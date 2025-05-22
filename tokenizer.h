@@ -39,7 +39,7 @@ void tokenizer_set_string(const std::string &str, unsigned char *&cur);
 // Get next token. Token type, first and last string index is returned
 void tokenizer_get_next_token(
         const unsigned char *string_start,
-        unsigned char *cur,
+        unsigned char *&cur,
         TokenType &token_type,
         uint64_t &first,
         uint64_t &last);
