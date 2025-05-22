@@ -332,18 +332,51 @@ public:
 };
 */
 
+std::string tokentype_to_string(TokenType tt) {
+#define CASE_TOKEN(x) case TokenType::x: return #x;
+    switch (tt) {
+        CASE_TOKEN(TK_EOF)
+        CASE_TOKEN(TK_NEWLINE)
+        CASE_TOKEN(TK_ERROR)
+        CASE_TOKEN(TK_LPAREN)
+        CASE_TOKEN(TK_RPAREN)
+        CASE_TOKEN(TK_LBRACKET)
+        CASE_TOKEN(TK_RBRACKET)
+        CASE_TOKEN(TK_LBRACE)
+        CASE_TOKEN(TK_RBRACE)
+        CASE_TOKEN(TK_PLUS)
+        CASE_TOKEN(TK_MINUS)
+        CASE_TOKEN(TK_EQUAL)
+        CASE_TOKEN(TK_COLON)
+        CASE_TOKEN(TK_SEMICOLON)
+        CASE_TOKEN(TK_SLASH)
+        CASE_TOKEN(TK_PERCENT)
+        CASE_TOKEN(TK_COMMA)
+        CASE_TOKEN(TK_STAR)
+        CASE_TOKEN(TK_VBAR)
+        CASE_TOKEN(TK_COMMENT)
+        CASE_TOKEN(TK_ARROW)
+        CASE_TOKEN(TK_REAL)
+        CASE_TOKEN(TK_STRING)
+        CASE_TOKEN(KW_ABSTRACT)
+        CASE_TOKEN(KW_ALL)
+        CASE_TOKEN(KW_WRITE)
+        default: abort();
+    }
+}
+
 void tokenizer_print_all_tokens(const std::string &input_code) {
     unsigned char *cur;
     tokenizer_set_string(input_code, cur);
     unsigned char *string_start = cur;
     while (true) {
         TokenType token_type;
-        uint64_t first, start;
+        uint64_t first, last;
         tokenizer_get_next_token(string_start, cur,
             token_type, first, last);
         std::cout << std::format("Token({}, \"{}\", {}, {})\n",
              tokentype_to_string(token_type), input_code.substr(first, last-first+1), first, last);
-        if (t.type == TokenType::TOKEN_EOF) {
+        if (token_type == TokenType::TK_EOF) {
             return;
         }
     }
