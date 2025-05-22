@@ -3,13 +3,6 @@
 #include <string>
 
 
-struct TokenizerState
-{
-    unsigned char *cur;
-    unsigned char *tok;
-    unsigned char *string_start;
-};
-
 enum class TokenType {
     TK_EOF,
     TK_NEWLINE,
@@ -41,8 +34,12 @@ enum class TokenType {
 
 // Set the string to tokenize. The caller must ensure `str` will stay valid
 // as long as `lex` is being called.
-void tokenizer_set_string(TokenizerState &state, const std::string &str);
+void tokenizer_set_string(const std::string &str, unsigned char *&cur);
 
 // Get next token. Token type, first and last string index is returned
-void lex(TokenizerState &state, TokenType &token_type,
-        uint64_t &first, uint64_t &last);
+void tokenizer_get_next_token(
+        const unsigned char *string_start,
+        unsigned char *cur,
+        TokenType &token_type,
+        uint64_t &first,
+        uint64_t &last);

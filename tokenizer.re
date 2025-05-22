@@ -30,7 +30,7 @@ void tokenizer_set_string(const std::string &str, unsigned char *&cur)
     token_type=TokenType::x; \
     return;
 
-void tokenizer_lex(
+void tokenizer_get_next_token(
         const unsigned char *string_start,
         unsigned char *cur,
         TokenType &token_type,

@@ -8,6 +8,8 @@
 #include <cctype>
 #include <format>
 
+#include "tokenizer.h"
+
 // MLIR Structures
 enum class AttributeKind { ATTR_INT, ATTR_STRING, ATTR_TYPE, ATTR_ARRAY, ATTR_DICT };
 using AttrValue = std::variant<long long, std::string, struct Type*, std::vector<struct Attribute*>, std::map<std::string, struct Attribute*>>;
@@ -47,6 +49,7 @@ struct Region {
 };
 
 // Token
+/*
 enum class TokenType {
     TOKEN_EOF,
     TOKEN_IDENTIFIER,
@@ -57,6 +60,9 @@ enum class TokenType {
     TOKEN_PUNCTUATION,
     TOKEN_ARROW
 };
+*/
+
+/*
 struct Token {
     TokenType type;
     std::string str_value;
@@ -140,17 +146,6 @@ public:
     }
 };
 
-void print_all_tokens(Lexer &lexer) {
-    while (true) {
-        Token t=lexer.get_next_token();
-        std::cout << std::format("Token({}, '{}', {})\n",
-             tokentype_to_string(t.type), t.str_value, t.int_value);
-        if (t.type == TokenType::TOKEN_EOF) {
-            return;
-        }
-    }
-}
-
 // Symbol Table
 class SymbolTable {
     std::vector<std::unordered_map<std::string, ValueRef>> scopes;
@@ -170,7 +165,6 @@ public:
     }
 };
 
-/*
 // Parser
 class Parser {
     Lexer lexer;
@@ -338,22 +332,17 @@ public:
 };
 */
 
+void print_all_tokens(const std::string &code) {
+    
+}
+
+
 // Main
 int main() {
     std::string mlir_code = "module {\n"
                             "  %0 = \"std.constant\"() {value = 42} : () -> i32\n"
                             "  \"std.return\"(%0) : (i32) -> ()\n"
                             "}";
-    try {
-        Lexer lexer(mlir_code);
-        print_all_tokens(lexer);
-        //Parser parser(mlir_code);
-        //auto module = parser.parse_module();
-        //std::cout << "Parsed module successfully\n";
-        // TODO: Add recursive deletion of module
-    } catch (const std::exception& e) {
-        std::cerr << "Parse error: " << e.what() << "\n";
-        return 1;
-    }
+    print_all_tokens(mlir_code);
     return 0;
 }
