@@ -111,8 +111,8 @@ void tokenizer_get_next_token(
             whitespace = [ \t\v\r]+;
             newline = "\n";
             digit = [0-9];
-            //char =  [a-zA-Z_];
-            //name = char (char | digit)*;
+            char =  [a-zA-Z_];
+            name = char (char | digit)*;
             significand = (digit+"."digit*) | ("."digit+);
             exp = [edED][-+]? digit+;
             integer = digit+;
@@ -152,8 +152,9 @@ void tokenizer_get_next_token(
             "//" { RET(TK_COMMENT) }
             "->" { RET(TK_ARROW) }
 
+            name { RET(TK_NAME) }
+            integer { RET(TK_INTEGER) }
             real { RET(TK_REAL) }
-            integer { RET(TK_REAL) }
             string { RET(TK_STRING) }
         */
     }
