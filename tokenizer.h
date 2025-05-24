@@ -38,6 +38,7 @@ enum class TokenType {
     TK_INTEGER,
     TK_STRING,
     TK_REGISTER,
+    TK_TYPE_DIM,
     TK_FUNCTION_NAME,
     KW_ABSTRACT,
     KW_ALL,

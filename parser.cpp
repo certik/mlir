@@ -373,6 +373,7 @@ std::string tokentype_to_string(TokenType tt) {
         CASE_TOKEN(TK_STRING)
         CASE_TOKEN(TK_REGISTER)
         CASE_TOKEN(TK_FUNCTION_NAME)
+        CASE_TOKEN(TK_TYPE_DIM)
         CASE_TOKEN(KW_ABSTRACT)
         CASE_TOKEN(KW_ALL)
         CASE_TOKEN(KW_WRITE)

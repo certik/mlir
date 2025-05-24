@@ -99,7 +99,7 @@ void tokenizer_get_next_token(
         // These two variables are needed by the re2c block below internally,
         // initialization is not needed. One can think of them as local
         // variables of the re2c block.
-        unsigned char *mar; //, *ctxmar;
+        unsigned char *mar, *ctxmar;
         /*!re2c
             re2c:define:YYCURSOR = cur;
             re2c:define:YYMARKER = mar;
@@ -121,6 +121,7 @@ void tokenizer_get_next_token(
             comment = "//" [^\n\x00]*;
             register = "%" (name | integer);
             fn_name = "@" name;
+            type = integer ("x" (integer | "?"))* "x";
 
             * { RET(TK_ERROR) }
             end { RET(TK_EOF); }
@@ -165,7 +166,8 @@ void tokenizer_get_next_token(
             name { RET(TK_NAME) }
             register { RET(TK_REGISTER) }
             fn_name { RET(TK_FUNCTION_NAME) }
-            integer { RET(TK_INTEGER) }
+            integer / whitespace { RET(TK_INTEGER) }
+            type { RET(TK_TYPE_DIM) }
             real { RET(TK_REAL) }
             string { RET(TK_STRING) }
         */
