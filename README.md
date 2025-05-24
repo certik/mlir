@@ -37,3 +37,8 @@ Faster and simpler MLIR infrastructure.
 * In the parser's actions we can extract the string using first/last and
   convert / further process as needed based on the syntax information from the
   parser or possibly even convert later based on semantic information.
+
+# Parser Design
+
+The tokenizer seems context dependent. In that case, just create multiple
+tokenizers.
