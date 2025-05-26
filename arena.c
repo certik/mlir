@@ -18,7 +18,7 @@ Arena* arena_create(size_t size) {
     return arena;
 }
 
-void* arena_alloc(Arena* arena, size_t size) {
+void* arena_alloc_(Arena* arena, size_t size) {
     if (size == 0) return NULL;
     const size_t align = 16;
     uintptr_t current_addr = (uintptr_t)arena->current;

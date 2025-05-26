@@ -12,11 +12,11 @@ typedef struct {
 } Arena;
 
 
-#define allocate(arena, type, n) \
-    ((type*)arena_alloc((arena), (n)*sizeof((type))))
+#define arena_alloc(arena, type, n) \
+    (type*)arena_alloc_((arena), (n)*sizeof(type))
 
 Arena* arena_create(size_t size);
-void* arena_alloc(Arena* arena, size_t size);
+void* arena_alloc_(Arena* arena, size_t size);
 void arena_free(Arena* arena); 
 
 
