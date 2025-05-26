@@ -30,10 +30,10 @@ Arena* arena_create(size_t size) {
     // Mark entire arena as addressable (ASan) and initialized (MSan)
     #if defined(__has_feature)
     #  if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
-    __asan_unpoison_memory_region(arena->start, size);
+    __asan_poison_memory_region(arena->start, size);
     #  endif
     #  if __has_feature(memory_sanitizer)
-    __msan_unpoison(arena->start, size);
+    __msan_poison(arena->start, size);
     #  endif
     #endif
 

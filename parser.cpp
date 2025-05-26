@@ -457,8 +457,6 @@ int main(int argc, char *argv[]) {
     Arena *arena = arena_create(10*1024*1024);
     int *i = arena_alloc(arena, int, 1);
     *i = 5;
-    i = i+1024;
-    *i = 5;
     if (argc == 2) {
         mlir_code = read_file_ok(argv[1]);
     }
