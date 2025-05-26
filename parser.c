@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <stdio.h>
 
 #include "tokenizer.h"
 #include "arena.h"
@@ -378,7 +379,7 @@ string tokentype_to_string(TokenType tt) {
     }
 }
 
-void tokenizer_print_all_tokens(const string input_code) {
+void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
     unsigned char *string_start;
     string_start = (unsigned char*)input_code.str;
     uint64_t cur=0;
@@ -388,54 +389,66 @@ void tokenizer_print_all_tokens(const string input_code) {
         first = cur;
         tokenizer_get_next_token(string_start, &cur, &token_type);
         last = cur-1;
-        printf("Token(%s, \"%s\", %d, %d)\n",
+        printf("Token(%s, %llu, %llu)\n",
             str_to_cstr_copy(arena, tokentype_to_string(token_type)),
-            input_code.substr(first, last-first+1),
+            //str_to_cstr_copy(arena,
+            //    str_substr(input_code, first, last-first+1)),
             first, last);
-        if (token_type == TokenType::TK_EOF) {
+        if (token_type == TK_EOF) {
             return;
         }
     }
 }
 
-bool read_file(const std::string &filename, std::string &text)
-{
-    if (filename.empty()) return false;
-    std::ifstream ifs(filename.c_str(), std::ios::in | std::ios::binary
-            | std::ios::ate);
-    if (!ifs.is_open()) return false;
 
-    std::ifstream::pos_type filesize = ifs.tellg();
-    if (filesize < 0) return false;
-
-    ifs.seekg(0, std::ios::beg);
-
-    std::vector<char> bytes(filesize);
-    if (filesize == 0) bytes.reserve(1);
-    ifs.read(&bytes[0], filesize);
-
-    text = std::string(&bytes[0], filesize);
+// Returns the file contents as a null-terminated string in `text`.
+// Returns `true` on success, otherwise `false`.
+bool read_file(Arena *arena, const string filename, string *text) {
+    char *cfilename = str_to_cstr_copy(arena, filename);
+    if (cfilename == NULL || *cfilename == '\0') return false;
+    FILE *file = fopen(cfilename, "rb");
+    if (file == NULL) return false;
+    fseek(file, 0, SEEK_END);
+    uint64_t filesize = ftell(file);
+    if (filesize < 0) {
+        fclose(file);
+        return false;
+    }
+    fseek(file, 0, SEEK_SET);
+    char *bytes = arena_alloc_array(arena, char, filesize+1);
+    if (bytes == NULL) {
+        fclose(file);
+        return false;
+    }
+    size_t readsize = fread(bytes, 1, filesize, file);
+    fclose(file);
+    if (readsize != filesize) return false;
+    bytes[readsize] = '\0';
+    text->str=bytes;
+    text->size=filesize+1;
     return true;
 }
 
-std::string read_file_ok(const std::string &filename) {
-    std::string text;
-    if (read_file(filename, text)) {
+
+string read_file_ok(Arena *arena, const string filename) {
+    string text;
+    if (read_file(arena, filename, &text)) {
         return text;
     } else {
-        std::cerr << "File '" + filename + "' cannot be opened." << std::endl;
+        //std::cerr << "File '" + filename + "' cannot be opened." << std::endl;
+        printf("File cannot be opened.\n");
         abort();
     }
 }
 
 // Main
 int main(int argc, char *argv[]) {
-    std::string mlir_code = "module {\n"
+    string mlir_code = str_lit("module {\n"
                             "  %0 = \"std.constant\"() {value = 42} : () -> i32\n"
                             "  \"std.return\"(%0) : (i32) -> ()\n"
-                            "}";
+                            "}");
     Arena *arena = arena_create(10*1024*1024);
-    tokenizer_print_all_tokens(mlir_code);
+    tokenizer_print_all_tokens(arena, mlir_code);
     arena_free(arena);
     return 0;
 }
