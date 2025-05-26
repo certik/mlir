@@ -101,7 +101,7 @@ void tokenizer_get_next_token(const unsigned char *string,
 
             * { RET(TK_ERROR) }
             end { RET(TK_EOF) }
-            whitespace { RET(TK_WHITESPACE); }
+            whitespace { RET(TK_WHITESPACE) }
             newline { RET(TK_NEWLINE) }
 
             // Keywords
