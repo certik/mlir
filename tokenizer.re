@@ -16,10 +16,8 @@ void tokenizer_get_next_token(
         uint64_t *current_position,
         enum TokenType *token_type)
 {
-    unsigned char *cur = string_start + *current_position;
+    const unsigned char *cur = string_start + *current_position;
     while (true) {
-        unsigned char *tok = cur;
-
         /*
         Re2c has excellent documentation at:
 
@@ -79,7 +77,7 @@ void tokenizer_get_next_token(
         // These two variables are needed by the re2c block below internally,
         // initialization is not needed. One can think of them as local
         // variables of the re2c block.
-        unsigned char *mar, *ctxmar;
+        const unsigned char *mar, *ctxmar;
         /*!re2c
             re2c:define:YYCURSOR = cur;
             re2c:define:YYMARKER = mar;
