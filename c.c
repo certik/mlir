@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <ctype.h>
 
 // Custom string and Arena types
 typedef struct {
@@ -58,9 +59,15 @@ string int_to_string(Arena *arena, int value) {
     return (string){.str = str, .size = len};
 }
 
-string double_to_string(Arena *arena, double value) {
+string double_to_string(Arena *arena, double value, int precision) {
     char buf[32];
-    int len = snprintf(buf, sizeof(buf), "%f", value);
+    int len;
+    printf("XX %f\n", value);
+    if (precision >= 0) {
+        len = snprintf(buf, sizeof(buf), "%.*f", precision, value);
+    } else {
+        len = snprintf(buf, sizeof(buf), "%f", value);
+    }
     char *str = arena_alloc_array(arena, char, len + 1);
     memcpy(str, buf, len + 1);
     return (string){.str = str, .size = len};
@@ -101,19 +108,102 @@ typedef struct {
     int:    (Arg){.type = ARG_INT,    .value = (uint64_t)(x)}  \
     )
 
+// FormatSpec structure
+typedef struct {
+    char alignment;  // '<', '>', '^', or '\0'
+    int width;       // -1 if not specified
+    int precision;   // -1 if not specified
+} FormatSpec;
+
+// Parse format specifier
+FormatSpec parse_format_spec(string spec) {
+    FormatSpec fs = {.alignment = '\0', .width = -1, .precision = -1};
+    const char *p = spec.str;
+    const char *end = spec.str + spec.size;
+    if (p < end) {
+        if (*p == '<' || *p == '>' || *p == '^') {
+            fs.alignment = *p++;
+        }
+    }
+    if (p < end && isdigit(*p)) {
+        fs.width = 0;
+        while (p < end && isdigit(*p)) {
+            fs.width = fs.width * 10 + (*p++ - '0');
+        }
+    }
+    if (p < end && *p == '.') {
+        p++;
+        if (p < end && isdigit(*p)) {
+            fs.precision = 0;
+            while (p < end && isdigit(*p)) {
+                fs.precision = fs.precision * 10 + (*p++ - '0');
+            }
+        }
+    }
+    return fs;
+}
+
+// Format argument based on type and spec
+string format_arg(Arena *arena, Arg arg, FormatSpec spec) {
+    string s;
+    switch (arg.type) {
+        case ARG_INT:
+            s = int_to_string(arena, (int)arg.value);
+            break;
+        case ARG_DOUBLE:
+            s = double_to_string(arena, (double)arg.value, spec.precision);
+            break;
+        case ARG_STRING:
+            s = str_from_cstr_view((char*)arg.value);
+            if (spec.precision >= 0 && spec.precision < s.size) {
+                s.size = spec.precision;
+            }
+            break;
+        case ARG_CHAR:
+            s = char_to_string(arena, (char)arg.value);
+            break;
+        default:
+            s = str_from_cstr_view("Unknown type");
+    }
+    if (spec.alignment == '\0') {
+        if (arg.type == ARG_INT || arg.type == ARG_DOUBLE) {
+            spec.alignment = '>';
+        } else {
+            spec.alignment = '<';
+        }
+    }
+    if (spec.width > 0 && s.size < spec.width) {
+        size_t pad_size = spec.width - s.size;
+        char pad_char = ' ';
+        string padding = {.str = arena_alloc_array(arena, char, pad_size), .size = pad_size};
+        memset(padding.str, pad_char, pad_size);
+        if (spec.alignment == '<') {
+            s = str_concat(arena, s, padding);
+        } else if (spec.alignment == '^') {
+            size_t left_pad = pad_size / 2;
+            size_t right_pad = pad_size - left_pad;
+            string left = {.str = padding.str, .size = left_pad};
+            string right = {.str = padding.str + left_pad, .size = right_pad};
+            s = str_concat(arena, left, s);
+            s = str_concat(arena, s, right);
+        } else {  // '>' or default
+            s = str_concat(arena, padding, s);
+        }
+    }
+    return s;
+}
+
 // Core formatting function
 string format(Arena *arena, string fmt, Arg args[], size_t arg_count) {
     if (arg_count > 8) {
         fprintf(stderr, "Error: format supports up to 8 arguments\n");
         exit(1);
     }
-
     string result = {.str = arena_alloc_array(arena, char, 1), .size = 0};
     result.str[0] = '\0';
     const char *p = fmt.str;
     const char *end = fmt.str + fmt.size;
     size_t i = 0;
-
     while (p < end) {
         const char *open_brace = memchr(p, '{', end - p);
         if (open_brace == NULL) {
@@ -137,38 +227,36 @@ string format(Arena *arena, string fmt, Arg args[], size_t arg_count) {
             p++;
             continue;
         }
-        if (*p != '}') {
-            string malformed = {.str = (char*)open_brace, .size = p - open_brace + 1};
-            result = str_concat(arena, result, malformed);
-            p++;
-            continue;
+        const char *close_brace = memchr(p, '}', end - p);
+        if (close_brace == NULL) {
+            string error = str_from_cstr_view("Error: missing closing brace");
+            result = str_concat(arena, result, error);
+            break;
+        }
+        const char *colon = memchr(p, ':', close_brace - p);
+        FormatSpec spec;
+        if (colon) {
+            string spec_str = {.str = (char*)colon + 1, .size = close_brace - (colon + 1)};
+            spec = parse_format_spec(spec_str);
+        } else {
+            if (p != close_brace) {
+                string error = str_from_cstr_view("Error: invalid format specifier");
+                result = str_concat(arena, result, error);
+                p = close_brace + 1;
+                continue;
+            }
+            spec = (FormatSpec){.alignment = '\0', .width = -1, .precision = -1};
         }
         if (i >= arg_count) {
             string error = str_from_cstr_view("Error: missing argument");
             result = str_concat(arena, result, error);
-            p++;
+            p = close_brace + 1;
             continue;
         }
         Arg arg = args[i++];
-        string s;
-        switch (arg.type) {
-            case ARG_INT:
-                s = int_to_string(arena, (int)arg.value);
-                break;
-            case ARG_DOUBLE:
-                s = double_to_string(arena, (double)arg.value);
-                break;
-            case ARG_STRING:
-                s = str_from_cstr_view((char*)arg.value);
-                break;
-            case ARG_CHAR:
-                s = char_to_string(arena, (char)arg.value);
-                break;
-            default:
-                s = str_from_cstr_view("Unknown type");
-        }
+        string s = format_arg(arena, arg, spec);
         result = str_concat(arena, result, s);
-        p++;
+        p = close_brace + 1;
     }
     if (i < arg_count) {
         return str_from_cstr_view("Error: excess arguments");
@@ -183,27 +271,49 @@ string format(Arena *arena, string fmt, Arg args[], size_t arg_count) {
 // Main function with examples
 int main() {
     Arena* arena = arena_create(1024);
+    double pi = 3.1415926535;
 
-    string fmt2 = str_lit("Hello!");
-    string result2 = format(arena, fmt2);
-    printf("Result 2: %.*s\n", (int)result2.size, result2.str);
+    // Original examples
+    string fmt = str_lit("Hello!");
+    string result = format(arena, fmt);
+    printf("Original 1: %.*s\n", (int)result.size, result.str);
 
-    fmt2 = str_lit("Hello, {}!");
-    result2 = format(arena, fmt2, A("world"));
-    printf("Result 2: %.*s\n", (int)result2.size, result2.str);
+    fmt = str_lit("Hello, {}!");
+    result = format(arena, fmt, A("world"));
+    printf("Original 2: %.*s\n", (int)result.size, result.str);
 
-    fmt2 = str_lit("Hello, {}, {}!");
-    result2 = format(arena, fmt2, A("world"), A("xx"));
-    printf("Result 2: %.*s\n", (int)result2.size, result2.str);
+    fmt = str_lit("Hello, {:>20}, {}!");
+    result = format(arena, fmt, A("world"), A("xx"));
+    printf("Original 3: %.*s\n", (int)result.size, result.str);
 
-    fmt2 = str_lit("Hello, {}, {}, {}!");
-    result2 = format(arena, fmt2, A("world"), A("xx"), A(42));
-    printf("Result 2: %.*s\n", (int)result2.size, result2.str);
+    // New examples for format specifications
+    fmt = str_lit("{:10.3f}");
+    result = format(arena, fmt, A(pi));
+    printf("Width and Precision: %.*s\n", (int)result.size, result.str);  // "   3.14000"
 
-    fmt2 = str_lit("Hello, {}, {}, {}, {}, {}!");
-    result2 = format(arena, fmt2, A("world"), A('c'), A("xx"), A(42), A(4.34));
-    printf("Result 2: %.*s\n", (int)result2.size, result2.str);
+    fmt = str_lit("{:.5f}");
+    result = format(arena, fmt, A(pi));
+    printf("Precision only: %.*s\n", (int)result.size, result.str);     // "3.14000"
 
+    fmt = str_lit("{:6}");
+    result = format(arena, fmt, A(42));
+    printf("Width for int: %.*s\n", (int)result.size, result.str);      // "    42"
+
+    fmt = str_lit("{:6}");
+    result = format(arena, fmt, A('x'));
+    printf("Width for char: %.*s\n", (int)result.size, result.str);     // "x     "
+
+    fmt = str_lit("{:<20}");
+    result = format(arena, fmt, A("left"));
+    printf("Left aligned: %.*s\n", (int)result.size, result.str);       // "left                "
+
+    fmt = str_lit("{:>20}");
+    result = format(arena, fmt, A("right"));
+    printf("Right aligned: %.*s\n", (int)result.size, result.str);      // "               right"
+
+    fmt = str_lit("{:^20}");
+    result = format(arena, fmt, A("centered"));
+    printf("Centered: %.*s\n", (int)result.size, result.str);           // "     centered      "
 
     arena_free(arena);
     return 0;
