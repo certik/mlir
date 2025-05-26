@@ -14,6 +14,8 @@
 #include "tokenizer.h"
 #include "arena.h"
 
+/*
+
 // MLIR Structures
 enum class AttributeKind { ATTR_INT, ATTR_STRING, ATTR_TYPE, ATTR_ARRAY, ATTR_DICT };
 using AttrValue = std::variant<long long, std::string, struct Type*, std::vector<struct Attribute*>, std::map<std::string, struct Attribute*>>;
@@ -51,6 +53,8 @@ struct Block {
 struct Region {
     std::vector<Block*> blocks;
 };
+
+*/
 
 // Token
 /*
