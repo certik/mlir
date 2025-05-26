@@ -139,8 +139,7 @@ FormatSpec parse_format_spec(string spec) {
 }
 
 // Core formatting function with variadic arguments
-string format_(Arena *arena, string fmt, size_t arg_count, ...) {
-    printf("Arg count: %zu\n", arg_count);
+string format(Arena *arena, string fmt, size_t arg_count, ...) {
     va_list ap;
     va_start(ap, arg_count);
     string result = {.str = arena_alloc_array(arena, char, 1), .size = 0};
@@ -263,35 +262,57 @@ string format_(Arena *arena, string fmt, size_t arg_count, ...) {
     return result;
 }
 
-// Macros to count arguments
+// Macros to apply A() to each argument
+#define APPLY_A0()
+#define APPLY_A1(a) A(a)
+#define APPLY_A2(a,b) A(a), A(b)
+#define APPLY_A3(a,b,c) A(a), A(b), A(c)
+#define APPLY_A4(a,b,c,d) A(a), A(b), A(c), A(d)
+#define APPLY_A5(a,b,c,d,e) A(a), A(b), A(c), A(d), A(e)
+#define APPLY_A6(a,b,c,d,e,f) A(a), A(b), A(c), A(d), A(e), A(f)
+#define APPLY_A7(a,b,c,d,e,f,g) A(a), A(b), A(c), A(d), A(e), A(f), A(g)
+#define APPLY_A8(a,b,c,d,e,f,g,h) A(a), A(b), A(c), A(d), A(e), A(f), A(g), A(h)
+
+// Macro to select the appropriate APPLY_A macro based on the number of arguments
+#define APPLY_A_N(N, ...) APPLY_A##N(__VA_ARGS__)
+
+// Macro to count arguments
 #define GET_ARG_COUNT(_1,_2,_3,_4,_5,_6,_7,_8,N,...) N
 #define COUNT_ARGS(...) GET_ARG_COUNT(__VA_ARGS__,8,7,6,5,4,3,2,1,0)
 
-// Format macro with explicit A() wrapping
+// Format macro with automatic A() wrapping
 #define format(arena, fmt, ...) \
-    format_(arena, fmt, COUNT_ARGS(__VA_ARGS__), __VA_ARGS__)
+    format(arena, fmt, COUNT_ARGS(__VA_ARGS__), APPLY_A_N(COUNT_ARGS(__VA_ARGS__), __VA_ARGS__))
 
 // Main function with examples
 int main() {
     Arena* arena = arena_create(1024);
     double pi = 3.1415926535;
 
-    // Examples
+    // Example with no arguments
     string fmt = str_lit("Hello, {}!");
-    string result = format(arena, fmt, A(5));
+    string result = format(arena, fmt, 5);
     printf("No args: %.*s\n", (int)result.size, result.str);
 
-    fmt = str_lit("Hello, {}, {}, {}!");
-    result = format(arena, fmt, A("world"), A(35.5), A(3));
+    // Example with one argument
+    fmt = str_lit("Hello, {}!");
+    result = format(arena, fmt, "world");
     printf("One arg: %.*s\n", (int)result.size, result.str);
 
+    // Example with formatted double
     fmt = str_lit("Value: {:10.5f}");
-    result = format(arena, fmt, A(pi));
+    result = format(arena, fmt, pi);
     printf("Formatted double: %.*s\n", (int)result.size, result.str);
 
+    // Example with formatted char
     fmt = str_lit("Char: {:^5}");
-    result = format(arena, fmt, A('x'));
+    result = format(arena, fmt, 'x');
     printf("Formatted char: %.*s\n", (int)result.size, result.str);
+
+    // Example with multiple arguments
+    fmt = str_lit("Hello, {}, {}, {}!");
+    result = format(arena, fmt, "world", 35.5, 3);
+    printf("Multiple args: %.*s\n", (int)result.size, result.str);
 
     arena_free(arena);
     return 0;
