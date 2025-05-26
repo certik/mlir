@@ -88,30 +88,17 @@ typedef enum {
     ARG_CHAR
 } ArgType;
 
-typedef union {
-    int i;
-    double d;
-    char* s;
-    char c;
-} ArgValue;
-
 typedef struct {
     ArgType type;
-    ArgValue value;
+    uint64_t value;
 } Arg;
 
 // Macro to wrap arguments with type detection
-#define A2(x) _Generic((x), \
-    int: (Arg){.type = ARG_INT, .value.i = (int)(x)}, \
-    double: (Arg){.type = ARG_DOUBLE, .value.d = (x)}, \
-    char*: (Arg){.type = ARG_STRING, .value.s = (char*)(x)}, \
-    char: (Arg){.type = ARG_CHAR, .value.c = (char)(x)})
-
 #define A(x) _Generic((x), \
-    char*: (Arg){.type = ARG_STRING, .value.s = (char*)(uint64_t)(x)}, \
-    double: (Arg){.type = ARG_DOUBLE, .value.d = (double)(uint64_t)(x)}, \
-    char: (Arg){.type = ARG_CHAR, .value.c = (char)(uint64_t)(x)}, \
-    int: (Arg){.type = ARG_INT, .value.i = (int64_t)(uint64_t)(x)} \
+    char*:  (Arg){.type = ARG_STRING, .value = (uint64_t)(x)}, \
+    double: (Arg){.type = ARG_DOUBLE, .value = (uint64_t)(x)}, \
+    char:   (Arg){.type = ARG_CHAR,   .value = (uint64_t)(x)}, \
+    int:    (Arg){.type = ARG_INT,    .value = (uint64_t)(x)}  \
     )
 
 // Core formatting function
@@ -166,16 +153,16 @@ string format(Arena *arena, string fmt, Arg args[], size_t arg_count) {
         string s;
         switch (arg.type) {
             case ARG_INT:
-                s = int_to_string(arena, arg.value.i);
+                s = int_to_string(arena, (int)arg.value);
                 break;
             case ARG_DOUBLE:
-                s = double_to_string(arena, arg.value.d);
+                s = double_to_string(arena, (double)arg.value);
                 break;
             case ARG_STRING:
-                s = str_from_cstr_view(arg.value.s);
+                s = str_from_cstr_view((char*)arg.value);
                 break;
             case ARG_CHAR:
-                s = char_to_string(arena, arg.value.c);
+                s = char_to_string(arena, (char)arg.value);
                 break;
             default:
                 s = str_from_cstr_view("Unknown type");
