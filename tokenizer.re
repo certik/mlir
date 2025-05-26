@@ -1,7 +1,7 @@
 // Compile with:
 // re2c -b tokenizer.re -o tokenizer.cpp
 
-#include <limits>
+#include <stdbool.h>
 
 #include "tokenizer.h"
 
@@ -9,34 +9,27 @@ void token_loc(
         const unsigned char *string_start,
         const unsigned char *tok,
         const unsigned char *cur,
-        uint64_t &first,
-        uint64_t &last)
+        uint64_t *first,
+        uint64_t *last)
 {
-    first = tok-string_start;
-    last = cur-string_start-1;
-}
-
-void tokenizer_set_string(const std::string &str, unsigned char *&string_start)
-{
-    // The input string must be NULL terminated, otherwise the tokenizer will
-    // not detect the end of string. After C++11, the std::string is guaranteed
-    // to end with \0, but we check this here just in case.
-    //ASSERT(str[str.size()] == '\0');
-    string_start = (unsigned char *)(&str[0]);
+    *first = tok-string_start;
+    *last = cur-string_start-1;
 }
 
 #define RET(x) \
     token_loc(string_start, tok, cur, first, last); \
-    token_type=TokenType::x; \
+    *token_type=x; \
+    *cur2 = cur; \
     return;
 
 void tokenizer_get_next_token(
         const unsigned char *string_start,
-        unsigned char *&cur,
-        TokenType &token_type,
-        uint64_t &first,
-        uint64_t &last)
+        unsigned char **cur2,
+        enum TokenType *token_type,
+        uint64_t *first,
+        uint64_t *last)
 {
+    unsigned char *cur = *cur2;
     while (true) {
         unsigned char *tok = cur;
 
@@ -124,7 +117,7 @@ void tokenizer_get_next_token(
             type = integer ("x" (integer | "?"))* "x";
 
             * { RET(TK_ERROR) }
-            end { RET(TK_EOF); }
+            end { RET(TK_EOF) }
             whitespace { continue; }
             newline { RET(TK_NEWLINE) }
 

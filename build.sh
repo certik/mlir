@@ -2,6 +2,8 @@
 
 set -ex
 
-re2c -b tokenizer.re -o tokenizer.cpp
-clang++ -g -Wall -std=c++20 parser.cpp tokenizer.cpp -o parser
+re2c -b tokenizer.re -o tokenizer.c
+clang -g -Wall -c tokenizer.c -o tokenizer.o
+clang++ -g -Wall -std=c++20 -c parser.cpp -o parser.o
+clang++ -g -Wall -std=c++20 -o parser parser.o tokenizer.o
 ./parser
