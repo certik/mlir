@@ -134,7 +134,9 @@ Operation* parse_operation(Parser *parser) {
 }
 
 
-bool read_file(Arena *arena, const char *filename, char **text) {
+// Returns the file contents as a null-terminated string in `text`.
+// Returns `true` on success, otherwise `false`.
+bool read_file(Arena *arena, const char *filename, string *text) {
     if (filename == NULL || *filename == '\0') return false;
     FILE *file = fopen(filename, "rb");
     if (file == NULL) return false;
@@ -150,9 +152,11 @@ bool read_file(Arena *arena, const char *filename, char **text) {
         fclose(file);
         return false;
     }
-    size_t read_size = fread(bytes, 1, filesize, file);
+    size_t readsize = fread(bytes, 1, filesize, file);
     fclose(file);
-    bytes[read_size] = '\0';
-    *text = bytes;
+    if (readsize != filesize) return false;
+    bytes[readsize] = '\0';
+    text->str=bytes;
+    text->size=filesize+1;
     return true;
 }
