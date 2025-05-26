@@ -5,16 +5,6 @@
 
 #include "tokenizer.h"
 
-void token_loc(
-        const unsigned char *string_start,
-        const unsigned char *tok,
-        const unsigned char *cur,
-        uint64_t *first,
-        uint64_t *last)
-{
-    *first = tok-string_start;
-    *last = cur-string_start-1;
-}
 
 #define RET(x) \
     *token_type=x; \
