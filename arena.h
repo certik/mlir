@@ -13,7 +13,9 @@ typedef struct {
 } Arena;
 
 
-#define arena_alloc(arena, type, n) \
+#define arena_alloc(arena, type) \
+    arena_alloc_array((arena), type, 1)
+#define arena_alloc_array(arena, type, n) \
     (type*)arena_alloc_((arena), (n)*sizeof(type))
 
 Arena* arena_create(size_t size);
