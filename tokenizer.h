@@ -49,11 +49,10 @@ enum TokenType {
     KW_WRITE,
 };
 
-// Get next token. Token type, first and last string index is returned
-void tokenizer_get_next_token(
-        const unsigned char *string_start,
-        uint64_t *current_position,
-        enum TokenType *token_type);
+// Get the token in the `string` at the `position`. The function
+// returns the `token_type` and the `position` one character after the token.
+void tokenizer_get_next_token(const unsigned char *string,
+        uint64_t *position, enum TokenType *token_type);
 
 #ifdef __cplusplus
 }

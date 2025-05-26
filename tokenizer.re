@@ -8,15 +8,13 @@
 
 #define RET(x) \
     *token_type=x; \
-    *current_position = cur-string_start; \
+    *position = cur-string; \
     return;
 
-void tokenizer_get_next_token(
-        const unsigned char *string_start,
-        uint64_t *current_position,
-        enum TokenType *token_type)
+void tokenizer_get_next_token(const unsigned char *string,
+        uint64_t *position, enum TokenType *token_type)
 {
-    const unsigned char *cur = string_start + *current_position;
+    const unsigned char *cur = string + *position;
     while (true) {
         /*
         Re2c has excellent documentation at:
