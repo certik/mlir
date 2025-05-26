@@ -1,6 +1,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "mlir_parser.h"
 
@@ -130,4 +131,47 @@ Operation* parse_operation(Parser *parser) {
                 parser->first, parser->last);
     }
     return NULL;
+}
+
+
+bool read_file(const char *filename, char **text) {
+    // Check for empty filename
+    if (filename == NULL || *filename == '\0') {
+        return false;
+    }
+
+    // Open file in binary mode
+    FILE *file = fopen(filename, "rb");
+    if (file == NULL) {
+        return false;
+    }
+
+    // Get file size
+    fseek(file, 0, SEEK_END);
+    long filesize = ftell(file);
+    if (filesize < 0) {
+        fclose(file);
+        return false;
+    }
+
+    // Seek back to start
+    fseek(file, 0, SEEK_SET);
+
+    // Allocate memory for bytes
+    char *bytes = (char *)malloc(filesize + 1); // +1 for null terminator
+    if (bytes == NULL) {
+        fclose(file);
+        return false;
+    }
+
+    // Read file contents
+    size_t read_size = fread(bytes, 1, filesize, file);
+    fclose(file);
+
+    // Null terminate the string
+    bytes[read_size] = '\0';
+
+    // Assign to output parameter
+    *text = bytes;
+    return true;
 }
