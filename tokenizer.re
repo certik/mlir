@@ -118,7 +118,7 @@ void tokenizer_get_next_token(
 
             * { RET(TK_ERROR) }
             end { RET(TK_EOF) }
-            whitespace { continue; }
+            whitespace { RET(TK_WHITESPACE); }
             newline { RET(TK_NEWLINE) }
 
             // Keywords

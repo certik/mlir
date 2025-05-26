@@ -9,6 +9,7 @@ extern "C" {
 enum TokenType {
     TK_EOF,
     TK_NEWLINE,
+    TK_WHITESPACE,
     TK_ERROR,
     TK_NAME,
     TK_LPAREN,

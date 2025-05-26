@@ -340,6 +340,7 @@ std::string tokentype_to_string(TokenType tt) {
     switch (tt) {
         CASE_TOKEN(TK_EOF)
         CASE_TOKEN(TK_NEWLINE)
+        CASE_TOKEN(TK_WHITESPACE)
         CASE_TOKEN(TK_ERROR)
         CASE_TOKEN(TK_NAME)
         CASE_TOKEN(TK_LPAREN)
@@ -388,7 +389,9 @@ void tokenizer_print_all_tokens(const std::string &input_code) {
     while (true) {
         TokenType token_type;
         uint64_t first, last;
-        tokenizer_get_next_token(string_start, &cur, &token_type, &first, &last);
+        first = cur;
+        tokenizer_get_next_token(string_start, &cur, &token_type, &last, &last);
+        last = cur-1;
         std::cout << std::format("Token({}, \"{}\", {}, {})\n",
              tokentype_to_string(token_type), input_code.substr(first, last-first+1), first, last);
         if (token_type == TokenType::TK_EOF) {
