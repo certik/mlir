@@ -12,7 +12,7 @@
     return;
 
 void tokenizer_get_next_token(const unsigned char *string,
-        uint64_t *position, enum TokenType *token_type)
+        uint64_t *position, TokenType *token_type)
 {
     const unsigned char *cur = string + *position;
     while (true) {

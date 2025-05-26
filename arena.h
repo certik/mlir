@@ -4,6 +4,7 @@
 extern "C" {
 #endif
 
+#include "stdlib.h"
 
 typedef struct {
     char* start;    // Start of the memory block

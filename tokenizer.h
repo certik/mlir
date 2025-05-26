@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-enum TokenType {
+typedef enum {
     TK_EOF,
     TK_NEWLINE,
     TK_WHITESPACE,
@@ -47,12 +47,12 @@ enum TokenType {
     KW_ABSTRACT,
     KW_ALL,
     KW_WRITE,
-};
+} TokenType;
 
 // Get the token in the `string` at the `position`. The function
 // returns the `token_type` and the `position` one character after the token.
 void tokenizer_get_next_token(const unsigned char *string,
-        uint64_t *position, enum TokenType *token_type);
+        uint64_t *position, TokenType *token_type);
 
 #ifdef __cplusplus
 }

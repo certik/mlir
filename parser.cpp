@@ -401,23 +401,6 @@ void tokenizer_print_all_tokens(const std::string &input_code) {
     }
 }
 
-/*
-    Operation* parse_module() {
-        expect_token(TokenType::TOKEN_IDENTIFIER, "module");
-        expect_token(TokenType::TOKEN_PUNCTUATION, "{");
-        symbol_table.push_scope();
-        std::vector<Operation*> ops;
-        while (current_token.value != "}") {
-            ops.push_back(parse_operation());
-        }
-        expect_token(TokenType::TOKEN_PUNCTUATION, "}");
-        symbol_table.pop_scope();
-        auto block = new Block{{}, ops};
-        auto region = new Region{{block}};
-        return new Operation{"builtin.module", {}, {}, {}, {region}, {}};
-    }
-    */
-
 bool read_file(const std::string &filename, std::string &text)
 {
     if (filename.empty()) return false;
