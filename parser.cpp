@@ -384,7 +384,7 @@ std::string tokentype_to_string(TokenType tt) {
 void tokenizer_print_all_tokens(const std::string &input_code) {
     unsigned char *string_start;
     string_start = (unsigned char *)(&input_code[0]);
-    unsigned char *cur=string_start;
+    uint64_t cur=0;
     while (true) {
         TokenType token_type;
         uint64_t first, last;
