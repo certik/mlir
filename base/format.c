@@ -7,6 +7,13 @@
 
 #include <base/format.h>
 
+
+typedef struct {
+    char alignment;  // '<', '>', '^', or '\0'
+    int width;       // -1 if not specified
+    int precision;   // -1 if not specified
+} FormatSpec;
+
 // Parse format specifier
 FormatSpec parse_format_spec(string spec) {
     FormatSpec fs = {.alignment = '\0', .width = -1, .precision = -1};
@@ -36,7 +43,7 @@ FormatSpec parse_format_spec(string spec) {
 }
 
 // Core formatting function with variadic arguments
-string format(Arena *arena, string fmt, size_t arg_count, ...) {
+string format_explicit(Arena *arena, string fmt, size_t arg_count, ...) {
     va_list ap;
     va_start(ap, arg_count);
     string result = {.str = arena_alloc_array(arena, char, 1), .size = 0};

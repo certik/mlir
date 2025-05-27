@@ -1,7 +1,8 @@
 #pragma once
 
-#include "tokenizer.h"
-#include "arena.h"
+#include <stdbool.h>
+
+#include <base/arena.h>
 
 #ifdef __cplusplus
 extern "C" {
