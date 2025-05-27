@@ -8,5 +8,5 @@ clang $CFLAGS -I. -o test_format tests/test_format.c base/arena.c base/string.c 
 ./test_format
 
 re2c -b tokenizer.re -o tokenizer.c
-clang $CFLAGS -I. -o parser parser.c tokenizer.c base/arena.c mlir_parser.c
+clang $CFLAGS -I. -o parser parser.c tokenizer.c base/arena.c base/io.c mlir_parser.c
 ./parser

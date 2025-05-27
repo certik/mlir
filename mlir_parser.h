@@ -1,7 +1,10 @@
 #pragma once
 
-#include "tokenizer.h"
 #include <base/arena.h>
+#include <base/string.h>
+
+#include "tokenizer.h"
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,18 +19,6 @@ typedef struct {
     uint64_t first, last;
 } Parser;
 
-typedef struct {
-    char *str;
-    uint64_t size;
-} string;
-
-#define str_lit(S)  (string){.str=(char*)(S), .size=sizeof(S)-1}
-
-string str_from_cstr_view(char *cstr); 
-string str_from_cstr_len_view(char *cstr, uint64_t size);
-char *str_to_cstr_copy(Arena *arena, string str);
-bool str_eq(string a, string b);
-string str_substr(string str, uint64_t min, uint64_t max);
 
 typedef struct Region Region;
 
