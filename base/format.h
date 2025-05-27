@@ -1,6 +1,4 @@
-// clang c.c && ./a.out
-// cl /std:c11 c.c
-//
+#pragma once
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,52 +7,6 @@
 #include <ctype.h>
 #include <stdarg.h>
 
-// Custom string and Arena types
-typedef struct {
-    char *str;
-    uint64_t size;
-} string;
-
-#define str_lit(S)  (string){.str=(char*)(S), .size=sizeof(S)-1}
-
-typedef struct {
-    char* start;
-    char* current;
-    char* end;
-} Arena;
-
-#define arena_alloc(arena, type) \
-    arena_alloc_array((arena), type, 1)
-#define arena_alloc_array(arena, type, n) \
-    (type*)arena_alloc_((arena), (n)*sizeof(type))
-
-void* arena_alloc_(Arena* arena, size_t size) {
-    if (arena->current + size > arena->end) {
-        fprintf(stderr, "Arena out of memory\n");
-        exit(1);
-    }
-    void* ptr = arena->current;
-    arena->current += size;
-    return ptr;
-}
-
-Arena* arena_create(size_t size) {
-    Arena* arena = malloc(sizeof(Arena));
-    arena->start = malloc(size);
-    arena->current = arena->start;
-    arena->end = arena->start + size;
-    return arena;
-}
-
-void arena_free(Arena* arena) {
-    free(arena->start);
-    free(arena);
-}
-
-// String utility functions
-string str_from_cstr_view(char *cstr) {
-    return (string){.str = cstr, .size = strlen(cstr)};
-}
 
 string int_to_string(Arena *arena, int value) {
     char buf[32];

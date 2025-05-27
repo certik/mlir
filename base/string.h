@@ -7,14 +7,10 @@
 extern "C" {
 #endif
 
+// Non-null-terminated string, represented by a pointer and a length.
 
-typedef struct {
-    Arena *arena;
-    unsigned char *input;
-    TokenType sym;
-    uint64_t cur;
-    uint64_t first, last;
-} Parser;
+// The string is typically owned by the Arena, so `string` can be seen as a
+// "view" of the string.
 
 typedef struct {
     char *str;
@@ -29,25 +25,6 @@ char *str_to_cstr_copy(Arena *arena, string str);
 bool str_eq(string a, string b);
 string str_substr(string str, uint64_t min, uint64_t max);
 
-typedef struct Region Region;
-
-typedef struct Operation Operation;
-struct Operation {
-    string opcode;
-    Region **regions;
-    uint64_t n_regions;
-};
-
-typedef struct Block Block;
-struct Block {
-    Operation **operations;
-    uint64_t n_operations;
-};
-
-struct Region {
-    Block **blocks;
-    uint64_t n_blocks;
-};
 
 
 #ifdef __cplusplus
