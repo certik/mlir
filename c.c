@@ -1,3 +1,6 @@
+// clang c.c && ./a.out
+//
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
