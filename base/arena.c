@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#include "arena.h"
+#include <base/arena.h>
 
 // Include sanitizer headers if enabled
 #if defined(__has_feature)
