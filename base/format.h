@@ -8,42 +8,6 @@
 #include <stdarg.h>
 
 
-string int_to_string(Arena *arena, int value) {
-    char buf[32];
-    int len = snprintf(buf, sizeof(buf), "%d", value);
-    char *str = arena_alloc_array(arena, char, len + 1);
-    memcpy(str, buf, len + 1);
-    return (string){.str = str, .size = len};
-}
-
-string double_to_string(Arena *arena, double value, int precision) {
-    char buf[32];
-    int len;
-    if (precision >= 0) {
-        len = snprintf(buf, sizeof(buf), "%.*f", precision, value);
-    } else {
-        len = snprintf(buf, sizeof(buf), "%f", value);
-    }
-    char *str = arena_alloc_array(arena, char, len + 1);
-    memcpy(str, buf, len + 1);
-    return (string){.str = str, .size = len};
-}
-
-string char_to_string(Arena *arena, char c) {
-    char *buf = arena_alloc_array(arena, char, 1);
-    *buf = c;
-    return (string){.str = buf, .size = 1};
-}
-
-string str_concat(Arena *arena, string a, string b) {
-    char *str = arena_alloc_array(arena, char, a.size + b.size + 1);
-    memcpy(str, a.str, a.size);
-    memcpy(str + a.size, b.str, b.size);
-    str[a.size + b.size] = '\0';
-    return (string){.str = str, .size = a.size + b.size};
-}
-
-// ArgType enum
 typedef enum {
     ARG_INT,
     ARG_DOUBLE,
@@ -52,23 +16,12 @@ typedef enum {
     ARG_CHAR
 } ArgType;
 
-// Macro to wrap arguments with type detection
-#define A(x) _Generic((x), \
-    char*:  ARG_STRING, \
-    string: ARG_STRING2, \
-    double: ARG_DOUBLE, \
-    char:   ARG_CHAR, \
-    int:    ARG_INT  \
-    ), (x)
-
-// FormatSpec structure
 typedef struct {
     char alignment;  // '<', '>', '^', or '\0'
     int width;       // -1 if not specified
     int precision;   // -1 if not specified
 } FormatSpec;
 
-// Parse format specifier
 FormatSpec parse_format_spec(string spec) {
     FormatSpec fs = {.alignment = '\0', .width = -1, .precision = -1};
     const char *p = spec.str;
@@ -96,7 +49,6 @@ FormatSpec parse_format_spec(string spec) {
     return fs;
 }
 
-// Core formatting function with variadic arguments
 string format(Arena *arena, string fmt, size_t arg_count, ...) {
     va_list ap;
     va_start(ap, arg_count);
@@ -232,6 +184,14 @@ string format(Arena *arena, string fmt, size_t arg_count, ...) {
 #define GET_ARG_COUNT(_1, _2, _3, _4, _5, _6, _7, _8, N, ...) N
 #define COUNT_ARGS(...) GET_ARG_COUNT(__VA_ARGS__, 8, 7, 6, 5, 4, 3, 2, 1, 0)
 
+#define A(x) _Generic((x), \
+    char*:  ARG_STRING, \
+    string: ARG_STRING2, \
+    double: ARG_DOUBLE, \
+    char:   ARG_CHAR, \
+    int:    ARG_INT  \
+    ), (x)
+
 #define APPLY_A0()
 #define APPLY_A1(a) A(a)
 #define APPLY_A2(a, b) A(a), A(b)
@@ -257,37 +217,3 @@ string format(Arena *arena, string fmt, size_t arg_count, ...) {
 
 #define format(arena, fmt, ...) \
     format(arena, fmt, COUNT_ARGS(__VA_ARGS__), APPLY_WITH_COUNT(COUNT_ARGS(__VA_ARGS__), __VA_ARGS__))
-
-// Main function with examples
-int main() {
-    Arena* arena = arena_create(1024);
-    double pi = 3.1415926535;
-
-    // Example with no arguments
-    string fmt = str_lit("Hello, {}!");
-    string result = format(arena, fmt, 5);
-    printf("No args: %.*s\n", (int)result.size, result.str);
-
-    // Example with one argument
-    fmt = str_lit("Hello, {}!");
-    result = format(arena, fmt, "world");
-    printf("One arg: %.*s\n", (int)result.size, result.str);
-
-    // Example with formatted double
-    fmt = str_lit("Value: {:10.5f}");
-    result = format(arena, fmt, pi);
-    printf("Formatted double: %.*s\n", (int)result.size, result.str);
-
-    // Example with formatted char
-    fmt = str_lit("Char: {:^5}");
-    result = format(arena, fmt, 'x');
-    printf("Formatted char: %.*s\n", (int)result.size, result.str);
-
-    // Example with multiple arguments
-    fmt = str_lit("Hello, {}, {}, {}, {}!");
-    result = format(arena, fmt, "world", 35.5, 3, fmt);
-    printf("Multiple args: %.*s\n", (int)result.size, result.str);
-
-    arena_free(arena);
-    return 0;
-}

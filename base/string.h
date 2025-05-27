@@ -25,6 +25,11 @@ char *str_to_cstr_copy(Arena *arena, string str);
 bool str_eq(string a, string b);
 string str_substr(string str, uint64_t min, uint64_t max);
 
+string int_to_string(Arena *arena, int value);
+string double_to_string(Arena *arena, double value, int precision);
+string char_to_string(Arena *arena, char c);
+string str_concat(Arena *arena, string a, string b);
+
 
 
 #ifdef __cplusplus
