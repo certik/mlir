@@ -42,9 +42,9 @@ int main() {
     printf("Formatted double: %.*s\n", (int)result.size, result.str);
 
     // Example with formatted char
-    fmt = str_lit("Char: {:^5}");
+    fmt = str_lit("Char: |{:^5}|");
     result = format(arena, fmt, 'x');
-    //assert(str_eq(result, str_lit("Char:  120")));
+    assert(str_eq(result, str_lit("Char: | 120 |")));
     printf("Formatted char: %.*s\n", (int)result.size, result.str);
 
     // Example with multiple arguments
