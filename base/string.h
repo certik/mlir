@@ -19,7 +19,7 @@ typedef struct {
     uint64_t size;
 } string;
 
-#define str_lit(S)  (string){.str=(char*)(S), .size=sizeof(S)-1}
+#define str_lit(S)  str_from_cstr_len_view(S, sizeof(S)-1)
 
 string str_from_cstr_view(char *cstr); 
 string str_from_cstr_len_view(char *cstr, uint64_t size);

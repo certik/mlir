@@ -26,7 +26,7 @@ int main() {
 
     // Example with one argument
     fmt = str_lit("Hello, {}!");
-    result = format(arena, fmt, "world");
+    result = format(arena, fmt, str_lit("world"));
     assert(str_eq(result, str_lit("Hello, world!")));
     printf("One arg: %.*s\n", (int)result.size, result.str);
 
