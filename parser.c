@@ -403,8 +403,11 @@ void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
 
 void parser_init(Arena *arena, Parser *parser, string text) {
     string text_null = str_concat(arena, text, str_lit("\0"));
+    parser->arena = arena;
     parser->input = (unsigned char*) text_null.str;
     parser->cur = 0;
+    parser->first = -1;
+    parser->last = -1;
     tokenizer_get_next_token(parser->input, &parser->cur, &parser->sym);
 }
 
