@@ -27,6 +27,8 @@ void test_io() {
     //assert(ok);
     //assert(text.size > 10);
 
+    println(arena, str_lit("Hello from io."));
+
     arena_free(arena);
     printf("Success\n");
 }
