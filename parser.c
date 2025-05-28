@@ -409,6 +409,9 @@ int main(int argc, char *argv[]) {
                             "  \"std.return\"(%0) : (i32) -> ()\n"
                             "}");
     Arena *arena = arena_create(10*1024*1024);
+    if (argc == 2) {
+        mlir_code = read_file_ok(arena, str_from_cstr_view(argv[1]));
+    }
     tokenizer_print_all_tokens(arena, mlir_code);
     arena_free(arena);
     return 0;
