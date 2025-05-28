@@ -18,14 +18,18 @@ int main() {
     double pi = 3.1415926535;
 
     // Example with no arguments
-    string fmt = str_lit("Hello, {}!");
-    string result = format(arena, fmt, 5);
+    string fmt = str_lit("Hello!");
+    string result = format(arena, fmt);
     printf("No args: %.*s\n", (int)result.size, result.str);
 
     // Example with one argument
     fmt = str_lit("Hello, {}!");
     result = format(arena, fmt, "world");
     printf("One arg: %.*s\n", (int)result.size, result.str);
+
+    fmt = str_lit("Hello, {}!");
+    result = format(arena, fmt, 5);
+    printf("No args: %.*s\n", (int)result.size, result.str);
 
     // Example with formatted double
     fmt = str_lit("Value: {:10.5f}");

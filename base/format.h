@@ -55,4 +55,4 @@ string format_explicit(Arena *arena, string fmt, size_t arg_count, ...);
 #define APPLY_WITH_COUNT(count, ...) CONCAT_AFTER_EXPAND(APPLY_A_FOR_COUNT_, count)(__VA_ARGS__)
 
 #define format(arena, fmt, ...) \
-    format_explicit(arena, fmt, COUNT_ARGS(__VA_ARGS__), APPLY_WITH_COUNT(COUNT_ARGS(__VA_ARGS__), __VA_ARGS__))
+    format_explicit(arena, fmt, COUNT_ARGS(__VA_ARGS__) __VA_OPT__(,) APPLY_WITH_COUNT(COUNT_ARGS(__VA_ARGS__) __VA_OPT__(,) __VA_ARGS__))
