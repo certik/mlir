@@ -41,7 +41,7 @@ void test_format() {
     string fmt = str_lit("Hello!");
     string result = format(arena, fmt);
     assert(str_eq(result, str_lit("Hello!")));
-    printf("No args: %.*s\n", (int)result.size, result.str);
+    println(arena, str_lit("No args: {}"), result);
 
     // Example with one argument
     fmt = str_lit("Hello, {}!");
