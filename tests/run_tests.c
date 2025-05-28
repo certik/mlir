@@ -20,6 +20,12 @@ void test_io() {
     bool ok = read_file(arena, str_lit("does not exist"), &text);
     assert(!ok);
 
+    text.size = 0;
+    assert(text.size == 0);
+    ok = read_file(arena, str_lit("README.md"), &text);
+    assert(ok);
+    assert(text.size > 10);
+
     arena_free(arena);
 }
 
