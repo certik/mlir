@@ -11,15 +11,15 @@
 
 void get_newlines(Arena *arena, const string s, vector_int64_t *newlines) {
     for (int64_t pos=0; pos < s.size; pos++) {
-        if (s[pos] == '\n') vector_int64_t_push_back(arena, newlines, pos);
+        if (s.str[pos] == '\n') vector_int64_t_push_back(arena, newlines, pos);
     }
 }
 
-void parser_error(Arena *arena, string msg, uint64_t first, uint64_t last) {
+void parser_error(Parser *parser, string msg, uint64_t first, uint64_t last) {
     vector_int64_t newlines;
-    vector_int64_t_reserve(arena, newlines, 16);
-    get_newlines(arena, arena->input, &newlines);
-    println(arena, str_lit("Syntax error ({}:{}): {}"), first, last, msg);
+    vector_int64_t_reserve(parser->arena, &newlines, 16);
+    get_newlines(parser->arena, str_from_cstr_view((char*)parser->input), &newlines);
+    println(parser->arena, str_lit("Syntax error ({}:{}): {}"), first, last, msg);
     exit(1);
 }
 
@@ -60,7 +60,7 @@ void parser_expect(Parser *parser, TokenType s) {
     if (parser_accept(parser, s)) {
         return;
     } else {
-        parser_error(parser->arena,
+        parser_error(parser,
                 str_lit("expect: unexpected symbol"),
                 parser->first, parser->last);
     }
@@ -76,7 +76,7 @@ void parser_expect_name(Parser *parser, string name) {
         parser_accept(parser, TK_NAME);
         return;
     } else {
-        parser_error(parser->arena,
+        parser_error(parser,
                 str_lit("expect: unexpected symbol"),
                 parser->first, parser->last);
     }
@@ -119,21 +119,21 @@ Operation* parse_operation(Parser *parser) {
         if (str_eq(op_name, str_lit("func.func"))) {
             return parse_func_func(parser);
         } else if (str_eq(op_name, str_lit("scf.for"))) {
-            parser_error(parser->arena,
+            parser_error(parser,
                     str_lit("unsupported operation: scf.for"),
                     parser->first, parser->last);
 //            return parse_scf_for(parser);
         } else {
-            parser_error(parser->arena,
+            parser_error(parser,
                     str_lit("unsupported operation"),
                     parser->first, parser->last);
         }
     } else if (parser_peek(parser, TK_REGISTER)) {
-        parser_error(parser->arena,
+        parser_error(parser,
                 str_lit("unsupported operation reg"),
                 parser->first, parser->last);
     } else {
-        parser_error(parser->arena,
+        parser_error(parser,
                 str_lit("expected a name or a register"),
                 parser->first, parser->last);
     }
