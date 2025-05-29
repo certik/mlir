@@ -108,7 +108,12 @@ string format_explicit_varg(Arena *arena, string fmt, size_t arg_count,
                 break;
             }
             case ARG_UINT64: {
-                int value = va_arg(ap, int);
+                uint64_t value = va_arg(ap, uint64_t);
+                s = int_to_string(arena, value);
+                break;
+            }
+            case ARG_INT64: {
+                int64_t value = va_arg(ap, int64_t);
                 s = int_to_string(arena, value);
                 break;
             }

@@ -18,8 +18,8 @@ static int vec_called_const = 0xdeadbeef;
 #define VECTOR_FUNC(suffix) CONCAT3(vector_, T, _##suffix)
 
 typedef struct VECTOR_NAME {
-    T* p;
-    size_t n, max;
+    T* data;
+    size_t size, max;
 #ifdef WITH_BASE_ASSERT
     int reserve_called;
 #endif

@@ -16,10 +16,40 @@ void get_newlines(Arena *arena, const string s, vector_int64_t *newlines) {
 }
 
 void parser_error(Parser *parser, string msg, uint64_t first, uint64_t last) {
+    string s = str_from_cstr_view((char*)parser->input);
     vector_int64_t newlines;
     vector_int64_t_reserve(parser->arena, &newlines, 16);
-    get_newlines(parser->arena, str_from_cstr_view((char*)parser->input), &newlines);
-    println(parser->arena, str_lit("Syntax error ({}:{}): {}"), first, last, msg);
+    get_newlines(parser->arena, s, &newlines);
+
+    // Find the line index (number of newlines before 'first')
+    int64_t line_idx = 0;
+    while (line_idx < newlines.size && newlines.data[line_idx] < first) {
+        line_idx++;
+    }
+    int64_t line_number = line_idx + 1;
+    int64_t start_of_line = (line_idx == 0) ? 0 : newlines.data[line_idx - 1] + 1;
+    int64_t end_of_line = (line_idx < newlines.size) ? newlines.data[line_idx] : s.size;
+    int64_t column_first = first - start_of_line + 1;
+
+    // Extract the line as a string
+    string line = { .str = s.str + start_of_line, .size = end_of_line - start_of_line };
+
+    // Create the caret string (spaces followed by carets)
+    int64_t token_length = last - first + 1; // Assuming 'last' is inclusive
+    char* caret_buf = arena_alloc_array(parser->arena, char, first - start_of_line + token_length);
+    for (int64_t i = 0; i < first - start_of_line; i++) {
+        caret_buf[i] = ' ';
+    }
+    for (int64_t i = 0; i < token_length; i++) {
+        caret_buf[first - start_of_line + i] = '^';
+    }
+    string caret_str = { .str = caret_buf, .size = first - start_of_line + token_length };
+
+    // Print the error message, line, and caret string
+    println(parser->arena, str_lit("Syntax error at line {} column {}: {}"), line_number, column_first, msg);
+    println(parser->arena, line);
+    println(parser->arena, caret_str);
+
     exit(1);
 }
 

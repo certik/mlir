@@ -11,6 +11,7 @@
 typedef enum {
     ARG_INT,
     ARG_UINT64,
+    ARG_INT64,
     ARG_DOUBLE,
     ARG_STRING,
     ARG_STRING2,
@@ -30,6 +31,7 @@ string format_explicit(Arena *arena, string fmt, size_t arg_count, ...);
     double: ARG_DOUBLE, \
     char:   ARG_CHAR, \
     int:    ARG_INT,  \
+    int64_t: ARG_INT64,  \
     uint64_t: ARG_UINT64  \
     ), (x)
 
