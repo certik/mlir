@@ -5,11 +5,20 @@
 
 #include <base/string.h>
 #include <base/io.h>
+#include <base/vector.h>
 
 #include "mlir_parser.h"
 
+void get_newlines(Arena *arena, const string s, vector_int64_t *newlines) {
+    for (int64_t pos=0; pos < s.size; pos++) {
+        if (s[pos] == '\n') vector_int64_t_push_back(arena, newlines, pos);
+    }
+}
 
 void parser_error(Arena *arena, string msg, uint64_t first, uint64_t last) {
+    vector_int64_t newlines;
+    vector_int64_t_reserve(arena, newlines, 16);
+    get_newlines(arena, arena->input, &newlines);
     println(arena, str_lit("Syntax error ({}:{}): {}"), first, last, msg);
     exit(1);
 }
