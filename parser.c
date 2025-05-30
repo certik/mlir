@@ -440,8 +440,16 @@ string print_region(Arena *arena, int indent_level, Region *region) {
     return result;
 }
 
+int reg_idx=0;
+
 string print_operation(Arena *arena, int indent_level, Operation *op) {
     string result = indent(arena, indent_level);
+    if (op->n_result_types > 0) {
+        result = str_concat(arena, result,
+            format(arena, str_lit("%{} = "), reg_idx)
+            );
+        reg_idx++;
+    }
     result = str_concat(arena, result,
         format(arena, str_lit("{}"), op->opcode)
         );

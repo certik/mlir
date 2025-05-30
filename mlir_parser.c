@@ -215,8 +215,10 @@ Operation* parse_operation(Parser *parser) {
         }
     } else {
         string op_name = str_lit("");
+        uint64_t n_result_types = 0;
         if (parser_peek(parser, TK_REGISTER)) {
             //string reg = parser_token_str(parser);
+            n_result_types = 1;
             parser_expect(parser, TK_REGISTER);
             parser_expect(parser, TK_EQUAL);
         }
@@ -263,6 +265,7 @@ Operation* parse_operation(Parser *parser) {
         op->opcode = op_name;
         op->regions = NULL;
         op->n_regions = 0;
+        op->n_result_types = n_result_types;
         return op;
     }
     return NULL;
