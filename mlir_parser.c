@@ -15,7 +15,7 @@ void get_newlines(Arena *arena, const string s, vector_int64_t *newlines) {
         if (s.str[pos] == '\n') vector_int64_t_push_back(arena, newlines, pos);
     }
     // Append end of file if not already present (doesn't end with \n)
-    if (!(newlines->size > 0 && newlines->data[newlines->size-1] == '\n')) {
+    if (!(s.size > 0 && s.str[s.size-1] == '\n')) {
         vector_int64_t_push_back(arena, newlines, s.size);
     }
 }
