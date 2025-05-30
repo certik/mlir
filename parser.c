@@ -404,9 +404,28 @@ void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
     }
 }
 
+string print_block(Arena *arena, Block *block) {
+    string result = str_lit("");
+    result = str_concat(arena, result, str_lit("Block:"));
+    /*
+    for (int i=0; i < op->n_blocks; i++) {
+        result = str_concat(arena, result,
+            print_block(arena, op->blocks[i])
+            );
+    }
+    */
+    return result;
+}
 
 string print_region(Arena *arena, Region *region) {
-    return format(arena, str_lit("Region()"));
+    string result = str_lit("");
+    result = str_concat(arena, result, str_lit("Region:"));
+    for (int i=0; i < region->n_blocks; i++) {
+        result = str_concat(arena, result,
+            print_block(arena, region->blocks[i])
+            );
+    }
+    return result;
 }
 
 string print_operation(Arena *arena, Operation *op) {

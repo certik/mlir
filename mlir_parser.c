@@ -166,12 +166,16 @@ Operation* parse_module(Parser *parser) {
     block->n_operations = operations.size;
 
     Region *region = arena_alloc(parser->arena, Region);
-    region->blocks = &block;
+    Block **block2 = arena_alloc(parser->arena, Block*);
+    block2[0] = block;
+    region->blocks = block2;
     region->n_blocks = 1;
 
     Operation *op = arena_alloc(parser->arena, Operation);
     op->opcode = str_lit("module");
-    op->regions = &region;
+    Region **regions = arena_alloc(parser->arena, Region*);
+    regions[0] = region;
+    op->regions = regions;
     op->n_regions = 1;
 
     return op;
