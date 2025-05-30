@@ -443,7 +443,7 @@ string print_region(Arena *arena, int indent_level, Region *region) {
 string print_operation(Arena *arena, int indent_level, Operation *op) {
     string result = indent(arena, indent_level);
     result = str_concat(arena, result,
-        format(arena, str_lit("Operation(opcode={})"), op->opcode)
+        format(arena, str_lit("{}"), op->opcode)
         );
     if (op->n_regions > 0) {
         result = str_concat(arena, result, str_lit(" "));
