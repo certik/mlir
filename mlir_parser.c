@@ -214,17 +214,20 @@ Operation* parse_operation(Parser *parser) {
                     parser->first, parser->last);
         }
     } else {
-        string op_name = str_lit("");
-        uint64_t n_result_types = 0;
+        Operation *op = arena_alloc(parser->arena, Operation);
+        op->regions = NULL;
+        op->n_regions = 0;
+        op->n_result_types = 0;
+        op->opcode = str_lit("");
         if (parser_peek(parser, TK_REGISTER)) {
             //string reg = parser_token_str(parser);
-            n_result_types = 1;
+            op->n_result_types = 1;
             parser_expect(parser, TK_REGISTER);
             parser_expect(parser, TK_EQUAL);
         }
         if (parser_peek(parser, TK_STRING)) {
-            op_name = parser_token_str(parser);
-            op_name = str_substr(op_name, 1, op_name.size-2);
+            op->opcode = parser_token_str(parser);
+            op->opcode = str_substr(op->opcode, 1, op->opcode.size-2);
             parser_expect(parser, TK_STRING);
         } else {
             parser_error(parser,
@@ -261,11 +264,6 @@ Operation* parse_operation(Parser *parser) {
         }
         parser_expect(parser, TK_NEWLINE);
 
-        Operation *op = arena_alloc(parser->arena, Operation);
-        op->opcode = op_name;
-        op->regions = NULL;
-        op->n_regions = 0;
-        op->n_result_types = n_result_types;
         return op;
     }
     return NULL;
