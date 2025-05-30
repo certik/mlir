@@ -123,8 +123,11 @@ void parser_expect(Parser *parser, TokenType s) {
         return;
     } else {
         parser_error(parser,
-                str_lit("expect: unexpected symbol"),
-                parser->first, parser->last);
+            format(parser->arena,
+                str_lit("Expected {}, got {}"),
+                tokentype_to_string(s),
+                tokentype_to_string(parser->sym)
+            ), parser->first, parser->last);
     }
 }
 
@@ -193,11 +196,26 @@ Operation* parse_operation(Parser *parser) {
         }
     } else if (parser_peek(parser, TK_REGISTER)) {
         string reg = parser_token_str(parser);
-        parser_accept(parser, TK_REGISTER);
-        parser_accept(parser, TK_EQUAL);
+        parser_expect(parser, TK_REGISTER);
+        parser_expect(parser, TK_EQUAL);
+        if (parser_peek(parser, TK_STRING)) {
+            string op_name = parser_token_str(parser);
+            parser_expect(parser, TK_STRING);
+            parser_expect(parser, TK_LPAREN);
+            parser_expect(parser, TK_RPAREN);
+            parser_expect(parser, TK_LBRACE);
+            parser_expect(parser, TK_RBRACE);
+        } else {
+            parser_error(parser,
+                format(parser->arena,
+                    str_lit("Expected string, got {}"),
+                    tokentype_to_string(parser->sym)),
+                    parser->first, parser->last);
+        }
         parser_error(parser,
                 str_lit("unsupported operation reg"),
                 parser->first, parser->last);
+
     } else {
         parser_error(parser,
                 format(parser->arena,
