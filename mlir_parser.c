@@ -81,14 +81,11 @@ void parser_error(Parser *parser, string msg, uint64_t first, uint64_t last) {
 }
 
 void parser_next_token(Parser *parser) {
-    parser->first = parser->cur;
-    tokenizer_get_next_token(parser->input, &parser->cur, &parser->sym);
-    parser->last = parser->cur-1;
-    while (parser->sym == TK_WHITESPACE) {
+    do {
         parser->first = parser->cur;
         tokenizer_get_next_token(parser->input, &parser->cur, &parser->sym);
         parser->last = parser->cur-1;
-    }
+    } while (parser->sym == TK_WHITESPACE);
 }
 
 void parser_init(Arena *arena, Parser *parser, string text) {
