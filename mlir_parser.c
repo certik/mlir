@@ -222,6 +222,7 @@ Operation* parse_operation(Parser *parser) {
         }
         if (parser_peek(parser, TK_STRING)) {
             op_name = parser_token_str(parser);
+            op_name = str_substr(op_name, 1, op_name.size-2);
             parser_expect(parser, TK_STRING);
         } else {
             parser_error(parser,
