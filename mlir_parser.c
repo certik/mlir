@@ -56,6 +56,14 @@ void parser_error(Parser *parser, string msg, uint64_t first, uint64_t last) {
     linear_to_line_column(newlines, first, &start_of_line, &end_of_line,
             &line_first, &column_first);
 
+    bool debug = false;
+    if (debug) {
+        println(parser->arena, str_lit("{}"), newlines);
+        println(parser->arena,
+                str_lit("first: {}, last: {}, line_first: {}, column_first: {}, start_of_line: {}, end_of_line: {}"),
+                first, last, line_first, column_first, start_of_line, end_of_line);
+    }
+
     // Extract the line as a string
     string line = { .str = s.str + start_of_line, .size = end_of_line - start_of_line };
 
