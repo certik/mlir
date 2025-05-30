@@ -390,11 +390,14 @@ void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
         first = cur;
         tokenizer_get_next_token(string_start, &cur, &token_type);
         last = cur-1;
+        bool debug = false;
+        if (debug) {
         printf("Token(%s, \"%s\", %llu, %llu)\n",
             str_to_cstr_copy(arena, tokentype_to_string(token_type)),
             str_to_cstr_copy(arena,
                 str_substr(input_code, first, last-first+1)),
             first, last);
+        }
         if (token_type == TK_EOF) {
             return;
         }
