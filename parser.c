@@ -404,16 +404,16 @@ void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
     }
 }
 
+string print_operation(Arena *arena, Operation *op);
+
 string print_block(Arena *arena, Block *block) {
     string result = str_lit("");
     result = str_concat(arena, result, str_lit("Block:"));
-    /*
-    for (int i=0; i < op->n_blocks; i++) {
+    for (int i=0; i < block->n_operations; i++) {
         result = str_concat(arena, result,
-            print_block(arena, op->blocks[i])
+            print_operation(arena, block->operations[i])
             );
     }
-    */
     return result;
 }
 
