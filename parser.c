@@ -407,7 +407,14 @@ void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
 string print_operation(Arena *arena, int indent_level, Operation *op);
 
 string indent(Arena *arena, int indent_level) {
-    return format(arena, str_lit("{}:"), indent_level);
+    const int indent_spaces=4;
+    int buf_size=indent_level*indent_spaces;
+    char* buf = arena_alloc_array(arena, char, buf_size);
+    for (int64_t i = 0; i < buf_size; i++) {
+        buf[i] = ' ';
+    }
+    string str = {buf, buf_size};
+    return str;
 }
 
 string print_block(Arena *arena, int bb_index, int indent_level, Block *block) {
@@ -439,9 +446,10 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
         format(arena, str_lit("Operation(opcode={})"), op->opcode)
         );
     if (op->n_regions > 0) {
+        result = str_concat(arena, result, str_lit(" "));
         for (int i=0; i < op->n_regions; i++) {
             result = str_concat(arena, result,
-                print_region(arena, indent_level+1, op->regions[i])
+                print_region(arena, indent_level, op->regions[i])
                 );
         }
     }
