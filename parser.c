@@ -401,6 +401,10 @@ void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
     }
 }
 
+string print_module(Arena *arena, Operation *op) {
+    return format(arena, str_lit("Operation(opcode={})"), op->opcode);
+}
+
 // Main
 int main(int argc, char *argv[]) {
     string mlir_code = str_lit("module {\n"
@@ -417,6 +421,8 @@ int main(int argc, char *argv[]) {
     parser_init(arena, &parser, mlir_code);
     // Uncomment to run parser (will currently fail with a syntax error):
     Operation* op = parse_module(&parser);
+    println(arena, str_lit("MLIR:"));
+    println(arena, str_lit("{}"), print_module(arena, op));
 
     arena_free(arena);
     return 0;
