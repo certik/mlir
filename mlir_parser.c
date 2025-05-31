@@ -201,12 +201,12 @@ Operation* parse_module(Parser *parser) {
 
 Operation* parse_func_func(Parser *parser) {
     parser_expect_opname(parser, str_lit("func.func"));
-    //string func_name = parser_token_str(parser);
     parser_expect(parser, TK_FUNCTION_NAME);
     while (!parser_peek(parser, TK_LBRACE)) {
         parser_next_token(parser);
     }
     parser_expect(parser, TK_LBRACE);
+    parser_expect(parser, TK_NEWLINE);
     while (!parser_peek(parser, TK_RBRACE)) {
         parse_operation(parser);
     }
