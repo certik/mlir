@@ -344,11 +344,12 @@ void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
         last = cur-1;
         bool debug = false;
         if (debug) {
-        printf("Token(%s, \"%s\", %llu, %llu)\n",
-            str_to_cstr_copy(arena, tokentype_to_string(token_type)),
-            str_to_cstr_copy(arena,
-                str_substr(input_code, first, last-first+1)),
-            first, last);
+            string token_str = str_substr(input_code, first, last-first+1);
+            if (token_type == TK_WHITESPACE || token_type == TK_NEWLINE) {
+                token_str = str_lit("");
+            }
+            println(arena, str_lit("Token({}, \"{}\", {},{})"),
+                tokentype_to_string(token_type), token_str, first, last);
         }
         if (token_type == TK_EOF) {
             return;
