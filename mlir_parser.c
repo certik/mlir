@@ -133,18 +133,19 @@ string parser_token_str(Parser *parser) {
     return str_from_cstr_len_view(t, parser->last - parser->first+1);
 }
 
-void parser_expect_name(Parser *parser, string name) {
-    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), name)){
-        parser_expect(parser, TK_NAME);
-        return;
-    } else {
-        parser_error(parser,
-            format(parser->arena,
-                str_lit("Expected TK_NAME '{}', got {}"),
-                name,
-                tokentype_to_string(parser->sym)
-            ), parser->first, parser->last);
+void parser_expect_opname(Parser *parser, string name) {
+    if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
+        if (str_eq(parser_token_str(parser), name)) {
+            parser_next_token(parser);
+            return;
+        }
     }
+    parser_error(parser,
+        format(parser->arena,
+            str_lit("Expected TK_NAME or TK_NAME_DOT_NAME '{}', got {}"),
+            name,
+            tokentype_to_string(parser->sym)
+        ), parser->first, parser->last);
 }
 
 Operation* parse_operation(Parser *parser);
@@ -167,7 +168,7 @@ Operation* parse_module(Parser *parser) {
         }
     }
 
-    parser_expect_name(parser, str_lit("module"));
+    parser_expect_opname(parser, str_lit("module"));
     parser_expect(parser, TK_LBRACE);
     parser_expect(parser, TK_NEWLINE);
     vector_int64_t operations;
@@ -199,7 +200,7 @@ Operation* parse_module(Parser *parser) {
 }
 
 Operation* parse_func_func(Parser *parser) {
-    parser_expect_name(parser, str_lit("func.func"));
+    parser_expect_opname(parser, str_lit("func.func"));
     //string func_name = parser_token_str(parser);
     parser_expect(parser, TK_FUNCTION_NAME);
     while (!parser_peek(parser, TK_LBRACE)) {
@@ -216,7 +217,7 @@ Operation* parse_func_func(Parser *parser) {
 }
 
 Operation* parse_operation(Parser *parser) {
-    if (parser_peek(parser, TK_NAME_DOT_NAME)) {
+    if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
         string op_name = parser_token_str(parser);
         if (str_eq(op_name, str_lit("func.func"))) {
             return parse_func_func(parser);
