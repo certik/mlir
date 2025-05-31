@@ -179,23 +179,6 @@ Region* parse_region(Parser *parser) {
 }
 
 Operation* parse_module(Parser *parser) {
-    while (!parser_peek(parser, TK_NAME)) {
-        if (parser_peek(parser, TK_HASH_NAME)) {
-            while (!parser_peek(parser, TK_NEWLINE)) {
-                parser_next_token(parser);
-            }
-            parser_expect(parser, TK_NEWLINE);
-        } else if (parser_peek(parser, TK_NEWLINE)) {
-            parser_expect(parser, TK_NEWLINE);
-        } else {
-            parser_error(parser,
-                format(parser->arena,
-                    str_lit("Expected TK_NAME, TK_HASH_NAME or TK_NEWLINE, got {}"),
-                    tokentype_to_string(parser->sym)
-                ), parser->first, parser->last);
-        }
-    }
-
     Operation *op = parse_operation(parser);
     if (!str_eq(op->opname, str_lit("module"))) {
         parser_error(parser, str_lit("expected module"), 0, 0);
@@ -228,9 +211,22 @@ Operation* parse_operation(Parser *parser) {
     op->n_result_types = 0;
     op->opname = str_lit("");
 
-    // Skip empty lines
-    while (parser_peek(parser, TK_NEWLINE)) {
-        parser_next_token(parser);
+    // Skip empty lines and attributes
+    while (
+        parser_peek(parser, TK_NEWLINE) ||
+        parser_peek(parser, TK_HASH_NAME)
+            ) {
+        if (parser_peek(parser, TK_HASH_NAME)) {
+            while (!parser_peek(parser, TK_NEWLINE)) {
+                parser_next_token(parser);
+            }
+            parser_expect(parser, TK_NEWLINE);
+        } else if (parser_peek(parser, TK_NEWLINE)) {
+            parser_expect(parser, TK_NEWLINE);
+        } else {
+            // Shouldn't happen
+            abort();
+        }
     }
 
     // Parse return registers if any
