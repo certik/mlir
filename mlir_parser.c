@@ -191,21 +191,17 @@ Operation* parse_module(Parser *parser) {
     return op;
 }
 
-Operation* parse_func_func(Parser *parser) {
-    parser_expect_opname(parser, str_lit("func.func"));
-    parser_expect(parser, TK_FUNCTION_NAME);
-    while (!parser_peek(parser, TK_LBRACE)) {
+void parse_tt_func(Parser *parser, Operation *op) {
+    //parser_expect(parser, TK_FUNCTION_NAME);
+    while (!parser_peek(parser, TK_LBRACE_END)) {
         parser_next_token(parser);
     }
-    parser_expect(parser, TK_LBRACE);
-    parser_expect(parser, TK_NEWLINE);
-    while (!parser_peek(parser, TK_RBRACE)) {
-        parse_operation(parser);
-    }
-    parser_expect(parser, TK_RBRACE);
-    Operation *op = arena_alloc(parser->arena, Operation);
-    op->opname = str_lit("func.func");
-    return op;
+    Region *region = parse_region(parser);
+
+    Region **regions = arena_alloc(parser->arena, Region*);
+    regions[0] = region;
+    op->regions = regions;
+    op->n_regions = 1;
 }
 
 Operation* parse_operation(Parser *parser) {
@@ -244,6 +240,7 @@ Operation* parse_operation(Parser *parser) {
     // Parse operation name
     if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
         op->opname = parser_token_str(parser);
+        parser_next_token(parser);
     } else if (parser_peek(parser, TK_STRING)) {
         op->opname = parser_token_str(parser);
         op->opname = str_substr(op->opname, 1, op->opname.size-2);
@@ -256,22 +253,11 @@ Operation* parse_operation(Parser *parser) {
             ), parser->first, parser->last);
     }
 
-    // Here we dispatch based on specific opnames
-
-    /*
-        if (str_eq(op_name, str_lit("func.func"))) {
-            return parse_func_func(parser);
-        } else if (str_eq(op_name, str_lit("scf.for"))) {
-            parser_error(parser,
-                    str_lit("unsupported operation: scf.for"),
-                    parser->first, parser->last);
-//            return parse_scf_for(parser);
-        } else {
-            parser_error(parser,
-                    str_lit("unsupported operation"),
-                    parser->first, parser->last);
-        }
-    */
+    // First we handle specific opnames with special parsing rules
+    if (str_eq(op->opname, str_lit("tt.func"))) {
+        parse_tt_func(parser, op);
+    } else {
+        // Then we parse a general opname
 
 
     // Parse details
@@ -304,19 +290,20 @@ Operation* parse_operation(Parser *parser) {
         }
     */
 
-    // Parse regions (if any), for now we assume 0 or 1 regions
-    while (!(parser_peek(parser, TK_LBRACE_END)
-                || parser_peek(parser, TK_NEWLINE))) {
-        parser_next_token(parser);
-    }
-    if (parser_peek(parser, TK_LBRACE_END)) {
-        Region *region = parse_region(parser);
+        // Parse regions (if any), for now we assume 0 or 1 regions
+        while (!(parser_peek(parser, TK_LBRACE_END)
+                    || parser_peek(parser, TK_NEWLINE))) {
+            parser_next_token(parser);
+        }
+        if (parser_peek(parser, TK_LBRACE_END)) {
+            Region *region = parse_region(parser);
 
-        // TODO: for now we assume one region
-        Region **regions = arena_alloc(parser->arena, Region*);
-        regions[0] = region;
-        op->regions = regions;
-        op->n_regions = 1;
+            // TODO: for now we assume one region
+            Region **regions = arena_alloc(parser->arena, Region*);
+            regions[0] = region;
+            op->regions = regions;
+            op->n_regions = 1;
+        }
     }
 
     return op;
