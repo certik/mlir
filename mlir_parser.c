@@ -181,9 +181,8 @@ Region* parse_region(Parser *parser) {
 Operation* parse_module(Parser *parser) {
     Operation *op = parse_operation(parser);
     if (!str_eq(op->opname, str_lit("module"))) {
-        parser_error(parser, str_lit("expected module"), 0, 0);
+        parser_error(parser, str_lit("The top level operation should be a module"), 0, 0);
     }
-
     return op;
 }
 
