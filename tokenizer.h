@@ -20,6 +20,7 @@ extern "C" {
     X(TK_LBRACKET) \
     X(TK_RBRACKET) \
     X(TK_LBRACE) \
+    X(TK_LBRACE_END) \
     X(TK_RBRACE) \
     X(TK_LANGLE) \
     X(TK_RANGLE) \

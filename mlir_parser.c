@@ -152,7 +152,7 @@ Operation* parse_operation(Parser *parser);
 
 // Parses a region from { to } inclusive
 Region* parse_region(Parser *parser) {
-    parser_expect(parser, TK_LBRACE);
+    parser_expect(parser, TK_LBRACE_END);
     parser_expect(parser, TK_NEWLINE);
     vector_int64_t operations;
     vector_int64_t_reserve(parser->arena, &operations, 16);
@@ -196,7 +196,7 @@ Operation* parse_module(Parser *parser) {
     }
 
     parser_expect_opname(parser, str_lit("module"));
-    parser_expect(parser, TK_LBRACE);
+    parser_expect(parser, TK_LBRACE_END);
     parser_expect(parser, TK_NEWLINE);
     vector_int64_t operations;
     vector_int64_t_reserve(parser->arena, &operations, 16);
@@ -322,11 +322,11 @@ Operation* parse_operation(Parser *parser) {
     */
 
     // Parse regions (if any), for now we assume 0 or 1 regions
-    while (!(parser_peek(parser, TK_LBRACE)
+    while (!(parser_peek(parser, TK_LBRACE_END)
                 || parser_peek(parser, TK_NEWLINE))) {
         parser_next_token(parser);
     }
-    if (parser_peek(parser, TK_LBRACE)) {
+    if (parser_peek(parser, TK_LBRACE_END)) {
         Region *region = parse_region(parser);
 
         // TODO: for now we assume one region

@@ -115,6 +115,7 @@ void tokenizer_get_next_token(const unsigned char *string,
             "[" { RET(TK_LBRACKET) }
             "]" { RET(TK_RBRACKET) }
             "{" { RET(TK_LBRACE) }
+            "{" / newline { RET(TK_LBRACE_END) }
             "}" { RET(TK_RBRACE) }
             "<" { RET(TK_LANGLE) }
             ">" { RET(TK_RANGLE) }
