@@ -120,7 +120,6 @@ void tokenizer_get_next_token(const unsigned char *string,
             ">" { RET(TK_RANGLE) }
             "!" { RET(TK_EXCLAMATION) }
             "$" { RET(TK_DOLLAR) }
-            "#" { RET(TK_HASH) }
             "+" { RET(TK_PLUS) }
             "-" { RET(TK_MINUS) }
             "=" { RET(TK_EQUAL) }
@@ -138,6 +137,8 @@ void tokenizer_get_next_token(const unsigned char *string,
             // Multiple character symbols
             "//" { RET(TK_COMMENT) }
             "->" { RET(TK_ARROW) }
+
+            "#" name { RET(TK_HASH_NAME); }
 
             name { RET(TK_NAME) }
             name "." name { RET(TK_NAME_DOT_NAME) }

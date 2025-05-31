@@ -6,48 +6,53 @@
 extern "C" {
 #endif
 
+#define LIST_OF_TOKENS \
+    X(TK_EOF) \
+    X(TK_NEWLINE) \
+    X(TK_WHITESPACE) \
+    X(TK_ERROR) \
+    X(TK_NAME) \
+    X(TK_NAME_DOT_NAME) \
+    X(TK_HASH_NAME) \
+    X(TK_COMMENT) \
+    X(TK_LPAREN) \
+    X(TK_RPAREN) \
+    X(TK_LBRACKET) \
+    X(TK_RBRACKET) \
+    X(TK_LBRACE) \
+    X(TK_RBRACE) \
+    X(TK_LANGLE) \
+    X(TK_RANGLE) \
+    X(TK_EXCLAMATION) \
+    X(TK_DOLLAR) \
+    X(TK_PLUS) \
+    X(TK_MINUS) \
+    X(TK_STAR) \
+    X(TK_SLASH) \
+    X(TK_EQUAL) \
+    X(TK_COLON) \
+    X(TK_SEMICOLON) \
+    X(TK_PERCENT) \
+    X(TK_COMMA) \
+    X(TK_VBAR) \
+    X(TK_AT) \
+    X(TK_CARET) \
+    X(TK_DOT) \
+    X(TK_ARROW) \
+    X(TK_INTEGER) \
+    X(TK_REAL) \
+    X(TK_STRING) \
+    X(TK_REGISTER) \
+    X(TK_TYPE_DIM) \
+    X(TK_FUNCTION_NAME) \
+    X(KW_ABSTRACT) \
+    X(KW_ALL) \
+    X(KW_WRITE)
+
 typedef enum {
-    TK_EOF,
-    TK_NEWLINE,
-    TK_WHITESPACE,
-    TK_ERROR,
-    TK_NAME,
-    TK_NAME_DOT_NAME,
-    TK_LPAREN,
-    TK_RPAREN,
-    TK_LBRACKET,
-    TK_RBRACKET,
-    TK_LBRACE,
-    TK_RBRACE,
-    TK_LANGLE,
-    TK_RANGLE,
-    TK_EXCLAMATION,
-    TK_DOLLAR,
-    TK_HASH,
-    TK_PLUS,
-    TK_MINUS,
-    TK_EQUAL,
-    TK_COLON,
-    TK_SEMICOLON,
-    TK_SLASH,
-    TK_PERCENT,
-    TK_COMMA,
-    TK_STAR,
-    TK_VBAR,
-    TK_AT,
-    TK_CARET,
-    TK_DOT,
-    TK_COMMENT,
-    TK_ARROW,
-    TK_REAL,
-    TK_INTEGER,
-    TK_STRING,
-    TK_REGISTER,
-    TK_TYPE_DIM,
-    TK_FUNCTION_NAME,
-    KW_ABSTRACT,
-    KW_ALL,
-    KW_WRITE,
+#define X(token) token,
+    LIST_OF_TOKENS
+#undef X
 } TokenType;
 
 // Get the token in the `string` at the `position`. The function

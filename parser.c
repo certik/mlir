@@ -333,49 +333,10 @@ public:
 */
 
 string tokentype_to_string(TokenType tt) {
-#define CASE_TOKEN(x) case x: return str_lit(#x);
     switch (tt) {
-        CASE_TOKEN(TK_EOF)
-        CASE_TOKEN(TK_NEWLINE)
-        CASE_TOKEN(TK_WHITESPACE)
-        CASE_TOKEN(TK_ERROR)
-        CASE_TOKEN(TK_NAME)
-        CASE_TOKEN(TK_NAME_DOT_NAME)
-        CASE_TOKEN(TK_LPAREN)
-        CASE_TOKEN(TK_RPAREN)
-        CASE_TOKEN(TK_LBRACKET)
-        CASE_TOKEN(TK_RBRACKET)
-        CASE_TOKEN(TK_LBRACE)
-        CASE_TOKEN(TK_RBRACE)
-        CASE_TOKEN(TK_LANGLE)
-        CASE_TOKEN(TK_RANGLE)
-        CASE_TOKEN(TK_EXCLAMATION)
-        CASE_TOKEN(TK_DOLLAR)
-        CASE_TOKEN(TK_HASH)
-        CASE_TOKEN(TK_PLUS)
-        CASE_TOKEN(TK_MINUS)
-        CASE_TOKEN(TK_EQUAL)
-        CASE_TOKEN(TK_COLON)
-        CASE_TOKEN(TK_SEMICOLON)
-        CASE_TOKEN(TK_SLASH)
-        CASE_TOKEN(TK_PERCENT)
-        CASE_TOKEN(TK_COMMA)
-        CASE_TOKEN(TK_STAR)
-        CASE_TOKEN(TK_VBAR)
-        CASE_TOKEN(TK_AT)
-        CASE_TOKEN(TK_CARET)
-        CASE_TOKEN(TK_DOT)
-        CASE_TOKEN(TK_COMMENT)
-        CASE_TOKEN(TK_ARROW)
-        CASE_TOKEN(TK_REAL)
-        CASE_TOKEN(TK_INTEGER)
-        CASE_TOKEN(TK_STRING)
-        CASE_TOKEN(TK_REGISTER)
-        CASE_TOKEN(TK_FUNCTION_NAME)
-        CASE_TOKEN(TK_TYPE_DIM)
-        CASE_TOKEN(KW_ABSTRACT)
-        CASE_TOKEN(KW_ALL)
-        CASE_TOKEN(KW_WRITE)
+#define X(token) case token: return str_lit(#token);
+        LIST_OF_TOKENS
+#undef X
         default: abort();
     }
 }
