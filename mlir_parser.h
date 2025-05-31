@@ -37,6 +37,8 @@ typedef struct ValueRef {
     uint64_t index;
 } ValueRef;
 
+// TODO: make all ** just *, since the type is known
+
 typedef struct Operation Operation;
 struct Operation {
     string opname;
