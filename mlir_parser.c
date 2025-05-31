@@ -191,12 +191,28 @@ Operation* parse_module(Parser *parser) {
     return op;
 }
 
+// parse loc()
+void parse_loc(Parser *parser) {
+    parser_expect(parser, TK_NAME);
+    parser_expect(parser, TK_LPAREN);
+    while (!(parser_peek(parser, TK_RPAREN))) {
+        parser_next_token(parser);
+    }
+    parser_expect(parser, TK_RPAREN);
+}
+
 void parse_tt_func(Parser *parser, Operation *op) {
     //parser_expect(parser, TK_FUNCTION_NAME);
     while (!parser_peek(parser, TK_LBRACE_END)) {
         parser_next_token(parser);
     }
     Region *region = parse_region(parser);
+
+    if (parser_peek(parser, TK_NAME)) {
+        if (str_eq(parser_token_str(parser), str_lit("loc"))) {
+            parse_loc(parser);
+        }
+    }
 
     Region **regions = arena_alloc(parser->arena, Region*);
     regions[0] = region;
@@ -307,6 +323,11 @@ Operation* parse_operation(Parser *parser) {
             regions[0] = region;
             op->regions = regions;
             op->n_regions = 1;
+        }
+        if (parser_peek(parser, TK_NAME)) {
+            if (str_eq(parser_token_str(parser), str_lit("loc"))) {
+                parse_loc(parser);
+            }
         }
     }
 
