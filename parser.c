@@ -332,15 +332,6 @@ public:
 };
 */
 
-string tokentype_to_string(TokenType tt) {
-    switch (tt) {
-#define X(token) case token: return str_lit(#token);
-        LIST_OF_TOKENS
-#undef X
-        default: abort();
-    }
-}
-
 void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
     unsigned char *string_start;
     string_start = (unsigned char*)input_code.str;

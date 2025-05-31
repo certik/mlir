@@ -10,8 +10,15 @@
 
 #include "mlir_parser.h"
 
-// TODO: move this to the tokenizer
-string tokentype_to_string(TokenType tt);
+string tokentype_to_string(TokenType tt) {
+    switch (tt) {
+#define X(token) case token: return str_lit(#token);
+        LIST_OF_TOKENS
+#undef X
+        default: abort();
+    }
+}
+
 
 void get_newlines(Arena *arena, const string s, vector_int64_t *newlines) {
     for (int64_t pos=0; pos < s.size; pos++) {

@@ -59,6 +59,7 @@ struct Region {
     uint64_t n_blocks;
 };
 
+string tokentype_to_string(TokenType tt);
 void parser_init(Arena *arena, Parser *parser, string text);
 Operation* parse_module(Parser *parser);
 
