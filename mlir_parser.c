@@ -156,6 +156,8 @@ Operation* parse_module(Parser *parser) {
                 parser_next_token(parser);
             }
             parser_expect(parser, TK_NEWLINE);
+        } else if (parser_peek(parser, TK_NEWLINE)) {
+            parser_expect(parser, TK_NEWLINE);
         } else {
             parser_error(parser,
                 format(parser->arena,
