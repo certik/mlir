@@ -250,6 +250,11 @@ Operation* parse_operation(Parser *parser) {
     op->n_result_types = 0;
     op->opname = str_lit("");
 
+    // Skip empty lines
+    while (parser_peek(parser, TK_NEWLINE)) {
+        parser_next_token(parser);
+    }
+
     // Parse return registers if any
     if (parser_peek(parser, TK_REGISTER)) {
         //string reg = parser_token_str(parser);
