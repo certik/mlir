@@ -238,6 +238,37 @@ void parse_tt_func(Parser *parser, Operation *op) {
     op->n_regions = 1;
 }
 
+void parse_scf_if(Parser *parser, Operation *op) {
+    while (!parser_peek(parser, TK_LBRACE_END)) {
+        parser_next_token(parser);
+    }
+    int n_regions = 1;
+    Region *region1 = parse_region(parser);
+    Region *region2 = NULL;
+
+    if (parser_peek(parser, TK_NAME)) {
+        if (str_eq(parser_token_str(parser), str_lit("else"))) {
+            parser_expect(parser, TK_NAME);
+            region2 = parse_region(parser);
+            n_regions++;
+        }
+    }
+
+    if (parser_peek(parser, TK_NAME)) {
+        if (str_eq(parser_token_str(parser), str_lit("loc"))) {
+            parse_loc(parser);
+        }
+    }
+
+    Region **regions = arena_alloc_array(parser->arena, Region*, n_regions);
+    regions[0] = region1;
+    if (region2) {
+        regions[1] = region2;
+    }
+    op->regions = regions;
+    op->n_regions = n_regions;
+}
+
 Operation* parse_operation(Parser *parser) {
     Operation *op = arena_alloc(parser->arena, Operation);
     op->regions = NULL;
@@ -294,6 +325,8 @@ Operation* parse_operation(Parser *parser) {
     // First we handle specific opnames with special parsing rules
     if (str_eq(op->opname, str_lit("tt.func"))) {
         parse_tt_func(parser, op);
+    } else if (str_eq(op->opname, str_lit("scf.if"))) {
+        parse_scf_if(parser, op);
     } else {
         // Then we parse a general opname
 
