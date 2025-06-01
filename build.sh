@@ -13,3 +13,4 @@ clang $CFLAGS -I. -o parser parser.c tokenizer.c mlir_parser.c base/arena.c base
 ./parser a.mlir
 ./parser b.mlir
 ./parser c.mlir
+./parser d.mlir
