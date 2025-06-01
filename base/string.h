@@ -31,6 +31,7 @@ string int_to_string(Arena *arena, int value);
 string double_to_string(Arena *arena, double value, int precision);
 string char_to_string(Arena *arena, char c);
 string str_concat(Arena *arena, string a, string b);
+uint32_t str_hash(string str);
 
 
 

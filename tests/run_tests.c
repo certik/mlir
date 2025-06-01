@@ -81,7 +81,7 @@ void test_format() {
 
 DEFINE_HASHTABLE_FOR_TYPES(int, string, MapIntString)
 
-void test_hashtable() {
+void test_hashtable1() {
     Arena* arena = arena_create(1024*10);
 
     MapIntString ht;
@@ -94,9 +94,28 @@ void test_hashtable() {
     arena_free(arena);
 }
 
+#define MapStringInt_HASH(key) (str_hash(key))
+#define MapStringInt_EQUAL(key1, key2) (str_eq((key1), (key2)))
+
+DEFINE_HASHTABLE_FOR_TYPES(string, int, MapStringInt)
+
+void test_hashtable2() {
+    Arena* arena = arena_create(1024*10);
+
+    MapStringInt ht;
+    MapStringInt_init(arena, &ht, 16);
+    MapStringInt_insert(arena, &ht, str_lit("forty-two"), 42);
+    int *value = MapStringInt_get(&ht, str_lit("forty-two"));
+    assert(value);
+    println(arena, str_lit("Value for key \"forty-two\": {}"), *value);
+
+    arena_free(arena);
+}
+
 int main() {
     test_format();
     test_io();
-    test_hashtable();
+    test_hashtable1();
+    test_hashtable2();
     return 0;
 }

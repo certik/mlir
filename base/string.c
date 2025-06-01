@@ -73,3 +73,13 @@ string str_concat(Arena *arena, string a, string b) {
     string result = {str, a.size + b.size};
     return result;
 }
+
+uint32_t str_hash(string str) {
+    // FNV-1a hash
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < str.size; i++) {
+        hash ^= (uint32_t)(unsigned char)str.str[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
