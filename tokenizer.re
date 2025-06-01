@@ -87,7 +87,7 @@ void tokenizer_get_next_token(const unsigned char *string,
             whitespace = [ \t\v]+;
             newline = "\n" | "\r\n";
             digit = [0-9];
-            char =  [a-zA-Z_];
+            char =  [a-zA-Z_-];
             name = char (char | digit)*;
             significand = (digit+"."digit*) | ("."digit+);
             exp = [edED][-+]? digit+;

@@ -89,7 +89,7 @@ void tokenizer_get_next_token(const unsigned char *string,
 		192, 192, 192, 192, 192, 192, 192, 192,
 		192, 192, 192, 192, 192, 192, 192, 192,
 		200, 192, 128, 192, 192, 192, 192, 192,
-		192, 192, 192, 192, 192, 192, 192, 192,
+		192, 192, 192, 192, 192, 224, 192, 192,
 		240, 240, 240, 240, 240, 240, 240, 240,
 		240, 240, 192, 192, 192, 192, 192, 192,
 		192, 224, 224, 224, 224, 224, 224, 224,
@@ -136,8 +136,8 @@ void tokenizer_get_next_token(const unsigned char *string,
 		case '+': goto yy16;
 		case ',': goto yy17;
 		case '-': goto yy18;
-		case '.': goto yy19;
-		case '/': goto yy21;
+		case '.': goto yy20;
+		case '/': goto yy22;
 		case '0':
 		case '1':
 		case '2':
@@ -147,15 +147,15 @@ void tokenizer_get_next_token(const unsigned char *string,
 		case '6':
 		case '7':
 		case '8':
-		case '9': goto yy22;
-		case ':': goto yy24;
-		case ';': goto yy25;
-		case '<': goto yy26;
-		case '=': goto yy27;
-		case '>': goto yy28;
-		case '@': goto yy29;
+		case '9': goto yy23;
+		case ':': goto yy25;
+		case ';': goto yy26;
+		case '<': goto yy27;
+		case '=': goto yy28;
+		case '>': goto yy29;
+		case '@': goto yy30;
 		case 'A':
-		case 'a': goto yy31;
+		case 'a': goto yy32;
 		case 'B':
 		case 'C':
 		case 'D':
@@ -204,15 +204,15 @@ void tokenizer_get_next_token(const unsigned char *string,
 		case 'v':
 		case 'x':
 		case 'y':
-		case 'z': goto yy33;
+		case 'z': goto yy34;
 		case 'W':
-		case 'w': goto yy35;
-		case '[': goto yy36;
-		case ']': goto yy37;
-		case '^': goto yy38;
-		case '{': goto yy39;
-		case '|': goto yy41;
-		case '}': goto yy42;
+		case 'w': goto yy36;
+		case '[': goto yy37;
+		case ']': goto yy38;
+		case '^': goto yy39;
+		case '{': goto yy40;
+		case '|': goto yy42;
+		case '}': goto yy43;
 		default: goto yy2;
 	}
 yy1:
@@ -250,530 +250,636 @@ yy8:
 	yyaccept = 0;
 	yych = *(mar = ++cur);
 	if (yych <= 0x00) goto yy3;
-	goto yy44;
+	goto yy45;
 yy9:
 	yych = *++cur;
-	if (yych <= '^') {
+	if (yych <= 'Z') {
+		if (yych == '-') goto yy48;
 		if (yych <= '@') goto yy3;
-		if (yych <= 'Z') goto yy47;
-		goto yy3;
+		goto yy48;
 	} else {
-		if (yych == '`') goto yy3;
-		if (yych <= 'z') goto yy47;
-		goto yy3;
+		if (yych <= '_') {
+			if (yych <= '^') goto yy3;
+			goto yy48;
+		} else {
+			if (yych <= '`') goto yy3;
+			if (yych <= 'z') goto yy48;
+			goto yy3;
+		}
 	}
 yy10:
 	++cur;
 #line 124 "tokenizer.re"
 	{ RET(TK_DOLLAR) }
-#line 270 "tokenizer.c"
+#line 275 "tokenizer.c"
 yy11:
 	yych = *++cur;
-	if (yych <= 'Z') {
-		if (yych <= '/') goto yy12;
-		if (yych <= '9') goto yy49;
-		if (yych >= 'A') goto yy51;
+	if (yych <= '@') {
+		if (yych <= '-') {
+			if (yych >= '-') goto yy50;
+		} else {
+			if (yych <= '/') goto yy12;
+			if (yych <= '9') goto yy52;
+		}
 	} else {
 		if (yych <= '_') {
-			if (yych >= '_') goto yy51;
+			if (yych <= 'Z') goto yy50;
+			if (yych >= '_') goto yy50;
 		} else {
 			if (yych <= '`') goto yy12;
-			if (yych <= 'z') goto yy51;
+			if (yych <= 'z') goto yy50;
 		}
 	}
 yy12:
 #line 131 "tokenizer.re"
 	{ RET(TK_PERCENT) }
-#line 288 "tokenizer.c"
+#line 297 "tokenizer.c"
 yy13:
 	yych = *++cur;
-	if (yych == '{') goto yy52;
+	if (yych == '{') goto yy53;
 #line 113 "tokenizer.re"
 	{ RET(TK_LPAREN) }
-#line 294 "tokenizer.c"
+#line 303 "tokenizer.c"
 yy14:
 	++cur;
 #line 115 "tokenizer.re"
 	{ RET(TK_RPAREN) }
-#line 299 "tokenizer.c"
+#line 308 "tokenizer.c"
 yy15:
 	++cur;
 #line 133 "tokenizer.re"
 	{ RET(TK_STAR) }
-#line 304 "tokenizer.c"
+#line 313 "tokenizer.c"
 yy16:
 	++cur;
 #line 125 "tokenizer.re"
 	{ RET(TK_PLUS) }
-#line 309 "tokenizer.c"
+#line 318 "tokenizer.c"
 yy17:
 	++cur;
 #line 132 "tokenizer.re"
 	{ RET(TK_COMMA) }
-#line 314 "tokenizer.c"
+#line 323 "tokenizer.c"
 yy18:
-	yych = *++cur;
-	if (yych == '>') goto yy53;
-#line 126 "tokenizer.re"
-	{ RET(TK_MINUS) }
-#line 320 "tokenizer.c"
-yy19:
-	yych = *++cur;
-	if (yych <= '/') goto yy20;
-	if (yych <= '9') goto yy54;
-yy20:
-#line 136 "tokenizer.re"
-	{ RET(TK_DOT) }
-#line 328 "tokenizer.c"
-yy21:
-	yych = *++cur;
-	if (yych == '/') goto yy56;
-#line 130 "tokenizer.re"
-	{ RET(TK_SLASH) }
-#line 334 "tokenizer.c"
-yy22:
 	yyaccept = 1;
 	yych = *(mar = ++cur);
-	if (yybm[0+yych] & 16) goto yy22;
-	if (yych <= 'E') {
-		if (yych == '.') goto yy54;
-		if (yych >= 'D') goto yy57;
-	} else {
-		if (yych <= 'e') {
-			if (yych >= 'd') goto yy57;
+	if (yych <= '>') {
+		if (yych <= '/') {
+			if (yych <= ',') goto yy19;
+			if (yych <= '.') goto yy35;
 		} else {
-			if (yych == 'x') goto yy58;
+			if (yych <= '9') goto yy35;
+			if (yych >= '>') goto yy55;
+		}
+	} else {
+		if (yych <= '^') {
+			if (yych <= '@') goto yy19;
+			if (yych <= 'Z') goto yy35;
+		} else {
+			if (yych == '`') goto yy19;
+			if (yych <= 'z') goto yy35;
 		}
 	}
+yy19:
+#line 126 "tokenizer.re"
+	{ RET(TK_MINUS) }
+#line 347 "tokenizer.c"
+yy20:
+	yych = *++cur;
+	if (yych <= '/') goto yy21;
+	if (yych <= '9') goto yy56;
+yy21:
+#line 136 "tokenizer.re"
+	{ RET(TK_DOT) }
+#line 355 "tokenizer.c"
+yy22:
+	yych = *++cur;
+	if (yych == '/') goto yy58;
+#line 130 "tokenizer.re"
+	{ RET(TK_SLASH) }
+#line 361 "tokenizer.c"
 yy23:
+	yyaccept = 2;
+	yych = *(mar = ++cur);
+	if (yybm[0+yych] & 16) goto yy23;
+	if (yych <= 'E') {
+		if (yych == '.') goto yy56;
+		if (yych >= 'D') goto yy59;
+	} else {
+		if (yych <= 'e') {
+			if (yych >= 'd') goto yy59;
+		} else {
+			if (yych == 'x') goto yy60;
+		}
+	}
+yy24:
 #line 149 "tokenizer.re"
 	{ RET(TK_INTEGER) }
-#line 352 "tokenizer.c"
-yy24:
+#line 379 "tokenizer.c"
+yy25:
 	++cur;
 #line 128 "tokenizer.re"
 	{ RET(TK_COLON) }
-#line 357 "tokenizer.c"
-yy25:
+#line 384 "tokenizer.c"
+yy26:
 	++cur;
 #line 129 "tokenizer.re"
 	{ RET(TK_SEMICOLON) }
-#line 362 "tokenizer.c"
-yy26:
+#line 389 "tokenizer.c"
+yy27:
 	++cur;
 #line 121 "tokenizer.re"
 	{ RET(TK_LANGLE) }
-#line 367 "tokenizer.c"
-yy27:
+#line 394 "tokenizer.c"
+yy28:
 	++cur;
 #line 127 "tokenizer.re"
 	{ RET(TK_EQUAL) }
-#line 372 "tokenizer.c"
-yy28:
+#line 399 "tokenizer.c"
+yy29:
 	++cur;
 #line 122 "tokenizer.re"
 	{ RET(TK_RANGLE) }
-#line 377 "tokenizer.c"
-yy29:
-	yych = *++cur;
-	if (yych <= '^') {
-		if (yych <= '@') goto yy30;
-		if (yych <= 'Z') goto yy60;
-	} else {
-		if (yych == '`') goto yy30;
-		if (yych <= 'z') goto yy60;
-	}
+#line 404 "tokenizer.c"
 yy30:
-#line 135 "tokenizer.re"
-	{ RET(TK_AT) }
-#line 390 "tokenizer.c"
-yy31:
-	yyaccept = 2;
-	yych = *(mar = ++cur);
-	if (yych <= 'L') {
-		if (yych == 'B') goto yy63;
-		if (yych <= 'K') goto yy34;
-		goto yy64;
+	yych = *++cur;
+	if (yych <= 'Z') {
+		if (yych == '-') goto yy62;
+		if (yych >= 'A') goto yy62;
 	} else {
-		if (yych <= 'b') {
-			if (yych <= 'a') goto yy34;
-			goto yy63;
+		if (yych <= '_') {
+			if (yych >= '_') goto yy62;
 		} else {
-			if (yych == 'l') goto yy64;
-			goto yy34;
+			if (yych <= '`') goto yy31;
+			if (yych <= 'z') goto yy62;
 		}
 	}
+yy31:
+#line 135 "tokenizer.re"
+	{ RET(TK_AT) }
+#line 421 "tokenizer.c"
 yy32:
+	yyaccept = 3;
+	yych = *(mar = ++cur);
+	if (yych <= 'L') {
+		if (yych == 'B') goto yy64;
+		if (yych <= 'K') goto yy35;
+		goto yy65;
+	} else {
+		if (yych <= 'b') {
+			if (yych <= 'a') goto yy35;
+			goto yy64;
+		} else {
+			if (yych == 'l') goto yy65;
+			goto yy35;
+		}
+	}
+yy33:
 #line 145 "tokenizer.re"
 	{ RET(TK_NAME) }
-#line 410 "tokenizer.c"
-yy33:
-	yyaccept = 2;
-	yych = *(mar = ++cur);
+#line 441 "tokenizer.c"
 yy34:
-	if (yybm[0+yych] & 32) goto yy33;
-	if (yych == '.') goto yy62;
-	goto yy32;
-yy35:
-	yyaccept = 2;
+	yyaccept = 3;
 	yych = *(mar = ++cur);
-	if (yych == 'R') goto yy65;
-	if (yych == 'r') goto yy65;
-	goto yy34;
+yy35:
+	if (yybm[0+yych] & 32) goto yy34;
+	if (yych <= ',') goto yy33;
+	if (yych <= '.') goto yy54;
+	goto yy33;
 yy36:
+	yyaccept = 3;
+	yych = *(mar = ++cur);
+	if (yych == 'R') goto yy66;
+	if (yych == 'r') goto yy66;
+	goto yy35;
+yy37:
 	++cur;
 #line 116 "tokenizer.re"
 	{ RET(TK_LBRACKET) }
-#line 428 "tokenizer.c"
-yy37:
+#line 460 "tokenizer.c"
+yy38:
 	++cur;
 #line 117 "tokenizer.re"
 	{ RET(TK_RBRACKET) }
-#line 433 "tokenizer.c"
-yy38:
-	yych = *++cur;
-	if (yych <= '^') {
-		if (yych <= '@') goto yy3;
-		if (yych <= 'Z') goto yy66;
-		goto yy3;
-	} else {
-		if (yych == '`') goto yy3;
-		if (yych <= 'z') goto yy66;
-		goto yy3;
-	}
+#line 465 "tokenizer.c"
 yy39:
-	yyaccept = 3;
+	yych = *++cur;
+	if (yych <= 'Z') {
+		if (yych == '-') goto yy67;
+		if (yych <= '@') goto yy3;
+		goto yy67;
+	} else {
+		if (yych <= '_') {
+			if (yych <= '^') goto yy3;
+			goto yy67;
+		} else {
+			if (yych <= '`') goto yy3;
+			if (yych <= 'z') goto yy67;
+			goto yy3;
+		}
+	}
+yy40:
+	yyaccept = 4;
 	yych = *(mar = ++cur);
 	if (yych == '\n') {
 		ctxmar = cur;
-		goto yy68;
+		goto yy69;
 	}
 	if (yych == '\r') {
 		ctxmar = cur;
-		goto yy69;
+		goto yy70;
 	}
-yy40:
+yy41:
 #line 118 "tokenizer.re"
 	{ RET(TK_LBRACE) }
-#line 459 "tokenizer.c"
-yy41:
+#line 496 "tokenizer.c"
+yy42:
 	++cur;
 #line 134 "tokenizer.re"
 	{ RET(TK_VBAR) }
-#line 464 "tokenizer.c"
-yy42:
+#line 501 "tokenizer.c"
+yy43:
 	++cur;
 #line 120 "tokenizer.re"
 	{ RET(TK_RBRACE) }
-#line 469 "tokenizer.c"
-yy43:
-	yych = *++cur;
+#line 506 "tokenizer.c"
 yy44:
-	if (yybm[0+yych] & 64) goto yy43;
-	if (yych >= 0x01) goto yy46;
+	yych = *++cur;
 yy45:
+	if (yybm[0+yych] & 64) goto yy44;
+	if (yych >= 0x01) goto yy47;
+yy46:
 	cur = mar;
 	if (yyaccept <= 4) {
 		if (yyaccept <= 2) {
 			if (yyaccept <= 1) {
 				if (yyaccept == 0) goto yy3;
-				else goto yy23;
+				else goto yy19;
 			} else {
-				goto yy32;
+				goto yy24;
 			}
 		} else {
-			if (yyaccept == 3) goto yy40;
-			else goto yy55;
+			if (yyaccept == 3) goto yy33;
+			else goto yy41;
 		}
 	} else {
-		if (yyaccept <= 6) {
-			if (yyaccept == 5) goto yy59;
-			else goto yy78;
+		if (yyaccept <= 7) {
+			if (yyaccept <= 6) {
+				if (yyaccept == 5) goto yy57;
+				else goto yy61;
+			} else {
+				goto yy79;
+			}
 		} else {
-			if (yyaccept == 7) goto yy84;
-			else goto yy88;
+			if (yyaccept == 8) goto yy85;
+			else goto yy89;
 		}
 	}
-yy46:
+yy47:
 	++cur;
 #line 152 "tokenizer.re"
 	{ RET(TK_STRING) }
-#line 502 "tokenizer.c"
-yy47:
+#line 543 "tokenizer.c"
+yy48:
 	yych = *++cur;
-	if (yych <= 'Z') {
-		if (yych <= '/') goto yy48;
-		if (yych <= '9') goto yy47;
-		if (yych >= 'A') goto yy47;
+	if (yych <= '@') {
+		if (yych <= '-') {
+			if (yych >= '-') goto yy48;
+		} else {
+			if (yych <= '/') goto yy49;
+			if (yych <= '9') goto yy48;
+		}
 	} else {
 		if (yych <= '_') {
-			if (yych >= '_') goto yy47;
+			if (yych <= 'Z') goto yy48;
+			if (yych >= '_') goto yy48;
 		} else {
-			if (yych <= '`') goto yy48;
-			if (yych <= 'z') goto yy47;
+			if (yych <= '`') goto yy49;
+			if (yych <= 'z') goto yy48;
 		}
 	}
-yy48:
+yy49:
 #line 142 "tokenizer.re"
 	{ RET(TK_HASH_NAME); }
-#line 520 "tokenizer.c"
-yy49:
-	yych = *++cur;
-	if (yych <= '/') goto yy50;
-	if (yych <= '9') goto yy49;
+#line 565 "tokenizer.c"
 yy50:
-#line 147 "tokenizer.re"
-	{ RET(TK_REGISTER) }
-#line 528 "tokenizer.c"
-yy51:
 	yych = *++cur;
-	if (yych <= 'Z') {
-		if (yych <= '/') goto yy50;
-		if (yych <= '9') goto yy51;
-		if (yych <= '@') goto yy50;
-		goto yy51;
+	if (yych <= '@') {
+		if (yych <= '-') {
+			if (yych >= '-') goto yy50;
+		} else {
+			if (yych <= '/') goto yy51;
+			if (yych <= '9') goto yy50;
+		}
 	} else {
 		if (yych <= '_') {
-			if (yych <= '^') goto yy50;
-			goto yy51;
+			if (yych <= 'Z') goto yy50;
+			if (yych >= '_') goto yy50;
 		} else {
-			if (yych <= '`') goto yy50;
-			if (yych <= 'z') goto yy51;
-			goto yy50;
+			if (yych <= '`') goto yy51;
+			if (yych <= 'z') goto yy50;
 		}
 	}
+yy51:
+#line 147 "tokenizer.re"
+	{ RET(TK_REGISTER) }
+#line 587 "tokenizer.c"
 yy52:
+	yych = *++cur;
+	if (yych <= '/') goto yy51;
+	if (yych <= '9') goto yy52;
+	goto yy51;
+yy53:
 	++cur;
 	cur -= 1;
 #line 114 "tokenizer.re"
 	{ RET(TK_LPAREN_BRACE) }
-#line 551 "tokenizer.c"
-yy53:
+#line 598 "tokenizer.c"
+yy54:
+	yych = *++cur;
+	if (yych <= 'Z') {
+		if (yych == '-') goto yy71;
+		if (yych <= '@') goto yy46;
+		goto yy71;
+	} else {
+		if (yych <= '_') {
+			if (yych <= '^') goto yy46;
+			goto yy71;
+		} else {
+			if (yych <= '`') goto yy46;
+			if (yych <= 'z') goto yy71;
+			goto yy46;
+		}
+	}
+yy55:
 	++cur;
 #line 140 "tokenizer.re"
 	{ RET(TK_ARROW) }
-#line 556 "tokenizer.c"
-yy54:
-	yyaccept = 4;
-	yych = *(mar = ++cur);
-	if (yych <= 'C') {
-		if (yych <= '/') goto yy55;
-		if (yych <= '9') goto yy54;
-	} else {
-		if (yych <= 'E') goto yy57;
-		if (yych <= 'c') goto yy55;
-		if (yych <= 'e') goto yy57;
-	}
-yy55:
-#line 151 "tokenizer.re"
-	{ RET(TK_REAL) }
-#line 571 "tokenizer.c"
+#line 619 "tokenizer.c"
 yy56:
-	yych = *++cur;
-	if (yybm[0+yych] & 128) goto yy56;
-#line 139 "tokenizer.re"
-	{ RET(TK_COMMENT) }
-#line 577 "tokenizer.c"
-yy57:
-	yych = *++cur;
-	if (yych <= ',') {
-		if (yych == '+') goto yy70;
-		goto yy45;
-	} else {
-		if (yych <= '-') goto yy70;
-		if (yych <= '/') goto yy45;
-		if (yych <= '9') goto yy71;
-		goto yy45;
-	}
-yy58:
 	yyaccept = 5;
 	yych = *(mar = ++cur);
-	if (yych <= '/') goto yy59;
-	if (yych <= '9') goto yy72;
-	if (yych == '?') goto yy73;
+	if (yych <= 'C') {
+		if (yych <= '/') goto yy57;
+		if (yych <= '9') goto yy56;
+	} else {
+		if (yych <= 'E') goto yy59;
+		if (yych <= 'c') goto yy57;
+		if (yych <= 'e') goto yy59;
+	}
+yy57:
+#line 151 "tokenizer.re"
+	{ RET(TK_REAL) }
+#line 634 "tokenizer.c"
+yy58:
+	yych = *++cur;
+	if (yybm[0+yych] & 128) goto yy58;
+#line 139 "tokenizer.re"
+	{ RET(TK_COMMENT) }
+#line 640 "tokenizer.c"
 yy59:
+	yych = *++cur;
+	if (yych <= ',') {
+		if (yych == '+') goto yy73;
+		goto yy46;
+	} else {
+		if (yych <= '-') goto yy73;
+		if (yych <= '/') goto yy46;
+		if (yych <= '9') goto yy74;
+		goto yy46;
+	}
+yy60:
+	yyaccept = 6;
+	yych = *(mar = ++cur);
+	if (yych <= '/') goto yy61;
+	if (yych <= '9') goto yy75;
+	if (yych == '?') goto yy76;
+yy61:
 #line 150 "tokenizer.re"
 	{ RET(TK_TYPE_DIM) }
-#line 598 "tokenizer.c"
-yy60:
-	yych = *++cur;
-	if (yych <= 'Z') {
-		if (yych <= '/') goto yy61;
-		if (yych <= '9') goto yy60;
-		if (yych >= 'A') goto yy60;
-	} else {
-		if (yych <= '_') {
-			if (yych >= '_') goto yy60;
-		} else {
-			if (yych <= '`') goto yy61;
-			if (yych <= 'z') goto yy60;
-		}
-	}
-yy61:
-#line 148 "tokenizer.re"
-	{ RET(TK_FUNCTION_NAME) }
-#line 616 "tokenizer.c"
+#line 661 "tokenizer.c"
 yy62:
 	yych = *++cur;
-	if (yych <= '^') {
-		if (yych <= '@') goto yy45;
-		if (yych <= 'Z') goto yy74;
-		goto yy45;
-	} else {
-		if (yych == '`') goto yy45;
-		if (yych <= 'z') goto yy74;
-		goto yy45;
-	}
-yy63:
-	yyaccept = 2;
-	yych = *(mar = ++cur);
-	if (yych == 'S') goto yy76;
-	if (yych == 's') goto yy76;
-	goto yy34;
-yy64:
-	yyaccept = 2;
-	yych = *(mar = ++cur);
-	if (yych == 'L') goto yy77;
-	if (yych == 'l') goto yy77;
-	goto yy34;
-yy65:
-	yyaccept = 2;
-	yych = *(mar = ++cur);
-	if (yych == 'I') goto yy79;
-	if (yych == 'i') goto yy79;
-	goto yy34;
-yy66:
-	yych = *++cur;
-	if (yych <= 'Z') {
-		if (yych <= '/') goto yy67;
-		if (yych <= '9') goto yy66;
-		if (yych >= 'A') goto yy66;
+	if (yych <= '@') {
+		if (yych <= '-') {
+			if (yych >= '-') goto yy62;
+		} else {
+			if (yych <= '/') goto yy63;
+			if (yych <= '9') goto yy62;
+		}
 	} else {
 		if (yych <= '_') {
-			if (yych >= '_') goto yy66;
+			if (yych <= 'Z') goto yy62;
+			if (yych >= '_') goto yy62;
 		} else {
-			if (yych <= '`') goto yy67;
-			if (yych <= 'z') goto yy66;
+			if (yych <= '`') goto yy63;
+			if (yych <= 'z') goto yy62;
 		}
 	}
+yy63:
+#line 148 "tokenizer.re"
+	{ RET(TK_FUNCTION_NAME) }
+#line 683 "tokenizer.c"
+yy64:
+	yyaccept = 3;
+	yych = *(mar = ++cur);
+	if (yych == 'S') goto yy77;
+	if (yych == 's') goto yy77;
+	goto yy35;
+yy65:
+	yyaccept = 3;
+	yych = *(mar = ++cur);
+	if (yych == 'L') goto yy78;
+	if (yych == 'l') goto yy78;
+	goto yy35;
+yy66:
+	yyaccept = 3;
+	yych = *(mar = ++cur);
+	if (yych == 'I') goto yy80;
+	if (yych == 'i') goto yy80;
+	goto yy35;
 yy67:
+	yych = *++cur;
+	if (yych <= '@') {
+		if (yych <= '-') {
+			if (yych >= '-') goto yy67;
+		} else {
+			if (yych <= '/') goto yy68;
+			if (yych <= '9') goto yy67;
+		}
+	} else {
+		if (yych <= '_') {
+			if (yych <= 'Z') goto yy67;
+			if (yych >= '_') goto yy67;
+		} else {
+			if (yych <= '`') goto yy68;
+			if (yych <= 'z') goto yy67;
+		}
+	}
+yy68:
 #line 143 "tokenizer.re"
 	{ RET(TK_CARET_NAME); }
-#line 663 "tokenizer.c"
-yy68:
+#line 723 "tokenizer.c"
+yy69:
 	++cur;
 	cur = ctxmar;
 #line 119 "tokenizer.re"
 	{ RET(TK_LBRACE_END) }
-#line 669 "tokenizer.c"
-yy69:
-	yych = *++cur;
-	if (yych == '\n') goto yy68;
-	goto yy45;
+#line 729 "tokenizer.c"
 yy70:
 	yych = *++cur;
-	if (yych <= '/') goto yy45;
-	if (yych >= ':') goto yy45;
+	if (yych == '\n') goto yy69;
+	goto yy46;
 yy71:
 	yych = *++cur;
-	if (yych <= '/') goto yy55;
-	if (yych <= '9') goto yy71;
-	goto yy55;
-yy72:
-	yych = *++cur;
-	if (yych <= '/') goto yy45;
-	if (yych <= '9') goto yy72;
-	if (yych == 'x') goto yy58;
-	goto yy45;
-yy73:
-	yych = *++cur;
-	if (yych == 'x') goto yy58;
-	goto yy45;
-yy74:
-	yych = *++cur;
-	if (yych <= 'Z') {
-		if (yych <= '/') goto yy75;
-		if (yych <= '9') goto yy74;
-		if (yych >= 'A') goto yy74;
+	if (yych <= '@') {
+		if (yych <= '-') {
+			if (yych >= '-') goto yy71;
+		} else {
+			if (yych <= '/') goto yy72;
+			if (yych <= '9') goto yy71;
+		}
 	} else {
 		if (yych <= '_') {
-			if (yych >= '_') goto yy74;
+			if (yych <= 'Z') goto yy71;
+			if (yych >= '_') goto yy71;
 		} else {
-			if (yych <= '`') goto yy75;
-			if (yych <= 'z') goto yy74;
+			if (yych <= '`') goto yy72;
+			if (yych <= 'z') goto yy71;
 		}
 	}
-yy75:
+yy72:
 #line 146 "tokenizer.re"
 	{ RET(TK_NAME_DOT_NAME) }
-#line 710 "tokenizer.c"
+#line 755 "tokenizer.c"
+yy73:
+	yych = *++cur;
+	if (yych <= '/') goto yy46;
+	if (yych >= ':') goto yy46;
+yy74:
+	yych = *++cur;
+	if (yych <= '/') goto yy57;
+	if (yych <= '9') goto yy74;
+	goto yy57;
+yy75:
+	yych = *++cur;
+	if (yych <= '/') goto yy46;
+	if (yych <= '9') goto yy75;
+	if (yych == 'x') goto yy60;
+	goto yy46;
 yy76:
-	yyaccept = 2;
-	yych = *(mar = ++cur);
-	if (yych == 'T') goto yy80;
-	if (yych == 't') goto yy80;
-	goto yy34;
+	yych = *++cur;
+	if (yych == 'x') goto yy60;
+	goto yy46;
 yy77:
-	yyaccept = 6;
-	yych = *(mar = ++cur);
-	if (yybm[0+yych] & 32) goto yy33;
-	if (yych == '.') goto yy62;
-yy78:
-#line 109 "tokenizer.re"
-	{ RET(KW_ALL) }
-#line 725 "tokenizer.c"
-yy79:
-	yyaccept = 2;
+	yyaccept = 3;
 	yych = *(mar = ++cur);
 	if (yych == 'T') goto yy81;
 	if (yych == 't') goto yy81;
-	goto yy34;
-yy80:
-	yyaccept = 2;
-	yych = *(mar = ++cur);
-	if (yych == 'R') goto yy82;
-	if (yych == 'r') goto yy82;
-	goto yy34;
-yy81:
-	yyaccept = 2;
-	yych = *(mar = ++cur);
-	if (yych == 'E') goto yy83;
-	if (yych == 'e') goto yy83;
-	goto yy34;
-yy82:
-	yyaccept = 2;
-	yych = *(mar = ++cur);
-	if (yych == 'A') goto yy85;
-	if (yych == 'a') goto yy85;
-	goto yy34;
-yy83:
+	goto yy35;
+yy78:
 	yyaccept = 7;
 	yych = *(mar = ++cur);
-	if (yybm[0+yych] & 32) goto yy33;
-	if (yych == '.') goto yy62;
+	if (yych <= '@') {
+		if (yych <= '.') {
+			if (yych >= '-') goto yy35;
+		} else {
+			if (yych <= '/') goto yy79;
+			if (yych <= '9') goto yy35;
+		}
+	} else {
+		if (yych <= '_') {
+			if (yych <= 'Z') goto yy35;
+			if (yych >= '_') goto yy35;
+		} else {
+			if (yych <= '`') goto yy79;
+			if (yych <= 'z') goto yy35;
+		}
+	}
+yy79:
+#line 109 "tokenizer.re"
+	{ RET(KW_ALL) }
+#line 803 "tokenizer.c"
+yy80:
+	yyaccept = 3;
+	yych = *(mar = ++cur);
+	if (yych == 'T') goto yy82;
+	if (yych == 't') goto yy82;
+	goto yy35;
+yy81:
+	yyaccept = 3;
+	yych = *(mar = ++cur);
+	if (yych == 'R') goto yy83;
+	if (yych == 'r') goto yy83;
+	goto yy35;
+yy82:
+	yyaccept = 3;
+	yych = *(mar = ++cur);
+	if (yych == 'E') goto yy84;
+	if (yych == 'e') goto yy84;
+	goto yy35;
+yy83:
+	yyaccept = 3;
+	yych = *(mar = ++cur);
+	if (yych == 'A') goto yy86;
+	if (yych == 'a') goto yy86;
+	goto yy35;
 yy84:
-#line 110 "tokenizer.re"
-	{ RET(KW_WRITE) }
-#line 758 "tokenizer.c"
-yy85:
-	yyaccept = 2;
-	yych = *(mar = ++cur);
-	if (yych == 'C') goto yy86;
-	if (yych != 'c') goto yy34;
-yy86:
-	yyaccept = 2;
-	yych = *(mar = ++cur);
-	if (yych == 'T') goto yy87;
-	if (yych != 't') goto yy34;
-yy87:
 	yyaccept = 8;
 	yych = *(mar = ++cur);
-	if (yybm[0+yych] & 32) goto yy33;
-	if (yych == '.') goto yy62;
+	if (yych <= '@') {
+		if (yych <= '.') {
+			if (yych >= '-') goto yy35;
+		} else {
+			if (yych <= '/') goto yy85;
+			if (yych <= '9') goto yy35;
+		}
+	} else {
+		if (yych <= '_') {
+			if (yych <= 'Z') goto yy35;
+			if (yych >= '_') goto yy35;
+		} else {
+			if (yych <= '`') goto yy85;
+			if (yych <= 'z') goto yy35;
+		}
+	}
+yy85:
+#line 110 "tokenizer.re"
+	{ RET(KW_WRITE) }
+#line 850 "tokenizer.c"
+yy86:
+	yyaccept = 3;
+	yych = *(mar = ++cur);
+	if (yych == 'C') goto yy87;
+	if (yych != 'c') goto yy35;
+yy87:
+	yyaccept = 3;
+	yych = *(mar = ++cur);
+	if (yych == 'T') goto yy88;
+	if (yych != 't') goto yy35;
 yy88:
+	yyaccept = 9;
+	yych = *(mar = ++cur);
+	if (yych <= '@') {
+		if (yych <= '.') {
+			if (yych >= '-') goto yy35;
+		} else {
+			if (yych <= '/') goto yy89;
+			if (yych <= '9') goto yy35;
+		}
+	} else {
+		if (yych <= '_') {
+			if (yych <= 'Z') goto yy35;
+			if (yych >= '_') goto yy35;
+		} else {
+			if (yych <= '`') goto yy89;
+			if (yych <= 'z') goto yy35;
+		}
+	}
+yy89:
 #line 108 "tokenizer.re"
 	{ RET(KW_ABSTRACT) }
-#line 777 "tokenizer.c"
+#line 883 "tokenizer.c"
 }
 #line 153 "tokenizer.re"
 
