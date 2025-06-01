@@ -39,8 +39,7 @@ typedef struct ValueRef {
 
 // TODO: make all ** just *, since the type is known
 
-typedef struct Operation Operation;
-struct Operation {
+typedef struct Operation {
     string opname;
     Type **result_types;
     uint64_t n_result_types;
@@ -48,13 +47,14 @@ struct Operation {
     uint64_t n_operands;
     Region **regions;
     uint64_t n_regions;
-};
+} Operation;
+typedef Operation* OperationPtr;
+DEFINE_VECTOR_FOR_TYPE(OperationPtr, VecOperation)
 
-typedef struct Block Block;
-struct Block {
+typedef struct Block {
     Operation **operations;
     uint64_t n_operations;
-};
+} Block;
 
 struct Region {
     Block **blocks;

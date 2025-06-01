@@ -158,11 +158,11 @@ Block* parse_block(Parser *parser) {
         }
         parser_expect(parser, TK_NEWLINE);
     }
-    vector_i64 operations;
-    vector_i64_reserve(parser->arena, &operations, 16);
+    VecOperation operations;
+    VecOperation_reserve(parser->arena, &operations, 16);
     while (! (parser_peek(parser, TK_RBRACE) || parser_peek(parser, TK_CARET_NAME))) {
         Operation *op = parse_operation(parser);
-        vector_i64_push_back(parser->arena, &operations, (int64_t)(op));
+        VecOperation_push_back(parser->arena, &operations, op);
         parser_expect(parser, TK_NEWLINE);
 
         // Skip empty lines
@@ -172,7 +172,7 @@ Block* parse_block(Parser *parser) {
     }
 
     Block *block = arena_alloc(parser->arena, Block);
-    block->operations = (Operation **)operations.data;
+    block->operations = operations.data;
     block->n_operations = operations.size;
 
     return block;
