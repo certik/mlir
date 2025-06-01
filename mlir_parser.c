@@ -389,6 +389,12 @@ Operation* parse_operation(Parser *parser) {
                 parser_next_token(parser);
             }
         }
+        if (parser_peek(parser, TK_ARROW)) {
+            parser_expect(parser, TK_ARROW);
+            while (!parser_peek(parser, TK_NEWLINE)) {
+                parser_next_token(parser);
+            }
+        }
         if (parser_peek(parser, TK_NAME)) {
             if (str_eq(parser_token_str(parser), str_lit("loc"))) {
                 parse_loc(parser);
