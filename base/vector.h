@@ -41,12 +41,11 @@
     } NAME; \
     \
     /* Reserves memory for at least 'new_max_capacity' elements. */ \
-    /* Resets size to 0. Old data is not preserved (typical for arena-based reserve). */ \
+    /* Resets size to 0. Old data is not preserved. */ \
     static inline void _GV_CONCAT3(NAME, _, reserve)(Arena *arena, NAME *vec, size_t new_max_capacity) { \
         vec->size = 0; \
         if (new_max_capacity <= 0) new_max_capacity = 1; /* Minimum capacity of 1 */ \
-        TYPE* new_data = arena_alloc_array(arena, TYPE, new_max_capacity); \
-        vec->data = new_data; \
+        vec->data = arena_alloc_array(arena, TYPE, new_max_capacity); \
         vec->max = new_max_capacity; \
         IF_GENERIC_VECTOR_WITH_BASE_ASSERT(vec->reserve_called_flag = GV_INTERNAL_RESERVE_CALLED_MAGIC;) \
     } \
@@ -55,19 +54,15 @@
     static inline void _GV_CONCAT3(NAME, _, push_back)(Arena *arena, NAME *vec, TYPE value) { \
         IF_GENERIC_VECTOR_WITH_BASE_ASSERT( \
             assert(vec->reserve_called_flag == GV_INTERNAL_RESERVE_CALLED_MAGIC && \
-                   "Vector reserve() not called or state corrupted. Call init() then reserve() first, or ensure vector is already reserved."); \
+                   "Vector reserve() not called before push_back()."); \
         ) \
-        \
         if (vec->size == vec->max) { \
-            size_t new_max_capacity; \
-            new_max_capacity = 2 * vec->max; /* Double the current capacity */ \
+            size_t new_max_capacity = 2 * vec->max; \
             TYPE* new_data = arena_alloc_array(arena, TYPE, new_max_capacity); \
             memcpy(new_data, vec->data, sizeof(TYPE) * vec->size); \
             vec->data = new_data; \
             vec->max = new_max_capacity; \
         } \
-        \
-        /* Structs are copied by assignment. For large structs, this is a member-wise copy. */ \
         vec->data[vec->size] = value; \
         vec->size++; \
     }
