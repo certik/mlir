@@ -329,8 +329,16 @@ Operation* parse_operation(Parser *parser) {
     */
 
         // Parse regions (if any), for now we assume 0 or 1 regions
-        while (!(parser_peek(parser, TK_LBRACE_END)
-                    || parser_peek(parser, TK_NEWLINE))) {
+        while (!(
+                parser_peek(parser, TK_LBRACE_END)
+                || parser_peek(parser, TK_NEWLINE)
+                || parser_peek(parser, TK_LPAREN_BRACE)
+                )) {
+            parser_next_token(parser);
+        }
+        bool lparen_brace = false;
+        if (parser_peek(parser, TK_LPAREN_BRACE)) {
+            lparen_brace = true;
             parser_next_token(parser);
         }
         if (parser_peek(parser, TK_LBRACE_END)) {
@@ -341,6 +349,12 @@ Operation* parse_operation(Parser *parser) {
             regions[0] = region;
             op->regions = regions;
             op->n_regions = 1;
+        }
+        if (lparen_brace) {
+            parser_expect(parser, TK_RPAREN);
+            while (!parser_peek(parser, TK_NEWLINE)) {
+                parser_next_token(parser);
+            }
         }
         if (parser_peek(parser, TK_NAME)) {
             if (str_eq(parser_token_str(parser), str_lit("loc"))) {

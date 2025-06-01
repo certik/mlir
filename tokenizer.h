@@ -23,6 +23,7 @@ extern "C" {
     X(TK_LBRACE) \
     X(TK_LBRACE_END) \
     X(TK_RBRACE) \
+    X(TK_LPAREN_BRACE) \
     X(TK_LANGLE) \
     X(TK_RANGLE) \
     X(TK_EXCLAMATION) \

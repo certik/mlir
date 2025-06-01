@@ -111,6 +111,7 @@ void tokenizer_get_next_token(const unsigned char *string,
 
             // Single character symbols
             "(" { RET(TK_LPAREN) }
+            "(" / "{" { RET(TK_LPAREN_BRACE) }
             ")" { RET(TK_RPAREN) }
             "[" { RET(TK_LBRACKET) }
             "]" { RET(TK_RBRACKET) }
