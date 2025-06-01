@@ -58,6 +58,8 @@ typedef struct Block {
     Operation **operations;
     uint64_t n_operations;
 } Block;
+typedef Block* BlockPtr;
+DEFINE_VECTOR_FOR_TYPE(BlockPtr, VecBlock)
 
 struct Region {
     Block **blocks;

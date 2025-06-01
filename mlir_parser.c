@@ -182,16 +182,16 @@ Block* parse_block(Parser *parser) {
 Region* parse_region(Parser *parser) {
     parser_expect(parser, TK_LBRACE_END);
     parser_expect(parser, TK_NEWLINE);
-    vector_i64 blocks;
-    vector_i64_reserve(parser->arena, &blocks, 8);
+    VecBlock blocks;
+    VecBlock_reserve(parser->arena, &blocks, 8);
     while (!parser_peek(parser, TK_RBRACE)) {
         Block *block = parse_block(parser);
-        vector_i64_push_back(parser->arena, &blocks, (int64_t)(block));
+        VecBlock_push_back(parser->arena, &blocks, block);
     }
     parser_expect(parser, TK_RBRACE);
 
     Region *region = arena_alloc(parser->arena, Region);
-    region->blocks = (Block **)blocks.data;
+    region->blocks = blocks.data;
     region->n_blocks = blocks.size;
 
     return region;
