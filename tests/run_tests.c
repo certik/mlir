@@ -112,10 +112,58 @@ void test_hashtable2() {
     arena_free(arena);
 }
 
+
+DEFINE_VECTOR_FOR_TYPE(int, VecInt)
+
+void test_vector1() {
+    Arena* arena = arena_create(1024*10);
+
+    VecInt v;
+    VecInt_reserve(arena, &v, 1);
+    assert(v.size == 0);
+    VecInt_push_back(arena, &v, 1);
+    assert(v.size == 1);
+    VecInt_push_back(arena, &v, 2);
+    assert(v.size == 2);
+    VecInt_push_back(arena, &v, 3);
+    assert(v.size == 3);
+    assert(v.data[0] == 1);
+    assert(v.data[1] == 2);
+    assert(v.data[2] == 3);
+
+    arena_free(arena);
+}
+
+DEFINE_VECTOR_FOR_TYPE(int*, VecIntP)
+
+void test_vector2() {
+    Arena* arena = arena_create(1024*10);
+
+    VecIntP v;
+    int i=1, j=2, k=3;
+    VecIntP_reserve(arena, &v, 1);
+    assert(v.size == 0);
+    VecIntP_push_back(arena, &v, &i);
+    assert(v.size == 1);
+    VecIntP_push_back(arena, &v, &j);
+    assert(v.size == 2);
+    VecIntP_push_back(arena, &v, &k);
+    assert(v.size == 3);
+    assert(*v.data[0] == 1);
+    assert(*v.data[1] == 2);
+    assert(*v.data[2] == 3);
+    k = 4;
+    assert(*v.data[2] == 4);
+
+    arena_free(arena);
+}
+
 int main() {
     test_format();
     test_io();
     test_hashtable1();
     test_hashtable2();
+    test_vector1();
+    test_vector2();
     return 0;
 }
