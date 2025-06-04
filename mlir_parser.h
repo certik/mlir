@@ -51,15 +51,13 @@ typedef struct Operation {
     Region **regions;
     uint64_t n_regions;
 } Operation;
-typedef Operation* OperationPtr;
-DEFINE_VECTOR_FOR_TYPE(OperationPtr, VecOperation)
+DEFINE_VECTOR_FOR_TYPE(Operation*, VecOperation)
 
 typedef struct Block {
     Operation **operations;
     uint64_t n_operations;
 } Block;
-typedef Block* BlockPtr;
-DEFINE_VECTOR_FOR_TYPE(BlockPtr, VecBlock)
+DEFINE_VECTOR_FOR_TYPE(Block*, VecBlock)
 
 struct Region {
     Block **blocks;
