@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 
 // ============================================================================
 // Type System - Using enums for maximum performance
@@ -405,15 +406,79 @@ Operation* create_unregistered_operation(const char *name,
 }
 
 // ============================================================================
+// String Buffer for Printer
+// ============================================================================
+
+typedef struct {
+    char *buffer;
+    size_t size;
+    size_t capacity;
+} StringBuffer;
+
+static void buffer_init(StringBuffer *buf, size_t initial_capacity) {
+    buf->buffer = malloc(initial_capacity);
+    buf->buffer[0] = '\0';
+    buf->size = 0;
+    buf->capacity = initial_capacity;
+}
+
+static void buffer_append(StringBuffer *buf, const char *str) {
+    size_t len = strlen(str);
+    if (buf->size + len + 1 > buf->capacity) {
+        buf->capacity = (buf->size + len + 1) * 2;
+        buf->buffer = realloc(buf->buffer, buf->capacity);
+    }
+    strcpy(buf->buffer + buf->size, str);
+    buf->size += len;
+}
+
+static void buffer_printf(StringBuffer *buf, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+
+    // Try with current capacity
+    int needed = vsnprintf(buf->buffer + buf->size, buf->capacity - buf->size, format, args);
+    va_end(args);
+
+    if (needed >= (int)(buf->capacity - buf->size)) {
+        // Need more space
+        buf->capacity = buf->size + needed + 1;
+        buf->buffer = realloc(buf->buffer, buf->capacity);
+
+        va_start(args, format);
+        vsnprintf(buf->buffer + buf->size, buf->capacity - buf->size, format, args);
+        va_end(args);
+    }
+
+    buf->size += needed;
+}
+
+static void buffer_free(StringBuffer *buf) {
+    free(buf->buffer);
+    buf->buffer = NULL;
+    buf->size = 0;
+    buf->capacity = 0;
+}
+
+// ============================================================================
 // Example Usage - Operation Printer
 // ============================================================================
 
-// Helper to print value names
+// Helper to print value names to stdout
 static void print_value(Value *val) {
     if (val->defining_op) {
         printf("%%%d", val->ssa_number);
     } else {
         printf("%%arg%d", val->ssa_number);
+    }
+}
+
+// Helper to print value names to string buffer
+static void buffer_print_value(StringBuffer *buf, Value *val) {
+    if (val->defining_op) {
+        buffer_printf(buf, "%%%d", val->ssa_number);
+    } else {
+        buffer_printf(buf, "%%arg%d", val->ssa_number);
     }
 }
 
@@ -450,6 +515,42 @@ static void print_type(Type *type) {
             break;
         default:
             printf("<unknown>");
+    }
+}
+
+// Helper to print types to string buffer
+static void buffer_print_type(StringBuffer *buf, Type *type) {
+    if (!type) {
+        buffer_append(buf, "<null>");
+        return;
+    }
+
+    switch (type->kind) {
+        case TYPE_KIND_INTEGER:
+            buffer_printf(buf, "i%d", type->data.integer.width);
+            break;
+        case TYPE_KIND_FLOAT:
+            buffer_printf(buf, "f%d", type->data.floating.width);
+            break;
+        case TYPE_KIND_INDEX:
+            buffer_append(buf, "index");
+            break;
+        case TYPE_KIND_MEMREF:
+            buffer_append(buf, "memref<");
+            for (uint32_t i = 0; i < type->data.shaped.rank; i++) {
+                if (type->data.shaped.shape[i] < 0) {
+                    buffer_append(buf, "?");
+                } else {
+                    buffer_printf(buf, "%lld", (long long)type->data.shaped.shape[i]);
+                }
+                if (i < type->data.shaped.rank - 1) buffer_append(buf, "x");
+            }
+            buffer_append(buf, "x");
+            buffer_print_type(buf, type->data.shaped.element_type);
+            buffer_append(buf, ">");
+            break;
+        default:
+            buffer_append(buf, "<unknown>");
     }
 }
 
@@ -657,7 +758,124 @@ static void register_all_printers(void) {
     // Register more as needed...
 }
 
-// Print a complete function
+// String-based operation printer
+static void buffer_print_operation(StringBuffer *buf, Operation *op) {
+    switch (op->op_type) {
+        case OP_TYPE_ARITH_ADDI: {
+            Value **operands = operation_get_operands(op);
+            Value *result = operation_get_results(op);
+            buffer_append(buf, "  ");
+            buffer_print_value(buf, result);
+            buffer_append(buf, " = arith.addi ");
+            buffer_print_value(buf, operands[0]);
+            buffer_append(buf, ", ");
+            buffer_print_value(buf, operands[1]);
+            buffer_append(buf, " : ");
+            buffer_print_type(buf, result->type);
+            buffer_append(buf, "\n");
+            break;
+        }
+        case OP_TYPE_ARITH_MULI: {
+            Value **operands = operation_get_operands(op);
+            Value *result = operation_get_results(op);
+            buffer_append(buf, "  ");
+            buffer_print_value(buf, result);
+            buffer_append(buf, " = arith.muli ");
+            buffer_print_value(buf, operands[0]);
+            buffer_append(buf, ", ");
+            buffer_print_value(buf, operands[1]);
+            buffer_append(buf, " : ");
+            buffer_print_type(buf, result->type);
+            buffer_append(buf, "\n");
+            break;
+        }
+        case OP_TYPE_ARITH_CONSTANT: {
+            Value *result = operation_get_results(op);
+            NamedAttribute *attrs = operation_get_attributes(op);
+            buffer_append(buf, "  ");
+            buffer_print_value(buf, result);
+            buffer_append(buf, " = arith.constant ");
+
+            // Find and print the value attribute
+            for (int i = 0; i < op->num_attributes; i++) {
+                if (strcmp(attrs[i].name, "value") == 0) {
+                    Attribute *attr = attrs[i].value;
+                    switch (attr->kind) {
+                        case ATTR_KIND_INTEGER:
+                            buffer_printf(buf, "%lld", (long long)attr->data.integer_value);
+                            break;
+                        case ATTR_KIND_FLOAT:
+                            buffer_printf(buf, "%f", attr->data.float_value);
+                            break;
+                        default:
+                            buffer_append(buf, "<unknown>");
+                    }
+                    break;
+                }
+            }
+
+            buffer_append(buf, " : ");
+            buffer_print_type(buf, result->type);
+            buffer_append(buf, "\n");
+            break;
+        }
+        case OP_TYPE_FUNC_RETURN: {
+            Value **operands = operation_get_operands(op);
+            buffer_append(buf, "  func.return");
+            if (op->num_operands > 0) {
+                buffer_append(buf, " ");
+                for (int i = 0; i < op->num_operands; i++) {
+                    if (i > 0) buffer_append(buf, ", ");
+                    buffer_print_value(buf, operands[i]);
+                }
+                buffer_append(buf, " : ");
+                for (int i = 0; i < op->num_operands; i++) {
+                    if (i > 0) buffer_append(buf, ", ");
+                    buffer_print_type(buf, operands[i]->type);
+                }
+            }
+            buffer_append(buf, "\n");
+            break;
+        }
+        case OP_TYPE_UNREGISTERED:
+            buffer_printf(buf, "  \"%s\" (unregistered)\n", op->unregistered_name);
+            break;
+        default:
+            buffer_printf(buf, "  Unknown operation type: %d\n", op->op_type);
+            break;
+    }
+}
+
+// Print a complete function to string buffer
+static char* print_function_to_string(Block *entry_block, const char *name) {
+    StringBuffer buf;
+    buffer_init(&buf, 1024);
+
+    buffer_printf(&buf, "func.func @%s(", name);
+
+    // Print block arguments
+    for (size_t i = 0; i < entry_block->num_arguments; i++) {
+        if (i > 0) buffer_append(&buf, ", ");
+        buffer_print_value(&buf, entry_block->arguments[i]);
+        buffer_append(&buf, ": ");
+        buffer_print_type(&buf, entry_block->arguments[i]->type);
+    }
+
+    buffer_append(&buf, ") {\n");
+
+    // Walk and print all operations in the block
+    Operation *op = entry_block->first_op;
+    while (op) {
+        buffer_print_operation(&buf, op);
+        op = op->next_op;
+    }
+
+    buffer_append(&buf, "}\n");
+
+    return buf.buffer;  // Caller must free
+}
+
+// Print a complete function to stdout
 static void print_function(Block *entry_block, const char *name) {
     printf("func.func @%s(", name);
 
@@ -770,8 +988,32 @@ int main() {
     custom_op->parent_block = block;
     ret_op->parent_block = block;
 
-    // Print the function
-    print_function(block, "example_func");
+    // Print the function using string printer
+    char *result = print_function_to_string(block, "example_func");
+    printf("%s", result);
 
-    return 0;
+    // Reference expected output
+    const char *expected =
+        "func.func @example_func(%arg0: i32, %arg1: i32) {\n"
+        "  %0 = arith.constant 5 : i32\n"
+        "  %1 = arith.addi %arg0, %arg1 : i32\n"
+        "  %2 = arith.muli %1, %0 : i32\n"
+        "  \"custom.my_op\" (unregistered)\n"
+        "  func.return %2 : i32\n"
+        "}\n";
+
+    // Test comparison
+    int exit_code;
+    if (strcmp(result, expected) == 0) {
+        printf("\n✅ Test PASSED: Output matches expected result\n");
+        exit_code = 0;
+    } else {
+        printf("\n❌ Test FAILED: Output does not match expected result\n");
+        printf("\nExpected:\n%s\n", expected);
+        printf("Actual:\n%s\n", result);
+        exit_code = 1;
+    }
+
+    free(result);
+    return exit_code;
 }
