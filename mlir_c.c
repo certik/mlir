@@ -816,12 +816,14 @@ static void buffer_print_operation_generic_internal(StringBuffer *buf, Operation
         buffer_append(buf, "  ");
     }
     
-    // Print results if any
+    // Print results with types if any
     Value *results = operation_get_results(op);
     if (op->num_results > 0) {
         for (int i = 0; i < op->num_results; i++) {
             if (i > 0) buffer_append(buf, ", ");
             buffer_print_value(buf, &results[i]);
+            buffer_append(buf, ": ");
+            buffer_print_type(buf, results[i].type);
         }
         buffer_append(buf, " = ");
     }
@@ -833,13 +835,15 @@ static void buffer_print_operation_generic_internal(StringBuffer *buf, Operation
         buffer_append(buf, op_type_to_string(op->op_type));
     }
     
-    // Print operands if any
+    // Print operands with types if any
     Value **operands = operation_get_operands(op);
     if (op->num_operands > 0) {
         buffer_append(buf, "(");
         for (int i = 0; i < op->num_operands; i++) {
             if (i > 0) buffer_append(buf, ", ");
             buffer_print_value(buf, operands[i]);
+            buffer_append(buf, ": ");
+            buffer_print_type(buf, operands[i]->type);
         }
         buffer_append(buf, ")");
     }
@@ -866,14 +870,6 @@ static void buffer_print_operation_generic_internal(StringBuffer *buf, Operation
         buffer_append(buf, "}");
     }
     
-    // Print result types if any (only for operations with results)
-    if (op->num_results > 0 && op->op_type != OP_TYPE_FUNC_RETURN) {
-        buffer_append(buf, " : ");
-        for (int i = 0; i < op->num_results; i++) {
-            if (i > 0) buffer_append(buf, ", ");
-            buffer_print_type(buf, results[i].type);
-        }
-    }
     
     // Print regions if any
     Region *regions = operation_get_regions(op);
@@ -1285,7 +1281,7 @@ int main() {
         "    %0 = arith.constant 5 : i32\n"
         "    %1 = arith.addi %arg0, %arg1 : i32\n"
         "    %2 = arith.muli %1, %0 : i32\n"
-        "    %3 = \"custom.my_op\"(%2) : i64\n"
+        "    %3: i64 = \"custom.my_op\"(%2: i32)\n"
         "    func.return %2 : i32\n"
         "  }\n"
         "}\n";
@@ -1312,11 +1308,11 @@ int main() {
         "  ^bb0():\n"
         "  func.func {sym_name = \"example_func\"} {\n"
         "    ^bb0(%arg0: i32, %arg1: i32):\n"
-        "    %0 = arith.constant {value = 5} : i32\n"
-        "    %1 = arith.addi(%arg0, %arg1) : i32\n"
-        "    %2 = arith.muli(%1, %0) : i32\n"
-        "    %3 = \"custom.my_op\"(%2) : i64\n"
-        "    func.return(%2)\n"
+        "    %0: i32 = arith.constant {value = 5}\n"
+        "    %1: i32 = arith.addi(%arg0: i32, %arg1: i32)\n"
+        "    %2: i32 = arith.muli(%1: i32, %0: i32)\n"
+        "    %3: i64 = \"custom.my_op\"(%2: i32)\n"
+        "    func.return(%2: i32)\n"
         "  }\n"
         "}\n";
 
