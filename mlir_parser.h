@@ -21,6 +21,7 @@ the parent struct, but that will make it hard to add more later, and each struct
 * An issue with using pointers is that you can't double and copy the vector allocation. Thus using indices is probably the best way to do that.
 * One can use a pool allocator to reuse space when operations are removed. One can move things around.
 * We still need an arena to allocate a vector of indices for each Operation/Region/Block
+* Indices also allow easy serializing/deserializing
 */
 
 
@@ -88,6 +89,7 @@ typedef enum ValueKind {
 
 typedef struct ValueRef {
     ValueKind kind;
+    // use an index
     void* def; // Block* or Operation* that produced it
     // Maybe later:
     //Operation **users;
@@ -101,6 +103,7 @@ typedef struct ValueRef {
 
 typedef struct Operation {
     OpType op_type; // Enum for registered ops
+    // Use indices here
     ValueRef **operands;
     uint64_t n_operands;
     Type **result_types;
