@@ -347,9 +347,15 @@ Operation* create_operation(OpType type,
     size_t size = operation_size(num_operands, num_results, 
                                 num_attributes, num_regions, num_successors);
     
+    // Round size up to multiple of 64 for aligned_alloc
+    size_t aligned_size = ((size + 63) / 64) * 64;
+    
     // Allocate with proper alignment
-    Operation *op = (Operation*)aligned_alloc(64, size);  // 64-byte aligned for cache
-    memset(op, 0, size);
+    Operation *op = (Operation*)aligned_alloc(64, aligned_size);  // 64-byte aligned for cache
+    if (!op) {
+        return NULL;  // Handle allocation failure
+    }
+    memset(op, 0, aligned_size);
     
     op->op_type = type;
     op->num_operands = num_operands;
