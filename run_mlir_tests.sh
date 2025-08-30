@@ -17,3 +17,4 @@ set -ex
 ./parser test_mlir/t1.mlir
 ./parser test_mlir/t2.mlir
 ./parser test_mlir/t3.mlir
+./parser test_mlir/add_kernel.ttir
