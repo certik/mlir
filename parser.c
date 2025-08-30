@@ -467,14 +467,22 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
         reg_idx += op->n_result_types;
     }
     
-    // Print operation name with quotes
-    result = str_concat(arena, result, str_lit("\""));
-    if (op->opname.size > 0) {
-        result = str_concat(arena, result, op->opname);
+    // Print operation name (quotes only for unregistered operations)
+    if (op->op_type == OP_TYPE_UNREGISTERED) {
+        result = str_concat(arena, result, str_lit("\""));
+        if (op->opname.size > 0) {
+            result = str_concat(arena, result, op->opname);
+        } else {
+            result = str_concat(arena, result, str_lit("unknown"));
+        }
+        result = str_concat(arena, result, str_lit("\""));
     } else {
-        result = str_concat(arena, result, str_from_cstr_view((char*)op_type_to_string(op->op_type)));
+        if (op->opname.size > 0) {
+            result = str_concat(arena, result, op->opname);
+        } else {
+            result = str_concat(arena, result, str_from_cstr_view((char*)op_type_to_string(op->op_type)));
+        }
     }
-    result = str_concat(arena, result, str_lit("\""));
     
     // Print operands with types (always include parentheses)
     result = str_concat(arena, result, str_lit("("));
@@ -757,14 +765,14 @@ int main(int argc, char *argv[]) {
         
         // Reference expected output for generic mode
         const char *expected = 
-            "\"module\"() {\n"
+            "module() {\n"
             "^bb0:\n"
-            "    \"func.func\"() {sym_name = \"example_func\"} {\n"
+            "    func.func() {sym_name = \"example_func\"} {\n"
             "    ^bb0(%arg0: i32, %arg1: i32):\n"
-            "        %0 = \"arith.constant\"() {value = 5} -> i32\n"
-            "        %1 = \"arith.addi\"(%arg0: i32, %arg1: i32) -> i32\n"
-            "        %2 = \"arith.muli\"(%1: i32, %0: i32) -> i32\n"
-            "        \"func.return\"(%2: i32)\n"
+            "        %0 = arith.constant() {value = 5} -> i32\n"
+            "        %1 = arith.addi(%arg0: i32, %arg1: i32) -> i32\n"
+            "        %2 = arith.muli(%1: i32, %0: i32) -> i32\n"
+            "        func.return(%2: i32)\n"
             "    }\n"
             "}\n";
         
