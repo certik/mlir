@@ -317,6 +317,11 @@ Operation* parse_operation(Parser *parser) {
     op->regions = NULL;
     op->n_regions = 0;
     op->n_result_types = 0;
+    op->operands = NULL;
+    op->n_operands = 0;
+    op->attributes = NULL;
+    op->n_attributes = 0;
+    op->result_types = NULL;
     op->opname = str_lit("");
 
     // Skip empty lines and attributes

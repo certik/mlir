@@ -359,6 +359,7 @@ void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
 }
 
 string print_operation(Arena *arena, int indent_level, Operation *op);
+static const char* op_type_to_string(OpType type);
 
 string indent(Arena *arena, int indent_level) {
     const int indent_spaces=4;
@@ -397,25 +398,117 @@ string print_region(Arena *arena, int indent_level, Region *region) {
 
 int reg_idx=0;
 
+static const char* op_type_to_string(OpType type) {
+    switch (type) {
+        case OP_TYPE_UNREGISTERED: return "unregistered";
+        case OP_TYPE_MODULE: return "module";
+        case OP_TYPE_ARITH_ADDI: return "arith.addi";
+        case OP_TYPE_ARITH_SUBI: return "arith.subi";
+        case OP_TYPE_ARITH_MULI: return "arith.muli";
+        case OP_TYPE_ARITH_DIVI: return "arith.divi";
+        case OP_TYPE_ARITH_ADDF: return "arith.addf";
+        case OP_TYPE_ARITH_SUBF: return "arith.subf";
+        case OP_TYPE_ARITH_MULF: return "arith.mulf";
+        case OP_TYPE_ARITH_DIVF: return "arith.divf";
+        case OP_TYPE_ARITH_CONSTANT: return "arith.constant";
+        case OP_TYPE_ARITH_CMPI: return "arith.cmpi";
+        case OP_TYPE_ARITH_CMPF: return "arith.cmpf";
+        case OP_TYPE_MEMREF_LOAD: return "memref.load";
+        case OP_TYPE_MEMREF_STORE: return "memref.store";
+        case OP_TYPE_MEMREF_ALLOC: return "memref.alloc";
+        case OP_TYPE_MEMREF_DEALLOC: return "memref.dealloc";
+        case OP_TYPE_CF_BR: return "cf.br";
+        case OP_TYPE_CF_COND_BR: return "cf.cond_br";
+        case OP_TYPE_CF_SWITCH: return "cf.switch";
+        case OP_TYPE_FUNC_FUNC: return "func.func";
+        case OP_TYPE_FUNC_RETURN: return "func.return";
+        case OP_TYPE_FUNC_CALL: return "func.call";
+        case OP_TYPE_SCF_FOR: return "scf.for";
+        case OP_TYPE_SCF_WHILE: return "scf.while";
+        case OP_TYPE_SCF_IF: return "scf.if";
+        default: return "unknown";
+    }
+}
+
 string print_operation(Arena *arena, int indent_level, Operation *op) {
     string result = indent(arena, indent_level);
+    
+    // Print results if any
     if (op->n_result_types > 0) {
-        result = str_concat(arena, result,
-            format(arena, str_lit("%{} = "), reg_idx)
-            );
-        reg_idx++;
+        for (int i = 0; i < op->n_result_types; i++) {
+            if (i > 0) result = str_concat(arena, result, str_lit(", "));
+            result = str_concat(arena, result, format(arena, str_lit("%{}"), reg_idx + i));
+        }
+        result = str_concat(arena, result, str_lit(" = "));
+        reg_idx += op->n_result_types;
     }
-    result = str_concat(arena, result,
-        format(arena, str_lit("{}"), op->opname)
-        );
+    
+    // Print operation name
+    if (op->op_type == OP_TYPE_UNREGISTERED) {
+        result = str_concat(arena, result, format(arena, str_lit("\"{}\""), op->opname));
+    } else {
+        result = str_concat(arena, result, str_from_cstr_view((char*)op_type_to_string(op->op_type)));
+    }
+    
+    // Print operands with types (always include parentheses)
+    result = str_concat(arena, result, str_lit("("));
+    for (int i = 0; i < op->n_operands; i++) {
+        if (i > 0) result = str_concat(arena, result, str_lit(", "));
+        ValueRef *operand = op->operands[i];
+        if (operand && operand->type) {
+            // For now, use a simple format for operands
+            result = str_concat(arena, result, format(arena, str_lit("%{}: {}"), 
+                                                    (int64_t)operand->result_index, operand->type->str));
+        } else {
+            result = str_concat(arena, result, str_lit("%?"));
+        }
+    }
+    result = str_concat(arena, result, str_lit(")"));
+    
+    // Print attributes if any
+    if (op->n_attributes > 0) {
+        result = str_concat(arena, result, str_lit(" {"));
+        for (int i = 0; i < op->n_attributes; i++) {
+            if (i > 0) result = str_concat(arena, result, str_lit(", "));
+            Attribute *attr = op->attributes[i];
+            result = str_concat(arena, result, format(arena, str_lit("{} = "), str_from_cstr_view((char*)attr->name)));
+            switch (attr->kind) {
+                case ATTR_KIND_INTEGER:
+                    result = str_concat(arena, result, format(arena, str_lit("{}"), attr->data.integer_value));
+                    break;
+                case ATTR_KIND_STRING:
+                    result = str_concat(arena, result, format(arena, str_lit("\"{}\""), str_from_cstr_view((char*)attr->data.string_value)));
+                    break;
+                default:
+                    result = str_concat(arena, result, str_lit("..."));
+            }
+        }
+        result = str_concat(arena, result, str_lit("}"));
+    }
+    
+    // Print result types if any
+    if (op->n_result_types > 0) {
+        result = str_concat(arena, result, str_lit(" -> "));
+        for (int i = 0; i < op->n_result_types; i++) {
+            if (i > 0) result = str_concat(arena, result, str_lit(", "));
+            if (op->result_types && op->result_types[i]) {
+                result = str_concat(arena, result, op->result_types[i]->str);
+            } else {
+                result = str_concat(arena, result, str_lit("?"));
+            }
+        }
+    }
+    
+    // Print regions if any
     if (op->n_regions > 0) {
         result = str_concat(arena, result, str_lit(" "));
-        for (int i=0; i < op->n_regions; i++) {
+        for (int i = 0; i < op->n_regions; i++) {
             result = str_concat(arena, result,
                 print_region(arena, indent_level, op->regions[i])
                 );
         }
     }
+    
     result = str_concat(arena, result, str_lit("\n"));
     return result;
 }
