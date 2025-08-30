@@ -340,6 +340,42 @@ static inline void dispatch_operations_batch(Operation **ops, size_t count, void
 }
 
 // ============================================================================
+// Operation Type to String Conversion
+// ============================================================================
+
+static const char* op_type_to_string(OpType type) {
+    switch (type) {
+        case OP_TYPE_UNREGISTERED: return "unregistered";
+        case OP_TYPE_MODULE: return "module";
+        case OP_TYPE_ARITH_ADDI: return "arith.addi";
+        case OP_TYPE_ARITH_SUBI: return "arith.subi";
+        case OP_TYPE_ARITH_MULI: return "arith.muli";
+        case OP_TYPE_ARITH_DIVI: return "arith.divi";
+        case OP_TYPE_ARITH_ADDF: return "arith.addf";
+        case OP_TYPE_ARITH_SUBF: return "arith.subf";
+        case OP_TYPE_ARITH_MULF: return "arith.mulf";
+        case OP_TYPE_ARITH_DIVF: return "arith.divf";
+        case OP_TYPE_ARITH_CONSTANT: return "arith.constant";
+        case OP_TYPE_ARITH_CMPI: return "arith.cmpi";
+        case OP_TYPE_ARITH_CMPF: return "arith.cmpf";
+        case OP_TYPE_MEMREF_LOAD: return "memref.load";
+        case OP_TYPE_MEMREF_STORE: return "memref.store";
+        case OP_TYPE_MEMREF_ALLOC: return "memref.alloc";
+        case OP_TYPE_MEMREF_DEALLOC: return "memref.dealloc";
+        case OP_TYPE_CF_BR: return "cf.br";
+        case OP_TYPE_CF_COND_BR: return "cf.cond_br";
+        case OP_TYPE_CF_SWITCH: return "cf.switch";
+        case OP_TYPE_FUNC_FUNC: return "func.func";
+        case OP_TYPE_FUNC_RETURN: return "func.return";
+        case OP_TYPE_FUNC_CALL: return "func.call";
+        case OP_TYPE_SCF_FOR: return "scf.for";
+        case OP_TYPE_SCF_WHILE: return "scf.while";
+        case OP_TYPE_SCF_IF: return "scf.if";
+        default: return "unknown";
+    }
+}
+
+// ============================================================================
 // SSA Value Numbering
 // ============================================================================
 
@@ -407,6 +443,15 @@ Operation* create_unregistered_operation(const char *name,
     op->unregistered_name = strdup(name);  // Would need to manage this memory
     return op;
 }
+
+// ============================================================================
+// Printer Modes
+// ============================================================================
+
+typedef enum {
+    PRINTER_MODE_SPECIFIC,  // Operation-specific formatting
+    PRINTER_MODE_GENERIC    // Generic formatting for all operations
+} PrinterMode;
 
 // ============================================================================
 // String Buffer for Printer
@@ -761,7 +806,112 @@ static void register_all_printers(void) {
     // Register more as needed...
 }
 
-// String-based operation printer
+// Generic operation printer - same format for all operations
+static void buffer_print_operation_generic(StringBuffer *buf, Operation *op, int indent_level) {
+    // Add indentation
+    for (int i = 0; i < indent_level; i++) {
+        buffer_append(buf, "  ");
+    }
+    
+    // Print results if any
+    Value *results = operation_get_results(op);
+    if (op->num_results > 0) {
+        for (int i = 0; i < op->num_results; i++) {
+            if (i > 0) buffer_append(buf, ", ");
+            buffer_print_value(buf, &results[i]);
+        }
+        buffer_append(buf, " = ");
+    }
+    
+    // Print operation name
+    if (op->op_type == OP_TYPE_UNREGISTERED) {
+        buffer_printf(buf, "\"%s\"", op->unregistered_name);
+    } else {
+        buffer_append(buf, op_type_to_string(op->op_type));
+    }
+    
+    // Print operands if any
+    Value **operands = operation_get_operands(op);
+    if (op->num_operands > 0) {
+        buffer_append(buf, "(");
+        for (int i = 0; i < op->num_operands; i++) {
+            if (i > 0) buffer_append(buf, ", ");
+            buffer_print_value(buf, operands[i]);
+        }
+        buffer_append(buf, ")");
+    }
+    
+    // Print attributes if any
+    NamedAttribute *attrs = operation_get_attributes(op);
+    if (op->num_attributes > 0) {
+        buffer_append(buf, " {");
+        for (int i = 0; i < op->num_attributes; i++) {
+            if (i > 0) buffer_append(buf, ", ");
+            buffer_printf(buf, "%s = ", attrs[i].name);
+            Attribute *attr = attrs[i].value;
+            switch (attr->kind) {
+                case ATTR_KIND_INTEGER:
+                    buffer_printf(buf, "%lld", (long long)attr->data.integer_value);
+                    break;
+                case ATTR_KIND_STRING:
+                    buffer_printf(buf, "\"%s\"", attr->data.string_value);
+                    break;
+                default:
+                    buffer_append(buf, "...");
+            }
+        }
+        buffer_append(buf, "}");
+    }
+    
+    // Print result types if any (only for operations with results)
+    if (op->num_results > 0 && op->op_type != OP_TYPE_FUNC_RETURN) {
+        buffer_append(buf, " : ");
+        for (int i = 0; i < op->num_results; i++) {
+            if (i > 0) buffer_append(buf, ", ");
+            buffer_print_type(buf, results[i].type);
+        }
+    }
+    
+    // Print regions if any
+    Region *regions = operation_get_regions(op);
+    if (op->num_regions > 0) {
+        buffer_append(buf, " {\n");
+        for (int i = 0; i < op->num_regions; i++) {
+            Block *block = regions[i].first_block;
+            while (block) {
+                // Always print block header
+                for (int j = 0; j < indent_level + 1; j++) {
+                    buffer_append(buf, "  ");
+                }
+                buffer_append(buf, "^bb0(");
+                for (size_t j = 0; j < block->num_arguments; j++) {
+                    if (j > 0) buffer_append(buf, ", ");
+                    buffer_print_value(buf, block->arguments[j]);
+                    buffer_append(buf, ": ");
+                    buffer_print_type(buf, block->arguments[j]->type);
+                }
+                buffer_append(buf, "):\n");
+                
+                // Print operations in block
+                Operation *block_op = block->first_op;
+                while (block_op) {
+                    buffer_print_operation_generic(buf, block_op, indent_level + 1);
+                    block_op = block_op->next_op;
+                }
+                
+                block = block->next_block;
+            }
+        }
+        for (int i = 0; i < indent_level; i++) {
+            buffer_append(buf, "  ");
+        }
+        buffer_append(buf, "}");
+    }
+    
+    buffer_append(buf, "\n");
+}
+
+// String-based operation printer - specific formatting
 static void buffer_print_operation(StringBuffer *buf, Operation *op) {
     switch (op->op_type) {
         case OP_TYPE_ARITH_ADDI: {
@@ -982,22 +1132,26 @@ static Operation* create_func_operation(const char *name, Block *body) {
 }
 
 // Print a complete module to string buffer
-static char* print_module_to_string(Operation *module) {
+static char* print_module_to_string(Operation *module, PrinterMode mode) {
     StringBuffer buf;
     buffer_init(&buf, 2048);
 
-    buffer_append(&buf, "module {\n");
+    if (mode == PRINTER_MODE_GENERIC) {
+        buffer_print_operation_generic(&buf, module, 0);
+    } else {
+        buffer_append(&buf, "module {\n");
 
-    // Walk through all operations in module's body
-    Region *body_region = operation_get_regions(module);
-    Block *body_block = body_region->first_block;
-    Operation *op = body_block->first_op;
-    while (op) {
-        buffer_print_operation(&buf, op);
-        op = op->next_op;
+        // Walk through all operations in module's body
+        Region *body_region = operation_get_regions(module);
+        Block *body_block = body_region->first_block;
+        Operation *op = body_block->first_op;
+        while (op) {
+            buffer_print_operation(&buf, op);
+            op = op->next_op;
+        }
+
+        buffer_append(&buf, "}\n");
     }
-
-    buffer_append(&buf, "}\n");
 
     return buf.buffer;  // Caller must free
 }
@@ -1120,12 +1274,13 @@ int main() {
     Operation *func_op = create_func_operation("example_func", block);
     module_add_operation(module, func_op);
 
-    // Print the module using string printer
-    char *result = print_module_to_string(module);
-    printf("%s", result);
+    // Test 1: Specific printer mode
+    printf("=== Test 1: Specific Printer Mode ===\n");
+    char *result1 = print_module_to_string(module, PRINTER_MODE_SPECIFIC);
+    printf("%s", result1);
 
-    // Reference expected output
-    const char *expected =
+    // Reference expected output for specific mode
+    const char *expected1 =
         "module {\n"
         "  func.func @example_func(%arg0: i32, %arg1: i32) {\n"
         "    %0 = arith.constant 5 : i32\n"
@@ -1136,18 +1291,47 @@ int main() {
         "  }\n"
         "}\n";
 
-    // Test comparison
-    int exit_code;
-    if (strcmp(result, expected) == 0) {
-        printf("\n✅ Test PASSED: Output matches expected result\n");
-        exit_code = 0;
+    // Test comparison for specific mode
+    int exit_code = 0;
+    if (strcmp(result1, expected1) == 0) {
+        printf("✅ Test 1 PASSED: Specific mode output matches expected result\n\n");
     } else {
-        printf("\n❌ Test FAILED: Output does not match expected result\n");
-        printf("\nExpected:\n%s\n", expected);
-        printf("Actual:\n%s\n", result);
+        printf("❌ Test 1 FAILED: Specific mode output does not match expected result\n");
+        printf("\nExpected:\n%s\n", expected1);
+        printf("Actual:\n%s\n", result1);
         exit_code = 1;
     }
 
-    free(result);
+    // Test 2: Generic printer mode
+    printf("=== Test 2: Generic Printer Mode ===\n");
+    char *result2 = print_module_to_string(module, PRINTER_MODE_GENERIC);
+    printf("%s", result2);
+
+    // Reference expected output for generic mode
+    const char *expected2 =
+        "module {\n"
+        "  ^bb0():\n"
+        "  func.func {sym_name = \"example_func\"} {\n"
+        "    ^bb0(%arg0: i32, %arg1: i32):\n"
+        "    %0 = arith.constant {value = 5} : i32\n"
+        "    %1 = arith.addi(%arg0, %arg1) : i32\n"
+        "    %2 = arith.muli(%1, %0) : i32\n"
+        "    %3 = \"custom.my_op\"(%2) : i64\n"
+        "    func.return(%2)\n"
+        "  }\n"
+        "}\n";
+
+    // Test comparison for generic mode
+    if (strcmp(result2, expected2) == 0) {
+        printf("✅ Test 2 PASSED: Generic mode output matches expected result\n");
+    } else {
+        printf("❌ Test 2 FAILED: Generic mode output does not match expected result\n");
+        printf("\nExpected:\n%s\n", expected2);
+        printf("Actual:\n%s\n", result2);
+        exit_code = 1;
+    }
+
+    free(result1);
+    free(result2);
     return exit_code;
 }
