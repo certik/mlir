@@ -130,6 +130,7 @@ struct Value {
     Operation *defining_op;  // Operation that produces this value
     uint32_t result_index;   // Which result of the operation
     Type *type;              // Type of this value
+    uint32_t ssa_number;     // Unique SSA number for printing
     
     // Use-def chain (simplified - in practice, would be more sophisticated)
     Operation **users;       // Operations using this value
@@ -335,6 +336,18 @@ static inline void dispatch_operations_batch(Operation **ops, size_t count, void
 }
 
 // ============================================================================
+// SSA Value Numbering
+// ============================================================================
+
+// Global counter for SSA value numbering
+static uint32_t next_ssa_number = 0;
+
+// Assign SSA numbers to values
+static void assign_ssa_number(Value *val) {
+    val->ssa_number = next_ssa_number++;
+}
+
+// ============================================================================
 // Operation Creation
 // ============================================================================
 
@@ -369,6 +382,7 @@ Operation* create_operation(OpType type,
     for (int i = 0; i < num_results; i++) {
         results[i].defining_op = op;
         results[i].result_index = i;
+        assign_ssa_number(&results[i]);
     }
     
     // Initialize regions
@@ -394,12 +408,12 @@ Operation* create_unregistered_operation(const char *name,
 // Example Usage - Operation Printer
 // ============================================================================
 
-// Helper to print value names (simplified - in real impl would track SSA names)
+// Helper to print value names
 static void print_value(Value *val) {
     if (val->defining_op) {
-        printf("%%%d", val->result_index);
+        printf("%%%d", val->ssa_number);
     } else {
-        printf("%%arg%p", (void*)val);
+        printf("%%arg%d", val->ssa_number);
     }
 }
 
@@ -689,8 +703,13 @@ int main() {
     block->arguments = malloc(2 * sizeof(Value*));
     block->arguments[0] = calloc(1, sizeof(Value));
     block->arguments[0]->type = i32_type;
+    block->arguments[0]->ssa_number = 0;  // %arg0
     block->arguments[1] = calloc(1, sizeof(Value));
     block->arguments[1]->type = i32_type;
+    block->arguments[1]->ssa_number = 1;  // %arg1
+    
+    // Start SSA numbering after block arguments
+    next_ssa_number = 0;
     
     // Create operations
     
