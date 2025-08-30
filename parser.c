@@ -373,8 +373,32 @@ string indent(Arena *arena, int indent_level) {
 }
 
 string print_block(Arena *arena, int bb_index, int indent_level, Block *block) {
-    string result = format(arena, str_lit("{}^bb{}\n"),
-            indent(arena, indent_level), bb_index);
+    string result = format(arena, str_lit("{}^bb{}"), indent(arena, indent_level), bb_index);
+    
+    // Print block arguments if any
+    if (block->n_arguments > 0 && block->arguments) {
+        // Try to access arguments safely
+        bool can_print_args = true;
+        for (int i = 0; i < block->n_arguments && can_print_args; i++) {
+            if (!block->arguments[i] || !block->arguments[i]->type) {
+                can_print_args = false;
+            }
+        }
+        
+        if (can_print_args) {
+            result = str_concat(arena, result, str_lit("("));
+            for (int i = 0; i < block->n_arguments; i++) {
+                if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                ValueRef *arg = block->arguments[i];
+                result = str_concat(arena, result, format(arena, str_lit("%arg{}: {}"), 
+                                                        (int64_t)arg->result_index, arg->type->str));
+            }
+            result = str_concat(arena, result, str_lit(")"));
+        }
+    }
+    
+    result = str_concat(arena, result, str_lit(":\n"));
+    
     for (int i=0; i < block->n_operations; i++) {
         result = str_concat(arena, result,
             print_operation(arena, indent_level+1, block->operations[i])
@@ -443,12 +467,14 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
         reg_idx += op->n_result_types;
     }
     
-    // Print operation name
+    // Print operation name with quotes
+    result = str_concat(arena, result, str_lit("\""));
     if (op->op_type == OP_TYPE_UNREGISTERED) {
-        result = str_concat(arena, result, format(arena, str_lit("\"{}\""), op->opname));
+        result = str_concat(arena, result, op->opname);
     } else {
         result = str_concat(arena, result, str_from_cstr_view((char*)op_type_to_string(op->op_type)));
     }
+    result = str_concat(arena, result, str_lit("\""));
     
     // Print operands with types (always include parentheses)
     result = str_concat(arena, result, str_lit("("));
@@ -456,9 +482,13 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
         if (i > 0) result = str_concat(arena, result, str_lit(", "));
         ValueRef *operand = op->operands[i];
         if (operand && operand->type) {
-            // For now, use a simple format for operands
-            result = str_concat(arena, result, format(arena, str_lit("%{}: {}"), 
-                                                    (int64_t)operand->result_index, operand->type->str));
+            if (operand->kind == BLOCK_ARG) {
+                result = str_concat(arena, result, format(arena, str_lit("%arg{}: {}"), 
+                                                        (int64_t)operand->result_index, operand->type->str));
+            } else {
+                result = str_concat(arena, result, format(arena, str_lit("%{}: {}"), 
+                                                        (int64_t)operand->result_index, operand->type->str));
+            }
         } else {
             result = str_concat(arena, result, str_lit("%?"));
         }
@@ -514,23 +544,258 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
 }
 
 // Main
-int main(int argc, char *argv[]) {
-    string mlir_code = str_lit("module {\n"
-                            "  %0 = \"std.constant\"() {value = 42} : () -> i32\n"
-                            "  \"std.return\"(%0) : (i32) -> ()\n"
-                            "}");
-    Arena *arena = arena_create(10*1024*1024);
-    if (argc == 2) {
-        mlir_code = read_file_ok(arena, str_from_cstr_view(argv[1]));
-    }
-    tokenizer_print_all_tokens(arena, mlir_code);
+Operation* construct_test_module(Arena *arena) {
+    // Create types
+    Type *i32_type = arena_alloc(arena, Type);
+    i32_type->kind = TYPE_KIND_INTEGER;
+    i32_type->data.integer.width = 32;
+    i32_type->data.integer.is_signed = true;
+    i32_type->str = str_lit("i32");
 
-    Parser parser;
-    parser_init(arena, &parser, mlir_code);
-    // Uncomment to run parser (will currently fail with a syntax error):
-    Operation* op = parse_module(&parser);
-    println(arena, str_lit("MLIR:"));
-    println(arena, str_lit("{}"), print_operation(arena, 0, op));
+    Type *i64_type = arena_alloc(arena, Type);
+    i64_type->kind = TYPE_KIND_INTEGER;
+    i64_type->data.integer.width = 64;
+    i64_type->data.integer.is_signed = true;
+    i64_type->str = str_lit("i64");
+
+    // Create module operation
+    Operation *module = arena_alloc(arena, Operation);
+    module->op_type = OP_TYPE_MODULE;
+    module->operands = NULL;
+    module->n_operands = 0;
+    module->result_types = NULL;
+    module->n_result_types = 0;
+    module->attributes = NULL;
+    module->n_attributes = 0;
+    module->opname = str_lit("module");
+
+    // Create module region
+    Region *module_region = arena_alloc(arena, Region);
+    Block *module_block = arena_alloc(arena, Block);
+    module_block->arguments = NULL;
+    module_block->n_arguments = 0;
+
+    // Create function operation
+    Operation *func_op = arena_alloc(arena, Operation);
+    func_op->op_type = OP_TYPE_FUNC_FUNC;
+    func_op->operands = NULL;
+    func_op->n_operands = 0;
+    func_op->result_types = NULL;
+    func_op->n_result_types = 0;
+    func_op->opname = str_lit("func.func");
+
+    // Function attributes (sym_name)
+    func_op->n_attributes = 1;
+    func_op->attributes = arena_alloc_array(arena, Attribute*, 1);
+    func_op->attributes[0] = arena_alloc(arena, Attribute);
+    func_op->attributes[0]->kind = ATTR_KIND_STRING;
+    func_op->attributes[0]->data.string_value = "example_func";
+    func_op->attributes[0]->name = "sym_name";
+
+    // Create function region and block
+    Region *func_region = arena_alloc(arena, Region);
+    Block *func_block = arena_alloc(arena, Block);
+    
+    // Function block arguments (%arg0, %arg1)
+    func_block->n_arguments = 2;
+    func_block->arguments = arena_alloc_array(arena, ValueRef*, 2);
+    func_block->arguments[0] = arena_alloc(arena, ValueRef);
+    func_block->arguments[0]->kind = BLOCK_ARG;
+    func_block->arguments[0]->result_index = 0;
+    func_block->arguments[0]->type = i32_type;
+    func_block->arguments[1] = arena_alloc(arena, ValueRef);
+    func_block->arguments[1]->kind = BLOCK_ARG;
+    func_block->arguments[1]->result_index = 1;
+    func_block->arguments[1]->type = i32_type;
+
+    // Create operations in function block
+    func_block->n_operations = 4;
+    func_block->operations = arena_alloc_array(arena, Operation*, 4);
+
+    // %0 = arith.constant 5 : i32
+    Operation *const_op = arena_alloc(arena, Operation);
+    const_op->op_type = OP_TYPE_ARITH_CONSTANT;
+    const_op->operands = NULL;
+    const_op->n_operands = 0;
+    const_op->n_result_types = 1;
+    const_op->result_types = arena_alloc_array(arena, Type*, 1);
+    const_op->result_types[0] = i32_type;
+    const_op->n_attributes = 1;
+    const_op->attributes = arena_alloc_array(arena, Attribute*, 1);
+    const_op->attributes[0] = arena_alloc(arena, Attribute);
+    const_op->attributes[0]->kind = ATTR_KIND_INTEGER;
+    const_op->attributes[0]->data.integer_value = 5;
+    const_op->attributes[0]->name = "value";
+    const_op->regions = NULL;
+    const_op->n_regions = 0;
+    const_op->opname = str_lit("arith.constant");
+
+    // %1 = arith.addi %arg0, %arg1 : i32
+    Operation *add_op = arena_alloc(arena, Operation);
+    add_op->op_type = OP_TYPE_ARITH_ADDI;
+    add_op->n_operands = 2;
+    add_op->operands = arena_alloc_array(arena, ValueRef*, 2);
+    add_op->operands[0] = func_block->arguments[0];
+    add_op->operands[1] = func_block->arguments[1];
+    add_op->n_result_types = 1;
+    add_op->result_types = arena_alloc_array(arena, Type*, 1);
+    add_op->result_types[0] = i32_type;
+    add_op->attributes = NULL;
+    add_op->n_attributes = 0;
+    add_op->regions = NULL;
+    add_op->n_regions = 0;
+    add_op->opname = str_lit("arith.addi");
+
+    // %2 = arith.muli %1, %0 : i32 (need to create ValueRef for %1 and %0)
+    ValueRef *add_result = arena_alloc(arena, ValueRef);
+    add_result->kind = OP_RESULT;
+    add_result->def = add_op;
+    add_result->result_index = 1;  // This will be %1
+    add_result->type = i32_type;
+
+    ValueRef *const_result = arena_alloc(arena, ValueRef);
+    const_result->kind = OP_RESULT;
+    const_result->def = const_op;
+    const_result->result_index = 0;  // This will be %0
+    const_result->type = i32_type;
+
+    Operation *mul_op = arena_alloc(arena, Operation);
+    mul_op->op_type = OP_TYPE_ARITH_MULI;
+    mul_op->n_operands = 2;
+    mul_op->operands = arena_alloc_array(arena, ValueRef*, 2);
+    mul_op->operands[0] = add_result;
+    mul_op->operands[1] = const_result;
+    mul_op->n_result_types = 1;
+    mul_op->result_types = arena_alloc_array(arena, Type*, 1);
+    mul_op->result_types[0] = i32_type;
+    mul_op->attributes = NULL;
+    mul_op->n_attributes = 0;
+    mul_op->regions = NULL;
+    mul_op->n_regions = 0;
+    mul_op->opname = str_lit("arith.muli");
+
+    // func.return %2 : i32
+    ValueRef *mul_result = arena_alloc(arena, ValueRef);
+    mul_result->kind = OP_RESULT;
+    mul_result->def = mul_op;
+    mul_result->result_index = 2;  // This will be %2
+    mul_result->type = i32_type;
+
+    Operation *ret_op = arena_alloc(arena, Operation);
+    ret_op->op_type = OP_TYPE_FUNC_RETURN;
+    ret_op->n_operands = 1;
+    ret_op->operands = arena_alloc_array(arena, ValueRef*, 1);
+    ret_op->operands[0] = mul_result;
+    ret_op->result_types = NULL;
+    ret_op->n_result_types = 0;
+    ret_op->attributes = NULL;
+    ret_op->n_attributes = 0;
+    ret_op->regions = NULL;
+    ret_op->n_regions = 0;
+    ret_op->opname = str_lit("func.return");
+
+    // Link operations to function block
+    func_block->operations[0] = const_op;
+    func_block->operations[1] = add_op;
+    func_block->operations[2] = mul_op;
+    func_block->operations[3] = ret_op;
+
+    // Link function block to function region
+    func_region->n_blocks = 1;
+    func_region->blocks = arena_alloc_array(arena, Block*, 1);
+    func_region->blocks[0] = func_block;
+
+    // Link function region to function operation
+    func_op->n_regions = 1;
+    func_op->regions = arena_alloc_array(arena, Region*, 1);
+    func_op->regions[0] = func_region;
+
+    // Link function operation to module block
+    module_block->n_operations = 1;
+    module_block->operations = arena_alloc_array(arena, Operation*, 1);
+    module_block->operations[0] = func_op;
+
+    // Link module block to module region
+    module_region->n_blocks = 1;
+    module_region->blocks = arena_alloc_array(arena, Block*, 1);
+    module_region->blocks[0] = module_block;
+
+    // Link module region to module operation
+    module->n_regions = 1;
+    module->regions = arena_alloc_array(arena, Region*, 1);
+    module->regions[0] = module_region;
+
+    return module;
+}
+
+int main(int argc, char *argv[]) {
+    Arena *arena = arena_create(10*1024*1024);
+    
+    // Check for --construct option
+    bool use_construction = false;
+    char *input_file = NULL;
+    
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--construct") == 0) {
+            use_construction = true;
+        } else if (argv[i][0] != '-') {
+            input_file = argv[i];
+        }
+    }
+    
+    Operation* op;
+    
+    if (use_construction) {
+        // Use constructed test module
+        op = construct_test_module(arena);
+        
+        // Test generic printing with expected output comparison
+        printf("=== Generic Printer Test ===\n");
+        reg_idx = 0;  // Reset SSA counter
+        string result = print_operation(arena, 0, op);
+        println(arena, str_lit("{}"), result);
+        
+        // Reference expected output for generic mode
+        const char *expected = 
+            "\"module\"() {\n"
+            "^bb0:\n"
+            "    \"func.func\"() {sym_name = \"example_func\"} {\n"
+            "    ^bb0(%arg0: i32, %arg1: i32):\n"
+            "        %0 = \"arith.constant\"() {value = 5} -> i32\n"
+            "        %1 = \"arith.addi\"(%arg0: i32, %arg1: i32) -> i32\n"
+            "        %2 = \"arith.muli\"(%1: i32, %0: i32) -> i32\n"
+            "        \"func.return\"(%2: i32)\n"
+            "    }\n"
+            "}\n";
+        
+        // Compare output
+        if (str_eq(result, str_from_cstr_view((char*)expected))) {
+            printf("✅ Generic mode test PASSED\n");
+        } else {
+            printf("❌ Generic mode test FAILED\n");
+            printf("Expected:\n%s\n", expected);
+            printf("Actual:\n");
+            println(arena, str_lit("{}"), result);
+        }
+    } else {
+        // Use parser mode
+        string mlir_code = str_lit("module {\n"
+                                "  %0 = \"std.constant\"() {value = 42} : () -> i32\n"
+                                "  \"std.return\"(%0) : (i32) -> ()\n"
+                                "}");
+        
+        if (input_file) {
+            mlir_code = read_file_ok(arena, str_from_cstr_view(input_file));
+        }
+        tokenizer_print_all_tokens(arena, mlir_code);
+
+        Parser parser;
+        parser_init(arena, &parser, mlir_code);
+        op = parse_module(&parser);
+        println(arena, str_lit("MLIR:"));
+        reg_idx = 0;  // Reset SSA counter
+        println(arena, str_lit("{}"), print_operation(arena, 0, op));
+    }
 
     arena_free(arena);
     return 0;

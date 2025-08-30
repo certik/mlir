@@ -174,6 +174,8 @@ Block* parse_block(Parser *parser) {
     Block *block = arena_alloc(parser->arena, Block);
     block->operations = operations.data;
     block->n_operations = operations.size;
+    block->arguments = NULL;
+    block->n_arguments = 0;
 
     return block;
 }
