@@ -147,6 +147,9 @@ typedef struct ValueRef {
     ValueKind kind;
     // use an index
     void* def; // Block* or Operation* that produced it
+    uint32_t result_index;   // Which result of the operation
+    Type *type;              // Type of this value
+
     // Maybe later:
     //Operation **users;
     //uint64_t n_users;
