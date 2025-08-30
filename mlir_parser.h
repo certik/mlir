@@ -10,6 +10,19 @@
 extern "C" {
 #endif
 
+/*
+TODO:
+* Currently we have a vector of pointers
+* Instead, have a vector of indices, store all operations in one vector
+* An idea: one can inline the structs at the end of
+the parent struct, but that will make it hard to add more later, and each struct will have a different size, so not possible to uniformly store them in a vector by value
+* Best is to have one vector for all operations
+  and then use either indices or pointers.
+* An issue with using pointers is that you can't double and copy the vector allocation. Thus using indices is probably the best way to do that.
+* One can use a pool allocator to reuse space when operations are removed. One can move things around.
+* We still need an arena to allocate a vector of indices for each Operation/Region/Block
+*/
+
 
 typedef struct {
     Arena *arena;
