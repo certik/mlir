@@ -833,18 +833,16 @@ static void buffer_print_operation_generic_internal(StringBuffer *buf, Operation
         buffer_append(buf, op_type_to_string(op->op_type));
     }
     
-    // Print operands with types if any
+    // Print operands with types (always include parentheses)
     Value **operands = operation_get_operands(op);
-    if (op->num_operands > 0) {
-        buffer_append(buf, "(");
-        for (int i = 0; i < op->num_operands; i++) {
-            if (i > 0) buffer_append(buf, ", ");
-            buffer_print_value(buf, operands[i]);
-            buffer_append(buf, ": ");
-            buffer_print_type(buf, operands[i]->type);
-        }
-        buffer_append(buf, ")");
+    buffer_append(buf, "(");
+    for (int i = 0; i < op->num_operands; i++) {
+        if (i > 0) buffer_append(buf, ", ");
+        buffer_print_value(buf, operands[i]);
+        buffer_append(buf, ": ");
+        buffer_print_type(buf, operands[i]->type);
     }
+    buffer_append(buf, ")");
     
     // Print attributes if any
     NamedAttribute *attrs = operation_get_attributes(op);
@@ -1310,11 +1308,11 @@ int main() {
 
     // Reference expected output for generic mode
     const char *expected2 =
-        "module {\n"
+        "module() {\n"
         "  ^bb0():\n"
-        "  func.func {sym_name = \"example_func\"} {\n"
+        "  func.func() {sym_name = \"example_func\"} {\n"
         "    ^bb0(%arg0: i32, %arg1: i32):\n"
-        "    %0 = arith.constant {value = 5} -> i32\n"
+        "    %0 = arith.constant() {value = 5} -> i32\n"
         "    %1 = arith.addi(%arg0: i32, %arg1: i32) -> i32\n"
         "    %2 = arith.muli(%1: i32, %0: i32) -> i32\n"
         "    %3 = \"custom.my_op\"(%2: i32) -> i64\n"
