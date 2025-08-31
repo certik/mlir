@@ -219,36 +219,27 @@ void parse_loc(Parser *parser) {
 
 void parse_tt_func(Parser *parser, Operation *op) {
     // Parse tt.func public @function_name(%arg0: type, %arg1: type, ...)
-    printf("DEBUG: Starting parse_tt_func\n");
     
     // Skip "public" if present
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("public"))) {
-        printf("DEBUG: Found 'public'\n");
         parser_expect(parser, TK_NAME);
     }
     
     // Skip @function_name
-    printf("DEBUG: Looking for @ symbol\n");
     if (parser_peek(parser, TK_AT)) {
-        printf("DEBUG: Found @ symbol\n");
         parser_expect(parser, TK_AT);
         if (parser_peek(parser, TK_NAME)) {
-            printf("DEBUG: Found function name\n");
             parser_expect(parser, TK_NAME);
         }
     } else {
-        printf("DEBUG: No @ symbol found, trying to skip to parenthesis\n");
         // Try to skip tokens until we find a parenthesis
         while (!parser_peek(parser, TK_LPAREN) && !parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_LBRACE_END)) {
-            printf("DEBUG: Skipping token\n");
             parser_next_token(parser);
         }
     }
     
     // Parse function arguments
-    printf("DEBUG: Looking for opening parenthesis\n");
     if (parser_peek(parser, TK_LPAREN)) {
-        printf("DEBUG: Found opening parenthesis, parsing arguments\n");
         parser_expect(parser, TK_LPAREN);
         
         // Count and parse arguments
@@ -259,17 +250,41 @@ void parse_tt_func(Parser *parser, Operation *op) {
         while (!parser_peek(&temp_parser, TK_RPAREN) && !parser_peek(&temp_parser, TK_EOF)) {
             if (parser_peek(&temp_parser, TK_REGISTER)) {
                 arg_count++;
-                // Skip to next comma or closing paren
-                while (!parser_peek(&temp_parser, TK_COMMA) && !parser_peek(&temp_parser, TK_RPAREN) && !parser_peek(&temp_parser, TK_EOF)) {
+                // Skip to next comma or closing paren, handling nested structures
+                int skip_count = 0;
+                int paren_depth = 0;
+                int brace_depth = 0;
+                while (!parser_peek(&temp_parser, TK_EOF)) {
+                    if (parser_peek(&temp_parser, TK_LPAREN)) {
+                        paren_depth++;
+                    } else if (parser_peek(&temp_parser, TK_RPAREN)) {
+                        if (paren_depth == 0) {
+                            // Found the main closing paren
+                            break;
+                        }
+                        paren_depth--;
+                    } else if (parser_peek(&temp_parser, TK_LBRACE)) {
+                        brace_depth++;
+                    } else if (parser_peek(&temp_parser, TK_RBRACE)) {
+                        brace_depth--;
+                    } else if (parser_peek(&temp_parser, TK_COMMA) && paren_depth == 0 && brace_depth == 0) {
+                        // Found a comma at the top level
+                        break;
+                    }
+                    
+                    skip_count++;
                     parser_next_token(&temp_parser);
                 }
                 if (parser_peek(&temp_parser, TK_COMMA)) {
                     parser_next_token(&temp_parser);
+                } else if (parser_peek(&temp_parser, TK_RPAREN)) {
+                    break;
                 }
             } else {
                 parser_next_token(&temp_parser);
             }
         }
+        
         
         // Allocate operands for function arguments
         op->n_operands = arg_count;
@@ -294,14 +309,11 @@ void parse_tt_func(Parser *parser, Operation *op) {
                     arg->type = arena_alloc(parser->arena, Type);
                     
                     // Parse the argument type
-                    printf("DEBUG: About to parse type\n");
                     if (parser_peek(parser, TK_EXCLAMATION)) {
-                        printf("DEBUG: Found ! token for complex type\n");
                         parser_expect(parser, TK_EXCLAMATION);
                         
                         if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
                             string type_name = parser_token_str(parser);
-                            printf("DEBUG: Type name: %.*s\n", (int)type_name.size, type_name.str);
                             if (parser_peek(parser, TK_NAME)) {
                                 parser_expect(parser, TK_NAME);
                             } else {
@@ -332,31 +344,41 @@ void parse_tt_func(Parser *parser, Operation *op) {
                                 arg->type->str = str_concat(parser->arena, str_lit("!"), type_name);
                             }
                         } else {
-                            printf("DEBUG: No NAME token after !\n");
                             arg->type->str = str_lit("!unknown");
                         }
                     } else if (parser_peek(parser, TK_NAME)) {
-                        printf("DEBUG: Found simple type\n");
                         // Simple type like i32
                         string type_name = parser_token_str(parser);
-                        printf("DEBUG: Simple type name: %.*s\n", (int)type_name.size, type_name.str);
                         parser_expect(parser, TK_NAME);
                         arg->type->str = type_name;
                     } else {
-                        printf("DEBUG: No type found!\n");
                         arg->type->str = str_lit("unknown");
                     }
                     
                     op->operands[current_arg] = arg;
-                    printf("DEBUG: Parsed argument %d: %.*s : %.*s\n", current_arg, 
-                           (int)arg->register_name.size, arg->register_name.str,
-                           (int)arg->type->str.size, arg->type->str.str);
                     current_arg++;
                 }
                 
                 // Skip everything until comma or closing paren (attributes, locations, etc.)
-                while (!parser_peek(parser, TK_COMMA) && !parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
-                    printf("DEBUG: Skipping token while looking for comma or )\n");
+                int paren_depth = 0;
+                int brace_depth = 0;
+                while (!parser_peek(parser, TK_EOF)) {
+                    if (parser_peek(parser, TK_LPAREN)) {
+                        paren_depth++;
+                    } else if (parser_peek(parser, TK_RPAREN)) {
+                        if (paren_depth == 0) {
+                            // Found the main closing paren
+                            break;
+                        }
+                        paren_depth--;
+                    } else if (parser_peek(parser, TK_LBRACE)) {
+                        brace_depth++;
+                    } else if (parser_peek(parser, TK_RBRACE)) {
+                        brace_depth--;
+                    } else if (parser_peek(parser, TK_COMMA) && paren_depth == 0 && brace_depth == 0) {
+                        // Found a comma at the top level
+                        break;
+                    }
                     parser_next_token(parser);
                 }
                 
@@ -371,9 +393,7 @@ void parse_tt_func(Parser *parser, Operation *op) {
         
         if (parser_peek(parser, TK_RPAREN)) {
             parser_expect(parser, TK_RPAREN);
-            printf("DEBUG: Successfully parsed all arguments, found closing )\n");
         } else {
-            printf("DEBUG: Warning: Did not find closing ), continuing anyway\n");
         }
     }
     
@@ -560,9 +580,7 @@ Operation* parse_operation(Parser *parser) {
     
 
     // First we handle specific opnames with special parsing rules
-    printf("DEBUG: Operation name: '%.*s'\n", (int)op->opname.size, op->opname.str);
     if (str_eq(op->opname, str_lit("tt.func"))) {
-        printf("DEBUG: Matched tt.func, calling parse_tt_func\n");
         parse_tt_func(parser, op);
     } else if (str_eq(op->opname, str_lit("scf.if"))) {
         parse_scf_if(parser, op);

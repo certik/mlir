@@ -490,6 +490,10 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
     for (int i = 0; i < op->n_operands; i++) {
         if (i > 0) result = str_concat(arena, result, str_lit(", "));
         ValueRef *operand = op->operands[i];
+        if (operand == NULL) {
+            result = str_concat(arena, result, str_lit("NULL_OPERAND"));
+            continue;
+        }
         if (operand->register_name.size > 0) {
             result = str_concat(arena, result, operand->register_name);
         }
