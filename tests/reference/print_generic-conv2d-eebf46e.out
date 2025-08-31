@@ -6,65 +6,77 @@ Arg 2: --no-error-banner
 Arg 3: --line=-1
 Arg 4: --column=-1
 Done parsing args. use_construction=0
+Warning (11:37): Undefined value: %arg22
+      %4 = tt.addptr %arg13, %arg22 : !tt.ptr<f32, 1>, i32
+                                    ^
+Warning (22:40): Undefined value: %arg24
+          %19 = arith.addi %10, %arg24 : i32
+                                       ^
+Warning (30:44): Undefined value: %arg26
+              %25 = arith.addi %11, %arg26 : i32
+                                           ^
+Warning (40:45): Undefined value: %arg26
+                %33 = tt.addptr %32, %arg26 : !tt.ptr<f32, 1>, i32
+                                            ^
 MLIR:
 module() {
 ^bb0:
     tt.func(%arg0: !tt.ptr<f32,1>, %arg1: i32, %arg2: i32, %arg3: i32, %arg4: i32, %arg5: i32, %arg6: !tt.ptr<f32,1>, %arg7: i32, %arg8: i32, %arg9: i32, %arg10: i32, %arg11: i32, %arg12: i32, %arg13: !tt.ptr<f32,1>, %arg14: !tt.ptr<f32,1>, %arg15: i32, %arg16: i32, %arg17: i32, %arg18: i32, %arg19: i32, %arg20: i32, %arg21: i32) {
-    ^bb0:
-        %0 = arith.constant() {value = 0} -> i32
+    ^bb0(%arg0: !tt.ptr<f32,1>, %arg1: i32, %arg2: i32, %arg3: i32, %arg4: i32, %arg5: i32, %arg6: !tt.ptr<f32,1>, %arg7: i32, %arg8: i32, %arg9: i32, %arg10: i32, %arg11: i32, %arg12: i32, %arg13: !tt.ptr<f32,1>, %arg14: !tt.ptr<f32,1>, %arg15: i32, %arg16: i32, %arg17: i32, %arg18: i32, %arg19: i32, %arg20: i32, %arg21: i32):
+        %0 = arith.constant() {value = 1} -> i32
         %1 = arith.constant() {value = 0} -> i32
         %2 = arith.constant() -> ?
         %3 = "tt.get_program_id"() -> i32
         %4 = arith.muli(%arg18: i32, %arg19: i32) -> i32
-        %5 = arith.muli(%0: i32, %arg1: i32) -> i32
-        %6 = arith.muli(%0: i32, %arg15: i32) -> i32
+        %5 = arith.muli(%3: i32, %arg1: i32) -> i32
+        %6 = arith.muli(%3: i32, %arg15: i32) -> i32
         "scf.for"() {
         ^bb0:
-            %7 = "tt.addptr"(%arg13: !tt.ptr<f32>, %arg22: !tt.ptr<f32>) -> !
-            %8 = arith.muli(%arg22: i32, %arg7: i32) -> i32
-            %9 = arith.muli(%arg22: i32, %arg16: i32) -> i32
-            %10 = arith.addi(%3: i32, %6: i32) -> i32
+            %7 = "tt.addptr"(%arg13: !tt.ptr<f32,1>, %arg22: unknown) -> !
+            %8 = arith.muli(%999: i32, %arg7: i32) -> i32
+            %9 = arith.muli(%999: i32, %arg16: i32) -> i32
+            %10 = arith.addi(%6: i32, %9: i32) -> i32
             "scf.for"() {
             ^bb0:
                 %11 = "arith.divsi"() -> ?
                 %12 = "arith.remsi"() -> ?
-                %13 = arith.subi(%8: i32, %arg20: i32) -> i32
-                %14 = arith.subi(%9: i32, %arg21: i32) -> i32
-                %15 = "tt.load"(%4: i32) -> ?
-                %16 = "scf.for"() -> ? {
+                %13 = arith.subi(%11: i32, %arg20: i32) -> i32
+                %14 = arith.subi(%12: i32, %arg21: i32) -> i32
+                %15 = "tt.load"(%7: !) -> ?
+                %39 = "scf.for"() -> ? {
                 ^bb0:
-                    %17 = arith.addi(%10: i32, %arg24: i32) -> i32
+                    %16 = arith.addi(%13: i32, %arg24: unknown) -> i32
+                    %17 = "arith.cmpi"() -> ?
                     %18 = "arith.cmpi"() -> ?
-                    %19 = "arith.cmpi"() -> ?
-                    %20 = "arith.ori"() -> ?
-                    %21 = "scf.if"() -> ? {
+                    %19 = "arith.ori"() -> ?
+                    %38 = "scf.if"() -> ? {
                     ^bb0:
                         "scf.yield"()
                     }{
                     ^bb0:
-                        %22 = "scf.for"() -> ? {
+                        %37 = "scf.for"() -> ? {
                         ^bb0:
-                            %23 = arith.addi(%11: i32, %arg26: i32) -> i32
-                            %24 = "arith.cmpi"() -> ?
-                            %25 = "arith.cmpi"() -> ?
-                            %26 = "arith.ori"() -> ?
-                            %27 = "scf.if"() -> ? {
+                            %20 = arith.addi(%14: i32, %arg26: unknown) -> i32
+                            %21 = "arith.cmpi"() -> ?
+                            %22 = "arith.cmpi"() -> ?
+                            %23 = "arith.ori"() -> ?
+                            %36 = "scf.if"() -> ? {
                             ^bb0:
                                 "scf.yield"()
                             }{
                             ^bb0:
-                                %28 = "tt.addptr"(%arg6: !tt.ptr<f32>, %5: i32) -> !
-                                %29 = arith.muli(%arg24: i32, %arg9: i32) -> i32
-                                %30 = "tt.addptr"(%30: i32, %31: i32) -> !
-                                %31 = "tt.addptr"(%32: i32, %arg26: !tt.ptr<f32>) -> !
-                                %32 = "tt.load"(%33: i32) -> ?
-                                %33 = "tt.addptr"(%arg0: !tt.ptr<f32>, %2: i32) -> !
-                                %34 = arith.muli(%19: i32, %arg3: i32) -> i32
-                                %35 = "tt.addptr"(%35: i32, %36: i32) -> !
-                                %36 = "tt.addptr"(%37: i32, %25: i32) -> !
-                                %37 = "tt.load"(%38: i32) -> ?
-                                %38 = "arith.mulf"() -> ?
-                                %39 = "arith.addf"() -> tensor<16xf32>
+                                %24 = "tt.addptr"(%arg6: !tt.ptr<f32,1>, %8: i32) -> !
+                                %25 = arith.muli(%999: i32, %arg9: i32) -> i32
+                                %26 = "tt.addptr"(%24: !, %25: i32) -> !
+                                %27 = "tt.addptr"(%26: !, %arg26: unknown) -> !
+                                %28 = "tt.load"(%27: !) -> ?
+                                %29 = "tt.addptr"(%arg0: !tt.ptr<f32,1>, %5: i32) -> !
+                                %30 = arith.muli(%16: i32, %arg3: i32) -> i32
+                                %31 = "tt.addptr"(%29: !, %30: i32) -> !
+                                %32 = "tt.addptr"(%31: !, %20: i32) -> !
+                                %33 = "tt.load"(%32: !) -> ?
+                                %34 = "arith.mulf"() -> ?
+                                %35 = "arith.addf"() -> tensor<16xf32>
                                 "scf.yield"()
                             }
                             "scf.yield"()
@@ -74,11 +86,11 @@ module() {
                     "scf.yield"()
                 }
                 %40 = "arith.addf"() -> tensor<16xf32>
-                %41 = arith.muli(%8: i32, %arg17: i32) -> i32
-                %42 = arith.addi(%7: i32, %15: i32) -> i32
-                %43 = arith.addi(%16: i32, %9: i32) -> i32
-                %44 = "tt.addptr"(%arg14: !tt.ptr<f32>, %17: i32) -> !
-                "tt.store"(%18: i32, %14: i32)
+                %41 = arith.muli(%11: i32, %arg17: i32) -> i32
+                %42 = arith.addi(%10: i32, %41: i32) -> i32
+                %43 = arith.addi(%42: i32, %12: i32) -> i32
+                %44 = "tt.addptr"(%arg14: !tt.ptr<f32,1>, %43: i32) -> !
+                "tt.store"(%44: !, %40: tensor<16xf32>)
             }
         }
         "tt.return"()

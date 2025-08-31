@@ -9,10 +9,10 @@ Done parsing args. use_construction=0
 MLIR:
 module() {
 ^bb0:
-    tt.func(%arg0: !tt.ptr<f32,1>) {
-    ^bb0:
+    tt.func(%arg0: !tt.ptr<f32,1>, %arg1: !tt.ptr<f32,1>, %arg2: !tt.ptr<f32,1>) {
+    ^bb0(%arg0: !tt.ptr<f32,1>, %arg1: !tt.ptr<f32,1>, %arg2: !tt.ptr<f32,1>):
         %0 = "tt.get_program_id"() -> i32
-        %1 = arith.constant() {value = 0} -> i32
+        %1 = arith.constant() {value = 1} -> i32
         %2 = "arith.cmpi"() -> ?
         "cf.cond_br"()
     ^bb1:
@@ -20,24 +20,24 @@ module() {
     ^bb2:
         "cf.br"()
     ^bb3:
-        %3 = arith.constant() {value = 0} -> i32
-        %4 = arith.muli(%0: i32, %c4_i32: i32) -> i32
+        %3 = arith.constant() {value = 4} -> i32
+        %4 = arith.muli(%0: i32, %3: i32) -> i32
         %5 = "tt.make_range"() {end = 16 : i32, start = 0 : i32} -> tensor<4xi32>
-        %6 = "tt.splat"(%2: i32) -> tensor<16xi32>
-        %7 = arith.addi(%4: i32, %3: i32) -> tensor<4xi32>
-        %8 = arith.constant() {value = 0} -> i32
+        %6 = "tt.splat"(%4: i32) -> tensor<16xi32>
+        %7 = arith.addi(%6: tensor<16xi32>, %5: tensor<4xi32>) -> tensor<4xi32>
+        %8 = arith.constant() {value = 4} -> i32
         %9 = arith.constant() -> ?
         %10 = "arith.cmpi"() -> ?
-        %11 = "tt.splat"(%arg0: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
-        %12 = "tt.addptr"(%7: i32, %5: i32) -> tensor<4x!tt.ptr<f32,1>
-        %13 = "tt.load"(%8: i32, %6: i32) -> ?
-        %14 = "tt.splat"(%arg1: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
-        %15 = "tt.addptr"(%10: i32, %5: i32) -> tensor<4x!tt.ptr<f32,1>
-        %16 = "tt.load"(%11: i32, %6: i32) -> ?
+        %11 = "tt.splat"(%arg0: !tt.ptr<f32,1>) -> tensor<16xi32>
+        %12 = "tt.addptr"(%11: tensor<16xi32>, %7: tensor<4xi32>) -> tensor<4x!tt.ptr<f32,1>
+        %13 = "tt.load"(%12: tensor<4x!tt.ptr<f32,1>, %10: i32) -> ?
+        %14 = "tt.splat"(%arg1: !tt.ptr<f32,1>) -> tensor<16xi32>
+        %15 = "tt.addptr"(%14: tensor<16xi32>, %7: tensor<4xi32>) -> tensor<4x!tt.ptr<f32,1>
+        %16 = "tt.load"(%15: tensor<4x!tt.ptr<f32,1>, %10: i32) -> ?
         %17 = "arith.addf"() -> tensor<16xf32>
-        %18 = "tt.splat"(%arg2: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
-        %19 = "tt.addptr"(%14: i32, %5: i32) -> tensor<4x!tt.ptr<f32,1>
-        "tt.store"(%15: i32, %13: i32, %6: i32)
+        %18 = "tt.splat"(%arg2: !tt.ptr<f32,1>) -> tensor<16xi32>
+        %19 = "tt.addptr"(%18: tensor<16xi32>, %7: tensor<4xi32>) -> tensor<4x!tt.ptr<f32,1>
+        "tt.store"(%19: tensor<4x!tt.ptr<f32,1>, %17: tensor<16xf32>, %10: i32)
         "tt.return"()
     }
 }

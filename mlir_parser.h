@@ -2,6 +2,8 @@
 
 #include <base/arena.h>
 #include <base/string.h>
+#include <base/hashtable.h>
+#include <base/vector.h>
 
 #include "tokenizer.h"
 
@@ -25,12 +27,43 @@ the parent struct, but that will make it hard to add more later, and each struct
 */
 
 
+// Hash function for strings
+static inline size_t string_hash(string str) {
+    size_t hash = 5381;
+    for (size_t i = 0; i < str.size; i++) {
+        hash = ((hash << 5) + hash) + str.str[i];
+    }
+    return hash;
+}
+
+// Equality function for strings
+static inline bool string_equal(string a, string b) {
+    return str_eq(a, b);
+}
+
+// Forward declare ValueRef for hashtable
+typedef struct ValueRef ValueRef;
+
+// Define hashtable for string -> ValueRef* mapping
+#define SymbolTable_HASH string_hash
+#define SymbolTable_EQUAL string_equal
+DEFINE_HASHTABLE_FOR_TYPES(string, ValueRef*, SymbolTable)
+
+// Scoped symbol table for SSA values
+typedef struct ScopedSymbolTable {
+    SymbolTable *scopes;
+    size_t num_scopes;
+    size_t scope_capacity;
+    uint32_t next_ssa_number;
+} ScopedSymbolTable;
+
 typedef struct {
     Arena *arena;
     unsigned char *input;
     TokenType sym;
     uint64_t cur;
     uint64_t first, last;
+    ScopedSymbolTable symbol_table;
 } Parser;
 
 
@@ -143,7 +176,7 @@ typedef enum ValueKind {
     OP_RESULT
 } ValueKind;
 
-typedef struct ValueRef {
+struct ValueRef {
     ValueKind kind;
     // TODO: Use an index
     void* def; // Block* or Operation* that produced it
@@ -155,11 +188,14 @@ typedef struct ValueRef {
     // same name. If this is used for printing, then extra care must be taken
     // that the printed Value name is unique.
     string register_name;
+    
+    // SSA number assigned during parsing for unique printing
+    uint32_t ssa_number;
 
     // Maybe later:
     //Operation **users;
     //uint64_t n_users;
-} ValueRef;
+};
 
 // Note: we use ** instead of *, because Value has a pointer to Operation or
 // Block, so we can't easily move them later. When parsing we do not know how
@@ -178,6 +214,10 @@ typedef struct Operation {
     Region **regions;
     uint64_t n_regions;
     string opname; // Only used for unregistered ops
+    
+    // Result values produced by this operation
+    ValueRef **results;
+    uint64_t n_results;
 } Operation;
 DEFINE_VECTOR_FOR_TYPE(Operation*, VecOperation)
 DEFINE_VECTOR_FOR_TYPE(ValueRef*, VecValueRef)
@@ -195,8 +235,24 @@ struct Region {
     uint64_t n_blocks;
 };
 
+// Symbol table functions
+void symbol_table_init(Arena *arena, ScopedSymbolTable *st);
+void symbol_table_push_scope(Arena *arena, ScopedSymbolTable *st);
+void symbol_table_pop_scope(ScopedSymbolTable *st);
+void symbol_table_add_value(Arena *arena, ScopedSymbolTable *st, string name, ValueRef *value);
+ValueRef* symbol_table_lookup(ScopedSymbolTable *st, string name);
+uint32_t symbol_table_get_next_ssa_number(ScopedSymbolTable *st);
+
+// Helper function to create properly initialized ValueRef
+ValueRef* create_value_ref(Arena *arena, ValueKind kind);
+
+// Specialized parsing functions
+void parse_gpu_launch(Parser *parser, Operation *op);
+
 string tokentype_to_string(TokenType tt);
 void parser_init(Arena *arena, Parser *parser, string text);
+void parser_error(Parser *parser, string msg, uint64_t first, uint64_t last);
+void parser_warning(Parser *parser, string msg, uint64_t first, uint64_t last);
 Operation* parse_module(Parser *parser);
 
 #ifdef __cplusplus

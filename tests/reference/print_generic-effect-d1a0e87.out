@@ -23,13 +23,13 @@ module() {
         %7 = arith.constant() {value = 0} -> i64
         %8 = "arith.cmpi"() -> ?
         "cf.br"()
-    ^bb2:
+    ^bb2(%3: i1, %4: i64):
         %9 = "arith.extui"() -> ?
         %10 = arith.constant() {value = 0} -> i64
         %11 = "arith.cmpi"() -> ?
         "cf.cond_br"()
     ^bb3:
-        %12 = arith.constant() {value = 0} -> i64
+        %12 = arith.constant() {value = 1} -> i64
         "return"()
     ^bb4:
         "cf.br"()
@@ -38,12 +38,12 @@ module() {
         %14 = "arith.cmpi"() -> ?
         "cf.cond_br"()
     ^bb6:
-        %15 = arith.constant() {value = 0} -> i64
+        %15 = arith.constant() {value = 2} -> i64
         "return"()
     ^bb7:
         "cf.br"()
     ^bb8:
-        %16 = arith.constant() {value = 0} -> i64
+        %16 = arith.constant() {value = 1} -> i64
         %17 = arith.constant() {value = 0} -> i64
         %18 = "arith.cmpi"() -> ?
         %19 = arith.constant() -> ?
@@ -53,31 +53,31 @@ module() {
         %21 = arith.constant() {value = 0} -> i64
         %22 = "arith.cmpi"() -> ?
         "cf.br"()
-    ^bb10:
+    ^bb10(%11: i1, %12: i64):
         %23 = "arith.extui"() -> ?
         %24 = arith.constant() {value = 0} -> i64
         %25 = "arith.cmpi"() -> ?
         "cf.cond_br"()
     ^bb11:
-        %26 = arith.constant() {value = 0} -> i64
+        %26 = arith.constant() {value = 1} -> i64
         %27 = "arith.cmpi"() -> ?
         %28 = "arith.extui"() -> ?
         %29 = arith.constant() {value = 0} -> i64
         %30 = "arith.cmpi"() -> ?
         "cf.cond_br"()
     ^bb12:
-        %31 = arith.constant() {value = 0} -> i64
+        %31 = arith.constant() {value = 3} -> i64
         "return"()
     ^bb13:
         "cf.br"()
     ^bb14:
         "cf.br"()
     ^bb15:
-        %32 = arith.constant() {value = 0} -> i64
+        %32 = arith.constant() {value = 4} -> i64
         "return"()
     ^bb16:
         %33 = arith.constant() {value = 0} -> i64
-        %34 = arith.constant() {value = 0} -> i64
+        %34 = arith.constant() {value = 1} -> i64
         %35 = arith.constant() {value = 0} -> i64
         %36 = "arith.cmpi"() -> ?
         %37 = arith.constant() -> ?
@@ -87,7 +87,7 @@ module() {
         %39 = arith.constant() {value = 0} -> i64
         %40 = "arith.cmpi"() -> ?
         "cf.br"()
-    ^bb18:
+    ^bb18(%21: i1, %22: i64):
         %41 = "arith.extui"() -> ?
         %42 = arith.constant() {value = 0} -> i64
         %43 = "arith.cmpi"() -> ?
@@ -97,14 +97,14 @@ module() {
         %45 = "arith.cmpi"() -> ?
         "cf.cond_br"()
     ^bb20:
-        %46 = arith.constant() {value = 0} -> i64
+        %46 = arith.constant() {value = 5} -> i64
         "return"()
     ^bb21:
         "cf.br"()
     ^bb22:
         "cf.br"()
     ^bb23:
-        %47 = arith.constant() {value = 0} -> i64
+        %47 = arith.constant() {value = 6} -> i64
         "return"()
     ^bb24:
         %48 = arith.constant() {value = 0} -> i64
@@ -117,27 +117,27 @@ module() {
         %53 = arith.constant() {value = 0} -> i64
         %54 = "arith.cmpi"() -> ?
         "cf.br"()
-    ^bb26:
+    ^bb26(%29: i1, %30: i64):
         %55 = "arith.extui"() -> ?
         %56 = arith.constant() {value = 0} -> i64
         %57 = "arith.cmpi"() -> ?
         "cf.cond_br"()
     ^bb27:
-        %58 = arith.constant() {value = 0} -> i64
+        %58 = arith.constant() {value = 1} -> i64
         %59 = "arith.cmpi"() -> ?
         %60 = "arith.extui"() -> ?
         %61 = arith.constant() {value = 0} -> i64
         %62 = "arith.cmpi"() -> ?
         "cf.cond_br"()
     ^bb28:
-        %63 = arith.constant() {value = 0} -> i64
+        %63 = arith.constant() {value = 7} -> i64
         "return"()
     ^bb29:
         "cf.br"()
     ^bb30:
         "cf.br"()
     ^bb31:
-        %64 = arith.constant() {value = 0} -> i64
+        %64 = arith.constant() {value = 8} -> i64
         "return"()
     ^bb32:
         %65 = arith.constant() {value = 0} -> i64
@@ -145,7 +145,7 @@ module() {
     }
     func.func() {
     ^bb0:
-        %66 = arith.constant() {value = 0} -> i64
+        %66 = arith.constant() {value = 1} -> i64
         "return"()
     }
 }

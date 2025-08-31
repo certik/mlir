@@ -13,13 +13,13 @@ module() {
     ^bb0:
         %0 = "memref.alloc"() -> ?
         %1 = arith.constant() {value = 0} -> index
-        %2 = arith.constant() {value = 0} -> index
-        %3 = arith.constant() {value = 0} -> index
+        %2 = arith.constant() {value = 10} -> index
+        %3 = arith.constant() {value = 1} -> index
         "scf.for"() {
         ^bb0:
             %4 = arith.constant() {value = 0} -> index
-            %5 = arith.constant() {value = 0} -> index
-            %6 = arith.constant() {value = 0} -> index
+            %5 = arith.constant() {value = 20} -> index
+            %6 = arith.constant() {value = 1} -> index
             "scf.for"() {
             ^bb0:
                 %7 = "memref.load"() -> ?

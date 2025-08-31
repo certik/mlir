@@ -377,24 +377,24 @@ string print_block(Arena *arena, int bb_index, int indent_level, Block *block) {
     
     // Print block arguments if any
     if (block->n_arguments > 0 && block->arguments) {
-        // Try to access arguments safely
-        bool can_print_args = true;
-        for (int i = 0; i < block->n_arguments && can_print_args; i++) {
-            if (!block->arguments[i] || !block->arguments[i]->type) {
-                can_print_args = false;
+        result = str_concat(arena, result, str_lit("("));
+        for (int i = 0; i < block->n_arguments; i++) {
+            if (i > 0) result = str_concat(arena, result, str_lit(", "));
+            ValueRef *arg = block->arguments[i];
+            if (arg && arg->type) {
+                // For block arguments, use the original register name
+                if (arg->register_name.size > 0) {
+                    result = str_concat(arena, result, format(arena, str_lit("{}: {}"), 
+                                                            arg->register_name, arg->type->str));
+                } else {
+                    result = str_concat(arena, result, format(arena, str_lit("%arg{}: {}"), 
+                                                            (int64_t)arg->result_index, arg->type->str));
+                }
+            } else {
+                result = str_concat(arena, result, str_lit("null_arg"));
             }
         }
-        
-        if (can_print_args) {
-            result = str_concat(arena, result, str_lit("("));
-            for (int i = 0; i < block->n_arguments; i++) {
-                if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                ValueRef *arg = block->arguments[i];
-                result = str_concat(arena, result, format(arena, str_lit("%arg{}: {}"), 
-                                                        (int64_t)arg->result_index, arg->type->str));
-            }
-            result = str_concat(arena, result, str_lit(")"));
-        }
+        result = str_concat(arena, result, str_lit(")"));
     }
     
     result = str_concat(arena, result, str_lit(":\n"));
@@ -461,10 +461,19 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
     if (op->n_result_types > 0) {
         for (int i = 0; i < op->n_result_types; i++) {
             if (i > 0) result = str_concat(arena, result, str_lit(", "));
-            result = str_concat(arena, result, format(arena, str_lit("%{}"), reg_idx + i));
+            
+            // Use SSA number from operation's results if available
+            if (op->n_results > i && op->results && op->results[i]) {
+                result = str_concat(arena, result, format(arena, str_lit("%{}"), (int64_t)op->results[i]->ssa_number));
+            } else {
+                // Fallback to global counter
+                result = str_concat(arena, result, format(arena, str_lit("%{}"), reg_idx + i));
+            }
         }
         result = str_concat(arena, result, str_lit(" = "));
-        reg_idx += op->n_result_types;
+        if (!op->n_results || !op->results) {
+            reg_idx += op->n_result_types;
+        }
     }
     
     // Print operation name (quotes only for unregistered operations, except tt.func)
@@ -494,7 +503,13 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
             result = str_concat(arena, result, str_lit("NULL_OPERAND"));
             continue;
         }
-        if (operand->register_name.size > 0) {
+        // Use original register name for BLOCK_ARG, SSA number for OP_RESULT
+        if (operand->kind == BLOCK_ARG && operand->register_name.size > 0) {
+            result = str_concat(arena, result, operand->register_name);
+        } else if (operand->ssa_number < 1000) {
+            result = str_concat(arena, result, format(arena, str_lit("%{}"), (int64_t)operand->ssa_number));
+        } else {
+            // Fallback to register name for debugging unresolved values
             result = str_concat(arena, result, operand->register_name);
         }
         result = str_concat(arena, result, str_lit(": "));
@@ -566,6 +581,8 @@ Operation* construct_test_module(Arena *arena) {
     module->n_result_types = 0;
     module->attributes = NULL;
     module->n_attributes = 0;
+    module->results = NULL;
+    module->n_results = 0;
     module->opname = str_lit("module");
 
     // Create module region and block (empty)
@@ -610,6 +627,8 @@ Operation* construct_test_module_full(Arena *arena) {
     module->n_result_types = 0;
     module->attributes = NULL;
     module->n_attributes = 0;
+    module->results = NULL;
+    module->n_results = 0;
     module->opname = str_lit("module");
 
     // Create module region
@@ -625,6 +644,8 @@ Operation* construct_test_module_full(Arena *arena) {
     func_op->n_operands = 0;
     func_op->result_types = NULL;
     func_op->n_result_types = 0;
+    func_op->results = NULL;
+    func_op->n_results = 0;
     func_op->opname = str_lit("func.func");
 
     // Function attributes (sym_name)
@@ -642,13 +663,11 @@ Operation* construct_test_module_full(Arena *arena) {
     // Function block arguments (%arg0, %arg1)
     func_block->n_arguments = 2;
     func_block->arguments = arena_alloc_array(arena, ValueRef*, 2);
-    func_block->arguments[0] = arena_alloc(arena, ValueRef);
-    func_block->arguments[0]->kind = BLOCK_ARG;
+    func_block->arguments[0] = create_value_ref(arena, BLOCK_ARG);
     func_block->arguments[0]->result_index = 0;
     func_block->arguments[0]->type = i32_type;
     func_block->arguments[0]->register_name = str_lit("%arg0");
-    func_block->arguments[1] = arena_alloc(arena, ValueRef);
-    func_block->arguments[1]->kind = BLOCK_ARG;
+    func_block->arguments[1] = create_value_ref(arena, BLOCK_ARG);
     func_block->arguments[1]->result_index = 1;
     func_block->arguments[1]->type = i32_type;
     func_block->arguments[1]->register_name = str_lit("%arg1");
@@ -673,6 +692,18 @@ Operation* construct_test_module_full(Arena *arena) {
     const_op->attributes[0]->name = "value";
     const_op->regions = NULL;
     const_op->n_regions = 0;
+    
+    // Create const_result before linking
+    ValueRef *const_result = create_value_ref(arena, OP_RESULT);
+    const_result->def = const_op;
+    const_result->result_index = 0;
+    const_result->type = i32_type;
+    const_result->register_name = str_lit("%0");
+    const_result->ssa_number = 0;
+    
+    const_op->results = arena_alloc_array(arena, ValueRef*, 1);
+    const_op->results[0] = const_result;
+    const_op->n_results = 1;
     const_op->opname = str_lit("arith.constant");
 
     // %1 = arith.addi %arg0, %arg1 : i32
@@ -689,22 +720,27 @@ Operation* construct_test_module_full(Arena *arena) {
     add_op->n_attributes = 0;
     add_op->regions = NULL;
     add_op->n_regions = 0;
-    add_op->opname = str_lit("arith.addi");
-
-    // %2 = arith.muli %1, %0 : i32 (need to create ValueRef for %1 and %0)
-    ValueRef *add_result = arena_alloc(arena, ValueRef);
-    add_result->kind = OP_RESULT;
+    // Create add_result before linking
+    ValueRef *add_result = create_value_ref(arena, OP_RESULT);
     add_result->def = add_op;
-    add_result->result_index = 1;  // This will be %1
+    add_result->result_index = 1;
     add_result->type = i32_type;
     add_result->register_name = str_lit("%1");
+    add_result->ssa_number = 1;
+    
+    add_op->results = arena_alloc_array(arena, ValueRef*, 1);
+    add_op->results[0] = add_result;
+    add_op->n_results = 1;
+    add_op->opname = str_lit("arith.addi");
 
-    ValueRef *const_result = arena_alloc(arena, ValueRef);
-    const_result->kind = OP_RESULT;
-    const_result->def = const_op;
-    const_result->result_index = 0;  // This will be %0
-    const_result->type = i32_type;
-    const_result->register_name = str_lit("%0");
+    // %2 = arith.muli %1, %0 : i32 (add_result and const_result already created above)
+
+    // Create mul_result before creating mul_op
+    ValueRef *mul_result = create_value_ref(arena, OP_RESULT);
+    mul_result->result_index = 2;  // This will be %2
+    mul_result->type = i32_type;
+    mul_result->register_name = str_lit("%2");
+    mul_result->ssa_number = 2;
 
     Operation *mul_op = arena_alloc(arena, Operation);
     mul_op->op_type = OP_TYPE_ARITH_MULI;
@@ -719,15 +755,15 @@ Operation* construct_test_module_full(Arena *arena) {
     mul_op->n_attributes = 0;
     mul_op->regions = NULL;
     mul_op->n_regions = 0;
+    mul_op->results = arena_alloc_array(arena, ValueRef*, 1);
+    mul_op->results[0] = mul_result;
+    mul_op->n_results = 1;
     mul_op->opname = str_lit("arith.muli");
+    
+    // Set def pointer for mul_result now that mul_op exists
+    mul_result->def = mul_op;
 
     // func.return %2 : i32
-    ValueRef *mul_result = arena_alloc(arena, ValueRef);
-    mul_result->kind = OP_RESULT;
-    mul_result->def = mul_op;
-    mul_result->result_index = 2;  // This will be %2
-    mul_result->type = i32_type;
-    mul_result->register_name = str_lit("%2");
 
     Operation *ret_op = arena_alloc(arena, Operation);
     ret_op->op_type = OP_TYPE_FUNC_RETURN;
@@ -740,6 +776,8 @@ Operation* construct_test_module_full(Arena *arena) {
     ret_op->n_attributes = 0;
     ret_op->regions = NULL;
     ret_op->n_regions = 0;
+    ret_op->results = NULL;
+    ret_op->n_results = 0;
     ret_op->opname = str_lit("func.return");
 
     // Link operations to function block

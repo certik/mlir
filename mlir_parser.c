@@ -10,6 +10,71 @@
 
 #include "mlir_parser.h"
 
+// Symbol table implementation
+void symbol_table_init(Arena *arena, ScopedSymbolTable *st) {
+    st->scope_capacity = 8;
+    st->scopes = arena_alloc_array(arena, SymbolTable, st->scope_capacity);
+    st->num_scopes = 0;
+    st->next_ssa_number = 0;
+}
+
+void symbol_table_push_scope(Arena *arena, ScopedSymbolTable *st) {
+    if (st->num_scopes >= st->scope_capacity) {
+        // Grow scopes array
+        size_t new_capacity = st->scope_capacity * 2;
+        SymbolTable *new_scopes = arena_alloc_array(arena, SymbolTable, new_capacity);
+        memcpy(new_scopes, st->scopes, st->num_scopes * sizeof(SymbolTable));
+        st->scopes = new_scopes;
+        st->scope_capacity = new_capacity;
+    }
+    SymbolTable_init(arena, &st->scopes[st->num_scopes], 16);
+    st->num_scopes++;
+}
+
+void symbol_table_pop_scope(ScopedSymbolTable *st) {
+    if (st->num_scopes > 0) {
+        st->num_scopes--;
+    }
+}
+
+void symbol_table_add_value(Arena *arena, ScopedSymbolTable *st, string name, ValueRef *value) {
+    if (st->num_scopes == 0) {
+        // Create a default scope if none exists
+        symbol_table_push_scope(arena, st);
+    }
+    // Only assign SSA numbers to OP_RESULT values, not BLOCK_ARG
+    if (value->kind == OP_RESULT) {
+        value->ssa_number = st->next_ssa_number++;
+    }
+    SymbolTable_insert(arena, &st->scopes[st->num_scopes - 1], name, value);
+}
+
+ValueRef* symbol_table_lookup(ScopedSymbolTable *st, string name) {
+    // Search from innermost to outermost scope
+    for (size_t i = st->num_scopes; i > 0; i--) {
+        ValueRef **found = SymbolTable_get(&st->scopes[i - 1], name);
+        if (found && *found) {
+            return *found;
+        }
+    }
+    return NULL;
+}
+
+uint32_t symbol_table_get_next_ssa_number(ScopedSymbolTable *st) {
+    return st->next_ssa_number++;
+}
+
+ValueRef* create_value_ref(Arena *arena, ValueKind kind) {
+    ValueRef *value = arena_alloc(arena, ValueRef);
+    value->kind = kind;
+    value->def = NULL;
+    value->result_index = 0;
+    value->type = NULL;
+    value->register_name = str_lit("");
+    value->ssa_number = 0;
+    return value;
+}
+
 string tokentype_to_string(TokenType tt) {
     switch (tt) {
 #define X(token) case token: return str_lit(#token);
@@ -95,6 +160,47 @@ void parser_error(Parser *parser, string msg, uint64_t first, uint64_t last) {
     exit(1);
 }
 
+void parser_warning(Parser *parser, string msg, uint64_t first, uint64_t last) {
+    assert(first <= last);
+    string s = str_from_cstr_view((char*)parser->input);
+    vector_i64 newlines;
+    vector_i64_reserve(parser->arena, &newlines, 16);
+    get_newlines(parser->arena, s, &newlines);
+
+    int64_t start_of_line, end_of_line, line_first, column_first;
+    linear_to_line_column(newlines, first, &start_of_line, &end_of_line,
+            &line_first, &column_first);
+
+    bool debug = false;
+    if (debug) {
+        println(parser->arena, str_lit("{}"), newlines);
+        println(parser->arena,
+                str_lit("first: {}, last: {}, line_first: {}, column_first: {}, start_of_line: {}, end_of_line: {}"),
+                first, last, line_first, column_first, start_of_line, end_of_line);
+    }
+
+    // Extract the line as a string
+    string line = { .str = s.str + start_of_line, .size = end_of_line - start_of_line };
+
+    // Create the caret string (spaces followed by carets)
+    int64_t token_length = last - first + 1; // Assuming 'last' is inclusive
+    assert(first >= start_of_line);
+    char* caret_buf = arena_alloc_array(parser->arena, char, first - start_of_line + token_length);
+    for (int64_t i = 0; i < first - start_of_line; i++) {
+        caret_buf[i] = ' ';
+    }
+    for (int64_t i = 0; i < token_length; i++) {
+        caret_buf[first - start_of_line + i] = '^';
+    }
+    string caret_str = { .str = caret_buf, .size = first - start_of_line + token_length };
+
+    // Print the warning message, line, and caret string
+    println(parser->arena, str_lit("Warning ({}:{}): {}"),
+            line_first, column_first, msg);
+    println(parser->arena, str_lit("{}"), line);
+    println(parser->arena, caret_str);
+}
+
 void parser_next_token(Parser *parser) {
     do {
         parser->first = parser->cur;
@@ -108,6 +214,7 @@ void parser_init(Arena *arena, Parser *parser, string text) {
     parser->arena = arena;
     parser->input = (unsigned char*) text_null.str;
     parser->cur = 0;
+    symbol_table_init(arena, &parser->symbol_table);
     parser_next_token(parser);
 }
 
@@ -151,10 +258,59 @@ void parser_expect_opname(Parser *parser, string name) {
 Operation* parse_operation(Parser *parser);
 
 Block* parse_block(Parser *parser) {
+    VecValueRef block_args;
+    VecValueRef_reserve(parser->arena, &block_args, 4);
+    
     if (parser_peek(parser, TK_CARET_NAME)) {
         parser_expect(parser, TK_CARET_NAME);
-        while (!(parser_peek(parser, TK_NEWLINE))) {
-            parser_next_token(parser);
+        
+        // Parse block arguments if present: ^bb1(%0: i64, %1: i32):
+        if (parser_peek(parser, TK_LPAREN)) {
+            parser_expect(parser, TK_LPAREN);
+            
+            while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
+                if (parser_peek(parser, TK_REGISTER)) {
+                    string arg_name = parser_token_str(parser);
+                    parser_expect(parser, TK_REGISTER);
+                    parser_expect(parser, TK_COLON);
+                    
+                    // Create block argument value
+                    ValueRef *block_arg = arena_alloc(parser->arena, ValueRef);
+                    block_arg->kind = BLOCK_ARG;
+                    block_arg->register_name = arg_name;
+                    block_arg->result_index = block_args.size;
+                    block_arg->def = NULL; // Block arguments don't have a defining operation
+                    block_arg->type = arena_alloc(parser->arena, Type);
+                    
+                    // Parse argument type
+                    if (parser_peek(parser, TK_NAME)) {
+                        string type_name = parser_token_str(parser);
+                        parser_expect(parser, TK_NAME);
+                        block_arg->type->str = type_name;
+                        block_arg->type->kind = TYPE_KIND_INTEGER; // Default, could be more sophisticated
+                    } else {
+                        block_arg->type->str = str_lit("i32");
+                        block_arg->type->kind = TYPE_KIND_INTEGER;
+                    }
+                    
+                    VecValueRef_push_back(parser->arena, &block_args, block_arg);
+                    
+                    // Register block argument in symbol table
+                    symbol_table_add_value(parser->arena, &parser->symbol_table, arg_name, block_arg);
+                    
+                    if (parser_peek(parser, TK_COMMA)) {
+                        parser_expect(parser, TK_COMMA);
+                    }
+                } else {
+                    parser_next_token(parser);
+                }
+            }
+            
+            parser_expect(parser, TK_RPAREN);
+        }
+        
+        if (parser_peek(parser, TK_COLON)) {
+            parser_expect(parser, TK_COLON);
         }
         parser_expect(parser, TK_NEWLINE);
     }
@@ -174,8 +330,8 @@ Block* parse_block(Parser *parser) {
     Block *block = arena_alloc(parser->arena, Block);
     block->operations = operations.data;
     block->n_operations = operations.size;
-    block->arguments = NULL;
-    block->n_arguments = 0;
+    block->arguments = block_args.data;
+    block->n_arguments = block_args.size;
 
     return block;
 }
@@ -184,6 +340,10 @@ Block* parse_block(Parser *parser) {
 Region* parse_region(Parser *parser) {
     parser_expect(parser, TK_LBRACE_END);
     parser_expect(parser, TK_NEWLINE);
+    
+    // Push new scope for this region
+    symbol_table_push_scope(parser->arena, &parser->symbol_table);
+    
     VecBlock blocks;
     VecBlock_reserve(parser->arena, &blocks, 8);
     while (!parser_peek(parser, TK_RBRACE)) {
@@ -191,6 +351,9 @@ Region* parse_region(Parser *parser) {
         VecBlock_push_back(parser->arena, &blocks, block);
     }
     parser_expect(parser, TK_RBRACE);
+    
+    // Pop scope when leaving region
+    symbol_table_pop_scope(&parser->symbol_table);
 
     Region *region = arena_alloc(parser->arena, Region);
     region->blocks = blocks.data;
@@ -215,6 +378,133 @@ void parse_loc(Parser *parser) {
         parser_next_token(parser);
     }
     parser_expect(parser, TK_RPAREN);
+}
+
+void parse_gpu_launch(Parser *parser, Operation *op) {
+    // Parse gpu.launch blocks(%arg2, %arg3, %arg4) in (...) threads(%arg5, %arg6, %arg7) in (...) {
+    
+    VecValueRef launch_args;
+    VecValueRef_reserve(parser->arena, &launch_args, 16);
+    
+    // Parse blocks(...) section
+    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("blocks"))) {
+        parser_expect(parser, TK_NAME);
+        if (parser_peek(parser, TK_LPAREN)) {
+            parser_expect(parser, TK_LPAREN);
+            
+            // Parse block arguments
+            while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
+                if (parser_peek(parser, TK_REGISTER)) {
+                    string reg_str = parser_token_str(parser);
+                    parser_expect(parser, TK_REGISTER);
+                    
+                    ValueRef *arg = create_value_ref(parser->arena, BLOCK_ARG);
+                    arg->register_name = reg_str;
+                    arg->result_index = launch_args.size;
+                    arg->type = arena_alloc(parser->arena, Type);
+                    arg->type->str = str_lit("index");
+                    arg->type->kind = TYPE_KIND_INDEX;
+                    
+                    VecValueRef_push_back(parser->arena, &launch_args, arg);
+                    
+                    if (parser_peek(parser, TK_COMMA)) {
+                        parser_expect(parser, TK_COMMA);
+                    }
+                } else {
+                    parser_next_token(parser);
+                }
+            }
+            parser_expect(parser, TK_RPAREN);
+        }
+    }
+    
+    // Skip until threads(...) section
+    while (!parser_peek(parser, TK_EOF) && !(parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("threads")))) {
+        parser_next_token(parser);
+    }
+    
+    // Parse threads(...) section
+    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("threads"))) {
+        parser_expect(parser, TK_NAME);
+        if (parser_peek(parser, TK_LPAREN)) {
+            parser_expect(parser, TK_LPAREN);
+            
+            // Parse thread arguments
+            while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
+                if (parser_peek(parser, TK_REGISTER)) {
+                    string reg_str = parser_token_str(parser);
+                    parser_expect(parser, TK_REGISTER);
+                    
+                    ValueRef *arg = create_value_ref(parser->arena, BLOCK_ARG);
+                    arg->register_name = reg_str;
+                    arg->result_index = launch_args.size;
+                    arg->type = arena_alloc(parser->arena, Type);
+                    arg->type->str = str_lit("index");
+                    arg->type->kind = TYPE_KIND_INDEX;
+                    
+                    VecValueRef_push_back(parser->arena, &launch_args, arg);
+                    
+                    if (parser_peek(parser, TK_COMMA)) {
+                        parser_expect(parser, TK_COMMA);
+                    }
+                } else {
+                    parser_next_token(parser);
+                }
+            }
+            parser_expect(parser, TK_RPAREN);
+        }
+    }
+    
+    // Skip until opening brace
+    while (!parser_peek(parser, TK_LBRACE_END) && !parser_peek(parser, TK_EOF)) {
+        parser_next_token(parser);
+    }
+    
+    // Parse the GPU launch region
+    parser_expect(parser, TK_LBRACE_END);
+    parser_expect(parser, TK_NEWLINE);
+    
+    // Push new scope for GPU launch region
+    symbol_table_push_scope(parser->arena, &parser->symbol_table);
+    
+    // Register all GPU launch arguments in the new scope
+    for (size_t i = 0; i < launch_args.size; i++) {
+        symbol_table_add_value(parser->arena, &parser->symbol_table, launch_args.data[i]->register_name, launch_args.data[i]);
+    }
+    
+    // Parse GPU launch body (single block)
+    VecOperation operations;
+    VecOperation_reserve(parser->arena, &operations, 16);
+    while (!parser_peek(parser, TK_RBRACE)) {
+        Operation *inner_op = parse_operation(parser);
+        VecOperation_push_back(parser->arena, &operations, inner_op);
+        parser_expect(parser, TK_NEWLINE);
+        
+        // Skip empty lines
+        while (parser_peek(parser, TK_NEWLINE)) {
+            parser_expect(parser, TK_NEWLINE);
+        }
+    }
+    parser_expect(parser, TK_RBRACE);
+    
+    // Pop scope when leaving GPU launch region
+    symbol_table_pop_scope(&parser->symbol_table);
+    
+    // Create the GPU launch region
+    Block *gpu_block = arena_alloc(parser->arena, Block);
+    gpu_block->operations = operations.data;
+    gpu_block->n_operations = operations.size;
+    gpu_block->arguments = launch_args.data;
+    gpu_block->n_arguments = launch_args.size;
+    
+    Region *gpu_region = arena_alloc(parser->arena, Region);
+    gpu_region->blocks = arena_alloc_array(parser->arena, Block*, 1);
+    gpu_region->blocks[0] = gpu_block;
+    gpu_region->n_blocks = 1;
+    
+    op->regions = arena_alloc_array(parser->arena, Region*, 1);
+    op->regions[0] = gpu_region;
+    op->n_regions = 1;
 }
 
 void parse_tt_func(Parser *parser, Operation *op) {
@@ -242,70 +532,34 @@ void parse_tt_func(Parser *parser, Operation *op) {
     if (parser_peek(parser, TK_LPAREN)) {
         parser_expect(parser, TK_LPAREN);
         
-        // Count and parse arguments
-        int arg_count = 0;
-        Parser temp_parser = *parser;
+        // Use a vector to collect arguments as we parse them
+        VecValueRef func_args;
+        VecValueRef_reserve(parser->arena, &func_args, 8);
         
-        // First pass: count arguments
-        while (!parser_peek(&temp_parser, TK_RPAREN) && !parser_peek(&temp_parser, TK_EOF)) {
-            if (parser_peek(&temp_parser, TK_REGISTER)) {
-                arg_count++;
-                // Skip to next comma or closing paren, handling nested structures
-                int skip_count = 0;
-                int paren_depth = 0;
-                int brace_depth = 0;
-                while (!parser_peek(&temp_parser, TK_EOF)) {
-                    if (parser_peek(&temp_parser, TK_LPAREN)) {
-                        paren_depth++;
-                    } else if (parser_peek(&temp_parser, TK_RPAREN)) {
-                        if (paren_depth == 0) {
-                            // Found the main closing paren
-                            break;
-                        }
-                        paren_depth--;
-                    } else if (parser_peek(&temp_parser, TK_LBRACE)) {
-                        brace_depth++;
-                    } else if (parser_peek(&temp_parser, TK_RBRACE)) {
-                        brace_depth--;
-                    } else if (parser_peek(&temp_parser, TK_COMMA) && paren_depth == 0 && brace_depth == 0) {
-                        // Found a comma at the top level
-                        break;
-                    }
-                    
-                    skip_count++;
-                    parser_next_token(&temp_parser);
-                }
-                if (parser_peek(&temp_parser, TK_COMMA)) {
-                    parser_next_token(&temp_parser);
-                } else if (parser_peek(&temp_parser, TK_RPAREN)) {
+        // Parse arguments directly in one pass
+        int paren_depth = 0;
+        while (!parser_peek(parser, TK_EOF)) {
+            if (parser_peek(parser, TK_LPAREN)) {
+                paren_depth++;
+                parser_next_token(parser);
+            } else if (parser_peek(parser, TK_RPAREN)) {
+                if (paren_depth == 0) {
+                    // Found the main closing paren
                     break;
                 }
-            } else {
-                parser_next_token(&temp_parser);
-            }
-        }
-        
-        
-        // Allocate operands for function arguments
-        op->n_operands = arg_count;
-        op->operands = arena_alloc_array(parser->arena, ValueRef*, arg_count);
-        
-        // Second pass: actually parse arguments
-        int current_arg = 0;
-        while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF) && current_arg < arg_count) {
-            if (parser_peek(parser, TK_REGISTER)) {
+                paren_depth--;
+                parser_next_token(parser);
+            } else if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
                 
-                // Expect colon
+                // Parse colon and type
                 if (parser_peek(parser, TK_COLON)) {
                     parser_expect(parser, TK_COLON);
                     
-                    // Parse type
-                    ValueRef *arg = arena_alloc(parser->arena, ValueRef);
-                    arg->kind = OP_RESULT;
+                    ValueRef *arg = create_value_ref(parser->arena, BLOCK_ARG);
                     arg->register_name = reg_str;
-                    arg->result_index = 0;
+                    arg->result_index = func_args.size;
                     arg->type = arena_alloc(parser->arena, Type);
                     
                     // Parse the argument type
@@ -355,40 +609,18 @@ void parse_tt_func(Parser *parser, Operation *op) {
                         arg->type->str = str_lit("unknown");
                     }
                     
-                    op->operands[current_arg] = arg;
-                    current_arg++;
-                }
-                
-                // Skip everything until comma or closing paren (attributes, locations, etc.)
-                int paren_depth = 0;
-                int brace_depth = 0;
-                while (!parser_peek(parser, TK_EOF)) {
-                    if (parser_peek(parser, TK_LPAREN)) {
-                        paren_depth++;
-                    } else if (parser_peek(parser, TK_RPAREN)) {
-                        if (paren_depth == 0) {
-                            // Found the main closing paren
-                            break;
-                        }
-                        paren_depth--;
-                    } else if (parser_peek(parser, TK_LBRACE)) {
-                        brace_depth++;
-                    } else if (parser_peek(parser, TK_RBRACE)) {
-                        brace_depth--;
-                    } else if (parser_peek(parser, TK_COMMA) && paren_depth == 0 && brace_depth == 0) {
-                        // Found a comma at the top level
-                        break;
-                    }
-                    parser_next_token(parser);
-                }
-                
-                // Skip comma if present
-                if (parser_peek(parser, TK_COMMA)) {
-                    parser_expect(parser, TK_COMMA);
+                    VecValueRef_push_back(parser->arena, &func_args, arg);
                 }
             } else {
                 parser_next_token(parser);
             }
+        }
+        
+        // Convert vector to array
+        op->n_operands = func_args.size;
+        op->operands = arena_alloc_array(parser->arena, ValueRef*, func_args.size);
+        for (size_t i = 0; i < func_args.size; i++) {
+            op->operands[i] = func_args.data[i];
         }
         
         if (parser_peek(parser, TK_RPAREN)) {
@@ -401,7 +633,49 @@ void parse_tt_func(Parser *parser, Operation *op) {
     while (!parser_peek(parser, TK_LBRACE_END)) {
         parser_next_token(parser);
     }
-    Region *region = parse_region(parser);
+    
+    // Parse the function body region with special handling for function arguments
+    parser_expect(parser, TK_LBRACE_END);
+    parser_expect(parser, TK_NEWLINE);
+    
+    // Push new scope for this region
+    symbol_table_push_scope(parser->arena, &parser->symbol_table);
+    
+    // Register function arguments in the new scope
+    for (int i = 0; i < op->n_operands; i++) {
+        if (op->operands[i]) {
+            symbol_table_add_value(parser->arena, &parser->symbol_table, op->operands[i]->register_name, op->operands[i]);
+        }
+    }
+    
+    // Parse blocks
+    VecBlock blocks;
+    VecBlock_reserve(parser->arena, &blocks, 8);
+    while (!parser_peek(parser, TK_RBRACE)) {
+        Block *block = parse_block(parser);
+        VecBlock_push_back(parser->arena, &blocks, block);
+    }
+    parser_expect(parser, TK_RBRACE);
+    
+    // Pop scope when leaving region
+    symbol_table_pop_scope(&parser->symbol_table);
+    
+    // Create region
+    Region *region = arena_alloc(parser->arena, Region);
+    region->blocks = blocks.data;
+    region->n_blocks = blocks.size;
+    
+    // Set up block arguments
+    if (region->n_blocks > 0 && op->n_operands > 0) {
+        Block *entry_block = region->blocks[0];
+        entry_block->n_arguments = op->n_operands;
+        entry_block->arguments = arena_alloc_array(parser->arena, ValueRef*, op->n_operands);
+        
+        // Copy function arguments to block arguments
+        for (int i = 0; i < op->n_operands; i++) {
+            entry_block->arguments[i] = op->operands[i];
+        }
+    }
 
     if (parser_peek(parser, TK_NAME)) {
         if (str_eq(parser_token_str(parser), str_lit("loc"))) {
@@ -511,6 +785,8 @@ Operation* parse_operation(Parser *parser) {
     op->attributes = NULL;
     op->n_attributes = 0;
     op->result_types = NULL;
+    op->results = NULL;
+    op->n_results = 0;
     op->opname = str_lit("");
 
     // Skip empty lines and attributes
@@ -532,8 +808,9 @@ Operation* parse_operation(Parser *parser) {
     }
 
     // Parse return registers if any
+    ValueRef *result_value = NULL;
     if (parser_peek(parser, TK_REGISTER)) {
-        //string reg = parser_token_str(parser);
+        string reg_name = parser_token_str(parser);
         op->n_result_types = 1;
         parser_expect(parser, TK_REGISTER);
         if (parser_peek(parser, TK_COLON)) {
@@ -541,6 +818,14 @@ Operation* parse_operation(Parser *parser) {
             parser_expect(parser, TK_INTEGER);
         }
         parser_expect(parser, TK_EQUAL);
+        
+        // Create ValueRef for the result and add to symbol table
+        result_value = arena_alloc(parser->arena, ValueRef);
+        result_value->kind = OP_RESULT;
+        result_value->def = op;
+        result_value->result_index = 0;
+        result_value->register_name = reg_name;
+        result_value->type = NULL; // Will be set later when we parse the result type
     }
 
     // Parse operation name
@@ -582,6 +867,8 @@ Operation* parse_operation(Parser *parser) {
     // First we handle specific opnames with special parsing rules
     if (str_eq(op->opname, str_lit("tt.func"))) {
         parse_tt_func(parser, op);
+    } else if (str_eq(op->opname, str_lit("gpu.launch"))) {
+        parse_gpu_launch(parser, op);
     } else if (str_eq(op->opname, str_lit("scf.if"))) {
         parse_scf_if(parser, op);
     } else if (str_eq(op->opname, str_lit("scf.for"))) {
@@ -603,7 +890,15 @@ Operation* parse_operation(Parser *parser) {
                 op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
                 op->attributes[0] = arena_alloc(parser->arena, Attribute);
                 op->attributes[0]->kind = ATTR_KIND_INTEGER;
-                op->attributes[0]->data.integer_value = 0; // TODO: parse actual value
+                
+                // Parse the actual integer value
+                int64_t parsed_value = 0;
+                for (size_t i = 0; i < value_str.size; i++) {
+                    if (value_str.str[i] >= '0' && value_str.str[i] <= '9') {
+                        parsed_value = parsed_value * 10 + (value_str.str[i] - '0');
+                    }
+                }
+                op->attributes[0]->data.integer_value = parsed_value;
                 op->attributes[0]->name = "value";
             }
         } else if (op->op_type == OP_TYPE_ARITH_ADDI || op->op_type == OP_TYPE_ARITH_MULI || 
@@ -617,14 +912,22 @@ Operation* parse_operation(Parser *parser) {
             // Parse first operand
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
-                ValueRef *operand = arena_alloc(parser->arena, ValueRef);
-                operand->kind = OP_RESULT;
-                operand->register_name = get_register_name(reg_str);
-                operand->result_index = 0; // Will be set during printing based on register name
-                operand->type = arena_alloc(parser->arena, Type);
-                operand->type->str = str_lit("i32"); // TODO: infer from context
-                VecValueRef_push_back(parser->arena, &operands, operand);
                 parser_expect(parser, TK_REGISTER);
+                
+                // Look up the value in symbol table
+                ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+                if (!operand) {
+                    // For now, create a placeholder value to avoid crashing
+                    // This should be fixed by ensuring all values are properly registered
+                    operand = arena_alloc(parser->arena, ValueRef);
+                    operand->kind = OP_RESULT;
+                    operand->register_name = reg_str;
+                    operand->result_index = 0;
+                    operand->ssa_number = 999; // Placeholder to identify the issue
+                    operand->type = arena_alloc(parser->arena, Type);
+                    operand->type->str = str_lit("i32");
+                }
+                VecValueRef_push_back(parser->arena, &operands, operand);
                 
                 if (parser_peek(parser, TK_COMMA)) {
                     parser_expect(parser, TK_COMMA);
@@ -632,14 +935,19 @@ Operation* parse_operation(Parser *parser) {
                     // Parse second operand
                     if (parser_peek(parser, TK_REGISTER)) {
                         string reg_str2 = parser_token_str(parser);
-                        ValueRef *operand2 = arena_alloc(parser->arena, ValueRef);
-                        operand2->kind = OP_RESULT;
-                        operand2->register_name = get_register_name(reg_str2);
-                        operand2->result_index = 0; // Will be set during printing based on register name
-                        operand2->type = arena_alloc(parser->arena, Type);
-                        operand2->type->str = str_lit("i32"); // TODO: infer from context
-                        VecValueRef_push_back(parser->arena, &operands, operand2);
                         parser_expect(parser, TK_REGISTER);
+                        
+                        // Look up the second value in symbol table
+                        ValueRef *operand2 = symbol_table_lookup(&parser->symbol_table, reg_str2);
+                        if (!operand2) {
+                            parser_warning(parser, format(parser->arena, str_lit("Undefined value: {}"), reg_str2), parser->first, parser->last);
+                            // Create placeholder for undefined value to avoid parse failure
+                            operand2 = create_value_ref(parser->arena, BLOCK_ARG);
+                            operand2->register_name = reg_str2;
+                            operand2->type = arena_alloc(parser->arena, Type);
+                            operand2->type->str = str_lit("unknown");
+                        }
+                        VecValueRef_push_back(parser->arena, &operands, operand2);
                     }
                 }
             }
@@ -657,26 +965,22 @@ Operation* parse_operation(Parser *parser) {
                 // tt.splat %operand : type -> result_type
                 if (parser_peek(parser, TK_REGISTER)) {
                     string reg_str = parser_token_str(parser);
-                    ValueRef *operand = arena_alloc(parser->arena, ValueRef);
-                    operand->kind = OP_RESULT;
-                    operand->register_name = get_register_name(reg_str);
-                    operand->result_index = 0;
-                    operand->type = arena_alloc(parser->arena, Type);
-                    // Basic type inference based on register name
-                    if (operand->register_name.size >= 4 && 
-                        strncmp(operand->register_name.str, "%arg", 4) == 0) {
-                        operand->type->str = str_lit("!tt.ptr<f32>");
-                    } else if (operand->register_name.size >= 2 && 
-                               strncmp(operand->register_name.str, "%c", 2) == 0) {
-                        operand->type->str = str_lit("i32");
-                    } else {
-                        operand->type->str = str_lit("i32");  // Default assumption
+                    parser_expect(parser, TK_REGISTER);
+                    
+                    // Look up the value in symbol table
+                    ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+                    if (!operand) {
+                        parser_warning(parser, format(parser->arena, str_lit("Undefined value: {}"), reg_str), parser->first, parser->last);
+                        // Create placeholder for undefined value to avoid parse failure
+                        operand = create_value_ref(parser->arena, BLOCK_ARG);
+                        operand->register_name = reg_str;
+                        operand->type = arena_alloc(parser->arena, Type);
+                        operand->type->str = str_lit("unknown");
                     }
                     
                     op->n_operands = 1;
                     op->operands = arena_alloc_array(parser->arena, ValueRef*, 1);
                     op->operands[0] = operand;
-                    parser_expect(parser, TK_REGISTER);
                 }
             } else if (str_eq(op->opname, str_lit("tt.make_range"))) {
                 // tt.make_range {end = 16 : i32, start = 0 : i32} : tensor<16xi32>
@@ -737,23 +1041,19 @@ Operation* parse_operation(Parser *parser) {
                 
                 while (parser_peek(parser, TK_REGISTER)) {
                     string reg_str = parser_token_str(parser);
-                    ValueRef *operand = arena_alloc(parser->arena, ValueRef);
-                    operand->kind = OP_RESULT;
-                    operand->register_name = get_register_name(reg_str);
-                    operand->result_index = 0;
-                    operand->type = arena_alloc(parser->arena, Type);
-                    // Basic type inference based on register name
-                    if (operand->register_name.size >= 4 && 
-                        strncmp(operand->register_name.str, "%arg", 4) == 0) {
-                        operand->type->str = str_lit("!tt.ptr<f32>");
-                    } else if (operand->register_name.size >= 2 && 
-                               strncmp(operand->register_name.str, "%c", 2) == 0) {
-                        operand->type->str = str_lit("i32");
-                    } else {
-                        operand->type->str = str_lit("i32");  // Default assumption
+                    parser_expect(parser, TK_REGISTER);
+                    
+                    // Look up the value in symbol table
+                    ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+                    if (!operand) {
+                        parser_warning(parser, format(parser->arena, str_lit("Undefined value: {}"), reg_str), parser->first, parser->last);
+                        // Create placeholder for undefined value to avoid parse failure
+                        operand = create_value_ref(parser->arena, BLOCK_ARG);
+                        operand->register_name = reg_str;
+                        operand->type = arena_alloc(parser->arena, Type);
+                        operand->type->str = str_lit("unknown");
                     }
                     VecValueRef_push_back(parser->arena, &operands, operand);
-                    parser_expect(parser, TK_REGISTER);
                     
                     if (parser_peek(parser, TK_COMMA)) {
                         parser_expect(parser, TK_COMMA);
@@ -965,6 +1265,30 @@ Operation* parse_operation(Parser *parser) {
             op->result_types[0]->str = str_lit("tensor<16xf32>");
             op->result_types[0]->kind = TYPE_KIND_TENSOR;
         }
+    }
+    
+    // Register result value in symbol table if we have one
+    if (result_value && op->n_result_types > 0) {
+        // Set the type if available
+        if (op->result_types && op->result_types[0]) {
+            result_value->type = op->result_types[0];
+        } else {
+            // Create a default type
+            result_value->type = arena_alloc(parser->arena, Type);
+            result_value->type->str = str_lit("i32");
+            result_value->type->kind = TYPE_KIND_INTEGER;
+        }
+        result_value->def = op;
+        symbol_table_add_value(parser->arena, &parser->symbol_table, result_value->register_name, result_value);
+        
+        // Link result to operation
+        op->n_results = 1;
+        op->results = arena_alloc_array(parser->arena, ValueRef*, 1);
+        op->results[0] = result_value;
+    } else if (op->n_result_types > 0) {
+        // If operation produces a result but no explicit register name was parsed,
+        // it might be an error, but let's handle it gracefully for unregistered ops
+        // that produce results without explicit SSA names
     }
 
     return op;

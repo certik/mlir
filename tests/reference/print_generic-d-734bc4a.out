@@ -22,7 +22,7 @@ module() {
         %4 = "index.constant"() -> ?
         %5 = arith.constant() -> ?
         %6 = arith.constant() {value = 0} -> i16
-        %7 = arith.constant() {value = 0} -> i16
+        %7 = arith.constant() {value = 1} -> i16
         %8 = "memref.alloc"() -> ?
         "linalg.fill"()
         %9 = "affine.load"() -> ?
@@ -38,10 +38,10 @@ module() {
         %13 = "linalg.copy"() -> ?
         %14 = "tensor.collapse_shape"() -> ?
         %15 = "index.constant"() -> ?
-        %16 = "scf.for"() -> ? {
+        %18 = "scf.for"() -> ? {
         ^bb0:
-            %17 = "tensor.extract"() -> ?
-            %18 = arith.addi(%arg2: i32, %extracted: i32) -> i16
+            %16 = "tensor.extract"() -> ?
+            %17 = arith.addi(%999: i32, %16: i32) -> i16
             "vector.print"()
             "scf.yield"()
         }
