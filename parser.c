@@ -506,7 +506,12 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
             result = str_concat(arena, result, format(arena, str_lit("{} = "), str_from_cstr_view((char*)attr->name)));
             switch (attr->kind) {
                 case ATTR_KIND_INTEGER:
-                    result = str_concat(arena, result, format(arena, str_lit("{}"), attr->data.integer_value));
+                    // Add type annotation for tt.make_range attributes
+                    if (str_eq(op->opname, str_lit("tt.make_range"))) {
+                        result = str_concat(arena, result, format(arena, str_lit("{} : i32"), attr->data.integer_value));
+                    } else {
+                        result = str_concat(arena, result, format(arena, str_lit("{}"), attr->data.integer_value));
+                    }
                     break;
                 case ATTR_KIND_STRING:
                     result = str_concat(arena, result, format(arena, str_lit("\"{}\""), str_from_cstr_view((char*)attr->data.string_value)));

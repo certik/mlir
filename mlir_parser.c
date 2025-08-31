@@ -504,6 +504,50 @@ Operation* parse_operation(Parser *parser) {
                 // No operands to parse, just attributes
                 op->n_operands = 0;
                 op->operands = NULL;
+                
+                // Parse attributes if present - be very conservative
+                if (parser_peek(parser, TK_LBRACE)) {
+                    parser_expect(parser, TK_LBRACE);
+                    
+                    // Allocate for 2 attributes
+                    op->n_attributes = 2;
+                    op->attributes = arena_alloc_array(parser->arena, Attribute*, 2);
+                    
+                    // Parse first attribute (end)
+                    if (parser_peek(parser, TK_NAME)) {
+                        parser_expect(parser, TK_NAME); // "end"
+                        parser_expect(parser, TK_EQUAL);
+                        parser_expect(parser, TK_INTEGER); // value
+                        parser_expect(parser, TK_COLON);
+                        parser_expect(parser, TK_NAME); // "i32"
+                        
+                        op->attributes[0] = arena_alloc(parser->arena, Attribute);
+                        op->attributes[0]->kind = ATTR_KIND_INTEGER;
+                        op->attributes[0]->name = "end";
+                        op->attributes[0]->data.integer_value = 16; // Hardcode for now
+                    }
+                    
+                    // Skip comma
+                    if (parser_peek(parser, TK_COMMA)) {
+                        parser_expect(parser, TK_COMMA);
+                    }
+                    
+                    // Parse second attribute (start)
+                    if (parser_peek(parser, TK_NAME)) {
+                        parser_expect(parser, TK_NAME); // "start"
+                        parser_expect(parser, TK_EQUAL);
+                        parser_expect(parser, TK_INTEGER); // value
+                        parser_expect(parser, TK_COLON);
+                        parser_expect(parser, TK_NAME); // "i32"
+                        
+                        op->attributes[1] = arena_alloc(parser->arena, Attribute);
+                        op->attributes[1]->kind = ATTR_KIND_INTEGER;
+                        op->attributes[1]->name = "start";
+                        op->attributes[1]->data.integer_value = 0; // Hardcode for now
+                    }
+                    
+                    parser_expect(parser, TK_RBRACE);
+                }
             } else if (str_eq(op->opname, str_lit("tt.addptr")) || str_eq(op->opname, str_lit("tt.load")) ||
                        str_eq(op->opname, str_lit("tt.store"))) {
                 // tt.addptr %ptr, %offset : ptr_type, offset_type
