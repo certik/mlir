@@ -483,7 +483,16 @@ Operation* parse_operation(Parser *parser) {
                     operand->register_name = get_register_name(reg_str);
                     operand->result_index = 0;
                     operand->type = arena_alloc(parser->arena, Type);
-                    operand->type->str = str_lit("unknown");
+                    // Basic type inference based on register name
+                    if (operand->register_name.size >= 4 && 
+                        strncmp(operand->register_name.str, "%arg", 4) == 0) {
+                        operand->type->str = str_lit("!tt.ptr<f32>");
+                    } else if (operand->register_name.size >= 2 && 
+                               strncmp(operand->register_name.str, "%c", 2) == 0) {
+                        operand->type->str = str_lit("i32");
+                    } else {
+                        operand->type->str = str_lit("i32");  // Default assumption
+                    }
                     
                     op->n_operands = 1;
                     op->operands = arena_alloc_array(parser->arena, ValueRef*, 1);
@@ -505,7 +514,16 @@ Operation* parse_operation(Parser *parser) {
                     operand->register_name = get_register_name(reg_str);
                     operand->result_index = 0;
                     operand->type = arena_alloc(parser->arena, Type);
-                    operand->type->str = str_lit("unknown");
+                    // Basic type inference based on register name
+                    if (operand->register_name.size >= 4 && 
+                        strncmp(operand->register_name.str, "%arg", 4) == 0) {
+                        operand->type->str = str_lit("!tt.ptr<f32>");
+                    } else if (operand->register_name.size >= 2 && 
+                               strncmp(operand->register_name.str, "%c", 2) == 0) {
+                        operand->type->str = str_lit("i32");
+                    } else {
+                        operand->type->str = str_lit("i32");  // Default assumption
+                    }
                     VecValueRef_push_back(parser->arena, &operands, operand);
                     parser_expect(parser, TK_REGISTER);
                     
