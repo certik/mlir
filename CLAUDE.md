@@ -12,7 +12,7 @@ This is a custom MLIR (Multi-Level Intermediate Representation) infrastructure i
 - **Parser**: Recursive descent parser that builds AST from tokens (`mlir_parser.c/h`)
 - **Main Parser**: Command-line interface for parsing MLIR files (`parser.c`)
 - **Base Utilities**: Arena allocator, string handling, I/O, formatting (`base/` directory)
-- **Testing**: Unit tests and MLIR file tests (`tests/`, `test_mlir/`)
+- **Testing**: Unit tests and diff tests (`run_tests`, `tests/`)
 
 ### Architecture
 
@@ -43,7 +43,6 @@ This script:
 2. Generates tokenizer from `tokenizer.re` using re2c
 3. Builds main parser binary
 4. Runs parser in construction mode and file parsing mode
-5. Runs all MLIR file tests
 
 **Windows build:**
 ```bash
@@ -73,15 +72,12 @@ uv run run_tests.py
 
 ### Test Structure
 - `tests/run_tests.c`: Unit tests for base utilities (arena, string, format, I/O)
-- `test_mlir/`: Collection of MLIR files for parser testing
-- `run_mlir_tests.sh`: Script that runs parser on all test files
 - `tests/tests.toml`: Test configuration with expected outputs
 - `run_tests.py`: Python test runner with comparison logic
 
 ### Running Tests
 ```bash
 ./run_tests              # Unit tests
-./run_mlir_tests.sh      # MLIR parser tests  
 uv run run_tests.py      # Run the full diff-test testsuite
 ```
 
@@ -98,8 +94,8 @@ Creates a test MLIR module programmatically and prints it. Used for validating t
 
 **File Parsing Mode**:
 ```bash
-./parser test_mlir/simple.mlir
-./parser test_mlir/add_kernel.ttir
+./parser tests/simple.mlir
+./parser tests/add_kernel.ttir
 ```
 Parses MLIR files and prints the parsed representation.
 
@@ -120,9 +116,9 @@ Parses MLIR files and prints the parsed representation.
 - `hashtable.h`: Hash table implementation (header-only)
 
 ### Test Files
-- `test_mlir/simple.mlir`: Basic MLIR with control flow
-- `test_mlir/*.ttir`: Triton TTIR (Triton IR) files
-- `test_mlir/*.mlir`: Standard MLIR files
+- `tests/simple.mlir`: Basic MLIR with control flow
+- `tests/*.ttir`: Triton TTIR (Triton IR) files
+- `tests/*.mlir`: Standard MLIR files
 
 ## Development Workflow
 
