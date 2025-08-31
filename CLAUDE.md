@@ -70,6 +70,13 @@ After every change ensure we can build the code and run all tests:
 uv run run_tests.py
 ```
 
+To update reference results, do:
+```
+uv run run_tests.py -u
+```
+This is needed when our printer or other internals change and the changes are
+good and we want to keep them.
+
 ### Test Structure
 - `tests/run_tests.c`: Unit tests for base utilities (arena, string, format, I/O)
 - `tests/tests.toml`: Test configuration with expected outputs
