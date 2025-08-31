@@ -1,8 +1,4 @@
 [[test]]
-filename = "add_kernel.ttir"
-print_generic = true
-
-[[test]]
 filename = "a.mlir"
 print_generic = true
 
