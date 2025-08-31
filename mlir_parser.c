@@ -545,8 +545,9 @@ Operation* parse_operation(Parser *parser) {
             if (parser_peek(parser, TK_COLON)) {
                 parser_expect(parser, TK_COLON);
                 
-                // Parse the result type - just take the first type token
-                if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
+                // Parse the result type - handle simple and complex types
+                if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME) || 
+                    parser_peek(parser, TK_EXCLAMATION)) {
                     string type_str = parser_token_str(parser);
                     
                     // Remove "loc" suffix if the token ends with "loc"
@@ -564,9 +565,8 @@ Operation* parse_operation(Parser *parser) {
                         type_str = str_concat(parser->arena, type_str, parser_token_str(parser));
                         parser_next_token(parser); // consume <
                         
-                        // Parse content inside <>
-                        while (parser_peek(parser, TK_INTEGER) || parser_peek(parser, TK_NAME) || 
-                               parser_peek(parser, TK_NAME_DOT_NAME)) {
+                        // Parse everything inside <> until we hit >
+                        while (!parser_peek(parser, TK_RANGLE) && !parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE)) {
                             type_str = str_concat(parser->arena, type_str, parser_token_str(parser));
                             parser_next_token(parser);
                         }
@@ -628,16 +628,45 @@ Operation* parse_operation(Parser *parser) {
                 parser_next_token(parser);
             }
         }
-        if (parser_peek(parser, TK_ARROW)) {
-            parser_expect(parser, TK_ARROW);
-            while (!parser_peek(parser, TK_NEWLINE)) {
-                parser_next_token(parser);
-            }
-        }
         if (parser_peek(parser, TK_NAME)) {
             if (str_eq(parser_token_str(parser), str_lit("loc"))) {
                 parse_loc(parser);
             }
+        }
+    }
+
+    // Parse result types (applies to all operations if not already set)
+    if (op->n_result_types == 0 && parser_peek(parser, TK_ARROW)) {
+        parser_expect(parser, TK_ARROW);
+        
+        // Parse result type
+        if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME) || 
+            parser_peek(parser, TK_EXCLAMATION)) {
+            string type_str = parser_token_str(parser);
+            parser_next_token(parser);
+            
+            // Handle complex types like tensor<16xi32>
+            if (parser_peek(parser, TK_LANGLE)) {
+                type_str = str_concat(parser->arena, type_str, parser_token_str(parser));
+                parser_next_token(parser); // consume <
+                
+                // Parse everything inside <> until we hit >
+                while (!parser_peek(parser, TK_RANGLE) && !parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE)) {
+                    type_str = str_concat(parser->arena, type_str, parser_token_str(parser));
+                    parser_next_token(parser);
+                }
+                
+                if (parser_peek(parser, TK_RANGLE)) {
+                    type_str = str_concat(parser->arena, type_str, parser_token_str(parser));
+                    parser_next_token(parser); // consume >
+                }
+            }
+            
+            // Set result type
+            op->n_result_types = 1;
+            op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+            op->result_types[0] = arena_alloc(parser->arena, Type);
+            op->result_types[0]->str = type_str;
         }
     }
 
