@@ -484,22 +484,16 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
         }
     }
     
-    // Print operands with types (always include parentheses)
+    // Print operands with types (always include parentheses)  
     result = str_concat(arena, result, str_lit("("));
     for (int i = 0; i < op->n_operands; i++) {
         if (i > 0) result = str_concat(arena, result, str_lit(", "));
         ValueRef *operand = op->operands[i];
-        if (operand && operand->type) {
-            if (operand->kind == BLOCK_ARG) {
-                result = str_concat(arena, result, format(arena, str_lit("%arg{}: {}"), 
-                                                        (int64_t)operand->result_index, operand->type->str));
-            } else {
-                result = str_concat(arena, result, format(arena, str_lit("%{}: {}"), 
-                                                        (int64_t)operand->result_index, operand->type->str));
-            }
-        } else {
-            result = str_concat(arena, result, str_lit("%?"));
+        if (operand->register_name.size > 0) {
+            result = str_concat(arena, result, operand->register_name);
         }
+        result = str_concat(arena, result, str_lit(": "));
+        result = str_concat(arena, result, operand->type->str);
     }
     result = str_concat(arena, result, str_lit(")"));
     
@@ -553,6 +547,37 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
 
 // Main
 Operation* construct_test_module(Arena *arena) {
+    // Create simple module operation
+    Operation *module = arena_alloc(arena, Operation);
+    module->op_type = OP_TYPE_MODULE;
+    module->operands = NULL;
+    module->n_operands = 0;
+    module->result_types = NULL;
+    module->n_result_types = 0;
+    module->attributes = NULL;
+    module->n_attributes = 0;
+    module->opname = str_lit("module");
+
+    // Create module region and block (empty)
+    Region *module_region = arena_alloc(arena, Region);
+    Block *module_block = arena_alloc(arena, Block);
+    module_block->arguments = NULL;
+    module_block->n_arguments = 0;
+    module_block->operations = NULL;
+    module_block->n_operations = 0;
+
+    module_region->n_blocks = 1;
+    module_region->blocks = arena_alloc_array(arena, Block*, 1);
+    module_region->blocks[0] = module_block;
+
+    module->n_regions = 1;
+    module->regions = arena_alloc_array(arena, Region*, 1);
+    module->regions[0] = module_region;
+
+    return module;
+}
+
+Operation* construct_test_module_full(Arena *arena) {
     // Create types
     Type *i32_type = arena_alloc(arena, Type);
     i32_type->kind = TYPE_KIND_INTEGER;
@@ -611,10 +636,12 @@ Operation* construct_test_module(Arena *arena) {
     func_block->arguments[0]->kind = BLOCK_ARG;
     func_block->arguments[0]->result_index = 0;
     func_block->arguments[0]->type = i32_type;
+    func_block->arguments[0]->register_name = str_lit("%arg0");
     func_block->arguments[1] = arena_alloc(arena, ValueRef);
     func_block->arguments[1]->kind = BLOCK_ARG;
     func_block->arguments[1]->result_index = 1;
     func_block->arguments[1]->type = i32_type;
+    func_block->arguments[1]->register_name = str_lit("%arg1");
 
     // Create operations in function block
     func_block->n_operations = 4;
@@ -660,12 +687,14 @@ Operation* construct_test_module(Arena *arena) {
     add_result->def = add_op;
     add_result->result_index = 1;  // This will be %1
     add_result->type = i32_type;
+    add_result->register_name = str_lit("%1");
 
     ValueRef *const_result = arena_alloc(arena, ValueRef);
     const_result->kind = OP_RESULT;
     const_result->def = const_op;
     const_result->result_index = 0;  // This will be %0
     const_result->type = i32_type;
+    const_result->register_name = str_lit("%0");
 
     Operation *mul_op = arena_alloc(arena, Operation);
     mul_op->op_type = OP_TYPE_ARITH_MULI;
@@ -688,6 +717,7 @@ Operation* construct_test_module(Arena *arena) {
     mul_result->def = mul_op;
     mul_result->result_index = 2;  // This will be %2
     mul_result->type = i32_type;
+    mul_result->register_name = str_lit("%2");
 
     Operation *ret_op = arena_alloc(arena, Operation);
     ret_op->op_type = OP_TYPE_FUNC_RETURN;
@@ -737,30 +767,41 @@ Operation* construct_test_module(Arena *arena) {
 }
 
 int main(int argc, char *argv[]) {
-    Arena *arena = arena_create(10*1024*1024);
+    printf("Starting main...\n");
+    Arena *arena = arena_create(50*1024*1024);  // Increase arena size
+    printf("Arena created...\n");
     
     // Check for --construct option
     bool use_construction = false;
     char *input_file = NULL;
     
+    printf("Parsing args...\n");
     for (int i = 1; i < argc; i++) {
+        printf("Arg %d: %s\n", i, argv[i]);
         if (strcmp(argv[i], "--construct") == 0) {
             use_construction = true;
+            printf("Construction mode enabled\n");
         } else if (argv[i][0] != '-') {
             input_file = argv[i];
         }
     }
+    printf("Done parsing args. use_construction=%d\n", use_construction);
     
     Operation* op;
     
+    int exit_code;
     if (use_construction) {
         // Use constructed test module
-        op = construct_test_module(arena);
+        printf("Creating module...\n");
+        op = construct_test_module_full(arena);
+        printf("Module created successfully.\n");
         
         // Test generic printing with expected output comparison
         printf("=== Generic Printer Test ===\n");
         reg_idx = 0;  // Reset SSA counter
+        printf("About to print operation...\n");
         string result = print_operation(arena, 0, op);
+        printf("Printing result...\n");
         println(arena, str_lit("{}"), result);
         
         // Reference expected output for generic mode
@@ -779,11 +820,13 @@ int main(int argc, char *argv[]) {
         // Compare output
         if (str_eq(result, str_from_cstr_view((char*)expected))) {
             printf("✅ Generic mode test PASSED\n");
+            exit_code = 0;
         } else {
             printf("❌ Generic mode test FAILED\n");
             printf("Expected:\n%s\n", expected);
             printf("Actual:\n");
             println(arena, str_lit("{}"), result);
+            exit_code = 1;
         }
     } else {
         // Use parser mode
@@ -804,8 +847,9 @@ int main(int argc, char *argv[]) {
         println(arena, str_lit("MLIR:"));
         reg_idx = 0;  // Reset SSA counter
         println(arena, str_lit("{}"), print_operation(arena, 0, op));
+        exit_code = 0;
     }
 
     arena_free(arena);
-    return 0;
+    return exit_code;
 }

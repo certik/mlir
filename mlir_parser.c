@@ -314,17 +314,12 @@ void parse_scf_while(Parser *parser, Operation *op) {
     op->n_regions = n_regions;
 }
 
-// Helper function to parse register number from %0, %1, etc.
-int parse_register_number(string reg_str) {
+// Helper function to extract register name for printing
+string get_register_name(string reg_str) {
     if (reg_str.size > 1 && reg_str.str[0] == '%') {
-        // Simple parsing - just assume it's %0, %1, etc.
-        if (reg_str.size == 2 && reg_str.str[1] >= '0' && reg_str.str[1] <= '9') {
-            return reg_str.str[1] - '0';
-        }
-        // For multi-digit numbers, would need more complex parsing
-        return 0;
+        return reg_str; // Return the full register name for printing
     }
-    return -1;
+    return str_lit("%unknown");
 }
 
 Operation* parse_operation(Parser *parser) {
@@ -445,7 +440,8 @@ Operation* parse_operation(Parser *parser) {
                 string reg_str = parser_token_str(parser);
                 ValueRef *operand = arena_alloc(parser->arena, ValueRef);
                 operand->kind = OP_RESULT;
-                operand->result_index = parse_register_number(reg_str);
+                operand->register_name = get_register_name(reg_str);
+                operand->result_index = 0; // Will be set during printing based on register name
                 operand->type = arena_alloc(parser->arena, Type);
                 operand->type->str = str_lit("i32"); // TODO: infer from context
                 VecValueRef_push_back(parser->arena, &operands, operand);
@@ -459,7 +455,8 @@ Operation* parse_operation(Parser *parser) {
                         string reg_str2 = parser_token_str(parser);
                         ValueRef *operand2 = arena_alloc(parser->arena, ValueRef);
                         operand2->kind = OP_RESULT;
-                        operand2->result_index = parse_register_number(reg_str2);
+                        operand2->register_name = get_register_name(reg_str2);
+                        operand2->result_index = 0; // Will be set during printing based on register name
                         operand2->type = arena_alloc(parser->arena, Type);
                         operand2->type->str = str_lit("i32"); // TODO: infer from context
                         VecValueRef_push_back(parser->arena, &operands, operand2);
@@ -470,34 +467,116 @@ Operation* parse_operation(Parser *parser) {
             
             op->operands = operands.data;
             op->n_operands = operands.size;
+        } else if (op->opname.size > 3 && op->opname.str[0] == 't' && op->opname.str[1] == 't' && op->opname.str[2] == '.') {
+            // Parse tt.* operations
+            if (str_eq(op->opname, str_lit("tt.get_program_id"))) {
+                // tt.get_program_id x : i32
+                if (parser_peek(parser, TK_NAME)) {
+                    parser_expect(parser, TK_NAME); // skip axis name (x, y, z)
+                }
+            } else if (str_eq(op->opname, str_lit("tt.splat"))) {
+                // tt.splat %operand : type -> result_type
+                if (parser_peek(parser, TK_REGISTER)) {
+                    string reg_str = parser_token_str(parser);
+                    ValueRef *operand = arena_alloc(parser->arena, ValueRef);
+                    operand->kind = OP_RESULT;
+                    operand->register_name = get_register_name(reg_str);
+                    operand->result_index = 0;
+                    operand->type = arena_alloc(parser->arena, Type);
+                    operand->type->str = str_lit("unknown");
+                    
+                    op->n_operands = 1;
+                    op->operands = arena_alloc_array(parser->arena, ValueRef*, 1);
+                    op->operands[0] = operand;
+                    parser_expect(parser, TK_REGISTER);
+                }
+            } else if (str_eq(op->opname, str_lit("tt.addptr")) || str_eq(op->opname, str_lit("tt.load")) ||
+                       str_eq(op->opname, str_lit("tt.store"))) {
+                // tt.addptr %ptr, %offset : ptr_type, offset_type
+                // tt.load %ptr : ptr_type
+                // tt.store %ptr, %value : ptr_type
+                VecValueRef operands;
+                VecValueRef_reserve(parser->arena, &operands, 2);
+                
+                while (parser_peek(parser, TK_REGISTER)) {
+                    string reg_str = parser_token_str(parser);
+                    ValueRef *operand = arena_alloc(parser->arena, ValueRef);
+                    operand->kind = OP_RESULT;
+                    operand->register_name = get_register_name(reg_str);
+                    operand->result_index = 0;
+                    operand->type = arena_alloc(parser->arena, Type);
+                    operand->type->str = str_lit("unknown");
+                    VecValueRef_push_back(parser->arena, &operands, operand);
+                    parser_expect(parser, TK_REGISTER);
+                    
+                    if (parser_peek(parser, TK_COMMA)) {
+                        parser_expect(parser, TK_COMMA);
+                    } else {
+                        break;
+                    }
+                }
+                
+                op->operands = operands.data;
+                op->n_operands = operands.size;
+            }
         }
         
-        // Parse result type for arith operations (: type)
-        if (op->op_type >= OP_TYPE_ARITH_ADDI && op->op_type <= OP_TYPE_ARITH_CMPF) {
+        // Parse result type for operations that have : type syntax
+        if ((op->op_type >= OP_TYPE_ARITH_ADDI && op->op_type <= OP_TYPE_ARITH_CMPF) ||
+            (op->opname.size > 3 && op->opname.str[0] == 't' && op->opname.str[1] == 't' && op->opname.str[2] == '.')) {
             if (parser_peek(parser, TK_COLON)) {
                 parser_expect(parser, TK_COLON);
                 
-                // Parse the result type
-                if (parser_peek(parser, TK_NAME)) {
+                // Parse the result type - just take the first type token
+                if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
                     string type_str = parser_token_str(parser);
-                    parser_expect(parser, TK_NAME);
                     
-                    op->n_result_types = 1;
-                    op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-                    op->result_types[0] = arena_alloc(parser->arena, Type);
-                    op->result_types[0]->str = type_str;
+                    // Remove "loc" suffix if the token ends with "loc"
+                    if (type_str.size > 3 && 
+                        type_str.str[type_str.size-3] == 'l' &&
+                        type_str.str[type_str.size-2] == 'o' &&
+                        type_str.str[type_str.size-1] == 'c') {
+                        type_str = str_substr(type_str, 0, type_str.size - 3);
+                    }
                     
-                    // Set type kind based on type string
-                    if (str_eq(type_str, str_lit("i32")) || str_eq(type_str, str_lit("i64"))) {
-                        op->result_types[0]->kind = TYPE_KIND_INTEGER;
-                        op->result_types[0]->data.integer.width = str_eq(type_str, str_lit("i32")) ? 32 : 64;
-                        op->result_types[0]->data.integer.is_signed = true;
-                    } else if (str_eq(type_str, str_lit("f32")) || str_eq(type_str, str_lit("f64"))) {
-                        op->result_types[0]->kind = TYPE_KIND_FLOAT;
-                        op->result_types[0]->data.floating.width = str_eq(type_str, str_lit("f32")) ? 32 : 64;
-                    } else {
-                        // Complex type like tensor<16xf32> - for now just store the string
-                        op->result_types[0]->kind = TYPE_KIND_TENSOR;
+                    parser_next_token(parser);
+                    
+                    // Handle complex types like tensor<16xi32>
+                    if (parser_peek(parser, TK_LANGLE)) {
+                        type_str = str_concat(parser->arena, type_str, parser_token_str(parser));
+                        parser_next_token(parser); // consume <
+                        
+                        // Parse content inside <>
+                        while (parser_peek(parser, TK_INTEGER) || parser_peek(parser, TK_NAME) || 
+                               parser_peek(parser, TK_NAME_DOT_NAME)) {
+                            type_str = str_concat(parser->arena, type_str, parser_token_str(parser));
+                            parser_next_token(parser);
+                        }
+                        
+                        if (parser_peek(parser, TK_RANGLE)) {
+                            type_str = str_concat(parser->arena, type_str, parser_token_str(parser));
+                            parser_next_token(parser); // consume >
+                        }
+                    }
+                    
+                    if (type_str.size > 0) {
+                        op->n_result_types = 1;
+                        op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+                        op->result_types[0] = arena_alloc(parser->arena, Type);
+                        op->result_types[0]->str = type_str;
+                        
+                        // Set type kind based on type string
+                        if (str_eq(type_str, str_lit("i32")) || str_eq(type_str, str_lit("i64"))) {
+                            op->result_types[0]->kind = TYPE_KIND_INTEGER;
+                            op->result_types[0]->data.integer.width = str_eq(type_str, str_lit("i32")) ? 32 : 64;
+                            op->result_types[0]->data.integer.is_signed = true;
+                        } else if (str_eq(type_str, str_lit("f32")) || str_eq(type_str, str_lit("f64"))) {
+                            op->result_types[0]->kind = TYPE_KIND_FLOAT;
+                            op->result_types[0]->data.floating.width = str_eq(type_str, str_lit("f32")) ? 32 : 64;
+                        } else {
+                            // Complex type like tensor<16xf32> - for now just store the string
+                            op->result_types[0]->kind = TYPE_KIND_TENSOR;
+                        }
                     }
                 }
             }

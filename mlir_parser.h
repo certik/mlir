@@ -149,6 +149,7 @@ typedef struct ValueRef {
     void* def; // Block* or Operation* that produced it
     uint32_t result_index;   // Which result of the operation
     Type *type;              // Type of this value
+    string register_name;    // For parsed register names like %0, %c16_i32
 
     // Maybe later:
     //Operation **users;
