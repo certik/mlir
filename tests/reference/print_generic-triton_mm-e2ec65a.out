@@ -73,14 +73,14 @@ module() {
         %55 = arith.addi(%53: tensor<32x1xi32>, %54: tensor<1x128xi32>) -> tensor<32x128xi32>
         %56 = tt.splat(%arg1: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
         %57 = tt.addptr(%56: tensor<16x!tt.ptr<f32>>, %55: tensor<32x128xi32>) -> tensor<32x128x!tt.ptr<f32>
-        %63 = scf.for(%15: i32, %3: i32, %2: i32, %8: i32, %49: tensor<64x32x!tt.ptr<f32>, %57: tensor<32x128x!tt.ptr<f32>) -> ? {
+        %58 = scf.for(%15: i32, %3: i32, %2: i32, %8: i32, %49: tensor<64x32x!tt.ptr<f32>, %57: tensor<32x128x!tt.ptr<f32>) -> ? {
         ^bb0(%arg0: index, %arg1: i16, %arg2: i16, %arg3: i16):
-            %58 = tt.load(%arg2: i16) -> tensor<64x32x!tt.ptr<f32>
-            %59 = tt.load(%arg3: i16) -> tensor<32x128x!tt.ptr<f32>
-            %60 = "tt.dot"(%58: tensor<64x32x!tt.ptr<f32>, %59: tensor<32x128x!tt.ptr<f32>, %arg1: i16) -> tensor<64x32xf32>
-            %61 = tt.addptr(%arg2: i16, %1: i32) -> tensor<64x32x!tt.ptr<f32>
-            %62 = tt.addptr(%arg3: i16, %0: i32) -> tensor<32x128x!tt.ptr<f32>
-            scf.yield(%60: tensor<64x32xf32>, %61: tensor<64x32x!tt.ptr<f32>, %62: tensor<32x128x!tt.ptr<f32>)
+            %59 = tt.load(%arg2: i16) -> tensor<64x32x!tt.ptr<f32>
+            %60 = tt.load(%arg3: i16) -> tensor<32x128x!tt.ptr<f32>
+            %61 = "tt.dot"(%59: tensor<64x32x!tt.ptr<f32>, %60: tensor<32x128x!tt.ptr<f32>, %arg1: i16) -> tensor<64x32xf32>
+            %62 = tt.addptr(%arg2: i16, %1: i32) -> tensor<64x32x!tt.ptr<f32>
+            %63 = tt.addptr(%arg3: i16, %0: i32) -> tensor<32x128x!tt.ptr<f32>
+            scf.yield(%61: tensor<64x32xf32>, %62: tensor<64x32x!tt.ptr<f32>, %63: tensor<32x128x!tt.ptr<f32>)
         }
         %64 = "tt.expand_dims"(%33: tensor<64xi32>) -> tensor<64xi32>
         %65 = "tt.expand_dims"(%37: tensor<128xi32>) -> tensor<128xi32>
@@ -96,7 +96,7 @@ module() {
         %75 = arith.addi(%73: tensor<1x128xi32>, %74: tensor<64x1xi32>) -> tensor<64x128xi32>
         %76 = tt.splat(%arg2: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
         %77 = tt.addptr(%76: tensor<16x!tt.ptr<f32>>, %75: tensor<64x128xi32>) -> tensor<64x128x!tt.ptr<f32>
-        tt.store(%77: tensor<64x128x!tt.ptr<f32>, %63: i32)
+        tt.store(%77: tensor<64x128x!tt.ptr<f32>, %58: i32)
         tt.return()
     }
 }

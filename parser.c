@@ -5,6 +5,7 @@
 #include <base/arena.h>
 #include <base/io.h>
 #include "mlir_parser.h"
+#include <base/hashtable.h>
 
 /*
 
@@ -358,7 +359,80 @@ void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
     }
 }
 
-string print_operation(Arena *arena, int indent_level, Operation *op);
+// SSA numbering map for printer
+static inline size_t ptr_hash(ValueRef *p) { return ((size_t)p) >> 3; }
+static inline bool ptr_equal(ValueRef *a, ValueRef *b) { return a == b; }
+#define SsaMap_HASH ptr_hash
+#define SsaMap_EQUAL ptr_equal
+DEFINE_HASHTABLE_FOR_TYPES(ValueRef*, uint32_t, SsaMap)
+
+typedef struct {
+    Arena *arena;
+    uint32_t next_ssa;
+    SsaMap ssa_map;
+} PrintCtx;
+
+static inline void ssa_map_init(PrintCtx *ctx, Arena *arena) {
+    ctx->arena = arena;
+    ctx->next_ssa = 0;
+    SsaMap_init(arena, &ctx->ssa_map, 128);
+}
+
+static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, ValueRef *v) {
+    uint32_t *found = SsaMap_get(&ctx->ssa_map, v);
+    if (found) return *found;
+    uint32_t num = ctx->next_ssa++;
+    SsaMap_insert(ctx->arena, &ctx->ssa_map, v, num);
+    return num;
+}
+
+static inline bool try_parse_regnum(string reg, uint32_t *out) {
+    if (reg.size >= 2 && reg.str[0] == '%') {
+        uint64_t val = 0;
+        bool any = false;
+        for (size_t i = 1; i < reg.size; i++) {
+            char c = reg.str[i];
+            if (c < '0' || c > '9') return false;
+            any = true;
+            val = val * 10 + (uint64_t)(c - '0');
+            if (val > 0xFFFFFFFFu) return false;
+        }
+        if (any) { *out = (uint32_t)val; return true; }
+    }
+    return false;
+}
+
+string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op);
+
+static void preassign_region_ssa(PrintCtx *ctx, Region *region, int indent_level);
+static void preassign_op_ssa(PrintCtx *ctx, Operation *op, int indent_level) {
+    // First preassign nested regions so nested results get earlier numbers
+    if (op->n_regions > 0 && op->regions) {
+        for (int i = 0; i < op->n_regions; i++) {
+            preassign_region_ssa(ctx, op->regions[i], indent_level + 1);
+        }
+    }
+    // Then assign SSA for this op's results, if any
+    if (op->n_results > 0 && op->results) {
+        for (int i = 0; i < op->n_results; i++) {
+            if (op->results[i]) {
+                (void)get_or_assign_ssa(ctx, op->results[i]);
+            }
+        }
+    }
+}
+
+static void preassign_block_ssa(PrintCtx *ctx, Block *block, int indent_level) {
+    for (int i = 0; i < block->n_operations; i++) {
+        preassign_op_ssa(ctx, block->operations[i], indent_level + 1);
+    }
+}
+
+static void preassign_region_ssa(PrintCtx *ctx, Region *region, int indent_level) {
+    for (int i = 0; i < region->n_blocks; i++) {
+        preassign_block_ssa(ctx, region->blocks[i], indent_level);
+    }
+}
 
 string indent(Arena *arena, int indent_level) {
     const int indent_spaces=4;
@@ -371,7 +445,8 @@ string indent(Arena *arena, int indent_level) {
     return str;
 }
 
-string print_block(Arena *arena, int bb_index, int indent_level, Block *block) {
+string print_block_internal(PrintCtx *ctx, int bb_index, int indent_level, Block *block) {
+    Arena *arena = ctx->arena;
     string result = format(arena, str_lit("{}^bb{}"), indent(arena, indent_level), bb_index);
 
     // Print block arguments if any
@@ -400,47 +475,51 @@ string print_block(Arena *arena, int bb_index, int indent_level, Block *block) {
 
     for (int i=0; i < block->n_operations; i++) {
         result = str_concat(arena, result,
-            print_operation(arena, indent_level+1, block->operations[i])
-            );
+            print_operation_internal(ctx, indent_level+1, block->operations[i])
+        );
     }
     return result;
 }
 
-string print_region(Arena *arena, int indent_level, Region *region) {
+string print_region_internal(PrintCtx *ctx, int indent_level, Region *region) {
+    Arena *arena = ctx->arena;
     string result = str_lit("");
     result = str_concat(arena, result, str_lit("{\n"));
     for (int i=0; i < region->n_blocks; i++) {
         result = str_concat(arena, result,
-            print_block(arena, i, indent_level, region->blocks[i])
-            );
+            print_block_internal(ctx, i, indent_level, region->blocks[i])
+        );
     }
     result = str_concat(arena, result, indent(arena, indent_level));
     result = str_concat(arena, result, str_lit("}"));
     return result;
 }
 
-int reg_idx=0;
-
-string print_operation(Arena *arena, int indent_level, Operation *op) {
+string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op) {
+    Arena *arena = ctx->arena;
     string result = indent(arena, indent_level);
 
     // Print results if any
     if (op->n_result_types > 0) {
+        // Ensure nested regions get SSA numbers first to match expected ordering
+        if (op->n_regions > 0 && op->regions) {
+            for (int i = 0; i < op->n_regions; i++) {
+                preassign_region_ssa(ctx, op->regions[i], indent_level + 1);
+            }
+        }
         for (int i = 0; i < op->n_result_types; i++) {
             if (i > 0) result = str_concat(arena, result, str_lit(", "));
 
-            // Use SSA number from operation's results if available
+            // Assign/get SSA number for the result value (after preassigning children)
             if (op->n_results > i && op->results && op->results[i]) {
-                result = str_concat(arena, result, format(arena, str_lit("%{}"), (int64_t)op->results[i]->ssa_number));
+                uint32_t num = get_or_assign_ssa(ctx, op->results[i]);
+                result = str_concat(arena, result, format(arena, str_lit("%{}"), (int64_t)num));
             } else {
-                // Fallback to global counter
-                result = str_concat(arena, result, format(arena, str_lit("%{}"), reg_idx + i));
+                // Should not happen; emit placeholder
+                result = str_concat(arena, result, str_lit("%_"));
             }
         }
         result = str_concat(arena, result, str_lit(" = "));
-        if (!op->n_results || !op->results) {
-            reg_idx += op->n_result_types;
-        }
     }
 
     // Print operation name (quotes only for unregistered operations, except tt.func)
@@ -470,14 +549,12 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
             result = str_concat(arena, result, str_lit("NULL_OPERAND"));
             continue;
         }
-        // Use original register name for BLOCK_ARG, SSA number for OP_RESULT
+        // Use original register name for BLOCK_ARG; for results prefer parsed numeric name
         if (operand->kind == BLOCK_ARG && operand->register_name.size > 0) {
             result = str_concat(arena, result, operand->register_name);
-        } else if (operand->ssa_number < 1000) {
-            result = str_concat(arena, result, format(arena, str_lit("%{}"), (int64_t)operand->ssa_number));
         } else {
-            // Fallback to register name for debugging unresolved values
-            result = str_concat(arena, result, operand->register_name);
+            uint32_t num = get_or_assign_ssa(ctx, operand);
+            result = str_concat(arena, result, format(arena, str_lit("%{}"), (int64_t)num));
         }
         result = str_concat(arena, result, str_lit(": "));
         result = str_concat(arena, result, operand->type->str);
@@ -528,13 +605,22 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
         result = str_concat(arena, result, str_lit(" "));
         for (int i = 0; i < op->n_regions; i++) {
             result = str_concat(arena, result,
-                print_region(arena, indent_level, op->regions[i])
-                );
+                print_region_internal(ctx, indent_level, op->regions[i])
+            );
         }
     }
 
     result = str_concat(arena, result, str_lit("\n"));
     return result;
+}
+
+// Public entry: initialize SSA context and print
+string print_operation(Arena *arena, int indent_level, Operation *op) {
+    PrintCtx ctx;
+    ssa_map_init(&ctx, arena);
+    // Preassign SSA numbers for entire subtree to match parser's post-order numbering
+    preassign_op_ssa(&ctx, op, indent_level);
+    return print_operation_internal(&ctx, indent_level, op);
 }
 
 // Main
@@ -666,7 +752,6 @@ Operation* construct_test_module_full(Arena *arena) {
     const_result->result_index = 0;
     const_result->type = i32_type;
     const_result->register_name = str_lit("%0");
-    const_result->ssa_number = 0;
 
     const_op->results = arena_alloc_array(arena, ValueRef*, 1);
     const_op->results[0] = const_result;
@@ -693,7 +778,6 @@ Operation* construct_test_module_full(Arena *arena) {
     add_result->result_index = 1;
     add_result->type = i32_type;
     add_result->register_name = str_lit("%1");
-    add_result->ssa_number = 1;
 
     add_op->results = arena_alloc_array(arena, ValueRef*, 1);
     add_op->results[0] = add_result;
@@ -707,7 +791,6 @@ Operation* construct_test_module_full(Arena *arena) {
     mul_result->result_index = 2;  // This will be %2
     mul_result->type = i32_type;
     mul_result->register_name = str_lit("%2");
-    mul_result->ssa_number = 2;
 
     Operation *mul_op = arena_alloc(arena, Operation);
     mul_op->op_type = OP_TYPE_ARITH_MULI;
@@ -813,7 +896,6 @@ int main(int argc, char *argv[]) {
 
         // Test generic printing with expected output comparison
         printf("=== Generic Printer Test ===\n");
-        reg_idx = 0;  // Reset SSA counter
         printf("About to print operation...\n");
         string result = print_operation(arena, 0, op);
         printf("Printing result...\n");
@@ -860,7 +942,6 @@ int main(int argc, char *argv[]) {
         parser_init(arena, &parser, mlir_code);
         op = parse_module(&parser);
         println(arena, str_lit("MLIR:"));
-        reg_idx = 0;  // Reset SSA counter
         println(arena, str_lit("{}"), print_operation(arena, 0, op));
         exit_code = 0;
     }

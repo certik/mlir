@@ -15,7 +15,6 @@ void symbol_table_init(Arena *arena, ScopedSymbolTable *st) {
     st->scope_capacity = 8;
     st->scopes = arena_alloc_array(arena, SymbolTable, st->scope_capacity);
     st->num_scopes = 0;
-    st->next_ssa_number = 0;
 }
 
 void symbol_table_push_scope(Arena *arena, ScopedSymbolTable *st) {
@@ -42,10 +41,6 @@ void symbol_table_add_value(Arena *arena, ScopedSymbolTable *st, string name, Va
         // Create a default scope if none exists
         symbol_table_push_scope(arena, st);
     }
-    // Only assign SSA numbers to OP_RESULT values, not BLOCK_ARG
-    if (value->kind == OP_RESULT) {
-        value->ssa_number = st->next_ssa_number++;
-    }
     SymbolTable_insert(arena, &st->scopes[st->num_scopes - 1], name, value);
 }
 
@@ -60,10 +55,6 @@ ValueRef* symbol_table_lookup(ScopedSymbolTable *st, string name) {
     return NULL;
 }
 
-uint32_t symbol_table_get_next_ssa_number(ScopedSymbolTable *st) {
-    return st->next_ssa_number++;
-}
-
 ValueRef* create_value_ref(Arena *arena, ValueKind kind) {
     ValueRef *value = arena_alloc(arena, ValueRef);
     value->kind = kind;
@@ -71,7 +62,6 @@ ValueRef* create_value_ref(Arena *arena, ValueKind kind) {
     value->result_index = 0;
     value->type = NULL;
     value->register_name = str_lit("");
-    value->ssa_number = 0;
     return value;
 }
 

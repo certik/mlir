@@ -41,37 +41,37 @@ module() {
         %27 = tt.addptr(%26: tensor<16xi32>, %22: tensor<65536xi32>) -> tensor<65536x!tt.ptr<bf16>
         %28 = tt.load(%27: tensor<65536x!tt.ptr<bf16>, %23: i32, %0: i32) -> tensor<65536xbf16>
         %29 = "arith.extf"() -> ?
-        %31 = "tt.reduce"() -> ? {
+        %30 = "tt.reduce"() -> ? {
         ^bb0(%arg5: f32, %arg6: f32):
-            %30 = "tt.pure_extern_elementwise"(%arg5: f32, %arg6: f32) -> ?
+            %31 = "tt.pure_extern_elementwise"(%arg5: f32, %arg6: f32) -> ?
             "tt.reduce"()
         }
-        %32 = tt.splat(%31: i32) -> tensor<16xi32>
+        %32 = tt.splat(%30: i32) -> tensor<16xi32>
         %33 = arith.subf(%29: i32, %32: tensor<16xi32>) -> tensor<65536xf32>
         %34 = "math.exp"() -> ?
-        %36 = "tt.reduce"() -> ? {
+        %35 = "tt.reduce"() -> ? {
         ^bb0(%arg5: f32, %arg6: f32):
-            %35 = arith.addf(%arg5: f32, %arg6: f32) -> f32
+            %36 = arith.addf(%arg5: f32, %arg6: f32) -> f32
             "tt.reduce"()
         }
         %37 = "math.log"() -> ?
-        %38 = arith.addf(%31: i32, %37: i32) -> f32
+        %38 = arith.addf(%30: i32, %37: i32) -> f32
         %39 = arith.cmpi() -> ?
         scf.if() {
         ^bb0:
             %40 = arith.cmpi() -> ?
-            %45 = scf.if() -> ? {
+            %41 = scf.if() -> ? {
             ^bb0:
-                %41 = tt.addptr(%13: !, %25: i32) -> !
-                %42 = tt.load(%41: !) -> bf16
-                %43 = "arith.extf"() -> ?
-                %44 = arith.mulf(%43: i32, %2: i32) -> f32
-                scf.yield(%44: f32)
+                %42 = tt.addptr(%13: !, %25: i32) -> !
+                %43 = tt.load(%42: !) -> bf16
+                %44 = "arith.extf"() -> ?
+                %45 = arith.mulf(%44: i32, %2: i32) -> f32
+                scf.yield(%45: f32)
             }{
             ^bb0:
                 scf.yield(%1: i32)
             }
-            tt.store(%14: !, %45: i32)
+            tt.store(%14: !, %41: i32)
         }
         tt.store(%17: !, %38: f32)
         tt.return()

@@ -38,12 +38,12 @@ module() {
         %13 = "linalg.copy"() -> ?
         %14 = "tensor.collapse_shape"() -> ?
         %15 = "index.constant"() -> ?
-        %18 = scf.for(%1: i32, %15: i32, %2: i32, %6: i16) -> ? {
+        %16 = scf.for(%1: i32, %15: i32, %2: i32, %6: i16) -> ? {
         ^bb0(%arg0: index, %arg1: i16):
-            %16 = "tensor.extract"() -> ?
-            %17 = arith.addi(%arg1: i16, %16: i32) -> i16
+            %17 = "tensor.extract"() -> ?
+            %18 = arith.addi(%arg1: i16, %17: i32) -> i16
             "vector.print"()
-            scf.yield(%17: i16)
+            scf.yield(%18: i16)
         }
         %19 = "tensor.collapse_shape"() -> ?
         %20 = "tensor.collapse_shape"() -> ?

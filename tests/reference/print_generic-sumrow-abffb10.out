@@ -32,33 +32,33 @@ module() {
         %18 = "arith.bitcast"() -> ?
         %19 = "arith.bitcast"() -> ?
         %20 = "llvm.mlir"() -> ?
-        %45 = scf.for(%17: i32, %18: i32, %19: i32, %14: i32) -> ? {
+        %21 = scf.for(%17: i32, %18: i32, %19: i32, %14: i32) -> ? {
         ^bb0(%arg0: index, %arg1: i16):
-            %21 = tt.splat(%arg0: index) -> tensor<16xi32>
-            %22 = arith.addi(%21: tensor<16xi32>, %12: i32) -> tensor<1x256xi32>
-            %23 = arith.constant() -> ?
-            %24 = arith.cmpi() -> ?
-            %25 = arith.constant() {value = 2048} -> i32
-            %26 = arith.constant() -> ?
-            %27 = arith.muli(%8: tensor<2x1xi32>, %26: i32) -> tensor<2x1xi32>
-            %28 = "tt.broadcast"(%22: tensor<1x256xi32>) -> ?
-            %29 = "tt.broadcast"(%27: tensor<2x1xi32>) -> ?
-            %30 = arith.addi(%28: i32, %29: i32) -> tensor<2x256xi32>
-            %31 = tt.splat(%arg0: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
-            %32 = tt.addptr(%31: tensor<16x!tt.ptr<f32>>, %30: tensor<2x256xi32>) -> tensor<2x256x!tt.ptr<f32>
-            %33 = "tt.broadcast"(%24: i32) -> ?
-            %34 = "tt.broadcast"(%10: i32) -> ?
-            %35 = "arith.andi"() -> ?
-            %36 = arith.constant() {value = 0} -> i32
-            %37 = arith.constant() -> ?
-            %38 = "arith.sitofp"() -> ?
-            %39 = tt.load(%32: tensor<2x256x!tt.ptr<f32>, %35: i32, %38: i32) -> tensor<2x256xf32>
-            %40 = arith.addf(%arg1: i16, %39: tensor<2x256xf32>) -> tensor<2x256xf32>
-            %41 = "tt.broadcast"(%10: i32) -> ?
-            %42 = "tt.broadcast"(%24: i32) -> ?
-            %43 = "arith.andi"() -> ?
-            %44 = "arith.select"() -> ?
-            scf.yield(%44: i32)
+            %22 = tt.splat(%arg0: index) -> tensor<16xi32>
+            %23 = arith.addi(%22: tensor<16xi32>, %12: i32) -> tensor<1x256xi32>
+            %24 = arith.constant() -> ?
+            %25 = arith.cmpi() -> ?
+            %26 = arith.constant() {value = 2048} -> i32
+            %27 = arith.constant() -> ?
+            %28 = arith.muli(%8: tensor<2x1xi32>, %27: i32) -> tensor<2x1xi32>
+            %29 = "tt.broadcast"(%23: tensor<1x256xi32>) -> ?
+            %30 = "tt.broadcast"(%28: tensor<2x1xi32>) -> ?
+            %31 = arith.addi(%29: i32, %30: i32) -> tensor<2x256xi32>
+            %32 = tt.splat(%arg0: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
+            %33 = tt.addptr(%32: tensor<16x!tt.ptr<f32>>, %31: tensor<2x256xi32>) -> tensor<2x256x!tt.ptr<f32>
+            %34 = "tt.broadcast"(%25: i32) -> ?
+            %35 = "tt.broadcast"(%10: i32) -> ?
+            %36 = "arith.andi"() -> ?
+            %37 = arith.constant() {value = 0} -> i32
+            %38 = arith.constant() -> ?
+            %39 = "arith.sitofp"() -> ?
+            %40 = tt.load(%33: tensor<2x256x!tt.ptr<f32>, %36: i32, %39: i32) -> tensor<2x256xf32>
+            %41 = arith.addf(%arg1: i16, %40: tensor<2x256xf32>) -> tensor<2x256xf32>
+            %42 = "tt.broadcast"(%10: i32) -> ?
+            %43 = "tt.broadcast"(%25: i32) -> ?
+            %44 = "arith.andi"() -> ?
+            %45 = "arith.select"() -> ?
+            scf.yield(%45: i32)
         }
         %46 = "tt.call"() -> ?
         %47 = "tt.expand_dims"(%46: i32) -> ?
@@ -69,12 +69,12 @@ module() {
     }
     tt.func(%arg0: tensor) {
     ^bb0:
-        %51 = "tt.reduce"() -> ? {
+        %50 = "tt.reduce"() -> ? {
         ^bb0(%arg1: f32, %arg2: f32):
-            %50 = "tt.call"() -> ?
+            %51 = "tt.call"() -> ?
             "tt.reduce"()
         }
-        tt.return(%51: i32)
+        tt.return(%50: i32)
     }
     tt.func(%arg0: f32, %arg1: f32) {
     ^bb0:
