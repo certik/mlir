@@ -41,10 +41,10 @@ module() {
         %15 = arith.constant() {value = 0} -> i32
         %16 = arith.constant() {value = 256} -> i32
         %17 = arith.muli(%arg3: i32, %16: i32) -> i32
-        %18 = "arith.cmpi"() -> ?
-        "cf.cond_br"()
+        %18 = arith.cmpi() -> ?
+        cf.cond_br()
     ^bb1:
-        "tt.return"()
+        tt.return()
     ^bb2:
         %19 = tt.get_program_id() {axis = "x"} -> i32
         %20 = arith.addi(%arg3: i32, %5: i32) -> i32
@@ -58,47 +58,47 @@ module() {
         %28 = "arith.remsi"() -> ?
         %29 = "arith.divsi"() -> ?
         %30 = arith.muli(%27: i32, %14: i32) -> i32
-        %31 = "tt.make_range"() {end = 16 : i32, start = 0 : i32} -> tensor<64xi32>
-        %32 = "tt.splat"(%30: i32) -> i32
+        %31 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<64xi32>
+        %32 = tt.splat(%30: i32) -> i32
         %33 = arith.addi(%32: i32, %31: tensor<64xi32>) -> tensor<64xi32>
         %34 = arith.muli(%29: i32, %13: i32) -> i32
-        %35 = "tt.make_range"() {end = 16 : i32, start = 0 : i32} -> tensor<128xi32>
-        %36 = "tt.splat"(%34: i32) -> i32
+        %35 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<128xi32>
+        %36 = tt.splat(%34: i32) -> i32
         %37 = arith.addi(%36: i32, %35: tensor<128xi32>) -> tensor<128xi32>
-        %38 = "tt.splat"(%arg3: i32) -> i32
+        %38 = tt.splat(%arg3: i32) -> i32
         %39 = "arith.remsi"() -> ?
         %40 = "arith.remsi"() -> ?
-        %41 = "tt.make_range"() {end = 16 : i32, start = 0 : i32} -> tensor<32xi32>
+        %41 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<32xi32>
         %42 = "tt.expand_dims"() -> ?
         %43 = arith.muli(%42: i32, %10: i32) -> tensor<64x1xi32>
         %44 = "tt.expand_dims"() -> ?
         %45 = "tt.broadcast"() -> ?
         %46 = "tt.broadcast"() -> ?
         %47 = arith.addi(%45: i32, %46: i32) -> tensor<64x32xi32>
-        %48 = "tt.splat"(%arg0: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
-        %49 = "tt.addptr"(%48: tensor<16x!tt.ptr<f32>>, %47: tensor<64x32xi32>) -> tensor<64x32x!tt.ptr<f32>
+        %48 = tt.splat(%arg0: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
+        %49 = tt.addptr(%48: tensor<16x!tt.ptr<f32>>, %47: tensor<64x32xi32>) -> tensor<64x32x!tt.ptr<f32>
         %50 = "tt.expand_dims"() -> ?
         %51 = "tt.expand_dims"() -> ?
         %52 = arith.muli(%51: i32, %9: i32) -> tensor<1x128xi32>
         %53 = "tt.broadcast"() -> ?
         %54 = "tt.broadcast"() -> ?
         %55 = arith.addi(%53: i32, %54: i32) -> tensor<32x128xi32>
-        %56 = "tt.splat"(%arg1: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
-        %57 = "tt.addptr"(%56: tensor<16x!tt.ptr<f32>>, %55: tensor<32x128xi32>) -> tensor<32x128x!tt.ptr<f32>
-        %63 = "scf.for"() -> ? {
+        %56 = tt.splat(%arg1: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
+        %57 = tt.addptr(%56: tensor<16x!tt.ptr<f32>>, %55: tensor<32x128xi32>) -> tensor<32x128x!tt.ptr<f32>
+        %63 = scf.for() -> ? {
         ^bb0:
             %58 = tt.load(%arg6: unknown) -> tensor<64x32x!tt.ptr<f32>
             %59 = tt.load(%arg7: unknown) -> tensor<32x128x!tt.ptr<f32>
             %60 = "tt.dot"() -> ?
-            %61 = "tt.addptr"(%arg6: unknown, %1: i32) -> tensor<64x32x!tt.ptr<f32>
-            %62 = "tt.addptr"(%arg7: unknown, %0: i32) -> tensor<32x128x!tt.ptr<f32>
+            %61 = tt.addptr(%arg6: unknown, %1: i32) -> tensor<64x32x!tt.ptr<f32>
+            %62 = tt.addptr(%arg7: unknown, %0: i32) -> tensor<32x128x!tt.ptr<f32>
             "scf.yield"()
         }
         %64 = "tt.expand_dims"() -> ?
         %65 = "tt.expand_dims"() -> ?
-        %66 = "tt.splat"(%arg3: i32) -> i32
-        %67 = "arith.cmpi"() -> ?
-        %68 = "arith.cmpi"() -> ?
+        %66 = tt.splat(%arg3: i32) -> i32
+        %67 = arith.cmpi() -> ?
+        %68 = arith.cmpi() -> ?
         %69 = "tt.broadcast"() -> ?
         %70 = "tt.broadcast"() -> ?
         %71 = "arith.andi"() -> ?
@@ -106,10 +106,10 @@ module() {
         %73 = "tt.broadcast"() -> ?
         %74 = "tt.broadcast"() -> ?
         %75 = arith.addi(%73: i32, %74: i32) -> tensor<64x128xi32>
-        %76 = "tt.splat"(%arg2: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
-        %77 = "tt.addptr"(%76: tensor<16x!tt.ptr<f32>>, %75: tensor<64x128xi32>) -> tensor<64x128x!tt.ptr<f32>
+        %76 = tt.splat(%arg2: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
+        %77 = tt.addptr(%76: tensor<16x!tt.ptr<f32>>, %75: tensor<64x128xi32>) -> tensor<64x128x!tt.ptr<f32>
         tt.store(%77: tensor<64x128x!tt.ptr<f32>, %63: i32)
-        "tt.return"()
+        tt.return()
     }
 }
 

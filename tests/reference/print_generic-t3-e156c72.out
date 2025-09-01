@@ -11,7 +11,7 @@ module() {
 ^bb0:
     func.func() {
     ^bb0:
-        %0 = "memref.alloc"() -> ?
+        %0 = memref.alloc() -> ?
         %1 = arith.constant() {value = 0} -> index
         %2 = arith.constant() {value = 10} -> index
         %3 = arith.subi(%2: index, %1: index) -> index
@@ -25,10 +25,10 @@ module() {
         ^bb0(%arg2: index, %arg3: index, %arg4: index, %arg5: index, %arg6: index, %arg7: index):
             %10 = arith.addi(%1: index, %arg2: index) -> index
             %11 = arith.addi(%5: index, %arg5: index) -> index
-            %12 = "memref.load"() -> ?
-            %13 = "memref.load"() -> ?
+            %12 = memref.load() -> ?
+            %13 = memref.load() -> ?
             %14 = arith.addf(%12: i32, %13: i32) -> f32
-            "memref.store"()
+            memref.store()
             "gpu.terminator"()
         }
         "return"()

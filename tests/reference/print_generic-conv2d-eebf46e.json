@@ -4,7 +4,7 @@
     "infile": "tests/conv2d.ttir",
     "infile_hash": "1b581f633b123f049906803f4967ad63a1604f1f47aaf176e44a2a04",
     "outfile": "print_generic-conv2d-eebf46e.out",
-    "outfile_hash": "d9189908014e635ca4b5be95b6f9cc985da8bfc4d7df7b350f4b39fa",
+    "outfile_hash": "3ba706781480722d4b3684da2ee9faf631a2cdd26a3f1a8b752af401",
     "stdout": null,
     "stdout_hash": null,
     "stderr": null,

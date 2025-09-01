@@ -12,19 +12,19 @@ module() {
     tt.func(%arg0: !tt.ptr<f16,1>, %arg1: !tt.ptr<f16,1>, %arg2: i32) {
     ^bb0(%arg0: !tt.ptr<f16,1>, %arg1: !tt.ptr<f16,1>, %arg2: i32):
         %0 = "arith.extsi"() -> ?
-        %1 = "tt.make_range"() {end = 16 : i32, start = 0 : i32} -> tensor<128xi32>
+        %1 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<128xi32>
         %2 = "arith.extsi"() -> ?
         %3 = "tt.expand_dims"() -> ?
-        %4 = "tt.splat"(%0: i32) -> tensor<16xi32>
+        %4 = tt.splat(%0: i32) -> tensor<16xi32>
         %5 = arith.muli(%3: i32, %4: tensor<16xi32>) -> tensor<128x1xi64>
-        %6 = "tt.splat"(%arg0: !tt.ptr<f16,1>) -> tensor<16xi32>
-        %7 = "tt.addptr"(%6: tensor<16xi32>, %5: tensor<128x1xi64>) -> tensor<128x1x!tt.ptr<f16,1>
+        %6 = tt.splat(%arg0: !tt.ptr<f16,1>) -> tensor<16xi32>
+        %7 = tt.addptr(%6: tensor<16xi32>, %5: tensor<128x1xi64>) -> tensor<128x1x!tt.ptr<f16,1>
         %8 = "tt.broadcast"() -> ?
-        %9 = "tt.make_range"() {end = 16 : i32, start = 0 : i32} -> tensor<64xi32>
+        %9 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<64xi32>
         %10 = "arith.extsi"() -> ?
         %11 = "tt.expand_dims"() -> ?
         %12 = "tt.broadcast"() -> ?
-        %13 = "tt.addptr"(%8: i32, %12: i32) -> tensor<128x64x!tt.ptr<f16,1>
+        %13 = tt.addptr(%8: i32, %12: i32) -> tensor<128x64x!tt.ptr<f16,1>
         tt.load(%13: tensor<128x64x!tt.ptr<f16,1>)
         %14 = "arith.extf"() -> ?
         %16 = "tt.reduce"() -> ? {
@@ -32,11 +32,11 @@ module() {
             %15 = "arith.maxf"() -> ?
             "tt.reduce"()
         }
-        %17 = "tt.splat"(%arg1: !tt.ptr<f16,1>) -> tensor<16xi32>
-        %18 = "tt.addptr"(%17: tensor<16xi32>, %1: tensor<128xi32>) -> tensor<128x!tt.ptr<f16,1>
+        %17 = tt.splat(%arg1: !tt.ptr<f16,1>) -> tensor<16xi32>
+        %18 = tt.addptr(%17: tensor<16xi32>, %1: tensor<128xi32>) -> tensor<128x!tt.ptr<f16,1>
         %19 = "arith.truncf"() -> ?
         tt.store(%18: tensor<128x!tt.ptr<f16,1>, %19: i32)
-        "tt.return"()
+        tt.return()
     }
 }
 
