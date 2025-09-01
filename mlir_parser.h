@@ -108,6 +108,8 @@ typedef enum {
 
     // Triton dialect
     OP_TYPE_TT_GET_PROGRAM_ID,
+    OP_TYPE_TT_LOAD,
+    OP_TYPE_TT_STORE,
 
     OP_TYPE_COUNT  // Total number of operation types
 } OpType;

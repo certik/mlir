@@ -103,6 +103,10 @@ OpType op_string_to_type(string opname) {
         return OP_TYPE_FUNC_RETURN;
     } else if (str_eq(opname, str_lit("tt.get_program_id"))) {
         return OP_TYPE_TT_GET_PROGRAM_ID;
+    } else if (str_eq(opname, str_lit("tt.load"))) {
+        return OP_TYPE_TT_LOAD;
+    } else if (str_eq(opname, str_lit("tt.store"))) {
+        return OP_TYPE_TT_STORE;
     } else {
         return OP_TYPE_UNREGISTERED;
     }
