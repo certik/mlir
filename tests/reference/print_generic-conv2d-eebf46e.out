@@ -76,7 +76,7 @@ module() {
                                 %32 = "tt.addptr"(%31: !, %20: i32) -> !
                                 %33 = "tt.load"(%32: !) -> ?
                                 %34 = "arith.mulf"() -> ?
-                                %35 = "arith.addf"() -> tensor<16xf32>
+                                %35 = arith.addf(%999: i32, %34: i32) -> f32
                                 "scf.yield"()
                             }
                             "scf.yield"()
@@ -85,12 +85,12 @@ module() {
                     }
                     "scf.yield"()
                 }
-                %40 = "arith.addf"() -> tensor<16xf32>
+                %40 = arith.addf(%39: i32, %15: i32) -> f32
                 %41 = arith.muli(%11: i32, %arg17: i32) -> i32
                 %42 = arith.addi(%10: i32, %41: i32) -> i32
                 %43 = arith.addi(%42: i32, %12: i32) -> i32
                 %44 = "tt.addptr"(%arg14: !tt.ptr<f32,1>, %43: i32) -> !
-                "tt.store"(%44: !, %40: tensor<16xf32>)
+                "tt.store"(%44: !, %40: f32)
             }
         }
         "tt.return"()

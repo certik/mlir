@@ -27,7 +27,7 @@ module() {
             %11 = arith.addi(%5: index, %arg5: index) -> index
             %12 = "memref.load"() -> ?
             %13 = "memref.load"() -> ?
-            %14 = "arith.addf"() -> tensor<16xf32>
+            %14 = arith.addf(%12: i32, %13: i32) -> f32
             "memref.store"()
             "gpu.terminator"()
         }

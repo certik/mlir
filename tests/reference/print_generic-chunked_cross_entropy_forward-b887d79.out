@@ -51,11 +51,11 @@ module() {
         %34 = "math.exp"() -> ?
         %36 = "tt.reduce"() -> ? {
         ^bb0(%arg5: f32, %arg6: f32):
-            %35 = "arith.addf"() -> tensor<16xf32>
+            %35 = arith.addf(%arg5: f32, %arg6: f32) -> f32
             "tt.reduce"()
         }
         %37 = "math.log"() -> ?
-        %38 = "arith.addf"() -> tensor<16xf32>
+        %38 = arith.addf(%31: i32, %37: i32) -> f32
         %39 = "arith.cmpi"() -> ?
         "scf.if"() {
         ^bb0:
@@ -73,7 +73,7 @@ module() {
             }
             "tt.store"(%14: !, %45: i32)
         }
-        "tt.store"(%17: !, %38: tensor<16xf32>)
+        "tt.store"(%17: !, %38: f32)
         "tt.return"()
     }
 }

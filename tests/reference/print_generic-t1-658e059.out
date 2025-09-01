@@ -18,7 +18,7 @@ module() {
             ^bb0:
                 %1 = "memref.load"() -> ?
                 %2 = "memref.load"() -> ?
-                %3 = "arith.addf"() -> tensor<16xf32>
+                %3 = arith.addf(%1: i32, %2: i32) -> f32
                 "memref.store"()
             }
         }

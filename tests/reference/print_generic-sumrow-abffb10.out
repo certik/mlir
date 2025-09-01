@@ -56,7 +56,7 @@ module() {
             %37 = arith.constant() -> ?
             %38 = "arith.sitofp"() -> ?
             %39 = "tt.load"(%32: tensor<2x256x!tt.ptr<f32>, %35: i32, %38: i32) -> ?
-            %40 = "arith.addf"() -> tensor<16xf32>
+            %40 = arith.addf(%999: i32, %39: i32) -> tensor<2x256xf32>
             %41 = "tt.broadcast"() -> ?
             %42 = "tt.broadcast"() -> ?
             %43 = "arith.andi"() -> ?
@@ -81,7 +81,7 @@ module() {
     }
     tt.func(%arg0: f32, %arg1: f32) {
     ^bb0(%arg0: f32, %arg1: f32):
-        %52 = "arith.addf"() -> tensor<16xf32>
+        %52 = arith.addf(%arg0: f32, %arg1: f32) -> f32
         "tt.return"()
     }
 }

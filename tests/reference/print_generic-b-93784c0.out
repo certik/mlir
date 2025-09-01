@@ -34,10 +34,10 @@ module() {
         %14 = "tt.splat"(%arg1: !tt.ptr<f32,1>) -> tensor<16xi32>
         %15 = "tt.addptr"(%14: tensor<16xi32>, %7: tensor<4xi32>) -> tensor<4x!tt.ptr<f32,1>
         %16 = "tt.load"(%15: tensor<4x!tt.ptr<f32,1>, %10: i32) -> ?
-        %17 = "arith.addf"() -> tensor<16xf32>
+        %17 = arith.addf(%13: i32, %16: i32) -> tensor<4xf32>
         %18 = "tt.splat"(%arg2: !tt.ptr<f32,1>) -> tensor<16xi32>
         %19 = "tt.addptr"(%18: tensor<16xi32>, %7: tensor<4xi32>) -> tensor<4x!tt.ptr<f32,1>
-        "tt.store"(%19: tensor<4x!tt.ptr<f32,1>, %17: tensor<16xf32>, %10: i32)
+        "tt.store"(%19: tensor<4x!tt.ptr<f32,1>, %17: tensor<4xf32>, %10: i32)
         "tt.return"()
     }
 }

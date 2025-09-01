@@ -23,7 +23,7 @@ module() {
         %9 = "tt.splat"(%arg1: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
         %10 = "tt.addptr"(%9: tensor<16x!tt.ptr<f32>>, %5: tensor<16xi32>) -> tensor<16x!tt.ptr<f32>
         %11 = "tt.load"(%10: tensor<16x!tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>
-        %12 = "arith.addf"() -> tensor<16xf32>
+        %12 = arith.addf(%8: tensor<16x!tt.ptr<f32>, %11: tensor<16x!tt.ptr<f32>) -> tensor<16xf32>
         %13 = "tt.splat"(%arg2: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
         %14 = "tt.addptr"(%13: tensor<16x!tt.ptr<f32>>, %5: tensor<16xi32>) -> tensor<16x!tt.ptr<f32>
         %0 = "tt.store"(%14: tensor<16x!tt.ptr<f32>, %12: tensor<16xf32>) -> tensor<16x!tt.ptr<f32>

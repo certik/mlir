@@ -24,7 +24,7 @@ module() {
             ^bb0:
                 %7 = "memref.load"() -> ?
                 %8 = "memref.load"() -> ?
-                %9 = "arith.addf"() -> tensor<16xf32>
+                %9 = arith.addf(%7: i32, %8: i32) -> f32
                 "memref.store"()
             }
         }

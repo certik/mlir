@@ -4,7 +4,7 @@
     "infile": "tests/b.mlir",
     "infile_hash": "b8460ac51e26117e47d04c473a6c586ddcb17e87aba9e5bb5ede854c",
     "outfile": "print_generic-b-93784c0.out",
-    "outfile_hash": "88a73e2b228ea96dbfae77c5f2106923dfd7c0c4bbcb9472e900815e",
+    "outfile_hash": "60073bdd5b606f7cef10d32c496544a71a3a3985dd96cff369d5fb21",
     "stdout": null,
     "stdout_hash": null,
     "stderr": null,
