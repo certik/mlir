@@ -359,7 +359,7 @@ void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
 }
 
 string print_operation(Arena *arena, int indent_level, Operation *op);
-static const char* op_type_to_string(OpType type);
+string op_type_to_string(OpType type);
 
 string indent(Arena *arena, int indent_level) {
     const int indent_spaces=4;
@@ -422,36 +422,36 @@ string print_region(Arena *arena, int indent_level, Region *region) {
 
 int reg_idx=0;
 
-static const char* op_type_to_string(OpType type) {
+string op_type_to_string(OpType type) {
     switch (type) {
-        case OP_TYPE_UNREGISTERED: return "unregistered";
-        case OP_TYPE_MODULE: return "module";
-        case OP_TYPE_ARITH_ADDI: return "arith.addi";
-        case OP_TYPE_ARITH_SUBI: return "arith.subi";
-        case OP_TYPE_ARITH_MULI: return "arith.muli";
-        case OP_TYPE_ARITH_DIVI: return "arith.divi";
-        case OP_TYPE_ARITH_ADDF: return "arith.addf";
-        case OP_TYPE_ARITH_SUBF: return "arith.subf";
-        case OP_TYPE_ARITH_MULF: return "arith.mulf";
-        case OP_TYPE_ARITH_DIVF: return "arith.divf";
-        case OP_TYPE_ARITH_CONSTANT: return "arith.constant";
-        case OP_TYPE_ARITH_CMPI: return "arith.cmpi";
-        case OP_TYPE_ARITH_CMPF: return "arith.cmpf";
-        case OP_TYPE_MEMREF_LOAD: return "memref.load";
-        case OP_TYPE_MEMREF_STORE: return "memref.store";
-        case OP_TYPE_MEMREF_ALLOC: return "memref.alloc";
-        case OP_TYPE_MEMREF_DEALLOC: return "memref.dealloc";
-        case OP_TYPE_CF_BR: return "cf.br";
-        case OP_TYPE_CF_COND_BR: return "cf.cond_br";
-        case OP_TYPE_CF_SWITCH: return "cf.switch";
-        case OP_TYPE_FUNC_FUNC: return "func.func";
-        case OP_TYPE_FUNC_RETURN: return "func.return";
-        case OP_TYPE_FUNC_CALL: return "func.call";
-        case OP_TYPE_SCF_FOR: return "scf.for";
-        case OP_TYPE_SCF_WHILE: return "scf.while";
-        case OP_TYPE_SCF_IF: return "scf.if";
-        case OP_TYPE_TT_GET_PROGRAM_ID: return "tt.get_program_id";
-        default: return "unknown";
+        case OP_TYPE_UNREGISTERED: return str_lit("unregistered");
+        case OP_TYPE_MODULE: return str_lit("module");
+        case OP_TYPE_ARITH_ADDI: return str_lit("arith.addi");
+        case OP_TYPE_ARITH_SUBI: return str_lit("arith.subi");
+        case OP_TYPE_ARITH_MULI: return str_lit("arith.muli");
+        case OP_TYPE_ARITH_DIVI: return str_lit("arith.divi");
+        case OP_TYPE_ARITH_ADDF: return str_lit("arith.addf");
+        case OP_TYPE_ARITH_SUBF: return str_lit("arith.subf");
+        case OP_TYPE_ARITH_MULF: return str_lit("arith.mulf");
+        case OP_TYPE_ARITH_DIVF: return str_lit("arith.divf");
+        case OP_TYPE_ARITH_CONSTANT: return str_lit("arith.constant");
+        case OP_TYPE_ARITH_CMPI: return str_lit("arith.cmpi");
+        case OP_TYPE_ARITH_CMPF: return str_lit("arith.cmpf");
+        case OP_TYPE_MEMREF_LOAD: return str_lit("memref.load");
+        case OP_TYPE_MEMREF_STORE: return str_lit("memref.store");
+        case OP_TYPE_MEMREF_ALLOC: return str_lit("memref.alloc");
+        case OP_TYPE_MEMREF_DEALLOC: return str_lit("memref.dealloc");
+        case OP_TYPE_CF_BR: return str_lit("cf.br");
+        case OP_TYPE_CF_COND_BR: return str_lit("cf.cond_br");
+        case OP_TYPE_CF_SWITCH: return str_lit("cf.switch");
+        case OP_TYPE_FUNC_FUNC: return str_lit("func.func");
+        case OP_TYPE_FUNC_RETURN: return str_lit("func.return");
+        case OP_TYPE_FUNC_CALL: return str_lit("func.call");
+        case OP_TYPE_SCF_FOR: return str_lit("scf.for");
+        case OP_TYPE_SCF_WHILE: return str_lit("scf.while");
+        case OP_TYPE_SCF_IF: return str_lit("scf.if");
+        case OP_TYPE_TT_GET_PROGRAM_ID: return str_lit("tt.get_program_id");
+        default: return str_lit("unknown");
     }
 }
 
@@ -491,7 +491,7 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
         if (op->opname.size > 0) {
             result = str_concat(arena, result, op->opname);
         } else {
-            result = str_concat(arena, result, str_from_cstr_view((char*)op_type_to_string(op->op_type)));
+            result = str_concat(arena, result, op_type_to_string(op->op_type));
         }
     }
 
