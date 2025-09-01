@@ -850,6 +850,8 @@ Operation* parse_operation(Parser *parser) {
         op->op_type = OP_TYPE_MODULE;
     } else if (str_eq(op->opname, str_lit("arith.addi"))) {
         op->op_type = OP_TYPE_ARITH_ADDI;
+    } else if (str_eq(op->opname, str_lit("arith.addf"))) {
+        op->op_type = OP_TYPE_ARITH_ADDF;
     } else if (str_eq(op->opname, str_lit("arith.subi"))) {
         op->op_type = OP_TYPE_ARITH_SUBI;
     } else if (str_eq(op->opname, str_lit("arith.muli"))) {
