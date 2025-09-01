@@ -421,39 +421,6 @@ string print_region(Arena *arena, int indent_level, Region *region) {
 
 int reg_idx=0;
 
-string op_type_to_string(OpType type) {
-    switch (type) {
-        case OP_TYPE_UNREGISTERED: return str_lit("unregistered");
-        case OP_TYPE_MODULE: return str_lit("module");
-        case OP_TYPE_ARITH_ADDI: return str_lit("arith.addi");
-        case OP_TYPE_ARITH_SUBI: return str_lit("arith.subi");
-        case OP_TYPE_ARITH_MULI: return str_lit("arith.muli");
-        case OP_TYPE_ARITH_DIVI: return str_lit("arith.divi");
-        case OP_TYPE_ARITH_ADDF: return str_lit("arith.addf");
-        case OP_TYPE_ARITH_SUBF: return str_lit("arith.subf");
-        case OP_TYPE_ARITH_MULF: return str_lit("arith.mulf");
-        case OP_TYPE_ARITH_DIVF: return str_lit("arith.divf");
-        case OP_TYPE_ARITH_CONSTANT: return str_lit("arith.constant");
-        case OP_TYPE_ARITH_CMPI: return str_lit("arith.cmpi");
-        case OP_TYPE_ARITH_CMPF: return str_lit("arith.cmpf");
-        case OP_TYPE_MEMREF_LOAD: return str_lit("memref.load");
-        case OP_TYPE_MEMREF_STORE: return str_lit("memref.store");
-        case OP_TYPE_MEMREF_ALLOC: return str_lit("memref.alloc");
-        case OP_TYPE_MEMREF_DEALLOC: return str_lit("memref.dealloc");
-        case OP_TYPE_CF_BR: return str_lit("cf.br");
-        case OP_TYPE_CF_COND_BR: return str_lit("cf.cond_br");
-        case OP_TYPE_CF_SWITCH: return str_lit("cf.switch");
-        case OP_TYPE_FUNC_FUNC: return str_lit("func.func");
-        case OP_TYPE_FUNC_RETURN: return str_lit("func.return");
-        case OP_TYPE_FUNC_CALL: return str_lit("func.call");
-        case OP_TYPE_SCF_FOR: return str_lit("scf.for");
-        case OP_TYPE_SCF_WHILE: return str_lit("scf.while");
-        case OP_TYPE_SCF_IF: return str_lit("scf.if");
-        case OP_TYPE_TT_GET_PROGRAM_ID: return str_lit("tt.get_program_id");
-        default: return str_lit("unknown");
-    }
-}
-
 string print_operation(Arena *arena, int indent_level, Operation *op) {
     string result = indent(arena, indent_level);
 
