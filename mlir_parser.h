@@ -258,6 +258,9 @@ void parser_error(Parser *parser, string msg, uint64_t first, uint64_t last);
 void parser_warning(Parser *parser, string msg, uint64_t first, uint64_t last);
 Operation* parse_module(Parser *parser);
 
+string op_type_to_string(OpType type);
+OpType op_string_to_type(string name);
+
 #ifdef __cplusplus
 }
 #endif

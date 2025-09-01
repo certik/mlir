@@ -84,6 +84,29 @@ string tokentype_to_string(TokenType tt) {
     }
 }
 
+OpType op_string_to_type(string opname) {
+    if (str_eq(opname, str_lit("module"))) {
+        return OP_TYPE_MODULE;
+    } else if (str_eq(opname, str_lit("arith.addi"))) {
+        return OP_TYPE_ARITH_ADDI;
+    } else if (str_eq(opname, str_lit("arith.addf"))) {
+        return OP_TYPE_ARITH_ADDF;
+    } else if (str_eq(opname, str_lit("arith.subi"))) {
+        return OP_TYPE_ARITH_SUBI;
+    } else if (str_eq(opname, str_lit("arith.muli"))) {
+        return OP_TYPE_ARITH_MULI;
+    } else if (str_eq(opname, str_lit("arith.constant"))) {
+        return OP_TYPE_ARITH_CONSTANT;
+    } else if (str_eq(opname, str_lit("func.func"))) {
+        return OP_TYPE_FUNC_FUNC;
+    } else if (str_eq(opname, str_lit("func.return"))) {
+        return OP_TYPE_FUNC_RETURN;
+    } else if (str_eq(opname, str_lit("tt.get_program_id"))) {
+        return OP_TYPE_TT_GET_PROGRAM_ID;
+    } else {
+        return OP_TYPE_UNREGISTERED;
+    }
+}
 
 void get_newlines(Arena *arena, const string s, vector_i64 *newlines) {
     for (int64_t pos=0; pos < s.size; pos++) {
@@ -846,27 +869,7 @@ Operation* parse_operation(Parser *parser) {
     }
 
     // Set op_type based on operation name
-    if (str_eq(op->opname, str_lit("module"))) {
-        op->op_type = OP_TYPE_MODULE;
-    } else if (str_eq(op->opname, str_lit("arith.addi"))) {
-        op->op_type = OP_TYPE_ARITH_ADDI;
-    } else if (str_eq(op->opname, str_lit("arith.addf"))) {
-        op->op_type = OP_TYPE_ARITH_ADDF;
-    } else if (str_eq(op->opname, str_lit("arith.subi"))) {
-        op->op_type = OP_TYPE_ARITH_SUBI;
-    } else if (str_eq(op->opname, str_lit("arith.muli"))) {
-        op->op_type = OP_TYPE_ARITH_MULI;
-    } else if (str_eq(op->opname, str_lit("arith.constant"))) {
-        op->op_type = OP_TYPE_ARITH_CONSTANT;
-    } else if (str_eq(op->opname, str_lit("func.func"))) {
-        op->op_type = OP_TYPE_FUNC_FUNC;
-    } else if (str_eq(op->opname, str_lit("func.return"))) {
-        op->op_type = OP_TYPE_FUNC_RETURN;
-    } else if (str_eq(op->opname, str_lit("tt.get_program_id"))) {
-        op->op_type = OP_TYPE_TT_GET_PROGRAM_ID;
-    } else {
-        op->op_type = OP_TYPE_UNREGISTERED;
-    }
+    op->op_type = op_string_to_type(op->opname);
 
 
     // First we handle specific opnames with special parsing rules
@@ -1082,6 +1085,7 @@ Operation* parse_operation(Parser *parser) {
 
                 op->operands = operands.data;
                 op->n_operands = operands.size;
+                op->n_result_types = 0;
             }
         }
 

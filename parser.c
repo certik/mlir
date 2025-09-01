@@ -359,7 +359,6 @@ void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
 }
 
 string print_operation(Arena *arena, int indent_level, Operation *op);
-string op_type_to_string(OpType type);
 
 string indent(Arena *arena, int indent_level) {
     const int indent_spaces=4;
