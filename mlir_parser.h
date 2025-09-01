@@ -106,6 +106,9 @@ typedef enum {
     OP_TYPE_SCF_WHILE,
     OP_TYPE_SCF_IF,
 
+    // Triton dialect
+    OP_TYPE_TT_GET_PROGRAM_ID,
+
     OP_TYPE_COUNT  // Total number of operation types
 } OpType;
 
@@ -154,19 +157,19 @@ typedef struct Attribute {
     union {
         int64_t integer_value;
         double float_value;
-        const char *string_value;
+        string string_value;
         bool bool_value;
         struct {
             struct Attribute **elements;
             size_t count;
         } array;
     } data;
-    const char *name;
+    string name;
 } Attribute;
 
 // Named attribute for dictionaries
 typedef struct NamedAttribute {
-    const char *name;
+    const string *name;
     Attribute *value;
 } NamedAttribute;
 
@@ -188,7 +191,7 @@ struct ValueRef {
     // same name. If this is used for printing, then extra care must be taken
     // that the printed Value name is unique.
     string register_name;
-    
+
     // SSA number assigned during parsing for unique printing
     uint32_t ssa_number;
 
@@ -214,7 +217,7 @@ typedef struct Operation {
     Region **regions;
     uint64_t n_regions;
     string opname; // Only used for unregistered ops
-    
+
     // Result values produced by this operation
     ValueRef **results;
     uint64_t n_results;

@@ -374,7 +374,7 @@ string indent(Arena *arena, int indent_level) {
 
 string print_block(Arena *arena, int bb_index, int indent_level, Block *block) {
     string result = format(arena, str_lit("{}^bb{}"), indent(arena, indent_level), bb_index);
-    
+
     // Print block arguments if any
     if (block->n_arguments > 0 && block->arguments) {
         result = str_concat(arena, result, str_lit("("));
@@ -384,10 +384,10 @@ string print_block(Arena *arena, int bb_index, int indent_level, Block *block) {
             if (arg && arg->type) {
                 // For block arguments, use the original register name
                 if (arg->register_name.size > 0) {
-                    result = str_concat(arena, result, format(arena, str_lit("{}: {}"), 
+                    result = str_concat(arena, result, format(arena, str_lit("{}: {}"),
                                                             arg->register_name, arg->type->str));
                 } else {
-                    result = str_concat(arena, result, format(arena, str_lit("%arg{}: {}"), 
+                    result = str_concat(arena, result, format(arena, str_lit("%arg{}: {}"),
                                                             (int64_t)arg->result_index, arg->type->str));
                 }
             } else {
@@ -396,9 +396,9 @@ string print_block(Arena *arena, int bb_index, int indent_level, Block *block) {
         }
         result = str_concat(arena, result, str_lit(")"));
     }
-    
+
     result = str_concat(arena, result, str_lit(":\n"));
-    
+
     for (int i=0; i < block->n_operations; i++) {
         result = str_concat(arena, result,
             print_operation(arena, indent_level+1, block->operations[i])
@@ -450,18 +450,19 @@ static const char* op_type_to_string(OpType type) {
         case OP_TYPE_SCF_FOR: return "scf.for";
         case OP_TYPE_SCF_WHILE: return "scf.while";
         case OP_TYPE_SCF_IF: return "scf.if";
+        case OP_TYPE_TT_GET_PROGRAM_ID: return "tt.get_program_id";
         default: return "unknown";
     }
 }
 
 string print_operation(Arena *arena, int indent_level, Operation *op) {
     string result = indent(arena, indent_level);
-    
+
     // Print results if any
     if (op->n_result_types > 0) {
         for (int i = 0; i < op->n_result_types; i++) {
             if (i > 0) result = str_concat(arena, result, str_lit(", "));
-            
+
             // Use SSA number from operation's results if available
             if (op->n_results > i && op->results && op->results[i]) {
                 result = str_concat(arena, result, format(arena, str_lit("%{}"), (int64_t)op->results[i]->ssa_number));
@@ -475,7 +476,7 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
             reg_idx += op->n_result_types;
         }
     }
-    
+
     // Print operation name (quotes only for unregistered operations, except tt.func)
     bool is_tt_func = (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.func")));
     if (op->op_type == OP_TYPE_UNREGISTERED && !is_tt_func) {
@@ -493,8 +494,17 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
             result = str_concat(arena, result, str_from_cstr_view((char*)op_type_to_string(op->op_type)));
         }
     }
-    
-    // Print operands with types (always include parentheses)  
+
+    // Special handling for tt.get_program_id axis parameter
+    if (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.get_program_id")) && op->n_attributes > 0) {
+        Attribute *axis_attr = op->attributes[0];
+        if (axis_attr && str_eq(axis_attr->name, str_lit("axis"))) {
+            result = str_concat(arena, result, str_lit(" "));
+            result = str_concat(arena, result, axis_attr->data.string_value);
+        }
+    }
+
+    // Print operands with types (always include parentheses)
     result = str_concat(arena, result, str_lit("("));
     for (int i = 0; i < op->n_operands; i++) {
         if (i > 0) result = str_concat(arena, result, str_lit(", "));
@@ -516,14 +526,15 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
         result = str_concat(arena, result, operand->type->str);
     }
     result = str_concat(arena, result, str_lit(")"));
-    
-    // Print attributes if any
-    if (op->n_attributes > 0) {
+
+    // Print attributes if any (skip for tt.get_program_id as it's handled specially)
+    bool skip_attributes = (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.get_program_id")));
+    if (op->n_attributes > 0 && !skip_attributes) {
         result = str_concat(arena, result, str_lit(" {"));
         for (int i = 0; i < op->n_attributes; i++) {
             if (i > 0) result = str_concat(arena, result, str_lit(", "));
             Attribute *attr = op->attributes[i];
-            result = str_concat(arena, result, format(arena, str_lit("{} = "), str_from_cstr_view((char*)attr->name)));
+            result = str_concat(arena, result, format(arena, str_lit("{} = "), attr->name));
             switch (attr->kind) {
                 case ATTR_KIND_INTEGER:
                     // Add type annotation for tt.make_range attributes
@@ -534,7 +545,7 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
                     }
                     break;
                 case ATTR_KIND_STRING:
-                    result = str_concat(arena, result, format(arena, str_lit("\"{}\""), str_from_cstr_view((char*)attr->data.string_value)));
+                    result = str_concat(arena, result, format(arena, str_lit("\"{}\""), attr->data.string_value));
                     break;
                 default:
                     result = str_concat(arena, result, str_lit("..."));
@@ -542,7 +553,7 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
         }
         result = str_concat(arena, result, str_lit("}"));
     }
-    
+
     // Print result types if any
     if (op->n_result_types > 0) {
         result = str_concat(arena, result, str_lit(" -> "));
@@ -555,7 +566,7 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
             }
         }
     }
-    
+
     // Print regions if any
     if (op->n_regions > 0) {
         result = str_concat(arena, result, str_lit(" "));
@@ -565,7 +576,7 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
                 );
         }
     }
-    
+
     result = str_concat(arena, result, str_lit("\n"));
     return result;
 }
@@ -653,13 +664,13 @@ Operation* construct_test_module_full(Arena *arena) {
     func_op->attributes = arena_alloc_array(arena, Attribute*, 1);
     func_op->attributes[0] = arena_alloc(arena, Attribute);
     func_op->attributes[0]->kind = ATTR_KIND_STRING;
-    func_op->attributes[0]->data.string_value = "example_func";
-    func_op->attributes[0]->name = "sym_name";
+    func_op->attributes[0]->data.string_value = str_lit("example_func");
+    func_op->attributes[0]->name = str_lit("sym_name");
 
     // Create function region and block
     Region *func_region = arena_alloc(arena, Region);
     Block *func_block = arena_alloc(arena, Block);
-    
+
     // Function block arguments (%arg0, %arg1)
     func_block->n_arguments = 2;
     func_block->arguments = arena_alloc_array(arena, ValueRef*, 2);
@@ -689,10 +700,10 @@ Operation* construct_test_module_full(Arena *arena) {
     const_op->attributes[0] = arena_alloc(arena, Attribute);
     const_op->attributes[0]->kind = ATTR_KIND_INTEGER;
     const_op->attributes[0]->data.integer_value = 5;
-    const_op->attributes[0]->name = "value";
+    const_op->attributes[0]->name = str_lit("value");
     const_op->regions = NULL;
     const_op->n_regions = 0;
-    
+
     // Create const_result before linking
     ValueRef *const_result = create_value_ref(arena, OP_RESULT);
     const_result->def = const_op;
@@ -700,7 +711,7 @@ Operation* construct_test_module_full(Arena *arena) {
     const_result->type = i32_type;
     const_result->register_name = str_lit("%0");
     const_result->ssa_number = 0;
-    
+
     const_op->results = arena_alloc_array(arena, ValueRef*, 1);
     const_op->results[0] = const_result;
     const_op->n_results = 1;
@@ -727,7 +738,7 @@ Operation* construct_test_module_full(Arena *arena) {
     add_result->type = i32_type;
     add_result->register_name = str_lit("%1");
     add_result->ssa_number = 1;
-    
+
     add_op->results = arena_alloc_array(arena, ValueRef*, 1);
     add_op->results[0] = add_result;
     add_op->n_results = 1;
@@ -759,7 +770,7 @@ Operation* construct_test_module_full(Arena *arena) {
     mul_op->results[0] = mul_result;
     mul_op->n_results = 1;
     mul_op->opname = str_lit("arith.muli");
-    
+
     // Set def pointer for mul_result now that mul_op exists
     mul_result->def = mul_op;
 
@@ -818,11 +829,11 @@ int main(int argc, char *argv[]) {
     printf("Starting main...\n");
     Arena *arena = arena_create(50*1024*1024);  // Increase arena size
     printf("Arena created...\n");
-    
+
     // Check for --construct option
     bool use_construction = false;
     char *input_file = NULL;
-    
+
     printf("Parsing args...\n");
     for (int i = 1; i < argc; i++) {
         printf("Arg %d: %s\n", i, argv[i]);
@@ -834,16 +845,16 @@ int main(int argc, char *argv[]) {
         }
     }
     printf("Done parsing args. use_construction=%d\n", use_construction);
-    
+
     Operation* op;
-    
+
     int exit_code;
     if (use_construction) {
         // Use constructed test module
         printf("Creating module...\n");
         op = construct_test_module_full(arena);
         printf("Module created successfully.\n");
-        
+
         // Test generic printing with expected output comparison
         printf("=== Generic Printer Test ===\n");
         reg_idx = 0;  // Reset SSA counter
@@ -851,9 +862,9 @@ int main(int argc, char *argv[]) {
         string result = print_operation(arena, 0, op);
         printf("Printing result...\n");
         println(arena, str_lit("{}"), result);
-        
+
         // Reference expected output for generic mode
-        const char *expected = 
+        const char *expected =
             "module() {\n"
             "^bb0:\n"
             "    func.func() {sym_name = \"example_func\"} {\n"
@@ -864,7 +875,7 @@ int main(int argc, char *argv[]) {
             "        func.return(%2: i32)\n"
             "    }\n"
             "}\n";
-        
+
         // Compare output
         if (str_eq(result, str_from_cstr_view((char*)expected))) {
             printf("✅ Generic mode test PASSED\n");
@@ -882,11 +893,11 @@ int main(int argc, char *argv[]) {
                                 "  %0 = \"std.constant\"() {value = 42} : () -> i32\n"
                                 "  \"std.return\"(%0) : (i32) -> ()\n"
                                 "}");
-        
+
         if (input_file) {
             mlir_code = read_file_ok(arena, str_from_cstr_view(input_file));
         }
-        
+
         tokenizer_print_all_tokens(arena, mlir_code);
 
         Parser parser;
