@@ -45,7 +45,7 @@ module() {
                 %12 = "arith.remsi"() -> ?
                 %13 = arith.subi(%11: i32, %arg20: i32) -> i32
                 %14 = arith.subi(%12: i32, %arg21: i32) -> i32
-                "tt.load"(%7: !)
+                tt.load(%7: !)
                 %36 = "scf.for"() -> ? {
                 ^bb0:
                     %15 = arith.addi(%13: i32, %arg24: unknown) -> i32
@@ -72,12 +72,12 @@ module() {
                                 %24 = arith.muli(%999: i32, %arg9: i32) -> i32
                                 %25 = "tt.addptr"(%23: !, %24: i32) -> !
                                 %26 = "tt.addptr"(%25: !, %arg26: unknown) -> !
-                                "tt.load"(%26: !)
+                                tt.load(%26: !)
                                 %27 = "tt.addptr"(%arg0: !tt.ptr<f32,1>, %5: i32) -> !
                                 %28 = arith.muli(%15: i32, %arg3: i32) -> i32
                                 %29 = "tt.addptr"(%27: !, %28: i32) -> !
                                 %30 = "tt.addptr"(%29: !, %19: i32) -> !
-                                "tt.load"(%30: !)
+                                tt.load(%30: !)
                                 %31 = "arith.mulf"() -> ?
                                 %32 = arith.addf(%999: i32, %31: i32) -> f32
                                 "scf.yield"()
@@ -93,7 +93,7 @@ module() {
                 %39 = arith.addi(%10: i32, %38: i32) -> i32
                 %40 = arith.addi(%39: i32, %12: i32) -> i32
                 %41 = "tt.addptr"(%arg14: !tt.ptr<f32,1>, %40: i32) -> !
-                "tt.store"(%41: !, %37: f32)
+                tt.store(%41: !, %37: f32)
             }
         }
         "tt.return"()

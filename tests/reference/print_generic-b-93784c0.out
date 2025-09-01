@@ -33,14 +33,14 @@ module() {
         %10 = "arith.cmpi"() -> ?
         %11 = "tt.splat"(%arg0: !tt.ptr<f32,1>) -> tensor<16xi32>
         %12 = "tt.addptr"(%11: tensor<16xi32>, %7: tensor<4xi32>) -> tensor<4x!tt.ptr<f32,1>
-        "tt.load"(%12: tensor<4x!tt.ptr<f32,1>, %10: i32)
+        tt.load(%12: tensor<4x!tt.ptr<f32,1>, %10: i32)
         %13 = "tt.splat"(%arg1: !tt.ptr<f32,1>) -> tensor<16xi32>
         %14 = "tt.addptr"(%13: tensor<16xi32>, %7: tensor<4xi32>) -> tensor<4x!tt.ptr<f32,1>
-        "tt.load"(%14: tensor<4x!tt.ptr<f32,1>, %10: i32)
+        tt.load(%14: tensor<4x!tt.ptr<f32,1>, %10: i32)
         %15 = arith.addf(%999: i32, %12: unknown) -> tensor<4xf32>
         %16 = "tt.splat"(%arg2: !tt.ptr<f32,1>) -> tensor<16xi32>
         %17 = "tt.addptr"(%16: tensor<16xi32>, %7: tensor<4xi32>) -> tensor<4x!tt.ptr<f32,1>
-        "tt.store"(%17: tensor<4x!tt.ptr<f32,1>, %15: tensor<4xf32>, %10: i32)
+        tt.store(%17: tensor<4x!tt.ptr<f32,1>, %15: tensor<4xf32>, %10: i32)
         "tt.return"()
     }
 }

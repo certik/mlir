@@ -92,11 +92,11 @@ module() {
             %64 = "tt.splat"(%63: i32) -> tensor<16xi32>
             %65 = "arith.cmpi"() -> ?
             %66 = "tt.broadcast"() -> ?
-            "tt.load"(%arg11: unknown, %66: i32, %8: i32)
+            tt.load(%arg11: unknown, %66: i32, %8: i32)
             %67 = "tt.splat"(%63: i32) -> tensor<16xi32>
             %68 = "arith.cmpi"() -> ?
             %69 = "tt.broadcast"() -> ?
-            "tt.load"(%arg12: unknown, %69: i32, %7: i32)
+            tt.load(%arg12: unknown, %69: i32, %7: i32)
             %70 = "tt.dot"() -> ?
             %71 = "tt.addptr"(%arg11: unknown, %5: i32) -> tensor<32x16x!tt.ptr<f32,1>
             %72 = "tt.addptr"(%arg12: unknown, %61: tensor<16xi32>) -> tensor<16x64x!tt.ptr<f32,1>
@@ -118,7 +118,7 @@ module() {
         %87 = "tt.broadcast"() -> ?
         %88 = "tt.broadcast"() -> ?
         %89 = "arith.andi"() -> ?
-        "tt.store"(%82: tensor<32x64x!tt.ptr<f32,1>, %73: i32)
+        tt.store(%82: tensor<32x64x!tt.ptr<f32,1>, %73: i32)
         "tt.return"()
     }
 }

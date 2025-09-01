@@ -58,7 +58,7 @@ module() {
             %36 = arith.constant() {value = 0} -> i32
             %37 = arith.constant() -> ?
             %38 = "arith.sitofp"() -> ?
-            "tt.load"(%32: tensor<2x256x!tt.ptr<f32>, %35: i32, %38: i32)
+            tt.load(%32: tensor<2x256x!tt.ptr<f32>, %35: i32, %38: i32)
             %39 = arith.addf(%999: i32, %31: unknown) -> tensor<2x256xf32>
             %40 = "tt.broadcast"() -> ?
             %41 = "tt.broadcast"() -> ?
@@ -70,7 +70,7 @@ module() {
         %46 = "tt.expand_dims"() -> ?
         %47 = "tt.splat"(%arg1: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
         %48 = "tt.addptr"(%47: tensor<16x!tt.ptr<f32>>, %8: tensor<2x1xi32>) -> tensor<2x1x!tt.ptr<f32>
-        "tt.store"(%48: tensor<2x1x!tt.ptr<f32>, %46: i32, %10: i32)
+        tt.store(%48: tensor<2x1x!tt.ptr<f32>, %46: i32, %10: i32)
         "tt.return"()
     }
     tt.func(%arg0: tensor) {

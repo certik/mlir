@@ -35,11 +35,11 @@ module() {
         %21 = "tt.splat"(%19: i32) -> tensor<16xi32>
         %22 = arith.addi(%21: tensor<16xi32>, %20: tensor<65536xi32>) -> tensor<65536xi32>
         %23 = "arith.cmpi"() -> ?
-        "tt.load"(%18: !)
+        tt.load(%18: !)
         %24 = "arith.trunci"() -> ?
         %25 = "tt.splat"(%13: !) -> tensor<16xi32>
         %26 = "tt.addptr"(%25: tensor<16xi32>, %22: tensor<65536xi32>) -> tensor<65536x!tt.ptr<bf16>
-        "tt.load"(%26: tensor<65536x!tt.ptr<bf16>, %23: i32, %0: i32)
+        tt.load(%26: tensor<65536x!tt.ptr<bf16>, %23: i32, %0: i32)
         %27 = "arith.extf"() -> ?
         %29 = "tt.reduce"() -> ? {
         ^bb0(%arg5: f32, %arg6: f32):
@@ -63,7 +63,7 @@ module() {
             %42 = "scf.if"() -> ? {
             ^bb0:
                 %39 = "tt.addptr"(%13: !, %24: i32) -> !
-                "tt.load"(%39: !)
+                tt.load(%39: !)
                 %40 = "arith.extf"() -> ?
                 %41 = "arith.mulf"() -> ?
                 "scf.yield"()
@@ -71,9 +71,9 @@ module() {
             ^bb0:
                 "scf.yield"()
             }
-            "tt.store"(%14: !, %42: i32)
+            tt.store(%14: !, %42: i32)
         }
-        "tt.store"(%17: !, %36: f32)
+        tt.store(%17: !, %36: f32)
         "tt.return"()
     }
 }

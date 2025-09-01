@@ -87,8 +87,8 @@ module() {
         %57 = "tt.addptr"(%56: tensor<16x!tt.ptr<f32>>, %55: tensor<32x128xi32>) -> tensor<32x128x!tt.ptr<f32>
         %63 = "scf.for"() -> ? {
         ^bb0:
-            %58 = "tt.load"(%arg6: unknown) -> tensor<64x32x!tt.ptr<f32>
-            %59 = "tt.load"(%arg7: unknown) -> tensor<32x128x!tt.ptr<f32>
+            %58 = tt.load(%arg6: unknown) -> tensor<64x32x!tt.ptr<f32>
+            %59 = tt.load(%arg7: unknown) -> tensor<32x128x!tt.ptr<f32>
             %60 = "tt.dot"() -> ?
             %61 = "tt.addptr"(%arg6: unknown, %1: i32) -> tensor<64x32x!tt.ptr<f32>
             %62 = "tt.addptr"(%arg7: unknown, %0: i32) -> tensor<32x128x!tt.ptr<f32>
@@ -108,7 +108,7 @@ module() {
         %75 = arith.addi(%73: i32, %74: i32) -> tensor<64x128xi32>
         %76 = "tt.splat"(%arg2: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
         %77 = "tt.addptr"(%76: tensor<16x!tt.ptr<f32>>, %75: tensor<64x128xi32>) -> tensor<64x128x!tt.ptr<f32>
-        "tt.store"(%77: tensor<64x128x!tt.ptr<f32>, %63: i32)
+        tt.store(%77: tensor<64x128x!tt.ptr<f32>, %63: i32)
         "tt.return"()
     }
 }

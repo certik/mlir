@@ -4,7 +4,7 @@
     "infile": "tests/sumrow.ttir",
     "infile_hash": "bf600b2046dfdfd13a5b372b897f5c083012115e5c32f6957c96198d",
     "outfile": "print_generic-sumrow-abffb10.out",
-    "outfile_hash": "45804d075c1396c1d64471b7dcabb96098823d2bdfa1207029144e3d",
+    "outfile_hash": "c16f06e82643c7dce05d3278366185498ea6ff1dd694dff67ed83c51",
     "stdout": null,
     "stdout_hash": null,
     "stderr": null,

@@ -25,7 +25,7 @@ module() {
         %11 = "tt.expand_dims"() -> ?
         %12 = "tt.broadcast"() -> ?
         %13 = "tt.addptr"(%8: i32, %12: i32) -> tensor<128x64x!tt.ptr<f16,1>
-        "tt.load"(%13: tensor<128x64x!tt.ptr<f16,1>)
+        tt.load(%13: tensor<128x64x!tt.ptr<f16,1>)
         %14 = "arith.extf"() -> ?
         %16 = "tt.reduce"() -> ? {
         ^bb0(%arg3: f32, %arg4: f32):
@@ -35,7 +35,7 @@ module() {
         %17 = "tt.splat"(%arg1: !tt.ptr<f16,1>) -> tensor<16xi32>
         %18 = "tt.addptr"(%17: tensor<16xi32>, %1: tensor<128xi32>) -> tensor<128x!tt.ptr<f16,1>
         %19 = "arith.truncf"() -> ?
-        "tt.store"(%18: tensor<128x!tt.ptr<f16,1>, %19: i32)
+        tt.store(%18: tensor<128x!tt.ptr<f16,1>, %19: i32)
         "tt.return"()
     }
 }
