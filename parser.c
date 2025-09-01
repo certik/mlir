@@ -495,15 +495,6 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
         }
     }
 
-    // Special handling for tt.get_program_id axis parameter
-    if (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.get_program_id")) && op->n_attributes > 0) {
-        Attribute *axis_attr = op->attributes[0];
-        if (axis_attr && str_eq(axis_attr->name, str_lit("axis"))) {
-            result = str_concat(arena, result, str_lit(" "));
-            result = str_concat(arena, result, axis_attr->data.string_value);
-        }
-    }
-
     // Print operands with types (always include parentheses)
     result = str_concat(arena, result, str_lit("("));
     for (int i = 0; i < op->n_operands; i++) {
@@ -528,8 +519,7 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
     result = str_concat(arena, result, str_lit(")"));
 
     // Print attributes if any (skip for tt.get_program_id as it's handled specially)
-    bool skip_attributes = (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.get_program_id")));
-    if (op->n_attributes > 0 && !skip_attributes) {
+    if (op->n_attributes > 0) {
         result = str_concat(arena, result, str_lit(" {"));
         for (int i = 0; i < op->n_attributes; i++) {
             if (i > 0) result = str_concat(arena, result, str_lit(", "));
