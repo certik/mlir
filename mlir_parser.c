@@ -778,15 +778,13 @@ void parse_tt_func(Parser *parser, Operation *op) {
     region->n_blocks = blocks.size;
 
     // Set up block arguments
+    // Note: For tt.func, we don't copy arguments to the first block to avoid duplication
+    // since the arguments are already printed in the function signature
     if (region->n_blocks > 0 && op->n_operands > 0) {
         Block *entry_block = region->blocks[0];
-        entry_block->n_arguments = op->n_operands;
-        entry_block->arguments = arena_alloc_array(parser->arena, ValueRef*, op->n_operands);
-
-        // Copy function arguments to block arguments
-        for (int i = 0; i < op->n_operands; i++) {
-            entry_block->arguments[i] = op->operands[i];
-        }
+        // Don't set block arguments for tt.func - they're already in the function signature
+        entry_block->n_arguments = 0;
+        entry_block->arguments = NULL;
     }
 
     if (parser_peek(parser, TK_NAME)) {
