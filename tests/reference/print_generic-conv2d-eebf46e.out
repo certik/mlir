@@ -18,6 +18,9 @@ Warning (30:44): Undefined value: %arg26
 Warning (40:45): Undefined value: %arg26
                 %33 = tt.addptr %32, %arg26 : !tt.ptr<f32, 1>, i32
                                             ^
+Warning (57:35): Undefined value: %12
+        %14 = arith.addf %13, %12 : f32
+                                  ^
 MLIR:
 module() {
 ^bb0:
@@ -42,41 +45,41 @@ module() {
                 %12 = "arith.remsi"() -> ?
                 %13 = arith.subi(%11: i32, %arg20: i32) -> i32
                 %14 = arith.subi(%12: i32, %arg21: i32) -> i32
-                %15 = "tt.load"(%7: !) -> ?
-                %39 = "scf.for"() -> ? {
+                "tt.load"(%7: !)
+                %36 = "scf.for"() -> ? {
                 ^bb0:
-                    %16 = arith.addi(%13: i32, %arg24: unknown) -> i32
+                    %15 = arith.addi(%13: i32, %arg24: unknown) -> i32
+                    %16 = "arith.cmpi"() -> ?
                     %17 = "arith.cmpi"() -> ?
-                    %18 = "arith.cmpi"() -> ?
-                    %19 = "arith.ori"() -> ?
-                    %38 = "scf.if"() -> ? {
+                    %18 = "arith.ori"() -> ?
+                    %35 = "scf.if"() -> ? {
                     ^bb0:
                         "scf.yield"()
                     }{
                     ^bb0:
-                        %37 = "scf.for"() -> ? {
+                        %34 = "scf.for"() -> ? {
                         ^bb0:
-                            %20 = arith.addi(%14: i32, %arg26: unknown) -> i32
+                            %19 = arith.addi(%14: i32, %arg26: unknown) -> i32
+                            %20 = "arith.cmpi"() -> ?
                             %21 = "arith.cmpi"() -> ?
-                            %22 = "arith.cmpi"() -> ?
-                            %23 = "arith.ori"() -> ?
-                            %36 = "scf.if"() -> ? {
+                            %22 = "arith.ori"() -> ?
+                            %33 = "scf.if"() -> ? {
                             ^bb0:
                                 "scf.yield"()
                             }{
                             ^bb0:
-                                %24 = "tt.addptr"(%arg6: !tt.ptr<f32,1>, %8: i32) -> !
-                                %25 = arith.muli(%999: i32, %arg9: i32) -> i32
-                                %26 = "tt.addptr"(%24: !, %25: i32) -> !
-                                %27 = "tt.addptr"(%26: !, %arg26: unknown) -> !
-                                %28 = "tt.load"(%27: !) -> ?
-                                %29 = "tt.addptr"(%arg0: !tt.ptr<f32,1>, %5: i32) -> !
-                                %30 = arith.muli(%16: i32, %arg3: i32) -> i32
-                                %31 = "tt.addptr"(%29: !, %30: i32) -> !
-                                %32 = "tt.addptr"(%31: !, %20: i32) -> !
-                                %33 = "tt.load"(%32: !) -> ?
-                                %34 = "arith.mulf"() -> ?
-                                %35 = arith.addf(%999: i32, %34: i32) -> f32
+                                %23 = "tt.addptr"(%arg6: !tt.ptr<f32,1>, %8: i32) -> !
+                                %24 = arith.muli(%999: i32, %arg9: i32) -> i32
+                                %25 = "tt.addptr"(%23: !, %24: i32) -> !
+                                %26 = "tt.addptr"(%25: !, %arg26: unknown) -> !
+                                "tt.load"(%26: !)
+                                %27 = "tt.addptr"(%arg0: !tt.ptr<f32,1>, %5: i32) -> !
+                                %28 = arith.muli(%15: i32, %arg3: i32) -> i32
+                                %29 = "tt.addptr"(%27: !, %28: i32) -> !
+                                %30 = "tt.addptr"(%29: !, %19: i32) -> !
+                                "tt.load"(%30: !)
+                                %31 = "arith.mulf"() -> ?
+                                %32 = arith.addf(%999: i32, %31: i32) -> f32
                                 "scf.yield"()
                             }
                             "scf.yield"()
@@ -85,12 +88,12 @@ module() {
                     }
                     "scf.yield"()
                 }
-                %40 = arith.addf(%39: i32, %15: i32) -> f32
-                %41 = arith.muli(%11: i32, %arg17: i32) -> i32
-                %42 = arith.addi(%10: i32, %41: i32) -> i32
-                %43 = arith.addi(%42: i32, %12: i32) -> i32
-                %44 = "tt.addptr"(%arg14: !tt.ptr<f32,1>, %43: i32) -> !
-                "tt.store"(%44: !, %40: f32)
+                %37 = arith.addf(%36: i32, %12: unknown) -> f32
+                %38 = arith.muli(%11: i32, %arg17: i32) -> i32
+                %39 = arith.addi(%10: i32, %38: i32) -> i32
+                %40 = arith.addi(%39: i32, %12: i32) -> i32
+                %41 = "tt.addptr"(%arg14: !tt.ptr<f32,1>, %40: i32) -> !
+                "tt.store"(%41: !, %37: f32)
             }
         }
         "tt.return"()

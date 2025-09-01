@@ -6,6 +6,9 @@ Arg 2: --no-error-banner
 Arg 3: --line=-1
 Arg 4: --column=-1
 Done parsing args. use_construction=0
+Warning (27:30): Undefined value: %12
+    %13 = arith.addf %9, %12 : tensor<4xf32> loc(#loc13)
+                             ^
 MLIR:
 module() {
 ^bb0:
@@ -30,14 +33,14 @@ module() {
         %10 = "arith.cmpi"() -> ?
         %11 = "tt.splat"(%arg0: !tt.ptr<f32,1>) -> tensor<16xi32>
         %12 = "tt.addptr"(%11: tensor<16xi32>, %7: tensor<4xi32>) -> tensor<4x!tt.ptr<f32,1>
-        %13 = "tt.load"(%12: tensor<4x!tt.ptr<f32,1>, %10: i32) -> ?
-        %14 = "tt.splat"(%arg1: !tt.ptr<f32,1>) -> tensor<16xi32>
-        %15 = "tt.addptr"(%14: tensor<16xi32>, %7: tensor<4xi32>) -> tensor<4x!tt.ptr<f32,1>
-        %16 = "tt.load"(%15: tensor<4x!tt.ptr<f32,1>, %10: i32) -> ?
-        %17 = arith.addf(%13: i32, %16: i32) -> tensor<4xf32>
-        %18 = "tt.splat"(%arg2: !tt.ptr<f32,1>) -> tensor<16xi32>
-        %19 = "tt.addptr"(%18: tensor<16xi32>, %7: tensor<4xi32>) -> tensor<4x!tt.ptr<f32,1>
-        "tt.store"(%19: tensor<4x!tt.ptr<f32,1>, %17: tensor<4xf32>, %10: i32)
+        "tt.load"(%12: tensor<4x!tt.ptr<f32,1>, %10: i32)
+        %13 = "tt.splat"(%arg1: !tt.ptr<f32,1>) -> tensor<16xi32>
+        %14 = "tt.addptr"(%13: tensor<16xi32>, %7: tensor<4xi32>) -> tensor<4x!tt.ptr<f32,1>
+        "tt.load"(%14: tensor<4x!tt.ptr<f32,1>, %10: i32)
+        %15 = arith.addf(%999: i32, %12: unknown) -> tensor<4xf32>
+        %16 = "tt.splat"(%arg2: !tt.ptr<f32,1>) -> tensor<16xi32>
+        %17 = "tt.addptr"(%16: tensor<16xi32>, %7: tensor<4xi32>) -> tensor<4x!tt.ptr<f32,1>
+        "tt.store"(%17: tensor<4x!tt.ptr<f32,1>, %15: tensor<4xf32>, %10: i32)
         "tt.return"()
     }
 }

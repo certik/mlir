@@ -9,6 +9,9 @@ Done parsing args. use_construction=0
 Warning (25:28): Undefined value: %arg4
       %18 = tt.splat %arg4 : (i32) -> tensor<1x256xi32>
                            ^
+Warning (44:35): Undefined value: %31
+      %32 = arith.addf %arg5, %31 : tensor<2x256xf32>
+                                  ^
 MLIR:
 module() {
 ^bb0:
@@ -35,7 +38,7 @@ module() {
         %18 = "arith.bitcast"() -> ?
         %19 = "arith.bitcast"() -> ?
         %20 = "llvm.mlir"() -> ?
-        %45 = "scf.for"() -> ? {
+        %44 = "scf.for"() -> ? {
         ^bb0:
             %21 = "tt.splat"(%arg4: unknown) -> tensor<16xi32>
             %22 = arith.addi(%21: tensor<16xi32>, %12: i32) -> tensor<1x256xi32>
@@ -55,33 +58,33 @@ module() {
             %36 = arith.constant() {value = 0} -> i32
             %37 = arith.constant() -> ?
             %38 = "arith.sitofp"() -> ?
-            %39 = "tt.load"(%32: tensor<2x256x!tt.ptr<f32>, %35: i32, %38: i32) -> ?
-            %40 = arith.addf(%999: i32, %39: i32) -> tensor<2x256xf32>
+            "tt.load"(%32: tensor<2x256x!tt.ptr<f32>, %35: i32, %38: i32)
+            %39 = arith.addf(%999: i32, %31: unknown) -> tensor<2x256xf32>
+            %40 = "tt.broadcast"() -> ?
             %41 = "tt.broadcast"() -> ?
-            %42 = "tt.broadcast"() -> ?
-            %43 = "arith.andi"() -> ?
-            %44 = "arith.select"() -> ?
+            %42 = "arith.andi"() -> ?
+            %43 = "arith.select"() -> ?
             "scf.yield"()
         }
-        %46 = "tt.call"() -> ?
-        %47 = "tt.expand_dims"() -> ?
-        %48 = "tt.splat"(%arg1: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
-        %49 = "tt.addptr"(%48: tensor<16x!tt.ptr<f32>>, %8: tensor<2x1xi32>) -> tensor<2x1x!tt.ptr<f32>
-        "tt.store"(%49: tensor<2x1x!tt.ptr<f32>, %47: i32, %10: i32)
+        %45 = "tt.call"() -> ?
+        %46 = "tt.expand_dims"() -> ?
+        %47 = "tt.splat"(%arg1: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
+        %48 = "tt.addptr"(%47: tensor<16x!tt.ptr<f32>>, %8: tensor<2x1xi32>) -> tensor<2x1x!tt.ptr<f32>
+        "tt.store"(%48: tensor<2x1x!tt.ptr<f32>, %46: i32, %10: i32)
         "tt.return"()
     }
     tt.func(%arg0: tensor) {
     ^bb0(%arg0: tensor):
-        %51 = "tt.reduce"() -> ? {
+        %50 = "tt.reduce"() -> ? {
         ^bb0(%arg1: f32, %arg2: f32):
-            %50 = "tt.call"() -> ?
+            %49 = "tt.call"() -> ?
             "tt.reduce"()
         }
         "tt.return"()
     }
     tt.func(%arg0: f32, %arg1: f32) {
     ^bb0(%arg0: f32, %arg1: f32):
-        %52 = arith.addf(%arg0: f32, %arg1: f32) -> f32
+        %51 = arith.addf(%arg0: f32, %arg1: f32) -> f32
         "tt.return"()
     }
 }
