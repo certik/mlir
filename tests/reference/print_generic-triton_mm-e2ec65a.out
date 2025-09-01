@@ -46,7 +46,7 @@ module() {
     ^bb1:
         "tt.return"()
     ^bb2:
-        %19 = tt.get_program_id x() -> i32
+        %19 = tt.get_program_id() {axis = "x"} -> i32
         %20 = arith.addi(%arg3: i32, %5: i32) -> i32
         %21 = "arith.divsi"() -> ?
         %22 = "arith.divsi"() -> ?
