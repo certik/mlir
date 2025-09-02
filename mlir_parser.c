@@ -1104,6 +1104,92 @@ static void parse_memref_load_or_store(Parser *parser, Operation *op) {
     op->n_operands = operands.size;
 }
 
+// Generic/unregistered operation parsing: operands, attrs/result types, optional region, loc
+static void parse_generic_operation(Parser *parser, Operation *op) {
+    // Parse operands until attributes, result type, or region begin
+    VecValueRef operands;
+    VecValueRef_reserve(parser->arena, &operands, 4);
+
+    while ((parser_peek(parser, TK_REGISTER) || parser_peek(parser, TK_LBRACKET)) &&
+           !parser_peek(parser, TK_COLON) && !parser_peek(parser, TK_LBRACE)) {
+        if (parser_peek(parser, TK_REGISTER)) {
+            string reg_str = parser_token_str(parser);
+            parser_expect(parser, TK_REGISTER);
+
+            ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+            if (!operand) {
+                parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
+                return;
+            }
+            VecValueRef_push_back(parser->arena, &operands, operand);
+        } else if (parser_peek(parser, TK_LBRACKET)) {
+            // Skip indexing syntax like [%arg1]
+            parser_expect(parser, TK_LBRACKET);
+            while (!parser_peek(parser, TK_RBRACKET) && !parser_peek(parser, TK_EOF)) {
+                if (parser_peek(parser, TK_REGISTER)) {
+                    string reg_str2 = parser_token_str(parser);
+                    parser_expect(parser, TK_REGISTER);
+                    ValueRef *operand2 = symbol_table_lookup(&parser->symbol_table, reg_str2);
+                    if (!operand2) {
+                        parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
+                        return;
+                    }
+                    VecValueRef_push_back(parser->arena, &operands, operand2);
+                } else {
+                    parser_next_token(parser);
+                }
+            }
+            parser_expect(parser, TK_RBRACKET);
+        }
+
+        if (parser_peek(parser, TK_COMMA)) {
+            parser_expect(parser, TK_COMMA);
+        } else {
+            break;
+        }
+    }
+
+    op->operands = operands.data;
+    op->n_operands = operands.size;
+
+    // Attributes and result types are parsed generically later
+    // Handle generic attributes and result types before scanning for regions
+    parse_generic_attrs_and_result_type(parser, op);
+
+    // Parse regions (if any), for now we assume 0 or 1 regions
+    while (!(parser_peek(parser, TK_LBRACE_END)
+             || parser_peek(parser, TK_NEWLINE)
+             || parser_peek(parser, TK_LPAREN_BRACE))) {
+        parser_next_token(parser);
+    }
+    bool lparen_brace = false;
+    if (parser_peek(parser, TK_LPAREN_BRACE)) {
+        lparen_brace = true;
+        parser_next_token(parser);
+    }
+    if (parser_peek(parser, TK_LBRACE_END)) {
+        // Before consuming a region, parse any trailing attributes/result types
+        parse_generic_attrs_and_result_type(parser, op);
+        Region *region = parse_region(parser);
+
+        Region **regions = arena_alloc(parser->arena, Region*);
+        regions[0] = region;
+        op->regions = regions;
+        op->n_regions = 1;
+    }
+    if (lparen_brace) {
+        parser_expect(parser, TK_RPAREN);
+        while (!parser_peek(parser, TK_NEWLINE)) {
+            parser_next_token(parser);
+        }
+    }
+    if (parser_peek(parser, TK_NAME)) {
+        if (str_eq(parser_token_str(parser), str_lit("loc"))) {
+            parse_loc(parser);
+        }
+    }
+}
+
 
 void parse_tt_func(Parser *parser, Operation *op) {
     // Parse tt.func public @function_name(%arg0: type, %arg1: type, ...)
@@ -1898,9 +1984,10 @@ Operation* parse_operation(Parser *parser) {
     } else if (str_eq(op->opname, str_lit("tensor.extract"))) {
         parse_tensor_extract(parser, op);
     } else {
-        // Parse general operations with operands and types
-        // Note: legacy hardwired parsing below is disabled in favor of
-        // dedicated per-op parsers (e.g., parse_scf_if, parse_tt_*).
+        // Generic/unregistered operations
+        parse_generic_operation(parser, op);
+        skip_generic_tail = true;
+        // Legacy/general parsing kept disabled
         #if 0
 
         // Parse operands if operation expects them (for arith operations)
@@ -2185,6 +2272,7 @@ Operation* parse_operation(Parser *parser) {
 
         #endif
 
+        #if 0 // legacy generic parsing (disabled after refactor)
         // Fallback: parse operands for unknown/generic operations
         {
             VecValueRef operands;
@@ -2274,6 +2362,7 @@ Operation* parse_operation(Parser *parser) {
                 parse_loc(parser);
             }
         }
+        #endif
     }
 
     // Ensure attrs/result types are handled for specialized op paths too
