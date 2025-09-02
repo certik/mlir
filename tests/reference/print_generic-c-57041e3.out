@@ -15,27 +15,27 @@ module() {
         %1 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<128xi32>
         %2 = "arith.extsi"() -> ?
         %3 = "tt.expand_dims"(%2: i32) -> ?
-        %4 = tt.splat(%0: i32) -> tensor<16xi32>
-        %5 = arith.muli(%3: i32, %4: tensor<16xi32>) -> tensor<128x1xi64>
-        %6 = tt.splat(%arg0: !tt.ptr<f16,1>) -> tensor<16xi32>
-        %7 = tt.addptr(%6: tensor<16xi32>, %5: tensor<128x1xi64>) -> tensor<128x1x!tt.ptr<f16,1>
-        %8 = "tt.broadcast"(%7: tensor<128x1x!tt.ptr<f16,1>) -> ?
+        %4 = tt.splat(%0: i32) -> tensor<128x1xi64>
+        %5 = arith.muli(%3: i32, %4: tensor<128x1xi64>) -> tensor<128x1xi64>
+        %6 = tt.splat(%arg0: !tt.ptr<f16,1>) -> tensor<128x1x!tt.ptr<f16,1>>
+        %7 = tt.addptr(%6: tensor<128x1x!tt.ptr<f16,1>>, %5: tensor<128x1xi64>) -> ?
+        %8 = "tt.broadcast"(%7: i32) -> ?
         %9 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<64xi32>
         %10 = "arith.extsi"() -> ?
         %11 = "tt.expand_dims"(%10: i32) -> ?
         %12 = "tt.broadcast"(%11: i32) -> ?
-        %13 = tt.addptr(%8: i32, %12: i32) -> tensor<128x64x!tt.ptr<f16,1>
-        %14 = tt.load(%13: tensor<128x64x!tt.ptr<f16,1>) -> tensor<128x64xf16>
+        %13 = tt.addptr(%8: i32, %12: i32) -> ?
+        %14 = tt.load(%13: i32) -> tensor<128x64xf16>
         %15 = "arith.extf"() -> ?
         %16 = "tt.reduce"() -> ? {
         ^bb0(%arg3: f32, %arg4: f32):
             %20 = "arith.maxf"() -> ?
             "tt.reduce"()
         }
-        %17 = tt.splat(%arg1: !tt.ptr<f16,1>) -> tensor<16xi32>
-        %18 = tt.addptr(%17: tensor<16xi32>, %1: tensor<128xi32>) -> tensor<128x!tt.ptr<f16,1>
+        %17 = tt.splat(%arg1: !tt.ptr<f16,1>) -> tensor<128x!tt.ptr<f16,1>>
+        %18 = tt.addptr(%17: tensor<128x!tt.ptr<f16,1>>, %1: tensor<128xi32>) -> ?
         %19 = "arith.truncf"() -> ?
-        tt.store(%18: tensor<128x!tt.ptr<f16,1>, %19: i32)
+        %_ = tt.store(%18: i32, %19: i32) -> tensor<128xf16>
         tt.return()
     }
 }

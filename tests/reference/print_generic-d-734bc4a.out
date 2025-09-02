@@ -40,8 +40,8 @@ module() {
         %dim = "index.constant"() -> ?
         %0 = scf.for(%idx0: i32, %dim: i32, %idx1: i32, %c0_i16: i16) -> ? {
         ^bb0(%arg0: index, %arg1: i16):
-            %extracted = "tensor.extract"() -> ?
-            %1 = arith.addi(%arg1: i16, %extracted: i32) -> i16
+            %extracted = "tensor.extract"(%collapsed_217: i32, %arg0: index) -> tensor<10xi16>
+            %1 = arith.addi(%arg1: i16, %extracted: tensor<10xi16>) -> i16
             "vector.print"()
             scf.yield(%1: i16)
         }

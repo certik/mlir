@@ -4,7 +4,7 @@
     "infile": "tests/add1.ttir",
     "infile_hash": "007c483cb4cf94fb9b431d9f6b61258963564be6943f3143b9054c74",
     "outfile": "print_generic-add1-44faefb.out",
-    "outfile_hash": "77c97a8155ab8109882c001721841336a2324941d94b4f0eb2964353",
+    "outfile_hash": "ad02ce1399170d89bb133fc058b8c1c5be936c8bf936bc9c48312617",
     "stdout": null,
     "stdout_hash": null,
     "stderr": null,
