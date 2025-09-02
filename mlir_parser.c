@@ -905,11 +905,49 @@ static void parse_tt_addptr_load_store(Parser *parser, Operation *op) {
     }
     op->operands = operands.data;
     op->n_operands = operands.size;
-    // Set result type heuristics for addptr only; load/store handled by generic tail or void
-    if (str_eq(op->opname, str_lit("tt.addptr")) && op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
-        op->n_result_types = 1;
-        op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-        op->result_types[0] = op->operands[0]->type;
+
+    // For tt.addptr, prefer explicit type after ':' when present; otherwise fall back.
+    if (str_eq(op->opname, str_lit("tt.addptr"))) {
+        if (parser_peek(parser, TK_COLON)) {
+            parser_expect(parser, TK_COLON);
+
+            // Parse first type token into a string (handles !dialect<...> nesting)
+            string type_left = str_lit("");
+            if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME) || parser_peek(parser, TK_EXCLAMATION)) {
+                type_left = parser_token_str(parser);
+                parser_next_token(parser);
+                if (type_left.size == 1 && type_left.str[0] == '!' && (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME))) {
+                    type_left = str_concat(parser->arena, type_left, parser_token_str(parser));
+                    parser_next_token(parser);
+                }
+                if (parser_peek(parser, TK_LANGLE)) {
+                    int depth = 0;
+                    do {
+                        if (parser_peek(parser, TK_LANGLE)) depth++;
+                        else if (parser_peek(parser, TK_RANGLE)) depth--;
+                        type_left = str_concat(parser->arena, type_left, parser_token_str(parser));
+                        parser_next_token(parser);
+                    } while (depth > 0 && !parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE));
+                }
+                // Set result type from the first type in the list
+                op->n_result_types = 1;
+                op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+                op->result_types[0] = arena_alloc(parser->arena, Type);
+                op->result_types[0]->str = type_left;
+            }
+            // Consume remaining type list conservatively until end of list or loc
+            if (parser_peek(parser, TK_COMMA)) {
+                do {
+                    parser_next_token(parser);
+                    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) break;
+                } while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE));
+            }
+        } else if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
+            // Fallback heuristic when no explicit type list is present
+            op->n_result_types = 1;
+            op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+            op->result_types[0] = op->operands[0]->type;
+        }
     }
 }
 
@@ -1450,6 +1488,7 @@ string get_register_name(string reg_str) {
 }
 
 Operation* parse_operation(Parser *parser) {
+    bool skip_generic_tail = false; // when specialized parser fully consumes tail
     Operation *op = arena_alloc(parser->arena, Operation);
     op->regions = NULL;
     op->n_regions = 0;
@@ -1632,9 +1671,39 @@ Operation* parse_operation(Parser *parser) {
         parse_tt_splat(parser, op);
     } else if (str_eq(op->opname, str_lit("tt.make_range"))) {
         parse_tt_make_range(parser, op);
-    } else if (str_eq(op->opname, str_lit("tt.addptr")) || str_eq(op->opname, str_lit("tt.load")) ||
-               str_eq(op->opname, str_lit("tt.store"))) {
+    } else if (str_eq(op->opname, str_lit("tt.addptr")) || str_eq(op->opname, str_lit("tt.load"))) {
         parse_tt_addptr_load_store(parser, op);
+    } else if (str_eq(op->opname, str_lit("tt.store"))) {
+        // Parse operands then consume trailing type list and optional loc without producing results
+        parse_tt_addptr_load_store(parser, op);
+        // Optional attribute dict after operands
+        if (parser_peek(parser, TK_LBRACE)) {
+            parser_expect(parser, TK_LBRACE);
+            int brace_depth = 1;
+            while (brace_depth > 0 && !parser_peek(parser, TK_EOF)) {
+                if (parser_peek(parser, TK_LBRACE)) brace_depth++;
+                else if (parser_peek(parser, TK_RBRACE)) brace_depth--;
+                parser_next_token(parser);
+            }
+        }
+        // Consume trailing ": ..." conservatively
+        if (parser_peek(parser, TK_COLON)) {
+            parser_expect(parser, TK_COLON);
+            // Consume until newline or closing brace; allow nested angle brackets
+            int angle = 0;
+            while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE)) {
+                if (parser_peek(parser, TK_LANGLE)) angle++;
+                else if (parser_peek(parser, TK_RANGLE) && angle > 0) angle--;
+                // Stop before loc() to allow proper loc parsing
+                if (angle == 0 && parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) break;
+                parser_next_token(parser);
+            }
+            // Optional trailing loc()
+            if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
+                parse_loc(parser);
+            }
+        }
+        skip_generic_tail = true;
     } else if (str_eq(op->opname, str_lit("tensor.extract"))) {
         parse_tensor_extract(parser, op);
     } else {
@@ -2013,7 +2082,9 @@ Operation* parse_operation(Parser *parser) {
     }
 
     // Ensure attrs/result types are handled for specialized op paths too
-    parse_generic_attrs_and_result_type(parser, op);
+    if (!skip_generic_tail) {
+        parse_generic_attrs_and_result_type(parser, op);
+    }
 
     // Generic attrs and result types already handled earlier for non-region ops
 
