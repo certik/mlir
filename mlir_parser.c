@@ -2121,7 +2121,7 @@ Operation* parse_operation(Parser *parser) {
         op->results = arena_alloc_array(parser->arena, ValueRef*, 1);
         op->results[0] = result_value;
     } else if (op->n_result_types > 0) {
-        parser_warning(parser, str_lit("ICE: parsed no result"), parser->first, parser->last);
+        parser_error(parser, str_lit("ICE: parsed no result"), parser->first, parser->last);
     }
 
     return op;
