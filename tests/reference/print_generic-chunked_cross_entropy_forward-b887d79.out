@@ -71,9 +71,9 @@ module() {
             ^bb0:
                 scf.yield(%cst_0: f32)
             }
-            %_ = tt.store(%6: !tt.ptr<f32>, %31: i32) -> f32
+            tt.store(%6: !tt.ptr<f32>, %31: i32)
         }
-        %_ = tt.store(%9: !tt.ptr<f32>, %28: f32) -> f32
+        tt.store(%9: !tt.ptr<f32>, %28: f32)
         tt.return()
     }
 }

@@ -64,7 +64,7 @@ module() {
         %15 = "tt.expand_dims"(%14: i32) -> ?
         %16 = tt.splat(%arg1: !tt.ptr<f32>) -> tensor<2x1x!tt.ptr<f32>>
         %17 = tt.addptr(%16: tensor<2x1x!tt.ptr<f32>>, %5: tensor<2x1xi32>) -> tensor<2x1x!tt.ptr<f32>>
-        %_ = tt.store(%17: tensor<2x1x!tt.ptr<f32>>, %15: i32, %6: i32) -> tensor<2x1xf32>
+        tt.store(%17: tensor<2x1x!tt.ptr<f32>>, %15: i32, %6: i32)
         tt.return()
     }
     tt.func(%arg0: tensor) {

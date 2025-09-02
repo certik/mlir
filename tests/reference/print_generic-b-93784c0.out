@@ -37,7 +37,7 @@ module() {
         %13 = arith.addf(%9: tensor<4xf32>, %12: tensor<4xf32>) -> tensor<4xf32>
         %14 = tt.splat(%arg2: !tt.ptr<f32,1>) -> tensor<4x!tt.ptr<f32,1>>
         %15 = tt.addptr(%14: tensor<4x!tt.ptr<f32,1>>, %5: tensor<4xi32>) -> tensor<4x!tt.ptr<f32,1>>
-        %_ = tt.store(%15: tensor<4x!tt.ptr<f32,1>>, %13: tensor<4xf32>, %6: i32) -> tensor<4xf32>
+        tt.store(%15: tensor<4x!tt.ptr<f32,1>>, %13: tensor<4xf32>, %6: i32)
         tt.return()
     }
 }

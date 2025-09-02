@@ -96,7 +96,7 @@ module() {
         %53 = arith.addi(%51: tensor<1x128xi32>, %52: tensor<64x1xi32>) -> tensor<64x128xi32>
         %54 = tt.splat(%arg2: !tt.ptr<f32>) -> tensor<64x128x!tt.ptr<f32>>
         %55 = tt.addptr(%54: tensor<64x128x!tt.ptr<f32>>, %53: tensor<64x128xi32>) -> tensor<64x128x!tt.ptr<f32>>
-        %_ = tt.store(%55: tensor<64x128x!tt.ptr<f32>>, %41: i32, %49: i32) -> tensor<64x128x!tt.ptr<f32>>
+        tt.store(%55: tensor<64x128x!tt.ptr<f32>>, %41: i32, %49: i32)
         tt.return()
     }
 }

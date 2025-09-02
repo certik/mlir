@@ -26,7 +26,7 @@ module() {
         %11 = arith.addf(%7: tensor<16x!tt.ptr<f32>>, %10: tensor<16x!tt.ptr<f32>>) -> tensor<16xf32>
         %12 = tt.splat(%arg2: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
         %13 = tt.addptr(%12: tensor<16x!tt.ptr<f32>>, %4: tensor<16xi32>) -> tensor<16x!tt.ptr<f32>>
-        %_ = tt.store(%13: tensor<16x!tt.ptr<f32>>, %11: tensor<16xf32>) -> tensor<16x!tt.ptr<f32>>
+        tt.store(%13: tensor<16x!tt.ptr<f32>>, %11: tensor<16xf32>)
         tt.return()
     }
 }

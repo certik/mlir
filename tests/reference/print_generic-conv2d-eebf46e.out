@@ -78,7 +78,7 @@ module() {
                 %16 = arith.addi(%7: i32, %15: i32) -> i32
                 %17 = arith.addi(%16: i32, %9: i32) -> i32
                 %18 = tt.addptr(%arg14: !tt.ptr<f32,1>, %17: i32) -> !tt.ptr<f32,1>
-                %_ = tt.store(%18: !tt.ptr<f32,1>, %14: f32) -> f32
+                tt.store(%18: !tt.ptr<f32,1>, %14: f32)
             }
         }
         tt.return()

@@ -106,7 +106,7 @@ module() {
         %63 = "tt.broadcast"(%60: i32) -> ?
         %64 = "tt.broadcast"(%62: i32) -> ?
         %65 = "arith.andi"() -> ?
-        %_ = tt.store(%58: tensor<32x64x!tt.ptr<f32,1>>, %49: i32, %65: i32) -> tensor<32x64xf32>
+        tt.store(%58: tensor<32x64x!tt.ptr<f32,1>>, %49: i32, %65: i32)
         tt.return()
     }
 }
