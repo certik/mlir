@@ -67,8 +67,10 @@ clang $CFLAGS -I. -o run_tests tests/run_tests.c base/arena.c base/string.c base
 After every change ensure we can build the code and run all tests:
 ```
 ./build.sh
-uv run run_tests.py
+uv run run_tests.py -s
 ```
+The `-s` option runs tests sequentially which is useful for better
+understanding the output if any test fails.
 
 To update reference results, do:
 ```
@@ -81,12 +83,6 @@ good and we want to keep them.
 - `tests/run_tests.c`: Unit tests for base utilities (arena, string, format, I/O)
 - `tests/tests.toml`: Test configuration with expected outputs
 - `run_tests.py`: Python test runner with comparison logic
-
-### Running Tests
-```bash
-./run_tests              # Unit tests
-uv run run_tests.py      # Run the full diff-test testsuite
-```
 
 ## Usage Modes
 
