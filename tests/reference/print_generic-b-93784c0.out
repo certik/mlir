@@ -14,7 +14,7 @@ module() {
         %0 = tt.get_program_id() {axis = "x"} -> i32
         %c1_i32 = arith.constant() {value = 1} -> i32
         %1 = arith.cmpi() -> ?
-        cf.cond_br()
+        cf.cond_br(%1: i32)
     ^bb1:
         tt.return()
     ^bb2:

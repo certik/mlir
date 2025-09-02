@@ -21,8 +21,8 @@ module() {
         %c2_i32 = arith.constant() {value = 2} -> i32
         %0 = tt.get_program_id() {axis = "x"} -> i32
         %1 = tt.get_program_id() {axis = "y"} -> i32
-        %2 = "arith.extsi"() -> ?
-        %3 = "arith.extsi"() -> ?
+        %2 = "arith.extsi"(%arg1: i32) -> i32
+        %3 = "arith.extsi"(%0: i32) -> i32
         %4 = arith.muli(%3: i32, %2: i32) -> i64
         %5 = tt.addptr(%arg0: !tt.ptr<bf16>, %4: i64) -> !tt.ptr<bf16>
         %6 = tt.addptr(%arg2: !tt.ptr<f32>, %0: i32) -> !tt.ptr<f32>
@@ -36,36 +36,36 @@ module() {
         %14 = arith.addi(%13: tensor<65536xi32>, %12: tensor<65536xi32>) -> tensor<65536xi32>
         %15 = arith.cmpi() -> ?
         %16 = tt.load(%10: !tt.ptr<i64>) -> i64
-        %17 = "arith.trunci"() -> ?
+        %17 = "arith.trunci"(%16: i64) -> i64
         %18 = tt.splat(%5: !tt.ptr<bf16>) -> tensor<65536x!tt.ptr<bf16>>
         %19 = tt.addptr(%18: tensor<65536x!tt.ptr<bf16>>, %14: tensor<65536xi32>) -> tensor<65536x!tt.ptr<bf16>>
         %20 = tt.load(%19: tensor<65536x!tt.ptr<bf16>>, %15: i32, %cst: tensor<65536xbf16>) -> tensor<65536xbf16>
-        %21 = "arith.extf"() -> ?
+        %21 = "arith.extf"(%20: tensor<65536xbf16>) -> tensor<65536xbf16>
         %22 = "tt.reduce"() -> ? {
         ^bb0(%arg5: f32, %arg6: f32):
             %30 = "tt.pure_extern_elementwise"(%arg5: f32, %arg6: f32) -> f32
             "tt.reduce"()
         }
         %23 = tt.splat(%22: i32) -> tensor<65536xf32>
-        %24 = arith.subf(%21: i32, %23: tensor<65536xf32>) -> tensor<65536xf32>
-        %25 = "math.exp"() -> ?
+        %24 = arith.subf(%21: tensor<65536xbf16>, %23: tensor<65536xf32>) -> tensor<65536xf32>
+        %25 = "math.exp"(%24: tensor<65536xf32>) -> tensor<65536xf32>
         %26 = "tt.reduce"() -> ? {
         ^bb0(%arg5: f32, %arg6: f32):
             %30 = arith.addf(%arg5: f32, %arg6: f32) -> f32
             "tt.reduce"()
         }
-        %27 = "math.log"() -> ?
-        %28 = arith.addf(%22: i32, %27: i32) -> f32
+        %27 = "math.log"(%26: i32) -> f32
+        %28 = arith.addf(%22: i32, %27: f32) -> f32
         %29 = arith.cmpi() -> ?
         scf.if() {
         ^bb0:
             %30 = arith.cmpi() -> ?
             %31 = scf.if() -> ? {
             ^bb0:
-                %32 = tt.addptr(%5: !tt.ptr<bf16>, %17: i32) -> !tt.ptr<bf16>
+                %32 = tt.addptr(%5: !tt.ptr<bf16>, %17: i64) -> !tt.ptr<bf16>
                 %33 = tt.load(%32: !tt.ptr<bf16>) -> bf16
-                %34 = "arith.extf"() -> ?
-                %35 = arith.mulf(%34: i32, %cst_1: f32) -> f32
+                %34 = "arith.extf"(%33: bf16) -> bf16
+                %35 = arith.mulf(%34: bf16, %cst_1: f32) -> f32
                 scf.yield(%35: f32)
             }{
             ^bb0:

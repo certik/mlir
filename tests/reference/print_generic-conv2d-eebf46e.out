@@ -26,8 +26,8 @@ module() {
             %7 = arith.addi(%3: i32, %6: i32) -> i32
             scf.for(%c0_i32: i32, %1: i32, %c1_i32: i32) {
             ^bb0(%arg0: index):
-                %8 = "arith.divsi"() -> ?
-                %9 = "arith.remsi"() -> ?
+                %8 = "arith.divsi"(%arg0: index, %arg19: i32) -> i32
+                %9 = "arith.remsi"(%arg0: index, %arg19: i32) -> i32
                 %10 = arith.subi(%8: i32, %arg20: i32) -> i32
                 %11 = arith.subi(%9: i32, %arg21: i32) -> i32
                 %12 = tt.load(%4: !tt.ptr<f32,1>) -> f32
@@ -36,7 +36,7 @@ module() {
                     %19 = arith.addi(%10: i32, %arg0: index) -> i32
                     %20 = arith.cmpi() -> ?
                     %21 = arith.cmpi() -> ?
-                    %22 = "arith.ori"() -> ?
+                    %22 = "arith.ori"(%20: i32, %21: i32) -> i1
                     %23 = scf.if() -> ? {
                     ^bb0:
                         scf.yield(%arg1: i16)
@@ -47,7 +47,7 @@ module() {
                             %25 = arith.addi(%11: i32, %arg0: index) -> i32
                             %26 = arith.cmpi() -> ?
                             %27 = arith.cmpi() -> ?
-                            %28 = "arith.ori"() -> ?
+                            %28 = "arith.ori"(%26: i32, %27: i32) -> i1
                             %29 = scf.if() -> ? {
                             ^bb0:
                                 scf.yield(%arg1: i16)

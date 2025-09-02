@@ -4,10 +4,10 @@
     "infile": "tests/t2.mlir",
     "infile_hash": "c371c8f3273fd2d065e5fd1d5e56d33a01e449089781b6a6425137ee",
     "outfile": "print_generic-t2-fd0fc6c.out",
-    "outfile_hash": "fa46b17bd06d1085b316d49c63cc329da522863ae06302dc8af2ce40",
+    "outfile_hash": "ce4860b8106d476c3f5de79152ac194a8012cceb0237b2517f2eebca",
     "stdout": null,
     "stdout_hash": null,
     "stderr": null,
     "stderr_hash": null,
-    "returncode": 0
+    "returncode": 1
 }

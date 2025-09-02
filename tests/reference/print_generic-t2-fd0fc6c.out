@@ -6,29 +6,6 @@ Arg 2: --no-error-banner
 Arg 3: --line=-1
 Arg 4: --column=-1
 Done parsing args. use_construction=0
-MLIR:
-module() {
-^bb0:
-    func.func() {
-    ^bb0:
-        %alloc = memref.alloc() -> ?
-        %c0 = arith.constant() {value = 0} -> index
-        %c10 = arith.constant() {value = 10} -> index
-        %c1 = arith.constant() {value = 1} -> index
-        scf.for(%c0: index, %c10: index, %c1: index) {
-        ^bb0(%arg0: index):
-            %c0_0 = arith.constant() {value = 0} -> index
-            %c20 = arith.constant() {value = 20} -> index
-            %c1_1 = arith.constant() {value = 1} -> index
-            scf.for(%c0_0: index, %c20: index, %c1_1: index) {
-            ^bb0(%arg0: index):
-                %0 = memref.load() -> ?
-                %1 = memref.load() -> ?
-                %2 = arith.addf(%0: i32, %1: i32) -> f32
-                memref.store()
-            }
-        }
-        "return"()
-    }
-}
-
+Syntax error (16:39): Use of undefined SSA value
+                %0 = memref.load %arg0[%arg2, %arg3] : memref<10x20xf32>
+                                      ^

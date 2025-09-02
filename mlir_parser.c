@@ -1616,6 +1616,9 @@ Operation* parse_operation(Parser *parser) {
         parse_tensor_extract(parser, op);
     } else {
         // Parse general operations with operands and types
+        // Note: legacy hardwired parsing below is disabled in favor of
+        // dedicated per-op parsers (e.g., parse_scf_if, parse_tt_*).
+        #if 0
 
         // Parse operands if operation expects them (for arith operations)
         if (op->op_type == OP_TYPE_ARITH_CONSTANT) {
@@ -1891,6 +1894,57 @@ Operation* parse_operation(Parser *parser) {
                 op->operands = operands.data;
                 op->n_operands = operands.size;
             }
+        }
+
+        #endif
+
+        // Fallback: parse operands for unknown/generic operations
+        {
+            VecValueRef operands;
+            VecValueRef_reserve(parser->arena, &operands, 4);
+
+            // Parse operands until attributes, result type, or end
+            while ((parser_peek(parser, TK_REGISTER) || parser_peek(parser, TK_LBRACKET)) &&
+                   !parser_peek(parser, TK_COLON) && !parser_peek(parser, TK_LBRACE)) {
+                if (parser_peek(parser, TK_REGISTER)) {
+                    string reg_str = parser_token_str(parser);
+                    parser_expect(parser, TK_REGISTER);
+
+                    ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+                    if (!operand) {
+                        parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
+                        return NULL;
+                    }
+                    VecValueRef_push_back(parser->arena, &operands, operand);
+                } else if (parser_peek(parser, TK_LBRACKET)) {
+                    // Skip indexing syntax like [%arg1]
+                    parser_expect(parser, TK_LBRACKET);
+                    while (!parser_peek(parser, TK_RBRACKET) && !parser_peek(parser, TK_EOF)) {
+                        if (parser_peek(parser, TK_REGISTER)) {
+                            string reg_str2 = parser_token_str(parser);
+                            parser_expect(parser, TK_REGISTER);
+                            ValueRef *operand2 = symbol_table_lookup(&parser->symbol_table, reg_str2);
+                            if (!operand2) {
+                                parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
+                                return NULL;
+                            }
+                            VecValueRef_push_back(parser->arena, &operands, operand2);
+                        } else {
+                            parser_next_token(parser);
+                        }
+                    }
+                    parser_expect(parser, TK_RBRACKET);
+                }
+
+                if (parser_peek(parser, TK_COMMA)) {
+                    parser_expect(parser, TK_COMMA);
+                } else {
+                    break;
+                }
+            }
+
+            op->operands = operands.data;
+            op->n_operands = operands.size;
         }
 
         // Attributes and result types are parsed generically later
