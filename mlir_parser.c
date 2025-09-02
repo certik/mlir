@@ -1404,30 +1404,30 @@ void parse_scf_if(Parser *parser, Operation *op) {
 
 void parse_scf_for(Parser *parser, Operation *op) {
     // Parse scf.for %loop_var = %start to %end step %step iter_args(%iter_var = %init) -> (type)
-    
+
     VecValueRef operands;
     VecValueRef_reserve(parser->arena, &operands, 4);
-    
+
     // Parse loop variable: %loop_var
     ValueRef *loop_var = NULL;
     if (parser_peek(parser, TK_REGISTER)) {
         string loop_var_name = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        
+
         loop_var = create_value_ref(parser->arena, BLOCK_ARG);
         loop_var->register_name = loop_var_name;
         loop_var->type = arena_alloc(parser->arena, Type);
         loop_var->type->str = str_lit("index");
         loop_var->type->kind = TYPE_KIND_INDEX;
-        
-        // Expect = 
+
+        // Expect =
         parser_expect(parser, TK_EQUAL);
-        
+
         // Parse %start operand
         if (parser_peek(parser, TK_REGISTER)) {
             string reg_str = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            
+
             ValueRef *start_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
             if (!start_operand) {
                 parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
@@ -1435,17 +1435,17 @@ void parse_scf_for(Parser *parser, Operation *op) {
             }
             VecValueRef_push_back(parser->arena, &operands, start_operand);
         }
-        
+
         // Expect "to"
         if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("to"))) {
             parser_expect(parser, TK_NAME);
         }
-        
+
         // Parse %end operand
         if (parser_peek(parser, TK_REGISTER)) {
             string reg_str = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            
+
             ValueRef *end_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
             if (!end_operand) {
                 parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
@@ -1453,17 +1453,17 @@ void parse_scf_for(Parser *parser, Operation *op) {
             }
             VecValueRef_push_back(parser->arena, &operands, end_operand);
         }
-        
+
         // Expect "step"
         if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("step"))) {
             parser_expect(parser, TK_NAME);
         }
-        
+
         // Parse %step operand
         if (parser_peek(parser, TK_REGISTER)) {
             string reg_str = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            
+
             ValueRef *step_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
             if (!step_operand) {
                 parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
@@ -1472,40 +1472,40 @@ void parse_scf_for(Parser *parser, Operation *op) {
             VecValueRef_push_back(parser->arena, &operands, step_operand);
         }
     }
-    
+
     // Parse iter_args(%iter_var1 = %init1, %iter_var2 = %init2, ...)
     VecValueRef iter_vars;
     VecValueRef_reserve(parser->arena, &iter_vars, 4);
-    
+
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("iter_args"))) {
         parser_expect(parser, TK_NAME); // consume "iter_args"
-        
+
         if (parser_peek(parser, TK_LPAREN)) {
             parser_expect(parser, TK_LPAREN);
-            
+
             while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
                 if (parser_peek(parser, TK_REGISTER)) {
                     string iter_var_name = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
-                    
+
                     ValueRef *iter_var = create_value_ref(parser->arena, BLOCK_ARG);
                     iter_var->register_name = iter_var_name;
                     iter_var->type = arena_alloc(parser->arena, Type);
                     iter_var->type->str = str_lit("i16");
                     iter_var->type->kind = TYPE_KIND_INTEGER;
-                    
+
                     VecValueRef_push_back(parser->arena, &iter_vars, iter_var);
-                    
+
                     // Expect =
                     parser_expect(parser, TK_EQUAL);
-                    
+
                     // Parse %init operand
                     if (parser_peek(parser, TK_REGISTER)) {
                         string reg_str = parser_token_str(parser);
                         parser_expect(parser, TK_REGISTER);
                         consume_optional_hash_selector(parser);
                         consume_optional_hash_selector(parser);
-                        
+
                         ValueRef *init_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
                         if (!init_operand) {
                             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
@@ -1513,7 +1513,7 @@ void parse_scf_for(Parser *parser, Operation *op) {
                         }
                         VecValueRef_push_back(parser->arena, &operands, init_operand);
                     }
-                    
+
                     // Handle comma for multiple iter_args
                     if (parser_peek(parser, TK_COMMA)) {
                         parser_expect(parser, TK_COMMA);
@@ -1525,34 +1525,34 @@ void parse_scf_for(Parser *parser, Operation *op) {
             parser_expect(parser, TK_RPAREN);
         }
     }
-    
+
     // Set operands for the scf.for operation
     op->operands = operands.data;
     op->n_operands = operands.size;
-    
+
     // Skip remaining tokens until region starts
     while (!parser_peek(parser, TK_LBRACE_END) && !parser_peek(parser, TK_EOF)) {
         parser_next_token(parser);
     }
-    
+
     // Parse the region, but first register loop arguments in the new scope
     parser_expect(parser, TK_LBRACE_END);
     parser_expect(parser, TK_NEWLINE);
-    
+
     // Push new scope for this region
     symbol_table_push_scope(parser->arena, &parser->symbol_table);
-    
+
     // Create a single block with loop variable and iter_args as block arguments
     VecBlock blocks;
     VecBlock_reserve(parser->arena, &blocks, 1);
-    
+
     // Create the block
     Block *block = arena_alloc(parser->arena, Block);
-    
+
     // Create block arguments for loop variable and iter_args
     VecValueRef block_args;
     VecValueRef_reserve(parser->arena, &block_args, 2);
-    
+
     if (loop_var) {
         // Create a new ValueRef for the block argument %arg0
         ValueRef *loop_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
@@ -1562,20 +1562,20 @@ void parse_scf_for(Parser *parser, Operation *op) {
         loop_block_arg->type->kind = TYPE_KIND_INDEX;
         loop_block_arg->result_index = 0;
         loop_block_arg->def = block;
-        
+
         VecValueRef_push_back(parser->arena, &block_args, loop_block_arg);
-        
+
         // Register in symbol table using original loop variable name
         symbol_table_add_value(parser->arena, &parser->symbol_table, loop_var->register_name, loop_block_arg);
     }
-    
+
     // Create block arguments for all iter_args
     for (size_t i = 0; i < iter_vars.size; i++) {
         ValueRef *iter_var = iter_vars.data[i];
-        
+
         // Create a new ValueRef for the block argument %arg{i+1}
         ValueRef *iter_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
-        
+
         // Generate argument name like %arg1, %arg2, %arg3, etc.
         string arg_name;
         if (i == 0) {
@@ -1593,16 +1593,16 @@ void parse_scf_for(Parser *parser, Operation *op) {
         iter_block_arg->type->kind = TYPE_KIND_INTEGER;
         iter_block_arg->result_index = i + 1;
         iter_block_arg->def = block;
-        
+
         VecValueRef_push_back(parser->arena, &block_args, iter_block_arg);
-        
+
         // Register in symbol table using original iter_args variable name
         symbol_table_add_value(parser->arena, &parser->symbol_table, iter_var->register_name, iter_block_arg);
     }
-    
+
     block->arguments = block_args.data;
     block->n_arguments = block_args.size;
-    
+
     // Parse operations inside the block
     VecOperation operations;
     VecOperation_reserve(parser->arena, &operations, 16);
@@ -1616,14 +1616,14 @@ void parse_scf_for(Parser *parser, Operation *op) {
             parser_expect(parser, TK_NEWLINE);
         }
     }
-    
+
     block->operations = operations.data;
     block->n_operations = operations.size;
-    
+
     VecBlock_push_back(parser->arena, &blocks, block);
-    
+
     parser_expect(parser, TK_RBRACE);
-    
+
     // Handle optional location attribute after }
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
         parser_expect(parser, TK_NAME); // consume "loc"
@@ -1634,10 +1634,10 @@ void parse_scf_for(Parser *parser, Operation *op) {
         }
         parser_expect(parser, TK_RPAREN);
     }
-    
+
     // Pop scope when leaving region
     symbol_table_pop_scope(&parser->symbol_table);
-    
+
     Region *region = arena_alloc(parser->arena, Region);
     region->blocks = blocks.data;
     region->n_blocks = blocks.size;
@@ -1829,38 +1829,38 @@ Operation* parse_operation(Parser *parser) {
             // Handle scf.yield specially - it starts with opname, not result assignment
             op->opname = potential_opname;
             parser_next_token(parser); // consume operation name
-            
+
             // Parse scf.yield operands
             VecValueRef operands;
             VecValueRef_reserve(parser->arena, &operands, 2);
-            
+
             while (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                
+
                 ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
                 if (!operand) {
                     parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                     return NULL;
                 }
                 VecValueRef_push_back(parser->arena, &operands, operand);
-                
+
                 if (parser_peek(parser, TK_COMMA)) {
                     parser_expect(parser, TK_COMMA);
                 } else {
                     break;
                 }
             }
-            
+
             op->operands = operands.data;
             op->n_operands = operands.size;
             op->op_type = OP_TYPE_SCF_YIELD;
-            
+
             // Skip remaining tokens (like : type)
             while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_EOF)) {
                 parser_next_token(parser);
             }
-            
+
             return op;
         } else if (
             str_eq(potential_opname, str_lit("return")) ||
@@ -1987,382 +1987,6 @@ Operation* parse_operation(Parser *parser) {
         // Generic/unregistered operations
         parse_generic_operation(parser, op);
         skip_generic_tail = true;
-        // Legacy/general parsing kept disabled
-        #if 0
-
-        // Parse operands if operation expects them (for arith operations)
-        if (op->op_type == OP_TYPE_ARITH_CONSTANT) {
-            // arith.constant value : type
-            if (parser_peek(parser, TK_INTEGER)) {
-                // Parse the constant value as an attribute
-                string value_str = parser_token_str(parser);
-                parser_expect(parser, TK_INTEGER);
-
-                op->n_attributes = 1;
-                op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
-                op->attributes[0] = arena_alloc(parser->arena, Attribute);
-                op->attributes[0]->kind = ATTR_KIND_INTEGER;
-
-                // Parse the actual integer value
-                int64_t parsed_value = 0;
-                for (size_t i = 0; i < value_str.size; i++) {
-                    if (value_str.str[i] >= '0' && value_str.str[i] <= '9') {
-                        parsed_value = parsed_value * 10 + (value_str.str[i] - '0');
-                    }
-                }
-                op->attributes[0]->data.integer_value = parsed_value;
-                op->attributes[0]->name = str_lit("value");
-            }
-        } else if (op->op_type == OP_TYPE_ARITH_ADDI || op->op_type == OP_TYPE_ARITH_MULI ||
-                   op->op_type == OP_TYPE_ARITH_ADDF || op->op_type == OP_TYPE_ARITH_SUBI ||
-                   op->op_type == OP_TYPE_ARITH_SUBF || op->op_type == OP_TYPE_ARITH_MULF ||
-                   op->op_type == OP_TYPE_ARITH_DIVI || op->op_type == OP_TYPE_ARITH_DIVF) {
-            // Binary arith operations: operand1, operand2 : type
-            VecValueRef operands;
-            VecValueRef_reserve(parser->arena, &operands, 2);
-
-            // Parse first operand
-            if (parser_peek(parser, TK_REGISTER)) {
-                string reg_str = parser_token_str(parser);
-                parser_expect(parser, TK_REGISTER);
-                consume_optional_hash_selector(parser);
-                consume_optional_hash_selector(parser);
-
-                // Look up the value in symbol table
-                ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
-                if (!operand) {
-                    parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
-                    return NULL;
-                }
-                VecValueRef_push_back(parser->arena, &operands, operand);
-
-                if (parser_peek(parser, TK_COMMA)) {
-                    parser_expect(parser, TK_COMMA);
-
-                    // Parse second operand
-                    if (parser_peek(parser, TK_REGISTER)) {
-                        string reg_str2 = parser_token_str(parser);
-                        parser_expect(parser, TK_REGISTER);
-                        consume_optional_hash_selector(parser);
-
-                        // Look up the second value in symbol table
-                        ValueRef *operand2 = symbol_table_lookup(&parser->symbol_table, reg_str2);
-                        if (!operand2) {
-                            parser_warning(parser, format(parser->arena, str_lit("Undefined value: {}"), reg_str2), parser->first, parser->last);
-                            // Create placeholder for undefined value to avoid parse failure
-                            operand2 = create_value_ref(parser->arena, BLOCK_ARG);
-                            operand2->register_name = reg_str2;
-                            operand2->type = arena_alloc(parser->arena, Type);
-                            operand2->type->str = str_lit("unknown");
-                        }
-                        VecValueRef_push_back(parser->arena, &operands, operand2);
-                    }
-                }
-            }
-
-            op->operands = operands.data;
-            op->n_operands = operands.size;
-        } else if (op->opname.size > 3 && op->opname.str[0] == 't' && op->opname.str[1] == 't' && op->opname.str[2] == '.') {
-            // Parse tt.* operations
-            if (str_eq(op->opname, str_lit("tt.get_program_id"))) {
-                // tt.get_program_id x : i32 - only parse the axis parameter
-                if (parser_peek(parser, TK_NAME)) {
-                    string axis_name = parser_token_str(parser);
-                    parser_expect(parser, TK_NAME);
-
-                    // Store axis as an attribute
-                    op->n_attributes = 1;
-                    op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
-                    op->attributes[0] = arena_alloc(parser->arena, Attribute);
-                    op->attributes[0]->name = str_lit("axis");
-                    op->attributes[0]->kind = ATTR_KIND_STRING;
-                    op->attributes[0]->data.string_value = axis_name;
-                }
-
-                // No operands for tt.get_program_id - let general parsing handle result type
-                op->n_operands = 0;
-                op->operands = NULL;
-            } else if (str_eq(op->opname, str_lit("tt.splat"))) {
-                // tt.splat %operand : type -> result_type
-                if (parser_peek(parser, TK_REGISTER)) {
-                    string reg_str = parser_token_str(parser);
-                    parser_expect(parser, TK_REGISTER);
-
-                    // Look up the value in symbol table
-                    ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
-                    if (!operand) {
-                        parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
-                        return NULL;
-                    }
-
-                    op->n_operands = 1;
-                    op->operands = arena_alloc_array(parser->arena, ValueRef*, 1);
-                    op->operands[0] = operand;
-                }
-            } else if (str_eq(op->opname, str_lit("tt.make_range"))) {
-                // tt.make_range {end = 16 : i32, start = 0 : i32} : tensor<16xi32>
-                // No operands to parse, just attributes
-                op->n_operands = 0;
-                op->operands = NULL;
-
-                // Parse attributes if present - be very conservative
-                if (parser_peek(parser, TK_LBRACE)) {
-                    parser_expect(parser, TK_LBRACE);
-
-                    // Allocate for 2 attributes
-                    op->n_attributes = 2;
-                    op->attributes = arena_alloc_array(parser->arena, Attribute*, 2);
-
-                    // Parse first attribute (end)
-                    if (parser_peek(parser, TK_NAME)) {
-                        parser_expect(parser, TK_NAME); // "end"
-                        parser_expect(parser, TK_EQUAL);
-                        parser_expect(parser, TK_INTEGER); // value
-                        parser_expect(parser, TK_COLON);
-                        parser_expect(parser, TK_NAME); // "i32"
-
-                        op->attributes[0] = arena_alloc(parser->arena, Attribute);
-                        op->attributes[0]->kind = ATTR_KIND_INTEGER;
-                        op->attributes[0]->name = str_lit("end");
-                        op->attributes[0]->data.integer_value = 16; // Hardcode for now
-                    }
-
-                    // Skip comma
-                    if (parser_peek(parser, TK_COMMA)) {
-                        parser_expect(parser, TK_COMMA);
-                    }
-
-                    // Parse second attribute (start)
-                    if (parser_peek(parser, TK_NAME)) {
-                        parser_expect(parser, TK_NAME); // "start"
-                        parser_expect(parser, TK_EQUAL);
-                        parser_expect(parser, TK_INTEGER); // value
-                        parser_expect(parser, TK_COLON);
-                        parser_expect(parser, TK_NAME); // "i32"
-
-                        op->attributes[1] = arena_alloc(parser->arena, Attribute);
-                        op->attributes[1]->kind = ATTR_KIND_INTEGER;
-                        op->attributes[1]->name = str_lit("start");
-                        op->attributes[1]->data.integer_value = 0; // Hardcode for now
-                    }
-
-                    parser_expect(parser, TK_RBRACE);
-                }
-            } else if (str_eq(op->opname, str_lit("tt.addptr")) || str_eq(op->opname, str_lit("tt.load")) ||
-                       str_eq(op->opname, str_lit("tt.store")) || str_eq(op->opname, str_lit("scf.yield"))) {
-                // tt.addptr %ptr, %offset : ptr_type, offset_type
-                // tt.load %ptr : ptr_type
-                // tt.store %ptr, %value : ptr_type
-                VecValueRef operands;
-                VecValueRef_reserve(parser->arena, &operands, 2);
-
-                while (parser_peek(parser, TK_REGISTER)) {
-                    string reg_str = parser_token_str(parser);
-                    parser_expect(parser, TK_REGISTER);
-
-                    // Look up the value in symbol table
-                    ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
-                    if (!operand) {
-                        parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
-                        return NULL;
-                    }
-                    VecValueRef_push_back(parser->arena, &operands, operand);
-
-                    if (parser_peek(parser, TK_COMMA)) {
-                        parser_expect(parser, TK_COMMA);
-                    } else {
-                        break;
-                    }
-                }
-
-                op->operands = operands.data;
-                op->n_operands = operands.size;
-                op->n_result_types = 0;
-            } else if (str_eq(op->opname, str_lit("tensor.extract"))) {
-                // tensor.extract %tensor[%index] : type
-                VecValueRef operands;
-                VecValueRef_reserve(parser->arena, &operands, 2);
-                
-                // Parse first operand (tensor)
-                if (parser_peek(parser, TK_REGISTER)) {
-                    string reg_str = parser_token_str(parser);
-                    parser_expect(parser, TK_REGISTER);
-                    
-                    ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
-                    if (!operand) {
-                        parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
-                        return NULL;
-                    }
-                    VecValueRef_push_back(parser->arena, &operands, operand);
-                }
-                
-                // Parse index in brackets [%index]
-                if (parser_peek(parser, TK_LBRACKET)) {
-                    parser_expect(parser, TK_LBRACKET);
-                    if (parser_peek(parser, TK_REGISTER)) {
-                        string reg_str = parser_token_str(parser);
-                        parser_expect(parser, TK_REGISTER);
-                        
-                        ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
-                        if (!operand) {
-                            parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
-                            return NULL;
-                        }
-                        VecValueRef_push_back(parser->arena, &operands, operand);
-                    }
-                    parser_expect(parser, TK_RBRACKET);
-                }
-                
-                op->operands = operands.data;
-                op->n_operands = operands.size;
-            } else {
-                // General parsing for unregistered operations
-                VecValueRef operands;
-                VecValueRef_reserve(parser->arena, &operands, 4);
-                
-                // Parse operands until we hit attributes, result type, or end
-                while ((parser_peek(parser, TK_REGISTER) || parser_peek(parser, TK_LBRACKET)) && 
-                       !parser_peek(parser, TK_COLON) && !parser_peek(parser, TK_LBRACE)) {
-                    if (parser_peek(parser, TK_REGISTER)) {
-                        string reg_str = parser_token_str(parser);
-                        parser_expect(parser, TK_REGISTER);
-                        
-                        ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
-                        if (!operand) {
-                            parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
-                            return NULL;
-                        }
-                        VecValueRef_push_back(parser->arena, &operands, operand);
-                    } else if (parser_peek(parser, TK_LBRACKET)) {
-                        // Skip indexing syntax like [%arg1] 
-                        parser_expect(parser, TK_LBRACKET);
-                        while (!parser_peek(parser, TK_RBRACKET) && !parser_peek(parser, TK_EOF)) {
-                            if (parser_peek(parser, TK_REGISTER)) {
-                                string reg_str = parser_token_str(parser);
-                                parser_expect(parser, TK_REGISTER);
-                                
-                                ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
-                                if (!operand) {
-                                    // In index lists, allow forward-declared indvars; create placeholder
-                                    operand = create_value_ref(parser->arena, BLOCK_ARG);
-                                    operand->register_name = reg_str;
-                                    operand->type = arena_alloc(parser->arena, Type);
-                                    operand->type->str = str_lit("index");
-                                    operand->type->kind = TYPE_KIND_INDEX;
-                                }
-                                VecValueRef_push_back(parser->arena, &operands, operand);
-                            } else {
-                                parser_next_token(parser);
-                            }
-                        }
-                        parser_expect(parser, TK_RBRACKET);
-                    }
-                    
-                    if (parser_peek(parser, TK_COMMA)) {
-                        parser_expect(parser, TK_COMMA);
-                    } else {
-                        break;
-                    }
-                }
-                
-                op->operands = operands.data;
-                op->n_operands = operands.size;
-            }
-        }
-
-        #endif
-
-        #if 0 // legacy generic parsing (disabled after refactor)
-        // Fallback: parse operands for unknown/generic operations
-        {
-            VecValueRef operands;
-            VecValueRef_reserve(parser->arena, &operands, 4);
-
-            // Parse operands until attributes, result type, or end
-            while ((parser_peek(parser, TK_REGISTER) || parser_peek(parser, TK_LBRACKET)) &&
-                   !parser_peek(parser, TK_COLON) && !parser_peek(parser, TK_LBRACE)) {
-                if (parser_peek(parser, TK_REGISTER)) {
-                    string reg_str = parser_token_str(parser);
-                    parser_expect(parser, TK_REGISTER);
-
-                    ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
-                    if (!operand) {
-                        parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
-                        return NULL;
-                    }
-                    VecValueRef_push_back(parser->arena, &operands, operand);
-                } else if (parser_peek(parser, TK_LBRACKET)) {
-                    // Skip indexing syntax like [%arg1]
-                    parser_expect(parser, TK_LBRACKET);
-                    while (!parser_peek(parser, TK_RBRACKET) && !parser_peek(parser, TK_EOF)) {
-                        if (parser_peek(parser, TK_REGISTER)) {
-                            string reg_str2 = parser_token_str(parser);
-                            parser_expect(parser, TK_REGISTER);
-                            ValueRef *operand2 = symbol_table_lookup(&parser->symbol_table, reg_str2);
-                            if (!operand2) {
-                                parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
-                                return NULL;
-                            }
-                            VecValueRef_push_back(parser->arena, &operands, operand2);
-                        } else {
-                            parser_next_token(parser);
-                        }
-                    }
-                    parser_expect(parser, TK_RBRACKET);
-                }
-
-                if (parser_peek(parser, TK_COMMA)) {
-                    parser_expect(parser, TK_COMMA);
-                } else {
-                    break;
-                }
-            }
-
-            op->operands = operands.data;
-            op->n_operands = operands.size;
-        }
-
-        // Attributes and result types are parsed generically later
-
-        // Handle generic attributes and result types before scanning for regions
-        parse_generic_attrs_and_result_type(parser, op);
-
-        // Parse regions (if any), for now we assume 0 or 1 regions
-        while (!(
-                parser_peek(parser, TK_LBRACE_END)
-                || parser_peek(parser, TK_NEWLINE)
-                || parser_peek(parser, TK_LPAREN_BRACE)
-                )) {
-            parser_next_token(parser);
-        }
-        bool lparen_brace = false;
-        if (parser_peek(parser, TK_LPAREN_BRACE)) {
-            lparen_brace = true;
-            parser_next_token(parser);
-        }
-        if (parser_peek(parser, TK_LBRACE_END)) {
-            // Before consuming a region, parse any trailing attributes/result types
-            parse_generic_attrs_and_result_type(parser, op);
-            Region *region = parse_region(parser);
-
-            // TODO: for now we assume one region
-            Region **regions = arena_alloc(parser->arena, Region*);
-            regions[0] = region;
-            op->regions = regions;
-            op->n_regions = 1;
-        }
-        if (lparen_brace) {
-            parser_expect(parser, TK_RPAREN);
-            while (!parser_peek(parser, TK_NEWLINE)) {
-                parser_next_token(parser);
-            }
-        }
-        if (parser_peek(parser, TK_NAME)) {
-            if (str_eq(parser_token_str(parser), str_lit("loc"))) {
-                parse_loc(parser);
-            }
-        }
-        #endif
     }
 
     // Ensure attrs/result types are handled for specialized op paths too
