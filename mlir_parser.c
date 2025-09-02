@@ -747,6 +747,28 @@ static void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
         }
     }
 
+    // Or optional result type directly after operands via '-> type'
+    if (parser_peek(parser, TK_ARROW)) {
+        parser_expect(parser, TK_ARROW);
+        if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME) || parser_peek(parser, TK_EXCLAMATION)) {
+            string type_str = parser_token_str(parser);
+            parser_next_token(parser);
+            if (parser_peek(parser, TK_LANGLE)) {
+                int depth = 0;
+                do {
+                    if (parser_peek(parser, TK_LANGLE)) depth++;
+                    else if (parser_peek(parser, TK_RANGLE)) depth--;
+                    type_str = str_concat(parser->arena, type_str, parser_token_str(parser));
+                    parser_next_token(parser);
+                } while (depth > 0 && !parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE));
+            }
+            op->n_result_types = 1;
+            op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+            op->result_types[0] = arena_alloc(parser->arena, Type);
+            op->result_types[0]->str = type_str;
+        }
+    }
+
     // Optional trailing loc()
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
         parse_loc(parser);
@@ -1871,86 +1893,10 @@ Operation* parse_operation(Parser *parser) {
             }
         }
 
-        // Parse attributes if present (for all operations)
-        if (parser_peek(parser, TK_LBRACE)) {
-            parser_expect(parser, TK_LBRACE);
-            
-            // Skip attribute parsing - just consume tokens until closing brace
-            int brace_depth = 1;
-            while (brace_depth > 0 && !parser_peek(parser, TK_EOF)) {
-                if (parser_peek(parser, TK_LBRACE)) {
-                    brace_depth++;
-                } else if (parser_peek(parser, TK_RBRACE)) {
-                    brace_depth--;
-                }
-                parser_next_token(parser);
-            }
-        }
+        // Attributes and result types are parsed generically later
 
-        // Parse result type for operations that have : type syntax (excluding void operations)
-        bool is_void_tt_op = (str_eq(op->opname, str_lit("tt.store")) || str_eq(op->opname, str_lit("tt.return")));
-        bool is_tt_splat = str_eq(op->opname, str_lit("tt.splat"));
-        if ((op->op_type >= OP_TYPE_ARITH_ADDI && op->op_type <= OP_TYPE_ARITH_CMPF) ||
-            ((op->opname.size > 3 && op->opname.str[0] == 't' && op->opname.str[1] == 't' && op->opname.str[2] == '.') && !is_void_tt_op && !is_tt_splat) ||
-            (op->op_type == OP_TYPE_UNREGISTERED && parser_peek(parser, TK_COLON))) {
-            if (parser_peek(parser, TK_COLON)) {
-                parser_expect(parser, TK_COLON);
-
-                // Parse the result type - handle simple and complex types
-                if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME) ||
-                    parser_peek(parser, TK_EXCLAMATION)) {
-                    string type_str = parser_token_str(parser);
-
-                    // Remove "loc" suffix if the token ends with "loc"
-                    if (type_str.size > 3 &&
-                        type_str.str[type_str.size-3] == 'l' &&
-                        type_str.str[type_str.size-2] == 'o' &&
-                        type_str.str[type_str.size-1] == 'c') {
-                        type_str = str_substr(type_str, 0, type_str.size - 3);
-                    }
-
-                    parser_next_token(parser);
-
-                    // Handle complex types like tensor<16xi32>
-                    if (parser_peek(parser, TK_LANGLE)) {
-                        type_str = str_concat(parser->arena, type_str, parser_token_str(parser));
-                        parser_next_token(parser); // consume <
-
-                        // Parse everything inside <> until we hit >
-                        while (!parser_peek(parser, TK_RANGLE) && !parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE)) {
-                            type_str = str_concat(parser->arena, type_str, parser_token_str(parser));
-                            parser_next_token(parser);
-                        }
-
-                        if (parser_peek(parser, TK_RANGLE)) {
-                            type_str = str_concat(parser->arena, type_str, parser_token_str(parser));
-                            parser_next_token(parser); // consume >
-                        }
-                    }
-
-                    if (type_str.size > 0) {
-                        op->n_result_types = 1;
-                        op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-                        op->result_types[0] = arena_alloc(parser->arena, Type);
-                        op->result_types[0]->str = type_str;
-
-
-                        // Set type kind based on type string
-                        if (str_eq(type_str, str_lit("i32")) || str_eq(type_str, str_lit("i64"))) {
-                            op->result_types[0]->kind = TYPE_KIND_INTEGER;
-                            op->result_types[0]->data.integer.width = str_eq(type_str, str_lit("i32")) ? 32 : 64;
-                            op->result_types[0]->data.integer.is_signed = true;
-                        } else if (str_eq(type_str, str_lit("f32")) || str_eq(type_str, str_lit("f64"))) {
-                            op->result_types[0]->kind = TYPE_KIND_FLOAT;
-                            op->result_types[0]->data.floating.width = str_eq(type_str, str_lit("f32")) ? 32 : 64;
-                        } else {
-                            // Complex type like tensor<16xf32> - for now just store the string
-                            op->result_types[0]->kind = TYPE_KIND_TENSOR;
-                        }
-                    }
-                }
-            }
-        }
+        // Handle generic attributes and result types before scanning for regions
+        parse_generic_attrs_and_result_type(parser, op);
 
         // Parse regions (if any), for now we assume 0 or 1 regions
         while (!(
@@ -1966,6 +1912,8 @@ Operation* parse_operation(Parser *parser) {
             parser_next_token(parser);
         }
         if (parser_peek(parser, TK_LBRACE_END)) {
+            // Before consuming a region, parse any trailing attributes/result types
+            parse_generic_attrs_and_result_type(parser, op);
             Region *region = parse_region(parser);
 
             // TODO: for now we assume one region
@@ -1987,43 +1935,10 @@ Operation* parse_operation(Parser *parser) {
         }
     }
 
-    // Parse generic attributes and trailing result type for all non-region ops
+    // Ensure attrs/result types are handled for specialized op paths too
     parse_generic_attrs_and_result_type(parser, op);
 
-    // Parse result types (applies to all operations if not already set)
-    if (!op->result_types && parser_peek(parser, TK_ARROW)) {
-        parser_expect(parser, TK_ARROW);
-
-        // Parse result type
-        if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME) ||
-            parser_peek(parser, TK_EXCLAMATION)) {
-            string type_str = parser_token_str(parser);
-            parser_next_token(parser);
-
-            // Handle complex types like tensor<16xi32>
-            if (parser_peek(parser, TK_LANGLE)) {
-                type_str = str_concat(parser->arena, type_str, parser_token_str(parser));
-                parser_next_token(parser); // consume <
-
-                // Parse everything inside <> until we hit >
-                while (!parser_peek(parser, TK_RANGLE) && !parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE)) {
-                    type_str = str_concat(parser->arena, type_str, parser_token_str(parser));
-                    parser_next_token(parser);
-                }
-
-                if (parser_peek(parser, TK_RANGLE)) {
-                    type_str = str_concat(parser->arena, type_str, parser_token_str(parser));
-                    parser_next_token(parser); // consume >
-                }
-            }
-
-            // Set result type
-            op->n_result_types = 1;
-            op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-            op->result_types[0] = arena_alloc(parser->arena, Type);
-            op->result_types[0]->str = type_str;
-        }
-    }
+    // Generic attrs and result types already handled earlier for non-region ops
 
     // Infer result types for common unregistered operations
     if (op->n_result_types == 0) {

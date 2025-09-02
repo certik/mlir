@@ -43,7 +43,7 @@ module() {
         %21 = "arith.extf"() -> ?
         %22 = "tt.reduce"() -> ? {
         ^bb0(%arg5: f32, %arg6: f32):
-            %30 = "tt.pure_extern_elementwise"(%arg5: f32, %arg6: f32) -> ?
+            %30 = "tt.pure_extern_elementwise"(%arg5: f32, %arg6: f32) -> f32
             "tt.reduce"()
         }
         %23 = tt.splat(%22: i32) -> tensor<65536xf32>
