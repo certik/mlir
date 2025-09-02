@@ -140,6 +140,7 @@ void tokenizer_get_next_token(const unsigned char *string,
             "->" { RET(TK_ARROW) }
 
             "#" name { RET(TK_HASH_NAME); }
+            "#" integer { RET(TK_HASH_NAME); }
             "^" name { RET(TK_CARET_NAME); }
 
             name { RET(TK_NAME) }

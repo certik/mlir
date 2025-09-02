@@ -10,6 +10,9 @@
 
 #include "mlir_parser.h"
 
+// Forward decls for helper scanners
+static inline void consume_optional_hash_selector(Parser *parser);
+
 // Symbol table implementation
 void symbol_table_init(Arena *arena, ScopedSymbolTable *st) {
     st->scope_capacity = 8;
@@ -877,6 +880,7 @@ static void parse_tt_addptr_load_store(Parser *parser, Operation *op) {
     while (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
+        consume_optional_hash_selector(parser);
         ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
         if (!operand) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
@@ -914,6 +918,10 @@ static void parse_tensor_extract(Parser *parser, Operation *op) {
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
+                consume_optional_hash_selector(parser);
+                consume_optional_hash_selector(parser);
+                consume_optional_hash_selector(parser);
+                consume_optional_hash_selector(parser);
                 ValueRef *idx = symbol_table_lookup(&parser->symbol_table, reg_str);
                 if (!idx) {
                     parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
@@ -1243,6 +1251,8 @@ void parse_scf_for(Parser *parser, Operation *op) {
                     if (parser_peek(parser, TK_REGISTER)) {
                         string reg_str = parser_token_str(parser);
                         parser_expect(parser, TK_REGISTER);
+                        consume_optional_hash_selector(parser);
+                        consume_optional_hash_selector(parser);
                         
                         ValueRef *init_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
                         if (!init_operand) {
@@ -1608,6 +1618,8 @@ Operation* parse_operation(Parser *parser) {
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
+                consume_optional_hash_selector(parser);
+                consume_optional_hash_selector(parser);
 
                 // Look up the value in symbol table
                 ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
@@ -1624,6 +1636,7 @@ Operation* parse_operation(Parser *parser) {
                     if (parser_peek(parser, TK_REGISTER)) {
                         string reg_str2 = parser_token_str(parser);
                         parser_expect(parser, TK_REGISTER);
+                        consume_optional_hash_selector(parser);
 
                         // Look up the second value in symbol table
                         ValueRef *operand2 = symbol_table_lookup(&parser->symbol_table, reg_str2);
@@ -2093,4 +2106,10 @@ Operation* parse_operation(Parser *parser) {
     }
 
     return op;
+}
+static inline void consume_optional_hash_selector(Parser *parser) {
+    // Consume tokens like #0, #1 after a register (e.g., %49#0) and ignore them
+    if (parser_peek(parser, TK_HASH_NAME)) {
+        parser_next_token(parser);
+    }
 }
