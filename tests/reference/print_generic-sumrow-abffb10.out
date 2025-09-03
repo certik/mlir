@@ -67,9 +67,9 @@ module() {
         tt.store(%17: tensor<2x1x!tt.ptr<f32>>, %15: tensor<2x1xf32>, %6: tensor<2x1xi32>)
         tt.return()
     }
-    tt.func(%arg0: tensor) {
+    tt.func(%arg0: tensor<f32>) {
     ^bb0:
-        %0 = tt.reduce(%arg0: tensor) -> ? {
+        %0 = tt.reduce(%arg0: tensor<f32>) -> ? {
         ^bb0(%arg1: f32, %arg2: f32):
             %1 = tt.call(%arg1: f32, %arg2: f32) -> f32
             tt.reduce.return()
