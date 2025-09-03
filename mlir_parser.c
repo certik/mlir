@@ -441,20 +441,6 @@ static bool parse_type_string(Parser *parser, string *out) {
     return true;
 }
 
-void parser_expect_opname(Parser *parser, string name) {
-    if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
-        if (str_eq(parser_token_str(parser), name)) {
-            parser_next_token(parser);
-            return;
-        }
-    }
-    parser_error(parser,
-        format(parser->arena,
-            str_lit("Expected TK_NAME or TK_NAME_DOT_NAME '{}', got {}"),
-            name,
-            tokentype_to_string(parser->sym)
-        ), parser->first, parser->last);
-}
 
 Operation* parse_operation(Parser *parser);
 
@@ -2674,14 +2660,6 @@ void parse_scf_while(Parser *parser, Operation *op) {
     }
     op->regions = regions;
     op->n_regions = n_regions;
-}
-
-// Helper function to extract register name for printing
-string get_register_name(string reg_str) {
-    if (reg_str.size > 1 && reg_str.str[0] == '%') {
-        return reg_str; // Return the full register name for printing
-    }
-    return str_lit("%unknown");
 }
 
 void parse_scf_yield(Parser *parser, Operation *op) {
