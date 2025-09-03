@@ -11,44 +11,44 @@ module() {
 ^bb0:
     func.func() {
     ^bb0:
-        %0 = arith.constant() {value = 0} -> i16
+        %c0_i16 = arith.constant() {value = 0} -> i16
         "return"()
     }
     func.func() {
     ^bb0:
-        %1 = "index.constant"() -> ?
-        %2 = "index.constant"() -> ?
-        %3 = "index.constant"() -> ?
-        %4 = "index.constant"() -> ?
-        %5 = arith.constant() -> ?
-        %6 = arith.constant() {value = 0} -> i16
-        %7 = arith.constant() {value = 1} -> i16
-        %8 = memref.alloc() -> ?
+        %idx0 = "index.constant"() -> index
+        %idx1 = "index.constant"() -> index
+        %idx2 = "index.constant"() -> index
+        %idx5 = "index.constant"() -> index
+        %true = arith.constant() {value = 1} -> i1
+        %c0_i16 = arith.constant() {value = 0} -> i16
+        %c1_i16 = arith.constant() {value = 1} -> i16
+        %alloc_76 = memref.alloc() -> memref<24xi16>
         "linalg.fill"()
-        %9 = "affine.load"() -> ?
-        %10 = "tensor.from_elements"() -> ?
-        %11 = scf.if() -> ? {
+        %49 = "affine.load"(%alloc_76: memref<24xi16>, %idx0: index) -> i16
+        %from_elements_117 = "tensor.from_elements"(%49: i16, %49: i16, %49: i16, %49: i16, %49: i16, %49: i16, %49: i16, %49: i16, %49: i16, %49: i16) -> tensor<5x2xi16>
+        %171 = scf.if() -> tensor<5x2xi16> {
         ^bb0:
-            scf.yield(%10: i32)
+            scf.yield(%from_elements_117: tensor<5x2xi16>)
         }{
         ^bb0:
-            scf.yield(%10: i32)
+            scf.yield(%from_elements_117: tensor<5x2xi16>)
         }
-        %12 = "tensor.splat"() -> ?
-        %13 = "linalg.copy"() -> ?
-        %14 = "tensor.collapse_shape"() -> ?
-        %15 = "index.constant"() -> ?
-        %18 = scf.for(%1: i32, %15: i32, %2: i32, %6: i16) -> ? {
+        %cast_258 = "tensor.splat"(%c1_i16: i16, %idx5: index, %idx2: index) -> tensor<?x?xi16>
+        %212 = "linalg.copy"(%cast_258: tensor<?x?xi16>) -> tensor<?x?xi16>
+        %collapsed_217 = "tensor.collapse_shape"(%171: tensor<5x2xi16>) -> tensor<10xi16>
+        %dim = "index.constant"() -> index
+        %0 = scf.for(%idx0: index, %dim: index, %idx1: index, %c0_i16: i16) -> i16 {
         ^bb0(%arg0: index, %arg1: i16):
-            %16 = "tensor.extract"() -> ?
-            %17 = arith.addi(%arg1: i16, %16: i32) -> i16
-            "vector.print"()
-            scf.yield(%17: i16)
+            %extracted = "tensor.extract"(%collapsed_217: tensor<10xi16>, %arg0: index) -> tensor<10xi16>
+            %1 = arith.addi(%arg1: i16, %extracted: tensor<10xi16>) -> i16
+            "vector.print"(%extracted: tensor<10xi16>)
+            scf.yield(%1: i16)
         }
-        %19 = "tensor.collapse_shape"() -> ?
-        %20 = "tensor.collapse_shape"() -> ?
-        %21 = "call"() -> ?
-        %22 = "arith.sitofp"() -> ?
+        %collapsed_213 = "tensor.collapse_shape"(%from_elements_117: tensor<5x2xi16>) -> tensor<10xi16>
+        %collapsed_222 = "tensor.collapse_shape"(%212: tensor<?x?xi16>) -> tensor<10xi16>
+        %490 = call(%collapsed_222: tensor<10xi16>) -> i16
+        %1 = "arith.sitofp"(%0: i16) -> i16
         "return"()
     }
 }

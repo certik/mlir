@@ -9,7 +9,7 @@ Done parsing args. use_construction=0
 MLIR:
 module() {
 ^bb0:
-    %0 = "std.constant"() -> ?
+    %0 = "std.constant"() -> i32
     "std.return"()
 }
 

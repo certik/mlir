@@ -11,141 +11,141 @@ module() {
 ^bb0:
     func.func() {
     ^bb0:
-        %0 = arith.constant() {value = 0} -> i64
-        %1 = arith.constant() {value = 0} -> i64
-        %2 = arith.constant() {value = 0} -> i64
-        %3 = arith.constant() {value = 0} -> i64
-        %4 = arith.cmpi() -> ?
-        %5 = arith.constant() -> ?
-        cf.cond_br()
+        %c0_i64 = arith.constant() {value = 0} -> i64
+        %c0_i64_0 = arith.constant() {value = 0} -> i64
+        %c0_i64_1 = arith.constant() {value = 0} -> i64
+        %c0_i64_2 = arith.constant() {value = 0} -> i64
+        %0 = arith.cmpi(%c0_i64_1: i64, %c0_i64_2: i64) -> i64
+        %false = arith.constant() {value = 0} -> i1
+        cf.cond_br(%0: i64)
     ^bb1:
-        %6 = "call"() -> ?
-        %7 = arith.constant() {value = 0} -> i64
-        %8 = arith.cmpi() -> ?
+        %1 = call() -> i64
+        %c0_i64_3 = arith.constant() {value = 0} -> i64
+        %2 = arith.cmpi(%1: i64, %c0_i64_3: i64) -> i64
         cf.br()
     ^bb2(%3: i1, %4: i64):
-        %9 = "arith.extui"() -> ?
-        %10 = arith.constant() {value = 0} -> i64
-        %11 = arith.cmpi() -> ?
-        cf.cond_br()
+        %5 = "arith.extui"(%3: i1) -> i1
+        %c0_i64_4 = arith.constant() {value = 0} -> i64
+        %6 = arith.cmpi(%5: i1, %c0_i64_4: i64) -> i64
+        cf.cond_br(%6: i64)
     ^bb3:
-        %12 = arith.constant() {value = 1} -> i64
+        %c1_i64 = arith.constant() {value = 1} -> i64
         "return"()
     ^bb4:
         cf.br()
     ^bb5:
-        %13 = arith.constant() {value = 0} -> i64
-        %14 = arith.cmpi() -> ?
-        cf.cond_br()
+        %c0_i64_5 = arith.constant() {value = 0} -> i64
+        %7 = arith.cmpi(%4: i64, %c0_i64_5: i64) -> i64
+        cf.cond_br(%7: i64)
     ^bb6:
-        %15 = arith.constant() {value = 2} -> i64
+        %c2_i64 = arith.constant() {value = 2} -> i64
         "return"()
     ^bb7:
         cf.br()
     ^bb8:
-        %16 = arith.constant() {value = 1} -> i64
-        %17 = arith.constant() {value = 0} -> i64
-        %18 = arith.cmpi() -> ?
-        %19 = arith.constant() -> ?
-        cf.cond_br()
+        %c1_i64_6 = arith.constant() {value = 1} -> i64
+        %c0_i64_7 = arith.constant() {value = 0} -> i64
+        %8 = arith.cmpi(%c1_i64_6: i64, %c0_i64_7: i64) -> i64
+        %false_8 = arith.constant() {value = 0} -> i1
+        cf.cond_br(%8: i64)
     ^bb9:
-        %20 = "call"() -> ?
-        %21 = arith.constant() {value = 0} -> i64
-        %22 = arith.cmpi() -> ?
+        %9 = call() -> i64
+        %c0_i64_9 = arith.constant() {value = 0} -> i64
+        %10 = arith.cmpi(%9: i64, %c0_i64_9: i64) -> i64
         cf.br()
     ^bb10(%11: i1, %12: i64):
-        %23 = "arith.extui"() -> ?
-        %24 = arith.constant() {value = 0} -> i64
-        %25 = arith.cmpi() -> ?
-        cf.cond_br()
+        %13 = "arith.extui"(%11: i1) -> i1
+        %c0_i64_10 = arith.constant() {value = 0} -> i64
+        %14 = arith.cmpi(%13: i1, %c0_i64_10: i64) -> i64
+        cf.cond_br(%14: i64)
     ^bb11:
-        %26 = arith.constant() {value = 1} -> i64
-        %27 = arith.cmpi() -> ?
-        %28 = "arith.extui"() -> ?
-        %29 = arith.constant() {value = 0} -> i64
-        %30 = arith.cmpi() -> ?
-        cf.cond_br()
+        %c1_i64_11 = arith.constant() {value = 1} -> i64
+        %15 = arith.cmpi(%12: i64, %c1_i64_11: i64) -> i64
+        %16 = "arith.extui"(%15: i64) -> i1
+        %c0_i64_12 = arith.constant() {value = 0} -> i64
+        %17 = arith.cmpi(%16: i1, %c0_i64_12: i64) -> i64
+        cf.cond_br(%17: i64)
     ^bb12:
-        %31 = arith.constant() {value = 3} -> i64
+        %c3_i64 = arith.constant() {value = 3} -> i64
         "return"()
     ^bb13:
         cf.br()
     ^bb14:
         cf.br()
     ^bb15:
-        %32 = arith.constant() {value = 4} -> i64
+        %c4_i64 = arith.constant() {value = 4} -> i64
         "return"()
     ^bb16:
-        %33 = arith.constant() {value = 0} -> i64
-        %34 = arith.constant() {value = 1} -> i64
-        %35 = arith.constant() {value = 0} -> i64
-        %36 = arith.cmpi() -> ?
-        %37 = arith.constant() -> ?
-        cf.cond_br()
+        %c0_i64_13 = arith.constant() {value = 0} -> i64
+        %c1_i64_14 = arith.constant() {value = 1} -> i64
+        %c0_i64_15 = arith.constant() {value = 0} -> i64
+        %18 = arith.cmpi(%c1_i64_14: i64, %c0_i64_15: i64) -> i64
+        %true = arith.constant() {value = 1} -> i1
+        cf.cond_br(%18: i64)
     ^bb17:
-        %38 = "call"() -> ?
-        %39 = arith.constant() {value = 0} -> i64
-        %40 = arith.cmpi() -> ?
+        %19 = call() -> i64
+        %c0_i64_16 = arith.constant() {value = 0} -> i64
+        %20 = arith.cmpi(%19: i64, %c0_i64_16: i64) -> i64
         cf.br()
     ^bb18(%21: i1, %22: i64):
-        %41 = "arith.extui"() -> ?
-        %42 = arith.constant() {value = 0} -> i64
-        %43 = arith.cmpi() -> ?
-        cf.cond_br()
+        %23 = "arith.extui"(%21: i1) -> i1
+        %c0_i64_17 = arith.constant() {value = 0} -> i64
+        %24 = arith.cmpi(%23: i1, %c0_i64_17: i64) -> i64
+        cf.cond_br(%24: i64)
     ^bb19:
-        %44 = arith.constant() {value = 0} -> i64
-        %45 = arith.cmpi() -> ?
-        cf.cond_br()
+        %c0_i64_18 = arith.constant() {value = 0} -> i64
+        %25 = arith.cmpi(%22: i64, %c0_i64_18: i64) -> i64
+        cf.cond_br(%25: i64)
     ^bb20:
-        %46 = arith.constant() {value = 5} -> i64
+        %c5_i64 = arith.constant() {value = 5} -> i64
         "return"()
     ^bb21:
         cf.br()
     ^bb22:
         cf.br()
     ^bb23:
-        %47 = arith.constant() {value = 6} -> i64
+        %c6_i64 = arith.constant() {value = 6} -> i64
         "return"()
     ^bb24:
-        %48 = arith.constant() {value = 0} -> i64
-        %49 = arith.constant() {value = 0} -> i64
-        %50 = arith.cmpi() -> ?
-        %51 = arith.constant() -> ?
-        cf.cond_br()
+        %c0_i64_19 = arith.constant() {value = 0} -> i64
+        %c0_i64_20 = arith.constant() {value = 0} -> i64
+        %26 = arith.cmpi(%c0_i64_19: i64, %c0_i64_20: i64) -> i64
+        %true_21 = arith.constant() {value = 1} -> i1
+        cf.cond_br(%26: i64)
     ^bb25:
-        %52 = "call"() -> ?
-        %53 = arith.constant() {value = 0} -> i64
-        %54 = arith.cmpi() -> ?
+        %27 = call() -> i64
+        %c0_i64_22 = arith.constant() {value = 0} -> i64
+        %28 = arith.cmpi(%27: i64, %c0_i64_22: i64) -> i64
         cf.br()
     ^bb26(%29: i1, %30: i64):
-        %55 = "arith.extui"() -> ?
-        %56 = arith.constant() {value = 0} -> i64
-        %57 = arith.cmpi() -> ?
-        cf.cond_br()
+        %31 = "arith.extui"(%29: i1) -> i1
+        %c0_i64_23 = arith.constant() {value = 0} -> i64
+        %32 = arith.cmpi(%31: i1, %c0_i64_23: i64) -> i64
+        cf.cond_br(%32: i64)
     ^bb27:
-        %58 = arith.constant() {value = 1} -> i64
-        %59 = arith.cmpi() -> ?
-        %60 = "arith.extui"() -> ?
-        %61 = arith.constant() {value = 0} -> i64
-        %62 = arith.cmpi() -> ?
-        cf.cond_br()
+        %c1_i64_24 = arith.constant() {value = 1} -> i64
+        %33 = arith.cmpi(%30: i64, %c1_i64_24: i64) -> i64
+        %34 = "arith.extui"(%33: i64) -> i1
+        %c0_i64_25 = arith.constant() {value = 0} -> i64
+        %35 = arith.cmpi(%34: i1, %c0_i64_25: i64) -> i64
+        cf.cond_br(%35: i64)
     ^bb28:
-        %63 = arith.constant() {value = 7} -> i64
+        %c7_i64 = arith.constant() {value = 7} -> i64
         "return"()
     ^bb29:
         cf.br()
     ^bb30:
         cf.br()
     ^bb31:
-        %64 = arith.constant() {value = 8} -> i64
+        %c8_i64 = arith.constant() {value = 8} -> i64
         "return"()
     ^bb32:
-        %65 = arith.constant() {value = 0} -> i64
+        %c0_i64_26 = arith.constant() {value = 0} -> i64
         "return"()
     }
     func.func() {
     ^bb0:
-        %66 = arith.constant() {value = 1} -> i64
+        %c1_i64 = arith.constant() {value = 1} -> i64
         "return"()
     }
 }

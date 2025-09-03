@@ -4,7 +4,7 @@
     "infile": "tests/t2.mlir",
     "infile_hash": "c371c8f3273fd2d065e5fd1d5e56d33a01e449089781b6a6425137ee",
     "outfile": "print_generic-t2-fd0fc6c.out",
-    "outfile_hash": "71f5d16b4f56df882f33a9387b3b823c3a0060112d2d5b631e328082",
+    "outfile_hash": "47ddb0489f4f1b09d4973cae06df9ea51887d04c02608624aa728be0",
     "stdout": null,
     "stdout_hash": null,
     "stderr": null,

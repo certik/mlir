@@ -11,24 +11,24 @@ module() {
 ^bb0:
     func.func() {
     ^bb0:
-        %0 = memref.alloc() -> ?
-        %1 = arith.constant() {value = 0} -> index
-        %2 = arith.constant() {value = 10} -> index
-        %3 = arith.subi(%2: index, %1: index) -> index
-        %4 = arith.constant() {value = 1} -> index
-        %5 = arith.constant() {value = 0} -> index
-        %6 = arith.constant() {value = 20} -> index
-        %7 = arith.subi(%6: index, %5: index) -> index
-        %8 = arith.constant() {value = 1} -> index
-        %9 = arith.constant() {value = 1} -> index
+        %alloc = memref.alloc() -> memref<10x20xf32>
+        %c0 = arith.constant() {value = 0} -> index
+        %c10 = arith.constant() {value = 10} -> index
+        %0 = arith.subi(%c10: index, %c0: index) -> index
+        %c1 = arith.constant() {value = 1} -> index
+        %c0_0 = arith.constant() {value = 0} -> index
+        %c20 = arith.constant() {value = 20} -> index
+        %1 = arith.subi(%c20: index, %c0_0: index) -> index
+        %c1_1 = arith.constant() {value = 1} -> index
+        %c1_2 = arith.constant() {value = 1} -> index
         "gpu.launch"() {
         ^bb0(%arg2: index, %arg3: index, %arg4: index, %arg5: index, %arg6: index, %arg7: index):
-            %10 = arith.addi(%1: index, %arg2: index) -> index
-            %11 = arith.addi(%5: index, %arg5: index) -> index
-            %12 = memref.load() -> ?
-            %13 = memref.load() -> ?
-            %14 = arith.addf(%12: i32, %13: i32) -> f32
-            memref.store()
+            %2 = arith.addi(%c0: index, %arg2: index) -> index
+            %3 = arith.addi(%c0_0: index, %arg5: index) -> index
+            %4 = memref.load(%arg0: unknown, %2: index, %3: index) -> memref<10x20xf32>
+            %5 = memref.load(%arg1: unknown, %2: index, %3: index) -> memref<10x20xf32>
+            %6 = arith.addf(%4: memref<10x20xf32>, %5: memref<10x20xf32>) -> f32
+            memref.store(%4: memref<10x20xf32>, %alloc: memref<10x20xf32>, %2: index, %3: index)
             "gpu.terminator"()
         }
         "return"()

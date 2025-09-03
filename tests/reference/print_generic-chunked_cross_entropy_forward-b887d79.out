@@ -11,69 +11,69 @@ module() {
 ^bb0:
     tt.func(%arg0: !tt.ptr<bf16>, %arg1: i32, %arg2: !tt.ptr<f32>, %arg3: !tt.ptr<f32>, %arg4: !tt.ptr<i64>) {
     ^bb0:
-        %0 = arith.constant() -> ?
-        %1 = arith.constant() -> ?
-        %2 = arith.constant() -> ?
-        %3 = arith.constant() -> ?
-        %4 = arith.constant() {value = 0} -> i32
-        %5 = arith.constant() -> ?
-        %6 = arith.constant() {value = 65536} -> i32
-        %7 = arith.constant() {value = 2} -> i32
-        %8 = tt.get_program_id() {axis = "x"} -> i32
-        %9 = tt.get_program_id() {axis = "y"} -> i32
-        %10 = "arith.extsi"() -> ?
-        %11 = "arith.extsi"() -> ?
-        %12 = arith.muli(%11: i32, %10: i32) -> i64
-        %13 = tt.addptr(%arg0: !tt.ptr<bf16>, %12: i64) -> !
-        %14 = tt.addptr(%arg2: !tt.ptr<f32>, %8: i32) -> !
-        %15 = arith.muli(%8: i32, %7: i32) -> i32
-        %16 = arith.addi(%15: i32, %9: i32) -> i32
-        %17 = tt.addptr(%arg3: !tt.ptr<f32>, %16: i32) -> !
-        %18 = tt.addptr(%arg4: !tt.ptr<i64>, %8: i32) -> !
-        %19 = arith.muli(%9: i32, %6: i32) -> i32
-        %20 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<65536xi32>
-        %21 = tt.splat(%19: i32) -> tensor<16xi32>
-        %22 = arith.addi(%21: tensor<16xi32>, %20: tensor<65536xi32>) -> tensor<65536xi32>
-        %23 = arith.cmpi() -> ?
-        %24 = tt.load(%18: !) -> i64
-        %25 = "arith.trunci"() -> ?
-        %26 = tt.splat(%13: !) -> tensor<16xi32>
-        %27 = tt.addptr(%26: tensor<16xi32>, %22: tensor<65536xi32>) -> tensor<65536x!tt.ptr<bf16>
-        %28 = tt.load(%27: tensor<65536x!tt.ptr<bf16>, %23: i32, %0: i32) -> tensor<65536xbf16>
-        %29 = "arith.extf"() -> ?
-        %31 = "tt.reduce"() -> ? {
+        %cst = arith.constant() -> tensor<65536xbf16>
+        %cst_0 = arith.constant() -> f32
+        %cst_1 = arith.constant() -> f32
+        %c-100_i32 = arith.constant() -> i32
+        %c0_i32 = arith.constant() {value = 0} -> i32
+        %cst_2 = arith.constant() -> tensor<65536xi32>
+        %c65536_i32 = arith.constant() {value = 65536} -> i32
+        %c2_i32 = arith.constant() {value = 2} -> i32
+        %0 = tt.get_program_id() {axis = "x"} -> i32
+        %1 = tt.get_program_id() {axis = "y"} -> i32
+        %2 = "arith.extsi"(%arg1: i32) -> i32
+        %3 = "arith.extsi"(%0: i32) -> i32
+        %4 = arith.muli(%3: i32, %2: i32) -> i64
+        %5 = tt.addptr(%arg0: !tt.ptr<bf16>, %4: i64) -> !tt.ptr<bf16>
+        %6 = tt.addptr(%arg2: !tt.ptr<f32>, %0: i32) -> !tt.ptr<f32>
+        %7 = arith.muli(%0: i32, %c2_i32: i32) -> i32
+        %8 = arith.addi(%7: i32, %1: i32) -> i32
+        %9 = tt.addptr(%arg3: !tt.ptr<f32>, %8: i32) -> !tt.ptr<f32>
+        %10 = tt.addptr(%arg4: !tt.ptr<i64>, %0: i32) -> !tt.ptr<i64>
+        %11 = arith.muli(%1: i32, %c65536_i32: i32) -> i32
+        %12 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<65536xi32>
+        %13 = tt.splat(%11: i32) -> tensor<65536xi32>
+        %14 = arith.addi(%13: tensor<65536xi32>, %12: tensor<65536xi32>) -> tensor<65536xi32>
+        %15 = arith.cmpi(%14: tensor<65536xi32>, %cst_2: tensor<65536xi32>) -> tensor<65536xi32>
+        %16 = tt.load(%10: !tt.ptr<i64>) -> i64
+        %17 = "arith.trunci"(%16: i64) -> i64
+        %18 = tt.splat(%5: !tt.ptr<bf16>) -> tensor<65536x!tt.ptr<bf16>>
+        %19 = tt.addptr(%18: tensor<65536x!tt.ptr<bf16>>, %14: tensor<65536xi32>) -> tensor<65536x!tt.ptr<bf16>>
+        %20 = tt.load(%19: tensor<65536x!tt.ptr<bf16>>, %15: tensor<65536xi32>, %cst: tensor<65536xbf16>) -> tensor<65536xbf16>
+        %21 = "arith.extf"(%20: tensor<65536xbf16>) -> tensor<65536xbf16>
+        %22 = "tt.reduce"(%21: tensor<65536xbf16>) -> ? {
         ^bb0(%arg5: f32, %arg6: f32):
-            %30 = "tt.pure_extern_elementwise"(%arg5: f32, %arg6: f32) -> ?
-            "tt.reduce"()
+            %30 = "tt.pure_extern_elementwise"(%arg5: f32, %arg6: f32) -> f32
+            "tt.reduce.return"()
         }
-        %32 = tt.splat(%31: i32) -> tensor<16xi32>
-        %33 = arith.subf(%29: i32, %32: tensor<16xi32>) -> tensor<65536xf32>
-        %34 = "math.exp"() -> ?
-        %36 = "tt.reduce"() -> ? {
+        %23 = tt.splat(%22: ?) -> tensor<65536xf32>
+        %24 = arith.subf(%21: tensor<65536xbf16>, %23: tensor<65536xf32>) -> tensor<65536xf32>
+        %25 = "math.exp"(%24: tensor<65536xf32>) -> tensor<65536xf32>
+        %26 = "tt.reduce"(%25: tensor<65536xf32>) -> ? {
         ^bb0(%arg5: f32, %arg6: f32):
-            %35 = arith.addf(%arg5: f32, %arg6: f32) -> f32
-            "tt.reduce"()
+            %30 = arith.addf(%arg5: f32, %arg6: f32) -> f32
+            "tt.reduce.return"()
         }
-        %37 = "math.log"() -> ?
-        %38 = arith.addf(%31: i32, %37: i32) -> f32
-        %39 = arith.cmpi() -> ?
+        %27 = "math.log"(%26: ?) -> f32
+        %28 = arith.addf(%22: ?, %27: f32) -> f32
+        %29 = arith.cmpi(%1: i32, %c0_i32: i32) -> i32
         scf.if() {
         ^bb0:
-            %40 = arith.cmpi() -> ?
-            %45 = scf.if() -> ? {
+            %30 = arith.cmpi(%17: i64, %c-100_i32: i32) -> i32
+            %31 = scf.if() -> f32 {
             ^bb0:
-                %41 = tt.addptr(%13: !, %25: i32) -> !
-                %42 = tt.load(%41: !) -> bf16
-                %43 = "arith.extf"() -> ?
-                %44 = arith.mulf(%43: i32, %2: i32) -> f32
-                scf.yield(%44: f32)
+                %32 = tt.addptr(%5: !tt.ptr<bf16>, %17: i64) -> !tt.ptr<bf16>
+                %33 = tt.load(%32: !tt.ptr<bf16>) -> bf16
+                %34 = "arith.extf"(%33: bf16) -> bf16
+                %35 = arith.mulf(%34: bf16, %cst_1: f32) -> f32
+                scf.yield(%35: f32)
             }{
             ^bb0:
-                scf.yield(%1: i32)
+                scf.yield(%cst_0: f32)
             }
-            tt.store(%14: !, %45: i32)
+            tt.store(%6: !tt.ptr<f32>, %31: f32)
         }
-        tt.store(%17: !, %38: f32)
+        tt.store(%9: !tt.ptr<f32>, %28: f32)
         tt.return()
     }
 }

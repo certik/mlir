@@ -54,7 +54,6 @@ typedef struct ScopedSymbolTable {
     SymbolTable *scopes;
     size_t num_scopes;
     size_t scope_capacity;
-    uint32_t next_ssa_number;
 } ScopedSymbolTable;
 
 typedef struct {
@@ -199,9 +198,6 @@ struct ValueRef {
     // that the printed Value name is unique.
     string register_name;
 
-    // SSA number assigned during parsing for unique printing
-    uint32_t ssa_number;
-
     // Maybe later:
     //Operation **users;
     //uint64_t n_users;
@@ -251,7 +247,6 @@ void symbol_table_push_scope(Arena *arena, ScopedSymbolTable *st);
 void symbol_table_pop_scope(ScopedSymbolTable *st);
 void symbol_table_add_value(Arena *arena, ScopedSymbolTable *st, string name, ValueRef *value);
 ValueRef* symbol_table_lookup(ScopedSymbolTable *st, string name);
-uint32_t symbol_table_get_next_ssa_number(ScopedSymbolTable *st);
 
 // Helper function to create properly initialized ValueRef
 ValueRef* create_value_ref(Arena *arena, ValueKind kind);
