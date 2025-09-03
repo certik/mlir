@@ -11,7 +11,7 @@ module() {
 ^bb0:
     func.func() {
     ^bb0:
-        %alloc = memref.alloc() -> ?
+        %alloc = memref.alloc() -> memref<10x20xf32>
         %c0 = arith.constant() {value = 0} -> index
         %c10 = arith.constant() {value = 10} -> index
         %c1 = arith.constant() {value = 1} -> index
@@ -25,10 +25,10 @@ module() {
                 %0 = memref.load(%arg0: unknown, %arg0: index, %arg0: index) -> memref<10x20xf32>
                 %1 = memref.load(%arg1: unknown, %arg0: index, %arg0: index) -> memref<10x20xf32>
                 %2 = arith.addf(%0: memref<10x20xf32>, %1: memref<10x20xf32>) -> f32
-                memref.store(%2: f32, %alloc: i32, %arg0: index, %arg0: index)
+                memref.store(%2: f32, %alloc: memref<10x20xf32>, %arg0: index, %arg0: index)
             }
         }
-        "return"(%alloc: i32)
+        "return"()
     }
 }
 

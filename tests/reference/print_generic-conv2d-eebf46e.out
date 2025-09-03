@@ -31,24 +31,24 @@ module() {
                 %10 = arith.subi(%8: i32, %arg20: i32) -> i32
                 %11 = arith.subi(%9: i32, %arg21: i32) -> i32
                 %12 = tt.load(%4: !tt.ptr<f32,1>) -> f32
-                %13 = scf.for(%c0_i32: i32, %arg10: i32, %c1_i32: i32, %cst: f32) -> ? {
+                %13 = scf.for(%c0_i32: i32, %arg10: i32, %c1_i32: i32, %cst: f32) -> f32 {
                 ^bb0(%arg0: index, %arg1: i16):
                     %19 = arith.addi(%10: i32, %arg0: index) -> i32
-                    %20 = arith.cmpi() -> ?
-                    %21 = arith.cmpi() -> ?
+                    %20 = arith.cmpi(%19: i32, %c0_i32: i32) -> i32
+                    %21 = arith.cmpi(%19: i32, %arg4: i32) -> i32
                     %22 = "arith.ori"(%20: i32, %21: i32) -> i1
-                    %23 = scf.if() -> ? {
+                    %23 = scf.if() -> f32 {
                     ^bb0:
                         scf.yield(%arg1: i16)
                     }{
                     ^bb0:
-                        %24 = scf.for(%c0_i32: i32, %arg11: i32, %c1_i32: i32, %arg1: i16) -> ? {
+                        %24 = scf.for(%c0_i32: i32, %arg11: i32, %c1_i32: i32, %arg1: i16) -> f32 {
                         ^bb0(%arg0: index, %arg1: i16):
                             %25 = arith.addi(%11: i32, %arg0: index) -> i32
-                            %26 = arith.cmpi() -> ?
-                            %27 = arith.cmpi() -> ?
+                            %26 = arith.cmpi(%25: i32, %c0_i32: i32) -> i32
+                            %27 = arith.cmpi(%25: i32, %arg5: i32) -> i32
                             %28 = "arith.ori"(%26: i32, %27: i32) -> i1
-                            %29 = scf.if() -> ? {
+                            %29 = scf.if() -> f32 {
                             ^bb0:
                                 scf.yield(%arg1: i16)
                             }{
@@ -67,13 +67,13 @@ module() {
                                 %41 = arith.addf(%arg1: i16, %40: f32) -> f32
                                 scf.yield(%41: f32)
                             }
-                            scf.yield(%29: i32)
+                            scf.yield(%29: f32)
                         }
-                        scf.yield(%24: i32)
+                        scf.yield(%24: f32)
                     }
-                    scf.yield(%23: i32)
+                    scf.yield(%23: f32)
                 }
-                %14 = arith.addf(%13: i32, %12: f32) -> f32
+                %14 = arith.addf(%13: f32, %12: f32) -> f32
                 %15 = arith.muli(%8: i32, %arg17: i32) -> i32
                 %16 = arith.addi(%7: i32, %15: i32) -> i32
                 %17 = arith.addi(%16: i32, %9: i32) -> i32

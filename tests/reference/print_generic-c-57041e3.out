@@ -27,14 +27,14 @@ module() {
         %13 = tt.addptr(%8: tensor<128x64x!tt.ptr<f16,1>>, %12: tensor<128x64xi64>) -> tensor<128x64x!tt.ptr<f16,1>>
         %14 = tt.load(%13: tensor<128x64x!tt.ptr<f16,1>>) -> tensor<128x64xf16>
         %15 = "arith.extf"(%14: tensor<128x64xf16>) -> tensor<128x64xf16>
-        %16 = "tt.reduce"() -> ? {
+        %16 = "tt.reduce"(%15: tensor<128x64xf16>) -> ? {
         ^bb0(%arg3: f32, %arg4: f32):
             %20 = "arith.maxf"(%arg3: f32, %arg4: f32) -> f32
-            "tt.reduce"()
+            "tt.reduce.return"()
         }
         %17 = tt.splat(%arg1: !tt.ptr<f16,1>) -> tensor<128x!tt.ptr<f16,1>>
         %18 = tt.addptr(%17: tensor<128x!tt.ptr<f16,1>>, %1: tensor<128xi32>) -> tensor<128x!tt.ptr<f16,1>>
-        %19 = "arith.truncf"(%16: i32) -> tensor<128xf32>
+        %19 = "arith.truncf"(%16: ?) -> tensor<128xf32>
         tt.store(%18: tensor<128x!tt.ptr<f16,1>>, %19: tensor<128xf32>)
         tt.return()
     }

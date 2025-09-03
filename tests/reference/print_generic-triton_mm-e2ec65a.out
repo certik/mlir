@@ -29,7 +29,7 @@ module() {
         %c0_i32 = arith.constant() {value = 0} -> i32
         %c256_i32 = arith.constant() {value = 256} -> i32
         %0 = arith.muli(%arg3: i32, %c256_i32: i32) -> i32
-        %1 = arith.cmpi() -> ?
+        %1 = arith.cmpi(%0: i32, %c0_i32: i32) -> i32
         cf.cond_br(%1: i32)
     ^bb1:
         tt.return()
@@ -73,7 +73,7 @@ module() {
         %38 = arith.addi(%36: tensor<32x128xi32>, %37: tensor<32x128xi32>) -> tensor<32x128xi32>
         %39 = tt.splat(%arg1: !tt.ptr<f32>) -> tensor<32x128x!tt.ptr<f32>>
         %40 = tt.addptr(%39: tensor<32x128x!tt.ptr<f32>>, %38: tensor<32x128xi32>) -> tensor<32x128x!tt.ptr<f32>>
-        %41 = scf.for(%c0_i32: i32, %c512_i32: i32, %c32_i32: i32, %cst_3: tensor<64x128xf32>, %32: tensor<64x32x!tt.ptr<f32>>, %40: tensor<32x128x!tt.ptr<f32>>) -> ? {
+        %41 = scf.for(%c0_i32: i32, %c512_i32: i32, %c32_i32: i32, %cst_3: tensor<64x128xf32>, %32: tensor<64x32x!tt.ptr<f32>>, %40: tensor<32x128x!tt.ptr<f32>>) -> tensor<64x128xf32> {
         ^bb0(%arg0: index, %arg1: i16, %arg2: i16, %arg3: i16):
             %56 = tt.load(%arg2: i16) -> tensor<64x32x!tt.ptr<f32>>
             %57 = tt.load(%arg3: i16) -> tensor<32x128x!tt.ptr<f32>>
@@ -85,10 +85,10 @@ module() {
         %42 = "tt.expand_dims"(%16: tensor<64xi32>) -> tensor<64x1xi32>
         %43 = "tt.expand_dims"(%20: tensor<128xi32>) -> tensor<1x128xi32>
         %44 = tt.splat(%arg3: i32) -> tensor<64x1xi32>
-        %45 = arith.cmpi() -> ?
-        %46 = arith.cmpi() -> ?
-        %47 = "tt.broadcast"(%45: i32) -> tensor<64x128xi1>
-        %48 = "tt.broadcast"(%46: i32) -> tensor<64x128xi1>
+        %45 = arith.cmpi(%42: tensor<64x1xi32>, %44: tensor<64x1xi32>) -> tensor<64x1xi32>
+        %46 = arith.cmpi(%43: tensor<1x128xi32>, %cst_2: tensor<1x128xi32>) -> tensor<1x128xi32>
+        %47 = "tt.broadcast"(%45: tensor<64x1xi32>) -> tensor<64x128xi1>
+        %48 = "tt.broadcast"(%46: tensor<1x128xi32>) -> tensor<64x128xi1>
         %49 = "arith.andi"(%47: tensor<64x128xi1>, %48: tensor<64x128xi1>) -> tensor<64x128xi1>
         %50 = arith.muli(%42: tensor<64x1xi32>, %cst_1: tensor<64x1xi32>) -> tensor<64x1xi32>
         %51 = "tt.broadcast"(%43: tensor<1x128xi32>) -> tensor<64x128xi32>
@@ -96,7 +96,7 @@ module() {
         %53 = arith.addi(%51: tensor<64x128xi32>, %52: tensor<64x128xi32>) -> tensor<64x128xi32>
         %54 = tt.splat(%arg2: !tt.ptr<f32>) -> tensor<64x128x!tt.ptr<f32>>
         %55 = tt.addptr(%54: tensor<64x128x!tt.ptr<f32>>, %53: tensor<64x128xi32>) -> tensor<64x128x!tt.ptr<f32>>
-        tt.store(%55: tensor<64x128x!tt.ptr<f32>>, %41: i32, %49: tensor<64x128xi1>)
+        tt.store(%55: tensor<64x128x!tt.ptr<f32>>, %41: tensor<64x128xf32>, %49: tensor<64x128xi1>)
         tt.return()
     }
 }
