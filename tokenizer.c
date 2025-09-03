@@ -379,7 +379,7 @@ yy23:
 		}
 	}
 yy24:
-#line 150 "tokenizer.re"
+#line 151 "tokenizer.re"
 	{ RET(TK_INTEGER) }
 #line 385 "tokenizer.c"
 yy25:
@@ -441,7 +441,7 @@ yy32:
 		}
 	}
 yy33:
-#line 146 "tokenizer.re"
+#line 147 "tokenizer.re"
 	{ RET(TK_NAME) }
 #line 447 "tokenizer.c"
 yy34:
@@ -543,7 +543,7 @@ yy46:
 	}
 yy47:
 	++cur;
-#line 153 "tokenizer.re"
+#line 154 "tokenizer.re"
 	{ RET(TK_STRING) }
 #line 549 "tokenizer.c"
 yy48:
@@ -573,7 +573,7 @@ yy50:
 	if (yych <= '/') goto yy51;
 	if (yych <= '9') goto yy50;
 yy51:
-#line 143 "tokenizer.re"
+#line 144 "tokenizer.re"
 	{ RET(TK_HASH_NAME); }
 #line 579 "tokenizer.c"
 yy52:
@@ -595,7 +595,7 @@ yy52:
 		}
 	}
 yy53:
-#line 148 "tokenizer.re"
+#line 149 "tokenizer.re"
 	{ RET(TK_REGISTER) }
 #line 601 "tokenizer.c"
 yy54:
@@ -642,7 +642,7 @@ yy58:
 		if (yych <= 'e') goto yy61;
 	}
 yy59:
-#line 152 "tokenizer.re"
+#line 153 "tokenizer.re"
 	{ RET(TK_REAL) }
 #line 648 "tokenizer.c"
 yy60:
@@ -669,7 +669,7 @@ yy62:
 	if (yych <= '9') goto yy77;
 	if (yych == '?') goto yy78;
 yy63:
-#line 151 "tokenizer.re"
+#line 152 "tokenizer.re"
 	{ RET(TK_TYPE_DIM) }
 #line 675 "tokenizer.c"
 yy64:
@@ -691,7 +691,7 @@ yy64:
 		}
 	}
 yy65:
-#line 149 "tokenizer.re"
+#line 150 "tokenizer.re"
 	{ RET(TK_FUNCTION_NAME) }
 #line 697 "tokenizer.c"
 yy66:
@@ -731,7 +731,7 @@ yy69:
 		}
 	}
 yy70:
-#line 144 "tokenizer.re"
+#line 145 "tokenizer.re"
 	{ RET(TK_CARET_NAME); }
 #line 737 "tokenizer.c"
 yy71:
@@ -763,7 +763,7 @@ yy73:
 		}
 	}
 yy74:
-#line 147 "tokenizer.re"
+#line 148 "tokenizer.re"
 	{ RET(TK_NAME_DOT_NAME) }
 #line 769 "tokenizer.c"
 yy75:
@@ -895,7 +895,7 @@ yy91:
 	{ RET(KW_ABSTRACT) }
 #line 897 "tokenizer.c"
 }
-#line 154 "tokenizer.re"
+#line 155 "tokenizer.re"
 
     }
 }
