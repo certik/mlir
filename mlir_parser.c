@@ -778,14 +778,14 @@ static void parse_arith_constant(Parser *parser, Operation *op) {
         // Handle boolean constants: true or false
         if (str_eq(name_str, str_lit("true")) || str_eq(name_str, str_lit("false"))) {
             parser_expect(parser, TK_NAME);
-            
+
             op->n_attributes = 1;
             op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
             op->attributes[0] = arena_alloc(parser->arena, Attribute);
             op->attributes[0]->kind = ATTR_KIND_INTEGER;
             op->attributes[0]->data.integer_value = str_eq(name_str, str_lit("true")) ? 1 : 0;
             op->attributes[0]->name = str_lit("value");
-            
+
             // Boolean constants have implicit i1 type
             op->n_result_types = 1;
             op->result_types = arena_alloc_array(parser->arena, Type*, 1);
@@ -867,10 +867,10 @@ static void parse_func_call(Parser *parser, Operation *op) {
     // Parse operands in parentheses
     if (parser_peek(parser, TK_LPAREN)) {
         parser_expect(parser, TK_LPAREN);
-        
+
         VecValueRef operands;
         VecValueRef_reserve(parser->arena, &operands, 4);
-        
+
         while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
@@ -884,18 +884,18 @@ static void parse_func_call(Parser *parser, Operation *op) {
             } else {
                 parser_next_token(parser); // skip unknown tokens
             }
-            
+
             if (parser_peek(parser, TK_COMMA)) {
                 parser_expect(parser, TK_COMMA);
             } else if (!parser_peek(parser, TK_RPAREN)) {
                 break;
             }
         }
-        
+
         if (parser_peek(parser, TK_RPAREN)) {
             parser_expect(parser, TK_RPAREN);
         }
-        
+
         op->operands = operands.data;
         op->n_operands = operands.size;
     }
@@ -903,7 +903,7 @@ static void parse_func_call(Parser *parser, Operation *op) {
     // Parse function signature: : (arg_types) -> result_type
     if (parser_peek(parser, TK_COLON)) {
         parser_expect(parser, TK_COLON);
-        
+
         // Skip arg types in parentheses
         if (parser_peek(parser, TK_LPAREN)) {
             parser_expect(parser, TK_LPAREN);
@@ -914,7 +914,7 @@ static void parse_func_call(Parser *parser, Operation *op) {
                 parser_next_token(parser);
             }
         }
-        
+
         // Parse arrow and result type
         if (parser_peek(parser, TK_ARROW)) {
             parser_expect(parser, TK_ARROW);
@@ -2939,8 +2939,9 @@ Operation* parse_operation(Parser *parser) {
         parse_generic_attrs_and_result_type(parser, op);
     }
 
-    // Handle return value(s) for all operations
     if (result_value) {
+        // If there is a result Value on the LHS, ensure the Operation returned
+        // a result type
         if (op->n_result_types == 0) {
             parser_error(parser, str_lit("Missing result type number for SSA result"), parser->first, parser->last);
         }
@@ -2950,6 +2951,16 @@ Operation* parse_operation(Parser *parser) {
         if (op->result_types[0] == NULL) {
             parser_error(parser, str_lit("Missing result type for SSA result II"), parser->first, parser->last);
         }
+    } else {
+        // If there is no result Value on the LHS, ensure the Operation did not return a type
+        if (op->n_result_types > 0) {
+            // Operation declares results but has no SSA name on LHS: error
+            parser_error(parser, str_lit("Result type declared but no SSA result name"), parser->first, parser->last);
+        }
+    }
+
+    // Handle return value(s) for all operations
+    if (result_value) {
         // Set the type
         result_value->type = op->result_types[0];
         result_value->def = op;
@@ -2959,11 +2970,6 @@ Operation* parse_operation(Parser *parser) {
         op->n_results = 1;
         op->results = arena_alloc_array(parser->arena, ValueRef*, 1);
         op->results[0] = result_value;
-    } else {
-        if (op->n_result_types > 0) {
-            // Operation declares results but has no SSA name on LHS: error
-            parser_error(parser, str_lit("Result type declared but no SSA result name"), parser->first, parser->last);
-        }
     }
 
     return op;
