@@ -155,6 +155,8 @@ typedef struct Region Region;
 
 // Type kinds for MLIR type system
 typedef enum {
+    TYPE_KIND_UNKNOWN,
+    TYPE_KIND_OPAQUE,
     TYPE_KIND_INTEGER,
     TYPE_KIND_FLOAT,
     TYPE_KIND_MEMREF,
