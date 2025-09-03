@@ -386,21 +386,6 @@ static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, ValueRef *v) {
     return num;
 }
 
-static inline bool try_parse_regnum(string reg, uint32_t *out) {
-    if (reg.size >= 2 && reg.str[0] == '%') {
-        uint64_t val = 0;
-        bool any = false;
-        for (size_t i = 1; i < reg.size; i++) {
-            char c = reg.str[i];
-            if (c < '0' || c > '9') return false;
-            any = true;
-            val = val * 10 + (uint64_t)(c - '0');
-            if (val > 0xFFFFFFFFu) return false;
-        }
-        if (any) { *out = (uint32_t)val; return true; }
-    }
-    return false;
-}
 
 string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op);
 
