@@ -1698,9 +1698,10 @@ static void parse_arith_select(Parser *parser, Operation *op) {
 
             // Parse the second type (result type)
             string result_type = str_lit("");
-            while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) &&
-                   !parser_peek(parser, TK_NAME) ||
-                   (parser_peek(parser, TK_NAME) && !str_eq(parser_token_str(parser), str_lit("loc")))) {
+            while (!parser_peek(parser, TK_EOF) &&
+                   !parser_peek(parser, TK_NEWLINE) &&
+                   !(parser_peek(parser, TK_NAME) &&
+                     str_eq(parser_token_str(parser), str_lit("loc")))) {
                 if (result_type.size > 0) {
                     result_type = str_concat(parser->arena, result_type, parser_token_str(parser));
                 } else {
