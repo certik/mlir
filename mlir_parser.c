@@ -444,9 +444,13 @@ static bool parse_type_string(Parser *parser, string *out) {
 Type* parse_type_from_string(Arena *arena, string type_str) {
     Type *type = arena_alloc(arena, Type);
     
-    // Unknown type
+    // Unknown type (printed as '?')
     if (str_eq(type_str, str_lit("?"))) {
         type->kind = TYPE_KIND_UNKNOWN;
+    }
+    // Opaque/unspecified type (printed as 'unknown')
+    else if (str_eq(type_str, str_lit("unknown")) || str_eq(type_str, str_lit("!unknown"))) {
+        type->kind = TYPE_KIND_OPAQUE;
     }
     // Parse index type first (before integer check below)
     else if (str_eq(type_str, str_lit("index"))) {
@@ -482,7 +486,7 @@ Type* parse_type_from_string(Arena *arena, string type_str) {
     // Parse floating point types like "f32", "f64", etc.
     else if (type_str.size >= 2 && type_str.str[0] == 'f') {
         type->kind = TYPE_KIND_FLOAT;
-        
+        type->data.floating.is_bfloat = false;
         // Extract width
         string width_str = str_substr(type_str, 1, type_str.size - 1);
         if (str_eq(width_str, str_lit("16"))) type->data.floating.width = 16;
@@ -490,10 +494,17 @@ Type* parse_type_from_string(Arena *arena, string type_str) {
         else if (str_eq(width_str, str_lit("64"))) type->data.floating.width = 64;
         else type->data.floating.width = 32; // Default
     }
+    // bfloat16
+    else if (str_eq(type_str, str_lit("bf16"))) {
+        type->kind = TYPE_KIND_FLOAT;
+        type->data.floating.width = 16;
+        type->data.floating.is_bfloat = true;
+    }
     // Parse pointer types like "!tt.ptr<f32, 1>"
     else if (type_str.size >= 7 && str_eq(str_substr(type_str, 0, 7), str_lit("!tt.ptr"))) {
         type->kind = TYPE_KIND_POINTER;
         type->data.pointer.address_space = 1; // Default
+        type->data.pointer.has_address_space = false;
         type->data.pointer.element_type = arena_alloc(arena, Type);
         
         // Find the content inside < >
@@ -537,15 +548,18 @@ Type* parse_type_from_string(Arena *arena, string type_str) {
                     }
                 }
                 type->data.pointer.address_space = as;
+                type->data.pointer.has_address_space = true;
             } else {
                 // No comma, assume f32 and address space 1
                 type->data.pointer.element_type = parse_type_from_string(arena, content);
                 type->data.pointer.address_space = 1;
+                type->data.pointer.has_address_space = false;
             }
         } else {
             // Malformed, default to f32 pointer
             type->data.pointer.element_type = parse_type_from_string(arena, str_lit("f32"));
             type->data.pointer.address_space = 1;
+            type->data.pointer.has_address_space = false;
         }
     }
     // Parse tensor types like "tensor<4xi32>" or "tensor<4x!tt.ptr<f32,1>>"
@@ -689,6 +703,8 @@ string type_to_string(Arena *arena, Type *type) {
     switch (type->kind) {
         case TYPE_KIND_UNKNOWN:
             return str_lit("?");
+        case TYPE_KIND_OPAQUE:
+            return str_lit("unknown");
         case TYPE_KIND_INTEGER:
             if (type->data.integer.is_signed) {
                 return format(arena, str_lit("i{}"), (int64_t)type->data.integer.width);
@@ -696,6 +712,9 @@ string type_to_string(Arena *arena, Type *type) {
                 return format(arena, str_lit("ui{}"), (int64_t)type->data.integer.width);
             }
         case TYPE_KIND_FLOAT:
+            if (type->data.floating.is_bfloat && type->data.floating.width == 16) {
+                return str_lit("bf16");
+            }
             return format(arena, str_lit("f{}"), (int64_t)type->data.floating.width);
         case TYPE_KIND_TENSOR:
             if (type->data.shaped.element_type) {
@@ -739,7 +758,13 @@ string type_to_string(Arena *arena, Type *type) {
         case TYPE_KIND_POINTER:
             if (type->data.pointer.element_type) {
                 string elem_str = type_to_string(arena, type->data.pointer.element_type);
-                return format(arena, str_lit("!tt.ptr<{},{}>"), elem_str, (int64_t)type->data.pointer.address_space);
+                if (type->data.pointer.has_address_space) {
+                    return format(arena, str_lit("!tt.ptr<{},{}>"), elem_str, (int64_t)type->data.pointer.address_space);
+                } else if (type->data.pointer.address_space == 1) {
+                    return format(arena, str_lit("!tt.ptr<{}>"), elem_str);
+                } else {
+                    return format(arena, str_lit("!tt.ptr<{},{}>"), elem_str, (int64_t)type->data.pointer.address_space);
+                }
             }
             return str_lit("!tt.ptr<?>");
         case TYPE_KIND_INDEX:

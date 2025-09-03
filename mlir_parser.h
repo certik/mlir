@@ -176,6 +176,7 @@ typedef struct Type {
         } integer;
         struct {
             uint32_t width;     // 16, 32, 64, etc.
+            bool is_bfloat;     // true for bf16
         } floating;
         struct {
             struct Type *element_type;
@@ -185,6 +186,7 @@ typedef struct Type {
         struct {
             struct Type *element_type;
             uint32_t address_space;  // For !tt.ptr<type, address_space>
+            bool has_address_space;
         } pointer;
     } data;
 } Type;
