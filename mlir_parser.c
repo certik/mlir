@@ -2633,6 +2633,39 @@ string get_register_name(string reg_str) {
     return str_lit("%unknown");
 }
 
+void parse_scf_yield(Parser *parser, Operation *op) {
+    // Parse scf.yield operands
+    VecValueRef operands;
+    VecValueRef_reserve(parser->arena, &operands, 2);
+
+    while (parser_peek(parser, TK_REGISTER)) {
+        string reg_str = parser_token_str(parser);
+        parser_expect(parser, TK_REGISTER);
+
+        ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        if (!operand) {
+            parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
+            return;
+        }
+        VecValueRef_push_back(parser->arena, &operands, operand);
+
+        if (parser_peek(parser, TK_COMMA)) {
+            parser_expect(parser, TK_COMMA);
+        } else {
+            break;
+        }
+    }
+
+    op->operands = operands.data;
+    op->n_operands = operands.size;
+    op->op_type = OP_TYPE_SCF_YIELD;
+
+    // Skip remaining tokens (like : type)
+    while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_EOF)) {
+        parser_next_token(parser);
+    }
+}
+
 void parse_return_operation(Parser *parser, Operation *op) {
     // Consume optional operands, with or without parentheses
     if (parser_peek(parser, TK_LPAREN)) {
@@ -2707,45 +2740,7 @@ Operation* parse_operation(Parser *parser) {
     // Check for operations that start with operation name instead of result assignment
     if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
         string potential_opname = parser_token_str(parser);
-        if (str_eq(potential_opname, str_lit("scf.yield"))) {
-            // Handle scf.yield specially - it starts with opname, not result assignment
-            op->opname = potential_opname;
-            parser_next_token(parser); // consume operation name
-
-            // Parse scf.yield operands
-            VecValueRef operands;
-            VecValueRef_reserve(parser->arena, &operands, 2);
-
-            while (parser_peek(parser, TK_REGISTER)) {
-                string reg_str = parser_token_str(parser);
-                parser_expect(parser, TK_REGISTER);
-
-                ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
-                if (!operand) {
-                    parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
-                    return NULL;
-                }
-                VecValueRef_push_back(parser->arena, &operands, operand);
-
-                if (parser_peek(parser, TK_COMMA)) {
-                    parser_expect(parser, TK_COMMA);
-                } else {
-                    break;
-                }
-            }
-
-            op->operands = operands.data;
-            op->n_operands = operands.size;
-            op->op_type = OP_TYPE_SCF_YIELD;
-
-            // Skip remaining tokens (like : type)
-            while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_EOF)) {
-                parser_next_token(parser);
-            }
-
-            return op;
-        } else if (
-            str_eq(potential_opname, str_lit("return")) ||
+        if (str_eq(potential_opname, str_lit("return")) ||
             str_eq(potential_opname, str_lit("func.return")) ||
             str_eq(potential_opname, str_lit("std.return")) ||
             str_eq(potential_opname, str_lit("tt.return")) ||
@@ -2839,6 +2834,7 @@ Operation* parse_operation(Parser *parser) {
             ), parser->first, parser->last);
     }
 
+
     // Set op_type based on operation name
     op->op_type = op_string_to_type(op->opname);
 
@@ -2928,6 +2924,8 @@ Operation* parse_operation(Parser *parser) {
         parse_tensor_splat(parser, op);
     } else if (str_eq(op->opname, str_lit("tensor.collapse_shape"))) {
         parse_tensor_collapse_shape(parser, op);
+    } else if (str_eq(op->opname, str_lit("scf.yield"))) {
+        parse_scf_yield(parser, op);
     } else {
         // Generic/unregistered operations
         parse_generic_operation(parser, op);
