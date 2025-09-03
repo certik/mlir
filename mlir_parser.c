@@ -2837,95 +2837,133 @@ Operation* parse_operation(Parser *parser) {
 
 
     // First we handle specific opnames with special parsing rules
-    if (op->op_type == OP_TYPE_TT_FUNC) {
-        parse_tt_func(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_GPU_LAUNCH) {
-        parse_gpu_launch(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_SCF_IF) {
-        parse_scf_if(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_SCF_FOR) {
-        parse_scf_for(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_SCF_WHILE) {
-        parse_scf_while(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_ARITH_CONSTANT) {
-        parse_arith_constant(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_ARITH_ADDI || op->op_type == OP_TYPE_ARITH_MULI ||
-               op->op_type == OP_TYPE_ARITH_ADDF || op->op_type == OP_TYPE_ARITH_SUBI ||
-               op->op_type == OP_TYPE_ARITH_SUBF || op->op_type == OP_TYPE_ARITH_MULF ||
-               op->op_type == OP_TYPE_ARITH_DIVI || op->op_type == OP_TYPE_ARITH_DIVF) {
-        parse_arith_binary(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_ARITH_SELECT) {
-        parse_arith_select(parser, op);
-    } else if (op->op_type == OP_TYPE_TT_GET_PROGRAM_ID) {
-        parse_tt_get_program_id(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_TT_SPLAT) {
-        parse_tt_splat(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_TT_MAKE_RANGE) {
-        parse_tt_make_range(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_TT_ADDPTR || op->op_type == OP_TYPE_TT_LOAD) {
-        parse_tt_addptr_load_store(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_TT_STORE) {
-        parse_tt_store(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_TT_CALL) {
-        parse_tt_call(parser, op);
-    } else if (op->op_type == OP_TYPE_FUNC_FUNC) {
-        parse_func_func(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_FUNC_CALL) {
-        parse_func_call(parser, op);
-    } else if (op->op_type == OP_TYPE_AFFINE_FOR) {
-        parse_affine_for(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_MEMREF_LOAD) {
-        parse_memref_load_or_store(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_MEMREF_STORE) {
-        parse_memref_store(parser, op);
-    } else if (op->op_type == OP_TYPE_VECTOR_PRINT) {
-        parse_vector_print(parser, op);
-    } else if (op->op_type == OP_TYPE_STD_CONSTANT) {
-        parse_std_constant(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_TT_REDUCE) {
-        parse_tt_reduce(parser, op);
-    } else if (op->op_type == OP_TYPE_TT_REDUCE_RETURN ||
-               op->op_type == OP_TYPE_TT_RETURN ||
-               op->op_type == OP_TYPE_STD_RETURN ||
-               op->op_type == OP_TYPE_FUNC_RETURN ||
-               op->op_type == OP_TYPE_RETURN) {
-        parse_return_operation(parser, op);
-    } else if (op->op_type == OP_TYPE_TENSOR_EXTRACT) {
-        parse_tensor_extract(parser, op);
-        parse_generic_attrs_and_result_type(parser, op);
-    } else if (op->op_type == OP_TYPE_CF_BR) {
-        parse_cf_br(parser, op);
-    } else if (op->op_type == OP_TYPE_LINALG_FILL) {
-        parse_linalg_fill(parser, op);
-    } else if (op->op_type == OP_TYPE_AFFINE_LOAD) {
-        parse_affine_load(parser, op);
-    } else if (op->op_type == OP_TYPE_INDEX_CONSTANT) {
-        parse_index_constant(parser, op);
-    } else if (op->op_type == OP_TYPE_TENSOR_SPLAT) {
-        parse_tensor_splat(parser, op);
-    } else if (op->op_type == OP_TYPE_TENSOR_COLLAPSE_SHAPE) {
-        parse_tensor_collapse_shape(parser, op);
-    } else if (op->op_type == OP_TYPE_SCF_YIELD) {
-        parse_scf_yield(parser, op);
-    } else {
-        // Generic/unregistered operations
-        parse_generic_operation(parser, op);
+    switch (op->op_type) {
+        case OP_TYPE_TT_FUNC:
+            parse_tt_func(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_GPU_LAUNCH:
+            parse_gpu_launch(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_SCF_IF:
+            parse_scf_if(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_SCF_FOR:
+            parse_scf_for(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_SCF_WHILE:
+            parse_scf_while(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_ARITH_CONSTANT:
+            parse_arith_constant(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_ARITH_ADDI:
+        case OP_TYPE_ARITH_MULI:
+        case OP_TYPE_ARITH_ADDF:
+        case OP_TYPE_ARITH_SUBI:
+        case OP_TYPE_ARITH_SUBF:
+        case OP_TYPE_ARITH_MULF:
+        case OP_TYPE_ARITH_DIVI:
+        case OP_TYPE_ARITH_DIVF:
+            parse_arith_binary(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_ARITH_SELECT:
+            parse_arith_select(parser, op);
+            break;
+        case OP_TYPE_TT_GET_PROGRAM_ID:
+            parse_tt_get_program_id(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_TT_SPLAT:
+            parse_tt_splat(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_TT_MAKE_RANGE:
+            parse_tt_make_range(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_TT_ADDPTR:
+        case OP_TYPE_TT_LOAD:
+            parse_tt_addptr_load_store(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_TT_STORE:
+            parse_tt_store(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_TT_CALL:
+            parse_tt_call(parser, op);
+            break;
+        case OP_TYPE_FUNC_FUNC:
+            parse_func_func(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_FUNC_CALL:
+            parse_func_call(parser, op);
+            break;
+        case OP_TYPE_AFFINE_FOR:
+            parse_affine_for(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_MEMREF_LOAD:
+            parse_memref_load_or_store(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_MEMREF_STORE:
+            parse_memref_store(parser, op);
+            break;
+        case OP_TYPE_VECTOR_PRINT:
+            parse_vector_print(parser, op);
+            break;
+        case OP_TYPE_STD_CONSTANT:
+            parse_std_constant(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_TT_REDUCE:
+            parse_tt_reduce(parser, op);
+            break;
+        case OP_TYPE_TT_REDUCE_RETURN:
+        case OP_TYPE_TT_RETURN:
+        case OP_TYPE_STD_RETURN:
+        case OP_TYPE_FUNC_RETURN:
+        case OP_TYPE_RETURN:
+            parse_return_operation(parser, op);
+            break;
+        case OP_TYPE_TENSOR_EXTRACT:
+            parse_tensor_extract(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
+        case OP_TYPE_CF_BR:
+            parse_cf_br(parser, op);
+            break;
+        case OP_TYPE_LINALG_FILL:
+            parse_linalg_fill(parser, op);
+            break;
+        case OP_TYPE_AFFINE_LOAD:
+            parse_affine_load(parser, op);
+            break;
+        case OP_TYPE_INDEX_CONSTANT:
+            parse_index_constant(parser, op);
+            break;
+        case OP_TYPE_TENSOR_SPLAT:
+            parse_tensor_splat(parser, op);
+            break;
+        case OP_TYPE_TENSOR_COLLAPSE_SHAPE:
+            parse_tensor_collapse_shape(parser, op);
+            break;
+        case OP_TYPE_SCF_YIELD:
+            parse_scf_yield(parser, op);
+            break;
+        default:
+            // Generic/unregistered operations
+            parse_generic_operation(parser, op);
+            break;
     }
 
     // Handle return value(s) for all operations
