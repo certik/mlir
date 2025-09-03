@@ -2933,37 +2933,28 @@ Operation* parse_operation(Parser *parser) {
         parse_generic_operation(parser, op);
     }
 
-    if (result_value) {
-        // If there is a result Value on the LHS, ensure the Operation returned
-        // a result type
-        if (op->n_result_types == 0) {
-            parser_error(parser, str_lit("Missing result type number for SSA result"), parser->first, parser->last);
-        }
-        if (op->result_types == NULL) {
-            parser_error(parser, str_lit("Missing result type for SSA result I"), parser->first, parser->last);
-        }
-        if (op->result_types[0] == NULL) {
-            parser_error(parser, str_lit("Missing result type for SSA result II"), parser->first, parser->last);
-        }
-    } else {
-        // If there is no result Value on the LHS, ensure the Operation did not return a type
-        if (op->n_result_types > 0) {
-            // Operation declares results but has no SSA name on LHS: error
-            parser_error(parser, str_lit("Result type declared but no SSA result name"), parser->first, parser->last);
-        }
-    }
-
     // Handle return value(s) for all operations
     if (result_value) {
-        // Set the type
-        result_value->type = op->result_types[0];
-        result_value->def = op;
-        symbol_table_add_value(parser->arena, &parser->symbol_table, result_value->register_name, result_value);
+        if (op->n_result_types > 0) {
+            // If op->n_result_types > 0, then op->result_types must be set:
+            assert(op->result_types != NULL);
+            assert(op->result_types[0] != NULL);
+            // Set the type
+            result_value->type = op->result_types[0];
+            result_value->def = op;
+            symbol_table_add_value(parser->arena, &parser->symbol_table, result_value->register_name, result_value);
 
-        // Link result to operation
-        op->n_results = 1;
-        op->results = arena_alloc_array(parser->arena, ValueRef*, 1);
-        op->results[0] = result_value;
+            // Link result to operation
+            op->n_results = 1;
+            op->results = arena_alloc_array(parser->arena, ValueRef*, 1);
+            op->results[0] = result_value;
+        } else {
+            parser_error(parser, str_lit("Result Value parsed on LHS but no Type present on RHS"), parser->first, parser->last);
+        }
+    } else {
+        if (op->n_result_types > 0) {
+            parser_error(parser, str_lit("Result Type parsed on RHS but no result Value on LHS"), parser->first, parser->last);
+        }
     }
 
     return op;
