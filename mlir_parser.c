@@ -2792,13 +2792,13 @@ Operation* parse_operation(Parser *parser) {
     } else if (str_eq(op->opname, str_lit("gpu.launch"))) {
         parse_gpu_launch(parser, op);
         parse_generic_attrs_and_result_type(parser, op);
-    } else if (str_eq(op->opname, str_lit("scf.if"))) {
+    } else if (op->op_type == OP_TYPE_SCF_IF) {
         parse_scf_if(parser, op);
         parse_generic_attrs_and_result_type(parser, op);
-    } else if (str_eq(op->opname, str_lit("scf.for"))) {
+    } else if (op->op_type == OP_TYPE_SCF_FOR) {
         parse_scf_for(parser, op);
         parse_generic_attrs_and_result_type(parser, op);
-    } else if (str_eq(op->opname, str_lit("scf.while"))) {
+    } else if (op->op_type == OP_TYPE_SCF_WHILE) {
         parse_scf_while(parser, op);
         parse_generic_attrs_and_result_type(parser, op);
     } else if (op->op_type == OP_TYPE_ARITH_CONSTANT) {
@@ -2812,24 +2812,24 @@ Operation* parse_operation(Parser *parser) {
         parse_generic_attrs_and_result_type(parser, op);
     } else if (str_eq(op->opname, str_lit("arith.select"))) {
         parse_arith_select(parser, op);
-    } else if (str_eq(op->opname, str_lit("tt.get_program_id"))) {
+    } else if (op->op_type == OP_TYPE_TT_GET_PROGRAM_ID) {
         parse_tt_get_program_id(parser, op);
         parse_generic_attrs_and_result_type(parser, op);
-    } else if (str_eq(op->opname, str_lit("tt.splat"))) {
+    } else if (op->op_type == OP_TYPE_TT_SPLAT) {
         parse_tt_splat(parser, op);
         parse_generic_attrs_and_result_type(parser, op);
-    } else if (str_eq(op->opname, str_lit("tt.make_range"))) {
+    } else if (op->op_type == OP_TYPE_TT_MAKE_RANGE) {
         parse_tt_make_range(parser, op);
         parse_generic_attrs_and_result_type(parser, op);
-    } else if (str_eq(op->opname, str_lit("tt.addptr")) || str_eq(op->opname, str_lit("tt.load"))) {
+    } else if (op->op_type == OP_TYPE_TT_ADDPTR || op->op_type == OP_TYPE_TT_LOAD) {
         parse_tt_addptr_load_store(parser, op);
         parse_generic_attrs_and_result_type(parser, op);
-    } else if (str_eq(op->opname, str_lit("tt.store"))) {
+    } else if (op->op_type == OP_TYPE_TT_STORE) {
         parse_tt_store(parser, op);
         parse_generic_attrs_and_result_type(parser, op);
     } else if (str_eq(op->opname, str_lit("tt.call"))) {
         parse_tt_call(parser, op);
-    } else if (str_eq(op->opname, str_lit("func.func"))) {
+    } else if (op->op_type == OP_TYPE_FUNC_FUNC) {
         parse_func_func(parser, op);
         parse_generic_attrs_and_result_type(parser, op);
     } else if (op->op_type == OP_TYPE_FUNC_CALL) {
@@ -2837,10 +2837,10 @@ Operation* parse_operation(Parser *parser) {
     } else if (str_eq(op->opname, str_lit("affine.for"))) {
         parse_affine_for(parser, op);
         parse_generic_attrs_and_result_type(parser, op);
-    } else if (str_eq(op->opname, str_lit("memref.load"))) {
+    } else if (op->op_type == OP_TYPE_MEMREF_LOAD) {
         parse_memref_load_or_store(parser, op);
         parse_generic_attrs_and_result_type(parser, op);
-    } else if (str_eq(op->opname, str_lit("memref.store"))) {
+    } else if (op->op_type == OP_TYPE_MEMREF_STORE) {
         parse_memref_store(parser, op);
     } else if (str_eq(op->opname, str_lit("vector.print"))) {
         parse_vector_print(parser, op);
@@ -2858,7 +2858,7 @@ Operation* parse_operation(Parser *parser) {
     } else if (str_eq(op->opname, str_lit("tensor.extract"))) {
         parse_tensor_extract(parser, op);
         parse_generic_attrs_and_result_type(parser, op);
-    } else if (str_eq(op->opname, str_lit("cf.br"))) {
+    } else if (op->op_type == OP_TYPE_CF_BR) {
         parse_cf_br(parser, op);
     } else if (str_eq(op->opname, str_lit("linalg.fill"))) {
         parse_linalg_fill(parser, op);
@@ -2870,7 +2870,7 @@ Operation* parse_operation(Parser *parser) {
         parse_tensor_splat(parser, op);
     } else if (str_eq(op->opname, str_lit("tensor.collapse_shape"))) {
         parse_tensor_collapse_shape(parser, op);
-    } else if (str_eq(op->opname, str_lit("scf.yield"))) {
+    } else if (op->op_type == OP_TYPE_SCF_YIELD) {
         parse_scf_yield(parser, op);
     } else {
         // Generic/unregistered operations
