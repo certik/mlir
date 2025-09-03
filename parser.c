@@ -118,10 +118,10 @@ string print_block_internal(PrintCtx *ctx, int bb_index, int indent_level, Block
                 // For block arguments, use the original register name
                 if (arg->register_name.size > 0) {
                     result = str_concat(arena, result, format(arena, str_lit("{}: {}"),
-                                                            arg->register_name, arg->type->str));
+                                                            arg->register_name, type_to_string(arena, arg->type)));
                 } else {
                     result = str_concat(arena, result, format(arena, str_lit("%arg{}: {}"),
-                                                            (int64_t)arg->result_index, arg->type->str));
+                                                            (int64_t)arg->result_index, type_to_string(arena, arg->type)));
                 }
             } else {
                 result = str_concat(arena, result, str_lit("null_arg"));
@@ -221,7 +221,7 @@ string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op) 
             result = str_concat(arena, result, format(arena, str_lit("%{}"), (int64_t)num));
         }
         result = str_concat(arena, result, str_lit(": "));
-        result = str_concat(arena, result, operand->type->str);
+        result = str_concat(arena, result, type_to_string(arena, operand->type));
     }
     result = str_concat(arena, result, str_lit(")"));
 
@@ -257,7 +257,7 @@ string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op) 
         for (int i = 0; i < op->n_result_types; i++) {
             if (i > 0) result = str_concat(arena, result, str_lit(", "));
             if (op->result_types && op->result_types[i]) {
-                result = str_concat(arena, result, op->result_types[i]->str);
+                result = str_concat(arena, result, type_to_string(arena, op->result_types[i]));
             } else {
                 result = str_concat(arena, result, str_lit("?"));
             }
@@ -327,13 +327,11 @@ Operation* construct_test_module_full(Arena *arena) {
     i32_type->kind = TYPE_KIND_INTEGER;
     i32_type->data.integer.width = 32;
     i32_type->data.integer.is_signed = true;
-    i32_type->str = str_lit("i32");
 
     Type *i64_type = arena_alloc(arena, Type);
     i64_type->kind = TYPE_KIND_INTEGER;
     i64_type->data.integer.width = 64;
     i64_type->data.integer.is_signed = true;
-    i64_type->str = str_lit("i64");
 
     // Create module operation
     Operation *module = arena_alloc(arena, Operation);
