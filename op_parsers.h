@@ -1,3 +1,8 @@
+/*
+This file contains specific operation parsers.
+
+Each parser is using Parser to parse a specific operation and return it in `op`.
+*/
 #pragma once
 
 #include <base/arena.h>
@@ -7,8 +12,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-// Forward declarations (already defined in mlir_parser.h)
 
 // Parsing functions for specific operation types
 void parse_gpu_launch(Parser *parser, Operation *op);
