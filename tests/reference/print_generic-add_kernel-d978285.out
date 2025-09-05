@@ -5,7 +5,7 @@ Arg 1: tests/add_kernel.ttir
 Arg 2: --no-error-banner
 Arg 3: --line=-1
 Arg 4: --column=-1
-Done parsing args. use_construction=0
+Done parsing args. use_construction=0, use_classic_printer=0
 MLIR:
 module() {
 ^bb0:
