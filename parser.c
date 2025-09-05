@@ -273,7 +273,7 @@ int main(int argc, char *argv[]) {
         // Test generic printing with expected output comparison
         printf("=== Generic Printer Test ===\n");
         printf("About to print operation...\n");
-        string result = print_operation(arena, 0, op);
+        string result = print_operation_generic(arena, 0, op);
         printf("Printing result...\n");
         println(arena, str_lit("{}"), result);
 
@@ -318,7 +318,7 @@ int main(int argc, char *argv[]) {
         parser_init(arena, &parser, mlir_code);
         op = parse_module(&parser);
         println(arena, str_lit("MLIR:"));
-        println(arena, str_lit("{}"), print_operation(arena, 0, op));
+        println(arena, str_lit("{}"), print_operation_generic(arena, 0, op));
         exit_code = 0;
     }
 

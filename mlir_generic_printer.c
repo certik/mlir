@@ -250,7 +250,7 @@ string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op) 
 }
 
 // Public API implementations
-string print_operation(Arena *arena, int indent_level, Operation *op) {
+string print_operation_generic(Arena *arena, int indent_level, Operation *op) {
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
     // Preassign SSA numbers for entire subtree to match parser's post-order numbering
@@ -258,14 +258,14 @@ string print_operation(Arena *arena, int indent_level, Operation *op) {
     return print_operation_internal(&ctx, indent_level, op);
 }
 
-string print_region(Arena *arena, int indent_level, Region *region) {
+string print_region_generic(Arena *arena, int indent_level, Region *region) {
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
     preassign_region_ssa(&ctx, region, indent_level);
     return print_region_internal(&ctx, indent_level, region);
 }
 
-string print_block(Arena *arena, int bb_index, int indent_level, Block *block) {
+string print_block_generic(Arena *arena, int bb_index, int indent_level, Block *block) {
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
     preassign_block_ssa(&ctx, block, indent_level);
