@@ -1037,10 +1037,53 @@ void parse_cf_cond_br(Parser *parser, Operation *op) {
     string tfalse = str_lit("");
     if (parser_peek(parser, TK_CARET_NAME)) {
         ttrue = parser_token_str(parser); parser_expect(parser, TK_CARET_NAME);
+        // Optional argument list for true target: (^bbX(%v1, %v2 : ty1, ty2))
+        if (parser_peek(parser, TK_LPAREN)) {
+            parser_expect(parser, TK_LPAREN);
+            while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
+                if (parser_peek(parser, TK_REGISTER)) {
+                    parser_expect(parser, TK_REGISTER);
+                    if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
+                } else if (parser_peek(parser, TK_COLON)) {
+                    parser_expect(parser, TK_COLON);
+                    // consume type list until ')'
+                    int angle=0;
+                    while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
+                        if (parser_peek(parser, TK_LANGLE)) angle++;
+                        else if (parser_peek(parser, TK_RANGLE) && angle>0) angle--;
+                        parser_next_token(parser);
+                    }
+                } else {
+                    parser_next_token(parser);
+                }
+            }
+            parser_expect(parser, TK_RPAREN);
+        }
     }
     if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
     if (parser_peek(parser, TK_CARET_NAME)) {
         tfalse = parser_token_str(parser); parser_expect(parser, TK_CARET_NAME);
+        // Optional argument list for false target
+        if (parser_peek(parser, TK_LPAREN)) {
+            parser_expect(parser, TK_LPAREN);
+            while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
+                if (parser_peek(parser, TK_REGISTER)) {
+                    parser_expect(parser, TK_REGISTER);
+                    if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
+                } else if (parser_peek(parser, TK_COLON)) {
+                    parser_expect(parser, TK_COLON);
+                    int angle=0;
+                    while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
+                        if (parser_peek(parser, TK_LANGLE)) angle++;
+                        else if (parser_peek(parser, TK_RANGLE) && angle>0) angle--;
+                        parser_next_token(parser);
+                    }
+                } else {
+                    parser_next_token(parser);
+                }
+            }
+            parser_expect(parser, TK_RPAREN);
+        }
     }
     op->operands = operands.data; op->n_operands = operands.size;
     // Store private attributes for classic printing
