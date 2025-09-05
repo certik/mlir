@@ -583,19 +583,51 @@ void parse_tt_addptr_load_store(Parser *parser, Operation *op) {
     op->operands = operands.data;
     op->n_operands = operands.size;
 
-    // For tt.addptr, prefer explicit type after ':' when present; otherwise fall back.
-    if (str_eq(op->opname, str_lit("tt.addptr"))) {
+    // For tt.addptr/tt.load, prefer explicit type after ':' when present; otherwise fall back.
+    if (str_eq(op->opname, str_lit("tt.addptr")) || str_eq(op->opname, str_lit("tt.load"))) {
         if (parser_peek(parser, TK_COLON)) {
             parser_expect(parser, TK_COLON);
 
             // Parse first type token into a string (handles !dialect<...> nesting)
             string type_left = str_lit("");
             if (parse_type_string(parser, &type_left)) {
-                // Set result type from the first type in the list
+                // Set result type
                 op->n_result_types = 1;
                 op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-                op->result_types[0] = arena_alloc(parser->arena, Type);
-                op->result_types[0] = parse_type_from_string(parser->arena, type_left);
+                if (str_eq(op->opname, str_lit("tt.addptr"))) {
+                    // For addptr, result type is the pointer tensor type
+                    op->result_types[0] = parse_type_from_string(parser->arena, type_left);
+                } else {
+                    // For load, convert pointer tensor element to value element type (e.g., f32)
+                    // Do a textual conversion: replace '!tt.ptr<...>' payload with element inside or f32
+                    string s = type_left;
+                    // Find '!tt.ptr<' inside s
+                    size_t pos = SIZE_MAX;
+                    for (size_t i = 0; i + 8 <= s.size; i++) {
+                        if (s.str[i]=='!' && i+8<=s.size && s.str[i+1]=='t' && s.str[i+2]=='t' && s.str[i+3]=='.' && s.str[i+4]=='p' && s.str[i+5]=='t' && s.str[i+6]=='r' && s.str[i+7]=='<') { pos = i; break; }
+                    }
+                    if (pos != SIZE_MAX) {
+                        // Extract element type inside '!tt.ptr<...>' before optional ','
+                        size_t start = pos + 8;
+                        size_t end = start;
+                        while (end < s.size && s.str[end] != '>' && s.str[end] != ',') end++;
+                        string elem = str_substr(s, start, end - start);
+                        // Build new type string by replacing '!tt.ptr<...>' with 'elem'
+                        string before = str_substr(s, 0, pos);
+                        // Skip until closing '>'
+                        size_t j = end;
+                        while (j < s.size && s.str[j] != '>') j++;
+                        if (j < s.size) j++; // include '>'
+                        string after = str_substr(s, j, s.size - j);
+                        string val_ty = before;
+                        val_ty = str_concat(parser->arena, val_ty, elem.size ? elem : str_lit("f32"));
+                        val_ty = str_concat(parser->arena, val_ty, after);
+                        op->result_types[0] = parse_type_from_string(parser->arena, val_ty);
+                    } else {
+                        // Fallback: assume f32 element
+                        op->result_types[0] = parse_type_from_string(parser->arena, s);
+                    }
+                }
             }
             // Consume remaining type list conservatively until end of list or loc
             if (parser_peek(parser, TK_COMMA)) {
@@ -604,7 +636,7 @@ void parse_tt_addptr_load_store(Parser *parser, Operation *op) {
                     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) break;
                 } while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE));
             }
-        } else if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
+        } else if (str_eq(op->opname, str_lit("tt.addptr")) && op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
             // Fallback heuristic when no explicit type list is present
             op->n_result_types = 1;
             op->result_types = arena_alloc_array(parser->arena, Type*, 1);

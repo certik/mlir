@@ -690,10 +690,17 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
             }
             
-            // Print result type
-            if (op->n_result_types > 0 && op->result_types[0]) {
-                result = str_concat(arena, result, str_lit(" : "));
-                result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
+            // Print type suffix: for tt.load without attrs, print pointer operand type; with attrs, print value type
+            if (op->n_attributes > 0) {
+                if (op->n_result_types > 0 && op->result_types[0]) {
+                    result = str_concat(arena, result, str_lit(" : "));
+                    result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
+                }
+            } else {
+                if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
+                    result = str_concat(arena, result, str_lit(" : "));
+                    result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
+                }
             }
             break;
         }
