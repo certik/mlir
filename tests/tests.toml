@@ -56,6 +56,7 @@ check_classic = true
 [[test]]
 filename = "matmul1.ttir"
 print_generic = true
+check_classic = true
 
 [[test]]
 filename = "sumrow.ttir"

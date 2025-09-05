@@ -1,0 +1,13 @@
+{
+    "basename": "check_classic-matmul1-0b6e1b2",
+    "cmd": "./parser {infile} --classic > {infile}2 && diff {infile} {infile}2",
+    "infile": "tests/matmul1.ttir",
+    "infile_hash": "4f9818648397af5506124429dd2e9a25bed36f16c98900df87d66764",
+    "outfile": null,
+    "outfile_hash": null,
+    "stdout": null,
+    "stdout_hash": null,
+    "stderr": null,
+    "stderr_hash": null,
+    "returncode": 0
+}
