@@ -271,8 +271,11 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             if (op->n_attributes > 0 && op->attributes[0]) {
                 if (op->attributes[0]->kind == ATTR_KIND_STRING && str_eq(op->attributes[0]->name, str_lit("value_text"))) {
                     result = str_concat(arena, result, op->attributes[0]->data.string_value);
-                } else if (op->attributes[0]->kind == ATTR_KIND_INTEGER) {
+                } else if (op->attributes[0]->kind == ATTR_KIND_INTEGER && !(op->n_result_types>0 && op->result_types[0] && op->result_types[0]->kind==TYPE_KIND_INTEGER && op->result_types[0]->data.integer.width==1)) {
                     result = str_concat(arena, result, format(arena, str_lit("{}"), op->attributes[0]->data.integer_value));
+                } else if (op->attributes[0]->kind == ATTR_KIND_INTEGER && op->n_result_types>0 && op->result_types[0] && op->result_types[0]->kind==TYPE_KIND_INTEGER && op->result_types[0]->data.integer.width==1) {
+                    // i1 as boolean
+                    result = str_concat(arena, result, op->attributes[0]->data.integer_value ? str_lit("true") : str_lit("false"));
                 } else if (op->attributes[0]->kind == ATTR_KIND_FLOAT) {
                     char buf[32];
                     snprintf(buf, sizeof(buf), "%.6e", op->attributes[0]->data.float_value);
@@ -283,7 +286,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             } else {
                 result = str_concat(arena, result, str_lit("0"));
             }
-            if (op->n_result_types > 0 && op->result_types[0]) {
+            if (op->n_result_types > 0 && op->result_types[0] && !(op->result_types[0]->kind==TYPE_KIND_INTEGER && op->result_types[0]->data.integer.width==1)) {
                 result = str_concat(arena, result, str_lit(" : "));
                 result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
             }
@@ -351,17 +354,56 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 // Pull targets from private attrs if present
                 string ttrue = str_lit("^bb1");
                 string tfalse = str_lit("^bb2");
+                int64_t ntrue = 0, nfalse = 0;
+                int op_index = 1;
                 for (int i = 0; i < op->n_attributes; i++) {
                     if (str_eq(op->attributes[i]->name, str_lit("_true")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
                         ttrue = op->attributes[i]->data.string_value;
                     } else if (str_eq(op->attributes[i]->name, str_lit("_false")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
                         tfalse = op->attributes[i]->data.string_value;
+                    } else if (str_eq(op->attributes[i]->name, str_lit("_ntrue")) && op->attributes[i]->kind == ATTR_KIND_INTEGER) {
+                        ntrue = op->attributes[i]->data.integer_value;
+                    } else if (str_eq(op->attributes[i]->name, str_lit("_nfalse")) && op->attributes[i]->kind == ATTR_KIND_INTEGER) {
+                        nfalse = op->attributes[i]->data.integer_value;
                     }
                 }
                 result = str_concat(arena, result, str_lit(", "));
                 result = str_concat(arena, result, ttrue);
+                if (ntrue > 0) {
+                    result = str_concat(arena, result, str_lit("("));
+                    for (int i = 0; i < ntrue; i++, op_index++) {
+                        if (i>0) result = str_concat(arena, result, str_lit(", "));
+                        result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[op_index]));
+                    }
+                    // Types for true args
+                    if (ntrue > 0) {
+                        result = str_concat(arena, result, str_lit(" : "));
+                        for (int i = 0; i < ntrue; i++) {
+                            if (i>0) result = str_concat(arena, result, str_lit(", "));
+                            result = str_concat(arena, result, type_to_string(arena, op->operands[1+i]->type));
+                        }
+                    }
+                    result = str_concat(arena, result, str_lit(")"));
+                }
                 result = str_concat(arena, result, str_lit(", "));
                 result = str_concat(arena, result, tfalse);
+                if (nfalse > 0) {
+                    result = str_concat(arena, result, str_lit("("));
+                    for (int i = 0; i < nfalse; i++, op_index++) {
+                        if (i>0) result = str_concat(arena, result, str_lit(", "));
+                        result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[op_index]));
+                    }
+                    if (nfalse > 0) {
+                        result = str_concat(arena, result, str_lit(" : "));
+                        for (int i = 0; i < nfalse; i++) {
+                            if (i>0) result = str_concat(arena, result, str_lit(", "));
+                            // false args types are after true args
+                            int idx = 1 + (int)ntrue + i;
+                            result = str_concat(arena, result, type_to_string(arena, op->operands[idx]->type));
+                        }
+                    }
+                    result = str_concat(arena, result, str_lit(")"));
+                }
             }
             break;
         }
@@ -380,6 +422,28 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, str_lit(" : "));
                     result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
                 }
+            }
+            break;
+        }
+        case OP_TYPE_FUNC_FUNC: {
+            // Print function header: func.func [visibility] @name() [-> ret] {
+            result = str_concat(arena, result, str_lit("func.func"));
+            string vis = str_lit(""); string name = str_lit(""); string ret = str_lit("");
+            for (int i=0;i<op->n_attributes;i++) {
+                if (str_eq(op->attributes[i]->name, str_lit("visibility")) && op->attributes[i]->kind==ATTR_KIND_STRING) vis = op->attributes[i]->data.string_value;
+                else if (str_eq(op->attributes[i]->name, str_lit("sym_name")) && op->attributes[i]->kind==ATTR_KIND_STRING) name = op->attributes[i]->data.string_value;
+                else if (str_eq(op->attributes[i]->name, str_lit("ret")) && op->attributes[i]->kind==ATTR_KIND_STRING) ret = op->attributes[i]->data.string_value;
+            }
+            if (vis.size>0) { result = str_concat(arena, result, str_lit(" ")); result = str_concat(arena, result, vis); }
+            if (name.size>0) { result = str_concat(arena, result, str_lit(" ")); result = str_concat(arena, result, name); }
+            result = str_concat(arena, result, str_lit("()"));
+            if (ret.size>0) { result = str_concat(arena, result, str_lit(" -> ")); result = str_concat(arena, result, ret); }
+            result = str_concat(arena, result, str_lit(" "));
+            // Print body region
+            if (op->n_regions>0) {
+                result = str_concat(arena, result, print_function_region_classic(ctx, indent_level, op->regions[0]));
+            } else {
+                result = str_concat(arena, result, str_lit("{ }"));
             }
             break;
         }

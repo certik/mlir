@@ -391,7 +391,16 @@ void parse_func_call(Parser *parser, Operation *op) {
     // Parse call @function(%args) : (arg_types) -> result_type
     // Function name (@name is tokenized as TK_FUNCTION_NAME)
     if (parser_peek(parser, TK_FUNCTION_NAME)) {
+        // Capture callee
+        string fname = parser_token_str(parser);
         parser_expect(parser, TK_FUNCTION_NAME);
+        // Store as attribute 'callee'
+        op->n_attributes = 1;
+        op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
+        op->attributes[0] = arena_alloc(parser->arena, Attribute);
+        op->attributes[0]->name = str_lit("callee");
+        op->attributes[0]->kind = ATTR_KIND_STRING;
+        op->attributes[0]->data.string_value = fname;
     }
 
     // Parse operands in parentheses
@@ -1040,9 +1049,14 @@ void parse_cf_cond_br(Parser *parser, Operation *op) {
         // Optional argument list for true target: (^bbX(%v1, %v2 : ty1, ty2))
         if (parser_peek(parser, TK_LPAREN)) {
             parser_expect(parser, TK_LPAREN);
+            int64_t ntrue = 0;
             while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
                 if (parser_peek(parser, TK_REGISTER)) {
+                    string vr = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
+                    ValueRef *v = symbol_table_lookup(&parser->symbol_table, vr);
+                    if (v) VecValueRef_push_back(parser->arena, &operands, v);
+                    ntrue++;
                     if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
                 } else if (parser_peek(parser, TK_COLON)) {
                     parser_expect(parser, TK_COLON);
@@ -1058,6 +1072,13 @@ void parse_cf_cond_br(Parser *parser, Operation *op) {
                 }
             }
             parser_expect(parser, TK_RPAREN);
+            // store count
+            // append attribute _ntrue
+            size_t n = op->n_attributes; Attribute **attrs = op->attributes;
+            Attribute *an = arena_alloc(parser->arena, Attribute);
+            an->name = str_lit("_ntrue"); an->kind = ATTR_KIND_INTEGER; an->data.integer_value = ntrue;
+            Attribute **na = arena_alloc_array(parser->arena, Attribute*, n+1);
+            for (size_t i=0;i<n;i++) na[i]=attrs[i]; na[n]=an; op->attributes=na; op->n_attributes=n+1;
         }
     }
     if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
@@ -1066,9 +1087,14 @@ void parse_cf_cond_br(Parser *parser, Operation *op) {
         // Optional argument list for false target
         if (parser_peek(parser, TK_LPAREN)) {
             parser_expect(parser, TK_LPAREN);
+            int64_t nfalse = 0;
             while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
                 if (parser_peek(parser, TK_REGISTER)) {
+                    string vr = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
+                    ValueRef *v = symbol_table_lookup(&parser->symbol_table, vr);
+                    if (v) VecValueRef_push_back(parser->arena, &operands, v);
+                    nfalse++;
                     if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
                 } else if (parser_peek(parser, TK_COLON)) {
                     parser_expect(parser, TK_COLON);
@@ -1083,6 +1109,11 @@ void parse_cf_cond_br(Parser *parser, Operation *op) {
                 }
             }
             parser_expect(parser, TK_RPAREN);
+            size_t n = op->n_attributes; Attribute **attrs = op->attributes;
+            Attribute *an = arena_alloc(parser->arena, Attribute);
+            an->name = str_lit("_nfalse"); an->kind = ATTR_KIND_INTEGER; an->data.integer_value = nfalse;
+            Attribute **na = arena_alloc_array(parser->arena, Attribute*, n+1);
+            for (size_t i=0;i<n;i++) na[i]=attrs[i]; na[n]=an; op->attributes=na; op->n_attributes=n+1;
         }
     }
     op->operands = operands.data; op->n_operands = operands.size;
@@ -1973,8 +2004,19 @@ void parse_tt_func(Parser *parser, Operation *op) {
 }
 
 void parse_func_func(Parser *parser, Operation *op) {
-    // Skip optional visibility and function name until argument list
+    // Capture optional visibility and function name
+    string visibility = str_lit("");
+    string fname = str_lit("");
     while (!parser_peek(parser, TK_LPAREN) && !parser_peek(parser, TK_EOF)) {
+        if (parser_peek(parser, TK_NAME)) {
+            string nm = parser_token_str(parser);
+            if (str_eq(nm, str_lit("private")) || str_eq(nm, str_lit("public"))) {
+                visibility = nm; parser_expect(parser, TK_NAME); continue;
+            }
+        }
+        if (parser_peek(parser, TK_FUNCTION_NAME)) {
+            fname = parser_token_str(parser); parser_expect(parser, TK_FUNCTION_NAME); continue;
+        }
         parser_next_token(parser);
     }
     // Parse argument list
@@ -2008,11 +2050,14 @@ void parse_func_func(Parser *parser, Operation *op) {
         }
         parser_expect(parser, TK_RPAREN);
     }
-    // Optional return type sequence after '->' (skip conservatively)
+    // Optional return type sequence after '->' (capture text conservatively)
+    string ret_sig = str_lit("");
     if (parser_peek(parser, TK_ARROW)) {
         parser_expect(parser, TK_ARROW);
+        // Capture until '{' or loc
         while (!(parser_peek(parser, TK_LBRACE_END) || parser_peek(parser, TK_EOF))) {
             if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) break;
+            ret_sig = str_concat(parser->arena, ret_sig, parser_token_str(parser));
             parser_next_token(parser);
         }
     }
@@ -2021,6 +2066,18 @@ void parse_func_func(Parser *parser, Operation *op) {
     op->regions = arena_alloc_array(parser->arena, Region*, 1);
     op->regions[0] = region;
     op->n_regions = 1;
+
+    // Store attributes for classic printing
+    size_t n = op->n_attributes; Attribute **attrs = op->attributes;
+    size_t add = 0; if (visibility.size>0) add++; if (fname.size>0) add++; if (ret_sig.size>0) add++;
+    if (add > 0) {
+        Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+add);
+        for (size_t i=0;i<n;i++) new_attrs[i]=attrs[i]; size_t idx=n;
+        if (visibility.size>0){ new_attrs[idx]=arena_alloc(parser->arena, Attribute); new_attrs[idx]->name=str_lit("visibility"); new_attrs[idx]->kind=ATTR_KIND_STRING; new_attrs[idx]->data.string_value=visibility; idx++; }
+        if (fname.size>0){ new_attrs[idx]=arena_alloc(parser->arena, Attribute); new_attrs[idx]->name=str_lit("sym_name"); new_attrs[idx]->kind=ATTR_KIND_STRING; new_attrs[idx]->data.string_value=fname; idx++; }
+        if (ret_sig.size>0){ new_attrs[idx]=arena_alloc(parser->arena, Attribute); new_attrs[idx]->name=str_lit("ret"); new_attrs[idx]->kind=ATTR_KIND_STRING; new_attrs[idx]->data.string_value=ret_sig; idx++; }
+        op->attributes = new_attrs; op->n_attributes = idx;
+    }
 }
 
 void parse_scf_if(Parser *parser, Operation *op) {
