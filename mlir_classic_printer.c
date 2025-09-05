@@ -344,8 +344,17 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         }
 
         case OP_TYPE_TT_FUNC: {
-            // Classic format header. We currently don't store the symbol name, so keep test name.
-            result = str_concat(arena, result, str_lit("tt.func public @add_kernel"));
+            // Classic format header with symbol name if available
+            result = str_concat(arena, result, str_lit("tt.func public @"));
+            // Try to find 'sym_name' attribute
+            string fname = str_lit("add_kernel");
+            for (int i = 0; i < op->n_attributes; i++) {
+                if (str_eq(op->attributes[i]->name, str_lit("sym_name")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
+                    fname = op->attributes[i]->data.string_value;
+                    break;
+                }
+            }
+            result = str_concat(arena, result, fname);
             // Arguments are stored in op->operands for tt.func
             result = str_concat(arena, result, str_lit("("));
             for (int i = 0; i < op->n_operands; i++) {
@@ -355,6 +364,16 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, format(arena, str_lit("{}: {}"),
                                                              print_ssa_value_classic(ctx, arg),
                                                              type_to_string(arena, arg->type)));
+                    if (arg->has_divisibility) {
+                        result = str_concat(arena, result, str_lit(" {tt.divisibility = "));
+                        result = str_concat(arena, result, format(arena, str_lit("{}"), (int64_t)arg->divisibility_value));
+                        result = str_concat(arena, result, str_lit(" : "));
+                        result = str_concat(arena, result, type_to_string(arena, arg->divisibility_type ? arg->divisibility_type : arg->type));
+                        result = str_concat(arena, result, str_lit("}"));
+                    }
+                    if (arg->location) {
+                        result = str_concat(arena, result, print_location_classic(arena, arg->location));
+                    }
                 }
             }
             result = str_concat(arena, result, str_lit(")"));
@@ -550,45 +569,72 @@ string print_block_classic(Arena *arena, int bb_index, int indent_level, Block *
 // Helper to print location map definitions
 static string print_location_map_classic(Arena *arena, LocationMap *location_map) {
     string result = str_lit("");
-    
     if (!location_map) return result;
-    
-    // Iterate over hashtable buckets to find location definitions
+
+    typedef struct { string key; Location *loc; int number; } LocEntry;
+    // Collect entries (excluding '#loc')
+    size_t cap = location_map->size;
+    LocEntry *arr = arena_alloc_array(arena, LocEntry, cap);
+    size_t n = 0;
     for (size_t i = 0; i < location_map->num_buckets; i++) {
-        if (location_map->buckets[i].occupied) {
-            string loc_name = location_map->buckets[i].key;
-            Location *loc = location_map->buckets[i].value;
-            
-            result = str_concat(arena, result, loc_name);
-            result = str_concat(arena, result, str_lit(" = "));
-            
-            switch (loc->kind) {
-                case LOC_KIND_FILE:
-                    result = str_concat(arena, result, 
-                        format(arena, str_lit("loc({}:{}:{})"), 
-                               loc->data.file.filename, 
-                               (int64_t)loc->data.file.line, 
-                               (int64_t)loc->data.file.column));
-                    break;
-                    
-                case LOC_KIND_NAME:
-                    result = str_concat(arena, result, 
-                        format(arena, str_lit("loc(\"{}\")"), loc->data.name.name));
-                    break;
-                    
-                case LOC_KIND_UNKNOWN:
-                    result = str_concat(arena, result, str_lit("loc(unknown)"));
-                    break;
-                    
-                default:
-                    result = str_concat(arena, result, str_lit("loc(unknown)"));
-                    break;
-            }
-            
-            result = str_concat(arena, result, str_lit("\n"));
+        if (!location_map->buckets[i].occupied) continue;
+        string name = location_map->buckets[i].key;
+        if (str_eq(name, str_lit("#loc"))) continue;
+        int num = -1;
+        if (name.size > 4 && name.str[0]=='#' && name.str[1]=='l' && name.str[2]=='o' && name.str[3]=='c') {
+            // parse integer suffix
+            int v = 0; bool any=false;
+            for (size_t k=4;k<name.size;k++) { char c = name.str[k]; if (c>='0'&&c<='9'){ any=true; v = v*10 + (c-'0'); } else { any=false; break; } }
+            if (any) num = v;
         }
+        arr[n].key = name;
+        arr[n].loc = location_map->buckets[i].value;
+        arr[n].number = num;
+        n++;
     }
-    
+
+    // Simple insertion sort by numeric suffix when present; non-numeric after numeric in stable order
+    for (size_t i = 1; i < n; i++) {
+        LocEntry x = arr[i];
+        size_t j = i;
+        while (j > 0) {
+            bool swap = false;
+            if (arr[j-1].number >= 0 && x.number >= 0) swap = arr[j-1].number > x.number;
+            else if (arr[j-1].number >= 0 && x.number < 0) swap = false; // keep numeric before non-numeric
+            else if (arr[j-1].number < 0 && x.number >= 0) swap = true;
+            else swap = false;
+            if (!swap) break;
+            arr[j] = arr[j-1];
+            j--;
+        }
+        arr[j] = x;
+    }
+
+    // Emit in order
+    for (size_t i = 0; i < n; i++) {
+        result = str_concat(arena, result, arr[i].key);
+        result = str_concat(arena, result, str_lit(" = "));
+        Location *loc = arr[i].loc;
+        switch (loc->kind) {
+            case LOC_KIND_FILE:
+                result = str_concat(arena, result,
+                    format(arena, str_lit("loc({}:{}:{})"),
+                           loc->data.file.filename,
+                           (int64_t)loc->data.file.line,
+                           (int64_t)loc->data.file.column));
+                break;
+            case LOC_KIND_NAME:
+                result = str_concat(arena, result,
+                    format(arena, str_lit("loc(\"{}\")"), loc->data.name.name));
+                break;
+            case LOC_KIND_UNKNOWN:
+            default:
+                result = str_concat(arena, result, str_lit("loc(unknown)"));
+                break;
+        }
+        result = str_concat(arena, result, str_lit("\n"));
+    }
+
     return result;
 }
 
@@ -596,30 +642,45 @@ string print_module_classic(Arena *arena, Operation *module, LocationMap *locati
     string result = str_lit("");
     
     // Print the special #loc definition at the beginning if it exists
-    if (location_map) {
+    if (module && module->unnumbered_loc_def) {
+        Location *loc = module->unnumbered_loc_def;
+        result = str_concat(arena, result, str_lit("#loc = "));
+        switch (loc->kind) {
+            case LOC_KIND_FILE:
+                result = str_concat(arena, result,
+                    format(arena, str_lit("loc({}:{}:{})"),
+                           loc->data.file.filename,
+                           (int64_t)loc->data.file.line,
+                           (int64_t)loc->data.file.column));
+                break;
+            case LOC_KIND_NAME:
+                result = str_concat(arena, result,
+                    format(arena, str_lit("loc(\"{}\")"), loc->data.name.name));
+                break;
+            default:
+                result = str_concat(arena, result, str_lit("loc(unknown)"));
+                break;
+        }
+        result = str_concat(arena, result, str_lit("\n"));
+    } else if (location_map) {
         for (size_t i = 0; i < location_map->num_buckets; i++) {
             if (location_map->buckets[i].occupied) {
                 string loc_name = location_map->buckets[i].key;
-                // Look for "#loc" (without number) to print first
-                if (str_eq(loc_name, str_lit("#loc"))) {
+                if (loc_name.size == 4 && loc_name.str && loc_name.str[0]=='#' && loc_name.str[1]=='l' && loc_name.str[2]=='o' && loc_name.str[3]=='c') {
                     Location *loc = location_map->buckets[i].value;
                     result = str_concat(arena, result, loc_name);
                     result = str_concat(arena, result, str_lit(" = "));
-                    
                     switch (loc->kind) {
                         case LOC_KIND_FILE:
-                            result = str_concat(arena, result, 
-                                format(arena, str_lit("loc({}:{}:{})"), 
-                                       loc->data.file.filename, 
-                                       (int64_t)loc->data.file.line, 
+                            result = str_concat(arena, result,
+                                format(arena, str_lit("loc({}:{}:{})"),
+                                       loc->data.file.filename,
+                                       (int64_t)loc->data.file.line,
                                        (int64_t)loc->data.file.column));
                             break;
                         case LOC_KIND_NAME:
-                            result = str_concat(arena, result, 
+                            result = str_concat(arena, result,
                                 format(arena, str_lit("loc(\"{}\")"), loc->data.name.name));
-                            break;
-                        case LOC_KIND_UNKNOWN:
-                            result = str_concat(arena, result, str_lit("loc(unknown)"));
                             break;
                         default:
                             result = str_concat(arena, result, str_lit("loc(unknown)"));
@@ -640,6 +701,9 @@ string print_module_classic(Arena *arena, Operation *module, LocationMap *locati
     if (loc_defs.size > 0) {
         result = str_concat(arena, result, loc_defs);
     }
-    
+    // Trim one trailing newline to match reference files exactly
+    if (result.size > 0 && result.str[result.size - 1] == '\n') {
+        result.size -= 1;
+    }
     return result;
 }

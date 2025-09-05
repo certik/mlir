@@ -1336,7 +1336,25 @@ void parse_tt_func(Parser *parser, Operation *op) {
     if (parser_peek(parser, TK_AT)) {
         parser_expect(parser, TK_AT);
         if (parser_peek(parser, TK_NAME)) {
+            // Capture function symbol name into an attribute for printing
+            string fname = parser_token_str(parser);
             parser_expect(parser, TK_NAME);
+            // Store as string attribute 'sym_name'
+            size_t n = op->n_attributes;
+            Attribute **attrs = op->attributes;
+            if (attrs == NULL) {
+                attrs = arena_alloc_array(parser->arena, Attribute*, 1);
+            } else {
+                Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+1);
+                for (size_t i = 0; i < n; i++) new_attrs[i] = attrs[i];
+                attrs = new_attrs;
+            }
+            attrs[n] = arena_alloc(parser->arena, Attribute);
+            attrs[n]->kind = ATTR_KIND_STRING;
+            attrs[n]->data.string_value = fname;
+            attrs[n]->name = str_lit("sym_name");
+            op->attributes = attrs;
+            op->n_attributes = n+1;
         }
     } else {
         // Try to skip tokens until we find a parenthesis
@@ -1426,6 +1444,65 @@ void parse_tt_func(Parser *parser, Operation *op) {
                         arg->type = parse_type_from_string(parser->arena, str_lit("unknown"));
                     }
 
+                    // Optional per-arg attribute dict: { ... }
+                    if (parser_peek(parser, TK_LBRACE)) {
+                        int depth = 0;
+                        // Try to detect simple 'tt.divisibility = <int> : <type>' pattern
+                        // without constructing a full attribute AST.
+                        // Consume '{'
+                        parser_expect(parser, TK_LBRACE);
+                        depth++;
+                        // Read tokens until matching '}'
+                        while (depth > 0 && !parser_peek(parser, TK_EOF)) {
+                            if (parser_peek(parser, TK_LBRACE)) { depth++; parser_next_token(parser); continue; }
+                            if (parser_peek(parser, TK_RBRACE)) { depth--; parser_next_token(parser); if (depth==0) break; else continue; }
+                            // Match name possibly with dots
+                            if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
+                                string name = parser_token_str(parser);
+                                parser_next_token(parser);
+                                if (str_eq(name, str_lit("tt.divisibility"))) {
+                                    // Expect '=' integer ':' type
+                                    if (parser_peek(parser, TK_EQUAL)) parser_expect(parser, TK_EQUAL);
+                                    if (parser_peek(parser, TK_INTEGER)) {
+                                        string ival = parser_token_str(parser);
+                                        // parse integer
+                                        int64_t v = 0; for (size_t k=0;k<ival.size;k++){ char c=ival.str[k]; if (c>='0' && c<='9') v = v*10 + (c-'0'); }
+                                        parser_expect(parser, TK_INTEGER);
+                                        // optional ':' type
+                                        Type *dtype = NULL;
+                                        if (parser_peek(parser, TK_COLON)) {
+                                            parser_expect(parser, TK_COLON);
+                                            string tstr = str_lit("");
+                                            // Reuse type parsing helper from mlir_parser.c via forward decl
+                                            // Here, mimic parse_type_string: collect until '}' or ',' or 'loc'
+                                            int angle = 0;
+                                            while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_RBRACE) && !parser_peek(parser, TK_COMMA)) {
+                                                if (parser_peek(parser, TK_LANGLE)) angle++;
+                                                else if (parser_peek(parser, TK_RANGLE) && angle>0) angle--;
+                                                if (angle==0 && parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) break;
+                                                string tok = parser_token_str(parser);
+                                                tstr = tstr.size ? str_concat(parser->arena, tstr, tok) : tok;
+                                                parser_next_token(parser);
+                                                if (angle==0 && (parser_peek(parser, TK_RBRACE) || parser_peek(parser, TK_COMMA))) break;
+                                            }
+                                            dtype = parse_type_from_string(parser->arena, tstr);
+                                        }
+                                        arg->has_divisibility = true;
+                                        arg->divisibility_value = v;
+                                        arg->divisibility_type = dtype ? dtype : parse_type_from_string(parser->arena, str_lit("i32"));
+                                    }
+                                }
+                            } else {
+                                parser_next_token(parser);
+                            }
+                        }
+                    }
+
+                    // Optional trailing per-arg loc()
+                    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
+                        arg->location = parse_loc(parser);
+                    }
+
                     VecValueRef_push_back(parser->arena, &func_args, arg);
                 }
             } else {
@@ -1443,6 +1520,20 @@ void parse_tt_func(Parser *parser, Operation *op) {
         if (parser_peek(parser, TK_RPAREN)) {
             parser_expect(parser, TK_RPAREN);
         } else {
+        }
+    }
+
+    // Optionally capture function attributes: attributes { ... }
+    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("attributes"))) {
+        parser_expect(parser, TK_NAME); // attributes
+        if (parser_peek(parser, TK_LBRACE)) {
+            int depth = 0; parser_expect(parser, TK_LBRACE); depth++;
+            // Conservatively skip content; generic op attribute parser can be used later if needed
+            while (depth>0 && !parser_peek(parser, TK_EOF)) {
+                if (parser_peek(parser, TK_LBRACE)) { depth++; }
+                else if (parser_peek(parser, TK_RBRACE)) { depth--; }
+                parser_next_token(parser);
+            }
         }
     }
 
@@ -1957,6 +2048,10 @@ void parse_return_operation(Parser *parser, Operation *op) {
             }
             parser_next_token(parser);
         } while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE) && !parser_peek(parser, TK_EOF));
+    }
+    // Or a trailing loc() without preceding ':'
+    if (!op->location && parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
+        op->location = parse_loc(parser);
     }
 
     // Done with this op line

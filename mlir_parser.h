@@ -73,6 +73,7 @@ typedef struct {
     ScopedSymbolTable symbol_table;
     LocationMap location_map;  // For #locN -> Location mapping
     int next_loc_id;          // Counter for generating #locN IDs
+    Location *unnumbered_loc_def; // Optional: definition of unnumbered '#loc' at file start
 } Parser;
 
 
@@ -280,6 +281,12 @@ struct ValueRef {
     // that the printed Value name is unique.
     string register_name;
 
+    // Optional per-argument metadata for classic printing
+    Location *location;           // e.g., arg loc("file":line:col)
+    bool has_divisibility;        // tt.divisibility attribute present
+    int64_t divisibility_value;   // value for tt.divisibility
+    Type *divisibility_type;      // type for tt.divisibility value (e.g., i32)
+
     // Maybe later:
     //Operation **users;
     //uint64_t n_users;
@@ -310,6 +317,8 @@ typedef struct Operation {
     
     // Location information
     Location *location;
+    // Optional: definition for unnumbered '#loc' header captured pre-module
+    Location *unnumbered_loc_def;
 } Operation;
 DEFINE_VECTOR_FOR_TYPE(Operation*, VecOperation)
 DEFINE_VECTOR_FOR_TYPE(ValueRef*, VecValueRef)
