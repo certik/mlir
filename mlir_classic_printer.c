@@ -326,19 +326,22 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         }
         
         case OP_TYPE_CF_BR: {
-            // Classic format: cf.br ^bb1(%0 : i64)
+            // Classic format: cf.br ^bbX(%args : types)
             result = str_concat(arena, result, str_lit("cf.br"));
-            
-            // TODO: Add block target reference ^bb1 and operands
+            string target = str_lit("^bb1");
+            for (int i=0;i<op->n_attributes;i++){ if (str_eq(op->attributes[i]->name, str_lit("_target")) && op->attributes[i]->kind==ATTR_KIND_STRING) { target = op->attributes[i]->data.string_value; break; } }
+            result = str_concat(arena, result, str_lit(" "));
+            result = str_concat(arena, result, target);
             if (op->n_operands > 0) {
-                result = str_concat(arena, result, str_lit(" ^bb1("));
+                result = str_concat(arena, result, str_lit("("));
                 for (int i = 0; i < op->n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
                     result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i]));
-                    if (op->operands[i]->type) {
-                        result = str_concat(arena, result, str_lit(" : "));
-                        result = str_concat(arena, result, type_to_string(arena, op->operands[i]->type));
-                    }
+                }
+                result = str_concat(arena, result, str_lit(" : "));
+                for (int i = 0; i < op->n_operands; i++) {
+                    if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                    if (op->operands[i] && op->operands[i]->type) result = str_concat(arena, result, type_to_string(arena, op->operands[i]->type));
                 }
                 result = str_concat(arena, result, str_lit(")"));
             }
@@ -408,6 +411,24 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
         
+        case OP_TYPE_FUNC_CALL: {
+            // Classic format: call @callee(%args) : (tys) -> ret
+            result = str_concat(arena, result, str_lit("call"));
+            string callee = str_lit("@unknown");
+            for (int i=0;i<op->n_attributes;i++){ if (str_eq(op->attributes[i]->name, str_lit("callee")) && op->attributes[i]->kind==ATTR_KIND_STRING) { callee = op->attributes[i]->data.string_value; break; } }
+            result = str_concat(arena, result, str_lit(" "));
+            result = str_concat(arena, result, callee);
+            // args
+            result = str_concat(arena, result, str_lit("("));
+            for (int i=0;i<op->n_operands;i++){ if (i>0) result = str_concat(arena, result, str_lit(", ")); result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i])); }
+            result = str_concat(arena, result, str_lit(")"));
+            // types
+            result = str_concat(arena, result, str_lit(" : ("));
+            for (int i=0;i<op->n_operands;i++){ if (i>0) result = str_concat(arena, result, str_lit(", ")); if (op->operands[i] && op->operands[i]->type) result = str_concat(arena, result, type_to_string(arena, op->operands[i]->type)); }
+            result = str_concat(arena, result, str_lit(")"));
+            if (op->n_result_types>0 && op->result_types[0]){ result = str_concat(arena, result, str_lit(" -> ")); result = str_concat(arena, result, type_to_string(arena, op->result_types[0])); }
+            break;
+        }
         case OP_TYPE_FUNC_RETURN:
         case OP_TYPE_RETURN: {
             // Classic format: return %0 : i64
@@ -448,43 +469,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
         
-        case OP_TYPE_FUNC_CALL: {
-            // Classic format: call @func(%0) : (i64) -> i64
-            result = str_concat(arena, result, str_lit("call "));
-            
-            // TODO: Extract function name from attributes
-            if (op->n_attributes > 0 && op->attributes[0] && op->attributes[0]->kind == ATTR_KIND_STRING) {
-                result = str_concat(arena, result, str_lit("@"));
-                result = str_concat(arena, result, op->attributes[0]->data.string_value);
-            } else {
-                result = str_concat(arena, result, str_lit("@unknown"));
-            }
-            
-            result = str_concat(arena, result, str_lit("("));
-            for (int i = 0; i < op->n_operands; i++) {
-                if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i]));
-            }
-            result = str_concat(arena, result, str_lit(")"));
-            
-            // Add function type if available
-            if (op->n_operands > 0 || op->n_result_types > 0) {
-                result = str_concat(arena, result, str_lit(" : ("));
-                for (int i = 0; i < op->n_operands; i++) {
-                    if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    if (op->operands[i]->type) {
-                        result = str_concat(arena, result, type_to_string(arena, op->operands[i]->type));
-                    }
-                }
-                result = str_concat(arena, result, str_lit(") -> "));
-                if (op->n_result_types > 0 && op->result_types[0]) {
-                    result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
-                } else {
-                    result = str_concat(arena, result, str_lit("()"));
-                }
-            }
-            break;
-        }
+        /* duplicate OP_TYPE_FUNC_CALL removed */
 
         case OP_TYPE_TT_FUNC: {
             // Classic format header with symbol name if available
@@ -895,6 +880,21 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 } else {
                     result = str_concat(arena, result, op_type_to_string(op->op_type));
                 }
+            }
+
+            // Special classic formatting for select ops
+            if (op->opname.size > 0 && str_eq(op->opname, str_lit("arith.extui"))) {
+                // arith.extui %v : src -> dst
+                result = str_concat(arena, result, str_lit(" "));
+                if (op->n_operands>0 && op->operands[0]) result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[0]));
+                // types
+                string src = (op->n_operands>0 && op->operands[0] && op->operands[0]->type) ? type_to_string(arena, op->operands[0]->type) : str_lit("i1");
+                string dst = (op->n_result_types>0 && op->result_types[0]) ? type_to_string(arena, op->result_types[0]) : str_lit("i64");
+                result = str_concat(arena, result, str_lit(" : "));
+                result = str_concat(arena, result, src);
+                result = str_concat(arena, result, str_lit(" to "));
+                result = str_concat(arena, result, dst);
+                break;
             }
 
             // Special classic formatting for select tt.* ops

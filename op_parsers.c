@@ -225,6 +225,15 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                     new_attrs[n] = srca; n = n+1; attrs = new_attrs;
                 }
                 op->attributes = attrs; op->n_attributes = n;
+            } else if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("to")) && op->opname.size>0 && str_eq(op->opname, str_lit("arith.extui"))) {
+                // arith.extui: ": src_ty to dst_ty"; set result to dst_ty
+                parser_expect(parser, TK_NAME);
+                string type_dst = str_lit("");
+                if (parse_type_string(parser, &type_dst)) {
+                    op->n_result_types = 1;
+                    op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+                    op->result_types[0] = parse_type_from_string(parser->arena, type_dst);
+                }
             } else if (parser_peek(parser, TK_COMMA)) {
                 // Operand type list ": type, type, ..." — consume conservatively
                 while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE)) {
@@ -997,37 +1006,36 @@ void parse_tt_reduce(Parser *parser, Operation *op) {
 }
 
 void parse_cf_br(Parser *parser, Operation *op) {
-    // Parse cf.br ^bb1(%arg : type, ...)
-    parser_expect(parser, TK_CARET_NAME);  // ^bb1
+    // Parse cf.br ^bbX(%args : types)
+    string target = str_lit("^bb1");
+    if (parser_peek(parser, TK_CARET_NAME)) { target = parser_token_str(parser); parser_expect(parser, TK_CARET_NAME); }
 
+    VecValueRef branch_args; VecValueRef_reserve(parser->arena, &branch_args, 4);
     if (parser_peek(parser, TK_LPAREN)) {
         parser_expect(parser, TK_LPAREN);
-        // Consume operands with type annotations
         while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
             if (parser_peek(parser, TK_REGISTER)) {
+                string vr = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                if (parser_peek(parser, TK_COLON)) {
-                    parser_expect(parser, TK_COLON);
-                    // Consume type
-                    while (!parser_peek(parser, TK_COMMA) && !parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
-                        parser_next_token(parser);
-                    }
-                }
+                ValueRef *v = symbol_table_lookup(&parser->symbol_table, vr);
+                if (v) VecValueRef_push_back(parser->arena, &branch_args, v);
                 if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
-            } else {
-                parser_next_token(parser);
-            }
+            } else if (parser_peek(parser, TK_COLON)) {
+                parser_expect(parser, TK_COLON);
+                // Skip types list
+                int angle=0;
+                while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) { if (parser_peek(parser, TK_LANGLE)) angle++; else if (parser_peek(parser, TK_RANGLE) && angle>0) angle--; parser_next_token(parser);}                
+            } else { parser_next_token(parser); }
         }
         parser_expect(parser, TK_RPAREN);
     }
-
-    // cf.br has no result types
-    op->n_result_types = 0;
-
-    // Consume any trailing loc()
-    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        op->location = parse_loc(parser);
-    }
+    op->operands = branch_args.data; op->n_operands = branch_args.size;
+    // Store target as private attribute
+    op->n_attributes = 1; op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
+    op->attributes[0] = arena_alloc(parser->arena, Attribute);
+    op->attributes[0]->name = str_lit("_target"); op->attributes[0]->kind = ATTR_KIND_STRING; op->attributes[0]->data.string_value = target;
+    // trailing loc
+    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) op->location = parse_loc(parser);
 }
 
 void parse_cf_cond_br(Parser *parser, Operation *op) {
