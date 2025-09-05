@@ -152,13 +152,17 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
 
         // Handle forms like ": (type, ...) -> type"
         if (parser_peek(parser, TK_LPAREN)) {
-            // Consume argument type list inside parens
-            int depth = 0;
-            do {
+            // Parse and capture the first type inside parentheses for classic printing
+            parser_expect(parser, TK_LPAREN);
+            string src_sig = str_lit("");
+            (void)parse_type_string(parser, &src_sig);
+            // Consume until matching ')'
+            int depth = 1;
+            while (depth > 0 && !parser_peek(parser, TK_EOF)) {
                 if (parser_peek(parser, TK_LPAREN)) depth++;
                 else if (parser_peek(parser, TK_RPAREN)) depth--;
                 parser_next_token(parser);
-            } while (depth > 0 && !parser_peek(parser, TK_EOF));
+            }
 
             // Optional arrow and a result type
             if (parser_peek(parser, TK_ARROW)) {
@@ -171,6 +175,32 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                 op->result_types = arena_alloc_array(parser->arena, Type*, 1);
                 op->result_types[0] = parse_type_from_string(parser->arena, type_str);
             }
+
+            // Record that the signature used parenthesized operand types
+            size_t n = op->n_attributes;
+            Attribute **attrs = op->attributes;
+            Attribute *flag = arena_alloc(parser->arena, Attribute);
+            flag->kind = ATTR_KIND_BOOL;
+            flag->name = str_lit("_sig_parens");
+            flag->data.bool_value = true;
+            if (attrs == NULL) {
+                attrs = arena_alloc_array(parser->arena, Attribute*, 2);
+                attrs[0] = flag; 
+                // also store the src type string
+                Attribute *srca = arena_alloc(parser->arena, Attribute);
+                srca->kind = ATTR_KIND_STRING; srca->name = str_lit("_sig_src"); srca->data.string_value = src_sig;
+                attrs[1] = srca; n = 2;
+            } else {
+                Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+2);
+                for (size_t i = 0; i < n; i++) new_attrs[i] = attrs[i];
+                new_attrs[n] = flag; 
+                Attribute *srca = arena_alloc(parser->arena, Attribute);
+                srca->kind = ATTR_KIND_STRING; srca->name = str_lit("_sig_src"); srca->data.string_value = src_sig;
+                new_attrs[n+1] = srca;
+                n = n+2; attrs = new_attrs;
+            }
+            op->attributes = attrs;
+            op->n_attributes = n;
 
             // Optional trailing loc()
             if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
@@ -281,13 +311,24 @@ void parse_arith_constant(Parser *parser, Operation *op) {
             op->result_types[0] = parse_type_from_string(parser->arena, str_lit("i1"));
             return;
         } else {
-            // Fallback: consume attribute-like payload (e.g., dense<...>) until ':' or EOL
+            // Capture payload like dense<...> verbatim until ':'
+            string payload = str_lit("");
             int angle = 0;
-            while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_COLON)) {
+            do {
+                string tok = parser_token_str(parser);
+                payload = payload.size ? str_concat(parser->arena, payload, tok) : tok;
+                parser_next_token(parser);
                 if (parser_peek(parser, TK_LANGLE)) angle++;
                 else if (parser_peek(parser, TK_RANGLE) && angle > 0) angle--;
-                parser_next_token(parser);
-            }
+                if (angle == 0 && parser_peek(parser, TK_COLON)) break;
+            } while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE));
+            // Store as string attribute for classic printing
+            op->n_attributes = 1;
+            op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
+            op->attributes[0] = arena_alloc(parser->arena, Attribute);
+            op->attributes[0]->kind = ATTR_KIND_STRING;
+            op->attributes[0]->name = str_lit("value_text");
+            op->attributes[0]->data.string_value = payload;
         }
     } else {
         // Fallback: consume attribute-like payload (e.g., dense<...>) until ':' or EOL
@@ -473,38 +514,53 @@ void parse_tt_make_range(Parser *parser, Operation *op) {
         op->n_attributes = 2;
         op->attributes = arena_alloc_array(parser->arena, Attribute*, 2);
         if (parser_peek(parser, TK_NAME)) {
-            parser_expect(parser, TK_NAME);
+            parser_expect(parser, TK_NAME); // end
             parser_expect(parser, TK_EQUAL);
-            parser_expect(parser, TK_INTEGER);
-            parser_expect(parser, TK_COLON);
-            parser_expect(parser, TK_NAME);
+            // capture integer
+            int64_t end_val = 0;
+            if (parser_peek(parser, TK_INTEGER)) {
+                string ival = parser_token_str(parser);
+                for (size_t k = 0; k < ival.size; k++) {
+                    char c = ival.str[k];
+                    if (c >= '0' && c <= '9') end_val = end_val * 10 + (c - '0');
+                }
+                parser_expect(parser, TK_INTEGER);
+            }
+            // optional ': i32'
+            if (parser_peek(parser, TK_COLON)) {
+                parser_expect(parser, TK_COLON);
+                if (parser_peek(parser, TK_NAME)) parser_expect(parser, TK_NAME);
+            }
             op->attributes[0] = arena_alloc(parser->arena, Attribute);
             op->attributes[0]->kind = ATTR_KIND_INTEGER;
             op->attributes[0]->name = str_lit("end");
-            op->attributes[0]->data.integer_value = 16;
+            op->attributes[0]->data.integer_value = end_val;
         }
         if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
         if (parser_peek(parser, TK_NAME)) {
-            parser_expect(parser, TK_NAME);
+            parser_expect(parser, TK_NAME); // start
             parser_expect(parser, TK_EQUAL);
-            parser_expect(parser, TK_INTEGER);
-            parser_expect(parser, TK_COLON);
-            parser_expect(parser, TK_NAME);
+            int64_t start_val = 0;
+            if (parser_peek(parser, TK_INTEGER)) {
+                string ival = parser_token_str(parser);
+                for (size_t k = 0; k < ival.size; k++) {
+                    char c = ival.str[k];
+                    if (c >= '0' && c <= '9') start_val = start_val * 10 + (c - '0');
+                }
+                parser_expect(parser, TK_INTEGER);
+            }
+            if (parser_peek(parser, TK_COLON)) {
+                parser_expect(parser, TK_COLON);
+                if (parser_peek(parser, TK_NAME)) parser_expect(parser, TK_NAME);
+            }
             op->attributes[1] = arena_alloc(parser->arena, Attribute);
             op->attributes[1]->kind = ATTR_KIND_INTEGER;
             op->attributes[1]->name = str_lit("start");
-            op->attributes[1]->data.integer_value = 0;
+            op->attributes[1]->data.integer_value = start_val;
         }
         parser_expect(parser, TK_RBRACE);
     }
-    // Fallback result type if not provided by a trailing type annotation
-    if (op->n_result_types == 0) {
-        op->n_result_types = 1;
-        op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-        op->result_types[0] = arena_alloc(parser->arena, Type);
-        op->result_types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16xi32>"));
-
-    }
+    // Result type parsed by generic handler after ':'
 }
 
 void parse_tt_addptr_load_store(Parser *parser, Operation *op) {
