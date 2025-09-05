@@ -1,0 +1,13 @@
+{
+    "basename": "check_classic-effect-ca62c3b",
+    "cmd": "./parser {infile} --classic > {infile}2 && diff {infile} {infile}2",
+    "infile": "tests/effect.mlir",
+    "infile_hash": "1024831ab4a72d4f986eb6724d7ca18bdb7dc277b889b3a828a6a882",
+    "outfile": null,
+    "outfile_hash": null,
+    "stdout": null,
+    "stdout_hash": null,
+    "stderr": null,
+    "stderr_hash": null,
+    "returncode": 0
+}

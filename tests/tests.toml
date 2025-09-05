@@ -17,6 +17,7 @@ print_generic = true
 [[test]]
 filename = "effect.mlir"
 print_generic = true
+check_classic = true
 
 [[test]]
 filename = "simple.mlir"
