@@ -519,7 +519,6 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
     }
 
     // For classic formatting: place locations after regions (when present)
-    bool printed_regions = false;
     if (op->n_regions > 0) {
         result = str_concat(arena, result, str_lit(" "));
         for (int i = 0; i < op->n_regions; i++) {
@@ -533,7 +532,6 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 );
             }
         }
-        printed_regions = true;
     }
     if (op->location) {
         result = str_concat(arena, result, print_location_classic(arena, op->location));

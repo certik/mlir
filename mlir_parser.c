@@ -958,8 +958,6 @@ Location* parse_loc(Parser *parser) {
     loc->kind = LOC_KIND_UNKNOWN;
     loc->original_text = str_lit("");
     
-    // Save starting position for original text
-    uint64_t start_pos = parser->cur;
     
     parser_expect(parser, TK_NAME); // 'loc'
     parser_expect(parser, TK_LPAREN);
