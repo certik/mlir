@@ -2305,10 +2305,19 @@ void parse_scf_yield(Parser *parser, Operation *op) {
     op->n_operands = operands.size;
     op->op_type = OP_TYPE_SCF_YIELD;
 
-    // Skip remaining tokens (like : type)
-    while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_EOF)) {
-        parser_next_token(parser);
+    // Optionally parse ": types" then a trailing loc()
+    if (parser_peek(parser, TK_COLON)) {
+        // consume to end of types list
+        do {
+            parser_next_token(parser);
+            if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) break;
+        } while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_EOF));
     }
+    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
+        op->location = parse_loc(parser);
+    }
+    // Skip to eol
+    while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_EOF)) parser_next_token(parser);
 }
 
 void parse_return_operation(Parser *parser, Operation *op) {
