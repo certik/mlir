@@ -2520,9 +2520,9 @@ void parse_return_operation(Parser *parser, Operation *op) {
         VecValueRef_push_back(parser->arena, &operands, operand);
         if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA); else break;
     }
-    // Do not keep operands for return-like ops in generic mode
-    op->operands = NULL;
-    op->n_operands = 0;
+    // Keep operands for classic and better generic fidelity
+    op->operands = operands.data;
+    op->n_operands = operands.size;
 
     // Consume any trailing ": ..." types or loc(), without assigning result types
     if (parser_peek(parser, TK_COLON)) {

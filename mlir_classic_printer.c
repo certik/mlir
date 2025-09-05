@@ -1204,6 +1204,10 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             if (str_eq(attr->name, str_lit("sym_name")) || str_eq(attr->name, str_lit("_sig_parens")) || str_eq(attr->name, str_lit("_sig_src")) || str_eq(attr->name, str_lit("value_text")) || (attr->name.size>0 && attr->name.str[0]=='_')) {
                 continue;
             }
+            // Skip 'callee' which we print in header for calls
+            if (str_eq(attr->name, str_lit("callee"))) {
+                continue;
+            }
             // Skip 'value' attribute only for arith.constant operations
             if (str_eq(attr->name, str_lit("value")) && op->op_type == OP_TYPE_ARITH_CONSTANT) {
                 continue;
