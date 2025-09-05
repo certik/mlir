@@ -502,6 +502,9 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 // Fallback
                 result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
             }
+            // Before printing region, set parent scf.for in context
+            Operation *saved_parent = ctx->current_scf_for;
+            ctx->current_scf_for = op;
             break;
         }
 
@@ -534,12 +537,20 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
                     result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i]));
                 }
-                // Print all operand types
-                result = str_concat(arena, result, str_lit(" : "));
-                for (int i = 0; i < op->n_operands; i++) {
-                    if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    if (op->operands[i] && op->operands[i]->type) {
-                        result = str_concat(arena, result, type_to_string(arena, op->operands[i]->type));
+                // Print yield types: if inside scf.for, mirror its result types; else use operand types
+                if (ctx->current_scf_for && ctx->current_scf_for->n_result_types > 0) {
+                    result = str_concat(arena, result, str_lit(" : "));
+                    for (int i = 0; i < ctx->current_scf_for->n_result_types; i++) {
+                        if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                        result = str_concat(arena, result, type_to_string(arena, ctx->current_scf_for->result_types[i]));
+                    }
+                } else {
+                    result = str_concat(arena, result, str_lit(" : "));
+                    for (int i = 0; i < op->n_operands; i++) {
+                        if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                        if (op->operands[i] && op->operands[i]->type) {
+                            result = str_concat(arena, result, type_to_string(arena, op->operands[i]->type));
+                        }
                     }
                 }
             }
@@ -781,8 +792,17 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     }
                 }
                 if (sig_src.size > 0) {
+                    // normalize ",X" to ", X" for readability
+                    string norm = str_lit("");
+                    for (size_t k = 0; k < sig_src.size; k++) {
+                        char c = sig_src.str[k];
+                        norm = str_concat(arena, norm, (string){&c,1});
+                        if (c == ',' && k+1 < sig_src.size && sig_src.str[k+1] != ' ') {
+                            norm = str_concat(arena, norm, str_lit(" "));
+                        }
+                    }
                     result = str_concat(arena, result, str_lit(" : ("));
-                    result = str_concat(arena, result, sig_src);
+                    result = str_concat(arena, result, norm);
                     result = str_concat(arena, result, str_lit(")"));
                 } else if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
                     result = str_concat(arena, result, str_lit(" : ("));
@@ -880,6 +900,10 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     }
                     result = str_concat(arena, result, str_lit(" -> "));
                     result = str_concat(arena, result, format(arena, str_lit("tensor<{}x{}xf32>"), m, n));
+                    // Inline location if present
+                    if (op->location) {
+                        result = str_concat(arena, result, print_location_classic(arena, op->location));
+                    }
                 }
                 break;
             }
@@ -981,7 +1005,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         }
     }
 
-    // For classic formatting: place locations after regions (when present)
+    // For classic formatting: place regions (when present)
     if (op->n_regions > 0) {
         result = str_concat(arena, result, str_lit(" "));
         for (int i = 0; i < op->n_regions; i++) {
@@ -1000,6 +1024,10 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     print_region_internal_classic(ctx, indent_level, op->regions[i])
                 );
             }
+        }
+        // After regions of scf.for, restore parent pointer
+        if (op->op_type == OP_TYPE_SCF_FOR) {
+            ctx->current_scf_for = NULL;
         }
     }
     if (op->location) {
