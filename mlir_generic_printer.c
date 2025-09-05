@@ -196,16 +196,17 @@ string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op) 
     }
     result = str_concat(arena, result, str_lit(")"));
 
-    // Print attributes if any (skip for tt.get_program_id as it's handled specially)
+    // Print attributes if any (skip private parser hints that start with '_')
     if (op->n_attributes > 0) {
-        result = str_concat(arena, result, str_lit(" {"));
+        bool opened = false; bool first = true;
         for (int i = 0; i < op->n_attributes; i++) {
-            if (i > 0) result = str_concat(arena, result, str_lit(", "));
             Attribute *attr = op->attributes[i];
+            if (attr->name.size > 0 && attr->name.str[0] == '_') { continue; }
+            if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
+            if (!first) result = str_concat(arena, result, str_lit(", ")); first = false;
             result = str_concat(arena, result, format(arena, str_lit("{} = "), attr->name));
             switch (attr->kind) {
                 case ATTR_KIND_INTEGER:
-                    // Add type annotation for tt.make_range attributes
                     if (str_eq(op->opname, str_lit("tt.make_range"))) {
                         result = str_concat(arena, result, format(arena, str_lit("{} : i32"), attr->data.integer_value));
                     } else {
@@ -219,7 +220,7 @@ string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op) 
                     result = str_concat(arena, result, str_lit("..."));
             }
         }
-        result = str_concat(arena, result, str_lit("}"));
+        if (opened) result = str_concat(arena, result, str_lit("}"));
     }
 
     // Print result types if any

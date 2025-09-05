@@ -2,12 +2,12 @@ module() {
 ^bb0:
     tt.func(%arg0: !tt.ptr<bf16>, %arg1: i32, %arg2: !tt.ptr<f32>, %arg3: !tt.ptr<f32>, %arg4: !tt.ptr<i64>) {sym_name = "_chunked_cross_entropy_forward_0d1d2d3d4d"} {
     ^bb0:
-        %cst = arith.constant() -> tensor<65536xbf16>
+        %cst = arith.constant() {value_text = "dense<0xFF80>"} -> tensor<65536xbf16>
         %cst_0 = arith.constant() {value = ...} -> f32
-        %cst_1 = arith.constant() -> f32
-        %c-100_i32 = arith.constant() -> i32
+        %cst_1 = arith.constant() {value_text = "-1.000000e+00"} -> f32
+        %c-100_i32 = arith.constant() {value_text = "-100"} -> i32
         %c0_i32 = arith.constant() {value = 0} -> i32
-        %cst_2 = arith.constant() -> tensor<65536xi32>
+        %cst_2 = arith.constant() {value_text = "dense<128256>"} -> tensor<65536xi32>
         %c65536_i32 = arith.constant() {value = 65536} -> i32
         %c2_i32 = arith.constant() {value = 2} -> i32
         %0 = tt.get_program_id() {axis = "x"} -> i32
@@ -22,7 +22,7 @@ module() {
         %9 = tt.addptr(%arg3: !tt.ptr<f32>, %8: i32) -> !tt.ptr<f32>
         %10 = tt.addptr(%arg4: !tt.ptr<i64>, %0: i32) -> !tt.ptr<i64>
         %11 = arith.muli(%1: i32, %c65536_i32: i32) -> i32
-        %12 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<65536xi32>
+        %12 = tt.make_range() {end = 65536 : i32, start = 0 : i32} -> tensor<65536xi32>
         %13 = tt.splat(%11: i32) -> tensor<65536xi32>
         %14 = arith.addi(%13: tensor<65536xi32>, %12: tensor<65536xi32>) -> tensor<65536xi32>
         %15 = arith.cmpi(%14: tensor<65536xi32>, %cst_2: tensor<65536xi32>) {predicate = "slt"} -> tensor<65536xi32>

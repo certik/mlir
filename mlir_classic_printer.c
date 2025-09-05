@@ -14,12 +14,14 @@ typedef struct {
     Arena *arena;
     uint32_t next_ssa;
     SsaMap ssa_map;
+    Operation *current_scf_for;
 } PrintCtx;
 
 static inline void ssa_map_init(PrintCtx *ctx, Arena *arena) {
     ctx->arena = arena;
     ctx->next_ssa = 0;
     SsaMap_init(arena, &ctx->ssa_map, 128);
+    ctx->current_scf_for = NULL;
 }
 
 static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, ValueRef *v) {
@@ -86,6 +88,19 @@ static string print_ssa_value_classic(PrintCtx *ctx, ValueRef *value) {
         uint32_t num = get_or_assign_ssa(ctx, value);
         return format(arena, str_lit("%{}"), (int64_t)num);
     }
+}
+
+// Helper to print operands; appends "#0" when referencing first result of a multi-result def
+static string print_ssa_operand_classic(PrintCtx *ctx, ValueRef *value) {
+    Arena *arena = ctx->arena;
+    string base = print_ssa_value_classic(ctx, value);
+    if (value && value->kind == OP_RESULT && value->def) {
+        Operation *defop = (Operation*)value->def;
+        if (defop->n_result_types > 1) {
+            base = str_concat(arena, base, str_lit("#0"));
+        }
+    }
+    return base;
 }
 
 // Helper to print location information
@@ -202,32 +217,36 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 preassign_region_ssa(ctx, op->regions[i], indent_level + 1);
             }
         }
-        for (int i = 0; i < op->n_result_types; i++) {
-            if (i > 0) result = str_concat(arena, result, str_lit(", "));
-
-            // Assign/get SSA number for the result value (after preassigning children)
-            if (op->n_results > i && op->results && op->results[i]) {
-                ValueRef *res = op->results[i];
-                result = str_concat(arena, result, print_ssa_value_classic(ctx, res));
-            } else {
-                // Should not happen; emit placeholder
-                result = str_concat(arena, result, str_lit("%_"));
+        // Special-case: one named result but multiple result types => print "%name:N ="
+        if (op->n_results == 1 && op->n_result_types > 1 && op->results && op->results[0]) {
+            result = str_concat(arena, result, print_ssa_value_classic(ctx, op->results[0]));
+            result = str_concat(arena, result, format(arena, str_lit(":{}"), (int64_t)op->n_result_types));
+            result = str_concat(arena, result, str_lit(" = "));
+        } else {
+            for (int i = 0; i < op->n_result_types; i++) {
+                if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                if (op->n_results > i && op->results && op->results[i]) {
+                    ValueRef *res = op->results[i];
+                    result = str_concat(arena, result, print_ssa_value_classic(ctx, res));
+                } else {
+                    result = str_concat(arena, result, str_lit("%_"));
+                }
             }
+            result = str_concat(arena, result, str_lit(" = "));
         }
-        result = str_concat(arena, result, str_lit(" = "));
     }
 
     // Operation-specific printing with switch statement
     switch (op->op_type) {
         case OP_TYPE_ARITH_CONSTANT: {
-            // Classic format: arith.constant 42 : i32 or arith.constant 0.000000e+00 : f32
+            // Classic format: arith.constant 42 : i32 | 0.000000e+00 : f32 | dense<...> : tensor<...>
             result = str_concat(arena, result, str_lit("arith.constant "));
             if (op->n_attributes > 0 && op->attributes[0]) {
-                if (op->attributes[0]->kind == ATTR_KIND_INTEGER) {
+                if (op->attributes[0]->kind == ATTR_KIND_STRING && str_eq(op->attributes[0]->name, str_lit("value_text"))) {
+                    result = str_concat(arena, result, op->attributes[0]->data.string_value);
+                } else if (op->attributes[0]->kind == ATTR_KIND_INTEGER) {
                     result = str_concat(arena, result, format(arena, str_lit("{}"), op->attributes[0]->data.integer_value));
                 } else if (op->attributes[0]->kind == ATTR_KIND_FLOAT) {
-                    // Format floating point to match original (e.g., 0.000000e+00) 
-                    // Use snprintf for scientific notation since format doesn't support :e
                     char buf[32];
                     snprintf(buf, sizeof(buf), "%.6e", op->attributes[0]->data.float_value);
                     result = str_concat(arena, result, str_from_cstr_view(buf));
@@ -265,7 +284,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit(", "));
                 for (int i = 0; i < op->n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[i]));
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i]));
                 }
             }
             
@@ -285,7 +304,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit(" ^bb1("));
                 for (int i = 0; i < op->n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[i]));
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i]));
                     if (op->operands[i]->type) {
                         result = str_concat(arena, result, str_lit(" : "));
                         result = str_concat(arena, result, type_to_string(arena, op->operands[i]->type));
@@ -301,7 +320,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit("cf.cond_br"));
             if (op->n_operands > 0) {
                 result = str_concat(arena, result, str_lit(" "));
-                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[0]));
+                result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[0]));
                 result = str_concat(arena, result, str_lit(", ^bb2, ^bb3"));
             }
             break;
@@ -315,7 +334,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit(" "));
                 for (int i = 0; i < op->n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[i]));
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i]));
                 }
                 if (op->operands[0]->type) {
                     result = str_concat(arena, result, str_lit(" : "));
@@ -340,7 +359,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit("("));
             for (int i = 0; i < op->n_operands; i++) {
                 if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[i]));
+                result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i]));
             }
             result = str_concat(arena, result, str_lit(")"));
             
@@ -439,7 +458,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
             // lb, ub, step operands
             if (op->n_operands >= 3) {
-                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[0]));
+                result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[0]));
                 result = str_concat(arena, result, str_lit(" to "));
                 result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[1]));
                 result = str_concat(arena, result, str_lit(" step "));
@@ -483,6 +502,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 // Fallback
                 result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
             }
+            // Before printing region, set parent scf.for in context
+            ctx->current_scf_for = op;
             break;
         }
 
@@ -491,7 +512,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit("scf.if "));
             
             if (op->n_operands > 0) {
-                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[0]));
+                result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[0]));
             }
             
             // Return type if present
@@ -513,11 +534,23 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit(" "));
                 for (int i = 0; i < op->n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[i]));
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i]));
                 }
-                if (op->operands[0]->type) {
+                // Print yield types: if inside scf.for, mirror its result types; else use operand types
+                if (ctx->current_scf_for && ctx->current_scf_for->n_result_types > 0) {
                     result = str_concat(arena, result, str_lit(" : "));
-                    result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
+                    for (int i = 0; i < ctx->current_scf_for->n_result_types; i++) {
+                        if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                        result = str_concat(arena, result, type_to_string(arena, ctx->current_scf_for->result_types[i]));
+                    }
+                } else {
+                    result = str_concat(arena, result, str_lit(" : "));
+                    for (int i = 0; i < op->n_operands; i++) {
+                        if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                        if (op->operands[i] && op->operands[i]->type) {
+                            result = str_concat(arena, result, type_to_string(arena, op->operands[i]->type));
+                        }
+                    }
                 }
             }
             break;
@@ -527,11 +560,25 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // Classic format: tt.splat %v : T -> tensor<NxT>
             result = str_concat(arena, result, str_lit("tt.splat "));
             if (op->n_operands > 0 && op->operands[0]) {
-                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[0]));
+                result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[0]));
             }
             if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
+                // Use parentheses only if original signature had them
+                bool sig_parens = false;
+                string sig_src = str_lit("");
+                for (int i = 0; i < op->n_attributes; i++) {
+                    if (str_eq(op->attributes[i]->name, str_lit("_sig_parens")) && op->attributes[i]->kind == ATTR_KIND_BOOL && op->attributes[i]->data.bool_value) {
+                        sig_parens = true; break;
+                    }
+                    if (str_eq(op->attributes[i]->name, str_lit("_sig_src")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
+                        sig_src = op->attributes[i]->data.string_value;
+                    }
+                }
                 result = str_concat(arena, result, str_lit(" : "));
-                result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
+                if (sig_parens) result = str_concat(arena, result, str_lit("("));
+                if (sig_src.size > 0) result = str_concat(arena, result, sig_src);
+                else result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
+                if (sig_parens) result = str_concat(arena, result, str_lit(")"));
             }
             if (op->n_result_types > 0 && op->result_types[0]) {
                 result = str_concat(arena, result, str_lit(" -> "));
@@ -545,7 +592,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit("tt.addptr "));
             for (int i = 0; i < op->n_operands; i++) {
                 if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[i]));
+                result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i]));
             }
             if (op->n_operands > 0) {
                 result = str_concat(arena, result, str_lit(" : "));
@@ -562,8 +609,9 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         case OP_TYPE_TT_LOAD: {
             // Classic format: tt.load %ptr {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : f32
             result = str_concat(arena, result, str_lit("tt.load "));
-            if (op->n_operands > 0 && op->operands[0]) {
-                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[0]));
+            for (int i = 0; i < op->n_operands; i++) {
+                if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i]));
             }
             
             // Print attributes before the result type
@@ -616,7 +664,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit("tt.store "));
             for (int i = 0; i < op->n_operands; i++) {
                 if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[i]));
+                result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i]));
             }
             
             // Print attributes before the result type
@@ -676,8 +724,21 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         }
 
         case OP_TYPE_TT_MAKE_RANGE: {
-            // Classic format: tt.make_range {end = 16 : i32, start = 0 : i32} : tensor<16xi32>
-            result = str_concat(arena, result, str_lit("tt.make_range {end = 16 : i32, start = 0 : i32} : tensor<16xi32>"));
+            // Classic format: tt.make_range {end = N : i32, start = M : i32} : tensor<Nxi32>
+            result = str_concat(arena, result, str_lit("tt.make_range"));
+            if (op->n_attributes > 0) {
+                result = str_concat(arena, result, str_lit(" {"));
+                for (int i = 0; i < op->n_attributes; i++) {
+                    if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                    Attribute *attr = op->attributes[i];
+                    result = str_concat(arena, result, format(arena, str_lit("{} = {} : i32"), attr->name, (int64_t)attr->data.integer_value));
+                }
+                result = str_concat(arena, result, str_lit("}"));
+            }
+            if (op->n_result_types > 0 && op->result_types[0]) {
+                result = str_concat(arena, result, str_lit(" : "));
+                result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
+            }
             break;
         }
         
@@ -715,6 +776,133 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
             }
 
+            // Special classic formatting for select tt.* ops
+            if (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.broadcast"))) {
+                // tt.broadcast %x : (src) -> dst
+                result = str_concat(arena, result, str_lit(" "));
+                if (op->n_operands > 0 && op->operands[0]) {
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[0]));
+                }
+                // Use captured src signature if available
+                string sig_src = str_lit("");
+                for (int i = 0; i < op->n_attributes; i++) {
+                    if (str_eq(op->attributes[i]->name, str_lit("_sig_src")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
+                        sig_src = op->attributes[i]->data.string_value; break;
+                    }
+                }
+                if (sig_src.size > 0) {
+                    // normalize ",X" to ", X" for readability
+                    string norm = str_lit("");
+                    for (size_t k = 0; k < sig_src.size; k++) {
+                        char c = sig_src.str[k];
+                        norm = str_concat(arena, norm, (string){&c,1});
+                        if (c == ',' && k+1 < sig_src.size && sig_src.str[k+1] != ' ') {
+                            norm = str_concat(arena, norm, str_lit(" "));
+                        }
+                    }
+                    result = str_concat(arena, result, str_lit(" : ("));
+                    result = str_concat(arena, result, norm);
+                    result = str_concat(arena, result, str_lit(")"));
+                } else if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
+                    result = str_concat(arena, result, str_lit(" : ("));
+                    result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
+                    result = str_concat(arena, result, str_lit(")"));
+                }
+                if (op->n_result_types > 0 && op->result_types[0]) {
+                    result = str_concat(arena, result, str_lit(" -> "));
+                    result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
+                }
+                break;
+            }
+            if (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.expand_dims"))) {
+                // tt.expand_dims %x {axis = i : i32} : (src) -> dst
+                result = str_concat(arena, result, str_lit(" "));
+                if (op->n_operands > 0 && op->operands[0]) {
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[0]));
+                }
+                // Inline attributes
+                if (op->n_attributes > 0) {
+                    bool opened = false; bool first = true;
+                    for (int i = 0; i < op->n_attributes; i++) {
+                        Attribute *attr = op->attributes[i];
+                        if (str_eq(attr->name, str_lit("_sig_parens")) || str_eq(attr->name, str_lit("_sig_src"))) { continue; }
+                        if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
+                        if (!first) result = str_concat(arena, result, str_lit(", ")); first = false;
+                        if (attr->kind == ATTR_KIND_INTEGER) {
+                            result = str_concat(arena, result, format(arena, str_lit("{} = {} : i32"), attr->name, (int64_t)attr->data.integer_value));
+                        } else {
+                            result = str_concat(arena, result, format(arena, str_lit("{} = ..."), attr->name));
+                        }
+                    }
+                    if (opened) result = str_concat(arena, result, str_lit("}"));
+                }
+                string sig_src2 = str_lit("");
+                for (int i = 0; i < op->n_attributes; i++) {
+                    if (str_eq(op->attributes[i]->name, str_lit("_sig_src")) && op->attributes[i]->kind == ATTR_KIND_STRING) { sig_src2 = op->attributes[i]->data.string_value; break; }
+                }
+                if (sig_src2.size > 0) {
+                    result = str_concat(arena, result, str_lit(" : ("));
+                    result = str_concat(arena, result, sig_src2);
+                    result = str_concat(arena, result, str_lit(")"));
+                } else if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
+                    result = str_concat(arena, result, str_lit(" : ("));
+                    result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
+                    result = str_concat(arena, result, str_lit(")"));
+                }
+                if (op->n_result_types > 0 && op->result_types[0]) {
+                    result = str_concat(arena, result, str_lit(" -> "));
+                    result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
+                }
+                break;
+            }
+            if (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.dot"))) {
+                // tt.dot %a, %b, %acc {attrs} : lhs * rhs -> res
+                result = str_concat(arena, result, str_lit(" "));
+                for (int i = 0; i < op->n_operands; i++) {
+                    if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i]));
+                }
+                if (op->n_attributes > 0) {
+                    result = str_concat(arena, result, str_lit(" {"));
+                    for (int i = 0; i < op->n_attributes; i++) {
+                        if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                        Attribute *attr = op->attributes[i];
+                        if (attr->kind == ATTR_KIND_BOOL) {
+                            result = str_concat(arena, result, format(arena, str_lit("{} = {}"), attr->name, attr->data.bool_value ? str_lit("true") : str_lit("false")));
+                        } else if (attr->kind == ATTR_KIND_INTEGER) {
+                            result = str_concat(arena, result, format(arena, str_lit("{} = {} : i32"), attr->name, (int64_t)attr->data.integer_value));
+                        } else {
+                            result = str_concat(arena, result, format(arena, str_lit("{} = ..."), attr->name));
+                        }
+                    }
+                    result = str_concat(arena, result, str_lit("}"));
+                }
+                // Types
+                if (op->n_operands >= 2 && op->operands[0] && op->operands[1] && op->operands[0]->type && op->operands[1]->type) {
+                    string lhs = type_to_string(arena, op->operands[0]->type);
+                    string rhs = type_to_string(arena, op->operands[1]->type);
+                    result = str_concat(arena, result, str_lit(" : "));
+                    result = str_concat(arena, result, lhs);
+                    result = str_concat(arena, result, str_lit(" * "));
+                    result = str_concat(arena, result, rhs);
+                    // Compute result type tensor<MxNxf32> from lhs and rhs
+                    int64_t m = 0, n = 0; const char *p;
+                    // parse m from lhs after 'tensor<'
+                    p = strstr(lhs.str, "tensor<"); if (p) { p += 7; while (*p && *p>='0' && *p<='9') { m = m*10 + (*p-'0'); p++; } }
+                    // parse n from rhs as last (second) dim
+                    const char *q = strstr(rhs.str, "tensor<"); if (q) {
+                        q += 7; // skip 'tensor<'
+                        // skip first dim and 'x'
+                        while (*q && *q!='x' && *q!='>') q++; if (*q=='x') q++;
+                        // parse n until 'x'
+                        while (*q && *q>='0' && *q<='9') { n = n*10 + (*q-'0'); q++; }
+                    }
+                    result = str_concat(arena, result, str_lit(" -> "));
+                    result = str_concat(arena, result, format(arena, str_lit("tensor<{}x{}xf32>"), m, n));
+                }
+                break;
+            }
+
             // Print operands in canonical format (no types for most ops)
             if (op->n_operands > 0) {
                 result = str_concat(arena, result, str_lit(" "));
@@ -725,7 +913,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                         result = str_concat(arena, result, str_lit("NULL_OPERAND"));
                         continue;
                     }
-                    result = str_concat(arena, result, print_ssa_value_classic(ctx, operand));
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
                 }
             }
 
@@ -759,24 +947,27 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
     // Skip internal attributes that shouldn't be visible
     if (op->n_attributes > 0 && op->op_type != OP_TYPE_TT_FUNC && 
         op->op_type != OP_TYPE_TT_LOAD && op->op_type != OP_TYPE_TT_STORE &&
-        op->op_type != OP_TYPE_ARITH_CMPI) {
+        op->op_type != OP_TYPE_ARITH_CMPI && op->op_type != OP_TYPE_TT_MAKE_RANGE) {
+        // Skip printing for ops where we printed inline already by name
+        if (op->opname.size > 0 && (str_eq(op->opname, str_lit("tt.expand_dims")) || str_eq(op->opname, str_lit("tt.dot")))) {
+            // do nothing
+        } else {
         bool has_visible_attrs = false;
         for (int i = 0; i < op->n_attributes; i++) {
             Attribute *attr = op->attributes[i];
             // Skip internal attributes that shouldn't be shown in classic format
-            if (str_eq(attr->name, str_lit("sym_name"))) {
+            if (str_eq(attr->name, str_lit("sym_name")) || str_eq(attr->name, str_lit("_sig_parens")) || str_eq(attr->name, str_lit("_sig_src")) || str_eq(attr->name, str_lit("value_text"))) {
                 continue;
             }
             // Skip 'value' attribute only for arith.constant operations
             if (str_eq(attr->name, str_lit("value")) && op->op_type == OP_TYPE_ARITH_CONSTANT) {
                 continue;
             }
-            // Skip internal parser attributes 
-            if (str_eq(attr->name, str_lit("axis")) ||
-                str_eq(attr->name, str_lit("start")) ||
-                str_eq(attr->name, str_lit("end"))) {
+            // Skip axis attribute for tt.get_program_id
+            if (op->op_type == OP_TYPE_TT_GET_PROGRAM_ID && str_eq(attr->name, str_lit("axis"))) {
                 continue;
             }
+            // No skipping of axis/start/end in classic mode
             if (!has_visible_attrs) {
                 result = str_concat(arena, result, str_lit(" {"));
                 has_visible_attrs = true;
@@ -806,9 +997,10 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         if (has_visible_attrs) {
             result = str_concat(arena, result, str_lit("}"));
         }
+        }
     }
 
-    // For classic formatting: place locations after regions (when present)
+    // For classic formatting: place regions (when present)
     if (op->n_regions > 0) {
         result = str_concat(arena, result, str_lit(" "));
         for (int i = 0; i < op->n_regions; i++) {
@@ -827,6 +1019,10 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     print_region_internal_classic(ctx, indent_level, op->regions[i])
                 );
             }
+        }
+        // After regions of scf.for, restore parent pointer
+        if (op->op_type == OP_TYPE_SCF_FOR) {
+            ctx->current_scf_for = NULL;
         }
     }
     if (op->location) {
@@ -909,22 +1105,25 @@ static string print_location_map_classic(Arena *arena, LocationMap *location_map
         result = str_concat(arena, result, arr[i].key);
         result = str_concat(arena, result, str_lit(" = "));
         Location *loc = arr[i].loc;
-        switch (loc->kind) {
-            case LOC_KIND_FILE:
-                result = str_concat(arena, result,
-                    format(arena, str_lit("loc({}:{}:{})"),
-                           loc->data.file.filename,
-                           (int64_t)loc->data.file.line,
-                           (int64_t)loc->data.file.column));
-                break;
-            case LOC_KIND_NAME:
-                result = str_concat(arena, result,
-                    format(arena, str_lit("loc(\"{}\")"), loc->data.name.name));
-                break;
-            case LOC_KIND_UNKNOWN:
-            default:
-                result = str_concat(arena, result, str_lit("loc(unknown)"));
-                break;
+        if (loc->original_text.size > 0) {
+            result = str_concat(arena, result, loc->original_text);
+        } else {
+            switch (loc->kind) {
+                case LOC_KIND_FILE:
+                    result = str_concat(arena, result,
+                        format(arena, str_lit("loc({}:{}:{})"),
+                               loc->data.file.filename,
+                               (int64_t)loc->data.file.line,
+                               (int64_t)loc->data.file.column));
+                    break;
+                case LOC_KIND_NAME:
+                    result = str_concat(arena, result,
+                        format(arena, str_lit("loc(\"{}\")"), loc->data.name.name));
+                    break;
+                default:
+                    result = str_concat(arena, result, str_lit("loc(unknown)"));
+                    break;
+            }
         }
         result = str_concat(arena, result, str_lit("\n"));
     }
