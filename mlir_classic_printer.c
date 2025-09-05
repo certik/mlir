@@ -900,10 +900,6 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     }
                     result = str_concat(arena, result, str_lit(" -> "));
                     result = str_concat(arena, result, format(arena, str_lit("tensor<{}x{}xf32>"), m, n));
-                    // Inline location if present
-                    if (op->location) {
-                        result = str_concat(arena, result, print_location_classic(arena, op->location));
-                    }
                 }
                 break;
             }

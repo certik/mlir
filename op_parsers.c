@@ -1531,6 +1531,10 @@ void parse_generic_operation(Parser *parser, Operation *op) {
     // Attributes and result types are parsed generically later
     // Handle generic attributes and result types before scanning for regions
     parse_generic_attrs_and_result_type(parser, op);
+    // Capture trailing loc() immediately if present to avoid getting skipped
+    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
+        op->location = parse_loc(parser);
+    }
 
     // Parse regions (if any), for now we assume 0 or 1 regions
     while (!(parser_peek(parser, TK_LBRACE_END)
