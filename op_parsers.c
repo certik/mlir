@@ -212,6 +212,19 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                     op->result_types = arena_alloc_array(parser->arena, Type*, 1);
                     op->result_types[0] = parse_type_from_string(parser->arena, type_right);
                 }
+                // Record source signature string for classic printing
+                size_t n = op->n_attributes;
+                Attribute **attrs = op->attributes;
+                Attribute *srca = arena_alloc(parser->arena, Attribute);
+                srca->kind = ATTR_KIND_STRING; srca->name = str_lit("_sig_src"); srca->data.string_value = type_left;
+                if (attrs == NULL) {
+                    attrs = arena_alloc_array(parser->arena, Attribute*, 1); attrs[0] = srca; n = 1;
+                } else {
+                    Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+1);
+                    for (size_t i = 0; i < n; i++) new_attrs[i] = attrs[i];
+                    new_attrs[n] = srca; n = n+1; attrs = new_attrs;
+                }
+                op->attributes = attrs; op->n_attributes = n;
             } else if (parser_peek(parser, TK_COMMA)) {
                 // Operand type list ": type, type, ..." — consume conservatively
                 while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE)) {
