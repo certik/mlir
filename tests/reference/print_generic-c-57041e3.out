@@ -21,7 +21,7 @@ module() {
         %16 = tt.reduce(%15: tensor<128x64xf16>) -> ? {
         ^bb0(%arg3: f32, %arg4: f32):
             %20 = "arith.maxf"(%arg3: f32, %arg4: f32) -> f32
-            tt.reduce.return()
+            tt.reduce.return(%20: f32)
         }
         %17 = tt.splat(%arg1: !tt.ptr<f16, 1>) -> tensor<128x!tt.ptr<f16, 1>>
         %18 = tt.addptr(%17: tensor<128x!tt.ptr<f16, 1>>, %1: tensor<128xi32>) -> tensor<128x!tt.ptr<f16, 1>>

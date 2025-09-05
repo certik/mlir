@@ -1,6 +1,6 @@
 module() {
 ^bb0:
-    func.func() {
+    func.func() {sym_name = "@avg", ret = "memref<10x20xf32>"} {
     ^bb0:
         %alloc = memref.alloc() -> memref<10x20xf32>
         %c0 = arith.constant() {value = 0} -> index
@@ -22,7 +22,7 @@ module() {
             memref.store(%4: memref<10x20xf32>, %alloc: memref<10x20xf32>, %2: index, %3: index)
             "gpu.terminator"()
         }
-        return()
+        return(%alloc: memref<10x20xf32>)
     }
 }
 

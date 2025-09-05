@@ -1,11 +1,11 @@
 module() {
 ^bb0:
-    func.func() {
+    func.func() {sym_name = "@tensor_i16", ret = "i16"} {
     ^bb0:
         %c0_i16 = arith.constant() {value = 0} -> i16
-        return()
+        return(%c0_i16: i16)
     }
-    func.func() {
+    func.func() {sym_name = "@func1", ret = "f32"} {
     ^bb0:
         %idx0 = index.constant() -> index
         %idx1 = index.constant() -> index
@@ -38,9 +38,9 @@ module() {
         }
         %collapsed_213 = tensor.collapse_shape(%from_elements_117: tensor<5x2xi16>) -> tensor<10xi16>
         %collapsed_222 = tensor.collapse_shape(%212: tensor<?x?xi16>) -> tensor<10xi16>
-        %490 = call(%collapsed_222: tensor<10xi16>) -> i16
+        %490 = call(%collapsed_222: tensor<10xi16>) {callee = "@tensor_i16"} -> i16
         %1 = "arith.sitofp"(%0: i16) -> i16
-        return()
+        return(%1: i16)
     }
 }
 

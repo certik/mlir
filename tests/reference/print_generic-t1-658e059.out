@@ -1,6 +1,6 @@
 module() {
 ^bb0:
-    func.func() {
+    func.func() {sym_name = "@matrix_add", ret = "memref<10x20xf32>"} {
     ^bb0:
         %result = memref.alloc() -> memref<10x20xf32>
         affine.for() {
@@ -13,7 +13,7 @@ module() {
                 memref.store(%sum: f32, %result: memref<10x20xf32>, %arg0: index, %arg0: index)
             }
         }
-        func.return()
+        func.return(%result: memref<10x20xf32>)
     }
 }
 

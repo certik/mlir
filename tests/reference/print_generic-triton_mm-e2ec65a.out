@@ -20,8 +20,8 @@ module() {
         %c0_i32 = arith.constant() {value = 0} -> i32
         %c256_i32 = arith.constant() {value = 256} -> i32
         %0 = arith.muli(%arg3: i32, %c256_i32: i32) -> i32
-        %1 = arith.cmpi(%0: i32, %c0_i32: i32) {predicate = "eq"} -> i32
-        cf.cond_br(%1: i32)
+        %1 = arith.cmpi(%0: i32, %c0_i32: i32) {predicate = "eq"} -> i1
+        cf.cond_br(%1: i1)
     ^bb1:
         tt.return()
     ^bb2:
@@ -76,10 +76,10 @@ module() {
         %42 = "tt.expand_dims"(%16: tensor<64xi32>) {axis = "1:i32"} -> tensor<64x1xi32>
         %43 = "tt.expand_dims"(%20: tensor<128xi32>) {axis = "0:i32"} -> tensor<1x128xi32>
         %44 = tt.splat(%arg3: i32) -> tensor<64x1xi32>
-        %45 = arith.cmpi(%42: tensor<64x1xi32>, %44: tensor<64x1xi32>) {predicate = "slt"} -> tensor<64x1xi32>
-        %46 = arith.cmpi(%43: tensor<1x128xi32>, %cst_2: tensor<1x128xi32>) {predicate = "slt"} -> tensor<1x128xi32>
-        %47 = "tt.broadcast"(%45: tensor<64x1xi32>) -> tensor<64x128xi1>
-        %48 = "tt.broadcast"(%46: tensor<1x128xi32>) -> tensor<64x128xi1>
+        %45 = arith.cmpi(%42: tensor<64x1xi32>, %44: tensor<64x1xi32>) {predicate = "slt"} -> i1
+        %46 = arith.cmpi(%43: tensor<1x128xi32>, %cst_2: tensor<1x128xi32>) {predicate = "slt"} -> i1
+        %47 = "tt.broadcast"(%45: i1) -> tensor<64x128xi1>
+        %48 = "tt.broadcast"(%46: i1) -> tensor<64x128xi1>
         %49 = "arith.andi"(%47: tensor<64x128xi1>, %48: tensor<64x128xi1>) -> tensor<64x128xi1>
         %50 = arith.muli(%42: tensor<64x1xi32>, %cst_1: tensor<64x1xi32>) -> tensor<64x1xi32>
         %51 = "tt.broadcast"(%43: tensor<1x128xi32>) -> tensor<64x128xi32>

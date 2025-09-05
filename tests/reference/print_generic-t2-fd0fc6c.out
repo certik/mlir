@@ -1,6 +1,6 @@
 module() {
 ^bb0:
-    func.func() {
+    func.func() {sym_name = "@avg", ret = "memref<10x20xf32>"} {
     ^bb0:
         %alloc = memref.alloc() -> memref<10x20xf32>
         %c0 = arith.constant() {value = 0} -> index
@@ -19,7 +19,7 @@ module() {
                 memref.store(%2: f32, %alloc: memref<10x20xf32>, %arg2: index, %arg3: index)
             }
         }
-        return()
+        return(%alloc: memref<10x20xf32>)
     }
 }
 
