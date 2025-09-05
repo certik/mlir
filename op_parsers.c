@@ -2412,3 +2412,50 @@ void parse_gpu_launch(Parser *parser, Operation *op) {
     op->regions[0] = gpu_region;
     op->n_regions = 1;
 }
+
+void parse_arith_cmpi(Parser *parser, Operation *op) {
+    // Parse arith.cmpi <predicate>, %lhs, %rhs : type
+    VecValueRef operands;
+    VecValueRef_reserve(parser->arena, &operands, 2);
+    
+    // Parse predicate (slt, sge, etc.)
+    string predicate = str_lit("slt"); // default
+    if (parser_peek(parser, TK_NAME)) {
+        predicate = parser_token_str(parser);
+        parser_expect(parser, TK_NAME);
+    }
+    
+    // Store predicate as an attribute
+    Attribute *predicate_attr = arena_alloc(parser->arena, Attribute);
+    predicate_attr->name = str_lit("predicate");
+    predicate_attr->kind = ATTR_KIND_STRING;
+    predicate_attr->data.string_value = predicate;
+    
+    op->n_attributes = 1;
+    op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
+    op->attributes[0] = predicate_attr;
+    
+    // Expect comma
+    parser_expect(parser, TK_COMMA);
+    
+    // Parse operands
+    if (parser_peek(parser, TK_REGISTER)) {
+        string lhs_str = parser_token_str(parser);
+        parser_expect(parser, TK_REGISTER);
+        ValueRef *lhs = symbol_table_lookup(&parser->symbol_table, lhs_str);
+        if (lhs) VecValueRef_push_back(parser->arena, &operands, lhs);
+    }
+    
+    parser_expect(parser, TK_COMMA);
+    
+    if (parser_peek(parser, TK_REGISTER)) {
+        string rhs_str = parser_token_str(parser);
+        parser_expect(parser, TK_REGISTER);
+        ValueRef *rhs = symbol_table_lookup(&parser->symbol_table, rhs_str);
+        if (rhs) VecValueRef_push_back(parser->arena, &operands, rhs);
+    }
+    
+    // Set operands
+    op->operands = operands.data;
+    op->n_operands = operands.size;
+}

@@ -1150,6 +1150,10 @@ Operation* parse_operation(Parser *parser) {
             parse_arith_constant(parser, op);
             parse_generic_attrs_and_result_type(parser, op);
             break;
+        case OP_TYPE_ARITH_CMPI:
+            parse_arith_cmpi(parser, op);
+            parse_generic_attrs_and_result_type(parser, op);
+            break;
         case OP_TYPE_ARITH_ADDI:
         case OP_TYPE_ARITH_MULI:
         case OP_TYPE_ARITH_ADDF:

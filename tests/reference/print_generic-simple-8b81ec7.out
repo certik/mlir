@@ -6,10 +6,10 @@ module() {
         cf.br()
     ^bb1(%0: i64):
         %c10_i64 = arith.constant() {value = 10} -> i64
-        %1 = arith.cmpi(%0: i64, %c10_i64: i64) -> i64
+        %1 = arith.cmpi(%0: i64, %c10_i64: i64) {predicate = "slt"} -> i64
         %2 = "arith.extui"(%1: i64) -> i1
         %c0_i64_0 = arith.constant() {value = 0} -> i64
-        %3 = arith.cmpi(%2: i1, %c0_i64_0: i64) -> i64
+        %3 = arith.cmpi(%2: i1, %c0_i64_0: i64) {predicate = "ne"} -> i64
         cf.cond_br(%3: i64)
     ^bb2:
         %c48_i64 = arith.constant() {value = 48} -> i64

@@ -25,7 +25,7 @@ module() {
         %12 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<65536xi32>
         %13 = tt.splat(%11: i32) -> tensor<65536xi32>
         %14 = arith.addi(%13: tensor<65536xi32>, %12: tensor<65536xi32>) -> tensor<65536xi32>
-        %15 = arith.cmpi(%14: tensor<65536xi32>, %cst_2: tensor<65536xi32>) -> tensor<65536xi32>
+        %15 = arith.cmpi(%14: tensor<65536xi32>, %cst_2: tensor<65536xi32>) {predicate = "slt"} -> tensor<65536xi32>
         %16 = tt.load(%10: !tt.ptr<i64>) {cache = 1, evict = 1, isVolatile = ...} -> i64
         %17 = "arith.trunci"(%16: i64) -> i64
         %18 = tt.splat(%5: !tt.ptr<bf16>) -> tensor<65536x!tt.ptr<bf16>>
@@ -47,10 +47,10 @@ module() {
         }
         %27 = "math.log"(%26: ?) -> f32
         %28 = arith.addf(%22: ?, %27: f32) -> f32
-        %29 = arith.cmpi(%1: i32, %c0_i32: i32) -> i32
+        %29 = arith.cmpi(%1: i32, %c0_i32: i32) {predicate = "eq"} -> i32
         scf.if() {
         ^bb0:
-            %30 = arith.cmpi(%17: i64, %c-100_i32: i32) -> i32
+            %30 = arith.cmpi(%17: i64, %c-100_i32: i32) {predicate = "ne"} -> i32
             %31 = scf.if() -> f32 {
             ^bb0:
                 %32 = tt.addptr(%5: !tt.ptr<bf16>, %17: i64) -> !tt.ptr<bf16>

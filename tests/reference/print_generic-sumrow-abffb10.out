@@ -12,7 +12,7 @@ module() {
         %4 = tt.splat(%1: i32) -> tensor<2x1xi32>
         %5 = arith.addi(%4: tensor<2x1xi32>, %3: tensor<2x1xi32>) -> tensor<2x1xi32>
         %cst = arith.constant() -> tensor<2x1xi32>
-        %6 = arith.cmpi(%5: tensor<2x1xi32>, %cst: tensor<2x1xi32>) -> tensor<2x1xi32>
+        %6 = arith.cmpi(%5: tensor<2x1xi32>, %cst: tensor<2x1xi32>) {predicate = "slt"} -> tensor<2x1xi32>
         %7 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<256xi32>
         %8 = "tt.expand_dims"(%7: tensor<256xi32>) {axis = 0} -> tensor<1x256xi32>
         %cst_0 = arith.constant() {value = ...} -> f32
@@ -28,7 +28,7 @@ module() {
             %18 = tt.splat(%arg0: index) -> tensor<1x256xi32>
             %19 = arith.addi(%18: tensor<1x256xi32>, %8: tensor<1x256xi32>) -> tensor<1x256xi32>
             %cst_2 = arith.constant() -> tensor<1x256xi32>
-            %20 = arith.cmpi(%19: tensor<1x256xi32>, %cst_2: tensor<1x256xi32>) -> tensor<1x256xi32>
+            %20 = arith.cmpi(%19: tensor<1x256xi32>, %cst_2: tensor<1x256xi32>) {predicate = "slt"} -> tensor<1x256xi32>
             %c2048_i32_3 = arith.constant() {value = 2048} -> i32
             %cst_4 = arith.constant() -> tensor<2x1xi32>
             %21 = arith.muli(%5: tensor<2x1xi32>, %cst_4: tensor<2x1xi32>) -> tensor<2x1xi32>

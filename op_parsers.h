@@ -24,6 +24,7 @@ void parse_return_operation(Parser *parser, Operation *op);
 
 // Static parsing functions (exposed for extraction)
 void parse_arith_constant(Parser *parser, Operation *op);
+void parse_arith_cmpi(Parser *parser, Operation *op);
 void parse_arith_binary(Parser *parser, Operation *op);
 void parse_arith_select(Parser *parser, Operation *op);
 void parse_tt_get_program_id(Parser *parser, Operation *op);

@@ -248,8 +248,18 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // Classic format: arith.cmpi slt, %0, %c10 : i64
             result = str_concat(arena, result, str_lit("arith.cmpi "));
             
-            // TODO: Extract comparison predicate from attributes
-            result = str_concat(arena, result, str_lit("slt"));
+            // Extract comparison predicate from attributes
+            string predicate = str_lit("slt"); // default fallback
+            if (op->n_attributes > 0) {
+                for (int i = 0; i < op->n_attributes; i++) {
+                    Attribute *attr = op->attributes[i];
+                    if (str_eq(attr->name, str_lit("predicate")) && attr->kind == ATTR_KIND_STRING) {
+                        predicate = attr->data.string_value;
+                        break;
+                    }
+                }
+            }
+            result = str_concat(arena, result, predicate);
             
             if (op->n_operands > 0) {
                 result = str_concat(arena, result, str_lit(", "));
@@ -533,6 +543,111 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
             break;
         }
+
+        case OP_TYPE_TT_LOAD: {
+            // Classic format: tt.load %ptr {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : f32
+            result = str_concat(arena, result, str_lit("tt.load "));
+            if (op->n_operands > 0 && op->operands[0]) {
+                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[0]));
+            }
+            
+            // Print attributes before the result type
+            if (op->n_attributes > 0) {
+                bool has_visible_attrs = false;
+                for (int i = 0; i < op->n_attributes; i++) {
+                    Attribute *attr = op->attributes[i];
+                    // Skip internal attributes
+                    if (str_eq(attr->name, str_lit("sym_name")) ||
+                        (str_eq(attr->name, str_lit("value")) && op->op_type == OP_TYPE_ARITH_CONSTANT) ||
+                        str_eq(attr->name, str_lit("axis")) ||
+                        str_eq(attr->name, str_lit("start")) ||
+                        str_eq(attr->name, str_lit("end"))) {
+                        continue;
+                    }
+                    if (!has_visible_attrs) {
+                        result = str_concat(arena, result, str_lit(" {"));
+                        has_visible_attrs = true;
+                    } else {
+                        result = str_concat(arena, result, str_lit(", "));
+                    }
+                    result = str_concat(arena, result, format(arena, str_lit("{} = "), attr->name));
+                    switch (attr->kind) {
+                        case ATTR_KIND_INTEGER:
+                            result = str_concat(arena, result, format(arena, str_lit("{}"), attr->data.integer_value));
+                            result = str_concat(arena, result, str_lit(" : i32"));
+                            break;
+                        case ATTR_KIND_BOOL:
+                            result = str_concat(arena, result, attr->data.bool_value ? str_lit("true") : str_lit("false"));
+                            break;
+                        default:
+                            result = str_concat(arena, result, str_lit("..."));
+                    }
+                }
+                if (has_visible_attrs) {
+                    result = str_concat(arena, result, str_lit("}"));
+                }
+            }
+            
+            // Print result type
+            if (op->n_result_types > 0 && op->result_types[0]) {
+                result = str_concat(arena, result, str_lit(" : "));
+                result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
+            }
+            break;
+        }
+
+        case OP_TYPE_TT_STORE: {
+            // Classic format: tt.store %ptr, %value {cache = 1 : i32, evict = 1 : i32} : f32
+            result = str_concat(arena, result, str_lit("tt.store "));
+            for (int i = 0; i < op->n_operands; i++) {
+                if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[i]));
+            }
+            
+            // Print attributes before the result type
+            if (op->n_attributes > 0) {
+                bool has_visible_attrs = false;
+                for (int i = 0; i < op->n_attributes; i++) {
+                    Attribute *attr = op->attributes[i];
+                    // Skip internal attributes
+                    if (str_eq(attr->name, str_lit("sym_name")) ||
+                        (str_eq(attr->name, str_lit("value")) && op->op_type == OP_TYPE_ARITH_CONSTANT) ||
+                        str_eq(attr->name, str_lit("axis")) ||
+                        str_eq(attr->name, str_lit("start")) ||
+                        str_eq(attr->name, str_lit("end"))) {
+                        continue;
+                    }
+                    if (!has_visible_attrs) {
+                        result = str_concat(arena, result, str_lit(" {"));
+                        has_visible_attrs = true;
+                    } else {
+                        result = str_concat(arena, result, str_lit(", "));
+                    }
+                    result = str_concat(arena, result, format(arena, str_lit("{} = "), attr->name));
+                    switch (attr->kind) {
+                        case ATTR_KIND_INTEGER:
+                            result = str_concat(arena, result, format(arena, str_lit("{}"), attr->data.integer_value));
+                            result = str_concat(arena, result, str_lit(" : i32"));
+                            break;
+                        case ATTR_KIND_BOOL:
+                            result = str_concat(arena, result, attr->data.bool_value ? str_lit("true") : str_lit("false"));
+                            break;
+                        default:
+                            result = str_concat(arena, result, str_lit("..."));
+                    }
+                }
+                if (has_visible_attrs) {
+                    result = str_concat(arena, result, str_lit("}"));
+                }
+            }
+            
+            // Print result type (for tt.store, it's the pointer operand type)
+            if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
+                result = str_concat(arena, result, str_lit(" : "));
+                result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
+            }
+            break;
+        }
         
         case OP_TYPE_TT_RETURN: {
             // Classic format: tt.return
@@ -622,7 +737,9 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
     // Print attributes for operations that should show them in classic format
     // Skip internal attributes that shouldn't be visible
-    if (op->n_attributes > 0 && op->op_type != OP_TYPE_TT_FUNC) {
+    if (op->n_attributes > 0 && op->op_type != OP_TYPE_TT_FUNC && 
+        op->op_type != OP_TYPE_TT_LOAD && op->op_type != OP_TYPE_TT_STORE &&
+        op->op_type != OP_TYPE_ARITH_CMPI) {
         bool has_visible_attrs = false;
         for (int i = 0; i < op->n_attributes; i++) {
             Attribute *attr = op->attributes[i];
