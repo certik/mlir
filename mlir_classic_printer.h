@@ -49,6 +49,16 @@ string print_region_classic(Arena *arena, int indent_level, Region *region);
  */
 string print_block_classic(Arena *arena, int bb_index, int indent_level, Block *block);
 
+/**
+ * Print a complete MLIR module with location map definitions.
+ * 
+ * @param arena Memory arena for allocating the result string
+ * @param module Module operation to print
+ * @param location_map Location map containing #locN definitions
+ * @return String containing the complete printed module with location definitions
+ */
+string print_module_classic(Arena *arena, Operation *module, LocationMap *location_map);
+
 #ifdef __cplusplus
 }
 #endif

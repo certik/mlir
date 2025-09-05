@@ -86,6 +86,34 @@ static string print_ssa_value_classic(PrintCtx *ctx, ValueRef *value) {
     }
 }
 
+// Helper to print location information
+static string print_location_classic(Arena *arena, Location *loc) {
+    if (!loc) return str_lit("");
+    
+    switch (loc->kind) {
+        case LOC_KIND_FILE:
+            return format(arena, str_lit(" loc({}:{}:{})"), 
+                         loc->data.file.filename, 
+                         (int64_t)loc->data.file.line, 
+                         (int64_t)loc->data.file.column);
+                         
+        case LOC_KIND_NAME:
+            return format(arena, str_lit(" loc(\"{}\")"), loc->data.name.name);
+            
+        case LOC_KIND_REF:
+            return format(arena, str_lit(" loc(#loc{})"), (int64_t)loc->data.ref.ref_id);
+            
+        case LOC_KIND_UNKNOWN:
+            if (loc->original_text.size > 0) {
+                return format(arena, str_lit(" {}"), loc->original_text);
+            }
+            return str_lit(" loc(unknown)");
+            
+        default:
+            return str_lit("");
+    }
+}
+
 static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int indent_level, Block *block) {
     Arena *arena = ctx->arena;
     string result = format(arena, str_lit("{}^bb{}"), indent_classic(arena, indent_level), bb_index);
@@ -400,6 +428,11 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         }
     }
 
+    // Print location if present
+    if (op->location) {
+        result = str_concat(arena, result, print_location_classic(arena, op->location));
+    }
+
     // Print regions if any
     if (op->n_regions > 0) {
         result = str_concat(arena, result, str_lit(" "));
@@ -435,4 +468,62 @@ string print_block_classic(Arena *arena, int bb_index, int indent_level, Block *
     ssa_map_init(&ctx, arena);
     preassign_block_ssa(&ctx, block, indent_level);
     return print_block_internal_classic(&ctx, bb_index, indent_level, block);
+}
+
+// Helper to print location map definitions
+static string print_location_map_classic(Arena *arena, LocationMap *location_map) {
+    string result = str_lit("");
+    
+    if (!location_map) return result;
+    
+    // Iterate over hashtable buckets to find location definitions
+    for (size_t i = 0; i < location_map->num_buckets; i++) {
+        if (location_map->buckets[i].occupied) {
+            string loc_name = location_map->buckets[i].key;
+            Location *loc = location_map->buckets[i].value;
+            
+            result = str_concat(arena, result, loc_name);
+            result = str_concat(arena, result, str_lit(" = "));
+            
+            switch (loc->kind) {
+                case LOC_KIND_FILE:
+                    result = str_concat(arena, result, 
+                        format(arena, str_lit("loc({}:{}:{})"), 
+                               loc->data.file.filename, 
+                               (int64_t)loc->data.file.line, 
+                               (int64_t)loc->data.file.column));
+                    break;
+                    
+                case LOC_KIND_NAME:
+                    result = str_concat(arena, result, 
+                        format(arena, str_lit("loc(\"{}\")"), loc->data.name.name));
+                    break;
+                    
+                case LOC_KIND_UNKNOWN:
+                    result = str_concat(arena, result, str_lit("loc(unknown)"));
+                    break;
+                    
+                default:
+                    result = str_concat(arena, result, str_lit("loc(unknown)"));
+                    break;
+            }
+            
+            result = str_concat(arena, result, str_lit("\n"));
+        }
+    }
+    
+    return result;
+}
+
+string print_module_classic(Arena *arena, Operation *module, LocationMap *location_map) {
+    // Print the module operation
+    string result = print_operation_classic(arena, 0, module);
+    
+    // Add location map definitions at the end
+    string loc_defs = print_location_map_classic(arena, location_map);
+    if (loc_defs.size > 0) {
+        result = str_concat(arena, result, loc_defs);
+    }
+    
+    return result;
 }

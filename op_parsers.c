@@ -91,7 +91,7 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
 
             // Optional trailing loc()
             if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-                parse_loc(parser);
+                op->location = parse_loc(parser);
             }
             return;
         }
@@ -139,7 +139,7 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
 
     // Optional trailing loc()
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        parse_loc(parser);
+        op->location = parse_loc(parser);
     }
 }
 
@@ -483,7 +483,7 @@ void parse_tt_store(Parser *parser, Operation *op) {
         }
         // Optional trailing loc()
         if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-            parse_loc(parser);
+            op->location = parse_loc(parser);
         }
     }
 }
@@ -621,7 +621,7 @@ void parse_memref_store(Parser *parser, Operation *op) {
             parser_next_token(parser);
         }
         if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-            parse_loc(parser);
+            op->location = parse_loc(parser);
         }
     }
     // Ensure no results
@@ -685,7 +685,7 @@ void parse_vector_print(Parser *parser, Operation *op) {
             parser_next_token(parser);
         }
         if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-            parse_loc(parser);
+            op->location = parse_loc(parser);
         }
     }
     // Ensure no results
@@ -756,7 +756,7 @@ void parse_cf_br(Parser *parser, Operation *op) {
 
     // Consume any trailing loc()
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        parse_loc(parser);
+        op->location = parse_loc(parser);
     }
 }
 
@@ -812,7 +812,7 @@ void parse_linalg_fill(Parser *parser, Operation *op) {
 
     // Consume any trailing loc()
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        parse_loc(parser);
+        op->location = parse_loc(parser);
     }
 }
 
@@ -904,7 +904,7 @@ void parse_affine_load(Parser *parser, Operation *op) {
 
     // Consume any trailing loc()
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        parse_loc(parser);
+        op->location = parse_loc(parser);
     }
 }
 
@@ -932,7 +932,7 @@ void parse_index_constant(Parser *parser, Operation *op) {
 
     // Consume any trailing loc()
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        parse_loc(parser);
+        op->location = parse_loc(parser);
     }
 }
 
@@ -1009,7 +1009,7 @@ void parse_tensor_splat(Parser *parser, Operation *op) {
 
     // Consume any trailing loc()
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        parse_loc(parser);
+        op->location = parse_loc(parser);
     }
 }
 
@@ -1076,7 +1076,7 @@ void parse_arith_select(Parser *parser, Operation *op) {
 
     // Consume any trailing loc()
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        parse_loc(parser);
+        op->location = parse_loc(parser);
     }
 }
 
@@ -1155,7 +1155,7 @@ void parse_tt_call(Parser *parser, Operation *op) {
 
     // Consume any trailing loc()
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        parse_loc(parser);
+        op->location = parse_loc(parser);
     }
 }
 
@@ -1226,7 +1226,7 @@ void parse_tensor_collapse_shape(Parser *parser, Operation *op) {
 
     // Consume any trailing loc()
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        parse_loc(parser);
+        op->location = parse_loc(parser);
     }
 }
 
@@ -1319,7 +1319,7 @@ void parse_generic_operation(Parser *parser, Operation *op) {
     }
     if (parser_peek(parser, TK_NAME)) {
         if (str_eq(parser_token_str(parser), str_lit("loc"))) {
-            parse_loc(parser);
+            op->location = parse_loc(parser);
         }
     }
 }
@@ -1494,7 +1494,7 @@ void parse_tt_func(Parser *parser, Operation *op) {
 
     if (parser_peek(parser, TK_NAME)) {
         if (str_eq(parser_token_str(parser), str_lit("loc"))) {
-            parse_loc(parser);
+            op->location = parse_loc(parser);
         }
     }
 
@@ -1592,7 +1592,7 @@ void parse_scf_if(Parser *parser, Operation *op) {
 
     if (parser_peek(parser, TK_NAME)) {
         if (str_eq(parser_token_str(parser), str_lit("loc"))) {
-            parse_loc(parser);
+            op->location = parse_loc(parser);
         }
     }
 
@@ -1882,7 +1882,7 @@ void parse_scf_while(Parser *parser, Operation *op) {
 
     if (parser_peek(parser, TK_NAME)) {
         if (str_eq(parser_token_str(parser), str_lit("loc"))) {
-            parse_loc(parser);
+            op->location = parse_loc(parser);
         }
     }
 
@@ -1952,7 +1952,7 @@ void parse_return_operation(Parser *parser, Operation *op) {
         // Consume tokens until newline/brace
         do {
             if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-                parse_loc(parser);
+                op->location = parse_loc(parser);
                 break;
             }
             parser_next_token(parser);
@@ -2047,7 +2047,7 @@ void parse_affine_for(Parser *parser, Operation *op) {
 
     // Optional trailing loc()
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        parse_loc(parser);
+        op->location = parse_loc(parser);
     }
 
     symbol_table_pop_scope(&parser->symbol_table);

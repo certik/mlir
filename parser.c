@@ -341,7 +341,7 @@ int main(int argc, char *argv[]) {
         op = parse_module(&parser);
         if (verbose) println(arena, str_lit("MLIR:"));
         if (use_classic_printer) {
-            println(arena, str_lit("{}"), print_operation_classic(arena, 0, op));
+            println(arena, str_lit("{}"), print_module_classic(arena, op, &parser.location_map));
         } else {
             println(arena, str_lit("{}"), print_operation_generic(arena, 0, op));
         }
