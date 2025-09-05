@@ -13,20 +13,20 @@ module() {
     ^bb3:
         %c4_i32 = arith.constant() {value = 4} -> i32
         %2 = arith.muli(%0: i32, %c4_i32: i32) -> i32
-        %3 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<4xi32>
-        %4 = tt.splat(%2: i32) -> tensor<4xi32>
+        %3 = tt.make_range() {end = 4 : i32, start = 0 : i32} -> tensor<4xi32>
+        %4 = tt.splat(%2: i32) {_sig_parens = ..., _sig_src = "i32"} -> tensor<4xi32>
         %5 = arith.addi(%4: tensor<4xi32>, %3: tensor<4xi32>) -> tensor<4xi32>
         %c4_i32_0 = arith.constant() {value = 4} -> i32
-        %cst = arith.constant() -> tensor<4xi32>
+        %cst = arith.constant() {value_text = "dense<4>"} -> tensor<4xi32>
         %6 = arith.cmpi(%5: tensor<4xi32>, %cst: tensor<4xi32>) {predicate = "slt"} -> tensor<4xi32>
-        %7 = tt.splat(%arg0: !tt.ptr<f32, 1>) -> tensor<4x!tt.ptr<f32, 1>>
+        %7 = tt.splat(%arg0: !tt.ptr<f32, 1>) {_sig_parens = ..., _sig_src = "!tt.ptr<f32,1>"} -> tensor<4x!tt.ptr<f32, 1>>
         %8 = tt.addptr(%7: tensor<4x!tt.ptr<f32, 1>>, %5: tensor<4xi32>) -> tensor<4x!tt.ptr<f32, 1>>
         %9 = tt.load(%8: tensor<4x!tt.ptr<f32, 1>>, %6: tensor<4xi32>) {cache = 1, evict = 1, isVolatile = ...} -> tensor<4xf32>
-        %10 = tt.splat(%arg1: !tt.ptr<f32, 1>) -> tensor<4x!tt.ptr<f32, 1>>
+        %10 = tt.splat(%arg1: !tt.ptr<f32, 1>) {_sig_parens = ..., _sig_src = "!tt.ptr<f32,1>"} -> tensor<4x!tt.ptr<f32, 1>>
         %11 = tt.addptr(%10: tensor<4x!tt.ptr<f32, 1>>, %5: tensor<4xi32>) -> tensor<4x!tt.ptr<f32, 1>>
         %12 = tt.load(%11: tensor<4x!tt.ptr<f32, 1>>, %6: tensor<4xi32>) {cache = 1, evict = 1, isVolatile = ...} -> tensor<4xf32>
         %13 = arith.addf(%9: tensor<4xf32>, %12: tensor<4xf32>) -> tensor<4xf32>
-        %14 = tt.splat(%arg2: !tt.ptr<f32, 1>) -> tensor<4x!tt.ptr<f32, 1>>
+        %14 = tt.splat(%arg2: !tt.ptr<f32, 1>) {_sig_parens = ..., _sig_src = "!tt.ptr<f32,1>"} -> tensor<4x!tt.ptr<f32, 1>>
         %15 = tt.addptr(%14: tensor<4x!tt.ptr<f32, 1>>, %5: tensor<4xi32>) -> tensor<4x!tt.ptr<f32, 1>>
         tt.store(%15: tensor<4x!tt.ptr<f32, 1>>, %13: tensor<4xf32>, %6: tensor<4xi32>) {cache = 1, evict = 1}
         tt.return()

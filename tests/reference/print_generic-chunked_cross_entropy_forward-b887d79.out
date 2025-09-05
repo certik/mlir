@@ -2,12 +2,12 @@ module() {
 ^bb0:
     tt.func(%arg0: !tt.ptr<bf16>, %arg1: i32, %arg2: !tt.ptr<f32>, %arg3: !tt.ptr<f32>, %arg4: !tt.ptr<i64>) {sym_name = "_chunked_cross_entropy_forward_0d1d2d3d4d"} {
     ^bb0:
-        %cst = arith.constant() -> tensor<65536xbf16>
+        %cst = arith.constant() {value_text = "dense<0xFF80>"} -> tensor<65536xbf16>
         %cst_0 = arith.constant() {value = ...} -> f32
-        %cst_1 = arith.constant() -> f32
-        %c-100_i32 = arith.constant() -> i32
+        %cst_1 = arith.constant() {value_text = "-1.000000e+00"} -> f32
+        %c-100_i32 = arith.constant() {value_text = "-100"} -> i32
         %c0_i32 = arith.constant() {value = 0} -> i32
-        %cst_2 = arith.constant() -> tensor<65536xi32>
+        %cst_2 = arith.constant() {value_text = "dense<128256>"} -> tensor<65536xi32>
         %c65536_i32 = arith.constant() {value = 65536} -> i32
         %c2_i32 = arith.constant() {value = 2} -> i32
         %0 = tt.get_program_id() {axis = "x"} -> i32
@@ -22,22 +22,22 @@ module() {
         %9 = tt.addptr(%arg3: !tt.ptr<f32>, %8: i32) -> !tt.ptr<f32>
         %10 = tt.addptr(%arg4: !tt.ptr<i64>, %0: i32) -> !tt.ptr<i64>
         %11 = arith.muli(%1: i32, %c65536_i32: i32) -> i32
-        %12 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<65536xi32>
-        %13 = tt.splat(%11: i32) -> tensor<65536xi32>
+        %12 = tt.make_range() {end = 65536 : i32, start = 0 : i32} -> tensor<65536xi32>
+        %13 = tt.splat(%11: i32) {_sig_parens = ..., _sig_src = "i32"} -> tensor<65536xi32>
         %14 = arith.addi(%13: tensor<65536xi32>, %12: tensor<65536xi32>) -> tensor<65536xi32>
         %15 = arith.cmpi(%14: tensor<65536xi32>, %cst_2: tensor<65536xi32>) {predicate = "slt"} -> tensor<65536xi32>
         %16 = tt.load(%10: !tt.ptr<i64>) {cache = 1, evict = 1, isVolatile = ...} -> i64
         %17 = "arith.trunci"(%16: i64) -> i64
-        %18 = tt.splat(%5: !tt.ptr<bf16>) -> tensor<65536x!tt.ptr<bf16>>
+        %18 = tt.splat(%5: !tt.ptr<bf16>) {_sig_parens = ..., _sig_src = "!tt.ptr<bf16>"} -> tensor<65536x!tt.ptr<bf16>>
         %19 = tt.addptr(%18: tensor<65536x!tt.ptr<bf16>>, %14: tensor<65536xi32>) -> tensor<65536x!tt.ptr<bf16>>
         %20 = tt.load(%19: tensor<65536x!tt.ptr<bf16>>, %15: tensor<65536xi32>, %cst: tensor<65536xbf16>) {cache = 1, evict = 1, isVolatile = ...} -> tensor<65536xbf16>
         %21 = "arith.extf"(%20: tensor<65536xbf16>) -> tensor<65536xbf16>
         %22 = tt.reduce(%21: tensor<65536xbf16>) -> ? {
         ^bb0(%arg5: f32, %arg6: f32):
-            %30 = "tt.pure_extern_elementwise"(%arg5: f32, %arg6: f32) {libname = 0, libpath = 0, symbol = 0} -> f32
+            %30 = "tt.pure_extern_elementwise"(%arg5: f32, %arg6: f32) {libname = 0, libpath = 0, symbol = 0, _sig_parens = ..., _sig_src = "f32"} -> f32
             tt.reduce.return()
         }
-        %23 = tt.splat(%22: ?) -> tensor<65536xf32>
+        %23 = tt.splat(%22: ?) {_sig_parens = ..., _sig_src = "f32"} -> tensor<65536xf32>
         %24 = arith.subf(%21: tensor<65536xbf16>, %23: tensor<65536xf32>) -> tensor<65536xf32>
         %25 = "math.exp"(%24: tensor<65536xf32>) -> tensor<65536xf32>
         %26 = tt.reduce(%25: tensor<65536xf32>) -> ? {

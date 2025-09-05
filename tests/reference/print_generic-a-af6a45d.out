@@ -1,6 +1,6 @@
 module() {
 ^bb0:
-    %0 = std.constant() -> i32
+    %0 = std.constant() {_sig_parens = ..., _sig_src = ""} -> i32
     std.return()
 }
 

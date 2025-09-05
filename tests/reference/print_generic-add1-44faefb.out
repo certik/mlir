@@ -5,7 +5,7 @@ module() {
         %c1024_i32 = arith.constant() {value = 1024} -> i32
         %0 = tt.get_program_id() {axis = "x"} -> i32
         %1 = arith.muli(%0: i32, %c1024_i32: i32) -> i32
-        %2 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<1024xi32>
+        %2 = tt.make_range() {end = 1024 : i32, start = 0 : i32} -> tensor<1024xi32>
         %3 = tt.splat(%1: i32) -> tensor<1024xi32>
         %4 = arith.addi(%3: tensor<1024xi32>, %2: tensor<1024xi32>) -> tensor<1024xi32>
         %5 = tt.splat(%arg3: i32) -> tensor<1024xi32>
