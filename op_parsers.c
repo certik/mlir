@@ -241,11 +241,15 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                     parser_next_token(parser);
                 }
             } else {
-                // Treat as single result type ": type"
-                op->n_result_types = 1;
-                op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-                op->result_types[0] = arena_alloc(parser->arena, Type);
-                op->result_types[0] = parse_type_from_string(parser->arena, type_left);
+                // Treat as single result type ": type" for most ops,
+                // but do NOT override for compare ops like arith.cmpi where
+                // the colon type is the operand type, not the result.
+                if (!(op->opname.size > 0 && str_eq(op->opname, str_lit("arith.cmpi")))) {
+                    op->n_result_types = 1;
+                    op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+                    op->result_types[0] = arena_alloc(parser->arena, Type);
+                    op->result_types[0] = parse_type_from_string(parser->arena, type_left);
+                }
             }
         }
     }
@@ -1039,7 +1043,7 @@ void parse_cf_br(Parser *parser, Operation *op) {
 }
 
 void parse_cf_cond_br(Parser *parser, Operation *op) {
-    // Parse: cf.cond_br %cond, ^bbX, ^bbY [loc]
+    // Parse: cf.cond_br %cond, ^bbX[(args : types)], ^bbY[(args : types)] [loc]
     VecValueRef operands; VecValueRef_reserve(parser->arena, &operands, 1);
     // condition
     if (parser_peek(parser, TK_REGISTER)) {
@@ -1080,13 +1084,15 @@ void parse_cf_cond_br(Parser *parser, Operation *op) {
                 }
             }
             parser_expect(parser, TK_RPAREN);
-            // store count
-            // append attribute _ntrue
+            // store count for true branch
+            // append attribute _ntrue (accumulate, don't overwrite later)
             size_t n = op->n_attributes; Attribute **attrs = op->attributes;
             Attribute *an = arena_alloc(parser->arena, Attribute);
             an->name = str_lit("_ntrue"); an->kind = ATTR_KIND_INTEGER; an->data.integer_value = ntrue;
             Attribute **na = arena_alloc_array(parser->arena, Attribute*, n+1);
-            for (size_t i=0;i<n;i++) na[i]=attrs[i]; na[n]=an; op->attributes=na; op->n_attributes=n+1;
+            for (size_t i=0;i<n;i++) na[i]=attrs[i];
+            na[n]=an;
+            op->attributes=na; op->n_attributes=(int)(n+1);
         }
     }
     if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
@@ -1121,21 +1127,25 @@ void parse_cf_cond_br(Parser *parser, Operation *op) {
             Attribute *an = arena_alloc(parser->arena, Attribute);
             an->name = str_lit("_nfalse"); an->kind = ATTR_KIND_INTEGER; an->data.integer_value = nfalse;
             Attribute **na = arena_alloc_array(parser->arena, Attribute*, n+1);
-            for (size_t i=0;i<n;i++) na[i]=attrs[i]; na[n]=an; op->attributes=na; op->n_attributes=n+1;
+            for (size_t i=0;i<n;i++) na[i]=attrs[i];
+            na[n]=an;
+            op->attributes=na; op->n_attributes=(int)(n+1);
         }
     }
     op->operands = operands.data; op->n_operands = operands.size;
-    // Store private attributes for classic printing
-    op->n_attributes = 2;
-    op->attributes = arena_alloc_array(parser->arena, Attribute*, 2);
-    op->attributes[0] = arena_alloc(parser->arena, Attribute);
-    op->attributes[0]->name = str_lit("_true");
-    op->attributes[0]->kind = ATTR_KIND_STRING;
-    op->attributes[0]->data.string_value = ttrue;
-    op->attributes[1] = arena_alloc(parser->arena, Attribute);
-    op->attributes[1]->name = str_lit("_false");
-    op->attributes[1]->kind = ATTR_KIND_STRING;
-    op->attributes[1]->data.string_value = tfalse;
+    // Store private attributes for classic printing; append _true/_false without dropping existing counts
+    size_t n0 = op->n_attributes; Attribute **attrs0 = op->attributes;
+    Attribute **na0 = arena_alloc_array(parser->arena, Attribute*, n0 + 2);
+    for (size_t i=0;i<n0;i++) na0[i]=attrs0[i];
+    na0[n0] = arena_alloc(parser->arena, Attribute);
+    na0[n0]->name = str_lit("_true");
+    na0[n0]->kind = ATTR_KIND_STRING;
+    na0[n0]->data.string_value = ttrue;
+    na0[n0+1] = arena_alloc(parser->arena, Attribute);
+    na0[n0+1]->name = str_lit("_false");
+    na0[n0+1]->kind = ATTR_KIND_STRING;
+    na0[n0+1]->data.string_value = tfalse;
+    op->attributes = na0; op->n_attributes = (int)(n0 + 2);
     // Optional loc
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
         op->location = parse_loc(parser);

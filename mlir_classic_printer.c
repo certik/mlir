@@ -1189,7 +1189,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
     // Skip internal attributes that shouldn't be visible
     if (op->n_attributes > 0 && op->op_type != OP_TYPE_TT_FUNC && 
         op->op_type != OP_TYPE_TT_LOAD && op->op_type != OP_TYPE_TT_STORE &&
-        op->op_type != OP_TYPE_ARITH_CMPI && op->op_type != OP_TYPE_TT_MAKE_RANGE) {
+        op->op_type != OP_TYPE_ARITH_CMPI && op->op_type != OP_TYPE_TT_MAKE_RANGE &&
+        op->op_type != OP_TYPE_FUNC_FUNC) {
         // If there are tt.* attributes, we printed them inline already for default ops
         bool any_tt = false; for (int i=0;i<op->n_attributes;i++){ if (op->attributes[i]->name.size>=3 && op->attributes[i]->name.str[0]=='t' && op->attributes[i]->name.str[1]=='t' && op->attributes[i]->name.str[2]=='.') { any_tt=true; break; } }
         if (!any_tt) {
@@ -1254,8 +1255,9 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         }
     }
 
-    // For classic formatting: place regions (when present)
-    if (op->n_regions > 0) {
+    // For classic formatting: place regions (when present).
+    // Skip here for func.func since its region was already printed in its case above.
+    if (op->n_regions > 0 && op->op_type != OP_TYPE_FUNC_FUNC) {
         result = str_concat(arena, result, str_lit(" "));
         for (int i = 0; i < op->n_regions; i++) {
             // Special handling for SCF if else
