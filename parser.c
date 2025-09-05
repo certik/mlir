@@ -242,49 +242,61 @@ Operation* construct_test_module_full(Arena *arena) {
 }
 
 int main(int argc, char *argv[]) {
-    printf("Starting main...\n");
-    Arena *arena = arena_create(50*1024*1024);  // Increase arena size
-    printf("Arena created...\n");
-
-    // Check for options
+    // Check for options first
     bool use_construction = false;
     bool use_classic_printer = false;
+    bool verbose = false;
     char *input_file = NULL;
 
-    printf("Parsing args...\n");
+    // Parse arguments first to determine verbose mode
     for (int i = 1; i < argc; i++) {
-        printf("Arg %d: %s\n", i, argv[i]);
+        if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) {
+            verbose = true;
+            break;
+        }
+    }
+
+    if (verbose) printf("Starting main...\n");
+    Arena *arena = arena_create(50*1024*1024);  // Increase arena size
+    if (verbose) printf("Arena created...\n");
+
+    if (verbose) printf("Parsing args...\n");
+    for (int i = 1; i < argc; i++) {
+        if (verbose) printf("Arg %d: %s\n", i, argv[i]);
         if (strcmp(argv[i], "--construct") == 0) {
             use_construction = true;
-            printf("Construction mode enabled\n");
+            if (verbose) printf("Construction mode enabled\n");
         } else if (strcmp(argv[i], "--classic") == 0 || strcmp(argv[i], "-c") == 0) {
             use_classic_printer = true;
-            printf("Classic printer enabled\n");
+            if (verbose) printf("Classic printer enabled\n");
+        } else if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) {
+            verbose = true;
+            if (verbose) printf("Verbose mode enabled\n");
         } else if (argv[i][0] != '-') {
             input_file = argv[i];
         }
     }
-    printf("Done parsing args. use_construction=%d, use_classic_printer=%d\n", use_construction, use_classic_printer);
+    if (verbose) printf("Done parsing args. use_construction=%d, use_classic_printer=%d\n", use_construction, use_classic_printer);
 
     Operation* op;
 
     int exit_code;
     if (use_construction) {
         // Use constructed test module
-        printf("Creating module...\n");
+        if (verbose) printf("Creating module...\n");
         op = construct_test_module_full(arena);
-        printf("Module created successfully.\n");
+        if (verbose) printf("Module created successfully.\n");
 
         // Test generic printing with expected output comparison
-        printf("=== Generic Printer Test ===\n");
-        printf("About to print operation...\n");
+        if (verbose) printf("=== Generic Printer Test ===\n");
+        if (verbose) printf("About to print operation...\n");
         string result;
         if (use_classic_printer) {
             result = print_operation_classic(arena, 0, op);
         } else {
             result = print_operation_generic(arena, 0, op);
         }
-        printf("Printing result...\n");
+        if (verbose) printf("Printing result...\n");
         println(arena, str_lit("{}"), result);
 
         // Reference expected output for generic mode
@@ -302,12 +314,12 @@ int main(int argc, char *argv[]) {
 
         // Compare output
         if (str_eq(result, str_from_cstr_view((char*)expected))) {
-            printf("✅ Generic mode test PASSED\n");
+            if (verbose) printf("✅ Generic mode test PASSED\n");
             exit_code = 0;
         } else {
-            printf("❌ Generic mode test FAILED\n");
-            printf("Expected:\n%s\n", expected);
-            printf("Actual:\n");
+            if (verbose) printf("❌ Generic mode test FAILED\n");
+            if (verbose) printf("Expected:\n%s\n", expected);
+            if (verbose) printf("Actual:\n");
             println(arena, str_lit("{}"), result);
             exit_code = 1;
         }
@@ -327,7 +339,7 @@ int main(int argc, char *argv[]) {
         Parser parser;
         parser_init(arena, &parser, mlir_code);
         op = parse_module(&parser);
-        println(arena, str_lit("MLIR:"));
+        if (verbose) println(arena, str_lit("MLIR:"));
         if (use_classic_printer) {
             println(arena, str_lit("{}"), print_operation_classic(arena, 0, op));
         } else {
