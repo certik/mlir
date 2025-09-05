@@ -2004,11 +2004,11 @@ void parse_scf_for(Parser *parser, Operation *op) {
     VecValueRef_reserve(parser->arena, &block_args, 2);
 
     if (loop_var) {
-        // Create a new ValueRef for the block argument %arg0
+        // Create a new ValueRef for the block argument using the original loop variable name
         ValueRef *loop_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
-        loop_block_arg->register_name = str_lit("%arg0");
+        loop_block_arg->register_name = loop_var->register_name;
         loop_block_arg->type = arena_alloc(parser->arena, Type);
-        loop_block_arg->type = parse_type_from_string(parser->arena, str_lit("index"));
+        loop_block_arg->type = parse_type_from_string(parser->arena, str_lit("i32"));
 
         loop_block_arg->result_index = 0;
         loop_block_arg->def = block;

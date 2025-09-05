@@ -65,8 +65,8 @@ module() {
         %47 = arith.muli(%arg7: i32, %c16_i32: i32) -> i32
         %48 = tt.splat(%47: i32) -> tensor<16x64xi32>
         %49 = scf.for(%c0_i32: i32, %46: i32, %c1_i32: i32, %cst_0: tensor<32x64xf32>, %35: tensor<32x16x!tt.ptr<f32, 1>>, %44: tensor<16x64x!tt.ptr<f32, 1>>) -> tensor<32x64xf32> {
-        ^bb0(%arg0: index, %arg1: i16, %arg2: i16, %arg3: i16):
-            %66 = arith.muli(%arg0: index, %c16_i32: i32) -> i32
+        ^bb0(%arg9: i32, %arg1: i16, %arg2: i16, %arg3: i16):
+            %66 = arith.muli(%arg9: i32, %c16_i32: i32) -> i32
             %67 = arith.subi(%arg5: i32, %66: i32) -> i32
             %68 = tt.splat(%67: i32) -> tensor<1x16xi32>
             %69 = arith.cmpi(%30: tensor<1x16xi32>, %68: tensor<1x16xi32>) {predicate = "slt"} -> tensor<1x16xi32>

@@ -7,16 +7,16 @@ module() {
         %c10 = arith.constant() {value = 10} -> index
         %c1 = arith.constant() {value = 1} -> index
         scf.for(%c0: index, %c10: index, %c1: index) {
-        ^bb0(%arg0: index):
+        ^bb0(%arg2: i32):
             %c0_0 = arith.constant() {value = 0} -> index
             %c20 = arith.constant() {value = 20} -> index
             %c1_1 = arith.constant() {value = 1} -> index
             scf.for(%c0_0: index, %c20: index, %c1_1: index) {
-            ^bb0(%arg0: index):
-                %0 = memref.load(%arg0: unknown, %arg0: index, %arg0: index) -> memref<10x20xf32>
-                %1 = memref.load(%arg1: unknown, %arg0: index, %arg0: index) -> memref<10x20xf32>
+            ^bb0(%arg3: i32):
+                %0 = memref.load(%arg0: unknown, %arg2: i32, %arg3: i32) -> memref<10x20xf32>
+                %1 = memref.load(%arg1: unknown, %arg2: i32, %arg3: i32) -> memref<10x20xf32>
                 %2 = arith.addf(%0: memref<10x20xf32>, %1: memref<10x20xf32>) -> f32
-                memref.store(%2: f32, %alloc: memref<10x20xf32>, %arg0: index, %arg0: index)
+                memref.store(%2: f32, %alloc: memref<10x20xf32>, %arg2: i32, %arg3: i32)
             }
         }
         return()
