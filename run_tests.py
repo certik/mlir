@@ -138,7 +138,7 @@ def single_test(test: Dict, verbose: bool, no_llvm: bool, skip_run_with_dbg: boo
     if print_classic:
         run_test(
             filename,
-            "check_classic",
+            "print_classic",
             "./parser {infile} --classic > {outfile}",
             filename,
             update_reference,
