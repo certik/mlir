@@ -965,7 +965,36 @@ Location* parse_loc(Parser *parser) {
     parser_expect(parser, TK_LPAREN);
     
     // Check what kind of location this is
-    if (parser_peek(parser, TK_STRING)) {
+    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("callsite"))) {
+        // Capture loc(callsite(...)) verbatim as original_text
+        string text = str_lit("loc(");
+        // Accumulate tokens until we hit the matching ')' of loc(
+        int depth = 0;
+        while (!parser_peek(parser, TK_EOF)) {
+            string tok = parser_token_str(parser);
+            if (parser_peek(parser, TK_LPAREN)) depth++;
+            else if (parser_peek(parser, TK_RPAREN)) {
+                if (depth == 0) break; else depth--;
+            }
+            // Insert space before identifiers or #loc if needed
+            if (tok.size > 0) {
+                char c0 = tok.str[0];
+                char last = text.size > 0 ? text.str[text.size - 1] : 0;
+                bool need_space = false;
+                if ((c0 == '#' || (c0 >= 'A' && c0 <= 'z')) && last != '(' && last != ' ' && last != ',') {
+                    need_space = true;
+                }
+                if (need_space) text = str_concat(parser->arena, text, str_lit(" "));
+            }
+            text = str_concat(parser->arena, text, tok);
+            parser_next_token(parser);
+        }
+        parser_expect(parser, TK_RPAREN);
+        text = str_concat(parser->arena, text, str_lit(")"));
+        loc->kind = LOC_KIND_UNKNOWN;
+        loc->original_text = text;
+        return loc;
+    } else if (parser_peek(parser, TK_STRING)) {
         // loc("filename":line:col) or loc("name")
         string filename = parser_token_str(parser);
         parser_next_token(parser);
@@ -1018,8 +1047,17 @@ Location* parse_loc(Parser *parser) {
     
     parser_expect(parser, TK_RPAREN);
     
-    // Capture original text for printing (simplified for now)
-    loc->original_text = str_lit("loc(unknown)");
+    // Capture original text for printing (simple reconstruction)
+    if (loc->kind == LOC_KIND_FILE) {
+        loc->original_text = format(parser->arena, str_lit("loc({}:{}:{})"),
+            loc->data.file.filename, (int64_t)loc->data.file.line, (int64_t)loc->data.file.column);
+    } else if (loc->kind == LOC_KIND_NAME) {
+        loc->original_text = format(parser->arena, str_lit("loc(\"{}\")"), loc->data.name.name);
+    } else if (loc->kind == LOC_KIND_REF) {
+        loc->original_text = format(parser->arena, str_lit("loc(#loc{})"), (int64_t)loc->data.ref.ref_id);
+    } else {
+        loc->original_text = str_lit("loc(unknown)");
+    }
     
     return loc;
 }

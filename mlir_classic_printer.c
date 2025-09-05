@@ -1110,22 +1110,25 @@ static string print_location_map_classic(Arena *arena, LocationMap *location_map
         result = str_concat(arena, result, arr[i].key);
         result = str_concat(arena, result, str_lit(" = "));
         Location *loc = arr[i].loc;
-        switch (loc->kind) {
-            case LOC_KIND_FILE:
-                result = str_concat(arena, result,
-                    format(arena, str_lit("loc({}:{}:{})"),
-                           loc->data.file.filename,
-                           (int64_t)loc->data.file.line,
-                           (int64_t)loc->data.file.column));
-                break;
-            case LOC_KIND_NAME:
-                result = str_concat(arena, result,
-                    format(arena, str_lit("loc(\"{}\")"), loc->data.name.name));
-                break;
-            case LOC_KIND_UNKNOWN:
-            default:
-                result = str_concat(arena, result, str_lit("loc(unknown)"));
-                break;
+        if (loc->original_text.size > 0) {
+            result = str_concat(arena, result, loc->original_text);
+        } else {
+            switch (loc->kind) {
+                case LOC_KIND_FILE:
+                    result = str_concat(arena, result,
+                        format(arena, str_lit("loc({}:{}:{})"),
+                               loc->data.file.filename,
+                               (int64_t)loc->data.file.line,
+                               (int64_t)loc->data.file.column));
+                    break;
+                case LOC_KIND_NAME:
+                    result = str_concat(arena, result,
+                        format(arena, str_lit("loc(\"{}\")"), loc->data.name.name));
+                    break;
+                default:
+                    result = str_concat(arena, result, str_lit("loc(unknown)"));
+                    break;
+            }
         }
         result = str_concat(arena, result, str_lit("\n"));
     }

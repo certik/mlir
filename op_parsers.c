@@ -214,7 +214,22 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
             string type_left = str_lit("");
             parse_type_string(parser, &type_left);
 
-            if (parser_peek(parser, TK_ARROW)) {
+            // Handle special form: "type * type -> result"
+            if (parser_peek(parser, TK_STAR)) {
+                parser_expect(parser, TK_STAR);
+                string type_right_mul = str_lit("");
+                parse_type_string(parser, &type_right_mul);
+                // Expect arrow and a result type
+                if (parser_peek(parser, TK_ARROW)) parser_expect(parser, TK_ARROW);
+                string type_res = str_lit("");
+                if (parse_type_string(parser, &type_res)) {
+                    op->n_result_types = 1;
+                    op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+                    op->result_types[0] = parse_type_from_string(parser->arena, type_res);
+                }
+                // Done handling this signature. Do not consume further (keep trailing loc()).
+                return;
+            } else if (parser_peek(parser, TK_ARROW)) {
                 // Form ": <src-type> -> <result-type>"
                 parser_expect(parser, TK_ARROW);
                 string type_right = str_lit("");
