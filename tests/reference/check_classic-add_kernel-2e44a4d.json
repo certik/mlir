@@ -1,0 +1,13 @@
+{
+    "basename": "check_classic-add_kernel-2e44a4d",
+    "cmd": "./parser {infile} --classic > {outfile}",
+    "infile": "tests/add_kernel.ttir",
+    "infile_hash": "722c799c60f583e83fb105ca0bb08e235b79a48a075e82a6f89ec84b",
+    "outfile": "check_classic-add_kernel-2e44a4d.out",
+    "outfile_hash": "e837bc42091adea712ada4bf6586828429b66fbc00500992b3a55541",
+    "stdout": null,
+    "stdout_hash": null,
+    "stderr": null,
+    "stderr_hash": null,
+    "returncode": 0
+}

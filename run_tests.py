@@ -89,6 +89,8 @@ def single_test(test: Dict, verbose: bool, no_llvm: bool, skip_run_with_dbg: boo
     bin_ = is_included("bin")
     fast = is_included("fast")
     print_generic = is_included("print_generic")
+    print_classic = is_included("print_classic")
+    check_classic = is_included("check_classic")
     print_leading_space = is_included("print_leading_space")
     interactive = is_included("interactive")
     options = test.get("options", "")
@@ -121,25 +123,33 @@ def single_test(test: Dict, verbose: bool, no_llvm: bool, skip_run_with_dbg: boo
     else:
         log.debug(f"{color(style.bold)} START TEST: {color(style.reset)} {filename}")
 
-    extra_args = f"--no-error-banner {show_verbose}"
-    if print_leading_space:
-        extra_args += " --print-leading-space"
-    if interactive:
-        extra_args += " --interactive-parse"
-    if cpp_infer:
-        extra_args += " --cpp-infer"
-    if line:
-        extra_args += " --line=" + line
-    if column:
-        extra_args += " --column=" + column
-    if options:
-        extra_args += " " + options
+    extra_args = ""
 
     if print_generic:
         run_test(
             filename,
             "print_generic",
             "./parser {infile} > {outfile}",
+            filename,
+            update_reference,
+            verify_hash,
+            extra_args)
+
+    if print_classic:
+        run_test(
+            filename,
+            "check_classic",
+            "./parser {infile} --classic > {outfile}",
+            filename,
+            update_reference,
+            verify_hash,
+            extra_args)
+
+    if check_classic:
+        run_test(
+            filename,
+            "check_classic",
+            "./parser {infile} --classic > {infile}2 && diff {infile} {infile}2",
             filename,
             update_reference,
             verify_hash,
