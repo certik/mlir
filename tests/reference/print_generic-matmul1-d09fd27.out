@@ -76,10 +76,10 @@ module() {
             %73 = arith.cmpi(%36: tensor<16x1xi32>, %72: tensor<16x1xi32>) {predicate = "slt"} -> tensor<16x1xi32>
             %74 = "tt.broadcast"(%73: tensor<16x1xi32>) {_sig_parens = ..., _sig_src = "tensor<16x1xi1>"} -> tensor<16x64xi1>
             %75 = tt.load(%arg12: tensor<16x64x!tt.ptr<f32, 1>>, %74: tensor<16x64xi1>, %cst_1: tensor<16x64xf32>) {cache = 1, evict = 1, isVolatile = ...} -> tensor<16x64xf32>
-            %76 = "tt.dot"(%71: tensor<32x16xf32>, %75: tensor<16x64xf32>, %arg10: tensor<32x64xf32>) {allowTF32 = ..., maxNumImpreciseAcc = 0} -> tensor<32x16xf32>
+            %76 = "tt.dot"(%71: tensor<32x16xf32>, %75: tensor<16x64xf32>, %arg10: tensor<32x64xf32>) {allowTF32 = ..., maxNumImpreciseAcc = 0} -> tensor<32x64xf32>
             %77 = tt.addptr(%arg11: tensor<32x16x!tt.ptr<f32, 1>>, %cst: tensor<32x16xi32>) -> tensor<32x16x!tt.ptr<f32, 1>>
             %78 = tt.addptr(%arg12: tensor<16x64x!tt.ptr<f32, 1>>, %48: tensor<16x64xi32>) -> tensor<16x64x!tt.ptr<f32, 1>>
-            scf.yield(%76: tensor<32x16xf32>, %77: tensor<32x16x!tt.ptr<f32, 1>>, %78: tensor<16x64x!tt.ptr<f32, 1>>)
+            scf.yield(%76: tensor<32x64xf32>, %77: tensor<32x16x!tt.ptr<f32, 1>>, %78: tensor<16x64x!tt.ptr<f32, 1>>)
         }
         %50 = "tt.expand_dims"(%17: tensor<32xi32>) {axis = 1, _sig_parens = ..., _sig_src = "tensor<32xi32>"} -> tensor<32x1xi32>
         %51 = tt.splat(%arg8: i32) {_sig_parens = ..., _sig_src = "i32"} -> tensor<32x1xi32>
