@@ -78,6 +78,9 @@ ValueRef* create_value_ref(Arena *arena, ValueKind kind) {
     value->has_divisibility = false;
     value->divisibility_value = 0;
     value->divisibility_type = NULL;
+    value->has_max_divisibility = false;
+    value->max_divisibility_value = 0;
+    value->max_divisibility_type = NULL;
     return value;
 }
 

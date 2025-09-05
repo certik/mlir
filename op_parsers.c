@@ -55,11 +55,94 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
     // Attributes block
     if (parser_peek(parser, TK_LBRACE)) {
         parser_expect(parser, TK_LBRACE);
-        int brace_depth = 1;
-        while (brace_depth > 0 && !parser_peek(parser, TK_EOF)) {
-            if (parser_peek(parser, TK_LBRACE)) brace_depth++;
-            else if (parser_peek(parser, TK_RBRACE)) brace_depth--;
-            parser_next_token(parser);
+        
+        Attribute **attrs = NULL;
+        size_t n_attrs = 0;
+        size_t attrs_capacity = 4;
+        attrs = arena_alloc_array(parser->arena, Attribute*, attrs_capacity);
+        
+        while (!parser_peek(parser, TK_RBRACE) && !parser_peek(parser, TK_EOF)) {
+            // Parse attribute name
+            if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
+                string attr_name = parser_token_str(parser);
+                parser_next_token(parser);
+                
+                // Expect '='
+                if (parser_peek(parser, TK_EQUAL)) {
+                    parser_expect(parser, TK_EQUAL);
+                    
+                    // Grow array if needed
+                    if (n_attrs >= attrs_capacity) {
+                        attrs_capacity *= 2;
+                        Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, attrs_capacity);
+                        for (size_t i = 0; i < n_attrs; i++) new_attrs[i] = attrs[i];
+                        attrs = new_attrs;
+                    }
+                    
+                    Attribute *attr = arena_alloc(parser->arena, Attribute);
+                    attr->name = attr_name;
+                    
+                    // Parse attribute value
+                    if (parser_peek(parser, TK_INTEGER)) {
+                        string val_str = parser_token_str(parser);
+                        parser_expect(parser, TK_INTEGER);
+                        
+                        attr->kind = ATTR_KIND_INTEGER;
+                        attr->data.integer_value = 0;
+                        for (size_t i = 0; i < val_str.size; i++) {
+                            char c = val_str.str[i];
+                            if (c >= '0' && c <= '9') {
+                                attr->data.integer_value = attr->data.integer_value * 10 + (c - '0');
+                            }
+                        }
+                    } else if (parser_peek(parser, TK_NAME)) {
+                        string val_str = parser_token_str(parser);
+                        parser_expect(parser, TK_NAME);
+                        
+                        if (str_eq(val_str, str_lit("true")) || str_eq(val_str, str_lit("false"))) {
+                            attr->kind = ATTR_KIND_BOOL;
+                            attr->data.bool_value = str_eq(val_str, str_lit("true"));
+                        } else {
+                            attr->kind = ATTR_KIND_STRING;
+                            attr->data.string_value = val_str;
+                        }
+                    } else {
+                        // Skip unknown attribute value
+                        parser_next_token(parser);
+                        attr->kind = ATTR_KIND_INTEGER;
+                        attr->data.integer_value = 0;
+                    }
+                    
+                    // Optional type annotation
+                    if (parser_peek(parser, TK_COLON)) {
+                        parser_expect(parser, TK_COLON);
+                        // Skip type for now
+                        if (parser_peek(parser, TK_NAME)) {
+                            parser_next_token(parser);
+                        }
+                    }
+                    
+                    attrs[n_attrs++] = attr;
+                }
+                
+                // Skip comma if present
+                if (parser_peek(parser, TK_COMMA)) {
+                    parser_expect(parser, TK_COMMA);
+                }
+            } else {
+                // Skip unknown token
+                parser_next_token(parser);
+            }
+        }
+        
+        if (parser_peek(parser, TK_RBRACE)) {
+            parser_expect(parser, TK_RBRACE);
+        }
+        
+        // Store parsed attributes
+        if (n_attrs > 0) {
+            op->attributes = attrs;
+            op->n_attributes = n_attrs;
         }
     }
 
@@ -1508,6 +1591,35 @@ void parse_tt_func(Parser *parser, Operation *op) {
                                         arg->has_divisibility = true;
                                         arg->divisibility_value = v;
                                         arg->divisibility_type = dtype ? dtype : parse_type_from_string(parser->arena, str_lit("i32"));
+                                    }
+                                } else if (str_eq(name, str_lit("tt.max_divisibility"))) {
+                                    // Expect '=' integer ':' type
+                                    if (parser_peek(parser, TK_EQUAL)) parser_expect(parser, TK_EQUAL);
+                                    if (parser_peek(parser, TK_INTEGER)) {
+                                        string ival = parser_token_str(parser);
+                                        // parse integer
+                                        int64_t v = 0; for (size_t k=0;k<ival.size;k++){ char c=ival.str[k]; if (c>='0' && c<='9') v = v*10 + (c-'0'); }
+                                        parser_expect(parser, TK_INTEGER);
+                                        // optional ':' type
+                                        Type *dtype = NULL;
+                                        if (parser_peek(parser, TK_COLON)) {
+                                            parser_expect(parser, TK_COLON);
+                                            string tstr = str_lit("");
+                                            int angle = 0;
+                                            while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_RBRACE) && !parser_peek(parser, TK_COMMA)) {
+                                                if (parser_peek(parser, TK_LANGLE)) angle++;
+                                                else if (parser_peek(parser, TK_RANGLE) && angle>0) angle--;
+                                                if (angle==0 && parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) break;
+                                                string tok = parser_token_str(parser);
+                                                tstr = tstr.size ? str_concat(parser->arena, tstr, tok) : tok;
+                                                parser_next_token(parser);
+                                                if (angle==0 && (parser_peek(parser, TK_RBRACE) || parser_peek(parser, TK_COMMA))) break;
+                                            }
+                                            dtype = parse_type_from_string(parser->arena, tstr);
+                                        }
+                                        arg->has_max_divisibility = true;
+                                        arg->max_divisibility_value = v;
+                                        arg->max_divisibility_type = dtype ? dtype : parse_type_from_string(parser->arena, str_lit("i32"));
                                     }
                                 }
                             } else {

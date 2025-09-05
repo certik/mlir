@@ -5,7 +5,7 @@ module() {
         %0 = "arith.extsi"(%arg2: i32) -> i32
         %1 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<128xi32>
         %2 = "arith.extsi"(%1: tensor<128xi32>) -> tensor<128xi32>
-        %3 = "tt.expand_dims"(%2: tensor<128xi32>) -> tensor<128x1xi64>
+        %3 = "tt.expand_dims"(%2: tensor<128xi32>) {axis = 1} -> tensor<128x1xi64>
         %4 = tt.splat(%0: i32) -> tensor<128x1xi64>
         %5 = arith.muli(%3: tensor<128x1xi64>, %4: tensor<128x1xi64>) -> tensor<128x1xi64>
         %6 = tt.splat(%arg0: !tt.ptr<f16, 1>) -> tensor<128x1x!tt.ptr<f16, 1>>
@@ -13,10 +13,10 @@ module() {
         %8 = "tt.broadcast"(%7: tensor<128x1x!tt.ptr<f16, 1>>) -> tensor<128x64x!tt.ptr<f16, 1>>
         %9 = tt.make_range() {end = 16 : i32, start = 0 : i32} -> tensor<64xi32>
         %10 = "arith.extsi"(%9: tensor<64xi32>) -> tensor<64xi32>
-        %11 = "tt.expand_dims"(%10: tensor<64xi32>) -> tensor<1x64xi64>
+        %11 = "tt.expand_dims"(%10: tensor<64xi32>) {axis = 0} -> tensor<1x64xi64>
         %12 = "tt.broadcast"(%11: tensor<1x64xi64>) -> tensor<128x64xi64>
         %13 = tt.addptr(%8: tensor<128x64x!tt.ptr<f16, 1>>, %12: tensor<128x64xi64>) -> tensor<128x64x!tt.ptr<f16, 1>>
-        %14 = tt.load(%13: tensor<128x64x!tt.ptr<f16, 1>>) -> tensor<128x64xf16>
+        %14 = tt.load(%13: tensor<128x64x!tt.ptr<f16, 1>>) {cache = 1, evict = 1, isVolatile = ...} -> tensor<128x64xf16>
         %15 = "arith.extf"(%14: tensor<128x64xf16>) -> tensor<128x64xf16>
         %16 = tt.reduce(%15: tensor<128x64xf16>) -> ? {
         ^bb0(%arg3: f32, %arg4: f32):

@@ -286,6 +286,10 @@ struct ValueRef {
     bool has_divisibility;        // tt.divisibility attribute present
     int64_t divisibility_value;   // value for tt.divisibility
     Type *divisibility_type;      // type for tt.divisibility value (e.g., i32)
+    
+    bool has_max_divisibility;    // tt.max_divisibility attribute present
+    int64_t max_divisibility_value; // value for tt.max_divisibility
+    Type *max_divisibility_type;  // type for tt.max_divisibility value (e.g., i32)
 
     // Maybe later:
     //Operation **users;

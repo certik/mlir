@@ -374,11 +374,23 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, format(arena, str_lit("{}: {}"),
                                                              print_ssa_value_classic(ctx, arg),
                                                              type_to_string(arena, arg->type)));
-                    if (arg->has_divisibility) {
-                        result = str_concat(arena, result, str_lit(" {tt.divisibility = "));
-                        result = str_concat(arena, result, format(arena, str_lit("{}"), (int64_t)arg->divisibility_value));
-                        result = str_concat(arena, result, str_lit(" : "));
-                        result = str_concat(arena, result, type_to_string(arena, arg->divisibility_type ? arg->divisibility_type : arg->type));
+                    if (arg->has_divisibility || arg->has_max_divisibility) {
+                        result = str_concat(arena, result, str_lit(" {"));
+                        if (arg->has_divisibility) {
+                            result = str_concat(arena, result, str_lit("tt.divisibility = "));
+                            result = str_concat(arena, result, format(arena, str_lit("{}"), (int64_t)arg->divisibility_value));
+                            result = str_concat(arena, result, str_lit(" : "));
+                            result = str_concat(arena, result, type_to_string(arena, arg->divisibility_type ? arg->divisibility_type : arg->type));
+                        }
+                        if (arg->has_max_divisibility) {
+                            if (arg->has_divisibility) {
+                                result = str_concat(arena, result, str_lit(", "));
+                            }
+                            result = str_concat(arena, result, str_lit("tt.max_divisibility = "));
+                            result = str_concat(arena, result, format(arena, str_lit("{}"), (int64_t)arg->max_divisibility_value));
+                            result = str_concat(arena, result, str_lit(" : "));
+                            result = str_concat(arena, result, type_to_string(arena, arg->max_divisibility_type ? arg->max_divisibility_type : arg->type));
+                        }
                         result = str_concat(arena, result, str_lit("}"));
                     }
                     if (arg->location) {
