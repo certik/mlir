@@ -919,6 +919,12 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                             result = str_concat(arena, result, format(arena, str_lit("{} = {}"), attr->name, attr->data.bool_value ? str_lit("true") : str_lit("false")));
                         } else if (attr->kind == ATTR_KIND_INTEGER) {
                             result = str_concat(arena, result, format(arena, str_lit("{} = {} : i32"), attr->name, (int64_t)attr->data.integer_value));
+                        } else if (attr->kind == ATTR_KIND_STRING) {
+                            // print payload verbatim (normalize colon spacing)
+                            string s = attr->data.string_value;
+                            string norm = str_lit(""); bool spaced=false;
+                            for (size_t k=0;k<s.size;k++){ char c=s.str[k]; if (c==':' && !spaced){ norm = str_concat(arena, norm, str_lit(" : ")); spaced=true; } else { norm = str_concat(arena, norm, (string){&c,1}); }}
+                            result = str_concat(arena, result, format(arena, str_lit("{} = {}"), attr->name, norm));
                         } else {
                             result = str_concat(arena, result, format(arena, str_lit("{} = ..."), attr->name));
                         }
