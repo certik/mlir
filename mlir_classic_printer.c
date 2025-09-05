@@ -813,8 +813,9 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[0]));
                 }
                 // Use captured src signature if available
-                string sig_src = str_lit("");
+                string sig_src = str_lit(""); bool sig_par=false;
                 for (int i = 0; i < op->n_attributes; i++) {
+                    if (str_eq(op->attributes[i]->name, str_lit("_sig_parens")) && op->attributes[i]->kind == ATTR_KIND_BOOL && op->attributes[i]->data.bool_value) sig_par=true;
                     if (str_eq(op->attributes[i]->name, str_lit("_sig_src")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
                         sig_src = op->attributes[i]->data.string_value; break;
                     }
@@ -829,13 +830,13 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                             norm = str_concat(arena, norm, str_lit(" "));
                         }
                     }
-                    result = str_concat(arena, result, str_lit(" : ("));
+                    result = str_concat(arena, result, str_lit(" : "));
+                    if (sig_par) result = str_concat(arena, result, str_lit("("));
                     result = str_concat(arena, result, norm);
-                    result = str_concat(arena, result, str_lit(")"));
+                    if (sig_par) result = str_concat(arena, result, str_lit(")"));
                 } else if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
-                    result = str_concat(arena, result, str_lit(" : ("));
+                    result = str_concat(arena, result, str_lit(" : "));
                     result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
-                    result = str_concat(arena, result, str_lit(")"));
                 }
                 if (op->n_result_types > 0 && op->result_types[0]) {
                     result = str_concat(arena, result, str_lit(" -> "));
@@ -860,25 +861,31 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                         if (attr->kind == ATTR_KIND_INTEGER) {
                             result = str_concat(arena, result, format(arena, str_lit("{} = {} : i32"), attr->name, (int64_t)attr->data.integer_value));
                         } else if (attr->kind == ATTR_KIND_STRING) {
-                            result = str_concat(arena, result, format(arena, str_lit("{} = {}"), attr->name, attr->data.string_value));
+                            // normalize axis payload spacing (e.g., "1:i32" -> "1 : i32")
+                            string s = attr->data.string_value; string norm = str_lit(""); bool spaced=false;
+                            for (size_t k=0;k<s.size;k++){ char c=s.str[k]; if (c==':' && !spaced){ norm = str_concat(arena, norm, str_lit(" : ")); spaced=true; } else { norm = str_concat(arena, norm, (string){&c,1}); }}
+                            result = str_concat(arena, result, format(arena, str_lit("{} = {}"), attr->name, norm));
                         } else {
                             result = str_concat(arena, result, format(arena, str_lit("{} = ..."), attr->name));
                         }
                     }
                     if (opened) result = str_concat(arena, result, str_lit("}"));
                 }
-                string sig_src2 = str_lit("");
+                string sig_src2 = str_lit(""); bool sig_par=false;
                 for (int i = 0; i < op->n_attributes; i++) {
-                    if (str_eq(op->attributes[i]->name, str_lit("_sig_src")) && op->attributes[i]->kind == ATTR_KIND_STRING) { sig_src2 = op->attributes[i]->data.string_value; break; }
+                    if (str_eq(op->attributes[i]->name, str_lit("_sig_parens")) && op->attributes[i]->kind == ATTR_KIND_BOOL && op->attributes[i]->data.bool_value) { sig_par=true; }
+                    if (str_eq(op->attributes[i]->name, str_lit("_sig_src")) && op->attributes[i]->kind == ATTR_KIND_STRING) { sig_src2 = op->attributes[i]->data.string_value; }
                 }
                 if (sig_src2.size > 0) {
-                    result = str_concat(arena, result, str_lit(" : ("));
+                    result = str_concat(arena, result, str_lit(" : "));
+                    if (sig_par) result = str_concat(arena, result, str_lit("("));
                     result = str_concat(arena, result, sig_src2);
-                    result = str_concat(arena, result, str_lit(")"));
+                    if (sig_par) result = str_concat(arena, result, str_lit(")"));
                 } else if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
-                    result = str_concat(arena, result, str_lit(" : ("));
-                    result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
-                    result = str_concat(arena, result, str_lit(")"));
+                    result = str_concat(arena, result, str_lit(" : "));
+                    string t = type_to_string(arena, op->operands[0]->type);
+                    // No parens in this form
+                    result = str_concat(arena, result, t);
                 }
                 if (op->n_result_types > 0 && op->result_types[0]) {
                     result = str_concat(arena, result, str_lit(" -> "));
