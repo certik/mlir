@@ -65,3 +65,4 @@ print_generic = true
 [[test]]
 filename = "triton_mm.ttir"
 print_generic = true
+check_classic = true
