@@ -503,7 +503,6 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
             }
             // Before printing region, set parent scf.for in context
-            Operation *saved_parent = ctx->current_scf_for;
             ctx->current_scf_for = op;
             break;
         }

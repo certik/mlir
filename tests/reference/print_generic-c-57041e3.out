@@ -5,16 +5,16 @@ module() {
         %0 = "arith.extsi"(%arg2: i32) -> i32
         %1 = tt.make_range() {end = 128 : i32, start = 0 : i32} -> tensor<128xi32>
         %2 = "arith.extsi"(%1: tensor<128xi32>) -> tensor<128xi32>
-        %3 = "tt.expand_dims"(%2: tensor<128xi32>) {axis = 1, _sig_parens = ..., _sig_src = "tensor<128xi64>"} -> tensor<128x1xi64>
-        %4 = tt.splat(%0: i32) {_sig_parens = ..., _sig_src = "i64"} -> tensor<128x1xi64>
+        %3 = "tt.expand_dims"(%2: tensor<128xi32>) {axis = 1} -> tensor<128x1xi64>
+        %4 = tt.splat(%0: i32) -> tensor<128x1xi64>
         %5 = arith.muli(%3: tensor<128x1xi64>, %4: tensor<128x1xi64>) -> tensor<128x1xi64>
-        %6 = tt.splat(%arg0: !tt.ptr<f16, 1>) {_sig_parens = ..., _sig_src = "!tt.ptr<f16,1>"} -> tensor<128x1x!tt.ptr<f16, 1>>
+        %6 = tt.splat(%arg0: !tt.ptr<f16, 1>) -> tensor<128x1x!tt.ptr<f16, 1>>
         %7 = tt.addptr(%6: tensor<128x1x!tt.ptr<f16, 1>>, %5: tensor<128x1xi64>) -> tensor<128x1x!tt.ptr<f16, 1>>
-        %8 = "tt.broadcast"(%7: tensor<128x1x!tt.ptr<f16, 1>>) {_sig_parens = ..., _sig_src = "tensor<128x1x!tt.ptr<f16,1>>"} -> tensor<128x64x!tt.ptr<f16, 1>>
+        %8 = "tt.broadcast"(%7: tensor<128x1x!tt.ptr<f16, 1>>) -> tensor<128x64x!tt.ptr<f16, 1>>
         %9 = tt.make_range() {end = 64 : i32, start = 0 : i32} -> tensor<64xi32>
         %10 = "arith.extsi"(%9: tensor<64xi32>) -> tensor<64xi32>
-        %11 = "tt.expand_dims"(%10: tensor<64xi32>) {axis = 0, _sig_parens = ..., _sig_src = "tensor<64xi64>"} -> tensor<1x64xi64>
-        %12 = "tt.broadcast"(%11: tensor<1x64xi64>) {_sig_parens = ..., _sig_src = "tensor<1x64xi64>"} -> tensor<128x64xi64>
+        %11 = "tt.expand_dims"(%10: tensor<64xi32>) {axis = 0} -> tensor<1x64xi64>
+        %12 = "tt.broadcast"(%11: tensor<1x64xi64>) -> tensor<128x64xi64>
         %13 = tt.addptr(%8: tensor<128x64x!tt.ptr<f16, 1>>, %12: tensor<128x64xi64>) -> tensor<128x64x!tt.ptr<f16, 1>>
         %14 = tt.load(%13: tensor<128x64x!tt.ptr<f16, 1>>) {cache = 1, evict = 1, isVolatile = ...} -> tensor<128x64xf16>
         %15 = "arith.extf"(%14: tensor<128x64xf16>) -> tensor<128x64xf16>
@@ -23,7 +23,7 @@ module() {
             %20 = "arith.maxf"(%arg3: f32, %arg4: f32) -> f32
             tt.reduce.return()
         }
-        %17 = tt.splat(%arg1: !tt.ptr<f16, 1>) {_sig_parens = ..., _sig_src = "!tt.ptr<f16,1>"} -> tensor<128x!tt.ptr<f16, 1>>
+        %17 = tt.splat(%arg1: !tt.ptr<f16, 1>) -> tensor<128x!tt.ptr<f16, 1>>
         %18 = tt.addptr(%17: tensor<128x!tt.ptr<f16, 1>>, %1: tensor<128xi32>) -> tensor<128x!tt.ptr<f16, 1>>
         %19 = "arith.truncf"(%16: ?) -> tensor<128xf32>
         tt.store(%18: tensor<128x!tt.ptr<f16, 1>>, %19: tensor<128xf32>) {cache = 1, evict = 1}
