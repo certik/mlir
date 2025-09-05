@@ -43,6 +43,7 @@ void parse_std_constant(Parser *parser, Operation *op);
 void parse_tt_reduce(Parser *parser, Operation *op);
 void parse_tensor_extract(Parser *parser, Operation *op);
 void parse_cf_br(Parser *parser, Operation *op);
+void parse_cf_cond_br(Parser *parser, Operation *op);
 void parse_linalg_fill(Parser *parser, Operation *op);
 void parse_affine_load(Parser *parser, Operation *op);
 void parse_index_constant(Parser *parser, Operation *op);

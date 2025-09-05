@@ -1272,6 +1272,9 @@ Operation* parse_operation(Parser *parser) {
         case OP_TYPE_CF_BR:
             parse_cf_br(parser, op);
             break;
+        case OP_TYPE_CF_COND_BR:
+            parse_cf_cond_br(parser, op);
+            break;
         case OP_TYPE_LINALG_FILL:
             parse_linalg_fill(parser, op);
             break;
