@@ -17,6 +17,78 @@ typedef struct {
     Operation *current_scf_for;
 } PrintCtx;
 
+// Optional predecessor comments per block for a region
+typedef struct {
+    Region *region;
+    string *comments; // size = region->n_blocks
+    int *counts;      // predecessor counts
+    int n_blocks;
+} PredComments;
+
+static int parse_bb_index(string lab) {
+    if (lab.size < 4) return -1;
+    if (!(lab.str[0]=='^' && lab.str[1]=='b' && lab.str[2]=='b')) return -1;
+    int v=0; for (size_t i=3;i<lab.size;i++){ char c=lab.str[i]; if (c>='0'&&c<='9') v = v*10 + (c-'0'); else break; }
+    return v;
+}
+
+static PredComments* build_pred_comments(Arena *arena, Region *region) {
+    if (!region) return NULL;
+    PredComments *pc = arena_alloc(arena, PredComments);
+    pc->region = region;
+    pc->n_blocks = (int)region->n_blocks;
+    pc->comments = arena_alloc_array(arena, string, pc->n_blocks);
+    pc->counts = arena_alloc_array(arena, int, pc->n_blocks);
+    for (int i=0;i<pc->n_blocks;i++){ pc->comments[i]=str_lit(""); pc->counts[i]=0; }
+    // Walk operations to find branch targets
+    for (int b=0; b<(int)region->n_blocks; b++) {
+        Block *blk = region->blocks[b];
+        for (int oi=0; oi<(int)blk->n_operations; oi++) {
+            Operation *op = blk->operations[oi];
+            if (op->op_type == OP_TYPE_CF_BR) {
+                // find _target attribute
+                string tgt = str_lit("");
+                for (int ai=0; ai<(int)op->n_attributes; ai++) {
+                    if (str_eq(op->attributes[ai]->name, str_lit("_target")) && op->attributes[ai]->kind==ATTR_KIND_STRING) { tgt = op->attributes[ai]->data.string_value; break; }
+                }
+                int idx = parse_bb_index(tgt);
+                if (idx>=0 && idx<pc->n_blocks) {
+                    if (pc->comments[idx].size==0) pc->comments[idx] = format(arena, str_lit("^bb{}"), (int64_t)b);
+                    else pc->comments[idx] = str_concat(arena, pc->comments[idx], format(arena, str_lit(", ^bb{}"), (int64_t)b));
+                    pc->counts[idx]++;
+                }
+            } else if (op->op_type == OP_TYPE_CF_COND_BR) {
+                string ttrue = str_lit(""); string tfalse = str_lit("");
+                for (int ai=0; ai<(int)op->n_attributes; ai++) {
+                    if (str_eq(op->attributes[ai]->name, str_lit("_true")) && op->attributes[ai]->kind==ATTR_KIND_STRING) ttrue = op->attributes[ai]->data.string_value;
+                    else if (str_eq(op->attributes[ai]->name, str_lit("_false")) && op->attributes[ai]->kind==ATTR_KIND_STRING) tfalse = op->attributes[ai]->data.string_value;
+                }
+                int it = parse_bb_index(ttrue); int ifa = parse_bb_index(tfalse);
+                if (it>=0 && it<pc->n_blocks) {
+                    if (pc->comments[it].size==0) pc->comments[it] = format(arena, str_lit("^bb{}"), (int64_t)b);
+                    else pc->comments[it] = str_concat(arena, pc->comments[it], format(arena, str_lit(", ^bb{}"), (int64_t)b));
+                    pc->counts[it]++;
+                }
+                if (ifa>=0 && ifa<pc->n_blocks) {
+                    if (pc->comments[ifa].size==0) pc->comments[ifa] = format(arena, str_lit("^bb{}"), (int64_t)b);
+                    else pc->comments[ifa] = str_concat(arena, pc->comments[ifa], format(arena, str_lit(", ^bb{}"), (int64_t)b));
+                    pc->counts[ifa]++;
+                }
+            }
+        }
+    }
+    // Turn into full comments with counts
+    for (int i=0;i<pc->n_blocks;i++) {
+        if (pc->counts[i] > 0) {
+            if (pc->counts[i] == 1) pc->comments[i] = str_concat(arena, str_lit("  // pred: "), pc->comments[i]);
+            else pc->comments[i] = str_concat(arena, format(arena, str_lit("  // {} preds: "), (int64_t)pc->counts[i]), pc->comments[i]);
+        } else {
+            pc->comments[i] = str_lit("");
+        }
+    }
+    return pc;
+}
+
 static inline void ssa_map_init(PrintCtx *ctx, Arena *arena) {
     ctx->arena = arena;
     ctx->next_ssa = 0;
@@ -203,7 +275,9 @@ static string print_function_region_classic(PrintCtx *ctx, int indent_level, Reg
         result = str_concat(arena, result, str_lit("}"));
         return result;
     } else {
-        // Multi-block: print first block without label, then labeled others
+        // Multi-block: compute predecessor comments
+        PredComments *pc = build_pred_comments(arena, region);
+        // Print first block without label, then labeled others with comments
         string out = str_lit("");
         out = str_concat(arena, out, str_lit("{\n"));
         if (region->n_blocks > 0) {
@@ -213,16 +287,17 @@ static string print_function_region_classic(PrintCtx *ctx, int indent_level, Reg
             }
         }
         for (int i = 1; i < region->n_blocks; i++) {
-            // Get the default block printing
             string blk = print_block_internal_classic(ctx, i, indent_level, region->blocks[i]);
-            // Inject simple predecessor comment on the label line to match reference
-            // Find first newline to split the label line
-            size_t pos = 0; while (pos < blk.size && blk.str[pos] != '\n') pos++;
-            if (pos < blk.size) {
-                string head = str_substr(blk, 0, pos);
-                string tail = str_substr(blk, pos, blk.size - pos);
-                head = str_concat(arena, head, str_lit("  // pred: ^bb0"));
-                blk = str_concat(arena, head, tail);
+            // Inject predecessor comment
+            string comment = pc ? pc->comments[i] : str_lit("");
+            if (comment.size > 0) {
+                size_t pos = 0; while (pos < blk.size && blk.str[pos] != '\n') pos++;
+                if (pos < blk.size) {
+                    string head = str_substr(blk, 0, pos);
+                    string tail = str_substr(blk, pos, blk.size - pos);
+                    head = str_concat(arena, head, comment);
+                    blk = str_concat(arena, head, tail);
+                }
             }
             out = str_concat(arena, out, blk);
         }

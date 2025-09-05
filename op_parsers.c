@@ -2814,4 +2814,8 @@ void parse_arith_cmpi(Parser *parser, Operation *op) {
     // Set operands
     op->operands = operands.data;
     op->n_operands = operands.size;
+    // Result type is i1 for arith.cmpi
+    op->n_result_types = 1;
+    op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+    op->result_types[0] = parse_type_from_string(parser->arena, str_lit("i1"));
 }
