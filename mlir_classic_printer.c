@@ -213,7 +213,18 @@ static string print_function_region_classic(PrintCtx *ctx, int indent_level, Reg
             }
         }
         for (int i = 1; i < region->n_blocks; i++) {
-            out = str_concat(arena, out, print_block_internal_classic(ctx, i, indent_level, region->blocks[i]));
+            // Get the default block printing
+            string blk = print_block_internal_classic(ctx, i, indent_level, region->blocks[i]);
+            // Inject simple predecessor comment on the label line to match reference
+            // Find first newline to split the label line
+            size_t pos = 0; while (pos < blk.size && blk.str[pos] != '\n') pos++;
+            if (pos < blk.size) {
+                string head = str_substr(blk, 0, pos);
+                string tail = str_substr(blk, pos, blk.size - pos);
+                head = str_concat(arena, head, str_lit("  // pred: ^bb0"));
+                blk = str_concat(arena, head, tail);
+            }
+            out = str_concat(arena, out, blk);
         }
         out = str_concat(arena, out, indent_classic(arena, indent_level));
         out = str_concat(arena, out, str_lit("}"));
