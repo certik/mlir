@@ -671,6 +671,16 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                         case ATTR_KIND_BOOL:
                             result = str_concat(arena, result, attr->data.bool_value ? str_lit("true") : str_lit("false"));
                             break;
+                        case ATTR_KIND_STRING: {
+                            // Print payload verbatim (e.g., "1 : i32" or "false")
+                            string s = attr->data.string_value;
+                            // normalize colon spacing
+                            string norm = str_lit("");
+                            bool spaced = false;
+                            for (size_t k=0;k<s.size;k++){ char c=s.str[k]; if (c==':' && !spaced){ norm = str_concat(arena, norm, str_lit(" : ")); spaced=true; } else { norm = str_concat(arena, norm, (string){&c,1}); }}
+                            result = str_concat(arena, result, norm);
+                            break;
+                        }
                         default:
                             result = str_concat(arena, result, str_lit("..."));
                     }
