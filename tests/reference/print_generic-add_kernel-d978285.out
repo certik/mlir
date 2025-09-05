@@ -10,11 +10,11 @@ module() {
         %4 = arith.addi(%3: tensor<16xi32>, %2: tensor<16xi32>) -> tensor<16xi32>
         %5 = tt.splat(%arg0: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
         %6 = tt.addptr(%5: tensor<16x!tt.ptr<f32>>, %4: tensor<16xi32>) -> tensor<16x!tt.ptr<f32>>
-        %7 = tt.load(%6: tensor<16x!tt.ptr<f32>>) -> tensor<16x!tt.ptr<f32>>
+        %7 = tt.load(%6: tensor<16x!tt.ptr<f32>>) -> tensor<16xf32>
         %8 = tt.splat(%arg1: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
         %9 = tt.addptr(%8: tensor<16x!tt.ptr<f32>>, %4: tensor<16xi32>) -> tensor<16x!tt.ptr<f32>>
-        %10 = tt.load(%9: tensor<16x!tt.ptr<f32>>) -> tensor<16x!tt.ptr<f32>>
-        %11 = arith.addf(%7: tensor<16x!tt.ptr<f32>>, %10: tensor<16x!tt.ptr<f32>>) -> tensor<16xf32>
+        %10 = tt.load(%9: tensor<16x!tt.ptr<f32>>) -> tensor<16xf32>
+        %11 = arith.addf(%7: tensor<16xf32>, %10: tensor<16xf32>) -> tensor<16xf32>
         %12 = tt.splat(%arg2: !tt.ptr<f32>) -> tensor<16x!tt.ptr<f32>>
         %13 = tt.addptr(%12: tensor<16x!tt.ptr<f32>>, %4: tensor<16xi32>) -> tensor<16x!tt.ptr<f32>>
         tt.store(%13: tensor<16x!tt.ptr<f32>>, %11: tensor<16xf32>)

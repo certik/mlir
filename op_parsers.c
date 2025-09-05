@@ -82,45 +82,19 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                     Attribute *attr = arena_alloc(parser->arena, Attribute);
                     attr->name = attr_name;
                     
-                    // Parse attribute value
-                    if (parser_peek(parser, TK_INTEGER)) {
-                        string val_str = parser_token_str(parser);
-                        parser_expect(parser, TK_INTEGER);
-                        
-                        attr->kind = ATTR_KIND_INTEGER;
-                        attr->data.integer_value = 0;
-                        for (size_t i = 0; i < val_str.size; i++) {
-                            char c = val_str.str[i];
-                            if (c >= '0' && c <= '9') {
-                                attr->data.integer_value = attr->data.integer_value * 10 + (c - '0');
-                            }
-                        }
-                    } else if (parser_peek(parser, TK_NAME)) {
-                        string val_str = parser_token_str(parser);
-                        parser_expect(parser, TK_NAME);
-                        
-                        if (str_eq(val_str, str_lit("true")) || str_eq(val_str, str_lit("false"))) {
-                            attr->kind = ATTR_KIND_BOOL;
-                            attr->data.bool_value = str_eq(val_str, str_lit("true"));
-                        } else {
-                            attr->kind = ATTR_KIND_STRING;
-                            attr->data.string_value = val_str;
-                        }
-                    } else {
-                        // Skip unknown attribute value
+                    // Parse attribute value: capture complex payload verbatim until ',' or '}'
+                    string payload = str_lit("");
+                    int angle = 0;
+                    while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_COMMA) && !parser_peek(parser, TK_RBRACE)) {
+                        string tok = parser_token_str(parser);
+                        if (parser_peek(parser, TK_LANGLE)) angle++;
+                        else if (parser_peek(parser, TK_RANGLE) && angle>0) angle--;
+                        payload = payload.size ? str_concat(parser->arena, payload, tok) : tok;
                         parser_next_token(parser);
-                        attr->kind = ATTR_KIND_INTEGER;
-                        attr->data.integer_value = 0;
+                        if (angle==0 && (parser_peek(parser, TK_COMMA) || parser_peek(parser, TK_RBRACE))) break;
                     }
-                    
-                    // Optional type annotation
-                    if (parser_peek(parser, TK_COLON)) {
-                        parser_expect(parser, TK_COLON);
-                        // Skip type for now
-                        if (parser_peek(parser, TK_NAME)) {
-                            parser_next_token(parser);
-                        }
-                    }
+                    attr->kind = ATTR_KIND_STRING;
+                    attr->data.string_value = payload;
                     
                     attrs[n_attrs++] = attr;
                 }
@@ -238,6 +212,19 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                     op->result_types = arena_alloc_array(parser->arena, Type*, 1);
                     op->result_types[0] = parse_type_from_string(parser->arena, type_right);
                 }
+                // Record source signature string for classic printing
+                size_t n = op->n_attributes;
+                Attribute **attrs = op->attributes;
+                Attribute *srca = arena_alloc(parser->arena, Attribute);
+                srca->kind = ATTR_KIND_STRING; srca->name = str_lit("_sig_src"); srca->data.string_value = type_left;
+                if (attrs == NULL) {
+                    attrs = arena_alloc_array(parser->arena, Attribute*, 1); attrs[0] = srca; n = 1;
+                } else {
+                    Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+1);
+                    for (size_t i = 0; i < n; i++) new_attrs[i] = attrs[i];
+                    new_attrs[n] = srca; n = n+1; attrs = new_attrs;
+                }
+                op->attributes = attrs; op->n_attributes = n;
             } else if (parser_peek(parser, TK_COMMA)) {
                 // Operand type list ": type, type, ..." — consume conservatively
                 while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE)) {
@@ -596,19 +583,51 @@ void parse_tt_addptr_load_store(Parser *parser, Operation *op) {
     op->operands = operands.data;
     op->n_operands = operands.size;
 
-    // For tt.addptr, prefer explicit type after ':' when present; otherwise fall back.
-    if (str_eq(op->opname, str_lit("tt.addptr"))) {
+    // For tt.addptr/tt.load, prefer explicit type after ':' when present; otherwise fall back.
+    if (str_eq(op->opname, str_lit("tt.addptr")) || str_eq(op->opname, str_lit("tt.load"))) {
         if (parser_peek(parser, TK_COLON)) {
             parser_expect(parser, TK_COLON);
 
             // Parse first type token into a string (handles !dialect<...> nesting)
             string type_left = str_lit("");
             if (parse_type_string(parser, &type_left)) {
-                // Set result type from the first type in the list
+                // Set result type
                 op->n_result_types = 1;
                 op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-                op->result_types[0] = arena_alloc(parser->arena, Type);
-                op->result_types[0] = parse_type_from_string(parser->arena, type_left);
+                if (str_eq(op->opname, str_lit("tt.addptr"))) {
+                    // For addptr, result type is the pointer tensor type
+                    op->result_types[0] = parse_type_from_string(parser->arena, type_left);
+                } else {
+                    // For load, convert pointer tensor element to value element type (e.g., f32)
+                    // Do a textual conversion: replace '!tt.ptr<...>' payload with element inside or f32
+                    string s = type_left;
+                    // Find '!tt.ptr<' inside s
+                    size_t pos = SIZE_MAX;
+                    for (size_t i = 0; i + 8 <= s.size; i++) {
+                        if (s.str[i]=='!' && i+8<=s.size && s.str[i+1]=='t' && s.str[i+2]=='t' && s.str[i+3]=='.' && s.str[i+4]=='p' && s.str[i+5]=='t' && s.str[i+6]=='r' && s.str[i+7]=='<') { pos = i; break; }
+                    }
+                    if (pos != SIZE_MAX) {
+                        // Extract element type inside '!tt.ptr<...>' before optional ','
+                        size_t start = pos + 8;
+                        size_t end = start;
+                        while (end < s.size && s.str[end] != '>' && s.str[end] != ',') end++;
+                        string elem = str_substr(s, start, end - start);
+                        // Build new type string by replacing '!tt.ptr<...>' with 'elem'
+                        string before = str_substr(s, 0, pos);
+                        // Skip until closing '>'
+                        size_t j = end;
+                        while (j < s.size && s.str[j] != '>') j++;
+                        if (j < s.size) j++; // include '>'
+                        string after = str_substr(s, j, s.size - j);
+                        string val_ty = before;
+                        val_ty = str_concat(parser->arena, val_ty, elem.size ? elem : str_lit("f32"));
+                        val_ty = str_concat(parser->arena, val_ty, after);
+                        op->result_types[0] = parse_type_from_string(parser->arena, val_ty);
+                    } else {
+                        // Fallback: assume f32 element
+                        op->result_types[0] = parse_type_from_string(parser->arena, s);
+                    }
+                }
             }
             // Consume remaining type list conservatively until end of list or loc
             if (parser_peek(parser, TK_COMMA)) {
@@ -617,7 +636,7 @@ void parse_tt_addptr_load_store(Parser *parser, Operation *op) {
                     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) break;
                 } while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE));
             }
-        } else if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
+        } else if (str_eq(op->opname, str_lit("tt.addptr")) && op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
             // Fallback heuristic when no explicit type list is present
             op->n_result_types = 1;
             op->result_types = arena_alloc_array(parser->arena, Type*, 1);
@@ -997,6 +1016,88 @@ void parse_cf_br(Parser *parser, Operation *op) {
     op->n_result_types = 0;
 
     // Consume any trailing loc()
+    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
+        op->location = parse_loc(parser);
+    }
+}
+
+void parse_cf_cond_br(Parser *parser, Operation *op) {
+    // Parse: cf.cond_br %cond, ^bbX, ^bbY [loc]
+    VecValueRef operands; VecValueRef_reserve(parser->arena, &operands, 1);
+    // condition
+    if (parser_peek(parser, TK_REGISTER)) {
+        string reg = parser_token_str(parser);
+        parser_expect(parser, TK_REGISTER);
+        ValueRef *cond = symbol_table_lookup(&parser->symbol_table, reg);
+        if (cond) VecValueRef_push_back(parser->arena, &operands, cond);
+    }
+    // commas and targets
+    if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
+    string ttrue = str_lit("");
+    string tfalse = str_lit("");
+    if (parser_peek(parser, TK_CARET_NAME)) {
+        ttrue = parser_token_str(parser); parser_expect(parser, TK_CARET_NAME);
+        // Optional argument list for true target: (^bbX(%v1, %v2 : ty1, ty2))
+        if (parser_peek(parser, TK_LPAREN)) {
+            parser_expect(parser, TK_LPAREN);
+            while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
+                if (parser_peek(parser, TK_REGISTER)) {
+                    parser_expect(parser, TK_REGISTER);
+                    if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
+                } else if (parser_peek(parser, TK_COLON)) {
+                    parser_expect(parser, TK_COLON);
+                    // consume type list until ')'
+                    int angle=0;
+                    while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
+                        if (parser_peek(parser, TK_LANGLE)) angle++;
+                        else if (parser_peek(parser, TK_RANGLE) && angle>0) angle--;
+                        parser_next_token(parser);
+                    }
+                } else {
+                    parser_next_token(parser);
+                }
+            }
+            parser_expect(parser, TK_RPAREN);
+        }
+    }
+    if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
+    if (parser_peek(parser, TK_CARET_NAME)) {
+        tfalse = parser_token_str(parser); parser_expect(parser, TK_CARET_NAME);
+        // Optional argument list for false target
+        if (parser_peek(parser, TK_LPAREN)) {
+            parser_expect(parser, TK_LPAREN);
+            while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
+                if (parser_peek(parser, TK_REGISTER)) {
+                    parser_expect(parser, TK_REGISTER);
+                    if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
+                } else if (parser_peek(parser, TK_COLON)) {
+                    parser_expect(parser, TK_COLON);
+                    int angle=0;
+                    while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
+                        if (parser_peek(parser, TK_LANGLE)) angle++;
+                        else if (parser_peek(parser, TK_RANGLE) && angle>0) angle--;
+                        parser_next_token(parser);
+                    }
+                } else {
+                    parser_next_token(parser);
+                }
+            }
+            parser_expect(parser, TK_RPAREN);
+        }
+    }
+    op->operands = operands.data; op->n_operands = operands.size;
+    // Store private attributes for classic printing
+    op->n_attributes = 2;
+    op->attributes = arena_alloc_array(parser->arena, Attribute*, 2);
+    op->attributes[0] = arena_alloc(parser->arena, Attribute);
+    op->attributes[0]->name = str_lit("_true");
+    op->attributes[0]->kind = ATTR_KIND_STRING;
+    op->attributes[0]->data.string_value = ttrue;
+    op->attributes[1] = arena_alloc(parser->arena, Attribute);
+    op->attributes[1]->name = str_lit("_false");
+    op->attributes[1]->kind = ATTR_KIND_STRING;
+    op->attributes[1]->data.string_value = tfalse;
+    // Optional loc
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
         op->location = parse_loc(parser);
     }
