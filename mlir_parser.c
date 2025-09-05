@@ -764,12 +764,11 @@ string type_to_string(Arena *arena, Type *type) {
         case TYPE_KIND_POINTER:
             if (type->data.pointer.element_type) {
                 string elem_str = type_to_string(arena, type->data.pointer.element_type);
-                if (type->data.pointer.has_address_space) {
-                    return format(arena, str_lit("!tt.ptr<{},{}>"), elem_str, (int64_t)type->data.pointer.address_space);
-                } else if (type->data.pointer.address_space == 1) {
-                    return format(arena, str_lit("!tt.ptr<{}>"), elem_str);
+                // Only show address space if it's explicitly set and not the default (0)
+                if (type->data.pointer.has_address_space && type->data.pointer.address_space != 0) {
+                    return format(arena, str_lit("!tt.ptr<{}, {}>"), elem_str, (int64_t)type->data.pointer.address_space);
                 } else {
-                    return format(arena, str_lit("!tt.ptr<{},{}>"), elem_str, (int64_t)type->data.pointer.address_space);
+                    return format(arena, str_lit("!tt.ptr<{}>"), elem_str);
                 }
             }
             return str_lit("!tt.ptr<?>");

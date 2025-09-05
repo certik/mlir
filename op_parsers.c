@@ -1332,30 +1332,31 @@ void parse_tt_func(Parser *parser, Operation *op) {
         parser_expect(parser, TK_NAME);
     }
 
-    // Skip @function_name
-    if (parser_peek(parser, TK_AT)) {
-        parser_expect(parser, TK_AT);
-        if (parser_peek(parser, TK_NAME)) {
-            // Capture function symbol name into an attribute for printing
-            string fname = parser_token_str(parser);
-            parser_expect(parser, TK_NAME);
-            // Store as string attribute 'sym_name'
-            size_t n = op->n_attributes;
-            Attribute **attrs = op->attributes;
-            if (attrs == NULL) {
-                attrs = arena_alloc_array(parser->arena, Attribute*, 1);
-            } else {
-                Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+1);
-                for (size_t i = 0; i < n; i++) new_attrs[i] = attrs[i];
-                attrs = new_attrs;
-            }
-            attrs[n] = arena_alloc(parser->arena, Attribute);
-            attrs[n]->kind = ATTR_KIND_STRING;
-            attrs[n]->data.string_value = fname;
-            attrs[n]->name = str_lit("sym_name");
-            op->attributes = attrs;
-            op->n_attributes = n+1;
+    // Parse @function_name
+    if (parser_peek(parser, TK_FUNCTION_NAME)) {
+        // Capture function symbol name into an attribute for printing
+        string fname_with_at = parser_token_str(parser);
+        parser_expect(parser, TK_FUNCTION_NAME);
+        
+        // Remove the '@' prefix to get just the function name
+        string fname = str_substr(fname_with_at, 1, fname_with_at.size - 1);
+        
+        // Store as string attribute 'sym_name'
+        size_t n = op->n_attributes;
+        Attribute **attrs = op->attributes;
+        if (attrs == NULL) {
+            attrs = arena_alloc_array(parser->arena, Attribute*, 1);
+        } else {
+            Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+1);
+            for (size_t i = 0; i < n; i++) new_attrs[i] = attrs[i];
+            attrs = new_attrs;
         }
+        attrs[n] = arena_alloc(parser->arena, Attribute);
+        attrs[n]->kind = ATTR_KIND_STRING;
+        attrs[n]->data.string_value = fname;
+        attrs[n]->name = str_lit("sym_name");
+        op->attributes = attrs;
+        op->n_attributes = n+1;
     } else {
         // Try to skip tokens until we find a parenthesis
         while (!parser_peek(parser, TK_LPAREN) && !parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_LBRACE_END)) {

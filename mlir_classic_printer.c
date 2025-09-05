@@ -220,10 +220,20 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
     // Operation-specific printing with switch statement
     switch (op->op_type) {
         case OP_TYPE_ARITH_CONSTANT: {
-            // Classic format: arith.constant 42 : i32
+            // Classic format: arith.constant 42 : i32 or arith.constant 0.000000e+00 : f32
             result = str_concat(arena, result, str_lit("arith.constant "));
-            if (op->n_attributes > 0 && op->attributes[0] && op->attributes[0]->kind == ATTR_KIND_INTEGER) {
-                result = str_concat(arena, result, format(arena, str_lit("{}"), op->attributes[0]->data.integer_value));
+            if (op->n_attributes > 0 && op->attributes[0]) {
+                if (op->attributes[0]->kind == ATTR_KIND_INTEGER) {
+                    result = str_concat(arena, result, format(arena, str_lit("{}"), op->attributes[0]->data.integer_value));
+                } else if (op->attributes[0]->kind == ATTR_KIND_FLOAT) {
+                    // Format floating point to match original (e.g., 0.000000e+00) 
+                    // Use snprintf for scientific notation since format doesn't support :e
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "%.6e", op->attributes[0]->data.float_value);
+                    result = str_concat(arena, result, str_from_cstr_view(buf));
+                } else {
+                    result = str_concat(arena, result, str_lit("0"));
+                }
             } else {
                 result = str_concat(arena, result, str_lit("0"));
             }
@@ -346,10 +356,10 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         case OP_TYPE_TT_FUNC: {
             // Classic format header with symbol name if available
             result = str_concat(arena, result, str_lit("tt.func public @"));
-            // Try to find 'sym_name' attribute
-            string fname = str_lit("add_kernel");
+            // Try to find 'sym_name' attribute - use original name if available
+            string fname = str_lit("unknown_func");
             for (int i = 0; i < op->n_attributes; i++) {
-                if (str_eq(op->attributes[i]->name, str_lit("sym_name")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
+                if (op->attributes[i] && str_eq(op->attributes[i]->name, str_lit("sym_name")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
                     fname = op->attributes[i]->data.string_value;
                     break;
                 }
@@ -385,6 +395,94 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         case OP_TYPE_TT_GET_PROGRAM_ID: {
             // Classic format: tt.get_program_id x : i32
             result = str_concat(arena, result, str_lit("tt.get_program_id x : i32"));
+            break;
+        }
+
+        case OP_TYPE_SCF_FOR: {
+            // Classic format: scf.for %arg22 = %c0_i32 to %arg12 step %c1_i32  : i32 {
+            result = str_concat(arena, result, str_lit("scf.for "));
+            
+            // Format: %induction = %init to %bound step %step
+            if (op->n_operands >= 3) {
+                // Induction variable (result)
+                if (op->n_results > 0 && op->results[0]) {
+                    result = str_concat(arena, result, print_ssa_value_classic(ctx, op->results[0]));
+                    result = str_concat(arena, result, str_lit(" = "));
+                }
+                
+                // init, bound, step
+                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[0]));
+                result = str_concat(arena, result, str_lit(" to "));
+                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[1]));
+                result = str_concat(arena, result, str_lit(" step "));
+                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[2]));
+                
+                // iter_args if present
+                if (op->n_operands > 3) {
+                    result = str_concat(arena, result, str_lit(" iter_args("));
+                    for (int i = 3; i < op->n_operands; i++) {
+                        if (i > 3) result = str_concat(arena, result, str_lit(", "));
+                        // iter_arg name from result 
+                        if (op->n_results > i-2 && op->results[i-2]) {
+                            result = str_concat(arena, result, print_ssa_value_classic(ctx, op->results[i-2]));
+                            result = str_concat(arena, result, str_lit(" = "));
+                        }
+                        result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[i]));
+                    }
+                    result = str_concat(arena, result, str_lit(") -> ("));
+                    // Return types for iter_args
+                    for (int i = 1; i < op->n_result_types; i++) {
+                        if (i > 1) result = str_concat(arena, result, str_lit(", "));
+                        result = str_concat(arena, result, type_to_string(arena, op->result_types[i]));
+                    }
+                    result = str_concat(arena, result, str_lit(")"));
+                }
+                
+                // Type annotation 
+                result = str_concat(arena, result, str_lit("  : "));
+                if (op->n_result_types > 0 && op->result_types[0]) {
+                    result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
+                } else if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
+                    result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
+                }
+            }
+            break;
+        }
+
+        case OP_TYPE_SCF_IF: {
+            // Classic format: scf.if %22 -> (f32) {
+            result = str_concat(arena, result, str_lit("scf.if "));
+            
+            if (op->n_operands > 0) {
+                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[0]));
+            }
+            
+            // Return type if present
+            if (op->n_result_types > 0) {
+                result = str_concat(arena, result, str_lit(" -> ("));
+                for (int i = 0; i < op->n_result_types; i++) {
+                    if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                    result = str_concat(arena, result, type_to_string(arena, op->result_types[i]));
+                }
+                result = str_concat(arena, result, str_lit(")"));
+            }
+            break;
+        }
+
+        case OP_TYPE_SCF_YIELD: {
+            // Classic format: scf.yield %41 : f32
+            result = str_concat(arena, result, str_lit("scf.yield"));
+            if (op->n_operands > 0) {
+                result = str_concat(arena, result, str_lit(" "));
+                for (int i = 0; i < op->n_operands; i++) {
+                    if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                    result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[i]));
+                }
+                if (op->operands[0]->type) {
+                    result = str_concat(arena, result, str_lit(" : "));
+                    result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
+                }
+            }
             break;
         }
         
@@ -440,9 +538,21 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // Default case: classic-ish formatting without result arrows
             
             
-            // Print operation name
+            // Print operation name  
             bool is_tt_func = (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.func")));
-            if (op->op_type == OP_TYPE_UNREGISTERED && !is_tt_func) {
+            bool is_known_op = false;
+            if (op->opname.size > 0) {
+                // Check if it's a known dialect operation that shouldn't be quoted
+                const char *name = op->opname.str;
+                size_t len = op->opname.size;
+                is_known_op = ((len > 6 && strncmp(name, "arith.", 6) == 0) ||
+                              (len > 4 && strncmp(name, "scf.", 4) == 0) ||
+                              (len > 3 && strncmp(name, "tt.", 3) == 0) ||
+                              (len > 5 && strncmp(name, "func.", 5) == 0) ||
+                              (len > 3 && strncmp(name, "cf.", 3) == 0));
+            }
+            
+            if (op->op_type == OP_TYPE_UNREGISTERED && !is_tt_func && !is_known_op) {
                 result = str_concat(arena, result, str_lit("\""));
                 if (op->opname.size > 0) {
                     result = str_concat(arena, result, op->opname);
@@ -494,27 +604,52 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
             }
 
-            // Print attributes in canonical format
-            if (op->n_attributes > 0) {
-                result = str_concat(arena, result, str_lit(" {"));
-                for (int i = 0; i < op->n_attributes; i++) {
-                    if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    Attribute *attr = op->attributes[i];
-                    result = str_concat(arena, result, format(arena, str_lit("{} = "), attr->name));
-                    switch (attr->kind) {
-                        case ATTR_KIND_INTEGER:
-                            result = str_concat(arena, result, format(arena, str_lit("{}"), attr->data.integer_value));
-                            break;
-                        case ATTR_KIND_STRING:
-                            result = str_concat(arena, result, format(arena, str_lit("\"{}\""), attr->data.string_value));
-                            break;
-                        default:
-                            result = str_concat(arena, result, str_lit("..."));
-                    }
-                }
-                result = str_concat(arena, result, str_lit("}"));
-            }
             break;
+        }
+    }
+
+    // Print attributes for operations that should show them in classic format
+    // Skip internal attributes that shouldn't be visible
+    if (op->n_attributes > 0 && op->op_type != OP_TYPE_TT_FUNC) {
+        bool has_visible_attrs = false;
+        for (int i = 0; i < op->n_attributes; i++) {
+            Attribute *attr = op->attributes[i];
+            // Skip internal attributes that shouldn't be shown in classic format
+            if (str_eq(attr->name, str_lit("value")) ||
+                str_eq(attr->name, str_lit("axis")) ||
+                str_eq(attr->name, str_lit("start")) ||
+                str_eq(attr->name, str_lit("end")) ||
+                str_eq(attr->name, str_lit("sym_name"))) {
+                continue;
+            }
+            if (!has_visible_attrs) {
+                result = str_concat(arena, result, str_lit(" {"));
+                has_visible_attrs = true;
+            } else {
+                result = str_concat(arena, result, str_lit(", "));
+            }
+            result = str_concat(arena, result, format(arena, str_lit("{} = "), attr->name));
+            switch (attr->kind) {
+                case ATTR_KIND_INTEGER:
+                    result = str_concat(arena, result, format(arena, str_lit("{}"), attr->data.integer_value));
+                    // Add type annotation for integer attributes
+                    result = str_concat(arena, result, str_lit(" : i32"));
+                    break;
+                case ATTR_KIND_FLOAT:
+                    result = str_concat(arena, result, format(arena, str_lit("{:e}"), attr->data.float_value));
+                    break;
+                case ATTR_KIND_STRING:
+                    result = str_concat(arena, result, format(arena, str_lit("\"{}\""), attr->data.string_value));
+                    break;
+                case ATTR_KIND_BOOL:
+                    result = str_concat(arena, result, attr->data.bool_value ? str_lit("true") : str_lit("false"));
+                    break;
+                default:
+                    result = str_concat(arena, result, str_lit("..."));
+            }
+        }
+        if (has_visible_attrs) {
+            result = str_concat(arena, result, str_lit("}"));
         }
     }
 

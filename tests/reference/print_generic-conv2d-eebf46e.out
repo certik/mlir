@@ -1,6 +1,6 @@
 module() {
 ^bb0:
-    tt.func(%arg0: !tt.ptr<f32,1>, %arg1: i32, %arg2: i32, %arg3: i32, %arg4: i32, %arg5: i32, %arg6: !tt.ptr<f32,1>, %arg7: i32, %arg8: i32, %arg9: i32, %arg10: i32, %arg11: i32, %arg12: i32, %arg13: !tt.ptr<f32,1>, %arg14: !tt.ptr<f32,1>, %arg15: i32, %arg16: i32, %arg17: i32, %arg18: i32, %arg19: i32, %arg20: i32, %arg21: i32) {
+    tt.func(%arg0: !tt.ptr<f32, 1>, %arg1: i32, %arg2: i32, %arg3: i32, %arg4: i32, %arg5: i32, %arg6: !tt.ptr<f32, 1>, %arg7: i32, %arg8: i32, %arg9: i32, %arg10: i32, %arg11: i32, %arg12: i32, %arg13: !tt.ptr<f32, 1>, %arg14: !tt.ptr<f32, 1>, %arg15: i32, %arg16: i32, %arg17: i32, %arg18: i32, %arg19: i32, %arg20: i32, %arg21: i32) {sym_name = "conv2d_kernel_0d1de2de34c567c8d9101112c13141516d17d18de19de20e21c22e23e24c25c26de27de28c29c30c"} {
     ^bb0:
         %c1_i32 = arith.constant() {value = 1} -> i32
         %c0_i32 = arith.constant() {value = 0} -> i32
@@ -11,7 +11,7 @@ module() {
         %3 = arith.muli(%0: i32, %arg15: i32) -> i32
         scf.for(%c0_i32: i32, %arg12: i32, %c1_i32: i32) {
         ^bb0(%arg0: index):
-            %4 = tt.addptr(%arg13: !tt.ptr<f32,1>, %arg0: index) -> !tt.ptr<f32,1>
+            %4 = tt.addptr(%arg13: !tt.ptr<f32, 1>, %arg0: index) -> !tt.ptr<f32, 1>
             %5 = arith.muli(%arg0: index, %arg7: i32) -> i32
             %6 = arith.muli(%arg0: index, %arg16: i32) -> i32
             %7 = arith.addi(%3: i32, %6: i32) -> i32
@@ -21,7 +21,7 @@ module() {
                 %9 = "arith.remsi"(%arg0: index, %arg19: i32) -> i32
                 %10 = arith.subi(%8: i32, %arg20: i32) -> i32
                 %11 = arith.subi(%9: i32, %arg21: i32) -> i32
-                %12 = tt.load(%4: !tt.ptr<f32,1>) -> f32
+                %12 = tt.load(%4: !tt.ptr<f32, 1>) -> f32
                 %13 = scf.for(%c0_i32: i32, %arg10: i32, %c1_i32: i32, %cst: f32) -> f32 {
                 ^bb0(%arg0: index, %arg1: i16):
                     %19 = arith.addi(%10: i32, %arg0: index) -> i32
@@ -44,16 +44,16 @@ module() {
                                 scf.yield(%arg1: i16)
                             }{
                             ^bb0:
-                                %30 = tt.addptr(%arg6: !tt.ptr<f32,1>, %5: i32) -> !tt.ptr<f32,1>
+                                %30 = tt.addptr(%arg6: !tt.ptr<f32, 1>, %5: i32) -> !tt.ptr<f32, 1>
                                 %31 = arith.muli(%arg0: index, %arg9: i32) -> i32
-                                %32 = tt.addptr(%30: !tt.ptr<f32,1>, %31: i32) -> !tt.ptr<f32,1>
-                                %33 = tt.addptr(%32: !tt.ptr<f32,1>, %arg0: index) -> !tt.ptr<f32,1>
-                                %34 = tt.load(%33: !tt.ptr<f32,1>) -> f32
-                                %35 = tt.addptr(%arg0: !tt.ptr<f32,1>, %2: i32) -> !tt.ptr<f32,1>
+                                %32 = tt.addptr(%30: !tt.ptr<f32, 1>, %31: i32) -> !tt.ptr<f32, 1>
+                                %33 = tt.addptr(%32: !tt.ptr<f32, 1>, %arg0: index) -> !tt.ptr<f32, 1>
+                                %34 = tt.load(%33: !tt.ptr<f32, 1>) -> f32
+                                %35 = tt.addptr(%arg0: !tt.ptr<f32, 1>, %2: i32) -> !tt.ptr<f32, 1>
                                 %36 = arith.muli(%19: i32, %arg3: i32) -> i32
-                                %37 = tt.addptr(%35: !tt.ptr<f32,1>, %36: i32) -> !tt.ptr<f32,1>
-                                %38 = tt.addptr(%37: !tt.ptr<f32,1>, %25: i32) -> !tt.ptr<f32,1>
-                                %39 = tt.load(%38: !tt.ptr<f32,1>) -> f32
+                                %37 = tt.addptr(%35: !tt.ptr<f32, 1>, %36: i32) -> !tt.ptr<f32, 1>
+                                %38 = tt.addptr(%37: !tt.ptr<f32, 1>, %25: i32) -> !tt.ptr<f32, 1>
+                                %39 = tt.load(%38: !tt.ptr<f32, 1>) -> f32
                                 %40 = arith.mulf(%39: f32, %34: f32) -> f32
                                 %41 = arith.addf(%arg1: i16, %40: f32) -> f32
                                 scf.yield(%41: f32)
@@ -68,8 +68,8 @@ module() {
                 %15 = arith.muli(%8: i32, %arg17: i32) -> i32
                 %16 = arith.addi(%7: i32, %15: i32) -> i32
                 %17 = arith.addi(%16: i32, %9: i32) -> i32
-                %18 = tt.addptr(%arg14: !tt.ptr<f32,1>, %17: i32) -> !tt.ptr<f32,1>
-                tt.store(%18: !tt.ptr<f32,1>, %14: f32)
+                %18 = tt.addptr(%arg14: !tt.ptr<f32, 1>, %17: i32) -> !tt.ptr<f32, 1>
+                tt.store(%18: !tt.ptr<f32, 1>, %14: f32)
             }
         }
         tt.return()
