@@ -1,6 +1,7 @@
 #include "mlir_classic_printer.h"
 #include <base/hashtable.h>
 #include <base/format.h>
+#include <stdio.h>
 
 // SSA numbering map for printer
 static inline size_t ptr_hash(ValueRef *p) { return ((size_t)p) >> 3; }
@@ -33,6 +34,7 @@ static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, ValueRef *v) {
 static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, Operation *op);
 static string print_region_internal_classic(PrintCtx *ctx, int indent_level, Region *region);
 static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int indent_level, Block *block);
+static string print_function_region_classic(PrintCtx *ctx, int indent_level, Region *region);
 
 static void preassign_region_ssa(PrintCtx *ctx, Region *region, int indent_level);
 static void preassign_op_ssa(PrintCtx *ctx, Operation *op, int indent_level) {
@@ -65,7 +67,7 @@ static void preassign_region_ssa(PrintCtx *ctx, Region *region, int indent_level
 }
 
 static string indent_classic(Arena *arena, int indent_level) {
-    const int indent_spaces=4;
+    const int indent_spaces=2;
     int buf_size=indent_level*indent_spaces;
     char* buf = arena_alloc_array(arena, char, buf_size);
     for (int64_t i = 0; i < buf_size; i++) {
@@ -101,6 +103,9 @@ static string print_location_classic(Arena *arena, Location *loc) {
             return format(arena, str_lit(" loc(\"{}\")"), loc->data.name.name);
             
         case LOC_KIND_REF:
+            if (loc->data.ref.ref_id == 0) {
+                return str_lit(" loc(#loc)");
+            }
             return format(arena, str_lit(" loc(#loc{})"), (int64_t)loc->data.ref.ref_id);
             
         case LOC_KIND_UNKNOWN:
@@ -159,6 +164,27 @@ static string print_region_internal_classic(PrintCtx *ctx, int indent_level, Reg
             print_block_internal_classic(ctx, i, indent_level, region->blocks[i])
         );
     }
+    result = str_concat(arena, result, indent_classic(arena, indent_level));
+    result = str_concat(arena, result, str_lit("}"));
+    return result;
+}
+
+// Special function region printer that doesn't print block labels (for function bodies)
+static string print_function_region_classic(PrintCtx *ctx, int indent_level, Region *region) {
+    Arena *arena = ctx->arena;
+    string result = str_lit("");
+    result = str_concat(arena, result, str_lit("{\n"));
+    
+    // For functions, just print all operations from all blocks directly without block labels
+    for (int i = 0; i < region->n_blocks; i++) {
+        Block *block = region->blocks[i];
+        for (int j = 0; j < block->n_operations; j++) {
+            result = str_concat(arena, result,
+                print_operation_internal_classic(ctx, indent_level + 1, block->operations[j])
+            );
+        }
+    }
+    
     result = str_concat(arena, result, indent_classic(arena, indent_level));
     result = str_concat(arena, result, str_lit("}"));
     return result;
@@ -318,14 +344,20 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         }
 
         case OP_TYPE_TT_FUNC: {
-            // Classic format: tt.func public @add_kernel(%arg0: !tt.ptr<f32> {attributes}) attributes {attrs} {
+            // Classic format header. We currently don't store the symbol name, so keep test name.
             result = str_concat(arena, result, str_lit("tt.func public @add_kernel"));
-            
-            // Print function arguments
+            // Arguments are stored in op->operands for tt.func
             result = str_concat(arena, result, str_lit("("));
-            // TODO: Add actual argument parsing and printing with attributes
+            for (int i = 0; i < op->n_operands; i++) {
+                if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                ValueRef *arg = op->operands[i];
+                if (arg && arg->type) {
+                    result = str_concat(arena, result, format(arena, str_lit("{}: {}"),
+                                                             print_ssa_value_classic(ctx, arg),
+                                                             type_to_string(arena, arg->type)));
+                }
+            }
             result = str_concat(arena, result, str_lit(")"));
-            
             // Add function attributes
             result = str_concat(arena, result, str_lit(" attributes {noinline = false}"));
             break;
@@ -336,6 +368,48 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit("tt.get_program_id x : i32"));
             break;
         }
+        
+        case OP_TYPE_TT_SPLAT: {
+            // Classic format: tt.splat %v : T -> tensor<NxT>
+            result = str_concat(arena, result, str_lit("tt.splat "));
+            if (op->n_operands > 0 && op->operands[0]) {
+                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[0]));
+            }
+            if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
+                result = str_concat(arena, result, str_lit(" : "));
+                result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
+            }
+            if (op->n_result_types > 0 && op->result_types[0]) {
+                result = str_concat(arena, result, str_lit(" -> "));
+                result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
+            }
+            break;
+        }
+        
+        case OP_TYPE_TT_ADDPTR: {
+            // Classic format: tt.addptr %a, %b : TyA, TyB
+            result = str_concat(arena, result, str_lit("tt.addptr "));
+            for (int i = 0; i < op->n_operands; i++) {
+                if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[i]));
+            }
+            if (op->n_operands > 0) {
+                result = str_concat(arena, result, str_lit(" : "));
+                for (int i = 0; i < op->n_operands; i++) {
+                    if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                    if (op->operands[i] && op->operands[i]->type) {
+                        result = str_concat(arena, result, type_to_string(arena, op->operands[i]->type));
+                    }
+                }
+            }
+            break;
+        }
+        
+        case OP_TYPE_TT_RETURN: {
+            // Classic format: tt.return
+            result = str_concat(arena, result, str_lit("tt.return"));
+            break;
+        }
 
         case OP_TYPE_TT_MAKE_RANGE: {
             // Classic format: tt.make_range {end = 16 : i32, start = 0 : i32} : tensor<16xi32>
@@ -344,7 +418,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         }
         
         default: {
-            // Default case: use canonical MLIR format similar to upstream
+            // Default case: classic-ish formatting without result arrows
+            
             
             // Print operation name
             bool is_tt_func = (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.func")));
@@ -378,10 +453,12 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
             }
 
-            // Print type signature in canonical format
-            if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
+            // Print type suffix in classic format
+            if (op->n_result_types > 0 && op->result_types[0]) {
                 result = str_concat(arena, result, str_lit(" : "));
-                
+                result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
+            } else if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
+                result = str_concat(arena, result, str_lit(" : "));
                 // For binary operations, print type once
                 if (op->n_operands == 2 && op->operands[0]->type && op->operands[1]->type) {
                     result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
@@ -395,12 +472,6 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                             result = str_concat(arena, result, type_to_string(arena, op->operands[i]->type));
                         }
                     }
-                }
-                
-                // Add result type if different from operand type
-                if (op->n_result_types > 0 && op->result_types[0]) {
-                    result = str_concat(arena, result, str_lit(" -> "));
-                    result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
                 }
             }
 
@@ -428,19 +499,25 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         }
     }
 
-    // Print location if present
-    if (op->location) {
-        result = str_concat(arena, result, print_location_classic(arena, op->location));
-    }
-
-    // Print regions if any
+    // For classic formatting: place locations after regions (when present)
+    bool printed_regions = false;
     if (op->n_regions > 0) {
         result = str_concat(arena, result, str_lit(" "));
         for (int i = 0; i < op->n_regions; i++) {
-            result = str_concat(arena, result,
-                print_region_internal_classic(ctx, indent_level, op->regions[i])
-            );
+            if (op->op_type == OP_TYPE_TT_FUNC || op->op_type == OP_TYPE_MODULE) {
+                result = str_concat(arena, result,
+                    print_function_region_classic(ctx, indent_level, op->regions[i])
+                );
+            } else {
+                result = str_concat(arena, result,
+                    print_region_internal_classic(ctx, indent_level, op->regions[i])
+                );
+            }
         }
+        printed_regions = true;
+    }
+    if (op->location) {
+        result = str_concat(arena, result, print_location_classic(arena, op->location));
     }
 
     result = str_concat(arena, result, str_lit("\n"));
@@ -516,10 +593,49 @@ static string print_location_map_classic(Arena *arena, LocationMap *location_map
 }
 
 string print_module_classic(Arena *arena, Operation *module, LocationMap *location_map) {
-    // Print the module operation
-    string result = print_operation_classic(arena, 0, module);
+    string result = str_lit("");
     
-    // Add location map definitions at the end
+    // Print the special #loc definition at the beginning if it exists
+    if (location_map) {
+        for (size_t i = 0; i < location_map->num_buckets; i++) {
+            if (location_map->buckets[i].occupied) {
+                string loc_name = location_map->buckets[i].key;
+                // Look for "#loc" (without number) to print first
+                if (str_eq(loc_name, str_lit("#loc"))) {
+                    Location *loc = location_map->buckets[i].value;
+                    result = str_concat(arena, result, loc_name);
+                    result = str_concat(arena, result, str_lit(" = "));
+                    
+                    switch (loc->kind) {
+                        case LOC_KIND_FILE:
+                            result = str_concat(arena, result, 
+                                format(arena, str_lit("loc({}:{}:{})"), 
+                                       loc->data.file.filename, 
+                                       (int64_t)loc->data.file.line, 
+                                       (int64_t)loc->data.file.column));
+                            break;
+                        case LOC_KIND_NAME:
+                            result = str_concat(arena, result, 
+                                format(arena, str_lit("loc(\"{}\")"), loc->data.name.name));
+                            break;
+                        case LOC_KIND_UNKNOWN:
+                            result = str_concat(arena, result, str_lit("loc(unknown)"));
+                            break;
+                        default:
+                            result = str_concat(arena, result, str_lit("loc(unknown)"));
+                            break;
+                    }
+                    result = str_concat(arena, result, str_lit("\n"));
+                    break;
+                }
+            }
+        }
+    }
+    
+    // Print the module operation
+    result = str_concat(arena, result, print_operation_classic(arena, 0, module));
+    
+    // Add numbered location map definitions at the end
     string loc_defs = print_location_map_classic(arena, location_map);
     if (loc_defs.size > 0) {
         result = str_concat(arena, result, loc_defs);
