@@ -328,6 +328,11 @@ typedef struct Operation {
 
     // Optional trailing comment captured from source line (e.g., " // note")
     string trailing_comment;
+
+    // Source line tracking (for accurate trailing comment capture)
+    // Byte offset in the original buffer of the first character of the line
+    // on which this operation starts.
+    int64_t source_line_start;
 } Operation;
 DEFINE_VECTOR_FOR_TYPE(Operation*, VecOperation)
 DEFINE_VECTOR_FOR_TYPE(ValueRef*, VecValueRef)

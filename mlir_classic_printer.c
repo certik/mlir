@@ -971,8 +971,19 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         }
         
         case OP_TYPE_TT_RETURN: {
-            // Classic format: tt.return
+            // Classic format: tt.return [%operands] [: type]
             result = str_concat(arena, result, str_lit("tt.return"));
+            if (op->n_operands > 0) {
+                result = str_concat(arena, result, str_lit(" "));
+                for (int i = 0; i < op->n_operands; i++) {
+                    if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i]));
+                }
+                if (op->operands[0] && op->operands[0]->type) {
+                    result = str_concat(arena, result, str_lit(" : "));
+                    result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
+                }
+            }
             break;
         }
 

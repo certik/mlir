@@ -845,25 +845,26 @@ Block* parse_block(Parser *parser) {
     VecOperation_reserve(parser->arena, &operations, 16);
     while (! (parser_peek(parser, TK_RBRACE) || parser_peek(parser, TK_CARET_NAME))) {
         Operation *op = parse_operation(parser);
-        // Capture trailing inline comment using the current newline token position
-        if (parser_peek(parser, TK_NEWLINE)) {
-            int64_t nl_pos = (int64_t)parser->first;
-            if (nl_pos > 0) {
-                int64_t line_end = nl_pos - 1;
-                int64_t line_start = line_end;
-                while (line_start > 0) {
-                    unsigned char c = parser->input[line_start - 1];
-                    if (c == '\n' || c == '\r') break;
-                    line_start--;
-                }
+        // Capture trailing inline comment based on the original line where the op started
+        // This avoids mis-associating comments if tokenization peeks into the next line.
+        if (op && op->source_line_start >= 0) {
+            int64_t line_start = op->source_line_start;
+            // Find end of this line
+            int64_t line_end = line_start;
+            while (parser->input[line_end] != '\0' && parser->input[line_end] != '\n' && parser->input[line_end] != '\r') {
+                line_end++;
+            }
+            if (line_end > line_start) {
+                // Search for // within this line
                 int64_t comment_pos = -1;
-                for (int64_t i = line_end - 1; i >= line_start; i--) {
+                for (int64_t i = line_start; i + 1 < line_end; i++) {
                     if (parser->input[i] == '/' && parser->input[i + 1] == '/') { comment_pos = i; break; }
                 }
                 if (comment_pos >= 0) {
                     int64_t begin = comment_pos;
+                    // include preceding spaces to keep formatting
                     while (begin > line_start && parser->input[begin - 1] == ' ') begin--;
-                    int64_t len = line_end - begin + 1;
+                    int64_t len = line_end - begin;
                     if (len > 0) {
                         op->trailing_comment = str_from_cstr_len_view((char*)parser->input + begin, len);
                     }
@@ -1104,6 +1105,7 @@ Operation* parse_operation(Parser *parser) {
     op->opname = str_lit("");
     op->unnumbered_loc_def = NULL;
     op->trailing_comment = str_lit("");
+    op->source_line_start = -1;
 
     // Skip empty lines and attributes
     while (
@@ -1135,6 +1137,17 @@ Operation* parse_operation(Parser *parser) {
             // Shouldn't happen
             abort();
         }
+    }
+
+    // Record source line start for this operation
+    {
+        int64_t pos = (int64_t)parser->first;
+        while (pos > 0) {
+            unsigned char c = parser->input[pos - 1];
+            if (c == '\n' || c == '\r') break;
+            pos--;
+        }
+        op->source_line_start = pos;
     }
 
     // Parse return registers if any
@@ -1352,10 +1365,7 @@ Operation* parse_operation(Parser *parser) {
 
     // Only capture comments for operations that definitely should have them
     // This conservative approach avoids the comment duplication issue
-    bool should_capture = (op->op_type == OP_TYPE_ARITH_MULI || 
-                          op->op_type == OP_TYPE_ARITH_ADDI ||
-                          op->op_type == OP_TYPE_ARITH_CMPI ||
-                          op->op_type == OP_TYPE_UNREGISTERED);
+    bool should_capture = false;
     
     if (should_capture && op->trailing_comment.size == 0) {
         // Only capture comments if we can find "//" in the rest of the current line

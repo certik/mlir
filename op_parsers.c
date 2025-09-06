@@ -1026,6 +1026,12 @@ void parse_std_constant(Parser *parser, Operation *op) {
 }
 
 void parse_tt_reduce(Parser *parser, Operation *op) {
+    // Record source line start for this op
+    {
+        int64_t pos = (int64_t)parser->first;
+        while (pos > 0) { unsigned char c = parser->input[pos-1]; if (c=='\n'||c=='\r') break; pos--; }
+        op->source_line_start = pos;
+    }
     // Parse "tt.reduce"(%operand) <{attributes}> ({region}) : (input_type) -> output_type
     
     // Parse operands: "tt.reduce"(%arg0)
@@ -1140,14 +1146,9 @@ void parse_tt_reduce(Parser *parser, Operation *op) {
         // Parse arrow and result type
         if (parser_peek(parser, TK_ARROW)) {
             parser_expect(parser, TK_ARROW);
-            // Parse result type
             string type_str = str_lit("");
-            while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_LBRACE_END)) {
-                string tok = parser_token_str(parser);
-                type_str = type_str.size ? str_concat(parser->arena, str_concat(parser->arena, type_str, str_lit(" ")), tok) : tok;
-                parser_next_token(parser);
-            }
-            if (type_str.size > 0) {
+            // Use helper to capture a full type token (handles nested <> correctly)
+            if (parse_type_string(parser, &type_str)) {
                 op->n_result_types = 1;
                 op->result_types = arena_alloc_array(parser->arena, Type*, 1);
                 op->result_types[0] = parse_type_from_string(parser->arena, type_str);
@@ -1782,6 +1783,16 @@ void parse_tensor_collapse_shape(Parser *parser, Operation *op) {
 }
 
 void parse_generic_operation(Parser *parser, Operation *op) {
+    // Remember the start of this operation's source line for accurate comment capture
+    {
+        int64_t pos = (int64_t)parser->first;
+        while (pos > 0) {
+            unsigned char c = parser->input[pos - 1];
+            if (c == '\n' || c == '\r') break;
+            pos--;
+        }
+        op->source_line_start = pos;
+    }
     // Skip non-structural tokens (e.g., cmp predicates) until operands/attrs/types
     while (!parser_peek(parser, TK_EOF) &&
            !(parser_peek(parser, TK_REGISTER) || parser_peek(parser, TK_LBRACKET) ||
@@ -1882,6 +1893,12 @@ void parse_generic_operation(Parser *parser, Operation *op) {
 }
 
 void parse_tt_func(Parser *parser, Operation *op) {
+    // Record source line start
+    {
+        int64_t pos = (int64_t)parser->first;
+        while (pos > 0) { unsigned char c = parser->input[pos-1]; if (c=='\n'||c=='\r') break; pos--; }
+        op->source_line_start = pos;
+    }
     // Parse tt.func public @function_name(%arg0: type, %arg1: type, ...)
 
     // Capture visibility keyword if present
@@ -2139,6 +2156,20 @@ void parse_tt_func(Parser *parser, Operation *op) {
         }
     }
 
+    // Optional return signature after '->' (capture conservatively until 'attributes' or body)
+    string ret_sig = str_lit("");
+    if (parser_peek(parser, TK_ARROW)) {
+        parser_expect(parser, TK_ARROW);
+        while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_LBRACE_END)) {
+            if (parser_peek(parser, TK_NAME)) {
+                string nm = parser_token_str(parser);
+                if (str_eq(nm, str_lit("attributes")) || str_eq(nm, str_lit("loc"))) break;
+            }
+            ret_sig = str_concat(parser->arena, ret_sig, parser_token_str(parser));
+            parser_next_token(parser);
+        }
+    }
+
     // Optionally capture function attributes: attributes { ... }
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("attributes"))) {
         parser_expect(parser, TK_NAME); // attributes
@@ -2268,6 +2299,7 @@ void parse_func_func(Parser *parser, Operation *op) {
             ret_sig = str_concat(parser->arena, ret_sig, parser_token_str(parser));
             parser_next_token(parser);
         }
+        
     }
     // Parse body region with caret block labels and arguments
     Region *region = parse_region(parser);
@@ -2592,8 +2624,30 @@ void parse_scf_for(Parser *parser, Operation *op) {
     VecOperation operations;
     VecOperation_reserve(parser->arena, &operations, 16);
     while (!parser_peek(parser, TK_RBRACE)) {
-        Operation *op = parse_operation(parser);
-        VecOperation_push_back(parser->arena, &operations, op);
+        Operation *inner_op = parse_operation(parser);
+        // Capture trailing comment for inner operations based on their source line
+        if (inner_op && inner_op->source_line_start >= 0) {
+            int64_t line_start = inner_op->source_line_start;
+            int64_t line_end = line_start;
+            while (parser->input[line_end] != '\0' && parser->input[line_end] != '\n' && parser->input[line_end] != '\r') {
+                line_end++;
+            }
+            if (line_end > line_start) {
+                int64_t comment_pos = -1;
+                for (int64_t i = line_start; i + 1 < line_end; i++) {
+                    if (parser->input[i] == '/' && parser->input[i + 1] == '/') { comment_pos = i; break; }
+                }
+                if (comment_pos >= 0) {
+                    int64_t begin = comment_pos;
+                    while (begin > line_start && parser->input[begin - 1] == ' ') begin--;
+                    int64_t len = line_end - begin;
+                    if (len > 0) {
+                        inner_op->trailing_comment = str_from_cstr_len_view((char*)parser->input + begin, len);
+                    }
+                }
+            }
+        }
+        VecOperation_push_back(parser->arena, &operations, inner_op);
         parser_expect(parser, TK_NEWLINE);
 
         // Skip empty lines
