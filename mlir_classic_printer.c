@@ -1025,7 +1025,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
         default: {
             // Before generic/default printing, handle a few named ops specially:
-            if (op->opname.size > 0 && (str_eq(op->opname, str_lit("arith.bitcast")) || str_eq(op->opname, str_lit("arith.sitofp")) || str_eq(op->opname, str_lit("arith.extsi")) || str_eq(op->opname, str_lit("arith.trunci")) || str_eq(op->opname, str_lit("arith.extf")))) {
+            if (op->opname.size > 0 && (str_eq(op->opname, str_lit("arith.bitcast")) || str_eq(op->opname, str_lit("arith.sitofp")) || str_eq(op->opname, str_lit("arith.extsi")) || str_eq(op->opname, str_lit("arith.trunci")) || str_eq(op->opname, str_lit("arith.extf")) || str_eq(op->opname, str_lit("arith.truncf")))) {
                 // op name
                 result = str_concat(arena, result, op->opname);
                 // operand
