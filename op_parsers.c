@@ -1766,8 +1766,8 @@ void parse_generic_operation(Parser *parser, Operation *op) {
 void parse_tt_func(Parser *parser, Operation *op) {
     // Parse tt.func public @function_name(%arg0: type, %arg1: type, ...)
 
-    // Skip "public" if present
-    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("public"))) {
+    // Skip visibility keyword if present
+    if (parser_peek(parser, TK_NAME) && (str_eq(parser_token_str(parser), str_lit("public")) || str_eq(parser_token_str(parser), str_lit("private")))) {
         parser_expect(parser, TK_NAME);
     }
 
