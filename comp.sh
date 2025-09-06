@@ -65,5 +65,12 @@ TEST=simple
 ./parser --classic tests/${TEST}.mlir > ${TEST}2.mlir
 diff -Naur tests/${TEST}.mlir ${TEST}2.mlir
 
-#t1.mlir
-#a.mlir
+# Weird formatting
+#TEST=t1
+#./parser --classic tests/${TEST}.mlir > ${TEST}2.mlir
+#diff -Naur tests/${TEST}.mlir ${TEST}2.mlir
+
+# Generic printing (not classic)
+#TEST=a
+#./parser --classic tests/${TEST}.mlir > ${TEST}2.mlir
+#diff -Naur tests/${TEST}.mlir ${TEST}2.mlir
