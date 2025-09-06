@@ -46,12 +46,24 @@ diff -Naur tests/${TEST}.ttir ${TEST}2.ttir
 #./parser --classic tests/${TEST}.mlir > ${TEST}2.mlir
 #diff -Naur tests/${TEST}.mlir ${TEST}2.mlir
 
-TEST=add1
-./parser --classic tests/${TEST}.ttir > ${TEST}2.ttir
-diff -Naur tests/${TEST}.ttir ${TEST}2.ttir
+# Hand modified:
+#TEST=add1
+#./parser --classic tests/${TEST}.ttir > ${TEST}2.ttir
+#diff -Naur tests/${TEST}.ttir ${TEST}2.ttir
 
-#t3.mlir
-#t2.mlir
-#simple.mlir
+# Weird indenting
+#TEST=t3
+#./parser --classic tests/${TEST}.mlir > ${TEST}2.mlir
+#diff -Naur tests/${TEST}.mlir ${TEST}2.mlir
+
+# Weird indenting
+#TEST=t2
+#./parser --classic tests/${TEST}.mlir > ${TEST}2.mlir
+#diff -Naur tests/${TEST}.mlir ${TEST}2.mlir
+
+TEST=simple
+./parser --classic tests/${TEST}.mlir > ${TEST}2.mlir
+diff -Naur tests/${TEST}.mlir ${TEST}2.mlir
+
 #t1.mlir
 #a.mlir
