@@ -1,0 +1,13 @@
+{
+    "basename": "check_classic-chunked_cross_entropy_forward-9dee695",
+    "cmd": "./parser {infile} --classic > {infile}2 && diff {infile} {infile}2",
+    "infile": "tests/chunked_cross_entropy_forward.ttir",
+    "infile_hash": "09b1b4746e7a46b266514a1083cd2dc3d70e9ee360c1b35c405158a0",
+    "outfile": null,
+    "outfile_hash": null,
+    "stdout": null,
+    "stdout_hash": null,
+    "stderr": null,
+    "stderr_hash": null,
+    "returncode": 0
+}

@@ -1,0 +1,13 @@
+{
+    "basename": "check_classic-c-67d1693",
+    "cmd": "./parser {infile} --classic > {infile}2 && diff {infile} {infile}2",
+    "infile": "tests/c.mlir",
+    "infile_hash": "3afe31fb5b545d9e0b843bf55d8de037e2b3f4b9fdf4adca6d759f7f",
+    "outfile": null,
+    "outfile_hash": null,
+    "stdout": null,
+    "stdout_hash": null,
+    "stderr": null,
+    "stderr_hash": null,
+    "returncode": 0
+}

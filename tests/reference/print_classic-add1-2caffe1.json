@@ -1,0 +1,13 @@
+{
+    "basename": "print_classic-add1-2caffe1",
+    "cmd": "./parser {infile} --classic > {outfile}",
+    "infile": "tests/add1.ttir",
+    "infile_hash": "007c483cb4cf94fb9b431d9f6b61258963564be6943f3143b9054c74",
+    "outfile": "print_classic-add1-2caffe1.out",
+    "outfile_hash": "dfdf8bf8d232abd8dd20625025a2db0befd7a5e348a6e1ca2afa309a",
+    "stdout": null,
+    "stdout_hash": null,
+    "stderr": null,
+    "stderr_hash": null,
+    "returncode": 0
+}

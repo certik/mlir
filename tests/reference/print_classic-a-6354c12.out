@@ -1,0 +1,4 @@
+module {
+  %0 = std.constant : i32
+  std.return
+}

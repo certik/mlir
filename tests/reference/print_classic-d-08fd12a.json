@@ -1,0 +1,13 @@
+{
+    "basename": "print_classic-d-08fd12a",
+    "cmd": "./parser {infile} --classic > {outfile}",
+    "infile": "tests/d.mlir",
+    "infile_hash": "f2ce54ce0339137a138a46e53c230e2312edec6c4b12fc375ce2625d",
+    "outfile": "print_classic-d-08fd12a.out",
+    "outfile_hash": "aa29b548765fe62880d754b0611af8d25b886453bc90ad3bd1512be3",
+    "stdout": null,
+    "stdout_hash": null,
+    "stderr": null,
+    "stderr_hash": null,
+    "returncode": 0
+}

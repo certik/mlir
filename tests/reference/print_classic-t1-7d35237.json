@@ -1,0 +1,13 @@
+{
+    "basename": "print_classic-t1-7d35237",
+    "cmd": "./parser {infile} --classic > {outfile}",
+    "infile": "tests/t1.mlir",
+    "infile_hash": "a9c66d7274d4805f7aaf4de36698dbbd77d6e571c21c18c7bf075365",
+    "outfile": "print_classic-t1-7d35237.out",
+    "outfile_hash": "9cf6e2d0a5987c106df293b9c97d4b078e050e846df03c51f327dfef",
+    "stdout": null,
+    "stdout_hash": null,
+    "stderr": null,
+    "stderr_hash": null,
+    "returncode": 0
+}

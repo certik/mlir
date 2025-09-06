@@ -1,0 +1,13 @@
+{
+    "basename": "check_classic-sumrow-274a315",
+    "cmd": "./parser {infile} --classic > {infile}2 && diff {infile} {infile}2",
+    "infile": "tests/sumrow.ttir",
+    "infile_hash": "bf600b2046dfdfd13a5b372b897f5c083012115e5c32f6957c96198d",
+    "outfile": null,
+    "outfile_hash": null,
+    "stdout": null,
+    "stdout_hash": null,
+    "stderr": null,
+    "stderr_hash": null,
+    "returncode": 0
+}

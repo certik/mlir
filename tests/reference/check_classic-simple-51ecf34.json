@@ -1,0 +1,13 @@
+{
+    "basename": "check_classic-simple-51ecf34",
+    "cmd": "./parser {infile} --classic > {infile}2 && diff {infile} {infile}2",
+    "infile": "tests/simple.mlir",
+    "infile_hash": "14445b10b7ec9580db2cb6e071b34464204243812cfec9709a629126",
+    "outfile": null,
+    "outfile_hash": null,
+    "stdout": null,
+    "stdout_hash": null,
+    "stderr": null,
+    "stderr_hash": null,
+    "returncode": 0
+}
