@@ -1065,7 +1065,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         default: {
             // Handle func.func robustly even if op_type mapping was missed
             if (op->opname.size > 0 && str_eq(op->opname, str_lit("func.func"))) {
-                string header = str_lit("func.func");
+                string header = str_lit("func.func ");
                 string vis = str_lit(""); string name = str_lit(""); string ret = str_lit(""); string params = str_lit("");
                 for (int i=0;i<op->n_attributes;i++) {
                     if (str_eq(op->attributes[i]->name, str_lit("visibility")) && op->attributes[i]->kind==ATTR_KIND_STRING) vis = op->attributes[i]->data.string_value;
@@ -1716,11 +1716,13 @@ string print_module_classic(Arena *arena, Operation *module, LocationMap *locati
                 }
             }
         }
-        // Specific fix: "->i" -> "-> i"
-        if (i + 3 <= result.size) {
-            if (result.str[i]=='-' && result.str[i+1]=='>' && result.str[i+2]=='i') {
-                norm = str_concat(arena, norm, str_lit("-> i"));
-                i += 2;
+        // Specific fix: "->letter" -> "-> letter" (handles types without space)
+        if (i + 2 < result.size) {
+            if (result.str[i]=='-' && result.str[i+1]=='>' && 
+                ((result.str[i+2] >= 'a' && result.str[i+2] <= 'z') || 
+                 (result.str[i+2] >= 'A' && result.str[i+2] <= 'Z'))) {
+                norm = str_concat(arena, norm, str_lit("-> "));
+                i += 2;  // Skip past '->', next iteration will handle letter
                 continue;
             }
         }
@@ -1729,6 +1731,19 @@ string print_module_classic(Arena *arena, Operation *module, LocationMap *locati
         i++;
     }
     result = norm.size > 0 ? norm : result;
+    
+    // Final fix: Replace any remaining "->i64" with "-> i64"
+    string final_result = str_lit("");
+    for (size_t j = 0; j < result.size; j++) {
+        if (j + 4 < result.size && result.str[j] == '-' && result.str[j+1] == '>' && 
+            result.str[j+2] == 'i' && result.str[j+3] == '6' && result.str[j+4] == '4') {
+            final_result = str_concat(arena, final_result, str_lit("-> i64"));
+            j += 4; // Skip past the "->i64"
+        } else {
+            final_result = str_concat(arena, final_result, (string){ &result.str[j], 1 });
+        }
+    }
+    result = final_result;
     
     // Add numbered location map definitions at the end
     string loc_defs = print_location_map_classic(arena, location_map);
