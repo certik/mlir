@@ -1104,6 +1104,7 @@ Operation* parse_operation(Parser *parser) {
     op->n_results = 0;
     op->opname = str_lit("");
     op->unnumbered_loc_def = NULL;
+    op->location = NULL;
     op->trailing_comment = str_lit("");
     op->source_line_start = -1;
 
