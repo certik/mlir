@@ -33,7 +33,9 @@ TEST=b
 ./parser --classic tests/${TEST}.mlir > ${TEST}2.mlir
 diff -Naur tests/${TEST}.mlir ${TEST}2.mlir
 
-#c.mlir
+TEST=c
+./parser --classic tests/${TEST}.mlir > ${TEST}2.mlir
+diff -Naur tests/${TEST}.mlir ${TEST}2.mlir
 
 TEST=add_kernel
 ./parser --classic tests/${TEST}.ttir > ${TEST}2.ttir
