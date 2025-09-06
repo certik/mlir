@@ -391,7 +391,7 @@ void parser_init(Arena *arena, Parser *parser, string text) {
     LocationMap_init(arena, &parser->location_map, 16);
     parser->next_loc_id = 0;
     parser->unnumbered_loc_def = NULL;
-    parser->capture_trailing_comments = false;
+    parser->capture_trailing_comments = true;
     parser_next_token(parser);
 }
 
