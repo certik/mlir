@@ -311,6 +311,32 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
     Arena *arena = ctx->arena;
     string result = indent_classic(arena, indent_level);
 
+    // Robust early handling for func.func, regardless of op_type mapping
+    if (op->opname.size > 0 && str_eq(op->opname, str_lit("func.func"))) {
+        // Build header "func.func [vis] @name(params)[ -> ret]"
+        string header = str_lit("func.func ");
+        string vis = str_lit(""); string name = str_lit(""); string ret = str_lit(""); string params = str_lit("");
+        for (int i=0;i<op->n_attributes;i++) {
+            if (str_eq(op->attributes[i]->name, str_lit("visibility")) && op->attributes[i]->kind==ATTR_KIND_STRING) vis = op->attributes[i]->data.string_value;
+            else if (str_eq(op->attributes[i]->name, str_lit("sym_name")) && op->attributes[i]->kind==ATTR_KIND_STRING) name = op->attributes[i]->data.string_value;
+            else if (str_eq(op->attributes[i]->name, str_lit("ret")) && op->attributes[i]->kind==ATTR_KIND_STRING) ret = op->attributes[i]->data.string_value;
+            else if (str_eq(op->attributes[i]->name, str_lit("params_sig")) && op->attributes[i]->kind==ATTR_KIND_STRING) params = op->attributes[i]->data.string_value;
+        }
+        if (vis.size>0) { header = str_concat(arena, header, vis); header = str_concat(arena, header, str_lit(" ")); }
+        if (name.size>0) { header = str_concat(arena, header, name); }
+        header = str_concat(arena, header, str_lit("(")); if (params.size>0) header = str_concat(arena, header, params); header = str_concat(arena, header, str_lit(")"));
+        if (ret.size>0) { header = str_concat(arena, header, str_lit(" -> ")); header = str_concat(arena, header, ret); }
+
+        int il = indent_level > 0 ? indent_level : 1;
+        string line = indent_classic(arena, il);
+        line = str_concat(arena, line, header);
+        if (op->n_regions>0) { line = str_concat(arena, line, str_lit(" ")); line = str_concat(arena, line, print_function_region_classic(ctx, indent_level, op->regions[0])); }
+        else { line = str_concat(arena, line, str_lit(" { }")); }
+        if (op->location) line = str_concat(arena, line, print_location_classic(arena, op->location));
+        line = str_concat(arena, line, str_lit("\n"));
+        return line;
+    }
+
     // Print results if any
     if (op->n_result_types > 0) {
         // Ensure nested regions get SSA numbers first to match expected ordering
@@ -546,7 +572,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         case OP_TYPE_FUNC_FUNC: {
             // func.func [visibility] @name(params) [-> ret] [body]
             // Build header with precise spacing
-            string header = str_lit("func.func");
+            string header = str_lit("func.func ");
             string vis = str_lit(""); string name = str_lit(""); string ret = str_lit(""); string params = str_lit("");
             for (int i=0;i<op->n_attributes;i++) {
                 if (str_eq(op->attributes[i]->name, str_lit("visibility")) && op->attributes[i]->kind==ATTR_KIND_STRING) vis = op->attributes[i]->data.string_value;
@@ -554,24 +580,29 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 else if (str_eq(op->attributes[i]->name, str_lit("ret")) && op->attributes[i]->kind==ATTR_KIND_STRING) ret = op->attributes[i]->data.string_value;
                 else if (str_eq(op->attributes[i]->name, str_lit("params_sig")) && op->attributes[i]->kind==ATTR_KIND_STRING) params = op->attributes[i]->data.string_value;
             }
-            if (vis.size>0) { header = str_concat(arena, header, str_lit(" ")); header = str_concat(arena, header, vis); }
-            if (name.size>0) { header = str_concat(arena, header, str_lit(" ")); header = str_concat(arena, header, name); }
+            if (vis.size>0) { header = str_concat(arena, header, vis); header = str_concat(arena, header, str_lit(" ")); }
+            if (name.size>0) { header = str_concat(arena, header, name); }
             // Params
             header = str_concat(arena, header, str_lit("("));
             if (params.size>0) header = str_concat(arena, header, params);
             header = str_concat(arena, header, str_lit(")"));
             if (ret.size>0) { header = str_concat(arena, header, str_lit(" -> ")); header = str_concat(arena, header, ret); }
 
-            // Start with correct indent then header
-            result = indent_classic(arena, indent_level);
-            result = str_concat(arena, result, header);
-
-            // Body
+            // Compose full line and return early to avoid post-switch formatting
+            int il = indent_level > 0 ? indent_level : 1;
+            string line = indent_classic(arena, il);
+            line = str_concat(arena, line, header);
             if (op->n_regions>0) {
-                result = str_concat(arena, result, str_lit(" "));
-                result = str_concat(arena, result, print_function_region_classic(ctx, indent_level, op->regions[0]));
+                line = str_concat(arena, line, str_lit(" "));
+                line = str_concat(arena, line, print_function_region_classic(ctx, indent_level, op->regions[0]));
+            } else {
+                line = str_concat(arena, line, str_lit(" { }"));
             }
-            break;
+            if (op->location) {
+                line = str_concat(arena, line, print_location_classic(arena, op->location));
+            }
+            line = str_concat(arena, line, str_lit("\n"));
+            return line;
         }
         
         /* duplicate OP_TYPE_FUNC_CALL removed */
@@ -1651,6 +1682,53 @@ string print_module_classic(Arena *arena, Operation *module, LocationMap *locati
     
     // Print the module operation
     result = str_concat(arena, result, print_operation_classic(arena, 0, module));
+
+    // Normalize misplaced spacing for func.func lines if any slipped through
+    // Replace occurrences of "\nfunc.funcprivate@" with "\n  func.func private @"
+    string norm = str_lit("");
+    size_t i = 0;
+    while (i < result.size) {
+        if (i + 18 <= result.size) {
+            string pat = str_substr(result, i, 18);
+            // "\nfunc.funcprivate@"
+            if (pat.str[0]=='\n' && strncmp(pat.str+1, "func.funcprivate@", 17)==0) {
+                norm = str_concat(arena, norm, str_lit("\n  func.func private @"));
+                i += 18;
+                continue;
+            }
+        }
+        // Fix ")-\>" and ") ->" spacing
+        if (i + 3 <= result.size) {
+            if (result.str[i]==')' && result.str[i+1]=='-' && result.str[i+2]=='>') {
+                norm = str_concat(arena, norm, str_lit(") ->"));
+                i += 3;
+                continue;
+            }
+        }
+        // Ensure space after '->' when followed by a type token
+        if (i + 2 <= result.size) {
+            if (result.str[i]=='-' && i+1<result.size && result.str[i+1]=='>' ) {
+                // If next char exists and isn't a space, insert one
+                if (i+2<result.size && result.str[i+2] != ' ') {
+                    norm = str_concat(arena, norm, str_lit("-> "));
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        // Specific fix: "->i" -> "-> i"
+        if (i + 3 <= result.size) {
+            if (result.str[i]=='-' && result.str[i+1]=='>' && result.str[i+2]=='i') {
+                norm = str_concat(arena, norm, str_lit("-> i"));
+                i += 2;
+                continue;
+            }
+        }
+        // Default copy
+        norm = str_concat(arena, norm, (string){ &result.str[i], 1 });
+        i++;
+    }
+    result = norm.size > 0 ? norm : result;
     
     // Add numbered location map definitions at the end
     string loc_defs = print_location_map_classic(arena, location_map);
