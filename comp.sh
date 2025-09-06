@@ -13,12 +13,13 @@ TEST=matmul1
 ./parser --classic tests/${TEST}.ttir > ${TEST}2.ttir
 diff -Naur tests/${TEST}.ttir ${TEST}2.ttir
 
-#effect.mlir
 TEST=effect
 ./parser --classic tests/${TEST}.mlir > ${TEST}2.mlir
 diff -Naur tests/${TEST}.mlir ${TEST}2.mlir
 
-#sumrow.ttir
+TEST=sumrow
+./parser --classic tests/${TEST}.ttir > ${TEST}2.ttir
+diff -Naur tests/${TEST}.ttir ${TEST}2.ttir
 
 TEST=conv2d
 ./parser --classic tests/${TEST}.ttir > ${TEST}2.ttir
