@@ -53,6 +53,35 @@ void consume_optional_hash_selector(Parser *parser) {
 // Include the extracted functions
 void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
     // Attributes block
+    // Handle generic attributes in angle-bracket form: <{ ... }>
+    if (parser_peek(parser, TK_LANGLE)) {
+        // Lookahead for '<{' sequence
+        uint64_t save_first = parser->first, save_last = parser->last, save_cur = parser->cur; TokenType save_sym = parser->sym;
+        parser_expect(parser, TK_LANGLE);
+        bool had_attrs=false;
+        if (parser_peek(parser, TK_LBRACE)) {
+            parser_expect(parser, TK_LBRACE);
+            Attribute **attrs = NULL; size_t n_attrs=0; size_t cap=4; attrs = arena_alloc_array(parser->arena, Attribute*, cap);
+            while (!parser_peek(parser, TK_RBRACE) && !parser_peek(parser, TK_EOF)) {
+                if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
+                    string attr_name = parser_token_str(parser); parser_next_token(parser);
+                    if (parser_peek(parser, TK_EQUAL)) { parser_expect(parser, TK_EQUAL);
+                        if (n_attrs>=cap){ cap*=2; Attribute**na = arena_alloc_array(parser->arena, Attribute*, cap); for(size_t i=0;i<n_attrs;i++) na[i]=attrs[i]; attrs=na; }
+                        Attribute *attr = arena_alloc(parser->arena, Attribute); attr->name=attr_name;
+                        string payload = str_lit(""); int angle=0; while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_COMMA) && !parser_peek(parser, TK_RBRACE)) { string tok=parser_token_str(parser); if (parser_peek(parser, TK_LANGLE)) angle++; else if (parser_peek(parser, TK_RANGLE) && angle>0) angle--; payload = payload.size ? str_concat(parser->arena, payload, tok) : tok; parser_next_token(parser); if (angle==0 && (parser_peek(parser, TK_COMMA) || parser_peek(parser, TK_RBRACE))) break; }
+                        attr->kind = ATTR_KIND_STRING; attr->data.string_value = payload; attrs[n_attrs++] = attr; had_attrs=true;
+                    }
+                    if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
+                } else { parser_next_token(parser); }
+            }
+            if (parser_peek(parser, TK_RBRACE)) parser_expect(parser, TK_RBRACE);
+            if (had_attrs) { op->attributes = attrs; op->n_attributes = n_attrs; }
+            if (parser_peek(parser, TK_RANGLE)) parser_expect(parser, TK_RANGLE);
+        } else {
+            // Not actually an attribute block; rewind
+            parser->first = save_first; parser->last = save_last; parser->cur = save_cur; parser->sym = save_sym;
+        }
+    }
     if (parser_peek(parser, TK_LBRACE)) {
         parser_expect(parser, TK_LBRACE);
         
@@ -225,8 +254,8 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                     new_attrs[n] = srca; n = n+1; attrs = new_attrs;
                 }
                 op->attributes = attrs; op->n_attributes = n;
-            } else if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("to")) && op->opname.size>0 && str_eq(op->opname, str_lit("arith.extui"))) {
-                // arith.extui: ": src_ty to dst_ty"; set result to dst_ty
+            } else if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("to"))) {
+                // Casts like ": src_ty to dst_ty"; set result to dst_ty
                 parser_expect(parser, TK_NAME);
                 string type_dst = str_lit("");
                 if (parse_type_string(parser, &type_dst)) {
@@ -1477,7 +1506,19 @@ void parse_tt_call(Parser *parser, Operation *op) {
 
     // Parse function name (@name is tokenized as TK_FUNCTION_NAME)
     if (parser_peek(parser, TK_FUNCTION_NAME)) {
+        // Capture callee name including '@'
+        string fname = parser_token_str(parser);
         parser_expect(parser, TK_FUNCTION_NAME);
+        // Store as attribute 'callee'
+        size_t n = op->n_attributes; Attribute **attrs = op->attributes;
+        if (!attrs) { attrs = arena_alloc_array(parser->arena, Attribute*, 1); n = 0; }
+        else {
+            Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+1);
+            for (size_t i=0;i<n;i++) new_attrs[i]=attrs[i]; attrs = new_attrs;
+        }
+        attrs[n] = arena_alloc(parser->arena, Attribute);
+        attrs[n]->name = str_lit("callee"); attrs[n]->kind = ATTR_KIND_STRING; attrs[n]->data.string_value = fname;
+        op->attributes = attrs; op->n_attributes = n+1;
     }
 
     // Parse arguments in parentheses
@@ -1706,6 +1747,8 @@ void parse_generic_operation(Parser *parser, Operation *op) {
         regions[0] = region;
         op->regions = regions;
         op->n_regions = 1;
+        // After region, there can be another signature/attrs like ": (tys) -> ty"
+        parse_generic_attrs_and_result_type(parser, op);
     }
     if (lparen_brace) {
         parser_expect(parser, TK_RPAREN);
