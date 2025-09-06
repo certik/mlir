@@ -1732,16 +1732,25 @@ string print_module_classic(Arena *arena, Operation *module, LocationMap *locati
     }
     result = norm.size > 0 ? norm : result;
     
-    // Final fix: Replace any remaining "->i64" with "-> i64"
+    // Final fix: Replace any remaining "->i64" with "-> i64" (efficient version)
     string final_result = str_lit("");
-    for (size_t j = 0; j < result.size; j++) {
-        if (j + 4 < result.size && result.str[j] == '-' && result.str[j+1] == '>' && 
+    size_t last_pos = 0;
+    for (size_t j = 0; j <= result.size - 5; j++) {
+        if (result.str[j] == '-' && result.str[j+1] == '>' && 
             result.str[j+2] == 'i' && result.str[j+3] == '6' && result.str[j+4] == '4') {
+            // Copy everything from last_pos up to j
+            if (j > last_pos) {
+                final_result = str_concat(arena, final_result, str_substr(result, last_pos, j - last_pos));
+            }
+            // Add the fixed version
             final_result = str_concat(arena, final_result, str_lit("-> i64"));
             j += 4; // Skip past the "->i64"
-        } else {
-            final_result = str_concat(arena, final_result, (string){ &result.str[j], 1 });
+            last_pos = j + 1;
         }
+    }
+    // Copy any remaining part
+    if (last_pos < result.size) {
+        final_result = str_concat(arena, final_result, str_substr(result, last_pos, result.size - last_pos));
     }
     result = final_result;
     
