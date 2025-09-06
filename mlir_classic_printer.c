@@ -545,6 +545,10 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         }
         case OP_TYPE_FUNC_FUNC: {
             // Print function header: func.func [visibility] @name() [-> ret] {
+            // Ensure at least one level of indent for top-level functions
+            if (indent_level <= 0) {
+                result = indent_classic(arena, 1);
+            }
             result = str_concat(arena, result, str_lit("func.func"));
             string vis = str_lit(""); string name = str_lit(""); string ret = str_lit("");
             for (int i=0;i<op->n_attributes;i++) {
@@ -552,7 +556,9 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 else if (str_eq(op->attributes[i]->name, str_lit("sym_name")) && op->attributes[i]->kind==ATTR_KIND_STRING) name = op->attributes[i]->data.string_value;
                 else if (str_eq(op->attributes[i]->name, str_lit("ret")) && op->attributes[i]->kind==ATTR_KIND_STRING) ret = op->attributes[i]->data.string_value;
             }
-            if (vis.size>0) { result = str_concat(arena, result, str_lit(" ")); result = str_concat(arena, result, vis); }
+            // Ensure at least one space after 'func.func'
+            result = str_concat(arena, result, str_lit(" "));
+            if (vis.size>0) { result = str_concat(arena, result, vis); }
             if (name.size>0) { result = str_concat(arena, result, str_lit(" ")); result = str_concat(arena, result, name); }
             // Print parameter signature if captured for declarations
             string params = str_lit("");
