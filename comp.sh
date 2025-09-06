@@ -41,13 +41,17 @@ TEST=add_kernel
 ./parser --classic tests/${TEST}.ttir > ${TEST}2.ttir
 diff -Naur tests/${TEST}.ttir ${TEST}2.ttir
 
-#d.mlir
-#add1.ttir
+# Hand modified:
+#TEST=d
+#./parser --classic tests/${TEST}.mlir > ${TEST}2.mlir
+#diff -Naur tests/${TEST}.mlir ${TEST}2.mlir
+
+TEST=add1
+./parser --classic tests/${TEST}.ttir > ${TEST}2.ttir
+diff -Naur tests/${TEST}.ttir ${TEST}2.ttir
+
 #t3.mlir
 #t2.mlir
 #simple.mlir
 #t1.mlir
 #a.mlir
-
-
-
