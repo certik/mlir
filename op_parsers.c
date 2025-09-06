@@ -1998,10 +1998,35 @@ void parse_tt_func(Parser *parser, Operation *op) {
                             arg->type = parse_type_from_string(parser->arena, str_lit("!unknown"));
                         }
                     } else if (parser_peek(parser, TK_NAME)) {
-                        // Simple type like i32
+                        // Simple type like i32 or complex type like tensor<2x256xf32>
                         string type_name = parser_token_str(parser);
                         parser_expect(parser, TK_NAME);
-                        arg->type = parse_type_from_string(parser->arena, type_name);
+                        
+                        // Handle complex types with angle brackets (e.g., tensor<2x256xf32>)
+                        if (parser_peek(parser, TK_LANGLE)) {
+                            parser_expect(parser, TK_LANGLE);
+                            string angle_content = str_lit("");
+                            int bracket_depth = 1;
+                            while (bracket_depth > 0 && !parser_peek(parser, TK_EOF)) {
+                                if (parser_peek(parser, TK_LANGLE)) {
+                                    bracket_depth++;
+                                } else if (parser_peek(parser, TK_RANGLE)) {
+                                    bracket_depth--;
+                                    if (bracket_depth == 0) {
+                                        parser_expect(parser, TK_RANGLE);
+                                        break;
+                                    }
+                                }
+                                string token_str = parser_token_str(parser);
+                                angle_content = str_concat(parser->arena, angle_content, token_str);
+                                parser_next_token(parser);
+                            }
+                            // Reconstruct the full type string
+                            string full_type = str_concat(parser->arena, type_name, str_concat(parser->arena, str_lit("<"), str_concat(parser->arena, angle_content, str_lit(">"))));
+                            arg->type = parse_type_from_string(parser->arena, full_type);
+                        } else {
+                            arg->type = parse_type_from_string(parser->arena, type_name);
+                        }
                     } else {
                         arg->type = parse_type_from_string(parser->arena, str_lit("unknown"));
                     }
