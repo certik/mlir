@@ -1380,6 +1380,11 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         result = str_concat(arena, result, print_location_classic(arena, op->location));
     }
 
+    // Append trailing comment if captured from source
+    if (op->trailing_comment.size > 0) {
+        result = str_concat(arena, result, op->trailing_comment);
+    }
+
     result = str_concat(arena, result, str_lit("\n"));
     return result;
 }

@@ -323,6 +323,9 @@ typedef struct Operation {
     Location *location;
     // Optional: definition for unnumbered '#loc' header captured pre-module
     Location *unnumbered_loc_def;
+
+    // Optional trailing comment captured from source line (e.g., " // note")
+    string trailing_comment;
 } Operation;
 DEFINE_VECTOR_FOR_TYPE(Operation*, VecOperation)
 DEFINE_VECTOR_FOR_TYPE(ValueRef*, VecValueRef)

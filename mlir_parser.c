@@ -844,6 +844,34 @@ Block* parse_block(Parser *parser) {
     VecOperation_reserve(parser->arena, &operations, 16);
     while (! (parser_peek(parser, TK_RBRACE) || parser_peek(parser, TK_CARET_NAME))) {
         Operation *op = parse_operation(parser);
+        // Capture trailing inline comment on this line, if any, from raw input
+        if (parser_peek(parser, TK_NEWLINE)) {
+            int64_t nl_pos = (int64_t)parser->first; // position of current token (newline)
+            if (nl_pos > 0) {
+                int64_t line_end = nl_pos - 1;
+                int64_t line_start = line_end;
+                while (line_start > 0) {
+                    unsigned char c = parser->input[line_start - 1];
+                    if (c == '\n' || c == '\r') break;
+                    line_start--;
+                }
+                // Search for "//" between line_start..line_end-1
+                int64_t comment_pos = -1;
+                for (int64_t i = line_start; i + 1 <= line_end; i++) {
+                    if (parser->input[i] == '/' && parser->input[i + 1] == '/') { comment_pos = i; break; }
+                }
+                if (comment_pos >= 0) {
+                    // Include spaces immediately before the comment for fidelity
+                    int64_t begin = comment_pos;
+                    while (begin > line_start && parser->input[begin - 1] == ' ') begin--;
+                    int64_t len = line_end - begin + 1;
+                    if (len > 0) {
+                        string cmt = str_from_cstr_len_view((char*)parser->input + begin, len);
+                        op->trailing_comment = cmt;
+                    }
+                }
+            }
+        }
         VecOperation_push_back(parser->arena, &operations, op);
         parser_expect(parser, TK_NEWLINE);
 
@@ -1077,6 +1105,7 @@ Operation* parse_operation(Parser *parser) {
     op->n_results = 0;
     op->opname = str_lit("");
     op->unnumbered_loc_def = NULL;
+    op->trailing_comment = str_lit("");
 
     // Skip empty lines and attributes
     while (
