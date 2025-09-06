@@ -2697,6 +2697,29 @@ void parse_affine_for(Parser *parser, Operation *op) {
                     }
                 }
             }
+        } else {
+            // Fallback: scan from end of op tokens to the end of this line
+            string text = str_from_cstr_view((char*)parser->input);
+            int64_t start = (int64_t)parser->last + 1;
+            if (start < (int64_t)text.size) {
+                int64_t end = (int64_t)text.size - 1;
+                for (int64_t i = start; i < (int64_t)text.size; i++) {
+                    char ch = text.str[i];
+                    if (ch == '\n' || ch == '\r') { end = i - 1; break; }
+                }
+                if (end >= start) {
+                    int64_t cpos = -1;
+                    for (int64_t i = start; i + 1 <= end; i++) {
+                        if (text.str[i] == '/' && text.str[i+1] == '/') { cpos = i; break; }
+                    }
+                    if (cpos >= 0) {
+                        int64_t begin = cpos;
+                        while (begin > start && text.str[begin - 1] == ' ') begin--;
+                        int64_t len = end - begin + 1;
+                        if (len > 0) inner->trailing_comment = str_from_cstr_len_view(text.str + begin, len);
+                    }
+                }
+            }
         }
         VecOperation_push_back(parser->arena, &operations, inner);
         parser_expect(parser, TK_NEWLINE);
