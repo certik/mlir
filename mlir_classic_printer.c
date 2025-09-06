@@ -544,41 +544,32 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
         case OP_TYPE_FUNC_FUNC: {
-            // Print function header: func.func [visibility] @name() [-> ret] {
-            // Ensure at least one level of indent for top-level functions
-            if (indent_level <= 0) {
-                result = indent_classic(arena, 1);
-            }
-            result = str_concat(arena, result, str_lit("func.func"));
-            string vis = str_lit(""); string name = str_lit(""); string ret = str_lit("");
+            // func.func [visibility] @name(params) [-> ret] [body]
+            // Build header with precise spacing
+            string header = str_lit("func.func");
+            string vis = str_lit(""); string name = str_lit(""); string ret = str_lit(""); string params = str_lit("");
             for (int i=0;i<op->n_attributes;i++) {
                 if (str_eq(op->attributes[i]->name, str_lit("visibility")) && op->attributes[i]->kind==ATTR_KIND_STRING) vis = op->attributes[i]->data.string_value;
                 else if (str_eq(op->attributes[i]->name, str_lit("sym_name")) && op->attributes[i]->kind==ATTR_KIND_STRING) name = op->attributes[i]->data.string_value;
                 else if (str_eq(op->attributes[i]->name, str_lit("ret")) && op->attributes[i]->kind==ATTR_KIND_STRING) ret = op->attributes[i]->data.string_value;
+                else if (str_eq(op->attributes[i]->name, str_lit("params_sig")) && op->attributes[i]->kind==ATTR_KIND_STRING) params = op->attributes[i]->data.string_value;
             }
-            // Ensure at least one space after 'func.func'
-            result = str_concat(arena, result, str_lit(" "));
-            if (vis.size>0) { result = str_concat(arena, result, vis); }
-            if (name.size>0) { result = str_concat(arena, result, str_lit(" ")); result = str_concat(arena, result, name); }
-            // Print parameter signature if captured for declarations
-            string params = str_lit("");
-            for (int i=0;i<op->n_attributes;i++) {
-                if (str_eq(op->attributes[i]->name, str_lit("params_sig")) && op->attributes[i]->kind==ATTR_KIND_STRING) { params = op->attributes[i]->data.string_value; break; }
-            }
-            if (params.size > 0) {
-                result = str_concat(arena, result, str_lit("("));
-                result = str_concat(arena, result, params);
-                result = str_concat(arena, result, str_lit(")"));
-            } else {
-                result = str_concat(arena, result, str_lit("()"));
-            }
-            if (ret.size>0) { result = str_concat(arena, result, str_lit(" -> ")); result = str_concat(arena, result, ret); }
-            result = str_concat(arena, result, str_lit(" "));
-            // Print body region
+            if (vis.size>0) { header = str_concat(arena, header, str_lit(" ")); header = str_concat(arena, header, vis); }
+            if (name.size>0) { header = str_concat(arena, header, str_lit(" ")); header = str_concat(arena, header, name); }
+            // Params
+            header = str_concat(arena, header, str_lit("("));
+            if (params.size>0) header = str_concat(arena, header, params);
+            header = str_concat(arena, header, str_lit(")"));
+            if (ret.size>0) { header = str_concat(arena, header, str_lit(" -> ")); header = str_concat(arena, header, ret); }
+
+            // Start with correct indent then header
+            result = indent_classic(arena, indent_level);
+            result = str_concat(arena, result, header);
+
+            // Body
             if (op->n_regions>0) {
+                result = str_concat(arena, result, str_lit(" "));
                 result = str_concat(arena, result, print_function_region_classic(ctx, indent_level, op->regions[0]));
-            } else {
-                result = str_concat(arena, result, str_lit("{ }"));
             }
             break;
         }
@@ -1041,6 +1032,26 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         }
 
         default: {
+            // Handle func.func robustly even if op_type mapping was missed
+            if (op->opname.size > 0 && str_eq(op->opname, str_lit("func.func"))) {
+                string header = str_lit("func.func");
+                string vis = str_lit(""); string name = str_lit(""); string ret = str_lit(""); string params = str_lit("");
+                for (int i=0;i<op->n_attributes;i++) {
+                    if (str_eq(op->attributes[i]->name, str_lit("visibility")) && op->attributes[i]->kind==ATTR_KIND_STRING) vis = op->attributes[i]->data.string_value;
+                    else if (str_eq(op->attributes[i]->name, str_lit("sym_name")) && op->attributes[i]->kind==ATTR_KIND_STRING) name = op->attributes[i]->data.string_value;
+                    else if (str_eq(op->attributes[i]->name, str_lit("ret")) && op->attributes[i]->kind==ATTR_KIND_STRING) ret = op->attributes[i]->data.string_value;
+                    else if (str_eq(op->attributes[i]->name, str_lit("params_sig")) && op->attributes[i]->kind==ATTR_KIND_STRING) params = op->attributes[i]->data.string_value;
+                }
+                if (vis.size>0) { header = str_concat(arena, header, str_lit(" ")); header = str_concat(arena, header, vis); }
+                if (name.size>0) { header = str_concat(arena, header, str_lit(" ")); header = str_concat(arena, header, name); }
+                header = str_concat(arena, header, str_lit("(")); if (params.size>0) header = str_concat(arena, header, params); header = str_concat(arena, header, str_lit(")"));
+                if (ret.size>0) { header = str_concat(arena, header, str_lit(" -> ")); header = str_concat(arena, header, ret); }
+                // Replace current line with indent + header
+                result = indent_classic(arena, indent_level);
+                result = str_concat(arena, result, header);
+                if (op->n_regions>0) { result = str_concat(arena, result, str_lit(" ")); result = str_concat(arena, result, print_function_region_classic(ctx, indent_level, op->regions[0])); }
+                break;
+            }
             // Before generic/default printing, handle a few named ops specially:
             if (op->opname.size > 0 && (str_eq(op->opname, str_lit("arith.bitcast")) || str_eq(op->opname, str_lit("arith.sitofp")) || str_eq(op->opname, str_lit("arith.extsi")) || str_eq(op->opname, str_lit("arith.trunci")) || str_eq(op->opname, str_lit("arith.extf")) || str_eq(op->opname, str_lit("arith.truncf")))) {
                 // op name
