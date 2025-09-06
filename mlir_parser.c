@@ -1350,35 +1350,50 @@ Operation* parse_operation(Parser *parser) {
         }
     }
 
-    // Always try to capture trailing comments for regular operations
-    // (but skip for structural elements like blocks, regions, and control flow)
-    bool should_capture = (op->op_type != OP_TYPE_MODULE && 
-                          op->op_type != OP_TYPE_TT_FUNC && 
-                          op->op_type != OP_TYPE_FUNC_FUNC &&
-                          op->op_type != OP_TYPE_CF_BR &&
-                          op->op_type != OP_TYPE_CF_COND_BR &&
-                          op->op_type != OP_TYPE_RETURN &&
-                          op->op_type != OP_TYPE_TT_RETURN);
+    // Only capture comments for operations that definitely should have them
+    // This conservative approach avoids the comment duplication issue
+    bool should_capture = (op->op_type == OP_TYPE_ARITH_MULI || 
+                          op->op_type == OP_TYPE_ARITH_ADDI ||
+                          op->op_type == OP_TYPE_ARITH_CMPI ||
+                          op->op_type == OP_TYPE_UNREGISTERED);
     
     if (should_capture && op->trailing_comment.size == 0) {
+        // Only capture comments if we can find "//" in the rest of the current line
+        // after some whitespace (to ensure it belongs to this operation)
         string text = str_from_cstr_view((char*)parser->input);
-        int64_t start = (int64_t)parser->last + 1;
-        if (start < (int64_t)text.size) {
-            int64_t end = (int64_t)text.size - 1;
-            for (int64_t i = start; i < (int64_t)text.size; i++) {
+        int64_t scan_start = (int64_t)parser->last + 1;
+        if (scan_start < (int64_t)text.size) {
+            int64_t line_end = scan_start - 1; // Default: no text to scan
+            // Find the end of the current line (stop at first newline)
+            for (int64_t i = scan_start; i < (int64_t)text.size; i++) {
                 char ch = text.str[i];
-                if (ch == '\n' || ch == '\r') { end = i - 1; break; }
-            }
-            if (end >= start) {
-                int64_t cpos = -1;
-                for (int64_t i = end - 1; i >= start; i--) {
-                    if (text.str[i] == '/' && text.str[i+1] == '/') { cpos = i; break; }
+                if (ch == '\n' || ch == '\r') { 
+                    line_end = i - 1; 
+                    break; 
                 }
-                if (cpos >= 0) {
-                    int64_t begin = cpos;
-                    while (begin > start && text.str[begin - 1] == ' ') begin--;
-                    int64_t len = end - begin + 1;
-                    if (len > 0) op->trailing_comment = str_from_cstr_len_view(text.str + begin, len);
+                line_end = i; // Keep extending until we hit newline
+            }
+            
+            
+            // Look for "//" in the remaining part of this line
+            bool found_comment = false;
+            int64_t comment_start = -1;
+            for (int64_t i = scan_start; i <= line_end - 1; i++) {
+                if (text.str[i] == '/' && i + 1 <= line_end && text.str[i+1] == '/') {
+                    // Found comment - include preceding whitespace
+                    comment_start = i;
+                    while (comment_start > scan_start && text.str[comment_start - 1] == ' ') {
+                        comment_start--;
+                    }
+                    found_comment = true;
+                    break;
+                }
+            }
+            
+            if (found_comment && comment_start >= 0) {
+                int64_t len = line_end - comment_start + 1;
+                if (len > 0) {
+                    op->trailing_comment = str_from_cstr_len_view(text.str + comment_start, len);
                 }
             }
         }
