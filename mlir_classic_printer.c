@@ -619,12 +619,23 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
             }
             result = str_concat(arena, result, str_lit(")"));
-            // Optional return signature captured in attribute 'ret'
+            // Optional return signature captured in attribute 'ret'; if absent, infer from last tt.return
+            bool printed_ret = false;
             for (int i=0;i<op->n_attributes;i++) {
                 if (op->attributes[i] && str_eq(op->attributes[i]->name, str_lit("ret")) && op->attributes[i]->kind==ATTR_KIND_STRING) {
                     string ret = op->attributes[i]->data.string_value;
-                    if (ret.size>0) { result = str_concat(arena, result, str_lit(" -> ")); result = str_concat(arena, result, ret); }
+                    if (ret.size>0) { result = str_concat(arena, result, str_lit(" -> ")); result = str_concat(arena, result, ret); printed_ret = true; }
                     break;
+                }
+            }
+            if (!printed_ret && op->n_regions>0 && op->regions[0] && op->regions[0]->n_blocks>0) {
+                Block *b = op->regions[0]->blocks[op->regions[0]->n_blocks-1];
+                if (b && b->n_operations>0) {
+                    Operation *last = b->operations[b->n_operations-1];
+                    if (last && last->op_type == OP_TYPE_TT_RETURN && last->n_operands>0 && last->operands[0] && last->operands[0]->type) {
+                        result = str_concat(arena, result, str_lit(" -> "));
+                        result = str_concat(arena, result, type_to_string(arena, last->operands[0]->type));
+                    }
                 }
             }
             // Always include the expected function attributes for these tests
@@ -1298,7 +1309,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
     // Print attributes for operations that should show them in classic format
     // Skip internal attributes that shouldn't be visible
-    if (op->n_attributes > 0 && op->op_type != OP_TYPE_TT_FUNC && 
+    if (op->n_attributes > 0 && op->op_type != OP_TYPE_TT_FUNC && op->op_type != OP_TYPE_TT_REDUCE && 
         op->op_type != OP_TYPE_TT_LOAD && op->op_type != OP_TYPE_TT_STORE &&
         op->op_type != OP_TYPE_ARITH_CMPI && op->op_type != OP_TYPE_TT_MAKE_RANGE &&
         op->op_type != OP_TYPE_FUNC_FUNC) {
@@ -1368,7 +1379,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
     // For classic formatting: place regions (when present).
     // Skip here for func.func since its region was already printed in its case above.
-    if (op->n_regions > 0 && op->op_type != OP_TYPE_FUNC_FUNC) {
+    if (op->n_regions > 0 && op->op_type != OP_TYPE_FUNC_FUNC && op->op_type != OP_TYPE_TT_REDUCE) {
         result = str_concat(arena, result, str_lit(" "));
         for (int i = 0; i < op->n_regions; i++) {
             // Special handling for SCF if else
