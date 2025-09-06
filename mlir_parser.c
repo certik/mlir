@@ -391,7 +391,7 @@ void parser_init(Arena *arena, Parser *parser, string text) {
     LocationMap_init(arena, &parser->location_map, 16);
     parser->next_loc_id = 0;
     parser->unnumbered_loc_def = NULL;
-    parser->capture_trailing_comments = true;
+    parser->capture_trailing_comments = false;
     parser_next_token(parser);
 }
 
@@ -1350,10 +1350,17 @@ Operation* parse_operation(Parser *parser) {
         }
     }
 
-    // Optionally capture trailing inline comment by scanning raw input from the
-    // end of the last token to the end of this line (for contexts that set
-    // capture_trailing_comments=true, e.g., SCF bodies).
-    if (parser->capture_trailing_comments && op->trailing_comment.size == 0) {
+    // Always try to capture trailing comments for regular operations
+    // (but skip for structural elements like blocks, regions, and control flow)
+    bool should_capture = (op->op_type != OP_TYPE_MODULE && 
+                          op->op_type != OP_TYPE_TT_FUNC && 
+                          op->op_type != OP_TYPE_FUNC_FUNC &&
+                          op->op_type != OP_TYPE_CF_BR &&
+                          op->op_type != OP_TYPE_CF_COND_BR &&
+                          op->op_type != OP_TYPE_RETURN &&
+                          op->op_type != OP_TYPE_TT_RETURN);
+    
+    if (should_capture && op->trailing_comment.size == 0) {
         string text = str_from_cstr_view((char*)parser->input);
         int64_t start = (int64_t)parser->last + 1;
         if (start < (int64_t)text.size) {

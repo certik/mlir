@@ -570,15 +570,20 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
         case OP_TYPE_TT_FUNC: {
             // Classic format header with visibility and symbol name
-            result = str_concat(arena, result, str_lit("tt.func public @"));
-            // Try to find 'sym_name' attribute - use original name if available
+            result = str_concat(arena, result, str_lit("tt.func "));
+            
+            // Get visibility from attributes
+            string visibility = str_lit("private");  // default
             string fname = str_lit("unknown_func");
             for (int i = 0; i < op->n_attributes; i++) {
-                if (op->attributes[i] && str_eq(op->attributes[i]->name, str_lit("sym_name")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
+                if (op->attributes[i] && str_eq(op->attributes[i]->name, str_lit("visibility")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
+                    visibility = op->attributes[i]->data.string_value;
+                } else if (op->attributes[i] && str_eq(op->attributes[i]->name, str_lit("sym_name")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
                     fname = op->attributes[i]->data.string_value;
-                    break;
                 }
             }
+            result = str_concat(arena, result, visibility);
+            result = str_concat(arena, result, str_lit(" @"));
             result = str_concat(arena, result, fname);
             // Arguments are stored in op->operands for tt.func
             result = str_concat(arena, result, str_lit("("));
@@ -1297,7 +1302,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         for (int i = 0; i < op->n_attributes; i++) {
             Attribute *attr = op->attributes[i];
             // Skip internal attributes that shouldn't be shown in classic format
-            if (str_eq(attr->name, str_lit("sym_name")) || str_eq(attr->name, str_lit("_sig_parens")) || str_eq(attr->name, str_lit("_sig_src")) || str_eq(attr->name, str_lit("value_text")) || (attr->name.size>0 && attr->name.str[0]=='_')) {
+            if (str_eq(attr->name, str_lit("sym_name")) || str_eq(attr->name, str_lit("visibility")) || str_eq(attr->name, str_lit("_sig_parens")) || str_eq(attr->name, str_lit("_sig_src")) || str_eq(attr->name, str_lit("value_text")) || (attr->name.size>0 && attr->name.str[0]=='_')) {
                 continue;
             }
             // Skip 'callee' which we print in header for calls
