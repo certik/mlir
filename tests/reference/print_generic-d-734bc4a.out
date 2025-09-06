@@ -39,8 +39,8 @@ module() {
         %collapsed_213 = tensor.collapse_shape(%from_elements_117: tensor<5x2xi16>) -> tensor<10xi16>
         %collapsed_222 = tensor.collapse_shape(%212: tensor<?x?xi16>) -> tensor<10xi16>
         %490 = call(%collapsed_222: tensor<10xi16>) {callee = "@tensor_i16"} -> i16
-        %1 = "arith.sitofp"(%0: i16) -> i16
-        return(%1: i16)
+        %1 = "arith.sitofp"(%0: i16) -> f32
+        return(%1: f32)
     }
 }
 

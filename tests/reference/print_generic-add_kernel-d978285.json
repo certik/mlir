@@ -4,7 +4,7 @@
     "infile": "tests/add_kernel.ttir",
     "infile_hash": "722c799c60f583e83fb105ca0bb08e235b79a48a075e82a6f89ec84b",
     "outfile": "print_generic-add_kernel-d978285.out",
-    "outfile_hash": "05717512d1736ea2d0a511bb2cd9f290154d7d6bb003946dddec8721",
+    "outfile_hash": "c6bdfeb58b9238549ca263266fa7142a67a6cb0ad53bbb327496fa74",
     "stdout": null,
     "stdout_hash": null,
     "stderr": null,

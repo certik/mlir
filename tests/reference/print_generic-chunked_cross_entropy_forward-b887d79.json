@@ -4,7 +4,7 @@
     "infile": "tests/chunked_cross_entropy_forward.ttir",
     "infile_hash": "09b1b4746e7a46b266514a1083cd2dc3d70e9ee360c1b35c405158a0",
     "outfile": "print_generic-chunked_cross_entropy_forward-b887d79.out",
-    "outfile_hash": "b086dbd3e235d8c19b1f3cfb32da36adc52d113ba28e885625faa527",
+    "outfile_hash": "4b6b37973d21a1570a15cb059d5d0e4e5e7a87b40d74815fafd080e7",
     "stdout": null,
     "stdout_hash": null,
     "stderr": null,
