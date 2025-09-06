@@ -554,7 +554,18 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
             if (vis.size>0) { result = str_concat(arena, result, str_lit(" ")); result = str_concat(arena, result, vis); }
             if (name.size>0) { result = str_concat(arena, result, str_lit(" ")); result = str_concat(arena, result, name); }
-            result = str_concat(arena, result, str_lit("()"));
+            // Print parameter signature if captured for declarations
+            string params = str_lit("");
+            for (int i=0;i<op->n_attributes;i++) {
+                if (str_eq(op->attributes[i]->name, str_lit("params_sig")) && op->attributes[i]->kind==ATTR_KIND_STRING) { params = op->attributes[i]->data.string_value; break; }
+            }
+            if (params.size > 0) {
+                result = str_concat(arena, result, str_lit("("));
+                result = str_concat(arena, result, params);
+                result = str_concat(arena, result, str_lit(")"));
+            } else {
+                result = str_concat(arena, result, str_lit("()"));
+            }
             if (ret.size>0) { result = str_concat(arena, result, str_lit(" -> ")); result = str_concat(arena, result, ret); }
             result = str_concat(arena, result, str_lit(" "));
             // Print body region

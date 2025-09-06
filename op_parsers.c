@@ -1950,6 +1950,9 @@ void parse_tt_func(Parser *parser, Operation *op) {
         VecValueRef func_args;
         VecValueRef_reserve(parser->arena, &func_args, 8);
 
+        // Accumulate a textual params signature when args are type-only (declarations)
+        string params_sig = str_lit("");
+
         // Parse arguments directly in one pass
         int paren_depth = 0;
         while (!parser_peek(parser, TK_EOF)) {
@@ -2138,6 +2141,15 @@ void parse_tt_func(Parser *parser, Operation *op) {
 
                     VecValueRef_push_back(parser->arena, &func_args, arg);
                 }
+            } else if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME) || parser_peek(parser, TK_EXCLAMATION)) {
+                // Type-only param (no SSA name); accumulate its textual form
+                string ty = str_lit("");
+                if (parse_type_string(parser, &ty)) {
+                    if (params_sig.size > 0) params_sig = str_concat(parser->arena, params_sig, str_lit(", "));
+                    params_sig = str_concat(parser->arena, params_sig, ty);
+                } else {
+                    parser_next_token(parser);
+                }
             } else {
                 parser_next_token(parser);
             }
@@ -2153,6 +2165,18 @@ void parse_tt_func(Parser *parser, Operation *op) {
         if (parser_peek(parser, TK_RPAREN)) {
             parser_expect(parser, TK_RPAREN);
         } else {
+        }
+
+        // Save params signature if any
+        if (params_sig.size > 0) {
+            size_t n = op->n_attributes; Attribute **attrs = op->attributes;
+            Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+1);
+            for (size_t i=0;i<n;i++) new_attrs[i] = attrs[i];
+            new_attrs[n] = arena_alloc(parser->arena, Attribute);
+            new_attrs[n]->name = str_lit("params_sig");
+            new_attrs[n]->kind = ATTR_KIND_STRING;
+            new_attrs[n]->data.string_value = params_sig;
+            op->attributes = new_attrs; op->n_attributes = (int)(n+1);
         }
     }
 
@@ -2184,62 +2208,56 @@ void parse_tt_func(Parser *parser, Operation *op) {
         }
     }
 
-    // Skip any remaining tokens until function body
-    while (!parser_peek(parser, TK_LBRACE_END)) {
-        parser_next_token(parser);
-    }
+    // If there is a function body, parse it; otherwise leave as a declaration
+    if (parser_peek(parser, TK_LBRACE_END)) {
+        // Parse the function body region with special handling for function arguments
+        parser_expect(parser, TK_LBRACE_END);
+        parser_expect(parser, TK_NEWLINE);
 
-    // Parse the function body region with special handling for function arguments
-    parser_expect(parser, TK_LBRACE_END);
-    parser_expect(parser, TK_NEWLINE);
+        // Push new scope for this region
+        symbol_table_push_scope(parser->arena, &parser->symbol_table);
 
-    // Push new scope for this region
-    symbol_table_push_scope(parser->arena, &parser->symbol_table);
-
-    // Register function arguments in the new scope
-    for (int i = 0; i < op->n_operands; i++) {
-        if (op->operands[i]) {
-            symbol_table_add_value(parser->arena, &parser->symbol_table, op->operands[i]->register_name, op->operands[i]);
+        // Register function arguments in the new scope
+        for (int i = 0; i < op->n_operands; i++) {
+            if (op->operands[i]) {
+                symbol_table_add_value(parser->arena, &parser->symbol_table, op->operands[i]->register_name, op->operands[i]);
+            }
         }
-    }
 
-    // Parse blocks
-    VecBlock blocks;
-    VecBlock_reserve(parser->arena, &blocks, 8);
-    while (!parser_peek(parser, TK_RBRACE)) {
-        Block *block = parse_block(parser);
-        VecBlock_push_back(parser->arena, &blocks, block);
-    }
-    parser_expect(parser, TK_RBRACE);
+        // Parse blocks
+        VecBlock blocks;
+        VecBlock_reserve(parser->arena, &blocks, 8);
+        while (!parser_peek(parser, TK_RBRACE)) {
+            Block *block = parse_block(parser);
+            VecBlock_push_back(parser->arena, &blocks, block);
+        }
+        parser_expect(parser, TK_RBRACE);
 
-    // Pop scope when leaving region
-    symbol_table_pop_scope(&parser->symbol_table);
+        // Pop scope when leaving region
+        symbol_table_pop_scope(&parser->symbol_table);
 
-    // Create region
-    Region *region = arena_alloc(parser->arena, Region);
-    region->blocks = blocks.data;
-    region->n_blocks = blocks.size;
+        // Create region
+        Region *region = arena_alloc(parser->arena, Region);
+        region->blocks = blocks.data;
+        region->n_blocks = blocks.size;
 
-    // Set up block arguments
-    // Note: For tt.func, we don't copy arguments to the first block to avoid duplication
-    // since the arguments are already printed in the function signature
-    if (region->n_blocks > 0 && op->n_operands > 0) {
-        Block *entry_block = region->blocks[0];
-        // Don't set block arguments for tt.func - they're already in the function signature
-        entry_block->n_arguments = 0;
-        entry_block->arguments = NULL;
-    }
+        // Assign region to operation
+        Region **regions = arena_alloc(parser->arena, Region*);
+        regions[0] = region;
+        op->regions = regions;
+        op->n_regions = 1;
 
-    if (parser_peek(parser, TK_NAME)) {
-        if (str_eq(parser_token_str(parser), str_lit("loc"))) {
+        if (parser_peek(parser, TK_NAME)) {
+            if (str_eq(parser_token_str(parser), str_lit("loc"))) {
+                op->location = parse_loc(parser);
+            }
+        }
+    } else {
+        // Declaration: no body. Optionally consume trailing loc
+        if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
             op->location = parse_loc(parser);
         }
     }
-
-    Region **regions = arena_alloc(parser->arena, Region*);
-    regions[0] = region;
-    op->regions = regions;
-    op->n_regions = 1;
 }
 
 void parse_func_func(Parser *parser, Operation *op) {
@@ -2263,6 +2281,7 @@ void parse_func_func(Parser *parser, Operation *op) {
     if (parser_peek(parser, TK_LPAREN)) {
         parser_expect(parser, TK_LPAREN);
         bool first = true;
+        string params_sig = str_lit("");
         while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
             if (!first && parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
             first = false;
@@ -2283,11 +2302,30 @@ void parse_func_func(Parser *parser, Operation *op) {
                 arg->register_name = reg;
                 arg->type = ty;
                 VecValueRef_push_back(parser->arena, &args, arg);
+            } else if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME) || parser_peek(parser, TK_EXCLAMATION)) {
+                // Type-only argument in declaration form
+                string t = str_lit("");
+                if (parse_type_string(parser, &t)) {
+                    if (params_sig.size > 0) params_sig = str_concat(parser->arena, params_sig, str_lit(", "));
+                    params_sig = str_concat(parser->arena, params_sig, t);
+                } else {
+                    parser_next_token(parser);
+                }
             } else {
                 parser_next_token(parser);
             }
         }
         parser_expect(parser, TK_RPAREN);
+        if (params_sig.size > 0) {
+            size_t n = op->n_attributes; Attribute **attrs = op->attributes;
+            Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+1);
+            for (size_t i=0;i<n;i++) new_attrs[i] = attrs[i];
+            new_attrs[n] = arena_alloc(parser->arena, Attribute);
+            new_attrs[n]->name = str_lit("params_sig");
+            new_attrs[n]->kind = ATTR_KIND_STRING;
+            new_attrs[n]->data.string_value = params_sig;
+            op->attributes = new_attrs; op->n_attributes = (int)(n+1);
+        }
     }
     // Optional return type sequence after '->' (capture text conservatively)
     string ret_sig = str_lit("");
@@ -2301,11 +2339,13 @@ void parse_func_func(Parser *parser, Operation *op) {
         }
         
     }
-    // Parse body region with caret block labels and arguments
-    Region *region = parse_region(parser);
-    op->regions = arena_alloc_array(parser->arena, Region*, 1);
-    op->regions[0] = region;
-    op->n_regions = 1;
+    // Parse optional body region (definition) or leave as declaration
+    if (parser_peek(parser, TK_LBRACE_END)) {
+        Region *region = parse_region(parser);
+        op->regions = arena_alloc_array(parser->arena, Region*, 1);
+        op->regions[0] = region;
+        op->n_regions = 1;
+    }
 
     // Store attributes for classic printing
     size_t n = op->n_attributes; Attribute **attrs = op->attributes;
