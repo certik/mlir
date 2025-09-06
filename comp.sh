@@ -29,7 +29,10 @@ TEST=chunked_cross_entropy_forward
 ./parser --classic tests/${TEST}.ttir > ${TEST}2.ttir
 diff -Naur tests/${TEST}.ttir ${TEST}2.ttir
 
-#b.mlir
+TEST=b
+./parser --classic tests/${TEST}.mlir > ${TEST}2.mlir
+diff -Naur tests/${TEST}.mlir ${TEST}2.mlir
+
 #c.mlir
 
 TEST=add_kernel
