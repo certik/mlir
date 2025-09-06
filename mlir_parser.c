@@ -391,6 +391,7 @@ void parser_init(Arena *arena, Parser *parser, string text) {
     LocationMap_init(arena, &parser->location_map, 16);
     parser->next_loc_id = 0;
     parser->unnumbered_loc_def = NULL;
+    parser->capture_trailing_comments = false;
     parser_next_token(parser);
 }
 
@@ -856,7 +857,7 @@ Block* parse_block(Parser *parser) {
                     line_start--;
                 }
                 int64_t comment_pos = -1;
-                for (int64_t i = line_start; i + 1 <= line_end; i++) {
+                for (int64_t i = line_end - 1; i >= line_start; i--) {
                     if (parser->input[i] == '/' && parser->input[i + 1] == '/') { comment_pos = i; break; }
                 }
                 if (comment_pos >= 0) {
@@ -1346,6 +1347,33 @@ Operation* parse_operation(Parser *parser) {
     } else {
         if (op->n_result_types > 0) {
             parser_error(parser, str_lit("Result Type parsed on RHS but no result Value on LHS"), parser->first, parser->last);
+        }
+    }
+
+    // Optionally capture trailing inline comment by scanning raw input from the
+    // end of the last token to the end of this line (for contexts that set
+    // capture_trailing_comments=true, e.g., SCF bodies).
+    if (parser->capture_trailing_comments && op->trailing_comment.size == 0) {
+        string text = str_from_cstr_view((char*)parser->input);
+        int64_t start = (int64_t)parser->last + 1;
+        if (start < (int64_t)text.size) {
+            int64_t end = (int64_t)text.size - 1;
+            for (int64_t i = start; i < (int64_t)text.size; i++) {
+                char ch = text.str[i];
+                if (ch == '\n' || ch == '\r') { end = i - 1; break; }
+            }
+            if (end >= start) {
+                int64_t cpos = -1;
+                for (int64_t i = end - 1; i >= start; i--) {
+                    if (text.str[i] == '/' && text.str[i+1] == '/') { cpos = i; break; }
+                }
+                if (cpos >= 0) {
+                    int64_t begin = cpos;
+                    while (begin > start && text.str[begin - 1] == ' ') begin--;
+                    int64_t len = end - begin + 1;
+                    if (len > 0) op->trailing_comment = str_from_cstr_len_view(text.str + begin, len);
+                }
+            }
         }
     }
 

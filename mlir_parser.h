@@ -74,6 +74,8 @@ typedef struct {
     LocationMap location_map;  // For #locN -> Location mapping
     int next_loc_id;          // Counter for generating #locN IDs
     Location *unnumbered_loc_def; // Optional: definition of unnumbered '#loc' at file start
+    // Parsing mode flag to enable robust trailing comment capture in special contexts
+    bool capture_trailing_comments;
 } Parser;
 
 

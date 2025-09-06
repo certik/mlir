@@ -2670,6 +2670,8 @@ void parse_affine_for(Parser *parser, Operation *op) {
     block->n_arguments = block_args.size;
 
     // Parse body operations
+    bool prev_flag = parser->capture_trailing_comments;
+    parser->capture_trailing_comments = true;
     VecOperation operations; VecOperation_reserve(parser->arena, &operations, 16);
     while (!parser_peek(parser, TK_RBRACE)) {
         Operation *inner = parse_operation(parser);
@@ -2685,7 +2687,7 @@ void parse_affine_for(Parser *parser, Operation *op) {
                     line_start--;
                 }
                 int64_t comment_pos = -1;
-                for (int64_t i = line_start; i + 1 <= line_end; i++) {
+                for (int64_t i = line_end - 1; i >= line_start; i--) {
                     if (parser->input[i] == '/' && parser->input[i + 1] == '/') { comment_pos = i; break; }
                 }
                 if (comment_pos >= 0) {
@@ -2709,7 +2711,7 @@ void parse_affine_for(Parser *parser, Operation *op) {
                 }
                 if (end >= start) {
                     int64_t cpos = -1;
-                    for (int64_t i = start; i + 1 <= end; i++) {
+                    for (int64_t i = end - 1; i >= start; i--) {
                         if (text.str[i] == '/' && text.str[i+1] == '/') { cpos = i; break; }
                     }
                     if (cpos >= 0) {
@@ -2726,6 +2728,7 @@ void parse_affine_for(Parser *parser, Operation *op) {
         while (parser_peek(parser, TK_NEWLINE)) parser_expect(parser, TK_NEWLINE);
     }
     parser_expect(parser, TK_RBRACE);
+    parser->capture_trailing_comments = prev_flag;
 
     // Optional trailing loc()
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
