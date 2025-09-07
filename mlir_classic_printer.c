@@ -1,25 +1,26 @@
+#include "mlir_api_impl.h"
 #include "mlir_classic_printer.h"
 #include <base/hashtable.h>
 #include <base/format.h>
 #include <stdio.h>
 
 // SSA numbering map for printer
-static inline size_t ptr_hash(ValueRef *p) { return ((size_t)p) >> 3; }
-static inline bool ptr_equal(ValueRef *a, ValueRef *b) { return a == b; }
+static inline size_t ptr_hash(MlirValue *p) { return ((size_t)p) >> 3; }
+static inline bool ptr_equal(MlirValue *a, MlirValue *b) { return a == b; }
 #define SsaMap_HASH ptr_hash
 #define SsaMap_EQUAL ptr_equal
-DEFINE_HASHTABLE_FOR_TYPES(ValueRef*, uint32_t, SsaMap)
+DEFINE_HASHTABLE_FOR_TYPES(MlirValue*, uint32_t, SsaMap)
 
 typedef struct {
     Arena *arena;
     uint32_t next_ssa;
     SsaMap ssa_map;
-    Operation *current_scf_for;
+    MlirOperation *current_scf_for;
 } PrintCtx;
 
 // Optional predecessor comments per block for a region
 typedef struct {
-    Region *region;
+    MlirRegion *region;
     string *comments; // size = region->n_blocks
     int *counts;      // predecessor counts
     int n_blocks;
@@ -32,20 +33,20 @@ static int parse_bb_index(string lab) {
     return v;
 }
 
-static PredComments* build_pred_comments(Arena *arena, Region *region) {
+static PredComments* build_pred_comments(Arena *arena, MlirRegion *region) {
     if (!region) return NULL;
     PredComments *pc = arena_alloc(arena, PredComments);
     pc->region = region;
-    pc->n_blocks = (int)region->n_blocks;
+    pc->n_blocks = (int)mlir_region_num_blocks(region);
     pc->comments = arena_alloc_array(arena, string, pc->n_blocks);
     pc->counts = arena_alloc_array(arena, int, pc->n_blocks);
     for (int i=0;i<pc->n_blocks;i++){ pc->comments[i]=str_lit(""); pc->counts[i]=0; }
     // Walk operations to find branch targets
-    for (int b=0; b<(int)region->n_blocks; b++) {
-        Block *blk = region->blocks[b];
-        for (int oi=0; oi<(int)blk->n_operations; oi++) {
-            Operation *op = blk->operations[oi];
-            if (op->op_type == OP_TYPE_CF_BR) {
+    for (int b=0; b<(int)mlir_region_num_blocks(region); b++) {
+        MlirBlock *blk = mlir_region_get_block(region, b);
+        for (int oi=0; oi<(int)mlir_block_num_operations(blk); oi++) {
+            MlirOperation *op = mlir_block_get_operation(blk, oi);
+            if (mlir_operation_get_type(op) == OP_TYPE_CF_BR) {
                 // find _target attribute
                 string tgt = str_lit("");
                 for (int ai=0; ai<(int)op->n_attributes; ai++) {
@@ -57,7 +58,7 @@ static PredComments* build_pred_comments(Arena *arena, Region *region) {
                     else pc->comments[idx] = str_concat(arena, pc->comments[idx], format(arena, str_lit(", ^bb{}"), (int64_t)b));
                     pc->counts[idx]++;
                 }
-            } else if (op->op_type == OP_TYPE_CF_COND_BR) {
+            } else if (mlir_operation_get_type(op) == OP_TYPE_CF_COND_BR) {
                 string ttrue = str_lit(""); string tfalse = str_lit("");
                 for (int ai=0; ai<(int)op->n_attributes; ai++) {
                     if (str_eq(op->attributes[ai]->name, str_lit("_true")) && op->attributes[ai]->kind==ATTR_KIND_STRING) ttrue = op->attributes[ai]->data.string_value;
@@ -96,7 +97,7 @@ static inline void ssa_map_init(PrintCtx *ctx, Arena *arena) {
     ctx->current_scf_for = NULL;
 }
 
-static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, ValueRef *v) {
+static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, MlirValue *v) {
     uint32_t *found = SsaMap_get(&ctx->ssa_map, v);
     if (found) return *found;
     uint32_t num = ctx->next_ssa++;
@@ -105,17 +106,17 @@ static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, ValueRef *v) {
 }
 
 // Forward declarations for internal functions
-static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, Operation *op);
-static string print_region_internal_classic(PrintCtx *ctx, int indent_level, Region *region);
-static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int indent_level, Block *block);
-static string print_function_region_classic(PrintCtx *ctx, int indent_level, Region *region);
+static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, MlirOperation *op);
+static string print_region_internal_classic(PrintCtx *ctx, int indent_level, MlirRegion *region);
+static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int indent_level, MlirBlock *block);
+static string print_function_region_classic(PrintCtx *ctx, int indent_level, MlirRegion *region);
 
-static void preassign_region_ssa(PrintCtx *ctx, Region *region, int indent_level);
-static void preassign_op_ssa(PrintCtx *ctx, Operation *op, int indent_level) {
+static void preassign_region_ssa(PrintCtx *ctx, MlirRegion *region, int indent_level);
+static void preassign_op_ssa(PrintCtx *ctx, MlirOperation *op, int indent_level) {
     // First preassign nested regions so nested results get earlier numbers
-    if (op->n_regions > 0 && op->regions) {
-        for (int i = 0; i < op->n_regions; i++) {
-            preassign_region_ssa(ctx, op->regions[i], indent_level + 1);
+    if (mlir_operation_num_regions(op) > 0) {
+        for (int i = 0; i < (int)mlir_operation_num_regions(op); i++) {
+            preassign_region_ssa(ctx, mlir_operation_get_region(op, i), indent_level + 1);
         }
     }
     // Then assign SSA for this op's results, if any
@@ -128,15 +129,15 @@ static void preassign_op_ssa(PrintCtx *ctx, Operation *op, int indent_level) {
     }
 }
 
-static void preassign_block_ssa(PrintCtx *ctx, Block *block, int indent_level) {
-    for (int i = 0; i < block->n_operations; i++) {
-        preassign_op_ssa(ctx, block->operations[i], indent_level + 1);
+static void preassign_block_ssa(PrintCtx *ctx, MlirBlock *block, int indent_level) {
+    for (int i = 0; i < (int)mlir_block_num_operations(block); i++) {
+        preassign_op_ssa(ctx, mlir_block_get_operation(block, i), indent_level + 1);
     }
 }
 
-static void preassign_region_ssa(PrintCtx *ctx, Region *region, int indent_level) {
-    for (int i = 0; i < region->n_blocks; i++) {
-        preassign_block_ssa(ctx, region->blocks[i], indent_level);
+static void preassign_region_ssa(PrintCtx *ctx, MlirRegion *region, int indent_level) {
+    for (int i = 0; i < (int)mlir_region_num_blocks(region); i++) {
+        preassign_block_ssa(ctx, mlir_region_get_block(region, i), indent_level);
     }
 }
 
@@ -152,7 +153,7 @@ static string indent_classic(Arena *arena, int indent_level) {
 }
 
 // Helper to print SSA value reference
-static string print_ssa_value_classic(PrintCtx *ctx, ValueRef *value) {
+static string print_ssa_value_classic(PrintCtx *ctx, MlirValue *value) {
     Arena *arena = ctx->arena;
     if (value->register_name.size > 0) {
         return value->register_name;
@@ -163,11 +164,11 @@ static string print_ssa_value_classic(PrintCtx *ctx, ValueRef *value) {
 }
 
 // Helper to print operands; appends "#0" when referencing first result of a multi-result def
-static string print_ssa_operand_classic(PrintCtx *ctx, ValueRef *value) {
+static string print_ssa_operand_classic(PrintCtx *ctx, MlirValue *value) {
     Arena *arena = ctx->arena;
     string base = print_ssa_value_classic(ctx, value);
     if (value && value->kind == OP_RESULT && value->def) {
-        Operation *defop = (Operation*)value->def;
+        MlirOperation *defop = (MlirOperation*)value->def;
         if (defop->n_result_types > 1) {
             base = str_concat(arena, base, str_lit("#0"));
         }
@@ -176,7 +177,7 @@ static string print_ssa_operand_classic(PrintCtx *ctx, ValueRef *value) {
 }
 
 // Helper to print location information
-static string print_location_classic(Arena *arena, Location *loc) {
+static string print_location_classic(Arena *arena, MlirLocation *loc) {
     if (!loc) return str_lit("");
     
     switch (loc->kind) {
@@ -206,7 +207,7 @@ static string print_location_classic(Arena *arena, Location *loc) {
     }
 }
 
-static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int indent_level, Block *block) {
+static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int indent_level, MlirBlock *block) {
     Arena *arena = ctx->arena;
     string result = format(arena, str_lit("{}^bb{}"), indent_classic(arena, indent_level), bb_index);
 
@@ -215,7 +216,7 @@ static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int inde
         result = str_concat(arena, result, str_lit("("));
         for (int i = 0; i < block->n_arguments; i++) {
             if (i > 0) result = str_concat(arena, result, str_lit(", "));
-            ValueRef *arg = block->arguments[i];
+            MlirValue *arg = block->arguments[i];
             if (arg && arg->type) {
                 // For block arguments, use the original register name
                 if (arg->register_name.size > 0) {
@@ -234,21 +235,21 @@ static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int inde
 
     result = str_concat(arena, result, str_lit(":\n"));
 
-    for (int i=0; i < block->n_operations; i++) {
+    for (int i=0; i < (int)mlir_block_num_operations(block); i++) {
         result = str_concat(arena, result,
-            print_operation_internal_classic(ctx, indent_level+1, block->operations[i])
+            print_operation_internal_classic(ctx, indent_level+1, mlir_block_get_operation(block, i))
         );
     }
     return result;
 }
 
-static string print_region_internal_classic(PrintCtx *ctx, int indent_level, Region *region) {
+static string print_region_internal_classic(PrintCtx *ctx, int indent_level, MlirRegion *region) {
     Arena *arena = ctx->arena;
     string result = str_lit("");
     result = str_concat(arena, result, str_lit("{\n"));
-    for (int i=0; i < region->n_blocks; i++) {
+    for (int i=0; i < (int)mlir_region_num_blocks(region); i++) {
         result = str_concat(arena, result,
-            print_block_internal_classic(ctx, i, indent_level, region->blocks[i])
+            print_block_internal_classic(ctx, i, indent_level, mlir_region_get_block(region, i))
         );
     }
     result = str_concat(arena, result, indent_classic(arena, indent_level));
@@ -257,17 +258,17 @@ static string print_region_internal_classic(PrintCtx *ctx, int indent_level, Reg
 }
 
 // Special function region printer that doesn't print block labels (for function bodies)
-static string print_function_region_classic(PrintCtx *ctx, int indent_level, Region *region) {
+static string print_function_region_classic(PrintCtx *ctx, int indent_level, MlirRegion *region) {
     Arena *arena = ctx->arena;
     string result = str_lit("");
     // If single block, keep the compact form; otherwise, print with block labels
-    if (region->n_blocks <= 1) {
+    if (mlir_region_num_blocks(region) <= 1) {
         result = str_concat(arena, result, str_lit("{\n"));
-        for (int i = 0; i < region->n_blocks; i++) {
-            Block *block = region->blocks[i];
-            for (int j = 0; j < block->n_operations; j++) {
+        for (int i = 0; i < (int)mlir_region_num_blocks(region); i++) {
+            MlirBlock *block = mlir_region_get_block(region, i);
+            for (int j = 0; j < (int)mlir_block_num_operations(block); j++) {
                 result = str_concat(arena, result,
-                    print_operation_internal_classic(ctx, indent_level + 1, block->operations[j])
+                    print_operation_internal_classic(ctx, indent_level + 1, mlir_block_get_operation(block, j))
                 );
             }
         }
@@ -280,14 +281,14 @@ static string print_function_region_classic(PrintCtx *ctx, int indent_level, Reg
         // Print first block without label, then labeled others with comments
         string out = str_lit("");
         out = str_concat(arena, out, str_lit("{\n"));
-        if (region->n_blocks > 0) {
-            Block *b0 = region->blocks[0];
-            for (int j = 0; j < b0->n_operations; j++) {
-                out = str_concat(arena, out, print_operation_internal_classic(ctx, indent_level + 1, b0->operations[j]));
+        if (mlir_region_num_blocks(region) > 0) {
+            MlirBlock *b0 = mlir_region_get_block(region, 0);
+            for (int j = 0; j < (int)mlir_block_num_operations(b0); j++) {
+                out = str_concat(arena, out, print_operation_internal_classic(ctx, indent_level + 1, mlir_block_get_operation(b0, j)));
             }
         }
-        for (int i = 1; i < region->n_blocks; i++) {
-            string blk = print_block_internal_classic(ctx, i, indent_level, region->blocks[i]);
+        for (int i = 1; i < (int)mlir_region_num_blocks(region); i++) {
+            string blk = print_block_internal_classic(ctx, i, indent_level, mlir_region_get_block(region, i));
             // Inject predecessor comment
             string comment = pc ? pc->comments[i] : str_lit("");
             if (comment.size > 0) {
@@ -307,7 +308,7 @@ static string print_function_region_classic(PrintCtx *ctx, int indent_level, Reg
     }
 }
 
-static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, Operation *op) {
+static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, MlirOperation *op) {
     Arena *arena = ctx->arena;
     string result = indent_classic(arena, indent_level);
 
@@ -354,7 +355,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             for (int i = 0; i < op->n_result_types; i++) {
                 if (i > 0) result = str_concat(arena, result, str_lit(", "));
                 if (op->n_results > i && op->results && op->results[i]) {
-                    ValueRef *res = op->results[i];
+                    MlirValue *res = op->results[i];
                     result = str_concat(arena, result, print_ssa_value_classic(ctx, res));
                 } else {
                     result = str_concat(arena, result, str_lit("%_"));
@@ -364,8 +365,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         }
     }
 
-    // Operation-specific printing with switch statement
-    switch (op->op_type) {
+    // MlirOperation-specific printing with switch statement
+    switch (mlir_operation_get_type(op)) {
         case OP_TYPE_ARITH_SELECT: {
             // Classic format: arith.select %cond, %t, %f : cond_ty, val_ty
             result = str_concat(arena, result, str_lit("arith.select "));
@@ -375,8 +376,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
             // Types: condition then value/result
             if (op->n_operands >= 2) {
-                Type *cond_ty = op->operands[0] ? op->operands[0]->type : NULL;
-                Type *val_ty = NULL;
+                MlirType *cond_ty = op->operands[0] ? op->operands[0]->type : NULL;
+                MlirType *val_ty = NULL;
                 if (op->n_result_types > 0 && op->result_types[0]) val_ty = op->result_types[0];
                 else if (op->operands[1] && op->operands[1]->type) val_ty = op->operands[1]->type;
                 if (cond_ty && val_ty) {
@@ -424,7 +425,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             string predicate = str_lit("slt"); // default fallback
             if (op->n_attributes > 0) {
                 for (int i = 0; i < op->n_attributes; i++) {
-                    Attribute *attr = op->attributes[i];
+                    MlirAttribute *attr = op->attributes[i];
                     if (str_eq(attr->name, str_lit("predicate")) && attr->kind == ATTR_KIND_STRING) {
                         predicate = attr->data.string_value;
                         break;
@@ -628,7 +629,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit("("));
             for (int i = 0; i < op->n_operands; i++) {
                 if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                ValueRef *arg = op->operands[i];
+                MlirValue *arg = op->operands[i];
                 if (arg && arg->type) {
                     result = str_concat(arena, result, format(arena, str_lit("{}: {}"),
                                                              print_ssa_value_classic(ctx, arg),
@@ -668,9 +669,9 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
             }
             if (!printed_ret && op->n_regions>0 && op->regions[0] && op->regions[0]->n_blocks>0) {
-                Block *b = op->regions[0]->blocks[op->regions[0]->n_blocks-1];
+                MlirBlock *b = op->regions[0]->blocks[op->regions[0]->n_blocks-1];
                 if (b && b->n_operations>0) {
-                    Operation *last = b->operations[b->n_operations-1];
+                    MlirOperation *last = b->operations[b->n_operations-1];
                     if (last && last->op_type == OP_TYPE_TT_RETURN && last->n_operands>0 && last->operands[0] && last->operands[0]->type) {
                         result = str_concat(arena, result, str_lit(" -> "));
                         result = str_concat(arena, result, type_to_string(arena, last->operands[0]->type));
@@ -720,7 +721,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             if (op->n_attributes>0) {
                 result = str_concat(arena, result, str_lit(" <{"));
                 bool first=true;
-                for (int i=0;i<op->n_attributes;i++) { Attribute *a=op->attributes[i]; if (!a) continue; if (!first) result = str_concat(arena, result, str_lit(", ")); first=false; if (a->kind==ATTR_KIND_INTEGER) { result = str_concat(arena, result, format(arena, str_lit("{} = {} : i32"), a->name, (int64_t)a->data.integer_value)); } else if (a->kind==ATTR_KIND_STRING) { string s=a->data.string_value; string norm=str_lit(""); for (size_t k=0;k<s.size;k++){ char c=s.str[k]; norm = str_concat(arena, norm, (string){&c,1}); if (c==':' && k+1<s.size && s.str[k+1]!=' ') norm = str_concat(arena, norm, str_lit(" ")); } result = str_concat(arena, result, format(arena, str_lit("{} = {}"), a->name, norm)); } else { result = str_concat(arena, result, a->name); } }
+                for (int i=0;i<op->n_attributes;i++) { MlirAttribute *a=op->attributes[i]; if (!a) continue; if (!first) result = str_concat(arena, result, str_lit(", ")); first=false; if (a->kind==ATTR_KIND_INTEGER) { result = str_concat(arena, result, format(arena, str_lit("{} = {} : i32"), a->name, (int64_t)a->data.integer_value)); } else if (a->kind==ATTR_KIND_STRING) { string s=a->data.string_value; string norm=str_lit(""); for (size_t k=0;k<s.size;k++){ char c=s.str[k]; norm = str_concat(arena, norm, (string){&c,1}); if (c==':' && k+1<s.size && s.str[k+1]!=' ') norm = str_concat(arena, norm, str_lit(" ")); } result = str_concat(arena, result, format(arena, str_lit("{} = {}"), a->name, norm)); } else { result = str_concat(arena, result, a->name); } }
                 result = str_concat(arena, result, str_lit("}>")); }
             // region in parens
             if (op->n_regions>0 && op->regions[0]) { result = str_concat(arena, result, str_lit(" (")); result = str_concat(arena, result, print_region_internal_classic(ctx, indent_level, op->regions[0])); result = str_concat(arena, result, str_lit(")")); }
@@ -737,7 +738,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit("scf.for "));
 
             // Resolve body block and arguments
-            Block *body = NULL;
+            MlirBlock *body = NULL;
             if (op->n_regions > 0 && op->regions && op->regions[0] && op->regions[0]->n_blocks > 0) {
                 body = op->regions[0]->blocks[0];
             }
@@ -763,7 +764,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit(" iter_args("));
                 for (int i = 0; i < n_iter; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    ValueRef *arg_name = NULL;
+                    MlirValue *arg_name = NULL;
                     if (body && body->n_arguments > (size_t)(i + 1)) arg_name = body->arguments[i + 1];
                     if (arg_name) {
                         result = str_concat(arena, result, print_ssa_value_classic(ctx, arg_name));
@@ -784,7 +785,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
             }
 
-            // Type annotation for induction variable after header
+            // MlirType annotation for induction variable after header
             result = str_concat(arena, result, str_lit("  : "));
             if (body && body->n_arguments > 0 && body->arguments[0] && body->arguments[0]->type) {
                 result = str_concat(arena, result, type_to_string(arena, body->arguments[0]->type));
@@ -910,7 +911,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             if (op->n_attributes > 0) {
                 bool has_visible_attrs = false;
                 for (int i = 0; i < op->n_attributes; i++) {
-                    Attribute *attr = op->attributes[i];
+                    MlirAttribute *attr = op->attributes[i];
                     // Skip internal attributes
                     if (str_eq(attr->name, str_lit("sym_name")) ||
                         (str_eq(attr->name, str_lit("value")) && op->op_type == OP_TYPE_ARITH_CONSTANT) ||
@@ -980,7 +981,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             if (op->n_attributes > 0) {
                 bool has_visible_attrs = false;
                 for (int i = 0; i < op->n_attributes; i++) {
-                    Attribute *attr = op->attributes[i];
+                    MlirAttribute *attr = op->attributes[i];
                     // Skip internal attributes
                     if (str_eq(attr->name, str_lit("sym_name")) ||
                         (str_eq(attr->name, str_lit("value")) && op->op_type == OP_TYPE_ARITH_CONSTANT) ||
@@ -1050,7 +1051,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit(" {"));
                 for (int i = 0; i < op->n_attributes; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    Attribute *attr = op->attributes[i];
+                    MlirAttribute *attr = op->attributes[i];
                     result = str_concat(arena, result, format(arena, str_lit("{} = {} : i32"), attr->name, (int64_t)attr->data.integer_value));
                 }
                 result = str_concat(arena, result, str_lit("}"));
@@ -1093,8 +1094,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[0]));
                 }
                 // types
-                Type *src = (op->n_operands>0 && op->operands[0]) ? op->operands[0]->type : NULL;
-                Type *dst = (op->n_result_types>0) ? op->result_types[0] : NULL;
+                MlirType *src = (op->n_operands>0 && op->operands[0]) ? op->operands[0]->type : NULL;
+                MlirType *dst = (op->n_result_types>0) ? op->result_types[0] : NULL;
                 if (src && dst) {
                     result = str_concat(arena, result, str_lit(" : "));
                     result = str_concat(arena, result, type_to_string(arena, src));
@@ -1129,7 +1130,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                               (len > 5 && strncmp(name, "llvm.", 5) == 0));
             }
             
-            if (op->op_type == OP_TYPE_UNREGISTERED && !is_tt_func && !is_known_op) {
+    if (mlir_operation_get_type(op) == OP_TYPE_UNREGISTERED && !is_tt_func && !is_known_op) {
                 result = str_concat(arena, result, str_lit("\""));
                 if (op->opname.size > 0) {
                     result = str_concat(arena, result, op->opname);
@@ -1141,7 +1142,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 if (op->opname.size > 0) {
                     result = str_concat(arena, result, op->opname);
                 } else {
-                    result = str_concat(arena, result, op_type_to_string(op->op_type));
+                    result = str_concat(arena, result, op_type_to_string(mlir_operation_get_type(op)));
                 }
             }
 
@@ -1209,7 +1210,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 if (op->n_attributes > 0) {
                     bool opened = false; bool first = true;
                     for (int i = 0; i < op->n_attributes; i++) {
-                        Attribute *attr = op->attributes[i];
+                        MlirAttribute *attr = op->attributes[i];
                         if (str_eq(attr->name, str_lit("_sig_parens")) || str_eq(attr->name, str_lit("_sig_src"))) { continue; }
                         if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
                         if (!first) result = str_concat(arena, result, str_lit(", ")); first = false;
@@ -1259,7 +1260,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, str_lit(" {"));
                     for (int i = 0; i < op->n_attributes; i++) {
                         if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                        Attribute *attr = op->attributes[i];
+                        MlirAttribute *attr = op->attributes[i];
                         if (attr->kind == ATTR_KIND_BOOL) {
                             result = str_concat(arena, result, format(arena, str_lit("{} = {}"), attr->name, attr->data.bool_value ? str_lit("true") : str_lit("false")));
                         } else if (attr->kind == ATTR_KIND_INTEGER) {
@@ -1313,7 +1314,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 if (op->n_attributes > 0) {
                     bool opened=false; bool first=true;
                     for (int i=0;i<op->n_attributes;i++) {
-                        Attribute *attr = op->attributes[i]; if (!attr) continue; if (attr->name.size>0 && attr->name.str[0]=='_') continue;
+                        MlirAttribute *attr = op->attributes[i]; if (!attr) continue; if (attr->name.size>0 && attr->name.str[0]=='_') continue;
                         if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened=true; }
                         if (!first) result = str_concat(arena, result, str_lit(", ")); first=false;
                         result = str_concat(arena, result, format(arena, str_lit("{} = "), attr->name));
@@ -1340,7 +1341,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit(" "));
                 for (int i = 0; i < op->n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    ValueRef *operand = op->operands[i];
+                    MlirValue *operand = op->operands[i];
                     if (operand == NULL) {
                         result = str_concat(arena, result, str_lit("NULL_OPERAND"));
                         continue;
@@ -1355,7 +1356,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 if (has_tt_attrs) {
                     bool opened=false; bool first=true;
                     for (int i=0;i<op->n_attributes;i++) {
-                        Attribute *attr = op->attributes[i];
+                        MlirAttribute *attr = op->attributes[i];
                         if (!(attr->name.size>=3 && attr->name.str[0]=='t' && attr->name.str[1]=='t' && attr->name.str[2]=='.')) continue;
                         if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened=true; }
                         if (!first) result = str_concat(arena, result, str_lit(", ")); first=false;
@@ -1408,10 +1409,10 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
     // Print attributes for operations that should show them in classic format
     // Skip internal attributes that shouldn't be visible
-    if (op->n_attributes > 0 && op->op_type != OP_TYPE_TT_FUNC && op->op_type != OP_TYPE_TT_REDUCE && 
-        op->op_type != OP_TYPE_TT_LOAD && op->op_type != OP_TYPE_TT_STORE &&
-        op->op_type != OP_TYPE_ARITH_CMPI && op->op_type != OP_TYPE_TT_MAKE_RANGE &&
-        op->op_type != OP_TYPE_FUNC_FUNC) {
+    if (op->n_attributes > 0 && mlir_operation_get_type(op) != OP_TYPE_TT_FUNC && mlir_operation_get_type(op) != OP_TYPE_TT_REDUCE &&
+        mlir_operation_get_type(op) != OP_TYPE_TT_LOAD && mlir_operation_get_type(op) != OP_TYPE_TT_STORE &&
+        mlir_operation_get_type(op) != OP_TYPE_ARITH_CMPI && mlir_operation_get_type(op) != OP_TYPE_TT_MAKE_RANGE &&
+        mlir_operation_get_type(op) != OP_TYPE_FUNC_FUNC) {
         // Skip printing here for cases handled inline above
         if (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.pure_extern_elementwise"))) {
             // already printed
@@ -1425,7 +1426,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         } else {
         bool has_visible_attrs = false;
         for (int i = 0; i < op->n_attributes; i++) {
-            Attribute *attr = op->attributes[i];
+            MlirAttribute *attr = op->attributes[i];
             // Skip internal attributes that shouldn't be shown in classic format
             if (str_eq(attr->name, str_lit("sym_name")) || str_eq(attr->name, str_lit("visibility")) || str_eq(attr->name, str_lit("_sig_parens")) || str_eq(attr->name, str_lit("_sig_src")) || str_eq(attr->name, str_lit("value_text")) || (attr->name.size>0 && attr->name.str[0]=='_')) {
                 continue;
@@ -1435,7 +1436,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 continue;
             }
             // Skip 'value' attribute only for arith.constant operations
-            if (str_eq(attr->name, str_lit("value")) && op->op_type == OP_TYPE_ARITH_CONSTANT) {
+            if (str_eq(attr->name, str_lit("value")) && mlir_operation_get_type(op) == OP_TYPE_ARITH_CONSTANT) {
                 continue;
             }
             // Skip tt.* attributes here; they are printed inline before type for default ops
@@ -1443,7 +1444,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 continue;
             }
             // Skip axis attribute for tt.get_program_id
-            if (op->op_type == OP_TYPE_TT_GET_PROGRAM_ID && str_eq(attr->name, str_lit("axis"))) {
+            if (mlir_operation_get_type(op) == OP_TYPE_TT_GET_PROGRAM_ID && str_eq(attr->name, str_lit("axis"))) {
                 continue;
             }
             // No skipping of axis/start/end in classic mode
@@ -1490,16 +1491,16 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
     // For classic formatting: place regions (when present).
     // Skip here for func.func since its region was already printed in its case above.
-    if (op->n_regions > 0 && op->op_type != OP_TYPE_FUNC_FUNC && op->op_type != OP_TYPE_TT_REDUCE) {
+    if (op->n_regions > 0 && mlir_operation_get_type(op) != OP_TYPE_FUNC_FUNC && mlir_operation_get_type(op) != OP_TYPE_TT_REDUCE) {
         result = str_concat(arena, result, str_lit(" "));
         for (int i = 0; i < op->n_regions; i++) {
             // Special handling for SCF if else
-            if (op->op_type == OP_TYPE_SCF_IF && i == 1 && op->n_regions == 2) {
+            if (mlir_operation_get_type(op) == OP_TYPE_SCF_IF && i == 1 && op->n_regions == 2) {
                 result = str_concat(arena, result, str_lit(" else "));
             }
             
-            if (op->op_type == OP_TYPE_TT_FUNC || op->op_type == OP_TYPE_MODULE ||
-                op->op_type == OP_TYPE_SCF_FOR || op->op_type == OP_TYPE_SCF_IF || op->op_type == OP_TYPE_SCF_WHILE) {
+            if (mlir_operation_get_type(op) == OP_TYPE_TT_FUNC || mlir_operation_get_type(op) == OP_TYPE_MODULE ||
+                mlir_operation_get_type(op) == OP_TYPE_SCF_FOR || mlir_operation_get_type(op) == OP_TYPE_SCF_IF || mlir_operation_get_type(op) == OP_TYPE_SCF_WHILE) {
                 result = str_concat(arena, result,
                     print_function_region_classic(ctx, indent_level, op->regions[i])
                 );
@@ -1510,7 +1511,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
         }
         // After regions of scf.for, restore parent pointer
-        if (op->op_type == OP_TYPE_SCF_FOR) {
+        if (mlir_operation_get_type(op) == OP_TYPE_SCF_FOR) {
             ctx->current_scf_for = NULL;
         }
     }
@@ -1528,7 +1529,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 }
 
 // Public API implementations
-string print_operation_classic(Arena *arena, int indent_level, Operation *op) {
+string print_operation_classic(Arena *arena, int indent_level, MlirOperation *op) {
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
     // Preassign SSA numbers for entire subtree to match parser's post-order numbering
@@ -1536,14 +1537,14 @@ string print_operation_classic(Arena *arena, int indent_level, Operation *op) {
     return print_operation_internal_classic(&ctx, indent_level, op);
 }
 
-string print_region_classic(Arena *arena, int indent_level, Region *region) {
+string print_region_classic(Arena *arena, int indent_level, MlirRegion *region) {
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
     preassign_region_ssa(&ctx, region, indent_level);
     return print_region_internal_classic(&ctx, indent_level, region);
 }
 
-string print_block_classic(Arena *arena, int bb_index, int indent_level, Block *block) {
+string print_block_classic(Arena *arena, int bb_index, int indent_level, MlirBlock *block) {
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
     preassign_block_ssa(&ctx, block, indent_level);
@@ -1555,7 +1556,7 @@ static string print_location_map_classic(Arena *arena, LocationMap *location_map
     string result = str_lit("");
     if (!location_map) return result;
 
-    typedef struct { string key; Location *loc; int number; } LocEntry;
+    typedef struct { string key; MlirLocation *loc; int number; } LocEntry;
     // Collect entries (excluding '#loc')
     size_t cap = location_map->size;
     LocEntry *arr = arena_alloc_array(arena, LocEntry, cap);
@@ -1598,7 +1599,7 @@ static string print_location_map_classic(Arena *arena, LocationMap *location_map
     for (size_t i = 0; i < n; i++) {
         result = str_concat(arena, result, arr[i].key);
         result = str_concat(arena, result, str_lit(" = "));
-        Location *loc = arr[i].loc;
+        MlirLocation *loc = arr[i].loc;
         if (loc->original_text.size > 0) {
             result = str_concat(arena, result, loc->original_text);
         } else {
@@ -1625,12 +1626,12 @@ static string print_location_map_classic(Arena *arena, LocationMap *location_map
     return result;
 }
 
-string print_module_classic(Arena *arena, Operation *module, LocationMap *location_map) {
+string print_module_classic(Arena *arena, MlirOperation *module, LocationMap *location_map) {
     string result = str_lit("");
     
     // Print the special #loc definition at the beginning if it exists
     if (module && module->unnumbered_loc_def) {
-        Location *loc = module->unnumbered_loc_def;
+        MlirLocation *loc = module->unnumbered_loc_def;
         result = str_concat(arena, result, str_lit("#loc = "));
         switch (loc->kind) {
             case LOC_KIND_FILE:
@@ -1654,7 +1655,7 @@ string print_module_classic(Arena *arena, Operation *module, LocationMap *locati
             if (location_map->buckets[i].occupied) {
                 string loc_name = location_map->buckets[i].key;
                 if (loc_name.size == 4 && loc_name.str && loc_name.str[0]=='#' && loc_name.str[1]=='l' && loc_name.str[2]=='o' && loc_name.str[3]=='c') {
-                    Location *loc = location_map->buckets[i].value;
+                    MlirLocation *loc = location_map->buckets[i].value;
                     result = str_concat(arena, result, loc_name);
                     result = str_concat(arena, result, str_lit(" = "));
                     switch (loc->kind) {

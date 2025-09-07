@@ -163,6 +163,7 @@ typedef enum {
 
     OP_TYPE_COUNT  // Total number of operation types
 } OpType;
+#define MLIR_OP_TYPE_DEFINED 1
 
 typedef struct Region Region;
 
