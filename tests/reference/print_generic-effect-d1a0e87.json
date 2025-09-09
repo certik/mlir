@@ -4,7 +4,7 @@
     "infile": "tests/effect.mlir",
     "infile_hash": "1024831ab4a72d4f986eb6724d7ca18bdb7dc277b889b3a828a6a882",
     "outfile": "print_generic-effect-d1a0e87.out",
-    "outfile_hash": "e883ecd97ba6c108898e1041c7805859205ca6c50d8e70bb363479a9",
+    "outfile_hash": "2586e938372e71662888c18bc7b9649bc8d25a624d5c15b54549b9f7",
     "stdout": null,
     "stdout_hash": null,
     "stderr": null,

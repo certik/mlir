@@ -59,7 +59,7 @@ Operation* construct_test_module_full(Arena *arena) {
     module->n_attributes = 0;
     module->results = NULL;
     module->n_results = 0;
-    module->opname = str_lit("module");
+    module->opname = str_lit("");
 
     // Create module region
     Region *module_region = arena_alloc(arena, Region);
@@ -76,7 +76,7 @@ Operation* construct_test_module_full(Arena *arena) {
     func_op->n_result_types = 0;
     func_op->results = NULL;
     func_op->n_results = 0;
-    func_op->opname = str_lit("func.func");
+    func_op->opname = str_lit("");
 
     // Function attributes (sym_name)
     func_op->n_attributes = 1;
@@ -133,7 +133,7 @@ Operation* construct_test_module_full(Arena *arena) {
     const_op->results = arena_alloc_array(arena, ValueRef*, 1);
     const_op->results[0] = const_result;
     const_op->n_results = 1;
-    const_op->opname = str_lit("arith.constant");
+    const_op->opname = str_lit("");
 
     // %1 = arith.addi %arg0, %arg1 : i32
     Operation *add_op = arena_alloc(arena, Operation);
@@ -159,7 +159,7 @@ Operation* construct_test_module_full(Arena *arena) {
     add_op->results = arena_alloc_array(arena, ValueRef*, 1);
     add_op->results[0] = add_result;
     add_op->n_results = 1;
-    add_op->opname = str_lit("arith.addi");
+    add_op->opname = str_lit("");
 
     // %2 = arith.muli %1, %0 : i32 (add_result and const_result already created above)
 
@@ -185,7 +185,7 @@ Operation* construct_test_module_full(Arena *arena) {
     mul_op->results = arena_alloc_array(arena, ValueRef*, 1);
     mul_op->results[0] = mul_result;
     mul_op->n_results = 1;
-    mul_op->opname = str_lit("arith.muli");
+    mul_op->opname = str_lit("");
 
     // Set def pointer for mul_result now that mul_op exists
     mul_result->def = mul_op;
@@ -205,7 +205,7 @@ Operation* construct_test_module_full(Arena *arena) {
     ret_op->n_regions = 0;
     ret_op->results = NULL;
     ret_op->n_results = 0;
-    ret_op->opname = str_lit("func.return");
+    ret_op->opname = str_lit("");
 
     // Link operations to function block
     func_block->operations[0] = const_op;

@@ -1004,7 +1004,7 @@ Operation* parse_module(Parser *parser) {
     }
 
     Operation *op = parse_operation(parser);
-    if (!str_eq(op->opname, str_lit("module"))) {
+    if (op->op_type != OP_TYPE_MODULE) {
         parser_error(parser, str_lit("The top level operation should be a module"), 0, 0);
     }
     
@@ -1232,23 +1232,24 @@ Operation* parse_operation(Parser *parser) {
     }
 
     // Parse operation name
+    string opname = str_lit("");
     if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
-        op->opname = parser_token_str(parser);
+        opname = parser_token_str(parser);
         parser_next_token(parser);
         // Accumulate dotted segments into full opname, e.g., tt.reduce.return
         while (parser_peek(parser, TK_DOT)) {
             parser_expect(parser, TK_DOT);
             if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
-                op->opname = str_concat(parser->arena, op->opname, str_lit("."));
-                op->opname = str_concat(parser->arena, op->opname, parser_token_str(parser));
+                opname = str_concat(parser->arena, opname, str_lit("."));
+                opname = str_concat(parser->arena, opname, parser_token_str(parser));
                 parser_next_token(parser);
             } else {
                 break;
             }
         }
     } else if (parser_peek(parser, TK_STRING)) {
-        op->opname = parser_token_str(parser);
-        op->opname = str_substr(op->opname, 1, op->opname.size-2);
+        opname = parser_token_str(parser);
+        opname = str_substr(opname, 1, opname.size-2);
         parser_expect(parser, TK_STRING);
     } else {
         parser_error(parser,
@@ -1260,7 +1261,10 @@ Operation* parse_operation(Parser *parser) {
 
 
     // Set op_type based on operation name
-    op->op_type = op_string_to_type(op->opname);
+    op->op_type = op_string_to_type(opname);
+    if (op->op_type == OP_TYPE_UNREGISTERED) {
+        op->opname = opname;
+    }
 
 
     // First we handle specific opnames with special parsing rules

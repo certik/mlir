@@ -1125,11 +1125,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
                 result = str_concat(arena, result, str_lit("\""));
             } else {
-                if (op->opname.size > 0) {
-                    result = str_concat(arena, result, op->opname);
-                } else {
-                    result = str_concat(arena, result, op_type_to_string(op->op_type));
-                }
+                result = str_concat(arena, result, op_type_to_string(op->op_type));
             }
 
             // Special classic formatting for select ops

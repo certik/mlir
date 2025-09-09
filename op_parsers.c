@@ -273,7 +273,7 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                 // Treat as single result type ": type" for most ops,
                 // but do NOT override for compare ops like arith.cmpi where
                 // the colon type is the operand type, not the result.
-                if (!(op->opname.size > 0 && str_eq(op->opname, str_lit("arith.cmpi")))) {
+                if (op->op_type != OP_TYPE_ARITH_CMPI) {
                     op->n_result_types = 1;
                     op->result_types = arena_alloc_array(parser->arena, Type*, 1);
                     op->result_types[0] = arena_alloc(parser->arena, Type);
@@ -421,7 +421,7 @@ void parse_arith_binary(Parser *parser, Operation *op) {
     op->n_operands = operands.size;
 
     // Optional default result type for specific ops when not provided
-    if (op->n_result_types == 0 && op->opname.size > 0 && str_eq(op->opname, str_lit("arith.addf"))) {
+    if (op->n_result_types == 0 && op->op_type == OP_TYPE_ARITH_ADDF) {
         op->n_result_types = 1;
         op->result_types = arena_alloc_array(parser->arena, Type*, 1);
         op->result_types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16xf32>"));
@@ -635,7 +635,7 @@ void parse_tt_addptr_load_store(Parser *parser, Operation *op) {
     op->n_operands = operands.size;
 
     // For tt.addptr/tt.load, prefer explicit type after ':' when present; otherwise fall back.
-    if (str_eq(op->opname, str_lit("tt.addptr")) || str_eq(op->opname, str_lit("tt.load"))) {
+    if (op->op_type == OP_TYPE_TT_ADDPTR || op->op_type == OP_TYPE_TT_LOAD) {
         if (parser_peek(parser, TK_COLON)) {
             parser_expect(parser, TK_COLON);
 
@@ -645,7 +645,7 @@ void parse_tt_addptr_load_store(Parser *parser, Operation *op) {
                 // Set result type
                 op->n_result_types = 1;
                 op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-                if (str_eq(op->opname, str_lit("tt.addptr"))) {
+                if (op->op_type == OP_TYPE_TT_ADDPTR) {
                     // For addptr, result type is the pointer tensor type
                     op->result_types[0] = parse_type_from_string(parser->arena, type_left);
                 } else {
@@ -687,7 +687,7 @@ void parse_tt_addptr_load_store(Parser *parser, Operation *op) {
                     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) break;
                 } while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE));
             }
-        } else if (str_eq(op->opname, str_lit("tt.addptr")) && op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
+        } else if (op->op_type == OP_TYPE_TT_ADDPTR && op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
             // Fallback heuristic when no explicit type list is present
             op->n_result_types = 1;
             op->result_types = arena_alloc_array(parser->arena, Type*, 1);
@@ -842,7 +842,7 @@ void parse_tensor_extract(Parser *parser, Operation *op) {
 void parse_memref_load_or_store(Parser *parser, Operation *op) {
     VecValueRef operands; VecValueRef_reserve(parser->arena, &operands, 4);
 
-    if (str_eq(op->opname, str_lit("memref.store"))) {
+    if (op->op_type == OP_TYPE_MEMREF_STORE) {
         // memref.store %value, %memref[indices] : memref<...>
         if (parser_peek(parser, TK_REGISTER)) {
             string reg = parser_token_str(parser);
