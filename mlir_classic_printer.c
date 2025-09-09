@@ -311,8 +311,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
     Arena *arena = ctx->arena;
     string result = indent_classic(arena, indent_level);
 
-    // Robust early handling for func.func, regardless of op_type mapping
-    if (op->opname.size > 0 && str_eq(op->opname, str_lit("func.func"))) {
+    // Early handling for func.func
+    if (op->op_type == OP_TYPE_FUNC_FUNC) {
         // Build header "func.func [vis] @name(params)[ -> ret]"
         string header = str_lit("func.func ");
         string vis = str_lit(""); string name = str_lit(""); string ret = str_lit(""); string params = str_lit("");
@@ -1115,23 +1115,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // Default case: classic-ish formatting without result arrows
             
             
-            // Print operation name  
-            bool is_tt_func = (op->op_type == OP_TYPE_TT_FUNC);
-            bool is_known_op = false;
-            if (op->opname.size > 0) {
-                // Check if it's a known dialect operation that shouldn't be quoted
-                const char *name = op->opname.str;
-                size_t len = op->opname.size;
-                is_known_op = ((len > 6 && strncmp(name, "arith.", 6) == 0) ||
-                              (len > 4 && strncmp(name, "scf.", 4) == 0) ||
-                              (len > 3 && strncmp(name, "tt.", 3) == 0) ||
-                              (len > 5 && strncmp(name, "func.", 5) == 0) ||
-                              (len > 3 && strncmp(name, "cf.", 3) == 0) ||
-                              (len > 5 && strncmp(name, "math.", 5) == 0) ||
-                              (len > 5 && strncmp(name, "llvm.", 5) == 0));
-            }
-            
-            if (op->op_type == OP_TYPE_UNREGISTERED && !is_tt_func && !is_known_op) {
+            // Print operation name
+            if (op->op_type == OP_TYPE_UNREGISTERED) {
                 result = str_concat(arena, result, str_lit("\""));
                 if (op->opname.size > 0) {
                     result = str_concat(arena, result, op->opname);

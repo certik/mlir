@@ -137,6 +137,14 @@ string op_type_to_string(OpType type) {
         case OP_TYPE_ARITH_EXTF: return str_lit("arith.extf");
         case OP_TYPE_ARITH_TRUNCF: return str_lit("arith.truncf");
         case OP_TYPE_ARITH_EXTUI: return str_lit("arith.extui");
+        case OP_TYPE_ARITH_MAXF: return str_lit("arith.maxf");
+        case OP_TYPE_ARITH_DIVSI: return str_lit("arith.divsi");
+        case OP_TYPE_ARITH_REMSI: return str_lit("arith.remsi");
+        case OP_TYPE_ARITH_ORI: return str_lit("arith.ori");
+        case OP_TYPE_ARITH_MINSI: return str_lit("arith.minsi");
+        case OP_TYPE_ARITH_ANDI: return str_lit("arith.andi");
+        case OP_TYPE_MATH_EXP: return str_lit("math.exp");
+        case OP_TYPE_MATH_LOG: return str_lit("math.log");
         case OP_TYPE_TT_FUNC: return str_lit("tt.func");
         case OP_TYPE_TT_CALL: return str_lit("tt.call");
         case OP_TYPE_TT_REDUCE: return str_lit("tt.reduce");
@@ -155,6 +163,7 @@ string op_type_to_string(OpType type) {
         case OP_TYPE_TENSOR_COLLAPSE_SHAPE: return str_lit("tensor.collapse_shape");
         case OP_TYPE_LINALG_FILL: return str_lit("linalg.fill");
         case OP_TYPE_INDEX_CONSTANT: return str_lit("index.constant");
+        case OP_TYPE_LLVM_MLIR_UNDEF: return str_lit("llvm.mlir.undef");
         case OP_TYPE_RETURN: return str_lit("return");
         case OP_TYPE_TT_REDUCE_RETURN: return str_lit("tt.reduce.return");
         default: return str_lit("unknown");
@@ -200,6 +209,22 @@ OpType op_string_to_type(string opname) {
         return OP_TYPE_ARITH_TRUNCF;
     } else if (str_eq(opname, str_lit("arith.extui"))) {
         return OP_TYPE_ARITH_EXTUI;
+    } else if (str_eq(opname, str_lit("arith.maxf"))) {
+        return OP_TYPE_ARITH_MAXF;
+    } else if (str_eq(opname, str_lit("arith.divsi"))) {
+        return OP_TYPE_ARITH_DIVSI;
+    } else if (str_eq(opname, str_lit("arith.remsi"))) {
+        return OP_TYPE_ARITH_REMSI;
+    } else if (str_eq(opname, str_lit("arith.ori"))) {
+        return OP_TYPE_ARITH_ORI;
+    } else if (str_eq(opname, str_lit("arith.minsi"))) {
+        return OP_TYPE_ARITH_MINSI;
+    } else if (str_eq(opname, str_lit("arith.andi"))) {
+        return OP_TYPE_ARITH_ANDI;
+    } else if (str_eq(opname, str_lit("math.exp"))) {
+        return OP_TYPE_MATH_EXP;
+    } else if (str_eq(opname, str_lit("math.log"))) {
+        return OP_TYPE_MATH_LOG;
     } else if (str_eq(opname, str_lit("memref.load"))) {
         return OP_TYPE_MEMREF_LOAD;
     } else if (str_eq(opname, str_lit("memref.store"))) {
@@ -282,6 +307,8 @@ OpType op_string_to_type(string opname) {
         return OP_TYPE_LINALG_FILL;
     } else if (str_eq(opname, str_lit("index.constant"))) {
         return OP_TYPE_INDEX_CONSTANT;
+    } else if (str_eq(opname, str_lit("llvm.mlir.undef"))) {
+        return OP_TYPE_LLVM_MLIR_UNDEF;
     } else if (str_eq(opname, str_lit("return"))) {
         return OP_TYPE_RETURN;
     } else if (str_eq(opname, str_lit("tt.reduce.return"))) {

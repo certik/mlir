@@ -104,6 +104,16 @@ typedef enum {
     OP_TYPE_ARITH_EXTF,
     OP_TYPE_ARITH_TRUNCF,
     OP_TYPE_ARITH_EXTUI,
+    OP_TYPE_ARITH_MAXF,
+    OP_TYPE_ARITH_DIVSI,
+    OP_TYPE_ARITH_REMSI,
+    OP_TYPE_ARITH_ORI,
+    OP_TYPE_ARITH_MINSI,
+    OP_TYPE_ARITH_ANDI,
+
+    // Math dialect
+    OP_TYPE_MATH_EXP,
+    OP_TYPE_MATH_LOG,
 
     // Memory dialect
     OP_TYPE_MEMREF_LOAD,
@@ -167,6 +177,9 @@ typedef enum {
 
     // Index dialect
     OP_TYPE_INDEX_CONSTANT,
+
+    // LLVM dialect
+    OP_TYPE_LLVM_MLIR_UNDEF,
 
     // Return operations
     OP_TYPE_RETURN,
