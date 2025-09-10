@@ -97,6 +97,23 @@ typedef enum {
     OP_TYPE_ARITH_CMPI,
     OP_TYPE_ARITH_CMPF,
     OP_TYPE_ARITH_SELECT,
+    OP_TYPE_ARITH_BITCAST,
+    OP_TYPE_ARITH_SITOFP,
+    OP_TYPE_ARITH_EXTSI,
+    OP_TYPE_ARITH_TRUNCI,
+    OP_TYPE_ARITH_EXTF,
+    OP_TYPE_ARITH_TRUNCF,
+    OP_TYPE_ARITH_EXTUI,
+    OP_TYPE_ARITH_MAXF,
+    OP_TYPE_ARITH_DIVSI,
+    OP_TYPE_ARITH_REMSI,
+    OP_TYPE_ARITH_ORI,
+    OP_TYPE_ARITH_MINSI,
+    OP_TYPE_ARITH_ANDI,
+
+    // Math dialect
+    OP_TYPE_MATH_EXP,
+    OP_TYPE_MATH_LOG,
 
     // Memory dialect
     OP_TYPE_MEMREF_LOAD,
@@ -131,6 +148,10 @@ typedef enum {
     OP_TYPE_TT_FUNC,
     OP_TYPE_TT_CALL,
     OP_TYPE_TT_REDUCE,
+    OP_TYPE_TT_BROADCAST,
+    OP_TYPE_TT_EXPAND_DIMS,
+    OP_TYPE_TT_DOT,
+    OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE,
 
     // GPU dialect
     OP_TYPE_GPU_LAUNCH,
@@ -156,6 +177,9 @@ typedef enum {
 
     // Index dialect
     OP_TYPE_INDEX_CONSTANT,
+
+    // LLVM dialect
+    OP_TYPE_LLVM_MLIR_UNDEF,
 
     // Return operations
     OP_TYPE_RETURN,

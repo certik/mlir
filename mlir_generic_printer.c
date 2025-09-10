@@ -157,9 +157,8 @@ string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op) 
         result = str_concat(arena, result, str_lit(" = "));
     }
 
-    // Print operation name (quotes only for unregistered operations, except tt.func)
-    bool is_tt_func = (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.func")));
-    if (op->op_type == OP_TYPE_UNREGISTERED && !is_tt_func) {
+    // Print operation name (quotes only for unregistered operations)
+    if (op->op_type == OP_TYPE_UNREGISTERED) {
         result = str_concat(arena, result, str_lit("\""));
         if (op->opname.size > 0) {
             result = str_concat(arena, result, op->opname);
@@ -168,11 +167,7 @@ string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op) 
         }
         result = str_concat(arena, result, str_lit("\""));
     } else {
-        if (op->opname.size > 0) {
-            result = str_concat(arena, result, op->opname);
-        } else {
-            result = str_concat(arena, result, op_type_to_string(op->op_type));
-        }
+        result = str_concat(arena, result, op_type_to_string(op->op_type));
     }
 
     // Print operands with types (always include parentheses)
@@ -207,7 +202,7 @@ string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op) 
             result = str_concat(arena, result, format(arena, str_lit("{} = "), attr->name));
             switch (attr->kind) {
                 case ATTR_KIND_INTEGER:
-                    if (str_eq(op->opname, str_lit("tt.make_range"))) {
+                    if (op->op_type == OP_TYPE_TT_MAKE_RANGE) {
                         result = str_concat(arena, result, format(arena, str_lit("{} : i32"), attr->data.integer_value));
                     } else {
                         result = str_concat(arena, result, format(arena, str_lit("{}"), attr->data.integer_value));

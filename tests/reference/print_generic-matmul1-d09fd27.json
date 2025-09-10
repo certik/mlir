@@ -4,7 +4,7 @@
     "infile": "tests/matmul1.ttir",
     "infile_hash": "4f9818648397af5506124429dd2e9a25bed36f16c98900df87d66764",
     "outfile": "print_generic-matmul1-d09fd27.out",
-    "outfile_hash": "e8b8de7135128e61f01d3b14f79c80e267461dc59efb4f897bd9e286",
+    "outfile_hash": "1e2441eed837c5f0e4c7d4eed3c2ca0d1273d56cf40c008f69a2124b",
     "stdout": null,
     "stdout_hash": null,
     "stderr": null,

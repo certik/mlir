@@ -116,7 +116,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     const_op->results = arena_alloc_array(arena, MlirValue*, 1);
     const_op->results[0] = const_result;
     const_op->n_results = 1;
-    const_op->opname = str_lit("arith.constant");
+    const_op->opname = str_lit("");
 
     // %1 = arith.addi %arg0, %arg1 : i32
     MlirOperation *add_op = arena_alloc(arena, MlirOperation);
@@ -142,7 +142,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     add_op->results = arena_alloc_array(arena, MlirValue*, 1);
     add_op->results[0] = add_result;
     add_op->n_results = 1;
-    add_op->opname = str_lit("arith.addi");
+    add_op->opname = str_lit("");
 
     // %2 = arith.muli %1, %0 : i32 (add_result and const_result already created above)
 
@@ -168,7 +168,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     mul_op->results = arena_alloc_array(arena, MlirValue*, 1);
     mul_op->results[0] = mul_result;
     mul_op->n_results = 1;
-    mul_op->opname = str_lit("arith.muli");
+    mul_op->opname = str_lit("");
 
     // Set def pointer for mul_result now that mul_op exists
     mul_result->def = mul_op;
@@ -188,7 +188,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     ret_op->n_regions = 0;
     ret_op->results = NULL;
     ret_op->n_results = 0;
-    ret_op->opname = str_lit("func.return");
+    ret_op->opname = str_lit("");
 
     // Link operations to function block
     mlir_block_add_operation(arena, func_block, const_op);

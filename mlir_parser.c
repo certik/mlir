@@ -130,9 +130,28 @@ string op_type_to_string(OpType type) {
         case OP_TYPE_TT_ADDPTR: return str_lit("tt.addptr");
         case OP_TYPE_TT_RETURN: return str_lit("tt.return");
         case OP_TYPE_ARITH_SELECT: return str_lit("arith.select");
+        case OP_TYPE_ARITH_BITCAST: return str_lit("arith.bitcast");
+        case OP_TYPE_ARITH_SITOFP: return str_lit("arith.sitofp");
+        case OP_TYPE_ARITH_EXTSI: return str_lit("arith.extsi");
+        case OP_TYPE_ARITH_TRUNCI: return str_lit("arith.trunci");
+        case OP_TYPE_ARITH_EXTF: return str_lit("arith.extf");
+        case OP_TYPE_ARITH_TRUNCF: return str_lit("arith.truncf");
+        case OP_TYPE_ARITH_EXTUI: return str_lit("arith.extui");
+        case OP_TYPE_ARITH_MAXF: return str_lit("arith.maxf");
+        case OP_TYPE_ARITH_DIVSI: return str_lit("arith.divsi");
+        case OP_TYPE_ARITH_REMSI: return str_lit("arith.remsi");
+        case OP_TYPE_ARITH_ORI: return str_lit("arith.ori");
+        case OP_TYPE_ARITH_MINSI: return str_lit("arith.minsi");
+        case OP_TYPE_ARITH_ANDI: return str_lit("arith.andi");
+        case OP_TYPE_MATH_EXP: return str_lit("math.exp");
+        case OP_TYPE_MATH_LOG: return str_lit("math.log");
         case OP_TYPE_TT_FUNC: return str_lit("tt.func");
         case OP_TYPE_TT_CALL: return str_lit("tt.call");
         case OP_TYPE_TT_REDUCE: return str_lit("tt.reduce");
+        case OP_TYPE_TT_BROADCAST: return str_lit("tt.broadcast");
+        case OP_TYPE_TT_EXPAND_DIMS: return str_lit("tt.expand_dims");
+        case OP_TYPE_TT_DOT: return str_lit("tt.dot");
+        case OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE: return str_lit("tt.pure_extern_elementwise");
         case OP_TYPE_GPU_LAUNCH: return str_lit("gpu.launch");
         case OP_TYPE_AFFINE_FOR: return str_lit("affine.for");
         case OP_TYPE_AFFINE_LOAD: return str_lit("affine.load");
@@ -144,6 +163,7 @@ string op_type_to_string(OpType type) {
         case OP_TYPE_TENSOR_COLLAPSE_SHAPE: return str_lit("tensor.collapse_shape");
         case OP_TYPE_LINALG_FILL: return str_lit("linalg.fill");
         case OP_TYPE_INDEX_CONSTANT: return str_lit("index.constant");
+        case OP_TYPE_LLVM_MLIR_UNDEF: return str_lit("llvm.mlir.undef");
         case OP_TYPE_RETURN: return str_lit("return");
         case OP_TYPE_TT_REDUCE_RETURN: return str_lit("tt.reduce.return");
         default: return str_lit("unknown");
@@ -175,6 +195,36 @@ OpType op_string_to_type(string opname) {
         return OP_TYPE_ARITH_CMPI;
     } else if (str_eq(opname, str_lit("arith.cmpf"))) {
         return OP_TYPE_ARITH_CMPF;
+    } else if (str_eq(opname, str_lit("arith.bitcast"))) {
+        return OP_TYPE_ARITH_BITCAST;
+    } else if (str_eq(opname, str_lit("arith.sitofp"))) {
+        return OP_TYPE_ARITH_SITOFP;
+    } else if (str_eq(opname, str_lit("arith.extsi"))) {
+        return OP_TYPE_ARITH_EXTSI;
+    } else if (str_eq(opname, str_lit("arith.trunci"))) {
+        return OP_TYPE_ARITH_TRUNCI;
+    } else if (str_eq(opname, str_lit("arith.extf"))) {
+        return OP_TYPE_ARITH_EXTF;
+    } else if (str_eq(opname, str_lit("arith.truncf"))) {
+        return OP_TYPE_ARITH_TRUNCF;
+    } else if (str_eq(opname, str_lit("arith.extui"))) {
+        return OP_TYPE_ARITH_EXTUI;
+    } else if (str_eq(opname, str_lit("arith.maxf"))) {
+        return OP_TYPE_ARITH_MAXF;
+    } else if (str_eq(opname, str_lit("arith.divsi"))) {
+        return OP_TYPE_ARITH_DIVSI;
+    } else if (str_eq(opname, str_lit("arith.remsi"))) {
+        return OP_TYPE_ARITH_REMSI;
+    } else if (str_eq(opname, str_lit("arith.ori"))) {
+        return OP_TYPE_ARITH_ORI;
+    } else if (str_eq(opname, str_lit("arith.minsi"))) {
+        return OP_TYPE_ARITH_MINSI;
+    } else if (str_eq(opname, str_lit("arith.andi"))) {
+        return OP_TYPE_ARITH_ANDI;
+    } else if (str_eq(opname, str_lit("math.exp"))) {
+        return OP_TYPE_MATH_EXP;
+    } else if (str_eq(opname, str_lit("math.log"))) {
+        return OP_TYPE_MATH_LOG;
     } else if (str_eq(opname, str_lit("memref.load"))) {
         return OP_TYPE_MEMREF_LOAD;
     } else if (str_eq(opname, str_lit("memref.store"))) {
@@ -227,6 +277,14 @@ OpType op_string_to_type(string opname) {
         return OP_TYPE_TT_CALL;
     } else if (str_eq(opname, str_lit("tt.reduce"))) {
         return OP_TYPE_TT_REDUCE;
+    } else if (str_eq(opname, str_lit("tt.broadcast"))) {
+        return OP_TYPE_TT_BROADCAST;
+    } else if (str_eq(opname, str_lit("tt.expand_dims"))) {
+        return OP_TYPE_TT_EXPAND_DIMS;
+    } else if (str_eq(opname, str_lit("tt.dot"))) {
+        return OP_TYPE_TT_DOT;
+    } else if (str_eq(opname, str_lit("tt.pure_extern_elementwise"))) {
+        return OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE;
     } else if (str_eq(opname, str_lit("gpu.launch"))) {
         return OP_TYPE_GPU_LAUNCH;
     } else if (str_eq(opname, str_lit("affine.for"))) {
@@ -249,6 +307,8 @@ OpType op_string_to_type(string opname) {
         return OP_TYPE_LINALG_FILL;
     } else if (str_eq(opname, str_lit("index.constant"))) {
         return OP_TYPE_INDEX_CONSTANT;
+    } else if (str_eq(opname, str_lit("llvm.mlir.undef"))) {
+        return OP_TYPE_LLVM_MLIR_UNDEF;
     } else if (str_eq(opname, str_lit("return"))) {
         return OP_TYPE_RETURN;
     } else if (str_eq(opname, str_lit("tt.reduce.return"))) {
@@ -944,7 +1004,7 @@ Operation* parse_module(Parser *parser) {
     }
 
     Operation *op = parse_operation(parser);
-    if (!str_eq(op->opname, str_lit("module"))) {
+    if (op->op_type != OP_TYPE_MODULE) {
         parser_error(parser, str_lit("The top level operation should be a module"), 0, 0);
     }
     
@@ -1172,23 +1232,24 @@ Operation* parse_operation(Parser *parser) {
     }
 
     // Parse operation name
+    string opname = str_lit("");
     if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
-        op->opname = parser_token_str(parser);
+        opname = parser_token_str(parser);
         parser_next_token(parser);
         // Accumulate dotted segments into full opname, e.g., tt.reduce.return
         while (parser_peek(parser, TK_DOT)) {
             parser_expect(parser, TK_DOT);
             if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
-                op->opname = str_concat(parser->arena, op->opname, str_lit("."));
-                op->opname = str_concat(parser->arena, op->opname, parser_token_str(parser));
+                opname = str_concat(parser->arena, opname, str_lit("."));
+                opname = str_concat(parser->arena, opname, parser_token_str(parser));
                 parser_next_token(parser);
             } else {
                 break;
             }
         }
     } else if (parser_peek(parser, TK_STRING)) {
-        op->opname = parser_token_str(parser);
-        op->opname = str_substr(op->opname, 1, op->opname.size-2);
+        opname = parser_token_str(parser);
+        opname = str_substr(opname, 1, opname.size-2);
         parser_expect(parser, TK_STRING);
     } else {
         parser_error(parser,
@@ -1200,7 +1261,10 @@ Operation* parse_operation(Parser *parser) {
 
 
     // Set op_type based on operation name
-    op->op_type = op_string_to_type(op->opname);
+    op->op_type = op_string_to_type(opname);
+    if (op->op_type == OP_TYPE_UNREGISTERED) {
+        op->opname = opname;
+    }
 
 
     // First we handle specific opnames with special parsing rules

@@ -312,8 +312,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
     Arena *arena = ctx->arena;
     string result = indent_classic(arena, indent_level);
 
-    // Robust early handling for func.func, regardless of op_type mapping
-    if (op->opname.size > 0 && str_eq(op->opname, str_lit("func.func"))) {
+    // Early handling for func.func
+    if (op->op_type == OP_TYPE_FUNC_FUNC) {
         // Build header "func.func [vis] @name(params)[ -> ret]"
         string header = str_lit("func.func ");
         string vis = str_lit(""); string name = str_lit(""); string ret = str_lit(""); string params = str_lit("");
@@ -1065,7 +1065,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
         default: {
             // Handle func.func robustly even if op_type mapping was missed
-            if (op->opname.size > 0 && str_eq(op->opname, str_lit("func.func"))) {
+            if (op->op_type == OP_TYPE_FUNC_FUNC) {
                 string header = str_lit("func.func ");
                 string vis = str_lit(""); string name = str_lit(""); string ret = str_lit(""); string params = str_lit("");
                 for (int i=0;i<op->n_attributes;i++) {
@@ -1085,9 +1085,11 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 break;
             }
             // Before generic/default printing, handle a few named ops specially:
-            if (op->opname.size > 0 && (str_eq(op->opname, str_lit("arith.bitcast")) || str_eq(op->opname, str_lit("arith.sitofp")) || str_eq(op->opname, str_lit("arith.extsi")) || str_eq(op->opname, str_lit("arith.trunci")) || str_eq(op->opname, str_lit("arith.extf")) || str_eq(op->opname, str_lit("arith.truncf")))) {
+            if (op->op_type == OP_TYPE_ARITH_BITCAST || op->op_type == OP_TYPE_ARITH_SITOFP ||
+                op->op_type == OP_TYPE_ARITH_EXTSI || op->op_type == OP_TYPE_ARITH_TRUNCI ||
+                op->op_type == OP_TYPE_ARITH_EXTF || op->op_type == OP_TYPE_ARITH_TRUNCF) {
                 // op name
-                result = str_concat(arena, result, op->opname);
+                result = str_concat(arena, result, op_type_to_string(op->op_type));
                 // operand
                 if (op->n_operands > 0 && op->operands[0]) {
                     result = str_concat(arena, result, str_lit(" "));
@@ -1114,23 +1116,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // Default case: classic-ish formatting without result arrows
             
             
-            // Print operation name  
-            bool is_tt_func = (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.func")));
-            bool is_known_op = false;
-            if (op->opname.size > 0) {
-                // Check if it's a known dialect operation that shouldn't be quoted
-                const char *name = op->opname.str;
-                size_t len = op->opname.size;
-                is_known_op = ((len > 6 && strncmp(name, "arith.", 6) == 0) ||
-                              (len > 4 && strncmp(name, "scf.", 4) == 0) ||
-                              (len > 3 && strncmp(name, "tt.", 3) == 0) ||
-                              (len > 5 && strncmp(name, "func.", 5) == 0) ||
-                              (len > 3 && strncmp(name, "cf.", 3) == 0) ||
-                              (len > 5 && strncmp(name, "math.", 5) == 0) ||
-                              (len > 5 && strncmp(name, "llvm.", 5) == 0));
-            }
-            
-    if (mlir_operation_get_type(op) == OP_TYPE_UNREGISTERED && !is_tt_func && !is_known_op) {
+            // Print operation name
+            if (mlir_operation_get_type(op) == OP_TYPE_UNREGISTERED) {
                 result = str_concat(arena, result, str_lit("\""));
                 if (op->opname.size > 0) {
                     result = str_concat(arena, result, op->opname);
@@ -1139,15 +1126,11 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
                 result = str_concat(arena, result, str_lit("\""));
             } else {
-                if (op->opname.size > 0) {
-                    result = str_concat(arena, result, op->opname);
-                } else {
-                    result = str_concat(arena, result, op_type_to_string(mlir_operation_get_type(op)));
-                }
+                result = str_concat(arena, result, op_type_to_string(mlir_operation_get_type(op)));
             }
 
             // Special classic formatting for select ops
-            if (op->opname.size > 0 && str_eq(op->opname, str_lit("arith.extui"))) {
+            if (op->op_type == OP_TYPE_ARITH_EXTUI) {
                 // arith.extui %v : src -> dst
                 result = str_concat(arena, result, str_lit(" "));
                 if (op->n_operands>0 && op->operands[0]) result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[0]));
@@ -1162,7 +1145,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
 
             // Special classic formatting for select tt.* ops
-            if (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.broadcast"))) {
+            if (op->op_type == OP_TYPE_TT_BROADCAST) {
                 // tt.broadcast %x : (src) -> dst
                 result = str_concat(arena, result, str_lit(" "));
                 if (op->n_operands > 0 && op->operands[0]) {
@@ -1200,7 +1183,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
                 break;
             }
-            if (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.expand_dims"))) {
+            if (op->op_type == OP_TYPE_TT_EXPAND_DIMS) {
                 // tt.expand_dims %x {axis = i : i32} : (src) -> dst
                 result = str_concat(arena, result, str_lit(" "));
                 if (op->n_operands > 0 && op->operands[0]) {
@@ -1249,7 +1232,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
                 break;
             }
-            if (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.dot"))) {
+            if (op->op_type == OP_TYPE_TT_DOT) {
                 // tt.dot %a, %b, %acc {attrs} : lhs * rhs -> res
                 result = str_concat(arena, result, str_lit(" "));
                 for (int i = 0; i < op->n_operands; i++) {
@@ -1304,7 +1287,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
 
             // Special case: tt.pure_extern_elementwise
-            if (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.pure_extern_elementwise"))) {
+            if (op->op_type == OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE) {
                 // Name already printed
                 if (op->n_operands > 0) {
                     result = str_concat(arena, result, str_lit(" "));
@@ -1414,14 +1397,14 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         mlir_operation_get_type(op) != OP_TYPE_ARITH_CMPI && mlir_operation_get_type(op) != OP_TYPE_TT_MAKE_RANGE &&
         mlir_operation_get_type(op) != OP_TYPE_FUNC_FUNC) {
         // Skip printing here for cases handled inline above
-        if (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.pure_extern_elementwise"))) {
+        if (op->op_type == OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE) {
             // already printed
         } else {
         // If there are tt.* attributes, we printed them inline already for default ops
         bool any_tt = false; for (int i=0;i<op->n_attributes;i++){ if (op->attributes[i]->name.size>=3 && op->attributes[i]->name.str[0]=='t' && op->attributes[i]->name.str[1]=='t' && op->attributes[i]->name.str[2]=='.') { any_tt=true; break; } }
         if (!any_tt) {
         // Skip printing for ops where we printed inline already by name
-        if (op->opname.size > 0 && (str_eq(op->opname, str_lit("tt.expand_dims")) || str_eq(op->opname, str_lit("tt.dot")))) {
+        if (op->op_type == OP_TYPE_TT_EXPAND_DIMS || op->op_type == OP_TYPE_TT_DOT) {
             // do nothing
         } else {
         bool has_visible_attrs = false;
