@@ -455,30 +455,36 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // Classic format: arith.cmpi slt, %0, %c10 : i64
             result = str_concat(arena, result, str_lit("arith.cmpi "));
             
-            // Extract comparison predicate from attributes
+            // Extract comparison predicate from attributes using API
             string predicate = str_lit("slt"); // default fallback
-            if (op->n_attributes > 0) {
-                for (int i = 0; i < op->n_attributes; i++) {
-                    Attribute *attr = op->attributes[i];
-                    if (str_eq(attr->name, str_lit("predicate")) && attr->kind == ATTR_KIND_STRING) {
-                        predicate = attr->data.string_value;
-                        break;
-                    }
+            size_t n_attrs = mlir_operation_num_attributes((MlirOperation*)op);
+            for (size_t i = 0; i < n_attrs; i++) {
+                MlirAttribute *attr = mlir_operation_get_attribute((MlirOperation*)op, i);
+                if (str_eq(mlir_attribute_get_name(attr), str_lit("predicate")) && 
+                    mlir_attribute_get_kind(attr) == ATTR_KIND_STRING) {
+                    predicate = mlir_attribute_get_string(attr);
+                    break;
                 }
             }
             result = str_concat(arena, result, predicate);
             
-            if (op->n_operands > 0) {
+            size_t n_operands = mlir_operation_num_operands((MlirOperation*)op);
+            if (n_operands > 0) {
                 result = str_concat(arena, result, str_lit(", "));
-                for (int i = 0; i < op->n_operands; i++) {
+                for (size_t i = 0; i < n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i]));
+                    MlirValue *operand = mlir_operation_get_operand((MlirOperation*)op, i);
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
                 }
             }
             
-            if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
-                result = str_concat(arena, result, str_lit(" : "));
-                result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
+            if (n_operands > 0) {
+                MlirValue *first_operand = mlir_operation_get_operand((MlirOperation*)op, 0);
+                MlirType *operand_type = mlir_value_get_type(first_operand);
+                if (operand_type) {
+                    result = str_concat(arena, result, str_lit(" : "));
+                    result = str_concat(arena, result, mlir_type_to_string(arena, operand_type));
+                }
             }
             break;
         }
@@ -487,19 +493,33 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // Classic format: cf.br ^bbX(%args : types)
             result = str_concat(arena, result, str_lit("cf.br"));
             string target = str_lit("^bb1");
-            for (int i=0;i<op->n_attributes;i++){ if (str_eq(op->attributes[i]->name, str_lit("_target")) && op->attributes[i]->kind==ATTR_KIND_STRING) { target = op->attributes[i]->data.string_value; break; } }
+            size_t n_attrs = mlir_operation_num_attributes((MlirOperation*)op);
+            for (size_t i = 0; i < n_attrs; i++) {
+                MlirAttribute *attr = mlir_operation_get_attribute((MlirOperation*)op, i);
+                if (str_eq(mlir_attribute_get_name(attr), str_lit("_target")) && 
+                    mlir_attribute_get_kind(attr) == ATTR_KIND_STRING) {
+                    target = mlir_attribute_get_string(attr);
+                    break;
+                }
+            }
             result = str_concat(arena, result, str_lit(" "));
             result = str_concat(arena, result, target);
-            if (op->n_operands > 0) {
+            size_t n_operands = mlir_operation_num_operands((MlirOperation*)op);
+            if (n_operands > 0) {
                 result = str_concat(arena, result, str_lit("("));
-                for (int i = 0; i < op->n_operands; i++) {
+                for (size_t i = 0; i < n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i]));
+                    MlirValue *operand = mlir_operation_get_operand((MlirOperation*)op, i);
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
                 }
                 result = str_concat(arena, result, str_lit(" : "));
-                for (int i = 0; i < op->n_operands; i++) {
+                for (size_t i = 0; i < n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    if (op->operands[i] && op->operands[i]->type) result = str_concat(arena, result, type_to_string(arena, op->operands[i]->type));
+                    MlirValue *operand = mlir_operation_get_operand((MlirOperation*)op, i);
+                    MlirType *operand_type = mlir_value_get_type(operand);
+                    if (operand_type) {
+                        result = str_concat(arena, result, mlir_type_to_string(arena, operand_type));
+                    }
                 }
                 result = str_concat(arena, result, str_lit(")"));
             }
