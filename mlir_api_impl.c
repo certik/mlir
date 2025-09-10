@@ -374,6 +374,16 @@ string mlir_attribute_get_string(const MlirAttribute *attr) {
     return a->data.string_value;
 }
 
+double mlir_attribute_get_float(const MlirAttribute *attr) {
+    const Attribute *a = (const Attribute*)attr;
+    return a->data.float_value;
+}
+
+bool mlir_attribute_get_bool(const MlirAttribute *attr) {
+    const Attribute *a = (const Attribute*)attr;
+    return a->data.bool_value;
+}
+
 // Value accessors
 int mlir_value_get_kind(const MlirValue *value) {
     const ValueRef *v = (const ValueRef*)value;

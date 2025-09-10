@@ -201,6 +201,8 @@ MlirAttrKind mlir_attribute_get_kind(const MlirAttribute *attr);
 string mlir_attribute_get_name(const MlirAttribute *attr);
 int64_t mlir_attribute_get_integer(const MlirAttribute *attr);
 string mlir_attribute_get_string(const MlirAttribute *attr);
+double mlir_attribute_get_float(const MlirAttribute *attr);
+bool mlir_attribute_get_bool(const MlirAttribute *attr);
 
 // Value creation and manipulation
 MlirValue *mlir_value_create(Arena *arena, int value_kind); // BLOCK_ARG or OP_RESULT

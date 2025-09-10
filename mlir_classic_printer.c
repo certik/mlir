@@ -5,12 +5,12 @@
 #include <base/format.h>
 #include <stdio.h>
 
-// SSA numbering map for printer
-static inline size_t ptr_hash(ValueRef *p) { return ((size_t)p) >> 3; }
-static inline bool ptr_equal(ValueRef *a, ValueRef *b) { return a == b; }
+// SSA numbering map for printer (key by API values during migration)
+static inline size_t ptr_hash(MlirValue *p) { return ((size_t)p) >> 3; }
+static inline bool ptr_equal(MlirValue *a, MlirValue *b) { return a == b; }
 #define SsaMap_HASH ptr_hash
 #define SsaMap_EQUAL ptr_equal
-DEFINE_HASHTABLE_FOR_TYPES(ValueRef*, uint32_t, SsaMap)
+DEFINE_HASHTABLE_FOR_TYPES(MlirValue*, uint32_t, SsaMap)
 
 typedef struct {
     Arena *arena;
@@ -98,7 +98,7 @@ static inline void ssa_map_init(PrintCtx *ctx, Arena *arena) {
     ctx->current_scf_for = NULL;
 }
 
-static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, ValueRef *v) {
+static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, MlirValue *v) {
     uint32_t *found = SsaMap_get(&ctx->ssa_map, v);
     if (found) return *found;
     uint32_t num = ctx->next_ssa++;
@@ -156,21 +156,21 @@ static string indent_classic(Arena *arena, int indent_level) {
 // Helper to print SSA value reference
 static string print_ssa_value_classic(PrintCtx *ctx, ValueRef *value) {
     Arena *arena = ctx->arena;
-    if (value->register_name.size > 0) {
-        return value->register_name;
-    } else {
-        uint32_t num = get_or_assign_ssa(ctx, value);
-        return format(arena, str_lit("%{}"), (int64_t)num);
-    }
+    MlirValue *v = (MlirValue*)value;
+    string rname = mlir_value_get_register_name(v);
+    if (rname.size > 0) return rname;
+    uint32_t num = get_or_assign_ssa(ctx, v);
+    return format(arena, str_lit("%{}"), (int64_t)num);
 }
 
 // Helper to print operands; appends "#0" when referencing first result of a multi-result def
 static string print_ssa_operand_classic(PrintCtx *ctx, ValueRef *value) {
     Arena *arena = ctx->arena;
-    string base = print_ssa_value_classic(ctx, value);
-    if (value && value->kind == OP_RESULT && value->def) {
-        Operation *defop = (Operation*)value->def;
-        if (defop->n_result_types > 1) {
+    MlirValue *v = (MlirValue*)value;
+    string base = print_ssa_value_classic(ctx, (ValueRef*)v);
+    if (v && mlir_value_get_kind(v) == MLIR_VALUE_OP_RESULT) {
+        MlirOperation *defop = mlir_value_get_def_op(v);
+        if (defop && mlir_operation_num_result_types(defop) > 1) {
             base = str_concat(arena, base, str_lit("#0"));
         }
     }
@@ -339,8 +339,9 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         return line;
     }
 
-    // Print results if any
-    if (op->n_result_types > 0) {
+    // Print results if any (API-based names and counts)
+    size_t api_num_result_types = mlir_operation_num_result_types((MlirOperation*)op);
+    if (api_num_result_types > 0) {
         // Ensure nested regions get SSA numbers first to match expected ordering
         if (op->n_regions > 0 && op->regions) {
             for (int i = 0; i < op->n_regions; i++) {
@@ -348,19 +349,22 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
         }
         // Special-case: one named result but multiple result types => print "%name:N ="
-        if (op->n_results == 1 && op->n_result_types > 1 && op->results && op->results[0]) {
-            result = str_concat(arena, result, print_ssa_value_classic(ctx, op->results[0]));
-            result = str_concat(arena, result, format(arena, str_lit(":{}"), (int64_t)op->n_result_types));
+        size_t api_num_results = mlir_operation_num_results((MlirOperation*)op);
+        if (api_num_results == 1 && api_num_result_types > 1) {
+            MlirValue *r0 = mlir_operation_get_result((MlirOperation*)op, 0);
+            if (r0) {
+                result = str_concat(arena, result, print_ssa_value_classic(ctx, (ValueRef*)r0));
+            } else {
+                result = str_concat(arena, result, str_lit("%_"));
+            }
+            result = str_concat(arena, result, format(arena, str_lit(":{}"), (int64_t)api_num_result_types));
             result = str_concat(arena, result, str_lit(" = "));
         } else {
-            for (int i = 0; i < op->n_result_types; i++) {
+            for (size_t i = 0; i < api_num_result_types; i++) {
                 if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                if (op->n_results > i && op->results && op->results[i]) {
-                    ValueRef *res = op->results[i];
-                    result = str_concat(arena, result, print_ssa_value_classic(ctx, res));
-                } else {
-                    result = str_concat(arena, result, str_lit("%_"));
-                }
+                MlirValue *res = (i < api_num_results) ? mlir_operation_get_result((MlirOperation*)op, i) : NULL;
+                if (res) result = str_concat(arena, result, print_ssa_value_classic(ctx, (ValueRef*)res));
+                else result = str_concat(arena, result, str_lit("%_"));
             }
             result = str_concat(arena, result, str_lit(" = "));
         }
