@@ -23,7 +23,7 @@ extern "C" {
  * @param op Operation to print
  * @return String containing the printed MLIR representation
  */
-string print_operation_generic(Arena *arena, int indent_level, Operation *op);
+string print_operation_generic(Arena *arena, int indent_level, MlirOperation *op);
 
 /**
  * Print an MLIR region to string.

@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include <base/arena.h>
+#include <base/string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -169,6 +170,9 @@ size_t mlir_operation_num_results(const MlirOperation *op);
 MlirValue *mlir_operation_get_result(const MlirOperation *op, size_t idx);
 MlirLocation *mlir_operation_get_location(const MlirOperation *op);
 const char *mlir_operation_get_name(const MlirOperation *op);
+size_t mlir_operation_num_result_types(const MlirOperation *op);
+MlirType *mlir_operation_get_result_type(const MlirOperation *op, size_t idx);
+const char *mlir_op_type_to_string(OpType type);
 
 size_t mlir_block_num_arguments(const MlirBlock *block);
 MlirValue *mlir_block_get_argument(const MlirBlock *block, size_t idx);
@@ -178,11 +182,25 @@ MlirType *mlir_type_create_integer(Arena *arena, uint32_t width, bool is_signed)
 MlirType *mlir_type_create_float(Arena *arena, uint32_t width, bool is_bfloat);
 void mlir_type_set_integer_properties(MlirType *type, uint32_t width, bool is_signed);
 void mlir_type_set_float_properties(MlirType *type, uint32_t width, bool is_bfloat);
+string mlir_type_to_string(Arena *arena, MlirType *type);
 
 // Attribute creation and manipulation
 MlirAttribute *mlir_attribute_create_integer(Arena *arena, int64_t value);
 MlirAttribute *mlir_attribute_create_string(Arena *arena, const char *str, size_t len);
 void mlir_attribute_set_name(MlirAttribute *attr, const char *name, size_t name_len);
+// Attribute accessors
+typedef enum {
+    MLIR_ATTR_KIND_INTEGER,
+    MLIR_ATTR_KIND_FLOAT,
+    MLIR_ATTR_KIND_STRING,
+    MLIR_ATTR_KIND_BOOL,
+    MLIR_ATTR_KIND_ARRAY,
+    MLIR_ATTR_KIND_DICT
+} MlirAttrKind;
+MlirAttrKind mlir_attribute_get_kind(const MlirAttribute *attr);
+string mlir_attribute_get_name(const MlirAttribute *attr);
+int64_t mlir_attribute_get_integer(const MlirAttribute *attr);
+string mlir_attribute_get_string(const MlirAttribute *attr);
 
 // Value creation and manipulation
 MlirValue *mlir_value_create(Arena *arena, int value_kind); // BLOCK_ARG or OP_RESULT
@@ -190,6 +208,12 @@ void mlir_value_set_type(MlirValue *value, MlirType *type);
 void mlir_value_set_register_name(MlirValue *value, const char *name, size_t name_len);
 void mlir_value_set_result_index(MlirValue *value, uint32_t index);
 void mlir_value_set_def(MlirValue *value, void *def); // Operation* or Block*
+// Value accessors
+int mlir_value_get_kind(const MlirValue *value);
+MlirType *mlir_value_get_type(const MlirValue *value);
+string mlir_value_get_register_name(const MlirValue *value);
+uint32_t mlir_value_get_result_index(const MlirValue *value);
+MlirOperation *mlir_value_get_def_op(const MlirValue *value);
 
 // Block and Region creation  
 MlirBlock *mlir_block_create(Arena *arena);

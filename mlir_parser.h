@@ -84,6 +84,13 @@ ValueRef* symbol_table_lookup(ScopedSymbolTable *st, string name);
 // Helper function to create properly initialized ValueRef
 ValueRef* create_value_ref(Arena *arena, ValueKind kind);
 
+// Forward declarations for core IR nodes (opaque here)
+typedef struct Operation Operation;
+typedef struct Region Region;
+typedef struct Block Block;
+typedef struct Type Type;
+typedef struct Attribute Attribute;
+
 // Specialized parsing functions
 void parse_gpu_launch(Parser *parser, Operation *op);
 

@@ -185,6 +185,16 @@ const char *mlir_operation_get_name(const MlirOperation *op) {
     return concrete_op->opname.str;
 }
 
+size_t mlir_operation_num_result_types(const MlirOperation *op) {
+    const Operation *concrete_op = (const Operation*)op;
+    return concrete_op->n_result_types;
+}
+
+MlirType *mlir_operation_get_result_type(const MlirOperation *op, size_t idx) {
+    const Operation *concrete_op = (const Operation*)op;
+    return (MlirType*)concrete_op->result_types[idx];
+}
+
 size_t mlir_block_num_arguments(const MlirBlock *block) {
     const Block *concrete_block = (const Block*)block;
     return concrete_block->n_arguments;
@@ -193,6 +203,11 @@ size_t mlir_block_num_arguments(const MlirBlock *block) {
 MlirValue *mlir_block_get_argument(const MlirBlock *block, size_t idx) {
     const Block *concrete_block = (const Block*)block;
     return (MlirValue*)concrete_block->arguments[idx];
+}
+
+// Type to string
+string mlir_type_to_string(Arena *arena, MlirType *type) {
+    return type_to_string(arena, (Type*)type);
 }
 
 // Type creation and manipulation
@@ -327,6 +342,66 @@ void mlir_operation_set_operands(MlirOperation *op, MlirValue **operands, size_t
     Operation *concrete_op = (Operation*)op;
     concrete_op->operands = (ValueRef**)operands;
     concrete_op->n_operands = count;
+}
+
+// Attribute accessors
+MlirAttrKind mlir_attribute_get_kind(const MlirAttribute *attr) {
+    const Attribute *a = (const Attribute*)attr;
+    switch (a->kind) {
+        case ATTR_KIND_INTEGER: return MLIR_ATTR_KIND_INTEGER;
+        case ATTR_KIND_FLOAT:   return MLIR_ATTR_KIND_FLOAT;
+        case ATTR_KIND_STRING:  return MLIR_ATTR_KIND_STRING;
+        case ATTR_KIND_BOOL:    return MLIR_ATTR_KIND_BOOL;
+        case ATTR_KIND_ARRAY:   return MLIR_ATTR_KIND_ARRAY;
+        case ATTR_KIND_DICT:    return MLIR_ATTR_KIND_DICT;
+        default:                return MLIR_ATTR_KIND_DICT;
+    }
+}
+
+string mlir_attribute_get_name(const MlirAttribute *attr) {
+    const Attribute *a = (const Attribute*)attr;
+    return a->name;
+}
+
+int64_t mlir_attribute_get_integer(const MlirAttribute *attr) {
+    const Attribute *a = (const Attribute*)attr;
+    return a->data.integer_value;
+}
+
+string mlir_attribute_get_string(const MlirAttribute *attr) {
+    const Attribute *a = (const Attribute*)attr;
+    return a->data.string_value;
+}
+
+// Value accessors
+int mlir_value_get_kind(const MlirValue *value) {
+    const ValueRef *v = (const ValueRef*)value;
+    return (int)v->kind;
+}
+
+MlirType *mlir_value_get_type(const MlirValue *value) {
+    const ValueRef *v = (const ValueRef*)value;
+    return (MlirType*)v->type;
+}
+
+string mlir_value_get_register_name(const MlirValue *value) {
+    const ValueRef *v = (const ValueRef*)value;
+    return v->register_name;
+}
+
+uint32_t mlir_value_get_result_index(const MlirValue *value) {
+    const ValueRef *v = (const ValueRef*)value;
+    return v->result_index;
+}
+
+MlirOperation *mlir_value_get_def_op(const MlirValue *value) {
+    const ValueRef *v = (const ValueRef*)value;
+    return (MlirOperation*)v->def;
+}
+
+const char *mlir_op_type_to_string(OpType type) {
+    string s = op_type_to_string(type);
+    return s.str;
 }
 
 // Parser functions

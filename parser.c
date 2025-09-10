@@ -249,7 +249,7 @@ int main(int argc, char *argv[]) {
         if (verbose) printf("About to print operation...\n");
         string result;
         if (use_classic_printer) {
-            result = print_operation_classic(arena, 0, (Operation*)op);
+            result = print_operation_classic(arena, 0, op);
         } else {
             result = print_operation_generic(arena, 0, (Operation*)op);
         }
@@ -300,7 +300,7 @@ int main(int argc, char *argv[]) {
         if (use_classic_printer) {
             void *locmap = NULL;
             mlir_parser_get_location_map(parser, &locmap);
-            println(arena, str_lit("{}"), print_module_classic(arena, (Operation*)op, (LocationMap*)locmap));
+            println(arena, str_lit("{}"), print_module_classic(arena, op, (LocationMap*)locmap));
         } else {
             println(arena, str_lit("{}"), print_operation_generic(arena, 0, (Operation*)op));
         }

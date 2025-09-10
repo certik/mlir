@@ -246,12 +246,11 @@ string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op) 
 }
 
 // Public API implementations
-string print_operation_generic(Arena *arena, int indent_level, Operation *op) {
+string print_operation_generic(Arena *arena, int indent_level, MlirOperation *op) {
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
-    // Preassign SSA numbers for entire subtree to match parser's post-order numbering
-    preassign_op_ssa(&ctx, op, indent_level);
-    return print_operation_internal(&ctx, indent_level, op);
+    preassign_op_ssa(&ctx, (Operation*)op, indent_level);
+    return print_operation_internal(&ctx, indent_level, (Operation*)op);
 }
 
 string print_region_generic(Arena *arena, int indent_level, Region *region) {
