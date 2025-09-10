@@ -131,14 +131,20 @@ static void preassign_op_ssa(PrintCtx *ctx, Operation *op, int indent_level) {
 }
 
 static void preassign_block_ssa(PrintCtx *ctx, Block *block, int indent_level) {
-    for (int i = 0; i < block->n_operations; i++) {
-        preassign_op_ssa(ctx, block->operations[i], indent_level + 1);
+    MlirBlock *b = (MlirBlock*)block;
+    size_t n = mlir_block_num_operations(b);
+    for (size_t i = 0; i < n; i++) {
+        MlirOperation *op = mlir_block_get_operation(b, i);
+        preassign_op_ssa(ctx, (Operation*)op, indent_level + 1);
     }
 }
 
 static void preassign_region_ssa(PrintCtx *ctx, Region *region, int indent_level) {
-    for (int i = 0; i < region->n_blocks; i++) {
-        preassign_block_ssa(ctx, region->blocks[i], indent_level);
+    MlirRegion *r = (MlirRegion*)region;
+    size_t n = mlir_region_num_blocks(r);
+    for (size_t i = 0; i < n; i++) {
+        MlirBlock *b = mlir_region_get_block(r, i);
+        preassign_block_ssa(ctx, (Block*)b, indent_level);
     }
 }
 
@@ -213,19 +219,22 @@ static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int inde
     string result = format(arena, str_lit("{}^bb{}"), indent_classic(arena, indent_level), bb_index);
 
     // Print block arguments if any
-    if (block->n_arguments > 0 && block->arguments) {
+    size_t n_args = mlir_block_num_arguments((MlirBlock*)block);
+    if (n_args > 0) {
         result = str_concat(arena, result, str_lit("("));
-        for (int i = 0; i < block->n_arguments; i++) {
+        for (size_t i = 0; i < n_args; i++) {
             if (i > 0) result = str_concat(arena, result, str_lit(", "));
-            ValueRef *arg = block->arguments[i];
-            if (arg && arg->type) {
+            MlirValue *arg = mlir_block_get_argument((MlirBlock*)block, i);
+            MlirType *arg_ty = arg ? mlir_value_get_type(arg) : NULL;
+            if (arg && arg_ty) {
                 // For block arguments, use the original register name
-                if (arg->register_name.size > 0) {
+                string rname = mlir_value_get_register_name(arg);
+                if (rname.size > 0) {
                     result = str_concat(arena, result, format(arena, str_lit("{}: {}"),
-                                                            arg->register_name, type_to_string(arena, arg->type)));
+                                                            rname, mlir_type_to_string(arena, arg_ty)));
                 } else {
                     result = str_concat(arena, result, format(arena, str_lit("%arg{}: {}"),
-                                                            (int64_t)arg->result_index, type_to_string(arena, arg->type)));
+                                                            (int64_t)mlir_value_get_result_index(arg), mlir_type_to_string(arena, arg_ty)));
                 }
             } else {
                 result = str_concat(arena, result, str_lit("null_arg"));
@@ -236,9 +245,10 @@ static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int inde
 
     result = str_concat(arena, result, str_lit(":\n"));
 
-    for (int i=0; i < block->n_operations; i++) {
+    for (size_t i=0, e = mlir_block_num_operations((MlirBlock*)block); i < e; i++) {
+        MlirOperation *opn = mlir_block_get_operation((MlirBlock*)block, i);
         result = str_concat(arena, result,
-            print_operation_internal_classic(ctx, indent_level+1, block->operations[i])
+            print_operation_internal_classic(ctx, indent_level+1, (Operation*)opn)
         );
     }
     return result;
@@ -248,9 +258,10 @@ static string print_region_internal_classic(PrintCtx *ctx, int indent_level, Reg
     Arena *arena = ctx->arena;
     string result = str_lit("");
     result = str_concat(arena, result, str_lit("{\n"));
-    for (int i=0; i < region->n_blocks; i++) {
+    for (size_t i=0, e = mlir_region_num_blocks((MlirRegion*)region); i < e; i++) {
+        MlirBlock *b = mlir_region_get_block((MlirRegion*)region, i);
         result = str_concat(arena, result,
-            print_block_internal_classic(ctx, i, indent_level, region->blocks[i])
+            print_block_internal_classic(ctx, (int)i, indent_level, (Block*)b)
         );
     }
     result = str_concat(arena, result, indent_classic(arena, indent_level));
@@ -263,13 +274,14 @@ static string print_function_region_classic(PrintCtx *ctx, int indent_level, Reg
     Arena *arena = ctx->arena;
     string result = str_lit("");
     // If single block, keep the compact form; otherwise, print with block labels
-    if (region->n_blocks <= 1) {
+    if (mlir_region_num_blocks((MlirRegion*)region) <= 1) {
         result = str_concat(arena, result, str_lit("{\n"));
-        for (int i = 0; i < region->n_blocks; i++) {
-            Block *block = region->blocks[i];
-            for (int j = 0; j < block->n_operations; j++) {
+        for (size_t i = 0, nb = mlir_region_num_blocks((MlirRegion*)region); i < nb; i++) {
+            MlirBlock *block = mlir_region_get_block((MlirRegion*)region, i);
+            for (size_t j = 0, no = mlir_block_num_operations(block); j < no; j++) {
+                MlirOperation *opn = mlir_block_get_operation(block, j);
                 result = str_concat(arena, result,
-                    print_operation_internal_classic(ctx, indent_level + 1, block->operations[j])
+                    print_operation_internal_classic(ctx, indent_level + 1, (Operation*)opn)
                 );
             }
         }
@@ -282,14 +294,16 @@ static string print_function_region_classic(PrintCtx *ctx, int indent_level, Reg
         // Print first block without label, then labeled others with comments
         string out = str_lit("");
         out = str_concat(arena, out, str_lit("{\n"));
-        if (region->n_blocks > 0) {
-            Block *b0 = region->blocks[0];
-            for (int j = 0; j < b0->n_operations; j++) {
-                out = str_concat(arena, out, print_operation_internal_classic(ctx, indent_level + 1, b0->operations[j]));
+        if (mlir_region_num_blocks((MlirRegion*)region) > 0) {
+            MlirBlock *b0 = mlir_region_get_block((MlirRegion*)region, 0);
+            for (size_t j = 0, no = mlir_block_num_operations(b0); j < no; j++) {
+                MlirOperation *opn = mlir_block_get_operation(b0, j);
+                out = str_concat(arena, out, print_operation_internal_classic(ctx, indent_level + 1, (Operation*)opn));
             }
         }
-        for (int i = 1; i < region->n_blocks; i++) {
-            string blk = print_block_internal_classic(ctx, i, indent_level, region->blocks[i]);
+        for (size_t i = 1, nb = mlir_region_num_blocks((MlirRegion*)region); i < nb; i++) {
+            MlirBlock *b = mlir_region_get_block((MlirRegion*)region, i);
+            string blk = print_block_internal_classic(ctx, (int)i, indent_level, (Block*)b);
             // Inject predecessor comment
             string comment = pc ? pc->comments[i] : str_lit("");
             if (comment.size > 0) {
@@ -318,11 +332,14 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         // Build header "func.func [vis] @name(params)[ -> ret]"
         string header = str_lit("func.func ");
         string vis = str_lit(""); string name = str_lit(""); string ret = str_lit(""); string params = str_lit("");
-        for (int i=0;i<op->n_attributes;i++) {
-            if (str_eq(op->attributes[i]->name, str_lit("visibility")) && op->attributes[i]->kind==ATTR_KIND_STRING) vis = op->attributes[i]->data.string_value;
-            else if (str_eq(op->attributes[i]->name, str_lit("sym_name")) && op->attributes[i]->kind==ATTR_KIND_STRING) name = op->attributes[i]->data.string_value;
-            else if (str_eq(op->attributes[i]->name, str_lit("ret")) && op->attributes[i]->kind==ATTR_KIND_STRING) ret = op->attributes[i]->data.string_value;
-            else if (str_eq(op->attributes[i]->name, str_lit("params_sig")) && op->attributes[i]->kind==ATTR_KIND_STRING) params = op->attributes[i]->data.string_value;
+        size_t nattrs = mlir_operation_num_attributes((MlirOperation*)op);
+        for (size_t i=0;i<nattrs;i++) {
+            MlirAttribute *a = mlir_operation_get_attribute((MlirOperation*)op, i);
+            string an = mlir_attribute_get_name(a);
+            if (str_eq(an, str_lit("visibility")) && mlir_attribute_get_kind(a)==MLIR_ATTR_KIND_STRING) vis = mlir_attribute_get_string(a);
+            else if (str_eq(an, str_lit("sym_name")) && mlir_attribute_get_kind(a)==MLIR_ATTR_KIND_STRING) name = mlir_attribute_get_string(a);
+            else if (str_eq(an, str_lit("ret")) && mlir_attribute_get_kind(a)==MLIR_ATTR_KIND_STRING) ret = mlir_attribute_get_string(a);
+            else if (str_eq(an, str_lit("params_sig")) && mlir_attribute_get_kind(a)==MLIR_ATTR_KIND_STRING) params = mlir_attribute_get_string(a);
         }
         if (vis.size>0) { header = str_concat(arena, header, vis); header = str_concat(arena, header, str_lit(" ")); }
         if (name.size>0) { header = str_concat(arena, header, name); }
@@ -580,11 +597,14 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // Build header with precise spacing
             string header = str_lit("func.func ");
             string vis = str_lit(""); string name = str_lit(""); string ret = str_lit(""); string params = str_lit("");
-            for (int i=0;i<op->n_attributes;i++) {
-                if (str_eq(op->attributes[i]->name, str_lit("visibility")) && op->attributes[i]->kind==ATTR_KIND_STRING) vis = op->attributes[i]->data.string_value;
-                else if (str_eq(op->attributes[i]->name, str_lit("sym_name")) && op->attributes[i]->kind==ATTR_KIND_STRING) name = op->attributes[i]->data.string_value;
-                else if (str_eq(op->attributes[i]->name, str_lit("ret")) && op->attributes[i]->kind==ATTR_KIND_STRING) ret = op->attributes[i]->data.string_value;
-                else if (str_eq(op->attributes[i]->name, str_lit("params_sig")) && op->attributes[i]->kind==ATTR_KIND_STRING) params = op->attributes[i]->data.string_value;
+            size_t nattrs2 = mlir_operation_num_attributes((MlirOperation*)op);
+            for (size_t i=0;i<nattrs2;i++) {
+                MlirAttribute *a = mlir_operation_get_attribute((MlirOperation*)op, i);
+                string an = mlir_attribute_get_name(a);
+                if (str_eq(an, str_lit("visibility")) && mlir_attribute_get_kind(a)==MLIR_ATTR_KIND_STRING) vis = mlir_attribute_get_string(a);
+                else if (str_eq(an, str_lit("sym_name")) && mlir_attribute_get_kind(a)==MLIR_ATTR_KIND_STRING) name = mlir_attribute_get_string(a);
+                else if (str_eq(an, str_lit("ret")) && mlir_attribute_get_kind(a)==MLIR_ATTR_KIND_STRING) ret = mlir_attribute_get_string(a);
+                else if (str_eq(an, str_lit("params_sig")) && mlir_attribute_get_kind(a)==MLIR_ATTR_KIND_STRING) params = mlir_attribute_get_string(a);
             }
             if (vis.size>0) { header = str_concat(arena, header, vis); header = str_concat(arena, header, str_lit(" ")); }
             if (name.size>0) { header = str_concat(arena, header, name); }
@@ -620,11 +640,14 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // Get visibility from attributes
             string visibility = str_lit("private");  // default
             string fname = str_lit("unknown_func");
-            for (int i = 0; i < op->n_attributes; i++) {
-                if (op->attributes[i] && str_eq(op->attributes[i]->name, str_lit("visibility")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
-                    visibility = op->attributes[i]->data.string_value;
-                } else if (op->attributes[i] && str_eq(op->attributes[i]->name, str_lit("sym_name")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
-                    fname = op->attributes[i]->data.string_value;
+            size_t nattrs3 = mlir_operation_num_attributes((MlirOperation*)op);
+            for (size_t i = 0; i < nattrs3; i++) {
+                MlirAttribute *a = mlir_operation_get_attribute((MlirOperation*)op, i);
+                string an = mlir_attribute_get_name(a);
+                if (str_eq(an, str_lit("visibility")) && mlir_attribute_get_kind(a) == MLIR_ATTR_KIND_STRING) {
+                    visibility = mlir_attribute_get_string(a);
+                } else if (str_eq(an, str_lit("sym_name")) && mlir_attribute_get_kind(a) == MLIR_ATTR_KIND_STRING) {
+                    fname = mlir_attribute_get_string(a);
                 }
             }
             result = str_concat(arena, result, visibility);
@@ -666,10 +689,12 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit(")"));
             // Optional return signature captured in attribute 'ret'; if absent, infer from last tt.return
             bool printed_ret = false;
-            for (int i=0;i<op->n_attributes;i++) {
-                if (op->attributes[i] && str_eq(op->attributes[i]->name, str_lit("ret")) && op->attributes[i]->kind==ATTR_KIND_STRING) {
-                    string ret = op->attributes[i]->data.string_value;
-                    if (ret.size>0) { result = str_concat(arena, result, str_lit(" -> ")); result = str_concat(arena, result, ret); printed_ret = true; }
+            size_t nattrs4 = mlir_operation_num_attributes((MlirOperation*)op);
+            for (size_t i=0;i<nattrs4;i++) {
+                MlirAttribute *a = mlir_operation_get_attribute((MlirOperation*)op, i);
+                if (a && str_eq(mlir_attribute_get_name(a), str_lit("ret")) && mlir_attribute_get_kind(a)==MLIR_ATTR_KIND_STRING) {
+                    string r = mlir_attribute_get_string(a);
+                    if (r.size>0) { result = str_concat(arena, result, str_lit(" -> ")); result = str_concat(arena, result, r); printed_ret = true; }
                     break;
                 }
             }
@@ -692,8 +717,10 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // Classic format: tt.get_program_id <axis> : i32
             result = str_concat(arena, result, str_lit("tt.get_program_id "));
             string axis = str_lit("x");
-            for (int i=0;i<op->n_attributes;i++) {
-                if (op->attributes[i] && str_eq(op->attributes[i]->name, str_lit("axis")) && op->attributes[i]->kind==ATTR_KIND_STRING) { axis = op->attributes[i]->data.string_value; break; }
+            size_t nattrs5 = mlir_operation_num_attributes((MlirOperation*)op);
+            for (size_t i=0;i<nattrs5;i++) {
+                MlirAttribute *a = mlir_operation_get_attribute((MlirOperation*)op, i);
+                if (a && str_eq(mlir_attribute_get_name(a), str_lit("axis")) && mlir_attribute_get_kind(a)==MLIR_ATTR_KIND_STRING) { axis = mlir_attribute_get_string(a); break; }
             }
             result = str_concat(arena, result, axis);
             result = str_concat(arena, result, str_lit(" : i32"));
@@ -703,7 +730,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // Classic tt.call @callee(%args) : (tys) -> ret
             result = str_concat(arena, result, str_lit("tt.call"));
             string callee = str_lit("@unknown");
-            for (int i=0;i<op->n_attributes;i++) { if (op->attributes[i] && str_eq(op->attributes[i]->name, str_lit("callee")) && op->attributes[i]->kind==ATTR_KIND_STRING) { callee = op->attributes[i]->data.string_value; break; } }
+            size_t nattrs6 = mlir_operation_num_attributes((MlirOperation*)op);
+            for (size_t i=0;i<nattrs6;i++) { MlirAttribute *a = mlir_operation_get_attribute((MlirOperation*)op, i); if (a && str_eq(mlir_attribute_get_name(a), str_lit("callee")) && mlir_attribute_get_kind(a)==MLIR_ATTR_KIND_STRING) { callee = mlir_attribute_get_string(a); break; } }
             result = str_concat(arena, result, str_lit(" "));
             result = str_concat(arena, result, callee);
             result = str_concat(arena, result, str_lit("("));
