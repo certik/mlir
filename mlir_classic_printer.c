@@ -376,9 +376,11 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
     size_t api_num_result_types = mlir_operation_num_result_types((MlirOperation*)op);
     if (api_num_result_types > 0) {
         // Ensure nested regions get SSA numbers first to match expected ordering
-        if (op->n_regions > 0 && op->regions) {
-            for (int i = 0; i < op->n_regions; i++) {
-                preassign_region_ssa(ctx, op->regions[i], indent_level + 1);
+        size_t n_regions = mlir_operation_num_regions((MlirOperation*)op);
+        if (n_regions > 0) {
+            for (size_t i = 0; i < n_regions; i++) {
+                MlirRegion *region = mlir_operation_get_region((MlirOperation*)op, i);
+                preassign_region_ssa(ctx, (Region*)region, indent_level + 1);
             }
         }
         // Special-case: one named result but multiple result types => print "%name:N ="
