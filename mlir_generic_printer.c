@@ -137,27 +137,36 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, Operatio
         result = str_concat(arena, result, mlir_type_to_string(arena, ot));
     }
     result = str_concat(arena, result, str_lit(")"));
-    if (op->n_attributes > 0) {
-        bool opened = false; bool first = true;
-        for (int i = 0; i < op->n_attributes; i++) {
-            Attribute *attr = op->attributes[i];
-            if (attr->name.size > 0 && attr->name.str[0] == '_') { continue; }
-            if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
-            if (!first) result = str_concat(arena, result, str_lit(", ")); first = false;
-            result = str_concat(arena, result, format(arena, str_lit("{} = "), attr->name));
-            switch (attr->kind) {
-                case ATTR_KIND_INTEGER:
-                    if (op->op_type == OP_TYPE_TT_MAKE_RANGE) result = str_concat(arena, result, format(arena, str_lit("{} : i32"), attr->data.integer_value));
-                    else result = str_concat(arena, result, format(arena, str_lit("{}"), attr->data.integer_value));
-                    break;
-                case ATTR_KIND_STRING:
-                    result = str_concat(arena, result, format(arena, str_lit("\"{}\""), attr->data.string_value));
-                    break;
-                default:
-                    result = str_concat(arena, result, str_lit("..."));
+    {
+        size_t n_attrs = mlir_operation_num_attributes((MlirOperation*)op);
+        if (n_attrs > 0) {
+            bool opened = false; bool first = true;
+            OpType opty = mlir_operation_get_type((MlirOperation*)op);
+            for (size_t i = 0; i < n_attrs; i++) {
+                MlirAttribute *attr = mlir_operation_get_attribute((MlirOperation*)op, i);
+                string name = mlir_attribute_get_name(attr);
+                if (name.size > 0 && name.str[0] == '_') { continue; }
+                if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
+                if (!first) result = str_concat(arena, result, str_lit(", ")); first = false;
+                result = str_concat(arena, result, format(arena, str_lit("{} = "), name));
+                switch (mlir_attribute_get_kind(attr)) {
+                    case MLIR_ATTR_KIND_INTEGER: {
+                        int64_t v = mlir_attribute_get_integer(attr);
+                        if (opty == OP_TYPE_TT_MAKE_RANGE) result = str_concat(arena, result, format(arena, str_lit("{} : i32"), v));
+                        else result = str_concat(arena, result, format(arena, str_lit("{}"), v));
+                        break;
+                    }
+                    case MLIR_ATTR_KIND_STRING: {
+                        string s = mlir_attribute_get_string(attr);
+                        result = str_concat(arena, result, format(arena, str_lit("\"{}\""), s));
+                        break;
+                    }
+                    default:
+                        result = str_concat(arena, result, str_lit("..."));
+                }
             }
+            if (opened) result = str_concat(arena, result, str_lit("}"));
         }
-        if (opened) result = str_concat(arena, result, str_lit("}"));
     }
     if (api_num_result_types > 0) {
         result = str_concat(arena, result, str_lit(" -> "));
