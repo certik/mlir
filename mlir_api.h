@@ -5,13 +5,13 @@
 #pragma once
 
 #include <stddef.h>
+#include <base/arena.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 // Forward declarations of opaque structures
-struct Arena;
 
 typedef struct MlirOperation MlirOperation;
 typedef struct MlirRegion MlirRegion;
@@ -20,6 +20,7 @@ typedef struct MlirValue MlirValue;
 typedef struct MlirType MlirType;
 typedef struct MlirAttribute MlirAttribute;
 typedef struct MlirLocation MlirLocation;
+typedef struct MlirParser MlirParser;
 
 // Operation type enumeration.
 typedef enum {
@@ -131,6 +132,10 @@ typedef enum {
     OP_TYPE_COUNT  // Total number of operation types
 } OpType;
 
+// Value kind constants
+#define MLIR_VALUE_BLOCK_ARG 0
+#define MLIR_VALUE_OP_RESULT 1
+
 // Initialization for implementations that require setup. When used with an
 // upstream MLIR implementation, root should point to the top-level
 // operation (typically a module) so that the implementation can pre-compute
@@ -138,13 +143,13 @@ typedef enum {
 void mlir_api_init(MlirOperation *root);
 
 // Construction helpers
-MlirOperation *mlir_op_create(struct Arena *arena, OpType type);
-void mlir_op_add_region(struct Arena *arena, MlirOperation *op, MlirRegion *region);
-void mlir_op_add_operand(struct Arena *arena, MlirOperation *op, MlirValue *operand);
-void mlir_op_add_result(struct Arena *arena, MlirOperation *op, MlirValue *result);
-void mlir_block_add_operation(struct Arena *arena, MlirBlock *block, MlirOperation *op);
-void mlir_block_add_argument(struct Arena *arena, MlirBlock *block, MlirValue *arg);
-void mlir_region_add_block(struct Arena *arena, MlirRegion *region, MlirBlock *block);
+MlirOperation *mlir_op_create(Arena *arena, OpType type);
+void mlir_op_add_region(Arena *arena, MlirOperation *op, MlirRegion *region);
+void mlir_op_add_operand(Arena *arena, MlirOperation *op, MlirValue *operand);
+void mlir_op_add_result(Arena *arena, MlirOperation *op, MlirValue *result);
+void mlir_block_add_operation(Arena *arena, MlirBlock *block, MlirOperation *op);
+void mlir_block_add_argument(Arena *arena, MlirBlock *block, MlirValue *arg);
+void mlir_region_add_block(Arena *arena, MlirRegion *region, MlirBlock *block);
 
 // Traversal helpers
 size_t mlir_region_num_blocks(const MlirRegion *region);
@@ -167,6 +172,44 @@ const char *mlir_operation_get_name(const MlirOperation *op);
 
 size_t mlir_block_num_arguments(const MlirBlock *block);
 MlirValue *mlir_block_get_argument(const MlirBlock *block, size_t idx);
+
+// Type creation and manipulation
+MlirType *mlir_type_create_integer(Arena *arena, uint32_t width, bool is_signed);
+MlirType *mlir_type_create_float(Arena *arena, uint32_t width, bool is_bfloat);
+void mlir_type_set_integer_properties(MlirType *type, uint32_t width, bool is_signed);
+void mlir_type_set_float_properties(MlirType *type, uint32_t width, bool is_bfloat);
+
+// Attribute creation and manipulation
+MlirAttribute *mlir_attribute_create_integer(Arena *arena, int64_t value);
+MlirAttribute *mlir_attribute_create_string(Arena *arena, const char *str, size_t len);
+void mlir_attribute_set_name(MlirAttribute *attr, const char *name, size_t name_len);
+
+// Value creation and manipulation
+MlirValue *mlir_value_create(Arena *arena, int value_kind); // BLOCK_ARG or OP_RESULT
+void mlir_value_set_type(MlirValue *value, MlirType *type);
+void mlir_value_set_register_name(MlirValue *value, const char *name, size_t name_len);
+void mlir_value_set_result_index(MlirValue *value, uint32_t index);
+void mlir_value_set_def(MlirValue *value, void *def); // Operation* or Block*
+
+// Block and Region creation  
+MlirBlock *mlir_block_create(Arena *arena);
+MlirRegion *mlir_region_create(Arena *arena);
+
+// Operation properties
+void mlir_operation_set_name(MlirOperation *op, const char *name, size_t name_len);
+void mlir_operation_set_result_types(MlirOperation *op, MlirType **types, size_t count);
+void mlir_operation_set_attributes(MlirOperation *op, MlirAttribute **attrs, size_t count);
+void mlir_operation_set_results(MlirOperation *op, MlirValue **results, size_t count);
+void mlir_operation_set_operands(MlirOperation *op, MlirValue **operands, size_t count);
+
+// Parser functions
+MlirParser *mlir_parser_create(Arena *arena);
+void mlir_parser_init(Arena *arena, MlirParser *parser, const char *input, size_t input_len);
+MlirOperation *mlir_parse_module(MlirParser *parser);
+
+// Utility functions  
+const char *mlir_tokentype_to_string(int token_type);
+void mlir_parser_get_location_map(MlirParser *parser, void **location_map); // Returns LocationMap* as void*
 
 #ifdef __cplusplus
 }

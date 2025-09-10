@@ -1,21 +1,22 @@
-#include "mlir_api_impl.h"
+#include "mlir_parser.h"
 #include "mlir_classic_printer.h"
+#include "mlir_parser.h"
 #include <base/hashtable.h>
 #include <base/format.h>
 #include <stdio.h>
 
 // SSA numbering map for printer
-static inline size_t ptr_hash(MlirValue *p) { return ((size_t)p) >> 3; }
-static inline bool ptr_equal(MlirValue *a, MlirValue *b) { return a == b; }
+static inline size_t ptr_hash(ValueRef *p) { return ((size_t)p) >> 3; }
+static inline bool ptr_equal(ValueRef *a, ValueRef *b) { return a == b; }
 #define SsaMap_HASH ptr_hash
 #define SsaMap_EQUAL ptr_equal
-DEFINE_HASHTABLE_FOR_TYPES(MlirValue*, uint32_t, SsaMap)
+DEFINE_HASHTABLE_FOR_TYPES(ValueRef*, uint32_t, SsaMap)
 
 typedef struct {
     Arena *arena;
     uint32_t next_ssa;
     SsaMap ssa_map;
-    MlirOperation *current_scf_for;
+    Operation *current_scf_for;
 } PrintCtx;
 
 // Optional predecessor comments per block for a region
@@ -33,19 +34,19 @@ static int parse_bb_index(string lab) {
     return v;
 }
 
-static PredComments* build_pred_comments(Arena *arena, MlirRegion *region) {
+static PredComments* build_pred_comments(Arena *arena, Region *region) {
     if (!region) return NULL;
     PredComments *pc = arena_alloc(arena, PredComments);
     pc->region = region;
-    pc->n_blocks = (int)mlir_region_num_blocks(region);
+    pc->n_blocks = (int)mlir_region_num_blocks((MlirRegion*)region);
     pc->comments = arena_alloc_array(arena, string, pc->n_blocks);
     pc->counts = arena_alloc_array(arena, int, pc->n_blocks);
     for (int i=0;i<pc->n_blocks;i++){ pc->comments[i]=str_lit(""); pc->counts[i]=0; }
     // Walk operations to find branch targets
-    for (int b=0; b<(int)mlir_region_num_blocks(region); b++) {
-        MlirBlock *blk = mlir_region_get_block(region, b);
-        for (int oi=0; oi<(int)mlir_block_num_operations(blk); oi++) {
-            MlirOperation *op = mlir_block_get_operation(blk, oi);
+    for (int b=0; b<(int)mlir_region_num_blocks((MlirRegion*)region); b++) {
+        Block *blk = (Block*)mlir_region_get_block((MlirRegion*)region, b);
+        for (int oi=0; oi<(int)mlir_block_num_operations((MlirBlock*)blk); oi++) {
+            Operation *op = (Operation*)mlir_block_get_operation((MlirBlock*)blk, oi);
             if (mlir_operation_get_type(op) == OP_TYPE_CF_BR) {
                 // find _target attribute
                 string tgt = str_lit("");
@@ -58,7 +59,7 @@ static PredComments* build_pred_comments(Arena *arena, MlirRegion *region) {
                     else pc->comments[idx] = str_concat(arena, pc->comments[idx], format(arena, str_lit(", ^bb{}"), (int64_t)b));
                     pc->counts[idx]++;
                 }
-            } else if (mlir_operation_get_type(op) == OP_TYPE_CF_COND_BR) {
+            } else if (mlir_operation_get_type((MlirOperation*)op) == OP_TYPE_CF_COND_BR) {
                 string ttrue = str_lit(""); string tfalse = str_lit("");
                 for (int ai=0; ai<(int)op->n_attributes; ai++) {
                     if (str_eq(op->attributes[ai]->name, str_lit("_true")) && op->attributes[ai]->kind==ATTR_KIND_STRING) ttrue = op->attributes[ai]->data.string_value;
@@ -1512,7 +1513,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 }
 
 // Public API implementations
-string print_operation_classic(Arena *arena, int indent_level, MlirOperation *op) {
+string print_operation_classic(Arena *arena, int indent_level, Operation *op) {
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
     // Preassign SSA numbers for entire subtree to match parser's post-order numbering
@@ -1520,14 +1521,14 @@ string print_operation_classic(Arena *arena, int indent_level, MlirOperation *op
     return print_operation_internal_classic(&ctx, indent_level, op);
 }
 
-string print_region_classic(Arena *arena, int indent_level, MlirRegion *region) {
+string print_region_classic(Arena *arena, int indent_level, Region *region) {
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
     preassign_region_ssa(&ctx, region, indent_level);
     return print_region_internal_classic(&ctx, indent_level, region);
 }
 
-string print_block_classic(Arena *arena, int bb_index, int indent_level, MlirBlock *block) {
+string print_block_classic(Arena *arena, int bb_index, int indent_level, Block *block) {
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
     preassign_block_ssa(&ctx, block, indent_level);
@@ -1609,7 +1610,7 @@ static string print_location_map_classic(Arena *arena, LocationMap *location_map
     return result;
 }
 
-string print_module_classic(Arena *arena, MlirOperation *module, LocationMap *location_map) {
+string print_module_classic(Arena *arena, Operation *module, LocationMap *location_map) {
     string result = str_lit("");
     
     // Print the special #loc definition at the beginning if it exists

@@ -2,7 +2,12 @@
 
 #include <base/arena.h>
 #include <base/string.h>
-#include "mlir_parser.h"
+#include "mlir_api.h"
+
+// Forward declarations for internal concrete types used by printers
+typedef struct Operation Operation;
+typedef struct Region Region;
+typedef struct Block Block;
 
 #ifdef __cplusplus
 extern "C" {

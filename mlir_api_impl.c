@@ -24,9 +24,6 @@ bool string_equal(string a, string b) {
     return str_eq(a, b);
 }
 
-// Forward declare ValueRef for hashtable
-typedef struct ValueRef ValueRef;
-
 // Define hashtable for string -> ValueRef* mapping
 #define SymbolTable_HASH string_hash
 #define SymbolTable_EQUAL string_equal
@@ -39,212 +36,21 @@ typedef struct ScopedSymbolTable {
     size_t scope_capacity;
 } ScopedSymbolTable;
 
-// Forward declare Location for hashtable
-typedef struct Location Location;
-
 // Location map for named location references
 #define LocationMap_HASH string_hash
 #define LocationMap_EQUAL string_equal
 DEFINE_HASHTABLE_FOR_TYPES(string, Location*, LocationMap)
 
-typedef struct {
-    Arena *arena;
-    unsigned char *input;
-    TokenType sym;
-    uint64_t cur;
-    uint64_t first, last;
-    ScopedSymbolTable symbol_table;
-    LocationMap location_map;  // For #locN -> Location mapping
-    int next_loc_id;          // Counter for generating #locN IDs
-    Location *unnumbered_loc_def; // Optional: definition of unnumbered '#loc' at file start
-    // Parsing mode flag to enable robust trailing comment capture in special contexts
-    bool capture_trailing_comments;
-} Parser;
+typedef Parser Parser; // use Parser from mlir_parser.h
 
-typedef struct Region Region;
+// Forward declarations for parser entry points implemented in mlir_parser.c
+void parser_init(Arena *arena, Parser *parser, string text);
+struct Operation; // forward decl
+struct Operation* parse_module(Parser *parser);
 
-// Type kinds for MLIR type system
-typedef enum {
-    TYPE_KIND_UNKNOWN,
-    TYPE_KIND_OPAQUE,
-    TYPE_KIND_INTEGER,
-    TYPE_KIND_FLOAT,
-    TYPE_KIND_MEMREF,
-    TYPE_KIND_TENSOR,
-    TYPE_KIND_FUNCTION,
-    TYPE_KIND_INDEX,
-    TYPE_KIND_POINTER
-} TypeKind;
-
-// MLIR Type representation
-typedef struct Type {
-    TypeKind kind;
-    union {
-        struct {
-            uint32_t width;     // Bit width for integers
-            bool is_signed;
-        } integer;
-        struct {
-            uint32_t width;     // 16, 32, 64, etc.
-            bool is_bfloat;     // true for bf16
-        } floating;
-        struct {
-            struct Type *element_type;
-            int64_t *shape;     // NULL-terminated or use rank
-            uint32_t rank;
-        } shaped;  // For memref and tensor
-        struct {
-            struct Type *element_type;
-            uint32_t address_space;  // For !tt.ptr<type, address_space>
-            bool has_address_space;
-        } pointer;
-    } data;
-} Type;
-
-// Attribute representation
-typedef struct Attribute {
-    enum {
-        ATTR_KIND_INTEGER,
-        ATTR_KIND_FLOAT,
-        ATTR_KIND_STRING,
-        ATTR_KIND_BOOL,
-        ATTR_KIND_ARRAY,
-        ATTR_KIND_DICT
-    } kind;
-    union {
-        int64_t integer_value;
-        double float_value;
-        string string_value;
-        bool bool_value;
-        struct {
-            struct Attribute **elements;
-            size_t count;
-        } array;
-    } data;
-    string name;
-} Attribute;
-
-// Named attribute for dictionaries
-typedef struct NamedAttribute {
-    const string *name;
-    Attribute *value;
-} NamedAttribute;
-
-// Location information for MLIR constructs
-typedef enum {
-    LOC_KIND_UNKNOWN,
-    LOC_KIND_FILE,      // loc("file.py":line:col)
-    LOC_KIND_NAME,      // loc("name")
-    LOC_KIND_CALLSITE,  // loc(callsite(...))
-    LOC_KIND_FUSED,     // loc(fused[...])
-    LOC_KIND_REF        // loc(#locN) - reference to named location
-} LocationKind;
-
-typedef struct Location {
-    LocationKind kind;
-    union {
-        struct {
-            string filename;
-            int line;
-            int column;
-        } file;
-        struct {
-            string name;
-        } name;
-        struct {
-            int ref_id;  // For #locN references
-        } ref;
-    } data;
-    
-    // For storing the original location string for printing
-    string original_text;
-} Location;
-
-typedef enum ValueKind {
-    BLOCK_ARG,
-    OP_RESULT
-} ValueKind;
-
-struct ValueRef {
-    ValueKind kind;
-    // TODO: Use an index
-    void* def; // Block* or Operation* that produced it
-    uint32_t result_index;   // Which result of the operation
-    // TODO: use Type by value
-    Type *type;              // Type of this value
-
-    // For parsed register names like %0, %c16_i32. These names are not unique
-    // in an MLIR module. Two different Values in different regions can have the
-    // same name. If this is used for printing, then extra care must be taken
-    // that the printed Value name is unique.
-    string register_name;
-
-    // Optional per-argument metadata for classic printing
-    Location *location;           // e.g., arg loc("file":line:col)
-    bool has_divisibility;        // tt.divisibility attribute present
-    int64_t divisibility_value;   // value for tt.divisibility
-    Type *divisibility_type;      // type for tt.divisibility value (e.g., i32)
-    
-    bool has_max_divisibility;    // tt.max_divisibility attribute present
-    int64_t max_divisibility_value; // value for tt.max_divisibility
-    Type *max_divisibility_type;  // type for tt.max_divisibility value (e.g., i32)
-
-    // Maybe later:
-    //Operation **users;
-    //uint64_t n_users;
-};
-
-// Note: we use ** instead of *, because Value has a pointer to Operation or
-// Block, so we can't easily move them later. When parsing we do not know how
-// many items we will need, so we use pointers, which we can grow by copying as
-// needed.
-
-typedef struct Operation {
-    OpType op_type; // Enum for registered ops
-    // Use indices here
-    ValueRef **operands;
-    uint64_t n_operands;
-    // TODO: use Type by value
-    Type **result_types;
-    uint64_t n_result_types;
-    Attribute **attributes;
-    uint64_t n_attributes;
-    Region **regions;
-    uint64_t n_regions;
-    string opname; // Only used for unregistered ops
-
-    // Result values produced by this operation
-    ValueRef **results;
-    uint64_t n_results;
-    
-    // Location information
-    Location *location;
-    // Optional: definition for unnumbered '#loc' header captured pre-module
-    Location *unnumbered_loc_def;
-
-    // Optional trailing comment captured from source line (e.g., " // note")
-    string trailing_comment;
-
-    // Source line tracking (for accurate trailing comment capture)
-    // Byte offset in the original buffer of the first character of the line
-    // on which this operation starts.
-    int64_t source_line_start;
-} Operation;
+// Use Operation/Block/Region/Type/Attribute/Location/ValueRef from mlir_parser.h
 DEFINE_VECTOR_FOR_TYPE(Operation*, VecOperation)
 DEFINE_VECTOR_FOR_TYPE(ValueRef*, VecValueRef)
-
-typedef struct Block {
-    Operation **operations;
-    uint64_t n_operations;
-    ValueRef **arguments;
-    uint64_t n_arguments;
-} Block;
-DEFINE_VECTOR_FOR_TYPE(Block*, VecBlock)
-
-struct Region {
-    Block **blocks;
-    uint64_t n_blocks;
-};
 
 
 // API wrapper functions that cast between API types and concrete types
@@ -255,7 +61,7 @@ void mlir_api_init(MlirOperation *root) {
     // No initialization required for the native C implementation.
 }
 
-MlirOperation *mlir_op_create(struct Arena *arena, OpType type) {
+MlirOperation *mlir_op_create(Arena *arena, OpType type) {
     // Cast Arena* to Arena*
     Arena *concrete_arena = (Arena*)arena;
     Operation *op = arena_alloc(concrete_arena, Operation);
@@ -265,7 +71,7 @@ MlirOperation *mlir_op_create(struct Arena *arena, OpType type) {
     return (MlirOperation*)op;
 }
 
-void mlir_op_add_region(struct Arena *arena, MlirOperation *op, MlirRegion *region) {
+void mlir_op_add_region(Arena *arena, MlirOperation *op, MlirRegion *region) {
     Arena *concrete_arena = (Arena*)arena;
     Operation *concrete_op = (Operation*)op;
     Region *concrete_region = (Region*)region;
@@ -276,7 +82,7 @@ void mlir_op_add_region(struct Arena *arena, MlirOperation *op, MlirRegion *regi
     concrete_op->n_regions++;
 }
 
-void mlir_op_add_operand(struct Arena *arena, MlirOperation *op, MlirValue *operand) {
+void mlir_op_add_operand(Arena *arena, MlirOperation *op, MlirValue *operand) {
     Arena *concrete_arena = (Arena*)arena;
     Operation *concrete_op = (Operation*)op;
     ValueRef *concrete_operand = (ValueRef*)operand;
@@ -287,7 +93,7 @@ void mlir_op_add_operand(struct Arena *arena, MlirOperation *op, MlirValue *oper
     concrete_op->n_operands++;
 }
 
-void mlir_op_add_result(struct Arena *arena, MlirOperation *op, MlirValue *result) {
+void mlir_op_add_result(Arena *arena, MlirOperation *op, MlirValue *result) {
     Arena *concrete_arena = (Arena*)arena;
     Operation *concrete_op = (Operation*)op;
     ValueRef *concrete_result = (ValueRef*)result;
@@ -298,7 +104,7 @@ void mlir_op_add_result(struct Arena *arena, MlirOperation *op, MlirValue *resul
     concrete_op->n_results++;
 }
 
-void mlir_block_add_operation(struct Arena *arena, MlirBlock *block, MlirOperation *op) {
+void mlir_block_add_operation(Arena *arena, MlirBlock *block, MlirOperation *op) {
     Arena *concrete_arena = (Arena*)arena;
     Block *concrete_block = (Block*)block;
     Operation *concrete_op = (Operation*)op;
@@ -309,7 +115,7 @@ void mlir_block_add_operation(struct Arena *arena, MlirBlock *block, MlirOperati
     concrete_block->n_operations++;
 }
 
-void mlir_block_add_argument(struct Arena *arena, MlirBlock *block, MlirValue *arg) {
+void mlir_block_add_argument(Arena *arena, MlirBlock *block, MlirValue *arg) {
     Arena *concrete_arena = (Arena*)arena;
     Block *concrete_block = (Block*)block;
     ValueRef *concrete_arg = (ValueRef*)arg;
@@ -320,7 +126,7 @@ void mlir_block_add_argument(struct Arena *arena, MlirBlock *block, MlirValue *a
     concrete_block->n_arguments++;
 }
 
-void mlir_region_add_block(struct Arena *arena, MlirRegion *region, MlirBlock *block) {
+void mlir_region_add_block(Arena *arena, MlirRegion *region, MlirBlock *block) {
     Arena *concrete_arena = (Arena*)arena;
     Region *concrete_region = (Region*)region;
     Block *concrete_block = (Block*)block;
@@ -415,6 +221,168 @@ size_t mlir_block_num_arguments(const MlirBlock *block) {
 MlirValue *mlir_block_get_argument(const MlirBlock *block, size_t idx) {
     const Block *concrete_block = (const Block*)block;
     return (MlirValue*)concrete_block->arguments[idx];
+}
+
+// Type creation and manipulation
+MlirType *mlir_type_create_integer(Arena *arena, uint32_t width, bool is_signed) {
+    Arena *concrete_arena = (Arena*)arena;
+    Type *type = arena_alloc(concrete_arena, Type);
+    *type = (Type){0};
+    type->kind = TYPE_KIND_INTEGER;
+    type->data.integer.width = width;
+    type->data.integer.is_signed = is_signed;
+    return (MlirType*)type;
+}
+
+MlirType *mlir_type_create_float(Arena *arena, uint32_t width, bool is_bfloat) {
+    Arena *concrete_arena = (Arena*)arena;
+    Type *type = arena_alloc(concrete_arena, Type);
+    *type = (Type){0};
+    type->kind = TYPE_KIND_FLOAT;
+    type->data.floating.width = width;
+    type->data.floating.is_bfloat = is_bfloat;
+    return (MlirType*)type;
+}
+
+void mlir_type_set_integer_properties(MlirType *type, uint32_t width, bool is_signed) {
+    Type *concrete_type = (Type*)type;
+    concrete_type->kind = TYPE_KIND_INTEGER;
+    concrete_type->data.integer.width = width;
+    concrete_type->data.integer.is_signed = is_signed;
+}
+
+void mlir_type_set_float_properties(MlirType *type, uint32_t width, bool is_bfloat) {
+    Type *concrete_type = (Type*)type;
+    concrete_type->kind = TYPE_KIND_FLOAT;
+    concrete_type->data.floating.width = width;
+    concrete_type->data.floating.is_bfloat = is_bfloat;
+}
+
+// Attribute creation and manipulation
+MlirAttribute *mlir_attribute_create_integer(Arena *arena, int64_t value) {
+    Arena *concrete_arena = (Arena*)arena;
+    Attribute *attr = arena_alloc(concrete_arena, Attribute);
+    *attr = (Attribute){0};
+    attr->kind = ATTR_KIND_INTEGER;
+    attr->data.integer_value = value;
+    return (MlirAttribute*)attr;
+}
+
+MlirAttribute *mlir_attribute_create_string(Arena *arena, const char *str, size_t len) {
+    Arena *concrete_arena = (Arena*)arena;
+    Attribute *attr = arena_alloc(concrete_arena, Attribute);
+    *attr = (Attribute){0};
+    attr->kind = ATTR_KIND_STRING;
+    attr->data.string_value = (string){(char*)str, len};
+    return (MlirAttribute*)attr;
+}
+
+void mlir_attribute_set_name(MlirAttribute *attr, const char *name, size_t name_len) {
+    Attribute *concrete_attr = (Attribute*)attr;
+    concrete_attr->name = (string){(char*)name, name_len};
+}
+
+// Value creation and manipulation
+MlirValue *mlir_value_create(Arena *arena, int value_kind) {
+    Arena *concrete_arena = (Arena*)arena;
+    ValueRef *value = arena_alloc(concrete_arena, ValueRef);
+    *value = (ValueRef){0};
+    value->kind = (ValueKind)value_kind;
+    return (MlirValue*)value;
+}
+
+void mlir_value_set_type(MlirValue *value, MlirType *type) {
+    ValueRef *concrete_value = (ValueRef*)value;
+    Type *concrete_type = (Type*)type;
+    concrete_value->type = concrete_type;
+}
+
+void mlir_value_set_register_name(MlirValue *value, const char *name, size_t name_len) {
+    ValueRef *concrete_value = (ValueRef*)value;
+    concrete_value->register_name = (string){(char*)name, name_len};
+}
+
+void mlir_value_set_result_index(MlirValue *value, uint32_t index) {
+    ValueRef *concrete_value = (ValueRef*)value;
+    concrete_value->result_index = index;
+}
+
+void mlir_value_set_def(MlirValue *value, void *def) {
+    ValueRef *concrete_value = (ValueRef*)value;
+    concrete_value->def = def;
+}
+
+// Block and Region creation
+MlirBlock *mlir_block_create(Arena *arena) {
+    Arena *concrete_arena = (Arena*)arena;
+    Block *block = arena_alloc(concrete_arena, Block);
+    *block = (Block){0};
+    return (MlirBlock*)block;
+}
+
+MlirRegion *mlir_region_create(Arena *arena) {
+    Arena *concrete_arena = (Arena*)arena;
+    Region *region = arena_alloc(concrete_arena, Region);
+    *region = (Region){0};
+    return (MlirRegion*)region;
+}
+
+// Operation properties
+void mlir_operation_set_name(MlirOperation *op, const char *name, size_t name_len) {
+    Operation *concrete_op = (Operation*)op;
+    concrete_op->opname = (string){(char*)name, name_len};
+}
+
+void mlir_operation_set_result_types(MlirOperation *op, MlirType **types, size_t count) {
+    Operation *concrete_op = (Operation*)op;
+    concrete_op->result_types = (Type**)types;
+    concrete_op->n_result_types = count;
+}
+
+void mlir_operation_set_attributes(MlirOperation *op, MlirAttribute **attrs, size_t count) {
+    Operation *concrete_op = (Operation*)op;
+    concrete_op->attributes = (Attribute**)attrs;
+    concrete_op->n_attributes = count;
+}
+
+void mlir_operation_set_results(MlirOperation *op, MlirValue **results, size_t count) {
+    Operation *concrete_op = (Operation*)op;
+    concrete_op->results = (ValueRef**)results;
+    concrete_op->n_results = count;
+}
+
+void mlir_operation_set_operands(MlirOperation *op, MlirValue **operands, size_t count) {
+    Operation *concrete_op = (Operation*)op;
+    concrete_op->operands = (ValueRef**)operands;
+    concrete_op->n_operands = count;
+}
+
+// Parser functions
+MlirParser *mlir_parser_create(Arena *arena) {
+    Arena *concrete_arena = (Arena*)arena;
+    Parser *parser = arena_alloc(concrete_arena, Parser);
+    return (MlirParser*)parser;
+}
+
+void mlir_parser_init(Arena *arena, MlirParser *parser, const char *input, size_t input_len) {
+    Arena *concrete_arena = (Arena*)arena;
+    Parser *concrete_parser = (Parser*)parser;
+    string input_string = {
+        .str = (char*)input,
+        .size = input_len
+    };
+    parser_init(concrete_arena, concrete_parser, input_string);
+}
+
+MlirOperation *mlir_parse_module(MlirParser *parser) {
+    Parser *concrete_parser = (Parser*)parser;
+    Operation *module = parse_module(concrete_parser);
+    return (MlirOperation*)module;
+}
+
+void mlir_parser_get_location_map(MlirParser *parser, void **location_map) {
+    Parser *concrete_parser = (Parser*)parser;
+    *location_map = &concrete_parser->location_map;
 }
 
 #ifdef __cplusplus

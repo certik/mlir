@@ -1,4 +1,5 @@
 #include "mlir_generic_printer.h"
+#include "mlir_parser.h"
 #include <base/hashtable.h>
 #include <base/format.h>
 
