@@ -122,16 +122,20 @@ static string print_function_region_classic(PrintCtx *ctx, int indent_level, Reg
 static void preassign_region_ssa(PrintCtx *ctx, Region *region, int indent_level);
 static void preassign_op_ssa(PrintCtx *ctx, Operation *op, int indent_level) {
     // First preassign nested regions so nested results get earlier numbers
-    if (op->n_regions > 0 && op->regions) {
-        for (int i = 0; i < op->n_regions; i++) {
-            preassign_region_ssa(ctx, op->regions[i], indent_level + 1);
+    size_t n_regions = mlir_operation_num_regions((MlirOperation*)op);
+    if (n_regions > 0) {
+        for (size_t i = 0; i < n_regions; i++) {
+            MlirRegion *region = mlir_operation_get_region((MlirOperation*)op, i);
+            preassign_region_ssa(ctx, (Region*)region, indent_level + 1);
         }
     }
     // Then assign SSA for this op's results, if any
-    if (op->n_results > 0 && op->results) {
-        for (int i = 0; i < op->n_results; i++) {
-            if (op->results[i]) {
-                (void)get_or_assign_ssa(ctx, (MlirValue*)op->results[i]);
+    size_t n_results = mlir_operation_num_results((MlirOperation*)op);
+    if (n_results > 0) {
+        for (size_t i = 0; i < n_results; i++) {
+            MlirValue *result = mlir_operation_get_result((MlirOperation*)op, i);
+            if (result) {
+                (void)get_or_assign_ssa(ctx, result);
             }
         }
     }
@@ -356,7 +360,12 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         int il = indent_level > 0 ? indent_level : 1;
         string line = indent_classic(arena, il);
         line = str_concat(arena, line, header);
-        if (op->n_regions>0) { line = str_concat(arena, line, str_lit(" ")); line = str_concat(arena, line, print_function_region_classic(ctx, indent_level, op->regions[0])); }
+        size_t n_regions = mlir_operation_num_regions((MlirOperation*)op);
+        if (n_regions > 0) { 
+            MlirRegion *region = mlir_operation_get_region((MlirOperation*)op, 0);
+            line = str_concat(arena, line, str_lit(" ")); 
+            line = str_concat(arena, line, print_function_region_classic(ctx, indent_level, (Region*)region)); 
+        }
         else { line = str_concat(arena, line, str_lit(" { }")); }
         if (op->location) line = str_concat(arena, line, print_location_classic(arena, op->location));
         line = str_concat(arena, line, str_lit("\n"));
