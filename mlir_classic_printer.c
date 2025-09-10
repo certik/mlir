@@ -928,16 +928,20 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
 
             // lb, ub, step operands
-            if (op->n_operands >= 3) {
-                result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[0]));
+            size_t n_operands = mlir_operation_num_operands((MlirOperation*)op);
+            if (n_operands >= 3) {
+                MlirValue *lb = mlir_operation_get_operand((MlirOperation*)op, 0);
+                MlirValue *ub = mlir_operation_get_operand((MlirOperation*)op, 1);
+                MlirValue *step = mlir_operation_get_operand((MlirOperation*)op, 2);
+                result = str_concat(arena, result, print_ssa_operand_classic(ctx, (ValueRef*)lb));
                 result = str_concat(arena, result, str_lit(" to "));
-                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[1]));
+                result = str_concat(arena, result, print_ssa_value_classic(ctx, (ValueRef*)ub));
                 result = str_concat(arena, result, str_lit(" step "));
-                result = str_concat(arena, result, print_ssa_value_classic(ctx, op->operands[2]));
+                result = str_concat(arena, result, print_ssa_value_classic(ctx, (ValueRef*)step));
             }
 
             // iter_args section with original names from block args 1..N
-            int n_iter = op->n_operands > 3 ? (op->n_operands - 3) : 0;
+            int n_iter = n_operands > 3 ? (n_operands - 3) : 0;
             if (n_iter > 0) {
                 result = str_concat(arena, result, str_lit(" iter_args("));
                 for (int i = 0; i < n_iter; i++) {
