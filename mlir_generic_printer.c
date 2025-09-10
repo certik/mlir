@@ -46,11 +46,21 @@ static void preassign_op_ssa(PrintCtx *ctx, Operation *op, int indent_level) {
 }
 
 static void preassign_block_ssa(PrintCtx *ctx, Block *block, int indent_level) {
-    for (int i = 0; i < block->n_operations; i++) preassign_op_ssa(ctx, block->operations[i], indent_level + 1);
+    MlirBlock *b = (MlirBlock*)block;
+    size_t n = mlir_block_num_operations(b);
+    for (size_t i = 0; i < n; i++) {
+        MlirOperation *op = mlir_block_get_operation(b, i);
+        preassign_op_ssa(ctx, (Operation*)op, indent_level + 1);
+    }
 }
 
 static void preassign_region_ssa(PrintCtx *ctx, Region *region, int indent_level) {
-    for (int i = 0; i < region->n_blocks; i++) preassign_block_ssa(ctx, region->blocks[i], indent_level);
+    MlirRegion *r = (MlirRegion*)region;
+    size_t n = mlir_region_num_blocks(r);
+    for (size_t i = 0; i < n; i++) {
+        MlirBlock *b = mlir_region_get_block(r, i);
+        preassign_block_ssa(ctx, (Block*)b, indent_level);
+    }
 }
 
 static string indent(Arena *arena, int indent_level) {
@@ -64,14 +74,17 @@ static string indent(Arena *arena, int indent_level) {
 static string print_block_internal(PrintCtx *ctx, int bb_index, int indent_level, Block *block) {
     Arena *arena = ctx->arena;
     string result = format(arena, str_lit("{}^bb{}"), indent(arena, indent_level), bb_index);
-    if (block->n_arguments > 0 && block->arguments) {
+    size_t n_args = mlir_block_num_arguments((MlirBlock*)block);
+    if (n_args > 0) {
         result = str_concat(arena, result, str_lit("("));
-        for (int i = 0; i < block->n_arguments; i++) {
+        for (size_t i = 0; i < n_args; i++) {
             if (i > 0) result = str_concat(arena, result, str_lit(", "));
-            ValueRef *arg = block->arguments[i];
-            if (arg && arg->type) {
-                if (arg->register_name.size > 0) result = str_concat(arena, result, format(arena, str_lit("{}: {}"), arg->register_name, type_to_string(arena, arg->type)));
-                else result = str_concat(arena, result, format(arena, str_lit("%arg{}: {}"), (int64_t)arg->result_index, type_to_string(arena, arg->type)));
+            MlirValue *arg = mlir_block_get_argument((MlirBlock*)block, i);
+            MlirType *arg_ty = arg ? mlir_value_get_type(arg) : NULL;
+            if (arg && arg_ty) {
+                string rname = mlir_value_get_register_name(arg);
+                if (rname.size > 0) result = str_concat(arena, result, format(arena, str_lit("{}: {}"), rname, mlir_type_to_string(arena, arg_ty)));
+                else result = str_concat(arena, result, format(arena, str_lit("%arg{}: {}"), (int64_t)mlir_value_get_result_index(arg), mlir_type_to_string(arena, arg_ty)));
             } else {
                 result = str_concat(arena, result, str_lit("null_arg"));
             }
@@ -79,7 +92,10 @@ static string print_block_internal(PrintCtx *ctx, int bb_index, int indent_level
         result = str_concat(arena, result, str_lit(")"));
     }
     result = str_concat(arena, result, str_lit(":\n"));
-    for (int i=0; i < block->n_operations; i++) result = str_concat(arena, result, print_operation_internal(ctx, indent_level+1, block->operations[i]));
+    for (size_t i = 0, e = mlir_block_num_operations((MlirBlock*)block); i < e; i++) {
+        MlirOperation *op = mlir_block_get_operation((MlirBlock*)block, i);
+        result = str_concat(arena, result, print_operation_internal(ctx, indent_level+1, (Operation*)op));
+    }
     return result;
 }
 
@@ -87,7 +103,10 @@ static string print_region_internal(PrintCtx *ctx, int indent_level, Region *reg
     Arena *arena = ctx->arena;
     string result = str_lit("");
     result = str_concat(arena, result, str_lit("{\n"));
-    for (int i=0; i < region->n_blocks; i++) result = str_concat(arena, result, print_block_internal(ctx, i, indent_level, region->blocks[i]));
+    for (size_t i = 0, e = mlir_region_num_blocks((MlirRegion*)region); i < e; i++) {
+        MlirBlock *b = mlir_region_get_block((MlirRegion*)region, i);
+        result = str_concat(arena, result, print_block_internal(ctx, (int)i, indent_level, (Block*)b));
+    }
     result = str_concat(arena, result, indent(arena, indent_level));
     result = str_concat(arena, result, str_lit("}"));
     return result;
