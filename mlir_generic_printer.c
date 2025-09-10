@@ -1,4 +1,5 @@
 #include "mlir_generic_printer.h"
+#include "mlir_ir_internal.h"
 #include <base/hashtable.h>
 #include <base/format.h>
 
@@ -253,16 +254,16 @@ string print_operation_generic(Arena *arena, int indent_level, MlirOperation *op
     return print_operation_internal(&ctx, indent_level, (Operation*)op);
 }
 
-string print_region_generic(Arena *arena, int indent_level, Region *region) {
+string print_region_generic(Arena *arena, int indent_level, MlirRegion *region) {
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
-    preassign_region_ssa(&ctx, region, indent_level);
-    return print_region_internal(&ctx, indent_level, region);
+    preassign_region_ssa(&ctx, (Region*)region, indent_level);
+    return print_region_internal(&ctx, indent_level, (Region*)region);
 }
 
-string print_block_generic(Arena *arena, int bb_index, int indent_level, Block *block) {
+string print_block_generic(Arena *arena, int bb_index, int indent_level, MlirBlock *block) {
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
-    preassign_block_ssa(&ctx, block, indent_level);
-    return print_block_internal(&ctx, bb_index, indent_level, block);
+    preassign_block_ssa(&ctx, (Block*)block, indent_level);
+    return print_block_internal(&ctx, bb_index, indent_level, (Block*)block);
 }

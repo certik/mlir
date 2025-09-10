@@ -9,6 +9,7 @@
 #include <base/vector.h>
 
 #include "mlir_parser.h"
+#include "mlir_ir_internal.h"
 #include "tokenizer.h"
 #include "op_parsers.h"
 

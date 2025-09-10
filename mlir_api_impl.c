@@ -5,6 +5,7 @@
 #include "tokenizer.h"
 #include "mlir_api.h"
 #include "mlir_parser.h"
+#include "mlir_ir_internal.h"
 #include <string.h>
 
 #ifdef __cplusplus
@@ -436,6 +437,49 @@ const char *mlir_tokentype_to_string(int token_type) {
     // Reuse existing tokenizer pretty-printer
     string s = tokentype_to_string((TokenType)token_type);
     return (const char*)s.str;
+}
+
+// Location accessors
+MlirLocationKind mlir_location_get_kind(const MlirLocation *loc) {
+    const Location *l = (const Location*)loc;
+    switch (l->kind) {
+        case LOC_KIND_FILE: return MLIR_LOC_FILE;
+        case LOC_KIND_NAME: return MLIR_LOC_NAME;
+        case LOC_KIND_CALLSITE: return MLIR_LOC_CALLSITE;
+        case LOC_KIND_FUSED: return MLIR_LOC_FUSED;
+        case LOC_KIND_REF: return MLIR_LOC_REF;
+        case LOC_KIND_UNKNOWN: default: return MLIR_LOC_UNKNOWN;
+    }
+}
+
+string mlir_location_get_original_text(const MlirLocation *loc) {
+    const Location *l = (const Location*)loc;
+    return l->original_text;
+}
+
+string mlir_location_get_file_filename(const MlirLocation *loc) {
+    const Location *l = (const Location*)loc;
+    return l->data.file.filename;
+}
+
+int mlir_location_get_file_line(const MlirLocation *loc) {
+    const Location *l = (const Location*)loc;
+    return l->data.file.line;
+}
+
+int mlir_location_get_file_column(const MlirLocation *loc) {
+    const Location *l = (const Location*)loc;
+    return l->data.file.column;
+}
+
+string mlir_location_get_name(const MlirLocation *loc) {
+    const Location *l = (const Location*)loc;
+    return l->data.name.name;
+}
+
+int mlir_location_get_ref_id(const MlirLocation *loc) {
+    const Location *l = (const Location*)loc;
+    return l->data.ref.ref_id;
 }
 
 #ifdef __cplusplus

@@ -238,3 +238,22 @@ void mlir_parser_get_location_map(MlirParser *parser, void **location_map); // R
 #ifdef __cplusplus
 }
 #endif
+// Location accessors for classic printer
+typedef enum {
+    MLIR_LOC_UNKNOWN,
+    MLIR_LOC_FILE,
+    MLIR_LOC_NAME,
+    MLIR_LOC_CALLSITE,
+    MLIR_LOC_FUSED,
+    MLIR_LOC_REF
+} MlirLocationKind;
+MlirLocationKind mlir_location_get_kind(const MlirLocation *loc);
+string mlir_location_get_original_text(const MlirLocation *loc);
+// File location fields
+string mlir_location_get_file_filename(const MlirLocation *loc);
+int mlir_location_get_file_line(const MlirLocation *loc);
+int mlir_location_get_file_column(const MlirLocation *loc);
+// Name location field
+string mlir_location_get_name(const MlirLocation *loc);
+// Ref location field (#locN)
+int mlir_location_get_ref_id(const MlirLocation *loc);

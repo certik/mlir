@@ -9,6 +9,7 @@
 #include <base/vector.h>
 
 #include "mlir_parser.h"
+#include "mlir_ir_internal.h"
 #include "op_parsers.h"
 
 // Forward decls for helper scanners (moved to op_parsers.h)
