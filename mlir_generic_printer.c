@@ -1,7 +1,7 @@
 #include "mlir_generic_printer.h"
-#include "mlir_ir_internal.h"
 #include <base/hashtable.h>
 #include <base/format.h>
+#include "mlir_ir_internal.h"
 
 // SSA numbering map for printer
 static inline size_t ptr_hash(ValueRef *p) { return ((size_t)p) >> 3; }
@@ -158,8 +158,9 @@ string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op) 
         result = str_concat(arena, result, str_lit(" = "));
     }
 
-    // Print operation name (quotes only for unregistered operations)
-    if (op->op_type == OP_TYPE_UNREGISTERED) {
+    // Print operation name (quotes only for unregistered operations, except tt.func)
+    bool is_tt_func = (op->opname.size > 0 && str_eq(op->opname, str_lit("tt.func")));
+    if (op->op_type == OP_TYPE_UNREGISTERED && !is_tt_func) {
         result = str_concat(arena, result, str_lit("\""));
         if (op->opname.size > 0) {
             result = str_concat(arena, result, op->opname);
@@ -168,7 +169,11 @@ string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op) 
         }
         result = str_concat(arena, result, str_lit("\""));
     } else {
-        result = str_concat(arena, result, op_type_to_string(op->op_type));
+        if (op->opname.size > 0) {
+            result = str_concat(arena, result, op->opname);
+        } else {
+            result = str_concat(arena, result, op_type_to_string(op->op_type));
+        }
     }
 
     // Print operands with types (always include parentheses)
@@ -248,22 +253,25 @@ string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op) 
 
 // Public API implementations
 string print_operation_generic(Arena *arena, int indent_level, MlirOperation *op) {
+    Operation *opc = (Operation*)op;
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
-    preassign_op_ssa(&ctx, (Operation*)op, indent_level);
-    return print_operation_internal(&ctx, indent_level, (Operation*)op);
+    preassign_op_ssa(&ctx, opc, indent_level);
+    return print_operation_internal(&ctx, indent_level, opc);
 }
 
 string print_region_generic(Arena *arena, int indent_level, MlirRegion *region) {
+    Region *rc = (Region*)region;
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
-    preassign_region_ssa(&ctx, (Region*)region, indent_level);
-    return print_region_internal(&ctx, indent_level, (Region*)region);
+    preassign_region_ssa(&ctx, rc, indent_level);
+    return print_region_internal(&ctx, indent_level, rc);
 }
 
 string print_block_generic(Arena *arena, int bb_index, int indent_level, MlirBlock *block) {
+    Block *bc = (Block*)block;
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
-    preassign_block_ssa(&ctx, (Block*)block, indent_level);
-    return print_block_internal(&ctx, bb_index, indent_level, (Block*)block);
+    preassign_block_ssa(&ctx, bc, indent_level);
+    return print_block_internal(&ctx, bb_index, indent_level, bc);
 }
