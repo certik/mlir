@@ -1242,18 +1242,23 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
 
             // Special classic formatting for select tt.* ops
-            if (op->op_type == OP_TYPE_TT_BROADCAST) {
+            if (mlir_operation_get_type((MlirOperation*)op) == OP_TYPE_TT_BROADCAST) {
                 // tt.broadcast %x : (src) -> dst
                 result = str_concat(arena, result, str_lit(" "));
-                if (op->n_operands > 0 && op->operands[0]) {
-                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[0]));
+                size_t n_operands = mlir_operation_num_operands((MlirOperation*)op);
+                if (n_operands > 0) {
+                    MlirValue *first_operand = mlir_operation_get_operand((MlirOperation*)op, 0);
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, (ValueRef*)first_operand));
                 }
                 // Use captured src signature if available
                 string sig_src = str_lit(""); bool sig_par=false;
-                for (int i = 0; i < op->n_attributes; i++) {
-                    if (str_eq(op->attributes[i]->name, str_lit("_sig_parens")) && op->attributes[i]->kind == ATTR_KIND_BOOL && op->attributes[i]->data.bool_value) sig_par=true;
-                    if (str_eq(op->attributes[i]->name, str_lit("_sig_src")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
-                        sig_src = op->attributes[i]->data.string_value; break;
+                size_t n_attrs = mlir_operation_num_attributes((MlirOperation*)op);
+                for (size_t i = 0; i < n_attrs; i++) {
+                    MlirAttribute *attr = mlir_operation_get_attribute((MlirOperation*)op, i);
+                    string attr_name = mlir_attribute_get_name(attr);
+                    if (str_eq(attr_name, str_lit("_sig_parens")) && mlir_attribute_get_kind(attr) == ATTR_KIND_BOOL && mlir_attribute_get_bool(attr)) sig_par=true;
+                    if (str_eq(attr_name, str_lit("_sig_src")) && mlir_attribute_get_kind(attr) == ATTR_KIND_STRING) {
+                        sig_src = mlir_attribute_get_string(attr); break;
                     }
                 }
                 if (sig_src.size > 0) {
@@ -1270,13 +1275,21 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     if (sig_par) result = str_concat(arena, result, str_lit("("));
                     result = str_concat(arena, result, norm);
                     if (sig_par) result = str_concat(arena, result, str_lit(")"));
-                } else if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
-                    result = str_concat(arena, result, str_lit(" : "));
-                    result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type));
+                } else if (n_operands > 0) {
+                    MlirValue *first_operand = mlir_operation_get_operand((MlirOperation*)op, 0);
+                    MlirType *operand_type = mlir_value_get_type(first_operand);
+                    if (operand_type) {
+                        result = str_concat(arena, result, str_lit(" : "));
+                        result = str_concat(arena, result, mlir_type_to_string(arena, operand_type));
+                    }
                 }
-                if (op->n_result_types > 0 && op->result_types[0]) {
-                    result = str_concat(arena, result, str_lit(" -> "));
-                    result = str_concat(arena, result, type_to_string(arena, op->result_types[0]));
+                size_t n_results = mlir_operation_num_result_types((MlirOperation*)op);
+                if (n_results > 0) {
+                    MlirType *result_type = mlir_operation_get_result_type((MlirOperation*)op, 0);
+                    if (result_type) {
+                        result = str_concat(arena, result, str_lit(" -> "));
+                        result = str_concat(arena, result, mlir_type_to_string(arena, result_type));
+                    }
                 }
                 break;
             }
