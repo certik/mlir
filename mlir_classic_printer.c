@@ -841,14 +841,40 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit("\"tt.reduce\""));
             // operands
             result = str_concat(arena, result, str_lit("("));
-            for (int i=0;i<op->n_operands;i++) { if (i>0) result = str_concat(arena, result, str_lit(", ")); result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[i])); }
+            size_t n_operands = mlir_operation_num_operands((MlirOperation*)op);
+            for (size_t i = 0; i < n_operands; i++) { 
+                if (i > 0) result = str_concat(arena, result, str_lit(", ")); 
+                MlirValue *operand = mlir_operation_get_operand((MlirOperation*)op, i);
+                result = str_concat(arena, result, print_ssa_operand_classic(ctx, (ValueRef*)operand)); 
+            }
             result = str_concat(arena, result, str_lit(")"));
             // attributes in <{ ... }>
-            if (op->n_attributes>0) {
+            size_t n_attrs = mlir_operation_num_attributes((MlirOperation*)op);
+            if (n_attrs > 0) {
                 result = str_concat(arena, result, str_lit(" <{"));
-                bool first=true;
-                for (int i=0;i<op->n_attributes;i++) { Attribute *a=op->attributes[i]; if (!a) continue; if (!first) result = str_concat(arena, result, str_lit(", ")); first=false; if (a->kind==ATTR_KIND_INTEGER) { result = str_concat(arena, result, format(arena, str_lit("{} = {} : i32"), a->name, (int64_t)a->data.integer_value)); } else if (a->kind==ATTR_KIND_STRING) { string s=a->data.string_value; string norm=str_lit(""); for (size_t k=0;k<s.size;k++){ char c=s.str[k]; norm = str_concat(arena, norm, (string){&c,1}); if (c==':' && k+1<s.size && s.str[k+1]!=' ') norm = str_concat(arena, norm, str_lit(" ")); } result = str_concat(arena, result, format(arena, str_lit("{} = {}"), a->name, norm)); } else { result = str_concat(arena, result, a->name); } }
-                result = str_concat(arena, result, str_lit("}>")); }
+                bool first = true;
+                for (size_t i = 0; i < n_attrs; i++) { 
+                    MlirAttribute *a = mlir_operation_get_attribute((MlirOperation*)op, i); 
+                    if (!a) continue; 
+                    if (!first) result = str_concat(arena, result, str_lit(", ")); 
+                    first = false; 
+                    if (mlir_attribute_get_kind(a) == ATTR_KIND_INTEGER) { 
+                        result = str_concat(arena, result, format(arena, str_lit("{} = {} : i32"), mlir_attribute_get_name(a), (int64_t)mlir_attribute_get_integer(a))); 
+                    } else if (mlir_attribute_get_kind(a) == ATTR_KIND_STRING) { 
+                        string s = mlir_attribute_get_string(a); 
+                        string norm = str_lit(""); 
+                        for (size_t k = 0; k < s.size; k++) { 
+                            char c = s.str[k]; 
+                            norm = str_concat(arena, norm, (string){&c,1}); 
+                            if (c == ':' && k+1 < s.size && s.str[k+1] != ' ') norm = str_concat(arena, norm, str_lit(" ")); 
+                        } 
+                        result = str_concat(arena, result, format(arena, str_lit("{} = {}"), mlir_attribute_get_name(a), norm)); 
+                    } else { 
+                        result = str_concat(arena, result, mlir_attribute_get_name(a)); 
+                    } 
+                }
+                result = str_concat(arena, result, str_lit("}>")); 
+            }
             // region in parens
             if (op->n_regions>0 && op->regions[0]) { result = str_concat(arena, result, str_lit(" (")); result = str_concat(arena, result, print_region_internal_classic(ctx, indent_level, op->regions[0])); result = str_concat(arena, result, str_lit(")")); }
             // signature
