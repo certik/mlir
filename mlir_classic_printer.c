@@ -474,7 +474,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 for (size_t i = 0; i < n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
                     MlirValue *operand = mlir_operation_get_operand((MlirOperation*)op, i);
-                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, (ValueRef*)operand));
                 }
             }
             
@@ -510,7 +510,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 for (size_t i = 0; i < n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
                     MlirValue *operand = mlir_operation_get_operand((MlirOperation*)op, i);
-                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, (ValueRef*)operand));
                 }
                 result = str_concat(arena, result, str_lit(" : "));
                 for (size_t i = 0; i < n_operands; i++) {
@@ -1415,7 +1415,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                         result = str_concat(arena, result, str_lit("NULL_OPERAND"));
                         continue;
                     }
-                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, (ValueRef*)operand));
                 }
             }
 
