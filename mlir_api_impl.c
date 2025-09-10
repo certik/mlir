@@ -357,6 +357,12 @@ void mlir_parser_get_location_map(MlirParser *parser, void **location_map) {
     *location_map = &concrete_parser->location_map;
 }
 
+const char *mlir_tokentype_to_string(int token_type) {
+    // Reuse existing tokenizer pretty-printer
+    string s = tokentype_to_string((TokenType)token_type);
+    return (const char*)s.str;
+}
+
 #ifdef __cplusplus
 }
 #endif
