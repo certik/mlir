@@ -878,9 +878,35 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // region in parens
             if (op->n_regions>0 && op->regions[0]) { result = str_concat(arena, result, str_lit(" (")); result = str_concat(arena, result, print_region_internal_classic(ctx, indent_level, op->regions[0])); result = str_concat(arena, result, str_lit(")")); }
             // signature
-            string sig_src = str_lit(""); for (int i=0;i<op->n_attributes;i++) if (op->attributes[i] && str_eq(op->attributes[i]->name, str_lit("_sig_src")) && op->attributes[i]->kind==ATTR_KIND_STRING) { sig_src = op->attributes[i]->data.string_value; break; }
-            if (sig_src.size>0 || (op->n_operands>0 && op->operands[0] && op->operands[0]->type)) { result = str_concat(arena, result, str_lit(" : (")); if (sig_src.size>0) result = str_concat(arena, result, sig_src); else result = str_concat(arena, result, type_to_string(arena, op->operands[0]->type)); result = str_concat(arena, result, str_lit(")")); }
-            if (op->n_result_types>0 && op->result_types[0]) { result = str_concat(arena, result, str_lit(" -> ")); result = str_concat(arena, result, type_to_string(arena, op->result_types[0])); }
+            string sig_src = str_lit(""); 
+            for (size_t i = 0; i < n_attrs; i++) {
+                MlirAttribute *attr = mlir_operation_get_attribute((MlirOperation*)op, i);
+                if (attr && str_eq(mlir_attribute_get_name(attr), str_lit("_sig_src")) && mlir_attribute_get_kind(attr) == ATTR_KIND_STRING) { 
+                    sig_src = mlir_attribute_get_string(attr); 
+                    break; 
+                }
+            }
+            if (sig_src.size > 0 || n_operands > 0) { 
+                result = str_concat(arena, result, str_lit(" : (")); 
+                if (sig_src.size > 0) {
+                    result = str_concat(arena, result, sig_src); 
+                } else if (n_operands > 0) {
+                    MlirValue *first_operand = mlir_operation_get_operand((MlirOperation*)op, 0);
+                    MlirType *operand_type = mlir_value_get_type(first_operand);
+                    if (operand_type) {
+                        result = str_concat(arena, result, mlir_type_to_string(arena, operand_type)); 
+                    }
+                }
+                result = str_concat(arena, result, str_lit(")")); 
+            }
+            size_t n_result_types = mlir_operation_num_result_types((MlirOperation*)op);
+            if (n_result_types > 0) { 
+                MlirType *result_type = mlir_operation_get_result_type((MlirOperation*)op, 0);
+                if (result_type) {
+                    result = str_concat(arena, result, str_lit(" -> ")); 
+                    result = str_concat(arena, result, mlir_type_to_string(arena, result_type)); 
+                }
+            }
             break;
         }
 
