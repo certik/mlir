@@ -39,7 +39,7 @@ void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
 MlirOperation* construct_test_module_full(Arena *arena) {
     // Create types
     MlirType *i32_type = mlir_type_create_integer(arena, 32, true);
-    MlirType *i64_type = mlir_type_create_integer(arena, 64, true);
+    //MlirType *i64_type = mlir_type_create_integer(arena, 64, true);
 
     // Create module operation
     MlirOperation *module = mlir_op_create(arena, OP_TYPE_MODULE);

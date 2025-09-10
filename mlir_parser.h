@@ -236,6 +236,8 @@ struct Block {
     uint64_t n_arguments;
 };
 DEFINE_VECTOR_FOR_TYPE(Block*, VecBlock)
+DEFINE_VECTOR_FOR_TYPE(ValueRef*, VecValueRef)
+DEFINE_VECTOR_FOR_TYPE(Operation*, VecOperation)
 
 struct Region {
     struct Block **blocks;

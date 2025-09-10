@@ -4,42 +4,16 @@
 #include <base/vector.h>
 #include "tokenizer.h"
 #include "mlir_api.h"
+#include "mlir_parser.h"
 #include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Hash function for strings
-size_t string_hash(string str) {
-    size_t hash = 5381;
-    for (size_t i = 0; i < str.size; i++) {
-        hash = ((hash << 5) + hash) + str.str[i];
-    }
-    return hash;
-}
+// string_hash and string_equal are provided inline in mlir_parser.h
 
-// Equality function for strings
-bool string_equal(string a, string b) {
-    return str_eq(a, b);
-}
-
-// Define hashtable for string -> ValueRef* mapping
-#define SymbolTable_HASH string_hash
-#define SymbolTable_EQUAL string_equal
-DEFINE_HASHTABLE_FOR_TYPES(string, ValueRef*, SymbolTable)
-
-// Scoped symbol table for SSA values
-typedef struct ScopedSymbolTable {
-    SymbolTable *scopes;
-    size_t num_scopes;
-    size_t scope_capacity;
-} ScopedSymbolTable;
-
-// Location map for named location references
-#define LocationMap_HASH string_hash
-#define LocationMap_EQUAL string_equal
-DEFINE_HASHTABLE_FOR_TYPES(string, Location*, LocationMap)
+// Use SymbolTable, ScopedSymbolTable, and LocationMap from mlir_parser.h
 
 typedef Parser Parser; // use Parser from mlir_parser.h
 
@@ -48,9 +22,7 @@ void parser_init(Arena *arena, Parser *parser, string text);
 struct Operation; // forward decl
 struct Operation* parse_module(Parser *parser);
 
-// Use Operation/Block/Region/Type/Attribute/Location/ValueRef from mlir_parser.h
-DEFINE_VECTOR_FOR_TYPE(Operation*, VecOperation)
-DEFINE_VECTOR_FOR_TYPE(ValueRef*, VecValueRef)
+// Use Operation/Block/Region/Type/Attribute/Location/ValueRef and vectors from mlir_parser.h
 
 
 // API wrapper functions that cast between API types and concrete types
