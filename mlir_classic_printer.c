@@ -1444,42 +1444,43 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
     // Print attributes for operations that should show them in classic format
     // Skip internal attributes that shouldn't be visible
-    if (op->n_attributes > 0 && op->op_type != OP_TYPE_TT_FUNC && op->op_type != OP_TYPE_TT_REDUCE && 
-        op->op_type != OP_TYPE_TT_LOAD && op->op_type != OP_TYPE_TT_STORE &&
-        op->op_type != OP_TYPE_ARITH_CMPI && op->op_type != OP_TYPE_TT_MAKE_RANGE &&
-        op->op_type != OP_TYPE_FUNC_FUNC) {
+    if (mlir_operation_num_attributes((MlirOperation*)op) > 0 && mlir_operation_get_type((MlirOperation*)op) != OP_TYPE_TT_FUNC && mlir_operation_get_type((MlirOperation*)op) != OP_TYPE_TT_REDUCE && 
+        mlir_operation_get_type((MlirOperation*)op) != OP_TYPE_TT_LOAD && mlir_operation_get_type((MlirOperation*)op) != OP_TYPE_TT_STORE &&
+        mlir_operation_get_type((MlirOperation*)op) != OP_TYPE_ARITH_CMPI && mlir_operation_get_type((MlirOperation*)op) != OP_TYPE_TT_MAKE_RANGE &&
+        mlir_operation_get_type((MlirOperation*)op) != OP_TYPE_FUNC_FUNC) {
         // Skip printing here for cases handled inline above
         if (op->op_type == OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE) {
             // already printed
         } else {
         // If there are tt.* attributes, we printed them inline already for default ops
-        bool any_tt = false; for (int i=0;i<op->n_attributes;i++){ if (op->attributes[i]->name.size>=3 && op->attributes[i]->name.str[0]=='t' && op->attributes[i]->name.str[1]=='t' && op->attributes[i]->name.str[2]=='.') { any_tt=true; break; } }
+        bool any_tt = false; for (size_t i=0, n=mlir_operation_num_attributes((MlirOperation*)op); i<n; i++){ string an = mlir_attribute_get_name(mlir_operation_get_attribute((MlirOperation*)op,i)); if (an.size>=3 && an.str[0]=='t' && an.str[1]=='t' && an.str[2]=='.') { any_tt=true; break; } }
         if (!any_tt) {
         // Skip printing for ops where we printed inline already by name
         if (op->op_type == OP_TYPE_TT_EXPAND_DIMS || op->op_type == OP_TYPE_TT_DOT) {
             // do nothing
         } else {
         bool has_visible_attrs = false;
-        for (int i = 0; i < op->n_attributes; i++) {
-            Attribute *attr = op->attributes[i];
+        for (size_t i = 0, n = mlir_operation_num_attributes((MlirOperation*)op); i < n; i++) {
+            MlirAttribute *attr = mlir_operation_get_attribute((MlirOperation*)op, i);
+            string attr_name = mlir_attribute_get_name(attr);
             // Skip internal attributes that shouldn't be shown in classic format
-            if (str_eq(attr->name, str_lit("sym_name")) || str_eq(attr->name, str_lit("visibility")) || str_eq(attr->name, str_lit("_sig_parens")) || str_eq(attr->name, str_lit("_sig_src")) || str_eq(attr->name, str_lit("value_text")) || (attr->name.size>0 && attr->name.str[0]=='_')) {
+            if (str_eq(attr_name, str_lit("sym_name")) || str_eq(attr_name, str_lit("visibility")) || str_eq(attr_name, str_lit("_sig_parens")) || str_eq(attr_name, str_lit("_sig_src")) || str_eq(attr_name, str_lit("value_text")) || (attr_name.size>0 && attr_name.str[0]=='_')) {
                 continue;
             }
             // Skip 'callee' which we print in header for calls
-            if (str_eq(attr->name, str_lit("callee"))) {
+            if (str_eq(attr_name, str_lit("callee"))) {
                 continue;
             }
             // Skip 'value' attribute only for arith.constant operations
-            if (str_eq(attr->name, str_lit("value")) && op->op_type == OP_TYPE_ARITH_CONSTANT) {
+            if (str_eq(attr_name, str_lit("value")) && mlir_operation_get_type((MlirOperation*)op) == OP_TYPE_ARITH_CONSTANT) {
                 continue;
             }
             // Skip tt.* attributes here; they are printed inline before type for default ops
-            if (attr->name.size>=3 && attr->name.str[0]=='t' && attr->name.str[1]=='t' && attr->name.str[2]=='.') {
+            if (attr_name.size>=3 && attr_name.str[0]=='t' && attr_name.str[1]=='t' && attr_name.str[2]=='.') {
                 continue;
             }
             // Skip axis attribute for tt.get_program_id
-            if (op->op_type == OP_TYPE_TT_GET_PROGRAM_ID && str_eq(attr->name, str_lit("axis"))) {
+            if (mlir_operation_get_type((MlirOperation*)op) == OP_TYPE_TT_GET_PROGRAM_ID && str_eq(attr_name, str_lit("axis"))) {
                 continue;
             }
             // No skipping of axis/start/end in classic mode
@@ -1489,19 +1490,19 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             } else {
                 result = str_concat(arena, result, str_lit(", "));
             }
-            result = str_concat(arena, result, format(arena, str_lit("{} = "), attr->name));
-            switch (attr->kind) {
-                case ATTR_KIND_INTEGER:
-                    result = str_concat(arena, result, format(arena, str_lit("{}"), attr->data.integer_value));
+            result = str_concat(arena, result, format(arena, str_lit("{} = "), attr_name));
+            switch (mlir_attribute_get_kind(attr)) {
+                case MLIR_ATTR_KIND_INTEGER:
+                    result = str_concat(arena, result, format(arena, str_lit("{}"), mlir_attribute_get_integer(attr)));
                     // Add type annotation for integer attributes
                     result = str_concat(arena, result, str_lit(" : i32"));
                     break;
-                case ATTR_KIND_FLOAT:
-                    result = str_concat(arena, result, format(arena, str_lit("{:e}"), attr->data.float_value));
+                case MLIR_ATTR_KIND_FLOAT:
+                    result = str_concat(arena, result, format(arena, str_lit("{:e}"), mlir_attribute_get_float(attr)));
                     break;
-                case ATTR_KIND_STRING:
+                case MLIR_ATTR_KIND_STRING:
                     {
-                        string s = attr->data.string_value;
+                        string s = mlir_attribute_get_string(attr);
                         if (s.size>=2 && s.str[0]=='"' && s.str[s.size-1]=='"') {
                             result = str_concat(arena, result, s);
                         } else {
@@ -1509,8 +1510,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                         }
                     }
                     break;
-                case ATTR_KIND_BOOL:
-                    result = str_concat(arena, result, attr->data.bool_value ? str_lit("true") : str_lit("false"));
+                case MLIR_ATTR_KIND_BOOL:
+                    result = str_concat(arena, result, mlir_attribute_get_bool(attr) ? str_lit("true") : str_lit("false"));
                     break;
                 default:
                     result = str_concat(arena, result, str_lit("..."));
