@@ -7,6 +7,7 @@
 #include "mlir_api.h"
 #include "mlir_generic_printer.h"
 #include "mlir_classic_printer.h"
+#include "mlir_parser.h"
 #include <base/hashtable.h>
 
 void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
@@ -50,7 +51,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     MlirBlock *module_block = mlir_block_create(arena);
     // Add block to region
     mlir_region_add_block(arena, module_region, module_block);
-    
+
     // Add region to module
     mlir_op_add_region(arena, module, module_region);
 
@@ -86,12 +87,12 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     // %0 = arith.constant 5 : i32
     MlirOperation *const_op = mlir_op_create(arena, OP_TYPE_ARITH_CONSTANT);
     mlir_operation_set_name(const_op, "arith.constant", 14);
-    
+
     // Set result types
     MlirType **const_result_types = arena_alloc_array(arena, MlirType*, 1);
     const_result_types[0] = i32_type;
     mlir_operation_set_result_types(const_op, const_result_types, 1);
-    
+
     // Set attributes
     MlirAttribute *value_attr = mlir_attribute_create_integer(arena, 5);
     mlir_attribute_set_name(value_attr, "value", 5);
@@ -113,18 +114,18 @@ MlirOperation* construct_test_module_full(Arena *arena) {
 
     // %1 = arith.addi %arg0, %arg1 : i32
     MlirOperation *add_op = mlir_op_create(arena, OP_TYPE_ARITH_ADDI);
-    
+
     // Set operands
     MlirValue **add_operands = arena_alloc_array(arena, MlirValue*, 2);
     add_operands[0] = mlir_block_get_argument(func_block, 0);
     add_operands[1] = mlir_block_get_argument(func_block, 1);
     mlir_operation_set_operands(add_op, add_operands, 2);
-    
+
     // Set result types
     MlirType **add_result_types = arena_alloc_array(arena, MlirType*, 1);
     add_result_types[0] = i32_type;
     mlir_operation_set_result_types(add_op, add_result_types, 1);
-    
+
     // Create add_result
     MlirValue *add_result = mlir_value_create(arena, MLIR_VALUE_OP_RESULT);
     mlir_value_set_def(add_result, add_op);
@@ -141,18 +142,18 @@ MlirOperation* construct_test_module_full(Arena *arena) {
 
     // Create mul operation
     MlirOperation *mul_op = mlir_op_create(arena, OP_TYPE_ARITH_MULI);
-    
+
     // Set operands
     MlirValue **mul_operands = arena_alloc_array(arena, MlirValue*, 2);
     mul_operands[0] = add_result;
     mul_operands[1] = const_result;
     mlir_operation_set_operands(mul_op, mul_operands, 2);
-    
+
     // Set result types
     MlirType **mul_result_types = arena_alloc_array(arena, MlirType*, 1);
     mul_result_types[0] = i32_type;
     mlir_operation_set_result_types(mul_op, mul_result_types, 1);
-    
+
     // Create mul_result
     MlirValue *mul_result = mlir_value_create(arena, MLIR_VALUE_OP_RESULT);
     mlir_value_set_def(mul_result, mul_op);
@@ -167,7 +168,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
 
     // func.return %2 : i32
     MlirOperation *ret_op = mlir_op_create(arena, OP_TYPE_FUNC_RETURN);
-    
+
     // Set operands
     MlirValue **ret_operands = arena_alloc_array(arena, MlirValue*, 1);
     ret_operands[0] = mul_result;

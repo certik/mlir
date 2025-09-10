@@ -4,18 +4,13 @@
 #include <base/string.h>
 #include "mlir_api.h"
 
-typedef struct LocationMap LocationMap;
-// Use opaque API types for printer interface
-typedef struct MlirOperation MlirOperation;
-typedef struct MlirRegion MlirRegion;
-typedef struct MlirBlock MlirBlock;
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /**
  * Classic MLIR printer that produces upstream MLIR textual format.
- * 
+ *
  * This printer handles all MLIR constructs with classic formatting conventions:
  * - Inline attributes (arith.constant 42 : i32)
  * - No empty parentheses
@@ -25,7 +20,7 @@ extern "C" {
 
 /**
  * Print an MLIR operation and its nested content to string using classic format.
- * 
+ *
  * @param arena Memory arena for allocating the result string
  * @param indent_level Base indentation level (0 = no indent, 1 = 4 spaces, etc.)
  * @param op Operation to print
@@ -35,7 +30,7 @@ string print_operation_classic(Arena *arena, int indent_level, MlirOperation *op
 
 /**
  * Print an MLIR region to string using classic format.
- * 
+ *
  * @param arena Memory arena for allocating the result string
  * @param indent_level Base indentation level
  * @param region Region to print
@@ -45,7 +40,7 @@ string print_region_classic(Arena *arena, int indent_level, MlirRegion *region);
 
 /**
  * Print an MLIR basic block to string using classic format.
- * 
+ *
  * @param arena Memory arena for allocating the result string
  * @param bb_index Block index (for ^bb0, ^bb1, etc.)
  * @param indent_level Base indentation level
@@ -56,7 +51,7 @@ string print_block_classic(Arena *arena, int bb_index, int indent_level, MlirBlo
 
 /**
  * Print a complete MLIR module with location map definitions.
- * 
+ *
  * @param arena Memory arena for allocating the result string
  * @param module Module operation to print
  * @param location_map Location map containing #locN definitions
