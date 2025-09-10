@@ -529,23 +529,28 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         case OP_TYPE_CF_COND_BR: {
             // Classic format: cf.cond_br %cond, ^bb1, ^bb2
             result = str_concat(arena, result, str_lit("cf.cond_br"));
-            if (op->n_operands > 0) {
+            size_t n_operands = mlir_operation_num_operands((MlirOperation*)op);
+            if (n_operands > 0) {
                 result = str_concat(arena, result, str_lit(" "));
-                result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[0]));
+                MlirValue *first_operand = mlir_operation_get_operand((MlirOperation*)op, 0);
+                result = str_concat(arena, result, print_ssa_operand_classic(ctx, (ValueRef*)first_operand));
                 // Pull targets from private attrs if present
                 string ttrue = str_lit("^bb1");
                 string tfalse = str_lit("^bb2");
                 int64_t ntrue = 0, nfalse = 0;
                 int op_index = 1;
-                for (int i = 0; i < op->n_attributes; i++) {
-                    if (str_eq(op->attributes[i]->name, str_lit("_true")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
-                        ttrue = op->attributes[i]->data.string_value;
-                    } else if (str_eq(op->attributes[i]->name, str_lit("_false")) && op->attributes[i]->kind == ATTR_KIND_STRING) {
-                        tfalse = op->attributes[i]->data.string_value;
-                    } else if (str_eq(op->attributes[i]->name, str_lit("_ntrue")) && op->attributes[i]->kind == ATTR_KIND_INTEGER) {
-                        ntrue = op->attributes[i]->data.integer_value;
-                    } else if (str_eq(op->attributes[i]->name, str_lit("_nfalse")) && op->attributes[i]->kind == ATTR_KIND_INTEGER) {
-                        nfalse = op->attributes[i]->data.integer_value;
+                size_t n_attrs = mlir_operation_num_attributes((MlirOperation*)op);
+                for (size_t i = 0; i < n_attrs; i++) {
+                    MlirAttribute *attr = mlir_operation_get_attribute((MlirOperation*)op, i);
+                    string attr_name = mlir_attribute_get_name(attr);
+                    if (str_eq(attr_name, str_lit("_true")) && mlir_attribute_get_kind(attr) == ATTR_KIND_STRING) {
+                        ttrue = mlir_attribute_get_string(attr);
+                    } else if (str_eq(attr_name, str_lit("_false")) && mlir_attribute_get_kind(attr) == ATTR_KIND_STRING) {
+                        tfalse = mlir_attribute_get_string(attr);
+                    } else if (str_eq(attr_name, str_lit("_ntrue")) && mlir_attribute_get_kind(attr) == ATTR_KIND_INTEGER) {
+                        ntrue = mlir_attribute_get_integer(attr);
+                    } else if (str_eq(attr_name, str_lit("_nfalse")) && mlir_attribute_get_kind(attr) == ATTR_KIND_INTEGER) {
+                        nfalse = mlir_attribute_get_integer(attr);
                     }
                 }
                 result = str_concat(arena, result, str_lit(", "));
@@ -554,14 +559,17 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, str_lit("("));
                     for (int i = 0; i < ntrue; i++, op_index++) {
                         if (i>0) result = str_concat(arena, result, str_lit(", "));
-                        result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[op_index]));
+                        MlirValue *operand = mlir_operation_get_operand((MlirOperation*)op, op_index);
+                        result = str_concat(arena, result, print_ssa_operand_classic(ctx, (ValueRef*)operand));
                     }
                     // Types for true args
                     if (ntrue > 0) {
                         result = str_concat(arena, result, str_lit(" : "));
                         for (int i = 0; i < ntrue; i++) {
                             if (i>0) result = str_concat(arena, result, str_lit(", "));
-                            result = str_concat(arena, result, type_to_string(arena, op->operands[1+i]->type));
+                            MlirValue *operand = mlir_operation_get_operand((MlirOperation*)op, 1+i);
+                            MlirType *operand_type = mlir_value_get_type(operand);
+                            result = str_concat(arena, result, mlir_type_to_string(arena, operand_type));
                         }
                     }
                     result = str_concat(arena, result, str_lit(")"));
@@ -572,7 +580,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, str_lit("("));
                     for (int i = 0; i < nfalse; i++, op_index++) {
                         if (i>0) result = str_concat(arena, result, str_lit(", "));
-                        result = str_concat(arena, result, print_ssa_operand_classic(ctx, op->operands[op_index]));
+                        MlirValue *operand = mlir_operation_get_operand((MlirOperation*)op, op_index);
+                        result = str_concat(arena, result, print_ssa_operand_classic(ctx, (ValueRef*)operand));
                     }
                     if (nfalse > 0) {
                         result = str_concat(arena, result, str_lit(" : "));
@@ -580,7 +589,9 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                             if (i>0) result = str_concat(arena, result, str_lit(", "));
                             // false args types are after true args
                             int idx = 1 + (int)ntrue + i;
-                            result = str_concat(arena, result, type_to_string(arena, op->operands[idx]->type));
+                            MlirValue *operand = mlir_operation_get_operand((MlirOperation*)op, idx);
+                            MlirType *operand_type = mlir_value_get_type(operand);
+                            result = str_concat(arena, result, mlir_type_to_string(arena, operand_type));
                         }
                     }
                     result = str_concat(arena, result, str_lit(")"));
