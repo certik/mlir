@@ -248,6 +248,38 @@ static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int inde
                     result = str_concat(arena, result, format(arena, str_lit("%arg{}: {}"),
                                                             (int64_t)mlir_value_get_result_index(arg), mlir_type_to_string(arena, arg_ty)));
                 }
+
+                // Append complex divisibility annotations if present
+                bool opened = false;
+                if (mlir_value_has_divisibility(arg)) {
+                    if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
+                    result = str_concat(arena, result, str_lit("tt.divisibility = "));
+                    result = str_concat(arena, result, format(arena, str_lit("{}"), (int64_t)mlir_value_get_divisibility_value(arg)));
+                    // If a type is available, print it as classic " : <type>"
+                    MlirType *dt = mlir_value_get_divisibility_type(arg);
+                    if (dt) {
+                        result = str_concat(arena, result, str_lit(" : "));
+                        result = str_concat(arena, result, mlir_type_to_string(arena, dt));
+                    }
+                }
+                if (mlir_value_has_max_divisibility(arg)) {
+                    if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
+                    else { result = str_concat(arena, result, str_lit(", ")); }
+                    result = str_concat(arena, result, str_lit("tt.max_divisibility = "));
+                    result = str_concat(arena, result, format(arena, str_lit("{}"), (int64_t)mlir_value_get_max_divisibility_value(arg)));
+                    MlirType *mdt = mlir_value_get_max_divisibility_type(arg);
+                    if (mdt) {
+                        result = str_concat(arena, result, str_lit(" : "));
+                        result = str_concat(arena, result, mlir_type_to_string(arena, mdt));
+                    }
+                }
+                if (opened) { result = str_concat(arena, result, str_lit("}")); }
+
+                // Append argument location if present
+                MlirLocation *arg_loc = mlir_value_get_location(arg);
+                if (arg_loc) {
+                    result = str_concat(arena, result, print_location_classic(arena, arg_loc));
+                }
             } else {
                 result = str_concat(arena, result, str_lit("null_arg"));
             }
@@ -759,19 +791,39 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, visibility);
             result = str_concat(arena, result, str_lit(" @"));
             result = str_concat(arena, result, fname);
-            // Arguments are stored in op->operands for tt.func
+            // Arguments are stored as operation operands for tt.func
             result = str_concat(arena, result, str_lit("("));
             for (int i = 0; i < mlir_operation_num_operands(op); i++) {
                 if (i > 0) result = str_concat(arena, result, str_lit(", "));
                 MlirValue *arg = mlir_operation_get_operand(op, i);
                 if (arg) {
+                    string name = mlir_value_get_register_name(arg);
+                    if (name.size == 0) name = print_ssa_value_classic(ctx, arg);
+                    result = str_concat(arena, result, name);
+                    result = str_concat(arena, result, str_lit(": "));
                     MlirType *arg_type = mlir_value_get_type(arg);
-                    if (arg_type) {
-                        result = str_concat(arena, result, format(arena, str_lit("{}: {}"),
-                                                                 print_ssa_value_classic(ctx, arg),
-                                                                 mlir_type_to_string(arena, arg_type)));
-                        // Note: Divisibility and location features simplified for API conversion
+                    if (arg_type) result = str_concat(arena, result, mlir_type_to_string(arena, arg_type));
+                    // Divisibility and max_divisibility
+                    bool opened = false;
+                    if (mlir_value_has_divisibility(arg)) {
+                        if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
+                        result = str_concat(arena, result, str_lit("tt.divisibility = "));
+                        result = str_concat(arena, result, format(arena, str_lit("{}"), (int64_t)mlir_value_get_divisibility_value(arg)));
+                        MlirType *dt = mlir_value_get_divisibility_type(arg);
+                        if (dt) { result = str_concat(arena, result, str_lit(" : ")); result = str_concat(arena, result, mlir_type_to_string(arena, dt)); }
                     }
+                    if (mlir_value_has_max_divisibility(arg)) {
+                        if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
+                        else { result = str_concat(arena, result, str_lit(", ")); }
+                        result = str_concat(arena, result, str_lit("tt.max_divisibility = "));
+                        result = str_concat(arena, result, format(arena, str_lit("{}"), (int64_t)mlir_value_get_max_divisibility_value(arg)));
+                        MlirType *mdt = mlir_value_get_max_divisibility_type(arg);
+                        if (mdt) { result = str_concat(arena, result, str_lit(" : ")); result = str_concat(arena, result, mlir_type_to_string(arena, mdt)); }
+                    }
+                    if (opened) result = str_concat(arena, result, str_lit("}"));
+                    // Per-argument location
+                    MlirLocation *al = mlir_value_get_location(arg);
+                    if (al) result = str_concat(arena, result, print_location_classic(arena, al));
                 }
             }
             result = str_concat(arena, result, str_lit(")"));
@@ -961,8 +1013,10 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 for (int i = 0; i < n_iter; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
                     MlirValue *arg_name = NULL;
-                    // Simplified for API conversion
-                    arg_name = NULL;
+                    // Iterator args correspond to body block arguments starting at index 1
+                    if (body && mlir_block_num_arguments(body) > (size_t)(1 + i)) {
+                        arg_name = mlir_block_get_argument(body, 1 + i);
+                    }
                     if (arg_name) {
                         result = str_concat(arena, result, print_ssa_value_classic(ctx, arg_name));
                         result = str_concat(arena, result, str_lit(" = "));
@@ -1778,7 +1832,16 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         result = str_concat(arena, result, print_location_classic(arena, loc));
     }
 
-    // Note: Trailing comments not available via API
+    // If there is a trailing comment (// ...), append it verbatim
+    string tcomm = mlir_operation_get_trailing_comment(op);
+    if (tcomm.size > 0) {
+        // skip leading spaces
+        size_t p = 0; while (p < tcomm.size && tcomm.str[p] == ' ') p++;
+        if (p + 1 < tcomm.size && tcomm.str[p] == '/' && tcomm.str[p+1] == '/') {
+            result = str_concat(arena, result, str_lit(" "));
+            result = str_concat(arena, result, str_substr(tcomm, p, tcomm.size - p));
+        }
+    }
 
     result = str_concat(arena, result, str_lit("\n"));
     return result;
