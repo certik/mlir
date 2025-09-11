@@ -495,6 +495,25 @@ const char *mlir_tokentype_to_string(int token_type) {
     return (const char*)s.str;
 }
 
+size_t mlir_location_map_size(void *location_map) {
+    LocationMap *lm = (LocationMap*)location_map;
+    if (!lm) return 0;
+    return lm->size;
+}
+
+size_t mlir_location_map_collect(void *location_map, string *out_keys, MlirLocation **out_locs, size_t max) {
+    LocationMap *lm = (LocationMap*)location_map;
+    if (!lm) return 0;
+    size_t written = 0;
+    for (size_t i = 0; i < lm->num_buckets && written < max; i++) {
+        if (!lm->buckets[i].occupied) continue;
+        out_keys[written] = lm->buckets[i].key;
+        out_locs[written] = (MlirLocation*)lm->buckets[i].value;
+        written++;
+    }
+    return written;
+}
+
 // Location accessors
 MlirLocationKind mlir_location_get_kind(const MlirLocation *loc) {
     const Location *l = (const Location*)loc;

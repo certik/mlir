@@ -251,6 +251,10 @@ MlirOperation *mlir_parse_module(MlirParser *parser);
 // Utility functions  
 const char *mlir_tokentype_to_string(int token_type);
 void mlir_parser_get_location_map(MlirParser *parser, void **location_map); // Returns LocationMap* as void*
+// Location map iteration helpers (opaque to callers)
+size_t mlir_location_map_size(void *location_map);
+// Collect up to 'max' entries into provided arrays. Returns number written.
+size_t mlir_location_map_collect(void *location_map, string *out_keys, MlirLocation **out_locs, size_t max);
 
 #ifdef __cplusplus
 }

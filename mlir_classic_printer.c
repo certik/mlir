@@ -1,6 +1,5 @@
 #include "mlir_classic_printer.h"
 #include "mlir_api.h"
-#include "mlir_parser.h"
 #include <base/hashtable.h>
 #include <base/format.h>
 #include <stdio.h>
@@ -1371,7 +1370,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 mlir_operation_get_type(op) == OP_TYPE_ARITH_EXTSI || mlir_operation_get_type(op) == OP_TYPE_ARITH_TRUNCI ||
                 mlir_operation_get_type(op) == OP_TYPE_ARITH_EXTF || mlir_operation_get_type(op) == OP_TYPE_ARITH_TRUNCF) {
                 // op name
-                result = str_concat(arena, result, op_type_to_string(mlir_operation_get_type(op)));
+                result = str_concat(arena, result, str_from_cstr_len_view((char*)mlir_op_type_to_string(mlir_operation_get_type(op)), strlen(mlir_op_type_to_string(mlir_operation_get_type(op)))));
                 // operand
                 if (mlir_operation_num_operands(op) > 0 && mlir_operation_get_operand(op, 0)) {
                     result = str_concat(arena, result, str_lit(" "));
@@ -1422,7 +1421,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             } else {
                 string s = mlir_operation_get_name_string(op);
                 if (s.size > 0) result = str_concat(arena, result, s);
-                else result = str_concat(arena, result, op_type_to_string(mlir_operation_get_type(op)));
+                else result = str_concat(arena, result, str_from_cstr_len_view((char*)mlir_op_type_to_string(mlir_operation_get_type(op)), strlen(mlir_op_type_to_string(mlir_operation_get_type(op)))));
             }
 
             // Special classic formatting for select ops
@@ -1845,28 +1844,25 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
 // Public API implementations
 string print_operation_classic(Arena *arena, int indent_level, MlirOperation *op) {
-    Operation *op_impl = (Operation*)op;
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
     // Preassign SSA numbers for entire subtree to match parser's post-order numbering
-    preassign_op_ssa(&ctx, (MlirOperation*)op_impl, indent_level);
-    return print_operation_internal_classic(&ctx, indent_level, (MlirOperation*)op_impl);
+    preassign_op_ssa(&ctx, op, indent_level);
+    return print_operation_internal_classic(&ctx, indent_level, op);
 }
 
 string print_region_classic(Arena *arena, int indent_level, MlirRegion *region) {
-    Region *region_impl = region;
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
-    preassign_region_ssa(&ctx, (MlirRegion*)region_impl, indent_level);
-    return print_region_internal_classic(&ctx, indent_level, (MlirRegion*)region_impl);
+    preassign_region_ssa(&ctx, region, indent_level);
+    return print_region_internal_classic(&ctx, indent_level, region);
 }
 
 string print_block_classic(Arena *arena, int bb_index, int indent_level, MlirBlock *block) {
-    Block *block_impl = (Block*)block;
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
-    preassign_block_ssa(&ctx, (MlirBlock*)block_impl, indent_level);
-    return print_block_internal_classic(&ctx, bb_index, indent_level, (MlirBlock*)block_impl);
+    preassign_block_ssa(&ctx, block, indent_level);
+    return print_block_internal_classic(&ctx, bb_index, indent_level, block);
 }
 
 // Helper to print location map definitions
@@ -1874,24 +1870,25 @@ static string print_location_map_classic(Arena *arena, LocationMap *location_map
     string result = str_lit("");
     if (!location_map) return result;
 
-    typedef struct { string key; Location *loc; int number; } LocEntry;
-    // Collect entries (excluding '#loc')
-    size_t cap = location_map->size;
-    LocEntry *arr = arena_alloc_array(arena, LocEntry, cap);
+    typedef struct { string key; MlirLocation *loc; int number; } LocEntry;
+    size_t cap = mlir_location_map_size(location_map);
+    if (cap == 0) return result;
+    string *keys = arena_alloc_array(arena, string, cap);
+    MlirLocation **locs = arena_alloc_array(arena, MlirLocation*, cap);
+    size_t ncol = mlir_location_map_collect(location_map, keys, locs, cap);
+    LocEntry *arr = arena_alloc_array(arena, LocEntry, ncol);
     size_t n = 0;
-    for (size_t i = 0; i < location_map->num_buckets; i++) {
-        if (!location_map->buckets[i].occupied) continue;
-        string name = location_map->buckets[i].key;
+    for (size_t i = 0; i < ncol; i++) {
+        string name = keys[i];
         if (str_eq(name, str_lit("#loc"))) continue;
         int num = -1;
         if (name.size > 4 && name.str[0]=='#' && name.str[1]=='l' && name.str[2]=='o' && name.str[3]=='c') {
-            // parse integer suffix
             int v = 0; bool any=false;
             for (size_t k=4;k<name.size;k++) { char c = name.str[k]; if (c>='0'&&c<='9'){ any=true; v = v*10 + (c-'0'); } else { any=false; break; } }
             if (any) num = v;
         }
         arr[n].key = name;
-        arr[n].loc = location_map->buckets[i].value;
+        arr[n].loc = locs[i];
         arr[n].number = num;
         n++;
     }
@@ -1917,21 +1914,21 @@ static string print_location_map_classic(Arena *arena, LocationMap *location_map
     for (size_t i = 0; i < n; i++) {
         result = str_concat(arena, result, arr[i].key);
         result = str_concat(arena, result, str_lit(" = "));
-        Location *loc = arr[i].loc;
-        if (mlir_location_get_original_text((MlirLocation*)loc).size > 0) {
-            result = str_concat(arena, result, mlir_location_get_original_text((MlirLocation*)loc));
+        MlirLocation *loc = arr[i].loc;
+        if (mlir_location_get_original_text(loc).size > 0) {
+            result = str_concat(arena, result, mlir_location_get_original_text(loc));
         } else {
-            switch (mlir_location_get_kind((MlirLocation*)loc)) {
+            switch (mlir_location_get_kind(loc)) {
                 case MLIR_LOC_FILE:
                     result = str_concat(arena, result,
                         format(arena, str_lit("loc({}:{}:{})"),
-                               mlir_location_get_file_filename((MlirLocation*)loc),
-                               (int64_t)mlir_location_get_file_line((MlirLocation*)loc),
-                               (int64_t)mlir_location_get_file_column((MlirLocation*)loc)));
+                               mlir_location_get_file_filename(loc),
+                               (int64_t)mlir_location_get_file_line(loc),
+                               (int64_t)mlir_location_get_file_column(loc)));
                     break;
                 case MLIR_LOC_NAME:
                     result = str_concat(arena, result,
-                        format(arena, str_lit("loc(\"{}\")"), mlir_location_get_name((MlirLocation*)loc)));
+                        format(arena, str_lit("loc(\"{}\")"), mlir_location_get_name(loc)));
                     break;
                 default:
                     result = str_concat(arena, result, str_lit("loc(unknown)"));
@@ -1945,30 +1942,33 @@ static string print_location_map_classic(Arena *arena, LocationMap *location_map
 }
 
 string print_module_classic(Arena *arena, MlirOperation *module, LocationMap *location_map) {
-    Operation *module_impl = (Operation*)module;
     string result = str_lit("");
     
     // Note: Special unnumbered_loc_def feature not available via API
     
     if (location_map) {
-        for (size_t i = 0; i < location_map->num_buckets; i++) {
-            if (location_map->buckets[i].occupied) {
-                string loc_name = location_map->buckets[i].key;
+        size_t cap = mlir_location_map_size(location_map);
+        if (cap > 0) {
+            string *keys = arena_alloc_array(arena, string, cap);
+            MlirLocation **locs = arena_alloc_array(arena, MlirLocation*, cap);
+            size_t n = mlir_location_map_collect(location_map, keys, locs, cap);
+            for (size_t i = 0; i < n; i++) {
+                string loc_name = keys[i];
                 if (loc_name.size == 4 && loc_name.str && loc_name.str[0]=='#' && loc_name.str[1]=='l' && loc_name.str[2]=='o' && loc_name.str[3]=='c') {
-                    Location *loc = location_map->buckets[i].value;
+                    MlirLocation *loc = locs[i];
                     result = str_concat(arena, result, loc_name);
                     result = str_concat(arena, result, str_lit(" = "));
-                    switch (mlir_location_get_kind((MlirLocation*)loc)) {
+                    switch (mlir_location_get_kind(loc)) {
                         case MLIR_LOC_FILE:
                             result = str_concat(arena, result,
                                 format(arena, str_lit("loc({}:{}:{})"),
-                                       mlir_location_get_file_filename((MlirLocation*)loc),
-                                       (int64_t)mlir_location_get_file_line((MlirLocation*)loc),
-                                       (int64_t)mlir_location_get_file_column((MlirLocation*)loc)));
+                                       mlir_location_get_file_filename(loc),
+                                       (int64_t)mlir_location_get_file_line(loc),
+                                       (int64_t)mlir_location_get_file_column(loc)));
                             break;
                         case MLIR_LOC_NAME:
                             result = str_concat(arena, result,
-                                format(arena, str_lit("loc(\"{}\")"), mlir_location_get_name((MlirLocation*)loc)));
+                                format(arena, str_lit("loc(\"{}\")"), mlir_location_get_name(loc)));
                             break;
                         default:
                             result = str_concat(arena, result, str_lit("loc(unknown)"));
@@ -1982,7 +1982,7 @@ string print_module_classic(Arena *arena, MlirOperation *module, LocationMap *lo
     }
     
     // Print the module operation
-    result = str_concat(arena, result, print_operation_classic(arena, 0, (MlirOperation*)module_impl));
+    result = str_concat(arena, result, print_operation_classic(arena, 0, module));
 
     // Minimal normalization to match reference formatting for func.func headers
     {
