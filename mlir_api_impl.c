@@ -145,6 +145,11 @@ MlirRegion *mlir_operation_get_region(const MlirOperation *op, size_t idx) {
     return (MlirRegion*)concrete_op->regions[idx];
 }
 
+string mlir_operation_get_trailing_comment(const MlirOperation *op) {
+    const Operation *concrete_op = (const Operation*)op;
+    return concrete_op->trailing_comment;
+}
+
 // Additional accessors for printer support
 size_t mlir_operation_num_attributes(const MlirOperation *op) {
     const Operation *concrete_op = (const Operation*)op;
@@ -204,6 +209,42 @@ size_t mlir_block_num_arguments(const MlirBlock *block) {
 MlirValue *mlir_block_get_argument(const MlirBlock *block, size_t idx) {
     const Block *concrete_block = (const Block*)block;
     return (MlirValue*)concrete_block->arguments[idx];
+}
+
+// Value metadata accessors
+MlirLocation *mlir_value_get_location(const MlirValue *value) {
+    const ValueRef *v = (const ValueRef*)value;
+    return (MlirLocation*)v->location;
+}
+
+bool mlir_value_has_divisibility(const MlirValue *value) {
+    const ValueRef *v = (const ValueRef*)value;
+    return v->has_divisibility;
+}
+
+int64_t mlir_value_get_divisibility_value(const MlirValue *value) {
+    const ValueRef *v = (const ValueRef*)value;
+    return v->divisibility_value;
+}
+
+MlirType *mlir_value_get_divisibility_type(const MlirValue *value) {
+    const ValueRef *v = (const ValueRef*)value;
+    return (MlirType*)v->divisibility_type;
+}
+
+bool mlir_value_has_max_divisibility(const MlirValue *value) {
+    const ValueRef *v = (const ValueRef*)value;
+    return v->has_max_divisibility;
+}
+
+int64_t mlir_value_get_max_divisibility_value(const MlirValue *value) {
+    const ValueRef *v = (const ValueRef*)value;
+    return v->max_divisibility_value;
+}
+
+MlirType *mlir_value_get_max_divisibility_type(const MlirValue *value) {
+    const ValueRef *v = (const ValueRef*)value;
+    return (MlirType*)v->max_divisibility_type;
 }
 
 // Type to string

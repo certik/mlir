@@ -160,6 +160,8 @@ MlirOperation *mlir_block_get_operation(const MlirBlock *block, size_t idx);
 OpType mlir_operation_get_type(const MlirOperation *op);
 size_t mlir_operation_num_regions(const MlirOperation *op);
 MlirRegion *mlir_operation_get_region(const MlirOperation *op, size_t idx);
+// Trailing comment (if any) after an operation on its source line
+string mlir_operation_get_trailing_comment(const MlirOperation *op);
 
 // Additional accessors for printer support
 size_t mlir_operation_num_attributes(const MlirOperation *op);
@@ -176,6 +178,17 @@ const char *mlir_op_type_to_string(OpType type);
 
 size_t mlir_block_num_arguments(const MlirBlock *block);
 MlirValue *mlir_block_get_argument(const MlirBlock *block, size_t idx);
+
+// Value metadata accessors
+// Per-value (incl. block arguments) source location
+MlirLocation *mlir_value_get_location(const MlirValue *value);
+// Divisibility annotations used by classic printer on tt.ptr arguments
+bool mlir_value_has_divisibility(const MlirValue *value);
+int64_t mlir_value_get_divisibility_value(const MlirValue *value);
+MlirType *mlir_value_get_divisibility_type(const MlirValue *value);
+bool mlir_value_has_max_divisibility(const MlirValue *value);
+int64_t mlir_value_get_max_divisibility_value(const MlirValue *value);
+MlirType *mlir_value_get_max_divisibility_type(const MlirValue *value);
 
 // Type creation and manipulation
 MlirType *mlir_type_create_integer(Arena *arena, uint32_t width, bool is_signed);
