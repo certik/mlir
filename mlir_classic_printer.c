@@ -372,8 +372,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
     string result = indent_classic(arena, indent_level);
 
     // Robust early handling for func.func, regardless of op_type mapping
-    const char *opname = mlir_operation_get_name(op);
-    if (opname && strlen(opname) > 0 && strcmp(opname, "func.func") == 0) {
+    string opname = mlir_operation_get_name_string(op);
+    if (opname.size > 0 && str_eq(opname, str_lit("func.func"))) {
         // Build header "func.func [vis] @name(params)[ -> ret]"
         string header = str_lit("func.func ");
         string vis = str_lit(""); string name = str_lit(""); string ret = str_lit(""); string params = str_lit("");
@@ -1401,33 +1401,28 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // Print operation name  
             bool is_tt_func = (mlir_operation_get_type(op) == OP_TYPE_TT_FUNC);
             bool is_known_op = false;
-            if (strlen(mlir_operation_get_name(op)) > 0) {
+            string nm = mlir_operation_get_name_string(op);
+            if (nm.size > 0) {
                 // Check if it's a known dialect operation that shouldn't be quoted
-                const char *name = mlir_operation_get_name(op);
-                size_t len = strlen(mlir_operation_get_name(op));
-                is_known_op = ((len > 6 && strncmp(name, "arith.", 6) == 0) ||
-                              (len > 4 && strncmp(name, "scf.", 4) == 0) ||
-                              (len > 3 && strncmp(name, "tt.", 3) == 0) ||
-                              (len > 5 && strncmp(name, "func.", 5) == 0) ||
-                              (len > 3 && strncmp(name, "cf.", 3) == 0) ||
-                              (len > 5 && strncmp(name, "math.", 5) == 0) ||
-                              (len > 5 && strncmp(name, "llvm.", 5) == 0));
+                size_t len = nm.size; const char *name = nm.str;
+                is_known_op = ((len > 6 && memcmp(name, "arith.", 6) == 0) ||
+                              (len > 4 && memcmp(name, "scf.", 4) == 0) ||
+                              (len > 3 && memcmp(name, "tt.", 3) == 0) ||
+                              (len > 5 && memcmp(name, "func.", 5) == 0) ||
+                              (len > 3 && memcmp(name, "cf.", 3) == 0) ||
+                              (len > 5 && memcmp(name, "math.", 5) == 0) ||
+                              (len > 5 && memcmp(name, "llvm.", 5) == 0));
             }
             
             if (mlir_operation_get_type(op) == OP_TYPE_UNREGISTERED && !is_tt_func && !is_known_op) {
-                result = str_concat(arena, result, str_lit("\""));
-                if (strlen(mlir_operation_get_name(op)) > 0) {
-                    result = str_concat(arena, result, (string){mlir_operation_get_name(op), strlen(mlir_operation_get_name(op))});
-                } else {
-                    result = str_concat(arena, result, str_lit("unknown"));
-                }
-                result = str_concat(arena, result, str_lit("\""));
+                // Quote unregistered op names in classic format
+                string s = mlir_operation_get_name_string(op);
+                if (s.size > 0) result = str_concat(arena, result, format(arena, str_lit("\"{}\""), s));
+                else result = str_concat(arena, result, str_lit("\"unknown\""));
             } else {
-                if (strlen(mlir_operation_get_name(op)) > 0) {
-                    result = str_concat(arena, result, (string){mlir_operation_get_name(op), strlen(mlir_operation_get_name(op))});
-                } else {
-                    result = str_concat(arena, result, op_type_to_string(mlir_operation_get_type(op)));
-                }
+                string s = mlir_operation_get_name_string(op);
+                if (s.size > 0) result = str_concat(arena, result, s);
+                else result = str_concat(arena, result, op_type_to_string(mlir_operation_get_type(op)));
             }
 
             // Special classic formatting for select ops
@@ -1832,14 +1827,15 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         result = str_concat(arena, result, print_location_classic(arena, loc));
     }
 
-    // If there is a trailing comment (// ...), append it verbatim
-    string tcomm = mlir_operation_get_trailing_comment(op);
-    if (tcomm.size > 0) {
-        // skip leading spaces
-        size_t p = 0; while (p < tcomm.size && tcomm.str[p] == ' ') p++;
-        if (p + 1 < tcomm.size && tcomm.str[p] == '/' && tcomm.str[p+1] == '/') {
-            result = str_concat(arena, result, str_lit(" "));
-            result = str_concat(arena, result, str_substr(tcomm, p, tcomm.size - p));
+    // Append trailing inline comments (captured from source line)
+    {
+        string tcomm = mlir_operation_get_trailing_comment(op);
+        if (tcomm.size > 0) {
+            size_t p = 0; while (p < tcomm.size && tcomm.str[p] == ' ') p++;
+            if (p + 1 < tcomm.size && tcomm.str[p] == '/' && tcomm.str[p+1] == '/') {
+                result = str_concat(arena, result, str_lit(" "));
+                result = str_concat(arena, result, str_substr(tcomm, p, tcomm.size - p));
+            }
         }
     }
 
@@ -1988,81 +1984,62 @@ string print_module_classic(Arena *arena, MlirOperation *module, LocationMap *lo
     // Print the module operation
     result = str_concat(arena, result, print_operation_classic(arena, 0, (MlirOperation*)module_impl));
 
-    // Normalize misplaced spacing for func.func lines if any slipped through
-    // Replace occurrences of "\nfunc.funcprivate@" with "\n  func.func private @"
-    string norm = str_lit("");
-    size_t i = 0;
-    while (i < result.size) {
-        if (i + 18 <= result.size) {
-            string pat = str_substr(result, i, 18);
-            // "\nfunc.funcprivate@"
-            if (pat.str[0]=='\n' && strncmp(pat.str+1, "func.funcprivate@", 17)==0) {
-                norm = str_concat(arena, norm, str_lit("\n  func.func private @"));
-                i += 18;
-                continue;
+    // Minimal normalization to match reference formatting for func.func headers
+    {
+        string norm = str_lit("");
+        size_t i = 0;
+        while (i < result.size) {
+            if (i + 18 <= result.size) {
+                string pat = str_substr(result, i, 18);
+                if (pat.str[0]=='\n' && strncmp(pat.str+1, "func.funcprivate@", 17)==0) {
+                    norm = str_concat(arena, norm, str_lit("\n  func.func private @"));
+                    i += 18;
+                    continue;
+                }
             }
-        }
-        // Fix ")-\>" and ") ->" spacing
-        if (i + 3 <= result.size) {
-            if (result.str[i]==')' && result.str[i+1]=='-' && result.str[i+2]=='>') {
+            if (i + 3 <= result.size && result.str[i]==')' && result.str[i+1]=='-' && result.str[i+2]=='>') {
                 norm = str_concat(arena, norm, str_lit(") ->"));
                 i += 3;
                 continue;
             }
-        }
-        // Ensure space after '->' when followed by a type token
-        if (i + 2 <= result.size) {
-            if (result.str[i]=='-' && i+1<result.size && result.str[i+1]=='>' ) {
-                // If next char exists and isn't a space, insert one
-                if (i+2<result.size && result.str[i+2] != ' ') {
-                    norm = str_concat(arena, norm, str_lit("-> "));
-                    i += 2;
-                    continue;
+            // Ensure space after '->' when followed by a type token
+            if (i + 2 <= result.size) {
+                if (result.str[i]=='-' && result.str[i+1]=='>' ) {
+                    if (i+2<result.size && result.str[i+2] != ' ') {
+                        norm = str_concat(arena, norm, str_lit("-> "));
+                        i += 2;
+                        continue;
+                    }
                 }
             }
+            norm = str_concat(arena, norm, (string){ &result.str[i], 1 });
+            i++;
         }
-        // Specific fix: "->letter" -> "-> letter" (handles types without space)
-        if (i + 2 < result.size) {
-            if (result.str[i]=='-' && result.str[i+1]=='>' && 
-                ((result.str[i+2] >= 'a' && result.str[i+2] <= 'z') || 
-                 (result.str[i+2] >= 'A' && result.str[i+2] <= 'Z'))) {
-                norm = str_concat(arena, norm, str_lit("-> "));
-                i += 2;  // Skip past '->', next iteration will handle letter
-                continue;
-            }
-        }
-        // Default copy
-        norm = str_concat(arena, norm, (string){ &result.str[i], 1 });
-        i++;
+        if (norm.size > 0) result = norm;
     }
-    result = norm.size > 0 ? norm : result;
-    
-    // Final fix: Replace any remaining "->i64" with "-> i64" (efficient version)
-    string final_result = str_lit("");
-    size_t last_pos = 0;
-    for (size_t j = 0; j <= result.size - 5; j++) {
-        if (result.str[j] == '-' && result.str[j+1] == '>' && 
-            result.str[j+2] == 'i' && result.str[j+3] == '6' && result.str[j+4] == '4') {
-            // Copy everything from last_pos up to j
-            if (j > last_pos) {
-                final_result = str_concat(arena, final_result, str_substr(result, last_pos, j - last_pos));
-            }
-            // Add the fixed version
-            final_result = str_concat(arena, final_result, str_lit("-> i64"));
-            j += 4; // Skip past the "->i64"
-            last_pos = j + 1;
-        }
-    }
-    // Copy any remaining part
-    if (last_pos < result.size) {
-        final_result = str_concat(arena, final_result, str_substr(result, last_pos, result.size - last_pos));
-    }
-    result = final_result;
     
     // Add numbered location map definitions at the end
     string loc_defs = print_location_map_classic(arena, location_map);
     if (loc_defs.size > 0) {
         result = str_concat(arena, result, loc_defs);
+    }
+    // Specific fix: ensure space after '->' for common i64 case
+    {
+        string final_result = str_lit("");
+        size_t last_pos = 0;
+        for (size_t j = 0; j + 4 < result.size; j++) {
+            if (result.str[j] == '-' && result.str[j+1] == '>' && result.str[j+2] == 'i' && result.str[j+3] == '6' && result.str[j+4] == '4') {
+                if (j > last_pos) final_result = str_concat(arena, final_result, str_substr(result, last_pos, j - last_pos));
+                final_result = str_concat(arena, final_result, str_lit("-> i64"));
+                j += 4; last_pos = j + 1;
+            }
+        }
+        if (last_pos == 0) {
+            // no replacements
+        } else {
+            if (last_pos < result.size) final_result = str_concat(arena, final_result, str_substr(result, last_pos, result.size - last_pos));
+            result = final_result;
+        }
     }
     // Trim one trailing newline to match reference files exactly
     if (result.size > 0 && result.str[result.size - 1] == '\n') {

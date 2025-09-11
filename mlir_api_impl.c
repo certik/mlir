@@ -191,6 +191,11 @@ const char *mlir_operation_get_name(const MlirOperation *op) {
     return concrete_op->opname.str;
 }
 
+string mlir_operation_get_name_string(const MlirOperation *op) {
+    const Operation *concrete_op = (const Operation*)op;
+    return concrete_op->opname;
+}
+
 size_t mlir_operation_num_result_types(const MlirOperation *op) {
     const Operation *concrete_op = (const Operation*)op;
     return concrete_op->n_result_types;

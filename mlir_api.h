@@ -172,6 +172,8 @@ size_t mlir_operation_num_results(const MlirOperation *op);
 MlirValue *mlir_operation_get_result(const MlirOperation *op, size_t idx);
 MlirLocation *mlir_operation_get_location(const MlirOperation *op);
 const char *mlir_operation_get_name(const MlirOperation *op);
+// Name with length (not necessarily null-terminated)
+string mlir_operation_get_name_string(const MlirOperation *op);
 size_t mlir_operation_num_result_types(const MlirOperation *op);
 MlirType *mlir_operation_get_result_type(const MlirOperation *op, size_t idx);
 const char *mlir_op_type_to_string(OpType type);
