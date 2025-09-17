@@ -500,6 +500,27 @@ static bool parse_type_string(Parser *parser, string *out) {
     return true;
 }
 
+static void sync_operation_to_api(Parser *parser, Operation *op) {
+    if (!op) return;
+    mlir_operation_set_attributes((MlirOperation*)op, (MlirAttribute**)op->attributes, op->n_attributes);
+    mlir_operation_set_operands((MlirOperation*)op, (MlirValue**)op->operands, op->n_operands);
+    mlir_operation_set_results((MlirOperation*)op, (MlirValue**)op->results, op->n_results);
+    mlir_operation_set_result_types((MlirOperation*)op, (MlirType**)op->result_types, op->n_result_types);
+    mlir_operation_set_location((MlirOperation*)op, (MlirLocation*)op->location);
+    mlir_operation_set_trailing_comment((MlirOperation*)op, op->trailing_comment.str, op->trailing_comment.size);
+    mlir_operation_set_source_line_start((MlirOperation*)op, op->source_line_start);
+    mlir_operation_set_unnumbered_loc_def((MlirOperation*)op, (MlirLocation*)op->unnumbered_loc_def);
+
+    if (op->n_regions > 0 && mlir_operation_num_regions((MlirOperation*)op) == 0) {
+        for (size_t i = 0; i < op->n_regions; i++) {
+            Region *region = op->regions[i];
+            if (region) {
+                mlir_op_add_region(parser->arena, (MlirOperation*)op, (MlirRegion*)region);
+            }
+        }
+    }
+}
+
 Type* parse_type_from_string(Arena *arena, string type_str) {
     Type *type = arena_alloc(arena, Type);
 
@@ -1388,6 +1409,8 @@ Operation* parse_operation(Parser *parser) {
             parse_generic_operation(parser, op);
             break;
     }
+
+    sync_operation_to_api(parser, op);
 
     // Handle return value(s) for all operations
     if (result_value) {

@@ -207,7 +207,77 @@ MlirRegion *mlir_operation_get_region(const MlirOperation *op, size_t idx) {
     return reinterpret_cast<MlirRegion *>(&cppOp->getRegion(idx));
 }
 
+void mlir_operation_set_location(MlirOperation *op, MlirLocation *loc) {
+    (void)op;
+    (void)loc;
+    // Upstream bridge has no location support yet.
+}
+
+void mlir_operation_set_trailing_comment(MlirOperation *op, const char *comment, size_t comment_len) {
+    (void)op;
+    (void)comment;
+    (void)comment_len;
+}
+
+void mlir_operation_set_source_line_start(MlirOperation *op, int64_t line_start) {
+    (void)op;
+    (void)line_start;
+}
+
+void mlir_operation_set_unnumbered_loc_def(MlirOperation *op, MlirLocation *loc) {
+    (void)op;
+    (void)loc;
+}
+
+MlirLocation *mlir_location_create(Arena *arena) {
+    (void)arena;
+    return nullptr;
+}
+
+void mlir_location_set_kind(MlirLocation *loc, MlirLocationKind kind) {
+    (void)loc;
+    (void)kind;
+}
+
+void mlir_location_set_original_text(MlirLocation *loc, string text) {
+    (void)loc;
+    (void)text;
+}
+
+void mlir_location_set_file_data(MlirLocation *loc, string filename, int line, int column) {
+    (void)loc;
+    (void)filename;
+    (void)line;
+    (void)column;
+}
+
+void mlir_location_set_name_data(MlirLocation *loc, string name) {
+    (void)loc;
+    (void)name;
+}
+
+void mlir_location_set_ref_id(MlirLocation *loc, int ref_id) {
+    (void)loc;
+    (void)ref_id;
+}
+
+void mlir_value_set_location(MlirValue *value, MlirLocation *loc) {
+    (void)value;
+    (void)loc;
+}
+
+void mlir_value_set_divisibility(MlirValue *value, int64_t div_value, MlirType *type) {
+    (void)value;
+    (void)div_value;
+    (void)type;
+}
+
+void mlir_value_set_max_divisibility(MlirValue *value, int64_t div_value, MlirType *type) {
+    (void)value;
+    (void)div_value;
+    (void)type;
+}
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
-

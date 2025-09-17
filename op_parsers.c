@@ -51,6 +51,18 @@ void consume_optional_hash_selector(Parser *parser) {
     }
 }
 
+static void set_op_attributes(Operation *op, Attribute **attrs, size_t count) {
+    mlir_operation_set_attributes((MlirOperation*)op, (MlirAttribute**)attrs, count);
+}
+
+static void set_op_operands(Operation *op, ValueRef **operands, size_t count) {
+    mlir_operation_set_operands((MlirOperation*)op, (MlirValue**)operands, count);
+}
+
+static void set_op_result_types(Operation *op, Type **types, size_t count) {
+    mlir_operation_set_result_types((MlirOperation*)op, (MlirType**)types, count);
+}
+
 // Include the extracted functions
 void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
     // Attributes block
@@ -76,7 +88,7 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                 } else { parser_next_token(parser); }
             }
             if (parser_peek(parser, TK_RBRACE)) parser_expect(parser, TK_RBRACE);
-            if (had_attrs) { op->attributes = attrs; op->n_attributes = n_attrs; }
+            if (had_attrs) { set_op_attributes(op, attrs, n_attrs); }
             if (parser_peek(parser, TK_RANGLE)) parser_expect(parser, TK_RANGLE);
         } else {
             // Not actually an attribute block; rewind
@@ -145,8 +157,7 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
         
         // Store parsed attributes
         if (n_attrs > 0) {
-            op->attributes = attrs;
-            op->n_attributes = n_attrs;
+            set_op_attributes(op, attrs, n_attrs);
         }
     }
 
@@ -175,9 +186,9 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
 
             string type_str = str_lit("");
             if (parse_type_string(parser, &type_str)) {
-                op->n_result_types = 1;
-                op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-                op->result_types[0] = parse_type_from_string(parser->arena, type_str);
+                Type **types = arena_alloc_array(parser->arena, Type*, 1);
+                types[0] = parse_type_from_string(parser->arena, type_str);
+                set_op_result_types(op, types, 1);
             }
 
             // Record that the signature used parenthesized operand types
@@ -203,12 +214,12 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                 new_attrs[n+1] = srca;
                 n = n+2; attrs = new_attrs;
             }
-            op->attributes = attrs;
-            op->n_attributes = n;
+            set_op_attributes(op, attrs, n);
 
             // Optional trailing loc()
             if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-                op->location = parse_loc(parser);
+                Location *loc = parse_loc(parser);
+                mlir_operation_set_location((MlirOperation*)op, (MlirLocation*)loc);
             }
             return;
         }
@@ -227,9 +238,9 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                 if (parser_peek(parser, TK_ARROW)) parser_expect(parser, TK_ARROW);
                 string type_res = str_lit("");
                 if (parse_type_string(parser, &type_res)) {
-                    op->n_result_types = 1;
-                    op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-                    op->result_types[0] = parse_type_from_string(parser->arena, type_res);
+                    Type **types = arena_alloc_array(parser->arena, Type*, 1);
+                    types[0] = parse_type_from_string(parser->arena, type_res);
+                    set_op_result_types(op, types, 1);
                 }
                 // Done handling this signature. Do not consume further (keep trailing loc()).
                 return;
@@ -238,9 +249,9 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                 parser_expect(parser, TK_ARROW);
                 string type_right = str_lit("");
                 if (parse_type_string(parser, &type_right)) {
-                    op->n_result_types = 1;
-                    op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-                    op->result_types[0] = parse_type_from_string(parser->arena, type_right);
+                    Type **types = arena_alloc_array(parser->arena, Type*, 1);
+                    types[0] = parse_type_from_string(parser->arena, type_right);
+                    set_op_result_types(op, types, 1);
                 }
                 // Record source signature string for classic printing
                 size_t n = op->n_attributes;
@@ -254,15 +265,15 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                     for (size_t i = 0; i < n; i++) new_attrs[i] = attrs[i];
                     new_attrs[n] = srca; n = n+1; attrs = new_attrs;
                 }
-                op->attributes = attrs; op->n_attributes = n;
+                set_op_attributes(op, attrs, n);
             } else if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("to"))) {
                 // Casts like ": src_ty to dst_ty"; set result to dst_ty
                 parser_expect(parser, TK_NAME);
                 string type_dst = str_lit("");
                 if (parse_type_string(parser, &type_dst)) {
-                    op->n_result_types = 1;
-                    op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-                    op->result_types[0] = parse_type_from_string(parser->arena, type_dst);
+                    Type **types = arena_alloc_array(parser->arena, Type*, 1);
+                    types[0] = parse_type_from_string(parser->arena, type_dst);
+                    set_op_result_types(op, types, 1);
                 }
             } else if (parser_peek(parser, TK_COMMA)) {
                 // Operand type list ": type, type, ..." — consume conservatively
@@ -275,10 +286,9 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                 // but do NOT override for compare ops like arith.cmpi where
                 // the colon type is the operand type, not the result.
                 if (op->op_type != OP_TYPE_ARITH_CMPI) {
-                    op->n_result_types = 1;
-                    op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-                    op->result_types[0] = arena_alloc(parser->arena, Type);
-                    op->result_types[0] = parse_type_from_string(parser->arena, type_left);
+                    Type **types = arena_alloc_array(parser->arena, Type*, 1);
+                    types[0] = parse_type_from_string(parser->arena, type_left);
+                    set_op_result_types(op, types, 1);
                 }
             }
         }
@@ -289,15 +299,16 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
         parser_expect(parser, TK_ARROW);
         string type_str = str_lit("");
         if (parse_type_string(parser, &type_str)) {
-            op->n_result_types = 1;
-            op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-            op->result_types[0] = parse_type_from_string(parser->arena, type_str);
+            Type **types = arena_alloc_array(parser->arena, Type*, 1);
+            types[0] = parse_type_from_string(parser->arena, type_str);
+            set_op_result_types(op, types, 1);
         }
     }
 
     // Optional trailing loc()
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        op->location = parse_loc(parser);
+        Location *loc = parse_loc(parser);
+        mlir_operation_set_location((MlirOperation*)op, (MlirLocation*)loc);
     }
 }
 
@@ -515,48 +526,48 @@ void parse_tt_get_program_id(Parser *parser, Operation *op) {
         string axis = parser_token_str(parser);
         parser_expect(parser, TK_NAME);
 
-        op->n_attributes = 1;
-        op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
-        op->attributes[0] = arena_alloc(parser->arena, Attribute);
-        op->attributes[0]->kind = ATTR_KIND_STRING;
-        op->attributes[0]->data.string_value = axis;
-        op->attributes[0]->name = str_lit("axis");
+        Attribute **attrs = arena_alloc_array(parser->arena, Attribute*, 1);
+        attrs[0] = arena_alloc(parser->arena, Attribute);
+        attrs[0]->kind = ATTR_KIND_STRING;
+        attrs[0]->data.string_value = axis;
+        attrs[0]->name = str_lit("axis");
+        set_op_attributes(op, attrs, 1);
     }
-    op->n_operands = 0;
-    op->operands = NULL;
+    set_op_operands(op, NULL, 0);
 }
 
 void parse_tt_splat(Parser *parser, Operation *op) {
+    ValueRef *operand = NULL;
     if (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        operand = symbol_table_lookup(&parser->symbol_table, reg_str);
         if (!operand) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             return;
         }
-        op->n_operands = 1;
-        op->operands = arena_alloc_array(parser->arena, ValueRef*, 1);
-        op->operands[0] = operand;
+        ValueRef **ops = arena_alloc_array(parser->arena, ValueRef*, 1);
+        ops[0] = operand;
+        set_op_operands(op, ops, 1);
     }
     // Infer result type if not already parsed from trailing type
     if (op->n_result_types == 0) {
-        op->n_result_types = 1;
-        op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-        op->result_types[0] = arena_alloc(parser->arena, Type);
-        if (op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
-            string operand_type = type_to_string(parser->arena, op->operands[0]->type);
-            if (str_eq(operand_type, str_lit("!tt.ptr<f32>"))) {
-                op->result_types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16x!tt.ptr<f32>>"));
-            } else if (str_eq(operand_type, str_lit("i32"))) {
-                op->result_types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16xi32>"));
+        Type **types = arena_alloc_array(parser->arena, Type*, 1);
+        types[0] = arena_alloc(parser->arena, Type);
+        Type *operand_type = operand ? operand->type : NULL;
+        if (operand_type) {
+            string operand_type_str = type_to_string(parser->arena, operand_type);
+            if (str_eq(operand_type_str, str_lit("!tt.ptr<f32>"))) {
+                types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16x!tt.ptr<f32>>"));
+            } else if (str_eq(operand_type_str, str_lit("i32"))) {
+                types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16xi32>"));
             } else {
-                op->result_types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16xi32>"));
+                types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16xi32>"));
             }
         } else {
-            op->result_types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16xi32>"));
+            types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16xi32>"));
         }
-
+        set_op_result_types(op, types, 1);
     }
 }
 
@@ -1182,7 +1193,7 @@ void parse_cf_br(Parser *parser, Operation *op) {
         }
         parser_expect(parser, TK_RPAREN);
     }
-    op->operands = branch_args.data; op->n_operands = branch_args.size;
+    set_op_operands(op, branch_args.data, branch_args.size);
     // Store target as private attribute
     op->n_attributes = 1; op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
     op->attributes[0] = arena_alloc(parser->arena, Attribute);
@@ -1281,7 +1292,7 @@ void parse_cf_cond_br(Parser *parser, Operation *op) {
             op->attributes=na; op->n_attributes=(int)(n+1);
         }
     }
-    op->operands = operands.data; op->n_operands = operands.size;
+    set_op_operands(op, operands.data, operands.size);
     // Store private attributes for classic printing; append _true/_false without dropping existing counts
     size_t n0 = op->n_attributes; Attribute **attrs0 = op->attributes;
     Attribute **na0 = arena_alloc_array(parser->arena, Attribute*, n0 + 2);
@@ -1294,7 +1305,7 @@ void parse_cf_cond_br(Parser *parser, Operation *op) {
     na0[n0+1]->name = str_lit("_false");
     na0[n0+1]->kind = ATTR_KIND_STRING;
     na0[n0+1]->data.string_value = tfalse;
-    op->attributes = na0; op->n_attributes = (int)(n0 + 2);
+    set_op_attributes(op, na0, (int)(n0 + 2));
     // Optional loc
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
         op->location = parse_loc(parser);
@@ -1638,7 +1649,7 @@ void parse_tt_call(Parser *parser, Operation *op) {
         }
         attrs[n] = arena_alloc(parser->arena, Attribute);
         attrs[n]->name = str_lit("callee"); attrs[n]->kind = ATTR_KIND_STRING; attrs[n]->data.string_value = fname;
-        op->attributes = attrs; op->n_attributes = n+1;
+        set_op_attributes(op, attrs, n+1);
     }
 
     // Parse arguments in parentheses
@@ -2177,7 +2188,7 @@ void parse_tt_func(Parser *parser, Operation *op) {
             new_attrs[n]->name = str_lit("params_sig");
             new_attrs[n]->kind = ATTR_KIND_STRING;
             new_attrs[n]->data.string_value = params_sig;
-            op->attributes = new_attrs; op->n_attributes = (int)(n+1);
+            set_op_attributes(op, new_attrs, (int)(n+1));
         }
     }
 
@@ -2325,7 +2336,7 @@ void parse_func_func(Parser *parser, Operation *op) {
             new_attrs[n]->name = str_lit("params_sig");
             new_attrs[n]->kind = ATTR_KIND_STRING;
             new_attrs[n]->data.string_value = params_sig;
-            op->attributes = new_attrs; op->n_attributes = (int)(n+1);
+            set_op_attributes(op, new_attrs, (int)(n+1));
         }
     }
     // Optional return type sequence after '->' (capture text conservatively)
@@ -2357,7 +2368,7 @@ void parse_func_func(Parser *parser, Operation *op) {
         if (visibility.size>0){ new_attrs[idx]=arena_alloc(parser->arena, Attribute); new_attrs[idx]->name=str_lit("visibility"); new_attrs[idx]->kind=ATTR_KIND_STRING; new_attrs[idx]->data.string_value=visibility; idx++; }
         if (fname.size>0){ new_attrs[idx]=arena_alloc(parser->arena, Attribute); new_attrs[idx]->name=str_lit("sym_name"); new_attrs[idx]->kind=ATTR_KIND_STRING; new_attrs[idx]->data.string_value=fname; idx++; }
         if (ret_sig.size>0){ new_attrs[idx]=arena_alloc(parser->arena, Attribute); new_attrs[idx]->name=str_lit("ret"); new_attrs[idx]->kind=ATTR_KIND_STRING; new_attrs[idx]->data.string_value=ret_sig; idx++; }
-        op->attributes = new_attrs; op->n_attributes = idx;
+        set_op_attributes(op, new_attrs, idx);
     }
 }
 
