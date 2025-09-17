@@ -2616,16 +2616,12 @@ void parse_scf_while(Parser *parser, MlirOperation *op) {
     while (!parser_peek(parser, TK_LBRACE_END)) {
         parser_next_token(parser);
     }
-    int n_regions = 1;
     MlirRegion *region1 = parse_region(parser);
     MlirRegion *region2 = NULL;
 
-    if (parser_peek(parser, TK_NAME)) {
-        if (str_eq(parser_token_str(parser), str_lit("do"))) {
-            parser_expect(parser, TK_NAME);
-            region2 = parse_region(parser);
-            n_regions++;
-        }
+    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("do"))) {
+        parser_expect(parser, TK_NAME);
+        region2 = parse_region(parser);
     }
 
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
