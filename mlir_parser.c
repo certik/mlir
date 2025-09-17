@@ -69,20 +69,8 @@ ValueRef* symbol_table_lookup(ScopedSymbolTable *st, string name) {
 }
 
 ValueRef* create_value_ref(Arena *arena, ValueKind kind) {
-    ValueRef *value = arena_alloc(arena, ValueRef);
-    value->kind = kind;
-    value->def = NULL;
-    value->result_index = 0;
-    value->type = NULL;
-    value->register_name = str_lit("");
-    value->location = NULL;
-    value->has_divisibility = false;
-    value->divisibility_value = 0;
-    value->divisibility_type = NULL;
-    value->has_max_divisibility = false;
-    value->max_divisibility_value = 0;
-    value->max_divisibility_type = NULL;
-    return value;
+    MlirValue *value = mlir_value_create(arena, kind);
+    return (ValueRef*)value;
 }
 
 string tokentype_to_string(TokenType tt) {
@@ -868,18 +856,18 @@ Block* parse_block(Parser *parser) {
                     // Create block argument value
                     ValueRef *block_arg = arena_alloc(parser->arena, ValueRef);
                     block_arg->kind = BLOCK_ARG;
-                    block_arg->register_name = arg_name;
-                    block_arg->result_index = block_args.size;
-                    block_arg->def = NULL; // Block arguments don't have a defining operation
-                    block_arg->type = arena_alloc(parser->arena, Type);
-
+                    mlir_value_set_register_name((MlirValue*)block_arg, arg_name.str, arg_name.size);
+                    mlir_value_set_result_index((MlirValue*)block_arg, (uint32_t)block_args.size);
+                    mlir_value_set_def((MlirValue*)block_arg, NULL);
                     // Parse argument type
                     string type_name = str_lit("");
+                    Type *arg_type = NULL;
                     if (parse_type_string(parser, &type_name)) {
-                        block_arg->type = parse_type_from_string(parser->arena, type_name);
+                        arg_type = parse_type_from_string(parser->arena, type_name);
                     } else {
-                        block_arg->type = parse_type_from_string(parser->arena, str_lit("i32"));
+                        arg_type = parse_type_from_string(parser->arena, str_lit("i32"));
                     }
+                    mlir_value_set_type((MlirValue*)block_arg, (MlirType*)arg_type);
 
                     VecValueRef_push_back(parser->arena, &block_args, block_arg);
 
@@ -927,7 +915,8 @@ Block* parse_block(Parser *parser) {
                     while (begin > line_start && parser->input[begin - 1] == ' ') begin--;
                     int64_t len = line_end - begin;
                     if (len > 0) {
-                        op->trailing_comment = str_from_cstr_len_view((char*)parser->input + begin, len);
+                        string comment = str_from_cstr_len_view((char*)parser->input + begin, len);
+                        mlir_operation_set_trailing_comment((MlirOperation*)op, comment.str, comment.size);
                     }
                 }
             }
@@ -941,11 +930,13 @@ Block* parse_block(Parser *parser) {
         }
     }
 
-    Block *block = arena_alloc(parser->arena, Block);
-    block->operations = operations.data;
-    block->n_operations = operations.size;
-    block->arguments = block_args.data;
-    block->n_arguments = block_args.size;
+    Block *block = (Block*)mlir_block_create(parser->arena);
+    for (size_t i = 0; i < block_args.size; i++) {
+        mlir_block_add_argument(parser->arena, (MlirBlock*)block, (MlirValue*)block_args.data[i]);
+    }
+    for (size_t i = 0; i < operations.size; i++) {
+        mlir_block_add_operation(parser->arena, (MlirBlock*)block, (MlirOperation*)operations.data[i]);
+    }
 
     return block;
 }
@@ -969,9 +960,10 @@ Region* parse_region(Parser *parser) {
     // Pop scope when leaving region
     symbol_table_pop_scope(&parser->symbol_table);
 
-    Region *region = arena_alloc(parser->arena, Region);
-    region->blocks = blocks.data;
-    region->n_blocks = blocks.size;
+    Region *region = (Region*)mlir_region_create(parser->arena);
+    for (size_t i = 0; i < blocks.size; i++) {
+        mlir_region_add_block(parser->arena, (MlirRegion*)region, (MlirBlock*)blocks.data[i]);
+    }
 
     return region;
 }
@@ -1037,16 +1029,17 @@ Operation* parse_module(Parser *parser) {
     
     // Attach unnumbered '#loc' definition captured during initial scan or in parse_operation
     if (!loc0_def) loc0_def = parser->unnumbered_loc_def;
-    op->unnumbered_loc_def = loc0_def;
+    mlir_operation_set_unnumbered_loc_def((MlirOperation*)op, (MlirLocation*)loc0_def);
     return op;
 }
 
 // parse loc()
 Location* parse_loc(Parser *parser) {
     Arena *arena = parser->arena;
-    Location *loc = arena_alloc(arena, Location);
-    loc->kind = LOC_KIND_UNKNOWN;
-    loc->original_text = str_lit("");
+    MlirLocation *mlir_loc = mlir_location_create(arena);
+    mlir_location_set_kind(mlir_loc, MLIR_LOC_UNKNOWN);
+    mlir_location_set_original_text(mlir_loc, str_lit(""));
+    Location *loc = (Location*)mlir_loc;
     
     
     parser_expect(parser, TK_NAME); // 'loc'
@@ -1079,8 +1072,8 @@ Location* parse_loc(Parser *parser) {
         }
         parser_expect(parser, TK_RPAREN);
         text = str_concat(parser->arena, text, str_lit(")"));
-        loc->kind = LOC_KIND_UNKNOWN;
-        loc->original_text = text;
+        mlir_location_set_kind(mlir_loc, MLIR_LOC_UNKNOWN);
+        mlir_location_set_original_text(mlir_loc, text);
         return loc;
     } else if (parser_peek(parser, TK_STRING)) {
         // loc("filename":line:col) or loc("name")
@@ -1090,42 +1083,39 @@ Location* parse_loc(Parser *parser) {
         if (parser_peek(parser, TK_COLON)) {
             // File location: loc("filename":line:col)
             parser_next_token(parser); // consume ':'
-            
+
+            int line = 0;
+            int column = 0;
+
             if (parser_peek(parser, TK_INTEGER)) {
-                loc->kind = LOC_KIND_FILE;
-                loc->data.file.filename = filename;
-                
-                // Parse line number
                 string line_str = parser_token_str(parser);
-                loc->data.file.line = atoi(line_str.str);
+                line = atoi(line_str.str);
                 parser_next_token(parser);
-                
+
                 if (parser_peek(parser, TK_COLON)) {
                     parser_next_token(parser); // consume ':'
                     if (parser_peek(parser, TK_INTEGER)) {
-                        // Parse column number
                         string col_str = parser_token_str(parser);
-                        loc->data.file.column = atoi(col_str.str);
+                        column = atoi(col_str.str);
                         parser_next_token(parser);
                     }
                 }
+
+                mlir_location_set_file_data(mlir_loc, filename, line, column);
             }
         } else {
             // Named location: loc("name")
-            loc->kind = LOC_KIND_NAME;
-            loc->data.name.name = filename;
+            mlir_location_set_name_data(mlir_loc, filename);
         }
     } else if (parser_peek(parser, TK_HASH_NAME)) {
         // Reference location: loc(#locN)
         string hash_name = parser_token_str(parser);
         parser_next_token(parser); // consume '#locN'
-        loc->kind = LOC_KIND_REF;
-        // Extract number from "#locN" format
+        int ref_id = 0;
         if (hash_name.size > 4 && strncmp(hash_name.str, "#loc", 4) == 0) {
-            loc->data.ref.ref_id = atoi(hash_name.str + 4);
-        } else {
-            loc->data.ref.ref_id = 0;
+            ref_id = atoi(hash_name.str + 4);
         }
+        mlir_location_set_ref_id(mlir_loc, ref_id);
     } else {
         // Unknown location format, just consume tokens until ')'
         while (!(parser_peek(parser, TK_RPAREN))) {
@@ -1136,15 +1126,21 @@ Location* parse_loc(Parser *parser) {
     parser_expect(parser, TK_RPAREN);
     
     // Capture original text for printing (simple reconstruction)
-    if (loc->kind == LOC_KIND_FILE) {
-        loc->original_text = format(parser->arena, str_lit("loc({}:{}:{})"),
-            loc->data.file.filename, (int64_t)loc->data.file.line, (int64_t)loc->data.file.column);
-    } else if (loc->kind == LOC_KIND_NAME) {
-        loc->original_text = format(parser->arena, str_lit("loc(\"{}\")"), loc->data.name.name);
-    } else if (loc->kind == LOC_KIND_REF) {
-        loc->original_text = format(parser->arena, str_lit("loc(#loc{})"), (int64_t)loc->data.ref.ref_id);
+    MlirLocationKind stored_kind = mlir_location_get_kind(mlir_loc);
+    if (stored_kind == MLIR_LOC_FILE) {
+        mlir_location_set_original_text(mlir_loc,
+            format(parser->arena, str_lit("loc({}:{}:{})"),
+                   mlir_location_get_file_filename(mlir_loc),
+                   (int64_t)mlir_location_get_file_line(mlir_loc),
+                   (int64_t)mlir_location_get_file_column(mlir_loc)));
+    } else if (stored_kind == MLIR_LOC_NAME) {
+        mlir_location_set_original_text(mlir_loc,
+            format(parser->arena, str_lit("loc(\"{}\")"), mlir_location_get_name(mlir_loc)));
+    } else if (stored_kind == MLIR_LOC_REF) {
+        mlir_location_set_original_text(mlir_loc,
+            format(parser->arena, str_lit("loc(#loc{})"), (int64_t)mlir_location_get_ref_id(mlir_loc)));
     } else {
-        loc->original_text = str_lit("loc(unknown)");
+        mlir_location_set_original_text(mlir_loc, str_lit("loc(unknown)"));
     }
     
     return loc;
@@ -1152,22 +1148,11 @@ Location* parse_loc(Parser *parser) {
 
 
 Operation* parse_operation(Parser *parser) {
-    Operation *op = arena_alloc(parser->arena, Operation);
-    op->regions = NULL;
-    op->n_regions = 0;
-    op->n_result_types = 0;
-    op->operands = NULL;
-    op->n_operands = 0;
-    op->attributes = NULL;
-    op->n_attributes = 0;
-    op->result_types = NULL;
-    op->results = NULL;
-    op->n_results = 0;
-    op->opname = str_lit("");
-    op->unnumbered_loc_def = NULL;
-    op->location = NULL;
-    op->trailing_comment = str_lit("");
-    op->source_line_start = -1;
+    Operation *op = (Operation*)mlir_op_create(parser->arena, OP_TYPE_UNREGISTERED);
+    mlir_operation_set_trailing_comment((MlirOperation*)op, "", 0);
+    mlir_operation_set_source_line_start((MlirOperation*)op, -1);
+    mlir_operation_set_location((MlirOperation*)op, NULL);
+    mlir_operation_set_unnumbered_loc_def((MlirOperation*)op, NULL);
 
     // Skip empty lines and attributes
     while (
@@ -1209,7 +1194,7 @@ Operation* parse_operation(Parser *parser) {
             if (c == '\n' || c == '\r') break;
             pos--;
         }
-        op->source_line_start = pos;
+        mlir_operation_set_source_line_start((MlirOperation*)op, pos);
     }
 
     // Parse return registers if any
@@ -1226,10 +1211,9 @@ Operation* parse_operation(Parser *parser) {
         // Create ValueRef for the result and add to symbol table
         result_value = arena_alloc(parser->arena, ValueRef);
         result_value->kind = OP_RESULT;
-        result_value->def = op;
-        result_value->result_index = 0;
-        result_value->register_name = reg_name;
-        result_value->type = NULL; // Will be set later when we parse the result type
+        mlir_value_set_def((MlirValue*)result_value, op);
+        mlir_value_set_result_index((MlirValue*)result_value, 0);
+        mlir_value_set_register_name((MlirValue*)result_value, reg_name.str, reg_name.size);
     }
 
     // Parse operation name
@@ -1407,24 +1391,22 @@ Operation* parse_operation(Parser *parser) {
 
     // Handle return value(s) for all operations
     if (result_value) {
-        if (op->n_result_types > 0) {
-            // If op->n_result_types > 0, then op->result_types must be set:
-            assert(op->result_types != NULL);
-            assert(op->result_types[0] != NULL);
-            // Set the type
-            result_value->type = op->result_types[0];
-            result_value->def = op;
+        if (mlir_operation_num_result_types((MlirOperation*)op) > 0) {
+            MlirType *res_type = mlir_operation_get_result_type((MlirOperation*)op, 0);
+            assert(res_type != NULL);
+            mlir_value_set_type((MlirValue*)result_value, res_type);
+            mlir_value_set_def((MlirValue*)result_value, op);
             symbol_table_add_value(parser->arena, &parser->symbol_table, result_value->register_name, result_value);
 
             // Link result to operation
-            op->n_results = 1;
-            op->results = arena_alloc_array(parser->arena, ValueRef*, 1);
-            op->results[0] = result_value;
+            ValueRef **results = arena_alloc_array(parser->arena, ValueRef*, 1);
+            results[0] = result_value;
+            mlir_operation_set_results((MlirOperation*)op, (MlirValue**)results, 1);
         } else {
             parser_error(parser, str_lit("Result Value parsed on LHS but no Type present on RHS"), parser->first, parser->last);
         }
     } else {
-        if (op->n_result_types > 0) {
+        if (mlir_operation_num_result_types((MlirOperation*)op) > 0) {
             parser_error(parser, str_lit("Result Type parsed on RHS but no result Value on LHS"), parser->first, parser->last);
         }
     }
@@ -1433,7 +1415,7 @@ Operation* parse_operation(Parser *parser) {
     // This conservative approach avoids the comment duplication issue
     bool should_capture = false;
     
-    if (should_capture && op->trailing_comment.size == 0) {
+    if (should_capture && mlir_operation_get_trailing_comment((MlirOperation*)op).size == 0) {
         // Only capture comments if we can find "//" in the rest of the current line
         // after some whitespace (to ensure it belongs to this operation)
         string text = str_from_cstr_view((char*)parser->input);
@@ -1469,7 +1451,8 @@ Operation* parse_operation(Parser *parser) {
             if (found_comment && comment_start >= 0) {
                 int64_t len = line_end - comment_start + 1;
                 if (len > 0) {
-                    op->trailing_comment = str_from_cstr_len_view(text.str + comment_start, len);
+                    string comment = str_from_cstr_len_view(text.str + comment_start, len);
+                    mlir_operation_set_trailing_comment((MlirOperation*)op, comment.str, comment.size);
                 }
             }
         }

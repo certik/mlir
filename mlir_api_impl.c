@@ -391,6 +391,26 @@ void mlir_operation_set_operands(MlirOperation *op, MlirValue **operands, size_t
     concrete_op->n_operands = count;
 }
 
+void mlir_operation_set_location(MlirOperation *op, MlirLocation *loc) {
+    Operation *concrete_op = (Operation*)op;
+    concrete_op->location = (Location*)loc;
+}
+
+void mlir_operation_set_trailing_comment(MlirOperation *op, const char *comment, size_t comment_len) {
+    Operation *concrete_op = (Operation*)op;
+    concrete_op->trailing_comment = (string){(char*)comment, comment_len};
+}
+
+void mlir_operation_set_source_line_start(MlirOperation *op, int64_t line_start) {
+    Operation *concrete_op = (Operation*)op;
+    concrete_op->source_line_start = line_start;
+}
+
+void mlir_operation_set_unnumbered_loc_def(MlirOperation *op, MlirLocation *loc) {
+    Operation *concrete_op = (Operation*)op;
+    concrete_op->unnumbered_loc_def = (Location*)loc;
+}
+
 // Attribute accessors
 MlirAttrKind mlir_attribute_get_kind(const MlirAttribute *attr) {
     const Attribute *a = (const Attribute*)attr;
@@ -555,6 +575,70 @@ string mlir_location_get_name(const MlirLocation *loc) {
 int mlir_location_get_ref_id(const MlirLocation *loc) {
     const Location *l = (const Location*)loc;
     return l->data.ref.ref_id;
+}
+
+MlirLocation *mlir_location_create(Arena *arena) {
+    Arena *concrete_arena = (Arena*)arena;
+    Location *loc = arena_alloc(concrete_arena, Location);
+    *loc = (Location){0};
+    loc->kind = LOC_KIND_UNKNOWN;
+    return (MlirLocation*)loc;
+}
+
+void mlir_location_set_kind(MlirLocation *loc, MlirLocationKind kind) {
+    Location *l = (Location*)loc;
+    switch (kind) {
+        case MLIR_LOC_FILE: l->kind = LOC_KIND_FILE; break;
+        case MLIR_LOC_NAME: l->kind = LOC_KIND_NAME; break;
+        case MLIR_LOC_CALLSITE: l->kind = LOC_KIND_CALLSITE; break;
+        case MLIR_LOC_FUSED: l->kind = LOC_KIND_FUSED; break;
+        case MLIR_LOC_REF: l->kind = LOC_KIND_REF; break;
+        case MLIR_LOC_UNKNOWN: default: l->kind = LOC_KIND_UNKNOWN; break;
+    }
+}
+
+void mlir_location_set_original_text(MlirLocation *loc, string text) {
+    Location *l = (Location*)loc;
+    l->original_text = text;
+}
+
+void mlir_location_set_file_data(MlirLocation *loc, string filename, int line, int column) {
+    Location *l = (Location*)loc;
+    l->kind = LOC_KIND_FILE;
+    l->data.file.filename = filename;
+    l->data.file.line = line;
+    l->data.file.column = column;
+}
+
+void mlir_location_set_name_data(MlirLocation *loc, string name) {
+    Location *l = (Location*)loc;
+    l->kind = LOC_KIND_NAME;
+    l->data.name.name = name;
+}
+
+void mlir_location_set_ref_id(MlirLocation *loc, int ref_id) {
+    Location *l = (Location*)loc;
+    l->kind = LOC_KIND_REF;
+    l->data.ref.ref_id = ref_id;
+}
+
+void mlir_value_set_location(MlirValue *value, MlirLocation *loc) {
+    ValueRef *v = (ValueRef*)value;
+    v->location = (Location*)loc;
+}
+
+void mlir_value_set_divisibility(MlirValue *value, int64_t div_value, MlirType *type) {
+    ValueRef *v = (ValueRef*)value;
+    v->has_divisibility = true;
+    v->divisibility_value = div_value;
+    v->divisibility_type = (Type*)type;
+}
+
+void mlir_value_set_max_divisibility(MlirValue *value, int64_t div_value, MlirType *type) {
+    ValueRef *v = (ValueRef*)value;
+    v->has_max_divisibility = true;
+    v->max_divisibility_value = div_value;
+    v->max_divisibility_type = (Type*)type;
 }
 
 #ifdef __cplusplus

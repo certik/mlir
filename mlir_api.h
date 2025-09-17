@@ -242,6 +242,10 @@ void mlir_operation_set_result_types(MlirOperation *op, MlirType **types, size_t
 void mlir_operation_set_attributes(MlirOperation *op, MlirAttribute **attrs, size_t count);
 void mlir_operation_set_results(MlirOperation *op, MlirValue **results, size_t count);
 void mlir_operation_set_operands(MlirOperation *op, MlirValue **operands, size_t count);
+void mlir_operation_set_location(MlirOperation *op, MlirLocation *loc);
+void mlir_operation_set_trailing_comment(MlirOperation *op, const char *comment, size_t comment_len);
+void mlir_operation_set_source_line_start(MlirOperation *op, int64_t line_start);
+void mlir_operation_set_unnumbered_loc_def(MlirOperation *op, MlirLocation *loc);
 
 // Parser functions
 MlirParser *mlir_parser_create(Arena *arena);
@@ -278,3 +282,15 @@ int mlir_location_get_file_column(const MlirLocation *loc);
 string mlir_location_get_name(const MlirLocation *loc);
 // Ref location field (#locN)
 int mlir_location_get_ref_id(const MlirLocation *loc);
+// Location construction helpers (used by parser)
+MlirLocation *mlir_location_create(Arena *arena);
+void mlir_location_set_kind(MlirLocation *loc, MlirLocationKind kind);
+void mlir_location_set_original_text(MlirLocation *loc, string text);
+void mlir_location_set_file_data(MlirLocation *loc, string filename, int line, int column);
+void mlir_location_set_name_data(MlirLocation *loc, string name);
+void mlir_location_set_ref_id(MlirLocation *loc, int ref_id);
+
+// Value metadata setters
+void mlir_value_set_location(MlirValue *value, MlirLocation *loc);
+void mlir_value_set_divisibility(MlirValue *value, int64_t div_value, MlirType *type);
+void mlir_value_set_max_divisibility(MlirValue *value, int64_t div_value, MlirType *type);
