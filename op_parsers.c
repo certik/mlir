@@ -2018,7 +2018,8 @@ void parse_tt_func(Parser *parser, MlirOperation *op) {
 
                                     if (parser_peek(parser, TK_RANGLE)) {
                                         parser_expect(parser, TK_RANGLE);
-                                        arg->type = mlir_type_create_from_string(parser->arena, str_concat(parser->arena, str_lit("!tt.ptr<"), str_concat(parser->arena, type_content, str_lit(">"))));
+                                        string full_type_str = str_concat(parser->arena, str_lit("!tt.ptr<"), str_concat(parser->arena, type_content, str_lit(">")));
+                                        arg->type = mlir_type_create_from_string(parser->arena, full_type_str);
                                     }
                                 } else {
                                     arg->type = mlir_type_create_from_string(parser->arena, str_lit("!tt.ptr"));

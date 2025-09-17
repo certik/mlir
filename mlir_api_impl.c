@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <base/arena.h>
 #include <base/string.h>
 #include <base/format.h>
@@ -208,6 +209,7 @@ string mlir_type_to_string(Arena *arena, MlirType *type) {
     if (!type) {
         return str_lit("null");
     }
+    
 
     switch (type->kind) {
         case TYPE_KIND_UNKNOWN:
@@ -267,8 +269,8 @@ string mlir_type_to_string(Arena *arena, MlirType *type) {
         case TYPE_KIND_POINTER:
             if (type->data.pointer.element_type) {
                 string elem_str = mlir_type_to_string(arena, type->data.pointer.element_type);
-                // Only show address space if it's explicitly set and not the default (0)
-                if (type->data.pointer.has_address_space && type->data.pointer.address_space != 0) {
+                // Show address space if it was explicitly present in the input
+                if (type->data.pointer.has_address_space) {
                     return format(arena, str_lit("!tt.ptr<{}, {}>"), elem_str, (int64_t)type->data.pointer.address_space);
                 } else {
                     return format(arena, str_lit("!tt.ptr<{}>"), elem_str);
@@ -772,6 +774,7 @@ bool mlir_type_is_opaque(const MlirType *type) {
 
 MlirType *mlir_type_create_from_string(Arena *arena, string type_str) {
     struct MlirType *type = arena_alloc(arena, struct MlirType);
+    
 
     // Unknown type (printed as '?')
     if (str_eq(type_str, str_lit("?"))) {
@@ -812,7 +815,7 @@ MlirType *mlir_type_create_from_string(Arena *arena, string type_str) {
     }
     // Parse float types like "f32", "f64", "bf16"
     else if (type_str.size >= 3 && 
-             (str_eq(str_substr(type_str, 0, 2), str_lit("f")) || 
+             (str_eq(str_substr(type_str, 0, 1), str_lit("f")) || 
               str_eq(str_substr(type_str, 0, 2), str_lit("bf")))) {
         
         bool is_bfloat = str_eq(str_substr(type_str, 0, 2), str_lit("bf"));
@@ -833,13 +836,15 @@ MlirType *mlir_type_create_from_string(Arena *arena, string type_str) {
         type->data.floating.is_bfloat = is_bfloat;
     }
     // Parse pointer types like "!tt.ptr<f32, 1>" or "!tt.ptr<f32>"
-    else if (type_str.size >= 8 && str_eq(str_substr(type_str, 0, 8), str_lit("!tt.ptr<"))) {
+    else if (type_str.size >= 7 && str_eq(str_substr(type_str, 0, 7), str_lit("!tt.ptr"))) {
         type->kind = TYPE_KIND_POINTER;
+        type->data.pointer.address_space = 1; // Default
+        type->data.pointer.has_address_space = false;
         
         // Find the content inside < >
         size_t start = 8; // After "!tt.ptr<"
         size_t end = type_str.size - 1; // Before ">"
-        if (start < end && type_str.str[end] == '>') {
+        if (start < end && type_str.str[7] == '<' && type_str.str[end] == '>') {
             string content = str_substr(type_str, start, end - start);
             
             // Look for comma to separate element type and address space

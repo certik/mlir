@@ -917,6 +917,8 @@ MlirOperation* parse_operation(Parser *parser) {
     if (op_type == OP_TYPE_UNREGISTERED) {
         mlir_operation_set_name_string(op, opname);
     }
+    
+    // Debug: Print all operation names
 
 
     // First we handle specific opnames with special parsing rules
