@@ -2603,20 +2603,17 @@ void parse_scf_for(Parser *parser, MlirOperation *op) {
     symbol_table_pop_scope(&parser->symbol_table);
 
     // Create the region containing the block
-    MlirRegion *region = arena_alloc(parser->arena, struct MlirRegion);
-    region->blocks = blocks.data;
-    region->n_blocks = blocks.size;
+    MlirRegion *region = mlir_region_create(parser->arena);
+    for (size_t i = 0; i < blocks.size; i++) {
+        mlir_region_add_block(parser->arena, region, blocks.data[i]);
+    }
 
     // Assign region to operation
-    op->regions = arena_alloc_array(parser->arena, MlirRegion*, 1);
-    op->regions[0] = region;
-    op->n_regions = 1;
+    mlir_op_add_region(parser->arena, op, region);
 
     // Assign parsed iter result types to operation
     if (n_iter_results > 0) {
-        op->n_result_types = (int)n_iter_results;
-        op->result_types = arena_alloc_array(parser->arena, MlirType*, n_iter_results);
-        for (size_t i = 0; i < n_iter_results; i++) op->result_types[i] = iter_result_types[i];
+        set_op_result_types(op, iter_result_types, n_iter_results);
     }
 
     // Handle optional location attribute after }
