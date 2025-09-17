@@ -2693,23 +2693,22 @@ void parse_return_operation(Parser *parser, MlirOperation *op) {
         if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA); else break;
     }
     // Keep operands for classic and better generic fidelity
-    op->operands = operands.data;
-    op->n_operands = operands.size;
+    set_op_operands(op, operands.data, operands.size);
 
     // Consume any trailing ": ..." types or loc(), without assigning result types
     if (parser_peek(parser, TK_COLON)) {
         // Consume tokens until newline/brace
         do {
             if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-                op->location = parse_loc(parser);
-                break;
-            }
-            parser_next_token(parser);
-        } while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE) && !parser_peek(parser, TK_EOF));
-    }
+            mlir_operation_set_location(op, parse_loc(parser));
+            break;
+        }
+        parser_next_token(parser);
+    } while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE) && !parser_peek(parser, TK_EOF));
+}
     // Or a trailing loc() without preceding ':'
-    if (!op->location && parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        op->location = parse_loc(parser);
+    if (!mlir_operation_get_location(op) && parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
+        mlir_operation_set_location(op, parse_loc(parser));
     }
 
     // Done with this op line
