@@ -2846,20 +2846,16 @@ void parse_affine_for(Parser *parser, MlirOperation *op) {
 
     // Optional trailing loc()
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        op->location = parse_loc(parser);
+        mlir_operation_set_location(op, parse_loc(parser));
     }
 
     symbol_table_pop_scope(&parser->symbol_table);
 
     block->operations = operations.data;
     block->n_operations = operations.size;
-    MlirRegion *region = arena_alloc(parser->arena, struct MlirRegion);
-    region->blocks = arena_alloc_array(parser->arena, MlirBlock*, 1);
-    region->blocks[0] = block;
-    region->n_blocks = 1;
-    op->regions = arena_alloc_array(parser->arena, MlirRegion*, 1);
-    op->regions[0] = region;
-    op->n_regions = 1;
+    MlirRegion *region = mlir_region_create(parser->arena);
+    mlir_region_add_block(parser->arena, region, block);
+    mlir_op_add_region(parser->arena, op, region);
 }
 
 void parse_gpu_launch(Parser *parser, MlirOperation *op) {
@@ -2881,10 +2877,9 @@ void parse_gpu_launch(Parser *parser, MlirOperation *op) {
                     parser_expect(parser, TK_REGISTER);
 
                     MlirValue *arg = create_value_ref(parser->arena, BLOCK_ARG);
-                    arg->register_name = reg_str;
-                    arg->result_index = launch_args.size;
-                    arg->type = arena_alloc(parser->arena, struct MlirType);
-                    arg->type = mlir_type_create_from_string(parser->arena, str_lit("index"));
+                    mlir_value_set_register_name(arg, string_data_or_null(reg_str), reg_str.size);
+                    mlir_value_set_result_index(arg, (uint32_t)launch_args.size);
+                    mlir_value_set_type(arg, mlir_type_create_from_string(parser->arena, str_lit("index")));
 
                     VecValue_push_back(parser->arena, &launch_args, arg);
 
@@ -2917,10 +2912,9 @@ void parse_gpu_launch(Parser *parser, MlirOperation *op) {
                     parser_expect(parser, TK_REGISTER);
 
                     MlirValue *arg = create_value_ref(parser->arena, BLOCK_ARG);
-                    arg->register_name = reg_str;
-                    arg->result_index = launch_args.size;
-                    arg->type = arena_alloc(parser->arena, struct MlirType);
-                    arg->type = mlir_type_create_from_string(parser->arena, str_lit("index"));
+                    mlir_value_set_register_name(arg, string_data_or_null(reg_str), reg_str.size);
+                    mlir_value_set_result_index(arg, (uint32_t)launch_args.size);
+                    mlir_value_set_type(arg, mlir_type_create_from_string(parser->arena, str_lit("index")));
 
                     VecValue_push_back(parser->arena, &launch_args, arg);
 
