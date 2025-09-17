@@ -2659,9 +2659,8 @@ void parse_scf_yield(Parser *parser, MlirOperation *op) {
         }
     }
 
-    op->operands = operands.data;
-    op->n_operands = operands.size;
-    op->op_type = OP_TYPE_SCF_YIELD;
+    set_op_operands(op, operands.data, operands.size);
+    mlir_operation_set_type(op, OP_TYPE_SCF_YIELD);
 
     // Optionally parse ": types" then a trailing loc()
     if (parser_peek(parser, TK_COLON)) {
@@ -2672,7 +2671,7 @@ void parse_scf_yield(Parser *parser, MlirOperation *op) {
         } while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_EOF));
     }
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        op->location = parse_loc(parser);
+        mlir_operation_set_location(op, parse_loc(parser));
     }
     // Skip to eol
     while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_EOF)) parser_next_token(parser);
