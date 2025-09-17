@@ -504,13 +504,7 @@ void parse_tt_get_program_id(Parser *parser, MlirOperation *op) {
     if (parser_peek(parser, TK_NAME)) {
         string axis = parser_token_str(parser);
         parser_expect(parser, TK_NAME);
-
-        MlirAttribute **attrs = arena_alloc_array(parser->arena, MlirAttribute*, 1);
-        attrs[0] = arena_alloc(parser->arena, struct MlirAttribute);
-        attrs[0]->kind = ATTR_KIND_STRING;
-        attrs[0]->data.string_value = axis;
-        attrs[0]->name = str_lit("axis");
-        set_op_attributes(op, attrs, 1);
+        operation_set_single_attribute(parser, op, create_string_attr(parser, str_lit("axis"), axis));
     }
     set_op_operands(op, NULL, 0);
 }
@@ -530,38 +524,39 @@ void parse_tt_splat(Parser *parser, MlirOperation *op) {
         set_op_operands(op, ops, 1);
     }
     // Infer result type if not already parsed from trailing type
-    if (op->n_result_types == 0) {
-        MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
-        types[0] = arena_alloc(parser->arena, struct MlirType);
-        MlirType *operand_type = operand ? operand->type : NULL;
+    if (mlir_operation_num_result_types(op) == 0) {
+        MlirType *operand_type = operand ? mlir_value_get_type(operand) : NULL;
+        MlirType *result_type = NULL;
         if (operand_type) {
             string operand_type_str = mlir_type_to_string(parser->arena, operand_type);
             if (str_eq(operand_type_str, str_lit("!tt.ptr<f32>"))) {
-                types[0] = mlir_type_create_from_string(parser->arena, str_lit("tensor<16x!tt.ptr<f32>>"));
+                result_type = mlir_type_create_from_string(parser->arena, str_lit("tensor<16x!tt.ptr<f32>>"));
             } else if (str_eq(operand_type_str, str_lit("i32"))) {
-                types[0] = mlir_type_create_from_string(parser->arena, str_lit("tensor<16xi32>"));
+                result_type = mlir_type_create_from_string(parser->arena, str_lit("tensor<16xi32>"));
             } else {
-                types[0] = mlir_type_create_from_string(parser->arena, str_lit("tensor<16xi32>"));
+                result_type = mlir_type_create_from_string(parser->arena, str_lit("tensor<16xi32>"));
             }
         } else {
-            types[0] = mlir_type_create_from_string(parser->arena, str_lit("tensor<16xi32>"));
+            result_type = mlir_type_create_from_string(parser->arena, str_lit("tensor<16xi32>"));
         }
+        MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
+        types[0] = result_type;
         set_op_result_types(op, types, 1);
     }
 }
 
 void parse_tt_make_range(Parser *parser, MlirOperation *op) {
-    op->n_operands = 0;
-    op->operands = NULL;
+    set_op_operands(op, NULL, 0);
+    bool have_end = false;
+    int64_t end_val = 0;
+    bool have_start = false;
+    int64_t start_val = 0;
     if (parser_peek(parser, TK_LBRACE)) {
         parser_expect(parser, TK_LBRACE);
-        op->n_attributes = 2;
-        op->attributes = arena_alloc_array(parser->arena, MlirAttribute*, 2);
         if (parser_peek(parser, TK_NAME)) {
             parser_expect(parser, TK_NAME); // end
             parser_expect(parser, TK_EQUAL);
             // capture integer
-            int64_t end_val = 0;
             if (parser_peek(parser, TK_INTEGER)) {
                 string ival = parser_token_str(parser);
                 for (size_t k = 0; k < ival.size; k++) {
@@ -575,16 +570,12 @@ void parse_tt_make_range(Parser *parser, MlirOperation *op) {
                 parser_expect(parser, TK_COLON);
                 if (parser_peek(parser, TK_NAME)) parser_expect(parser, TK_NAME);
             }
-            op->attributes[0] = arena_alloc(parser->arena, struct MlirAttribute);
-            op->attributes[0]->kind = ATTR_KIND_INTEGER;
-            op->attributes[0]->name = str_lit("end");
-            op->attributes[0]->data.integer_value = end_val;
+            have_end = true;
         }
         if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
         if (parser_peek(parser, TK_NAME)) {
             parser_expect(parser, TK_NAME); // start
             parser_expect(parser, TK_EQUAL);
-            int64_t start_val = 0;
             if (parser_peek(parser, TK_INTEGER)) {
                 string ival = parser_token_str(parser);
                 for (size_t k = 0; k < ival.size; k++) {
@@ -597,12 +588,17 @@ void parse_tt_make_range(Parser *parser, MlirOperation *op) {
                 parser_expect(parser, TK_COLON);
                 if (parser_peek(parser, TK_NAME)) parser_expect(parser, TK_NAME);
             }
-            op->attributes[1] = arena_alloc(parser->arena, struct MlirAttribute);
-            op->attributes[1]->kind = ATTR_KIND_INTEGER;
-            op->attributes[1]->name = str_lit("start");
-            op->attributes[1]->data.integer_value = start_val;
+            have_start = true;
         }
         parser_expect(parser, TK_RBRACE);
+    }
+    size_t attr_count = (have_end ? 1 : 0) + (have_start ? 1 : 0);
+    if (attr_count > 0) {
+        MlirAttribute **attrs = arena_alloc_array(parser->arena, MlirAttribute*, attr_count);
+        size_t idx = 0;
+        if (have_end) attrs[idx++] = create_integer_attr(parser, str_lit("end"), end_val);
+        if (have_start) attrs[idx++] = create_integer_attr(parser, str_lit("start"), start_val);
+        set_op_attributes(op, attrs, attr_count);
     }
     // Result type parsed by generic handler after ':'
 }
