@@ -187,7 +187,7 @@ void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op) {
             string type_str = str_lit("");
             if (parse_type_string(parser, &type_str)) {
                 MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
-                types[0] = parse_type_from_string(parser->arena, type_str);
+                types[0] = mlir_type_create_from_string(parser->arena, type_str);
                 set_op_result_types(op, types, 1);
             }
 
@@ -239,7 +239,7 @@ void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op) {
                 string type_res = str_lit("");
                 if (parse_type_string(parser, &type_res)) {
                     MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
-                    types[0] = parse_type_from_string(parser->arena, type_res);
+                    types[0] = mlir_type_create_from_string(parser->arena, type_res);
                     set_op_result_types(op, types, 1);
                 }
                 // Done handling this signature. Do not consume further (keep trailing loc()).
@@ -250,7 +250,7 @@ void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op) {
                 string type_right = str_lit("");
                 if (parse_type_string(parser, &type_right)) {
                     MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
-                    types[0] = parse_type_from_string(parser->arena, type_right);
+                    types[0] = mlir_type_create_from_string(parser->arena, type_right);
                     set_op_result_types(op, types, 1);
                 }
                 // Record source signature string for classic printing
@@ -272,7 +272,7 @@ void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op) {
                 string type_dst = str_lit("");
                 if (parse_type_string(parser, &type_dst)) {
                     MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
-                    types[0] = parse_type_from_string(parser->arena, type_dst);
+                    types[0] = mlir_type_create_from_string(parser->arena, type_dst);
                     set_op_result_types(op, types, 1);
                 }
             } else if (parser_peek(parser, TK_COMMA)) {
@@ -287,7 +287,7 @@ void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op) {
                 // the colon type is the operand type, not the result.
                 if (op->op_type != OP_TYPE_ARITH_CMPI) {
                     MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
-                    types[0] = parse_type_from_string(parser->arena, type_left);
+                    types[0] = mlir_type_create_from_string(parser->arena, type_left);
                     set_op_result_types(op, types, 1);
                 }
             }
@@ -300,7 +300,7 @@ void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op) {
         string type_str = str_lit("");
         if (parse_type_string(parser, &type_str)) {
             MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
-            types[0] = parse_type_from_string(parser->arena, type_str);
+            types[0] = mlir_type_create_from_string(parser->arena, type_str);
             set_op_result_types(op, types, 1);
         }
     }
@@ -364,7 +364,7 @@ void parse_arith_constant(Parser *parser, MlirOperation *op) {
             // Boolean constants have implicit i1 type
             op->n_result_types = 1;
             op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
-            op->result_types[0] = parse_type_from_string(parser->arena, str_lit("i1"));
+            op->result_types[0] = mlir_type_create_from_string(parser->arena, str_lit("i1"));
             return;
         } else {
             // Capture payload like dense<...> verbatim until ':'
@@ -422,7 +422,7 @@ void parse_arith_binary(Parser *parser, MlirOperation *op) {
                     operand2 = create_value_ref(parser->arena, BLOCK_ARG);
                     operand2->register_name = reg_str2;
                     operand2->type = arena_alloc(parser->arena, struct MlirType);
-                    operand2->type = parse_type_from_string(parser->arena, str_lit("unknown"));
+                    operand2->type = mlir_type_create_from_string(parser->arena, str_lit("unknown"));
                 }
                 VecValue_push_back(parser->arena, &operands, operand2);
             }
@@ -436,7 +436,7 @@ void parse_arith_binary(Parser *parser, MlirOperation *op) {
     if (op->n_result_types == 0 && op->op_type == OP_TYPE_ARITH_ADDF) {
         op->n_result_types = 1;
         op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
-        op->result_types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16xf32>"));
+        op->result_types[0] = mlir_type_create_from_string(parser->arena, str_lit("tensor<16xf32>"));
 
     }
 }
@@ -515,7 +515,7 @@ void parse_func_call(Parser *parser, MlirOperation *op) {
             if (parse_type_string(parser, &type_str)) {
                 op->n_result_types = 1;
                 op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
-                op->result_types[0] = parse_type_from_string(parser->arena, type_str);
+                op->result_types[0] = mlir_type_create_from_string(parser->arena, type_str);
             }
         }
     }
@@ -556,16 +556,16 @@ void parse_tt_splat(Parser *parser, MlirOperation *op) {
         types[0] = arena_alloc(parser->arena, struct MlirType);
         MlirType *operand_type = operand ? operand->type : NULL;
         if (operand_type) {
-            string operand_type_str = type_to_string(parser->arena, operand_type);
+            string operand_type_str = mlir_type_to_string(parser->arena, operand_type);
             if (str_eq(operand_type_str, str_lit("!tt.ptr<f32>"))) {
-                types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16x!tt.ptr<f32>>"));
+                types[0] = mlir_type_create_from_string(parser->arena, str_lit("tensor<16x!tt.ptr<f32>>"));
             } else if (str_eq(operand_type_str, str_lit("i32"))) {
-                types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16xi32>"));
+                types[0] = mlir_type_create_from_string(parser->arena, str_lit("tensor<16xi32>"));
             } else {
-                types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16xi32>"));
+                types[0] = mlir_type_create_from_string(parser->arena, str_lit("tensor<16xi32>"));
             }
         } else {
-            types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16xi32>"));
+            types[0] = mlir_type_create_from_string(parser->arena, str_lit("tensor<16xi32>"));
         }
         set_op_result_types(op, types, 1);
     }
@@ -659,7 +659,7 @@ void parse_tt_addptr_load_store(Parser *parser, MlirOperation *op) {
                 op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
                 if (op->op_type == OP_TYPE_TT_ADDPTR) {
                     // For addptr, result type is the pointer tensor type
-                    op->result_types[0] = parse_type_from_string(parser->arena, type_left);
+                    op->result_types[0] = mlir_type_create_from_string(parser->arena, type_left);
                 } else {
                     // For load, convert pointer tensor element to value element type (e.g., f32)
                     // Do a textual conversion: replace '!tt.ptr<...>' payload with element inside or f32
@@ -685,10 +685,10 @@ void parse_tt_addptr_load_store(Parser *parser, MlirOperation *op) {
                         string val_ty = before;
                         val_ty = str_concat(parser->arena, val_ty, elem.size ? elem : str_lit("f32"));
                         val_ty = str_concat(parser->arena, val_ty, after);
-                        op->result_types[0] = parse_type_from_string(parser->arena, val_ty);
+                        op->result_types[0] = mlir_type_create_from_string(parser->arena, val_ty);
                     } else {
                         // Fallback: assume f32 element
-                        op->result_types[0] = parse_type_from_string(parser->arena, s);
+                        op->result_types[0] = mlir_type_create_from_string(parser->arena, s);
                     }
                 }
             }
@@ -864,7 +864,7 @@ void parse_memref_load_or_store(Parser *parser, MlirOperation *op) {
                 val = create_value_ref(parser->arena, BLOCK_ARG);
                 val->register_name = reg;
                 val->type = arena_alloc(parser->arena, struct MlirType);
-                val->type = parse_type_from_string(parser->arena, str_lit("unknown"));
+                val->type = mlir_type_create_from_string(parser->arena, str_lit("unknown"));
 
             }
             VecValue_push_back(parser->arena, &operands, val);
@@ -878,7 +878,7 @@ void parse_memref_load_or_store(Parser *parser, MlirOperation *op) {
                 val = create_value_ref(parser->arena, BLOCK_ARG);
                 val->register_name = reg;
                 val->type = arena_alloc(parser->arena, struct MlirType);
-                val->type = parse_type_from_string(parser->arena, str_lit("unknown"));
+                val->type = mlir_type_create_from_string(parser->arena, str_lit("unknown"));
 
             }
             VecValue_push_back(parser->arena, &operands, val);
@@ -893,7 +893,7 @@ void parse_memref_load_or_store(Parser *parser, MlirOperation *op) {
                 val = create_value_ref(parser->arena, BLOCK_ARG);
                 val->register_name = reg;
                 val->type = arena_alloc(parser->arena, struct MlirType);
-                val->type = parse_type_from_string(parser->arena, str_lit("unknown"));
+                val->type = mlir_type_create_from_string(parser->arena, str_lit("unknown"));
 
             }
             VecValue_push_back(parser->arena, &operands, val);
@@ -915,7 +915,7 @@ void parse_memref_load_or_store(Parser *parser, MlirOperation *op) {
                     val = create_value_ref(parser->arena, BLOCK_ARG);
                     val->register_name = idx;
                     val->type = arena_alloc(parser->arena, struct MlirType);
-                    val->type = parse_type_from_string(parser->arena, str_lit("index"));
+                    val->type = mlir_type_create_from_string(parser->arena, str_lit("index"));
 
                 }
                 VecValue_push_back(parser->arena, &operands, val);
@@ -969,7 +969,7 @@ void parse_vector_print(Parser *parser, MlirOperation *op) {
                     val = create_value_ref(parser->arena, BLOCK_ARG);
                     val->register_name = reg;
                     val->type = arena_alloc(parser->arena, struct MlirType);
-                    val->type = parse_type_from_string(parser->arena, str_lit("unknown"));
+                    val->type = mlir_type_create_from_string(parser->arena, str_lit("unknown"));
 
                 }
                 VecValue_push_back(parser->arena, &operands, val);
@@ -988,7 +988,7 @@ void parse_vector_print(Parser *parser, MlirOperation *op) {
                 val = create_value_ref(parser->arena, BLOCK_ARG);
                 val->register_name = reg;
                 val->type = arena_alloc(parser->arena, struct MlirType);
-                val->type = parse_type_from_string(parser->arena, str_lit("unknown"));
+                val->type = mlir_type_create_from_string(parser->arena, str_lit("unknown"));
 
             }
             VecValue_push_back(parser->arena, &operands, val);
@@ -1163,7 +1163,7 @@ void parse_tt_reduce(Parser *parser, MlirOperation *op) {
             if (parse_type_string(parser, &type_str)) {
                 op->n_result_types = 1;
                 op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
-                op->result_types[0] = parse_type_from_string(parser->arena, type_str);
+                op->result_types[0] = mlir_type_create_from_string(parser->arena, type_str);
             }
         }
     }
@@ -1447,7 +1447,7 @@ void parse_affine_load(Parser *parser, MlirOperation *op) {
                 op->n_result_types = 1;
                 op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
                 op->result_types[0] = arena_alloc(parser->arena, struct MlirType);
-                op->result_types[0] = parse_type_from_string(parser->arena, element_type);
+                op->result_types[0] = mlir_type_create_from_string(parser->arena, element_type);
 
                 parser_expect(parser, TK_RANGLE);
             }
@@ -1479,7 +1479,7 @@ void parse_index_constant(Parser *parser, MlirOperation *op) {
     op->n_result_types = 1;
     op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
     op->result_types[0] = arena_alloc(parser->arena, struct MlirType);
-    op->result_types[0] = parse_type_from_string(parser->arena, str_lit("index"));
+    op->result_types[0] = mlir_type_create_from_string(parser->arena, str_lit("index"));
 
 
     // Consume any trailing loc()
@@ -1553,7 +1553,7 @@ void parse_tensor_splat(Parser *parser, MlirOperation *op) {
                 op->n_result_types = 1;
                 op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
                 op->result_types[0] = arena_alloc(parser->arena, struct MlirType);
-                op->result_types[0] = parse_type_from_string(parser->arena, tensor_type);
+                op->result_types[0] = mlir_type_create_from_string(parser->arena, tensor_type);
 
             }
         }
@@ -1621,7 +1621,7 @@ void parse_arith_select(Parser *parser, MlirOperation *op) {
             op->n_result_types = 1;
             op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
             op->result_types[0] = arena_alloc(parser->arena, struct MlirType);
-            op->result_types[0] = parse_type_from_string(parser->arena, result_type);
+            op->result_types[0] = mlir_type_create_from_string(parser->arena, result_type);
 
         }
     }
@@ -1712,7 +1712,7 @@ void parse_tt_call(Parser *parser, MlirOperation *op) {
             op->n_result_types = 1;
             op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
             op->result_types[0] = arena_alloc(parser->arena, struct MlirType);
-            op->result_types[0] = parse_type_from_string(parser->arena, result_type);
+            op->result_types[0] = mlir_type_create_from_string(parser->arena, result_type);
 
         }
     }
@@ -1783,7 +1783,7 @@ void parse_tensor_collapse_shape(Parser *parser, MlirOperation *op) {
             op->n_result_types = 1;
             op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
             op->result_types[0] = arena_alloc(parser->arena, struct MlirType);
-            op->result_types[0] = parse_type_from_string(parser->arena, result_type);
+            op->result_types[0] = mlir_type_create_from_string(parser->arena, result_type);
 
         }
     }
@@ -2018,16 +2018,16 @@ void parse_tt_func(Parser *parser, MlirOperation *op) {
 
                                     if (parser_peek(parser, TK_RANGLE)) {
                                         parser_expect(parser, TK_RANGLE);
-                                        arg->type = parse_type_from_string(parser->arena, str_concat(parser->arena, str_lit("!tt.ptr<"), str_concat(parser->arena, type_content, str_lit(">"))));
+                                        arg->type = mlir_type_create_from_string(parser->arena, str_concat(parser->arena, str_lit("!tt.ptr<"), str_concat(parser->arena, type_content, str_lit(">"))));
                                     }
                                 } else {
-                                    arg->type = parse_type_from_string(parser->arena, str_lit("!tt.ptr"));
+                                    arg->type = mlir_type_create_from_string(parser->arena, str_lit("!tt.ptr"));
                                 }
                             } else {
-                                arg->type = parse_type_from_string(parser->arena, str_concat(parser->arena, str_lit("!"), type_name));
+                                arg->type = mlir_type_create_from_string(parser->arena, str_concat(parser->arena, str_lit("!"), type_name));
                             }
                         } else {
-                            arg->type = parse_type_from_string(parser->arena, str_lit("!unknown"));
+                            arg->type = mlir_type_create_from_string(parser->arena, str_lit("!unknown"));
                         }
                     } else if (parser_peek(parser, TK_NAME)) {
                         // Simple type like i32 or complex type like tensor<2x256xf32>
@@ -2055,12 +2055,12 @@ void parse_tt_func(Parser *parser, MlirOperation *op) {
                             }
                             // Reconstruct the full type string
                             string full_type = str_concat(parser->arena, type_name, str_concat(parser->arena, str_lit("<"), str_concat(parser->arena, angle_content, str_lit(">"))));
-                            arg->type = parse_type_from_string(parser->arena, full_type);
+                            arg->type = mlir_type_create_from_string(parser->arena, full_type);
                         } else {
-                            arg->type = parse_type_from_string(parser->arena, type_name);
+                            arg->type = mlir_type_create_from_string(parser->arena, type_name);
                         }
                     } else {
-                        arg->type = parse_type_from_string(parser->arena, str_lit("unknown"));
+                        arg->type = mlir_type_create_from_string(parser->arena, str_lit("unknown"));
                     }
 
                     // Optional per-arg attribute dict: { ... }
@@ -2104,11 +2104,11 @@ void parse_tt_func(Parser *parser, MlirOperation *op) {
                                                 parser_next_token(parser);
                                                 if (angle==0 && (parser_peek(parser, TK_RBRACE) || parser_peek(parser, TK_COMMA))) break;
                                             }
-                                            dtype = parse_type_from_string(parser->arena, tstr);
+                                            dtype = mlir_type_create_from_string(parser->arena, tstr);
                                         }
                                         arg->has_divisibility = true;
                                         arg->divisibility_value = v;
-                                        arg->divisibility_type = dtype ? dtype : parse_type_from_string(parser->arena, str_lit("i32"));
+                                        arg->divisibility_type = dtype ? dtype : mlir_type_create_from_string(parser->arena, str_lit("i32"));
                                     }
                                 } else if (str_eq(name, str_lit("tt.max_divisibility"))) {
                                     // Expect '=' integer ':' type
@@ -2133,11 +2133,11 @@ void parse_tt_func(Parser *parser, MlirOperation *op) {
                                                 parser_next_token(parser);
                                                 if (angle==0 && (parser_peek(parser, TK_RBRACE) || parser_peek(parser, TK_COMMA))) break;
                                             }
-                                            dtype = parse_type_from_string(parser->arena, tstr);
+                                            dtype = mlir_type_create_from_string(parser->arena, tstr);
                                         }
                                         arg->has_max_divisibility = true;
                                         arg->max_divisibility_value = v;
-                                        arg->max_divisibility_type = dtype ? dtype : parse_type_from_string(parser->arena, str_lit("i32"));
+                                        arg->max_divisibility_type = dtype ? dtype : mlir_type_create_from_string(parser->arena, str_lit("i32"));
                                     }
                                 }
                             } else {
@@ -2306,7 +2306,7 @@ void parse_func_func(Parser *parser, MlirOperation *op) {
                     parser_expect(parser, TK_COLON);
                     string t = str_lit("");
                     if (parse_type_string(parser, &t)) {
-                        ty = parse_type_from_string(parser->arena, t);
+                        ty = mlir_type_create_from_string(parser->arena, t);
 
                     }
                 }
@@ -2402,7 +2402,7 @@ void parse_scf_if(Parser *parser, MlirOperation *op) {
                         op->n_result_types = 1;
                         op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
                         op->result_types[0] = arena_alloc(parser->arena, struct MlirType);
-                        op->result_types[0] = parse_type_from_string(parser->arena, t);
+                        op->result_types[0] = mlir_type_create_from_string(parser->arena, t);
                     }
                     // Consume rest until ')'
                     while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) parser_next_token(parser);
@@ -2588,7 +2588,7 @@ void parse_scf_for(Parser *parser, MlirOperation *op) {
                     for (size_t i = 0; i < sz; i++) nt[i] = tmp[i];
                     tmp = nt; cap = ncap;
                 }
-                tmp[sz++] = parse_type_from_string(parser->arena, t);
+                tmp[sz++] = mlir_type_create_from_string(parser->arena, t);
                 if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
             }
             parser_expect(parser, TK_RPAREN);
@@ -2603,7 +2603,7 @@ void parse_scf_for(Parser *parser, MlirOperation *op) {
         parser_expect(parser, TK_COLON);
         string t = str_lit("");
         if (parse_type_string(parser, &t)) {
-            iv_type = parse_type_from_string(parser->arena, t);
+            iv_type = mlir_type_create_from_string(parser->arena, t);
         }
     }
 
@@ -2635,7 +2635,7 @@ void parse_scf_for(Parser *parser, MlirOperation *op) {
         } else if (operands.size > 0 && operands.data[0] && operands.data[0]->type) {
             loop_block_arg->type = operands.data[0]->type;
         } else {
-            loop_block_arg->type = parse_type_from_string(parser->arena, str_lit("i32"));
+            loop_block_arg->type = mlir_type_create_from_string(parser->arena, str_lit("i32"));
         }
 
         loop_block_arg->result_index = 0;
@@ -2657,7 +2657,7 @@ void parse_scf_for(Parser *parser, MlirOperation *op) {
         if (op->n_operands >= 4 + (int)i && operands.data[3 + i] && operands.data[3 + i]->type) {
             iter_block_arg->type = operands.data[3 + i]->type;
         } else {
-            iter_block_arg->type = parse_type_from_string(parser->arena, str_lit("unknown"));
+            iter_block_arg->type = mlir_type_create_from_string(parser->arena, str_lit("unknown"));
         }
 
         iter_block_arg->result_index = i + 1;
@@ -2861,7 +2861,7 @@ void parse_affine_for(Parser *parser, MlirOperation *op) {
         ind_var = create_value_ref(parser->arena, BLOCK_ARG);
         ind_var->register_name = iv_name;
         ind_var->type = arena_alloc(parser->arena, struct MlirType);
-        ind_var->type = parse_type_from_string(parser->arena, str_lit("index"));
+        ind_var->type = mlir_type_create_from_string(parser->arena, str_lit("index"));
 
 
         // '=' lower bound
@@ -2912,7 +2912,7 @@ void parse_affine_for(Parser *parser, MlirOperation *op) {
         MlirValue *iv_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
         iv_block_arg->register_name = str_lit("%arg0");
         iv_block_arg->type = arena_alloc(parser->arena, struct MlirType);
-        iv_block_arg->type = parse_type_from_string(parser->arena, str_lit("index"));
+        iv_block_arg->type = mlir_type_create_from_string(parser->arena, str_lit("index"));
         iv_block_arg->result_index = 0;
         iv_block_arg->def = block;
         VecValue_push_back(parser->arena, &block_args, iv_block_arg);
@@ -3023,7 +3023,7 @@ void parse_gpu_launch(Parser *parser, MlirOperation *op) {
                     arg->register_name = reg_str;
                     arg->result_index = launch_args.size;
                     arg->type = arena_alloc(parser->arena, struct MlirType);
-                    arg->type = parse_type_from_string(parser->arena, str_lit("index"));
+                    arg->type = mlir_type_create_from_string(parser->arena, str_lit("index"));
 
                     VecValue_push_back(parser->arena, &launch_args, arg);
 
@@ -3059,7 +3059,7 @@ void parse_gpu_launch(Parser *parser, MlirOperation *op) {
                     arg->register_name = reg_str;
                     arg->result_index = launch_args.size;
                     arg->type = arena_alloc(parser->arena, struct MlirType);
-                    arg->type = parse_type_from_string(parser->arena, str_lit("index"));
+                    arg->type = mlir_type_create_from_string(parser->arena, str_lit("index"));
 
                     VecValue_push_back(parser->arena, &launch_args, arg);
 
@@ -3174,5 +3174,5 @@ void parse_arith_cmpi(Parser *parser, MlirOperation *op) {
     // Result type is i1 for arith.cmpi
     op->n_result_types = 1;
     op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
-    op->result_types[0] = parse_type_from_string(parser->arena, str_lit("i1"));
+    op->result_types[0] = mlir_type_create_from_string(parser->arena, str_lit("i1"));
 }

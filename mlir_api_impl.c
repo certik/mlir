@@ -1,5 +1,6 @@
 #include <base/arena.h>
 #include <base/string.h>
+#include <base/format.h>
 #include <base/hashtable.h>
 #include <base/vector.h>
 #include "tokenizer.h"
@@ -204,7 +205,83 @@ MlirType *mlir_value_get_max_divisibility_type(const MlirValue *value) {
 
 // Type to string
 string mlir_type_to_string(Arena *arena, MlirType *type) {
-    return type_to_string(arena, type);
+    if (!type) {
+        return str_lit("null");
+    }
+
+    switch (type->kind) {
+        case TYPE_KIND_UNKNOWN:
+            return str_lit("?");
+        case TYPE_KIND_OPAQUE:
+            return str_lit("unknown");
+        case TYPE_KIND_INTEGER:
+            if (type->data.integer.is_signed) {
+                return format(arena, str_lit("i{}"), (int64_t)type->data.integer.width);
+            } else {
+                return format(arena, str_lit("ui{}"), (int64_t)type->data.integer.width);
+            }
+        case TYPE_KIND_FLOAT:
+            if (type->data.floating.is_bfloat && type->data.floating.width == 16) {
+                return str_lit("bf16");
+            }
+            return format(arena, str_lit("f{}"), (int64_t)type->data.floating.width);
+        case TYPE_KIND_TENSOR:
+            if (type->data.shaped.element_type) {
+                string elem_str = mlir_type_to_string(arena, type->data.shaped.element_type);
+                if (type->data.shaped.rank > 0 && type->data.shaped.shape) {
+                    // Build shape string like "4x" or "4x2x"
+                    string shape_str = str_lit("");
+                    for (uint32_t i = 0; i < type->data.shaped.rank; i++) {
+                        int64_t dim = type->data.shaped.shape[i];
+                        if (dim < 0) {
+                            shape_str = str_concat(arena, shape_str, str_lit("?x"));
+                        } else {
+                            shape_str = str_concat(arena, shape_str, format(arena, str_lit("{}x"), dim));
+                        }
+                    }
+                    return format(arena, str_lit("tensor<{}{}>"), shape_str, elem_str);
+                } else {
+                    return format(arena, str_lit("tensor<{}>"), elem_str);
+                }
+            }
+            return str_lit("tensor<?>");
+        case TYPE_KIND_MEMREF:
+            if (type->data.shaped.element_type) {
+                string elem_str = mlir_type_to_string(arena, type->data.shaped.element_type);
+                if (type->data.shaped.rank > 0 && type->data.shaped.shape) {
+                    string shape_str = str_lit("");
+                    for (uint32_t i = 0; i < type->data.shaped.rank; i++) {
+                        int64_t dim = type->data.shaped.shape[i];
+                        if (dim < 0) {
+                            shape_str = str_concat(arena, shape_str, str_lit("?x"));
+                        } else {
+                            shape_str = str_concat(arena, shape_str, format(arena, str_lit("{}x"), dim));
+                        }
+                    }
+                    return format(arena, str_lit("memref<{}{}>"), shape_str, elem_str);
+                } else {
+                    return format(arena, str_lit("memref<{}>"), elem_str);
+                }
+            }
+            return str_lit("memref<?>");
+        case TYPE_KIND_POINTER:
+            if (type->data.pointer.element_type) {
+                string elem_str = mlir_type_to_string(arena, type->data.pointer.element_type);
+                // Only show address space if it's explicitly set and not the default (0)
+                if (type->data.pointer.has_address_space && type->data.pointer.address_space != 0) {
+                    return format(arena, str_lit("!tt.ptr<{}, {}>"), elem_str, (int64_t)type->data.pointer.address_space);
+                } else {
+                    return format(arena, str_lit("!tt.ptr<{}>"), elem_str);
+                }
+            }
+            return str_lit("!tt.ptr<?>");
+        case TYPE_KIND_INDEX:
+            return str_lit("index");
+        case TYPE_KIND_FUNCTION:
+            return str_lit("function");
+        default:
+            return str_lit("unknown");
+    }
 }
 
 // Type creation and manipulation
@@ -625,6 +702,328 @@ void mlir_value_set_max_divisibility(MlirValue *value, int64_t div_value, MlirTy
     value->has_max_divisibility = true;
     value->max_divisibility_value = div_value;
     value->max_divisibility_type = type;
+}
+
+// New API functions for parser compatibility
+
+MlirType *mlir_type_create_opaque(Arena *arena, string name) {
+    struct MlirType *type = arena_alloc(arena, struct MlirType);
+    *type = (struct MlirType){0};
+    type->kind = TYPE_KIND_OPAQUE;
+    // Store the name in a way that can be retrieved later if needed
+    return type;
+}
+
+void mlir_type_set_tensor_properties(MlirType *type, const int64_t *shape, size_t rank, MlirType *element_type) {
+    type->kind = TYPE_KIND_TENSOR;
+    type->data.shaped.element_type = element_type;
+    // Note: These functions expect the shape to be pre-allocated, they just set the pointer
+    type->data.shaped.shape = (int64_t*)shape;
+    type->data.shaped.rank = (uint32_t)rank;
+}
+
+void mlir_type_set_memref_properties(MlirType *type, const int64_t *shape, size_t rank, MlirType *element_type) {
+    type->kind = TYPE_KIND_MEMREF;
+    type->data.shaped.element_type = element_type;
+    // Note: These functions expect the shape to be pre-allocated, they just set the pointer
+    type->data.shaped.shape = (int64_t*)shape;
+    type->data.shaped.rank = (uint32_t)rank;
+}
+
+void mlir_type_set_pointer_properties(MlirType *type, MlirType *element_type, bool has_address_space, uint32_t address_space) {
+    type->kind = TYPE_KIND_POINTER;
+    type->data.pointer.element_type = element_type;
+    type->data.pointer.has_address_space = has_address_space;
+    type->data.pointer.address_space = address_space;
+}
+
+// Type introspection functions
+bool mlir_type_is_integer(const MlirType *type) {
+    return type->kind == TYPE_KIND_INTEGER;
+}
+
+bool mlir_type_is_float(const MlirType *type) {
+    return type->kind == TYPE_KIND_FLOAT;
+}
+
+bool mlir_type_is_tensor(const MlirType *type) {
+    return type->kind == TYPE_KIND_TENSOR;
+}
+
+bool mlir_type_is_memref(const MlirType *type) {
+    return type->kind == TYPE_KIND_MEMREF;
+}
+
+bool mlir_type_is_pointer(const MlirType *type) {
+    return type->kind == TYPE_KIND_POINTER;
+}
+
+bool mlir_type_is_index(const MlirType *type) {
+    return type->kind == TYPE_KIND_INDEX;
+}
+
+bool mlir_type_is_unknown(const MlirType *type) {
+    return type->kind == TYPE_KIND_UNKNOWN;
+}
+
+bool mlir_type_is_opaque(const MlirType *type) {
+    return type->kind == TYPE_KIND_OPAQUE;
+}
+
+MlirType *mlir_type_create_from_string(Arena *arena, string type_str) {
+    struct MlirType *type = arena_alloc(arena, struct MlirType);
+
+    // Unknown type (printed as '?')
+    if (str_eq(type_str, str_lit("?"))) {
+        type->kind = TYPE_KIND_UNKNOWN;
+    }
+    // Opaque/unspecified type (printed as 'unknown')
+    else if (str_eq(type_str, str_lit("unknown")) || str_eq(type_str, str_lit("!unknown"))) {
+        type->kind = TYPE_KIND_OPAQUE;
+    }
+    // Parse index type first (before integer check below)
+    else if (str_eq(type_str, str_lit("index"))) {
+        type->kind = TYPE_KIND_INDEX;
+    }
+    // Parse integer types like "i32", "i64", etc.
+    else if (type_str.size >= 2 && type_str.str[0] == 'i') {
+        // Require that all remaining characters are digits
+        bool all_digits = true;
+        for (size_t i = 1; i < type_str.size; i++) {
+            char c = type_str.str[i];
+            if (c < '0' || c > '9') {
+                all_digits = false;
+                break;
+            }
+        }
+        if (all_digits) {
+            uint32_t width = 0;
+            for (size_t i = 1; i < type_str.size; i++) {
+                width = width * 10 + (uint32_t)(type_str.str[i] - '0');
+            }
+            type->kind = TYPE_KIND_INTEGER;
+            type->data.integer.width = width;
+            type->data.integer.is_signed = true;
+        } else {
+            type->kind = TYPE_KIND_INTEGER;
+            type->data.integer.width = 32;
+            type->data.integer.is_signed = true;
+        }
+    }
+    // Parse float types like "f32", "f64", "bf16"
+    else if (type_str.size >= 3 && 
+             (str_eq(str_substr(type_str, 0, 2), str_lit("f")) || 
+              str_eq(str_substr(type_str, 0, 2), str_lit("bf")))) {
+        
+        bool is_bfloat = str_eq(str_substr(type_str, 0, 2), str_lit("bf"));
+        size_t width_start = is_bfloat ? 2 : 1;
+        
+        type->kind = TYPE_KIND_FLOAT;
+        uint32_t width = 32;  // default
+        
+        // Parse width from remaining characters
+        for (size_t i = width_start; i < type_str.size; i++) {
+            if (type_str.str[i] >= '0' && type_str.str[i] <= '9') {
+                if (i == width_start) width = 0;  // Reset on first digit
+                width = width * 10 + (uint32_t)(type_str.str[i] - '0');
+            }
+        }
+        
+        type->data.floating.width = width;
+        type->data.floating.is_bfloat = is_bfloat;
+    }
+    // Parse pointer types like "!tt.ptr<f32, 1>" or "!tt.ptr<f32>"
+    else if (type_str.size >= 8 && str_eq(str_substr(type_str, 0, 8), str_lit("!tt.ptr<"))) {
+        type->kind = TYPE_KIND_POINTER;
+        
+        // Find the content inside < >
+        size_t start = 8; // After "!tt.ptr<"
+        size_t end = type_str.size - 1; // Before ">"
+        if (start < end && type_str.str[end] == '>') {
+            string content = str_substr(type_str, start, end - start);
+            
+            // Look for comma to separate element type and address space
+            size_t comma_pos = content.size;
+            for (size_t i = 0; i < content.size; i++) {
+                if (content.str[i] == ',') {
+                    comma_pos = i;
+                    break;
+                }
+            }
+            
+            if (comma_pos < content.size) {
+                // Has address space
+                string elem_type_str = str_substr(content, 0, comma_pos);
+                type->data.pointer.element_type = mlir_type_create_from_string(arena, elem_type_str);
+                
+                // Parse address space from right of comma (trim spaces)
+                string addr_str = str_substr(content, comma_pos + 1, content.size - comma_pos - 1);
+                while (addr_str.size > 0 && addr_str.str[0] == ' ') {
+                    addr_str = str_substr(addr_str, 1, addr_str.size - 1);
+                }
+                while (addr_str.size > 0 && addr_str.str[addr_str.size - 1] == ' ') {
+                    addr_str = str_substr(addr_str, 0, addr_str.size - 1);
+                }
+                uint32_t as = 0;
+                for (size_t i = 0; i < addr_str.size; i++) {
+                    if (addr_str.str[i] >= '0' && addr_str.str[i] <= '9') {
+                        as = as * 10 + (uint32_t)(addr_str.str[i] - '0');
+                    }
+                }
+                type->data.pointer.address_space = as;
+                type->data.pointer.has_address_space = true;
+            } else {
+                // No comma, assume f32 and address space 1
+                type->data.pointer.element_type = mlir_type_create_from_string(arena, content);
+                type->data.pointer.address_space = 1;
+                type->data.pointer.has_address_space = false;
+            }
+        } else {
+            // Malformed, default to f32 pointer
+            type->data.pointer.element_type = mlir_type_create_from_string(arena, str_lit("f32"));
+            type->data.pointer.address_space = 1;
+            type->data.pointer.has_address_space = false;
+        }
+    }
+    // Parse tensor types like "tensor<4xi32>" or "tensor<4x!tt.ptr<f32,1>>"
+    else if (type_str.size >= 6 && str_eq(str_substr(type_str, 0, 6), str_lit("tensor"))) {
+        type->kind = TYPE_KIND_TENSOR;
+        
+        // Find the content inside < >
+        size_t start = 7; // After "tensor<"
+        size_t end = type_str.size - 1; // Before ">"
+        if (start < end && type_str.str[6] == '<' && type_str.str[end] == '>') {
+            string content = str_substr(type_str, start, end - start);
+            
+            // Parse dimensions and element type (e.g., "4xi32" or "4x!tt.ptr<f32,1>")
+            // Find the last 'x' to separate dimensions from element type
+            int last_x_pos = -1;
+            int bracket_depth = 0;
+            for (int i = content.size - 1; i >= 0; i--) {
+                if (content.str[i] == '>') bracket_depth++;
+                else if (content.str[i] == '<') bracket_depth--;
+                else if (content.str[i] == 'x' && bracket_depth == 0) {
+                    last_x_pos = i;
+                    break;
+                }
+            }
+            
+            if (last_x_pos >= 0) {
+                string elem_type_str = str_substr(content, last_x_pos + 1, content.size - last_x_pos - 1);
+                type->data.shaped.element_type = mlir_type_create_from_string(arena, elem_type_str);
+                
+                // Parse shape dims from tokens separated by 'x'
+                string shape_str = str_substr(content, 0, last_x_pos);
+                uint32_t dims = 1;
+                for (size_t i = 0; i < shape_str.size; i++) if (shape_str.str[i] == 'x') dims++;
+                type->data.shaped.rank = dims;
+                type->data.shaped.shape = arena_alloc_array(arena, int64_t, dims);
+                size_t pos = 0; uint32_t dim_idx = 0;
+                while (pos <= shape_str.size && dim_idx < dims) {
+                    size_t next = pos;
+                    while (next < shape_str.size && shape_str.str[next] != 'x') next++;
+                    string tok = str_substr(shape_str, pos, next - pos);
+                    if (tok.size == 1 && tok.str[0] == '?') {
+                        type->data.shaped.shape[dim_idx++] = -1;
+                    } else {
+                        int64_t val = 0;
+                        for (size_t j = 0; j < tok.size; j++) {
+                            if (tok.str[j] >= '0' && tok.str[j] <= '9') {
+                                val = val * 10 + (tok.str[j] - '0');
+                            }
+                        }
+                        type->data.shaped.shape[dim_idx++] = val;
+                    }
+                    pos = next + 1;
+                }
+            } else {
+                // No 'x' found, treat entire content as element type
+                type->data.shaped.element_type = mlir_type_create_from_string(arena, content);
+                type->data.shaped.rank = 0;
+                type->data.shaped.shape = NULL;
+            }
+        } else {
+            // Malformed tensor, default to f32
+            type->data.shaped.element_type = mlir_type_create_from_string(arena, str_lit("f32"));
+            type->data.shaped.rank = 0;
+            type->data.shaped.shape = NULL;
+        }
+    }
+    // Parse memref types like "memref<2x3xf32>"
+    else if (type_str.size >= 6 && str_eq(str_substr(type_str, 0, 6), str_lit("memref"))) {
+        type->kind = TYPE_KIND_MEMREF;
+        type->data.shaped.element_type = NULL;
+        type->data.shaped.shape = NULL;
+        type->data.shaped.rank = 0;
+        // Extract inside of angle brackets
+        size_t start = 7; // after "memref<"
+        size_t end = type_str.size - 1; // before '>'
+        if (start < end && type_str.str[6] == '<' && type_str.str[end] == '>') {
+            string content = str_substr(type_str, start, end - start);
+            // Find last 'x' not inside nested '<>' to split shape and element type
+            int last_x_pos = -1;
+            int bracket_depth = 0;
+            for (int i = (int)content.size - 1; i >= 0; i--) {
+                char c = content.str[i];
+                if (c == '>') bracket_depth++;
+                else if (c == '<') bracket_depth--;
+                else if (c == 'x' && bracket_depth == 0) {
+                    last_x_pos = i;
+                    break;
+                }
+            }
+            if (last_x_pos >= 0) {
+                string elem_type_str = str_substr(content, last_x_pos + 1, content.size - last_x_pos - 1);
+                type->data.shaped.element_type = mlir_type_create_from_string(arena, elem_type_str);
+                string shape_str = str_substr(content, 0, last_x_pos);
+                // Count dims
+                uint32_t dims = 1;
+                for (size_t i = 0; i < shape_str.size; i++) if (shape_str.str[i] == 'x') dims++;
+                type->data.shaped.rank = dims;
+                type->data.shaped.shape = arena_alloc_array(arena, int64_t, dims);
+                // Parse each dimension token separated by 'x'
+                size_t pos = 0, dim_idx = 0;
+                while (pos <= shape_str.size && dim_idx < dims) {
+                    size_t next = pos;
+                    while (next < shape_str.size && shape_str.str[next] != 'x') next++;
+                    string tok = str_substr(shape_str, pos, next - pos);
+                    // Parse integer dim or '?' for dynamic
+                    if (tok.size == 1 && tok.str[0] == '?') {
+                        type->data.shaped.shape[dim_idx++] = -1;
+                    } else {
+                        int64_t val = 0;
+                        for (size_t j = 0; j < tok.size; j++) {
+                            if (tok.str[j] >= '0' && tok.str[j] <= '9') {
+                                val = val * 10 + (tok.str[j] - '0');
+                            }
+                        }
+                        type->data.shaped.shape[dim_idx++] = val;
+                    }
+                    pos = next + 1;
+                }
+            } else {
+                // No 'x' found, treat entire content as element type
+                type->data.shaped.element_type = mlir_type_create_from_string(arena, content);
+                type->data.shaped.rank = 0;
+                type->data.shaped.shape = NULL;
+            }
+        }
+    }
+    // Default to integer if unrecognized
+    else {
+        type->kind = TYPE_KIND_INTEGER;
+        type->data.integer.width = 32;
+        type->data.integer.is_signed = true;
+    }
+    return type;
+}
+
+void mlir_operation_set_type(MlirOperation *op, OpType type) {
+    op->op_type = type;
+}
+
+void mlir_operation_set_name_string(MlirOperation *op, string name) {
+    op->opname = name;
 }
 
 #ifdef __cplusplus

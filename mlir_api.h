@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <base/arena.h>
 #include <base/string.h>
+#include <base/vector.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,6 +23,11 @@ typedef struct MlirType MlirType;
 typedef struct MlirAttribute MlirAttribute;
 typedef struct MlirLocation MlirLocation;
 typedef struct MlirParser MlirParser;
+
+// Vector types for parsing operations  
+DEFINE_VECTOR_FOR_TYPE(MlirOperation*, VecOperation)
+DEFINE_VECTOR_FOR_TYPE(MlirValue*, VecValue)
+DEFINE_VECTOR_FOR_TYPE(MlirBlock*, VecBlock)
 
 // Operation type enumeration.
 typedef enum {
@@ -200,9 +206,24 @@ MlirType *mlir_type_create_unknown(Arena *arena);
 MlirType *mlir_type_create_tensor(Arena *arena, const int64_t *shape, size_t rank, MlirType *element_type);
 MlirType *mlir_type_create_memref(Arena *arena, const int64_t *shape, size_t rank, MlirType *element_type);
 MlirType *mlir_type_create_pointer(Arena *arena, MlirType *element_type, bool has_address_space, uint32_t address_space);
+MlirType *mlir_type_create_opaque(Arena *arena, string name);
+MlirType *mlir_type_create_from_string(Arena *arena, string type_str);
 void mlir_type_set_integer_properties(MlirType *type, uint32_t width, bool is_signed);
 void mlir_type_set_float_properties(MlirType *type, uint32_t width, bool is_bfloat);
+void mlir_type_set_tensor_properties(MlirType *type, const int64_t *shape, size_t rank, MlirType *element_type);
+void mlir_type_set_memref_properties(MlirType *type, const int64_t *shape, size_t rank, MlirType *element_type);
+void mlir_type_set_pointer_properties(MlirType *type, MlirType *element_type, bool has_address_space, uint32_t address_space);
 string mlir_type_to_string(Arena *arena, MlirType *type);
+
+// Type introspection functions
+bool mlir_type_is_integer(const MlirType *type);
+bool mlir_type_is_float(const MlirType *type);
+bool mlir_type_is_tensor(const MlirType *type);
+bool mlir_type_is_memref(const MlirType *type);
+bool mlir_type_is_pointer(const MlirType *type);
+bool mlir_type_is_index(const MlirType *type);
+bool mlir_type_is_unknown(const MlirType *type);
+bool mlir_type_is_opaque(const MlirType *type);
 
 // Attribute creation and manipulation
 MlirAttribute *mlir_attribute_create_integer(Arena *arena, int64_t value);
@@ -256,6 +277,8 @@ void mlir_operation_set_unnumbered_loc_def(MlirOperation *op, MlirLocation *loc)
 void mlir_operation_append_attribute(Arena *arena, MlirOperation *op, MlirAttribute *attr);
 int64_t mlir_operation_get_source_line_start(const MlirOperation *op);
 MlirLocation *mlir_operation_get_unnumbered_loc_def(const MlirOperation *op);
+void mlir_operation_set_type(MlirOperation *op, OpType type);
+void mlir_operation_set_name_string(MlirOperation *op, string name);
 
 // Parser functions
 MlirParser *mlir_parser_create(Arena *arena);

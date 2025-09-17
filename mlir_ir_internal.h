@@ -137,10 +137,7 @@ struct MlirRegion {
     uint64_t n_blocks;
 };
 
-// Common vectors used internally
-DEFINE_VECTOR_FOR_TYPE(struct MlirOperation*, VecOperation)
-DEFINE_VECTOR_FOR_TYPE(struct MlirValue*, VecValue)
-DEFINE_VECTOR_FOR_TYPE(struct MlirBlock*, VecBlock)
+// Note: Vector types now defined in mlir_api.h
 
 #ifdef __cplusplus
 }
