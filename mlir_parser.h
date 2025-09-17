@@ -29,9 +29,6 @@ static inline bool string_equal(string a, string b) {
     return str_eq(a, b);
 }
 
-// Forward declare ValueRef for hashtable
-typedef struct ValueRef ValueRef;
-
 // Value kind used for SSA values
 typedef enum ValueKind {
     BLOCK_ARG,
@@ -41,7 +38,7 @@ typedef enum ValueKind {
 // Define hashtable for string -> ValueRef* mapping
 #define SymbolTable_HASH string_hash
 #define SymbolTable_EQUAL string_equal
-DEFINE_HASHTABLE_FOR_TYPES(string, ValueRef*, SymbolTable)
+DEFINE_HASHTABLE_FOR_TYPES(string, MlirValue*, SymbolTable)
 
 // Scoped symbol table for SSA values
 typedef struct ScopedSymbolTable {
@@ -50,13 +47,10 @@ typedef struct ScopedSymbolTable {
     size_t scope_capacity;
 } ScopedSymbolTable;
 
-// Forward declare Location for hashtable
-typedef struct Location Location;
-
 // Location map for named location references
 #define LocationMap_HASH string_hash
 #define LocationMap_EQUAL string_equal
-DEFINE_HASHTABLE_FOR_TYPES(string, Location*, LocationMap)
+DEFINE_HASHTABLE_FOR_TYPES(string, MlirLocation*, LocationMap)
 
 typedef struct {
     Arena *arena;
@@ -67,7 +61,7 @@ typedef struct {
     ScopedSymbolTable symbol_table;
     LocationMap location_map;  // For #locN -> Location mapping
     int next_loc_id;          // Counter for generating #locN IDs
-    Location *unnumbered_loc_def; // Optional: definition of unnumbered '#loc' at file start
+    MlirLocation *unnumbered_loc_def; // Optional: definition of unnumbered '#loc' at file start
     // Parsing mode flag to enable robust trailing comment capture in special contexts
     bool capture_trailing_comments;
 } Parser;
@@ -78,21 +72,15 @@ typedef struct {
 void symbol_table_init(Arena *arena, ScopedSymbolTable *st);
 void symbol_table_push_scope(Arena *arena, ScopedSymbolTable *st);
 void symbol_table_pop_scope(ScopedSymbolTable *st);
-void symbol_table_add_value(Arena *arena, ScopedSymbolTable *st, string name, ValueRef *value);
-ValueRef* symbol_table_lookup(ScopedSymbolTable *st, string name);
+void symbol_table_add_value(Arena *arena, ScopedSymbolTable *st, string name, MlirValue *value);
+MlirValue* symbol_table_lookup(ScopedSymbolTable *st, string name);
 
 // Helper function to create properly initialized ValueRef
-ValueRef* create_value_ref(Arena *arena, ValueKind kind);
+MlirValue* create_value_ref(Arena *arena, ValueKind kind);
 
 // Forward declarations for core IR nodes (opaque here)
-typedef struct Operation Operation;
-typedef struct Region Region;
-typedef struct Block Block;
-typedef struct Type Type;
-typedef struct Attribute Attribute;
-
 // Specialized parsing functions
-void parse_gpu_launch(Parser *parser, Operation *op);
+void parse_gpu_launch(Parser *parser, MlirOperation *op);
 
 string tokentype_to_string(TokenType tt);
 void parser_init(Arena *arena, Parser *parser, string text);
@@ -102,18 +90,18 @@ void parser_expect(Parser *parser, TokenType s);
 string parser_token_str(Parser *parser);
 void parser_error(Parser *parser, string msg, uint64_t first, uint64_t last);
 void parser_warning(Parser *parser, string msg, uint64_t first, uint64_t last);
-Operation* parse_module(Parser *parser);
-Location* parse_loc(Parser *parser);
-Operation* parse_operation(Parser *parser);
-Region* parse_region(Parser *parser);
-Block* parse_block(Parser *parser);
+MlirOperation* parse_module(Parser *parser);
+MlirLocation* parse_loc(Parser *parser);
+MlirOperation* parse_operation(Parser *parser);
+MlirRegion* parse_region(Parser *parser);
+MlirBlock* parse_block(Parser *parser);
 
 string op_type_to_string(OpType type);
 OpType op_string_to_type(string name);
 
 // TODO: use Type by value
-Type* parse_type_from_string(Arena *arena, string type_str);
-string type_to_string(Arena *arena, Type *type);
+MlirType* parse_type_from_string(Arena *arena, string type_str);
+string type_to_string(Arena *arena, MlirType *type);
 
 #ifdef __cplusplus
 }

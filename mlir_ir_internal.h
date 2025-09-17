@@ -25,7 +25,7 @@ typedef enum {
     TYPE_KIND_POINTER
 } TypeKind;
 
-typedef struct Type {
+struct MlirType {
     TypeKind kind;
     union {
         struct {
@@ -37,19 +37,19 @@ typedef struct Type {
             bool is_bfloat;
         } floating;
         struct {
-            struct Type *element_type;
+            struct MlirType *element_type;
             int64_t *shape;
             uint32_t rank;
         } shaped;  // memref/tensor
         struct {
-            struct Type *element_type;
+            struct MlirType *element_type;
             uint32_t address_space;
             bool has_address_space;
         } pointer;
     } data;
-} Type;
+};
 
-typedef struct Attribute {
+struct MlirAttribute {
     enum {
         ATTR_KIND_INTEGER,
         ATTR_KIND_FLOAT,
@@ -64,12 +64,12 @@ typedef struct Attribute {
         string string_value;
         bool bool_value;
         struct {
-            struct Attribute **elements;
+            struct MlirAttribute **elements;
             size_t count;
         } array;
     } data;
     string name;
-} Attribute;
+};
 
 typedef enum {
     LOC_KIND_UNKNOWN,
@@ -80,7 +80,7 @@ typedef enum {
     LOC_KIND_REF
 } LocationKind;
 
-typedef struct Location {
+struct MlirLocation {
     LocationKind kind;
     union {
         struct { string filename; int line; int column; } file;
@@ -88,63 +88,59 @@ typedef struct Location {
         struct { int ref_id; } ref;
     } data;
     string original_text;
-} Location;
+};
 
-typedef struct ValueRef {
+struct MlirValue {
     int /*ValueKind*/ kind;
     void* def;               // Operation* or Block*
     uint32_t result_index;
-    Type *type;
+    struct MlirType *type;
     string register_name;
 
-    Location *location;
+    struct MlirLocation *location;
     bool has_divisibility;
     int64_t divisibility_value;
-    Type *divisibility_type;
+    struct MlirType *divisibility_type;
     bool has_max_divisibility;
     int64_t max_divisibility_value;
-    Type *max_divisibility_type;
-} ValueRef;
+    struct MlirType *max_divisibility_type;
+};
 
-typedef struct Operation Operation;
-typedef struct Block Block;
-typedef struct Region Region;
-
-struct Operation {
+struct MlirOperation {
     OpType op_type;
-    ValueRef **operands;
+    struct MlirValue **operands;
     uint64_t n_operands;
-    Type **result_types;
+    struct MlirType **result_types;
     uint64_t n_result_types;
-    Attribute **attributes;
+    struct MlirAttribute **attributes;
     uint64_t n_attributes;
-    Region **regions;
+    struct MlirRegion **regions;
     uint64_t n_regions;
     string opname;
-    ValueRef **results;
+    struct MlirValue **results;
     uint64_t n_results;
-    Location *location;
-    Location *unnumbered_loc_def;
+    struct MlirLocation *location;
+    struct MlirLocation *unnumbered_loc_def;
     string trailing_comment;
     int64_t source_line_start;
 };
 
-struct Block {
-    Operation **operations;
+struct MlirBlock {
+    struct MlirOperation **operations;
     uint64_t n_operations;
-    ValueRef **arguments;
+    struct MlirValue **arguments;
     uint64_t n_arguments;
 };
 
-struct Region {
-    Block **blocks;
+struct MlirRegion {
+    struct MlirBlock **blocks;
     uint64_t n_blocks;
 };
 
 // Common vectors used internally
-DEFINE_VECTOR_FOR_TYPE(Operation*, VecOperation)
-DEFINE_VECTOR_FOR_TYPE(ValueRef*, VecValueRef)
-DEFINE_VECTOR_FOR_TYPE(Block*, VecBlock)
+DEFINE_VECTOR_FOR_TYPE(struct MlirOperation*, VecOperation)
+DEFINE_VECTOR_FOR_TYPE(struct MlirValue*, VecValue)
+DEFINE_VECTOR_FOR_TYPE(struct MlirBlock*, VecBlock)
 
 #ifdef __cplusplus
 }

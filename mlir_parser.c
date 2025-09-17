@@ -49,7 +49,7 @@ void symbol_table_pop_scope(ScopedSymbolTable *st) {
     }
 }
 
-void symbol_table_add_value(Arena *arena, ScopedSymbolTable *st, string name, ValueRef *value) {
+void symbol_table_add_value(Arena *arena, ScopedSymbolTable *st, string name, MlirValue *value) {
     if (st->num_scopes == 0) {
         // Create a default scope if none exists
         symbol_table_push_scope(arena, st);
@@ -57,10 +57,10 @@ void symbol_table_add_value(Arena *arena, ScopedSymbolTable *st, string name, Va
     SymbolTable_insert(arena, &st->scopes[st->num_scopes - 1], name, value);
 }
 
-ValueRef* symbol_table_lookup(ScopedSymbolTable *st, string name) {
+MlirValue* symbol_table_lookup(ScopedSymbolTable *st, string name) {
     // Search from innermost to outermost scope
     for (size_t i = st->num_scopes; i > 0; i--) {
-        ValueRef **found = SymbolTable_get(&st->scopes[i - 1], name);
+        MlirValue **found = SymbolTable_get(&st->scopes[i - 1], name);
         if (found && *found) {
             return *found;
         }
@@ -68,9 +68,9 @@ ValueRef* symbol_table_lookup(ScopedSymbolTable *st, string name) {
     return NULL;
 }
 
-ValueRef* create_value_ref(Arena *arena, ValueKind kind) {
+MlirValue* create_value_ref(Arena *arena, ValueKind kind) {
     MlirValue *value = mlir_value_create(arena, kind);
-    return (ValueRef*)value;
+    return (MlirValue*)value;
 }
 
 string tokentype_to_string(TokenType tt) {
@@ -500,7 +500,7 @@ static bool parse_type_string(Parser *parser, string *out) {
     return true;
 }
 
-static void sync_operation_to_api(Parser *parser, Operation *op) {
+static void sync_operation_to_api(Parser *parser, MlirOperation *op) {
     if (!op) return;
     mlir_operation_set_attributes((MlirOperation*)op, (MlirAttribute**)op->attributes, op->n_attributes);
     mlir_operation_set_operands((MlirOperation*)op, (MlirValue**)op->operands, op->n_operands);
@@ -513,7 +513,7 @@ static void sync_operation_to_api(Parser *parser, Operation *op) {
 
     if (op->n_regions > 0 && mlir_operation_num_regions((MlirOperation*)op) == 0) {
         for (size_t i = 0; i < op->n_regions; i++) {
-            Region *region = op->regions[i];
+            MlirRegion *region = op->regions[i];
             if (region) {
                 mlir_op_add_region(parser->arena, (MlirOperation*)op, (MlirRegion*)region);
             }
@@ -521,8 +521,8 @@ static void sync_operation_to_api(Parser *parser, Operation *op) {
     }
 }
 
-Type* parse_type_from_string(Arena *arena, string type_str) {
-    Type *type = arena_alloc(arena, Type);
+MlirType* parse_type_from_string(Arena *arena, string type_str) {
+    struct MlirType *type = arena_alloc(arena, struct MlirType);
 
     // Unknown type (printed as '?')
     if (str_eq(type_str, str_lit("?"))) {
@@ -585,7 +585,7 @@ Type* parse_type_from_string(Arena *arena, string type_str) {
         type->kind = TYPE_KIND_POINTER;
         type->data.pointer.address_space = 1; // Default
         type->data.pointer.has_address_space = false;
-        type->data.pointer.element_type = arena_alloc(arena, Type);
+        type->data.pointer.element_type = arena_alloc(arena, struct MlirType);
 
         // Find the content inside < >
         size_t start = 8; // After "!tt.ptr<"
@@ -772,7 +772,7 @@ Type* parse_type_from_string(Arena *arena, string type_str) {
     return type;
 }
 
-string type_to_string(Arena *arena, Type *type) {
+string type_to_string(Arena *arena, MlirType *type) {
     if (!type) {
         return str_lit("null");
     }
@@ -855,11 +855,11 @@ string type_to_string(Arena *arena, Type *type) {
     }
 }
 
-Operation* parse_operation(Parser *parser);
+MlirOperation* parse_operation(Parser *parser);
 
-Block* parse_block(Parser *parser) {
-    VecValueRef block_args;
-    VecValueRef_reserve(parser->arena, &block_args, 4);
+MlirBlock* parse_block(Parser *parser) {
+    VecValue block_args;
+    VecValue_reserve(parser->arena, &block_args, 4);
 
     if (parser_peek(parser, TK_CARET_NAME)) {
         parser_expect(parser, TK_CARET_NAME);
@@ -875,7 +875,7 @@ Block* parse_block(Parser *parser) {
                     parser_expect(parser, TK_COLON);
 
                     // Create block argument value
-                    ValueRef *block_arg = (ValueRef*)mlir_value_create(parser->arena, BLOCK_ARG);
+                    MlirValue *block_arg = (MlirValue*)mlir_value_create(parser->arena, BLOCK_ARG);
                     mlir_value_set_register_name((MlirValue*)block_arg, arg_name.str, arg_name.size);
                     mlir_value_set_result_index((MlirValue*)block_arg, (uint32_t)block_args.size);
                     mlir_value_set_def((MlirValue*)block_arg, NULL);
@@ -889,7 +889,7 @@ Block* parse_block(Parser *parser) {
                     }
                     mlir_value_set_type((MlirValue*)block_arg, arg_type);
 
-                    VecValueRef_push_back(parser->arena, &block_args, block_arg);
+                    VecValue_push_back(parser->arena, &block_args, block_arg);
 
                     // Register block argument in symbol table
                     symbol_table_add_value(parser->arena, &parser->symbol_table, arg_name, block_arg);
@@ -913,7 +913,7 @@ Block* parse_block(Parser *parser) {
     VecOperation operations;
     VecOperation_reserve(parser->arena, &operations, 16);
     while (! (parser_peek(parser, TK_RBRACE) || parser_peek(parser, TK_CARET_NAME))) {
-        Operation *op = parse_operation(parser);
+        MlirOperation *op = parse_operation(parser);
         // Capture trailing inline comment based on the original line where the op started
         // This avoids mis-associating comments if tokenization peeks into the next line.
         if (op && op->source_line_start >= 0) {
@@ -950,19 +950,19 @@ Block* parse_block(Parser *parser) {
         }
     }
 
-    Block *block = (Block*)mlir_block_create(parser->arena);
+    MlirBlock *block = mlir_block_create(parser->arena);
     for (size_t i = 0; i < block_args.size; i++) {
-        mlir_block_add_argument(parser->arena, (MlirBlock*)block, (MlirValue*)block_args.data[i]);
+        mlir_block_add_argument(parser->arena, block, block_args.data[i]);
     }
     for (size_t i = 0; i < operations.size; i++) {
-        mlir_block_add_operation(parser->arena, (MlirBlock*)block, (MlirOperation*)operations.data[i]);
+        mlir_block_add_operation(parser->arena, block, operations.data[i]);
     }
 
     return block;
 }
 
 // Parses a region from { to } inclusive
-Region* parse_region(Parser *parser) {
+MlirRegion* parse_region(Parser *parser) {
     parser_expect(parser, TK_LBRACE_END);
     parser_expect(parser, TK_NEWLINE);
 
@@ -972,7 +972,7 @@ Region* parse_region(Parser *parser) {
     VecBlock blocks;
     VecBlock_reserve(parser->arena, &blocks, 8);
     while (!parser_peek(parser, TK_RBRACE)) {
-        Block *block = parse_block(parser);
+        MlirBlock *block = parse_block(parser);
         VecBlock_push_back(parser->arena, &blocks, block);
     }
     parser_expect(parser, TK_RBRACE);
@@ -980,7 +980,7 @@ Region* parse_region(Parser *parser) {
     // Pop scope when leaving region
     symbol_table_pop_scope(&parser->symbol_table);
 
-    Region *region = (Region*)mlir_region_create(parser->arena);
+    MlirRegion *region = (MlirRegion*)mlir_region_create(parser->arena);
     for (size_t i = 0; i < blocks.size; i++) {
         mlir_region_add_block(parser->arena, (MlirRegion*)region, (MlirBlock*)blocks.data[i]);
     }
@@ -988,16 +988,16 @@ Region* parse_region(Parser *parser) {
     return region;
 }
 
-Operation* parse_module(Parser *parser) {
+MlirOperation* parse_module(Parser *parser) {
     // Capture any top-of-file #loc definitions before the module
-    Location *loc0_def = NULL;
+    MlirLocation *loc0_def = NULL;
     while (parser_peek(parser, TK_HASH_NAME)) {
         string hash_name = parser_token_str(parser);
         parser_next_token(parser); // consume '#name'
         if (parser_peek(parser, TK_EQUAL)) {
             parser_next_token(parser); // consume '='
             if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-                Location *loc_def = parse_loc(parser);
+                MlirLocation *loc_def = parse_loc(parser);
                 if (loc_def) {
                     LocationMap_insert(parser->arena, &parser->location_map, hash_name, loc_def);
                     if (hash_name.size == 4 && strncmp(hash_name.str, "#loc", 4) == 0) {
@@ -1016,7 +1016,7 @@ Operation* parse_module(Parser *parser) {
         while (parser_peek(parser, TK_NEWLINE) || parser_peek(parser, TK_WHITESPACE)) parser_next_token(parser);
     }
 
-    Operation *op = parse_operation(parser);
+    MlirOperation *op = parse_operation(parser);
     if (op->op_type != OP_TYPE_MODULE) {
         parser_error(parser, str_lit("The top level operation should be a module"), 0, 0);
     }
@@ -1034,7 +1034,7 @@ Operation* parse_module(Parser *parser) {
         if (parser_peek(parser, TK_EQUAL)) {
             parser_next_token(parser); // consume '='
             if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-                Location *loc_def = parse_loc(parser);
+                MlirLocation *loc_def = parse_loc(parser);
                 if (loc_def) {
                     LocationMap_insert(parser->arena, &parser->location_map, hash_name, loc_def);
                 }
@@ -1054,12 +1054,11 @@ Operation* parse_module(Parser *parser) {
 }
 
 // parse loc()
-Location* parse_loc(Parser *parser) {
+MlirLocation* parse_loc(Parser *parser) {
     Arena *arena = parser->arena;
-    MlirLocation *mlir_loc = mlir_location_create(arena);
-    mlir_location_set_kind(mlir_loc, MLIR_LOC_UNKNOWN);
-    mlir_location_set_original_text(mlir_loc, str_lit(""));
-    Location *loc = (Location*)mlir_loc;
+    MlirLocation *loc = mlir_location_create(arena);
+    mlir_location_set_kind(loc, MLIR_LOC_UNKNOWN);
+    mlir_location_set_original_text(loc, str_lit(""));
     
     
     parser_expect(parser, TK_NAME); // 'loc'
@@ -1092,8 +1091,8 @@ Location* parse_loc(Parser *parser) {
         }
         parser_expect(parser, TK_RPAREN);
         text = str_concat(parser->arena, text, str_lit(")"));
-        mlir_location_set_kind(mlir_loc, MLIR_LOC_UNKNOWN);
-        mlir_location_set_original_text(mlir_loc, text);
+        mlir_location_set_kind(loc, MLIR_LOC_UNKNOWN);
+        mlir_location_set_original_text(loc, text);
         return loc;
     } else if (parser_peek(parser, TK_STRING)) {
         // loc("filename":line:col) or loc("name")
@@ -1121,11 +1120,11 @@ Location* parse_loc(Parser *parser) {
                     }
                 }
 
-                mlir_location_set_file_data(mlir_loc, filename, line, column);
+                mlir_location_set_file_data(loc, filename, line, column);
             }
         } else {
             // Named location: loc("name")
-            mlir_location_set_name_data(mlir_loc, filename);
+            mlir_location_set_name_data(loc, filename);
         }
     } else if (parser_peek(parser, TK_HASH_NAME)) {
         // Reference location: loc(#locN)
@@ -1135,7 +1134,7 @@ Location* parse_loc(Parser *parser) {
         if (hash_name.size > 4 && strncmp(hash_name.str, "#loc", 4) == 0) {
             ref_id = atoi(hash_name.str + 4);
         }
-        mlir_location_set_ref_id(mlir_loc, ref_id);
+        mlir_location_set_ref_id(loc, ref_id);
     } else {
         // Unknown location format, just consume tokens until ')'
         while (!(parser_peek(parser, TK_RPAREN))) {
@@ -1146,29 +1145,29 @@ Location* parse_loc(Parser *parser) {
     parser_expect(parser, TK_RPAREN);
     
     // Capture original text for printing (simple reconstruction)
-    MlirLocationKind stored_kind = mlir_location_get_kind(mlir_loc);
+    MlirLocationKind stored_kind = mlir_location_get_kind(loc);
     if (stored_kind == MLIR_LOC_FILE) {
-        mlir_location_set_original_text(mlir_loc,
+        mlir_location_set_original_text(loc,
             format(parser->arena, str_lit("loc({}:{}:{})"),
-                   mlir_location_get_file_filename(mlir_loc),
-                   (int64_t)mlir_location_get_file_line(mlir_loc),
-                   (int64_t)mlir_location_get_file_column(mlir_loc)));
+                   mlir_location_get_file_filename(loc),
+                   (int64_t)mlir_location_get_file_line(loc),
+                   (int64_t)mlir_location_get_file_column(loc)));
     } else if (stored_kind == MLIR_LOC_NAME) {
-        mlir_location_set_original_text(mlir_loc,
-            format(parser->arena, str_lit("loc(\"{}\")"), mlir_location_get_name(mlir_loc)));
+        mlir_location_set_original_text(loc,
+            format(parser->arena, str_lit("loc(\"{}\")"), mlir_location_get_name(loc)));
     } else if (stored_kind == MLIR_LOC_REF) {
-        mlir_location_set_original_text(mlir_loc,
-            format(parser->arena, str_lit("loc(#loc{})"), (int64_t)mlir_location_get_ref_id(mlir_loc)));
+        mlir_location_set_original_text(loc,
+            format(parser->arena, str_lit("loc(#loc{})"), (int64_t)mlir_location_get_ref_id(loc)));
     } else {
-        mlir_location_set_original_text(mlir_loc, str_lit("loc(unknown)"));
+        mlir_location_set_original_text(loc, str_lit("loc(unknown)"));
     }
     
     return loc;
 }
 
 
-Operation* parse_operation(Parser *parser) {
-    Operation *op = (Operation*)mlir_op_create(parser->arena, OP_TYPE_UNREGISTERED);
+MlirOperation* parse_operation(Parser *parser) {
+    MlirOperation *op = (MlirOperation*)mlir_op_create(parser->arena, OP_TYPE_UNREGISTERED);
     mlir_operation_set_trailing_comment((MlirOperation*)op, "", 0);
     mlir_operation_set_source_line_start((MlirOperation*)op, -1);
     mlir_operation_set_location((MlirOperation*)op, NULL);
@@ -1186,7 +1185,7 @@ Operation* parse_operation(Parser *parser) {
             if (parser_peek(parser, TK_EQUAL)) {
                 parser_next_token(parser); // consume '='
                 if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-                    Location *loc_def = parse_loc(parser);
+                    MlirLocation *loc_def = parse_loc(parser);
                     if (loc_def) {
                         LocationMap_insert(parser->arena, &parser->location_map, hash_name, loc_def);
                         if (hash_name.size == 4 && strncmp(hash_name.str, "#loc", 4) == 0) {
@@ -1218,7 +1217,7 @@ Operation* parse_operation(Parser *parser) {
     }
 
     // Parse return registers if any
-    ValueRef *result_value = NULL;
+    MlirValue *result_value = NULL;
     if (parser_peek(parser, TK_REGISTER)) {
         string reg_name = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
@@ -1228,8 +1227,8 @@ Operation* parse_operation(Parser *parser) {
         }
         parser_expect(parser, TK_EQUAL);
 
-        // Create ValueRef for the result and add to symbol table
-        result_value = arena_alloc(parser->arena, ValueRef);
+        // Create MlirValue for the result and add to symbol table
+        result_value = arena_alloc(parser->arena, MlirValue);
         result_value->kind = OP_RESULT;
         mlir_value_set_def((MlirValue*)result_value, op);
         mlir_value_set_result_index((MlirValue*)result_value, 0);
@@ -1421,7 +1420,7 @@ Operation* parse_operation(Parser *parser) {
             symbol_table_add_value(parser->arena, &parser->symbol_table, result_value->register_name, result_value);
 
             // Link result to operation
-            ValueRef **results = arena_alloc_array(parser->arena, ValueRef*, 1);
+            MlirValue **results = arena_alloc_array(parser->arena, MlirValue*, 1);
             results[0] = result_value;
             mlir_operation_set_results((MlirOperation*)op, (MlirValue**)results, 1);
         } else {

@@ -31,12 +31,12 @@ static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, MlirValue *v) {
     return num;
 }
 
-static string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op);
-static string print_region_internal(PrintCtx *ctx, int indent_level, Region *region);
-static string print_block_internal(PrintCtx *ctx, int bb_index, int indent_level, Block *block);
+static string print_operation_internal(PrintCtx *ctx, int indent_level, MlirOperation *op);
+static string print_region_internal(PrintCtx *ctx, int indent_level, MlirRegion *region);
+static string print_block_internal(PrintCtx *ctx, int bb_index, int indent_level, MlirBlock *block);
 
-static void preassign_region_ssa(PrintCtx *ctx, Region *region, int indent_level);
-static void preassign_op_ssa(PrintCtx *ctx, Operation *op, int indent_level) {
+static void preassign_region_ssa(PrintCtx *ctx, MlirRegion *region, int indent_level);
+static void preassign_op_ssa(PrintCtx *ctx, MlirOperation *op, int indent_level) {
     if (op->n_regions > 0 && op->regions) {
         for (int i = 0; i < op->n_regions; i++) preassign_region_ssa(ctx, op->regions[i], indent_level + 1);
     }
@@ -45,21 +45,21 @@ static void preassign_op_ssa(PrintCtx *ctx, Operation *op, int indent_level) {
     }
 }
 
-static void preassign_block_ssa(PrintCtx *ctx, Block *block, int indent_level) {
-    MlirBlock *b = (MlirBlock*)block;
+static void preassign_block_ssa(PrintCtx *ctx, MlirBlock *block, int indent_level) {
+    MlirBlock *b = block;
     size_t n = mlir_block_num_operations(b);
     for (size_t i = 0; i < n; i++) {
         MlirOperation *op = mlir_block_get_operation(b, i);
-        preassign_op_ssa(ctx, (Operation*)op, indent_level + 1);
+        preassign_op_ssa(ctx, op, indent_level + 1);
     }
 }
 
-static void preassign_region_ssa(PrintCtx *ctx, Region *region, int indent_level) {
-    MlirRegion *r = (MlirRegion*)region;
+static void preassign_region_ssa(PrintCtx *ctx, MlirRegion *region, int indent_level) {
+    MlirRegion *r = region;
     size_t n = mlir_region_num_blocks(r);
     for (size_t i = 0; i < n; i++) {
         MlirBlock *b = mlir_region_get_block(r, i);
-        preassign_block_ssa(ctx, (Block*)b, indent_level);
+        preassign_block_ssa(ctx, b, indent_level);
     }
 }
 
@@ -71,15 +71,15 @@ static string indent(Arena *arena, int indent_level) {
     return (string){buf, buf_size};
 }
 
-static string print_block_internal(PrintCtx *ctx, int bb_index, int indent_level, Block *block) {
+static string print_block_internal(PrintCtx *ctx, int bb_index, int indent_level, MlirBlock *block) {
     Arena *arena = ctx->arena;
     string result = format(arena, str_lit("{}^bb{}"), indent(arena, indent_level), bb_index);
-    size_t n_args = mlir_block_num_arguments((MlirBlock*)block);
+    size_t n_args = mlir_block_num_arguments(block);
     if (n_args > 0) {
         result = str_concat(arena, result, str_lit("("));
         for (size_t i = 0; i < n_args; i++) {
             if (i > 0) result = str_concat(arena, result, str_lit(", "));
-            MlirValue *arg = mlir_block_get_argument((MlirBlock*)block, i);
+            MlirValue *arg = mlir_block_get_argument(block, i);
             MlirType *arg_ty = arg ? mlir_value_get_type(arg) : NULL;
             if (arg && arg_ty) {
                 string rname = mlir_value_get_register_name(arg);
@@ -92,27 +92,27 @@ static string print_block_internal(PrintCtx *ctx, int bb_index, int indent_level
         result = str_concat(arena, result, str_lit(")"));
     }
     result = str_concat(arena, result, str_lit(":\n"));
-    for (size_t i = 0, e = mlir_block_num_operations((MlirBlock*)block); i < e; i++) {
-        MlirOperation *op = mlir_block_get_operation((MlirBlock*)block, i);
-        result = str_concat(arena, result, print_operation_internal(ctx, indent_level+1, (Operation*)op));
+    for (size_t i = 0, e = mlir_block_num_operations(block); i < e; i++) {
+        MlirOperation *op = mlir_block_get_operation(block, i);
+        result = str_concat(arena, result, print_operation_internal(ctx, indent_level+1, op));
     }
     return result;
 }
 
-static string print_region_internal(PrintCtx *ctx, int indent_level, Region *region) {
+static string print_region_internal(PrintCtx *ctx, int indent_level, MlirRegion *region) {
     Arena *arena = ctx->arena;
     string result = str_lit("");
     result = str_concat(arena, result, str_lit("{\n"));
     for (size_t i = 0, e = mlir_region_num_blocks((MlirRegion*)region); i < e; i++) {
         MlirBlock *b = mlir_region_get_block((MlirRegion*)region, i);
-        result = str_concat(arena, result, print_block_internal(ctx, (int)i, indent_level, (Block*)b));
+        result = str_concat(arena, result, print_block_internal(ctx, (int)i, indent_level, b));
     }
     result = str_concat(arena, result, indent(arena, indent_level));
     result = str_concat(arena, result, str_lit("}"));
     return result;
 }
 
-static string print_operation_internal(PrintCtx *ctx, int indent_level, Operation *op) {
+static string print_operation_internal(PrintCtx *ctx, int indent_level, MlirOperation *op) {
     Arena *arena = ctx->arena;
     string result = indent(arena, indent_level);
     size_t api_num_result_types = mlir_operation_num_result_types((MlirOperation*)op);
@@ -207,18 +207,18 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, Operatio
 // duplicate wrappers removed
 string print_operation_generic(Arena *arena, int indent_level, MlirOperation *op) {
     PrintCtx ctx; ssa_map_init(&ctx, arena);
-    preassign_op_ssa(&ctx, (Operation*)op, indent_level);
-    return print_operation_internal(&ctx, indent_level, (Operation*)op);
+    preassign_op_ssa(&ctx, op, indent_level);
+    return print_operation_internal(&ctx, indent_level, op);
 }
 
 string print_region_generic(Arena *arena, int indent_level, MlirRegion *region) {
     PrintCtx ctx; ssa_map_init(&ctx, arena);
-    preassign_region_ssa(&ctx, (Region*)region, indent_level);
-    return print_region_internal(&ctx, indent_level, (Region*)region);
+    preassign_region_ssa(&ctx, region, indent_level);
+    return print_region_internal(&ctx, indent_level, region);
 }
 
 string print_block_generic(Arena *arena, int bb_index, int indent_level, MlirBlock *block) {
     PrintCtx ctx; ssa_map_init(&ctx, arena);
-    preassign_block_ssa(&ctx, (Block*)block, indent_level);
-    return print_block_internal(&ctx, bb_index, indent_level, (Block*)block);
+    preassign_block_ssa(&ctx, block, indent_level);
+    return print_block_internal(&ctx, bb_index, indent_level, block);
 }

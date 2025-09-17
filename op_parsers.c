@@ -51,20 +51,20 @@ void consume_optional_hash_selector(Parser *parser) {
     }
 }
 
-static void set_op_attributes(Operation *op, Attribute **attrs, size_t count) {
-    mlir_operation_set_attributes((MlirOperation*)op, (MlirAttribute**)attrs, count);
+static void set_op_attributes(MlirOperation *op, MlirAttribute **attrs, size_t count) {
+    mlir_operation_set_attributes(op, attrs, count);
 }
 
-static void set_op_operands(Operation *op, ValueRef **operands, size_t count) {
-    mlir_operation_set_operands((MlirOperation*)op, (MlirValue**)operands, count);
+static void set_op_operands(MlirOperation *op, MlirValue **operands, size_t count) {
+    mlir_operation_set_operands(op, operands, count);
 }
 
-static void set_op_result_types(Operation *op, Type **types, size_t count) {
-    mlir_operation_set_result_types((MlirOperation*)op, (MlirType**)types, count);
+static void set_op_result_types(MlirOperation *op, MlirType **types, size_t count) {
+    mlir_operation_set_result_types(op, types, count);
 }
 
 // Include the extracted functions
-void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
+void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op) {
     // Attributes block
     // Handle generic attributes in angle-bracket form: <{ ... }>
     if (parser_peek(parser, TK_LANGLE)) {
@@ -74,13 +74,13 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
         bool had_attrs=false;
         if (parser_peek(parser, TK_LBRACE)) {
             parser_expect(parser, TK_LBRACE);
-            Attribute **attrs = NULL; size_t n_attrs=0; size_t cap=4; attrs = arena_alloc_array(parser->arena, Attribute*, cap);
+            MlirAttribute **attrs = NULL; size_t n_attrs=0; size_t cap=4; attrs = arena_alloc_array(parser->arena, MlirAttribute*, cap);
             while (!parser_peek(parser, TK_RBRACE) && !parser_peek(parser, TK_EOF)) {
                 if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
                     string attr_name = parser_token_str(parser); parser_next_token(parser);
                     if (parser_peek(parser, TK_EQUAL)) { parser_expect(parser, TK_EQUAL);
-                        if (n_attrs>=cap){ cap*=2; Attribute**na = arena_alloc_array(parser->arena, Attribute*, cap); for(size_t i=0;i<n_attrs;i++) na[i]=attrs[i]; attrs=na; }
-                        Attribute *attr = arena_alloc(parser->arena, Attribute); attr->name=attr_name;
+                        if (n_attrs>=cap){ cap*=2; MlirAttribute**na = arena_alloc_array(parser->arena, MlirAttribute*, cap); for(size_t i=0;i<n_attrs;i++) na[i]=attrs[i]; attrs=na; }
+                        MlirAttribute *attr = arena_alloc(parser->arena, struct MlirAttribute); attr->name=attr_name;
                         string payload = str_lit(""); int angle=0; while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_COMMA) && !parser_peek(parser, TK_RBRACE)) { string tok=parser_token_str(parser); if (parser_peek(parser, TK_LANGLE)) angle++; else if (parser_peek(parser, TK_RANGLE) && angle>0) angle--; payload = payload.size ? str_concat(parser->arena, payload, tok) : tok; parser_next_token(parser); if (angle==0 && (parser_peek(parser, TK_COMMA) || parser_peek(parser, TK_RBRACE))) break; }
                         attr->kind = ATTR_KIND_STRING; attr->data.string_value = payload; attrs[n_attrs++] = attr; had_attrs=true;
                     }
@@ -98,10 +98,10 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
     if (parser_peek(parser, TK_LBRACE)) {
         parser_expect(parser, TK_LBRACE);
         
-        Attribute **attrs = NULL;
+        MlirAttribute **attrs = NULL;
         size_t n_attrs = 0;
         size_t attrs_capacity = 4;
-        attrs = arena_alloc_array(parser->arena, Attribute*, attrs_capacity);
+        attrs = arena_alloc_array(parser->arena, MlirAttribute*, attrs_capacity);
         
         while (!parser_peek(parser, TK_RBRACE) && !parser_peek(parser, TK_EOF)) {
             // Parse attribute name
@@ -116,12 +116,12 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                     // Grow array if needed
                     if (n_attrs >= attrs_capacity) {
                         attrs_capacity *= 2;
-                        Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, attrs_capacity);
+                        MlirAttribute **new_attrs = arena_alloc_array(parser->arena, MlirAttribute*, attrs_capacity);
                         for (size_t i = 0; i < n_attrs; i++) new_attrs[i] = attrs[i];
                         attrs = new_attrs;
                     }
                     
-                    Attribute *attr = arena_alloc(parser->arena, Attribute);
+                    MlirAttribute *attr = arena_alloc(parser->arena, struct MlirAttribute);
                     attr->name = attr_name;
                     
                     // Parse attribute value: capture complex payload verbatim until ',' or '}'
@@ -186,30 +186,30 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
 
             string type_str = str_lit("");
             if (parse_type_string(parser, &type_str)) {
-                Type **types = arena_alloc_array(parser->arena, Type*, 1);
+                MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
                 types[0] = parse_type_from_string(parser->arena, type_str);
                 set_op_result_types(op, types, 1);
             }
 
             // Record that the signature used parenthesized operand types
             size_t n = op->n_attributes;
-            Attribute **attrs = op->attributes;
-            Attribute *flag = arena_alloc(parser->arena, Attribute);
+            MlirAttribute **attrs = op->attributes;
+            MlirAttribute *flag = arena_alloc(parser->arena, struct MlirAttribute);
             flag->kind = ATTR_KIND_BOOL;
             flag->name = str_lit("_sig_parens");
             flag->data.bool_value = true;
             if (attrs == NULL) {
-                attrs = arena_alloc_array(parser->arena, Attribute*, 2);
+                attrs = arena_alloc_array(parser->arena, MlirAttribute*, 2);
                 attrs[0] = flag; 
                 // also store the src type string
-                Attribute *srca = arena_alloc(parser->arena, Attribute);
+                MlirAttribute *srca = arena_alloc(parser->arena, struct MlirAttribute);
                 srca->kind = ATTR_KIND_STRING; srca->name = str_lit("_sig_src"); srca->data.string_value = src_sig;
                 attrs[1] = srca; n = 2;
             } else {
-                Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+2);
+                MlirAttribute **new_attrs = arena_alloc_array(parser->arena, MlirAttribute*, n+2);
                 for (size_t i = 0; i < n; i++) new_attrs[i] = attrs[i];
                 new_attrs[n] = flag; 
-                Attribute *srca = arena_alloc(parser->arena, Attribute);
+                MlirAttribute *srca = arena_alloc(parser->arena, struct MlirAttribute);
                 srca->kind = ATTR_KIND_STRING; srca->name = str_lit("_sig_src"); srca->data.string_value = src_sig;
                 new_attrs[n+1] = srca;
                 n = n+2; attrs = new_attrs;
@@ -218,8 +218,8 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
 
             // Optional trailing loc()
             if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-                Location *loc = parse_loc(parser);
-                mlir_operation_set_location((MlirOperation*)op, (MlirLocation*)loc);
+                MlirLocation *loc = parse_loc(parser);
+                mlir_operation_set_location(op, loc);
             }
             return;
         }
@@ -238,7 +238,7 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                 if (parser_peek(parser, TK_ARROW)) parser_expect(parser, TK_ARROW);
                 string type_res = str_lit("");
                 if (parse_type_string(parser, &type_res)) {
-                    Type **types = arena_alloc_array(parser->arena, Type*, 1);
+                    MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
                     types[0] = parse_type_from_string(parser->arena, type_res);
                     set_op_result_types(op, types, 1);
                 }
@@ -249,19 +249,19 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                 parser_expect(parser, TK_ARROW);
                 string type_right = str_lit("");
                 if (parse_type_string(parser, &type_right)) {
-                    Type **types = arena_alloc_array(parser->arena, Type*, 1);
+                    MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
                     types[0] = parse_type_from_string(parser->arena, type_right);
                     set_op_result_types(op, types, 1);
                 }
                 // Record source signature string for classic printing
                 size_t n = op->n_attributes;
-                Attribute **attrs = op->attributes;
-                Attribute *srca = arena_alloc(parser->arena, Attribute);
+                MlirAttribute **attrs = op->attributes;
+                MlirAttribute *srca = arena_alloc(parser->arena, struct MlirAttribute);
                 srca->kind = ATTR_KIND_STRING; srca->name = str_lit("_sig_src"); srca->data.string_value = type_left;
                 if (attrs == NULL) {
-                    attrs = arena_alloc_array(parser->arena, Attribute*, 1); attrs[0] = srca; n = 1;
+                    attrs = arena_alloc_array(parser->arena, MlirAttribute*, 1); attrs[0] = srca; n = 1;
                 } else {
-                    Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+1);
+                    MlirAttribute **new_attrs = arena_alloc_array(parser->arena, MlirAttribute*, n+1);
                     for (size_t i = 0; i < n; i++) new_attrs[i] = attrs[i];
                     new_attrs[n] = srca; n = n+1; attrs = new_attrs;
                 }
@@ -271,7 +271,7 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                 parser_expect(parser, TK_NAME);
                 string type_dst = str_lit("");
                 if (parse_type_string(parser, &type_dst)) {
-                    Type **types = arena_alloc_array(parser->arena, Type*, 1);
+                    MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
                     types[0] = parse_type_from_string(parser->arena, type_dst);
                     set_op_result_types(op, types, 1);
                 }
@@ -286,7 +286,7 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
                 // but do NOT override for compare ops like arith.cmpi where
                 // the colon type is the operand type, not the result.
                 if (op->op_type != OP_TYPE_ARITH_CMPI) {
-                    Type **types = arena_alloc_array(parser->arena, Type*, 1);
+                    MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
                     types[0] = parse_type_from_string(parser->arena, type_left);
                     set_op_result_types(op, types, 1);
                 }
@@ -299,7 +299,7 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
         parser_expect(parser, TK_ARROW);
         string type_str = str_lit("");
         if (parse_type_string(parser, &type_str)) {
-            Type **types = arena_alloc_array(parser->arena, Type*, 1);
+            MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
             types[0] = parse_type_from_string(parser->arena, type_str);
             set_op_result_types(op, types, 1);
         }
@@ -307,20 +307,20 @@ void parse_generic_attrs_and_result_type(Parser *parser, Operation *op) {
 
     // Optional trailing loc()
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        Location *loc = parse_loc(parser);
-        mlir_operation_set_location((MlirOperation*)op, (MlirLocation*)loc);
+        MlirLocation *loc = parse_loc(parser);
+        mlir_operation_set_location(op, (MlirLocation*)loc);
     }
 }
 
-void parse_arith_constant(Parser *parser, Operation *op) {
+void parse_arith_constant(Parser *parser, MlirOperation *op) {
     // arith.constant value : type
     if (parser_peek(parser, TK_INTEGER)) {
         string value_str = parser_token_str(parser);
         parser_expect(parser, TK_INTEGER);
 
         op->n_attributes = 1;
-        op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
-        op->attributes[0] = arena_alloc(parser->arena, Attribute);
+        op->attributes = arena_alloc_array(parser->arena, MlirAttribute*, 1);
+        op->attributes[0] = arena_alloc(parser->arena, struct MlirAttribute);
         op->attributes[0]->kind = ATTR_KIND_INTEGER;
 
         int64_t parsed_value = 0;
@@ -337,8 +337,8 @@ void parse_arith_constant(Parser *parser, Operation *op) {
         parser_expect(parser, TK_REAL);
 
         op->n_attributes = 1;
-        op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
-        op->attributes[0] = arena_alloc(parser->arena, Attribute);
+        op->attributes = arena_alloc_array(parser->arena, MlirAttribute*, 1);
+        op->attributes[0] = arena_alloc(parser->arena, struct MlirAttribute);
         op->attributes[0]->kind = ATTR_KIND_FLOAT;
 
         // Parse floating point value using strtod
@@ -355,15 +355,15 @@ void parse_arith_constant(Parser *parser, Operation *op) {
             parser_expect(parser, TK_NAME);
 
             op->n_attributes = 1;
-            op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
-            op->attributes[0] = arena_alloc(parser->arena, Attribute);
+            op->attributes = arena_alloc_array(parser->arena, MlirAttribute*, 1);
+            op->attributes[0] = arena_alloc(parser->arena, struct MlirAttribute);
             op->attributes[0]->kind = ATTR_KIND_INTEGER;
             op->attributes[0]->data.integer_value = str_eq(name_str, str_lit("true")) ? 1 : 0;
             op->attributes[0]->name = str_lit("value");
 
             // Boolean constants have implicit i1 type
             op->n_result_types = 1;
-            op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+            op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
             op->result_types[0] = parse_type_from_string(parser->arena, str_lit("i1"));
             return;
         } else {
@@ -380,8 +380,8 @@ void parse_arith_constant(Parser *parser, Operation *op) {
             } while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE));
             // Store as string attribute for classic printing
             op->n_attributes = 1;
-            op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
-            op->attributes[0] = arena_alloc(parser->arena, Attribute);
+            op->attributes = arena_alloc_array(parser->arena, MlirAttribute*, 1);
+            op->attributes[0] = arena_alloc(parser->arena, struct MlirAttribute);
             op->attributes[0]->kind = ATTR_KIND_STRING;
             op->attributes[0]->name = str_lit("value_text");
             op->attributes[0]->data.string_value = payload;
@@ -397,34 +397,34 @@ void parse_arith_constant(Parser *parser, Operation *op) {
     }
 }
 
-void parse_arith_binary(Parser *parser, Operation *op) {
-    VecValueRef operands;
-    VecValueRef_reserve(parser->arena, &operands, 2);
+void parse_arith_binary(Parser *parser, MlirOperation *op) {
+    VecValue operands;
+    VecValue_reserve(parser->arena, &operands, 2);
 
     if (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
         if (!operand) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             return;
         }
-        VecValueRef_push_back(parser->arena, &operands, operand);
+        VecValue_push_back(parser->arena, &operands, operand);
 
         if (parser_peek(parser, TK_COMMA)) {
             parser_expect(parser, TK_COMMA);
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str2 = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                ValueRef *operand2 = symbol_table_lookup(&parser->symbol_table, reg_str2);
+                MlirValue *operand2 = symbol_table_lookup(&parser->symbol_table, reg_str2);
                 if (!operand2) {
                     parser_warning(parser, format(parser->arena, str_lit("Undefined value: {}"), reg_str2), parser->first, parser->last);
                     operand2 = create_value_ref(parser->arena, BLOCK_ARG);
                     operand2->register_name = reg_str2;
-                    operand2->type = arena_alloc(parser->arena, Type);
+                    operand2->type = arena_alloc(parser->arena, struct MlirType);
                     operand2->type = parse_type_from_string(parser->arena, str_lit("unknown"));
                 }
-                VecValueRef_push_back(parser->arena, &operands, operand2);
+                VecValue_push_back(parser->arena, &operands, operand2);
             }
         }
     }
@@ -435,13 +435,13 @@ void parse_arith_binary(Parser *parser, Operation *op) {
     // Optional default result type for specific ops when not provided
     if (op->n_result_types == 0 && op->op_type == OP_TYPE_ARITH_ADDF) {
         op->n_result_types = 1;
-        op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+        op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
         op->result_types[0] = parse_type_from_string(parser->arena, str_lit("tensor<16xf32>"));
 
     }
 }
 
-void parse_func_call(Parser *parser, Operation *op) {
+void parse_func_call(Parser *parser, MlirOperation *op) {
     // Parse call @function(%args) : (arg_types) -> result_type
     // Function name (@name is tokenized as TK_FUNCTION_NAME)
     if (parser_peek(parser, TK_FUNCTION_NAME)) {
@@ -450,8 +450,8 @@ void parse_func_call(Parser *parser, Operation *op) {
         parser_expect(parser, TK_FUNCTION_NAME);
         // Store as attribute 'callee'
         op->n_attributes = 1;
-        op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
-        op->attributes[0] = arena_alloc(parser->arena, Attribute);
+        op->attributes = arena_alloc_array(parser->arena, MlirAttribute*, 1);
+        op->attributes[0] = arena_alloc(parser->arena, struct MlirAttribute);
         op->attributes[0]->name = str_lit("callee");
         op->attributes[0]->kind = ATTR_KIND_STRING;
         op->attributes[0]->data.string_value = fname;
@@ -461,19 +461,19 @@ void parse_func_call(Parser *parser, Operation *op) {
     if (parser_peek(parser, TK_LPAREN)) {
         parser_expect(parser, TK_LPAREN);
 
-        VecValueRef operands;
-        VecValueRef_reserve(parser->arena, &operands, 4);
+        VecValue operands;
+        VecValue_reserve(parser->arena, &operands, 4);
 
         while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+                MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
                 if (!operand) {
                     parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                     return;
                 }
-                VecValueRef_push_back(parser->arena, &operands, operand);
+                VecValue_push_back(parser->arena, &operands, operand);
             } else {
                 parser_next_token(parser); // skip unknown tokens
             }
@@ -514,20 +514,20 @@ void parse_func_call(Parser *parser, Operation *op) {
             string type_str = str_lit("");
             if (parse_type_string(parser, &type_str)) {
                 op->n_result_types = 1;
-                op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+                op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
                 op->result_types[0] = parse_type_from_string(parser->arena, type_str);
             }
         }
     }
 }
 
-void parse_tt_get_program_id(Parser *parser, Operation *op) {
+void parse_tt_get_program_id(Parser *parser, MlirOperation *op) {
     if (parser_peek(parser, TK_NAME)) {
         string axis = parser_token_str(parser);
         parser_expect(parser, TK_NAME);
 
-        Attribute **attrs = arena_alloc_array(parser->arena, Attribute*, 1);
-        attrs[0] = arena_alloc(parser->arena, Attribute);
+        MlirAttribute **attrs = arena_alloc_array(parser->arena, MlirAttribute*, 1);
+        attrs[0] = arena_alloc(parser->arena, struct MlirAttribute);
         attrs[0]->kind = ATTR_KIND_STRING;
         attrs[0]->data.string_value = axis;
         attrs[0]->name = str_lit("axis");
@@ -536,8 +536,8 @@ void parse_tt_get_program_id(Parser *parser, Operation *op) {
     set_op_operands(op, NULL, 0);
 }
 
-void parse_tt_splat(Parser *parser, Operation *op) {
-    ValueRef *operand = NULL;
+void parse_tt_splat(Parser *parser, MlirOperation *op) {
+    MlirValue *operand = NULL;
     if (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
@@ -546,15 +546,15 @@ void parse_tt_splat(Parser *parser, Operation *op) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             return;
         }
-        ValueRef **ops = arena_alloc_array(parser->arena, ValueRef*, 1);
+        MlirValue **ops = arena_alloc_array(parser->arena, MlirValue*, 1);
         ops[0] = operand;
         set_op_operands(op, ops, 1);
     }
     // Infer result type if not already parsed from trailing type
     if (op->n_result_types == 0) {
-        Type **types = arena_alloc_array(parser->arena, Type*, 1);
-        types[0] = arena_alloc(parser->arena, Type);
-        Type *operand_type = operand ? operand->type : NULL;
+        MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
+        types[0] = arena_alloc(parser->arena, struct MlirType);
+        MlirType *operand_type = operand ? operand->type : NULL;
         if (operand_type) {
             string operand_type_str = type_to_string(parser->arena, operand_type);
             if (str_eq(operand_type_str, str_lit("!tt.ptr<f32>"))) {
@@ -571,13 +571,13 @@ void parse_tt_splat(Parser *parser, Operation *op) {
     }
 }
 
-void parse_tt_make_range(Parser *parser, Operation *op) {
+void parse_tt_make_range(Parser *parser, MlirOperation *op) {
     op->n_operands = 0;
     op->operands = NULL;
     if (parser_peek(parser, TK_LBRACE)) {
         parser_expect(parser, TK_LBRACE);
         op->n_attributes = 2;
-        op->attributes = arena_alloc_array(parser->arena, Attribute*, 2);
+        op->attributes = arena_alloc_array(parser->arena, MlirAttribute*, 2);
         if (parser_peek(parser, TK_NAME)) {
             parser_expect(parser, TK_NAME); // end
             parser_expect(parser, TK_EQUAL);
@@ -596,7 +596,7 @@ void parse_tt_make_range(Parser *parser, Operation *op) {
                 parser_expect(parser, TK_COLON);
                 if (parser_peek(parser, TK_NAME)) parser_expect(parser, TK_NAME);
             }
-            op->attributes[0] = arena_alloc(parser->arena, Attribute);
+            op->attributes[0] = arena_alloc(parser->arena, struct MlirAttribute);
             op->attributes[0]->kind = ATTR_KIND_INTEGER;
             op->attributes[0]->name = str_lit("end");
             op->attributes[0]->data.integer_value = end_val;
@@ -618,7 +618,7 @@ void parse_tt_make_range(Parser *parser, Operation *op) {
                 parser_expect(parser, TK_COLON);
                 if (parser_peek(parser, TK_NAME)) parser_expect(parser, TK_NAME);
             }
-            op->attributes[1] = arena_alloc(parser->arena, Attribute);
+            op->attributes[1] = arena_alloc(parser->arena, struct MlirAttribute);
             op->attributes[1]->kind = ATTR_KIND_INTEGER;
             op->attributes[1]->name = str_lit("start");
             op->attributes[1]->data.integer_value = start_val;
@@ -628,19 +628,19 @@ void parse_tt_make_range(Parser *parser, Operation *op) {
     // Result type parsed by generic handler after ':'
 }
 
-void parse_tt_addptr_load_store(Parser *parser, Operation *op) {
-    VecValueRef operands;
-    VecValueRef_reserve(parser->arena, &operands, 2);
+void parse_tt_addptr_load_store(Parser *parser, MlirOperation *op) {
+    VecValue operands;
+    VecValue_reserve(parser->arena, &operands, 2);
     while (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
         consume_optional_hash_selector(parser);
-        ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
         if (!operand) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             return;
         }
-        VecValueRef_push_back(parser->arena, &operands, operand);
+        VecValue_push_back(parser->arena, &operands, operand);
         if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA); else break;
     }
     op->operands = operands.data;
@@ -656,7 +656,7 @@ void parse_tt_addptr_load_store(Parser *parser, Operation *op) {
             if (parse_type_string(parser, &type_left)) {
                 // Set result type
                 op->n_result_types = 1;
-                op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+                op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
                 if (op->op_type == OP_TYPE_TT_ADDPTR) {
                     // For addptr, result type is the pointer tensor type
                     op->result_types[0] = parse_type_from_string(parser->arena, type_left);
@@ -702,13 +702,13 @@ void parse_tt_addptr_load_store(Parser *parser, Operation *op) {
         } else if (op->op_type == OP_TYPE_TT_ADDPTR && op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
             // Fallback heuristic when no explicit type list is present
             op->n_result_types = 1;
-            op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+            op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
             op->result_types[0] = op->operands[0]->type;
         }
     }
 }
 
-void parse_tt_store(Parser *parser, Operation *op) {
+void parse_tt_store(Parser *parser, MlirOperation *op) {
     // Reuse common operand parsing for tt.addptr/load/store
     parse_tt_addptr_load_store(parser, op);
 
@@ -717,10 +717,10 @@ void parse_tt_store(Parser *parser, Operation *op) {
     if (parser_peek(parser, TK_LBRACE)) {
         parser_expect(parser, TK_LBRACE);
         
-        Attribute **attrs = NULL;
+        MlirAttribute **attrs = NULL;
         size_t n_attrs = 0;
         size_t attrs_capacity = 4;
-        attrs = arena_alloc_array(parser->arena, Attribute*, attrs_capacity);
+        attrs = arena_alloc_array(parser->arena, MlirAttribute*, attrs_capacity);
         
         while (!parser_peek(parser, TK_RBRACE) && !parser_peek(parser, TK_EOF)) {
             // Parse attribute name
@@ -735,7 +735,7 @@ void parse_tt_store(Parser *parser, Operation *op) {
                     // Grow array if needed
                     if (n_attrs >= attrs_capacity) {
                         attrs_capacity *= 2;
-                        Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, attrs_capacity);
+                        MlirAttribute **new_attrs = arena_alloc_array(parser->arena, MlirAttribute*, attrs_capacity);
                         for (size_t i = 0; i < n_attrs; i++) {
                             new_attrs[i] = attrs[i];
                         }
@@ -743,7 +743,7 @@ void parse_tt_store(Parser *parser, Operation *op) {
                     }
                     
                     // Create and parse attribute
-                    Attribute *attr = arena_alloc(parser->arena, Attribute);
+                    MlirAttribute *attr = arena_alloc(parser->arena, struct MlirAttribute);
                     attr->name = attr_name;
                     
                     // Parse attribute value
@@ -812,18 +812,18 @@ void parse_tt_store(Parser *parser, Operation *op) {
     }
 }
 
-void parse_tensor_extract(Parser *parser, Operation *op) {
-    VecValueRef operands;
-    VecValueRef_reserve(parser->arena, &operands, 2);
+void parse_tensor_extract(Parser *parser, MlirOperation *op) {
+    VecValue operands;
+    VecValue_reserve(parser->arena, &operands, 2);
     if (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        ValueRef *tensor_op = symbol_table_lookup(&parser->symbol_table, reg_str);
+        MlirValue *tensor_op = symbol_table_lookup(&parser->symbol_table, reg_str);
         if (!tensor_op) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             return;
         }
-        VecValueRef_push_back(parser->arena, &operands, tensor_op);
+        VecValue_push_back(parser->arena, &operands, tensor_op);
     }
     if (parser_peek(parser, TK_LBRACKET)) {
         parser_expect(parser, TK_LBRACKET);
@@ -835,12 +835,12 @@ void parse_tensor_extract(Parser *parser, Operation *op) {
                 consume_optional_hash_selector(parser);
                 consume_optional_hash_selector(parser);
                 consume_optional_hash_selector(parser);
-                ValueRef *idx = symbol_table_lookup(&parser->symbol_table, reg_str);
+                MlirValue *idx = symbol_table_lookup(&parser->symbol_table, reg_str);
                 if (!idx) {
                     parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                     return;
                 }
-                VecValueRef_push_back(parser->arena, &operands, idx);
+                VecValue_push_back(parser->arena, &operands, idx);
             } else {
                 parser_next_token(parser);
             }
@@ -851,52 +851,52 @@ void parse_tensor_extract(Parser *parser, Operation *op) {
     op->n_operands = operands.size;
 }
 
-void parse_memref_load_or_store(Parser *parser, Operation *op) {
-    VecValueRef operands; VecValueRef_reserve(parser->arena, &operands, 4);
+void parse_memref_load_or_store(Parser *parser, MlirOperation *op) {
+    VecValue operands; VecValue_reserve(parser->arena, &operands, 4);
 
     if (op->op_type == OP_TYPE_MEMREF_STORE) {
         // memref.store %value, %memref[indices] : memref<...>
         if (parser_peek(parser, TK_REGISTER)) {
             string reg = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            ValueRef *val = symbol_table_lookup(&parser->symbol_table, reg);
+            MlirValue *val = symbol_table_lookup(&parser->symbol_table, reg);
             if (!val) {
                 val = create_value_ref(parser->arena, BLOCK_ARG);
                 val->register_name = reg;
-                val->type = arena_alloc(parser->arena, Type);
+                val->type = arena_alloc(parser->arena, struct MlirType);
                 val->type = parse_type_from_string(parser->arena, str_lit("unknown"));
 
             }
-            VecValueRef_push_back(parser->arena, &operands, val);
+            VecValue_push_back(parser->arena, &operands, val);
         }
         if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
         if (parser_peek(parser, TK_REGISTER)) {
             string reg = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            ValueRef *val = symbol_table_lookup(&parser->symbol_table, reg);
+            MlirValue *val = symbol_table_lookup(&parser->symbol_table, reg);
             if (!val) {
                 val = create_value_ref(parser->arena, BLOCK_ARG);
                 val->register_name = reg;
-                val->type = arena_alloc(parser->arena, Type);
+                val->type = arena_alloc(parser->arena, struct MlirType);
                 val->type = parse_type_from_string(parser->arena, str_lit("unknown"));
 
             }
-            VecValueRef_push_back(parser->arena, &operands, val);
+            VecValue_push_back(parser->arena, &operands, val);
         }
     } else {
         // memref.load %memref[indices] : memref<...>
         if (parser_peek(parser, TK_REGISTER)) {
             string reg = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            ValueRef *val = symbol_table_lookup(&parser->symbol_table, reg);
+            MlirValue *val = symbol_table_lookup(&parser->symbol_table, reg);
             if (!val) {
                 val = create_value_ref(parser->arena, BLOCK_ARG);
                 val->register_name = reg;
-                val->type = arena_alloc(parser->arena, Type);
+                val->type = arena_alloc(parser->arena, struct MlirType);
                 val->type = parse_type_from_string(parser->arena, str_lit("unknown"));
 
             }
-            VecValueRef_push_back(parser->arena, &operands, val);
+            VecValue_push_back(parser->arena, &operands, val);
         }
     }
 
@@ -910,15 +910,15 @@ void parse_memref_load_or_store(Parser *parser, Operation *op) {
             if (parser_peek(parser, TK_REGISTER)) {
                 string idx = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                ValueRef *val = symbol_table_lookup(&parser->symbol_table, idx);
+                MlirValue *val = symbol_table_lookup(&parser->symbol_table, idx);
                 if (!val) {
                     val = create_value_ref(parser->arena, BLOCK_ARG);
                     val->register_name = idx;
-                    val->type = arena_alloc(parser->arena, Type);
+                    val->type = arena_alloc(parser->arena, struct MlirType);
                     val->type = parse_type_from_string(parser->arena, str_lit("index"));
 
                 }
-                VecValueRef_push_back(parser->arena, &operands, val);
+                VecValue_push_back(parser->arena, &operands, val);
             } else {
                 parser_next_token(parser);
             }
@@ -930,7 +930,7 @@ void parse_memref_load_or_store(Parser *parser, Operation *op) {
     op->n_operands = operands.size;
 }
 
-void parse_memref_store(Parser *parser, Operation *op) {
+void parse_memref_store(Parser *parser, MlirOperation *op) {
     // Reuse common operand + index parsing
     parse_memref_load_or_store(parser, op);
 
@@ -952,9 +952,9 @@ void parse_memref_store(Parser *parser, Operation *op) {
     op->n_result_types = 0;
 }
 
-void parse_vector_print(Parser *parser, Operation *op) {
+void parse_vector_print(Parser *parser, MlirOperation *op) {
     // Parse operands inside parentheses or as bare register(s)
-    VecValueRef operands; VecValueRef_reserve(parser->arena, &operands, 2);
+    VecValue operands; VecValue_reserve(parser->arena, &operands, 2);
     if (parser_peek(parser, TK_LPAREN)) {
         parser_expect(parser, TK_LPAREN);
         bool first = true;
@@ -964,15 +964,15 @@ void parse_vector_print(Parser *parser, Operation *op) {
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                ValueRef *val = symbol_table_lookup(&parser->symbol_table, reg);
+                MlirValue *val = symbol_table_lookup(&parser->symbol_table, reg);
                 if (!val) {
                     val = create_value_ref(parser->arena, BLOCK_ARG);
                     val->register_name = reg;
-                    val->type = arena_alloc(parser->arena, Type);
+                    val->type = arena_alloc(parser->arena, struct MlirType);
                     val->type = parse_type_from_string(parser->arena, str_lit("unknown"));
 
                 }
-                VecValueRef_push_back(parser->arena, &operands, val);
+                VecValue_push_back(parser->arena, &operands, val);
             } else {
                 parser_next_token(parser);
             }
@@ -983,15 +983,15 @@ void parse_vector_print(Parser *parser, Operation *op) {
         while (parser_peek(parser, TK_REGISTER)) {
             string reg = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            ValueRef *val = symbol_table_lookup(&parser->symbol_table, reg);
+            MlirValue *val = symbol_table_lookup(&parser->symbol_table, reg);
             if (!val) {
                 val = create_value_ref(parser->arena, BLOCK_ARG);
                 val->register_name = reg;
-                val->type = arena_alloc(parser->arena, Type);
+                val->type = arena_alloc(parser->arena, struct MlirType);
                 val->type = parse_type_from_string(parser->arena, str_lit("unknown"));
 
             }
-            VecValueRef_push_back(parser->arena, &operands, val);
+            VecValue_push_back(parser->arena, &operands, val);
             if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA); else break;
         }
     }
@@ -1016,7 +1016,7 @@ void parse_vector_print(Parser *parser, Operation *op) {
     op->n_result_types = 0;
 }
 
-void parse_std_constant(Parser *parser, Operation *op) {
+void parse_std_constant(Parser *parser, MlirOperation *op) {
     // Optional empty operand list in parentheses
     if (parser_peek(parser, TK_LPAREN)) {
         parser_expect(parser, TK_LPAREN);
@@ -1037,7 +1037,7 @@ void parse_std_constant(Parser *parser, Operation *op) {
     }
 }
 
-void parse_tt_reduce(Parser *parser, Operation *op) {
+void parse_tt_reduce(Parser *parser, MlirOperation *op) {
     // Record source line start for this op
     {
         int64_t pos = (int64_t)parser->first;
@@ -1047,20 +1047,20 @@ void parse_tt_reduce(Parser *parser, Operation *op) {
     // Parse "tt.reduce"(%operand) <{attributes}> ({region}) : (input_type) -> output_type
     
     // Parse operands: "tt.reduce"(%arg0)
-    VecValueRef operands;
-    VecValueRef_reserve(parser->arena, &operands, 1);
+    VecValue operands;
+    VecValue_reserve(parser->arena, &operands, 1);
     if (parser_peek(parser, TK_LPAREN)) {
         parser_expect(parser, TK_LPAREN);
         while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+                MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
                 if (!operand) {
                     parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                     return;
                 }
-                VecValueRef_push_back(parser->arena, &operands, operand);
+                VecValue_push_back(parser->arena, &operands, operand);
                 if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
             } else {
                 parser_next_token(parser);
@@ -1089,8 +1089,8 @@ void parse_tt_reduce(Parser *parser, Operation *op) {
                             
                             // Store axis attribute
                             op->n_attributes = 1;
-                            op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
-                            op->attributes[0] = arena_alloc(parser->arena, Attribute);
+                            op->attributes = arena_alloc_array(parser->arena, MlirAttribute*, 1);
+                            op->attributes[0] = arena_alloc(parser->arena, struct MlirAttribute);
                             op->attributes[0]->name = attr_name;
                             op->attributes[0]->kind = ATTR_KIND_INTEGER;
                             
@@ -1127,9 +1127,9 @@ void parse_tt_reduce(Parser *parser, Operation *op) {
             parser_expect(parser, TK_LPAREN);
         }
         if (parser_peek(parser, TK_LBRACE_END)) {
-            Region *region = parse_region(parser);
+            MlirRegion *region = parse_region(parser);
             op->n_regions = 1;
-            op->regions = arena_alloc_array(parser->arena, Region*, 1);
+            op->regions = arena_alloc_array(parser->arena, MlirRegion*, 1);
             op->regions[0] = region;
         }
         parser_expect(parser, TK_RPAREN);
@@ -1162,27 +1162,27 @@ void parse_tt_reduce(Parser *parser, Operation *op) {
             // Use helper to capture a full type token (handles nested <> correctly)
             if (parse_type_string(parser, &type_str)) {
                 op->n_result_types = 1;
-                op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+                op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
                 op->result_types[0] = parse_type_from_string(parser->arena, type_str);
             }
         }
     }
 }
 
-void parse_cf_br(Parser *parser, Operation *op) {
+void parse_cf_br(Parser *parser, MlirOperation *op) {
     // Parse cf.br ^bbX(%args : types)
     string target = str_lit("^bb1");
     if (parser_peek(parser, TK_CARET_NAME)) { target = parser_token_str(parser); parser_expect(parser, TK_CARET_NAME); }
 
-    VecValueRef branch_args; VecValueRef_reserve(parser->arena, &branch_args, 4);
+    VecValue branch_args; VecValue_reserve(parser->arena, &branch_args, 4);
     if (parser_peek(parser, TK_LPAREN)) {
         parser_expect(parser, TK_LPAREN);
         while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
             if (parser_peek(parser, TK_REGISTER)) {
                 string vr = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                ValueRef *v = symbol_table_lookup(&parser->symbol_table, vr);
-                if (v) VecValueRef_push_back(parser->arena, &branch_args, v);
+                MlirValue *v = symbol_table_lookup(&parser->symbol_table, vr);
+                if (v) VecValue_push_back(parser->arena, &branch_args, v);
                 if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
             } else if (parser_peek(parser, TK_COLON)) {
                 parser_expect(parser, TK_COLON);
@@ -1195,22 +1195,22 @@ void parse_cf_br(Parser *parser, Operation *op) {
     }
     set_op_operands(op, branch_args.data, branch_args.size);
     // Store target as private attribute
-    op->n_attributes = 1; op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
-    op->attributes[0] = arena_alloc(parser->arena, Attribute);
+    op->n_attributes = 1; op->attributes = arena_alloc_array(parser->arena, MlirAttribute*, 1);
+    op->attributes[0] = arena_alloc(parser->arena, struct MlirAttribute);
     op->attributes[0]->name = str_lit("_target"); op->attributes[0]->kind = ATTR_KIND_STRING; op->attributes[0]->data.string_value = target;
     // trailing loc
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) op->location = parse_loc(parser);
 }
 
-void parse_cf_cond_br(Parser *parser, Operation *op) {
+void parse_cf_cond_br(Parser *parser, MlirOperation *op) {
     // Parse: cf.cond_br %cond, ^bbX[(args : types)], ^bbY[(args : types)] [loc]
-    VecValueRef operands; VecValueRef_reserve(parser->arena, &operands, 1);
+    VecValue operands; VecValue_reserve(parser->arena, &operands, 1);
     // condition
     if (parser_peek(parser, TK_REGISTER)) {
         string reg = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        ValueRef *cond = symbol_table_lookup(&parser->symbol_table, reg);
-        if (cond) VecValueRef_push_back(parser->arena, &operands, cond);
+        MlirValue *cond = symbol_table_lookup(&parser->symbol_table, reg);
+        if (cond) VecValue_push_back(parser->arena, &operands, cond);
     }
     // commas and targets
     if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
@@ -1226,8 +1226,8 @@ void parse_cf_cond_br(Parser *parser, Operation *op) {
                 if (parser_peek(parser, TK_REGISTER)) {
                     string vr = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
-                    ValueRef *v = symbol_table_lookup(&parser->symbol_table, vr);
-                    if (v) VecValueRef_push_back(parser->arena, &operands, v);
+                    MlirValue *v = symbol_table_lookup(&parser->symbol_table, vr);
+                    if (v) VecValue_push_back(parser->arena, &operands, v);
                     ntrue++;
                     if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
                 } else if (parser_peek(parser, TK_COLON)) {
@@ -1246,10 +1246,10 @@ void parse_cf_cond_br(Parser *parser, Operation *op) {
             parser_expect(parser, TK_RPAREN);
             // store count for true branch
             // append attribute _ntrue (accumulate, don't overwrite later)
-            size_t n = op->n_attributes; Attribute **attrs = op->attributes;
-            Attribute *an = arena_alloc(parser->arena, Attribute);
+            size_t n = op->n_attributes; MlirAttribute **attrs = op->attributes;
+            MlirAttribute *an = arena_alloc(parser->arena, struct MlirAttribute);
             an->name = str_lit("_ntrue"); an->kind = ATTR_KIND_INTEGER; an->data.integer_value = ntrue;
-            Attribute **na = arena_alloc_array(parser->arena, Attribute*, n+1);
+            MlirAttribute **na = arena_alloc_array(parser->arena, MlirAttribute*, n+1);
             for (size_t i=0;i<n;i++) na[i]=attrs[i];
             na[n]=an;
             op->attributes=na; op->n_attributes=(int)(n+1);
@@ -1266,8 +1266,8 @@ void parse_cf_cond_br(Parser *parser, Operation *op) {
                 if (parser_peek(parser, TK_REGISTER)) {
                     string vr = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
-                    ValueRef *v = symbol_table_lookup(&parser->symbol_table, vr);
-                    if (v) VecValueRef_push_back(parser->arena, &operands, v);
+                    MlirValue *v = symbol_table_lookup(&parser->symbol_table, vr);
+                    if (v) VecValue_push_back(parser->arena, &operands, v);
                     nfalse++;
                     if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
                 } else if (parser_peek(parser, TK_COLON)) {
@@ -1283,10 +1283,10 @@ void parse_cf_cond_br(Parser *parser, Operation *op) {
                 }
             }
             parser_expect(parser, TK_RPAREN);
-            size_t n = op->n_attributes; Attribute **attrs = op->attributes;
-            Attribute *an = arena_alloc(parser->arena, Attribute);
+            size_t n = op->n_attributes; MlirAttribute **attrs = op->attributes;
+            MlirAttribute *an = arena_alloc(parser->arena, struct MlirAttribute);
             an->name = str_lit("_nfalse"); an->kind = ATTR_KIND_INTEGER; an->data.integer_value = nfalse;
-            Attribute **na = arena_alloc_array(parser->arena, Attribute*, n+1);
+            MlirAttribute **na = arena_alloc_array(parser->arena, MlirAttribute*, n+1);
             for (size_t i=0;i<n;i++) na[i]=attrs[i];
             na[n]=an;
             op->attributes=na; op->n_attributes=(int)(n+1);
@@ -1294,14 +1294,14 @@ void parse_cf_cond_br(Parser *parser, Operation *op) {
     }
     set_op_operands(op, operands.data, operands.size);
     // Store private attributes for classic printing; append _true/_false without dropping existing counts
-    size_t n0 = op->n_attributes; Attribute **attrs0 = op->attributes;
-    Attribute **na0 = arena_alloc_array(parser->arena, Attribute*, n0 + 2);
+    size_t n0 = op->n_attributes; MlirAttribute **attrs0 = op->attributes;
+    MlirAttribute **na0 = arena_alloc_array(parser->arena, MlirAttribute*, n0 + 2);
     for (size_t i=0;i<n0;i++) na0[i]=attrs0[i];
-    na0[n0] = arena_alloc(parser->arena, Attribute);
+    na0[n0] = arena_alloc(parser->arena, struct MlirAttribute);
     na0[n0]->name = str_lit("_true");
     na0[n0]->kind = ATTR_KIND_STRING;
     na0[n0]->data.string_value = ttrue;
-    na0[n0+1] = arena_alloc(parser->arena, Attribute);
+    na0[n0+1] = arena_alloc(parser->arena, struct MlirAttribute);
     na0[n0+1]->name = str_lit("_false");
     na0[n0+1]->kind = ATTR_KIND_STRING;
     na0[n0+1]->data.string_value = tfalse;
@@ -1312,7 +1312,7 @@ void parse_cf_cond_br(Parser *parser, Operation *op) {
     }
 }
 
-void parse_linalg_fill(Parser *parser, Operation *op) {
+void parse_linalg_fill(Parser *parser, MlirOperation *op) {
     // Parse linalg.fill ins(%val : type) outs(%tensor : type)
 
     // Parse ins()
@@ -1368,20 +1368,20 @@ void parse_linalg_fill(Parser *parser, Operation *op) {
     }
 }
 
-void parse_affine_load(Parser *parser, Operation *op) {
+void parse_affine_load(Parser *parser, MlirOperation *op) {
     // Parse affine.load %memref[%index] : memref<type>
-    VecValueRef operands; VecValueRef_reserve(parser->arena, &operands, 2);
+    VecValue operands; VecValue_reserve(parser->arena, &operands, 2);
 
     // Parse memref operand
     if (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        ValueRef *memref_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        MlirValue *memref_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
         if (!memref_operand) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             return;
         }
-        VecValueRef_push_back(parser->arena, &operands, memref_operand);
+        VecValue_push_back(parser->arena, &operands, memref_operand);
     }
 
     // Parse indices in brackets
@@ -1391,12 +1391,12 @@ void parse_affine_load(Parser *parser, Operation *op) {
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                ValueRef *idx = symbol_table_lookup(&parser->symbol_table, reg_str);
+                MlirValue *idx = symbol_table_lookup(&parser->symbol_table, reg_str);
                 if (!idx) {
                     parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                     return;
                 }
-                VecValueRef_push_back(parser->arena, &operands, idx);
+                VecValue_push_back(parser->arena, &operands, idx);
                 if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
             } else {
                 parser_next_token(parser);
@@ -1445,8 +1445,8 @@ void parse_affine_load(Parser *parser, Operation *op) {
 
                 // Set result type to element type
                 op->n_result_types = 1;
-                op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-                op->result_types[0] = arena_alloc(parser->arena, Type);
+                op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
+                op->result_types[0] = arena_alloc(parser->arena, struct MlirType);
                 op->result_types[0] = parse_type_from_string(parser->arena, element_type);
 
                 parser_expect(parser, TK_RANGLE);
@@ -1460,7 +1460,7 @@ void parse_affine_load(Parser *parser, Operation *op) {
     }
 }
 
-void parse_index_constant(Parser *parser, Operation *op) {
+void parse_index_constant(Parser *parser, MlirOperation *op) {
     // Parse index.constant <value>
     // This should produce a result of type 'index'
 
@@ -1477,8 +1477,8 @@ void parse_index_constant(Parser *parser, Operation *op) {
 
     // index.constant produces a result of type 'index'
     op->n_result_types = 1;
-    op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-    op->result_types[0] = arena_alloc(parser->arena, Type);
+    op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
+    op->result_types[0] = arena_alloc(parser->arena, struct MlirType);
     op->result_types[0] = parse_type_from_string(parser->arena, str_lit("index"));
 
 
@@ -1488,20 +1488,20 @@ void parse_index_constant(Parser *parser, Operation *op) {
     }
 }
 
-void parse_tensor_splat(Parser *parser, Operation *op) {
+void parse_tensor_splat(Parser *parser, MlirOperation *op) {
     // Parse tensor.splat %value[%dim1, %dim2] : tensor<type>
-    VecValueRef operands; VecValueRef_reserve(parser->arena, &operands, 3);
+    VecValue operands; VecValue_reserve(parser->arena, &operands, 3);
 
     // Parse value operand
     if (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        ValueRef *value_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        MlirValue *value_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
         if (!value_operand) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             return;
         }
-        VecValueRef_push_back(parser->arena, &operands, value_operand);
+        VecValue_push_back(parser->arena, &operands, value_operand);
     }
 
     // Parse dimensions in brackets
@@ -1511,12 +1511,12 @@ void parse_tensor_splat(Parser *parser, Operation *op) {
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                ValueRef *dim = symbol_table_lookup(&parser->symbol_table, reg_str);
+                MlirValue *dim = symbol_table_lookup(&parser->symbol_table, reg_str);
                 if (!dim) {
                     parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                     return;
                 }
-                VecValueRef_push_back(parser->arena, &operands, dim);
+                VecValue_push_back(parser->arena, &operands, dim);
                 if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
             } else {
                 parser_next_token(parser);
@@ -1551,8 +1551,8 @@ void parse_tensor_splat(Parser *parser, Operation *op) {
 
                 // Set result type to the full tensor type
                 op->n_result_types = 1;
-                op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-                op->result_types[0] = arena_alloc(parser->arena, Type);
+                op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
+                op->result_types[0] = arena_alloc(parser->arena, struct MlirType);
                 op->result_types[0] = parse_type_from_string(parser->arena, tensor_type);
 
             }
@@ -1565,21 +1565,21 @@ void parse_tensor_splat(Parser *parser, Operation *op) {
     }
 }
 
-void parse_arith_select(Parser *parser, Operation *op) {
+void parse_arith_select(Parser *parser, MlirOperation *op) {
     // Parse arith.select %cond, %true_val, %false_val : cond_type, val_type
-    VecValueRef operands; VecValueRef_reserve(parser->arena, &operands, 3);
+    VecValue operands; VecValue_reserve(parser->arena, &operands, 3);
 
     // Parse three operands
     for (int i = 0; i < 3; i++) {
         if (parser_peek(parser, TK_REGISTER)) {
             string reg_str = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+            MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
             if (!operand) {
                 parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                 return;
             }
-            VecValueRef_push_back(parser->arena, &operands, operand);
+            VecValue_push_back(parser->arena, &operands, operand);
             if (i < 2 && parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
         } else {
             parser_error(parser, str_lit("Expected register operand"), parser->first, parser->last);
@@ -1619,8 +1619,8 @@ void parse_arith_select(Parser *parser, Operation *op) {
 
             // Set result type
             op->n_result_types = 1;
-            op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-            op->result_types[0] = arena_alloc(parser->arena, Type);
+            op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
+            op->result_types[0] = arena_alloc(parser->arena, struct MlirType);
             op->result_types[0] = parse_type_from_string(parser->arena, result_type);
 
         }
@@ -1632,7 +1632,7 @@ void parse_arith_select(Parser *parser, Operation *op) {
     }
 }
 
-void parse_tt_call(Parser *parser, Operation *op) {
+void parse_tt_call(Parser *parser, MlirOperation *op) {
     // Parse tt.call @function(%args) : (arg_types) -> result_type
 
     // Parse function name (@name is tokenized as TK_FUNCTION_NAME)
@@ -1641,31 +1641,31 @@ void parse_tt_call(Parser *parser, Operation *op) {
         string fname = parser_token_str(parser);
         parser_expect(parser, TK_FUNCTION_NAME);
         // Store as attribute 'callee'
-        size_t n = op->n_attributes; Attribute **attrs = op->attributes;
-        if (!attrs) { attrs = arena_alloc_array(parser->arena, Attribute*, 1); n = 0; }
+        size_t n = op->n_attributes; MlirAttribute **attrs = op->attributes;
+        if (!attrs) { attrs = arena_alloc_array(parser->arena, MlirAttribute*, 1); n = 0; }
         else {
-            Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+1);
+            MlirAttribute **new_attrs = arena_alloc_array(parser->arena, MlirAttribute*, n+1);
             for (size_t i=0;i<n;i++) new_attrs[i]=attrs[i]; attrs = new_attrs;
         }
-        attrs[n] = arena_alloc(parser->arena, Attribute);
+        attrs[n] = arena_alloc(parser->arena, struct MlirAttribute);
         attrs[n]->name = str_lit("callee"); attrs[n]->kind = ATTR_KIND_STRING; attrs[n]->data.string_value = fname;
         set_op_attributes(op, attrs, n+1);
     }
 
     // Parse arguments in parentheses
-    VecValueRef operands; VecValueRef_reserve(parser->arena, &operands, 4);
+    VecValue operands; VecValue_reserve(parser->arena, &operands, 4);
     if (parser_peek(parser, TK_LPAREN)) {
         parser_expect(parser, TK_LPAREN);
         while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+                MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
                 if (!operand) {
                     parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                     return;
                 }
-                VecValueRef_push_back(parser->arena, &operands, operand);
+                VecValue_push_back(parser->arena, &operands, operand);
                 if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
             } else {
                 parser_next_token(parser);
@@ -1710,8 +1710,8 @@ void parse_tt_call(Parser *parser, Operation *op) {
 
             // Set result type
             op->n_result_types = 1;
-            op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-            op->result_types[0] = arena_alloc(parser->arena, Type);
+            op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
+            op->result_types[0] = arena_alloc(parser->arena, struct MlirType);
             op->result_types[0] = parse_type_from_string(parser->arena, result_type);
 
         }
@@ -1723,20 +1723,20 @@ void parse_tt_call(Parser *parser, Operation *op) {
     }
 }
 
-void parse_tensor_collapse_shape(Parser *parser, Operation *op) {
+void parse_tensor_collapse_shape(Parser *parser, MlirOperation *op) {
     // Parse tensor.collapse_shape %tensor [[indices]] : input_type into result_type
-    VecValueRef operands; VecValueRef_reserve(parser->arena, &operands, 1);
+    VecValue operands; VecValue_reserve(parser->arena, &operands, 1);
 
     // Parse tensor operand
     if (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        ValueRef *tensor_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        MlirValue *tensor_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
         if (!tensor_operand) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             return;
         }
-        VecValueRef_push_back(parser->arena, &operands, tensor_operand);
+        VecValue_push_back(parser->arena, &operands, tensor_operand);
     }
 
     // Parse [[indices]] - skip the bracket notation
@@ -1781,8 +1781,8 @@ void parse_tensor_collapse_shape(Parser *parser, Operation *op) {
 
             // Set result type
             op->n_result_types = 1;
-            op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-            op->result_types[0] = arena_alloc(parser->arena, Type);
+            op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
+            op->result_types[0] = arena_alloc(parser->arena, struct MlirType);
             op->result_types[0] = parse_type_from_string(parser->arena, result_type);
 
         }
@@ -1794,7 +1794,7 @@ void parse_tensor_collapse_shape(Parser *parser, Operation *op) {
     }
 }
 
-void parse_generic_operation(Parser *parser, Operation *op) {
+void parse_generic_operation(Parser *parser, MlirOperation *op) {
     // Remember the start of this operation's source line for accurate comment capture
     {
         int64_t pos = (int64_t)parser->first;
@@ -1815,8 +1815,8 @@ void parse_generic_operation(Parser *parser, Operation *op) {
     }
 
     // Parse operands until attributes, result type, or region begin
-    VecValueRef operands;
-    VecValueRef_reserve(parser->arena, &operands, 4);
+    VecValue operands;
+    VecValue_reserve(parser->arena, &operands, 4);
 
     while ((parser_peek(parser, TK_REGISTER) || parser_peek(parser, TK_LBRACKET)) &&
            !parser_peek(parser, TK_COLON) && !parser_peek(parser, TK_LBRACE)) {
@@ -1824,12 +1824,12 @@ void parse_generic_operation(Parser *parser, Operation *op) {
             string reg_str = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
 
-            ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+            MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
             if (!operand) {
                 parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                 return;
             }
-            VecValueRef_push_back(parser->arena, &operands, operand);
+            VecValue_push_back(parser->arena, &operands, operand);
         } else if (parser_peek(parser, TK_LBRACKET)) {
             // Skip indexing syntax like [%arg1]
             parser_expect(parser, TK_LBRACKET);
@@ -1837,12 +1837,12 @@ void parse_generic_operation(Parser *parser, Operation *op) {
                 if (parser_peek(parser, TK_REGISTER)) {
                     string reg_str2 = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
-                    ValueRef *operand2 = symbol_table_lookup(&parser->symbol_table, reg_str2);
+                    MlirValue *operand2 = symbol_table_lookup(&parser->symbol_table, reg_str2);
                     if (!operand2) {
                         parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                         return;
                     }
-                    VecValueRef_push_back(parser->arena, &operands, operand2);
+                    VecValue_push_back(parser->arena, &operands, operand2);
                 } else {
                     parser_next_token(parser);
                 }
@@ -1882,9 +1882,9 @@ void parse_generic_operation(Parser *parser, Operation *op) {
     if (parser_peek(parser, TK_LBRACE_END)) {
         // Before consuming a region, parse any trailing attributes/result types
         parse_generic_attrs_and_result_type(parser, op);
-        Region *region = parse_region(parser);
+        MlirRegion *region = parse_region(parser);
 
-        Region **regions = arena_alloc(parser->arena, Region*);
+        MlirRegion **regions = arena_alloc(parser->arena, MlirRegion*);
         regions[0] = region;
         op->regions = regions;
         op->n_regions = 1;
@@ -1904,7 +1904,7 @@ void parse_generic_operation(Parser *parser, Operation *op) {
     }
 }
 
-void parse_tt_func(Parser *parser, Operation *op) {
+void parse_tt_func(Parser *parser, MlirOperation *op) {
     // Record source line start
     {
         int64_t pos = (int64_t)parser->first;
@@ -1922,8 +1922,8 @@ void parse_tt_func(Parser *parser, Operation *op) {
     
     // Store visibility as attribute
     op->n_attributes = 1;
-    op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
-    op->attributes[0] = arena_alloc(parser->arena, Attribute);
+    op->attributes = arena_alloc_array(parser->arena, MlirAttribute*, 1);
+    op->attributes[0] = arena_alloc(parser->arena, struct MlirAttribute);
     op->attributes[0]->kind = ATTR_KIND_STRING;
     op->attributes[0]->data.string_value = visibility;
     op->attributes[0]->name = str_lit("visibility");
@@ -1939,9 +1939,9 @@ void parse_tt_func(Parser *parser, Operation *op) {
         
         // Store as string attribute 'sym_name'
         size_t n = op->n_attributes;
-        Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+1);
+        MlirAttribute **new_attrs = arena_alloc_array(parser->arena, MlirAttribute*, n+1);
         for (size_t i = 0; i < n; i++) new_attrs[i] = op->attributes[i];
-        new_attrs[n] = arena_alloc(parser->arena, Attribute);
+        new_attrs[n] = arena_alloc(parser->arena, struct MlirAttribute);
         new_attrs[n]->kind = ATTR_KIND_STRING;
         new_attrs[n]->data.string_value = fname;
         new_attrs[n]->name = str_lit("sym_name");
@@ -1959,8 +1959,8 @@ void parse_tt_func(Parser *parser, Operation *op) {
         parser_expect(parser, TK_LPAREN);
 
         // Use a vector to collect arguments as we parse them
-        VecValueRef func_args;
-        VecValueRef_reserve(parser->arena, &func_args, 8);
+        VecValue func_args;
+        VecValue_reserve(parser->arena, &func_args, 8);
 
         // Accumulate a textual params signature when args are type-only (declarations)
         string params_sig = str_lit("");
@@ -1986,10 +1986,10 @@ void parse_tt_func(Parser *parser, Operation *op) {
                 if (parser_peek(parser, TK_COLON)) {
                     parser_expect(parser, TK_COLON);
 
-                    ValueRef *arg = create_value_ref(parser->arena, BLOCK_ARG);
+                    MlirValue *arg = create_value_ref(parser->arena, BLOCK_ARG);
                     arg->register_name = reg_str;
                     arg->result_index = func_args.size;
-                    arg->type = arena_alloc(parser->arena, Type);
+                    arg->type = arena_alloc(parser->arena, struct MlirType);
 
                     // Parse the argument type
                     if (parser_peek(parser, TK_EXCLAMATION)) {
@@ -2088,7 +2088,7 @@ void parse_tt_func(Parser *parser, Operation *op) {
                                         int64_t v = 0; for (size_t k=0;k<ival.size;k++){ char c=ival.str[k]; if (c>='0' && c<='9') v = v*10 + (c-'0'); }
                                         parser_expect(parser, TK_INTEGER);
                                         // optional ':' type
-                                        Type *dtype = NULL;
+                                        MlirType *dtype = NULL;
                                         if (parser_peek(parser, TK_COLON)) {
                                             parser_expect(parser, TK_COLON);
                                             string tstr = str_lit("");
@@ -2119,7 +2119,7 @@ void parse_tt_func(Parser *parser, Operation *op) {
                                         int64_t v = 0; for (size_t k=0;k<ival.size;k++){ char c=ival.str[k]; if (c>='0' && c<='9') v = v*10 + (c-'0'); }
                                         parser_expect(parser, TK_INTEGER);
                                         // optional ':' type
-                                        Type *dtype = NULL;
+                                        MlirType *dtype = NULL;
                                         if (parser_peek(parser, TK_COLON)) {
                                             parser_expect(parser, TK_COLON);
                                             string tstr = str_lit("");
@@ -2151,7 +2151,7 @@ void parse_tt_func(Parser *parser, Operation *op) {
                         arg->location = parse_loc(parser);
                     }
 
-                    VecValueRef_push_back(parser->arena, &func_args, arg);
+                    VecValue_push_back(parser->arena, &func_args, arg);
                 }
             } else if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME) || parser_peek(parser, TK_EXCLAMATION)) {
                 // Type-only param (no SSA name); accumulate its textual form
@@ -2169,7 +2169,7 @@ void parse_tt_func(Parser *parser, Operation *op) {
 
         // Convert vector to array
         op->n_operands = func_args.size;
-        op->operands = arena_alloc_array(parser->arena, ValueRef*, func_args.size);
+        op->operands = arena_alloc_array(parser->arena, MlirValue*, func_args.size);
         for (size_t i = 0; i < func_args.size; i++) {
             op->operands[i] = func_args.data[i];
         }
@@ -2181,10 +2181,10 @@ void parse_tt_func(Parser *parser, Operation *op) {
 
         // Save params signature if any
         if (params_sig.size > 0) {
-            size_t n = op->n_attributes; Attribute **attrs = op->attributes;
-            Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+1);
+            size_t n = op->n_attributes; MlirAttribute **attrs = op->attributes;
+            MlirAttribute **new_attrs = arena_alloc_array(parser->arena, MlirAttribute*, n+1);
             for (size_t i=0;i<n;i++) new_attrs[i] = attrs[i];
-            new_attrs[n] = arena_alloc(parser->arena, Attribute);
+            new_attrs[n] = arena_alloc(parser->arena, struct MlirAttribute);
             new_attrs[n]->name = str_lit("params_sig");
             new_attrs[n]->kind = ATTR_KIND_STRING;
             new_attrs[n]->data.string_value = params_sig;
@@ -2240,7 +2240,7 @@ void parse_tt_func(Parser *parser, Operation *op) {
         VecBlock blocks;
         VecBlock_reserve(parser->arena, &blocks, 8);
         while (!parser_peek(parser, TK_RBRACE)) {
-            Block *block = parse_block(parser);
+            MlirBlock *block = parse_block(parser);
             VecBlock_push_back(parser->arena, &blocks, block);
         }
         parser_expect(parser, TK_RBRACE);
@@ -2249,12 +2249,12 @@ void parse_tt_func(Parser *parser, Operation *op) {
         symbol_table_pop_scope(&parser->symbol_table);
 
         // Create region
-        Region *region = arena_alloc(parser->arena, Region);
+        MlirRegion *region = arena_alloc(parser->arena, struct MlirRegion);
         region->blocks = blocks.data;
         region->n_blocks = blocks.size;
 
         // Assign region to operation
-        Region **regions = arena_alloc(parser->arena, Region*);
+        MlirRegion **regions = arena_alloc(parser->arena, MlirRegion*);
         regions[0] = region;
         op->regions = regions;
         op->n_regions = 1;
@@ -2272,7 +2272,7 @@ void parse_tt_func(Parser *parser, Operation *op) {
     }
 }
 
-void parse_func_func(Parser *parser, Operation *op) {
+void parse_func_func(Parser *parser, MlirOperation *op) {
     // Capture optional visibility and function name
     string visibility = str_lit("");
     string fname = str_lit("");
@@ -2289,7 +2289,7 @@ void parse_func_func(Parser *parser, Operation *op) {
         parser_next_token(parser);
     }
     // Parse argument list
-    VecValueRef args; VecValueRef_reserve(parser->arena, &args, 8);
+    VecValue args; VecValue_reserve(parser->arena, &args, 8);
     if (parser_peek(parser, TK_LPAREN)) {
         parser_expect(parser, TK_LPAREN);
         bool first = true;
@@ -2301,7 +2301,7 @@ void parse_func_func(Parser *parser, Operation *op) {
                 string reg = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
                 // Optional type annotation
-                Type *ty = NULL;
+                MlirType *ty = NULL;
                 if (parser_peek(parser, TK_COLON)) {
                     parser_expect(parser, TK_COLON);
                     string t = str_lit("");
@@ -2310,10 +2310,10 @@ void parse_func_func(Parser *parser, Operation *op) {
 
                     }
                 }
-                ValueRef *arg = create_value_ref(parser->arena, BLOCK_ARG);
+                MlirValue *arg = create_value_ref(parser->arena, BLOCK_ARG);
                 arg->register_name = reg;
                 arg->type = ty;
-                VecValueRef_push_back(parser->arena, &args, arg);
+                VecValue_push_back(parser->arena, &args, arg);
             } else if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME) || parser_peek(parser, TK_EXCLAMATION)) {
                 // Type-only argument in declaration form
                 string t = str_lit("");
@@ -2329,10 +2329,10 @@ void parse_func_func(Parser *parser, Operation *op) {
         }
         parser_expect(parser, TK_RPAREN);
         if (params_sig.size > 0) {
-            size_t n = op->n_attributes; Attribute **attrs = op->attributes;
-            Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+1);
+            size_t n = op->n_attributes; MlirAttribute **attrs = op->attributes;
+            MlirAttribute **new_attrs = arena_alloc_array(parser->arena, MlirAttribute*, n+1);
             for (size_t i=0;i<n;i++) new_attrs[i] = attrs[i];
-            new_attrs[n] = arena_alloc(parser->arena, Attribute);
+            new_attrs[n] = arena_alloc(parser->arena, struct MlirAttribute);
             new_attrs[n]->name = str_lit("params_sig");
             new_attrs[n]->kind = ATTR_KIND_STRING;
             new_attrs[n]->data.string_value = params_sig;
@@ -2353,36 +2353,36 @@ void parse_func_func(Parser *parser, Operation *op) {
     }
     // Parse optional body region (definition) or leave as declaration
     if (parser_peek(parser, TK_LBRACE_END)) {
-        Region *region = parse_region(parser);
-        op->regions = arena_alloc_array(parser->arena, Region*, 1);
+        MlirRegion *region = parse_region(parser);
+        op->regions = arena_alloc_array(parser->arena, MlirRegion*, 1);
         op->regions[0] = region;
         op->n_regions = 1;
     }
 
     // Store attributes for classic printing
-    size_t n = op->n_attributes; Attribute **attrs = op->attributes;
+    size_t n = op->n_attributes; MlirAttribute **attrs = op->attributes;
     size_t add = 0; if (visibility.size>0) add++; if (fname.size>0) add++; if (ret_sig.size>0) add++;
     if (add > 0) {
-        Attribute **new_attrs = arena_alloc_array(parser->arena, Attribute*, n+add);
+        MlirAttribute **new_attrs = arena_alloc_array(parser->arena, MlirAttribute*, n+add);
         for (size_t i=0;i<n;i++) new_attrs[i]=attrs[i]; size_t idx=n;
-        if (visibility.size>0){ new_attrs[idx]=arena_alloc(parser->arena, Attribute); new_attrs[idx]->name=str_lit("visibility"); new_attrs[idx]->kind=ATTR_KIND_STRING; new_attrs[idx]->data.string_value=visibility; idx++; }
-        if (fname.size>0){ new_attrs[idx]=arena_alloc(parser->arena, Attribute); new_attrs[idx]->name=str_lit("sym_name"); new_attrs[idx]->kind=ATTR_KIND_STRING; new_attrs[idx]->data.string_value=fname; idx++; }
-        if (ret_sig.size>0){ new_attrs[idx]=arena_alloc(parser->arena, Attribute); new_attrs[idx]->name=str_lit("ret"); new_attrs[idx]->kind=ATTR_KIND_STRING; new_attrs[idx]->data.string_value=ret_sig; idx++; }
+        if (visibility.size>0){ new_attrs[idx]=arena_alloc(parser->arena, struct MlirAttribute); new_attrs[idx]->name=str_lit("visibility"); new_attrs[idx]->kind=ATTR_KIND_STRING; new_attrs[idx]->data.string_value=visibility; idx++; }
+        if (fname.size>0){ new_attrs[idx]=arena_alloc(parser->arena, struct MlirAttribute); new_attrs[idx]->name=str_lit("sym_name"); new_attrs[idx]->kind=ATTR_KIND_STRING; new_attrs[idx]->data.string_value=fname; idx++; }
+        if (ret_sig.size>0){ new_attrs[idx]=arena_alloc(parser->arena, struct MlirAttribute); new_attrs[idx]->name=str_lit("ret"); new_attrs[idx]->kind=ATTR_KIND_STRING; new_attrs[idx]->data.string_value=ret_sig; idx++; }
         set_op_attributes(op, new_attrs, idx);
     }
 }
 
-void parse_scf_if(Parser *parser, Operation *op) {
+void parse_scf_if(Parser *parser, MlirOperation *op) {
     // Parse condition operand: scf.if %condition -> ...
-    VecValueRef operands;
-    VecValueRef_reserve(parser->arena, &operands, 1);
+    VecValue operands;
+    VecValue_reserve(parser->arena, &operands, 1);
     
     if (parser_peek(parser, TK_REGISTER)) {
         string cond_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        ValueRef *condition = symbol_table_lookup(&parser->symbol_table, cond_str);
+        MlirValue *condition = symbol_table_lookup(&parser->symbol_table, cond_str);
         if (condition) {
-            VecValueRef_push_back(parser->arena, &operands, condition);
+            VecValue_push_back(parser->arena, &operands, condition);
         }
     }
     
@@ -2400,8 +2400,8 @@ void parse_scf_if(Parser *parser, Operation *op) {
                     string t = str_lit("");
                     if (parse_type_string(parser, &t)) {
                         op->n_result_types = 1;
-                        op->result_types = arena_alloc_array(parser->arena, Type*, 1);
-                        op->result_types[0] = arena_alloc(parser->arena, Type);
+                        op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
+                        op->result_types[0] = arena_alloc(parser->arena, struct MlirType);
                         op->result_types[0] = parse_type_from_string(parser->arena, t);
                     }
                     // Consume rest until ')'
@@ -2413,8 +2413,8 @@ void parse_scf_if(Parser *parser, Operation *op) {
         }
     }
     int n_regions = 1;
-    Region *region1 = parse_region(parser);
-    Region *region2 = NULL;
+    MlirRegion *region1 = parse_region(parser);
+    MlirRegion *region2 = NULL;
 
     if (parser_peek(parser, TK_NAME)) {
         if (str_eq(parser_token_str(parser), str_lit("else"))) {
@@ -2430,7 +2430,7 @@ void parse_scf_if(Parser *parser, Operation *op) {
         }
     }
 
-    Region **regions = arena_alloc_array(parser->arena, Region*, n_regions);
+    MlirRegion **regions = arena_alloc_array(parser->arena, MlirRegion*, n_regions);
     regions[0] = region1;
     if (region2) {
         regions[1] = region2;
@@ -2439,15 +2439,15 @@ void parse_scf_if(Parser *parser, Operation *op) {
     op->n_regions = n_regions;
 }
 
-void parse_scf_for(Parser *parser, Operation *op) {
+void parse_scf_for(Parser *parser, MlirOperation *op) {
     // Parse scf.for %iv = %lb to %ub step %step
     //        [iter_args(%arg = %init, ...)] [-> (types...)]  : iv_type { ... }
 
-    VecValueRef operands;
-    VecValueRef_reserve(parser->arena, &operands, 4);
+    VecValue operands;
+    VecValue_reserve(parser->arena, &operands, 4);
 
     // Parse loop variable: %iv
-    ValueRef *loop_var = NULL;
+    MlirValue *loop_var = NULL;
     if (parser_peek(parser, TK_REGISTER)) {
         string loop_var_name = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
@@ -2466,12 +2466,12 @@ void parse_scf_for(Parser *parser, Operation *op) {
             string reg_str = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
 
-            ValueRef *start_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+            MlirValue *start_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
             if (!start_operand) {
                 parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                 return;
             }
-            VecValueRef_push_back(parser->arena, &operands, start_operand);
+            VecValue_push_back(parser->arena, &operands, start_operand);
         }
 
         // Expect "to"
@@ -2484,12 +2484,12 @@ void parse_scf_for(Parser *parser, Operation *op) {
             string reg_str = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
 
-            ValueRef *end_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+            MlirValue *end_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
             if (!end_operand) {
                 parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                 return;
             }
-            VecValueRef_push_back(parser->arena, &operands, end_operand);
+            VecValue_push_back(parser->arena, &operands, end_operand);
         }
 
         // Expect "step"
@@ -2502,18 +2502,18 @@ void parse_scf_for(Parser *parser, Operation *op) {
             string reg_str = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
 
-            ValueRef *step_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+            MlirValue *step_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
             if (!step_operand) {
                 parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                 return;
             }
-            VecValueRef_push_back(parser->arena, &operands, step_operand);
+            VecValue_push_back(parser->arena, &operands, step_operand);
         }
     }
 
     // Parse iter_args(%iter_var1 = %init1, %iter_var2 = %init2, ...)
-    VecValueRef iter_vars;
-    VecValueRef_reserve(parser->arena, &iter_vars, 4);
+    VecValue iter_vars;
+    VecValue_reserve(parser->arena, &iter_vars, 4);
 
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("iter_args"))) {
         parser_expect(parser, TK_NAME); // consume "iter_args"
@@ -2526,13 +2526,13 @@ void parse_scf_for(Parser *parser, Operation *op) {
                     string iter_var_name = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
 
-                    ValueRef *iter_var = create_value_ref(parser->arena, BLOCK_ARG);
+                    MlirValue *iter_var = create_value_ref(parser->arena, BLOCK_ARG);
                     // Keep the original SSA name for printing and symbol mapping
                     iter_var->register_name = iter_var_name;
                     iter_var->type = NULL; // Determined from init operand
 
 
-                    VecValueRef_push_back(parser->arena, &iter_vars, iter_var);
+                    VecValue_push_back(parser->arena, &iter_vars, iter_var);
 
                     // Expect =
                     parser_expect(parser, TK_EQUAL);
@@ -2544,12 +2544,12 @@ void parse_scf_for(Parser *parser, Operation *op) {
                         consume_optional_hash_selector(parser);
                         consume_optional_hash_selector(parser);
 
-                        ValueRef *init_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+                        MlirValue *init_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
                         if (!init_operand) {
                             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                             return;
                         }
-                        VecValueRef_push_back(parser->arena, &operands, init_operand);
+                        VecValue_push_back(parser->arena, &operands, init_operand);
                     }
 
                     // Handle comma for multiple iter_args
@@ -2569,7 +2569,7 @@ void parse_scf_for(Parser *parser, Operation *op) {
     op->n_operands = operands.size;
     
     // Parse optional result types list '-> (type, ...)' before region
-    Type **iter_result_types = NULL;
+    MlirType **iter_result_types = NULL;
     size_t n_iter_results = 0;
     if (parser_peek(parser, TK_ARROW)) {
         parser_expect(parser, TK_ARROW);
@@ -2578,13 +2578,13 @@ void parse_scf_for(Parser *parser, Operation *op) {
             // Parse one or more types separated by commas
             // Minimal manual growth: collect types with manual growth
             size_t cap = 4; size_t sz = 0;
-            Type **tmp = arena_alloc_array(parser->arena, Type*, cap);
+            MlirType **tmp = arena_alloc_array(parser->arena, MlirType*, cap);
             while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
                 string t = str_lit("");
                 if (!parse_type_string(parser, &t)) break;
                 if (sz >= cap) {
                     size_t ncap = cap * 2;
-                    Type **nt = arena_alloc_array(parser->arena, Type*, ncap);
+                    MlirType **nt = arena_alloc_array(parser->arena, MlirType*, ncap);
                     for (size_t i = 0; i < sz; i++) nt[i] = tmp[i];
                     tmp = nt; cap = ncap;
                 }
@@ -2598,7 +2598,7 @@ void parse_scf_for(Parser *parser, Operation *op) {
     }
 
     // Optional trailing ": <iv_type>" before region
-    Type *iv_type = NULL;
+    MlirType *iv_type = NULL;
     if (parser_peek(parser, TK_COLON)) {
         parser_expect(parser, TK_COLON);
         string t = str_lit("");
@@ -2619,15 +2619,15 @@ void parse_scf_for(Parser *parser, Operation *op) {
     VecBlock_reserve(parser->arena, &blocks, 1);
 
     // Create the block
-    Block *block = arena_alloc(parser->arena, Block);
+    MlirBlock *block = arena_alloc(parser->arena, struct MlirBlock);
 
     // Create block arguments for loop variable and iter_args
-    VecValueRef block_args;
-    VecValueRef_reserve(parser->arena, &block_args, 2);
+    VecValue block_args;
+    VecValue_reserve(parser->arena, &block_args, 2);
 
     if (loop_var) {
         // Create a new ValueRef for the block argument using the original loop variable name
-        ValueRef *loop_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
+        MlirValue *loop_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
         loop_block_arg->register_name = loop_var->register_name;
         // Use parsed iv type if available; otherwise default to the lb type or i32
         if (iv_type) {
@@ -2641,7 +2641,7 @@ void parse_scf_for(Parser *parser, Operation *op) {
         loop_block_arg->result_index = 0;
         loop_block_arg->def = block;
 
-        VecValueRef_push_back(parser->arena, &block_args, loop_block_arg);
+        VecValue_push_back(parser->arena, &block_args, loop_block_arg);
 
         // Register in symbol table using original loop variable name
         symbol_table_add_value(parser->arena, &parser->symbol_table, loop_var->register_name, loop_block_arg);
@@ -2649,9 +2649,9 @@ void parse_scf_for(Parser *parser, Operation *op) {
 
     // Create block arguments for all iter_args
     for (size_t i = 0; i < iter_vars.size; i++) {
-        ValueRef *iter_var = iter_vars.data[i];
+        MlirValue *iter_var = iter_vars.data[i];
         // Create a new ValueRef for the block argument using original name
-        ValueRef *iter_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
+        MlirValue *iter_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
         iter_block_arg->register_name = iter_var->register_name;
         // Type of iter arg is the type of its init operand (operands[3+i])
         if (op->n_operands >= 4 + (int)i && operands.data[3 + i] && operands.data[3 + i]->type) {
@@ -2663,7 +2663,7 @@ void parse_scf_for(Parser *parser, Operation *op) {
         iter_block_arg->result_index = i + 1;
         iter_block_arg->def = block;
 
-        VecValueRef_push_back(parser->arena, &block_args, iter_block_arg);
+        VecValue_push_back(parser->arena, &block_args, iter_block_arg);
 
         // Register in symbol table using original iter_args variable name
         symbol_table_add_value(parser->arena, &parser->symbol_table, iter_var->register_name, iter_block_arg);
@@ -2676,7 +2676,7 @@ void parse_scf_for(Parser *parser, Operation *op) {
     VecOperation operations;
     VecOperation_reserve(parser->arena, &operations, 16);
     while (!parser_peek(parser, TK_RBRACE)) {
-        Operation *inner_op = parse_operation(parser);
+        MlirOperation *inner_op = parse_operation(parser);
         // Capture trailing comment for inner operations based on their source line
         if (inner_op && inner_op->source_line_start >= 0) {
             int64_t line_start = inner_op->source_line_start;
@@ -2719,32 +2719,32 @@ void parse_scf_for(Parser *parser, Operation *op) {
     symbol_table_pop_scope(&parser->symbol_table);
 
     // Create the region containing the block
-    Region *region = arena_alloc(parser->arena, Region);
+    MlirRegion *region = arena_alloc(parser->arena, struct MlirRegion);
     region->blocks = blocks.data;
     region->n_blocks = blocks.size;
 
     // Assign region to operation
-    op->regions = arena_alloc_array(parser->arena, Region*, 1);
+    op->regions = arena_alloc_array(parser->arena, MlirRegion*, 1);
     op->regions[0] = region;
     op->n_regions = 1;
 
     // Assign parsed iter result types to operation
     if (n_iter_results > 0) {
         op->n_result_types = (int)n_iter_results;
-        op->result_types = arena_alloc_array(parser->arena, Type*, n_iter_results);
+        op->result_types = arena_alloc_array(parser->arena, MlirType*, n_iter_results);
         for (size_t i = 0; i < n_iter_results; i++) op->result_types[i] = iter_result_types[i];
     }
 
     // Handle optional location attribute after }
 }
 
-void parse_scf_while(Parser *parser, Operation *op) {
+void parse_scf_while(Parser *parser, MlirOperation *op) {
     while (!parser_peek(parser, TK_LBRACE_END)) {
         parser_next_token(parser);
     }
     int n_regions = 1;
-    Region *region1 = parse_region(parser);
-    Region *region2 = NULL;
+    MlirRegion *region1 = parse_region(parser);
+    MlirRegion *region2 = NULL;
 
     if (parser_peek(parser, TK_NAME)) {
         if (str_eq(parser_token_str(parser), str_lit("do"))) {
@@ -2760,7 +2760,7 @@ void parse_scf_while(Parser *parser, Operation *op) {
         }
     }
 
-    Region **regions = arena_alloc_array(parser->arena, Region*, n_regions);
+    MlirRegion **regions = arena_alloc_array(parser->arena, MlirRegion*, n_regions);
     regions[0] = region1;
     if (region2) {
         regions[1] = region2;
@@ -2769,21 +2769,21 @@ void parse_scf_while(Parser *parser, Operation *op) {
     op->n_regions = n_regions;
 }
 
-void parse_scf_yield(Parser *parser, Operation *op) {
+void parse_scf_yield(Parser *parser, MlirOperation *op) {
     // Parse scf.yield operands
-    VecValueRef operands;
-    VecValueRef_reserve(parser->arena, &operands, 2);
+    VecValue operands;
+    VecValue_reserve(parser->arena, &operands, 2);
 
     while (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
 
-        ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
         if (!operand) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             return;
         }
-        VecValueRef_push_back(parser->arena, &operands, operand);
+        VecValue_push_back(parser->arena, &operands, operand);
 
         if (parser_peek(parser, TK_COMMA)) {
             parser_expect(parser, TK_COMMA);
@@ -2811,19 +2811,19 @@ void parse_scf_yield(Parser *parser, Operation *op) {
     while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_EOF)) parser_next_token(parser);
 }
 
-void parse_return_operation(Parser *parser, Operation *op) {
+void parse_return_operation(Parser *parser, MlirOperation *op) {
     // Parse optional operands
-    VecValueRef operands;
-    VecValueRef_reserve(parser->arena, &operands, 2);
+    VecValue operands;
+    VecValue_reserve(parser->arena, &operands, 2);
     while (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        ValueRef *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
         if (!operand) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             return;
         }
-        VecValueRef_push_back(parser->arena, &operands, operand);
+        VecValue_push_back(parser->arena, &operands, operand);
         if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA); else break;
     }
     // Keep operands for classic and better generic fidelity
@@ -2850,9 +2850,9 @@ void parse_return_operation(Parser *parser, Operation *op) {
     while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_EOF)) parser_next_token(parser);
 }
 
-void parse_affine_for(Parser *parser, Operation *op) {
+void parse_affine_for(Parser *parser, MlirOperation *op) {
     // Expect induction variable
-    ValueRef *ind_var = NULL;
+    MlirValue *ind_var = NULL;
     if (parser_peek(parser, TK_REGISTER)) {
         string iv_name = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
@@ -2860,7 +2860,7 @@ void parse_affine_for(Parser *parser, Operation *op) {
         // Create a placeholder for the block argument; registered later
         ind_var = create_value_ref(parser->arena, BLOCK_ARG);
         ind_var->register_name = iv_name;
-        ind_var->type = arena_alloc(parser->arena, Type);
+        ind_var->type = arena_alloc(parser->arena, struct MlirType);
         ind_var->type = parse_type_from_string(parser->arena, str_lit("index"));
 
 
@@ -2906,16 +2906,16 @@ void parse_affine_for(Parser *parser, Operation *op) {
     symbol_table_push_scope(parser->arena, &parser->symbol_table);
 
     // Create single block and register induction variable as block argument
-    Block *block = arena_alloc(parser->arena, Block);
-    VecValueRef block_args; VecValueRef_reserve(parser->arena, &block_args, 1);
+    MlirBlock *block = arena_alloc(parser->arena, struct MlirBlock);
+    VecValue block_args; VecValue_reserve(parser->arena, &block_args, 1);
     if (ind_var) {
-        ValueRef *iv_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
+        MlirValue *iv_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
         iv_block_arg->register_name = str_lit("%arg0");
-        iv_block_arg->type = arena_alloc(parser->arena, Type);
+        iv_block_arg->type = arena_alloc(parser->arena, struct MlirType);
         iv_block_arg->type = parse_type_from_string(parser->arena, str_lit("index"));
         iv_block_arg->result_index = 0;
         iv_block_arg->def = block;
-        VecValueRef_push_back(parser->arena, &block_args, iv_block_arg);
+        VecValue_push_back(parser->arena, &block_args, iv_block_arg);
         // Map original name (e.g., %i) to the block arg
         symbol_table_add_value(parser->arena, &parser->symbol_table, ind_var->register_name, iv_block_arg);
     }
@@ -2927,7 +2927,7 @@ void parse_affine_for(Parser *parser, Operation *op) {
     parser->capture_trailing_comments = true;
     VecOperation operations; VecOperation_reserve(parser->arena, &operations, 16);
     while (!parser_peek(parser, TK_RBRACE)) {
-        Operation *inner = parse_operation(parser);
+        MlirOperation *inner = parse_operation(parser);
         // Capture trailing inline comment before consuming the newline
         if (parser_peek(parser, TK_NEWLINE)) {
             int64_t nl_pos = (int64_t)parser->first;
@@ -2992,20 +2992,20 @@ void parse_affine_for(Parser *parser, Operation *op) {
 
     block->operations = operations.data;
     block->n_operations = operations.size;
-    Region *region = arena_alloc(parser->arena, Region);
-    region->blocks = arena_alloc_array(parser->arena, Block*, 1);
+    MlirRegion *region = arena_alloc(parser->arena, struct MlirRegion);
+    region->blocks = arena_alloc_array(parser->arena, MlirBlock*, 1);
     region->blocks[0] = block;
     region->n_blocks = 1;
-    op->regions = arena_alloc_array(parser->arena, Region*, 1);
+    op->regions = arena_alloc_array(parser->arena, MlirRegion*, 1);
     op->regions[0] = region;
     op->n_regions = 1;
 }
 
-void parse_gpu_launch(Parser *parser, Operation *op) {
+void parse_gpu_launch(Parser *parser, MlirOperation *op) {
     // Parse gpu.launch blocks(%arg2, %arg3, %arg4) in (...) threads(%arg5, %arg6, %arg7) in (...) {
 
-    VecValueRef launch_args;
-    VecValueRef_reserve(parser->arena, &launch_args, 16);
+    VecValue launch_args;
+    VecValue_reserve(parser->arena, &launch_args, 16);
 
     // Parse blocks(...) section
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("blocks"))) {
@@ -3019,13 +3019,13 @@ void parse_gpu_launch(Parser *parser, Operation *op) {
                     string reg_str = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
 
-                    ValueRef *arg = create_value_ref(parser->arena, BLOCK_ARG);
+                    MlirValue *arg = create_value_ref(parser->arena, BLOCK_ARG);
                     arg->register_name = reg_str;
                     arg->result_index = launch_args.size;
-                    arg->type = arena_alloc(parser->arena, Type);
+                    arg->type = arena_alloc(parser->arena, struct MlirType);
                     arg->type = parse_type_from_string(parser->arena, str_lit("index"));
 
-                    VecValueRef_push_back(parser->arena, &launch_args, arg);
+                    VecValue_push_back(parser->arena, &launch_args, arg);
 
                     if (parser_peek(parser, TK_COMMA)) {
                         parser_expect(parser, TK_COMMA);
@@ -3055,13 +3055,13 @@ void parse_gpu_launch(Parser *parser, Operation *op) {
                     string reg_str = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
 
-                    ValueRef *arg = create_value_ref(parser->arena, BLOCK_ARG);
+                    MlirValue *arg = create_value_ref(parser->arena, BLOCK_ARG);
                     arg->register_name = reg_str;
                     arg->result_index = launch_args.size;
-                    arg->type = arena_alloc(parser->arena, Type);
+                    arg->type = arena_alloc(parser->arena, struct MlirType);
                     arg->type = parse_type_from_string(parser->arena, str_lit("index"));
 
-                    VecValueRef_push_back(parser->arena, &launch_args, arg);
+                    VecValue_push_back(parser->arena, &launch_args, arg);
 
                     if (parser_peek(parser, TK_COMMA)) {
                         parser_expect(parser, TK_COMMA);
@@ -3095,7 +3095,7 @@ void parse_gpu_launch(Parser *parser, Operation *op) {
     VecOperation operations;
     VecOperation_reserve(parser->arena, &operations, 16);
     while (!parser_peek(parser, TK_RBRACE)) {
-        Operation *inner_op = parse_operation(parser);
+        MlirOperation *inner_op = parse_operation(parser);
         VecOperation_push_back(parser->arena, &operations, inner_op);
         parser_expect(parser, TK_NEWLINE);
 
@@ -3110,26 +3110,26 @@ void parse_gpu_launch(Parser *parser, Operation *op) {
     symbol_table_pop_scope(&parser->symbol_table);
 
     // Create the GPU launch region
-    Block *gpu_block = arena_alloc(parser->arena, Block);
+    MlirBlock *gpu_block = arena_alloc(parser->arena, struct MlirBlock);
     gpu_block->operations = operations.data;
     gpu_block->n_operations = operations.size;
     gpu_block->arguments = launch_args.data;
     gpu_block->n_arguments = launch_args.size;
 
-    Region *gpu_region = arena_alloc(parser->arena, Region);
-    gpu_region->blocks = arena_alloc_array(parser->arena, Block*, 1);
+    MlirRegion *gpu_region = arena_alloc(parser->arena, struct MlirRegion);
+    gpu_region->blocks = arena_alloc_array(parser->arena, MlirBlock*, 1);
     gpu_region->blocks[0] = gpu_block;
     gpu_region->n_blocks = 1;
 
-    op->regions = arena_alloc_array(parser->arena, Region*, 1);
+    op->regions = arena_alloc_array(parser->arena, MlirRegion*, 1);
     op->regions[0] = gpu_region;
     op->n_regions = 1;
 }
 
-void parse_arith_cmpi(Parser *parser, Operation *op) {
+void parse_arith_cmpi(Parser *parser, MlirOperation *op) {
     // Parse arith.cmpi <predicate>, %lhs, %rhs : type
-    VecValueRef operands;
-    VecValueRef_reserve(parser->arena, &operands, 2);
+    VecValue operands;
+    VecValue_reserve(parser->arena, &operands, 2);
     
     // Parse predicate (slt, sge, etc.)
     string predicate = str_lit("slt"); // default
@@ -3139,13 +3139,13 @@ void parse_arith_cmpi(Parser *parser, Operation *op) {
     }
     
     // Store predicate as an attribute
-    Attribute *predicate_attr = arena_alloc(parser->arena, Attribute);
+    MlirAttribute *predicate_attr = arena_alloc(parser->arena, struct MlirAttribute);
     predicate_attr->name = str_lit("predicate");
     predicate_attr->kind = ATTR_KIND_STRING;
     predicate_attr->data.string_value = predicate;
     
     op->n_attributes = 1;
-    op->attributes = arena_alloc_array(parser->arena, Attribute*, 1);
+    op->attributes = arena_alloc_array(parser->arena, MlirAttribute*, 1);
     op->attributes[0] = predicate_attr;
     
     // Expect comma
@@ -3155,8 +3155,8 @@ void parse_arith_cmpi(Parser *parser, Operation *op) {
     if (parser_peek(parser, TK_REGISTER)) {
         string lhs_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        ValueRef *lhs = symbol_table_lookup(&parser->symbol_table, lhs_str);
-        if (lhs) VecValueRef_push_back(parser->arena, &operands, lhs);
+        MlirValue *lhs = symbol_table_lookup(&parser->symbol_table, lhs_str);
+        if (lhs) VecValue_push_back(parser->arena, &operands, lhs);
     }
     
     parser_expect(parser, TK_COMMA);
@@ -3164,8 +3164,8 @@ void parse_arith_cmpi(Parser *parser, Operation *op) {
     if (parser_peek(parser, TK_REGISTER)) {
         string rhs_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        ValueRef *rhs = symbol_table_lookup(&parser->symbol_table, rhs_str);
-        if (rhs) VecValueRef_push_back(parser->arena, &operands, rhs);
+        MlirValue *rhs = symbol_table_lookup(&parser->symbol_table, rhs_str);
+        if (rhs) VecValue_push_back(parser->arena, &operands, rhs);
     }
     
     // Set operands
@@ -3173,6 +3173,6 @@ void parse_arith_cmpi(Parser *parser, Operation *op) {
     op->n_operands = operands.size;
     // Result type is i1 for arith.cmpi
     op->n_result_types = 1;
-    op->result_types = arena_alloc_array(parser->arena, Type*, 1);
+    op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
     op->result_types[0] = parse_type_from_string(parser->arena, str_lit("i1"));
 }
