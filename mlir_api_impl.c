@@ -432,6 +432,18 @@ void mlir_value_set_def(MlirValue *value, void *def) {
     value->def = def;
 }
 
+void mlir_value_set_divisibility_raw(MlirValue *value, bool has_value, int64_t div_value, MlirType *type) {
+    value->has_divisibility = has_value;
+    value->divisibility_value = div_value;
+    value->divisibility_type = type;
+}
+
+void mlir_value_set_max_divisibility_raw(MlirValue *value, bool has_value, int64_t div_value, MlirType *type) {
+    value->has_max_divisibility = has_value;
+    value->max_divisibility_value = div_value;
+    value->max_divisibility_type = type;
+}
+
 // Block and Region creation
 MlirBlock *mlir_block_create(Arena *arena) {
     struct MlirBlock *block = arena_alloc(arena, struct MlirBlock);

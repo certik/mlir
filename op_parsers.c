@@ -103,6 +103,19 @@ static void operation_set_single_attribute(Parser *parser, MlirOperation *op, Ml
     set_op_attributes(op, attrs, 1);
 }
 
+static MlirValue *lookup_or_create_value(Parser *parser, string reg, string default_type) {
+    MlirValue *val = symbol_table_lookup(&parser->symbol_table, reg);
+    if (!val) {
+        val = create_value_ref(parser->arena, BLOCK_ARG);
+        mlir_value_set_register_name(val, string_data_or_null(reg), reg.size);
+        if (default_type.size > 0) {
+            MlirType *ty = mlir_type_create_from_string(parser->arena, default_type);
+            mlir_value_set_type(val, ty);
+        }
+    }
+    return val;
+}
+
 // Include the extracted functions
 void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op) {
     // Attributes block
@@ -618,11 +631,11 @@ void parse_tt_addptr_load_store(Parser *parser, MlirOperation *op) {
         VecValue_push_back(parser->arena, &operands, operand);
         if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA); else break;
     }
-    op->operands = operands.data;
-    op->n_operands = operands.size;
+    set_op_operands(op, operands.data, operands.size);
 
     // For tt.addptr/tt.load, prefer explicit type after ':' when present; otherwise fall back.
-    if (op->op_type == OP_TYPE_TT_ADDPTR || op->op_type == OP_TYPE_TT_LOAD) {
+    OpType op_type = mlir_operation_get_type(op);
+    if (op_type == OP_TYPE_TT_ADDPTR || op_type == OP_TYPE_TT_LOAD) {
         if (parser_peek(parser, TK_COLON)) {
             parser_expect(parser, TK_COLON);
 
@@ -630,11 +643,10 @@ void parse_tt_addptr_load_store(Parser *parser, MlirOperation *op) {
             string type_left = str_lit("");
             if (parse_type_string(parser, &type_left)) {
                 // Set result type
-                op->n_result_types = 1;
-                op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
-                if (op->op_type == OP_TYPE_TT_ADDPTR) {
+                MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
+                if (op_type == OP_TYPE_TT_ADDPTR) {
                     // For addptr, result type is the pointer tensor type
-                    op->result_types[0] = mlir_type_create_from_string(parser->arena, type_left);
+                    types[0] = mlir_type_create_from_string(parser->arena, type_left);
                 } else {
                     // For load, convert pointer tensor element to value element type (e.g., f32)
                     // Do a textual conversion: replace '!tt.ptr<...>' payload with element inside or f32
@@ -660,12 +672,13 @@ void parse_tt_addptr_load_store(Parser *parser, MlirOperation *op) {
                         string val_ty = before;
                         val_ty = str_concat(parser->arena, val_ty, elem.size ? elem : str_lit("f32"));
                         val_ty = str_concat(parser->arena, val_ty, after);
-                        op->result_types[0] = mlir_type_create_from_string(parser->arena, val_ty);
+                        types[0] = mlir_type_create_from_string(parser->arena, val_ty);
                     } else {
                         // Fallback: assume f32 element
-                        op->result_types[0] = mlir_type_create_from_string(parser->arena, s);
+                        types[0] = mlir_type_create_from_string(parser->arena, s);
                     }
                 }
+                set_op_result_types(op, types, 1);
             }
             // Consume remaining type list conservatively until end of list or loc
             if (parser_peek(parser, TK_COMMA)) {
@@ -674,11 +687,15 @@ void parse_tt_addptr_load_store(Parser *parser, MlirOperation *op) {
                     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) break;
                 } while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE));
             }
-        } else if (op->op_type == OP_TYPE_TT_ADDPTR && op->n_operands > 0 && op->operands[0] && op->operands[0]->type) {
+        } else if (op_type == OP_TYPE_TT_ADDPTR && mlir_operation_num_operands(op) > 0) {
+            MlirValue *first = mlir_operation_get_operand(op, 0);
+            MlirType *first_type = first ? mlir_value_get_type(first) : NULL;
             // Fallback heuristic when no explicit type list is present
-            op->n_result_types = 1;
-            op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
-            op->result_types[0] = op->operands[0]->type;
+            if (first_type) {
+                MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
+                types[0] = first_type;
+                set_op_result_types(op, types, 1);
+            }
         }
     }
 }
@@ -758,8 +775,7 @@ void parse_tt_store(Parser *parser, MlirOperation *op) {
         parser_expect(parser, TK_RBRACE);
         
         // Store attributes in operation
-        op->attributes = attrs;
-        op->n_attributes = n_attrs;
+        set_op_attributes(op, attrs, n_attrs);
     }
 
     // Trailing operand type list ": ..." (consume conservatively)
@@ -775,7 +791,7 @@ void parse_tt_store(Parser *parser, MlirOperation *op) {
         }
         // Optional trailing loc()
         if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-            op->location = parse_loc(parser);
+            mlir_operation_set_location(op, parse_loc(parser));
         }
     }
 }
@@ -815,40 +831,26 @@ void parse_tensor_extract(Parser *parser, MlirOperation *op) {
         }
         parser_expect(parser, TK_RBRACKET);
     }
-    op->operands = operands.data;
-    op->n_operands = operands.size;
+    set_op_operands(op, operands.data, operands.size);
 }
 
 void parse_memref_load_or_store(Parser *parser, MlirOperation *op) {
     VecValue operands; VecValue_reserve(parser->arena, &operands, 4);
+    OpType op_type = mlir_operation_get_type(op);
 
-    if (op->op_type == OP_TYPE_MEMREF_STORE) {
+    if (op_type == OP_TYPE_MEMREF_STORE) {
         // memref.store %value, %memref[indices] : memref<...>
         if (parser_peek(parser, TK_REGISTER)) {
             string reg = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            MlirValue *val = symbol_table_lookup(&parser->symbol_table, reg);
-            if (!val) {
-                val = create_value_ref(parser->arena, BLOCK_ARG);
-                val->register_name = reg;
-                val->type = arena_alloc(parser->arena, struct MlirType);
-                val->type = mlir_type_create_from_string(parser->arena, str_lit("unknown"));
-
-            }
+            MlirValue *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
             VecValue_push_back(parser->arena, &operands, val);
         }
         if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
         if (parser_peek(parser, TK_REGISTER)) {
             string reg = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            MlirValue *val = symbol_table_lookup(&parser->symbol_table, reg);
-            if (!val) {
-                val = create_value_ref(parser->arena, BLOCK_ARG);
-                val->register_name = reg;
-                val->type = arena_alloc(parser->arena, struct MlirType);
-                val->type = mlir_type_create_from_string(parser->arena, str_lit("unknown"));
-
-            }
+            MlirValue *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
             VecValue_push_back(parser->arena, &operands, val);
         }
     } else {
@@ -856,14 +858,7 @@ void parse_memref_load_or_store(Parser *parser, MlirOperation *op) {
         if (parser_peek(parser, TK_REGISTER)) {
             string reg = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            MlirValue *val = symbol_table_lookup(&parser->symbol_table, reg);
-            if (!val) {
-                val = create_value_ref(parser->arena, BLOCK_ARG);
-                val->register_name = reg;
-                val->type = arena_alloc(parser->arena, struct MlirType);
-                val->type = mlir_type_create_from_string(parser->arena, str_lit("unknown"));
-
-            }
+            MlirValue *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
             VecValue_push_back(parser->arena, &operands, val);
         }
     }
@@ -878,14 +873,7 @@ void parse_memref_load_or_store(Parser *parser, MlirOperation *op) {
             if (parser_peek(parser, TK_REGISTER)) {
                 string idx = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                MlirValue *val = symbol_table_lookup(&parser->symbol_table, idx);
-                if (!val) {
-                    val = create_value_ref(parser->arena, BLOCK_ARG);
-                    val->register_name = idx;
-                    val->type = arena_alloc(parser->arena, struct MlirType);
-                    val->type = mlir_type_create_from_string(parser->arena, str_lit("index"));
-
-                }
+                MlirValue *val = lookup_or_create_value(parser, idx, str_lit("index"));
                 VecValue_push_back(parser->arena, &operands, val);
             } else {
                 parser_next_token(parser);
@@ -894,8 +882,7 @@ void parse_memref_load_or_store(Parser *parser, MlirOperation *op) {
         parser_expect(parser, TK_RBRACKET);
     }
 
-    op->operands = operands.data;
-    op->n_operands = operands.size;
+    set_op_operands(op, operands.data, operands.size);
 }
 
 void parse_memref_store(Parser *parser, MlirOperation *op) {
@@ -913,11 +900,11 @@ void parse_memref_store(Parser *parser, MlirOperation *op) {
             parser_next_token(parser);
         }
         if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-            op->location = parse_loc(parser);
+            mlir_operation_set_location(op, parse_loc(parser));
         }
     }
     // Ensure no results
-    op->n_result_types = 0;
+    mlir_operation_set_result_types(op, NULL, 0);
 }
 
 void parse_vector_print(Parser *parser, MlirOperation *op) {
