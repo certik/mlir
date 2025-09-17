@@ -1,6 +1,5 @@
 // Generic printer (internal IR for now, wrapped for API)
 #include "mlir_generic_printer.h"
-#include "mlir_ir_internal.h"
 #include <base/hashtable.h>
 #include <base/format.h>
 
@@ -37,11 +36,15 @@ static string print_block_internal(PrintCtx *ctx, int bb_index, int indent_level
 
 static void preassign_region_ssa(PrintCtx *ctx, MlirRegion *region, int indent_level);
 static void preassign_op_ssa(PrintCtx *ctx, MlirOperation *op, int indent_level) {
-    if (op->n_regions > 0 && op->regions) {
-        for (int i = 0; i < op->n_regions; i++) preassign_region_ssa(ctx, op->regions[i], indent_level + 1);
+    size_t n_regions = mlir_operation_num_regions(op);
+    for (size_t i = 0; i < n_regions; i++) {
+        MlirRegion *region = mlir_operation_get_region(op, i);
+        if (region) preassign_region_ssa(ctx, region, indent_level + 1);
     }
-    if (op->n_results > 0 && op->results) {
-        for (int i = 0; i < op->n_results; i++) if (op->results[i]) (void)get_or_assign_ssa(ctx, (MlirValue*)op->results[i]);
+    size_t n_results = mlir_operation_num_results(op);
+    for (size_t i = 0; i < n_results; i++) {
+        MlirValue *result = mlir_operation_get_result(op, i);
+        if (result) (void)get_or_assign_ssa(ctx, result);
     }
 }
 
@@ -115,14 +118,18 @@ static string print_region_internal(PrintCtx *ctx, int indent_level, MlirRegion 
 static string print_operation_internal(PrintCtx *ctx, int indent_level, MlirOperation *op) {
     Arena *arena = ctx->arena;
     string result = indent(arena, indent_level);
-    size_t api_num_result_types = mlir_operation_num_result_types((MlirOperation*)op);
+    size_t api_num_result_types = mlir_operation_num_result_types(op);
     if (api_num_result_types > 0) {
-        if (op->n_regions > 0 && op->regions) for (int i = 0; i < op->n_regions; i++) preassign_region_ssa(ctx, op->regions[i], indent_level + 1);
+        size_t n_regions = mlir_operation_num_regions(op);
+        for (size_t i = 0; i < n_regions; i++) {
+            MlirRegion *region = mlir_operation_get_region(op, i);
+            if (region) preassign_region_ssa(ctx, region, indent_level + 1);
+        }
         for (size_t i = 0; i < api_num_result_types; i++) {
             if (i > 0) result = str_concat(arena, result, str_lit(", "));
-            size_t api_num_results = mlir_operation_num_results((MlirOperation*)op);
+            size_t api_num_results = mlir_operation_num_results(op);
             if (api_num_results > i) {
-                MlirValue *res = mlir_operation_get_result((MlirOperation*)op, i);
+                MlirValue *res = mlir_operation_get_result(op, i);
                 if (res) {
                     string name = mlir_value_get_register_name(res);
                     if (name.size > 0) result = str_concat(arena, result, name);
@@ -136,17 +143,21 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MlirOper
         }
         result = str_concat(arena, result, str_lit(" = "));
     }
-    if (op->op_type == OP_TYPE_UNREGISTERED) {
+    OpType op_type = mlir_operation_get_type(op);
+    string opname = mlir_operation_get_name_string(op);
+    if (op_type == OP_TYPE_UNREGISTERED) {
         result = str_concat(arena, result, str_lit("\""));
-        if (op->opname.size > 0) result = str_concat(arena, result, op->opname); else result = str_concat(arena, result, str_lit("unknown"));
+        if (opname.size > 0) result = str_concat(arena, result, opname);
+        else result = str_concat(arena, result, str_lit("unknown"));
         result = str_concat(arena, result, str_lit("\""));
     } else {
-        if (op->opname.size > 0) result = str_concat(arena, result, op->opname); else result = str_concat(arena, result, op_type_to_string(op->op_type));
+        if (opname.size > 0) result = str_concat(arena, result, opname);
+        else result = str_concat(arena, result, str_from_cstr_view((char*)mlir_op_type_to_string(op_type)));
     }
     result = str_concat(arena, result, str_lit("("));
-    for (size_t i = 0, e = mlir_operation_num_operands((MlirOperation*)op); i < e; i++) {
+    for (size_t i = 0, e = mlir_operation_num_operands(op); i < e; i++) {
         if (i > 0) result = str_concat(arena, result, str_lit(", "));
-        MlirValue *operand = mlir_operation_get_operand((MlirOperation*)op, i);
+        MlirValue *operand = mlir_operation_get_operand(op, i);
         if (!operand) { result = str_concat(arena, result, str_lit("NULL_OPERAND")); continue; }
         string name = mlir_value_get_register_name(operand);
         if (name.size > 0) result = str_concat(arena, result, name);
@@ -157,12 +168,12 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MlirOper
     }
     result = str_concat(arena, result, str_lit(")"));
     {
-        size_t n_attrs = mlir_operation_num_attributes((MlirOperation*)op);
+        size_t n_attrs = mlir_operation_num_attributes(op);
         if (n_attrs > 0) {
             bool opened = false; bool first = true;
-            OpType opty = mlir_operation_get_type((MlirOperation*)op);
+            OpType opty = mlir_operation_get_type(op);
             for (size_t i = 0; i < n_attrs; i++) {
-                MlirAttribute *attr = mlir_operation_get_attribute((MlirOperation*)op, i);
+                MlirAttribute *attr = mlir_operation_get_attribute(op, i);
                 string name = mlir_attribute_get_name(attr);
                 if (name.size > 0 && name.str[0] == '_') { continue; }
                 if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
@@ -191,13 +202,17 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MlirOper
         result = str_concat(arena, result, str_lit(" -> "));
         for (size_t i = 0; i < api_num_result_types; i++) {
             if (i > 0) result = str_concat(arena, result, str_lit(", "));
-            MlirType *rt = mlir_operation_get_result_type((MlirOperation*)op, i);
+            MlirType *rt = mlir_operation_get_result_type(op, i);
             if (rt) result = str_concat(arena, result, mlir_type_to_string(arena, rt)); else result = str_concat(arena, result, str_lit("?"));
         }
     }
-    if (op->n_regions > 0) {
+    size_t n_regions = mlir_operation_num_regions(op);
+    if (n_regions > 0) {
         result = str_concat(arena, result, str_lit(" "));
-        for (int i = 0; i < op->n_regions; i++) result = str_concat(arena, result, print_region_internal(ctx, indent_level, op->regions[i]));
+        for (size_t i = 0; i < n_regions; i++) {
+            MlirRegion *region = mlir_operation_get_region(op, i);
+            if (region) result = str_concat(arena, result, print_region_internal(ctx, indent_level, region));
+        }
     }
     result = str_concat(arena, result, str_lit("\n"));
     return result;
