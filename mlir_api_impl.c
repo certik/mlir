@@ -278,6 +278,65 @@ MlirType *mlir_type_create_float(Arena *arena, uint32_t width, bool is_bfloat) {
     return (MlirType*)type;
 }
 
+MlirType *mlir_type_create_index(Arena *arena) {
+    Arena *concrete_arena = (Arena*)arena;
+    Type *type = arena_alloc(concrete_arena, Type);
+    *type = (Type){0};
+    type->kind = TYPE_KIND_INDEX;
+    return (MlirType*)type;
+}
+
+MlirType *mlir_type_create_unknown(Arena *arena) {
+    Arena *concrete_arena = (Arena*)arena;
+    Type *type = arena_alloc(concrete_arena, Type);
+    *type = (Type){0};
+    type->kind = TYPE_KIND_UNKNOWN;
+    return (MlirType*)type;
+}
+
+static void copy_shape(Arena *arena, Type *type, const int64_t *shape, size_t rank) {
+    type->data.shaped.rank = (uint32_t)rank;
+    if (rank > 0 && shape) {
+        type->data.shaped.shape = arena_alloc_array(arena, int64_t, rank);
+        for (size_t i = 0; i < rank; i++) {
+            type->data.shaped.shape[i] = shape[i];
+        }
+    } else {
+        type->data.shaped.shape = NULL;
+    }
+}
+
+MlirType *mlir_type_create_tensor(Arena *arena, const int64_t *shape, size_t rank, MlirType *element_type) {
+    Arena *concrete_arena = (Arena*)arena;
+    Type *type = arena_alloc(concrete_arena, Type);
+    *type = (Type){0};
+    type->kind = TYPE_KIND_TENSOR;
+    type->data.shaped.element_type = (Type*)element_type;
+    copy_shape(concrete_arena, type, shape, rank);
+    return (MlirType*)type;
+}
+
+MlirType *mlir_type_create_memref(Arena *arena, const int64_t *shape, size_t rank, MlirType *element_type) {
+    Arena *concrete_arena = (Arena*)arena;
+    Type *type = arena_alloc(concrete_arena, Type);
+    *type = (Type){0};
+    type->kind = TYPE_KIND_MEMREF;
+    type->data.shaped.element_type = (Type*)element_type;
+    copy_shape(concrete_arena, type, shape, rank);
+    return (MlirType*)type;
+}
+
+MlirType *mlir_type_create_pointer(Arena *arena, MlirType *element_type, bool has_address_space, uint32_t address_space) {
+    Arena *concrete_arena = (Arena*)arena;
+    Type *type = arena_alloc(concrete_arena, Type);
+    *type = (Type){0};
+    type->kind = TYPE_KIND_POINTER;
+    type->data.pointer.element_type = (Type*)element_type;
+    type->data.pointer.has_address_space = has_address_space;
+    type->data.pointer.address_space = address_space;
+    return (MlirType*)type;
+}
+
 void mlir_type_set_integer_properties(MlirType *type, uint32_t width, bool is_signed) {
     Type *concrete_type = (Type*)type;
     concrete_type->kind = TYPE_KIND_INTEGER;
@@ -308,6 +367,24 @@ MlirAttribute *mlir_attribute_create_string(Arena *arena, const char *str, size_
     *attr = (Attribute){0};
     attr->kind = ATTR_KIND_STRING;
     attr->data.string_value = (string){(char*)str, len};
+    return (MlirAttribute*)attr;
+}
+
+MlirAttribute *mlir_attribute_create_float(Arena *arena, double value) {
+    Arena *concrete_arena = (Arena*)arena;
+    Attribute *attr = arena_alloc(concrete_arena, Attribute);
+    *attr = (Attribute){0};
+    attr->kind = ATTR_KIND_FLOAT;
+    attr->data.float_value = value;
+    return (MlirAttribute*)attr;
+}
+
+MlirAttribute *mlir_attribute_create_bool(Arena *arena, bool value) {
+    Arena *concrete_arena = (Arena*)arena;
+    Attribute *attr = arena_alloc(concrete_arena, Attribute);
+    *attr = (Attribute){0};
+    attr->kind = ATTR_KIND_BOOL;
+    attr->data.bool_value = value;
     return (MlirAttribute*)attr;
 }
 
@@ -409,6 +486,29 @@ void mlir_operation_set_source_line_start(MlirOperation *op, int64_t line_start)
 void mlir_operation_set_unnumbered_loc_def(MlirOperation *op, MlirLocation *loc) {
     Operation *concrete_op = (Operation*)op;
     concrete_op->unnumbered_loc_def = (Location*)loc;
+}
+
+void mlir_operation_append_attribute(Arena *arena, MlirOperation *op, MlirAttribute *attr) {
+    Arena *concrete_arena = (Arena*)arena;
+    Operation *concrete_op = (Operation*)op;
+    size_t new_count = concrete_op->n_attributes + 1;
+    Attribute **new_attrs = arena_alloc_array(concrete_arena, Attribute*, new_count);
+    if (concrete_op->attributes) {
+        memcpy(new_attrs, concrete_op->attributes, concrete_op->n_attributes * sizeof(Attribute*));
+    }
+    new_attrs[new_count - 1] = (Attribute*)attr;
+    concrete_op->attributes = new_attrs;
+    concrete_op->n_attributes = new_count;
+}
+
+int64_t mlir_operation_get_source_line_start(const MlirOperation *op) {
+    const Operation *concrete_op = (const Operation*)op;
+    return concrete_op->source_line_start;
+}
+
+MlirLocation *mlir_operation_get_unnumbered_loc_def(const MlirOperation *op) {
+    const Operation *concrete_op = (const Operation*)op;
+    return (MlirLocation*)concrete_op->unnumbered_loc_def;
 }
 
 // Attribute accessors

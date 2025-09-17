@@ -195,6 +195,11 @@ MlirType *mlir_value_get_max_divisibility_type(const MlirValue *value);
 // Type creation and manipulation
 MlirType *mlir_type_create_integer(Arena *arena, uint32_t width, bool is_signed);
 MlirType *mlir_type_create_float(Arena *arena, uint32_t width, bool is_bfloat);
+MlirType *mlir_type_create_index(Arena *arena);
+MlirType *mlir_type_create_unknown(Arena *arena);
+MlirType *mlir_type_create_tensor(Arena *arena, const int64_t *shape, size_t rank, MlirType *element_type);
+MlirType *mlir_type_create_memref(Arena *arena, const int64_t *shape, size_t rank, MlirType *element_type);
+MlirType *mlir_type_create_pointer(Arena *arena, MlirType *element_type, bool has_address_space, uint32_t address_space);
 void mlir_type_set_integer_properties(MlirType *type, uint32_t width, bool is_signed);
 void mlir_type_set_float_properties(MlirType *type, uint32_t width, bool is_bfloat);
 string mlir_type_to_string(Arena *arena, MlirType *type);
@@ -202,6 +207,8 @@ string mlir_type_to_string(Arena *arena, MlirType *type);
 // Attribute creation and manipulation
 MlirAttribute *mlir_attribute_create_integer(Arena *arena, int64_t value);
 MlirAttribute *mlir_attribute_create_string(Arena *arena, const char *str, size_t len);
+MlirAttribute *mlir_attribute_create_float(Arena *arena, double value);
+MlirAttribute *mlir_attribute_create_bool(Arena *arena, bool value);
 void mlir_attribute_set_name(MlirAttribute *attr, const char *name, size_t name_len);
 // Attribute accessors
 typedef enum {
@@ -246,6 +253,9 @@ void mlir_operation_set_location(MlirOperation *op, MlirLocation *loc);
 void mlir_operation_set_trailing_comment(MlirOperation *op, const char *comment, size_t comment_len);
 void mlir_operation_set_source_line_start(MlirOperation *op, int64_t line_start);
 void mlir_operation_set_unnumbered_loc_def(MlirOperation *op, MlirLocation *loc);
+void mlir_operation_append_attribute(Arena *arena, MlirOperation *op, MlirAttribute *attr);
+int64_t mlir_operation_get_source_line_start(const MlirOperation *op);
+MlirLocation *mlir_operation_get_unnumbered_loc_def(const MlirOperation *op);
 
 // Parser functions
 MlirParser *mlir_parser_create(Arena *arena);
