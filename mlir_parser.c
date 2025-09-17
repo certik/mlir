@@ -875,20 +875,19 @@ Block* parse_block(Parser *parser) {
                     parser_expect(parser, TK_COLON);
 
                     // Create block argument value
-                    ValueRef *block_arg = arena_alloc(parser->arena, ValueRef);
-                    block_arg->kind = BLOCK_ARG;
+                    ValueRef *block_arg = (ValueRef*)mlir_value_create(parser->arena, BLOCK_ARG);
                     mlir_value_set_register_name((MlirValue*)block_arg, arg_name.str, arg_name.size);
                     mlir_value_set_result_index((MlirValue*)block_arg, (uint32_t)block_args.size);
                     mlir_value_set_def((MlirValue*)block_arg, NULL);
                     // Parse argument type
                     string type_name = str_lit("");
-                    Type *arg_type = NULL;
+                    MlirType *arg_type = NULL;
                     if (parse_type_string(parser, &type_name)) {
                         arg_type = parse_type_from_string(parser->arena, type_name);
                     } else {
                         arg_type = parse_type_from_string(parser->arena, str_lit("i32"));
                     }
-                    mlir_value_set_type((MlirValue*)block_arg, (MlirType*)arg_type);
+                    mlir_value_set_type((MlirValue*)block_arg, arg_type);
 
                     VecValueRef_push_back(parser->arena, &block_args, block_arg);
 
