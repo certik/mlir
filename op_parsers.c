@@ -2119,9 +2119,13 @@ void parse_tt_func(Parser *parser, MlirOperation *op) {
         symbol_table_push_scope(parser->arena, &parser->symbol_table);
 
         // Register function arguments in the new scope
-        for (int i = 0; i < op->n_operands; i++) {
-            if (op->operands[i]) {
-                symbol_table_add_value(parser->arena, &parser->symbol_table, op->operands[i]->register_name, op->operands[i]);
+        size_t num_operands = mlir_operation_num_operands(op);
+        for (size_t i = 0; i < num_operands; i++) {
+            MlirValue *operand = mlir_operation_get_operand(op, i);
+            if (!operand) continue;
+            string name = mlir_value_get_register_name(operand);
+            if (name.size > 0) {
+                symbol_table_add_value(parser->arena, &parser->symbol_table, name, operand);
             }
         }
 
@@ -2272,53 +2276,45 @@ void parse_scf_if(Parser *parser, MlirOperation *op) {
     // Set operands
     set_op_operands(op, operands.data, operands.size);
     
+    MlirType **result_types = NULL;
+    size_t num_results = 0;
+
     // Capture optional result types: '-> (type, ... )'
     while (!parser_peek(parser, TK_LBRACE_END) && !parser_peek(parser, TK_EOF)) {
         if (parser_peek(parser, TK_ARROW)) {
             parser_expect(parser, TK_ARROW);
-                if (parser_peek(parser, TK_LPAREN)) {
-                    parser_expect(parser, TK_LPAREN);
-                    // Parse a single result type conservatively
-                    string t = str_lit("");
-                    if (parse_type_string(parser, &t)) {
-                        op->n_result_types = 1;
-                        op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
-                        op->result_types[0] = arena_alloc(parser->arena, struct MlirType);
-                        op->result_types[0] = mlir_type_create_from_string(parser->arena, t);
-                    }
-                    // Consume rest until ')'
-                    while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) parser_next_token(parser);
-                    if (parser_peek(parser, TK_RPAREN)) parser_expect(parser, TK_RPAREN);
+            if (parser_peek(parser, TK_LPAREN)) {
+                parser_expect(parser, TK_LPAREN);
+                string t = str_lit("");
+                if (parse_type_string(parser, &t)) {
+                    result_types = arena_alloc_array(parser->arena, MlirType*, 1);
+                    result_types[0] = mlir_type_create_from_string(parser->arena, t);
+                    num_results = 1;
                 }
+                while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) parser_next_token(parser);
+                if (parser_peek(parser, TK_RPAREN)) parser_expect(parser, TK_RPAREN);
+            }
         } else {
             parser_next_token(parser);
         }
     }
-    int n_regions = 1;
+
+    if (num_results > 0) set_op_result_types(op, result_types, num_results);
+
     MlirRegion *region1 = parse_region(parser);
     MlirRegion *region2 = NULL;
 
-    if (parser_peek(parser, TK_NAME)) {
-        if (str_eq(parser_token_str(parser), str_lit("else"))) {
-            parser_expect(parser, TK_NAME);
-            region2 = parse_region(parser);
-            n_regions++;
-        }
+    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("else"))) {
+        parser_expect(parser, TK_NAME);
+        region2 = parse_region(parser);
     }
 
-    if (parser_peek(parser, TK_NAME)) {
-        if (str_eq(parser_token_str(parser), str_lit("loc"))) {
-            op->location = parse_loc(parser);
-        }
+    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
+        mlir_operation_set_location(op, parse_loc(parser));
     }
 
-    MlirRegion **regions = arena_alloc_array(parser->arena, MlirRegion*, n_regions);
-    regions[0] = region1;
-    if (region2) {
-        regions[1] = region2;
-    }
-    op->regions = regions;
-    op->n_regions = n_regions;
+    mlir_op_add_region(parser->arena, op, region1);
+    if (region2) mlir_op_add_region(parser->arena, op, region2);
 }
 
 void parse_scf_for(Parser *parser, MlirOperation *op) {
@@ -2335,9 +2331,9 @@ void parse_scf_for(Parser *parser, MlirOperation *op) {
         parser_expect(parser, TK_REGISTER);
 
         loop_var = create_value_ref(parser->arena, BLOCK_ARG);
-        loop_var->register_name = loop_var_name;
+        mlir_value_set_register_name(loop_var, string_data_or_null(loop_var_name), loop_var_name.size);
         // Type assigned from trailing ": <type>" if present; default later
-        loop_var->type = NULL;
+        mlir_value_set_type(loop_var, NULL);
 
 
         // Expect =
@@ -2409,9 +2405,8 @@ void parse_scf_for(Parser *parser, MlirOperation *op) {
                     parser_expect(parser, TK_REGISTER);
 
                     MlirValue *iter_var = create_value_ref(parser->arena, BLOCK_ARG);
-                    // Keep the original SSA name for printing and symbol mapping
-                    iter_var->register_name = iter_var_name;
-                    iter_var->type = NULL; // Determined from init operand
+                    mlir_value_set_register_name(iter_var, string_data_or_null(iter_var_name), iter_var_name.size);
+                    mlir_value_set_type(iter_var, NULL); // Determined from init operand later
 
 
                     VecValue_push_back(parser->arena, &iter_vars, iter_var);
@@ -2509,23 +2504,24 @@ void parse_scf_for(Parser *parser, MlirOperation *op) {
     if (loop_var) {
         // Create a new ValueRef for the block argument using the original loop variable name
         MlirValue *loop_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
-        loop_block_arg->register_name = loop_var->register_name;
+        string loop_name = mlir_value_get_register_name(loop_var);
+        mlir_value_set_register_name(loop_block_arg, string_data_or_null(loop_name), loop_name.size);
         // Use parsed iv type if available; otherwise default to the lb type or i32
         if (iv_type) {
-            loop_block_arg->type = iv_type;
-        } else if (operands.size > 0 && operands.data[0] && operands.data[0]->type) {
-            loop_block_arg->type = operands.data[0]->type;
+            mlir_value_set_type(loop_block_arg, iv_type);
+        } else if (operands.size > 0 && operands.data[0] && mlir_value_get_type(operands.data[0])) {
+            mlir_value_set_type(loop_block_arg, mlir_value_get_type(operands.data[0]));
         } else {
-            loop_block_arg->type = mlir_type_create_from_string(parser->arena, str_lit("i32"));
+            mlir_value_set_type(loop_block_arg, mlir_type_create_from_string(parser->arena, str_lit("i32")));
         }
 
-        loop_block_arg->result_index = 0;
-        loop_block_arg->def = block;
+        mlir_value_set_result_index(loop_block_arg, 0);
+        mlir_value_set_def(loop_block_arg, block);
 
         VecValue_push_back(parser->arena, &block_args, loop_block_arg);
 
         // Register in symbol table using original loop variable name
-        symbol_table_add_value(parser->arena, &parser->symbol_table, loop_var->register_name, loop_block_arg);
+        if (loop_name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, loop_name, loop_block_arg);
     }
 
     // Create block arguments for all iter_args
@@ -2533,21 +2529,28 @@ void parse_scf_for(Parser *parser, MlirOperation *op) {
         MlirValue *iter_var = iter_vars.data[i];
         // Create a new ValueRef for the block argument using original name
         MlirValue *iter_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
-        iter_block_arg->register_name = iter_var->register_name;
+        string iter_name = mlir_value_get_register_name(iter_var);
+        mlir_value_set_register_name(iter_block_arg, string_data_or_null(iter_name), iter_name.size);
         // Type of iter arg is the type of its init operand (operands[3+i])
-        if (op->n_operands >= 4 + (int)i && operands.data[3 + i] && operands.data[3 + i]->type) {
-            iter_block_arg->type = operands.data[3 + i]->type;
+        size_t init_index = 3 + i;
+        if (mlir_operation_num_operands(op) > init_index) {
+            MlirValue *init_operand = mlir_operation_get_operand(op, init_index);
+            if (init_operand && mlir_value_get_type(init_operand)) {
+                mlir_value_set_type(iter_block_arg, mlir_value_get_type(init_operand));
+            } else {
+                mlir_value_set_type(iter_block_arg, mlir_type_create_from_string(parser->arena, str_lit("unknown")));
+            }
         } else {
-            iter_block_arg->type = mlir_type_create_from_string(parser->arena, str_lit("unknown"));
+            mlir_value_set_type(iter_block_arg, mlir_type_create_from_string(parser->arena, str_lit("unknown")));
         }
 
-        iter_block_arg->result_index = i + 1;
-        iter_block_arg->def = block;
+        mlir_value_set_result_index(iter_block_arg, (uint32_t)(i + 1));
+        mlir_value_set_def(iter_block_arg, block);
 
         VecValue_push_back(parser->arena, &block_args, iter_block_arg);
 
         // Register in symbol table using original iter_args variable name
-        symbol_table_add_value(parser->arena, &parser->symbol_table, iter_var->register_name, iter_block_arg);
+        if (iter_name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, iter_name, iter_block_arg);
     }
 
     block->arguments = block_args.data;
