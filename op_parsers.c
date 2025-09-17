@@ -198,9 +198,6 @@ void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op) {
                         attrs = new_attrs;
                     }
                     
-                    MlirAttribute *attr = arena_alloc(parser->arena, struct MlirAttribute);
-                    attr->name = attr_name;
-                    
                     // Parse attribute value: capture complex payload verbatim until ',' or '}'
                     string payload = str_lit("");
                     int angle = 0;
@@ -212,10 +209,8 @@ void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op) {
                         parser_next_token(parser);
                         if (angle==0 && (parser_peek(parser, TK_COMMA) || parser_peek(parser, TK_RBRACE))) break;
                     }
-                    attr->kind = ATTR_KIND_STRING;
-                    attr->data.string_value = payload;
-                    
-                    attrs[n_attrs++] = attr;
+
+                    attrs[n_attrs++] = create_string_attr(parser, attr_name, payload);
                 }
                 
                 // Skip comma if present
@@ -1568,6 +1563,7 @@ void parse_tt_call(Parser *parser, MlirOperation *op) {
     // Parse function name (@name is tokenized as TK_FUNCTION_NAME)
     MlirAttribute **attrs = NULL; size_t n_attrs = 0, cap_attrs = 0;
     attr_list_init_from_op(parser, op, &attrs, &n_attrs, &cap_attrs);
+    attr_list_init_from_op(parser, op, &attrs, &n_attrs, &cap_attrs);
     if (parser_peek(parser, TK_FUNCTION_NAME)) {
         // Capture callee name including '@'
         string fname = parser_token_str(parser);
@@ -2693,15 +2689,14 @@ void parse_return_operation(Parser *parser, MlirOperation *op) {
 
     // Consume any trailing ": ..." types or loc(), without assigning result types
     if (parser_peek(parser, TK_COLON)) {
-        // Consume tokens until newline/brace
         do {
             if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-            mlir_operation_set_location(op, parse_loc(parser));
-            break;
-        }
-        parser_next_token(parser);
-    } while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE) && !parser_peek(parser, TK_EOF));
-}
+                mlir_operation_set_location(op, parse_loc(parser));
+                break;
+            }
+            parser_next_token(parser);
+        } while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE) && !parser_peek(parser, TK_EOF));
+    }
     // Or a trailing loc() without preceding ':'
     if (!mlir_operation_get_location(op) && parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
         mlir_operation_set_location(op, parse_loc(parser));
@@ -2720,9 +2715,8 @@ void parse_affine_for(Parser *parser, MlirOperation *op) {
 
         // Create a placeholder for the block argument; registered later
         ind_var = create_value_ref(parser->arena, BLOCK_ARG);
-        ind_var->register_name = iv_name;
-        ind_var->type = arena_alloc(parser->arena, struct MlirType);
-        ind_var->type = mlir_type_create_from_string(parser->arena, str_lit("index"));
+        mlir_value_set_register_name(ind_var, string_data_or_null(iv_name), iv_name.size);
+        mlir_value_set_type(ind_var, mlir_type_create_from_string(parser->arena, str_lit("index")));
 
 
         // '=' lower bound
@@ -2771,14 +2765,14 @@ void parse_affine_for(Parser *parser, MlirOperation *op) {
     VecValue block_args; VecValue_reserve(parser->arena, &block_args, 1);
     if (ind_var) {
         MlirValue *iv_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
-        iv_block_arg->register_name = str_lit("%arg0");
-        iv_block_arg->type = arena_alloc(parser->arena, struct MlirType);
-        iv_block_arg->type = mlir_type_create_from_string(parser->arena, str_lit("index"));
-        iv_block_arg->result_index = 0;
-        iv_block_arg->def = block;
+        string block_name = str_lit("%arg0");
+        mlir_value_set_register_name(iv_block_arg, block_name.str, block_name.size);
+        mlir_value_set_type(iv_block_arg, mlir_type_create_from_string(parser->arena, str_lit("index")));
+        mlir_value_set_result_index(iv_block_arg, 0);
+        mlir_value_set_def(iv_block_arg, block);
         VecValue_push_back(parser->arena, &block_args, iv_block_arg);
-        // Map original name (e.g., %i) to the block arg
-        symbol_table_add_value(parser->arena, &parser->symbol_table, ind_var->register_name, iv_block_arg);
+        string orig_name = mlir_value_get_register_name(ind_var);
+        if (orig_name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, orig_name, iv_block_arg);
     }
     block->arguments = block_args.data;
     block->n_arguments = block_args.size;
@@ -2934,51 +2928,37 @@ void parse_gpu_launch(Parser *parser, MlirOperation *op) {
         parser_next_token(parser);
     }
 
-    // Parse the GPU launch region
+    while (!parser_peek(parser, TK_LBRACE_END) && !parser_peek(parser, TK_EOF)) parser_next_token(parser);
+
     parser_expect(parser, TK_LBRACE_END);
     parser_expect(parser, TK_NEWLINE);
 
-    // Push new scope for GPU launch region
     symbol_table_push_scope(parser->arena, &parser->symbol_table);
-
-    // Register all GPU launch arguments in the new scope
     for (size_t i = 0; i < launch_args.size; i++) {
-        symbol_table_add_value(parser->arena, &parser->symbol_table, launch_args.data[i]->register_name, launch_args.data[i]);
+        string name = mlir_value_get_register_name(launch_args.data[i]);
+        if (name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, name, launch_args.data[i]);
     }
 
-    // Parse GPU launch body (single block)
     VecOperation operations;
     VecOperation_reserve(parser->arena, &operations, 16);
     while (!parser_peek(parser, TK_RBRACE)) {
         MlirOperation *inner_op = parse_operation(parser);
         VecOperation_push_back(parser->arena, &operations, inner_op);
         parser_expect(parser, TK_NEWLINE);
-
-        // Skip empty lines
-        while (parser_peek(parser, TK_NEWLINE)) {
-            parser_expect(parser, TK_NEWLINE);
-        }
+        while (parser_peek(parser, TK_NEWLINE)) parser_expect(parser, TK_NEWLINE);
     }
     parser_expect(parser, TK_RBRACE);
-
-    // Pop scope when leaving GPU launch region
     symbol_table_pop_scope(&parser->symbol_table);
 
-    // Create the GPU launch region
     MlirBlock *gpu_block = arena_alloc(parser->arena, struct MlirBlock);
     gpu_block->operations = operations.data;
     gpu_block->n_operations = operations.size;
     gpu_block->arguments = launch_args.data;
     gpu_block->n_arguments = launch_args.size;
 
-    MlirRegion *gpu_region = arena_alloc(parser->arena, struct MlirRegion);
-    gpu_region->blocks = arena_alloc_array(parser->arena, MlirBlock*, 1);
-    gpu_region->blocks[0] = gpu_block;
-    gpu_region->n_blocks = 1;
-
-    op->regions = arena_alloc_array(parser->arena, MlirRegion*, 1);
-    op->regions[0] = gpu_region;
-    op->n_regions = 1;
+    MlirRegion *gpu_region = mlir_region_create(parser->arena);
+    mlir_region_add_block(parser->arena, gpu_region, gpu_block);
+    mlir_op_add_region(parser->arena, op, gpu_region);
 }
 
 void parse_arith_cmpi(Parser *parser, MlirOperation *op) {
@@ -2993,15 +2973,8 @@ void parse_arith_cmpi(Parser *parser, MlirOperation *op) {
         parser_expect(parser, TK_NAME);
     }
     
-    // Store predicate as an attribute
-    MlirAttribute *predicate_attr = arena_alloc(parser->arena, struct MlirAttribute);
-    predicate_attr->name = str_lit("predicate");
-    predicate_attr->kind = ATTR_KIND_STRING;
-    predicate_attr->data.string_value = predicate;
-    
-    op->n_attributes = 1;
-    op->attributes = arena_alloc_array(parser->arena, MlirAttribute*, 1);
-    op->attributes[0] = predicate_attr;
+    MlirAttribute **attrs = NULL; size_t n_attrs = 0, cap_attrs = 0;
+    append_attr(parser, &attrs, &n_attrs, &cap_attrs, create_string_attr(parser, str_lit("predicate"), predicate));
     
     // Expect comma
     parser_expect(parser, TK_COMMA);
@@ -3023,11 +2996,9 @@ void parse_arith_cmpi(Parser *parser, MlirOperation *op) {
         if (rhs) VecValue_push_back(parser->arena, &operands, rhs);
     }
     
-    // Set operands
-    op->operands = operands.data;
-    op->n_operands = operands.size;
-    // Result type is i1 for arith.cmpi
-    op->n_result_types = 1;
-    op->result_types = arena_alloc_array(parser->arena, MlirType*, 1);
-    op->result_types[0] = mlir_type_create_from_string(parser->arena, str_lit("i1"));
+    set_op_operands(op, operands.data, operands.size);
+    MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
+    types[0] = mlir_type_create_from_string(parser->arena, str_lit("i1"));
+    set_op_result_types(op, types, 1);
+    if (n_attrs > 0) set_op_attributes(op, attrs, n_attrs);
 }
