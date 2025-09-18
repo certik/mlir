@@ -701,6 +701,42 @@ MlirOperation* parse_module(Parser *parser) {
     return op;
 }
 
+MlirOperation *mlir_parse_module(Arena *arena, const char *input, size_t input_len, MlirLocationMap **out_location_map) {
+    Parser *parser = arena_alloc(arena, Parser);
+    string input_string = {
+        .str = (char*)input,
+        .size = input_len
+    };
+    parser_init(arena, parser, input_string);
+    MlirOperation *module = parse_module(parser);
+    if (out_location_map) {
+        *out_location_map = &parser->location_map;
+    }
+    return module;
+}
+
+const char *mlir_tokentype_to_string(int token_type) {
+    string s = tokentype_to_string((TokenType)token_type);
+    return s.str;
+}
+
+size_t mlir_location_map_size(const MlirLocationMap *location_map) {
+    if (!location_map) return 0;
+    return location_map->size;
+}
+
+size_t mlir_location_map_collect(const MlirLocationMap *location_map, string *out_keys, MlirLocation **out_locs, size_t max) {
+    if (!location_map) return 0;
+    size_t written = 0;
+    for (size_t i = 0; i < location_map->num_buckets && written < max; i++) {
+        if (!location_map->buckets[i].occupied) continue;
+        out_keys[written] = location_map->buckets[i].key;
+        out_locs[written] = location_map->buckets[i].value;
+        written++;
+    }
+    return written;
+}
+
 // parse loc()
 MlirLocation* parse_loc(Parser *parser) {
     Arena *arena = parser->arena;

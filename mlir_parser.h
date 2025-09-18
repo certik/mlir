@@ -52,6 +52,8 @@ typedef struct ScopedSymbolTable {
 #define LocationMap_EQUAL string_equal
 DEFINE_HASHTABLE_FOR_TYPES(string, MlirLocation*, LocationMap)
 
+typedef LocationMap MlirLocationMap;
+
 typedef struct {
     Arena *arena;
     unsigned char *input;
@@ -102,6 +104,12 @@ OpType op_string_to_type(string name);
 // TODO: use Type by value
 MlirType* parse_type_from_string(Arena *arena, string type_str);
 string type_to_string(Arena *arena, MlirType *type);
+
+// Public parser facade
+MlirOperation *mlir_parse_module(Arena *arena, const char *input, size_t input_len, MlirLocationMap **out_location_map);
+const char *mlir_tokentype_to_string(int token_type);
+size_t mlir_location_map_size(const MlirLocationMap *location_map);
+size_t mlir_location_map_collect(const MlirLocationMap *location_map, string *out_keys, MlirLocation **out_locs, size_t max);
 
 #ifdef __cplusplus
 }

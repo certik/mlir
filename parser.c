@@ -7,6 +7,7 @@
 #include "mlir_api.h"
 #include "mlir_generic_printer.h"
 #include "mlir_classic_printer.h"
+#include "mlir_parser.h"
 #include <base/hashtable.h>
 
 void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
