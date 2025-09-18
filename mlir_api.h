@@ -171,7 +171,6 @@ void mlir_op_add_result(Arena *arena, MlirOperation *op, MlirValue *result);
 // Property setters
 void mlir_operation_set_type(MlirOperation *op, OpType type);
 void mlir_operation_set_name(MlirOperation *op, const char *name, size_t name_len);
-void mlir_operation_set_name_string(MlirOperation *op, string name);
 void mlir_operation_set_operands(MlirOperation *op, MlirValue **operands, size_t count);
 void mlir_operation_set_results(MlirOperation *op, MlirValue **results, size_t count);
 void mlir_operation_set_result_types(MlirOperation *op, MlirType **types, size_t count);

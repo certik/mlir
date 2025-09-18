@@ -957,7 +957,7 @@ MlirOperation* parse_operation(Parser *parser) {
     OpType op_type = op_string_to_type(opname);
     mlir_operation_set_type(op, op_type);
     if (op_type == OP_TYPE_UNREGISTERED) {
-        mlir_operation_set_name_string(op, opname);
+        mlir_operation_set_name(op, opname.str, opname.size);
     }
     
     // Debug: Print all operation names

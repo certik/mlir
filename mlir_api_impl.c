@@ -1099,10 +1099,6 @@ void mlir_operation_set_type(MlirOperation *op, OpType type) {
     op->op_type = type;
 }
 
-void mlir_operation_set_name_string(MlirOperation *op, string name) {
-    op->opname = name;
-}
-
 #ifdef __cplusplus
 }
 #endif
