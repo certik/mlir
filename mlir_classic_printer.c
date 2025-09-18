@@ -1866,7 +1866,7 @@ string print_block_classic(Arena *arena, int bb_index, int indent_level, MlirBlo
 }
 
 // Helper to print location map definitions
-static string print_location_map_classic(Arena *arena, LocationMap *location_map) {
+static string print_location_map_classic(Arena *arena, MlirLocationMap *location_map) {
     string result = str_lit("");
     if (!location_map) return result;
 
@@ -1941,7 +1941,7 @@ static string print_location_map_classic(Arena *arena, LocationMap *location_map
     return result;
 }
 
-string print_module_classic(Arena *arena, MlirOperation *module, LocationMap *location_map) {
+string print_module_classic(Arena *arena, MlirOperation *module, MlirLocationMap *location_map) {
     string result = str_lit("");
     
     // Note: Special unnumbered_loc_def feature not available via API

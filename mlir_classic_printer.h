@@ -4,8 +4,6 @@
 #include <base/string.h>
 #include "mlir_api.h"
 
-typedef struct LocationMap LocationMap;
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -59,7 +57,7 @@ string print_block_classic(Arena *arena, int bb_index, int indent_level, MlirBlo
  * @param location_map Location map containing #locN definitions
  * @return String containing the complete printed module with location definitions
  */
-string print_module_classic(Arena *arena, MlirOperation *module, LocationMap *location_map);
+string print_module_classic(Arena *arena, MlirOperation *module, MlirLocationMap *location_map);
 
 #ifdef __cplusplus
 }

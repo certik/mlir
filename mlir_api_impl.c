@@ -143,6 +143,10 @@ struct MlirRegion {
 
 typedef Parser Parser; // use Parser from mlir_parser.h
 
+struct MlirLocationMap {
+    LocationMap *map;
+};
+
 // Forward declarations for parser entry points implemented in mlir_parser.c
 void parser_init(Arena *arena, Parser *parser, string text);
 struct MlirOperation; // forward decl
@@ -700,29 +704,20 @@ const char *mlir_op_type_to_string(OpType type) {
 }
 
 // Parser functions
-MlirParser *mlir_parser_create(Arena *arena) {
+MlirOperation *mlir_parse_module(Arena *arena, const char *input, size_t input_len, MlirLocationMap **out_location_map) {
     Parser *parser = arena_alloc(arena, Parser);
-    return (MlirParser*)parser;
-}
-
-void mlir_parser_init(Arena *arena, MlirParser *parser, const char *input, size_t input_len) {
-    Parser *concrete_parser = (Parser*)parser;
     string input_string = {
         .str = (char*)input,
         .size = input_len
     };
-    parser_init(arena, concrete_parser, input_string);
-}
-
-MlirOperation *mlir_parse_module(MlirParser *parser) {
-    Parser *concrete_parser = (Parser*)parser;
-    MlirOperation *module = parse_module(concrete_parser);
+    parser_init(arena, parser, input_string);
+    MlirOperation *module = parse_module(parser);
+    if (out_location_map) {
+        MlirLocationMap *wrapper = arena_alloc(arena, MlirLocationMap);
+        wrapper->map = &parser->location_map;
+        *out_location_map = wrapper;
+    }
     return module;
-}
-
-void mlir_parser_get_location_map(MlirParser *parser, void **location_map) {
-    Parser *concrete_parser = (Parser*)parser;
-    *location_map = &concrete_parser->location_map;
 }
 
 const char *mlir_tokentype_to_string(int token_type) {
@@ -731,14 +726,14 @@ const char *mlir_tokentype_to_string(int token_type) {
     return (const char*)s.str;
 }
 
-size_t mlir_location_map_size(void *location_map) {
-    LocationMap *lm = (LocationMap*)location_map;
+size_t mlir_location_map_size(const MlirLocationMap *location_map) {
+    const LocationMap *lm = (location_map) ? location_map->map : NULL;
     if (!lm) return 0;
     return lm->size;
 }
 
-size_t mlir_location_map_collect(void *location_map, string *out_keys, MlirLocation **out_locs, size_t max) {
-    LocationMap *lm = (LocationMap*)location_map;
+size_t mlir_location_map_collect(const MlirLocationMap *location_map, string *out_keys, MlirLocation **out_locs, size_t max) {
+    const LocationMap *lm = (location_map) ? location_map->map : NULL;
     if (!lm) return 0;
     size_t written = 0;
     for (size_t i = 0; i < lm->num_buckets && written < max; i++) {

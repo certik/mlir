@@ -7,7 +7,6 @@
 #include "mlir_api.h"
 #include "mlir_generic_printer.h"
 #include "mlir_classic_printer.h"
-#include "mlir_parser.h"
 #include <base/hashtable.h>
 
 void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
@@ -293,14 +292,11 @@ int main(int argc, char *argv[]) {
 
         tokenizer_print_all_tokens(arena, mlir_code);
 
-        MlirParser *parser = mlir_parser_create(arena);
-        mlir_parser_init(arena, parser, (const char*)mlir_code.str, mlir_code.size);
-        op = mlir_parse_module(parser);
+        MlirLocationMap *locmap = NULL;
+        op = mlir_parse_module(arena, (const char*)mlir_code.str, mlir_code.size, &locmap);
         if (verbose) println(arena, str_lit("MLIR:"));
         if (use_classic_printer) {
-            void *locmap = NULL;
-            mlir_parser_get_location_map(parser, &locmap);
-            println(arena, str_lit("{}"), print_module_classic(arena, op, (LocationMap*)locmap));
+            println(arena, str_lit("{}"), print_module_classic(arena, op, locmap));
         } else {
             println(arena, str_lit("{}"), print_operation_generic(arena, 0, op));
         }
