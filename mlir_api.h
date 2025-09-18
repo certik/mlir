@@ -236,10 +236,8 @@ void mlir_value_set_type(MlirValue *value, MlirType *type);
 void mlir_value_set_register_name(MlirValue *value, const char *name, size_t name_len);
 void mlir_value_set_result_index(MlirValue *value, uint32_t index);
 void mlir_value_set_location(MlirValue *value, MlirLocation *loc);
-void mlir_value_set_divisibility_raw(MlirValue *value, bool has_value, int64_t div_value, MlirType *type);
-void mlir_value_set_max_divisibility_raw(MlirValue *value, bool has_value, int64_t div_value, MlirType *type);
-void mlir_value_set_divisibility(MlirValue *value, int64_t div_value, MlirType *type);
-void mlir_value_set_max_divisibility(MlirValue *value, int64_t div_value, MlirType *type);
+void mlir_value_set_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type);
+void mlir_value_set_max_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type);
 
 // Accessors
 int mlir_value_get_kind(const MlirValue *value);

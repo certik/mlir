@@ -266,14 +266,16 @@ void mlir_value_set_location(MlirValue *value, MlirLocation *loc) {
     (void)loc;
 }
 
-void mlir_value_set_divisibility(MlirValue *value, int64_t div_value, MlirType *type) {
+void mlir_value_set_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type) {
     (void)value;
+    (void)has_value;
     (void)div_value;
     (void)type;
 }
 
-void mlir_value_set_max_divisibility(MlirValue *value, int64_t div_value, MlirType *type) {
+void mlir_value_set_max_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type) {
     (void)value;
+    (void)has_value;
     (void)div_value;
     (void)type;
 }

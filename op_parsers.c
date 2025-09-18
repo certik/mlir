@@ -2004,7 +2004,7 @@ void parse_tt_func(Parser *parser, MlirOperation *op) {
                                             dtype = mlir_type_create_from_string(parser->arena, tstr);
                                         }
                                         MlirType *dtype_actual = dtype ? dtype : mlir_type_create_from_string(parser->arena, str_lit("i32"));
-                                        mlir_value_set_divisibility_raw(arg, true, v, dtype_actual);
+                                        mlir_value_set_divisibility(arg, true, v, dtype_actual);
                                     }
                                 } else if (str_eq(name, str_lit("tt.max_divisibility"))) {
                                     // Expect '=' integer ':' type
@@ -2032,7 +2032,7 @@ void parse_tt_func(Parser *parser, MlirOperation *op) {
                                             dtype = mlir_type_create_from_string(parser->arena, tstr);
                                         }
                                         MlirType *dtype_actual = dtype ? dtype : mlir_type_create_from_string(parser->arena, str_lit("i32"));
-                                        mlir_value_set_max_divisibility_raw(arg, true, v, dtype_actual);
+                                        mlir_value_set_max_divisibility(arg, true, v, dtype_actual);
                                     }
                                 }
                             } else {

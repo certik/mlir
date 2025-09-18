@@ -555,13 +555,13 @@ void mlir_value_set_def(MlirValue *value, void *def) {
     value->def = def;
 }
 
-void mlir_value_set_divisibility_raw(MlirValue *value, bool has_value, int64_t div_value, MlirType *type) {
+void mlir_value_set_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type) {
     value->has_divisibility = has_value;
     value->divisibility_value = div_value;
     value->divisibility_type = type;
 }
 
-void mlir_value_set_max_divisibility_raw(MlirValue *value, bool has_value, int64_t div_value, MlirType *type) {
+void mlir_value_set_max_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type) {
     value->has_max_divisibility = has_value;
     value->max_divisibility_value = div_value;
     value->max_divisibility_type = type;
@@ -776,18 +776,6 @@ void mlir_location_set_ref_id(MlirLocation *loc, int ref_id) {
 
 void mlir_value_set_location(MlirValue *value, MlirLocation *loc) {
     value->location = loc;
-}
-
-void mlir_value_set_divisibility(MlirValue *value, int64_t div_value, MlirType *type) {
-    value->has_divisibility = true;
-    value->divisibility_value = div_value;
-    value->divisibility_type = type;
-}
-
-void mlir_value_set_max_divisibility(MlirValue *value, int64_t div_value, MlirType *type) {
-    value->has_max_divisibility = true;
-    value->max_divisibility_value = div_value;
-    value->max_divisibility_type = type;
 }
 
 // New API functions for parser compatibility
