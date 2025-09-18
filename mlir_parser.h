@@ -52,7 +52,7 @@ typedef struct ScopedSymbolTable {
 #define LocationMap_EQUAL string_equal
 DEFINE_HASHTABLE_FOR_TYPES(string, MlirLocation*, LocationMap)
 
-typedef LocationMap MlirLocationMap;
+typedef struct MlirLocationMap MlirLocationMap;
 
 typedef struct {
     Arena *arena;

@@ -25,6 +25,13 @@ typedef struct MlirType MlirType;
 typedef struct MlirAttribute MlirAttribute;
 typedef struct MlirLocation MlirLocation;
 
+typedef struct MlirLocationMap {
+    void *impl;
+} MlirLocationMap;
+
+size_t mlir_location_map_size(const MlirLocationMap *location_map);
+size_t mlir_location_map_collect(const MlirLocationMap *location_map, string *out_keys, MlirLocation **out_locs, size_t max);
+
 // Vector helpers used by the parser implementation
 DEFINE_VECTOR_FOR_TYPE(MlirOperation*, VecOperation)
 DEFINE_VECTOR_FOR_TYPE(MlirValue*, VecValue)

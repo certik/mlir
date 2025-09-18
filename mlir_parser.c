@@ -710,7 +710,9 @@ MlirOperation *mlir_parse_module(Arena *arena, const char *input, size_t input_l
     parser_init(arena, parser, input_string);
     MlirOperation *module = parse_module(parser);
     if (out_location_map) {
-        *out_location_map = &parser->location_map;
+        MlirLocationMap *map_wrapper = arena_alloc(arena, MlirLocationMap);
+        map_wrapper->impl = &parser->location_map;
+        *out_location_map = map_wrapper;
     }
     return module;
 }
@@ -722,16 +724,20 @@ const char *mlir_tokentype_to_string(int token_type) {
 
 size_t mlir_location_map_size(const MlirLocationMap *location_map) {
     if (!location_map) return 0;
-    return location_map->size;
+    const LocationMap *lm = (const LocationMap*)location_map->impl;
+    if (!lm) return 0;
+    return lm->size;
 }
 
 size_t mlir_location_map_collect(const MlirLocationMap *location_map, string *out_keys, MlirLocation **out_locs, size_t max) {
     if (!location_map) return 0;
+    const LocationMap *lm = (const LocationMap*)location_map->impl;
+    if (!lm) return 0;
     size_t written = 0;
-    for (size_t i = 0; i < location_map->num_buckets && written < max; i++) {
-        if (!location_map->buckets[i].occupied) continue;
-        out_keys[written] = location_map->buckets[i].key;
-        out_locs[written] = location_map->buckets[i].value;
+    for (size_t i = 0; i < lm->num_buckets && written < max; i++) {
+        if (!lm->buckets[i].occupied) continue;
+        out_keys[written] = lm->buckets[i].key;
+        out_locs[written] = lm->buckets[i].value;
         written++;
     }
     return written;
