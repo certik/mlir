@@ -9,7 +9,6 @@
 #include <base/vector.h>
 
 #include "mlir_parser.h"
-#include "mlir_ir_internal.h"
 #include "tokenizer.h"
 #include "op_parsers.h"
 
@@ -133,11 +132,12 @@ static void append_attr(Parser *parser, MlirAttribute ***attrs, size_t *n, size_
 }
 
 static void attr_list_init_from_op(Parser *parser, MlirOperation *op, MlirAttribute ***attrs, size_t *n, size_t *cap) {
-    if (op->attributes && op->n_attributes > 0) {
-        *cap = op->n_attributes + 4;
+    size_t count = mlir_operation_num_attributes(op);
+    if (count > 0) {
+        *cap = count + 4;
         *attrs = arena_alloc_array(parser->arena, MlirAttribute*, *cap);
-        for (size_t i = 0; i < op->n_attributes; i++) (*attrs)[i] = op->attributes[i];
-        *n = op->n_attributes;
+        for (size_t i = 0; i < count; i++) (*attrs)[i] = mlir_operation_get_attribute(op, i);
+        *n = count;
     }
 }
 
@@ -2472,89 +2472,52 @@ void parse_scf_for(Parser *parser, MlirOperation *op) {
         }
     }
 
-    // Parse the region, but first register loop arguments in the new scope
-    parser_expect(parser, TK_LBRACE_END);
+        parser_expect(parser, TK_LBRACE_END);
     parser_expect(parser, TK_NEWLINE);
 
-    // Push new scope for this region
     symbol_table_push_scope(parser->arena, &parser->symbol_table);
-
-    // Create a single block with loop variable and iter_args as block arguments
-    VecBlock blocks;
-    VecBlock_reserve(parser->arena, &blocks, 1);
-
-    // Create the block
-    MlirBlock *block = arena_alloc(parser->arena, struct MlirBlock);
-
-    // Create block arguments for loop variable and iter_args
-    VecValue block_args;
-    VecValue_reserve(parser->arena, &block_args, 2);
+    MlirBlock *block = mlir_block_create(parser->arena);
 
     if (loop_var) {
-        // Create a new ValueRef for the block argument using the original loop variable name
         MlirValue *loop_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
         string loop_name = mlir_value_get_register_name(loop_var);
         mlir_value_set_register_name(loop_block_arg, string_data_or_null(loop_name), loop_name.size);
-        // Use parsed iv type if available; otherwise default to the lb type or i32
-        if (iv_type) {
-            mlir_value_set_type(loop_block_arg, iv_type);
-        } else if (operands.size > 0 && operands.data[0] && mlir_value_get_type(operands.data[0])) {
-            mlir_value_set_type(loop_block_arg, mlir_value_get_type(operands.data[0]));
-        } else {
-            mlir_value_set_type(loop_block_arg, mlir_type_create_from_string(parser->arena, str_lit("i32")));
-        }
-
+        if (iv_type) mlir_value_set_type(loop_block_arg, iv_type);
+        else if (operands.size > 0 && operands.data[0] && mlir_value_get_type(operands.data[0])) mlir_value_set_type(loop_block_arg, mlir_value_get_type(operands.data[0]));
+        else mlir_value_set_type(loop_block_arg, mlir_type_create_from_string(parser->arena, str_lit("i32")));
         mlir_value_set_result_index(loop_block_arg, 0);
         mlir_value_set_def(loop_block_arg, block);
-
-        VecValue_push_back(parser->arena, &block_args, loop_block_arg);
-
-        // Register in symbol table using original loop variable name
+        mlir_block_add_argument(parser->arena, block, loop_block_arg);
         if (loop_name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, loop_name, loop_block_arg);
     }
 
-    // Create block arguments for all iter_args
     for (size_t i = 0; i < iter_vars.size; i++) {
         MlirValue *iter_var = iter_vars.data[i];
-        // Create a new ValueRef for the block argument using original name
         MlirValue *iter_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
         string iter_name = mlir_value_get_register_name(iter_var);
         mlir_value_set_register_name(iter_block_arg, string_data_or_null(iter_name), iter_name.size);
-        // Type of iter arg is the type of its init operand (operands[3+i])
         size_t init_index = 3 + i;
         if (mlir_operation_num_operands(op) > init_index) {
             MlirValue *init_operand = mlir_operation_get_operand(op, init_index);
-            if (init_operand && mlir_value_get_type(init_operand)) {
-                mlir_value_set_type(iter_block_arg, mlir_value_get_type(init_operand));
-            } else {
-                mlir_value_set_type(iter_block_arg, mlir_type_create_from_string(parser->arena, str_lit("unknown")));
-            }
+            if (init_operand && mlir_value_get_type(init_operand)) mlir_value_set_type(iter_block_arg, mlir_value_get_type(init_operand));
+            else mlir_value_set_type(iter_block_arg, mlir_type_create_from_string(parser->arena, str_lit("unknown")));
         } else {
             mlir_value_set_type(iter_block_arg, mlir_type_create_from_string(parser->arena, str_lit("unknown")));
         }
-
         mlir_value_set_result_index(iter_block_arg, (uint32_t)(i + 1));
         mlir_value_set_def(iter_block_arg, block);
-
-        VecValue_push_back(parser->arena, &block_args, iter_block_arg);
-
-        // Register in symbol table using original iter_args variable name
+        mlir_block_add_argument(parser->arena, block, iter_block_arg);
         if (iter_name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, iter_name, iter_block_arg);
     }
 
-    block->arguments = block_args.data;
-    block->n_arguments = block_args.size;
-
-    // Parse operations inside the block
-    VecOperation operations;
-    VecOperation_reserve(parser->arena, &operations, 16);
     while (!parser_peek(parser, TK_RBRACE)) {
         MlirOperation *inner_op = parse_operation(parser);
-        // Capture trailing comment for inner operations based on their source line
-        if (inner_op && inner_op->source_line_start >= 0) {
-            int64_t line_start = inner_op->source_line_start;
+        int64_t line_start = mlir_operation_get_source_line_start(inner_op);
+        if (line_start >= 0) {
             int64_t line_end = line_start;
-            while (parser->input[line_end] != '\0' && parser->input[line_end] != '\n' && parser->input[line_end] != '\r') {
+            while (parser->input[line_end] != '\0' &&
+                   parser->input[line_end] != '\n' &&
+                   parser->input[line_end] != '\r') {
                 line_end++;
             }
             if (line_end > line_start) {
@@ -2567,40 +2530,25 @@ void parse_scf_for(Parser *parser, MlirOperation *op) {
                     while (begin > line_start && parser->input[begin - 1] == ' ') begin--;
                     int64_t len = line_end - begin;
                     if (len > 0) {
-                        inner_op->trailing_comment = str_from_cstr_len_view((char*)parser->input + begin, len);
+                        string comment = str_from_cstr_len_view((char*)parser->input + begin, len);
+                        mlir_operation_set_trailing_comment(inner_op, comment.str, comment.size);
                     }
                 }
             }
         }
-        VecOperation_push_back(parser->arena, &operations, inner_op);
+        mlir_block_add_operation(parser->arena, block, inner_op);
         parser_expect(parser, TK_NEWLINE);
-
-        // Skip empty lines
-        while (parser_peek(parser, TK_NEWLINE)) {
-            parser_expect(parser, TK_NEWLINE);
-        }
+        while (parser_peek(parser, TK_NEWLINE)) parser_expect(parser, TK_NEWLINE);
     }
-
-    block->operations = operations.data;
-    block->n_operations = operations.size;
-
-    VecBlock_push_back(parser->arena, &blocks, block);
 
     parser_expect(parser, TK_RBRACE);
 
-    // Pop scope when exiting region
     symbol_table_pop_scope(&parser->symbol_table);
 
-    // Create the region containing the block
     MlirRegion *region = mlir_region_create(parser->arena);
-    for (size_t i = 0; i < blocks.size; i++) {
-        mlir_region_add_block(parser->arena, region, blocks.data[i]);
-    }
-
-    // Assign region to operation
+    mlir_region_add_block(parser->arena, region, block);
     mlir_op_add_region(parser->arena, op, region);
-
-    // Assign parsed iter result types to operation
+// Assign parsed iter result types to operation
     if (n_iter_results > 0) {
         set_op_result_types(op, iter_result_types, n_iter_results);
     }
@@ -2761,26 +2709,22 @@ void parse_affine_for(Parser *parser, MlirOperation *op) {
     symbol_table_push_scope(parser->arena, &parser->symbol_table);
 
     // Create single block and register induction variable as block argument
-    MlirBlock *block = arena_alloc(parser->arena, struct MlirBlock);
-    VecValue block_args; VecValue_reserve(parser->arena, &block_args, 1);
+    MlirBlock *block = mlir_block_create(parser->arena);
     if (ind_var) {
         MlirValue *iv_block_arg = create_value_ref(parser->arena, BLOCK_ARG);
         string block_name = str_lit("%arg0");
         mlir_value_set_register_name(iv_block_arg, block_name.str, block_name.size);
         mlir_value_set_type(iv_block_arg, mlir_type_create_from_string(parser->arena, str_lit("index")));
-        mlir_value_set_result_index(iv_block_arg, 0);
+        mlir_value_set_result_index(iv_block_arg, (uint32_t)mlir_block_num_arguments(block));
         mlir_value_set_def(iv_block_arg, block);
-        VecValue_push_back(parser->arena, &block_args, iv_block_arg);
+        mlir_block_add_argument(parser->arena, block, iv_block_arg);
         string orig_name = mlir_value_get_register_name(ind_var);
         if (orig_name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, orig_name, iv_block_arg);
     }
-    block->arguments = block_args.data;
-    block->n_arguments = block_args.size;
 
     // Parse body operations
     bool prev_flag = parser->capture_trailing_comments;
     parser->capture_trailing_comments = true;
-    VecOperation operations; VecOperation_reserve(parser->arena, &operations, 16);
     while (!parser_peek(parser, TK_RBRACE)) {
         MlirOperation *inner = parse_operation(parser);
         // Capture trailing inline comment before consuming the newline
@@ -2803,12 +2747,12 @@ void parse_affine_for(Parser *parser, MlirOperation *op) {
                     while (begin > line_start && parser->input[begin - 1] == ' ') begin--;
                     int64_t len = line_end - begin + 1;
                     if (len > 0) {
-                        inner->trailing_comment = str_from_cstr_len_view((char*)parser->input + begin, len);
+                        string c = str_from_cstr_len_view((char*)parser->input + begin, len);
+                        mlir_operation_set_trailing_comment(inner, c.str, c.size);
                     }
                 }
             }
         } else {
-            // Fallback: scan from end of op tokens to the end of this line
             string text = str_from_cstr_view((char*)parser->input);
             int64_t start = (int64_t)parser->last + 1;
             if (start < (int64_t)text.size) {
@@ -2826,12 +2770,15 @@ void parse_affine_for(Parser *parser, MlirOperation *op) {
                         int64_t begin = cpos;
                         while (begin > start && text.str[begin - 1] == ' ') begin--;
                         int64_t len = end - begin + 1;
-                        if (len > 0) inner->trailing_comment = str_from_cstr_len_view(text.str + begin, len);
+                        if (len > 0) {
+                            string c = str_from_cstr_len_view(text.str + begin, len);
+                            mlir_operation_set_trailing_comment(inner, c.str, c.size);
+                        }
                     }
                 }
             }
         }
-        VecOperation_push_back(parser->arena, &operations, inner);
+        mlir_block_add_operation(parser->arena, block, inner);
         parser_expect(parser, TK_NEWLINE);
         while (parser_peek(parser, TK_NEWLINE)) parser_expect(parser, TK_NEWLINE);
     }
@@ -2844,9 +2791,6 @@ void parse_affine_for(Parser *parser, MlirOperation *op) {
     }
 
     symbol_table_pop_scope(&parser->symbol_table);
-
-    block->operations = operations.data;
-    block->n_operations = operations.size;
     MlirRegion *region = mlir_region_create(parser->arena);
     mlir_region_add_block(parser->arena, region, block);
     mlir_op_add_region(parser->arena, op, region);
@@ -2933,28 +2877,27 @@ void parse_gpu_launch(Parser *parser, MlirOperation *op) {
     parser_expect(parser, TK_LBRACE_END);
     parser_expect(parser, TK_NEWLINE);
 
+    MlirBlock *gpu_block = mlir_block_create(parser->arena);
+    for (size_t i = 0; i < launch_args.size; i++) {
+        MlirValue *arg = launch_args.data[i];
+        mlir_value_set_def(arg, gpu_block);
+        mlir_block_add_argument(parser->arena, gpu_block, arg);
+    }
+
     symbol_table_push_scope(parser->arena, &parser->symbol_table);
     for (size_t i = 0; i < launch_args.size; i++) {
         string name = mlir_value_get_register_name(launch_args.data[i]);
         if (name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, name, launch_args.data[i]);
     }
 
-    VecOperation operations;
-    VecOperation_reserve(parser->arena, &operations, 16);
     while (!parser_peek(parser, TK_RBRACE)) {
         MlirOperation *inner_op = parse_operation(parser);
-        VecOperation_push_back(parser->arena, &operations, inner_op);
+        mlir_block_add_operation(parser->arena, gpu_block, inner_op);
         parser_expect(parser, TK_NEWLINE);
         while (parser_peek(parser, TK_NEWLINE)) parser_expect(parser, TK_NEWLINE);
     }
     parser_expect(parser, TK_RBRACE);
     symbol_table_pop_scope(&parser->symbol_table);
-
-    MlirBlock *gpu_block = arena_alloc(parser->arena, struct MlirBlock);
-    gpu_block->operations = operations.data;
-    gpu_block->n_operations = operations.size;
-    gpu_block->arguments = launch_args.data;
-    gpu_block->n_arguments = launch_args.size;
 
     MlirRegion *gpu_region = mlir_region_create(parser->arena);
     mlir_region_add_block(parser->arena, gpu_region, gpu_block);
