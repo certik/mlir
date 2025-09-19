@@ -4,8 +4,6 @@
 #include <base/string.h>
 #include "mlir_api.h"
 
-typedef struct MlirLocationMap MlirLocationMap;
-
 #ifdef __cplusplus
 extern "C" {
 #endif
