@@ -77,6 +77,197 @@ string tokentype_to_string(TokenType tt) {
     }
 }
 
+static bool is_space_char(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+static string string_trim_whitespace(string s) {
+    size_t start = 0;
+    while (start < s.size && is_space_char(s.str[start])) start++;
+    size_t end = s.size;
+    while (end > start && is_space_char(s.str[end - 1])) end--;
+    return str_substr(s, start, end - start);
+}
+
+static uint32_t parse_uint32_from_string(string s) {
+    uint32_t value = 0;
+    for (size_t i = 0; i < s.size; i++) {
+        char c = s.str[i];
+        if (c >= '0' && c <= '9') {
+            value = value * 10u + (uint32_t)(c - '0');
+        }
+    }
+    return value;
+}
+
+static MlirType *parse_tensor_like_type(Arena *arena, string content, bool is_tensor) {
+    int last_x_pos = -1;
+    int bracket_depth = 0;
+    for (int i = (int)content.size - 1; i >= 0; i--) {
+        char c = content.str[i];
+        if (c == '>') bracket_depth++;
+        else if (c == '<') bracket_depth--;
+        else if (c == 'x' && bracket_depth == 0) {
+            last_x_pos = i;
+            break;
+        }
+    }
+
+    if (last_x_pos >= 0) {
+        string elem_part = string_trim_whitespace(str_substr(content, (size_t)last_x_pos + 1, content.size - (size_t)last_x_pos - 1));
+        MlirType *element_type = mlir_type_create_from_string(arena, elem_part);
+
+        string shape_str = str_substr(content, 0, (size_t)last_x_pos);
+        uint32_t rank = 1;
+        for (size_t i = 0; i < shape_str.size; i++) {
+            if (shape_str.str[i] == 'x') rank++;
+        }
+
+        if (rank > 0) {
+            int64_t dims[rank];
+            size_t pos = 0;
+            uint32_t dim_idx = 0;
+            while (pos <= shape_str.size && dim_idx < rank) {
+                size_t next = pos;
+                while (next < shape_str.size && shape_str.str[next] != 'x') next++;
+                string tok = string_trim_whitespace(str_substr(shape_str, pos, next - pos));
+                if (tok.size == 1 && tok.str[0] == '?') {
+                    dims[dim_idx++] = -1;
+                } else {
+                    int64_t val = 0;
+                    for (size_t j = 0; j < tok.size; j++) {
+                        char ch = tok.str[j];
+                        if (ch >= '0' && ch <= '9') {
+                            val = val * 10 + (int64_t)(ch - '0');
+                        }
+                    }
+                    dims[dim_idx++] = val;
+                }
+                pos = next + 1;
+            }
+
+            if (is_tensor) {
+                return mlir_type_create_tensor(arena, dims, rank, element_type);
+            }
+            return mlir_type_create_memref(arena, dims, rank, element_type);
+        }
+    }
+
+    MlirType *elem_fallback = mlir_type_create_from_string(arena, string_trim_whitespace(content));
+    if (is_tensor) {
+        return mlir_type_create_tensor(arena, NULL, 0, elem_fallback);
+    }
+    return mlir_type_create_memref(arena, NULL, 0, elem_fallback);
+}
+
+MlirType *mlir_type_create_from_string(Arena *arena, string type_str) {
+    string type = string_trim_whitespace(type_str);
+    if (type.size == 0) {
+        return mlir_type_create_integer(arena, 32, true);
+    }
+
+    if (str_eq(type, str_lit("?"))) {
+        return mlir_type_create_unknown(arena);
+    }
+
+    if (str_eq(type, str_lit("unknown")) || str_eq(type, str_lit("!unknown"))) {
+        return mlir_type_create_opaque(arena, type);
+    }
+
+    if (str_eq(type, str_lit("index"))) {
+        return mlir_type_create_index(arena);
+    }
+
+    if (type.size >= 2 && type.str[0] == 'i') {
+        bool all_digits = true;
+        for (size_t i = 1; i < type.size; i++) {
+            char c = type.str[i];
+            if (c < '0' || c > '9') {
+                all_digits = false;
+                break;
+            }
+        }
+
+        if (all_digits) {
+            uint32_t width = 0;
+            for (size_t i = 1; i < type.size; i++) {
+                width = width * 10u + (uint32_t)(type.str[i] - '0');
+            }
+            return mlir_type_create_integer(arena, width, true);
+        }
+        return mlir_type_create_integer(arena, 32, true);
+    }
+
+    bool is_float_prefix = false;
+    bool is_bfloat = false;
+    if (type.size >= 1 && type.str[0] == 'f') {
+        is_float_prefix = true;
+    } else if (type.size >= 2 && type.str[0] == 'b' && type.str[1] == 'f') {
+        is_float_prefix = true;
+        is_bfloat = true;
+    }
+
+    if (is_float_prefix) {
+        size_t width_start = is_bfloat ? 2 : 1;
+        uint32_t width = 32;
+        for (size_t i = width_start; i < type.size; i++) {
+            char c = type.str[i];
+            if (c >= '0' && c <= '9') {
+                if (i == width_start) width = 0;
+                width = width * 10u + (uint32_t)(c - '0');
+            }
+        }
+        return mlir_type_create_float(arena, width, is_bfloat);
+    }
+
+    if (type.size >= 7 && str_eq(str_substr(type, 0, 7), str_lit("!tt.ptr"))) {
+        if (type.size > 8 && type.str[7] == '<' && type.str[type.size - 1] == '>') {
+            string content = str_substr(type, 8, type.size - 9);
+            size_t comma_pos = content.size;
+            for (size_t i = 0; i < content.size; i++) {
+                if (content.str[i] == ',') {
+                    comma_pos = i;
+                    break;
+                }
+            }
+
+            if (comma_pos < content.size) {
+                string elem_part = string_trim_whitespace(str_substr(content, 0, comma_pos));
+                string addr_part = string_trim_whitespace(str_substr(content, comma_pos + 1, content.size - comma_pos - 1));
+                MlirType *elem_type = mlir_type_create_from_string(arena, elem_part);
+                uint32_t addr_space = parse_uint32_from_string(addr_part);
+                return mlir_type_create_pointer(arena, elem_type, true, addr_space);
+            }
+
+            MlirType *elem_type = mlir_type_create_from_string(arena, string_trim_whitespace(content));
+            return mlir_type_create_pointer(arena, elem_type, false, 1);
+        }
+
+        MlirType *fallback_elem = mlir_type_create_from_string(arena, str_lit("f32"));
+        return mlir_type_create_pointer(arena, fallback_elem, false, 1);
+    }
+
+    if (type.size >= 6 && str_eq(str_substr(type, 0, 6), str_lit("tensor"))) {
+        if (type.size > 7 && type.str[6] == '<' && type.str[type.size - 1] == '>') {
+            string content = str_substr(type, 7, type.size - 8);
+            return parse_tensor_like_type(arena, content, true);
+        }
+
+        MlirType *default_elem = mlir_type_create_from_string(arena, str_lit("f32"));
+        return mlir_type_create_tensor(arena, NULL, 0, default_elem);
+    }
+
+    if (type.size >= 6 && str_eq(str_substr(type, 0, 6), str_lit("memref"))) {
+        if (type.size > 7 && type.str[6] == '<' && type.str[type.size - 1] == '>') {
+            string content = str_substr(type, 7, type.size - 8);
+            return parse_tensor_like_type(arena, content, false);
+        }
+        return mlir_type_create_memref(arena, NULL, 0, NULL);
+    }
+
+    return mlir_type_create_integer(arena, 32, true);
+}
+
 string op_type_to_string(OpType type) {
     switch (type) {
         case OP_TYPE_UNREGISTERED: return str_lit("unregistered");
