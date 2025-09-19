@@ -1399,21 +1399,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
             // Print operation name
             bool is_tt_func = (mlir_operation_get_type(op) == OP_TYPE_TT_FUNC);
-            bool is_known_op = false;
-            string nm = mlir_operation_get_name_string(op);
-            if (nm.size > 0) {
-                // Check if it's a known dialect operation that shouldn't be quoted
-                size_t len = nm.size; const char *name = nm.str;
-                is_known_op = ((len > 6 && memcmp(name, "arith.", 6) == 0) ||
-                              (len > 4 && memcmp(name, "scf.", 4) == 0) ||
-                              (len > 3 && memcmp(name, "tt.", 3) == 0) ||
-                              (len > 5 && memcmp(name, "func.", 5) == 0) ||
-                              (len > 3 && memcmp(name, "cf.", 3) == 0) ||
-                              (len > 5 && memcmp(name, "math.", 5) == 0) ||
-                              (len > 5 && memcmp(name, "llvm.", 5) == 0));
-            }
-
-            if (mlir_operation_get_type(op) == OP_TYPE_UNREGISTERED && !is_tt_func && !is_known_op) {
+            if (mlir_operation_get_type(op) == OP_TYPE_UNREGISTERED && !is_tt_func) {
                 // Quote unregistered op names in classic format
                 result = str_concat(arena, result, str_lit("\""));
                 string s = mlir_operation_get_name_string(op);
