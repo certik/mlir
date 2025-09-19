@@ -225,11 +225,14 @@ MlirValue *mlir_block_get_argument(const MlirBlock *block, size_t idx);
 // Value API
 // -----------------------------------------------------------------------------
 
-#define MLIR_VALUE_BLOCK_ARG 0
-#define MLIR_VALUE_OP_RESULT 1
+// Value kind used for SSA values
+typedef enum ValueKind {
+    BLOCK_ARG,
+    OP_RESULT
+} ValueKind;
 
 // Creation & mutation
-MlirValue *mlir_value_create(Arena *arena, int value_kind);
+MlirValue *mlir_value_create(Arena *arena, ValueKind value_kind);
 void mlir_value_set_def(MlirValue *value, void *def);
 void mlir_value_set_type(MlirValue *value, MlirType *type);
 void mlir_value_set_register_name(MlirValue *value, const char *name, size_t name_len);
@@ -239,7 +242,7 @@ void mlir_value_set_divisibility(MlirValue *value, bool has_value, int64_t div_v
 void mlir_value_set_max_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type);
 
 // Accessors
-int mlir_value_get_kind(const MlirValue *value);
+ValueKind mlir_value_get_kind(const MlirValue *value);
 MlirType *mlir_value_get_type(const MlirValue *value);
 string mlir_value_get_register_name(const MlirValue *value);
 uint32_t mlir_value_get_result_index(const MlirValue *value);

@@ -106,7 +106,7 @@ struct MlirLocation {
 };
 
 struct MlirValue {
-    int kind; // ValueKind
+    ValueKind kind;
     void *def;
     uint32_t result_index;
     struct MlirType *type;
@@ -546,7 +546,7 @@ void mlir_attribute_set_name(MlirAttribute *attr, const char *name, size_t name_
 }
 
 // Value creation and manipulation
-MlirValue *mlir_value_create(Arena *arena, int value_kind) {
+MlirValue *mlir_value_create(Arena *arena, ValueKind value_kind) {
     struct MlirValue *value = arena_alloc(arena, struct MlirValue);
     *value = (struct MlirValue){0};
     value->kind = value_kind;
@@ -688,7 +688,7 @@ bool mlir_attribute_get_bool(const MlirAttribute *attr) {
 }
 
 // Value accessors
-int mlir_value_get_kind(const MlirValue *value) {
+ValueKind mlir_value_get_kind(const MlirValue *value) {
     return value->kind;
 }
 

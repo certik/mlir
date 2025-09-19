@@ -71,13 +71,13 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     MlirBlock *func_block = mlir_block_create(arena);
 
     // Function block arguments (%arg0, %arg1)
-    MlirValue *arg0 = mlir_value_create(arena, MLIR_VALUE_BLOCK_ARG);
+    MlirValue *arg0 = mlir_value_create(arena, BLOCK_ARG);
     mlir_value_set_result_index(arg0, 0);
     mlir_value_set_type(arg0, i32_type);
     mlir_value_set_register_name(arg0, "%arg0", 5);
     mlir_block_add_argument(arena, func_block, arg0);
 
-    MlirValue *arg1 = mlir_value_create(arena, MLIR_VALUE_BLOCK_ARG);
+    MlirValue *arg1 = mlir_value_create(arena, BLOCK_ARG);
     mlir_value_set_result_index(arg1, 1);
     mlir_value_set_type(arg1, i32_type);
     mlir_value_set_register_name(arg1, "%arg1", 5);
@@ -101,7 +101,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     mlir_operation_set_attributes(const_op, const_attrs, 1);
 
     // Create const_result
-    MlirValue *const_result = mlir_value_create(arena, MLIR_VALUE_OP_RESULT);
+    MlirValue *const_result = mlir_value_create(arena, OP_RESULT);
     mlir_value_set_def(const_result, const_op);
     mlir_value_set_result_index(const_result, 0);
     mlir_value_set_type(const_result, i32_type);
@@ -127,7 +127,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     mlir_operation_set_result_types(add_op, add_result_types, 1);
 
     // Create add_result
-    MlirValue *add_result = mlir_value_create(arena, MLIR_VALUE_OP_RESULT);
+    MlirValue *add_result = mlir_value_create(arena, OP_RESULT);
     mlir_value_set_def(add_result, add_op);
     mlir_value_set_result_index(add_result, 1);
     mlir_value_set_type(add_result, i32_type);
@@ -155,7 +155,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     mlir_operation_set_result_types(mul_op, mul_result_types, 1);
 
     // Create mul_result
-    MlirValue *mul_result = mlir_value_create(arena, MLIR_VALUE_OP_RESULT);
+    MlirValue *mul_result = mlir_value_create(arena, OP_RESULT);
     mlir_value_set_def(mul_result, mul_op);
     mlir_value_set_result_index(mul_result, 2);
     mlir_value_set_type(mul_result, i32_type);

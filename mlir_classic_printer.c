@@ -185,7 +185,7 @@ static string print_ssa_operand_classic(PrintCtx *ctx, MlirValue *value) {
     Arena *arena = ctx->arena;
     MlirValue *v = value;
     string base = print_ssa_value_classic(ctx, v);
-    if (v && mlir_value_get_kind(v) == MLIR_VALUE_OP_RESULT) {
+    if (v && mlir_value_get_kind(v) == OP_RESULT) {
         MlirOperation *defop = mlir_value_get_def_op(v);
         if (defop && mlir_operation_num_result_types(defop) > 1) {
             base = str_concat(arena, base, str_lit("#0"));

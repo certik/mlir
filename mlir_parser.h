@@ -29,12 +29,6 @@ static inline bool string_equal(string a, string b) {
     return str_eq(a, b);
 }
 
-// Value kind used for SSA values
-typedef enum ValueKind {
-    BLOCK_ARG,
-    OP_RESULT
-} ValueKind;
-
 // Define hashtable for string -> ValueRef* mapping
 #define SymbolTable_HASH string_hash
 #define SymbolTable_EQUAL string_equal
@@ -75,9 +69,6 @@ void symbol_table_push_scope(Arena *arena, ScopedSymbolTable *st);
 void symbol_table_pop_scope(ScopedSymbolTable *st);
 void symbol_table_add_value(Arena *arena, ScopedSymbolTable *st, string name, MlirValue *value);
 MlirValue* symbol_table_lookup(ScopedSymbolTable *st, string name);
-
-// Helper function to create properly initialized ValueRef
-MlirValue* create_value_ref(Arena *arena, ValueKind kind);
 
 // Forward declarations for core IR nodes (opaque here)
 // Specialized parsing functions

@@ -68,11 +68,6 @@ MlirValue* symbol_table_lookup(ScopedSymbolTable *st, string name) {
     return NULL;
 }
 
-MlirValue* create_value_ref(Arena *arena, ValueKind kind) {
-    MlirValue *value = mlir_value_create(arena, kind);
-    return value;
-}
-
 string tokentype_to_string(TokenType tt) {
     switch (tt) {
 #define X(token) case token: return str_lit(#token);
@@ -918,7 +913,7 @@ MlirOperation* parse_operation(Parser *parser) {
         parser_expect(parser, TK_EQUAL);
 
         // Create MlirValue for the result and add to symbol table
-        result_value = mlir_value_create(parser->arena, MLIR_VALUE_OP_RESULT);
+        result_value = mlir_value_create(parser->arena, OP_RESULT);
         mlir_value_set_def(result_value, op);
         mlir_value_set_result_index(result_value, 0);
         mlir_value_set_register_name(result_value, reg_name.str, reg_name.size);
