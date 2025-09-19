@@ -1415,9 +1415,11 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
             if (mlir_operation_get_type(op) == OP_TYPE_UNREGISTERED && !is_tt_func && !is_known_op) {
                 // Quote unregistered op names in classic format
+                result = str_concat(arena, result, str_lit("\""));
                 string s = mlir_operation_get_name_string(op);
-                if (s.size > 0) result = str_concat(arena, result, format(arena, str_lit("\"{}\""), s));
-                else result = str_concat(arena, result, str_lit("\"unknown\""));
+                if (s.size > 0) result = str_concat(arena, result, s);
+                else result = str_concat(arena, result, str_lit("unknown"));
+                result = str_concat(arena, result, str_lit("\""));
             } else {
                 string s = mlir_operation_get_name_string(op);
                 if (s.size > 0) result = str_concat(arena, result, s);
