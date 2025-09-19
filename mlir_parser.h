@@ -101,6 +101,8 @@ const char *mlir_tokentype_to_string(int token_type);
 size_t mlir_location_map_size(const MlirLocationMap *location_map);
 size_t mlir_location_map_collect(const MlirLocationMap *location_map, string *out_keys, MlirLocation **out_locs, size_t max);
 
+MlirType *mlir_type_create_from_string(Arena *arena, string type_str);
+
 #ifdef __cplusplus
 }
 #endif

@@ -268,7 +268,6 @@ MlirType *mlir_type_create_tensor(Arena *arena, const int64_t *shape, size_t ran
 MlirType *mlir_type_create_memref(Arena *arena, const int64_t *shape, size_t rank, MlirType *element_type);
 MlirType *mlir_type_create_pointer(Arena *arena, MlirType *element_type, bool has_address_space, uint32_t address_space);
 MlirType *mlir_type_create_opaque(Arena *arena, string name);
-MlirType *mlir_type_create_from_string(Arena *arena, string type_str);
 
 // Mutation
 void mlir_type_set_integer_properties(MlirType *type, uint32_t width, bool is_signed);
