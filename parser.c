@@ -43,7 +43,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     //MlirType *i64_type = mlir_type_create_integer(arena, 64, true);
 
     // Create module operation
-    MlirOperation *module = mlir_op_create(arena, OP_TYPE_MODULE);
+    MlirOperation *module = mlir_op_create(arena, OP_TYPE_MODULE, str_lit(""), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
     mlir_operation_set_name(module, "module", 6);
 
     // Create module region
@@ -56,7 +56,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     mlir_op_add_region(arena, module, module_region);
 
     // Create function operation
-    MlirOperation *func_op = mlir_op_create(arena, OP_TYPE_FUNC_FUNC);
+    MlirOperation *func_op = mlir_op_create(arena, OP_TYPE_FUNC_FUNC, str_lit(""), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
     mlir_operation_set_name(func_op, "func.func", 9);
 
     // Function attributes (sym_name)
@@ -85,7 +85,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
 
     // Create operations in function block
     // %0 = arith.constant 5 : i32
-    MlirOperation *const_op = mlir_op_create(arena, OP_TYPE_ARITH_CONSTANT);
+    MlirOperation *const_op = mlir_op_create(arena, OP_TYPE_ARITH_CONSTANT, str_lit(""), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
     mlir_operation_set_name(const_op, "arith.constant", 14);
 
     // Set result types
@@ -113,7 +113,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     mlir_operation_set_results(const_op, const_results, 1);
 
     // %1 = arith.addi %arg0, %arg1 : i32
-    MlirOperation *add_op = mlir_op_create(arena, OP_TYPE_ARITH_ADDI);
+    MlirOperation *add_op = mlir_op_create(arena, OP_TYPE_ARITH_ADDI, str_lit(""), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
 
     // Set operands
     MlirValue **add_operands = arena_alloc_array(arena, MlirValue*, 2);
@@ -141,7 +141,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     // %2 = arith.muli %1, %0 : i32 (add_result and const_result already created above)
 
     // Create mul operation
-    MlirOperation *mul_op = mlir_op_create(arena, OP_TYPE_ARITH_MULI);
+    MlirOperation *mul_op = mlir_op_create(arena, OP_TYPE_ARITH_MULI, str_lit(""), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
 
     // Set operands
     MlirValue **mul_operands = arena_alloc_array(arena, MlirValue*, 2);
@@ -167,7 +167,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     mlir_operation_set_results(mul_op, mul_results, 1);
 
     // func.return %2 : i32
-    MlirOperation *ret_op = mlir_op_create(arena, OP_TYPE_FUNC_RETURN);
+    MlirOperation *ret_op = mlir_op_create(arena, OP_TYPE_FUNC_RETURN, str_lit(""), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
 
     // Set operands
     MlirValue **ret_operands = arena_alloc_array(arena, MlirValue*, 1);

@@ -12,7 +12,14 @@
 #include "tokenizer.h"
 #include "op_parsers.h"
 
-static MlirAttribute **append_attr(Arena *arena, MlirAttribute **attrs, size_t *n_attrs, MlirAttribute *attr) {
+// Forward declarations
+static MlirAttribute *create_integer_attr(Parser *parser, string name, int64_t value);
+static MlirAttribute *create_float_attr(Parser *parser, string name, double value);
+static MlirAttribute *create_string_attr(Parser *parser, string name, string value);
+static MlirValue *lookup_or_create_value(Parser *parser, string reg, string default_type);
+static bool parse_type_string(Parser *parser, string *out);
+
+static MlirAttribute **append_attr_helper(Arena *arena, MlirAttribute **attrs, size_t *n_attrs, MlirAttribute *attr) {
     if (!attr) return attrs;
     size_t new_count = *n_attrs + 1;
     MlirAttribute **new_attrs = arena_alloc_array(arena, MlirAttribute*, new_count);
@@ -67,7 +74,7 @@ OperationParserResult parse_arith_constant_op(const OperationParserParams *param
                 parsed_value = parsed_value * 10 + (c - '0');
             }
         }
-        attributes = append_attr(arena, attributes, &n_attrs,
+        attributes = append_attr_helper(arena, attributes, &n_attrs,
                                  create_integer_attr(parser, str_lit("value"), parsed_value));
     } else if (parser_peek(parser, TK_REAL)) {
         string value_str = parser_token_str(parser);
@@ -76,13 +83,13 @@ OperationParserResult parse_arith_constant_op(const OperationParserParams *param
         memcpy(buffer, value_str.str, value_str.size);
         buffer[value_str.size] = '\0';
         double parsed_value = strtod(buffer, NULL);
-        attributes = append_attr(arena, attributes, &n_attrs,
+        attributes = append_attr_helper(arena, attributes, &n_attrs,
                                  create_float_attr(parser, str_lit("value"), parsed_value));
     } else if (parser_peek(parser, TK_NAME)) {
         string name_str = parser_token_str(parser);
         if (str_eq(name_str, str_lit("true")) || str_eq(name_str, str_lit("false"))) {
             parser_expect(parser, TK_NAME);
-            attributes = append_attr(arena, attributes, &n_attrs,
+            attributes = append_attr_helper(arena, attributes, &n_attrs,
                                      create_integer_attr(parser, str_lit("value"), str_eq(name_str, str_lit("true")) ? 1 : 0));
             MlirType *bool_type = mlir_type_create_from_string(arena, str_lit("i1"));
             result_types = append_type(arena, result_types, &n_result_types, bool_type);
@@ -101,7 +108,7 @@ OperationParserResult parse_arith_constant_op(const OperationParserParams *param
                 parser_next_token(parser);
                 if (angle == 0 && parser_peek(parser, TK_COLON)) break;
             }
-            attributes = append_attr(arena, attributes, &n_attrs,
+            attributes = append_attr_helper(arena, attributes, &n_attrs,
                                      create_string_attr(parser, str_lit("value_text"), payload));
         }
     }
@@ -157,14 +164,183 @@ OperationParserResult parse_arith_constant_op(const OperationParserParams *param
 }
 
 OperationParserResult parse_memref_load_op(const OperationParserParams *params) {
-    (void)params;
-    OperationParserResult out = {0};
+    Parser *parser = params->parser;
+    Arena  *arena  = params->arena;
+
+    MlirAttribute **attributes = NULL; size_t n_attrs = 0;
+    MlirType      **result_types = NULL; size_t n_result_types = 0;
+    MlirValue     **results = NULL; size_t n_results = 0;
+    MlirValue     **operands = NULL; size_t n_operands = 0;
+    MlirLocation   *op_location = NULL;
+
+    // Use LHS results if provided, otherwise create a result for memref.load
+    if (params->n_lhs_results > 0) {
+        results = params->lhs_results;
+        n_results = params->n_lhs_results;
+    } else {
+        // memref.load always produces a result
+        MlirValue *result_value = mlir_value_create(arena, OP_RESULT);
+        results = arena_alloc_array(arena, MlirValue*, 1);
+        results[0] = result_value;
+        n_results = 1;
+    }
+
+    // Parse memref.load %memref[indices] : memref<...>
+    if (parser_peek(parser, TK_REGISTER)) {
+        string reg = parser_token_str(parser);
+        parser_expect(parser, TK_REGISTER);
+        MlirValue *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
+        operands = append_value(arena, operands, &n_operands, val);
+    }
+
+    // Optional index list in brackets
+    if (parser_peek(parser, TK_LBRACKET)) {
+        parser_expect(parser, TK_LBRACKET);
+        bool first = true;
+        while (!parser_peek(parser, TK_RBRACKET) && !parser_peek(parser, TK_EOF)) {
+            if (!first && parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
+            first = false;
+            if (parser_peek(parser, TK_REGISTER)) {
+                string idx = parser_token_str(parser);
+                parser_expect(parser, TK_REGISTER);
+                MlirValue *val = lookup_or_create_value(parser, idx, str_lit("index"));
+                operands = append_value(arena, operands, &n_operands, val);
+            } else {
+                parser_next_token(parser);
+            }
+        }
+        parser_expect(parser, TK_RBRACKET);
+    }
+
+    // Parse ": memref<type>" and set result type 
+    // NOTE: The original parser incorrectly set the result type to the memref type
+    // instead of the element type. We reproduce this behavior for compatibility.
+    if (parser_peek(parser, TK_COLON)) {
+        parser_expect(parser, TK_COLON);
+        string type_str = str_lit("");
+        if (parse_type_string(parser, &type_str)) {
+            if (results && n_results > 0) {
+                // Reproduce original incorrect behavior: use the memref type as result type
+                MlirType *result_type = mlir_type_create_from_string(arena, type_str);
+                result_types = append_type(arena, result_types, &n_result_types, result_type);
+                if (results[0]) {
+                    mlir_value_set_type(results[0], result_type);
+                }
+            }
+        }
+    }
+
+    // Parse location if present
+    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
+        op_location = parse_loc(parser);
+    }
+
+    MlirOperation *op = mlir_op_create(
+        arena,
+        params->op_type,
+        params->opname,
+        attributes, n_attrs,
+        result_types, n_result_types,
+        results, n_results,
+        operands, n_operands,
+        NULL, 0,
+        op_location,
+        params->unnumbered_loc_def,
+        str_lit(""),
+        params->source_line_start);
+
+    OperationParserResult out = {
+        .operation = op,
+        .results = results,
+        .n_results = n_results,
+        .location = op_location
+    };
     return out;
 }
 
 OperationParserResult parse_memref_store_op(const OperationParserParams *params) {
-    (void)params;
-    OperationParserResult out = {0};
+    Parser *parser = params->parser;
+    Arena  *arena  = params->arena;
+
+    MlirAttribute **attributes = NULL; size_t n_attrs = 0;
+    MlirType      **result_types = NULL; size_t n_result_types = 0;
+    MlirValue     **results = NULL; size_t n_results = 0;
+    MlirValue     **operands = NULL; size_t n_operands = 0;
+    MlirLocation   *op_location = NULL;
+
+    // memref.store %value, %memref[indices] : memref<...>
+    if (parser_peek(parser, TK_REGISTER)) {
+        string reg = parser_token_str(parser);
+        parser_expect(parser, TK_REGISTER);
+        MlirValue *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
+        operands = append_value(arena, operands, &n_operands, val);
+    }
+    if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
+    if (parser_peek(parser, TK_REGISTER)) {
+        string reg = parser_token_str(parser);
+        parser_expect(parser, TK_REGISTER);
+        MlirValue *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
+        operands = append_value(arena, operands, &n_operands, val);
+    }
+
+    // Optional index list in brackets
+    if (parser_peek(parser, TK_LBRACKET)) {
+        parser_expect(parser, TK_LBRACKET);
+        bool first = true;
+        while (!parser_peek(parser, TK_RBRACKET) && !parser_peek(parser, TK_EOF)) {
+            if (!first && parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
+            first = false;
+            if (parser_peek(parser, TK_REGISTER)) {
+                string idx = parser_token_str(parser);
+                parser_expect(parser, TK_REGISTER);
+                MlirValue *val = lookup_or_create_value(parser, idx, str_lit("index"));
+                operands = append_value(arena, operands, &n_operands, val);
+            } else {
+                parser_next_token(parser);
+            }
+        }
+        parser_expect(parser, TK_RBRACKET);
+    }
+
+    // Consume trailing ": memref<...>" conservatively and optional loc()
+    if (parser_peek(parser, TK_COLON)) {
+        parser_expect(parser, TK_COLON);
+        int angle = 0;
+        while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE)) {
+            if (parser_peek(parser, TK_LANGLE)) angle++;
+            else if (parser_peek(parser, TK_RANGLE) && angle > 0) angle--;
+            if (angle == 0 && parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) break;
+            parser_next_token(parser);
+        }
+        if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
+            op_location = parse_loc(parser);
+        }
+    }
+
+    // Ensure no results - memref.store does not return values
+    result_types = NULL;
+    n_result_types = 0;
+
+    MlirOperation *op = mlir_op_create(
+        arena,
+        params->op_type,
+        params->opname,
+        attributes, n_attrs,
+        result_types, n_result_types,
+        results, n_results,
+        operands, n_operands,
+        NULL, 0,
+        op_location,
+        params->unnumbered_loc_def,
+        str_lit(""),
+        params->source_line_start);
+
+    OperationParserResult out = {
+        .operation = op,
+        .results = results,
+        .n_results = n_results,
+        .location = op_location
+    };
     return out;
 }
 

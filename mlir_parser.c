@@ -1272,13 +1272,56 @@ MlirOperation* parse_operation(Parser *parser) {
             parse_affine_for(parser, op);
             parse_generic_attrs_and_result_type(parser, op);
             break;
-        case OP_TYPE_MEMREF_LOAD:
-            parse_memref_load_or_store(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+        case OP_TYPE_MEMREF_LOAD: {
+            OperationParserParams params = {
+                .parser = parser,
+                .arena = parser->arena,
+                .op_type = op_type,
+                .opname = opname,
+                .lhs_results = lhs_results,
+                .n_lhs_results = n_lhs_results,
+                .unnumbered_loc_def = parser->unnumbered_loc_def,
+                .source_line_start = recorded_source_line
+            };
+            OperationParserResult parsed = parse_memref_load_op(&params);
+            op = parsed.operation;
+            new_results_from_parser = parsed.results;
+            n_new_results_from_parser = parsed.n_results;
+            if (parsed.location) {
+                recorded_location = parsed.location;
+                mlir_operation_set_location(op, recorded_location);
+            }
+            mlir_operation_set_source_line_start(op, recorded_source_line);
+            recorded_unnumbered_loc = parser->unnumbered_loc_def;
+            mlir_operation_set_unnumbered_loc_def(op, recorded_unnumbered_loc);
+            replaced_op = true;
             break;
-        case OP_TYPE_MEMREF_STORE:
-            parse_memref_store(parser, op);
+        }
+        case OP_TYPE_MEMREF_STORE: {
+            OperationParserParams params = {
+                .parser = parser,
+                .arena = parser->arena,
+                .op_type = op_type,
+                .opname = opname,
+                .lhs_results = lhs_results,
+                .n_lhs_results = n_lhs_results,
+                .unnumbered_loc_def = parser->unnumbered_loc_def,
+                .source_line_start = recorded_source_line
+            };
+            OperationParserResult parsed = parse_memref_store_op(&params);
+            op = parsed.operation;
+            new_results_from_parser = parsed.results;
+            n_new_results_from_parser = parsed.n_results;
+            if (parsed.location) {
+                recorded_location = parsed.location;
+                mlir_operation_set_location(op, recorded_location);
+            }
+            mlir_operation_set_source_line_start(op, recorded_source_line);
+            recorded_unnumbered_loc = parser->unnumbered_loc_def;
+            mlir_operation_set_unnumbered_loc_def(op, recorded_unnumbered_loc);
+            replaced_op = true;
             break;
+        }
         case OP_TYPE_VECTOR_PRINT:
             parse_vector_print(parser, op);
             break;
