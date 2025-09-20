@@ -1308,6 +1308,7 @@ void parse_vector_print(Parser *parser, MlirOperation *op) {
     mlir_operation_set_result_types(op, NULL, 0);
 }
 
+
 void parse_std_constant(Parser *parser, MlirOperation *op) {
     // Optional empty operand list in parentheses
     if (parser_peek(parser, TK_LPAREN)) {
