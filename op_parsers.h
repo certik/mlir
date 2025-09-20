@@ -20,7 +20,7 @@ void parse_affine_for(Parser *parser, MlirOperation *op);
 
 void parse_arith_binary(Parser *parser, MlirOperation *op);
 void parse_arith_cmpi(Parser *parser, MlirOperation *op);
-void parse_arith_constant(Parser *parser, MlirOperation *op);
+OperationParserResult parse_arith_constant_op(const OperationParserParams *params);
 void parse_arith_select(Parser *parser, MlirOperation *op);
 
 void parse_cf_br(Parser *parser, MlirOperation *op);
@@ -35,6 +35,8 @@ void parse_index_constant(Parser *parser, MlirOperation *op);
 
 void parse_linalg_fill(Parser *parser, MlirOperation *op);
 
+OperationParserResult parse_memref_load_op(const OperationParserParams *params);
+OperationParserResult parse_memref_store_op(const OperationParserParams *params);
 void parse_memref_load_or_store(Parser *parser, MlirOperation *op);
 void parse_memref_store(Parser *parser, MlirOperation *op);
 

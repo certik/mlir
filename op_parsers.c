@@ -12,6 +12,162 @@
 #include "tokenizer.h"
 #include "op_parsers.h"
 
+static MlirAttribute **append_attr(Arena *arena, MlirAttribute **attrs, size_t *n_attrs, MlirAttribute *attr) {
+    if (!attr) return attrs;
+    size_t new_count = *n_attrs + 1;
+    MlirAttribute **new_attrs = arena_alloc_array(arena, MlirAttribute*, new_count);
+    if (attrs) memcpy(new_attrs, attrs, (*n_attrs) * sizeof(MlirAttribute*));
+    new_attrs[new_count - 1] = attr;
+    *n_attrs = new_count;
+    return new_attrs;
+}
+
+static MlirType **append_type(Arena *arena, MlirType **types, size_t *n_types, MlirType *type) {
+    if (!type) return types;
+    size_t new_count = *n_types + 1;
+    MlirType **new_types = arena_alloc_array(arena, MlirType*, new_count);
+    if (types) memcpy(new_types, types, (*n_types) * sizeof(MlirType*));
+    new_types[new_count - 1] = type;
+    *n_types = new_count;
+    return new_types;
+}
+
+static MlirValue **append_value(Arena *arena, MlirValue **values, size_t *n_values, MlirValue *value) {
+    size_t new_count = *n_values + 1;
+    MlirValue **new_values = arena_alloc_array(arena, MlirValue*, new_count);
+    if (values) memcpy(new_values, values, (*n_values) * sizeof(MlirValue*));
+    new_values[new_count - 1] = value;
+    *n_values = new_count;
+    return new_values;
+}
+
+OperationParserResult parse_arith_constant_op(const OperationParserParams *params) {
+    Parser *parser = params->parser;
+    Arena  *arena  = params->arena;
+
+    MlirAttribute **attributes = NULL; size_t n_attrs = 0;
+    MlirType      **result_types = NULL; size_t n_result_types = 0;
+    MlirValue     **results = NULL; size_t n_results = 0;
+    MlirValue      *result_value = NULL;
+    MlirLocation   *op_location = NULL;
+
+    if (params->n_lhs_results > 0) {
+        results = params->lhs_results;
+        n_results = params->n_lhs_results;
+        result_value = params->lhs_results[0];
+    }
+
+    if (parser_peek(parser, TK_INTEGER)) {
+        string value_str = parser_token_str(parser);
+        parser_expect(parser, TK_INTEGER);
+        int64_t parsed_value = 0;
+        for (size_t i = 0; i < value_str.size; i++) {
+            char c = value_str.str[i];
+            if (c >= '0' && c <= '9') {
+                parsed_value = parsed_value * 10 + (c - '0');
+            }
+        }
+        attributes = append_attr(arena, attributes, &n_attrs,
+                                 create_integer_attr(parser, str_lit("value"), parsed_value));
+    } else if (parser_peek(parser, TK_REAL)) {
+        string value_str = parser_token_str(parser);
+        parser_expect(parser, TK_REAL);
+        char *buffer = arena_alloc_array(arena, char, value_str.size + 1);
+        memcpy(buffer, value_str.str, value_str.size);
+        buffer[value_str.size] = '\0';
+        double parsed_value = strtod(buffer, NULL);
+        attributes = append_attr(arena, attributes, &n_attrs,
+                                 create_float_attr(parser, str_lit("value"), parsed_value));
+    } else if (parser_peek(parser, TK_NAME)) {
+        string name_str = parser_token_str(parser);
+        if (str_eq(name_str, str_lit("true")) || str_eq(name_str, str_lit("false"))) {
+            parser_expect(parser, TK_NAME);
+            attributes = append_attr(arena, attributes, &n_attrs,
+                                     create_integer_attr(parser, str_lit("value"), str_eq(name_str, str_lit("true")) ? 1 : 0));
+            MlirType *bool_type = mlir_type_create_from_string(arena, str_lit("i1"));
+            result_types = append_type(arena, result_types, &n_result_types, bool_type);
+            if (!result_value) {
+                result_value = mlir_value_create(arena, OP_RESULT);
+            }
+            mlir_value_set_type(result_value, bool_type);
+        } else {
+            string payload = str_lit("");
+            int angle = 0;
+            while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_COLON)) {
+                string tok = parser_token_str(parser);
+                payload = payload.size ? str_concat(arena, payload, tok) : tok;
+                if (parser_peek(parser, TK_LANGLE)) angle++;
+                else if (parser_peek(parser, TK_RANGLE) && angle > 0) angle--;
+                parser_next_token(parser);
+                if (angle == 0 && parser_peek(parser, TK_COLON)) break;
+            }
+            attributes = append_attr(arena, attributes, &n_attrs,
+                                     create_string_attr(parser, str_lit("value_text"), payload));
+        }
+    }
+
+    if (parser_peek(parser, TK_COLON)) {
+        parser_expect(parser, TK_COLON);
+        string type_str = str_lit("");
+        if (parse_type_string(parser, &type_str)) {
+            MlirType *type = mlir_type_create_from_string(arena, type_str);
+            result_types = append_type(arena, result_types, &n_result_types, type);
+            if (!result_value) {
+                result_value = mlir_value_create(arena, OP_RESULT);
+            }
+            mlir_value_set_type(result_value, type);
+        }
+    }
+
+    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
+        op_location = parse_loc(parser);
+    }
+
+    if (!result_value) {
+        result_value = mlir_value_create(arena, OP_RESULT);
+    }
+
+    if (!results) {
+        results = arena_alloc_array(arena, MlirValue*, 1);
+        n_results = 1;
+        results[0] = result_value;
+    }
+
+    MlirOperation *op = mlir_op_create(
+        arena,
+        params->op_type,
+        params->opname,
+        attributes, n_attrs,
+        result_types, n_result_types,
+        results, n_results,
+        NULL, 0,
+        NULL, 0,
+        op_location,
+        params->unnumbered_loc_def,
+        str_lit(""),
+        params->source_line_start);
+
+    OperationParserResult out = {
+        .operation = op,
+        .results = results,
+        .n_results = n_results,
+        .location = op_location
+    };
+    return out;
+}
+
+OperationParserResult parse_memref_load_op(const OperationParserParams *params) {
+    (void)params;
+    OperationParserResult out = {0};
+    return out;
+}
+
+OperationParserResult parse_memref_store_op(const OperationParserParams *params) {
+    (void)params;
+    OperationParserResult out = {0};
+    return out;
+}
+
 // Helper function declarations
 static bool parse_type_string(Parser *parser, string *out) {
     if (!(parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME) || parser_peek(parser, TK_EXCLAMATION))) {
