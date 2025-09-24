@@ -1068,7 +1068,6 @@ MlirOperation* parse_operation(Parser *parser) {
     size_t n_lhs_results = 0;
     MlirValue **new_results_from_parser = NULL;
     size_t n_new_results_from_parser = 0;
-    bool replaced_op = false;
 
     // Skip empty lines and attributes
     while (
@@ -1206,10 +1205,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parse_generic_attrs_and_result_type(parser, op);
             break;
         case OP_TYPE_ARITH_CONSTANT:
-            params.lhs_results = lhs_results;
-            params.n_lhs_results = n_lhs_results;
             parsed = parse_arith_constant_op(&params);
-            replaced_op = true;
             break;
         case OP_TYPE_ARITH_CMPI:
             parse_arith_cmpi(parser, op);
@@ -1265,16 +1261,10 @@ MlirOperation* parse_operation(Parser *parser) {
             parse_generic_attrs_and_result_type(parser, op);
             break;
         case OP_TYPE_MEMREF_LOAD:
-            params.lhs_results = lhs_results;
-            params.n_lhs_results = n_lhs_results;
             parsed = parse_memref_load_op(&params);
-            replaced_op = true;
             break;
         case OP_TYPE_MEMREF_STORE:
-            params.lhs_results = lhs_results;
-            params.n_lhs_results = n_lhs_results;
             parsed = parse_memref_store_op(&params);
-            replaced_op = true;
             break;
         case OP_TYPE_VECTOR_PRINT:
             parse_vector_print(parser, op);
@@ -1326,9 +1316,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parse_generic_operation(parser, op);
             break;
     }
-
-
-    if (replaced_op) {
+    if (parsed.operation != NULL) {
         op = parsed.operation;
         new_results_from_parser = parsed.results;
         n_new_results_from_parser = parsed.n_results;
@@ -1344,7 +1332,7 @@ MlirOperation* parse_operation(Parser *parser) {
     }
 
     // Handle return value(s) for all operations
-    if (!replaced_op) {
+    if (parsed.operation == NULL) {
         if (result_value) {
             if (mlir_operation_num_result_types(op) > 0) {
                 MlirType *res_type = mlir_operation_get_result_type(op, 0);
