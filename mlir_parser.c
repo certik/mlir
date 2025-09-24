@@ -1239,7 +1239,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parse_generic_attrs_and_result_type(parser, op);
             break;
         case OP_TYPE_TT_CALL:
-            parse_tt_call(parser, op);
+            parsed = parse_tt_call_op(parser, &params);
             break;
         case OP_TYPE_FUNC_FUNC:
             parse_func_func(parser, op);
@@ -1259,7 +1259,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_memref_store_op(parser, &params);
             break;
         case OP_TYPE_VECTOR_PRINT:
-            parse_vector_print(parser, op);
+            parsed = parse_vector_print_op(parser, &params);
             break;
         case OP_TYPE_STD_CONSTANT:
             parse_std_constant(parser, op);
@@ -1279,13 +1279,13 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_tensor_extract_op(parser, &params);
             break;
         case OP_TYPE_CF_BR:
-            parse_cf_br(parser, op);
+            parsed = parse_cf_br_op(parser, &params);
             break;
         case OP_TYPE_CF_COND_BR:
-            parse_cf_cond_br(parser, op);
+            parsed = parse_cf_cond_br_op(parser, &params);
             break;
         case OP_TYPE_LINALG_FILL:
-            parse_linalg_fill(parser, op);
+            parsed = parse_linalg_fill_op(parser, &params);
             break;
         case OP_TYPE_AFFINE_LOAD:
             parse_affine_load(parser, op);
@@ -1294,7 +1294,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_index_constant_op(parser, &params);
             break;
         case OP_TYPE_TENSOR_SPLAT:
-            parse_tensor_splat(parser, op);
+            parsed = parse_tensor_splat_op(parser, &params);
             break;
         case OP_TYPE_TENSOR_COLLAPSE_SHAPE:
             parse_tensor_collapse_shape(parser, op);
