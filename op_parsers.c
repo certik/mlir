@@ -1117,27 +1117,10 @@ OperationParserResult parse_memref_load_op(Parser *parser, const OperationParser
 }
 
 OperationParserResult parse_memref_store_op(Parser *parser, const OperationParserParams *params) {
-    MlirOperation *op = mlir_op_create(
-        params->arena,
-        params->op_type,
-        params->opname,
-        NULL, 0,
-        NULL, 0,
-        params->lhs_results, params->n_lhs_results,
-        NULL, 0,
-        NULL, 0,
-        NULL,
-        params->unnumbered_loc_def,
-        str_lit(""),
-        params->source_line_start);
-
-    if (params->lhs_results && params->n_lhs_results > 0) {
-        mlir_operation_set_results(op, params->lhs_results, params->n_lhs_results);
-    }
-
     VecValue operands;
     VecValue_reserve(parser->arena, &operands, 4);
 
+    // Parse operands: store value, memref, [indices...]
     if (parser_peek(parser, TK_REGISTER)) {
         string reg = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
@@ -1170,8 +1153,21 @@ OperationParserResult parse_memref_store_op(Parser *parser, const OperationParse
         parser_expect(parser, TK_RBRACKET);
     }
 
-    set_op_operands(op, operands.data, operands.size);
+    MlirAttribute **attributes = NULL;
+    size_t n_attributes = 0;
+    size_t attributes_capacity = 0;
+    MlirType **result_types = NULL;
+    size_t n_result_types = 0;
 
+    // memref.store operations do not have results
+    MlirValue **results = NULL;
+    size_t n_results = 0;
+    
+    // Parse attributes from both <{...}> and {...} blocks
+    parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+    parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+    
+    // Parse type information and location after colon (memref.store doesn't have result types)
     if (parser_peek(parser, TK_COLON)) {
         parser_expect(parser, TK_COLON);
         int angle = 0;
@@ -1181,28 +1177,30 @@ OperationParserResult parse_memref_store_op(Parser *parser, const OperationParse
             if (angle == 0 && parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) break;
             parser_next_token(parser);
         }
-        if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-            mlir_operation_set_location(op, parse_loc(parser));
-        }
     }
-    mlir_operation_set_result_types(op, NULL, 0);
+    
+    // Parse optional location
+    MlirLocation *op_location = parse_optional_location(parser);
 
-    MlirValue **results = params->lhs_results;
-    size_t n_results = params->n_lhs_results;
-    if ((!results || n_results == 0) && mlir_operation_num_results(op) > 0) {
-        n_results = mlir_operation_num_results(op);
-        results = arena_alloc_array(params->arena, MlirValue*, n_results);
-        for (size_t i = 0; i < n_results; i++) {
-            results[i] = mlir_operation_get_result(op, i);
-        }
-        mlir_operation_set_results(op, results, n_results);
-    }
+    MlirOperation *op = mlir_op_create(
+        params->arena,
+        params->op_type,
+        params->opname,
+        attributes, n_attributes,
+        result_types, n_result_types,
+        results, n_results,
+        operands.data, operands.size,
+        NULL, 0,
+        op_location,
+        params->unnumbered_loc_def,
+        str_lit(""),
+        params->source_line_start);
 
     OperationParserResult out = {
         .operation = op,
         .results = results,
         .n_results = n_results,
-        .location = mlir_operation_get_location(op)
+        .location = op_location
     };
     return out;
 }
