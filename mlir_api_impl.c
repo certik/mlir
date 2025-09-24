@@ -622,22 +622,18 @@ MlirRegion *mlir_region_create(Arena *arena) {
 }
 
 // Operation properties
-void mlir_operation_set_type(MlirOperation *op, OpType type) {
-    op->op_type = type;
-}
-
 void mlir_operation_set_name(MlirOperation *op, const char *name, size_t name_len) {
     op->opname = (string){(char*)name, name_len};
-}
-
-void mlir_operation_set_attributes(MlirOperation *op, MlirAttribute **attrs, size_t count) {
-    op->attributes = attrs;
-    op->n_attributes = count;
 }
 
 void mlir_operation_set_result_types(MlirOperation *op, MlirType **types, size_t count) {
     op->result_types = types;
     op->n_result_types = count;
+}
+
+void mlir_operation_set_attributes(MlirOperation *op, MlirAttribute **attrs, size_t count) {
+    op->attributes = attrs;
+    op->n_attributes = count;
 }
 
 void mlir_operation_set_results(MlirOperation *op, MlirValue **results, size_t count) {
@@ -887,6 +883,10 @@ bool mlir_type_is_unknown(const MlirType *type) {
 
 bool mlir_type_is_opaque(const MlirType *type) {
     return type->kind == TYPE_KIND_OPAQUE;
+}
+
+void mlir_operation_set_type(MlirOperation *op, OpType type) {
+    op->op_type = type;
 }
 
 #ifdef __cplusplus
