@@ -1215,8 +1215,7 @@ MlirOperation* parse_operation(Parser *parser) {
         case OP_TYPE_ARITH_MULF:
         case OP_TYPE_ARITH_DIVI:
         case OP_TYPE_ARITH_DIVF:
-            parse_arith_binary(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_arith_binary_op(parser, &params);
             break;
         case OP_TYPE_ARITH_SELECT:
             parse_arith_select(parser, op);
@@ -1226,8 +1225,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parse_generic_attrs_and_result_type(parser, op);
             break;
         case OP_TYPE_TT_SPLAT:
-            parse_tt_splat(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_tt_splat_op(parser, &params);
             break;
         case OP_TYPE_TT_MAKE_RANGE:
             parse_tt_make_range(parser, op);
@@ -1250,7 +1248,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parse_generic_attrs_and_result_type(parser, op);
             break;
         case OP_TYPE_FUNC_CALL:
-            parse_func_call(parser, op);
+            parsed = parse_func_call_op(parser, &params);
             break;
         case OP_TYPE_AFFINE_FOR:
             parse_affine_for(parser, op);

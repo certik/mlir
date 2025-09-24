@@ -38,7 +38,7 @@ typedef struct OperationParserResult {
 void parse_affine_load(Parser *parser, MlirOperation *op);
 void parse_affine_for(Parser *parser, MlirOperation *op);
 
-void parse_arith_binary(Parser *parser, MlirOperation *op);
+OperationParserResult parse_arith_binary_op(Parser *parser, const OperationParserParams *params);
 void parse_arith_cmpi(Parser *parser, MlirOperation *op);
 OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserParams *params);
 void parse_arith_select(Parser *parser, MlirOperation *op);
@@ -46,7 +46,7 @@ void parse_arith_select(Parser *parser, MlirOperation *op);
 void parse_cf_br(Parser *parser, MlirOperation *op);
 void parse_cf_cond_br(Parser *parser, MlirOperation *op);
 
-void parse_func_call(Parser *parser, MlirOperation *op);
+OperationParserResult parse_func_call_op(Parser *parser, const OperationParserParams *params);
 void parse_func_func(Parser *parser, MlirOperation *op);
 
 OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserParams *params);
@@ -77,7 +77,7 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
 void parse_tt_get_program_id(Parser *parser, MlirOperation *op);
 void parse_tt_make_range(Parser *parser, MlirOperation *op);
 void parse_tt_reduce(Parser *parser, MlirOperation *op);
-void parse_tt_splat(Parser *parser, MlirOperation *op);
+OperationParserResult parse_tt_splat_op(Parser *parser, const OperationParserParams *params);
 void parse_tt_store(Parser *parser, MlirOperation *op);
 
 void parse_vector_print(Parser *parser, MlirOperation *op);
