@@ -13,6 +13,26 @@ Each parser is using Parser to parse a specific operation and return it in `op`.
 extern "C" {
 #endif
 
+typedef struct OperationParserParams {
+    Parser *parser;
+    Arena  *arena;
+    OpType  op_type;
+    string  opname; /* only non-empty for unregistered ops */
+
+    MlirValue **lhs_results;
+    size_t     n_lhs_results;
+
+    MlirLocation *unnumbered_loc_def;
+    int64_t       source_line_start;
+} OperationParserParams;
+
+typedef struct OperationParserResult {
+    MlirOperation *operation;
+    MlirValue    **results;
+    size_t         n_results;
+    MlirLocation  *location; /* may be NULL */
+} OperationParserResult;
+
 // Specific operation parsers
 
 void parse_affine_load(Parser *parser, MlirOperation *op);

@@ -61,26 +61,6 @@ typedef struct {
     bool capture_trailing_comments;
 } Parser;
 
-typedef struct OperationParserParams {
-    Parser *parser;
-    Arena  *arena;
-    OpType  op_type;
-    string  opname; /* only non-empty for unregistered ops */
-
-    MlirValue **lhs_results;
-    size_t     n_lhs_results;
-
-    MlirLocation *unnumbered_loc_def;
-    int64_t       source_line_start;
-} OperationParserParams;
-
-typedef struct OperationParserResult {
-    MlirOperation *operation;
-    MlirValue    **results;
-    size_t         n_results;
-    MlirLocation  *location; /* may be NULL */
-} OperationParserResult;
-
 
 
 // Symbol table functions
@@ -93,10 +73,6 @@ MlirValue* symbol_table_lookup(ScopedSymbolTable *st, string name);
 // Forward declarations for core IR nodes (opaque here)
 // Specialized parsing functions
 void parse_gpu_launch(Parser *parser, MlirOperation *op);
-
-OperationParserResult parse_arith_constant_op(const OperationParserParams *params);
-OperationParserResult parse_memref_load_op(const OperationParserParams *params);
-OperationParserResult parse_memref_store_op(const OperationParserParams *params);
 
 string tokentype_to_string(TokenType tt);
 void parser_init(Arena *arena, Parser *parser, string text);
