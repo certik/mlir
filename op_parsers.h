@@ -37,8 +37,6 @@ void parse_linalg_fill(Parser *parser, MlirOperation *op);
 
 OperationParserResult parse_memref_load_op(const OperationParserParams *params);
 OperationParserResult parse_memref_store_op(const OperationParserParams *params);
-void parse_memref_load_or_store(Parser *parser, MlirOperation *op);
-void parse_memref_store(Parser *parser, MlirOperation *op);
 
 void parse_return_operation(Parser *parser, MlirOperation *op);
 
