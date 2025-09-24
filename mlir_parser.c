@@ -1204,8 +1204,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_arith_constant_op(parser, &params);
             break;
         case OP_TYPE_ARITH_CMPI:
-            parse_arith_cmpi(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_arith_cmpi_op(parser, &params);
             break;
         case OP_TYPE_ARITH_ADDI:
         case OP_TYPE_ARITH_MULI:
@@ -1218,7 +1217,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_arith_binary_op(parser, &params);
             break;
         case OP_TYPE_ARITH_SELECT:
-            parse_arith_select(parser, op);
+            parsed = parse_arith_select_op(parser, &params);
             break;
         case OP_TYPE_TT_GET_PROGRAM_ID:
             parse_tt_get_program_id(parser, op);
@@ -1228,8 +1227,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_tt_splat_op(parser, &params);
             break;
         case OP_TYPE_TT_MAKE_RANGE:
-            parse_tt_make_range(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_tt_make_range_op(parser, &params);
             break;
         case OP_TYPE_TT_ADDPTR:
         case OP_TYPE_TT_LOAD:
@@ -1278,8 +1276,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parse_return_operation(parser, op);
             break;
         case OP_TYPE_TENSOR_EXTRACT:
-            parse_tensor_extract(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_tensor_extract_op(parser, &params);
             break;
         case OP_TYPE_CF_BR:
             parse_cf_br(parser, op);
@@ -1294,7 +1291,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parse_affine_load(parser, op);
             break;
         case OP_TYPE_INDEX_CONSTANT:
-            parse_index_constant(parser, op);
+            parsed = parse_index_constant_op(parser, &params);
             break;
         case OP_TYPE_TENSOR_SPLAT:
             parse_tensor_splat(parser, op);
