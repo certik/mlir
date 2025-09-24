@@ -1066,7 +1066,6 @@ MlirOperation* parse_operation(Parser *parser) {
     int64_t recorded_source_line = -1;
     MlirValue **lhs_results = NULL;
     size_t n_lhs_results = 0;
-    MlirValue **new_results_from_parser = NULL;
     size_t n_new_results_from_parser = 0;
 
     // Skip empty lines and attributes
@@ -1168,7 +1167,6 @@ MlirOperation* parse_operation(Parser *parser) {
         mlir_operation_set_name(op, opname.str, opname.size);
     }
     OperationParserParams params = {
-        .parser = parser,
         .arena = parser->arena,
         .op_type = op_type,
         .opname = opname,
@@ -1205,7 +1203,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parse_generic_attrs_and_result_type(parser, op);
             break;
         case OP_TYPE_ARITH_CONSTANT:
-            parsed = parse_arith_constant_op(&params);
+            parsed = parse_arith_constant_op(parser, &params);
             break;
         case OP_TYPE_ARITH_CMPI:
             parse_arith_cmpi(parser, op);
@@ -1261,10 +1259,10 @@ MlirOperation* parse_operation(Parser *parser) {
             parse_generic_attrs_and_result_type(parser, op);
             break;
         case OP_TYPE_MEMREF_LOAD:
-            parsed = parse_memref_load_op(&params);
+            parsed = parse_memref_load_op(parser, &params);
             break;
         case OP_TYPE_MEMREF_STORE:
-            parsed = parse_memref_store_op(&params);
+            parsed = parse_memref_store_op(parser, &params);
             break;
         case OP_TYPE_VECTOR_PRINT:
             parse_vector_print(parser, op);
@@ -1318,7 +1316,6 @@ MlirOperation* parse_operation(Parser *parser) {
     }
     if (parsed.operation != NULL) {
         op = parsed.operation;
-        new_results_from_parser = parsed.results;
         n_new_results_from_parser = parsed.n_results;
         if (parsed.location) {
             recorded_location = parsed.location;
