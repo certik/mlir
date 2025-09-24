@@ -365,6 +365,7 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
     MlirValue *result_value = (n_results > 0) ? results[0] : NULL;
 
     MlirLocation *op_location = NULL;
+    bool has_explicit_type = false;
 
     if (parser_peek(parser, TK_INTEGER)) {
         string value_str = parser_token_str(parser);
@@ -426,7 +427,7 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
         }
     }
 
-    if (parser_peek(parser, TK_COLON)) {
+    if (!has_explicit_type && parser_peek(parser, TK_COLON)) {
         parser_expect(parser, TK_COLON);
         string type_str = str_lit("");
         if (parse_type_string(parser, &type_str)) {
@@ -440,6 +441,7 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
                 result_value = mlir_value_create(parser->arena, OP_RESULT);
             }
             mlir_value_set_type(result_value, type);
+            has_explicit_type = true;
         }
     }
 
