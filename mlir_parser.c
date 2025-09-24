@@ -1357,6 +1357,9 @@ MlirOperation* parse_operation(Parser *parser) {
             }
             mlir_value_set_def(result_value, op);
             symbol_table_add_value(parser->arena, &parser->symbol_table, mlir_value_get_register_name(result_value), result_value);
+        } else if (!result_value && n_new_results_from_parser > 0) {
+            // Operation produces results but no SSA name was provided - this is invalid MLIR
+            parser_error(parser, str_lit("Operation produces results but no SSA name provided on left-hand side"), parser->first, parser->last);
         }
     }
 
