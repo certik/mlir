@@ -181,7 +181,17 @@ void mlir_op_add_operand(Arena *arena, MlirOperation *op, MlirValue *operand);
 void mlir_op_add_result(Arena *arena, MlirOperation *op, MlirValue *result);
 
 // Property setters
+void mlir_operation_set_type(MlirOperation *op, OpType type);
+void mlir_operation_set_name(MlirOperation *op, const char *name, size_t name_len);
+void mlir_operation_set_operands(MlirOperation *op, MlirValue **operands, size_t count);
+void mlir_operation_set_results(MlirOperation *op, MlirValue **results, size_t count);
+void mlir_operation_set_result_types(MlirOperation *op, MlirType **types, size_t count);
+void mlir_operation_set_attributes(MlirOperation *op, MlirAttribute **attrs, size_t count);
 void mlir_operation_append_attribute(Arena *arena, MlirOperation *op, MlirAttribute *attr);
+void mlir_operation_set_location(MlirOperation *op, MlirLocation *loc);
+void mlir_operation_set_trailing_comment(MlirOperation *op, const char *comment, size_t comment_len);
+void mlir_operation_set_source_line_start(MlirOperation *op, int64_t line_start);
+void mlir_operation_set_unnumbered_loc_def(MlirOperation *op, MlirLocation *loc);
 
 // Accessors
 OpType mlir_operation_get_type(const MlirOperation *op);
@@ -197,18 +207,6 @@ size_t mlir_operation_num_results(const MlirOperation *op);
 MlirValue *mlir_operation_get_result(const MlirOperation *op, size_t idx);
 size_t mlir_operation_num_result_types(const MlirOperation *op);
 MlirType *mlir_operation_get_result_type(const MlirOperation *op, size_t idx);
-void mlir_operation_set_type(MlirOperation *op, OpType type);
-void mlir_operation_set_name(MlirOperation *op, const char *name, size_t name_len);
-void mlir_operation_set_operands(MlirOperation *op, MlirValue **operands, size_t count);
-void mlir_operation_set_results(MlirOperation *op, MlirValue **results, size_t count);
-void mlir_operation_set_result_types(MlirOperation *op, MlirType **types, size_t count);
-void mlir_operation_set_attributes(MlirOperation *op, MlirAttribute **attrs, size_t count);
-void mlir_operation_append_attribute(Arena *arena, MlirOperation *op, MlirAttribute *attr);
-void mlir_operation_set_location(MlirOperation *op, MlirLocation *loc);
-void mlir_operation_set_trailing_comment(MlirOperation *op, const char *comment, size_t comment_len);
-void mlir_operation_set_source_line_start(MlirOperation *op, int64_t line_start);
-void mlir_operation_set_unnumbered_loc_def(MlirOperation *op, MlirLocation *loc);
-
 size_t mlir_operation_num_attributes(const MlirOperation *op);
 MlirAttribute *mlir_operation_get_attribute(const MlirOperation *op, size_t idx);
 size_t mlir_operation_num_regions(const MlirOperation *op);
