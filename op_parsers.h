@@ -49,7 +49,7 @@ void parse_cf_cond_br(Parser *parser, MlirOperation *op);
 void parse_func_call(Parser *parser, MlirOperation *op);
 void parse_func_func(Parser *parser, MlirOperation *op);
 
-void parse_gpu_launch(Parser *parser, MlirOperation *op);
+OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserParams *params);
 
 void parse_index_constant(Parser *parser, MlirOperation *op);
 
@@ -73,7 +73,7 @@ void parse_tensor_splat(Parser *parser, MlirOperation *op);
 
 void parse_tt_addptr_load_store(Parser *parser, MlirOperation *op);
 void parse_tt_call(Parser *parser, MlirOperation *op);
-void parse_tt_func(Parser *parser, MlirOperation *op);
+OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserParams *params);
 void parse_tt_get_program_id(Parser *parser, MlirOperation *op);
 void parse_tt_make_range(Parser *parser, MlirOperation *op);
 void parse_tt_reduce(Parser *parser, MlirOperation *op);

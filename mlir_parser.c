@@ -1183,12 +1183,10 @@ MlirOperation* parse_operation(Parser *parser) {
     // First we handle specific opnames with special parsing rules
     switch (op_type) {
         case OP_TYPE_TT_FUNC:
-            parse_tt_func(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_tt_func_op(parser, &params);
             break;
         case OP_TYPE_GPU_LAUNCH:
-            parse_gpu_launch(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_gpu_launch_op(parser, &params);
             break;
         case OP_TYPE_SCF_IF:
             parse_scf_if(parser, op);

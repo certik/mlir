@@ -2090,15 +2090,20 @@ void parse_generic_operation(Parser *parser, MlirOperation *op) {
     }
 }
 
-void parse_tt_func(Parser *parser, MlirOperation *op) {
-    // Record source line start
-    {
-        int64_t pos = (int64_t)parser->first;
-        while (pos > 0) { unsigned char c = parser->input[pos-1]; if (c=='\n'||c=='\r') break; pos--; }
-        mlir_operation_set_source_line_start(op, pos);
-    }
+OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserParams *params) {
+    // Record source line start - will be set on the operation created at the end
     // Parse tt.func public @function_name(%arg0: type, %arg1: type, ...)
 
+    // Initialize variables that will be used at the end
+    MlirLocation *op_location = NULL;
+    MlirRegion *func_region = NULL;
+    MlirValue **func_operands = NULL;
+    size_t n_func_operands = 0;
+    
+    // Vector to collect function arguments as we parse them
+    VecValue func_args;
+    VecValue_reserve(parser->arena, &func_args, 8);
+    
     // Capture visibility keyword if present
     string visibility = str_lit("private");  // default
     if (parser_peek(parser, TK_NAME) && (str_eq(parser_token_str(parser), str_lit("public")) || str_eq(parser_token_str(parser), str_lit("private")))) {
@@ -2107,7 +2112,6 @@ void parse_tt_func(Parser *parser, MlirOperation *op) {
     }
     
     MlirAttribute **attrs = NULL; size_t n_attrs = 0, cap_attrs = 0;
-    attr_list_init_from_op(parser, op, &attrs, &n_attrs, &cap_attrs);
     append_attr(parser, &attrs, &n_attrs, &cap_attrs, create_string_attr(parser, str_lit("visibility"), visibility));
 
     // Parse @function_name
@@ -2132,9 +2136,7 @@ void parse_tt_func(Parser *parser, MlirOperation *op) {
     if (parser_peek(parser, TK_LPAREN)) {
         parser_expect(parser, TK_LPAREN);
 
-        // Use a vector to collect arguments as we parse them
-        VecValue func_args;
-        VecValue_reserve(parser->arena, &func_args, 8);
+        // Arguments will be collected in the func_args vector
 
         // Accumulate a textual params signature when args are type-only (declarations)
         string params_sig = str_lit("");
@@ -2342,7 +2344,11 @@ void parse_tt_func(Parser *parser, MlirOperation *op) {
             }
         }
 
-        set_op_operands(op, func_args.data, func_args.size);
+        // Store operands for later assignment to operation
+        if (func_args.size > 0) {
+            func_operands = func_args.data;
+            n_func_operands = func_args.size;
+        }
 
         if (parser_peek(parser, TK_RPAREN)) {
             parser_expect(parser, TK_RPAREN);
@@ -2393,9 +2399,8 @@ void parse_tt_func(Parser *parser, MlirOperation *op) {
         symbol_table_push_scope(parser->arena, &parser->symbol_table);
 
         // Register function arguments in the new scope
-        size_t num_operands = mlir_operation_num_operands(op);
-        for (size_t i = 0; i < num_operands; i++) {
-            MlirValue *operand = mlir_operation_get_operand(op, i);
+        for (size_t i = 0; i < func_args.size; i++) {
+            MlirValue *operand = func_args.data[i];
             if (!operand) continue;
             string name = mlir_value_get_register_name(operand);
             if (name.size > 0) {
@@ -2421,22 +2426,78 @@ void parse_tt_func(Parser *parser, MlirOperation *op) {
             mlir_region_add_block(parser->arena, region, blocks.data[i]);
         }
 
-        // Assign region to operation
-        mlir_op_add_region(parser->arena, op, region);
+        // Store region for later assignment to operation
+        func_region = region;
 
         if (parser_peek(parser, TK_NAME)) {
             if (str_eq(parser_token_str(parser), str_lit("loc"))) {
-                mlir_operation_set_location(op, parse_loc(parser));
+                op_location = parse_loc(parser);
             }
         }
     } else {
         // Declaration: no body. Optionally consume trailing loc
         if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-            mlir_operation_set_location(op, parse_loc(parser));
+            op_location = parse_loc(parser);
         }
     }
 
-    if (n_attrs > 0) set_op_attributes(op, attrs, n_attrs);
+    // Parse any additional attributes and result types using helper functions
+    parse_angle_brace_attributes(parser, &attrs, &n_attrs, &cap_attrs);
+    parse_brace_attributes(parser, &attrs, &n_attrs, &cap_attrs);
+
+    MlirType **result_types = NULL;
+    size_t n_result_types = 0;
+    parse_result_types(parser, &result_types, &n_result_types, &attrs, &n_attrs, &cap_attrs, params->op_type, NULL);
+
+    // Parse optional location if not already set
+    if (!op_location) {
+        op_location = parse_optional_location(parser);
+        if (!op_location) {
+            op_location = params->unnumbered_loc_def;
+        }
+    }
+
+    // Create the operation at the end
+    MlirOperation *op = mlir_op_create(params->arena, params->op_type, params->opname, 
+                                      attrs, n_attrs, 
+                                      result_types, n_result_types,
+                                      params->lhs_results, params->n_lhs_results, 
+                                      func_operands, n_func_operands,
+                                      NULL, 0, 
+                                      op_location, params->unnumbered_loc_def, 
+                                      str_lit(""), params->source_line_start);
+
+    // Add the region if it exists
+    if (func_region) {
+        mlir_op_add_region(params->arena, op, func_region);
+    }
+
+    // Create results from the operation's result types
+    MlirValue **results = NULL;
+    size_t n_results = 0;
+    
+    if (n_result_types > 0) {
+        results = arena_alloc_array(params->arena, MlirValue*, n_result_types);
+        for (size_t i = 0; i < n_result_types; i++) {
+            results[i] = mlir_value_create(params->arena, OP_RESULT);
+            mlir_value_set_def(results[i], op);
+            mlir_value_set_result_index(results[i], (uint32_t)i);
+            mlir_value_set_type(results[i], result_types[i]);
+            if (params->lhs_results && i < params->n_lhs_results) {
+                string reg_name = mlir_value_get_register_name(params->lhs_results[i]);
+                mlir_value_set_register_name(results[i], string_data_or_null(reg_name), reg_name.size);
+            }
+        }
+        mlir_operation_set_results(op, results, n_results = n_result_types);
+    }
+
+    OperationParserResult out = {
+        .operation = op,
+        .results = results,
+        .n_results = n_results,
+        .location = op_location
+    };
+    return out;
 }
 
 void parse_func_func(Parser *parser, MlirOperation *op) {
@@ -3074,7 +3135,7 @@ void parse_affine_for(Parser *parser, MlirOperation *op) {
     mlir_op_add_region(parser->arena, op, region);
 }
 
-void parse_gpu_launch(Parser *parser, MlirOperation *op) {
+OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserParams *params) {
     // Parse gpu.launch blocks(%arg2, %arg3, %arg4) in (...) threads(%arg5, %arg6, %arg7) in (...) {
 
     VecValue launch_args;
@@ -3145,6 +3206,24 @@ void parse_gpu_launch(Parser *parser, MlirOperation *op) {
         }
     }
 
+    // Parse any attributes and result types using helper functions
+    MlirAttribute **attributes = NULL;
+    size_t n_attributes = 0;
+    size_t attributes_capacity = 0;
+    
+    parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+    parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+
+    MlirType **result_types = NULL;
+    size_t n_result_types = 0;
+    parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
+
+    // Parse optional location
+    MlirLocation *op_location = parse_optional_location(parser);
+    if (!op_location) {
+        op_location = params->unnumbered_loc_def;
+    }
+
     // Skip until opening brace
     while (!parser_peek(parser, TK_LBRACE_END) && !parser_peek(parser, TK_EOF)) {
         parser_next_token(parser);
@@ -3179,7 +3258,45 @@ void parse_gpu_launch(Parser *parser, MlirOperation *op) {
 
     MlirRegion *gpu_region = mlir_region_create(parser->arena);
     mlir_region_add_block(parser->arena, gpu_region, gpu_block);
+
+    // Create the operation at the end
+    MlirOperation *op = mlir_op_create(params->arena, params->op_type, params->opname, 
+                                      attributes, n_attributes,
+                                      result_types, n_result_types,
+                                      params->lhs_results, params->n_lhs_results, 
+                                      NULL, 0, 
+                                      NULL, 0,
+                                      op_location, params->unnumbered_loc_def, 
+                                      str_lit(""), params->source_line_start);
+
     mlir_op_add_region(parser->arena, op, gpu_region);
+
+    // Create results from the operation's result types
+    MlirValue **results = NULL;
+    size_t n_results = 0;
+    
+    if (n_result_types > 0) {
+        results = arena_alloc_array(params->arena, MlirValue*, n_result_types);
+        for (size_t i = 0; i < n_result_types; i++) {
+            results[i] = mlir_value_create(params->arena, OP_RESULT);
+            mlir_value_set_def(results[i], op);
+            mlir_value_set_result_index(results[i], (uint32_t)i);
+            mlir_value_set_type(results[i], result_types[i]);
+            if (params->lhs_results && i < params->n_lhs_results) {
+                string reg_name = mlir_value_get_register_name(params->lhs_results[i]);
+                mlir_value_set_register_name(results[i], string_data_or_null(reg_name), reg_name.size);
+            }
+        }
+        mlir_operation_set_results(op, results, n_results = n_result_types);
+    }
+
+    OperationParserResult out = {
+        .operation = op,
+        .results = results,
+        .n_results = n_results,
+        .location = op_location
+    };
+    return out;
 }
 
 void parse_arith_cmpi(Parser *parser, MlirOperation *op) {
