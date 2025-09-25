@@ -63,7 +63,12 @@ void parse_return_operation(Parser *parser, MlirOperation *op);
 OperationParserResult parse_scf_if_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_scf_while_op(Parser *parser, const OperationParserParams *params);
-void parse_scf_yield(Parser *parser, MlirOperation *op);
+OperationParserResult parse_scf_yield_op(Parser *parser, const OperationParserParams *params);
+OperationParserResult parse_tt_load_op(Parser *parser, const OperationParserParams *params);
+OperationParserResult parse_tt_store_op(Parser *parser, const OperationParserParams *params);
+OperationParserResult parse_func_func_op(Parser *parser, const OperationParserParams *params);
+OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserParams *params);
+OperationParserResult parse_return_op(Parser *parser, const OperationParserParams *params);
 
 OperationParserResult parse_std_constant_op(Parser *parser, const OperationParserParams *params);
 

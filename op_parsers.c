@@ -2221,6 +2221,9 @@ OperationParserResult parse_affine_load_op(Parser *parser, const OperationParser
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
+    parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+    parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+
     MlirType **result_types = NULL;
     size_t n_result_types = 0;
 
@@ -4564,6 +4567,457 @@ OperationParserResult parse_arith_cmpi_op(Parser *parser, const OperationParserP
         .results = results,
         .n_results = n_results,
         .location = op_location
+    };
+    return out;
+}
+
+
+OperationParserResult parse_scf_yield_op(Parser *parser, const OperationParserParams *params) {
+    VecValue operands;
+    VecValue_reserve(parser->arena, &operands, 2);
+
+    while (parser_peek(parser, TK_REGISTER)) {
+        string reg_str = parser_token_str(parser);
+        parser_expect(parser, TK_REGISTER);
+        MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        if (!operand) {
+            parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
+            OperationParserResult empty = {0};
+            return empty;
+        }
+        VecValue_push_back(parser->arena, &operands, operand);
+        if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
+        else break;
+    }
+
+    // Handle optional type information after all operands
+    if (parser_peek(parser, TK_COLON)) {
+        parser_expect(parser, TK_COLON);
+        // Parse type list until we hit loc() or end
+        while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE)) {
+            if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
+                break;
+            }
+            parser_next_token(parser);
+        }
+    }
+
+    MlirLocation *op_location = parse_optional_location(parser);
+    if (!op_location) op_location = params->unnumbered_loc_def;
+
+    MlirOperation *op = mlir_op_create(
+        params->arena,
+        params->op_type,
+        str_lit(""),
+        NULL, 0,
+        NULL, 0,
+        params->lhs_results,
+        params->n_lhs_results,
+        operands.data,
+        operands.size,
+        NULL, 0,
+        op_location,
+        params->unnumbered_loc_def,
+        str_lit(""),
+        params->source_line_start);
+
+    OperationParserResult out = {
+        .operation = op,
+        .results = NULL,
+        .n_results = 0,
+        .location = op_location
+    };
+    return out;
+}
+
+OperationParserResult parse_return_op(Parser *parser, const OperationParserParams *params) {
+    VecValue operands;
+    VecValue_reserve(parser->arena, &operands, 2);
+
+    // Handle optional parentheses
+    bool has_parens = false;
+    if (parser_peek(parser, TK_LPAREN)) {
+        parser_expect(parser, TK_LPAREN);
+        has_parens = true;
+    }
+
+    while (parser_peek(parser, TK_REGISTER)) {
+        string reg_str = parser_token_str(parser);
+        parser_expect(parser, TK_REGISTER);
+        MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        if (!operand) {
+            parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
+            OperationParserResult empty = {0};
+            return empty;
+        }
+        VecValue_push_back(parser->arena, &operands, operand);
+        if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
+        else break;
+    }
+
+    if (has_parens) {
+        parser_expect(parser, TK_RPAREN);
+    }
+
+    // Handle optional type information
+    if (parser_peek(parser, TK_COLON)) {
+        parser_expect(parser, TK_COLON);
+        // Skip type information
+        while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_RBRACE)) {
+            parser_next_token(parser);
+        }
+    }
+
+    MlirLocation *op_location = parse_optional_location(parser);
+    if (!op_location) op_location = params->unnumbered_loc_def;
+
+    bool keep_operands = params->op_type != OP_TYPE_STD_RETURN;
+
+    MlirOperation *op = mlir_op_create(
+        params->arena,
+        params->op_type,
+        str_lit(""),
+        NULL, 0,
+        NULL, 0,
+        params->lhs_results,
+        params->n_lhs_results,
+        (keep_operands && operands.size > 0) ? operands.data : NULL,
+        keep_operands ? operands.size : 0,
+        NULL, 0,
+        op_location,
+        params->unnumbered_loc_def,
+        str_lit(""),
+        params->source_line_start);
+
+    OperationParserResult out = {
+        .operation = op,
+        .results = NULL,
+        .n_results = 0,
+        .location = op_location
+    };
+    return out;
+}
+
+
+OperationParserResult parse_tt_load_op(Parser *parser, const OperationParserParams *params) {
+    VecValue operands;
+    VecValue_reserve(parser->arena, &operands, 3);
+
+    while (parser_peek(parser, TK_REGISTER)) {
+        string reg_str = parser_token_str(parser);
+        parser_expect(parser, TK_REGISTER);
+        consume_optional_hash_selector(parser);
+        MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        if (!operand) {
+            parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
+            OperationParserResult empty = {0};
+            return empty;
+        }
+        VecValue_push_back(parser->arena, &operands, operand);
+        if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
+        else break;
+    }
+
+    MlirAttribute **attributes = NULL;
+    size_t n_attributes = 0;
+    size_t attributes_capacity = 0;
+
+    parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+    parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+
+    MlirType **result_types = NULL;
+    size_t n_result_types = 0;
+
+    while (parser_peek(parser, TK_WHITESPACE)) parser_expect(parser, TK_WHITESPACE);
+
+    if (parser_peek(parser, TK_COLON)) {
+        parser_expect(parser, TK_COLON);
+        while (parser_peek(parser, TK_WHITESPACE)) parser_expect(parser, TK_WHITESPACE);
+
+        string pointer_sig = str_lit("");
+        if (parse_type_string(parser, &pointer_sig)) {
+            string result_sig = pointer_sig;
+
+            while (parser_peek(parser, TK_WHITESPACE)) parser_expect(parser, TK_WHITESPACE);
+            if (parser_peek(parser, TK_ARROW)) {
+                parser_expect(parser, TK_ARROW);
+                while (parser_peek(parser, TK_WHITESPACE)) parser_expect(parser, TK_WHITESPACE);
+                string explicit_result = str_lit("");
+                if (parse_type_string(parser, &explicit_result)) {
+                    result_sig = explicit_result;
+                }
+            } else {
+                size_t pos = (size_t)-1;
+                const size_t needle_len = 8; // strlen("!tt.ptr<")
+                for (size_t i = 0; i + needle_len <= pointer_sig.size; i++) {
+                    if (pointer_sig.str[i] == '!' &&
+                        pointer_sig.str[i + 1] == 't' &&
+                        pointer_sig.str[i + 2] == 't' &&
+                        pointer_sig.str[i + 3] == '.' &&
+                        pointer_sig.str[i + 4] == 'p' &&
+                        pointer_sig.str[i + 5] == 't' &&
+                        pointer_sig.str[i + 6] == 'r' &&
+                        pointer_sig.str[i + 7] == '<') {
+                        pos = i;
+                        break;
+                    }
+                }
+
+                if (pos != (size_t)-1) {
+                    size_t start = pos + needle_len;
+                    size_t end = start;
+                    while (end < pointer_sig.size && pointer_sig.str[end] != '>' && pointer_sig.str[end] != ',') end++;
+                    string elem = str_substr(pointer_sig, start, end - start);
+
+                    size_t close = end;
+                    while (close < pointer_sig.size && pointer_sig.str[close] != '>') close++;
+                    if (close < pointer_sig.size) close++;
+
+                    string before = str_substr(pointer_sig, 0, pos);
+                    string after = str_substr(pointer_sig, close, pointer_sig.size - close);
+
+                    string val_sig = before;
+                    val_sig = str_concat(parser->arena, val_sig, elem.size > 0 ? elem : str_lit("f32"));
+                    val_sig = str_concat(parser->arena, val_sig, after);
+                    result_sig = val_sig;
+                }
+            }
+
+            if (result_sig.size > 0) {
+                result_types = arena_alloc_array(params->arena, MlirType*, 1);
+                result_types[0] = mlir_type_create_from_string(params->arena, result_sig);
+                n_result_types = 1;
+            }
+        }
+
+        while (parser_peek(parser, TK_WHITESPACE)) parser_expect(parser, TK_WHITESPACE);
+        if (parser_peek(parser, TK_COMMA)) {
+            do {
+                parser_next_token(parser);
+                if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) break;
+            } while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE));
+        }
+    }
+
+    while (parser_peek(parser, TK_WHITESPACE)) parser_expect(parser, TK_WHITESPACE);
+    parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+    parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+
+    MlirLocation *op_location = parse_optional_location(parser);
+    if (!op_location) op_location = params->unnumbered_loc_def;
+
+    MlirOperation *op = mlir_op_create(
+        params->arena,
+        params->op_type,
+        str_lit(""),
+        attributes,
+        n_attributes,
+        result_types,
+        n_result_types,
+        params->lhs_results,
+        params->n_lhs_results,
+        operands.data,
+        operands.size,
+        NULL, 0,
+        op_location,
+        params->unnumbered_loc_def,
+        str_lit(""),
+        params->source_line_start);
+
+    MlirValue **results = NULL;
+    size_t n_results = 0;
+    if (n_result_types > 0) {
+        results = arena_alloc_array(params->arena, MlirValue*, n_result_types);
+        for (size_t i = 0; i < n_result_types; i++) {
+            results[i] = mlir_value_create(params->arena, OP_RESULT);
+            mlir_value_set_def(results[i], op);
+            mlir_value_set_result_index(results[i], (uint32_t)i);
+            mlir_value_set_type(results[i], result_types[i]);
+            if (params->lhs_results && i < params->n_lhs_results) {
+                string reg_name = mlir_value_get_register_name(params->lhs_results[i]);
+                mlir_value_set_register_name(results[i], string_data_or_null(reg_name), reg_name.size);
+            } else {
+                mlir_value_set_register_name(results[i], NULL, 0);
+            }
+        }
+        mlir_operation_set_results(op, results, n_results = n_result_types);
+    }
+
+    OperationParserResult out = {
+        .operation = op,
+        .results = results,
+        .n_results = n_results,
+        .location = op_location
+    };
+    return out;
+}
+
+OperationParserResult parse_tt_store_op(Parser *parser, const OperationParserParams *params) {
+    VecValue operands;
+    VecValue_reserve(parser->arena, &operands, 3);
+    
+    // Parse operands: pointer, value, mask
+    while (parser_peek(parser, TK_REGISTER)) {
+        string reg_str = parser_token_str(parser);
+        parser_expect(parser, TK_REGISTER);
+        consume_optional_hash_selector(parser);
+        MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        if (!operand) {
+            parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
+            OperationParserResult empty = {0};
+            return empty;
+        }
+        VecValue_push_back(params->arena, &operands, operand);
+        if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA); 
+        else break;
+    }
+
+    MlirAttribute **attributes = NULL;
+    size_t n_attributes = 0;
+    size_t attributes_capacity = 0;
+
+    // Custom attribute parsing for tt.store to handle ellipsis and create proper integer attributes
+    if (parser_peek(parser, TK_LBRACE)) {
+        parser_expect(parser, TK_LBRACE);
+        while (!parser_peek(parser, TK_RBRACE)) {
+            if (parser_peek(parser, TK_NAME)) {
+                string attr_name = parser_token_str(parser);
+                parser_expect(parser, TK_NAME);
+                parser_expect(parser, TK_EQUAL);
+                
+                if (parser_peek(parser, TK_DOT)) {
+                    // Handle "..." (ellipsis) tokens - convert to integer 1
+                    parser_expect(parser, TK_DOT);
+                    parser_expect(parser, TK_DOT);
+                    parser_expect(parser, TK_DOT);
+                    
+                    append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
+                                create_integer_attr(parser, attr_name, 1));
+                } else if (parser_peek(parser, TK_INTEGER)) {
+                    // Handle regular integer values
+                    string ival = parser_token_str(parser);
+                    char *buffer = arena_alloc_array(parser->arena, char, ival.size + 1);
+                    memcpy(buffer, ival.str, ival.size);
+                    buffer[ival.size] = '\0';
+                    int64_t int_val = strtoll(buffer, NULL, 10);
+                    parser_expect(parser, TK_INTEGER);
+                    
+                    // Skip optional type annotation (:i32)
+                    if (parser_peek(parser, TK_COLON)) {
+                        parser_expect(parser, TK_COLON);
+                        parser_expect(parser, TK_NAME);
+                    }
+                    
+                    append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
+                                create_integer_attr(parser, attr_name, int_val));
+                } else {
+                    // Skip unknown tokens
+                    parser_next_token(parser);
+                }
+            }
+            if (parser_peek(parser, TK_COMMA)) {
+                parser_expect(parser, TK_COMMA);
+            }
+        }
+        parser_expect(parser, TK_RBRACE);
+    }
+    parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+
+    // Handle optional type information
+    if (parser_peek(parser, TK_COLON)) {
+        parser_expect(parser, TK_COLON);
+        // Skip type information for store operations
+        while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE)) {
+            if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
+                break;
+            }
+            parser_next_token(parser);
+        }
+    }
+
+    MlirLocation *op_location = parse_optional_location(parser);
+    if (!op_location) op_location = params->unnumbered_loc_def;
+
+    MlirOperation *op = mlir_op_create(
+        params->arena,
+        params->op_type,
+        str_lit(""),
+        attributes,
+        n_attributes,
+        NULL, 0,
+        params->lhs_results,
+        params->n_lhs_results,
+        operands.data,
+        operands.size,
+        NULL, 0,
+        op_location,
+        params->unnumbered_loc_def,
+        str_lit(""),
+        params->source_line_start);
+
+    OperationParserResult out = {
+        .operation = op,
+        .results = NULL,
+        .n_results = 0,
+        .location = op_location
+    };
+    return out;
+}
+
+OperationParserResult parse_func_func_op(Parser *parser, const OperationParserParams *params) {
+    // For now, create a minimal implementation that delegates to the old parser
+    // This is a complex function that would need significant work to properly migrate
+    MlirOperation *op = mlir_op_create(
+        params->arena,
+        params->op_type,
+        str_lit(""),
+        NULL, 0,
+        NULL, 0,
+        params->lhs_results,
+        params->n_lhs_results,
+        NULL, 0,
+        NULL, 0,
+        params->unnumbered_loc_def,
+        params->unnumbered_loc_def,
+        str_lit(""),
+        params->source_line_start);
+    parse_func_func(parser, op);
+    parse_generic_attrs_and_result_type(parser, op);
+
+    OperationParserResult out = {
+        .operation = op,
+        .results = NULL,
+        .n_results = 0,
+        .location = params->unnumbered_loc_def
+    };
+    return out;
+}
+
+OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserParams *params) {
+    // For now, create a minimal implementation that delegates to the old parser
+    // This is a complex function that would need significant work to properly migrate
+    MlirOperation *op = mlir_op_create(
+        params->arena,
+        params->op_type,
+        str_lit(""),
+        NULL, 0,
+        NULL, 0,
+        params->lhs_results,
+        params->n_lhs_results,
+        NULL, 0,
+        NULL, 0,
+        params->unnumbered_loc_def,
+        params->unnumbered_loc_def,
+        str_lit(""),
+        params->source_line_start);
+    parse_affine_for(parser, op);
+    parse_generic_attrs_and_result_type(parser, op);
+
+    OperationParserResult out = {
+        .operation = op,
+        .results = NULL,
+        .n_results = 0,
+        .location = params->unnumbered_loc_def
     };
     return out;
 }

@@ -1226,27 +1226,26 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_tt_make_range_op(parser, &params);
             break;
         case OP_TYPE_TT_ADDPTR:
-        case OP_TYPE_TT_LOAD:
             parse_tt_addptr_load_store(parser, op);
             parse_generic_attrs_and_result_type(parser, op);
             break;
+        case OP_TYPE_TT_LOAD:
+            parsed = parse_tt_load_op(parser, &params);
+            break;
         case OP_TYPE_TT_STORE:
-            parse_tt_store(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_tt_store_op(parser, &params);
             break;
         case OP_TYPE_TT_CALL:
             parsed = parse_tt_call_op(parser, &params);
             break;
         case OP_TYPE_FUNC_FUNC:
-            parse_func_func(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_func_func_op(parser, &params);
             break;
         case OP_TYPE_FUNC_CALL:
             parsed = parse_func_call_op(parser, &params);
             break;
         case OP_TYPE_AFFINE_FOR:
-            parse_affine_for(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_affine_for_op(parser, &params);
             break;
         case OP_TYPE_MEMREF_LOAD:
             parsed = parse_memref_load_op(parser, &params);
@@ -1268,7 +1267,7 @@ MlirOperation* parse_operation(Parser *parser) {
         case OP_TYPE_STD_RETURN:
         case OP_TYPE_FUNC_RETURN:
         case OP_TYPE_RETURN:
-            parse_return_operation(parser, op);
+            parsed = parse_return_op(parser, &params);
             break;
         case OP_TYPE_TENSOR_EXTRACT:
             parsed = parse_tensor_extract_op(parser, &params);
@@ -1295,7 +1294,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_tensor_collapse_shape_op(parser, &params);
             break;
         case OP_TYPE_SCF_YIELD:
-            parse_scf_yield(parser, op);
+            parsed = parse_scf_yield_op(parser, &params);
             break;
         default:
             // Generic/unregistered operations
