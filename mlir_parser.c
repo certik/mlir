@@ -1043,23 +1043,6 @@ MlirLocation* parse_loc(Parser *parser) {
 
 
 MlirOperation* parse_operation(Parser *parser) {
-    MlirOperation *op = mlir_op_create(
-        parser->arena,
-        OP_TYPE_UNREGISTERED,
-        str_lit(""),
-        NULL, 0,
-        NULL, 0,
-        NULL, 0,
-        NULL, 0,
-        NULL, 0,
-        NULL,
-        NULL,
-        str_lit(""),
-        -1);
-    mlir_operation_set_trailing_comment(op, "", 0);
-    mlir_operation_set_source_line_start(op, -1);
-    mlir_operation_set_location(op, NULL);
-    mlir_operation_set_unnumbered_loc_def(op, NULL);
 
     MlirLocation *recorded_location = NULL;
     MlirLocation *recorded_unnumbered_loc = NULL;
@@ -1108,7 +1091,6 @@ MlirOperation* parse_operation(Parser *parser) {
             if (c == '\n' || c == '\r') break;
             pos--;
         }
-        mlir_operation_set_source_line_start(op, pos);
         recorded_source_line = pos;
     }
 
@@ -1162,10 +1144,6 @@ MlirOperation* parse_operation(Parser *parser) {
 
     // Set op_type based on operation name
     OpType op_type = op_string_to_type(opname);
-    mlir_operation_set_type(op, op_type);
-    if (op_type == OP_TYPE_UNREGISTERED) {
-        mlir_operation_set_name(op, opname.str, opname.size);
-    }
     OperationParserParams params = {
         .arena = parser->arena,
         .op_type = op_type,
@@ -1300,18 +1278,18 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_generic_op(parser, &params);
             break;
     }
-    if (parsed.operation != NULL) {
-        op = parsed.operation;
-        n_new_results_from_parser = parsed.n_results;
-        if (parsed.location) {
-            recorded_location = parsed.location;
-        }
-        mlir_operation_set_source_line_start(op, recorded_source_line);
-        recorded_unnumbered_loc = parser->unnumbered_loc_def;
-        mlir_operation_set_unnumbered_loc_def(op, recorded_unnumbered_loc);
-        if (recorded_location) {
-            mlir_operation_set_location(op, recorded_location);
-        }
+
+    assert(parsed.operation != NULL);
+    MlirOperation *op = parsed.operation;
+    n_new_results_from_parser = parsed.n_results;
+    if (parsed.location) {
+        recorded_location = parsed.location;
+    }
+    mlir_operation_set_source_line_start(op, recorded_source_line);
+    recorded_unnumbered_loc = parser->unnumbered_loc_def;
+    mlir_operation_set_unnumbered_loc_def(op, recorded_unnumbered_loc);
+    if (recorded_location) {
+        mlir_operation_set_location(op, recorded_location);
     }
 
     // Handle return value(s) for all operations
