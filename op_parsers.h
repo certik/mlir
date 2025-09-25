@@ -35,7 +35,7 @@ typedef struct OperationParserResult {
 
 // Specific operation parsers
 
-void parse_affine_load(Parser *parser, MlirOperation *op);
+OperationParserResult parse_affine_load_op(Parser *parser, const OperationParserParams *params);
 void parse_affine_for(Parser *parser, MlirOperation *op);
 
 OperationParserResult parse_arith_binary_op(Parser *parser, const OperationParserParams *params);
@@ -65,18 +65,18 @@ void parse_scf_for(Parser *parser, MlirOperation *op);
 void parse_scf_while(Parser *parser, MlirOperation *op);
 void parse_scf_yield(Parser *parser, MlirOperation *op);
 
-void parse_std_constant(Parser *parser, MlirOperation *op);
+OperationParserResult parse_std_constant_op(Parser *parser, const OperationParserParams *params);
 
-void parse_tensor_collapse_shape(Parser *parser, MlirOperation *op);
+OperationParserResult parse_tensor_collapse_shape_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_tensor_extract_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_tensor_splat_op(Parser *parser, const OperationParserParams *params);
 
 void parse_tt_addptr_load_store(Parser *parser, MlirOperation *op);
 OperationParserResult parse_tt_call_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserParams *params);
-void parse_tt_get_program_id(Parser *parser, MlirOperation *op);
+OperationParserResult parse_tt_get_program_id_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_tt_make_range_op(Parser *parser, const OperationParserParams *params);
-void parse_tt_reduce(Parser *parser, MlirOperation *op);
+OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_tt_splat_op(Parser *parser, const OperationParserParams *params);
 void parse_tt_store(Parser *parser, MlirOperation *op);
 

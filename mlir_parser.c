@@ -1220,8 +1220,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_arith_select_op(parser, &params);
             break;
         case OP_TYPE_TT_GET_PROGRAM_ID:
-            parse_tt_get_program_id(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_tt_get_program_id_op(parser, &params);
             break;
         case OP_TYPE_TT_SPLAT:
             parsed = parse_tt_splat_op(parser, &params);
@@ -1262,11 +1261,10 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_vector_print_op(parser, &params);
             break;
         case OP_TYPE_STD_CONSTANT:
-            parse_std_constant(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_std_constant_op(parser, &params);
             break;
         case OP_TYPE_TT_REDUCE:
-            parse_tt_reduce(parser, op);
+            parsed = parse_tt_reduce_op(parser, &params);
             break;
         case OP_TYPE_TT_REDUCE_RETURN:
         case OP_TYPE_TT_RETURN:
@@ -1288,7 +1286,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_linalg_fill_op(parser, &params);
             break;
         case OP_TYPE_AFFINE_LOAD:
-            parse_affine_load(parser, op);
+            parsed = parse_affine_load_op(parser, &params);
             break;
         case OP_TYPE_INDEX_CONSTANT:
             parsed = parse_index_constant_op(parser, &params);
@@ -1297,7 +1295,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_tensor_splat_op(parser, &params);
             break;
         case OP_TYPE_TENSOR_COLLAPSE_SHAPE:
-            parse_tensor_collapse_shape(parser, op);
+            parsed = parse_tensor_collapse_shape_op(parser, &params);
             break;
         case OP_TYPE_SCF_YIELD:
             parse_scf_yield(parser, op);
