@@ -69,9 +69,6 @@ OperationParserResult parse_tt_splat_op(Parser *parser, const OperationParserPar
 OperationParserResult parse_vector_print_op(Parser *parser, const OperationParserParams *params);
 
 
-// Helper functions
-void consume_optional_hash_selector(Parser *parser);
-void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op);
 OperationParserResult parse_generic_op(Parser *parser, const OperationParserParams *params);
 
 #ifdef __cplusplus

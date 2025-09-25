@@ -134,6 +134,8 @@ void parse_result_types(Parser *parser, MlirType ***result_types, size_t *n_resu
 MlirLocation *parse_optional_location(Parser *parser);
 void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op);
 
+void consume_optional_hash_selector(Parser *parser);
+void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op);
 
 string op_type_to_string(OpType type);
 OpType op_string_to_type(string name);
