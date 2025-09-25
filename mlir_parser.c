@@ -1043,23 +1043,6 @@ MlirLocation* parse_loc(Parser *parser) {
 
 
 MlirOperation* parse_operation(Parser *parser) {
-    MlirOperation *op = mlir_op_create(
-        parser->arena,
-        OP_TYPE_UNREGISTERED,
-        str_lit(""),
-        NULL, 0,
-        NULL, 0,
-        NULL, 0,
-        NULL, 0,
-        NULL, 0,
-        NULL,
-        NULL,
-        str_lit(""),
-        -1);
-    mlir_operation_set_trailing_comment(op, "", 0);
-    mlir_operation_set_source_line_start(op, -1);
-    mlir_operation_set_location(op, NULL);
-    mlir_operation_set_unnumbered_loc_def(op, NULL);
 
     MlirLocation *recorded_location = NULL;
     MlirLocation *recorded_unnumbered_loc = NULL;
@@ -1108,7 +1091,6 @@ MlirOperation* parse_operation(Parser *parser) {
             if (c == '\n' || c == '\r') break;
             pos--;
         }
-        mlir_operation_set_source_line_start(op, pos);
         recorded_source_line = pos;
     }
 
@@ -1162,10 +1144,6 @@ MlirOperation* parse_operation(Parser *parser) {
 
     // Set op_type based on operation name
     OpType op_type = op_string_to_type(opname);
-    mlir_operation_set_type(op, op_type);
-    if (op_type == OP_TYPE_UNREGISTERED) {
-        mlir_operation_set_name(op, opname.str, opname.size);
-    }
     OperationParserParams params = {
         .arena = parser->arena,
         .op_type = op_type,
@@ -1183,31 +1161,25 @@ MlirOperation* parse_operation(Parser *parser) {
     // First we handle specific opnames with special parsing rules
     switch (op_type) {
         case OP_TYPE_TT_FUNC:
-            parse_tt_func(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_tt_func_op(parser, &params);
             break;
         case OP_TYPE_GPU_LAUNCH:
-            parse_gpu_launch(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_gpu_launch_op(parser, &params);
             break;
         case OP_TYPE_SCF_IF:
-            parse_scf_if(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_scf_if_op(parser, &params);
             break;
         case OP_TYPE_SCF_FOR:
-            parse_scf_for(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_scf_for_op(parser, &params);
             break;
         case OP_TYPE_SCF_WHILE:
-            parse_scf_while(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_scf_while_op(parser, &params);
             break;
         case OP_TYPE_ARITH_CONSTANT:
             parsed = parse_arith_constant_op(parser, &params);
             break;
         case OP_TYPE_ARITH_CMPI:
-            parse_arith_cmpi(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_arith_cmpi_op(parser, &params);
             break;
         case OP_TYPE_ARITH_ADDI:
         case OP_TYPE_ARITH_MULI:
@@ -1217,46 +1189,40 @@ MlirOperation* parse_operation(Parser *parser) {
         case OP_TYPE_ARITH_MULF:
         case OP_TYPE_ARITH_DIVI:
         case OP_TYPE_ARITH_DIVF:
-            parse_arith_binary(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_arith_binary_op(parser, &params);
             break;
         case OP_TYPE_ARITH_SELECT:
-            parse_arith_select(parser, op);
+            parsed = parse_arith_select_op(parser, &params);
             break;
         case OP_TYPE_TT_GET_PROGRAM_ID:
-            parse_tt_get_program_id(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_tt_get_program_id_op(parser, &params);
             break;
         case OP_TYPE_TT_SPLAT:
-            parse_tt_splat(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_tt_splat_op(parser, &params);
             break;
         case OP_TYPE_TT_MAKE_RANGE:
-            parse_tt_make_range(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_tt_make_range_op(parser, &params);
             break;
         case OP_TYPE_TT_ADDPTR:
+            parsed = parse_tt_addptr_op(parser, &params);
+            break;
         case OP_TYPE_TT_LOAD:
-            parse_tt_addptr_load_store(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_tt_load_op(parser, &params);
             break;
         case OP_TYPE_TT_STORE:
-            parse_tt_store(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_tt_store_op(parser, &params);
             break;
         case OP_TYPE_TT_CALL:
-            parse_tt_call(parser, op);
+            parsed = parse_tt_call_op(parser, &params);
             break;
         case OP_TYPE_FUNC_FUNC:
-            parse_func_func(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_func_func_op(parser, &params);
             break;
         case OP_TYPE_FUNC_CALL:
-            parse_func_call(parser, op);
+            parsed = parse_func_call_op(parser, &params);
             break;
         case OP_TYPE_AFFINE_FOR:
-            parse_affine_for(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_affine_for_op(parser, &params);
             break;
         case OP_TYPE_MEMREF_LOAD:
             parsed = parse_memref_load_op(parser, &params);
@@ -1265,101 +1231,97 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_memref_store_op(parser, &params);
             break;
         case OP_TYPE_VECTOR_PRINT:
-            parse_vector_print(parser, op);
+            parsed = parse_vector_print_op(parser, &params);
             break;
         case OP_TYPE_STD_CONSTANT:
-            parse_std_constant(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_std_constant_op(parser, &params);
             break;
         case OP_TYPE_TT_REDUCE:
-            parse_tt_reduce(parser, op);
+            parsed = parse_tt_reduce_op(parser, &params);
             break;
         case OP_TYPE_TT_REDUCE_RETURN:
         case OP_TYPE_TT_RETURN:
         case OP_TYPE_STD_RETURN:
         case OP_TYPE_FUNC_RETURN:
         case OP_TYPE_RETURN:
-            parse_return_operation(parser, op);
+            parsed = parse_return_op(parser, &params);
             break;
         case OP_TYPE_TENSOR_EXTRACT:
-            parse_tensor_extract(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_tensor_extract_op(parser, &params);
             break;
         case OP_TYPE_CF_BR:
-            parse_cf_br(parser, op);
+            parsed = parse_cf_br_op(parser, &params);
             break;
         case OP_TYPE_CF_COND_BR:
-            parse_cf_cond_br(parser, op);
+            parsed = parse_cf_cond_br_op(parser, &params);
             break;
         case OP_TYPE_LINALG_FILL:
-            parse_linalg_fill(parser, op);
+            parsed = parse_linalg_fill_op(parser, &params);
             break;
         case OP_TYPE_AFFINE_LOAD:
-            parse_affine_load(parser, op);
+            parsed = parse_affine_load_op(parser, &params);
             break;
         case OP_TYPE_INDEX_CONSTANT:
-            parse_index_constant(parser, op);
+            parsed = parse_index_constant_op(parser, &params);
             break;
         case OP_TYPE_TENSOR_SPLAT:
-            parse_tensor_splat(parser, op);
+            parsed = parse_tensor_splat_op(parser, &params);
             break;
         case OP_TYPE_TENSOR_COLLAPSE_SHAPE:
-            parse_tensor_collapse_shape(parser, op);
+            parsed = parse_tensor_collapse_shape_op(parser, &params);
             break;
         case OP_TYPE_SCF_YIELD:
-            parse_scf_yield(parser, op);
+            parsed = parse_scf_yield_op(parser, &params);
             break;
         default:
             // Generic/unregistered operations
-            parse_generic_operation(parser, op);
+            parsed = parse_generic_op(parser, &params);
             break;
     }
-    if (parsed.operation != NULL) {
-        op = parsed.operation;
-        n_new_results_from_parser = parsed.n_results;
-        if (parsed.location) {
-            recorded_location = parsed.location;
-        }
-        mlir_operation_set_source_line_start(op, recorded_source_line);
-        recorded_unnumbered_loc = parser->unnumbered_loc_def;
-        mlir_operation_set_unnumbered_loc_def(op, recorded_unnumbered_loc);
-        if (recorded_location) {
-            mlir_operation_set_location(op, recorded_location);
-        }
+
+    assert(parsed.operation != NULL);
+    MlirOperation *op = parsed.operation;
+    n_new_results_from_parser = parsed.n_results;
+    if (parsed.location) {
+        recorded_location = parsed.location;
+    }
+    mlir_operation_set_source_line_start(op, recorded_source_line);
+    recorded_unnumbered_loc = parser->unnumbered_loc_def;
+    mlir_operation_set_unnumbered_loc_def(op, recorded_unnumbered_loc);
+    if (recorded_location) {
+        mlir_operation_set_location(op, recorded_location);
     }
 
     // Handle return value(s) for all operations
-    if (parsed.operation == NULL) {
-        if (result_value) {
-            if (mlir_operation_num_result_types(op) > 0) {
-                MlirType *res_type = mlir_operation_get_result_type(op, 0);
-                assert(res_type != NULL);
-                mlir_value_set_type(result_value, res_type);
-                mlir_value_set_def(result_value, op);
-                symbol_table_add_value(parser->arena, &parser->symbol_table, mlir_value_get_register_name(result_value), result_value);
+    assert(parsed.operation != NULL);
 
-                MlirValue **results = arena_alloc_array(parser->arena, MlirValue*, 1);
-                results[0] = result_value;
-                mlir_operation_set_results(op, results, 1);
-            } else {
-                parser_error(parser, str_lit("Result Value parsed on LHS but no Type present on RHS"), parser->first, parser->last);
-            }
-        } else {
-            if (mlir_operation_num_result_types(op) > 0) {
-                parser_error(parser, str_lit("Result Type parsed on RHS but no result Value on LHS"), parser->first, parser->last);
-            }
+    if (result_value && parsed.results && n_new_results_from_parser > 0) {
+        result_value = parsed.results[0];
+    }
+
+    if (result_value && n_new_results_from_parser > 0) {
+        MlirType *res_type = mlir_operation_get_result_type(op, 0);
+        if (res_type) {
+            mlir_value_set_type(result_value, res_type);
         }
-    } else {
-        if (result_value && n_new_results_from_parser > 0) {
+        mlir_value_set_def(result_value, op);
+        symbol_table_add_value(parser->arena, &parser->symbol_table, mlir_value_get_register_name(result_value), result_value);
+    } else if (!result_value && n_new_results_from_parser > 0) {
+        // Operation produces results but no SSA name was provided - this is invalid MLIR
+        parser_error(parser, str_lit("Operation produces results but no SSA name provided on left-hand side"), parser->first, parser->last);
+    } else if (result_value) {
+        if (mlir_operation_num_result_types(op) > 0) {
             MlirType *res_type = mlir_operation_get_result_type(op, 0);
-            if (res_type) {
-                mlir_value_set_type(result_value, res_type);
-            }
+            assert(res_type != NULL);
+            mlir_value_set_type(result_value, res_type);
             mlir_value_set_def(result_value, op);
             symbol_table_add_value(parser->arena, &parser->symbol_table, mlir_value_get_register_name(result_value), result_value);
-        } else if (!result_value && n_new_results_from_parser > 0) {
-            // Operation produces results but no SSA name was provided - this is invalid MLIR
-            parser_error(parser, str_lit("Operation produces results but no SSA name provided on left-hand side"), parser->first, parser->last);
+
+            MlirValue **results = arena_alloc_array(parser->arena, MlirValue*, 1);
+            results[0] = result_value;
+            mlir_operation_set_results(op, results, 1);
+        } else {
+            parser_error(parser, str_lit("Result Value parsed on LHS but no Type present on RHS"), parser->first, parser->last);
         }
     }
 
