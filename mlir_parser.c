@@ -1189,16 +1189,13 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_gpu_launch_op(parser, &params);
             break;
         case OP_TYPE_SCF_IF:
-            parse_scf_if(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_scf_if_op(parser, &params);
             break;
         case OP_TYPE_SCF_FOR:
-            parse_scf_for(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_scf_for_op(parser, &params);
             break;
         case OP_TYPE_SCF_WHILE:
-            parse_scf_while(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_scf_while_op(parser, &params);
             break;
         case OP_TYPE_ARITH_CONSTANT:
             parsed = parse_arith_constant_op(parser, &params);
