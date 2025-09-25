@@ -1315,37 +1315,31 @@ MlirOperation* parse_operation(Parser *parser) {
     }
 
     // Handle return value(s) for all operations
-    if (parsed.operation == NULL) {
-        if (result_value) {
-            if (mlir_operation_num_result_types(op) > 0) {
-                MlirType *res_type = mlir_operation_get_result_type(op, 0);
-                assert(res_type != NULL);
-                mlir_value_set_type(result_value, res_type);
-                mlir_value_set_def(result_value, op);
-                symbol_table_add_value(parser->arena, &parser->symbol_table, mlir_value_get_register_name(result_value), result_value);
+    assert(parsed.operation != NULL);
 
-                MlirValue **results = arena_alloc_array(parser->arena, MlirValue*, 1);
-                results[0] = result_value;
-                mlir_operation_set_results(op, results, 1);
-            } else {
-                parser_error(parser, str_lit("Result Value parsed on LHS but no Type present on RHS"), parser->first, parser->last);
-            }
-        } else {
-            if (mlir_operation_num_result_types(op) > 0) {
-                parser_error(parser, str_lit("Result Type parsed on RHS but no result Value on LHS"), parser->first, parser->last);
-            }
+    if (result_value && n_new_results_from_parser > 0) {
+        MlirType *res_type = mlir_operation_get_result_type(op, 0);
+        if (res_type) {
+            mlir_value_set_type(result_value, res_type);
         }
-    } else {
-        if (result_value && n_new_results_from_parser > 0) {
+        mlir_value_set_def(result_value, op);
+        symbol_table_add_value(parser->arena, &parser->symbol_table, mlir_value_get_register_name(result_value), result_value);
+    } else if (!result_value && n_new_results_from_parser > 0) {
+        // Operation produces results but no SSA name was provided - this is invalid MLIR
+        parser_error(parser, str_lit("Operation produces results but no SSA name provided on left-hand side"), parser->first, parser->last);
+    } else if (result_value) {
+        if (mlir_operation_num_result_types(op) > 0) {
             MlirType *res_type = mlir_operation_get_result_type(op, 0);
-            if (res_type) {
-                mlir_value_set_type(result_value, res_type);
-            }
+            assert(res_type != NULL);
+            mlir_value_set_type(result_value, res_type);
             mlir_value_set_def(result_value, op);
             symbol_table_add_value(parser->arena, &parser->symbol_table, mlir_value_get_register_name(result_value), result_value);
-        } else if (!result_value && n_new_results_from_parser > 0) {
-            // Operation produces results but no SSA name was provided - this is invalid MLIR
-            parser_error(parser, str_lit("Operation produces results but no SSA name provided on left-hand side"), parser->first, parser->last);
+
+            MlirValue **results = arena_alloc_array(parser->arena, MlirValue*, 1);
+            results[0] = result_value;
+            mlir_operation_set_results(op, results, 1);
+        } else {
+            parser_error(parser, str_lit("Result Value parsed on LHS but no Type present on RHS"), parser->first, parser->last);
         }
     }
 
