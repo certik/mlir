@@ -66,6 +66,20 @@ static inline const char *string_data_or_null(string s) {
     return s.size > 0 ? s.str : NULL;
 }
 
+static bool parse_register_operand(Parser *parser, VecValue *operands, bool allow_hash_selector) {
+    if (!parser_peek(parser, TK_REGISTER)) return false;
+    string reg_str = parser_token_str(parser);
+    parser_expect(parser, TK_REGISTER);
+    if (allow_hash_selector) consume_optional_hash_selector(parser);
+    MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+    if (!operand) {
+        parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
+        return false;
+    }
+    VecValue_push_back(parser->arena, operands, operand);
+    return true;
+}
+
 static MlirValue **finalize_results(const OperationParserParams *params,
                                     MlirOperation *op,
                                     MlirType **result_types,
@@ -643,15 +657,10 @@ OperationParserResult parse_arith_binary_op(Parser *parser, const OperationParse
     VecValue_reserve(parser->arena, &operands, 2);
 
     if (parser_peek(parser, TK_REGISTER)) {
-        string reg_str = parser_token_str(parser);
-        parser_expect(parser, TK_REGISTER);
-        MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
-        if (!operand) {
-            parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
+        if (!parse_register_operand(parser, &operands, false)) {
             OperationParserResult empty = {0};
             return empty;
         }
-        VecValue_push_back(parser->arena, &operands, operand);
 
         if (parser_peek(parser, TK_COMMA)) {
             parser_expect(parser, TK_COMMA);
@@ -1082,16 +1091,10 @@ OperationParserResult parse_tt_addptr_op(Parser *parser, const OperationParserPa
     VecValue_reserve(parser->arena, &operands, 2);
 
     while (parser_peek(parser, TK_REGISTER)) {
-        string reg_str = parser_token_str(parser);
-        parser_expect(parser, TK_REGISTER);
-        consume_optional_hash_selector(parser);
-        MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
-        if (!operand) {
-            parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
+        if (!parse_register_operand(parser, &operands, true)) {
             OperationParserResult empty = {0};
             return empty;
         }
-        VecValue_push_back(parser->arena, &operands, operand);
         if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
         else break;
     }
@@ -4386,16 +4389,10 @@ OperationParserResult parse_tt_load_op(Parser *parser, const OperationParserPara
     VecValue_reserve(parser->arena, &operands, 3);
 
     while (parser_peek(parser, TK_REGISTER)) {
-        string reg_str = parser_token_str(parser);
-        parser_expect(parser, TK_REGISTER);
-        consume_optional_hash_selector(parser);
-        MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
-        if (!operand) {
-            parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
+        if (!parse_register_operand(parser, &operands, true)) {
             OperationParserResult empty = {0};
             return empty;
         }
-        VecValue_push_back(parser->arena, &operands, operand);
         if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
         else break;
     }
@@ -4524,17 +4521,11 @@ OperationParserResult parse_tt_store_op(Parser *parser, const OperationParserPar
     
     // Parse operands: pointer, value, mask
     while (parser_peek(parser, TK_REGISTER)) {
-        string reg_str = parser_token_str(parser);
-        parser_expect(parser, TK_REGISTER);
-        consume_optional_hash_selector(parser);
-        MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
-        if (!operand) {
-            parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
+        if (!parse_register_operand(parser, &operands, true)) {
             OperationParserResult empty = {0};
             return empty;
         }
-        VecValue_push_back(params->arena, &operands, operand);
-        if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA); 
+        if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
         else break;
     }
 
