@@ -1295,6 +1295,10 @@ MlirOperation* parse_operation(Parser *parser) {
     // Handle return value(s) for all operations
     assert(parsed.operation != NULL);
 
+    if (result_value && parsed.results && n_new_results_from_parser > 0) {
+        result_value = parsed.results[0];
+    }
+
     if (result_value && n_new_results_from_parser > 0) {
         MlirType *res_type = mlir_operation_get_result_type(op, 0);
         if (res_type) {
