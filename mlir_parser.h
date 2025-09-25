@@ -14,6 +14,24 @@ extern "C" {
 #endif
 
 
+typedef struct OperationParserParams {
+    Arena  *arena;
+    OpType  op_type;
+    string  opname; /* only non-empty for unregistered ops */
+
+    MlirValue **lhs_results;
+    size_t     n_lhs_results;
+
+    MlirLocation *unnumbered_loc_def;
+    int64_t       source_line_start;
+} OperationParserParams;
+
+typedef struct OperationParserResult {
+    MlirOperation *operation;
+    MlirValue    **results;
+    size_t         n_results;
+    MlirLocation  *location; /* may be NULL */
+} OperationParserResult;
 
 // Hash function for strings
 static inline size_t string_hash(string str) {
@@ -87,6 +105,37 @@ MlirLocation* parse_loc(Parser *parser);
 MlirOperation* parse_operation(Parser *parser);
 MlirRegion* parse_region(Parser *parser);
 MlirBlock* parse_block(Parser *parser);
+
+bool parse_type_string(Parser *parser, string *out);
+void consume_optional_hash_selector(Parser *parser);
+void set_op_attributes(MlirOperation *op, MlirAttribute **attrs, size_t count);
+void set_op_operands(MlirOperation *op, MlirValue **operands, size_t count);
+void set_op_result_types(MlirOperation *op, MlirType **types, size_t count);
+const char *string_data_or_null(string s);
+bool parse_register_operand(Parser *parser, VecValue *operands, bool allow_hash_selector);
+MlirValue **finalize_results(const OperationParserParams *params,
+                                    MlirOperation *op,
+                                    MlirType **result_types,
+                                    size_t n_result_types,
+                                    size_t *out_n_results);
+MlirAttribute *create_string_attr(Parser *parser, string name, string value);
+MlirAttribute *create_integer_attr(Parser *parser, string name, int64_t value);
+MlirAttribute *create_float_attr(Parser *parser, string name, double value);
+MlirAttribute *create_bool_attr(Parser *parser, string name, bool value);
+void operation_append_attribute(Parser *parser, MlirOperation *op, MlirAttribute *attr);
+MlirValue *lookup_or_create_value(Parser *parser, string reg, string default_type);
+void append_attr(Parser *parser, MlirAttribute ***attrs, size_t *n, size_t *cap, MlirAttribute *attr);
+void attr_list_init_from_op(Parser *parser, MlirOperation *op, MlirAttribute ***attrs, size_t *n, size_t *cap);
+void parse_angle_brace_attributes(Parser *parser, MlirAttribute ***attributes, size_t *n_attributes, size_t *attributes_capacity);
+void parse_brace_attributes(Parser *parser, MlirAttribute ***attributes, size_t *n_attributes, size_t *attributes_capacity);
+void parse_result_types(Parser *parser, MlirType ***result_types, size_t *n_result_types,
+                              MlirAttribute ***attributes, size_t *n_attributes, size_t *attributes_capacity,
+                              OpType op_type, MlirOperation *op_for_attributes);
+MlirLocation *parse_optional_location(Parser *parser);
+void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op);
+
+void consume_optional_hash_selector(Parser *parser);
+void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op);
 
 string op_type_to_string(OpType type);
 OpType op_string_to_type(string name);
