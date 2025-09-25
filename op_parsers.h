@@ -64,6 +64,7 @@ OperationParserResult parse_scf_if_op(Parser *parser, const OperationParserParam
 OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_scf_while_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_scf_yield_op(Parser *parser, const OperationParserParams *params);
+OperationParserResult parse_tt_addptr_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_tt_load_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_tt_store_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_func_func_op(Parser *parser, const OperationParserParams *params);
@@ -76,14 +77,12 @@ OperationParserResult parse_tensor_collapse_shape_op(Parser *parser, const Opera
 OperationParserResult parse_tensor_extract_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_tensor_splat_op(Parser *parser, const OperationParserParams *params);
 
-void parse_tt_addptr_load_store(Parser *parser, MlirOperation *op);
 OperationParserResult parse_tt_call_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_tt_get_program_id_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_tt_make_range_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserParams *params);
 OperationParserResult parse_tt_splat_op(Parser *parser, const OperationParserParams *params);
-void parse_tt_store(Parser *parser, MlirOperation *op);
 
 OperationParserResult parse_vector_print_op(Parser *parser, const OperationParserParams *params);
 
@@ -91,7 +90,7 @@ OperationParserResult parse_vector_print_op(Parser *parser, const OperationParse
 // Helper functions
 void consume_optional_hash_selector(Parser *parser);
 void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op);
-void parse_generic_operation(Parser *parser, MlirOperation *op);
+OperationParserResult parse_generic_op(Parser *parser, const OperationParserParams *params);
 
 #ifdef __cplusplus
 }

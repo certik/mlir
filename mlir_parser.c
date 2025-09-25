@@ -1226,8 +1226,7 @@ MlirOperation* parse_operation(Parser *parser) {
             parsed = parse_tt_make_range_op(parser, &params);
             break;
         case OP_TYPE_TT_ADDPTR:
-            parse_tt_addptr_load_store(parser, op);
-            parse_generic_attrs_and_result_type(parser, op);
+            parsed = parse_tt_addptr_op(parser, &params);
             break;
         case OP_TYPE_TT_LOAD:
             parsed = parse_tt_load_op(parser, &params);
@@ -1298,7 +1297,7 @@ MlirOperation* parse_operation(Parser *parser) {
             break;
         default:
             // Generic/unregistered operations
-            parse_generic_operation(parser, op);
+            parsed = parse_generic_op(parser, &params);
             break;
     }
     if (parsed.operation != NULL) {
