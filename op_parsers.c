@@ -3299,46 +3299,6 @@ OperationParserResult parse_scf_while_op(Parser *parser, const OperationParserPa
     };
     return out;
 }
-void parse_scf_yield(Parser *parser, MlirOperation *op) {
-    // Parse scf.yield operands
-    VecValue operands;
-    VecValue_reserve(parser->arena, &operands, 2);
-
-    while (parser_peek(parser, TK_REGISTER)) {
-        string reg_str = parser_token_str(parser);
-        parser_expect(parser, TK_REGISTER);
-
-        MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
-        if (!operand) {
-            parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
-            return;
-        }
-        VecValue_push_back(parser->arena, &operands, operand);
-
-        if (parser_peek(parser, TK_COMMA)) {
-            parser_expect(parser, TK_COMMA);
-        } else {
-            break;
-        }
-    }
-
-    set_op_operands(op, operands.data, operands.size);
-    mlir_operation_set_type(op, OP_TYPE_SCF_YIELD);
-
-    // Optionally parse ": types" then a trailing loc()
-    if (parser_peek(parser, TK_COLON)) {
-        // consume to end of types list
-        do {
-            parser_next_token(parser);
-            if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) break;
-        } while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_EOF));
-    }
-    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        mlir_operation_set_location(op, parse_loc(parser));
-    }
-    // Skip to eol
-    while (!parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_EOF)) parser_next_token(parser);
-}
 
 void parse_affine_for(Parser *parser, MlirOperation *op) {
     // Expect induction variable
