@@ -91,7 +91,6 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     // Set result types
     MlirType **const_result_types = arena_alloc_array(arena, MlirType*, 1);
     const_result_types[0] = i32_type;
-    mlir_operation_set_result_types(const_op, const_result_types, 1);
 
     // Set attributes
     MlirAttribute *value_attr = mlir_attribute_create_integer(arena, 5);
@@ -107,10 +106,10 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     mlir_value_set_type(const_result, i32_type);
     mlir_value_set_register_name(const_result, "%0", 2);
 
-    // Set operation results
+    // Set operation results and types together
     MlirValue **const_results = arena_alloc_array(arena, MlirValue*, 1);
     const_results[0] = const_result;
-    mlir_operation_set_results(const_op, const_results, 1);
+    mlir_operation_set_results_with_types(const_op, const_results, const_result_types, 1);
 
     // %1 = arith.addi %arg0, %arg1 : i32
     MlirOperation *add_op = mlir_op_create(arena, OP_TYPE_ARITH_ADDI, str_lit(""), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
@@ -124,7 +123,6 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     // Set result types
     MlirType **add_result_types = arena_alloc_array(arena, MlirType*, 1);
     add_result_types[0] = i32_type;
-    mlir_operation_set_result_types(add_op, add_result_types, 1);
 
     // Create add_result
     MlirValue *add_result = mlir_value_create(arena, OP_RESULT);
@@ -133,10 +131,10 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     mlir_value_set_type(add_result, i32_type);
     mlir_value_set_register_name(add_result, "%1", 2);
 
-    // Set operation results
+    // Set operation results and types together
     MlirValue **add_results = arena_alloc_array(arena, MlirValue*, 1);
     add_results[0] = add_result;
-    mlir_operation_set_results(add_op, add_results, 1);
+    mlir_operation_set_results_with_types(add_op, add_results, add_result_types, 1);
 
     // %2 = arith.muli %1, %0 : i32 (add_result and const_result already created above)
 
@@ -152,7 +150,6 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     // Set result types
     MlirType **mul_result_types = arena_alloc_array(arena, MlirType*, 1);
     mul_result_types[0] = i32_type;
-    mlir_operation_set_result_types(mul_op, mul_result_types, 1);
 
     // Create mul_result
     MlirValue *mul_result = mlir_value_create(arena, OP_RESULT);
@@ -161,10 +158,10 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     mlir_value_set_type(mul_result, i32_type);
     mlir_value_set_register_name(mul_result, "%2", 2);
 
-    // Set operation results
+    // Set operation results and types together
     MlirValue **mul_results = arena_alloc_array(arena, MlirValue*, 1);
     mul_results[0] = mul_result;
-    mlir_operation_set_results(mul_op, mul_results, 1);
+    mlir_operation_set_results_with_types(mul_op, mul_results, mul_result_types, 1);
 
     // func.return %2 : i32
     MlirOperation *ret_op = mlir_op_create(arena, OP_TYPE_FUNC_RETURN, str_lit(""), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);

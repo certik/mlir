@@ -418,8 +418,24 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
         }
         // Special-case: one named result but multiple result types => print "%name:N ="
+        // Check if we have N results where only the first is non-NULL
         size_t api_num_results = mlir_operation_num_results(op);
-        if (api_num_results == 1 && api_num_result_types > 1) {
+        bool use_colon_syntax = false;
+        if (api_num_result_types > 1 && api_num_results == api_num_result_types) {
+            MlirValue *r0 = mlir_operation_get_result(op, 0);
+            if (r0) {
+                bool all_rest_null = true;
+                for (size_t i = 1; i < api_num_results; i++) {
+                    if (mlir_operation_get_result(op, i) != NULL) {
+                        all_rest_null = false;
+                        break;
+                    }
+                }
+                use_colon_syntax = all_rest_null;
+            }
+        }
+
+        if (use_colon_syntax) {
             MlirValue *r0 = mlir_operation_get_result(op, 0);
             if (r0) {
                 result = str_concat(arena, result, print_ssa_value_classic(ctx, r0));
