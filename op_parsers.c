@@ -3329,148 +3329,6 @@ OperationParserResult parse_scf_while_op(Parser *parser, const OperationParserPa
     return out;
 }
 
-void parse_affine_for(Parser *parser, MlirOperation *op) {
-    // Expect induction variable
-    MlirValue *ind_var = NULL;
-    if (parser_peek(parser, TK_REGISTER)) {
-        string iv_name = parser_token_str(parser);
-        parser_expect(parser, TK_REGISTER);
-
-        // Create a placeholder for the block argument; registered later
-        ind_var = mlir_value_create(parser->arena, BLOCK_ARG);
-        mlir_value_set_register_name(ind_var, string_data_or_null(iv_name), iv_name.size);
-        mlir_value_set_type(ind_var, mlir_type_create_from_string(parser->arena, str_lit("index")));
-
-
-        // '=' lower bound
-        if (parser_peek(parser, TK_EQUAL)) {
-            parser_expect(parser, TK_EQUAL);
-            // Consume a simple affine lower bound: integer or register/expression until 'to'
-            while (!parser_peek(parser, TK_EOF)) {
-                if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("to"))) break;
-                if (parser_peek(parser, TK_LBRACE_END)) break;
-                parser_next_token(parser);
-            }
-        }
-
-        // 'to' upper bound
-        if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("to"))) {
-            parser_expect(parser, TK_NAME);
-            // Consume simple upper bound until optional 'step' or '{'
-            while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_LBRACE_END)) {
-                if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("step"))) break;
-                parser_next_token(parser);
-            }
-        }
-
-        // Optional 'step' expression
-        if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("step"))) {
-            parser_expect(parser, TK_NAME);
-            // Consume step expression until '{'
-            while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_LBRACE_END)) {
-                parser_next_token(parser);
-            }
-        }
-    }
-
-    // Now parse the loop region
-    while (!parser_peek(parser, TK_LBRACE_END) && !parser_peek(parser, TK_EOF)) {
-        parser_next_token(parser);
-    }
-    parser_expect(parser, TK_LBRACE_END);
-    parser_expect(parser, TK_NEWLINE);
-
-    // Push new scope for induction variable
-    symbol_table_push_scope(parser->arena, &parser->symbol_table);
-
-    // Create single block and register induction variable as block argument
-    MlirBlock *block = mlir_block_create(parser->arena);
-    if (ind_var) {
-        MlirValue *iv_block_arg = mlir_value_create(parser->arena, BLOCK_ARG);
-        string block_name = str_lit("%arg0");
-        mlir_value_set_register_name(iv_block_arg, block_name.str, block_name.size);
-        mlir_value_set_type(iv_block_arg, mlir_type_create_from_string(parser->arena, str_lit("index")));
-        mlir_value_set_result_index(iv_block_arg, (uint32_t)mlir_block_num_arguments(block));
-        mlir_value_set_def(iv_block_arg, block);
-        mlir_block_add_argument(parser->arena, block, iv_block_arg);
-        string orig_name = mlir_value_get_register_name(ind_var);
-        if (orig_name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, orig_name, iv_block_arg);
-    }
-
-    // Parse body operations
-    bool prev_flag = parser->capture_trailing_comments;
-    parser->capture_trailing_comments = true;
-    while (!parser_peek(parser, TK_RBRACE)) {
-        MlirOperation *inner = parse_operation(parser);
-        // Capture trailing inline comment before consuming the newline
-        if (parser_peek(parser, TK_NEWLINE)) {
-            int64_t nl_pos = (int64_t)parser->first;
-            if (nl_pos > 0) {
-                int64_t line_end = nl_pos - 1;
-                int64_t line_start = line_end;
-                while (line_start > 0) {
-                    unsigned char c = parser->input[line_start - 1];
-                    if (c == '\n' || c == '\r') break;
-                    line_start--;
-                }
-                int64_t comment_pos = -1;
-                for (int64_t i = line_end - 1; i >= line_start; i--) {
-                    if (parser->input[i] == '/' && parser->input[i + 1] == '/') { comment_pos = i; break; }
-                }
-                if (comment_pos >= 0) {
-                    int64_t begin = comment_pos;
-                    while (begin > line_start && parser->input[begin - 1] == ' ') begin--;
-                    int64_t len = line_end - begin + 1;
-                    if (len > 0) {
-                        string c = str_from_cstr_len_view((char*)parser->input + begin, len);
-                        mlir_operation_set_trailing_comment(inner, c.str, c.size);
-                    }
-                }
-            }
-        } else {
-            string text = str_from_cstr_view((char*)parser->input);
-            int64_t start = (int64_t)parser->last + 1;
-            if (start < (int64_t)text.size) {
-                int64_t end = (int64_t)text.size - 1;
-                for (int64_t i = start; i < (int64_t)text.size; i++) {
-                    char ch = text.str[i];
-                    if (ch == '\n' || ch == '\r') { end = i - 1; break; }
-                }
-                if (end >= start) {
-                    int64_t cpos = -1;
-                    for (int64_t i = end - 1; i >= start; i--) {
-                        if (text.str[i] == '/' && text.str[i+1] == '/') { cpos = i; break; }
-                    }
-                    if (cpos >= 0) {
-                        int64_t begin = cpos;
-                        while (begin > start && text.str[begin - 1] == ' ') begin--;
-                        int64_t len = end - begin + 1;
-                        if (len > 0) {
-                            string c = str_from_cstr_len_view(text.str + begin, len);
-                            mlir_operation_set_trailing_comment(inner, c.str, c.size);
-                        }
-                    }
-                }
-            }
-        }
-        mlir_block_add_operation(parser->arena, block, inner);
-        parser_expect(parser, TK_NEWLINE);
-        while (parser_peek(parser, TK_NEWLINE)) parser_expect(parser, TK_NEWLINE);
-    }
-    parser_expect(parser, TK_RBRACE);
-    parser->capture_trailing_comments = prev_flag;
-
-    // Optional trailing loc()
-    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        mlir_operation_set_location(op, parse_loc(parser));
-    }
-
-    symbol_table_pop_scope(&parser->symbol_table);
-    MlirRegion *region = mlir_region_create(parser->arena);
-    mlir_region_add_block(parser->arena, region, block);
-    mlir_op_add_region(parser->arena, op, region);
-}
-
 OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserParams *params) {
     // Parse gpu.launch blocks(%arg2, %arg3, %arg4) in (...) threads(%arg5, %arg6, %arg7) in (...) {
 
@@ -4109,30 +3967,189 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
 }
 
 OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserParams *params) {
-    // For now, create a minimal implementation that delegates to the old parser
-    // This is a complex function that would need significant work to properly migrate
+    // Collect all data before creating operation (inlined from parse_affine_for)
+
+    // Expect induction variable
+    MlirValue *ind_var = NULL;
+    if (parser_peek(parser, TK_REGISTER)) {
+        string iv_name = parser_token_str(parser);
+        parser_expect(parser, TK_REGISTER);
+
+        // Create a placeholder for the block argument; registered later
+        ind_var = mlir_value_create(parser->arena, BLOCK_ARG);
+        mlir_value_set_register_name(ind_var, string_data_or_null(iv_name), iv_name.size);
+        mlir_value_set_type(ind_var, mlir_type_create_from_string(parser->arena, str_lit("index")));
+
+
+        // '=' lower bound
+        if (parser_peek(parser, TK_EQUAL)) {
+            parser_expect(parser, TK_EQUAL);
+            // Consume a simple affine lower bound: integer or register/expression until 'to'
+            while (!parser_peek(parser, TK_EOF)) {
+                if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("to"))) break;
+                if (parser_peek(parser, TK_LBRACE_END)) break;
+                parser_next_token(parser);
+            }
+        }
+
+        // 'to' upper bound
+        if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("to"))) {
+            parser_expect(parser, TK_NAME);
+            // Consume simple upper bound until optional 'step' or '{'
+            while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_LBRACE_END)) {
+                if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("step"))) break;
+                parser_next_token(parser);
+            }
+        }
+
+        // Optional 'step' expression
+        if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("step"))) {
+            parser_expect(parser, TK_NAME);
+            // Consume step expression until '{'
+            while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_LBRACE_END)) {
+                parser_next_token(parser);
+            }
+        }
+    }
+
+    // Now parse the loop region
+    while (!parser_peek(parser, TK_LBRACE_END) && !parser_peek(parser, TK_EOF)) {
+        parser_next_token(parser);
+    }
+    parser_expect(parser, TK_LBRACE_END);
+    parser_expect(parser, TK_NEWLINE);
+
+    // Push new scope for induction variable
+    symbol_table_push_scope(parser->arena, &parser->symbol_table);
+
+    // Create single block and register induction variable as block argument
+    MlirBlock *block = mlir_block_create(parser->arena);
+    if (ind_var) {
+        MlirValue *iv_block_arg = mlir_value_create(parser->arena, BLOCK_ARG);
+        string block_name = str_lit("%arg0");
+        mlir_value_set_register_name(iv_block_arg, block_name.str, block_name.size);
+        mlir_value_set_type(iv_block_arg, mlir_type_create_from_string(parser->arena, str_lit("index")));
+        mlir_value_set_result_index(iv_block_arg, (uint32_t)mlir_block_num_arguments(block));
+        mlir_value_set_def(iv_block_arg, block);
+        mlir_block_add_argument(parser->arena, block, iv_block_arg);
+        string orig_name = mlir_value_get_register_name(ind_var);
+        if (orig_name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, orig_name, iv_block_arg);
+    }
+
+    // Parse body operations
+    bool prev_flag = parser->capture_trailing_comments;
+    parser->capture_trailing_comments = true;
+    while (!parser_peek(parser, TK_RBRACE)) {
+        MlirOperation *inner = parse_operation(parser);
+        // Capture trailing inline comment before consuming the newline
+        if (parser_peek(parser, TK_NEWLINE)) {
+            int64_t nl_pos = (int64_t)parser->first;
+            if (nl_pos > 0) {
+                int64_t line_end = nl_pos - 1;
+                int64_t line_start = line_end;
+                while (line_start > 0) {
+                    unsigned char c = parser->input[line_start - 1];
+                    if (c == '\n' || c == '\r') break;
+                    line_start--;
+                }
+                int64_t comment_pos = -1;
+                for (int64_t i = line_end - 1; i >= line_start; i--) {
+                    if (parser->input[i] == '/' && parser->input[i + 1] == '/') { comment_pos = i; break; }
+                }
+                if (comment_pos >= 0) {
+                    int64_t begin = comment_pos;
+                    while (begin > line_start && parser->input[begin - 1] == ' ') begin--;
+                    int64_t len = line_end - begin + 1;
+                    if (len > 0) {
+                        string c = str_from_cstr_len_view((char*)parser->input + begin, len);
+                        mlir_operation_set_trailing_comment(inner, c.str, c.size);
+                    }
+                }
+            }
+        } else {
+            string text = str_from_cstr_view((char*)parser->input);
+            int64_t start = (int64_t)parser->last + 1;
+            if (start < (int64_t)text.size) {
+                int64_t end = (int64_t)text.size - 1;
+                for (int64_t i = start; i < (int64_t)text.size; i++) {
+                    char ch = text.str[i];
+                    if (ch == '\n' || ch == '\r') { end = i - 1; break; }
+                }
+                if (end >= start) {
+                    int64_t cpos = -1;
+                    for (int64_t i = end - 1; i >= start; i--) {
+                        if (text.str[i] == '/' && text.str[i+1] == '/') { cpos = i; break; }
+                    }
+                    if (cpos >= 0) {
+                        int64_t begin = cpos;
+                        while (begin > start && text.str[begin - 1] == ' ') begin--;
+                        int64_t len = end - begin + 1;
+                        if (len > 0) {
+                            string c = str_from_cstr_len_view(text.str + begin, len);
+                            mlir_operation_set_trailing_comment(inner, c.str, c.size);
+                        }
+                    }
+                }
+            }
+        }
+        mlir_block_add_operation(parser->arena, block, inner);
+        parser_expect(parser, TK_NEWLINE);
+        while (parser_peek(parser, TK_NEWLINE)) parser_expect(parser, TK_NEWLINE);
+    }
+    parser_expect(parser, TK_RBRACE);
+    parser->capture_trailing_comments = prev_flag;
+
+    // Parse optional trailing location
+    MlirLocation *op_location = NULL;
+    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
+        op_location = parse_loc(parser);
+    }
+
+    symbol_table_pop_scope(&parser->symbol_table);
+
+    // Build region with the parsed block
+    MlirRegion *region = mlir_region_create(parser->arena);
+    mlir_region_add_block(parser->arena, region, block);
+    MlirRegion **regions = arena_alloc_array(parser->arena, MlirRegion*, 1);
+    regions[0] = region;
+
+    // Parse attributes and result types
+    MlirAttribute **attributes = NULL;
+    size_t n_attributes = 0;
+    size_t attributes_capacity = 0;
+    MlirType **result_types = NULL;
+    size_t n_result_types = 0;
+
+    parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+    parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+    parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
+    MlirLocation *loc_after_attrs = parse_optional_location(parser);
+    if (loc_after_attrs) op_location = loc_after_attrs;
+
+    // Fallback location if none was parsed
+    if (!op_location) op_location = params->unnumbered_loc_def;
+
+    // NOW create operation with all collected data
     MlirOperation *op = mlir_op_create(
         params->arena,
         params->op_type,
         str_lit(""),
-        NULL, 0,
-        NULL, 0,
+        attributes, n_attributes,
+        result_types, n_result_types,
         params->lhs_results,
         params->n_lhs_results,
         NULL, 0,
-        NULL, 0,
-        params->unnumbered_loc_def,
+        regions, 1,
+        op_location,
         params->unnumbered_loc_def,
         str_lit(""),
         params->source_line_start);
-    parse_affine_for(parser, op);
-    parse_generic_attrs_and_result_type(parser, op);
 
     OperationParserResult out = {
         .operation = op,
         .results = NULL,
         .n_results = 0,
-        .location = params->unnumbered_loc_def
+        .location = op_location
     };
     return out;
 }
