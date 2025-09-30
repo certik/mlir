@@ -748,33 +748,7 @@ MlirBlock* parse_block(Parser *parser) {
     VecOperation_reserve(parser->arena, &operations, 16);
     while (! (parser_peek(parser, TK_RBRACE) || parser_peek(parser, TK_CARET_NAME))) {
         MlirOperation *op = parse_operation(parser);
-        // Capture trailing inline comment based on the original line where the op started
-        // This avoids mis-associating comments if tokenization peeks into the next line.
-        if (op && mlir_operation_get_source_line_start(op) >= 0) {
-            int64_t line_start = mlir_operation_get_source_line_start(op);
-            // Find end of this line
-            int64_t line_end = line_start;
-            while (parser->input[line_end] != '\0' && parser->input[line_end] != '\n' && parser->input[line_end] != '\r') {
-                line_end++;
-            }
-            if (line_end > line_start) {
-                // Search for // within this line
-                int64_t comment_pos = -1;
-                for (int64_t i = line_start; i + 1 < line_end; i++) {
-                    if (parser->input[i] == '/' && parser->input[i + 1] == '/') { comment_pos = i; break; }
-                }
-                if (comment_pos >= 0) {
-                    int64_t begin = comment_pos;
-                    // include preceding spaces to keep formatting
-                    while (begin > line_start && parser->input[begin - 1] == ' ') begin--;
-                    int64_t len = line_end - begin;
-                    if (len > 0) {
-                        string comment = str_from_cstr_len_view((char*)parser->input + begin, len);
-                        mlir_operation_set_trailing_comment(op, comment.str, comment.size);
-                    }
-                }
-            }
-        }
+
         VecOperation_push_back(parser->arena, &operations, op);
         parser_expect(parser, TK_NEWLINE);
 
@@ -1625,6 +1599,34 @@ MlirOperation* parse_operation(Parser *parser) {
 
     // Set op_type based on operation name
     OpType op_type = op_string_to_type(opname);
+
+    // Capture trailing comment from the current line
+    string trailing_comment = str_lit("");
+    {
+        int64_t line_start = recorded_source_line;
+        // Find end of this line
+        int64_t line_end = line_start;
+        while (parser->input[line_end] != '\0' && parser->input[line_end] != '\n' && parser->input[line_end] != '\r') {
+            line_end++;
+        }
+        if (line_end > line_start) {
+            // Search for // within this line
+            int64_t comment_pos = -1;
+            for (int64_t i = line_start; i + 1 < line_end; i++) {
+                if (parser->input[i] == '/' && parser->input[i + 1] == '/') { comment_pos = i; break; }
+            }
+            if (comment_pos >= 0) {
+                int64_t begin = comment_pos;
+                // include preceding spaces to keep formatting
+                while (begin > line_start && parser->input[begin - 1] == ' ') begin--;
+                int64_t len = line_end - begin;
+                if (len > 0) {
+                    trailing_comment = str_from_cstr_len_view((char*)parser->input + begin, len);
+                }
+            }
+        }
+    }
+
     OperationParserParams params = {
         .arena = parser->arena,
         .op_type = op_type,
@@ -1632,7 +1634,8 @@ MlirOperation* parse_operation(Parser *parser) {
         .lhs_results = lhs_results,
         .n_lhs_results = n_lhs_results,
         .unnumbered_loc_def = parser->unnumbered_loc_def,
-        .source_line_start = recorded_source_line
+        .source_line_start = recorded_source_line,
+        .trailing_comment = trailing_comment
     };
     OperationParserResult parsed = {0};
 
@@ -1851,8 +1854,6 @@ MlirOperation* parse_operation(Parser *parser) {
             if (found_comment && comment_start >= 0) {
                 int64_t len = line_end - comment_start + 1;
                 if (len > 0) {
-                    string comment = str_from_cstr_len_view(text.str + comment_start, len);
-                    mlir_operation_set_trailing_comment(op, comment.str, comment.size);
                 }
             }
         }

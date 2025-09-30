@@ -24,6 +24,7 @@ typedef struct OperationParserParams {
 
     MlirLocation *unnumbered_loc_def;
     int64_t       source_line_start;
+    string        trailing_comment;
 } OperationParserParams;
 
 typedef struct OperationParserResult {
