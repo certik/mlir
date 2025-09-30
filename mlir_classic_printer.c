@@ -418,25 +418,20 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
         }
         // Special-case: one named result but multiple result types => print "%name:N ="
-        // This handles both: api_num_results=1 (old code) or multiple results with only first non-NULL
+        // Check if we have N results where only the first is non-NULL
         size_t api_num_results = mlir_operation_num_results(op);
         bool use_colon_syntax = false;
-        if (api_num_result_types > 1) {
-            if (api_num_results == 1) {
-                use_colon_syntax = true;
-            } else if (api_num_results == api_num_result_types) {
-                // Check if only first result is non-NULL
-                MlirValue *r0 = mlir_operation_get_result(op, 0);
-                if (r0) {
-                    bool all_rest_null = true;
-                    for (size_t i = 1; i < api_num_results; i++) {
-                        if (mlir_operation_get_result(op, i) != NULL) {
-                            all_rest_null = false;
-                            break;
-                        }
+        if (api_num_result_types > 1 && api_num_results == api_num_result_types) {
+            MlirValue *r0 = mlir_operation_get_result(op, 0);
+            if (r0) {
+                bool all_rest_null = true;
+                for (size_t i = 1; i < api_num_results; i++) {
+                    if (mlir_operation_get_result(op, i) != NULL) {
+                        all_rest_null = false;
+                        break;
                     }
-                    use_colon_syntax = all_rest_null;
                 }
+                use_colon_syntax = all_rest_null;
             }
         }
 
