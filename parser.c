@@ -43,25 +43,23 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     //MlirType *i64_type = mlir_type_create_integer(arena, 64, true);
 
     // Create module operation
-    MlirOperation *module = mlir_op_create(arena, OP_TYPE_MODULE, str_lit("module"), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
-
     // Create module region
     MlirRegion *module_region = mlir_region_create(arena);
     MlirBlock *module_block = mlir_block_create(arena);
     // Add block to region
     mlir_region_add_block(arena, module_region, module_block);
 
-    // Add region to module
-    mlir_op_add_region(arena, module, module_region);
+    // Set regions
+    MlirRegion **module_regions = arena_alloc_array(arena, MlirRegion*, 1);
+    module_regions[0] = module_region;
+
+    MlirOperation *module = mlir_op_create(arena, OP_TYPE_MODULE, str_lit("module"), NULL, 0, NULL, 0, NULL, 0, NULL, 0, module_regions, 1, NULL, NULL, str_lit(""), -1);
 
     // Function attributes (sym_name)
     MlirAttribute *sym_name_attr = mlir_attribute_create_string(arena, "example_func", 12);
     mlir_attribute_set_name(sym_name_attr, "sym_name", 8);
     MlirAttribute **func_attrs = arena_alloc_array(arena, MlirAttribute*, 1);
     func_attrs[0] = sym_name_attr;
-
-    // Create function operation
-    MlirOperation *func_op = mlir_op_create(arena, OP_TYPE_FUNC_FUNC, str_lit("func.func"), func_attrs, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
 
     // Create function region and block
     MlirRegion *func_region = mlir_region_create(arena);
@@ -174,8 +172,12 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     // Link function block to function region
     mlir_region_add_block(arena, func_region, func_block);
 
-    // Link function region to function operation
-    mlir_op_add_region(arena, func_op, func_region);
+    // Set regions for function operation
+    MlirRegion **func_regions = arena_alloc_array(arena, MlirRegion*, 1);
+    func_regions[0] = func_region;
+
+    // Create function operation
+    MlirOperation *func_op = mlir_op_create(arena, OP_TYPE_FUNC_FUNC, str_lit("func.func"), func_attrs, 1, NULL, 0, NULL, 0, NULL, 0, func_regions, 1, NULL, NULL, str_lit(""), -1);
 
     // Link function operation to module block
     mlir_block_add_operation(arena, module_block, func_op);

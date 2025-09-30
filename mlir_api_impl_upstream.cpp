@@ -123,13 +123,6 @@ MlirOperation *mlir_op_create(Arena *arena, OpType type) {
     return reinterpret_cast<MlirOperation *>(op);
 }
 
-void mlir_op_add_region(Arena *arena, MlirOperation *op, MlirRegion *region) {
-    (void)arena;
-    Operation *cppOp = reinterpret_cast<Operation *>(op);
-    Region *cppRegion = reinterpret_cast<Region *>(region);
-    cppOp->getRegions().push_back(cppRegion);
-}
-
 void mlir_block_add_operation(Arena *arena, MlirBlock *block, MlirOperation *op) {
     (void)arena;
     Block *cppBlock = reinterpret_cast<Block *>(block);

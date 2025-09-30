@@ -2638,20 +2638,24 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
         }
     }
 
+    // Set regions
+    MlirRegion **regions = NULL;
+    size_t n_regions = 0;
+    if (func_region) {
+        regions = arena_alloc_array(params->arena, MlirRegion*, 1);
+        regions[0] = func_region;
+        n_regions = 1;
+    }
+
     // Create the operation at the end
     MlirOperation *op = mlir_op_create(params->arena, params->op_type, str_lit(""),
                                       attrs, n_attrs,
                                       result_types, n_result_types,
                                       params->lhs_results, params->n_lhs_results,
                                       func_operands, n_func_operands,
-                                      NULL, 0,
+                                      regions, n_regions,
                                       op_location, params->unnumbered_loc_def,
                                       params->trailing_comment, params->source_line_start);
-
-    // Add the region if it exists
-    if (func_region) {
-        mlir_op_add_region(params->arena, op, func_region);
-    }
 
     size_t n_results = 0;
     MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -3297,17 +3301,20 @@ OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserP
     MlirRegion *gpu_region = mlir_region_create(parser->arena);
     mlir_region_add_block(parser->arena, gpu_region, gpu_block);
 
+    // Set regions
+    MlirRegion **regions = arena_alloc_array(params->arena, MlirRegion*, 1);
+    regions[0] = gpu_region;
+    size_t n_regions = 1;
+
     // Create the operation at the end
     MlirOperation *op = mlir_op_create(params->arena, params->op_type, str_lit(""),
                                       attributes, n_attributes,
                                       result_types, n_result_types,
                                       params->lhs_results, params->n_lhs_results,
                                       NULL, 0,
-                                      NULL, 0,
+                                      regions, n_regions,
                                       op_location, params->unnumbered_loc_def,
                                       params->trailing_comment, params->source_line_start);
-
-    mlir_op_add_region(parser->arena, op, gpu_region);
 
     // Create results from the operation's result types
     MlirValue **results = NULL;
