@@ -634,10 +634,6 @@ void mlir_operation_set_attributes(MlirOperation *op, MlirAttribute **attrs, siz
     op->n_attributes = count;
 }
 
-void mlir_operation_set_source_line_start(MlirOperation *op, int64_t line_start) {
-    op->source_line_start = line_start;
-}
-
 void mlir_operation_set_unnumbered_loc_def(MlirOperation *op, MlirLocation *loc) {
     op->unnumbered_loc_def = loc;
 }

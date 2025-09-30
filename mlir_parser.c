@@ -1766,7 +1766,6 @@ MlirOperation* parse_operation(Parser *parser) {
     assert(parsed.operation != NULL);
     MlirOperation *op = parsed.operation;
     n_new_results_from_parser = parsed.n_results;
-    mlir_operation_set_source_line_start(op, recorded_source_line);
     recorded_unnumbered_loc = parser->unnumbered_loc_def;
     mlir_operation_set_unnumbered_loc_def(op, recorded_unnumbered_loc);
 

@@ -207,11 +207,6 @@ MlirRegion *mlir_operation_get_region(const MlirOperation *op, size_t idx) {
     return reinterpret_cast<MlirRegion *>(&cppOp->getRegion(idx));
 }
 
-void mlir_operation_set_source_line_start(MlirOperation *op, int64_t line_start) {
-    (void)op;
-    (void)line_start;
-}
-
 void mlir_operation_set_unnumbered_loc_def(MlirOperation *op, MlirLocation *loc) {
     (void)op;
     (void)loc;
