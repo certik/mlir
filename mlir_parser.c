@@ -1058,7 +1058,7 @@ void set_op_operands(MlirOperation *op, MlirValue **operands, size_t count) {
 }
 
 void set_op_result_types(MlirOperation *op, MlirType **types, size_t count) {
-    mlir_operation_set_result_types(op, types, count);
+    mlir_operation_set_result_types_internal(op, types, count);
 }
 
 const char *string_data_or_null(string s) {
@@ -1093,11 +1093,18 @@ MlirValue **finalize_results(const OperationParserParams *params,
 
     if (n_result_types > 0) {
         results = arena_alloc_array(params->arena, MlirValue*, n_result_types);
+        MlirType **types_array = result_types;
+        if (!types_array) {
+            types_array = arena_alloc_array(params->arena, MlirType*, n_result_types);
+            for (size_t i = 0; i < n_result_types; i++) {
+                types_array[i] = mlir_operation_get_result_type(op, i);
+            }
+        }
         for (size_t i = 0; i < n_result_types; i++) {
             MlirValue *res = mlir_value_create(params->arena, OP_RESULT);
             mlir_value_set_def(res, op);
             mlir_value_set_result_index(res, (uint32_t)i);
-            MlirType *ty = result_types ? result_types[i] : mlir_operation_get_result_type(op, i);
+            MlirType *ty = types_array[i];
             if (ty) {
                 mlir_value_set_type(res, ty);
             }
@@ -1109,7 +1116,7 @@ MlirValue **finalize_results(const OperationParserParams *params,
             }
             results[i] = res;
         }
-        mlir_operation_set_results(op, results, n_results = n_result_types);
+        mlir_operation_set_results_with_types(op, results, types_array, n_results = n_result_types);
     }
 
     if (out_n_results) *out_n_results = n_results;
@@ -1791,7 +1798,9 @@ MlirOperation* parse_operation(Parser *parser) {
 
             MlirValue **results = arena_alloc_array(parser->arena, MlirValue*, 1);
             results[0] = result_value;
-            mlir_operation_set_results(op, results, 1);
+            MlirType **result_types = arena_alloc_array(parser->arena, MlirType*, 1);
+            result_types[0] = res_type;
+            mlir_operation_set_results_with_types(op, results, result_types, 1);
         } else {
             parser_error(parser, str_lit("Result Value parsed on LHS but no Type present on RHS"), parser->first, parser->last);
         }

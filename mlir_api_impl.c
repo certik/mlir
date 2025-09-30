@@ -634,13 +634,14 @@ void mlir_operation_set_results_with_types(MlirOperation *op, MlirValue **result
     op->n_result_types = count;
 }
 
-// Legacy setters kept for backward compatibility
-void mlir_operation_set_result_types(MlirOperation *op, MlirType **types, size_t count) {
+// Internal helper for parser - sets just result types (used during incremental parsing)
+void mlir_operation_set_result_types_internal(MlirOperation *op, MlirType **types, size_t count) {
     op->result_types = types;
     op->n_result_types = count;
 }
 
-void mlir_operation_set_results(MlirOperation *op, MlirValue **results, size_t count) {
+// Internal helper for parser - sets just results (used when counts differ from types)
+void mlir_operation_set_results_internal(MlirOperation *op, MlirValue **results, size_t count) {
     op->results = results;
     op->n_results = count;
 }

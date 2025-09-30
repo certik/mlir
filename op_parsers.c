@@ -3143,8 +3143,10 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
             mlir_value_set_register_name(results[i], string_data_or_null(reg_name), reg_name.size);
         }
         n_results = count;
-        mlir_operation_set_results(op, results, n_results);
-        mlir_operation_set_result_types(op, iter_result_types, n_iter_results);
+        // Special case: results and result_types have different counts
+        // Use separate setters (can't use consolidated API when counts differ)
+        mlir_operation_set_results_internal(op, results, n_results);
+        mlir_operation_set_result_types_internal(op, iter_result_types, n_iter_results);
     }
 
     OperationParserResult out = {
