@@ -883,10 +883,6 @@ bool mlir_type_is_opaque(const MlirType *type) {
     return type->kind == TYPE_KIND_OPAQUE;
 }
 
-void mlir_operation_set_type(MlirOperation *op, OpType type) {
-    op->op_type = type;
-}
-
 #ifdef __cplusplus
 }
 #endif
