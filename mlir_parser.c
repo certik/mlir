@@ -1334,7 +1334,7 @@ void parse_result_types(Parser *parser, MlirType ***result_types, size_t *n_resu
                 } else if (op_for_attributes) {
                     MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
                     types[0] = type;
-                    set_op_result_types(op_for_attributes, types, 1);
+                    mlir_operation_set_results_with_types(op_for_attributes, NULL, types, 1);
                 }
             }
 
@@ -1386,7 +1386,7 @@ void parse_result_types(Parser *parser, MlirType ***result_types, size_t *n_resu
                     } else if (op_for_attributes) {
                         MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
                         types[0] = type;
-                        set_op_result_types(op_for_attributes, types, 1);
+                        mlir_operation_set_results_with_types(op_for_attributes, NULL, types, 1);
                     }
                 }
             } else if (parser_peek(parser, TK_ARROW)) {
@@ -1402,7 +1402,7 @@ void parse_result_types(Parser *parser, MlirType ***result_types, size_t *n_resu
                     } else if (op_for_attributes) {
                         MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
                         types[0] = type;
-                        set_op_result_types(op_for_attributes, types, 1);
+                        mlir_operation_set_results_with_types(op_for_attributes, NULL, types, 1);
                     }
                 }
                 // Record source signature string for classic printing
@@ -1436,7 +1436,7 @@ void parse_result_types(Parser *parser, MlirType ***result_types, size_t *n_resu
                     } else if (op_for_attributes) {
                         MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
                         types[0] = type;
-                        set_op_result_types(op_for_attributes, types, 1);
+                        mlir_operation_set_results_with_types(op_for_attributes, NULL, types, 1);
                     }
                 }
             } else if (parser_peek(parser, TK_COMMA)) {
@@ -1458,7 +1458,7 @@ void parse_result_types(Parser *parser, MlirType ***result_types, size_t *n_resu
                     } else if (op_for_attributes) {
                         MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
                         types[0] = type;
-                        set_op_result_types(op_for_attributes, types, 1);
+                        mlir_operation_set_results_with_types(op_for_attributes, NULL, types, 1);
                     }
                 }
             }
@@ -1478,7 +1478,7 @@ void parse_result_types(Parser *parser, MlirType ***result_types, size_t *n_resu
             } else if (op_for_attributes) {
                 MlirType **types = arena_alloc_array(parser->arena, MlirType*, 1);
                 types[0] = type;
-                set_op_result_types(op_for_attributes, types, 1);
+                mlir_operation_set_results_with_types(op_for_attributes, NULL, types, 1);
             }
         }
     }

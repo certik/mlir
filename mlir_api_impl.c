@@ -639,12 +639,6 @@ void mlir_operation_set_attributes(MlirOperation *op, MlirAttribute **attrs, siz
     op->n_attributes = count;
 }
 
-// Internal helper for parser - sets just result types during incremental parsing
-void set_op_result_types(MlirOperation *op, MlirType **types, size_t count) {
-    op->result_types = types;
-    op->n_result_types = count;
-}
-
 void mlir_operation_set_operands(MlirOperation *op, MlirValue **operands, size_t count) {
     op->operands = operands;
     op->n_operands = count;

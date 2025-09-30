@@ -110,7 +110,6 @@ bool parse_type_string(Parser *parser, string *out);
 void consume_optional_hash_selector(Parser *parser);
 void set_op_attributes(MlirOperation *op, MlirAttribute **attrs, size_t count);
 void set_op_operands(MlirOperation *op, MlirValue **operands, size_t count);
-void set_op_result_types(MlirOperation *op, MlirType **types, size_t count); // Internal parser helper
 const char *string_data_or_null(string s);
 
 bool parse_register_operand(Parser *parser, VecValue *operands, bool allow_hash_selector);
