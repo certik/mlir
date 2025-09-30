@@ -1492,27 +1492,26 @@ MlirLocation *parse_optional_location(Parser *parser) {
     return NULL;
 }
 
-void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op) {
-    MlirAttribute **attrs = NULL;
-    size_t n_attrs = 0;
-    size_t attrs_capacity = 0;
-
+void parse_generic_attrs_and_result_type(Parser *parser,
+                                          MlirAttribute ***attributes,
+                                          size_t *n_attributes,
+                                          size_t *attributes_capacity,
+                                          MlirType ***result_types,
+                                          size_t *n_result_types,
+                                          MlirLocation **location,
+                                          OpType op_type) {
     // Parse attributes from both <{...}> and {...} blocks
-    parse_angle_brace_attributes(parser, &attrs, &n_attrs, &attrs_capacity);
-    parse_brace_attributes(parser, &attrs, &n_attrs, &attrs_capacity);
+    // These functions will append to existing arrays if provided
+    parse_angle_brace_attributes(parser, attributes, n_attributes, attributes_capacity);
+    parse_brace_attributes(parser, attributes, n_attributes, attributes_capacity);
 
-    // Set attributes on operation if any were parsed
-    if (n_attrs > 0) {
-        set_op_attributes(op, attrs, n_attrs);
-    }
-
-    // Parse result types directly on the existing operation
-    parse_result_types(parser, NULL, NULL, NULL, NULL, NULL, mlir_operation_get_type(op), op);
+    // Parse result types using output parameters
+    parse_result_types(parser, result_types, n_result_types, attributes, n_attributes, attributes_capacity, op_type, NULL);
 
     // Parse optional location
-    MlirLocation *location = parse_optional_location(parser);
-    if (location) {
-        mlir_operation_set_location(op, location);
+    MlirLocation *parsed_location = parse_optional_location(parser);
+    if (parsed_location && location) {
+        *location = parsed_location;
     }
 }
 

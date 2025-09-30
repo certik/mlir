@@ -132,10 +132,16 @@ void parse_result_types(Parser *parser, MlirType ***result_types, size_t *n_resu
                               MlirAttribute ***attributes, size_t *n_attributes, size_t *attributes_capacity,
                               OpType op_type, MlirOperation *op_for_attributes);
 MlirLocation *parse_optional_location(Parser *parser);
-void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op);
+void parse_generic_attrs_and_result_type(Parser *parser,
+                                          MlirAttribute ***attributes,
+                                          size_t *n_attributes,
+                                          size_t *attributes_capacity,
+                                          MlirType ***result_types,
+                                          size_t *n_result_types,
+                                          MlirLocation **location,
+                                          OpType op_type);
 
 void consume_optional_hash_selector(Parser *parser);
-void parse_generic_attrs_and_result_type(Parser *parser, MlirOperation *op);
 
 string op_type_to_string(OpType type);
 OpType op_string_to_type(string name);
