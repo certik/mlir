@@ -3132,21 +3132,26 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
     MlirValue **results = NULL;
     size_t n_results = 0;
     if (n_iter_results > 0 && params->n_lhs_results > 0) {
-        size_t count = params->n_lhs_results < n_iter_results ? params->n_lhs_results : n_iter_results;
-        results = arena_alloc_array(params->arena, MlirValue*, count);
-        for (size_t i = 0; i < count; i++) {
-            results[i] = mlir_value_create(params->arena, OP_RESULT);
-            mlir_value_set_def(results[i], op);
-            mlir_value_set_result_index(results[i], (uint32_t)i);
-            mlir_value_set_type(results[i], iter_result_types[i]);
-            string reg_name = mlir_value_get_register_name(params->lhs_results[i]);
-            mlir_value_set_register_name(results[i], string_data_or_null(reg_name), reg_name.size);
+        // lhs_results now contains the correct count matching n_iter_results
+        // (expanded when parsing %reg:N syntax)
+        results = params->lhs_results;
+        n_results = params->n_lhs_results;
+
+        // Set def and types on named results; set unnamed results to NULL so they print as %_
+        for (size_t i = 0; i < n_results; i++) {
+            string reg_name = mlir_value_get_register_name(results[i]);
+            if (reg_name.size > 0) {
+                // Named result: set def and type
+                mlir_value_set_def(results[i], op);
+                mlir_value_set_type(results[i], iter_result_types[i]);
+            } else {
+                // Unnamed result: set to NULL so it prints as %_
+                results[i] = NULL;
+            }
         }
-        n_results = count;
-        // Special case: results and result_types have different counts
-        // Use separate setters (can't use consolidated API when counts differ)
-        mlir_operation_set_results_internal(op, results, n_results);
-        mlir_operation_set_result_types_internal(op, iter_result_types, n_iter_results);
+
+        // Use consolidated API now that counts match
+        mlir_operation_set_results_with_types(op, results, iter_result_types, n_results);
     }
 
     OperationParserResult out = {
