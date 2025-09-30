@@ -222,14 +222,6 @@ void mlir_op_add_operand(Arena *arena, MlirOperation *op, MlirValue *operand) {
     op->n_operands++;
 }
 
-void mlir_op_add_result(Arena *arena, MlirOperation *op, MlirValue *result) {
-    struct MlirValue **new_results = arena_alloc_array(arena, struct MlirValue*, op->n_results + 1);
-    if (op->results) memcpy(new_results, op->results, op->n_results * sizeof(struct MlirValue*));
-    new_results[op->n_results] = result;
-    op->results = new_results;
-    op->n_results++;
-}
-
 void mlir_block_add_operation(Arena *arena, MlirBlock *block, MlirOperation *op) {
     MlirOperation **new_ops = arena_alloc_array(arena, MlirOperation*, block->n_operations + 1);
     if (block->operations) memcpy(new_ops, block->operations, block->n_operations * sizeof(MlirOperation*));

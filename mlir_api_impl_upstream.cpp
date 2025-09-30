@@ -137,13 +137,6 @@ void mlir_op_add_operand(Arena *arena, MlirOperation *op, MlirValue *operand) {
     cppOp->insertOperands(cppOp->getNumOperands(), cppVal);
 }
 
-void mlir_op_add_result(Arena *arena, MlirOperation *op, MlirValue *result) {
-    (void)arena;
-    Operation *cppOp = reinterpret_cast<Operation *>(op);
-    Value cppVal = *reinterpret_cast<Value *>(result);
-    cppOp->insertResults(cppOp->getNumResults(), cppVal.getType());
-}
-
 void mlir_block_add_operation(Arena *arena, MlirBlock *block, MlirOperation *op) {
     (void)arena;
     Block *cppBlock = reinterpret_cast<Block *>(block);
