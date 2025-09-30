@@ -2114,8 +2114,15 @@ OperationParserResult parse_tensor_collapse_shape_op(Parser *parser, const Opera
     return out;
 }
 
-static void parse_generic_operation_impl(Parser *parser, MlirOperation *op) {
-    // Remember the start of this operation's source line for accurate comment capture
+OperationParserResult parse_generic_op(Parser *parser, const OperationParserParams *params) {
+    string opname = (params->op_type == OP_TYPE_UNREGISTERED && params->opname.size > 0)
+        ? params->opname
+        : str_lit("");
+
+    // Collect all data before creating operation (inlined from parse_generic_operation_impl)
+
+    // Remember the start of this operation's source line
+    int64_t source_line_start;
     {
         int64_t pos = (int64_t)parser->first;
         while (pos > 0) {
@@ -2123,9 +2130,10 @@ static void parse_generic_operation_impl(Parser *parser, MlirOperation *op) {
             if (c == '\n' || c == '\r') break;
             pos--;
         }
-        mlir_operation_set_source_line_start(op, pos);
+        source_line_start = pos;
     }
-    // Skip non-structural tokens (e.g., cmp predicates) until operands/attrs/types
+
+    // Skip non-structural tokens until operands/attrs/types
     while (!parser_peek(parser, TK_EOF) &&
            !(parser_peek(parser, TK_REGISTER) || parser_peek(parser, TK_LBRACKET) ||
              parser_peek(parser, TK_COLON) || parser_peek(parser, TK_LBRACE) ||
@@ -2134,7 +2142,7 @@ static void parse_generic_operation_impl(Parser *parser, MlirOperation *op) {
         parser_next_token(parser);
     }
 
-    // Parse operands until attributes, result type, or region begin
+    // Parse operands
     VecValue operands;
     VecValue_reserve(parser->arena, &operands, 4);
 
@@ -2147,11 +2155,11 @@ static void parse_generic_operation_impl(Parser *parser, MlirOperation *op) {
             MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
             if (!operand) {
                 parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
-                return;
+                OperationParserResult empty = {NULL, NULL, 0, NULL};
+                return empty;
             }
             VecValue_push_back(parser->arena, &operands, operand);
         } else if (parser_peek(parser, TK_LBRACKET)) {
-            // Skip indexing syntax like [%arg1]
             parser_expect(parser, TK_LBRACKET);
             while (!parser_peek(parser, TK_RBRACKET) && !parser_peek(parser, TK_EOF)) {
                 if (parser_peek(parser, TK_REGISTER)) {
@@ -2160,7 +2168,8 @@ static void parse_generic_operation_impl(Parser *parser, MlirOperation *op) {
                     MlirValue *operand2 = symbol_table_lookup(&parser->symbol_table, reg_str2);
                     if (!operand2) {
                         parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
-                        return;
+                        OperationParserResult empty = {NULL, NULL, 0, NULL};
+                        return empty;
                     }
                     VecValue_push_back(parser->arena, &operands, operand2);
                 } else {
@@ -2177,17 +2186,30 @@ static void parse_generic_operation_impl(Parser *parser, MlirOperation *op) {
         }
     }
 
-    set_op_operands(op, operands.data, operands.size);
+    // Collect attributes, result types, and location
+    MlirAttribute **attributes = NULL;
+    size_t n_attributes = 0;
+    size_t attributes_capacity = 0;
+    MlirType **result_types = NULL;
+    size_t n_result_types = 0;
+    MlirLocation *op_location = NULL;
 
-    // Attributes and result types are parsed generically later
-    // Handle generic attributes and result types before scanning for regions
-    parse_generic_attrs_and_result_type(parser, op);
-    // Capture trailing loc() immediately if present to avoid getting skipped
+    // Parse attributes and result types (inline parse_generic_attrs_and_result_type #1)
+    parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+    parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+    parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
+    MlirLocation *loc1 = parse_optional_location(parser);
+    if (loc1) op_location = loc1;
+
+    // Capture trailing loc() if present
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        mlir_operation_set_location(op, parse_loc(parser));
+        op_location = parse_loc(parser);
     }
 
-    // Parse regions (if any), for now we assume 0 or 1 regions
+    // Parse regions
+    MlirRegion **regions = NULL;
+    size_t n_regions = 0;
+
     while (!(parser_peek(parser, TK_LBRACE_END)
              || parser_peek(parser, TK_NEWLINE)
              || parser_peek(parser, TK_LPAREN_BRACE))) {
@@ -2199,12 +2221,24 @@ static void parse_generic_operation_impl(Parser *parser, MlirOperation *op) {
         parser_next_token(parser);
     }
     if (parser_peek(parser, TK_LBRACE_END)) {
-        // Before consuming a region, parse any trailing attributes/result types
-        parse_generic_attrs_and_result_type(parser, op);
+        // Parse attributes/result types before region (inline parse_generic_attrs_and_result_type #2)
+        parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+        parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+        parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
+        MlirLocation *loc2 = parse_optional_location(parser);
+        if (loc2) op_location = loc2;
+
         MlirRegion *region = parse_region(parser);
-        mlir_op_add_region(parser->arena, op, region);
-        // After region, there can be another signature/attrs like ": (tys) -> ty"
-        parse_generic_attrs_and_result_type(parser, op);
+        regions = arena_alloc_array(parser->arena, MlirRegion*, 1);
+        regions[0] = region;
+        n_regions = 1;
+
+        // Parse attributes/result types after region (inline parse_generic_attrs_and_result_type #3)
+        parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+        parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
+        parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
+        MlirLocation *loc3 = parse_optional_location(parser);
+        if (loc3) op_location = loc3;
     }
     if (lparen_brace) {
         parser_expect(parser, TK_RPAREN);
@@ -2212,37 +2246,32 @@ static void parse_generic_operation_impl(Parser *parser, MlirOperation *op) {
             parser_next_token(parser);
         }
     }
-    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-        mlir_operation_set_location(op, parse_loc(parser));
-    }
-}
-OperationParserResult parse_generic_op(Parser *parser, const OperationParserParams *params) {
-    string opname = (params->op_type == OP_TYPE_UNREGISTERED && params->opname.size > 0)
-        ? params->opname
-        : str_lit("");
 
+    // Final location check
+    if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
+        op_location = parse_loc(parser);
+    }
+
+    // Use fallback location if none was parsed
+    if (!op_location) op_location = params->unnumbered_loc_def;
+
+    // NOW create the operation with all collected data
     MlirOperation *op = mlir_op_create(
         params->arena,
         params->op_type,
         opname,
-        NULL, 0,
-        NULL, 0,
+        attributes, n_attributes,
+        result_types, n_result_types,
         params->lhs_results,
         params->n_lhs_results,
-        NULL, 0,
-        NULL, 0,
-        NULL,
+        operands.data, operands.size,
+        regions, n_regions,
+        op_location,
         params->unnumbered_loc_def,
         str_lit(""),
-        params->source_line_start);
+        source_line_start);
 
-    parse_generic_operation_impl(parser, op);
-
-    MlirLocation *op_location = mlir_operation_get_location(op);
-    if (!op_location) op_location = params->unnumbered_loc_def;
-    if (op_location) mlir_operation_set_location(op, op_location);
-
-    size_t n_result_types = mlir_operation_num_result_types(op);
+    // Finalize results
     size_t n_results = 0;
     MlirValue **results = finalize_results(params, op, NULL, n_result_types, &n_results);
 
