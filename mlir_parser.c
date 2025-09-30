@@ -1053,9 +1053,7 @@ void set_op_attributes(MlirOperation *op, MlirAttribute **attrs, size_t count) {
     mlir_operation_set_attributes(op, attrs, count);
 }
 
-void set_op_operands(MlirOperation *op, MlirValue **operands, size_t count) {
-    mlir_operation_set_operands(op, operands, count);
-}
+
 
 const char *string_data_or_null(string s) {
     return s.size > 0 ? s.str : NULL;

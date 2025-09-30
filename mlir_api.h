@@ -181,7 +181,6 @@ void mlir_op_add_operand(Arena *arena, MlirOperation *op, MlirValue *operand);
 void mlir_op_add_result(Arena *arena, MlirOperation *op, MlirValue *result);
 
 // Property setters
-void mlir_operation_set_operands(MlirOperation *op, MlirValue **operands, size_t count);
 
 // Consolidated setter for results and their types
 void mlir_operation_set_results_with_types(MlirOperation *op, MlirValue **results, MlirType **result_types, size_t count);
