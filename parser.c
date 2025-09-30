@@ -43,8 +43,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     //MlirType *i64_type = mlir_type_create_integer(arena, 64, true);
 
     // Create module operation
-    MlirOperation *module = mlir_op_create(arena, OP_TYPE_MODULE, str_lit(""), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
-    mlir_operation_set_name(module, "module", 6);
+    MlirOperation *module = mlir_op_create(arena, OP_TYPE_MODULE, str_lit("module"), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
 
     // Create module region
     MlirRegion *module_region = mlir_region_create(arena);
@@ -56,8 +55,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     mlir_op_add_region(arena, module, module_region);
 
     // Create function operation
-    MlirOperation *func_op = mlir_op_create(arena, OP_TYPE_FUNC_FUNC, str_lit(""), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
-    mlir_operation_set_name(func_op, "func.func", 9);
+    MlirOperation *func_op = mlir_op_create(arena, OP_TYPE_FUNC_FUNC, str_lit("func.func"), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
 
     // Function attributes (sym_name)
     MlirAttribute *sym_name_attr = mlir_attribute_create_string(arena, "example_func", 12);
@@ -85,8 +83,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
 
     // Create operations in function block
     // %0 = arith.constant 5 : i32
-    MlirOperation *const_op = mlir_op_create(arena, OP_TYPE_ARITH_CONSTANT, str_lit(""), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
-    mlir_operation_set_name(const_op, "arith.constant", 14);
+    MlirOperation *const_op = mlir_op_create(arena, OP_TYPE_ARITH_CONSTANT, str_lit("arith.constant"), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
 
     // Set result types
     MlirType **const_result_types = arena_alloc_array(arena, MlirType*, 1);

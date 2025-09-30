@@ -2217,10 +2217,14 @@ static void parse_generic_operation_impl(Parser *parser, MlirOperation *op) {
     }
 }
 OperationParserResult parse_generic_op(Parser *parser, const OperationParserParams *params) {
+    string opname = (params->op_type == OP_TYPE_UNREGISTERED && params->opname.size > 0)
+        ? params->opname
+        : str_lit("");
+
     MlirOperation *op = mlir_op_create(
         params->arena,
         params->op_type,
-        str_lit(""),
+        opname,
         NULL, 0,
         NULL, 0,
         params->lhs_results,
@@ -2231,10 +2235,6 @@ OperationParserResult parse_generic_op(Parser *parser, const OperationParserPara
         params->unnumbered_loc_def,
         str_lit(""),
         params->source_line_start);
-
-    if (params->op_type == OP_TYPE_UNREGISTERED && params->opname.size > 0) {
-        mlir_operation_set_name(op, params->opname.str, params->opname.size);
-    }
 
     parse_generic_operation_impl(parser, op);
 
