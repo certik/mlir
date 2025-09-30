@@ -214,14 +214,6 @@ void mlir_op_add_region(Arena *arena, MlirOperation *op, MlirRegion *region) {
     op->n_regions++;
 }
 
-void mlir_op_add_operand(Arena *arena, MlirOperation *op, MlirValue *operand) {
-    struct MlirValue **new_operands = arena_alloc_array(arena, struct MlirValue*, op->n_operands + 1);
-    if (op->operands) memcpy(new_operands, op->operands, op->n_operands * sizeof(struct MlirValue*));
-    new_operands[op->n_operands] = operand;
-    op->operands = new_operands;
-    op->n_operands++;
-}
-
 void mlir_block_add_operation(Arena *arena, MlirBlock *block, MlirOperation *op) {
     MlirOperation **new_ops = arena_alloc_array(arena, MlirOperation*, block->n_operations + 1);
     if (block->operations) memcpy(new_ops, block->operations, block->n_operations * sizeof(MlirOperation*));

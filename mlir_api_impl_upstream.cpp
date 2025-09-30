@@ -130,13 +130,6 @@ void mlir_op_add_region(Arena *arena, MlirOperation *op, MlirRegion *region) {
     cppOp->getRegions().push_back(cppRegion);
 }
 
-void mlir_op_add_operand(Arena *arena, MlirOperation *op, MlirValue *operand) {
-    (void)arena;
-    Operation *cppOp = reinterpret_cast<Operation *>(op);
-    Value cppVal = *reinterpret_cast<Value *>(operand);
-    cppOp->insertOperands(cppOp->getNumOperands(), cppVal);
-}
-
 void mlir_block_add_operation(Arena *arena, MlirBlock *block, MlirOperation *op) {
     (void)arena;
     Block *cppBlock = reinterpret_cast<Block *>(block);
