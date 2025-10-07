@@ -172,7 +172,7 @@ void mlir_api_init(MlirOperation *root) {
     // No initialization required for the native C implementation.
 }
 
-MlirOperation *mlir_operation_create(
+MlirOperation *mlir_op_create(
     Arena *arena,
     OpType type,
     string opname,
@@ -264,64 +264,64 @@ MlirOperation *mlir_block_get_operation(const MlirBlock *block, size_t idx) {
     return block->operations[idx];
 }
 
-OpType mlir_operation_get_type(const MlirOperation *op) {
+OpType mlir_op_get_type(const MlirOperation *op) {
     return op->op_type;
 }
 
-size_t mlir_operation_num_regions(const MlirOperation *op) {
+size_t mlir_op_num_regions(const MlirOperation *op) {
     return op->n_regions;
 }
 
-MlirRegion *mlir_operation_get_region(const MlirOperation *op, size_t idx) {
+MlirRegion *mlir_op_get_region(const MlirOperation *op, size_t idx) {
     return op->regions[idx];
 }
 
-string mlir_operation_get_trailing_comment(const MlirOperation *op) {
+string mlir_op_get_trailing_comment(const MlirOperation *op) {
     return op->trailing_comment;
 }
 
 // Additional accessors for printer support
-size_t mlir_operation_num_attributes(const MlirOperation *op) {
+size_t mlir_op_num_attributes(const MlirOperation *op) {
     return op->n_attributes;
 }
 
-MlirAttribute *mlir_operation_get_attribute(const MlirOperation *op, size_t idx) {
+MlirAttribute *mlir_op_get_attribute(const MlirOperation *op, size_t idx) {
     return op->attributes[idx];
 }
 
-size_t mlir_operation_num_operands(const MlirOperation *op) {
+size_t mlir_op_num_operands(const MlirOperation *op) {
     return op->n_operands;
 }
 
-MlirValue *mlir_operation_get_operand(const MlirOperation *op, size_t idx) {
+MlirValue *mlir_op_get_operand(const MlirOperation *op, size_t idx) {
     return op->operands[idx];
 }
 
-size_t mlir_operation_num_results(const MlirOperation *op) {
+size_t mlir_op_num_results(const MlirOperation *op) {
     return op->n_results;
 }
 
-MlirValue *mlir_operation_get_result(const MlirOperation *op, size_t idx) {
+MlirValue *mlir_op_get_result(const MlirOperation *op, size_t idx) {
     return op->results[idx];
 }
 
-MlirLocation *mlir_operation_get_location(const MlirOperation *op) {
+MlirLocation *mlir_op_get_location(const MlirOperation *op) {
     return op->location;
 }
 
-string mlir_operation_get_name(const MlirOperation *op) {
+string mlir_op_get_name(const MlirOperation *op) {
     return op->opname;
 }
 
-string mlir_operation_get_name_string(const MlirOperation *op) {
+string mlir_op_get_name_string(const MlirOperation *op) {
     return op->opname;
 }
 
-size_t mlir_operation_num_result_types(const MlirOperation *op) {
+size_t mlir_op_num_result_types(const MlirOperation *op) {
     return op->n_result_types;
 }
 
-MlirType *mlir_operation_get_result_type(const MlirOperation *op, size_t idx) {
+MlirType *mlir_op_get_result_type(const MlirOperation *op, size_t idx) {
     return op->result_types[idx];
 }
 
@@ -616,7 +616,7 @@ MlirRegion *mlir_region_create(Arena *arena) {
     return region;
 }
 
-void mlir_operation_append_attribute(Arena *arena, MlirOperation *op, MlirAttribute *attr) {
+void mlir_op_append_attribute(Arena *arena, MlirOperation *op, MlirAttribute *attr) {
     size_t new_count = op->n_attributes + 1;
     struct MlirAttribute **new_attrs = arena_alloc_array(arena, struct MlirAttribute*, new_count);
     if (op->attributes) {
@@ -627,11 +627,11 @@ void mlir_operation_append_attribute(Arena *arena, MlirOperation *op, MlirAttrib
     op->n_attributes = new_count;
 }
 
-int64_t mlir_operation_get_source_line_start(const MlirOperation *op) {
+int64_t mlir_op_get_source_line_start(const MlirOperation *op) {
     return op->source_line_start;
 }
 
-MlirLocation *mlir_operation_get_unnumbered_loc_def(const MlirOperation *op) {
+MlirLocation *mlir_op_get_unnumbered_loc_def(const MlirOperation *op) {
     return op->unnumbered_loc_def;
 }
 

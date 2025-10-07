@@ -163,7 +163,7 @@ void mlir_api_init(MlirOperation *root);
 // -----------------------------------------------------------------------------
 
 // Creation & structural mutation
-MlirOperation *mlir_operation_create(
+MlirOperation *mlir_op_create(
     Arena *arena,
     OpType type,
     string opname,
@@ -176,26 +176,26 @@ MlirOperation *mlir_operation_create(
     MlirLocation *unnumbered_loc_def,
     string trailing_comment,
     int64_t source_line_start);
-void mlir_operation_append_attribute(Arena *arena, MlirOperation *op, MlirAttribute *attr);
+void mlir_op_append_attribute(Arena *arena, MlirOperation *op, MlirAttribute *attr);
 
 // Accessors
-OpType mlir_operation_get_type(const MlirOperation *op);
-string mlir_operation_get_name(const MlirOperation *op);
-string mlir_operation_get_name_string(const MlirOperation *op);
-MlirLocation *mlir_operation_get_location(const MlirOperation *op);
-string mlir_operation_get_trailing_comment(const MlirOperation *op);
-int64_t mlir_operation_get_source_line_start(const MlirOperation *op);
-MlirLocation *mlir_operation_get_unnumbered_loc_def(const MlirOperation *op);
-size_t mlir_operation_num_operands(const MlirOperation *op);
-MlirValue *mlir_operation_get_operand(const MlirOperation *op, size_t idx);
-size_t mlir_operation_num_results(const MlirOperation *op);
-MlirValue *mlir_operation_get_result(const MlirOperation *op, size_t idx);
-size_t mlir_operation_num_result_types(const MlirOperation *op);
-MlirType *mlir_operation_get_result_type(const MlirOperation *op, size_t idx);
-size_t mlir_operation_num_attributes(const MlirOperation *op);
-MlirAttribute *mlir_operation_get_attribute(const MlirOperation *op, size_t idx);
-size_t mlir_operation_num_regions(const MlirOperation *op);
-MlirRegion *mlir_operation_get_region(const MlirOperation *op, size_t idx);
+OpType mlir_op_get_type(const MlirOperation *op);
+string mlir_op_get_name(const MlirOperation *op);
+string mlir_op_get_name_string(const MlirOperation *op);
+MlirLocation *mlir_op_get_location(const MlirOperation *op);
+string mlir_op_get_trailing_comment(const MlirOperation *op);
+int64_t mlir_op_get_source_line_start(const MlirOperation *op);
+MlirLocation *mlir_op_get_unnumbered_loc_def(const MlirOperation *op);
+size_t mlir_op_num_operands(const MlirOperation *op);
+MlirValue *mlir_op_get_operand(const MlirOperation *op, size_t idx);
+size_t mlir_op_num_results(const MlirOperation *op);
+MlirValue *mlir_op_get_result(const MlirOperation *op, size_t idx);
+size_t mlir_op_num_result_types(const MlirOperation *op);
+MlirType *mlir_op_get_result_type(const MlirOperation *op, size_t idx);
+size_t mlir_op_num_attributes(const MlirOperation *op);
+MlirAttribute *mlir_op_get_attribute(const MlirOperation *op, size_t idx);
+size_t mlir_op_num_regions(const MlirOperation *op);
+MlirRegion *mlir_op_get_region(const MlirOperation *op, size_t idx);
 
 // -----------------------------------------------------------------------------
 // Region API

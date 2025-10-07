@@ -826,7 +826,7 @@ MlirOperation* parse_module(Parser *parser) {
     }
 
     MlirOperation *op = parse_operation(parser);
-    if (mlir_operation_get_type(op) != OP_TYPE_MODULE) {
+    if (mlir_op_get_type(op) != OP_TYPE_MODULE) {
         parser_error(parser, str_lit("The top level operation should be a module"), 0, 0);
     }
 
@@ -1031,7 +1031,7 @@ MlirValue **finalize_results(const OperationParserParams *params,
     size_t n_results = 0;
 
     if (result_types == NULL && op) {
-        n_result_types = mlir_operation_num_result_types(op);
+        n_result_types = mlir_op_num_result_types(op);
     }
 
     if (n_result_types > 0) {
@@ -1040,7 +1040,7 @@ MlirValue **finalize_results(const OperationParserParams *params,
         if (!types_array && op) {
             types_array = arena_alloc_array(params->arena, MlirType*, n_result_types);
             for (size_t i = 0; i < n_result_types; i++) {
-                types_array[i] = mlir_operation_get_result_type(op, i);
+                types_array[i] = mlir_op_get_result_type(op, i);
             }
         }
         for (size_t i = 0; i < n_result_types; i++) {
@@ -1077,7 +1077,7 @@ MlirAttribute *create_bool_attr(Parser *parser, string name, bool value) {
 
 void operation_append_attribute(Parser *parser, MlirOperation *op, MlirAttribute *attr) {
     if (!attr) return;
-    mlir_operation_append_attribute(parser->arena, op, attr);
+    mlir_op_append_attribute(parser->arena, op, attr);
 }
 
 MlirValue *lookup_or_create_value(Parser *parser, string reg, string default_type) {
@@ -1109,11 +1109,11 @@ void append_attr(Parser *parser, MlirAttribute ***attrs, size_t *n, size_t *cap,
 }
 
 void attr_list_init_from_op(Parser *parser, MlirOperation *op, MlirAttribute ***attrs, size_t *n, size_t *cap) {
-    size_t count = mlir_operation_num_attributes(op);
+    size_t count = mlir_op_num_attributes(op);
     if (count > 0) {
         *cap = count + 4;
         *attrs = arena_alloc_array(parser->arena, MlirAttribute*, *cap);
-        for (size_t i = 0; i < count; i++) (*attrs)[i] = mlir_operation_get_attribute(op, i);
+        for (size_t i = 0; i < count; i++) (*attrs)[i] = mlir_op_get_attribute(op, i);
         *n = count;
     }
 }
@@ -1726,7 +1726,7 @@ MlirOperation* parse_operation(Parser *parser) {
                 string reg_name = mlir_value_get_register_name(parsed.results[i]);
                 if (reg_name.size > 0) {
                     // Only process results with names
-                    // (Type is auto-synced by mlir_operation_create)
+                    // (Type is auto-synced by mlir_op_create)
                     symbol_table_add_value(parser->arena, &parser->symbol_table, reg_name, parsed.results[i]);
                 }
             }
@@ -1735,8 +1735,8 @@ MlirOperation* parse_operation(Parser *parser) {
         // Operation produces results but no SSA name was provided - this is invalid MLIR
         parser_error(parser, str_lit("Operation produces results but no SSA name provided on left-hand side"), parser->first, parser->last);
     } else if (result_value) {
-        if (mlir_operation_num_result_types(op) > 0) {
-            // Type is auto-synced by mlir_operation_create
+        if (mlir_op_num_result_types(op) > 0) {
+            // Type is auto-synced by mlir_op_create
             symbol_table_add_value(parser->arena, &parser->symbol_table, mlir_value_get_register_name(result_value), result_value);
         } else {
             parser_error(parser, str_lit("Result Value parsed on LHS but no Type present on RHS"), parser->first, parser->last);
@@ -1747,7 +1747,7 @@ MlirOperation* parse_operation(Parser *parser) {
     // This conservative approach avoids the comment duplication issue
     bool should_capture = false;
 
-    if (should_capture && mlir_operation_get_trailing_comment(op).size == 0) {
+    if (should_capture && mlir_op_get_trailing_comment(op).size == 0) {
         // Only capture comments if we can find "//" in the rest of the current line
         // after some whitespace (to ensure it belongs to this operation)
         string text = str_from_cstr_view((char*)parser->input);
