@@ -112,12 +112,6 @@ struct MlirValue {
     struct MlirType *type;
     string register_name;
     struct MlirLocation *location;
-    bool has_divisibility;
-    int64_t divisibility_value;
-    struct MlirType *divisibility_type;
-    bool has_max_divisibility;
-    int64_t max_divisibility_value;
-    struct MlirType *max_divisibility_type;
 };
 
 struct MlirOperation {
@@ -336,30 +330,6 @@ MlirValue *mlir_block_get_argument(const MlirBlock *block, size_t idx) {
 // Value metadata accessors
 MlirLocation *mlir_value_get_location(const MlirValue *value) {
     return value->location;
-}
-
-bool mlir_value_has_divisibility(const MlirValue *value) {
-    return value->has_divisibility;
-}
-
-int64_t mlir_value_get_divisibility_value(const MlirValue *value) {
-    return value->divisibility_value;
-}
-
-MlirType *mlir_value_get_divisibility_type(const MlirValue *value) {
-    return value->divisibility_type;
-}
-
-bool mlir_value_has_max_divisibility(const MlirValue *value) {
-    return value->has_max_divisibility;
-}
-
-int64_t mlir_value_get_max_divisibility_value(const MlirValue *value) {
-    return value->max_divisibility_value;
-}
-
-MlirType *mlir_value_get_max_divisibility_type(const MlirValue *value) {
-    return value->max_divisibility_type;
 }
 
 // Type to string
@@ -589,18 +559,6 @@ MlirValue *mlir_value_create_op_result(Arena *arena, void *def, uint32_t result_
     value->register_name = register_name;
     value->location = location;
     return value;
-}
-
-void mlir_value_set_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type) {
-    value->has_divisibility = has_value;
-    value->divisibility_value = div_value;
-    value->divisibility_type = type;
-}
-
-void mlir_value_set_max_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type) {
-    value->has_max_divisibility = has_value;
-    value->max_divisibility_value = div_value;
-    value->max_divisibility_type = type;
 }
 
 // Block and Region creation

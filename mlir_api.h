@@ -240,18 +240,6 @@ uint32_t mlir_value_get_result_index(const MlirValue *value);
 MlirOperation *mlir_value_get_def_op(const MlirValue *value);
 MlirLocation *mlir_value_get_location(const MlirValue *value);
 
-// Triton Setters/Mutation
-void mlir_value_set_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type);
-void mlir_value_set_max_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type);
-
-// Triton Accessors
-bool mlir_value_has_divisibility(const MlirValue *value);
-int64_t mlir_value_get_divisibility_value(const MlirValue *value);
-MlirType *mlir_value_get_divisibility_type(const MlirValue *value);
-bool mlir_value_has_max_divisibility(const MlirValue *value);
-int64_t mlir_value_get_max_divisibility_value(const MlirValue *value);
-MlirType *mlir_value_get_max_divisibility_type(const MlirValue *value);
-
 // -----------------------------------------------------------------------------
 // Type API
 // -----------------------------------------------------------------------------

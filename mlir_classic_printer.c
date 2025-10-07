@@ -248,31 +248,8 @@ static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int inde
                                                             (int64_t)mlir_value_get_result_index(arg), mlir_type_to_string(arena, arg_ty)));
                 }
 
-                // Append complex divisibility annotations if present
-                bool opened = false;
-                if (mlir_value_has_divisibility(arg)) {
-                    if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
-                    result = str_concat(arena, result, str_lit("tt.divisibility = "));
-                    result = str_concat(arena, result, format(arena, str_lit("{}"), (int64_t)mlir_value_get_divisibility_value(arg)));
-                    // If a type is available, print it as classic " : <type>"
-                    MlirType *dt = mlir_value_get_divisibility_type(arg);
-                    if (dt) {
-                        result = str_concat(arena, result, str_lit(" : "));
-                        result = str_concat(arena, result, mlir_type_to_string(arena, dt));
-                    }
-                }
-                if (mlir_value_has_max_divisibility(arg)) {
-                    if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
-                    else { result = str_concat(arena, result, str_lit(", ")); }
-                    result = str_concat(arena, result, str_lit("tt.max_divisibility = "));
-                    result = str_concat(arena, result, format(arena, str_lit("{}"), (int64_t)mlir_value_get_max_divisibility_value(arg)));
-                    MlirType *mdt = mlir_value_get_max_divisibility_type(arg);
-                    if (mdt) {
-                        result = str_concat(arena, result, str_lit(" : "));
-                        result = str_concat(arena, result, mlir_type_to_string(arena, mdt));
-                    }
-                }
-                if (opened) { result = str_concat(arena, result, str_lit("}")); }
+                // Note: Block arguments in control flow blocks don't have tt.divisibility attributes.
+                // Those are only on tt.func operation's arguments (which are stored as operands).
 
                 // Append argument location if present
                 MlirLocation *arg_loc = mlir_value_get_location(arg);
@@ -818,24 +795,25 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, str_lit(": "));
                     MlirType *arg_type = mlir_value_get_type(arg);
                     if (arg_type) result = str_concat(arena, result, mlir_type_to_string(arena, arg_type));
-                    // Divisibility and max_divisibility
-                    bool opened = false;
-                    if (mlir_value_has_divisibility(arg)) {
-                        if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
-                        result = str_concat(arena, result, str_lit("tt.divisibility = "));
-                        result = str_concat(arena, result, format(arena, str_lit("{}"), (int64_t)mlir_value_get_divisibility_value(arg)));
-                        MlirType *dt = mlir_value_get_divisibility_type(arg);
-                        if (dt) { result = str_concat(arena, result, str_lit(" : ")); result = str_concat(arena, result, mlir_type_to_string(arena, dt)); }
+
+                    // Look for _argN_attrs attribute on the operation
+                    string arg_attr_name = format(arena, str_lit("_arg{}_attrs"), (int64_t)i);
+                    string arg_attrs_str = str_lit("");
+                    size_t nattrs_arg = mlir_op_num_attributes(op);
+                    for (size_t j = 0; j < nattrs_arg; j++) {
+                        MlirAttribute *a = mlir_op_get_attribute(op, j);
+                        string an = mlir_attribute_get_name(a);
+                        if (str_eq(an, arg_attr_name) && mlir_attribute_get_kind(a) == MLIR_ATTR_KIND_STRING) {
+                            arg_attrs_str = mlir_attribute_get_string(a);
+                            break;
+                        }
                     }
-                    if (mlir_value_has_max_divisibility(arg)) {
-                        if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
-                        else { result = str_concat(arena, result, str_lit(", ")); }
-                        result = str_concat(arena, result, str_lit("tt.max_divisibility = "));
-                        result = str_concat(arena, result, format(arena, str_lit("{}"), (int64_t)mlir_value_get_max_divisibility_value(arg)));
-                        MlirType *mdt = mlir_value_get_max_divisibility_type(arg);
-                        if (mdt) { result = str_concat(arena, result, str_lit(" : ")); result = str_concat(arena, result, mlir_type_to_string(arena, mdt)); }
+                    if (arg_attrs_str.size > 0) {
+                        result = str_concat(arena, result, str_lit(" {"));
+                        result = str_concat(arena, result, arg_attrs_str);
+                        result = str_concat(arena, result, str_lit("}"));
                     }
-                    if (opened) result = str_concat(arena, result, str_lit("}"));
+
                     // Per-argument location
                     MlirLocation *al = mlir_value_get_location(arg);
                     if (al) result = str_concat(arena, result, print_location_classic(arena, al));
