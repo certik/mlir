@@ -1,6 +1,6 @@
 module() {
 ^bb0:
-    tt.func(%arg0: !tt.ptr<bf16>, %arg1: i32, %arg2: !tt.ptr<f32>, %arg3: !tt.ptr<f32>, %arg4: !tt.ptr<i64>) {visibility = "public", sym_name = "_chunked_cross_entropy_forward_0d1d2d3d4d", arg0_attrs = "tt.divisibility = 16 : i32", arg1_attrs = "tt.divisibility = 16 : i32", arg2_attrs = "tt.divisibility = 16 : i32", arg3_attrs = "tt.divisibility = 16 : i32", arg4_attrs = "tt.divisibility = 16 : i32"} {
+    tt.func(%arg0: !tt.ptr<bf16>, %arg1: i32, %arg2: !tt.ptr<f32>, %arg3: !tt.ptr<f32>, %arg4: !tt.ptr<i64>) {visibility = "public", sym_name = "_chunked_cross_entropy_forward_0d1d2d3d4d", arg_attrs = [{tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}]} {
     ^bb0:
         %cst = arith.constant() {value_text = "dense<0xFF80>"} -> tensor<65536xbf16>
         %cst_0 = arith.constant() {value = ...} -> f32

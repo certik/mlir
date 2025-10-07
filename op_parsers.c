@@ -2279,9 +2279,9 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
     VecValue_reserve(parser->arena, &func_args, 8);
 
     // Vector to collect per-argument attributes (parallel to func_args)
-    // Each element is a string like "tt.divisibility = 16 : i32" or empty if no attrs
-    VecString arg_attr_strings;
-    VecString_reserve(parser->arena, &arg_attr_strings, 8);
+    // Each element is a DictionaryAttr containing the attributes for that argument
+    VecAttribute arg_attr_dicts;
+    VecAttribute_reserve(parser->arena, &arg_attr_dicts, 8);
 
     // Capture visibility keyword if present
     string visibility = str_lit("private");  // default
@@ -2519,22 +2519,24 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                     // Now create the value with all information
                     MlirValue *arg = mlir_value_create_block_arg(parser->arena, reg_str, (uint32_t)func_args.size, arg_type, arg_location);
 
-                    // Build attribute string for this argument
-                    string arg_attrs_str = str_lit("");
+                    // Build structured dictionary attribute for this argument
+                    VecAttribute dict_elems;
+                    VecAttribute_reserve(parser->arena, &dict_elems, 2);
+
                     if (has_div) {
-                        string div_type_str = mlir_type_to_string(parser->arena, div_type);
-                        arg_attrs_str = format(parser->arena, str_lit("tt.divisibility = {} : {}"), div_value, div_type_str);
+                        MlirAttribute *div_attr = mlir_attribute_create_integer(parser->arena, str_lit("tt.divisibility"), div_value);
+                        VecAttribute_push_back(parser->arena, &dict_elems, div_attr);
                     }
                     if (has_max_div) {
-                        string max_div_type_str = mlir_type_to_string(parser->arena, max_div_type);
-                        if (arg_attrs_str.size > 0) {
-                            arg_attrs_str = str_concat(parser->arena, arg_attrs_str, str_lit(", "));
-                        }
-                        arg_attrs_str = str_concat(parser->arena, arg_attrs_str, format(parser->arena, str_lit("tt.max_divisibility = {} : {}"), max_div_value, max_div_type_str));
+                        MlirAttribute *max_div_attr = mlir_attribute_create_integer(parser->arena, str_lit("tt.max_divisibility"), max_div_value);
+                        VecAttribute_push_back(parser->arena, &dict_elems, max_div_attr);
                     }
 
+                    // Create dictionary attribute (empty if no attributes)
+                    MlirAttribute *arg_dict = mlir_attribute_create_dict(parser->arena, str_lit(""), dict_elems.data, dict_elems.size);
+
                     VecValue_push_back(parser->arena, &func_args, arg);
-                    VecString_push_back(parser->arena, &arg_attr_strings, arg_attrs_str);
+                    VecAttribute_push_back(parser->arena, &arg_attr_dicts, arg_dict);
                 }
             } else if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME) || parser_peek(parser, TK_EXCLAMATION)) {
                 // Type-only param (no SSA name); accumulate its textual form
@@ -2682,15 +2684,12 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                                       op_location, params->unnumbered_loc_def,
                                       params->trailing_comment, params->source_line_start);
 
-    // Add per-argument attributes to the operation
-    for (size_t i = 0; i < arg_attr_strings.size; i++) {
-        string attr_str = arg_attr_strings.data[i];
-        if (attr_str.size > 0) {
-            // Create an attribute with name "argN_attrs" where N is the argument index
-            // These will be visible in both generic and classic printers
-            string attr_name = format(parser->arena, str_lit("arg{}_attrs"), (int64_t)i);
-            mlir_op_append_attribute(parser->arena, op, create_string_attr(parser, attr_name, attr_str));
-        }
+    // Add arg_attrs array attribute to the operation if there are any argument attributes
+    if (arg_attr_dicts.size > 0) {
+        // Create ArrayAttr containing all DictionaryAttrs
+        MlirAttribute *arg_attrs = mlir_attribute_create_array(
+            parser->arena, str_lit("arg_attrs"), arg_attr_dicts.data, arg_attr_dicts.size);
+        mlir_op_append_attribute(parser->arena, op, arg_attrs);
     }
 
     size_t n_results = 0;

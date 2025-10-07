@@ -4,7 +4,7 @@
     "infile": "tests/triton_mm.ttir",
     "infile_hash": "8ba050421fa5edc43f8b126545a6d4280d2ca2ddfedafdfcabe1c535",
     "outfile": "print_generic-triton_mm-e2ec65a.out",
-    "outfile_hash": "4e131b5077b70e9b02604a4beba7ca28839dcb7784593726f95967d7",
+    "outfile_hash": "2367c67759e0884bb78266f2ecb8579e0814e8d82aa61cacadf2c25b",
     "stdout": null,
     "stdout_hash": null,
     "stderr": null,

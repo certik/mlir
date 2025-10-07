@@ -191,6 +191,55 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MlirOper
                         result = str_concat(arena, result, format(arena, str_lit("\"{}\""), s));
                         break;
                     }
+                    case MLIR_ATTR_KIND_ARRAY: {
+                        result = str_concat(arena, result, str_lit("["));
+                        size_t arr_size = mlir_attribute_get_array_size(attr);
+                        for (size_t j = 0; j < arr_size; j++) {
+                            if (j > 0) result = str_concat(arena, result, str_lit(", "));
+                            MlirAttribute *elem = mlir_attribute_get_array_element(attr, j);
+                            if (elem) {
+                                // Recursively print the element
+                                if (mlir_attribute_get_kind(elem) == MLIR_ATTR_KIND_DICT) {
+                                    // Print dictionary inline
+                                    result = str_concat(arena, result, str_lit("{"));
+                                    size_t dict_size = mlir_attribute_get_dict_size(elem);
+                                    for (size_t k = 0; k < dict_size; k++) {
+                                        if (k > 0) result = str_concat(arena, result, str_lit(", "));
+                                        MlirAttribute *dict_elem = mlir_attribute_get_dict_element(elem, k);
+                                        if (dict_elem) {
+                                            string elem_name = mlir_attribute_get_name(dict_elem);
+                                            result = str_concat(arena, result, elem_name);
+                                            result = str_concat(arena, result, str_lit(" = "));
+                                            int64_t val = mlir_attribute_get_integer(dict_elem);
+                                            result = str_concat(arena, result, format(arena, str_lit("{} : i32"), val));
+                                        }
+                                    }
+                                    result = str_concat(arena, result, str_lit("}"));
+                                } else {
+                                    result = str_concat(arena, result, str_lit("..."));
+                                }
+                            }
+                        }
+                        result = str_concat(arena, result, str_lit("]"));
+                        break;
+                    }
+                    case MLIR_ATTR_KIND_DICT: {
+                        result = str_concat(arena, result, str_lit("{"));
+                        size_t dict_size = mlir_attribute_get_dict_size(attr);
+                        for (size_t j = 0; j < dict_size; j++) {
+                            if (j > 0) result = str_concat(arena, result, str_lit(", "));
+                            MlirAttribute *elem = mlir_attribute_get_dict_element(attr, j);
+                            if (elem) {
+                                string elem_name = mlir_attribute_get_name(elem);
+                                result = str_concat(arena, result, elem_name);
+                                result = str_concat(arena, result, str_lit(" = "));
+                                int64_t val = mlir_attribute_get_integer(elem);
+                                result = str_concat(arena, result, format(arena, str_lit("{} : i32"), val));
+                            }
+                        }
+                        result = str_concat(arena, result, str_lit("}"));
+                        break;
+                    }
                     default:
                         result = str_concat(arena, result, str_lit("..."));
                 }

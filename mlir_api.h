@@ -36,6 +36,7 @@ size_t mlir_location_map_collect(const MlirLocationMap *location_map, string *ou
 DEFINE_VECTOR_FOR_TYPE(MlirOperation*, VecOperation)
 DEFINE_VECTOR_FOR_TYPE(MlirValue*, VecValue)
 DEFINE_VECTOR_FOR_TYPE(MlirBlock*, VecBlock)
+DEFINE_VECTOR_FOR_TYPE(MlirAttribute*, VecAttribute)
 
 // -----------------------------------------------------------------------------
 // Operation kinds
@@ -281,6 +282,8 @@ MlirAttribute *mlir_attribute_create_integer(Arena *arena, string name, int64_t 
 MlirAttribute *mlir_attribute_create_float(Arena *arena, string name, double value);
 MlirAttribute *mlir_attribute_create_bool(Arena *arena, string name, bool value);
 MlirAttribute *mlir_attribute_create_string(Arena *arena, string name, string value);
+MlirAttribute *mlir_attribute_create_array(Arena *arena, string name, MlirAttribute **elements, size_t count);
+MlirAttribute *mlir_attribute_create_dict(Arena *arena, string name, MlirAttribute **elements, size_t count);
 
 // Introspection
 typedef enum {
@@ -298,6 +301,10 @@ int64_t mlir_attribute_get_integer(const MlirAttribute *attr);
 double mlir_attribute_get_float(const MlirAttribute *attr);
 bool mlir_attribute_get_bool(const MlirAttribute *attr);
 string mlir_attribute_get_string(const MlirAttribute *attr);
+size_t mlir_attribute_get_array_size(const MlirAttribute *attr);
+MlirAttribute *mlir_attribute_get_array_element(const MlirAttribute *attr, size_t idx);
+size_t mlir_attribute_get_dict_size(const MlirAttribute *attr);
+MlirAttribute *mlir_attribute_get_dict_element(const MlirAttribute *attr, size_t idx);
 
 // -----------------------------------------------------------------------------
 // Location API

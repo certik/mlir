@@ -784,6 +784,17 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit(" @"));
             result = str_concat(arena, result, fname);
             // Arguments are stored as operation operands for tt.func
+            // Find arg_attrs array attribute
+            MlirAttribute *arg_attrs_array = NULL;
+            size_t nattrs_op = mlir_op_num_attributes(op);
+            for (size_t j = 0; j < nattrs_op; j++) {
+                MlirAttribute *a = mlir_op_get_attribute(op, j);
+                if (str_eq(mlir_attribute_get_name(a), str_lit("arg_attrs"))) {
+                    arg_attrs_array = a;
+                    break;
+                }
+            }
+
             result = str_concat(arena, result, str_lit("("));
             for (int i = 0; i < mlir_op_num_operands(op); i++) {
                 if (i > 0) result = str_concat(arena, result, str_lit(", "));
@@ -796,22 +807,25 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     MlirType *arg_type = mlir_value_get_type(arg);
                     if (arg_type) result = str_concat(arena, result, mlir_type_to_string(arena, arg_type));
 
-                    // Look for argN_attrs attribute on the operation
-                    string arg_attr_name = format(arena, str_lit("arg{}_attrs"), (int64_t)i);
-                    string arg_attrs_str = str_lit("");
-                    size_t nattrs_arg = mlir_op_num_attributes(op);
-                    for (size_t j = 0; j < nattrs_arg; j++) {
-                        MlirAttribute *a = mlir_op_get_attribute(op, j);
-                        string an = mlir_attribute_get_name(a);
-                        if (str_eq(an, arg_attr_name) && mlir_attribute_get_kind(a) == MLIR_ATTR_KIND_STRING) {
-                            arg_attrs_str = mlir_attribute_get_string(a);
-                            break;
+                    // Extract attributes for this argument from arg_attrs array
+                    if (arg_attrs_array && i < (int)mlir_attribute_get_array_size(arg_attrs_array)) {
+                        MlirAttribute *arg_dict = mlir_attribute_get_array_element(arg_attrs_array, i);
+                        if (arg_dict && mlir_attribute_get_dict_size(arg_dict) > 0) {
+                            result = str_concat(arena, result, str_lit(" {"));
+                            size_t dict_size = mlir_attribute_get_dict_size(arg_dict);
+                            for (size_t k = 0; k < dict_size; k++) {
+                                if (k > 0) result = str_concat(arena, result, str_lit(", "));
+                                MlirAttribute *dict_elem = mlir_attribute_get_dict_element(arg_dict, k);
+                                if (dict_elem) {
+                                    string elem_name = mlir_attribute_get_name(dict_elem);
+                                    result = str_concat(arena, result, elem_name);
+                                    result = str_concat(arena, result, str_lit(" = "));
+                                    int64_t val = mlir_attribute_get_integer(dict_elem);
+                                    result = str_concat(arena, result, format(arena, str_lit("{} : i32"), val));
+                                }
+                            }
+                            result = str_concat(arena, result, str_lit("}"));
                         }
-                    }
-                    if (arg_attrs_str.size > 0) {
-                        result = str_concat(arena, result, str_lit(" {"));
-                        result = str_concat(arena, result, arg_attrs_str);
-                        result = str_concat(arena, result, str_lit("}"));
                     }
 
                     // Per-argument location

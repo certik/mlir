@@ -536,6 +536,27 @@ MlirAttribute *mlir_attribute_create_bool(Arena *arena, string name, bool value)
     return attr;
 }
 
+MlirAttribute *mlir_attribute_create_array(Arena *arena, string name, MlirAttribute **elements, size_t count) {
+    struct MlirAttribute *attr = arena_alloc(arena, struct MlirAttribute);
+    *attr = (struct MlirAttribute){0};
+    attr->kind = ATTR_KIND_ARRAY;
+    attr->name = name;
+    attr->data.array.elements = elements;
+    attr->data.array.count = count;
+    return attr;
+}
+
+MlirAttribute *mlir_attribute_create_dict(Arena *arena, string name, MlirAttribute **elements, size_t count) {
+    struct MlirAttribute *attr = arena_alloc(arena, struct MlirAttribute);
+    *attr = (struct MlirAttribute){0};
+    attr->kind = ATTR_KIND_DICT;
+    attr->name = name;
+    // Dictionary uses the same storage as array
+    attr->data.array.elements = elements;
+    attr->data.array.count = count;
+    return attr;
+}
+
 // Value creation and manipulation
 MlirValue *mlir_value_create_block_arg(Arena *arena, string register_name, uint32_t result_index, MlirType *type, MlirLocation *location) {
     struct MlirValue *value = arena_alloc(arena, struct MlirValue);
@@ -624,6 +645,24 @@ double mlir_attribute_get_float(const MlirAttribute *attr) {
 
 bool mlir_attribute_get_bool(const MlirAttribute *attr) {
     return attr->data.bool_value;
+}
+
+size_t mlir_attribute_get_array_size(const MlirAttribute *attr) {
+    return attr->data.array.count;
+}
+
+MlirAttribute *mlir_attribute_get_array_element(const MlirAttribute *attr, size_t idx) {
+    if (idx >= attr->data.array.count) return NULL;
+    return attr->data.array.elements[idx];
+}
+
+size_t mlir_attribute_get_dict_size(const MlirAttribute *attr) {
+    return attr->data.array.count;
+}
+
+MlirAttribute *mlir_attribute_get_dict_element(const MlirAttribute *attr, size_t idx) {
+    if (idx >= attr->data.array.count) return NULL;
+    return attr->data.array.elements[idx];
 }
 
 // Value accessors
