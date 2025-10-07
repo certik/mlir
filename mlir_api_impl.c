@@ -291,8 +291,8 @@ MlirLocation *mlir_operation_get_location(const MlirOperation *op) {
     return op->location;
 }
 
-const char *mlir_operation_get_name(const MlirOperation *op) {
-    return op->opname.str;
+string mlir_operation_get_name(const MlirOperation *op) {
+    return op->opname;
 }
 
 string mlir_operation_get_name_string(const MlirOperation *op) {
@@ -520,11 +520,11 @@ MlirAttribute *mlir_attribute_create_integer(Arena *arena, int64_t value) {
     return attr;
 }
 
-MlirAttribute *mlir_attribute_create_string(Arena *arena, const char *str, size_t len) {
+MlirAttribute *mlir_attribute_create_string(Arena *arena, string value) {
     struct MlirAttribute *attr = arena_alloc(arena, struct MlirAttribute);
     *attr = (struct MlirAttribute){0};
     attr->kind = ATTR_KIND_STRING;
-    attr->data.string_value = (string){(char*)str, len};
+    attr->data.string_value = value;
     return attr;
 }
 
@@ -544,8 +544,8 @@ MlirAttribute *mlir_attribute_create_bool(Arena *arena, bool value) {
     return attr;
 }
 
-void mlir_attribute_set_name(MlirAttribute *attr, const char *name, size_t name_len) {
-    attr->name = (string){(char*)name, name_len};
+void mlir_attribute_set_name(MlirAttribute *attr, string name) {
+    attr->name = name;
 }
 
 // Value creation and manipulation
@@ -560,8 +560,8 @@ void mlir_value_set_type(MlirValue *value, MlirType *type) {
     value->type = type;
 }
 
-void mlir_value_set_register_name(MlirValue *value, const char *name, size_t name_len) {
-    value->register_name = (string){(char*)name, name_len};
+void mlir_value_set_register_name(MlirValue *value, string name) {
+    value->register_name = name;
 }
 
 void mlir_value_set_result_index(MlirValue *value, uint32_t index) {
@@ -670,9 +670,8 @@ MlirOperation *mlir_value_get_def_op(const MlirValue *value) {
     return (MlirOperation*)value->def;
 }
 
-const char *mlir_op_type_to_string(OpType type) {
-    string s = op_type_to_string(type);
-    return s.str;
+string mlir_op_type_to_string(OpType type) {
+    return op_type_to_string(type);
 }
 
 // Location accessors

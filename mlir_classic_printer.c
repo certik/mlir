@@ -1386,7 +1386,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 mlir_operation_get_type(op) == OP_TYPE_ARITH_EXTSI || mlir_operation_get_type(op) == OP_TYPE_ARITH_TRUNCI ||
                 mlir_operation_get_type(op) == OP_TYPE_ARITH_EXTF || mlir_operation_get_type(op) == OP_TYPE_ARITH_TRUNCF) {
                 // op name
-                result = str_concat(arena, result, str_from_cstr_len_view((char*)mlir_op_type_to_string(mlir_operation_get_type(op)), strlen(mlir_op_type_to_string(mlir_operation_get_type(op)))));
+                result = str_concat(arena, result, mlir_op_type_to_string(mlir_operation_get_type(op)));
                 // operand
                 if (mlir_operation_num_operands(op) > 0 && mlir_operation_get_operand(op, 0)) {
                     result = str_concat(arena, result, str_lit(" "));
@@ -1425,7 +1425,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             } else {
                 string s = mlir_operation_get_name_string(op);
                 if (s.size > 0) result = str_concat(arena, result, s);
-                else result = str_concat(arena, result, str_from_cstr_len_view((char*)mlir_op_type_to_string(mlir_operation_get_type(op)), strlen(mlir_op_type_to_string(mlir_operation_get_type(op)))));
+                else result = str_concat(arena, result, mlir_op_type_to_string(mlir_operation_get_type(op)));
             }
 
             // Special classic formatting for select ops

@@ -152,7 +152,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MlirOper
         result = str_concat(arena, result, str_lit("\""));
     } else {
         if (opname.size > 0) result = str_concat(arena, result, opname);
-        else result = str_concat(arena, result, str_from_cstr_view((char*)mlir_op_type_to_string(op_type)));
+        else result = str_concat(arena, result, mlir_op_type_to_string(op_type));
     }
     result = str_concat(arena, result, str_lit("("));
     for (size_t i = 0, e = mlir_operation_num_operands(op); i < e; i++) {

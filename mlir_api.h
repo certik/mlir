@@ -150,7 +150,7 @@ typedef enum {
     OP_TYPE_COUNT
 } OpType;
 
-const char *mlir_op_type_to_string(OpType type);
+string mlir_op_type_to_string(OpType type);
 
 // -----------------------------------------------------------------------------
 // API lifecycle
@@ -180,7 +180,7 @@ void mlir_operation_append_attribute(Arena *arena, MlirOperation *op, MlirAttrib
 
 // Accessors
 OpType mlir_operation_get_type(const MlirOperation *op);
-const char *mlir_operation_get_name(const MlirOperation *op);
+string mlir_operation_get_name(const MlirOperation *op);
 string mlir_operation_get_name_string(const MlirOperation *op);
 MlirLocation *mlir_operation_get_location(const MlirOperation *op);
 string mlir_operation_get_trailing_comment(const MlirOperation *op);
@@ -232,7 +232,7 @@ typedef enum ValueKind {
 MlirValue *mlir_value_create(Arena *arena, ValueKind value_kind);
 void mlir_value_set_def(MlirValue *value, void *def);
 void mlir_value_set_type(MlirValue *value, MlirType *type);
-void mlir_value_set_register_name(MlirValue *value, const char *name, size_t name_len);
+void mlir_value_set_register_name(MlirValue *value, string name);
 void mlir_value_set_result_index(MlirValue *value, uint32_t index);
 void mlir_value_set_location(MlirValue *value, MlirLocation *loc);
 void mlir_value_set_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type);
@@ -292,8 +292,8 @@ string mlir_type_to_string(Arena *arena, MlirType *type);
 MlirAttribute *mlir_attribute_create_integer(Arena *arena, int64_t value);
 MlirAttribute *mlir_attribute_create_float(Arena *arena, double value);
 MlirAttribute *mlir_attribute_create_bool(Arena *arena, bool value);
-MlirAttribute *mlir_attribute_create_string(Arena *arena, const char *str, size_t len);
-void mlir_attribute_set_name(MlirAttribute *attr, const char *name, size_t name_len);
+MlirAttribute *mlir_attribute_create_string(Arena *arena, string value);
+void mlir_attribute_set_name(MlirAttribute *attr, string name);
 
 // Introspection
 typedef enum {
