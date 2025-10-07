@@ -289,11 +289,10 @@ string mlir_type_to_string(Arena *arena, MlirType *type);
 // -----------------------------------------------------------------------------
 
 // Creation & mutation
-MlirAttribute *mlir_attribute_create_integer(Arena *arena, int64_t value);
-MlirAttribute *mlir_attribute_create_float(Arena *arena, double value);
-MlirAttribute *mlir_attribute_create_bool(Arena *arena, bool value);
-MlirAttribute *mlir_attribute_create_string(Arena *arena, string value);
-void mlir_attribute_set_name(MlirAttribute *attr, string name);
+MlirAttribute *mlir_attribute_create_integer(Arena *arena, string name, int64_t value);
+MlirAttribute *mlir_attribute_create_float(Arena *arena, string name, double value);
+MlirAttribute *mlir_attribute_create_bool(Arena *arena, string name, bool value);
+MlirAttribute *mlir_attribute_create_string(Arena *arena, string name, string value);
 
 // Introspection
 typedef enum {

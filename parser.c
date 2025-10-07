@@ -56,8 +56,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     MlirOperation *module = mlir_operation_create(arena, OP_TYPE_MODULE, str_lit("module"), NULL, 0, NULL, 0, NULL, 0, NULL, 0, module_regions, 1, NULL, NULL, str_lit(""), -1);
 
     // Function attributes (sym_name)
-    MlirAttribute *sym_name_attr = mlir_attribute_create_string(arena, str_lit("example_func"));
-    mlir_attribute_set_name(sym_name_attr, str_lit("sym_name"));
+    MlirAttribute *sym_name_attr = mlir_attribute_create_string(arena, str_lit("sym_name"), str_lit("example_func"));
     MlirAttribute **func_attrs = arena_alloc_array(arena, MlirAttribute*, 1);
     func_attrs[0] = sym_name_attr;
 
@@ -92,8 +91,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     const_result_types[0] = i32_type;
 
     // Set attributes
-    MlirAttribute *value_attr = mlir_attribute_create_integer(arena, 5);
-    mlir_attribute_set_name(value_attr, str_lit("value"));
+    MlirAttribute *value_attr = mlir_attribute_create_integer(arena, str_lit("value"), 5);
     MlirAttribute **const_attrs = arena_alloc_array(arena, MlirAttribute*, 1);
     const_attrs[0] = value_attr;
 

@@ -1092,27 +1092,19 @@ MlirValue **finalize_results(const OperationParserParams *params,
 }
 
 MlirAttribute *create_string_attr(Parser *parser, string name, string value) {
-    MlirAttribute *attr = mlir_attribute_create_string(parser->arena, value);
-    if (name.size > 0) mlir_attribute_set_name(attr, name);
-    return attr;
+    return mlir_attribute_create_string(parser->arena, name, value);
 }
 
 MlirAttribute *create_integer_attr(Parser *parser, string name, int64_t value) {
-    MlirAttribute *attr = mlir_attribute_create_integer(parser->arena, value);
-    if (name.size > 0) mlir_attribute_set_name(attr, name);
-    return attr;
+    return mlir_attribute_create_integer(parser->arena, name, value);
 }
 
 MlirAttribute *create_float_attr(Parser *parser, string name, double value) {
-    MlirAttribute *attr = mlir_attribute_create_float(parser->arena, value);
-    if (name.size > 0) mlir_attribute_set_name(attr, name);
-    return attr;
+    return mlir_attribute_create_float(parser->arena, name, value);
 }
 
 MlirAttribute *create_bool_attr(Parser *parser, string name, bool value) {
-    MlirAttribute *attr = mlir_attribute_create_bool(parser->arena, value);
-    if (name.size > 0) mlir_attribute_set_name(attr, name);
-    return attr;
+    return mlir_attribute_create_bool(parser->arena, name, value);
 }
 
 void operation_append_attribute(Parser *parser, MlirOperation *op, MlirAttribute *attr) {

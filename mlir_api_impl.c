@@ -512,40 +512,40 @@ void mlir_type_set_float_properties(MlirType *type, uint32_t width, bool is_bflo
 }
 
 // Attribute creation and manipulation
-MlirAttribute *mlir_attribute_create_integer(Arena *arena, int64_t value) {
+MlirAttribute *mlir_attribute_create_integer(Arena *arena, string name, int64_t value) {
     struct MlirAttribute *attr = arena_alloc(arena, struct MlirAttribute);
     *attr = (struct MlirAttribute){0};
     attr->kind = ATTR_KIND_INTEGER;
+    attr->name = name;
     attr->data.integer_value = value;
     return attr;
 }
 
-MlirAttribute *mlir_attribute_create_string(Arena *arena, string value) {
+MlirAttribute *mlir_attribute_create_string(Arena *arena, string name, string value) {
     struct MlirAttribute *attr = arena_alloc(arena, struct MlirAttribute);
     *attr = (struct MlirAttribute){0};
     attr->kind = ATTR_KIND_STRING;
+    attr->name = name;
     attr->data.string_value = value;
     return attr;
 }
 
-MlirAttribute *mlir_attribute_create_float(Arena *arena, double value) {
+MlirAttribute *mlir_attribute_create_float(Arena *arena, string name, double value) {
     struct MlirAttribute *attr = arena_alloc(arena, struct MlirAttribute);
     *attr = (struct MlirAttribute){0};
     attr->kind = ATTR_KIND_FLOAT;
+    attr->name = name;
     attr->data.float_value = value;
     return attr;
 }
 
-MlirAttribute *mlir_attribute_create_bool(Arena *arena, bool value) {
+MlirAttribute *mlir_attribute_create_bool(Arena *arena, string name, bool value) {
     struct MlirAttribute *attr = arena_alloc(arena, struct MlirAttribute);
     *attr = (struct MlirAttribute){0};
     attr->kind = ATTR_KIND_BOOL;
+    attr->name = name;
     attr->data.bool_value = value;
     return attr;
-}
-
-void mlir_attribute_set_name(MlirAttribute *attr, string name) {
-    attr->name = name;
 }
 
 // Value creation and manipulation
