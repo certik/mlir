@@ -908,13 +908,11 @@ size_t mlir_location_map_collect(const MlirLocationMap *location_map, string *ou
 // parse loc()
 MlirLocation* parse_loc(Parser *parser) {
     Arena *arena = parser->arena;
-    MlirLocation *loc = mlir_location_create(arena);
-    mlir_location_set_kind(loc, MLIR_LOC_UNKNOWN);
-    mlir_location_set_original_text(loc, str_lit(""));
-
 
     parser_expect(parser, TK_NAME); // 'loc'
     parser_expect(parser, TK_LPAREN);
+
+    MlirLocation *loc = NULL;
 
     // Check what kind of location this is
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("callsite"))) {
@@ -943,8 +941,7 @@ MlirLocation* parse_loc(Parser *parser) {
         }
         parser_expect(parser, TK_RPAREN);
         text = str_concat(parser->arena, text, str_lit(")"));
-        mlir_location_set_kind(loc, MLIR_LOC_UNKNOWN);
-        mlir_location_set_original_text(loc, text);
+        loc = mlir_location_create_unknown(arena, text);
         return loc;
     } else if (parser_peek(parser, TK_STRING)) {
         // loc("filename":line:col) or loc("name")
@@ -971,12 +968,12 @@ MlirLocation* parse_loc(Parser *parser) {
                         parser_next_token(parser);
                     }
                 }
-
-                mlir_location_set_file_data(loc, filename, line, column);
             }
+
+            loc = mlir_location_create_file(arena, filename, line, column);
         } else {
             // Named location: loc("name")
-            mlir_location_set_name_data(loc, filename);
+            loc = mlir_location_create_name(arena, filename);
         }
     } else if (parser_peek(parser, TK_HASH_NAME)) {
         // Reference location: loc(#locN)
@@ -986,34 +983,16 @@ MlirLocation* parse_loc(Parser *parser) {
         if (hash_name.size > 4 && strncmp(hash_name.str, "#loc", 4) == 0) {
             ref_id = atoi(hash_name.str + 4);
         }
-        mlir_location_set_ref_id(loc, ref_id);
+        loc = mlir_location_create_ref(arena, ref_id);
     } else {
         // Unknown location format, just consume tokens until ')'
         while (!(parser_peek(parser, TK_RPAREN))) {
             parser_next_token(parser);
         }
+        loc = mlir_location_create_unknown(arena, str_lit("loc(unknown)"));
     }
 
     parser_expect(parser, TK_RPAREN);
-
-    // Capture original text for printing (simple reconstruction)
-    MlirLocationKind stored_kind = mlir_location_get_kind(loc);
-    if (stored_kind == MLIR_LOC_FILE) {
-        mlir_location_set_original_text(loc,
-            format(parser->arena, str_lit("loc({}:{}:{})"),
-                   mlir_location_get_file_filename(loc),
-                   (int64_t)mlir_location_get_file_line(loc),
-                   (int64_t)mlir_location_get_file_column(loc)));
-    } else if (stored_kind == MLIR_LOC_NAME) {
-        mlir_location_set_original_text(loc,
-            format(parser->arena, str_lit("loc(\"{}\")"), mlir_location_get_name(loc)));
-    } else if (stored_kind == MLIR_LOC_REF) {
-        mlir_location_set_original_text(loc,
-            format(parser->arena, str_lit("loc(#loc{})"), (int64_t)mlir_location_get_ref_id(loc)));
-    } else {
-        mlir_location_set_original_text(loc, str_lit("loc(unknown)"));
-    }
-
     return loc;
 }
 
