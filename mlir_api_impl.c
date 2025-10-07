@@ -567,18 +567,19 @@ MlirAttribute *mlir_attribute_create_bool(Arena *arena, string name, bool value)
 }
 
 // Value creation and manipulation
-MlirValue *mlir_value_create_block_arg(Arena *arena, string register_name, uint32_t result_index, MlirType *type) {
+MlirValue *mlir_value_create_block_arg(Arena *arena, string register_name, uint32_t result_index, MlirType *type, MlirLocation *location) {
     struct MlirValue *value = arena_alloc(arena, struct MlirValue);
     *value = (struct MlirValue){0};
     value->kind = BLOCK_ARG;
     value->register_name = register_name;
     value->result_index = result_index;
     value->type = type;
+    value->location = location;
     value->def = NULL;
     return value;
 }
 
-MlirValue *mlir_value_create_op_result(Arena *arena, void *def, uint32_t result_index, MlirType *type, string register_name) {
+MlirValue *mlir_value_create_op_result(Arena *arena, void *def, uint32_t result_index, MlirType *type, string register_name, MlirLocation *location) {
     struct MlirValue *value = arena_alloc(arena, struct MlirValue);
     *value = (struct MlirValue){0};
     value->kind = OP_RESULT;
@@ -586,6 +587,7 @@ MlirValue *mlir_value_create_op_result(Arena *arena, void *def, uint32_t result_
     value->result_index = result_index;
     value->type = type;
     value->register_name = register_name;
+    value->location = location;
     return value;
 }
 
@@ -762,10 +764,6 @@ MlirLocation *mlir_location_create_ref(Arena *arena, int ref_id) {
     loc->data.ref.ref_id = ref_id;
     loc->original_text = format(arena, str_lit("loc(#loc{})"), (int64_t)ref_id);
     return loc;
-}
-
-void mlir_value_set_location(MlirValue *value, MlirLocation *loc) {
-    value->location = loc;
 }
 
 // New API functions for parser compatibility

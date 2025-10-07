@@ -65,17 +65,17 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     MlirBlock *func_block = mlir_block_create(arena);
 
     // Function block arguments (%arg0, %arg1)
-    MlirValue *arg0 = mlir_value_create_block_arg(arena, str_lit("%arg0"), 0, i32_type);
+    MlirValue *arg0 = mlir_value_create_block_arg(arena, str_lit("%arg0"), 0, i32_type, NULL);
     mlir_block_add_argument(arena, func_block, arg0);
 
-    MlirValue *arg1 = mlir_value_create_block_arg(arena, str_lit("%arg1"), 1, i32_type);
+    MlirValue *arg1 = mlir_value_create_block_arg(arena, str_lit("%arg1"), 1, i32_type, NULL);
     mlir_block_add_argument(arena, func_block, arg1);
 
     // Create operations in function block
     // %0 = arith.constant 5 : i32
 
     // Create const_result first (def will be set after operation creation)
-    MlirValue *const_result = mlir_value_create_op_result(arena, NULL, 0, i32_type, str_lit("%0"));
+    MlirValue *const_result = mlir_value_create_op_result(arena, NULL, 0, i32_type, str_lit("%0"), NULL);
 
     // Set result types
     MlirType **const_result_types = arena_alloc_array(arena, MlirType*, 1);
@@ -95,7 +95,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     // %1 = arith.addi %arg0, %arg1 : i32
 
     // Create add_result first (def will be set after operation creation)
-    MlirValue *add_result = mlir_value_create_op_result(arena, NULL, 1, i32_type, str_lit("%1"));
+    MlirValue *add_result = mlir_value_create_op_result(arena, NULL, 1, i32_type, str_lit("%1"), NULL);
 
     // Set operands
     MlirValue **add_operands = arena_alloc_array(arena, MlirValue*, 2);
@@ -115,7 +115,7 @@ MlirOperation* construct_test_module_full(Arena *arena) {
     // %2 = arith.muli %1, %0 : i32 (add_result and const_result already created above)
 
     // Create mul_result first (def will be set after operation creation)
-    MlirValue *mul_result = mlir_value_create_op_result(arena, NULL, 2, i32_type, str_lit("%2"));
+    MlirValue *mul_result = mlir_value_create_op_result(arena, NULL, 2, i32_type, str_lit("%2"), NULL);
 
     // Set operands
     MlirValue **mul_operands = arena_alloc_array(arena, MlirValue*, 2);
