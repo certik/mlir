@@ -2334,8 +2334,15 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                 if (parser_peek(parser, TK_COLON)) {
                     parser_expect(parser, TK_COLON);
 
-                    MlirValue *arg = mlir_value_create_block_arg(parser->arena, reg_str, (uint32_t)func_args.size, NULL);
+                    // Collect all information before creating the value
                     MlirType *arg_type = NULL;
+                    bool has_div = false;
+                    int64_t div_value = 0;
+                    MlirType *div_type = NULL;
+                    bool has_max_div = false;
+                    int64_t max_div_value = 0;
+                    MlirType *max_div_type = NULL;
+                    MlirLocation *arg_location = NULL;
 
                     // Parse the argument type
                     if (parser_peek(parser, TK_EXCLAMATION)) {
@@ -2454,7 +2461,10 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                                             dtype = mlir_type_create_from_string(parser->arena, tstr);
                                         }
                                         MlirType *dtype_actual = dtype ? dtype : mlir_type_create_from_string(parser->arena, str_lit("i32"));
-                                        mlir_value_set_divisibility(arg, true, v, dtype_actual);
+                                        // Store in temporaries instead of setting on value
+                                        has_div = true;
+                                        div_value = v;
+                                        div_type = dtype_actual;
                                     }
                                 } else if (str_eq(name, str_lit("tt.max_divisibility"))) {
                                     // Expect '=' integer ':' type
@@ -2482,7 +2492,10 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                                             dtype = mlir_type_create_from_string(parser->arena, tstr);
                                         }
                                         MlirType *dtype_actual = dtype ? dtype : mlir_type_create_from_string(parser->arena, str_lit("i32"));
-                                        mlir_value_set_max_divisibility(arg, true, v, dtype_actual);
+                                        // Store in temporaries instead of setting on value
+                                        has_max_div = true;
+                                        max_div_value = v;
+                                        max_div_type = dtype_actual;
                                     }
                                 }
                             } else {
@@ -2493,10 +2506,16 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
 
                     // Optional trailing per-arg loc()
                     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
-                        mlir_value_set_location(arg, parse_loc(parser));
+                        arg_location = parse_loc(parser);
                     }
 
-                    if (arg_type) mlir_value_set_type(arg, arg_type);
+                    // Now create the value with all information
+                    MlirValue *arg = mlir_value_create_block_arg(parser->arena, reg_str, (uint32_t)func_args.size, arg_type);
+
+                    // Set attributes after creation
+                    if (has_div) mlir_value_set_divisibility(arg, true, div_value, div_type);
+                    if (has_max_div) mlir_value_set_max_divisibility(arg, true, max_div_value, max_div_type);
+                    if (arg_location) mlir_value_set_location(arg, arg_location);
 
                     VecValue_push_back(parser->arena, &func_args, arg);
                 }
@@ -2997,13 +3016,11 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
         results = params->lhs_results;
         n_results = params->n_lhs_results;
 
-        // Set def and types on named results; set unnamed results to NULL so they print as %_
+        // Set unnamed results to NULL so they print as %_
+        // (Types are auto-synced by mlir_operation_create)
         for (size_t i = 0; i < n_results; i++) {
             string reg_name = mlir_value_get_register_name(results[i]);
-            if (reg_name.size > 0) {
-                // Named result: set type
-                mlir_value_set_type(results[i], iter_result_types[i]);
-            } else {
+            if (reg_name.size == 0) {
                 // Unnamed result: set to NULL so it prints as %_
                 results[i] = NULL;
             }

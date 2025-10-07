@@ -205,9 +205,14 @@ MlirOperation *mlir_operation_create(
     op->source_line_start = source_line_start;
 
     // Automatically set the def field on all result values
+    // Also sync type from result_types if value has NULL type
     for (size_t i = 0; i < n_results; i++) {
         if (results[i]) {
             results[i]->def = op;
+            // Auto-sync type from result_types if not already set
+            if (i < n_result_types && result_types[i] && !results[i]->type) {
+                results[i]->type = result_types[i];
+            }
         }
     }
 
@@ -757,10 +762,6 @@ MlirLocation *mlir_location_create_ref(Arena *arena, int ref_id) {
     loc->data.ref.ref_id = ref_id;
     loc->original_text = format(arena, str_lit("loc(#loc{})"), (int64_t)ref_id);
     return loc;
-}
-
-void mlir_value_set_type(MlirValue *value, MlirType *type) {
-    value->type = type;
 }
 
 void mlir_value_set_location(MlirValue *value, MlirLocation *loc) {
