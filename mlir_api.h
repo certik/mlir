@@ -324,13 +324,11 @@ typedef enum {
     MLIR_LOC_REF
 } MlirLocationKind;
 
-// Creation & mutation
-MlirLocation *mlir_location_create(Arena *arena);
-void mlir_location_set_kind(MlirLocation *loc, MlirLocationKind kind);
-void mlir_location_set_original_text(MlirLocation *loc, string text);
-void mlir_location_set_file_data(MlirLocation *loc, string filename, int line, int column);
-void mlir_location_set_name_data(MlirLocation *loc, string name);
-void mlir_location_set_ref_id(MlirLocation *loc, int ref_id);
+// Creation
+MlirLocation *mlir_location_create_unknown(Arena *arena, string original_text);
+MlirLocation *mlir_location_create_file(Arena *arena, string filename, int line, int column);
+MlirLocation *mlir_location_create_name(Arena *arena, string name);
+MlirLocation *mlir_location_create_ref(Arena *arena, int ref_id);
 
 // Accessors
 MlirLocationKind mlir_location_get_kind(const MlirLocation *loc);

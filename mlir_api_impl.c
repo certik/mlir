@@ -710,43 +710,41 @@ int mlir_location_get_ref_id(const MlirLocation *loc) {
     return loc->data.ref.ref_id;
 }
 
-MlirLocation *mlir_location_create(Arena *arena) {
+MlirLocation *mlir_location_create_unknown(Arena *arena, string original_text) {
     struct MlirLocation *loc = arena_alloc(arena, struct MlirLocation);
     *loc = (struct MlirLocation){0};
     loc->kind = LOC_KIND_UNKNOWN;
+    loc->original_text = original_text;
     return loc;
 }
 
-void mlir_location_set_kind(MlirLocation *loc, MlirLocationKind kind) {
-    switch (kind) {
-        case MLIR_LOC_FILE: loc->kind = LOC_KIND_FILE; break;
-        case MLIR_LOC_NAME: loc->kind = LOC_KIND_NAME; break;
-        case MLIR_LOC_CALLSITE: loc->kind = LOC_KIND_CALLSITE; break;
-        case MLIR_LOC_FUSED: loc->kind = LOC_KIND_FUSED; break;
-        case MLIR_LOC_REF: loc->kind = LOC_KIND_REF; break;
-        case MLIR_LOC_UNKNOWN: default: loc->kind = LOC_KIND_UNKNOWN; break;
-    }
-}
-
-void mlir_location_set_original_text(MlirLocation *loc, string text) {
-    loc->original_text = text;
-}
-
-void mlir_location_set_file_data(MlirLocation *loc, string filename, int line, int column) {
+MlirLocation *mlir_location_create_file(Arena *arena, string filename, int line, int column) {
+    struct MlirLocation *loc = arena_alloc(arena, struct MlirLocation);
+    *loc = (struct MlirLocation){0};
     loc->kind = LOC_KIND_FILE;
     loc->data.file.filename = filename;
     loc->data.file.line = line;
     loc->data.file.column = column;
+    loc->original_text = format(arena, str_lit("loc({}:{}:{})"), filename, (int64_t)line, (int64_t)column);
+    return loc;
 }
 
-void mlir_location_set_name_data(MlirLocation *loc, string name) {
+MlirLocation *mlir_location_create_name(Arena *arena, string name) {
+    struct MlirLocation *loc = arena_alloc(arena, struct MlirLocation);
+    *loc = (struct MlirLocation){0};
     loc->kind = LOC_KIND_NAME;
     loc->data.name.name = name;
+    loc->original_text = format(arena, str_lit("loc(\"{}\")"), name);
+    return loc;
 }
 
-void mlir_location_set_ref_id(MlirLocation *loc, int ref_id) {
+MlirLocation *mlir_location_create_ref(Arena *arena, int ref_id) {
+    struct MlirLocation *loc = arena_alloc(arena, struct MlirLocation);
+    *loc = (struct MlirLocation){0};
     loc->kind = LOC_KIND_REF;
     loc->data.ref.ref_id = ref_id;
+    loc->original_text = format(arena, str_lit("loc(#loc{})"), (int64_t)ref_id);
+    return loc;
 }
 
 void mlir_value_set_location(MlirValue *value, MlirLocation *loc) {
