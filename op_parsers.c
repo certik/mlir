@@ -12,8 +12,6 @@
 #include "tokenizer.h"
 #include "op_parsers.h"
 
-// Define vector type for storing strings (used for argument attributes in tt.func)
-DEFINE_VECTOR_FOR_TYPE(string, VecString)
 
 OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserParams *params) {
     MlirAttribute **attributes = NULL;
@@ -2345,10 +2343,8 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                     MlirType *arg_type = NULL;
                     bool has_div = false;
                     int64_t div_value = 0;
-                    MlirType *div_type = NULL;
                     bool has_max_div = false;
                     int64_t max_div_value = 0;
-                    MlirType *max_div_type = NULL;
                     MlirLocation *arg_location = NULL;
 
                     // Parse the argument type
@@ -2449,7 +2445,6 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                                         int64_t v = 0; for (size_t k=0;k<ival.size;k++){ char c=ival.str[k]; if (c>='0' && c<='9') v = v*10 + (c-'0'); }
                                         parser_expect(parser, TK_INTEGER);
                                         // optional ':' type
-                                        MlirType *dtype = NULL;
                                         if (parser_peek(parser, TK_COLON)) {
                                             parser_expect(parser, TK_COLON);
                                             string tstr = str_lit("");
@@ -2465,13 +2460,10 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                                                 parser_next_token(parser);
                                                 if (angle==0 && (parser_peek(parser, TK_RBRACE) || parser_peek(parser, TK_COMMA))) break;
                                             }
-                                            dtype = mlir_type_create_from_string(parser->arena, tstr);
                                         }
-                                        MlirType *dtype_actual = dtype ? dtype : mlir_type_create_from_string(parser->arena, str_lit("i32"));
                                         // Store in temporaries instead of setting on value
                                         has_div = true;
                                         div_value = v;
-                                        div_type = dtype_actual;
                                     }
                                 } else if (str_eq(name, str_lit("tt.max_divisibility"))) {
                                     // Expect '=' integer ':' type
@@ -2482,7 +2474,6 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                                         int64_t v = 0; for (size_t k=0;k<ival.size;k++){ char c=ival.str[k]; if (c>='0' && c<='9') v = v*10 + (c-'0'); }
                                         parser_expect(parser, TK_INTEGER);
                                         // optional ':' type
-                                        MlirType *dtype = NULL;
                                         if (parser_peek(parser, TK_COLON)) {
                                             parser_expect(parser, TK_COLON);
                                             string tstr = str_lit("");
@@ -2496,13 +2487,10 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                                                 parser_next_token(parser);
                                                 if (angle==0 && (parser_peek(parser, TK_RBRACE) || parser_peek(parser, TK_COMMA))) break;
                                             }
-                                            dtype = mlir_type_create_from_string(parser->arena, tstr);
                                         }
-                                        MlirType *dtype_actual = dtype ? dtype : mlir_type_create_from_string(parser->arena, str_lit("i32"));
                                         // Store in temporaries instead of setting on value
                                         has_max_div = true;
                                         max_div_value = v;
-                                        max_div_type = dtype_actual;
                                     }
                                 }
                             } else {
