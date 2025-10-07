@@ -232,10 +232,6 @@ typedef enum ValueKind {
 MlirValue *mlir_value_create_block_arg(Arena *arena, string register_name, uint32_t result_index, MlirType *type, MlirLocation *location);
 MlirValue *mlir_value_create_op_result(Arena *arena, void *def, uint32_t result_index, MlirType *type, string register_name, MlirLocation *location);
 
-// Optional mutation (for Triton-specific attributes)
-void mlir_value_set_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type);
-void mlir_value_set_max_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type);
-
 // Accessors
 ValueKind mlir_value_get_kind(const MlirValue *value);
 MlirType *mlir_value_get_type(const MlirValue *value);
@@ -243,6 +239,12 @@ string mlir_value_get_register_name(const MlirValue *value);
 uint32_t mlir_value_get_result_index(const MlirValue *value);
 MlirOperation *mlir_value_get_def_op(const MlirValue *value);
 MlirLocation *mlir_value_get_location(const MlirValue *value);
+
+// Triton Setters/Mutation
+void mlir_value_set_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type);
+void mlir_value_set_max_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type);
+
+// Triton Accessors
 bool mlir_value_has_divisibility(const MlirValue *value);
 int64_t mlir_value_get_divisibility_value(const MlirValue *value);
 MlirType *mlir_value_get_divisibility_type(const MlirValue *value);
