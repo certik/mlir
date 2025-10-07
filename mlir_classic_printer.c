@@ -796,8 +796,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     MlirType *arg_type = mlir_value_get_type(arg);
                     if (arg_type) result = str_concat(arena, result, mlir_type_to_string(arena, arg_type));
 
-                    // Look for _argN_attrs attribute on the operation
-                    string arg_attr_name = format(arena, str_lit("_arg{}_attrs"), (int64_t)i);
+                    // Look for argN_attrs attribute on the operation
+                    string arg_attr_name = format(arena, str_lit("arg{}_attrs"), (int64_t)i);
                     string arg_attrs_str = str_lit("");
                     size_t nattrs_arg = mlir_op_num_attributes(op);
                     for (size_t j = 0; j < nattrs_arg; j++) {

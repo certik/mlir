@@ -1,6 +1,6 @@
 module() {
 ^bb0:
-    tt.func(%arg0: !tt.ptr<f32, 1>, %arg1: !tt.ptr<f32, 1>, %arg2: !tt.ptr<f32, 1>, %arg3: i32, %arg4: i32, %arg5: i32, %arg6: i32, %arg7: i32, %arg8: i32) {visibility = "public", sym_name = "matmul_kernel_0d1d2d34567c89c1011c"} {
+    tt.func(%arg0: !tt.ptr<f32, 1>, %arg1: !tt.ptr<f32, 1>, %arg2: !tt.ptr<f32, 1>, %arg3: i32, %arg4: i32, %arg5: i32, %arg6: i32, %arg7: i32, %arg8: i32) {visibility = "public", sym_name = "matmul_kernel_0d1d2d34567c89c1011c", arg0_attrs = "tt.divisibility = 16 : i32", arg1_attrs = "tt.divisibility = 16 : i32", arg2_attrs = "tt.divisibility = 16 : i32"} {
     ^bb0:
         %c15_i32 = arith.constant() {value = 15} -> i32
         %c63_i32 = arith.constant() {value = 63} -> i32

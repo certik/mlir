@@ -1,6 +1,6 @@
 module() {
 ^bb0:
-    tt.func(%arg0: !tt.ptr<f16, 1>, %arg1: !tt.ptr<f16, 1>, %arg2: i32) {visibility = "public", sym_name = "load_reduce_kernel_0d1d2de3c4c"} {
+    tt.func(%arg0: !tt.ptr<f16, 1>, %arg1: !tt.ptr<f16, 1>, %arg2: i32) {visibility = "public", sym_name = "load_reduce_kernel_0d1d2de3c4c", arg0_attrs = "tt.divisibility = 16 : i32", arg1_attrs = "tt.divisibility = 16 : i32", arg2_attrs = "tt.divisibility = 16 : i32, tt.max_divisibility = 8 : i32"} {
     ^bb0:
         %0 = arith.extsi(%arg2: i32) -> i64
         %1 = tt.make_range() {end = 128 : i32, start = 0 : i32} -> tensor<128xi32>

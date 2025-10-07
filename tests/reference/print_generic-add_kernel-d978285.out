@@ -1,6 +1,6 @@
 module() {
 ^bb0:
-    tt.func(%arg0: !tt.ptr<f32>, %arg1: !tt.ptr<f32>, %arg2: !tt.ptr<f32>, %arg3: i32) {visibility = "public", sym_name = "add_kernel"} {
+    tt.func(%arg0: !tt.ptr<f32>, %arg1: !tt.ptr<f32>, %arg2: !tt.ptr<f32>, %arg3: i32) {visibility = "public", sym_name = "add_kernel", arg0_attrs = "tt.divisibility = 16 : i32", arg1_attrs = "tt.divisibility = 16 : i32", arg2_attrs = "tt.divisibility = 16 : i32", arg3_attrs = "tt.divisibility = 16 : i32"} {
     ^bb0:
         %c16_i32 = arith.constant() {value = 16} -> i32
         %0 = tt.get_program_id() {axis = "x"} -> i32

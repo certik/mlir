@@ -2686,9 +2686,9 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
     for (size_t i = 0; i < arg_attr_strings.size; i++) {
         string attr_str = arg_attr_strings.data[i];
         if (attr_str.size > 0) {
-            // Create an attribute with name "_argN_attrs" where N is the argument index
-            // The underscore prefix marks this as an internal attribute (won't be printed by generic printer)
-            string attr_name = format(parser->arena, str_lit("_arg{}_attrs"), (int64_t)i);
+            // Create an attribute with name "argN_attrs" where N is the argument index
+            // These will be visible in both generic and classic printers
+            string attr_name = format(parser->arena, str_lit("arg{}_attrs"), (int64_t)i);
             mlir_op_append_attribute(parser->arena, op, create_string_attr(parser, attr_name, attr_str));
         }
     }
