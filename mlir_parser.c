@@ -717,7 +717,7 @@ MlirBlock* parse_block(Parser *parser) {
                         arg_type = mlir_type_create_from_string(parser->arena, str_lit("i32"));
                     }
                     // Create block argument value with parsed type
-                    MlirValue *block_arg = mlir_value_create_block_arg(parser->arena, arg_name, (uint32_t)block_args.size, arg_type);
+                    MlirValue *block_arg = mlir_value_create_block_arg(parser->arena, arg_name, (uint32_t)block_args.size, arg_type, NULL);
 
                     VecValue_push_back(parser->arena, &block_args, block_arg);
 
@@ -1049,7 +1049,7 @@ MlirValue **finalize_results(const OperationParserParams *params,
             if (params->lhs_results && i < params->n_lhs_results) {
                 reg_name = mlir_value_get_register_name(params->lhs_results[i]);
             }
-            MlirValue *res = mlir_value_create_op_result(params->arena, op, (uint32_t)i, ty, reg_name);
+            MlirValue *res = mlir_value_create_op_result(params->arena, op, (uint32_t)i, ty, reg_name, NULL);
             results[i] = res;
         }
         n_results = n_result_types;
@@ -1087,7 +1087,7 @@ MlirValue *lookup_or_create_value(Parser *parser, string reg, string default_typ
         if (default_type.size > 0) {
             ty = mlir_type_create_from_string(parser->arena, default_type);
         }
-        val = mlir_value_create_block_arg(parser->arena, reg, 0, ty);
+        val = mlir_value_create_block_arg(parser->arena, reg, 0, ty, NULL);
     }
     return val;
 }
@@ -1507,7 +1507,7 @@ MlirOperation* parse_operation(Parser *parser) {
         lhs_results = arena_alloc_array(parser->arena, MlirValue*, result_count);
         for (size_t i = 0; i < result_count; i++) {
             string name = (i == 0) ? reg_name : (string){NULL, 0};
-            lhs_results[i] = mlir_value_create_op_result(parser->arena, NULL, (uint32_t)i, NULL, name);
+            lhs_results[i] = mlir_value_create_op_result(parser->arena, NULL, (uint32_t)i, NULL, name, NULL);
         }
         n_lhs_results = result_count;
         result_value = lhs_results[0]; // Keep first for backward compatibility
