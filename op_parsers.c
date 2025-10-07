@@ -12,6 +12,8 @@
 #include "tokenizer.h"
 #include "op_parsers.h"
 
+// Define vector type for storing strings (used for argument attributes in tt.func)
+DEFINE_VECTOR_FOR_TYPE(string, VecString)
 
 OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserParams *params) {
     MlirAttribute **attributes = NULL;
@@ -2276,6 +2278,11 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
     VecValue func_args;
     VecValue_reserve(parser->arena, &func_args, 8);
 
+    // Vector to collect per-argument attributes (parallel to func_args)
+    // Each element is a string like "tt.divisibility = 16 : i32" or empty if no attrs
+    VecString arg_attr_strings;
+    VecString_reserve(parser->arena, &arg_attr_strings, 8);
+
     // Capture visibility keyword if present
     string visibility = str_lit("private");  // default
     if (parser_peek(parser, TK_NAME) && (str_eq(parser_token_str(parser), str_lit("public")) || str_eq(parser_token_str(parser), str_lit("private")))) {
@@ -2512,11 +2519,22 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                     // Now create the value with all information
                     MlirValue *arg = mlir_value_create_block_arg(parser->arena, reg_str, (uint32_t)func_args.size, arg_type, arg_location);
 
-                    // Set attributes after creation
-                    if (has_div) mlir_value_set_divisibility(arg, true, div_value, div_type);
-                    if (has_max_div) mlir_value_set_max_divisibility(arg, true, max_div_value, max_div_type);
+                    // Build attribute string for this argument
+                    string arg_attrs_str = str_lit("");
+                    if (has_div) {
+                        string div_type_str = mlir_type_to_string(parser->arena, div_type);
+                        arg_attrs_str = format(parser->arena, str_lit("tt.divisibility = {} : {}"), div_value, div_type_str);
+                    }
+                    if (has_max_div) {
+                        string max_div_type_str = mlir_type_to_string(parser->arena, max_div_type);
+                        if (arg_attrs_str.size > 0) {
+                            arg_attrs_str = str_concat(parser->arena, arg_attrs_str, str_lit(", "));
+                        }
+                        arg_attrs_str = str_concat(parser->arena, arg_attrs_str, format(parser->arena, str_lit("tt.max_divisibility = {} : {}"), max_div_value, max_div_type_str));
+                    }
 
                     VecValue_push_back(parser->arena, &func_args, arg);
+                    VecString_push_back(parser->arena, &arg_attr_strings, arg_attrs_str);
                 }
             } else if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME) || parser_peek(parser, TK_EXCLAMATION)) {
                 // Type-only param (no SSA name); accumulate its textual form
@@ -2663,6 +2681,17 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                                       regions, n_regions,
                                       op_location, params->unnumbered_loc_def,
                                       params->trailing_comment, params->source_line_start);
+
+    // Add per-argument attributes to the operation
+    for (size_t i = 0; i < arg_attr_strings.size; i++) {
+        string attr_str = arg_attr_strings.data[i];
+        if (attr_str.size > 0) {
+            // Create an attribute with name "_argN_attrs" where N is the argument index
+            // The underscore prefix marks this as an internal attribute (won't be printed by generic printer)
+            string attr_name = format(parser->arena, str_lit("_arg{}_attrs"), (int64_t)i);
+            mlir_op_append_attribute(parser->arena, op, create_string_attr(parser, attr_name, attr_str));
+        }
+    }
 
     size_t n_results = 0;
     MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
