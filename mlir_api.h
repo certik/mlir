@@ -158,7 +158,7 @@ string MLIR_MLIR_OpTypeToString(MLIR_OpType type);
 // -----------------------------------------------------------------------------
 
 void MLIR_InitApi(MLIR_Op *root);
-void MLIR_SetGlobalArenaAllocator(Arena *arena);
+void MLIR_SetArena(Arena *arena);
 
 // -----------------------------------------------------------------------------
 // Operation API

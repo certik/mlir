@@ -168,7 +168,7 @@ void MLIR_InitApi(MLIR_Op *root) {
     // No initialization required for the native C implementation.
 }
 
-void MLIR_SetGlobalArenaAllocator(Arena *arena) {
+void MLIR_SetArena(Arena *arena) {
     global_arena = arena;
 }
 

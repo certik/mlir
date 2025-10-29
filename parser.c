@@ -188,7 +188,7 @@ int main(int argc, char *argv[]) {
     if (verbose) printf("Arena created...\n");
     
     // Set the global arena for MLIR API
-    MLIR_SetGlobalArenaAllocator(arena);
+    MLIR_SetArena(arena);
     if (verbose) printf("Global arena set...\n");
 
     if (verbose) printf("Parsing args...\n");
