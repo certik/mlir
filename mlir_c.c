@@ -53,7 +53,7 @@ typedef enum {
     OP_TYPE_SCF_IF,
 
     OP_TYPE_COUNT  // Total number of operation types
-} OpType;
+} MLIR_OpType;
 
 // Type kinds for MLIR type system
 typedef enum {
@@ -171,7 +171,7 @@ struct Region {
 // The core Operation structure - designed for cache efficiency
 struct Operation {
     // Type identification - FIRST for fastest access
-    OpType op_type;              // 4 bytes - enum for registered ops
+    MLIR_OpType op_type;              // 4 bytes - enum for registered ops
 
     // For unregistered ops, store the string name
     const char *unregistered_name;  // 8 bytes - NULL for registered ops
@@ -257,7 +257,7 @@ typedef void (*OpHandler)(Operation *op, void *context);
 static OpHandler dispatch_table[OP_TYPE_COUNT];
 
 // Register a handler for an operation type
-static inline void register_handler(OpType type, OpHandler handler) {
+static inline void register_handler(MLIR_OpType type, OpHandler handler) {
     if (type > 0 && type < OP_TYPE_COUNT) {
         dispatch_table[type] = handler;
     }
@@ -343,7 +343,7 @@ static inline void dispatch_operations_batch(Operation **ops, size_t count, void
 // Operation Type to String Conversion
 // ============================================================================
 
-static const char* op_type_to_string(OpType type) {
+static const char* op_type_to_string(MLIR_OpType type) {
     switch (type) {
         case OP_TYPE_UNREGISTERED: return "unregistered";
         case OP_TYPE_MODULE: return "module";
@@ -391,7 +391,7 @@ static void assign_ssa_number(Value *val) {
 // Operation Creation
 // ============================================================================
 
-Operation* create_operation(OpType type,
+Operation* create_operation(MLIR_OpType type,
                            uint16_t num_operands,
                            uint16_t num_results,
                            uint16_t num_attributes,

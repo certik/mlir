@@ -22,11 +22,11 @@ using namespace mlir;
 static MLIRContext *gContext = nullptr;
 static OpBuilder *gBuilder = nullptr;
 
-// Mapping from MLIR operation pointers back to our OpType enumeration.
-static llvm::DenseMap<const Operation *, OpType> gOpTypeMap;
+// Mapping from MLIR operation pointers back to our MLIR_OpType enumeration.
+static llvm::DenseMap<const Operation *, MLIR_OpType> gMLIR_OpTypeMap;
 
-// Mapping from OpType to the canonical MLIR operation name.  The order matches
-// the OpType enumeration defined in mlir_api.h.
+// Mapping from MLIR_OpType to the canonical MLIR operation name.  The order matches
+// the MLIR_OpType enumeration defined in mlir_api.h.
 static const char *const kOpNames[OP_TYPE_COUNT] = {
     "",                     // OP_TYPE_UNREGISTERED
     "builtin.module",       // OP_TYPE_MODULE
@@ -81,7 +81,7 @@ static const char *const kOpNames[OP_TYPE_COUNT] = {
     "tt.reduce_return"      // OP_TYPE_TT_REDUCE_RETURN
 };
 
-static inline StringRef opTypeToName(OpType type) {
+static inline StringRef opTypeToName(MLIR_OpType type) {
     assert(type < OP_TYPE_COUNT);
     return kOpNames[type];
 }
@@ -90,147 +90,147 @@ static inline StringRef opTypeToName(OpType type) {
 extern "C" {
 #endif
 
-static OpType lookupOpTypeByName(StringRef name) {
+static MLIR_OpType lookupMLIR_OpTypeByName(StringRef name) {
     for (int i = 1; i < OP_TYPE_COUNT; ++i) {
-        if (name == opTypeToName(static_cast<OpType>(i)))
-            return static_cast<OpType>(i);
+        if (name == opTypeToName(static_cast<MLIR_OpType>(i)))
+            return static_cast<MLIR_OpType>(i);
     }
     return OP_TYPE_UNREGISTERED;
 }
 
-void MLIR_ApiInit(MlirOperation *root) {
+void MLIR_ApiInit(MLIR_Op *root) {
     if (!gContext) {
         gContext = new MLIRContext();
         gContext->loadAllAvailableDialects();
         gBuilder = new OpBuilder(gContext);
     }
 
-    gOpTypeMap.clear();
+    gMLIR_OpTypeMap.clear();
 
     if (root) {
         Operation *cppRoot = reinterpret_cast<Operation *>(root);
         cppRoot->walk([](Operation *op) {
-            gOpTypeMap[op] = lookupOpTypeByName(op->getName().getStringRef());
+            gMLIR_OpTypeMap[op] = lookupMLIR_OpTypeByName(op->getName().getStringRef());
         });
     }
 }
 
-MlirOperation *mlir_operation_create(Arena *arena, OpType type) {
+MLIR_Op *mlir_operation_create(Arena *arena, MLIR_OpType type) {
     (void)arena;
     OperationState state(gBuilder->getUnknownLoc(), opTypeToName(type));
     Operation *op = Operation::create(state);
-    gOpTypeMap[op] = type;
-    return reinterpret_cast<MlirOperation *>(op);
+    gMLIR_OpTypeMap[op] = type;
+    return reinterpret_cast<MLIR_Op *>(op);
 }
 
-void MLIR_BlockAddOp(Arena *arena, MlirBlock *block, MlirOperation *op) {
+void MLIR_BlockAddOp(Arena *arena, MLIR_Block *block, MLIR_Op *op) {
     (void)arena;
     Block *cppBlock = reinterpret_cast<Block *>(block);
     Operation *cppOp = reinterpret_cast<Operation *>(op);
     cppBlock->push_back(cppOp);
 }
 
-void MLIR_BlockAddArg(Arena *arena, MlirBlock *block, MlirValue *arg) {
+void MLIR_BlockAddArg(Arena *arena, MLIR_Block *block, MLIR_Value *arg) {
     (void)arena;
     Block *cppBlock = reinterpret_cast<Block *>(block);
     Value cppVal = *reinterpret_cast<Value *>(arg);
     cppBlock->addArgument(cppVal.getType(), cppVal.getLoc());
 }
 
-void MLIR_RegionAddBlock(Arena *arena, MlirRegion *region, MlirBlock *block) {
+void MLIR_RegionAddBlock(Arena *arena, MLIR_Region *region, MLIR_Block *block) {
     (void)arena;
     Region *cppRegion = reinterpret_cast<Region *>(region);
     Block *cppBlock = reinterpret_cast<Block *>(block);
     cppRegion->push_back(cppBlock);
 }
 
-size_t MLIR_RegionNumBlocks(const MlirRegion *region) {
+size_t MLIR_RegionNumBlocks(const MLIR_Region *region) {
     const Region *cppRegion = reinterpret_cast<const Region *>(region);
     return cppRegion->getBlocks().size();
 }
 
-MlirBlock *MLIR_RegionGetBlock(const MlirRegion *region, size_t idx) {
+MLIR_Block *MLIR_RegionGetBlock(const MLIR_Region *region, size_t idx) {
     Region *cppRegion = const_cast<Region *>(reinterpret_cast<const Region *>(region));
     auto it = cppRegion->begin();
     std::advance(it, idx);
-    return reinterpret_cast<MlirBlock *>(&*it);
+    return reinterpret_cast<MLIR_Block *>(&*it);
 }
 
-size_t MLIR_BlockNumOps(const MlirBlock *block) {
+size_t MLIR_BlockNumOps(const MLIR_Block *block) {
     const Block *cppBlock = reinterpret_cast<const Block *>(block);
     return cppBlock->getOperations().size();
 }
 
-MlirOperation *MLIR_BlockGetOp(const MlirBlock *block, size_t idx) {
+MLIR_Op *MLIR_BlockGetOp(const MLIR_Block *block, size_t idx) {
     Block *cppBlock = const_cast<Block *>(reinterpret_cast<const Block *>(block));
     auto it = cppBlock->begin();
     std::advance(it, idx);
-    return reinterpret_cast<MlirOperation *>(&*it);
+    return reinterpret_cast<MLIR_Op *>(&*it);
 }
 
-OpType mlir_operation_get_type(const MlirOperation *op) {
+MLIR_OpType mlir_operation_get_type(const MLIR_Op *op) {
     const Operation *cppOp = reinterpret_cast<const Operation *>(op);
-    auto it = gOpTypeMap.find(cppOp);
-    if (it != gOpTypeMap.end())
+    auto it = gMLIR_OpTypeMap.find(cppOp);
+    if (it != gMLIR_OpTypeMap.end())
         return it->second;
     return OP_TYPE_UNREGISTERED;
 }
 
-size_t mlir_operation_num_regions(const MlirOperation *op) {
+size_t mlir_operation_num_regions(const MLIR_Op *op) {
     const Operation *cppOp = reinterpret_cast<const Operation *>(op);
     return cppOp->getNumRegions();
 }
 
-MlirRegion *mlir_operation_get_region(const MlirOperation *op, size_t idx) {
+MLIR_Region *mlir_operation_get_region(const MLIR_Op *op, size_t idx) {
     Operation *cppOp = const_cast<Operation *>(reinterpret_cast<const Operation *>(op));
-    return reinterpret_cast<MlirRegion *>(&cppOp->getRegion(idx));
+    return reinterpret_cast<MLIR_Region *>(&cppOp->getRegion(idx));
 }
 
-MlirLocation *mlir_location_create(Arena *arena) {
+MLIR_Location *mlir_location_create(Arena *arena) {
     (void)arena;
     return nullptr;
 }
 
-void mlir_location_set_kind(MlirLocation *loc, MlirLocationKind kind) {
+void mlir_location_set_kind(MLIR_Location *loc, MLIR_LocationKind kind) {
     (void)loc;
     (void)kind;
 }
 
-void mlir_location_set_original_text(MlirLocation *loc, string text) {
+void mlir_location_set_original_text(MLIR_Location *loc, string text) {
     (void)loc;
     (void)text;
 }
 
-void mlir_location_set_file_data(MlirLocation *loc, string filename, int line, int column) {
+void mlir_location_set_file_data(MLIR_Location *loc, string filename, int line, int column) {
     (void)loc;
     (void)filename;
     (void)line;
     (void)column;
 }
 
-void mlir_location_set_name_data(MlirLocation *loc, string name) {
+void mlir_location_set_name_data(MLIR_Location *loc, string name) {
     (void)loc;
     (void)name;
 }
 
-void mlir_location_set_ref_id(MlirLocation *loc, int ref_id) {
+void mlir_location_set_ref_id(MLIR_Location *loc, int ref_id) {
     (void)loc;
     (void)ref_id;
 }
 
-void mlir_value_set_location(MlirValue *value, MlirLocation *loc) {
+void mlir_value_set_location(MLIR_Value *value, MLIR_Location *loc) {
     (void)value;
     (void)loc;
 }
 
-void mlir_value_set_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type) {
+void mlir_value_set_divisibility(MLIR_Value *value, bool has_value, int64_t div_value, MLIR_Type *type) {
     (void)value;
     (void)has_value;
     (void)div_value;
     (void)type;
 }
 
-void mlir_value_set_max_divisibility(MlirValue *value, bool has_value, int64_t div_value, MlirType *type) {
+void mlir_value_set_max_divisibility(MLIR_Value *value, bool has_value, int64_t div_value, MLIR_Type *type) {
     (void)value;
     (void)has_value;
     (void)div_value;

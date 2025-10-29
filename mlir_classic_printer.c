@@ -6,22 +6,22 @@
 #include <string.h>
 
 // SSA numbering map for printer (key by API values during migration)
-static inline size_t ptr_hash(MlirValue *p) { return ((size_t)p) >> 3; }
-static inline bool ptr_equal(MlirValue *a, MlirValue *b) { return a == b; }
+static inline size_t ptr_hash(MLIR_Value *p) { return ((size_t)p) >> 3; }
+static inline bool ptr_equal(MLIR_Value *a, MLIR_Value *b) { return a == b; }
 #define SsaMap_HASH ptr_hash
 #define SsaMap_EQUAL ptr_equal
-DEFINE_HASHTABLE_FOR_TYPES(MlirValue*, uint32_t, SsaMap)
+DEFINE_HASHTABLE_FOR_TYPES(MLIR_Value*, uint32_t, SsaMap)
 
 typedef struct {
     Arena *arena;
     uint32_t next_ssa;
     SsaMap ssa_map;
-    MlirOperation *current_scf_for;
+    MLIR_Op *current_scf_for;
 } PrintCtx;
 
 // Optional predecessor comments per block for a region
 typedef struct {
-    MlirRegion *region;
+    MLIR_Region *region;
     string *comments; // size = region->n_blocks
     int *counts;      // predecessor counts
     int n_blocks;
@@ -34,7 +34,7 @@ static int parse_bb_index(string lab) {
     return v;
 }
 
-static PredComments* build_pred_comments(Arena *arena, MlirRegion *region) {
+static PredComments* build_pred_comments(Arena *arena, MLIR_Region *region) {
     if (!region) return NULL;
     PredComments *pc = arena_alloc(arena, PredComments);
     pc->region = region;
@@ -45,17 +45,17 @@ static PredComments* build_pred_comments(Arena *arena, MlirRegion *region) {
     for (int i=0;i<pc->n_blocks;i++){ pc->comments[i]=str_lit(""); pc->counts[i]=0; }
     // Walk operations to find branch targets
     for (size_t b=0; b<nb; b++) {
-        MlirBlock *blk = MLIR_RegionGetBlock(region, b);
+        MLIR_Block *blk = MLIR_RegionGetBlock(region, b);
         size_t no = MLIR_BlockNumOps(blk);
         for (size_t oi=0; oi<no; oi++) {
-            MlirOperation *op = MLIR_BlockGetOp(blk, oi);
-            OpType ty = MLIR_OpGetType(op);
+            MLIR_Op *op = MLIR_BlockGetOp(blk, oi);
+            MLIR_OpType ty = MLIR_OpGetType(op);
             if (ty == OP_TYPE_CF_BR) {
                 // find _target attribute
                 string tgt = str_lit("");
                 size_t na = MLIR_OpNumAttributes(op);
                 for (size_t ai=0; ai<na; ai++) {
-                    MlirAttribute *a = MLIR_OpGetAttribute(op, ai);
+                    MLIR_Attribute *a = MLIR_OpGetAttribute(op, ai);
                     if (str_eq(MLIR_AttributeGetName(a), str_lit("_target")) && MLIR_AttributeGetKind(a)==MLIR_ATTR_KIND_STRING) { tgt = MLIR_AttributeGetString(a); break; }
                 }
                 int idx = parse_bb_index(tgt);
@@ -68,7 +68,7 @@ static PredComments* build_pred_comments(Arena *arena, MlirRegion *region) {
                 string ttrue = str_lit(""); string tfalse = str_lit("");
                 size_t na = MLIR_OpNumAttributes(op);
                 for (size_t ai=0; ai<na; ai++) {
-                    MlirAttribute *a = MLIR_OpGetAttribute(op, ai);
+                    MLIR_Attribute *a = MLIR_OpGetAttribute(op, ai);
                     if (str_eq(MLIR_AttributeGetName(a), str_lit("_true")) && MLIR_AttributeGetKind(a)==MLIR_ATTR_KIND_STRING) ttrue = MLIR_AttributeGetString(a);
                     else if (str_eq(MLIR_AttributeGetName(a), str_lit("_false")) && MLIR_AttributeGetKind(a)==MLIR_ATTR_KIND_STRING) tfalse = MLIR_AttributeGetString(a);
                 }
@@ -105,7 +105,7 @@ static inline void ssa_map_init(PrintCtx *ctx, Arena *arena) {
     ctx->current_scf_for = NULL;
 }
 
-static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, MlirValue *v) {
+static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, MLIR_Value *v) {
     uint32_t *found = SsaMap_get(&ctx->ssa_map, v);
     if (found) return *found;
     uint32_t num = ctx->next_ssa++;
@@ -114,18 +114,18 @@ static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, MlirValue *v) {
 }
 
 // Forward declarations for internal functions
-static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, MlirOperation *op);
-static string print_region_internal_classic(PrintCtx *ctx, int indent_level, MlirRegion *region);
-static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int indent_level, MlirBlock *block);
-static string print_function_region_classic(PrintCtx *ctx, int indent_level, MlirRegion *region);
+static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, MLIR_Op *op);
+static string print_region_internal_classic(PrintCtx *ctx, int indent_level, MLIR_Region *region);
+static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int indent_level, MLIR_Block *block);
+static string print_function_region_classic(PrintCtx *ctx, int indent_level, MLIR_Region *region);
 
-static void preassign_region_ssa(PrintCtx *ctx, MlirRegion *region, int indent_level);
-static void preassign_op_ssa(PrintCtx *ctx, MlirOperation *op, int indent_level) {
+static void preassign_region_ssa(PrintCtx *ctx, MLIR_Region *region, int indent_level);
+static void preassign_op_ssa(PrintCtx *ctx, MLIR_Op *op, int indent_level) {
     // First preassign nested regions so nested results get earlier numbers
     size_t n_regions = MLIR_OpNumRegions(op);
     if (n_regions > 0) {
         for (size_t i = 0; i < n_regions; i++) {
-            MlirRegion *region = MLIR_OpGetRegion(op, i);
+            MLIR_Region *region = MLIR_OpGetRegion(op, i);
             preassign_region_ssa(ctx, region, indent_level + 1);
         }
     }
@@ -133,7 +133,7 @@ static void preassign_op_ssa(PrintCtx *ctx, MlirOperation *op, int indent_level)
     size_t n_results = MLIR_OpNumResults(op);
     if (n_results > 0) {
         for (size_t i = 0; i < n_results; i++) {
-            MlirValue *result = MLIR_OpGetResult(op, i);
+            MLIR_Value *result = MLIR_OpGetResult(op, i);
             if (result) {
                 (void)get_or_assign_ssa(ctx, result);
             }
@@ -141,20 +141,20 @@ static void preassign_op_ssa(PrintCtx *ctx, MlirOperation *op, int indent_level)
     }
 }
 
-static void preassign_block_ssa(PrintCtx *ctx, MlirBlock *block, int indent_level) {
-    MlirBlock *b = block;
+static void preassign_block_ssa(PrintCtx *ctx, MLIR_Block *block, int indent_level) {
+    MLIR_Block *b = block;
     size_t n = MLIR_BlockNumOps(b);
     for (size_t i = 0; i < n; i++) {
-        MlirOperation *op = MLIR_BlockGetOp(b, i);
+        MLIR_Op *op = MLIR_BlockGetOp(b, i);
         preassign_op_ssa(ctx, op, indent_level + 1);
     }
 }
 
-static void preassign_region_ssa(PrintCtx *ctx, MlirRegion *region, int indent_level) {
-    MlirRegion *r = region;
+static void preassign_region_ssa(PrintCtx *ctx, MLIR_Region *region, int indent_level) {
+    MLIR_Region *r = region;
     size_t n = MLIR_RegionNumBlocks(r);
     for (size_t i = 0; i < n; i++) {
-        MlirBlock *b = MLIR_RegionGetBlock(r, i);
+        MLIR_Block *b = MLIR_RegionGetBlock(r, i);
         preassign_block_ssa(ctx, b, indent_level);
     }
 }
@@ -171,9 +171,9 @@ static string indent_classic(Arena *arena, int indent_level) {
 }
 
 // Helper to print SSA value reference
-static string print_ssa_value_classic(PrintCtx *ctx, MlirValue *value) {
+static string print_ssa_value_classic(PrintCtx *ctx, MLIR_Value *value) {
     Arena *arena = ctx->arena;
-    MlirValue *v = value;
+    MLIR_Value *v = value;
     string rname = MLIR_ValueGetRegisterName(v);
     if (rname.size > 0) return rname;
     uint32_t num = get_or_assign_ssa(ctx, v);
@@ -181,12 +181,12 @@ static string print_ssa_value_classic(PrintCtx *ctx, MlirValue *value) {
 }
 
 // Helper to print operands; appends "#0" when referencing first result of a multi-result def
-static string print_ssa_operand_classic(PrintCtx *ctx, MlirValue *value) {
+static string print_ssa_operand_classic(PrintCtx *ctx, MLIR_Value *value) {
     Arena *arena = ctx->arena;
-    MlirValue *v = value;
+    MLIR_Value *v = value;
     string base = print_ssa_value_classic(ctx, v);
     if (v && MLIR_ValueGetKind(v) == OP_RESULT) {
-        MlirOperation *defop = MLIR_ValueGetDefOp(v);
+        MLIR_Op *defop = MLIR_ValueGetDefOp(v);
         if (defop && MLIR_OpNumResultTypes(defop) > 1) {
             base = str_concat(arena, base, str_lit("#0"));
         }
@@ -195,7 +195,7 @@ static string print_ssa_operand_classic(PrintCtx *ctx, MlirValue *value) {
 }
 
 // Helper to print location information
-static string print_location_classic(Arena *arena, MlirLocation *loc) {
+static string print_location_classic(Arena *arena, MLIR_Location *loc) {
     if (!loc) return str_lit("");
 
     switch (MLIR_LocationGetKind(loc)) {
@@ -225,7 +225,7 @@ static string print_location_classic(Arena *arena, MlirLocation *loc) {
     }
 }
 
-static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int indent_level, MlirBlock *block) {
+static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int indent_level, MLIR_Block *block) {
     Arena *arena = ctx->arena;
     string result = format(arena, str_lit("{}^bb{}"), indent_classic(arena, indent_level), bb_index);
 
@@ -235,8 +235,8 @@ static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int inde
         result = str_concat(arena, result, str_lit("("));
         for (size_t i = 0; i < n_args; i++) {
             if (i > 0) result = str_concat(arena, result, str_lit(", "));
-            MlirValue *arg = MLIR_BlockGetArg(block, i);
-            MlirType *arg_ty = arg ? MLIR_ValueGetType(arg) : NULL;
+            MLIR_Value *arg = MLIR_BlockGetArg(block, i);
+            MLIR_Type *arg_ty = arg ? MLIR_ValueGetType(arg) : NULL;
             if (arg && arg_ty) {
                 // For block arguments, use the original register name
                 string rname = MLIR_ValueGetRegisterName(arg);
@@ -252,7 +252,7 @@ static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int inde
                 // Those are only on tt.func operation's arguments (which are stored as operands).
 
                 // Append argument location if present
-                MlirLocation *arg_loc = MLIR_ValueGetLocation(arg);
+                MLIR_Location *arg_loc = MLIR_ValueGetLocation(arg);
                 if (arg_loc) {
                     result = str_concat(arena, result, print_location_classic(arena, arg_loc));
                 }
@@ -266,7 +266,7 @@ static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int inde
     result = str_concat(arena, result, str_lit(":\n"));
 
     for (size_t i=0, e = MLIR_BlockNumOps(block); i < e; i++) {
-        MlirOperation *opn = MLIR_BlockGetOp(block, i);
+        MLIR_Op *opn = MLIR_BlockGetOp(block, i);
         result = str_concat(arena, result,
             print_operation_internal_classic(ctx, indent_level+1, opn)
         );
@@ -274,12 +274,12 @@ static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int inde
     return result;
 }
 
-static string print_region_internal_classic(PrintCtx *ctx, int indent_level, MlirRegion *region) {
+static string print_region_internal_classic(PrintCtx *ctx, int indent_level, MLIR_Region *region) {
     Arena *arena = ctx->arena;
     string result = str_lit("");
     result = str_concat(arena, result, str_lit("{\n"));
     for (size_t i=0, e = MLIR_RegionNumBlocks(region); i < e; i++) {
-        MlirBlock *b = MLIR_RegionGetBlock(region, i);
+        MLIR_Block *b = MLIR_RegionGetBlock(region, i);
         result = str_concat(arena, result,
             print_block_internal_classic(ctx, (int)i, indent_level, b)
         );
@@ -290,16 +290,16 @@ static string print_region_internal_classic(PrintCtx *ctx, int indent_level, Mli
 }
 
 // Special function region printer that doesn't print block labels (for function bodies)
-static string print_function_region_classic(PrintCtx *ctx, int indent_level, MlirRegion *region) {
+static string print_function_region_classic(PrintCtx *ctx, int indent_level, MLIR_Region *region) {
     Arena *arena = ctx->arena;
     string result = str_lit("");
     // If single block, keep the compact form; otherwise, print with block labels
     if (MLIR_RegionNumBlocks(region) <= 1) {
         result = str_concat(arena, result, str_lit("{\n"));
         for (size_t i = 0, nb = MLIR_RegionNumBlocks(region); i < nb; i++) {
-            MlirBlock *block = MLIR_RegionGetBlock(region, i);
+            MLIR_Block *block = MLIR_RegionGetBlock(region, i);
             for (size_t j = 0, no = MLIR_BlockNumOps(block); j < no; j++) {
-                MlirOperation *opn = MLIR_BlockGetOp(block, j);
+                MLIR_Op *opn = MLIR_BlockGetOp(block, j);
                 result = str_concat(arena, result,
                     print_operation_internal_classic(ctx, indent_level + 1, opn)
                 );
@@ -315,14 +315,14 @@ static string print_function_region_classic(PrintCtx *ctx, int indent_level, Mli
         string out = str_lit("");
         out = str_concat(arena, out, str_lit("{\n"));
         if (MLIR_RegionNumBlocks(region) > 0) {
-            MlirBlock *b0 = MLIR_RegionGetBlock(region, 0);
+            MLIR_Block *b0 = MLIR_RegionGetBlock(region, 0);
             for (size_t j = 0, no = MLIR_BlockNumOps(b0); j < no; j++) {
-                MlirOperation *opn = MLIR_BlockGetOp(b0, j);
+                MLIR_Op *opn = MLIR_BlockGetOp(b0, j);
                 out = str_concat(arena, out, print_operation_internal_classic(ctx, indent_level + 1, opn));
             }
         }
         for (size_t i = 1, nb = MLIR_RegionNumBlocks(region); i < nb; i++) {
-            MlirBlock *b = MLIR_RegionGetBlock(region, i);
+            MLIR_Block *b = MLIR_RegionGetBlock(region, i);
             string blk = print_block_internal_classic(ctx, (int)i, indent_level, b);
             // Inject predecessor comment
             string comment = pc ? pc->comments[i] : str_lit("");
@@ -343,7 +343,7 @@ static string print_function_region_classic(PrintCtx *ctx, int indent_level, Mli
     }
 }
 
-static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, MlirOperation *op) {
+static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, MLIR_Op *op) {
     Arena *arena = ctx->arena;
     string result = indent_classic(arena, indent_level);
 
@@ -355,7 +355,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         string vis = str_lit(""); string name = str_lit(""); string ret = str_lit(""); string params = str_lit("");
         size_t nattrs = MLIR_OpNumAttributes(op);
         for (size_t i=0;i<nattrs;i++) {
-            MlirAttribute *a = MLIR_OpGetAttribute(op, i);
+            MLIR_Attribute *a = MLIR_OpGetAttribute(op, i);
             string an = MLIR_AttributeGetName(a);
             if (str_eq(an, str_lit("visibility")) && MLIR_AttributeGetKind(a)==MLIR_ATTR_KIND_STRING) vis = MLIR_AttributeGetString(a);
             else if (str_eq(an, str_lit("sym_name")) && MLIR_AttributeGetKind(a)==MLIR_ATTR_KIND_STRING) name = MLIR_AttributeGetString(a);
@@ -372,12 +372,12 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         line = str_concat(arena, line, header);
         size_t n_regions = MLIR_OpNumRegions(op);
         if (n_regions > 0) {
-            MlirRegion *region = MLIR_OpGetRegion(op, 0);
+            MLIR_Region *region = MLIR_OpGetRegion(op, 0);
             line = str_concat(arena, line, str_lit(" "));
             line = str_concat(arena, line, print_function_region_classic(ctx, indent_level, region));
         }
         else { line = str_concat(arena, line, str_lit(" { }")); }
-        MlirLocation *loc = MLIR_OpGetLocation(op);
+        MLIR_Location *loc = MLIR_OpGetLocation(op);
         if (loc) line = str_concat(arena, line, print_location_classic(arena, loc));
         line = str_concat(arena, line, str_lit("\n"));
         return line;
@@ -390,7 +390,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         size_t n_regions = MLIR_OpNumRegions(op);
         if (n_regions > 0) {
             for (size_t i = 0; i < n_regions; i++) {
-                MlirRegion *region = MLIR_OpGetRegion(op, i);
+                MLIR_Region *region = MLIR_OpGetRegion(op, i);
                 preassign_region_ssa(ctx, region, indent_level + 1);
             }
         }
@@ -399,7 +399,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         size_t api_num_results = MLIR_OpNumResults(op);
         bool use_colon_syntax = false;
         if (api_num_result_types > 1 && api_num_results == api_num_result_types) {
-            MlirValue *r0 = MLIR_OpGetResult(op, 0);
+            MLIR_Value *r0 = MLIR_OpGetResult(op, 0);
             if (r0) {
                 bool all_rest_null = true;
                 for (size_t i = 1; i < api_num_results; i++) {
@@ -413,7 +413,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         }
 
         if (use_colon_syntax) {
-            MlirValue *r0 = MLIR_OpGetResult(op, 0);
+            MLIR_Value *r0 = MLIR_OpGetResult(op, 0);
             if (r0) {
                 result = str_concat(arena, result, print_ssa_value_classic(ctx, r0));
             } else {
@@ -424,7 +424,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         } else {
             for (size_t i = 0; i < api_num_result_types; i++) {
                 if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                MlirValue *res = (i < api_num_results) ? MLIR_OpGetResult(op, i) : NULL;
+                MLIR_Value *res = (i < api_num_results) ? MLIR_OpGetResult(op, i) : NULL;
                 if (res) result = str_concat(arena, result, print_ssa_value_classic(ctx, res));
                 else result = str_concat(arena, result, str_lit("%_"));
             }
@@ -439,17 +439,17 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit("arith.select "));
             for (size_t i = 0, n = MLIR_OpNumOperands(op); i < n; i++) {
                 if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                MlirValue *ov = MLIR_OpGetOperand(op, i);
+                MLIR_Value *ov = MLIR_OpGetOperand(op, i);
                 result = str_concat(arena, result, print_ssa_operand_classic(ctx, ov));
             }
             // Types: condition then value/result
             if (MLIR_OpNumOperands(op) >= 2) {
-                MlirValue *v0 = MLIR_OpGetOperand(op, 0);
-                MlirType *cond_ty = v0 ? MLIR_ValueGetType(v0) : NULL;
-                MlirType *val_ty = NULL;
+                MLIR_Value *v0 = MLIR_OpGetOperand(op, 0);
+                MLIR_Type *cond_ty = v0 ? MLIR_ValueGetType(v0) : NULL;
+                MLIR_Type *val_ty = NULL;
                 if (MLIR_OpNumResultTypes(op) > 0) val_ty = MLIR_OpGetResult_type(op, 0);
                 else {
-                    MlirValue *v1 = MLIR_OpGetOperand(op, 1);
+                    MLIR_Value *v1 = MLIR_OpGetOperand(op, 1);
                     val_ty = v1 ? MLIR_ValueGetType(v1) : NULL;
                 }
                 if (cond_ty && val_ty) {
@@ -466,14 +466,14 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit("arith.constant "));
             size_t n_attrs = MLIR_OpNumAttributes(op);
             if (n_attrs > 0) {
-                MlirAttribute *first_attr = MLIR_OpGetAttribute(op, 0);
+                MLIR_Attribute *first_attr = MLIR_OpGetAttribute(op, 0);
                 if (MLIR_AttributeGetKind(first_attr) == MLIR_ATTR_KIND_STRING && str_eq(MLIR_AttributeGetName(first_attr), str_lit("value_text"))) {
                     result = str_concat(arena, result, MLIR_AttributeGetString(first_attr));
                 } else if (MLIR_AttributeGetKind(first_attr) == MLIR_ATTR_KIND_INTEGER) {
                     size_t n_result_types = MLIR_OpNumResultTypes(op);
                     bool is_i1_bool = false;
                     if (n_result_types > 0) {
-                        MlirType *result_type = MLIR_OpGetResult_type(op, 0);
+                        MLIR_Type *result_type = MLIR_OpGetResult_type(op, 0);
                         if (result_type) {
                             string type_str = MLIR_TypeToString(arena, result_type);
                             if (str_eq(type_str, str_lit("i1"))) {
@@ -499,7 +499,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
             size_t n_result_types = MLIR_OpNumResultTypes(op);
             if (n_result_types > 0) {
-                MlirType *result_type = MLIR_OpGetResult_type(op, 0);
+                MLIR_Type *result_type = MLIR_OpGetResult_type(op, 0);
                 if (result_type) {
                     string type_str = MLIR_TypeToString(arena, result_type);
                     if (!str_eq(type_str, str_lit("i1"))) {
@@ -519,7 +519,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             string predicate = str_lit("slt"); // default fallback
             size_t n_attrs = MLIR_OpNumAttributes(op);
             for (size_t i = 0; i < n_attrs; i++) {
-                MlirAttribute *attr = MLIR_OpGetAttribute(op, i);
+                MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i);
                 if (str_eq(MLIR_AttributeGetName(attr), str_lit("predicate")) &&
                     MLIR_AttributeGetKind(attr) == MLIR_ATTR_KIND_STRING) {
                     predicate = MLIR_AttributeGetString(attr);
@@ -533,14 +533,14 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit(", "));
                 for (size_t i = 0; i < n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    MlirValue *operand = MLIR_OpGetOperand(op, i);
+                    MLIR_Value *operand = MLIR_OpGetOperand(op, i);
                     result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
                 }
             }
 
             if (n_operands > 0) {
-                MlirValue *first_operand = MLIR_OpGetOperand(op, 0);
-                MlirType *operand_type = MLIR_ValueGetType(first_operand);
+                MLIR_Value *first_operand = MLIR_OpGetOperand(op, 0);
+                MLIR_Type *operand_type = MLIR_ValueGetType(first_operand);
                 if (operand_type) {
                     result = str_concat(arena, result, str_lit(" : "));
                     result = str_concat(arena, result, MLIR_TypeToString(arena, operand_type));
@@ -555,7 +555,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             string target = str_lit("^bb1");
             size_t n_attrs = MLIR_OpNumAttributes(op);
             for (size_t i = 0; i < n_attrs; i++) {
-                MlirAttribute *attr = MLIR_OpGetAttribute(op, i);
+                MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i);
                 if (str_eq(MLIR_AttributeGetName(attr), str_lit("_target")) &&
                     MLIR_AttributeGetKind(attr) == MLIR_ATTR_KIND_STRING) {
                     target = MLIR_AttributeGetString(attr);
@@ -569,14 +569,14 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit("("));
                 for (size_t i = 0; i < n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    MlirValue *operand = MLIR_OpGetOperand(op, i);
+                    MLIR_Value *operand = MLIR_OpGetOperand(op, i);
                     result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
                 }
                 result = str_concat(arena, result, str_lit(" : "));
                 for (size_t i = 0; i < n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    MlirValue *operand = MLIR_OpGetOperand(op, i);
-                    MlirType *operand_type = MLIR_ValueGetType(operand);
+                    MLIR_Value *operand = MLIR_OpGetOperand(op, i);
+                    MLIR_Type *operand_type = MLIR_ValueGetType(operand);
                     if (operand_type) {
                         result = str_concat(arena, result, MLIR_TypeToString(arena, operand_type));
                     }
@@ -592,7 +592,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             size_t n_operands = MLIR_OpNumOperands(op);
             if (n_operands > 0) {
                 result = str_concat(arena, result, str_lit(" "));
-                MlirValue *first_operand = MLIR_OpGetOperand(op, 0);
+                MLIR_Value *first_operand = MLIR_OpGetOperand(op, 0);
                 result = str_concat(arena, result, print_ssa_operand_classic(ctx, first_operand));
                 // Pull targets from private attrs if present
                 string ttrue = str_lit("^bb1");
@@ -601,7 +601,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 int op_index = 1;
                 size_t n_attrs = MLIR_OpNumAttributes(op);
                 for (size_t i = 0; i < n_attrs; i++) {
-                    MlirAttribute *attr = MLIR_OpGetAttribute(op, i);
+                    MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i);
                     string attr_name = MLIR_AttributeGetName(attr);
                     if (str_eq(attr_name, str_lit("_true")) && MLIR_AttributeGetKind(attr) == MLIR_ATTR_KIND_STRING) {
                         ttrue = MLIR_AttributeGetString(attr);
@@ -619,7 +619,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, str_lit("("));
                     for (int i = 0; i < ntrue; i++, op_index++) {
                         if (i>0) result = str_concat(arena, result, str_lit(", "));
-                        MlirValue *operand = MLIR_OpGetOperand(op, op_index);
+                        MLIR_Value *operand = MLIR_OpGetOperand(op, op_index);
                         result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
                     }
                     // Types for true args
@@ -627,8 +627,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                         result = str_concat(arena, result, str_lit(" : "));
                         for (int i = 0; i < ntrue; i++) {
                             if (i>0) result = str_concat(arena, result, str_lit(", "));
-                            MlirValue *operand = MLIR_OpGetOperand(op, 1+i);
-                            MlirType *operand_type = MLIR_ValueGetType(operand);
+                            MLIR_Value *operand = MLIR_OpGetOperand(op, 1+i);
+                            MLIR_Type *operand_type = MLIR_ValueGetType(operand);
                             result = str_concat(arena, result, MLIR_TypeToString(arena, operand_type));
                         }
                     }
@@ -640,7 +640,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, str_lit("("));
                     for (int i = 0; i < nfalse; i++, op_index++) {
                         if (i>0) result = str_concat(arena, result, str_lit(", "));
-                        MlirValue *operand = MLIR_OpGetOperand(op, op_index);
+                        MLIR_Value *operand = MLIR_OpGetOperand(op, op_index);
                         result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
                     }
                     if (nfalse > 0) {
@@ -649,8 +649,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                             if (i>0) result = str_concat(arena, result, str_lit(", "));
                             // false args types are after true args
                             int idx = 1 + (int)ntrue + i;
-                            MlirValue *operand = MLIR_OpGetOperand(op, idx);
-                            MlirType *operand_type = MLIR_ValueGetType(operand);
+                            MLIR_Value *operand = MLIR_OpGetOperand(op, idx);
+                            MLIR_Type *operand_type = MLIR_ValueGetType(operand);
                             result = str_concat(arena, result, MLIR_TypeToString(arena, operand_type));
                         }
                     }
@@ -666,7 +666,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             string callee = str_lit("@unknown");
             size_t n_attrs = MLIR_OpNumAttributes(op);
             for (size_t i = 0; i < n_attrs; i++) {
-                MlirAttribute *attr = MLIR_OpGetAttribute(op, i);
+                MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i);
                 if (str_eq(MLIR_AttributeGetName(attr), str_lit("callee")) && MLIR_AttributeGetKind(attr) == MLIR_ATTR_KIND_STRING) {
                     callee = MLIR_AttributeGetString(attr);
                     break;
@@ -679,7 +679,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             size_t n_operands = MLIR_OpNumOperands(op);
             for (size_t i = 0; i < n_operands; i++) {
                 if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                MlirValue *operand = MLIR_OpGetOperand(op, i);
+                MLIR_Value *operand = MLIR_OpGetOperand(op, i);
                 result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
             }
             result = str_concat(arena, result, str_lit(")"));
@@ -687,14 +687,14 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit(" : ("));
             for (size_t i = 0; i < n_operands; i++) {
                 if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                MlirValue *operand = MLIR_OpGetOperand(op, i);
-                MlirType *operand_type = MLIR_ValueGetType(operand);
+                MLIR_Value *operand = MLIR_OpGetOperand(op, i);
+                MLIR_Type *operand_type = MLIR_ValueGetType(operand);
                 if (operand_type) result = str_concat(arena, result, MLIR_TypeToString(arena, operand_type));
             }
             result = str_concat(arena, result, str_lit(")"));
             size_t n_result_types = MLIR_OpNumResultTypes(op);
             if (n_result_types > 0) {
-                MlirType *result_type = MLIR_OpGetResult_type(op, 0);
+                MLIR_Type *result_type = MLIR_OpGetResult_type(op, 0);
                 if (result_type) {
                     result = str_concat(arena, result, str_lit(" -> "));
                     result = str_concat(arena, result, MLIR_TypeToString(arena, result_type));
@@ -710,10 +710,10 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit(" "));
                 for (size_t i = 0, n = MLIR_OpNumOperands(op); i < n; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    MlirValue *ov = MLIR_OpGetOperand(op, i);
+                    MLIR_Value *ov = MLIR_OpGetOperand(op, i);
                     result = str_concat(arena, result, print_ssa_operand_classic(ctx, ov));
                 }
-                MlirValue *ov0 = MLIR_OpGetOperand(op, 0);
+                MLIR_Value *ov0 = MLIR_OpGetOperand(op, 0);
                 if (ov0 && MLIR_ValueGetType(ov0)) {
                     result = str_concat(arena, result, str_lit(" : "));
                     result = str_concat(arena, result, MLIR_TypeToString(arena, MLIR_ValueGetType(ov0)));
@@ -728,7 +728,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             string vis = str_lit(""); string name = str_lit(""); string ret = str_lit(""); string params = str_lit("");
             size_t nattrs2 = MLIR_OpNumAttributes(op);
             for (size_t i=0;i<nattrs2;i++) {
-                MlirAttribute *a = MLIR_OpGetAttribute(op, i);
+                MLIR_Attribute *a = MLIR_OpGetAttribute(op, i);
                 string an = MLIR_AttributeGetName(a);
                 if (str_eq(an, str_lit("visibility")) && MLIR_AttributeGetKind(a)==MLIR_ATTR_KIND_STRING) vis = MLIR_AttributeGetString(a);
                 else if (str_eq(an, str_lit("sym_name")) && MLIR_AttributeGetKind(a)==MLIR_ATTR_KIND_STRING) name = MLIR_AttributeGetString(a);
@@ -753,7 +753,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             } else {
                 line = str_concat(arena, line, str_lit(" { }"));
             }
-            MlirLocation *loc = MLIR_OpGetLocation(op);
+            MLIR_Location *loc = MLIR_OpGetLocation(op);
             if (loc) {
                 line = str_concat(arena, line, print_location_classic(arena, loc));
             }
@@ -772,7 +772,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             string fname = str_lit("unknown_func");
             size_t nattrs3 = MLIR_OpNumAttributes(op);
             for (size_t i = 0; i < nattrs3; i++) {
-                MlirAttribute *a = MLIR_OpGetAttribute(op, i);
+                MLIR_Attribute *a = MLIR_OpGetAttribute(op, i);
                 string an = MLIR_AttributeGetName(a);
                 if (str_eq(an, str_lit("visibility")) && MLIR_AttributeGetKind(a) == MLIR_ATTR_KIND_STRING) {
                     visibility = MLIR_AttributeGetString(a);
@@ -785,10 +785,10 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, fname);
             // Arguments are stored as operation operands for tt.func
             // Find arg_attrs array attribute
-            MlirAttribute *arg_attrs_array = NULL;
+            MLIR_Attribute *arg_attrs_array = NULL;
             size_t nattrs_op = MLIR_OpNumAttributes(op);
             for (size_t j = 0; j < nattrs_op; j++) {
-                MlirAttribute *a = MLIR_OpGetAttribute(op, j);
+                MLIR_Attribute *a = MLIR_OpGetAttribute(op, j);
                 if (str_eq(MLIR_AttributeGetName(a), str_lit("arg_attrs"))) {
                     arg_attrs_array = a;
                     break;
@@ -798,24 +798,24 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit("("));
             for (int i = 0; i < MLIR_OpNumOperands(op); i++) {
                 if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                MlirValue *arg = MLIR_OpGetOperand(op, i);
+                MLIR_Value *arg = MLIR_OpGetOperand(op, i);
                 if (arg) {
                     string name = MLIR_ValueGetRegisterName(arg);
                     if (name.size == 0) name = print_ssa_value_classic(ctx, arg);
                     result = str_concat(arena, result, name);
                     result = str_concat(arena, result, str_lit(": "));
-                    MlirType *arg_type = MLIR_ValueGetType(arg);
+                    MLIR_Type *arg_type = MLIR_ValueGetType(arg);
                     if (arg_type) result = str_concat(arena, result, MLIR_TypeToString(arena, arg_type));
 
                     // Extract attributes for this argument from arg_attrs array
                     if (arg_attrs_array && i < (int)MLIR_AttributeGetArraySize(arg_attrs_array)) {
-                        MlirAttribute *arg_dict = MLIR_AttributeGetArrayElement(arg_attrs_array, i);
+                        MLIR_Attribute *arg_dict = MLIR_AttributeGetArrayElement(arg_attrs_array, i);
                         if (arg_dict && MLIR_AttributeGetDictSize(arg_dict) > 0) {
                             result = str_concat(arena, result, str_lit(" {"));
                             size_t dict_size = MLIR_AttributeGetDictSize(arg_dict);
                             for (size_t k = 0; k < dict_size; k++) {
                                 if (k > 0) result = str_concat(arena, result, str_lit(", "));
-                                MlirAttribute *dict_elem = MLIR_AttributeGetDictElement(arg_dict, k);
+                                MLIR_Attribute *dict_elem = MLIR_AttributeGetDictElement(arg_dict, k);
                                 if (dict_elem) {
                                     string elem_name = MLIR_AttributeGetName(dict_elem);
                                     result = str_concat(arena, result, elem_name);
@@ -829,7 +829,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     }
 
                     // Per-argument location
-                    MlirLocation *al = MLIR_ValueGetLocation(arg);
+                    MLIR_Location *al = MLIR_ValueGetLocation(arg);
                     if (al) result = str_concat(arena, result, print_location_classic(arena, al));
                 }
             }
@@ -838,7 +838,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             bool printed_ret = false;
             size_t nattrs4 = MLIR_OpNumAttributes(op);
             for (size_t i=0;i<nattrs4;i++) {
-                MlirAttribute *a = MLIR_OpGetAttribute(op, i);
+                MLIR_Attribute *a = MLIR_OpGetAttribute(op, i);
                 if (a && str_eq(MLIR_AttributeGetName(a), str_lit("ret")) && MLIR_AttributeGetKind(a)==MLIR_ATTR_KIND_STRING) {
                     string r = MLIR_AttributeGetString(a);
                     if (r.size>0) { result = str_concat(arena, result, str_lit(" -> ")); result = str_concat(arena, result, r); printed_ret = true; }
@@ -846,15 +846,15 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
             }
             if (!printed_ret && MLIR_OpNumRegions(op)>0) {
-                MlirRegion *region = MLIR_OpGetRegion(op, 0);
+                MLIR_Region *region = MLIR_OpGetRegion(op, 0);
                 if (region && MLIR_RegionNumBlocks(region) > 0) {
-                    MlirBlock *b = MLIR_RegionGetBlock(region, MLIR_RegionNumBlocks(region) - 1);
+                    MLIR_Block *b = MLIR_RegionGetBlock(region, MLIR_RegionNumBlocks(region) - 1);
                     if (b && MLIR_BlockNumOps(b) > 0) {
-                        MlirOperation *last = MLIR_BlockGetOp(b, MLIR_BlockNumOps(b) - 1);
+                        MLIR_Op *last = MLIR_BlockGetOp(b, MLIR_BlockNumOps(b) - 1);
                         if (last && MLIR_OpGetType(last) == OP_TYPE_TT_RETURN && MLIR_OpNumOperands(last) > 0) {
-                            MlirValue *return_val = MLIR_OpGetOperand(last, 0);
+                            MLIR_Value *return_val = MLIR_OpGetOperand(last, 0);
                             if (return_val) {
-                                MlirType *return_type = MLIR_ValueGetType(return_val);
+                                MLIR_Type *return_type = MLIR_ValueGetType(return_val);
                                 if (return_type) {
                                     result = str_concat(arena, result, str_lit(" -> "));
                                     result = str_concat(arena, result, MLIR_TypeToString(arena, return_type));
@@ -875,7 +875,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             string axis = str_lit("x");
             size_t nattrs5 = MLIR_OpNumAttributes(op);
             for (size_t i=0;i<nattrs5;i++) {
-                MlirAttribute *a = MLIR_OpGetAttribute(op, i);
+                MLIR_Attribute *a = MLIR_OpGetAttribute(op, i);
                 if (a && str_eq(MLIR_AttributeGetName(a), str_lit("axis")) && MLIR_AttributeGetKind(a)==MLIR_ATTR_KIND_STRING) { axis = MLIR_AttributeGetString(a); break; }
             }
             result = str_concat(arena, result, axis);
@@ -887,14 +887,14 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit("tt.call"));
             string callee = str_lit("@unknown");
             size_t nattrs6 = MLIR_OpNumAttributes(op);
-            for (size_t i=0;i<nattrs6;i++) { MlirAttribute *a = MLIR_OpGetAttribute(op, i); if (a && str_eq(MLIR_AttributeGetName(a), str_lit("callee")) && MLIR_AttributeGetKind(a)==MLIR_ATTR_KIND_STRING) { callee = MLIR_AttributeGetString(a); break; } }
+            for (size_t i=0;i<nattrs6;i++) { MLIR_Attribute *a = MLIR_OpGetAttribute(op, i); if (a && str_eq(MLIR_AttributeGetName(a), str_lit("callee")) && MLIR_AttributeGetKind(a)==MLIR_ATTR_KIND_STRING) { callee = MLIR_AttributeGetString(a); break; } }
             result = str_concat(arena, result, str_lit(" "));
             result = str_concat(arena, result, callee);
             result = str_concat(arena, result, str_lit("("));
-            for (size_t i=0, n=MLIR_OpNumOperands(op); i<n; i++) { if (i>0) result = str_concat(arena, result, str_lit(", ")); MlirValue *ov = MLIR_OpGetOperand(op, i); result = str_concat(arena, result, print_ssa_operand_classic(ctx, ov)); }
+            for (size_t i=0, n=MLIR_OpNumOperands(op); i<n; i++) { if (i>0) result = str_concat(arena, result, str_lit(", ")); MLIR_Value *ov = MLIR_OpGetOperand(op, i); result = str_concat(arena, result, print_ssa_operand_classic(ctx, ov)); }
             result = str_concat(arena, result, str_lit(")"));
             result = str_concat(arena, result, str_lit(" : ("));
-            for (size_t i=0, n=MLIR_OpNumOperands(op); i<n; i++) { if (i>0) result = str_concat(arena, result, str_lit(", ")); MlirValue *ov = MLIR_OpGetOperand(op, i); if (ov && MLIR_ValueGetType(ov)) result = str_concat(arena, result, MLIR_TypeToString(arena, MLIR_ValueGetType(ov))); }
+            for (size_t i=0, n=MLIR_OpNumOperands(op); i<n; i++) { if (i>0) result = str_concat(arena, result, str_lit(", ")); MLIR_Value *ov = MLIR_OpGetOperand(op, i); if (ov && MLIR_ValueGetType(ov)) result = str_concat(arena, result, MLIR_TypeToString(arena, MLIR_ValueGetType(ov))); }
             result = str_concat(arena, result, str_lit(")"));
             if (MLIR_OpNumResultTypes(op)>0) { result = str_concat(arena, result, str_lit(" -> ")); result = str_concat(arena, result, MLIR_TypeToString(arena, MLIR_OpGetResult_type(op, 0))); }
             break;
@@ -907,7 +907,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             size_t n_operands = MLIR_OpNumOperands(op);
             for (size_t i = 0; i < n_operands; i++) {
                 if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                MlirValue *operand = MLIR_OpGetOperand(op, i);
+                MLIR_Value *operand = MLIR_OpGetOperand(op, i);
                 result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
             }
             result = str_concat(arena, result, str_lit(")"));
@@ -917,7 +917,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit(" <{"));
                 bool first = true;
                 for (size_t i = 0; i < n_attrs; i++) {
-                    MlirAttribute *a = MLIR_OpGetAttribute(op, i);
+                    MLIR_Attribute *a = MLIR_OpGetAttribute(op, i);
                     if (!a) continue;
                     if (!first) result = str_concat(arena, result, str_lit(", "));
                     first = false;
@@ -943,7 +943,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // signature
             string sig_src = str_lit("");
             for (size_t i = 0; i < n_attrs; i++) {
-                MlirAttribute *attr = MLIR_OpGetAttribute(op, i);
+                MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i);
                 if (attr && str_eq(MLIR_AttributeGetName(attr), str_lit("_sig_src")) && MLIR_AttributeGetKind(attr) == MLIR_ATTR_KIND_STRING) {
                     sig_src = MLIR_AttributeGetString(attr);
                     break;
@@ -954,8 +954,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 if (sig_src.size > 0) {
                     result = str_concat(arena, result, sig_src);
                 } else if (n_operands > 0) {
-                    MlirValue *first_operand = MLIR_OpGetOperand(op, 0);
-                    MlirType *operand_type = MLIR_ValueGetType(first_operand);
+                    MLIR_Value *first_operand = MLIR_OpGetOperand(op, 0);
+                    MLIR_Type *operand_type = MLIR_ValueGetType(first_operand);
                     if (operand_type) {
                         result = str_concat(arena, result, MLIR_TypeToString(arena, operand_type));
                     }
@@ -964,7 +964,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
             size_t n_result_types = MLIR_OpNumResultTypes(op);
             if (n_result_types > 0) {
-                MlirType *result_type = MLIR_OpGetResult_type(op, 0);
+                MLIR_Type *result_type = MLIR_OpGetResult_type(op, 0);
                 if (result_type) {
                     result = str_concat(arena, result, str_lit(" -> "));
                     result = str_concat(arena, result, MLIR_TypeToString(arena, result_type));
@@ -979,9 +979,9 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit("scf.for "));
 
             // Resolve body block and arguments
-            MlirBlock *body = NULL;
+            MLIR_Block *body = NULL;
             if (MLIR_OpNumRegions(op) > 0) {
-                MlirRegion *region = MLIR_OpGetRegion(op, 0);
+                MLIR_Region *region = MLIR_OpGetRegion(op, 0);
                 if (region && MLIR_RegionNumBlocks(region) > 0) {
                     body = MLIR_RegionGetBlock(region, 0);
                 }
@@ -989,7 +989,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
             // Print induction variable name from block arg 0
             if (body && MLIR_BlockNumArgs(body) > 0) {
-                MlirValue *first_arg = MLIR_BlockGetArg(body, 0);
+                MLIR_Value *first_arg = MLIR_BlockGetArg(body, 0);
                 if (first_arg) {
                     result = str_concat(arena, result, print_ssa_value_classic(ctx, first_arg));
                 } else {
@@ -1003,9 +1003,9 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // lb, ub, step operands
             size_t n_operands = MLIR_OpNumOperands(op);
             if (n_operands >= 3) {
-                MlirValue *lb = MLIR_OpGetOperand(op, 0);
-                MlirValue *ub = MLIR_OpGetOperand(op, 1);
-                MlirValue *step = MLIR_OpGetOperand(op, 2);
+                MLIR_Value *lb = MLIR_OpGetOperand(op, 0);
+                MLIR_Value *ub = MLIR_OpGetOperand(op, 1);
+                MLIR_Value *step = MLIR_OpGetOperand(op, 2);
                 result = str_concat(arena, result, print_ssa_operand_classic(ctx, lb));
                 result = str_concat(arena, result, str_lit(" to "));
                 result = str_concat(arena, result, print_ssa_value_classic(ctx, ub));
@@ -1019,7 +1019,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit(" iter_args("));
                 for (int i = 0; i < n_iter; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    MlirValue *arg_name = NULL;
+                    MLIR_Value *arg_name = NULL;
                     // Iterator args correspond to body block arguments starting at index 1
                     if (body && MLIR_BlockNumArgs(body) > (size_t)(1 + i)) {
                         arg_name = MLIR_BlockGetArg(body, 1 + i);
@@ -1028,7 +1028,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                         result = str_concat(arena, result, print_ssa_value_classic(ctx, arg_name));
                         result = str_concat(arena, result, str_lit(" = "));
                     }
-                    MlirValue *iter_operand = MLIR_OpGetOperand(op, 3 + i);
+                    MLIR_Value *iter_operand = MLIR_OpGetOperand(op, 3 + i);
                     result = str_concat(arena, result, print_ssa_value_classic(ctx, iter_operand));
                 }
                 // Arrow result types: exactly MLIR_OpGetResult_type(op, i)
@@ -1037,7 +1037,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, str_lit(") -> ("));
                     for (size_t i = 0; i < n_result_types; i++) {
                         if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                        MlirType *result_type = MLIR_OpGetResult_type(op, i);
+                        MLIR_Type *result_type = MLIR_OpGetResult_type(op, i);
                         result = str_concat(arena, result, MLIR_TypeToString(arena, result_type));
                     }
                     result = str_concat(arena, result, str_lit(")"));
@@ -1049,16 +1049,16 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // Type annotation for induction variable after header
             result = str_concat(arena, result, str_lit("  : "));
             if (body && MLIR_BlockNumArgs(body) > 0) {
-                MlirValue *first_arg = MLIR_BlockGetArg(body, 0);
+                MLIR_Value *first_arg = MLIR_BlockGetArg(body, 0);
                 if (first_arg) {
-                    MlirType *arg_type = MLIR_ValueGetType(first_arg);
+                    MLIR_Type *arg_type = MLIR_ValueGetType(first_arg);
                     if (arg_type) {
                         result = str_concat(arena, result, MLIR_TypeToString(arena, arg_type));
                     }
                 }
             } else if (n_operands > 0) {
-                MlirValue *first_operand = MLIR_OpGetOperand(op, 0);
-                MlirType *operand_type = MLIR_ValueGetType(first_operand);
+                MLIR_Value *first_operand = MLIR_OpGetOperand(op, 0);
+                MLIR_Type *operand_type = MLIR_ValueGetType(first_operand);
                 if (operand_type) {
                     result = str_concat(arena, result, MLIR_TypeToString(arena, operand_type));
                 }
@@ -1066,7 +1066,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 size_t n_result_types_fallback = MLIR_OpNumResultTypes(op);
                 if (n_result_types_fallback > 0) {
                     // Fallback
-                    MlirType *result_type = MLIR_OpGetResult_type(op, 0);
+                    MLIR_Type *result_type = MLIR_OpGetResult_type(op, 0);
                     if (result_type) {
                         result = str_concat(arena, result, MLIR_TypeToString(arena, result_type));
                     }
@@ -1131,19 +1131,19 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             result = str_concat(arena, result, str_lit("tt.splat "));
             size_t n_operands = MLIR_OpNumOperands(op);
             if (n_operands > 0) {
-                MlirValue *first_operand = MLIR_OpGetOperand(op, 0);
+                MLIR_Value *first_operand = MLIR_OpGetOperand(op, 0);
                 result = str_concat(arena, result, print_ssa_operand_classic(ctx, first_operand));
             }
             if (n_operands > 0) {
-                MlirValue *first_operand = MLIR_OpGetOperand(op, 0);
-                MlirType *operand_type = MLIR_ValueGetType(first_operand);
+                MLIR_Value *first_operand = MLIR_OpGetOperand(op, 0);
+                MLIR_Type *operand_type = MLIR_ValueGetType(first_operand);
                 if (operand_type) {
                     // Use parentheses only if original signature had them
                     bool sig_parens = false;
                     string sig_src = str_lit("");
                     size_t n_attrs = MLIR_OpNumAttributes(op);
                     for (size_t i = 0; i < n_attrs; i++) {
-                        MlirAttribute *attr = MLIR_OpGetAttribute(op, i);
+                        MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i);
                         if (str_eq(MLIR_AttributeGetName(attr), str_lit("_sig_parens")) && MLIR_AttributeGetKind(attr) == MLIR_ATTR_KIND_BOOL && MLIR_AttributeGetBool(attr)) {
                             sig_parens = true; break;
                         }
@@ -1160,7 +1160,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
             size_t n_result_types = MLIR_OpNumResultTypes(op);
             if (n_result_types > 0) {
-                MlirType *result_type = MLIR_OpGetResult_type(op, 0);
+                MLIR_Type *result_type = MLIR_OpGetResult_type(op, 0);
                 if (result_type) {
                     result = str_concat(arena, result, str_lit(" -> "));
                     result = str_concat(arena, result, MLIR_TypeToString(arena, result_type));
@@ -1200,7 +1200,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             if (MLIR_OpNumAttributes(op) > 0) {
                 bool has_visible_attrs = false;
                 for (int i = 0; i < MLIR_OpNumAttributes(op); i++) {
-                    MlirAttribute *attr = MLIR_OpGetAttribute(op, i);
+                    MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i);
                     // Skip internal attributes
                     if (str_eq(MLIR_AttributeGetName(attr), str_lit("sym_name")) ||
                         (str_eq(MLIR_AttributeGetName(attr), str_lit("value")) && MLIR_OpGetType(op) == OP_TYPE_ARITH_CONSTANT) ||
@@ -1270,7 +1270,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             if (MLIR_OpNumAttributes(op) > 0) {
                 bool has_visible_attrs = false;
                 for (int i = 0; i < MLIR_OpNumAttributes(op); i++) {
-                    MlirAttribute *attr = MLIR_OpGetAttribute(op, i);
+                    MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i);
                     // Skip internal attributes
                     if (str_eq(MLIR_AttributeGetName(attr), str_lit("sym_name")) ||
                         (str_eq(MLIR_AttributeGetName(attr), str_lit("value")) && MLIR_OpGetType(op) == OP_TYPE_ARITH_CONSTANT) ||
@@ -1340,7 +1340,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit(" {"));
                 for (int i = 0; i < MLIR_OpNumAttributes(op); i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    MlirAttribute *attr = MLIR_OpGetAttribute(op, i);
+                    MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i);
                     result = str_concat(arena, result, format(arena, str_lit("{} = {} : i32"), MLIR_AttributeGetName(attr), (int64_t)MLIR_AttributeGetInteger(attr)));
                 }
                 result = str_concat(arena, result, str_lit("}"));
@@ -1378,15 +1378,15 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 MLIR_OpGetType(op) == OP_TYPE_ARITH_EXTSI || MLIR_OpGetType(op) == OP_TYPE_ARITH_TRUNCI ||
                 MLIR_OpGetType(op) == OP_TYPE_ARITH_EXTF || MLIR_OpGetType(op) == OP_TYPE_ARITH_TRUNCF) {
                 // op name
-                result = str_concat(arena, result, MLIR_OpTypeToString(MLIR_OpGetType(op)));
+                result = str_concat(arena, result, MLIR_MLIR_OpTypeToString(MLIR_OpGetType(op)));
                 // operand
                 if (MLIR_OpNumOperands(op) > 0 && MLIR_OpGetOperand(op, 0)) {
                     result = str_concat(arena, result, str_lit(" "));
                     result = str_concat(arena, result, print_ssa_operand_classic(ctx, MLIR_OpGetOperand(op, 0)));
                 }
                 // types
-                MlirType *src = (MLIR_OpNumOperands(op)>0 && MLIR_OpGetOperand(op, 0)) ? MLIR_ValueGetType(MLIR_OpGetOperand(op, 0)) : NULL;
-                MlirType *dst = (MLIR_OpNumResultTypes(op)>0) ? MLIR_OpGetResult_type(op, 0) : NULL;
+                MLIR_Type *src = (MLIR_OpNumOperands(op)>0 && MLIR_OpGetOperand(op, 0)) ? MLIR_ValueGetType(MLIR_OpGetOperand(op, 0)) : NULL;
+                MLIR_Type *dst = (MLIR_OpNumResultTypes(op)>0) ? MLIR_OpGetResult_type(op, 0) : NULL;
                 if (src && dst) {
                     result = str_concat(arena, result, str_lit(" : "));
                     result = str_concat(arena, result, MLIR_TypeToString(arena, src));
@@ -1417,7 +1417,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             } else {
                 string s = MLIR_OpGetName_string(op);
                 if (s.size > 0) result = str_concat(arena, result, s);
-                else result = str_concat(arena, result, MLIR_OpTypeToString(MLIR_OpGetType(op)));
+                else result = str_concat(arena, result, MLIR_MLIR_OpTypeToString(MLIR_OpGetType(op)));
             }
 
             // Special classic formatting for select ops
@@ -1441,14 +1441,14 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit(" "));
                 size_t n_operands = MLIR_OpNumOperands(op);
                 if (n_operands > 0) {
-                    MlirValue *first_operand = MLIR_OpGetOperand(op, 0);
+                    MLIR_Value *first_operand = MLIR_OpGetOperand(op, 0);
                     result = str_concat(arena, result, print_ssa_operand_classic(ctx, first_operand));
                 }
                 // Use captured src signature if available
                 string sig_src = str_lit(""); bool sig_par=false;
                 size_t n_attrs = MLIR_OpNumAttributes(op);
                 for (size_t i = 0; i < n_attrs; i++) {
-                    MlirAttribute *attr = MLIR_OpGetAttribute(op, i);
+                    MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i);
                     string attr_name = MLIR_AttributeGetName(attr);
                     if (str_eq(attr_name, str_lit("_sig_parens")) && MLIR_AttributeGetKind(attr) == MLIR_ATTR_KIND_BOOL && MLIR_AttributeGetBool(attr)) sig_par=true;
                     if (str_eq(attr_name, str_lit("_sig_src")) && MLIR_AttributeGetKind(attr) == MLIR_ATTR_KIND_STRING) {
@@ -1470,8 +1470,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, norm);
                     if (sig_par) result = str_concat(arena, result, str_lit(")"));
                 } else if (n_operands > 0) {
-                    MlirValue *first_operand = MLIR_OpGetOperand(op, 0);
-                    MlirType *operand_type = MLIR_ValueGetType(first_operand);
+                    MLIR_Value *first_operand = MLIR_OpGetOperand(op, 0);
+                    MLIR_Type *operand_type = MLIR_ValueGetType(first_operand);
                     if (operand_type) {
                         result = str_concat(arena, result, str_lit(" : "));
                         result = str_concat(arena, result, MLIR_TypeToString(arena, operand_type));
@@ -1479,7 +1479,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
                 size_t n_results = MLIR_OpNumResultTypes(op);
                 if (n_results > 0) {
-                    MlirType *result_type = MLIR_OpGetResult_type(op, 0);
+                    MLIR_Type *result_type = MLIR_OpGetResult_type(op, 0);
                     if (result_type) {
                         result = str_concat(arena, result, str_lit(" -> "));
                         result = str_concat(arena, result, MLIR_TypeToString(arena, result_type));
@@ -1492,7 +1492,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit(" "));
                 size_t n_operands = MLIR_OpNumOperands(op);
                 if (n_operands > 0) {
-                    MlirValue *first_operand = MLIR_OpGetOperand(op, 0);
+                    MLIR_Value *first_operand = MLIR_OpGetOperand(op, 0);
                     result = str_concat(arena, result, print_ssa_operand_classic(ctx, first_operand));
                 }
                 // Inline attributes
@@ -1500,7 +1500,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 if (n_attrs > 0) {
                     bool opened = false; bool first = true;
                     for (size_t i = 0; i < n_attrs; i++) {
-                        MlirAttribute *attr = MLIR_OpGetAttribute(op, i);
+                        MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i);
                         string attr_name = MLIR_AttributeGetName(attr);
                         if (str_eq(attr_name, str_lit("_sig_parens")) || str_eq(attr_name, str_lit("_sig_src"))) { continue; }
                         if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
@@ -1520,7 +1520,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
                 string sig_src2 = str_lit(""); bool sig_par=false;
                 for (size_t i = 0; i < n_attrs; i++) {
-                    MlirAttribute *attr = MLIR_OpGetAttribute(op, i);
+                    MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i);
                     string attr_name = MLIR_AttributeGetName(attr);
                     if (str_eq(attr_name, str_lit("_sig_parens")) && MLIR_AttributeGetKind(attr) == MLIR_ATTR_KIND_BOOL && MLIR_AttributeGetBool(attr)) { sig_par=true; }
                     if (str_eq(attr_name, str_lit("_sig_src")) && MLIR_AttributeGetKind(attr) == MLIR_ATTR_KIND_STRING) { sig_src2 = MLIR_AttributeGetString(attr); }
@@ -1531,8 +1531,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, sig_src2);
                     if (sig_par) result = str_concat(arena, result, str_lit(")"));
                 } else if (n_operands > 0) {
-                    MlirValue *first_operand = MLIR_OpGetOperand(op, 0);
-                    MlirType *operand_type = MLIR_ValueGetType(first_operand);
+                    MLIR_Value *first_operand = MLIR_OpGetOperand(op, 0);
+                    MLIR_Type *operand_type = MLIR_ValueGetType(first_operand);
                     if (operand_type) {
                         result = str_concat(arena, result, str_lit(" : "));
                         string t = MLIR_TypeToString(arena, operand_type);
@@ -1542,7 +1542,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
                 size_t n_results = MLIR_OpNumResultTypes(op);
                 if (n_results > 0) {
-                    MlirType *result_type = MLIR_OpGetResult_type(op, 0);
+                    MLIR_Type *result_type = MLIR_OpGetResult_type(op, 0);
                     if (result_type) {
                         result = str_concat(arena, result, str_lit(" -> "));
                         result = str_concat(arena, result, MLIR_TypeToString(arena, result_type));
@@ -1561,7 +1561,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, str_lit(" {"));
                     for (int i = 0; i < MLIR_OpNumAttributes(op); i++) {
                         if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                        MlirAttribute *attr = MLIR_OpGetAttribute(op, i);
+                        MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i);
                         if (MLIR_AttributeGetKind(attr) == MLIR_ATTR_KIND_BOOL) {
                             result = str_concat(arena, result, format(arena, str_lit("{} = {}"), MLIR_AttributeGetName(attr), MLIR_AttributeGetBool(attr) ? str_lit("true") : str_lit("false")));
                         } else if (MLIR_AttributeGetKind(attr) == MLIR_ATTR_KIND_INTEGER) {
@@ -1615,7 +1615,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 if (MLIR_OpNumAttributes(op) > 0) {
                     bool opened=false; bool first=true;
                     for (int i=0;i<MLIR_OpNumAttributes(op);i++) {
-                        MlirAttribute *attr = MLIR_OpGetAttribute(op, i); if (!attr) continue; if (MLIR_AttributeGetName(attr).size>0 && MLIR_AttributeGetName(attr).str[0]=='_') continue;
+                        MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i); if (!attr) continue; if (MLIR_AttributeGetName(attr).size>0 && MLIR_AttributeGetName(attr).str[0]=='_') continue;
                         if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened=true; }
                         if (!first) result = str_concat(arena, result, str_lit(", ")); first=false;
                         result = str_concat(arena, result, format(arena, str_lit("{} = "), MLIR_AttributeGetName(attr)));
@@ -1642,7 +1642,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 result = str_concat(arena, result, str_lit(" "));
                 for (int i = 0; i < MLIR_OpNumOperands(op); i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    MlirValue *operand = MLIR_OpGetOperand(op, i);
+                    MLIR_Value *operand = MLIR_OpGetOperand(op, i);
                     if (operand == NULL) {
                         result = str_concat(arena, result, str_lit("NULL_OPERAND"));
                         continue;
@@ -1657,7 +1657,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 if (has_tt_attrs) {
                     bool opened=false; bool first=true;
                     for (int i=0;i<MLIR_OpNumAttributes(op);i++) {
-                        MlirAttribute *attr = MLIR_OpGetAttribute(op, i);
+                        MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i);
                         if (!(MLIR_AttributeGetName(attr).size>=3 && MLIR_AttributeGetName(attr).str[0]=='t' && MLIR_AttributeGetName(attr).str[1]=='t' && MLIR_AttributeGetName(attr).str[2]=='.')) continue;
                         if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened=true; }
                         if (!first) result = str_concat(arena, result, str_lit(", ")); first=false;
@@ -1727,7 +1727,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         } else {
         bool has_visible_attrs = false;
         for (size_t i = 0, n = MLIR_OpNumAttributes(op); i < n; i++) {
-            MlirAttribute *attr = MLIR_OpGetAttribute(op, i);
+            MLIR_Attribute *attr = MLIR_OpGetAttribute(op, i);
             string attr_name = MLIR_AttributeGetName(attr);
             // Skip internal attributes that shouldn't be shown in classic format
             if (str_eq(attr_name, str_lit("sym_name")) || str_eq(attr_name, str_lit("visibility")) || str_eq(attr_name, str_lit("_sig_parens")) || str_eq(attr_name, str_lit("_sig_src")) || str_eq(attr_name, str_lit("value_text")) || (attr_name.size>0 && attr_name.str[0]=='_')) {
@@ -1817,7 +1817,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             ctx->current_scf_for = NULL;
         }
     }
-    MlirLocation *loc = MLIR_OpGetLocation(op);
+    MLIR_Location *loc = MLIR_OpGetLocation(op);
     if (loc) {
         result = str_concat(arena, result, print_location_classic(arena, loc));
     }
@@ -1839,7 +1839,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 }
 
 // Public API implementations
-string print_operation_classic(Arena *arena, int indent_level, MlirOperation *op) {
+string print_operation_classic(Arena *arena, int indent_level, MLIR_Op *op) {
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
     // Preassign SSA numbers for entire subtree to match parser's post-order numbering
@@ -1847,14 +1847,14 @@ string print_operation_classic(Arena *arena, int indent_level, MlirOperation *op
     return print_operation_internal_classic(&ctx, indent_level, op);
 }
 
-string print_region_classic(Arena *arena, int indent_level, MlirRegion *region) {
+string print_region_classic(Arena *arena, int indent_level, MLIR_Region *region) {
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
     preassign_region_ssa(&ctx, region, indent_level);
     return print_region_internal_classic(&ctx, indent_level, region);
 }
 
-string print_block_classic(Arena *arena, int bb_index, int indent_level, MlirBlock *block) {
+string print_block_classic(Arena *arena, int bb_index, int indent_level, MLIR_Block *block) {
     PrintCtx ctx;
     ssa_map_init(&ctx, arena);
     preassign_block_ssa(&ctx, block, indent_level);
@@ -1862,15 +1862,15 @@ string print_block_classic(Arena *arena, int bb_index, int indent_level, MlirBlo
 }
 
 // Helper to print location map definitions
-static string print_location_map_classic(Arena *arena, MlirLocationMap *location_map) {
+static string print_location_map_classic(Arena *arena, MLIR_LocationMap *location_map) {
     string result = str_lit("");
     if (!location_map) return result;
 
-    typedef struct { string key; MlirLocation *loc; int number; } LocEntry;
+    typedef struct { string key; MLIR_Location *loc; int number; } LocEntry;
     size_t cap = MLIR_LocationMapSize(location_map);
     if (cap == 0) return result;
     string *keys = arena_alloc_array(arena, string, cap);
-    MlirLocation **locs = arena_alloc_array(arena, MlirLocation*, cap);
+    MLIR_Location **locs = arena_alloc_array(arena, MLIR_Location*, cap);
     size_t ncol = MLIR_LocationMapCollect(location_map, keys, locs, cap);
     LocEntry *arr = arena_alloc_array(arena, LocEntry, ncol);
     size_t n = 0;
@@ -1910,7 +1910,7 @@ static string print_location_map_classic(Arena *arena, MlirLocationMap *location
     for (size_t i = 0; i < n; i++) {
         result = str_concat(arena, result, arr[i].key);
         result = str_concat(arena, result, str_lit(" = "));
-        MlirLocation *loc = arr[i].loc;
+        MLIR_Location *loc = arr[i].loc;
         if (MLIR_LocationGetOriginalText(loc).size > 0) {
             result = str_concat(arena, result, MLIR_LocationGetOriginalText(loc));
         } else {
@@ -1937,7 +1937,7 @@ static string print_location_map_classic(Arena *arena, MlirLocationMap *location
     return result;
 }
 
-string print_module_classic(Arena *arena, MlirOperation *module, MlirLocationMap *location_map) {
+string print_module_classic(Arena *arena, MLIR_Op *module, MLIR_LocationMap *location_map) {
     string result = str_lit("");
 
     // Note: Special unnumbered_loc_def feature not available via API
@@ -1946,12 +1946,12 @@ string print_module_classic(Arena *arena, MlirOperation *module, MlirLocationMap
         size_t cap = MLIR_LocationMapSize(location_map);
         if (cap > 0) {
             string *keys = arena_alloc_array(arena, string, cap);
-            MlirLocation **locs = arena_alloc_array(arena, MlirLocation*, cap);
+            MLIR_Location **locs = arena_alloc_array(arena, MLIR_Location*, cap);
             size_t n = MLIR_LocationMapCollect(location_map, keys, locs, cap);
             for (size_t i = 0; i < n; i++) {
                 string loc_name = keys[i];
                 if (loc_name.size == 4 && loc_name.str && loc_name.str[0]=='#' && loc_name.str[1]=='l' && loc_name.str[2]=='o' && loc_name.str[3]=='c') {
-                    MlirLocation *loc = locs[i];
+                    MLIR_Location *loc = locs[i];
                     result = str_concat(arena, result, loc_name);
                     result = str_concat(arena, result, str_lit(" = "));
                     switch (MLIR_LocationGetKind(loc)) {

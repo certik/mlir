@@ -131,7 +131,7 @@ Parses MLIR files and prints the parsed representation.
 3. Rebuild and test
 
 ### Adding New Operation Types
-1. Add enum value to `OpType` in `mlir_parser.h`
+1. Add enum value to `MLIR_OpType` in `mlir_parser.h`
 2. Update `op_type_to_string()` function in `parser.c`
 3. Add parsing logic in `mlir_parser.c` if needed
 4. Add test cases

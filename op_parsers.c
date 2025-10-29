@@ -14,18 +14,18 @@
 
 
 OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserParams *params) {
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
 
-    MlirValue **results = params->lhs_results;
+    MLIR_Value **results = params->lhs_results;
     size_t n_results = params->n_lhs_results;
-    MlirValue *result_value = (n_results > 0) ? results[0] : NULL;
+    MLIR_Value *result_value = (n_results > 0) ? results[0] : NULL;
 
-    MlirLocation *op_location = NULL;
+    MLIR_Location *op_location = NULL;
     bool has_explicit_type = false;
 
     if (parser_peek(parser, TK_INTEGER)) {
@@ -57,11 +57,11 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
             append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
                         create_integer_attr(parser, str_lit("value"), str_eq(name_str, str_lit("true")) ? 1 : 0));
 
-            MlirType *bool_type = mlir_type_create_from_string(parser->arena, str_lit("i1"));
+            MLIR_Type *bool_type = mlir_type_create_from_string(parser->arena, str_lit("i1"));
             if (!result_value) {
                 result_value = MLIR_ValueCreateOpResult(parser->arena, NULL, 0, bool_type, (string){NULL, 0}, NULL);
             }
-            result_types = arena_alloc_array(parser->arena, MlirType*, 1);
+            result_types = arena_alloc_array(parser->arena, MLIR_Type*, 1);
             result_types[0] = bool_type;
             n_result_types = 1;
         } else {
@@ -91,9 +91,9 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
         parser_expect(parser, TK_COLON);
         string type_str = str_lit("");
         if (parse_type_string(parser, &type_str)) {
-            MlirType *type = mlir_type_create_from_string(parser->arena, type_str);
+            MLIR_Type *type = mlir_type_create_from_string(parser->arena, type_str);
             if (!result_types) {
-                result_types = arena_alloc_array(parser->arena, MlirType*, 1);
+                result_types = arena_alloc_array(parser->arena, MLIR_Type*, 1);
             }
             result_types[0] = type;
             n_result_types = 1;
@@ -113,7 +113,7 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
     }
 
     if (!results) {
-        results = arena_alloc_array(parser->arena, MlirValue*, 1);
+        results = arena_alloc_array(parser->arena, MLIR_Value*, 1);
         results[0] = result_value;
         n_results = 1;
     }
@@ -128,7 +128,7 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
     }
 
     // NOW create operation with all collected data
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         params->opname,
@@ -165,10 +165,10 @@ OperationParserResult parse_arith_binary_op(Parser *parser, const OperationParse
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str2 = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                MlirValue *operand2 = symbol_table_lookup(&parser->symbol_table, reg_str2);
+                MLIR_Value *operand2 = symbol_table_lookup(&parser->symbol_table, reg_str2);
                 if (!operand2) {
                     parser_warning(parser, format(parser->arena, str_lit("Undefined value: {}"), reg_str2), parser->first, parser->last);
-                    MlirType *unknown_type = mlir_type_create_from_string(parser->arena, str_lit("unknown"));
+                    MLIR_Type *unknown_type = mlir_type_create_from_string(parser->arena, str_lit("unknown"));
                     operand2 = MLIR_ValueCreateBlockArg(parser->arena, reg_str2, 0, unknown_type, NULL);
                 }
                 VecValue_push_back(parser->arena, &operands, operand2);
@@ -177,36 +177,36 @@ OperationParserResult parse_arith_binary_op(Parser *parser, const OperationParse
     }
 
     // Parse any attributes and result types using helper functions
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0; // tracks attribute list growth for arith binary ops
 
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
 
     // Optional default result type for specific ops when not provided
     if (n_result_types == 0 && params->op_type == OP_TYPE_ARITH_ADDF) {
-        result_types = arena_alloc_array(params->arena, MlirType*, 1);
+        result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
         result_types[0] = mlir_type_create_from_string(params->arena, str_lit("tensor<16xf32>"));
         n_result_types = 1;
     }
 
     // Parse optional location
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
     // Create results from the operation's result types
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, NULL, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, NULL, result_types, n_result_types, &n_results);
 
     // Create the operation at the end
-    MlirOperation *op = MLIR_OpCreate(params->arena, params->op_type, str_lit(""),
+    MLIR_Op *op = MLIR_OpCreate(params->arena, params->op_type, str_lit(""),
                                       attributes, n_attributes,
                                       result_types, n_result_types,
                                       results, n_results,
@@ -227,7 +227,7 @@ OperationParserResult parse_arith_binary_op(Parser *parser, const OperationParse
 OperationParserResult parse_func_call_op(Parser *parser, const OperationParserParams *params) {
     // Parse call @function(%args) : (arg_types) -> result_type
     // Function name (@name is tokenized as TK_FUNCTION_NAME)
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -250,7 +250,7 @@ OperationParserResult parse_func_call_op(Parser *parser, const OperationParserPa
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+                MLIR_Value *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
                 if (!operand) {
                     parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                     OperationParserResult empty = {0};
@@ -277,7 +277,7 @@ OperationParserResult parse_func_call_op(Parser *parser, const OperationParserPa
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
 
     // Parse function signature: : (arg_types) -> result_type
@@ -300,7 +300,7 @@ OperationParserResult parse_func_call_op(Parser *parser, const OperationParserPa
             parser_expect(parser, TK_ARROW);
             string type_str = str_lit("");
             if (parse_type_string(parser, &type_str)) {
-                result_types = arena_alloc_array(params->arena, MlirType*, 1);
+                result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
                 result_types[0] = mlir_type_create_from_string(params->arena, type_str);
                 n_result_types = 1;
             }
@@ -313,13 +313,13 @@ OperationParserResult parse_func_call_op(Parser *parser, const OperationParserPa
     }
 
     // Parse optional location
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
     // Create the operation at the end
-    MlirOperation *op = MLIR_OpCreate(params->arena, params->op_type, str_lit(""),
+    MLIR_Op *op = MLIR_OpCreate(params->arena, params->op_type, str_lit(""),
                                       attributes, n_attributes,
                                       result_types, n_result_types,
                                       params->lhs_results, params->n_lhs_results,
@@ -329,7 +329,7 @@ OperationParserResult parse_func_call_op(Parser *parser, const OperationParserPa
                                       params->trailing_comment, params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -340,7 +340,7 @@ OperationParserResult parse_func_call_op(Parser *parser, const OperationParserPa
 }
 
 OperationParserResult parse_tt_get_program_id_op(Parser *parser, const OperationParserParams *params) {
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -354,17 +354,17 @@ OperationParserResult parse_tt_get_program_id_op(Parser *parser, const Operation
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity,
                       params->op_type, NULL);
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -384,7 +384,7 @@ OperationParserResult parse_tt_get_program_id_op(Parser *parser, const Operation
         params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -395,9 +395,9 @@ OperationParserResult parse_tt_get_program_id_op(Parser *parser, const Operation
 }
 
 OperationParserResult parse_tt_splat_op(Parser *parser, const OperationParserParams *params) {
-    MlirValue **operands = NULL;
+    MLIR_Value **operands = NULL;
     size_t n_operands = 0;
-    MlirValue *operand = NULL;
+    MLIR_Value *operand = NULL;
 
     if (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
@@ -408,27 +408,27 @@ OperationParserResult parse_tt_splat_op(Parser *parser, const OperationParserPar
             OperationParserResult empty = {0};
             return empty;
         }
-        operands = arena_alloc_array(params->arena, MlirValue*, 1);
+        operands = arena_alloc_array(params->arena, MLIR_Value*, 1);
         operands[0] = operand;
         n_operands = 1;
     }
 
     // Parse any attributes and result types using helper functions
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
 
     // Infer result type if not already parsed from trailing type
     if (n_result_types == 0) {
-        MlirType *operand_type = operand ? MLIR_ValueGetType(operand) : NULL;
-        MlirType *result_type = NULL;
+        MLIR_Type *operand_type = operand ? MLIR_ValueGetType(operand) : NULL;
+        MLIR_Type *result_type = NULL;
         if (operand_type) {
             string operand_type_str = MLIR_TypeToString(params->arena, operand_type);
             if (str_eq(operand_type_str, str_lit("!tt.ptr<f32>"))) {
@@ -441,19 +441,19 @@ OperationParserResult parse_tt_splat_op(Parser *parser, const OperationParserPar
         } else {
             result_type = mlir_type_create_from_string(params->arena, str_lit("tensor<16xi32>"));
         }
-        result_types = arena_alloc_array(params->arena, MlirType*, 1);
+        result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
         result_types[0] = result_type;
         n_result_types = 1;
     }
 
     // Parse optional location
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
     // Create the operation at the end
-    MlirOperation *op = MLIR_OpCreate(params->arena, params->op_type, str_lit(""),
+    MLIR_Op *op = MLIR_OpCreate(params->arena, params->op_type, str_lit(""),
                                       attributes, n_attributes,
                                       result_types, n_result_types,
                                       params->lhs_results, params->n_lhs_results,
@@ -463,7 +463,7 @@ OperationParserResult parse_tt_splat_op(Parser *parser, const OperationParserPar
                                       params->trailing_comment, params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -474,7 +474,7 @@ OperationParserResult parse_tt_splat_op(Parser *parser, const OperationParserPar
 }
 
 OperationParserResult parse_tt_make_range_op(Parser *parser, const OperationParserParams *params) {
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -539,16 +539,16 @@ OperationParserResult parse_tt_make_range_op(Parser *parser, const OperationPars
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -568,7 +568,7 @@ OperationParserResult parse_tt_make_range_op(Parser *parser, const OperationPars
         params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -591,14 +591,14 @@ OperationParserResult parse_tt_addptr_op(Parser *parser, const OperationParserPa
         else break;
     }
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
 
     while (parser_peek(parser, TK_WHITESPACE)) parser_expect(parser, TK_WHITESPACE);
@@ -609,7 +609,7 @@ OperationParserResult parse_tt_addptr_op(Parser *parser, const OperationParserPa
 
         string pointer_sig = str_lit("");
         if (parse_type_string(parser, &pointer_sig)) {
-            result_types = arena_alloc_array(params->arena, MlirType*, 1);
+            result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
             result_types[0] = mlir_type_create_from_string(params->arena, pointer_sig);
             n_result_types = 1;
         }
@@ -622,10 +622,10 @@ OperationParserResult parse_tt_addptr_op(Parser *parser, const OperationParserPa
             } while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE));
         }
     } else if (operands.size > 0) {
-        MlirValue *first = operands.data[0];
-        MlirType *first_type = first ? MLIR_ValueGetType(first) : NULL;
+        MLIR_Value *first = operands.data[0];
+        MLIR_Type *first_type = first ? MLIR_ValueGetType(first) : NULL;
         if (first_type) {
-            result_types = arena_alloc_array(params->arena, MlirType*, 1);
+            result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
             result_types[0] = first_type;
             n_result_types = 1;
         }
@@ -635,10 +635,10 @@ OperationParserResult parse_tt_addptr_op(Parser *parser, const OperationParserPa
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) op_location = params->unnumbered_loc_def;
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -656,7 +656,7 @@ OperationParserResult parse_tt_addptr_op(Parser *parser, const OperationParserPa
         params->trailing_comment,
         params->source_line_start);
 
-    MlirValue **results = NULL;
+    MLIR_Value **results = NULL;
     size_t n_results = 0;
     results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
@@ -676,7 +676,7 @@ OperationParserResult parse_tensor_extract_op(Parser *parser, const OperationPar
     if (parser_peek(parser, TK_REGISTER)) {
         string tensor_reg = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        MlirValue *tensor_val = symbol_table_lookup(&parser->symbol_table, tensor_reg);
+        MLIR_Value *tensor_val = symbol_table_lookup(&parser->symbol_table, tensor_reg);
         if (!tensor_val) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             OperationParserResult empty = {0};
@@ -699,7 +699,7 @@ OperationParserResult parse_tensor_extract_op(Parser *parser, const OperationPar
                 while (parser_peek(parser, TK_HASH_NAME)) {
                     consume_optional_hash_selector(parser);
                 }
-                MlirValue *idx_val = symbol_table_lookup(&parser->symbol_table, idx_reg);
+                MLIR_Value *idx_val = symbol_table_lookup(&parser->symbol_table, idx_reg);
                 if (!idx_val) {
                     parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                     OperationParserResult empty = {0};
@@ -716,23 +716,23 @@ OperationParserResult parse_tensor_extract_op(Parser *parser, const OperationPar
         parser_expect(parser, TK_RBRACKET);
     }
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -752,7 +752,7 @@ OperationParserResult parse_tensor_extract_op(Parser *parser, const OperationPar
         params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -769,7 +769,7 @@ OperationParserResult parse_memref_load_op(Parser *parser, const OperationParser
     if (parser_peek(parser, TK_REGISTER)) {
         string reg = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        MlirValue *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
+        MLIR_Value *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
         VecValue_push_back(parser->arena, &operands, val);
     }
 
@@ -782,7 +782,7 @@ OperationParserResult parse_memref_load_op(Parser *parser, const OperationParser
             if (parser_peek(parser, TK_REGISTER)) {
                 string idx = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                MlirValue *val = lookup_or_create_value(parser, idx, str_lit("index"));
+                MLIR_Value *val = lookup_or_create_value(parser, idx, str_lit("index"));
                 VecValue_push_back(parser->arena, &operands, val);
             } else {
                 parser_next_token(parser);
@@ -791,13 +791,13 @@ OperationParserResult parse_memref_load_op(Parser *parser, const OperationParser
         parser_expect(parser, TK_RBRACKET);
     }
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
 
-    MlirValue **results = params->lhs_results;
+    MLIR_Value **results = params->lhs_results;
     size_t n_results = params->n_lhs_results;
 
     // Parse attributes from both <{...}> and {...} blocks
@@ -808,9 +808,9 @@ OperationParserResult parse_memref_load_op(Parser *parser, const OperationParser
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
 
     // Parse optional location
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         params->opname,
@@ -840,14 +840,14 @@ OperationParserResult parse_memref_store_op(Parser *parser, const OperationParse
     if (parser_peek(parser, TK_REGISTER)) {
         string reg = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        MlirValue *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
+        MLIR_Value *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
         VecValue_push_back(parser->arena, &operands, val);
     }
     if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
     if (parser_peek(parser, TK_REGISTER)) {
         string reg = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        MlirValue *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
+        MLIR_Value *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
         VecValue_push_back(parser->arena, &operands, val);
     }
 
@@ -860,7 +860,7 @@ OperationParserResult parse_memref_store_op(Parser *parser, const OperationParse
             if (parser_peek(parser, TK_REGISTER)) {
                 string idx = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                MlirValue *val = lookup_or_create_value(parser, idx, str_lit("index"));
+                MLIR_Value *val = lookup_or_create_value(parser, idx, str_lit("index"));
                 VecValue_push_back(parser->arena, &operands, val);
             } else {
                 parser_next_token(parser);
@@ -869,14 +869,14 @@ OperationParserResult parse_memref_store_op(Parser *parser, const OperationParse
         parser_expect(parser, TK_RBRACKET);
     }
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
 
     // memref.store operations do not have results
-    MlirValue **results = NULL;
+    MLIR_Value **results = NULL;
     size_t n_results = 0;
 
     // Parse attributes from both <{...}> and {...} blocks
@@ -896,9 +896,9 @@ OperationParserResult parse_memref_store_op(Parser *parser, const OperationParse
     }
 
     // Parse optional location
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         params->opname,
@@ -933,7 +933,7 @@ OperationParserResult parse_vector_print_op(Parser *parser, const OperationParse
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                MlirValue *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
+                MLIR_Value *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
                 VecValue_push_back(parser->arena, &operands, val);
             } else {
                 parser_next_token(parser);
@@ -944,7 +944,7 @@ OperationParserResult parse_vector_print_op(Parser *parser, const OperationParse
         while (parser_peek(parser, TK_REGISTER)) {
             string reg = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            MlirValue *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
+            MLIR_Value *val = lookup_or_create_value(parser, reg, str_lit("unknown"));
             VecValue_push_back(parser->arena, &operands, val);
             if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
             else break;
@@ -962,12 +962,12 @@ OperationParserResult parse_vector_print_op(Parser *parser, const OperationParse
         }
     }
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -1013,24 +1013,24 @@ OperationParserResult parse_std_constant_op(Parser *parser, const OperationParse
         }
     }
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity,
                       params->op_type, NULL);
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -1050,7 +1050,7 @@ OperationParserResult parse_std_constant_op(Parser *parser, const OperationParse
         params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -1070,7 +1070,7 @@ OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserPa
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+                MLIR_Value *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
                 if (!operand) {
                     parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                     OperationParserResult empty = {0};
@@ -1085,7 +1085,7 @@ OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserPa
         parser_expect(parser, TK_RPAREN);
     }
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -1126,7 +1126,7 @@ OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserPa
         if (parser_peek(parser, TK_RANGLE)) parser_expect(parser, TK_RANGLE);
     }
 
-    MlirRegion **regions = NULL;
+    MLIR_Region **regions = NULL;
     size_t n_regions = 0;
     if (parser_peek(parser, TK_LPAREN_BRACE) || parser_peek(parser, TK_LPAREN)) {
         if (parser_peek(parser, TK_LPAREN_BRACE)) {
@@ -1134,13 +1134,13 @@ OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserPa
         } else {
             parser_expect(parser, TK_LPAREN);
         }
-        MlirRegion *region = NULL;
+        MLIR_Region *region = NULL;
         if (parser_peek(parser, TK_LBRACE_END)) {
             region = parse_region(parser);
         }
         parser_expect(parser, TK_RPAREN);
         if (region) {
-            regions = arena_alloc_array(params->arena, MlirRegion*, 1);
+            regions = arena_alloc_array(params->arena, MLIR_Region*, 1);
             regions[0] = region;
             n_regions = 1;
         }
@@ -1163,13 +1163,13 @@ OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserPa
         }
     }
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
     if (parser_peek(parser, TK_ARROW)) {
         parser_expect(parser, TK_ARROW);
         string type_str = str_lit("");
         if (parse_type_string(parser, &type_str)) {
-            result_types = arena_alloc_array(params->arena, MlirType*, 1);
+            result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
             result_types[0] = mlir_type_create_from_string(params->arena, type_str);
             n_result_types = 1;
         }
@@ -1183,12 +1183,12 @@ OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserPa
                           params->op_type, NULL);
     }
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -1208,7 +1208,7 @@ OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserPa
         params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -1234,7 +1234,7 @@ OperationParserResult parse_cf_br_op(Parser *parser, const OperationParserParams
             if (parser_peek(parser, TK_REGISTER)) {
                 string vr = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                MlirValue *v = symbol_table_lookup(&parser->symbol_table, vr);
+                MLIR_Value *v = symbol_table_lookup(&parser->symbol_table, vr);
                 if (v) VecValue_push_back(parser->arena, &branch_args, v);
                 if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
             } else if (parser_peek(parser, TK_COLON)) {
@@ -1252,18 +1252,18 @@ OperationParserResult parse_cf_br_op(Parser *parser, const OperationParserParams
         parser_expect(parser, TK_RPAREN);
     }
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
     append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
                 create_string_attr(parser, str_lit("_target"), target));
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -1298,7 +1298,7 @@ OperationParserResult parse_cf_cond_br_op(Parser *parser, const OperationParserP
     if (parser_peek(parser, TK_REGISTER)) {
         string reg = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        MlirValue *cond = symbol_table_lookup(&parser->symbol_table, reg);
+        MLIR_Value *cond = symbol_table_lookup(&parser->symbol_table, reg);
         if (cond) VecValue_push_back(parser->arena, &operands, cond);
     }
 
@@ -1306,7 +1306,7 @@ OperationParserResult parse_cf_cond_br_op(Parser *parser, const OperationParserP
 
     string ttrue = str_lit("");
     string tfalse = str_lit("");
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -1320,7 +1320,7 @@ OperationParserResult parse_cf_cond_br_op(Parser *parser, const OperationParserP
                 if (parser_peek(parser, TK_REGISTER)) {
                     string vr = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
-                    MlirValue *v = symbol_table_lookup(&parser->symbol_table, vr);
+                    MLIR_Value *v = symbol_table_lookup(&parser->symbol_table, vr);
                     if (v) VecValue_push_back(parser->arena, &operands, v);
                     ntrue++;
                     if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
@@ -1354,7 +1354,7 @@ OperationParserResult parse_cf_cond_br_op(Parser *parser, const OperationParserP
                 if (parser_peek(parser, TK_REGISTER)) {
                     string vr = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
-                    MlirValue *v = symbol_table_lookup(&parser->symbol_table, vr);
+                    MLIR_Value *v = symbol_table_lookup(&parser->symbol_table, vr);
                     if (v) VecValue_push_back(parser->arena, &operands, v);
                     nfalse++;
                     if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
@@ -1381,12 +1381,12 @@ OperationParserResult parse_cf_cond_br_op(Parser *parser, const OperationParserP
     append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
                 create_string_attr(parser, str_lit("_false"), tfalse));
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -1454,12 +1454,12 @@ OperationParserResult parse_linalg_fill_op(Parser *parser, const OperationParser
         parser_expect(parser, TK_RPAREN);
     }
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -1493,7 +1493,7 @@ OperationParserResult parse_affine_load_op(Parser *parser, const OperationParser
     if (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        MlirValue *memref_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        MLIR_Value *memref_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
         if (!memref_operand) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             OperationParserResult empty = {0};
@@ -1508,7 +1508,7 @@ OperationParserResult parse_affine_load_op(Parser *parser, const OperationParser
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                MlirValue *idx = symbol_table_lookup(&parser->symbol_table, reg_str);
+                MLIR_Value *idx = symbol_table_lookup(&parser->symbol_table, reg_str);
                 if (!idx) {
                     parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                     OperationParserResult empty = {0};
@@ -1523,14 +1523,14 @@ OperationParserResult parse_affine_load_op(Parser *parser, const OperationParser
         parser_expect(parser, TK_RBRACKET);
     }
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
 
     if (parser_peek(parser, TK_COLON)) {
@@ -1558,7 +1558,7 @@ OperationParserResult parse_affine_load_op(Parser *parser, const OperationParser
                     parser_expect(parser, TK_NAME);
                 }
 
-                result_types = arena_alloc_array(params->arena, MlirType*, 1);
+                result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
                 result_types[0] = mlir_type_create_from_string(params->arena, element_type);
                 n_result_types = 1;
 
@@ -1575,12 +1575,12 @@ OperationParserResult parse_affine_load_op(Parser *parser, const OperationParser
                           params->op_type, NULL);
     }
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -1600,7 +1600,7 @@ OperationParserResult parse_affine_load_op(Parser *parser, const OperationParser
         params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -1611,11 +1611,11 @@ OperationParserResult parse_affine_load_op(Parser *parser, const OperationParser
 }
 
 OperationParserResult parse_index_constant_op(Parser *parser, const OperationParserParams *params) {
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
 
     // Parse the constant value if present
@@ -1635,17 +1635,17 @@ OperationParserResult parse_index_constant_op(Parser *parser, const OperationPar
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
 
     if (n_result_types == 0) {
-        result_types = arena_alloc_array(params->arena, MlirType*, 1);
+        result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
         result_types[0] = mlir_type_create_from_string(params->arena, str_lit("index"));
         n_result_types = 1;
     }
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -1665,7 +1665,7 @@ OperationParserResult parse_index_constant_op(Parser *parser, const OperationPar
         params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -1683,7 +1683,7 @@ OperationParserResult parse_tensor_splat_op(Parser *parser, const OperationParse
     if (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        MlirValue *value_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        MLIR_Value *value_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
         if (!value_operand) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             OperationParserResult empty = {0};
@@ -1698,7 +1698,7 @@ OperationParserResult parse_tensor_splat_op(Parser *parser, const OperationParse
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                MlirValue *dim = symbol_table_lookup(&parser->symbol_table, reg_str);
+                MLIR_Value *dim = symbol_table_lookup(&parser->symbol_table, reg_str);
                 if (!dim) {
                     parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                     OperationParserResult empty = {0};
@@ -1713,10 +1713,10 @@ OperationParserResult parse_tensor_splat_op(Parser *parser, const OperationParse
         parser_expect(parser, TK_RBRACKET);
     }
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
 
     if (parser_peek(parser, TK_COLON)) {
@@ -1736,19 +1736,19 @@ OperationParserResult parse_tensor_splat_op(Parser *parser, const OperationParse
                     parser_next_token(parser);
                 }
 
-                result_types = arena_alloc_array(params->arena, MlirType*, 1);
+                result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
                 result_types[0] = mlir_type_create_from_string(params->arena, tensor_type);
                 n_result_types = 1;
             }
         }
     }
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -1768,7 +1768,7 @@ OperationParserResult parse_tensor_splat_op(Parser *parser, const OperationParse
         params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -1788,7 +1788,7 @@ OperationParserResult parse_arith_select_op(Parser *parser, const OperationParse
         if (parser_peek(parser, TK_REGISTER)) {
             string reg_str = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+            MLIR_Value *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
             if (!operand) {
                 parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                 OperationParserResult empty = {0};
@@ -1804,14 +1804,14 @@ OperationParserResult parse_arith_select_op(Parser *parser, const OperationParse
     }
 
     // Parse any additional attributes
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
 
     // Parse ": type1, type2" - result type is type2 (the value type)
@@ -1842,7 +1842,7 @@ OperationParserResult parse_arith_select_op(Parser *parser, const OperationParse
             }
 
             if (result_type.size > 0) {
-                result_types = arena_alloc_array(params->arena, MlirType*, 1);
+                result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
                 result_types[0] = mlir_type_create_from_string(params->arena, result_type);
                 n_result_types = 1;
             }
@@ -1855,13 +1855,13 @@ OperationParserResult parse_arith_select_op(Parser *parser, const OperationParse
     }
 
     // Parse optional location
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
     // Create the operation at the end
-    MlirOperation *op = MLIR_OpCreate(params->arena, params->op_type, str_lit(""),
+    MLIR_Op *op = MLIR_OpCreate(params->arena, params->op_type, str_lit(""),
                                       attributes, n_attributes,
                                       result_types, n_result_types,
                                       params->lhs_results, params->n_lhs_results,
@@ -1871,7 +1871,7 @@ OperationParserResult parse_arith_select_op(Parser *parser, const OperationParse
                                       params->trailing_comment, params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -1884,7 +1884,7 @@ OperationParserResult parse_arith_select_op(Parser *parser, const OperationParse
 OperationParserResult parse_tt_call_op(Parser *parser, const OperationParserParams *params) {
     // Parse tt.call @function(%args) : (arg_types) -> result_type
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -1903,7 +1903,7 @@ OperationParserResult parse_tt_call_op(Parser *parser, const OperationParserPara
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg_str = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+                MLIR_Value *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
                 if (!operand) {
                     parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                     OperationParserResult empty = {0};
@@ -1918,7 +1918,7 @@ OperationParserResult parse_tt_call_op(Parser *parser, const OperationParserPara
         parser_expect(parser, TK_RPAREN);
     }
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
 
     if (parser_peek(parser, TK_COLON)) {
@@ -1946,19 +1946,19 @@ OperationParserResult parse_tt_call_op(Parser *parser, const OperationParserPara
             }
 
             if (result_type.size > 0) {
-                result_types = arena_alloc_array(params->arena, MlirType*, 1);
+                result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
                 result_types[0] = mlir_type_create_from_string(params->arena, result_type);
                 n_result_types = 1;
             }
         }
     }
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -1978,7 +1978,7 @@ OperationParserResult parse_tt_call_op(Parser *parser, const OperationParserPara
         params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -1995,7 +1995,7 @@ OperationParserResult parse_tensor_collapse_shape_op(Parser *parser, const Opera
     if (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        MlirValue *tensor_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        MLIR_Value *tensor_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
         if (!tensor_operand) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             OperationParserResult empty = {0};
@@ -2013,11 +2013,11 @@ OperationParserResult parse_tensor_collapse_shape_op(Parser *parser, const Opera
         } while (depth > 0 && !parser_peek(parser, TK_EOF));
     }
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
 
     if (parser_peek(parser, TK_COLON)) {
@@ -2041,7 +2041,7 @@ OperationParserResult parse_tensor_collapse_shape_op(Parser *parser, const Opera
             }
 
             if (result_type.size > 0) {
-                result_types = arena_alloc_array(params->arena, MlirType*, 1);
+                result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
                 result_types[0] = mlir_type_create_from_string(params->arena, result_type);
                 n_result_types = 1;
             }
@@ -2056,12 +2056,12 @@ OperationParserResult parse_tensor_collapse_shape_op(Parser *parser, const Opera
                           params->op_type, NULL);
     }
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -2081,7 +2081,7 @@ OperationParserResult parse_tensor_collapse_shape_op(Parser *parser, const Opera
         params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -2129,7 +2129,7 @@ OperationParserResult parse_generic_op(Parser *parser, const OperationParserPara
             string reg_str = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
 
-            MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+            MLIR_Value *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
             if (!operand) {
                 parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                 OperationParserResult empty = {NULL, NULL, 0};
@@ -2142,7 +2142,7 @@ OperationParserResult parse_generic_op(Parser *parser, const OperationParserPara
                 if (parser_peek(parser, TK_REGISTER)) {
                     string reg_str2 = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
-                    MlirValue *operand2 = symbol_table_lookup(&parser->symbol_table, reg_str2);
+                    MLIR_Value *operand2 = symbol_table_lookup(&parser->symbol_table, reg_str2);
                     if (!operand2) {
                         parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                         OperationParserResult empty = {NULL, NULL, 0};
@@ -2164,18 +2164,18 @@ OperationParserResult parse_generic_op(Parser *parser, const OperationParserPara
     }
 
     // Collect attributes, result types, and location
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
-    MlirLocation *op_location = NULL;
+    MLIR_Location *op_location = NULL;
 
     // Parse attributes and result types (inline parse_generic_attrs_and_result_type #1)
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
-    MlirLocation *loc1 = parse_optional_location(parser);
+    MLIR_Location *loc1 = parse_optional_location(parser);
     if (loc1) op_location = loc1;
 
     // Capture trailing loc() if present
@@ -2184,7 +2184,7 @@ OperationParserResult parse_generic_op(Parser *parser, const OperationParserPara
     }
 
     // Parse regions
-    MlirRegion **regions = NULL;
+    MLIR_Region **regions = NULL;
     size_t n_regions = 0;
 
     while (!(parser_peek(parser, TK_LBRACE_END)
@@ -2202,11 +2202,11 @@ OperationParserResult parse_generic_op(Parser *parser, const OperationParserPara
         parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
         parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
         parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
-        MlirLocation *loc2 = parse_optional_location(parser);
+        MLIR_Location *loc2 = parse_optional_location(parser);
         if (loc2) op_location = loc2;
 
-        MlirRegion *region = parse_region(parser);
-        regions = arena_alloc_array(parser->arena, MlirRegion*, 1);
+        MLIR_Region *region = parse_region(parser);
+        regions = arena_alloc_array(parser->arena, MLIR_Region*, 1);
         regions[0] = region;
         n_regions = 1;
 
@@ -2214,7 +2214,7 @@ OperationParserResult parse_generic_op(Parser *parser, const OperationParserPara
         parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
         parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
         parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
-        MlirLocation *loc3 = parse_optional_location(parser);
+        MLIR_Location *loc3 = parse_optional_location(parser);
         if (loc3) op_location = loc3;
     }
     if (lparen_brace) {
@@ -2233,7 +2233,7 @@ OperationParserResult parse_generic_op(Parser *parser, const OperationParserPara
     if (!op_location) op_location = params->unnumbered_loc_def;
 
     // NOW create the operation with all collected data
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         opname,
@@ -2250,7 +2250,7 @@ OperationParserResult parse_generic_op(Parser *parser, const OperationParserPara
 
     // Finalize results
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, NULL, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, NULL, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -2267,9 +2267,9 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
     // Parse tt.func public @function_name(%arg0: type, %arg1: type, ...)
 
     // Initialize variables that will be used at the end
-    MlirLocation *op_location = NULL;
-    MlirRegion *func_region = NULL;
-    MlirValue **func_operands = NULL;
+    MLIR_Location *op_location = NULL;
+    MLIR_Region *func_region = NULL;
+    MLIR_Value **func_operands = NULL;
     size_t n_func_operands = 0;
 
     // Vector to collect function arguments as we parse them
@@ -2288,7 +2288,7 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
         parser_expect(parser, TK_NAME);
     }
 
-    MlirAttribute **attrs = NULL; size_t n_attrs = 0, cap_attrs = 0;
+    MLIR_Attribute **attrs = NULL; size_t n_attrs = 0, cap_attrs = 0;
     append_attr(parser, &attrs, &n_attrs, &cap_attrs, create_string_attr(parser, str_lit("visibility"), visibility));
 
     // Parse @function_name
@@ -2340,12 +2340,12 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                     parser_expect(parser, TK_COLON);
 
                     // Collect all information before creating the value
-                    MlirType *arg_type = NULL;
+                    MLIR_Type *arg_type = NULL;
                     bool has_div = false;
                     int64_t div_value = 0;
                     bool has_max_div = false;
                     int64_t max_div_value = 0;
-                    MlirLocation *arg_location = NULL;
+                    MLIR_Location *arg_location = NULL;
 
                     // Parse the argument type
                     if (parser_peek(parser, TK_EXCLAMATION)) {
@@ -2505,23 +2505,23 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                     }
 
                     // Now create the value with all information
-                    MlirValue *arg = MLIR_ValueCreateBlockArg(parser->arena, reg_str, (uint32_t)func_args.size, arg_type, arg_location);
+                    MLIR_Value *arg = MLIR_ValueCreateBlockArg(parser->arena, reg_str, (uint32_t)func_args.size, arg_type, arg_location);
 
                     // Build structured dictionary attribute for this argument
                     VecAttribute dict_elems;
                     VecAttribute_reserve(parser->arena, &dict_elems, 2);
 
                     if (has_div) {
-                        MlirAttribute *div_attr = MLIR_AttributeCreateInteger(parser->arena, str_lit("tt.divisibility"), div_value);
+                        MLIR_Attribute *div_attr = MLIR_AttributeCreateInteger(parser->arena, str_lit("tt.divisibility"), div_value);
                         VecAttribute_push_back(parser->arena, &dict_elems, div_attr);
                     }
                     if (has_max_div) {
-                        MlirAttribute *max_div_attr = MLIR_AttributeCreateInteger(parser->arena, str_lit("tt.max_divisibility"), max_div_value);
+                        MLIR_Attribute *max_div_attr = MLIR_AttributeCreateInteger(parser->arena, str_lit("tt.max_divisibility"), max_div_value);
                         VecAttribute_push_back(parser->arena, &dict_elems, max_div_attr);
                     }
 
                     // Create dictionary attribute (empty if no attributes)
-                    MlirAttribute *arg_dict = MLIR_AttributeCreateDict(parser->arena, str_lit(""), dict_elems.data, dict_elems.size);
+                    MLIR_Attribute *arg_dict = MLIR_AttributeCreateDict(parser->arena, str_lit(""), dict_elems.data, dict_elems.size);
 
                     VecValue_push_back(parser->arena, &func_args, arg);
                     VecAttribute_push_back(parser->arena, &arg_attr_dicts, arg_dict);
@@ -2596,7 +2596,7 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
 
         // Register function arguments in the new scope
         for (size_t i = 0; i < func_args.size; i++) {
-            MlirValue *operand = func_args.data[i];
+            MLIR_Value *operand = func_args.data[i];
             if (!operand) continue;
             string name = MLIR_ValueGetRegisterName(operand);
             if (name.size > 0) {
@@ -2608,7 +2608,7 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
         VecBlock blocks;
         VecBlock_reserve(parser->arena, &blocks, 8);
         while (!parser_peek(parser, TK_RBRACE)) {
-            MlirBlock *block = parse_block(parser);
+            MLIR_Block *block = parse_block(parser);
             VecBlock_push_back(parser->arena, &blocks, block);
         }
         parser_expect(parser, TK_RBRACE);
@@ -2617,7 +2617,7 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
         symbol_table_pop_scope(&parser->symbol_table);
 
         // Create region
-        MlirRegion *region = MLIR_RegionCreate(parser->arena);
+        MLIR_Region *region = MLIR_RegionCreate(parser->arena);
         for (size_t i = 0; i < blocks.size; i++) {
             MLIR_RegionAddBlock(parser->arena, region, blocks.data[i]);
         }
@@ -2641,7 +2641,7 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
     parse_angle_brace_attributes(parser, &attrs, &n_attrs, &cap_attrs);
     parse_brace_attributes(parser, &attrs, &n_attrs, &cap_attrs);
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
     parse_result_types(parser, &result_types, &n_result_types, &attrs, &n_attrs, &cap_attrs, params->op_type, NULL);
 
@@ -2654,16 +2654,16 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
     }
 
     // Set regions
-    MlirRegion **regions = NULL;
+    MLIR_Region **regions = NULL;
     size_t n_regions = 0;
     if (func_region) {
-        regions = arena_alloc_array(params->arena, MlirRegion*, 1);
+        regions = arena_alloc_array(params->arena, MLIR_Region*, 1);
         regions[0] = func_region;
         n_regions = 1;
     }
 
     // Create the operation at the end
-    MlirOperation *op = MLIR_OpCreate(params->arena, params->op_type, str_lit(""),
+    MLIR_Op *op = MLIR_OpCreate(params->arena, params->op_type, str_lit(""),
                                       attrs, n_attrs,
                                       result_types, n_result_types,
                                       params->lhs_results, params->n_lhs_results,
@@ -2675,13 +2675,13 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
     // Add arg_attrs array attribute to the operation if there are any argument attributes
     if (arg_attr_dicts.size > 0) {
         // Create ArrayAttr containing all DictionaryAttrs
-        MlirAttribute *arg_attrs = MLIR_AttributeCreateArray(
+        MLIR_Attribute *arg_attrs = MLIR_AttributeCreateArray(
             parser->arena, str_lit("arg_attrs"), arg_attr_dicts.data, arg_attr_dicts.size);
         MLIR_OpAppendAttribute(parser->arena, op, arg_attrs);
     }
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -2698,7 +2698,7 @@ OperationParserResult parse_scf_if_op(Parser *parser, const OperationParserParam
     if (parser_peek(parser, TK_REGISTER)) {
         string cond_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        MlirValue *condition = symbol_table_lookup(&parser->symbol_table, cond_str);
+        MLIR_Value *condition = symbol_table_lookup(&parser->symbol_table, cond_str);
         if (!condition) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             OperationParserResult empty = {0};
@@ -2711,7 +2711,7 @@ OperationParserResult parse_scf_if_op(Parser *parser, const OperationParserParam
         return empty;
     }
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -2720,7 +2720,7 @@ OperationParserResult parse_scf_if_op(Parser *parser, const OperationParserParam
         parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     }
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
 
     if (parser_peek(parser, TK_ARROW)) {
@@ -2728,13 +2728,13 @@ OperationParserResult parse_scf_if_op(Parser *parser, const OperationParserParam
         if (parser_peek(parser, TK_LPAREN)) {
             parser_expect(parser, TK_LPAREN);
             size_t cap = 2;
-            result_types = arena_alloc_array(params->arena, MlirType*, cap);
+            result_types = arena_alloc_array(params->arena, MLIR_Type*, cap);
             while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
                 string type_str = str_lit("");
                 if (!parse_type_string(parser, &type_str)) break;
                 if (n_result_types >= cap) {
                     cap *= 2;
-                    MlirType **expanded = arena_alloc_array(params->arena, MlirType*, cap);
+                    MLIR_Type **expanded = arena_alloc_array(params->arena, MLIR_Type*, cap);
                     for (size_t i = 0; i < n_result_types; i++) expanded[i] = result_types[i];
                     result_types = expanded;
                 }
@@ -2746,15 +2746,15 @@ OperationParserResult parse_scf_if_op(Parser *parser, const OperationParserParam
         } else {
             string type_str = str_lit("");
             if (parse_type_string(parser, &type_str)) {
-                result_types = arena_alloc_array(params->arena, MlirType*, 1);
+                result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
                 result_types[0] = mlir_type_create_from_string(params->arena, type_str);
                 n_result_types = 1;
             }
         }
     }
 
-    MlirRegion *then_region = parse_region(parser);
-    MlirRegion *else_region = NULL;
+    MLIR_Region *then_region = parse_region(parser);
+    MLIR_Region *else_region = NULL;
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("else"))) {
         parser_expect(parser, TK_NAME);
         else_region = parse_region(parser);
@@ -2763,17 +2763,17 @@ OperationParserResult parse_scf_if_op(Parser *parser, const OperationParserParam
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
     size_t n_regions = else_region ? 2 : 1;
-    MlirRegion **regions = arena_alloc_array(params->arena, MlirRegion*, n_regions);
+    MLIR_Region **regions = arena_alloc_array(params->arena, MLIR_Region*, n_regions);
     regions[0] = then_region;
     if (else_region) regions[1] = else_region;
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -2793,7 +2793,7 @@ OperationParserResult parse_scf_if_op(Parser *parser, const OperationParserParam
         params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -2807,8 +2807,8 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
     VecValue operands;
     VecValue_reserve(parser->arena, &operands, 4);
 
-    MlirValue *loop_var = NULL;
-    MlirType *iv_type = NULL;
+    MLIR_Value *loop_var = NULL;
+    MLIR_Type *iv_type = NULL;
 
     if (parser_peek(parser, TK_REGISTER)) {
         string loop_var_name = parser_token_str(parser);
@@ -2821,7 +2821,7 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
         if (parser_peek(parser, TK_REGISTER)) {
             string reg_str = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            MlirValue *start_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+            MLIR_Value *start_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
             if (!start_operand) {
                 parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                 OperationParserResult empty = {0};
@@ -2837,7 +2837,7 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
         if (parser_peek(parser, TK_REGISTER)) {
             string reg_str = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            MlirValue *end_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+            MLIR_Value *end_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
             if (!end_operand) {
                 parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                 OperationParserResult empty = {0};
@@ -2853,7 +2853,7 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
         if (parser_peek(parser, TK_REGISTER)) {
             string reg_str = parser_token_str(parser);
             parser_expect(parser, TK_REGISTER);
-            MlirValue *step_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+            MLIR_Value *step_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
             if (!step_operand) {
                 parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                 OperationParserResult empty = {0};
@@ -2875,7 +2875,7 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
                 string iter_var_name = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
 
-                MlirValue *iter_var = MLIR_ValueCreateBlockArg(parser->arena, iter_var_name, 0, NULL, NULL);
+                MLIR_Value *iter_var = MLIR_ValueCreateBlockArg(parser->arena, iter_var_name, 0, NULL, NULL);
                 VecValue_push_back(parser->arena, &iter_vars, iter_var);
 
                 parser_expect(parser, TK_EQUAL);
@@ -2884,7 +2884,7 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
                     parser_expect(parser, TK_REGISTER);
                     consume_optional_hash_selector(parser);
                     consume_optional_hash_selector(parser);
-                    MlirValue *init_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+                    MLIR_Value *init_operand = symbol_table_lookup(&parser->symbol_table, reg_str);
                     if (!init_operand) {
                         parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                         OperationParserResult empty = {0};
@@ -2903,20 +2903,20 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
         }
     }
 
-    MlirType **iter_result_types = NULL;
+    MLIR_Type **iter_result_types = NULL;
     size_t n_iter_results = 0;
     if (parser_peek(parser, TK_ARROW)) {
         parser_expect(parser, TK_ARROW);
         if (parser_peek(parser, TK_LPAREN)) {
             parser_expect(parser, TK_LPAREN);
             size_t cap = 4;
-            iter_result_types = arena_alloc_array(params->arena, MlirType*, cap);
+            iter_result_types = arena_alloc_array(params->arena, MLIR_Type*, cap);
             while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
                 string t = str_lit("");
                 if (!parse_type_string(parser, &t)) break;
                 if (n_iter_results >= cap) {
                     cap *= 2;
-                    MlirType **tmp = arena_alloc_array(params->arena, MlirType*, cap);
+                    MLIR_Type **tmp = arena_alloc_array(params->arena, MLIR_Type*, cap);
                     for (size_t i = 0; i < n_iter_results; i++) tmp[i] = iter_result_types[i];
                     iter_result_types = tmp;
                 }
@@ -2944,10 +2944,10 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
 
     symbol_table_push_scope(parser->arena, &parser->symbol_table);
 
-    MlirBlock *block = MLIR_BlockCreate(parser->arena);
+    MLIR_Block *block = MLIR_BlockCreate(parser->arena);
     if (loop_var) {
         string loop_name = MLIR_ValueGetRegisterName(loop_var);
-        MlirType *arg_type;
+        MLIR_Type *arg_type;
         if (iv_type) {
             arg_type = iv_type;
         } else if (operands.size > 0 && operands.data[0] && MLIR_ValueGetType(operands.data[0])) {
@@ -2955,18 +2955,18 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
         } else {
             arg_type = mlir_type_create_from_string(parser->arena, str_lit("index"));
         }
-        MlirValue *iv_block_arg = MLIR_ValueCreateBlockArg(parser->arena, loop_name, 0, arg_type, NULL);
+        MLIR_Value *iv_block_arg = MLIR_ValueCreateBlockArg(parser->arena, loop_name, 0, arg_type, NULL);
         MLIR_BlockAddArg(parser->arena, block, iv_block_arg);
         if (loop_name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, loop_name, iv_block_arg);
     }
 
     for (size_t i = 0; i < iter_vars.size; i++) {
-        MlirValue *iter_var = iter_vars.data[i];
+        MLIR_Value *iter_var = iter_vars.data[i];
         string iter_name = MLIR_ValueGetRegisterName(iter_var);
         size_t init_index = 3 + i;
-        MlirType *arg_type;
+        MLIR_Type *arg_type;
         if (operands.size > init_index) {
-            MlirValue *init_operand = operands.data[init_index];
+            MLIR_Value *init_operand = operands.data[init_index];
             if (init_operand && MLIR_ValueGetType(init_operand)) {
                 arg_type = MLIR_ValueGetType(init_operand);
             } else {
@@ -2975,7 +2975,7 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
         } else {
             arg_type = mlir_type_create_from_string(parser->arena, str_lit("unknown"));
         }
-        MlirValue *iter_block_arg = MLIR_ValueCreateBlockArg(parser->arena, iter_name, (uint32_t)(i + 1), arg_type, NULL);
+        MLIR_Value *iter_block_arg = MLIR_ValueCreateBlockArg(parser->arena, iter_name, (uint32_t)(i + 1), arg_type, NULL);
         MLIR_BlockAddArg(parser->arena, block, iter_block_arg);
         if (iter_name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, iter_name, iter_block_arg);
     }
@@ -2983,7 +2983,7 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
     bool prev_flag = parser->capture_trailing_comments;
     parser->capture_trailing_comments = true;
     while (!parser_peek(parser, TK_RBRACE)) {
-        MlirOperation *inner = parse_operation(parser);
+        MLIR_Op *inner = parse_operation(parser);
         MLIR_BlockAddOp(parser->arena, block, inner);
         parser_expect(parser, TK_NEWLINE);
         while (parser_peek(parser, TK_NEWLINE)) parser_expect(parser, TK_NEWLINE);
@@ -2993,18 +2993,18 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
 
     symbol_table_pop_scope(&parser->symbol_table);
 
-    MlirRegion *region = MLIR_RegionCreate(parser->arena);
+    MLIR_Region *region = MLIR_RegionCreate(parser->arena);
     MLIR_RegionAddBlock(parser->arena, region, block);
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MlirRegion **regions = arena_alloc_array(params->arena, MlirRegion*, 1);
+    MLIR_Region **regions = arena_alloc_array(params->arena, MLIR_Region*, 1);
     regions[0] = region;
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -3023,7 +3023,7 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
         params->trailing_comment,
         params->source_line_start);
 
-    MlirValue **results = NULL;
+    MLIR_Value **results = NULL;
     size_t n_results = 0;
     if (n_iter_results > 0 && params->n_lhs_results > 0) {
         // lhs_results now contains the correct count matching n_iter_results
@@ -3067,7 +3067,7 @@ OperationParserResult parse_scf_while_op(Parser *parser, const OperationParserPa
             if (parser_peek(parser, TK_REGISTER)) {
                 string reg = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
-                MlirValue *init = symbol_table_lookup(&parser->symbol_table, reg);
+                MLIR_Value *init = symbol_table_lookup(&parser->symbol_table, reg);
                 if (!init) {
                     parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
                     OperationParserResult empty = {0};
@@ -3096,20 +3096,20 @@ OperationParserResult parse_scf_while_op(Parser *parser, const OperationParserPa
         }
     }
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
     if (parser_peek(parser, TK_ARROW)) {
         parser_expect(parser, TK_ARROW);
         if (parser_peek(parser, TK_LPAREN)) {
             parser_expect(parser, TK_LPAREN);
             size_t cap = 2;
-            result_types = arena_alloc_array(params->arena, MlirType*, cap);
+            result_types = arena_alloc_array(params->arena, MLIR_Type*, cap);
             while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
                 string t = str_lit("");
                 if (!parse_type_string(parser, &t)) break;
                 if (n_result_types >= cap) {
                     cap *= 2;
-                    MlirType **tmp = arena_alloc_array(params->arena, MlirType*, cap);
+                    MLIR_Type **tmp = arena_alloc_array(params->arena, MLIR_Type*, cap);
                     for (size_t i = 0; i < n_result_types; i++) tmp[i] = result_types[i];
                     result_types = tmp;
                 }
@@ -3121,14 +3121,14 @@ OperationParserResult parse_scf_while_op(Parser *parser, const OperationParserPa
         } else {
             string t = str_lit("");
             if (parse_type_string(parser, &t)) {
-                result_types = arena_alloc_array(params->arena, MlirType*, 1);
+                result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
                 result_types[0] = mlir_type_create_from_string(params->arena, t);
                 n_result_types = 1;
             }
         }
     }
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
@@ -3137,9 +3137,9 @@ OperationParserResult parse_scf_while_op(Parser *parser, const OperationParserPa
     while (!parser_peek(parser, TK_LBRACE_END) && !parser_peek(parser, TK_EOF)) {
         parser_next_token(parser);
     }
-    MlirRegion *cond_region = parse_region(parser);
+    MLIR_Region *cond_region = parse_region(parser);
 
-    MlirRegion *body_region = NULL;
+    MLIR_Region *body_region = NULL;
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("do"))) {
         parser_expect(parser, TK_NAME);
         body_region = parse_region(parser);
@@ -3148,17 +3148,17 @@ OperationParserResult parse_scf_while_op(Parser *parser, const OperationParserPa
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
     size_t n_regions = body_region ? 2 : 1;
-    MlirRegion **regions = arena_alloc_array(params->arena, MlirRegion*, n_regions);
+    MLIR_Region **regions = arena_alloc_array(params->arena, MLIR_Region*, n_regions);
     regions[0] = cond_region;
     if (body_region) regions[1] = body_region;
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -3178,7 +3178,7 @@ OperationParserResult parse_scf_while_op(Parser *parser, const OperationParserPa
         params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -3206,7 +3206,7 @@ OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserP
                     string reg_str = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
 
-                    MlirValue *arg = MLIR_ValueCreateBlockArg(parser->arena, reg_str, (uint32_t)launch_args.size, mlir_type_create_from_string(parser->arena, str_lit("index")), NULL);
+                    MLIR_Value *arg = MLIR_ValueCreateBlockArg(parser->arena, reg_str, (uint32_t)launch_args.size, mlir_type_create_from_string(parser->arena, str_lit("index")), NULL);
 
                     VecValue_push_back(parser->arena, &launch_args, arg);
 
@@ -3238,7 +3238,7 @@ OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserP
                     string reg_str = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
 
-                    MlirValue *arg = MLIR_ValueCreateBlockArg(parser->arena, reg_str, (uint32_t)launch_args.size, mlir_type_create_from_string(parser->arena, str_lit("index")), NULL);
+                    MLIR_Value *arg = MLIR_ValueCreateBlockArg(parser->arena, reg_str, (uint32_t)launch_args.size, mlir_type_create_from_string(parser->arena, str_lit("index")), NULL);
 
                     VecValue_push_back(parser->arena, &launch_args, arg);
 
@@ -3254,19 +3254,19 @@ OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserP
     }
 
     // Parse any attributes and result types using helper functions
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
 
     // Parse optional location
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
@@ -3281,9 +3281,9 @@ OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserP
     parser_expect(parser, TK_LBRACE_END);
     parser_expect(parser, TK_NEWLINE);
 
-    MlirBlock *gpu_block = MLIR_BlockCreate(parser->arena);
+    MLIR_Block *gpu_block = MLIR_BlockCreate(parser->arena);
     for (size_t i = 0; i < launch_args.size; i++) {
-        MlirValue *arg = launch_args.data[i];
+        MLIR_Value *arg = launch_args.data[i];
         MLIR_BlockAddArg(parser->arena, gpu_block, arg);
     }
 
@@ -3294,7 +3294,7 @@ OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserP
     }
 
     while (!parser_peek(parser, TK_RBRACE)) {
-        MlirOperation *inner_op = parse_operation(parser);
+        MLIR_Op *inner_op = parse_operation(parser);
         MLIR_BlockAddOp(parser->arena, gpu_block, inner_op);
         parser_expect(parser, TK_NEWLINE);
         while (parser_peek(parser, TK_NEWLINE)) parser_expect(parser, TK_NEWLINE);
@@ -3302,16 +3302,16 @@ OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserP
     parser_expect(parser, TK_RBRACE);
     symbol_table_pop_scope(&parser->symbol_table);
 
-    MlirRegion *gpu_region = MLIR_RegionCreate(parser->arena);
+    MLIR_Region *gpu_region = MLIR_RegionCreate(parser->arena);
     MLIR_RegionAddBlock(parser->arena, gpu_region, gpu_block);
 
     // Set regions
-    MlirRegion **regions = arena_alloc_array(params->arena, MlirRegion*, 1);
+    MLIR_Region **regions = arena_alloc_array(params->arena, MLIR_Region*, 1);
     regions[0] = gpu_region;
     size_t n_regions = 1;
 
     // Create the operation at the end
-    MlirOperation *op = MLIR_OpCreate(params->arena, params->op_type, str_lit(""),
+    MLIR_Op *op = MLIR_OpCreate(params->arena, params->op_type, str_lit(""),
                                       attributes, n_attributes,
                                       result_types, n_result_types,
                                       params->lhs_results, params->n_lhs_results,
@@ -3321,7 +3321,7 @@ OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserP
                                       params->trailing_comment, params->source_line_start);
 
     // Create results from the operation's result types
-    MlirValue **results = NULL;
+    MLIR_Value **results = NULL;
     size_t n_results = 0;
 
     results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -3346,7 +3346,7 @@ OperationParserResult parse_arith_cmpi_op(Parser *parser, const OperationParserP
         parser_expect(parser, TK_NAME);
     }
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0, attributes_capacity = 0;
     append_attr(parser, &attributes, &n_attributes, &attributes_capacity, create_string_attr(parser, str_lit("predicate"), predicate));
 
@@ -3357,7 +3357,7 @@ OperationParserResult parse_arith_cmpi_op(Parser *parser, const OperationParserP
     if (parser_peek(parser, TK_REGISTER)) {
         string lhs_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        MlirValue *lhs = symbol_table_lookup(&parser->symbol_table, lhs_str);
+        MLIR_Value *lhs = symbol_table_lookup(&parser->symbol_table, lhs_str);
         if (!lhs) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             OperationParserResult empty = {0};
@@ -3371,7 +3371,7 @@ OperationParserResult parse_arith_cmpi_op(Parser *parser, const OperationParserP
     if (parser_peek(parser, TK_REGISTER)) {
         string rhs_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        MlirValue *rhs = symbol_table_lookup(&parser->symbol_table, rhs_str);
+        MLIR_Value *rhs = symbol_table_lookup(&parser->symbol_table, rhs_str);
         if (!rhs) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             OperationParserResult empty = {0};
@@ -3384,25 +3384,25 @@ OperationParserResult parse_arith_cmpi_op(Parser *parser, const OperationParserP
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
 
     // Default result type if not specified
     if (n_result_types == 0) {
-        result_types = arena_alloc_array(params->arena, MlirType*, 1);
+        result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
         result_types[0] = mlir_type_create_from_string(params->arena, str_lit("i1"));
         n_result_types = 1;
     }
 
     // Parse optional location
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
     // Create the operation at the end
-    MlirOperation *op = MLIR_OpCreate(params->arena, params->op_type, str_lit(""),
+    MLIR_Op *op = MLIR_OpCreate(params->arena, params->op_type, str_lit(""),
                                       attributes, n_attributes,
                                       result_types, n_result_types,
                                       params->lhs_results, params->n_lhs_results,
@@ -3412,7 +3412,7 @@ OperationParserResult parse_arith_cmpi_op(Parser *parser, const OperationParserP
                                       params->trailing_comment, params->source_line_start);
 
     // Create results from the operation's result types
-    MlirValue **results = NULL;
+    MLIR_Value **results = NULL;
     size_t n_results = 0;
 
     results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -3433,7 +3433,7 @@ OperationParserResult parse_scf_yield_op(Parser *parser, const OperationParserPa
     while (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        MLIR_Value *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
         if (!operand) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             OperationParserResult empty = {0};
@@ -3456,10 +3456,10 @@ OperationParserResult parse_scf_yield_op(Parser *parser, const OperationParserPa
         }
     }
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) op_location = params->unnumbered_loc_def;
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -3497,7 +3497,7 @@ OperationParserResult parse_return_op(Parser *parser, const OperationParserParam
     while (parser_peek(parser, TK_REGISTER)) {
         string reg_str = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
-        MlirValue *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
+        MLIR_Value *operand = symbol_table_lookup(&parser->symbol_table, reg_str);
         if (!operand) {
             parser_error(parser, str_lit("Use of undefined SSA value"), parser->first, parser->last);
             OperationParserResult empty = {0};
@@ -3521,12 +3521,12 @@ OperationParserResult parse_return_op(Parser *parser, const OperationParserParam
         }
     }
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) op_location = params->unnumbered_loc_def;
 
     bool keep_operands = params->op_type != OP_TYPE_STD_RETURN;
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -3564,14 +3564,14 @@ OperationParserResult parse_tt_load_op(Parser *parser, const OperationParserPara
         else break;
     }
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
 
     while (parser_peek(parser, TK_WHITESPACE)) parser_expect(parser, TK_WHITESPACE);
@@ -3630,7 +3630,7 @@ OperationParserResult parse_tt_load_op(Parser *parser, const OperationParserPara
             }
 
             if (result_sig.size > 0) {
-                result_types = arena_alloc_array(params->arena, MlirType*, 1);
+                result_types = arena_alloc_array(params->arena, MLIR_Type*, 1);
                 result_types[0] = mlir_type_create_from_string(params->arena, result_sig);
                 n_result_types = 1;
             }
@@ -3649,10 +3649,10 @@ OperationParserResult parse_tt_load_op(Parser *parser, const OperationParserPara
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) op_location = params->unnumbered_loc_def;
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -3671,7 +3671,7 @@ OperationParserResult parse_tt_load_op(Parser *parser, const OperationParserPara
         params->source_line_start);
 
     size_t n_results = 0;
-    MlirValue **results = finalize_results(params, op, result_types, n_result_types, &n_results);
+    MLIR_Value **results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     OperationParserResult out = {
         .operation = op,
@@ -3695,7 +3695,7 @@ OperationParserResult parse_tt_store_op(Parser *parser, const OperationParserPar
         else break;
     }
 
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -3758,10 +3758,10 @@ OperationParserResult parse_tt_store_op(Parser *parser, const OperationParserPar
         }
     }
 
-    MlirLocation *op_location = parse_optional_location(parser);
+    MLIR_Location *op_location = parse_optional_location(parser);
     if (!op_location) op_location = params->unnumbered_loc_def;
 
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -3792,7 +3792,7 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
     // Capture optional visibility and function name
     string visibility = str_lit("");
     string fname = str_lit("");
-    MlirAttribute **attrs = NULL;
+    MLIR_Attribute **attrs = NULL;
     size_t n_attrs = 0;
     size_t cap_attrs = 0;
 
@@ -3827,7 +3827,7 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
                 string reg = parser_token_str(parser);
                 parser_expect(parser, TK_REGISTER);
                 // Optional type annotation
-                MlirType *ty = NULL;
+                MLIR_Type *ty = NULL;
                 if (parser_peek(parser, TK_COLON)) {
                     parser_expect(parser, TK_COLON);
                     string t = str_lit("");
@@ -3835,7 +3835,7 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
                         ty = mlir_type_create_from_string(parser->arena, t);
                     }
                 }
-                MlirValue *arg = MLIR_ValueCreateBlockArg(parser->arena, reg, 0, ty, NULL);
+                MLIR_Value *arg = MLIR_ValueCreateBlockArg(parser->arena, reg, 0, ty, NULL);
                 VecValue_push_back(parser->arena, &args, arg);
             } else if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME) || parser_peek(parser, TK_EXCLAMATION)) {
                 // Type-only argument in declaration form
@@ -3869,11 +3869,11 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
     }
 
     // Parse optional body region (definition) or leave as declaration
-    MlirRegion **regions = NULL;
+    MLIR_Region **regions = NULL;
     size_t n_regions = 0;
     if (parser_peek(parser, TK_LBRACE_END)) {
-        MlirRegion *region = parse_region(parser);
-        regions = arena_alloc_array(parser->arena, MlirRegion*, 1);
+        MLIR_Region *region = parse_region(parser);
+        regions = arena_alloc_array(parser->arena, MLIR_Region*, 1);
         regions[0] = region;
         n_regions = 1;
     }
@@ -3884,9 +3884,9 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
     if (ret_sig.size > 0) append_attr(parser, &attrs, &n_attrs, &cap_attrs, create_string_attr(parser, str_lit("ret"), ret_sig));
 
     // Parse additional attributes, result types, and location
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
-    MlirLocation *op_location = NULL;
+    MLIR_Location *op_location = NULL;
     parse_generic_attrs_and_result_type(parser, &attrs, &n_attrs, &cap_attrs,
                                          &result_types, &n_result_types, params->op_type);
 
@@ -3896,7 +3896,7 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
     }
 
     // NOW create operation with all collected data
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),
@@ -3923,7 +3923,7 @@ OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserP
     // Collect all data before creating operation (inlined from parse_affine_for)
 
     // Expect induction variable
-    MlirValue *ind_var = NULL;
+    MLIR_Value *ind_var = NULL;
     if (parser_peek(parser, TK_REGISTER)) {
         string iv_name = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
@@ -3974,10 +3974,10 @@ OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserP
     symbol_table_push_scope(parser->arena, &parser->symbol_table);
 
     // Create single block and register induction variable as block argument
-    MlirBlock *block = MLIR_BlockCreate(parser->arena);
+    MLIR_Block *block = MLIR_BlockCreate(parser->arena);
     if (ind_var) {
         string block_name = str_lit("%arg0");
-        MlirValue *iv_block_arg = MLIR_ValueCreateBlockArg(parser->arena, block_name, (uint32_t)MLIR_BlockNumArgs(block), mlir_type_create_from_string(parser->arena, str_lit("index")), NULL);
+        MLIR_Value *iv_block_arg = MLIR_ValueCreateBlockArg(parser->arena, block_name, (uint32_t)MLIR_BlockNumArgs(block), mlir_type_create_from_string(parser->arena, str_lit("index")), NULL);
         MLIR_BlockAddArg(parser->arena, block, iv_block_arg);
         string orig_name = MLIR_ValueGetRegisterName(ind_var);
         if (orig_name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, orig_name, iv_block_arg);
@@ -3987,7 +3987,7 @@ OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserP
     bool prev_flag = parser->capture_trailing_comments;
     parser->capture_trailing_comments = true;
     while (!parser_peek(parser, TK_RBRACE)) {
-        MlirOperation *inner = parse_operation(parser);
+        MLIR_Op *inner = parse_operation(parser);
         MLIR_BlockAddOp(parser->arena, block, inner);
         parser_expect(parser, TK_NEWLINE);
         while (parser_peek(parser, TK_NEWLINE)) parser_expect(parser, TK_NEWLINE);
@@ -3996,7 +3996,7 @@ OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserP
     parser->capture_trailing_comments = prev_flag;
 
     // Parse optional trailing location
-    MlirLocation *op_location = NULL;
+    MLIR_Location *op_location = NULL;
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
         op_location = parse_loc(parser);
     }
@@ -4004,29 +4004,29 @@ OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserP
     symbol_table_pop_scope(&parser->symbol_table);
 
     // Build region with the parsed block
-    MlirRegion *region = MLIR_RegionCreate(parser->arena);
+    MLIR_Region *region = MLIR_RegionCreate(parser->arena);
     MLIR_RegionAddBlock(parser->arena, region, block);
-    MlirRegion **regions = arena_alloc_array(parser->arena, MlirRegion*, 1);
+    MLIR_Region **regions = arena_alloc_array(parser->arena, MLIR_Region*, 1);
     regions[0] = region;
 
     // Parse attributes and result types
-    MlirAttribute **attributes = NULL;
+    MLIR_Attribute **attributes = NULL;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
-    MlirType **result_types = NULL;
+    MLIR_Type **result_types = NULL;
     size_t n_result_types = 0;
 
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, NULL);
-    MlirLocation *loc_after_attrs = parse_optional_location(parser);
+    MLIR_Location *loc_after_attrs = parse_optional_location(parser);
     if (loc_after_attrs) op_location = loc_after_attrs;
 
     // Fallback location if none was parsed
     if (!op_location) op_location = params->unnumbered_loc_def;
 
     // NOW create operation with all collected data
-    MlirOperation *op = MLIR_OpCreate(
+    MLIR_Op *op = MLIR_OpCreate(
         params->arena,
         params->op_type,
         str_lit(""),

@@ -26,7 +26,7 @@ extern "C" {
  * @param op Operation to print
  * @return String containing the printed MLIR representation
  */
-string print_operation_classic(Arena *arena, int indent_level, MlirOperation *op);
+string print_operation_classic(Arena *arena, int indent_level, MLIR_Op *op);
 
 /**
  * Print an MLIR region to string using classic format.
@@ -36,7 +36,7 @@ string print_operation_classic(Arena *arena, int indent_level, MlirOperation *op
  * @param region Region to print
  * @return String containing the printed region with braces and blocks
  */
-string print_region_classic(Arena *arena, int indent_level, MlirRegion *region);
+string print_region_classic(Arena *arena, int indent_level, MLIR_Region *region);
 
 /**
  * Print an MLIR basic block to string using classic format.
@@ -47,7 +47,7 @@ string print_region_classic(Arena *arena, int indent_level, MlirRegion *region);
  * @param block Block to print
  * @return String containing the printed block with label and operations
  */
-string print_block_classic(Arena *arena, int bb_index, int indent_level, MlirBlock *block);
+string print_block_classic(Arena *arena, int bb_index, int indent_level, MLIR_Block *block);
 
 /**
  * Print a complete MLIR module with location map definitions.
@@ -57,7 +57,7 @@ string print_block_classic(Arena *arena, int bb_index, int indent_level, MlirBlo
  * @param location_map Location map containing #locN definitions
  * @return String containing the complete printed module with location definitions
  */
-string print_module_classic(Arena *arena, MlirOperation *module, MlirLocationMap *location_map);
+string print_module_classic(Arena *arena, MLIR_Op *module, MLIR_LocationMap *location_map);
 
 #ifdef __cplusplus
 }
