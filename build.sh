@@ -2,7 +2,12 @@
 
 set -ex
 
-CFLAGS="-fsanitize=address -g -Wall -ferror-limit=1"
+# Use AddressSanitizer on macOS, but not on Linux due to WSL issues
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    CFLAGS="-fsanitize=address -g -Wall -ferror-limit=1"
+else
+    CFLAGS="-g -Wall -ferror-limit=1"
+fi
 
 clang $CFLAGS -I. -o run_tests tests/run_tests.c base/arena.c base/string.c base/format.c base/io.c
 #./run_tests
