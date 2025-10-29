@@ -152,8 +152,8 @@ string type_to_string(Arena *arena, MlirType *type);
 // Public parser facade
 MlirOperation *mlir_parse_module(Arena *arena, const char *input, size_t input_len, MlirLocationMap **out_location_map);
 const char *mlir_tokentype_to_string(int token_type);
-size_t mlir_location_map_size(const MlirLocationMap *location_map);
-size_t mlir_location_map_collect(const MlirLocationMap *location_map, string *out_keys, MlirLocation **out_locs, size_t max);
+size_t MLIR_LocationMapSize(const MlirLocationMap *location_map);
+size_t MLIR_LocationMapCollect(const MlirLocationMap *location_map, string *out_keys, MlirLocation **out_locs, size_t max);
 
 MlirType *mlir_type_create_from_string(Arena *arena, string type_str);
 

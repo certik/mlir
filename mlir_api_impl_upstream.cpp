@@ -98,7 +98,7 @@ static OpType lookupOpTypeByName(StringRef name) {
     return OP_TYPE_UNREGISTERED;
 }
 
-void mlir_api_init(MlirOperation *root) {
+void MLIR_ApiInit(MlirOperation *root) {
     if (!gContext) {
         gContext = new MLIRContext();
         gContext->loadAllAvailableDialects();
@@ -123,45 +123,45 @@ MlirOperation *mlir_operation_create(Arena *arena, OpType type) {
     return reinterpret_cast<MlirOperation *>(op);
 }
 
-void mlir_block_add_operation(Arena *arena, MlirBlock *block, MlirOperation *op) {
+void MLIR_BlockAddOp(Arena *arena, MlirBlock *block, MlirOperation *op) {
     (void)arena;
     Block *cppBlock = reinterpret_cast<Block *>(block);
     Operation *cppOp = reinterpret_cast<Operation *>(op);
     cppBlock->push_back(cppOp);
 }
 
-void mlir_block_add_argument(Arena *arena, MlirBlock *block, MlirValue *arg) {
+void MLIR_BlockAddArg(Arena *arena, MlirBlock *block, MlirValue *arg) {
     (void)arena;
     Block *cppBlock = reinterpret_cast<Block *>(block);
     Value cppVal = *reinterpret_cast<Value *>(arg);
     cppBlock->addArgument(cppVal.getType(), cppVal.getLoc());
 }
 
-void mlir_region_add_block(Arena *arena, MlirRegion *region, MlirBlock *block) {
+void MLIR_RegionAddBlock(Arena *arena, MlirRegion *region, MlirBlock *block) {
     (void)arena;
     Region *cppRegion = reinterpret_cast<Region *>(region);
     Block *cppBlock = reinterpret_cast<Block *>(block);
     cppRegion->push_back(cppBlock);
 }
 
-size_t mlir_region_num_blocks(const MlirRegion *region) {
+size_t MLIR_RegionNumBlocks(const MlirRegion *region) {
     const Region *cppRegion = reinterpret_cast<const Region *>(region);
     return cppRegion->getBlocks().size();
 }
 
-MlirBlock *mlir_region_get_block(const MlirRegion *region, size_t idx) {
+MlirBlock *MLIR_RegionGetBlock(const MlirRegion *region, size_t idx) {
     Region *cppRegion = const_cast<Region *>(reinterpret_cast<const Region *>(region));
     auto it = cppRegion->begin();
     std::advance(it, idx);
     return reinterpret_cast<MlirBlock *>(&*it);
 }
 
-size_t mlir_block_num_operations(const MlirBlock *block) {
+size_t MLIR_BlockNumOps(const MlirBlock *block) {
     const Block *cppBlock = reinterpret_cast<const Block *>(block);
     return cppBlock->getOperations().size();
 }
 
-MlirOperation *mlir_block_get_operation(const MlirBlock *block, size_t idx) {
+MlirOperation *MLIR_BlockGetOp(const MlirBlock *block, size_t idx) {
     Block *cppBlock = const_cast<Block *>(reinterpret_cast<const Block *>(block));
     auto it = cppBlock->begin();
     std::advance(it, idx);
