@@ -27,45 +27,41 @@ typedef uint32_t MLIR_LocationHandle;
 ```
 
 ### Handle Manager
-Create a central handle management system:
+Create a central handle management system using existing Vector infrastructure:
 
 ```c
+// Define vectors for each object type using existing DEFINE_VECTOR_FOR_TYPE
+DEFINE_VECTOR_FOR_TYPE(MLIR_Op, OpPool)
+DEFINE_VECTOR_FOR_TYPE(MLIR_Region, RegionPool)
+DEFINE_VECTOR_FOR_TYPE(MLIR_Block, BlockPool)
+DEFINE_VECTOR_FOR_TYPE(MLIR_Value, ValuePool)
+DEFINE_VECTOR_FOR_TYPE(MLIR_Type, TypePool)
+DEFINE_VECTOR_FOR_TYPE(MLIR_Attribute, AttributePool)
+DEFINE_VECTOR_FOR_TYPE(MLIR_Location, LocationPool)
+
+// Define vectors for free handle lists (optional optimization)
+DEFINE_VECTOR_FOR_TYPE(uint32_t, HandleFreeList)
+
 typedef struct MLIR_HandleManager {
     Arena *arena;
     
-    // Object pools - store actual objects by value
-    MLIR_Op *ops;
-    size_t ops_count;
-    size_t ops_capacity;
+    // Object pools using existing Vector system
+    OpPool ops;
+    RegionPool regions;
+    BlockPool blocks;
+    ValuePool values;
+    TypePool types;
+    AttributePool attributes;
+    LocationPool locations;
     
-    MLIR_Region *regions;
-    size_t regions_count;
-    size_t regions_capacity;
-    
-    MLIR_Block *blocks;
-    size_t blocks_count;
-    size_t blocks_capacity;
-    
-    MLIR_Value *values;
-    size_t values_count;
-    size_t values_capacity;
-    
-    MLIR_Type *types;
-    size_t types_count;
-    size_t types_capacity;
-    
-    MLIR_Attribute *attributes;
-    size_t attributes_count;
-    size_t attributes_capacity;
-    
-    MLIR_Location *locations;
-    size_t locations_count;
-    size_t locations_capacity;
-    
-    // Free lists for reuse (optional optimization)
-    uint32_t *free_op_handles;
-    size_t free_op_handles_count;
-    // ... similar for other types
+    // Free lists for handle reuse (optional optimization)
+    HandleFreeList free_op_handles;
+    HandleFreeList free_region_handles;
+    HandleFreeList free_block_handles;
+    HandleFreeList free_value_handles;
+    HandleFreeList free_type_handles;
+    HandleFreeList free_attribute_handles;
+    HandleFreeList free_location_handles;
 } MLIR_HandleManager;
 ```
 
@@ -186,10 +182,11 @@ void MLIR_AppendBlockOp(MLIR_BlockHandle block, MLIR_OpHandle op);
 
 ### Phase 1: Handle Manager Implementation
 1. **Create `mlir_handle_manager.h/c`** with:
-   - Handle manager structure
-   - Pool allocation functions
-   - Handle-to-object resolution functions
-   - Object creation/destruction functions
+   - Handle manager structure using existing Vector types
+   - Vector pool definitions (`DEFINE_VECTOR_FOR_TYPE` for each object type)
+   - Handle-to-object resolution functions (simple array indexing)
+   - Object creation using `Vector_push_back()` functions
+   - Optional handle recycling using free lists
 
 ### Phase 2: Internal Structure Updates
 1. **Update `mlir_api_impl.c`**:
@@ -204,30 +201,93 @@ void MLIR_AppendBlockOp(MLIR_BlockHandle block, MLIR_OpHandle op);
    - Keep function names the same for easier migration
 
 ### Phase 4: Vector System Updates
-1. **Update vector usage**:
-   - Change `VecOp`, `VecValue`, etc. to store handles instead of pointers
-   - Update `DEFINE_VECTOR_FOR_TYPE` usage patterns
+1. **Update existing vector usage**:
+   - Change `VecOp`, `VecValue`, etc. to store handles instead of pointers:
+     ```c
+     // Current:
+     DEFINE_VECTOR_FOR_TYPE(MLIR_Op*, VecOp)
+     DEFINE_VECTOR_FOR_TYPE(MLIR_Value*, VecValue)
+     
+     // New:
+     DEFINE_VECTOR_FOR_TYPE(MLIR_OpHandle, VecOpHandle)
+     DEFINE_VECTOR_FOR_TYPE(MLIR_ValueHandle, VecValueHandle)
+     ```
+   - Leverage existing Vector API (`reserve`, `push_back`) for both handle manager and user code
 
 ## 5. Key Implementation Details
 
 ### Handle Resolution Functions
 ```c
-// Internal functions for converting handles to objects
-static inline MLIR_Op* resolve_op_handle(MLIR_OpHandle handle);
-static inline MLIR_Region* resolve_region_handle(MLIR_RegionHandle handle);
-static inline MLIR_Block* resolve_block_handle(MLIR_BlockHandle handle);
-// ... etc
+// Internal functions for converting handles to objects using Vector access
+static inline MLIR_Op* resolve_op_handle(MLIR_OpHandle handle) {
+    if (handle == MLIR_INVALID_HANDLE || handle > global_handle_manager->ops.size) {
+        return NULL;
+    }
+    return &global_handle_manager->ops.data[handle - 1]; // handles are 1-based
+}
 
-// Handle creation functions
-static inline MLIR_OpHandle create_op_handle(void);
-static inline MLIR_RegionHandle create_region_handle(void);
-// ... etc
+static inline MLIR_Region* resolve_region_handle(MLIR_RegionHandle handle) {
+    if (handle == MLIR_INVALID_HANDLE || handle > global_handle_manager->regions.size) {
+        return NULL;
+    }
+    return &global_handle_manager->regions.data[handle - 1];
+}
+
+// Handle creation functions using Vector push_back
+static inline MLIR_OpHandle create_op_handle(void) {
+    // Check free list first (optional optimization)
+    if (global_handle_manager->free_op_handles.size > 0) {
+        uint32_t handle = global_handle_manager->free_op_handles.data[
+            --global_handle_manager->free_op_handles.size];
+        return handle;
+    }
+    
+    // Create new handle - allocate new slot in vector
+    MLIR_Op new_op = {0}; // Zero-initialize
+    OpPool_push_back(global_handle_manager->arena, &global_handle_manager->ops, new_op);
+    return (MLIR_OpHandle)global_handle_manager->ops.size; // 1-based handles
+}
+
+static inline MLIR_RegionHandle create_region_handle(void) {
+    if (global_handle_manager->free_region_handles.size > 0) {
+        uint32_t handle = global_handle_manager->free_region_handles.data[
+            --global_handle_manager->free_region_handles.size];
+        return handle;
+    }
+    
+    MLIR_Region new_region = {0};
+    RegionPool_push_back(global_handle_manager->arena, &global_handle_manager->regions, new_region);
+    return (MLIR_RegionHandle)global_handle_manager->regions.size;
+}
+// ... similar for other types
 ```
 
 ### Global State Management
 ```c
 // Global handle manager (or context-based)
 static MLIR_HandleManager *global_handle_manager = NULL;
+
+static void init_handle_manager(Arena *arena, MLIR_HandleManager *manager) {
+    manager->arena = arena;
+    
+    // Initialize all vector pools using existing Vector API
+    OpPool_reserve(arena, &manager->ops, 64);           // Initial capacity
+    RegionPool_reserve(arena, &manager->regions, 32);
+    BlockPool_reserve(arena, &manager->blocks, 64);
+    ValuePool_reserve(arena, &manager->values, 256);
+    TypePool_reserve(arena, &manager->types, 64);
+    AttributePool_reserve(arena, &manager->attributes, 128);
+    LocationPool_reserve(arena, &manager->locations, 64);
+    
+    // Initialize free lists
+    HandleFreeList_reserve(arena, &manager->free_op_handles, 16);
+    HandleFreeList_reserve(arena, &manager->free_region_handles, 16);
+    HandleFreeList_reserve(arena, &manager->free_block_handles, 16);
+    HandleFreeList_reserve(arena, &manager->free_value_handles, 16);
+    HandleFreeList_reserve(arena, &manager->free_type_handles, 16);
+    HandleFreeList_reserve(arena, &manager->free_attribute_handles, 16);
+    HandleFreeList_reserve(arena, &manager->free_location_handles, 16);
+}
 
 void MLIR_SetArena(Arena *arena) {
     if (!global_handle_manager) {
@@ -302,14 +362,60 @@ MLIR_OpHandle MLIR_CreateOp(MLIR_Context *ctx, /* ... */);
 - This allows simple validation: `if (handle == 0 || handle > pool_size) return error;`
 
 ### Memory Layout Benefits
-- All objects of same type stored contiguously (better cache locality)
-- Easy to implement object pools and memory reuse
-- Handles remain valid even if underlying arrays are reallocated
+- All objects of same type stored contiguously via Vector (better cache locality)
+- Existing Vector system automatically handles growth and reallocation
+- Handles remain stable even when Vector data arrays are reallocated
+- Reuses battle-tested Vector implementation (no new memory management bugs)
+- Vector's `push_back` and `reserve` provide optimal growth strategies
 
 ### API Migration Path
 1. Keep both pointer and handle APIs temporarily during transition
 2. Add `_Handle` suffix to new functions initially
 3. Gradually migrate callers from pointer to handle versions
 4. Remove pointer APIs in final step
+
+## 11. Vector System Integration Advantages
+
+### Reusing Existing Infrastructure
+The plan leverages the existing `base/vector.h` system which provides:
+
+1. **Proven Implementation**: The Vector system is already tested and used throughout the codebase
+2. **Automatic Growth**: `push_back()` handles reallocation automatically with 2x growth strategy
+3. **Memory Efficiency**: Contiguous storage with minimal overhead
+4. **Debug Support**: Built-in assertions when `WITH_BASE_ASSERT` is enabled
+5. **Arena Integration**: Vectors already work seamlessly with the Arena allocator
+
+### Simplified Implementation
+Using Vectors eliminates the need to:
+- Implement custom dynamic array logic
+- Handle memory reallocation edge cases  
+- Debug memory management issues
+- Optimize growth strategies
+
+### Code Example: Vector-Based Handle Manager
+```c
+// mlir_handle_manager.h
+#include <base/vector.h>
+
+// Define pools using existing Vector macros
+DEFINE_VECTOR_FOR_TYPE(MLIR_Op, OpPool)
+DEFINE_VECTOR_FOR_TYPE(MLIR_Value, ValuePool)
+// ... etc
+
+// Simple handle resolution using Vector direct access
+#define RESOLVE_OP_HANDLE(handle) \
+    ((handle) == 0 || (handle) > global_handle_manager->ops.size ? NULL : \
+     &global_handle_manager->ops.data[(handle) - 1])
+
+// Object creation using Vector push_back
+MLIR_OpHandle create_op_handle(MLIR_Op op) {
+    OpPool_push_back(global_handle_manager->arena, &global_handle_manager->ops, op);
+    return global_handle_manager->ops.size; // 1-based handles
+}
+```
+
+This approach maximizes code reuse while providing all the benefits of handle-based architecture.
+
+---
 
 This plan provides a complete pathway to replace the pointer-based API with a robust handle-based system while maintaining functionality and improving safety and debuggability.
