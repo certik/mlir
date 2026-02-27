@@ -4,6 +4,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include <base/arena.h>
 #include <base/string.h>
@@ -14,29 +15,35 @@ extern "C" {
 #endif
 
 // -----------------------------------------------------------------------------
-// Opaque forward declarations
+// Handle types - opaque integer handles replacing raw pointers
 // -----------------------------------------------------------------------------
 
-typedef struct MLIR_Op MLIR_Op;
-typedef struct MLIR_Region MLIR_Region;
-typedef struct MLIR_Block MLIR_Block;
-typedef struct MLIR_Value MLIR_Value;
-typedef struct MLIR_Type MLIR_Type;
-typedef struct MLIR_Attribute MLIR_Attribute;
-typedef struct MLIR_Location MLIR_Location;
+typedef uintptr_t MLIR_OpHandle;
+typedef uintptr_t MLIR_RegionHandle;
+typedef uintptr_t MLIR_BlockHandle;
+typedef uintptr_t MLIR_ValueHandle;
+typedef uintptr_t MLIR_TypeHandle;
+typedef uintptr_t MLIR_AttributeHandle;
+typedef uintptr_t MLIR_LocationHandle;
+
+#define MLIR_INVALID_HANDLE 0
+
+typedef struct MLIR_Context {
+    Arena *arena;
+} MLIR_Context;
 
 typedef struct MLIR_LocationMap {
     void *impl;
 } MLIR_LocationMap;
 
 size_t MLIR_GetLocationMapSize(const MLIR_LocationMap *location_map);
-size_t MLIR_CollectLocationMap(const MLIR_LocationMap *location_map, string *out_keys, MLIR_Location **out_locs, size_t max);
+size_t MLIR_CollectLocationMap(const MLIR_LocationMap *location_map, string *out_keys, MLIR_LocationHandle *out_locs, size_t max);
 
 // Vector helpers used by the parser implementation
-DEFINE_VECTOR_FOR_TYPE(MLIR_Op*, VecOp)
-DEFINE_VECTOR_FOR_TYPE(MLIR_Value*, VecValue)
-DEFINE_VECTOR_FOR_TYPE(MLIR_Block*, VecBlock)
-DEFINE_VECTOR_FOR_TYPE(MLIR_Attribute*, VecAttribute)
+DEFINE_VECTOR_FOR_TYPE(MLIR_OpHandle, VecOp)
+DEFINE_VECTOR_FOR_TYPE(MLIR_ValueHandle, VecValue)
+DEFINE_VECTOR_FOR_TYPE(MLIR_BlockHandle, VecBlock)
+DEFINE_VECTOR_FOR_TYPE(MLIR_AttributeHandle, VecAttribute)
 
 // -----------------------------------------------------------------------------
 // Operation kinds
@@ -157,67 +164,69 @@ string MLIR_MLIR_OpTypeToString(MLIR_OpType type);
 // API lifecycle
 // -----------------------------------------------------------------------------
 
-void MLIR_InitApi(MLIR_Op *root);
+void MLIR_InitApi(MLIR_Context *ctx, MLIR_OpHandle root);
+void MLIR_SetArenaAllocator(MLIR_Context *ctx, Arena *arena);
+Arena *MLIR_GetArenaAllocator(MLIR_Context *ctx);
 
 // -----------------------------------------------------------------------------
 // Operation API
 // -----------------------------------------------------------------------------
 
 // Creation & structural mutation
-MLIR_Op *MLIR_CreateOp(
-    Arena *arena,
+MLIR_OpHandle MLIR_CreateOp(
+    MLIR_Context *ctx,
     MLIR_OpType type,
     string opname,
-    MLIR_Attribute **attributes, size_t n_attributes,
-    MLIR_Type **result_types, size_t n_result_types,
-    MLIR_Value **results, size_t n_results,
-    MLIR_Value **operands, size_t n_operands,
-    MLIR_Region **regions, size_t n_regions,
-    MLIR_Location *location,
-    MLIR_Location *unnumbered_loc_def,
+    MLIR_AttributeHandle *attributes, size_t n_attributes,
+    MLIR_TypeHandle *result_types, size_t n_result_types,
+    MLIR_ValueHandle *results, size_t n_results,
+    MLIR_ValueHandle *operands, size_t n_operands,
+    MLIR_RegionHandle *regions, size_t n_regions,
+    MLIR_LocationHandle location,
+    MLIR_LocationHandle unnumbered_loc_def,
     string trailing_comment,
     int64_t source_line_start);
-void MLIR_AppendOpAttribute(Arena *arena, MLIR_Op *op, MLIR_Attribute *attr);
+void MLIR_AppendOpAttribute(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttributeHandle attr);
 
 // Accessors
-MLIR_OpType MLIR_GetOpType(const MLIR_Op *op);
-string MLIR_GetOpName(const MLIR_Op *op);
-string MLIR_GetOpName_string(const MLIR_Op *op);
-MLIR_Location *MLIR_GetOpLocation(const MLIR_Op *op);
-string MLIR_GetOpTrailingComment(const MLIR_Op *op);
-int64_t MLIR_GetOpSourceLineStart(const MLIR_Op *op);
-MLIR_Location *MLIR_GetOpUnnumberedLocationDef(const MLIR_Op *op);
-size_t MLIR_GetOpNumOperands(const MLIR_Op *op);
-MLIR_Value *MLIR_GetOpOperand(const MLIR_Op *op, size_t idx);
-size_t MLIR_GetOpNumResults(const MLIR_Op *op);
-MLIR_Value *MLIR_GetOpResult(const MLIR_Op *op, size_t idx);
-size_t MLIR_GetOpNumResultTypes(const MLIR_Op *op);
-MLIR_Type *MLIR_GetOpResult_type(const MLIR_Op *op, size_t idx);
-size_t MLIR_GetOpNumAttributes(const MLIR_Op *op);
-MLIR_Attribute *MLIR_GetOpAttribute(const MLIR_Op *op, size_t idx);
-size_t MLIR_GetOpNumRegions(const MLIR_Op *op);
-MLIR_Region *MLIR_GetOpRegion(const MLIR_Op *op, size_t idx);
+MLIR_OpType MLIR_GetOpType(MLIR_OpHandle op);
+string MLIR_GetOpName(MLIR_OpHandle op);
+string MLIR_GetOpName_string(MLIR_OpHandle op);
+MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle op);
+string MLIR_GetOpTrailingComment(MLIR_OpHandle op);
+int64_t MLIR_GetOpSourceLineStart(MLIR_OpHandle op);
+MLIR_LocationHandle MLIR_GetOpUnnumberedLocationDef(MLIR_OpHandle op);
+size_t MLIR_GetOpNumOperands(MLIR_OpHandle op);
+MLIR_ValueHandle MLIR_GetOpOperand(MLIR_OpHandle op, size_t idx);
+size_t MLIR_GetOpNumResults(MLIR_OpHandle op);
+MLIR_ValueHandle MLIR_GetOpResult(MLIR_OpHandle op, size_t idx);
+size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle op);
+MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle op, size_t idx);
+size_t MLIR_GetOpNumAttributes(MLIR_OpHandle op);
+MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle op, size_t idx);
+size_t MLIR_GetOpNumRegions(MLIR_OpHandle op);
+MLIR_RegionHandle MLIR_GetOpRegion(MLIR_OpHandle op, size_t idx);
 
 // -----------------------------------------------------------------------------
 // Region API
 // -----------------------------------------------------------------------------
 
-MLIR_Region *MLIR_CreateRegion(Arena *arena);
-void MLIR_AppendRegionBlock(Arena *arena, MLIR_Region *region, MLIR_Block *block);
-size_t MLIR_GetRegionNumBlocks(const MLIR_Region *region);
-MLIR_Block *MLIR_GetRegionBlock(const MLIR_Region *region, size_t idx);
+MLIR_RegionHandle MLIR_CreateRegion(MLIR_Context *ctx);
+void MLIR_AppendRegionBlock(MLIR_Context *ctx, MLIR_RegionHandle region, MLIR_BlockHandle block);
+size_t MLIR_GetRegionNumBlocks(MLIR_RegionHandle region);
+MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_RegionHandle region, size_t idx);
 
 // -----------------------------------------------------------------------------
 // Block API
 // -----------------------------------------------------------------------------
 
-MLIR_Block *MLIR_CreateBlock(Arena *arena);
-void MLIR_AppendBlockOp(Arena *arena, MLIR_Block *block, MLIR_Op *op);
-void MLIR_AppendBlockArg(Arena *arena, MLIR_Block *block, MLIR_Value *arg);
-size_t MLIR_GetBlockNumOps(const MLIR_Block *block);
-MLIR_Op *MLIR_GetBlockOp(const MLIR_Block *block, size_t idx);
-size_t MLIR_GetBlockNumArgs(const MLIR_Block *block);
-MLIR_Value *MLIR_GetBlockArg(const MLIR_Block *block, size_t idx);
+MLIR_BlockHandle MLIR_CreateBlock(MLIR_Context *ctx);
+void MLIR_AppendBlockOp(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_OpHandle op);
+void MLIR_AppendBlockArg(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_ValueHandle arg);
+size_t MLIR_GetBlockNumOps(MLIR_BlockHandle block);
+MLIR_OpHandle MLIR_GetBlockOp(MLIR_BlockHandle block, size_t idx);
+size_t MLIR_GetBlockNumArgs(MLIR_BlockHandle block);
+MLIR_ValueHandle MLIR_GetBlockArg(MLIR_BlockHandle block, size_t idx);
 
 // -----------------------------------------------------------------------------
 // Value API
@@ -230,60 +239,60 @@ typedef enum MLIR_ValueKind {
 } MLIR_ValueKind;
 
 // Creation
-MLIR_Value *MLIR_CreateValueBlockArg(Arena *arena, string register_name, uint32_t result_index, MLIR_Type *type, MLIR_Location *location);
-MLIR_Value *MLIR_CreateValueOpResult(Arena *arena, void *def, uint32_t result_index, MLIR_Type *type, string register_name, MLIR_Location *location);
+MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_name, uint32_t result_index, MLIR_TypeHandle type, MLIR_LocationHandle location);
+MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_Context *ctx, MLIR_OpHandle def, uint32_t result_index, MLIR_TypeHandle type, string register_name, MLIR_LocationHandle location);
 
 // Accessors
-MLIR_ValueKind MLIR_GetValueKind(const MLIR_Value *value);
-MLIR_Type *MLIR_GetValueType(const MLIR_Value *value);
-string MLIR_GetValueRegisterName(const MLIR_Value *value);
-uint32_t MLIR_GetValueResultIndex(const MLIR_Value *value);
-MLIR_Op *MLIR_GetValueDefiningOp(const MLIR_Value *value);
-MLIR_Location *MLIR_GetValueLocation(const MLIR_Value *value);
+MLIR_ValueKind MLIR_GetValueKind(MLIR_ValueHandle value);
+MLIR_TypeHandle MLIR_GetValueType(MLIR_ValueHandle value);
+string MLIR_GetValueRegisterName(MLIR_ValueHandle value);
+uint32_t MLIR_GetValueResultIndex(MLIR_ValueHandle value);
+MLIR_OpHandle MLIR_GetValueDefiningOp(MLIR_ValueHandle value);
+MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle value);
 
 // -----------------------------------------------------------------------------
 // Type API
 // -----------------------------------------------------------------------------
 
 // Creation
-MLIR_Type *MLIR_CreateTypeInteger(Arena *arena, uint32_t width, bool is_signed);
-MLIR_Type *MLIR_CreateTypeFloat(Arena *arena, uint32_t width, bool is_bfloat);
-MLIR_Type *MLIR_CreateTypeIndex(Arena *arena);
-MLIR_Type *MLIR_CreateTypeUnknown(Arena *arena);
-MLIR_Type *MLIR_CreateTypeTensor(Arena *arena, const int64_t *shape, size_t rank, MLIR_Type *element_type);
-MLIR_Type *MLIR_CreateTypeMemref(Arena *arena, const int64_t *shape, size_t rank, MLIR_Type *element_type);
-MLIR_Type *MLIR_CreateTypePointer(Arena *arena, MLIR_Type *element_type, bool has_address_space, uint32_t address_space);
-MLIR_Type *MLIR_CreateTypeOpaque(Arena *arena, string name);
+MLIR_TypeHandle MLIR_CreateTypeInteger(MLIR_Context *ctx, uint32_t width, bool is_signed);
+MLIR_TypeHandle MLIR_CreateTypeFloat(MLIR_Context *ctx, uint32_t width, bool is_bfloat);
+MLIR_TypeHandle MLIR_CreateTypeIndex(MLIR_Context *ctx);
+MLIR_TypeHandle MLIR_CreateTypeUnknown(MLIR_Context *ctx);
+MLIR_TypeHandle MLIR_CreateTypeTensor(MLIR_Context *ctx, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type);
+MLIR_TypeHandle MLIR_CreateTypeMemref(MLIR_Context *ctx, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type);
+MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *ctx, MLIR_TypeHandle element_type, bool has_address_space, uint32_t address_space);
+MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *ctx, string name);
 
 // Mutation
-void MLIR_SetTypeIntegerProperties(MLIR_Type *type, uint32_t width, bool is_signed);
-void MLIR_SetTypeFloatProperties(MLIR_Type *type, uint32_t width, bool is_bfloat);
-void MLIR_SetTypeTensorProperties(MLIR_Type *type, const int64_t *shape, size_t rank, MLIR_Type *element_type);
-void MLIR_SetTypeMemrefProperties(MLIR_Type *type, const int64_t *shape, size_t rank, MLIR_Type *element_type);
-void MLIR_SetTypePointerProperties(MLIR_Type *type, MLIR_Type *element_type, bool has_address_space, uint32_t address_space);
+void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle type, uint32_t width, bool is_signed);
+void MLIR_SetTypeFloatProperties(MLIR_TypeHandle type, uint32_t width, bool is_bfloat);
+void MLIR_SetTypeTensorProperties(MLIR_TypeHandle type, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type);
+void MLIR_SetTypeMemrefProperties(MLIR_TypeHandle type, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type);
+void MLIR_SetTypePointerProperties(MLIR_TypeHandle type, MLIR_TypeHandle element_type, bool has_address_space, uint32_t address_space);
 
 // Introspection & formatting
-bool MLIR_IsTypeInteger(const MLIR_Type *type);
-bool MLIR_IsTypeFloat(const MLIR_Type *type);
-bool MLIR_IsTypeTensor(const MLIR_Type *type);
-bool MLIR_IsTypeMemref(const MLIR_Type *type);
-bool MLIR_IsTypePointer(const MLIR_Type *type);
-bool MLIR_IsTypeIndex(const MLIR_Type *type);
-bool MLIR_IsTypeUnknown(const MLIR_Type *type);
-bool MLIR_IsTypeOpaque(const MLIR_Type *type);
-string MLIR_GetTypeString(Arena *arena, MLIR_Type *type);
+bool MLIR_IsTypeInteger(MLIR_TypeHandle type);
+bool MLIR_IsTypeFloat(MLIR_TypeHandle type);
+bool MLIR_IsTypeTensor(MLIR_TypeHandle type);
+bool MLIR_IsTypeMemref(MLIR_TypeHandle type);
+bool MLIR_IsTypePointer(MLIR_TypeHandle type);
+bool MLIR_IsTypeIndex(MLIR_TypeHandle type);
+bool MLIR_IsTypeUnknown(MLIR_TypeHandle type);
+bool MLIR_IsTypeOpaque(MLIR_TypeHandle type);
+string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle type);
 
 // -----------------------------------------------------------------------------
 // Attribute API
 // -----------------------------------------------------------------------------
 
 // Creation & mutation
-MLIR_Attribute *MLIR_CreateAttributeInteger(Arena *arena, string name, int64_t value);
-MLIR_Attribute *MLIR_CreateAttributeFloat(Arena *arena, string name, double value);
-MLIR_Attribute *MLIR_CreateAttributeBool(Arena *arena, string name, bool value);
-MLIR_Attribute *MLIR_CreateAttributeString(Arena *arena, string name, string value);
-MLIR_Attribute *MLIR_CreateAttributeArray(Arena *arena, string name, MLIR_Attribute **elements, size_t count);
-MLIR_Attribute *MLIR_CreateAttributeDict(Arena *arena, string name, MLIR_Attribute **elements, size_t count);
+MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *ctx, string name, int64_t value);
+MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, string name, double value);
+MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *ctx, string name, bool value);
+MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *ctx, string name, string value);
+MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count);
+MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count);
 
 // Introspection
 typedef enum {
@@ -295,16 +304,16 @@ typedef enum {
     MLIR_ATTR_KIND_DICT
 } MLIR_AttrKind;
 
-MLIR_AttrKind MLIR_GetAttributeKind(const MLIR_Attribute *attr);
-string MLIR_GetAttributeName(const MLIR_Attribute *attr);
-int64_t MLIR_GetAttributeInteger(const MLIR_Attribute *attr);
-double MLIR_GetAttributeFloat(const MLIR_Attribute *attr);
-bool MLIR_GetAttributeBool(const MLIR_Attribute *attr);
-string MLIR_GetAttributeString(const MLIR_Attribute *attr);
-size_t MLIR_GetAttributeArraySize(const MLIR_Attribute *attr);
-MLIR_Attribute *MLIR_GetAttributeArrayElement(const MLIR_Attribute *attr, size_t idx);
-size_t MLIR_GetAttributeDictSize(const MLIR_Attribute *attr);
-MLIR_Attribute *MLIR_GetAttributeDictElement(const MLIR_Attribute *attr, size_t idx);
+MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle attr);
+string MLIR_GetAttributeName(MLIR_AttributeHandle attr);
+int64_t MLIR_GetAttributeInteger(MLIR_AttributeHandle attr);
+double MLIR_GetAttributeFloat(MLIR_AttributeHandle attr);
+bool MLIR_GetAttributeBool(MLIR_AttributeHandle attr);
+string MLIR_GetAttributeString(MLIR_AttributeHandle attr);
+size_t MLIR_GetAttributeArraySize(MLIR_AttributeHandle attr);
+MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_AttributeHandle attr, size_t idx);
+size_t MLIR_GetAttributeDictSize(MLIR_AttributeHandle attr);
+MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_AttributeHandle attr, size_t idx);
 
 // -----------------------------------------------------------------------------
 // Location API
@@ -320,19 +329,19 @@ typedef enum {
 } MLIR_LocationKind;
 
 // Creation
-MLIR_Location *MLIR_CreateLocationUnknown(Arena *arena, string original_text);
-MLIR_Location *MLIR_CreateLocationFile(Arena *arena, string filename, int line, int column);
-MLIR_Location *MLIR_CreateLocationName(Arena *arena, string name);
-MLIR_Location *MLIR_CreateLocationRef(Arena *arena, int ref_id);
+MLIR_LocationHandle MLIR_CreateLocationUnknown(MLIR_Context *ctx, string original_text);
+MLIR_LocationHandle MLIR_CreateLocationFile(MLIR_Context *ctx, string filename, int line, int column);
+MLIR_LocationHandle MLIR_CreateLocationName(MLIR_Context *ctx, string name);
+MLIR_LocationHandle MLIR_CreateLocationRef(MLIR_Context *ctx, int ref_id);
 
 // Accessors
-MLIR_LocationKind MLIR_GetLocationKind(const MLIR_Location *loc);
-string MLIR_GetLocationOriginalText(const MLIR_Location *loc);
-string MLIR_GetLocationFileFilename(const MLIR_Location *loc);
-int MLIR_GetLocationFileLine(const MLIR_Location *loc);
-int MLIR_GetLocationFileColumn(const MLIR_Location *loc);
-string MLIR_GetLocationName(const MLIR_Location *loc);
-int MLIR_GetLocationRefId(const MLIR_Location *loc);
+MLIR_LocationKind MLIR_GetLocationKind(MLIR_LocationHandle loc);
+string MLIR_GetLocationOriginalText(MLIR_LocationHandle loc);
+string MLIR_GetLocationFileFilename(MLIR_LocationHandle loc);
+int MLIR_GetLocationFileLine(MLIR_LocationHandle loc);
+int MLIR_GetLocationFileColumn(MLIR_LocationHandle loc);
+string MLIR_GetLocationName(MLIR_LocationHandle loc);
+int MLIR_GetLocationRefId(MLIR_LocationHandle loc);
 
 #ifdef __cplusplus
 }

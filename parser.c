@@ -37,142 +37,112 @@ void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
 }
 
 
-MLIR_Op* construct_test_module_full(Arena *arena) {
+MLIR_OpHandle construct_test_module_full(MLIR_Context *ctx) {
     // Create types
-    MLIR_Type *i32_type = MLIR_CreateTypeInteger(arena, 32, true);
-    //MLIR_Type *i64_type = MLIR_CreateTypeInteger(arena, 64, true);
+    MLIR_TypeHandle i32_type = MLIR_CreateTypeInteger(ctx, 32, true);
 
     // Create module operation
-    // Create module region
-    MLIR_Region *module_region = MLIR_CreateRegion(arena);
-    MLIR_Block *module_block = MLIR_CreateBlock(arena);
-    // Add block to region
-    MLIR_AppendRegionBlock(arena, module_region, module_block);
+    MLIR_RegionHandle module_region = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle module_block = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, module_region, module_block);
+
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
 
     // Set regions
-    MLIR_Region **module_regions = arena_alloc_array(arena, MLIR_Region*, 1);
+    MLIR_RegionHandle *module_regions = arena_alloc_array(arena, MLIR_RegionHandle, 1);
     module_regions[0] = module_region;
 
-    MLIR_Op *module = MLIR_CreateOp(arena, OP_TYPE_MODULE, str_lit("module"), NULL, 0, NULL, 0, NULL, 0, NULL, 0, module_regions, 1, NULL, NULL, str_lit(""), -1);
+    MLIR_OpHandle module = MLIR_CreateOp(ctx, OP_TYPE_MODULE, str_lit("module"), NULL, 0, NULL, 0, NULL, 0, NULL, 0, module_regions, 1, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
 
     // Function attributes (sym_name)
-    MLIR_Attribute *sym_name_attr = MLIR_CreateAttributeString(arena, str_lit("sym_name"), str_lit("example_func"));
-    MLIR_Attribute **func_attrs = arena_alloc_array(arena, MLIR_Attribute*, 1);
+    MLIR_AttributeHandle sym_name_attr = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("example_func"));
+    MLIR_AttributeHandle *func_attrs = arena_alloc_array(arena, MLIR_AttributeHandle, 1);
     func_attrs[0] = sym_name_attr;
 
     // Create function region and block
-    MLIR_Region *func_region = MLIR_CreateRegion(arena);
-    MLIR_Block *func_block = MLIR_CreateBlock(arena);
+    MLIR_RegionHandle func_region = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle func_block = MLIR_CreateBlock(ctx);
 
     // Function block arguments (%arg0, %arg1)
-    MLIR_Value *arg0 = MLIR_CreateValueBlockArg(arena, str_lit("%arg0"), 0, i32_type, NULL);
-    MLIR_AppendBlockArg(arena, func_block, arg0);
+    MLIR_ValueHandle arg0 = MLIR_CreateValueBlockArg(ctx, str_lit("%arg0"), 0, i32_type, MLIR_INVALID_HANDLE);
+    MLIR_AppendBlockArg(ctx, func_block, arg0);
 
-    MLIR_Value *arg1 = MLIR_CreateValueBlockArg(arena, str_lit("%arg1"), 1, i32_type, NULL);
-    MLIR_AppendBlockArg(arena, func_block, arg1);
+    MLIR_ValueHandle arg1 = MLIR_CreateValueBlockArg(ctx, str_lit("%arg1"), 1, i32_type, MLIR_INVALID_HANDLE);
+    MLIR_AppendBlockArg(ctx, func_block, arg1);
 
-    // Create operations in function block
     // %0 = arith.constant 5 : i32
+    MLIR_ValueHandle const_result = MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0, i32_type, str_lit("%0"), MLIR_INVALID_HANDLE);
 
-    // Create const_result first (def will be set after operation creation)
-    MLIR_Value *const_result = MLIR_CreateValueOpResult(arena, NULL, 0, i32_type, str_lit("%0"), NULL);
-
-    // Set result types
-    MLIR_Type **const_result_types = arena_alloc_array(arena, MLIR_Type*, 1);
+    MLIR_TypeHandle *const_result_types = arena_alloc_array(arena, MLIR_TypeHandle, 1);
     const_result_types[0] = i32_type;
 
-    // Set attributes
-    MLIR_Attribute *value_attr = MLIR_CreateAttributeInteger(arena, str_lit("value"), 5);
-    MLIR_Attribute **const_attrs = arena_alloc_array(arena, MLIR_Attribute*, 1);
+    MLIR_AttributeHandle value_attr = MLIR_CreateAttributeInteger(ctx, str_lit("value"), 5);
+    MLIR_AttributeHandle *const_attrs = arena_alloc_array(arena, MLIR_AttributeHandle, 1);
     const_attrs[0] = value_attr;
 
-    // Set results
-    MLIR_Value **const_results = arena_alloc_array(arena, MLIR_Value*, 1);
+    MLIR_ValueHandle *const_results = arena_alloc_array(arena, MLIR_ValueHandle, 1);
     const_results[0] = const_result;
 
-    MLIR_Op *const_op = MLIR_CreateOp(arena, OP_TYPE_ARITH_CONSTANT, str_lit("arith.constant"), const_attrs, 1, const_result_types, 1, const_results, 1, NULL, 0, NULL, 0, NULL, NULL, str_lit(""), -1);
+    MLIR_OpHandle const_op = MLIR_CreateOp(ctx, OP_TYPE_ARITH_CONSTANT, str_lit("arith.constant"), const_attrs, 1, const_result_types, 1, const_results, 1, NULL, 0, NULL, 0, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
 
     // %1 = arith.addi %arg0, %arg1 : i32
+    MLIR_ValueHandle add_result = MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 1, i32_type, str_lit("%1"), MLIR_INVALID_HANDLE);
 
-    // Create add_result first (def will be set after operation creation)
-    MLIR_Value *add_result = MLIR_CreateValueOpResult(arena, NULL, 1, i32_type, str_lit("%1"), NULL);
-
-    // Set operands
-    MLIR_Value **add_operands = arena_alloc_array(arena, MLIR_Value*, 2);
+    MLIR_ValueHandle *add_operands = arena_alloc_array(arena, MLIR_ValueHandle, 2);
     add_operands[0] = MLIR_GetBlockArg(func_block, 0);
     add_operands[1] = MLIR_GetBlockArg(func_block, 1);
 
-    // Set result types
-    MLIR_Type **add_result_types = arena_alloc_array(arena, MLIR_Type*, 1);
+    MLIR_TypeHandle *add_result_types = arena_alloc_array(arena, MLIR_TypeHandle, 1);
     add_result_types[0] = i32_type;
 
-    // Set results
-    MLIR_Value **add_results = arena_alloc_array(arena, MLIR_Value*, 1);
+    MLIR_ValueHandle *add_results = arena_alloc_array(arena, MLIR_ValueHandle, 1);
     add_results[0] = add_result;
 
-    MLIR_Op *add_op = MLIR_CreateOp(arena, OP_TYPE_ARITH_ADDI, str_lit(""), NULL, 0, add_result_types, 1, add_results, 1, add_operands, 2, NULL, 0, NULL, NULL, str_lit(""), -1);
+    MLIR_OpHandle add_op = MLIR_CreateOp(ctx, OP_TYPE_ARITH_ADDI, str_lit(""), NULL, 0, add_result_types, 1, add_results, 1, add_operands, 2, NULL, 0, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
 
-    // %2 = arith.muli %1, %0 : i32 (add_result and const_result already created above)
+    // %2 = arith.muli %1, %0 : i32
+    MLIR_ValueHandle mul_result = MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 2, i32_type, str_lit("%2"), MLIR_INVALID_HANDLE);
 
-    // Create mul_result first (def will be set after operation creation)
-    MLIR_Value *mul_result = MLIR_CreateValueOpResult(arena, NULL, 2, i32_type, str_lit("%2"), NULL);
-
-    // Set operands
-    MLIR_Value **mul_operands = arena_alloc_array(arena, MLIR_Value*, 2);
+    MLIR_ValueHandle *mul_operands = arena_alloc_array(arena, MLIR_ValueHandle, 2);
     mul_operands[0] = add_result;
     mul_operands[1] = const_result;
 
-    // Set result types
-    MLIR_Type **mul_result_types = arena_alloc_array(arena, MLIR_Type*, 1);
+    MLIR_TypeHandle *mul_result_types = arena_alloc_array(arena, MLIR_TypeHandle, 1);
     mul_result_types[0] = i32_type;
 
-    // Set results
-    MLIR_Value **mul_results = arena_alloc_array(arena, MLIR_Value*, 1);
+    MLIR_ValueHandle *mul_results = arena_alloc_array(arena, MLIR_ValueHandle, 1);
     mul_results[0] = mul_result;
 
-    MLIR_Op *mul_op = MLIR_CreateOp(arena, OP_TYPE_ARITH_MULI, str_lit(""), NULL, 0, mul_result_types, 1, mul_results, 1, mul_operands, 2, NULL, 0, NULL, NULL, str_lit(""), -1);
+    MLIR_OpHandle mul_op = MLIR_CreateOp(ctx, OP_TYPE_ARITH_MULI, str_lit(""), NULL, 0, mul_result_types, 1, mul_results, 1, mul_operands, 2, NULL, 0, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
 
     // func.return %2 : i32
-    MLIR_Value **ret_operands = arena_alloc_array(arena, MLIR_Value*, 1);
+    MLIR_ValueHandle *ret_operands = arena_alloc_array(arena, MLIR_ValueHandle, 1);
     ret_operands[0] = mul_result;
-    MLIR_Op *ret_op = MLIR_CreateOp(arena, OP_TYPE_FUNC_RETURN, str_lit(""), NULL, 0, NULL, 0, NULL, 0, ret_operands, 1, NULL, 0, NULL, NULL, str_lit(""), -1);
+    MLIR_OpHandle ret_op = MLIR_CreateOp(ctx, OP_TYPE_FUNC_RETURN, str_lit(""), NULL, 0, NULL, 0, NULL, 0, ret_operands, 1, NULL, 0, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
 
-    // Link operations to function block
-    MLIR_AppendBlockOp(arena, func_block, const_op);
-    MLIR_AppendBlockOp(arena, func_block, add_op);
-    MLIR_AppendBlockOp(arena, func_block, mul_op);
-    MLIR_AppendBlockOp(arena, func_block, ret_op);
+    MLIR_AppendBlockOp(ctx, func_block, const_op);
+    MLIR_AppendBlockOp(ctx, func_block, add_op);
+    MLIR_AppendBlockOp(ctx, func_block, mul_op);
+    MLIR_AppendBlockOp(ctx, func_block, ret_op);
 
-    // Link function block to function region
-    MLIR_AppendRegionBlock(arena, func_region, func_block);
+    MLIR_AppendRegionBlock(ctx, func_region, func_block);
 
-    // Set regions for function operation
-    MLIR_Region **func_regions = arena_alloc_array(arena, MLIR_Region*, 1);
+    MLIR_RegionHandle *func_regions = arena_alloc_array(arena, MLIR_RegionHandle, 1);
     func_regions[0] = func_region;
 
-    // Create function operation
-    MLIR_Op *func_op = MLIR_CreateOp(arena, OP_TYPE_FUNC_FUNC, str_lit("func.func"), func_attrs, 1, NULL, 0, NULL, 0, NULL, 0, func_regions, 1, NULL, NULL, str_lit(""), -1);
+    MLIR_OpHandle func_op = MLIR_CreateOp(ctx, OP_TYPE_FUNC_FUNC, str_lit("func.func"), func_attrs, 1, NULL, 0, NULL, 0, NULL, 0, func_regions, 1, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
 
-    // Link function operation to module block
-    MLIR_AppendBlockOp(arena, module_block, func_op);
-
-    // Link module block to module region
-    // module_region already has block
-
-    // Link module region to module operation
-    // module already has region
+    MLIR_AppendBlockOp(ctx, module_block, func_op);
 
     return module;
 }
 
 int main(int argc, char *argv[]) {
-    // Check for options first
     bool use_construction = false;
     bool use_classic_printer = false;
     bool verbose = false;
     char *input_file = NULL;
 
-    // Parse arguments first to determine verbose mode
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) {
             verbose = true;
@@ -181,8 +151,11 @@ int main(int argc, char *argv[]) {
     }
 
     if (verbose) printf("Starting main...\n");
-    Arena *arena = arena_create(50*1024*1024);  // Increase arena size
+    Arena *arena = arena_create(50*1024*1024);
     if (verbose) printf("Arena created...\n");
+    MLIR_Context ctx = {0};
+    MLIR_SetArenaAllocator(&ctx, arena);
+    if (verbose) printf("Arena allocator set on context...\n");
 
     if (verbose) printf("Parsing args...\n");
     for (int i = 1; i < argc; i++) {
@@ -202,28 +175,25 @@ int main(int argc, char *argv[]) {
     }
     if (verbose) printf("Done parsing args. use_construction=%d, use_classic_printer=%d\n", use_construction, use_classic_printer);
 
-    MLIR_Op* op;
+    MLIR_OpHandle op;
 
     int exit_code;
     if (use_construction) {
-        // Use constructed test module
         if (verbose) printf("Creating module...\n");
-        op = construct_test_module_full(arena);
+        op = construct_test_module_full(&ctx);
         if (verbose) printf("Module created successfully.\n");
 
-        // Test generic printing with expected output comparison
         if (verbose) printf("=== Generic Printer Test ===\n");
         if (verbose) printf("About to print operation...\n");
         string result;
         if (use_classic_printer) {
-            result = print_operation_classic(arena, 0, op);
+            result = print_operation_classic(&ctx, 0, op);
         } else {
-            result = print_operation_generic(arena, 0, op);
+            result = print_operation_generic(&ctx, 0, op);
         }
         if (verbose) printf("Printing result...\n");
         println(arena, str_lit("{}"), result);
 
-        // Reference expected output for generic mode
         const char *expected =
             "module() {\n"
             "^bb0:\n"
@@ -236,7 +206,6 @@ int main(int argc, char *argv[]) {
             "    }\n"
             "}\n";
 
-        // Compare output
         if (str_eq(result, str_from_cstr_view((char*)expected))) {
             if (verbose) printf("✅ Generic mode test PASSED\n");
             exit_code = 0;
@@ -248,7 +217,6 @@ int main(int argc, char *argv[]) {
             exit_code = 1;
         }
     } else {
-        // Use parser mode
         string mlir_code = str_lit("module {\n"
                                 "  %0 = \"std.constant\"() {value = 42} : () -> i32\n"
                                 "  \"std.return\"(%0) : (i32) -> ()\n"
@@ -261,12 +229,12 @@ int main(int argc, char *argv[]) {
         tokenizer_print_all_tokens(arena, mlir_code);
 
         MLIR_LocationMap *locmap = NULL;
-        op = mlir_parse_module(arena, (const char*)mlir_code.str, mlir_code.size, &locmap);
+        op = mlir_parse_module(&ctx, (const char*)mlir_code.str, mlir_code.size, &locmap);
         if (verbose) println(arena, str_lit("MLIR:"));
         if (use_classic_printer) {
-            println(arena, str_lit("{}"), print_module_classic(arena, op, locmap));
+            println(arena, str_lit("{}"), print_module_classic(&ctx, op, locmap));
         } else {
-            println(arena, str_lit("{}"), print_operation_generic(arena, 0, op));
+            println(arena, str_lit("{}"), print_operation_generic(&ctx, 0, op));
         }
         exit_code = 0;
     }
