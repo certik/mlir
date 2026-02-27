@@ -26,7 +26,7 @@ typedef uintptr_t MLIR_TypeHandle;
 typedef uintptr_t MLIR_AttributeHandle;
 typedef uintptr_t MLIR_LocationHandle;
 
-#define MLIR_INVALID_HANDLE ((uintptr_t)0)
+#define MLIR_INVALID_HANDLE 0
 
 typedef struct MLIR_Context {
     Arena *arena;
