@@ -11,15 +11,19 @@ static inline bool handle_equal(MLIR_ValueHandle a, MLIR_ValueHandle b) { return
 DEFINE_HASHTABLE_FOR_TYPES(MLIR_ValueHandle, uint32_t, SsaMap)
 
 typedef struct {
+    MLIR_Context *mlir_ctx;
     Arena *arena;
     uint32_t next_ssa;
     SsaMap ssa_map;
 } PrintCtx;
 
-static inline void ssa_map_init(PrintCtx *ctx, Arena *arena) {
-    ctx->arena = arena;
+static inline void ssa_map_init(PrintCtx *ctx, MLIR_Context *mlir_ctx) {
+    ctx->mlir_ctx = mlir_ctx;
+    ctx->arena = mlir_ctx ? MLIR_GetArenaAllocator(mlir_ctx) : NULL;
     ctx->next_ssa = 0;
-    SsaMap_init(arena, &ctx->ssa_map, 128);
+    if (ctx->arena) {
+        SsaMap_init(ctx->arena, &ctx->ssa_map, 128);
+    }
 }
 
 static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, MLIR_ValueHandle v) {
@@ -84,8 +88,8 @@ static string print_block_internal(PrintCtx *ctx, int bb_index, int indent_level
             MLIR_TypeHandle arg_ty = arg ? MLIR_GetValueType(arg) : MLIR_INVALID_HANDLE;
             if (arg && arg_ty) {
                 string rname = MLIR_GetValueRegisterName(arg);
-                if (rname.size > 0) result = str_concat(arena, result, format(arena, str_lit("{}: {}"), rname, MLIR_GetTypeString(arena, arg_ty)));
-                else result = str_concat(arena, result, format(arena, str_lit("%arg{}: {}"), (int64_t)MLIR_GetValueResultIndex(arg), MLIR_GetTypeString(arena, arg_ty)));
+                if (rname.size > 0) result = str_concat(arena, result, format(arena, str_lit("{}: {}"), rname, MLIR_GetTypeString(ctx->mlir_ctx, arg_ty)));
+                else result = str_concat(arena, result, format(arena, str_lit("%arg{}: {}"), (int64_t)MLIR_GetValueResultIndex(arg), MLIR_GetTypeString(ctx->mlir_ctx, arg_ty)));
             } else {
                 result = str_concat(arena, result, str_lit("null_arg"));
             }
@@ -162,7 +166,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
         else { uint32_t num = get_or_assign_ssa(ctx, operand); result = str_concat(arena, result, format(arena, str_lit("%{}"), (int64_t)num)); }
         result = str_concat(arena, result, str_lit(": "));
         MLIR_TypeHandle ot = MLIR_GetValueType(operand);
-        result = str_concat(arena, result, MLIR_GetTypeString(arena, ot));
+        result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, ot));
     }
     result = str_concat(arena, result, str_lit(")"));
     {
@@ -248,7 +252,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
         for (size_t i = 0; i < api_num_result_types; i++) {
             if (i > 0) result = str_concat(arena, result, str_lit(", "));
             MLIR_TypeHandle rt = MLIR_GetOpResult_type(op, i);
-            if (rt) result = str_concat(arena, result, MLIR_GetTypeString(arena, rt)); else result = str_concat(arena, result, str_lit("?"));
+            if (rt) result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, rt)); else result = str_concat(arena, result, str_lit("?"));
         }
     }
     size_t n_regions = MLIR_GetOpNumRegions(op);
@@ -263,20 +267,23 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
     return result;
 }
 
-string print_operation_generic(Arena *arena, int indent_level, MLIR_OpHandle op) {
-    PrintCtx ctx; ssa_map_init(&ctx, arena);
-    preassign_op_ssa(&ctx, op, indent_level);
-    return print_operation_internal(&ctx, indent_level, op);
+string print_operation_generic(MLIR_Context *ctx, int indent_level, MLIR_OpHandle op) {
+    PrintCtx pctx;
+    ssa_map_init(&pctx, ctx);
+    preassign_op_ssa(&pctx, op, indent_level);
+    return print_operation_internal(&pctx, indent_level, op);
 }
 
-string print_region_generic(Arena *arena, int indent_level, MLIR_RegionHandle region) {
-    PrintCtx ctx; ssa_map_init(&ctx, arena);
-    preassign_region_ssa(&ctx, region, indent_level);
-    return print_region_internal(&ctx, indent_level, region);
+string print_region_generic(MLIR_Context *ctx, int indent_level, MLIR_RegionHandle region) {
+    PrintCtx pctx;
+    ssa_map_init(&pctx, ctx);
+    preassign_region_ssa(&pctx, region, indent_level);
+    return print_region_internal(&pctx, indent_level, region);
 }
 
-string print_block_generic(Arena *arena, int bb_index, int indent_level, MLIR_BlockHandle block) {
-    PrintCtx ctx; ssa_map_init(&ctx, arena);
-    preassign_block_ssa(&ctx, block, indent_level);
-    return print_block_internal(&ctx, bb_index, indent_level, block);
+string print_block_generic(MLIR_Context *ctx, int bb_index, int indent_level, MLIR_BlockHandle block) {
+    PrintCtx pctx;
+    ssa_map_init(&pctx, ctx);
+    preassign_block_ssa(&pctx, block, indent_level);
+    return print_block_internal(&pctx, bb_index, indent_level, block);
 }

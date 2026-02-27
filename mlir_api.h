@@ -18,15 +18,19 @@ extern "C" {
 // Handle types - opaque integer handles replacing raw pointers
 // -----------------------------------------------------------------------------
 
-typedef uint32_t MLIR_OpHandle;
-typedef uint32_t MLIR_RegionHandle;
-typedef uint32_t MLIR_BlockHandle;
-typedef uint32_t MLIR_ValueHandle;
-typedef uint32_t MLIR_TypeHandle;
-typedef uint32_t MLIR_AttributeHandle;
-typedef uint32_t MLIR_LocationHandle;
+typedef uintptr_t MLIR_OpHandle;
+typedef uintptr_t MLIR_RegionHandle;
+typedef uintptr_t MLIR_BlockHandle;
+typedef uintptr_t MLIR_ValueHandle;
+typedef uintptr_t MLIR_TypeHandle;
+typedef uintptr_t MLIR_AttributeHandle;
+typedef uintptr_t MLIR_LocationHandle;
 
-#define MLIR_INVALID_HANDLE 0u
+#define MLIR_INVALID_HANDLE ((uintptr_t)0)
+
+typedef struct MLIR_Context {
+    Arena *arena;
+} MLIR_Context;
 
 typedef struct MLIR_LocationMap {
     void *impl;
@@ -160,8 +164,9 @@ string MLIR_MLIR_OpTypeToString(MLIR_OpType type);
 // API lifecycle
 // -----------------------------------------------------------------------------
 
-void MLIR_InitApi(MLIR_OpHandle root);
-void MLIR_SetArena(Arena *arena);
+void MLIR_InitApi(MLIR_Context *ctx, MLIR_OpHandle root);
+void MLIR_SetArenaAllocator(MLIR_Context *ctx, Arena *arena);
+Arena *MLIR_GetArenaAllocator(MLIR_Context *ctx);
 
 // -----------------------------------------------------------------------------
 // Operation API
@@ -169,6 +174,7 @@ void MLIR_SetArena(Arena *arena);
 
 // Creation & structural mutation
 MLIR_OpHandle MLIR_CreateOp(
+    MLIR_Context *ctx,
     MLIR_OpType type,
     string opname,
     MLIR_AttributeHandle *attributes, size_t n_attributes,
@@ -180,7 +186,7 @@ MLIR_OpHandle MLIR_CreateOp(
     MLIR_LocationHandle unnumbered_loc_def,
     string trailing_comment,
     int64_t source_line_start);
-void MLIR_AppendOpAttribute(MLIR_OpHandle op, MLIR_AttributeHandle attr);
+void MLIR_AppendOpAttribute(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttributeHandle attr);
 
 // Accessors
 MLIR_OpType MLIR_GetOpType(MLIR_OpHandle op);
@@ -205,8 +211,8 @@ MLIR_RegionHandle MLIR_GetOpRegion(MLIR_OpHandle op, size_t idx);
 // Region API
 // -----------------------------------------------------------------------------
 
-MLIR_RegionHandle MLIR_CreateRegion(void);
-void MLIR_AppendRegionBlock(MLIR_RegionHandle region, MLIR_BlockHandle block);
+MLIR_RegionHandle MLIR_CreateRegion(MLIR_Context *ctx);
+void MLIR_AppendRegionBlock(MLIR_Context *ctx, MLIR_RegionHandle region, MLIR_BlockHandle block);
 size_t MLIR_GetRegionNumBlocks(MLIR_RegionHandle region);
 MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_RegionHandle region, size_t idx);
 
@@ -214,9 +220,9 @@ MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_RegionHandle region, size_t idx);
 // Block API
 // -----------------------------------------------------------------------------
 
-MLIR_BlockHandle MLIR_CreateBlock(void);
-void MLIR_AppendBlockOp(MLIR_BlockHandle block, MLIR_OpHandle op);
-void MLIR_AppendBlockArg(MLIR_BlockHandle block, MLIR_ValueHandle arg);
+MLIR_BlockHandle MLIR_CreateBlock(MLIR_Context *ctx);
+void MLIR_AppendBlockOp(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_OpHandle op);
+void MLIR_AppendBlockArg(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_ValueHandle arg);
 size_t MLIR_GetBlockNumOps(MLIR_BlockHandle block);
 MLIR_OpHandle MLIR_GetBlockOp(MLIR_BlockHandle block, size_t idx);
 size_t MLIR_GetBlockNumArgs(MLIR_BlockHandle block);
@@ -233,8 +239,8 @@ typedef enum MLIR_ValueKind {
 } MLIR_ValueKind;
 
 // Creation
-MLIR_ValueHandle MLIR_CreateValueBlockArg(string register_name, uint32_t result_index, MLIR_TypeHandle type, MLIR_LocationHandle location);
-MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_OpHandle def, uint32_t result_index, MLIR_TypeHandle type, string register_name, MLIR_LocationHandle location);
+MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_name, uint32_t result_index, MLIR_TypeHandle type, MLIR_LocationHandle location);
+MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_Context *ctx, MLIR_OpHandle def, uint32_t result_index, MLIR_TypeHandle type, string register_name, MLIR_LocationHandle location);
 
 // Accessors
 MLIR_ValueKind MLIR_GetValueKind(MLIR_ValueHandle value);
@@ -249,14 +255,14 @@ MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle value);
 // -----------------------------------------------------------------------------
 
 // Creation
-MLIR_TypeHandle MLIR_CreateTypeInteger(uint32_t width, bool is_signed);
-MLIR_TypeHandle MLIR_CreateTypeFloat(uint32_t width, bool is_bfloat);
-MLIR_TypeHandle MLIR_CreateTypeIndex(void);
-MLIR_TypeHandle MLIR_CreateTypeUnknown(void);
-MLIR_TypeHandle MLIR_CreateTypeTensor(const int64_t *shape, size_t rank, MLIR_TypeHandle element_type);
-MLIR_TypeHandle MLIR_CreateTypeMemref(const int64_t *shape, size_t rank, MLIR_TypeHandle element_type);
-MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_TypeHandle element_type, bool has_address_space, uint32_t address_space);
-MLIR_TypeHandle MLIR_CreateTypeOpaque(string name);
+MLIR_TypeHandle MLIR_CreateTypeInteger(MLIR_Context *ctx, uint32_t width, bool is_signed);
+MLIR_TypeHandle MLIR_CreateTypeFloat(MLIR_Context *ctx, uint32_t width, bool is_bfloat);
+MLIR_TypeHandle MLIR_CreateTypeIndex(MLIR_Context *ctx);
+MLIR_TypeHandle MLIR_CreateTypeUnknown(MLIR_Context *ctx);
+MLIR_TypeHandle MLIR_CreateTypeTensor(MLIR_Context *ctx, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type);
+MLIR_TypeHandle MLIR_CreateTypeMemref(MLIR_Context *ctx, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type);
+MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *ctx, MLIR_TypeHandle element_type, bool has_address_space, uint32_t address_space);
+MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *ctx, string name);
 
 // Mutation
 void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle type, uint32_t width, bool is_signed);
@@ -274,19 +280,19 @@ bool MLIR_IsTypePointer(MLIR_TypeHandle type);
 bool MLIR_IsTypeIndex(MLIR_TypeHandle type);
 bool MLIR_IsTypeUnknown(MLIR_TypeHandle type);
 bool MLIR_IsTypeOpaque(MLIR_TypeHandle type);
-string MLIR_GetTypeString(Arena *arena, MLIR_TypeHandle type);
+string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle type);
 
 // -----------------------------------------------------------------------------
 // Attribute API
 // -----------------------------------------------------------------------------
 
 // Creation & mutation
-MLIR_AttributeHandle MLIR_CreateAttributeInteger(string name, int64_t value);
-MLIR_AttributeHandle MLIR_CreateAttributeFloat(string name, double value);
-MLIR_AttributeHandle MLIR_CreateAttributeBool(string name, bool value);
-MLIR_AttributeHandle MLIR_CreateAttributeString(string name, string value);
-MLIR_AttributeHandle MLIR_CreateAttributeArray(string name, MLIR_AttributeHandle *elements, size_t count);
-MLIR_AttributeHandle MLIR_CreateAttributeDict(string name, MLIR_AttributeHandle *elements, size_t count);
+MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *ctx, string name, int64_t value);
+MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, string name, double value);
+MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *ctx, string name, bool value);
+MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *ctx, string name, string value);
+MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count);
+MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count);
 
 // Introspection
 typedef enum {
@@ -323,10 +329,10 @@ typedef enum {
 } MLIR_LocationKind;
 
 // Creation
-MLIR_LocationHandle MLIR_CreateLocationUnknown(string original_text);
-MLIR_LocationHandle MLIR_CreateLocationFile(string filename, int line, int column);
-MLIR_LocationHandle MLIR_CreateLocationName(string name);
-MLIR_LocationHandle MLIR_CreateLocationRef(int ref_id);
+MLIR_LocationHandle MLIR_CreateLocationUnknown(MLIR_Context *ctx, string original_text);
+MLIR_LocationHandle MLIR_CreateLocationFile(MLIR_Context *ctx, string filename, int line, int column);
+MLIR_LocationHandle MLIR_CreateLocationName(MLIR_Context *ctx, string name);
+MLIR_LocationHandle MLIR_CreateLocationRef(MLIR_Context *ctx, int ref_id);
 
 // Accessors
 MLIR_LocationKind MLIR_GetLocationKind(MLIR_LocationHandle loc);

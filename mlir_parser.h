@@ -15,6 +15,7 @@ extern "C" {
 
 
 typedef struct OperationParserParams {
+    MLIR_Context *ctx;
     Arena  *arena;
     MLIR_OpType  op_type;
     string  opname; /* only non-empty for unregistered ops */
@@ -66,6 +67,7 @@ DEFINE_HASHTABLE_FOR_TYPES(string, MLIR_LocationHandle, LocationMap)
 
 
 typedef struct {
+    MLIR_Context *ctx;
     Arena *arena;
     unsigned char *input;
     TokenType sym;
@@ -93,7 +95,7 @@ MLIR_ValueHandle symbol_table_lookup(ScopedSymbolTable *st, string name);
 void parse_gpu_launch(Parser *parser, MLIR_OpHandle op);
 
 string tokentype_to_string(TokenType tt);
-void parser_init(Arena *arena, Parser *parser, string text);
+void parser_init(MLIR_Context *ctx, Parser *parser, string text);
 void parser_next_token(Parser *parser);
 bool parser_peek(Parser *parser, TokenType s);
 void parser_expect(Parser *parser, TokenType s);
@@ -146,16 +148,16 @@ string op_type_to_string(MLIR_OpType type);
 MLIR_OpType op_string_to_type(string name);
 
 // TODO: use Type by value
-MLIR_TypeHandle parse_type_from_string(Arena *arena, string type_str);
-string type_to_string(Arena *arena, MLIR_TypeHandle type);
+MLIR_TypeHandle parse_type_from_string(MLIR_Context *ctx, string type_str);
+string type_to_string(MLIR_Context *ctx, MLIR_TypeHandle type);
 
 // Public parser facade
-MLIR_OpHandle mlir_parse_module(Arena *arena, const char *input, size_t input_len, MLIR_LocationMap **out_location_map);
+MLIR_OpHandle mlir_parse_module(MLIR_Context *ctx, const char *input, size_t input_len, MLIR_LocationMap **out_location_map);
 const char *mlir_tokentype_to_string(int token_type);
 size_t MLIR_GetLocationMapSize(const MLIR_LocationMap *location_map);
 size_t MLIR_CollectLocationMap(const MLIR_LocationMap *location_map, string *out_keys, MLIR_LocationHandle *out_locs, size_t max);
 
-MLIR_TypeHandle mlir_type_create_from_string(Arena *arena, string type_str);
+MLIR_TypeHandle mlir_type_create_from_string(MLIR_Context *ctx, string type_str);
 
 #ifdef __cplusplus
 }

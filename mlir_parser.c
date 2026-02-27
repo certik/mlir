@@ -100,7 +100,7 @@ static uint32_t parse_uint32_from_string(string s) {
     return value;
 }
 
-static MLIR_TypeHandle parse_tensor_like_type(Arena *arena, string content, bool is_tensor) {
+static MLIR_TypeHandle parse_tensor_like_type(MLIR_Context *ctx, string content, bool is_tensor) {
     int last_x_pos = -1;
     int bracket_depth = 0;
     for (int i = (int)content.size - 1; i >= 0; i--) {
@@ -115,7 +115,7 @@ static MLIR_TypeHandle parse_tensor_like_type(Arena *arena, string content, bool
 
     if (last_x_pos >= 0) {
         string elem_part = string_trim_whitespace(str_substr(content, (size_t)last_x_pos + 1, content.size - (size_t)last_x_pos - 1));
-        MLIR_TypeHandle element_type = mlir_type_create_from_string(arena, elem_part);
+        MLIR_TypeHandle element_type = mlir_type_create_from_string(ctx, elem_part);
 
         string shape_str = str_substr(content, 0, (size_t)last_x_pos);
         uint32_t rank = 1;
@@ -147,35 +147,35 @@ static MLIR_TypeHandle parse_tensor_like_type(Arena *arena, string content, bool
             }
 
             if (is_tensor) {
-                return MLIR_CreateTypeTensor(dims, rank, element_type);
+                return MLIR_CreateTypeTensor(ctx, dims, rank, element_type);
             }
-            return MLIR_CreateTypeMemref(dims, rank, element_type);
+            return MLIR_CreateTypeMemref(ctx, dims, rank, element_type);
         }
     }
 
-    MLIR_TypeHandle elem_fallback = mlir_type_create_from_string(arena, string_trim_whitespace(content));
+    MLIR_TypeHandle elem_fallback = mlir_type_create_from_string(ctx, string_trim_whitespace(content));
     if (is_tensor) {
-        return MLIR_CreateTypeTensor(MLIR_INVALID_HANDLE, 0, elem_fallback);
+        return MLIR_CreateTypeTensor(ctx, MLIR_INVALID_HANDLE, 0, elem_fallback);
     }
-    return MLIR_CreateTypeMemref(MLIR_INVALID_HANDLE, 0, elem_fallback);
+    return MLIR_CreateTypeMemref(ctx, MLIR_INVALID_HANDLE, 0, elem_fallback);
 }
 
-MLIR_TypeHandle mlir_type_create_from_string(Arena *arena, string type_str) {
+MLIR_TypeHandle mlir_type_create_from_string(MLIR_Context *ctx, string type_str) {
     string type = string_trim_whitespace(type_str);
     if (type.size == 0) {
-        return MLIR_CreateTypeInteger(32, true);
+        return MLIR_CreateTypeInteger(ctx, 32, true);
     }
 
     if (str_eq(type, str_lit("?"))) {
-        return MLIR_CreateTypeUnknown();
+        return MLIR_CreateTypeUnknown(ctx);
     }
 
     if (str_eq(type, str_lit("unknown")) || str_eq(type, str_lit("!unknown"))) {
-        return MLIR_CreateTypeOpaque(type);
+        return MLIR_CreateTypeOpaque(ctx, type);
     }
 
     if (str_eq(type, str_lit("index"))) {
-        return MLIR_CreateTypeIndex();
+        return MLIR_CreateTypeIndex(ctx);
     }
 
     if (type.size >= 2 && type.str[0] == 'i') {
@@ -193,9 +193,9 @@ MLIR_TypeHandle mlir_type_create_from_string(Arena *arena, string type_str) {
             for (size_t i = 1; i < type.size; i++) {
                 width = width * 10u + (uint32_t)(type.str[i] - '0');
             }
-            return MLIR_CreateTypeInteger(width, true);
+            return MLIR_CreateTypeInteger(ctx, width, true);
         }
-        return MLIR_CreateTypeInteger(32, true);
+        return MLIR_CreateTypeInteger(ctx, 32, true);
     }
 
     bool is_float_prefix = false;
@@ -217,7 +217,7 @@ MLIR_TypeHandle mlir_type_create_from_string(Arena *arena, string type_str) {
                 width = width * 10u + (uint32_t)(c - '0');
             }
         }
-        return MLIR_CreateTypeFloat(width, is_bfloat);
+        return MLIR_CreateTypeFloat(ctx, width, is_bfloat);
     }
 
     if (type.size >= 7 && str_eq(str_substr(type, 0, 7), str_lit("!tt.ptr"))) {
@@ -234,42 +234,42 @@ MLIR_TypeHandle mlir_type_create_from_string(Arena *arena, string type_str) {
             if (comma_pos < content.size) {
                 string elem_part = string_trim_whitespace(str_substr(content, 0, comma_pos));
                 string addr_part = string_trim_whitespace(str_substr(content, comma_pos + 1, content.size - comma_pos - 1));
-                MLIR_TypeHandle elem_type = mlir_type_create_from_string(arena, elem_part);
+                MLIR_TypeHandle elem_type = mlir_type_create_from_string(ctx, elem_part);
                 uint32_t addr_space = parse_uint32_from_string(addr_part);
-                return MLIR_CreateTypePointer(elem_type, true, addr_space);
+                return MLIR_CreateTypePointer(ctx, elem_type, true, addr_space);
             }
 
-            MLIR_TypeHandle elem_type = mlir_type_create_from_string(arena, string_trim_whitespace(content));
-            return MLIR_CreateTypePointer(elem_type, false, 1);
+            MLIR_TypeHandle elem_type = mlir_type_create_from_string(ctx, string_trim_whitespace(content));
+            return MLIR_CreateTypePointer(ctx, elem_type, false, 1);
         }
 
-        MLIR_TypeHandle fallback_elem = mlir_type_create_from_string(arena, str_lit("f32"));
-        return MLIR_CreateTypePointer(fallback_elem, false, 1);
+        MLIR_TypeHandle fallback_elem = mlir_type_create_from_string(ctx, str_lit("f32"));
+        return MLIR_CreateTypePointer(ctx, fallback_elem, false, 1);
     }
 
     if (type.size >= 6 && str_eq(str_substr(type, 0, 6), str_lit("tensor"))) {
         if (type.size > 7 && type.str[6] == '<' && type.str[type.size - 1] == '>') {
             string content = str_substr(type, 7, type.size - 8);
-            return parse_tensor_like_type(arena, content, true);
+            return parse_tensor_like_type(ctx, content, true);
         }
 
-        MLIR_TypeHandle default_elem = mlir_type_create_from_string(arena, str_lit("f32"));
-        return MLIR_CreateTypeTensor(MLIR_INVALID_HANDLE, 0, default_elem);
+        MLIR_TypeHandle default_elem = mlir_type_create_from_string(ctx, str_lit("f32"));
+        return MLIR_CreateTypeTensor(ctx, MLIR_INVALID_HANDLE, 0, default_elem);
     }
 
     if (type.size >= 6 && str_eq(str_substr(type, 0, 6), str_lit("memref"))) {
         if (type.size > 7 && type.str[6] == '<' && type.str[type.size - 1] == '>') {
             string content = str_substr(type, 7, type.size - 8);
-            return parse_tensor_like_type(arena, content, false);
+            return parse_tensor_like_type(ctx, content, false);
         }
-        return MLIR_CreateTypeMemref(MLIR_INVALID_HANDLE, 0, MLIR_INVALID_HANDLE);
+        return MLIR_CreateTypeMemref(ctx, MLIR_INVALID_HANDLE, 0, MLIR_INVALID_HANDLE);
     }
 
-    return MLIR_CreateTypeInteger(32, true);
+    return MLIR_CreateTypeInteger(ctx, 32, true);
 }
 
-MLIR_TypeHandle parse_type_from_string(Arena *arena, string type_str) {
-    return mlir_type_create_from_string(arena, type_str);
+MLIR_TypeHandle parse_type_from_string(MLIR_Context *ctx, string type_str) {
+    return mlir_type_create_from_string(ctx, type_str);
 }
 
 string op_type_to_string(MLIR_OpType type) {
@@ -621,8 +621,10 @@ void parser_next_token(Parser *parser) {
     } while (parser->sym == TK_WHITESPACE || parser->sym == TK_COMMENT);
 }
 
-void parser_init(Arena *arena, Parser *parser, string text) {
+void parser_init(MLIR_Context *ctx, Parser *parser, string text) {
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
     string text_null = str_concat(arena, text, str_lit("\0"));
+    parser->ctx = ctx;
     parser->arena = arena;
     parser->input = (unsigned char*) text_null.str;
     parser->cur = 0;
@@ -716,12 +718,12 @@ MLIR_BlockHandle parse_block(Parser *parser) {
                     string type_name = str_lit("");
                     MLIR_TypeHandle arg_type = MLIR_INVALID_HANDLE;
                     if (parse_type_string(parser, &type_name)) {
-                        arg_type = mlir_type_create_from_string(parser->arena, type_name);
+                        arg_type = mlir_type_create_from_string(parser->ctx, type_name);
                     } else {
-                        arg_type = mlir_type_create_from_string(parser->arena, str_lit("i32"));
+                        arg_type = mlir_type_create_from_string(parser->ctx, str_lit("i32"));
                     }
                     // Create block argument value with parsed type
-                    MLIR_ValueHandle block_arg = MLIR_CreateValueBlockArg(arg_name, (uint32_t)block_args.size, arg_type, MLIR_INVALID_HANDLE);
+                    MLIR_ValueHandle block_arg = MLIR_CreateValueBlockArg(parser->ctx, arg_name, (uint32_t)block_args.size, arg_type, MLIR_INVALID_HANDLE);
 
                     VecValue_push_back(parser->arena, &block_args, block_arg);
 
@@ -758,12 +760,12 @@ MLIR_BlockHandle parse_block(Parser *parser) {
         }
     }
 
-    MLIR_BlockHandle block = MLIR_CreateBlock();
+    MLIR_BlockHandle block = MLIR_CreateBlock(parser->ctx);
     for (size_t i = 0; i < block_args.size; i++) {
-        MLIR_AppendBlockArg(block, block_args.data[i]);
+        MLIR_AppendBlockArg(parser->ctx, block, block_args.data[i]);
     }
     for (size_t i = 0; i < operations.size; i++) {
-        MLIR_AppendBlockOp(block, operations.data[i]);
+        MLIR_AppendBlockOp(parser->ctx, block, operations.data[i]);
     }
 
     return block;
@@ -788,9 +790,9 @@ MLIR_RegionHandle parse_region(Parser *parser) {
     // Pop scope when leaving region
     symbol_table_pop_scope(&parser->symbol_table);
 
-    MLIR_RegionHandle region = MLIR_CreateRegion();
+    MLIR_RegionHandle region = MLIR_CreateRegion(parser->ctx);
     for (size_t i = 0; i < blocks.size; i++) {
-        MLIR_AppendRegionBlock(region, blocks.data[i]);
+        MLIR_AppendRegionBlock(parser->ctx, region, blocks.data[i]);
     }
 
     return region;
@@ -863,13 +865,14 @@ MLIR_OpHandle parse_module(Parser *parser) {
     return op;
 }
 
-MLIR_OpHandle mlir_parse_module(Arena *arena, const char *input, size_t input_len, MLIR_LocationMap **out_location_map) {
+MLIR_OpHandle mlir_parse_module(MLIR_Context *ctx, const char *input, size_t input_len, MLIR_LocationMap **out_location_map) {
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
     Parser *parser = arena_alloc(arena, Parser);
     string input_string = {
         .str = (char*)input,
         .size = input_len
     };
-    parser_init(arena, parser, input_string);
+    parser_init(ctx, parser, input_string);
     MLIR_OpHandle module = parse_module(parser);
     if (out_location_map) {
         MLIR_LocationMap *map_wrapper = arena_alloc(arena, MLIR_LocationMap);
@@ -939,7 +942,7 @@ MLIR_LocationHandle parse_loc(Parser *parser) {
         }
         parser_expect(parser, TK_RPAREN);
         text = str_concat(parser->arena, text, str_lit(")"));
-        loc = MLIR_CreateLocationUnknown(text);
+        loc = MLIR_CreateLocationUnknown(parser->ctx, text);
         return loc;
     } else if (parser_peek(parser, TK_STRING)) {
         // loc("filename":line:col) or loc("name")
@@ -968,10 +971,10 @@ MLIR_LocationHandle parse_loc(Parser *parser) {
                 }
             }
 
-            loc = MLIR_CreateLocationFile(filename, line, column);
+            loc = MLIR_CreateLocationFile(parser->ctx, filename, line, column);
         } else {
             // Named location: loc("name")
-            loc = MLIR_CreateLocationName(filename);
+            loc = MLIR_CreateLocationName(parser->ctx, filename);
         }
     } else if (parser_peek(parser, TK_HASH_NAME)) {
         // Reference location: loc(#locN)
@@ -981,13 +984,13 @@ MLIR_LocationHandle parse_loc(Parser *parser) {
         if (hash_name.size > 4 && strncmp(hash_name.str, "#loc", 4) == 0) {
             ref_id = atoi(hash_name.str + 4);
         }
-        loc = MLIR_CreateLocationRef(ref_id);
+        loc = MLIR_CreateLocationRef(parser->ctx, ref_id);
     } else {
         // Unknown location format, just consume tokens until ')'
         while (!(parser_peek(parser, TK_RPAREN))) {
             parser_next_token(parser);
         }
-        loc = MLIR_CreateLocationUnknown(str_lit("loc(unknown)"));
+        loc = MLIR_CreateLocationUnknown(parser->ctx, str_lit("loc(unknown)"));
     }
 
     parser_expect(parser, TK_RPAREN);
@@ -1007,7 +1010,7 @@ void consume_optional_hash_selector(Parser *parser) {
 
 
 const char *string_data_or_null(string s) {
-    return s.size > 0 ? s.str : MLIR_INVALID_HANDLE;
+    return s.size > 0 ? s.str : NULL;
 }
 
 bool parse_register_operand(Parser *parser, VecValue *operands, bool allow_hash_selector) {
@@ -1051,7 +1054,7 @@ MLIR_ValueHandle *finalize_results(const OperationParserParams *params,
             if (params->lhs_results && i < params->n_lhs_results) {
                 reg_name = MLIR_GetValueRegisterName(params->lhs_results[i]);
             }
-            MLIR_ValueHandle res = MLIR_CreateValueOpResult(op, (uint32_t)i, ty, reg_name, MLIR_INVALID_HANDLE);
+            MLIR_ValueHandle res = MLIR_CreateValueOpResult(params->ctx, op, (uint32_t)i, ty, reg_name, MLIR_INVALID_HANDLE);
             results[i] = res;
         }
         n_results = n_result_types;
@@ -1062,24 +1065,24 @@ MLIR_ValueHandle *finalize_results(const OperationParserParams *params,
 }
 
 MLIR_AttributeHandle create_string_attr(Parser *parser, string name, string value) {
-    return MLIR_CreateAttributeString(name, value);
+    return MLIR_CreateAttributeString(parser->ctx, name, value);
 }
 
 MLIR_AttributeHandle create_integer_attr(Parser *parser, string name, int64_t value) {
-    return MLIR_CreateAttributeInteger(name, value);
+    return MLIR_CreateAttributeInteger(parser->ctx, name, value);
 }
 
 MLIR_AttributeHandle create_float_attr(Parser *parser, string name, double value) {
-    return MLIR_CreateAttributeFloat(name, value);
+    return MLIR_CreateAttributeFloat(parser->ctx, name, value);
 }
 
 MLIR_AttributeHandle create_bool_attr(Parser *parser, string name, bool value) {
-    return MLIR_CreateAttributeBool(name, value);
+    return MLIR_CreateAttributeBool(parser->ctx, name, value);
 }
 
 void operation_append_attribute(Parser *parser, MLIR_OpHandle op, MLIR_AttributeHandle attr) {
     if (!attr) return;
-    MLIR_AppendOpAttribute(op, attr);
+    MLIR_AppendOpAttribute(parser->ctx, op, attr);
 }
 
 MLIR_ValueHandle lookup_or_create_value(Parser *parser, string reg, string default_type) {
@@ -1087,9 +1090,9 @@ MLIR_ValueHandle lookup_or_create_value(Parser *parser, string reg, string defau
     if (val == MLIR_INVALID_HANDLE) {
         MLIR_TypeHandle ty = MLIR_INVALID_HANDLE;
         if (default_type.size > 0) {
-            ty = mlir_type_create_from_string(parser->arena, default_type);
+            ty = mlir_type_create_from_string(parser->ctx, default_type);
         }
-        val = MLIR_CreateValueBlockArg(reg, 0, ty, MLIR_INVALID_HANDLE);
+        val = MLIR_CreateValueBlockArg(parser->ctx, reg, 0, ty, MLIR_INVALID_HANDLE);
     }
     return val;
 }
@@ -1259,7 +1262,7 @@ void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *
 
             string type_str = str_lit("");
             if (parse_type_string(parser, &type_str)) {
-                MLIR_TypeHandle type = mlir_type_create_from_string(parser->arena, type_str);
+                MLIR_TypeHandle type = mlir_type_create_from_string(parser->ctx, type_str);
                 if (result_types) {
                     *result_types = arena_alloc_array(parser->arena, MLIR_TypeHandle, 1);
                     (*result_types)[0] = type;
@@ -1307,7 +1310,7 @@ void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *
                 if (parser_peek(parser, TK_ARROW)) parser_expect(parser, TK_ARROW);
                 string type_res = str_lit("");
                 if (parse_type_string(parser, &type_res)) {
-                    MLIR_TypeHandle type = mlir_type_create_from_string(parser->arena, type_res);
+                    MLIR_TypeHandle type = mlir_type_create_from_string(parser->ctx, type_res);
                     if (result_types) {
                         *result_types = arena_alloc_array(parser->arena, MLIR_TypeHandle, 1);
                         (*result_types)[0] = type;
@@ -1319,7 +1322,7 @@ void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *
                 parser_expect(parser, TK_ARROW);
                 string type_right = str_lit("");
                 if (parse_type_string(parser, &type_right)) {
-                    MLIR_TypeHandle type = mlir_type_create_from_string(parser->arena, type_right);
+                    MLIR_TypeHandle type = mlir_type_create_from_string(parser->ctx, type_right);
                     if (result_types) {
                         *result_types = arena_alloc_array(parser->arena, MLIR_TypeHandle, 1);
                         (*result_types)[0] = type;
@@ -1349,7 +1352,7 @@ void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *
                 parser_expect(parser, TK_NAME);
                 string type_dst = str_lit("");
                 if (parse_type_string(parser, &type_dst)) {
-                    MLIR_TypeHandle type = mlir_type_create_from_string(parser->arena, type_dst);
+                    MLIR_TypeHandle type = mlir_type_create_from_string(parser->ctx, type_dst);
                     if (result_types) {
                         *result_types = arena_alloc_array(parser->arena, MLIR_TypeHandle, 1);
                         (*result_types)[0] = type;
@@ -1367,7 +1370,7 @@ void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *
                 // but do NOT override for compare ops like arith.cmpi where
                 // the colon type is the operand type, not the result.
                 if (op_type != OP_TYPE_ARITH_CMPI) {
-                    MLIR_TypeHandle type = mlir_type_create_from_string(parser->arena, type_left);
+                    MLIR_TypeHandle type = mlir_type_create_from_string(parser->ctx, type_left);
                     if (result_types) {
                         *result_types = arena_alloc_array(parser->arena, MLIR_TypeHandle, 1);
                         (*result_types)[0] = type;
@@ -1383,7 +1386,7 @@ void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *
         parser_expect(parser, TK_ARROW);
         string type_str = str_lit("");
         if (parse_type_string(parser, &type_str)) {
-            MLIR_TypeHandle type = mlir_type_create_from_string(parser->arena, type_str);
+            MLIR_TypeHandle type = mlir_type_create_from_string(parser->ctx, type_str);
             if (result_types) {
                 *result_types = arena_alloc_array(parser->arena, MLIR_TypeHandle, 1);
                 (*result_types)[0] = type;
@@ -1491,7 +1494,7 @@ MLIR_OpHandle parse_operation(Parser *parser) {
         lhs_results = arena_alloc_array(parser->arena, MLIR_ValueHandle, result_count);
         for (size_t i = 0; i < result_count; i++) {
             string name = (i == 0) ? reg_name : (string){MLIR_INVALID_HANDLE, 0};
-            lhs_results[i] = MLIR_CreateValueOpResult(MLIR_INVALID_HANDLE, (uint32_t)i, MLIR_INVALID_HANDLE, name, MLIR_INVALID_HANDLE);
+            lhs_results[i] = MLIR_CreateValueOpResult(parser->ctx, MLIR_INVALID_HANDLE, (uint32_t)i, MLIR_INVALID_HANDLE, name, MLIR_INVALID_HANDLE);
         }
         n_lhs_results = result_count;
         result_value = lhs_results[0]; // Keep first for backward compatibility
@@ -1557,6 +1560,7 @@ MLIR_OpHandle parse_operation(Parser *parser) {
     }
 
     OperationParserParams params = {
+        .ctx = parser->ctx,
         .arena = parser->arena,
         .op_type = op_type,
         .opname = opname,

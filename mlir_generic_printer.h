@@ -12,9 +12,9 @@ extern "C" {
  * Generic MLIR printer that produces standard MLIR textual format.
  */
 
-string print_operation_generic(Arena *arena, int indent_level, MLIR_OpHandle op);
-string print_region_generic(Arena *arena, int indent_level, MLIR_RegionHandle region);
-string print_block_generic(Arena *arena, int bb_index, int indent_level, MLIR_BlockHandle block);
+string print_operation_generic(MLIR_Context *ctx, int indent_level, MLIR_OpHandle op);
+string print_region_generic(MLIR_Context *ctx, int indent_level, MLIR_RegionHandle region);
+string print_block_generic(MLIR_Context *ctx, int bb_index, int indent_level, MLIR_BlockHandle block);
 
 #ifdef __cplusplus
 }
