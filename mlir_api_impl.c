@@ -9,25 +9,12 @@
 #include "mlir_parser.h"
 #include <string.h>
 
-/*
-TODO:
-* Currently we have a vector of pointers
-* Instead, have a vector of indices, store all operations in one vector
-* An idea: one can inline the structs at the end of
-the parent struct, but that will make it hard to add more later, and each struct will have a different size, so not possible to uniformly store them in a vector by value
-* Best is to have one vector for all operations
-  and then use either indices or pointers.
-* An issue with using pointers is that you can't double and copy the vector allocation. Thus using indices is probably the best way to do that.
-* One can use a pool allocator to reuse space when operations are removed. One can move things around.
-* We still need an arena to allocate a vector of indices for each Operation/Region/Block
-* Indices also allow easy serializing/deserializing
-*/
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Internal concrete IR definitions (inlined from the former mlir_ir_internal.h)
+// Internal concrete IR definitions
+
 typedef enum {
     TYPE_KIND_UNKNOWN,
     TYPE_KIND_OPAQUE,
@@ -49,7 +36,9 @@ typedef enum {
     LOC_KIND_REF
 } LocationKind;
 
-struct MLIR_Type {
+// Internal struct definitions using handle fields
+
+typedef struct IR_Type {
     TypeKind kind;
     union {
         struct {
@@ -61,19 +50,19 @@ struct MLIR_Type {
             bool is_bfloat;
         } floating;
         struct {
-            struct MLIR_Type *element_type;
+            MLIR_TypeHandle element_type;
             int64_t *shape;
             uint32_t rank;
         } shaped;
         struct {
-            struct MLIR_Type *element_type;
+            MLIR_TypeHandle element_type;
             uint32_t address_space;
             bool has_address_space;
         } pointer;
     } data;
-};
+} IR_Type;
 
-struct MLIR_Attribute {
+typedef struct IR_Attribute {
     enum {
         ATTR_KIND_INTEGER,
         ATTR_KIND_FLOAT,
@@ -88,14 +77,14 @@ struct MLIR_Attribute {
         string string_value;
         bool bool_value;
         struct {
-            struct MLIR_Attribute **elements;
+            MLIR_AttributeHandle *elements;
             size_t count;
         } array;
     } data;
     string name;
-};
+} IR_Attribute;
 
-struct MLIR_Location {
+typedef struct IR_Location {
     LocationKind kind;
     union {
         struct { string filename; int line; int column; } file;
@@ -103,246 +92,362 @@ struct MLIR_Location {
         struct { int ref_id; } ref;
     } data;
     string original_text;
-};
+} IR_Location;
 
-struct MLIR_Value {
+typedef struct IR_Value {
     MLIR_ValueKind kind;
-    void *def;
+    uint32_t def_handle;  // MLIR_OpHandle if OP_RESULT, MLIR_BlockHandle if BLOCK_ARG
     uint32_t result_index;
-    struct MLIR_Type *type;
+    MLIR_TypeHandle type;
     string register_name;
-    struct MLIR_Location *location;
-};
+    MLIR_LocationHandle location;
+} IR_Value;
 
-struct MLIR_Op {
+typedef struct IR_Op {
     MLIR_OpType op_type;
-    struct MLIR_Value **operands;
+    MLIR_ValueHandle *operands;
     uint64_t n_operands;
-    struct MLIR_Type **result_types;
+    MLIR_TypeHandle *result_types;
     uint64_t n_result_types;
-    struct MLIR_Attribute **attributes;
+    MLIR_AttributeHandle *attributes;
     uint64_t n_attributes;
-    struct MLIR_Region **regions;
+    MLIR_RegionHandle *regions;
     uint64_t n_regions;
     string opname;
-    struct MLIR_Value **results;
+    MLIR_ValueHandle *results;
     uint64_t n_results;
-    struct MLIR_Location *location;
-    struct MLIR_Location *unnumbered_loc_def;
+    MLIR_LocationHandle location;
+    MLIR_LocationHandle unnumbered_loc_def;
     string trailing_comment;
     int64_t source_line_start;
-};
+} IR_Op;
 
-struct MLIR_Block {
-    struct MLIR_Op **operations;
+typedef struct IR_Block {
+    MLIR_OpHandle *operations;
     uint64_t n_operations;
-    struct MLIR_Value **arguments;
+    MLIR_ValueHandle *arguments;
     uint64_t n_arguments;
-};
+} IR_Block;
 
-struct MLIR_Region {
-    struct MLIR_Block **blocks;
+typedef struct IR_Region {
+    MLIR_BlockHandle *blocks;
     uint64_t n_blocks;
-};
+} IR_Region;
 
-// string_hash and string_equal are provided inline in mlir_parser.h
+// Define vector pools for each object type
+DEFINE_VECTOR_FOR_TYPE(IR_Op, OpPool)
+DEFINE_VECTOR_FOR_TYPE(IR_Region, RegionPool)
+DEFINE_VECTOR_FOR_TYPE(IR_Block, BlockPool)
+DEFINE_VECTOR_FOR_TYPE(IR_Value, ValuePool)
+DEFINE_VECTOR_FOR_TYPE(IR_Type, TypePool)
+DEFINE_VECTOR_FOR_TYPE(IR_Attribute, AttributePool)
+DEFINE_VECTOR_FOR_TYPE(IR_Location, LocationPool)
 
-// Use SymbolTable, ScopedSymbolTable, and LocationMap from mlir_parser.h
+typedef struct MLIR_HandleManager {
+    Arena *arena;
+    OpPool ops;
+    RegionPool regions;
+    BlockPool blocks;
+    ValuePool values;
+    TypePool types;
+    AttributePool attributes;
+    LocationPool locations;
+} MLIR_HandleManager;
 
-typedef Parser Parser; // use Parser from mlir_parser.h
+// Global handle manager
+static MLIR_HandleManager *global_handle_manager = NULL;
 
-// Forward declarations for parser entry points implemented in mlir_parser.c
-void parser_init(Arena *arena, Parser *parser, string text);
-struct MLIR_Op; // forward decl
-struct MLIR_Op* parse_module(Parser *parser);
+// Handle resolution - handles are 1-based (0 = MLIR_INVALID_HANDLE)
+static inline IR_Op* resolve_op(MLIR_OpHandle h) {
+    if (h == MLIR_INVALID_HANDLE || h > global_handle_manager->ops.size) return NULL;
+    return &global_handle_manager->ops.data[h - 1];
+}
+static inline IR_Region* resolve_region(MLIR_RegionHandle h) {
+    if (h == MLIR_INVALID_HANDLE || h > global_handle_manager->regions.size) return NULL;
+    return &global_handle_manager->regions.data[h - 1];
+}
+static inline IR_Block* resolve_block(MLIR_BlockHandle h) {
+    if (h == MLIR_INVALID_HANDLE || h > global_handle_manager->blocks.size) return NULL;
+    return &global_handle_manager->blocks.data[h - 1];
+}
+static inline IR_Value* resolve_value(MLIR_ValueHandle h) {
+    if (h == MLIR_INVALID_HANDLE || h > global_handle_manager->values.size) return NULL;
+    return &global_handle_manager->values.data[h - 1];
+}
+static inline IR_Type* resolve_type(MLIR_TypeHandle h) {
+    if (h == MLIR_INVALID_HANDLE || h > global_handle_manager->types.size) return NULL;
+    return &global_handle_manager->types.data[h - 1];
+}
+static inline IR_Attribute* resolve_attr(MLIR_AttributeHandle h) {
+    if (h == MLIR_INVALID_HANDLE || h > global_handle_manager->attributes.size) return NULL;
+    return &global_handle_manager->attributes.data[h - 1];
+}
+static inline IR_Location* resolve_loc(MLIR_LocationHandle h) {
+    if (h == MLIR_INVALID_HANDLE || h > global_handle_manager->locations.size) return NULL;
+    return &global_handle_manager->locations.data[h - 1];
+}
 
-// Use Operation/Block/Region/Type/Attribute/Location/ValueRef and vectors from mlir_parser.h
+// Handle allocation helpers
+static inline MLIR_OpHandle alloc_op(IR_Op op) {
+    OpPool_push_back(global_handle_manager->arena, &global_handle_manager->ops, op);
+    return (MLIR_OpHandle)global_handle_manager->ops.size;
+}
+static inline MLIR_RegionHandle alloc_region(IR_Region r) {
+    RegionPool_push_back(global_handle_manager->arena, &global_handle_manager->regions, r);
+    return (MLIR_RegionHandle)global_handle_manager->regions.size;
+}
+static inline MLIR_BlockHandle alloc_block(IR_Block b) {
+    BlockPool_push_back(global_handle_manager->arena, &global_handle_manager->blocks, b);
+    return (MLIR_BlockHandle)global_handle_manager->blocks.size;
+}
+static inline MLIR_ValueHandle alloc_value(IR_Value v) {
+    ValuePool_push_back(global_handle_manager->arena, &global_handle_manager->values, v);
+    return (MLIR_ValueHandle)global_handle_manager->values.size;
+}
+static inline MLIR_TypeHandle alloc_type(IR_Type t) {
+    TypePool_push_back(global_handle_manager->arena, &global_handle_manager->types, t);
+    return (MLIR_TypeHandle)global_handle_manager->types.size;
+}
+static inline MLIR_AttributeHandle alloc_attr_obj(IR_Attribute a) {
+    AttributePool_push_back(global_handle_manager->arena, &global_handle_manager->attributes, a);
+    return (MLIR_AttributeHandle)global_handle_manager->attributes.size;
+}
+static inline MLIR_LocationHandle alloc_loc(IR_Location l) {
+    LocationPool_push_back(global_handle_manager->arena, &global_handle_manager->locations, l);
+    return (MLIR_LocationHandle)global_handle_manager->locations.size;
+}
 
-// Global arena allocator
-static Arena *global_arena = NULL;
+static void init_handle_manager(Arena *arena, MLIR_HandleManager *manager) {
+    manager->arena = arena;
+    OpPool_reserve(arena, &manager->ops, 64);
+    RegionPool_reserve(arena, &manager->regions, 32);
+    BlockPool_reserve(arena, &manager->blocks, 64);
+    ValuePool_reserve(arena, &manager->values, 256);
+    TypePool_reserve(arena, &manager->types, 64);
+    AttributePool_reserve(arena, &manager->attributes, 128);
+    LocationPool_reserve(arena, &manager->locations, 64);
+}
 
-// API wrapper functions that cast between API types and concrete types
-void MLIR_InitApi(MLIR_Op *root) {
-    // Cast API type to concrete type
+// API lifecycle
+void MLIR_InitApi(MLIR_OpHandle root) {
     (void)root;
-    // No initialization required for the native C implementation.
 }
 
 void MLIR_SetArena(Arena *arena) {
-    global_arena = arena;
+    if (!global_handle_manager) {
+        global_handle_manager = arena_alloc(arena, MLIR_HandleManager);
+        init_handle_manager(arena, global_handle_manager);
+    }
 }
 
-MLIR_Op *MLIR_CreateOp(
+// Operation creation
+MLIR_OpHandle MLIR_CreateOp(
     MLIR_OpType type,
     string opname,
-    MLIR_Attribute **attributes, size_t n_attributes,
-    MLIR_Type **result_types, size_t n_result_types,
-    MLIR_Value **results, size_t n_results,
-    MLIR_Value **operands, size_t n_operands,
-    MLIR_Region **regions, size_t n_regions,
-    MLIR_Location *location,
-    MLIR_Location *unnumbered_loc_def,
+    MLIR_AttributeHandle *attributes, size_t n_attributes,
+    MLIR_TypeHandle *result_types, size_t n_result_types,
+    MLIR_ValueHandle *results, size_t n_results,
+    MLIR_ValueHandle *operands, size_t n_operands,
+    MLIR_RegionHandle *regions, size_t n_regions,
+    MLIR_LocationHandle location,
+    MLIR_LocationHandle unnumbered_loc_def,
     string trailing_comment,
     int64_t source_line_start) {
-    MLIR_Op *op = arena_alloc(global_arena, MLIR_Op);
-    *op = (MLIR_Op){0};
-    op->op_type = type;
-    op->opname = opname;
-    op->attributes = attributes;
-    op->n_attributes = n_attributes;
-    op->result_types = result_types;
-    op->n_result_types = n_result_types;
-    op->results = results;
-    op->n_results = n_results;
-    op->operands = operands;
-    op->n_operands = n_operands;
-    op->regions = regions;
-    op->n_regions = n_regions;
-    op->location = location;
-    op->unnumbered_loc_def = unnumbered_loc_def;
-    op->trailing_comment = trailing_comment;
-    op->source_line_start = source_line_start;
 
-    // Automatically set the def field on all result values
-    // Also sync type from result_types if value has NULL type
+    IR_Op op = {0};
+    op.op_type = type;
+    op.opname = opname;
+    op.attributes = attributes;
+    op.n_attributes = n_attributes;
+    op.result_types = result_types;
+    op.n_result_types = n_result_types;
+    op.results = results;
+    op.n_results = n_results;
+    op.operands = operands;
+    op.n_operands = n_operands;
+    op.regions = regions;
+    op.n_regions = n_regions;
+    op.location = location;
+    op.unnumbered_loc_def = unnumbered_loc_def;
+    op.trailing_comment = trailing_comment;
+    op.source_line_start = source_line_start;
+
+    MLIR_OpHandle handle = alloc_op(op);
+
+    // Set def_handle on result values
     for (size_t i = 0; i < n_results; i++) {
-        if (results[i]) {
-            results[i]->def = op;
+        IR_Value *v = resolve_value(results[i]);
+        if (v) {
+            v->def_handle = handle;
             // Auto-sync type from result_types if not already set
-            if (i < n_result_types && result_types[i] && !results[i]->type) {
-                results[i]->type = result_types[i];
+            if (i < n_result_types && result_types[i] != MLIR_INVALID_HANDLE && v->type == MLIR_INVALID_HANDLE) {
+                v->type = result_types[i];
             }
         }
     }
 
-    return op;
+    return handle;
 }
 
-void MLIR_AppendBlockOp(MLIR_Block *block, MLIR_Op *op) {
-    MLIR_Op **new_ops = arena_alloc_array(global_arena, MLIR_Op*, block->n_operations + 1);
-    if (block->operations) memcpy(new_ops, block->operations, block->n_operations * sizeof(MLIR_Op*));
+void MLIR_AppendBlockOp(MLIR_BlockHandle bh, MLIR_OpHandle op) {
+    IR_Block *block = resolve_block(bh);
+    if (!block) return;
+    Arena *arena = global_handle_manager->arena;
+    MLIR_OpHandle *new_ops = arena_alloc_array(arena, MLIR_OpHandle, block->n_operations + 1);
+    if (block->operations) memcpy(new_ops, block->operations, block->n_operations * sizeof(MLIR_OpHandle));
     new_ops[block->n_operations] = op;
     block->operations = new_ops;
     block->n_operations++;
 }
 
-void MLIR_AppendBlockArg(MLIR_Block *block, MLIR_Value *arg) {
-    struct MLIR_Value **new_args = arena_alloc_array(global_arena, struct MLIR_Value*, block->n_arguments + 1);
-    if (block->arguments) memcpy(new_args, block->arguments, block->n_arguments * sizeof(struct MLIR_Value*));
+void MLIR_AppendBlockArg(MLIR_BlockHandle bh, MLIR_ValueHandle arg) {
+    IR_Block *block = resolve_block(bh);
+    if (!block) return;
+    Arena *arena = global_handle_manager->arena;
+    MLIR_ValueHandle *new_args = arena_alloc_array(arena, MLIR_ValueHandle, block->n_arguments + 1);
+    if (block->arguments) memcpy(new_args, block->arguments, block->n_arguments * sizeof(MLIR_ValueHandle));
     new_args[block->n_arguments] = arg;
     block->arguments = new_args;
     block->n_arguments++;
 
-    // Automatically set the def field to point to the block for block arguments
-    if (arg) {
-        arg->def = block;
-    }
+    // Set def_handle to block for block arguments
+    IR_Value *v = resolve_value(arg);
+    if (v) v->def_handle = bh;
 }
 
-void MLIR_AppendRegionBlock(MLIR_Region *region, MLIR_Block *block) {
-    MLIR_Block **new_blocks = arena_alloc_array(global_arena, MLIR_Block*, region->n_blocks + 1);
-    if (region->blocks) memcpy(new_blocks, region->blocks, region->n_blocks * sizeof(MLIR_Block*));
+void MLIR_AppendRegionBlock(MLIR_RegionHandle rh, MLIR_BlockHandle block) {
+    IR_Region *region = resolve_region(rh);
+    if (!region) return;
+    Arena *arena = global_handle_manager->arena;
+    MLIR_BlockHandle *new_blocks = arena_alloc_array(arena, MLIR_BlockHandle, region->n_blocks + 1);
+    if (region->blocks) memcpy(new_blocks, region->blocks, region->n_blocks * sizeof(MLIR_BlockHandle));
     new_blocks[region->n_blocks] = block;
     region->blocks = new_blocks;
     region->n_blocks++;
 }
 
-size_t MLIR_GetRegionNumBlocks(const MLIR_Region *region) {
-    return region->n_blocks;
+size_t MLIR_GetRegionNumBlocks(MLIR_RegionHandle rh) {
+    IR_Region *r = resolve_region(rh);
+    return r ? r->n_blocks : 0;
 }
 
-MLIR_Block *MLIR_GetRegionBlock(const MLIR_Region *region, size_t idx) {
-    return region->blocks[idx];
+MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_RegionHandle rh, size_t idx) {
+    IR_Region *r = resolve_region(rh);
+    if (!r || idx >= r->n_blocks) return MLIR_INVALID_HANDLE;
+    return r->blocks[idx];
 }
 
-size_t MLIR_GetBlockNumOps(const MLIR_Block *block) {
-    return block->n_operations;
+size_t MLIR_GetBlockNumOps(MLIR_BlockHandle bh) {
+    IR_Block *b = resolve_block(bh);
+    return b ? b->n_operations : 0;
 }
 
-MLIR_Op *MLIR_GetBlockOp(const MLIR_Block *block, size_t idx) {
-    return block->operations[idx];
+MLIR_OpHandle MLIR_GetBlockOp(MLIR_BlockHandle bh, size_t idx) {
+    IR_Block *b = resolve_block(bh);
+    if (!b || idx >= b->n_operations) return MLIR_INVALID_HANDLE;
+    return b->operations[idx];
 }
 
-MLIR_OpType MLIR_GetOpType(const MLIR_Op *op) {
-    return op->op_type;
+MLIR_OpType MLIR_GetOpType(MLIR_OpHandle oh) {
+    IR_Op *op = resolve_op(oh);
+    return op ? op->op_type : OP_TYPE_UNREGISTERED;
 }
 
-size_t MLIR_GetOpNumRegions(const MLIR_Op *op) {
-    return op->n_regions;
+size_t MLIR_GetOpNumRegions(MLIR_OpHandle oh) {
+    IR_Op *op = resolve_op(oh);
+    return op ? op->n_regions : 0;
 }
 
-MLIR_Region *MLIR_GetOpRegion(const MLIR_Op *op, size_t idx) {
+MLIR_RegionHandle MLIR_GetOpRegion(MLIR_OpHandle oh, size_t idx) {
+    IR_Op *op = resolve_op(oh);
+    if (!op || idx >= op->n_regions) return MLIR_INVALID_HANDLE;
     return op->regions[idx];
 }
 
-string MLIR_GetOpTrailingComment(const MLIR_Op *op) {
-    return op->trailing_comment;
+string MLIR_GetOpTrailingComment(MLIR_OpHandle oh) {
+    IR_Op *op = resolve_op(oh);
+    return op ? op->trailing_comment : str_lit("");
 }
 
-// Additional accessors for printer support
-size_t MLIR_GetOpNumAttributes(const MLIR_Op *op) {
-    return op->n_attributes;
+size_t MLIR_GetOpNumAttributes(MLIR_OpHandle oh) {
+    IR_Op *op = resolve_op(oh);
+    return op ? op->n_attributes : 0;
 }
 
-MLIR_Attribute *MLIR_GetOpAttribute(const MLIR_Op *op, size_t idx) {
+MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle oh, size_t idx) {
+    IR_Op *op = resolve_op(oh);
+    if (!op || idx >= op->n_attributes) return MLIR_INVALID_HANDLE;
     return op->attributes[idx];
 }
 
-size_t MLIR_GetOpNumOperands(const MLIR_Op *op) {
-    return op->n_operands;
+size_t MLIR_GetOpNumOperands(MLIR_OpHandle oh) {
+    IR_Op *op = resolve_op(oh);
+    return op ? op->n_operands : 0;
 }
 
-MLIR_Value *MLIR_GetOpOperand(const MLIR_Op *op, size_t idx) {
+MLIR_ValueHandle MLIR_GetOpOperand(MLIR_OpHandle oh, size_t idx) {
+    IR_Op *op = resolve_op(oh);
+    if (!op || idx >= op->n_operands) return MLIR_INVALID_HANDLE;
     return op->operands[idx];
 }
 
-size_t MLIR_GetOpNumResults(const MLIR_Op *op) {
-    return op->n_results;
+size_t MLIR_GetOpNumResults(MLIR_OpHandle oh) {
+    IR_Op *op = resolve_op(oh);
+    return op ? op->n_results : 0;
 }
 
-MLIR_Value *MLIR_GetOpResult(const MLIR_Op *op, size_t idx) {
+MLIR_ValueHandle MLIR_GetOpResult(MLIR_OpHandle oh, size_t idx) {
+    IR_Op *op = resolve_op(oh);
+    if (!op || idx >= op->n_results) return MLIR_INVALID_HANDLE;
     return op->results[idx];
 }
 
-MLIR_Location *MLIR_GetOpLocation(const MLIR_Op *op) {
-    return op->location;
+MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle oh) {
+    IR_Op *op = resolve_op(oh);
+    return op ? op->location : MLIR_INVALID_HANDLE;
 }
 
-string MLIR_GetOpName(const MLIR_Op *op) {
-    return op->opname;
+string MLIR_GetOpName(MLIR_OpHandle oh) {
+    IR_Op *op = resolve_op(oh);
+    return op ? op->opname : str_lit("");
 }
 
-string MLIR_GetOpName_string(const MLIR_Op *op) {
-    return op->opname;
+string MLIR_GetOpName_string(MLIR_OpHandle oh) {
+    IR_Op *op = resolve_op(oh);
+    return op ? op->opname : str_lit("");
 }
 
-size_t MLIR_GetOpNumResultTypes(const MLIR_Op *op) {
-    return op->n_result_types;
+size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle oh) {
+    IR_Op *op = resolve_op(oh);
+    return op ? op->n_result_types : 0;
 }
 
-MLIR_Type *MLIR_GetOpResult_type(const MLIR_Op *op, size_t idx) {
+MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle oh, size_t idx) {
+    IR_Op *op = resolve_op(oh);
+    if (!op || idx >= op->n_result_types) return MLIR_INVALID_HANDLE;
     return op->result_types[idx];
 }
 
-size_t MLIR_GetBlockNumArgs(const MLIR_Block *block) {
-    return block->n_arguments;
+size_t MLIR_GetBlockNumArgs(MLIR_BlockHandle bh) {
+    IR_Block *b = resolve_block(bh);
+    return b ? b->n_arguments : 0;
 }
 
-MLIR_Value *MLIR_GetBlockArg(const MLIR_Block *block, size_t idx) {
-    return block->arguments[idx];
+MLIR_ValueHandle MLIR_GetBlockArg(MLIR_BlockHandle bh, size_t idx) {
+    IR_Block *b = resolve_block(bh);
+    if (!b || idx >= b->n_arguments) return MLIR_INVALID_HANDLE;
+    return b->arguments[idx];
 }
 
-// Value metadata accessors
-MLIR_Location *MLIR_GetValueLocation(const MLIR_Value *value) {
-    return value->location;
+MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle vh) {
+    IR_Value *v = resolve_value(vh);
+    return v ? v->location : MLIR_INVALID_HANDLE;
 }
 
 // Type to string
-string MLIR_GetTypeString(Arena *arena, MLIR_Type *type) {
-    if (!type) {
-        return str_lit("null");
-    }
-    
+string MLIR_GetTypeString(Arena *arena, MLIR_TypeHandle th) {
+    IR_Type *type = resolve_type(th);
+    if (!type) return str_lit("null");
 
     switch (type->kind) {
         case TYPE_KIND_UNKNOWN:
@@ -360,11 +465,11 @@ string MLIR_GetTypeString(Arena *arena, MLIR_Type *type) {
                 return str_lit("bf16");
             }
             return format(arena, str_lit("f{}"), (int64_t)type->data.floating.width);
-        case TYPE_KIND_TENSOR:
-            if (type->data.shaped.element_type) {
-                string elem_str = MLIR_GetTypeString(arena, type->data.shaped.element_type);
+        case TYPE_KIND_TENSOR: {
+            MLIR_TypeHandle elem_h = type->data.shaped.element_type;
+            if (elem_h != MLIR_INVALID_HANDLE) {
+                string elem_str = MLIR_GetTypeString(arena, elem_h);
                 if (type->data.shaped.rank > 0 && type->data.shaped.shape) {
-                    // Build shape string like "4x" or "4x2x"
                     string shape_str = str_lit("");
                     for (uint32_t i = 0; i < type->data.shaped.rank; i++) {
                         int64_t dim = type->data.shaped.shape[i];
@@ -380,9 +485,11 @@ string MLIR_GetTypeString(Arena *arena, MLIR_Type *type) {
                 }
             }
             return str_lit("tensor<?>");
-        case TYPE_KIND_MEMREF:
-            if (type->data.shaped.element_type) {
-                string elem_str = MLIR_GetTypeString(arena, type->data.shaped.element_type);
+        }
+        case TYPE_KIND_MEMREF: {
+            MLIR_TypeHandle elem_h = type->data.shaped.element_type;
+            if (elem_h != MLIR_INVALID_HANDLE) {
+                string elem_str = MLIR_GetTypeString(arena, elem_h);
                 if (type->data.shaped.rank > 0 && type->data.shaped.shape) {
                     string shape_str = str_lit("");
                     for (uint32_t i = 0; i < type->data.shaped.rank; i++) {
@@ -399,10 +506,11 @@ string MLIR_GetTypeString(Arena *arena, MLIR_Type *type) {
                 }
             }
             return str_lit("memref<?>");
-        case TYPE_KIND_POINTER:
-            if (type->data.pointer.element_type) {
-                string elem_str = MLIR_GetTypeString(arena, type->data.pointer.element_type);
-                // Show address space if it was explicitly present in the input
+        }
+        case TYPE_KIND_POINTER: {
+            MLIR_TypeHandle elem_h = type->data.pointer.element_type;
+            if (elem_h != MLIR_INVALID_HANDLE) {
+                string elem_str = MLIR_GetTypeString(arena, elem_h);
                 if (type->data.pointer.has_address_space) {
                     return format(arena, str_lit("!tt.ptr<{}, {}>"), elem_str, (int64_t)type->data.pointer.address_space);
                 } else {
@@ -410,6 +518,7 @@ string MLIR_GetTypeString(Arena *arena, MLIR_Type *type) {
                 }
             }
             return str_lit("!tt.ptr<?>");
+        }
         case TYPE_KIND_INDEX:
             return str_lit("index");
         case TYPE_KIND_FUNCTION:
@@ -419,43 +528,39 @@ string MLIR_GetTypeString(Arena *arena, MLIR_Type *type) {
     }
 }
 
-// Type creation and manipulation
-MLIR_Type *MLIR_CreateTypeInteger(uint32_t width, bool is_signed) {
-    struct MLIR_Type *type = arena_alloc(global_arena, struct MLIR_Type);
-    *type = (struct MLIR_Type){0};
-    type->kind = TYPE_KIND_INTEGER;
-    type->data.integer.width = width;
-    type->data.integer.is_signed = is_signed;
-    return type;
+// Type creation
+MLIR_TypeHandle MLIR_CreateTypeInteger(uint32_t width, bool is_signed) {
+    IR_Type t = {0};
+    t.kind = TYPE_KIND_INTEGER;
+    t.data.integer.width = width;
+    t.data.integer.is_signed = is_signed;
+    return alloc_type(t);
 }
 
-MLIR_Type *MLIR_CreateTypeFloat(uint32_t width, bool is_bfloat) {
-    struct MLIR_Type *type = arena_alloc(global_arena, struct MLIR_Type);
-    *type = (struct MLIR_Type){0};
-    type->kind = TYPE_KIND_FLOAT;
-    type->data.floating.width = width;
-    type->data.floating.is_bfloat = is_bfloat;
-    return type;
+MLIR_TypeHandle MLIR_CreateTypeFloat(uint32_t width, bool is_bfloat) {
+    IR_Type t = {0};
+    t.kind = TYPE_KIND_FLOAT;
+    t.data.floating.width = width;
+    t.data.floating.is_bfloat = is_bfloat;
+    return alloc_type(t);
 }
 
-MLIR_Type *MLIR_CreateTypeIndex(void) {
-    struct MLIR_Type *type = arena_alloc(global_arena, struct MLIR_Type);
-    *type = (struct MLIR_Type){0};
-    type->kind = TYPE_KIND_INDEX;
-    return type;
+MLIR_TypeHandle MLIR_CreateTypeIndex(void) {
+    IR_Type t = {0};
+    t.kind = TYPE_KIND_INDEX;
+    return alloc_type(t);
 }
 
-MLIR_Type *MLIR_CreateTypeUnknown(void) {
-    struct MLIR_Type *type = arena_alloc(global_arena, struct MLIR_Type);
-    *type = (struct MLIR_Type){0};
-    type->kind = TYPE_KIND_UNKNOWN;
-    return type;
+MLIR_TypeHandle MLIR_CreateTypeUnknown(void) {
+    IR_Type t = {0};
+    t.kind = TYPE_KIND_UNKNOWN;
+    return alloc_type(t);
 }
 
-static void copy_shape(struct MLIR_Type *type, const int64_t *shape, size_t rank) {
+static void copy_shape_to_arena(IR_Type *type, const int64_t *shape, size_t rank) {
     type->data.shaped.rank = (uint32_t)rank;
     if (rank > 0 && shape) {
-        type->data.shaped.shape = arena_alloc_array(global_arena, int64_t, rank);
+        type->data.shaped.shape = arena_alloc_array(global_handle_manager->arena, int64_t, rank);
         for (size_t i = 0; i < rank; i++) {
             type->data.shaped.shape[i] = shape[i];
         }
@@ -464,163 +569,160 @@ static void copy_shape(struct MLIR_Type *type, const int64_t *shape, size_t rank
     }
 }
 
-MLIR_Type *MLIR_CreateTypeTensor(const int64_t *shape, size_t rank, MLIR_Type *element_type) {
-    struct MLIR_Type *type = arena_alloc(global_arena, struct MLIR_Type);
-    *type = (struct MLIR_Type){0};
-    type->kind = TYPE_KIND_TENSOR;
-    type->data.shaped.element_type = element_type;
-    copy_shape(type, shape, rank);
-    return type;
+MLIR_TypeHandle MLIR_CreateTypeTensor(const int64_t *shape, size_t rank, MLIR_TypeHandle element_type) {
+    IR_Type t = {0};
+    t.kind = TYPE_KIND_TENSOR;
+    t.data.shaped.element_type = element_type;
+    copy_shape_to_arena(&t, shape, rank);
+    return alloc_type(t);
 }
 
-MLIR_Type *MLIR_CreateTypeMemref(const int64_t *shape, size_t rank, MLIR_Type *element_type) {
-    struct MLIR_Type *type = arena_alloc(global_arena, struct MLIR_Type);
-    *type = (struct MLIR_Type){0};
-    type->kind = TYPE_KIND_MEMREF;
-    type->data.shaped.element_type = element_type;
-    copy_shape(type, shape, rank);
-    return type;
+MLIR_TypeHandle MLIR_CreateTypeMemref(const int64_t *shape, size_t rank, MLIR_TypeHandle element_type) {
+    IR_Type t = {0};
+    t.kind = TYPE_KIND_MEMREF;
+    t.data.shaped.element_type = element_type;
+    copy_shape_to_arena(&t, shape, rank);
+    return alloc_type(t);
 }
 
-MLIR_Type *MLIR_CreateTypePointer(MLIR_Type *element_type, bool has_address_space, uint32_t address_space) {
-    struct MLIR_Type *type = arena_alloc(global_arena, struct MLIR_Type);
-    *type = (struct MLIR_Type){0};
-    type->kind = TYPE_KIND_POINTER;
-    type->data.pointer.element_type = element_type;
-    type->data.pointer.has_address_space = has_address_space;
-    type->data.pointer.address_space = address_space;
-    return type;
+MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_TypeHandle element_type, bool has_address_space, uint32_t address_space) {
+    IR_Type t = {0};
+    t.kind = TYPE_KIND_POINTER;
+    t.data.pointer.element_type = element_type;
+    t.data.pointer.has_address_space = has_address_space;
+    t.data.pointer.address_space = address_space;
+    return alloc_type(t);
 }
 
-void MLIR_SetTypeIntegerProperties(MLIR_Type *type, uint32_t width, bool is_signed) {
-    type->kind = TYPE_KIND_INTEGER;
-    type->data.integer.width = width;
-    type->data.integer.is_signed = is_signed;
+void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle th, uint32_t width, bool is_signed) {
+    IR_Type *t = resolve_type(th);
+    if (!t) return;
+    t->kind = TYPE_KIND_INTEGER;
+    t->data.integer.width = width;
+    t->data.integer.is_signed = is_signed;
 }
 
-void MLIR_SetTypeFloatProperties(MLIR_Type *type, uint32_t width, bool is_bfloat) {
-    type->kind = TYPE_KIND_FLOAT;
-    type->data.floating.width = width;
-    type->data.floating.is_bfloat = is_bfloat;
+void MLIR_SetTypeFloatProperties(MLIR_TypeHandle th, uint32_t width, bool is_bfloat) {
+    IR_Type *t = resolve_type(th);
+    if (!t) return;
+    t->kind = TYPE_KIND_FLOAT;
+    t->data.floating.width = width;
+    t->data.floating.is_bfloat = is_bfloat;
 }
 
-// Attribute creation and manipulation
-MLIR_Attribute *MLIR_CreateAttributeInteger(string name, int64_t value) {
-    struct MLIR_Attribute *attr = arena_alloc(global_arena, struct MLIR_Attribute);
-    *attr = (struct MLIR_Attribute){0};
-    attr->kind = ATTR_KIND_INTEGER;
-    attr->name = name;
-    attr->data.integer_value = value;
-    return attr;
+// Attribute creation
+MLIR_AttributeHandle MLIR_CreateAttributeInteger(string name, int64_t value) {
+    IR_Attribute a = {0};
+    a.kind = ATTR_KIND_INTEGER;
+    a.name = name;
+    a.data.integer_value = value;
+    return alloc_attr_obj(a);
 }
 
-MLIR_Attribute *MLIR_CreateAttributeString(string name, string value) {
-    struct MLIR_Attribute *attr = arena_alloc(global_arena, struct MLIR_Attribute);
-    *attr = (struct MLIR_Attribute){0};
-    attr->kind = ATTR_KIND_STRING;
-    attr->name = name;
-    attr->data.string_value = value;
-    return attr;
+MLIR_AttributeHandle MLIR_CreateAttributeString(string name, string value) {
+    IR_Attribute a = {0};
+    a.kind = ATTR_KIND_STRING;
+    a.name = name;
+    a.data.string_value = value;
+    return alloc_attr_obj(a);
 }
 
-MLIR_Attribute *MLIR_CreateAttributeFloat(string name, double value) {
-    struct MLIR_Attribute *attr = arena_alloc(global_arena, struct MLIR_Attribute);
-    *attr = (struct MLIR_Attribute){0};
-    attr->kind = ATTR_KIND_FLOAT;
-    attr->name = name;
-    attr->data.float_value = value;
-    return attr;
+MLIR_AttributeHandle MLIR_CreateAttributeFloat(string name, double value) {
+    IR_Attribute a = {0};
+    a.kind = ATTR_KIND_FLOAT;
+    a.name = name;
+    a.data.float_value = value;
+    return alloc_attr_obj(a);
 }
 
-MLIR_Attribute *MLIR_CreateAttributeBool(string name, bool value) {
-    struct MLIR_Attribute *attr = arena_alloc(global_arena, struct MLIR_Attribute);
-    *attr = (struct MLIR_Attribute){0};
-    attr->kind = ATTR_KIND_BOOL;
-    attr->name = name;
-    attr->data.bool_value = value;
-    return attr;
+MLIR_AttributeHandle MLIR_CreateAttributeBool(string name, bool value) {
+    IR_Attribute a = {0};
+    a.kind = ATTR_KIND_BOOL;
+    a.name = name;
+    a.data.bool_value = value;
+    return alloc_attr_obj(a);
 }
 
-MLIR_Attribute *MLIR_CreateAttributeArray(string name, MLIR_Attribute **elements, size_t count) {
-    struct MLIR_Attribute *attr = arena_alloc(global_arena, struct MLIR_Attribute);
-    *attr = (struct MLIR_Attribute){0};
-    attr->kind = ATTR_KIND_ARRAY;
-    attr->name = name;
-    attr->data.array.elements = elements;
-    attr->data.array.count = count;
-    return attr;
+MLIR_AttributeHandle MLIR_CreateAttributeArray(string name, MLIR_AttributeHandle *elements, size_t count) {
+    IR_Attribute a = {0};
+    a.kind = ATTR_KIND_ARRAY;
+    a.name = name;
+    a.data.array.elements = elements;
+    a.data.array.count = count;
+    return alloc_attr_obj(a);
 }
 
-MLIR_Attribute *MLIR_CreateAttributeDict(string name, MLIR_Attribute **elements, size_t count) {
-    struct MLIR_Attribute *attr = arena_alloc(global_arena, struct MLIR_Attribute);
-    *attr = (struct MLIR_Attribute){0};
-    attr->kind = ATTR_KIND_DICT;
-    attr->name = name;
-    // Dictionary uses the same storage as array
-    attr->data.array.elements = elements;
-    attr->data.array.count = count;
-    return attr;
+MLIR_AttributeHandle MLIR_CreateAttributeDict(string name, MLIR_AttributeHandle *elements, size_t count) {
+    IR_Attribute a = {0};
+    a.kind = ATTR_KIND_DICT;
+    a.name = name;
+    a.data.array.elements = elements;
+    a.data.array.count = count;
+    return alloc_attr_obj(a);
 }
 
-// Value creation and manipulation
-MLIR_Value *MLIR_CreateValueBlockArg(string register_name, uint32_t result_index, MLIR_Type *type, MLIR_Location *location) {
-    struct MLIR_Value *value = arena_alloc(global_arena, struct MLIR_Value);
-    *value = (struct MLIR_Value){0};
-    value->kind = BLOCK_ARG;
-    value->register_name = register_name;
-    value->result_index = result_index;
-    value->type = type;
-    value->location = location;
-    value->def = NULL;
-    return value;
+// Value creation
+MLIR_ValueHandle MLIR_CreateValueBlockArg(string register_name, uint32_t result_index, MLIR_TypeHandle type, MLIR_LocationHandle location) {
+    IR_Value v = {0};
+    v.kind = BLOCK_ARG;
+    v.register_name = register_name;
+    v.result_index = result_index;
+    v.type = type;
+    v.location = location;
+    v.def_handle = MLIR_INVALID_HANDLE;
+    return alloc_value(v);
 }
 
-MLIR_Value *MLIR_CreateValueOpResult(void *def, uint32_t result_index, MLIR_Type *type, string register_name, MLIR_Location *location) {
-    struct MLIR_Value *value = arena_alloc(global_arena, struct MLIR_Value);
-    *value = (struct MLIR_Value){0};
-    value->kind = OP_RESULT;
-    value->def = def;
-    value->result_index = result_index;
-    value->type = type;
-    value->register_name = register_name;
-    value->location = location;
-    return value;
+MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_OpHandle def, uint32_t result_index, MLIR_TypeHandle type, string register_name, MLIR_LocationHandle location) {
+    IR_Value v = {0};
+    v.kind = OP_RESULT;
+    v.def_handle = def;
+    v.result_index = result_index;
+    v.type = type;
+    v.register_name = register_name;
+    v.location = location;
+    return alloc_value(v);
 }
 
 // Block and Region creation
-MLIR_Block *MLIR_CreateBlock(void) {
-    struct MLIR_Block *block = arena_alloc(global_arena, struct MLIR_Block);
-    *block = (struct MLIR_Block){0};
-    return block;
+MLIR_BlockHandle MLIR_CreateBlock(void) {
+    IR_Block b = {0};
+    return alloc_block(b);
 }
 
-MLIR_Region *MLIR_CreateRegion(void) {
-    struct MLIR_Region *region = arena_alloc(global_arena, struct MLIR_Region);
-    *region = (struct MLIR_Region){0};
-    return region;
+MLIR_RegionHandle MLIR_CreateRegion(void) {
+    IR_Region r = {0};
+    return alloc_region(r);
 }
 
-void MLIR_AppendOpAttribute(MLIR_Op *op, MLIR_Attribute *attr) {
+void MLIR_AppendOpAttribute(MLIR_OpHandle oh, MLIR_AttributeHandle attr) {
+    IR_Op *op = resolve_op(oh);
+    if (!op) return;
     size_t new_count = op->n_attributes + 1;
-    struct MLIR_Attribute **new_attrs = arena_alloc_array(global_arena, struct MLIR_Attribute*, new_count);
+    Arena *arena = global_handle_manager->arena;
+    MLIR_AttributeHandle *new_attrs = arena_alloc_array(arena, MLIR_AttributeHandle, new_count);
     if (op->attributes) {
-        memcpy(new_attrs, op->attributes, op->n_attributes * sizeof(struct MLIR_Attribute*));
+        memcpy(new_attrs, op->attributes, op->n_attributes * sizeof(MLIR_AttributeHandle));
     }
     new_attrs[new_count - 1] = attr;
     op->attributes = new_attrs;
     op->n_attributes = new_count;
 }
 
-int64_t MLIR_GetOpSourceLineStart(const MLIR_Op *op) {
-    return op->source_line_start;
+int64_t MLIR_GetOpSourceLineStart(MLIR_OpHandle oh) {
+    IR_Op *op = resolve_op(oh);
+    return op ? op->source_line_start : -1;
 }
 
-MLIR_Location *MLIR_GetOpUnnumberedLocationDef(const MLIR_Op *op) {
-    return op->unnumbered_loc_def;
+MLIR_LocationHandle MLIR_GetOpUnnumberedLocationDef(MLIR_OpHandle oh) {
+    IR_Op *op = resolve_op(oh);
+    return op ? op->unnumbered_loc_def : MLIR_INVALID_HANDLE;
 }
 
 // Attribute accessors
-MLIR_AttrKind MLIR_GetAttributeKind(const MLIR_Attribute *attr) {
+MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle ah) {
+    IR_Attribute *attr = resolve_attr(ah);
+    if (!attr) return MLIR_ATTR_KIND_INTEGER;
     switch (attr->kind) {
         case ATTR_KIND_INTEGER: return MLIR_ATTR_KIND_INTEGER;
         case ATTR_KIND_FLOAT:   return MLIR_ATTR_KIND_FLOAT;
@@ -632,63 +734,78 @@ MLIR_AttrKind MLIR_GetAttributeKind(const MLIR_Attribute *attr) {
     }
 }
 
-string MLIR_GetAttributeName(const MLIR_Attribute *attr) {
-    return attr->name;
+string MLIR_GetAttributeName(MLIR_AttributeHandle ah) {
+    IR_Attribute *attr = resolve_attr(ah);
+    return attr ? attr->name : str_lit("");
 }
 
-int64_t MLIR_GetAttributeInteger(const MLIR_Attribute *attr) {
-    return attr->data.integer_value;
+int64_t MLIR_GetAttributeInteger(MLIR_AttributeHandle ah) {
+    IR_Attribute *attr = resolve_attr(ah);
+    return attr ? attr->data.integer_value : 0;
 }
 
-string MLIR_GetAttributeString(const MLIR_Attribute *attr) {
-    return attr->data.string_value;
+string MLIR_GetAttributeString(MLIR_AttributeHandle ah) {
+    IR_Attribute *attr = resolve_attr(ah);
+    return attr ? attr->data.string_value : str_lit("");
 }
 
-double MLIR_GetAttributeFloat(const MLIR_Attribute *attr) {
-    return attr->data.float_value;
+double MLIR_GetAttributeFloat(MLIR_AttributeHandle ah) {
+    IR_Attribute *attr = resolve_attr(ah);
+    return attr ? attr->data.float_value : 0.0;
 }
 
-bool MLIR_GetAttributeBool(const MLIR_Attribute *attr) {
-    return attr->data.bool_value;
+bool MLIR_GetAttributeBool(MLIR_AttributeHandle ah) {
+    IR_Attribute *attr = resolve_attr(ah);
+    return attr ? attr->data.bool_value : false;
 }
 
-size_t MLIR_GetAttributeArraySize(const MLIR_Attribute *attr) {
-    return attr->data.array.count;
+size_t MLIR_GetAttributeArraySize(MLIR_AttributeHandle ah) {
+    IR_Attribute *attr = resolve_attr(ah);
+    return attr ? attr->data.array.count : 0;
 }
 
-MLIR_Attribute *MLIR_GetAttributeArrayElement(const MLIR_Attribute *attr, size_t idx) {
-    if (idx >= attr->data.array.count) return NULL;
+MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_AttributeHandle ah, size_t idx) {
+    IR_Attribute *attr = resolve_attr(ah);
+    if (!attr || idx >= attr->data.array.count) return MLIR_INVALID_HANDLE;
     return attr->data.array.elements[idx];
 }
 
-size_t MLIR_GetAttributeDictSize(const MLIR_Attribute *attr) {
-    return attr->data.array.count;
+size_t MLIR_GetAttributeDictSize(MLIR_AttributeHandle ah) {
+    IR_Attribute *attr = resolve_attr(ah);
+    return attr ? attr->data.array.count : 0;
 }
 
-MLIR_Attribute *MLIR_GetAttributeDictElement(const MLIR_Attribute *attr, size_t idx) {
-    if (idx >= attr->data.array.count) return NULL;
+MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_AttributeHandle ah, size_t idx) {
+    IR_Attribute *attr = resolve_attr(ah);
+    if (!attr || idx >= attr->data.array.count) return MLIR_INVALID_HANDLE;
     return attr->data.array.elements[idx];
 }
 
 // Value accessors
-MLIR_ValueKind MLIR_GetValueKind(const MLIR_Value *value) {
-    return value->kind;
+MLIR_ValueKind MLIR_GetValueKind(MLIR_ValueHandle vh) {
+    IR_Value *v = resolve_value(vh);
+    return v ? v->kind : BLOCK_ARG;
 }
 
-MLIR_Type *MLIR_GetValueType(const MLIR_Value *value) {
-    return value->type;
+MLIR_TypeHandle MLIR_GetValueType(MLIR_ValueHandle vh) {
+    IR_Value *v = resolve_value(vh);
+    return v ? v->type : MLIR_INVALID_HANDLE;
 }
 
-string MLIR_GetValueRegisterName(const MLIR_Value *value) {
-    return value->register_name;
+string MLIR_GetValueRegisterName(MLIR_ValueHandle vh) {
+    IR_Value *v = resolve_value(vh);
+    return v ? v->register_name : str_lit("");
 }
 
-uint32_t MLIR_GetValueResultIndex(const MLIR_Value *value) {
-    return value->result_index;
+uint32_t MLIR_GetValueResultIndex(MLIR_ValueHandle vh) {
+    IR_Value *v = resolve_value(vh);
+    return v ? v->result_index : 0;
 }
 
-MLIR_Op *MLIR_GetValueDefiningOp(const MLIR_Value *value) {
-    return (MLIR_Op*)value->def;
+MLIR_OpHandle MLIR_GetValueDefiningOp(MLIR_ValueHandle vh) {
+    IR_Value *v = resolve_value(vh);
+    if (!v || v->kind != OP_RESULT) return MLIR_INVALID_HANDLE;
+    return (MLIR_OpHandle)v->def_handle;
 }
 
 string MLIR_MLIR_OpTypeToString(MLIR_OpType type) {
@@ -696,7 +813,9 @@ string MLIR_MLIR_OpTypeToString(MLIR_OpType type) {
 }
 
 // Location accessors
-MLIR_LocationKind MLIR_GetLocationKind(const MLIR_Location *loc) {
+MLIR_LocationKind MLIR_GetLocationKind(MLIR_LocationHandle lh) {
+    IR_Location *loc = resolve_loc(lh);
+    if (!loc) return MLIR_LOC_UNKNOWN;
     switch (loc->kind) {
         case LOC_KIND_FILE: return MLIR_LOC_FILE;
         case LOC_KIND_NAME: return MLIR_LOC_NAME;
@@ -707,131 +826,142 @@ MLIR_LocationKind MLIR_GetLocationKind(const MLIR_Location *loc) {
     }
 }
 
-string MLIR_GetLocationOriginalText(const MLIR_Location *loc) {
-    return loc->original_text;
+string MLIR_GetLocationOriginalText(MLIR_LocationHandle lh) {
+    IR_Location *loc = resolve_loc(lh);
+    return loc ? loc->original_text : str_lit("");
 }
 
-string MLIR_GetLocationFileFilename(const MLIR_Location *loc) {
-    return loc->data.file.filename;
+string MLIR_GetLocationFileFilename(MLIR_LocationHandle lh) {
+    IR_Location *loc = resolve_loc(lh);
+    return loc ? loc->data.file.filename : str_lit("");
 }
 
-int MLIR_GetLocationFileLine(const MLIR_Location *loc) {
-    return loc->data.file.line;
+int MLIR_GetLocationFileLine(MLIR_LocationHandle lh) {
+    IR_Location *loc = resolve_loc(lh);
+    return loc ? loc->data.file.line : 0;
 }
 
-int MLIR_GetLocationFileColumn(const MLIR_Location *loc) {
-    return loc->data.file.column;
+int MLIR_GetLocationFileColumn(MLIR_LocationHandle lh) {
+    IR_Location *loc = resolve_loc(lh);
+    return loc ? loc->data.file.column : 0;
 }
 
-string MLIR_GetLocationName(const MLIR_Location *loc) {
-    return loc->data.name.name;
+string MLIR_GetLocationName(MLIR_LocationHandle lh) {
+    IR_Location *loc = resolve_loc(lh);
+    return loc ? loc->data.name.name : str_lit("");
 }
 
-int MLIR_GetLocationRefId(const MLIR_Location *loc) {
-    return loc->data.ref.ref_id;
+int MLIR_GetLocationRefId(MLIR_LocationHandle lh) {
+    IR_Location *loc = resolve_loc(lh);
+    return loc ? loc->data.ref.ref_id : 0;
 }
 
-MLIR_Location *MLIR_CreateLocationUnknown(string original_text) {
-    struct MLIR_Location *loc = arena_alloc(global_arena, struct MLIR_Location);
-    *loc = (struct MLIR_Location){0};
-    loc->kind = LOC_KIND_UNKNOWN;
-    loc->original_text = original_text;
-    return loc;
+MLIR_LocationHandle MLIR_CreateLocationUnknown(string original_text) {
+    IR_Location l = {0};
+    l.kind = LOC_KIND_UNKNOWN;
+    l.original_text = original_text;
+    return alloc_loc(l);
 }
 
-MLIR_Location *MLIR_CreateLocationFile(string filename, int line, int column) {
-    struct MLIR_Location *loc = arena_alloc(global_arena, struct MLIR_Location);
-    *loc = (struct MLIR_Location){0};
-    loc->kind = LOC_KIND_FILE;
-    loc->data.file.filename = filename;
-    loc->data.file.line = line;
-    loc->data.file.column = column;
-    loc->original_text = format(global_arena, str_lit("loc({}:{}:{})"), filename, (int64_t)line, (int64_t)column);
-    return loc;
+MLIR_LocationHandle MLIR_CreateLocationFile(string filename, int line, int column) {
+    IR_Location l = {0};
+    l.kind = LOC_KIND_FILE;
+    l.data.file.filename = filename;
+    l.data.file.line = line;
+    l.data.file.column = column;
+    l.original_text = format(global_handle_manager->arena, str_lit("loc({}:{}:{})"), filename, (int64_t)line, (int64_t)column);
+    return alloc_loc(l);
 }
 
-MLIR_Location *MLIR_CreateLocationName(string name) {
-    struct MLIR_Location *loc = arena_alloc(global_arena, struct MLIR_Location);
-    *loc = (struct MLIR_Location){0};
-    loc->kind = LOC_KIND_NAME;
-    loc->data.name.name = name;
-    loc->original_text = format(global_arena, str_lit("loc(\"{}\")"), name);
-    return loc;
+MLIR_LocationHandle MLIR_CreateLocationName(string name) {
+    IR_Location l = {0};
+    l.kind = LOC_KIND_NAME;
+    l.data.name.name = name;
+    l.original_text = format(global_handle_manager->arena, str_lit("loc(\"{}\")"), name);
+    return alloc_loc(l);
 }
 
-MLIR_Location *MLIR_CreateLocationRef(int ref_id) {
-    struct MLIR_Location *loc = arena_alloc(global_arena, struct MLIR_Location);
-    *loc = (struct MLIR_Location){0};
-    loc->kind = LOC_KIND_REF;
-    loc->data.ref.ref_id = ref_id;
-    loc->original_text = format(global_arena, str_lit("loc(#loc{})"), (int64_t)ref_id);
-    return loc;
+MLIR_LocationHandle MLIR_CreateLocationRef(int ref_id) {
+    IR_Location l = {0};
+    l.kind = LOC_KIND_REF;
+    l.data.ref.ref_id = ref_id;
+    l.original_text = format(global_handle_manager->arena, str_lit("loc(#loc{})"), (int64_t)ref_id);
+    return alloc_loc(l);
 }
 
-// New API functions for parser compatibility
-
-MLIR_Type *MLIR_CreateTypeOpaque(string name) {
-    struct MLIR_Type *type = arena_alloc(global_arena, struct MLIR_Type);
-    *type = (struct MLIR_Type){0};
-    type->kind = TYPE_KIND_OPAQUE;
-    // Store the name in a way that can be retrieved later if needed
-    return type;
+MLIR_TypeHandle MLIR_CreateTypeOpaque(string name) {
+    (void)name;
+    IR_Type t = {0};
+    t.kind = TYPE_KIND_OPAQUE;
+    return alloc_type(t);
 }
 
-void MLIR_SetTypeTensorProperties(MLIR_Type *type, const int64_t *shape, size_t rank, MLIR_Type *element_type) {
-    type->kind = TYPE_KIND_TENSOR;
-    type->data.shaped.element_type = element_type;
-    // Note: These functions expect the shape to be pre-allocated, they just set the pointer
-    type->data.shaped.shape = (int64_t*)shape;
-    type->data.shaped.rank = (uint32_t)rank;
+void MLIR_SetTypeTensorProperties(MLIR_TypeHandle th, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type) {
+    IR_Type *t = resolve_type(th);
+    if (!t) return;
+    t->kind = TYPE_KIND_TENSOR;
+    t->data.shaped.element_type = element_type;
+    t->data.shaped.shape = (int64_t*)shape;
+    t->data.shaped.rank = (uint32_t)rank;
 }
 
-void MLIR_SetTypeMemrefProperties(MLIR_Type *type, const int64_t *shape, size_t rank, MLIR_Type *element_type) {
-    type->kind = TYPE_KIND_MEMREF;
-    type->data.shaped.element_type = element_type;
-    // Note: These functions expect the shape to be pre-allocated, they just set the pointer
-    type->data.shaped.shape = (int64_t*)shape;
-    type->data.shaped.rank = (uint32_t)rank;
+void MLIR_SetTypeMemrefProperties(MLIR_TypeHandle th, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type) {
+    IR_Type *t = resolve_type(th);
+    if (!t) return;
+    t->kind = TYPE_KIND_MEMREF;
+    t->data.shaped.element_type = element_type;
+    t->data.shaped.shape = (int64_t*)shape;
+    t->data.shaped.rank = (uint32_t)rank;
 }
 
-void MLIR_SetTypePointerProperties(MLIR_Type *type, MLIR_Type *element_type, bool has_address_space, uint32_t address_space) {
-    type->kind = TYPE_KIND_POINTER;
-    type->data.pointer.element_type = element_type;
-    type->data.pointer.has_address_space = has_address_space;
-    type->data.pointer.address_space = address_space;
+void MLIR_SetTypePointerProperties(MLIR_TypeHandle th, MLIR_TypeHandle element_type, bool has_address_space, uint32_t address_space) {
+    IR_Type *t = resolve_type(th);
+    if (!t) return;
+    t->kind = TYPE_KIND_POINTER;
+    t->data.pointer.element_type = element_type;
+    t->data.pointer.has_address_space = has_address_space;
+    t->data.pointer.address_space = address_space;
 }
 
-// Type introspection functions
-bool MLIR_IsTypeInteger(const MLIR_Type *type) {
-    return type->kind == TYPE_KIND_INTEGER;
+// Type introspection
+bool MLIR_IsTypeInteger(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    return t && t->kind == TYPE_KIND_INTEGER;
 }
 
-bool MLIR_IsTypeFloat(const MLIR_Type *type) {
-    return type->kind == TYPE_KIND_FLOAT;
+bool MLIR_IsTypeFloat(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    return t && t->kind == TYPE_KIND_FLOAT;
 }
 
-bool MLIR_IsTypeTensor(const MLIR_Type *type) {
-    return type->kind == TYPE_KIND_TENSOR;
+bool MLIR_IsTypeTensor(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    return t && t->kind == TYPE_KIND_TENSOR;
 }
 
-bool MLIR_IsTypeMemref(const MLIR_Type *type) {
-    return type->kind == TYPE_KIND_MEMREF;
+bool MLIR_IsTypeMemref(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    return t && t->kind == TYPE_KIND_MEMREF;
 }
 
-bool MLIR_IsTypePointer(const MLIR_Type *type) {
-    return type->kind == TYPE_KIND_POINTER;
+bool MLIR_IsTypePointer(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    return t && t->kind == TYPE_KIND_POINTER;
 }
 
-bool MLIR_IsTypeIndex(const MLIR_Type *type) {
-    return type->kind == TYPE_KIND_INDEX;
+bool MLIR_IsTypeIndex(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    return t && t->kind == TYPE_KIND_INDEX;
 }
 
-bool MLIR_IsTypeUnknown(const MLIR_Type *type) {
-    return type->kind == TYPE_KIND_UNKNOWN;
+bool MLIR_IsTypeUnknown(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    return t && t->kind == TYPE_KIND_UNKNOWN;
 }
 
-bool MLIR_IsTypeOpaque(const MLIR_Type *type) {
-    return type->kind == TYPE_KIND_OPAQUE;
+bool MLIR_IsTypeOpaque(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    return t && t->kind == TYPE_KIND_OPAQUE;
 }
 
 #ifdef __cplusplus
