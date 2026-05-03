@@ -177,8 +177,11 @@ def run(basename: str, cmd: Union[pathlib.Path, str],
     outfile = os.path.join(out_dir, basename + "." + "out")
 
     infile = infile.replace("\\\\", "\\").replace("\\", "/")
+    # Normalize the outfile path passed to the shell to forward slashes too;
+    # backslashes confuse sh on Windows.
+    outfile_for_shell = outfile.replace("\\", "/")
 
-    cmd2 = cmd.format(infile=infile, outfile=outfile)
+    cmd2 = cmd.format(infile=infile, outfile=outfile_for_shell)
     if extra_args:
         cmd2 += " " + extra_args
     # On Windows, subprocess(shell=True) launches cmd.exe which doesn't
