@@ -50,3 +50,11 @@ jobs:
         if: matrix.platform == 'windows'
         run: ${{ matrix.pixi-command }}
         shell: cmd
+
+      - name: Upload test outputs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-outputs-${{ matrix.platform }}
+          path: tests/output/
+          if-no-files-found: ignore

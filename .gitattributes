@@ -1,0 +1,25 @@
+# Default: normalize text files to LF on commit, leave LF in working tree.
+* text=auto eol=lf
+
+# Be explicit about source / test / config files.
+*.c       text eol=lf
+*.h       text eol=lf
+*.re      text eol=lf
+*.py      text eol=lf
+*.toml    text eol=lf
+*.lock    text eol=lf
+*.md      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.sh      text eol=lf
+*.json    text eol=lf
+*.mlir    text eol=lf
+*.ttir    text eol=lf
+*.out     text eol=lf
+*.stderr  text eol=lf
+
+# Treat anything else as binary by default.
+*.wasm  binary
+*.exe   binary
+*.obj   binary
+*.o     binary
