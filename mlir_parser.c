@@ -124,7 +124,7 @@ static MLIR_TypeHandle parse_tensor_like_type(MLIR_Context *ctx, string content,
         }
 
         if (rank > 0) {
-            int64_t dims[rank];
+            int64_t *dims = arena_alloc_array(MLIR_GetArenaAllocator(ctx), int64_t, rank);
             size_t pos = 0;
             uint32_t dim_idx = 0;
             while (pos <= shape_str.size && dim_idx < rank) {
