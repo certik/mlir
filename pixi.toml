@@ -248,7 +248,7 @@ link \
     /out:parser.exe
 """, depends-on = ["tokenizer"], description = "Build parser.exe native binary (Windows only; requires MSVC vcvars64)" }
 
-test_windows = { cmd = "parser.exe --construct && python run_tests.py -s", depends-on = ["build_windows"], description = "Run mlir test suite (Windows)" }
+test_windows = { cmd = "./parser.exe --construct && python run_tests.py -s", depends-on = ["build_windows"], description = "Run mlir test suite (Windows)" }
 
 [feature.windows.target.win-64.dependencies]
 # MSVC must be available on PATH (e.g. via vcvars64.bat)
