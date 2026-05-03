@@ -1262,7 +1262,7 @@ void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *
             if (parse_type_string(parser, &type_str)) {
                 MLIR_TypeHandle type = mlir_type_create_from_string(parser->ctx, type_str);
                 if (result_types) {
-                    *result_types = arena_alloc(parser->arena, MLIR_TypeHandle);
+                    *result_types = arena_alloc_array(parser->arena, MLIR_TypeHandle, 1);
                     (*result_types)[0] = type;
                     *n_result_types = 1;
                 }
@@ -1310,7 +1310,7 @@ void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *
                 if (parse_type_string(parser, &type_res)) {
                     MLIR_TypeHandle type = mlir_type_create_from_string(parser->ctx, type_res);
                     if (result_types) {
-                        *result_types = arena_alloc(parser->arena, MLIR_TypeHandle);
+                        *result_types = arena_alloc_array(parser->arena, MLIR_TypeHandle, 1);
                         (*result_types)[0] = type;
                         *n_result_types = 1;
                     }
@@ -1322,7 +1322,7 @@ void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *
                 if (parse_type_string(parser, &type_right)) {
                     MLIR_TypeHandle type = mlir_type_create_from_string(parser->ctx, type_right);
                     if (result_types) {
-                        *result_types = arena_alloc(parser->arena, MLIR_TypeHandle);
+                        *result_types = arena_alloc_array(parser->arena, MLIR_TypeHandle, 1);
                         (*result_types)[0] = type;
                         *n_result_types = 1;
                     }
@@ -1352,7 +1352,7 @@ void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *
                 if (parse_type_string(parser, &type_dst)) {
                     MLIR_TypeHandle type = mlir_type_create_from_string(parser->ctx, type_dst);
                     if (result_types) {
-                        *result_types = arena_alloc(parser->arena, MLIR_TypeHandle);
+                        *result_types = arena_alloc_array(parser->arena, MLIR_TypeHandle, 1);
                         (*result_types)[0] = type;
                         *n_result_types = 1;
                     }
@@ -1370,7 +1370,7 @@ void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *
                 if (op_type != OP_TYPE_ARITH_CMPI) {
                     MLIR_TypeHandle type = mlir_type_create_from_string(parser->ctx, type_left);
                     if (result_types) {
-                        *result_types = arena_alloc(parser->arena, MLIR_TypeHandle);
+                        *result_types = arena_alloc_array(parser->arena, MLIR_TypeHandle, 1);
                         (*result_types)[0] = type;
                         *n_result_types = 1;
                     }
@@ -1386,7 +1386,7 @@ void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *
         if (parse_type_string(parser, &type_str)) {
             MLIR_TypeHandle type = mlir_type_create_from_string(parser->ctx, type_str);
             if (result_types) {
-                *result_types = arena_alloc(parser->arena, MLIR_TypeHandle);
+                *result_types = arena_alloc_array(parser->arena, MLIR_TypeHandle, 1);
                 (*result_types)[0] = type;
                 *n_result_types = 1;
             }

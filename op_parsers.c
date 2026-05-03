@@ -61,7 +61,7 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
             if (!result_value) {
                 result_value = MLIR_CreateValueOpResult(parser->ctx, MLIR_INVALID_HANDLE, 0, bool_type, (string){MLIR_INVALID_HANDLE, 0}, MLIR_INVALID_HANDLE);
             }
-            result_types = arena_alloc(parser->arena, MLIR_TypeHandle);
+            result_types = arena_alloc_array(parser->arena, MLIR_TypeHandle, 1);
             result_types[0] = bool_type;
             n_result_types = 1;
         } else {
@@ -93,7 +93,7 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
         if (parse_type_string(parser, &type_str)) {
             MLIR_TypeHandle type = mlir_type_create_from_string(parser->ctx, type_str);
             if (!result_types) {
-                result_types = arena_alloc(parser->arena, MLIR_TypeHandle);
+                result_types = arena_alloc_array(parser->arena, MLIR_TypeHandle, 1);
             }
             result_types[0] = type;
             n_result_types = 1;
@@ -113,7 +113,7 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
     }
 
     if (!results) {
-        results = arena_alloc(parser->arena, MLIR_ValueHandle);
+        results = arena_alloc_array(parser->arena, MLIR_ValueHandle, 1);
         results[0] = result_value;
         n_results = 1;
     }
@@ -189,7 +189,7 @@ OperationParserResult parse_arith_binary_op(Parser *parser, const OperationParse
 
     // Optional default result type for specific ops when not provided
     if (n_result_types == 0 && params->op_type == OP_TYPE_ARITH_ADDF) {
-        result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+        result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
         result_types[0] = mlir_type_create_from_string(params->ctx, str_lit("tensor<16xf32>"));
         n_result_types = 1;
     }
@@ -299,7 +299,7 @@ OperationParserResult parse_func_call_op(Parser *parser, const OperationParserPa
             parser_expect(parser, TK_ARROW);
             string type_str = str_lit("");
             if (parse_type_string(parser, &type_str)) {
-                result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+                result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
                 result_types[0] = mlir_type_create_from_string(params->ctx, type_str);
                 n_result_types = 1;
             }
@@ -407,7 +407,7 @@ OperationParserResult parse_tt_splat_op(Parser *parser, const OperationParserPar
             OperationParserResult empty = {0};
             return empty;
         }
-        operands = arena_alloc(params->arena, MLIR_ValueHandle);
+        operands = arena_alloc_array(params->arena, MLIR_ValueHandle, 1);
         operands[0] = operand;
         n_operands = 1;
     }
@@ -440,7 +440,7 @@ OperationParserResult parse_tt_splat_op(Parser *parser, const OperationParserPar
         } else {
             result_type = mlir_type_create_from_string(params->ctx, str_lit("tensor<16xi32>"));
         }
-        result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+        result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
         result_types[0] = result_type;
         n_result_types = 1;
     }
@@ -608,7 +608,7 @@ OperationParserResult parse_tt_addptr_op(Parser *parser, const OperationParserPa
 
         string pointer_sig = str_lit("");
         if (parse_type_string(parser, &pointer_sig)) {
-            result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+            result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
             result_types[0] = mlir_type_create_from_string(params->ctx, pointer_sig);
             n_result_types = 1;
         }
@@ -624,7 +624,7 @@ OperationParserResult parse_tt_addptr_op(Parser *parser, const OperationParserPa
         MLIR_ValueHandle first = operands.data[0];
         MLIR_TypeHandle first_type = first ? MLIR_GetValueType(first) : MLIR_INVALID_HANDLE;
         if (first_type) {
-            result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+            result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
             result_types[0] = first_type;
             n_result_types = 1;
         }
@@ -1139,7 +1139,7 @@ OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserPa
         }
         parser_expect(parser, TK_RPAREN);
         if (region) {
-            regions = arena_alloc(params->arena, MLIR_RegionHandle);
+            regions = arena_alloc_array(params->arena, MLIR_RegionHandle, 1);
             regions[0] = region;
             n_regions = 1;
         }
@@ -1168,7 +1168,7 @@ OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserPa
         parser_expect(parser, TK_ARROW);
         string type_str = str_lit("");
         if (parse_type_string(parser, &type_str)) {
-            result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+            result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
             result_types[0] = mlir_type_create_from_string(params->ctx, type_str);
             n_result_types = 1;
         }
@@ -1557,7 +1557,7 @@ OperationParserResult parse_affine_load_op(Parser *parser, const OperationParser
                     parser_expect(parser, TK_NAME);
                 }
 
-                result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+                result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
                 result_types[0] = mlir_type_create_from_string(params->ctx, element_type);
                 n_result_types = 1;
 
@@ -1634,7 +1634,7 @@ OperationParserResult parse_index_constant_op(Parser *parser, const OperationPar
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, MLIR_INVALID_HANDLE);
 
     if (n_result_types == 0) {
-        result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+        result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
         result_types[0] = mlir_type_create_from_string(params->ctx, str_lit("index"));
         n_result_types = 1;
     }
@@ -1735,7 +1735,7 @@ OperationParserResult parse_tensor_splat_op(Parser *parser, const OperationParse
                     parser_next_token(parser);
                 }
 
-                result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+                result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
                 result_types[0] = mlir_type_create_from_string(params->ctx, tensor_type);
                 n_result_types = 1;
             }
@@ -1841,7 +1841,7 @@ OperationParserResult parse_arith_select_op(Parser *parser, const OperationParse
             }
 
             if (result_type.size > 0) {
-                result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+                result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
                 result_types[0] = mlir_type_create_from_string(params->ctx, result_type);
                 n_result_types = 1;
             }
@@ -1945,7 +1945,7 @@ OperationParserResult parse_tt_call_op(Parser *parser, const OperationParserPara
             }
 
             if (result_type.size > 0) {
-                result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+                result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
                 result_types[0] = mlir_type_create_from_string(params->ctx, result_type);
                 n_result_types = 1;
             }
@@ -2040,7 +2040,7 @@ OperationParserResult parse_tensor_collapse_shape_op(Parser *parser, const Opera
             }
 
             if (result_type.size > 0) {
-                result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+                result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
                 result_types[0] = mlir_type_create_from_string(params->ctx, result_type);
                 n_result_types = 1;
             }
@@ -2205,7 +2205,7 @@ OperationParserResult parse_generic_op(Parser *parser, const OperationParserPara
         if (loc2) op_location = loc2;
 
         MLIR_RegionHandle region = parse_region(parser);
-        regions = arena_alloc(parser->arena, MLIR_RegionHandle);
+        regions = arena_alloc_array(parser->arena, MLIR_RegionHandle, 1);
         regions[0] = region;
         n_regions = 1;
 
@@ -2656,7 +2656,7 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
     MLIR_RegionHandle *regions = MLIR_INVALID_HANDLE;
     size_t n_regions = 0;
     if (func_region) {
-        regions = arena_alloc(params->arena, MLIR_RegionHandle);
+        regions = arena_alloc_array(params->arena, MLIR_RegionHandle, 1);
         regions[0] = func_region;
         n_regions = 1;
     }
@@ -2745,7 +2745,7 @@ OperationParserResult parse_scf_if_op(Parser *parser, const OperationParserParam
         } else {
             string type_str = str_lit("");
             if (parse_type_string(parser, &type_str)) {
-                result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+                result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
                 result_types[0] = mlir_type_create_from_string(params->ctx, type_str);
                 n_result_types = 1;
             }
@@ -3000,7 +3000,7 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
         op_location = params->unnumbered_loc_def;
     }
 
-    MLIR_RegionHandle *regions = arena_alloc(params->arena, MLIR_RegionHandle);
+    MLIR_RegionHandle *regions = arena_alloc_array(params->arena, MLIR_RegionHandle, 1);
     regions[0] = region;
 
     MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
@@ -3120,7 +3120,7 @@ OperationParserResult parse_scf_while_op(Parser *parser, const OperationParserPa
         } else {
             string t = str_lit("");
             if (parse_type_string(parser, &t)) {
-                result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+                result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
                 result_types[0] = mlir_type_create_from_string(params->ctx, t);
                 n_result_types = 1;
             }
@@ -3305,7 +3305,7 @@ OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserP
     MLIR_AppendRegionBlock(parser->ctx, gpu_region, gpu_block);
 
     // Set regions
-    MLIR_RegionHandle *regions = arena_alloc(params->arena, MLIR_RegionHandle);
+    MLIR_RegionHandle *regions = arena_alloc_array(params->arena, MLIR_RegionHandle, 1);
     regions[0] = gpu_region;
     size_t n_regions = 1;
 
@@ -3389,7 +3389,7 @@ OperationParserResult parse_arith_cmpi_op(Parser *parser, const OperationParserP
 
     // Default result type if not specified
     if (n_result_types == 0) {
-        result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+        result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
         result_types[0] = mlir_type_create_from_string(params->ctx, str_lit("i1"));
         n_result_types = 1;
     }
@@ -3629,7 +3629,7 @@ OperationParserResult parse_tt_load_op(Parser *parser, const OperationParserPara
             }
 
             if (result_sig.size > 0) {
-                result_types = arena_alloc(params->arena, MLIR_TypeHandle);
+                result_types = arena_alloc_array(params->arena, MLIR_TypeHandle, 1);
                 result_types[0] = mlir_type_create_from_string(params->ctx, result_sig);
                 n_result_types = 1;
             }
@@ -3872,7 +3872,7 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
     size_t n_regions = 0;
     if (parser_peek(parser, TK_LBRACE_END)) {
         MLIR_RegionHandle region = parse_region(parser);
-        regions = arena_alloc(parser->arena, MLIR_RegionHandle);
+        regions = arena_alloc_array(parser->arena, MLIR_RegionHandle, 1);
         regions[0] = region;
         n_regions = 1;
     }
@@ -4005,7 +4005,7 @@ OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserP
     // Build region with the parsed block
     MLIR_RegionHandle region = MLIR_CreateRegion(parser->ctx);
     MLIR_AppendRegionBlock(parser->ctx, region, block);
-    MLIR_RegionHandle *regions = arena_alloc(parser->arena, MLIR_RegionHandle);
+    MLIR_RegionHandle *regions = arena_alloc_array(parser->arena, MLIR_RegionHandle, 1);
     regions[0] = region;
 
     // Parse attributes and result types
