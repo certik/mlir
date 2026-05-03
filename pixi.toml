@@ -220,6 +220,7 @@ link \
     /subsystem:console \
     /nodefaultlib \
     /entry:_start \
+    /STACK:8388608,8388608 \
     kernel32.lib \
     shell32.lib \
     parser.obj \
