@@ -89,13 +89,13 @@ static int parse_bb_index(string lab) {
 
 static PredComments* build_pred_comments(MLIR_Context *mlir_ctx, Arena *arena, MLIR_RegionHandle region) {
     if (!region) return NULL;
-    PredComments *pc = arena_alloc_array(arena, PredComments, 1);
+    PredComments *pc = arena_alloc(arena, sizeof(PredComments) * (1));
     (void)mlir_ctx;
     pc->region = region;
     size_t nb = MLIR_GetRegionNumBlocks(region);
     pc->n_blocks = (int)nb;
-    pc->comments = arena_alloc_array(arena, string, pc->n_blocks);
-    pc->counts = arena_alloc_array(arena, int, pc->n_blocks);
+    pc->comments = arena_alloc(arena, sizeof(string) * (pc->n_blocks));
+    pc->counts = arena_alloc(arena, sizeof(int) * (pc->n_blocks));
     for (int i=0;i<pc->n_blocks;i++){ pc->comments[i]=str_lit(""); pc->counts[i]=0; }
     // Walk operations to find branch targets
     for (size_t b=0; b<nb; b++) {
@@ -219,7 +219,11 @@ static void preassign_region_ssa(PrintCtx *ctx, MLIR_RegionHandle region, int in
 static string indent_classic(Arena *arena, int indent_level) {
     const int indent_spaces=2;
     int buf_size=indent_level*indent_spaces;
-    char* buf = arena_alloc_array(arena, char, buf_size);
+    if (buf_size <= 0) {
+        string str = {NULL, 0};
+        return str;
+    }
+    char* buf = arena_alloc(arena, sizeof(char) * (buf_size));
     for (int64_t i = 0; i < buf_size; i++) {
         buf[i] = ' ';
     }
@@ -1926,10 +1930,10 @@ static string print_location_map_classic(MLIR_Context *ctx, Arena *arena, MLIR_L
     typedef struct { string key; MLIR_LocationHandle loc; int number; } LocEntry;
     size_t cap = MLIR_GetLocationMapSize(location_map);
     if (cap == 0) return result;
-    string *keys = arena_alloc_array(arena, string, cap);
-    MLIR_LocationHandle *locs = arena_alloc_array(arena, MLIR_LocationHandle, cap);
+    string *keys = arena_alloc(arena, sizeof(string) * (cap));
+    MLIR_LocationHandle *locs = arena_alloc(arena, sizeof(MLIR_LocationHandle) * (cap));
     size_t ncol = MLIR_CollectLocationMap(location_map, keys, locs, cap);
-    LocEntry *arr = arena_alloc_array(arena, LocEntry, ncol);
+    LocEntry *arr = arena_alloc(arena, sizeof(LocEntry) * (ncol));
     size_t n = 0;
     for (size_t i = 0; i < ncol; i++) {
         string name = keys[i];
@@ -2003,8 +2007,8 @@ string print_module_classic(MLIR_Context *ctx, MLIR_OpHandle module, MLIR_Locati
     if (location_map) {
         size_t cap = MLIR_GetLocationMapSize(location_map);
         if (cap > 0) {
-            string *keys = arena_alloc_array(arena, string, cap);
-            MLIR_LocationHandle *locs = arena_alloc_array(arena, MLIR_LocationHandle, cap);
+            string *keys = arena_alloc(arena, sizeof(string) * (cap));
+            MLIR_LocationHandle *locs = arena_alloc(arena, sizeof(MLIR_LocationHandle) * (cap));
             size_t n = MLIR_CollectLocationMap(location_map, keys, locs, cap);
             for (size_t i = 0; i < n; i++) {
                 string loc_name = keys[i];

@@ -10,12 +10,6 @@
 #include <base/string.h>
 #include <base/vector.h>
 
-// Allow zero-count allocations to return NULL (matches mlir's prior behavior;
-// corec's arena_alloc asserts size > 0).
-#undef arena_alloc_array
-#define arena_alloc_array(arena, type, count) \
-    ((count) > 0 ? (type*)arena_alloc((arena), sizeof(type) * (size_t)(count)) : (type*)0)
-
 #ifdef __cplusplus
 extern "C" {
 #endif
