@@ -85,6 +85,20 @@ std::unordered_map<const void *, ValueBox *> &valueIndex() {
     return m;
 }
 
+// Side-map: per-Operation snapshot of the named attributes the user
+// supplied via MLIR_CreateOp / MLIR_AppendOpAttribute. Used by
+// MLIR_GetOpNumAttributes / MLIR_GetOpAttribute so that dialect-injected
+// inherent attributes (e.g. arith.addi's default
+// `overflowFlags = #arith.overflow<none>` property) don't leak through
+// the API and cause spurious diffs against the dialect-agnostic native
+// backend.
+std::unordered_map<const mlir::Operation *, std::vector<mlir::NamedAttribute>> &
+opUserAttrs() {
+    static std::unordered_map<const mlir::Operation *,
+                              std::vector<mlir::NamedAttribute>> m;
+    return m;
+}
+
 ValueBox *boxFor(mlir::Value v) {
     auto &m = valueIndex();
     auto it = m.find(v.getAsOpaquePointer());
@@ -238,7 +252,14 @@ extern "C" MLIR_OpHandle MLIR_CreateOp(
     for (size_t i = 0; i < n_regions; i++) {
         state.addRegion(std::unique_ptr<mlir::Region>(F<mlir::Region>(regions[i])));
     }
+    // Snapshot the user-supplied attribute set; we'll expose it (rather
+    // than the operation's combined attribute dictionary) through the
+    // MLIR_GetOpAttribute API so that dialect-injected inherent attributes
+    // (e.g. arith.addi's default overflowFlags) don't leak through.
+    std::vector<mlir::NamedAttribute> userAttrs(state.attributes.begin(),
+                                                state.attributes.end());
     mlir::Operation *op = mlir::Operation::create(state);
+    opUserAttrs()[op] = std::move(userAttrs);
 
     // Bind user-supplied result handles to the freshly-created OpResults.
     for (size_t i = 0; i < n_results; i++) {
@@ -256,6 +277,18 @@ extern "C" void MLIR_AppendOpAttribute(MLIR_Context *, MLIR_OpHandle oh,
     auto *op = F<mlir::Operation>(oh);
     const auto *na = F<mlir::NamedAttribute>(ah);
     op->setAttr(na->getName(), na->getValue());
+    auto &m = opUserAttrs();
+    auto it = m.find(op);
+    if (it != m.end()) {
+        // Replace if name already present, else append.
+        for (auto &existing : it->second) {
+            if (existing.getName() == na->getName()) {
+                existing = *na;
+                return;
+            }
+        }
+        it->second.push_back(*na);
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -301,10 +334,18 @@ extern "C" MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle h, size_t i) {
     return typeH(F<mlir::Operation>(h)->getResult(i).getType());
 }
 extern "C" size_t MLIR_GetOpNumAttributes(MLIR_OpHandle h) {
-    return F<mlir::Operation>(h)->getAttrs().size();
+    auto *op = F<mlir::Operation>(h);
+    auto &m = opUserAttrs();
+    auto it = m.find(op);
+    if (it != m.end()) return it->second.size();
+    return op->getAttrs().size();
 }
 extern "C" MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle h, size_t i) {
-    auto attrs = F<mlir::Operation>(h)->getAttrs();
+    auto *op = F<mlir::Operation>(h);
+    auto &m = opUserAttrs();
+    auto it = m.find(op);
+    if (it != m.end()) return reinterpret_cast<uintptr_t>(&it->second[i]);
+    auto attrs = op->getAttrs();
     return reinterpret_cast<uintptr_t>(&attrs[i]);
 }
 extern "C" size_t MLIR_GetOpNumRegions(MLIR_OpHandle h) {
