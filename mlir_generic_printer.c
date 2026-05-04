@@ -250,8 +250,15 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
                         }
                         break;
                     }
-                    default:
-                        result = str_concat(arena, result, str_lit("..."));
+                    default: {
+                        // Unknown attribute kind (typically dialect-specific
+                        // attrs like enum flags or DenseArrayAttr coming from
+                        // upstream MLIR when dialects are registered). Print
+                        // them by asking the API for their stringified form.
+                        string s = MLIR_GetAttributeAsString(ctx->mlir_ctx, attr);
+                        if (s.size > 0) result = str_concat(arena, result, s);
+                        else result = str_concat(arena, result, str_lit("..."));
+                    }
                 }
             }
             if (opened) result = str_concat(arena, result, str_lit("}"));

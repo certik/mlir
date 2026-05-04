@@ -834,6 +834,46 @@ OperationParserResult parse_memref_load_op(Parser *parser, const OperationParser
     // Parse result types (memref.load operations can have result types)
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, MLIR_INVALID_HANDLE);
 
+    // The trailing `: memref<NxMxELEM[, layout][, memspace]>` describes the
+    // source memref, not the result type. memref.load returns the element
+    // type. Stash the original memref type as a hidden `_source_type` string
+    // attribute so the classic printer can roundtrip it (the first operand's
+    // type is not reliable: SSA shadowing in nested regions can cause it to
+    // resolve to a different `%name` of type `index`).
+    //
+    // Parse the memref type structurally to find ELEM:
+    //   - the dim/element chunk runs from after `memref<` to the first `,` at
+    //     bracket depth 0 (or to the closing `>`);
+    //   - within that chunk, ELEM follows the last `x` at depth 0 (so nested
+    //     types like `vector<4xf32>` are not split).
+    if (n_result_types == 1) {
+        string ts = MLIR_GetTypeString(parser->ctx, result_types[0]);
+        if (ts.size > 7 && strncmp(ts.str, "memref<", 7) == 0 && ts.str[ts.size - 1] == '>') {
+            size_t chunk_end = ts.size - 1;  // exclusive; defaults to closing '>'
+            int depth = 0;
+            for (size_t i = 7; i < ts.size - 1; i++) {
+                char c = ts.str[i];
+                if (c == '<') depth++;
+                else if (c == '>') depth--;
+                else if (c == ',' && depth == 0) { chunk_end = i; break; }
+            }
+            size_t last_x = 0;
+            depth = 0;
+            for (size_t i = 7; i < chunk_end; i++) {
+                char c = ts.str[i];
+                if (c == '<') depth++;
+                else if (c == '>') depth--;
+                else if (c == 'x' && depth == 0) last_x = i;
+            }
+            if (last_x > 0) {
+                string elem = (string){ .str = ts.str + last_x + 1, .size = chunk_end - last_x - 1 };
+                append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
+                            create_string_attr(parser, str_lit("_source_type"), ts));
+                result_types[0] = mlir_type_create_from_string(parser->ctx, elem);
+            }
+        }
+    }
+
     // Parse optional location
     MLIR_LocationHandle op_location = parse_optional_location(parser);
 
@@ -910,9 +950,16 @@ OperationParserResult parse_memref_store_op(Parser *parser, const OperationParse
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
 
-    // Parse type information and location after colon (memref.store doesn't have result types)
+    // Parse type information and location after colon (memref.store doesn't have result types).
+    // Capture the first type as `_source_type` so the classic printer can roundtrip
+    // `memref.store %v, %m[i,j] : memref<...>`. The remaining tokens are skipped.
     if (parser_peek(parser, TK_COLON)) {
         parser_expect(parser, TK_COLON);
+        string source_type = (string){0};
+        if (parse_type_string(parser, &source_type) && source_type.size > 0) {
+            append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
+                        create_string_attr(parser, str_lit("_source_type"), source_type));
+        }
         int angle = 0;
         while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE) && !parser_peek(parser, TK_RBRACE)) {
             if (parser_peek(parser, TK_LANGLE)) angle++;
@@ -3848,6 +3895,11 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
         }
         if (parser_peek(parser, TK_FUNCTION_NAME)) {
             fname = parser_token_str(parser);
+            // Strip leading '@' (token text is "@name")
+            if (fname.size > 0 && fname.str[0] == '@') {
+                fname.str += 1;
+                fname.size -= 1;
+            }
             parser_expect(parser, TK_FUNCTION_NAME);
             continue;
         }

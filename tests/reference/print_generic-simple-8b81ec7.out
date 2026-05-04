@@ -1,7 +1,7 @@
 module() {
 ^bb0:
-    func.func() {visibility = "private", sym_name = "@putchar", function_type = (i64) -> i64}
-    func.func() {visibility = "private", sym_name = "@main", function_type = () -> i64} {
+    func.func() {visibility = "private", sym_name = "putchar", function_type = (i64) -> i64}
+    func.func() {visibility = "private", sym_name = "main", function_type = () -> i64} {
     ^bb0:
         %c0_i64 = arith.constant() {value = 0} -> i64
         cf.br(%c0_i64: i64)

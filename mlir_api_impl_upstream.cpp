@@ -31,6 +31,13 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/Region.h"
+#include "mlir/IR/DialectRegistry.h"
+#include "mlir/AsmParser/AsmParser.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "llvm/Support/raw_ostream.h"
 
 extern "C" {
@@ -48,7 +55,17 @@ namespace {
 
 struct UpstreamCtx {
     mlir::MLIRContext mctx;
-    UpstreamCtx() { mctx.allowUnregisteredDialects(true); }
+    UpstreamCtx() {
+        mlir::DialectRegistry registry;
+        registry.insert<mlir::arith::ArithDialect,
+                        mlir::func::FuncDialect,
+                        mlir::scf::SCFDialect,
+                        mlir::cf::ControlFlowDialect,
+                        mlir::memref::MemRefDialect>();
+        mctx.appendDialectRegistry(registry);
+        mctx.loadAllAvailableDialects();
+        mctx.allowUnregisteredDialects(true);
+    }
 };
 UpstreamCtx &globalCtx() { static UpstreamCtx g; return g; }
 
@@ -65,6 +82,20 @@ struct ValueBox {
 
 std::unordered_map<const void *, ValueBox *> &valueIndex() {
     static std::unordered_map<const void *, ValueBox *> m;
+    return m;
+}
+
+// Side-map: per-Operation snapshot of the named attributes the user
+// supplied via MLIR_CreateOp / MLIR_AppendOpAttribute. Used by
+// MLIR_GetOpNumAttributes / MLIR_GetOpAttribute so that dialect-injected
+// inherent attributes (e.g. arith.addi's default
+// `overflowFlags = #arith.overflow<none>` property) don't leak through
+// the API and cause spurious diffs against the dialect-agnostic native
+// backend.
+std::unordered_map<const mlir::Operation *, std::vector<mlir::NamedAttribute>> &
+opUserAttrs() {
+    static std::unordered_map<const mlir::Operation *,
+                              std::vector<mlir::NamedAttribute>> m;
     return m;
 }
 
@@ -188,8 +219,12 @@ extern "C" MLIR_OpHandle MLIR_CreateOp(
         string s = op_type_to_string(type);
         if (s.size > 0) nm.assign(s.str, s.size);
         else nm = "unknown";
-    } else if (type == OP_TYPE_MODULE && nm == "module") {
+    }
+    if (type == OP_TYPE_MODULE && nm == "module") {
         nm = "builtin.module";
+    } else if (nm == "return") {
+        // Bare `return` in pretty form is the alias for func.return.
+        nm = "func.return";
     }
 
     mlir::Location loc = (location == MLIR_INVALID_HANDLE)
@@ -210,7 +245,14 @@ extern "C" MLIR_OpHandle MLIR_CreateOp(
     for (size_t i = 0; i < n_regions; i++) {
         state.addRegion(std::unique_ptr<mlir::Region>(F<mlir::Region>(regions[i])));
     }
+    // Snapshot the user-supplied attribute set; we'll expose it (rather
+    // than the operation's combined attribute dictionary) through the
+    // MLIR_GetOpAttribute API so that dialect-injected inherent attributes
+    // (e.g. arith.addi's default overflowFlags) don't leak through.
+    std::vector<mlir::NamedAttribute> userAttrs(state.attributes.begin(),
+                                                state.attributes.end());
     mlir::Operation *op = mlir::Operation::create(state);
+    opUserAttrs()[op] = std::move(userAttrs);
 
     // Bind user-supplied result handles to the freshly-created OpResults.
     for (size_t i = 0; i < n_results; i++) {
@@ -228,6 +270,18 @@ extern "C" void MLIR_AppendOpAttribute(MLIR_Context *, MLIR_OpHandle oh,
     auto *op = F<mlir::Operation>(oh);
     const auto *na = F<mlir::NamedAttribute>(ah);
     op->setAttr(na->getName(), na->getValue());
+    auto &m = opUserAttrs();
+    auto it = m.find(op);
+    if (it != m.end()) {
+        // Replace if name already present, else append.
+        for (auto &existing : it->second) {
+            if (existing.getName() == na->getName()) {
+                existing = *na;
+                return;
+            }
+        }
+        it->second.push_back(*na);
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -273,10 +327,18 @@ extern "C" MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle h, size_t i) {
     return typeH(F<mlir::Operation>(h)->getResult(i).getType());
 }
 extern "C" size_t MLIR_GetOpNumAttributes(MLIR_OpHandle h) {
-    return F<mlir::Operation>(h)->getAttrs().size();
+    auto *op = F<mlir::Operation>(h);
+    auto &m = opUserAttrs();
+    auto it = m.find(op);
+    if (it != m.end()) return it->second.size();
+    return op->getAttrs().size();
 }
 extern "C" MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle h, size_t i) {
-    auto attrs = F<mlir::Operation>(h)->getAttrs();
+    auto *op = F<mlir::Operation>(h);
+    auto &m = opUserAttrs();
+    auto it = m.find(op);
+    if (it != m.end()) return reinterpret_cast<uintptr_t>(&it->second[i]);
+    auto attrs = op->getAttrs();
     return reinterpret_cast<uintptr_t>(&attrs[i]);
 }
 extern "C" size_t MLIR_GetOpNumRegions(MLIR_OpHandle h) {
@@ -517,6 +579,7 @@ extern "C" string MLIR_PrintOperationUpstream(MLIR_Context *ctx, MLIR_OpHandle h
     std::string buf;
     llvm::raw_string_ostream os(buf);
     mlir::OpPrintingFlags flags;
+    flags.assumeVerified();
     F<mlir::Operation>(h)->print(os, flags);
     os.flush();
     buf.push_back('\n');
@@ -589,7 +652,7 @@ extern "C" MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle h) {
     if (llvm::isa<mlir::ArrayAttr>(value))   return MLIR_ATTR_KIND_ARRAY;
     if (llvm::isa<mlir::DictionaryAttr>(value)) return MLIR_ATTR_KIND_DICT;
     if (llvm::isa<mlir::TypeAttr>(value))    return MLIR_ATTR_KIND_TYPE;
-    return MLIR_ATTR_KIND_STRING;
+    return MLIR_ATTR_KIND_OTHER;
 }
 extern "C" string MLIR_GetAttributeName(MLIR_AttributeHandle h) {
     return mkRefString(F<mlir::NamedAttribute>(h)->getName().getValue());
@@ -616,6 +679,13 @@ extern "C" bool MLIR_GetAttributeBool(MLIR_AttributeHandle h) {
 }
 extern "C" string MLIR_GetAttributeString(MLIR_AttributeHandle h) {
     return mkRefString(llvm::cast<mlir::StringAttr>(F<mlir::NamedAttribute>(h)->getValue()).getValue());
+}
+extern "C" string MLIR_GetAttributeAsString(MLIR_Context *ctx, MLIR_AttributeHandle h) {
+    std::string buf;
+    llvm::raw_string_ostream os(buf);
+    F<mlir::NamedAttribute>(h)->getValue().print(os);
+    os.flush();
+    return mkArenaString(ctx, buf);
 }
 extern "C" size_t MLIR_GetAttributeArraySize(MLIR_AttributeHandle h) {
     return llvm::cast<mlir::ArrayAttr>(F<mlir::NamedAttribute>(h)->getValue()).size();

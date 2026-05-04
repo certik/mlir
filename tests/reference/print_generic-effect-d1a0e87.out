@@ -1,6 +1,6 @@
 module() {
 ^bb0:
-    func.func() {visibility = "private", sym_name = "@main", function_type = () -> i64} {
+    func.func() {visibility = "private", sym_name = "main", function_type = () -> i64} {
     ^bb0:
         %c0_i64 = arith.constant() {value = 0} -> i64
         %c0_i64_0 = arith.constant() {value = 0} -> i64
@@ -134,7 +134,7 @@ module() {
         %c0_i64_26 = arith.constant() {value = 0} -> i64
         return(%c0_i64_26: i64)
     }
-    func.func() {visibility = "private", sym_name = "@effect", function_type = () -> i64} {
+    func.func() {visibility = "private", sym_name = "effect", function_type = () -> i64} {
     ^bb0:
         %c1_i64 = arith.constant() {value = 1} -> i64
         return(%c1_i64: i64)

@@ -17,7 +17,7 @@ module {
       %4 = memref.load %arg0, %2, %3 : memref<10x20xf32>
       %5 = memref.load %arg1, %2, %3 : memref<10x20xf32>
       %6 = arith.addf %4, %5 : f32
-      memref.store %4, %alloc, %2, %3 : memref<10x20xf32>, memref<10x20xf32>, index, index
+      memref.store %4, %alloc, %2, %3 : memref<10x20xf32>
       "gpu.terminator"
     }
     return %alloc : memref<10x20xf32>

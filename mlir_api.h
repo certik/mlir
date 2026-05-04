@@ -328,11 +328,15 @@ typedef enum {
     MLIR_ATTR_KIND_BOOL,
     MLIR_ATTR_KIND_ARRAY,
     MLIR_ATTR_KIND_DICT,
-    MLIR_ATTR_KIND_TYPE
+    MLIR_ATTR_KIND_TYPE,
+    MLIR_ATTR_KIND_OTHER
 } MLIR_AttrKind;
 
 MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle attr);
 string MLIR_GetAttributeName(MLIR_AttributeHandle attr);
+// Print any attribute as a string (e.g. "0 : i64", "@callee", "[1, 2]").
+// Used as a fallback when the kind is MLIR_ATTR_KIND_OTHER.
+string MLIR_GetAttributeAsString(MLIR_Context *ctx, MLIR_AttributeHandle attr);
 int64_t MLIR_GetAttributeInteger(MLIR_AttributeHandle attr);
 double MLIR_GetAttributeFloat(MLIR_AttributeHandle attr);
 // For Integer and Float attributes, returns the numeric type. For other

@@ -12,7 +12,7 @@ module {
         %0 = memref.load %arg0, %arg2, %arg3 : memref<10x20xf32>
         %1 = memref.load %arg1, %arg2, %arg3 : memref<10x20xf32>
         %2 = arith.addf %0, %1 : f32
-        memref.store %2, %alloc, %arg2, %arg3 : f32, memref<10x20xf32>, index, index
+        memref.store %2, %alloc, %arg2, %arg3 : memref<10x20xf32>
       }
     }
     return %alloc : memref<10x20xf32>

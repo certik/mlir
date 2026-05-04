@@ -4,7 +4,7 @@
     "infile": "tests/t3.mlir",
     "infile_hash": "f880377afbe6e9dd24ccfa1099014e9aefacd2ec0a46655cee525cc2",
     "outfile": "print_generic-t3-e156c72.out",
-    "outfile_hash": "8cbe801e9e4f5e06fcac23496fac22c4e2f60449a5803038116e0985",
+    "outfile_hash": "081bcea29b88c47a1f124e29e59408dc72e93439a62eae16d5258cf9",
     "stdout": null,
     "stdout_hash": null,
     "stderr": null,
