@@ -668,6 +668,14 @@ MLIR_BlockHandle parse_block(Parser *parser) {
         }
         parser_expect(parser, TK_NEWLINE);
     }
+    // Create the block and bind its arguments BEFORE parsing operations,
+    // so operand references to block args resolve to real values during
+    // op construction (required by upstream MLIR's strict Value model).
+    MLIR_BlockHandle block = MLIR_CreateBlock(parser->ctx);
+    for (size_t i = 0; i < block_args.size; i++) {
+        MLIR_AppendBlockArg(parser->ctx, block, block_args.data[i]);
+    }
+
     VecOp operations;
     VecOp_reserve(parser->arena, &operations, 16);
     while (! (parser_peek(parser, TK_RBRACE) || parser_peek(parser, TK_CARET_NAME))) {
@@ -682,10 +690,6 @@ MLIR_BlockHandle parse_block(Parser *parser) {
         }
     }
 
-    MLIR_BlockHandle block = MLIR_CreateBlock(parser->ctx);
-    for (size_t i = 0; i < block_args.size; i++) {
-        MLIR_AppendBlockArg(parser->ctx, block, block_args.data[i]);
-    }
     for (size_t i = 0; i < operations.size; i++) {
         MLIR_AppendBlockOp(parser->ctx, block, operations.data[i]);
     }

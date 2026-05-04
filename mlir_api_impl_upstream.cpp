@@ -26,6 +26,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Location.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/OperationSupport.h"
@@ -58,6 +59,7 @@ struct ValueBox {
     mlir::Value v;                  // bound after AppendBlockArg / Op create
     std::string name;               // register name; empty for op results
     mlir::Type pendingType;         // used until AppendBlockArg binds v
+    mlir::Location pending_loc{mlir::UnknownLoc::get(&globalCtx().mctx)};
     bool deferredBlockArg = false;
 };
 
@@ -83,22 +85,21 @@ uintptr_t typeH(mlir::Type t) { return reinterpret_cast<uintptr_t>(t.getAsOpaque
 mlir::Type typeF(uintptr_t h) {
     return mlir::Type::getFromOpaquePointer(reinterpret_cast<const void *>(h));
 }
-
-const char *opNameForType(MLIR_OpType t) {
-    switch (t) {
-        case OP_TYPE_MODULE:        return "builtin.module";
-        case OP_TYPE_ARITH_ADDI:    return "arith.addi";
-        case OP_TYPE_FUNC_FUNC:     return "func.func";
-        case OP_TYPE_FUNC_RETURN:   return "func.return";
-        default:                    return nullptr;
-    }
+uintptr_t locH(mlir::Location loc) { return reinterpret_cast<uintptr_t>(loc.getAsOpaquePointer()); }
+mlir::Location locF(uintptr_t h) {
+    return mlir::Location::getFromOpaquePointer(reinterpret_cast<const void *>(h));
 }
 
 MLIR_OpType opTypeFromName(llvm::StringRef name) {
     if (name == "builtin.module") return OP_TYPE_MODULE;
-    if (name == "arith.addi")     return OP_TYPE_ARITH_ADDI;
-    if (name == "func.func")      return OP_TYPE_FUNC_FUNC;
-    if (name == "func.return")    return OP_TYPE_FUNC_RETURN;
+    // Walk the canonical name table backwards. OP_TYPE_UNREGISTERED is the
+    // fallback.
+    for (int t = 0; t < 256; t++) {
+        string s = op_type_to_string((MLIR_OpType)t);
+        if (s.size == 0) continue;
+        if (name.size() == s.size && std::memcmp(name.data(), s.str, s.size) == 0)
+            return (MLIR_OpType)t;
+    }
     return OP_TYPE_UNREGISTERED;
 }
 
@@ -155,11 +156,16 @@ extern "C" void MLIR_AppendBlockArg(MLIR_Context *, MLIR_BlockHandle bh,
         std::fprintf(stderr, "AppendBlockArg: handle is not a deferred block arg\n");
         std::abort();
     }
-    auto arg = block->addArgument(box->pendingType,
-                                   mlir::UnknownLoc::get(&globalCtx().mctx));
-    box->v = arg;
+    auto realArg = block->addArgument(box->pendingType, box->pending_loc);
+    // If we have a stand-in arg from a hidden holder block, redirect uses.
+    if (box->v) {
+        auto oldOpaque = box->v.getAsOpaquePointer();
+        valueIndex().erase(oldOpaque);
+        box->v.replaceAllUsesWith(realArg);
+    }
+    box->v = realArg;
     box->deferredBlockArg = false;
-    valueIndex()[arg.getAsOpaquePointer()] = box;
+    valueIndex()[realArg.getAsOpaquePointer()] = box;
 }
 
 // -----------------------------------------------------------------------------
@@ -173,19 +179,23 @@ extern "C" MLIR_OpHandle MLIR_CreateOp(
     MLIR_ValueHandle *results, size_t n_results,
     MLIR_ValueHandle *operands, size_t n_operands,
     MLIR_RegionHandle *regions, size_t n_regions,
-    MLIR_LocationHandle, MLIR_LocationHandle, string, int64_t) {
+    MLIR_LocationHandle location, MLIR_LocationHandle, string, int64_t) {
     auto &ctx = globalCtx().mctx;
 
     std::string nm(opname.str, opname.size);
     if (nm.empty()) {
-        const char *fallback = opNameForType(type);
-        nm = fallback ? fallback : "unknown";
+        // Fall back to the canonical mapping from mlir_op_names.
+        string s = op_type_to_string(type);
+        if (s.size > 0) nm.assign(s.str, s.size);
+        else nm = "unknown";
     } else if (type == OP_TYPE_MODULE && nm == "module") {
         nm = "builtin.module";
     }
 
-    mlir::OperationState state(mlir::UnknownLoc::get(&ctx),
-                               llvm::StringRef(nm));
+    mlir::Location loc = (location == MLIR_INVALID_HANDLE)
+                             ? mlir::Location(mlir::UnknownLoc::get(&ctx))
+                             : locF(location);
+    mlir::OperationState state(loc, llvm::StringRef(nm));
 
     for (size_t i = 0; i < n_operands; i++) {
         state.addOperands(F<ValueBox>(operands[i])->v);
@@ -314,18 +324,36 @@ extern "C" MLIR_ValueHandle MLIR_GetBlockArg(MLIR_BlockHandle h, size_t i) {
 
 extern "C" MLIR_ValueHandle MLIR_CreateValueBlockArg(
     MLIR_Context *, string register_name, uint32_t /*idx*/,
-    MLIR_TypeHandle type, MLIR_LocationHandle) {
+    MLIR_TypeHandle type, MLIR_LocationHandle loc) {
     auto *box = new ValueBox();
     box->name.assign(register_name.str, register_name.size);
     box->pendingType = typeF(type);
+    if (loc != MLIR_INVALID_HANDLE) box->pending_loc = locF(loc);
     box->deferredBlockArg = true;
+    // Eagerly bind to a hidden holder block so the value can be used as an
+    // operand before AppendBlockArg moves it onto the real block. Upstream
+    // MLIR doesn't allow moving a BlockArgument between blocks, so on
+    // AppendBlockArg we add a fresh arg to the real block and RAUW.
+    static thread_local mlir::Block *holder = nullptr;
+    if (!holder) holder = new mlir::Block();
+    auto arg = holder->addArgument(box->pendingType, box->pending_loc);
+    box->v = arg;
+    valueIndex()[arg.getAsOpaquePointer()] = box;
     return H(box);
 }
 extern "C" MLIR_ValueHandle MLIR_CreateValueOpResult(
-    MLIR_Context *, MLIR_OpHandle, uint32_t /*idx*/, MLIR_TypeHandle,
+    MLIR_Context *, MLIR_OpHandle oh, uint32_t idx, MLIR_TypeHandle,
     string register_name, MLIR_LocationHandle) {
     auto *box = new ValueBox();
     box->name.assign(register_name.str, register_name.size);
+    if (oh != MLIR_INVALID_HANDLE) {
+        auto *op = F<mlir::Operation>(oh);
+        if (idx < op->getNumResults()) {
+            auto v = op->getResult(idx);
+            box->v = v;
+            valueIndex()[v.getAsOpaquePointer()] = box;
+        }
+    }
     return H(box);
 }
 
@@ -359,29 +387,89 @@ extern "C" MLIR_TypeHandle MLIR_CreateTypeInteger(MLIR_Context *, uint32_t width
                                                    bool /*is_signed*/) {
     return typeH(mlir::IntegerType::get(&globalCtx().mctx, width));
 }
-extern "C" MLIR_TypeHandle MLIR_CreateTypeFloat(MLIR_Context *, uint32_t, bool) { UNIMPLEMENTED(); }
+extern "C" MLIR_TypeHandle MLIR_CreateTypeFloat(MLIR_Context *, uint32_t width, bool is_bfloat) {
+    auto &ctx = globalCtx().mctx;
+    if (is_bfloat) return typeH(mlir::BFloat16Type::get(&ctx));
+    switch (width) {
+        case 16: return typeH(mlir::Float16Type::get(&ctx));
+        case 32: return typeH(mlir::Float32Type::get(&ctx));
+        case 64: return typeH(mlir::Float64Type::get(&ctx));
+        default: return typeH(mlir::Float32Type::get(&ctx));
+    }
+}
 extern "C" MLIR_TypeHandle MLIR_CreateTypeIndex(MLIR_Context *) {
     return typeH(mlir::IndexType::get(&globalCtx().mctx));
 }
-extern "C" MLIR_TypeHandle MLIR_CreateTypeUnknown(MLIR_Context *) { UNIMPLEMENTED(); }
-extern "C" MLIR_TypeHandle MLIR_CreateTypeTensor(MLIR_Context *, const int64_t *, size_t, MLIR_TypeHandle) { UNIMPLEMENTED(); }
-extern "C" MLIR_TypeHandle MLIR_CreateTypeMemref(MLIR_Context *, const int64_t *, size_t, MLIR_TypeHandle) { UNIMPLEMENTED(); }
-extern "C" MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *, MLIR_TypeHandle, bool, uint32_t) { UNIMPLEMENTED(); }
-extern "C" MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *, string) { UNIMPLEMENTED(); }
-extern "C" void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle, uint32_t, bool) { UNIMPLEMENTED(); }
-extern "C" void MLIR_SetTypeFloatProperties(MLIR_TypeHandle, uint32_t, bool) { UNIMPLEMENTED(); }
-extern "C" void MLIR_SetTypeTensorProperties(MLIR_TypeHandle, const int64_t *, size_t, MLIR_TypeHandle) { UNIMPLEMENTED(); }
-extern "C" void MLIR_SetTypeMemrefProperties(MLIR_TypeHandle, const int64_t *, size_t, MLIR_TypeHandle) { UNIMPLEMENTED(); }
-extern "C" void MLIR_SetTypePointerProperties(MLIR_TypeHandle, MLIR_TypeHandle, bool, uint32_t) { UNIMPLEMENTED(); }
+extern "C" MLIR_TypeHandle MLIR_CreateTypeUnknown(MLIR_Context *) {
+    return typeH(mlir::NoneType::get(&globalCtx().mctx));
+}
+extern "C" MLIR_TypeHandle MLIR_CreateTypeTensor(MLIR_Context *, const int64_t *shape,
+                                                  size_t rank, MLIR_TypeHandle element_type) {
+    auto &ctx = globalCtx().mctx;
+    mlir::Type elem = (element_type == MLIR_INVALID_HANDLE)
+                          ? mlir::Type(mlir::Float32Type::get(&ctx))
+                          : typeF(element_type);
+    if (rank == 0 || shape == nullptr) {
+        return typeH(mlir::UnrankedTensorType::get(elem));
+    }
+    llvm::SmallVector<int64_t, 8> dims;
+    dims.reserve(rank);
+    for (size_t i = 0; i < rank; i++) {
+        int64_t d = shape[i];
+        dims.push_back(d < 0 ? mlir::ShapedType::kDynamic : d);
+    }
+    return typeH(mlir::RankedTensorType::get(dims, elem));
+}
+extern "C" MLIR_TypeHandle MLIR_CreateTypeMemref(MLIR_Context *, const int64_t *shape,
+                                                  size_t rank, MLIR_TypeHandle element_type) {
+    auto &ctx = globalCtx().mctx;
+    mlir::Type elem = (element_type == MLIR_INVALID_HANDLE)
+                          ? mlir::Type(mlir::Float32Type::get(&ctx))
+                          : typeF(element_type);
+    if (rank == 0 || shape == nullptr) {
+        return typeH(mlir::UnrankedMemRefType::get(elem, 0));
+    }
+    llvm::SmallVector<int64_t, 8> dims;
+    dims.reserve(rank);
+    for (size_t i = 0; i < rank; i++) {
+        int64_t d = shape[i];
+        dims.push_back(d < 0 ? mlir::ShapedType::kDynamic : d);
+    }
+    return typeH(mlir::MemRefType::get(dims, elem));
+}
+extern "C" MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *, MLIR_TypeHandle /*element*/,
+                                                   bool /*has_addr*/, uint32_t /*addr*/) {
+    // Upstream has no built-in dialect-agnostic pointer type. Use an opaque
+    // type tagged "!tt.ptr"; element type and address space are dropped.
+    auto &ctx = globalCtx().mctx;
+    return typeH(mlir::OpaqueType::get(mlir::StringAttr::get(&ctx, "tt"),
+                                        "ptr"));
+}
+extern "C" MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *, string name) {
+    auto &ctx = globalCtx().mctx;
+    return typeH(mlir::OpaqueType::get(mlir::StringAttr::get(&ctx, "?"),
+                                        llvm::StringRef(name.str, name.size)));
+}
+extern "C" void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle, uint32_t, bool) {}
+extern "C" void MLIR_SetTypeFloatProperties(MLIR_TypeHandle, uint32_t, bool) {}
+extern "C" void MLIR_SetTypeTensorProperties(MLIR_TypeHandle, const int64_t *, size_t, MLIR_TypeHandle) {}
+extern "C" void MLIR_SetTypeMemrefProperties(MLIR_TypeHandle, const int64_t *, size_t, MLIR_TypeHandle) {}
+extern "C" void MLIR_SetTypePointerProperties(MLIR_TypeHandle, MLIR_TypeHandle, bool, uint32_t) {}
 
 extern "C" bool MLIR_IsTypeInteger(MLIR_TypeHandle h) { return llvm::isa<mlir::IntegerType>(typeF(h)); }
 extern "C" bool MLIR_IsTypeFloat(MLIR_TypeHandle h)   { return llvm::isa<mlir::FloatType>(typeF(h)); }
-extern "C" bool MLIR_IsTypeTensor(MLIR_TypeHandle)    { return false; }
-extern "C" bool MLIR_IsTypeMemref(MLIR_TypeHandle)    { return false; }
-extern "C" bool MLIR_IsTypePointer(MLIR_TypeHandle)   { return false; }
+extern "C" bool MLIR_IsTypeTensor(MLIR_TypeHandle h)  { return llvm::isa<mlir::TensorType>(typeF(h)); }
+extern "C" bool MLIR_IsTypeMemref(MLIR_TypeHandle h)  { return llvm::isa<mlir::BaseMemRefType>(typeF(h)); }
+extern "C" bool MLIR_IsTypePointer(MLIR_TypeHandle h) {
+    auto opaq = llvm::dyn_cast<mlir::OpaqueType>(typeF(h));
+    return opaq && opaq.getDialectNamespace() == "tt";
+}
 extern "C" bool MLIR_IsTypeIndex(MLIR_TypeHandle h)   { return llvm::isa<mlir::IndexType>(typeF(h)); }
-extern "C" bool MLIR_IsTypeUnknown(MLIR_TypeHandle)   { return false; }
-extern "C" bool MLIR_IsTypeOpaque(MLIR_TypeHandle)    { return false; }
+extern "C" bool MLIR_IsTypeUnknown(MLIR_TypeHandle h) { return llvm::isa<mlir::NoneType>(typeF(h)); }
+extern "C" bool MLIR_IsTypeOpaque(MLIR_TypeHandle h)  {
+    auto opaq = llvm::dyn_cast<mlir::OpaqueType>(typeF(h));
+    return opaq && opaq.getDialectNamespace() != "tt";
+}
 
 extern "C" string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle h) {
     std::string buf;
@@ -421,10 +509,30 @@ extern "C" MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *, strin
     return makeNamedAttr(llvm::StringRef(name.str, name.size),
                          mlir::StringAttr::get(&ctx, llvm::StringRef(value.str, value.size)));
 }
-extern "C" MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *, string,
-                                                           MLIR_AttributeHandle *, size_t) { UNIMPLEMENTED(); }
-extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *, string,
-                                                          MLIR_AttributeHandle *, size_t) { UNIMPLEMENTED(); }
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *, string name,
+                                                           MLIR_AttributeHandle *elements,
+                                                           size_t count) {
+    auto &ctx = globalCtx().mctx;
+    llvm::SmallVector<mlir::Attribute, 8> values;
+    values.reserve(count);
+    for (size_t i = 0; i < count; i++) {
+        values.push_back(F<mlir::NamedAttribute>(elements[i])->getValue());
+    }
+    return makeNamedAttr(llvm::StringRef(name.str, name.size),
+                         mlir::ArrayAttr::get(&ctx, values));
+}
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *, string name,
+                                                          MLIR_AttributeHandle *elements,
+                                                          size_t count) {
+    auto &ctx = globalCtx().mctx;
+    llvm::SmallVector<mlir::NamedAttribute, 8> entries;
+    entries.reserve(count);
+    for (size_t i = 0; i < count; i++) {
+        entries.push_back(*F<mlir::NamedAttribute>(elements[i]));
+    }
+    return makeNamedAttr(llvm::StringRef(name.str, name.size),
+                         mlir::DictionaryAttr::get(&ctx, entries));
+}
 
 extern "C" MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle h) {
     auto value = F<mlir::NamedAttribute>(h)->getValue();
@@ -454,11 +562,93 @@ extern "C" string MLIR_GetAttributeString(MLIR_AttributeHandle h) {
 extern "C" size_t MLIR_GetAttributeArraySize(MLIR_AttributeHandle h) {
     return llvm::cast<mlir::ArrayAttr>(F<mlir::NamedAttribute>(h)->getValue()).size();
 }
-extern "C" MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_AttributeHandle, size_t) { UNIMPLEMENTED(); }
+extern "C" MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_AttributeHandle h, size_t i) {
+    auto arr = llvm::cast<mlir::ArrayAttr>(F<mlir::NamedAttribute>(h)->getValue());
+    auto &ctx = globalCtx().mctx;
+    auto *na = new mlir::NamedAttribute(mlir::StringAttr::get(&ctx, ""), arr[i]);
+    return reinterpret_cast<uintptr_t>(na);
+}
 extern "C" size_t MLIR_GetAttributeDictSize(MLIR_AttributeHandle h) {
     return llvm::cast<mlir::DictionaryAttr>(F<mlir::NamedAttribute>(h)->getValue()).size();
 }
-extern "C" MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_AttributeHandle, size_t) { UNIMPLEMENTED(); }
+extern "C" MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_AttributeHandle h, size_t i) {
+    auto dict = llvm::cast<mlir::DictionaryAttr>(F<mlir::NamedAttribute>(h)->getValue());
+    auto entries = dict.getValue();
+    return reinterpret_cast<uintptr_t>(&entries[i]);
+}
+
+// -----------------------------------------------------------------------------
+// Location
+// -----------------------------------------------------------------------------
+//
+// MLIR_LocationHandle is the opaque pointer of mlir::Location. Information
+// the upstream Location system cannot represent (e.g. our `original_text`
+// blob, or the parser's `#locN` reference id) is dropped on the floor;
+// printing locations through parser_upstream is therefore expected to be
+// less faithful than the native parser.
+
+namespace {
+} // namespace
+
+extern "C" MLIR_LocationHandle MLIR_CreateLocationUnknown(MLIR_Context *, string /*orig*/) {
+    return locH(mlir::UnknownLoc::get(&globalCtx().mctx));
+}
+extern "C" MLIR_LocationHandle MLIR_CreateLocationFile(MLIR_Context *, string filename,
+                                                        int line, int column) {
+    auto &ctx = globalCtx().mctx;
+    return locH(mlir::FileLineColLoc::get(
+        &ctx, llvm::StringRef(filename.str, filename.size),
+        (unsigned)line, (unsigned)column));
+}
+extern "C" MLIR_LocationHandle MLIR_CreateLocationName(MLIR_Context *, string name) {
+    auto &ctx = globalCtx().mctx;
+    return locH(mlir::NameLoc::get(
+        mlir::StringAttr::get(&ctx, llvm::StringRef(name.str, name.size))));
+}
+extern "C" MLIR_LocationHandle MLIR_CreateLocationRef(MLIR_Context *, int /*ref_id*/) {
+    return locH(mlir::UnknownLoc::get(&globalCtx().mctx));
+}
+
+extern "C" MLIR_LocationKind MLIR_GetLocationKind(MLIR_LocationHandle h) {
+    if (h == MLIR_INVALID_HANDLE) return MLIR_LOC_UNKNOWN;
+    auto loc = locF(h);
+    if (llvm::isa<mlir::FileLineColLoc>(loc)) return MLIR_LOC_FILE;
+    if (llvm::isa<mlir::NameLoc>(loc))        return MLIR_LOC_NAME;
+    if (llvm::isa<mlir::CallSiteLoc>(loc))    return MLIR_LOC_CALLSITE;
+    if (llvm::isa<mlir::FusedLoc>(loc))       return MLIR_LOC_FUSED;
+    return MLIR_LOC_UNKNOWN;
+}
+extern "C" string MLIR_GetLocationOriginalText(MLIR_LocationHandle) {
+    return mkRefString(llvm::StringRef());
+}
+extern "C" string MLIR_GetLocationFileFilename(MLIR_LocationHandle h) {
+    if (auto fl = llvm::dyn_cast<mlir::FileLineColLoc>(locF(h)))
+        return mkRefString(fl.getFilename().getValue());
+    return mkRefString(llvm::StringRef());
+}
+extern "C" int MLIR_GetLocationFileLine(MLIR_LocationHandle h) {
+    if (auto fl = llvm::dyn_cast<mlir::FileLineColLoc>(locF(h)))
+        return (int)fl.getLine();
+    return 0;
+}
+extern "C" int MLIR_GetLocationFileColumn(MLIR_LocationHandle h) {
+    if (auto fl = llvm::dyn_cast<mlir::FileLineColLoc>(locF(h)))
+        return (int)fl.getColumn();
+    return 0;
+}
+extern "C" string MLIR_GetLocationName(MLIR_LocationHandle h) {
+    if (auto nl = llvm::dyn_cast<mlir::NameLoc>(locF(h)))
+        return mkRefString(nl.getName().getValue());
+    return mkRefString(llvm::StringRef());
+}
+extern "C" int MLIR_GetLocationRefId(MLIR_LocationHandle) { return 0; }
+
+extern "C" MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle h) {
+    if (h == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
+    auto v = F<ValueBox>(h)->v;
+    if (!v) return MLIR_INVALID_HANDLE;
+    return locH(v.getLoc());
+}
 
 // -----------------------------------------------------------------------------
 // Misc
@@ -468,15 +658,9 @@ extern "C" string MLIR_MLIR_OpTypeToString(MLIR_OpType type) {
     return op_type_to_string(type);
 }
 
-extern "C" size_t MLIR_GetLocationMapSize(const MLIR_LocationMap *) { return 0; }
-extern "C" size_t MLIR_CollectLocationMap(const MLIR_LocationMap *, string *,
-                                           MLIR_LocationHandle *, size_t) {
-    return 0;
-}
-
 extern "C" int app_main(void);
 extern "C" void platform_init(int argc, char **argv);
-int main(int /*argc*/, char ** /*argv*/) {
-    platform_init(0, nullptr);
+int main(int argc, char **argv) {
+    platform_init(argc, argv);
     return app_main();
 }

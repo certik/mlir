@@ -332,6 +332,22 @@ $CXX -g -o cross_upstream \
 test_cross = { cmd = "./cross_upstream > tests/cross/out_upstream.txt && diff tests/cross/expected.txt tests/cross/out_upstream.txt", depends-on = ["build_cross_upstream"], description = "Run upstream cross-impl driver and diff against reference" }
 
 
+build_parser_upstream = { cmd = """
+COREC_C_FILES="corec/base/io.c corec/base/buddy.c corec/base/arena.c corec/base/scratch.c corec/base/format.c corec/base/math.c corec/base/string.c corec/base/mem.c corec/base/numconv.c corec/base/assert.c corec/base/exit.c corec/platform/platform_macos.c" && \
+PROJ_C_FILES="parser.c tokenizer.c mlir_parser.c mlir_classic_printer.c mlir_generic_printer.c op_parsers.c mlir_op_names.c" && \
+$CC -c -g -I corec -I . $COREC_C_FILES $PROJ_C_FILES && \
+$CXX -c -std=c++17 -fno-rtti -g -I corec -I . -I "$CONDA_PREFIX/include" mlir_api_impl_upstream.cpp && \
+$CXX -g -o parser_upstream \
+    parser.o tokenizer.o mlir_parser.o mlir_classic_printer.o mlir_generic_printer.o \
+    op_parsers.o mlir_op_names.o mlir_api_impl_upstream.o \
+    io.o buddy.o arena.o scratch.o format.o math.o string.o mem.o numconv.o assert.o exit.o platform_macos.o \
+    -L "$CONDA_PREFIX/lib" "$CONDA_PREFIX/lib/libMLIR.19.1.dylib" -lLLVM \
+    -Wl,-rpath,"$CONDA_PREFIX/lib"
+""", depends-on = ["tokenizer"], description = "Build parser_upstream against upstream LLVM/MLIR" }
+
+test_parser_upstream = { cmd = "bash tests/run_parser_upstream.sh", depends-on = ["build_parser_upstream"], description = "Run mlir test suite using parser_upstream as ./parser (some mismatches expected)" }
+
+
 [environments]
 default = { solve-group = "default" }
 wasm = ["wasm"]

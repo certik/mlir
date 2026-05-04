@@ -2,3 +2,12 @@ cross_native
 cross_upstream
 cross_native.dSYM/
 tests/cross/out_*.txt
+parser
+parser_upstream
+parser.wasm
+parser.dSYM/
+*.o
+tests/output/
+tests/*.mlir2
+tests/*.ttir2
+parser.native.bak
