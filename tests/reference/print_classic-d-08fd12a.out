@@ -1,9 +1,9 @@
 module {
-  func.func @tensor_i16() -> i16 {
+  func.func tensor_i16() -> i16 {
     %c0_i16 = arith.constant 0 : i16
     return %c0_i16 : i16
   }
-  func.func @func1() -> f32 {
+  func.func func1() -> f32 {
     %idx0 = index.constant : index
     %idx1 = index.constant : index
     %idx2 = index.constant : index

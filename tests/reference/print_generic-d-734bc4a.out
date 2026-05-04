@@ -1,11 +1,11 @@
 module() {
 ^bb0:
-    func.func() {sym_name = "@tensor_i16", ret = "i16"} {
-    ^bb0:
+    func.func() {sym_name = "tensor_i16", ret = "i16"} {
+    ^bb0(%arg0: tensor<10xi16>):
         %c0_i16 = arith.constant() {value = 0} -> i16
         return(%c0_i16: i16)
     }
-    func.func() {sym_name = "@func1", ret = "f32"} {
+    func.func() {sym_name = "func1", ret = "f32"} {
     ^bb0:
         %idx0 = index.constant() -> index
         %idx1 = index.constant() -> index

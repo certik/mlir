@@ -1,0 +1,18 @@
+--- tests/effect.mlir
++++ tests/effect.mlir2
+@@ -1,5 +1,5 @@
+ module {
+-  func.func private @main() -> i64 {
++  func.func private main() -> i64 {
+     %c0_i64 = arith.constant 0 : i64
+     %c0_i64_0 = arith.constant 0 : i64
+     %c0_i64_1 = arith.constant 0 : i64
+@@ -132,7 +132,7 @@
+     %c0_i64_26 = arith.constant 0 : i64
+     return %c0_i64_26 : i64
+   }
+-  func.func private @effect() -> i64 {
++  func.func private effect() -> i64 {
+     %c1_i64 = arith.constant 1 : i64
+     return %c1_i64 : i64
+   }

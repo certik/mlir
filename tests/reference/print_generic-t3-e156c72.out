@@ -1,7 +1,7 @@
 module() {
 ^bb0:
-    func.func() {sym_name = "@avg", ret = "memref<10x20xf32>"} {
-    ^bb0:
+    func.func() {sym_name = "avg", ret = "memref<10x20xf32>"} {
+    ^bb0(%arg0: memref<10x20xf32>, %arg1: memref<10x20xf32>):
         %alloc = memref.alloc() -> memref<10x20xf32>
         %c0 = arith.constant() {value = 0} -> index
         %c10 = arith.constant() {value = 10} -> index
@@ -16,10 +16,10 @@ module() {
         ^bb0(%arg2: index, %arg3: index, %arg4: index, %arg5: index, %arg6: index, %arg7: index):
             %2 = arith.addi(%c0: index, %arg2: index) -> index
             %3 = arith.addi(%c0_0: index, %arg5: index) -> index
-            %4 = memref.load(%arg0: unknown, %2: index, %3: index) -> memref<10x20xf32>
-            %5 = memref.load(%arg1: unknown, %2: index, %3: index) -> memref<10x20xf32>
-            %6 = arith.addf(%4: memref<10x20xf32>, %5: memref<10x20xf32>) -> f32
-            memref.store(%4: memref<10x20xf32>, %alloc: memref<10x20xf32>, %2: index, %3: index)
+            %4 = memref.load(%arg0: memref<10x20xf32>, %2: index, %3: index) -> f32
+            %5 = memref.load(%arg1: memref<10x20xf32>, %2: index, %3: index) -> f32
+            %6 = arith.addf(%4: f32, %5: f32) -> f32
+            memref.store(%4: f32, %alloc: memref<10x20xf32>, %2: index, %3: index)
             "gpu.terminator"()
         }
         return(%alloc: memref<10x20xf32>)

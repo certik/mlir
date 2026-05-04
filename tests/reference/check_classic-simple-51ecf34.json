@@ -5,9 +5,9 @@
     "infile_hash": "14445b10b7ec9580db2cb6e071b34464204243812cfec9709a629126",
     "outfile": null,
     "outfile_hash": null,
-    "stdout": null,
-    "stdout_hash": null,
+    "stdout": "check_classic-simple-51ecf34.stdout",
+    "stdout_hash": "a50db3db94e09a30125d1c3cfd6a963e676d80492490687c54e991c1",
     "stderr": null,
     "stderr_hash": null,
-    "returncode": 0
+    "returncode": 1
 }

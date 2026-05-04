@@ -1,5 +1,5 @@
 module {
-  func.func @avg() -> memref<10x20xf32> {
+  func.func avg() -> memref<10x20xf32> {
     %alloc = memref.alloc : memref<10x20xf32>
     %c0 = arith.constant 0 : index
     %c10 = arith.constant 10 : index
@@ -14,10 +14,10 @@ module {
     ^bb0(%arg2: index, %arg3: index, %arg4: index, %arg5: index, %arg6: index, %arg7: index):
       %2 = arith.addi %c0, %arg2 : index
       %3 = arith.addi %c0_0, %arg5 : index
-      %4 = memref.load %arg0, %2, %3 : memref<10x20xf32>
-      %5 = memref.load %arg1, %2, %3 : memref<10x20xf32>
+      %4 = memref.load %arg0, %2, %3 : f32
+      %5 = memref.load %arg1, %2, %3 : f32
       %6 = arith.addf %4, %5 : f32
-      memref.store %4, %alloc, %2, %3 : memref<10x20xf32>, memref<10x20xf32>, index, index
+      memref.store %4, %alloc, %2, %3 : f32, memref<10x20xf32>, index, index
       "gpu.terminator"
     }
     return %alloc : memref<10x20xf32>

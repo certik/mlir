@@ -806,6 +806,25 @@ OperationParserResult parse_memref_load_op(Parser *parser, const OperationParser
     // Parse result types (memref.load operations can have result types)
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, MLIR_INVALID_HANDLE);
 
+    // The trailing `: memref<NxMxELEM>` describes the source memref, not the
+    // result type. memref.load returns the element type. Extract ELEM from the
+    // memref type string.
+    if (n_result_types == 1) {
+        string ts = MLIR_GetTypeString(parser->ctx, result_types[0]);
+        if (ts.size > 7 && strncmp(ts.str, "memref<", 7) == 0 && ts.str[ts.size - 1] == '>') {
+            // Find the last 'x' before the '>' (after which is the element type).
+            size_t end = ts.size - 1; // index of '>'
+            size_t last_x = 0;
+            for (size_t i = 7; i < end; i++) {
+                if (ts.str[i] == 'x') last_x = i;
+            }
+            if (last_x > 0) {
+                string elem = (string){ .str = ts.str + last_x + 1, .size = end - last_x - 1 };
+                result_types[0] = mlir_type_create_from_string(parser->ctx, elem);
+            }
+        }
+    }
+
     // Parse optional location
     MLIR_LocationHandle op_location = parse_optional_location(parser);
 
@@ -3806,6 +3825,11 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
         }
         if (parser_peek(parser, TK_FUNCTION_NAME)) {
             fname = parser_token_str(parser);
+            // Strip leading '@' (token text is "@name")
+            if (fname.size > 0 && fname.str[0] == '@') {
+                fname.str += 1;
+                fname.size -= 1;
+            }
             parser_expect(parser, TK_FUNCTION_NAME);
             continue;
         }
@@ -3867,15 +3891,32 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
         }
     }
 
+    // Push scope so function args are visible in the body region (which
+    // pushes its own child scope), then pop after parsing the region.
+    symbol_table_push_scope(parser->arena, &parser->symbol_table);
+    for (size_t i = 0; i < args.size; i++) {
+        string an = MLIR_GetValueRegisterName(args.data[i]);
+        if (an.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, an, args.data[i]);
+    }
+
     // Parse optional body region (definition) or leave as declaration
     MLIR_RegionHandle *regions = MLIR_INVALID_HANDLE;
     size_t n_regions = 0;
     if (parser_peek(parser, TK_LBRACE_END)) {
         MLIR_RegionHandle region = parse_region(parser);
+        // Attach function args as block args of the entry block, so the
+        // body's references to %argN resolve to real Values.
+        if (MLIR_GetRegionNumBlocks(region) > 0) {
+            MLIR_BlockHandle entry = MLIR_GetRegionBlock(region, 0);
+            for (size_t i = 0; i < args.size; i++) {
+                MLIR_AppendBlockArg(parser->ctx, entry, args.data[i]);
+            }
+        }
         regions = arena_new_array(parser->arena, MLIR_RegionHandle, 1);
         regions[0] = region;
         n_regions = 1;
     }
+    symbol_table_pop_scope(&parser->symbol_table);
 
     // Store attributes for classic printing
     if (visibility.size > 0) append_attr(parser, &attrs, &n_attrs, &cap_attrs, create_string_attr(parser, str_lit("visibility"), visibility));
