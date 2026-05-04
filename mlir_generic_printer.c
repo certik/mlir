@@ -71,6 +71,7 @@ static void preassign_region_ssa(PrintCtx *ctx, MLIR_RegionHandle region, int in
 static string indent(Arena *arena, int indent_level) {
     const int indent_spaces=4;
     int buf_size=indent_level*indent_spaces;
+    if (buf_size <= 0) return (string){NULL, 0};
     char* buf = arena_alloc_array(arena, char, buf_size);
     for (int64_t i = 0; i < buf_size; i++) buf[i] = ' ';
     return (string){buf, buf_size};

@@ -1,0 +1,6 @@
+[submodule "corec"]
+	path = corec
+	url = https://github.com/certik/corec.git
+[submodule "corec-stdlib"]
+	path = corec-stdlib
+	url = https://github.com/certik/corec-stdlib.git

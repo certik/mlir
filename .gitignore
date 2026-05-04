@@ -1,0 +1,26 @@
+# Pixi
+.pixi/
+
+# Build artifacts
+parser
+parser.exe
+parser.wasm
+parser.dSYM/
+mlir
+mlir.exe
+mlir.wasm
+mlir.dSYM/
+*.o
+*.obj
+
+# Generated tokenizer
+tokenizer.c
+
+# Test artifacts
+tests/output/
+tests/*.mlir2
+tests/*.ttir2
+
+# Python
+__pycache__/
+*.pyc

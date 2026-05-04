@@ -47,7 +47,7 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
         char *buffer = arena_alloc_array(parser->arena, char, value_str.size + 1);
         memcpy(buffer, value_str.str, value_str.size);
         buffer[value_str.size] = '\0';
-        double parsed_value = strtod(buffer, MLIR_INVALID_HANDLE);
+        double parsed_value = atof(buffer);
         append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
                     create_float_attr(parser, str_lit("value"), parsed_value));
     } else if (parser_peek(parser, TK_NAME)) {
@@ -493,7 +493,7 @@ OperationParserResult parse_tt_make_range_op(Parser *parser, const OperationPars
                 char *buffer = arena_alloc_array(parser->arena, char, ival.size + 1);
                 memcpy(buffer, ival.str, ival.size);
                 buffer[ival.size] = '\0';
-                end_val = strtoll(buffer, MLIR_INVALID_HANDLE, 10);
+                end_val = atoll(buffer);
                 parser_expect(parser, TK_INTEGER);
             }
             if (parser_peek(parser, TK_COLON)) {
@@ -513,7 +513,7 @@ OperationParserResult parse_tt_make_range_op(Parser *parser, const OperationPars
                 char *buffer = arena_alloc_array(parser->arena, char, ival.size + 1);
                 memcpy(buffer, ival.str, ival.size);
                 buffer[ival.size] = '\0';
-                start_val = strtoll(buffer, MLIR_INVALID_HANDLE, 10);
+                start_val = atoll(buffer);
                 parser_expect(parser, TK_INTEGER);
             }
             if (parser_peek(parser, TK_COLON)) {
@@ -3721,7 +3721,7 @@ OperationParserResult parse_tt_store_op(Parser *parser, const OperationParserPar
                     char *buffer = arena_alloc_array(parser->arena, char, ival.size + 1);
                     memcpy(buffer, ival.str, ival.size);
                     buffer[ival.size] = '\0';
-                    int64_t int_val = strtoll(buffer, MLIR_INVALID_HANDLE, 10);
+                    int64_t int_val = atoll(buffer);
                     parser_expect(parser, TK_INTEGER);
 
                     // Skip optional type annotation (:i32)

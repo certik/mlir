@@ -1,26 +1,263 @@
 [workspace]
+authors = ["Ondřej Čertík <ondrej@certik.us>"]
+channels = [
+    "https://prefix.dev/certik-forge",
+    "conda-forge",
+]
 name = "mlir"
+description = "Faster and simpler MLIR infrastructure, built on Core C"
+platforms = ["osx-arm64", "linux-64", "win-64"]
 version = "0.1.0"
-description = "Faster and simpler MLIR infrastructure"
-channels = ["conda-forge"]
-platforms = ["linux-64", "osx-arm64"]
+
+#=============================================================================
+# Tokenizer (re2c) — available in all environments via the default feature
+#=============================================================================
+[tasks]
+tokenizer = { cmd = "re2c --no-generation-date -b tokenizer.re -o tokenizer.c", inputs = ["tokenizer.re"], outputs = ["tokenizer.c"], description = "Generate tokenizer.c from tokenizer.re via re2c" }
 
 [dependencies]
-clang = ">=17"
-clangxx = ">=17"
+shell = "*"
 re2c = ">=3"
 python = ">=3.11"
 toml = ">=0.10.2"
 
-[tasks]
-tokenizer = { cmd = "re2c --no-generation-date -b tokenizer.re -o tokenizer.c", description = "Generate tokenizer.c from tokenizer.re via re2c" }
-build-tests = { cmd = "clang -g -Wall -ferror-limit=1 -I. -o run_tests tests/run_tests.c base/arena.c base/string.c base/format.c base/io.c", description = "Compile the unit test binary" }
-build-parser = { cmd = "clang -g -Wall -ferror-limit=1 -I. -o parser parser.c tokenizer.c mlir_parser.c mlir_generic_printer.c mlir_classic_printer.c op_parsers.c mlir_api_impl.c base/arena.c base/string.c base/format.c base/io.c", depends-on = ["tokenizer"], description = "Compile the parser binary" }
-build = { depends-on = ["build-tests", "build-parser"], description = "Build everything (tests + parser)" }
-unit-tests = { cmd = "./run_tests", depends-on = ["build-tests"], description = "Run C unit tests for base utilities" }
-run-parser = { cmd = "./parser", depends-on = ["build-parser"], description = "Smoke-test parser in default mode" }
-run-construct = { cmd = "./parser --construct", depends-on = ["build-parser"], description = "Test parser in AST construction mode" }
-test = { cmd = "python run_tests.py -s", depends-on = ["build"], description = "Run the Python-based diff test suite" }
-roundtrip = { cmd = "bash comp.sh", depends-on = ["build-parser"], description = "Run classic-printer roundtrip checks" }
-update-refs = { cmd = "python run_tests.py -u", depends-on = ["build"], description = "Update reference test results" }
-ci = { depends-on = ["unit-tests", "run-parser", "run-construct", "test"], description = "Full CI: build + all tests" }
+#=============================================================================
+# Common MLIR sources (used by every native/wasm build below)
+#=============================================================================
+# Reusable shell-variable list of mlir + corec + corec-stdlib sources.
+# Defined inline in each platform task because pixi tasks don't share env.
+
+#=============================================================================
+# WebAssembly (WASI)
+#=============================================================================
+[feature.wasm.tasks]
+build_wasm = { cmd = """
+clang \
+    --target=wasm32-wasi \
+    -Os \
+    -nostdlib \
+    -nostdinc \
+    -fno-builtin \
+    -I corec \
+    -I corec-stdlib/stdlib \
+    -I . \
+    -Wl,--no-entry \
+    -Wl,--export=__heap_base \
+    -Wl,--export=_start \
+    -Wl,--initial-memory=131072 \
+    -o parser.wasm \
+    parser.c \
+    tokenizer.c \
+    mlir_parser.c \
+    mlir_classic_printer.c \
+    mlir_generic_printer.c \
+    op_parsers.c \
+    mlir_api_impl.c \
+    corec-stdlib/stdlib/stdio.c \
+    corec-stdlib/stdlib/stdlib.c \
+    corec-stdlib/stdlib/printf.c \
+    corec-stdlib/stdlib/string_impl.c \
+    corec/base/io.c \
+    corec/base/buddy.c \
+    corec/base/arena.c \
+    corec/base/scratch.c \
+    corec/base/format.c \
+    corec/base/math.c \
+    corec/base/string.c \
+    corec/base/mem.c \
+    corec/base/numconv.c \
+    corec/base/assert.c \
+    corec/base/exit.c \
+    corec/platform/platform_wasm.c
+""", inputs = [
+    "parser.c", "tokenizer.c", "tokenizer.h",
+    "mlir_parser.c", "mlir_parser.h",
+    "mlir_classic_printer.c", "mlir_classic_printer.h",
+    "mlir_generic_printer.c", "mlir_generic_printer.h",
+    "op_parsers.c", "op_parsers.h",
+    "mlir_api_impl.c", "mlir_api.h",
+    "corec-stdlib/stdlib/**/*.c", "corec-stdlib/stdlib/**/*.h",
+    "corec/base/**/*.c", "corec/base/**/*.h",
+    "corec/platform/platform_wasm.c", "corec/platform/platform.h",
+], outputs = ["parser.wasm"], depends-on = ["tokenizer"], description = "Build parser.wasm (wasm32-wasi target)" }
+
+test_wasm = { cmd = "wasmtime --dir . parser.wasm --construct", depends-on = ["build_wasm"], description = "Run parser.wasm under wasmtime (construct mode)" }
+
+[feature.wasm.dependencies]
+clang = ">=20.1.4,<21"
+lld = ">=20.1.4,<21"
+wasmtime = ">=38.0.3,<39"
+
+#=============================================================================
+# Linux
+#=============================================================================
+[feature.linux.tasks]
+build_linux = { cmd = """
+clang \
+    -nostdlib \
+    -nostdinc \
+    -fno-builtin \
+    -I corec \
+    -I corec-stdlib/stdlib \
+    -I . \
+    -o parser \
+    parser.c \
+    tokenizer.c \
+    mlir_parser.c \
+    mlir_classic_printer.c \
+    mlir_generic_printer.c \
+    op_parsers.c \
+    mlir_api_impl.c \
+    corec-stdlib/stdlib/stdio.c \
+    corec-stdlib/stdlib/stdlib.c \
+    corec-stdlib/stdlib/printf.c \
+    corec-stdlib/stdlib/string_impl.c \
+    corec/base/io.c \
+    corec/base/buddy.c \
+    corec/base/arena.c \
+    corec/base/scratch.c \
+    corec/base/format.c \
+    corec/base/math.c \
+    corec/base/string.c \
+    corec/base/mem.c \
+    corec/base/numconv.c \
+    corec/base/assert.c \
+    corec/base/exit.c \
+    corec/platform/platform_linux.c
+""", depends-on = ["tokenizer"], description = "Build mlir native binary (Linux only)" }
+
+test_linux = { cmd = "./parser --construct && python run_tests.py -s", depends-on = ["build_linux"], description = "Run mlir test suite (Linux)" }
+
+[feature.linux.target.linux-64.dependencies]
+clang = ">=20.1.4,<21"
+
+#=============================================================================
+# macOS
+#=============================================================================
+[feature.macos.tasks]
+build_macos = { cmd = """
+clang \
+    -g \
+    -nostdlib \
+    -nostdinc \
+    -fno-builtin \
+    -I corec \
+    -I corec-stdlib/stdlib \
+    -I . \
+    -o parser \
+    parser.c \
+    tokenizer.c \
+    mlir_parser.c \
+    mlir_classic_printer.c \
+    mlir_generic_printer.c \
+    op_parsers.c \
+    mlir_api_impl.c \
+    corec-stdlib/stdlib/stdio.c \
+    corec-stdlib/stdlib/stdlib.c \
+    corec-stdlib/stdlib/printf.c \
+    corec-stdlib/stdlib/string_impl.c \
+    corec/base/io.c \
+    corec/base/buddy.c \
+    corec/base/arena.c \
+    corec/base/scratch.c \
+    corec/base/format.c \
+    corec/base/math.c \
+    corec/base/string.c \
+    corec/base/mem.c \
+    corec/base/numconv.c \
+    corec/base/assert.c \
+    corec/base/exit.c \
+    corec/platform/platform_macos.c \
+    -lSystem \
+    -Wl,-e,__start
+""", depends-on = ["tokenizer"], description = "Build mlir native binary (macOS only)" }
+
+test_macos = { cmd = "./parser --construct && python run_tests.py -s", depends-on = ["build_macos"], description = "Run mlir test suite (macOS)" }
+
+#=============================================================================
+# Windows (MSVC)
+#=============================================================================
+[feature.windows.tasks]
+build_windows = { cmd = """
+cl \
+    /nologo \
+    /X \
+    /std:c11 \
+    /Zc:preprocessor \
+    /I"corec" \
+    /I"corec-stdlib/stdlib" \
+    /I"." \
+    /GS- \
+    /Gs0 \
+    /kernel \
+    /c \
+    parser.c \
+    tokenizer.c \
+    mlir_parser.c \
+    mlir_classic_printer.c \
+    mlir_generic_printer.c \
+    op_parsers.c \
+    mlir_api_impl.c \
+    corec-stdlib/stdlib/stdio.c \
+    corec-stdlib/stdlib/stdlib.c \
+    corec-stdlib/stdlib/printf.c \
+    corec-stdlib/stdlib/string_impl.c \
+    corec/base/io.c \
+    corec/base/buddy.c \
+    corec/base/arena.c \
+    corec/base/scratch.c \
+    corec/base/format.c \
+    corec/base/math.c \
+    corec/base/string.c \
+    corec/base/mem.c \
+    corec/base/numconv.c \
+    corec/base/assert.c \
+    corec/base/exit.c \
+    corec/platform/platform_windows.c \
+    && \
+link \
+    /nologo \
+    /subsystem:console \
+    /nodefaultlib \
+    /entry:_start \
+    /STACK:8388608,8388608 \
+    kernel32.lib \
+    shell32.lib \
+    parser.obj \
+    tokenizer.obj \
+    mlir_parser.obj \
+    mlir_classic_printer.obj \
+    mlir_generic_printer.obj \
+    op_parsers.obj \
+    mlir_api_impl.obj \
+    stdio.obj \
+    stdlib.obj \
+    printf.obj \
+    string_impl.obj \
+    io.obj \
+    buddy.obj \
+    arena.obj \
+    scratch.obj \
+    format.obj \
+    math.obj \
+    string.obj \
+    mem.obj \
+    numconv.obj \
+    assert.obj \
+    exit.obj \
+    platform_windows.obj \
+    /out:parser.exe
+""", depends-on = ["tokenizer"], description = "Build parser.exe native binary (Windows only; requires MSVC vcvars64)" }
+
+test_windows = { cmd = "./parser.exe --construct && python run_tests.py -s", depends-on = ["build_windows"], description = "Run mlir test suite (Windows)" }
+
+[feature.windows.target.win-64.dependencies]
+# MSVC must be available on PATH (e.g. via vcvars64.bat)
+
+
+[environments]
+default = { solve-group = "default" }
+wasm = ["wasm"]
+linux = { features = ["linux"], solve-group = "linux" }
+macos = { features = ["macos"], solve-group = "macos" }
+windows = { features = ["windows"], solve-group = "windows" }

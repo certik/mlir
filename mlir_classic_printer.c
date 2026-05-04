@@ -5,6 +5,58 @@
 #include <stdio.h>
 #include <string.h>
 
+// Format a double in scientific form like printf("%.<precision>e", v).
+// Written here because corec's snprintf does not support %e.
+static int format_double_e(char *out, size_t cap, double v, int precision) {
+    size_t pos = 0;
+    if (cap == 0) return 0;
+    int neg = 0;
+    if (v < 0) { neg = 1; v = -v; }
+    int exp = 0;
+    if (v != 0.0) {
+        while (v >= 10.0) { v /= 10.0; exp++; }
+        while (v < 1.0)   { v *= 10.0; exp--; }
+    }
+    // Round to 'precision' fractional digits in the mantissa.
+    double scale = 1.0;
+    for (int i = 0; i < precision; i++) scale *= 10.0;
+    double rounded = (long long)(v * scale + 0.5) / scale;
+    if (rounded >= 10.0) { rounded /= 10.0; exp++; }
+    v = rounded;
+
+    if (neg && pos < cap - 1) out[pos++] = '-';
+    int int_part = (int)v;
+    if (int_part > 9) int_part = 9;
+    if (pos < cap - 1) out[pos++] = '0' + int_part;
+    if (precision > 0) {
+        if (pos < cap - 1) out[pos++] = '.';
+        double frac = v - int_part;
+        for (int i = 0; i < precision && pos < cap - 1; i++) {
+            frac *= 10.0;
+            int digit = (int)frac;
+            if (digit > 9) digit = 9;
+            if (digit < 0) digit = 0;
+            out[pos++] = '0' + digit;
+            frac -= digit;
+        }
+    }
+    if (pos < cap - 1) out[pos++] = 'e';
+    if (exp < 0) {
+        if (pos < cap - 1) out[pos++] = '-';
+        exp = -exp;
+    } else {
+        if (pos < cap - 1) out[pos++] = '+';
+    }
+    char digits[8];
+    int n = 0;
+    if (exp == 0) digits[n++] = '0';
+    while (exp > 0) { digits[n++] = '0' + (exp % 10); exp /= 10; }
+    while (n < 2) digits[n++] = '0';
+    while (n > 0 && pos < cap - 1) out[pos++] = digits[--n];
+    out[pos] = '\0';
+    return (int)pos;
+}
+
 // SSA numbering map for printer (key by API values during migration)
 static inline size_t ptr_hash(MLIR_ValueHandle p) { return ((size_t)p) >> 3; }
 static inline bool ptr_equal(MLIR_ValueHandle a, MLIR_ValueHandle b) { return a == b; }
@@ -167,6 +219,10 @@ static void preassign_region_ssa(PrintCtx *ctx, MLIR_RegionHandle region, int in
 static string indent_classic(Arena *arena, int indent_level) {
     const int indent_spaces=2;
     int buf_size=indent_level*indent_spaces;
+    if (buf_size <= 0) {
+        string str = {NULL, 0};
+        return str;
+    }
     char* buf = arena_alloc_array(arena, char, buf_size);
     for (int64_t i = 0; i < buf_size; i++) {
         buf[i] = ' ';
@@ -494,7 +550,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     }
                 } else if (MLIR_GetAttributeKind(first_attr) == MLIR_ATTR_KIND_FLOAT) {
                     char buf[32];
-                    snprintf(buf, sizeof(buf), "%.6e", MLIR_GetAttributeFloat(first_attr));
+                    format_double_e(buf, sizeof(buf), MLIR_GetAttributeFloat(first_attr), 6);
                     result = str_concat(arena, result, str_from_cstr_view(buf));
                 } else {
                     result = str_concat(arena, result, str_lit("0"));

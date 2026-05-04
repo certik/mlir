@@ -124,7 +124,7 @@ static MLIR_TypeHandle parse_tensor_like_type(MLIR_Context *ctx, string content,
         }
 
         if (rank > 0) {
-            int64_t dims[rank];
+            int64_t *dims = arena_alloc_array(MLIR_GetArenaAllocator(ctx), int64_t, rank);
             size_t pos = 0;
             uint32_t dim_idx = 0;
             while (pos <= shape_str.size && dim_idx < rank) {
@@ -542,9 +542,8 @@ void parser_error(Parser *parser, string msg, uint64_t first, uint64_t last) {
 
     bool debug = false;
     if (debug) {
-        println(parser->arena, str_lit("{}"), newlines);
-        println(parser->arena,
-                str_lit("first: {}, last: {}, line_first: {}, column_first: {}, start_of_line: {}, end_of_line: {}"),
+        println(str_lit("{}"), newlines);
+        println(str_lit("first: {}, last: {}, line_first: {}, column_first: {}, start_of_line: {}, end_of_line: {}"),
                 first, last, line_first, column_first, start_of_line, end_of_line);
     }
 
@@ -564,10 +563,10 @@ void parser_error(Parser *parser, string msg, uint64_t first, uint64_t last) {
     string caret_str = { .str = caret_buf, .size = first - start_of_line + token_length };
 
     // Print the error message, line, and caret string
-    println(parser->arena, str_lit("Syntax error ({}:{}): {}"),
+    println(str_lit("Syntax error ({}:{}): {}"),
             line_first, column_first, msg);
-    println(parser->arena, str_lit("{}"), line);
-    println(parser->arena, caret_str);
+    println(str_lit("{}"), line);
+    println(caret_str);
 
     exit(1);
 }
@@ -585,9 +584,8 @@ void parser_warning(Parser *parser, string msg, uint64_t first, uint64_t last) {
 
     bool debug = false;
     if (debug) {
-        println(parser->arena, str_lit("{}"), newlines);
-        println(parser->arena,
-                str_lit("first: {}, last: {}, line_first: {}, column_first: {}, start_of_line: {}, end_of_line: {}"),
+        println(str_lit("{}"), newlines);
+        println(str_lit("first: {}, last: {}, line_first: {}, column_first: {}, start_of_line: {}, end_of_line: {}"),
                 first, last, line_first, column_first, start_of_line, end_of_line);
     }
 
@@ -607,10 +605,10 @@ void parser_warning(Parser *parser, string msg, uint64_t first, uint64_t last) {
     string caret_str = { .str = caret_buf, .size = first - start_of_line + token_length };
 
     // Print the warning message, line, and caret string
-    println(parser->arena, str_lit("Warning ({}:{}): {}"),
+    println(str_lit("Warning ({}:{}): {}"),
             line_first, column_first, msg);
-    println(parser->arena, str_lit("{}"), line);
-    println(parser->arena, caret_str);
+    println(str_lit("{}"), line);
+    println(caret_str);
 }
 
 void parser_next_token(Parser *parser) {

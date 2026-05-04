@@ -1,6 +1,9 @@
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 
+#include <platform/platform.h>
 #include "tokenizer.h"
 #include <base/arena.h>
 #include <base/io.h>
@@ -27,7 +30,7 @@ void tokenizer_print_all_tokens(Arena *arena, const string input_code) {
                     || token_type == TK_EOF) {
                 token_str = str_lit("");
             }
-            println(arena, str_lit("Token({}, \"{}\", {},{})"),
+            println(str_lit("Token({}, \"{}\", {},{})"),
                 str_from_cstr_view((char*)mlir_tokentype_to_string(token_type)), token_str, first, last);
         }
         if (token_type == TK_EOF) {
@@ -137,11 +140,24 @@ MLIR_OpHandle construct_test_module_full(MLIR_Context *ctx) {
     return module;
 }
 
-int main(int argc, char *argv[]) {
+int app_main(void) {
     bool use_construction = false;
     bool use_classic_printer = false;
     bool verbose = false;
     char *input_file = NULL;
+
+    // Fetch argv via the corec platform layer.
+    size_t pargc = 0, argv_buf_size = 0;
+    int rc = platform_args_sizes_get(&pargc, &argv_buf_size);
+    if (rc != 0) pargc = 0;
+    int argc = (int)pargc;
+    Arena *boot_arena = arena_new(64 * 1024);
+    char **argv = arena_alloc_array(boot_arena, char *, argc + 1);
+    char *argv_buf = arena_alloc_array(boot_arena, char, argv_buf_size + 1);
+    if (argc > 0) {
+        platform_args_get(argv, argv_buf);
+    }
+    argv[argc] = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) {
@@ -151,7 +167,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (verbose) printf("Starting main...\n");
-    Arena *arena = arena_create(50*1024*1024);
+    Arena *arena = arena_new(50*1024*1024);
     if (verbose) printf("Arena created...\n");
     MLIR_Context ctx = {0};
     MLIR_SetArenaAllocator(&ctx, arena);
@@ -192,7 +208,7 @@ int main(int argc, char *argv[]) {
             result = print_operation_generic(&ctx, 0, op);
         }
         if (verbose) printf("Printing result...\n");
-        println(arena, str_lit("{}"), result);
+        println(str_lit("{}"), result);
 
         const char *expected =
             "module() {\n"
@@ -213,7 +229,7 @@ int main(int argc, char *argv[]) {
             if (verbose) printf("❌ Generic mode test FAILED\n");
             if (verbose) printf("Expected:\n%s\n", expected);
             if (verbose) printf("Actual:\n");
-            println(arena, str_lit("{}"), result);
+            println(str_lit("{}"), result);
             exit_code = 1;
         }
     } else {
@@ -230,11 +246,11 @@ int main(int argc, char *argv[]) {
 
         MLIR_LocationMap *locmap = NULL;
         op = mlir_parse_module(&ctx, (const char*)mlir_code.str, mlir_code.size, &locmap);
-        if (verbose) println(arena, str_lit("MLIR:"));
+        if (verbose) println(str_lit("MLIR:"));
         if (use_classic_printer) {
-            println(arena, str_lit("{}"), print_module_classic(&ctx, op, locmap));
+            println(str_lit("{}"), print_module_classic(&ctx, op, locmap));
         } else {
-            println(arena, str_lit("{}"), print_operation_generic(&ctx, 0, op));
+            println(str_lit("{}"), print_operation_generic(&ctx, 0, op));
         }
         exit_code = 0;
     }
