@@ -310,6 +310,9 @@ platforms = ["linux-64", "osx-arm64"]
 [feature.upstream.dependencies]
 mlir = "*"
 cxx-compiler = "*"
+zlib = "*"
+libxml2 = "*"
+zstd = "*"
 
 [feature.upstream.target.osx-arm64.activation.env]
 PLATFORM_C = "corec/platform/platform_macos.c"
