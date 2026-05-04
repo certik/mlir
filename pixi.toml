@@ -53,6 +53,7 @@ clang \
     mlir_generic_printer.c \
     op_parsers.c \
     mlir_api_impl.c \
+    mlir_op_names.c \
     corec-stdlib/stdlib/stdio.c \
     corec-stdlib/stdlib/stdlib.c \
     corec-stdlib/stdlib/printf.c \
@@ -75,7 +76,7 @@ clang \
     "mlir_classic_printer.c", "mlir_classic_printer.h",
     "mlir_generic_printer.c", "mlir_generic_printer.h",
     "op_parsers.c", "op_parsers.h",
-    "mlir_api_impl.c", "mlir_api.h",
+    "mlir_api_impl.c", "mlir_op_names.c", "mlir_op_names.h", "mlir_api.h",
     "corec-stdlib/stdlib/**/*.c", "corec-stdlib/stdlib/**/*.h",
     "corec/base/**/*.c", "corec/base/**/*.h",
     "corec/platform/platform_wasm.c", "corec/platform/platform.h",
@@ -108,6 +109,7 @@ clang \
     mlir_generic_printer.c \
     op_parsers.c \
     mlir_api_impl.c \
+    mlir_op_names.c \
     corec-stdlib/stdlib/stdio.c \
     corec-stdlib/stdlib/stdlib.c \
     corec-stdlib/stdlib/printf.c \
@@ -152,6 +154,7 @@ clang \
     mlir_generic_printer.c \
     op_parsers.c \
     mlir_api_impl.c \
+    mlir_op_names.c \
     corec-stdlib/stdlib/stdio.c \
     corec-stdlib/stdlib/stdlib.c \
     corec-stdlib/stdlib/printf.c \
@@ -173,6 +176,42 @@ clang \
 """, depends-on = ["tokenizer"], description = "Build mlir native binary (macOS only)" }
 
 test_macos = { cmd = "./parser --construct && python run_tests.py -s", depends-on = ["build_macos"], description = "Run mlir test suite (macOS)" }
+
+build_cross_native_macos = { cmd = """
+clang \
+    -g \
+    -nostdlib \
+    -nostdinc \
+    -fno-builtin \
+    -I corec \
+    -I corec-stdlib/stdlib \
+    -I . \
+    -o cross_native \
+    tests/cross/driver.c \
+    mlir_generic_printer.c \
+    mlir_api_impl.c \
+    mlir_op_names.c \
+    corec-stdlib/stdlib/stdio.c \
+    corec-stdlib/stdlib/stdlib.c \
+    corec-stdlib/stdlib/printf.c \
+    corec-stdlib/stdlib/string_impl.c \
+    corec/base/io.c \
+    corec/base/buddy.c \
+    corec/base/arena.c \
+    corec/base/scratch.c \
+    corec/base/format.c \
+    corec/base/math.c \
+    corec/base/string.c \
+    corec/base/mem.c \
+    corec/base/numconv.c \
+    corec/base/assert.c \
+    corec/base/exit.c \
+    corec/platform/platform_macos.c \
+    -lSystem \
+    -Wl,-e,__start
+""", description = "Build cross-impl test driver (native, macOS)" }
+
+test_cross_native_macos = { cmd = "./cross_native > tests/cross/out_native.txt && diff tests/cross/expected.txt tests/cross/out_native.txt", depends-on = ["build_cross_native_macos"], description = "Run native cross-impl test driver and diff against reference" }
 
 #=============================================================================
 # Windows (MSVC)
@@ -198,6 +237,7 @@ cl \
     mlir_generic_printer.c \
     op_parsers.c \
     mlir_api_impl.c \
+    mlir_op_names.c \
     corec-stdlib/stdlib/stdio.c \
     corec-stdlib/stdlib/stdlib.c \
     corec-stdlib/stdlib/printf.c \
@@ -230,6 +270,7 @@ link \
     mlir_generic_printer.obj \
     op_parsers.obj \
     mlir_api_impl.obj \
+    mlir_op_names.obj \
     stdio.obj \
     stdlib.obj \
     printf.obj \
@@ -255,9 +296,50 @@ test_windows = { cmd = "./parser.exe --construct && python run_tests.py -s", dep
 # MSVC must be available on PATH (e.g. via vcvars64.bat)
 
 
+#=============================================================================
+# Upstream MLIR bridge
+# Optional environment that links the public C API against upstream LLVM/MLIR
+# (mlir_api_impl_upstream.cpp). Uses conda-forge `llvmdev`, which ships MLIR
+# headers + libs. Restricted to native desktop platforms (no WASM) and isolated
+# in its own pixi environment so the default/macos/linux/windows/wasm envs
+# stay small and fast.
+#=============================================================================
+[feature.upstream]
+platforms = ["linux-64", "osx-arm64"]
+
+[feature.upstream.dependencies]
+mlir = "*"
+cxx-compiler = "*"
+zlib = "*"
+libxml2 = "*"
+zstd = "*"
+
+[feature.upstream.target.osx-arm64.activation.env]
+PLATFORM_C = "corec/platform/platform_macos.c"
+PLATFORM_OBJ = "platform_macos.o"
+EXTRA_LINK_FLAGS = ""
+
+[feature.upstream.target.linux-64.activation.env]
+PLATFORM_C = "corec/platform/platform_linux.c"
+PLATFORM_OBJ = "platform_linux.o"
+EXTRA_LINK_FLAGS = "-nostartfiles -Wl,--defsym=__dso_handle=0"
+
+[feature.upstream.tasks]
+build_cross_upstream = { cmd = "bash tests/build_cross_upstream.sh", description = "Build cross-impl driver against upstream LLVM/MLIR" }
+
+
+test_cross = { cmd = "./cross_upstream > tests/cross/out_upstream.txt && diff tests/cross/expected.txt tests/cross/out_upstream.txt", depends-on = ["build_cross_upstream"], description = "Run upstream cross-impl driver and diff against reference" }
+
+
+build_parser_upstream = { cmd = "bash tests/build_parser_upstream.sh", depends-on = ["tokenizer"], description = "Build parser_upstream against upstream LLVM/MLIR" }
+
+test_parser_upstream = { cmd = "bash tests/run_parser_upstream.sh", depends-on = ["build_parser_upstream"], description = "Run mlir test suite using parser_upstream as ./parser (some mismatches expected)" }
+
+
 [environments]
 default = { solve-group = "default" }
 wasm = ["wasm"]
 linux = { features = ["linux"], solve-group = "linux" }
 macos = { features = ["macos"], solve-group = "macos" }
 windows = { features = ["windows"], solve-group = "windows" }
+upstream = { features = ["upstream"], solve-group = "upstream" }

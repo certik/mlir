@@ -6,6 +6,7 @@
 #include <base/vector.h>
 #include "tokenizer.h"
 #include "mlir_api.h"
+#include "mlir_op_names.h"
 #include "mlir_parser.h"
 #include <string.h>
 

@@ -144,7 +144,6 @@ void parse_generic_attrs_and_result_type(Parser *parser,
 
 void consume_optional_hash_selector(Parser *parser);
 
-string op_type_to_string(MLIR_OpType type);
 MLIR_OpType op_string_to_type(string name);
 
 // TODO: use Type by value

@@ -1,26 +1,14 @@
-# Pixi
-.pixi/
-
-# Build artifacts
+cross_native
+cross_upstream
+cross_native.dSYM/
+tests/cross/out_*.txt
 parser
-parser.exe
+parser_upstream
 parser.wasm
 parser.dSYM/
-mlir
-mlir.exe
-mlir.wasm
-mlir.dSYM/
 *.o
-*.obj
-
-# Generated tokenizer
-tokenizer.c
-
-# Test artifacts
 tests/output/
 tests/*.mlir2
 tests/*.ttir2
-
-# Python
-__pycache__/
-*.pyc
+parser.native.bak
+compiler_tester/__pycache__/

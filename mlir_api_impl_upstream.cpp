@@ -1,242 +1,666 @@
-#include "mlir_api.h"
+// Upstream LLVM/MLIR-backed implementation of the public API in mlir_api.h.
+//
+// All structural queries (getOperand/getResult/getAttrs/getRegions/...)
+// go directly through the upstream MLIR C++ API. The only auxiliary
+// state we keep is a small map from `mlir::Value` to a heap-allocated
+// `ValueBox`, which exists because:
+//   1. The C API creates `MLIR_ValueHandle` for a future block arg
+//      *before* the block exists (CreateValueBlockArg, then later
+//      AppendBlockArg), so the handle has to be an indirection slot.
+//   2. Upstream MLIR does not track per-Value register names; the
+//      printer's MLIR_GetValueRegisterName needs them for block args.
+//
+// All other handle types map directly to upstream pointers / opaque
+// pointers, with no parallel storage.
+//
+// Coverage is the surface needed by tests/cross/driver.c. APIs outside
+// that surface are stubbed with UNIMPLEMENTED().
 
-// This file provides an example implementation of the public C API on top of
-// the upstream MLIR C++ library.  It is not compiled as part of this project
-// but demonstrates how the API can be bridged to the official MLIR data
-// structures.
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <unordered_map>
 
 #include "mlir/IR/Block.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Location.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Operation.h"
+#include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/Region.h"
-#include "mlir/IR/Value.h"
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/StringRef.h"
-#include <cassert>
+#include "llvm/Support/raw_ostream.h"
 
-using namespace mlir;
+extern "C" {
+#include "mlir_api.h"
+#include "mlir_op_names.h"
+}
 
-// Global context/builder used to create operations.  A real implementation
-// would likely provide a more sophisticated ownership model.
-static MLIRContext *gContext = nullptr;
-static OpBuilder *gBuilder = nullptr;
+#define UNIMPLEMENTED()                                                   \
+    do {                                                                  \
+        std::fprintf(stderr, "%s unimplemented (upstream)\n", __func__);  \
+        std::abort();                                                     \
+    } while (0)
 
-// Mapping from MLIR operation pointers back to our MLIR_OpType enumeration.
-static llvm::DenseMap<const Operation *, MLIR_OpType> gMLIR_OpTypeMap;
+namespace {
 
-// Mapping from MLIR_OpType to the canonical MLIR operation name.  The order matches
-// the MLIR_OpType enumeration defined in mlir_api.h.
-static const char *const kOpNames[OP_TYPE_COUNT] = {
-    "",                     // OP_TYPE_UNREGISTERED
-    "builtin.module",       // OP_TYPE_MODULE
-    "arith.addi",           // OP_TYPE_ARITH_ADDI
-    "arith.subi",           // OP_TYPE_ARITH_SUBI
-    "arith.muli",           // OP_TYPE_ARITH_MULI
-    "arith.divi",           // OP_TYPE_ARITH_DIVI
-    "arith.addf",           // OP_TYPE_ARITH_ADDF
-    "arith.subf",           // OP_TYPE_ARITH_SUBF
-    "arith.mulf",           // OP_TYPE_ARITH_MULF
-    "arith.divf",           // OP_TYPE_ARITH_DIVF
-    "arith.constant",       // OP_TYPE_ARITH_CONSTANT
-    "arith.cmpi",           // OP_TYPE_ARITH_CMPI
-    "arith.cmpf",           // OP_TYPE_ARITH_CMPF
-    "arith.select",         // OP_TYPE_ARITH_SELECT
-    "memref.load",          // OP_TYPE_MEMREF_LOAD
-    "memref.store",         // OP_TYPE_MEMREF_STORE
-    "memref.alloc",         // OP_TYPE_MEMREF_ALLOC
-    "memref.dealloc",       // OP_TYPE_MEMREF_DEALLOC
-    "cf.br",                // OP_TYPE_CF_BR
-    "cf.cond_br",           // OP_TYPE_CF_COND_BR
-    "cf.switch",            // OP_TYPE_CF_SWITCH
-    "func.func",            // OP_TYPE_FUNC_FUNC
-    "func.return",          // OP_TYPE_FUNC_RETURN
-    "func.call",            // OP_TYPE_FUNC_CALL
-    "scf.for",              // OP_TYPE_SCF_FOR
-    "scf.while",            // OP_TYPE_SCF_WHILE
-    "scf.if",               // OP_TYPE_SCF_IF
-    "scf.yield",            // OP_TYPE_SCF_YIELD
-    "tt.get_program_id",    // OP_TYPE_TT_GET_PROGRAM_ID
-    "tt.load",              // OP_TYPE_TT_LOAD
-    "tt.store",             // OP_TYPE_TT_STORE
-    "tt.make_range",        // OP_TYPE_TT_MAKE_RANGE
-    "tt.splat",             // OP_TYPE_TT_SPLAT
-    "tt.addptr",            // OP_TYPE_TT_ADDPTR
-    "tt.return",            // OP_TYPE_TT_RETURN
-    "tt.func",              // OP_TYPE_TT_FUNC
-    "tt.call",              // OP_TYPE_TT_CALL
-    "tt.reduce",            // OP_TYPE_TT_REDUCE
-    "gpu.launch",           // OP_TYPE_GPU_LAUNCH
-    "affine.for",           // OP_TYPE_AFFINE_FOR
-    "affine.load",          // OP_TYPE_AFFINE_LOAD
-    "vector.print",         // OP_TYPE_VECTOR_PRINT
-    "std.constant",         // OP_TYPE_STD_CONSTANT
-    "std.return",           // OP_TYPE_STD_RETURN
-    "tensor.extract",       // OP_TYPE_TENSOR_EXTRACT
-    "tensor.splat",         // OP_TYPE_TENSOR_SPLAT
-    "tensor.collapse_shape",// OP_TYPE_TENSOR_COLLAPSE_SHAPE
-    "linalg.fill",          // OP_TYPE_LINALG_FILL
-    "index.constant",       // OP_TYPE_INDEX_CONSTANT
-    "return",               // OP_TYPE_RETURN
-    "tt.reduce_return"      // OP_TYPE_TT_REDUCE_RETURN
+struct UpstreamCtx {
+    mlir::MLIRContext mctx;
+    UpstreamCtx() { mctx.allowUnregisteredDialects(true); }
+};
+UpstreamCtx &globalCtx() { static UpstreamCtx g; return g; }
+
+// One ValueBox per logical mlir::Value. Provides a stable handle and
+// (for block args) carries the register name that upstream doesn't
+// track natively.
+struct ValueBox {
+    mlir::Value v;                  // bound after AppendBlockArg / Op create
+    std::string name;               // register name; empty for op results
+    mlir::Type pendingType;         // used until AppendBlockArg binds v
+    mlir::Location pending_loc{mlir::UnknownLoc::get(&globalCtx().mctx)};
+    bool deferredBlockArg = false;
 };
 
-static inline StringRef opTypeToName(MLIR_OpType type) {
-    assert(type < OP_TYPE_COUNT);
-    return kOpNames[type];
+std::unordered_map<const void *, ValueBox *> &valueIndex() {
+    static std::unordered_map<const void *, ValueBox *> m;
+    return m;
 }
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+ValueBox *boxFor(mlir::Value v) {
+    auto &m = valueIndex();
+    auto it = m.find(v.getAsOpaquePointer());
+    if (it != m.end()) return it->second;
+    auto *box = new ValueBox();
+    box->v = v;
+    m[v.getAsOpaquePointer()] = box;
+    return box;
+}
 
-static MLIR_OpType lookupMLIR_OpTypeByName(StringRef name) {
-    for (int i = 1; i < OP_TYPE_COUNT; ++i) {
-        if (name == opTypeToName(static_cast<MLIR_OpType>(i)))
-            return static_cast<MLIR_OpType>(i);
+template <class T> uintptr_t H(T *p) { return reinterpret_cast<uintptr_t>(p); }
+template <class T> T *F(uintptr_t h) { return reinterpret_cast<T *>(h); }
+
+uintptr_t typeH(mlir::Type t) { return reinterpret_cast<uintptr_t>(t.getAsOpaquePointer()); }
+mlir::Type typeF(uintptr_t h) {
+    return mlir::Type::getFromOpaquePointer(reinterpret_cast<const void *>(h));
+}
+uintptr_t locH(mlir::Location loc) { return reinterpret_cast<uintptr_t>(loc.getAsOpaquePointer()); }
+mlir::Location locF(uintptr_t h) {
+    return mlir::Location::getFromOpaquePointer(reinterpret_cast<const void *>(h));
+}
+
+MLIR_OpType opTypeFromName(llvm::StringRef name) {
+    if (name == "builtin.module") return OP_TYPE_MODULE;
+    // Walk the canonical name table backwards. OP_TYPE_UNREGISTERED is the
+    // fallback.
+    for (int t = 0; t < 256; t++) {
+        string s = op_type_to_string((MLIR_OpType)t);
+        if (s.size == 0) continue;
+        if (name.size() == s.size && std::memcmp(name.data(), s.str, s.size) == 0)
+            return (MLIR_OpType)t;
     }
     return OP_TYPE_UNREGISTERED;
 }
 
-void MLIR_InitApi(MLIR_Op *root) {
-    if (!gContext) {
-        gContext = new MLIRContext();
-        gContext->loadAllAvailableDialects();
-        gBuilder = new OpBuilder(gContext);
+// Copy a std::string into the C-API arena so the returned `string` is
+// stable for the lifetime of the printer.
+string mkArenaString(MLIR_Context *ctx, llvm::StringRef src) {
+    Arena *a = ctx->arena;
+    auto *p = (char *)arena_alloc(a, src.size());
+    if (src.size() > 0) std::memcpy(p, src.data(), src.size());
+    string s; s.str = p; s.size = src.size();
+    return s;
+}
+
+string mkRefString(llvm::StringRef src) {
+    string s;
+    s.str  = const_cast<char *>(src.data());
+    s.size = src.size();
+    return s;
+}
+
+} // namespace
+
+// -----------------------------------------------------------------------------
+// Lifecycle
+// -----------------------------------------------------------------------------
+
+extern "C" void MLIR_InitApi(MLIR_Context *, MLIR_OpHandle) {}
+extern "C" void MLIR_SetArenaAllocator(MLIR_Context *ctx, Arena *arena) { ctx->arena = arena; }
+extern "C" Arena *MLIR_GetArenaAllocator(MLIR_Context *ctx) { return ctx->arena; }
+
+// -----------------------------------------------------------------------------
+// Region / Block
+// -----------------------------------------------------------------------------
+
+extern "C" MLIR_RegionHandle MLIR_CreateRegion(MLIR_Context *) {
+    return H(new mlir::Region());
+}
+extern "C" MLIR_BlockHandle MLIR_CreateBlock(MLIR_Context *) {
+    return H(new mlir::Block());
+}
+extern "C" void MLIR_AppendRegionBlock(MLIR_Context *, MLIR_RegionHandle r,
+                                        MLIR_BlockHandle b) {
+    F<mlir::Region>(r)->push_back(F<mlir::Block>(b));
+}
+extern "C" void MLIR_AppendBlockOp(MLIR_Context *, MLIR_BlockHandle b,
+                                    MLIR_OpHandle op) {
+    F<mlir::Block>(b)->push_back(F<mlir::Operation>(op));
+}
+extern "C" void MLIR_AppendBlockArg(MLIR_Context *, MLIR_BlockHandle bh,
+                                     MLIR_ValueHandle vh) {
+    auto *block = F<mlir::Block>(bh);
+    auto *box = F<ValueBox>(vh);
+    if (!box->deferredBlockArg) {
+        std::fprintf(stderr, "AppendBlockArg: handle is not a deferred block arg\n");
+        std::abort();
+    }
+    auto realArg = block->addArgument(box->pendingType, box->pending_loc);
+    // If we have a stand-in arg from a hidden holder block, redirect uses.
+    if (box->v) {
+        auto oldOpaque = box->v.getAsOpaquePointer();
+        valueIndex().erase(oldOpaque);
+        box->v.replaceAllUsesWith(realArg);
+    }
+    box->v = realArg;
+    box->deferredBlockArg = false;
+    valueIndex()[realArg.getAsOpaquePointer()] = box;
+}
+
+// -----------------------------------------------------------------------------
+// Op construction
+// -----------------------------------------------------------------------------
+
+extern "C" MLIR_OpHandle MLIR_CreateOp(
+    MLIR_Context *, MLIR_OpType type, string opname,
+    MLIR_AttributeHandle *attrs, size_t n_attrs,
+    MLIR_TypeHandle *result_types, size_t n_result_types,
+    MLIR_ValueHandle *results, size_t n_results,
+    MLIR_ValueHandle *operands, size_t n_operands,
+    MLIR_RegionHandle *regions, size_t n_regions,
+    MLIR_LocationHandle location, MLIR_LocationHandle, string, int64_t) {
+    auto &ctx = globalCtx().mctx;
+
+    std::string nm(opname.str, opname.size);
+    if (nm.empty()) {
+        // Fall back to the canonical mapping from mlir_op_names.
+        string s = op_type_to_string(type);
+        if (s.size > 0) nm.assign(s.str, s.size);
+        else nm = "unknown";
+    } else if (type == OP_TYPE_MODULE && nm == "module") {
+        nm = "builtin.module";
     }
 
-    gMLIR_OpTypeMap.clear();
+    mlir::Location loc = (location == MLIR_INVALID_HANDLE)
+                             ? mlir::Location(mlir::UnknownLoc::get(&ctx))
+                             : locF(location);
+    mlir::OperationState state(loc, llvm::StringRef(nm));
 
-    if (root) {
-        Operation *cppRoot = reinterpret_cast<Operation *>(root);
-        cppRoot->walk([](Operation *op) {
-            gMLIR_OpTypeMap[op] = lookupMLIR_OpTypeByName(op->getName().getStringRef());
-        });
+    for (size_t i = 0; i < n_operands; i++) {
+        state.addOperands(F<ValueBox>(operands[i])->v);
+    }
+    for (size_t i = 0; i < n_result_types; i++) {
+        state.addTypes(typeF(result_types[i]));
+    }
+    for (size_t i = 0; i < n_attrs; i++) {
+        const auto *na = F<mlir::NamedAttribute>(attrs[i]);
+        state.addAttribute(na->getName(), na->getValue());
+    }
+    for (size_t i = 0; i < n_regions; i++) {
+        state.addRegion(std::unique_ptr<mlir::Region>(F<mlir::Region>(regions[i])));
+    }
+    mlir::Operation *op = mlir::Operation::create(state);
+
+    // Bind user-supplied result handles to the freshly-created OpResults.
+    for (size_t i = 0; i < n_results; i++) {
+        auto v = op->getResult(i);
+        auto *box = F<ValueBox>(results[i]);
+        box->v = v;
+        valueIndex()[v.getAsOpaquePointer()] = box;
+    }
+
+    return H(op);
+}
+
+extern "C" void MLIR_AppendOpAttribute(MLIR_Context *, MLIR_OpHandle oh,
+                                        MLIR_AttributeHandle ah) {
+    auto *op = F<mlir::Operation>(oh);
+    const auto *na = F<mlir::NamedAttribute>(ah);
+    op->setAttr(na->getName(), na->getValue());
+}
+
+// -----------------------------------------------------------------------------
+// Op accessors — straight passthrough to upstream
+// -----------------------------------------------------------------------------
+
+extern "C" MLIR_OpType MLIR_GetOpType(MLIR_OpHandle h) {
+    return opTypeFromName(F<mlir::Operation>(h)->getName().getStringRef());
+}
+extern "C" string MLIR_GetOpName(MLIR_OpHandle h) {
+    auto sr = F<mlir::Operation>(h)->getName().getStringRef();
+    // The C side prints OP_TYPE_MODULE as "module"; strip "builtin." prefix
+    // for the canonical builtin module op so output matches.
+    if (sr == "builtin.module") return mkRefString("module");
+    return mkRefString(sr);
+}
+extern "C" string MLIR_GetOpName_string(MLIR_OpHandle h) { return MLIR_GetOpName(h); }
+extern "C" MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle) { return MLIR_INVALID_HANDLE; }
+extern "C" string MLIR_GetOpTrailingComment(MLIR_OpHandle) {
+    string s; s.str = nullptr; s.size = 0; return s;
+}
+extern "C" int64_t MLIR_GetOpSourceLineStart(MLIR_OpHandle) { return -1; }
+extern "C" MLIR_LocationHandle MLIR_GetOpUnnumberedLocationDef(MLIR_OpHandle) {
+    return MLIR_INVALID_HANDLE;
+}
+
+extern "C" size_t MLIR_GetOpNumOperands(MLIR_OpHandle h) {
+    return F<mlir::Operation>(h)->getNumOperands();
+}
+extern "C" MLIR_ValueHandle MLIR_GetOpOperand(MLIR_OpHandle h, size_t i) {
+    return H(boxFor(F<mlir::Operation>(h)->getOperand(i)));
+}
+extern "C" size_t MLIR_GetOpNumResults(MLIR_OpHandle h) {
+    return F<mlir::Operation>(h)->getNumResults();
+}
+extern "C" MLIR_ValueHandle MLIR_GetOpResult(MLIR_OpHandle h, size_t i) {
+    return H(boxFor(F<mlir::Operation>(h)->getResult(i)));
+}
+extern "C" size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle h) {
+    return F<mlir::Operation>(h)->getNumResults();
+}
+extern "C" MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle h, size_t i) {
+    return typeH(F<mlir::Operation>(h)->getResult(i).getType());
+}
+extern "C" size_t MLIR_GetOpNumAttributes(MLIR_OpHandle h) {
+    return F<mlir::Operation>(h)->getAttrs().size();
+}
+extern "C" MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle h, size_t i) {
+    auto attrs = F<mlir::Operation>(h)->getAttrs();
+    return reinterpret_cast<uintptr_t>(&attrs[i]);
+}
+extern "C" size_t MLIR_GetOpNumRegions(MLIR_OpHandle h) {
+    return F<mlir::Operation>(h)->getNumRegions();
+}
+extern "C" MLIR_RegionHandle MLIR_GetOpRegion(MLIR_OpHandle h, size_t i) {
+    return H(&F<mlir::Operation>(h)->getRegion(i));
+}
+
+// -----------------------------------------------------------------------------
+// Region / Block accessors
+// -----------------------------------------------------------------------------
+
+extern "C" size_t MLIR_GetRegionNumBlocks(MLIR_RegionHandle h) {
+    auto *r = F<mlir::Region>(h);
+    return std::distance(r->begin(), r->end());
+}
+extern "C" MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_RegionHandle h, size_t i) {
+    auto *r = F<mlir::Region>(h);
+    auto it = r->begin();
+    std::advance(it, i);
+    return H(&*it);
+}
+
+extern "C" size_t MLIR_GetBlockNumOps(MLIR_BlockHandle h) {
+    auto *b = F<mlir::Block>(h);
+    return std::distance(b->begin(), b->end());
+}
+extern "C" MLIR_OpHandle MLIR_GetBlockOp(MLIR_BlockHandle h, size_t i) {
+    auto *b = F<mlir::Block>(h);
+    auto it = b->begin();
+    std::advance(it, i);
+    return H(&*it);
+}
+extern "C" size_t MLIR_GetBlockNumArgs(MLIR_BlockHandle h) {
+    return F<mlir::Block>(h)->getNumArguments();
+}
+extern "C" MLIR_ValueHandle MLIR_GetBlockArg(MLIR_BlockHandle h, size_t i) {
+    return H(boxFor(F<mlir::Block>(h)->getArgument(i)));
+}
+
+// -----------------------------------------------------------------------------
+// Value
+// -----------------------------------------------------------------------------
+
+extern "C" MLIR_ValueHandle MLIR_CreateValueBlockArg(
+    MLIR_Context *, string register_name, uint32_t /*idx*/,
+    MLIR_TypeHandle type, MLIR_LocationHandle loc) {
+    auto *box = new ValueBox();
+    box->name.assign(register_name.str, register_name.size);
+    box->pendingType = typeF(type);
+    if (loc != MLIR_INVALID_HANDLE) box->pending_loc = locF(loc);
+    box->deferredBlockArg = true;
+    // Eagerly bind to a hidden holder block so the value can be used as an
+    // operand before AppendBlockArg moves it onto the real block. Upstream
+    // MLIR doesn't allow moving a BlockArgument between blocks, so on
+    // AppendBlockArg we add a fresh arg to the real block and RAUW.
+    static thread_local mlir::Block *holder = nullptr;
+    if (!holder) holder = new mlir::Block();
+    auto arg = holder->addArgument(box->pendingType, box->pending_loc);
+    box->v = arg;
+    valueIndex()[arg.getAsOpaquePointer()] = box;
+    return H(box);
+}
+extern "C" MLIR_ValueHandle MLIR_CreateValueOpResult(
+    MLIR_Context *, MLIR_OpHandle oh, uint32_t idx, MLIR_TypeHandle,
+    string register_name, MLIR_LocationHandle) {
+    auto *box = new ValueBox();
+    box->name.assign(register_name.str, register_name.size);
+    if (oh != MLIR_INVALID_HANDLE) {
+        auto *op = F<mlir::Operation>(oh);
+        if (idx < op->getNumResults()) {
+            auto v = op->getResult(idx);
+            box->v = v;
+            valueIndex()[v.getAsOpaquePointer()] = box;
+        }
+    }
+    return H(box);
+}
+
+extern "C" MLIR_ValueKind MLIR_GetValueKind(MLIR_ValueHandle h) {
+    auto v = F<ValueBox>(h)->v;
+    return llvm::isa<mlir::BlockArgument>(v) ? BLOCK_ARG : OP_RESULT;
+}
+extern "C" MLIR_TypeHandle MLIR_GetValueType(MLIR_ValueHandle h) {
+    return typeH(F<ValueBox>(h)->v.getType());
+}
+extern "C" string MLIR_GetValueRegisterName(MLIR_ValueHandle h) {
+    return mkRefString(F<ValueBox>(h)->name);
+}
+extern "C" uint32_t MLIR_GetValueResultIndex(MLIR_ValueHandle h) {
+    auto v = F<ValueBox>(h)->v;
+    if (auto ba = llvm::dyn_cast<mlir::BlockArgument>(v)) return ba.getArgNumber();
+    if (auto opr = llvm::dyn_cast<mlir::OpResult>(v)) return opr.getResultNumber();
+    return 0;
+}
+extern "C" MLIR_OpHandle MLIR_GetValueDefiningOp(MLIR_ValueHandle h) {
+    auto v = F<ValueBox>(h)->v;
+    if (auto opr = llvm::dyn_cast<mlir::OpResult>(v)) return H(opr.getOwner());
+    return MLIR_INVALID_HANDLE;
+}
+
+// -----------------------------------------------------------------------------
+// Type
+// -----------------------------------------------------------------------------
+
+extern "C" MLIR_TypeHandle MLIR_CreateTypeInteger(MLIR_Context *, uint32_t width,
+                                                   bool /*is_signed*/) {
+    return typeH(mlir::IntegerType::get(&globalCtx().mctx, width));
+}
+extern "C" MLIR_TypeHandle MLIR_CreateTypeFloat(MLIR_Context *, uint32_t width, bool is_bfloat) {
+    auto &ctx = globalCtx().mctx;
+    if (is_bfloat) return typeH(mlir::BFloat16Type::get(&ctx));
+    switch (width) {
+        case 16: return typeH(mlir::Float16Type::get(&ctx));
+        case 32: return typeH(mlir::Float32Type::get(&ctx));
+        case 64: return typeH(mlir::Float64Type::get(&ctx));
+        default: return typeH(mlir::Float32Type::get(&ctx));
     }
 }
+extern "C" MLIR_TypeHandle MLIR_CreateTypeIndex(MLIR_Context *) {
+    return typeH(mlir::IndexType::get(&globalCtx().mctx));
+}
+extern "C" MLIR_TypeHandle MLIR_CreateTypeUnknown(MLIR_Context *) {
+    return typeH(mlir::NoneType::get(&globalCtx().mctx));
+}
+extern "C" MLIR_TypeHandle MLIR_CreateTypeTensor(MLIR_Context *, const int64_t *shape,
+                                                  size_t rank, MLIR_TypeHandle element_type) {
+    auto &ctx = globalCtx().mctx;
+    mlir::Type elem = (element_type == MLIR_INVALID_HANDLE)
+                          ? mlir::Type(mlir::Float32Type::get(&ctx))
+                          : typeF(element_type);
+    if (rank == 0 || shape == nullptr) {
+        return typeH(mlir::UnrankedTensorType::get(elem));
+    }
+    llvm::SmallVector<int64_t, 8> dims;
+    dims.reserve(rank);
+    for (size_t i = 0; i < rank; i++) {
+        int64_t d = shape[i];
+        dims.push_back(d < 0 ? mlir::ShapedType::kDynamic : d);
+    }
+    return typeH(mlir::RankedTensorType::get(dims, elem));
+}
+extern "C" MLIR_TypeHandle MLIR_CreateTypeMemref(MLIR_Context *, const int64_t *shape,
+                                                  size_t rank, MLIR_TypeHandle element_type) {
+    auto &ctx = globalCtx().mctx;
+    mlir::Type elem = (element_type == MLIR_INVALID_HANDLE)
+                          ? mlir::Type(mlir::Float32Type::get(&ctx))
+                          : typeF(element_type);
+    if (rank == 0 || shape == nullptr) {
+        return typeH(mlir::UnrankedMemRefType::get(elem, 0));
+    }
+    llvm::SmallVector<int64_t, 8> dims;
+    dims.reserve(rank);
+    for (size_t i = 0; i < rank; i++) {
+        int64_t d = shape[i];
+        dims.push_back(d < 0 ? mlir::ShapedType::kDynamic : d);
+    }
+    return typeH(mlir::MemRefType::get(dims, elem));
+}
+extern "C" MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *, MLIR_TypeHandle /*element*/,
+                                                   bool /*has_addr*/, uint32_t /*addr*/) {
+    // Upstream has no built-in dialect-agnostic pointer type. Use an opaque
+    // type tagged "!tt.ptr"; element type and address space are dropped.
+    auto &ctx = globalCtx().mctx;
+    return typeH(mlir::OpaqueType::get(mlir::StringAttr::get(&ctx, "tt"),
+                                        "ptr"));
+}
+extern "C" MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *, string name) {
+    auto &ctx = globalCtx().mctx;
+    return typeH(mlir::OpaqueType::get(mlir::StringAttr::get(&ctx, "?"),
+                                        llvm::StringRef(name.str, name.size)));
+}
+extern "C" void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle, uint32_t, bool) {}
+extern "C" void MLIR_SetTypeFloatProperties(MLIR_TypeHandle, uint32_t, bool) {}
+extern "C" void MLIR_SetTypeTensorProperties(MLIR_TypeHandle, const int64_t *, size_t, MLIR_TypeHandle) {}
+extern "C" void MLIR_SetTypeMemrefProperties(MLIR_TypeHandle, const int64_t *, size_t, MLIR_TypeHandle) {}
+extern "C" void MLIR_SetTypePointerProperties(MLIR_TypeHandle, MLIR_TypeHandle, bool, uint32_t) {}
 
-MLIR_Op *mlir_operation_create(Arena *arena, MLIR_OpType type) {
-    (void)arena;
-    OperationState state(gBuilder->getUnknownLoc(), opTypeToName(type));
-    Operation *op = Operation::create(state);
-    gMLIR_OpTypeMap[op] = type;
-    return reinterpret_cast<MLIR_Op *>(op);
+extern "C" bool MLIR_IsTypeInteger(MLIR_TypeHandle h) { return llvm::isa<mlir::IntegerType>(typeF(h)); }
+extern "C" bool MLIR_IsTypeFloat(MLIR_TypeHandle h)   { return llvm::isa<mlir::FloatType>(typeF(h)); }
+extern "C" bool MLIR_IsTypeTensor(MLIR_TypeHandle h)  { return llvm::isa<mlir::TensorType>(typeF(h)); }
+extern "C" bool MLIR_IsTypeMemref(MLIR_TypeHandle h)  { return llvm::isa<mlir::BaseMemRefType>(typeF(h)); }
+extern "C" bool MLIR_IsTypePointer(MLIR_TypeHandle h) {
+    auto opaq = llvm::dyn_cast<mlir::OpaqueType>(typeF(h));
+    return opaq && opaq.getDialectNamespace() == "tt";
+}
+extern "C" bool MLIR_IsTypeIndex(MLIR_TypeHandle h)   { return llvm::isa<mlir::IndexType>(typeF(h)); }
+extern "C" bool MLIR_IsTypeUnknown(MLIR_TypeHandle h) { return llvm::isa<mlir::NoneType>(typeF(h)); }
+extern "C" bool MLIR_IsTypeOpaque(MLIR_TypeHandle h)  {
+    auto opaq = llvm::dyn_cast<mlir::OpaqueType>(typeF(h));
+    return opaq && opaq.getDialectNamespace() != "tt";
 }
 
-void MLIR_AppendBlockOp(Arena *arena, MLIR_Block *block, MLIR_Op *op) {
-    (void)arena;
-    Block *cppBlock = reinterpret_cast<Block *>(block);
-    Operation *cppOp = reinterpret_cast<Operation *>(op);
-    cppBlock->push_back(cppOp);
+extern "C" string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle h) {
+    std::string buf;
+    llvm::raw_string_ostream os(buf);
+    typeF(h).print(os);
+    os.flush();
+    return mkArenaString(ctx, buf);
 }
 
-void MLIR_AppendBlockArg(Arena *arena, MLIR_Block *block, MLIR_Value *arg) {
-    (void)arena;
-    Block *cppBlock = reinterpret_cast<Block *>(block);
-    Value cppVal = *reinterpret_cast<Value *>(arg);
-    cppBlock->addArgument(cppVal.getType(), cppVal.getLoc());
+// -----------------------------------------------------------------------------
+// Attribute — handle is a heap mlir::NamedAttribute*
+// -----------------------------------------------------------------------------
+
+static MLIR_AttributeHandle makeNamedAttr(llvm::StringRef name, mlir::Attribute value) {
+    auto &ctx = globalCtx().mctx;
+    auto *na = new mlir::NamedAttribute(mlir::StringAttr::get(&ctx, name), value);
+    return reinterpret_cast<uintptr_t>(na);
 }
 
-void MLIR_AppendRegionBlock(Arena *arena, MLIR_Region *region, MLIR_Block *block) {
-    (void)arena;
-    Region *cppRegion = reinterpret_cast<Region *>(region);
-    Block *cppBlock = reinterpret_cast<Block *>(block);
-    cppRegion->push_back(cppBlock);
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *, string name, int64_t value) {
+    auto &ctx = globalCtx().mctx;
+    return makeNamedAttr(llvm::StringRef(name.str, name.size),
+                         mlir::IntegerAttr::get(mlir::IntegerType::get(&ctx, 64), value));
+}
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *, string name, double value) {
+    auto &ctx = globalCtx().mctx;
+    return makeNamedAttr(llvm::StringRef(name.str, name.size),
+                         mlir::FloatAttr::get(mlir::Float64Type::get(&ctx), value));
+}
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *, string name, bool value) {
+    auto &ctx = globalCtx().mctx;
+    return makeNamedAttr(llvm::StringRef(name.str, name.size),
+                         mlir::BoolAttr::get(&ctx, value));
+}
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *, string name, string value) {
+    auto &ctx = globalCtx().mctx;
+    return makeNamedAttr(llvm::StringRef(name.str, name.size),
+                         mlir::StringAttr::get(&ctx, llvm::StringRef(value.str, value.size)));
+}
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *, string name,
+                                                           MLIR_AttributeHandle *elements,
+                                                           size_t count) {
+    auto &ctx = globalCtx().mctx;
+    llvm::SmallVector<mlir::Attribute, 8> values;
+    values.reserve(count);
+    for (size_t i = 0; i < count; i++) {
+        values.push_back(F<mlir::NamedAttribute>(elements[i])->getValue());
+    }
+    return makeNamedAttr(llvm::StringRef(name.str, name.size),
+                         mlir::ArrayAttr::get(&ctx, values));
+}
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *, string name,
+                                                          MLIR_AttributeHandle *elements,
+                                                          size_t count) {
+    auto &ctx = globalCtx().mctx;
+    llvm::SmallVector<mlir::NamedAttribute, 8> entries;
+    entries.reserve(count);
+    for (size_t i = 0; i < count; i++) {
+        entries.push_back(*F<mlir::NamedAttribute>(elements[i]));
+    }
+    return makeNamedAttr(llvm::StringRef(name.str, name.size),
+                         mlir::DictionaryAttr::get(&ctx, entries));
 }
 
-size_t MLIR_GetRegionNumBlocks(const MLIR_Region *region) {
-    const Region *cppRegion = reinterpret_cast<const Region *>(region);
-    return cppRegion->getBlocks().size();
+extern "C" MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle h) {
+    auto value = F<mlir::NamedAttribute>(h)->getValue();
+    if (llvm::isa<mlir::StringAttr>(value))  return MLIR_ATTR_KIND_STRING;
+    if (llvm::isa<mlir::BoolAttr>(value))    return MLIR_ATTR_KIND_BOOL;
+    if (llvm::isa<mlir::IntegerAttr>(value)) return MLIR_ATTR_KIND_INTEGER;
+    if (llvm::isa<mlir::FloatAttr>(value))   return MLIR_ATTR_KIND_FLOAT;
+    if (llvm::isa<mlir::ArrayAttr>(value))   return MLIR_ATTR_KIND_ARRAY;
+    if (llvm::isa<mlir::DictionaryAttr>(value)) return MLIR_ATTR_KIND_DICT;
+    return MLIR_ATTR_KIND_STRING;
+}
+extern "C" string MLIR_GetAttributeName(MLIR_AttributeHandle h) {
+    return mkRefString(F<mlir::NamedAttribute>(h)->getName().getValue());
+}
+extern "C" int64_t MLIR_GetAttributeInteger(MLIR_AttributeHandle h) {
+    return llvm::cast<mlir::IntegerAttr>(F<mlir::NamedAttribute>(h)->getValue()).getInt();
+}
+extern "C" double MLIR_GetAttributeFloat(MLIR_AttributeHandle h) {
+    return llvm::cast<mlir::FloatAttr>(F<mlir::NamedAttribute>(h)->getValue()).getValueAsDouble();
+}
+extern "C" bool MLIR_GetAttributeBool(MLIR_AttributeHandle h) {
+    return llvm::cast<mlir::BoolAttr>(F<mlir::NamedAttribute>(h)->getValue()).getValue();
+}
+extern "C" string MLIR_GetAttributeString(MLIR_AttributeHandle h) {
+    return mkRefString(llvm::cast<mlir::StringAttr>(F<mlir::NamedAttribute>(h)->getValue()).getValue());
+}
+extern "C" size_t MLIR_GetAttributeArraySize(MLIR_AttributeHandle h) {
+    return llvm::cast<mlir::ArrayAttr>(F<mlir::NamedAttribute>(h)->getValue()).size();
+}
+extern "C" MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_AttributeHandle h, size_t i) {
+    auto arr = llvm::cast<mlir::ArrayAttr>(F<mlir::NamedAttribute>(h)->getValue());
+    auto &ctx = globalCtx().mctx;
+    auto *na = new mlir::NamedAttribute(mlir::StringAttr::get(&ctx, ""), arr[i]);
+    return reinterpret_cast<uintptr_t>(na);
+}
+extern "C" size_t MLIR_GetAttributeDictSize(MLIR_AttributeHandle h) {
+    return llvm::cast<mlir::DictionaryAttr>(F<mlir::NamedAttribute>(h)->getValue()).size();
+}
+extern "C" MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_AttributeHandle h, size_t i) {
+    auto dict = llvm::cast<mlir::DictionaryAttr>(F<mlir::NamedAttribute>(h)->getValue());
+    auto entries = dict.getValue();
+    return reinterpret_cast<uintptr_t>(&entries[i]);
 }
 
-MLIR_Block *MLIR_GetRegionBlock(const MLIR_Region *region, size_t idx) {
-    Region *cppRegion = const_cast<Region *>(reinterpret_cast<const Region *>(region));
-    auto it = cppRegion->begin();
-    std::advance(it, idx);
-    return reinterpret_cast<MLIR_Block *>(&*it);
+// -----------------------------------------------------------------------------
+// Location
+// -----------------------------------------------------------------------------
+//
+// MLIR_LocationHandle is the opaque pointer of mlir::Location. Information
+// the upstream Location system cannot represent (e.g. our `original_text`
+// blob, or the parser's `#locN` reference id) is dropped on the floor;
+// printing locations through parser_upstream is therefore expected to be
+// less faithful than the native parser.
+
+namespace {
+} // namespace
+
+extern "C" MLIR_LocationHandle MLIR_CreateLocationUnknown(MLIR_Context *, string /*orig*/) {
+    return locH(mlir::UnknownLoc::get(&globalCtx().mctx));
+}
+extern "C" MLIR_LocationHandle MLIR_CreateLocationFile(MLIR_Context *, string filename,
+                                                        int line, int column) {
+    auto &ctx = globalCtx().mctx;
+    return locH(mlir::FileLineColLoc::get(
+        &ctx, llvm::StringRef(filename.str, filename.size),
+        (unsigned)line, (unsigned)column));
+}
+extern "C" MLIR_LocationHandle MLIR_CreateLocationName(MLIR_Context *, string name) {
+    auto &ctx = globalCtx().mctx;
+    return locH(mlir::NameLoc::get(
+        mlir::StringAttr::get(&ctx, llvm::StringRef(name.str, name.size))));
+}
+extern "C" MLIR_LocationHandle MLIR_CreateLocationRef(MLIR_Context *, int /*ref_id*/) {
+    return locH(mlir::UnknownLoc::get(&globalCtx().mctx));
 }
 
-size_t MLIR_GetBlockNumOps(const MLIR_Block *block) {
-    const Block *cppBlock = reinterpret_cast<const Block *>(block);
-    return cppBlock->getOperations().size();
+extern "C" MLIR_LocationKind MLIR_GetLocationKind(MLIR_LocationHandle h) {
+    if (h == MLIR_INVALID_HANDLE) return MLIR_LOC_UNKNOWN;
+    auto loc = locF(h);
+    if (llvm::isa<mlir::FileLineColLoc>(loc)) return MLIR_LOC_FILE;
+    if (llvm::isa<mlir::NameLoc>(loc))        return MLIR_LOC_NAME;
+    if (llvm::isa<mlir::CallSiteLoc>(loc))    return MLIR_LOC_CALLSITE;
+    if (llvm::isa<mlir::FusedLoc>(loc))       return MLIR_LOC_FUSED;
+    return MLIR_LOC_UNKNOWN;
+}
+extern "C" string MLIR_GetLocationOriginalText(MLIR_LocationHandle) {
+    return mkRefString(llvm::StringRef());
+}
+extern "C" string MLIR_GetLocationFileFilename(MLIR_LocationHandle h) {
+    if (auto fl = llvm::dyn_cast<mlir::FileLineColLoc>(locF(h)))
+        return mkRefString(fl.getFilename().getValue());
+    return mkRefString(llvm::StringRef());
+}
+extern "C" int MLIR_GetLocationFileLine(MLIR_LocationHandle h) {
+    if (auto fl = llvm::dyn_cast<mlir::FileLineColLoc>(locF(h)))
+        return (int)fl.getLine();
+    return 0;
+}
+extern "C" int MLIR_GetLocationFileColumn(MLIR_LocationHandle h) {
+    if (auto fl = llvm::dyn_cast<mlir::FileLineColLoc>(locF(h)))
+        return (int)fl.getColumn();
+    return 0;
+}
+extern "C" string MLIR_GetLocationName(MLIR_LocationHandle h) {
+    if (auto nl = llvm::dyn_cast<mlir::NameLoc>(locF(h)))
+        return mkRefString(nl.getName().getValue());
+    return mkRefString(llvm::StringRef());
+}
+extern "C" int MLIR_GetLocationRefId(MLIR_LocationHandle) { return 0; }
+
+extern "C" MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle h) {
+    if (h == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
+    auto v = F<ValueBox>(h)->v;
+    if (!v) return MLIR_INVALID_HANDLE;
+    return locH(v.getLoc());
 }
 
-MLIR_Op *MLIR_GetBlockOp(const MLIR_Block *block, size_t idx) {
-    Block *cppBlock = const_cast<Block *>(reinterpret_cast<const Block *>(block));
-    auto it = cppBlock->begin();
-    std::advance(it, idx);
-    return reinterpret_cast<MLIR_Op *>(&*it);
+// -----------------------------------------------------------------------------
+// Misc
+// -----------------------------------------------------------------------------
+
+extern "C" string MLIR_MLIR_OpTypeToString(MLIR_OpType type) {
+    return op_type_to_string(type);
 }
 
-MLIR_OpType mlir_operation_get_type(const MLIR_Op *op) {
-    const Operation *cppOp = reinterpret_cast<const Operation *>(op);
-    auto it = gMLIR_OpTypeMap.find(cppOp);
-    if (it != gMLIR_OpTypeMap.end())
-        return it->second;
-    return OP_TYPE_UNREGISTERED;
+extern "C" int app_main(void);
+extern "C" void platform_init(int argc, char **argv);
+int main(int argc, char **argv) {
+    platform_init(argc, argv);
+    return app_main();
 }
-
-size_t mlir_operation_num_regions(const MLIR_Op *op) {
-    const Operation *cppOp = reinterpret_cast<const Operation *>(op);
-    return cppOp->getNumRegions();
-}
-
-MLIR_Region *mlir_operation_get_region(const MLIR_Op *op, size_t idx) {
-    Operation *cppOp = const_cast<Operation *>(reinterpret_cast<const Operation *>(op));
-    return reinterpret_cast<MLIR_Region *>(&cppOp->getRegion(idx));
-}
-
-MLIR_Location *mlir_location_create(Arena *arena) {
-    (void)arena;
-    return nullptr;
-}
-
-void mlir_location_set_kind(MLIR_Location *loc, MLIR_LocationKind kind) {
-    (void)loc;
-    (void)kind;
-}
-
-void mlir_location_set_original_text(MLIR_Location *loc, string text) {
-    (void)loc;
-    (void)text;
-}
-
-void mlir_location_set_file_data(MLIR_Location *loc, string filename, int line, int column) {
-    (void)loc;
-    (void)filename;
-    (void)line;
-    (void)column;
-}
-
-void mlir_location_set_name_data(MLIR_Location *loc, string name) {
-    (void)loc;
-    (void)name;
-}
-
-void mlir_location_set_ref_id(MLIR_Location *loc, int ref_id) {
-    (void)loc;
-    (void)ref_id;
-}
-
-void mlir_value_set_location(MLIR_Value *value, MLIR_Location *loc) {
-    (void)value;
-    (void)loc;
-}
-
-void mlir_value_set_divisibility(MLIR_Value *value, bool has_value, int64_t div_value, MLIR_Type *type) {
-    (void)value;
-    (void)has_value;
-    (void)div_value;
-    (void)type;
-}
-
-void mlir_value_set_max_divisibility(MLIR_Value *value, bool has_value, int64_t div_value, MLIR_Type *type) {
-    (void)value;
-    (void)has_value;
-    (void)div_value;
-    (void)type;
-}
-
-#ifdef __cplusplus
-} // extern "C"
-#endif
