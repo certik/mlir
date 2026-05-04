@@ -2,9 +2,10 @@
 set -e
 
 LLVM_LIBS=$("$CONDA_PREFIX/bin/llvm-config" --link-static --libs support core)
-SYS_LIBS=$("$CONDA_PREFIX/bin/llvm-config" --link-static --system-libs)
-# Fallback: ensure common runtime deps are present even if llvm-config returns nothing.
-SYS_LIBS="$SYS_LIBS -lpthread -ldl -lm -lz"
+# Don't trust llvm-config --system-libs because it may list libraries
+# whose unversioned .so symlinks aren't shipped by conda (e.g. libxml2).
+# We supply only what we know LLVM Support actually needs.
+SYS_LIBS="-lpthread -ldl -lm -lz"
 MLIR_LIBS="-lMLIRIR -lMLIRSupport"
 
 COREC_C_FILES="corec/base/io.c corec/base/buddy.c corec/base/arena.c corec/base/scratch.c corec/base/format.c corec/base/math.c corec/base/string.c corec/base/mem.c corec/base/numconv.c corec/base/assert.c corec/base/exit.c $PLATFORM_C"
