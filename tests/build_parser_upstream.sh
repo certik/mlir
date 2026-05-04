@@ -3,6 +3,12 @@ set -e
 
 LLVM_LIBS=$("$CONDA_PREFIX/bin/llvm-config" --link-static --libs support core)
 SYS_LIBS="-lpthread -ldl -lm $CONDA_PREFIX/lib/libz.a"
+# GNU ld requires --start-group/--end-group to resolve cyclic dependencies
+# between static archives. Apple's ld64 resolves these without help.
+case "$(uname)" in
+    Linux) GROUP_START="-Wl,--start-group"; GROUP_END="-Wl,--end-group" ;;
+    *)     GROUP_START="";                  GROUP_END="" ;;
+esac
 # Link MLIR statically: enumerate every libMLIR*.a archive shipped by
 # conda-forge. This pulls in all dialects (Func, Arith, MemRef, SCF, CF, ...)
 # the upstream backend registers, and avoids dylib/so version-skew or rpath
@@ -23,5 +29,5 @@ $CXX -g -o parser_upstream \
     upstream_main.o parser.o tokenizer.o mlir_parser.o mlir_classic_printer.o mlir_generic_printer.o \
     op_parsers.o mlir_op_names.o mlir_api_impl_upstream.o \
     io.o buddy.o arena.o scratch.o format.o math.o string.o mem.o numconv.o assert.o exit.o $PLATFORM_OBJ \
-    -L "$CONDA_PREFIX/lib" $MLIR_LIBS $LLVM_LIBS $SYS_LIBS \
+    -L "$CONDA_PREFIX/lib" $GROUP_START $MLIR_LIBS $LLVM_LIBS $GROUP_END $SYS_LIBS \
     -Wl,-rpath,"$CONDA_PREFIX/lib"
