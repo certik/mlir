@@ -317,12 +317,10 @@ zstd = "*"
 [feature.upstream.target.osx-arm64.activation.env]
 PLATFORM_C = "corec/platform/platform_macos.c"
 PLATFORM_OBJ = "platform_macos.o"
-EXTRA_LINK_FLAGS = ""
 
 [feature.upstream.target.linux-64.activation.env]
 PLATFORM_C = "corec/platform/platform_linux.c"
 PLATFORM_OBJ = "platform_linux.o"
-EXTRA_LINK_FLAGS = "-nostartfiles -Wl,--defsym=__dso_handle=0"
 
 [feature.upstream.tasks]
 build_cross_upstream = { cmd = "bash tests/build_cross_upstream.sh", description = "Build cross-impl driver against upstream LLVM/MLIR" }

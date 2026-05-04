@@ -660,10 +660,3 @@ extern "C" MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle h) {
 extern "C" string MLIR_MLIR_OpTypeToString(MLIR_OpType type) {
     return op_type_to_string(type);
 }
-
-extern "C" int app_main(void);
-extern "C" void platform_init(int argc, char **argv);
-int main(int argc, char **argv) {
-    platform_init(argc, argv);
-    return app_main();
-}
