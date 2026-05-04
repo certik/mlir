@@ -1575,7 +1575,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     for (size_t i = 0; i < n_attrs; i++) {
                         MLIR_AttributeHandle attr = MLIR_GetOpAttribute(op, i);
                         string attr_name = MLIR_GetAttributeName(attr);
-                        if (str_eq(attr_name, str_lit("_sig_parens")) || str_eq(attr_name, str_lit("_sig_src"))) { continue; }
+                        if (str_eq(attr_name, str_lit("_sig_parens")) || str_eq(attr_name, str_lit("_sig_src")) || str_eq(attr_name, str_lit("_source_type"))) { continue; }
                         if (!opened) { result = str_concat(arena, result, str_lit(" {")); opened = true; }
                         if (!first) result = str_concat(arena, result, str_lit(", ")); first = false;
                         if (MLIR_GetAttributeKind(attr) == MLIR_ATTR_KIND_INTEGER) {
@@ -1756,7 +1756,28 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
             }
             // Print type suffix in classic format
-            if (MLIR_GetOpNumResultTypes(op) > 0 && MLIR_GetOpResult_type(op, 0)) {
+            if (MLIR_GetOpType(op) == OP_TYPE_MEMREF_LOAD) {
+                // memref.load prints the source memref type, not the (element)
+                // result type. Look up the `_source_type` hidden attr stashed
+                // by the parser; fall back to operand 0's type if unavailable.
+                string src_type_str = (string){0};
+                for (size_t i = 0, n = MLIR_GetOpNumAttributes(op); i < n; i++) {
+                    MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
+                    if (a && MLIR_GetAttributeKind(a) == MLIR_ATTR_KIND_STRING &&
+                        str_eq(MLIR_GetAttributeName(a), str_lit("_source_type"))) {
+                        src_type_str = MLIR_GetAttributeString(a);
+                        break;
+                    }
+                }
+                if (src_type_str.size > 0) {
+                    result = str_concat(arena, result, str_lit(" : "));
+                    result = str_concat(arena, result, src_type_str);
+                } else if (MLIR_GetOpNumOperands(op) > 0 && MLIR_GetOpOperand(op, 0) &&
+                           MLIR_GetValueType(MLIR_GetOpOperand(op, 0))) {
+                    result = str_concat(arena, result, str_lit(" : "));
+                    result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, MLIR_GetValueType(MLIR_GetOpOperand(op, 0))));
+                }
+            } else if (MLIR_GetOpNumResultTypes(op) > 0 && MLIR_GetOpResult_type(op, 0)) {
                 result = str_concat(arena, result, str_lit(" : "));
                 result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, MLIR_GetOpResult_type(op, 0)));
             } else if (MLIR_GetOpNumOperands(op) > 0 && MLIR_GetOpOperand(op, 0) && MLIR_GetValueType(MLIR_GetOpOperand(op, 0))) {

@@ -836,7 +836,10 @@ OperationParserResult parse_memref_load_op(Parser *parser, const OperationParser
 
     // The trailing `: memref<NxMxELEM>` describes the source memref, not the
     // result type. memref.load returns the element type. Extract ELEM from the
-    // memref type string.
+    // memref type string. Stash the original memref type as a hidden
+    // `_source_type` string attribute so the classic printer can roundtrip it
+    // (the first operand's type is not reliable: SSA shadowing in nested
+    // regions can cause it to resolve to a different `%name` of type `index`).
     if (n_result_types == 1) {
         string ts = MLIR_GetTypeString(parser->ctx, result_types[0]);
         if (ts.size > 7 && strncmp(ts.str, "memref<", 7) == 0 && ts.str[ts.size - 1] == '>') {
@@ -847,6 +850,8 @@ OperationParserResult parse_memref_load_op(Parser *parser, const OperationParser
             }
             if (last_x > 0) {
                 string elem = (string){ .str = ts.str + last_x + 1, .size = end - last_x - 1 };
+                append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
+                            create_string_attr(parser, str_lit("_source_type"), ts));
                 result_types[0] = mlir_type_create_from_string(parser->ctx, elem);
             }
         }
