@@ -335,7 +335,7 @@ test_parser_upstream = { cmd = "bash tests/run_parser_upstream.sh", depends-on =
 
 [feature.upstream.target.win-64.tasks]
 build_cross_upstream = { cmd = "tests\\build_cross_upstream.bat", description = "Build cross-impl driver against upstream LLVM/MLIR (Windows)" }
-test_cross = { cmd = "cross_upstream.exe > tests/cross/out_upstream.txt && python tests/file_diff.py tests/cross/expected.txt tests/cross/out_upstream.txt", depends-on = ["build_cross_upstream"], description = "Run upstream cross-impl driver and diff against reference (Windows)" }
+test_cross = { cmd = "./cross_upstream.exe > tests/cross/out_upstream.txt && python tests/file_diff.py tests/cross/expected.txt tests/cross/out_upstream.txt", depends-on = ["build_cross_upstream"], description = "Run upstream cross-impl driver and diff against reference (Windows)" }
 build_parser_upstream = { cmd = "tests\\build_parser_upstream.bat", depends-on = ["tokenizer"], description = "Build parser_upstream against upstream LLVM/MLIR (Windows)" }
 
 
