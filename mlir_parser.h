@@ -121,8 +121,8 @@ MLIR_ValueHandle *finalize_results(const OperationParserParams *params,
                                     size_t n_result_types,
                                     size_t *out_n_results);
 MLIR_AttributeHandle create_string_attr(Parser *parser, string name, string value);
-MLIR_AttributeHandle create_integer_attr(Parser *parser, string name, int64_t value);
-MLIR_AttributeHandle create_float_attr(Parser *parser, string name, double value);
+MLIR_AttributeHandle create_integer_attr(Parser *parser, string name, int64_t value, MLIR_TypeHandle type);
+MLIR_AttributeHandle create_float_attr(Parser *parser, string name, double value, MLIR_TypeHandle type);
 MLIR_AttributeHandle create_bool_attr(Parser *parser, string name, bool value);
 void operation_append_attribute(Parser *parser, MLIR_OpHandle op, MLIR_AttributeHandle attr);
 MLIR_ValueHandle lookup_or_create_value(Parser *parser, string reg, string default_type);

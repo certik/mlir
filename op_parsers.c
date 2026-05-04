@@ -28,6 +28,15 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
     MLIR_LocationHandle op_location = MLIR_INVALID_HANDLE;
     bool has_explicit_type = false;
 
+    // Defer building the typed integer/float attribute until the result type
+    // has been parsed: arith.constant requires `value`'s attribute type to
+    // equal the result type (so `0 : index` becomes IntegerAttr typed index,
+    // not the i64 default).
+    bool pending_int = false;
+    int64_t pending_int_val = 0;
+    bool pending_float = false;
+    double pending_float_val = 0.0;
+
     if (parser_peek(parser, TK_INTEGER)) {
         string value_str = parser_token_str(parser);
         parser_expect(parser, TK_INTEGER);
@@ -38,8 +47,8 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
                 parsed_value = parsed_value * 10 + (value_str.str[i] - '0');
             }
         }
-        append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                    create_integer_attr(parser, str_lit("value"), parsed_value));
+        pending_int = true;
+        pending_int_val = parsed_value;
     } else if (parser_peek(parser, TK_REAL)) {
         string value_str = parser_token_str(parser);
         parser_expect(parser, TK_REAL);
@@ -48,16 +57,18 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
         memcpy(buffer, value_str.str, value_str.size);
         buffer[value_str.size] = '\0';
         double parsed_value = atof(buffer);
-        append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                    create_float_attr(parser, str_lit("value"), parsed_value));
+        pending_float = true;
+        pending_float_val = parsed_value;
     } else if (parser_peek(parser, TK_NAME)) {
         string name_str = parser_token_str(parser);
         if (str_eq(name_str, str_lit("true")) || str_eq(name_str, str_lit("false"))) {
             parser_expect(parser, TK_NAME);
-            append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                        create_integer_attr(parser, str_lit("value"), str_eq(name_str, str_lit("true")) ? 1 : 0));
-
             MLIR_TypeHandle bool_type = mlir_type_create_from_string(parser->ctx, str_lit("i1"));
+            append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
+                        create_integer_attr(parser, str_lit("value"),
+                                            str_eq(name_str, str_lit("true")) ? 1 : 0,
+                                            bool_type));
+
             if (!result_value) {
                 result_value = MLIR_CreateValueOpResult(parser->ctx, MLIR_INVALID_HANDLE, 0, bool_type, (string){MLIR_INVALID_HANDLE, 0}, MLIR_INVALID_HANDLE);
             }
@@ -101,6 +112,22 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
                 result_value = MLIR_CreateValueOpResult(parser->ctx, MLIR_INVALID_HANDLE, 0, type, (string){MLIR_INVALID_HANDLE, 0}, MLIR_INVALID_HANDLE);
             }
             has_explicit_type = true;
+        }
+    }
+
+    // Now that the result type is known (or defaulted), build the deferred
+    // typed integer/float `value` attribute so it carries the correct type.
+    if (pending_int || pending_float) {
+        MLIR_TypeHandle attr_type =
+            (n_result_types > 0) ? result_types[0]
+                                 : mlir_type_create_from_string(parser->ctx,
+                                       pending_int ? str_lit("i64") : str_lit("f64"));
+        if (pending_int) {
+            append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
+                        create_integer_attr(parser, str_lit("value"), pending_int_val, attr_type));
+        } else {
+            append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
+                        create_float_attr(parser, str_lit("value"), pending_float_val, attr_type));
         }
     }
 
@@ -526,13 +553,14 @@ OperationParserResult parse_tt_make_range_op(Parser *parser, const OperationPars
         parser_expect(parser, TK_RBRACE);
     }
 
+    MLIR_TypeHandle i32_ty = mlir_type_create_from_string(parser->ctx, str_lit("i32"));
     if (have_end) {
         append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                    create_integer_attr(parser, str_lit("end"), end_val));
+                    create_integer_attr(parser, str_lit("end"), end_val, i32_ty));
     }
     if (have_start) {
         append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                    create_integer_attr(parser, str_lit("start"), start_val));
+                    create_integer_attr(parser, str_lit("start"), start_val, i32_ty));
     }
 
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
@@ -1106,13 +1134,19 @@ OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserPa
                                 char c = int_val.str[i];
                                 if (c >= '0' && c <= '9') val = val * 10 + (c - '0');
                             }
-                            append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                                        create_integer_attr(parser, attr_name, val));
 
+                            string type_str = str_lit("");
                             if (parser_peek(parser, TK_COLON)) {
                                 parser_expect(parser, TK_COLON);
-                                if (parser_peek(parser, TK_NAME)) parser_expect(parser, TK_NAME);
+                                if (parser_peek(parser, TK_NAME)) {
+                                    type_str = parser_token_str(parser);
+                                    parser_expect(parser, TK_NAME);
+                                }
                             }
+                            MLIR_TypeHandle attr_ty = mlir_type_create_from_string(
+                                parser->ctx, type_str.size > 0 ? type_str : str_lit("i64"));
+                            append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
+                                        create_integer_attr(parser, attr_name, val, attr_ty));
                         }
                     }
                 } else {
@@ -1336,8 +1370,9 @@ OperationParserResult parse_cf_cond_br_op(Parser *parser, const OperationParserP
                 }
             }
             parser_expect(parser, TK_RPAREN);
+            MLIR_TypeHandle i64_ty = mlir_type_create_from_string(parser->ctx, str_lit("i64"));
             append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                        create_integer_attr(parser, str_lit("_ntrue"), ntrue));
+                        create_integer_attr(parser, str_lit("_ntrue"), ntrue, i64_ty));
         }
     }
 
@@ -1370,8 +1405,9 @@ OperationParserResult parse_cf_cond_br_op(Parser *parser, const OperationParserP
                 }
             }
             parser_expect(parser, TK_RPAREN);
+            MLIR_TypeHandle i64_ty = mlir_type_create_from_string(parser->ctx, str_lit("i64"));
             append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                        create_integer_attr(parser, str_lit("_nfalse"), nfalse));
+                        create_integer_attr(parser, str_lit("_nfalse"), nfalse, i64_ty));
         }
     }
 
@@ -2510,12 +2546,13 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                     VecAttribute dict_elems;
                     VecAttribute_reserve(parser->arena, &dict_elems, 2);
 
+                    MLIR_TypeHandle i32_ty = mlir_type_create_from_string(parser->ctx, str_lit("i32"));
                     if (has_div) {
-                        MLIR_AttributeHandle div_attr = MLIR_CreateAttributeInteger(parser->ctx, str_lit("tt.divisibility"), div_value);
+                        MLIR_AttributeHandle div_attr = MLIR_CreateAttributeInteger(parser->ctx, str_lit("tt.divisibility"), div_value, i32_ty);
                         VecAttribute_push_back(parser->arena, &dict_elems, div_attr);
                     }
                     if (has_max_div) {
-                        MLIR_AttributeHandle max_div_attr = MLIR_CreateAttributeInteger(parser->ctx, str_lit("tt.max_divisibility"), max_div_value);
+                        MLIR_AttributeHandle max_div_attr = MLIR_CreateAttributeInteger(parser->ctx, str_lit("tt.max_divisibility"), max_div_value, i32_ty);
                         VecAttribute_push_back(parser->arena, &dict_elems, max_div_attr);
                     }
 
@@ -3713,8 +3750,9 @@ OperationParserResult parse_tt_store_op(Parser *parser, const OperationParserPar
                     parser_expect(parser, TK_DOT);
                     parser_expect(parser, TK_DOT);
 
+                    MLIR_TypeHandle i32_ty = mlir_type_create_from_string(parser->ctx, str_lit("i32"));
                     append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                                create_integer_attr(parser, attr_name, 1));
+                                create_integer_attr(parser, attr_name, 1, i32_ty));
                 } else if (parser_peek(parser, TK_INTEGER)) {
                     // Handle regular integer values
                     string ival = parser_token_str(parser);
@@ -3724,14 +3762,18 @@ OperationParserResult parse_tt_store_op(Parser *parser, const OperationParserPar
                     int64_t int_val = atoll(buffer);
                     parser_expect(parser, TK_INTEGER);
 
-                    // Skip optional type annotation (:i32)
+                    string type_str = str_lit("");
                     if (parser_peek(parser, TK_COLON)) {
                         parser_expect(parser, TK_COLON);
-                        parser_expect(parser, TK_NAME);
+                        if (parser_peek(parser, TK_NAME)) {
+                            type_str = parser_token_str(parser);
+                            parser_expect(parser, TK_NAME);
+                        }
                     }
-
+                    MLIR_TypeHandle attr_ty = mlir_type_create_from_string(
+                        parser->ctx, type_str.size > 0 ? type_str : str_lit("i32"));
                     append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                                create_integer_attr(parser, attr_name, int_val));
+                                create_integer_attr(parser, attr_name, int_val, attr_ty));
                 } else {
                     // Skip unknown tokens
                     parser_next_token(parser);
