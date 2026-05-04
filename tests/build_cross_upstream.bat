@@ -5,11 +5,11 @@ REM Get LLVM static libs from llvm-config (Windows MSVC build emits .lib paths).
 for /f "delims=" %%i in ('"%CONDA_PREFIX%\Library\bin\llvm-config.exe" --link-static --libs support core') do set LLVM_LIBS=%%i
 if errorlevel 1 exit /b 1
 
-REM Use all available MLIR static libraries (mirrors the umbrella libMLIR
-REM approach used on Linux/macOS). The phase-2 dialect registration pulls
-REM in a long chain of transitive deps (interfaces, analyses, etc.), so
-REM enumerating libs by hand is brittle. Write to a linker response file
-REM because the full list exceeds the cmd.exe line length limit (~8 KB).
+REM Link all MLIR static libraries shipped by conda-forge. This pulls in
+REM every dialect (Func, Arith, MemRef, SCF, CF, ...) the upstream backend
+REM registers, and avoids enumerating transitive deps by hand. Use a
+REM linker response file because the full list exceeds cmd.exe's line
+REM length limit.
 if exist mlir_libs.rsp del mlir_libs.rsp
 for %%f in ("%CONDA_PREFIX%\Library\lib\MLIR*.lib") do echo %%~nxf>>mlir_libs.rsp
 

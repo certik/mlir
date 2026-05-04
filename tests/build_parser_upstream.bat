@@ -4,9 +4,9 @@ setlocal enabledelayedexpansion
 for /f "delims=" %%i in ('"%CONDA_PREFIX%\Library\bin\llvm-config.exe" --link-static --libs support core') do set LLVM_LIBS=%%i
 if errorlevel 1 exit /b 1
 
-REM Use all available MLIR static libraries (mirrors the umbrella libMLIR
-REM approach used on Linux/macOS). Use a linker response file because the
-REM full list exceeds cmd.exe line length limit.
+REM Link all MLIR static libraries shipped by conda-forge. Use a linker
+REM response file because the full list exceeds cmd.exe's line length
+REM limit.
 if exist mlir_libs.rsp del mlir_libs.rsp
 for %%f in ("%CONDA_PREFIX%\Library\lib\MLIR*.lib") do echo %%~nxf>>mlir_libs.rsp
 
