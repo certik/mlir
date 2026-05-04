@@ -305,14 +305,19 @@ test_windows = { cmd = "./parser.exe --construct && python run_tests.py -s", dep
 # stay small and fast.
 #=============================================================================
 [feature.upstream]
-platforms = ["linux-64", "osx-arm64"]
+platforms = ["linux-64", "osx-arm64", "win-64"]
 
 [feature.upstream.dependencies]
 mlir = "*"
-cxx-compiler = "*"
 zlib = "*"
-libxml2 = "*"
 zstd = "*"
+
+# C++ toolchain: use conda's cxx-compiler on Unix; on Windows use MSVC from the
+# host (vcvars64) — conda's cxx-compiler on win-64 isn't compatible with the
+# MSVC-built MLIR static libs.
+[feature.upstream.target.unix.dependencies]
+cxx-compiler = "*"
+libxml2 = "*"
 
 [feature.upstream.target.osx-arm64.activation.env]
 PLATFORM_C = "corec/platform/platform_macos.c"
@@ -322,16 +327,16 @@ PLATFORM_OBJ = "platform_macos.o"
 PLATFORM_C = "corec/platform/platform_linux.c"
 PLATFORM_OBJ = "platform_linux.o"
 
-[feature.upstream.tasks]
+[feature.upstream.target.unix.tasks]
 build_cross_upstream = { cmd = "bash tests/build_cross_upstream.sh", description = "Build cross-impl driver against upstream LLVM/MLIR" }
-
-
 test_cross = { cmd = "./cross_upstream > tests/cross/out_upstream.txt && diff tests/cross/expected.txt tests/cross/out_upstream.txt", depends-on = ["build_cross_upstream"], description = "Run upstream cross-impl driver and diff against reference" }
-
-
 build_parser_upstream = { cmd = "bash tests/build_parser_upstream.sh", depends-on = ["tokenizer"], description = "Build parser_upstream against upstream LLVM/MLIR" }
-
 test_parser_upstream = { cmd = "bash tests/run_parser_upstream.sh", depends-on = ["build_parser_upstream"], description = "Run mlir test suite using parser_upstream as ./parser (some mismatches expected)" }
+
+[feature.upstream.target.win-64.tasks]
+build_cross_upstream = { cmd = "tests\\build_cross_upstream.bat", description = "Build cross-impl driver against upstream LLVM/MLIR (Windows)" }
+test_cross = { cmd = "./cross_upstream.exe > tests/cross/out_upstream.txt && python tests/file_diff.py tests/cross/expected.txt tests/cross/out_upstream.txt", depends-on = ["build_cross_upstream"], description = "Run upstream cross-impl driver and diff against reference (Windows)" }
+build_parser_upstream = { cmd = "tests\\build_parser_upstream.bat", depends-on = ["tokenizer"], description = "Build parser_upstream against upstream LLVM/MLIR (Windows)" }
 
 
 [environments]
