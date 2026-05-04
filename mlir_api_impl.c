@@ -83,7 +83,8 @@ typedef struct IR_Attribute {
         } array;
     } data;
     string name;
-    // Only meaningful for ATTR_KIND_INTEGER and ATTR_KIND_FLOAT.
+    // Only meaningful for ATTR_KIND_INTEGER and ATTR_KIND_FLOAT (for now;
+    // will also apply to ATTR_KIND_DENSE_ELEMENTS when added).
     MLIR_TypeHandle type;
 } IR_Attribute;
 
