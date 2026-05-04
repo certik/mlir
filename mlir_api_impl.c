@@ -83,6 +83,8 @@ typedef struct IR_Attribute {
         } array;
     } data;
     string name;
+    // Only meaningful for ATTR_KIND_INTEGER and ATTR_KIND_FLOAT.
+    MLIR_TypeHandle type;
 } IR_Attribute;
 
 typedef struct IR_Location {
@@ -612,11 +614,12 @@ void MLIR_SetTypeFloatProperties(MLIR_TypeHandle th, uint32_t width, bool is_bfl
 }
 
 // Attribute creation
-MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *ctx, string name, int64_t value) {
+MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *ctx, string name, int64_t value, MLIR_TypeHandle type) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_INTEGER;
     a.name = name;
     a.data.integer_value = value;
+    a.type = type;
     return alloc_attr_obj(ctx, a);
 }
 
@@ -628,11 +631,12 @@ MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *ctx, string name, 
     return alloc_attr_obj(ctx, a);
 }
 
-MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, string name, double value) {
+MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, string name, double value, MLIR_TypeHandle type) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_FLOAT;
     a.name = name;
     a.data.float_value = value;
+    a.type = type;
     return alloc_attr_obj(ctx, a);
 }
 
@@ -753,6 +757,14 @@ string MLIR_GetAttributeString(MLIR_AttributeHandle ah) {
 double MLIR_GetAttributeFloat(MLIR_AttributeHandle ah) {
     IR_Attribute *attr = resolve_attr(ah);
     return attr ? attr->data.float_value : 0.0;
+}
+
+MLIR_TypeHandle MLIR_GetAttributeType(MLIR_AttributeHandle ah) {
+    IR_Attribute *attr = resolve_attr(ah);
+    if (!attr) return MLIR_INVALID_HANDLE;
+    if (attr->kind != ATTR_KIND_INTEGER && attr->kind != ATTR_KIND_FLOAT)
+        return MLIR_INVALID_HANDLE;
+    return attr->type;
 }
 
 bool MLIR_GetAttributeBool(MLIR_AttributeHandle ah) {

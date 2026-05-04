@@ -994,12 +994,12 @@ MLIR_AttributeHandle create_string_attr(Parser *parser, string name, string valu
     return MLIR_CreateAttributeString(parser->ctx, name, value);
 }
 
-MLIR_AttributeHandle create_integer_attr(Parser *parser, string name, int64_t value) {
-    return MLIR_CreateAttributeInteger(parser->ctx, name, value);
+MLIR_AttributeHandle create_integer_attr(Parser *parser, string name, int64_t value, MLIR_TypeHandle type) {
+    return MLIR_CreateAttributeInteger(parser->ctx, name, value, type);
 }
 
-MLIR_AttributeHandle create_float_attr(Parser *parser, string name, double value) {
-    return MLIR_CreateAttributeFloat(parser->ctx, name, value);
+MLIR_AttributeHandle create_float_attr(Parser *parser, string name, double value, MLIR_TypeHandle type) {
+    return MLIR_CreateAttributeFloat(parser->ctx, name, value, type);
 }
 
 MLIR_AttributeHandle create_bool_attr(Parser *parser, string name, bool value) {

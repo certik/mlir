@@ -293,8 +293,15 @@ string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle type);
 // -----------------------------------------------------------------------------
 
 // Creation & mutation
-MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *ctx, string name, int64_t value);
-MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, string name, double value);
+//
+// Integer and Float attributes carry an MLIR Type indicating their numeric
+// type (e.g. i32, i64, index, f32, f64). The caller must construct that
+// type first via the Type API. There is no untyped form: typing every
+// numeric attribute eagerly is what allows ops like arith.constant to
+// build proper IR (where `value`'s attribute type must equal the result
+// type) without later fixups.
+MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *ctx, string name, int64_t value, MLIR_TypeHandle type);
+MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, string name, double value, MLIR_TypeHandle type);
 MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *ctx, string name, bool value);
 MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *ctx, string name, string value);
 MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count);
@@ -314,6 +321,9 @@ MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle attr);
 string MLIR_GetAttributeName(MLIR_AttributeHandle attr);
 int64_t MLIR_GetAttributeInteger(MLIR_AttributeHandle attr);
 double MLIR_GetAttributeFloat(MLIR_AttributeHandle attr);
+// For Integer and Float attributes, returns the numeric type. For other
+// attribute kinds, returns MLIR_INVALID_HANDLE.
+MLIR_TypeHandle MLIR_GetAttributeType(MLIR_AttributeHandle attr);
 bool MLIR_GetAttributeBool(MLIR_AttributeHandle attr);
 string MLIR_GetAttributeString(MLIR_AttributeHandle attr);
 size_t MLIR_GetAttributeArraySize(MLIR_AttributeHandle attr);

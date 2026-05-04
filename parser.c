@@ -79,7 +79,7 @@ MLIR_OpHandle construct_test_module_full(MLIR_Context *ctx) {
     MLIR_TypeHandle *const_result_types = arena_new_array(arena, MLIR_TypeHandle, 1);
     const_result_types[0] = i32_type;
 
-    MLIR_AttributeHandle value_attr = MLIR_CreateAttributeInteger(ctx, str_lit("value"), 5);
+    MLIR_AttributeHandle value_attr = MLIR_CreateAttributeInteger(ctx, str_lit("value"), 5, i32_type);
     MLIR_AttributeHandle *const_attrs = arena_new_array(arena, MLIR_AttributeHandle, 1);
     const_attrs[0] = value_attr;
 

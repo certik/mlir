@@ -502,15 +502,13 @@ static MLIR_AttributeHandle makeNamedAttr(llvm::StringRef name, mlir::Attribute 
     return reinterpret_cast<uintptr_t>(na);
 }
 
-extern "C" MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *, string name, int64_t value) {
-    auto &ctx = globalCtx().mctx;
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *, string name, int64_t value, MLIR_TypeHandle type) {
     return makeNamedAttr(llvm::StringRef(name.str, name.size),
-                         mlir::IntegerAttr::get(mlir::IntegerType::get(&ctx, 64), value));
+                         mlir::IntegerAttr::get(typeF(type), value));
 }
-extern "C" MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *, string name, double value) {
-    auto &ctx = globalCtx().mctx;
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *, string name, double value, MLIR_TypeHandle type) {
     return makeNamedAttr(llvm::StringRef(name.str, name.size),
-                         mlir::FloatAttr::get(mlir::Float64Type::get(&ctx), value));
+                         mlir::FloatAttr::get(typeF(type), value));
 }
 extern "C" MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *, string name, bool value) {
     auto &ctx = globalCtx().mctx;
@@ -565,6 +563,12 @@ extern "C" int64_t MLIR_GetAttributeInteger(MLIR_AttributeHandle h) {
 }
 extern "C" double MLIR_GetAttributeFloat(MLIR_AttributeHandle h) {
     return llvm::cast<mlir::FloatAttr>(F<mlir::NamedAttribute>(h)->getValue()).getValueAsDouble();
+}
+extern "C" MLIR_TypeHandle MLIR_GetAttributeType(MLIR_AttributeHandle h) {
+    auto attr = F<mlir::NamedAttribute>(h)->getValue();
+    if (auto ia = llvm::dyn_cast<mlir::IntegerAttr>(attr)) return typeH(ia.getType());
+    if (auto fa = llvm::dyn_cast<mlir::FloatAttr>(attr))   return typeH(fa.getType());
+    return MLIR_INVALID_HANDLE;
 }
 extern "C" bool MLIR_GetAttributeBool(MLIR_AttributeHandle h) {
     return llvm::cast<mlir::BoolAttr>(F<mlir::NamedAttribute>(h)->getValue()).getValue();
