@@ -31,6 +31,12 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/Region.h"
+#include "mlir/IR/DialectRegistry.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "llvm/Support/raw_ostream.h"
 
 extern "C" {
@@ -48,7 +54,17 @@ namespace {
 
 struct UpstreamCtx {
     mlir::MLIRContext mctx;
-    UpstreamCtx() { mctx.allowUnregisteredDialects(true); }
+    UpstreamCtx() {
+        mlir::DialectRegistry registry;
+        registry.insert<mlir::arith::ArithDialect,
+                        mlir::func::FuncDialect,
+                        mlir::scf::SCFDialect,
+                        mlir::cf::ControlFlowDialect,
+                        mlir::memref::MemRefDialect>();
+        mctx.appendDialectRegistry(registry);
+        mctx.loadAllAvailableDialects();
+        mctx.allowUnregisteredDialects(true);
+    }
 };
 UpstreamCtx &globalCtx() { static UpstreamCtx g; return g; }
 
@@ -555,7 +571,7 @@ extern "C" MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle h) {
     if (llvm::isa<mlir::FloatAttr>(value))   return MLIR_ATTR_KIND_FLOAT;
     if (llvm::isa<mlir::ArrayAttr>(value))   return MLIR_ATTR_KIND_ARRAY;
     if (llvm::isa<mlir::DictionaryAttr>(value)) return MLIR_ATTR_KIND_DICT;
-    return MLIR_ATTR_KIND_STRING;
+    return MLIR_ATTR_KIND_OTHER;
 }
 extern "C" string MLIR_GetAttributeName(MLIR_AttributeHandle h) {
     return mkRefString(F<mlir::NamedAttribute>(h)->getName().getValue());
@@ -571,6 +587,13 @@ extern "C" bool MLIR_GetAttributeBool(MLIR_AttributeHandle h) {
 }
 extern "C" string MLIR_GetAttributeString(MLIR_AttributeHandle h) {
     return mkRefString(llvm::cast<mlir::StringAttr>(F<mlir::NamedAttribute>(h)->getValue()).getValue());
+}
+extern "C" string MLIR_GetAttributeAsString(MLIR_Context *ctx, MLIR_AttributeHandle h) {
+    std::string buf;
+    llvm::raw_string_ostream os(buf);
+    F<mlir::NamedAttribute>(h)->getValue().print(os);
+    os.flush();
+    return mkArenaString(ctx, buf);
 }
 extern "C" size_t MLIR_GetAttributeArraySize(MLIR_AttributeHandle h) {
     return llvm::cast<mlir::ArrayAttr>(F<mlir::NamedAttribute>(h)->getValue()).size();

@@ -740,6 +740,12 @@ string MLIR_GetAttributeName(MLIR_AttributeHandle ah) {
     return attr ? attr->name : str_lit("");
 }
 
+// Native parser never produces "other" attrs; this is just for API parity.
+string MLIR_GetAttributeAsString(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
+    (void)ctx; (void)ah;
+    return str_lit("");
+}
+
 int64_t MLIR_GetAttributeInteger(MLIR_AttributeHandle ah) {
     IR_Attribute *attr = resolve_attr(ah);
     return attr ? attr->data.integer_value : 0;
