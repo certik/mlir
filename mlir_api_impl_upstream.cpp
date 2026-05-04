@@ -486,7 +486,6 @@ extern "C" string MLIR_PrintOperationUpstream(MLIR_Context *ctx, MLIR_OpHandle h
     std::string buf;
     llvm::raw_string_ostream os(buf);
     mlir::OpPrintingFlags flags;
-    flags.printGenericOpForm();
     F<mlir::Operation>(h)->print(os, flags);
     os.flush();
     buf.push_back('\n');
