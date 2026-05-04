@@ -17,6 +17,7 @@ jobs:
             pixi-command: |
               pixi run -e linux test_linux
               pixi run -e wasm test_wasm
+              pixi run -e upstream test_cross
           - platform: macos
             os: macos-latest
             pixi-command: |
