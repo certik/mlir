@@ -7,7 +7,15 @@
 set -u
 cd "$(dirname "$0")/.."
 
-trap 'rm -f parser; [ -e parser.native.bak ] && mv parser.native.bak parser; exit' EXIT INT TERM
+cleanup() {
+    rc=$?
+    rm -f parser
+    if [ -e parser.native.bak ]; then
+        mv parser.native.bak parser
+    fi
+    exit "$rc"
+}
+trap cleanup EXIT INT TERM
 
 if [ -e parser ]; then
     mv parser parser.native.bak
@@ -16,5 +24,3 @@ cp parser_upstream parser
 
 set +e
 python run_tests.py -s
-status=$?
-exit $status

@@ -409,8 +409,11 @@ extern "C" MLIR_TypeHandle MLIR_CreateTypeTensor(MLIR_Context *, const int64_t *
     mlir::Type elem = (element_type == MLIR_INVALID_HANDLE)
                           ? mlir::Type(mlir::Float32Type::get(&ctx))
                           : typeF(element_type);
-    if (rank == 0 || shape == nullptr) {
-        return typeH(mlir::UnrankedTensorType::get(elem));
+    if (shape == nullptr) {
+        // Native impl uses shape==NULL to signal "shape not known"; print as
+        // a rank-0 tensor (tensor<elem>) to match its textual output, not as
+        // an unranked tensor (tensor<*xelem>).
+        return typeH(mlir::RankedTensorType::get({}, elem));
     }
     llvm::SmallVector<int64_t, 8> dims;
     dims.reserve(rank);
@@ -426,8 +429,8 @@ extern "C" MLIR_TypeHandle MLIR_CreateTypeMemref(MLIR_Context *, const int64_t *
     mlir::Type elem = (element_type == MLIR_INVALID_HANDLE)
                           ? mlir::Type(mlir::Float32Type::get(&ctx))
                           : typeF(element_type);
-    if (rank == 0 || shape == nullptr) {
-        return typeH(mlir::UnrankedMemRefType::get(elem, 0));
+    if (shape == nullptr) {
+        return typeH(mlir::MemRefType::get({}, elem));
     }
     llvm::SmallVector<int64_t, 8> dims;
     dims.reserve(rank);
