@@ -255,9 +255,39 @@ test_windows = { cmd = "./parser.exe --construct && python run_tests.py -s", dep
 # MSVC must be available on PATH (e.g. via vcvars64.bat)
 
 
+#=============================================================================
+# Upstream MLIR bridge
+# Optional environment that links the public C API against upstream LLVM/MLIR
+# (mlir_api_impl_upstream.cpp). Uses conda-forge `llvmdev`, which ships MLIR
+# headers + libs. Restricted to native desktop platforms (no WASM) and isolated
+# in its own pixi environment so the default/macos/linux/windows/wasm envs
+# stay small and fast.
+#=============================================================================
+[feature.upstream]
+platforms = ["linux-64", "osx-arm64", "win-64"]
+
+[feature.upstream.dependencies]
+mlir = "*"
+cxx-compiler = "*"
+
+[feature.upstream.tasks]
+build_upstream = { cmd = """
+$CXX -c -std=c++17 -fno-rtti \
+    -I corec \
+    -I corec-stdlib/stdlib \
+    -I . \
+    -I "$CONDA_PREFIX/include" \
+    -o mlir_api_impl_upstream.o \
+    mlir_api_impl_upstream.cpp
+""", depends-on = ["tokenizer"], description = "Compile mlir_api_impl_upstream.cpp against upstream MLIR (compile-only)" }
+
+test_upstream = { cmd = "echo upstream build OK", depends-on = ["build_upstream"], description = "Build the upstream MLIR bridge as a smoke test" }
+
+
 [environments]
 default = { solve-group = "default" }
 wasm = ["wasm"]
 linux = { features = ["linux"], solve-group = "linux" }
 macos = { features = ["macos"], solve-group = "macos" }
 windows = { features = ["windows"], solve-group = "windows" }
+upstream = { features = ["upstream"], solve-group = "upstream" }
