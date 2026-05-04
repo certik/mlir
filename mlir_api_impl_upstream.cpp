@@ -32,6 +32,7 @@
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/Region.h"
 #include "mlir/IR/DialectRegistry.h"
+#include "mlir/AsmParser/AsmParser.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -188,6 +189,79 @@ extern "C" void MLIR_AppendBlockArg(MLIR_Context *, MLIR_BlockHandle bh,
 // Op construction
 // -----------------------------------------------------------------------------
 
+// Per-op-name fixups that retype attributes and rebuild structural attributes
+// so that the resulting Operation parses, verifies and prints in pretty form.
+// Our parser stores attributes in a generic, untyped form (e.g. `value = 0 :
+// i64` for arith.constant, `ret = "memref<...>"` for func.func). Upstream's
+// pretty-form printers reject those, so we rewrite them here into what the
+// dialect actually expects (IntegerAttr typed to the result type, FunctionType
+// TypeAttr, etc.).
+static void fixupOpStateForRegisteredOp(mlir::OperationState &state,
+                                        const std::string &opName,
+                                        mlir::MLIRContext &ctx) {
+    auto &attrs = state.attributes;
+
+    if (opName == "arith.constant") {
+        if (state.types.size() != 1) return;
+        mlir::Type resTy = state.types[0];
+        mlir::Attribute valAttr = attrs.get("value");
+        if (auto intAttr = llvm::dyn_cast_or_null<mlir::IntegerAttr>(valAttr)) {
+            if (resTy != intAttr.getType() &&
+                (resTy.isIndex() || resTy.isIntOrIndex())) {
+                attrs.set("value", mlir::IntegerAttr::get(resTy, intAttr.getInt()));
+            }
+        } else if (auto fAttr = llvm::dyn_cast_or_null<mlir::FloatAttr>(valAttr)) {
+            if (resTy != fAttr.getType() && llvm::isa<mlir::FloatType>(resTy)) {
+                attrs.set("value", mlir::FloatAttr::get(resTy, fAttr.getValueAsDouble()));
+            }
+        }
+        return;
+    }
+
+    if (opName == "func.func") {
+        if (attrs.get("function_type")) return;
+        if (state.regions.empty()) return;
+        mlir::Region *region = state.regions.front().get();
+        if (!region || region->empty()) return;
+        mlir::Block &entry = region->front();
+
+        llvm::SmallVector<mlir::Type> argTys(entry.getArgumentTypes().begin(),
+                                              entry.getArgumentTypes().end());
+
+        llvm::SmallVector<mlir::Type> resTys;
+        if (auto retAttr = llvm::dyn_cast_or_null<mlir::StringAttr>(attrs.get("ret"))) {
+            llvm::StringRef txt = retAttr.getValue().trim();
+            if (!txt.empty()) {
+                if (mlir::Type t = mlir::parseType(txt, &ctx)) {
+                    resTys.push_back(t);
+                } else {
+                    if (txt.starts_with("(") && txt.ends_with(")"))
+                        txt = txt.drop_front().drop_back();
+                    int depth = 0;
+                    size_t start = 0;
+                    for (size_t i = 0; i <= txt.size(); ++i) {
+                        char c = (i < txt.size()) ? txt[i] : ',';
+                        if (c == '<' || c == '(' || c == '[') depth++;
+                        else if (c == '>' || c == ')' || c == ']') depth--;
+                        else if (c == ',' && depth == 0) {
+                            llvm::StringRef part = txt.substr(start, i - start).trim();
+                            if (!part.empty()) {
+                                if (mlir::Type pt = mlir::parseType(part, &ctx))
+                                    resTys.push_back(pt);
+                            }
+                            start = i + 1;
+                        }
+                    }
+                }
+            }
+        }
+        attrs.erase("ret");
+        attrs.set("function_type",
+                  mlir::TypeAttr::get(mlir::FunctionType::get(&ctx, argTys, resTys)));
+        return;
+    }
+}
+
 extern "C" MLIR_OpHandle MLIR_CreateOp(
     MLIR_Context *, MLIR_OpType type, string opname,
     MLIR_AttributeHandle *attrs, size_t n_attrs,
@@ -204,8 +278,12 @@ extern "C" MLIR_OpHandle MLIR_CreateOp(
         string s = op_type_to_string(type);
         if (s.size > 0) nm.assign(s.str, s.size);
         else nm = "unknown";
-    } else if (type == OP_TYPE_MODULE && nm == "module") {
+    }
+    if (type == OP_TYPE_MODULE && nm == "module") {
         nm = "builtin.module";
+    } else if (nm == "return") {
+        // Bare `return` in pretty form is the alias for func.return.
+        nm = "func.return";
     }
 
     mlir::Location loc = (location == MLIR_INVALID_HANDLE)
@@ -226,6 +304,7 @@ extern "C" MLIR_OpHandle MLIR_CreateOp(
     for (size_t i = 0; i < n_regions; i++) {
         state.addRegion(std::unique_ptr<mlir::Region>(F<mlir::Region>(regions[i])));
     }
+    fixupOpStateForRegisteredOp(state, nm, ctx);
     mlir::Operation *op = mlir::Operation::create(state);
 
     // Bind user-supplied result handles to the freshly-created OpResults.
@@ -502,6 +581,7 @@ extern "C" string MLIR_PrintOperationUpstream(MLIR_Context *ctx, MLIR_OpHandle h
     std::string buf;
     llvm::raw_string_ostream os(buf);
     mlir::OpPrintingFlags flags;
+    flags.assumeVerified();
     F<mlir::Operation>(h)->print(os, flags);
     os.flush();
     buf.push_back('\n');
