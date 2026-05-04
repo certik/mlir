@@ -10,20 +10,6 @@
 #include <base/string.h>
 #include <base/vector.h>
 
-// TODO: move this into corec.
-// `arena_alloc(arena, T)` allocates one T. Since this 2-arg form collides with
-// corec's `arena_alloc(Arena*, size_t)` function, we route both `arena_alloc`
-// and `arena_alloc_array` through a wrapper that captures the byte-size form
-// before the macros shadow it.
-static inline void *_mlir_arena_alloc_bytes(Arena *a, size_t s) {
-    return arena_alloc(a, s);
-}
-#define arena_alloc(arena, type) \
-    ((type *)_mlir_arena_alloc_bytes((arena), sizeof(type)))
-#undef arena_alloc_array
-#define arena_alloc_array(arena, type, count) \
-    ((type *)_mlir_arena_alloc_bytes((arena), sizeof(type) * (size_t)(count)))
-
 #ifdef __cplusplus
 extern "C" {
 #endif

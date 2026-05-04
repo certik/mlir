@@ -23,8 +23,8 @@ typedef struct {
 } Arena;
 
 #define arena_alloc(arena, type) \
-    arena_alloc_array((arena), type, 1)
-#define arena_alloc_array(arena, type, n) \
+    arena_new_array((arena), type, 1)
+#define arena_new_array(arena, type, n) \
     (type*)arena_alloc_((arena), (n)*sizeof(type))
 
 void* arena_alloc_(Arena* arena, size_t size) {
@@ -45,7 +45,7 @@ Arena* arena_create(size_t size) {
     return arena;
 }
 
-void arena_free(Arena* arena) {
+void arena_destroy(Arena* arena) {
     free(arena->start);
     free(arena);
 }
@@ -58,7 +58,7 @@ string str_from_cstr_view(char *cstr) {
 string int_to_string(Arena *arena, int value) {
     char buf[32];
     int len = snprintf(buf, sizeof(buf), "%d", value);
-    char *str = arena_alloc_array(arena, char, len + 1);
+    char *str = arena_new_array(arena, char, len + 1);
     memcpy(str, buf, len + 1);
     return string{.str = str, .size = (uint64_t)len};
 }
@@ -71,19 +71,19 @@ string double_to_string(Arena *arena, double value, int precision) {
     } else {
         len = snprintf(buf, sizeof(buf), "%f", value);
     }
-    char *str = arena_alloc_array(arena, char, len + 1);
+    char *str = arena_new_array(arena, char, len + 1);
     memcpy(str, buf, len + 1);
     return string{.str = str, .size = (uint64_t)len};
 }
 
 string char_to_string(Arena *arena, char c) {
-    char *buf = arena_alloc_array(arena, char, 1);
+    char *buf = arena_new_array(arena, char, 1);
     *buf = c;
     return string{.str = buf, .size = 1};
 }
 
 string str_concat(Arena *arena, string a, string b) {
-    char *str = arena_alloc_array(arena, char, a.size + b.size + 1);
+    char *str = arena_new_array(arena, char, a.size + b.size + 1);
     memcpy(str, a.str, a.size);
     memcpy(str + a.size, b.str, b.size);
     str[a.size + b.size] = '\0';
@@ -155,7 +155,7 @@ FormatSpec parse_format_spec(string spec) {
 string format(Arena *arena, string fmt, size_t arg_count, ...) {
     va_list ap;
     va_start(ap, arg_count);
-    string result = {.str = arena_alloc_array(arena, char, 1), .size = 0};
+    string result = {.str = arena_new_array(arena, char, 1), .size = 0};
     result.str[0] = '\0';
     const char *p = fmt.str;
     const char *end = fmt.str + fmt.size;
@@ -259,7 +259,7 @@ string format(Arena *arena, string fmt, size_t arg_count, ...) {
         if (spec.width > 0 && s.size < spec.width) {
             size_t pad_size = spec.width - s.size;
             char pad_char = ' ';
-            string padding = {.str = arena_alloc_array(arena, char, pad_size), .size = pad_size};
+            string padding = {.str = arena_new_array(arena, char, pad_size), .size = pad_size};
             memset(padding.str, pad_char, pad_size);
             if (spec.alignment == '<') {
                 s = str_concat(arena, s, padding);
@@ -348,6 +348,6 @@ int main() {
     printf("Multiple args: %.*s\n", (int)result.size, result.str);
     */
 
-    arena_free(arena);
+    arena_destroy(arena);
     return 0;
 }

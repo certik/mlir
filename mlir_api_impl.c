@@ -164,49 +164,49 @@ static inline IR_Location *resolve_loc(MLIR_LocationHandle h) {
 
 static inline MLIR_OpHandle alloc_op(MLIR_Context *ctx, IR_Op op) {
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
-    IR_Op *slot = arena_alloc(ctx->arena, IR_Op);
+    IR_Op *slot = arena_new(ctx->arena, IR_Op);
     *slot = op;
     return (MLIR_OpHandle)(uintptr_t)slot;
 }
 
 static inline MLIR_RegionHandle alloc_region(MLIR_Context *ctx, IR_Region r) {
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
-    IR_Region *slot = arena_alloc(ctx->arena, IR_Region);
+    IR_Region *slot = arena_new(ctx->arena, IR_Region);
     *slot = r;
     return (MLIR_RegionHandle)(uintptr_t)slot;
 }
 
 static inline MLIR_BlockHandle alloc_block(MLIR_Context *ctx, IR_Block b) {
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
-    IR_Block *slot = arena_alloc(ctx->arena, IR_Block);
+    IR_Block *slot = arena_new(ctx->arena, IR_Block);
     *slot = b;
     return (MLIR_BlockHandle)(uintptr_t)slot;
 }
 
 static inline MLIR_ValueHandle alloc_value(MLIR_Context *ctx, IR_Value v) {
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
-    IR_Value *slot = arena_alloc(ctx->arena, IR_Value);
+    IR_Value *slot = arena_new(ctx->arena, IR_Value);
     *slot = v;
     return (MLIR_ValueHandle)(uintptr_t)slot;
 }
 
 static inline MLIR_TypeHandle alloc_type(MLIR_Context *ctx, IR_Type t) {
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
-    IR_Type *slot = arena_alloc(ctx->arena, IR_Type);
+    IR_Type *slot = arena_new(ctx->arena, IR_Type);
     *slot = t;
     return (MLIR_TypeHandle)(uintptr_t)slot;
 }
 
 static inline MLIR_AttributeHandle alloc_attr_obj(MLIR_Context *ctx, IR_Attribute a) {
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
-    IR_Attribute *slot = arena_alloc(ctx->arena, IR_Attribute);
+    IR_Attribute *slot = arena_new(ctx->arena, IR_Attribute);
     *slot = a;
     return (MLIR_AttributeHandle)(uintptr_t)slot;
 }
 
 static inline MLIR_LocationHandle alloc_loc(MLIR_Context *ctx, IR_Location l) {
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
-    IR_Location *slot = arena_alloc(ctx->arena, IR_Location);
+    IR_Location *slot = arena_new(ctx->arena, IR_Location);
     *slot = l;
     return (MLIR_LocationHandle)(uintptr_t)slot;
 }
@@ -280,7 +280,7 @@ void MLIR_AppendBlockOp(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHandle op
     IR_Block *block = resolve_block(bh);
     if (!block || !ctx || !ctx->arena) return;
     Arena *arena = ctx->arena;
-    MLIR_OpHandle *new_ops = arena_alloc_array(arena, MLIR_OpHandle, block->n_operations + 1);
+    MLIR_OpHandle *new_ops = arena_new_array(arena, MLIR_OpHandle, block->n_operations + 1);
     if (block->operations) memcpy(new_ops, block->operations, block->n_operations * sizeof(MLIR_OpHandle));
     new_ops[block->n_operations] = op;
     block->operations = new_ops;
@@ -291,7 +291,7 @@ void MLIR_AppendBlockArg(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_ValueHandl
     IR_Block *block = resolve_block(bh);
     if (!block || !ctx || !ctx->arena) return;
     Arena *arena = ctx->arena;
-    MLIR_ValueHandle *new_args = arena_alloc_array(arena, MLIR_ValueHandle, block->n_arguments + 1);
+    MLIR_ValueHandle *new_args = arena_new_array(arena, MLIR_ValueHandle, block->n_arguments + 1);
     if (block->arguments) memcpy(new_args, block->arguments, block->n_arguments * sizeof(MLIR_ValueHandle));
     new_args[block->n_arguments] = arg;
     block->arguments = new_args;
@@ -306,7 +306,7 @@ void MLIR_AppendRegionBlock(MLIR_Context *ctx, MLIR_RegionHandle rh, MLIR_BlockH
     IR_Region *region = resolve_region(rh);
     if (!region || !ctx || !ctx->arena) return;
     Arena *arena = ctx->arena;
-    MLIR_BlockHandle *new_blocks = arena_alloc_array(arena, MLIR_BlockHandle, region->n_blocks + 1);
+    MLIR_BlockHandle *new_blocks = arena_new_array(arena, MLIR_BlockHandle, region->n_blocks + 1);
     if (region->blocks) memcpy(new_blocks, region->blocks, region->n_blocks * sizeof(MLIR_BlockHandle));
     new_blocks[region->n_blocks] = block;
     region->blocks = new_blocks;
@@ -554,7 +554,7 @@ static void copy_shape_to_arena(MLIR_Context *ctx, IR_Type *type, const int64_t 
             type->data.shaped.rank = 0;
             return;
         }
-        type->data.shaped.shape = arena_alloc_array(ctx->arena, int64_t, rank);
+        type->data.shaped.shape = arena_new_array(ctx->arena, int64_t, rank);
         for (size_t i = 0; i < rank; i++) {
             type->data.shaped.shape[i] = shape[i];
         }
@@ -694,7 +694,7 @@ void MLIR_AppendOpAttribute(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_AttributeH
     if (!op || !ctx || !ctx->arena) return;
     size_t new_count = op->n_attributes + 1;
     Arena *arena = ctx->arena;
-    MLIR_AttributeHandle *new_attrs = arena_alloc_array(arena, MLIR_AttributeHandle, new_count);
+    MLIR_AttributeHandle *new_attrs = arena_new_array(arena, MLIR_AttributeHandle, new_count);
     if (op->attributes) {
         memcpy(new_attrs, op->attributes, op->n_attributes * sizeof(MLIR_AttributeHandle));
     }

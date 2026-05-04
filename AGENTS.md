@@ -137,7 +137,7 @@ Parses MLIR files and prints the parsed representation.
 4. Add test cases
 
 ### Memory Management
-- Always use arena allocation: `arena_alloc(arena, Type)` or `arena_alloc_array(arena, Type, count)`
+- Always use arena allocation: `arena_alloc(arena, Type)` or `arena_new_array(arena, Type, count)`
 - No need for individual `free()` calls - arena cleanup handles everything
 - Create arena with sufficient size: `arena_create(50*1024*1024)` for large workloads
 
