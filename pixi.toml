@@ -270,6 +270,7 @@ link \
     mlir_generic_printer.obj \
     op_parsers.obj \
     mlir_api_impl.obj \
+    mlir_op_names.obj \
     stdio.obj \
     stdlib.obj \
     printf.obj \
