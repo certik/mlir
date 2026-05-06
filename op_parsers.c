@@ -4071,25 +4071,31 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
 }
 
 OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserParams *params) {
-    // Collect all data before creating operation (inlined from parse_affine_for)
+    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    size_t n_attributes = 0;
+    size_t attributes_capacity = 0;
 
-    // Expect induction variable
-    MLIR_ValueHandle ind_var = MLIR_INVALID_HANDLE;
+    string iv_name = str_lit("");
+    bool have_lb = false; int64_t lb_val = 0;
+    bool have_ub = false; int64_t ub_val = 0;
+    bool have_step = false; int64_t step_val = 1;
+
     if (parser_peek(parser, TK_REGISTER)) {
-        string iv_name = parser_token_str(parser);
+        iv_name = parser_token_str(parser);
         parser_expect(parser, TK_REGISTER);
 
-        // Create a placeholder for the block argument; registered later
-        ind_var = MLIR_CreateValueBlockArg(parser->ctx, iv_name, 0, mlir_type_create_from_string(parser->ctx, str_lit("index")), MLIR_INVALID_HANDLE);
-
-
-        // '=' lower bound
+        // '=' lower bound (literal int only; otherwise consume tokens)
         if (parser_peek(parser, TK_EQUAL)) {
             parser_expect(parser, TK_EQUAL);
-            // Consume a simple affine lower bound: integer or register/expression until 'to'
-            while (!parser_peek(parser, TK_EOF)) {
+            if (parser_peek(parser, TK_INTEGER)) {
+                string s = parser_token_str(parser);
+                int64_t v = 0;
+                for (size_t i = 0; i < s.size; i++) if (s.str[i]>='0' && s.str[i]<='9') v = v*10 + (s.str[i]-'0');
+                lb_val = v; have_lb = true;
+                parser_expect(parser, TK_INTEGER);
+            }
+            while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_LBRACE_END)) {
                 if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("to"))) break;
-                if (parser_peek(parser, TK_LBRACE_END)) break;
                 parser_next_token(parser);
             }
         }
@@ -4097,44 +4103,50 @@ OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserP
         // 'to' upper bound
         if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("to"))) {
             parser_expect(parser, TK_NAME);
-            // Consume simple upper bound until optional 'step' or '{'
+            if (parser_peek(parser, TK_INTEGER)) {
+                string s = parser_token_str(parser);
+                int64_t v = 0;
+                for (size_t i = 0; i < s.size; i++) if (s.str[i]>='0' && s.str[i]<='9') v = v*10 + (s.str[i]-'0');
+                ub_val = v; have_ub = true;
+                parser_expect(parser, TK_INTEGER);
+            }
             while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_LBRACE_END)) {
                 if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("step"))) break;
                 parser_next_token(parser);
             }
         }
 
-        // Optional 'step' expression
+        // optional 'step'
         if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("step"))) {
             parser_expect(parser, TK_NAME);
-            // Consume step expression until '{'
+            if (parser_peek(parser, TK_INTEGER)) {
+                string s = parser_token_str(parser);
+                int64_t v = 0;
+                for (size_t i = 0; i < s.size; i++) if (s.str[i]>='0' && s.str[i]<='9') v = v*10 + (s.str[i]-'0');
+                step_val = v; have_step = true;
+                parser_expect(parser, TK_INTEGER);
+            }
             while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_LBRACE_END)) {
                 parser_next_token(parser);
             }
         }
     }
 
-    // Now parse the loop region
     while (!parser_peek(parser, TK_LBRACE_END) && !parser_peek(parser, TK_EOF)) {
         parser_next_token(parser);
     }
     parser_expect(parser, TK_LBRACE_END);
     parser_expect(parser, TK_NEWLINE);
 
-    // Push new scope for induction variable
     symbol_table_push_scope(parser->arena, &parser->symbol_table);
 
-    // Create single block and register induction variable as block argument
     MLIR_BlockHandle block = MLIR_CreateBlock(parser->ctx);
-    if (ind_var) {
-        string block_name = str_lit("%arg0");
-        MLIR_ValueHandle iv_block_arg = MLIR_CreateValueBlockArg(parser->ctx, block_name, (uint32_t)MLIR_GetBlockNumArgs(block), mlir_type_create_from_string(parser->ctx, str_lit("index")), MLIR_INVALID_HANDLE);
+    if (iv_name.size > 0) {
+        MLIR_ValueHandle iv_block_arg = MLIR_CreateValueBlockArg(parser->ctx, iv_name, (uint32_t)MLIR_GetBlockNumArgs(block), mlir_type_create_from_string(parser->ctx, str_lit("index")), MLIR_INVALID_HANDLE);
         MLIR_AppendBlockArg(parser->ctx, block, iv_block_arg);
-        string orig_name = MLIR_GetValueRegisterName(ind_var);
-        if (orig_name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, orig_name, iv_block_arg);
+        symbol_table_add_value(parser->arena, &parser->symbol_table, iv_name, iv_block_arg);
     }
 
-    // Parse body operations
     bool prev_flag = parser->capture_trailing_comments;
     parser->capture_trailing_comments = true;
     while (!parser_peek(parser, TK_RBRACE)) {
@@ -4146,7 +4158,6 @@ OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserP
     parser_expect(parser, TK_RBRACE);
     parser->capture_trailing_comments = prev_flag;
 
-    // Parse optional trailing location
     MLIR_LocationHandle op_location = MLIR_INVALID_HANDLE;
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) {
         op_location = parse_loc(parser);
@@ -4154,31 +4165,30 @@ OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserP
 
     symbol_table_pop_scope(&parser->symbol_table);
 
-    // Build region with the parsed block
     MLIR_RegionHandle region = MLIR_CreateRegion(parser->ctx);
     MLIR_AppendRegionBlock(parser->ctx, region, block);
     MLIR_RegionHandle *regions = arena_new_array(parser->arena, MLIR_RegionHandle, 1);
     regions[0] = region;
 
-    // Parse attributes and result types
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
-    size_t n_attributes = 0;
-    size_t attributes_capacity = 0;
     MLIR_TypeHandle *result_types = MLIR_INVALID_HANDLE;
     size_t n_result_types = 0;
-
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
     parse_result_types(parser, &result_types, &n_result_types, &attributes, &n_attributes, &attributes_capacity, params->op_type, MLIR_INVALID_HANDLE);
     MLIR_LocationHandle loc_after_attrs = parse_optional_location(parser);
     if (loc_after_attrs) op_location = loc_after_attrs;
-
-    // Fallback location if none was parsed
     if (!op_location) op_location = params->unnumbered_loc_def;
 
-    // NOW create operation with all collected data
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
-        
+    // Stash bounds on the op as private attrs so the classic printer can emit them.
+    MLIR_TypeHandle idx_ty = mlir_type_create_from_string(parser->ctx, str_lit("index"));
+    if (have_lb) append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
+        create_integer_attr(parser, str_lit("_lb"), lb_val, idx_ty));
+    if (have_ub) append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
+        create_integer_attr(parser, str_lit("_ub"), ub_val, idx_ty));
+    if (have_step) append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
+        create_integer_attr(parser, str_lit("_step"), step_val, idx_ty));
+
+    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx,
         params->op_type,
         str_lit(""),
         attributes, n_attributes,

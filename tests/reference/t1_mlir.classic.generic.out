@@ -4,13 +4,13 @@ module() {
     ^bb0(%arg0: memref<10x20xf32>, %arg1: memref<10x20xf32>):
         %result = memref.alloc() -> memref<10x20xf32>
         affine.for() {
-        ^bb0(%arg0: index):
+        ^bb0(%i: index):
             affine.for() {
-            ^bb0(%arg0: index):
-                %lhs = memref.load(%arg0: unknown, %arg0: index, %arg0: index) -> f32
-                %rhs = memref.load(%arg1: unknown, %arg0: index, %arg0: index) -> f32
+            ^bb0(%j: index):
+                %lhs = memref.load(%arg0: unknown, %i: index, %j: index) -> f32
+                %rhs = memref.load(%arg1: unknown, %i: index, %j: index) -> f32
                 %sum = arith.addf(%lhs: f32, %rhs: f32) -> f32
-                memref.store(%sum: f32, %result: memref<10x20xf32>, %arg0: index, %arg0: index)
+                memref.store(%sum: f32, %result: memref<10x20xf32>, %i: index, %j: index)
             }
         }
         func.return(%result: memref<10x20xf32>)

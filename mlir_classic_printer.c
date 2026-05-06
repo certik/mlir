@@ -1084,6 +1084,42 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
 
+        case OP_TYPE_AFFINE_FOR: {
+            // Classic format: affine.for %iv = LB to UB [step S]
+            result = str_concat(arena, result, str_lit("affine.for "));
+
+            MLIR_BlockHandle body = MLIR_INVALID_HANDLE;
+            if (MLIR_GetOpNumRegions(op) > 0) {
+                MLIR_RegionHandle region = MLIR_GetOpRegion(op, 0);
+                if (region && MLIR_GetRegionNumBlocks(region) > 0) {
+                    body = MLIR_GetRegionBlock(region, 0);
+                }
+            }
+
+            if (body && MLIR_GetBlockNumArgs(body) > 0) {
+                MLIR_ValueHandle iv = MLIR_GetBlockArg(body, 0);
+                result = str_concat(arena, result, print_ssa_value_classic(ctx, iv));
+            } else {
+                result = str_concat(arena, result, str_lit("%i"));
+            }
+
+            int64_t lb_val = 0, ub_val = 0, step_val = 1;
+            bool have_step = false;
+            for (size_t i = 0, n = MLIR_GetOpNumAttributes(op); i < n; i++) {
+                MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
+                string an = MLIR_GetAttributeName(a);
+                if (MLIR_GetAttributeKind(a) != MLIR_ATTR_KIND_INTEGER) continue;
+                if (str_eq(an, str_lit("_lb"))) lb_val = MLIR_GetAttributeInteger(a);
+                else if (str_eq(an, str_lit("_ub"))) ub_val = MLIR_GetAttributeInteger(a);
+                else if (str_eq(an, str_lit("_step"))) { step_val = MLIR_GetAttributeInteger(a); have_step = true; }
+            }
+            result = str_concat(arena, result, format(arena, str_lit(" = {} to {}"), lb_val, ub_val));
+            if (have_step && step_val != 1) {
+                result = str_concat(arena, result, format(arena, str_lit(" step {}"), step_val));
+            }
+            break;
+        }
+
         case OP_TYPE_SCF_FOR: {
             // Classic format: %res? = scf.for %iv = %lb to %ub step %step
             //                  [iter_args(%a = %init, ...)] [-> (types...)]  : iv_type
@@ -1992,7 +2028,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
 
             if (MLIR_GetOpType(op) == OP_TYPE_TT_FUNC || MLIR_GetOpType(op) == OP_TYPE_MODULE ||
-                MLIR_GetOpType(op) == OP_TYPE_SCF_FOR || MLIR_GetOpType(op) == OP_TYPE_SCF_IF || MLIR_GetOpType(op) == OP_TYPE_SCF_WHILE) {
+                MLIR_GetOpType(op) == OP_TYPE_SCF_FOR || MLIR_GetOpType(op) == OP_TYPE_SCF_IF || MLIR_GetOpType(op) == OP_TYPE_SCF_WHILE ||
+                MLIR_GetOpType(op) == OP_TYPE_AFFINE_FOR) {
                 result = str_concat(arena, result,
                     print_function_region_classic(ctx, indent_level, MLIR_GetOpRegion(op, i))
                 );
