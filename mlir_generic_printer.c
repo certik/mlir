@@ -159,8 +159,10 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
         else result = str_concat(arena, result, MLIR_MLIR_OpTypeToString(op_type));
     }
     result = str_concat(arena, result, str_lit("("));
+    bool first_op = true;
     for (size_t i = 0, e = MLIR_GetOpNumOperands(op); i < e; i++) {
-        if (i > 0) result = str_concat(arena, result, str_lit(", "));
+        if (!first_op) result = str_concat(arena, result, str_lit(", "));
+        first_op = false;
         MLIR_ValueHandle operand = MLIR_GetOpOperand(op, i);
         if (!operand) { result = str_concat(arena, result, str_lit("NULL_OPERAND")); continue; }
         string name = MLIR_GetValueRegisterName(operand);
@@ -169,6 +171,22 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
         result = str_concat(arena, result, str_lit(": "));
         MLIR_TypeHandle ot = MLIR_GetValueType(operand);
         result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, ot));
+    }
+    // Emit successor operands too (the upstream backend puts these into
+    // op->operands; the native backend keeps them in a separate vector).
+    for (size_t s = 0, ns = MLIR_GetOpNumSuccessors(op); s < ns; s++) {
+        for (size_t i = 0, e = MLIR_GetOpNumSuccessorOperands(op, s); i < e; i++) {
+            if (!first_op) result = str_concat(arena, result, str_lit(", "));
+            first_op = false;
+            MLIR_ValueHandle operand = MLIR_GetOpSuccessorOperand(op, s, i);
+            if (!operand) { result = str_concat(arena, result, str_lit("NULL_OPERAND")); continue; }
+            string name = MLIR_GetValueRegisterName(operand);
+            if (name.size > 0) result = str_concat(arena, result, name);
+            else { uint32_t num = get_or_assign_ssa(ctx, operand); result = str_concat(arena, result, format(arena, str_lit("%{}"), (int64_t)num)); }
+            result = str_concat(arena, result, str_lit(": "));
+            MLIR_TypeHandle ot = MLIR_GetValueType(operand);
+            result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, ot));
+        }
     }
     result = str_concat(arena, result, str_lit(")"));
     {

@@ -555,7 +555,43 @@ void parser_init(MLIR_Context *ctx, Parser *parser, string text) {
     parser->next_loc_id = 0;
     parser->unnumbered_loc_def = MLIR_INVALID_HANDLE;
     parser->capture_trailing_comments = false;
+    parser->block_label_stack = NULL;
+    parser->block_label_depth = 0;
+    parser->block_label_capacity = 0;
     parser_next_token(parser);
+}
+
+void parser_push_region_blocks(Parser *parser) {
+    if (parser->block_label_depth >= parser->block_label_capacity) {
+        size_t new_cap = parser->block_label_capacity ? parser->block_label_capacity * 2 : 4;
+        BlockLabelMap *new_stack = arena_new_array(parser->arena, BlockLabelMap, new_cap);
+        if (parser->block_label_stack) {
+            memcpy(new_stack, parser->block_label_stack,
+                   parser->block_label_depth * sizeof(BlockLabelMap));
+        }
+        parser->block_label_stack = new_stack;
+        parser->block_label_capacity = new_cap;
+    }
+    BlockLabelMap_init(parser->arena, &parser->block_label_stack[parser->block_label_depth], 8);
+    parser->block_label_depth++;
+}
+
+void parser_pop_region_blocks(Parser *parser) {
+    if (parser->block_label_depth > 0) parser->block_label_depth--;
+}
+
+MLIR_BlockHandle parser_get_or_create_block(Parser *parser, string label) {
+    if (parser->block_label_depth == 0) {
+        return MLIR_CreateBlock(parser->ctx);
+    }
+    BlockLabelMap *m = &parser->block_label_stack[parser->block_label_depth - 1];
+    MLIR_BlockHandle *existing = BlockLabelMap_get(m, label);
+    if (existing) {
+        return *existing;
+    }
+    MLIR_BlockHandle nb = MLIR_CreateBlock(parser->ctx);
+    BlockLabelMap_insert(parser->arena, m, label, nb);
+    return nb;
 }
 
 bool parser_peek(Parser *parser, TokenType s) {
@@ -623,7 +659,9 @@ MLIR_BlockHandle parse_block(Parser *parser) {
     VecValue block_args;
     VecValue_reserve(parser->arena, &block_args, 4);
 
+    string block_label = str_lit("");
     if (parser_peek(parser, TK_CARET_NAME)) {
+        block_label = parser_token_str(parser);
         parser_expect(parser, TK_CARET_NAME);
 
         // Parse block arguments if present: ^bb1(%0: i64, %1: i32):
@@ -671,7 +709,15 @@ MLIR_BlockHandle parse_block(Parser *parser) {
     // Create the block and bind its arguments BEFORE parsing operations,
     // so operand references to block args resolve to real values during
     // op construction (required by upstream MLIR's strict Value model).
-    MLIR_BlockHandle block = MLIR_CreateBlock(parser->ctx);
+    // Use forward-reference-friendly creation so cf.br targets resolve to
+    // the same MLIR_BlockHandle whether the label appears before or after
+    // the branch op.
+    MLIR_BlockHandle block;
+    if (block_label.size > 0) {
+        block = parser_get_or_create_block(parser, block_label);
+    } else {
+        block = MLIR_CreateBlock(parser->ctx);
+    }
     for (size_t i = 0; i < block_args.size; i++) {
         MLIR_AppendBlockArg(parser->ctx, block, block_args.data[i]);
     }
@@ -704,6 +750,7 @@ MLIR_RegionHandle parse_region(Parser *parser) {
 
     // Push new scope for this region
     symbol_table_push_scope(parser->arena, &parser->symbol_table);
+    parser_push_region_blocks(parser);
 
     VecBlock blocks;
     VecBlock_reserve(parser->arena, &blocks, 8);
@@ -715,6 +762,7 @@ MLIR_RegionHandle parse_region(Parser *parser) {
 
     // Pop scope when leaving region
     symbol_table_pop_scope(&parser->symbol_table);
+    parser_pop_region_blocks(parser);
 
     MLIR_RegionHandle region = MLIR_CreateRegion(parser->ctx);
     for (size_t i = 0; i < blocks.size; i++) {

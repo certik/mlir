@@ -3,21 +3,21 @@ module {
   func.func @main() -> i64 {
     %0 = arith.constant 0 : i64
     cf.br ^bb1(%0 : i64)
-  ^bb1(%11: i64 loc("-":6:8)):
+  ^bb1(%11: i64 loc("-":6:8)):  // 2 preds: ^bb0, ^bb2
     %1 = arith.constant 10 : i64
     %2 = arith.cmpi slt, %11, %1 : i64
     %3 = arith.extui %2 : i1 to i64
     %4 = arith.constant 0 : i64
     %5 = arith.cmpi slt, %3, %4 : i64
     cf.cond_br %5, ^bb2, ^bb3
-  ^bb2:
+  ^bb2:  // pred: ^bb1
     %6 = arith.constant 48 : i64
     %7 = arith.addi %11, %6 : i64
     %8 = call @putchar(%7) : (i64) -> i64
     %9 = arith.constant 1 : i64
     %10 = arith.addi %11, %9 : i64
     cf.br ^bb1(%10 : i64)
-  ^bb3:
+  ^bb3:  // pred: ^bb1
     return %11 : i64
   }
 }

@@ -186,6 +186,26 @@ MLIR_OpHandle MLIR_CreateOp(
     MLIR_LocationHandle unnumbered_loc_def,
     string trailing_comment,
     int64_t source_line_start);
+// Like MLIR_CreateOp, but with explicit successor blocks and per-successor
+// operand arrays. Used by branch ops (cf.br, cf.cond_br, ...). The successor
+// blocks must be valid block handles (forward-referenced blocks are fine as
+// long as MLIR_CreateBlock has been called for them).
+MLIR_OpHandle MLIR_CreateOpWithSuccessors(
+    MLIR_Context *ctx,
+    MLIR_OpType type,
+    string opname,
+    MLIR_AttributeHandle *attributes, size_t n_attributes,
+    MLIR_TypeHandle *result_types, size_t n_result_types,
+    MLIR_ValueHandle *results, size_t n_results,
+    MLIR_ValueHandle *operands, size_t n_operands,
+    MLIR_RegionHandle *regions, size_t n_regions,
+    MLIR_BlockHandle *successors, size_t n_successors,
+    MLIR_ValueHandle **successor_operands,
+    size_t *n_successor_operands,
+    MLIR_LocationHandle location,
+    MLIR_LocationHandle unnumbered_loc_def,
+    string trailing_comment,
+    int64_t source_line_start);
 void MLIR_AppendOpAttribute(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttributeHandle attr);
 
 // Print an operation. Three named entry points instead of an enum-dispatched

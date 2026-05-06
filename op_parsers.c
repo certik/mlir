@@ -1299,7 +1299,7 @@ OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserPa
 
 OperationParserResult parse_cf_br_op(Parser *parser, const OperationParserParams *params) {
     // Parse cf.br ^bbX(%args : types)
-    string target = str_lit("^bb1");
+    string target = str_lit("");
     if (parser_peek(parser, TK_CARET_NAME)) {
         target = parser_token_str(parser);
         parser_expect(parser, TK_CARET_NAME);
@@ -1331,31 +1331,27 @@ OperationParserResult parse_cf_br_op(Parser *parser, const OperationParserParams
         parser_expect(parser, TK_RPAREN);
     }
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
-    size_t n_attributes = 0;
-    size_t attributes_capacity = 0;
-    append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                create_string_attr(parser, str_lit("_target"), target));
-
     MLIR_LocationHandle op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
-        
+    // Successor: resolve label to a (possibly forward-referenced) block.
+    MLIR_BlockHandle target_block = parser_get_or_create_block(parser, target);
+    MLIR_BlockHandle successors[1] = { target_block };
+    MLIR_ValueHandle *succ_operands_arrs[1] = { branch_args.data };
+    size_t succ_operand_counts[1] = { branch_args.size };
+
+    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(parser->ctx,
         params->op_type,
         str_lit(""),
-        attributes,
-        n_attributes,
-        MLIR_INVALID_HANDLE,
-        0,
-        params->lhs_results,
-        params->n_lhs_results,
-        branch_args.data,
-        branch_args.size,
-        MLIR_INVALID_HANDLE,
-        0,
+        MLIR_INVALID_HANDLE, 0,
+        MLIR_INVALID_HANDLE, 0,
+        params->lhs_results, params->n_lhs_results,
+        MLIR_INVALID_HANDLE, 0,
+        MLIR_INVALID_HANDLE, 0,
+        successors, 1,
+        succ_operands_arrs, succ_operand_counts,
         op_location,
         params->unnumbered_loc_def,
         params->trailing_comment,
@@ -1385,23 +1381,21 @@ OperationParserResult parse_cf_cond_br_op(Parser *parser, const OperationParserP
 
     string ttrue = str_lit("");
     string tfalse = str_lit("");
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
-    size_t n_attributes = 0;
-    size_t attributes_capacity = 0;
+    VecValue true_args, false_args;
+    VecValue_reserve(parser->arena, &true_args, 4);
+    VecValue_reserve(parser->arena, &false_args, 4);
 
     if (parser_peek(parser, TK_CARET_NAME)) {
         ttrue = parser_token_str(parser);
         parser_expect(parser, TK_CARET_NAME);
         if (parser_peek(parser, TK_LPAREN)) {
             parser_expect(parser, TK_LPAREN);
-            int64_t ntrue = 0;
             while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
                 if (parser_peek(parser, TK_REGISTER)) {
                     string vr = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
                     MLIR_ValueHandle v = symbol_table_lookup(&parser->symbol_table, vr);
-                    if (v) VecValue_push_back(parser->arena, &operands, v);
-                    ntrue++;
+                    if (v) VecValue_push_back(parser->arena, &true_args, v);
                     if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
                 } else if (parser_peek(parser, TK_COLON)) {
                     parser_expect(parser, TK_COLON);
@@ -1416,9 +1410,6 @@ OperationParserResult parse_cf_cond_br_op(Parser *parser, const OperationParserP
                 }
             }
             parser_expect(parser, TK_RPAREN);
-            MLIR_TypeHandle i64_ty = mlir_type_create_from_string(parser->ctx, str_lit("i64"));
-            append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                        create_integer_attr(parser, str_lit("_ntrue"), ntrue, i64_ty));
         }
     }
 
@@ -1429,14 +1420,12 @@ OperationParserResult parse_cf_cond_br_op(Parser *parser, const OperationParserP
         parser_expect(parser, TK_CARET_NAME);
         if (parser_peek(parser, TK_LPAREN)) {
             parser_expect(parser, TK_LPAREN);
-            int64_t nfalse = 0;
             while (!parser_peek(parser, TK_RPAREN) && !parser_peek(parser, TK_EOF)) {
                 if (parser_peek(parser, TK_REGISTER)) {
                     string vr = parser_token_str(parser);
                     parser_expect(parser, TK_REGISTER);
                     MLIR_ValueHandle v = symbol_table_lookup(&parser->symbol_table, vr);
-                    if (v) VecValue_push_back(parser->arena, &operands, v);
-                    nfalse++;
+                    if (v) VecValue_push_back(parser->arena, &false_args, v);
                     if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
                 } else if (parser_peek(parser, TK_COLON)) {
                     parser_expect(parser, TK_COLON);
@@ -1451,36 +1440,30 @@ OperationParserResult parse_cf_cond_br_op(Parser *parser, const OperationParserP
                 }
             }
             parser_expect(parser, TK_RPAREN);
-            MLIR_TypeHandle i64_ty = mlir_type_create_from_string(parser->ctx, str_lit("i64"));
-            append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                        create_integer_attr(parser, str_lit("_nfalse"), nfalse, i64_ty));
         }
     }
-
-    append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                create_string_attr(parser, str_lit("_true"), ttrue));
-    append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                create_string_attr(parser, str_lit("_false"), tfalse));
 
     MLIR_LocationHandle op_location = parse_optional_location(parser);
     if (!op_location) {
         op_location = params->unnumbered_loc_def;
     }
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
-        
+    MLIR_BlockHandle true_blk = parser_get_or_create_block(parser, ttrue);
+    MLIR_BlockHandle false_blk = parser_get_or_create_block(parser, tfalse);
+    MLIR_BlockHandle successors[2] = { true_blk, false_blk };
+    MLIR_ValueHandle *succ_operands_arrs[2] = { true_args.data, false_args.data };
+    size_t succ_operand_counts[2] = { true_args.size, false_args.size };
+
+    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(parser->ctx,
         params->op_type,
         str_lit(""),
-        attributes,
-        n_attributes,
-        MLIR_INVALID_HANDLE,
-        0,
-        params->lhs_results,
-        params->n_lhs_results,
-        operands.data,
-        operands.size,
-        MLIR_INVALID_HANDLE,
-        0,
+        MLIR_INVALID_HANDLE, 0,
+        MLIR_INVALID_HANDLE, 0,
+        params->lhs_results, params->n_lhs_results,
+        operands.data, operands.size,
+        MLIR_INVALID_HANDLE, 0,
+        successors, 2,
+        succ_operands_arrs, succ_operand_counts,
         op_location,
         params->unnumbered_loc_def,
         params->trailing_comment,

@@ -221,19 +221,21 @@ extern "C" void MLIR_AppendBlockArg(MLIR_Context *, MLIR_BlockHandle bh,
 // Op construction
 // -----------------------------------------------------------------------------
 
-extern "C" MLIR_OpHandle MLIR_CreateOp(
+extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     MLIR_Context *, MLIR_OpType type, string opname,
     MLIR_AttributeHandle *attrs, size_t n_attrs,
     MLIR_TypeHandle *result_types, size_t n_result_types,
     MLIR_ValueHandle *results, size_t n_results,
     MLIR_ValueHandle *operands, size_t n_operands,
     MLIR_RegionHandle *regions, size_t n_regions,
+    MLIR_BlockHandle *successors, size_t n_successors,
+    MLIR_ValueHandle **successor_operands,
+    size_t *n_successor_operands,
     MLIR_LocationHandle location, MLIR_LocationHandle, string, int64_t) {
     auto &ctx = globalCtx().mctx;
 
     std::string nm(opname.str, opname.size);
     if (nm.empty()) {
-        // Fall back to the canonical mapping from mlir_op_names.
         string s = op_type_to_string(type);
         if (s.size > 0) nm.assign(s.str, s.size);
         else nm = "unknown";
@@ -241,10 +243,6 @@ extern "C" MLIR_OpHandle MLIR_CreateOp(
     if (type == OP_TYPE_MODULE && nm == "module") {
         nm = "builtin.module";
     }
-    // Note: we no longer rename bare "return" to "func.return" here. The
-    // upstream backend keeps the name as authored so that classic-parser-
-    // built IR and native-backend IR are byte-identical when printed via
-    // the classic and generic printers.
 
     mlir::Location loc = (location == MLIR_INVALID_HANDLE)
                              ? mlir::Location(mlir::UnknownLoc::get(&ctx))
@@ -253,6 +251,14 @@ extern "C" MLIR_OpHandle MLIR_CreateOp(
 
     for (size_t i = 0; i < n_operands; i++) {
         state.addOperands(F<ValueBox>(operands[i])->v);
+    }
+    // For branch-like ops, successor operands are appended after regular
+    // operands; the BranchOpInterface uses operandSegmentSizes to slice them.
+    for (size_t s = 0; s < n_successors; s++) {
+        size_t n = n_successor_operands ? n_successor_operands[s] : 0;
+        for (size_t i = 0; i < n; i++) {
+            state.addOperands(F<ValueBox>(successor_operands[s][i])->v);
+        }
     }
     for (size_t i = 0; i < n_result_types; i++) {
         state.addTypes(typeF(result_types[i]));
@@ -264,16 +270,31 @@ extern "C" MLIR_OpHandle MLIR_CreateOp(
     for (size_t i = 0; i < n_regions; i++) {
         state.addRegion(std::unique_ptr<mlir::Region>(F<mlir::Region>(regions[i])));
     }
-    // Snapshot the user-supplied attribute set; we'll expose it (rather
-    // than the operation's combined attribute dictionary) through the
-    // MLIR_GetOpAttribute API so that dialect-injected inherent attributes
-    // (e.g. arith.addi's default overflowFlags) don't leak through.
+    for (size_t i = 0; i < n_successors; i++) {
+        state.addSuccessors(F<mlir::Block>(successors[i]));
+    }
+
+    // Snapshot user attrs BEFORE we synthesize operandSegmentSizes — the
+    // generic printer iterates user attrs and we don't want that internal
+    // attribute leaking into output.
     std::vector<mlir::NamedAttribute> userAttrs(state.attributes.begin(),
                                                 state.attributes.end());
+
+    if (n_successors > 0 && n_successor_operands) {
+        if (nm == "cf.cond_br") {
+            llvm::SmallVector<int32_t, 4> seg;
+            seg.push_back((int32_t)n_operands);
+            for (size_t s = 0; s < n_successors; s++) {
+                seg.push_back((int32_t)n_successor_operands[s]);
+            }
+            state.addAttribute("operandSegmentSizes",
+                mlir::DenseI32ArrayAttr::get(&ctx, seg));
+        }
+    }
+
     mlir::Operation *op = mlir::Operation::create(state);
     opUserAttrs()[op] = std::move(userAttrs);
 
-    // Bind user-supplied result handles to the freshly-created OpResults.
     for (size_t i = 0; i < n_results; i++) {
         auto v = op->getResult(i);
         auto *box = F<ValueBox>(results[i]);
@@ -282,6 +303,24 @@ extern "C" MLIR_OpHandle MLIR_CreateOp(
     }
 
     return H(op);
+}
+
+extern "C" MLIR_OpHandle MLIR_CreateOp(
+    MLIR_Context *ctx, MLIR_OpType type, string opname,
+    MLIR_AttributeHandle *attrs, size_t n_attrs,
+    MLIR_TypeHandle *result_types, size_t n_result_types,
+    MLIR_ValueHandle *results, size_t n_results,
+    MLIR_ValueHandle *operands, size_t n_operands,
+    MLIR_RegionHandle *regions, size_t n_regions,
+    MLIR_LocationHandle location, MLIR_LocationHandle u, string tc, int64_t sl) {
+    return MLIR_CreateOpWithSuccessors(
+        ctx, type, opname, attrs, n_attrs,
+        result_types, n_result_types,
+        results, n_results,
+        operands, n_operands,
+        regions, n_regions,
+        nullptr, 0, nullptr, nullptr,
+        location, u, tc, sl);
 }
 
 extern "C" void MLIR_AppendOpAttribute(MLIR_Context *, MLIR_OpHandle oh,
@@ -328,7 +367,17 @@ extern "C" MLIR_LocationHandle MLIR_GetOpUnnumberedLocationDef(MLIR_OpHandle) {
 }
 
 extern "C" size_t MLIR_GetOpNumOperands(MLIR_OpHandle h) {
-    return F<mlir::Operation>(h)->getNumOperands();
+    auto *op = F<mlir::Operation>(h);
+    if (auto br = mlir::dyn_cast<mlir::BranchOpInterface>(op)) {
+        // Exclude successor operands; expose only "regular" (non-forwarded)
+        // operands so the API matches the native backend convention.
+        size_t total = op->getNumOperands();
+        for (unsigned s = 0; s < op->getNumSuccessors(); s++) {
+            total -= br.getSuccessorOperands(s).size();
+        }
+        return total;
+    }
+    return op->getNumOperands();
 }
 extern "C" MLIR_ValueHandle MLIR_GetOpOperand(MLIR_OpHandle h, size_t i) {
     return H(boxFor(F<mlir::Operation>(h)->getOperand(i)));

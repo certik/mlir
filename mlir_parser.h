@@ -65,6 +65,11 @@ typedef struct ScopedSymbolTable {
 #define LocationMap_EQUAL string_equal
 DEFINE_HASHTABLE_FOR_TYPES(string, MLIR_LocationHandle, LocationMap)
 
+// Per-region map from block label (e.g. "^bb1") to MLIR_BlockHandle
+#define BlockLabelMap_HASH string_hash
+#define BlockLabelMap_EQUAL string_equal
+DEFINE_HASHTABLE_FOR_TYPES(string, MLIR_BlockHandle, BlockLabelMap)
+
 
 typedef struct {
     MLIR_Context *ctx;
@@ -79,6 +84,10 @@ typedef struct {
     MLIR_LocationHandle unnumbered_loc_def; // Optional: definition of unnumbered '#loc' at file start
     // Parsing mode flag to enable robust trailing comment capture in special contexts
     bool capture_trailing_comments;
+    // Stack of per-region block-by-label maps for forward-reference handling.
+    BlockLabelMap *block_label_stack;
+    size_t block_label_depth;
+    size_t block_label_capacity;
 } Parser;
 
 
@@ -89,6 +98,11 @@ void symbol_table_push_scope(Arena *arena, ScopedSymbolTable *st);
 void symbol_table_pop_scope(ScopedSymbolTable *st);
 void symbol_table_add_value(Arena *arena, ScopedSymbolTable *st, string name, MLIR_ValueHandle value);
 MLIR_ValueHandle symbol_table_lookup(ScopedSymbolTable *st, string name);
+
+// Block-by-label helpers (used by branch parsers + parse_block).
+void parser_push_region_blocks(Parser *parser);
+void parser_pop_region_blocks(Parser *parser);
+MLIR_BlockHandle parser_get_or_create_block(Parser *parser, string label);
 
 // Forward declarations for core IR nodes (opaque here)
 // Specialized parsing functions

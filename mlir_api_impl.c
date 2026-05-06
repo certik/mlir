@@ -127,6 +127,10 @@ typedef struct IR_Op {
     uint64_t n_attributes;
     MLIR_RegionHandle *regions;
     uint64_t n_regions;
+    MLIR_BlockHandle *successors;
+    uint64_t n_successors;
+    MLIR_ValueHandle **successor_operands;
+    uint64_t *n_successor_operands;
     string opname;
     MLIR_ValueHandle *results;
     uint64_t n_results;
@@ -141,6 +145,7 @@ typedef struct IR_Block {
     uint64_t n_operations;
     MLIR_ValueHandle *arguments;
     uint64_t n_arguments;
+    MLIR_RegionHandle parent_region;
 } IR_Block;
 
 typedef struct IR_Region {
@@ -241,7 +246,7 @@ Arena *MLIR_GetArenaAllocator(MLIR_Context *ctx) {
 }
 
 // Operation creation
-MLIR_OpHandle MLIR_CreateOp(
+MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     MLIR_Context *ctx,
     MLIR_OpType type,
     string opname,
@@ -250,6 +255,9 @@ MLIR_OpHandle MLIR_CreateOp(
     MLIR_ValueHandle *results, size_t n_results,
     MLIR_ValueHandle *operands, size_t n_operands,
     MLIR_RegionHandle *regions, size_t n_regions,
+    MLIR_BlockHandle *successors, size_t n_successors,
+    MLIR_ValueHandle **successor_operands,
+    size_t *n_successor_operands,
     MLIR_LocationHandle location,
     MLIR_LocationHandle unnumbered_loc_def,
     string trailing_comment,
@@ -268,6 +276,29 @@ MLIR_OpHandle MLIR_CreateOp(
     op.n_operands = n_operands;
     op.regions = regions;
     op.n_regions = n_regions;
+    if (n_successors > 0 && successors) {
+        MLIR_BlockHandle *s_copy = arena_new_array(ctx->arena, MLIR_BlockHandle, n_successors);
+        memcpy(s_copy, successors, n_successors * sizeof(MLIR_BlockHandle));
+        op.successors = s_copy;
+        op.n_successors = n_successors;
+        if (successor_operands && n_successor_operands) {
+            uint64_t *nso = arena_new_array(ctx->arena, uint64_t, n_successors);
+            MLIR_ValueHandle **sop = arena_new_array(ctx->arena, MLIR_ValueHandle *, n_successors);
+            for (size_t s = 0; s < n_successors; s++) {
+                size_t k = n_successor_operands[s];
+                nso[s] = k;
+                if (k > 0) {
+                    MLIR_ValueHandle *vs = arena_new_array(ctx->arena, MLIR_ValueHandle, k);
+                    memcpy(vs, successor_operands[s], k * sizeof(MLIR_ValueHandle));
+                    sop[s] = vs;
+                } else {
+                    sop[s] = NULL;
+                }
+            }
+            op.successor_operands = sop;
+            op.n_successor_operands = nso;
+        }
+    }
     op.location = location;
     op.unnumbered_loc_def = unnumbered_loc_def;
     op.trailing_comment = trailing_comment;
@@ -280,7 +311,6 @@ MLIR_OpHandle MLIR_CreateOp(
         IR_Value *v = resolve_value(results[i]);
         if (v) {
             v->def_handle = handle;
-            // Auto-sync type from result_types if not already set
             if (i < n_result_types && result_types[i] != MLIR_INVALID_HANDLE && v->type == MLIR_INVALID_HANDLE) {
                 v->type = result_types[i];
             }
@@ -288,6 +318,30 @@ MLIR_OpHandle MLIR_CreateOp(
     }
 
     return handle;
+}
+
+MLIR_OpHandle MLIR_CreateOp(
+    MLIR_Context *ctx,
+    MLIR_OpType type,
+    string opname,
+    MLIR_AttributeHandle *attributes, size_t n_attributes,
+    MLIR_TypeHandle *result_types, size_t n_result_types,
+    MLIR_ValueHandle *results, size_t n_results,
+    MLIR_ValueHandle *operands, size_t n_operands,
+    MLIR_RegionHandle *regions, size_t n_regions,
+    MLIR_LocationHandle location,
+    MLIR_LocationHandle unnumbered_loc_def,
+    string trailing_comment,
+    int64_t source_line_start) {
+    return MLIR_CreateOpWithSuccessors(
+        ctx, type, opname,
+        attributes, n_attributes,
+        result_types, n_result_types,
+        results, n_results,
+        operands, n_operands,
+        regions, n_regions,
+        NULL, 0, NULL, NULL,
+        location, unnumbered_loc_def, trailing_comment, source_line_start);
 }
 
 void MLIR_AppendBlockOp(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHandle op) {
@@ -325,6 +379,8 @@ void MLIR_AppendRegionBlock(MLIR_Context *ctx, MLIR_RegionHandle rh, MLIR_BlockH
     new_blocks[region->n_blocks] = block;
     region->blocks = new_blocks;
     region->n_blocks++;
+    IR_Block *b = resolve_block(block);
+    if (b) b->parent_region = rh;
 }
 
 size_t MLIR_GetRegionNumBlocks(MLIR_RegionHandle rh) {
@@ -432,10 +488,26 @@ MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle oh, size_t idx) {
 // Native backend doesn't track successors/successor-operands separately;
 // the classic parser stores _target/_ntrue/_nfalse + interleaves operands.
 // Return 0/invalid so the printer falls back to its attribute-based path.
-size_t MLIR_GetOpNumSuccessors(MLIR_OpHandle oh) { (void)oh; return 0; }
-MLIR_BlockHandle MLIR_GetOpSuccessor(MLIR_OpHandle oh, size_t idx) { (void)oh; (void)idx; return MLIR_INVALID_HANDLE; }
-size_t MLIR_GetOpNumSuccessorOperands(MLIR_OpHandle oh, size_t s) { (void)oh; (void)s; return 0; }
-MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_OpHandle oh, size_t s, size_t i) { (void)oh; (void)s; (void)i; return MLIR_INVALID_HANDLE; }
+size_t MLIR_GetOpNumSuccessors(MLIR_OpHandle oh) {
+    IR_Op *op = resolve_op(oh);
+    return op ? op->n_successors : 0;
+}
+MLIR_BlockHandle MLIR_GetOpSuccessor(MLIR_OpHandle oh, size_t idx) {
+    IR_Op *op = resolve_op(oh);
+    if (!op || idx >= op->n_successors) return MLIR_INVALID_HANDLE;
+    return op->successors[idx];
+}
+size_t MLIR_GetOpNumSuccessorOperands(MLIR_OpHandle oh, size_t s) {
+    IR_Op *op = resolve_op(oh);
+    if (!op || s >= op->n_successors || !op->n_successor_operands) return 0;
+    return (size_t)op->n_successor_operands[s];
+}
+MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_OpHandle oh, size_t s, size_t i) {
+    IR_Op *op = resolve_op(oh);
+    if (!op || s >= op->n_successors || !op->successor_operands) return MLIR_INVALID_HANDLE;
+    if (i >= (size_t)op->n_successor_operands[s]) return MLIR_INVALID_HANDLE;
+    return op->successor_operands[s][i];
+}
 
 size_t MLIR_GetBlockNumArgs(MLIR_BlockHandle bh) {
     IR_Block *b = resolve_block(bh);
@@ -448,7 +520,16 @@ MLIR_ValueHandle MLIR_GetBlockArg(MLIR_BlockHandle bh, size_t idx) {
     return b->arguments[idx];
 }
 
-size_t MLIR_GetBlockIndex(MLIR_BlockHandle bh) { (void)bh; return (size_t)-1; }
+size_t MLIR_GetBlockIndex(MLIR_BlockHandle bh) {
+    IR_Block *b = resolve_block(bh);
+    if (!b) return (size_t)-1;
+    IR_Region *r = resolve_region(b->parent_region);
+    if (!r) return (size_t)-1;
+    for (size_t i = 0; i < r->n_blocks; i++) {
+        if (r->blocks[i] == bh) return i;
+    }
+    return (size_t)-1;
+}
 
 MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle vh) {
     IR_Value *v = resolve_value(vh);
