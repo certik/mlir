@@ -1,6 +1,6 @@
 module {
-  func.func @avg(: memref<10x20xf32>, : memref<10x20xf32>) -> memref<10x20xf32> {
-    %0 = memref.alloc() : memref<10x20xf32> {operandSegmentSizes = ...}
+  func.func @avg(%arg0: memref<10x20xf32>, %arg1: memref<10x20xf32>) -> memref<10x20xf32> {
+    %0 = memref.alloc() : memref<10x20xf32>
     %1 = arith.constant 0 : index
     %2 = arith.constant 10 : index
     %3 = arith.constant 1 : index
@@ -11,7 +11,7 @@ module {
       scf.for %11 = %4 to %5 step %6  : index {
         %7 = memref.load %12[%10, %11] : memref<10x20xf32>
         %8 = memref.load %13[%10, %11] : memref<10x20xf32>
-        %9 = arith.addf %7, %8 : f32 {fastmath = ...}
+        %9 = arith.addf %7, %8 : f32
         memref.store %9, %0[%10, %11] : memref<10x20xf32>
         scf.yield
       }

@@ -6,7 +6,7 @@ module {
     %3 = arith.constant 0 : i64
     %4 = arith.cmpi slt, %2, %3 : i64
     %5 = arith.constant false
-    cf.cond_br %4, ^bb1, ^bb2 {operandSegmentSizes = ...}
+    cf.cond_br %4, ^bb1, ^bb2
   ^bb1:
     %6 = call @unknown() : () -> i64
     %7 = arith.constant 0 : i64
@@ -16,7 +16,7 @@ module {
     %9 = arith.extui %67 : i1 to i64
     %10 = arith.constant 0 : i64
     %11 = arith.cmpi slt, %9, %10 : i64
-    cf.cond_br %11, ^bb1, ^bb2 {operandSegmentSizes = ...}
+    cf.cond_br %11, ^bb1, ^bb2
   ^bb3:
     %12 = arith.constant 1 : i64
     return %12 : i64
@@ -25,7 +25,7 @@ module {
   ^bb5:
     %13 = arith.constant 0 : i64
     %14 = arith.cmpi slt, %68, %13 : i64
-    cf.cond_br %14, ^bb1, ^bb2 {operandSegmentSizes = ...}
+    cf.cond_br %14, ^bb1, ^bb2
   ^bb6:
     %15 = arith.constant 2 : i64
     return %15 : i64
@@ -36,7 +36,7 @@ module {
     %17 = arith.constant 0 : i64
     %18 = arith.cmpi slt, %16, %17 : i64
     %19 = arith.constant false
-    cf.cond_br %18, ^bb1, ^bb2 {operandSegmentSizes = ...}
+    cf.cond_br %18, ^bb1, ^bb2
   ^bb9:
     %20 = call @unknown() : () -> i64
     %21 = arith.constant 0 : i64
@@ -46,14 +46,14 @@ module {
     %23 = arith.extui %69 : i1 to i64
     %24 = arith.constant 0 : i64
     %25 = arith.cmpi slt, %23, %24 : i64
-    cf.cond_br %25, ^bb1, ^bb2 {operandSegmentSizes = ...}
+    cf.cond_br %25, ^bb1, ^bb2
   ^bb11:
     %26 = arith.constant 1 : i64
     %27 = arith.cmpi slt, %70, %26 : i64
     %28 = arith.extui %27 : i1 to i64
     %29 = arith.constant 0 : i64
     %30 = arith.cmpi slt, %28, %29 : i64
-    cf.cond_br %30, ^bb1, ^bb2 {operandSegmentSizes = ...}
+    cf.cond_br %30, ^bb1, ^bb2
   ^bb12:
     %31 = arith.constant 3 : i64
     return %31 : i64
@@ -70,7 +70,7 @@ module {
     %35 = arith.constant 0 : i64
     %36 = arith.cmpi slt, %34, %35 : i64
     %37 = arith.constant true
-    cf.cond_br %36, ^bb1, ^bb2 {operandSegmentSizes = ...}
+    cf.cond_br %36, ^bb1, ^bb2
   ^bb17:
     %38 = call @unknown() : () -> i64
     %39 = arith.constant 0 : i64
@@ -80,11 +80,11 @@ module {
     %41 = arith.extui %71 : i1 to i64
     %42 = arith.constant 0 : i64
     %43 = arith.cmpi slt, %41, %42 : i64
-    cf.cond_br %43, ^bb1, ^bb2 {operandSegmentSizes = ...}
+    cf.cond_br %43, ^bb1, ^bb2
   ^bb19:
     %44 = arith.constant 0 : i64
     %45 = arith.cmpi slt, %72, %44 : i64
-    cf.cond_br %45, ^bb1, ^bb2 {operandSegmentSizes = ...}
+    cf.cond_br %45, ^bb1, ^bb2
   ^bb20:
     %46 = arith.constant 5 : i64
     return %46 : i64
@@ -100,7 +100,7 @@ module {
     %49 = arith.constant 0 : i64
     %50 = arith.cmpi slt, %48, %49 : i64
     %51 = arith.constant true
-    cf.cond_br %50, ^bb1, ^bb2 {operandSegmentSizes = ...}
+    cf.cond_br %50, ^bb1, ^bb2
   ^bb25:
     %52 = call @unknown() : () -> i64
     %53 = arith.constant 0 : i64
@@ -110,14 +110,14 @@ module {
     %55 = arith.extui %73 : i1 to i64
     %56 = arith.constant 0 : i64
     %57 = arith.cmpi slt, %55, %56 : i64
-    cf.cond_br %57, ^bb1, ^bb2 {operandSegmentSizes = ...}
+    cf.cond_br %57, ^bb1, ^bb2
   ^bb27:
     %58 = arith.constant 1 : i64
     %59 = arith.cmpi slt, %74, %58 : i64
     %60 = arith.extui %59 : i1 to i64
     %61 = arith.constant 0 : i64
     %62 = arith.cmpi slt, %60, %61 : i64
-    cf.cond_br %62, ^bb1, ^bb2 {operandSegmentSizes = ...}
+    cf.cond_br %62, ^bb1, ^bb2
   ^bb28:
     %63 = arith.constant 7 : i64
     return %63 : i64

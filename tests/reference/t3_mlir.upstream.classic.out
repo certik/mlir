@@ -1,22 +1,22 @@
 module {
-  func.func @avg(: memref<10x20xf32>, : memref<10x20xf32>) -> memref<10x20xf32> {
-    %0 = memref.alloc() : memref<10x20xf32> {operandSegmentSizes = ...}
+  func.func @avg(%arg0: memref<10x20xf32>, %arg1: memref<10x20xf32>) -> memref<10x20xf32> {
+    %0 = memref.alloc() : memref<10x20xf32>
     %1 = arith.constant 0 : index
     %2 = arith.constant 10 : index
-    %3 = arith.subi %2, %1 : index {overflowFlags = ...}
+    %3 = arith.subi %2, %1 : index
     %4 = arith.constant 1 : index
     %5 = arith.constant 0 : index
     %6 = arith.constant 20 : index
-    %7 = arith.subi %6, %5 : index {overflowFlags = ...}
+    %7 = arith.subi %6, %5 : index
     %8 = arith.constant 1 : index
     %9 = arith.constant 1 : index
-    gpu.launch %3, %9, %9, %7, %9, %9 : index, index, index, index, index, index {operandSegmentSizes = ..., workgroup_attributions = 0 : i32} {
+    gpu.launch %3, %9, %9, %7, %9, %9 : index, index, index, index, index, index {workgroup_attributions = 0 : i32} {
     ^bb0(%arg0: index loc(-:16:27), %arg1: index loc(-:16:34), %arg2: index loc(-:16:41), %arg3: index loc(-:16:103), %arg4: index loc(-:16:110), %arg5: index loc(-:16:117), %arg6: index loc(-:16:52), %arg7: index loc(-:16:64), %arg8: index loc(-:16:79), %arg9: index loc(-:16:128), %arg10: index loc(-:16:141), %arg11: index loc(-:16:157)):
-      %10 = arith.addi %1, %15 : index {overflowFlags = ...}
-      %11 = arith.addi %5, %16 : index {overflowFlags = ...}
+      %10 = arith.addi %1, %15 : index
+      %11 = arith.addi %5, %16 : index
       %12 = memref.load %17[%10, %11] : memref<10x20xf32>
       %13 = memref.load %18[%10, %11] : memref<10x20xf32>
-      %14 = arith.addf %12, %13 : f32 {fastmath = ...}
+      %14 = arith.addf %12, %13 : f32
       memref.store %12, %0[%10, %11] : memref<10x20xf32>
       "gpu.terminator"
     }

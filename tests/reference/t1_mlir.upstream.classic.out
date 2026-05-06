@@ -1,13 +1,13 @@
 module {
-  func.func @matrix_add(: memref<10x20xf32>, : memref<10x20xf32>) -> memref<10x20xf32> {
-    %0 = memref.alloc() : memref<10x20xf32> {operandSegmentSizes = ...}
-    affine.for {lowerBoundMap = ..., operandSegmentSizes = ..., step = 1 : i32, upperBoundMap = ...} {
+  func.func @matrix_add(%arg0: memref<10x20xf32>, %arg1: memref<10x20xf32>) -> memref<10x20xf32> {
+    %0 = memref.alloc() : memref<10x20xf32>
+    affine.for {lowerBoundMap = ..., step = 1 : i32, upperBoundMap = ...} {
     ^bb0(%arg0: index loc(-:6:13)):
-      affine.for {lowerBoundMap = ..., operandSegmentSizes = ..., step = 1 : i32, upperBoundMap = ...} {
+      affine.for {lowerBoundMap = ..., step = 1 : i32, upperBoundMap = ...} {
       ^bb0(%arg0: index loc(-:7:14)):
         %1 = memref.load %4[%5, %6] : memref<10x20xf32>
         %2 = memref.load %7[%5, %6] : memref<10x20xf32>
-        %3 = arith.addf %1, %2 : f32 {fastmath = ...}
+        %3 = arith.addf %1, %2 : f32
         memref.store %3, %0[%5, %6] : memref<10x20xf32>
         "affine.yield"
       }

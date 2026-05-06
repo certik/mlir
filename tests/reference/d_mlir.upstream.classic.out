@@ -1,5 +1,5 @@
 module {
-  func.func @tensor_i16(: tensor<10xi16>) -> i16 {
+  func.func @tensor_i16(%arg0: tensor<10xi16>) -> i16 {
     %0 = arith.constant 0 : i16
     return %0 : i16
   }
@@ -11,8 +11,8 @@ module {
     %5 = arith.constant true
     %6 = arith.constant 0 : i16
     %7 = arith.constant 1 : i16
-    %8 = memref.alloc() : memref<24xi16> {operandSegmentSizes = ...}
-    linalg.fill %6, %8 : i16 {operandSegmentSizes = ...} {
+    %8 = memref.alloc() : memref<24xi16>
+    linalg.fill %6, %8 : i16 {
     ^bb0(%arg0: i16, %arg1: i16):
       "linalg.yield" %23 : i16
     }
@@ -24,7 +24,7 @@ module {
       scf.yield %10 : tensor<5x2xi16>
     }
     %12 = tensor.splat %7, %4, %3 : tensor<?x?xi16>
-    %13 = "linalg.copy" %12, %10 : tensor<5x2xi16> {operandSegmentSizes = ...} {
+    %13 = "linalg.copy" %12, %10 : tensor<5x2xi16> {
     ^bb0(%arg0: i16, %arg1: i16):
       "linalg.yield" %24 : i16
     }
@@ -32,7 +32,7 @@ module {
     %15 = index.constant : index {value = 10 : i32}
     %18 = scf.for %25 = %1 to %15 step %2 iter_args(%26 = %6) -> (i16)  : index {
       %16 = tensor.extract %14, %25 : i16
-      %17 = arith.addi %26, %16 : i16 {overflowFlags = ...}
+      %17 = arith.addi %26, %16 : i16
       vector.print %16 : i16 {punctuation = ...}
       scf.yield %17 : i16
     }
