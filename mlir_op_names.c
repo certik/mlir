@@ -45,6 +45,8 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_ARITH_SELECT: return str_lit("arith.select");
         case OP_TYPE_ARITH_BITCAST: return str_lit("arith.bitcast");
         case OP_TYPE_ARITH_SITOFP: return str_lit("arith.sitofp");
+        case OP_TYPE_ARITH_FPTOSI: return str_lit("arith.fptosi");
+        case OP_TYPE_ARITH_INDEX_CAST: return str_lit("arith.index_cast");
         case OP_TYPE_ARITH_EXTSI: return str_lit("arith.extsi");
         case OP_TYPE_ARITH_TRUNCI: return str_lit("arith.trunci");
         case OP_TYPE_ARITH_EXTF: return str_lit("arith.extf");

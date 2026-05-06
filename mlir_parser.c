@@ -302,6 +302,10 @@ MLIR_OpType op_string_to_type(string opname) {
         return OP_TYPE_ARITH_BITCAST;
     } else if (str_eq(opname, str_lit("arith.sitofp"))) {
         return OP_TYPE_ARITH_SITOFP;
+    } else if (str_eq(opname, str_lit("arith.fptosi"))) {
+        return OP_TYPE_ARITH_FPTOSI;
+    } else if (str_eq(opname, str_lit("arith.index_cast"))) {
+        return OP_TYPE_ARITH_INDEX_CAST;
     } else if (str_eq(opname, str_lit("arith.extsi"))) {
         return OP_TYPE_ARITH_EXTSI;
     } else if (str_eq(opname, str_lit("arith.trunci"))) {

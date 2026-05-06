@@ -278,7 +278,7 @@ static MLIR_ValueHandle emit_index_cast(E *e, MLIR_ValueHandle i32_val) {
     MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->index;
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
     MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = i32_val;
-    emit_op(e, OP_TYPE_UNREGISTERED, str_lit("arith.index_cast"),
+    emit_op(e, OP_TYPE_ARITH_INDEX_CAST, str_lit("arith.index_cast"),
             rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
     return r;
 }
@@ -341,7 +341,7 @@ static MLIR_ValueHandle emit_expr_i32(E *e, Scope *sc, Expr *ex) {
         MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i32;
         MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
         MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = v.val;
-        emit_op(e, OP_TYPE_UNREGISTERED, str_lit("arith.fptosi"),
+        emit_op(e, OP_TYPE_ARITH_FPTOSI, str_lit("arith.fptosi"),
                 rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
         return r;
     }
@@ -507,7 +507,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i32;
                 MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = nr;
                 MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = v.val;
-                emit_op(e, OP_TYPE_UNREGISTERED, str_lit("arith.fptosi"),
+                emit_op(e, OP_TYPE_ARITH_FPTOSI, str_lit("arith.fptosi"),
                         rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
                 v.val = nr; v.is_float = false;
             }

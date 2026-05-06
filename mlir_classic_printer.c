@@ -1939,6 +1939,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
             // Before generic/default printing, handle a few named ops specially:
             if (MLIR_GetOpType(op) == OP_TYPE_ARITH_BITCAST || MLIR_GetOpType(op) == OP_TYPE_ARITH_SITOFP ||
+                MLIR_GetOpType(op) == OP_TYPE_ARITH_FPTOSI || MLIR_GetOpType(op) == OP_TYPE_ARITH_INDEX_CAST ||
                 MLIR_GetOpType(op) == OP_TYPE_ARITH_EXTSI || MLIR_GetOpType(op) == OP_TYPE_ARITH_TRUNCI ||
                 MLIR_GetOpType(op) == OP_TYPE_ARITH_EXTF || MLIR_GetOpType(op) == OP_TYPE_ARITH_TRUNCF) {
                 // op name
