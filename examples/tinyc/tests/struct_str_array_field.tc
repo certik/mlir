@@ -1,0 +1,23 @@
+// Struct with an array of char* fields, populated from string literals.
+
+struct StrTable {
+    char* names[3];
+};
+
+int main() {
+    struct StrTable t;
+    t.names[0] = "alpha";
+    t.names[1] = "beta";
+    t.names[2] = "gamma";
+
+    int i = 0;
+    while (i < 3) {
+        print(t.names[i]);
+        i = i + 1;
+    }
+
+    // Reassign one slot.
+    t.names[1] = "BETA!";
+    print(t.names[1]);
+    return 0;
+}

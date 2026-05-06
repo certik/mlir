@@ -97,7 +97,11 @@ typedef enum {
     TY_F32,
     TY_PTR_I32,        // alias-only pointer to int
     TY_PTR_CHAR,       // pointer to char (string literals / globals)
-    TY_ARRAY_I32,      // fixed-size int[N], length in `array_len`
+    TY_ARRAY_I32,      // fixed-size int[N] / int[N][M] (length(s) in array_len[2])
+    TY_ARRAY_F32,      // fixed-size float[N] / float[N][M] (struct field only)
+    TY_ARRAY_PTR_STRUCT, // fixed-size (struct T*)[N] (struct field only;
+                       // struct_name carries T)
+    TY_ARRAY_PTR_CHAR, // fixed-size (char*)[N] (struct field only)
     TY_STRUCT,         // struct value (fields stored as flat per-leaf scalars)
     TY_PTR_STRUCT,     // alias-only pointer to struct (bundle of memref aliases)
     TY_ARRAY_STRUCT,   // fixed-size struct[N], length in `array_len`
@@ -258,8 +262,12 @@ DEFINE_VECTOR_FOR_TYPE(Func*, VecFuncPtr)
 typedef struct {
     string name;
     Type   type;        // field type. May be TY_I32, TY_F32, TY_STRUCT
-                        // (nested by-value struct), or TY_PTR_STRUCT
-                        // (pointer to struct, possibly self-referencing).
+                        // (nested by-value struct), TY_PTR_STRUCT
+                        // (pointer to struct, possibly self-referencing),
+                        // TY_PTR_CHAR (char*), or one of the array kinds:
+                        // TY_ARRAY_I32 (1D / 2D int), TY_ARRAY_F32 (1D / 2D
+                        // float), TY_ARRAY_PTR_STRUCT (struct T*[N]),
+                        // TY_ARRAY_PTR_CHAR (char*[N]).
                         // TY_ARRAY_STRUCT is not allowed in fields yet.
 } StructField;
 

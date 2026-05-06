@@ -1,0 +1,45 @@
+// Struct with an array of struct pointers. Fills items with stack node
+// addresses and reads back items[i]->v.
+
+struct Node {
+    int v;
+    struct Node* next;
+};
+
+struct Pool {
+    int count;
+    struct Node* items[4];
+};
+
+int main() {
+    struct Node a;
+    struct Node b;
+    struct Node c;
+    struct Node d;
+    a.v = 10; a.next = null;
+    b.v = 20; b.next = null;
+    c.v = 30; c.next = null;
+    d.v = 40; d.next = null;
+
+    struct Pool p;
+    p.count = 4;
+    p.items[0] = &a;
+    p.items[1] = &b;
+    p.items[2] = &c;
+    p.items[3] = &d;
+
+    int total = 0;
+    int i = 0;
+    while (i < p.count) {
+        print(p.items[i]->v);
+        total = total + p.items[i]->v;
+        i = i + 1;
+    }
+    print(total);                 // 100
+
+    // Reassign one slot and verify.
+    p.items[2] = &a;
+    print(p.items[2]->v);         // 10
+
+    return 0;
+}

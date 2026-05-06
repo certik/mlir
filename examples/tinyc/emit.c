@@ -780,6 +780,79 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
             return r;
         }
         case EX_INDEX: {
+            // Struct field array: s.f[i] / p->f[i] (1D) or s.f[i][j] (2D),
+            // including chained walks like arr[k].f[i] (parent.dyn_index
+            // is non-INVALID then). Emit a single GEP that descends from
+            // the parent struct's source_elem all the way to the scalar
+            // (or pointer) leaf.
+            Expr *field_expr = NULL;
+            Expr *idx_a = NULL, *idx_b = NULL;
+            if (ex->lhs->kind == EX_FIELD) {
+                field_expr = ex->lhs;
+                idx_a = ex->rhs;
+            } else if (ex->lhs->kind == EX_INDEX &&
+                       ex->lhs->lhs->kind == EX_FIELD) {
+                field_expr = ex->lhs->lhs;
+                idx_a = ex->lhs->rhs;
+                idx_b = ex->rhs;
+            }
+            if (field_expr) {
+                SCtx parent = walk_struct_lhs(e, sc, field_expr->lhs);
+                if (parent.ok) {
+                    int fidx = struct_field_index(parent.sd, field_expr->name);
+                    if (fidx < 0) {
+                        println(str_lit("tinyc emit: unknown struct field {}"),
+                                field_expr->name);
+                        return r;
+                    }
+                    Type ft = parent.sd->fields.data[fidx].type;
+                    bool is_arr_i32 = (ft.kind == TY_ARRAY_I32);
+                    bool is_arr_f32 = (ft.kind == TY_ARRAY_F32);
+                    bool is_arr_pst = (ft.kind == TY_ARRAY_PTR_STRUCT);
+                    bool is_arr_pch = (ft.kind == TY_ARRAY_PTR_CHAR);
+                    if (is_arr_i32 || is_arr_f32 || is_arr_pst || is_arr_pch) {
+                        bool is_2d = (ft.array_len2 != 0);
+                        if (is_2d && !idx_b) {
+                            println(str_lit("tinyc emit: 2D field array requires both indices, e.g. s.m[i][j]"));
+                            return r;
+                        }
+                        if (!is_2d && idx_b) {
+                            println(str_lit("tinyc emit: 1D field array indexed twice"));
+                            return r;
+                        }
+                        if ((is_arr_pst || is_arr_pch) && is_2d) {
+                            println(str_lit("tinyc emit: 2D pointer-array fields are not supported"));
+                            return r;
+                        }
+                        MLIR_TypeHandle elem = is_arr_f32 ? e->f32
+                                              : (is_arr_pst || is_arr_pch) ? e->ptr
+                                              : e->i32;
+                        MLIR_ValueHandle iv = emit_expr_i32(e, sc, idx_a);
+                        MLIR_ValueHandle jv = is_2d ? emit_expr_i32(e, sc, idx_b)
+                                                   : MLIR_INVALID_HANDLE;
+                        size_t parent_n = parent.n_const_path;
+                        size_t extra = 1 + (is_2d ? 2 : 1);
+                        size_t total = parent_n + extra;
+                        int32_t *path = arena_new_array(e->arena, int32_t, total);
+                        for (size_t k = 0; k < parent_n; k++) path[k] = parent.const_path[k];
+                        path[parent_n] = (int32_t)fidx;
+                        path[parent_n + 1] = LLVM_GEP_DYN;
+                        if (is_2d) path[parent_n + 2] = LLVM_GEP_DYN;
+                        size_t n_dyn = (parent.dyn_index != MLIR_INVALID_HANDLE ? 1 : 0)
+                                     + 1 + (is_2d ? 1 : 0);
+                        MLIR_ValueHandle *dyn = arena_new_array(e->arena, MLIR_ValueHandle, n_dyn);
+                        size_t di = 0;
+                        if (parent.dyn_index != MLIR_INVALID_HANDLE) dyn[di++] = parent.dyn_index;
+                        dyn[di++] = iv;
+                        if (is_2d) dyn[di++] = jv;
+                        MLIR_ValueHandle gep = emit_gep(e, parent.base_ptr,
+                            parent.source_elem, path, total, dyn, n_dyn);
+                        r.base_ptr = gep;
+                        r.elem_ty = elem;
+                        return r;
+                    }
+                }
+            }
             // Multi-dim array: m[i][j] for `int m[N1][N2];`.
             if (ex->lhs->kind == EX_INDEX &&
                 ex->lhs->lhs->kind == EX_VAR) {
@@ -959,11 +1032,35 @@ static void emit_struct_copy_path(E *e, MLIR_ValueHandle dst, MLIR_ValueHandle s
         if (ft.kind == TY_STRUCT) {
             StructDef *inner = find_struct(e, ft.struct_name);
             emit_struct_copy_path(e, dst, src, source_elem, inner, path, n_path);
-        } else if (ft.kind == TY_PTR_STRUCT) {
+        } else if (ft.kind == TY_PTR_STRUCT || ft.kind == TY_PTR_I32 ||
+                   ft.kind == TY_PTR_CHAR) {
             MLIR_ValueHandle sp = emit_gep(e, src, source_elem, path, n_path, NULL, 0);
             MLIR_ValueHandle val = emit_load_v(e, sp, e->ptr);
             MLIR_ValueHandle dp = emit_gep(e, dst, source_elem, path, n_path, NULL, 0);
             emit_store_v(e, val, dp);
+        } else if (ft.kind == TY_ARRAY_I32 || ft.kind == TY_ARRAY_F32 ||
+                   ft.kind == TY_ARRAY_PTR_STRUCT || ft.kind == TY_ARRAY_PTR_CHAR) {
+            bool is_2d = (ft.array_len2 != 0);
+            int64_t n1 = ft.array_len;
+            int64_t n2 = is_2d ? ft.array_len2 : 1;
+            MLIR_TypeHandle elem;
+            if (ft.kind == TY_ARRAY_F32) elem = e->f32;
+            else if (ft.kind == TY_ARRAY_PTR_STRUCT || ft.kind == TY_ARRAY_PTR_CHAR) elem = e->ptr;
+            else elem = e->i32;
+            for (int64_t a = 0; a < n1; a++) {
+                for (int64_t b = 0; b < n2; b++) {
+                    size_t inner_n = is_2d ? 2 : 1;
+                    size_t total = n_path + inner_n;
+                    int32_t *p2 = arena_new_array(e->arena, int32_t, total);
+                    for (size_t kk = 0; kk < n_path; kk++) p2[kk] = path[kk];
+                    p2[n_path] = (int32_t)a;
+                    if (is_2d) p2[n_path + 1] = (int32_t)b;
+                    MLIR_ValueHandle sp = emit_gep(e, src, source_elem, p2, total, NULL, 0);
+                    MLIR_ValueHandle val = emit_load_v(e, sp, elem);
+                    MLIR_ValueHandle dp = emit_gep(e, dst, source_elem, p2, total, NULL, 0);
+                    emit_store_v(e, val, dp);
+                }
+            }
         } else {
             MLIR_TypeHandle elem = scalar_mlir_type(e, ft.kind);
             MLIR_ValueHandle sp = emit_gep(e, src, source_elem, path, n_path, NULL, 0);
@@ -1234,6 +1331,29 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                             Type ft = parent.sd->fields.data[fidx].type;
                             if (ft.kind == TY_PTR_STRUCT) {
                                 v.sdef = find_struct(e, ft.struct_name);
+                            }
+                        }
+                    }
+                } else if (ex->kind == EX_INDEX) {
+                    // Reading an element of a struct-field array of
+                    // pointers: tag the result so downstream consumers
+                    // (print(), -> chains) see the right element kind.
+                    Expr *fe = NULL;
+                    if (ex->lhs->kind == EX_FIELD) fe = ex->lhs;
+                    else if (ex->lhs->kind == EX_INDEX &&
+                             ex->lhs->lhs->kind == EX_FIELD) fe = ex->lhs->lhs;
+                    if (fe) {
+                        SCtx parent = walk_struct_lhs(e, sc, fe->lhs);
+                        if (parent.ok) {
+                            int fidx = struct_field_index(parent.sd, fe->name);
+                            if (fidx >= 0) {
+                                Type ft = parent.sd->fields.data[fidx].type;
+                                if (ft.kind == TY_ARRAY_PTR_CHAR) {
+                                    v.is_str = true;
+                                    v.ptr_elem = e->i8;
+                                } else if (ft.kind == TY_ARRAY_PTR_STRUCT) {
+                                    v.sdef = find_struct(e, ft.struct_name);
+                                }
                             }
                         }
                     }
@@ -1659,9 +1779,34 @@ static void emit_struct_zero(E *e, MLIR_ValueHandle base, MLIR_TypeHandle source
         if (ft.kind == TY_STRUCT) {
             StructDef *inner = find_struct(e, ft.struct_name);
             emit_struct_zero(e, base, source_elem, inner, path, n_path);
-        } else if (ft.kind == TY_PTR_STRUCT) {
+        } else if (ft.kind == TY_PTR_STRUCT || ft.kind == TY_PTR_I32 ||
+                   ft.kind == TY_PTR_CHAR) {
             MLIR_ValueHandle p = emit_gep(e, base, source_elem, path, n_path, NULL, 0);
             emit_store_v(e, emit_null_ptr(e), p);
+        } else if (ft.kind == TY_ARRAY_I32 || ft.kind == TY_ARRAY_F32 ||
+                   ft.kind == TY_ARRAY_PTR_STRUCT || ft.kind == TY_ARRAY_PTR_CHAR) {
+            // Zero each element with explicit GEPs. Cheap and avoids
+            // reaching for llvm.memset.
+            bool is_2d = (ft.array_len2 != 0);
+            int64_t n1 = ft.array_len;
+            int64_t n2 = is_2d ? ft.array_len2 : 1;
+            MLIR_ValueHandle z;
+            if (ft.kind == TY_ARRAY_F32) { z = emit_const_f32(e, 0.0); }
+            else if (ft.kind == TY_ARRAY_PTR_STRUCT || ft.kind == TY_ARRAY_PTR_CHAR) {
+                z = emit_null_ptr(e);
+            } else { z = emit_const_i32(e, 0); }
+            for (int64_t a = 0; a < n1; a++) {
+                for (int64_t b = 0; b < n2; b++) {
+                    size_t inner_n = is_2d ? 2 : 1;
+                    size_t total = n_path + inner_n;
+                    int32_t *p2 = arena_new_array(e->arena, int32_t, total);
+                    for (size_t kk = 0; kk < n_path; kk++) p2[kk] = path[kk];
+                    p2[n_path] = (int32_t)a;
+                    if (is_2d) p2[n_path + 1] = (int32_t)b;
+                    MLIR_ValueHandle p = emit_gep(e, base, source_elem, p2, total, NULL, 0);
+                    emit_store_v(e, z, p);
+                }
+            }
         } else {
             MLIR_ValueHandle p = emit_gep(e, base, source_elem, path, n_path, NULL, 0);
             MLIR_ValueHandle z = (ft.kind == TY_F32) ? emit_const_f32(e, 0.0) : emit_const_i32(e, 0);
@@ -2220,7 +2365,10 @@ static int64_t type_size(E *e, Type t) {
     if (t.kind == TY_F32) return 4;
     if (t.kind == TY_PTR_I32 || t.kind == TY_PTR_STRUCT) return 8;
     if (t.kind == TY_PTR_CHAR || t.kind == TY_FNPTR) return 8;
-    if (t.kind == TY_ARRAY_I32) return 4 * t.array_len;
+    if (t.kind == TY_ARRAY_I32) return 4 * t.array_len * (t.array_len2 ? t.array_len2 : 1);
+    if (t.kind == TY_ARRAY_F32) return 4 * t.array_len * (t.array_len2 ? t.array_len2 : 1);
+    if (t.kind == TY_ARRAY_PTR_STRUCT || t.kind == TY_ARRAY_PTR_CHAR)
+        return 8 * t.array_len;
     if (t.kind == TY_STRUCT) {
         StructDef *sd = find_struct(e, t.struct_name);
         if (!sd) return 0;
@@ -2247,7 +2395,8 @@ static int64_t type_align(E *e, Type t) {
     if (t.kind == TY_I32 || t.kind == TY_F32) return 4;
     if (t.kind == TY_PTR_I32 || t.kind == TY_PTR_STRUCT) return 8;
     if (t.kind == TY_PTR_CHAR || t.kind == TY_FNPTR) return 8;
-    if (t.kind == TY_ARRAY_I32) return 4;
+    if (t.kind == TY_ARRAY_I32 || t.kind == TY_ARRAY_F32) return 4;
+    if (t.kind == TY_ARRAY_PTR_STRUCT || t.kind == TY_ARRAY_PTR_CHAR) return 8;
     if (t.kind == TY_STRUCT) {
         StructDef *sd = find_struct(e, t.struct_name);
         if (!sd) return 1;
@@ -2324,11 +2473,29 @@ static void init_struct_types(E *e) {
             Type ft = sd->fields.data[k].type;
             if (ft.kind == TY_I32) body[k] = e->i32;
             else if (ft.kind == TY_F32) body[k] = e->f32;
-            else if (ft.kind == TY_PTR_STRUCT) body[k] = e->ptr;
+            else if (ft.kind == TY_PTR_STRUCT || ft.kind == TY_PTR_I32 ||
+                     ft.kind == TY_PTR_CHAR) body[k] = e->ptr;
             else if (ft.kind == TY_STRUCT) {
                 StructDef *inner = find_struct(e, ft.struct_name);
                 MLIR_TypeHandle t = find_struct_type(e, inner);
                 body[k] = t;
+            } else if (ft.kind == TY_ARRAY_I32 || ft.kind == TY_ARRAY_F32) {
+                MLIR_TypeHandle elem = (ft.kind == TY_ARRAY_F32) ? e->f32 : e->i32;
+                MLIR_TypeHandle inner;
+                if (ft.array_len2 != 0) {
+                    MLIR_TypeHandle in2 = MLIR_CreateTypeLLVMArray(
+                        e->ctx, elem, (uint64_t)ft.array_len2);
+                    inner = MLIR_CreateTypeLLVMArray(
+                        e->ctx, in2, (uint64_t)ft.array_len);
+                } else {
+                    inner = MLIR_CreateTypeLLVMArray(
+                        e->ctx, elem, (uint64_t)ft.array_len);
+                }
+                body[k] = inner;
+            } else if (ft.kind == TY_ARRAY_PTR_STRUCT ||
+                       ft.kind == TY_ARRAY_PTR_CHAR) {
+                body[k] = MLIR_CreateTypeLLVMArray(
+                    e->ctx, e->ptr, (uint64_t)ft.array_len);
             } else {
                 println(str_lit("tinyc emit: unsupported struct field type in {}"), sd->name);
                 body[k] = e->i32;

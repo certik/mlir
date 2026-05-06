@@ -133,3 +133,19 @@ expected_stdout = "12\n42\n"
 [[test]]
 name = "fnptr_typedef"
 expected_stdout = "42\n42\n"
+
+[[test]]
+name = "struct_array_field"
+expected_stdout = "8\n0\n9\n49\n0\n25\n140\n"
+
+[[test]]
+name = "struct_2d_array_field"
+expected_stdout = "0\n2\n10\n12\n12.5\n"
+
+[[test]]
+name = "struct_ptr_array_field"
+expected_stdout = "10\n20\n30\n40\n100\n10\n"
+
+[[test]]
+name = "struct_str_array_field"
+expected_stdout = "alpha\nbeta\ngamma\nBETA!\n"

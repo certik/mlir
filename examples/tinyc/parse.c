@@ -917,25 +917,87 @@ static StructDef *parse_struct_def(P *p) {
     VecStructField_reserve(p->arena, &sd->fields, 4);
     while (cur(p).kind != TC_TK_RBRACE && cur(p).kind != TC_TK_EOF) {
         Type ft = {0};
+        bool is_struct_kind = false;
+        bool is_ptr = false;
+        bool was_char = false;
+        bool was_float = false;
         if (cur(p).kind == TC_TK_KW_STRUCT) {
-            // Nested struct field: `struct Inner name;` (by-value) or
-            // `struct Inner* name;` (pointer to struct).
+            // Nested struct field: `struct Inner name;` (by-value),
+            // `struct Inner* name;` (pointer to struct), or
+            // `struct Inner* name[N];` (array of struct pointers).
             p->i++;
             TcTok sn = cur(p);
             if (!expect(p, TC_TK_IDENT, str_lit("expected struct name"))) { p->i++; continue; }
-            ft.kind = accept(p, TC_TK_STAR) ? TY_PTR_STRUCT : TY_STRUCT;
+            is_ptr = accept(p, TC_TK_STAR);
+            ft.kind = is_ptr ? TY_PTR_STRUCT : TY_STRUCT;
             ft.struct_name = sn.text;
+            is_struct_kind = true;
         } else {
             TypeKind k;
+            was_char = (cur(p).kind == TC_TK_KW_CHAR);
+            was_float = (cur(p).kind == TC_TK_KW_FLOAT);
             if (!parse_base_type(p, &k)) {
-                perror_at(p, cur(p).line, str_lit("expected field type (int|float|struct)"));
+                perror_at(p, cur(p).line, str_lit("expected field type (int|float|char|struct)"));
                 p->i++;
                 continue;
             }
             ft.kind = k;
+            // Optional pointer suffix on base types.
+            if (accept(p, TC_TK_STAR)) {
+                is_ptr = true;
+                if (was_char) ft.kind = TY_PTR_CHAR;
+                else if (k == TY_I32) ft.kind = TY_PTR_I32;
+                else {
+                    perror_at(p, cur(p).line, str_lit("only int*/char* pointer fields are supported"));
+                }
+            }
         }
         TcTok fn = cur(p);
         expect(p, TC_TK_IDENT, str_lit("expected field name"));
+        // Optional array suffix `[N]` or `[N][M]`.
+        if (accept(p, TC_TK_LBRACK)) {
+            if (cur(p).kind == TC_TK_RBRACK) {
+                perror_at(p, cur(p).line, str_lit("flexible array fields are not supported"));
+            }
+            TcTok lit = cur(p);
+            expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
+            expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
+            int64_t n1 = lit.int_value;
+            int64_t n2 = 0;
+            if (accept(p, TC_TK_LBRACK)) {
+                TcTok lit2 = cur(p);
+                expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
+                expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
+                n2 = lit2.int_value;
+            }
+            // Map (element-type, dim) -> array TypeKind.
+            if (is_struct_kind) {
+                if (!is_ptr) {
+                    perror_at(p, cur(p).line, str_lit("array of nested struct value is not supported as a field"));
+                } else if (n2 != 0) {
+                    perror_at(p, cur(p).line, str_lit("only 1D arrays of struct pointers are supported"));
+                } else {
+                    ft.kind = TY_ARRAY_PTR_STRUCT;
+                    ft.array_len = n1;
+                }
+            } else if (was_char && is_ptr) {
+                if (n2 != 0) {
+                    perror_at(p, cur(p).line, str_lit("only 1D arrays of char* are supported"));
+                }
+                ft.kind = TY_ARRAY_PTR_CHAR;
+                ft.array_len = n1;
+            } else if (is_ptr) {
+                perror_at(p, cur(p).line, str_lit("array of int* is not supported as a field"));
+            } else if (was_float) {
+                ft.kind = TY_ARRAY_F32;
+                ft.array_len = n1;
+                ft.array_len2 = n2;
+            } else {
+                ft.kind = TY_ARRAY_I32;
+                ft.array_len = n1;
+                ft.array_len2 = n2;
+            }
+        }
         expect(p, TC_TK_SEMI, str_lit("expected ';' after field"));
         VecStructField_push_back(p->arena, &sd->fields,
             ((StructField){.name = fn.text, .type = ft}));
