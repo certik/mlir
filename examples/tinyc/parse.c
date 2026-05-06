@@ -53,7 +53,7 @@ static Stmt *new_stmt(P *p, StmtKind k, int line) {
 
 static Expr *parse_expr(P *p);
 
-// postfix := (...) | [expr]
+// postfix := (...) | [expr] | .ident
 static Expr *parse_postfix(P *p, Expr *base) {
     for (;;) {
         if (cur(p).kind == TC_TK_LBRACK) {
@@ -63,6 +63,16 @@ static Expr *parse_postfix(P *p, Expr *base) {
             expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
             Expr *e = new_expr(p, EX_INDEX, line);
             e->lhs = base; e->rhs = idx;
+            base = e;
+            continue;
+        }
+        if (cur(p).kind == TC_TK_DOT) {
+            int line = cur(p).line;
+            p->i++;
+            TcTok name = cur(p);
+            expect(p, TC_TK_IDENT, str_lit("expected field name"));
+            Expr *e = new_expr(p, EX_FIELD, line);
+            e->lhs = base; e->name = name.text;
             base = e;
             continue;
         }
@@ -276,9 +286,27 @@ static void parse_block(P *p, VecStmtPtr *out) {
 }
 
 // Parse a decl statement: <type> [*] name [ '[' N ']' ] [ '=' expr ] ';'
-// Caller has already verified that current token starts a base type.
+//   or                  : struct Name name ';'
+// Caller has already verified that current token starts a decl.
 static Stmt *parse_decl(P *p, bool require_semi) {
     int line = cur(p).line;
+    // struct decl: `struct Name var;`
+    if (cur(p).kind == TC_TK_KW_STRUCT) {
+        p->i++;
+        TcTok sn = cur(p);
+        expect(p, TC_TK_IDENT, str_lit("expected struct name"));
+        TcTok name = cur(p);
+        expect(p, TC_TK_IDENT, str_lit("expected variable name"));
+        Stmt *s = new_stmt(p, ST_DECL, line);
+        s->decl_name = name.text;
+        s->decl_type.kind = TY_STRUCT;
+        s->decl_type.struct_name = sn.text;
+        if (cur(p).kind == TC_TK_ASSIGN) {
+            perror_at(p, line, str_lit("struct initializers are not supported"));
+        }
+        if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+        return s;
+    }
     TypeKind base = TY_I32;
     parse_base_type(p, &base);
     bool is_ptr = false;
@@ -389,7 +417,7 @@ static Stmt *parse_stmt(P *p) {
         expect(p, TC_TK_SEMI, str_lit("expected ';'"));
         return s;
     }
-    if (t.kind == TC_TK_KW_INT || t.kind == TC_TK_KW_FLOAT) {
+    if (t.kind == TC_TK_KW_INT || t.kind == TC_TK_KW_FLOAT || t.kind == TC_TK_KW_STRUCT) {
         return parse_decl(p, /*require_semi*/ true);
     }
     // expression statement (covers assignments and calls)
@@ -425,12 +453,47 @@ static Func *parse_func(P *p) {
     return f;
 }
 
+static StructDef *parse_struct_def(P *p) {
+    int line = cur(p).line;
+    expect(p, TC_TK_KW_STRUCT, str_lit("expected 'struct'"));
+    TcTok name = cur(p);
+    expect(p, TC_TK_IDENT, str_lit("expected struct name"));
+    expect(p, TC_TK_LBRACE, str_lit("expected '{'"));
+    StructDef *sd = arena_new(p->arena, StructDef);
+    *sd = (StructDef){0};
+    sd->name = name.text;
+    sd->line = line;
+    VecStructField_reserve(p->arena, &sd->fields, 4);
+    while (cur(p).kind != TC_TK_RBRACE && cur(p).kind != TC_TK_EOF) {
+        TypeKind k;
+        if (!parse_base_type(p, &k)) {
+            perror_at(p, cur(p).line, str_lit("expected field type (int|float)"));
+            p->i++;
+            continue;
+        }
+        TcTok fn = cur(p);
+        expect(p, TC_TK_IDENT, str_lit("expected field name"));
+        expect(p, TC_TK_SEMI, str_lit("expected ';' after field"));
+        VecStructField_push_back(p->arena, &sd->fields,
+            ((StructField){.name = fn.text, .kind = k}));
+    }
+    expect(p, TC_TK_RBRACE, str_lit("expected '}'"));
+    expect(p, TC_TK_SEMI, str_lit("expected ';' after struct definition"));
+    return sd;
+}
+
 Program *tinyc_parse(Arena *arena, VecTcTok toks) {
     P p = {.arena = arena, .toks = toks.data, .n = toks.size, .i = 0};
     Program *prog = arena_new(arena, Program);
     *prog = (Program){0};
     VecFuncPtr_reserve(arena, &prog->funcs, 4);
+    VecStructDefPtr_reserve(arena, &prog->structs, 4);
     while (cur(&p).kind != TC_TK_EOF) {
+        if (cur(&p).kind == TC_TK_KW_STRUCT) {
+            StructDef *sd = parse_struct_def(&p);
+            VecStructDefPtr_push_back(arena, &prog->structs, sd);
+            continue;
+        }
         Func *f = parse_func(&p);
         VecFuncPtr_push_back(arena, &prog->funcs, f);
     }

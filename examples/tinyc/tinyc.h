@@ -6,13 +6,14 @@
 // that a compiler can be written against the public API.
 //
 // Subset of C supported:
-//   - Types (locals only): int (i32), float (f32), int[N], int* (alias)
+//   - Types (locals only): int (i32), float (f32), int[N], int* (alias),
+//     struct S { int/float fields }
 //   - Local variables (mutable)
 //   - Integer and float literals
 //   - Binary ops: + - * / (% on int only)
 //   - Comparisons: < <= > >= == != (int and float)
 //   - Logical: && || ! (short-circuit, int operands)
-//   - Assignments to general lvalues: x, a[i], *p
+//   - Assignments to general lvalues: x, a[i], *p, s.field
 //   - if / else, while, for
 //   - break, continue, early return
 //   - Address-of (&x) and dereference (*p) — alias-only pointers
@@ -20,8 +21,10 @@
 //   - `print(expr);` builtin -> vector.print
 //   - Top-level entry point: int main()
 //
-// Not supported: structs, strings, pointer reassignment, pointer
-// arithmetic, arrays-of-pointer, function pointers, float params.
+// Not supported: strings, pointer reassignment, pointer arithmetic,
+// arrays-of-pointer, function pointers, float params, struct params/
+// returns, &s (address-of struct), nested/array/pointer-of-struct,
+// struct literal initialization.
 #pragma once
 
 #include <stdbool.h>
@@ -44,11 +47,13 @@ typedef enum {
     TY_F32,
     TY_PTR_I32,        // alias-only pointer to int
     TY_ARRAY_I32,      // fixed-size int[N], length in `array_len`
+    TY_STRUCT,         // struct value (fields stored as separate scalars)
 } TypeKind;
 
 typedef struct {
     TypeKind kind;
     int64_t  array_len;
+    string   struct_name;     // for TY_STRUCT
 } Type;
 
 typedef enum {
@@ -62,6 +67,7 @@ typedef enum {
     EX_INDEX,          // a[i]
     EX_ADDR,           // &x
     EX_DEREF,          // *p
+    EX_FIELD,          // s.x  (lhs = struct lvalue, name = field name)
 } ExprKind;
 
 typedef enum {
@@ -155,7 +161,23 @@ typedef struct {
 DEFINE_VECTOR_FOR_TYPE(Func*, VecFuncPtr)
 
 typedef struct {
-    VecFuncPtr funcs;
+    string   name;
+    TypeKind kind;       // TY_I32 or TY_F32 only
+} StructField;
+
+DEFINE_VECTOR_FOR_TYPE(StructField, VecStructField)
+
+typedef struct StructDef {
+    string         name;
+    VecStructField fields;
+    int            line;
+} StructDef;
+
+DEFINE_VECTOR_FOR_TYPE(StructDef*, VecStructDefPtr)
+
+typedef struct {
+    VecFuncPtr      funcs;
+    VecStructDefPtr structs;
 } Program;
 
 // ---------------- Lexer ----------------
@@ -175,10 +197,11 @@ typedef enum {
     TC_TK_KW_BREAK,
     TC_TK_KW_CONTINUE,
     TC_TK_KW_PRINT,
+    TC_TK_KW_STRUCT,
     TC_TK_LPAREN, TC_TK_RPAREN,
     TC_TK_LBRACE, TC_TK_RBRACE,
     TC_TK_LBRACK, TC_TK_RBRACK,
-    TC_TK_SEMI, TC_TK_COMMA,
+    TC_TK_SEMI, TC_TK_COMMA, TC_TK_DOT,
     TC_TK_PLUS, TC_TK_MINUS, TC_TK_STAR, TC_TK_SLASH, TC_TK_PERCENT,
     TC_TK_LT, TC_TK_LE, TC_TK_GT, TC_TK_GE, TC_TK_EQEQ, TC_TK_NE,
     TC_TK_ASSIGN, TC_TK_BANG,

@@ -24,6 +24,7 @@ static TcTokKind keyword_or_ident(string s) {
     if (str_eq(s, str_lit("break")))    return TC_TK_KW_BREAK;
     if (str_eq(s, str_lit("continue"))) return TC_TK_KW_CONTINUE;
     if (str_eq(s, str_lit("print")))    return TC_TK_KW_PRINT;
+    if (str_eq(s, str_lit("struct")))   return TC_TK_KW_STRUCT;
     return TC_TK_IDENT;
 }
 
@@ -113,6 +114,7 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                 case ']': k = TC_TK_RBRACK; break;
                 case ';': k = TC_TK_SEMI; break;
                 case ',': k = TC_TK_COMMA; break;
+                case '.': k = TC_TK_DOT; break;
                 case '+': k = TC_TK_PLUS; break;
                 case '-': k = TC_TK_MINUS; break;
                 case '*': k = TC_TK_STAR; break;

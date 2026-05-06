@@ -1,0 +1,31 @@
+struct Point {
+    int x;
+    int y;
+};
+
+struct Stats {
+    int count;
+    float sum;
+};
+
+int main() {
+    struct Point p;
+    p.x = 3;
+    p.y = 4;
+    print(p.x);
+    print(p.y);
+    print(p.x * p.x + p.y * p.y);
+
+    struct Stats s;
+    s.count = 0;
+    s.sum = 0.0;
+    int i = 0;
+    while (i < 5) {
+        s.count = s.count + 1;
+        s.sum = s.sum + 1.5;
+        i = i + 1;
+    }
+    print(s.count);
+    print(s.sum);
+    return 0;
+}

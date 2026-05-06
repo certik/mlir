@@ -25,6 +25,10 @@ typedef struct Sym {
     string name;
     Type   type;                // declared type
     MLIR_ValueHandle addr;      // memref handle backing this local
+    // For TY_STRUCT: per-field memref handles (parallel to sdef->fields).
+    // For non-struct types: NULL / unused.
+    StructDef *sdef;
+    MLIR_ValueHandle *field_addrs;
     struct Sym *next;
 } Sym;
 
@@ -65,7 +69,24 @@ typedef struct {
     MLIR_LocationHandle loc;
     int next_ssa;                     // running %N counter
     LoopCtx *loops;
+    Program *program;                 // for resolving struct names
 } E;
+
+static StructDef *find_struct(E *e, string name) {
+    if (!e->program) return NULL;
+    for (size_t i = 0; i < e->program->structs.size; i++) {
+        StructDef *sd = e->program->structs.data[i];
+        if (str_eq(sd->name, name)) return sd;
+    }
+    return NULL;
+}
+
+static int struct_field_index(StructDef *sd, string name) {
+    for (size_t i = 0; i < sd->fields.size; i++) {
+        if (str_eq(sd->fields.data[i].name, name)) return (int)i;
+    }
+    return -1;
+}
 
 static MLIR_LocationHandle eloc(E *e, int line) {
     (void)line;
@@ -419,6 +440,26 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
             r.elem_ty = e->i32;
             return r;
         }
+        case EX_FIELD: {
+            // s.field — base must be a struct variable.
+            if (ex->lhs->kind != EX_VAR) {
+                println(str_lit("tinyc emit: only <var>.field field access is supported"));
+                return r;
+            }
+            Sym *s = scope_lookup(sc, ex->lhs->name);
+            if (!s || s->type.kind != TY_STRUCT || !s->sdef) {
+                println(str_lit("tinyc emit: field access on non-struct"));
+                return r;
+            }
+            int idx = struct_field_index(s->sdef, ex->name);
+            if (idx < 0) {
+                println(str_lit("tinyc emit: unknown struct field {}"), ex->name);
+                return r;
+            }
+            r.addr = s->field_addrs[idx];
+            r.elem_ty = (s->sdef->fields.data[idx].kind == TY_F32) ? e->f32 : e->i32;
+            return r;
+        }
         default:
             println(str_lit("tinyc emit: invalid lvalue"));
             return r;
@@ -488,6 +529,10 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             return r;
         }
         case EX_DEREF: {
+            LVal lv = emit_lvalue(e, sc, ex);
+            return load_lvalue(e, lv);
+        }
+        case EX_FIELD: {
             LVal lv = emit_lvalue(e, sc, ex);
             return load_lvalue(e, lv);
         }
@@ -687,6 +732,26 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 sy->addr = emit_alloc(e, arr_ty);
                 if (st->decl_init) {
                     println(str_lit("tinyc emit: array initializers are not supported"));
+                }
+            } else if (st->decl_type.kind == TY_STRUCT) {
+                StructDef *sd = find_struct(e, st->decl_type.struct_name);
+                if (!sd) {
+                    println(str_lit("tinyc emit: unknown struct type {}"), st->decl_type.struct_name);
+                    return;
+                }
+                sy->sdef = sd;
+                sy->field_addrs = arena_new_array(e->arena, MLIR_ValueHandle,
+                                                  sd->fields.size ? sd->fields.size : 1);
+                for (size_t i = 0; i < sd->fields.size; i++) {
+                    bool flt = (sd->fields.data[i].kind == TY_F32);
+                    MLIR_ValueHandle addr = emit_alloc(e, flt ? e->memref_f32 : e->memref_i32);
+                    sy->field_addrs[i] = addr;
+                    // zero-initialize each field
+                    if (flt) emit_store(e, emit_const_f32(e, 0.0), addr, NULL, 0);
+                    else     emit_store(e, emit_const_i32(e, 0),   addr, NULL, 0);
+                }
+                if (st->decl_init) {
+                    println(str_lit("tinyc emit: struct initializers are not supported"));
                 }
             } else if (st->decl_type.kind == TY_F32) {
                 sy->addr = emit_alloc(e, e->memref_f32);
@@ -937,6 +1002,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
     e.func_region = MLIR_INVALID_HANDLE;
     e.terminated = false;
     e.loops = NULL;
+    e.program = program;
 
     // builtin.module { ... }
     MLIR_RegionHandle mr = MLIR_CreateRegion(ctx);
