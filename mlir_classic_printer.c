@@ -28,6 +28,34 @@ typedef struct {
     int n_blocks;
 } PredComments;
 
+// Try to parse an AffineMap attribute of the simple constant form
+// `affine_map<() -> (N)>` and return N. Returns false if the map has any
+// dim/sym arguments or multiple results.
+static bool try_extract_constant_affine_map(MLIR_Context *mlir_ctx,
+                                            MLIR_AttributeHandle attr,
+                                            int64_t *out) {
+    string s = MLIR_GetAttributeAsString(mlir_ctx, attr);
+    // Expect: affine_map<() -> (N)>
+    string prefix = str_lit("affine_map<() -> (");
+    if (s.size < prefix.size + 2) return false;
+    for (size_t i = 0; i < prefix.size; i++) {
+        if (s.str[i] != prefix.str[i]) return false;
+    }
+    size_t i = prefix.size;
+    bool neg = false;
+    if (i < s.size && s.str[i] == '-') { neg = true; i++; }
+    if (i >= s.size || s.str[i] < '0' || s.str[i] > '9') return false;
+    int64_t v = 0;
+    while (i < s.size && s.str[i] >= '0' && s.str[i] <= '9') {
+        v = v*10 + (s.str[i] - '0');
+        i++;
+    }
+    if (i + 2 > s.size) return false;
+    if (s.str[i] != ')' || s.str[i+1] != '>') return false;
+    *out = neg ? -v : v;
+    return true;
+}
+
 static int parse_bb_index(string lab) {
     if (lab.size < 4) return -1;
     if (!(lab.str[0]=='^' && lab.str[1]=='b' && lab.str[2]=='b')) return -1;
@@ -384,7 +412,19 @@ static string print_function_region_classic(PrintCtx *ctx, int indent_level, MLI
         result = str_concat(arena, result, str_lit("{\n"));
         for (size_t i = 0, nb = MLIR_GetRegionNumBlocks(region); i < nb; i++) {
             MLIR_BlockHandle block = MLIR_GetRegionBlock(region, i);
-            for (size_t j = 0, no = MLIR_GetBlockNumOps(block); j < no; j++) {
+            size_t no = MLIR_GetBlockNumOps(block);
+            // affine.for has an implicit `affine.yield` terminator that the
+            // upstream printer omits; mirror that for round-trip parity.
+            if (no > 0) {
+                MLIR_OpHandle last = MLIR_GetBlockOp(block, no - 1);
+                string lname = MLIR_GetOpName(last);
+                if (lname.size == 0) lname = MLIR_MLIR_OpTypeToString(MLIR_GetOpType(last));
+                if (str_eq(lname, str_lit("affine.yield")) &&
+                    MLIR_GetOpNumOperands(last) == 0) {
+                    no--;
+                }
+            }
+            for (size_t j = 0; j < no; j++) {
                 MLIR_OpHandle opn = MLIR_GetBlockOp(block, j);
                 result = str_concat(arena, result,
                     print_operation_internal_classic(ctx, indent_level + 1, opn)
@@ -1070,10 +1110,20 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             for (size_t i = 0, n = MLIR_GetOpNumAttributes(op); i < n; i++) {
                 MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
                 string an = MLIR_GetAttributeName(a);
-                if (MLIR_GetAttributeKind(a) != MLIR_ATTR_KIND_INTEGER) continue;
-                if (str_eq(an, str_lit("_lb"))) lb_val = MLIR_GetAttributeInteger(a);
-                else if (str_eq(an, str_lit("_ub"))) ub_val = MLIR_GetAttributeInteger(a);
-                else if (str_eq(an, str_lit("_step"))) { step_val = MLIR_GetAttributeInteger(a); have_step = true; }
+                MLIR_AttrKind ak = MLIR_GetAttributeKind(a);
+                if (ak == MLIR_ATTR_KIND_INTEGER) {
+                    if (str_eq(an, str_lit("_lb"))) lb_val = MLIR_GetAttributeInteger(a);
+                    else if (str_eq(an, str_lit("_ub"))) ub_val = MLIR_GetAttributeInteger(a);
+                    else if (str_eq(an, str_lit("_step"))) { step_val = MLIR_GetAttributeInteger(a); have_step = true; }
+                    else if (str_eq(an, str_lit("step"))) { step_val = MLIR_GetAttributeInteger(a); have_step = true; }
+                } else if (ak == MLIR_ATTR_KIND_OTHER) {
+                    int64_t v;
+                    if (str_eq(an, str_lit("lowerBoundMap"))) {
+                        if (try_extract_constant_affine_map(ctx->mlir_ctx, a, &v)) lb_val = v;
+                    } else if (str_eq(an, str_lit("upperBoundMap"))) {
+                        if (try_extract_constant_affine_map(ctx->mlir_ctx, a, &v)) ub_val = v;
+                    }
+                }
             }
             result = str_concat(arena, result, format(arena, str_lit(" = {} to {}"), lb_val, ub_val));
             if (have_step && step_val != 1) {
@@ -1913,6 +1963,14 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 str_eq(attr_name, str_lit("result_segment_sizes")) ||
                 str_eq(attr_name, str_lit("overflowFlags")) ||
                 str_eq(attr_name, str_lit("fastmath"))) {
+                continue;
+            }
+            // affine.for absorbs lowerBoundMap/upperBoundMap/step into its
+            // header (`= LB to UB step S`), so don't repeat them here.
+            if (MLIR_GetOpType(op) == OP_TYPE_AFFINE_FOR &&
+                (str_eq(attr_name, str_lit("lowerBoundMap")) ||
+                 str_eq(attr_name, str_lit("upperBoundMap")) ||
+                 str_eq(attr_name, str_lit("step")))) {
                 continue;
             }
             // Skip 'callee' which we print in header for calls

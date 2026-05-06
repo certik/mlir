@@ -112,10 +112,6 @@ COMBOS_UPSTREAM_PARSER = [
 # means new regressions are caught immediately while pre-existing structural
 # bugs can be tackled one PR at a time.
 VALIDATE_REFS_SKIP = {
-    # affine.for: upstream backend exposes lowerBoundMap/upperBoundMap/step
-    # as AffineMap attributes which the classic printer renders as `...`;
-    # needs an AffineMap attr API to round-trip.
-    "t1_mlir.upstream.classic.out",
     # gpu.launch lossy structural printing.
     "t3_mlir.classic.classic.out",
     "t3_mlir.upstream.classic.out",
