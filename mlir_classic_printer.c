@@ -206,6 +206,11 @@ static string print_block_internal_classic(PrintCtx *ctx, int bb_index, int inde
 static string print_function_region_classic(PrintCtx *ctx, int indent_level, MLIR_RegionHandle region);
 
 static void preassign_region_ssa(PrintCtx *ctx, MLIR_RegionHandle region, int indent_level);
+
+// Forward decl: emit an op in MLIR's generic round-trippable form
+static string print_op_generic_form_classic(PrintCtx *ctx, int indent_level, MLIR_OpHandle op);
+static bool op_force_generic_form(MLIR_OpHandle op);
+
 static void preassign_op_ssa(PrintCtx *ctx, MLIR_OpHandle op, int indent_level) {
     // First preassign nested regions so nested results get earlier numbers
     size_t n_regions = MLIR_GetOpNumRegions(op);
@@ -469,9 +474,217 @@ static string print_function_region_classic(PrintCtx *ctx, int indent_level, MLI
     }
 }
 
+// Emit a single attribute value in MLIR-generic form (without the leading name).
+static string print_attribute_generic(PrintCtx *ctx, MLIR_AttributeHandle attr) {
+    Arena *arena = ctx->arena;
+    switch (MLIR_GetAttributeKind(attr)) {
+        case MLIR_ATTR_KIND_INTEGER: {
+            MLIR_TypeHandle ty = MLIR_GetAttributeType(attr);
+            string tystr = ty ? MLIR_GetTypeString(ctx->mlir_ctx, ty) : str_lit("i64");
+            return format(arena, str_lit("{} : {}"), MLIR_GetAttributeInteger(attr), tystr);
+        }
+        case MLIR_ATTR_KIND_FLOAT: {
+            MLIR_TypeHandle ty = MLIR_GetAttributeType(attr);
+            string tystr = ty ? MLIR_GetTypeString(ctx->mlir_ctx, ty) : str_lit("f32");
+            return format(arena, str_lit("{:e} : {}"), MLIR_GetAttributeFloat(attr), tystr);
+        }
+        case MLIR_ATTR_KIND_BOOL:
+            return MLIR_GetAttributeBool(attr) ? str_lit("true") : str_lit("false");
+        case MLIR_ATTR_KIND_STRING: {
+            string s = MLIR_GetAttributeString(attr);
+            if (s.size>=2 && s.str[0]=='"' && s.str[s.size-1]=='"') return s;
+            return format(arena, str_lit("\"{}\""), s);
+        }
+        case MLIR_ATTR_KIND_TYPE: {
+            MLIR_TypeHandle ty = MLIR_GetAttributeTypeValue(attr);
+            return ty ? MLIR_GetTypeString(ctx->mlir_ctx, ty) : str_lit("none");
+        }
+        default:
+            return MLIR_GetAttributeAsString(ctx->mlir_ctx, attr);
+    }
+}
+
+// Emit an op in MLIR's standard generic round-trippable form:
+//   %r = "opname"(%a, %b) ({ <region> }) {attr_name = attr_value, ...}
+//        : (a_ty, b_ty) -> r_ty
+static string print_op_generic_form_classic(PrintCtx *ctx, int indent_level, MLIR_OpHandle op) {
+    Arena *arena = ctx->arena;
+    string result = indent_classic(arena, indent_level);
+
+    size_t n_results = MLIR_GetOpNumResults(op);
+    size_t n_result_types = MLIR_GetOpNumResultTypes(op);
+    if (n_result_types > 0) {
+        if (n_result_types > 1) {
+            MLIR_ValueHandle r0 = (n_results > 0) ? MLIR_GetOpResult(op, 0) : MLIR_INVALID_HANDLE;
+            if (r0) result = str_concat(arena, result, print_ssa_value_classic(ctx, r0));
+            else result = str_concat(arena, result, str_lit("%_"));
+            result = str_concat(arena, result, format(arena, str_lit(":{} = "), (int64_t)n_result_types));
+        } else {
+            MLIR_ValueHandle res = (n_results > 0) ? MLIR_GetOpResult(op, 0) : MLIR_INVALID_HANDLE;
+            if (res) result = str_concat(arena, result, print_ssa_value_classic(ctx, res));
+            else result = str_concat(arena, result, str_lit("%_"));
+            result = str_concat(arena, result, str_lit(" = "));
+        }
+    }
+
+    // Quoted op name
+    string opname = MLIR_GetOpName_string(op);
+    if (opname.size == 0) opname = MLIR_MLIR_OpTypeToString(MLIR_GetOpType(op));
+    result = str_concat(arena, result, format(arena, str_lit("\"{}\"("), opname));
+
+    // Operands
+    size_t n_operands = MLIR_GetOpNumOperands(op);
+    for (size_t i = 0; i < n_operands; i++) {
+        if (i > 0) result = str_concat(arena, result, str_lit(", "));
+        MLIR_ValueHandle ov = MLIR_GetOpOperand(op, i);
+        if (ov) result = str_concat(arena, result, print_ssa_operand_classic(ctx, ov));
+        else result = str_concat(arena, result, str_lit("NULL"));
+    }
+    result = str_concat(arena, result, str_lit(")"));
+
+    // Successors (if any)
+    size_t n_succ = MLIR_GetOpNumSuccessors(op);
+    if (n_succ > 0) {
+        result = str_concat(arena, result, str_lit("["));
+        for (size_t i = 0; i < n_succ; i++) {
+            if (i > 0) result = str_concat(arena, result, str_lit(", "));
+            MLIR_BlockHandle b = MLIR_GetOpSuccessor(op, i);
+            size_t bi = MLIR_GetBlockIndex(b);
+            result = str_concat(arena, result, format(arena, str_lit("^bb{}"), (int64_t)bi));
+        }
+        result = str_concat(arena, result, str_lit("]"));
+    }
+
+    // Regions
+    size_t n_regions = MLIR_GetOpNumRegions(op);
+    if (n_regions > 0) {
+        result = str_concat(arena, result, str_lit(" ("));
+        for (size_t r = 0; r < n_regions; r++) {
+            if (r > 0) result = str_concat(arena, result, str_lit(", "));
+            MLIR_RegionHandle reg = MLIR_GetOpRegion(op, r);
+            size_t nb = MLIR_GetRegionNumBlocks(reg);
+            result = str_concat(arena, result, str_lit("{\n"));
+            for (size_t bi = 0; bi < nb; bi++) {
+                MLIR_BlockHandle blk = MLIR_GetRegionBlock(reg, bi);
+                // Emit "  ^bbN(args):"
+                result = str_concat(arena, result, indent_classic(arena, indent_level + 1));
+                result = str_concat(arena, result, format(arena, str_lit("^bb{}"), (int64_t)bi));
+                size_t na = MLIR_GetBlockNumArgs(blk);
+                if (na > 0) {
+                    result = str_concat(arena, result, str_lit("("));
+                    for (size_t a = 0; a < na; a++) {
+                        if (a > 0) result = str_concat(arena, result, str_lit(", "));
+                        MLIR_ValueHandle arg = MLIR_GetBlockArg(blk, a);
+                        MLIR_TypeHandle aty = arg ? MLIR_GetValueType(arg) : MLIR_INVALID_HANDLE;
+                        if (arg) {
+                            string nm = MLIR_GetValueRegisterName(arg);
+                            if (nm.size > 0) result = str_concat(arena, result, nm);
+                            else {
+                                uint32_t num = get_or_assign_ssa(ctx, arg);
+                                result = str_concat(arena, result, format(arena, str_lit("%{}"), (int64_t)num));
+                            }
+                            result = str_concat(arena, result, str_lit(": "));
+                            result = str_concat(arena, result, aty ? MLIR_GetTypeString(ctx->mlir_ctx, aty) : str_lit("none"));
+                        }
+                    }
+                    result = str_concat(arena, result, str_lit(")"));
+                }
+                result = str_concat(arena, result, str_lit(":\n"));
+                size_t no = MLIR_GetBlockNumOps(blk);
+                for (size_t oi = 0; oi < no; oi++) {
+                    MLIR_OpHandle nop = MLIR_GetBlockOp(blk, oi);
+                    result = str_concat(arena, result,
+                        print_operation_internal_classic(ctx, indent_level + 1, nop));
+                }
+            }
+            result = str_concat(arena, result, indent_classic(arena, indent_level));
+            result = str_concat(arena, result, str_lit("}"));
+        }
+        result = str_concat(arena, result, str_lit(")"));
+    }
+
+    // Attributes
+    size_t n_attrs = MLIR_GetOpNumAttributes(op);
+    bool any_visible_attr = false;
+    for (size_t i = 0; i < n_attrs; i++) {
+        MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
+        string an = MLIR_GetAttributeName(a);
+        if (an.size > 0 && an.str[0] == '_') continue;
+        if (!any_visible_attr) { result = str_concat(arena, result, str_lit(" {")); any_visible_attr = true; }
+        else result = str_concat(arena, result, str_lit(", "));
+        result = str_concat(arena, result, format(arena, str_lit("{} = "), an));
+        result = str_concat(arena, result, print_attribute_generic(ctx, a));
+    }
+    if (any_visible_attr) result = str_concat(arena, result, str_lit("}"));
+
+    // Functional type: : (operand_types) -> result_types
+    result = str_concat(arena, result, str_lit(" : ("));
+    for (size_t i = 0; i < n_operands; i++) {
+        if (i > 0) result = str_concat(arena, result, str_lit(", "));
+        MLIR_ValueHandle ov = MLIR_GetOpOperand(op, i);
+        MLIR_TypeHandle oty = ov ? MLIR_GetValueType(ov) : MLIR_INVALID_HANDLE;
+        result = str_concat(arena, result, oty ? MLIR_GetTypeString(ctx->mlir_ctx, oty) : str_lit("none"));
+    }
+    result = str_concat(arena, result, str_lit(") -> "));
+    if (n_result_types == 0) {
+        result = str_concat(arena, result, str_lit("()"));
+    } else if (n_result_types == 1) {
+        MLIR_TypeHandle rt = MLIR_GetOpResult_type(op, 0);
+        result = str_concat(arena, result, rt ? MLIR_GetTypeString(ctx->mlir_ctx, rt) : str_lit("none"));
+    } else {
+        result = str_concat(arena, result, str_lit("("));
+        for (size_t i = 0; i < n_result_types; i++) {
+            if (i > 0) result = str_concat(arena, result, str_lit(", "));
+            MLIR_TypeHandle rt = MLIR_GetOpResult_type(op, i);
+            result = str_concat(arena, result, rt ? MLIR_GetTypeString(ctx->mlir_ctx, rt) : str_lit("none"));
+        }
+        result = str_concat(arena, result, str_lit(")"));
+    }
+
+    MLIR_LocationHandle loc = MLIR_GetOpLocation(op);
+    if (loc) result = str_concat(arena, result, print_location_classic(arena, loc));
+    result = str_concat(arena, result, str_lit("\n"));
+    return result;
+}
+
+// Decide whether an op should be emitted in MLIR generic form by the
+// classic printer. Used as a fallback for ops the classic printer doesn't
+// know how to format and that the buggy default path would mangle.
+static bool op_force_generic_form(MLIR_OpHandle op) {
+    string nm = MLIR_GetOpName_string(op);
+    if (nm.size == 0) nm = MLIR_MLIR_OpTypeToString(MLIR_GetOpType(op));
+    if (nm.size == 0) return false;
+    static const char *names[] = {
+        "linalg.fill", "linalg.copy", "linalg.yield",
+        "tensor.from_elements", "tensor.collapse_shape", "tensor.splat",
+        "tensor.extract",
+        "affine.load",
+        "vector.print",
+        "gpu.launch", "gpu.terminator",
+    };
+    for (size_t i = 0; i < sizeof(names)/sizeof(names[0]); i++) {
+        string s = (string){(char*)names[i], 0};
+        const char *p = names[i];
+        size_t L = 0; while (p[L]) L++;
+        s.size = L;
+        if (str_eq(nm, s)) return true;
+    }
+    return false;
+}
+
 static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, MLIR_OpHandle op) {
     Arena *arena = ctx->arena;
     string result = indent_classic(arena, indent_level);
+
+    // For ops whose classic-form is broken (named structured ops, gpu.launch,
+    // tensor.* / affine.load with custom syntaxes the classic printer doesn't
+    // implement), fall back to MLIR's standard generic form. This guarantees
+    // round-trippability through the upstream parser.
+    if (op_force_generic_form(op)) {
+        return print_op_generic_form_classic(ctx, indent_level, op);
+    }
+    (void)result;
+    result = indent_classic(arena, indent_level);
 
     // Robust early handling for func.func, regardless of op_type mapping
     string opname = MLIR_GetOpName_string(op);

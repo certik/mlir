@@ -112,13 +112,16 @@ COMBOS_UPSTREAM_PARSER = [
 # means new regressions are caught immediately while pre-existing structural
 # bugs can be tackled one PR at a time.
 VALIDATE_REFS_SKIP = {
-    # gpu.launch lossy structural printing.
+    # Native classic parser doesn't fully parse `gpu.launch blocks(...) in
+    # (...) threads(...) in (...)` (operands and outer-block sizes are lost),
+    # so the regenerated ref carries a `gpu.launch` with 0 operands which
+    # then fails to re-parse through upstream. Needs a native-parser fix.
     "t3_mlir.classic.classic.out",
-    "t3_mlir.upstream.classic.out",
-    # linalg.fill named-structured-op region not preserved (needs region args
-    # and the `ins(...) outs(...)` block to be emitted by classic printer).
+    # Native classic parser is incomplete for several ops in d.mlir
+    # (linalg.fill `ins/outs`, linalg.copy `outs`, tensor.extract result
+    # type), producing invalid IR after round-trip. Needs native-parser
+    # fixes for those ops.
     "d_mlir.classic.classic.out",
-    "d_mlir.upstream.classic.out",
 }
 
 
