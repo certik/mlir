@@ -17,3 +17,27 @@ expected_stdout = "55\n"
 [[test]]
 name = "short_circuit"
 expected_stdout = "0\n1\n1\n1\n"
+
+[[test]]
+name = "return"
+expected_stdout = "3\n-1\n"
+
+[[test]]
+name = "break_continue"
+expected_stdout = "17\n7\n"
+
+[[test]]
+name = "for"
+expected_stdout = "55\n10\n"
+
+[[test]]
+name = "float"
+expected_stdout = "4.375\n1\n6\n"
+
+[[test]]
+name = "array"
+expected_stdout = "30\n9\n"
+
+[[test]]
+name = "pointer"
+expected_stdout = "42\n42\n"

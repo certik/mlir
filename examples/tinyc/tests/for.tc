@@ -1,0 +1,16 @@
+int main() {
+    int s = 0;
+    for (int i = 1; i <= 10; i = i + 1) {
+        s = s + i;
+    }
+    print(s);   // 55
+
+    // for with break
+    int t = 0;
+    for (int i = 0; i < 100; i = i + 1) {
+        if (i > 4) { break; }
+        t = t + i;
+    }
+    print(t);   // 0+1+2+3+4 = 10
+    return 0;
+}

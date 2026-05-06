@@ -46,13 +46,32 @@ static Stmt *new_stmt(P *p, StmtKind k, int line) {
     VecStmtPtr_reserve(p->arena, &s->then_body, 4);
     VecStmtPtr_reserve(p->arena, &s->else_body, 4);
     VecStmtPtr_reserve(p->arena, &s->while_body, 4);
+    VecStmtPtr_reserve(p->arena, &s->for_body, 4);
     VecStmtPtr_reserve(p->arena, &s->block_body, 4);
     return s;
 }
 
 static Expr *parse_expr(P *p);
 
-// primary := INT_LIT | IDENT | IDENT '(' args ')' | '(' expr ')' | unary
+// postfix := (...) | [expr]
+static Expr *parse_postfix(P *p, Expr *base) {
+    for (;;) {
+        if (cur(p).kind == TC_TK_LBRACK) {
+            int line = cur(p).line;
+            p->i++;
+            Expr *idx = parse_expr(p);
+            expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
+            Expr *e = new_expr(p, EX_INDEX, line);
+            e->lhs = base; e->rhs = idx;
+            base = e;
+            continue;
+        }
+        break;
+    }
+    return base;
+}
+
+// primary := INT_LIT | FLOAT_LIT | IDENT | IDENT '(' args ')' | '(' expr ')' | unary
 static Expr *parse_primary(P *p) {
     TcTok t = cur(p);
     if (t.kind == TC_TK_INT_LIT) {
@@ -61,11 +80,17 @@ static Expr *parse_primary(P *p) {
         e->int_value = t.int_value;
         return e;
     }
+    if (t.kind == TC_TK_FLOAT_LIT) {
+        p->i++;
+        Expr *e = new_expr(p, EX_FLOAT, t.line);
+        e->float_value = t.float_value;
+        return e;
+    }
     if (t.kind == TC_TK_LPAREN) {
         p->i++;
         Expr *e = parse_expr(p);
         expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
-        return e;
+        return parse_postfix(p, e);
     }
     if (t.kind == TC_TK_MINUS) {
         p->i++;
@@ -78,6 +103,18 @@ static Expr *parse_primary(P *p) {
         p->i++;
         Expr *e = new_expr(p, EX_UN, t.line);
         e->op = OP_NOT;
+        e->lhs = parse_primary(p);
+        return e;
+    }
+    if (t.kind == TC_TK_AMP) {
+        p->i++;
+        Expr *e = new_expr(p, EX_ADDR, t.line);
+        e->lhs = parse_primary(p);
+        return e;
+    }
+    if (t.kind == TC_TK_STAR) {
+        p->i++;
+        Expr *e = new_expr(p, EX_DEREF, t.line);
         e->lhs = parse_primary(p);
         return e;
     }
@@ -95,11 +132,11 @@ static Expr *parse_primary(P *p) {
                 }
             }
             expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
-            return e;
+            return parse_postfix(p, e);
         }
         Expr *e = new_expr(p, EX_VAR, t.line);
         e->name = t.text;
-        return e;
+        return parse_postfix(p, e);
     }
     perror_at(p, t.line, str_lit("expected expression"));
     Expr *e = new_expr(p, EX_INT, t.line);
@@ -202,20 +239,30 @@ static Expr *parse_or(P *p) {
     return l;
 }
 static Expr *parse_assign_or_or(P *p) {
-    // Handle `IDENT '=' assign` if pattern matches; else fall through to OR.
-    if (cur(p).kind == TC_TK_IDENT && peek(p, 1).kind == TC_TK_ASSIGN) {
-        TcTok name = cur(p);
-        p->i += 2;
+    // Parse a logical-or expression first, then if '=' follows, treat
+    // the LHS as an lvalue (validated in the emitter).
+    Expr *lhs = parse_or(p);
+    if (cur(p).kind == TC_TK_ASSIGN) {
+        int line = cur(p).line;
+        p->i++;
         Expr *rhs = parse_assign_or_or(p);   // right-assoc
-        Expr *e = new_expr(p, EX_ASSIGN, name.line);
-        e->name = name.text;
+        Expr *e = new_expr(p, EX_ASSIGN, line);
+        e->lvalue = lhs;
         e->rhs_assign = rhs;
         return e;
     }
-    return parse_or(p);
+    return lhs;
 }
 
 static Expr *parse_expr(P *p) { return parse_assign_or_or(p); }
+
+// Parse a base type keyword. Returns true if we consumed one and writes
+// the kind to *out. Pointer/array suffixes are handled at decl time.
+static bool parse_base_type(P *p, TypeKind *out) {
+    if (cur(p).kind == TC_TK_KW_INT)   { p->i++; *out = TY_I32; return true; }
+    if (cur(p).kind == TC_TK_KW_FLOAT) { p->i++; *out = TY_F32; return true; }
+    return false;
+}
 
 static Stmt *parse_stmt(P *p);
 
@@ -226,6 +273,38 @@ static void parse_block(P *p, VecStmtPtr *out) {
         VecStmtPtr_push_back(p->arena, out, s);
     }
     expect(p, TC_TK_RBRACE, str_lit("expected '}'"));
+}
+
+// Parse a decl statement: <type> [*] name [ '[' N ']' ] [ '=' expr ] ';'
+// Caller has already verified that current token starts a base type.
+static Stmt *parse_decl(P *p, bool require_semi) {
+    int line = cur(p).line;
+    TypeKind base = TY_I32;
+    parse_base_type(p, &base);
+    bool is_ptr = false;
+    if (accept(p, TC_TK_STAR)) is_ptr = true;
+    TcTok name = cur(p);
+    expect(p, TC_TK_IDENT, str_lit("expected identifier"));
+    Stmt *s = new_stmt(p, ST_DECL, line);
+    s->decl_name = name.text;
+    s->decl_type.kind = base;
+    if (is_ptr) {
+        if (base != TY_I32) perror_at(p, line, str_lit("only int* pointers are supported"));
+        s->decl_type.kind = TY_PTR_I32;
+    }
+    if (accept(p, TC_TK_LBRACK)) {
+        if (base != TY_I32 || is_ptr) perror_at(p, line, str_lit("only int[N] arrays are supported"));
+        TcTok lit = cur(p);
+        expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
+        expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
+        s->decl_type.kind = TY_ARRAY_I32;
+        s->decl_type.array_len = lit.int_value;
+    }
+    if (accept(p, TC_TK_ASSIGN)) {
+        s->decl_init = parse_expr(p);
+    }
+    if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+    return s;
 }
 
 static Stmt *parse_stmt(P *p) {
@@ -240,6 +319,18 @@ static Stmt *parse_stmt(P *p) {
         Stmt *s = new_stmt(p, ST_RETURN, t.line);
         s->expr = parse_expr(p);
         expect(p, TC_TK_SEMI, str_lit("expected ';' after return"));
+        return s;
+    }
+    if (t.kind == TC_TK_KW_BREAK) {
+        p->i++;
+        Stmt *s = new_stmt(p, ST_BREAK, t.line);
+        expect(p, TC_TK_SEMI, str_lit("expected ';' after break"));
+        return s;
+    }
+    if (t.kind == TC_TK_KW_CONTINUE) {
+        p->i++;
+        Stmt *s = new_stmt(p, ST_CONTINUE, t.line);
+        expect(p, TC_TK_SEMI, str_lit("expected ';' after continue"));
         return s;
     }
     if (t.kind == TC_TK_KW_IF) {
@@ -264,6 +355,31 @@ static Stmt *parse_stmt(P *p) {
         parse_block(p, &s->while_body);
         return s;
     }
+    if (t.kind == TC_TK_KW_FOR) {
+        p->i++;
+        Stmt *s = new_stmt(p, ST_FOR, t.line);
+        expect(p, TC_TK_LPAREN, str_lit("expected '('"));
+        // init: empty | decl | expr
+        if (cur(p).kind == TC_TK_SEMI) {
+            p->i++;
+            s->for_init = NULL;
+        } else if (cur(p).kind == TC_TK_KW_INT || cur(p).kind == TC_TK_KW_FLOAT) {
+            s->for_init = parse_decl(p, /*require_semi*/ true);
+        } else {
+            Stmt *es = new_stmt(p, ST_EXPR, cur(p).line);
+            es->expr = parse_expr(p);
+            expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+            s->for_init = es;
+        }
+        // cond: empty means "true"
+        if (cur(p).kind != TC_TK_SEMI) s->cond = parse_expr(p);
+        expect(p, TC_TK_SEMI, str_lit("expected ';' after for-cond"));
+        // step: empty allowed
+        if (cur(p).kind != TC_TK_RPAREN) s->for_step = parse_expr(p);
+        expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
+        parse_block(p, &s->for_body);
+        return s;
+    }
     if (t.kind == TC_TK_KW_PRINT) {
         p->i++;
         Stmt *s = new_stmt(p, ST_PRINT, t.line);
@@ -273,17 +389,8 @@ static Stmt *parse_stmt(P *p) {
         expect(p, TC_TK_SEMI, str_lit("expected ';'"));
         return s;
     }
-    if (t.kind == TC_TK_KW_INT) {
-        p->i++;
-        TcTok name = cur(p);
-        expect(p, TC_TK_IDENT, str_lit("expected identifier"));
-        Stmt *s = new_stmt(p, ST_DECL, t.line);
-        s->decl_name = name.text;
-        if (accept(p, TC_TK_ASSIGN)) {
-            s->decl_init = parse_expr(p);
-        }
-        expect(p, TC_TK_SEMI, str_lit("expected ';'"));
-        return s;
+    if (t.kind == TC_TK_KW_INT || t.kind == TC_TK_KW_FLOAT) {
+        return parse_decl(p, /*require_semi*/ true);
     }
     // expression statement (covers assignments and calls)
     Stmt *s = new_stmt(p, ST_EXPR, t.line);

@@ -5,21 +5,23 @@
 // upstream MLIR directly; the whole point of this example is to prove
 // that a compiler can be written against the public API.
 //
-// Subset of C supported in this iteration:
-//   - Types: int (i32) only
-//   - Local variables (declared with `int`, mutable)
-//   - Integer literals
-//   - Binary ops: + - * / %
-//   - Comparisons: < <= > >= == !=
-//   - Logical: && || ! (lowered via short-circuit + select)
-//   - Assignments
-//   - if / else, while
+// Subset of C supported:
+//   - Types (locals only): int (i32), float (f32), int[N], int* (alias)
+//   - Local variables (mutable)
+//   - Integer and float literals
+//   - Binary ops: + - * / (% on int only)
+//   - Comparisons: < <= > >= == != (int and float)
+//   - Logical: && || ! (short-circuit, int operands)
+//   - Assignments to general lvalues: x, a[i], *p
+//   - if / else, while, for
+//   - break, continue, early return
+//   - Address-of (&x) and dereference (*p) — alias-only pointers
 //   - Functions with int parameters returning int
 //   - `print(expr);` builtin -> vector.print
 //   - Top-level entry point: int main()
 //
-// Not yet supported: arrays, pointers, structs, char/string, float,
-// for-loops, break/continue.
+// Not supported: structs, strings, pointer reassignment, pointer
+// arithmetic, arrays-of-pointer, function pointers, float params.
 #pragma once
 
 #include <stdbool.h>
@@ -33,13 +35,33 @@
 
 // ---------------- AST ----------------
 
+// Type kinds known to the parser. The emitter computes per-expression
+// MLIR types on the fly; this tag is just enough to (a) decide what
+// memref to allocate for a declaration, (b) drive lvalue/address mode,
+// and (c) decide between integer/float arithmetic ops in the emitter.
+typedef enum {
+    TY_I32,
+    TY_F32,
+    TY_PTR_I32,        // alias-only pointer to int
+    TY_ARRAY_I32,      // fixed-size int[N], length in `array_len`
+} TypeKind;
+
+typedef struct {
+    TypeKind kind;
+    int64_t  array_len;
+} Type;
+
 typedef enum {
     EX_INT,            // integer literal
-    EX_VAR,            // variable reference
+    EX_FLOAT,          // float literal
+    EX_VAR,            // variable reference (lvalue when used as such)
     EX_BIN,            // binary op (kind in `op`)
     EX_UN,             // unary op
     EX_CALL,           // function call
-    EX_ASSIGN,         // var = expr
+    EX_ASSIGN,         // lvalue = expr
+    EX_INDEX,          // a[i]
+    EX_ADDR,           // &x
+    EX_DEREF,          // *p
 } ExprKind;
 
 typedef enum {
@@ -57,7 +79,9 @@ struct Expr {
     ExprKind kind;
     // For EX_INT
     int64_t int_value;
-    // For EX_VAR / EX_ASSIGN
+    // For EX_FLOAT
+    double float_value;
+    // For EX_VAR
     string name;
     // For EX_BIN / EX_UN
     BinOp op;
@@ -67,19 +91,24 @@ struct Expr {
     string callee;
     VecExprPtr args;
     // For EX_ASSIGN
+    Expr *lvalue;          // an lvalue expression (EX_VAR / EX_INDEX / EX_DEREF)
     Expr *rhs_assign;
-    // Source line for diagnostics
+    // For EX_INDEX (lhs = array, rhs = index)
+    // For EX_ADDR / EX_DEREF (lhs = inner)
     int line;
 };
 
 typedef enum {
     ST_EXPR,           // expression-statement (e.g. f(x);)
-    ST_DECL,           // int x = expr;
+    ST_DECL,           // <type> name [= expr];
     ST_RETURN,         // return expr;
     ST_IF,             // if (c) { then } [else { else }]
     ST_WHILE,          // while (c) { body }
+    ST_FOR,            // for (init; cond; step) body
     ST_BLOCK,          // { ... }
     ST_PRINT,          // print(expr);
+    ST_BREAK,          // break;
+    ST_CONTINUE,       // continue;
 } StmtKind;
 
 typedef struct Stmt Stmt;
@@ -91,15 +120,19 @@ struct Stmt {
     // ST_EXPR / ST_RETURN / ST_PRINT
     Expr *expr;
     // ST_DECL
+    Type  decl_type;
     string decl_name;
     Expr *decl_init;
-    // ST_IF
+    // ST_IF / ST_WHILE / ST_FOR
     Expr *cond;
     VecStmtPtr then_body;
     VecStmtPtr else_body;
     bool has_else;
-    // ST_WHILE
     VecStmtPtr while_body;
+    // ST_FOR
+    Stmt *for_init;
+    Expr *for_step;
+    VecStmtPtr for_body;
     // ST_BLOCK
     VecStmtPtr block_body;
     int line;
@@ -130,25 +163,33 @@ typedef struct {
 typedef enum {
     TC_TK_EOF = 0,
     TC_TK_INT_LIT,
+    TC_TK_FLOAT_LIT,
     TC_TK_IDENT,
     TC_TK_KW_INT,
+    TC_TK_KW_FLOAT,
     TC_TK_KW_RETURN,
     TC_TK_KW_IF,
     TC_TK_KW_ELSE,
     TC_TK_KW_WHILE,
+    TC_TK_KW_FOR,
+    TC_TK_KW_BREAK,
+    TC_TK_KW_CONTINUE,
     TC_TK_KW_PRINT,
     TC_TK_LPAREN, TC_TK_RPAREN,
     TC_TK_LBRACE, TC_TK_RBRACE,
+    TC_TK_LBRACK, TC_TK_RBRACK,
     TC_TK_SEMI, TC_TK_COMMA,
     TC_TK_PLUS, TC_TK_MINUS, TC_TK_STAR, TC_TK_SLASH, TC_TK_PERCENT,
     TC_TK_LT, TC_TK_LE, TC_TK_GT, TC_TK_GE, TC_TK_EQEQ, TC_TK_NE,
     TC_TK_ASSIGN, TC_TK_BANG,
+    TC_TK_AMP,
     TC_TK_AMPAMP, TC_TK_PIPEPIPE,
 } TcTokKind;
 
 typedef struct {
     TcTokKind kind;
     int64_t int_value;
+    double  float_value;
     string text;             // interned identifier text (for IDENT)
     int line;
 } TcTok;

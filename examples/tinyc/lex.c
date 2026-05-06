@@ -14,12 +14,16 @@ static bool is_digit(char c) { return c >= '0' && c <= '9'; }
 static bool is_alnum(char c) { return is_alpha(c) || is_digit(c); }
 
 static TcTokKind keyword_or_ident(string s) {
-    if (str_eq(s, str_lit("int")))    return TC_TK_KW_INT;
-    if (str_eq(s, str_lit("return"))) return TC_TK_KW_RETURN;
-    if (str_eq(s, str_lit("if")))     return TC_TK_KW_IF;
-    if (str_eq(s, str_lit("else")))   return TC_TK_KW_ELSE;
-    if (str_eq(s, str_lit("while")))  return TC_TK_KW_WHILE;
-    if (str_eq(s, str_lit("print")))  return TC_TK_KW_PRINT;
+    if (str_eq(s, str_lit("int")))      return TC_TK_KW_INT;
+    if (str_eq(s, str_lit("float")))    return TC_TK_KW_FLOAT;
+    if (str_eq(s, str_lit("return")))   return TC_TK_KW_RETURN;
+    if (str_eq(s, str_lit("if")))       return TC_TK_KW_IF;
+    if (str_eq(s, str_lit("else")))     return TC_TK_KW_ELSE;
+    if (str_eq(s, str_lit("while")))    return TC_TK_KW_WHILE;
+    if (str_eq(s, str_lit("for")))      return TC_TK_KW_FOR;
+    if (str_eq(s, str_lit("break")))    return TC_TK_KW_BREAK;
+    if (str_eq(s, str_lit("continue"))) return TC_TK_KW_CONTINUE;
+    if (str_eq(s, str_lit("print")))    return TC_TK_KW_PRINT;
     return TC_TK_IDENT;
 }
 
@@ -41,6 +45,39 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
             while (j < src.size && is_digit(src.str[j])) {
                 v = v * 10 + (src.str[j] - '0');
                 j++;
+            }
+            // Float literal: <digits>.<digits>[ (e|E)[+-]?<digits> ]
+            if (j < src.size && src.str[j] == '.' &&
+                j + 1 < src.size && is_digit(src.str[j + 1])) {
+                double f = (double)v;
+                j++; // consume '.'
+                double scale = 0.1;
+                while (j < src.size && is_digit(src.str[j])) {
+                    f += (double)(src.str[j] - '0') * scale;
+                    scale *= 0.1;
+                    j++;
+                }
+                if (j < src.size && (src.str[j] == 'e' || src.str[j] == 'E')) {
+                    j++;
+                    int sign = 1;
+                    if (j < src.size && (src.str[j] == '+' || src.str[j] == '-')) {
+                        if (src.str[j] == '-') sign = -1;
+                        j++;
+                    }
+                    int exp = 0;
+                    while (j < src.size && is_digit(src.str[j])) {
+                        exp = exp * 10 + (src.str[j] - '0');
+                        j++;
+                    }
+                    double m = 1.0;
+                    for (int k = 0; k < exp; k++) m *= 10.0;
+                    if (sign < 0) f /= m; else f *= m;
+                }
+                // Optional 'f'/'F' suffix
+                if (j < src.size && (src.str[j] == 'f' || src.str[j] == 'F')) j++;
+                TcTok t = (TcTok){.kind = TC_TK_FLOAT_LIT, .float_value = f, .line = line};
+                VecTcTok_push_back(arena, &toks, t);
+                i = j; continue;
             }
             TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
             VecTcTok_push_back(arena, &toks, t);
@@ -72,6 +109,8 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                 case ')': k = TC_TK_RPAREN; break;
                 case '{': k = TC_TK_LBRACE; break;
                 case '}': k = TC_TK_RBRACE; break;
+                case '[': k = TC_TK_LBRACK; break;
+                case ']': k = TC_TK_RBRACK; break;
                 case ';': k = TC_TK_SEMI; break;
                 case ',': k = TC_TK_COMMA; break;
                 case '+': k = TC_TK_PLUS; break;
@@ -83,6 +122,7 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                 case '>': k = TC_TK_GT; break;
                 case '=': k = TC_TK_ASSIGN; break;
                 case '!': k = TC_TK_BANG; break;
+                case '&': k = TC_TK_AMP; break;
                 default: {
                     println(str_lit("tinyc lex error at line {}: unexpected '{}'"),
                             (int64_t)line, str_substr(src, i, 1));
