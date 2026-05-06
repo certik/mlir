@@ -276,29 +276,13 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     op.n_operands = n_operands;
     op.regions = regions;
     op.n_regions = n_regions;
-    if (n_successors > 0 && successors) {
-        MLIR_BlockHandle *s_copy = arena_new_array(ctx->arena, MLIR_BlockHandle, n_successors);
-        memcpy(s_copy, successors, n_successors * sizeof(MLIR_BlockHandle));
-        op.successors = s_copy;
-        op.n_successors = n_successors;
-        if (successor_operands && n_successor_operands) {
-            uint64_t *nso = arena_new_array(ctx->arena, uint64_t, n_successors);
-            MLIR_ValueHandle **sop = arena_new_array(ctx->arena, MLIR_ValueHandle *, n_successors);
-            for (size_t s = 0; s < n_successors; s++) {
-                size_t k = n_successor_operands[s];
-                nso[s] = k;
-                if (k > 0) {
-                    MLIR_ValueHandle *vs = arena_new_array(ctx->arena, MLIR_ValueHandle, k);
-                    memcpy(vs, successor_operands[s], k * sizeof(MLIR_ValueHandle));
-                    sop[s] = vs;
-                } else {
-                    sop[s] = NULL;
-                }
-            }
-            op.successor_operands = sop;
-            op.n_successor_operands = nso;
-        }
-    }
+    op.successors = successors;
+    op.n_successors = n_successors;
+    op.successor_operands = successor_operands;
+    // The native IR_Op stores n_successor_operands as uint64_t* for layout
+    // stability, but the public API uses size_t* (caller-owned arena array).
+    // On 64-bit targets these are identical; we simply alias the pointer.
+    op.n_successor_operands = (uint64_t *)n_successor_operands;
     op.location = location;
     op.unnumbered_loc_def = unnumbered_loc_def;
     op.trailing_comment = trailing_comment;

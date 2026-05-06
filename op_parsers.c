@@ -1338,9 +1338,12 @@ OperationParserResult parse_cf_br_op(Parser *parser, const OperationParserParams
 
     // Successor: resolve label to a (possibly forward-referenced) block.
     MLIR_BlockHandle target_block = parser_get_or_create_block(parser, target);
-    MLIR_BlockHandle successors[1] = { target_block };
-    MLIR_ValueHandle *succ_operands_arrs[1] = { branch_args.data };
-    size_t succ_operand_counts[1] = { branch_args.size };
+    MLIR_BlockHandle *successors = arena_new_array(parser->arena, MLIR_BlockHandle, 1);
+    successors[0] = target_block;
+    MLIR_ValueHandle **succ_operands_arrs = arena_new_array(parser->arena, MLIR_ValueHandle *, 1);
+    succ_operands_arrs[0] = branch_args.data;
+    size_t *succ_operand_counts = arena_new_array(parser->arena, size_t, 1);
+    succ_operand_counts[0] = branch_args.size;
 
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(parser->ctx,
         params->op_type,
@@ -1450,9 +1453,15 @@ OperationParserResult parse_cf_cond_br_op(Parser *parser, const OperationParserP
 
     MLIR_BlockHandle true_blk = parser_get_or_create_block(parser, ttrue);
     MLIR_BlockHandle false_blk = parser_get_or_create_block(parser, tfalse);
-    MLIR_BlockHandle successors[2] = { true_blk, false_blk };
-    MLIR_ValueHandle *succ_operands_arrs[2] = { true_args.data, false_args.data };
-    size_t succ_operand_counts[2] = { true_args.size, false_args.size };
+    MLIR_BlockHandle *successors = arena_new_array(parser->arena, MLIR_BlockHandle, 2);
+    successors[0] = true_blk;
+    successors[1] = false_blk;
+    MLIR_ValueHandle **succ_operands_arrs = arena_new_array(parser->arena, MLIR_ValueHandle *, 2);
+    succ_operands_arrs[0] = true_args.data;
+    succ_operands_arrs[1] = false_args.data;
+    size_t *succ_operand_counts = arena_new_array(parser->arena, size_t, 2);
+    succ_operand_counts[0] = true_args.size;
+    succ_operand_counts[1] = false_args.size;
 
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(parser->ctx,
         params->op_type,
