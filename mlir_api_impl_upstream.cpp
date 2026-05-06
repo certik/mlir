@@ -849,6 +849,65 @@ extern "C" MLIR_TypeHandle MLIR_CreateTypeLLVMArray(MLIR_Context *, MLIR_TypeHan
     return typeH(mlir::LLVM::LLVMArrayType::get(typeF(elem), count));
 }
 
+extern "C" MLIR_OpHandle MLIR_CreateLLVMGlobalString(MLIR_Context *,
+                                                     string sym_name,
+                                                     string bytes,
+                                                     MLIR_LocationHandle location) {
+    auto &ctx = globalCtx().mctx;
+    mlir::Location loc = (location == MLIR_INVALID_HANDLE)
+                             ? mlir::Location(mlir::UnknownLoc::get(&ctx))
+                             : locF(location);
+    auto i8 = mlir::IntegerType::get(&ctx, 8);
+    auto arrTy = mlir::LLVM::LLVMArrayType::get(i8, bytes.size);
+    auto strAttr = mlir::StringAttr::get(&ctx,
+        llvm::StringRef(bytes.str, bytes.size));
+    mlir::OpBuilder b(&ctx);
+    auto op = b.create<mlir::LLVM::GlobalOp>(
+        loc, arrTy, /*isConstant=*/true,
+        mlir::LLVM::Linkage::Private,
+        llvm::StringRef(sym_name.str, sym_name.size),
+        strAttr, /*alignment=*/0);
+    return H(op.getOperation());
+}
+
+extern "C" MLIR_OpHandle MLIR_CreateLLVMGlobal(MLIR_Context *,
+                                               string sym_name,
+                                               MLIR_TypeHandle elem_ty,
+                                               bool is_constant,
+                                               int init_kind,
+                                               int64_t init_int,
+                                               double init_float,
+                                               MLIR_BlockHandle *out_init_block,
+                                               MLIR_LocationHandle location) {
+    auto &ctx = globalCtx().mctx;
+    mlir::Location loc = (location == MLIR_INVALID_HANDLE)
+                             ? mlir::Location(mlir::UnknownLoc::get(&ctx))
+                             : locF(location);
+    mlir::Type ty = typeF(elem_ty);
+    mlir::Attribute initAttr;
+    if (init_kind == 0) {
+        initAttr = mlir::IntegerAttr::get(ty, init_int);
+    } else if (init_kind == 1) {
+        initAttr = mlir::FloatAttr::get(ty, init_float);
+    }
+    mlir::OpBuilder b(&ctx);
+    auto op = b.create<mlir::LLVM::GlobalOp>(
+        loc, ty, is_constant,
+        mlir::LLVM::Linkage::Internal,
+        llvm::StringRef(sym_name.str, sym_name.size),
+        initAttr, /*alignment=*/0);
+    if (init_kind == 2) {
+        // Caller will populate the entry block.
+        mlir::Region &region = op.getInitializerRegion();
+        mlir::Block *entry = new mlir::Block();
+        region.push_back(entry);
+        if (out_init_block) *out_init_block = H(entry);
+    } else if (out_init_block) {
+        *out_init_block = MLIR_INVALID_HANDLE;
+    }
+    return H(op.getOperation());
+}
+
 extern "C" MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle h) {
     auto value = F<mlir::NamedAttribute>(h)->getValue();
     if (llvm::isa<mlir::StringAttr>(value))  return MLIR_ATTR_KIND_STRING;

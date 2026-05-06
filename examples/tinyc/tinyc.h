@@ -42,11 +42,39 @@
 //   - Pointer comparisons `p == null`, `p != null`, `p == q` use
 //     llvm.icmp.
 //
-// Not supported: strings, int* reassignment, pointer arithmetic,
-// arrays-of-pointer, function pointers, returning struct*, array-of-
-// struct as a function parameter or return, &<sub-struct-field>, struct
-// literal initialization, struct copy `q = p;` (use a wrapper or
-// field-by-field assignment).
+// Tier-1 extensions:
+//   - String literals "..." (with backslash escapes \n \t \r \\ \" \0)
+//     evaluate to a `char*` (lowered as `!llvm.ptr` to a private
+//     `!llvm.array<N x i8>` constant emitted at module scope). Pass them
+//     to `print(...)` to get string output (newline appended), or to a
+//     `char*` parameter / global.
+//   - Module-scope globals: `int g; int g = 42; float f = 1.5; char *m = "...";`
+//     are emitted as `llvm.mlir.global` and read/written via
+//     `llvm.mlir.addressof` + `llvm.load`/`llvm.store`. Initializers must
+//     be literals (int / float / `null` / string).
+//   - `char` keyword + `char*` type. Standalone `char` arithmetic is NOT
+//     supported; the only use of `char` in this PR is via `char*`
+//     pointers, populated from string literals / casts, and printed.
+//   - Compound assignment: `+= -= *= /= %= &= |= ^= <<= >>=` desugar to
+//     `lhs = lhs OP rhs` (the lvalue is evaluated twice — keep it
+//     simple: a plain variable / field / `arr[i]` with side-effect-free
+//     index).
+//   - `++x` / `--x` (prefix) and `x++` / `x--` (postfix) desugar to
+//     `x = x ± 1`. Both forms produce the *new* value (post-increment
+//     value semantics differ from C; only safe in expression-statements
+//     and for-step contexts).
+//   - Bitwise `& | ^ ~` and shifts `<< >>` on `int` (i32) with C
+//     precedence (`<< >>` between `+ -` and `<`; `&` `^` `|` between
+//     `==` and `&&`).
+//   - Ternary `cond ? a : b` lowering via `cf.cond_br` + a merge block
+//     with one block-arg (same shape as the existing `&&`/`||` lowering).
+//
+// Not supported: int* reassignment, pointer arithmetic, arrays-of-pointer,
+// function pointers, returning struct*, array-of-struct as a function
+// parameter or return, &<sub-struct-field>, struct literal initialization,
+// struct copy `q = p;` (use a wrapper or field-by-field assignment),
+// reading individual chars out of a `char*` (`p[i]`), char[N] arrays,
+// expression-level char arithmetic.
 #pragma once
 
 #include <stdbool.h>
@@ -68,6 +96,7 @@ typedef enum {
     TY_I32,
     TY_F32,
     TY_PTR_I32,        // alias-only pointer to int
+    TY_PTR_CHAR,       // pointer to char (string literals / globals)
     TY_ARRAY_I32,      // fixed-size int[N], length in `array_len`
     TY_STRUCT,         // struct value (fields stored as flat per-leaf scalars)
     TY_PTR_STRUCT,     // alias-only pointer to struct (bundle of memref aliases)
@@ -83,6 +112,7 @@ typedef struct {
 typedef enum {
     EX_INT,            // integer literal
     EX_FLOAT,          // float literal
+    EX_STR,            // string literal (name = decoded bytes incl. NUL)
     EX_NULL,           // null pointer literal
     EX_SIZEOF,         // sizeof(<type>) — uses cast_type
     EX_CAST,           // (T*)expr  — uses cast_type and lhs
@@ -95,13 +125,17 @@ typedef enum {
     EX_ADDR,           // &x
     EX_DEREF,          // *p
     EX_FIELD,          // s.x  (lhs = struct lvalue, name = field name)
+    EX_TERNARY,        // c ? a : b — lhs=cond, rhs=then, lvalue=else
 } ExprKind;
 
 typedef enum {
     OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
     OP_LT, OP_LE, OP_GT, OP_GE, OP_EQ, OP_NE,
     OP_AND, OP_OR,                // logical && || (short-circuit)
+    OP_BAND, OP_BOR, OP_BXOR,     // bitwise & | ^
+    OP_SHL, OP_SHR,               // shifts << >>
     OP_NEG, OP_NOT,               // unary - !
+    OP_BNOT,                      // unary ~
 } BinOp;
 
 typedef struct Expr Expr;
@@ -210,9 +244,28 @@ typedef struct StructDef {
 
 DEFINE_VECTOR_FOR_TYPE(StructDef*, VecStructDefPtr)
 
+// Module-scope global variable. Restricted to literal initializers:
+//   int g;          (zero)
+//   int g = 42;     (init_int)
+//   float f = 1.5;  (init_float)
+//   char *s = "hi"; (init_str carries the decoded bytes incl. NUL)
+//   int *p = null;  (TY_PTR_I32 + has_init=true, init_int=0 means null)
+typedef struct {
+    string  name;
+    Type    type;
+    bool    has_init;
+    int64_t init_int;
+    double  init_float;
+    string  init_str;       // for TY_PTR_CHAR initialized from string literal
+    int     line;
+} Global;
+
+DEFINE_VECTOR_FOR_TYPE(Global, VecGlobal)
+
 typedef struct {
     VecFuncPtr      funcs;
     VecStructDefPtr structs;
+    VecGlobal       globals;
 } Program;
 
 // ---------------- Lexer ----------------
@@ -235,6 +288,8 @@ typedef enum {
     TC_TK_KW_STRUCT,
     TC_TK_KW_NULL,
     TC_TK_KW_SIZEOF,
+    TC_TK_KW_CHAR,
+    TC_TK_STRING_LIT,
     TC_TK_LPAREN, TC_TK_RPAREN,
     TC_TK_LBRACE, TC_TK_RBRACE,
     TC_TK_LBRACK, TC_TK_RBRACK,
@@ -243,7 +298,13 @@ typedef enum {
     TC_TK_LT, TC_TK_LE, TC_TK_GT, TC_TK_GE, TC_TK_EQEQ, TC_TK_NE,
     TC_TK_ASSIGN, TC_TK_BANG,
     TC_TK_AMP,
+    TC_TK_PIPE, TC_TK_CARET, TC_TK_TILDE,
+    TC_TK_SHL, TC_TK_SHR,
     TC_TK_AMPAMP, TC_TK_PIPEPIPE,
+    TC_TK_PLUSEQ, TC_TK_MINUSEQ, TC_TK_STAREQ, TC_TK_SLASHEQ, TC_TK_PERCENTEQ,
+    TC_TK_AMPEQ, TC_TK_PIPEEQ, TC_TK_CARETEQ, TC_TK_SHLEQ, TC_TK_SHREQ,
+    TC_TK_PLUSPLUS, TC_TK_MINUSMINUS,
+    TC_TK_QUESTION, TC_TK_COLON,
     TC_TK_ARROW,                  // ->  (sugar for (*p).field)
 } TcTokKind;
 

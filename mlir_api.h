@@ -160,6 +160,12 @@ typedef enum {
     OP_TYPE_LLVM_MLIR_ZERO,
     OP_TYPE_LLVM_MLIR_CONSTANT,
     OP_TYPE_LLVM_ICMP,
+    OP_TYPE_LLVM_MLIR_ADDRESSOF,
+    OP_TYPE_LLVM_MLIR_GLOBAL,
+    OP_TYPE_LLVM_RETURN,
+    OP_TYPE_ARITH_XORI,
+    OP_TYPE_ARITH_SHLI,
+    OP_TYPE_ARITH_SHRSI,
 
     // Return operations
     OP_TYPE_RETURN,
@@ -338,6 +344,35 @@ MLIR_TypeHandle MLIR_CreateTypeLLVMStructIdentified(MLIR_Context *ctx, string na
 void            MLIR_SetTypeLLVMStructBody(MLIR_Context *ctx, MLIR_TypeHandle struct_ty,
                                            const MLIR_TypeHandle *fields, size_t n_fields);
 MLIR_TypeHandle MLIR_CreateTypeLLVMArray(MLIR_Context *ctx, MLIR_TypeHandle elem, uint64_t count);
+
+// LLVM-dialect global helpers. Each returns a freshly-created (unattached)
+// op; the caller appends it to the module body. Implemented by the
+// upstream backend; the native backend returns MLIR_INVALID_HANDLE.
+//
+// MLIR_CreateLLVMGlobalString: emits
+//   llvm.mlir.global private constant @<sym>("<bytes>") : !llvm.array<N x i8>
+//
+// MLIR_CreateLLVMGlobal: emits
+//   llvm.mlir.global internal @<sym>(<init>) : <elem_ty>
+// Init shapes:
+//   init_kind == 0  -> simple integer initializer (init_int)
+//   init_kind == 1  -> simple float initializer (init_float)
+//   init_kind == 2  -> region initializer: caller emits ops into
+//                      *out_init_block and terminates with llvm.return.
+//   init_kind == 3  -> no initializer (zero-initialized).
+MLIR_OpHandle MLIR_CreateLLVMGlobalString(MLIR_Context *ctx,
+                                          string sym_name,
+                                          string bytes,
+                                          MLIR_LocationHandle loc);
+MLIR_OpHandle MLIR_CreateLLVMGlobal(MLIR_Context *ctx,
+                                    string sym_name,
+                                    MLIR_TypeHandle elem_ty,
+                                    bool is_constant,
+                                    int init_kind,
+                                    int64_t init_int,
+                                    double init_float,
+                                    MLIR_BlockHandle *out_init_block,
+                                    MLIR_LocationHandle loc);
 
 MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *ctx, string name);
 // Function type: (input_types) -> (result_types). Both arrays are

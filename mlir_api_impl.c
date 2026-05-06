@@ -736,6 +736,25 @@ MLIR_TypeHandle MLIR_CreateTypeLLVMArray(MLIR_Context *ctx, MLIR_TypeHandle elem
     return alloc_type(ctx, t);
 }
 
+// LLVM-dialect global helpers — not implemented natively. These features
+// (string literals / module-scope globals) are exercised only via the
+// upstream backend in tinyc.
+MLIR_OpHandle MLIR_CreateLLVMGlobalString(MLIR_Context *ctx, string sym_name,
+                                          string bytes, MLIR_LocationHandle loc) {
+    (void)ctx; (void)sym_name; (void)bytes; (void)loc;
+    return MLIR_INVALID_HANDLE;
+}
+MLIR_OpHandle MLIR_CreateLLVMGlobal(MLIR_Context *ctx, string sym_name,
+                                    MLIR_TypeHandle elem_ty, bool is_constant,
+                                    int init_kind, int64_t init_int, double init_float,
+                                    MLIR_BlockHandle *out_init_block,
+                                    MLIR_LocationHandle loc) {
+    (void)ctx; (void)sym_name; (void)elem_ty; (void)is_constant;
+    (void)init_kind; (void)init_int; (void)init_float; (void)loc;
+    if (out_init_block) *out_init_block = MLIR_INVALID_HANDLE;
+    return MLIR_INVALID_HANDLE;
+}
+
 MLIR_TypeHandle MLIR_CreateTypeFunction(MLIR_Context *ctx,
                                          const MLIR_TypeHandle *inputs, size_t n_inputs,
                                          const MLIR_TypeHandle *results, size_t n_results) {

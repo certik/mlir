@@ -87,6 +87,12 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_LLVM_MLIR_ZERO: return str_lit("llvm.mlir.zero");
         case OP_TYPE_LLVM_MLIR_CONSTANT: return str_lit("llvm.mlir.constant");
         case OP_TYPE_LLVM_ICMP: return str_lit("llvm.icmp");
+        case OP_TYPE_LLVM_MLIR_ADDRESSOF: return str_lit("llvm.mlir.addressof");
+        case OP_TYPE_LLVM_MLIR_GLOBAL: return str_lit("llvm.mlir.global");
+        case OP_TYPE_LLVM_RETURN: return str_lit("llvm.return");
+        case OP_TYPE_ARITH_XORI: return str_lit("arith.xori");
+        case OP_TYPE_ARITH_SHLI: return str_lit("arith.shli");
+        case OP_TYPE_ARITH_SHRSI: return str_lit("arith.shrsi");
         case OP_TYPE_RETURN: return str_lit("return");
         case OP_TYPE_TT_REDUCE_RETURN: return str_lit("tt.reduce.return");
         default: return str_lit("unknown");

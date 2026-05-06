@@ -81,3 +81,23 @@ expected_stdout = "4\n4\n8\n16\n"
 [[test]]
 name = "struct_ptr_return"
 expected_stdout = "60\n99\n99\n99\n"
+
+[[test]]
+name = "hello_world"
+expected_stdout = "Hello, world!\nFoo\n\n"
+
+[[test]]
+name = "globals"
+expected_stdout = "Hi\n1\n3\n30\n3\n"
+
+[[test]]
+name = "compound_ops"
+expected_stdout = "15\n13\n39\n9\n4\n10\n2\n1\n"
+
+[[test]]
+name = "bitwise"
+expected_stdout = "1\n7\n6\n-1\n8\n4\n8\n5\n2\n16\n4\n"
+
+[[test]]
+name = "ternary"
+expected_stdout = "7\n3\n5\n3\n1\n"
