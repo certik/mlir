@@ -168,6 +168,9 @@ shrink.
   exit code etc.), `tests/reference/` (committed reference output),
   `run_tests.py` (test runner), `tests/mutation_check.py` (test-infra
   mutation sanity check).
+* `examples/tinyc/` — an end-to-end compiler example: a tiny C subset
+  compiled to a native binary using only `mlir_api.h`. See
+  `examples/tinyc/README.md`.
 
 ## Tokenizer design
 

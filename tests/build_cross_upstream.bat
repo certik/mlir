@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 REM Get LLVM static libs from llvm-config (Windows MSVC build emits .lib paths).
-for /f "delims=" %%i in ('"%CONDA_PREFIX%\Library\bin\llvm-config.exe" --link-static --libs support core') do set LLVM_LIBS=%%i
+for /f "delims=" %%i in ('"%CONDA_PREFIX%\Library\bin\llvm-config.exe" --link-static --libs support core analysis transformutils frontendopenmp') do set LLVM_LIBS=%%i
 if errorlevel 1 exit /b 1
 
 REM Link all MLIR static libraries shipped by conda-forge. This pulls in

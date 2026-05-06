@@ -19,6 +19,7 @@ jobs:
               pixi run -e wasm test_wasm
               pixi run -e upstream test_cross
               pixi run -e upstream validate_refs
+              pixi run -e upstream test_tinyc_upstream
           - platform: macos
             os: macos-latest
             pixi-command: |
@@ -26,6 +27,7 @@ jobs:
               pixi run -e wasm test_wasm
               pixi run -e upstream test_cross
               pixi run -e upstream validate_refs
+              pixi run -e upstream test_tinyc_upstream
           - platform: windows
             os: windows-latest
             pixi-command: |

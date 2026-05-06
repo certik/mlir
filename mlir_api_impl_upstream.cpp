@@ -50,6 +50,21 @@
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Pass/Pass.h"
+#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
+#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
+#include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVMPass.h"
+#include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
+#include "mlir/Target/LLVMIR/Export.h"
+#include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
+#include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+
 extern "C" {
 #include "mlir_api.h"
 #include "mlir_op_names.h"
@@ -788,6 +803,12 @@ extern "C" MLIR_AttributeHandle MLIR_CreateAttributeType(MLIR_Context *, string 
     return makeNamedAttr(llvm::StringRef(name.str, name.size),
                          mlir::TypeAttr::get(typeF(type)));
 }
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeSymbolRef(MLIR_Context *, string name, string value) {
+    auto &ctx = globalCtx().mctx;
+    return makeNamedAttr(llvm::StringRef(name.str, name.size),
+                         mlir::FlatSymbolRefAttr::get(&ctx,
+                             llvm::StringRef(value.str, value.size)));
+}
 
 extern "C" MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle h) {
     auto value = F<mlir::NamedAttribute>(h)->getValue();
@@ -947,4 +968,58 @@ extern "C" MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle h) {
 
 extern "C" string MLIR_MLIR_OpTypeToString(MLIR_OpType type) {
     return op_type_to_string(type);
+}
+
+// -----------------------------------------------------------------------------
+// Lowering to LLVM dialect + translation to LLVM IR text
+// -----------------------------------------------------------------------------
+
+extern "C" bool MLIR_LowerToLLVMDialect(MLIR_Context *, MLIR_OpHandle module_h) {
+    auto *op = F<mlir::Operation>(module_h);
+    auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
+    if (!module) {
+        std::fprintf(stderr, "MLIR_LowerToLLVMDialect: handle is not a ModuleOp\n");
+        return false;
+    }
+    auto &ctx = globalCtx().mctx;
+    mlir::PassManager pm(&ctx);
+    pm.addPass(mlir::createConvertSCFToCFPass());
+    pm.addPass(mlir::createConvertVectorToLLVMPass());
+    pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
+    pm.addPass(mlir::createConvertControlFlowToLLVMPass());
+    pm.addPass(mlir::createArithToLLVMConversionPass());
+    pm.addPass(mlir::createConvertFuncToLLVMPass());
+    pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+    if (mlir::failed(pm.run(module))) {
+        std::fprintf(stderr, "MLIR_LowerToLLVMDialect: pass pipeline failed\n");
+        return false;
+    }
+    return true;
+}
+
+extern "C" string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module_h) {
+    auto *op = F<mlir::Operation>(module_h);
+    auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
+    if (!module) {
+        std::fprintf(stderr, "MLIR_TranslateModuleToLLVMIR: not a ModuleOp\n");
+        return mkRefString(llvm::StringRef());
+    }
+    // Register the LLVM-IR translation interfaces (idempotent).
+    mlir::registerBuiltinDialectTranslation(globalCtx().mctx);
+    mlir::registerLLVMDialectTranslation(globalCtx().mctx);
+
+    llvm::LLVMContext llctx;
+    auto llmod = mlir::translateModuleToLLVMIR(module, llctx);
+    if (!llmod) {
+        std::fprintf(stderr, "MLIR_TranslateModuleToLLVMIR: translation failed\n");
+        return mkRefString(llvm::StringRef());
+    }
+    std::string out;
+    llvm::raw_string_ostream os(out);
+    llmod->print(os, nullptr);
+    os.flush();
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
+    char *buf = (char*)arena_alloc(arena, out.size());
+    std::memcpy(buf, out.data(), out.size());
+    return (string){.str = buf, .size = out.size()};
 }

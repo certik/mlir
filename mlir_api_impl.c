@@ -844,6 +844,18 @@ MLIR_AttributeHandle MLIR_CreateAttributeType(MLIR_Context *ctx, string name, ML
     return alloc_attr_obj(ctx, a);
 }
 
+// Native backend stores SymbolRef as a plain string attribute with the
+// symbol name (without leading `@`). This is sufficient for printing —
+// the classic printer prepends `@` when emitting `callee = @sym_name`
+// for func.call. Verifier-style validation is not performed natively.
+MLIR_AttributeHandle MLIR_CreateAttributeSymbolRef(MLIR_Context *ctx, string name, string value) {
+    IR_Attribute a = {0};
+    a.kind = ATTR_KIND_STRING;
+    a.name = name;
+    a.data.string_value = value;
+    return alloc_attr_obj(ctx, a);
+}
+
 // Value creation
 MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_name, uint32_t result_index, MLIR_TypeHandle type, MLIR_LocationHandle location) {
     IR_Value v = {0};
@@ -1172,6 +1184,18 @@ bool MLIR_IsTypeUnknown(MLIR_TypeHandle th) {
 bool MLIR_IsTypeOpaque(MLIR_TypeHandle th) {
     IR_Type *t = resolve_type(th);
     return t && t->kind == TYPE_KIND_OPAQUE;
+}
+
+// Lowering / LLVM IR translation are upstream-only. Stub them on the
+// native backend so binaries that link only the native impl still resolve.
+bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module) {
+    (void)ctx; (void)module;
+    return false;
+}
+
+string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module) {
+    (void)ctx; (void)module;
+    return str_lit("");
 }
 
 #ifdef __cplusplus
