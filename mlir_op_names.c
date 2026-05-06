@@ -80,6 +80,13 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_LINALG_COPY: return str_lit("linalg.copy");
         case OP_TYPE_INDEX_CONSTANT: return str_lit("index.constant");
         case OP_TYPE_LLVM_MLIR_UNDEF: return str_lit("llvm.mlir.undef");
+        case OP_TYPE_LLVM_ALLOCA: return str_lit("llvm.alloca");
+        case OP_TYPE_LLVM_LOAD: return str_lit("llvm.load");
+        case OP_TYPE_LLVM_STORE: return str_lit("llvm.store");
+        case OP_TYPE_LLVM_GEP: return str_lit("llvm.getelementptr");
+        case OP_TYPE_LLVM_MLIR_ZERO: return str_lit("llvm.mlir.zero");
+        case OP_TYPE_LLVM_MLIR_CONSTANT: return str_lit("llvm.mlir.constant");
+        case OP_TYPE_LLVM_ICMP: return str_lit("llvm.icmp");
         case OP_TYPE_RETURN: return str_lit("return");
         case OP_TYPE_TT_REDUCE_RETURN: return str_lit("tt.reduce.return");
         default: return str_lit("unknown");

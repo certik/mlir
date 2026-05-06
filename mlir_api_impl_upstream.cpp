@@ -810,6 +810,45 @@ extern "C" MLIR_AttributeHandle MLIR_CreateAttributeSymbolRef(MLIR_Context *, st
                              llvm::StringRef(value.str, value.size)));
 }
 
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *, string name,
+                                                                    const int32_t *values, size_t count) {
+    auto &ctx = globalCtx().mctx;
+    llvm::SmallVector<int32_t, 8> v(values, values + count);
+    return makeNamedAttr(llvm::StringRef(name.str, name.size),
+                         mlir::DenseI32ArrayAttr::get(&ctx, v));
+}
+
+extern "C" MLIR_TypeHandle MLIR_CreateTypeLLVMPointer(MLIR_Context *) {
+    auto &ctx = globalCtx().mctx;
+    return typeH(mlir::LLVM::LLVMPointerType::get(&ctx));
+}
+
+extern "C" MLIR_TypeHandle MLIR_CreateTypeLLVMStructIdentified(MLIR_Context *, string name) {
+    auto &ctx = globalCtx().mctx;
+    return typeH(mlir::LLVM::LLVMStructType::getIdentified(&ctx,
+                     llvm::StringRef(name.str, name.size)));
+}
+
+extern "C" void MLIR_SetTypeLLVMStructBody(MLIR_Context *, MLIR_TypeHandle struct_ty,
+                                            const MLIR_TypeHandle *fields, size_t n_fields) {
+    auto t = llvm::dyn_cast<mlir::LLVM::LLVMStructType>(typeF(struct_ty));
+    if (!t) {
+        std::fprintf(stderr, "MLIR_SetTypeLLVMStructBody: not an LLVM struct type\n");
+        return;
+    }
+    llvm::SmallVector<mlir::Type, 8> body;
+    body.reserve(n_fields);
+    for (size_t i = 0; i < n_fields; i++) body.push_back(typeF(fields[i]));
+    if (llvm::failed(t.setBody(body, /*isPacked=*/false))) {
+        std::fprintf(stderr, "MLIR_SetTypeLLVMStructBody: setBody failed (already set?)\n");
+    }
+}
+
+extern "C" MLIR_TypeHandle MLIR_CreateTypeLLVMArray(MLIR_Context *, MLIR_TypeHandle elem,
+                                                     uint64_t count) {
+    return typeH(mlir::LLVM::LLVMArrayType::get(typeF(elem), count));
+}
+
 extern "C" MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle h) {
     auto value = F<mlir::NamedAttribute>(h)->getValue();
     if (llvm::isa<mlir::StringAttr>(value))  return MLIR_ATTR_KIND_STRING;

@@ -52,6 +52,7 @@ static Stmt *new_stmt(P *p, StmtKind k, int line) {
 }
 
 static Expr *parse_expr(P *p);
+static bool parse_sig_type(P *p, Type *out);
 
 // postfix := (...) | [expr] | .ident
 static Expr *parse_postfix(P *p, Expr *base) {
@@ -109,7 +110,39 @@ static Expr *parse_primary(P *p) {
         e->float_value = t.float_value;
         return e;
     }
+    if (t.kind == TC_TK_KW_NULL) {
+        p->i++;
+        Expr *e = new_expr(p, EX_NULL, t.line);
+        return e;
+    }
+    if (t.kind == TC_TK_KW_SIZEOF) {
+        p->i++;
+        expect(p, TC_TK_LPAREN, str_lit("expected '(' after sizeof"));
+        Type ty = {0};
+        if (!parse_sig_type(p, &ty)) {
+            perror_at(p, cur(p).line, str_lit("expected type in sizeof(...)"));
+        }
+        expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
+        Expr *e = new_expr(p, EX_SIZEOF, t.line);
+        e->cast_type = ty;
+        return e;
+    }
     if (t.kind == TC_TK_LPAREN) {
+        // Could be a cast `(T)expr` or a parenthesized expression.
+        TcTokKind nxt = peek(p, 1).kind;
+        if (nxt == TC_TK_KW_INT || nxt == TC_TK_KW_FLOAT || nxt == TC_TK_KW_STRUCT) {
+            p->i++;  // consume '('
+            Type ty = {0};
+            if (!parse_sig_type(p, &ty)) {
+                perror_at(p, cur(p).line, str_lit("expected type in cast"));
+            }
+            expect(p, TC_TK_RPAREN, str_lit("expected ')' in cast"));
+            Expr *operand = parse_primary(p);
+            Expr *e = new_expr(p, EX_CAST, t.line);
+            e->cast_type = ty;
+            e->lhs = operand;
+            return e;
+        }
         p->i++;
         Expr *e = parse_expr(p);
         expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
@@ -522,11 +555,12 @@ static StructDef *parse_struct_def(P *p) {
     while (cur(p).kind != TC_TK_RBRACE && cur(p).kind != TC_TK_EOF) {
         Type ft = {0};
         if (cur(p).kind == TC_TK_KW_STRUCT) {
-            // Nested by-value struct field: `struct Inner name;`
+            // Nested struct field: `struct Inner name;` (by-value) or
+            // `struct Inner* name;` (pointer to struct).
             p->i++;
             TcTok sn = cur(p);
             if (!expect(p, TC_TK_IDENT, str_lit("expected struct name"))) { p->i++; continue; }
-            ft.kind = TY_STRUCT;
+            ft.kind = accept(p, TC_TK_STAR) ? TY_PTR_STRUCT : TY_STRUCT;
             ft.struct_name = sn.text;
         } else {
             TypeKind k;

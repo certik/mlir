@@ -1,0 +1,19 @@
+// Exercise sizeof on basic and composite types.
+
+struct Pair {
+    int a;
+    int b;
+};
+
+struct WithPtr {
+    int v;
+    struct Pair* p;
+};
+
+int main() {
+    print(sizeof(int));               // 4
+    print(sizeof(float));             // 4
+    print(sizeof(struct Pair));       // 8
+    print(sizeof(struct WithPtr));    // 16: int(4) + pad(4) + ptr(8)
+    return 0;
+}

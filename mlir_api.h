@@ -153,6 +153,13 @@ typedef enum {
 
     // LLVM dialect
     OP_TYPE_LLVM_MLIR_UNDEF,
+    OP_TYPE_LLVM_ALLOCA,
+    OP_TYPE_LLVM_LOAD,
+    OP_TYPE_LLVM_STORE,
+    OP_TYPE_LLVM_GEP,
+    OP_TYPE_LLVM_MLIR_ZERO,
+    OP_TYPE_LLVM_MLIR_CONSTANT,
+    OP_TYPE_LLVM_ICMP,
 
     // Return operations
     OP_TYPE_RETURN,
@@ -319,6 +326,19 @@ MLIR_TypeHandle MLIR_CreateTypeUnknown(MLIR_Context *ctx);
 MLIR_TypeHandle MLIR_CreateTypeTensor(MLIR_Context *ctx, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type);
 MLIR_TypeHandle MLIR_CreateTypeMemref(MLIR_Context *ctx, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type);
 MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *ctx, MLIR_TypeHandle element_type, bool has_address_space, uint32_t address_space);
+
+// LLVM dialect types — used by frontends that emit `!llvm.ptr`,
+// `!llvm.struct`, and `!llvm.array`. Identified structs are mutable: create
+// with MLIR_CreateTypeLLVMStructIdentified, then call
+// MLIR_SetTypeLLVMStructBody once. Recursion through `!llvm.ptr` (which is
+// opaque) is fully supported because the body never mentions the recursive
+// struct's body type.
+MLIR_TypeHandle MLIR_CreateTypeLLVMPointer(MLIR_Context *ctx);
+MLIR_TypeHandle MLIR_CreateTypeLLVMStructIdentified(MLIR_Context *ctx, string name);
+void            MLIR_SetTypeLLVMStructBody(MLIR_Context *ctx, MLIR_TypeHandle struct_ty,
+                                           const MLIR_TypeHandle *fields, size_t n_fields);
+MLIR_TypeHandle MLIR_CreateTypeLLVMArray(MLIR_Context *ctx, MLIR_TypeHandle elem, uint64_t count);
+
 MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *ctx, string name);
 // Function type: (input_types) -> (result_types). Both arrays are
 // copied; passing 0 inputs/results is allowed.
@@ -369,6 +389,10 @@ MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, string name, d
 MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *ctx, string name, bool value);
 MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *ctx, string name, string value);
 MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count);
+// Dense i32 array attribute (DenseI32ArrayAttr) — used e.g. for
+// `llvm.getelementptr`'s `rawConstantIndices`.
+MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *ctx, string name,
+                                                        const int32_t *values, size_t count);
 MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count);
 // TypeAttr: an attribute that wraps a Type (e.g. func.func's
 // `function_type` attribute, which wraps a FunctionType).

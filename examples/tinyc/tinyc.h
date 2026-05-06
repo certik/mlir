@@ -27,10 +27,24 @@
 //   - `print(expr);` builtin -> vector.print
 //   - Top-level entry point: int main()
 //
-// Not supported: strings, pointer reassignment, pointer arithmetic,
-// arrays-of-pointer, function pointers, returning struct*, pointer or
-// array-of-struct as a function parameter or return, struct fields
-// that are themselves pointers or arrays, &<sub-struct-field>, struct
+// Pointer-mediated recursive data structures:
+//   - struct fields can be `struct Foo*` (TY_PTR_STRUCT). By-value cycles
+//     in struct definitions are detected and rejected at emit time.
+//   - `null` literal: a polymorphic null pointer (lowered to
+//     llvm.mlir.zero : !llvm.ptr).
+//   - `sizeof(<type>)` operator: compile-time i32 with a fixed layout
+//     (i32/f32 = 4, ptr = 8, struct = padded sum of fields).
+//   - C-style cast `(T*)expr` between pointer types: a no-op (we use
+//     opaque `!llvm.ptr`).
+//   - Built-in extern functions `malloc(i64) -> !llvm.ptr` and
+//     `free(!llvm.ptr)` are always declared at module scope and linked
+//     against libc.
+//   - Pointer comparisons `p == null`, `p != null`, `p == q` use
+//     llvm.icmp.
+//
+// Not supported: strings, int* reassignment, pointer arithmetic,
+// arrays-of-pointer, function pointers, returning struct*, array-of-
+// struct as a function parameter or return, &<sub-struct-field>, struct
 // literal initialization, struct copy `q = p;` (use a wrapper or
 // field-by-field assignment).
 #pragma once
@@ -69,6 +83,9 @@ typedef struct {
 typedef enum {
     EX_INT,            // integer literal
     EX_FLOAT,          // float literal
+    EX_NULL,           // null pointer literal
+    EX_SIZEOF,         // sizeof(<type>) — uses cast_type
+    EX_CAST,           // (T*)expr  — uses cast_type and lhs
     EX_VAR,            // variable reference (lvalue when used as such)
     EX_BIN,            // binary op (kind in `op`)
     EX_UN,             // unary op
@@ -111,6 +128,9 @@ struct Expr {
     Expr *rhs_assign;
     // For EX_INDEX (lhs = array, rhs = index)
     // For EX_ADDR / EX_DEREF (lhs = inner)
+    // For EX_SIZEOF / EX_CAST: cast_type is the type being asked about /
+    // cast to. EX_CAST also uses lhs as the operand.
+    Type cast_type;
     int line;
 };
 
@@ -174,9 +194,10 @@ DEFINE_VECTOR_FOR_TYPE(Func*, VecFuncPtr)
 
 typedef struct {
     string name;
-    Type   type;        // field type. May be TY_I32, TY_F32, or TY_STRUCT
-                        // (nested by-value struct). TY_PTR_STRUCT and
-                        // TY_ARRAY_STRUCT are not allowed in fields yet.
+    Type   type;        // field type. May be TY_I32, TY_F32, TY_STRUCT
+                        // (nested by-value struct), or TY_PTR_STRUCT
+                        // (pointer to struct, possibly self-referencing).
+                        // TY_ARRAY_STRUCT is not allowed in fields yet.
 } StructField;
 
 DEFINE_VECTOR_FOR_TYPE(StructField, VecStructField)
@@ -212,6 +233,8 @@ typedef enum {
     TC_TK_KW_CONTINUE,
     TC_TK_KW_PRINT,
     TC_TK_KW_STRUCT,
+    TC_TK_KW_NULL,
+    TC_TK_KW_SIZEOF,
     TC_TK_LPAREN, TC_TK_RPAREN,
     TC_TK_LBRACE, TC_TK_RBRACE,
     TC_TK_LBRACK, TC_TK_RBRACK,

@@ -1,0 +1,47 @@
+// Tiny binary search tree with recursive sum. Exercises recursive
+// pointer-mediated struct types, malloc, free, null comparison.
+
+struct TreeNode {
+    int value;
+    struct TreeNode* left;
+    struct TreeNode* right;
+};
+
+int sum_tree(struct TreeNode* root) {
+    if (root == null) {
+        return 0;
+    }
+    return root->value + sum_tree(root->left) + sum_tree(root->right);
+}
+
+int free_tree(struct TreeNode* root) {
+    if (root == null) {
+        return 0;
+    }
+    free_tree(root->left);
+    free_tree(root->right);
+    free(root);
+    return 0;
+}
+
+int main() {
+    struct TreeNode* root;
+    struct TreeNode* l;
+    struct TreeNode* r;
+    struct TreeNode* ll;
+    struct TreeNode* lr;
+    root = (struct TreeNode*)malloc(sizeof(struct TreeNode));
+    l    = (struct TreeNode*)malloc(sizeof(struct TreeNode));
+    r    = (struct TreeNode*)malloc(sizeof(struct TreeNode));
+    ll   = (struct TreeNode*)malloc(sizeof(struct TreeNode));
+    lr   = (struct TreeNode*)malloc(sizeof(struct TreeNode));
+    root->value = 10; root->left = l;    root->right = r;
+    l->value    = 5;  l->left    = ll;   l->right    = lr;
+    r->value    = 15; r->left    = null; r->right    = null;
+    ll->value   = 3;  ll->left   = null; ll->right   = null;
+    lr->value   = 7;  lr->left   = null; lr->right   = null;
+    print(sum_tree(root));     // 10+5+15+3+7 = 40
+    free_tree(root);
+    return 0;
+}
+

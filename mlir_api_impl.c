@@ -707,6 +707,35 @@ MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *ctx, MLIR_TypeHandle elemen
     return alloc_type(ctx, t);
 }
 
+MLIR_TypeHandle MLIR_CreateTypeLLVMPointer(MLIR_Context *ctx) {
+    // Native classic/generic backend doesn't currently model LLVM dialect
+    // types; tinyC and other LLVM-dialect users go through the upstream
+    // backend. Return an opaque marker so unrelated tests still link.
+    IR_Type t = {0};
+    t.kind = TYPE_KIND_OPAQUE;
+    (void)ctx;
+    return alloc_type(ctx, t);
+}
+
+MLIR_TypeHandle MLIR_CreateTypeLLVMStructIdentified(MLIR_Context *ctx, string name) {
+    IR_Type t = {0};
+    t.kind = TYPE_KIND_OPAQUE;
+    (void)name;
+    return alloc_type(ctx, t);
+}
+
+void MLIR_SetTypeLLVMStructBody(MLIR_Context *ctx, MLIR_TypeHandle struct_ty,
+                                 const MLIR_TypeHandle *fields, size_t n_fields) {
+    (void)ctx; (void)struct_ty; (void)fields; (void)n_fields;
+}
+
+MLIR_TypeHandle MLIR_CreateTypeLLVMArray(MLIR_Context *ctx, MLIR_TypeHandle elem, uint64_t count) {
+    IR_Type t = {0};
+    t.kind = TYPE_KIND_OPAQUE;
+    (void)elem; (void)count;
+    return alloc_type(ctx, t);
+}
+
 MLIR_TypeHandle MLIR_CreateTypeFunction(MLIR_Context *ctx,
                                          const MLIR_TypeHandle *inputs, size_t n_inputs,
                                          const MLIR_TypeHandle *results, size_t n_results) {
@@ -853,6 +882,17 @@ MLIR_AttributeHandle MLIR_CreateAttributeSymbolRef(MLIR_Context *ctx, string nam
     a.kind = ATTR_KIND_STRING;
     a.name = name;
     a.data.string_value = value;
+    return alloc_attr_obj(ctx, a);
+}
+
+// Native classic/generic backend doesn't model DenseI32ArrayAttr; stash
+// nothing useful — only the upstream backend currently consumes this.
+MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *ctx, string name,
+                                                       const int32_t *values, size_t count) {
+    IR_Attribute a = {0};
+    a.kind = ATTR_KIND_STRING;
+    a.name = name;
+    (void)values; (void)count;
     return alloc_attr_obj(ctx, a);
 }
 

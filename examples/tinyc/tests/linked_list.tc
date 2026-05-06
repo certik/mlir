@@ -1,0 +1,33 @@
+// Build a singly-linked list 1 -> 2 -> 3, traverse to compute sum,
+// then free the nodes. Exercises pointer-typed struct fields, malloc,
+// free, sizeof, the (struct Node*) cast, and the `null` sentinel.
+
+struct Node {
+    int value;
+    struct Node* next;
+};
+
+int sum_list(struct Node* head) {
+    int total;
+    total = 0;
+    while (head != null) {
+        total = total + head->value;
+        head = head->next;
+    }
+    return total;
+}
+
+int main() {
+    struct Node* a;
+    struct Node* b;
+    struct Node* c;
+    a = (struct Node*)malloc(sizeof(struct Node));
+    b = (struct Node*)malloc(sizeof(struct Node));
+    c = (struct Node*)malloc(sizeof(struct Node));
+    a->value = 1; a->next = b;
+    b->value = 2; b->next = c;
+    c->value = 3; c->next = null;
+    print(sum_list(a));
+    free(a); free(b); free(c);
+    return 0;
+}
