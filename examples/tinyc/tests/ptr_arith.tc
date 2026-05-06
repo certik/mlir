@@ -1,0 +1,26 @@
+int main() {
+    int a[5];
+    int i;
+    for (i = 0; i < 5; i = i + 1) {
+        a[i] = (i + 1) * 10;
+    }
+
+    int* p = &a[0];
+    print(*p);          // 10
+    print(*(p + 2));    // 30
+    print(p[3]);        // 40
+
+    int* q = p + 4;
+    print(*q);          // 50
+    print(q - p);       // 4
+
+    int sum = 0;
+    int* it = &a[0];
+    int* end = &a[0] + 5;
+    while (it < end) {
+        sum = sum + *it;
+        it = it + 1;
+    }
+    print(sum);         // 10+20+30+40+50 = 150
+    return 0;
+}

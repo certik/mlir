@@ -90,6 +90,7 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_LLVM_MLIR_ADDRESSOF: return str_lit("llvm.mlir.addressof");
         case OP_TYPE_LLVM_MLIR_GLOBAL: return str_lit("llvm.mlir.global");
         case OP_TYPE_LLVM_RETURN: return str_lit("llvm.return");
+        case OP_TYPE_LLVM_PTRTOINT: return str_lit("llvm.ptrtoint");
         case OP_TYPE_ARITH_XORI: return str_lit("arith.xori");
         case OP_TYPE_ARITH_SHLI: return str_lit("arith.shli");
         case OP_TYPE_ARITH_SHRSI: return str_lit("arith.shrsi");

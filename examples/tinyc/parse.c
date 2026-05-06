@@ -6,15 +6,30 @@
 #include <base/io.h>
 #include <base/string.h>
 
+// One entry in the typedef map. Module-scope only.
+typedef struct Typedef {
+    string name;
+    Type   ty;
+    struct Typedef *next;
+} Typedef;
+
 typedef struct {
     Arena *arena;
     TcTok *toks;
     size_t n;
     size_t i;
+    Typedef *typedefs;
 } P;
 
 static TcTok cur(P *p) { return p->toks[p->i]; }
 static TcTok peek(P *p, size_t k) { return p->toks[p->i + k < p->n ? p->i + k : p->n - 1]; }
+
+static Typedef *typedef_lookup(P *p, string name) {
+    for (Typedef *t = p->typedefs; t; t = t->next) {
+        if (str_eq(t->name, name)) return t;
+    }
+    return NULL;
+}
 
 static void perror_at(P *p, int line, string msg) {
     println(str_lit("tinyc parse error at line {}: {}"), (int64_t)line, msg);
@@ -153,8 +168,13 @@ static Expr *parse_primary(P *p) {
     if (t.kind == TC_TK_LPAREN) {
         // Could be a cast `(T)expr` or a parenthesized expression.
         TcTokKind nxt = peek(p, 1).kind;
-        if (nxt == TC_TK_KW_INT || nxt == TC_TK_KW_FLOAT ||
-            nxt == TC_TK_KW_STRUCT || nxt == TC_TK_KW_CHAR) {
+        bool is_cast = (nxt == TC_TK_KW_INT || nxt == TC_TK_KW_FLOAT ||
+                        nxt == TC_TK_KW_STRUCT || nxt == TC_TK_KW_CHAR);
+        if (!is_cast && nxt == TC_TK_IDENT &&
+            typedef_lookup(p, peek(p, 1).text)) {
+            is_cast = true;
+        }
+        if (is_cast) {
             p->i++;  // consume '('
             Type ty = {0};
             if (!parse_sig_type(p, &ty)) {
@@ -471,11 +491,43 @@ static void parse_block(P *p, VecStmtPtr *out) {
     expect(p, TC_TK_RBRACE, str_lit("expected '}'"));
 }
 
-// Parse a decl statement: <type> [*] name [ '[' N ']' ] [ '=' expr ] ';'
-//   or                  : struct Name [*] name [ '=' &<var> ] ';'
+// Parse a decl statement: <type> [*] name [ '[' N ']' [ '[' M ']' ] ] [ '=' expr ] ';'
+//   or                  : struct Name [*] name [ '[' N ']' ] [ '=' &<var> ] ';'
+//   or                  : <typedef-name> name [ ... ] [ '=' expr ] ';'
 // Caller has already verified that current token starts a decl.
 static Stmt *parse_decl(P *p, bool require_semi) {
     int line = cur(p).line;
+    // Typedef'd type-name takes precedence over manual parsing.
+    if (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, cur(p).text)) {
+        Type ty = {0};
+        parse_sig_type(p, &ty);
+        TcTok name = cur(p);
+        expect(p, TC_TK_IDENT, str_lit("expected identifier"));
+        Stmt *s = new_stmt(p, ST_DECL, line);
+        s->decl_name = name.text;
+        s->decl_type = ty;
+        if (accept(p, TC_TK_LBRACK)) {
+            TcTok lit = cur(p);
+            expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
+            expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
+            if (s->decl_type.kind != TY_I32) {
+                perror_at(p, line, str_lit("only int[N] arrays are supported"));
+            }
+            s->decl_type.kind = TY_ARRAY_I32;
+            s->decl_type.array_len = lit.int_value;
+            if (accept(p, TC_TK_LBRACK)) {
+                TcTok lit2 = cur(p);
+                expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
+                expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
+                s->decl_type.array_len2 = lit2.int_value;
+            }
+        }
+        if (accept(p, TC_TK_ASSIGN)) {
+            s->decl_init = parse_expr(p);
+        }
+        if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+        return s;
+    }
     // struct decl: `struct Name var;` or `struct Name * p = &s;`
     //              or `struct Name var[N];`
     if (cur(p).kind == TC_TK_KW_STRUCT) {
@@ -531,6 +583,12 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
         s->decl_type.kind = TY_ARRAY_I32;
         s->decl_type.array_len = lit.int_value;
+        if (accept(p, TC_TK_LBRACK)) {
+            TcTok lit2 = cur(p);
+            expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
+            expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
+            s->decl_type.array_len2 = lit2.int_value;
+        }
     }
     if (accept(p, TC_TK_ASSIGN)) {
         s->decl_init = parse_expr(p);
@@ -596,7 +654,8 @@ static Stmt *parse_stmt(P *p) {
             p->i++;
             s->for_init = NULL;
         } else if (cur(p).kind == TC_TK_KW_INT || cur(p).kind == TC_TK_KW_FLOAT ||
-                   cur(p).kind == TC_TK_KW_CHAR) {
+                   cur(p).kind == TC_TK_KW_CHAR ||
+                   (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, cur(p).text))) {
             s->for_init = parse_decl(p, /*require_semi*/ true);
         } else {
             Stmt *es = new_stmt(p, ST_EXPR, cur(p).line);
@@ -622,8 +681,50 @@ static Stmt *parse_stmt(P *p) {
         expect(p, TC_TK_SEMI, str_lit("expected ';'"));
         return s;
     }
+    if (t.kind == TC_TK_KW_SWITCH) {
+        p->i++;
+        Stmt *s = new_stmt(p, ST_SWITCH, t.line);
+        expect(p, TC_TK_LPAREN, str_lit("expected '('"));
+        s->cond = parse_expr(p);
+        expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
+        expect(p, TC_TK_LBRACE, str_lit("expected '{'"));
+        VecSwitchCase_reserve(p->arena, &s->switch_cases, 4);
+        while (cur(p).kind != TC_TK_RBRACE && cur(p).kind != TC_TK_EOF) {
+            if (cur(p).kind == TC_TK_KW_CASE) {
+                p->i++;
+                bool neg = false;
+                if (accept(p, TC_TK_MINUS)) neg = true;
+                TcTok lit = cur(p);
+                expect(p, TC_TK_INT_LIT, str_lit("expected integer in 'case'"));
+                expect(p, TC_TK_COLON, str_lit("expected ':' after case"));
+                SwitchCase sc = (SwitchCase){
+                    .value = neg ? -lit.int_value : lit.int_value,
+                    .is_default = false,
+                    .body_start = s->block_body.size,
+                };
+                VecSwitchCase_push_back(p->arena, &s->switch_cases, sc);
+                continue;
+            }
+            if (cur(p).kind == TC_TK_KW_DEFAULT) {
+                p->i++;
+                expect(p, TC_TK_COLON, str_lit("expected ':' after default"));
+                SwitchCase sc = (SwitchCase){
+                    .value = 0, .is_default = true,
+                    .body_start = s->block_body.size,
+                };
+                VecSwitchCase_push_back(p->arena, &s->switch_cases, sc);
+                continue;
+            }
+            Stmt *bs = parse_stmt(p);
+            VecStmtPtr_push_back(p->arena, &s->block_body, bs);
+        }
+        expect(p, TC_TK_RBRACE, str_lit("expected '}'"));
+        return s;
+    }
     if (t.kind == TC_TK_KW_INT || t.kind == TC_TK_KW_FLOAT ||
-        t.kind == TC_TK_KW_STRUCT || t.kind == TC_TK_KW_CHAR) {
+        t.kind == TC_TK_KW_STRUCT || t.kind == TC_TK_KW_CHAR ||
+        (t.kind == TC_TK_IDENT && typedef_lookup(p, t.text) &&
+         peek(p, 1).kind == TC_TK_IDENT)) {
         return parse_decl(p, /*require_semi*/ true);
     }
     // expression statement (covers assignments and calls)
@@ -634,10 +735,12 @@ static Stmt *parse_stmt(P *p) {
 }
 
 // Parse a function-signature type:  int | float | char [*] | struct Name [*]
+// or a typedef'd type-name (in which case any leading '*' for typedef-int
+// produces TY_PTR_I32, etc.).
 // Returns false if the current tokens don't start a type.
 static bool parse_sig_type(P *p, Type *out) {
     *out = (Type){0};
-    if (cur(p).kind == TC_TK_KW_INT)   { p->i++; out->kind = TY_I32; return true; }
+    if (cur(p).kind == TC_TK_KW_INT)   { p->i++; out->kind = TY_I32; if (accept(p, TC_TK_STAR)) out->kind = TY_PTR_I32; return true; }
     if (cur(p).kind == TC_TK_KW_FLOAT) { p->i++; out->kind = TY_F32; return true; }
     if (cur(p).kind == TC_TK_KW_CHAR)  {
         p->i++;
@@ -653,6 +756,21 @@ static bool parse_sig_type(P *p, Type *out) {
         out->struct_name = sn.text;
         if (accept(p, TC_TK_STAR)) out->kind = TY_PTR_STRUCT;
         return true;
+    }
+    if (cur(p).kind == TC_TK_IDENT) {
+        Typedef *td = typedef_lookup(p, cur(p).text);
+        if (td) {
+            p->i++;
+            *out = td->ty;
+            // Allow `Td*` to add another level of pointer (only for scalar
+            // typedefs; struct typedefs already encode the pointer).
+            if (accept(p, TC_TK_STAR)) {
+                if (out->kind == TY_I32) out->kind = TY_PTR_I32;
+                else if (out->kind == TY_STRUCT) out->kind = TY_PTR_STRUCT;
+                // else: ignore (e.g. typedef'd pointer + extra '*' not supported)
+            }
+            return true;
+        }
     }
     return false;
 }
@@ -679,14 +797,22 @@ static Func *parse_func(P *p) {
             if (!parse_sig_type(p, &pty)) {
                 perror_at(p, cur(p).line, str_lit("expected parameter type"));
             }
-            TcTok pn = cur(p);
-            expect(p, TC_TK_IDENT, str_lit("expected parameter name"));
+            string pname = (string){0};
+            if (cur(p).kind == TC_TK_IDENT) {
+                pname = cur(p).text;
+                p->i++;
+            }
             VecParam_push_back(p->arena, &f->params,
-                ((Param){.name = pn.text, .type = pty, .line = pn.line}));
+                ((Param){.name = pname, .type = pty, .line = cur(p).line}));
             if (!accept(p, TC_TK_COMMA)) break;
         }
     }
     expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
+    if (accept(p, TC_TK_SEMI)) {
+        // Forward declaration / prototype: no body.
+        f->is_forward = true;
+        return f;
+    }
     parse_block(p, &f->body);
     return f;
 }
@@ -733,7 +859,7 @@ static StructDef *parse_struct_def(P *p) {
 }
 
 Program *tinyc_parse(Arena *arena, VecTcTok toks) {
-    P p = {.arena = arena, .toks = toks.data, .n = toks.size, .i = 0};
+    P p = {.arena = arena, .toks = toks.data, .n = toks.size, .i = 0, .typedefs = NULL};
     Program *prog = arena_new(arena, Program);
     *prog = (Program){0};
     VecFuncPtr_reserve(arena, &prog->funcs, 4);
@@ -745,6 +871,41 @@ Program *tinyc_parse(Arena *arena, VecTcTok toks) {
             VecStructDefPtr_push_back(arena, &prog->structs, sd);
             continue;
         }
+        if (cur(&p).kind == TC_TK_KW_TYPEDEF) {
+            int line = cur(&p).line;
+            p.i++;
+            Type ty = {0};
+            if (!parse_sig_type(&p, &ty)) {
+                perror_at(&p, line, str_lit("expected type after 'typedef'"));
+                while (cur(&p).kind != TC_TK_SEMI && cur(&p).kind != TC_TK_EOF) p.i++;
+                accept(&p, TC_TK_SEMI);
+                continue;
+            }
+            TcTok nm = cur(&p);
+            if (!expect(&p, TC_TK_IDENT, str_lit("expected typedef name"))) continue;
+            // Optional `[N]` to support `typedef int Vec[N];` (1D only).
+            if (accept(&p, TC_TK_LBRACK)) {
+                TcTok lit = cur(&p);
+                expect(&p, TC_TK_INT_LIT, str_lit("expected array length"));
+                expect(&p, TC_TK_RBRACK, str_lit("expected ']'"));
+                if (ty.kind == TY_I32) {
+                    ty.kind = TY_ARRAY_I32;
+                    ty.array_len = lit.int_value;
+                } else {
+                    perror_at(&p, line, str_lit("typedef array only supported for int"));
+                }
+            }
+            expect(&p, TC_TK_SEMI, str_lit("expected ';' after typedef"));
+            Typedef *td = arena_new(arena, Typedef);
+            td->name = nm.text;
+            td->ty = ty;
+            td->next = p.typedefs;
+            p.typedefs = td;
+            continue;
+        }
+        // `extern` is parser-noise: drop the keyword and parse the rest as
+        // a normal forward decl / global.
+        if (cur(&p).kind == TC_TK_KW_EXTERN) p.i++;
         // Disambiguate top-level decl between a function and a global.
         // We look ahead past `<type>` (and optional `*`) for an IDENT
         // followed by `=` or `;` -> global, otherwise function.
@@ -799,10 +960,33 @@ Program *tinyc_parse(Arena *arena, VecTcTok toks) {
                 }
             }
         }
-        // Not a global — rewind and parse as a function.
+        // Not a global — rewind and parse as a function (def or forward decl).
         p.i = save;
         Func *f = parse_func(&p);
-        VecFuncPtr_push_back(arena, &prog->funcs, f);
+        // Check for an existing entry with the same name. Forward decls can
+        // be replaced by a definition; duplicate forward decls are merged;
+        // a forward decl after a definition is dropped.
+        Func *existing = NULL;
+        size_t existing_idx = 0;
+        for (size_t i = 0; i < prog->funcs.size; i++) {
+            if (str_eq(prog->funcs.data[i]->name, f->name)) {
+                existing = prog->funcs.data[i];
+                existing_idx = i;
+                break;
+            }
+        }
+        if (!existing) {
+            VecFuncPtr_push_back(arena, &prog->funcs, f);
+        } else if (!existing->is_forward && f->is_forward) {
+            // Drop redundant forward decl after definition.
+        } else if (existing->is_forward && f->is_forward) {
+            // Drop redundant forward decl after another forward decl.
+        } else if (existing->is_forward && !f->is_forward) {
+            // Replace the forward decl with the real definition.
+            prog->funcs.data[existing_idx] = f;
+        } else {
+            perror_at(&p, f->line, str_lit("function redefinition"));
+        }
     }
     return prog;
 }
