@@ -1,25 +1,36 @@
-# mlir — a faster, simpler MLIR infrastructure
+# mlir — a small MLIR core in C
 
-A custom [MLIR](https://mlir.llvm.org/) implementation written in C, built on
-top of [Core C](https://github.com/certik/corec). The goal is a **full
-replacement for upstream LLVM/MLIR for building compilers**: a small, fast,
-dependency-free MLIR core that lets a compiler built against this API
-build quickly and run fast via the native implementation, while staying
-100% compatible with real upstream MLIR via the upstream implementation
-of the same API.
-
-The same compiler, written once against `mlir_api.h`, can be linked against
-either backend:
+A compact [MLIR](https://mlir.llvm.org/) core written in C, built on top
+of [Core C](https://github.com/certik/corec), and complementary to
+upstream LLVM/MLIR. A single C API, `mlir_api.h`, has two interchangeable
+implementations behind it:
 
 * **native** — pure C, no LLVM/MLIR dependency, builds with
-  `-nostdlib -nostdinc -fno-builtin`. Tiny, fast, portable.
+  `-nostdlib -nostdinc -fno-builtin`. Quick to build, easy to embed,
+  portable down to WebAssembly.
 * **upstream** — thin C++ shim that delegates to real `mlir::Operation`,
-  `mlir::Type`, etc. Used as the trusted oracle and for any feature only
-  upstream can validate.
+  `mlir::Type`, etc., so a compiler written against this API can use
+  upstream LLVM/MLIR directly.
 
-Both backends are required to produce byte-identical textual output for
-every input the test suite exercises, so a downstream compiler can target
-the native API confidently and fall back to upstream where needed.
+A compiler written once against `mlir_api.h` can be linked against either
+backend without code changes. Both backends are required to produce
+byte-identical textual output for every input the test suite exercises,
+so the two are kept in lockstep by construction.
+
+Why use it:
+
+* **Tiny build, no LLVM dependency** on the native side — drop it into
+  another project, ship a small CLI, or run it inside a WASI sandbox.
+* **Fast iteration.** Hand-written tokenizer, recursive-descent parser,
+  arena allocation, no C runtime — clean builds are seconds, not minutes.
+* **Same API, two backends.** Develop against the native build for speed,
+  link against the upstream backend when you want it; the compiler code
+  is the same either way.
+* **Cross-validated against upstream MLIR.** Every classic-form reference
+  must round-trip through the real upstream parser, and native and
+  upstream output is diffed byte-for-byte in CI.
+* **Portable.** One source tree builds on Linux, macOS, Windows and
+  WebAssembly (WASI).
 
 This repository is built `-nostdlib -nostdinc -fno-builtin` (native side)
 with the [`corec`](https://github.com/certik/corec) and
@@ -30,27 +41,24 @@ macOS, Windows and WebAssembly (WASI).
 
 ## Motivation
 
-Upstream MLIR is large, slow to build, and tightly coupled to LLVM. For a
-compiler whose job is to ingest, transform and emit MLIR, most of LLVM is
-unnecessary baggage at build time and at runtime.
+A single C API, `mlir_api.h`, with two interchangeable implementations:
 
-This project takes the opposite approach:
-
-1. **A small, narrow C API** (`mlir_api.h`) for working with operations,
-   blocks, regions, types, attributes and values. Two implementations live
-   behind that API:
+1. **A small, narrow C API** for working with operations, blocks, regions,
+   types, attributes and values. Two implementations live behind that
+   API and are interchangeable from the compiler's point of view:
    * **native** — pure-C, no LLVM/MLIR dependency, builds with `-nostdlib`.
    * **upstream** — thin C++ shim that delegates to real `mlir::Operation`,
-     `mlir::Type`, etc.
-2. **Cross-validation by construction.** Every parser/printer combination is
-   exercised by the test runner. Native and upstream are required to produce
-   byte-identical output, and every classic-form reference must round-trip
-   cleanly through the real upstream parser.
+     `mlir::Type`, etc., so upstream LLVM/MLIR is a first-class backend.
+2. **Cross-validation between the two backends.** Every parser/printer
+   combination is exercised by the test runner. Native and upstream are
+   required to produce byte-identical output, and every classic-form
+   reference must round-trip cleanly through the upstream parser.
 3. **No standard library, no C runtime (native side).** The native binary
    inherits Core C's sandbox: a single narrow `platform.h` interface, arena
    allocators, custom `string` / `format` / I/O. The same source compiles
    to native binaries on Linux/macOS/Windows and to a WASI `.wasm`
-   artifact.
+   artifact, which makes it convenient to embed alongside or on top of an
+   existing upstream-based toolchain.
 
 ## Getting started
 
