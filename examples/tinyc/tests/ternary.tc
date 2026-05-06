@@ -1,0 +1,16 @@
+int abs_val(int n) {
+    return n < 0 ? -n : n;
+}
+
+int main() {
+    print(abs_val(-7));
+    print(abs_val(3));
+    int x = 5;
+    int y = x > 0 ? x : 0;
+    print(y);
+    int z = x > 100 ? 1 : x > 10 ? 2 : 3;
+    print(z);
+    int big = 1000;
+    print(big > 500 ? 1 : 0);
+    return 0;
+}

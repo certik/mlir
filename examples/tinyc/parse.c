@@ -90,6 +90,23 @@ static Expr *parse_postfix(P *p, Expr *base) {
             base = e;
             continue;
         }
+        if (cur(p).kind == TC_TK_PLUSPLUS || cur(p).kind == TC_TK_MINUSMINUS) {
+            // Postfix ++/--: desugar to `base = base ± 1`. The result of
+            // the expression is the new value (we don't preserve the
+            // pre-increment value). Suitable for expression-statement /
+            // for-step usage.
+            BinOp op = (cur(p).kind == TC_TK_PLUSPLUS) ? OP_ADD : OP_SUB;
+            int line = cur(p).line;
+            p->i++;
+            Expr *one = new_expr(p, EX_INT, line);
+            one->int_value = 1;
+            Expr *bin = new_expr(p, EX_BIN, line);
+            bin->op = op; bin->lhs = base; bin->rhs = one;
+            Expr *as = new_expr(p, EX_ASSIGN, line);
+            as->lvalue = base; as->rhs_assign = bin;
+            base = as;
+            continue;
+        }
         break;
     }
     return base;
@@ -127,10 +144,17 @@ static Expr *parse_primary(P *p) {
         e->cast_type = ty;
         return e;
     }
+    if (t.kind == TC_TK_STRING_LIT) {
+        p->i++;
+        Expr *e = new_expr(p, EX_STR, t.line);
+        e->name = t.text;
+        return e;
+    }
     if (t.kind == TC_TK_LPAREN) {
         // Could be a cast `(T)expr` or a parenthesized expression.
         TcTokKind nxt = peek(p, 1).kind;
-        if (nxt == TC_TK_KW_INT || nxt == TC_TK_KW_FLOAT || nxt == TC_TK_KW_STRUCT) {
+        if (nxt == TC_TK_KW_INT || nxt == TC_TK_KW_FLOAT ||
+            nxt == TC_TK_KW_STRUCT || nxt == TC_TK_KW_CHAR) {
             p->i++;  // consume '('
             Type ty = {0};
             if (!parse_sig_type(p, &ty)) {
@@ -161,6 +185,26 @@ static Expr *parse_primary(P *p) {
         e->op = OP_NOT;
         e->lhs = parse_primary(p);
         return e;
+    }
+    if (t.kind == TC_TK_TILDE) {
+        p->i++;
+        Expr *e = new_expr(p, EX_UN, t.line);
+        e->op = OP_BNOT;
+        e->lhs = parse_primary(p);
+        return e;
+    }
+    if (t.kind == TC_TK_PLUSPLUS || t.kind == TC_TK_MINUSMINUS) {
+        // Prefix ++/--: rewrite to `lhs = lhs ± 1`.
+        BinOp op = (t.kind == TC_TK_PLUSPLUS) ? OP_ADD : OP_SUB;
+        p->i++;
+        Expr *target = parse_primary(p);
+        Expr *one = new_expr(p, EX_INT, t.line);
+        one->int_value = 1;
+        Expr *bin = new_expr(p, EX_BIN, t.line);
+        bin->op = op; bin->lhs = target; bin->rhs = one;
+        Expr *as = new_expr(p, EX_ASSIGN, t.line);
+        as->lvalue = target; as->rhs_assign = bin;
+        return as;
     }
     if (t.kind == TC_TK_AMP) {
         p->i++;
@@ -234,8 +278,25 @@ static Expr *parse_add(P *p) {
     }
     return l;
 }
-static Expr *parse_rel(P *p) {
+static Expr *parse_shift(P *p) {
     Expr *l = parse_add(p);
+    for (;;) {
+        TcTokKind k = cur(p).kind;
+        BinOp op;
+        if      (k == TC_TK_SHL) op = OP_SHL;
+        else if (k == TC_TK_SHR) op = OP_SHR;
+        else break;
+        int line = cur(p).line;
+        p->i++;
+        Expr *r = parse_add(p);
+        Expr *e = new_expr(p, EX_BIN, line);
+        e->op = op; e->lhs = l; e->rhs = r;
+        l = e;
+    }
+    return l;
+}
+static Expr *parse_rel(P *p) {
+    Expr *l = parse_shift(p);
     for (;;) {
         TcTokKind k = cur(p).kind;
         BinOp op;
@@ -246,7 +307,7 @@ static Expr *parse_rel(P *p) {
         else break;
         int line = cur(p).line;
         p->i++;
-        Expr *r = parse_add(p);
+        Expr *r = parse_shift(p);
         Expr *e = new_expr(p, EX_BIN, line);
         e->op = op; e->lhs = l; e->rhs = r;
         l = e;
@@ -270,12 +331,48 @@ static Expr *parse_eq(P *p) {
     }
     return l;
 }
-static Expr *parse_and(P *p) {
+static Expr *parse_bitand(P *p) {
     Expr *l = parse_eq(p);
-    while (cur(p).kind == TC_TK_AMPAMP) {
+    while (cur(p).kind == TC_TK_AMP) {
         int line = cur(p).line;
         p->i++;
         Expr *r = parse_eq(p);
+        Expr *e = new_expr(p, EX_BIN, line);
+        e->op = OP_BAND; e->lhs = l; e->rhs = r;
+        l = e;
+    }
+    return l;
+}
+static Expr *parse_bitxor(P *p) {
+    Expr *l = parse_bitand(p);
+    while (cur(p).kind == TC_TK_CARET) {
+        int line = cur(p).line;
+        p->i++;
+        Expr *r = parse_bitand(p);
+        Expr *e = new_expr(p, EX_BIN, line);
+        e->op = OP_BXOR; e->lhs = l; e->rhs = r;
+        l = e;
+    }
+    return l;
+}
+static Expr *parse_bitor(P *p) {
+    Expr *l = parse_bitxor(p);
+    while (cur(p).kind == TC_TK_PIPE) {
+        int line = cur(p).line;
+        p->i++;
+        Expr *r = parse_bitxor(p);
+        Expr *e = new_expr(p, EX_BIN, line);
+        e->op = OP_BOR; e->lhs = l; e->rhs = r;
+        l = e;
+    }
+    return l;
+}
+static Expr *parse_and(P *p) {
+    Expr *l = parse_bitor(p);
+    while (cur(p).kind == TC_TK_AMPAMP) {
+        int line = cur(p).line;
+        p->i++;
+        Expr *r = parse_bitor(p);
         Expr *e = new_expr(p, EX_BIN, line);
         e->op = OP_AND; e->lhs = l; e->rhs = r;
         l = e;
@@ -294,10 +391,52 @@ static Expr *parse_or(P *p) {
     }
     return l;
 }
+static Expr *parse_assign_or_or(P *p);
+static Expr *parse_ternary(P *p) {
+    Expr *cond = parse_or(p);
+    if (cur(p).kind == TC_TK_QUESTION) {
+        int line = cur(p).line;
+        p->i++;
+        Expr *th = parse_expr(p);
+        expect(p, TC_TK_COLON, str_lit("expected ':' in ternary"));
+        Expr *el = parse_assign_or_or(p);  // right-associative
+        Expr *e = new_expr(p, EX_TERNARY, line);
+        e->lhs = cond; e->rhs = th; e->lvalue = el;
+        return e;
+    }
+    return cond;
+}
 static Expr *parse_assign_or_or(P *p) {
-    // Parse a logical-or expression first, then if '=' follows, treat
-    // the LHS as an lvalue (validated in the emitter).
-    Expr *lhs = parse_or(p);
+    // Parse a logical-or / ternary expression first, then if '=' (or any
+    // compound-assign) follows, treat the LHS as an lvalue (validated in
+    // the emitter).
+    Expr *lhs = parse_ternary(p);
+    TcTokKind k = cur(p).kind;
+    BinOp compound;
+    bool is_compound = false;
+    switch (k) {
+        case TC_TK_PLUSEQ:    compound = OP_ADD;  is_compound = true; break;
+        case TC_TK_MINUSEQ:   compound = OP_SUB;  is_compound = true; break;
+        case TC_TK_STAREQ:    compound = OP_MUL;  is_compound = true; break;
+        case TC_TK_SLASHEQ:   compound = OP_DIV;  is_compound = true; break;
+        case TC_TK_PERCENTEQ: compound = OP_MOD;  is_compound = true; break;
+        case TC_TK_AMPEQ:     compound = OP_BAND; is_compound = true; break;
+        case TC_TK_PIPEEQ:    compound = OP_BOR;  is_compound = true; break;
+        case TC_TK_CARETEQ:   compound = OP_BXOR; is_compound = true; break;
+        case TC_TK_SHLEQ:     compound = OP_SHL;  is_compound = true; break;
+        case TC_TK_SHREQ:     compound = OP_SHR;  is_compound = true; break;
+        default: break;
+    }
+    if (is_compound) {
+        int line = cur(p).line;
+        p->i++;
+        Expr *rhs = parse_assign_or_or(p);
+        Expr *bin = new_expr(p, EX_BIN, line);
+        bin->op = compound; bin->lhs = lhs; bin->rhs = rhs;
+        Expr *e = new_expr(p, EX_ASSIGN, line);
+        e->lvalue = lhs; e->rhs_assign = bin;
+        return e;
+    }
     if (cur(p).kind == TC_TK_ASSIGN) {
         int line = cur(p).line;
         p->i++;
@@ -317,6 +456,7 @@ static Expr *parse_expr(P *p) { return parse_assign_or_or(p); }
 static bool parse_base_type(P *p, TypeKind *out) {
     if (cur(p).kind == TC_TK_KW_INT)   { p->i++; *out = TY_I32; return true; }
     if (cur(p).kind == TC_TK_KW_FLOAT) { p->i++; *out = TY_F32; return true; }
+    if (cur(p).kind == TC_TK_KW_CHAR)  { p->i++; *out = TY_I32; return true; }
     return false;
 }
 
@@ -370,6 +510,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         return s;
     }
     TypeKind base = TY_I32;
+    bool was_char = (cur(p).kind == TC_TK_KW_CHAR);
     parse_base_type(p, &base);
     bool is_ptr = false;
     if (accept(p, TC_TK_STAR)) is_ptr = true;
@@ -379,8 +520,9 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     s->decl_name = name.text;
     s->decl_type.kind = base;
     if (is_ptr) {
-        if (base != TY_I32) perror_at(p, line, str_lit("only int* pointers are supported"));
-        s->decl_type.kind = TY_PTR_I32;
+        if (was_char) s->decl_type.kind = TY_PTR_CHAR;
+        else if (base == TY_I32) s->decl_type.kind = TY_PTR_I32;
+        else perror_at(p, line, str_lit("only int*/char* pointers are supported"));
     }
     if (accept(p, TC_TK_LBRACK)) {
         if (base != TY_I32 || is_ptr) perror_at(p, line, str_lit("only int[N] arrays are supported"));
@@ -453,7 +595,8 @@ static Stmt *parse_stmt(P *p) {
         if (cur(p).kind == TC_TK_SEMI) {
             p->i++;
             s->for_init = NULL;
-        } else if (cur(p).kind == TC_TK_KW_INT || cur(p).kind == TC_TK_KW_FLOAT) {
+        } else if (cur(p).kind == TC_TK_KW_INT || cur(p).kind == TC_TK_KW_FLOAT ||
+                   cur(p).kind == TC_TK_KW_CHAR) {
             s->for_init = parse_decl(p, /*require_semi*/ true);
         } else {
             Stmt *es = new_stmt(p, ST_EXPR, cur(p).line);
@@ -479,7 +622,8 @@ static Stmt *parse_stmt(P *p) {
         expect(p, TC_TK_SEMI, str_lit("expected ';'"));
         return s;
     }
-    if (t.kind == TC_TK_KW_INT || t.kind == TC_TK_KW_FLOAT || t.kind == TC_TK_KW_STRUCT) {
+    if (t.kind == TC_TK_KW_INT || t.kind == TC_TK_KW_FLOAT ||
+        t.kind == TC_TK_KW_STRUCT || t.kind == TC_TK_KW_CHAR) {
         return parse_decl(p, /*require_semi*/ true);
     }
     // expression statement (covers assignments and calls)
@@ -489,12 +633,18 @@ static Stmt *parse_stmt(P *p) {
     return s;
 }
 
-// Parse a function-signature type:  int | float | struct Name [ '*' ]
+// Parse a function-signature type:  int | float | char [*] | struct Name [*]
 // Returns false if the current tokens don't start a type.
 static bool parse_sig_type(P *p, Type *out) {
     *out = (Type){0};
     if (cur(p).kind == TC_TK_KW_INT)   { p->i++; out->kind = TY_I32; return true; }
     if (cur(p).kind == TC_TK_KW_FLOAT) { p->i++; out->kind = TY_F32; return true; }
+    if (cur(p).kind == TC_TK_KW_CHAR)  {
+        p->i++;
+        if (accept(p, TC_TK_STAR)) out->kind = TY_PTR_CHAR;
+        else out->kind = TY_I32;
+        return true;
+    }
     if (cur(p).kind == TC_TK_KW_STRUCT) {
         p->i++;
         TcTok sn = cur(p);
@@ -588,12 +738,69 @@ Program *tinyc_parse(Arena *arena, VecTcTok toks) {
     *prog = (Program){0};
     VecFuncPtr_reserve(arena, &prog->funcs, 4);
     VecStructDefPtr_reserve(arena, &prog->structs, 4);
+    VecGlobal_reserve(arena, &prog->globals, 4);
     while (cur(&p).kind != TC_TK_EOF) {
         if (cur(&p).kind == TC_TK_KW_STRUCT && peek(&p, 2).kind == TC_TK_LBRACE) {
             StructDef *sd = parse_struct_def(&p);
             VecStructDefPtr_push_back(arena, &prog->structs, sd);
             continue;
         }
+        // Disambiguate top-level decl between a function and a global.
+        // We look ahead past `<type>` (and optional `*`) for an IDENT
+        // followed by `=` or `;` -> global, otherwise function.
+        size_t save = p.i;
+        Type tty = {0};
+        if (parse_sig_type(&p, &tty)) {
+            if (cur(&p).kind == TC_TK_IDENT) {
+                TcTokKind after = peek(&p, 1).kind;
+                if (after == TC_TK_ASSIGN || after == TC_TK_SEMI) {
+                    TcTok nm = cur(&p);
+                    p.i++;
+                    Global g = (Global){0};
+                    g.name = nm.text;
+                    g.type = tty;
+                    g.line = nm.line;
+                    if (accept(&p, TC_TK_ASSIGN)) {
+                        g.has_init = true;
+                        TcTok lit = cur(&p);
+                        if (lit.kind == TC_TK_INT_LIT) {
+                            g.init_int = lit.int_value;
+                            p.i++;
+                        } else if (lit.kind == TC_TK_FLOAT_LIT) {
+                            g.init_float = lit.float_value;
+                            p.i++;
+                        } else if (lit.kind == TC_TK_KW_NULL) {
+                            // a null-initialized pointer; init_int=0 means null.
+                            p.i++;
+                        } else if (lit.kind == TC_TK_STRING_LIT) {
+                            g.init_str = lit.text;
+                            p.i++;
+                        } else if (lit.kind == TC_TK_MINUS &&
+                                   peek(&p, 1).kind == TC_TK_INT_LIT) {
+                            p.i++;
+                            TcTok n = cur(&p);
+                            g.init_int = -n.int_value;
+                            p.i++;
+                        } else if (lit.kind == TC_TK_MINUS &&
+                                   peek(&p, 1).kind == TC_TK_FLOAT_LIT) {
+                            p.i++;
+                            TcTok n = cur(&p);
+                            g.init_float = -n.float_value;
+                            p.i++;
+                        } else {
+                            perror_at(&p, lit.line,
+                                str_lit("global initializer must be a literal"));
+                            p.i++;
+                        }
+                    }
+                    expect(&p, TC_TK_SEMI, str_lit("expected ';' after global"));
+                    VecGlobal_push_back(arena, &prog->globals, g);
+                    continue;
+                }
+            }
+        }
+        // Not a global — rewind and parse as a function.
+        p.i = save;
         Func *f = parse_func(&p);
         VecFuncPtr_push_back(arena, &prog->funcs, f);
     }

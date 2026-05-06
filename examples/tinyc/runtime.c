@@ -16,3 +16,12 @@ void printI32(int32_t v) { printf("%d\n", v); }
 void printF32(float v) { printf("%g", (double)v); }
 void printF64(double v) { printf("%g", v); }
 
+// tinyC's `print(<string>)` lowers to a direct call to @printStr. We
+// emit the bytes (which are NUL-terminated by the string-literal global)
+// followed by a newline to mirror the behavior of `print(<int>)` and
+// `print(<float>)`.
+void printStr(const char *s) {
+    if (s) fputs(s, stdout);
+    fputc('\n', stdout);
+}
+

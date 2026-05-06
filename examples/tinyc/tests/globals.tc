@@ -1,0 +1,21 @@
+int counter = 1;
+int total;
+float pi = 3.0;
+char *greeting = "Hi";
+
+int bump() {
+    counter = counter + 1;
+    return counter;
+}
+
+int main() {
+    print(greeting);
+    print(counter);
+    bump();
+    bump();
+    print(counter);
+    total = counter * 10;
+    print(total);
+    print(pi);
+    return 0;
+}

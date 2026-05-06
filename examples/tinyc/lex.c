@@ -27,6 +27,7 @@ static TcTokKind keyword_or_ident(string s) {
     if (str_eq(s, str_lit("struct")))   return TC_TK_KW_STRUCT;
     if (str_eq(s, str_lit("null")))     return TC_TK_KW_NULL;
     if (str_eq(s, str_lit("sizeof")))   return TC_TK_KW_SIZEOF;
+    if (str_eq(s, str_lit("char")))     return TC_TK_KW_CHAR;
     return TC_TK_IDENT;
 }
 
@@ -41,6 +42,76 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
         if (c == '/' && i + 1 < src.size && src.str[i + 1] == '/') {
             while (i < src.size && src.str[i] != '\n') i++;
             continue;
+        }
+        if (c == '"') {
+            // String literal. Decode escapes into an arena buffer; append a
+            // trailing NUL so callers can pass the bytes to printf/fputs.
+            size_t j = i + 1;
+            char *buf = arena_new_array(arena, char, src.size - i + 1);
+            size_t n = 0;
+            while (j < src.size && src.str[j] != '"') {
+                char ch = src.str[j++];
+                if (ch == '\\' && j < src.size) {
+                    char esc = src.str[j++];
+                    switch (esc) {
+                        case 'n': ch = '\n'; break;
+                        case 't': ch = '\t'; break;
+                        case 'r': ch = '\r'; break;
+                        case '\\': ch = '\\'; break;
+                        case '"': ch = '"'; break;
+                        case '\'': ch = '\''; break;
+                        case '0': ch = '\0'; break;
+                        default:
+                            println(str_lit("tinyc lex error at line {}: unknown escape '\\{}'"),
+                                    (int64_t)line, str_substr(src, j - 1, 1));
+                            ch = esc;
+                    }
+                } else if (ch == '\n') {
+                    line++;
+                }
+                buf[n++] = ch;
+            }
+            if (j >= src.size) {
+                println(str_lit("tinyc lex error at line {}: unterminated string literal"),
+                        (int64_t)line);
+            } else {
+                j++; // consume closing "
+            }
+            buf[n++] = '\0';   // NUL terminator (counted in str.size)
+            string text = (string){.str = buf, .size = n};
+            TcTok t = (TcTok){.kind = TC_TK_STRING_LIT, .text = text, .line = line};
+            VecTcTok_push_back(arena, &toks, t);
+            i = j; continue;
+        }
+        if (c == '\'') {
+            // Char literal — produce a TC_TK_INT_LIT carrying the byte value.
+            size_t j = i + 1;
+            int64_t v = 0;
+            if (j < src.size && src.str[j] == '\\' && j + 1 < src.size) {
+                j++;
+                char esc = src.str[j++];
+                switch (esc) {
+                    case 'n': v = '\n'; break;
+                    case 't': v = '\t'; break;
+                    case 'r': v = '\r'; break;
+                    case '\\': v = '\\'; break;
+                    case '\'': v = '\''; break;
+                    case '"': v = '"'; break;
+                    case '0': v = '\0'; break;
+                    default:
+                        println(str_lit("tinyc lex error at line {}: unknown char escape"),
+                                (int64_t)line);
+                        v = esc;
+                }
+            } else if (j < src.size) {
+                v = (unsigned char)src.str[j++];
+            }
+            if (j < src.size && src.str[j] == '\'') j++;
+            else println(str_lit("tinyc lex error at line {}: unterminated char literal"),
+                         (int64_t)line);
+            TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
+            VecTcTok_push_back(arena, &toks, t);
+            i = j; continue;
         }
         if (is_digit(c)) {
             size_t j = i;
@@ -97,7 +168,13 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
         // punctuation / multi-char
         TcTokKind k = TC_TK_EOF;
         size_t consumed = 1;
-        if (i + 1 < src.size) {
+        // 3-char tokens first.
+        if (i + 2 < src.size) {
+            char d = src.str[i + 1], e2 = src.str[i + 2];
+            if      (c == '<' && d == '<' && e2 == '=') { k = TC_TK_SHLEQ; consumed = 3; }
+            else if (c == '>' && d == '>' && e2 == '=') { k = TC_TK_SHREQ; consumed = 3; }
+        }
+        if (k == TC_TK_EOF && i + 1 < src.size) {
             char d = src.str[i + 1];
             if      (c == '<' && d == '=') { k = TC_TK_LE; consumed = 2; }
             else if (c == '>' && d == '=') { k = TC_TK_GE; consumed = 2; }
@@ -106,6 +183,18 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
             else if (c == '&' && d == '&') { k = TC_TK_AMPAMP; consumed = 2; }
             else if (c == '|' && d == '|') { k = TC_TK_PIPEPIPE; consumed = 2; }
             else if (c == '-' && d == '>') { k = TC_TK_ARROW; consumed = 2; }
+            else if (c == '+' && d == '=') { k = TC_TK_PLUSEQ; consumed = 2; }
+            else if (c == '-' && d == '=') { k = TC_TK_MINUSEQ; consumed = 2; }
+            else if (c == '*' && d == '=') { k = TC_TK_STAREQ; consumed = 2; }
+            else if (c == '/' && d == '=') { k = TC_TK_SLASHEQ; consumed = 2; }
+            else if (c == '%' && d == '=') { k = TC_TK_PERCENTEQ; consumed = 2; }
+            else if (c == '&' && d == '=') { k = TC_TK_AMPEQ; consumed = 2; }
+            else if (c == '|' && d == '=') { k = TC_TK_PIPEEQ; consumed = 2; }
+            else if (c == '^' && d == '=') { k = TC_TK_CARETEQ; consumed = 2; }
+            else if (c == '<' && d == '<') { k = TC_TK_SHL; consumed = 2; }
+            else if (c == '>' && d == '>') { k = TC_TK_SHR; consumed = 2; }
+            else if (c == '+' && d == '+') { k = TC_TK_PLUSPLUS; consumed = 2; }
+            else if (c == '-' && d == '-') { k = TC_TK_MINUSMINUS; consumed = 2; }
         }
         if (k == TC_TK_EOF) {
             switch (c) {
@@ -128,6 +217,11 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                 case '=': k = TC_TK_ASSIGN; break;
                 case '!': k = TC_TK_BANG; break;
                 case '&': k = TC_TK_AMP; break;
+                case '|': k = TC_TK_PIPE; break;
+                case '^': k = TC_TK_CARET; break;
+                case '~': k = TC_TK_TILDE; break;
+                case '?': k = TC_TK_QUESTION; break;
+                case ':': k = TC_TK_COLON; break;
                 default: {
                     println(str_lit("tinyc lex error at line {}: unexpected '{}'"),
                             (int64_t)line, str_substr(src, i, 1));

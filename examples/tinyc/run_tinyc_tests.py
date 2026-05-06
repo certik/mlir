@@ -37,7 +37,12 @@ def link_native(obj_path: Path, exe_path: Path):
             str(obj_path), str(RUNTIME),
             f"/Fe:{exe_path}",
         ])
-    return run([CC, str(obj_path), str(RUNTIME), "-o", str(exe_path)])
+    cmd = [CC, str(obj_path), str(RUNTIME), "-o", str(exe_path)]
+    # llc emits non-PIC by default; some Linux toolchains default to -pie which
+    # rejects R_X86_64_32 relocations from .rodata. Force -no-pie on Linux.
+    if sys.platform.startswith("linux"):
+        cmd.append("-no-pie")
+    return run(cmd)
 
 
 def main():

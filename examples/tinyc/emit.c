@@ -32,6 +32,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <stdlib.h>
 #include <base/arena.h>
@@ -46,6 +47,8 @@ typedef struct Sym {
     Type   type;                // declared type
     MLIR_ValueHandle addr;      // !llvm.ptr to this local's storage
     StructDef *sdef;            // for TY_STRUCT / TY_PTR_STRUCT / TY_ARRAY_STRUCT
+    bool   is_global;           // if true, addr is unused; reload via addressof
+    string global_sym;          // sym_name of the llvm.mlir.global (for globals)
     struct Sym *next;
 } Sym;
 
@@ -99,12 +102,18 @@ typedef struct StructTypeEntry {
     MLIR_TypeHandle  ty;
 } StructTypeEntry;
 
+typedef struct StringEntry {
+    string  bytes;
+    string  sym;        // global symbol name like ".str.0"
+} StringEntry;
+
 typedef struct {
     MLIR_Context *ctx;
     Arena *arena;
     MLIR_TypeHandle i32;
     MLIR_TypeHandle i1;
     MLIR_TypeHandle i64;
+    MLIR_TypeHandle i8;
     MLIR_TypeHandle f32;
     MLIR_TypeHandle index;
     MLIR_TypeHandle ptr;             // !llvm.ptr
@@ -121,6 +130,12 @@ typedef struct {
     MLIR_ValueHandle cur_sret_ptr;   // for struct-returning functions
     StructTypeEntry *struct_types;
     size_t           n_struct_types;
+    StringEntry     *strings;        // dedup'd string-literal pool
+    size_t           n_strings;
+    size_t           cap_strings;
+    MLIR_BlockHandle module_block;
+    Sym             *globals;        // module-scope symbols
+    bool             use_print_str;  // emit @printStr extern decl
 } E;
 
 static StructDef *find_struct(E *e, string name) {
@@ -155,7 +170,7 @@ static FuncSig *find_sig(E *e, string name) {
 
 static MLIR_TypeHandle scalar_mlir_type(E *e, TypeKind k) {
     if (k == TY_F32) return e->f32;
-    if (k == TY_PTR_STRUCT || k == TY_PTR_I32) return e->ptr;
+    if (k == TY_PTR_STRUCT || k == TY_PTR_I32 || k == TY_PTR_CHAR) return e->ptr;
     return e->i32;
 }
 
@@ -351,6 +366,63 @@ static MLIR_ValueHandle emit_extsi_i32_to_i64(E *e, MLIR_ValueHandle v) {
     return r;
 }
 
+// Emit `llvm.mlir.addressof @<sym>` -> !llvm.ptr.
+static MLIR_ValueHandle emit_addressof(E *e, string sym) {
+    MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
+                                                  e->ptr, ssa_name(e), eloc(e, 0));
+    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->ptr;
+    MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
+    MLIR_AttributeHandle a = MLIR_CreateAttributeSymbolRef(
+        e->ctx, str_lit("global_name"), sym);
+    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = a;
+    emit_op(e, OP_TYPE_LLVM_MLIR_ADDRESSOF, str_lit("llvm.mlir.addressof"),
+            rts, 1, rs, 1, NULL, 0, as, 1, NULL, 0);
+    return r;
+}
+
+// Look up (or create) a string-literal global; return its sym_name.
+static string intern_string(E *e, string bytes) {
+    for (size_t i = 0; i < e->n_strings; i++) {
+        if (e->strings[i].bytes.size == bytes.size &&
+            memcmp(e->strings[i].bytes.str, bytes.str, bytes.size) == 0) {
+            return e->strings[i].sym;
+        }
+    }
+    if (e->n_strings == e->cap_strings) {
+        size_t nc = e->cap_strings ? e->cap_strings * 2 : 8;
+        StringEntry *na = arena_new_array(e->arena, StringEntry, nc);
+        for (size_t i = 0; i < e->n_strings; i++) na[i] = e->strings[i];
+        e->strings = na; e->cap_strings = nc;
+    }
+    string sym = format(e->arena, str_lit(".str.{}"), (int64_t)e->n_strings);
+    e->strings[e->n_strings].bytes = bytes;
+    e->strings[e->n_strings].sym   = sym;
+    e->n_strings++;
+    return sym;
+}
+
+// Address of a symbol: either the local alloca slot or a freshly-emitted
+// addressof for a module-level global.
+static MLIR_ValueHandle sym_addr(E *e, Sym *s) {
+    if (s->is_global) return emit_addressof(e, s->global_sym);
+    return s->addr;
+}
+
+// Look up a name as a global. Returns NULL if not found.
+static Sym *global_lookup(E *e, string name) {
+    for (Sym *s = e->globals; s; s = s->next) {
+        if (str_eq(s->name, name)) return s;
+    }
+    return NULL;
+}
+
+// Combined lookup: locals/scope chain first, then module globals.
+static Sym *lookup(E *e, Scope *sc, string name) {
+    Sym *s = scope_lookup(sc, name);
+    if (s) return s;
+    return global_lookup(e, name);
+}
+
 // ----- LLVM-dialect storage primitives -----
 
 static MLIR_ValueHandle emit_alloca(E *e, MLIR_TypeHandle elem_ty) {
@@ -462,6 +534,7 @@ typedef struct {
     MLIR_ValueHandle val;
     bool is_float;
     bool is_ptr;       // val is a !llvm.ptr (struct pointer or null)
+    bool is_str;       // val is a !llvm.ptr to char data (string)
     StructDef *sdef;   // when is_ptr, the StructDef the pointer targets (NULL for null)
 } EVal;
 
@@ -589,10 +662,10 @@ static SCtx walk_struct_lhs(E *e, Scope *sc, Expr *ex) {
     SCtx r = {0};
     r.dyn_index = MLIR_INVALID_HANDLE;
     if (ex->kind == EX_VAR) {
-        Sym *s = scope_lookup(sc, ex->name);
+        Sym *s = lookup(e, sc, ex->name);
         if (!s) { println(str_lit("tinyc emit: undefined variable {}"), ex->name); return r; }
         if (s->type.kind == TY_STRUCT) {
-            r.base_ptr = s->addr;
+            r.base_ptr = sym_addr(e, s);
             r.source_elem = find_struct_type(e, s->sdef);
             r.sd = s->sdef;
             sctx_push(e, &r, 0);
@@ -601,7 +674,7 @@ static SCtx walk_struct_lhs(E *e, Scope *sc, Expr *ex) {
         }
         if (s->type.kind == TY_PTR_STRUCT) {
             // Load the inner ptr first.
-            r.base_ptr = emit_load_v(e, s->addr, e->ptr);
+            r.base_ptr = emit_load_v(e, sym_addr(e, s), e->ptr);
             r.source_elem = find_struct_type(e, s->sdef);
             r.sd = s->sdef;
             sctx_push(e, &r, 0);
@@ -613,12 +686,12 @@ static SCtx walk_struct_lhs(E *e, Scope *sc, Expr *ex) {
     }
     if (ex->kind == EX_DEREF) {
         if (ex->lhs->kind == EX_VAR) {
-            Sym *s = scope_lookup(sc, ex->lhs->name);
+            Sym *s = lookup(e, sc, ex->lhs->name);
             if (!s || s->type.kind != TY_PTR_STRUCT || !s->sdef) {
                 println(str_lit("tinyc emit: -> requires a struct pointer"));
                 return r;
             }
-            r.base_ptr = emit_load_v(e, s->addr, e->ptr);
+            r.base_ptr = emit_load_v(e, sym_addr(e, s), e->ptr);
             r.source_elem = find_struct_type(e, s->sdef);
             r.sd = s->sdef;
             sctx_push(e, &r, 0);
@@ -640,13 +713,13 @@ static SCtx walk_struct_lhs(E *e, Scope *sc, Expr *ex) {
         return r;
     }
     if (ex->kind == EX_INDEX && ex->lhs->kind == EX_VAR) {
-        Sym *s = scope_lookup(sc, ex->lhs->name);
+        Sym *s = lookup(e, sc, ex->lhs->name);
         if (!s || s->type.kind != TY_ARRAY_STRUCT || !s->sdef) {
             println(str_lit("tinyc emit: arr[i].f requires an array of struct"));
             return r;
         }
         MLIR_ValueHandle idx_i32 = emit_expr_i32(e, sc, ex->rhs);
-        r.base_ptr = s->addr;
+        r.base_ptr = sym_addr(e, s);
         // Source elem is the !llvm.array<N x !llvm.struct<...>>.
         MLIR_TypeHandle struct_ty = find_struct_type(e, s->sdef);
         r.source_elem = MLIR_CreateTypeLLVMArray(e->ctx, struct_ty, (uint64_t)s->type.array_len);
@@ -687,14 +760,15 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
     r.elem_ty = e->i32;
     switch (ex->kind) {
         case EX_VAR: {
-            Sym *s = scope_lookup(sc, ex->name);
+            Sym *s = lookup(e, sc, ex->name);
             if (!s) {
                 println(str_lit("tinyc emit: undefined variable {}"), ex->name);
                 return r;
             }
-            r.base_ptr = s->addr;
+            r.base_ptr = sym_addr(e, s);
             if (s->type.kind == TY_F32) r.elem_ty = e->f32;
-            else if (s->type.kind == TY_PTR_STRUCT || s->type.kind == TY_PTR_I32)
+            else if (s->type.kind == TY_PTR_STRUCT || s->type.kind == TY_PTR_I32 ||
+                     s->type.kind == TY_PTR_CHAR)
                 r.elem_ty = e->ptr;
             else r.elem_ty = e->i32;
             return r;
@@ -704,7 +778,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 println(str_lit("tinyc emit: only simple-array indexing is supported"));
                 return r;
             }
-            Sym *s = scope_lookup(sc, ex->lhs->name);
+            Sym *s = lookup(e, sc, ex->lhs->name);
             if (!s) {
                 println(str_lit("tinyc emit: undefined array {}"), ex->lhs->name);
                 return r;
@@ -718,7 +792,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 return r;
             }
             MLIR_ValueHandle idx_i32 = emit_expr_i32(e, sc, ex->rhs);
-            r.base_ptr = s->addr;
+            r.base_ptr = sym_addr(e, s);
             r.source_elem = MLIR_CreateTypeLLVMArray(e->ctx, e->i32, (uint64_t)s->type.array_len);
             int32_t *path = arena_new_array(e->arena, int32_t, 2);
             path[0] = 0; path[1] = LLVM_GEP_DYN;
@@ -732,13 +806,13 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 println(str_lit("tinyc emit: only *<var> dereference is supported"));
                 return r;
             }
-            Sym *s = scope_lookup(sc, ex->lhs->name);
+            Sym *s = lookup(e, sc, ex->lhs->name);
             if (!s || s->type.kind != TY_PTR_I32) {
                 println(str_lit("tinyc emit: dereference of non-pointer"));
                 return r;
             }
             // Load the inner ptr from p's slot.
-            r.base_ptr = emit_load_v(e, s->addr, e->ptr);
+            r.base_ptr = emit_load_v(e, sym_addr(e, s), e->ptr);
             r.elem_ty = e->i32;
             return r;
         }
@@ -797,15 +871,15 @@ static MLIR_ValueHandle resolve_struct_source(E *e, Scope *sc, Expr *arg, Struct
         target = arg->lhs;
     }
     if (target->kind == EX_VAR) {
-        Sym *s = scope_lookup(sc, target->name);
+        Sym *s = lookup(e, sc, target->name);
         if (s && (s->type.kind == TY_STRUCT || s->type.kind == TY_PTR_STRUCT) && s->sdef) {
             if (arg->kind == EX_ADDR && s->type.kind != TY_STRUCT) {
                 println(str_lit("tinyc emit: &<var> requires a struct local"));
                 return MLIR_INVALID_HANDLE;
             }
             *out_sd = s->sdef;
-            if (s->type.kind == TY_PTR_STRUCT) return emit_load_v(e, s->addr, e->ptr);
-            return s->addr;
+            if (s->type.kind == TY_PTR_STRUCT) return emit_load_v(e, sym_addr(e, s), e->ptr);
+            return sym_addr(e, s);
         }
     }
     // Fallback: evaluate as a generic pointer expression.
@@ -932,6 +1006,67 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             r.val = emit_const_f32(e, ex->float_value); r.is_float = true; return r;
         case EX_NULL:
             r.val = emit_null_ptr(e); r.is_ptr = true; r.sdef = NULL; return r;
+        case EX_STR: {
+            // String literal: emit a !llvm.ptr to a deduplicated
+            // module-level llvm.mlir.global string buffer.
+            string sym = intern_string(e, ex->name);
+            r.val = emit_addressof(e, sym);
+            r.is_ptr = true;
+            r.is_str = true;
+            return r;
+        }
+        case EX_TERNARY: {
+            // Lower `c ? a : b` via cf.cond_br + alloca for result.
+            EVal cv = emit_expr(e, sc, ex->lhs);
+            MLIR_ValueHandle cb = emit_to_bool_i1(e, cv);
+            MLIR_BlockHandle then_blk = new_cfg_block(e);
+            MLIR_BlockHandle else_blk = new_cfg_block(e);
+            MLIR_BlockHandle merge_blk = new_cfg_block(e);
+
+            MLIR_BlockHandle save = e->cur_block;
+            e->cur_block = then_blk; e->terminated = false;
+            EVal av = emit_expr(e, sc, ex->rhs);
+            MLIR_BlockHandle then_tail = e->cur_block;
+
+            e->cur_block = else_blk; e->terminated = false;
+            EVal bv = emit_expr(e, sc, ex->lvalue);
+            MLIR_BlockHandle else_tail = e->cur_block;
+
+            bool any_float = av.is_float || bv.is_float;
+            bool any_ptr   = av.is_ptr   || bv.is_ptr;
+            MLIR_TypeHandle rty = any_ptr ? e->ptr : (any_float ? e->f32 : e->i32);
+
+            // Alloca in current (pre-branch) block.
+            e->cur_block = save; e->terminated = false;
+            MLIR_ValueHandle slot = emit_alloca(e, rty);
+
+            // Coerce + store in then-tail.
+            e->cur_block = then_tail; e->terminated = false;
+            MLIR_ValueHandle ta = any_ptr
+                ? (av.is_ptr ? av.val : emit_null_ptr(e))
+                : coerce_eval(e, av, rty);
+            emit_store_v(e, ta, slot);
+            emit_branch(e, merge_blk);
+
+            e->cur_block = else_tail; e->terminated = false;
+            MLIR_ValueHandle tb = any_ptr
+                ? (bv.is_ptr ? bv.val : emit_null_ptr(e))
+                : coerce_eval(e, bv, rty);
+            emit_store_v(e, tb, slot);
+            emit_branch(e, merge_blk);
+
+            // From the original block, branch on cb to then/else.
+            e->cur_block = save; e->terminated = false;
+            emit_cond_branch(e, cb, then_blk, else_blk);
+
+            e->cur_block = merge_blk; e->terminated = false;
+            r.val = emit_load_v(e, slot, rty);
+            r.is_float = any_float;
+            r.is_ptr   = any_ptr;
+            r.is_str   = av.is_str && bv.is_str;
+            r.sdef     = av.sdef ? av.sdef : bv.sdef;
+            return r;
+        }
         case EX_SIZEOF:
             r.val = emit_const_i32(e, type_size(e, ex->cast_type)); return r;
         case EX_CAST: {
@@ -962,8 +1097,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // comparisons) can reason about it.
             if (v.is_ptr) {
                 if (ex->kind == EX_VAR) {
-                    Sym *s = scope_lookup(sc, ex->name);
-                    if (s) v.sdef = s->sdef;
+                    Sym *s = lookup(e, sc, ex->name);
+                    if (s) {
+                        v.sdef = s->sdef;
+                        if (s->type.kind == TY_PTR_CHAR) v.is_str = true;
+                    }
                 } else if (ex->kind == EX_FIELD) {
                     SCtx parent = walk_struct_lhs(e, sc, ex->lhs);
                     if (parent.ok) {
@@ -987,24 +1125,24 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 println(str_lit("tinyc emit: &expr requires a simple variable"));
                 return r;
             }
-            Sym *s = scope_lookup(sc, ex->lhs->name);
+            Sym *s = lookup(e, sc, ex->lhs->name);
             if (!s) {
                 println(str_lit("tinyc emit: undefined variable {}"), ex->lhs->name);
                 return r;
             }
-            r.val = s->addr;
+            r.val = sym_addr(e, s);
             return r;
         }
         case EX_ASSIGN: {
             // Struct rhs from a struct-returning call: q = f(args);
             if (ex->lvalue->kind == EX_VAR && ex->rhs_assign->kind == EX_CALL) {
-                Sym *target = scope_lookup(sc, ex->lvalue->name);
+                Sym *target = lookup(e, sc, ex->lvalue->name);
                 FuncSig *sig = find_sig(e, ex->rhs_assign->callee);
                 if (target && target->type.kind == TY_STRUCT && target->sdef &&
                     sig && sig->ret.type.kind == TY_STRUCT &&
                     sig->ret.sdef == target->sdef) {
                     // Pass &q as the sret slot; no extra copy needed.
-                    emit_flat_call(e, sc, sig, ex->rhs_assign->args, NULL, target->addr);
+                    emit_flat_call(e, sc, sig, ex->rhs_assign->args, NULL, sym_addr(e, target));
                     return r;
                 }
             }
@@ -1026,6 +1164,17 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     MLIR_ValueHandle z = emit_const_i32(e, 0);
                     r.val = emit_binop(e, OP_TYPE_ARITH_SUBI, str_lit("arith.subi"), e->i32, z, a.val);
                 }
+                return r;
+            }
+            if (ex->op == OP_BNOT) {
+                if (a.is_float) {
+                    println(str_lit("tinyc emit: ~ not supported on floats"));
+                    r.val = emit_const_i32(e, 0);
+                    return r;
+                }
+                MLIR_ValueHandle ones = emit_const_i32(e, -1);
+                r.val = emit_binop(e, OP_TYPE_ARITH_XORI, str_lit("arith.xori"),
+                                   e->i32, a.val, ones);
                 return r;
             }
             MLIR_ValueHandle b = emit_to_bool_i1(e, a);
@@ -1131,6 +1280,26 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     r.val = bool_to_i32(e, cmp);
                     return r;
                 }
+                case OP_BAND:
+                    if (flt) { println(str_lit("tinyc emit: & not supported on floats")); r.val = emit_const_i32(e, 0); return r; }
+                    r.val = emit_binop(e, OP_TYPE_ARITH_ANDI, str_lit("arith.andi"), e->i32, a.val, b.val);
+                    return r;
+                case OP_BOR:
+                    if (flt) { println(str_lit("tinyc emit: | not supported on floats")); r.val = emit_const_i32(e, 0); return r; }
+                    r.val = emit_binop(e, OP_TYPE_ARITH_ORI, str_lit("arith.ori"), e->i32, a.val, b.val);
+                    return r;
+                case OP_BXOR:
+                    if (flt) { println(str_lit("tinyc emit: ^ not supported on floats")); r.val = emit_const_i32(e, 0); return r; }
+                    r.val = emit_binop(e, OP_TYPE_ARITH_XORI, str_lit("arith.xori"), e->i32, a.val, b.val);
+                    return r;
+                case OP_SHL:
+                    if (flt) { println(str_lit("tinyc emit: << not supported on floats")); r.val = emit_const_i32(e, 0); return r; }
+                    r.val = emit_binop(e, OP_TYPE_ARITH_SHLI, str_lit("arith.shli"), e->i32, a.val, b.val);
+                    return r;
+                case OP_SHR:
+                    if (flt) { println(str_lit("tinyc emit: >> not supported on floats")); r.val = emit_const_i32(e, 0); return r; }
+                    r.val = emit_binop(e, OP_TYPE_ARITH_SHRSI, str_lit("arith.shrsi"), e->i32, a.val, b.val);
+                    return r;
                 default: break;
             }
             r.val = emit_const_i32(e, 0);
@@ -1251,13 +1420,22 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                         st->decl_init->lhs->kind != EX_VAR) {
                         println(str_lit("tinyc emit: int* must be initialized with &<var>"));
                     } else {
-                        Sym *target = scope_lookup(sc, st->decl_init->lhs->name);
+                        Sym *target = lookup(e, sc, st->decl_init->lhs->name);
                         if (!target || target->type.kind != TY_I32) {
                             println(str_lit("tinyc emit: pointer target must be an int local"));
                         } else {
-                            emit_store_v(e, target->addr, sy->addr);
+                            emit_store_v(e, sym_addr(e, target), sy->addr);
                         }
                     }
+                }
+            } else if (st->decl_type.kind == TY_PTR_CHAR) {
+                sy->addr = emit_alloca(e, e->ptr);
+                if (st->decl_init) {
+                    EVal iv = emit_expr(e, sc, st->decl_init);
+                    MLIR_ValueHandle p = iv.is_ptr ? iv.val : emit_null_ptr(e);
+                    emit_store_v(e, p, sy->addr);
+                } else {
+                    emit_store_v(e, emit_null_ptr(e), sy->addr);
                 }
             } else if (st->decl_type.kind == TY_PTR_STRUCT) {
                 StructDef *sd = find_struct(e, st->decl_type.struct_name);
@@ -1272,11 +1450,11 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                         st->decl_init->lhs->kind != EX_VAR) {
                         println(str_lit("tinyc emit: struct* must be initialized with &<struct_var>"));
                     } else {
-                        Sym *target = scope_lookup(sc, st->decl_init->lhs->name);
+                        Sym *target = lookup(e, sc, st->decl_init->lhs->name);
                         if (!target || target->type.kind != TY_STRUCT || target->sdef != sd) {
                             println(str_lit("tinyc emit: struct* target type mismatch"));
                         } else {
-                            emit_store_v(e, target->addr, sy->addr);
+                            emit_store_v(e, sym_addr(e, target), sy->addr);
                         }
                     }
                 }
@@ -1351,11 +1529,11 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                         emit_flat_call(e, sc, csig, st->expr->args, NULL, out);
                     }
                 } else if (st->expr->kind == EX_VAR) {
-                    Sym *s = scope_lookup(sc, st->expr->name);
+                    Sym *s = lookup(e, sc, st->expr->name);
                     if (!s || s->type.kind != TY_STRUCT || s->sdef != want) {
                         println(str_lit("tinyc emit: returned struct type mismatch"));
                     } else {
-                        emit_struct_copy(e, out, s->addr, want);
+                        emit_struct_copy(e, out, sym_addr(e, s), want);
                     }
                 } else {
                     println(str_lit("tinyc emit: struct return must be a variable or struct call"));
@@ -1399,6 +1577,18 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
         }
         case ST_PRINT: {
             EVal v = emit_expr(e, sc, st->expr);
+            if (v.is_str) {
+                // print(<string>) -> @printStr(!llvm.ptr)
+                e->use_print_str = true;
+                MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1);
+                ops[0] = v.val;
+                MLIR_AttributeHandle ca = MLIR_CreateAttributeSymbolRef(
+                    e->ctx, str_lit("callee"), str_lit("printStr"));
+                MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = ca;
+                emit_op(e, OP_TYPE_FUNC_CALL, str_lit("func.call"),
+                        NULL, 0, NULL, 0, ops, 1, as, 1, NULL, 0);
+                return;
+            }
             MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1);
             ops[0] = v.val;
             emit_op(e, OP_TYPE_VECTOR_PRINT, str_lit("vector.print"),
@@ -1782,6 +1972,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
     e.i32 = MLIR_CreateTypeInteger(ctx, 32, true);
     e.i1  = MLIR_CreateTypeInteger(ctx, 1, false);
     e.i64 = MLIR_CreateTypeInteger(ctx, 64, true);
+    e.i8  = MLIR_CreateTypeInteger(ctx, 8, true);
     e.f32 = MLIR_CreateTypeFloat(ctx, 32, false);
     e.index = MLIR_CreateTypeIndex(ctx);
     e.ptr = MLIR_CreateTypeLLVMPointer(ctx);
@@ -1802,11 +1993,89 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
     MLIR_RegionHandle mr = MLIR_CreateRegion(ctx);
     MLIR_BlockHandle mb = MLIR_CreateBlock(ctx);
     MLIR_AppendRegionBlock(ctx, mr, mb);
+    e.module_block = mb;
     MLIR_RegionHandle *mregs = arena_new_array(arena, MLIR_RegionHandle, 1); mregs[0] = mr;
     MLIR_OpHandle module = MLIR_CreateOp(ctx, OP_TYPE_MODULE, str_lit("module"),
                                          NULL, 0, NULL, 0, NULL, 0, NULL, 0,
                                          mregs, 1, e.loc, MLIR_INVALID_HANDLE,
                                          str_lit(""), -1);
+
+    // Pre-pass: emit module-level globals. For char* globals initialized
+    // by a string literal, emit the string-literal global first, then the
+    // pointer global with an initializer region that takes the address.
+    for (size_t i = 0; i < program->globals.size; i++) {
+        Global *g = &program->globals.data[i];
+        Sym *sy = arena_new(arena, Sym);
+        *sy = (Sym){0};
+        sy->name = g->name;
+        sy->type = g->type;
+        sy->is_global = true;
+        sy->global_sym = g->name;
+        sy->next = e.globals;
+        e.globals = sy;
+
+        if (g->type.kind == TY_PTR_CHAR) {
+            string str_sym = (string){0};
+            if (g->has_init && g->init_str.size > 0) {
+                str_sym = intern_string(&e, g->init_str);
+            }
+            // Emit the !llvm.ptr global with an initializer region that
+            // either returns the string addr or a null pointer.
+            MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
+            MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.ptr,
+                /*is_constant=*/false,
+                /*init_kind=*/2, 0, 0.0, &init_blk, e.loc);
+            // Build initializer body: %0 = addressof @str ; llvm.return %0
+            MLIR_BlockHandle save_blk = e.cur_block;
+            bool save_term = e.terminated;
+            e.cur_block = init_blk;
+            e.terminated = false;
+            MLIR_ValueHandle init_v;
+            if (str_sym.size > 0) {
+                init_v = emit_addressof(&e, str_sym);
+            } else {
+                init_v = emit_null_ptr(&e);
+            }
+            MLIR_ValueHandle *rops = arena_new_array(arena, MLIR_ValueHandle, 1);
+            rops[0] = init_v;
+            emit_op(&e, OP_TYPE_LLVM_RETURN, str_lit("llvm.return"),
+                    NULL, 0, NULL, 0, rops, 1, NULL, 0, NULL, 0);
+            e.cur_block = save_blk;
+            e.terminated = save_term;
+            MLIR_AppendBlockOp(ctx, mb, gop);
+        } else if (g->type.kind == TY_F32) {
+            MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.f32,
+                /*is_constant=*/false,
+                /*init_kind=*/1, 0, g->has_init ? g->init_float : 0.0,
+                NULL, e.loc);
+            MLIR_AppendBlockOp(ctx, mb, gop);
+        } else if (g->type.kind == TY_PTR_I32 || g->type.kind == TY_PTR_STRUCT) {
+            // Emit a zero-initialized pointer global.
+            MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
+            MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.ptr,
+                /*is_constant=*/false,
+                /*init_kind=*/2, 0, 0.0, &init_blk, e.loc);
+            MLIR_BlockHandle save_blk = e.cur_block;
+            bool save_term = e.terminated;
+            e.cur_block = init_blk;
+            e.terminated = false;
+            MLIR_ValueHandle init_v = emit_null_ptr(&e);
+            MLIR_ValueHandle *rops = arena_new_array(arena, MLIR_ValueHandle, 1);
+            rops[0] = init_v;
+            emit_op(&e, OP_TYPE_LLVM_RETURN, str_lit("llvm.return"),
+                    NULL, 0, NULL, 0, rops, 1, NULL, 0, NULL, 0);
+            e.cur_block = save_blk;
+            e.terminated = save_term;
+            MLIR_AppendBlockOp(ctx, mb, gop);
+        } else {
+            // i32 (default for plain int)
+            MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.i32,
+                /*is_constant=*/false,
+                /*init_kind=*/0, g->has_init ? g->init_int : 0, 0.0,
+                NULL, e.loc);
+            MLIR_AppendBlockOp(ctx, mb, gop);
+        }
+    }
 
     for (size_t i = 0; i < program->funcs.size; i++) {
         MLIR_OpHandle fn = emit_func(&e, program->funcs.data[i]);
@@ -1835,6 +2104,31 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         MLIR_TypeHandle *ins = arena_new_array(arena, MLIR_TypeHandle, 1); ins[0] = e.ptr;
         MLIR_TypeHandle fty = MLIR_CreateTypeFunction(ctx, ins, 1, NULL, 0);
         MLIR_AttributeHandle a0 = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("free"));
+        MLIR_AttributeHandle a1 = MLIR_CreateAttributeType(ctx, str_lit("function_type"), fty);
+        MLIR_AttributeHandle a2 = MLIR_CreateAttributeString(ctx, str_lit("sym_visibility"), str_lit("private"));
+        MLIR_AttributeHandle *attrs = arena_new_array(arena, MLIR_AttributeHandle, 3);
+        attrs[0] = a0; attrs[1] = a1; attrs[2] = a2;
+        MLIR_RegionHandle body = MLIR_CreateRegion(ctx);
+        MLIR_RegionHandle *regs = arena_new_array(arena, MLIR_RegionHandle, 1); regs[0] = body;
+        MLIR_OpHandle decl = MLIR_CreateOp(ctx, OP_TYPE_FUNC_FUNC, str_lit("func.func"),
+                                           attrs, 3, NULL, 0, NULL, 0, NULL, 0,
+                                           regs, 1, e.loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_AppendBlockOp(ctx, mb, decl);
+    }
+
+    // Emit any string-literal globals collected by ST_PRINT/EX_STR.
+    for (size_t i = 0; i < e.n_strings; i++) {
+        StringEntry *se = &e.strings[i];
+        MLIR_OpHandle gop = MLIR_CreateLLVMGlobalString(
+            ctx, se->sym, se->bytes, e.loc);
+        MLIR_AppendBlockOp(ctx, mb, gop);
+    }
+
+    // If any user-code path used print(<string>), declare @printStr.
+    if (e.use_print_str) {
+        MLIR_TypeHandle *ins = arena_new_array(arena, MLIR_TypeHandle, 1); ins[0] = e.ptr;
+        MLIR_TypeHandle fty = MLIR_CreateTypeFunction(ctx, ins, 1, NULL, 0);
+        MLIR_AttributeHandle a0 = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("printStr"));
         MLIR_AttributeHandle a1 = MLIR_CreateAttributeType(ctx, str_lit("function_type"), fty);
         MLIR_AttributeHandle a2 = MLIR_CreateAttributeString(ctx, str_lit("sym_visibility"), str_lit("private"));
         MLIR_AttributeHandle *attrs = arena_new_array(arena, MLIR_AttributeHandle, 3);
