@@ -6,7 +6,7 @@
 // that a compiler can be written against the public API.
 //
 // Subset of C supported:
-//   - Types (locals only): int (i32), float (f32), int[N], int* (alias),
+//   - Types: int (i32), float (f32), int[N], int* (alias-only),
 //     struct S { int/float fields }
 //   - Local variables (mutable)
 //   - Integer and float literals
@@ -17,14 +17,19 @@
 //   - if / else, while, for
 //   - break, continue, early return
 //   - Address-of (&x) and dereference (*p) — alias-only pointers
-//   - Functions with int parameters returning int
+//   - Functions with int / float / struct parameters and return types.
+//     Struct params and returns are scalarized at the function boundary
+//     (one MLIR scalar per field, in declaration order — Clang-style ABI
+//     lowering).  `q = f(p);` and `return s;` are the supported uses;
+//     a struct-returning call cannot appear in arbitrary expression
+//     position (must be assigned to a struct local, returned, or discarded).
 //   - `print(expr);` builtin -> vector.print
 //   - Top-level entry point: int main()
 //
 // Not supported: strings, pointer reassignment, pointer arithmetic,
-// arrays-of-pointer, function pointers, float params, struct params/
-// returns, &s (address-of struct), nested/array/pointer-of-struct,
-// struct literal initialization.
+// arrays-of-pointer, function pointers, &struct, nested/array/pointer
+// of struct, struct literal initialization, struct copy `q = p;` (use
+// a wrapper function or field-by-field assignment).
 #pragma once
 
 #include <stdbool.h>
@@ -146,16 +151,18 @@ struct Stmt {
 
 typedef struct {
     string name;
+    Type   type;             // parameter type (TY_I32 / TY_F32 / TY_STRUCT)
     int line;
 } Param;
 
 DEFINE_VECTOR_FOR_TYPE(Param, VecParam)
 
 typedef struct {
-    string name;
-    VecParam params;
+    string     name;
+    Type       return_type;  // function return type
+    VecParam   params;
     VecStmtPtr body;
-    int line;
+    int        line;
 } Func;
 
 DEFINE_VECTOR_FOR_TYPE(Func*, VecFuncPtr)

@@ -55,6 +55,26 @@ typedef struct LoopCtx {
 } LoopCtx;
 
 typedef struct {
+    Type        type;          // declared type of the slot
+    StructDef  *sdef;          // resolved if type.kind == TY_STRUCT
+    size_t      flat_count;    // 1 for scalar; #fields for struct
+    size_t      flat_offset;   // index into flat_in_tys / flat_out_tys
+} SlotInfo;
+
+typedef struct FuncSig {
+    string         name;
+    Func          *func;
+    SlotInfo       ret;
+    SlotInfo      *params;
+    size_t         n_params;
+    MLIR_TypeHandle *flat_in_tys;
+    size_t         n_flat_in;
+    MLIR_TypeHandle *flat_out_tys;
+    size_t         n_flat_out;
+    MLIR_TypeHandle fn_ty;
+} FuncSig;
+
+typedef struct {
     MLIR_Context *ctx;
     Arena *arena;
     MLIR_TypeHandle i32;
@@ -70,6 +90,9 @@ typedef struct {
     int next_ssa;                     // running %N counter
     LoopCtx *loops;
     Program *program;                 // for resolving struct names
+    FuncSig *sigs;                    // signatures of all program functions
+    size_t   n_sigs;
+    FuncSig *cur_sig;                 // signature of the function being emitted
 } E;
 
 static StructDef *find_struct(E *e, string name) {
@@ -86,6 +109,17 @@ static int struct_field_index(StructDef *sd, string name) {
         if (str_eq(sd->fields.data[i].name, name)) return (int)i;
     }
     return -1;
+}
+
+static FuncSig *find_sig(E *e, string name) {
+    for (size_t i = 0; i < e->n_sigs; i++) {
+        if (str_eq(e->sigs[i].name, name)) return &e->sigs[i];
+    }
+    return NULL;
+}
+
+static MLIR_TypeHandle scalar_mlir_type(E *e, TypeKind k) {
+    return (k == TY_F32) ? e->f32 : e->i32;
 }
 
 static MLIR_LocationHandle eloc(E *e, int line) {
@@ -369,6 +403,22 @@ static MLIR_ValueHandle emit_expr_i32(E *e, Scope *sc, Expr *ex) {
     return v.val;
 }
 
+// Coerce an EVal to a target scalar MLIR type (i32 or f32).
+static MLIR_ValueHandle coerce_eval(E *e, EVal v, MLIR_TypeHandle want) {
+    if (want == e->f32 && !v.is_float) return emit_sitofp(e, v.val);
+    if (want == e->i32 && v.is_float) {
+        MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
+                                                      e->i32, ssa_name(e), eloc(e, 0));
+        MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i32;
+        MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
+        MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = v.val;
+        emit_op(e, OP_TYPE_ARITH_FPTOSI, str_lit("arith.fptosi"),
+                rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
+        return r;
+    }
+    return v.val;
+}
+
 static MLIR_ValueHandle emit_to_bool_i1(E *e, EVal v) {
     if (v.is_float) {
         MLIR_ValueHandle z = emit_const_f32(e, 0.0);
@@ -496,6 +546,62 @@ static void unify_numeric(E *e, EVal *a, EVal *b) {
     if (!b->is_float) { b->val = emit_sitofp(e, b->val); b->is_float = true; }
 }
 
+// Load all fields of a struct local into the operand array starting at base.
+static void flatten_struct_arg(E *e, Scope *sc, Expr *arg, SlotInfo *p,
+                               MLIR_ValueHandle *out, size_t base) {
+    if (arg->kind != EX_VAR) {
+        println(str_lit("tinyc emit: struct argument must be a struct variable"));
+        return;
+    }
+    Sym *s = scope_lookup(sc, arg->name);
+    if (!s || s->type.kind != TY_STRUCT || !s->sdef) {
+        println(str_lit("tinyc emit: struct argument {} is not a struct"), arg->name);
+        return;
+    }
+    if (s->sdef != p->sdef) {
+        println(str_lit("tinyc emit: struct type mismatch in call argument"));
+    }
+    for (size_t k = 0; k < s->sdef->fields.size; k++) {
+        bool flt = (s->sdef->fields.data[k].kind == TY_F32);
+        out[base + k] = emit_load(e, s->field_addrs[k], flt ? e->f32 : e->i32, NULL, 0);
+    }
+}
+
+// Emit a func.call with flattened arguments and results. If `out_results` is
+// non-NULL it is filled with sig->n_flat_out result values.
+static void emit_flat_call(E *e, Scope *sc, FuncSig *sig, VecExprPtr args,
+                           MLIR_ValueHandle *out_results) {
+    if (args.size != sig->n_params) {
+        println(str_lit("tinyc emit: call to {} arity mismatch"), sig->name);
+    }
+    size_t n_in = sig->n_flat_in;
+    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, n_in ? n_in : 1);
+    for (size_t i = 0; i < sig->n_params && i < args.size; i++) {
+        SlotInfo *p = &sig->params[i];
+        if (p->type.kind == TY_STRUCT) {
+            flatten_struct_arg(e, sc, args.data[i], p, ops, p->flat_offset);
+        } else {
+            EVal v = emit_expr(e, sc, args.data[i]);
+            ops[p->flat_offset] = coerce_eval(e, v, scalar_mlir_type(e, p->type.kind));
+        }
+    }
+    size_t n_out = sig->n_flat_out;
+    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, n_out ? n_out : 1);
+    MLIR_ValueHandle *rs  = arena_new_array(e->arena, MLIR_ValueHandle, n_out ? n_out : 1);
+    for (size_t i = 0; i < n_out; i++) {
+        rts[i] = sig->flat_out_tys[i];
+        rs[i]  = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, (uint32_t)i,
+                                          rts[i], ssa_name(e), eloc(e, 0));
+        if (out_results) out_results[i] = rs[i];
+    }
+    MLIR_AttributeHandle callee_attr = MLIR_CreateAttributeSymbolRef(
+        e->ctx, str_lit("callee"), sig->name);
+    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1);
+    as[0] = callee_attr;
+    emit_op(e, OP_TYPE_FUNC_CALL, str_lit("func.call"),
+            rts, n_out, rs, n_out, ops, n_in, as, 1, NULL, 0);
+}
+
 static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
     EVal r = {0};
     switch (ex->kind) {
@@ -537,25 +643,27 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             return load_lvalue(e, lv);
         }
         case EX_ASSIGN: {
-            // Special case: `int* p = &x` — assign aliases through the
-            // pointer slot. We treat that as "the pointer variable's slot
-            // refers to the same memref as x". Only valid at decl time;
-            // see ST_DECL handling.
+            // Struct rhs from a struct-returning call: q = f(p);
+            if (ex->lvalue->kind == EX_VAR && ex->rhs_assign->kind == EX_CALL) {
+                Sym *target = scope_lookup(sc, ex->lvalue->name);
+                FuncSig *sig = find_sig(e, ex->rhs_assign->callee);
+                if (target && target->type.kind == TY_STRUCT && target->sdef &&
+                    sig && sig->ret.type.kind == TY_STRUCT &&
+                    sig->ret.sdef == target->sdef) {
+                    size_t n = sig->n_flat_out;
+                    MLIR_ValueHandle *results = arena_new_array(e->arena, MLIR_ValueHandle,
+                                                                n ? n : 1);
+                    emit_flat_call(e, sc, sig, ex->rhs_assign->args, results);
+                    for (size_t k = 0; k < n; k++) {
+                        emit_store(e, results[k], target->field_addrs[k], NULL, 0);
+                    }
+                    return r;
+                }
+            }
             LVal lv = emit_lvalue(e, sc, ex->lvalue);
             EVal v = emit_expr(e, sc, ex->rhs_assign);
-            // coerce rhs to match lvalue element type
-            if (lv.elem_ty == e->f32 && !v.is_float) {
-                v.val = emit_sitofp(e, v.val); v.is_float = true;
-            } else if (lv.elem_ty == e->i32 && v.is_float) {
-                MLIR_ValueHandle nr = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
-                                                               e->i32, ssa_name(e), eloc(e, 0));
-                MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i32;
-                MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = nr;
-                MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = v.val;
-                emit_op(e, OP_TYPE_ARITH_FPTOSI, str_lit("arith.fptosi"),
-                        rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
-                v.val = nr; v.is_float = false;
-            }
+            v.val = coerce_eval(e, v, lv.elem_ty);
+            v.is_float = (lv.elem_ty == e->f32);
             store_lvalue(e, lv, v.val);
             return v;
         }
@@ -673,22 +781,26 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             return r;
         }
         case EX_CALL: {
-            size_t n = ex->args.size;
-            MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, n ? n : 1);
-            for (size_t i = 0; i < n; i++) {
-                ops[i] = emit_expr_i32(e, sc, ex->args.data[i]);
+            FuncSig *sig = find_sig(e, ex->callee);
+            if (!sig) {
+                println(str_lit("tinyc emit: unknown function {}"), ex->callee);
+                r.val = emit_const_i32(e, 0);
+                return r;
             }
-            MLIR_ValueHandle res = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
-                                                            e->i32, ssa_name(e), eloc(e, 0));
-            MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i32;
-            MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = res;
-            MLIR_AttributeHandle callee_attr = MLIR_CreateAttributeSymbolRef(
-                e->ctx, str_lit("callee"), ex->callee);
-            MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1);
-            as[0] = callee_attr;
-            emit_op(e, OP_TYPE_FUNC_CALL, str_lit("func.call"),
-                    rts, 1, rs, 1, ops, n, as, 1, NULL, 0);
-            r.val = res;
+            if (sig->ret.type.kind == TY_STRUCT) {
+                // Struct return is only valid as the rhs of an assignment to
+                // a struct lvalue, as a `return` expression in a struct-
+                // returning function, or as a discarded ST_EXPR (handled at
+                // the statement level). In an arbitrary expression position
+                // we have nowhere to put the multiple results.
+                println(str_lit("tinyc emit: struct-returning call cannot appear in expression position"));
+                r.val = emit_const_i32(e, 0);
+                return r;
+            }
+            MLIR_ValueHandle *results = arena_new_array(e->arena, MLIR_ValueHandle, 1);
+            emit_flat_call(e, sc, sig, ex->args, results);
+            r.val = results[0];
+            r.is_float = (sig->ret.type.kind == TY_F32);
             return r;
         }
     }
@@ -701,9 +813,18 @@ static void emit_block(E *e, Scope *sc, VecStmtPtr body);
 static void emit_stmt(E *e, Scope *sc, Stmt *st) {
     if (e->terminated) return;
     switch (st->kind) {
-        case ST_EXPR:
+        case ST_EXPR: {
+            // Detect `f(...);` where f returns struct (discard the result).
+            if (st->expr->kind == EX_CALL) {
+                FuncSig *sig = find_sig(e, st->expr->callee);
+                if (sig && sig->ret.type.kind == TY_STRUCT) {
+                    emit_flat_call(e, sc, sig, st->expr->args, NULL);
+                    return;
+                }
+            }
             (void)emit_expr(e, sc, st->expr);
             return;
+        }
         case ST_DECL: {
             Sym *sy = arena_new(e->arena, Sym);
             sy->name = st->decl_name;
@@ -776,8 +897,46 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             return;
         }
         case ST_RETURN: {
-            MLIR_ValueHandle v = emit_expr_i32(e, sc, st->expr);
-            MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = v;
+            FuncSig *sig = e->cur_sig;
+            // struct return: load each field and emit multi-result return.
+            if (sig && sig->ret.type.kind == TY_STRUCT) {
+                StructDef *want = sig->ret.sdef;
+                size_t n = want ? want->fields.size : 0;
+                MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, n ? n : 1);
+                if (st->expr->kind == EX_CALL) {
+                    // `return f(p);` where f also returns the same struct.
+                    FuncSig *csig = find_sig(e, st->expr->callee);
+                    if (!csig || csig->ret.type.kind != TY_STRUCT || csig->ret.sdef != want) {
+                        println(str_lit("tinyc emit: returned call type mismatch"));
+                        for (size_t k = 0; k < n; k++) ops[k] = emit_const_i32(e, 0);
+                    } else {
+                        emit_flat_call(e, sc, csig, st->expr->args, ops);
+                    }
+                } else if (st->expr->kind == EX_VAR) {
+                    Sym *s = scope_lookup(sc, st->expr->name);
+                    if (!s || s->type.kind != TY_STRUCT || s->sdef != want) {
+                        println(str_lit("tinyc emit: returned struct type mismatch"));
+                        for (size_t k = 0; k < n; k++) ops[k] = emit_const_i32(e, 0);
+                    } else {
+                        for (size_t k = 0; k < n; k++) {
+                            bool flt = (s->sdef->fields.data[k].kind == TY_F32);
+                            ops[k] = emit_load(e, s->field_addrs[k], flt ? e->f32 : e->i32, NULL, 0);
+                        }
+                    }
+                } else {
+                    println(str_lit("tinyc emit: struct return must be a variable or struct call"));
+                    for (size_t k = 0; k < n; k++) ops[k] = emit_const_i32(e, 0);
+                }
+                emit_op(e, OP_TYPE_FUNC_RETURN, str_lit("func.return"),
+                        NULL, 0, NULL, 0, ops, n, NULL, 0, NULL, 0);
+                e->terminated = true;
+                return;
+            }
+            // scalar return: coerce to declared return type.
+            MLIR_TypeHandle want_ty = (sig && sig->ret.type.kind == TY_F32) ? e->f32 : e->i32;
+            EVal v = emit_expr(e, sc, st->expr);
+            MLIR_ValueHandle ret_v = coerce_eval(e, v, want_ty);
+            MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = ret_v;
             emit_op(e, OP_TYPE_FUNC_RETURN, str_lit("func.return"),
                     NULL, 0, NULL, 0, ops, 1, NULL, 0, NULL, 0);
             e->terminated = true;
@@ -920,60 +1079,148 @@ static void emit_block(E *e, Scope *sc, VecStmtPtr body) {
 
 // ----- function & module -----
 
+// Resolve a parser-level Type into a SlotInfo (struct ref + flat layout).
+// Sets sdef, flat_count from struct definition (or 1 for scalar). flat_offset
+// is filled in by the caller after layout pass.
+static void slot_resolve(E *e, Type ty, SlotInfo *out) {
+    out->type = ty;
+    out->sdef = NULL;
+    out->flat_count = 1;
+    out->flat_offset = 0;
+    if (ty.kind == TY_STRUCT) {
+        out->sdef = find_struct(e, ty.struct_name);
+        if (!out->sdef) {
+            println(str_lit("tinyc emit: unknown struct type {}"), ty.struct_name);
+            out->flat_count = 0;
+        } else {
+            out->flat_count = out->sdef->fields.size;
+        }
+    } else if (ty.kind != TY_I32 && ty.kind != TY_F32) {
+        println(str_lit("tinyc emit: unsupported type in function signature"));
+        out->flat_count = 0;
+    }
+}
+
+// Append the flattened MLIR types of a slot into `tys` starting at `*offset`.
+static void slot_emit_flat_types(E *e, SlotInfo *s, MLIR_TypeHandle *tys, size_t *offset) {
+    s->flat_offset = *offset;
+    if (s->type.kind == TY_STRUCT) {
+        if (!s->sdef) return;
+        for (size_t i = 0; i < s->sdef->fields.size; i++) {
+            tys[(*offset)++] = scalar_mlir_type(e, s->sdef->fields.data[i].kind);
+        }
+    } else {
+        tys[(*offset)++] = scalar_mlir_type(e, s->type.kind);
+    }
+}
+
+static void build_signatures(E *e) {
+    e->n_sigs = e->program->funcs.size;
+    e->sigs = arena_new_array(e->arena, FuncSig, e->n_sigs ? e->n_sigs : 1);
+    for (size_t f_i = 0; f_i < e->n_sigs; f_i++) {
+        Func *f = e->program->funcs.data[f_i];
+        FuncSig *sig = &e->sigs[f_i];
+        *sig = (FuncSig){0};
+        sig->name = f->name;
+        sig->func = f;
+        slot_resolve(e, f->return_type, &sig->ret);
+        sig->n_params = f->params.size;
+        sig->params = arena_new_array(e->arena, SlotInfo, sig->n_params ? sig->n_params : 1);
+        size_t in_total = 0;
+        for (size_t i = 0; i < sig->n_params; i++) {
+            slot_resolve(e, f->params.data[i].type, &sig->params[i]);
+            in_total += sig->params[i].flat_count;
+        }
+        size_t out_total = sig->ret.flat_count;
+        sig->flat_in_tys  = arena_new_array(e->arena, MLIR_TypeHandle, in_total ? in_total : 1);
+        sig->flat_out_tys = arena_new_array(e->arena, MLIR_TypeHandle, out_total ? out_total : 1);
+        size_t off = 0;
+        for (size_t i = 0; i < sig->n_params; i++) {
+            slot_emit_flat_types(e, &sig->params[i], sig->flat_in_tys, &off);
+        }
+        sig->n_flat_in = off;
+        off = 0;
+        slot_emit_flat_types(e, &sig->ret, sig->flat_out_tys, &off);
+        sig->n_flat_out = off;
+        sig->fn_ty = MLIR_CreateTypeFunction(e->ctx,
+            sig->flat_in_tys, sig->n_flat_in, sig->flat_out_tys, sig->n_flat_out);
+    }
+}
+
 static MLIR_OpHandle emit_func(E *e, Func *f) {
-    // (i32, i32, ...) -> i32  (params and return are int-only).
-    MLIR_TypeHandle *in_tys = arena_new_array(e->arena, MLIR_TypeHandle, f->params.size ? f->params.size : 1);
-    for (size_t i = 0; i < f->params.size; i++) in_tys[i] = e->i32;
-    MLIR_TypeHandle *out_tys = arena_new_array(e->arena, MLIR_TypeHandle, 1); out_tys[0] = e->i32;
-    MLIR_TypeHandle fn_ty = MLIR_CreateTypeFunction(e->ctx, in_tys, f->params.size, out_tys, 1);
+    FuncSig *sig = find_sig(e, f->name);
 
     MLIR_RegionHandle body_r = MLIR_CreateRegion(e->ctx);
     MLIR_BlockHandle entry = MLIR_CreateBlock(e->ctx);
     MLIR_AppendRegionBlock(e->ctx, body_r, entry);
 
     Scope sc = (Scope){.head = NULL, .parent = NULL};
-    MLIR_ValueHandle *param_args = arena_new_array(e->arena, MLIR_ValueHandle,
-                                                   f->params.size ? f->params.size : 1);
-    for (size_t i = 0; i < f->params.size; i++) {
+    // Create one BlockArg per flattened scalar parameter.
+    MLIR_ValueHandle *flat_args = arena_new_array(e->arena, MLIR_ValueHandle,
+                                                  sig->n_flat_in ? sig->n_flat_in : 1);
+    for (size_t i = 0; i < sig->n_flat_in; i++) {
         string nm = format(e->arena, str_lit("%arg{}"), (int64_t)i);
-        param_args[i] = MLIR_CreateValueBlockArg(e->ctx, nm, (uint32_t)i, e->i32, eloc(e, 0));
-        MLIR_AppendBlockArg(e->ctx, entry, param_args[i]);
+        flat_args[i] = MLIR_CreateValueBlockArg(e->ctx, nm, (uint32_t)i,
+                                                sig->flat_in_tys[i], eloc(e, 0));
+        MLIR_AppendBlockArg(e->ctx, entry, flat_args[i]);
     }
 
     MLIR_BlockHandle saved = e->cur_block;
     MLIR_RegionHandle saved_region = e->func_region;
+    FuncSig *saved_sig = e->cur_sig;
     e->cur_block = entry;
     e->func_region = body_r;
+    e->cur_sig = sig;
     e->terminated = false;
     e->next_ssa = 0;
 
-    // Spill each parameter into a memref so users can reassign it.
-    for (size_t i = 0; i < f->params.size; i++) {
-        MLIR_ValueHandle addr = emit_alloc(e, e->memref_i32);
-        emit_store(e, param_args[i], addr, NULL, 0);
+    // Spill each parameter into per-field memrefs (struct) or one
+    // memref (scalar) so the body can mutate it like any other local.
+    for (size_t i = 0; i < sig->n_params; i++) {
+        SlotInfo *p = &sig->params[i];
         Sym *sy = arena_new(e->arena, Sym);
         sy->name = f->params.data[i].name;
-        sy->type = (Type){.kind = TY_I32};
-        sy->addr = addr;
+        sy->type = p->type;
+        if (p->type.kind == TY_STRUCT && p->sdef) {
+            sy->sdef = p->sdef;
+            sy->field_addrs = arena_new_array(e->arena, MLIR_ValueHandle,
+                                              p->sdef->fields.size ? p->sdef->fields.size : 1);
+            for (size_t k = 0; k < p->sdef->fields.size; k++) {
+                bool flt = (p->sdef->fields.data[k].kind == TY_F32);
+                MLIR_ValueHandle addr = emit_alloc(e, flt ? e->memref_f32 : e->memref_i32);
+                sy->field_addrs[k] = addr;
+                emit_store(e, flat_args[p->flat_offset + k], addr, NULL, 0);
+            }
+        } else {
+            bool flt = (p->type.kind == TY_F32);
+            MLIR_ValueHandle addr = emit_alloc(e, flt ? e->memref_f32 : e->memref_i32);
+            emit_store(e, flat_args[p->flat_offset], addr, NULL, 0);
+            sy->addr = addr;
+        }
         sy->next = sc.head;
         sc.head = sy;
     }
 
     emit_block(e, &sc, f->body);
     // Fall-through safety: if the user's last block did not terminate,
-    // emit a `return 0;` so the IR is structurally valid.
+    // emit a default return so the IR is structurally valid.
     if (!e->terminated) {
-        MLIR_ValueHandle z = emit_const_i32(e, 0);
-        MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = z;
+        MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle,
+                                                sig->n_flat_out ? sig->n_flat_out : 1);
+        for (size_t i = 0; i < sig->n_flat_out; i++) {
+            MLIR_TypeHandle ty = sig->flat_out_tys[i];
+            ops[i] = (ty == e->f32) ? emit_const_f32(e, 0.0) : emit_const_i32(e, 0);
+        }
         emit_op(e, OP_TYPE_FUNC_RETURN, str_lit("func.return"),
-                NULL, 0, NULL, 0, ops, 1, NULL, 0, NULL, 0);
+                NULL, 0, NULL, 0, ops, sig->n_flat_out, NULL, 0, NULL, 0);
         e->terminated = true;
     }
     e->cur_block = saved;
     e->func_region = saved_region;
+    e->cur_sig = saved_sig;
 
     MLIR_AttributeHandle sym_name = MLIR_CreateAttributeString(e->ctx, str_lit("sym_name"), f->name);
-    MLIR_AttributeHandle fn_ty_attr = MLIR_CreateAttributeType(e->ctx, str_lit("function_type"), fn_ty);
+    MLIR_AttributeHandle fn_ty_attr = MLIR_CreateAttributeType(e->ctx, str_lit("function_type"), sig->fn_ty);
     MLIR_AttributeHandle *attrs = arena_new_array(e->arena, MLIR_AttributeHandle, 2);
     attrs[0] = sym_name; attrs[1] = fn_ty_attr;
     MLIR_RegionHandle *regs = arena_new_array(e->arena, MLIR_RegionHandle, 1); regs[0] = body_r;
@@ -1003,6 +1250,9 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
     e.terminated = false;
     e.loops = NULL;
     e.program = program;
+    e.cur_sig = NULL;
+
+    build_signatures(&e);
 
     // builtin.module { ... }
     MLIR_RegionHandle mr = MLIR_CreateRegion(ctx);

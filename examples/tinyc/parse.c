@@ -427,24 +427,49 @@ static Stmt *parse_stmt(P *p) {
     return s;
 }
 
+// Parse a function-signature type:  int | float | struct Name
+// Returns false if the current tokens don't start a type.
+static bool parse_sig_type(P *p, Type *out) {
+    *out = (Type){0};
+    if (cur(p).kind == TC_TK_KW_INT)   { p->i++; out->kind = TY_I32; return true; }
+    if (cur(p).kind == TC_TK_KW_FLOAT) { p->i++; out->kind = TY_F32; return true; }
+    if (cur(p).kind == TC_TK_KW_STRUCT) {
+        p->i++;
+        TcTok sn = cur(p);
+        if (!expect(p, TC_TK_IDENT, str_lit("expected struct name"))) return false;
+        out->kind = TY_STRUCT;
+        out->struct_name = sn.text;
+        return true;
+    }
+    return false;
+}
+
 static Func *parse_func(P *p) {
     int line = cur(p).line;
-    expect(p, TC_TK_KW_INT, str_lit("expected return type 'int'"));
+    Type ret_ty = {0};
+    if (!parse_sig_type(p, &ret_ty)) {
+        perror_at(p, cur(p).line, str_lit("expected return type"));
+    }
     TcTok name = cur(p);
     expect(p, TC_TK_IDENT, str_lit("expected function name"));
     expect(p, TC_TK_LPAREN, str_lit("expected '('"));
     Func *f = arena_new(p->arena, Func);
     *f = (Func){0};
     f->name = name.text;
+    f->return_type = ret_ty;
     f->line = line;
     VecParam_reserve(p->arena, &f->params, 4);
     VecStmtPtr_reserve(p->arena, &f->body, 8);
     if (cur(p).kind != TC_TK_RPAREN) {
         for (;;) {
-            expect(p, TC_TK_KW_INT, str_lit("expected 'int'"));
+            Type pty = {0};
+            if (!parse_sig_type(p, &pty)) {
+                perror_at(p, cur(p).line, str_lit("expected parameter type"));
+            }
             TcTok pn = cur(p);
             expect(p, TC_TK_IDENT, str_lit("expected parameter name"));
-            VecParam_push_back(p->arena, &f->params, ((Param){.name = pn.text, .line = pn.line}));
+            VecParam_push_back(p->arena, &f->params,
+                ((Param){.name = pn.text, .type = pty, .line = pn.line}));
             if (!accept(p, TC_TK_COMMA)) break;
         }
     }
@@ -489,7 +514,7 @@ Program *tinyc_parse(Arena *arena, VecTcTok toks) {
     VecFuncPtr_reserve(arena, &prog->funcs, 4);
     VecStructDefPtr_reserve(arena, &prog->structs, 4);
     while (cur(&p).kind != TC_TK_EOF) {
-        if (cur(&p).kind == TC_TK_KW_STRUCT) {
+        if (cur(&p).kind == TC_TK_KW_STRUCT && peek(&p, 2).kind == TC_TK_LBRACE) {
             StructDef *sd = parse_struct_def(&p);
             VecStructDefPtr_push_back(arena, &prog->structs, sd);
             continue;
