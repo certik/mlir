@@ -1173,9 +1173,103 @@ static void emit_flat_call(E *e, Scope *sc, FuncSig *sig, VecExprPtr args,
     }
 }
 
+// Compile-time folder for literal-only integer expressions. Returns
+// true and writes the folded i32 value (sign-extended in int64_t) when
+// `ex` and all its sub-expressions are pure integer-only computations
+// reducible at emit time. Used to produce a single `arith.constant`
+// instead of a chain of arith ops for things like `1 + 2 * 3`,
+// `(1 << 4) | 3`, `sizeof(int) * 4`, or ternary with a literal cond.
+//
+// Folded operations (i32 semantics, wrap-around on overflow):
+//   EX_INT, EX_SIZEOF
+//   EX_UN: OP_NEG, OP_BNOT, OP_NOT
+//   EX_BIN: + - * / % & | ^ << >> < <= > >= == != && ||
+//   EX_TERNARY when the condition itself folds.
+//
+// Refused (returns false; caller falls back to normal emission):
+//   - EX_VAR, EX_CALL, EX_ASSIGN, EX_INDEX, EX_ADDR, EX_DEREF,
+//     EX_FIELD, EX_FLOAT, EX_NULL, EX_STR, EX_CAST
+//   - division / modulo by zero (let runtime / LLVM handle it)
+//   - shifts by negative or >=32 (let LLVM handle it)
+static bool ast_fold_int(E *e, Expr *ex, int64_t *out) {
+    if (!ex) return false;
+    switch (ex->kind) {
+        case EX_INT:
+            *out = (int64_t)(int32_t)ex->int_value;
+            return true;
+        case EX_SIZEOF:
+            *out = (int64_t)(int32_t)type_size(e, ex->cast_type);
+            return true;
+        case EX_UN: {
+            int64_t a;
+            if (!ast_fold_int(e, ex->lhs, &a)) return false;
+            int32_t a32 = (int32_t)a;
+            switch (ex->op) {
+                case OP_NEG:  *out = (int64_t)(int32_t)(-a32);   return true;
+                case OP_BNOT: *out = (int64_t)(int32_t)(~a32);   return true;
+                case OP_NOT:  *out = (a32 == 0) ? 1 : 0;         return true;
+                default: return false;
+            }
+        }
+        case EX_BIN: {
+            int64_t a, b;
+            if (!ast_fold_int(e, ex->lhs, &a)) return false;
+            if (!ast_fold_int(e, ex->rhs, &b)) return false;
+            int32_t a32 = (int32_t)a, b32 = (int32_t)b;
+            switch (ex->op) {
+                case OP_ADD: *out = (int64_t)(int32_t)(a32 + b32); return true;
+                case OP_SUB: *out = (int64_t)(int32_t)(a32 - b32); return true;
+                case OP_MUL: *out = (int64_t)(int32_t)(a32 * b32); return true;
+                case OP_DIV:
+                    if (b32 == 0) return false;
+                    *out = (int64_t)(int32_t)(a32 / b32); return true;
+                case OP_MOD:
+                    if (b32 == 0) return false;
+                    *out = (int64_t)(int32_t)(a32 % b32); return true;
+                case OP_BAND: *out = (int64_t)(int32_t)(a32 & b32); return true;
+                case OP_BOR:  *out = (int64_t)(int32_t)(a32 | b32); return true;
+                case OP_BXOR: *out = (int64_t)(int32_t)(a32 ^ b32); return true;
+                case OP_SHL:
+                    if (b32 < 0 || b32 >= 32) return false;
+                    *out = (int64_t)(int32_t)((uint32_t)a32 << b32); return true;
+                case OP_SHR:
+                    if (b32 < 0 || b32 >= 32) return false;
+                    *out = (int64_t)(int32_t)(a32 >> b32); return true;
+                case OP_LT: *out = a32 <  b32 ? 1 : 0; return true;
+                case OP_LE: *out = a32 <= b32 ? 1 : 0; return true;
+                case OP_GT: *out = a32 >  b32 ? 1 : 0; return true;
+                case OP_GE: *out = a32 >= b32 ? 1 : 0; return true;
+                case OP_EQ: *out = a32 == b32 ? 1 : 0; return true;
+                case OP_NE: *out = a32 != b32 ? 1 : 0; return true;
+                case OP_AND: *out = (a32 != 0 && b32 != 0) ? 1 : 0; return true;
+                case OP_OR:  *out = (a32 != 0 || b32 != 0) ? 1 : 0; return true;
+                default: return false;
+            }
+        }
+        case EX_TERNARY: {
+            int64_t c;
+            if (!ast_fold_int(e, ex->lhs, &c)) return false;
+            Expr *pick = ((int32_t)c != 0) ? ex->rhs : ex->lvalue;
+            return ast_fold_int(e, pick, out);
+        }
+        default:
+            return false;
+    }
+}
+
 static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
     e->cur_line = ex->line;
     EVal r = {0};
+    // Pre-pass: literal-only integer subtree -> a single arith.constant.
+    // Only kicks in for nodes that ast_fold_int actually folds; anything
+    // with a side effect or a non-int operand falls through unchanged.
+    if (ex->kind == EX_BIN || ex->kind == EX_UN || ex->kind == EX_TERNARY) {
+        int64_t fv;
+        if (ast_fold_int(e, ex, &fv)) {
+            r.val = emit_const_i32(e, fv);
+            return r;
+        }
+    }
     switch (ex->kind) {
         case EX_INT:
             r.val = emit_const_i32(e, ex->int_value); return r;

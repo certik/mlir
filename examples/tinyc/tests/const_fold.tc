@@ -1,0 +1,23 @@
+// Verify constant folding of literal-only integer expressions: the
+// generated MLIR should reduce these to single `arith.constant` ops,
+// and the runtime values must match plain C semantics.
+
+int main() {
+    print(1 + 2 * 3);             // 7
+    print((1 << 4) | 3);          // 19
+    print(10 - 4 / 2);            // 8
+    print(100 % 7);               // 2
+    print(-5 + 7);                // 2
+    print(~0);                    // -1
+    print(!0);                    // 1
+    print(!5);                    // 0
+    print(255 & 15);              // 15
+    print(1 < 2);                 // 1
+    print(3 == 4);                // 0
+    print(1 ? 42 : 99);           // 42
+    print(0 ? 42 : 99);           // 99
+    print(1 && 1);                // 1
+    print(0 || 0);                // 0
+    print(sizeof(int) * 4);       // 16
+    return 0;
+}
