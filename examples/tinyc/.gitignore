@@ -1,2 +1,5 @@
 tests/*.ll
 tests/*.bin
+tests/*.o
+tests/*.obj
+tests/*.exe

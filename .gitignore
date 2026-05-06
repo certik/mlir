@@ -13,3 +13,4 @@ tests/*.ttir2
 parser.native.bak
 compiler_tester/__pycache__/
 /tinyc
+/tinyc.exe

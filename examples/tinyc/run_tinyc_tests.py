@@ -15,16 +15,29 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 ROOT = HERE.parent.parent
-TINYC = ROOT / "tinyc"
+IS_WIN = sys.platform == "win32"
+TINYC = ROOT / ("tinyc.exe" if IS_WIN else "tinyc")
 RUNTIME = HERE / "runtime.c"
 TESTS_TOML = HERE / "tests.toml"
 
-CC = os.environ.get("CC", "clang")
+CC = os.environ.get("CC", "cl" if IS_WIN else "clang")
 LLC = os.environ.get("LLC", "llc")
 
 
 def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def link_native(obj_path: Path, exe_path: Path):
+    """Compile runtime.c and link with the llc-produced object."""
+    if IS_WIN:
+        # MSVC: cl /nologo /MD obj runtime.c /Fe:exe.exe
+        return run([
+            CC, "/nologo", "/MD",
+            str(obj_path), str(RUNTIME),
+            f"/Fe:{exe_path}",
+        ])
+    return run([CC, str(obj_path), str(RUNTIME), "-o", str(exe_path)])
 
 
 def main():
@@ -43,7 +56,8 @@ def main():
         expected = t["expected_stdout"]
         src = HERE / "tests" / f"{name}.tc"
         ll  = HERE / "tests" / f"{name}.ll"
-        exe = HERE / "tests" / f"{name}.bin"
+        obj = HERE / "tests" / (f"{name}.obj" if IS_WIN else f"{name}.o")
+        exe = HERE / "tests" / (f"{name}.exe" if IS_WIN else f"{name}.bin")
 
         # Stage 1: emit LLVM IR
         r = run([str(TINYC), "--emit=llvm", str(src)])
@@ -57,17 +71,16 @@ def main():
             continue
         ll.write_text(r.stdout)
 
-        # Stage 2: compile .ll -> .o with llc (works regardless of $CC),
-        # then link with $CC + runtime.c.
-        obj = HERE / "tests" / f"{name}.o"
+        # Stage 2: compile .ll -> .o/.obj with llc (works regardless of $CC),
+        # then link with the platform compiler + runtime.c.
         r = run([LLC, "-filetype=obj", str(ll), "-o", str(obj)])
         if r.returncode != 0:
             print(f"FAIL {name}: llc failed\nstderr:\n{r.stderr}")
             failures += 1
             continue
-        r = run([CC, str(obj), str(RUNTIME), "-o", str(exe)])
+        r = link_native(obj, exe)
         if r.returncode != 0:
-            print(f"FAIL {name}: link failed\nstderr:\n{r.stderr}")
+            print(f"FAIL {name}: link failed\nstderr:\n{r.stderr}\nstdout:\n{r.stdout}")
             failures += 1
             continue
 

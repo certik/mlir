@@ -341,6 +341,8 @@ build_cross_upstream = { cmd = "tests\\build_cross_upstream.bat", description = 
 test_cross = { cmd = "./cross_upstream.exe > tests/cross/out_upstream.txt && python tests/file_diff.py tests/cross/expected.txt tests/cross/out_upstream.txt", depends-on = ["build_cross_upstream"], description = "Run upstream cross-impl driver and diff against reference (Windows)" }
 build_parser_upstream = { cmd = "tests\\build_parser_upstream.bat", depends-on = ["tokenizer"], description = "Build parser_upstream against upstream LLVM/MLIR (Windows)" }
 validate_refs = { cmd = "python run_tests.py --validate-refs", depends-on = ["build_parser_upstream"], description = "Round-trip every classic-form reference through the upstream parser to catch invalid MLIR (Windows)" }
+build_tinyc_upstream = { cmd = "examples\\tinyc\\build_tinyc_upstream.bat", description = "Build the tinyC example compiler against upstream LLVM/MLIR (Windows)" }
+test_tinyc_upstream = { cmd = "python examples/tinyc/run_tinyc_tests.py", depends-on = ["build_tinyc_upstream"], description = "Run tinyC example compiler tests (Windows)" }
 
 
 [environments]

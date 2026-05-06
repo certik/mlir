@@ -36,6 +36,7 @@ jobs:
               pixi run -e wasm test_wasm || exit /b 1
               pixi run -e upstream test_cross || exit /b 1
               pixi run -e upstream validate_refs || exit /b 1
+              pixi run -e upstream test_tinyc_upstream || exit /b 1
 
     runs-on: ${{ matrix.os }}
     name: Test ${{ matrix.platform }}
