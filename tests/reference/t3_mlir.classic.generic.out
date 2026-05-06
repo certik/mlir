@@ -12,8 +12,8 @@ module() {
         %1 = arith.subi(%c20: index, %c0_0: index) -> index
         %c1_1 = arith.constant() {value = 1} -> index
         %c1_2 = arith.constant() {value = 1} -> index
-        gpu.launch() {
-        ^bb0(%arg2: index, %arg3: index, %arg4: index, %arg5: index, %arg6: index, %arg7: index):
+        gpu.launch(%0: index, %c1_2: index, %c1_2: index, %1: index, %c1_2: index, %c1_2: index) {
+        ^bb0(%arg2: index, %arg3: index, %arg4: index, %arg8: index, %arg9: index, %arg10: index, %arg5: index, %arg6: index, %arg7: index, %arg11: index, %arg12: index, %arg13: index):
             %2 = arith.addi(%c0: index, %arg2: index) -> index
             %3 = arith.addi(%c0_0: index, %arg5: index) -> index
             %4 = memref.load(%arg0: unknown, %2: index, %3: index) -> f32

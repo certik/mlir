@@ -12,11 +12,8 @@ module {
     %6 = arith.constant 0 : i16
     %7 = arith.constant 1 : i16
     %8 = memref.alloc() : memref<24xi16>
-    "linalg.fill"(%6, %8) ({
-      ^bb0(%24: i16, %25: i16):
-      "linalg.yield"(%24) : (i16) -> ()
-    }) {operandSegmentSizes = array<i32: 1, 1>} : (i16, memref<24xi16>) -> ()
-    %9 = "affine.load"(%8, %1) {map = affine_map<(d0) -> (d0)>} : (memref<24xi16>, index) -> i16
+    linalg.fill ins(%6 : i16) outs(%8 : memref<24xi16>)
+    %9 = affine.load %8[%1] : memref<24xi16>
     %10 = "tensor.from_elements"(%9, %9, %9, %9, %9, %9, %9, %9, %9, %9) : (i16, i16, i16, i16, i16, i16, i16, i16, i16, i16) -> tensor<5x2xi16>
     %11 = scf.if %5 -> (tensor<5x2xi16>) {
       scf.yield %10 : tensor<5x2xi16>
@@ -24,20 +21,17 @@ module {
       scf.yield %10 : tensor<5x2xi16>
     }
     %12 = "tensor.splat"(%7, %4, %3) : (i16, index, index) -> tensor<?x?xi16>
-    %13 = "linalg.copy"(%12, %10) ({
-      ^bb0(%26: i16, %27: i16):
-      "linalg.yield"(%26) : (i16) -> ()
-    }) {operandSegmentSizes = array<i32: 1, 1>} : (tensor<?x?xi16>, tensor<5x2xi16>) -> tensor<5x2xi16>
-    %14 = "tensor.collapse_shape"(%11) {reassociation = [[0, 1]]} : (tensor<5x2xi16>) -> tensor<10xi16>
+    %13 = linalg.copy ins(%12 : tensor<?x?xi16>) outs(%10 : tensor<5x2xi16>) -> tensor<5x2xi16>
+    %14 = tensor.collapse_shape %11 [[0, 1]] : tensor<5x2xi16> into tensor<10xi16>
     %15 = index.constant 10
-    %18 = scf.for %28 = %1 to %15 step %2 iter_args(%29 = %6) -> (i16)  : index {
-      %16 = "tensor.extract"(%14, %28) : (tensor<10xi16>, index) -> i16
-      %17 = arith.addi %29, %16 : i16
+    %18 = scf.for %24 = %1 to %15 step %2 iter_args(%25 = %6) -> (i16)  : index {
+      %16 = "tensor.extract"(%14, %24) : (tensor<10xi16>, index) -> i16
+      %17 = arith.addi %25, %16 : i16
       "vector.print"(%16) {punctuation = #vector.punctuation<newline>} : (i16) -> ()
       scf.yield %17 : i16
     }
-    %19 = "tensor.collapse_shape"(%10) {reassociation = [[0, 1]]} : (tensor<5x2xi16>) -> tensor<10xi16>
-    %20 = "tensor.collapse_shape"(%13) {reassociation = [[0, 1]]} : (tensor<5x2xi16>) -> tensor<10xi16>
+    %19 = tensor.collapse_shape %10 [[0, 1]] : tensor<5x2xi16> into tensor<10xi16>
+    %20 = tensor.collapse_shape %13 [[0, 1]] : tensor<5x2xi16> into tensor<10xi16>
     %21 = call @tensor_i16(%20) : (tensor<10xi16>) -> i16
     %22 = arith.sitofp %18 : i16 to f32
     return %22 : f32

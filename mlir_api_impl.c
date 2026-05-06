@@ -758,6 +758,15 @@ MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_TypeHandle th, size_t idx) {
     return t->data.function.results[idx];
 }
 
+MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    if (!t) return MLIR_INVALID_HANDLE;
+    if (t->kind == TYPE_KIND_TENSOR || t->kind == TYPE_KIND_MEMREF) {
+        return t->data.shaped.element_type;
+    }
+    return MLIR_INVALID_HANDLE;
+}
+
 void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle th, uint32_t width, bool is_signed) {
     IR_Type *t = resolve_type(th);
     if (!t) return;

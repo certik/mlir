@@ -75,6 +75,7 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_TENSOR_SPLAT: return str_lit("tensor.splat");
         case OP_TYPE_TENSOR_COLLAPSE_SHAPE: return str_lit("tensor.collapse_shape");
         case OP_TYPE_LINALG_FILL: return str_lit("linalg.fill");
+        case OP_TYPE_LINALG_COPY: return str_lit("linalg.copy");
         case OP_TYPE_INDEX_CONSTANT: return str_lit("index.constant");
         case OP_TYPE_LLVM_MLIR_UNDEF: return str_lit("llvm.mlir.undef");
         case OP_TYPE_RETURN: return str_lit("return");

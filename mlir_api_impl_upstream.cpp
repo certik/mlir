@@ -683,6 +683,14 @@ extern "C" MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_TypeHandle h, size_t 
     return typeH(ft.getResult(idx));
 }
 
+extern "C" MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle h) {
+    auto t = typeF(h);
+    if (auto st = llvm::dyn_cast<mlir::ShapedType>(t)) {
+        return typeH(st.getElementType());
+    }
+    return MLIR_INVALID_HANDLE;
+}
+
 extern "C" string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle h) {
     auto t = typeF(h);
     // Normalize opaque "unknown" types (dialect `?`, type `unknown`) to the

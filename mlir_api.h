@@ -144,6 +144,7 @@ typedef enum {
 
     // Linalg dialect
     OP_TYPE_LINALG_FILL,
+    OP_TYPE_LINALG_COPY,
 
     // Index dialect
     OP_TYPE_INDEX_CONSTANT,
@@ -331,6 +332,9 @@ size_t MLIR_GetTypeFunctionNumInputs(MLIR_TypeHandle type);
 MLIR_TypeHandle MLIR_GetTypeFunctionInput(MLIR_TypeHandle type, size_t idx);
 size_t MLIR_GetTypeFunctionNumResults(MLIR_TypeHandle type);
 MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_TypeHandle type, size_t idx);
+// Element type of a tensor/memref/vector type, or invalid if the type is
+// not a shaped type.
+MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle type);
 string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle type);
 
 // -----------------------------------------------------------------------------

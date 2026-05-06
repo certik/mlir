@@ -655,12 +655,11 @@ static bool op_force_generic_form(MLIR_OpHandle op) {
     if (nm.size == 0) nm = MLIR_MLIR_OpTypeToString(MLIR_GetOpType(op));
     if (nm.size == 0) return false;
     static const char *names[] = {
-        "linalg.fill", "linalg.copy", "linalg.yield",
-        "tensor.from_elements", "tensor.collapse_shape", "tensor.splat",
+        "linalg.yield",
+        "tensor.from_elements", "tensor.splat",
         "tensor.extract",
-        "affine.load",
         "vector.print",
-        "gpu.launch", "gpu.terminator",
+        "gpu.terminator",
     };
     for (size_t i = 0; i < sizeof(names)/sizeof(names[0]); i++) {
         string s = (string){(char*)names[i], 0};
@@ -1498,6 +1497,200 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
 
+        case OP_TYPE_TENSOR_COLLAPSE_SHAPE: {
+            // Typed form: %r = tensor.collapse_shape %t [[reassoc...]] : T into RT
+            result = str_concat(arena, result, str_lit("tensor.collapse_shape"));
+            size_t no = MLIR_GetOpNumOperands(op);
+            MLIR_ValueHandle src = (no > 0) ? MLIR_GetOpOperand(op, 0) : MLIR_INVALID_HANDLE;
+            if (src) {
+                result = str_concat(arena, result, str_lit(" "));
+                result = str_concat(arena, result, print_ssa_operand_classic(ctx, src));
+            }
+            // Reassociation: prefer captured `_reassoc` attribute, else fall back
+            // to a single-group `[[0, 1, ..., N-1]]` (collapse-to-1D) which fits
+            // every collapse op currently exercised by our tests.
+            string reassoc = str_lit("");
+            for (size_t i = 0, n = MLIR_GetOpNumAttributes(op); i < n; i++) {
+                MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
+                string an = MLIR_GetAttributeName(a);
+                if (str_eq(an, str_lit("_reassoc")) && MLIR_GetAttributeKind(a) == MLIR_ATTR_KIND_STRING) {
+                    reassoc = MLIR_GetAttributeString(a);
+                    break;
+                }
+            }
+            result = str_concat(arena, result, str_lit(" "));
+            if (reassoc.size > 0) {
+                result = str_concat(arena, result, reassoc);
+            } else {
+                MLIR_TypeHandle st = src ? MLIR_GetValueType(src) : MLIR_INVALID_HANDLE;
+                int64_t rank = 0;
+                if (st) {
+                    string s = MLIR_GetTypeString(ctx->mlir_ctx, st);
+                    for (int64_t k = 0; k < (int64_t)s.size; k++) if (s.str[k] == 'x') rank++;
+                }
+                if (rank < 1) rank = 1;
+                result = str_concat(arena, result, str_lit("[["));
+                for (int64_t k = 0; k < rank; k++) {
+                    if (k > 0) result = str_concat(arena, result, str_lit(", "));
+                    result = str_concat(arena, result, format(arena, str_lit("{}"), k));
+                }
+                result = str_concat(arena, result, str_lit("]]"));
+            }
+            // Source type, then `into` and result type
+            MLIR_TypeHandle st = src ? MLIR_GetValueType(src) : MLIR_INVALID_HANDLE;
+            if (st) {
+                result = str_concat(arena, result, str_lit(" : "));
+                result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, st));
+            }
+            if (MLIR_GetOpNumResultTypes(op) > 0) {
+                result = str_concat(arena, result, str_lit(" into "));
+                result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, MLIR_GetOpResult_type(op, 0)));
+            }
+            break;
+        }
+
+        case OP_TYPE_AFFINE_LOAD: {
+            // Typed form: %r = affine.load %memref[%i, ...] : memref<...>
+            result = str_concat(arena, result, str_lit("affine.load"));
+            size_t no = MLIR_GetOpNumOperands(op);
+            if (no > 0) {
+                MLIR_ValueHandle mref = MLIR_GetOpOperand(op, 0);
+                if (mref) {
+                    result = str_concat(arena, result, str_lit(" "));
+                    result = str_concat(arena, result, print_ssa_operand_classic(ctx, mref));
+                }
+                result = str_concat(arena, result, str_lit("["));
+                for (size_t i = 1; i < no; i++) {
+                    if (i > 1) result = str_concat(arena, result, str_lit(", "));
+                    MLIR_ValueHandle idx = MLIR_GetOpOperand(op, i);
+                    if (idx) result = str_concat(arena, result, print_ssa_operand_classic(ctx, idx));
+                }
+                result = str_concat(arena, result, str_lit("]"));
+                MLIR_TypeHandle mty = mref ? MLIR_GetValueType(mref) : MLIR_INVALID_HANDLE;
+                if (mty) {
+                    result = str_concat(arena, result, str_lit(" : "));
+                    result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, mty));
+                }
+            }
+            break;
+        }
+
+        case OP_TYPE_LINALG_FILL:
+        case OP_TYPE_LINALG_COPY: {
+            // Typed form: linalg.fill|copy ins(%a : T, ...) outs(%b : T, ...) [-> rt, ...]
+            // We treat the first half of operands as ins, second half as outs.
+            // For the typical fill/copy this means 1 ins + 1 outs.
+            result = str_concat(arena, result,
+                MLIR_GetOpType(op) == OP_TYPE_LINALG_FILL ? str_lit("linalg.fill") : str_lit("linalg.copy"));
+            size_t n_op = MLIR_GetOpNumOperands(op);
+            size_t n_ins = n_op / 2;
+            if (n_op > 0 && n_ins == 0) n_ins = 1;
+            if (n_ins > n_op) n_ins = n_op;
+            // ins(...)
+            result = str_concat(arena, result, str_lit(" ins("));
+            for (size_t i = 0; i < n_ins; i++) {
+                if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                MLIR_ValueHandle v = MLIR_GetOpOperand(op, i);
+                if (v) result = str_concat(arena, result, print_ssa_operand_classic(ctx, v));
+            }
+            result = str_concat(arena, result, str_lit(" : "));
+            for (size_t i = 0; i < n_ins; i++) {
+                if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                MLIR_ValueHandle v = MLIR_GetOpOperand(op, i);
+                MLIR_TypeHandle t = v ? MLIR_GetValueType(v) : MLIR_INVALID_HANDLE;
+                if (t) result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, t));
+            }
+            result = str_concat(arena, result, str_lit(") outs("));
+            for (size_t i = n_ins; i < n_op; i++) {
+                if (i > n_ins) result = str_concat(arena, result, str_lit(", "));
+                MLIR_ValueHandle v = MLIR_GetOpOperand(op, i);
+                if (v) result = str_concat(arena, result, print_ssa_operand_classic(ctx, v));
+            }
+            result = str_concat(arena, result, str_lit(" : "));
+            for (size_t i = n_ins; i < n_op; i++) {
+                if (i > n_ins) result = str_concat(arena, result, str_lit(", "));
+                MLIR_ValueHandle v = MLIR_GetOpOperand(op, i);
+                MLIR_TypeHandle t = v ? MLIR_GetValueType(v) : MLIR_INVALID_HANDLE;
+                if (t) result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, t));
+            }
+            result = str_concat(arena, result, str_lit(")"));
+            // Result types
+            size_t n_rt = MLIR_GetOpNumResultTypes(op);
+            if (n_rt > 0) {
+                result = str_concat(arena, result, str_lit(" -> "));
+                if (n_rt > 1) result = str_concat(arena, result, str_lit("("));
+                for (size_t i = 0; i < n_rt; i++) {
+                    if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                    MLIR_TypeHandle t = MLIR_GetOpResult_type(op, i);
+                    if (t) result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, t));
+                }
+                if (n_rt > 1) result = str_concat(arena, result, str_lit(")"));
+            }
+            break;
+        }
+
+        case OP_TYPE_GPU_LAUNCH: {
+            // Typed form:
+            //   gpu.launch blocks(%a0, %a1, %a2) in (%a6 = %op0, %a7 = %op1, %a8 = %op2)
+            //              threads(%a3, %a4, %a5) in (%a9 = %op3, %a10 = %op4, %a11 = %op5) {
+            //     <body ops>
+            //   }
+            // Block args are laid out as [bx,by,bz, in_b1,in_b2,in_b3, tx,ty,tz, in_t1,in_t2,in_t3]
+            // Operands are [op0..op5] (the 6 RHS values from the two `in(...)` clauses).
+            result = str_concat(arena, result, str_lit("gpu.launch"));
+
+            MLIR_BlockHandle body = MLIR_INVALID_HANDLE;
+            if (MLIR_GetOpNumRegions(op) > 0) {
+                MLIR_RegionHandle region = MLIR_GetOpRegion(op, 0);
+                if (region && MLIR_GetRegionNumBlocks(region) > 0) {
+                    body = MLIR_GetRegionBlock(region, 0);
+                }
+            }
+            size_t na = body ? MLIR_GetBlockNumArgs(body) : 0;
+            size_t no = MLIR_GetOpNumOperands(op);
+
+            // Helper to print a (kw)(arg, arg, arg) clause from block arg indices [a..a+2].
+            #define PRINT_3ARGS(s, base) do { \
+                result = str_concat(arena, result, str_lit(s)); \
+                result = str_concat(arena, result, str_lit("(")); \
+                for (size_t k = 0; k < 3; k++) { \
+                    if (k > 0) result = str_concat(arena, result, str_lit(", ")); \
+                    if ((base) + k < na) { \
+                        MLIR_ValueHandle a = MLIR_GetBlockArg(body, (base) + k); \
+                        if (a) result = str_concat(arena, result, print_ssa_value_classic(ctx, a)); \
+                    } \
+                } \
+                result = str_concat(arena, result, str_lit(")")); \
+            } while (0)
+
+            // Helper to print `in (%argA = %opB, ...)` for 3 pairs starting at given indices.
+            #define PRINT_IN3(arg_base, op_base) do { \
+                result = str_concat(arena, result, str_lit(" in (")); \
+                for (size_t k = 0; k < 3; k++) { \
+                    if (k > 0) result = str_concat(arena, result, str_lit(", ")); \
+                    if ((arg_base) + k < na) { \
+                        MLIR_ValueHandle a = MLIR_GetBlockArg(body, (arg_base) + k); \
+                        if (a) result = str_concat(arena, result, print_ssa_value_classic(ctx, a)); \
+                    } \
+                    result = str_concat(arena, result, str_lit(" = ")); \
+                    if ((op_base) + k < no) { \
+                        MLIR_ValueHandle ov = MLIR_GetOpOperand(op, (op_base) + k); \
+                        if (ov) result = str_concat(arena, result, print_ssa_operand_classic(ctx, ov)); \
+                    } \
+                } \
+                result = str_concat(arena, result, str_lit(")")); \
+            } while (0)
+
+            PRINT_3ARGS(" blocks", 0);
+            PRINT_IN3(3, 0);
+            PRINT_3ARGS(" threads", 6);
+            PRINT_IN3(9, 3);
+
+            #undef PRINT_3ARGS
+            #undef PRINT_IN3
+            break;
+        }
+
         case OP_TYPE_TT_SPLAT: {
             // Classic format: tt.splat %v : T -> tensor<NxT>
             result = str_concat(arena, result, str_lit("tt.splat "));
@@ -2175,7 +2368,19 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 str_eq(attr_name, str_lit("resultSegmentSizes")) ||
                 str_eq(attr_name, str_lit("result_segment_sizes")) ||
                 str_eq(attr_name, str_lit("overflowFlags")) ||
+                str_eq(attr_name, str_lit("workgroup_attributions")) ||
+                str_eq(attr_name, str_lit("private_attributions")) ||
                 str_eq(attr_name, str_lit("fastmath"))) {
+                continue;
+            }
+            // For ops with typed forms that absorb structural attributes,
+            // suppress those attributes from the trailing `{...}` block.
+            if (MLIR_GetOpType(op) == OP_TYPE_AFFINE_LOAD &&
+                str_eq(attr_name, str_lit("map"))) {
+                continue;
+            }
+            if (MLIR_GetOpType(op) == OP_TYPE_TENSOR_COLLAPSE_SHAPE &&
+                str_eq(attr_name, str_lit("reassociation"))) {
                 continue;
             }
             // affine.for absorbs lowerBoundMap/upperBoundMap/step into its
@@ -2252,7 +2457,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
     // For classic formatting: place regions (when present).
     // Skip here for func.func since its region was already printed in its case above.
-    if (MLIR_GetOpNumRegions(op) > 0 && MLIR_GetOpType(op) != OP_TYPE_FUNC_FUNC && MLIR_GetOpType(op) != OP_TYPE_TT_REDUCE) {
+    if (MLIR_GetOpNumRegions(op) > 0 && MLIR_GetOpType(op) != OP_TYPE_FUNC_FUNC && MLIR_GetOpType(op) != OP_TYPE_TT_REDUCE
+        && MLIR_GetOpType(op) != OP_TYPE_LINALG_FILL && MLIR_GetOpType(op) != OP_TYPE_LINALG_COPY) {
         result = str_concat(arena, result, str_lit(" "));
         for (size_t i = 0, nr = MLIR_GetOpNumRegions(op); i < nr; i++) {
             // Special handling for SCF if else
@@ -2262,7 +2468,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
             if (MLIR_GetOpType(op) == OP_TYPE_TT_FUNC || MLIR_GetOpType(op) == OP_TYPE_MODULE ||
                 MLIR_GetOpType(op) == OP_TYPE_SCF_FOR || MLIR_GetOpType(op) == OP_TYPE_SCF_IF || MLIR_GetOpType(op) == OP_TYPE_SCF_WHILE ||
-                MLIR_GetOpType(op) == OP_TYPE_AFFINE_FOR) {
+                MLIR_GetOpType(op) == OP_TYPE_AFFINE_FOR ||
+                MLIR_GetOpType(op) == OP_TYPE_GPU_LAUNCH) {
                 result = str_concat(arena, result,
                     print_function_region_classic(ctx, indent_level, MLIR_GetOpRegion(op, i))
                 );

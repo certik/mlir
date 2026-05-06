@@ -29,7 +29,7 @@ module() {
             scf.yield(%10: tensor<5x2xi16>)
         }
         %12 = tensor.splat(%7: i16, %4: index, %3: index) -> tensor<?x?xi16>
-        %13 = "linalg.copy"(%12: tensor<?x?xi16>, %10: tensor<5x2xi16>) {operandSegmentSizes = array<i32: 1, 1>} -> tensor<5x2xi16> {
+        %13 = linalg.copy(%12: tensor<?x?xi16>, %10: tensor<5x2xi16>) {operandSegmentSizes = array<i32: 1, 1>} -> tensor<5x2xi16> {
         ^bb0(%arg0: i16, %arg1: i16):
             "linalg.yield"(%24: i16)
         }

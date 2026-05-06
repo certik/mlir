@@ -111,18 +111,7 @@ COMBOS_UPSTREAM_PARSER = [
 # Tracking these centrally — instead of letting them silently slip past CI —
 # means new regressions are caught immediately while pre-existing structural
 # bugs can be tackled one PR at a time.
-VALIDATE_REFS_SKIP = {
-    # Native classic parser doesn't fully parse `gpu.launch blocks(...) in
-    # (...) threads(...) in (...)` (operands and outer-block sizes are lost),
-    # so the regenerated ref carries a `gpu.launch` with 0 operands which
-    # then fails to re-parse through upstream. Needs a native-parser fix.
-    "t3_mlir.classic.classic.out",
-    # Native classic parser is incomplete for several ops in d.mlir
-    # (linalg.fill `ins/outs`, linalg.copy `outs`, tensor.extract result
-    # type), producing invalid IR after round-trip. Needs native-parser
-    # fixes for those ops.
-    "d_mlir.classic.classic.out",
-}
+VALIDATE_REFS_SKIP = set()
 
 
 def ensure_refs(filename, upstream_parser):

@@ -408,6 +408,8 @@ MLIR_OpType op_string_to_type(string opname) {
         return OP_TYPE_TENSOR_COLLAPSE_SHAPE;
     } else if (str_eq(opname, str_lit("linalg.fill"))) {
         return OP_TYPE_LINALG_FILL;
+    } else if (str_eq(opname, str_lit("linalg.copy"))) {
+        return OP_TYPE_LINALG_COPY;
     } else if (str_eq(opname, str_lit("index.constant"))) {
         return OP_TYPE_INDEX_CONSTANT;
     } else if (str_eq(opname, str_lit("llvm.mlir.undef"))) {
@@ -1654,6 +1656,7 @@ MLIR_OpHandle parse_operation(Parser *parser) {
             parsed = parse_cf_cond_br_op(parser, &params);
             break;
         case OP_TYPE_LINALG_FILL:
+        case OP_TYPE_LINALG_COPY:
             parsed = parse_linalg_fill_op(parser, &params);
             break;
         case OP_TYPE_AFFINE_LOAD:
