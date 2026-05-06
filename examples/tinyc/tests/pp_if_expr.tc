@@ -1,0 +1,43 @@
+// Constant expression evaluation in #if.
+
+#define X 7
+
+int main() {
+#if (3 + 4) * 2 == 14
+    print(1);            // 1
+#endif
+
+#if X * X - 1 == 48
+    print(2);            // 2
+#endif
+
+#if (1 << 4) | 2 == 18
+    print(3);            // 3
+#endif
+
+#if 1 ? 4 : 99
+    print(4);            // 4
+#endif
+
+#if 0 ? 99 : 5
+    print(5);            // 5
+#endif
+
+#if (10 % 3) == 1 && (10 / 3) == 3
+    print(6);            // 6
+#endif
+
+#if !(0)
+    print(7);            // 7
+#endif
+
+#if ~0 == -1
+    print(8);            // 8
+#endif
+
+#if defined(X) + defined(Y) == 1
+    print(9);            // 9
+#endif
+
+    return 0;
+}

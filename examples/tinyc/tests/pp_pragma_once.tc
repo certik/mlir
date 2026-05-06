@@ -1,0 +1,11 @@
+// pragma once: pp_a.h is included transitively via pp_b.h AND directly.
+// Without pragma once we'd get a duplicate-symbol error from emitting
+// once_value twice.
+#include "pp_a.h"
+#include "pp_b.h"
+
+int main() {
+    print(once_value()); // 7
+    print(b_call());     // 7
+    return 0;
+}
