@@ -10,16 +10,16 @@ module {
     %7 = arith.subi %6, %5 : index
     %8 = arith.constant 1 : index
     %9 = arith.constant 1 : index
-    gpu.launch %3, %9, %9, %7, %9, %9 : index, index, index, index, index, index {workgroup_attributions = 0 : i32} {
-    ^bb0(%17: index loc("-":16:27), %18: index loc("-":16:34), %19: index loc("-":16:41), %20: index loc("-":16:103), %21: index loc("-":16:110), %22: index loc("-":16:117), %23: index loc("-":16:52), %24: index loc("-":16:64), %25: index loc("-":16:79), %26: index loc("-":16:128), %27: index loc("-":16:141), %28: index loc("-":16:157)):
+    "gpu.launch"(%3, %9, %9, %7, %9, %9) ({
+      ^bb0(%17: index, %18: index, %19: index, %20: index, %21: index, %22: index, %23: index, %24: index, %25: index, %26: index, %27: index, %28: index):
       %10 = arith.addi %1, %17 : index
       %11 = arith.addi %5, %20 : index
       %12 = memref.load %15[%10, %11] : memref<10x20xf32>
       %13 = memref.load %16[%10, %11] : memref<10x20xf32>
       %14 = arith.addf %12, %13 : f32
       memref.store %12, %0[%10, %11] : memref<10x20xf32>
-      "gpu.terminator"
-    }
+      "gpu.terminator"() : () -> ()
+    }) {operandSegmentSizes = array<i32: 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0>, workgroup_attributions = 0 : i64} : (index, index, index, index, index, index) -> ()
     return %0 : memref<10x20xf32>
   }
 }
