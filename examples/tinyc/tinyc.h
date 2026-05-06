@@ -373,6 +373,16 @@ DEFINE_VECTOR_FOR_TYPE(TcTok, VecTcTok)
 
 VecTcTok tinyc_lex(Arena *arena, string src);
 
+// ---------------- Preprocessor ----------------
+
+// Run the C-style preprocessor on `path`. Returns the fully-preprocessed
+// source as a single contiguous string with embedded `#line N "file"`
+// directives that the lexer recognizes. `include_dirs` is a list of -I
+// directories searched for `#include "..."` (after the source-relative
+// search) and `#include <...>`.
+string tinyc_preprocess(Arena *arena, string path,
+                        string *include_dirs, size_t n_include_dirs);
+
 // ---------------- Parser ----------------
 
 Program *tinyc_parse(Arena *arena, VecTcTok toks);

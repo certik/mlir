@@ -1,0 +1,9 @@
+// #include "..." — relative to the source directory.
+#include "pp_helper.h"
+
+int main() {
+    print(helper_add(3, 4));     // 7
+    print(helper_square(5));     // 25
+    print(helper_add(helper_square(2), helper_square(3))); // 13
+    return 0;
+}

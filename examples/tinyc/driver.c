@@ -30,15 +30,23 @@ int app_main(void) {
     bool emit_llvm = false;
     bool emit_lowered = false;
 
+    // -I include directories (repeatable). Allocated in boot_arena.
+    string *include_dirs = arena_new_array(boot_arena, string, argc + 1);
+    size_t n_include_dirs = 0;
+
     for (int i = 1; i < argc; i++) {
         if      (strcmp(argv[i], "--emit=mlir")    == 0) { emit_llvm = false; emit_lowered = false; }
         else if (strcmp(argv[i], "--emit=lowered") == 0) { emit_lowered = true;  emit_llvm = false; }
         else if (strcmp(argv[i], "--emit=llvm")    == 0) { emit_llvm = true;     emit_lowered = false; }
-        else if (argv[i][0] != '-') input_file = argv[i];
+        else if (strncmp(argv[i], "-I", 2) == 0 && argv[i][2] != '\0') {
+            include_dirs[n_include_dirs++] = str_from_cstr_view(argv[i] + 2);
+        } else if (strcmp(argv[i], "-I") == 0 && i + 1 < argc) {
+            include_dirs[n_include_dirs++] = str_from_cstr_view(argv[++i]);
+        } else if (argv[i][0] != '-') input_file = argv[i];
     }
 
     if (!input_file) {
-        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm] FILE.tc"));
+        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm] [-I dir ...] FILE.tc"));
         arena_destroy(boot_arena);
         return 1;
     }
@@ -47,7 +55,8 @@ int app_main(void) {
     MLIR_Context ctx = {0};
     MLIR_SetArenaAllocator(&ctx, arena);
 
-    string src = read_file_ok(arena, str_from_cstr_view(input_file));
+    string src = tinyc_preprocess(arena, str_from_cstr_view(input_file),
+                                  include_dirs, n_include_dirs);
     if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
     VecTcTok toks = tinyc_lex(arena, src);
     Program *prog = tinyc_parse(arena, toks);

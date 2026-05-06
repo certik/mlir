@@ -1,0 +1,54 @@
+// Object-like macros, function-like macros, stringize, token paste,
+// variadic + __VA_ARGS__ + __VA_OPT__, recursion guard.
+
+#define ANSWER 42
+#define ADD(a, b) ((a) + (b))
+#define SQ(x) ((x) * (x))
+
+// Token paste: builds a function name from a prefix.
+#define CAT(a, b) a##b
+#define MK_GET(name, val) int CAT(get_, name)() { return val; }
+
+MK_GET(answer, 42)
+MK_GET(zero, 0)
+
+// Stringize: produces a string literal for use with print().
+#define STR(x) #x
+
+// Variadic with __VA_OPT__ — emits a leading comma when args are present.
+// SUM3 forwards its variadic args; sum_impl signature uses 4 ints.
+
+int sum_impl(int n, int a, int b, int c) {
+    if (n == 0) { return 0; }
+    if (n == 2) { return a + b; }
+    return a + b + c;
+}
+
+#define SUM2(a, b) sum_impl(2, a, b, 0)
+#define SUM3(...) sum_impl(3 __VA_OPT__(,) __VA_ARGS__)
+#define SUM0() sum_impl(0, 0, 0, 0)
+
+// Recursion guard: foo expands to (1 + foo) once and the inner foo stays
+// as a bare identifier — we redefine foo afterwards so the surviving
+// `foo` token resolves via the second definition.
+int foo_var = 100;
+#define foo (1 + foo_var)
+
+int main() {
+    print(ANSWER);            // 42
+    print(ADD(3, 4));         // 7
+    print(SQ(5));             // 25
+    print(SQ(1 + 2));         // 9 — parens guard against precedence
+    print(get_answer());      // 42
+    print(get_zero());        // 0
+
+    print(SUM2(10, 20));      // 30
+    print(SUM3(1, 2, 3));     // 6
+    print(SUM0());            // 0
+
+    print(foo);               // 101
+
+    // Stringize: STR(hello) becomes the literal "hello".
+    print(STR(hello));        // hello
+    return 0;
+}

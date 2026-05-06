@@ -1,0 +1,48 @@
+// Conditional compilation: #ifdef, #ifndef, #else, #endif, #undef,
+// #if defined(X), #elif.
+
+#define FEATURE_A
+#define VERSION 2
+
+int main() {
+#ifdef FEATURE_A
+    print(1);            // 1
+#else
+    print(99);
+#endif
+
+#ifndef FEATURE_A
+    print(99);
+#else
+    print(2);            // 2
+#endif
+
+#undef FEATURE_A
+
+#ifdef FEATURE_A
+    print(99);
+#else
+    print(3);            // 3
+#endif
+
+#if defined(VERSION) && VERSION == 2
+    print(4);            // 4
+#elif defined(VERSION)
+    print(99);
+#else
+    print(99);
+#endif
+
+#if !defined(FEATURE_A)
+    print(5);            // 5
+#endif
+
+#if VERSION > 5
+    print(99);
+#elif VERSION > 1
+    print(6);            // 6
+#else
+    print(99);
+#endif
+    return 0;
+}

@@ -50,6 +50,45 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
             while (i < src.size && src.str[i] != '\n') i++;
             continue;
         }
+        if (c == '/' && i + 1 < src.size && src.str[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < src.size && !(src.str[i] == '*' && src.str[i + 1] == '/')) {
+                if (src.str[i] == '\n') line++;
+                i++;
+            }
+            if (i + 1 < src.size) i += 2;
+            else i = src.size;
+            continue;
+        }
+        if (c == '#') {
+            // #line N "file" — emitted by the preprocessor. Update line
+            // tracking for subsequent diagnostics; we ignore the file name
+            // since we report only line numbers.
+            size_t j = i + 1;
+            while (j < src.size && (src.str[j] == ' ' || src.str[j] == '\t')) j++;
+            // Optional "line" keyword (not required by our PP, but accepted).
+            if (j + 4 <= src.size && src.str[j] == 'l' && src.str[j + 1] == 'i'
+                && src.str[j + 2] == 'n' && src.str[j + 3] == 'e'
+                && (j + 4 == src.size || !is_alnum(src.str[j + 4]))) {
+                j += 4;
+                while (j < src.size && (src.str[j] == ' ' || src.str[j] == '\t')) j++;
+            }
+            if (j < src.size && is_digit(src.str[j])) {
+                int new_line = 0;
+                while (j < src.size && is_digit(src.str[j])) {
+                    new_line = new_line * 10 + (src.str[j] - '0');
+                    j++;
+                }
+                // Skip rest of line (optional "file" string and any
+                // trailing junk).
+                while (j < src.size && src.str[j] != '\n') j++;
+                if (j < src.size) j++; // consume newline
+                line = new_line;
+                i = j;
+                continue;
+            }
+            // Otherwise: stray '#'. Fall through to error.
+        }
         if (c == '"') {
             // String literal. Decode escapes into an arena buffer; append a
             // trailing NUL so callers can pass the bytes to printf/fputs.

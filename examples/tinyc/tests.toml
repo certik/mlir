@@ -173,3 +173,23 @@ expected_stdout = "1\n2\n3\n2\n1\n10\n11\n12\n1\n7\n9\n"
 [[test]]
 name = "enum_shadow"
 expected_stdout = "1\n2\n3\n1\n"
+
+[[test]]
+name = "pp_define"
+expected_stdout = "42\n7\n25\n9\n42\n0\n30\n6\n0\n101\nhello\n"
+
+[[test]]
+name = "pp_ifdef"
+expected_stdout = "1\n2\n3\n4\n5\n6\n"
+
+[[test]]
+name = "pp_include"
+expected_stdout = "7\n25\n13\n"
+
+[[test]]
+name = "pp_pragma_once"
+expected_stdout = "7\n7\n"
+
+[[test]]
+name = "pp_if_expr"
+expected_stdout = "1\n2\n3\n4\n5\n6\n7\n8\n9\n"
