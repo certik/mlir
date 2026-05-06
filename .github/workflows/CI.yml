@@ -18,12 +18,14 @@ jobs:
               pixi run -e linux test_linux
               pixi run -e wasm test_wasm
               pixi run -e upstream test_cross
+              pixi run -e upstream validate_refs
           - platform: macos
             os: macos-latest
             pixi-command: |
               pixi run -e macos test_macos
               pixi run -e wasm test_wasm
               pixi run -e upstream test_cross
+              pixi run -e upstream validate_refs
           - platform: windows
             os: windows-latest
             pixi-command: |
@@ -31,6 +33,7 @@ jobs:
               pixi run -e windows test_windows || exit /b 1
               pixi run -e wasm test_wasm || exit /b 1
               pixi run -e upstream test_cross || exit /b 1
+              pixi run -e upstream validate_refs || exit /b 1
 
     runs-on: ${{ matrix.os }}
     name: Test ${{ matrix.platform }}

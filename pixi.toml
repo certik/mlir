@@ -332,11 +332,13 @@ build_cross_upstream = { cmd = "bash tests/build_cross_upstream.sh", description
 test_cross = { cmd = "./cross_upstream > tests/cross/out_upstream.txt && diff tests/cross/expected.txt tests/cross/out_upstream.txt", depends-on = ["build_cross_upstream"], description = "Run upstream cross-impl driver and diff against reference" }
 build_parser_upstream = { cmd = "bash tests/build_parser_upstream.sh", depends-on = ["tokenizer"], description = "Build parser_upstream against upstream LLVM/MLIR" }
 test_parser_upstream = { cmd = "bash tests/run_parser_upstream.sh", depends-on = ["build_parser_upstream"], description = "Run mlir test suite using parser_upstream as ./parser (some mismatches expected)" }
+validate_refs = { cmd = "python run_tests.py --validate-refs", depends-on = ["build_parser_upstream"], description = "Round-trip every classic-form reference through the upstream parser to catch invalid MLIR" }
 
 [feature.upstream.target.win-64.tasks]
 build_cross_upstream = { cmd = "tests\\build_cross_upstream.bat", description = "Build cross-impl driver against upstream LLVM/MLIR (Windows)" }
 test_cross = { cmd = "./cross_upstream.exe > tests/cross/out_upstream.txt && python tests/file_diff.py tests/cross/expected.txt tests/cross/out_upstream.txt", depends-on = ["build_cross_upstream"], description = "Run upstream cross-impl driver and diff against reference (Windows)" }
 build_parser_upstream = { cmd = "tests\\build_parser_upstream.bat", depends-on = ["tokenizer"], description = "Build parser_upstream against upstream LLVM/MLIR (Windows)" }
+validate_refs = { cmd = "python run_tests.py --validate-refs", depends-on = ["build_parser_upstream"], description = "Round-trip every classic-form reference through the upstream parser to catch invalid MLIR (Windows)" }
 
 
 [environments]

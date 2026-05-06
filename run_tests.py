@@ -102,6 +102,43 @@ COMBOS_UPSTREAM_PARSER = [
 ]
 
 
+# Reference files known to fail upstream round-trip due to structural classic-
+# printer bugs we have not yet fixed. Each entry should have a one-line note
+# pointing at the *root cause* (not just the upstream error message). This
+# list is enforced to only ever shrink: any ref that starts round-tripping
+# must be removed (run_tests.py --validate-refs will fail until you do).
+#
+# Tracking these centrally — instead of letting them silently slip past CI —
+# means new regressions are caught immediately while pre-existing structural
+# bugs can be tackled one PR at a time.
+VALIDATE_REFS_SKIP = {
+    # std.constant / std.return — input file uses an MLIR dialect that no
+    # longer exists upstream. Not a printer bug; the input itself is stale.
+    "a_mlir.classic.classic.out",
+    "a_mlir.upstream.classic.out",
+    # Multiple structural classic-printer issues: missing `()` on
+    # memref.alloc, `affine.for {` lacking loop bounds + induction var,
+    # `memref.load %a, %b, %c` instead of `memref.load %a[%b, %c]`,
+    # attribute "..." placeholders for unknown attribute kinds, dropped
+    # block-argument names from the upstream backend.
+    "t1_mlir.classic.classic.out",
+    "t1_mlir.upstream.classic.out",
+    "t2_mlir.classic.classic.out",
+    "t2_mlir.upstream.classic.out",
+    "t3_mlir.classic.classic.out",
+    "t3_mlir.upstream.classic.out",
+    # tensor / linalg / affine.load / scf.if attribute printing not yet
+    # supported by classic printer (`expected attribute value` / `expected
+    # non-function type`).
+    "d_mlir.classic.classic.out",
+    "d_mlir.upstream.classic.out",
+    # Function private declarations rendered as definitions with empty
+    # body, broken SSA renumbering, attribute "..." placeholders.
+    "effect_mlir.upstream.classic.out",
+    "simple_mlir.upstream.classic.out",
+}
+
+
 def ensure_refs(filename, upstream_parser):
     """Generate per-(parser,printer) reference files using parser_upstream."""
     infile = os.path.join(TESTS, filename)
@@ -195,11 +232,18 @@ def roundtrip_validate_refs(tests):
     We skip *.generic.out because our generic format is a debugging
     representation, not MLIR's standard generic form. We skip
     *.upstream.upstream.out because it is by definition upstream's own
-    pretty form (already valid)."""
+    pretty form (already valid).
+
+    Refs in VALIDATE_REFS_SKIP are known-broken due to structural classic-
+    printer bugs (affine.for syntax, memref subscript syntax, attribute "..."
+    placeholders, SSA renumbering, etc.). They are skipped here but the list
+    is enforced to only ever shrink: if a skipped ref now passes round-trip,
+    we fail and ask for it to be removed from the list."""
     if not os.path.exists(UPSTREAM):
         print(f"error: {UPSTREAM} required for round-trip ref validation", file=sys.stderr)
         sys.exit(1)
     failures = []
+    unexpected_passes = []
     n = 0
     for t in tests:
         filename = t["filename"]
@@ -215,11 +259,25 @@ def roundtrip_validate_refs(tests):
             ref = ref_path(filename, parse_k, print_k)
             if not os.path.exists(ref):
                 continue
+            base = os.path.basename(ref)
             cmd = [UPSTREAM, ref, "--parse=upstream", "--print=upstream"]
             rc, _, err = run_capture(cmd)
+            if base in VALIDATE_REFS_SKIP:
+                if rc == 0:
+                    unexpected_passes.append(base)
+                continue
             n += 1
             if rc != 0:
                 failures.append((ref, err.decode("utf-8", errors="replace")))
+    if unexpected_passes:
+        print(
+            f"\n{len(unexpected_passes)} ref(s) listed in VALIDATE_REFS_SKIP now "
+            f"round-trip cleanly. Please remove them from the list in run_tests.py:",
+            file=sys.stderr,
+        )
+        for b in unexpected_passes:
+            print(f"  {b}", file=sys.stderr)
+        sys.exit(1)
     if failures:
         print(f"\n{len(failures)}/{n} reference file(s) failed upstream round-trip:\n", file=sys.stderr)
         for ref, err in failures:
