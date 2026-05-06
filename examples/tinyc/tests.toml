@@ -101,3 +101,23 @@ expected_stdout = "1\n7\n6\n-1\n8\n4\n8\n5\n2\n16\n4\n"
 [[test]]
 name = "ternary"
 expected_stdout = "7\n3\n5\n3\n1\n"
+
+[[test]]
+name = "typedef"
+expected_stdout = "16\n100\n7\n"
+
+[[test]]
+name = "forward_decl"
+expected_stdout = "1\n1\n0\n6\n"
+
+[[test]]
+name = "multi_array"
+expected_stdout = "0\n12\n23\n138\n"
+
+[[test]]
+name = "ptr_arith"
+expected_stdout = "10\n30\n40\n50\n4\n150\n"
+
+[[test]]
+name = "switch_case"
+expected_stdout = "100\n200\n200\n301\n0\n999\n22\n"

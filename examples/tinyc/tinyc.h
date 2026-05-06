@@ -105,7 +105,8 @@ typedef enum {
 
 typedef struct {
     TypeKind kind;
-    int64_t  array_len;
+    int64_t  array_len;       // 1st dimension for TY_ARRAY_I32 / TY_ARRAY_STRUCT
+    int64_t  array_len2;      // 2nd dimension for TY_ARRAY_I32 (0 = 1D)
     string   struct_name;     // for TY_STRUCT
 } Type;
 
@@ -179,11 +180,26 @@ typedef enum {
     ST_PRINT,          // print(expr);
     ST_BREAK,          // break;
     ST_CONTINUE,       // continue;
+    ST_SWITCH,         // switch (e) { case 1: ... default: ... }
 } StmtKind;
 
 typedef struct Stmt Stmt;
 
 DEFINE_VECTOR_FOR_TYPE(Stmt*, VecStmtPtr)
+
+// One entry in a `switch` body: marks the start of a case-block. The
+// body (Stmt array on the parent ST_SWITCH) is parsed as a flat sequence;
+// each case label / default record points at the index in that sequence
+// where the case body begins. Multiple case labels with the same body
+// (`case 1: case 2:`) produce multiple SwitchCase entries with the same
+// body_start.
+typedef struct {
+    int64_t value;
+    bool    is_default;
+    size_t  body_start;
+} SwitchCase;
+
+DEFINE_VECTOR_FOR_TYPE(SwitchCase, VecSwitchCase)
 
 struct Stmt {
     StmtKind kind;
@@ -193,7 +209,7 @@ struct Stmt {
     Type  decl_type;
     string decl_name;
     Expr *decl_init;
-    // ST_IF / ST_WHILE / ST_FOR
+    // ST_IF / ST_WHILE / ST_FOR / ST_SWITCH
     Expr *cond;
     VecStmtPtr then_body;
     VecStmtPtr else_body;
@@ -203,8 +219,10 @@ struct Stmt {
     Stmt *for_init;
     Expr *for_step;
     VecStmtPtr for_body;
-    // ST_BLOCK
+    // ST_BLOCK / ST_SWITCH (body)
     VecStmtPtr block_body;
+    // ST_SWITCH
+    VecSwitchCase switch_cases;
     int line;
 };
 
@@ -221,6 +239,9 @@ typedef struct {
     Type       return_type;  // function return type
     VecParam   params;
     VecStmtPtr body;
+    bool       is_forward;   // true when this Func is just a prototype
+                             // (no body). Replaced in-place by a later
+                             // definition with the same name.
     int        line;
 } Func;
 
@@ -289,6 +310,11 @@ typedef enum {
     TC_TK_KW_NULL,
     TC_TK_KW_SIZEOF,
     TC_TK_KW_CHAR,
+    TC_TK_KW_TYPEDEF,
+    TC_TK_KW_EXTERN,
+    TC_TK_KW_SWITCH,
+    TC_TK_KW_CASE,
+    TC_TK_KW_DEFAULT,
     TC_TK_STRING_LIT,
     TC_TK_LPAREN, TC_TK_RPAREN,
     TC_TK_LBRACE, TC_TK_RBRACE,

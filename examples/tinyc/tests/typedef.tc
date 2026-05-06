@@ -1,0 +1,28 @@
+typedef int Int32;
+typedef int* IntPtr;
+
+struct Point {
+    int x;
+    int y;
+};
+typedef struct Point Point;
+
+Int32 add(Int32 a, Int32 b) {
+    return a + b;
+}
+
+int main() {
+    Int32 x = 7;
+    Int32 y = 9;
+    print(add(x, y));      // 16
+
+    IntPtr p = &x;
+    *p = 100;
+    print(x);              // 100
+
+    Point pt;
+    pt.x = 3;
+    pt.y = 4;
+    print(pt.x + pt.y);    // 7
+    return 0;
+}

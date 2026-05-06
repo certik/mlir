@@ -28,6 +28,11 @@ static TcTokKind keyword_or_ident(string s) {
     if (str_eq(s, str_lit("null")))     return TC_TK_KW_NULL;
     if (str_eq(s, str_lit("sizeof")))   return TC_TK_KW_SIZEOF;
     if (str_eq(s, str_lit("char")))     return TC_TK_KW_CHAR;
+    if (str_eq(s, str_lit("typedef")))  return TC_TK_KW_TYPEDEF;
+    if (str_eq(s, str_lit("extern")))   return TC_TK_KW_EXTERN;
+    if (str_eq(s, str_lit("switch")))   return TC_TK_KW_SWITCH;
+    if (str_eq(s, str_lit("case")))     return TC_TK_KW_CASE;
+    if (str_eq(s, str_lit("default")))  return TC_TK_KW_DEFAULT;
     return TC_TK_IDENT;
 }
 
