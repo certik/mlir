@@ -119,16 +119,10 @@ VALIDATE_REFS_SKIP = {
     # gpu.launch lossy structural printing.
     "t3_mlir.classic.classic.out",
     "t3_mlir.upstream.classic.out",
-    # tensor / linalg / affine.load / scf.if attribute printing not yet
-    # supported by classic printer (`expected attribute value` / `expected
-    # non-function type`).
+    # linalg.fill named-structured-op region not preserved (needs region args
+    # and the `ins(...) outs(...)` block to be emitted by classic printer).
     "d_mlir.classic.classic.out",
     "d_mlir.upstream.classic.out",
-    # cf.br / cf.cond_br successor-block operand syntax ('cf.br ^bb1(...)')
-    # not emitted by classic printer when going through the upstream backend
-    # (no _target/_ntrue/_nfalse attrs); needs a Successor API.
-    "effect_mlir.upstream.classic.out",
-    "simple_mlir.upstream.classic.out",
 }
 
 

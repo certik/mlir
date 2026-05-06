@@ -209,7 +209,13 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
                     }
                     case MLIR_ATTR_KIND_STRING: {
                         string s = MLIR_GetAttributeString(attr);
-                        result = str_concat(arena, result, format(arena, str_lit("\"{}\""), s));
+                        // Symbol references are stored as `@name` and must be
+                        // emitted unquoted in generic form.
+                        if (s.size > 0 && s.str[0] == '@') {
+                            result = str_concat(arena, result, s);
+                        } else {
+                            result = str_concat(arena, result, format(arena, str_lit("\"{}\""), s));
+                        }
                         break;
                     }
                     case MLIR_ATTR_KIND_ARRAY: {

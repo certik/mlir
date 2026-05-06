@@ -665,29 +665,49 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // Classic format: cf.br ^bbX(%args : types)
             result = str_concat(arena, result, str_lit("cf.br"));
             string target = str_lit("^bb1");
-            size_t n_attrs = MLIR_GetOpNumAttributes(op);
-            for (size_t i = 0; i < n_attrs; i++) {
-                MLIR_AttributeHandle attr = MLIR_GetOpAttribute(op, i);
-                if (str_eq(MLIR_GetAttributeName(attr), str_lit("_target")) &&
-                    MLIR_GetAttributeKind(attr) == MLIR_ATTR_KIND_STRING) {
-                    target = MLIR_GetAttributeString(attr);
-                    break;
+
+            // Prefer the Successor API (works with upstream backend); fall
+            // back to the native parser's _target attr.
+            if (MLIR_GetOpNumSuccessors(op) > 0) {
+                MLIR_BlockHandle succ = MLIR_GetOpSuccessor(op, 0);
+                size_t bidx = MLIR_GetBlockIndex(succ);
+                if (bidx != (size_t)-1) {
+                    target = format(arena, str_lit("^bb{}"), (int64_t)bidx);
+                }
+            } else {
+                size_t n_attrs = MLIR_GetOpNumAttributes(op);
+                for (size_t i = 0; i < n_attrs; i++) {
+                    MLIR_AttributeHandle attr = MLIR_GetOpAttribute(op, i);
+                    if (str_eq(MLIR_GetAttributeName(attr), str_lit("_target")) &&
+                        MLIR_GetAttributeKind(attr) == MLIR_ATTR_KIND_STRING) {
+                        target = MLIR_GetAttributeString(attr);
+                        break;
+                    }
                 }
             }
             result = str_concat(arena, result, str_lit(" "));
             result = str_concat(arena, result, target);
-            size_t n_operands = MLIR_GetOpNumOperands(op);
+
+            // Successor operands: prefer Successor API; fall back to op operands.
+            size_t n_operands = MLIR_GetOpNumSuccessors(op) > 0
+                ? MLIR_GetOpNumSuccessorOperands(op, 0)
+                : MLIR_GetOpNumOperands(op);
             if (n_operands > 0) {
+                bool use_succ = MLIR_GetOpNumSuccessors(op) > 0;
                 result = str_concat(arena, result, str_lit("("));
                 for (size_t i = 0; i < n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    MLIR_ValueHandle operand = MLIR_GetOpOperand(op, i);
+                    MLIR_ValueHandle operand = use_succ
+                        ? MLIR_GetOpSuccessorOperand(op, 0, i)
+                        : MLIR_GetOpOperand(op, i);
                     result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
                 }
                 result = str_concat(arena, result, str_lit(" : "));
                 for (size_t i = 0; i < n_operands; i++) {
                     if (i > 0) result = str_concat(arena, result, str_lit(", "));
-                    MLIR_ValueHandle operand = MLIR_GetOpOperand(op, i);
+                    MLIR_ValueHandle operand = use_succ
+                        ? MLIR_GetOpSuccessorOperand(op, 0, i)
+                        : MLIR_GetOpOperand(op, i);
                     MLIR_TypeHandle operand_type = MLIR_GetValueType(operand);
                     if (operand_type) {
                         result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, operand_type));
@@ -699,50 +719,62 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
         }
 
         case OP_TYPE_CF_COND_BR: {
-            // Classic format: cf.cond_br %cond, ^bb1, ^bb2
+            // Classic format: cf.cond_br %cond, ^bb1(...), ^bb2(...)
             result = str_concat(arena, result, str_lit("cf.cond_br"));
             size_t n_operands = MLIR_GetOpNumOperands(op);
             if (n_operands > 0) {
                 result = str_concat(arena, result, str_lit(" "));
                 MLIR_ValueHandle first_operand = MLIR_GetOpOperand(op, 0);
                 result = str_concat(arena, result, print_ssa_operand_classic(ctx, first_operand));
-                // Pull targets from private attrs if present
+
+                bool use_succ = MLIR_GetOpNumSuccessors(op) >= 2;
                 string ttrue = str_lit("^bb1");
                 string tfalse = str_lit("^bb2");
                 int64_t ntrue = 0, nfalse = 0;
                 int op_index = 1;
-                size_t n_attrs = MLIR_GetOpNumAttributes(op);
-                for (size_t i = 0; i < n_attrs; i++) {
-                    MLIR_AttributeHandle attr = MLIR_GetOpAttribute(op, i);
-                    string attr_name = MLIR_GetAttributeName(attr);
-                    if (str_eq(attr_name, str_lit("_true")) && MLIR_GetAttributeKind(attr) == MLIR_ATTR_KIND_STRING) {
-                        ttrue = MLIR_GetAttributeString(attr);
-                    } else if (str_eq(attr_name, str_lit("_false")) && MLIR_GetAttributeKind(attr) == MLIR_ATTR_KIND_STRING) {
-                        tfalse = MLIR_GetAttributeString(attr);
-                    } else if (str_eq(attr_name, str_lit("_ntrue")) && MLIR_GetAttributeKind(attr) == MLIR_ATTR_KIND_INTEGER) {
-                        ntrue = MLIR_GetAttributeInteger(attr);
-                    } else if (str_eq(attr_name, str_lit("_nfalse")) && MLIR_GetAttributeKind(attr) == MLIR_ATTR_KIND_INTEGER) {
-                        nfalse = MLIR_GetAttributeInteger(attr);
+                if (use_succ) {
+                    size_t bt = MLIR_GetBlockIndex(MLIR_GetOpSuccessor(op, 0));
+                    size_t bf = MLIR_GetBlockIndex(MLIR_GetOpSuccessor(op, 1));
+                    if (bt != (size_t)-1) ttrue = format(arena, str_lit("^bb{}"), (int64_t)bt);
+                    if (bf != (size_t)-1) tfalse = format(arena, str_lit("^bb{}"), (int64_t)bf);
+                    ntrue = (int64_t)MLIR_GetOpNumSuccessorOperands(op, 0);
+                    nfalse = (int64_t)MLIR_GetOpNumSuccessorOperands(op, 1);
+                } else {
+                    size_t n_attrs = MLIR_GetOpNumAttributes(op);
+                    for (size_t i = 0; i < n_attrs; i++) {
+                        MLIR_AttributeHandle attr = MLIR_GetOpAttribute(op, i);
+                        string attr_name = MLIR_GetAttributeName(attr);
+                        if (str_eq(attr_name, str_lit("_true")) && MLIR_GetAttributeKind(attr) == MLIR_ATTR_KIND_STRING) {
+                            ttrue = MLIR_GetAttributeString(attr);
+                        } else if (str_eq(attr_name, str_lit("_false")) && MLIR_GetAttributeKind(attr) == MLIR_ATTR_KIND_STRING) {
+                            tfalse = MLIR_GetAttributeString(attr);
+                        } else if (str_eq(attr_name, str_lit("_ntrue")) && MLIR_GetAttributeKind(attr) == MLIR_ATTR_KIND_INTEGER) {
+                            ntrue = MLIR_GetAttributeInteger(attr);
+                        } else if (str_eq(attr_name, str_lit("_nfalse")) && MLIR_GetAttributeKind(attr) == MLIR_ATTR_KIND_INTEGER) {
+                            nfalse = MLIR_GetAttributeInteger(attr);
+                        }
                     }
                 }
+
                 result = str_concat(arena, result, str_lit(", "));
                 result = str_concat(arena, result, ttrue);
                 if (ntrue > 0) {
                     result = str_concat(arena, result, str_lit("("));
                     for (int i = 0; i < ntrue; i++, op_index++) {
                         if (i>0) result = str_concat(arena, result, str_lit(", "));
-                        MLIR_ValueHandle operand = MLIR_GetOpOperand(op, op_index);
+                        MLIR_ValueHandle operand = use_succ
+                            ? MLIR_GetOpSuccessorOperand(op, 0, (size_t)i)
+                            : MLIR_GetOpOperand(op, op_index);
                         result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
                     }
-                    // Types for true args
-                    if (ntrue > 0) {
-                        result = str_concat(arena, result, str_lit(" : "));
-                        for (int i = 0; i < ntrue; i++) {
-                            if (i>0) result = str_concat(arena, result, str_lit(", "));
-                            MLIR_ValueHandle operand = MLIR_GetOpOperand(op, 1+i);
-                            MLIR_TypeHandle operand_type = MLIR_GetValueType(operand);
-                            result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, operand_type));
-                        }
+                    result = str_concat(arena, result, str_lit(" : "));
+                    for (int i = 0; i < ntrue; i++) {
+                        if (i>0) result = str_concat(arena, result, str_lit(", "));
+                        MLIR_ValueHandle operand = use_succ
+                            ? MLIR_GetOpSuccessorOperand(op, 0, (size_t)i)
+                            : MLIR_GetOpOperand(op, 1+i);
+                        MLIR_TypeHandle operand_type = MLIR_GetValueType(operand);
+                        result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, operand_type));
                     }
                     result = str_concat(arena, result, str_lit(")"));
                 }
@@ -752,19 +784,19 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     result = str_concat(arena, result, str_lit("("));
                     for (int i = 0; i < nfalse; i++, op_index++) {
                         if (i>0) result = str_concat(arena, result, str_lit(", "));
-                        MLIR_ValueHandle operand = MLIR_GetOpOperand(op, op_index);
+                        MLIR_ValueHandle operand = use_succ
+                            ? MLIR_GetOpSuccessorOperand(op, 1, (size_t)i)
+                            : MLIR_GetOpOperand(op, op_index);
                         result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
                     }
-                    if (nfalse > 0) {
-                        result = str_concat(arena, result, str_lit(" : "));
-                        for (int i = 0; i < nfalse; i++) {
-                            if (i>0) result = str_concat(arena, result, str_lit(", "));
-                            // false args types are after true args
-                            int idx = 1 + (int)ntrue + i;
-                            MLIR_ValueHandle operand = MLIR_GetOpOperand(op, idx);
-                            MLIR_TypeHandle operand_type = MLIR_GetValueType(operand);
-                            result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, operand_type));
-                        }
+                    result = str_concat(arena, result, str_lit(" : "));
+                    for (int i = 0; i < nfalse; i++) {
+                        if (i>0) result = str_concat(arena, result, str_lit(", "));
+                        MLIR_ValueHandle operand = use_succ
+                            ? MLIR_GetOpSuccessorOperand(op, 1, (size_t)i)
+                            : MLIR_GetOpOperand(op, 1+(int)ntrue+i);
+                        MLIR_TypeHandle operand_type = MLIR_GetValueType(operand);
+                        result = str_concat(arena, result, MLIR_GetTypeString(ctx->mlir_ctx, operand_type));
                     }
                     result = str_concat(arena, result, str_lit(")"));
                 }

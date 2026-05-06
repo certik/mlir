@@ -38,7 +38,7 @@ module {
     }
     %19 = tensor.collapse_shape %10 : tensor<10xi16> {reassociation = ...}
     %20 = tensor.collapse_shape %13 : tensor<10xi16> {reassociation = ...}
-    %21 = call @unknown(%20) : (tensor<10xi16>) -> i16
+    %21 = call @tensor_i16(%20) : (tensor<10xi16>) -> i16
     %22 = arith.sitofp %18 : i16 to f32
     return %22 : f32
   }

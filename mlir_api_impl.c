@@ -429,6 +429,14 @@ MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle oh, size_t idx) {
     return op->result_types[idx];
 }
 
+// Native backend doesn't track successors/successor-operands separately;
+// the classic parser stores _target/_ntrue/_nfalse + interleaves operands.
+// Return 0/invalid so the printer falls back to its attribute-based path.
+size_t MLIR_GetOpNumSuccessors(MLIR_OpHandle oh) { (void)oh; return 0; }
+MLIR_BlockHandle MLIR_GetOpSuccessor(MLIR_OpHandle oh, size_t idx) { (void)oh; (void)idx; return MLIR_INVALID_HANDLE; }
+size_t MLIR_GetOpNumSuccessorOperands(MLIR_OpHandle oh, size_t s) { (void)oh; (void)s; return 0; }
+MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_OpHandle oh, size_t s, size_t i) { (void)oh; (void)s; (void)i; return MLIR_INVALID_HANDLE; }
+
 size_t MLIR_GetBlockNumArgs(MLIR_BlockHandle bh) {
     IR_Block *b = resolve_block(bh);
     return b ? b->n_arguments : 0;
@@ -439,6 +447,8 @@ MLIR_ValueHandle MLIR_GetBlockArg(MLIR_BlockHandle bh, size_t idx) {
     if (!b || idx >= b->n_arguments) return MLIR_INVALID_HANDLE;
     return b->arguments[idx];
 }
+
+size_t MLIR_GetBlockIndex(MLIR_BlockHandle bh) { (void)bh; return (size_t)-1; }
 
 MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle vh) {
     IR_Value *v = resolve_value(vh);

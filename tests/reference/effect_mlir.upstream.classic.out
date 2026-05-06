@@ -6,61 +6,61 @@ module {
     %3 = arith.constant 0 : i64
     %4 = arith.cmpi slt, %2, %3 : i64
     %5 = arith.constant false
-    cf.cond_br %4, ^bb1, ^bb2
+    cf.cond_br %4, ^bb1, ^bb2(%5, %1 : i1, i64)
   ^bb1:
-    %6 = call @unknown() : () -> i64
+    %6 = call @effect() : () -> i64
     %7 = arith.constant 0 : i64
     %8 = arith.cmpi slt, %6, %7 : i64
-    cf.br ^bb1(%8, %6 : i1, i64)
+    cf.br ^bb2(%8, %6 : i1, i64)
   ^bb2(%67: i1 loc("-":15:8), %68: i64 loc("-":15:16)):
     %9 = arith.extui %67 : i1 to i64
     %10 = arith.constant 0 : i64
     %11 = arith.cmpi slt, %9, %10 : i64
-    cf.cond_br %11, ^bb1, ^bb2
+    cf.cond_br %11, ^bb3, ^bb4
   ^bb3:
     %12 = arith.constant 1 : i64
     return %12 : i64
   ^bb4:
-    cf.br ^bb1
+    cf.br ^bb5
   ^bb5:
     %13 = arith.constant 0 : i64
     %14 = arith.cmpi slt, %68, %13 : i64
-    cf.cond_br %14, ^bb1, ^bb2
+    cf.cond_br %14, ^bb6, ^bb7
   ^bb6:
     %15 = arith.constant 2 : i64
     return %15 : i64
   ^bb7:
-    cf.br ^bb1
+    cf.br ^bb8
   ^bb8:
     %16 = arith.constant 1 : i64
     %17 = arith.constant 0 : i64
     %18 = arith.cmpi slt, %16, %17 : i64
     %19 = arith.constant false
-    cf.cond_br %18, ^bb1, ^bb2
+    cf.cond_br %18, ^bb9, ^bb10(%19, %68 : i1, i64)
   ^bb9:
-    %20 = call @unknown() : () -> i64
+    %20 = call @effect() : () -> i64
     %21 = arith.constant 0 : i64
     %22 = arith.cmpi slt, %20, %21 : i64
-    cf.br ^bb1(%22, %20 : i1, i64)
+    cf.br ^bb10(%22, %20 : i1, i64)
   ^bb10(%69: i1 loc("-":45:9), %70: i64 loc("-":45:18)):
     %23 = arith.extui %69 : i1 to i64
     %24 = arith.constant 0 : i64
     %25 = arith.cmpi slt, %23, %24 : i64
-    cf.cond_br %25, ^bb1, ^bb2
+    cf.cond_br %25, ^bb11, ^bb15
   ^bb11:
     %26 = arith.constant 1 : i64
     %27 = arith.cmpi slt, %70, %26 : i64
     %28 = arith.extui %27 : i1 to i64
     %29 = arith.constant 0 : i64
     %30 = arith.cmpi slt, %28, %29 : i64
-    cf.cond_br %30, ^bb1, ^bb2
+    cf.cond_br %30, ^bb12, ^bb13
   ^bb12:
     %31 = arith.constant 3 : i64
     return %31 : i64
   ^bb13:
-    cf.br ^bb1
+    cf.br ^bb14
   ^bb14:
-    cf.br ^bb1
+    cf.br ^bb16
   ^bb15:
     %32 = arith.constant 4 : i64
     return %32 : i64
@@ -70,28 +70,28 @@ module {
     %35 = arith.constant 0 : i64
     %36 = arith.cmpi slt, %34, %35 : i64
     %37 = arith.constant true
-    cf.cond_br %36, ^bb1, ^bb2
+    cf.cond_br %36, ^bb18(%37, %33 : i1, i64), ^bb17
   ^bb17:
-    %38 = call @unknown() : () -> i64
+    %38 = call @effect() : () -> i64
     %39 = arith.constant 0 : i64
     %40 = arith.cmpi slt, %38, %39 : i64
-    cf.br ^bb1(%40, %38 : i1, i64)
+    cf.br ^bb18(%40, %38 : i1, i64)
   ^bb18(%71: i1 loc("-":79:9), %72: i64 loc("-":79:18)):
     %41 = arith.extui %71 : i1 to i64
     %42 = arith.constant 0 : i64
     %43 = arith.cmpi slt, %41, %42 : i64
-    cf.cond_br %43, ^bb1, ^bb2
+    cf.cond_br %43, ^bb19, ^bb23
   ^bb19:
     %44 = arith.constant 0 : i64
     %45 = arith.cmpi slt, %72, %44 : i64
-    cf.cond_br %45, ^bb1, ^bb2
+    cf.cond_br %45, ^bb20, ^bb21
   ^bb20:
     %46 = arith.constant 5 : i64
     return %46 : i64
   ^bb21:
-    cf.br ^bb1
+    cf.br ^bb22
   ^bb22:
-    cf.br ^bb1
+    cf.br ^bb24
   ^bb23:
     %47 = arith.constant 6 : i64
     return %47 : i64
@@ -100,31 +100,31 @@ module {
     %49 = arith.constant 0 : i64
     %50 = arith.cmpi slt, %48, %49 : i64
     %51 = arith.constant true
-    cf.cond_br %50, ^bb1, ^bb2
+    cf.cond_br %50, ^bb26(%51, %72 : i1, i64), ^bb25
   ^bb25:
-    %52 = call @unknown() : () -> i64
+    %52 = call @effect() : () -> i64
     %53 = arith.constant 0 : i64
     %54 = arith.cmpi slt, %52, %53 : i64
-    cf.br ^bb1(%54, %52 : i1, i64)
+    cf.br ^bb26(%54, %52 : i1, i64)
   ^bb26(%73: i1 loc("-":109:9), %74: i64 loc("-":109:18)):
     %55 = arith.extui %73 : i1 to i64
     %56 = arith.constant 0 : i64
     %57 = arith.cmpi slt, %55, %56 : i64
-    cf.cond_br %57, ^bb1, ^bb2
+    cf.cond_br %57, ^bb27, ^bb31
   ^bb27:
     %58 = arith.constant 1 : i64
     %59 = arith.cmpi slt, %74, %58 : i64
     %60 = arith.extui %59 : i1 to i64
     %61 = arith.constant 0 : i64
     %62 = arith.cmpi slt, %60, %61 : i64
-    cf.cond_br %62, ^bb1, ^bb2
+    cf.cond_br %62, ^bb28, ^bb29
   ^bb28:
     %63 = arith.constant 7 : i64
     return %63 : i64
   ^bb29:
-    cf.br ^bb1
+    cf.br ^bb30
   ^bb30:
-    cf.br ^bb1
+    cf.br ^bb32
   ^bb31:
     %64 = arith.constant 8 : i64
     return %64 : i64

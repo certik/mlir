@@ -220,6 +220,10 @@ size_t MLIR_GetOpNumAttributes(MLIR_OpHandle op);
 MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle op, size_t idx);
 size_t MLIR_GetOpNumRegions(MLIR_OpHandle op);
 MLIR_RegionHandle MLIR_GetOpRegion(MLIR_OpHandle op, size_t idx);
+size_t MLIR_GetOpNumSuccessors(MLIR_OpHandle op);
+MLIR_BlockHandle MLIR_GetOpSuccessor(MLIR_OpHandle op, size_t idx);
+size_t MLIR_GetOpNumSuccessorOperands(MLIR_OpHandle op, size_t succ_idx);
+MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_OpHandle op, size_t succ_idx, size_t op_idx);
 
 // -----------------------------------------------------------------------------
 // Region API
@@ -241,6 +245,9 @@ size_t MLIR_GetBlockNumOps(MLIR_BlockHandle block);
 MLIR_OpHandle MLIR_GetBlockOp(MLIR_BlockHandle block, size_t idx);
 size_t MLIR_GetBlockNumArgs(MLIR_BlockHandle block);
 MLIR_ValueHandle MLIR_GetBlockArg(MLIR_BlockHandle block, size_t idx);
+// Returns the 0-indexed position of `block` within its parent region.
+// Returns SIZE_MAX if the block has no parent or the backend doesn't track it.
+size_t MLIR_GetBlockIndex(MLIR_BlockHandle block);
 
 // -----------------------------------------------------------------------------
 // Value API

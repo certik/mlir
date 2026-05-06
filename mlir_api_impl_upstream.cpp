@@ -32,6 +32,7 @@
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/Region.h"
 #include "mlir/IR/DialectRegistry.h"
+#include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/AsmParser/AsmParser.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -366,6 +367,28 @@ extern "C" MLIR_RegionHandle MLIR_GetOpRegion(MLIR_OpHandle h, size_t i) {
     return H(&F<mlir::Operation>(h)->getRegion(i));
 }
 
+extern "C" size_t MLIR_GetOpNumSuccessors(MLIR_OpHandle h) {
+    return F<mlir::Operation>(h)->getNumSuccessors();
+}
+extern "C" MLIR_BlockHandle MLIR_GetOpSuccessor(MLIR_OpHandle h, size_t i) {
+    return H(F<mlir::Operation>(h)->getSuccessor(i));
+}
+extern "C" size_t MLIR_GetOpNumSuccessorOperands(MLIR_OpHandle h, size_t s) {
+    auto *op = F<mlir::Operation>(h);
+    if (auto br = mlir::dyn_cast<mlir::BranchOpInterface>(op)) {
+        return br.getSuccessorOperands(s).size();
+    }
+    return 0;
+}
+extern "C" MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_OpHandle h, size_t s, size_t i) {
+    auto *op = F<mlir::Operation>(h);
+    if (auto br = mlir::dyn_cast<mlir::BranchOpInterface>(op)) {
+        auto ops = br.getSuccessorOperands(s);
+        return H(boxFor(ops[i]));
+    }
+    return MLIR_INVALID_HANDLE;
+}
+
 // -----------------------------------------------------------------------------
 // Region / Block accessors
 // -----------------------------------------------------------------------------
@@ -396,6 +419,18 @@ extern "C" size_t MLIR_GetBlockNumArgs(MLIR_BlockHandle h) {
 }
 extern "C" MLIR_ValueHandle MLIR_GetBlockArg(MLIR_BlockHandle h, size_t i) {
     return H(boxFor(F<mlir::Block>(h)->getArgument(i)));
+}
+
+extern "C" size_t MLIR_GetBlockIndex(MLIR_BlockHandle h) {
+    auto *b = F<mlir::Block>(h);
+    auto *r = b->getParent();
+    if (!r) return (size_t)-1;
+    size_t idx = 0;
+    for (auto &it : *r) {
+        if (&it == b) return idx;
+        idx++;
+    }
+    return (size_t)-1;
 }
 
 // -----------------------------------------------------------------------------
@@ -700,6 +735,7 @@ extern "C" MLIR_AttributeHandle MLIR_CreateAttributeType(MLIR_Context *, string 
 extern "C" MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle h) {
     auto value = F<mlir::NamedAttribute>(h)->getValue();
     if (llvm::isa<mlir::StringAttr>(value))  return MLIR_ATTR_KIND_STRING;
+    if (llvm::isa<mlir::FlatSymbolRefAttr>(value)) return MLIR_ATTR_KIND_STRING;
     if (llvm::isa<mlir::BoolAttr>(value))    return MLIR_ATTR_KIND_BOOL;
     if (llvm::isa<mlir::IntegerAttr>(value)) return MLIR_ATTR_KIND_INTEGER;
     if (llvm::isa<mlir::FloatAttr>(value))   return MLIR_ATTR_KIND_FLOAT;
@@ -732,7 +768,23 @@ extern "C" bool MLIR_GetAttributeBool(MLIR_AttributeHandle h) {
     return llvm::cast<mlir::BoolAttr>(F<mlir::NamedAttribute>(h)->getValue()).getValue();
 }
 extern "C" string MLIR_GetAttributeString(MLIR_AttributeHandle h) {
-    return mkRefString(llvm::cast<mlir::StringAttr>(F<mlir::NamedAttribute>(h)->getValue()).getValue());
+    auto value = F<mlir::NamedAttribute>(h)->getValue();
+    if (auto s = llvm::dyn_cast<mlir::StringAttr>(value)) return mkRefString(s.getValue());
+    if (auto sr = llvm::dyn_cast<mlir::FlatSymbolRefAttr>(value)) {
+        // Return `@name`. Interned via a thread-local map so the storage
+        // outlives this call without needing an external arena.
+        static thread_local std::unordered_map<std::string, std::string> cache;
+        auto rootRef = sr.getValue();
+        std::string key(rootRef.data(), rootRef.size());
+        auto it = cache.find(key);
+        if (it == cache.end()) {
+            it = cache.emplace(key, std::string("@") + key).first;
+        }
+        const std::string &v = it->second;
+        string out; out.str = const_cast<char *>(v.data()); out.size = v.size();
+        return out;
+    }
+    return mkRefString(llvm::cast<mlir::StringAttr>(value).getValue());
 }
 extern "C" string MLIR_GetAttributeAsString(MLIR_Context *ctx, MLIR_AttributeHandle h) {
     std::string buf;
