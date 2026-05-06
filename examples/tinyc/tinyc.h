@@ -101,14 +101,22 @@ typedef enum {
     TY_STRUCT,         // struct value (fields stored as flat per-leaf scalars)
     TY_PTR_STRUCT,     // alias-only pointer to struct (bundle of memref aliases)
     TY_ARRAY_STRUCT,   // fixed-size struct[N], length in `array_len`
+    TY_FNPTR,          // function pointer with a fixed signature
 } TypeKind;
 
-typedef struct {
+typedef struct Type Type;
+struct Type {
     TypeKind kind;
     int64_t  array_len;       // 1st dimension for TY_ARRAY_I32 / TY_ARRAY_STRUCT
     int64_t  array_len2;      // 2nd dimension for TY_ARRAY_I32 (0 = 1D)
     string   struct_name;     // for TY_STRUCT
-} Type;
+    // For TY_FNPTR: arena-allocated return type and parameter types.
+    // Storage type is always !llvm.ptr; this signature is consulted at
+    // indirect-call sites to build the func.call_indirect operand types.
+    Type    *fnptr_ret;
+    Type    *fnptr_params;
+    int      fnptr_nparams;
+};
 
 typedef enum {
     EX_INT,            // integer literal

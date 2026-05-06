@@ -1,0 +1,21 @@
+typedef int (*BinOp)(int, int);
+
+int add(int a, int b) {
+    return a + b;
+}
+
+int sub(int a, int b) {
+    return a - b;
+}
+
+int run(BinOp op, int x, int y) {
+    return op(x, y);
+}
+
+int main() {
+    BinOp f;
+    f = &add;
+    print(f(20, 22));
+    print(run(sub, 50, 8));
+    return 0;
+}

@@ -121,3 +121,15 @@ expected_stdout = "10\n30\n40\n50\n4\n150\n"
 [[test]]
 name = "switch_case"
 expected_stdout = "100\n200\n200\n301\n0\n999\n22\n"
+
+[[test]]
+name = "fnptr_basic"
+expected_stdout = "7\n7\n"
+
+[[test]]
+name = "fnptr_arg"
+expected_stdout = "12\n42\n"
+
+[[test]]
+name = "fnptr_typedef"
+expected_stdout = "42\n42\n"

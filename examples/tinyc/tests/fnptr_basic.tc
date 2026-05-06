@@ -1,0 +1,16 @@
+int add(int a, int b) {
+    return a + b;
+}
+
+int sub(int a, int b) {
+    return a - b;
+}
+
+int main() {
+    int (*op)(int, int);
+    op = &add;
+    print(op(3, 4));
+    op = sub;
+    print(op(10, 3));
+    return 0;
+}

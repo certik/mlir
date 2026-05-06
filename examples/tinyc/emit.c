@@ -170,7 +170,8 @@ static FuncSig *find_sig(E *e, string name) {
 
 static MLIR_TypeHandle scalar_mlir_type(E *e, TypeKind k) {
     if (k == TY_F32) return e->f32;
-    if (k == TY_PTR_STRUCT || k == TY_PTR_I32 || k == TY_PTR_CHAR) return e->ptr;
+    if (k == TY_PTR_STRUCT || k == TY_PTR_I32 || k == TY_PTR_CHAR ||
+        k == TY_FNPTR) return e->ptr;
     return e->i32;
 }
 
@@ -538,6 +539,8 @@ typedef struct {
     StructDef *sdef;   // when is_ptr, the StructDef the pointer targets (NULL for null)
     MLIR_TypeHandle ptr_elem;  // pointee element type for non-struct pointers
                                // (INVALID otherwise). Used by pointer arithmetic.
+    Type *fnptr_ty;    // when val is a function pointer, its TY_FNPTR signature
+                       // (return + parameter types). NULL otherwise.
 } EVal;
 
 static EVal emit_expr(E *e, Scope *sc, Expr *ex);
@@ -771,7 +774,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
             r.base_ptr = sym_addr(e, s);
             if (s->type.kind == TY_F32) r.elem_ty = e->f32;
             else if (s->type.kind == TY_PTR_STRUCT || s->type.kind == TY_PTR_I32 ||
-                     s->type.kind == TY_PTR_CHAR)
+                     s->type.kind == TY_PTR_CHAR || s->type.kind == TY_FNPTR)
                 r.elem_ty = e->ptr;
             else r.elem_ty = e->i32;
             return r;
@@ -1140,6 +1143,71 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
         case EX_INDEX:
         case EX_DEREF:
         case EX_FIELD: {
+            // Bare function name (no call): decay to a function-pointer
+            // value via `llvm.mlir.addressof @sym : !llvm.ptr`. Tag the
+            // result with a TY_FNPTR carrying the function's signature so
+            // downstream call sites can build the right call_indirect.
+            if (ex->kind == EX_VAR) {
+                Sym *s = lookup(e, sc, ex->name);
+                if (!s) {
+                    FuncSig *fsig = find_sig(e, ex->name);
+                    if (fsig) {
+                        // Build the function MLIR type for func.constant.
+                        size_t np = fsig->n_params;
+                        MLIR_TypeHandle *in_tys = arena_new_array(e->arena,
+                            MLIR_TypeHandle, np ? np : 1);
+                        for (size_t i = 0; i < np; i++)
+                            in_tys[i] = scalar_mlir_type(e, fsig->params[i].type.kind);
+                        MLIR_TypeHandle ret_ty = scalar_mlir_type(e,
+                            fsig->ret.type.kind);
+                        MLIR_TypeHandle out_tys[1] = { ret_ty };
+                        MLIR_TypeHandle f_ty = MLIR_CreateTypeFunction(e->ctx,
+                            in_tys, np, out_tys, 1);
+                        // %fn = func.constant @sym : (T...) -> R
+                        MLIR_ValueHandle fn_v = MLIR_CreateValueOpResult(
+                            e->ctx, MLIR_INVALID_HANDLE, 0, f_ty, ssa_name(e),
+                            eloc(e, 0));
+                        MLIR_TypeHandle *frts = arena_new_array(e->arena,
+                            MLIR_TypeHandle, 1); frts[0] = f_ty;
+                        MLIR_ValueHandle *frs = arena_new_array(e->arena,
+                            MLIR_ValueHandle, 1); frs[0] = fn_v;
+                        MLIR_AttributeHandle va = MLIR_CreateAttributeSymbolRef(
+                            e->ctx, str_lit("value"), fsig->name);
+                        MLIR_AttributeHandle *fas = arena_new_array(e->arena,
+                            MLIR_AttributeHandle, 1); fas[0] = va;
+                        emit_op(e, OP_TYPE_FUNC_CONSTANT, str_lit("func.constant"),
+                                frts, 1, frs, 1, NULL, 0, fas, 1, NULL, 0);
+                        // Cast (T...) -> R into !llvm.ptr for uniform storage.
+                        MLIR_ValueHandle ptr_v = MLIR_CreateValueOpResult(
+                            e->ctx, MLIR_INVALID_HANDLE, 0, e->ptr, ssa_name(e),
+                            eloc(e, 0));
+                        MLIR_TypeHandle *crts = arena_new_array(e->arena,
+                            MLIR_TypeHandle, 1); crts[0] = e->ptr;
+                        MLIR_ValueHandle *crs = arena_new_array(e->arena,
+                            MLIR_ValueHandle, 1); crs[0] = ptr_v;
+                        MLIR_ValueHandle *cops = arena_new_array(e->arena,
+                            MLIR_ValueHandle, 1); cops[0] = fn_v;
+                        emit_op(e, OP_TYPE_UNREALIZED_CONVERSION_CAST,
+                                str_lit("builtin.unrealized_conversion_cast"),
+                                crts, 1, crs, 1, cops, 1, NULL, 0, NULL, 0);
+                        r.val = ptr_v;
+                        r.is_ptr = true;
+                        Type *fnty = arena_new(e->arena, Type);
+                        *fnty = (Type){0};
+                        fnty->kind = TY_FNPTR;
+                        Type *ret_box = arena_new(e->arena, Type);
+                        *ret_box = fsig->ret.type;
+                        fnty->fnptr_ret = ret_box;
+                        fnty->fnptr_nparams = (int)fsig->n_params;
+                        fnty->fnptr_params = arena_new_array(e->arena, Type,
+                            fnty->fnptr_nparams ? (size_t)fnty->fnptr_nparams : 1);
+                        for (size_t i = 0; i < fsig->n_params; i++)
+                            fnty->fnptr_params[i] = fsig->params[i].type;
+                        r.fnptr_ty = fnty;
+                        return r;
+                    }
+                }
+            }
             LVal lv = emit_lvalue(e, sc, ex);
             EVal v = load_lvalue(e, lv);
             // Tag the resulting pointer with its target StructDef, when
@@ -1152,6 +1220,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         v.sdef = s->sdef;
                         if (s->type.kind == TY_PTR_CHAR) { v.is_str = true; v.ptr_elem = e->i8; }
                         else if (s->type.kind == TY_PTR_I32) v.ptr_elem = e->i32;
+                        else if (s->type.kind == TY_FNPTR) {
+                            Type *fnty = arena_new(e->arena, Type);
+                            *fnty = s->type;
+                            v.fnptr_ty = fnty;
+                        }
                     }
                 } else if (ex->kind == EX_FIELD) {
                     SCtx parent = walk_struct_lhs(e, sc, ex->lhs);
@@ -1175,6 +1248,12 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             if (ex->lhs->kind == EX_VAR) {
                 Sym *s = lookup(e, sc, ex->lhs->name);
                 if (!s) {
+                    // &funcname: explicit address-of-function. Same as
+                    // bare function-name decay.
+                    FuncSig *fsig = find_sig(e, ex->lhs->name);
+                    if (fsig) {
+                        return emit_expr(e, sc, ex->lhs);
+                    }
                     println(str_lit("tinyc emit: undefined variable {}"), ex->lhs->name);
                     return r;
                 }
@@ -1483,8 +1562,67 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             }
             FuncSig *sig = find_sig(e, ex->callee);
             if (!sig) {
-                println(str_lit("tinyc emit: unknown function {}"), ex->callee);
-                r.val = emit_const_i32(e, 0);
+                // Indirect call through a function-pointer value bound to
+                // `ex->callee` (local var, parameter, or module global).
+                Sym *sy = lookup(e, sc, ex->callee);
+                if (!sy || sy->type.kind != TY_FNPTR || !sy->type.fnptr_ret) {
+                    println(str_lit("tinyc emit: unknown function {}"), ex->callee);
+                    r.val = emit_const_i32(e, 0);
+                    return r;
+                }
+                Type *fnty = &sy->type;
+                // Load the !llvm.ptr from the variable's storage.
+                MLIR_ValueHandle callee_ptr = emit_load_v(e, sym_addr(e, sy), e->ptr);
+                size_t na = ex->args.size;
+                if ((int)na != fnty->fnptr_nparams) {
+                    println(str_lit("tinyc emit: indirect call to {} arity mismatch"),
+                            ex->callee);
+                }
+                // Build the function MLIR type that func.call_indirect needs.
+                size_t np = (size_t)fnty->fnptr_nparams;
+                MLIR_TypeHandle *in_tys = arena_new_array(e->arena, MLIR_TypeHandle,
+                                                           np ? np : 1);
+                for (size_t i = 0; i < np; i++)
+                    in_tys[i] = scalar_mlir_type(e, fnty->fnptr_params[i].kind);
+                MLIR_TypeHandle rty = scalar_mlir_type(e, fnty->fnptr_ret->kind);
+                MLIR_TypeHandle out_tys[1] = { rty };
+                MLIR_TypeHandle f_ty = MLIR_CreateTypeFunction(e->ctx,
+                    in_tys, np, out_tys, 1);
+                // Cast !llvm.ptr -> function type so func.call_indirect's
+                // verifier is happy. The reconcile-unrealized-casts pass
+                // eliminates this after func-to-llvm lowering.
+                MLIR_ValueHandle callee_v = MLIR_CreateValueOpResult(
+                    e->ctx, MLIR_INVALID_HANDLE, 0, f_ty, ssa_name(e), eloc(e, 0));
+                MLIR_TypeHandle *crts = arena_new_array(e->arena, MLIR_TypeHandle, 1);
+                crts[0] = f_ty;
+                MLIR_ValueHandle *crs = arena_new_array(e->arena, MLIR_ValueHandle, 1);
+                crs[0] = callee_v;
+                MLIR_ValueHandle *cops = arena_new_array(e->arena, MLIR_ValueHandle, 1);
+                cops[0] = callee_ptr;
+                emit_op(e, OP_TYPE_UNREALIZED_CONVERSION_CAST,
+                        str_lit("builtin.unrealized_conversion_cast"),
+                        crts, 1, crs, 1, cops, 1, NULL, 0, NULL, 0);
+
+                size_t n_ops = 1 + na;
+                MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle,
+                                                         n_ops ? n_ops : 1);
+                ops[0] = callee_v;
+                for (size_t i = 0; i < na; i++) {
+                    EVal av = emit_expr(e, sc, ex->args.data[i]);
+                    TypeKind want = (i < (size_t)fnty->fnptr_nparams)
+                        ? fnty->fnptr_params[i].kind : TY_I32;
+                    ops[1 + i] = coerce_eval(e, av, scalar_mlir_type(e, want));
+                }
+                MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1);
+                MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1);
+                rts[0] = rty;
+                rs[0] = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
+                                                  rty, ssa_name(e), eloc(e, 0));
+                emit_op(e, OP_TYPE_FUNC_CALL_INDIRECT, str_lit("func.call_indirect"),
+                        rts, 1, rs, 1, ops, n_ops, NULL, 0, NULL, 0);
+                r.val = rs[0];
+                r.is_float = (fnty->fnptr_ret->kind == TY_F32);
+                r.is_ptr = (rty == e->ptr);
                 return r;
             }
             if (sig->ret.type.kind == TY_STRUCT) {
@@ -1562,6 +1700,15 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                     }
                 }
             } else if (st->decl_type.kind == TY_PTR_CHAR) {
+                sy->addr = emit_alloca(e, e->ptr);
+                if (st->decl_init) {
+                    EVal iv = emit_expr(e, sc, st->decl_init);
+                    MLIR_ValueHandle p = iv.is_ptr ? iv.val : emit_null_ptr(e);
+                    emit_store_v(e, p, sy->addr);
+                } else {
+                    emit_store_v(e, emit_null_ptr(e), sy->addr);
+                }
+            } else if (st->decl_type.kind == TY_FNPTR) {
                 sy->addr = emit_alloca(e, e->ptr);
                 if (st->decl_init) {
                     EVal iv = emit_expr(e, sc, st->decl_init);
@@ -1922,7 +2069,9 @@ static void slot_resolve(E *e, Type ty, SlotInfo *out) {
         if (!out->sdef) {
             println(str_lit("tinyc emit: unknown struct type {}"), ty.struct_name);
         }
-    } else if (ty.kind != TY_I32 && ty.kind != TY_F32) {
+    } else if (ty.kind != TY_I32 && ty.kind != TY_F32 &&
+               ty.kind != TY_PTR_I32 && ty.kind != TY_PTR_CHAR &&
+               ty.kind != TY_FNPTR) {
         println(str_lit("tinyc emit: unsupported type in function signature"));
     }
 }
@@ -2019,6 +2168,10 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
         } else if (p->type.kind == TY_F32) {
             sy->addr = emit_alloca(e, e->f32);
             emit_store_v(e, blk, sy->addr);
+        } else if (p->type.kind == TY_PTR_I32 || p->type.kind == TY_PTR_CHAR ||
+                   p->type.kind == TY_FNPTR) {
+            sy->addr = emit_alloca(e, e->ptr);
+            emit_store_v(e, blk, sy->addr);
         } else {
             sy->addr = emit_alloca(e, e->i32);
             emit_store_v(e, blk, sy->addr);
@@ -2066,6 +2219,7 @@ static int64_t type_size(E *e, Type t) {
     if (t.kind == TY_I32) return 4;
     if (t.kind == TY_F32) return 4;
     if (t.kind == TY_PTR_I32 || t.kind == TY_PTR_STRUCT) return 8;
+    if (t.kind == TY_PTR_CHAR || t.kind == TY_FNPTR) return 8;
     if (t.kind == TY_ARRAY_I32) return 4 * t.array_len;
     if (t.kind == TY_STRUCT) {
         StructDef *sd = find_struct(e, t.struct_name);
@@ -2092,6 +2246,7 @@ static int64_t type_size(E *e, Type t) {
 static int64_t type_align(E *e, Type t) {
     if (t.kind == TY_I32 || t.kind == TY_F32) return 4;
     if (t.kind == TY_PTR_I32 || t.kind == TY_PTR_STRUCT) return 8;
+    if (t.kind == TY_PTR_CHAR || t.kind == TY_FNPTR) return 8;
     if (t.kind == TY_ARRAY_I32) return 4;
     if (t.kind == TY_STRUCT) {
         StructDef *sd = find_struct(e, t.struct_name);
@@ -2268,7 +2423,8 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                 /*init_kind=*/1, 0, g->has_init ? g->init_float : 0.0,
                 NULL, e.loc);
             MLIR_AppendBlockOp(ctx, mb, gop);
-        } else if (g->type.kind == TY_PTR_I32 || g->type.kind == TY_PTR_STRUCT) {
+        } else if (g->type.kind == TY_PTR_I32 || g->type.kind == TY_PTR_STRUCT ||
+                   g->type.kind == TY_FNPTR) {
             // Emit a zero-initialized pointer global.
             MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.ptr,

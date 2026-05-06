@@ -1,0 +1,17 @@
+int add(int a, int b) {
+    return a + b;
+}
+
+int mul(int a, int b) {
+    return a * b;
+}
+
+int apply(int (*op)(int, int), int x, int y) {
+    return op(x, y);
+}
+
+int main() {
+    print(apply(&add, 5, 7));
+    print(apply(mul, 6, 7));
+    return 0;
+}

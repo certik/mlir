@@ -31,6 +31,9 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_FUNC_FUNC: return str_lit("func.func");
         case OP_TYPE_FUNC_RETURN: return str_lit("func.return");
         case OP_TYPE_FUNC_CALL: return str_lit("func.call");
+        case OP_TYPE_FUNC_CALL_INDIRECT: return str_lit("func.call_indirect");
+        case OP_TYPE_FUNC_CONSTANT: return str_lit("func.constant");
+        case OP_TYPE_UNREALIZED_CONVERSION_CAST: return str_lit("builtin.unrealized_conversion_cast");
         case OP_TYPE_SCF_FOR: return str_lit("scf.for");
         case OP_TYPE_SCF_WHILE: return str_lit("scf.while");
         case OP_TYPE_SCF_IF: return str_lit("scf.if");
