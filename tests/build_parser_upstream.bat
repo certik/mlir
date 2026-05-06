@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 
-for /f "delims=" %%i in ('"%CONDA_PREFIX%\Library\bin\llvm-config.exe" --link-static --libs support core') do set LLVM_LIBS=%%i
+for /f "delims=" %%i in ('"%CONDA_PREFIX%\Library\bin\llvm-config.exe" --link-static --libs support core analysis transformutils frontendopenmp') do set LLVM_LIBS=%%i
 if errorlevel 1 exit /b 1
 
 REM Link all MLIR static libraries shipped by conda-forge. Use a linker
@@ -26,7 +26,7 @@ link /nologo /out:parser_upstream.exe ^
     upstream_main.obj parser.obj tokenizer.obj mlir_parser.obj mlir_classic_printer.obj mlir_generic_printer.obj ^
     op_parsers.obj mlir_op_names.obj mlir_api_impl_upstream.obj ^
     io.obj buddy.obj arena.obj scratch.obj format.obj math.obj string.obj mem.obj numconv.obj assert.obj exit.obj platform_windows.obj ^
-    /LIBPATH:"%CONDA_PREFIX%\Library\lib" @mlir_libs.rsp %LLVM_LIBS% ntdll.lib
+    /LIBPATH:"%CONDA_PREFIX%\Library\lib" @mlir_libs.rsp %LLVM_LIBS% ntdll.lib zlib.lib zstd.lib
 if errorlevel 1 exit /b 1
 
 endlocal

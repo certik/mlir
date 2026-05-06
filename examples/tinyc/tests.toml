@@ -1,0 +1,19 @@
+# tinyC end-to-end tests. Each entry compiles tests/<name>.tc to LLVM IR
+# via the tinyc driver, links it with runtime.c using $CC, runs the
+# resulting binary, and compares stdout to expected_stdout exactly.
+
+[[test]]
+name = "simple"
+expected_stdout = "3\n"
+
+[[test]]
+name = "sum_to_10"
+expected_stdout = "55\n"
+
+[[test]]
+name = "fib"
+expected_stdout = "55\n"
+
+[[test]]
+name = "short_circuit"
+expected_stdout = "0\n1\n1\n1\n"

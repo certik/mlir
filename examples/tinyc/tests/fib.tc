@@ -1,0 +1,14 @@
+int fib(int n) {
+    int r = 0;
+    if (n < 2) {
+        r = n;
+    } else {
+        r = fib(n - 1) + fib(n - 2);
+    }
+    return r;
+}
+
+int main() {
+    print(fib(10));
+    return 0;
+}

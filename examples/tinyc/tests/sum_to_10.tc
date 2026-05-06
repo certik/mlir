@@ -1,0 +1,15 @@
+int sum_to(int n) {
+    int i = 1;
+    int s = 0;
+    while (i <= n) {
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}
+
+int main() {
+    int x = sum_to(10);
+    print(x);
+    return 0;
+}

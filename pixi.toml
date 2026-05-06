@@ -308,7 +308,7 @@ test_windows = { cmd = "./parser.exe --construct && python run_tests.py -s --nat
 platforms = ["linux-64", "osx-arm64", "win-64"]
 
 [feature.upstream.dependencies]
-mlir = "*"
+mlir = "19.*"
 zlib = "*"
 zstd = "*"
 
@@ -333,6 +333,8 @@ test_cross = { cmd = "./cross_upstream > tests/cross/out_upstream.txt && diff te
 build_parser_upstream = { cmd = "bash tests/build_parser_upstream.sh", depends-on = ["tokenizer"], description = "Build parser_upstream against upstream LLVM/MLIR" }
 test_parser_upstream = { cmd = "bash tests/run_parser_upstream.sh", depends-on = ["build_parser_upstream"], description = "Run mlir test suite using parser_upstream as ./parser (some mismatches expected)" }
 validate_refs = { cmd = "python run_tests.py --validate-refs", depends-on = ["build_parser_upstream"], description = "Round-trip every classic-form reference through the upstream parser to catch invalid MLIR" }
+build_tinyc_upstream = { cmd = "bash examples/tinyc/build_tinyc_upstream.sh", description = "Build the tinyC example compiler against upstream LLVM/MLIR" }
+test_tinyc_upstream = { cmd = "python examples/tinyc/run_tinyc_tests.py", depends-on = ["build_tinyc_upstream"], description = "Run tinyC example compiler tests" }
 
 [feature.upstream.target.win-64.tasks]
 build_cross_upstream = { cmd = "tests\\build_cross_upstream.bat", description = "Build cross-impl driver against upstream LLVM/MLIR (Windows)" }

@@ -1,0 +1,30 @@
+// Verify short-circuit semantics: in `(n != 0) && (100/n > 0)`, the
+// RHS must NOT execute when n == 0, otherwise the program traps on
+// integer divide-by-zero. Same for `||` with the negated guard.
+//
+// tinyC currently disallows early `return` inside scf.if regions, so
+// each helper writes its result through a local variable.
+int test_and(int n) {
+    int r = 0;
+    if ((n != 0) && (100 / n > 0)) {
+        r = 1;
+    }
+    return r;
+}
+
+int test_or(int n) {
+    int r = 0;
+    if ((n == 0) || (100 / n > 0)) {
+        r = 1;
+    }
+    return r;
+}
+
+int main() {
+    print(test_and(0));
+    print(test_and(5));
+    print(test_or(0));
+    print(test_or(5));
+    return 0;
+}
+

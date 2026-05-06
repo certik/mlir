@@ -223,6 +223,19 @@ string MLIR_PrintOperationGeneric(MLIR_Context *ctx, MLIR_OpHandle op);
 MLIR_OpHandle MLIR_ParseTextUpstream(MLIR_Context *ctx, string text);
 MLIR_OpHandle MLIR_ParseTextClassic(MLIR_Context *ctx, string text);
 
+// Lower a `builtin.module` op to the LLVM dialect by running the standard
+// conversion passes (scf -> cf, arith/memref/cf/func/vector -> llvm,
+// reconcile-unrealized-casts). Mutates `module` in place. Returns true on
+// success. Available with the upstream backend only; the native backend
+// returns false. Diagnostic messages from failed passes are printed to
+// stderr.
+bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module);
+
+// Translate a `builtin.module` op already lowered to the LLVM dialect into
+// LLVM IR text (`.ll`). Returns the IR text on success or an empty string
+// on failure. Available with the upstream backend only.
+string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module);
+
 // Accessors
 MLIR_OpType MLIR_GetOpType(MLIR_OpHandle op);
 string MLIR_GetOpName(MLIR_OpHandle op);
@@ -358,6 +371,10 @@ MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *ctx, string name, ML
 // TypeAttr: an attribute that wraps a Type (e.g. func.func's
 // `function_type` attribute, which wraps a FunctionType).
 MLIR_AttributeHandle MLIR_CreateAttributeType(MLIR_Context *ctx, string name, MLIR_TypeHandle type);
+
+// SymbolRef attribute (e.g. `callee = @foo` on func.call). The `value`
+// must be the bare symbol name (no leading `@`).
+MLIR_AttributeHandle MLIR_CreateAttributeSymbolRef(MLIR_Context *ctx, string name, string value);
 
 // Introspection
 typedef enum {
