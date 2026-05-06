@@ -47,7 +47,11 @@ def main():
         # Stage 1: emit LLVM IR
         r = run([str(TINYC), "--emit=llvm", str(src)])
         if r.returncode != 0:
-            print(f"FAIL {name}: tinyc returned {r.returncode}\n{r.stderr}")
+            print(f"FAIL {name}: tinyc returned {r.returncode}\nstderr:\n{r.stderr}\nstdout (first 200 chars):\n{r.stdout[:200]}")
+            failures += 1
+            continue
+        if not r.stdout.strip():
+            print(f"FAIL {name}: tinyc produced empty LLVM IR\nstderr:\n{r.stderr}")
             failures += 1
             continue
         ll.write_text(r.stdout)

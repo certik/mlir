@@ -62,6 +62,11 @@ int app_main(void) {
     }
     if (emit_llvm) {
         string ll = MLIR_TranslateModuleToLLVMIR(&ctx, module);
+        if (ll.size == 0) {
+            arena_destroy(arena);
+            arena_destroy(boot_arena);
+            return 1;
+        }
         println(str_lit("{}"), ll);
     } else {
         println(str_lit("{}"), print_fn(&ctx, module));
