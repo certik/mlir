@@ -1706,20 +1706,36 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
             // Print operands in canonical format (no types for most ops).
             // memref.alloc / memref.alloca print operands inside parens even
-            // when empty: `memref.alloc() : memref<...>`. Other ops use a
-            // bare space-separated list.
+            // when empty: `memref.alloc() : memref<...>`. memref.load and
+            // memref.store use subscript syntax: `memref.load %m[%i, %j]`
+            // and `memref.store %v, %m[%i, %j]`. Other ops use a bare
+            // space-separated list.
             MLIR_OpType _ot = MLIR_GetOpType(op);
             bool _wants_parens = (_ot == OP_TYPE_MEMREF_ALLOC);
+            bool _is_load = (_ot == OP_TYPE_MEMREF_LOAD);
+            bool _is_store = (_ot == OP_TYPE_MEMREF_STORE);
             if (MLIR_GetOpNumOperands(op) > 0 || _wants_parens) {
                 result = str_concat(arena, result, _wants_parens ? str_lit("(") : str_lit(" "));
+                int subscript_after = -1;
+                if (_is_load && MLIR_GetOpNumOperands(op) >= 1) subscript_after = 0;
+                if (_is_store && MLIR_GetOpNumOperands(op) >= 2) subscript_after = 1;
                 for (int i = 0; i < MLIR_GetOpNumOperands(op); i++) {
-                    if (i > 0) result = str_concat(arena, result, str_lit(", "));
+                    if (i > 0) {
+                        if (i == subscript_after + 1) {
+                            result = str_concat(arena, result, str_lit("["));
+                        } else {
+                            result = str_concat(arena, result, str_lit(", "));
+                        }
+                    }
                     MLIR_ValueHandle operand = MLIR_GetOpOperand(op, i);
                     if (operand == MLIR_INVALID_HANDLE) {
                         result = str_concat(arena, result, str_lit("NULL_OPERAND"));
                         continue;
                     }
                     result = str_concat(arena, result, print_ssa_operand_classic(ctx, operand));
+                }
+                if (subscript_after >= 0 && MLIR_GetOpNumOperands(op) > subscript_after + 1) {
+                    result = str_concat(arena, result, str_lit("]"));
                 }
                 if (_wants_parens) result = str_concat(arena, result, str_lit(")"));
             }

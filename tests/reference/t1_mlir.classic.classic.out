@@ -5,10 +5,10 @@ module {
     ^bb0(%arg0: index):
       affine.for {
       ^bb0(%arg0: index):
-        %lhs = memref.load %arg0, %arg0, %arg0 : memref<10x20xf32>
-        %rhs = memref.load %arg1, %arg0, %arg0 : memref<10x20xf32>
+        %lhs = memref.load %arg0[%arg0, %arg0] : memref<10x20xf32>
+        %rhs = memref.load %arg1[%arg0, %arg0] : memref<10x20xf32>
         %sum = arith.addf %lhs, %rhs : f32
-        memref.store %sum, %result, %arg0, %arg0 : memref<10x20xf32>
+        memref.store %sum, %result[%arg0, %arg0] : memref<10x20xf32>
       }
     }
     return %result : memref<10x20xf32>

@@ -119,7 +119,6 @@ VALIDATE_REFS_SKIP = {
     # block-argument names from the upstream backend.
     "t1_mlir.classic.classic.out",
     "t1_mlir.upstream.classic.out",
-    "t2_mlir.classic.classic.out",
     "t2_mlir.upstream.classic.out",
     "t3_mlir.classic.classic.out",
     "t3_mlir.upstream.classic.out",
