@@ -1,0 +1,8 @@
+int main() {
+    int x = 10;
+    int* p = &x;
+    *p = 42;
+    print(x);    // 42
+    print(*p);   // 42
+    return 0;
+}

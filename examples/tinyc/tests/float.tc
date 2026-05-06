@@ -1,0 +1,15 @@
+int main() {
+    float x = 1.5;
+    float y = 2.25;
+    float z = x * y + 1.0;     // 4.375
+    print(z);
+    if (z > 4.0) {
+        print(1);
+    } else {
+        print(0);
+    }
+    // mixed int/float: int promoted to float
+    float w = 2.0 * 3;
+    print(w);                  // 6
+    return 0;
+}
