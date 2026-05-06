@@ -33,6 +33,7 @@ static TcTokKind keyword_or_ident(string s) {
     if (str_eq(s, str_lit("switch")))   return TC_TK_KW_SWITCH;
     if (str_eq(s, str_lit("case")))     return TC_TK_KW_CASE;
     if (str_eq(s, str_lit("default")))  return TC_TK_KW_DEFAULT;
+    if (str_eq(s, str_lit("enum")))     return TC_TK_KW_ENUM;
     return TC_TK_IDENT;
 }
 

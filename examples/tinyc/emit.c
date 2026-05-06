@@ -168,6 +168,18 @@ static FuncSig *find_sig(E *e, string name) {
     return NULL;
 }
 
+// Emit-time enumerator lookup. Resolved AFTER locals/globals/functions
+// so that an inner-scope variable with the same name correctly shadows
+// the enum constant (e.g. `enum {A=1}; int f(){ int A=2; return A; }`
+// must return 2, not 1).
+static bool find_enum(E *e, string name, int64_t *out_value) {
+    if (!e->program) return false;
+    for (ProgramEnum *pe = e->program->enums; pe; pe = pe->next) {
+        if (str_eq(pe->name, name)) { *out_value = pe->value; return true; }
+    }
+    return false;
+}
+
 static MLIR_TypeHandle scalar_mlir_type(E *e, TypeKind k) {
     if (k == TY_F32) return e->f32;
     if (k == TY_PTR_STRUCT || k == TY_PTR_I32 || k == TY_PTR_CHAR ||
@@ -1301,6 +1313,14 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         for (size_t i = 0; i < fsig->n_params; i++)
                             fnty->fnptr_params[i] = fsig->params[i].type;
                         r.fnptr_ty = fnty;
+                        return r;
+                    }
+                    // Fall back to enum constants ONLY when both local
+                    // scope and the function table miss — this preserves
+                    // shadowing by inner-scope variables.
+                    int64_t en_v;
+                    if (find_enum(e, ex->name, &en_v)) {
+                        r.val = emit_const_i32(e, en_v);
                         return r;
                     }
                 }

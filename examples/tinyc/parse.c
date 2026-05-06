@@ -13,12 +13,22 @@ typedef struct Typedef {
     struct Typedef *next;
 } Typedef;
 
+// One entry in the enumerator map. Module-scope only. Enumerators are
+// always i32 constants and live in the same value namespace as variables
+// and functions (lookup falls through to them after locals/globals miss).
+typedef struct Enumerator {
+    string  name;
+    int64_t value;
+    struct Enumerator *next;
+} Enumerator;
+
 typedef struct {
     Arena *arena;
     TcTok *toks;
     size_t n;
     size_t i;
     Typedef *typedefs;
+    Enumerator *enums;
 } P;
 
 static TcTok cur(P *p) { return p->toks[p->i]; }
@@ -27,6 +37,13 @@ static TcTok peek(P *p, size_t k) { return p->toks[p->i + k < p->n ? p->i + k : 
 static Typedef *typedef_lookup(P *p, string name) {
     for (Typedef *t = p->typedefs; t; t = t->next) {
         if (str_eq(t->name, name)) return t;
+    }
+    return NULL;
+}
+
+static Enumerator *enum_lookup(P *p, string name) {
+    for (Enumerator *e = p->enums; e; e = e->next) {
+        if (str_eq(e->name, name)) return e;
     }
     return NULL;
 }
@@ -70,6 +87,7 @@ static Expr *parse_expr(P *p);
 static bool parse_sig_type(P *p, Type *out);
 static bool parse_abstract_type(P *p, Type *out);
 static bool try_parse_fnptr_suffix(P *p, Type *ty, string *out_name);
+static void parse_enum_decl_top(P *p);
 
 // postfix := (...) | [expr] | .ident
 static Expr *parse_postfix(P *p, Expr *base) {
@@ -479,6 +497,15 @@ static bool parse_base_type(P *p, TypeKind *out) {
     if (cur(p).kind == TC_TK_KW_INT)   { p->i++; *out = TY_I32; return true; }
     if (cur(p).kind == TC_TK_KW_FLOAT) { p->i++; *out = TY_F32; return true; }
     if (cur(p).kind == TC_TK_KW_CHAR)  { p->i++; *out = TY_I32; return true; }
+    if (cur(p).kind == TC_TK_KW_ENUM) {
+        // `enum [Tag]` as a type-spec — behaves exactly as `int`. A body
+        // is not allowed in this position; only the top-level / statement
+        // form `enum Tag { ... };` (handled separately) registers values.
+        p->i++;
+        if (cur(p).kind == TC_TK_IDENT) p->i++;  // optional tag
+        *out = TY_I32;
+        return true;
+    }
     return false;
 }
 
@@ -672,7 +699,7 @@ static Stmt *parse_stmt(P *p) {
             p->i++;
             s->for_init = NULL;
         } else if (cur(p).kind == TC_TK_KW_INT || cur(p).kind == TC_TK_KW_FLOAT ||
-                   cur(p).kind == TC_TK_KW_CHAR ||
+                   cur(p).kind == TC_TK_KW_CHAR || cur(p).kind == TC_TK_KW_ENUM ||
                    (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, cur(p).text))) {
             s->for_init = parse_decl(p, /*require_semi*/ true);
         } else {
@@ -713,10 +740,19 @@ static Stmt *parse_stmt(P *p) {
                 bool neg = false;
                 if (accept(p, TC_TK_MINUS)) neg = true;
                 TcTok lit = cur(p);
-                expect(p, TC_TK_INT_LIT, str_lit("expected integer in 'case'"));
+                int64_t cval = 0;
+                if (lit.kind == TC_TK_INT_LIT) {
+                    cval = lit.int_value;
+                    p->i++;
+                } else if (lit.kind == TC_TK_IDENT && enum_lookup(p, lit.text)) {
+                    cval = enum_lookup(p, lit.text)->value;
+                    p->i++;
+                } else {
+                    expect(p, TC_TK_INT_LIT, str_lit("expected integer or enumerator in 'case'"));
+                }
                 expect(p, TC_TK_COLON, str_lit("expected ':' after case"));
                 SwitchCase sc = (SwitchCase){
-                    .value = neg ? -lit.int_value : lit.int_value,
+                    .value = neg ? -cval : cval,
                     .is_default = false,
                     .body_start = s->block_body.size,
                 };
@@ -741,8 +777,36 @@ static Stmt *parse_stmt(P *p) {
     }
     if (t.kind == TC_TK_KW_INT || t.kind == TC_TK_KW_FLOAT ||
         t.kind == TC_TK_KW_STRUCT || t.kind == TC_TK_KW_CHAR ||
+        t.kind == TC_TK_KW_ENUM ||
         (t.kind == TC_TK_IDENT && typedef_lookup(p, t.text) &&
          peek(p, 1).kind == TC_TK_IDENT)) {
+        // `enum [Tag] { ... };` is a module-scope-only registration form;
+        // a body inside a function or block scope would leak enumerators
+        // out of their lexical scope (we have no scope-pop machinery for
+        // enums), so reject it. `enum [Tag] name;` (no body) still falls
+        // through to parse_decl below, which treats `enum [Tag]` as `int`.
+        if (t.kind == TC_TK_KW_ENUM) {
+            size_t k = 1;
+            if (peek(p, k).kind == TC_TK_IDENT) k++;
+            if (peek(p, k).kind == TC_TK_LBRACE) {
+                perror_at(p, t.line, str_lit(
+                    "enum body is only allowed at module scope"));
+                // Skip to matching '}' then optional ';' to keep parsing.
+                while (cur(p).kind != TC_TK_LBRACE &&
+                       cur(p).kind != TC_TK_EOF) p->i++;
+                if (cur(p).kind == TC_TK_LBRACE) {
+                    int depth = 0;
+                    do {
+                        if (cur(p).kind == TC_TK_LBRACE) depth++;
+                        else if (cur(p).kind == TC_TK_RBRACE) depth--;
+                        p->i++;
+                    } while (depth > 0 && cur(p).kind != TC_TK_EOF);
+                }
+                accept(p, TC_TK_SEMI);
+                Stmt *empty = new_stmt(p, ST_BLOCK, t.line);
+                return empty;
+            }
+        }
         return parse_decl(p, /*require_semi*/ true);
     }
     // expression statement (covers assignments and calls)
@@ -830,6 +894,16 @@ static bool parse_sig_type(P *p, Type *out) {
         out->kind = TY_STRUCT;
         out->struct_name = sn.text;
         if (accept(p, TC_TK_STAR)) out->kind = TY_PTR_STRUCT;
+        return true;
+    }
+    if (cur(p).kind == TC_TK_KW_ENUM) {
+        // `enum [Tag]` — a parser-side alias for `int`. No body allowed in
+        // a signature/cast position; the top-level `enum Tag { ... };`
+        // form is handled by the program-level loop.
+        p->i++;
+        if (cur(p).kind == TC_TK_IDENT) p->i++;
+        out->kind = TY_I32;
+        if (accept(p, TC_TK_STAR)) out->kind = TY_PTR_I32;
         return true;
     }
     if (cur(p).kind == TC_TK_IDENT) {
@@ -1007,8 +1081,63 @@ static StructDef *parse_struct_def(P *p) {
     return sd;
 }
 
+// Parse `enum [Tag] { name [= int-const-expr], ... };` at module-scope or
+// statement-scope. Registers each enumerator in the parser's enum map.
+// The `enum` keyword has already been peeked but NOT consumed by the
+// caller. The trailing `;` is consumed here.
+//
+// Constant expression accepted for `= ...`: an INT_LIT, optionally with
+// a leading unary `-`, OR a previously-declared enumerator name. This is
+// intentionally a tight subset (per the spec).
+static void parse_enum_decl_top(P *p) {
+    int line = cur(p).line;
+    expect(p, TC_TK_KW_ENUM, str_lit("expected 'enum'"));
+    // Optional tag — accepted for source compatibility, not stored. The
+    // tag namespace is implicit: `enum Tag` always lowers to `int`, so
+    // there's nothing to look up later.
+    if (cur(p).kind == TC_TK_IDENT) p->i++;
+    expect(p, TC_TK_LBRACE, str_lit("expected '{' to begin enum body"));
+    int64_t next_value = 0;
+    while (cur(p).kind != TC_TK_RBRACE && cur(p).kind != TC_TK_EOF) {
+        TcTok nm = cur(p);
+        if (!expect(p, TC_TK_IDENT, str_lit("expected enumerator name"))) break;
+        int64_t value = next_value;
+        if (accept(p, TC_TK_ASSIGN)) {
+            bool neg = accept(p, TC_TK_MINUS);
+            TcTok lit = cur(p);
+            if (lit.kind == TC_TK_INT_LIT) {
+                value = neg ? -lit.int_value : lit.int_value;
+                p->i++;
+            } else if (lit.kind == TC_TK_IDENT && enum_lookup(p, lit.text)) {
+                int64_t v = enum_lookup(p, lit.text)->value;
+                value = neg ? -v : v;
+                p->i++;
+            } else {
+                perror_at(p, lit.line,
+                    str_lit("enum initializer must be an int literal "
+                            "or a previously-declared enumerator"));
+                p->i++;
+            }
+        }
+        if (enum_lookup(p, nm.text)) {
+            perror_at(p, nm.line, str_lit("duplicate enumerator"));
+        }
+        Enumerator *e = arena_new(p->arena, Enumerator);
+        e->name = nm.text;
+        e->value = value;
+        e->next = p->enums;
+        p->enums = e;
+        next_value = value + 1;
+        if (!accept(p, TC_TK_COMMA)) break;
+    }
+    expect(p, TC_TK_RBRACE, str_lit("expected '}'"));
+    expect(p, TC_TK_SEMI, str_lit("expected ';' after enum declaration"));
+    (void)line;
+}
+
 Program *tinyc_parse(Arena *arena, VecTcTok toks) {
-    P p = {.arena = arena, .toks = toks.data, .n = toks.size, .i = 0, .typedefs = NULL};
+    P p = {.arena = arena, .toks = toks.data, .n = toks.size, .i = 0,
+           .typedefs = NULL, .enums = NULL};
     Program *prog = arena_new(arena, Program);
     *prog = (Program){0};
     VecFuncPtr_reserve(arena, &prog->funcs, 4);
@@ -1019,6 +1148,18 @@ Program *tinyc_parse(Arena *arena, VecTcTok toks) {
             StructDef *sd = parse_struct_def(&p);
             VecStructDefPtr_push_back(arena, &prog->structs, sd);
             continue;
+        }
+        // Top-level enum body: `enum [Tag] { ... };`. Anything else that
+        // starts with `enum` (a global/function whose type-spec is `enum
+        // Tag`) falls through to the generic decl path below, where
+        // parse_sig_type treats `enum [Tag]` as `int`.
+        if (cur(&p).kind == TC_TK_KW_ENUM) {
+            size_t k = 1;
+            if (peek(&p, k).kind == TC_TK_IDENT) k++;
+            if (peek(&p, k).kind == TC_TK_LBRACE) {
+                parse_enum_decl_top(&p);
+                continue;
+            }
         }
         if (cur(&p).kind == TC_TK_KW_TYPEDEF) {
             int line = cur(&p).line;
@@ -1127,6 +1268,9 @@ Program *tinyc_parse(Arena *arena, VecTcTok toks) {
                             TcTok n = cur(&p);
                             g.init_float = -n.float_value;
                             p.i++;
+                        } else if (lit.kind == TC_TK_IDENT && enum_lookup(&p, lit.text)) {
+                            g.init_int = enum_lookup(&p, lit.text)->value;
+                            p.i++;
                         } else {
                             perror_at(&p, lit.line,
                                 str_lit("global initializer must be a literal"));
@@ -1166,6 +1310,15 @@ Program *tinyc_parse(Arena *arena, VecTcTok toks) {
         } else {
             perror_at(&p, f->line, str_lit("function redefinition"));
         }
+    }
+    // Publish the parser's enumerator list to the Program for emit-time
+    // resolution (lookup falls back to it after locals/globals/functions).
+    for (Enumerator *en = p.enums; en; en = en->next) {
+        ProgramEnum *pe = arena_new(arena, ProgramEnum);
+        pe->name = en->name;
+        pe->value = en->value;
+        pe->next = prog->enums;
+        prog->enums = pe;
     }
     return prog;
 }

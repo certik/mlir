@@ -1,0 +1,38 @@
+// `enum Tag` is accepted as a type-spec wherever `int` is — parameters,
+// return type, locals, and as a typedef target. Internally it's just int.
+enum Color { K_RED = 1, K_GREEN, K_BLUE };
+
+typedef enum Color Color;
+
+// Parameter and return type both spelled `enum Color`.
+enum Color brighten(enum Color c) {
+    if (c == K_RED) { return K_GREEN; }
+    if (c == K_GREEN) { return K_BLUE; }
+    return c;
+}
+
+// Same function via the typedef alias.
+Color darken(Color c) {
+    if (c == K_BLUE) { return K_GREEN; }
+    if (c == K_GREEN) { return K_RED; }
+    return c;
+}
+
+int main() {
+    enum Color c = K_RED;
+    print(c);                  // 1
+    c = brighten(c);
+    print(c);                  // 2  (K_GREEN)
+    c = brighten(c);
+    print(c);                  // 3  (K_BLUE)
+
+    Color d = darken(c);
+    print(d);                  // 2
+    d = darken(d);
+    print(d);                  // 1
+
+    // Mixed arithmetic with int.
+    int n = K_BLUE + K_GREEN;
+    print(n);                  // 5
+    return 0;
+}

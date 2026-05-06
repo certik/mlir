@@ -1,0 +1,29 @@
+// Regression: a local variable must shadow a module-scope enum constant
+// of the same name. Previously the parser eagerly substituted the
+// enumerator's value into every identifier, producing the enum constant
+// even when an inner-scope local with the same name was visible.
+
+enum { A = 100, B = 200 };
+
+int use_local() {
+    int A = 2;       // shadows enum A inside this function
+    return A;        // must be 2, not 100
+}
+
+int use_enum() {
+    return A;        // must be 100 — no shadowing in scope
+}
+
+int use_param(int B) {  // parameter shadows enum B
+    return B;        // must be the argument value
+}
+
+int main() {
+    print(use_enum() - 99);    // 100 - 99 = 1
+    print(use_local());        // 2
+    print(use_param(3));       // 3
+    int A;
+    A = 1;
+    print(A);                  // 1, not 100
+    return 0;
+}

@@ -1,0 +1,39 @@
+// Anonymous enum: implicit 0..N counting.
+enum { RED, GREEN, BLUE };
+
+// Named enum, mixing explicit and implicit values:
+//   A=1, B=2, C=10, D=11.
+enum Letters { A = 1, B, C = 10, D };
+
+// Reference a previously-declared enumerator in an initializer.
+enum Aliases { ALPHA = A, BETA, GAMMA = C };
+
+int classify(int color) {
+    switch (color) {
+        case RED:   return 100;
+        case GREEN: return 200;
+        case BLUE:  return 300;
+        default:    return -1;
+    }
+}
+
+int main() {
+    print(RED);          // 0
+    print(GREEN);        // 1
+    print(BLUE);         // 2
+    print(A);            // 1
+    print(B);            // 2
+    print(C);            // 10
+    print(D);            // 11
+    print(ALPHA);        // 1
+    print(BETA);         // 2
+    print(GAMMA);        // 10
+    print(classify(RED));    // 100
+    print(classify(GREEN));  // 200
+    print(classify(BLUE));   // 300
+
+    // Enumerators are usable in arbitrary integer contexts.
+    int x = D + 5;
+    print(x);            // 16
+    return 0;
+}
