@@ -206,6 +206,7 @@ static Expr *parse_primary(P *p) {
         p->i++;
         Expr *e = new_expr(p, EX_INT, t.line);
         e->int_value = t.int_value;
+        e->is_i64 = t.is_i64;
         return e;
     }
     if (t.kind == TC_TK_FLOAT_LIT) {
@@ -242,7 +243,8 @@ static Expr *parse_primary(P *p) {
         TcTokKind nxt = peek(p, 1).kind;
         bool is_cast = (nxt == TC_TK_KW_INT || nxt == TC_TK_KW_FLOAT ||
                         nxt == TC_TK_KW_STRUCT || nxt == TC_TK_KW_CHAR ||
-                        nxt == TC_TK_KW_CONST);
+                        nxt == TC_TK_KW_CONST || nxt == TC_TK_KW_LONG ||
+                        nxt == TC_TK_KW_SIGNED || nxt == TC_TK_KW_UNSIGNED);
         if (!is_cast && nxt == TC_TK_IDENT &&
             typedef_lookup(p, peek(p, 1).text)) {
             is_cast = true;
@@ -548,7 +550,30 @@ static Expr *parse_expr(P *p) { return parse_assign_or_or(p); }
 // the kind to *out. Pointer/array suffixes are handled at decl time.
 static bool parse_base_type(P *p, TypeKind *out) {
     skip_const(p);
-    if (cur(p).kind == TC_TK_KW_INT)   { p->i++; *out = TY_I32; skip_const(p); return true; }
+    // C-style integer base specifier: optional signed/unsigned, optional
+    // long [long], optional int. Any 'long' makes the result TY_I64.
+    bool saw_int_kw = false;
+    bool saw_long_kw = false;
+    bool saw_signedness_kw = false;
+    while (cur(p).kind == TC_TK_KW_SIGNED || cur(p).kind == TC_TK_KW_UNSIGNED) {
+        saw_signedness_kw = true; p->i++; skip_const(p);
+    }
+    while (cur(p).kind == TC_TK_KW_LONG) {
+        saw_long_kw = true; p->i++; skip_const(p);
+    }
+    if (cur(p).kind == TC_TK_KW_INT) {
+        saw_int_kw = true; p->i++; skip_const(p);
+    }
+    while (cur(p).kind == TC_TK_KW_LONG) {
+        saw_long_kw = true; p->i++; skip_const(p);
+    }
+    if (cur(p).kind == TC_TK_KW_SIGNED || cur(p).kind == TC_TK_KW_UNSIGNED) {
+        saw_signedness_kw = true; p->i++; skip_const(p);
+    }
+    if (saw_long_kw)         { *out = TY_I64; skip_const(p); return true; }
+    if (saw_int_kw || saw_signedness_kw) {
+        *out = TY_I32; skip_const(p); return true;
+    }
     if (cur(p).kind == TC_TK_KW_FLOAT) { p->i++; *out = TY_F32; skip_const(p); return true; }
     if (cur(p).kind == TC_TK_KW_CHAR)  { p->i++; *out = TY_I32; skip_const(p); return true; }
     if (cur(p).kind == TC_TK_KW_VOID)  { p->i++; *out = TY_VOID; skip_const(p); return true; }
@@ -791,6 +816,8 @@ static Stmt *parse_stmt(P *p) {
                    cur(p).kind == TC_TK_KW_CHAR || cur(p).kind == TC_TK_KW_ENUM ||
                    cur(p).kind == TC_TK_KW_CONST || cur(p).kind == TC_TK_KW_VOID ||
                    cur(p).kind == TC_TK_KW_STATIC || cur(p).kind == TC_TK_KW_INLINE ||
+                   cur(p).kind == TC_TK_KW_LONG || cur(p).kind == TC_TK_KW_SIGNED ||
+                   cur(p).kind == TC_TK_KW_UNSIGNED ||
                    (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, cur(p).text))) {
             s->for_init = parse_decl(p, /*require_semi*/ true);
         } else {
@@ -871,6 +898,8 @@ static Stmt *parse_stmt(P *p) {
         t.kind == TC_TK_KW_ENUM || t.kind == TC_TK_KW_CONST ||
         t.kind == TC_TK_KW_VOID ||
         t.kind == TC_TK_KW_STATIC || t.kind == TC_TK_KW_INLINE ||
+        t.kind == TC_TK_KW_LONG || t.kind == TC_TK_KW_SIGNED ||
+        t.kind == TC_TK_KW_UNSIGNED ||
         (t.kind == TC_TK_IDENT && typedef_lookup(p, t.text) &&
          peek(p, 1).kind == TC_TK_IDENT)) {
         // `enum [Tag] { ... };` is a module-scope-only registration form;
@@ -998,6 +1027,19 @@ static void wrap_ptr_to_ptr(P *p, Type *out) {
 static bool parse_sig_type(P *p, Type *out) {
     *out = (Type){0};
     skip_const(p);
+    // Accept signed/unsigned/long modifiers in any order ahead of `int` or
+    // by themselves. Any 'long' promotes to TY_I64; otherwise TY_I32.
+    if (cur(p).kind == TC_TK_KW_SIGNED || cur(p).kind == TC_TK_KW_UNSIGNED ||
+        cur(p).kind == TC_TK_KW_LONG) {
+        bool saw_long = false;
+        while (cur(p).kind == TC_TK_KW_SIGNED || cur(p).kind == TC_TK_KW_UNSIGNED ||
+               cur(p).kind == TC_TK_KW_LONG || cur(p).kind == TC_TK_KW_INT) {
+            if (cur(p).kind == TC_TK_KW_LONG) saw_long = true;
+            p->i++; skip_const(p);
+        }
+        out->kind = saw_long ? TY_I64 : TY_I32;
+        return true;
+    }
     if (cur(p).kind == TC_TK_KW_INT)   {
         p->i++; out->kind = TY_I32; skip_const(p);
         if (accept(p, TC_TK_STAR)) {
@@ -1322,6 +1364,31 @@ static void parse_enum_decl_top(P *p) {
 Program *tinyc_parse(Arena *arena, VecTcTok toks) {
     P p = {.arena = arena, .toks = toks.data, .n = toks.size, .i = 0,
            .typedefs = NULL, .enums = NULL};
+    // Built-in typedefs (treated as TY_I64, signedness ignored).
+    {
+        const char *names[] = {"int64_t", "uint64_t", "size_t", "ssize_t",
+                               "intptr_t", "uintptr_t", "ptrdiff_t"};
+        for (size_t k = 0; k < sizeof(names) / sizeof(names[0]); k++) {
+            Typedef *td = arena_new(arena, Typedef);
+            td->name = (string){.str = (char *)names[k], .size = 0};
+            // Compute string length without libc.
+            const char *s = names[k]; size_t len = 0; while (s[len]) len++;
+            td->name.size = len;
+            td->ty.kind = TY_I64;
+            td->next = p.typedefs;
+            p.typedefs = td;
+        }
+        // int32_t / uint32_t — match TY_I32 to keep existing semantics.
+        const char *n32[] = {"int32_t", "uint32_t"};
+        for (size_t k = 0; k < sizeof(n32) / sizeof(n32[0]); k++) {
+            Typedef *td = arena_new(arena, Typedef);
+            const char *s = n32[k]; size_t len = 0; while (s[len]) len++;
+            td->name = (string){.str = (char *)n32[k], .size = len};
+            td->ty.kind = TY_I32;
+            td->next = p.typedefs;
+            p.typedefs = td;
+        }
+    }
     Program *prog = arena_new(arena, Program);
     *prog = (Program){0};
     VecFuncPtr_reserve(arena, &prog->funcs, 4);

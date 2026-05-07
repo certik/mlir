@@ -38,6 +38,9 @@ static TcTokKind keyword_or_ident(string s) {
     if (str_eq(s, str_lit("void")))     return TC_TK_KW_VOID;
     if (str_eq(s, str_lit("static")))   return TC_TK_KW_STATIC;
     if (str_eq(s, str_lit("inline")))   return TC_TK_KW_INLINE;
+    if (str_eq(s, str_lit("long")))     return TC_TK_KW_LONG;
+    if (str_eq(s, str_lit("signed")))   return TC_TK_KW_SIGNED;
+    if (str_eq(s, str_lit("unsigned"))) return TC_TK_KW_UNSIGNED;
     return TC_TK_IDENT;
 }
 
@@ -203,6 +206,15 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                 i = j; continue;
             }
             TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
+            // Optional integer-literal suffix: 'l', 'L', 'll', 'LL' marks
+            // the literal as TY_I64. We do not distinguish signedness.
+            if (j < src.size && (src.str[j] == 'l' || src.str[j] == 'L')) {
+                t.is_i64 = true;
+                j++;
+                if (j < src.size && (src.str[j] == 'l' || src.str[j] == 'L')) j++;
+            }
+            // Also accept a trailing 'u'/'U' (silently — we don't track signedness).
+            if (j < src.size && (src.str[j] == 'u' || src.str[j] == 'U')) j++;
             VecTcTok_push_back(arena, &toks, t);
             i = j; continue;
         }

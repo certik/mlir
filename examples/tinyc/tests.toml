@@ -217,3 +217,15 @@ expected_stdout = "41\n42\n"
 [[test]]
 name = "ptr_to_fnptr"
 expected_stdout = "5\n7\n"
+
+[[test]]
+name = "i64_basic"
+expected_stdout = "300\n900\n"
+
+[[test]]
+name = "i64_mixed"
+expected_stdout = "15\n5\n50\n"
+
+[[test]]
+name = "i64_size_t"
+expected_stdout = "55\n5050\n0\n"

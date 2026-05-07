@@ -194,6 +194,7 @@ static bool find_enum(E *e, string name, int64_t *out_value) {
 
 static MLIR_TypeHandle scalar_mlir_type(E *e, TypeKind k) {
     if (k == TY_F32) return e->f32;
+    if (k == TY_I64) return e->i64;
     if (k == TY_PTR_STRUCT || k == TY_PTR_I32 || k == TY_PTR_CHAR ||
         k == TY_PTR_VOID || k == TY_FNPTR || k == TY_PTR_PTR) return e->ptr;
     return e->i32;
@@ -391,6 +392,18 @@ static MLIR_ValueHandle emit_extsi_i32_to_i64(E *e, MLIR_ValueHandle v) {
     return r;
 }
 
+// Truncate i64 -> i32 (arith.trunci).
+static MLIR_ValueHandle emit_trunci_i64_to_i32(E *e, MLIR_ValueHandle v) {
+    MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
+                                                  e->i32, ssa_name(e), eloc(e, 0));
+    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i32;
+    MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
+    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = v;
+    emit_op(e, OP_TYPE_ARITH_TRUNCI, str_lit("arith.trunci"),
+            rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
+    return r;
+}
+
 // Emit `llvm.mlir.addressof @<sym>` -> !llvm.ptr.
 static MLIR_ValueHandle emit_addressof(E *e, string sym) {
     MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
@@ -558,6 +571,7 @@ static int64_t cmpf_pred_for(BinOp op) {
 typedef struct {
     MLIR_ValueHandle val;
     bool is_float;
+    bool is_i64;       // val has MLIR type i64 (TY_I64)
     bool is_ptr;       // val is a !llvm.ptr (struct pointer, int*, char*, ...)
     bool is_str;       // val is a !llvm.ptr to char data (string)
     StructDef *sdef;   // when is_ptr, the StructDef the pointer targets (NULL for null)
@@ -599,6 +613,18 @@ static MLIR_ValueHandle coerce_eval(E *e, EVal v, MLIR_TypeHandle want) {
         emit_op(e, OP_TYPE_ARITH_FPTOSI, str_lit("arith.fptosi"),
                 rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
         return r;
+    }
+    if (want == e->i64) {
+        if (v.is_i64) return v.val;
+        if (v.is_float) {
+            // float -> i32 -> i64 (no direct fptosi-to-i64 helper here).
+            EVal as_i32 = (EVal){.val = coerce_eval(e, v, e->i32)};
+            return emit_extsi_i32_to_i64(e, as_i32.val);
+        }
+        return emit_extsi_i32_to_i64(e, v.val);
+    }
+    if (want == e->i32 && v.is_i64) {
+        return emit_trunci_i64_to_i32(e, v.val);
     }
     return v.val;
 }
@@ -655,6 +681,7 @@ static EVal load_lvalue(E *e, LVal lv) {
     MLIR_ValueHandle p = lval_address(e, lv);
     r.val = emit_load_v(e, p, lv.elem_ty);
     r.is_float = (lv.elem_ty == e->f32);
+    r.is_i64 = (lv.elem_ty == e->i64);
     r.is_ptr = (lv.elem_ty == e->ptr);
     r.ptr_elem = MLIR_INVALID_HANDLE;
     return r;
@@ -801,9 +828,10 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
             }
             r.base_ptr = sym_addr(e, s);
             if (s->type.kind == TY_F32) r.elem_ty = e->f32;
+            else if (s->type.kind == TY_I64) r.elem_ty = e->i64;
             else if (s->type.kind == TY_PTR_STRUCT || s->type.kind == TY_PTR_I32 ||
                      s->type.kind == TY_PTR_CHAR || s->type.kind == TY_PTR_VOID ||
-                     s->type.kind == TY_FNPTR)
+                     s->type.kind == TY_FNPTR || s->type.kind == TY_PTR_PTR)
                 r.elem_ty = e->ptr;
             else r.elem_ty = e->i32;
             return r;
@@ -1009,9 +1037,23 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
 }
 
 static void unify_numeric(E *e, EVal *a, EVal *b) {
-    if (a->is_float == b->is_float) return;
-    if (!a->is_float) { a->val = emit_sitofp(e, a->val); a->is_float = true; }
-    if (!b->is_float) { b->val = emit_sitofp(e, b->val); b->is_float = true; }
+    if (a->is_float || b->is_float) {
+        if (a->is_float == b->is_float) return;
+        if (!a->is_float) {
+            // Promote i64 -> i32 first if necessary, since emit_sitofp
+            // assumes i32 input.
+            if (a->is_i64) { a->val = emit_trunci_i64_to_i32(e, a->val); a->is_i64 = false; }
+            a->val = emit_sitofp(e, a->val); a->is_float = true;
+        }
+        if (!b->is_float) {
+            if (b->is_i64) { b->val = emit_trunci_i64_to_i32(e, b->val); b->is_i64 = false; }
+            b->val = emit_sitofp(e, b->val); b->is_float = true;
+        }
+        return;
+    }
+    if (a->is_i64 == b->is_i64) return;
+    if (!a->is_i64) { a->val = emit_extsi_i32_to_i64(e, a->val); a->is_i64 = true; }
+    if (!b->is_i64) { b->val = emit_extsi_i32_to_i64(e, b->val); b->is_i64 = true; }
 }
 
 // ----- struct-by-pointer helpers -----
@@ -1283,7 +1325,13 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
     }
     switch (ex->kind) {
         case EX_INT:
-            r.val = emit_const_i32(e, ex->int_value); return r;
+            if (ex->is_i64) {
+                r.val = emit_const_i64(e, ex->int_value);
+                r.is_i64 = true;
+            } else {
+                r.val = emit_const_i32(e, ex->int_value);
+            }
+            return r;
         case EX_FLOAT:
             r.val = emit_const_f32(e, ex->float_value); r.is_float = true; return r;
         case EX_NULL:
@@ -1605,6 +1653,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             EVal v = emit_expr(e, sc, ex->rhs_assign);
             v.val = coerce_eval(e, v, lv.elem_ty);
             v.is_float = (lv.elem_ty == e->f32);
+            v.is_i64 = (lv.elem_ty == e->i64);
             store_lvalue(e, lv, v.val);
             return v;
         }
@@ -1788,30 +1837,32 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             }
             unify_numeric(e, &a, &b);
             bool flt = a.is_float;
+            bool i64m = a.is_i64;
+            MLIR_TypeHandle ity = i64m ? e->i64 : e->i32;
             switch (ex->op) {
                 case OP_ADD:
                     r.val = flt ? emit_binop(e, OP_TYPE_ARITH_ADDF, str_lit("arith.addf"), e->f32, a.val, b.val)
-                                : emit_binop(e, OP_TYPE_ARITH_ADDI, str_lit("arith.addi"), e->i32, a.val, b.val);
-                    r.is_float = flt; return r;
+                                : emit_binop(e, OP_TYPE_ARITH_ADDI, str_lit("arith.addi"), ity, a.val, b.val);
+                    r.is_float = flt; r.is_i64 = i64m && !flt; return r;
                 case OP_SUB:
                     r.val = flt ? emit_binop(e, OP_TYPE_ARITH_SUBF, str_lit("arith.subf"), e->f32, a.val, b.val)
-                                : emit_binop(e, OP_TYPE_ARITH_SUBI, str_lit("arith.subi"), e->i32, a.val, b.val);
-                    r.is_float = flt; return r;
+                                : emit_binop(e, OP_TYPE_ARITH_SUBI, str_lit("arith.subi"), ity, a.val, b.val);
+                    r.is_float = flt; r.is_i64 = i64m && !flt; return r;
                 case OP_MUL:
                     r.val = flt ? emit_binop(e, OP_TYPE_ARITH_MULF, str_lit("arith.mulf"), e->f32, a.val, b.val)
-                                : emit_binop(e, OP_TYPE_ARITH_MULI, str_lit("arith.muli"), e->i32, a.val, b.val);
-                    r.is_float = flt; return r;
+                                : emit_binop(e, OP_TYPE_ARITH_MULI, str_lit("arith.muli"), ity, a.val, b.val);
+                    r.is_float = flt; r.is_i64 = i64m && !flt; return r;
                 case OP_DIV:
                     r.val = flt ? emit_binop(e, OP_TYPE_ARITH_DIVF, str_lit("arith.divf"), e->f32, a.val, b.val)
-                                : emit_binop(e, OP_TYPE_ARITH_DIVSI, str_lit("arith.divsi"), e->i32, a.val, b.val);
-                    r.is_float = flt; return r;
+                                : emit_binop(e, OP_TYPE_ARITH_DIVSI, str_lit("arith.divsi"), ity, a.val, b.val);
+                    r.is_float = flt; r.is_i64 = i64m && !flt; return r;
                 case OP_MOD:
                     if (flt) {
                         EMIT_ERR(e, "% not supported on floats");
                         r.val = emit_const_f32(e, 0.0); r.is_float = true; return r;
                     }
-                    r.val = emit_binop(e, OP_TYPE_ARITH_REMSI, str_lit("arith.remsi"), e->i32, a.val, b.val);
-                    return r;
+                    r.val = emit_binop(e, OP_TYPE_ARITH_REMSI, str_lit("arith.remsi"), ity, a.val, b.val);
+                    r.is_i64 = i64m; return r;
                 case OP_LT: case OP_LE: case OP_GT: case OP_GE:
                 case OP_EQ: case OP_NE: {
                     MLIR_ValueHandle cmp = flt
@@ -1822,24 +1873,24 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 }
                 case OP_BAND:
                     if (flt) { EMIT_ERR(e, "& not supported on floats"); r.val = emit_const_i32(e, 0); return r; }
-                    r.val = emit_binop(e, OP_TYPE_ARITH_ANDI, str_lit("arith.andi"), e->i32, a.val, b.val);
-                    return r;
+                    r.val = emit_binop(e, OP_TYPE_ARITH_ANDI, str_lit("arith.andi"), ity, a.val, b.val);
+                    r.is_i64 = i64m; return r;
                 case OP_BOR:
                     if (flt) { EMIT_ERR(e, "| not supported on floats"); r.val = emit_const_i32(e, 0); return r; }
-                    r.val = emit_binop(e, OP_TYPE_ARITH_ORI, str_lit("arith.ori"), e->i32, a.val, b.val);
-                    return r;
+                    r.val = emit_binop(e, OP_TYPE_ARITH_ORI, str_lit("arith.ori"), ity, a.val, b.val);
+                    r.is_i64 = i64m; return r;
                 case OP_BXOR:
                     if (flt) { EMIT_ERR(e, "^ not supported on floats"); r.val = emit_const_i32(e, 0); return r; }
-                    r.val = emit_binop(e, OP_TYPE_ARITH_XORI, str_lit("arith.xori"), e->i32, a.val, b.val);
-                    return r;
+                    r.val = emit_binop(e, OP_TYPE_ARITH_XORI, str_lit("arith.xori"), ity, a.val, b.val);
+                    r.is_i64 = i64m; return r;
                 case OP_SHL:
                     if (flt) { EMIT_ERR(e, "<< not supported on floats"); r.val = emit_const_i32(e, 0); return r; }
-                    r.val = emit_binop(e, OP_TYPE_ARITH_SHLI, str_lit("arith.shli"), e->i32, a.val, b.val);
-                    return r;
+                    r.val = emit_binop(e, OP_TYPE_ARITH_SHLI, str_lit("arith.shli"), ity, a.val, b.val);
+                    r.is_i64 = i64m; return r;
                 case OP_SHR:
                     if (flt) { EMIT_ERR(e, ">> not supported on floats"); r.val = emit_const_i32(e, 0); return r; }
-                    r.val = emit_binop(e, OP_TYPE_ARITH_SHRSI, str_lit("arith.shrsi"), e->i32, a.val, b.val);
-                    return r;
+                    r.val = emit_binop(e, OP_TYPE_ARITH_SHRSI, str_lit("arith.shrsi"), ity, a.val, b.val);
+                    r.is_i64 = i64m; return r;
                 default: break;
             }
             r.val = emit_const_i32(e, 0);
@@ -1987,6 +2038,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             emit_flat_call(e, sc, sig, ex->args, results, MLIR_INVALID_HANDLE);
             r.val = results[0];
             r.is_float = (sig->ret.type.kind == TY_F32);
+            r.is_i64 = (sig->ret.type.kind == TY_I64);
             if (sig->ret.type.kind == TY_PTR_STRUCT) {
                 r.is_ptr = true;
                 r.sdef = sig->ret.sdef;
@@ -2172,6 +2224,15 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 if (st->decl_init) {
                     EMIT_ERR(e, "struct initializers are not supported");
                 }
+            } else if (st->decl_type.kind == TY_I64) {
+                sy->addr = emit_alloca(e, e->i64);
+                if (st->decl_init) {
+                    EVal v = emit_expr(e, sc, st->decl_init);
+                    MLIR_ValueHandle iv = coerce_eval(e, v, e->i64);
+                    emit_store_v(e, iv, sy->addr);
+                } else {
+                    emit_store_v(e, emit_const_i64(e, 0), sy->addr);
+                }
             } else if (st->decl_type.kind == TY_F32) {
                 sy->addr = emit_alloca(e, e->f32);
                 if (st->decl_init) {
@@ -2240,6 +2301,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             }
             MLIR_TypeHandle want_ty;
             if (sig && sig->ret.type.kind == TY_F32) want_ty = e->f32;
+            else if (sig && sig->ret.type.kind == TY_I64) want_ty = e->i64;
             else if (sig && (sig->ret.type.kind == TY_PTR_STRUCT ||
                              sig->ret.type.kind == TY_PTR_I32 ||
                              sig->ret.type.kind == TY_PTR_CHAR ||
@@ -2481,7 +2543,7 @@ static void slot_resolve(E *e, Type ty, SlotInfo *out) {
         if (!out->sdef) {
             EMIT_ERR(e, "unknown struct type {}", ty.struct_name);
         }
-    } else if (ty.kind != TY_I32 && ty.kind != TY_F32 &&
+    } else if (ty.kind != TY_I32 && ty.kind != TY_I64 && ty.kind != TY_F32 &&
                ty.kind != TY_PTR_I32 && ty.kind != TY_PTR_CHAR &&
                ty.kind != TY_PTR_VOID && ty.kind != TY_VOID &&
                ty.kind != TY_FNPTR && ty.kind != TY_PTR_PTR) {
@@ -2583,6 +2645,9 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
         } else if (p->type.kind == TY_F32) {
             sy->addr = emit_alloca(e, e->f32);
             emit_store_v(e, blk, sy->addr);
+        } else if (p->type.kind == TY_I64) {
+            sy->addr = emit_alloca(e, e->i64);
+            emit_store_v(e, blk, sy->addr);
         } else if (p->type.kind == TY_PTR_I32 || p->type.kind == TY_PTR_CHAR ||
                    p->type.kind == TY_PTR_VOID || p->type.kind == TY_FNPTR ||
                    p->type.kind == TY_PTR_PTR) {
@@ -2633,6 +2698,7 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
 static int64_t type_align(E *e, Type t);
 static int64_t type_size(E *e, Type t) {
     if (t.kind == TY_I32) return 4;
+    if (t.kind == TY_I64) return 8;
     if (t.kind == TY_F32) return 4;
     if (t.kind == TY_PTR_I32 || t.kind == TY_PTR_STRUCT) return 8;
     if (t.kind == TY_PTR_CHAR || t.kind == TY_PTR_VOID || t.kind == TY_FNPTR) return 8;
@@ -2665,6 +2731,7 @@ static int64_t type_size(E *e, Type t) {
 }
 static int64_t type_align(E *e, Type t) {
     if (t.kind == TY_I32 || t.kind == TY_F32) return 4;
+    if (t.kind == TY_I64) return 8;
     if (t.kind == TY_PTR_I32 || t.kind == TY_PTR_STRUCT) return 8;
     if (t.kind == TY_PTR_CHAR || t.kind == TY_PTR_VOID || t.kind == TY_FNPTR) return 8;
     if (t.kind == TY_PTR_PTR) return 8;

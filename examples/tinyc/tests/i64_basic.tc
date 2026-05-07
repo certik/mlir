@@ -1,0 +1,11 @@
+int main() {
+    long a;
+    long long b;
+    int64_t c;
+    a = 100LL;
+    b = 200LL;
+    c = a + b;
+    print(c);
+    print(c * 3LL);
+    return 0;
+}

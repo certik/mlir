@@ -98,6 +98,7 @@
 // and (c) decide between integer/float arithmetic ops in the emitter.
 typedef enum {
     TY_I32,
+    TY_I64,            // 64-bit signed int (long, long long, int64_t, size_t)
     TY_F32,
     TY_PTR_I32,        // alias-only pointer to int
     TY_PTR_CHAR,       // pointer to char (string literals / globals)
@@ -175,6 +176,8 @@ struct Expr {
     ExprKind kind;
     // For EX_INT
     int64_t int_value;
+    bool    is_i64;          // true iff the integer literal had L/LL suffix
+                             // and so should be emitted as TY_I64.
     // For EX_FLOAT
     double float_value;
     // For EX_VAR
@@ -361,6 +364,9 @@ typedef enum {
     TC_TK_KW_VOID,
     TC_TK_KW_STATIC,
     TC_TK_KW_INLINE,
+    TC_TK_KW_LONG,
+    TC_TK_KW_SIGNED,
+    TC_TK_KW_UNSIGNED,
     TC_TK_STRING_LIT,
     TC_TK_LPAREN, TC_TK_RPAREN,
     TC_TK_LBRACE, TC_TK_RBRACE,
@@ -383,6 +389,7 @@ typedef enum {
 typedef struct {
     TcTokKind kind;
     int64_t int_value;
+    bool    is_i64;          // EX_INT / TC_TK_INT_LIT marked with L/LL suffix
     double  float_value;
     string text;             // interned identifier text (for IDENT)
     int line;
