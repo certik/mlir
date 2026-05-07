@@ -94,8 +94,29 @@ static void parse_enum_decl_top(P *p);
 // in pointer declarators, and (via these helpers) wherever a type can
 // appear (return type, param, sizeof/cast, typedef target, struct field,
 // local decl).
+// Parser-level type qualifiers and storage-class specifiers that have no
+// effect on the AST and are silently dropped wherever a type can appear:
+//   - `const`   (qualifier)
+//   - `static`  (storage class — no linkage change in tinyC)
+//   - `inline`  (no inlining performed)
+// Any combination, in any order, even repetitions, is accepted.
 static void skip_const(P *p) {
-    while (cur(p).kind == TC_TK_KW_CONST) p->i++;
+    while (cur(p).kind == TC_TK_KW_CONST ||
+           cur(p).kind == TC_TK_KW_STATIC ||
+           cur(p).kind == TC_TK_KW_INLINE) {
+        p->i++;
+    }
+}
+
+// `static` and `inline` are parser-only storage-class qualifiers. Any
+// combination (`static`, `inline`, `static inline`, `inline static`,
+// even repetitions) is silently accepted at any position where a type
+// can appear. They do not affect the AST or codegen — names retain
+// external linkage and inline functions are not substituted.
+static void skip_storage_class(P *p) {
+    while (cur(p).kind == TC_TK_KW_STATIC || cur(p).kind == TC_TK_KW_INLINE) {
+        p->i++;
+    }
 }
 
 // postfix := (...) | [expr] | .ident
@@ -724,6 +745,7 @@ static Stmt *parse_stmt(P *p) {
         } else if (cur(p).kind == TC_TK_KW_INT || cur(p).kind == TC_TK_KW_FLOAT ||
                    cur(p).kind == TC_TK_KW_CHAR || cur(p).kind == TC_TK_KW_ENUM ||
                    cur(p).kind == TC_TK_KW_CONST || cur(p).kind == TC_TK_KW_VOID ||
+                   cur(p).kind == TC_TK_KW_STATIC || cur(p).kind == TC_TK_KW_INLINE ||
                    (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, cur(p).text))) {
             s->for_init = parse_decl(p, /*require_semi*/ true);
         } else {
@@ -803,6 +825,7 @@ static Stmt *parse_stmt(P *p) {
         t.kind == TC_TK_KW_STRUCT || t.kind == TC_TK_KW_CHAR ||
         t.kind == TC_TK_KW_ENUM || t.kind == TC_TK_KW_CONST ||
         t.kind == TC_TK_KW_VOID ||
+        t.kind == TC_TK_KW_STATIC || t.kind == TC_TK_KW_INLINE ||
         (t.kind == TC_TK_IDENT && typedef_lookup(p, t.text) &&
          peek(p, 1).kind == TC_TK_IDENT)) {
         // `enum [Tag] { ... };` is a module-scope-only registration form;
@@ -1198,6 +1221,9 @@ Program *tinyc_parse(Arena *arena, VecTcTok toks) {
     VecStructDefPtr_reserve(arena, &prog->structs, 4);
     VecGlobal_reserve(arena, &prog->globals, 4);
     while (cur(&p).kind != TC_TK_EOF) {
+        // Top-level storage-class qualifiers are parser-noise.
+        skip_storage_class(&p);
+        if (cur(&p).kind == TC_TK_EOF) break;
         if (cur(&p).kind == TC_TK_KW_STRUCT && peek(&p, 2).kind == TC_TK_LBRACE) {
             StructDef *sd = parse_struct_def(&p);
             VecStructDefPtr_push_back(arena, &prog->structs, sd);

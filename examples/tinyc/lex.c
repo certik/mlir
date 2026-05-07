@@ -36,6 +36,8 @@ static TcTokKind keyword_or_ident(string s) {
     if (str_eq(s, str_lit("enum")))     return TC_TK_KW_ENUM;
     if (str_eq(s, str_lit("const")))    return TC_TK_KW_CONST;
     if (str_eq(s, str_lit("void")))     return TC_TK_KW_VOID;
+    if (str_eq(s, str_lit("static")))   return TC_TK_KW_STATIC;
+    if (str_eq(s, str_lit("inline")))   return TC_TK_KW_INLINE;
     return TC_TK_IDENT;
 }
 

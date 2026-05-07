@@ -1,0 +1,30 @@
+// Storage-class qualifiers: parser-only acceptance.
+
+static int counter = 0;
+static const int kSeed = 10;
+const static int kSeed2 = 20;
+
+static int incr(void) {
+    counter = counter + 1;
+    return counter;
+}
+
+static inline int squared(int n) {
+    return n * n;
+}
+
+inline static int cubed(int n);  // forward decl with both, swapped
+
+int main() {
+    print(incr());
+    print(incr());
+    print(incr());
+    print(squared(5));
+    print(cubed(3));
+    print(kSeed + kSeed2);
+    return 0;
+}
+
+inline static int cubed(int n) {
+    return n * n * n;
+}
