@@ -820,10 +820,12 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 s->decl_type.array_len = alen;
                 s->decl_type.array_len_expr = aexpr;
             } else {
-                if (s->decl_type.kind != TY_I32) {
-                    perror_at(p, line, str_lit("only int[N] arrays are supported"));
+                bool is_i64 = (s->decl_type.kind == TY_I64);
+                if (s->decl_type.kind != TY_I32 && s->decl_type.kind != TY_I64) {
+                    perror_at(p, line, str_lit("only int[N] / long long[N] arrays are supported"));
                 }
                 s->decl_type.kind = TY_ARRAY_I32;
+                s->decl_type.array_elem_is_i64 = is_i64;
                 s->decl_type.array_len = alen;
                 s->decl_type.array_len_expr = aexpr;
                 if (accept(p, TC_TK_LBRACK)) {
@@ -2139,7 +2141,8 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
             }
             if (cur(&p).kind == TC_TK_IDENT) {
                 TcTokKind after = peek(&p, 1).kind;
-                if (after == TC_TK_ASSIGN || after == TC_TK_SEMI) {
+                if (after == TC_TK_ASSIGN || after == TC_TK_SEMI ||
+                    after == TC_TK_LBRACK) {
                     TcTok nm = cur(&p);
                     p.i++;
                     Global g = (Global){0};
@@ -2147,6 +2150,27 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
                     g.is_extern = saw_extern;
                     g.type = tty;
                     g.line = nm.line;
+                    // Optional array suffix `[N]` (or `[const-expr]`).
+                    // Only zero-initialized arrays are supported at file
+                    // scope; no aggregate initializer.
+                    if (accept(&p, TC_TK_LBRACK)) {
+                        int64_t alen = 0; Expr *aexpr = NULL;
+                        parse_array_len_bracket(&p, &alen, &aexpr);
+                        if (g.type.kind == TY_STRUCT) {
+                            g.type.kind = TY_ARRAY_STRUCT;
+                        } else if (g.type.kind == TY_PTR_CHAR) {
+                            g.type.kind = TY_ARRAY_PTR_CHAR;
+                        } else if (g.type.kind == TY_I32 || g.type.kind == TY_I64) {
+                            bool is_i64 = (g.type.kind == TY_I64);
+                            g.type.kind = TY_ARRAY_I32;
+                            g.type.array_elem_is_i64 = is_i64;
+                        } else {
+                            perror_at(&p, nm.line,
+                                str_lit("unsupported global array element type"));
+                        }
+                        g.type.array_len = alen;
+                        g.type.array_len_expr = aexpr;
+                    }
                     if (accept(&p, TC_TK_ASSIGN)) {
                         g.has_init = true;
                         TcTok lit = cur(&p);

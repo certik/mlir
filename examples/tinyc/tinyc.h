@@ -154,6 +154,10 @@ struct Type {
     // generic pointer kind without losing the element width needed for
     // pointer arithmetic, indexing, and dereferenced-load typing.
     bool     ptr_is_i64;
+    // For TY_ARRAY_I32: when true, the elements are 64-bit wide (i64).
+    // Used to support `size_t arr[N]` / `long arr[N]` / `int64_t arr[N]`
+    // without introducing a separate TY_ARRAY_I64 kind.
+    bool     array_elem_is_i64;
     // For TY_I32/TY_I64: optional explicit bit width hint (0 = unspecified,
     // 8/16/32/64 = explicit width). Used by `_Generic` for typedef
     // matching on narrow-int aliases (`int8_t`, `int16_t`, ...).

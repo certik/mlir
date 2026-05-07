@@ -1218,13 +1218,14 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 return r;
             }
             MLIR_ValueHandle idx_i32 = emit_expr_i32(e, sc, ex->rhs);
+            MLIR_TypeHandle aelem = s->type.array_elem_is_i64 ? e->i64 : e->i32;
             r.base_ptr = sym_addr(e, s);
-            r.source_elem = MLIR_CreateTypeLLVMArray(e->ctx, e->i32, (uint64_t)s->type.array_len);
+            r.source_elem = MLIR_CreateTypeLLVMArray(e->ctx, aelem, (uint64_t)s->type.array_len);
             int32_t *path = arena_new_array(e->arena, int32_t, 2);
             path[0] = 0; path[1] = LLVM_GEP_DYN;
             r.const_path = path; r.n_const_path = 2;
             r.dyn_index = idx_i32;
-            r.elem_ty = e->i32;
+            r.elem_ty = aelem;
             return r;
         }
         case EX_DEREF: {
@@ -2103,6 +2104,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     if (s->type.kind == TY_ARRAY_F32) r.ptr_elem = e->f32;
                     else if (s->type.kind == TY_ARRAY_PTR_STRUCT ||
                              s->type.kind == TY_ARRAY_PTR_CHAR) r.ptr_elem = e->ptr;
+                    else if (s->type.kind == TY_ARRAY_I32 && s->type.array_elem_is_i64) r.ptr_elem = e->i64;
                     else r.ptr_elem = e->i32;
                     if (s->type.kind == TY_ARRAY_STRUCT) r.sdef = s->sdef;
                     return r;
@@ -3080,15 +3082,16 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                     }
                 }
             } else if (st->decl_type.kind == TY_ARRAY_I32) {
+                MLIR_TypeHandle elem_ty = st->decl_type.array_elem_is_i64 ? e->i64 : e->i32;
                 MLIR_TypeHandle arr_ty;
                 if (st->decl_type.array_len2 != 0) {
                     MLIR_TypeHandle inner = MLIR_CreateTypeLLVMArray(
-                        e->ctx, e->i32, (uint64_t)st->decl_type.array_len2);
+                        e->ctx, elem_ty, (uint64_t)st->decl_type.array_len2);
                     arr_ty = MLIR_CreateTypeLLVMArray(
                         e->ctx, inner, (uint64_t)st->decl_type.array_len);
                 } else {
                     arr_ty = MLIR_CreateTypeLLVMArray(
-                        e->ctx, e->i32, (uint64_t)st->decl_type.array_len);
+                        e->ctx, elem_ty, (uint64_t)st->decl_type.array_len);
                 }
                 sy->addr = emit_alloca(e, arr_ty);
                 if (st->decl_init) {
@@ -3891,7 +3894,9 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
         case EX_INDEX: {
             Type base = infer_expr_type(e, sc, ex->lhs);
             if (base.kind == TY_ARRAY_I32 || base.kind == TY_PTR_I32) {
-                t.kind = TY_I32; return t;
+                t.kind = (base.kind == TY_ARRAY_I32 && base.array_elem_is_i64) ||
+                         (base.kind == TY_PTR_I32 && base.ptr_is_i64) ? TY_I64 : TY_I32;
+                return t;
             }
             if (base.kind == TY_PTR_CHAR) { t.kind = TY_I32; return t; }
             if (base.kind == TY_ARRAY_PTR_CHAR) { t.kind = TY_PTR_CHAR; return t; }
@@ -4219,6 +4224,58 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                     NULL, 0, NULL, 0, rops, 1, NULL, 0, NULL, 0);
             e.cur_block = save_blk;
             e.terminated = save_term;
+            MLIR_AppendBlockOp(ctx, mb, gop);
+        } else if (g->type.kind == TY_ARRAY_STRUCT ||
+                   g->type.kind == TY_ARRAY_I32 ||
+                   g->type.kind == TY_ARRAY_PTR_CHAR) {
+            // Zero-initialized aggregate global. Resolve a deferred array
+            // length expression (e.g. `[20 + 1]`) at emit time using
+            // ast_fold_int with no scope (file-scope const expressions
+            // only).
+            if (g->type.array_len_expr) {
+                int64_t v = 0;
+                if (!ast_fold_int(&e, NULL, g->type.array_len_expr, &v)) {
+                    EMIT_ERR(&e, "non-constant global array length");
+                }
+                g->type.array_len = v;
+            }
+            MLIR_TypeHandle elem;
+            if (g->type.kind == TY_ARRAY_STRUCT) {
+                StructDef *sd = find_struct(&e, g->type.struct_name);
+                if (!sd) { EMIT_ERR(&e, "unknown struct in global array"); continue; }
+                elem = find_struct_type(&e, sd);
+            } else if (g->type.kind == TY_ARRAY_PTR_CHAR) {
+                elem = e.ptr;
+            } else {
+                elem = g->type.array_elem_is_i64 ? e.i64 : e.i32;
+            }
+            MLIR_TypeHandle arr_ty = MLIR_CreateTypeLLVMArray(
+                ctx, elem, (uint64_t)g->type.array_len);
+            MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
+            MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, arr_ty,
+                /*is_constant=*/false,
+                /*init_kind=*/2, 0, 0.0, &init_blk, e.loc);
+            MLIR_BlockHandle save_blk = e.cur_block;
+            bool save_term = e.terminated;
+            e.cur_block = init_blk;
+            e.terminated = false;
+            // Materialize a zero of the array type.
+            MLIR_ValueHandle zv = MLIR_CreateValueOpResult(e.ctx, MLIR_INVALID_HANDLE, 0,
+                                                          arr_ty, ssa_name(&e), eloc(&e, 0));
+            MLIR_TypeHandle *zrts = arena_new_array(e.arena, MLIR_TypeHandle, 1); zrts[0] = arr_ty;
+            MLIR_ValueHandle *zrs = arena_new_array(e.arena, MLIR_ValueHandle, 1); zrs[0] = zv;
+            emit_op(&e, OP_TYPE_LLVM_MLIR_ZERO, str_lit("llvm.mlir.zero"),
+                    zrts, 1, zrs, 1, NULL, 0, NULL, 0, NULL, 0);
+            MLIR_ValueHandle *rops = arena_new_array(arena, MLIR_ValueHandle, 1);
+            rops[0] = zv;
+            emit_op(&e, OP_TYPE_LLVM_RETURN, str_lit("llvm.return"),
+                    NULL, 0, NULL, 0, rops, 1, NULL, 0, NULL, 0);
+            e.cur_block = save_blk;
+            e.terminated = save_term;
+            // Record the struct sdef on the symbol for indexed access.
+            if (g->type.kind == TY_ARRAY_STRUCT) {
+                sy->sdef = find_struct(&e, g->type.struct_name);
+            }
             MLIR_AppendBlockOp(ctx, mb, gop);
         } else {
             // i32 (default for plain int)

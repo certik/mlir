@@ -456,3 +456,7 @@ expected_stdout = "4096\n4096\n4096\n4096\n7\n"
 [[test]]
 name = "compound_literal_array"
 expected_stdout = "2\n6\n"
+
+[[test]]
+name = "global_array"
+expected_stdout = "0 0\n1 10\n2 20\n3 30\n24\n1000000005\n"
