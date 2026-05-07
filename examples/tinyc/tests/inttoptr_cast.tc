@@ -1,0 +1,12 @@
+extern int printf(const char *fmt, ...);
+struct B { int v; };
+int main() {
+    struct B b;
+    b.v = 42;
+    long long addr;
+    addr = (long long)&b;
+    struct B *p;
+    p = (struct B *)addr;
+    printf("%d\n", p->v);
+    return 0;
+}

@@ -1988,11 +1988,29 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // just evaluate the operand. We tag the result type from
             // cast_type for downstream consumers.
             if (!v.is_ptr) {
-                // Integer-to-pointer cast: only literal 0 is allowed
-                // (used for `(T*)0` null sentinels in C). Synthesize a
-                // null pointer.
+                // Integer-to-pointer cast: literal 0 -> null pointer
+                // (used for `(T*)0` null sentinels in C). Any other
+                // integer operand is materialized via llvm.inttoptr
+                // (used in corec for `(struct buddy_block *)addr` where
+                // `addr` is a uintptr_t).
                 if (ex->lhs->kind == EX_INT && ex->lhs->int_value == 0) {
                     v.val = emit_null_ptr(e);
+                } else if (!v.is_float) {
+                    // Ensure the operand is i64 for inttoptr.
+                    MLIR_ValueHandle iv = v.val;
+                    if (!v.is_i64) {
+                        iv = emit_extsi_i32_to_i64(e, iv);
+                    }
+                    MLIR_ValueHandle pv = MLIR_CreateValueOpResult(
+                        e->ctx, MLIR_INVALID_HANDLE, 0, e->ptr,
+                        ssa_name(e), eloc(e, 0));
+                    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->ptr;
+                    MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = pv;
+                    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = iv;
+                    emit_op(e, OP_TYPE_UNREGISTERED, str_lit("llvm.inttoptr"),
+                            rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
+                    v.val = pv;
+                    v.is_i64 = false;
                 } else {
                     EMIT_ERR(e, "cast operand is not a pointer");
                 }
