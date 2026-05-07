@@ -1543,7 +1543,13 @@ static bool parse_sig_type(P *p, Type *out) {
             // Allow `Td*` to add another level of pointer (only for scalar
             // typedefs; struct typedefs already encode the pointer).
             if (accept(p, TC_TK_STAR)) {
-                if (out->kind == TY_I32) out->kind = TY_PTR_I32;
+                if (out->kind == TY_I32 && out->int_bits == 8) {
+                    // `uint8_t *` / `int8_t *` / similar: 8-bit element
+                    // type. Treat as `char *` so pointer arithmetic uses
+                    // a 1-byte stride rather than 4.
+                    out->kind = TY_PTR_CHAR;
+                }
+                else if (out->kind == TY_I32) out->kind = TY_PTR_I32;
                 else if (out->kind == TY_I64) {
                     out->kind = TY_PTR_I32;
                     out->ptr_is_i64 = true;
@@ -1707,6 +1713,8 @@ static StructDef *parse_struct_def(P *p) {
                     ft.kind = TY_PTR_STRUCT;
                 } else if (ft.kind == TY_VOID) {
                     ft.kind = TY_PTR_VOID;
+                } else if (ft.kind == TY_I32 && ft.int_bits == 8) {
+                    ft.kind = TY_PTR_CHAR;
                 } else if (ft.kind == TY_I32 || ft.kind == TY_I64) {
                     // No distinct TY_PTR_I64 today — bucket integer
                     // pointers under TY_PTR_I32 as a conservative alias.
