@@ -1206,7 +1206,8 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 r.elem_ty = e->ptr;
                 return r;
             }
-            if (s->type.kind == TY_ARRAY_PTR_CHAR) {
+            if (s->type.kind == TY_ARRAY_PTR_CHAR ||
+                s->type.kind == TY_ARRAY_PTR_STRUCT) {
                 MLIR_ValueHandle idx_i32 = emit_expr_i32(e, sc, ex->rhs);
                 r.base_ptr = sym_addr(e, s);
                 r.source_elem = MLIR_CreateTypeLLVMArray(e->ctx, e->ptr, (uint64_t)s->type.array_len);
@@ -4379,7 +4380,8 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             MLIR_AppendBlockOp(ctx, mb, gop);
         } else if (g->type.kind == TY_ARRAY_STRUCT ||
                    g->type.kind == TY_ARRAY_I32 ||
-                   g->type.kind == TY_ARRAY_PTR_CHAR) {
+                   g->type.kind == TY_ARRAY_PTR_CHAR ||
+                   g->type.kind == TY_ARRAY_PTR_STRUCT) {
             // Zero-initialized aggregate global. Resolve a deferred array
             // length expression (e.g. `[20 + 1]`) at emit time using
             // ast_fold_int with no scope (file-scope const expressions
@@ -4396,7 +4398,8 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                 StructDef *sd = find_struct(&e, g->type.struct_name);
                 if (!sd) { EMIT_ERR(&e, "unknown struct in global array"); continue; }
                 elem = find_struct_type(&e, sd);
-            } else if (g->type.kind == TY_ARRAY_PTR_CHAR) {
+            } else if (g->type.kind == TY_ARRAY_PTR_CHAR ||
+                       g->type.kind == TY_ARRAY_PTR_STRUCT) {
                 elem = e.ptr;
             } else {
                 elem = g->type.array_elem_is_i64 ? e.i64 : e.i32;

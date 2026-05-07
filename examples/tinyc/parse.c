@@ -2210,6 +2210,12 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
                             g.type.kind = TY_ARRAY_STRUCT;
                         } else if (g.type.kind == TY_PTR_CHAR) {
                             g.type.kind = TY_ARRAY_PTR_CHAR;
+                        } else if (g.type.kind == TY_PTR_STRUCT ||
+                                   g.type.kind == TY_PTR_VOID ||
+                                   g.type.kind == TY_FNPTR ||
+                                   g.type.kind == TY_PTR_PTR ||
+                                   g.type.kind == TY_PTR_I32) {
+                            g.type.kind = TY_ARRAY_PTR_STRUCT;
                         } else if (g.type.kind == TY_I32 || g.type.kind == TY_I64) {
                             bool is_i64 = (g.type.kind == TY_I64);
                             g.type.kind = TY_ARRAY_I32;
@@ -2224,7 +2230,50 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
                     if (accept(&p, TC_TK_ASSIGN)) {
                         g.has_init = true;
                         TcTok lit = cur(&p);
-                        if (lit.kind == TC_TK_INT_LIT) {
+                        if (lit.kind == TC_TK_LBRACE) {
+                            // Aggregate initializer for global array.
+                            // Currently only supported when all elements are
+                            // 0 / NULL — emit as zero-init aggregate.
+                            p.i++;
+                            if (cur(&p).kind != TC_TK_RBRACE) {
+                                for (;;) {
+                                    TcTok el = cur(&p);
+                                    bool ok = false;
+                                    if (el.kind == TC_TK_INT_LIT && el.int_value == 0) ok = true;
+                                    else if (el.kind == TC_TK_KW_NULL) ok = true;
+                                    else if (el.kind == TC_TK_LPAREN) {
+                                        // tolerate `(void*)0`-style tokens by
+                                        // skipping to matching ')'. Followed
+                                        // by an int 0 constant.
+                                        int depth = 1; p.i++;
+                                        while (depth > 0 && cur(&p).kind != TC_TK_EOF) {
+                                            if (cur(&p).kind == TC_TK_LPAREN) depth++;
+                                            else if (cur(&p).kind == TC_TK_RPAREN) depth--;
+                                            p.i++;
+                                        }
+                                        // optional int 0 after the cast
+                                        if (cur(&p).kind == TC_TK_INT_LIT &&
+                                            cur(&p).int_value == 0) p.i++;
+                                        ok = true;
+                                    }
+                                    if (!ok) {
+                                        perror_at(&p, el.line,
+                                            str_lit("global array initializer element must be 0/NULL"));
+                                        p.i++;
+                                    } else if (el.kind != TC_TK_LPAREN) {
+                                        p.i++;
+                                    }
+                                    if (cur(&p).kind == TC_TK_COMMA) {
+                                        p.i++;
+                                        if (cur(&p).kind == TC_TK_RBRACE) break;
+                                        continue;
+                                    }
+                                    break;
+                                }
+                            }
+                            expect(&p, TC_TK_RBRACE,
+                                   str_lit("expected '}' in global array initializer"));
+                        } else if (lit.kind == TC_TK_INT_LIT) {
                             g.init_int = lit.int_value;
                             p.i++;
                         } else if (lit.kind == TC_TK_FLOAT_LIT) {

@@ -480,3 +480,7 @@ expected_stdout = "3 7 10 20\n"
 [[test]]
 name = "bnot_i64"
 expected_stdout = "-16\n"
+
+[[test]]
+name = "global_ptr_array"
+expected_stdout = "1\n"

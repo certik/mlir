@@ -1,0 +1,13 @@
+extern int printf(const char *fmt, ...);
+
+struct Box { int v; };
+
+struct Box *boxes[3] = {((void*)0), ((void*)0), ((void*)0)};
+int *ints[2] = {0, 0};
+
+int main() {
+    int ok;
+    ok = (boxes[0] == ((void*)0)) && (boxes[2] == ((void*)0)) && (ints[1] == 0);
+    printf("%d\n", ok);
+    return 0;
+}
