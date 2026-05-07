@@ -1,0 +1,25 @@
+extern int printf(const char *fmt, ...);
+
+// Forward declaration of struct, then full definition later.
+struct Node;
+
+struct Outer {
+    struct Node *n;
+    int v;
+};
+
+struct Node {
+    int data;
+    struct Node *next;
+};
+
+int main() {
+    struct Node n;
+    n.data = 7;
+    n.next = ((void*)0);
+    struct Outer o;
+    o.v = 9;
+    o.n = &n;
+    printf("%d\n", o.n->data + o.v);
+    return 0;
+}

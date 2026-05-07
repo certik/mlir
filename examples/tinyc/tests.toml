@@ -464,3 +464,7 @@ expected_stdout = "0 0\n1 10\n2 20\n3 30\n24\n1000000005\n"
 [[test]]
 name = "inttoptr_cast"
 expected_stdout = "42\n"
+
+[[test]]
+name = "struct_fwd_then_def"
+expected_stdout = "16\n"

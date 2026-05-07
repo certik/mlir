@@ -1913,6 +1913,11 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
             }
             if (!existing_sd) {
                 VecStructDefPtr_push_back(arena, &prog->structs, sd);
+            } else if (existing_sd->fields.size == 0) {
+                // Existing entry is a forward-declared placeholder; upgrade
+                // it in place by copying the new full definition's fields.
+                existing_sd->fields = sd->fields;
+                existing_sd->line = sd->line;
             } else if (!struct_def_equal(existing_sd, sd)) {
                 perror_at(&p, sd->line,
                     str_lit("conflicting redefinition of struct"));
@@ -2028,6 +2033,10 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
                     }
                     if (!existing_sd) {
                         VecStructDefPtr_push_back(arena, &prog->structs, sd);
+                    } else if (existing_sd->fields.size == 0) {
+                        // Upgrade forward-decl placeholder.
+                        existing_sd->fields = sd->fields;
+                        existing_sd->line = sd->line;
                     } else if (!struct_def_equal(existing_sd, sd)) {
                         perror_at(&p, sd->line, str_lit("conflicting redefinition of struct"));
                     }
