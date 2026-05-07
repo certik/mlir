@@ -789,16 +789,21 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             TcTok lit = cur(p);
             expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
             expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
-            if (s->decl_type.kind != TY_I32) {
-                perror_at(p, line, str_lit("only int[N] arrays are supported"));
-            }
-            s->decl_type.kind = TY_ARRAY_I32;
-            s->decl_type.array_len = lit.int_value;
-            if (accept(p, TC_TK_LBRACK)) {
-                TcTok lit2 = cur(p);
-                expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
-                expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
-                s->decl_type.array_len2 = lit2.int_value;
+            if (s->decl_type.kind == TY_STRUCT) {
+                s->decl_type.kind = TY_ARRAY_STRUCT;
+                s->decl_type.array_len = lit.int_value;
+            } else {
+                if (s->decl_type.kind != TY_I32) {
+                    perror_at(p, line, str_lit("only int[N] arrays are supported"));
+                }
+                s->decl_type.kind = TY_ARRAY_I32;
+                s->decl_type.array_len = lit.int_value;
+                if (accept(p, TC_TK_LBRACK)) {
+                    TcTok lit2 = cur(p);
+                    expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
+                    expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
+                    s->decl_type.array_len2 = lit2.int_value;
+                }
             }
         }
         if (accept(p, TC_TK_ASSIGN)) {
