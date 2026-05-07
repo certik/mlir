@@ -408,3 +408,7 @@ expected_stdout = "100\n200\n"
 [[test]]
 name = "struct_return_decl"
 expected_stdout = "7\n42\n100\n200\n"
+
+[[test]]
+name = "array_zero_init"
+expected_stdout = "0\n0\n0\n0\n0\n0\n99\n7\n"

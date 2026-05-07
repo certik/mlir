@@ -1436,6 +1436,20 @@ static bool generic_type_matches(Type a, Type b) {
 
 static Expr *generic_select(E *e, Scope *sc, Expr *ex) {
     Type ct = infer_expr_type(e, sc, ex->lhs);
+    // C array decay: in _Generic, an array operand decays to a pointer.
+    if (ct.kind == TY_ARRAY_I32 || ct.kind == TY_ARRAY_F32) {
+        Type d = (Type){0};
+        d.kind = TY_PTR_CHAR; // char[] is the typical case (string, buffer)
+        // For int[] we'd want TY_PTR_I32; but in practice corec uses char[].
+        // Still, prefer TY_PTR_I32 if int_bits suggests int.
+        if (ct.int_bits != 0 && ct.int_bits != 8) d.kind = TY_PTR_I32;
+        ct = d;
+    } else if (ct.kind == TY_ARRAY_STRUCT || ct.kind == TY_ARRAY_PTR_STRUCT ||
+               ct.kind == TY_ARRAY_PTR_CHAR) {
+        Type d = (Type){0};
+        d.kind = TY_PTR_VOID;
+        ct = d;
+    }
     int n = (int)ex->args.size;
     int chosen = -1;
     for (int i = 0; i < n; i++) {
@@ -2569,7 +2583,39 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 }
                 sy->addr = emit_alloca(e, arr_ty);
                 if (st->decl_init) {
-                    EMIT_ERR(e, "array initializers are not supported");
+                    // Support `= {0}` (zero-initialize) by zeroing every
+                    // element. Anything else is unsupported.
+                    bool is_zero_init = false;
+                    if (st->decl_init->kind == EX_COMPOUND) {
+                        size_t n = st->decl_init->args.size;
+                        is_zero_init = (n == 0);
+                        if (n == 1) {
+                            Expr *a = st->decl_init->args.data[0];
+                            if (a->kind == EX_INT && a->int_value == 0) {
+                                is_zero_init = true;
+                            }
+                        }
+                    }
+                    if (!is_zero_init) {
+                        EMIT_ERR(e, "array initializers are not supported");
+                    } else {
+                        int64_t n1 = st->decl_type.array_len;
+                        int64_t n2 = st->decl_type.array_len2 ? st->decl_type.array_len2 : 1;
+                        bool is_2d = (st->decl_type.array_len2 != 0);
+                        MLIR_ValueHandle z = emit_const_i32(e, 0);
+                        for (int64_t a = 0; a < n1; a++) {
+                            for (int64_t b = 0; b < n2; b++) {
+                                int32_t path[3];
+                                size_t np = 0;
+                                path[np++] = 0;
+                                path[np++] = (int32_t)a;
+                                if (is_2d) path[np++] = (int32_t)b;
+                                MLIR_ValueHandle p = emit_gep(
+                                    e, sy->addr, arr_ty, path, np, NULL, 0);
+                                emit_store_v(e, z, p);
+                            }
+                        }
+                    }
                 }
             } else if (st->decl_type.kind == TY_ARRAY_STRUCT) {
                 StructDef *sd = find_struct(e, st->decl_type.struct_name);
