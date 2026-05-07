@@ -4642,6 +4642,12 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                 sy->sdef = find_struct(&e, g->type.struct_name);
             }
             MLIR_AppendBlockOp(ctx, mb, gop);
+        } else if (g->type.kind == TY_I64) {
+            MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.i64,
+                /*is_constant=*/false,
+                /*init_kind=*/0, g->has_init ? g->init_int : 0, 0.0,
+                NULL, e.loc);
+            MLIR_AppendBlockOp(ctx, mb, gop);
         } else {
             // i32 (default for plain int)
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.i32,

@@ -1,0 +1,24 @@
+// Static / file-scope `long` (i64) globals must be allocated as 8 bytes
+// and initialized with an i64 value. Previously every non-pointer scalar
+// global fell through to the default i32 emitter, so:
+//
+//   static long g_committed = 0;
+//   long n = g_committed;        // load i64, ptr @g_committed
+//
+// would mismatch storage size (4 bytes) vs access size (8 bytes), causing
+// the i64 load to read into the next global and i64 stores to clobber it.
+extern int printf(const char *fmt, ...);
+
+static long g_a = 5;
+static long g_b = 7;
+long g_c = 11;
+
+int main() {
+    g_a = g_a + 100;
+    g_b = g_b * 2;
+    g_c = g_c + 1;
+    printf("%ld %ld %ld\n", g_a, g_b, g_c);
+    long s = g_a + g_b + g_c;
+    printf("sum=%ld\n", s);
+    return 0;
+}

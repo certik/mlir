@@ -527,3 +527,7 @@ expected_stdout = "40000200000\n"
 [[test]]
 name = "postfix_inc"
 expected_stdout = "a=5\nb=6\nx=5\nbuf=hi len=2\nn=786432 nlen=6\n"
+
+[[test]]
+name = "global_long"
+expected_stdout = "105 14 12\nsum=131\n"
