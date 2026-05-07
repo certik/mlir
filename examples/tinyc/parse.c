@@ -981,6 +981,14 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             s->decl_type.kind = TY_PTR_I32;
             s->decl_type.ptr_is_i64 = true;
         }
+        else if (base == TY_F32) {
+            s->decl_type.kind = TY_PTR_I32;
+            s->decl_type.ptr_is_f32 = true;
+        }
+        else if (base == TY_F64) {
+            s->decl_type.kind = TY_PTR_I32;
+            s->decl_type.ptr_is_f64 = true;
+        }
         else if (base == TY_VOID) s->decl_type.kind = TY_PTR_VOID;
         else perror_at(p, line, str_lit("only int*/char*/void* pointers are supported"));
         if (is_ptr_ptr) {
@@ -1430,8 +1438,26 @@ static bool parse_sig_type(P *p, Type *out) {
         skip_const(p);
         return true;
     }
-    if (cur(p).kind == TC_TK_KW_FLOAT) { p->i++; out->kind = TY_F32; skip_const(p); return true; }
-    if (cur(p).kind == TC_TK_KW_DOUBLE) { p->i++; out->kind = TY_F64; skip_const(p); return true; }
+    if (cur(p).kind == TC_TK_KW_FLOAT) {
+        p->i++; out->kind = TY_F32; skip_const(p);
+        if (accept(p, TC_TK_STAR)) {
+            out->kind = TY_PTR_I32; out->ptr_is_f32 = true;
+            skip_const(p);
+            if (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
+        }
+        skip_const(p);
+        return true;
+    }
+    if (cur(p).kind == TC_TK_KW_DOUBLE) {
+        p->i++; out->kind = TY_F64; skip_const(p);
+        if (accept(p, TC_TK_STAR)) {
+            out->kind = TY_PTR_I32; out->ptr_is_f64 = true;
+            skip_const(p);
+            if (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
+        }
+        skip_const(p);
+        return true;
+    }
     if (cur(p).kind == TC_TK_KW_VOID)  {
         p->i++;
         skip_const(p);

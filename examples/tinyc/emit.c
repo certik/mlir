@@ -1094,6 +1094,8 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                         MLIR_TypeHandle elem = (ft.kind == TY_PTR_CHAR) ? e->i8
                                               : (ft.kind == TY_PTR_PTR) ? e->ptr
                                               : ft.ptr_is_i64 ? e->i64
+                                              : ft.ptr_is_f32 ? e->f32
+                                              : ft.ptr_is_f64 ? e->f64
                                               : e->i32;
                         MLIR_ValueHandle iv = emit_expr_i32(e, sc, idx_a);
                         int32_t *gpath = arena_new_array(e->arena, int32_t, 1);
@@ -1184,6 +1186,8 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 MLIR_ValueHandle base = emit_load_v(e, sym_addr(e, s), e->ptr);
                 MLIR_TypeHandle elem = (s->type.kind == TY_PTR_CHAR) ? e->i8
                                       : s->type.ptr_is_i64 ? e->i64
+                                      : s->type.ptr_is_f32 ? e->f32
+                                      : s->type.ptr_is_f64 ? e->f64
                                       : e->i32;
                 int32_t *path = arena_new_array(e->arena, int32_t, 1);
                 path[0] = LLVM_GEP_DYN;
@@ -1251,6 +1255,9 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 r.base_ptr = emit_load_v(e, sym_addr(e, s), e->ptr);
                 if (s->type.kind == TY_PTR_CHAR) r.elem_ty = e->i8;
                 else if (s->type.kind == TY_PTR_PTR) r.elem_ty = e->ptr;
+                else if (s->type.ptr_is_i64) r.elem_ty = e->i64;
+                else if (s->type.ptr_is_f32) r.elem_ty = e->f32;
+                else if (s->type.ptr_is_f64) r.elem_ty = e->f64;
                 else r.elem_ty = e->i32;
                 return r;
             }
@@ -2340,7 +2347,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 r.val = sym_addr(e, s);
                 r.is_ptr = true;
                 if (s->type.kind == TY_I32 || s->type.kind == TY_ARRAY_I32) r.ptr_elem = e->i32;
+                else if (s->type.kind == TY_I64) r.ptr_elem = e->i64;
                 else if (s->type.kind == TY_F32) r.ptr_elem = e->f32;
+                else if (s->type.kind == TY_F64) r.ptr_elem = e->f64;
                 else if (s->type.kind == TY_PTR_I32 || s->type.kind == TY_PTR_CHAR ||
                          s->type.kind == TY_PTR_VOID || s->type.kind == TY_PTR_STRUCT ||
                          s->type.kind == TY_FNPTR || s->type.kind == TY_PTR_PTR) {
@@ -4073,7 +4082,12 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
         }
         case EX_DEREF: {
             Type inner = infer_expr_type(e, sc, ex->lhs);
-            if (inner.kind == TY_PTR_I32) { t.kind = TY_I32; return t; }
+            if (inner.kind == TY_PTR_I32) {
+                if (inner.ptr_is_f32) { t.kind = TY_F32; return t; }
+                if (inner.ptr_is_f64) { t.kind = TY_F64; return t; }
+                if (inner.ptr_is_i64) { t.kind = TY_I64; return t; }
+                t.kind = TY_I32; return t;
+            }
             if (inner.kind == TY_PTR_CHAR) { t.kind = TY_I32; return t; }
             if (inner.kind == TY_PTR_PTR && inner.pointee) return *inner.pointee;
             if (inner.kind == TY_PTR_STRUCT) {
@@ -4084,6 +4098,9 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
         case EX_ADDR: {
             Type inner = infer_expr_type(e, sc, ex->lhs);
             if (inner.kind == TY_I32) { t.kind = TY_PTR_I32; return t; }
+            if (inner.kind == TY_I64) { t.kind = TY_PTR_I32; t.ptr_is_i64 = true; return t; }
+            if (inner.kind == TY_F32) { t.kind = TY_PTR_I32; t.ptr_is_f32 = true; return t; }
+            if (inner.kind == TY_F64) { t.kind = TY_PTR_I32; t.ptr_is_f64 = true; return t; }
             if (inner.kind == TY_STRUCT) {
                 t.kind = TY_PTR_STRUCT; t.struct_name = inner.struct_name;
                 return t;
@@ -4107,6 +4124,8 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
         case EX_INDEX: {
             Type base = infer_expr_type(e, sc, ex->lhs);
             if (base.kind == TY_ARRAY_I32 || base.kind == TY_PTR_I32) {
+                if (base.kind == TY_PTR_I32 && base.ptr_is_f32) { t.kind = TY_F32; return t; }
+                if (base.kind == TY_PTR_I32 && base.ptr_is_f64) { t.kind = TY_F64; return t; }
                 t.kind = (base.kind == TY_ARRAY_I32 && base.array_elem_is_i64) ||
                          (base.kind == TY_PTR_I32 && base.ptr_is_i64) ? TY_I64 : TY_I32;
                 return t;

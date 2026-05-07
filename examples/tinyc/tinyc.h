@@ -154,6 +154,12 @@ struct Type {
     // generic pointer kind without losing the element width needed for
     // pointer arithmetic, indexing, and dereferenced-load typing.
     bool     ptr_is_i64;
+    // For TY_PTR_I32: when true, the pointed-at element is f32 (float).
+    // Used to map `float *` to a generic pointer kind without losing the
+    // element width needed for dereferenced-load/store typing.
+    bool     ptr_is_f32;
+    // For TY_PTR_I32: when true, the pointed-at element is f64 (double).
+    bool     ptr_is_f64;
     // For TY_ARRAY_I32: when true, the elements are 64-bit wide (i64).
     // Used to support `size_t arr[N]` / `long arr[N]` / `int64_t arr[N]`
     // without introducing a separate TY_ARRAY_I64 kind.

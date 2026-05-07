@@ -488,3 +488,7 @@ expected_stdout = "1\n"
 [[test]]
 name = "va_arg_struct"
 expected_stdout = "33\n"
+
+[[test]]
+name = "float_ptr"
+expected_stdout = "4 6\n"
