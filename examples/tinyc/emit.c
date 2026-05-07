@@ -1161,6 +1161,17 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 r.elem_ty = e->ptr;
                 return r;
             }
+            if (s->type.kind == TY_ARRAY_PTR_CHAR) {
+                MLIR_ValueHandle idx_i32 = emit_expr_i32(e, sc, ex->rhs);
+                r.base_ptr = sym_addr(e, s);
+                r.source_elem = MLIR_CreateTypeLLVMArray(e->ctx, e->ptr, (uint64_t)s->type.array_len);
+                int32_t *path = arena_new_array(e->arena, int32_t, 2);
+                path[0] = 0; path[1] = LLVM_GEP_DYN;
+                r.const_path = path; r.n_const_path = 2;
+                r.dyn_index = idx_i32;
+                r.elem_ty = e->ptr;
+                return r;
+            }
             if (s->type.kind != TY_ARRAY_I32) {
                 EMIT_ERR(e, "indexing of non-array variable");
                 return r;
@@ -1528,19 +1539,28 @@ static void emit_flat_call(E *e, Scope *sc, FuncSig *sig, VecExprPtr args,
 //     EX_FIELD, EX_FLOAT, EX_NULL, EX_STR, EX_CAST
 //   - division / modulo by zero (let runtime / LLVM handle it)
 //   - shifts by negative or >=32 (let LLVM handle it)
-static bool ast_fold_int(E *e, Expr *ex, int64_t *out) {
+static bool ast_fold_int(E *e, Scope *sc, Expr *ex, int64_t *out) {
     if (!ex) return false;
     switch (ex->kind) {
         case EX_INT:
             *out = (int64_t)(int32_t)ex->int_value;
             return true;
-        case EX_SIZEOF:
-            if (ex->cast_type.kind == TY_VOID) return false;
-            *out = (int64_t)(int32_t)type_size(e, ex->cast_type);
+        case EX_SIZEOF: {
+            Type ty;
+            if (ex->sizeof_is_expr) {
+                if (!sc) return false;
+                ty = infer_expr_type(e, sc, ex->lhs);
+                if (ty.kind == TY_VOID) return false;
+            } else {
+                if (ex->cast_type.kind == TY_VOID) return false;
+                ty = ex->cast_type;
+            }
+            *out = (int64_t)(int32_t)type_size(e, ty);
             return true;
+        }
         case EX_UN: {
             int64_t a;
-            if (!ast_fold_int(e, ex->lhs, &a)) return false;
+            if (!ast_fold_int(e, sc, ex->lhs, &a)) return false;
             int32_t a32 = (int32_t)a;
             switch (ex->op) {
                 case OP_NEG:  *out = (int64_t)(int32_t)(-a32);   return true;
@@ -1551,8 +1571,8 @@ static bool ast_fold_int(E *e, Expr *ex, int64_t *out) {
         }
         case EX_BIN: {
             int64_t a, b;
-            if (!ast_fold_int(e, ex->lhs, &a)) return false;
-            if (!ast_fold_int(e, ex->rhs, &b)) return false;
+            if (!ast_fold_int(e, sc, ex->lhs, &a)) return false;
+            if (!ast_fold_int(e, sc, ex->rhs, &b)) return false;
             int32_t a32 = (int32_t)a, b32 = (int32_t)b;
             switch (ex->op) {
                 case OP_ADD: *out = (int64_t)(int32_t)(a32 + b32); return true;
@@ -1586,13 +1606,33 @@ static bool ast_fold_int(E *e, Expr *ex, int64_t *out) {
         }
         case EX_TERNARY: {
             int64_t c;
-            if (!ast_fold_int(e, ex->lhs, &c)) return false;
+            if (!ast_fold_int(e, sc, ex->lhs, &c)) return false;
             Expr *pick = ((int32_t)c != 0) ? ex->rhs : ex->lvalue;
-            return ast_fold_int(e, pick, out);
+            return ast_fold_int(e, sc, pick, out);
         }
         default:
             return false;
     }
+}
+
+// Resolve a deferred array-length expression on `t` (set when the
+// parser saw `[<const-expr>]`) into the integer `array_len` slot, in
+// the given scope. No-op when array_len_expr is NULL or array_len is
+// already set. The expression must constant-fold to a positive int32;
+// otherwise we leave array_len at 0 and let the caller error.
+static void resolve_array_len(E *e, Scope *sc, Type *t) {
+    if (!t->array_len_expr) return;
+    if (t->array_len > 0) return;
+    int64_t v = 0;
+    if (!ast_fold_int(e, sc, t->array_len_expr, &v)) {
+        EMIT_ERR(e, "array length is not a constant integer expression");
+        return;
+    }
+    if (v <= 0) {
+        EMIT_ERR(e, "array length must be positive (got {})", v);
+        return;
+    }
+    t->array_len = v;
 }
 
 // True if the i-th `_Generic` association's type matches the controlling
@@ -1655,7 +1695,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
     // with a side effect or a non-int operand falls through unchanged.
     if (ex->kind == EX_BIN || ex->kind == EX_UN || ex->kind == EX_TERNARY) {
         int64_t fv;
-        if (ast_fold_int(e, ex, &fv)) {
+        if (ast_fold_int(e, sc, ex, &fv)) {
             r.val = emit_const_i32(e, fv);
             return r;
         }
@@ -2796,6 +2836,27 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             sy->name = st->decl_name;
             sy->type = st->decl_type;
 
+            // Unsized `T arr[] = {a, b, ...}`: infer length from the
+            // aggregate initializer's argument count.
+            if ((st->decl_type.kind == TY_ARRAY_I32 ||
+                 st->decl_type.kind == TY_ARRAY_PTR_CHAR ||
+                 st->decl_type.kind == TY_ARRAY_STRUCT) &&
+                st->decl_type.array_len == 0 &&
+                !st->decl_type.array_len_expr &&
+                st->decl_init && st->decl_init->kind == EX_COMPOUND) {
+                int64_t n = (int64_t)st->decl_init->args.size;
+                if (n <= 0) {
+                    EMIT_ERR(e, "unsized array '{}[]' requires a non-empty initializer", st->decl_name);
+                    n = 1;
+                }
+                st->decl_type.array_len = n;
+                sy->type.array_len = n;
+            }
+            // Constant-expression array length, e.g. `T arr[sizeof(x)/sizeof(x[0])]`.
+            // Fold against the current scope so sizeof of in-scope locals works.
+            resolve_array_len(e, sc, &st->decl_type);
+            sy->type.array_len = st->decl_type.array_len;
+
             if (st->decl_type.kind == TY_VA_LIST) {
                 // Allocate a 32-byte buffer (sufficient for x86_64-SysV
                 // and aarch64 va_list layouts on Linux/macOS/Windows). We
@@ -2874,8 +2935,10 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 sy->addr = emit_alloca(e, arr_ty);
                 if (st->decl_init) {
                     // Support `= {0}` (zero-initialize) by zeroing every
-                    // element. Anything else is unsupported.
+                    // element. Also support a positional list `{v0,v1,...}`
+                    // for 1-D arrays where each value is an int expression.
                     bool is_zero_init = false;
+                    bool is_list_init = false;
                     if (st->decl_init->kind == EX_COMPOUND) {
                         size_t n = st->decl_init->args.size;
                         is_zero_init = (n == 0);
@@ -2885,9 +2948,25 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                 is_zero_init = true;
                             }
                         }
+                        if (!is_zero_init && st->decl_type.array_len2 == 0) {
+                            is_list_init = true;
+                        }
                     }
-                    if (!is_zero_init) {
+                    if (!is_zero_init && !is_list_init) {
                         EMIT_ERR(e, "array initializers are not supported");
+                    } else if (is_list_init) {
+                        size_t n = st->decl_init->args.size;
+                        if ((int64_t)n != st->decl_type.array_len) {
+                            EMIT_ERR(e, "int array initializer count {} does not match length {}",
+                                     (int64_t)n, st->decl_type.array_len);
+                        }
+                        int64_t lim = (int64_t)n < st->decl_type.array_len ? (int64_t)n : st->decl_type.array_len;
+                        for (int64_t a = 0; a < lim; a++) {
+                            MLIR_ValueHandle iv = emit_expr_i32(e, sc, st->decl_init->args.data[a]);
+                            int32_t path[2] = {0, (int32_t)a};
+                            MLIR_ValueHandle p = emit_gep(e, sy->addr, arr_ty, path, 2, NULL, 0);
+                            emit_store_v(e, iv, p);
+                        }
                     } else {
                         int64_t n1 = st->decl_type.array_len;
                         int64_t n2 = st->decl_type.array_len2 ? st->decl_type.array_len2 : 1;
@@ -2903,6 +2982,43 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                 MLIR_ValueHandle p = emit_gep(
                                     e, sy->addr, arr_ty, path, np, NULL, 0);
                                 emit_store_v(e, z, p);
+                            }
+                        }
+                    }
+                }
+            } else if (st->decl_type.kind == TY_ARRAY_PTR_CHAR) {
+                MLIR_TypeHandle arr_ty = MLIR_CreateTypeLLVMArray(
+                    e->ctx, e->ptr, (uint64_t)st->decl_type.array_len);
+                sy->addr = emit_alloca(e, arr_ty);
+                if (st->decl_init) {
+                    if (st->decl_init->kind != EX_COMPOUND) {
+                        EMIT_ERR(e, "char* array initializer must be an aggregate '{...}'");
+                    } else {
+                        size_t n = st->decl_init->args.size;
+                        // `= {0}` zero-init shorthand.
+                        bool is_zero = (n == 0) ||
+                                       (n == 1 &&
+                                        st->decl_init->args.data[0]->kind == EX_INT &&
+                                        st->decl_init->args.data[0]->int_value == 0);
+                        if (is_zero) {
+                            MLIR_ValueHandle nullp = emit_null_ptr(e);
+                            for (int64_t a = 0; a < st->decl_type.array_len; a++) {
+                                int32_t path[2] = {0, (int32_t)a};
+                                MLIR_ValueHandle p = emit_gep(e, sy->addr, arr_ty, path, 2, NULL, 0);
+                                emit_store_v(e, nullp, p);
+                            }
+                        } else {
+                            if ((int64_t)n != st->decl_type.array_len) {
+                                EMIT_ERR(e, "char* array initializer count {} does not match length {}",
+                                         (int64_t)n, st->decl_type.array_len);
+                            }
+                            int64_t lim = (int64_t)n < st->decl_type.array_len ? (int64_t)n : st->decl_type.array_len;
+                            for (int64_t a = 0; a < lim; a++) {
+                                EVal iv = emit_expr(e, sc, st->decl_init->args.data[a]);
+                                MLIR_ValueHandle p_val = iv.is_ptr ? iv.val : emit_null_ptr(e);
+                                int32_t path[2] = {0, (int32_t)a};
+                                MLIR_ValueHandle p = emit_gep(e, sy->addr, arr_ty, path, 2, NULL, 0);
+                                emit_store_v(e, p_val, p);
                             }
                         }
                     }
@@ -3615,6 +3731,7 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
                 t.kind = TY_I32; return t;
             }
             if (base.kind == TY_PTR_CHAR) { t.kind = TY_I32; return t; }
+            if (base.kind == TY_ARRAY_PTR_CHAR) { t.kind = TY_PTR_CHAR; return t; }
             if (base.kind == TY_ARRAY_F32) { t.kind = TY_F32; return t; }
             if (base.kind == TY_ARRAY_STRUCT) {
                 t.kind = TY_STRUCT; t.struct_name = base.struct_name; return t;

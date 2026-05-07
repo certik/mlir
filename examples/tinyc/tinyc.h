@@ -131,6 +131,13 @@ struct Type {
     TypeKind kind;
     int64_t  array_len;       // 1st dimension for TY_ARRAY_I32 / TY_ARRAY_STRUCT
     int64_t  array_len2;      // 2nd dimension for TY_ARRAY_I32 (0 = 1D)
+    // Optional deferred array-length expression (constant integer
+    // expression, may use sizeof of in-scope variables). When non-NULL,
+    // the emitter folds it via ast_fold_int(scope) at the alloca site
+    // and writes the result into `array_len` before allocating storage.
+    // Used to support `T arr[CONST_EXPR]` where CONST_EXPR is not a bare
+    // integer literal (e.g. `T arr[sizeof(x) / sizeof(x[0])]`).
+    struct Expr *array_len_expr;
     string   struct_name;     // for TY_STRUCT
     // For TY_FNPTR: arena-allocated return type and parameter types.
     // Storage type is always !llvm.ptr; this signature is consulted at

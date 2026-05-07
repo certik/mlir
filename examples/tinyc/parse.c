@@ -87,6 +87,33 @@ static Stmt *new_stmt(P *p, StmtKind k, int line) {
 
 static Expr *parse_expr(P *p);
 static bool parse_sig_type(P *p, Type *out);
+// Parse the contents of `[ ... ]` as an array-length specifier. The
+// caller has already consumed the opening `[`. Consumes the closing `]`.
+// Behavior:
+//   - Empty `[]`: writes 0 to *out_len and NULL to *out_expr; the caller
+//     must subsequently fill in the length from an aggregate initializer.
+//   - `[ INT_LIT ]`: writes the literal value to *out_len.
+//   - `[ <const-expr> ]`: writes 0 to *out_len and the parsed expression
+//     to *out_expr; the emitter folds it at the alloca site (via
+//     ast_fold_int with scope, so `sizeof(x) / sizeof(x[0])` works).
+static void parse_array_len_bracket(P *p, int64_t *out_len, Expr **out_expr) {
+    *out_len = 0;
+    *out_expr = NULL;
+    if (cur(p).kind == TC_TK_RBRACK) {
+        p->i++;  // ']'
+        return;
+    }
+    if (cur(p).kind == TC_TK_INT_LIT && peek(p, 1).kind == TC_TK_RBRACK) {
+        TcTok lit = cur(p);
+        p->i++;
+        p->i++;  // ']'
+        *out_len = lit.int_value;
+        return;
+    }
+    Expr *ex = parse_expr(p);
+    expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
+    *out_expr = ex;
+}
 static bool parse_abstract_type(P *p, Type *out);
 static bool try_parse_fnptr_suffix(P *p, Type *ty, string *out_name);
 static void parse_enum_decl_top(P *p);
@@ -786,23 +813,24 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         s->decl_name = name.text;
         s->decl_type = ty;
         if (accept(p, TC_TK_LBRACK)) {
-            TcTok lit = cur(p);
-            expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
-            expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
+            int64_t alen = 0; Expr *aexpr = NULL;
+            parse_array_len_bracket(p, &alen, &aexpr);
             if (s->decl_type.kind == TY_STRUCT) {
                 s->decl_type.kind = TY_ARRAY_STRUCT;
-                s->decl_type.array_len = lit.int_value;
+                s->decl_type.array_len = alen;
+                s->decl_type.array_len_expr = aexpr;
             } else {
                 if (s->decl_type.kind != TY_I32) {
                     perror_at(p, line, str_lit("only int[N] arrays are supported"));
                 }
                 s->decl_type.kind = TY_ARRAY_I32;
-                s->decl_type.array_len = lit.int_value;
+                s->decl_type.array_len = alen;
+                s->decl_type.array_len_expr = aexpr;
                 if (accept(p, TC_TK_LBRACK)) {
-                    TcTok lit2 = cur(p);
-                    expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
-                    expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
-                    s->decl_type.array_len2 = lit2.int_value;
+                    int64_t alen2 = 0; Expr *aexpr2 = NULL;
+                    parse_array_len_bracket(p, &alen2, &aexpr2);
+                    s->decl_type.array_len2 = alen2;
+                    if (aexpr2) perror_at(p, line, str_lit("2D array second dim must be a literal"));
                 }
             }
         }
@@ -849,11 +877,11 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             if (is_ptr) {
                 perror_at(p, line, str_lit("array of struct pointer is not supported"));
             }
-            TcTok lit = cur(p);
-            expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
-            expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
+            int64_t alen = 0; Expr *aexpr = NULL;
+            parse_array_len_bracket(p, &alen, &aexpr);
             s->decl_type.kind = TY_ARRAY_STRUCT;
-            s->decl_type.array_len = lit.int_value;
+            s->decl_type.array_len = alen;
+            s->decl_type.array_len_expr = aexpr;
         } else if (is_ptr_ptr) {
             // struct Foo **var: TY_PTR_PTR(pointee=TY_PTR_STRUCT).
             Type *inner = arena_new(p->arena, Type);
@@ -941,16 +969,21 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     }
     if (accept(p, TC_TK_LBRACK)) {
         if ((base != TY_I32 && !was_char) || is_ptr_ptr) perror_at(p, line, str_lit("only int[N]/char[N]/char*[N] arrays are supported"));
-        TcTok lit = cur(p);
-        expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
-        expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
-        s->decl_type.kind = TY_ARRAY_I32;
-        s->decl_type.array_len = lit.int_value;
+        bool is_char_ptr_arr = (was_char && is_ptr);
+        int64_t alen = 0; Expr *aexpr = NULL;
+        parse_array_len_bracket(p, &alen, &aexpr);
+        if (is_char_ptr_arr) {
+            s->decl_type.kind = TY_ARRAY_PTR_CHAR;
+        } else {
+            s->decl_type.kind = TY_ARRAY_I32;
+        }
+        s->decl_type.array_len = alen;
+        s->decl_type.array_len_expr = aexpr;
         if (accept(p, TC_TK_LBRACK)) {
-            TcTok lit2 = cur(p);
-            expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
-            expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
-            s->decl_type.array_len2 = lit2.int_value;
+            int64_t alen2 = 0; Expr *aexpr2 = NULL;
+            parse_array_len_bracket(p, &alen2, &aexpr2);
+            s->decl_type.array_len2 = alen2;
+            if (aexpr2) perror_at(p, line, str_lit("2D array second dim must be a literal"));
         }
     }
     if (accept(p, TC_TK_ASSIGN)) {
@@ -992,11 +1025,12 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             }
             if (accept(p, TC_TK_LBRACK)) {
                 if ((base != TY_I32 && !was_char) || dis_pp) perror_at(p, dname.line, str_lit("only int[N]/char[N]/char*[N] arrays are supported"));
-                TcTok lit = cur(p);
-                expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
-                expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
-                ds->decl_type.kind = TY_ARRAY_I32;
-                ds->decl_type.array_len = lit.int_value;
+                bool dis_char_ptr_arr = (was_char && dis_ptr);
+                int64_t alen = 0; Expr *aexpr = NULL;
+                parse_array_len_bracket(p, &alen, &aexpr);
+                ds->decl_type.kind = dis_char_ptr_arr ? TY_ARRAY_PTR_CHAR : TY_ARRAY_I32;
+                ds->decl_type.array_len = alen;
+                ds->decl_type.array_len_expr = aexpr;
             }
             if (accept(p, TC_TK_ASSIGN)) {
                 Expr *agg = parse_aggregate_init(p, ds->decl_type);

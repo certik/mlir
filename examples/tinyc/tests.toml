@@ -424,3 +424,11 @@ expected_stdout = "2.5\n3.75\n1.5\n"
 [[test]]
 name = "deref_struct_pass"
 expected_stdout = "3\n4\n"
+
+[[test]]
+name = "array_unsized_init"
+expected_stdout = "10\n40\n4\n3\n98\n97\n"
+
+[[test]]
+name = "array_len_sizeof_div"
+expected_stdout = "8\n5\n16\n"
