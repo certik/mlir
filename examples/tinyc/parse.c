@@ -935,7 +935,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         perror_at(p, line, str_lit("'void' is not a valid variable type (did you mean 'void*'?)"));
     }
     if (accept(p, TC_TK_LBRACK)) {
-        if (base != TY_I32 || is_ptr) perror_at(p, line, str_lit("only int[N] arrays are supported"));
+        if ((base != TY_I32 && !was_char) || is_ptr_ptr) perror_at(p, line, str_lit("only int[N]/char[N]/char*[N] arrays are supported"));
         TcTok lit = cur(p);
         expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
         expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
@@ -986,7 +986,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 }
             }
             if (accept(p, TC_TK_LBRACK)) {
-                if (base != TY_I32 || dis_ptr) perror_at(p, dname.line, str_lit("only int[N] arrays are supported"));
+                if ((base != TY_I32 && !was_char) || dis_pp) perror_at(p, dname.line, str_lit("only int[N]/char[N]/char*[N] arrays are supported"));
                 TcTok lit = cur(p);
                 expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
                 expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
