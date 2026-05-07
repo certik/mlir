@@ -491,6 +491,18 @@ static MLIR_ValueHandle emit_trunci_i64_to_i32(E *e, MLIR_ValueHandle v) {
     return r;
 }
 
+// Truncate any integer -> i8 (arith.trunci).
+static MLIR_ValueHandle emit_trunci_to_i8(E *e, MLIR_ValueHandle v) {
+    MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
+                                                  e->i8, ssa_name(e), eloc(e, 0));
+    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i8;
+    MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
+    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = v;
+    emit_op(e, OP_TYPE_ARITH_TRUNCI, str_lit("arith.trunci"),
+            rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
+    return r;
+}
+
 // Emit `llvm.mlir.addressof @<sym>` -> !llvm.ptr.
 static MLIR_ValueHandle emit_addressof(E *e, string sym) {
     MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
@@ -757,6 +769,15 @@ static MLIR_ValueHandle coerce_eval(E *e, EVal v, MLIR_TypeHandle want) {
     }
     if (want == e->i32 && v.is_i64) {
         return emit_trunci_i64_to_i32(e, v.val);
+    }
+    if (want == e->i8) {
+        // Storing into a `char*` (i8 element type): truncate any wider
+        // integer value down to i8.
+        if (v.is_i64) {
+            MLIR_ValueHandle as_i32 = emit_trunci_i64_to_i32(e, v.val);
+            return emit_trunci_to_i8(e, as_i32);
+        }
+        return emit_trunci_to_i8(e, v.val);
     }
     return v.val;
 }
@@ -2448,6 +2469,26 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 }
             }
             LVal lv = emit_lvalue(e, sc, ex->lvalue);
+            if (ex->is_post_step) {
+                // Postfix `x++` / `x--`: yield the old value, then store
+                // `old ± 1` back into the lvalue. Skip evaluating
+                // `ex->rhs_assign` (which references `ex->lvalue` on the
+                // LHS); compute the step directly from the loaded value.
+                EVal old = load_lvalue(e, lv);
+                MLIR_TypeHandle ity = old.is_i64 ? e->i64 : e->i32;
+                MLIR_ValueHandle one_v = old.is_i64 ? emit_const_i64(e, 1)
+                                                    : emit_const_i32(e, 1);
+                MLIR_OpType opty = (ex->rhs_assign && ex->rhs_assign->op == OP_SUB)
+                                       ? OP_TYPE_ARITH_SUBI : OP_TYPE_ARITH_ADDI;
+                string opname = (ex->rhs_assign && ex->rhs_assign->op == OP_SUB)
+                                    ? str_lit("arith.subi") : str_lit("arith.addi");
+                MLIR_ValueHandle stepped = emit_binop(e, opty, opname, ity,
+                                                       old.val, one_v);
+                MLIR_ValueHandle stored = coerce_eval(e,
+                    (EVal){.val = stepped, .is_i64 = old.is_i64}, lv.elem_ty);
+                store_lvalue(e, lv, stored);
+                return old;
+            }
             EVal v = emit_expr(e, sc, ex->rhs_assign);
             v.val = coerce_eval(e, v, lv.elem_ty);
             v.is_float = (lv.elem_ty == e->f32 || lv.elem_ty == e->f64);

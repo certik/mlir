@@ -234,6 +234,9 @@ struct Expr {
     // For EX_ASSIGN
     Expr *lvalue;          // an lvalue expression (EX_VAR / EX_INDEX / EX_DEREF)
     Expr *rhs_assign;
+    bool is_post_step;     // EX_ASSIGN that originated from a postfix `x++` /
+                           // `x--`. Emit reads the old value of the lvalue,
+                           // stores `old ± 1`, and yields the OLD value.
     // For EX_INDEX (lhs = array, rhs = index)
     // For EX_ADDR / EX_DEREF (lhs = inner)
     // For EX_SIZEOF / EX_CAST: cast_type is the type being asked about /

@@ -237,10 +237,10 @@ static Expr *parse_postfix(P *p, Expr *base) {
             continue;
         }
         if (cur(p).kind == TC_TK_PLUSPLUS || cur(p).kind == TC_TK_MINUSMINUS) {
-            // Postfix ++/--: desugar to `base = base ± 1`. The result of
-            // the expression is the new value (we don't preserve the
-            // pre-increment value). Suitable for expression-statement /
-            // for-step usage.
+            // Postfix ++/--: yield the value of `base` *before* the step
+            // (proper C semantics). The desugared assign carries the +/-
+            // operation; emit notices `is_post_step` and arranges for the
+            // expression to evaluate to the old value.
             BinOp op = (cur(p).kind == TC_TK_PLUSPLUS) ? OP_ADD : OP_SUB;
             int line = cur(p).line;
             p->i++;
@@ -250,6 +250,7 @@ static Expr *parse_postfix(P *p, Expr *base) {
             bin->op = op; bin->lhs = base; bin->rhs = one;
             Expr *as = new_expr(p, EX_ASSIGN, line);
             as->lvalue = base; as->rhs_assign = bin;
+            as->is_post_step = true;
             base = as;
             continue;
         }

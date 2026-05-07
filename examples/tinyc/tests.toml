@@ -523,3 +523,7 @@ expected_stdout = "sz=24\nq-p=24\nr-p=48\n"
 [[test]]
 name = "loop_local_alloca"
 expected_stdout = "40000200000\n"
+
+[[test]]
+name = "postfix_inc"
+expected_stdout = "a=5\nb=6\nx=5\nbuf=hi len=2\nn=786432 nlen=6\n"
