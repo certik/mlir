@@ -775,6 +775,11 @@ extern "C" MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *, strin
     return makeNamedAttr(llvm::StringRef(name.str, name.size),
                          mlir::StringAttr::get(&ctx, llvm::StringRef(value.str, value.size)));
 }
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *, string name) {
+    auto &ctx = globalCtx().mctx;
+    auto attr = mlir::LLVM::LinkageAttr::get(&ctx, mlir::LLVM::Linkage::Internal);
+    return makeNamedAttr(llvm::StringRef(name.str, name.size), attr);
+}
 extern "C" MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *, string name,
                                                            MLIR_AttributeHandle *elements,
                                                            size_t count) {

@@ -443,6 +443,7 @@ MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *ctx, string name,
 MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, string name, double value, MLIR_TypeHandle type);
 MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *ctx, string name, bool value);
 MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *ctx, string name, string value);
+MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *ctx, string name);
 MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count);
 // Dense i32 array attribute (DenseI32ArrayAttr) — used e.g. for
 // `llvm.getelementptr`'s `rawConstantIndices`.

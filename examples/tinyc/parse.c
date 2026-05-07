@@ -1969,8 +1969,13 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
         VecGlobal_reserve(arena, &prog->globals, 4);
     }
     while (cur(&p).kind != TC_TK_EOF) {
-        // Top-level storage-class qualifiers are parser-noise.
-        skip_storage_class(&p);
+        // Top-level storage-class qualifiers. Track `static` so we can emit
+        // private linkage for static functions/globals.
+        bool tl_saw_static = false;
+        while (cur(&p).kind == TC_TK_KW_STATIC || cur(&p).kind == TC_TK_KW_INLINE) {
+            if (cur(&p).kind == TC_TK_KW_STATIC) tl_saw_static = true;
+            p.i++;
+        }
         if (cur(&p).kind == TC_TK_EOF) break;
         if (cur(&p).kind == TC_TK_KW_STRUCT && peek(&p, 2).kind == TC_TK_LBRACE) {
             StructDef *sd = parse_struct_def(&p);
@@ -2199,6 +2204,14 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
         // `stdout`). For function decls it's still parser-noise.
         bool saw_extern = false;
         if (cur(&p).kind == TC_TK_KW_EXTERN) { saw_extern = true; p.i++; }
+        // `static` and `inline` at file scope: track so we can emit private
+        // linkage for static functions/globals.
+        bool saw_static = tl_saw_static;
+        while (cur(&p).kind == TC_TK_KW_STATIC ||
+               cur(&p).kind == TC_TK_KW_INLINE) {
+            if (cur(&p).kind == TC_TK_KW_STATIC) saw_static = true;
+            p.i++;
+        }
         // Disambiguate top-level decl between a function and a global.
         // We look ahead past `<type>` (and optional `*`) for an IDENT
         // followed by `=` or `;` -> global, otherwise function.
@@ -2218,6 +2231,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
                 g.name = fnp_name;
                 g.type = tty;
                 g.is_extern = saw_extern;
+                g.is_static = saw_static;
                 g.line = cur(&p).line;
                 merge_push_global(&p, prog, g);
                 continue;
@@ -2231,6 +2245,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
                     Global g = (Global){0};
                     g.name = nm.text;
                     g.is_extern = saw_extern;
+                    g.is_static = saw_static;
                     g.type = tty;
                     g.line = nm.line;
                     // Optional array suffix `[N]` (or `[const-expr]`).
@@ -2374,6 +2389,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
         // Not a global — rewind and parse as a function (def or forward decl).
         p.i = save;
         Func *f = parse_func(&p);
+        f->is_static = saw_static;
         // Check for an existing entry with the same name. Forward decls can
         // be replaced by a definition; duplicate forward decls are merged;
         // a forward decl after a definition is dropped.

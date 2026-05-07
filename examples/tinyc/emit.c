@@ -3913,14 +3913,15 @@ static void build_signatures(E *e) {
         }
         sig->fn_ty = MLIR_CreateTypeFunction(e->ctx,
             sig->flat_in_tys, sig->n_flat_in, sig->flat_out_tys, sig->n_flat_out);
-        if (sig->is_variadic) {
-            // LLVMFunctionType has at most one result; "void" is represented
-            // by the LLVM void type rather than a 0-result tuple.
+        // Always compute llvm_fn_ty too — needed for variadic emit and for
+        // static functions which we emit as `llvm.func` with internal linkage.
+        {
             MLIR_TypeHandle ret_ty = (sig->n_flat_out == 1)
                 ? sig->flat_out_tys[0]
                 : MLIR_CreateTypeLLVMVoid(e->ctx);
             sig->llvm_fn_ty = MLIR_CreateTypeLLVMFunction(e->ctx,
-                ret_ty, sig->flat_in_tys, sig->n_flat_in, /*is_var_arg=*/true);
+                ret_ty, sig->flat_in_tys, sig->n_flat_in,
+                /*is_var_arg=*/sig->is_variadic);
         }
     }
 }
@@ -4067,21 +4068,28 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
     MLIR_AttributeHandle sym_name = MLIR_CreateAttributeString(e->ctx, str_lit("sym_name"), f->name);
     // Variadic functions are emitted as `llvm.func` with an LLVMFunctionType
     // attribute (which carries the var_arg flag); non-variadic ones stay as
-    // `func.func` with a regular FunctionType.
+    // `func.func` with a regular FunctionType. Static functions add an
+    // `llvm.linkage = #llvm.linkage<internal>` attribute that propagates to
+    // LLVM IR through convert-func-to-llvm.
     MLIR_TypeHandle ft = sig->is_variadic ? sig->llvm_fn_ty : sig->fn_ty;
     MLIR_AttributeHandle fn_ty_attr = MLIR_CreateAttributeType(e->ctx, str_lit("function_type"), ft);
-    MLIR_AttributeHandle *attrs = arena_new_array(e->arena, MLIR_AttributeHandle, 2);
+    int n_attrs = 2;
+    MLIR_AttributeHandle *attrs = arena_new_array(e->arena, MLIR_AttributeHandle, 3);
     attrs[0] = sym_name; attrs[1] = fn_ty_attr;
+    if (f->is_static) {
+        attrs[2] = MLIR_CreateAttributeLLVMLinkageInternal(e->ctx, str_lit("llvm.linkage"));
+        n_attrs = 3;
+    }
     MLIR_RegionHandle *regs = arena_new_array(e->arena, MLIR_RegionHandle, 1); regs[0] = body_r;
     MLIR_OpHandle fn;
     if (sig->is_variadic) {
         fn = MLIR_CreateOp(e->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.func"),
-                           attrs, 2, NULL, 0, NULL, 0, NULL, 0,
+                           attrs, n_attrs, NULL, 0, NULL, 0, NULL, 0,
                            regs, 1, eloc(e, 0), MLIR_INVALID_HANDLE,
                            str_lit(""), -1);
     } else {
         fn = MLIR_CreateOp(e->ctx, OP_TYPE_FUNC_FUNC, str_lit("func.func"),
-                           attrs, 2, NULL, 0, NULL, 0, NULL, 0,
+                           attrs, n_attrs, NULL, 0, NULL, 0, NULL, 0,
                            regs, 1, eloc(e, 0), MLIR_INVALID_HANDLE,
                            str_lit(""), -1);
     }

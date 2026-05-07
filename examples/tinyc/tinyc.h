@@ -338,6 +338,8 @@ typedef struct {
                              // an ellipsis. Such functions are emitted as
                              // `llvm.func` (not `func.func`) so the var-arg
                              // ABI is modeled at the call site.
+    bool       is_static;    // `static` at file scope: emit with private
+                             // visibility/internal linkage.
     int        line;
 } Func;
 
@@ -376,6 +378,8 @@ typedef struct {
     Type    type;
     bool    has_init;
     bool    is_extern;      // `extern T x;` — emit external-linkage global
+    bool    is_static;      // `static` at file scope: emit with internal
+                            // linkage.
     int64_t init_int;
     double  init_float;
     string  init_str;       // for TY_PTR_CHAR initialized from string literal

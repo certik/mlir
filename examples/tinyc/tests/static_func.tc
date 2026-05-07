@@ -1,0 +1,8 @@
+extern int printf(const char *fmt, ...);
+
+static int helper(int x) { return x * 3; }
+
+int main() {
+    printf("%d\n", helper(7));
+    return 0;
+}

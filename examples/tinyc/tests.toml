@@ -512,3 +512,7 @@ expected_stdout = "1 256\n"
 [[test]]
 name = "builtin_sqrt"
 expected_stdout = "4 9\n"
+
+[[test]]
+name = "static_func"
+expected_stdout = "21\n"
