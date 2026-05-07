@@ -1,0 +1,38 @@
+// Regression test: variadic function receiving a struct arg and a size_t
+// arg followed by `...` must read the size_t correctly. Earlier corec
+// builds saw `arg_count` come through as 1 inside the callee even though
+// the caller passed 0 (manifested as `Arguments do not match the format
+// string`). Also exercise the case where the variadic function returns a
+// struct (sret), which forces an extra hidden first argument.
+extern int printf(const char *fmt, ...);
+
+typedef struct {
+    char *str;
+    long size;
+} string;
+
+void check(string s, long arg_count, ...) {
+    printf("size=%ld count=%ld\n", s.size, arg_count);
+}
+
+string check_sret(void *arena, string s, long arg_count, ...) {
+    printf("sret size=%ld count=%ld\n", s.size, arg_count);
+    string r;
+    r.str = "ok";
+    r.size = 2;
+    return r;
+}
+
+int main() {
+    string s;
+    s.str = "Hi";
+    s.size = 2;
+    check(s, 0);
+    check(s, 5);
+    string r = check_sret((void*)0, s, 0);
+    printf("r.size=%ld\n", r.size);
+    string r2 = check_sret((void*)0, s, 7);
+    printf("r2.size=%ld\n", r2.size);
+    return 0;
+}
+

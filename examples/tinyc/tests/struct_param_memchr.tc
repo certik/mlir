@@ -1,0 +1,29 @@
+// Reproduce: memchr called from the body of a function whose first
+// `string` parameter feeds `p` and `end` must find characters correctly.
+extern int printf(const char *fmt, ...);
+extern void *memchr(const void *s, int c, unsigned long n);
+
+typedef struct {
+    char *str;
+    long size;
+} string;
+
+void scan(string fmt) {
+    const char *p = fmt.str;
+    const char *end = fmt.str + fmt.size;
+    long n = end - p;
+    printf("n=%ld\n", n);
+    void *o = memchr(p, '{', (unsigned long)n);
+    printf("found=%d\n", o != 0);
+    if (o) {
+        printf("offset=%ld\n", (long)((char*)o - p));
+    }
+}
+
+int main() {
+    string s;
+    s.str = "No args: {}";
+    s.size = 11;
+    scan(s);
+    return 0;
+}

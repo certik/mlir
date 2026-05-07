@@ -547,3 +547,15 @@ expected_stdout = "tag=7 x=11 y=22\ntag=1 x=0 y=0\n"
 [[test]]
 name = "sizeof_string_lit"
 expected_stdout = "hi=3 empty=1 hello=6 ptr=8\n"
+
+[[test]]
+name = "variadic_struct_arg_count"
+expected_stdout = "size=2 count=0\nsize=2 count=5\nsret size=2 count=0\nr.size=2\nsret size=2 count=7\nr2.size=2\n"
+
+[[test]]
+name = "struct_param_memchr"
+expected_stdout = """\
+n=11
+found=1
+offset=9
+"""
