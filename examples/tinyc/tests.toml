@@ -496,3 +496,7 @@ expected_stdout = "4 6\n"
 [[test]]
 name = "float_exp_lit"
 expected_stdout = "1000 200 150\n"
+
+[[test]]
+name = "empty_stmt"
+expected_stdout = "3\n"

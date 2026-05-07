@@ -1,0 +1,9 @@
+extern int printf(const char *fmt, ...);
+
+int main() {
+    int n = 0;
+    for (int i = 0; i < 5; i++);
+    for (int i = 0; i < 3; i++) n++;
+    printf("%d\n", n);
+    return 0;
+}

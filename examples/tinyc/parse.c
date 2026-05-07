@@ -1082,6 +1082,12 @@ static Stmt *parse_decl(P *p, bool require_semi) {
 
 static Stmt *parse_stmt(P *p) {
     TcTok t = cur(p);
+    if (t.kind == TC_TK_SEMI) {
+        // Empty statement `;` — represented as an empty block.
+        p->i++;
+        Stmt *s = new_stmt(p, ST_BLOCK, t.line);
+        return s;
+    }
     if (t.kind == TC_TK_LBRACE) {
         Stmt *s = new_stmt(p, ST_BLOCK, t.line);
         parse_block(p, &s->block_body);
