@@ -906,10 +906,13 @@ extern "C" MLIR_OpHandle MLIR_CreateLLVMGlobal(MLIR_Context *,
     } else if (init_kind == 1) {
         initAttr = mlir::FloatAttr::get(ty, init_float);
     }
+    mlir::LLVM::Linkage linkage = (init_kind == 4)
+                                      ? mlir::LLVM::Linkage::External
+                                      : mlir::LLVM::Linkage::Internal;
     mlir::OpBuilder b(&ctx);
     auto op = b.create<mlir::LLVM::GlobalOp>(
         loc, ty, is_constant,
-        mlir::LLVM::Linkage::Internal,
+        linkage,
         llvm::StringRef(sym_name.str, sym_name.size),
         initAttr, /*alignment=*/0);
     if (init_kind == 2) {

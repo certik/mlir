@@ -1,0 +1,29 @@
+// libc interop: qsort with a tinyC function pointer comparator.
+extern void qsort(void *base, long nmemb, long size, int (*cmp)(void *, void *));
+
+int icmp(void *a, void *b) {
+    int *ia;
+    int *ib;
+    ia = (int*)a;
+    ib = (int*)b;
+    if (*ia < *ib) { return -1; }
+    if (*ia > *ib) { return 1; }
+    return 0;
+}
+
+int main() {
+    int a[6];
+    a[0] = 5; a[1] = 2; a[2] = 8; a[3] = 1; a[4] = 9; a[5] = 3;
+    void *base;
+    base = &a[0];
+    long sz;
+    sz = sizeof(int);
+    qsort(base, 6LL, sz, &icmp);
+    int i;
+    i = 0;
+    while (i < 6) {
+        print(a[i]);
+        i = i + 1;
+    }
+    return 0;
+}

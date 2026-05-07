@@ -1,0 +1,9 @@
+// libc interop: strlen returns size_t (==long in tinyC).
+extern long strlen(char *s);
+
+int main() {
+    print(strlen(""));
+    print(strlen("hello"));
+    print(strlen("hello world"));
+    return 0;
+}

@@ -364,6 +364,8 @@ MLIR_TypeHandle MLIR_CreateTypeLLVMArray(MLIR_Context *ctx, MLIR_TypeHandle elem
 //   init_kind == 2  -> region initializer: caller emits ops into
 //                      *out_init_block and terminates with llvm.return.
 //   init_kind == 3  -> no initializer (zero-initialized).
+//   init_kind == 4  -> external linkage, no initializer (for `extern T x;`
+//                      declarations resolved by the linker, e.g. `stdout`).
 MLIR_OpHandle MLIR_CreateLLVMGlobalString(MLIR_Context *ctx,
                                           string sym_name,
                                           string bytes,
