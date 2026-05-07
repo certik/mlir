@@ -396,3 +396,7 @@ expected_stdout = "64\n100\n255\n43981\n"
 [[test]]
 name = "multi_decl"
 expected_stdout = "1\n2\n3\n10\n5\n20\n1\n2\n100\n200\n"
+
+[[test]]
+name = "struct_ptr_init_call"
+expected_stdout = "10\n11\n20\n21\n"

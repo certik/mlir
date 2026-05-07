@@ -2529,16 +2529,20 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 sy->sdef = sd;
                 sy->addr = emit_alloca(e, e->ptr);
                 if (st->decl_init) {
-                    if (st->decl_init->kind != EX_ADDR ||
-                        st->decl_init->lhs->kind != EX_VAR) {
-                        EMIT_ERR(e, "struct* must be initialized with &<struct_var>");
-                    } else {
+                    if (st->decl_init->kind == EX_ADDR &&
+                        st->decl_init->lhs->kind == EX_VAR) {
                         Sym *target = lookup(e, sc, st->decl_init->lhs->name);
                         if (!target || target->type.kind != TY_STRUCT || target->sdef != sd) {
                             EMIT_ERR(e, "struct* target type mismatch");
                         } else {
                             emit_store_v(e, sym_addr(e, target), sy->addr);
                         }
+                    } else {
+                        // Allow any expression yielding a pointer (e.g., a
+                        // function call returning struct*, or a cast).
+                        EVal iv = emit_expr(e, sc, st->decl_init);
+                        MLIR_ValueHandle p = iv.is_ptr ? iv.val : emit_null_ptr(e);
+                        emit_store_v(e, p, sy->addr);
                     }
                 }
             } else if (st->decl_type.kind == TY_ARRAY_I32) {
