@@ -2693,6 +2693,31 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             e->cur_block = exit_b; e->terminated = false;
             return;
         }
+        case ST_DO_WHILE: {
+            // do { body } while (cond); — body executes once before the
+            // condition is tested. `continue` jumps to the cond-check.
+            MLIR_BlockHandle body_b = new_cfg_block(e);
+            MLIR_BlockHandle cond_b = new_cfg_block(e);
+            MLIR_BlockHandle exit_b = new_cfg_block(e);
+            emit_branch(e, body_b);
+
+            e->cur_block = body_b; e->terminated = false;
+            LoopCtx lc = (LoopCtx){.continue_block = cond_b, .break_block = exit_b, .parent = e->loops};
+            e->loops = &lc;
+            { Scope inner = (Scope){.head = NULL, .parent = sc};
+              for (size_t i = 0; i < st->while_body.size && !e->terminated; i++)
+                  emit_stmt(e, &inner, st->while_body.data[i]); }
+            e->loops = lc.parent;
+            emit_branch(e, cond_b);
+
+            e->cur_block = cond_b; e->terminated = false;
+            EVal c = emit_expr(e, sc, st->cond);
+            MLIR_ValueHandle cb = emit_to_bool_i1(e, c);
+            emit_cond_branch(e, cb, body_b, exit_b);
+
+            e->cur_block = exit_b; e->terminated = false;
+            return;
+        }
         case ST_FOR: {
             Scope inner = (Scope){.head = NULL, .parent = sc};
             if (st->for_init) emit_stmt(e, &inner, st->for_init);

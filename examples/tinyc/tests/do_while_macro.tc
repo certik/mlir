@@ -1,0 +1,10 @@
+// do-while inside a `do { ... } while (0)` macro-style guard.
+#define ONCE(s) do { s; } while (0)
+
+int main() {
+    int x;
+    x = 0;
+    ONCE(x = 42);
+    print(x);  // 42
+    return 0;
+}

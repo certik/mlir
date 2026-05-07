@@ -20,6 +20,7 @@ static TcTokKind keyword_or_ident(string s) {
     if (str_eq(s, str_lit("if")))       return TC_TK_KW_IF;
     if (str_eq(s, str_lit("else")))     return TC_TK_KW_ELSE;
     if (str_eq(s, str_lit("while")))    return TC_TK_KW_WHILE;
+    if (str_eq(s, str_lit("do")))       return TC_TK_KW_DO;
     if (str_eq(s, str_lit("for")))      return TC_TK_KW_FOR;
     if (str_eq(s, str_lit("break")))    return TC_TK_KW_BREAK;
     if (str_eq(s, str_lit("continue"))) return TC_TK_KW_CONTINUE;

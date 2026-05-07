@@ -328,3 +328,11 @@ expected_stdout = "read 11 bytes: hello libc\n"
 [[test]]
 name = "libc_qsort"
 expected_stdout = "1\n2\n3\n5\n8\n9\n"
+
+[[test]]
+name = "do_while"
+expected_stdout = "10\n101\n7\n18\n"
+
+[[test]]
+name = "do_while_macro"
+expected_stdout = "42\n"

@@ -215,6 +215,7 @@ typedef enum {
     ST_RETURN,         // return expr;
     ST_IF,             // if (c) { then } [else { else }]
     ST_WHILE,          // while (c) { body }
+    ST_DO_WHILE,       // do { body } while (c);
     ST_FOR,            // for (init; cond; step) body
     ST_BLOCK,          // { ... }
     ST_PRINT,          // print(expr);
@@ -360,6 +361,7 @@ typedef enum {
     TC_TK_KW_IF,
     TC_TK_KW_ELSE,
     TC_TK_KW_WHILE,
+    TC_TK_KW_DO,
     TC_TK_KW_FOR,
     TC_TK_KW_BREAK,
     TC_TK_KW_CONTINUE,

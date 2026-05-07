@@ -866,6 +866,17 @@ static Stmt *parse_stmt(P *p) {
         parse_block(p, &s->while_body);
         return s;
     }
+    if (t.kind == TC_TK_KW_DO) {
+        p->i++;
+        Stmt *s = new_stmt(p, ST_DO_WHILE, t.line);
+        parse_block(p, &s->while_body);
+        expect(p, TC_TK_KW_WHILE, str_lit("expected 'while' after do-block"));
+        expect(p, TC_TK_LPAREN, str_lit("expected '('"));
+        s->cond = parse_expr(p);
+        expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
+        expect(p, TC_TK_SEMI, str_lit("expected ';' after do-while"));
+        return s;
+    }
     if (t.kind == TC_TK_KW_FOR) {
         p->i++;
         Stmt *s = new_stmt(p, ST_FOR, t.line);
