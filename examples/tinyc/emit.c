@@ -1588,7 +1588,14 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // just evaluate the operand. We tag the result type from
             // cast_type for downstream consumers.
             if (!v.is_ptr) {
-                EMIT_ERR(e, "cast operand is not a pointer");
+                // Integer-to-pointer cast: only literal 0 is allowed
+                // (used for `(T*)0` null sentinels in C). Synthesize a
+                // null pointer.
+                if (ex->lhs->kind == EX_INT && ex->lhs->int_value == 0) {
+                    v.val = emit_null_ptr(e);
+                } else {
+                    EMIT_ERR(e, "cast operand is not a pointer");
+                }
             }
             v.is_ptr = true;
             v.is_float = false;

@@ -1,0 +1,19 @@
+// `(void*)0` literal cast should produce a null pointer; functions can
+// then return it where a typed pointer is expected.
+
+typedef struct Pt { int x; int y; } Pt;
+
+Pt *find(int n) {
+    if (n < 0) return ((void*)0);
+    return ((Pt *)0);
+}
+
+int main() {
+    Pt *a;
+    Pt *b;
+    a = find(-1);
+    b = find(7);
+    if (a == ((Pt *)0)) print(1);
+    if (b == ((void*)0)) print(2);
+    return 0;
+}

@@ -376,3 +376,7 @@ expected_stdout = "1\n10\n20\n2\n30\n40\n"
 [[test]]
 name = "typedef_i64_ptr"
 expected_stdout = "100\n101\n102\n103\n"
+
+[[test]]
+name = "cast_null"
+expected_stdout = "1\n2\n"

@@ -261,7 +261,8 @@ static Expr *parse_primary(P *p) {
         bool is_cast = (nxt == TC_TK_KW_INT || nxt == TC_TK_KW_FLOAT ||
                         nxt == TC_TK_KW_STRUCT || nxt == TC_TK_KW_CHAR ||
                         nxt == TC_TK_KW_CONST || nxt == TC_TK_KW_LONG ||
-                        nxt == TC_TK_KW_SIGNED || nxt == TC_TK_KW_UNSIGNED);
+                        nxt == TC_TK_KW_SIGNED || nxt == TC_TK_KW_UNSIGNED ||
+                        nxt == TC_TK_KW_VOID);
         if (!is_cast && nxt == TC_TK_IDENT &&
             typedef_lookup(p, peek(p, 1).text)) {
             is_cast = true;
