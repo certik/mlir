@@ -348,3 +348,11 @@ expected_stdout = "7\n30\n"
 [[test]]
 name = "typedef_enum"
 expected_stdout = "1\n200\n2\n"
+
+[[test]]
+name = "struct_field_i64"
+expected_stdout = "2\n16\n18\n"
+
+[[test]]
+name = "variadic_struct_return"
+expected_stdout = "13\n7\n25\n15\n"

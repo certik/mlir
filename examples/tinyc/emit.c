@@ -1037,9 +1037,10 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 return r;
             }
             Type ft = parent.sd->fields.data[idx].type;
-            if (ft.kind != TY_I32 && ft.kind != TY_F32 &&
+            if (ft.kind != TY_I32 && ft.kind != TY_I64 && ft.kind != TY_F32 &&
                 ft.kind != TY_PTR_STRUCT && ft.kind != TY_PTR_I32 &&
-                ft.kind != TY_PTR_CHAR && ft.kind != TY_PTR_VOID) {
+                ft.kind != TY_PTR_CHAR && ft.kind != TY_PTR_VOID &&
+                ft.kind != TY_FNPTR && ft.kind != TY_PTR_PTR) {
                 EMIT_ERR(e, "field {} is not a scalar lvalue", ex->name);
                 return r;
             }
@@ -1050,8 +1051,10 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
             r.n_const_path = parent.n_const_path;
             r.dyn_index = parent.dyn_index;
             if (ft.kind == TY_F32) r.elem_ty = e->f32;
+            else if (ft.kind == TY_I64) r.elem_ty = e->i64;
             else if (ft.kind == TY_PTR_STRUCT || ft.kind == TY_PTR_I32 ||
-                     ft.kind == TY_PTR_CHAR || ft.kind == TY_PTR_VOID) r.elem_ty = e->ptr;
+                     ft.kind == TY_PTR_CHAR || ft.kind == TY_PTR_VOID ||
+                     ft.kind == TY_FNPTR || ft.kind == TY_PTR_PTR) r.elem_ty = e->ptr;
             else r.elem_ty = e->i32;
             return r;
         }
@@ -2882,9 +2885,9 @@ static void build_signatures(E *e) {
             slot_resolve(e, f->params.data[i].type, &sig->params[i]);
         }
         sig->sret = (sig->ret.type.kind == TY_STRUCT);
-        if (sig->is_variadic && sig->sret) {
-            EMIT_ERR(e, "variadic function {} cannot return a struct", f->name);
-        }
+        // Note: variadic + sret is allowed. The sret pointer is the first
+        // argument, followed by fixed args, then variadic args. The function
+        // returns void via llvm.return.
         bool is_void = (sig->ret.type.kind == TY_VOID);
         size_t in_total = sig->n_params + (sig->sret ? 1 : 0);
         size_t out_total = (sig->sret || is_void) ? 0 : 1;
