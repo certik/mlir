@@ -2451,8 +2451,10 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     r.val = emit_binop(e, OP_TYPE_ARITH_SUBF, str_lit("arith.subf"), ft, z, a.val);
                     r.is_float = true; r.is_f64 = a.is_f64;
                 } else {
-                    MLIR_ValueHandle z = emit_const_i32(e, 0);
-                    r.val = emit_binop(e, OP_TYPE_ARITH_SUBI, str_lit("arith.subi"), e->i32, z, a.val);
+                    MLIR_ValueHandle z = a.is_i64 ? emit_const_i64(e, 0) : emit_const_i32(e, 0);
+                    MLIR_TypeHandle ity = a.is_i64 ? e->i64 : e->i32;
+                    r.val = emit_binop(e, OP_TYPE_ARITH_SUBI, str_lit("arith.subi"), ity, z, a.val);
+                    r.is_i64 = a.is_i64;
                 }
                 return r;
             }

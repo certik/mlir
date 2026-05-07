@@ -500,3 +500,7 @@ expected_stdout = "1000 200 150\n"
 [[test]]
 name = "empty_stmt"
 expected_stdout = "3\n"
+
+[[test]]
+name = "neg_i64"
+expected_stdout = "-1000000000000\n"

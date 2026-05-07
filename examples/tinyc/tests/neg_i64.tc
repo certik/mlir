@@ -1,0 +1,10 @@
+extern int printf(const char *fmt, ...);
+
+long neg_i64(long x) { return -x; }
+
+int main() {
+    long a = 1000000000000L;
+    long b = neg_i64(a);
+    printf("%lld\n", b);
+    return 0;
+}
