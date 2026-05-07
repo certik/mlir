@@ -476,3 +476,7 @@ expected_stdout = "10\n"
 [[test]]
 name = "compound_designated"
 expected_stdout = "3 7 10 20\n"
+
+[[test]]
+name = "bnot_i64"
+expected_stdout = "-16\n"

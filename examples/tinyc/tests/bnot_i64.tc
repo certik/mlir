@@ -1,0 +1,10 @@
+extern int printf(const char *fmt, ...);
+
+int main() {
+    long a;
+    a = 15;
+    long b;
+    b = ~a;
+    printf("%ld\n", b);
+    return 0;
+}

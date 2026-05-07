@@ -2392,6 +2392,13 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     r.val = emit_const_i32(e, 0);
                     return r;
                 }
+                if (a.is_i64) {
+                    MLIR_ValueHandle ones = emit_const_i64(e, -1);
+                    r.val = emit_binop(e, OP_TYPE_ARITH_XORI, str_lit("arith.xori"),
+                                       e->i64, a.val, ones);
+                    r.is_i64 = true;
+                    return r;
+                }
                 MLIR_ValueHandle ones = emit_const_i32(e, -1);
                 r.val = emit_binop(e, OP_TYPE_ARITH_XORI, str_lit("arith.xori"),
                                    e->i32, a.val, ones);
