@@ -88,12 +88,18 @@ int app_main(void) {
     // struct dedup happens inside tinyc_parse_into.
     Program *prog = arena_new(arena, Program);
     *prog = (Program){0};
+    int total_errs = 0;
     for (size_t k = 0; k < n_input_files; k++) {
         string src = tinyc_preprocess(arena, str_from_cstr_view(input_files[k]),
                                       include_dirs, n_include_dirs);
         if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
         VecTcTok toks = tinyc_lex(arena, src);
-        tinyc_parse_into(arena, prog, toks);
+        total_errs += tinyc_parse_into(arena, prog, toks);
+    }
+    if (total_errs > 0) {
+        arena_destroy(arena);
+        arena_destroy(boot_arena);
+        return 1;
     }
     MLIR_OpHandle module = tinyc_emit_module(&ctx, prog);
 

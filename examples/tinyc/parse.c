@@ -29,6 +29,7 @@ typedef struct {
     size_t i;
     Typedef *typedefs;
     Enumerator *enums;
+    int err_count;
 } P;
 
 static TcTok cur(P *p) { return p->toks[p->i]; }
@@ -50,6 +51,7 @@ static Enumerator *enum_lookup(P *p, string name) {
 
 static void perror_at(P *p, int line, string msg) {
     println(str_lit("tinyc parse error at line {}: {}"), (int64_t)line, msg);
+    p->err_count++;
 }
 
 static bool accept(P *p, TcTokKind k) {
@@ -399,6 +401,47 @@ static Expr *parse_primary(P *p) {
         e->lhs = parse_primary(p);
         return e;
     }
+    if (t.kind == TC_TK_KW_GENERIC) {
+        p->i++;
+        expect(p, TC_TK_LPAREN, str_lit("expected '(' after _Generic"));
+        Expr *ge = new_expr(p, EX_GENERIC, t.line);
+        ge->lhs = parse_expr(p);
+        ge->generic_default_index = -1;
+        // Collect entries. Types go into a parallel array; result exprs
+        // go into ge->args (already reserved by new_expr).
+        int cap = 0;
+        Type *types = NULL;
+        int n = 0;
+        while (accept(p, TC_TK_COMMA)) {
+            int line = cur(p).line;
+            Type ty = {0};
+            bool is_default = false;
+            if (cur(p).kind == TC_TK_KW_DEFAULT) {
+                p->i++;
+                is_default = true;
+            } else if (!parse_abstract_type(p, &ty)) {
+                perror_at(p, cur(p).line,
+                    str_lit("expected type or 'default' in _Generic"));
+            }
+            expect(p, TC_TK_COLON, str_lit("expected ':' in _Generic entry"));
+            Expr *val = parse_expr(p);
+            if (n >= cap) {
+                int ncap = cap == 0 ? 4 : cap * 2;
+                Type *nt = arena_alloc(p->arena, sizeof(Type) * (size_t)ncap);
+                for (int j = 0; j < n; j++) nt[j] = types[j];
+                types = nt;
+                cap = ncap;
+            }
+            types[n] = ty;
+            VecExprPtr_push_back(p->arena, &ge->args, val);
+            if (is_default) ge->generic_default_index = n;
+            n++;
+            (void)line;
+        }
+        ge->generic_types = types;
+        expect(p, TC_TK_RPAREN, str_lit("expected ')' in _Generic"));
+        return parse_postfix(p, ge);
+    }
     if (t.kind == TC_TK_IDENT) {
         p->i++;
         if (cur(p).kind == TC_TK_LPAREN) {
@@ -436,6 +479,7 @@ static Expr *parse_primary(P *p) {
         return parse_postfix(p, e);
     }
     perror_at(p, t.line, str_lit("expected expression"));
+    if (cur(p).kind != TC_TK_EOF) p->i++;
     Expr *e = new_expr(p, EX_INT, t.line);
     return e;
 }
@@ -1185,16 +1229,28 @@ static bool parse_sig_type(P *p, Type *out) {
         cur(p).kind == TC_TK_KW_LONG   || cur(p).kind == TC_TK_KW_SHORT  ||
         cur(p).kind == TC_TK_KW_BOOL) {
         bool saw_long = false;
+        bool saw_short = false;
         bool saw_char = false;
+        bool saw_bool = false;
+        bool saw_unsigned = false;
         while (cur(p).kind == TC_TK_KW_SIGNED || cur(p).kind == TC_TK_KW_UNSIGNED ||
                cur(p).kind == TC_TK_KW_LONG   || cur(p).kind == TC_TK_KW_INT     ||
                cur(p).kind == TC_TK_KW_SHORT  || cur(p).kind == TC_TK_KW_CHAR    ||
                cur(p).kind == TC_TK_KW_BOOL) {
             if (cur(p).kind == TC_TK_KW_LONG) saw_long = true;
+            if (cur(p).kind == TC_TK_KW_SHORT) saw_short = true;
             if (cur(p).kind == TC_TK_KW_CHAR) saw_char = true;
+            if (cur(p).kind == TC_TK_KW_BOOL) saw_bool = true;
+            if (cur(p).kind == TC_TK_KW_UNSIGNED) saw_unsigned = true;
             p->i++; skip_const(p);
         }
         out->kind = saw_long ? TY_I64 : TY_I32;
+        if (saw_long) out->int_bits = 64;
+        else if (saw_char) out->int_bits = 8;
+        else if (saw_short) out->int_bits = 16;
+        else if (saw_bool) out->int_bits = 8;
+        else out->int_bits = 32;
+        out->int_unsigned = saw_unsigned;
         skip_const(p);
         if (accept(p, TC_TK_STAR)) {
             out->kind = saw_char ? TY_PTR_CHAR : (saw_long ? TY_PTR_I32 : TY_PTR_I32);
@@ -1205,7 +1261,7 @@ static bool parse_sig_type(P *p, Type *out) {
         return true;
     }
     if (cur(p).kind == TC_TK_KW_INT)   {
-        p->i++; out->kind = TY_I32; skip_const(p);
+        p->i++; out->kind = TY_I32; out->int_bits = 32; skip_const(p);
         if (accept(p, TC_TK_STAR)) {
             out->kind = TY_PTR_I32;
             skip_const(p);
@@ -1237,6 +1293,7 @@ static bool parse_sig_type(P *p, Type *out) {
             if (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
         } else {
             out->kind = TY_I32;
+            out->int_bits = 8;
         }
         skip_const(p);
         return true;
@@ -1647,13 +1704,14 @@ static void merge_push_global(P *p, Program *prog, Global g) {
     VecGlobal_push_back(p->arena, &prog->globals, g);
 }
 
-void tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
+int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
     P p = {.arena = arena, .toks = toks.data, .n = toks.size, .i = 0,
            .typedefs = NULL, .enums = NULL};
     // Built-in typedefs (treated as TY_I64, signedness ignored).
     {
         const char *names[] = {"int64_t", "uint64_t", "size_t", "ssize_t",
                                "intptr_t", "uintptr_t", "ptrdiff_t"};
+        bool unsigneds[] = {false, true, true, false, false, true, false};
         for (size_t k = 0; k < sizeof(names) / sizeof(names[0]); k++) {
             Typedef *td = arena_new(arena, Typedef);
             td->name = (string){.str = (char *)names[k], .size = 0};
@@ -1661,16 +1719,36 @@ void tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
             const char *s = names[k]; size_t len = 0; while (s[len]) len++;
             td->name.size = len;
             td->ty.kind = TY_I64;
+            td->ty.int_bits = 64;
+            td->ty.int_unsigned = unsigneds[k];
             td->next = p.typedefs;
             p.typedefs = td;
         }
         // int32_t / uint32_t — match TY_I32 to keep existing semantics.
         const char *n32[] = {"int32_t", "uint32_t"};
+        bool u32[] = {false, true};
         for (size_t k = 0; k < sizeof(n32) / sizeof(n32[0]); k++) {
             Typedef *td = arena_new(arena, Typedef);
             const char *s = n32[k]; size_t len = 0; while (s[len]) len++;
             td->name = (string){.str = (char *)n32[k], .size = len};
             td->ty.kind = TY_I32;
+            td->ty.int_bits = 32;
+            td->ty.int_unsigned = u32[k];
+            td->next = p.typedefs;
+            p.typedefs = td;
+        }
+        // int8_t / int16_t / uint8_t / uint16_t — narrow ints. Bucketed
+        // to TY_I32 storage but tagged with int_bits for `_Generic`.
+        const char *nn[] = {"int8_t", "uint8_t", "int16_t", "uint16_t"};
+        int       nbits[] = {8, 8, 16, 16};
+        bool      nuns[] = {false, true, false, true};
+        for (size_t k = 0; k < sizeof(nn) / sizeof(nn[0]); k++) {
+            Typedef *td = arena_new(arena, Typedef);
+            const char *s = nn[k]; size_t len = 0; while (s[len]) len++;
+            td->name = (string){.str = (char *)nn[k], .size = len};
+            td->ty.kind = TY_I32;
+            td->ty.int_bits = nbits[k];
+            td->ty.int_unsigned = nuns[k];
             td->next = p.typedefs;
             p.typedefs = td;
         }
@@ -2020,4 +2098,5 @@ void tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
         pe->next = prog->enums;
         prog->enums = pe;
     }
+    return p.err_count;
 }

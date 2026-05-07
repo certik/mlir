@@ -46,6 +46,7 @@ static TcTokKind keyword_or_ident(string s) {
     if (str_eq(s, str_lit("short")))    return TC_TK_KW_SHORT;
     if (str_eq(s, str_lit("_Bool")))    return TC_TK_KW_BOOL;
     if (str_eq(s, str_lit("bool")))     return TC_TK_KW_BOOL;
+    if (str_eq(s, str_lit("_Generic")))    return TC_TK_KW_GENERIC;
     if (str_eq(s, str_lit("va_list"))) return TC_TK_KW_VA_LIST;
     if (str_eq(s, str_lit("__builtin_va_list"))) return TC_TK_KW_VA_LIST;
     return TC_TK_IDENT;

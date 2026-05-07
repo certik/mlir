@@ -1406,9 +1406,47 @@ static bool ast_fold_int(E *e, Expr *ex, int64_t *out) {
     }
 }
 
+// True if the i-th `_Generic` association's type matches the controlling
+// expression type. struct types match by struct_name; integer types
+// match by kind plus, when both have explicit int_bits, equal width and
+// sign. Pointer kinds match by exact kind.
+static bool generic_type_matches(Type a, Type b) {
+    if (a.kind != b.kind) return false;
+    if (a.kind == TY_STRUCT || a.kind == TY_PTR_STRUCT) {
+        return str_eq(a.struct_name, b.struct_name);
+    }
+    if (a.kind == TY_I32 || a.kind == TY_I64) {
+        if (a.int_bits != 0 && b.int_bits != 0 && a.int_bits != b.int_bits)
+            return false;
+        return true;
+    }
+    return true;
+}
+
+static Expr *generic_select(E *e, Scope *sc, Expr *ex) {
+    Type ct = infer_expr_type(e, sc, ex->lhs);
+    int n = (int)ex->args.size;
+    int chosen = -1;
+    for (int i = 0; i < n; i++) {
+        if (i == ex->generic_default_index) continue;
+        if (generic_type_matches(ex->generic_types[i], ct)) {
+            chosen = i; break;
+        }
+    }
+    if (chosen < 0) chosen = ex->generic_default_index;
+    if (chosen < 0 || chosen >= n) {
+        EMIT_ERR(e, "_Generic: no matching association and no default");
+        return ex->lhs;
+    }
+    return ex->args.data[chosen];
+}
+
 static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
     e->cur_line = ex->line;
     EVal r = {0};
+    if (ex->kind == EX_GENERIC) {
+        return emit_expr(e, sc, generic_select(e, sc, ex));
+    }
     // Pre-pass: literal-only integer subtree -> a single arith.constant.
     // Only kicks in for nodes that ast_fold_int actually folds; anything
     // with a side effect or a non-int operand falls through unchanged.
@@ -3124,7 +3162,10 @@ static int64_t type_align(E *e, Type t);
 static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
     Type t = (Type){0};
     switch (ex->kind) {
-        case EX_INT:   t.kind = ex->is_i64 ? TY_I64 : TY_I32; return t;
+        case EX_INT:
+            if (ex->is_i64) { t.kind = TY_I64; t.int_bits = 64; }
+            else            { t.kind = TY_I32; t.int_bits = 32; }
+            return t;
         case EX_FLOAT: t.kind = TY_F32; return t;
         case EX_STR:   t.kind = TY_PTR_CHAR; return t;
         case EX_NULL:  t.kind = TY_PTR_VOID; return t;
@@ -3148,6 +3189,10 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
         case EX_ADDR: {
             Type inner = infer_expr_type(e, sc, ex->lhs);
             if (inner.kind == TY_I32) { t.kind = TY_PTR_I32; return t; }
+            if (inner.kind == TY_STRUCT) {
+                t.kind = TY_PTR_STRUCT; t.struct_name = inner.struct_name;
+                return t;
+            }
             // For other base kinds we report a generic pointer; sizeof
             // is the same regardless.
             t.kind = TY_PTR_VOID; return t;

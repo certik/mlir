@@ -146,6 +146,11 @@ struct Type {
     // generic pointer kind without losing the element width needed for
     // pointer arithmetic, indexing, and dereferenced-load typing.
     bool     ptr_is_i64;
+    // For TY_I32/TY_I64: optional explicit bit width hint (0 = unspecified,
+    // 8/16/32/64 = explicit width). Used by `_Generic` for typedef
+    // matching on narrow-int aliases (`int8_t`, `int16_t`, ...).
+    int      int_bits;
+    bool     int_unsigned;
 };
 
 typedef enum {
@@ -167,6 +172,12 @@ typedef enum {
     EX_TERNARY,        // c ? a : b — lhs=cond, rhs=then, lvalue=else
     EX_COMPOUND,       // (T){v0, v1, ...} — cast_type + args
     EX_VA_ARG,         // va_arg(ap, T) — lhs = ap lvalue, cast_type = T
+    EX_GENERIC,        // _Generic(lhs, T1: a1, ..., default: aN)
+                       // lhs = controlling expression (NOT evaluated);
+                       // args[i] = result expressions; generic_types[i] =
+                       // matching type for entry i (kind==TY_VOID +
+                       // generic_is_default[i] flag indicates the
+                       // `default:` entry).
 } ExprKind;
 
 typedef enum {
@@ -216,6 +227,11 @@ struct Expr {
     // non-empty name selects the named field. NULL when there are no
     // designated entries at all.
     string *compound_field_names;
+    // For EX_GENERIC: parallel to args[]. generic_types[i] is the type
+    // at the i-th association entry; generic_default_index is the
+    // index of the `default:` entry, or -1 if absent.
+    Type   *generic_types;
+    int     generic_default_index;
     int line;
 };
 
@@ -396,6 +412,7 @@ typedef enum {
     TC_TK_KW_SHORT,
     TC_TK_KW_BOOL,
     TC_TK_KW_VA_LIST,
+    TC_TK_KW_GENERIC,
     TC_TK_STRING_LIT,
     TC_TK_LPAREN, TC_TK_RPAREN,
     TC_TK_LBRACE, TC_TK_RBRACE,
@@ -452,7 +469,8 @@ Program *tinyc_parse(Arena *arena, VecTcTok toks);
 //     keeps the initialized one; two initialized errors.
 // Each call has its own typedef / enumerator scope (matching per-file
 // preprocessor isolation): typedefs do not leak across files.
-void tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks);
+// Returns the number of parse errors encountered (0 on success).
+int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks);
 
 // ---------------- Emitter ----------------
 
