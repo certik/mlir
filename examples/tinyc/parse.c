@@ -1611,9 +1611,10 @@ void tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
             p.typedefs = td;
             continue;
         }
-        // `extern` is parser-noise: drop the keyword and parse the rest as
-        // a normal forward decl / global.
-        if (cur(&p).kind == TC_TK_KW_EXTERN) p.i++;
+        // `extern` on a global makes it externally linked (e.g. libc's
+        // `stdout`). For function decls it's still parser-noise.
+        bool saw_extern = false;
+        if (cur(&p).kind == TC_TK_KW_EXTERN) { saw_extern = true; p.i++; }
         // Disambiguate top-level decl between a function and a global.
         // We look ahead past `<type>` (and optional `*`) for an IDENT
         // followed by `=` or `;` -> global, otherwise function.
@@ -1632,6 +1633,7 @@ void tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
                 Global g = (Global){0};
                 g.name = fnp_name;
                 g.type = tty;
+                g.is_extern = saw_extern;
                 g.line = cur(&p).line;
                 merge_push_global(&p, prog, g);
                 continue;
@@ -1643,6 +1645,7 @@ void tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
                     p.i++;
                     Global g = (Global){0};
                     g.name = nm.text;
+                    g.is_extern = saw_extern;
                     g.type = tty;
                     g.line = nm.line;
                     if (accept(&p, TC_TK_ASSIGN)) {

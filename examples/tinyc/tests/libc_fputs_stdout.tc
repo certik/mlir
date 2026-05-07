@@ -1,0 +1,12 @@
+// libc interop: fputs writing to stdout. Linux-only — on macOS `stdout`
+// is defined as `#define stdout __stdoutp`, so the symbol does not link
+// portably; on Windows MSVC `stdout` is `__acrt_iob_func(1)`. Gated via
+// tests.toml `platforms`. The libc_file_io test covers fputs portably.
+extern void *stdout;
+extern int fputs(char *s, void *stream);
+
+int main() {
+    fputs("hello\n", stdout);
+    fputs("world\n", stdout);
+    return 0;
+}

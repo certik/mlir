@@ -1,0 +1,19 @@
+// libc interop: user-declared extern malloc/free must coexist with the
+// emitter-internal decls (regression for PR #118 dedup logic). Use
+// explicit casts and write/read through the pointer.
+extern void *malloc(long n);
+extern void free(void *p);
+
+int main() {
+    int *p;
+    p = (int*)malloc(sizeof(int) * 4);
+    p[0] = 11;
+    p[1] = 22;
+    p[2] = 33;
+    p[3] = 44;
+    int sum;
+    sum = p[0] + p[1] + p[2] + p[3];
+    print(sum);
+    free(p);
+    return 0;
+}

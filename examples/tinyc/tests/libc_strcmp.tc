@@ -1,0 +1,17 @@
+// libc interop: declare strcmp via extern and call it. Print the
+// normalized sign so the expected output is deterministic across libc
+// implementations (some return ±1, others the byte difference).
+extern int strcmp(char *a, char *b);
+
+int sign(int x) {
+    if (x < 0) { return -1; }
+    if (x > 0) { return 1; }
+    return 0;
+}
+
+int main() {
+    print(sign(strcmp("abc", "abc")));
+    print(sign(strcmp("abc", "abd")));
+    print(sign(strcmp("abd", "abc")));
+    return 0;
+}

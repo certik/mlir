@@ -1,0 +1,36 @@
+// libc interop: full read/write/cycle through libc. Open a file, write a
+// known string, close, reopen, fread, close, print. Cross-platform: uses
+// a relative filename in cwd. Passes on Linux/macOS/Windows.
+extern void *fopen(char *path, char *mode);
+extern int fputs(char *s, void *stream);
+extern long fread(void *buf, long size, long nmemb, void *stream);
+extern int fclose(void *stream);
+extern int printf(char *fmt, ...);
+extern void *calloc(long nmemb, long size);
+extern void free(void *p);
+
+int main() {
+    char *path;
+    path = "_libc_io_tmp.txt";
+
+    void *fw;
+    fw = fopen(path, "w");
+    if (fw == null) { print("open-w failed"); return 1; }
+    fputs("hello libc\n", fw);
+    fclose(fw);
+
+    void *fr;
+    fr = fopen(path, "r");
+    if (fr == null) { print("open-r failed"); return 1; }
+    // calloc zeros the buffer so the C string is naturally NUL-terminated
+    // after fread copies the payload (we read at most 31 bytes into 32).
+    char *buf;
+    buf = (char*)calloc(32LL, 1LL);
+    long n;
+    n = fread(buf, 1LL, 31LL, fr);
+    fclose(fr);
+
+    printf("read %lld bytes: %s", n, buf);
+    free(buf);
+    return 0;
+}

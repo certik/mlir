@@ -55,10 +55,29 @@ def main():
         print("error: no tests found in tests.toml", file=sys.stderr)
         return 2
 
+    # Platform key matching `platforms = [...]` in tests.toml. A test
+    # with a `platforms` field runs only on listed platforms. Values:
+    # "linux", "darwin", "win32".
+    plat = sys.platform if sys.platform.startswith(("linux", "darwin", "win32")) else sys.platform
+    if plat.startswith("linux"):
+        plat_key = "linux"
+    elif plat.startswith("darwin"):
+        plat_key = "darwin"
+    elif plat.startswith("win32"):
+        plat_key = "win32"
+    else:
+        plat_key = plat
+
     failures = 0
+    skipped = 0
     for t in tests:
         name = t["name"]
         expected = t["expected_stdout"]
+        platforms = t.get("platforms")
+        if platforms is not None and plat_key not in platforms:
+            print(f"SKIP {name} (platforms={platforms}, current={plat_key})")
+            skipped += 1
+            continue
         # Multi-file tests pass `sources = [...]`; single-file tests
         # default to `<name>.tc` for backwards compatibility.
         sources = t.get("sources", [f"{name}.tc"])
@@ -111,7 +130,11 @@ def main():
     if failures:
         print(f"\n{failures} test(s) failed")
         return 1
-    print(f"\nAll {len(tests)} tinyC tests passed")
+    ran = len(tests) - skipped
+    if skipped:
+        print(f"\nAll {ran} tinyC tests passed ({skipped} skipped on {plat_key})")
+    else:
+        print(f"\nAll {len(tests)} tinyC tests passed")
     return 0
 
 

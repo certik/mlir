@@ -1,0 +1,25 @@
+// libc interop: memcmp on int arrays initialized in tinyC.
+extern int memcmp(void *a, void *b, long n);
+
+int sign(int x) {
+    if (x < 0) { return -1; }
+    if (x > 0) { return 1; }
+    return 0;
+}
+
+int main() {
+    int a[3];
+    int b[3];
+    int c[3];
+    a[0] = 1; a[1] = 2; a[2] = 3;
+    b[0] = 1; b[1] = 2; b[2] = 3;
+    c[0] = 1; c[1] = 2; c[2] = 4;
+    void *pa; void *pb; void *pc;
+    pa = &a[0]; pb = &b[0]; pc = &c[0];
+    long n;
+    n = sizeof(int) * 3;
+    print(sign(memcmp(pa, pb, n)));
+    print(sign(memcmp(pa, pc, n)));
+    print(sign(memcmp(pc, pa, n)));
+    return 0;
+}

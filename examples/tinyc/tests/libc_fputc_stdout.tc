@@ -1,0 +1,10 @@
+// libc interop: fputc to stdout. Linux-only — see libc_fputs_stdout.tc.
+extern void *stdout;
+extern int fputc(int c, void *stream);
+
+int main() {
+    fputc('A', stdout);
+    fputc('B', stdout);
+    fputc('\n', stdout);
+    return 0;
+}

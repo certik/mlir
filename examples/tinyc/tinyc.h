@@ -323,6 +323,7 @@ typedef struct {
     string  name;
     Type    type;
     bool    has_init;
+    bool    is_extern;      // `extern T x;` — emit external-linkage global
     int64_t init_int;
     double  init_float;
     string  init_str;       // for TY_PTR_CHAR initialized from string literal

@@ -282,3 +282,49 @@ expected_stdout = "1\n2\n"
 name = "multi_three_files"
 sources = ["multi_three_files_a.tc", "multi_three_files_b.tc", "multi_three_files_c.tc"]
 expected_stdout = "20\n100\n8\n"
+
+# ---------------------------------------------------------------------------
+# libc interop: tinyC programs that declare libc functions via `extern`
+# and link against the system libc through the test harness's $CC. These
+# tests prove that the language can be used end-to-end against the real
+# libc surface, not just runtime.c. FILE* is modeled as `void *` (Option
+# A in PR #120) — tinyC has no need for the layout of FILE.
+# ---------------------------------------------------------------------------
+
+[[test]]
+name = "libc_strcmp"
+expected_stdout = "0\n-1\n1\n"
+
+[[test]]
+name = "libc_memcmp"
+expected_stdout = "0\n-1\n1\n"
+
+[[test]]
+name = "libc_strlen"
+expected_stdout = "0\n5\n11\n"
+
+[[test]]
+name = "libc_malloc_free"
+expected_stdout = "110\n"
+
+# stdout-using tests: stdout is a real linker symbol only on glibc/Linux.
+# macOS exposes only `__stdoutp` (with `stdout` as a macro), and Windows
+# MSVC uses `__acrt_iob_func(1)`. Gated to linux to keep the ergonomic
+# `fputs(..., stdout)` form here; portable file I/O is in libc_file_io.
+[[test]]
+name = "libc_fputs_stdout"
+platforms = ["linux"]
+expected_stdout = "hello\nworld\n"
+
+[[test]]
+name = "libc_fputc_stdout"
+platforms = ["linux"]
+expected_stdout = "AB\n"
+
+[[test]]
+name = "libc_file_io"
+expected_stdout = "read 11 bytes: hello libc\n"
+
+[[test]]
+name = "libc_qsort"
+expected_stdout = "1\n2\n3\n5\n8\n9\n"

@@ -3294,7 +3294,24 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         sy->next = e.globals;
         e.globals = sy;
 
-        if (g->type.kind == TY_PTR_CHAR) {
+        if (g->is_extern) {
+            // `extern T x;` — emit external linkage with no initializer.
+            // Used for libc symbols like `stdout` resolved by the linker.
+            MLIR_TypeHandle gty;
+            if (g->type.kind == TY_F32) {
+                gty = e.f32;
+            } else if (g->type.kind == TY_PTR_CHAR || g->type.kind == TY_PTR_I32 ||
+                       g->type.kind == TY_PTR_STRUCT || g->type.kind == TY_PTR_VOID ||
+                       g->type.kind == TY_FNPTR) {
+                gty = e.ptr;
+            } else {
+                gty = e.i32;
+            }
+            MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, gty,
+                /*is_constant=*/false,
+                /*init_kind=*/4, 0, 0.0, NULL, e.loc);
+            MLIR_AppendBlockOp(ctx, mb, gop);
+        } else if (g->type.kind == TY_PTR_CHAR) {
             string str_sym = (string){0};
             if (g->has_init && g->init_str.size > 0) {
                 str_sym = intern_string(&e, g->init_str);
