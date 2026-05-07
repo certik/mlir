@@ -141,6 +141,11 @@ struct Type {
     // at. Carries the inner pointee kind / fnptr signature / struct_name
     // so a deref can be typed correctly.
     Type    *pointee;
+    // For TY_PTR_I32: when true, the pointed-at element is 64-bit wide
+    // (i64). Used to map `int64_t *` / `long *` / `size_t *` to a single
+    // generic pointer kind without losing the element width needed for
+    // pointer arithmetic, indexing, and dereferenced-load typing.
+    bool     ptr_is_i64;
 };
 
 typedef enum {

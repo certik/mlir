@@ -797,7 +797,10 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     if (is_ptr) {
         if (was_char) s->decl_type.kind = TY_PTR_CHAR;
         else if (base == TY_I32) s->decl_type.kind = TY_PTR_I32;
-        else if (base == TY_I64) s->decl_type.kind = TY_PTR_I32;
+        else if (base == TY_I64) {
+            s->decl_type.kind = TY_PTR_I32;
+            s->decl_type.ptr_is_i64 = true;
+        }
         else if (base == TY_VOID) s->decl_type.kind = TY_PTR_VOID;
         else perror_at(p, line, str_lit("only int*/char*/void* pointers are supported"));
         if (is_ptr_ptr) {
@@ -1143,6 +1146,7 @@ static bool parse_sig_type(P *p, Type *out) {
         skip_const(p);
         if (accept(p, TC_TK_STAR)) {
             out->kind = saw_char ? TY_PTR_CHAR : (saw_long ? TY_PTR_I32 : TY_PTR_I32);
+            if (saw_long && !saw_char) out->ptr_is_i64 = true;
             skip_const(p);
             if (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
         }
@@ -1382,7 +1386,9 @@ static StructDef *parse_struct_def(P *p) {
                 } else if (ft.kind == TY_I32 || ft.kind == TY_I64) {
                     // No distinct TY_PTR_I64 today — bucket integer
                     // pointers under TY_PTR_I32 as a conservative alias.
+                    bool is_i64 = (ft.kind == TY_I64);
                     ft.kind = TY_PTR_I32;
+                    ft.ptr_is_i64 = is_i64;
                 } else {
                     perror_at(p, cur(p).line,
                         str_lit("unsupported pointer-to-typedef field type"));
@@ -1403,7 +1409,7 @@ static StructDef *parse_struct_def(P *p) {
                 is_ptr = true;
                 if (was_char) ft.kind = TY_PTR_CHAR;
                 else if (k == TY_I32) ft.kind = TY_PTR_I32;
-                else if (k == TY_I64) ft.kind = TY_PTR_I32;
+                else if (k == TY_I64) { ft.kind = TY_PTR_I32; ft.ptr_is_i64 = true; }
                 else if (k == TY_VOID) ft.kind = TY_PTR_VOID;
                 else {
                     perror_at(p, cur(p).line, str_lit("only int*/char*/void* pointer fields are supported"));

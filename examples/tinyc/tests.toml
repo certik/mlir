@@ -364,3 +364,7 @@ expected_stdout = "100\n7000\n-1\n"
 [[test]]
 name = "typedef_ptr_decl"
 expected_stdout = "3\n4\n7\n"
+
+[[test]]
+name = "struct_ptr_field_index"
+expected_stdout = "10\n11\n12\n1000000\n2000000\n3000000\n"

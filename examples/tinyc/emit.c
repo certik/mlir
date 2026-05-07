@@ -933,6 +933,40 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                         r.elem_ty = elem;
                         return r;
                     }
+                    // Pointer field indexed: `s.f[i]` / `p->f[i]` where
+                    // `f` is `T *` (TY_PTR_I32 / TY_PTR_CHAR / TY_PTR_VOID
+                    // / TY_PTR_PTR). Load the pointer from the field, then
+                    // GEP it with the (single) index.
+                    bool is_ptr_field = (ft.kind == TY_PTR_I32 ||
+                                         ft.kind == TY_PTR_CHAR ||
+                                         ft.kind == TY_PTR_VOID ||
+                                         ft.kind == TY_PTR_PTR);
+                    if (is_ptr_field && idx_a && !idx_b) {
+                        size_t parent_n = parent.n_const_path;
+                        size_t total = parent_n + 1;
+                        int32_t *fpath = arena_new_array(e->arena, int32_t, total);
+                        for (size_t k = 0; k < parent_n; k++) fpath[k] = parent.const_path[k];
+                        fpath[parent_n] = (int32_t)fidx;
+                        size_t n_dyn = (parent.dyn_index != MLIR_INVALID_HANDLE ? 1 : 0);
+                        MLIR_ValueHandle *fdyn = arena_new_array(e->arena, MLIR_ValueHandle,
+                                                                 n_dyn ? n_dyn : 1);
+                        if (n_dyn) fdyn[0] = parent.dyn_index;
+                        MLIR_ValueHandle field_addr = emit_gep(e, parent.base_ptr,
+                            parent.source_elem, fpath, total, fdyn, n_dyn);
+                        MLIR_ValueHandle base = emit_load_v(e, field_addr, e->ptr);
+                        MLIR_TypeHandle elem = (ft.kind == TY_PTR_CHAR) ? e->i8
+                                              : (ft.kind == TY_PTR_PTR) ? e->ptr
+                                              : ft.ptr_is_i64 ? e->i64
+                                              : e->i32;
+                        MLIR_ValueHandle iv = emit_expr_i32(e, sc, idx_a);
+                        int32_t *gpath = arena_new_array(e->arena, int32_t, 1);
+                        gpath[0] = LLVM_GEP_DYN;
+                        MLIR_ValueHandle *gdyn = arena_new_array(e->arena, MLIR_ValueHandle, 1);
+                        gdyn[0] = iv;
+                        r.base_ptr = emit_gep(e, base, elem, gpath, 1, gdyn, 1);
+                        r.elem_ty = elem;
+                        return r;
+                    }
                 }
             }
             // Multi-dim array: m[i][j] for `int m[N1][N2];`.
@@ -974,7 +1008,9 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
             if (s->type.kind == TY_PTR_I32 || s->type.kind == TY_PTR_CHAR) {
                 MLIR_ValueHandle idx_i32 = emit_expr_i32(e, sc, ex->rhs);
                 MLIR_ValueHandle base = emit_load_v(e, sym_addr(e, s), e->ptr);
-                MLIR_TypeHandle elem = (s->type.kind == TY_PTR_CHAR) ? e->i8 : e->i32;
+                MLIR_TypeHandle elem = (s->type.kind == TY_PTR_CHAR) ? e->i8
+                                      : s->type.ptr_is_i64 ? e->i64
+                                      : e->i32;
                 int32_t *path = arena_new_array(e->arena, int32_t, 1);
                 path[0] = LLVM_GEP_DYN;
                 MLIR_ValueHandle *dyn = arena_new_array(e->arena, MLIR_ValueHandle, 1);

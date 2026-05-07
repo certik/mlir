@@ -1,0 +1,47 @@
+// Pointer-field indexing: `vec->data[i]` and `s.f[i]` where `f` is
+// `int *` or `int64_t *`. Both load the pointer from the field, then GEP
+// it by `i` (using the right element width, which differs for i64).
+extern void *malloc(long n);
+extern void free(void *p);
+
+typedef struct ivec_s { int *data; long n; } IVec;
+typedef struct lvec_s { long *data; long n; } LVec;
+
+void fill_iv(IVec *iv) {
+    int i;
+    for (i = 0; i < 3; i = i + 1) iv->data[i] = i + 10;
+}
+
+void fill_lv(LVec *lv) {
+    int j;
+    for (j = 0; j < 3; j = j + 1) lv->data[j] = (long)(j + 1) * 1000000LL;
+}
+
+int main() {
+    int *ibuf;
+    ibuf = (int *)malloc(sizeof(int) * 3);
+
+    IVec iv;
+    iv.data = ibuf;
+    iv.n = 3LL;
+    fill_iv(&iv);
+
+    print(iv.data[0]); // 10
+    print(iv.data[1]); // 11
+    print(iv.data[2]); // 12
+
+    long *lbuf;
+    lbuf = (long *)malloc(sizeof(long) * 3);
+    LVec lv;
+    lv.data = lbuf;
+    lv.n = 3LL;
+    fill_lv(&lv);
+
+    print(lv.data[0]);  // 1000000
+    print(lv.data[1]);  // 2000000
+    print(lv.data[2]);  // 3000000
+    free(lbuf);
+    free(ibuf);
+    return 0;
+}
+
