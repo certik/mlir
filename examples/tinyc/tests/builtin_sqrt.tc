@@ -1,0 +1,11 @@
+extern int printf(const char *fmt, ...);
+
+double mysqrtd(double x) { return __builtin_sqrt(x); }
+float  mysqrtf(float x)  { return __builtin_sqrtf(x); }
+
+int main() {
+    int a = (int)mysqrtd(16.0);
+    int b = (int)mysqrtf(81.0f);
+    printf("%d %d\n", a, b);
+    return 0;
+}

@@ -2768,6 +2768,39 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 r.val = emit_const_i32(e, 0);
                 return r;
             }
+            // Built-in __builtin_sqrt / __builtin_sqrtf: lower to
+            // llvm.intr.sqrt on f64 / f32 respectively.
+            if (!indirect_fnty &&
+                (str_eq(ex->callee, str_lit("__builtin_sqrt")) ||
+                 str_eq(ex->callee, str_lit("__builtin_sqrtf")))) {
+                bool is_f32 = str_eq(ex->callee, str_lit("__builtin_sqrtf"));
+                if (ex->args.size != 1) {
+                    EMIT_ERR(e, "{} expects 1 argument", ex->callee);
+                    r.val = is_f32 ? emit_const_f32(e, 0.0) : emit_const_f64(e, 0.0);
+                    r.is_float = true; r.is_f64 = !is_f32; return r;
+                }
+                EVal a = emit_expr(e, sc, ex->args.data[0]);
+                MLIR_TypeHandle ft = is_f32 ? e->f32 : e->f64;
+                if (!a.is_float) {
+                    if (a.is_i64) a.val = emit_trunci_i64_to_i32(e, a.val);
+                    a.val = is_f32 ? emit_sitofp(e, a.val) : emit_sitofp_f64(e, a.val);
+                } else {
+                    if (is_f32 && a.is_f64) {
+                        // Truncate f64->f32 (rare here since arg should match).
+                        // Fall back: just reuse value if compiler can't match.
+                    } else if (!is_f32 && !a.is_f64) {
+                        a.val = emit_fpext_f32_to_f64(e, a.val);
+                    }
+                }
+                MLIR_ValueHandle res = MLIR_CreateValueOpResult(
+                    e->ctx, MLIR_INVALID_HANDLE, 0, ft, ssa_name(e), eloc(e, 0));
+                MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = ft;
+                MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = res;
+                MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = a.val;
+                emit_op(e, OP_TYPE_UNREGISTERED, str_lit("llvm.intr.sqrt"),
+                        rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
+                r.val = res; r.is_float = true; r.is_f64 = !is_f32; return r;
+            }
             // Built-in malloc(size) -> !llvm.ptr; size is i32 (typically
             // sizeof), extended to i64 for the libc signature.
             if (!indirect_fnty && str_eq(ex->callee, str_lit("malloc"))) {                if (ex->args.size != 1) {

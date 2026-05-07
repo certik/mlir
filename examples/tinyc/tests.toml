@@ -508,3 +508,7 @@ expected_stdout = "-1000000000000\n"
 [[test]]
 name = "global_cast_null_shift"
 expected_stdout = "1 256\n"
+
+[[test]]
+name = "builtin_sqrt"
+expected_stdout = "4 9\n"
