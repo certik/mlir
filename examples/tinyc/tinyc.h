@@ -262,6 +262,8 @@ typedef enum {
     ST_BREAK,          // break;
     ST_CONTINUE,       // continue;
     ST_SWITCH,         // switch (e) { case 1: ... default: ... }
+    ST_LABEL,          // label:
+    ST_GOTO,           // goto label;
 } StmtKind;
 
 typedef struct Stmt Stmt;
@@ -305,6 +307,8 @@ struct Stmt {
     bool block_no_scope;
     // ST_SWITCH
     VecSwitchCase switch_cases;
+    // ST_LABEL / ST_GOTO
+    string label_name;
     int line;
 };
 
@@ -429,6 +433,7 @@ typedef enum {
     TC_TK_KW_BOOL,
     TC_TK_KW_VA_LIST,
     TC_TK_KW_GENERIC,
+    TC_TK_KW_GOTO,
     TC_TK_STRING_LIT,
     TC_TK_LPAREN, TC_TK_RPAREN,
     TC_TK_LBRACE, TC_TK_RBRACE,

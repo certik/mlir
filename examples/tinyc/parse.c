@@ -1054,6 +1054,23 @@ static Stmt *parse_stmt(P *p) {
         parse_block(p, &s->block_body);
         return s;
     }
+    if (t.kind == TC_TK_KW_GOTO) {
+        p->i++;
+        TcTok nm = cur(p);
+        expect(p, TC_TK_IDENT, str_lit("expected label after 'goto'"));
+        Stmt *s = new_stmt(p, ST_GOTO, t.line);
+        s->label_name = nm.text;
+        expect(p, TC_TK_SEMI, str_lit("expected ';' after goto"));
+        return s;
+    }
+    // Plain `IDENT:` is a label statement (no nested code per stmt; the
+    // following statements form the label's body in the surrounding block).
+    if (t.kind == TC_TK_IDENT && peek(p, 1).kind == TC_TK_COLON) {
+        p->i += 2;  // consume IDENT and ':'
+        Stmt *s = new_stmt(p, ST_LABEL, t.line);
+        s->label_name = t.text;
+        return s;
+    }
     if (t.kind == TC_TK_KW_RETURN) {
         p->i++;
         Stmt *s = new_stmt(p, ST_RETURN, t.line);

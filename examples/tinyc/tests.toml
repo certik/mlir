@@ -468,3 +468,7 @@ expected_stdout = "42\n"
 [[test]]
 name = "struct_fwd_then_def"
 expected_stdout = "16\n"
+
+[[test]]
+name = "goto_label"
+expected_stdout = "10\n"

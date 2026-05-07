@@ -130,6 +130,14 @@ typedef struct {
     MLIR_LocationHandle loc;
     int next_ssa;
     LoopCtx *loops;
+    // Linked list of `goto` labels in the currently-emitting function.
+    // Pre-populated at emit_func entry with one entry per ST_LABEL found
+    // anywhere in the body. Reset to NULL between functions.
+    struct LabelBlock {
+        string name;
+        MLIR_BlockHandle block;
+        struct LabelBlock *next;
+    } *labels;
     Program *program;
     FuncSig *sigs;
     size_t   n_sigs;
@@ -3014,7 +3022,7 @@ static void emit_struct_zero(E *e, MLIR_ValueHandle base, MLIR_TypeHandle source
 }
 
 static void emit_stmt(E *e, Scope *sc, Stmt *st) {
-    if (e->terminated) return;
+    if (e->terminated && st->kind != ST_LABEL) return;
     e->cur_line = st->line;
     switch (st->kind) {
         case ST_EXPR: {
@@ -3446,6 +3454,31 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             emit_branch(e, e->loops->continue_block);
             return;
         }
+        case ST_LABEL: {
+            struct LabelBlock *lb = e->labels;
+            while (lb && !str_eq(lb->name, st->label_name)) lb = lb->next;
+            if (!lb) {
+                EMIT_ERR(e, "internal: label not pre-registered");
+                return;
+            }
+            // Block was already appended to the func region in
+            // collect_labels; just terminate the predecessor and
+            // continue emission inside the label block.
+            if (!e->terminated) emit_branch(e, lb->block);
+            e->cur_block = lb->block;
+            e->terminated = false;
+            return;
+        }
+        case ST_GOTO: {
+            struct LabelBlock *lb = e->labels;
+            while (lb && !str_eq(lb->name, st->label_name)) lb = lb->next;
+            if (!lb) {
+                EMIT_ERR(e, "goto: undefined label '{}'", st->label_name);
+                return;
+            }
+            emit_branch(e, lb->block);
+            return;
+        }
         case ST_PRINT: {
             EVal v = emit_expr(e, sc, st->expr);
             if (v.is_str) {
@@ -3673,7 +3706,11 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
 }
 
 static void emit_block(E *e, Scope *sc, VecStmtPtr body) {
-    for (size_t i = 0; i < body.size && !e->terminated; i++) emit_stmt(e, sc, body.data[i]);
+    for (size_t i = 0; i < body.size; i++) {
+        Stmt *st = body.data[i];
+        if (e->terminated && st->kind != ST_LABEL) continue;
+        emit_stmt(e, sc, st);
+    }
 }
 
 // ----- function & module -----
@@ -3752,6 +3789,45 @@ static void build_signatures(E *e) {
     }
 }
 
+// Recursively walk all statements in a function body and pre-allocate
+// a block for every ST_LABEL encountered. The blocks are appended to
+// e->labels in source order; emit-time the corresponding ST_LABEL site
+// appends each block to the function region.
+static void collect_labels(E *e, VecStmtPtr body) {
+    for (size_t i = 0; i < body.size; i++) {
+        Stmt *st = body.data[i];
+        if (!st) continue;
+        switch (st->kind) {
+            case ST_LABEL: {
+                struct LabelBlock *lb = arena_new(e->arena, struct LabelBlock);
+                lb->name = st->label_name;
+                lb->block = MLIR_CreateBlock(e->ctx);
+                MLIR_AppendRegionBlock(e->ctx, e->func_region, lb->block);
+                lb->next = e->labels;
+                e->labels = lb;
+                break;
+            }
+            case ST_IF:
+                collect_labels(e, st->then_body);
+                if (st->has_else) collect_labels(e, st->else_body);
+                break;
+            case ST_WHILE:
+            case ST_DO_WHILE:
+                collect_labels(e, st->while_body);
+                break;
+            case ST_FOR:
+                collect_labels(e, st->for_body);
+                break;
+            case ST_BLOCK:
+            case ST_SWITCH:
+                collect_labels(e, st->block_body);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
 static MLIR_OpHandle emit_func(E *e, Func *f) {
     e->cur_line = f->line;
     FuncSig *sig = find_sig(e, f->name);
@@ -3780,6 +3856,10 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
     e->cur_sret_ptr = MLIR_INVALID_HANDLE;
     e->terminated = false;
     e->next_ssa = 0;
+    e->labels = NULL;
+    // Pre-pass: walk the function body and pre-allocate a block for each
+    // ST_LABEL so that forward `goto` references resolve cleanly.
+    collect_labels(e, f->body);
 
     size_t arg_off = 0;
     if (sig->sret) {
