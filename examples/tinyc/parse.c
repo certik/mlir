@@ -2306,6 +2306,13 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
                             }
                             expect(&p, TC_TK_RBRACE,
                                    str_lit("expected '}' in global array initializer"));
+                        } else if (lit.kind == TC_TK_INT_LIT &&
+                                   peek(&p, 1).kind == TC_TK_SHL &&
+                                   peek(&p, 2).kind == TC_TK_INT_LIT) {
+                            int64_t a = lit.int_value;
+                            int64_t b = peek(&p, 2).int_value;
+                            g.init_int = a << b;
+                            p.i += 3;
                         } else if (lit.kind == TC_TK_INT_LIT) {
                             g.init_int = lit.int_value;
                             p.i++;
@@ -2333,6 +2340,25 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
                         } else if (lit.kind == TC_TK_IDENT && enum_lookup(&p, lit.text)) {
                             g.init_int = enum_lookup(&p, lit.text)->value;
                             p.i++;
+                        } else if (lit.kind == TC_TK_LPAREN) {
+                            // `((void*)0)` — scalar null pointer init via cast.
+                            int depth = 0;
+                            while (cur(&p).kind == TC_TK_LPAREN) { depth++; p.i++; }
+                            while (cur(&p).kind != TC_TK_RPAREN &&
+                                   cur(&p).kind != TC_TK_EOF) p.i++;
+                            if (cur(&p).kind == TC_TK_RPAREN) { p.i++; depth--; }
+                            if (cur(&p).kind == TC_TK_INT_LIT &&
+                                cur(&p).int_value == 0) p.i++;
+                            while (depth > 0 && cur(&p).kind == TC_TK_RPAREN) {
+                                p.i++; depth--;
+                            }
+                        } else if (lit.kind == TC_TK_INT_LIT &&
+                                   peek(&p, 1).kind == TC_TK_SHL &&
+                                   peek(&p, 2).kind == TC_TK_INT_LIT) {
+                            int64_t a = lit.int_value;
+                            int64_t b = peek(&p, 2).int_value;
+                            g.init_int = a << b;
+                            p.i += 3;
                         } else {
                             perror_at(&p, lit.line,
                                 str_lit("global initializer must be a literal"));
