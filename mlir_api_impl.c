@@ -339,6 +339,11 @@ void MLIR_AppendBlockOp(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHandle op
     block->n_operations++;
 }
 
+void MLIR_InsertBlockOpBeforeTerminator(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHandle op) {
+    // Legacy text backend has no terminator concept; fall back to append.
+    MLIR_AppendBlockOp(ctx, bh, op);
+}
+
 void MLIR_AppendBlockArg(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_ValueHandle arg) {
     IR_Block *block = resolve_block(bh);
     if (!block || !ctx || !ctx->arena) return;

@@ -293,6 +293,7 @@ MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_RegionHandle region, size_t idx);
 
 MLIR_BlockHandle MLIR_CreateBlock(MLIR_Context *ctx);
 void MLIR_AppendBlockOp(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_OpHandle op);
+void MLIR_InsertBlockOpBeforeTerminator(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_OpHandle op);
 void MLIR_AppendBlockArg(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_ValueHandle arg);
 size_t MLIR_GetBlockNumOps(MLIR_BlockHandle block);
 MLIR_OpHandle MLIR_GetBlockOp(MLIR_BlockHandle block, size_t idx);

@@ -519,3 +519,7 @@ expected_stdout = "21\n"
 [[test]]
 name = "struct_ptr_arith"
 expected_stdout = "sz=24\nq-p=24\nr-p=48\n"
+
+[[test]]
+name = "loop_local_alloca"
+expected_stdout = "40000200000\n"

@@ -125,6 +125,8 @@ typedef struct {
     MLIR_TypeHandle index;
     MLIR_TypeHandle ptr;             // !llvm.ptr
     MLIR_BlockHandle cur_block;
+    MLIR_BlockHandle entry_block;    // function entry block, alloca insertion point
+    MLIR_ValueHandle entry_const_one; // i64 constant 1 in entry_block, shared by all allocas
     bool terminated;
     MLIR_RegionHandle func_region;
     MLIR_LocationHandle loc;
@@ -549,16 +551,28 @@ static Sym *lookup(E *e, Scope *sc, string name) {
 // ----- LLVM-dialect storage primitives -----
 
 static MLIR_ValueHandle emit_alloca(E *e, MLIR_TypeHandle elem_ty) {
-    MLIR_ValueHandle one = emit_const_i64(e, 1);
+    // Hoist all `llvm.alloca` ops to the function's entry block so loops
+    // (where local declarations sit on each iteration) don't grow the stack
+    // unboundedly. We share a single `arith.constant 1 : i64` count operand
+    // that lives at the top of the entry block.
     MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
                                                   e->ptr, ssa_name(e), eloc(e, 0));
     MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->ptr;
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
-    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = one;
+    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1);
+    ops[0] = e->entry_const_one;
     MLIR_AttributeHandle elem_attr = MLIR_CreateAttributeType(e->ctx, str_lit("elem_type"), elem_ty);
     MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = elem_attr;
-    emit_op(e, OP_TYPE_LLVM_ALLOCA, str_lit("llvm.alloca"),
-            rts, 1, rs, 1, ops, 1, as, 1, NULL, 0);
+
+    bool hoist = e->entry_block && e->entry_block != e->cur_block;
+    MLIR_BlockHandle saved = e->cur_block;
+    if (hoist) e->cur_block = MLIR_INVALID_HANDLE;
+    MLIR_OpHandle aop = emit_op(e, OP_TYPE_LLVM_ALLOCA, str_lit("llvm.alloca"),
+                                rts, 1, rs, 1, ops, 1, as, 1, NULL, 0);
+    if (hoist) {
+        MLIR_InsertBlockOpBeforeTerminator(e->ctx, e->entry_block, aop);
+        e->cur_block = saved;
+    }
     return r;
 }
 
@@ -3994,6 +4008,8 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
     FuncSig *saved_sig = e->cur_sig;
     MLIR_ValueHandle saved_sret = e->cur_sret_ptr;
     e->cur_block = entry;
+    e->entry_block = entry;
+    e->entry_const_one = emit_const_i64(e, 1);
     e->func_region = body_r;
     e->cur_sig = sig;
     e->cur_sret_ptr = MLIR_INVALID_HANDLE;
@@ -4067,6 +4083,7 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
         e->terminated = true;
     }
     e->cur_block = saved;
+    e->entry_block = MLIR_INVALID_HANDLE;
     e->func_region = saved_region;
     e->cur_sig = saved_sig;
     e->cur_sret_ptr = saved_sret;
