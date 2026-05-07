@@ -1940,6 +1940,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
         bool unsigneds[] = {false, true, true, false, false, true, false};
         for (size_t k = 0; k < sizeof(names) / sizeof(names[0]); k++) {
             Typedef *td = arena_new(arena, Typedef);
+            *td = (Typedef){0};
             td->name = (string){.str = (char *)names[k], .size = 0};
             // Compute string length without libc.
             const char *s = names[k]; size_t len = 0; while (s[len]) len++;
@@ -1955,6 +1956,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
         bool u32[] = {false, true};
         for (size_t k = 0; k < sizeof(n32) / sizeof(n32[0]); k++) {
             Typedef *td = arena_new(arena, Typedef);
+            *td = (Typedef){0};
             const char *s = n32[k]; size_t len = 0; while (s[len]) len++;
             td->name = (string){.str = (char *)n32[k], .size = len};
             td->ty.kind = TY_I32;
@@ -1970,6 +1972,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
         bool      nuns[] = {false, true, false, true};
         for (size_t k = 0; k < sizeof(nn) / sizeof(nn[0]); k++) {
             Typedef *td = arena_new(arena, Typedef);
+            *td = (Typedef){0};
             const char *s = nn[k]; size_t len = 0; while (s[len]) len++;
             td->name = (string){.str = (char *)nn[k], .size = len};
             td->ty.kind = TY_I32;

@@ -1694,7 +1694,7 @@ static bool ast_fold_int(E *e, Scope *sc, Expr *ex, int64_t *out) {
             *out = (int64_t)(int32_t)ex->int_value;
             return true;
         case EX_SIZEOF: {
-            Type ty;
+            Type ty = (Type){0};
             if (ex->sizeof_is_expr) {
                 if (!sc) return false;
                 if (ex->lhs && ex->lhs->kind == EX_STR) {
@@ -2042,7 +2042,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             return r;
         }
         case EX_SIZEOF: {
-            Type ty;
+            Type ty = (Type){0};
             if (ex->sizeof_is_expr) {
                 if (ex->lhs && ex->lhs->kind == EX_STR) {
                     r.val = emit_const_i32(e, (int32_t)ex->lhs->name.size);
@@ -3291,6 +3291,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
         }
         case ST_DECL: {
             Sym *sy = arena_new(e->arena, Sym);
+            *sy = (Sym){0};
             sy->name = st->decl_name;
             sy->type = st->decl_type;
 
@@ -4129,6 +4130,7 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
     for (size_t i = 0; i < sig->n_params; i++) {
         SlotInfo *p = &sig->params[i];
         Sym *sy = arena_new(e->arena, Sym);
+        *sy = (Sym){0};
         sy->name = f->params.data[i].name;
         sy->type = p->type;
         MLIR_ValueHandle blk = flat_args[arg_off++];
