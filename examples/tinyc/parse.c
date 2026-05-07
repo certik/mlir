@@ -750,7 +750,8 @@ static Expr *parse_expr(P *p) { return parse_assign_or_or(p); }
 
 // Parse a base type keyword. Returns true if we consumed one and writes
 // the kind to *out. Pointer/array suffixes are handled at decl time.
-static bool parse_base_type(P *p, TypeKind *out) {
+static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char) {
+    *out_was_char = false;
     skip_const(p);
     // C-style integer base specifier: any sequence of signed / unsigned /
     // short / long / int / char / _Bool / bool. Any 'long' promotes to
@@ -783,6 +784,7 @@ static bool parse_base_type(P *p, TypeKind *out) {
             saw_bool_kw = true; p->i++; skip_const(p); progress = true;
         }
     }
+    *out_was_char = saw_char_kw;
     if (saw_long_kw)         { *out = TY_I64; skip_const(p); return true; }
     if (saw_int_kw || saw_signedness_kw || saw_short_kw || saw_char_kw || saw_bool_kw) {
         *out = TY_I32; skip_const(p); return true;
@@ -801,6 +803,11 @@ static bool parse_base_type(P *p, TypeKind *out) {
         return true;
     }
     return false;
+}
+
+static bool parse_base_type(P *p, TypeKind *out) {
+    bool dummy = false;
+    return parse_base_type2(p, out, &dummy);
 }
 
 static Stmt *parse_stmt(P *p);
@@ -946,8 +953,8 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         return s;
     }
     TypeKind base = TY_I32;
-    bool was_char = (cur(p).kind == TC_TK_KW_CHAR);
-    parse_base_type(p, &base);
+    bool was_char = false;
+    parse_base_type2(p, &base, &was_char);
     // Function-pointer local: `int (*name)(types)`.
     if (cur(p).kind == TC_TK_LPAREN && peek(p, 1).kind == TC_TK_STAR) {
         Stmt *s = new_stmt(p, ST_DECL, line);
@@ -1728,9 +1735,9 @@ static StructDef *parse_struct_def(P *p) {
             }
         } else {
             TypeKind k;
-            was_char = (cur(p).kind == TC_TK_KW_CHAR);
+            was_char = false;
             was_float = (cur(p).kind == TC_TK_KW_FLOAT);
-            if (!parse_base_type(p, &k)) {
+            if (!parse_base_type2(p, &k, &was_char)) {
                 perror_at(p, cur(p).line, str_lit("expected field type (int|float|char|struct)"));
                 p->i++;
                 continue;

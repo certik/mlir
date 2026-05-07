@@ -559,3 +559,9 @@ n=11
 found=1
 offset=9
 """
+[[test]]
+name = "unsigned_char_ptr_local"
+expected_stdout = """\
+sum=476
+found_at=9
+"""
