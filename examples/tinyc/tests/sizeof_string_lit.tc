@@ -1,0 +1,15 @@
+// sizeof of a string literal returns the array size (including the
+// trailing NUL byte), not sizeof(char *). This matches standard C and
+// is required by patterns like `str_lit(S)` macros that compute
+// `sizeof(S) - 1` to obtain the string length.
+extern int printf(const char *fmt, ...);
+
+int main() {
+    int n_hi    = sizeof("hi");        // 3
+    int n_empty = sizeof("");          // 1
+    int n_long  = sizeof("hello");     // 6
+    int n_ptr   = sizeof(char *);      // 8 (sanity)
+    printf("hi=%d empty=%d hello=%d ptr=%d\n",
+           n_hi, n_empty, n_long, n_ptr);
+    return 0;
+}

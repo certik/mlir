@@ -543,3 +543,7 @@ expected_stdout = "buf=ABCDE\n"
 [[test]]
 name = "compound_struct_field"
 expected_stdout = "tag=7 x=11 y=22\ntag=1 x=0 y=0\n"
+
+[[test]]
+name = "sizeof_string_lit"
+expected_stdout = "hi=3 empty=1 hello=6 ptr=8\n"

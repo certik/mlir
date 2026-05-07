@@ -1697,6 +1697,12 @@ static bool ast_fold_int(E *e, Scope *sc, Expr *ex, int64_t *out) {
             Type ty;
             if (ex->sizeof_is_expr) {
                 if (!sc) return false;
+                if (ex->lhs && ex->lhs->kind == EX_STR) {
+                    // sizeof("string literal") yields the array size
+                    // including the trailing NUL, matching standard C.
+                    *out = (int64_t)ex->lhs->name.size;
+                    return true;
+                }
                 ty = infer_expr_type(e, sc, ex->lhs);
                 if (ty.kind == TY_VOID) return false;
             } else {
@@ -2038,6 +2044,10 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
         case EX_SIZEOF: {
             Type ty;
             if (ex->sizeof_is_expr) {
+                if (ex->lhs && ex->lhs->kind == EX_STR) {
+                    r.val = emit_const_i32(e, (int32_t)ex->lhs->name.size);
+                    return r;
+                }
                 ty = infer_expr_type(e, sc, ex->lhs);
                 if (ty.kind == TY_VOID) {
                     EMIT_ERR(e, "sizeof of unsupported expression");
