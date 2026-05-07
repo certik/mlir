@@ -1,0 +1,18 @@
+int main() {
+    int i = 1, j = 2, k = 3;
+    int a, b = 5, c;
+    a = 10; c = 20;
+    int *p = &i, *q = &j;
+    int64_t x = 100, y = 200;
+    print((int64_t)i);
+    print((int64_t)j);
+    print((int64_t)k);
+    print((int64_t)a);
+    print((int64_t)b);
+    print((int64_t)c);
+    print((int64_t)*p);
+    print((int64_t)*q);
+    print(x);
+    print(y);
+    return 0;
+}

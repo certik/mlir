@@ -2763,6 +2763,11 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             return;
         }
         case ST_BLOCK: {
+            if (st->block_no_scope) {
+                for (size_t i = 0; i < st->block_body.size && !e->terminated; i++)
+                    emit_stmt(e, sc, st->block_body.data[i]);
+                return;
+            }
             Scope inner = (Scope){.head = NULL, .parent = sc};
             emit_block(e, &inner, st->block_body);
             return;

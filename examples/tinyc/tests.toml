@@ -392,3 +392,7 @@ expected_stdout = "1\n2\n3\n4\n5\n9\n100\n8\n16\n32\n"
 [[test]]
 name = "hex_int"
 expected_stdout = "64\n100\n255\n43981\n"
+
+[[test]]
+name = "multi_decl"
+expected_stdout = "1\n2\n3\n10\n5\n20\n1\n2\n100\n200\n"

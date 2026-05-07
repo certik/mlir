@@ -288,6 +288,7 @@ struct Stmt {
     VecStmtPtr for_body;
     // ST_BLOCK / ST_SWITCH (body)
     VecStmtPtr block_body;
+    bool block_no_scope;
     // ST_SWITCH
     VecSwitchCase switch_cases;
     int line;

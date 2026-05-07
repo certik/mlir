@@ -802,6 +802,26 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         if (accept(p, TC_TK_ASSIGN)) {
             { Expr *agg = parse_aggregate_init(p, s->decl_type); s->decl_init = agg ? agg : parse_expr(p); }
         }
+        // Comma-separated additional declarators sharing the same typedef'd type.
+        if (cur(p).kind == TC_TK_COMMA) {
+            Stmt *blk = new_stmt(p, ST_BLOCK, line);
+            blk->block_no_scope = true;
+            VecStmtPtr_push_back(p->arena, &blk->block_body, s);
+            while (accept(p, TC_TK_COMMA)) {
+                TcTok dname = cur(p);
+                expect(p, TC_TK_IDENT, str_lit("expected identifier"));
+                Stmt *ds = new_stmt(p, ST_DECL, dname.line);
+                ds->decl_name = dname.text;
+                ds->decl_type = ty;
+                if (accept(p, TC_TK_ASSIGN)) {
+                    Expr *agg = parse_aggregate_init(p, ds->decl_type);
+                    ds->decl_init = agg ? agg : parse_expr(p);
+                }
+                VecStmtPtr_push_back(p->arena, &blk->block_body, ds);
+            }
+            if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+            return blk;
+        }
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
         return s;
     }
@@ -928,6 +948,57 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     }
     if (accept(p, TC_TK_ASSIGN)) {
         { Expr *agg = parse_aggregate_init(p, s->decl_type); s->decl_init = agg ? agg : parse_expr(p); }
+    }
+    // Comma-separated additional declarators sharing the same base type:
+    //   `int i = 1, j = 2, *p = 0;`. Wrap into an ST_BLOCK if present.
+    if (cur(p).kind == TC_TK_COMMA) {
+        Stmt *blk = new_stmt(p, ST_BLOCK, line);
+        blk->block_no_scope = true;
+        VecStmtPtr_push_back(p->arena, &blk->block_body, s);
+        while (accept(p, TC_TK_COMMA)) {
+            bool dis_ptr = false, dis_pp = false;
+            if (accept(p, TC_TK_STAR)) {
+                dis_ptr = true; skip_const(p);
+                if (accept(p, TC_TK_STAR)) { dis_pp = true; skip_const(p); }
+            }
+            TcTok dname = cur(p);
+            expect(p, TC_TK_IDENT, str_lit("expected identifier"));
+            Stmt *ds = new_stmt(p, ST_DECL, dname.line);
+            ds->decl_name = dname.text;
+            ds->decl_type.kind = base;
+            if (dis_ptr) {
+                if (was_char) ds->decl_type.kind = TY_PTR_CHAR;
+                else if (base == TY_I32) ds->decl_type.kind = TY_PTR_I32;
+                else if (base == TY_I64) {
+                    ds->decl_type.kind = TY_PTR_I32;
+                    ds->decl_type.ptr_is_i64 = true;
+                }
+                else if (base == TY_VOID) ds->decl_type.kind = TY_PTR_VOID;
+                else perror_at(p, dname.line, str_lit("only int*/char*/void* pointers are supported"));
+                if (dis_pp) {
+                    Type *inner = arena_new(p->arena, Type);
+                    *inner = ds->decl_type;
+                    ds->decl_type = (Type){0};
+                    ds->decl_type.kind = TY_PTR_PTR;
+                    ds->decl_type.pointee = inner;
+                }
+            }
+            if (accept(p, TC_TK_LBRACK)) {
+                if (base != TY_I32 || dis_ptr) perror_at(p, dname.line, str_lit("only int[N] arrays are supported"));
+                TcTok lit = cur(p);
+                expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
+                expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
+                ds->decl_type.kind = TY_ARRAY_I32;
+                ds->decl_type.array_len = lit.int_value;
+            }
+            if (accept(p, TC_TK_ASSIGN)) {
+                Expr *agg = parse_aggregate_init(p, ds->decl_type);
+                ds->decl_init = agg ? agg : parse_expr(p);
+            }
+            VecStmtPtr_push_back(p->arena, &blk->block_body, ds);
+        }
+        if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+        return blk;
     }
     if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
     return s;
