@@ -1790,55 +1790,63 @@ static StructDef *parse_struct_def(P *p) {
                 perror_at(p, cur(p).line, str_lit("'void' is not a valid struct field type"));
             }
         }
-        TcTok fn = cur(p);
-        expect(p, TC_TK_IDENT, str_lit("expected field name"));
-        // Optional array suffix `[N]` or `[N][M]`.
-        if (accept(p, TC_TK_LBRACK)) {
-            if (cur(p).kind == TC_TK_RBRACK) {
-                perror_at(p, cur(p).line, str_lit("flexible array fields are not supported"));
-            }
-            TcTok lit = cur(p);
-            expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
-            expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
-            int64_t n1 = lit.int_value;
-            int64_t n2 = 0;
+        // One or more comma-separated declarators sharing the base type
+        // `ft` parsed above. Each may add its own `[N]`/`[N][M]` suffix.
+        Type base_ft = ft;
+        bool more_decls = true;
+        while (more_decls) {
+            Type ft = base_ft;
+            TcTok fn = cur(p);
+            expect(p, TC_TK_IDENT, str_lit("expected field name"));
+            // Optional array suffix `[N]` or `[N][M]`.
             if (accept(p, TC_TK_LBRACK)) {
-                TcTok lit2 = cur(p);
+                if (cur(p).kind == TC_TK_RBRACK) {
+                    perror_at(p, cur(p).line, str_lit("flexible array fields are not supported"));
+                }
+                TcTok lit = cur(p);
                 expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
                 expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
-                n2 = lit2.int_value;
-            }
-            // Map (element-type, dim) -> array TypeKind.
-            if (is_struct_kind) {
-                if (!is_ptr) {
-                    perror_at(p, cur(p).line, str_lit("array of nested struct value is not supported as a field"));
-                } else if (n2 != 0) {
-                    perror_at(p, cur(p).line, str_lit("only 1D arrays of struct pointers are supported"));
-                } else {
-                    ft.kind = TY_ARRAY_PTR_STRUCT;
+                int64_t n1 = lit.int_value;
+                int64_t n2 = 0;
+                if (accept(p, TC_TK_LBRACK)) {
+                    TcTok lit2 = cur(p);
+                    expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
+                    expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
+                    n2 = lit2.int_value;
+                }
+                // Map (element-type, dim) -> array TypeKind.
+                if (is_struct_kind) {
+                    if (!is_ptr) {
+                        perror_at(p, cur(p).line, str_lit("array of nested struct value is not supported as a field"));
+                    } else if (n2 != 0) {
+                        perror_at(p, cur(p).line, str_lit("only 1D arrays of struct pointers are supported"));
+                    } else {
+                        ft.kind = TY_ARRAY_PTR_STRUCT;
+                        ft.array_len = n1;
+                    }
+                } else if (was_char && is_ptr) {
+                    if (n2 != 0) {
+                        perror_at(p, cur(p).line, str_lit("only 1D arrays of char* are supported"));
+                    }
+                    ft.kind = TY_ARRAY_PTR_CHAR;
                     ft.array_len = n1;
+                } else if (is_ptr) {
+                    perror_at(p, cur(p).line, str_lit("array of int* is not supported as a field"));
+                } else if (was_float) {
+                    ft.kind = TY_ARRAY_F32;
+                    ft.array_len = n1;
+                    ft.array_len2 = n2;
+                } else {
+                    ft.kind = TY_ARRAY_I32;
+                    ft.array_len = n1;
+                    ft.array_len2 = n2;
                 }
-            } else if (was_char && is_ptr) {
-                if (n2 != 0) {
-                    perror_at(p, cur(p).line, str_lit("only 1D arrays of char* are supported"));
-                }
-                ft.kind = TY_ARRAY_PTR_CHAR;
-                ft.array_len = n1;
-            } else if (is_ptr) {
-                perror_at(p, cur(p).line, str_lit("array of int* is not supported as a field"));
-            } else if (was_float) {
-                ft.kind = TY_ARRAY_F32;
-                ft.array_len = n1;
-                ft.array_len2 = n2;
-            } else {
-                ft.kind = TY_ARRAY_I32;
-                ft.array_len = n1;
-                ft.array_len2 = n2;
             }
+            VecStructField_push_back(p->arena, &sd->fields,
+                ((StructField){.name = fn.text, .type = ft}));
+            more_decls = accept(p, TC_TK_COMMA);
         }
         expect(p, TC_TK_SEMI, str_lit("expected ';' after field"));
-        VecStructField_push_back(p->arena, &sd->fields,
-            ((StructField){.name = fn.text, .type = ft}));
     }
     expect(p, TC_TK_RBRACE, str_lit("expected '}'"));
     return sd;

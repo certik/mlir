@@ -1,0 +1,25 @@
+// Regression: tinyc must accept multiple comma-separated declarators
+// in a single struct field declaration: `int first, last;` is just
+// shorthand for two fields of the same base type.
+struct S {
+    int first, last;
+    long a, b;
+    int arr1[3], scalar;
+};
+
+int main() {
+    struct S s;
+    s.first = 1;
+    s.last = 2;
+    s.a = 100;
+    s.b = 200;
+    s.arr1[0] = 7;
+    s.scalar = 9;
+    print(s.first);
+    print(s.last);
+    print((int)s.a);
+    print((int)s.b);
+    print(s.arr1[0]);
+    print(s.scalar);
+    return 0;
+}
