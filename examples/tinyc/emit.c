@@ -1156,6 +1156,46 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                     }
                 }
             }
+            // Pointer-to-pointer chained indexing: pp[i][j] where pp is T**.
+            // Step 1: GEP pp+i (stride sizeof(ptr)) -> ptr-to-ptr.
+            // Step 2: load that to obtain the inner T*.
+            // Step 3: GEP T*+j (stride sizeof(T)) -> ptr-to-T.
+            if (ex->lhs->kind == EX_INDEX &&
+                ex->lhs->lhs->kind == EX_VAR) {
+                Sym *s = lookup(e, sc, ex->lhs->lhs->name);
+                if (s && s->type.kind == TY_PTR_PTR) {
+                    MLIR_ValueHandle i_v = emit_expr_i32(e, sc, ex->lhs->rhs);
+                    MLIR_ValueHandle j_v = emit_expr_i32(e, sc, ex->rhs);
+                    // pp[i]: GEP at base of pp (which holds T**), stride i.
+                    MLIR_ValueHandle base_pp = emit_load_v(e, sym_addr(e, s), e->ptr);
+                    int32_t *path1 = arena_new_array(e->arena, int32_t, 1);
+                    path1[0] = LLVM_GEP_DYN;
+                    MLIR_ValueHandle *dyn1 = arena_new_array(e->arena, MLIR_ValueHandle, 1);
+                    dyn1[0] = i_v;
+                    MLIR_ValueHandle slot = emit_gep(e, base_pp, e->ptr, path1, 1, dyn1, 1);
+                    // Load T* from that slot.
+                    MLIR_ValueHandle inner = emit_load_v(e, slot, e->ptr);
+                    // Decide element type of inner (T).
+                    MLIR_TypeHandle elem = e->i8;
+                    if (s->type.pointee) {
+                        TypeKind pk = s->type.pointee->kind;
+                        if (pk == TY_PTR_CHAR) elem = e->i8;
+                        else if (pk == TY_PTR_I32) {
+                            elem = s->type.pointee->ptr_is_i64 ? e->i64
+                                 : s->type.pointee->ptr_is_f32 ? e->f32
+                                 : s->type.pointee->ptr_is_f64 ? e->f64
+                                 : e->i32;
+                        }
+                    }
+                    int32_t *path2 = arena_new_array(e->arena, int32_t, 1);
+                    path2[0] = LLVM_GEP_DYN;
+                    MLIR_ValueHandle *dyn2 = arena_new_array(e->arena, MLIR_ValueHandle, 1);
+                    dyn2[0] = j_v;
+                    r.base_ptr = emit_gep(e, inner, elem, path2, 1, dyn2, 1);
+                    r.elem_ty = elem;
+                    return r;
+                }
+            }
             // Multi-dim array: m[i][j] for `int m[N1][N2];`.
             if (ex->lhs->kind == EX_INDEX &&
                 ex->lhs->lhs->kind == EX_VAR) {

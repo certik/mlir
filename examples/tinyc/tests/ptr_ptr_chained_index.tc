@@ -1,0 +1,17 @@
+// Regression: chained subscript pp[i][j] for char**/int** — used by
+// `argv[i][0]` flag-parsing in mlir/parser.c.
+int main(int argc, char **argv) {
+    char *a = "abc";
+    char *b = "xyz";
+    char *arr[2];
+    arr[0] = a;
+    arr[1] = b;
+    char **pp = arr;
+    print(pp[0][0]);
+    print(pp[0][1]);
+    print(pp[0][2]);
+    print(pp[1][0]);
+    print(pp[1][1]);
+    print(pp[1][2]);
+    return 0;
+}
