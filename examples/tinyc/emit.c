@@ -1467,6 +1467,26 @@ static MLIR_ValueHandle resolve_struct_source(E *e, Scope *sc, Expr *arg, Struct
             }
         }
         if (arg->lhs->kind != EX_VAR) {
+            // Generic case: `&<lvalue-chain>` where the lvalue resolves
+            // to a struct-typed slot reachable via FIELD/ARROW/INDEX
+            // descent (e.g. `&st->scopes[i]`).
+            Type t = infer_expr_type(e, sc, arg->lhs);
+            if (t.kind == TY_STRUCT) {
+                StructDef *sd = find_struct(e, t.struct_name);
+                if (sd) {
+                    SCtx c = walk_struct_lhs(e, sc, arg->lhs);
+                    if (c.ok && c.sd == sd) {
+                        LVal lv = (LVal){0};
+                        lv.base_ptr = c.base_ptr;
+                        lv.source_elem = c.source_elem;
+                        lv.const_path = c.const_path;
+                        lv.n_const_path = c.n_const_path;
+                        lv.dyn_index = c.dyn_index;
+                        *out_sd = sd;
+                        return lval_address(e, lv);
+                    }
+                }
+            }
             EMIT_ERR(e, "&expr in struct context requires a simple variable");
             return MLIR_INVALID_HANDLE;
         }

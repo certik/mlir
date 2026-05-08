@@ -1,0 +1,25 @@
+struct Inner { int a; int b; };
+
+struct Container {
+    struct Inner *items;
+    int n;
+};
+
+void set(struct Inner *p, int v) { p->a = v; p->b = v * 10; }
+
+int main() {
+    struct Inner storage[3];
+    struct Container c;
+    c.items = storage;
+    c.n = 3;
+    set(&c.items[0], 1);
+    set(&c.items[1], 2);
+    struct Container *cp = &c;
+    set(&cp->items[2], 3);
+    print(storage[0].a); print(storage[0].b);
+    print(storage[1].a); print(storage[1].b);
+    print(storage[2].a); print(storage[2].b);
+    return 0;
+}
+
+
