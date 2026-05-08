@@ -19,13 +19,16 @@ if errorlevel 1 exit /b 1
 cl /nologo /std:c11 /Zc:preprocessor /MD /DPLATFORM_SKIP_ENTRY /I corec /I . /c corec\platform\platform_windows.c
 if errorlevel 1 exit /b 1
 
+ml64 /nologo /c corec\platform\win_chkstk_x64.asm
+if errorlevel 1 exit /b 1
+
 cl /nologo /std:c++17 /MD /EHsc /GR- /I corec /I . /I "%CONDA_PREFIX%\Library\include" /c mlir_api_impl_upstream.cpp
 if errorlevel 1 exit /b 1
 
 link /nologo /out:parser_upstream.exe ^
     upstream_main.obj parser.obj tokenizer.obj mlir_parser.obj mlir_classic_printer.obj mlir_generic_printer.obj ^
     op_parsers.obj mlir_op_names.obj mlir_api_impl_upstream.obj ^
-    io.obj buddy.obj arena.obj scratch.obj format.obj math.obj string.obj mem.obj numconv.obj assert.obj exit.obj platform_windows.obj ^
+    io.obj buddy.obj arena.obj scratch.obj format.obj math.obj string.obj mem.obj numconv.obj assert.obj exit.obj platform_windows.obj win_chkstk_x64.obj ^
     /LIBPATH:"%CONDA_PREFIX%\Library\lib" @mlir_libs.rsp %LLVM_LIBS% ntdll.lib zlib.lib zstd.lib
 if errorlevel 1 exit /b 1
 
