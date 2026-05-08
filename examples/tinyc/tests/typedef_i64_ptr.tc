@@ -1,0 +1,22 @@
+// `Td *` where Td is a typedef for `long`/i64 must yield a 64-bit pointer.
+
+typedef long Long;
+
+void fill(Long *buf, int n) {
+    int i;
+    for (i = 0; i < n; i = i + 1) {
+        buf[i] = (long)(100 + i);
+    }
+}
+
+int main() {
+    Long *p;
+    p = (Long *)malloc(sizeof(long) * 4);
+    fill(p, 4);
+    print(p[0]);
+    print(p[1]);
+    print(p[2]);
+    print(p[3]);
+    free(p);
+    return 0;
+}

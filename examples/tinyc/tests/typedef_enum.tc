@@ -1,0 +1,22 @@
+// `typedef enum { ... } Name;` registers Name as a typedef for int and
+// brings the enumerators into scope as int constants.
+typedef enum {
+    COLOR_RED,    // 0
+    COLOR_GREEN,  // 1
+    COLOR_BLUE    // 2
+} Color;
+
+int classify(Color c) {
+    if (c == COLOR_RED) return 100;
+    if (c == COLOR_GREEN) return 200;
+    return 300;
+}
+
+int main() {
+    Color c;
+    c = COLOR_GREEN;
+    print(c);            // 1
+    print(classify(c));  // 200
+    print(COLOR_BLUE);   // 2
+    return 0;
+}

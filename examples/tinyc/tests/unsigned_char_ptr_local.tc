@@ -1,0 +1,28 @@
+// Regression: `unsigned char *p` (and `const unsigned char *`) used as a
+// LOCAL variable must produce i8-stride pointer access, just like
+// `char *p`.  Previously tinyc only set TY_PTR_CHAR when the *current*
+// token at decl time was the `char` keyword, so any signedness modifier
+// in front (`unsigned char *`, `signed char *`) silently fell back to
+// TY_PTR_I32 and caused 4-byte-strided indexing.
+extern int printf(const char *fmt, ...);
+
+int main() {
+    // Use a string literal so its storage is a real `[N x i8]` global,
+    // independent of the unrelated `char[N]` local-array codegen issue.
+    const unsigned char *p = (const unsigned char *)"ABCDEFG";
+    int sum = 0;
+    for (int i = 0; i < 7; i++) {
+        sum = sum + (int)p[i];
+    }
+    // Expected: 'A'+'B'+...+'G' = 65+66+67+68+69+70+71 = 476
+    printf("sum=%d\n", sum);
+
+    // memchr-style scan of an unsigned-char view of another literal.
+    const unsigned char *q = (const unsigned char *)"No args: {}";
+    int found = -1;
+    for (int i = 0; i < 11; i++) {
+        if (q[i] == (unsigned char)'{') { found = i; break; }
+    }
+    printf("found_at=%d\n", found);
+    return 0;
+}

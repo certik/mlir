@@ -1,0 +1,11 @@
+int main() {
+    int a = 0x40;
+    int b = (0x40 | 0x4 | 0x20);
+    int c = 0xFF;
+    int64_t d = 0xabcdL;
+    print((int64_t)a);
+    print((int64_t)b);
+    print((int64_t)c);
+    print(d);
+    return 0;
+}

@@ -1,0 +1,16 @@
+struct Pos { int chunk_id; int ofs; };
+
+struct Pos make(int a, int b) {
+    struct Pos r = {.chunk_id = a, .ofs = b};
+    return r;
+}
+
+int main() {
+    struct Pos p = make(7, 42);
+    print((int64_t)p.chunk_id);
+    print((int64_t)p.ofs);
+    struct Pos q = make(100, 200);
+    print((int64_t)q.chunk_id);
+    print((int64_t)q.ofs);
+    return 0;
+}

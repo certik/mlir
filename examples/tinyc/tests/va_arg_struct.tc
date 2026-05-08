@@ -1,0 +1,31 @@
+extern int printf(const char *fmt, ...);
+
+struct Pt {
+    int x;
+    int y;
+};
+
+int sum_pts(int n, ...) {
+    __builtin_va_list ap;
+    __builtin_va_start(ap, n);
+    int total;
+    total = 0;
+    int i;
+    i = 0;
+    while (i < n) {
+        struct Pt p = __builtin_va_arg(ap, struct Pt);
+        total = total + p.x + p.y;
+        i = i + 1;
+    }
+    __builtin_va_end(ap);
+    return total;
+}
+
+int main() {
+    struct Pt a;
+    a.x = 1; a.y = 2;
+    struct Pt b;
+    b.x = 10; b.y = 20;
+    printf("%d\n", sum_pts(2, a, b));
+    return 0;
+}

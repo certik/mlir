@@ -1,0 +1,25 @@
+// Read/write of an int64 struct field through both a struct local and a
+// struct pointer (->).
+typedef struct vec_s {
+    long size;
+    long max;
+} Vec;
+
+void grow(Vec *v) {
+    v->max = v->max * 2LL;
+    v->size = v->size + 1LL;
+}
+
+int main() {
+    Vec v;
+    v.size = 0LL;
+    v.max = 4LL;
+    grow(&v);
+    grow(&v);
+    print(v.size);  // 2
+    print(v.max);   // 16
+    long s;
+    s = v.size + v.max;
+    print(s);       // 18
+    return 0;
+}

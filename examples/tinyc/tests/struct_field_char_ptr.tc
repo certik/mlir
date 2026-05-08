@@ -1,0 +1,27 @@
+// Loading a struct field of type `char *` and then doing pointer
+// arithmetic on the loaded value must use a 1-byte stride. Previously
+// tinyc tagged the loaded pointer with no element kind, so the
+// downstream GEP fell back to i32 stride and `arena->current_ptr +=
+// aligned_size` advanced 4 bytes per unit instead of 1.
+extern int printf(const char *fmt, ...);
+
+typedef struct A {
+    int     n;
+    char   *p;
+} A;
+
+static char buf[16];
+
+int main() {
+    A a;
+    a.n = 0;
+    a.p = buf;
+    int i;
+    for (i = 0; i < 5; i++) {
+        *(a.p + i) = (char)('A' + i);
+    }
+    a.p += 5;
+    *a.p = 0;
+    printf("buf=%s\n", buf);
+    return 0;
+}

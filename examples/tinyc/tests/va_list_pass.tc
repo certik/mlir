@@ -1,0 +1,25 @@
+extern int printf(const char *fmt, ...);
+
+// Forwarding a va_list rvalue to another variadic helper.
+void vprint(const char *fmt, va_list ap) {
+    int i;
+    i = 0;
+    while (i < 3) {
+        int v;
+        v = va_arg(ap, int);
+        printf("%d\n", v);
+        i = i + 1;
+    }
+}
+
+void show(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vprint(fmt, ap);
+    va_end(ap);
+}
+
+int main() {
+    show("x", 7, 8, 9);
+    return 0;
+}

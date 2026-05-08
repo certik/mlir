@@ -1,0 +1,28 @@
+// Pointer arithmetic on a struct pointer must use sizeof(struct) as the
+// stride (not sizeof(int)).  Regression test: previously `p + 1` on a
+// `struct buddy_block *` was emitted as a GEP with element type i32,
+// producing an offset of 4 bytes instead of sizeof(struct).
+extern int printf(const char *fmt, ...);
+
+struct B {
+    int order;
+    struct B *prev;
+    struct B *next;
+};
+
+int main() {
+    struct B arr[3];
+    struct B *p = &arr[0];
+    struct B *q = p + 1;
+    struct B *r = p + 2;
+    long pi = (long)p;
+    long qi = (long)q;
+    long ri = (long)r;
+    long sz = (long)sizeof(struct B);
+    printf("sz=%ld\n", sz);
+    printf("q-p=%ld\n", qi - pi);
+    printf("r-p=%ld\n", ri - pi);
+    if (qi - pi != sz) return 1;
+    if (ri - pi != sz * 2) return 2;
+    return 0;
+}

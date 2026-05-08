@@ -212,6 +212,17 @@ extern "C" void MLIR_AppendBlockOp(MLIR_Context *, MLIR_BlockHandle b,
                                     MLIR_OpHandle op) {
     F<mlir::Block>(b)->push_back(F<mlir::Operation>(op));
 }
+extern "C" void MLIR_InsertBlockOpBeforeTerminator(MLIR_Context *,
+                                                   MLIR_BlockHandle b,
+                                                   MLIR_OpHandle op) {
+    auto *block = F<mlir::Block>(b);
+    auto *o = F<mlir::Operation>(op);
+    if (!block->empty() && block->back().hasTrait<mlir::OpTrait::IsTerminator>()) {
+        block->getOperations().insert(mlir::Block::iterator(&block->back()), o);
+    } else {
+        block->push_back(o);
+    }
+}
 extern "C" void MLIR_AppendBlockArg(MLIR_Context *, MLIR_BlockHandle bh,
                                      MLIR_ValueHandle vh) {
     auto *block = F<mlir::Block>(bh);
@@ -774,6 +785,11 @@ extern "C" MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *, strin
     auto &ctx = globalCtx().mctx;
     return makeNamedAttr(llvm::StringRef(name.str, name.size),
                          mlir::StringAttr::get(&ctx, llvm::StringRef(value.str, value.size)));
+}
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *, string name) {
+    auto &ctx = globalCtx().mctx;
+    auto attr = mlir::LLVM::LinkageAttr::get(&ctx, mlir::LLVM::Linkage::Internal);
+    return makeNamedAttr(llvm::StringRef(name.str, name.size), attr);
 }
 extern "C" MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *, string name,
                                                            MLIR_AttributeHandle *elements,

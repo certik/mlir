@@ -34,4 +34,17 @@ void printStr(const char *s) {
 // here, run the standard va_arg macro, and return the value.
 int            tinyc_va_arg_i32(va_list *ap) { return va_arg(*ap, int); }
 long long      tinyc_va_arg_i64(va_list *ap) { return va_arg(*ap, long long); }
+double         tinyc_va_arg_f64(va_list *ap) { return va_arg(*ap, double); }
 void          *tinyc_va_arg_ptr(va_list *ap) { return va_arg(*ap, void *); }
+
+// Generic struct va_arg: copies `size` bytes (rounded up to 8) from the
+// va_list into `out` by reading consecutive 8-byte words. Works for
+// Darwin ARM64 / SysV x86_64 where small structs occupy contiguous slots
+// in the variadic argument area.
+void tinyc_va_arg_struct(va_list *ap, void *out, long long size) {
+    long long *o = (long long *)out;
+    long long words = (size + 7) / 8;
+    for (long long i = 0; i < words; i++) {
+        o[i] = va_arg(*ap, long long);
+    }
+}

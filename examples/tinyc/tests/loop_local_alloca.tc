@@ -1,0 +1,25 @@
+// Local declarations inside a loop body must not allocate stack space on
+// each iteration.  Regression test: previously tinyc emitted one
+// `llvm.alloca` per iteration, causing very long loops (e.g. the corec
+// buddy allocator's `add_memory`) to blow the stack with `Bus error`.
+//
+// This test runs a long-running loop with several block-local declarations
+// and verifies the program completes without stack exhaustion.
+extern int printf(const char *fmt, ...);
+
+int main() {
+    // Use `long long` (fixed 64-bit) instead of `long` so the test is
+    // portable across LP64 (Linux/macOS, long=64) and LLP64 (Windows,
+    // long=32). The total exceeds 2^32 so a 32-bit accumulator would
+    // truncate.
+    long long sum = 0;
+    int i;
+    for (i = 0; i < 200000; i = i + 1) {
+        int a = i + 1;
+        int b = a * 2;
+        long long c = (long long)b;
+        sum = sum + c;
+    }
+    printf("%lld\n", sum);
+    return 0;
+}

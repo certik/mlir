@@ -1,0 +1,12 @@
+extern int printf(const char *fmt, ...);
+
+int main() {
+    double a = 1e3;
+    double b = 2E2;
+    double c = 1.5e2;
+    int ai = (int)a;
+    int bi = (int)b;
+    int ci = (int)c;
+    printf("%d %d %d\n", ai, bi, ci);
+    return 0;
+}

@@ -336,3 +336,240 @@ expected_stdout = "10\n101\n7\n18\n"
 [[test]]
 name = "do_while_macro"
 expected_stdout = "42\n"
+
+[[test]]
+name = "braceless_if"
+expected_stdout = "8\n7\n7\n7\n"
+
+[[test]]
+name = "typedef_struct_anon"
+expected_stdout = "7\n30\n"
+
+[[test]]
+name = "typedef_enum"
+expected_stdout = "1\n200\n2\n"
+
+[[test]]
+name = "struct_field_i64"
+expected_stdout = "2\n16\n18\n"
+
+[[test]]
+name = "variadic_struct_return"
+expected_stdout = "13\n7\n25\n15\n"
+
+[[test]]
+name = "cast_int"
+expected_stdout = "100\n7000\n-1\n"
+
+[[test]]
+name = "typedef_ptr_decl"
+expected_stdout = "3\n4\n7\n"
+
+[[test]]
+name = "struct_ptr_field_index"
+expected_stdout = "10\n11\n12\n1000000\n2000000\n3000000\n"
+
+[[test]]
+name = "struct_call_in_arg"
+expected_stdout = "1\n10\n20\n2\n30\n40\n"
+
+[[test]]
+name = "typedef_i64_ptr"
+expected_stdout = "100\n101\n102\n103\n"
+
+[[test]]
+name = "cast_null"
+expected_stdout = "1\n2\n"
+
+[[test]]
+name = "struct_init"
+expected_stdout = "1\n2\n3\n10\n20\n30\n100\n400\n700\n"
+
+[[test]]
+name = "generic"
+expected_stdout = "1\n2\n3\n4\n5\n9\n100\n8\n16\n32\n"
+
+[[test]]
+name = "hex_int"
+expected_stdout = "64\n100\n255\n43981\n"
+
+[[test]]
+name = "multi_decl"
+expected_stdout = "1\n2\n3\n10\n5\n20\n1\n2\n100\n200\n"
+
+[[test]]
+name = "struct_ptr_init_call"
+expected_stdout = "10\n11\n20\n21\n"
+
+[[test]]
+name = "structptr_index_field"
+expected_stdout = "100\n200\n"
+
+[[test]]
+name = "struct_return_decl"
+expected_stdout = "7\n42\n100\n200\n"
+
+[[test]]
+name = "array_zero_init"
+expected_stdout = "0\n0\n0\n0\n0\n0\n99\n7\n"
+
+[[test]]
+name = "double_basic"
+expected_stdout = "3.75\n3.375\n-1.5\n2\n7\n3.5\n1\n"
+
+[[test]]
+name = "double_va_arg"
+expected_stdout = "2.5\n3.75\n1.5\n"
+
+[[test]]
+name = "deref_struct_pass"
+expected_stdout = "3\n4\n"
+
+[[test]]
+name = "array_unsized_init"
+expected_stdout = "10\n40\n4\n3\n98\n97\n"
+
+[[test]]
+name = "array_len_sizeof_div"
+expected_stdout = "8\n5\n16\n"
+
+[[test]]
+name = "func_macro"
+expected_stdout = "greet\nsquare=16\nmain\n"
+
+[[test]]
+name = "builtin_va"
+expected_stdout = "10\n20\n30\n"
+
+[[test]]
+name = "va_list_pass"
+expected_stdout = "7\n8\n9\n"
+
+[[test]]
+name = "addr_of_struct_index"
+expected_stdout = "333\n330\n"
+
+[[test]]
+name = "int_suffix_ul"
+expected_stdout = "4096\n4096\n4096\n4096\n7\n"
+
+[[test]]
+name = "compound_literal_array"
+expected_stdout = "2\n6\n"
+
+[[test]]
+name = "global_array"
+expected_stdout = "0 0\n1 10\n2 20\n3 30\n24\n1000000005\n"
+
+[[test]]
+name = "inttoptr_cast"
+expected_stdout = "42\n"
+
+[[test]]
+name = "struct_fwd_then_def"
+expected_stdout = "16\n"
+
+[[test]]
+name = "goto_label"
+expected_stdout = "10\n"
+
+[[test]]
+name = "compound_designated"
+expected_stdout = "3 7 10 20\n"
+
+[[test]]
+name = "bnot_i64"
+expected_stdout = "-16\n"
+
+[[test]]
+name = "global_ptr_array"
+expected_stdout = "1\n"
+
+[[test]]
+name = "va_arg_struct"
+expected_stdout = "33\n"
+
+[[test]]
+name = "float_ptr"
+expected_stdout = "4 6\n"
+
+[[test]]
+name = "float_exp_lit"
+expected_stdout = "1000 200 150\n"
+
+[[test]]
+name = "empty_stmt"
+expected_stdout = "3\n"
+
+[[test]]
+name = "neg_i64"
+expected_stdout = "-1000000000000\n"
+
+[[test]]
+name = "global_cast_null_shift"
+expected_stdout = "1 256\n"
+
+[[test]]
+name = "builtin_sqrt"
+expected_stdout = "4 9\n"
+
+[[test]]
+name = "static_func"
+expected_stdout = "21\n"
+[[test]]
+name = "struct_ptr_arith"
+expected_stdout = "sz=24\nq-p=24\nr-p=48\n"
+
+[[test]]
+name = "loop_local_alloca"
+expected_stdout = "40000200000\n"
+
+[[test]]
+name = "postfix_inc"
+expected_stdout = "a=5\nb=6\nx=5\nbuf=hi len=2\nn=786432 nlen=6\n"
+
+[[test]]
+name = "global_long"
+expected_stdout = "105 14 12\nsum=131\n"
+
+[[test]]
+name = "typedef_u8_ptr"
+expected_stdout = "a=ABCDEF\nb=abcdef\nc=012345\n"
+
+[[test]]
+name = "struct_field_char_ptr"
+expected_stdout = "buf=ABCDE\n"
+
+[[test]]
+name = "compound_struct_field"
+expected_stdout = "tag=7 x=11 y=22\ntag=1 x=0 y=0\n"
+
+[[test]]
+name = "sizeof_string_lit"
+expected_stdout = "hi=3 empty=1 hello=6 ptr=8\n"
+
+[[test]]
+name = "variadic_struct_arg_count"
+expected_stdout = "size=2 count=0\nsize=2 count=5\nsret size=2 count=0\nr.size=2\nsret size=2 count=7\nr2.size=2\n"
+
+[[test]]
+name = "struct_param_memchr"
+expected_stdout = """\
+n=11
+found=1
+offset=9
+"""
+[[test]]
+name = "unsigned_char_ptr_local"
+expected_stdout = """\
+sum=476
+found_at=9
+"""
+
+[[test]]
+name = "ptr_postfix_stride"
+expected_stdout = """\
+long: 20 30 20
+int: 8 7
+chr: 98 97
+"""

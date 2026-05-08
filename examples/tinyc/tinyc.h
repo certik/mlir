@@ -100,6 +100,7 @@ typedef enum {
     TY_I32,
     TY_I64,            // 64-bit signed int (long, long long, int64_t, size_t)
     TY_F32,
+    TY_F64,            // 64-bit IEEE-754 double
     TY_PTR_I32,        // alias-only pointer to int
     TY_PTR_CHAR,       // pointer to char (string literals / globals)
     TY_ARRAY_I32,      // fixed-size int[N] / int[N][M] (length(s) in array_len[2])
@@ -130,6 +131,13 @@ struct Type {
     TypeKind kind;
     int64_t  array_len;       // 1st dimension for TY_ARRAY_I32 / TY_ARRAY_STRUCT
     int64_t  array_len2;      // 2nd dimension for TY_ARRAY_I32 (0 = 1D)
+    // Optional deferred array-length expression (constant integer
+    // expression, may use sizeof of in-scope variables). When non-NULL,
+    // the emitter folds it via ast_fold_int(scope) at the alloca site
+    // and writes the result into `array_len` before allocating storage.
+    // Used to support `T arr[CONST_EXPR]` where CONST_EXPR is not a bare
+    // integer literal (e.g. `T arr[sizeof(x) / sizeof(x[0])]`).
+    struct Expr *array_len_expr;
     string   struct_name;     // for TY_STRUCT
     // For TY_FNPTR: arena-allocated return type and parameter types.
     // Storage type is always !llvm.ptr; this signature is consulted at
@@ -141,6 +149,30 @@ struct Type {
     // at. Carries the inner pointee kind / fnptr signature / struct_name
     // so a deref can be typed correctly.
     Type    *pointee;
+    // For TY_PTR_I32: when true, the pointed-at element is 64-bit wide
+    // (i64). Used to map `int64_t *` / `long *` / `size_t *` to a single
+    // generic pointer kind without losing the element width needed for
+    // pointer arithmetic, indexing, and dereferenced-load typing.
+    bool     ptr_is_i64;
+    // For TY_PTR_I32: when true, the pointed-at element is f32 (float).
+    // Used to map `float *` to a generic pointer kind without losing the
+    // element width needed for dereferenced-load/store typing.
+    bool     ptr_is_f32;
+    // For TY_PTR_I32: when true, the pointed-at element is f64 (double).
+    bool     ptr_is_f64;
+    // For TY_ARRAY_I32: when true, the elements are 64-bit wide (i64).
+    // Used to support `size_t arr[N]` / `long arr[N]` / `int64_t arr[N]`
+    // without introducing a separate TY_ARRAY_I64 kind.
+    bool     array_elem_is_i64;
+    // For TY_ARRAY_I32: when true, the elements are 8-bit wide (i8/char).
+    // Used to support `char arr[N]` without introducing a separate
+    // TY_ARRAY_CHAR kind.
+    bool     array_elem_is_i8;
+    // For TY_I32/TY_I64: optional explicit bit width hint (0 = unspecified,
+    // 8/16/32/64 = explicit width). Used by `_Generic` for typedef
+    // matching on narrow-int aliases (`int8_t`, `int16_t`, ...).
+    int      int_bits;
+    bool     int_unsigned;
 };
 
 typedef enum {
@@ -162,6 +194,12 @@ typedef enum {
     EX_TERNARY,        // c ? a : b — lhs=cond, rhs=then, lvalue=else
     EX_COMPOUND,       // (T){v0, v1, ...} — cast_type + args
     EX_VA_ARG,         // va_arg(ap, T) — lhs = ap lvalue, cast_type = T
+    EX_GENERIC,        // _Generic(lhs, T1: a1, ..., default: aN)
+                       // lhs = controlling expression (NOT evaluated);
+                       // args[i] = result expressions; generic_types[i] =
+                       // matching type for entry i (kind==TY_VOID +
+                       // generic_is_default[i] flag indicates the
+                       // `default:` entry).
 } ExprKind;
 
 typedef enum {
@@ -184,6 +222,8 @@ struct Expr {
     int64_t int_value;
     bool    is_i64;          // true iff the integer literal had L/LL suffix
                              // and so should be emitted as TY_I64.
+    bool    is_f64;          // true iff the float literal has TY_F64 type
+                             // (i.e. no `f` suffix; C's default for `1.0`).
     // For EX_FLOAT
     double float_value;
     // For EX_VAR
@@ -198,6 +238,9 @@ struct Expr {
     // For EX_ASSIGN
     Expr *lvalue;          // an lvalue expression (EX_VAR / EX_INDEX / EX_DEREF)
     Expr *rhs_assign;
+    bool is_post_step;     // EX_ASSIGN that originated from a postfix `x++` /
+                           // `x--`. Emit reads the old value of the lvalue,
+                           // stores `old ± 1`, and yields the OLD value.
     // For EX_INDEX (lhs = array, rhs = index)
     // For EX_ADDR / EX_DEREF (lhs = inner)
     // For EX_SIZEOF / EX_CAST: cast_type is the type being asked about /
@@ -206,6 +249,16 @@ struct Expr {
     // case the emitter infers the type from the expression.
     Type cast_type;
     bool sizeof_is_expr;
+    // For EX_COMPOUND with designated initializers: parallel to `args`.
+    // compound_field_names[i].size == 0 indicates a positional entry; a
+    // non-empty name selects the named field. NULL when there are no
+    // designated entries at all.
+    string *compound_field_names;
+    // For EX_GENERIC: parallel to args[]. generic_types[i] is the type
+    // at the i-th association entry; generic_default_index is the
+    // index of the `default:` entry, or -1 if absent.
+    Type   *generic_types;
+    int     generic_default_index;
     int line;
 };
 
@@ -222,6 +275,8 @@ typedef enum {
     ST_BREAK,          // break;
     ST_CONTINUE,       // continue;
     ST_SWITCH,         // switch (e) { case 1: ... default: ... }
+    ST_LABEL,          // label:
+    ST_GOTO,           // goto label;
 } StmtKind;
 
 typedef struct Stmt Stmt;
@@ -262,8 +317,11 @@ struct Stmt {
     VecStmtPtr for_body;
     // ST_BLOCK / ST_SWITCH (body)
     VecStmtPtr block_body;
+    bool block_no_scope;
     // ST_SWITCH
     VecSwitchCase switch_cases;
+    // ST_LABEL / ST_GOTO
+    string label_name;
     int line;
 };
 
@@ -287,6 +345,8 @@ typedef struct {
                              // an ellipsis. Such functions are emitted as
                              // `llvm.func` (not `func.func`) so the var-arg
                              // ABI is modeled at the call site.
+    bool       is_static;    // `static` at file scope: emit with private
+                             // visibility/internal linkage.
     int        line;
 } Func;
 
@@ -325,6 +385,8 @@ typedef struct {
     Type    type;
     bool    has_init;
     bool    is_extern;      // `extern T x;` — emit external-linkage global
+    bool    is_static;      // `static` at file scope: emit with internal
+                            // linkage.
     int64_t init_int;
     double  init_float;
     string  init_str;       // for TY_PTR_CHAR initialized from string literal
@@ -357,6 +419,7 @@ typedef enum {
     TC_TK_IDENT,
     TC_TK_KW_INT,
     TC_TK_KW_FLOAT,
+    TC_TK_KW_DOUBLE,
     TC_TK_KW_RETURN,
     TC_TK_KW_IF,
     TC_TK_KW_ELSE,
@@ -383,7 +446,11 @@ typedef enum {
     TC_TK_KW_LONG,
     TC_TK_KW_SIGNED,
     TC_TK_KW_UNSIGNED,
+    TC_TK_KW_SHORT,
+    TC_TK_KW_BOOL,
     TC_TK_KW_VA_LIST,
+    TC_TK_KW_GENERIC,
+    TC_TK_KW_GOTO,
     TC_TK_STRING_LIT,
     TC_TK_LPAREN, TC_TK_RPAREN,
     TC_TK_LBRACE, TC_TK_RBRACE,
@@ -408,6 +475,7 @@ typedef struct {
     TcTokKind kind;
     int64_t int_value;
     bool    is_i64;          // EX_INT / TC_TK_INT_LIT marked with L/LL suffix
+    bool    is_f64;          // TC_TK_FLOAT_LIT without `f` suffix (i.e. double)
     double  float_value;
     string text;             // interned identifier text (for IDENT)
     int line;
@@ -440,10 +508,12 @@ Program *tinyc_parse(Arena *arena, VecTcTok toks);
 //     keeps the initialized one; two initialized errors.
 // Each call has its own typedef / enumerator scope (matching per-file
 // preprocessor isolation): typedefs do not leak across files.
-void tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks);
+// Returns the number of parse errors encountered (0 on success).
+int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks);
 
 // ---------------- Emitter ----------------
 
 // Build a top-level MLIR module from `program`. The returned op handle
 // is the `builtin.module` op. Uses only mlir_api.h.
 MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program);
+int tinyc_last_emit_errors(void);

@@ -1,0 +1,22 @@
+// Pass `*p` (a struct rvalue) by value to a function that takes the
+// struct by value. The compiler should treat the deref as a struct
+// source and emit a byval copy.
+struct Point {
+    int x;
+    int y;
+};
+
+void show(struct Point p) {
+    print(p.x);
+    print(p.y);
+}
+
+int main() {
+    struct Point pt;
+    pt.x = 3;
+    pt.y = 4;
+    struct Point *q;
+    q = &pt;
+    show(*q);   // 3, 4
+    return 0;
+}

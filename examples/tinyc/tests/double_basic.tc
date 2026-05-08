@@ -1,0 +1,36 @@
+// Basic `double` (TY_F64) support: literal, arithmetic, comparison,
+// casts to/from int and float, and printing.
+int main() {
+    double a;
+    double b;
+    a = 1.5;
+    b = 2.25;
+    double s;
+    s = a + b;
+    print(s);            // 3.75
+
+    double p;
+    p = a * b;
+    print(p);            // 3.375
+
+    double n;
+    n = -a;
+    print(n);            // -1.5
+
+    int i;
+    i = (int)b;
+    print(i);            // 2
+
+    double d;
+    d = (double)7;
+    print(d);            // 7
+
+    float f;
+    f = 3.5f;
+    double w;
+    w = (double)f;
+    print(w);            // 3.5
+
+    if (a < b) print(1); else print(0);  // 1
+    return 0;
+}

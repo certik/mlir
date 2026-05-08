@@ -1,0 +1,22 @@
+extern int printf(const char *fmt, ...);
+
+// __builtin_va_start / __builtin_va_end aliases (clang -E expands va_start
+// macros to these on some targets/configurations).
+void show(int n, ...) {
+    va_list ap;
+    __builtin_va_start(ap, n);
+    int i;
+    i = 0;
+    while (i < n) {
+        int v;
+        v = va_arg(ap, int);
+        printf("%d\n", v);
+        i = i + 1;
+    }
+    __builtin_va_end(ap);
+}
+
+int main() {
+    show(3, 10, 20, 30);
+    return 0;
+}

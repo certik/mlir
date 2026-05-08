@@ -1,0 +1,17 @@
+extern int printf(const char *fmt, ...);
+
+struct Point {
+    int x;
+    int y;
+};
+
+struct Point make_point(int a, int b) {
+    return (struct Point){.x = a, .y = b};
+}
+
+int main() {
+    struct Point p = (struct Point){.y = 7, .x = 3};
+    struct Point q = make_point(10, 20);
+    printf("%d %d %d %d\n", p.x, p.y, q.x, q.y);
+    return 0;
+}

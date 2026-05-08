@@ -1,0 +1,23 @@
+// A variadic function that returns a struct.
+typedef struct point_s {
+    int x;
+    int y;
+} Point;
+
+Point shift(int n, int x0, ...) {
+    Point p;
+    p.x = x0 + n;
+    p.y = n - x0;
+    return p;
+}
+
+int main() {
+    Point a;
+    a = shift(10, 3);
+    print(a.x);  // 13
+    print(a.y);  // 7
+    a = shift(20, 5, 99, 88);
+    print(a.x);  // 25
+    print(a.y);  // 15
+    return 0;
+}

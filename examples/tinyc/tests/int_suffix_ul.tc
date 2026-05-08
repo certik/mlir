@@ -1,0 +1,20 @@
+extern int printf(const char *fmt, ...);
+
+int main() {
+    long long a;
+    long long b;
+    long long c;
+    long long d;
+    int e;
+    a = 4096UL;
+    b = 4096LU;
+    c = 4096ULL;
+    d = 4096LLU;
+    e = 7U;
+    printf("%lld\n", a);
+    printf("%lld\n", b);
+    printf("%lld\n", c);
+    printf("%lld\n", d);
+    printf("%d\n", e);
+    return 0;
+}

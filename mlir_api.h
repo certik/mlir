@@ -293,6 +293,7 @@ MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_RegionHandle region, size_t idx);
 
 MLIR_BlockHandle MLIR_CreateBlock(MLIR_Context *ctx);
 void MLIR_AppendBlockOp(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_OpHandle op);
+void MLIR_InsertBlockOpBeforeTerminator(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_OpHandle op);
 void MLIR_AppendBlockArg(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_ValueHandle arg);
 size_t MLIR_GetBlockNumOps(MLIR_BlockHandle block);
 MLIR_OpHandle MLIR_GetBlockOp(MLIR_BlockHandle block, size_t idx);
@@ -443,6 +444,7 @@ MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *ctx, string name,
 MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, string name, double value, MLIR_TypeHandle type);
 MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *ctx, string name, bool value);
 MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *ctx, string name, string value);
+MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *ctx, string name);
 MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count);
 // Dense i32 array attribute (DenseI32ArrayAttr) — used e.g. for
 // `llvm.getelementptr`'s `rawConstantIndices`.

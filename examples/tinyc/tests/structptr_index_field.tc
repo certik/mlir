@@ -1,0 +1,10 @@
+struct R { int a; int b; };
+
+int main() {
+    struct R one;
+    one.a = 100; one.b = 200;
+    struct R *p = &one;
+    print((int64_t)p[0].a);
+    print((int64_t)p[0].b);
+    return 0;
+}

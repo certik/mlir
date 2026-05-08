@@ -1,0 +1,29 @@
+// `T *` where T is a typedef of an 8-bit type (e.g. `unsigned char` /
+// the built-in `uint8_t`) must use a 1-byte pointer stride. Previously
+// tinyc bucketed any non-struct integer typedef pointer under
+// TY_PTR_I32, so `uint8_t* p; p + 1;` produced a 4-byte stride GEP and
+// `*(p + i) = c;` clobbered three bytes past the intended offset.
+extern int printf(const char *fmt, ...);
+
+typedef unsigned char  u8_a;     // user typedef of unsigned char
+typedef int8_t         u8_b;     // resolved via tinyc's built-in int8_t
+typedef uint8_t        u8_c;     // resolved via tinyc's built-in uint8_t
+
+static u8_a buf_a[8];
+static u8_b buf_b[8];
+static u8_c buf_c[8];
+
+int main() {
+    int i;
+    for (i = 0; i < 6; i++) {
+        u8_a *pa = buf_a;
+        u8_b *pb = buf_b;
+        u8_c *pc = buf_c;
+        *(pa + i) = (u8_a)('A' + i);
+        *(pb + i) = (u8_b)('a' + i);
+        *(pc + i) = (u8_c)('0' + i);
+    }
+    buf_a[6] = 0; buf_b[6] = 0; buf_c[6] = 0;
+    printf("a=%s\nb=%s\nc=%s\n", (char*)buf_a, (char*)buf_b, (char*)buf_c);
+    return 0;
+}

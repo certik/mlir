@@ -1,0 +1,25 @@
+// Use a struct-returning call directly as a struct argument to another call.
+
+typedef struct Pt {
+    int x;
+    int y;
+} Pt;
+
+Pt make_pt(int a, int b) {
+    Pt p;
+    p.x = a;
+    p.y = b;
+    return p;
+}
+
+void show(Pt p, int tag) {
+    print(tag);
+    print(p.x);
+    print(p.y);
+}
+
+int main() {
+    show(make_pt(10, 20), 1);
+    show(make_pt(30, 40), 2);
+    return 0;
+}

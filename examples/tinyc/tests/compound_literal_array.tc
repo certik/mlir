@@ -1,0 +1,23 @@
+extern int printf(const char *fmt, ...);
+
+struct V { const char *s; int n; };
+
+int total_len(struct V *vs, int n) {
+    int t;
+    int i;
+    t = 0;
+    i = 0;
+    while (i < n) {
+        t = t + vs[i].n;
+        i = i + 1;
+    }
+    return t;
+}
+
+int main() {
+    // Array compound literal of struct (1 element).
+    printf("%d\n", total_len((struct V[]){(struct V){"hi", 2}}, 1));
+    // Array compound literal of struct (multiple elements, sized).
+    printf("%d\n", total_len((struct V[3]){(struct V){"a", 1}, (struct V){"bb", 2}, (struct V){"ccc", 3}}, 3));
+    return 0;
+}

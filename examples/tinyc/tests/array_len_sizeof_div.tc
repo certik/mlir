@@ -1,0 +1,18 @@
+// Array length specifier may be a constant integer expression, including
+// `sizeof(arr) / sizeof(arr[0])`. Test both fixed-size and unsized
+// source arrays, and that the resulting array length matches.
+int main() {
+    int src[8] = {0};
+    int dst[sizeof(src) / sizeof(src[0])] = {0};
+    // Length should be 8.
+    print((int64_t)(sizeof(dst) / sizeof(dst[0])));
+
+    const char *names[] = {"a", "b", "c", "d", "e"};
+    int n = (int)(sizeof(names) / sizeof(names[0]));
+    print((int64_t)n);
+
+    // Use the folded constant as a multi-statement expression.
+    int copies[2 * (sizeof(src) / sizeof(src[0]))] = {0};
+    print((int64_t)(sizeof(copies) / sizeof(copies[0])));
+    return 0;
+}

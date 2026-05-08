@@ -1,0 +1,31 @@
+// Compound-literal initializer where one field is itself a struct
+// produced by another struct-returning call. tinyc must copy the
+// returned struct (sret buffer) into the outer field instead of
+// storing the sret pointer as a scalar.
+extern int printf(const char *fmt, ...);
+
+typedef struct Pos {
+    int x;
+    int y;
+} Pos;
+
+typedef struct Wrap {
+    int       tag;
+    Pos       pos;
+} Wrap;
+
+Pos make_pos(int a, int b) {
+    return (Pos){.x = a, .y = b};
+}
+
+Wrap make_wrap(int t, int a, int b) {
+    return (Wrap){.tag = t, .pos = make_pos(a, b)};
+}
+
+int main() {
+    Wrap w = make_wrap(7, 11, 22);
+    printf("tag=%d x=%d y=%d\n", w.tag, w.pos.x, w.pos.y);
+    Wrap z = (Wrap){.tag = 1, .pos = 0};
+    printf("tag=%d x=%d y=%d\n", z.tag, z.pos.x, z.pos.y);
+    return 0;
+}

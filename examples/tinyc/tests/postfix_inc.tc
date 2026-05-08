@@ -1,0 +1,48 @@
+// Postfix `x++` / `x--` must yield the value of `x` BEFORE the step.
+// Regression test: previously tinyc desugared `x++` to `x = x + 1`,
+// which yielded the new value (breaking C semantics). The most visible
+// breakage was `buf[len++] = ch;` writing at the wrong index.
+extern int printf(const char *fmt, ...);
+
+int writes(char *buf, int len, char ch) {
+    buf[len++] = ch;
+    return len;
+}
+
+int int_to_str(long val, char *buf) {
+    if (val == 0) { buf[0] = '0'; return 1; }
+    int len = 0;
+    while (val > 0) {
+        buf[len++] = (char)('0' + (val % 10));
+        val /= 10;
+    }
+    int i;
+    for (i = 0; i < len / 2; i++) {
+        char t = buf[i];
+        buf[i] = buf[len - 1 - i];
+        buf[len - 1 - i] = t;
+    }
+    return len;
+}
+
+int main() {
+    int x = 5;
+    int a = x++;
+    int b = x--;
+    printf("a=%d\n", a);    // 5 (old value of x)
+    printf("b=%d\n", b);    // 6 (old value of x)
+    printf("x=%d\n", x);    // 5 (after ++ then --)
+
+    char buf[32];
+    int len = writes(buf, 0, 'h');
+    len = writes(buf, len, 'i');
+    buf[len] = 0;
+    printf("buf=%s len=%d\n", buf, len);   // "hi" 2
+
+    char nb[32];
+    int nlen = int_to_str(786432, nb);
+    nb[nlen] = 0;
+    printf("n=%s nlen=%d\n", nb, nlen);    // 786432 6
+    return 0;
+}
+

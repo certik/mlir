@@ -1,0 +1,31 @@
+extern int printf(const char *fmt, ...);
+
+struct P { int x; int y; };
+
+int sum_first(struct P *arr, int n) {
+    int i;
+    int s;
+    s = 0;
+    i = 0;
+    while (i < n) {
+        struct P *q;
+        q = &arr[i];
+        s = s + q->x + q->y;
+        i = i + 1;
+    }
+    return s;
+}
+
+int main() {
+    struct P a[3];
+    a[0].x = 1; a[0].y = 2;
+    a[1].x = 10; a[1].y = 20;
+    a[2].x = 100; a[2].y = 200;
+    // local array decays — pass &a[0]
+    printf("%d\n", sum_first(&a[0], 3));
+    // pointer indirection variant
+    struct P *p;
+    p = a;
+    printf("%d\n", sum_first(&p[1], 2));
+    return 0;
+}

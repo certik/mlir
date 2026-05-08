@@ -16,6 +16,7 @@ static bool is_alnum(char c) { return is_alpha(c) || is_digit(c); }
 static TcTokKind keyword_or_ident(string s) {
     if (str_eq(s, str_lit("int")))      return TC_TK_KW_INT;
     if (str_eq(s, str_lit("float")))    return TC_TK_KW_FLOAT;
+    if (str_eq(s, str_lit("double")))   return TC_TK_KW_DOUBLE;
     if (str_eq(s, str_lit("return")))   return TC_TK_KW_RETURN;
     if (str_eq(s, str_lit("if")))       return TC_TK_KW_IF;
     if (str_eq(s, str_lit("else")))     return TC_TK_KW_ELSE;
@@ -42,7 +43,13 @@ static TcTokKind keyword_or_ident(string s) {
     if (str_eq(s, str_lit("long")))     return TC_TK_KW_LONG;
     if (str_eq(s, str_lit("signed")))   return TC_TK_KW_SIGNED;
     if (str_eq(s, str_lit("unsigned"))) return TC_TK_KW_UNSIGNED;
+    if (str_eq(s, str_lit("short")))    return TC_TK_KW_SHORT;
+    if (str_eq(s, str_lit("_Bool")))    return TC_TK_KW_BOOL;
+    if (str_eq(s, str_lit("bool")))     return TC_TK_KW_BOOL;
+    if (str_eq(s, str_lit("_Generic")))    return TC_TK_KW_GENERIC;
     if (str_eq(s, str_lit("va_list"))) return TC_TK_KW_VA_LIST;
+    if (str_eq(s, str_lit("__builtin_va_list"))) return TC_TK_KW_VA_LIST;
+    if (str_eq(s, str_lit("goto")))     return TC_TK_KW_GOTO;
     return TC_TK_IDENT;
 }
 
@@ -170,20 +177,52 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
         if (is_digit(c)) {
             size_t j = i;
             int64_t v = 0;
+            // Hex literal: 0x... / 0X...
+            if (c == '0' && j + 1 < src.size &&
+                (src.str[j + 1] == 'x' || src.str[j + 1] == 'X')) {
+                j += 2;
+                while (j < src.size) {
+                    char h = src.str[j];
+                    int dv;
+                    if (h >= '0' && h <= '9') dv = h - '0';
+                    else if (h >= 'a' && h <= 'f') dv = 10 + (h - 'a');
+                    else if (h >= 'A' && h <= 'F') dv = 10 + (h - 'A');
+                    else break;
+                    v = v * 16 + dv;
+                    j++;
+                }
+                TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
+                // Optional integer-literal suffix: any mix of 'l'/'L' /
+                // 'u'/'U' in any order (see below for the decimal path).
+                for (int k = 0; k < 3 && j < src.size; k++) {
+                    char c2 = src.str[j];
+                    if (c2 == 'l' || c2 == 'L') { t.is_i64 = true; j++; }
+                    else if (c2 == 'u' || c2 == 'U') { j++; }
+                    else break;
+                }
+                VecTcTok_push_back(arena, &toks, t);
+                i = j; continue;
+            }
             while (j < src.size && is_digit(src.str[j])) {
                 v = v * 10 + (src.str[j] - '0');
                 j++;
             }
-            // Float literal: <digits>.<digits>[ (e|E)[+-]?<digits> ]
-            if (j < src.size && src.str[j] == '.' &&
-                j + 1 < src.size && is_digit(src.str[j + 1])) {
+            // Float literal: <digits>.<digits>[(e|E)[+-]?<digits>] OR
+            // <digits>(e|E)[+-]?<digits>
+            bool has_dot = (j < src.size && src.str[j] == '.' &&
+                            j + 1 < src.size && is_digit(src.str[j + 1]));
+            bool has_exp_only = (!has_dot && j < src.size &&
+                                 (src.str[j] == 'e' || src.str[j] == 'E'));
+            if (has_dot || has_exp_only) {
                 double f = (double)v;
-                j++; // consume '.'
-                double scale = 0.1;
-                while (j < src.size && is_digit(src.str[j])) {
-                    f += (double)(src.str[j] - '0') * scale;
-                    scale *= 0.1;
-                    j++;
+                if (has_dot) {
+                    j++; // consume '.'
+                    double scale = 0.1;
+                    while (j < src.size && is_digit(src.str[j])) {
+                        f += (double)(src.str[j] - '0') * scale;
+                        scale *= 0.1;
+                        j++;
+                    }
                 }
                 if (j < src.size && (src.str[j] == 'e' || src.str[j] == 'E')) {
                     j++;
@@ -201,22 +240,25 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                     for (int k = 0; k < exp; k++) m *= 10.0;
                     if (sign < 0) f /= m; else f *= m;
                 }
-                // Optional 'f'/'F' suffix
-                if (j < src.size && (src.str[j] == 'f' || src.str[j] == 'F')) j++;
-                TcTok t = (TcTok){.kind = TC_TK_FLOAT_LIT, .float_value = f, .line = line};
+                // Optional 'f'/'F' suffix marks the literal as TY_F32; otherwise
+                // (per C99) it has TY_F64 (double).
+                bool is_f64 = true;
+                if (j < src.size && (src.str[j] == 'f' || src.str[j] == 'F')) { j++; is_f64 = false; }
+                TcTok t = (TcTok){.kind = TC_TK_FLOAT_LIT, .float_value = f, .is_f64 = is_f64, .line = line};
                 VecTcTok_push_back(arena, &toks, t);
                 i = j; continue;
             }
             TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
-            // Optional integer-literal suffix: 'l', 'L', 'll', 'LL' marks
-            // the literal as TY_I64. We do not distinguish signedness.
-            if (j < src.size && (src.str[j] == 'l' || src.str[j] == 'L')) {
-                t.is_i64 = true;
-                j++;
-                if (j < src.size && (src.str[j] == 'l' || src.str[j] == 'L')) j++;
+            // Optional integer-literal suffix: any combination of 'l'/'L'
+            // (denoting TY_I64) and 'u'/'U' (signedness, silently dropped),
+            // in either order. So 'L', 'LL', 'UL', 'LU', 'ULL', 'LLU', 'U'
+            // are all accepted. We do not distinguish signedness.
+            for (int k = 0; k < 3 && j < src.size; k++) {
+                char c2 = src.str[j];
+                if (c2 == 'l' || c2 == 'L') { t.is_i64 = true; j++; }
+                else if (c2 == 'u' || c2 == 'U') { j++; }
+                else break;
             }
-            // Also accept a trailing 'u'/'U' (silently — we don't track signedness).
-            if (j < src.size && (src.str[j] == 'u' || src.str[j] == 'U')) j++;
             VecTcTok_push_back(arena, &toks, t);
             i = j; continue;
         }

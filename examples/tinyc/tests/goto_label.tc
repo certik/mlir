@@ -1,0 +1,17 @@
+extern int printf(const char *fmt, ...);
+
+int main() {
+    int i;
+    int n;
+    n = 0;
+    i = 0;
+loop:
+    if (i >= 5) goto done;
+    n = n + i;
+    i = i + 1;
+    goto loop;
+done:
+    printf("%d\n", n);
+    return 0;
+}
+

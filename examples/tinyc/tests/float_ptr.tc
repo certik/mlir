@@ -1,0 +1,16 @@
+extern int printf(const char *fmt, ...);
+
+void set_pair(float x, float *a, float *b) {
+    *a = x + 1.0f;
+    *b = x * 2.0f;
+}
+
+int main() {
+    float a;
+    float b;
+    set_pair(3.0f, &a, &b);
+    int ai = (int)a;
+    int bi = (int)b;
+    printf("%d %d\n", ai, bi);
+    return 0;
+}

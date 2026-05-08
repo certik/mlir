@@ -1,0 +1,38 @@
+// Regression test: postfix `p++` / `p--` on a pointer must step by
+// sizeof(*p) bytes, not always 4. Previously emit.c consulted
+// `array_elem_is_i64` (only set on TY_ARRAY_*) instead of `ptr_is_i64`,
+// so `long *p; p++;` advanced by 4 bytes instead of 8.
+extern int printf(const char *fmt, ...);
+
+long la[3] = {0};
+int  ia[3] = {0};
+char ca[3] = {0};
+
+int main() {
+    la[0] = 10; la[1] = 20; la[2] = 30;
+    long *lp = la;
+    lp++;
+    long lv1 = *lp;
+    lp++;
+    long lv2 = *lp;
+    lp--;
+    long lv3 = *lp;
+    printf("long: %ld %ld %ld\n", lv1, lv2, lv3); // 20 30 20
+
+    ia[0] = 7; ia[1] = 8; ia[2] = 9;
+    int *ip = ia;
+    ip++;
+    int iv1 = *ip;
+    ip--;
+    int iv2 = *ip;
+    printf("int: %d %d\n", iv1, iv2); // 8 7
+
+    ca[0] = 'a'; ca[1] = 'b'; ca[2] = 'c';
+    char *cp = ca;
+    cp++;
+    char cv1 = *cp;
+    cp--;
+    char cv2 = *cp;
+    printf("chr: %d %d\n", cv1, cv2); // 98 97
+    return 0;
+}

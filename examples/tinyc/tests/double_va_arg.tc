@@ -1,0 +1,25 @@
+// va_arg(ap, double) and float→double default-arg promotion through ...
+extern int printf(const char *fmt, ...);
+
+void show(int n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    int i;
+    i = 0;
+    while (i < n) {
+        double v;
+        v = va_arg(ap, double);
+        printf("%g\n", v);
+        i = i + 1;
+    }
+    va_end(ap);
+}
+
+int main() {
+    // The 'f' suffix here means float; C requires float→double promotion
+    // when passing through ...
+    float ff;
+    ff = 1.5f;
+    show(3, 2.5, 3.75, (double)ff);
+    return 0;
+}

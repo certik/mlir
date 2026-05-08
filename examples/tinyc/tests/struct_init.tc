@@ -1,0 +1,17 @@
+// Aggregate initializer for struct locals: positional and designated.
+
+typedef struct Pt {
+    int x;
+    int y;
+    int z;
+} Pt;
+
+int main() {
+    Pt a = {1, 2, 3};
+    Pt b = {.x = 10, .y = 20, .z = 30};
+    Pt c = {.z = 700, .x = 100, .y = 400};
+    print(a.x); print(a.y); print(a.z);
+    print(b.x); print(b.y); print(b.z);
+    print(c.x); print(c.y); print(c.z);
+    return 0;
+}

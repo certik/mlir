@@ -1,0 +1,25 @@
+extern int printf(const char *fmt, ...);
+
+struct LH { int x; int y; };
+
+#define N 4
+
+static struct LH g_arr[N];
+static int g_ints[2 + 1];
+static long long g_longs[2 + 1];
+
+int main() {
+    int i;
+    for (i = 0; i < N; i = i + 1) {
+        g_arr[i].x = i;
+        g_arr[i].y = i * 10;
+    }
+    for (i = 0; i < N; i = i + 1) {
+        printf("%d %d\n", g_arr[i].x, g_arr[i].y);
+    }
+    g_ints[0] = 7; g_ints[1] = 8; g_ints[2] = 9;
+    printf("%d\n", g_ints[0] + g_ints[1] + g_ints[2]);
+    g_longs[0] = 1000000000LL; g_longs[1] = 2; g_longs[2] = 3;
+    printf("%lld\n", g_longs[0] + g_longs[1] + g_longs[2]);
+    return 0;
+}

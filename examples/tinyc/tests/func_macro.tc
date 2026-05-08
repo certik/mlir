@@ -1,0 +1,17 @@
+extern int printf(const char *fmt, ...);
+
+void greet() {
+    printf("%s\n", __func__);
+}
+
+int square(int x) {
+    printf("%s=%d\n", __func__, x * x);
+    return x * x;
+}
+
+int main() {
+    greet();
+    square(4);
+    printf("%s\n", __func__);
+    return 0;
+}

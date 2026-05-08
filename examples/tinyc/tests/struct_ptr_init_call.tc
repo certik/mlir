@@ -1,0 +1,16 @@
+struct Pt { int x; int y; };
+
+struct Pt *get0(struct Pt *out) { out->x = 10; out->y = 11; return out; }
+struct Pt *get1(struct Pt *out) { out->x = 20; out->y = 21; return out; }
+
+int main() {
+    struct Pt s0;
+    struct Pt s1;
+    struct Pt *p = get0(&s0);
+    print((int64_t)p->x);
+    print((int64_t)p->y);
+    struct Pt *q = (struct Pt *)get1(&s1);
+    print((int64_t)q->x);
+    print((int64_t)q->y);
+    return 0;
+}
