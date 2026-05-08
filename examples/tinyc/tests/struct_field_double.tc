@@ -1,0 +1,19 @@
+// double / f64 fields inside a struct.
+
+extern int printf(const char *fmt, ...);
+
+typedef struct { int x; double y; char z; } S;
+
+int main(void) {
+    S s;
+    s.x = 42;
+    s.y = 3.5;
+    s.z = 'a';
+    printf("%d %.1f %d\n", s.x, s.y, (int)s.z);  // 42 3.5 97
+
+    // Mutate via a struct pointer.
+    S *p = &s;
+    p->y = -1.25;
+    printf("%.2f\n", p->y);                       // -1.25
+    return 0;
+}

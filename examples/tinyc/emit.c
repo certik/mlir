@@ -4515,6 +4515,7 @@ static void init_struct_types(E *e) {
             if (ft.kind == TY_I32) body[k] = e->i32;
             else if (ft.kind == TY_I64) body[k] = e->i64;
             else if (ft.kind == TY_F32) body[k] = e->f32;
+            else if (ft.kind == TY_F64) body[k] = e->f64;
             else if (ft.kind == TY_PTR_STRUCT || ft.kind == TY_PTR_I32 ||
                      ft.kind == TY_PTR_CHAR || ft.kind == TY_PTR_VOID ||
                      ft.kind == TY_PTR_PTR || ft.kind == TY_FNPTR) body[k] = e->ptr;
