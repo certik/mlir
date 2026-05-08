@@ -1,0 +1,14 @@
+typedef long (*Fn)(int);
+
+long mul100(int x) {
+    return (long)x * 100;
+}
+
+int main() {
+    Fn f = mul100;
+    long r = f(7);
+    print((int)r);
+    long r2 = f(20);
+    print((int)r2);
+    return 0;
+}

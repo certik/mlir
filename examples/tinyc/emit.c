@@ -3097,6 +3097,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 r.val = rs[0];
                 r.is_float = (fnty->fnptr_ret->kind == TY_F32 || fnty->fnptr_ret->kind == TY_F64);
                 r.is_f64 = (fnty->fnptr_ret->kind == TY_F64);
+                r.is_i64 = (fnty->fnptr_ret->kind == TY_I64);
                 r.is_ptr = (rty == e->ptr);
                 return r;
             }
