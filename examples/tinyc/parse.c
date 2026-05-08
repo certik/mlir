@@ -30,6 +30,7 @@ typedef struct {
     Typedef *typedefs;
     Enumerator *enums;
     int err_count;
+    struct Program *prog;
 } P;
 
 static TcTok cur(P *p) { return p->toks[p->i]; }
@@ -118,6 +119,8 @@ static bool parse_abstract_type(P *p, Type *out);
 static bool try_parse_fnptr_suffix(P *p, Type *ty, string *out_name);
 static void parse_enum_decl_top(P *p);
 static void parse_enum_body(P *p);
+static void parse_typedef_decl(P *p);
+static bool struct_def_equal(StructDef *a, StructDef *b);
 
 // Aggregate initializer: `{ v0, v1, ... }` or `{ .f1 = v0, .f2 = v1, ... }`.
 // Builds an EX_COMPOUND whose cast_type is the decl's type (struct or
@@ -1097,6 +1100,12 @@ static Stmt *parse_stmt(P *p) {
         Stmt *s = new_stmt(p, ST_BLOCK, t.line);
         return s;
     }
+    if (t.kind == TC_TK_KW_TYPEDEF) {
+        // Block-local typedef: register and emit an empty statement.
+        parse_typedef_decl(p);
+        Stmt *s = new_stmt(p, ST_BLOCK, t.line);
+        return s;
+    }
     if (t.kind == TC_TK_LBRACE) {
         Stmt *s = new_stmt(p, ST_BLOCK, t.line);
         parse_block(p, &s->block_body);
@@ -1931,9 +1940,154 @@ static void merge_push_global(P *p, Program *prog, Global g) {
     VecGlobal_push_back(p->arena, &prog->globals, g);
 }
 
+// Parse a `typedef ...;` declaration. Assumes cur(p) is TC_TK_KW_TYPEDEF.
+// Used at file scope and inside function bodies (block-local typedefs).
+static void parse_typedef_decl(P *p) {
+    Program *prog = p->prog;
+    Arena *arena = p->arena;
+    int line = cur(p).line;
+    p->i++;
+    // Skip typedefs of the va_list keyword to itself (or aliases).
+    // tinyC already provides `va_list` as a built-in; corec does
+    // `typedef __builtin_va_list va_list;` which we map to a no-op.
+    if (cur(p).kind == TC_TK_KW_VA_LIST) {
+        while (cur(p).kind != TC_TK_SEMI && cur(p).kind != TC_TK_EOF) p->i++;
+        accept(p, TC_TK_SEMI);
+        return;
+    }
+    // `typedef enum [Tag] { ... } Alias;`
+    if (cur(p).kind == TC_TK_KW_ENUM) {
+        p->i++;
+        if (cur(p).kind == TC_TK_IDENT) p->i++;  // optional tag
+        if (cur(p).kind == TC_TK_LBRACE) {
+            parse_enum_body(p);
+        }
+        if (cur(p).kind == TC_TK_IDENT) {
+            TcTok nm = cur(p);
+            p->i++;
+            Type ty = (Type){0};
+            ty.kind = TY_I32;
+            Typedef *td = arena_new(arena, Typedef);
+            td->name = nm.text;
+            td->ty = ty;
+            td->next = p->typedefs;
+            p->typedefs = td;
+        }
+        expect(p, TC_TK_SEMI, str_lit("expected ';' after typedef"));
+        return;
+    }
+    // `typedef struct [Tag] { ... } Alias;`
+    if (cur(p).kind == TC_TK_KW_STRUCT) {
+        size_t la = 1;
+        if (peek(p, la).kind == TC_TK_IDENT) la++;
+        if (peek(p, la).kind == TC_TK_LBRACE) {
+            StructDef *sd = parse_struct_def(p);
+            string alias = (string){0};
+            if (cur(p).kind == TC_TK_IDENT) {
+                alias = cur(p).text;
+                p->i++;
+            }
+            if (sd->name.size == 0) {
+                if (alias.size == 0) {
+                    perror_at(p, line,
+                        str_lit("typedef of anonymous struct requires a name"));
+                }
+                sd->name = alias;
+            }
+            StructDef *existing_sd = NULL;
+            for (size_t i = 0; i < prog->structs.size; i++) {
+                if (str_eq(prog->structs.data[i]->name, sd->name)) {
+                    existing_sd = prog->structs.data[i];
+                    break;
+                }
+            }
+            if (!existing_sd) {
+                VecStructDefPtr_push_back(arena, &prog->structs, sd);
+            } else if (existing_sd->fields.size == 0) {
+                existing_sd->fields = sd->fields;
+                existing_sd->line = sd->line;
+            } else if (!struct_def_equal(existing_sd, sd)) {
+                perror_at(p, sd->line, str_lit("conflicting redefinition of struct"));
+            }
+            if (alias.size != 0) {
+                Type ty = (Type){0};
+                ty.kind = TY_STRUCT;
+                ty.struct_name = sd->name;
+                Typedef *td = arena_new(arena, Typedef);
+                td->name = alias;
+                td->ty = ty;
+                td->next = p->typedefs;
+                p->typedefs = td;
+            }
+            expect(p, TC_TK_SEMI, str_lit("expected ';' after typedef"));
+            return;
+        }
+        // No body: `typedef struct Tag Alias;`.
+        if (peek(p, 1).kind == TC_TK_IDENT) {
+            string tag = peek(p, 1).text;
+            bool found = false;
+            for (size_t i = 0; i < prog->structs.size; i++) {
+                if (str_eq(prog->structs.data[i]->name, tag)) {
+                    found = true; break;
+                }
+            }
+            if (!found) {
+                StructDef *sd = arena_new(arena, StructDef);
+                *sd = (StructDef){0};
+                sd->name = tag;
+                sd->line = line;
+                VecStructField_reserve(arena, &sd->fields, 0);
+                VecStructDefPtr_push_back(arena, &prog->structs, sd);
+            }
+        }
+        // Fall through to parse_sig_type below (which handles `struct Tag`).
+    }
+    Type ty = {0};
+    if (!parse_sig_type(p, &ty)) {
+        perror_at(p, line, str_lit("expected type after 'typedef'"));
+        while (cur(p).kind != TC_TK_SEMI && cur(p).kind != TC_TK_EOF) p->i++;
+        accept(p, TC_TK_SEMI);
+        return;
+    }
+    // Function-pointer typedef: `typedef int (*BinOp)(int, int);`.
+    string fnp_name = (string){0};
+    if (try_parse_fnptr_suffix(p, &ty, &fnp_name)) {
+        if (fnp_name.size == 0) {
+            perror_at(p, line, str_lit("function-pointer typedef requires a name"));
+        }
+        expect(p, TC_TK_SEMI, str_lit("expected ';' after typedef"));
+        Typedef *td = arena_new(arena, Typedef);
+        td->name = fnp_name;
+        td->ty = ty;
+        td->next = p->typedefs;
+        p->typedefs = td;
+        return;
+    }
+    TcTok nm = cur(p);
+    if (!expect(p, TC_TK_IDENT, str_lit("expected typedef name"))) return;
+    // Optional `[N]` to support `typedef int Vec[N];` (1D only).
+    if (accept(p, TC_TK_LBRACK)) {
+        TcTok lit = cur(p);
+        expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
+        expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
+        if (ty.kind == TY_I32) {
+            ty.kind = TY_ARRAY_I32;
+            ty.array_len = lit.int_value;
+        } else {
+            perror_at(p, line, str_lit("typedef array only supported for int"));
+        }
+    }
+    expect(p, TC_TK_SEMI, str_lit("expected ';' after typedef"));
+    Typedef *td = arena_new(arena, Typedef);
+    td->name = nm.text;
+    td->ty = ty;
+    td->next = p->typedefs;
+    p->typedefs = td;
+}
+
 int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
     P p = {.arena = arena, .toks = toks.data, .n = toks.size, .i = 0,
-           .typedefs = NULL, .enums = NULL};
+           .typedefs = NULL, .enums = NULL, .prog = prog};
     // Built-in typedefs (treated as TY_I64, signedness ignored).
     {
         const char *names[] = {"int64_t", "uint64_t", "size_t", "ssize_t",
@@ -2067,157 +2221,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
             }
         }
         if (cur(&p).kind == TC_TK_KW_TYPEDEF) {
-            int line = cur(&p).line;
-            p.i++;
-            // Skip typedefs of the va_list keyword to itself (or aliases).
-            // tinyC already provides `va_list` as a built-in; corec does
-            // `typedef __builtin_va_list va_list;` which we map to a no-op.
-            if (cur(&p).kind == TC_TK_KW_VA_LIST) {
-                while (cur(&p).kind != TC_TK_SEMI && cur(&p).kind != TC_TK_EOF) p.i++;
-                accept(&p, TC_TK_SEMI);
-                continue;
-            }
-            // `typedef enum [Tag] { ... } Alias;` — register the
-            // enumerators and treat Alias as TY_I32 (consistent with
-            // tinyC's existing `enum [Tag]` handling in parse_sig_type).
-            if (cur(&p).kind == TC_TK_KW_ENUM) {
-                p.i++;
-                if (cur(&p).kind == TC_TK_IDENT) p.i++;  // optional tag
-                if (cur(&p).kind == TC_TK_LBRACE) {
-                    parse_enum_body(&p);
-                }
-                if (cur(&p).kind == TC_TK_IDENT) {
-                    TcTok nm = cur(&p);
-                    p.i++;
-                    Type ty = (Type){0};
-                    ty.kind = TY_I32;
-                    Typedef *td = arena_new(arena, Typedef);
-                    td->name = nm.text;
-                    td->ty = ty;
-                    td->next = p.typedefs;
-                    p.typedefs = td;
-                }
-                expect(&p, TC_TK_SEMI, str_lit("expected ';' after typedef"));
-                continue;
-            }
-            // `typedef struct [Tag] { ... } Alias;`  — parse the struct
-            // body (creating / merging struct Tag, generating an anonymous
-            // tag if absent) and register Alias as a typedef for it.
-            // Also accept `typedef struct Tag Alias;` (no body).
-            if (cur(&p).kind == TC_TK_KW_STRUCT) {
-                size_t la = 1;
-                if (peek(&p, la).kind == TC_TK_IDENT) la++;
-                if (peek(&p, la).kind == TC_TK_LBRACE) {
-                    StructDef *sd = parse_struct_def(&p);
-                    // Alias name is required for anonymous structs.
-                    string alias = (string){0};
-                    if (cur(&p).kind == TC_TK_IDENT) {
-                        alias = cur(&p).text;
-                        p.i++;
-                    }
-                    if (sd->name.size == 0) {
-                        if (alias.size == 0) {
-                            perror_at(&p, line,
-                                str_lit("typedef of anonymous struct requires a name"));
-                        }
-                        sd->name = alias;
-                    }
-                    // Merge with existing struct of same tag.
-                    StructDef *existing_sd = NULL;
-                    for (size_t i = 0; i < prog->structs.size; i++) {
-                        if (str_eq(prog->structs.data[i]->name, sd->name)) {
-                            existing_sd = prog->structs.data[i];
-                            break;
-                        }
-                    }
-                    if (!existing_sd) {
-                        VecStructDefPtr_push_back(arena, &prog->structs, sd);
-                    } else if (existing_sd->fields.size == 0) {
-                        // Upgrade forward-decl placeholder.
-                        existing_sd->fields = sd->fields;
-                        existing_sd->line = sd->line;
-                    } else if (!struct_def_equal(existing_sd, sd)) {
-                        perror_at(&p, sd->line, str_lit("conflicting redefinition of struct"));
-                    }
-                    if (alias.size != 0) {
-                        Type ty = (Type){0};
-                        ty.kind = TY_STRUCT;
-                        ty.struct_name = sd->name;
-                        Typedef *td = arena_new(arena, Typedef);
-                        td->name = alias;
-                        td->ty = ty;
-                        td->next = p.typedefs;
-                        p.typedefs = td;
-                    }
-                    expect(&p, TC_TK_SEMI, str_lit("expected ';' after typedef"));
-                    continue;
-                }
-                // No body: `typedef struct Tag Alias;`. Register an
-                // opaque placeholder StructDef for Tag (if not already
-                // defined) so that emit-time `find_struct` succeeds for
-                // pointer-only uses, then fall through to parse_sig_type
-                // which will return TY_STRUCT/TY_PTR_STRUCT as the
-                // typedef target type.
-                if (peek(&p, 1).kind == TC_TK_IDENT) {
-                    string tag = peek(&p, 1).text;
-                    bool found = false;
-                    for (size_t i = 0; i < prog->structs.size; i++) {
-                        if (str_eq(prog->structs.data[i]->name, tag)) {
-                            found = true; break;
-                        }
-                    }
-                    if (!found) {
-                        StructDef *sd = arena_new(arena, StructDef);
-                        *sd = (StructDef){0};
-                        sd->name = tag;
-                        sd->line = line;
-                        VecStructField_reserve(arena, &sd->fields, 0);
-                        VecStructDefPtr_push_back(arena, &prog->structs, sd);
-                    }
-                }
-                // Fall through to parse_sig_type below (which handles `struct Tag`).
-            }
-            Type ty = {0};
-            if (!parse_sig_type(&p, &ty)) {
-                perror_at(&p, line, str_lit("expected type after 'typedef'"));
-                while (cur(&p).kind != TC_TK_SEMI && cur(&p).kind != TC_TK_EOF) p.i++;
-                accept(&p, TC_TK_SEMI);
-                continue;
-            }
-            // Function-pointer typedef: `typedef int (*BinOp)(int, int);`.
-            string fnp_name = (string){0};
-            if (try_parse_fnptr_suffix(&p, &ty, &fnp_name)) {
-                if (fnp_name.size == 0) {
-                    perror_at(&p, line, str_lit("function-pointer typedef requires a name"));
-                }
-                expect(&p, TC_TK_SEMI, str_lit("expected ';' after typedef"));
-                Typedef *td = arena_new(arena, Typedef);
-                td->name = fnp_name;
-                td->ty = ty;
-                td->next = p.typedefs;
-                p.typedefs = td;
-                continue;
-            }
-            TcTok nm = cur(&p);
-            if (!expect(&p, TC_TK_IDENT, str_lit("expected typedef name"))) continue;
-            // Optional `[N]` to support `typedef int Vec[N];` (1D only).
-            if (accept(&p, TC_TK_LBRACK)) {
-                TcTok lit = cur(&p);
-                expect(&p, TC_TK_INT_LIT, str_lit("expected array length"));
-                expect(&p, TC_TK_RBRACK, str_lit("expected ']'"));
-                if (ty.kind == TY_I32) {
-                    ty.kind = TY_ARRAY_I32;
-                    ty.array_len = lit.int_value;
-                } else {
-                    perror_at(&p, line, str_lit("typedef array only supported for int"));
-                }
-            }
-            expect(&p, TC_TK_SEMI, str_lit("expected ';' after typedef"));
-            Typedef *td = arena_new(arena, Typedef);
-            td->name = nm.text;
-            td->ty = ty;
-            td->next = p.typedefs;
-            p.typedefs = td;
+            parse_typedef_decl(&p);
             continue;
         }
         // `extern` on a global makes it externally linked (e.g. libc's

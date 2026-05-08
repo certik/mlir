@@ -403,7 +403,7 @@ typedef struct ProgramEnum {
     struct ProgramEnum *next;
 } ProgramEnum;
 
-typedef struct {
+typedef struct Program {
     VecFuncPtr      funcs;
     VecStructDefPtr structs;
     VecGlobal       globals;
