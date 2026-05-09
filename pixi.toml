@@ -177,6 +177,9 @@ clang \
 
 test_macos = { cmd = "./parser --construct && python run_tests.py -s --native", depends-on = ["build_macos"], description = "Run mlir test suite (macOS)" }
 
+build_macos_tinyc = { cmd = "bash scripts/build_macos_tinyc.sh", depends-on = ["tokenizer"], description = "Build mlir native binary using tinyC instead of clang's C frontend (macOS only). Requires ./tinyc; build it first with 'pixi run -e upstream build_tinyc_upstream'." }
+test_macos_tinyc = { cmd = "MLIR_PARSER_NATIVE=$PWD/parser_tinyc python run_tests.py -s --native", depends-on = ["build_macos_tinyc"], description = "Run mlir test suite using the tinyC-built parser (macOS). Requires ./tinyc — see build_macos_tinyc." }
+
 build_cross_native_macos = { cmd = """
 clang \
     -g \
