@@ -1,0 +1,22 @@
+void grow(int **arr, int *cap) {
+    int new_cap = *cap * 2;
+    int *new_arr = (int*)0;
+    new_arr = *arr;
+    for (int i = 0; i < *cap; i++) {
+        (*arr)[i] = (*arr)[i] + 100;
+    }
+    (void)new_cap; (void)new_arr;
+}
+
+int main() {
+    int storage[3];
+    storage[0] = 1; storage[1] = 2; storage[2] = 3;
+    int *p = storage;
+    int **pp = &p;
+    int cap = 3;
+    grow(pp, &cap);
+    print((*pp)[0]);
+    print((*pp)[1]);
+    print((*pp)[2]);
+    return 0;
+}

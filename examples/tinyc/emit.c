@@ -1233,6 +1233,38 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 }
             }
             if (ex->lhs->kind != EX_VAR) {
+                // (*p)[i] where p is T**: load p (get T**), load again (get
+                // T*), then GEP by i with stride sizeof(T).
+                if (ex->lhs->kind == EX_DEREF &&
+                    ex->lhs->lhs->kind == EX_VAR) {
+                    Sym *s = lookup(e, sc, ex->lhs->lhs->name);
+                    if (s && s->type.kind == TY_PTR_PTR) {
+                        MLIR_ValueHandle iv = emit_expr_i32(e, sc, ex->rhs);
+                        MLIR_ValueHandle outer = emit_load_v(e, sym_addr(e, s), e->ptr);
+                        MLIR_ValueHandle inner = emit_load_v(e, outer, e->ptr);
+                        MLIR_TypeHandle elem = e->i8;
+                        if (s->type.pointee) {
+                            TypeKind pk = s->type.pointee->kind;
+                            if (pk == TY_PTR_CHAR) elem = e->i8;
+                            else if (pk == TY_PTR_I32) {
+                                elem = s->type.pointee->ptr_is_i64 ? e->i64
+                                     : s->type.pointee->ptr_is_f32 ? e->f32
+                                     : s->type.pointee->ptr_is_f64 ? e->f64
+                                     : e->i32;
+                            } else if (pk == TY_PTR_VOID || pk == TY_PTR_STRUCT ||
+                                       pk == TY_FNPTR || pk == TY_PTR_PTR) {
+                                elem = e->ptr;
+                            }
+                        }
+                        int32_t *gpath = arena_new_array(e->arena, int32_t, 1);
+                        gpath[0] = LLVM_GEP_DYN;
+                        MLIR_ValueHandle *gdyn = arena_new_array(e->arena, MLIR_ValueHandle, 1);
+                        gdyn[0] = iv;
+                        r.base_ptr = emit_gep(e, inner, elem, gpath, 1, gdyn, 1);
+                        r.elem_ty = elem;
+                        return r;
+                    }
+                }
                 EMIT_ERR(e, "only simple-array indexing is supported");
                 return r;
             }
