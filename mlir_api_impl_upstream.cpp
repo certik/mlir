@@ -59,6 +59,7 @@
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
 #include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVMPass.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
+#include "mlir/Transforms/Passes.h"
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
@@ -1127,18 +1128,49 @@ extern "C" bool MLIR_LowerToLLVMDialect(MLIR_Context *, MLIR_OpHandle module_h) 
         return false;
     }
     auto &ctx = globalCtx().mctx;
-    mlir::PassManager pm(&ctx);
-    pm.addPass(mlir::createConvertSCFToCFPass());
-    pm.addPass(mlir::createConvertVectorToLLVMPass());
-    pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
-    pm.addPass(mlir::createConvertControlFlowToLLVMPass());
-    pm.addPass(mlir::createArithToLLVMConversionPass());
-    pm.addPass(mlir::createConvertFuncToLLVMPass());
-    pm.addPass(mlir::createReconcileUnrealizedCastsPass());
-    if (mlir::failed(pm.run(module))) {
-        std::fprintf(stderr, "MLIR_LowerToLLVMDialect: pass pipeline failed\n");
-        return false;
+    auto runOne = [&](const char *name, std::unique_ptr<mlir::Pass> p) -> bool {
+        mlir::PassManager pm(&ctx);
+        pm.addPass(std::move(p));
+        bool ok = !mlir::failed(pm.run(module));
+        if (std::getenv("TINYC_DUMP_PASSES")) {
+            std::fprintf(stderr, "=== after %s ===\n", name);
+            module->print(llvm::errs());
+            std::fprintf(stderr, "\n=== end %s ===\n", name);
+        }
+        return ok;
+    };
+    if (!runOne("ConvertSCFToCF", mlir::createConvertSCFToCFPass())) return false;
+    // Only run VectorToLLVM if the module actually contains vector ops.
+    // The pass uses applyPartialConversion + greedy region simplification,
+    // which aggressively merges/eliminates blocks. Even when no vector
+    // patterns match, the simplification runs and can drop stores or merge
+    // blocks in ways that break tinyc's emitted code (in particular the
+    // `mar = ++cur` store inside backtracking states of a re2c-generated
+    // tokenizer). When the module has no vector ops, this pass is a no-op
+    // semantically, so skipping it removes the harmful side effects.
+    bool has_vector_op = false;
+    module.walk([&](mlir::Operation *o) {
+        if (o->getDialect() && o->getDialect()->getNamespace() == "vector") {
+            has_vector_op = true;
+            return mlir::WalkResult::interrupt();
+        }
+        return mlir::WalkResult::advance();
+    });
+    if (has_vector_op) {
+        if (!runOne("ConvertVectorToLLVM", mlir::createConvertVectorToLLVMPass())) return false;
+    } else {
+        // VectorToLLVM normally cleans up unreachable blocks as a side effect
+        // of dialect conversion. When we skip it, run canonicalize to remove
+        // unreachable blocks; otherwise convert-cf-to-llvm leaves stranded
+        // `cf.br` ops in unreachable blocks (their target signatures cannot be
+        // converted), and `mlir-translate` then fails on unconverted cf ops.
+        if (!runOne("Canonicalize", mlir::createCanonicalizerPass())) return false;
     }
+    if (!runOne("FinalizeMemRefToLLVM", mlir::createFinalizeMemRefToLLVMConversionPass())) return false;
+    if (!runOne("ConvertControlFlowToLLVM", mlir::createConvertControlFlowToLLVMPass())) return false;
+    if (!runOne("ArithToLLVM", mlir::createArithToLLVMConversionPass())) return false;
+    if (!runOne("ConvertFuncToLLVM", mlir::createConvertFuncToLLVMPass())) return false;
+    if (!runOne("ReconcileUnrealizedCasts", mlir::createReconcileUnrealizedCastsPass())) return false;
     return true;
 }
 
