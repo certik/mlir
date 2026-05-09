@@ -1,0 +1,13 @@
+struct Pair { int a; int b; };
+
+struct Pair make(int a, int b) {
+    struct Pair p; p.a = a; p.b = b;
+    return p;
+}
+
+int main() {
+    print(make(7, 11).a);
+    print(make(7, 11).b);
+    print(make(100, 200).a + make(3, 4).b);
+    return 0;
+}
