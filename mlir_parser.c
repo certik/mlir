@@ -322,6 +322,12 @@ MLIR_OpType op_string_to_type(string opname) {
         return OP_TYPE_ARITH_DIVSI;
     } else if (str_eq(opname, str_lit("arith.remsi"))) {
         return OP_TYPE_ARITH_REMSI;
+    } else if (str_eq(opname, str_lit("arith.divui"))) {
+        return OP_TYPE_ARITH_DIVUI;
+    } else if (str_eq(opname, str_lit("arith.remui"))) {
+        return OP_TYPE_ARITH_REMUI;
+    } else if (str_eq(opname, str_lit("arith.shrui"))) {
+        return OP_TYPE_ARITH_SHRUI;
     } else if (str_eq(opname, str_lit("arith.ori"))) {
         return OP_TYPE_ARITH_ORI;
     } else if (str_eq(opname, str_lit("arith.minsi"))) {

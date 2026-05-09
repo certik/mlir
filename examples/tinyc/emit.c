@@ -468,6 +468,18 @@ static MLIR_ValueHandle emit_extsi_i32_to_i64(E *e, MLIR_ValueHandle v) {
     return r;
 }
 
+// Zero-extend i32 -> i64 (arith.extui), used to widen unsigned operands.
+static MLIR_ValueHandle emit_extui_i32_to_i64(E *e, MLIR_ValueHandle v) {
+    MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
+                                                  e->i64, ssa_name(e), eloc(e, 0));
+    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i64;
+    MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
+    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = v;
+    emit_op(e, OP_TYPE_ARITH_EXTUI, str_lit("arith.extui"),
+            rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
+    return r;
+}
+
 // Sign-extend i8 -> i32 (arith.extsi).
 static MLIR_ValueHandle emit_extsi_i8_to_i32(E *e, MLIR_ValueHandle v) {
     MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
@@ -695,11 +707,13 @@ static MLIR_ValueHandle emit_sitofp_f64(E *e, MLIR_ValueHandle iv) {
     return r;
 }
 
-static int64_t cmpi_pred_for(BinOp op) {
+static int64_t cmpi_pred_for(BinOp op, bool is_unsigned) {
     switch (op) {
         case OP_EQ: return 0; case OP_NE: return 1;
-        case OP_LT: return 2; case OP_LE: return 3;
-        case OP_GT: return 4; case OP_GE: return 5;
+        case OP_LT: return is_unsigned ? 6 : 2;
+        case OP_LE: return is_unsigned ? 7 : 3;
+        case OP_GT: return is_unsigned ? 8 : 4;
+        case OP_GE: return is_unsigned ? 9 : 5;
         default:    return 0;
     }
 }
@@ -729,6 +743,8 @@ typedef struct {
                        // (return + parameter types). NULL otherwise.
     bool is_void_ptr;  // val is a `void*` — dereference / indexing /
                        // pointer arithmetic are forbidden on it.
+    bool is_unsigned;  // integer val came from an `unsigned` C type; selects
+                       // unsigned div/mod/shr (and comparisons) at use sites.
 } EVal;
 
 static EVal emit_expr(E *e, Scope *sc, Expr *ex);
@@ -849,6 +865,7 @@ typedef struct {
     size_t           n_const_path;
     MLIR_ValueHandle dyn_index;       // INVALID for purely-static GEP
     MLIR_TypeHandle  elem_ty;         // i32 or f32
+    bool             is_unsigned;     // backing C type was `unsigned`
 } LVal;
 
 static MLIR_ValueHandle lval_address(E *e, LVal lv) {
@@ -878,6 +895,7 @@ static EVal load_lvalue(E *e, LVal lv) {
     r.is_f64 = (lv.elem_ty == e->f64);
     r.is_i64 = (lv.elem_ty == e->i64);
     r.is_ptr = (lv.elem_ty == e->ptr);
+    r.is_unsigned = lv.is_unsigned;
     r.ptr_elem = MLIR_INVALID_HANDLE;
     return r;
 }
@@ -1094,6 +1112,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                      s->type.kind == TY_FNPTR || s->type.kind == TY_PTR_PTR)
                 r.elem_ty = e->ptr;
             else r.elem_ty = e->i32;
+            r.is_unsigned = s->type.int_unsigned;
             return r;
         }
         case EX_INDEX: {
@@ -1573,9 +1592,23 @@ static void unify_numeric(E *e, EVal *a, EVal *b) {
         }
         return;
     }
-    if (a->is_i64 == b->is_i64) return;
-    if (!a->is_i64) { a->val = emit_extsi_i32_to_i64(e, a->val); a->is_i64 = true; }
-    if (!b->is_i64) { b->val = emit_extsi_i32_to_i64(e, b->val); b->is_i64 = true; }
+    if (a->is_i64 == b->is_i64) {
+        bool u = a->is_unsigned || b->is_unsigned;
+        a->is_unsigned = u; b->is_unsigned = u;
+        return;
+    }
+    if (!a->is_i64) {
+        a->val = a->is_unsigned ? emit_extui_i32_to_i64(e, a->val)
+                                : emit_extsi_i32_to_i64(e, a->val);
+        a->is_i64 = true;
+    }
+    if (!b->is_i64) {
+        b->val = b->is_unsigned ? emit_extui_i32_to_i64(e, b->val)
+                                : emit_extsi_i32_to_i64(e, b->val);
+        b->is_i64 = true;
+    }
+    bool u = a->is_unsigned || b->is_unsigned;
+    a->is_unsigned = u; b->is_unsigned = u;
 }
 
 // ----- struct-by-pointer helpers -----
@@ -2932,7 +2965,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             if (a.is_ptr && b.is_ptr &&
                 (ex->op == OP_LT || ex->op == OP_LE ||
                  ex->op == OP_GT || ex->op == OP_GE)) {
-                MLIR_ValueHandle cmp = emit_icmp_ptr(e, cmpi_pred_for(ex->op), a.val, b.val);
+                MLIR_ValueHandle cmp = emit_icmp_ptr(e, cmpi_pred_for(ex->op, false), a.val, b.val);
                 r.val = bool_to_i32(e, cmp);
                 return r;
             }
@@ -3022,60 +3055,66 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             bool flt = a.is_float;
             bool flt64 = a.is_f64;
             bool i64m = a.is_i64;
+            bool unsgn = a.is_unsigned;
             MLIR_TypeHandle ity = i64m ? e->i64 : e->i32;
             MLIR_TypeHandle fty = flt64 ? e->f64 : e->f32;
             switch (ex->op) {
                 case OP_ADD:
                     r.val = flt ? emit_binop(e, OP_TYPE_ARITH_ADDF, str_lit("arith.addf"), fty, a.val, b.val)
                                 : emit_binop(e, OP_TYPE_ARITH_ADDI, str_lit("arith.addi"), ity, a.val, b.val);
-                    r.is_float = flt; r.is_f64 = flt && flt64; r.is_i64 = i64m && !flt; return r;
+                    r.is_float = flt; r.is_f64 = flt && flt64; r.is_i64 = i64m && !flt; r.is_unsigned = unsgn && !flt; return r;
                 case OP_SUB:
                     r.val = flt ? emit_binop(e, OP_TYPE_ARITH_SUBF, str_lit("arith.subf"), fty, a.val, b.val)
                                 : emit_binop(e, OP_TYPE_ARITH_SUBI, str_lit("arith.subi"), ity, a.val, b.val);
-                    r.is_float = flt; r.is_f64 = flt && flt64; r.is_i64 = i64m && !flt; return r;
+                    r.is_float = flt; r.is_f64 = flt && flt64; r.is_i64 = i64m && !flt; r.is_unsigned = unsgn && !flt; return r;
                 case OP_MUL:
                     r.val = flt ? emit_binop(e, OP_TYPE_ARITH_MULF, str_lit("arith.mulf"), fty, a.val, b.val)
                                 : emit_binop(e, OP_TYPE_ARITH_MULI, str_lit("arith.muli"), ity, a.val, b.val);
-                    r.is_float = flt; r.is_f64 = flt && flt64; r.is_i64 = i64m && !flt; return r;
+                    r.is_float = flt; r.is_f64 = flt && flt64; r.is_i64 = i64m && !flt; r.is_unsigned = unsgn && !flt; return r;
                 case OP_DIV:
                     r.val = flt ? emit_binop(e, OP_TYPE_ARITH_DIVF, str_lit("arith.divf"), fty, a.val, b.val)
-                                : emit_binop(e, OP_TYPE_ARITH_DIVSI, str_lit("arith.divsi"), ity, a.val, b.val);
-                    r.is_float = flt; r.is_f64 = flt && flt64; r.is_i64 = i64m && !flt; return r;
+                                : (unsgn ? emit_binop(e, OP_TYPE_ARITH_DIVUI, str_lit("arith.divui"), ity, a.val, b.val)
+                                         : emit_binop(e, OP_TYPE_ARITH_DIVSI, str_lit("arith.divsi"), ity, a.val, b.val));
+                    r.is_float = flt; r.is_f64 = flt && flt64; r.is_i64 = i64m && !flt; r.is_unsigned = unsgn && !flt; return r;
                 case OP_MOD:
                     if (flt) {
                         EMIT_ERR(e, "% not supported on floats");
                         r.val = emit_const_f32(e, 0.0); r.is_float = true; return r;
                     }
-                    r.val = emit_binop(e, OP_TYPE_ARITH_REMSI, str_lit("arith.remsi"), ity, a.val, b.val);
-                    r.is_i64 = i64m; return r;
+                    r.val = unsgn
+                        ? emit_binop(e, OP_TYPE_ARITH_REMUI, str_lit("arith.remui"), ity, a.val, b.val)
+                        : emit_binop(e, OP_TYPE_ARITH_REMSI, str_lit("arith.remsi"), ity, a.val, b.val);
+                    r.is_i64 = i64m; r.is_unsigned = unsgn; return r;
                 case OP_LT: case OP_LE: case OP_GT: case OP_GE:
                 case OP_EQ: case OP_NE: {
                     MLIR_ValueHandle cmp = flt
                         ? emit_cmpf(e, cmpf_pred_for(ex->op), a.val, b.val)
-                        : emit_cmpi(e, cmpi_pred_for(ex->op), a.val, b.val);
+                        : emit_cmpi(e, cmpi_pred_for(ex->op, unsgn), a.val, b.val);
                     r.val = bool_to_i32(e, cmp);
                     return r;
                 }
                 case OP_BAND:
                     if (flt) { EMIT_ERR(e, "& not supported on floats"); r.val = emit_const_i32(e, 0); return r; }
                     r.val = emit_binop(e, OP_TYPE_ARITH_ANDI, str_lit("arith.andi"), ity, a.val, b.val);
-                    r.is_i64 = i64m; return r;
+                    r.is_i64 = i64m; r.is_unsigned = unsgn; return r;
                 case OP_BOR:
                     if (flt) { EMIT_ERR(e, "| not supported on floats"); r.val = emit_const_i32(e, 0); return r; }
                     r.val = emit_binop(e, OP_TYPE_ARITH_ORI, str_lit("arith.ori"), ity, a.val, b.val);
-                    r.is_i64 = i64m; return r;
+                    r.is_i64 = i64m; r.is_unsigned = unsgn; return r;
                 case OP_BXOR:
                     if (flt) { EMIT_ERR(e, "^ not supported on floats"); r.val = emit_const_i32(e, 0); return r; }
                     r.val = emit_binop(e, OP_TYPE_ARITH_XORI, str_lit("arith.xori"), ity, a.val, b.val);
-                    r.is_i64 = i64m; return r;
+                    r.is_i64 = i64m; r.is_unsigned = unsgn; return r;
                 case OP_SHL:
                     if (flt) { EMIT_ERR(e, "<< not supported on floats"); r.val = emit_const_i32(e, 0); return r; }
                     r.val = emit_binop(e, OP_TYPE_ARITH_SHLI, str_lit("arith.shli"), ity, a.val, b.val);
-                    r.is_i64 = i64m; return r;
+                    r.is_i64 = i64m; r.is_unsigned = unsgn; return r;
                 case OP_SHR:
                     if (flt) { EMIT_ERR(e, ">> not supported on floats"); r.val = emit_const_i32(e, 0); return r; }
-                    r.val = emit_binop(e, OP_TYPE_ARITH_SHRSI, str_lit("arith.shrsi"), ity, a.val, b.val);
-                    r.is_i64 = i64m; return r;
+                    r.val = unsgn
+                        ? emit_binop(e, OP_TYPE_ARITH_SHRUI, str_lit("arith.shrui"), ity, a.val, b.val)
+                        : emit_binop(e, OP_TYPE_ARITH_SHRSI, str_lit("arith.shrsi"), ity, a.val, b.val);
+                    r.is_i64 = i64m; r.is_unsigned = unsgn; return r;
                 default: break;
             }
             r.val = emit_const_i32(e, 0);
