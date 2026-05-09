@@ -225,31 +225,56 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
             bool has_exp_only = (!has_dot && j < src.size &&
                                  (src.str[j] == 'e' || src.str[j] == 'E'));
             if (has_dot || has_exp_only) {
-                double f = (double)v;
+                // Build the literal from an integer mantissa (uint64_t) and
+                // a single decimal exponent so we incur at most one round.
+                // The naive `f += digit * 0.1; scale *= 0.1` form accumulates
+                // ulp-level error per digit and miscompiles literals like
+                // 0.75 to 0x1.8000000000001p-1 (see tests/float_literal_0_75).
+                uint64_t mantissa = (uint64_t)v;
+                int dec_places = 0;
                 if (has_dot) {
                     j++; // consume '.'
-                    double scale = 0.1;
                     while (j < src.size && is_digit(src.str[j])) {
-                        f += (double)(src.str[j] - '0') * scale;
-                        scale *= 0.1;
+                        mantissa = mantissa * 10 + (uint64_t)(src.str[j] - '0');
+                        dec_places++;
                         j++;
                     }
                 }
+                int exp_sign = 1;
+                int exp = 0;
                 if (j < src.size && (src.str[j] == 'e' || src.str[j] == 'E')) {
                     j++;
-                    int sign = 1;
                     if (j < src.size && (src.str[j] == '+' || src.str[j] == '-')) {
-                        if (src.str[j] == '-') sign = -1;
+                        if (src.str[j] == '-') exp_sign = -1;
                         j++;
                     }
-                    int exp = 0;
                     while (j < src.size && is_digit(src.str[j])) {
                         exp = exp * 10 + (src.str[j] - '0');
                         j++;
                     }
-                    double m = 1.0;
-                    for (int k = 0; k < exp; k++) m *= 10.0;
-                    if (sign < 0) f /= m; else f *= m;
+                }
+                int net_exp = (exp_sign < 0 ? -exp : exp) - dec_places;
+                double f = (double)mantissa;
+                if (net_exp > 0) {
+                    // Multiply by 10^net_exp using exact integer powers
+                    // up to 10^22 (which is exactly representable in f64),
+                    // chunking larger exponents.
+                    while (net_exp > 0) {
+                        int chunk = net_exp > 22 ? 22 : net_exp;
+                        double p = 1.0;
+                        for (int k = 0; k < chunk; k++) p *= 10.0;
+                        f *= p;
+                        net_exp -= chunk;
+                    }
+                } else if (net_exp < 0) {
+                    int n = -net_exp;
+                    while (n > 0) {
+                        int chunk = n > 22 ? 22 : n;
+                        double p = 1.0;
+                        for (int k = 0; k < chunk; k++) p *= 10.0;
+                        f /= p;
+                        n -= chunk;
+                    }
                 }
                 // Optional 'f'/'F' suffix marks the literal as TY_F32; otherwise
                 // (per C99) it has TY_F64 (double).
