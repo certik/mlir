@@ -662,3 +662,7 @@ name = "union_field_offset"
 expected_stdout = """\
 0
 """
+
+[[test]]
+name = "re2c_keyword_longest_match"
+expected_stdout = "OK\n"
