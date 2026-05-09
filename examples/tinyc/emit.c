@@ -1497,6 +1497,7 @@ static void unify_numeric(E *e, EVal *a, EVal *b) {
 //   - EX_ADDR(EX_VAR struct) -> sym->addr
 //   - any expression yielding a pointer (struct* field load, malloc cast,
 //     null, etc.) -> the EVal's !llvm.ptr value
+static void emit_struct_copy(E *e, MLIR_ValueHandle dst, MLIR_ValueHandle src, StructDef *sd);
 static MLIR_ValueHandle resolve_struct_source(E *e, Scope *sc, Expr *arg, StructDef **out_sd) {
     Expr *target = arg;
     if (arg->kind == EX_ADDR) {
@@ -1601,6 +1602,46 @@ static MLIR_ValueHandle resolve_struct_source(E *e, Scope *sc, Expr *arg, Struct
                     *out_sd = sd;
                     return lval_address(e, lv);
                 }
+            }
+        }
+    }
+    // Ternary returning a struct: `cond ? a : b` where both arms are
+    // struct-typed of the same struct. Allocate one slot, copy in each
+    // branch, return the slot.
+    if (arg->kind == EX_TERNARY) {
+        Type t = infer_expr_type(e, sc, arg->rhs);
+        if (t.kind == TY_STRUCT) {
+            StructDef *sd = find_struct(e, t.struct_name);
+            if (sd) {
+                MLIR_TypeHandle st_ty = find_struct_type(e, sd);
+                MLIR_ValueHandle save_ptr = MLIR_INVALID_HANDLE;
+                MLIR_BlockHandle save_blk = e->cur_block;
+                MLIR_ValueHandle slot = emit_alloca(e, st_ty);
+                EVal cv = emit_expr(e, sc, arg->lhs);
+                MLIR_ValueHandle cb = emit_to_bool_i1(e, cv);
+                MLIR_BlockHandle then_blk = new_cfg_block(e);
+                MLIR_BlockHandle else_blk = new_cfg_block(e);
+                MLIR_BlockHandle merge_blk = new_cfg_block(e);
+                e->cur_block = then_blk; e->terminated = false;
+                StructDef *tsd = NULL;
+                MLIR_ValueHandle tsrc = resolve_struct_source(e, sc, arg->rhs, &tsd);
+                if (tsrc != MLIR_INVALID_HANDLE && tsd == sd) {
+                    emit_struct_copy(e, slot, tsrc, sd);
+                }
+                emit_branch(e, merge_blk);
+                e->cur_block = else_blk; e->terminated = false;
+                StructDef *esd = NULL;
+                MLIR_ValueHandle esrc = resolve_struct_source(e, sc, arg->lvalue, &esd);
+                if (esrc != MLIR_INVALID_HANDLE && esd == sd) {
+                    emit_struct_copy(e, slot, esrc, sd);
+                }
+                emit_branch(e, merge_blk);
+                e->cur_block = save_blk; e->terminated = false;
+                emit_cond_branch(e, cb, then_blk, else_blk);
+                e->cur_block = merge_blk; e->terminated = false;
+                (void)save_ptr;
+                *out_sd = sd;
+                return slot;
             }
         }
     }

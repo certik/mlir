@@ -304,6 +304,10 @@ expected_stdout = "42\n"
 needs_libc = true
 
 [[test]]
+name = "struct_ternary"
+expected_stdout = "70\n15\n"
+
+[[test]]
 name = "define_malloc_free"
 expected_stdout = "7\n13\n"
 

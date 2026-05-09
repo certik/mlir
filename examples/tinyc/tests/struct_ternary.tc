@@ -1,0 +1,17 @@
+struct S { int a; int b; };
+
+struct S mk(int a, int b) { struct S r; r.a = a; r.b = b; return r; }
+
+int main() {
+    struct S arr[3];
+    arr[0] = mk(10, 20);
+    arr[1] = mk(30, 40);
+    int i = 1;
+    int cond = 1;
+    struct S s = cond ? arr[i] : mk(0, 0);
+    print(s.a + s.b);
+    cond = 0;
+    struct S t = cond ? arr[i] : mk(7, 8);
+    print(t.a + t.b);
+    return 0;
+}
