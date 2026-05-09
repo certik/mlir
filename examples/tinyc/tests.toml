@@ -674,3 +674,7 @@ expected_stdout = "OK\n"
 [[test]]
 name = "unsigned_modulo"
 expected_stdout = "1\n"
+
+[[test]]
+name = "struct_field_designated_init"
+expected_stdout = "3\n"
