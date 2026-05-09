@@ -3,15 +3,15 @@
 int main() {
     char *s;
     s = "\v\f\a\b\?";
-    print(s[0]);
-    print(s[1]);
-    print(s[2]);
-    print(s[3]);
-    print(s[4]);
-    print('\v');
-    print('\f');
-    print('\a');
-    print('\b');
-    print('\?');
+    _tinyc_print(s[0]);
+    _tinyc_print(s[1]);
+    _tinyc_print(s[2]);
+    _tinyc_print(s[3]);
+    _tinyc_print(s[4]);
+    _tinyc_print('\v');
+    _tinyc_print('\f');
+    _tinyc_print('\a');
+    _tinyc_print('\b');
+    _tinyc_print('\?');
     return 0;
 }
