@@ -1,0 +1,20 @@
+// Regression: ternary returning int64_t must not truncate to i32.
+// The bug was: ternary result type ignored is_i64, so an i64 result
+// was stored as i32 (trunc) then sext back, destroying upper 32 bits.
+
+int64_t pick(int c, int64_t a, int64_t b) {
+    return c ? a : b;
+}
+
+int main() {
+    int64_t big = ((int64_t)1 << 32) | 3;
+    int64_t z = 0;
+    int64_t r1 = pick(1, big, z);
+    int64_t r2 = pick(0, big, z);
+    // print top and bottom halves so the failure is visible.
+    print((int)(r1 >> 32));   // 1
+    print((int)(r1 & 0xff));  // 3
+    print((int)(r2 >> 32));   // 0
+    print((int)(r2 & 0xff));  // 0
+    return 0;
+}

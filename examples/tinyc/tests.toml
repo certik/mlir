@@ -103,6 +103,10 @@ name = "ternary"
 expected_stdout = "7\n3\n5\n3\n1\n"
 
 [[test]]
+name = "ternary_i64"
+expected_stdout = "1\n3\n0\n0\n"
+
+[[test]]
 name = "typedef"
 expected_stdout = "16\n100\n7\n"
 

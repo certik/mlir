@@ -35,10 +35,11 @@ TESTS = os.path.join(ROOT, "tests")
 REF = os.path.join(TESTS, "reference")
 OUT = os.path.join(TESTS, "output")
 
-NATIVE = os.path.join(ROOT, "parser")
+NATIVE = os.environ.get("MLIR_PARSER_NATIVE") or os.path.join(ROOT, "parser")
 UPSTREAM = os.path.join(ROOT, "parser_upstream")
 if os.name == "nt":
-    NATIVE += ".exe"
+    if not os.environ.get("MLIR_PARSER_NATIVE"):
+        NATIVE += ".exe"
     UPSTREAM += ".exe"
 
 
