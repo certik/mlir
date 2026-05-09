@@ -1018,6 +1018,20 @@ static SCtx walk_struct_lhs(E *e, Scope *sc, Expr *ex) {
         r.ok = (r.sd != NULL);
         return r;
     }
+    // Fallback: a struct-returning call result, `f(...).field`. The
+    // call yields an EVal with is_ptr=true and sdef set; we treat that
+    // !llvm.ptr as the struct base.
+    if (ex->kind == EX_CALL) {
+        EVal v = emit_expr(e, sc, ex);
+        if (v.is_ptr && v.sdef) {
+            r.base_ptr = v.val;
+            r.sd = v.sdef;
+            r.source_elem = find_struct_type(e, v.sdef);
+            sctx_push(e, &r, 0);
+            r.ok = true;
+            return r;
+        }
+    }
     EMIT_ERR(e, "unsupported lvalue base in field access");
     return r;
 }
