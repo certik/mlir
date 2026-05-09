@@ -666,3 +666,10 @@ expected_stdout = """\
 [[test]]
 name = "re2c_keyword_longest_match"
 expected_stdout = "OK\n"
+
+[[test]]
+name = "float_literal_0_75_precision"
+expected_stdout = """\
+12.00000000000000000000
+OK
+"""

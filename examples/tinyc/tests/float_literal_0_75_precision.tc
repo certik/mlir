@@ -1,0 +1,30 @@
+// MRE for tinyC bug: decimal float literal parser accumulates rounding
+// error so that 0.75 is parsed as 0x3FE8000000000001 (~0.7500000000000001)
+// instead of the exact double 0x3FE8000000000000 (0.75).
+//
+// Root cause: examples/tinyc/lex.c reads the fractional part by repeatedly
+// adding `(digit) * scale` where `scale` starts at 0.1 and is multiplied
+// by 0.1 each iteration. Since neither 0.1 nor its powers are exactly
+// representable in binary floating-point, the accumulated error pushes
+// 0.75 one ulp above the true value.
+//
+// Downstream symptom (the reason this matters): corec's hashtable uses
+// `if (ht->size >= 0.75 * ht->num_buckets) resize();` to decide when to
+// grow. For an initially-16-bucket SymbolTable, the threshold should be
+// 12 entries, but tinyc's miscompiled comparison evaluates 12 >= 12.0...01
+// as false, so the table never resizes. Long probe sequences then cause
+// later lookups to spuriously fail (parser_tinyc reports "Undefined SSA
+// value" on entries that were inserted earlier).
+//
+// The fix lives in the lex.c float-literal parser: collect the fractional
+// digits as an integer, then perform a single division by the appropriate
+// power of ten so that exact values like 0.75 round correctly.
+extern int printf(const char *fmt, ...);
+
+int main(void) {
+    double x = 0.75;
+    // Should print exactly 12.000000... — bug prints 12.000000000000002.
+    printf("%.20f\n", x * 16.0);
+    if (12 >= x * 16) printf("OK\n"); else printf("FAIL\n");
+    return 0;
+}
