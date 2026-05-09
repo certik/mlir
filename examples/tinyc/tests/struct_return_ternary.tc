@@ -7,8 +7,8 @@ struct S choose(int c) { return c ? t() : f(); }
 
 int main() {
     struct S r = choose(1);
-    print(r.a + r.b);
+    _tinyc_print(r.a + r.b);
     struct S q = choose(0);
-    print(q.a + q.b);
+    _tinyc_print(q.a + q.b);
     return 0;
 }

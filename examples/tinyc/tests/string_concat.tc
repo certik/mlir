@@ -5,9 +5,9 @@ int main() {
     s = "hello"
         " "
         "world";
-    print(s[0]);
-    print(s[5]);
-    print(s[6]);
-    print(s[10]);
+    _tinyc_print(s[0]);
+    _tinyc_print(s[5]);
+    _tinyc_print(s[6]);
+    _tinyc_print(s[10]);
     return 0;
 }

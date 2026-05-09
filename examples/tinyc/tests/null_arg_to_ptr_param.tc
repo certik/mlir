@@ -2,7 +2,7 @@ extern int strlen(char *p);
 
 int main() {
     char *p = 0;
-    if (p) print(strlen(p));
-    print(42);
+    if (p) _tinyc_print(strlen(p));
+    _tinyc_print(42);
     return 0;
 }

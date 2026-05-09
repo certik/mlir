@@ -29,15 +29,15 @@ int main(void) {
     a.after = 99;
 
     a.data.b = 1;
-    if (a.data.b != 1) { print(1); return 1; }
+    if (a.data.b != 1) { _tinyc_print(1); return 1; }
 
     a.data.i = 42;
-    if (a.data.i != 42) { print(2); return 2; }
+    if (a.data.i != 42) { _tinyc_print(2); return 2; }
 
     // Cross-member: writing `b` then reading `i` reads the low bits we
     // just wrote (alias at offset 0).
     a.data.b = 5;
-    if ((int)a.data.i != 5) { print(3); return 3; }
+    if ((int)a.data.i != 5) { _tinyc_print(3); return 3; }
 
     // Nested struct member of a union: write the inner fields and read
     // them back (exercises the "partial GEP, restart with nested struct
@@ -45,13 +45,13 @@ int main(void) {
     int x = 0;
     a.data.arr.p = &x;
     a.data.arr.n = 11;
-    if (a.data.arr.p != &x) { print(4); return 4; }
-    if (a.data.arr.n != 11) { print(5); return 5; }
+    if (a.data.arr.p != &x) { _tinyc_print(4); return 4; }
+    if (a.data.arr.n != 11) { _tinyc_print(5); return 5; }
 
     // Outer struct fields are unaffected.
-    if (a.kind != 7) { print(6); return 6; }
-    if (a.after != 99) { print(7); return 7; }
+    if (a.kind != 7) { _tinyc_print(6); return 6; }
+    if (a.after != 99) { _tinyc_print(7); return 7; }
 
-    print(0);
+    _tinyc_print(0);
     return 0;
 }

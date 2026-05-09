@@ -7,11 +7,11 @@ int main(int argc, char **argv) {
     arr[0] = a;
     arr[1] = b;
     char **pp = arr;
-    print(pp[0][0]);
-    print(pp[0][1]);
-    print(pp[0][2]);
-    print(pp[1][0]);
-    print(pp[1][1]);
-    print(pp[1][2]);
+    _tinyc_print(pp[0][0]);
+    _tinyc_print(pp[0][1]);
+    _tinyc_print(pp[0][2]);
+    _tinyc_print(pp[1][0]);
+    _tinyc_print(pp[1][1]);
+    _tinyc_print(pp[1][2]);
     return 0;
 }

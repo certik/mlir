@@ -12,9 +12,9 @@ int main() {
     int64_t r1 = pick(1, big, z);
     int64_t r2 = pick(0, big, z);
     // print top and bottom halves so the failure is visible.
-    print((int)(r1 >> 32));   // 1
-    print((int)(r1 & 0xff));  // 3
-    print((int)(r2 >> 32));   // 0
-    print((int)(r2 & 0xff));  // 0
+    _tinyc_print((int)(r1 >> 32));   // 1
+    _tinyc_print((int)(r1 & 0xff));  // 3
+    _tinyc_print((int)(r2 >> 32));   // 0
+    _tinyc_print((int)(r2 & 0xff));  // 0
     return 0;
 }

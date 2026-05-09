@@ -15,8 +15,8 @@ int main() {
     int **pp = &p;
     int cap = 3;
     grow(pp, &cap);
-    print((*pp)[0]);
-    print((*pp)[1]);
-    print((*pp)[2]);
+    _tinyc_print((*pp)[0]);
+    _tinyc_print((*pp)[1]);
+    _tinyc_print((*pp)[2]);
     return 0;
 }

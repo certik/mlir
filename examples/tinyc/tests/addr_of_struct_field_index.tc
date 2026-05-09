@@ -16,9 +16,9 @@ int main() {
     set(&c.items[1], 2);
     struct Container *cp = &c;
     set(&cp->items[2], 3);
-    print(storage[0].a); print(storage[0].b);
-    print(storage[1].a); print(storage[1].b);
-    print(storage[2].a); print(storage[2].b);
+    _tinyc_print(storage[0].a); _tinyc_print(storage[0].b);
+    _tinyc_print(storage[1].a); _tinyc_print(storage[1].b);
+    _tinyc_print(storage[2].a); _tinyc_print(storage[2].b);
     return 0;
 }
 

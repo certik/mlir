@@ -5,9 +5,9 @@ struct S make() { struct S s; s.a = 5; s.b = 9; return s; }
 int main() {
     int x = 1;
     if (x && make().a == 5) {
-        print(100 + make().b);
+        _tinyc_print(100 + make().b);
     } else {
-        print(0);
+        _tinyc_print(0);
     }
     return 0;
 }

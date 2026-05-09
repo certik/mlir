@@ -7,8 +7,8 @@ long mul100(int x) {
 int main() {
     Fn f = mul100;
     long r = f(7);
-    print((int)r);
+    _tinyc_print((int)r);
     long r2 = f(20);
-    print((int)r2);
+    _tinyc_print((int)r2);
     return 0;
 }

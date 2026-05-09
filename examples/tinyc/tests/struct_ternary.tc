@@ -9,9 +9,9 @@ int main() {
     int i = 1;
     int cond = 1;
     struct S s = cond ? arr[i] : mk(0, 0);
-    print(s.a + s.b);
+    _tinyc_print(s.a + s.b);
     cond = 0;
     struct S t = cond ? arr[i] : mk(7, 8);
-    print(t.a + t.b);
+    _tinyc_print(t.a + t.b);
     return 0;
 }

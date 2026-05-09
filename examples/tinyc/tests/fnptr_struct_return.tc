@@ -12,8 +12,8 @@ typedef struct S (*Fn)(int);
 int main() {
     Fn f = make;
     struct S r = f(7);
-    print(r.a);
-    print(r.b);
-    print(r.a + r.b);
+    _tinyc_print(r.a);
+    _tinyc_print(r.b);
+    _tinyc_print(r.a + r.b);
     return 0;
 }
