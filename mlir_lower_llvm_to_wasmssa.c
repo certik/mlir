@@ -1245,6 +1245,42 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         return true;
     }
 
+    // ---- llvm.mlir.addressof ----------------------------------------------
+    // Result is a pointer (i32) to a data global. We emit an ADDRESSOF op
+    // that stage 3 will lower as `i32.const <padded sleb>` plus a
+    // R_WASM_MEMORY_ADDR_SLEB reloc to the named global symbol.
+    if (name_eq(name, "llvm.mlir.addressof")) {
+        if (MLIR_GetOpNumResults(op) != 1) return false;
+        MLIR_AttributeHandle ta = find_attr(op, "global_name");
+        if (ta == MLIR_INVALID_HANDLE)
+            ta = find_attr(op, "value");
+        if (ta == MLIR_INVALID_HANDLE) {
+            // Fallback: any string attr.
+            size_t na = MLIR_GetOpNumAttributes(op);
+            for (size_t i = 0; i < na; i++) {
+                MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
+                if (MLIR_GetAttributeKind(a) == MLIR_ATTR_KIND_STRING) {
+                    ta = a; break;
+                }
+            }
+        }
+        if (ta == MLIR_INVALID_HANDLE) return false;
+        string ts = MLIR_GetAttributeString(ta);
+        // Strip leading '@' if present (FlatSymbolRefAttr prints with '@').
+        if (ts.size && ts.str[0] == '@') {
+            ts.str++;
+            ts.size--;
+        }
+
+        wasmssa_op_t *o; int idx = add_op(F, &o);
+        o->type = OP_TYPE_WASMSSA_ADDRESSOF;
+        o->valtype = WT_I32;
+        o->call_target = xstrdup_str(ts);  // reuse field for symbol name
+        o->has_result = true;
+        vmap_set(F, MLIR_GetOpResult(op, 0), idx);
+        return true;
+    }
+
     // ---- llvm.mlir.zero ---------------------------------------------------
     // Pointer / integer zero. f32/f64 zero would also fall through here but
     // currently only ptr/int paths are exercised (the float test uses a
@@ -1449,6 +1485,125 @@ static bool sig_for_func(MLIR_Context *ctx, MLIR_OpHandle fn,
     return true;
 }
 
+// Return alignment requirement (power-of-2 exponent) for a global of
+// the given LLVM type. 0 = byte-aligned.
+static uint32_t align_pow_for_type(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    unsigned a = type_align_bytes(ctx, ty);
+    uint32_t p = 0;
+    while ((1u << p) < a) p++;
+    return p;
+}
+
+// Lower one llvm.mlir.global op into a wasm_global_t entry. Returns
+// false on failure.
+static bool lower_global(MLIR_Context *ctx, wasmssa_module_t *out,
+                         MLIR_OpHandle op) {
+    MLIR_AttributeHandle sa = find_attr(op, "sym_name");
+    if (sa == MLIR_INVALID_HANDLE) return false;
+    string sym = MLIR_GetAttributeString(sa);
+
+    MLIR_AttributeHandle ga = find_attr(op, "global_type");
+    MLIR_TypeHandle gty = MLIR_INVALID_HANDLE;
+    if (ga != MLIR_INVALID_HANDLE) gty = MLIR_GetAttributeTypeValue(ga);
+
+    wasm_global_t *g = wasmssa_module_add_global(out);
+    g->name = xstrdup_str(sym);
+    if (gty != MLIR_INVALID_HANDLE) {
+        g->size = type_size_bytes(ctx, gty);
+        g->align_pow = align_pow_for_type(ctx, gty);
+    }
+
+    // Constness: presence of attr "constant" (any value).
+    g->is_const = (find_attr(op, "constant") != MLIR_INVALID_HANDLE);
+
+    MLIR_AttributeHandle va = find_attr(op, "value");
+    if (va != MLIR_INVALID_HANDLE) {
+        MLIR_AttrKind ak = MLIR_GetAttributeKind(va);
+        if (ak == MLIR_ATTR_KIND_STRING) {
+            string s = MLIR_GetAttributeString(va);
+            g->size = (uint32_t)s.size;
+            g->data = (uint8_t *)malloc(g->size ? g->size : 1);
+            memcpy(g->data, s.str, g->size);
+            if (g->align_pow == 0) g->align_pow = 0;
+            return true;
+        }
+        if (ak == MLIR_ATTR_KIND_INTEGER || ak == MLIR_ATTR_KIND_FLOAT) {
+            if (g->size == 0) return false;
+            g->data = (uint8_t *)calloc(1, g->size);
+            uint64_t bits = 0;
+            if (ak == MLIR_ATTR_KIND_INTEGER) {
+                bits = (uint64_t)MLIR_GetAttributeInteger(va);
+            } else {
+                double d = MLIR_GetAttributeFloat(va);
+                if (g->size == 4) {
+                    float f = (float)d; uint32_t b32;
+                    memcpy(&b32, &f, 4); bits = b32;
+                } else if (g->size == 8) {
+                    memcpy(&bits, &d, 8);
+                } else return false;
+            }
+            for (uint32_t i = 0; i < g->size && i < 8; i++)
+                g->data[i] = (uint8_t)(bits >> (8 * i));
+            return true;
+        }
+        // Unknown attr kind -- fall through to zero-init.
+    }
+
+    // Region-init globals: walk for an llvm.mlir.addressof + llvm.return.
+    if (MLIR_GetOpNumRegions(op) > 0) {
+        MLIR_RegionHandle rgn = MLIR_GetOpRegion(op, 0);
+        if (MLIR_GetRegionNumBlocks(rgn) > 0) {
+            MLIR_BlockHandle blk = MLIR_GetRegionBlock(rgn, 0);
+            size_t nb = MLIR_GetBlockNumOps(blk);
+            // Map block-internal ssa value -> tagged "addressof @target".
+            // We only support the trivial pattern produced by tinyc:
+            //   %0 = llvm.mlir.addressof @other : !llvm.ptr
+            //   llvm.return %0 : !llvm.ptr
+            char *pending_target = NULL;
+            for (size_t bi = 0; bi < nb; bi++) {
+                MLIR_OpHandle bop = MLIR_GetBlockOp(blk, bi);
+                string bn = MLIR_GetOpName(bop);
+                if (name_eq(bn, "llvm.mlir.addressof")) {
+                    MLIR_AttributeHandle ta = find_attr(bop, "global_name");
+                    if (ta == MLIR_INVALID_HANDLE)
+                        ta = find_attr(bop, "value");  // upstream attr name
+                    if (ta == MLIR_INVALID_HANDLE) {
+                        // Fallback: any FlatSymbolRef-shaped attr.
+                        size_t na = MLIR_GetOpNumAttributes(bop);
+                        for (size_t i = 0; i < na; i++) {
+                            MLIR_AttributeHandle a = MLIR_GetOpAttribute(bop, i);
+                            if (MLIR_GetAttributeKind(a) == MLIR_ATTR_KIND_STRING) {
+                                ta = a; break;
+                            }
+                        }
+                    }
+                    if (ta == MLIR_INVALID_HANDLE) return false;
+                    string ts = MLIR_GetAttributeString(ta);
+                    if (ts.size && ts.str[0] == '@') {
+                        ts.str++; ts.size--;
+                    }
+                    free(pending_target);
+                    pending_target = xstrdup_str(ts);
+                } else if (name_eq(bn, "llvm.return")) {
+                    if (!pending_target) break;
+                    g->size = 4;
+                    if (g->align_pow == 0) g->align_pow = 2;
+                    g->data = (uint8_t *)calloc(1, g->size);
+                    wasm_global_add_reloc(g, 0, pending_target, 0);
+                    free(pending_target);
+                    return true;
+                }
+            }
+            free(pending_target);
+        }
+    }
+
+    // No initializer found (e.g. uninitialized scalar global). Zero-init.
+    if (g->size == 0) return false;
+    g->data = (uint8_t *)calloc(1, g->size);
+    return true;
+}
+
 wasmssa_module_t *mlir_lower_llvm_to_wasmssa(MLIR_Context *ctx,
                                              MLIR_OpHandle module) {
     MLIR_RegionHandle mr = MLIR_GetOpRegion(module, 0);
@@ -1456,6 +1611,19 @@ wasmssa_module_t *mlir_lower_llvm_to_wasmssa(MLIR_Context *ctx,
     size_t nops = MLIR_GetBlockNumOps(mb);
 
     wasmssa_module_t *out = wasmssa_module_new();
+
+    // Pass 0: globals (llvm.mlir.global). Must precede func lowering so
+    // addressof can resolve symbol names to an existing global table
+    // entry — though the lowering only stores the name and stage 3
+    // matches by name during DATA emission.
+    for (size_t i = 0; i < nops; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
+        if (!name_eq(MLIR_GetOpName(op), "llvm.mlir.global")) continue;
+        if (!lower_global(ctx, out, op)) {
+            fprintf(stderr, "wasmssa-lower: failed to lower global\n");
+            wasmssa_module_free(out); return NULL;
+        }
+    }
 
     // Pass 1: imports (declared funcs) first so they get the low function
     // indices in the wasm function-index space.

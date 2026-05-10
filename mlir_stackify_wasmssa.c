@@ -68,6 +68,7 @@ static MLIR_OpType ssa_to_stack(MLIR_OpType t) {
     case OP_TYPE_WASMSSA_BR_IF:       return OP_TYPE_WASMSTACK_BR_IF;
     case OP_TYPE_WASMSSA_SELECT:      return OP_TYPE_WASMSTACK_SELECT;
     case OP_TYPE_WASMSSA_EQZ:         return OP_TYPE_WASMSTACK_EQZ;
+    case OP_TYPE_WASMSSA_ADDRESSOF:   return OP_TYPE_WASMSTACK_ADDRESSOF;
     default: return (MLIR_OpType)0;
     }
 }
@@ -203,6 +204,19 @@ wasmstack_module_t *mlir_stackify_wasmssa(wasmssa_module_t *m) {
             wasmstack_module_free(out);
             return NULL;
         }
+    }
+    // Move globals over verbatim (transfer ownership of name/data/relocs).
+    for (size_t i = 0; i < m->n_globals; i++) {
+        wasm_global_t *src = &m->globals[i];
+        wasm_global_t *dst = wasmstack_module_add_global(out);
+        dst->name = src->name;       src->name = NULL;
+        dst->data = src->data;       src->data = NULL;
+        dst->size = src->size;
+        dst->align_pow = src->align_pow;
+        dst->is_const = src->is_const;
+        dst->relocs = src->relocs;   src->relocs = NULL;
+        dst->n_relocs = src->n_relocs; src->n_relocs = 0;
+        dst->c_relocs = src->c_relocs; src->c_relocs = 0;
     }
     return out;
 }

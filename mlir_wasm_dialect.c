@@ -41,6 +41,14 @@ void wasmssa_module_free(wasmssa_module_t *m) {
     if (!m) return;
     for (size_t i = 0; i < m->n_funcs; i++) wasmssa_func_free(&m->funcs[i]);
     free(m->funcs);
+    for (size_t i = 0; i < m->n_globals; i++) {
+        free(m->globals[i].name);
+        free(m->globals[i].data);
+        for (size_t j = 0; j < m->globals[i].n_relocs; j++)
+            free(m->globals[i].relocs[j].target);
+        free(m->globals[i].relocs);
+    }
+    free(m->globals);
     free(m);
 }
 
@@ -79,6 +87,14 @@ void wasmstack_module_free(wasmstack_module_t *m) {
     if (!m) return;
     for (size_t i = 0; i < m->n_funcs; i++) wasmstack_func_free(&m->funcs[i]);
     free(m->funcs);
+    for (size_t i = 0; i < m->n_globals; i++) {
+        free(m->globals[i].name);
+        free(m->globals[i].data);
+        for (size_t j = 0; j < m->globals[i].n_relocs; j++)
+            free(m->globals[i].relocs[j].target);
+        free(m->globals[i].relocs);
+    }
+    free(m->globals);
     free(m);
 }
 
@@ -100,4 +116,30 @@ uint32_t wasmstack_func_add_local(wasmstack_func_t *f, uint8_t vt) {
     ENSURE(f->local_types, f->n_locals, f->c_locals, uint8_t);
     f->local_types[f->n_locals] = vt;
     return (uint32_t)(f->n_params + f->n_locals++);
+}
+
+// ============================================================================
+// globals
+// ============================================================================
+wasm_global_t *wasmssa_module_add_global(wasmssa_module_t *m) {
+    ENSURE(m->globals, m->n_globals, m->c_globals, wasm_global_t);
+    wasm_global_t *g = &m->globals[m->n_globals++];
+    memset(g, 0, sizeof(*g));
+    return g;
+}
+wasm_global_t *wasmstack_module_add_global(wasmstack_module_t *m) {
+    ENSURE(m->globals, m->n_globals, m->c_globals, wasm_global_t);
+    wasm_global_t *g = &m->globals[m->n_globals++];
+    memset(g, 0, sizeof(*g));
+    return g;
+}
+void wasm_global_add_reloc(wasm_global_t *g, uint32_t off,
+                           const char *target, int32_t addend) {
+    ENSURE(g->relocs, g->n_relocs, g->c_relocs, wasm_data_reloc_t);
+    wasm_data_reloc_t *r = &g->relocs[g->n_relocs++];
+    r->offset = off;
+    size_t n = strlen(target);
+    r->target = (char *)malloc(n + 1);
+    memcpy(r->target, target, n + 1);
+    r->addend = addend;
 }

@@ -89,22 +89,43 @@ enum {
     SEC_IMPORT   = 2,
     SEC_FUNCTION = 3,
     SEC_CODE     = 10,
+    SEC_DATA     = 11,
+    SEC_DATACOUNT = 12,
 
     IMP_FUNC   = 0,
     IMP_MEMORY = 2,
     IMP_GLOBAL = 3,
 
-    LINK_VERSION          = 2,
-    LINK_SUB_SYMBOL_TABLE = 8,
+    LINK_VERSION             = 2,
+    LINK_SUB_SEGMENT_INFO    = 5,
+    LINK_SUB_SYMBOL_TABLE    = 8,
 
     SYM_FUNCTION = 0,
+    SYM_DATA     = 1,
     SYM_GLOBAL   = 2,
 
+    SYMF_BINDING_LOCAL = 0x02,
+    SYMF_VISIBILITY_HIDDEN = 0x04,
     SYMF_UNDEFINED = 0x10,
+    SYMF_EXPLICIT_NAME = 0x40,
 
     R_WASM_FUNCTION_INDEX_LEB = 0,
+    R_WASM_TABLE_INDEX_SLEB   = 1,
+    R_WASM_MEMORY_ADDR_LEB    = 3,
+    R_WASM_MEMORY_ADDR_SLEB   = 4,
+    R_WASM_MEMORY_ADDR_I32    = 5,
     R_WASM_GLOBAL_INDEX_LEB   = 7,
 };
+
+// 5-byte zero-padded sleb128 (signed counterpart of leb_u_pad5).
+static void leb_s_pad5(Buf *b, int32_t v) {
+    for (int i = 0; i < 5; i++) {
+        uint8_t byte = v & 0x7f;
+        v >>= 7;
+        if (i < 4) byte |= 0x80;
+        buf_putc(b, byte);
+    }
+}
 
 // =============================================================================
 // Function-signature interner (functype dedup for the TYPE section).
@@ -149,6 +170,7 @@ typedef struct {
     uint8_t  type;
     uint32_t body_offset;   // relative to start of `body` while building
     uint32_t sym_idx;
+    int32_t  addend;        // only for memory_addr reloc kinds
 } Reloc;
 
 typedef struct {
@@ -168,7 +190,15 @@ static void emfunc_add_reloc(EmFunc *f, uint8_t type, uint32_t off, uint32_t sym
         f->c_relocs = f->c_relocs ? f->c_relocs * 2 : 4;
         f->relocs = (Reloc *)realloc(f->relocs, f->c_relocs * sizeof(Reloc));
     }
-    f->relocs[f->n_relocs++] = (Reloc){type, off, sym};
+    f->relocs[f->n_relocs++] = (Reloc){type, off, sym, 0};
+}
+static void emfunc_add_reloc_a(EmFunc *f, uint8_t type, uint32_t off,
+                               uint32_t sym, int32_t addend) {
+    if (f->n_relocs == f->c_relocs) {
+        f->c_relocs = f->c_relocs ? f->c_relocs * 2 : 4;
+        f->relocs = (Reloc *)realloc(f->relocs, f->c_relocs * sizeof(Reloc));
+    }
+    f->relocs[f->n_relocs++] = (Reloc){type, off, sym, addend};
 }
 
 // =============================================================================
@@ -189,8 +219,17 @@ static int find_func_by_name(EmFunc *funcs, size_t n, const char *nm) {
 // Per-op encoding. Dispatches on MLIR_OpType. Returns false on unknown
 // op or invalid encoding.
 // =============================================================================
+static int find_global_by_name(const wasm_global_t *gs, size_t n,
+                               const char *nm) {
+    for (size_t i = 0; i < n; i++)
+        if (strcmp(gs[i].name, nm) == 0) return (int)i;
+    return -1;
+}
+
 static bool encode_op(EmFunc *F, const wasmstack_op_t *op, uint32_t sp_sym_idx,
-                      EmFunc *all_funcs, size_t all_funcs_n) {
+                      EmFunc *all_funcs, size_t all_funcs_n,
+                      const wasm_global_t *globals, size_t n_globals,
+                      uint32_t global_sym_base) {
     Buf *b = &F->body;
     switch (op->type) {
     case OP_TYPE_WASMSTACK_LOCAL_GET:
@@ -335,6 +374,21 @@ static bool encode_op(EmFunc *F, const wasmstack_op_t *op, uint32_t sp_sym_idx,
         return true;
     }
 
+    case OP_TYPE_WASMSTACK_ADDRESSOF: {
+        int idx = find_global_by_name(globals, n_globals, op->call_target);
+        if (idx < 0) {
+            fprintf(stderr, "wasm-emit: addressof unknown global '%s'\n",
+                    op->call_target);
+            return false;
+        }
+        buf_putc(b, 0x41);  // i32.const
+        uint32_t off = (uint32_t)b->len;
+        leb_s_pad5(b, 0);
+        emfunc_add_reloc(F, R_WASM_MEMORY_ADDR_SLEB, off,
+                         global_sym_base + (uint32_t)idx);
+        return true;
+    }
+
     default:
         fprintf(stderr, "wasm-emit: unsupported wasmstack op (enum=%d)\n",
                 (int)op->type);
@@ -347,13 +401,16 @@ static bool encode_op(EmFunc *F, const wasmstack_op_t *op, uint32_t sp_sym_idx,
 // =============================================================================
 static bool build_body(EmFunc *F, const wasmstack_func_t *src,
                        uint32_t sp_sym_idx,
-                       EmFunc *all_funcs, size_t all_funcs_n) {
+                       EmFunc *all_funcs, size_t all_funcs_n,
+                       const wasm_global_t *globals, size_t n_globals,
+                       uint32_t global_sym_base) {
     // Build instruction stream.
     Buf insns = {0};
     Buf saved = F->body;
     F->body = insns;
     for (size_t i = 0; i < src->n_ops; i++) {
-        if (!encode_op(F, &src->ops[i], sp_sym_idx, all_funcs, all_funcs_n)) {
+        if (!encode_op(F, &src->ops[i], sp_sym_idx, all_funcs, all_funcs_n,
+                       globals, n_globals, global_sym_base)) {
             buf_free(&F->body);
             F->body = saved;
             return false;
@@ -413,16 +470,19 @@ static void emit_string(Buf *out, const char *s) {
     buf_append(out, s, n);
 }
 
-// `linking` custom section: SYMBOL_TABLE subsection only.
+// `linking` custom section: SYMBOL_TABLE subsection + optional SEGMENT_INFO.
 //   sym 0       : __stack_pointer (imported global)
 //   sym 1..n    : functions in EmFunc order (imports first, then defs)
+//   sym n+1..   : data symbols (one per global)
 static void build_linking_section(EmFunc *funcs, size_t n_funcs,
-                                  uint32_t sp_global_idx, Buf *out) {
+                                  uint32_t sp_global_idx,
+                                  const wasm_global_t *globals, size_t n_globals,
+                                  Buf *out) {
     Buf body = {0};
     leb_u(&body, LINK_VERSION);
 
     Buf sub = {0};
-    leb_u(&sub, 1u + (uint32_t)n_funcs);
+    leb_u(&sub, 1u + (uint32_t)n_funcs + (uint32_t)n_globals);
 
     // Sym 0: __stack_pointer (imported global).
     buf_putc(&sub, SYM_GLOBAL);
@@ -439,10 +499,44 @@ static void build_linking_section(EmFunc *funcs, size_t n_funcs,
         if (!f->imported) emit_string(&sub, f->name);
     }
 
+    for (size_t i = 0; i < n_globals; i++) {
+        buf_putc(&sub, SYM_DATA);
+        // Mark all data symbols as local + hidden so the linker treats
+        // them as private to this object.
+        leb_u(&sub, SYMF_BINDING_LOCAL | SYMF_VISIBILITY_HIDDEN);
+        emit_string(&sub, globals[i].name);
+        // For SYM_DATA, defined symbols carry segment index, offset, size.
+        leb_u(&sub, (uint32_t)i);   // segment_index
+        leb_u(&sub, 0);             // offset within segment
+        leb_u(&sub, globals[i].size);
+    }
+
     buf_putc(&body, LINK_SUB_SYMBOL_TABLE);
     leb_u(&body, sub.len);
     buf_append(&body, sub.data, sub.len);
     buf_free(&sub);
+
+    if (n_globals) {
+        Buf seg = {0};
+        leb_u(&seg, (uint32_t)n_globals);
+        for (size_t i = 0; i < n_globals; i++) {
+            // Sanitize: lld accepts arbitrary names but require non-empty.
+            const char *nm = globals[i].name && globals[i].name[0]
+                              ? globals[i].name : ".rodata";
+            // Use a conventional segment name prefix per constness.
+            // Many existing toolchains use ".rodata.<name>" / ".data.<name>".
+            char *full = (char *)malloc(strlen(nm) + 16);
+            sprintf(full, "%s%s", globals[i].is_const ? ".rodata." : ".data.", nm);
+            emit_string(&seg, full);
+            free(full);
+            leb_u(&seg, globals[i].align_pow);
+            leb_u(&seg, 0);  // flags
+        }
+        buf_putc(&body, LINK_SUB_SEGMENT_INFO);
+        leb_u(&body, seg.len);
+        buf_append(&body, seg.data, seg.len);
+        buf_free(&seg);
+    }
 
     Buf payload = {0};
     emit_string(&payload, "linking");
@@ -453,12 +547,19 @@ static void build_linking_section(EmFunc *funcs, size_t n_funcs,
     buf_free(&payload);
 }
 
+// Helper: true if this reloc type carries an addend (sleb128).
+static bool reloc_has_addend(uint8_t t) {
+    return t == R_WASM_MEMORY_ADDR_LEB ||
+           t == R_WASM_MEMORY_ADDR_SLEB ||
+           t == R_WASM_MEMORY_ADDR_I32;
+}
+
 // `reloc.CODE` custom section.
 static void build_reloc_code_section(EmFunc *funcs, size_t n_funcs,
                                      uint8_t code_section_index,
                                      const uint32_t *func_body_off,
                                      Buf *out) {
-    typedef struct { uint8_t type; uint32_t off; uint32_t sym; } R;
+    typedef struct { uint8_t type; uint32_t off; uint32_t sym; int32_t addend; } R;
     R *all = NULL; size_t na = 0, ca = 0;
     size_t k = 0;
     for (size_t i = 0; i < n_funcs; i++) {
@@ -470,6 +571,7 @@ static void build_reloc_code_section(EmFunc *funcs, size_t n_funcs,
                 f->relocs[j].type,
                 func_body_off[k] + f->relocs[j].body_offset,
                 f->relocs[j].sym_idx,
+                f->relocs[j].addend,
             };
         }
         k++;
@@ -482,6 +584,7 @@ static void build_reloc_code_section(EmFunc *funcs, size_t n_funcs,
         buf_putc(&body, all[i].type);
         leb_u(&body, all[i].off);
         leb_u(&body, all[i].sym);
+        if (reloc_has_addend(all[i].type)) leb_s(&body, all[i].addend);
     }
     free(all);
 
@@ -535,9 +638,10 @@ string mlir_translate_wasmstack_to_binary(MLIR_Context *ctx,
         n_funcs++;
     }
 
-    // Sym indices: 0 = __stack_pointer, 1..N = funcs in EmFunc order.
+    // Sym indices: 0 = __stack_pointer, 1..N = funcs, N+1.. = data globals.
     uint32_t sp_sym = 0;
     for (size_t i = 0; i < n_funcs; i++) funcs[i].sym_index = (uint32_t)(i + 1);
+    uint32_t global_sym_base = 1u + (uint32_t)n_funcs;
 
     // ---- Emit each defined function's body ---------------------------------
     // We have to walk the source funcs in their original order to find each
@@ -549,7 +653,8 @@ string mlir_translate_wasmstack_to_binary(MLIR_Context *ctx,
             if (pass == 0 && !imp) continue;
             if (pass == 1 && imp) continue;
             if (pass == 1) {
-                if (!build_body(&funcs[ei], &m->funcs[i], sp_sym, funcs, n_funcs)) {
+                if (!build_body(&funcs[ei], &m->funcs[i], sp_sym, funcs, n_funcs,
+                                m->globals, m->n_globals, global_sym_base)) {
                     goto fail_after_funcs;
                 }
             }
@@ -633,8 +738,80 @@ string mlir_translate_wasmstack_to_binary(MLIR_Context *ctx,
     emit_section(&img, SEC_FUNCTION, &function_payload);
     uint8_t code_section_index = 3;  // type=0,import=1,function=2,code=3
     emit_section(&img, SEC_CODE,     &code_payload);
-    build_linking_section(funcs, n_funcs, /*sp_global_idx=*/0, &img);
+    uint8_t data_section_index = 4;
+
+    // ---- DATA section + reloc.DATA -----------------------------------------
+    // One active segment per global (memory 0, offset i32.const 0). Each
+    // segment header bytes occupy a few bytes before the data payload;
+    // we track each global's data start within the payload buffer to
+    // place reloc records for ptr-init globals.
+    Buf data_payload = {0};
+    uint32_t *data_offsets = NULL;
+    if (m->n_globals) {
+        data_offsets = (uint32_t *)calloc(m->n_globals, sizeof(uint32_t));
+        leb_u(&data_payload, (uint32_t)m->n_globals);
+        for (size_t i = 0; i < m->n_globals; i++) {
+            const wasm_global_t *g = &m->globals[i];
+            // active segment in memory 0 with offset = i32.const 0
+            leb_u(&data_payload, 0);     // flags=0 (active, memory 0)
+            buf_putc(&data_payload, 0x41); leb_s(&data_payload, 0); // i32.const 0
+            buf_putc(&data_payload, 0x0b);                          // end
+            leb_u(&data_payload, g->size);
+            data_offsets[i] = (uint32_t)data_payload.len;
+            if (g->size) buf_append(&data_payload, g->data, g->size);
+        }
+        // Required for relocatable wasm with active segments? Not strictly
+        // — wasm-ld doesn't insist on a DataCount for relocatable inputs
+        // when memory.init isn't used. Skip.
+        emit_section(&img, SEC_DATA, &data_payload);
+    }
+
+    build_linking_section(funcs, n_funcs, /*sp_global_idx=*/0,
+                          m->globals, m->n_globals, &img);
     build_reloc_code_section(funcs, n_funcs, code_section_index, body_offsets, &img);
+
+    // reloc.DATA for ptr-init globals.
+    if (m->n_globals) {
+        size_t total = 0;
+        for (size_t i = 0; i < m->n_globals; i++) total += m->globals[i].n_relocs;
+        if (total) {
+            Buf body = {0};
+            leb_u(&body, data_section_index);
+            leb_u(&body, (uint32_t)total);
+            for (size_t i = 0; i < m->n_globals; i++) {
+                const wasm_global_t *g = &m->globals[i];
+                for (size_t j = 0; j < g->n_relocs; j++) {
+                    int tidx = -1;
+                    for (size_t k = 0; k < m->n_globals; k++)
+                        if (strcmp(m->globals[k].name, g->relocs[j].target) == 0) {
+                            tidx = (int)k; break;
+                        }
+                    if (tidx < 0) {
+                        fprintf(stderr,
+                                "wasm-emit: reloc.DATA target '%s' not found\n",
+                                g->relocs[j].target);
+                        free(data_offsets);
+                        buf_free(&data_payload);
+                        buf_free(&body);
+                        goto fail_after_funcs;
+                    }
+                    buf_putc(&body, R_WASM_MEMORY_ADDR_I32);
+                    leb_u(&body, data_offsets[i] + g->relocs[j].offset);
+                    leb_u(&body, global_sym_base + (uint32_t)tidx);
+                    leb_s(&body, g->relocs[j].addend);
+                }
+            }
+            Buf payload = {0};
+            emit_string(&payload, "reloc.DATA");
+            buf_append(&payload, body.data, body.len);
+            buf_free(&body);
+            emit_section(&img, SEC_CUSTOM, &payload);
+            buf_free(&payload);
+        }
+    }
+    free(data_offsets);
+    buf_free(&data_payload);
+    (void)data_section_index;
 
     free(body_offsets);
     buf_free(&type_payload);

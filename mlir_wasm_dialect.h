@@ -37,6 +37,30 @@ enum {
 };
 
 // =============================================================================
+// Globals (LLVM-dialect llvm.mlir.global -> wasm DATA segment + symbol).
+// =============================================================================
+//
+// Each `llvm.mlir.global @name` becomes one wasm DATA segment plus one
+// SYM_DATA entry. Pointer-initialized globals carry an internal reloc
+// list (target sym + addend at byte offset within the segment).
+
+typedef struct {
+    uint32_t offset;          // byte offset within the segment's data
+    char    *target;          // target global symbol name (xstrdup'd)
+    int32_t  addend;
+} wasm_data_reloc_t;
+
+typedef struct {
+    char    *name;            // symbol name (xstrdup'd, no leading '@')
+    uint8_t *data;            // raw init bytes (size bytes)
+    uint32_t size;
+    uint32_t align_pow;       // log2 alignment (0=1 byte, 2=4 byte)
+    bool     is_const;
+    wasm_data_reloc_t *relocs;
+    size_t n_relocs, c_relocs;
+} wasm_global_t;
+
+// =============================================================================
 // wasmssa: SSA-form intermediate.
 // =============================================================================
 //
@@ -100,6 +124,9 @@ typedef struct {
     wasmssa_func_t *funcs;
     size_t          n_funcs;
     size_t          c_funcs;
+    wasm_global_t  *globals;
+    size_t          n_globals;
+    size_t          c_globals;
     // The imported env.__stack_pointer global is implicit; emitted by stage 3.
 } wasmssa_module_t;
 
@@ -149,6 +176,9 @@ typedef struct {
     wasmstack_func_t *funcs;
     size_t            n_funcs;
     size_t            c_funcs;
+    wasm_global_t    *globals;
+    size_t            n_globals;
+    size_t            c_globals;
 } wasmstack_module_t;
 
 // =============================================================================
@@ -165,6 +195,12 @@ void                wasmstack_module_free(wasmstack_module_t *m);
 wasmstack_func_t   *wasmstack_module_add_func(wasmstack_module_t *m);
 wasmstack_op_t     *wasmstack_func_add_op(wasmstack_func_t *f);
 uint32_t            wasmstack_func_add_local(wasmstack_func_t *f, uint8_t vt);
+
+// Globals.
+wasm_global_t      *wasmssa_module_add_global(wasmssa_module_t *m);
+wasm_global_t      *wasmstack_module_add_global(wasmstack_module_t *m);
+void                wasm_global_add_reloc(wasm_global_t *g, uint32_t off,
+                                          const char *target, int32_t addend);
 
 // =============================================================================
 // Pipeline stages.

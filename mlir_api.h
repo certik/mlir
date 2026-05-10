@@ -239,6 +239,7 @@ typedef enum {
     // stage 2). Each carrier_id refers to one local of a fixed valtype.
     OP_TYPE_WASMSSA_CARRIER_SET,
     OP_TYPE_WASMSSA_CARRIER_GET,
+    OP_TYPE_WASMSSA_ADDRESSOF,
 
     // -------------------------------------------------------------------------
     // wasmstack dialect — low-level stack-machine WebAssembly ops. 1:1
@@ -273,6 +274,7 @@ typedef enum {
     OP_TYPE_WASMSTACK_BR_IF,
     OP_TYPE_WASMSTACK_SELECT,
     OP_TYPE_WASMSTACK_EQZ,
+    OP_TYPE_WASMSTACK_ADDRESSOF,
 
     OP_TYPE_COUNT
 } MLIR_OpType;
