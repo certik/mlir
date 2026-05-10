@@ -61,6 +61,7 @@
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
+#include "mlir/Conversion/ControlFlowToSCF/ControlFlowToSCF.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
 #include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVMPass.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
@@ -444,20 +445,28 @@ extern "C" size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle h) {
 extern "C" MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle h, size_t i) {
     return typeH(F<mlir::Operation>(h)->getResult(i).getType());
 }
-extern "C" size_t MLIR_GetOpNumAttributes(MLIR_OpHandle h) {
-    auto *op = F<mlir::Operation>(h);
+// op->getAttrs() may return an ArrayRef whose elements are not stable across
+// calls (especially on newer MLIR where some "inherent" attributes are kept
+// in inline property storage and the dictionary view is rebuilt on demand).
+// Cache a stable copy on first access so MLIR_AttributeHandle pointers stay
+// valid for the rest of the lowering pass.
+static std::vector<mlir::NamedAttribute> &
+ensureCachedAttrs(mlir::Operation *op) {
     auto &m = opUserAttrs();
     auto it = m.find(op);
-    if (it != m.end()) return it->second.size();
-    return op->getAttrs().size();
+    if (it != m.end()) return it->second;
+    auto attrs = op->getAttrs();
+    auto &v = m[op];
+    v.assign(attrs.begin(), attrs.end());
+    return v;
+}
+extern "C" size_t MLIR_GetOpNumAttributes(MLIR_OpHandle h) {
+    auto *op = F<mlir::Operation>(h);
+    return ensureCachedAttrs(op).size();
 }
 extern "C" MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle h, size_t i) {
     auto *op = F<mlir::Operation>(h);
-    auto &m = opUserAttrs();
-    auto it = m.find(op);
-    if (it != m.end()) return reinterpret_cast<uintptr_t>(&it->second[i]);
-    auto attrs = op->getAttrs();
-    return reinterpret_cast<uintptr_t>(&attrs[i]);
+    return reinterpret_cast<uintptr_t>(&ensureCachedAttrs(op)[i]);
 }
 extern "C" size_t MLIR_GetOpNumRegions(MLIR_OpHandle h) {
     return F<mlir::Operation>(h)->getNumRegions();
@@ -1307,9 +1316,63 @@ extern "C" bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module_
     return true;
 }
 
-extern "C" string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module_h,
+extern "C" bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx,
+                                               MLIR_OpHandle module_h,
                                                MLIR_LoweringBackend backend) {
     auto *op = F<mlir::Operation>(module_h);
+    auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
+    if (!module) {
+        std::fprintf(stderr,
+                     "MLIR_LowerToLLVMDialectForWasm: handle is not a ModuleOp\n");
+        return false;
+    }
+    if (backend != MLIR_LOWERING_NATIVE) {
+        // Upstream backend: just defer to the standard lowering. The wasm
+        // emitter for the upstream backend uses LLVM's WebAssembly target
+        // which expects fully-lowered LLVM-dialect input.
+        return MLIR_LowerToLLVMDialect(ctx, module_h, backend);
+    }
+    auto &mctx = globalCtx().mctx;
+    // The opUserAttrs cache is keyed by Operation* and may contain stale
+    // entries for ops about to be erased by the conversion passes below.
+    // Allocator reuse can produce false hits later; clear it before lowering.
+    opUserAttrs().clear();
+    bool has_vector_op = false;
+    module.walk([&](mlir::Operation *o) {
+        if (o->getDialect() && o->getDialect()->getNamespace() == "vector") {
+            has_vector_op = true;
+            return mlir::WalkResult::interrupt();
+        }
+        return mlir::WalkResult::advance();
+    });
+    {
+        mlir::IRRewriter rewriter(&mctx);
+        (void)mlir::eraseUnreachableBlocks(rewriter, module->getRegions());
+    }
+    mlir::PassManager pm(&mctx);
+    // Recover structured CF (scf.if/scf.while) from cf.br/cf.cond_br so
+    // the native wasm emitter can lower them to wasm block/loop/if.
+    pm.addPass(mlir::createLiftControlFlowToSCFPass());
+    if (has_vector_op) {
+        pm.addPass(mlir::createConvertVectorToLLVMPass());
+    }
+    pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
+    pm.addPass(mlir::createArithToLLVMConversionPass());
+    pm.addPass(mlir::createConvertFuncToLLVMPass());
+    pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+    if (mlir::failed(pm.run(module))) {
+        std::fprintf(stderr,
+                     "MLIR_LowerToLLVMDialectForWasm: pass pipeline failed\n");
+        return false;
+    }
+    // Drop any cached attrs from before / during the pipeline: the ops they
+    // were keyed on may have been erased and the addresses recycled.
+    opUserAttrs().clear();
+    return true;
+}
+
+extern "C" string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module_h,
+                                               MLIR_LoweringBackend backend) {    auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
         std::fprintf(stderr, "MLIR_TranslateModuleToLLVMIR: not a ModuleOp\n");

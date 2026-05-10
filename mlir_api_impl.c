@@ -1722,6 +1722,15 @@ bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module,
     return mlir_lower_to_llvm_native(ctx, module);
 }
 
+bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx, MLIR_OpHandle module,
+                                    MLIR_LoweringBackend backend) {
+    // Pure-native binary has no upstream lift-cf-to-scf pass available;
+    // the wasm translator on the native backend therefore can't go beyond
+    // the cf-free subset that its scaffold supports.
+    (void)backend;
+    return mlir_lower_to_llvm_native(ctx, module);
+}
+
 string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module,
                                     MLIR_LoweringBackend backend) {
     (void)backend;

@@ -222,6 +222,23 @@ typedef enum {
     OP_TYPE_WASMSSA_EXTEND_I32_S,
     OP_TYPE_WASMSSA_RETURN,
     OP_TYPE_WASMSSA_CALL,
+    // Structured control-flow markers. Linearized into the flat per-func
+    // op stream in stage 1; stage 2 pairs BEGINs to ENDs to compute br
+    // depths.
+    OP_TYPE_WASMSSA_BLOCK_BEGIN,
+    OP_TYPE_WASMSSA_LOOP_BEGIN,
+    OP_TYPE_WASMSSA_IF_BEGIN,
+    OP_TYPE_WASMSSA_IF_ELSE,
+    OP_TYPE_WASMSSA_END,
+    OP_TYPE_WASMSSA_BR,
+    OP_TYPE_WASMSSA_BR_IF,
+    OP_TYPE_WASMSSA_SELECT,
+    OP_TYPE_WASMSSA_EQZ,
+    // Carrier ops materialize scf.yield-ed values across structured-CF
+    // boundaries via per-function shared locals (allocated lazily by
+    // stage 2). Each carrier_id refers to one local of a fixed valtype.
+    OP_TYPE_WASMSSA_CARRIER_SET,
+    OP_TYPE_WASMSSA_CARRIER_GET,
 
     // -------------------------------------------------------------------------
     // wasmstack dialect — low-level stack-machine WebAssembly ops. 1:1
@@ -246,6 +263,16 @@ typedef enum {
     OP_TYPE_WASMSTACK_EXTEND_I32_S,
     OP_TYPE_WASMSTACK_RETURN,
     OP_TYPE_WASMSTACK_CALL,
+    // Structured-CF + select.
+    OP_TYPE_WASMSTACK_BLOCK,
+    OP_TYPE_WASMSTACK_LOOP,
+    OP_TYPE_WASMSTACK_IF,
+    OP_TYPE_WASMSTACK_ELSE,
+    OP_TYPE_WASMSTACK_END,
+    OP_TYPE_WASMSTACK_BR,
+    OP_TYPE_WASMSTACK_BR_IF,
+    OP_TYPE_WASMSTACK_SELECT,
+    OP_TYPE_WASMSTACK_EQZ,
 
     OP_TYPE_COUNT
 } MLIR_OpType;
@@ -336,6 +363,18 @@ typedef enum {
 // stderr.
 bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module,
                              MLIR_LoweringBackend backend);
+
+// Same as MLIR_LowerToLLVMDialect, but tailored to feed the native
+// LLVM-dialect-MLIR -> WASM emitter (mlir_translate_to_wasm.c). The
+// difference matters only for MLIR_LOWERING_NATIVE: instead of running
+// scf->cf and cf->llvm (which destroys structured control flow that
+// wasm needs), this entry point runs upstream's `lift-cf-to-scf`
+// pass first and then lowers arith/memref/func/vector/etc. to LLVM,
+// leaving scf.* ops in place for stage 1 of the wasm pipeline to
+// consume directly. For MLIR_LOWERING_UPSTREAM it is identical to
+// MLIR_LowerToLLVMDialect.
+bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx, MLIR_OpHandle module,
+                                    MLIR_LoweringBackend backend);
 
 // Translate a `builtin.module` op already lowered to the LLVM dialect into
 // LLVM IR text (`.ll`). Returns the IR text on success or an empty string

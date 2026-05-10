@@ -12,14 +12,17 @@ wasm_native_run = true
 
 [[test]]
 name = "sum_to_10"
+wasm_native_run = true
 expected_stdout = "55\n"
 
 [[test]]
 name = "fib"
+wasm_native_run = true
 expected_stdout = "55\n"
 
 [[test]]
 name = "short_circuit"
+wasm_native_run = true
 expected_stdout = "0\n1\n1\n1\n"
 
 [[test]]
@@ -98,6 +101,7 @@ expected_stdout = "Hi\n1\n3\n30\n3\n"
 
 [[test]]
 name = "compound_ops"
+wasm_native_run = true
 expected_stdout = "15\n13\n39\n9\n4\n10\n2\n1\n"
 
 [[test]]
@@ -107,10 +111,12 @@ expected_stdout = "1\n7\n6\n-1\n8\n4\n8\n5\n2\n16\n4\n"
 
 [[test]]
 name = "ternary"
+wasm_native_run = true
 expected_stdout = "7\n3\n5\n3\n1\n"
 
 [[test]]
 name = "ternary_i64"
+wasm_native_run = true
 expected_stdout = "1\n3\n0\n0\n"
 
 [[test]]
@@ -119,6 +125,7 @@ expected_stdout = "16\n100\n7\n"
 
 [[test]]
 name = "forward_decl"
+wasm_native_run = true
 expected_stdout = "1\n1\n0\n6\n"
 
 [[test]]
@@ -165,10 +172,12 @@ expected_stdout = "alpha\nbeta\ngamma\nBETA!\n"
 
 [[test]]
 name = "enum_basic"
+wasm_native_run = true
 expected_stdout = "0\n1\n2\n1\n2\n10\n11\n1\n2\n10\n100\n200\n300\n16\n"
 
 [[test]]
 name = "enum_typed"
+wasm_native_run = true
 expected_stdout = "1\n2\n3\n2\n1\n5\n"
 
 [[test]]
@@ -182,6 +191,7 @@ expected_stdout = "25\n7\n4\n4\n10\n"
 
 [[test]]
 name = "nested_scope"
+wasm_native_run = true
 expected_stdout = "1\n2\n3\n2\n1\n10\n11\n12\n1\n7\n9\n"
 
 [[test]]
@@ -215,6 +225,7 @@ expected_stdout = "1\n2\n3\n4\n5\n6\n7\n8\n9\n"
 
 [[test]]
 name = "void_return"
+wasm_native_run = true
 expected_stdout = "7\n-1\n42\n"
 
 [[test]]
@@ -251,6 +262,7 @@ expected_stdout = "15\n5\n50\n"
 
 [[test]]
 name = "i64_size_t"
+wasm_native_run = true
 expected_stdout = "55\n5050\n0\n"
 
 [[test]]
@@ -450,6 +462,7 @@ expected_stdout = "42\n"
 
 [[test]]
 name = "braceless_if"
+wasm_native_run = true
 expected_stdout = "8\n7\n7\n7\n"
 
 [[test]]
@@ -458,6 +471,7 @@ expected_stdout = "7\n30\n"
 
 [[test]]
 name = "typedef_enum"
+wasm_native_run = true
 expected_stdout = "1\n200\n2\n"
 
 [[test]]

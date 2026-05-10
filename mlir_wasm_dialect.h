@@ -65,6 +65,8 @@ typedef struct {
     uint32_t mem_size_bytes;      // LOAD / STORE (1/2/4/8)
     char    *call_target;         // CALL: function symbol name (xstrdup'd)
     uint8_t  wasm_opcode;         // BINOP / UNOP: actual wasm bytecode byte
+    uint32_t br_depth;            // BR / BR_IF: relative target depth
+    uint32_t carrier_id;          // CARRIER_SET / CARRIER_GET
 
     // Operands as ssa_def indices into the parent function's `ops`.
     int   *operands;              // length n_operands; -1 means "unbound"
@@ -81,6 +83,12 @@ typedef struct {
     size_t   n_params;
     uint8_t *result_types;        // length n_results (WT_*)
     size_t   n_results;
+
+    // Carriers: per-function shared "registers" used to materialize
+    // scf.yield-style values across structured-CF boundaries. Stage 2
+    // turns each carrier into one wasm local of the recorded valtype.
+    uint8_t *carrier_vts;
+    size_t   n_carriers;
 
     // Function body. Empty for imports.
     wasmssa_op_t *ops;
@@ -112,6 +120,7 @@ typedef struct {
     uint32_t mem_size_bytes;      // LOAD / STORE
     char    *call_target;         // CALL
     uint8_t  wasm_opcode;         // BINOP / UNOP
+    uint32_t br_depth;            // BR / BR_IF
 } wasmstack_op_t;
 
 typedef struct {

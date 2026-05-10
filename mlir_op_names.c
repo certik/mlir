@@ -136,6 +136,17 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_WASMSSA_EXTEND_I32_S: return str_lit("wasmssa.extend_i32_s");
         case OP_TYPE_WASMSSA_RETURN: return str_lit("wasmssa.return");
         case OP_TYPE_WASMSSA_CALL: return str_lit("wasmssa.call");
+        case OP_TYPE_WASMSSA_BLOCK_BEGIN: return str_lit("wasmssa.block_begin");
+        case OP_TYPE_WASMSSA_LOOP_BEGIN:  return str_lit("wasmssa.loop_begin");
+        case OP_TYPE_WASMSSA_IF_BEGIN:    return str_lit("wasmssa.if_begin");
+        case OP_TYPE_WASMSSA_IF_ELSE:     return str_lit("wasmssa.if_else");
+        case OP_TYPE_WASMSSA_END:         return str_lit("wasmssa.end");
+        case OP_TYPE_WASMSSA_BR:          return str_lit("wasmssa.br");
+        case OP_TYPE_WASMSSA_BR_IF:       return str_lit("wasmssa.br_if");
+        case OP_TYPE_WASMSSA_SELECT:      return str_lit("wasmssa.select");
+        case OP_TYPE_WASMSSA_EQZ:         return str_lit("wasmssa.eqz");
+        case OP_TYPE_WASMSSA_CARRIER_SET: return str_lit("wasmssa.carrier_set");
+        case OP_TYPE_WASMSSA_CARRIER_GET: return str_lit("wasmssa.carrier_get");
         // wasmstack dialect
         case OP_TYPE_WASMSTACK_FUNC: return str_lit("wasmstack.func");
         case OP_TYPE_WASMSTACK_IMPORT_FUNC: return str_lit("wasmstack.import_func");
@@ -155,6 +166,15 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_WASMSTACK_EXTEND_I32_S: return str_lit("wasmstack.extend_i32_s");
         case OP_TYPE_WASMSTACK_RETURN: return str_lit("wasmstack.return");
         case OP_TYPE_WASMSTACK_CALL: return str_lit("wasmstack.call");
+        case OP_TYPE_WASMSTACK_BLOCK:  return str_lit("wasmstack.block");
+        case OP_TYPE_WASMSTACK_LOOP:   return str_lit("wasmstack.loop");
+        case OP_TYPE_WASMSTACK_IF:     return str_lit("wasmstack.if");
+        case OP_TYPE_WASMSTACK_ELSE:   return str_lit("wasmstack.else");
+        case OP_TYPE_WASMSTACK_END:    return str_lit("wasmstack.end");
+        case OP_TYPE_WASMSTACK_BR:     return str_lit("wasmstack.br");
+        case OP_TYPE_WASMSTACK_BR_IF:  return str_lit("wasmstack.br_if");
+        case OP_TYPE_WASMSTACK_SELECT: return str_lit("wasmstack.select");
+        case OP_TYPE_WASMSTACK_EQZ:    return str_lit("wasmstack.eqz");
         default: return str_lit("unknown");
     }
 }

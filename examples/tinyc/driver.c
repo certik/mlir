@@ -138,7 +138,10 @@ int app_main(void) {
     }
 
     if (emit_lowered || emit_llvm || emit_wasm) {
-        if (!MLIR_LowerToLLVMDialect(&ctx, module, lowering)) {
+        bool ok = emit_wasm
+                      ? MLIR_LowerToLLVMDialectForWasm(&ctx, module, lowering)
+                      : MLIR_LowerToLLVMDialect(&ctx, module, lowering);
+        if (!ok) {
             arena_destroy(arena);
             arena_destroy(boot_arena);
             return 1;

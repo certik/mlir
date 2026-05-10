@@ -29,6 +29,7 @@ static void wasmssa_func_free(wasmssa_func_t *f) {
     free(f->name);
     free(f->param_types);
     free(f->result_types);
+    free(f->carrier_vts);
     for (size_t i = 0; i < f->n_ops; i++) {
         free(f->ops[i].operands);
         free(f->ops[i].call_target);

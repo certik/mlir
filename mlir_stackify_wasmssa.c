@@ -59,6 +59,15 @@ static MLIR_OpType ssa_to_stack(MLIR_OpType t) {
     case OP_TYPE_WASMSSA_EXTEND_I32_S: return OP_TYPE_WASMSTACK_EXTEND_I32_S;
     case OP_TYPE_WASMSSA_RETURN:     return OP_TYPE_WASMSTACK_RETURN;
     case OP_TYPE_WASMSSA_CALL:       return OP_TYPE_WASMSTACK_CALL;
+    case OP_TYPE_WASMSSA_BLOCK_BEGIN: return OP_TYPE_WASMSTACK_BLOCK;
+    case OP_TYPE_WASMSSA_LOOP_BEGIN:  return OP_TYPE_WASMSTACK_LOOP;
+    case OP_TYPE_WASMSSA_IF_BEGIN:    return OP_TYPE_WASMSTACK_IF;
+    case OP_TYPE_WASMSSA_IF_ELSE:     return OP_TYPE_WASMSTACK_ELSE;
+    case OP_TYPE_WASMSSA_END:         return OP_TYPE_WASMSTACK_END;
+    case OP_TYPE_WASMSSA_BR:          return OP_TYPE_WASMSTACK_BR;
+    case OP_TYPE_WASMSSA_BR_IF:       return OP_TYPE_WASMSTACK_BR_IF;
+    case OP_TYPE_WASMSSA_SELECT:      return OP_TYPE_WASMSTACK_SELECT;
+    case OP_TYPE_WASMSSA_EQZ:         return OP_TYPE_WASMSTACK_EQZ;
     default: return (MLIR_OpType)0;
     }
 }
@@ -86,18 +95,66 @@ static bool stackify_func(const wasmssa_func_t *src, wasmstack_func_t *dst) {
         bound[i] = true;
     }
 
+    // Carrier id -> wasm local idx (allocated lazily on first use).
+    uint32_t *cmap = NULL;
+    bool     *cbound = NULL;
+    if (src->n_carriers) {
+        cmap   = (uint32_t *)malloc(src->n_carriers * sizeof(uint32_t));
+        cbound = (bool *)calloc(src->n_carriers, sizeof(bool));
+    }
+
     for (size_t i = 0; i < src->n_ops; i++) {
         const wasmssa_op_t *op = &src->ops[i];
+
+        // Carriers desugar to local.set / local.get directly: don't push
+        // operands via local.get for them (handled inline below).
+        if (op->type == OP_TYPE_WASMSSA_CARRIER_SET) {
+            uint32_t cid = op->carrier_id;
+            if (cid >= src->n_carriers) {
+                fprintf(stderr, "stackify: carrier id %u out of range\n", cid);
+                goto fail;
+            }
+            if (!cbound[cid]) {
+                cmap[cid] = wasmstack_func_add_local(dst, src->carrier_vts[cid]);
+                cbound[cid] = true;
+            }
+            // Push operand value, then local.set carrier-local.
+            int sidx = op->operands[0];
+            if (sidx < 0 || (size_t)sidx >= n_ssa || !bound[sidx]) goto unbound;
+            emit_local_get(dst, vmap[sidx]);
+            emit_local_set(dst, cmap[cid]);
+            continue;
+        }
+        if (op->type == OP_TYPE_WASMSSA_CARRIER_GET) {
+            uint32_t cid = op->carrier_id;
+            if (cid >= src->n_carriers) {
+                fprintf(stderr, "stackify: carrier id %u out of range\n", cid);
+                goto fail;
+            }
+            if (!cbound[cid]) {
+                // Possible only if the producing region was unreachable;
+                // allocate anyway with the recorded valtype.
+                cmap[cid] = wasmstack_func_add_local(dst, src->carrier_vts[cid]);
+                cbound[cid] = true;
+            }
+            emit_local_get(dst, cmap[cid]);
+            // CARRIER_GET produces an SSA result: stash into a fresh local.
+            uint32_t li = wasmstack_func_add_local(dst, op->valtype);
+            emit_local_set(dst, li);
+            vmap[src->n_params + i] = li;
+            bound[src->n_params + i] = true;
+            continue;
+        }
 
         // Push each operand by local.get vmap[idx].
         for (int k = 0; k < op->n_operands; k++) {
             int sidx = op->operands[k];
             if (sidx < 0 || (size_t)sidx >= n_ssa || !bound[sidx]) {
+            unbound:
                 fprintf(stderr,
                         "stackify: unbound operand (op %zu, opnd %d, sidx %d)\n",
                         i, k, sidx);
-                free(vmap); free(bound);
-                return false;
+                goto fail;
             }
             emit_local_get(dst, vmap[sidx]);
         }
@@ -107,8 +164,7 @@ static bool stackify_func(const wasmssa_func_t *src, wasmstack_func_t *dst) {
         if (st == 0) {
             fprintf(stderr, "stackify: unknown wasmssa op (enum=%d)\n",
                     (int)op->type);
-            free(vmap); free(bound);
-            return false;
+            goto fail;
         }
         wasmstack_op_t *out = wasmstack_func_add_op(dst);
         out->type              = st;
@@ -119,6 +175,7 @@ static bool stackify_func(const wasmssa_func_t *src, wasmstack_func_t *dst) {
         out->memory_align_log2 = op->memory_align_log2;
         out->mem_size_bytes    = op->mem_size_bytes;
         out->wasm_opcode       = op->wasm_opcode;
+        out->br_depth          = op->br_depth;
         if (op->call_target) out->call_target = strdup(op->call_target);
 
         // Stash the result into a fresh local.
@@ -130,8 +187,11 @@ static bool stackify_func(const wasmssa_func_t *src, wasmstack_func_t *dst) {
         }
     }
 
-    free(vmap); free(bound);
+    free(vmap); free(bound); free(cmap); free(cbound);
     return true;
+fail:
+    free(vmap); free(bound); free(cmap); free(cbound);
+    return false;
 }
 
 wasmstack_module_t *mlir_stackify_wasmssa(wasmssa_module_t *m) {

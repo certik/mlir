@@ -286,6 +286,30 @@ static bool encode_op(EmFunc *F, const wasmstack_op_t *op, uint32_t sp_sym_idx,
         buf_putc(b, op->wasm_opcode);
         return true;
 
+    case OP_TYPE_WASMSTACK_BLOCK:
+        buf_putc(b, 0x02); buf_putc(b, op->valtype ? op->valtype : 0x40);
+        return true;
+    case OP_TYPE_WASMSTACK_LOOP:
+        buf_putc(b, 0x03); buf_putc(b, op->valtype ? op->valtype : 0x40);
+        return true;
+    case OP_TYPE_WASMSTACK_IF:
+        buf_putc(b, 0x04); buf_putc(b, op->valtype ? op->valtype : 0x40);
+        return true;
+    case OP_TYPE_WASMSTACK_ELSE:
+        buf_putc(b, 0x05);
+        return true;
+    case OP_TYPE_WASMSTACK_END:
+        buf_putc(b, 0x0b);
+        return true;
+    case OP_TYPE_WASMSTACK_BR:
+        buf_putc(b, 0x0c); leb_u(b, op->br_depth); return true;
+    case OP_TYPE_WASMSTACK_BR_IF:
+        buf_putc(b, 0x0d); leb_u(b, op->br_depth); return true;
+    case OP_TYPE_WASMSTACK_SELECT:
+        buf_putc(b, 0x1b); return true;
+    case OP_TYPE_WASMSTACK_EQZ:
+        buf_putc(b, op->valtype == WT_I64 ? 0x50 : 0x45); return true;
+
     case OP_TYPE_WASMSTACK_CALL: {
         int idx = find_func_by_name(all_funcs, all_funcs_n, op->call_target);
         if (idx < 0) {
