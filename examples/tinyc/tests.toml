@@ -662,3 +662,19 @@ name = "union_field_offset"
 expected_stdout = """\
 0
 """
+
+[[test]]
+name = "re2c_keyword_longest_match"
+expected_stdout = "OK\n"
+
+[[test]]
+name = "float_literal_0_75"
+expected_stdout = "OK\n"
+
+[[test]]
+name = "unsigned_modulo"
+expected_stdout = "1\n"
+
+[[test]]
+name = "struct_field_designated_init"
+expected_stdout = "3\n"

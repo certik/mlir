@@ -618,10 +618,11 @@ static bool lower_scf_if(LowerState *st, MLIR_OpHandle op,
         else_reg = MLIR_TakeOpRegion(st->ctx, op, 1);
     }
     if (then_reg == MLIR_INVALID_HANDLE) return false;
-    if (MLIR_GetRegionNumBlocks(then_reg) != 1) return false;
+    if (MLIR_GetRegionNumBlocks(then_reg) < 1) return false;
     bool has_else = (else_reg != MLIR_INVALID_HANDLE) &&
-                    (MLIR_GetRegionNumBlocks(else_reg) == 1);
+                    (MLIR_GetRegionNumBlocks(else_reg) >= 1);
 
+    // Entry blocks are first block of each region; the branch target.
     MLIR_BlockHandle then_blk = MLIR_GetRegionBlock(then_reg, 0);
     MLIR_BlockHandle else_blk = has_else ? MLIR_GetRegionBlock(else_reg, 0)
                                          : MLIR_INVALID_HANDLE;
@@ -646,12 +647,34 @@ static bool lower_scf_if(LowerState *st, MLIR_OpHandle op,
         MLIR_MoveOpToBlockEnd(st->ctx, tail, cont);
     }
 
-    rewrite_yield_to_br(st, then_blk, cont);
-    if (has_else) rewrite_yield_to_br(st, else_blk, cont);
+    // Rewrite scf.yield in any block of the regions to llvm.br ^cont(args).
+    // Inner control-flow lowering may have produced multi-block regions,
+    // but scf.yield only ever appears as a block terminator, so walking
+    // the blocks of the moved region and matching on the terminator is
+    // sufficient.
+    size_t nthen = MLIR_GetRegionNumBlocks(then_reg);
+    for (size_t bi = 0; bi < nthen; bi++) {
+        rewrite_yield_to_br(st, MLIR_GetRegionBlock(then_reg, bi), cont);
+    }
+    if (has_else) {
+        size_t nelse = MLIR_GetRegionNumBlocks(else_reg);
+        for (size_t bi = 0; bi < nelse; bi++) {
+            rewrite_yield_to_br(st, MLIR_GetRegionBlock(else_reg, bi), cont);
+        }
+    }
 
-    // Move blocks into the parent region.
-    MLIR_MoveBlockToRegionEnd(st->ctx, then_blk, parent_region);
-    if (has_else) MLIR_MoveBlockToRegionEnd(st->ctx, else_blk, parent_region);
+    // Move all blocks of each region into parent_region (in original order).
+    // Each MoveBlockToRegionEnd removes from src region, so re-fetch index 0.
+    while (MLIR_GetRegionNumBlocks(then_reg) > 0) {
+        MLIR_MoveBlockToRegionEnd(st->ctx,
+            MLIR_GetRegionBlock(then_reg, 0), parent_region);
+    }
+    if (has_else) {
+        while (MLIR_GetRegionNumBlocks(else_reg) > 0) {
+            MLIR_MoveBlockToRegionEnd(st->ctx,
+                MLIR_GetRegionBlock(else_reg, 0), parent_region);
+        }
+    }
     MLIR_MoveBlockToRegionEnd(st->ctx, cont, parent_region);
 
     MLIR_BlockHandle false_target = has_else ? else_blk : cont;

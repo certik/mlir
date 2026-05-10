@@ -1,0 +1,28 @@
+// MRE for tinyC bug: decimal float literals are parsed with accumulated
+// rounding error.
+//
+// The naive lexer in lex.c builds the fractional part as
+//
+//     f += digit * scale; scale *= 0.1;
+//
+// 0.1 is not representable exactly in binary, so each multiplication
+// adds another ulp of error. Parsing 0.75 yields 0x1.8000000000001p-1
+// (one ulp above the true 0x1.8p-1) and `0.75 * 16` rounds up to a
+// value strictly greater than 12.0, breaking the SymbolTable load-factor
+// check `size >= 0.75 * num_buckets` in corec/base/hashtable.h:42 used
+// by mlir_parser.c. That in turn causes the parser to lose entries and
+// emit "Undefined value" warnings on names like %c65536_i32.
+
+extern int printf(const char *fmt, ...);
+typedef unsigned long long uint64_t;
+
+int main(void) {
+    uint64_t size = 12;
+    uint64_t num_buckets = 16;
+    if (size >= 0.75 * num_buckets) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+    }
+    return 0;
+}

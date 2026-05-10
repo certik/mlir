@@ -58,6 +58,9 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_ARITH_MAXF: return str_lit("arith.maxf");
         case OP_TYPE_ARITH_DIVSI: return str_lit("arith.divsi");
         case OP_TYPE_ARITH_REMSI: return str_lit("arith.remsi");
+        case OP_TYPE_ARITH_DIVUI: return str_lit("arith.divui");
+        case OP_TYPE_ARITH_REMUI: return str_lit("arith.remui");
+        case OP_TYPE_ARITH_SHRUI: return str_lit("arith.shrui");
         case OP_TYPE_ARITH_ORI: return str_lit("arith.ori");
         case OP_TYPE_ARITH_MINSI: return str_lit("arith.minsi");
         case OP_TYPE_ARITH_ANDI: return str_lit("arith.andi");

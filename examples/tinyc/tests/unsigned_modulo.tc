@@ -1,0 +1,28 @@
+// MRE for tinyC bug: % on unsigned operands lowers to arith.remsi
+// (signed remainder), so any unsigned value with bit 63 set is
+// interpreted as a negative number and yields the wrong remainder
+// (often a large positive number, since wrapping mod 2^N preserves
+// the high bits).
+//
+// Concretely, the upstream hashtable in corec/base/hashtable.h does
+//     size_t index = hash_value % ht->num_buckets;
+// where hash_value is size_t (unsigned). When djb2 happens to produce
+// a value with the top bit set (≈50% of all 11+-character strings),
+// arith.remsi returns a negative i64 which is then used as a bucket
+// index, corrupting the table. This is what causes
+// chunked_cross_entropy_forward.ttir / d.mlir to lose
+// `%c65536_i32` from parser_tinyc's symbol table.
+//
+// Expected (clang): 0xC000000000000001 % 16 == 1
+// Buggy (tinyc, before fix): srem returns -15, printed as 18446744073709551601
+// (or as 1 if truncated to i32 — depends on print path).
+
+extern int printf(const char *fmt, ...);
+typedef unsigned long long uint64_t;
+
+int main(void) {
+    uint64_t h = 0xC000000000000001ULL;
+    uint64_t m = h % 16ULL;
+    printf("%llu\n", m);
+    return 0;
+}

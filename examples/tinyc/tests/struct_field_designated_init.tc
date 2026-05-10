@@ -1,0 +1,42 @@
+// MRE for tinyC bug: designated-initializer field assignment of a
+// 16-byte struct (two 8-byte words) only copies the first word.
+//
+// This breaks the MLIR parser (mlir_parser.c), which builds an
+// OperationParserParams using a struct initializer like
+//
+//     OperationParserParams params = {
+//         .op_type = op_type,
+//         .opname  = opname,         // string is { char*, size_t }, 16 bytes
+//         ...
+//     };
+//
+// `opname.size` ends up zero, so unregistered op names are dropped
+// and parser_tinyc prints e.g. "gpu.terminator" as "unknown".
+
+extern int printf(const char *fmt, ...);
+
+typedef unsigned long long u64;
+
+typedef struct {
+    char *str;
+    u64 size;
+} S;
+
+typedef struct {
+    int t;
+    S s;
+    int x;
+} P;
+
+int main(void) {
+    S nm;
+    nm.str = "foo";
+    nm.size = 3;
+    P p = {
+        .t = 1,
+        .s = nm,
+        .x = 42,
+    };
+    printf("%llu\n", p.s.size);
+    return 0;
+}

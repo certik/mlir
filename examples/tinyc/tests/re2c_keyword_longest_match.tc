@@ -1,0 +1,58 @@
+// MRE for tinyC bug: re2c-generated tokenizer matches keyword 'all'
+// even when followed by name-continuation chars (e.g. "allow").
+//
+// Reduced from the full re2c-generated state machine in tokenizer.c.
+// The clang-built tokenizer correctly treats "allow" as TK_NAME (longest
+// match wins, returning token type 4 at position 5). The tinyC-built
+// tokenizer prematurely returns KW_ALL (41) after 3 chars at position 3.
+//
+// The bug requires:
+//   - two character-class accept states (yy80, yy90) with the full nested
+//     if-else cascade (simpler char-class checks do NOT trigger it);
+//   - both states reachable from a common predecessor state (yy32).
+// Removing either cascade or simplifying its nesting makes the bug vanish,
+// suggesting a tinyC code-gen issue triggered by this control-flow shape.
+
+extern int printf(const char *fmt, ...);
+typedef unsigned long long uint64_t;
+#define RET(x) *token_type=x; *position = cur-string; return;
+
+void tok(const unsigned char *string, uint64_t *position, int *token_type) {
+    const unsigned char *cur = string + *position;
+    unsigned char yych;
+    if (*cur != 'a') { RET(4) }
+    yych = *++cur;
+    if (yych == 'b') goto yy90;
+    if (yych != 'l') goto yy35;
+    yych = *++cur;
+    if (yych == 'l') goto yy80;
+    goto yy35;
+yy35:
+    while ((yych >= 'a' && yych <= 'z') || (yych >= 'A' && yych <= 'Z') || (yych >= '0' && yych <= '9') || yych == '_') yych = *++cur;
+    RET(4)
+yy80:
+    yych = *++cur;
+    if (yych <= '@') { if (yych <= '.') { if (yych >= '-') goto yy35; } else { if (yych <= '/') goto yy81; if (yych <= '9') goto yy35; } }
+    else { if (yych <= '_') { if (yych <= 'Z') goto yy35; if (yych >= '_') goto yy35; } else { if (yych <= '`') goto yy81; if (yych <= 'z') goto yy35; } }
+yy81:
+    RET(41)
+yy90:
+    yych = *++cur;
+    if (yych <= '@') { if (yych <= '.') { if (yych >= '-') goto yy35; } else { if (yych <= '/') goto yy91; if (yych <= '9') goto yy35; } }
+    else { if (yych <= '_') { if (yych <= 'Z') goto yy35; if (yych >= '_') goto yy35; } else { if (yych <= '`') goto yy91; if (yych <= 'z') goto yy35; } }
+yy91:
+    RET(40)
+}
+
+int main(void) {
+    const unsigned char *s = (const unsigned char*)"allow ";
+    uint64_t pos = 0;
+    int t = -99;
+    tok(s, &pos, &t);
+    if (t != 4 || pos != 5) {
+        printf("FAIL t=%d pos=%llu\n", t, (unsigned long long)pos);
+        return 1;
+    }
+    printf("OK\n");
+    return 0;
+}
