@@ -851,7 +851,8 @@ MLIR_TypeHandle MLIR_CreateTypeLLVMPointer(MLIR_Context *ctx) {
 // by the string contents (cheap given the small N in tinyc programs).
 static MLIR_TypeHandle *g_struct_handles = NULL;
 static string         *g_struct_names   = NULL;
-static size_t          g_n_structs = 0, g_cap_structs = 0;
+static size_t          g_n_structs = 0;
+static size_t          g_cap_structs = 0;
 
 static MLIR_TypeHandle intern_llvm_struct(MLIR_Context *ctx, string name) {
     for (size_t i = 0; i < g_n_structs; i++) {

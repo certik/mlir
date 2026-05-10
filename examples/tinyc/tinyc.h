@@ -495,7 +495,8 @@ VecTcTok tinyc_lex(Arena *arena, string src);
 // directories searched for `#include "..."` (after the source-relative
 // search) and `#include <...>`.
 string tinyc_preprocess(Arena *arena, string path,
-                        string *include_dirs, size_t n_include_dirs);
+                        string *include_dirs, size_t n_include_dirs,
+                        string *defines, size_t n_defines);
 
 // ---------------- Parser ----------------
 

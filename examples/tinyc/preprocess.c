@@ -768,10 +768,43 @@ static void substitute(PP *pp, Macro *m, VecPPTok *args, VecPPTok *out) {
 }
 
 // Expand tokens in `toks` and append the result to `out`.
+// Replace work->data[pos .. pos+del) with the `ins_n` tokens at `ins`.
+// Grows the vector as needed; preserves all other entries.
+static void vec_pptok_splice(Arena *a, VecPPTok *v, size_t pos, size_t del,
+                             const PPTok *ins, size_t ins_n) {
+    size_t old_size = v->size;
+    size_t tail_n = old_size - (pos + del);
+    if (ins_n > del) {
+        size_t need = ins_n - del;
+        // Use push_back with dummy values to grow capacity.
+        PPTok zero = {0};
+        for (size_t k = 0; k < need; k++) VecPPTok_push_back(a, v, zero);
+        // Move tail right (in reverse, since regions overlap).
+        for (size_t k = tail_n; k > 0; k--) {
+            v->data[pos + ins_n + k - 1] = v->data[pos + del + k - 1];
+        }
+    } else if (ins_n < del) {
+        size_t shrink = del - ins_n;
+        // Move tail left.
+        for (size_t k = 0; k < tail_n; k++) {
+            v->data[pos + ins_n + k] = v->data[pos + del + k];
+        }
+        v->size -= shrink;
+    }
+    for (size_t k = 0; k < ins_n; k++) v->data[pos + k] = ins[k];
+}
+
 static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out) {
+    // Copy input into a working buffer so substitutions can be spliced
+    // back in for proper rescanning across the original input boundary.
+    // This is required by C: after a macro is replaced, the result is
+    // reinserted into the source stream so that nested function-like
+    // macros can pick up arguments that follow in the original input.
+    VecPPTok work; VecPPTok_reserve(pp->arena, &work, n + 4);
+    for (size_t k = 0; k < n; k++) VecPPTok_push_back(pp->arena, &work, toks[k]);
     size_t i = 0;
-    while (i < n) {
-        PPTok t = toks[i];
+    while (i < work.size) {
+        PPTok t = work.data[i];
         if (t.kind == PP_END) break;
         if (t.kind == PP_NEWLINE) { i++; continue; }
         if (t.kind == PP_IDENT) {
@@ -814,34 +847,27 @@ static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out) {
             Macro *m = macro_lookup(pp, t.text);
             if (m && !m->expanding) {
                 if (!m->is_func) {
-                    // Object-like.
+                    // Object-like: substitute, then splice the result back
+                    // into the work buffer at position `i` so rescanning
+                    // happens against the rest of the original input too.
                     m->expanding = true;
                     VecPPTok inner; VecPPTok_reserve(pp->arena, &inner, 4);
-                    // The body has no parameters — substitute(...) handles
-                    // # / ## but never reaches param branches.
-                    VecPPTok empty_args; VecPPTok_reserve(pp->arena, &empty_args, 1);
-                    (void)empty_args;
                     substitute(pp, m, NULL, &inner);
-                    // Tag inner tokens with origin location from `t`.
+                    m->expanding = false;
                     for (size_t k = 0; k < inner.size; k++) {
                         inner.data[k].line = t.line;
                         inner.data[k].file = t.file;
                         inner.data[k].hide = hide_add(pp->arena, inner.data[k].hide, m->name);
                     }
                     if (inner.size > 0) inner.data[0].has_space = t.has_space;
-                    VecPPTok rescanned; VecPPTok_reserve(pp->arena, &rescanned, 4);
-                    expand_tokens(pp, inner.data, inner.size, &rescanned);
-                    for (size_t k = 0; k < rescanned.size; k++)
-                        VecPPTok_push_back(pp->arena, out, rescanned.data[k]);
-                    m->expanding = false;
-                    i++;
+                    vec_pptok_splice(pp->arena, &work, i, 1, inner.data, inner.size);
                     continue;
                 } else {
-                    // Function-like.
+                    // Function-like: peek for '(' across the work buffer.
                     size_t j = i + 1;
-                    while (j < n && toks[j].kind == PP_NEWLINE) j++;
-                    if (j >= n || toks[j].kind != PP_PUNCT || !str_eq(toks[j].text, s_lit("("))) {
-                        // No args — emit the identifier as-is.
+                    while (j < work.size && work.data[j].kind == PP_NEWLINE) j++;
+                    if (j >= work.size || work.data[j].kind != PP_PUNCT
+                            || !str_eq(work.data[j].text, s_lit("("))) {
                         VecPPTok_push_back(pp->arena, out, t);
                         i++;
                         continue;
@@ -852,25 +878,24 @@ static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out) {
                     for (size_t k = 0; k < expected; k++)
                         VecPPTok_reserve(pp->arena, &args[k], 2);
                     size_t cur = j;
-                    if (!collect_args(pp, toks, n, &cur, m, args)) {
+                    if (!collect_args(pp, work.data, work.size, &cur, m, args)) {
                         i++;
                         continue;
                     }
                     m->expanding = true;
                     VecPPTok inner; VecPPTok_reserve(pp->arena, &inner, 4);
                     substitute(pp, m, args, &inner);
+                    m->expanding = false;
                     for (size_t k = 0; k < inner.size; k++) {
                         inner.data[k].line = t.line;
                         inner.data[k].file = t.file;
                         inner.data[k].hide = hide_add(pp->arena, inner.data[k].hide, m->name);
                     }
                     if (inner.size > 0) inner.data[0].has_space = t.has_space;
-                    VecPPTok rescanned; VecPPTok_reserve(pp->arena, &rescanned, 4);
-                    expand_tokens(pp, inner.data, inner.size, &rescanned);
-                    for (size_t k = 0; k < rescanned.size; k++)
-                        VecPPTok_push_back(pp->arena, out, rescanned.data[k]);
-                    m->expanding = false;
-                    i = cur;
+                    // Splice inner tokens into `work` in place of the call
+                    // (identifier + arg list); rescan from position `i`.
+                    vec_pptok_splice(pp->arena, &work, i, cur - i,
+                                     inner.data, inner.size);
                     continue;
                 }
             }
@@ -1454,9 +1479,22 @@ static void process_tokens(PP *pp, PPTok *toks, size_t n, string file) {
         }
 
         // Non-directive line: collect through end-of-line, expand macros,
-        // emit results.
+        // emit results. To support macro invocations whose argument list
+        // spans newlines (e.g. println( ..., \n ..., ...)), we keep
+        // extending `end` past plain newlines until we hit a directive
+        // line (a '#' at line start) or EOF. Tokens stay tagged with
+        // their original source line via #line directives in the output.
         size_t end = i;
-        while (end < n && toks[end].kind != PP_NEWLINE && toks[end].kind != PP_END) end++;
+        while (end < n && toks[end].kind != PP_END) {
+            if (toks[end].kind == PP_NEWLINE) {
+                size_t k = end + 1;
+                while (k < n && toks[k].kind == PP_NEWLINE) k++;
+                if (k < n && toks[k].kind == PP_HASH) break;
+                end = k;
+                continue;
+            }
+            end++;
+        }
         VecPPTok ex; VecPPTok_reserve(pp->arena, &ex, 4);
         expand_tokens(pp, toks + i, end - i, &ex);
         for (size_t k = 0; k < ex.size; k++) emit_pp_token(pp, &ex.data[k]);
@@ -1482,7 +1520,8 @@ static void process_file(PP *pp, string path) {
 // ----------------------------------------------------------------------
 
 string tinyc_preprocess(Arena *arena, string path,
-                        string *include_dirs, size_t n_include_dirs) {
+                        string *include_dirs, size_t n_include_dirs,
+                        string *defines, size_t n_defines) {
     PP pp = {0};
     pp.arena = arena;
     pp.include_dirs = include_dirs;
@@ -1497,6 +1536,37 @@ string tinyc_preprocess(Arena *arena, string path,
     tcm->body[0] = one;
     tcm->n_body = 1;
     // __FILE__ and __LINE__ are intercepted at expansion time.
+
+    // Command-line -D defines. Each entry is either "NAME" or "NAME=BODY".
+    // The body is tokenized via the same pp_tokenize() the source uses.
+    for (size_t k = 0; k < n_defines; k++) {
+        string d = defines[k];
+        size_t eq = 0;
+        while (eq < d.size && d.str[eq] != '=') eq++;
+        string name = (string){d.str, eq};
+        Macro *m = macro_define(&pp, name);
+        if (eq >= d.size) {
+            PPTok body = {0};
+            body.kind = PP_NUMBER;
+            body.text = s_lit("1");
+            m->body = arena_new_array(arena, PPTok, 1);
+            m->body[0] = body;
+            m->n_body = 1;
+        } else {
+            string body_src = (string){d.str + eq + 1, d.size - eq - 1};
+            VecPPTok body_toks; VecPPTok_reserve(arena, &body_toks, 4);
+            pp_tokenize(arena, body_src, s_lit("<command-line>"), &body_toks);
+            // Strip trailing PP_NEWLINE / PP_END that pp_tokenize appends.
+            size_t bn = body_toks.size;
+            while (bn > 0 && (body_toks.data[bn - 1].kind == PP_NEWLINE
+                              || body_toks.data[bn - 1].kind == PP_END)) bn--;
+            if (bn > 0) {
+                m->body = arena_new_array(arena, PPTok, bn);
+                for (size_t bi = 0; bi < bn; bi++) m->body[bi] = body_toks.data[bi];
+                m->n_body = bn;
+            }
+        }
+    }
 
     process_file(&pp, path);
     out_char(&pp, '\n');

@@ -3,8 +3,10 @@
 # tinyC compiler instead of clang's C front-end.
 #
 # Pipeline per source:
-#   1. clang -E      preprocess (no system headers, corec/corec-stdlib only)
-#   2. tinyc         lower the preprocessed unit to LLVM IR (.ll)
+#   1. tinyc         preprocess + lower the unit to LLVM IR (.ll). tinyc
+#                    has its own self-contained C preprocessor (see
+#                    examples/tinyc/preprocess.c) so no external cpp is
+#                    required.
 #
 # Final link:
 #   clang -nostdlib -fno-builtin -lSystem -Wl,-e,__start <all .ll>
@@ -26,7 +28,7 @@ BIN="${BIN:-parser_tinyc}"
 mkdir -p "$OUT"
 
 INCLUDES=(-I corec -I corec-stdlib/stdlib -I .)
-CPP_FLAGS=(-E -P -nostdinc -fno-builtin -DNDEBUG "${INCLUDES[@]}")
+DEFINES=(-DNDEBUG)
 
 SOURCES=(
     parser.c
@@ -58,12 +60,9 @@ SOURCES=(
 LL_FILES=()
 for src in "${SOURCES[@]}"; do
     base="$(basename "$src")"
-    ipath="$OUT/${base}.i"
     lpath="$OUT/${base}.ll"
-    printf '[clang -E] %s\n' "$src"
-    clang "${CPP_FLAGS[@]}" "$src" -o "$ipath"
-    printf '[tinyc   ] %s -> %s\n' "$ipath" "$lpath"
-    "$TINYC" --emit=llvm -o "$lpath" "$ipath"
+    printf '[tinyc   ] %s -> %s\n' "$src" "$lpath"
+    "$TINYC" --emit=llvm "${INCLUDES[@]}" "${DEFINES[@]}" -o "$lpath" "$src"
     LL_FILES+=("$lpath")
 done
 

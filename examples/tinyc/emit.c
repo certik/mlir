@@ -5038,6 +5038,12 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         sy->type = g->type;
         sy->is_global = true;
         sy->global_sym = g->name;
+        // Record the struct sdef on the symbol so indexed/field accesses
+        // through the global (e.g. `g_arr[i].field`) can resolve fields.
+        if (g->type.kind == TY_PTR_STRUCT || g->type.kind == TY_ARRAY_STRUCT
+                || g->type.kind == TY_STRUCT) {
+            sy->sdef = find_struct(&e, g->type.struct_name);
+        }
         sy->next = e.globals;
         e.globals = sy;
 

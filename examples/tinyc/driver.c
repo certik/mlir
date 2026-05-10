@@ -56,6 +56,10 @@ int app_main(void) {
     string *include_dirs = arena_new_array(boot_arena, string, argc + 1);
     size_t n_include_dirs = 0;
 
+    // -D define list (repeatable). Each entry is "NAME" or "NAME=BODY".
+    string *defines = arena_new_array(boot_arena, string, argc + 1);
+    size_t n_defines = 0;
+
     for (int i = 1; i < argc; i++) {
         if      (strcmp(argv[i], "--emit=mlir")    == 0) { emit_llvm = false; emit_lowered = false; }
         else if (strcmp(argv[i], "--emit=lowered") == 0) { emit_lowered = true;  emit_llvm = false; }
@@ -66,6 +70,10 @@ int app_main(void) {
             include_dirs[n_include_dirs++] = str_from_cstr_view(argv[i] + 2);
         } else if (strcmp(argv[i], "-I") == 0 && i + 1 < argc) {
             include_dirs[n_include_dirs++] = str_from_cstr_view(argv[++i]);
+        } else if (strncmp(argv[i], "-D", 2) == 0 && argv[i][2] != '\0') {
+            defines[n_defines++] = str_from_cstr_view(argv[i] + 2);
+        } else if (strcmp(argv[i], "-D") == 0 && i + 1 < argc) {
+            defines[n_defines++] = str_from_cstr_view(argv[++i]);
         } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             output_file = argv[++i];
         } else if (strncmp(argv[i], "-o", 2) == 0 && argv[i][2] != '\0') {
@@ -76,7 +84,7 @@ int app_main(void) {
     }
 
     if (n_input_files == 0) {
-        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm] [--lowering=upstream|native] [-I dir ...] [-o OUT] FILE.tc [FILE2.tc ...]"));
+        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm] [--lowering=upstream|native] [-I dir ...] [-D name[=value] ...] [-o OUT] FILE.tc [FILE2.tc ...]"));
         arena_destroy(boot_arena);
         return 1;
     }
@@ -94,7 +102,8 @@ int app_main(void) {
     int total_errs = 0;
     for (size_t k = 0; k < n_input_files; k++) {
         string src = tinyc_preprocess(arena, str_from_cstr_view(input_files[k]),
-                                      include_dirs, n_include_dirs);
+                                      include_dirs, n_include_dirs,
+                                      defines, n_defines);
         if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
         VecTcTok toks = tinyc_lex(arena, src);
         total_errs += tinyc_parse_into(arena, prog, toks);
