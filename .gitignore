@@ -14,6 +14,7 @@ parser.native.bak
 compiler_tester/__pycache__/
 /tinyc
 /tinyc.exe
+/tinyc_native
 _libc_io_tmp.txt
 parser_tinyc
 build_tinyc/

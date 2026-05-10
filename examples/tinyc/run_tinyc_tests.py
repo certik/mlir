@@ -16,7 +16,7 @@ from pathlib import Path
 HERE = Path(__file__).parent
 ROOT = HERE.parent.parent
 IS_WIN = sys.platform == "win32"
-TINYC = ROOT / ("tinyc.exe" if IS_WIN else "tinyc")
+TINYC = Path(os.environ.get("TINYC", str(ROOT / ("tinyc.exe" if IS_WIN else "tinyc")))).resolve()
 RUNTIME = HERE / "runtime.c"
 TESTS_TOML = HERE / "tests.toml"
 

@@ -138,6 +138,7 @@ typedef struct IR_Op {
     MLIR_LocationHandle unnumbered_loc_def;
     string trailing_comment;
     int64_t source_line_start;
+    MLIR_BlockHandle parent_block;
 } IR_Op;
 
 typedef struct IR_Block {
@@ -181,11 +182,35 @@ static inline IR_Location *resolve_loc(MLIR_LocationHandle h) {
     return h == MLIR_INVALID_HANDLE ? NULL : (IR_Location *)(uintptr_t)h;
 }
 
+// Process-wide registry of all created ops. Native MLIR has no per-context
+// op list, but the lowering pass needs one for MLIR_ReplaceAllUsesOfValue
+// (which has to scan every op's operand/successor-operand arrays). The
+// tinyc/parser binaries each create exactly one MLIR_Context per process,
+// so a single static list is enough. Memory comes from the context arena.
+static MLIR_OpHandle *g_all_ops = NULL;
+static size_t         g_n_all_ops = 0;
+static size_t         g_cap_all_ops = 0;
+
+static void register_op(MLIR_Context *ctx, MLIR_OpHandle h) {
+    if (!ctx || !ctx->arena) return;
+    if (g_n_all_ops == g_cap_all_ops) {
+        size_t nc = g_cap_all_ops ? g_cap_all_ops * 2 : 256;
+        MLIR_OpHandle *p = arena_new_array(ctx->arena, MLIR_OpHandle, nc);
+        if (g_all_ops && g_n_all_ops)
+            memcpy(p, g_all_ops, g_n_all_ops * sizeof(MLIR_OpHandle));
+        g_all_ops = p;
+        g_cap_all_ops = nc;
+    }
+    g_all_ops[g_n_all_ops++] = h;
+}
+
 static inline MLIR_OpHandle alloc_op(MLIR_Context *ctx, IR_Op op) {
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
     IR_Op *slot = arena_new(ctx->arena, IR_Op);
     *slot = op;
-    return (MLIR_OpHandle)(uintptr_t)slot;
+    MLIR_OpHandle h = (MLIR_OpHandle)(uintptr_t)slot;
+    register_op(ctx, h);
+    return h;
 }
 
 static inline MLIR_RegionHandle alloc_region(MLIR_Context *ctx, IR_Region r) {
@@ -337,6 +362,8 @@ void MLIR_AppendBlockOp(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHandle op
     new_ops[block->n_operations] = op;
     block->operations = new_ops;
     block->n_operations++;
+    IR_Op *o = resolve_op(op);
+    if (o) o->parent_block = bh;
 }
 
 void MLIR_InsertBlockOpBeforeTerminator(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHandle op) {
@@ -358,6 +385,8 @@ void MLIR_InsertBlockOpAtIndex(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHa
                (block->n_operations - idx) * sizeof(MLIR_OpHandle));
     block->operations = new_ops;
     block->n_operations++;
+    IR_Op *o = resolve_op(op);
+    if (o) o->parent_block = bh;
 }
 
 void MLIR_AppendBlockArg(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_ValueHandle arg) {
@@ -953,6 +982,18 @@ MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *ctx, string
     return alloc_attr_obj(ctx, a);
 }
 
+// LLVM linkage attribute. Native backend stores the printable form
+// (e.g. "#llvm.linkage<internal>") in a string attr — this matches the
+// upstream backend's MLIR_GetAttributeAsString result, so the native
+// LLVM-IR translator can recognize it the same way for both backends.
+MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *ctx, string name) {
+    IR_Attribute a = {0};
+    a.kind = ATTR_KIND_STRING;
+    a.name = name;
+    a.data.string_value = str_lit("#llvm.linkage<internal>");
+    return alloc_attr_obj(ctx, a);
+}
+
 // Value creation
 MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_name, uint32_t result_index, MLIR_TypeHandle type, MLIR_LocationHandle location) {
     IR_Value v = {0};
@@ -1034,7 +1075,14 @@ string MLIR_GetAttributeName(MLIR_AttributeHandle ah) {
 
 // Native parser never produces "other" attrs; this is just for API parity.
 string MLIR_GetAttributeAsString(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
-    (void)ctx; (void)ah;
+    (void)ctx;
+    IR_Attribute *attr = resolve_attr(ah);
+    if (!attr) return str_lit("");
+    // The native lowering/translation passes only consult this for a few
+    // attributes whose printed form is well-defined (LLVM linkage, plain
+    // strings). For everything else we return empty — callers must use
+    // the typed accessors.
+    if (attr->kind == ATTR_KIND_STRING) return attr->data.string_value;
     return str_lit("");
 }
 
@@ -1283,70 +1331,138 @@ bool MLIR_IsTypeOpaque(MLIR_TypeHandle th) {
     return t && t->kind == TYPE_KIND_OPAQUE;
 }
 
-// IR mutation primitives — stubbed on the native backend until Stage D.
-// The Stage B/C lowering lives in mlir_lower_to_llvm.c, called from the
-// upstream backend's NATIVE arm. These stubs let mlir_api_impl.c keep
-// linking; the native build doesn't yet exercise them.
+// IR mutation primitives — native implementations used by the Stage B/C
+// lowering+translation passes (mlir_lower_to_llvm.c and
+// mlir_translate_to_llvm_ir.c). They mirror the upstream-backend behaviour
+// just well enough for the tinyc test suite.
+
 void MLIR_ReplaceAllUsesOfValue(MLIR_Context *ctx,
                                 MLIR_ValueHandle old_value,
                                 MLIR_ValueHandle new_value) {
-    (void)ctx; (void)old_value; (void)new_value;
+    (void)ctx;
+    if (old_value == MLIR_INVALID_HANDLE || old_value == new_value) return;
+    for (size_t k = 0; k < g_n_all_ops; k++) {
+        IR_Op *o = resolve_op(g_all_ops[k]);
+        if (!o) continue;
+        for (size_t i = 0; i < o->n_operands; i++) {
+            if (o->operands[i] == old_value) o->operands[i] = new_value;
+        }
+        for (size_t s = 0; s < o->n_successors; s++) {
+            uint64_t n = o->n_successor_operands ? o->n_successor_operands[s] : 0;
+            MLIR_ValueHandle *arr = o->successor_operands ? o->successor_operands[s] : NULL;
+            for (uint64_t i = 0; i < n; i++) {
+                if (arr && arr[i] == old_value) arr[i] = new_value;
+            }
+        }
+    }
 }
 
 void MLIR_EraseOp(MLIR_Context *ctx, MLIR_OpHandle op) {
-    (void)ctx; (void)op;
+    (void)ctx;
+    IR_Op *o = resolve_op(op);
+    if (!o) return;
+    IR_Block *b = resolve_block(o->parent_block);
+    if (b) {
+        size_t w = 0;
+        for (size_t i = 0; i < b->n_operations; i++) {
+            if (b->operations[i] != op) b->operations[w++] = b->operations[i];
+        }
+        b->n_operations = w;
+    }
+    o->parent_block = MLIR_INVALID_HANDLE;
 }
 
 void MLIR_SetOpRegion(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx,
                       MLIR_RegionHandle region) {
-    (void)ctx; (void)op; (void)idx; (void)region;
+    (void)ctx;
+    IR_Op *o = resolve_op(op);
+    if (!o || idx >= o->n_regions) return;
+    o->regions[idx] = region;
 }
 
 MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *ctx, MLIR_OpHandle op,
                                     size_t idx) {
-    (void)ctx; (void)op; (void)idx;
-    return MLIR_INVALID_HANDLE;
+    IR_Op *o = resolve_op(op);
+    if (!o || idx >= o->n_regions) return MLIR_INVALID_HANDLE;
+    MLIR_RegionHandle taken = o->regions[idx];
+    // Replace with a fresh empty region and reparent any blocks that
+    // referenced the old region.
+    IR_Region empty = {0};
+    o->regions[idx] = alloc_region(ctx, empty);
+    return taken;
 }
 
 MLIR_BlockHandle MLIR_GetOpParentBlock(MLIR_OpHandle op) {
-    (void)op;
-    return MLIR_INVALID_HANDLE;
+    IR_Op *o = resolve_op(op);
+    return o ? o->parent_block : MLIR_INVALID_HANDLE;
 }
 
 size_t MLIR_GetBlockOpIndex(MLIR_BlockHandle block, MLIR_OpHandle op) {
-    (void)block; (void)op;
+    IR_Block *b = resolve_block(block);
+    if (!b) return (size_t)-1;
+    for (size_t i = 0; i < b->n_operations; i++) {
+        if (b->operations[i] == op) return i;
+    }
     return (size_t)-1;
 }
 
 MLIR_RegionHandle MLIR_GetBlockParentRegion(MLIR_BlockHandle block) {
-    (void)block;
-    return MLIR_INVALID_HANDLE;
+    IR_Block *b = resolve_block(block);
+    return b ? b->parent_region : MLIR_INVALID_HANDLE;
 }
 
 void MLIR_MoveOpToBlockEnd(MLIR_Context *ctx, MLIR_OpHandle op,
                            MLIR_BlockHandle dest) {
-    (void)ctx; (void)op; (void)dest;
+    if (op == MLIR_INVALID_HANDLE || dest == MLIR_INVALID_HANDLE) return;
+    IR_Op *o = resolve_op(op);
+    if (!o) return;
+    // Detach from current parent.
+    IR_Block *cur = resolve_block(o->parent_block);
+    if (cur) {
+        size_t w = 0;
+        for (size_t i = 0; i < cur->n_operations; i++) {
+            if (cur->operations[i] != op) cur->operations[w++] = cur->operations[i];
+        }
+        cur->n_operations = w;
+    }
+    o->parent_block = MLIR_INVALID_HANDLE;
+    MLIR_AppendBlockOp(ctx, dest, op);
 }
 
 void MLIR_MoveBlockToRegionEnd(MLIR_Context *ctx, MLIR_BlockHandle block,
                                MLIR_RegionHandle dest) {
-    (void)ctx; (void)block; (void)dest;
+    if (block == MLIR_INVALID_HANDLE || dest == MLIR_INVALID_HANDLE) return;
+    IR_Block *b = resolve_block(block);
+    if (!b) return;
+    IR_Region *cur = resolve_region(b->parent_region);
+    if (cur) {
+        size_t w = 0;
+        for (size_t i = 0; i < cur->n_blocks; i++) {
+            if (cur->blocks[i] != block) cur->blocks[w++] = cur->blocks[i];
+        }
+        cur->n_blocks = w;
+    }
+    b->parent_region = MLIR_INVALID_HANDLE;
+    MLIR_AppendRegionBlock(ctx, dest, block);
 }
 
-// Lowering / LLVM IR translation are upstream-only for now. Stub them on
-// the native backend so binaries that link only the native impl still
-// resolve. Stage D will replace these stubs with a real native lowering
-// + translation.
+// Native lowering & LLVM-IR translation. Both delegate to the shared
+// implementations in mlir_lower_to_llvm.c / mlir_translate_to_llvm_ir.c
+// which only use the public mlir_api.h surface and therefore work
+// against the native backend.
+extern bool   mlir_lower_to_llvm_native(MLIR_Context *, MLIR_OpHandle);
+extern string mlir_translate_to_llvm_ir_native(MLIR_Context *, MLIR_OpHandle);
+
 bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module,
                              MLIR_LoweringBackend backend) {
-    (void)ctx; (void)module; (void)backend;
-    return false;
+    (void)backend; // Native backend has no upstream pipeline to fall back on.
+    return mlir_lower_to_llvm_native(ctx, module);
 }
 
 string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module,
                                     MLIR_LoweringBackend backend) {
-    (void)ctx; (void)module; (void)backend;
-    return str_lit("");
+    (void)backend;
+    return mlir_translate_to_llvm_ir_native(ctx, module);
 }
 
 #ifdef __cplusplus
