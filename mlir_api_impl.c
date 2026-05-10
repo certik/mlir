@@ -1675,13 +1675,15 @@ void MLIR_MoveBlockToRegionEnd(MLIR_Context *ctx, MLIR_BlockHandle block,
 // which override these with the real implementations. On compilers
 // without weak-symbol support (e.g. MSVC for the Windows parser build)
 // the strong stubs satisfy the link without conflict because those
-// builds don't pull in the real translation units.
+// builds don't pull in the real translation units. Hosted builds on
+// MSVC must define MLIR_HAS_NATIVE_LOWERING so the real symbols win.
 #if defined(__GNUC__) || defined(__clang__)
 #define MLIR_NATIVE_LOWERING_WEAK __attribute__((weak))
 #else
 #define MLIR_NATIVE_LOWERING_WEAK
 #endif
 
+#ifndef MLIR_HAS_NATIVE_LOWERING
 MLIR_NATIVE_LOWERING_WEAK bool
 mlir_lower_to_llvm_native(MLIR_Context *ctx, MLIR_OpHandle module) {
     (void)ctx; (void)module;
@@ -1694,6 +1696,7 @@ mlir_translate_to_llvm_ir_native(MLIR_Context *ctx, MLIR_OpHandle module) {
     string s = {0};
     return s;
 }
+#endif
 
 bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module,
                              MLIR_LoweringBackend backend) {

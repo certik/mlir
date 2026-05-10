@@ -78,7 +78,12 @@ printf '[clang   ] link -> %s\n' "$BIN"
 # Compile examples/tinyc/runtime.c with clang (it intentionally uses system
 # stdio.h for the print* helpers and stdarg.h for the va_arg helpers — see
 # scripts/build_macos_tinyc.sh for the same pattern). Only the va_arg
-# helpers are referenced by the mlir parser bootstrap.
-clang -nostdlib -fno-builtin -o "$BIN" "${LL_FILES[@]}" "$PLATFORM_OBJ" examples/tinyc/runtime.c
+# helpers are referenced by the mlir parser bootstrap; the print* helpers
+# pull in libc symbols (stdout, fputs, printf) which we can't satisfy
+# under -nostdlib on Linux. Build runtime.c with per-function sections so
+# the linker garbage-collects the unreferenced print* helpers.
+clang -c -ffunction-sections -fdata-sections -o "$OUT/runtime.o" examples/tinyc/runtime.c
+clang -nostdlib -fno-builtin -Wl,--gc-sections -o "$BIN" \
+    "${LL_FILES[@]}" "$PLATFORM_OBJ" "$OUT/runtime.o"
 
 printf 'Built %s via tinyC.\n' "$BIN"
