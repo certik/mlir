@@ -574,6 +574,14 @@ bool MLIR_GetTypeFunctionIsVarArg(MLIR_TypeHandle type);
 // Element type of a tensor/memref/vector type, or invalid if the type is
 // not a shaped type.
 MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle type);
+// LLVM struct/array type introspection. Used by lowering passes that
+// need to compute byte offsets and sizes (e.g. native LLVM->WASM).
+bool            MLIR_IsTypeLLVMStruct(MLIR_TypeHandle type);
+size_t          MLIR_GetTypeLLVMStructNumFields(MLIR_TypeHandle type);
+MLIR_TypeHandle MLIR_GetTypeLLVMStructField(MLIR_TypeHandle type, size_t idx);
+bool            MLIR_IsTypeLLVMArray(MLIR_TypeHandle type);
+MLIR_TypeHandle MLIR_GetTypeLLVMArrayElement(MLIR_TypeHandle type);
+uint64_t        MLIR_GetTypeLLVMArrayNumElements(MLIR_TypeHandle type);
 string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle type);
 
 // -----------------------------------------------------------------------------

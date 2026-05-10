@@ -39,10 +39,12 @@ expected_stdout = "55\n10\n"
 
 [[test]]
 name = "float"
+wasm_native_run = true
 expected_stdout = "4.375\n1\n6\n"
 
 [[test]]
 name = "array"
+wasm_native_run = true
 expected_stdout = "30\n9\n"
 
 [[test]]
@@ -52,34 +54,42 @@ expected_stdout = "42\n42\n"
 
 [[test]]
 name = "struct"
+wasm_native_run = true
 expected_stdout = "3\n4\n25\n5\n7.5\n"
 
 [[test]]
 name = "struct_pass"
+wasm_native_run = true
 expected_stdout = "11\n4\n6\n20\n30\n13\n24\n7\n3.5\n"
 
 [[test]]
 name = "struct_ptr"
+wasm_native_run = true
 expected_stdout = "15\n5\n10\n15\n15\n55\n1\n1\n"
 
 [[test]]
 name = "struct_nested"
+wasm_native_run = true
 expected_stdout = "10\n20\n30\n60\n60\n1\n2\n3\n6\n"
 
 [[test]]
 name = "struct_array"
+wasm_native_run = true
 expected_stdout = "6\n60\n4\n"
 
 [[test]]
 name = "linked_list"
+wasm_native_run = true
 expected_stdout = "6\n"
 
 [[test]]
 name = "binary_tree"
+wasm_native_run = true
 expected_stdout = "40\n"
 
 [[test]]
 name = "null_check"
+wasm_native_run = true
 expected_stdout = "1\n0\n1\n0\n0\n42\n99\n"
 
 [[test]]
@@ -89,6 +99,7 @@ expected_stdout = "4\n4\n8\n16\n"
 
 [[test]]
 name = "struct_ptr_return"
+wasm_native_run = true
 expected_stdout = "60\n99\n99\n99\n"
 
 [[test]]
@@ -121,6 +132,7 @@ expected_stdout = "1\n3\n0\n0\n"
 
 [[test]]
 name = "typedef"
+wasm_native_run = true
 expected_stdout = "16\n100\n7\n"
 
 [[test]]
@@ -130,10 +142,12 @@ expected_stdout = "1\n1\n0\n6\n"
 
 [[test]]
 name = "multi_array"
+wasm_native_run = true
 expected_stdout = "0\n12\n23\n138\n"
 
 [[test]]
 name = "ptr_arith"
+wasm_native_run = true
 expected_stdout = "10\n30\n40\n50\n4\n150\n"
 
 [[test]]
@@ -154,6 +168,7 @@ expected_stdout = "42\n42\n"
 
 [[test]]
 name = "struct_array_field"
+wasm_native_run = true
 expected_stdout = "8\n0\n9\n49\n0\n25\n140\n"
 
 [[test]]
@@ -164,6 +179,7 @@ wasm_skip = true
 
 [[test]]
 name = "struct_ptr_array_field"
+wasm_native_run = true
 expected_stdout = "10\n20\n30\n40\n100\n10\n"
 
 [[test]]
@@ -235,6 +251,7 @@ expected_stdout = "42\n7\n42\n"
 
 [[test]]
 name = "void_ptr"
+wasm_native_run = true
 expected_stdout = "17\n17\n99\n99\n5\n99\n"
 
 [[test]]
@@ -271,6 +288,7 @@ expected_stdout = "4\n4\n8\n8\n8\n4\n4\n8\n"
 
 [[test]]
 name = "compound_literal"
+wasm_native_run = true
 expected_stdout = "42\n7\n3\n4\n7\n"
 
 [[test]]
@@ -291,10 +309,12 @@ expected_stdout = "10\n300\n"
 
 [[test]]
 name = "extern_malloc_free"
+wasm_native_run = true
 expected_stdout = "42\n99\n"
 
 [[test]]
 name = "struct_multi_decl_field"
+wasm_native_run = true
 expected_stdout = "1\n2\n100\n200\n7\n9\n"
 
 [[test]]
@@ -317,35 +337,43 @@ expected_stdout = "700\n2000\n"
 
 [[test]]
 name = "addr_of_struct_field_index"
+wasm_native_run = true
 expected_stdout = "1\n10\n2\n20\n3\n30\n"
 
 [[test]]
 name = "null_ptr_init"
+wasm_native_run = true
 expected_stdout = "1\n2\n3\n7\n"
 
 [[test]]
 name = "field_of_call_result"
+wasm_native_run = true
 expected_stdout = "7\n11\n104\n"
 
 [[test]]
 name = "deref_index_pp"
+wasm_native_run = true
 expected_stdout = "101\n102\n103\n"
 
 [[test]]
 name = "struct_call_in_short_circuit"
+wasm_native_run = true
 expected_stdout = "109\n"
 
 [[test]]
 name = "null_arg_to_ptr_param"
+wasm_native_run = true
 expected_stdout = "42\n"
 needs_libc = true
 
 [[test]]
 name = "struct_ternary"
+wasm_native_run = true
 expected_stdout = "70\n15\n"
 
 [[test]]
 name = "struct_return_ternary"
+wasm_native_run = true
 expected_stdout = "3\n17\n"
 
 [[test]]
@@ -371,6 +399,7 @@ expected_stdout = "10\n15\n"
 
 [[test]]
 name = "multi_struct"
+wasm_native_run = true
 sources = ["multi_struct_a.tc", "multi_struct_b.tc"]
 expected_stdout = "11\n"
 
@@ -400,6 +429,7 @@ expected_stdout = "0\n-1\n1\n"
 
 [[test]]
 name = "libc_memcmp"
+wasm_native_run = true
 expected_stdout = "0\n-1\n1\n"
 
 [[test]]
@@ -408,6 +438,7 @@ expected_stdout = "0\n5\n11\n"
 
 [[test]]
 name = "libc_malloc_free"
+wasm_native_run = true
 expected_stdout = "110\n"
 
 # stdout-using tests: stdout is a real linker symbol only on glibc/Linux.
@@ -450,6 +481,7 @@ expected_stdout = "hello 6\nabc 10 0 0 0\njello\n"
 
 [[test]]
 name = "typedef_local"
+wasm_native_run = true
 expected_stdout = "42\n7\n"
 
 [[test]]
@@ -467,6 +499,7 @@ expected_stdout = "8\n7\n7\n7\n"
 
 [[test]]
 name = "typedef_struct_anon"
+wasm_native_run = true
 expected_stdout = "7\n30\n"
 
 [[test]]
@@ -476,6 +509,7 @@ expected_stdout = "1\n200\n2\n"
 
 [[test]]
 name = "struct_field_i64"
+wasm_native_run = true
 expected_stdout = "2\n16\n18\n"
 
 [[test]]
@@ -489,26 +523,32 @@ expected_stdout = "100\n7000\n-1\n"
 
 [[test]]
 name = "typedef_ptr_decl"
+wasm_native_run = true
 expected_stdout = "3\n4\n7\n"
 
 [[test]]
 name = "struct_ptr_field_index"
+wasm_native_run = true
 expected_stdout = "10\n11\n12\n1000000\n2000000\n3000000\n"
 
 [[test]]
 name = "struct_call_in_arg"
+wasm_native_run = true
 expected_stdout = "1\n10\n20\n2\n30\n40\n"
 
 [[test]]
 name = "typedef_i64_ptr"
+wasm_native_run = true
 expected_stdout = "100\n101\n102\n103\n"
 
 [[test]]
 name = "cast_null"
+wasm_native_run = true
 expected_stdout = "1\n2\n"
 
 [[test]]
 name = "struct_init"
+wasm_native_run = true
 expected_stdout = "1\n2\n3\n10\n20\n30\n100\n400\n700\n"
 
 [[test]]
@@ -527,22 +567,27 @@ expected_stdout = "1\n2\n3\n10\n5\n20\n1\n2\n100\n200\n"
 
 [[test]]
 name = "struct_ptr_init_call"
+wasm_native_run = true
 expected_stdout = "10\n11\n20\n21\n"
 
 [[test]]
 name = "structptr_index_field"
+wasm_native_run = true
 expected_stdout = "100\n200\n"
 
 [[test]]
 name = "struct_return_decl"
+wasm_native_run = true
 expected_stdout = "7\n42\n100\n200\n"
 
 [[test]]
 name = "array_zero_init"
+wasm_native_run = true
 expected_stdout = "0\n0\n0\n0\n0\n0\n99\n7\n"
 
 [[test]]
 name = "double_basic"
+wasm_native_run = true
 expected_stdout = "3.75\n3.375\n-1.5\n2\n7\n3.5\n1\n"
 
 [[test]]
@@ -551,6 +596,7 @@ expected_stdout = "2.5\n3.75\n1.5\n"
 
 [[test]]
 name = "deref_struct_pass"
+wasm_native_run = true
 expected_stdout = "3\n4\n"
 
 [[test]]
@@ -712,12 +758,14 @@ wasm_skip = true
 
 [[test]]
 name = "struct_zero_init_64bit"
+wasm_native_run = true
 expected_stdout = """\
 0
 """
 
 [[test]]
 name = "union_field_offset"
+wasm_native_run = true
 expected_stdout = """\
 0
 """

@@ -1096,6 +1096,36 @@ MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle th) {
     return MLIR_INVALID_HANDLE;
 }
 
+bool MLIR_IsTypeLLVMStruct(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    return t && t->kind == TYPE_KIND_LLVM_STRUCT;
+}
+size_t MLIR_GetTypeLLVMStructNumFields(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    if (!t || t->kind != TYPE_KIND_LLVM_STRUCT) return 0;
+    return t->data.llvm_struct.n_fields;
+}
+MLIR_TypeHandle MLIR_GetTypeLLVMStructField(MLIR_TypeHandle th, size_t idx) {
+    IR_Type *t = resolve_type(th);
+    if (!t || t->kind != TYPE_KIND_LLVM_STRUCT) return MLIR_INVALID_HANDLE;
+    if (idx >= t->data.llvm_struct.n_fields) return MLIR_INVALID_HANDLE;
+    return t->data.llvm_struct.fields[idx];
+}
+bool MLIR_IsTypeLLVMArray(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    return t && t->kind == TYPE_KIND_LLVM_ARRAY;
+}
+MLIR_TypeHandle MLIR_GetTypeLLVMArrayElement(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    if (!t || t->kind != TYPE_KIND_LLVM_ARRAY) return MLIR_INVALID_HANDLE;
+    return t->data.llvm_array.element;
+}
+uint64_t MLIR_GetTypeLLVMArrayNumElements(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    if (!t || t->kind != TYPE_KIND_LLVM_ARRAY) return 0;
+    return t->data.llvm_array.count;
+}
+
 void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle th, uint32_t width, bool is_signed) {
     IR_Type *t = resolve_type(th);
     if (!t) return;

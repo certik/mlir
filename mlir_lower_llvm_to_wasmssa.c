@@ -79,6 +79,69 @@ static uint8_t wasm_vt(MLIR_Context *ctx, MLIR_TypeHandle ty) {
     return 0;
 }
 
+// Returns the integer bit width of `ty` (1/8/16/32/64) or 0 if `ty`
+// is not an `iN` integer type.
+static int int_bits(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    string s = MLIR_GetTypeString(ctx, ty);
+    if (s.size > 1 && s.str[0] == 'i') {
+        int w = 0;
+        for (size_t i = 1; i < s.size; i++) {
+            if (s.str[i] >= '0' && s.str[i] <= '9') w = w * 10 + (s.str[i] - '0');
+            else return 0;
+        }
+        return w;
+    }
+    return 0;
+}
+
+static unsigned type_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty);
+static unsigned type_align_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty);
+
+// Round x up to the nearest multiple of `align` (a power of two).
+static unsigned align_up(unsigned x, unsigned align) {
+    return (x + align - 1) & ~(align - 1);
+}
+
+// Sum of (padded) field sizes for an LLVM struct type, with the natural
+// alignment that the LLVM data layout uses on wasm32 (each field aligned
+// to its own alignment; trailing padding to the struct's max-field alignment).
+static unsigned struct_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
+    unsigned off = 0, max_align = 1;
+    for (size_t i = 0; i < nf; i++) {
+        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(ty, i);
+        unsigned fsz = type_size_bytes(ctx, ft);
+        unsigned fal = type_align_bytes(ctx, ft);
+        if (fsz == 0 || fal == 0) return 0;
+        off = align_up(off, fal);
+        off += fsz;
+        if (fal > max_align) max_align = fal;
+    }
+    return align_up(off, max_align);
+}
+static unsigned struct_align_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
+    unsigned ma = 1;
+    for (size_t i = 0; i < nf; i++) {
+        unsigned fa = type_align_bytes(ctx, MLIR_GetTypeLLVMStructField(ty, i));
+        if (fa > ma) ma = fa;
+    }
+    return ma;
+}
+// Byte offset of the i-th field within its containing struct.
+static unsigned struct_field_offset(MLIR_Context *ctx, MLIR_TypeHandle sty,
+                                    size_t fld_idx) {
+    unsigned off = 0;
+    for (size_t i = 0; i <= fld_idx; i++) {
+        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(sty, i);
+        unsigned fal = type_align_bytes(ctx, ft);
+        off = align_up(off, fal);
+        if (i == fld_idx) return off;
+        off += type_size_bytes(ctx, ft);
+    }
+    return off;
+}
+
 static unsigned type_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
     string s = MLIR_GetTypeString(ctx, ty);
     if (s.size >= 9 && memcmp(s.str, "!llvm.ptr", 9) == 0) return 4;
@@ -96,7 +159,26 @@ static unsigned type_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
         if (w == 32) return 4;
         if (w == 64) return 8;
     }
+    if (MLIR_IsTypeLLVMArray(ty)) {
+        unsigned esz = type_size_bytes(ctx, MLIR_GetTypeLLVMArrayElement(ty));
+        if (esz == 0) return 0;
+        return esz * (unsigned)MLIR_GetTypeLLVMArrayNumElements(ty);
+    }
+    if (MLIR_IsTypeLLVMStruct(ty)) {
+        return struct_size_bytes(ctx, ty);
+    }
     return 0;
+}
+
+static unsigned type_align_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    if (MLIR_IsTypeLLVMArray(ty)) {
+        return type_align_bytes(ctx, MLIR_GetTypeLLVMArrayElement(ty));
+    }
+    if (MLIR_IsTypeLLVMStruct(ty)) {
+        return struct_align_bytes(ctx, ty);
+    }
+    unsigned sz = type_size_bytes(ctx, ty);
+    return sz ? sz : 1;
 }
 
 // =============================================================================
@@ -250,6 +332,64 @@ static void emit_global_set(FnCtx *F, uint32_t gidx, int valv) {
     o->n_operands = 1;
     o->operands = (int *)malloc(sizeof(int));
     o->operands[0] = valv;
+}
+
+// Convenience: i32 mul.
+static int emit_mul_i32(FnCtx *F, int lhs, int rhs) {
+    wasmssa_op_t *o; int idx = add_op(F, &o);
+    o->type = OP_TYPE_WASMSSA_BINOP;
+    o->valtype = WT_I32;
+    o->wasm_opcode = 0x6c;  // i32.mul
+    o->n_operands = 2;
+    o->operands = (int *)malloc(2 * sizeof(int));
+    o->operands[0] = lhs;
+    o->operands[1] = rhs;
+    o->has_result = true;
+    return idx;
+}
+// Convenience: i32.wrap_i64 (0xa7) — narrows an i64 SSA value to i32.
+static int emit_wrap_i64_to_i32(FnCtx *F, int v) {
+    wasmssa_op_t *o; int idx = add_op(F, &o);
+    o->type = OP_TYPE_WASMSSA_UNOP;
+    o->valtype = WT_I32;
+    o->wasm_opcode = 0xa7;
+    o->n_operands = 1;
+    o->operands = (int *)malloc(sizeof(int));
+    o->operands[0] = v;
+    o->has_result = true;
+    return idx;
+}
+
+// Parse a "array<i32: v0, v1, ...>" string into a heap-allocated int32_t
+// vector; returns NULL on parse failure. Sets *n_out.
+static int32_t *parse_dense_i32_array(string s, size_t *n_out) {
+    *n_out = 0;
+    const char *p = s.str;
+    const char *end = s.str + s.size;
+    const char *pref = "array<i32";
+    size_t plen = strlen(pref);
+    if (s.size < plen || memcmp(p, pref, plen) != 0) return NULL;
+    p += plen;
+    // Allow "array<i32>" (empty) or "array<i32: ...>".
+    while (p < end && *p == ' ') p++;
+    if (p < end && *p == '>') { return (int32_t *)malloc(sizeof(int32_t)); }
+    if (p >= end || *p != ':') return NULL;
+    p++;
+    int32_t *vs = NULL; size_t n = 0, c = 0;
+    while (p < end && *p != '>') {
+        while (p < end && (*p == ' ' || *p == ',')) p++;
+        if (p >= end || *p == '>') break;
+        bool neg = false;
+        if (*p == '-') { neg = true; p++; }
+        if (p >= end || *p < '0' || *p > '9') { free(vs); return NULL; }
+        int64_t v = 0;
+        while (p < end && *p >= '0' && *p <= '9') { v = v*10 + (*p - '0'); p++; }
+        if (neg) v = -v;
+        if (n == c) { c = c ? c*2 : 4; vs = (int32_t *)realloc(vs, c * sizeof(int32_t)); }
+        vs[n++] = (int32_t)v;
+    }
+    *n_out = n;
+    return vs ? vs : (int32_t *)malloc(sizeof(int32_t));
 }
 
 // =============================================================================
@@ -424,7 +564,17 @@ static bool lower_scf_while(FnCtx *F, MLIR_OpHandle op) {
     return true;
 }
 
+static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op);
 static bool lower_op(FnCtx *F, MLIR_OpHandle op) {
+    bool ok = lower_op_inner(F, op);
+    if (!ok) {
+        string n = MLIR_GetOpName(op);
+        fprintf(stderr, "wasmssa-lower: lower_op failed at '%.*s'\n",
+                (int)n.size, n.str);
+    }
+    return ok;
+}
+static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     string name = MLIR_GetOpName(op);
 
     // ---- scf.if / scf.while ----------------------------------------------
@@ -476,13 +626,32 @@ static bool lower_op(FnCtx *F, MLIR_OpHandle op) {
         if (vt == 0) return false;
         MLIR_AttributeHandle va = find_attr(op, "value");
         if (va == MLIR_INVALID_HANDLE) return false;
-        if (MLIR_GetAttributeKind(va) != MLIR_ATTR_KIND_INTEGER) return false;
-        int64_t iv = MLIR_GetAttributeInteger(va);
+        MLIR_AttrKind ak = MLIR_GetAttributeKind(va);
 
         wasmssa_op_t *o; int idx = add_op(F, &o);
         o->type = OP_TYPE_WASMSSA_CONST;
         o->valtype = vt;
-        o->i_const = iv;
+        if (ak == MLIR_ATTR_KIND_INTEGER) {
+            o->i_const = MLIR_GetAttributeInteger(va);
+        } else if (ak == MLIR_ATTR_KIND_FLOAT) {
+            double dv = MLIR_GetAttributeFloat(va);
+            // Pack the bit pattern through an integer of matching width;
+            // stage 3 emits f32.const / f64.const using the same bytes.
+            if (vt == WT_F32) {
+                float fv = (float)dv;
+                uint32_t bits;
+                memcpy(&bits, &fv, 4);
+                o->i_const = (int64_t)(uint64_t)bits;
+            } else if (vt == WT_F64) {
+                uint64_t bits;
+                memcpy(&bits, &dv, 8);
+                o->i_const = (int64_t)bits;
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
         o->has_result = true;
         vmap_set(F, r, idx);
         return true;
@@ -586,26 +755,85 @@ static bool lower_op(FnCtx *F, MLIR_OpHandle op) {
         return true;
     }
 
-    // ---- llvm.sext (i32 -> i64) -------------------------------------------
+    // ---- llvm.sext (i8/i16/i32 -> i32; i32 -> i64; i8/i16 -> i64) ----------
     if (name_eq(name, "llvm.sext")) {
         if (MLIR_GetOpNumResults(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         MLIR_ValueHandle s = MLIR_GetOpOperand(op, 0);
-        uint8_t in_vt  = wasm_vt(F->ctx, MLIR_GetValueType(s));
-        uint8_t out_vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
-        if (in_vt != WT_I32 || out_vt != WT_I64) return false;
+        int in_w  = int_bits(F->ctx, MLIR_GetValueType(s));
+        int out_w = int_bits(F->ctx, MLIR_GetValueType(r));
+        if (in_w == 0 || out_w == 0 || in_w > out_w) return false;
         int sa;
         if (!vmap_get(F, s, &sa)) return false;
-        wasmssa_op_t *o; int idx = add_op(F, &o);
-        o->type = OP_TYPE_WASMSSA_EXTEND_I32_S;
-        o->valtype = WT_I64;
-        o->n_operands = 1;
-        o->operands = (int *)malloc(sizeof(int));
-        o->operands[0] = sa;
-        o->has_result = true;
-        vmap_set(F, r, idx);
+
+        // Step 1: if narrowing source is i8/i16 stored in i32, sign-extend
+        // within i32 first (extend8_s=0xc0, extend16_s=0xc1).
+        int cur_idx = sa;
+        uint8_t cur_vt = wasm_vt(F->ctx, MLIR_GetValueType(s));
+        if (in_w == 8 || in_w == 16) {
+            wasmssa_op_t *o; int idx = add_op(F, &o);
+            o->type = OP_TYPE_WASMSSA_UNOP;
+            o->valtype = WT_I32;
+            o->wasm_opcode = (in_w == 8) ? 0xc0 : 0xc1;
+            o->n_operands = 1;
+            o->operands = (int *)malloc(sizeof(int));
+            o->operands[0] = cur_idx;
+            o->has_result = true;
+            cur_idx = idx; cur_vt = WT_I32;
+        }
+        // Step 2: if widening into i64, use i64.extend_i32_s (0xac).
+        if (out_w == 64) {
+            wasmssa_op_t *o; int idx = add_op(F, &o);
+            o->type = OP_TYPE_WASMSSA_EXTEND_I32_S;
+            o->valtype = WT_I64;
+            o->n_operands = 1;
+            o->operands = (int *)malloc(sizeof(int));
+            o->operands[0] = cur_idx;
+            o->has_result = true;
+            cur_idx = idx;
+        }
+        vmap_set(F, r, cur_idx);
         return true;
     }
+
+    // ---- llvm.ptrtoint / llvm.inttoptr -------------------------------------
+    if (name_eq(name, "llvm.ptrtoint") || name_eq(name, "llvm.inttoptr")) {
+        if (MLIR_GetOpNumResults(op) != 1 ||
+            MLIR_GetOpNumOperands(op) != 1) return false;
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        MLIR_ValueHandle s = MLIR_GetOpOperand(op, 0);
+        uint8_t in_vt  = wasm_vt(F->ctx, MLIR_GetValueType(s));
+        uint8_t out_vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
+        int sa;
+        if (!vmap_get(F, s, &sa)) return false;
+        // Pointers are i32. If matched, identity; if narrowing/widening, defer
+        // to the existing trunc/zext-style lowering by emitting a wrap or
+        // extend.
+        if (in_vt == out_vt) {
+            vmap_set(F, r, sa);
+            return true;
+        }
+        if (in_vt == WT_I64 && out_vt == WT_I32) {
+            int idx = emit_wrap_i64_to_i32(F, sa);
+            vmap_set(F, r, idx);
+            return true;
+        }
+        if (in_vt == WT_I32 && out_vt == WT_I64) {
+            // unsigned extension: i64.extend_i32_u (0xad)
+            wasmssa_op_t *o; int idx = add_op(F, &o);
+            o->type = OP_TYPE_WASMSSA_UNOP;
+            o->valtype = WT_I64;
+            o->wasm_opcode = 0xad;
+            o->n_operands = 1;
+            o->operands = (int *)malloc(sizeof(int));
+            o->operands[0] = sa;
+            o->has_result = true;
+            vmap_set(F, r, idx);
+            return true;
+        }
+        return false;
+    }
+
 
     // ---- llvm binary integer ops -------------------------------------------
     // Mapped to a generic wasmssa.binop carrying the actual wasm bytecode
@@ -651,6 +879,148 @@ static bool lower_op(FnCtx *F, MLIR_OpHandle op) {
             vmap_set(F, r, idx);
             return true;
         }
+    }
+
+    // ---- llvm binary float ops ---------------------------------------------
+    {
+        struct { const char *nm; uint8_t f32op, f64op; } ftab[] = {
+            { "llvm.fadd",  0x92, 0xa0 },
+            { "llvm.fsub",  0x93, 0xa1 },
+            { "llvm.fmul",  0x94, 0xa2 },
+            { "llvm.fdiv",  0x95, 0xa3 },
+        };
+        for (size_t k = 0; k < sizeof(ftab)/sizeof(ftab[0]); k++) {
+            if (!name_eq(name, ftab[k].nm)) continue;
+            if (MLIR_GetOpNumResults(op) != 1 ||
+                MLIR_GetOpNumOperands(op) != 2) return false;
+            MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+            uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
+            uint8_t opc = (vt == WT_F32) ? ftab[k].f32op
+                        : (vt == WT_F64) ? ftab[k].f64op : 0;
+            if (opc == 0) return false;
+            int ai, bi;
+            if (!vmap_get(F, MLIR_GetOpOperand(op, 0), &ai)) return false;
+            if (!vmap_get(F, MLIR_GetOpOperand(op, 1), &bi)) return false;
+            wasmssa_op_t *o; int idx = add_op(F, &o);
+            o->type = OP_TYPE_WASMSSA_BINOP;
+            o->valtype = vt;
+            o->wasm_opcode = opc;
+            o->n_operands = 2;
+            o->operands = (int *)malloc(2 * sizeof(int));
+            o->operands[0] = ai; o->operands[1] = bi;
+            o->has_result = true;
+            vmap_set(F, r, idx);
+            return true;
+        }
+    }
+
+    // ---- llvm float compares -----------------------------------------------
+    if (name_eq(name, "llvm.fcmp")) {
+        if (MLIR_GetOpNumResults(op) != 1 ||
+            MLIR_GetOpNumOperands(op) != 2) return false;
+        MLIR_ValueHandle a = MLIR_GetOpOperand(op, 0);
+        uint8_t opvt = wasm_vt(F->ctx, MLIR_GetValueType(a));
+        // FCmpPredicate enum: oeq=1, ogt=2, oge=3, olt=4, ole=5, one=6,
+        // une=11, ueq=8 (unordered variants); we only support ordered.
+        // wasm has eq, ne, lt, gt, le, ge (ordered). Map oeq->eq, etc.
+        MLIR_AttributeHandle pa = find_attr(op, "predicate");
+        if (pa == MLIR_INVALID_HANDLE) return false;
+        int64_t pred = MLIR_GetAttributeInteger(pa);
+        // Map LLVM fcmp predicate -> wasm op offset (eq=0,ne=1,lt=2,gt=3,le=4,ge=5).
+        int8_t off;
+        switch (pred) {
+        case 1: off = 0; break;  // oeq
+        case 2: off = 3; break;  // ogt
+        case 3: off = 5; break;  // oge
+        case 4: off = 2; break;  // olt
+        case 5: off = 4; break;  // ole
+        case 6: off = 1; break;  // one
+        default: return false;
+        }
+        uint8_t opc = (opvt == WT_F32) ? (uint8_t)(0x5b + off)
+                    : (opvt == WT_F64) ? (uint8_t)(0x61 + off) : 0;
+        if (opc == 0) return false;
+        int ai, bi;
+        if (!vmap_get(F, a, &ai)) return false;
+        if (!vmap_get(F, MLIR_GetOpOperand(op, 1), &bi)) return false;
+        wasmssa_op_t *o; int idx = add_op(F, &o);
+        o->type = OP_TYPE_WASMSSA_BINOP;
+        o->valtype = WT_I32;
+        o->wasm_opcode = opc;
+        o->n_operands = 2;
+        o->operands = (int *)malloc(2 * sizeof(int));
+        o->operands[0] = ai; o->operands[1] = bi;
+        o->has_result = true;
+        vmap_set(F, MLIR_GetOpResult(op, 0), idx);
+        return true;
+    }
+
+    // ---- llvm.fpext / llvm.fptrunc / llvm.fneg ----------------------------
+    if (name_eq(name, "llvm.fpext") || name_eq(name, "llvm.fptrunc") ||
+        name_eq(name, "llvm.fneg")) {
+        if (MLIR_GetOpNumResults(op) != 1 ||
+            MLIR_GetOpNumOperands(op) != 1) return false;
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        MLIR_ValueHandle s = MLIR_GetOpOperand(op, 0);
+        uint8_t in_vt  = wasm_vt(F->ctx, MLIR_GetValueType(s));
+        uint8_t out_vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
+        uint8_t opc = 0;
+        if (name_eq(name, "llvm.fpext") && in_vt == WT_F32 && out_vt == WT_F64) opc = 0xbb;
+        else if (name_eq(name, "llvm.fptrunc") && in_vt == WT_F64 && out_vt == WT_F32) opc = 0xb6;
+        else if (name_eq(name, "llvm.fneg") && in_vt == WT_F32 && out_vt == WT_F32) opc = 0x8c;
+        else if (name_eq(name, "llvm.fneg") && in_vt == WT_F64 && out_vt == WT_F64) opc = 0x9a;
+        else return false;
+        int sa;
+        if (!vmap_get(F, s, &sa)) return false;
+        wasmssa_op_t *o; int idx = add_op(F, &o);
+        o->type = OP_TYPE_WASMSSA_UNOP;
+        o->valtype = out_vt;
+        o->wasm_opcode = opc;
+        o->n_operands = 1;
+        o->operands = (int *)malloc(sizeof(int));
+        o->operands[0] = sa;
+        o->has_result = true;
+        vmap_set(F, r, idx);
+        return true;
+    }
+
+    // ---- llvm.sitofp / llvm.uitofp / llvm.fptosi / llvm.fptoui ------------
+    if (name_eq(name, "llvm.sitofp") || name_eq(name, "llvm.uitofp") ||
+        name_eq(name, "llvm.fptosi") || name_eq(name, "llvm.fptoui")) {
+        if (MLIR_GetOpNumResults(op) != 1 ||
+            MLIR_GetOpNumOperands(op) != 1) return false;
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        MLIR_ValueHandle s = MLIR_GetOpOperand(op, 0);
+        uint8_t in_vt  = wasm_vt(F->ctx, MLIR_GetValueType(s));
+        uint8_t out_vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
+        bool is_signed = name_eq(name, "llvm.sitofp") || name_eq(name, "llvm.fptosi");
+        uint8_t opc = 0;
+        if (name_eq(name, "llvm.sitofp") || name_eq(name, "llvm.uitofp")) {
+            // f{32,64}.convert_i{32,64}_{s,u}
+            if (out_vt == WT_F32 && in_vt == WT_I32) opc = is_signed ? 0xb2 : 0xb3;
+            else if (out_vt == WT_F32 && in_vt == WT_I64) opc = is_signed ? 0xb4 : 0xb5;
+            else if (out_vt == WT_F64 && in_vt == WT_I32) opc = is_signed ? 0xb7 : 0xb8;
+            else if (out_vt == WT_F64 && in_vt == WT_I64) opc = is_signed ? 0xb9 : 0xba;
+        } else {
+            // i{32,64}.trunc_f{32,64}_{s,u}
+            if (out_vt == WT_I32 && in_vt == WT_F32) opc = is_signed ? 0xa8 : 0xa9;
+            else if (out_vt == WT_I32 && in_vt == WT_F64) opc = is_signed ? 0xaa : 0xab;
+            else if (out_vt == WT_I64 && in_vt == WT_F32) opc = is_signed ? 0xae : 0xaf;
+            else if (out_vt == WT_I64 && in_vt == WT_F64) opc = is_signed ? 0xb0 : 0xb1;
+        }
+        if (opc == 0) return false;
+        int sa;
+        if (!vmap_get(F, s, &sa)) return false;
+        wasmssa_op_t *o; int idx = add_op(F, &o);
+        o->type = OP_TYPE_WASMSSA_UNOP;
+        o->valtype = out_vt;
+        o->wasm_opcode = opc;
+        o->n_operands = 1;
+        o->operands = (int *)malloc(sizeof(int));
+        o->operands[0] = sa;
+        o->has_result = true;
+        vmap_set(F, r, idx);
+        return true;
     }
 
     // ---- llvm.icmp ---------------------------------------------------------
@@ -801,6 +1171,120 @@ static bool lower_op(FnCtx *F, MLIR_OpHandle op) {
         return true;
     }
 
+    // ---- llvm.getelementptr -----------------------------------------------
+    if (name_eq(name, "llvm.getelementptr")) {
+        if (MLIR_GetOpNumResults(op) != 1) return false;
+        if (MLIR_GetOpNumOperands(op) < 1) return false;
+        MLIR_ValueHandle r    = MLIR_GetOpResult(op, 0);
+        MLIR_ValueHandle base = MLIR_GetOpOperand(op, 0);
+        int addr;
+        if (!vmap_get(F, base, &addr)) return false;
+        MLIR_AttributeHandle eta = find_attr(op, "elem_type");
+        if (eta == MLIR_INVALID_HANDLE) return false;
+        MLIR_TypeHandle elem_ty = MLIR_GetAttributeTypeValue(eta);
+        MLIR_AttributeHandle ria = find_attr(op, "rawConstantIndices");
+        if (ria == MLIR_INVALID_HANDLE) return false;
+        size_t n_idx = 0;
+        int32_t *cidx = parse_dense_i32_array(
+            MLIR_GetAttributeAsString(F->ctx, ria), &n_idx);
+        if (!cidx || n_idx == 0) { free(cidx); return false; }
+
+        size_t op_idx = 1;
+        MLIR_TypeHandle cur_ty = elem_ty;
+        for (size_t i = 0; i < n_idx; i++) {
+            bool is_dyn = (cidx[i] == (int32_t)0x80000000);
+            int dyn_def = -1;
+            if (is_dyn) {
+                if (op_idx >= MLIR_GetOpNumOperands(op)) { free(cidx); return false; }
+                MLIR_ValueHandle ov = MLIR_GetOpOperand(op, op_idx++);
+                if (!vmap_get(F, ov, &dyn_def)) { free(cidx); return false; }
+                uint8_t ovt = wasm_vt(F->ctx, MLIR_GetValueType(ov));
+                if (ovt == WT_I64) dyn_def = emit_wrap_i64_to_i32(F, dyn_def);
+                else if (ovt != WT_I32) { free(cidx); return false; }
+            }
+
+            if (i == 0) {
+                unsigned esz = type_size_bytes(F->ctx, elem_ty);
+                if (esz == 0) { free(cidx); return false; }
+                if (is_dyn) {
+                    int k = emit_const_i32(F, (int32_t)esz);
+                    int m = emit_mul_i32(F, dyn_def, k);
+                    addr = emit_add_i32(F, addr, m);
+                } else if (cidx[i] != 0) {
+                    int k = emit_const_i32(F, (int32_t)((int64_t)cidx[i] * (int32_t)esz));
+                    addr = emit_add_i32(F, addr, k);
+                }
+            } else if (MLIR_IsTypeLLVMStruct(cur_ty)) {
+                if (is_dyn) { free(cidx); return false; }
+                unsigned off = struct_field_offset(F->ctx, cur_ty, (size_t)cidx[i]);
+                if (off != 0) {
+                    int k = emit_const_i32(F, (int32_t)off);
+                    addr = emit_add_i32(F, addr, k);
+                }
+                cur_ty = MLIR_GetTypeLLVMStructField(cur_ty, (size_t)cidx[i]);
+            } else if (MLIR_IsTypeLLVMArray(cur_ty)) {
+                MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(cur_ty);
+                unsigned esz = type_size_bytes(F->ctx, et);
+                if (esz == 0) { free(cidx); return false; }
+                if (is_dyn) {
+                    int k = emit_const_i32(F, (int32_t)esz);
+                    int m = emit_mul_i32(F, dyn_def, k);
+                    addr = emit_add_i32(F, addr, m);
+                } else if (cidx[i] != 0) {
+                    int k = emit_const_i32(F, (int32_t)((int64_t)cidx[i] * (int32_t)esz));
+                    addr = emit_add_i32(F, addr, k);
+                }
+                cur_ty = et;
+            } else {
+                free(cidx);
+                return false;
+            }
+        }
+        free(cidx);
+        vmap_set(F, r, addr);
+        return true;
+    }
+
+    // ---- llvm.mlir.zero ---------------------------------------------------
+    // Pointer / integer zero. f32/f64 zero would also fall through here but
+    // currently only ptr/int paths are exercised (the float test uses a
+    // typed llvm.mlir.constant for 0.0).
+    if (name_eq(name, "llvm.mlir.zero")) {
+        if (MLIR_GetOpNumResults(op) != 1) return false;
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
+        if (vt == 0) return false;
+        wasmssa_op_t *o; int idx = add_op(F, &o);
+        o->type = OP_TYPE_WASMSSA_CONST;
+        o->valtype = vt;
+        o->i_const = 0;
+        o->has_result = true;
+        vmap_set(F, r, idx);
+        return true;
+    }
+
+    // ---- llvm.intr.sqrt ---------------------------------------------------
+    if (name_eq(name, "llvm.intr.sqrt")) {
+        if (MLIR_GetOpNumResults(op) != 1 ||
+            MLIR_GetOpNumOperands(op) != 1) return false;
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
+        uint8_t opc = (vt == WT_F32) ? 0x91 : (vt == WT_F64) ? 0x9f : 0;
+        if (opc == 0) return false;
+        int sa;
+        if (!vmap_get(F, MLIR_GetOpOperand(op, 0), &sa)) return false;
+        wasmssa_op_t *o; int idx = add_op(F, &o);
+        o->type = OP_TYPE_WASMSSA_UNOP;
+        o->valtype = vt;
+        o->wasm_opcode = opc;
+        o->n_operands = 1;
+        o->operands = (int *)malloc(sizeof(int));
+        o->operands[0] = sa;
+        o->has_result = true;
+        vmap_set(F, r, idx);
+        return true;
+    }
+
     fprintf(stderr, "wasmssa-lower: unsupported op '%.*s'\n",
             (int)name.size, name.str);
     return false;
@@ -846,8 +1330,9 @@ static bool prewalk_op(FnCtx *F, MLIR_OpHandle op) {
             MLIR_AttributeHandle va = find_attr(cd, "value");
             cnt = MLIR_GetAttributeInteger(va);
         }
-        unsigned align = esz < 4 ? 4 : esz;
-        F->frame_size = (F->frame_size + align - 1) & ~(align - 1);
+        unsigned ealign = type_align_bytes(F->ctx, et);
+        if (ealign < 4) ealign = 4;
+        F->frame_size = align_up(F->frame_size, ealign);
         uint32_t off = F->frame_size;
         F->frame_size += (uint32_t)(esz * cnt);
         amap_set(F, MLIR_GetOpResult(op, 0), off);

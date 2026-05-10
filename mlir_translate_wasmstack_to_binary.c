@@ -223,6 +223,16 @@ static bool encode_op(EmFunc *F, const wasmstack_op_t *op, uint32_t sp_sym_idx,
     case OP_TYPE_WASMSTACK_CONST:
         if (op->valtype == WT_I32)      { buf_putc(b, 0x41); leb_s(b, (int32_t)op->i_const); }
         else if (op->valtype == WT_I64) { buf_putc(b, 0x42); leb_s(b, op->i_const); }
+        else if (op->valtype == WT_F32) {
+            buf_putc(b, 0x43);
+            uint32_t bits = (uint32_t)(uint64_t)op->i_const;
+            for (int i = 0; i < 4; i++) buf_putc(b, (uint8_t)(bits >> (8*i)));
+        }
+        else if (op->valtype == WT_F64) {
+            buf_putc(b, 0x44);
+            uint64_t bits = (uint64_t)op->i_const;
+            for (int i = 0; i < 8; i++) buf_putc(b, (uint8_t)(bits >> (8*i)));
+        }
         else { fprintf(stderr, "wasm-emit: const of unsupported valtype\n"); return false; }
         return true;
 

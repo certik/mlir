@@ -782,6 +782,33 @@ extern "C" MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle h) {
     return MLIR_INVALID_HANDLE;
 }
 
+extern "C" bool MLIR_IsTypeLLVMStruct(MLIR_TypeHandle h) {
+    return llvm::isa<mlir::LLVM::LLVMStructType>(typeF(h));
+}
+extern "C" size_t MLIR_GetTypeLLVMStructNumFields(MLIR_TypeHandle h) {
+    auto st = llvm::dyn_cast<mlir::LLVM::LLVMStructType>(typeF(h));
+    if (!st) return 0;
+    return st.getBody().size();
+}
+extern "C" MLIR_TypeHandle MLIR_GetTypeLLVMStructField(MLIR_TypeHandle h, size_t idx) {
+    auto st = llvm::dyn_cast<mlir::LLVM::LLVMStructType>(typeF(h));
+    if (!st || idx >= st.getBody().size()) return MLIR_INVALID_HANDLE;
+    return typeH(st.getBody()[idx]);
+}
+extern "C" bool MLIR_IsTypeLLVMArray(MLIR_TypeHandle h) {
+    return llvm::isa<mlir::LLVM::LLVMArrayType>(typeF(h));
+}
+extern "C" MLIR_TypeHandle MLIR_GetTypeLLVMArrayElement(MLIR_TypeHandle h) {
+    auto at = llvm::dyn_cast<mlir::LLVM::LLVMArrayType>(typeF(h));
+    if (!at) return MLIR_INVALID_HANDLE;
+    return typeH(at.getElementType());
+}
+extern "C" uint64_t MLIR_GetTypeLLVMArrayNumElements(MLIR_TypeHandle h) {
+    auto at = llvm::dyn_cast<mlir::LLVM::LLVMArrayType>(typeF(h));
+    if (!at) return 0;
+    return at.getNumElements();
+}
+
 extern "C" string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle h) {
     auto t = typeF(h);
     // Normalize opaque "unknown" types (dialect `?`, type `unknown`) to the
