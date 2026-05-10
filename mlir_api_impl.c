@@ -511,6 +511,18 @@ MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle oh, size_t idx) {
     return op->attributes[idx];
 }
 
+MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle oh, const char *name) {
+    IR_Op *op = resolve_op(oh);
+    if (!op) return MLIR_INVALID_HANDLE;
+    size_t nlen = strlen(name);
+    for (size_t i = 0; i < op->n_attributes; i++) {
+        string an = MLIR_GetAttributeName(op->attributes[i]);
+        if (an.size == nlen && memcmp(an.str, name, nlen) == 0)
+            return op->attributes[i];
+    }
+    return MLIR_INVALID_HANDLE;
+}
+
 size_t MLIR_GetOpNumOperands(MLIR_OpHandle oh) {
     IR_Op *op = resolve_op(oh);
     return op ? op->n_operands : 0;

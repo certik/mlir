@@ -202,6 +202,7 @@ typedef struct {
 typedef struct {
     MLIR_Context   *ctx;
     wasmssa_func_t *f;
+    wasmssa_module_t *m;     // parent module (for function-name lookups)
     size_t          n_params;
 
     // Map MLIR_ValueHandle -> ssa_def_idx (index into [0, n_params + f->n_ops)).
@@ -390,6 +391,47 @@ static int32_t *parse_dense_i32_array(string s, size_t *n_out) {
     }
     *n_out = n;
     return vs ? vs : (int32_t *)malloc(sizeof(int32_t));
+}
+
+// Look up a name as a function symbol in the module under construction.
+// Returns true if the module already has a wasmssa_func_t with that name.
+// Used to disambiguate addressof @sym between data globals and functions.
+// Note: pass 1 (imports) and pass 2 (defs) lower funcs in source order.
+// Function bodies are lowered in pass 2 — the function being lowered
+// itself is already added; recursive self-address-taking works.
+static bool is_function_symbol(wasmssa_module_t *m, const char *nm,
+                               size_t nlen) {
+    for (size_t i = 0; i < m->n_funcs; i++) {
+        if (m->funcs[i].name &&
+            strlen(m->funcs[i].name) == nlen &&
+            memcmp(m->funcs[i].name, nm, nlen) == 0) return true;
+    }
+    return false;
+}
+
+// Convenience: encode a fixed-arity function signature into freshly-allocated
+// param_types / result_types arrays. Returns false if any operand/result type
+// is not a wasm value type.
+static bool extract_func_sig(MLIR_Context *ctx, MLIR_TypeHandle fty,
+                             uint8_t **out_p, size_t *out_np,
+                             uint8_t **out_r, size_t *out_nr) {
+    size_t ni = MLIR_GetTypeFunctionNumInputs(fty);
+    size_t no = MLIR_GetTypeFunctionNumResults(fty);
+    uint8_t *p = (uint8_t *)malloc(ni ? ni : 1);
+    for (size_t i = 0; i < ni; i++) {
+        uint8_t v = wasm_vt(ctx, MLIR_GetTypeFunctionInput(fty, i));
+        if (v == 0) { free(p); return false; }
+        p[i] = v;
+    }
+    uint8_t *r = (uint8_t *)malloc(no ? no : 1);
+    for (size_t i = 0; i < no; i++) {
+        uint8_t v = wasm_vt(ctx, MLIR_GetTypeFunctionResult(fty, i));
+        if (v == 0) { free(p); free(r); return false; }
+        r[i] = v;
+    }
+    *out_p = p; *out_np = ni;
+    *out_r = r; *out_nr = no;
+    return true;
 }
 
 // =============================================================================
@@ -1127,11 +1169,65 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         return true;
     }
 
-    // ---- llvm.call (direct, fixed-arity) -----------------------------------
+    // ---- llvm.call (direct or indirect) ------------------------------------
     if (name_eq(name, "llvm.call")) {
-        MLIR_AttributeHandle callee = find_attr(op, "callee");
-        if (callee == MLIR_INVALID_HANDLE) return false;
-        MLIR_AttributeHandle var_callee_type = find_attr(op, "var_callee_type");
+        MLIR_AttributeHandle callee = MLIR_GetOpAttributeByName(op, "callee");
+        MLIR_AttributeHandle var_callee_type = MLIR_GetOpAttributeByName(op, "var_callee_type");
+
+        // Indirect: no callee attr, operand[0] is the function pointer
+        // (a !llvm.ptr SSA value), and var_callee_type carries the signature.
+        if (callee == MLIR_INVALID_HANDLE) {
+            // Indirect call: operand[0] is function pointer (!llvm.ptr).
+            // Build the signature from operand types and result types,
+            // since the upstream wasm pipeline doesn't carry var_callee_type
+            // through after lowering.
+            size_t no = MLIR_GetOpNumOperands(op);
+            if (no < 1) return false;
+            size_t snp = no - 1;
+            uint8_t *sp = (uint8_t *)malloc(snp ? snp : 1);
+            for (size_t i = 0; i < snp; i++) {
+                uint8_t v = wasm_vt(F->ctx,
+                    MLIR_GetValueType(MLIR_GetOpOperand(op, i + 1)));
+                if (v == 0) { free(sp); return false; }
+                sp[i] = v;
+            }
+            size_t nr = MLIR_GetOpNumResults(op);
+            if (nr > 1) { free(sp); return false; }
+            uint8_t *sr = (uint8_t *)malloc(1);
+            size_t snr = 0;
+            if (nr == 1) {
+                uint8_t v = wasm_vt(F->ctx,
+                    MLIR_GetValueType(MLIR_GetOpResult(op, 0)));
+                if (v == 0) { free(sp); free(sr); return false; }
+                sr[0] = v;
+                snr = 1;
+            }
+            int *opnds = (int *)malloc(no * sizeof(int));
+            // wasm call_indirect pops args first then table-index, so order
+            // them in operand[] as [args..., funcptr].
+            for (size_t i = 0; i < snp; i++) {
+                if (!vmap_get(F, MLIR_GetOpOperand(op, i + 1), &opnds[i])) {
+                    free(opnds); free(sp); free(sr); return false;
+                }
+            }
+            if (!vmap_get(F, MLIR_GetOpOperand(op, 0), &opnds[snp])) {
+                free(opnds); free(sp); free(sr); return false;
+            }
+            wasmssa_op_t *o; int idx = add_op(F, &o);
+            o->type = OP_TYPE_WASMSSA_CALL_INDIRECT;
+            o->n_operands = (int)no;
+            o->operands = opnds;
+            o->sig_params = sp; o->n_sig_params = snp;
+            o->sig_results = sr; o->n_sig_results = snr;
+            if (snr == 1) {
+                MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+                o->valtype = sr[0];
+                o->has_result = true;
+                vmap_set(F, r, idx);
+            }
+            return true;
+        }
+
         if (var_callee_type != MLIR_INVALID_HANDLE) {
             MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(var_callee_type);
             if (MLIR_GetTypeFunctionIsVarArg(fty)) return false;
@@ -1272,6 +1368,19 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
             ts.size--;
         }
 
+        // If this name refers to a function (not a data global), emit a
+        // FUNC_ADDR (lowered as i32.const + R_WASM_TABLE_INDEX_SLEB) so the
+        // wasm linker places it in __indirect_function_table.
+        if (is_function_symbol(F->m, ts.str, ts.size)) {
+            wasmssa_op_t *o; int idx = add_op(F, &o);
+            o->type = OP_TYPE_WASMSSA_FUNC_ADDR;
+            o->valtype = WT_I32;
+            o->call_target = xstrdup_str(ts);
+            o->has_result = true;
+            vmap_set(F, MLIR_GetOpResult(op, 0), idx);
+            return true;
+        }
+
         wasmssa_op_t *o; int idx = add_op(F, &o);
         o->type = OP_TYPE_WASMSSA_ADDRESSOF;
         o->valtype = WT_I32;
@@ -1407,13 +1516,15 @@ static bool lower_block(FnCtx *F, MLIR_BlockHandle blk) {
     return true;
 }
 
-static bool lower_function(MLIR_Context *ctx, wasmssa_func_t *df,
+static bool lower_function(MLIR_Context *ctx, wasmssa_module_t *out,
+                           wasmssa_func_t *df,
                            MLIR_OpHandle fn,
                            const uint8_t *param_types, size_t n_params) {
     FnCtx F;
     memset(&F, 0, sizeof F);
     F.ctx = ctx;
     F.f = df;
+    F.m = out;
     F.n_params = n_params;
     F.sp_def = -1;
 
@@ -1671,7 +1782,7 @@ wasmssa_module_t *mlir_lower_llvm_to_wasmssa(MLIR_Context *ctx,
         df->n_params = np; df->param_types = p;
         df->n_results = nr; df->result_types = r;
 
-        if (!lower_function(ctx, df, op, p, np)) {
+        if (!lower_function(ctx, out, df, op, p, np)) {
             wasmssa_module_free(out); return NULL;
         }
     }

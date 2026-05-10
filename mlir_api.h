@@ -240,6 +240,11 @@ typedef enum {
     OP_TYPE_WASMSSA_CARRIER_SET,
     OP_TYPE_WASMSSA_CARRIER_GET,
     OP_TYPE_WASMSSA_ADDRESSOF,
+    // Function-pointer support: FUNC_ADDR pushes the table-index of a
+    // named function (lowered via R_WASM_TABLE_INDEX_SLEB); CALL_INDIRECT
+    // pops args + table-index and dispatches via wasm `call_indirect`.
+    OP_TYPE_WASMSSA_FUNC_ADDR,
+    OP_TYPE_WASMSSA_CALL_INDIRECT,
 
     // -------------------------------------------------------------------------
     // wasmstack dialect — low-level stack-machine WebAssembly ops. 1:1
@@ -275,6 +280,8 @@ typedef enum {
     OP_TYPE_WASMSTACK_SELECT,
     OP_TYPE_WASMSTACK_EQZ,
     OP_TYPE_WASMSTACK_ADDRESSOF,
+    OP_TYPE_WASMSTACK_FUNC_ADDR,
+    OP_TYPE_WASMSTACK_CALL_INDIRECT,
 
     OP_TYPE_COUNT
 } MLIR_OpType;
@@ -415,6 +422,10 @@ size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle op);
 MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle op, size_t idx);
 size_t MLIR_GetOpNumAttributes(MLIR_OpHandle op);
 MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle op, size_t idx);
+// Like MLIR_GetOpAttribute, but looks up by name including inherent
+// attributes that are stored in the op's Properties (e.g. LLVM::CallOp
+// `callee` and `var_callee_type`). Returns MLIR_INVALID_HANDLE on miss.
+MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle op, const char *name);
 size_t MLIR_GetOpNumRegions(MLIR_OpHandle op);
 MLIR_RegionHandle MLIR_GetOpRegion(MLIR_OpHandle op, size_t idx);
 size_t MLIR_GetOpNumSuccessors(MLIR_OpHandle op);

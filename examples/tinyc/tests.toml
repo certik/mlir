@@ -158,14 +158,17 @@ expected_stdout = "100\n200\n200\n301\n0\n999\n22\n"
 
 [[test]]
 name = "fnptr_basic"
+wasm_native_run = true
 expected_stdout = "7\n7\n"
 
 [[test]]
 name = "fnptr_arg"
+wasm_native_run = true
 expected_stdout = "12\n42\n"
 
 [[test]]
 name = "fnptr_typedef"
+wasm_native_run = true
 expected_stdout = "42\n42\n"
 
 [[test]]
@@ -271,6 +274,7 @@ expected_stdout = "41\n42\n"
 
 [[test]]
 name = "ptr_to_fnptr"
+wasm_native_run = true
 expected_stdout = "5\n7\n"
 
 [[test]]
@@ -337,10 +341,12 @@ wasm_skip = true
 
 [[test]]
 name = "fnptr_struct_return"
+wasm_native_run = true
 expected_stdout = "7\n70\n77\n"
 
 [[test]]
 name = "fnptr_i64_return"
+wasm_native_run = true
 expected_stdout = "700\n2000\n"
 
 [[test]]

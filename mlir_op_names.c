@@ -147,6 +147,9 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_WASMSSA_EQZ:         return str_lit("wasmssa.eqz");
         case OP_TYPE_WASMSSA_CARRIER_SET: return str_lit("wasmssa.carrier_set");
         case OP_TYPE_WASMSSA_CARRIER_GET: return str_lit("wasmssa.carrier_get");
+        case OP_TYPE_WASMSSA_ADDRESSOF:   return str_lit("wasmssa.addressof");
+        case OP_TYPE_WASMSSA_FUNC_ADDR:   return str_lit("wasmssa.func_addr");
+        case OP_TYPE_WASMSSA_CALL_INDIRECT: return str_lit("wasmssa.call_indirect");
         // wasmstack dialect
         case OP_TYPE_WASMSTACK_FUNC: return str_lit("wasmstack.func");
         case OP_TYPE_WASMSTACK_IMPORT_FUNC: return str_lit("wasmstack.import_func");
@@ -175,6 +178,9 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_WASMSTACK_BR_IF:  return str_lit("wasmstack.br_if");
         case OP_TYPE_WASMSTACK_SELECT: return str_lit("wasmstack.select");
         case OP_TYPE_WASMSTACK_EQZ:    return str_lit("wasmstack.eqz");
+        case OP_TYPE_WASMSTACK_ADDRESSOF: return str_lit("wasmstack.addressof");
+        case OP_TYPE_WASMSTACK_FUNC_ADDR: return str_lit("wasmstack.func_addr");
+        case OP_TYPE_WASMSTACK_CALL_INDIRECT: return str_lit("wasmstack.call_indirect");
         default: return str_lit("unknown");
     }
 }

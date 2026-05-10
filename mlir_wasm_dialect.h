@@ -92,6 +92,12 @@ typedef struct {
     uint32_t br_depth;            // BR / BR_IF: relative target depth
     uint32_t carrier_id;          // CARRIER_SET / CARRIER_GET
 
+    // CALL_INDIRECT: callee function signature (for type-section interning).
+    // operands[0] is the function-pointer (table index); operands[1..] args.
+    uint8_t *sig_params;
+    uint8_t *sig_results;
+    size_t   n_sig_params, n_sig_results;
+
     // Operands as ssa_def indices into the parent function's `ops`.
     int   *operands;              // length n_operands; -1 means "unbound"
     int    n_operands;
@@ -148,6 +154,11 @@ typedef struct {
     char    *call_target;         // CALL
     uint8_t  wasm_opcode;         // BINOP / UNOP
     uint32_t br_depth;            // BR / BR_IF
+
+    // CALL_INDIRECT: callee function signature.
+    uint8_t *sig_params;
+    uint8_t *sig_results;
+    size_t   n_sig_params, n_sig_results;
 } wasmstack_op_t;
 
 typedef struct {

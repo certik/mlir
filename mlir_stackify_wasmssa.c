@@ -69,6 +69,8 @@ static MLIR_OpType ssa_to_stack(MLIR_OpType t) {
     case OP_TYPE_WASMSSA_SELECT:      return OP_TYPE_WASMSTACK_SELECT;
     case OP_TYPE_WASMSSA_EQZ:         return OP_TYPE_WASMSTACK_EQZ;
     case OP_TYPE_WASMSSA_ADDRESSOF:   return OP_TYPE_WASMSTACK_ADDRESSOF;
+    case OP_TYPE_WASMSSA_FUNC_ADDR:   return OP_TYPE_WASMSTACK_FUNC_ADDR;
+    case OP_TYPE_WASMSSA_CALL_INDIRECT: return OP_TYPE_WASMSTACK_CALL_INDIRECT;
     default: return (MLIR_OpType)0;
     }
 }
@@ -178,6 +180,16 @@ static bool stackify_func(const wasmssa_func_t *src, wasmstack_func_t *dst) {
         out->wasm_opcode       = op->wasm_opcode;
         out->br_depth          = op->br_depth;
         if (op->call_target) out->call_target = strdup(op->call_target);
+        if (op->n_sig_params) {
+            out->n_sig_params = op->n_sig_params;
+            out->sig_params = (uint8_t *)malloc(op->n_sig_params);
+            memcpy(out->sig_params, op->sig_params, op->n_sig_params);
+        }
+        if (op->n_sig_results) {
+            out->n_sig_results = op->n_sig_results;
+            out->sig_results = (uint8_t *)malloc(op->n_sig_results);
+            memcpy(out->sig_results, op->sig_results, op->n_sig_results);
+        }
 
         // Stash the result into a fresh local.
         if (op->has_result) {

@@ -468,6 +468,34 @@ extern "C" MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle h, size_t i) {
     auto *op = F<mlir::Operation>(h);
     return reinterpret_cast<uintptr_t>(&ensureCachedAttrs(op)[i]);
 }
+extern "C" MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle h,
+                                                          const char *name) {
+    auto *op = F<mlir::Operation>(h);
+    static thread_local std::vector<std::unique_ptr<mlir::NamedAttribute>> keep;
+    auto stash = [&](mlir::Attribute a) -> MLIR_AttributeHandle {
+        keep.emplace_back(std::make_unique<mlir::NamedAttribute>(
+            mlir::StringAttr::get(op->getContext(), name), a));
+        return reinterpret_cast<uintptr_t>(keep.back().get());
+    };
+    if (auto call = mlir::dyn_cast<mlir::LLVM::CallOp>(op)) {
+        llvm::StringRef nm(name);
+        if (nm == "callee") {
+            if (auto c = call.getCalleeAttr()) return stash(c);
+            return MLIR_INVALID_HANDLE;
+        }
+        if (nm == "var_callee_type") {
+            if (auto t = call.getVarCalleeTypeAttr()) return stash(t);
+            return MLIR_INVALID_HANDLE;
+        }
+    }
+    if (auto a = op->getAttr(name)) return stash(a);
+    auto dict = op->getAttrDictionary();
+    if (auto na = dict.getNamed(name)) {
+        keep.emplace_back(std::make_unique<mlir::NamedAttribute>(*na));
+        return reinterpret_cast<uintptr_t>(keep.back().get());
+    }
+    return MLIR_INVALID_HANDLE;
+}
 extern "C" size_t MLIR_GetOpNumRegions(MLIR_OpHandle h) {
     return F<mlir::Operation>(h)->getNumRegions();
 }

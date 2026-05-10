@@ -11,6 +11,7 @@
 // mlir_wasm_dialect.h / mlir_wasm_dialect.c.
 
 #include <stddef.h>
+#include <stdio.h>
 
 #include <base/string.h>
 

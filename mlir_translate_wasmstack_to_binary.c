@@ -88,11 +88,13 @@ enum {
     SEC_TYPE     = 1,
     SEC_IMPORT   = 2,
     SEC_FUNCTION = 3,
+    SEC_ELEMENT  = 9,
     SEC_CODE     = 10,
     SEC_DATA     = 11,
     SEC_DATACOUNT = 12,
 
     IMP_FUNC   = 0,
+    IMP_TABLE  = 1,
     IMP_MEMORY = 2,
     IMP_GLOBAL = 3,
 
@@ -103,17 +105,20 @@ enum {
     SYM_FUNCTION = 0,
     SYM_DATA     = 1,
     SYM_GLOBAL   = 2,
+    SYM_TABLE    = 5,
 
     SYMF_BINDING_LOCAL = 0x02,
     SYMF_VISIBILITY_HIDDEN = 0x04,
     SYMF_UNDEFINED = 0x10,
     SYMF_EXPLICIT_NAME = 0x40,
+    SYMF_NO_STRIP  = 0x80,
 
     R_WASM_FUNCTION_INDEX_LEB = 0,
     R_WASM_TABLE_INDEX_SLEB   = 1,
     R_WASM_MEMORY_ADDR_LEB    = 3,
     R_WASM_MEMORY_ADDR_SLEB   = 4,
     R_WASM_MEMORY_ADDR_I32    = 5,
+    R_WASM_TYPE_INDEX_LEB     = 6,
     R_WASM_GLOBAL_INDEX_LEB   = 7,
 };
 
@@ -229,7 +234,7 @@ static int find_global_by_name(const wasm_global_t *gs, size_t n,
 static bool encode_op(EmFunc *F, const wasmstack_op_t *op, uint32_t sp_sym_idx,
                       EmFunc *all_funcs, size_t all_funcs_n,
                       const wasm_global_t *globals, size_t n_globals,
-                      uint32_t global_sym_base) {
+                      uint32_t global_sym_base, SigTab *sigs) {
     Buf *b = &F->body;
     switch (op->type) {
     case OP_TYPE_WASMSTACK_LOCAL_GET:
@@ -389,6 +394,33 @@ static bool encode_op(EmFunc *F, const wasmstack_op_t *op, uint32_t sp_sym_idx,
         return true;
     }
 
+    case OP_TYPE_WASMSTACK_FUNC_ADDR: {
+        int idx = find_func_by_name(all_funcs, all_funcs_n, op->call_target);
+        if (idx < 0) {
+            fprintf(stderr, "wasm-emit: func_addr unknown function '%s'\n",
+                    op->call_target);
+            return false;
+        }
+        buf_putc(b, 0x41);  // i32.const
+        uint32_t off = (uint32_t)b->len;
+        leb_s_pad5(b, 0);
+        emfunc_add_reloc(F, R_WASM_TABLE_INDEX_SLEB, off,
+                         all_funcs[idx].sym_index);
+        return true;
+    }
+
+    case OP_TYPE_WASMSTACK_CALL_INDIRECT: {
+        // Intern the callee signature so the TYPE section has it.
+        uint32_t tidx = sig_intern(sigs, op->sig_params, op->n_sig_params,
+                                         op->sig_results, op->n_sig_results);
+        buf_putc(b, 0x11);  // call_indirect
+        uint32_t off = (uint32_t)b->len;
+        leb_u_pad5(b, tidx);
+        emfunc_add_reloc(F, R_WASM_TYPE_INDEX_LEB, off, tidx);
+        buf_putc(b, 0x00);  // table 0
+        return true;
+    }
+
     default:
         fprintf(stderr, "wasm-emit: unsupported wasmstack op (enum=%d)\n",
                 (int)op->type);
@@ -403,14 +435,14 @@ static bool build_body(EmFunc *F, const wasmstack_func_t *src,
                        uint32_t sp_sym_idx,
                        EmFunc *all_funcs, size_t all_funcs_n,
                        const wasm_global_t *globals, size_t n_globals,
-                       uint32_t global_sym_base) {
+                       uint32_t global_sym_base, SigTab *sigs) {
     // Build instruction stream.
     Buf insns = {0};
     Buf saved = F->body;
     F->body = insns;
     for (size_t i = 0; i < src->n_ops; i++) {
         if (!encode_op(F, &src->ops[i], sp_sym_idx, all_funcs, all_funcs_n,
-                       globals, n_globals, global_sym_base)) {
+                       globals, n_globals, global_sym_base, sigs)) {
             buf_free(&F->body);
             F->body = saved;
             return false;
@@ -477,12 +509,15 @@ static void emit_string(Buf *out, const char *s) {
 static void build_linking_section(EmFunc *funcs, size_t n_funcs,
                                   uint32_t sp_global_idx,
                                   const wasm_global_t *globals, size_t n_globals,
+                                  bool include_indirect_table,
+                                  uint32_t indirect_table_idx,
                                   Buf *out) {
     Buf body = {0};
     leb_u(&body, LINK_VERSION);
 
     Buf sub = {0};
-    leb_u(&sub, 1u + (uint32_t)n_funcs + (uint32_t)n_globals);
+    leb_u(&sub, 1u + (uint32_t)n_funcs + (uint32_t)n_globals
+                + (include_indirect_table ? 1u : 0u));
 
     // Sym 0: __stack_pointer (imported global).
     buf_putc(&sub, SYM_GLOBAL);
@@ -509,6 +544,13 @@ static void build_linking_section(EmFunc *funcs, size_t n_funcs,
         leb_u(&sub, (uint32_t)i);   // segment_index
         leb_u(&sub, 0);             // offset within segment
         leb_u(&sub, globals[i].size);
+    }
+
+    if (include_indirect_table) {
+        buf_putc(&sub, SYM_TABLE);
+        leb_u(&sub, SYMF_NO_STRIP | SYMF_UNDEFINED);
+        leb_u(&sub, indirect_table_idx);
+        // No name: UNDEFINED && !EXPLICIT_NAME → name comes from import.
     }
 
     buf_putc(&body, LINK_SUB_SYMBOL_TABLE);
@@ -643,6 +685,38 @@ string mlir_translate_wasmstack_to_binary(MLIR_Context *ctx,
     for (size_t i = 0; i < n_funcs; i++) funcs[i].sym_index = (uint32_t)(i + 1);
     uint32_t global_sym_base = 1u + (uint32_t)n_funcs;
 
+    // ---- Collect address-taken functions and detect indirect calls --------
+    // Walk all (defined) function bodies looking for FUNC_ADDR ops (gives the
+    // set of address-taken function names) and CALL_INDIRECT ops (signals
+    // that we need the indirect_function_table import even if no FUNC_ADDR is
+    // local to this object).
+    bool need_indirect_table = false;
+    uint32_t *addr_taken = NULL;        // function-index list
+    size_t n_addr_taken = 0;
+    {
+        for (size_t i = 0; i < m->n_funcs; i++) {
+            const wasmstack_func_t *sf = &m->funcs[i];
+            for (size_t j = 0; j < sf->n_ops; j++) {
+                const wasmstack_op_t *op = &sf->ops[j];
+                if (op->type == OP_TYPE_WASMSTACK_CALL_INDIRECT) {
+                    need_indirect_table = true;
+                } else if (op->type == OP_TYPE_WASMSTACK_FUNC_ADDR) {
+                    need_indirect_table = true;
+                    int idx = find_func_by_name(funcs, n_funcs, op->call_target);
+                    if (idx < 0) continue;
+                    bool dup = false;
+                    for (size_t k = 0; k < n_addr_taken; k++)
+                        if (addr_taken[k] == funcs[idx].func_index) { dup = true; break; }
+                    if (!dup) {
+                        addr_taken = (uint32_t *)realloc(
+                            addr_taken, (n_addr_taken + 1) * sizeof(uint32_t));
+                        addr_taken[n_addr_taken++] = funcs[idx].func_index;
+                    }
+                }
+            }
+        }
+    }
+
     // ---- Emit each defined function's body ---------------------------------
     // We have to walk the source funcs in their original order to find each
     // EmFunc's body source.
@@ -654,7 +728,7 @@ string mlir_translate_wasmstack_to_binary(MLIR_Context *ctx,
             if (pass == 1 && imp) continue;
             if (pass == 1) {
                 if (!build_body(&funcs[ei], &m->funcs[i], sp_sym, funcs, n_funcs,
-                                m->globals, m->n_globals, global_sym_base)) {
+                                m->globals, m->n_globals, global_sym_base, &sigs)) {
                     goto fail_after_funcs;
                 }
             }
@@ -677,7 +751,7 @@ string mlir_translate_wasmstack_to_binary(MLIR_Context *ctx,
     {
         uint32_t n_func_imports = 0;
         for (size_t i = 0; i < n_funcs; i++) if (funcs[i].imported) n_func_imports++;
-        uint32_t n_imports_total = 2 + n_func_imports;  // memory + sp + func imports
+        uint32_t n_imports_total = 2 + n_func_imports + (need_indirect_table ? 1u : 0u);
         leb_u(&import_payload, n_imports_total);
 
         // env.__linear_memory : memory 0
@@ -700,6 +774,16 @@ string mlir_translate_wasmstack_to_binary(MLIR_Context *ctx,
             emit_string(&import_payload, funcs[i].name);
             buf_putc(&import_payload, IMP_FUNC);
             leb_u(&import_payload, funcs[i].sig);
+        }
+
+        if (need_indirect_table) {
+            // env.__indirect_function_table : table funcref min=1
+            emit_string(&import_payload, "env");
+            emit_string(&import_payload, "__indirect_function_table");
+            buf_putc(&import_payload, IMP_TABLE);
+            buf_putc(&import_payload, 0x70);  // funcref
+            buf_putc(&import_payload, 0x00);  // limits: min only
+            leb_u(&import_payload, 1);        // min=1 (slot 0 reserved)
         }
     }
 
@@ -736,9 +820,26 @@ string mlir_translate_wasmstack_to_binary(MLIR_Context *ctx,
     emit_section(&img, SEC_TYPE,     &type_payload);
     emit_section(&img, SEC_IMPORT,   &import_payload);
     emit_section(&img, SEC_FUNCTION, &function_payload);
-    uint8_t code_section_index = 3;  // type=0,import=1,function=2,code=3
+
+    // ---- ELEM section ------------------------------------------------------
+    // One active segment in the imported __indirect_function_table at
+    // initial offset i32.const 1 (slot 0 reserved for null-fnptr).
+    Buf elem_payload = {0};
+    if (n_addr_taken) {
+        leb_u(&elem_payload, 1);            // 1 segment
+        leb_u(&elem_payload, 0);            // flag=0 (active, table 0, funcref impl.)
+        buf_putc(&elem_payload, 0x41);      // i32.const
+        leb_s(&elem_payload, 1);            //   1
+        buf_putc(&elem_payload, 0x0b);      // end
+        leb_u(&elem_payload, (uint32_t)n_addr_taken);
+        for (size_t i = 0; i < n_addr_taken; i++)
+            leb_u(&elem_payload, addr_taken[i]);
+        emit_section(&img, SEC_ELEMENT, &elem_payload);
+    }
+
+    uint8_t code_section_index = (uint8_t)(n_addr_taken ? 4 : 3);
     emit_section(&img, SEC_CODE,     &code_payload);
-    uint8_t data_section_index = 4;
+    uint8_t data_section_index = (uint8_t)(code_section_index + 1);
 
     // ---- DATA section + reloc.DATA -----------------------------------------
     // One active segment per global (memory 0, offset i32.const 0). Each
@@ -767,7 +868,9 @@ string mlir_translate_wasmstack_to_binary(MLIR_Context *ctx,
     }
 
     build_linking_section(funcs, n_funcs, /*sp_global_idx=*/0,
-                          m->globals, m->n_globals, &img);
+                          m->globals, m->n_globals,
+                          need_indirect_table, /*indirect_table_idx=*/0,
+                          &img);
     build_reloc_code_section(funcs, n_funcs, code_section_index, body_offsets, &img);
 
     // reloc.DATA for ptr-init globals.

@@ -33,6 +33,8 @@ static void wasmssa_func_free(wasmssa_func_t *f) {
     for (size_t i = 0; i < f->n_ops; i++) {
         free(f->ops[i].operands);
         free(f->ops[i].call_target);
+        free(f->ops[i].sig_params);
+        free(f->ops[i].sig_results);
     }
     free(f->ops);
 }
@@ -79,7 +81,11 @@ static void wasmstack_func_free(wasmstack_func_t *f) {
     free(f->param_types);
     free(f->result_types);
     free(f->local_types);
-    for (size_t i = 0; i < f->n_ops; i++) free(f->ops[i].call_target);
+    for (size_t i = 0; i < f->n_ops; i++) {
+        free(f->ops[i].call_target);
+        free(f->ops[i].sig_params);
+        free(f->ops[i].sig_results);
+    }
     free(f->ops);
 }
 
