@@ -1666,8 +1666,33 @@ void MLIR_MoveBlockToRegionEnd(MLIR_Context *ctx, MLIR_BlockHandle block,
 // implementations in mlir_lower_to_llvm.c / mlir_translate_to_llvm_ir.c
 // which only use the public mlir_api.h surface and therefore work
 // against the native backend.
-extern bool   mlir_lower_to_llvm_native(MLIR_Context *, MLIR_OpHandle);
-extern string mlir_translate_to_llvm_ir_native(MLIR_Context *, MLIR_OpHandle);
+//
+// Bare-metal builds (parser, parser.exe, parser.wasm) only use the
+// MLIR parser surface and never call these entry points, so we provide
+// weak fallback definitions here. Hosted builds (tinyc_native,
+// tinyc_upstream) link mlir_lower_to_llvm.c / mlir_translate_to_llvm_ir.c
+// which override these with the real implementations. On compilers
+// without weak-symbol support (e.g. MSVC for the Windows parser build)
+// the strong stubs satisfy the link without conflict because those
+// builds don't pull in the real translation units.
+#if defined(__GNUC__) || defined(__clang__)
+#define MLIR_NATIVE_LOWERING_WEAK __attribute__((weak))
+#else
+#define MLIR_NATIVE_LOWERING_WEAK
+#endif
+
+MLIR_NATIVE_LOWERING_WEAK bool
+mlir_lower_to_llvm_native(MLIR_Context *ctx, MLIR_OpHandle module) {
+    (void)ctx; (void)module;
+    return false;
+}
+
+MLIR_NATIVE_LOWERING_WEAK string
+mlir_translate_to_llvm_ir_native(MLIR_Context *ctx, MLIR_OpHandle module) {
+    (void)ctx; (void)module;
+    string s = {0};
+    return s;
+}
 
 bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module,
                              MLIR_LoweringBackend backend) {
