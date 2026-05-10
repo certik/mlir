@@ -3,3 +3,4 @@ tests/*.bin
 tests/*.o
 tests/*.obj
 tests/*.exe
+tests/*.wasm

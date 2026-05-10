@@ -66,6 +66,13 @@
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/SmallVectorMemoryBuffer.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/TargetParser/Triple.h"
+#include "llvm/TargetParser/Host.h"
 
 extern "C" {
 #include "mlir_api.h"
@@ -1323,5 +1330,93 @@ extern "C" string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle 
     string result;
     result.str = buf;
     result.size = out.size();
+    return result;
+}
+
+// Translate a `builtin.module` op already lowered to the LLVM dialect into
+// a wasm32-wasi relocatable object file using LLVM's WebAssembly target.
+// The returned bytes are NOT a runnable wasm module — they still need to
+// be linked (typically with `wasm-ld`) against any runtime/imports the
+// program uses.
+extern "C" string MLIR_TranslateModuleToWasm(MLIR_Context *ctx,
+                                             MLIR_OpHandle module_h,
+                                             MLIR_LoweringBackend backend) {
+    auto *op = F<mlir::Operation>(module_h);
+    auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
+    if (!module) {
+        std::fprintf(stderr,
+                     "MLIR_TranslateModuleToWasm: handle is not a ModuleOp\n");
+        return mkRefString(llvm::StringRef());
+    }
+    if (backend == MLIR_LOWERING_NATIVE) {
+        std::fprintf(stderr,
+                     "MLIR_TranslateModuleToWasm: native backend is not "
+                     "implemented; use MLIR_LOWERING_UPSTREAM\n");
+        return mkRefString(llvm::StringRef());
+    }
+
+    // Translate the LLVM-dialect MLIR module to an LLVM IR module.
+    mlir::registerBuiltinDialectTranslation(globalCtx().mctx);
+    mlir::registerLLVMDialectTranslation(globalCtx().mctx);
+    llvm::LLVMContext llctx;
+    auto llmod = mlir::translateModuleToLLVMIR(module, llctx);
+    if (!llmod) {
+        std::fprintf(stderr,
+                     "MLIR_TranslateModuleToWasm: translation to LLVM IR failed\n");
+        return mkRefString(llvm::StringRef());
+    }
+
+    // Initialize the WebAssembly target. Idempotent: LLVM guards these
+    // with internal flags so repeated calls are cheap.
+    LLVMInitializeWebAssemblyTargetInfo();
+    LLVMInitializeWebAssemblyTarget();
+    LLVMInitializeWebAssemblyTargetMC();
+    LLVMInitializeWebAssemblyAsmParser();
+    LLVMInitializeWebAssemblyAsmPrinter();
+
+    const std::string triple = "wasm32-wasi";
+    llmod->setTargetTriple(triple);
+
+    std::string err;
+    const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, err);
+    if (!target) {
+        std::fprintf(stderr,
+                     "MLIR_TranslateModuleToWasm: lookupTarget failed: %s\n",
+                     err.c_str());
+        return mkRefString(llvm::StringRef());
+    }
+
+    llvm::TargetOptions opts;
+    auto rm = std::optional<llvm::Reloc::Model>();
+    auto cm = std::optional<llvm::CodeModel::Model>();
+    std::unique_ptr<llvm::TargetMachine> tm(target->createTargetMachine(
+        triple, /*CPU*/ "generic", /*Features*/ "", opts, rm, cm));
+    if (!tm) {
+        std::fprintf(stderr,
+                     "MLIR_TranslateModuleToWasm: createTargetMachine failed\n");
+        return mkRefString(llvm::StringRef());
+    }
+    llmod->setDataLayout(tm->createDataLayout());
+
+    // Emit a wasm32 relocatable object file (ELF-like wasm object) into
+    // an in-memory buffer. Final linking with wasm-ld is the caller's
+    // responsibility.
+    llvm::SmallVector<char, 0> obj_bytes;
+    llvm::raw_svector_ostream obj_os(obj_bytes);
+    llvm::legacy::PassManager pm;
+    if (tm->addPassesToEmitFile(pm, obj_os, /*DwoOut*/ nullptr,
+                                llvm::CodeGenFileType::ObjectFile)) {
+        std::fprintf(stderr,
+                     "MLIR_TranslateModuleToWasm: target cannot emit object file\n");
+        return mkRefString(llvm::StringRef());
+    }
+    pm.run(*llmod);
+
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
+    char *buf = (char *)arena_alloc(arena, obj_bytes.size());
+    std::memcpy(buf, obj_bytes.data(), obj_bytes.size());
+    string result;
+    result.str = buf;
+    result.size = obj_bytes.size();
     return result;
 }

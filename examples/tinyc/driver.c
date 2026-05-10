@@ -29,6 +29,21 @@ static int write_string_to_file(string out, const char *path) {
     return werr ? 1 : 0;
 }
 
+// Like write_string_to_file but writes the bytes verbatim with no
+// trailing newline. Used for binary outputs (e.g. wasm object files).
+static int write_bytes_to_file(string out, const char *path) {
+    size_t plen = 0; while (path[plen]) plen++;
+    platform_fd_t fd = platform_path_open(path, plen,
+        PLATFORM_RIGHTS_WRITE, PLATFORM_O_CREAT | PLATFORM_O_TRUNC);
+    if (fd < 0) return 1;
+    ciovec_t iovs[1];
+    iovs[0].buf = out.str;
+    iovs[0].buf_len = out.size;
+    uint32_t werr = write_all(fd, iovs, 1);
+    platform_fd_close(fd);
+    return werr ? 1 : 0;
+}
+
 int app_main(void) {
     size_t pargc = 0, argv_buf_size = 0;
     int rc = platform_args_sizes_get(&pargc, &argv_buf_size);
@@ -44,6 +59,7 @@ int app_main(void) {
     PrintFn print_fn = MLIR_PrintOperationUpstream;
     bool emit_llvm = false;
     bool emit_lowered = false;
+    bool emit_wasm = false;
     MLIR_LoweringBackend lowering = MLIR_LOWERING_UPSTREAM;
     char *output_file = NULL;
 
@@ -61,9 +77,10 @@ int app_main(void) {
     size_t n_defines = 0;
 
     for (int i = 1; i < argc; i++) {
-        if      (strcmp(argv[i], "--emit=mlir")    == 0) { emit_llvm = false; emit_lowered = false; }
-        else if (strcmp(argv[i], "--emit=lowered") == 0) { emit_lowered = true;  emit_llvm = false; }
-        else if (strcmp(argv[i], "--emit=llvm")    == 0) { emit_llvm = true;     emit_lowered = false; }
+        if      (strcmp(argv[i], "--emit=mlir")    == 0) { emit_llvm = false; emit_lowered = false; emit_wasm = false; }
+        else if (strcmp(argv[i], "--emit=lowered") == 0) { emit_lowered = true;  emit_llvm = false; emit_wasm = false; }
+        else if (strcmp(argv[i], "--emit=llvm")    == 0) { emit_llvm = true;     emit_lowered = false; emit_wasm = false; }
+        else if (strcmp(argv[i], "--emit=wasm")    == 0) { emit_wasm = true;     emit_llvm = false; emit_lowered = false; }
         else if (strcmp(argv[i], "--lowering=upstream") == 0) { lowering = MLIR_LOWERING_UPSTREAM; }
         else if (strcmp(argv[i], "--lowering=native")   == 0) { lowering = MLIR_LOWERING_NATIVE; }
         else if (strncmp(argv[i], "-I", 2) == 0 && argv[i][2] != '\0') {
@@ -84,7 +101,7 @@ int app_main(void) {
     }
 
     if (n_input_files == 0) {
-        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm] [--lowering=upstream|native] [-I dir ...] [-D name[=value] ...] [-o OUT] FILE.tc [FILE2.tc ...]"));
+        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm|wasm] [--lowering=upstream|native] [-I dir ...] [-D name[=value] ...] [-o OUT] FILE.tc [FILE2.tc ...]"));
         arena_destroy(boot_arena);
         return 1;
     }
@@ -120,7 +137,7 @@ int app_main(void) {
         return 1;
     }
 
-    if (emit_lowered || emit_llvm) {
+    if (emit_lowered || emit_llvm || emit_wasm) {
         if (!MLIR_LowerToLLVMDialect(&ctx, module, lowering)) {
             arena_destroy(arena);
             arena_destroy(boot_arena);
@@ -128,7 +145,14 @@ int app_main(void) {
         }
     }
     string out;
-    if (emit_llvm) {
+    if (emit_wasm) {
+        out = MLIR_TranslateModuleToWasm(&ctx, module, lowering);
+        if (out.size == 0) {
+            arena_destroy(arena);
+            arena_destroy(boot_arena);
+            return 1;
+        }
+    } else if (emit_llvm) {
         out = MLIR_TranslateModuleToLLVMIR(&ctx, module, lowering);
         if (out.size == 0) {
             arena_destroy(arena);
@@ -140,7 +164,11 @@ int app_main(void) {
     }
     int wrc = 0;
     if (output_file) {
-        wrc = write_string_to_file(out, output_file);
+        if (emit_wasm) {
+            wrc = write_bytes_to_file(out, output_file);
+        } else {
+            wrc = write_string_to_file(out, output_file);
+        }
     } else {
         println(str_lit("{}"), out);
     }

@@ -18,15 +18,27 @@ ROOT = HERE.parent.parent
 IS_WIN = sys.platform == "win32"
 TINYC = Path(os.environ.get("TINYC", str(ROOT / ("tinyc.exe" if IS_WIN else "tinyc")))).resolve()
 RUNTIME = HERE / "runtime.c"
+RUNTIME_WASM = HERE / "runtime_wasm.c"
+RUNTIME_WASM_START = HERE / "start_wasm.s"
 TESTS_TOML = HERE / "tests.toml"
 
 CC = os.environ.get("CC", "cl" if IS_WIN else "clang")
 LLC = os.environ.get("LLC", "llc")
+WASM_LD = os.environ.get("WASM_LD", "wasm-ld")
+WASMTIME = os.environ.get("WASMTIME", "wasmtime")
+WASM_CC = os.environ.get("WASM_CC", "clang")
 
 # Backend used by `tinyc --lowering=...`. Defaults to upstream; override
 # with TINYC_LOWERING=native (or any other valid value) to exercise the
 # native lowering path through the same suite.
 LOWERING = os.environ.get("TINYC_LOWERING", "upstream")
+
+# Code-generation/runtime target for the suite. "native" (default) emits
+# LLVM IR via tinyc, then llc + host CC + runtime.c. "wasm" emits a
+# wasm32 object via tinyc, then wasm-ld + runtime_wasm.c, and runs the
+# resulting .wasm via wasmtime. The wasm target requires
+# TINYC_LOWERING=upstream (the native lowering does not implement wasm).
+TARGET = os.environ.get("TINYC_TARGET", "native")
 
 
 def run(cmd, **kw):
@@ -48,6 +60,47 @@ def link_native(obj_path: Path, exe_path: Path):
     if sys.platform.startswith("linux"):
         cmd.append("-no-pie")
     return run(cmd)
+
+
+def build_wasm_runtime(out_path: Path, start_obj: Path):
+    """Compile runtime_wasm.c (and the _start asm shim) into wasm32
+    relocatable object files once per test run. Cached on disk; only
+    rebuilt if missing or older than the source."""
+    runtime_stale = (
+        not out_path.exists()
+        or out_path.stat().st_mtime < RUNTIME_WASM.stat().st_mtime
+    )
+    if runtime_stale:
+        r = run([
+            WASM_CC, "--target=wasm32-wasi",
+            "-nostdlib", "-nostdlibinc", "-fno-builtin", "-O1",
+            "-c", str(RUNTIME_WASM), "-o", str(out_path),
+        ])
+        if r.returncode != 0:
+            return r
+    start_stale = (
+        not start_obj.exists()
+        or start_obj.stat().st_mtime < RUNTIME_WASM_START.stat().st_mtime
+    )
+    if start_stale:
+        r = run([
+            WASM_CC, "--target=wasm32",
+            "-c", str(RUNTIME_WASM_START), "-o", str(start_obj),
+        ])
+        if r.returncode != 0:
+            return r
+    return None
+
+
+def link_wasm(obj_path: Path, runtime_obj: Path, start_obj: Path,
+              wasm_path: Path):
+    """Link a tinyc-emitted wasm32 object together with the wasm runtime
+    + _start shim using wasm-ld, producing a runnable .wasm module."""
+    return run([
+        WASM_LD, "--no-entry", "--export=_start",
+        str(obj_path), str(runtime_obj), str(start_obj),
+        "-o", str(wasm_path),
+    ])
 
 
 def main():
@@ -73,6 +126,22 @@ def main():
     else:
         plat_key = plat
 
+    if TARGET == "wasm" and LOWERING != "upstream":
+        print(f"error: TINYC_TARGET=wasm requires TINYC_LOWERING=upstream "
+              f"(got {LOWERING!r}); the native lowering does not implement wasm",
+              file=sys.stderr)
+        return 2
+
+    # Pre-build the wasm runtime object once per run.
+    wasm_runtime_obj = HERE / "tests" / "runtime_wasm.o"
+    wasm_start_obj   = HERE / "tests" / "start_wasm.o"
+    if TARGET == "wasm":
+        r = build_wasm_runtime(wasm_runtime_obj, wasm_start_obj)
+        if r is not None and r.returncode != 0:
+            print(f"error: failed to compile wasm runtime\nstderr:\n{r.stderr}",
+                  file=sys.stderr)
+            return 2
+
     failures = 0
     skipped = 0
     for t in tests:
@@ -83,10 +152,52 @@ def main():
             print(f"SKIP {name} (platforms={platforms}, current={plat_key})")
             skipped += 1
             continue
+        # Optional opt-out for the wasm target only (e.g. tests that
+        # rely on host-libc behavior wasm32-wasi can't reproduce).
+        if TARGET == "wasm" and t.get("wasm_skip"):
+            print(f"SKIP {name} (wasm_skip)")
+            skipped += 1
+            continue
         # Multi-file tests pass `sources = [...]`; single-file tests
         # default to `<name>.tc` for backwards compatibility.
         sources = t.get("sources", [f"{name}.tc"])
         srcs = [HERE / "tests" / s for s in sources]
+
+        if TARGET == "wasm":
+            obj  = HERE / "tests" / f"{name}.wasm.o"
+            wasm = HERE / "tests" / f"{name}.wasm"
+
+            # Stage 1: tinyc emits wasm32 object directly.
+            r = run([str(TINYC), "--emit=wasm", f"--lowering={LOWERING}",
+                     "-I", str(HERE / "tests"),
+                     "-o", str(obj),
+                     *[str(s) for s in srcs]])
+            if r.returncode != 0:
+                print(f"FAIL {name}: tinyc returned {r.returncode}\nstderr:\n{r.stderr}")
+                failures += 1
+                continue
+
+            # Stage 2: link with wasm-ld + runtime_wasm.o + start_wasm.o.
+            r = link_wasm(obj, wasm_runtime_obj, wasm_start_obj, wasm)
+            if r.returncode != 0:
+                print(f"FAIL {name}: wasm-ld failed\nstderr:\n{r.stderr}\nstdout:\n{r.stdout}")
+                failures += 1
+                continue
+
+            # Stage 3: run under wasmtime.
+            r = run([WASMTIME, str(wasm)])
+            if r.returncode != 0:
+                print(f"FAIL {name}: wasm exited with status {r.returncode}\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
+                failures += 1
+                continue
+            if r.stdout != expected:
+                print(f"FAIL {name}: stdout mismatch\n  expected: {expected!r}\n  got:      {r.stdout!r}")
+                failures += 1
+                continue
+
+            print(f"PASS {name}")
+            continue
+
         ll  = HERE / "tests" / f"{name}.ll"
         obj = HERE / "tests" / (f"{name}.obj" if IS_WIN else f"{name}.o")
         exe = HERE / "tests" / (f"{name}.exe" if IS_WIN else f"{name}.bin")

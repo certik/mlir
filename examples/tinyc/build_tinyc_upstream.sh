@@ -5,7 +5,7 @@ set -e
 # Mirrors tests/build_parser_upstream.sh — same link line, just
 # substituting tinyC sources + driver for the parser.
 
-LLVM_LIBS=$("$CONDA_PREFIX/bin/llvm-config" --link-static --libs support core analysis transformutils frontendopenmp)
+LLVM_LIBS=$("$CONDA_PREFIX/bin/llvm-config" --link-static --libs support core analysis transformutils frontendopenmp webassemblycodegen webassemblyasmparser webassemblydesc webassemblydisassembler webassemblyinfo webassemblyutils target mc mcparser asmprinter codegen selectiondag globalisel bitwriter)
 SYS_LIBS="-lpthread -ldl -lm $CONDA_PREFIX/lib/libz.a -lzstd"
 case "$(uname)" in
     Linux) GROUP_START="-Wl,--start-group"; GROUP_END="-Wl,--end-group" ;;

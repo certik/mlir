@@ -1713,6 +1713,20 @@ string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module,
     return mlir_translate_to_llvm_ir_native(ctx, module);
 }
 
+// MLIR_TranslateModuleToWasm: not yet implemented for the native backend.
+// Returns an empty string so callers can detect failure. The upstream
+// backend (mlir_api_impl_upstream.cpp) provides the real implementation
+// via LLVM's WebAssembly target.
+string MLIR_TranslateModuleToWasm(MLIR_Context *ctx, MLIR_OpHandle module,
+                                  MLIR_LoweringBackend backend) {
+    (void)ctx; (void)module; (void)backend;
+    fprintf(stderr,
+            "MLIR_TranslateModuleToWasm: native backend is not implemented; "
+            "use MLIR_LOWERING_UPSTREAM\n");
+    string s = {0};
+    return s;
+}
+
 #ifdef __cplusplus
 }
 #endif

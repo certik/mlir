@@ -274,6 +274,21 @@ bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module,
 string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module,
                                     MLIR_LoweringBackend backend);
 
+// Translate a `builtin.module` op already lowered to the LLVM dialect into
+// a WebAssembly relocatable object file (wasm32-wasi). Returns the raw
+// object bytes on success or an empty string on failure. The returned
+// bytes are NOT a runnable wasm module — they still need to be linked
+// (typically with `wasm-ld`) against any runtime/imports the program
+// uses, producing a final `.wasm` module that can be run by wasmtime.
+//
+// Backend semantics:
+//   MLIR_LOWERING_UPSTREAM uses LLVM's WebAssembly target machine to
+//   emit the object file. Requires the upstream backend.
+//   MLIR_LOWERING_NATIVE is not implemented and returns an empty string
+//   (a diagnostic is printed to stderr).
+string MLIR_TranslateModuleToWasm(MLIR_Context *ctx, MLIR_OpHandle module,
+                                  MLIR_LoweringBackend backend);
+
 // Accessors
 MLIR_OpType MLIR_GetOpType(MLIR_OpHandle op);
 string MLIR_GetOpName(MLIR_OpHandle op);

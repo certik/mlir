@@ -5,7 +5,7 @@ REM Build the tinyC example compiler against the upstream MLIR backend on
 REM Windows. Mirrors tests\build_parser_upstream.bat -- same link line, just
 REM substituting tinyC sources + driver for the parser sources.
 
-for /f "delims=" %%i in ('"%CONDA_PREFIX%\Library\bin\llvm-config.exe" --link-static --libs support core analysis transformutils frontendopenmp') do set LLVM_LIBS=%%i
+for /f "delims=" %%i in ('"%CONDA_PREFIX%\Library\bin\llvm-config.exe" --link-static --libs support core analysis transformutils frontendopenmp webassemblycodegen webassemblyasmparser webassemblydesc webassemblydisassembler webassemblyinfo webassemblyutils target mc mcparser asmprinter codegen selectiondag globalisel bitwriter') do set LLVM_LIBS=%%i
 if errorlevel 1 exit /b 1
 
 if exist mlir_libs.rsp del mlir_libs.rsp
