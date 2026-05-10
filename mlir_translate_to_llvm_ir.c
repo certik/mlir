@@ -983,14 +983,17 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
     if (gtya != MLIR_INVALID_HANDLE) gty = MLIR_GetAttributeTypeValue(gtya);
 
     // Linkage: "linkage" attr is an LLVM Linkage attr; we read it via
-    // GetAttributeAsString and map common values.
+    // GetAttributeAsString and map common values. A separate flag tracks
+    // "external" because it's a declaration form in LLVM IR text (no
+    // initializer is permitted/expected) rather than a linkage prefix.
     const char *linkage = "";
+    bool is_external = false;
     MLIR_AttributeHandle linka = find_attr(gop, "linkage");
     if (linka != MLIR_INVALID_HANDLE) {
         string s = MLIR_GetAttributeAsString(ctx, linka);
         if      (name_starts_with(s, "#llvm.linkage<internal>")) linkage = "internal ";
         else if (name_starts_with(s, "#llvm.linkage<private>"))  linkage = "private ";
-        else if (name_starts_with(s, "#llvm.linkage<external>")) linkage = "";
+        else if (name_starts_with(s, "#llvm.linkage<external>")) is_external = true;
         else if (name_starts_with(s, "#llvm.linkage<common>"))   linkage = "common ";
         else if (name_starts_with(s, "#llvm.linkage<weak>"))     linkage = "weak ";
     }
@@ -1045,6 +1048,18 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
                 }
             }
         }
+    }
+
+    // External linkage with no initializer is a declaration:
+    //   @name = external global T
+    // Otherwise emit as a definition with an initializer (zeroinitializer
+    // by default).
+    if (is_external && init == NULL) {
+        buf_printf(out, "@%.*s = external %s ", (int)sym.size, sym.str,
+                   is_constant ? "constant" : "global");
+        print_type(out, ctx, gty);
+        buf_putc(out, '\n');
+        return;
     }
     if (init == NULL) init = xstrdup("zeroinitializer");
 
