@@ -242,18 +242,34 @@ string MLIR_PrintOperationGeneric(MLIR_Context *ctx, MLIR_OpHandle op);
 MLIR_OpHandle MLIR_ParseTextUpstream(MLIR_Context *ctx, string text);
 MLIR_OpHandle MLIR_ParseTextClassic(MLIR_Context *ctx, string text);
 
+// Backend selector for the lowering / LLVM-IR translation entry points.
+//
+// MLIR_LOWERING_UPSTREAM uses upstream MLIR's pass pipeline / translator
+// (only available when linked against mlir_api_impl_upstream.cpp).
+//
+// MLIR_LOWERING_NATIVE uses our own implementation, walking the IR
+// through mlir_api.h only. It is the path that makes the native build
+// (mlir_api_impl.c) self-contained.
+typedef enum {
+    MLIR_LOWERING_UPSTREAM = 0,
+    MLIR_LOWERING_NATIVE   = 1,
+} MLIR_LoweringBackend;
+
 // Lower a `builtin.module` op to the LLVM dialect by running the standard
 // conversion passes (scf -> cf, arith/memref/cf/func/vector -> llvm,
 // reconcile-unrealized-casts). Mutates `module` in place. Returns true on
-// success. Available with the upstream backend only; the native backend
-// returns false. Diagnostic messages from failed passes are printed to
+// success. With MLIR_LOWERING_UPSTREAM available only when linked against
+// the upstream backend; with MLIR_LOWERING_NATIVE this is the native
+// implementation. Diagnostic messages from failed passes are printed to
 // stderr.
-bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module);
+bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module,
+                             MLIR_LoweringBackend backend);
 
 // Translate a `builtin.module` op already lowered to the LLVM dialect into
 // LLVM IR text (`.ll`). Returns the IR text on success or an empty string
-// on failure. Available with the upstream backend only.
-string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module);
+// on failure. See MLIR_LoweringBackend above for backend semantics.
+string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module,
+                                    MLIR_LoweringBackend backend);
 
 // Accessors
 MLIR_OpType MLIR_GetOpType(MLIR_OpHandle op);

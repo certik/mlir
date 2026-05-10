@@ -1283,15 +1283,19 @@ bool MLIR_IsTypeOpaque(MLIR_TypeHandle th) {
     return t && t->kind == TYPE_KIND_OPAQUE;
 }
 
-// Lowering / LLVM IR translation are upstream-only. Stub them on the
-// native backend so binaries that link only the native impl still resolve.
-bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module) {
-    (void)ctx; (void)module;
+// Lowering / LLVM IR translation are upstream-only for now. Stub them on
+// the native backend so binaries that link only the native impl still
+// resolve. Stage D will replace these stubs with a real native lowering
+// + translation.
+bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module,
+                             MLIR_LoweringBackend backend) {
+    (void)ctx; (void)module; (void)backend;
     return false;
 }
 
-string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module) {
-    (void)ctx; (void)module;
+string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module,
+                                    MLIR_LoweringBackend backend) {
+    (void)ctx; (void)module; (void)backend;
     return str_lit("");
 }
 

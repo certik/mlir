@@ -44,6 +44,7 @@ int app_main(void) {
     PrintFn print_fn = MLIR_PrintOperationUpstream;
     bool emit_llvm = false;
     bool emit_lowered = false;
+    MLIR_LoweringBackend lowering = MLIR_LOWERING_UPSTREAM;
     char *output_file = NULL;
 
     // Multiple positional input files (multi-file compilation merges them
@@ -59,6 +60,8 @@ int app_main(void) {
         if      (strcmp(argv[i], "--emit=mlir")    == 0) { emit_llvm = false; emit_lowered = false; }
         else if (strcmp(argv[i], "--emit=lowered") == 0) { emit_lowered = true;  emit_llvm = false; }
         else if (strcmp(argv[i], "--emit=llvm")    == 0) { emit_llvm = true;     emit_lowered = false; }
+        else if (strcmp(argv[i], "--lowering=upstream") == 0) { lowering = MLIR_LOWERING_UPSTREAM; }
+        else if (strcmp(argv[i], "--lowering=native")   == 0) { lowering = MLIR_LOWERING_NATIVE; }
         else if (strncmp(argv[i], "-I", 2) == 0 && argv[i][2] != '\0') {
             include_dirs[n_include_dirs++] = str_from_cstr_view(argv[i] + 2);
         } else if (strcmp(argv[i], "-I") == 0 && i + 1 < argc) {
@@ -73,7 +76,7 @@ int app_main(void) {
     }
 
     if (n_input_files == 0) {
-        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm] [-I dir ...] [-o OUT] FILE.tc [FILE2.tc ...]"));
+        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm] [--lowering=upstream|native] [-I dir ...] [-o OUT] FILE.tc [FILE2.tc ...]"));
         arena_destroy(boot_arena);
         return 1;
     }
@@ -109,7 +112,7 @@ int app_main(void) {
     }
 
     if (emit_lowered || emit_llvm) {
-        if (!MLIR_LowerToLLVMDialect(&ctx, module)) {
+        if (!MLIR_LowerToLLVMDialect(&ctx, module, lowering)) {
             arena_destroy(arena);
             arena_destroy(boot_arena);
             return 1;
@@ -117,7 +120,7 @@ int app_main(void) {
     }
     string out;
     if (emit_llvm) {
-        out = MLIR_TranslateModuleToLLVMIR(&ctx, module);
+        out = MLIR_TranslateModuleToLLVMIR(&ctx, module, lowering);
         if (out.size == 0) {
             arena_destroy(arena);
             arena_destroy(boot_arena);

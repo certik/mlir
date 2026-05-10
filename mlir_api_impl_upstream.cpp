@@ -1119,15 +1119,20 @@ extern "C" string MLIR_MLIR_OpTypeToString(MLIR_OpType type) {
 // Lowering to LLVM dialect + translation to LLVM IR text
 // -----------------------------------------------------------------------------
 
-extern "C" bool MLIR_LowerToLLVMDialect(MLIR_Context *, MLIR_OpHandle module_h) {
+extern "C" bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module_h,
+                                        MLIR_LoweringBackend backend) {
+    (void)ctx;
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
         std::fprintf(stderr, "MLIR_LowerToLLVMDialect: handle is not a ModuleOp\n");
         return false;
     }
-    auto &ctx = globalCtx().mctx;
-    mlir::PassManager pm(&ctx);
+    // For now, MLIR_LOWERING_NATIVE delegates to the upstream pipeline.
+    // Stage B will replace this branch with a walk via mlir_api.h.
+    (void)backend;
+    auto &mctx = globalCtx().mctx;
+    mlir::PassManager pm(&mctx);
     pm.addPass(mlir::createConvertSCFToCFPass());
     pm.addPass(mlir::createConvertVectorToLLVMPass());
     pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
@@ -1142,13 +1147,17 @@ extern "C" bool MLIR_LowerToLLVMDialect(MLIR_Context *, MLIR_OpHandle module_h) 
     return true;
 }
 
-extern "C" string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module_h) {
+extern "C" string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module_h,
+                                               MLIR_LoweringBackend backend) {
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
         std::fprintf(stderr, "MLIR_TranslateModuleToLLVMIR: not a ModuleOp\n");
         return mkRefString(llvm::StringRef());
     }
+    // For now, MLIR_LOWERING_NATIVE delegates to the upstream translator.
+    // Stage C will replace this branch with a walk via mlir_api.h.
+    (void)backend;
     // Register the LLVM-IR translation interfaces (idempotent).
     mlir::registerBuiltinDialectTranslation(globalCtx().mctx);
     mlir::registerLLVMDialectTranslation(globalCtx().mctx);

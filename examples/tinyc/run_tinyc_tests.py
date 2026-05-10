@@ -23,6 +23,11 @@ TESTS_TOML = HERE / "tests.toml"
 CC = os.environ.get("CC", "cl" if IS_WIN else "clang")
 LLC = os.environ.get("LLC", "llc")
 
+# Backend used by `tinyc --lowering=...`. Defaults to upstream; override
+# with TINYC_LOWERING=native (or any other valid value) to exercise the
+# native lowering path through the same suite.
+LOWERING = os.environ.get("TINYC_LOWERING", "upstream")
+
 
 def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
@@ -89,7 +94,8 @@ def main():
         # Stage 1: emit LLVM IR. The driver accepts multiple input files
         # and merges them into a single MLIR module.
         # `-I tests` so multi-file tests can `#include "shared.h"`.
-        r = run([str(TINYC), "--emit=llvm", "-I", str(HERE / "tests"),
+        r = run([str(TINYC), "--emit=llvm", f"--lowering={LOWERING}",
+                 "-I", str(HERE / "tests"),
                  *[str(s) for s in srcs]])
         if r.returncode != 0:
             print(f"FAIL {name}: tinyc returned {r.returncode}\nstderr:\n{r.stderr}\nstdout (first 200 chars):\n{r.stdout[:200]}")
