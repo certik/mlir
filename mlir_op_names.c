@@ -102,6 +102,19 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_LLVM_SEXT: return str_lit("llvm.sext");
         case OP_TYPE_LLVM_ADD: return str_lit("llvm.add");
         case OP_TYPE_LLVM_SUB: return str_lit("llvm.sub");
+        case OP_TYPE_LLVM_MUL: return str_lit("llvm.mul");
+        case OP_TYPE_LLVM_SDIV: return str_lit("llvm.sdiv");
+        case OP_TYPE_LLVM_UDIV: return str_lit("llvm.udiv");
+        case OP_TYPE_LLVM_SREM: return str_lit("llvm.srem");
+        case OP_TYPE_LLVM_UREM: return str_lit("llvm.urem");
+        case OP_TYPE_LLVM_AND: return str_lit("llvm.and");
+        case OP_TYPE_LLVM_OR: return str_lit("llvm.or");
+        case OP_TYPE_LLVM_XOR: return str_lit("llvm.xor");
+        case OP_TYPE_LLVM_SHL: return str_lit("llvm.shl");
+        case OP_TYPE_LLVM_LSHR: return str_lit("llvm.lshr");
+        case OP_TYPE_LLVM_ASHR: return str_lit("llvm.ashr");
+        case OP_TYPE_LLVM_TRUNC: return str_lit("llvm.trunc");
+        case OP_TYPE_LLVM_ZEXT: return str_lit("llvm.zext");
         case OP_TYPE_ARITH_XORI: return str_lit("arith.xori");
         case OP_TYPE_ARITH_SHLI: return str_lit("arith.shli");
         case OP_TYPE_ARITH_SHRSI: return str_lit("arith.shrsi");
@@ -114,6 +127,8 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_WASMSSA_CONST: return str_lit("wasmssa.const");
         case OP_TYPE_WASMSSA_ADD: return str_lit("wasmssa.add");
         case OP_TYPE_WASMSSA_SUB: return str_lit("wasmssa.sub");
+        case OP_TYPE_WASMSSA_BINOP: return str_lit("wasmssa.binop");
+        case OP_TYPE_WASMSSA_UNOP: return str_lit("wasmssa.unop");
         case OP_TYPE_WASMSSA_LOAD: return str_lit("wasmssa.load");
         case OP_TYPE_WASMSSA_STORE: return str_lit("wasmssa.store");
         case OP_TYPE_WASMSSA_GLOBAL_GET: return str_lit("wasmssa.global_get");
@@ -131,6 +146,8 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_WASMSTACK_CONST: return str_lit("wasmstack.const");
         case OP_TYPE_WASMSTACK_ADD: return str_lit("wasmstack.add");
         case OP_TYPE_WASMSTACK_SUB: return str_lit("wasmstack.sub");
+        case OP_TYPE_WASMSTACK_BINOP: return str_lit("wasmstack.binop");
+        case OP_TYPE_WASMSTACK_UNOP: return str_lit("wasmstack.unop");
         case OP_TYPE_WASMSTACK_LOAD: return str_lit("wasmstack.load");
         case OP_TYPE_WASMSTACK_STORE: return str_lit("wasmstack.store");
         case OP_TYPE_WASMSTACK_GLOBAL_GET: return str_lit("wasmstack.global.get");

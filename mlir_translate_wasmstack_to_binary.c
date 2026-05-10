@@ -281,6 +281,11 @@ static bool encode_op(EmFunc *F, const wasmstack_op_t *op, uint32_t sp_sym_idx,
         buf_putc(b, 0xac);  // i64.extend_i32_s
         return true;
 
+    case OP_TYPE_WASMSTACK_BINOP:
+    case OP_TYPE_WASMSTACK_UNOP:
+        buf_putc(b, op->wasm_opcode);
+        return true;
+
     case OP_TYPE_WASMSTACK_CALL: {
         int idx = find_func_by_name(all_funcs, all_funcs_n, op->call_target);
         if (idx < 0) {

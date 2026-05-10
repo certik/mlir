@@ -340,6 +340,128 @@ static bool lower_op(FnCtx *F, MLIR_OpHandle op) {
         return true;
     }
 
+    // ---- llvm binary integer ops -------------------------------------------
+    // Mapped to a generic wasmssa.binop carrying the actual wasm bytecode
+    // byte. Op kind picks the row; valtype picks the column of the table.
+    {
+        // (op-name, i32-opcode, i64-opcode); 0 = unsupported
+        struct { const char *nm; uint8_t i32op, i64op; } btab[] = {
+            { "llvm.add",  0x6a, 0x7c },
+            { "llvm.sub",  0x6b, 0x7d },
+            { "llvm.mul",  0x6c, 0x7e },
+            { "llvm.sdiv", 0x6d, 0x7f },
+            { "llvm.udiv", 0x6e, 0x80 },
+            { "llvm.srem", 0x6f, 0x81 },
+            { "llvm.urem", 0x70, 0x82 },
+            { "llvm.and",  0x71, 0x83 },
+            { "llvm.or",   0x72, 0x84 },
+            { "llvm.xor",  0x73, 0x85 },
+            { "llvm.shl",  0x74, 0x86 },
+            { "llvm.ashr", 0x75, 0x87 },
+            { "llvm.lshr", 0x76, 0x88 },
+        };
+        for (size_t k = 0; k < sizeof(btab)/sizeof(btab[0]); k++) {
+            if (!name_eq(name, btab[k].nm)) continue;
+            if (MLIR_GetOpNumResults(op) != 1 ||
+                MLIR_GetOpNumOperands(op) != 2) return false;
+            MLIR_ValueHandle r  = MLIR_GetOpResult(op, 0);
+            MLIR_ValueHandle a  = MLIR_GetOpOperand(op, 0);
+            MLIR_ValueHandle b  = MLIR_GetOpOperand(op, 1);
+            uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
+            uint8_t opc = (vt == WT_I32) ? btab[k].i32op
+                        : (vt == WT_I64) ? btab[k].i64op : 0;
+            if (opc == 0) return false;
+            int ai, bi;
+            if (!vmap_get(F, a, &ai) || !vmap_get(F, b, &bi)) return false;
+            wasmssa_op_t *o; int idx = add_op(F, &o);
+            o->type = OP_TYPE_WASMSSA_BINOP;
+            o->valtype = vt;
+            o->wasm_opcode = opc;
+            o->n_operands = 2;
+            o->operands = (int *)malloc(2 * sizeof(int));
+            o->operands[0] = ai; o->operands[1] = bi;
+            o->has_result = true;
+            vmap_set(F, r, idx);
+            return true;
+        }
+    }
+
+    // ---- llvm.icmp ---------------------------------------------------------
+    // Result is i1 (encoded as i32 in wasm). Operand valtype determines
+    // the i32.* vs i64.* opcode family.
+    if (name_eq(name, "llvm.icmp")) {
+        if (MLIR_GetOpNumResults(op) != 1 ||
+            MLIR_GetOpNumOperands(op) != 2) return false;
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        MLIR_ValueHandle a = MLIR_GetOpOperand(op, 0);
+        MLIR_ValueHandle b = MLIR_GetOpOperand(op, 1);
+        uint8_t opvt = wasm_vt(F->ctx, MLIR_GetValueType(a));
+        // LLVM ICmpPredicate enum: eq=0, ne=1, slt=2, sle=3, sgt=4, sge=5,
+        // ult=6, ule=7, ugt=8, uge=9.
+        MLIR_AttributeHandle pa = find_attr(op, "predicate");
+        if (pa == MLIR_INVALID_HANDLE) return false;
+        int64_t pred = MLIR_GetAttributeInteger(pa);
+        // i32: 0x46..0x4f ; i64: 0x51..0x5a (skip eqz at 0x45/0x50).
+        // Map predicate -> bytecode offset within (eq, ne, lt_s, lt_u,
+        // gt_s, gt_u, le_s, le_u, ge_s, ge_u).
+        // LLVM order:  eq, ne, slt, sle, sgt, sge, ult, ule, ugt, uge
+        // wasm order:  eq, ne, lt_s, lt_u, gt_s, gt_u, le_s, le_u, ge_s, ge_u
+        static const int8_t llvm_to_wasm[10] = {0, 1, 2, 6, 4, 8, 3, 7, 5, 9};
+        if (pred < 0 || pred >= 10) return false;
+        int wasm_idx = llvm_to_wasm[pred];
+        uint8_t opc = (opvt == WT_I32) ? (uint8_t)(0x46 + wasm_idx)
+                    : (opvt == WT_I64) ? (uint8_t)(0x51 + wasm_idx) : 0;
+        if (opc == 0) return false;
+        int ai, bi;
+        if (!vmap_get(F, a, &ai) || !vmap_get(F, b, &bi)) return false;
+        wasmssa_op_t *o; int idx = add_op(F, &o);
+        o->type = OP_TYPE_WASMSSA_BINOP;
+        o->valtype = WT_I32;  // result type
+        o->wasm_opcode = opc;
+        o->n_operands = 2;
+        o->operands = (int *)malloc(2 * sizeof(int));
+        o->operands[0] = ai; o->operands[1] = bi;
+        o->has_result = true;
+        vmap_set(F, r, idx);
+        return true;
+    }
+
+    // ---- llvm.trunc / llvm.zext -------------------------------------------
+    // i64 -> i32 trunc:    i32.wrap_i64    (0xa7)
+    // i32 -> i64 zext:     i64.extend_i32_u(0xad)
+    // smaller-int trunc/zext within i32: no-op (wasm has no sub-i32 reg).
+    if (name_eq(name, "llvm.trunc") || name_eq(name, "llvm.zext")) {
+        bool is_zext = name_eq(name, "llvm.zext");
+        if (MLIR_GetOpNumResults(op) != 1 ||
+            MLIR_GetOpNumOperands(op) != 1) return false;
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        MLIR_ValueHandle s = MLIR_GetOpOperand(op, 0);
+        uint8_t in_vt  = wasm_vt(F->ctx, MLIR_GetValueType(s));
+        uint8_t out_vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
+        if (in_vt == 0 || out_vt == 0) return false;
+        int sa;
+        if (!vmap_get(F, s, &sa)) return false;
+        if (in_vt == out_vt) {
+            // No-op: result alias of operand.
+            vmap_set(F, r, sa);
+            return true;
+        }
+        uint8_t opc;
+        if (!is_zext && in_vt == WT_I64 && out_vt == WT_I32) opc = 0xa7;
+        else if (is_zext && in_vt == WT_I32 && out_vt == WT_I64) opc = 0xad;
+        else return false;
+        wasmssa_op_t *o; int idx = add_op(F, &o);
+        o->type = OP_TYPE_WASMSSA_UNOP;
+        o->valtype = out_vt;
+        o->wasm_opcode = opc;
+        o->n_operands = 1;
+        o->operands = (int *)malloc(sizeof(int));
+        o->operands[0] = sa;
+        o->has_result = true;
+        vmap_set(F, r, idx);
+        return true;
+    }
+
     // ---- llvm.return -------------------------------------------------------
     if (name_eq(name, "llvm.return")) {
         size_t no = MLIR_GetOpNumOperands(op);

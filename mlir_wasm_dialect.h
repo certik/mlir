@@ -64,6 +64,7 @@ typedef struct {
     uint32_t memory_align_log2;   // LOAD / STORE
     uint32_t mem_size_bytes;      // LOAD / STORE (1/2/4/8)
     char    *call_target;         // CALL: function symbol name (xstrdup'd)
+    uint8_t  wasm_opcode;         // BINOP / UNOP: actual wasm bytecode byte
 
     // Operands as ssa_def indices into the parent function's `ops`.
     int   *operands;              // length n_operands; -1 means "unbound"
@@ -110,6 +111,7 @@ typedef struct {
     uint32_t memory_align_log2;   // LOAD / STORE
     uint32_t mem_size_bytes;      // LOAD / STORE
     char    *call_target;         // CALL
+    uint8_t  wasm_opcode;         // BINOP / UNOP
 } wasmstack_op_t;
 
 typedef struct {

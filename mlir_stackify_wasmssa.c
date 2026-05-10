@@ -50,6 +50,8 @@ static MLIR_OpType ssa_to_stack(MLIR_OpType t) {
     case OP_TYPE_WASMSSA_CONST:      return OP_TYPE_WASMSTACK_CONST;
     case OP_TYPE_WASMSSA_ADD:        return OP_TYPE_WASMSTACK_ADD;
     case OP_TYPE_WASMSSA_SUB:        return OP_TYPE_WASMSTACK_SUB;
+    case OP_TYPE_WASMSSA_BINOP:      return OP_TYPE_WASMSTACK_BINOP;
+    case OP_TYPE_WASMSSA_UNOP:       return OP_TYPE_WASMSTACK_UNOP;
     case OP_TYPE_WASMSSA_LOAD:       return OP_TYPE_WASMSTACK_LOAD;
     case OP_TYPE_WASMSSA_STORE:      return OP_TYPE_WASMSTACK_STORE;
     case OP_TYPE_WASMSSA_GLOBAL_GET: return OP_TYPE_WASMSTACK_GLOBAL_GET;
@@ -116,6 +118,7 @@ static bool stackify_func(const wasmssa_func_t *src, wasmstack_func_t *dst) {
         out->memory_offset     = op->memory_offset;
         out->memory_align_log2 = op->memory_align_log2;
         out->mem_size_bytes    = op->mem_size_bytes;
+        out->wasm_opcode       = op->wasm_opcode;
         if (op->call_target) out->call_target = strdup(op->call_target);
 
         // Stash the result into a fresh local.
