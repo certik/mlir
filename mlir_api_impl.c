@@ -1080,6 +1080,13 @@ MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_TypeHandle th, size_t idx) {
     return MLIR_INVALID_HANDLE;
 }
 
+bool MLIR_GetTypeFunctionIsVarArg(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    if (!t) return false;
+    if (t->kind == TYPE_KIND_LLVM_FUNCTION) return t->data.llvm_function.is_var_arg;
+    return false;
+}
+
 MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle th) {
     IR_Type *t = resolve_type(th);
     if (!t) return MLIR_INVALID_HANDLE;

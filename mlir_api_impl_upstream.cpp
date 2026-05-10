@@ -35,6 +35,9 @@
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/AsmParser/AsmParser.h"
+#include "llvm/AsmParser/Parser.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Support/SourceMgr.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -754,6 +757,14 @@ extern "C" MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_TypeHandle h, size_t 
     return MLIR_INVALID_HANDLE;
 }
 
+extern "C" bool MLIR_GetTypeFunctionIsVarArg(MLIR_TypeHandle h) {
+    auto t = typeF(h);
+    if (auto ft = llvm::dyn_cast<mlir::LLVM::LLVMFunctionType>(t)) {
+        return ft.isVarArg();
+    }
+    return false;
+}
+
 extern "C" MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle h) {
     auto t = typeF(h);
     if (auto st = llvm::dyn_cast<mlir::ShapedType>(t)) {
@@ -1348,22 +1359,46 @@ extern "C" string MLIR_TranslateModuleToWasm(MLIR_Context *ctx,
                      "MLIR_TranslateModuleToWasm: handle is not a ModuleOp\n");
         return mkRefString(llvm::StringRef());
     }
-    if (backend == MLIR_LOWERING_NATIVE) {
-        std::fprintf(stderr,
-                     "MLIR_TranslateModuleToWasm: native backend is not "
-                     "implemented; use MLIR_LOWERING_UPSTREAM\n");
-        return mkRefString(llvm::StringRef());
-    }
 
-    // Translate the LLVM-dialect MLIR module to an LLVM IR module.
-    mlir::registerBuiltinDialectTranslation(globalCtx().mctx);
-    mlir::registerLLVMDialectTranslation(globalCtx().mctx);
+    // Translate the LLVM-dialect MLIR module to an LLVM IR module. With
+    // backend==MLIR_LOWERING_NATIVE we route through the native MLIR->LLVM
+    // IR translator (printed as text) and re-parse it via LLVM's IR parser,
+    // mirroring how MLIR_TranslateModuleToLLVMIR delegates. The resulting
+    // llvm::Module is then fed to LLVM's WebAssembly TargetMachine — so
+    // "native lowering + upstream wasm emit" exercises our own translator
+    // while still producing real wasm.
     llvm::LLVMContext llctx;
-    auto llmod = mlir::translateModuleToLLVMIR(module, llctx);
-    if (!llmod) {
-        std::fprintf(stderr,
-                     "MLIR_TranslateModuleToWasm: translation to LLVM IR failed\n");
-        return mkRefString(llvm::StringRef());
+    std::unique_ptr<llvm::Module> llmod;
+    if (backend == MLIR_LOWERING_NATIVE) {
+        extern string mlir_translate_to_llvm_ir_native(MLIR_Context *, MLIR_OpHandle);
+        string ir_text = mlir_translate_to_llvm_ir_native(ctx, module_h);
+        if (ir_text.size == 0) {
+            std::fprintf(stderr,
+                         "MLIR_TranslateModuleToWasm: native translator returned empty IR\n");
+            return mkRefString(llvm::StringRef());
+        }
+        llvm::SMDiagnostic err;
+        llvm::StringRef ir_ref(ir_text.str, ir_text.size);
+        llmod = llvm::parseAssemblyString(ir_ref, err, llctx);
+        if (!llmod) {
+            std::string msg;
+            llvm::raw_string_ostream os(msg);
+            err.print("native-llvm-ir", os);
+            os.flush();
+            std::fprintf(stderr,
+                         "MLIR_TranslateModuleToWasm: failed to parse native LLVM IR:\n%s\n",
+                         msg.c_str());
+            return mkRefString(llvm::StringRef());
+        }
+    } else {
+        mlir::registerBuiltinDialectTranslation(globalCtx().mctx);
+        mlir::registerLLVMDialectTranslation(globalCtx().mctx);
+        llmod = mlir::translateModuleToLLVMIR(module, llctx);
+        if (!llmod) {
+            std::fprintf(stderr,
+                         "MLIR_TranslateModuleToWasm: translation to LLVM IR failed\n");
+            return mkRefString(llvm::StringRef());
+        }
     }
 
     // Initialize the WebAssembly target. Idempotent: LLVM guards these

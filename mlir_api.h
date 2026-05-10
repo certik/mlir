@@ -460,6 +460,9 @@ size_t MLIR_GetTypeFunctionNumInputs(MLIR_TypeHandle type);
 MLIR_TypeHandle MLIR_GetTypeFunctionInput(MLIR_TypeHandle type, size_t idx);
 size_t MLIR_GetTypeFunctionNumResults(MLIR_TypeHandle type);
 MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_TypeHandle type, size_t idx);
+// True if the type is an `LLVMFunctionType` whose `isVarArg` flag is set.
+// Returns false for the standard `FunctionType` (which is never variadic).
+bool MLIR_GetTypeFunctionIsVarArg(MLIR_TypeHandle type);
 // Element type of a tensor/memref/vector type, or invalid if the type is
 // not a shaped type.
 MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle type);

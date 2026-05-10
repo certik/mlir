@@ -126,11 +126,10 @@ def main():
     else:
         plat_key = plat
 
-    if TARGET == "wasm" and LOWERING != "upstream":
-        print(f"error: TINYC_TARGET=wasm requires TINYC_LOWERING=upstream "
-              f"(got {LOWERING!r}); the native lowering does not implement wasm",
-              file=sys.stderr)
-        return 2
+    # The native lowering is allowed with the wasm target: the upstream
+    # `MLIR_TranslateModuleToWasm` is responsible for the LLVM->wasm step,
+    # and the lowering choice only affects how MLIR is reduced to the LLVM
+    # dialect beforehand.
 
     # Pre-build the wasm runtime object once per run.
     wasm_runtime_obj = HERE / "tests" / "runtime_wasm.o"

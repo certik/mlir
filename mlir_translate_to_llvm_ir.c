@@ -443,19 +443,30 @@ static void emit_call(FnCtx *F, MLIR_OpHandle op) {
     if (!is_void) { emit_use(F, MLIR_GetOpResult(op, 0)); buf_cstr(out, " = "); }
     buf_cstr(out, "call ");
 
-    // Vararg form: emit the full function signature. Otherwise just return type.
+    // Vararg form: emit the full function signature `<ret> (<arg-types>, ...)`.
+    // For non-variadic indirect calls, just the return type is sufficient
+    // (LLVM IR allows `call <ret> %fnptr(...)` when the function is not
+    // variadic). Emitting the variadic form unconditionally for indirect
+    // calls produces calls with the wrong signature on targets like wasm32
+    // where variadic and fixed-arity ABIs differ.
     if (var_callee_type != MLIR_INVALID_HANDLE) {
         MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(var_callee_type);
-        size_t ni = MLIR_GetTypeFunctionNumInputs(fty);
-        size_t no = MLIR_GetTypeFunctionNumResults(fty);
-        if (no == 0) buf_cstr(out, "void");
-        else         print_type(out, F->ctx, MLIR_GetTypeFunctionResult(fty, 0));
-        buf_cstr(out, " (");
-        for (size_t i = 0; i < ni; i++) {
-            if (i) buf_cstr(out, ", ");
-            print_type(out, F->ctx, MLIR_GetTypeFunctionInput(fty, i));
+        bool is_vararg = MLIR_GetTypeFunctionIsVarArg(fty);
+        if (is_vararg) {
+            size_t ni = MLIR_GetTypeFunctionNumInputs(fty);
+            size_t no = MLIR_GetTypeFunctionNumResults(fty);
+            if (no == 0) buf_cstr(out, "void");
+            else         print_type(out, F->ctx, MLIR_GetTypeFunctionResult(fty, 0));
+            buf_cstr(out, " (");
+            for (size_t i = 0; i < ni; i++) {
+                if (i) buf_cstr(out, ", ");
+                print_type(out, F->ctx, MLIR_GetTypeFunctionInput(fty, i));
+            }
+            buf_cstr(out, ", ...)");
+        } else {
+            if (is_void) buf_cstr(out, "void");
+            else         print_type(out, F->ctx, rty);
         }
-        buf_cstr(out, ", ...)");
     } else {
         if (is_void) buf_cstr(out, "void");
         else         print_type(out, F->ctx, rty);
