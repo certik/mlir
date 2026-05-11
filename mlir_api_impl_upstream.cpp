@@ -1507,7 +1507,8 @@ extern "C" bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx,
 }
 
 extern "C" string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module_h,
-                                               MLIR_LoweringBackend backend) {    auto *op = F<mlir::Operation>(module_h);
+                                               MLIR_LoweringBackend backend) {
+    auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
         std::fprintf(stderr, "MLIR_TranslateModuleToLLVMIR: not a ModuleOp\n");

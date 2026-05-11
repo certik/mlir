@@ -5,10 +5,6 @@
 [[test]]
 name = "simple"
 expected_stdout = "3\n"
-# Opt-in for the still-incomplete native LLVM->WASM translator
-# (mlir_llvm_to_wasmssa + mlir_wasmssa_to_wasmstack + mlir_wasmstack_to_bin).
-# Other tests fall back to SKIP under
-# LOWERING=native + TARGET=wasm until coverage grows.
 
 [[test]]
 name = "sum_to_10"
