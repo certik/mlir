@@ -55,17 +55,17 @@ typedef struct {
     uint32_t memory_offset;
     uint32_t memory_align_log2;
     uint32_t mem_size_bytes;
-    char    *call_target;
+    string   call_target;
     uint8_t  wasm_opcode;
     uint32_t br_depth;
     uint32_t carrier_id;
 
-    uint8_t *sig_params;
-    uint8_t *sig_results;
-    size_t   n_sig_params, n_sig_results;
+    const uint8_t *sig_params;
+    const uint8_t *sig_results;
+    size_t         n_sig_params, n_sig_results;
 
-    int   *operands;
-    int    n_operands;
+    const int *operands;
+    int        n_operands;
 
     bool has_result;
 } wasmssa_op_t;
@@ -413,8 +413,7 @@ static int commit_op(FnCtx *F, wasmssa_op_t *o) {
     case OP_TYPE_WASMSSA_CALL:
     case OP_TYPE_WASMSSA_ADDRESSOF:
     case OP_TYPE_WASMSSA_FUNC_ADDR:
-        as[nas++] = attr_s_cstr(ctx, "target",
-                                o->call_target ? o->call_target : "");
+        as[nas++] = attr_s(ctx, "target", o->call_target.str, o->call_target.size);
         break;
     case OP_TYPE_WASMSSA_CALL_INDIRECT:
         as[nas++] = attr_s_hex(ctx, F->arena, "sig_params",
@@ -446,13 +445,6 @@ static int commit_op(FnCtx *F, wasmssa_op_t *o) {
                                                   F->c_ssa * sizeof(MLIR_ValueHandle));
     }
     F->ssa_vals[F->n_ssa++] = o->has_result ? res : MLIR_INVALID_HANDLE;
-    // The temporary wasmssa_op_t owns these malloc'd buffers; release them
-    // now that the MLIR op has captured their contents (attribute strings
-    // are copied / encoded into arena-backed storage by the helpers).
-    free(o->operands);
-    free(o->call_target);
-    free(o->sig_params);
-    free(o->sig_results);
     return idx;
 }
 
@@ -468,29 +460,25 @@ static int emit_const_i32(FnCtx *F, int32_t v) {
 }
 // Convenience: i32 add of two ssa-def operands.
 static int emit_add_i32(FnCtx *F, int lhs, int rhs) {
+    int ops[2] = { lhs, rhs };
     wasmssa_op_t o = {0};
     o.type = OP_TYPE_WASMSSA_ADD;
     o.valtype = WT_I32;
     o.n_operands = 2;
-    o.operands = (int *)malloc(2 * sizeof(int));
-    o.operands[0] = lhs;
-    o.operands[1] = rhs;
+    o.operands = ops;
     o.has_result = true;
-    int idx = commit_op(F, &o);
-    return idx;
+    return commit_op(F, &o);
 }
 // Convenience: i32 sub.
 static int emit_sub_i32(FnCtx *F, int lhs, int rhs) {
+    int ops[2] = { lhs, rhs };
     wasmssa_op_t o = {0};
     o.type = OP_TYPE_WASMSSA_SUB;
     o.valtype = WT_I32;
     o.n_operands = 2;
-    o.operands = (int *)malloc(2 * sizeof(int));
-    o.operands[0] = lhs;
-    o.operands[1] = rhs;
+    o.operands = ops;
     o.has_result = true;
-    int idx = commit_op(F, &o);
-    return idx;
+    return commit_op(F, &o);
 }
 // Convenience: global_get of an i32 global.
 static int emit_global_get(FnCtx *F, uint32_t gidx) {
@@ -503,42 +491,39 @@ static int emit_global_get(FnCtx *F, uint32_t gidx) {
     return idx;
 }
 static void emit_global_set(FnCtx *F, uint32_t gidx, int valv) {
+    int ops[1] = { valv };
     wasmssa_op_t o = {0};
     o.type = OP_TYPE_WASMSSA_GLOBAL_SET;
     o.valtype = WT_I32;
     o.global_idx = gidx;
     o.n_operands = 1;
-    o.operands = (int *)malloc(sizeof(int));
-    o.operands[0] = valv;
+    o.operands = ops;
     (void)commit_op(F, &o);
 }
 
 // Convenience: i32 mul.
 static int emit_mul_i32(FnCtx *F, int lhs, int rhs) {
+    int ops[2] = { lhs, rhs };
     wasmssa_op_t o = {0};
     o.type = OP_TYPE_WASMSSA_BINOP;
     o.valtype = WT_I32;
     o.wasm_opcode = 0x6c;  // i32.mul
     o.n_operands = 2;
-    o.operands = (int *)malloc(2 * sizeof(int));
-    o.operands[0] = lhs;
-    o.operands[1] = rhs;
+    o.operands = ops;
     o.has_result = true;
-    int idx = commit_op(F, &o);
-    return idx;
+    return commit_op(F, &o);
 }
 // Convenience: i32.wrap_i64 (0xa7) — narrows an i64 SSA value to i32.
 static int emit_wrap_i64_to_i32(FnCtx *F, int v) {
+    int ops[1] = { v };
     wasmssa_op_t o = {0};
     o.type = OP_TYPE_WASMSSA_UNOP;
     o.valtype = WT_I32;
     o.wasm_opcode = 0xa7;
     o.n_operands = 1;
-    o.operands = (int *)malloc(sizeof(int));
-    o.operands[0] = v;
+    o.operands = ops;
     o.has_result = true;
-    int idx = commit_op(F, &o);
-    return idx;
+    return commit_op(F, &o);
 }
 
 // Parse a "array<i32: v0, v1, ...>" string into a heap-allocated int32_t
@@ -599,27 +584,26 @@ static bool lower_block(FnCtx *F, MLIR_BlockHandle blk);
 // Append a structured-CF marker / br / select op.
 static int emit_marker(FnCtx *F, MLIR_OpType t, uint8_t blocktype,
                        int cond_operand, uint32_t depth) {
+    int ops[1] = { cond_operand };
     wasmssa_op_t o = {0};
     o.type = t;
     o.valtype = blocktype;
     o.br_depth = depth;
     if (cond_operand >= 0) {
         o.n_operands = 1;
-        o.operands = (int *)malloc(sizeof(int));
-        o.operands[0] = cond_operand;
+        o.operands = ops;
     }
     return commit_op(F, &o);
 }
 static int emit_eqz(FnCtx *F, int v) {
+    int ops[1] = { v };
     wasmssa_op_t o = {0};
     o.type = OP_TYPE_WASMSSA_EQZ;
     o.valtype = WT_I32;
     o.n_operands = 1;
-    o.operands = (int *)malloc(sizeof(int));
-    o.operands[0] = v;
+    o.operands = ops;
     o.has_result = true;
-    int idx = commit_op(F, &o);
-    return idx;
+    return commit_op(F, &o);
 }
 static int emit_carrier_get(FnCtx *F, uint32_t cid, uint8_t vt) {
     wasmssa_op_t o = {0};
@@ -627,17 +611,16 @@ static int emit_carrier_get(FnCtx *F, uint32_t cid, uint8_t vt) {
     o.valtype = vt;
     o.carrier_id = cid;
     o.has_result = true;
-    int idx = commit_op(F, &o);
-    return idx;
+    return commit_op(F, &o);
 }
 static void emit_carrier_set(FnCtx *F, uint32_t cid, uint8_t vt, int valv) {
+    int ops[1] = { valv };
     wasmssa_op_t o = {0};
     o.type = OP_TYPE_WASMSSA_CARRIER_SET;
     o.valtype = vt;
     o.carrier_id = cid;
     o.n_operands = 1;
-    o.operands = (int *)malloc(sizeof(int));
-    o.operands[0] = valv;
+    o.operands = ops;
     (void)commit_op(F, &o);
 }
 
@@ -915,14 +898,13 @@ static bool lower_scf_index_switch(FnCtx *F, MLIR_OpHandle op) {
     for (size_t i = 0; i < n_cases; i++) {
         int kc = emit_const_i32(F, (int32_t)case_vals[i]);
         // i32.eq = 0x46
+        int ops[2] = { cond_idx, kc };
         wasmssa_op_t o = {0};
         o.type = OP_TYPE_WASMSSA_BINOP;
         o.valtype = WT_I32;
         o.wasm_opcode = 0x46;
         o.n_operands = 2;
-        o.operands = (int *)malloc(2 * sizeof(int));
-        o.operands[0] = cond_idx;
-        o.operands[1] = kc;
+        o.operands = ops;
         o.has_result = true;
         int eq_idx = commit_op(F, &o);
         emit_marker(F, OP_TYPE_WASMSSA_IF_BEGIN, 0x40, eq_idx, 0);
@@ -995,13 +977,13 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         if (!vmap_get(F, MLIR_GetOpOperand(op, 0), &ci)) return false;
         if (!vmap_get(F, MLIR_GetOpOperand(op, 1), &ai)) return false;
         if (!vmap_get(F, MLIR_GetOpOperand(op, 2), &bi)) return false;
+        int ops[3] = { ai, bi, ci };
         wasmssa_op_t o = {0};
         o.type = OP_TYPE_WASMSSA_SELECT;
         o.valtype = vt;
         o.n_operands = 3;
-        o.operands = (int *)malloc(3 * sizeof(int));
         // wasm select pops cond,b,a so we order operands as a,b,cond.
-        o.operands[0] = ai; o.operands[1] = bi; o.operands[2] = ci;
+        o.operands = ops;
         o.has_result = true;
         int idx = commit_op(F, &o);
         vmap_set(F, r, idx);
@@ -1102,6 +1084,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         else if (vt == WT_F64)   align_log2 = 3;
         else return false;
 
+        int ops[2] = { pa, va };
         wasmssa_op_t o = {0};
         o.type = OP_TYPE_WASMSSA_STORE;
         o.valtype = vt;
@@ -1109,9 +1092,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         o.memory_align_log2 = align_log2;
         o.memory_offset = 0;
         o.n_operands = 2;
-        o.operands = (int *)malloc(2 * sizeof(int));
-        o.operands[0] = pa;   // address (stage 2 emits local.get for these in order)
-        o.operands[1] = va;   // value
+        o.operands = ops;
         (void)commit_op(F, &o);
         return true;
     }
@@ -1136,6 +1117,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         else if (vt == WT_F64)   align_log2 = 3;
         else return false;
 
+        int ops[1] = { pa };
         wasmssa_op_t o = {0};
         o.type = OP_TYPE_WASMSSA_LOAD;
         o.valtype = vt;
@@ -1143,8 +1125,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         o.memory_align_log2 = align_log2;
         o.memory_offset = 0;
         o.n_operands = 1;
-        o.operands = (int *)malloc(sizeof(int));
-        o.operands[0] = pa;
+        o.operands = ops;
         o.has_result = true;
         int idx = commit_op(F, &o);
         vmap_set(F, r, idx);
@@ -1167,25 +1148,25 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         int cur_idx = sa;
         uint8_t cur_vt = wasm_vt(F->ctx, MLIR_GetValueType(s));
         if (in_w == 8 || in_w == 16) {
+            int ops[1] = { cur_idx };
             wasmssa_op_t o = {0};
             o.type = OP_TYPE_WASMSSA_UNOP;
             o.valtype = WT_I32;
             o.wasm_opcode = (in_w == 8) ? 0xc0 : 0xc1;
             o.n_operands = 1;
-            o.operands = (int *)malloc(sizeof(int));
-            o.operands[0] = cur_idx;
+            o.operands = ops;
             o.has_result = true;
             int idx = commit_op(F, &o);
             cur_idx = idx; cur_vt = WT_I32;
         }
         // Step 2: if widening into i64, use i64.extend_i32_s (0xac).
         if (out_w == 64) {
+            int ops[1] = { cur_idx };
             wasmssa_op_t o = {0};
             o.type = OP_TYPE_WASMSSA_EXTEND_I32_S;
             o.valtype = WT_I64;
             o.n_operands = 1;
-            o.operands = (int *)malloc(sizeof(int));
-            o.operands[0] = cur_idx;
+            o.operands = ops;
             o.has_result = true;
             int idx = commit_op(F, &o);
             cur_idx = idx;
@@ -1218,13 +1199,13 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         }
         if (in_vt == WT_I32 && out_vt == WT_I64) {
             // unsigned extension: i64.extend_i32_u (0xad)
+            int ops[1] = { sa };
             wasmssa_op_t o = {0};
             o.type = OP_TYPE_WASMSSA_UNOP;
             o.valtype = WT_I64;
             o.wasm_opcode = 0xad;
             o.n_operands = 1;
-            o.operands = (int *)malloc(sizeof(int));
-            o.operands[0] = sa;
+            o.operands = ops;
             o.has_result = true;
             int idx = commit_op(F, &o);
             vmap_set(F, r, idx);
@@ -1267,13 +1248,13 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
             if (opc == 0) return false;
             int ai, bi;
             if (!vmap_get(F, a, &ai) || !vmap_get(F, b, &bi)) return false;
+            int ops[2] = { ai, bi };
             wasmssa_op_t o = {0};
             o.type = OP_TYPE_WASMSSA_BINOP;
             o.valtype = vt;
             o.wasm_opcode = opc;
             o.n_operands = 2;
-            o.operands = (int *)malloc(2 * sizeof(int));
-            o.operands[0] = ai; o.operands[1] = bi;
+            o.operands = ops;
             o.has_result = true;
             int idx = commit_op(F, &o);
             vmap_set(F, r, idx);
@@ -1301,13 +1282,13 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
             int ai, bi;
             if (!vmap_get(F, MLIR_GetOpOperand(op, 0), &ai)) return false;
             if (!vmap_get(F, MLIR_GetOpOperand(op, 1), &bi)) return false;
+            int ops[2] = { ai, bi };
             wasmssa_op_t o = {0};
             o.type = OP_TYPE_WASMSSA_BINOP;
             o.valtype = vt;
             o.wasm_opcode = opc;
             o.n_operands = 2;
-            o.operands = (int *)malloc(2 * sizeof(int));
-            o.operands[0] = ai; o.operands[1] = bi;
+            o.operands = ops;
             o.has_result = true;
             int idx = commit_op(F, &o);
             vmap_set(F, r, idx);
@@ -1344,13 +1325,13 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         int ai, bi;
         if (!vmap_get(F, a, &ai)) return false;
         if (!vmap_get(F, MLIR_GetOpOperand(op, 1), &bi)) return false;
+        int ops[2] = { ai, bi };
         wasmssa_op_t o = {0};
         o.type = OP_TYPE_WASMSSA_BINOP;
         o.valtype = WT_I32;
         o.wasm_opcode = opc;
         o.n_operands = 2;
-        o.operands = (int *)malloc(2 * sizeof(int));
-        o.operands[0] = ai; o.operands[1] = bi;
+        o.operands = ops;
         o.has_result = true;
         int idx = commit_op(F, &o);
         vmap_set(F, MLIR_GetOpResult(op, 0), idx);
@@ -1379,8 +1360,8 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         o.valtype = out_vt;
         o.wasm_opcode = opc;
         o.n_operands = 1;
-        o.operands = (int *)malloc(sizeof(int));
-        o.operands[0] = sa;
+        int o_ops[1] = { sa };
+        o.operands = o_ops;
         o.has_result = true;
         int idx = commit_op(F, &o);
         vmap_set(F, r, idx);
@@ -1419,8 +1400,8 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         o.valtype = out_vt;
         o.wasm_opcode = opc;
         o.n_operands = 1;
-        o.operands = (int *)malloc(sizeof(int));
-        o.operands[0] = sa;
+        int o_ops[1] = { sa };
+        o.operands = o_ops;
         o.has_result = true;
         int idx = commit_op(F, &o);
         vmap_set(F, r, idx);
@@ -1455,13 +1436,13 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         if (opc == 0) return false;
         int ai, bi;
         if (!vmap_get(F, a, &ai) || !vmap_get(F, b, &bi)) return false;
+        int ops[2] = { ai, bi };
         wasmssa_op_t o = {0};
         o.type = OP_TYPE_WASMSSA_BINOP;
         o.valtype = WT_I32;  // result type
         o.wasm_opcode = opc;
         o.n_operands = 2;
-        o.operands = (int *)malloc(2 * sizeof(int));
-        o.operands[0] = ai; o.operands[1] = bi;
+        o.operands = ops;
         o.has_result = true;
         int idx = commit_op(F, &o);
         vmap_set(F, r, idx);
@@ -1497,8 +1478,8 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         o.valtype = out_vt;
         o.wasm_opcode = opc;
         o.n_operands = 1;
-        o.operands = (int *)malloc(sizeof(int));
-        o.operands[0] = sa;
+        int o_ops[1] = { sa };
+        o.operands = o_ops;
         o.has_result = true;
         int idx = commit_op(F, &o);
         vmap_set(F, r, idx);
@@ -1528,8 +1509,8 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         o.valtype = out_vt;
         o.wasm_opcode = opc;
         o.n_operands = 1;
-        o.operands = (int *)malloc(sizeof(int));
-        o.operands[0] = sa;
+        int o_ops[1] = { sa };
+        o.operands = o_ops;
         o.has_result = true;
         int idx = commit_op(F, &o);
         vmap_set(F, r, idx);
@@ -1558,8 +1539,8 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         o.type = OP_TYPE_WASMSSA_RETURN;
         if (no == 1) {
             o.n_operands = 1;
-            o.operands = (int *)malloc(sizeof(int));
-            o.operands[0] = retv;
+            int o_ops[1] = { retv };
+            o.operands = o_ops;
         }
         (void)commit_op(F, &o);
         return true;
@@ -1580,35 +1561,33 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
             size_t no = MLIR_GetOpNumOperands(op);
             if (no < 1) return false;
             size_t snp = no - 1;
-            uint8_t *sp = (uint8_t *)malloc(snp ? snp : 1);
+            uint8_t *sp = (uint8_t *)arena_alloc(F->arena, snp ? snp : 1);
             for (size_t i = 0; i < snp; i++) {
                 uint8_t v = wasm_vt(F->ctx,
                     MLIR_GetValueType(MLIR_GetOpOperand(op, i + 1)));
-                if (v == 0) { free(sp); return false; }
+                if (v == 0) return false;
                 sp[i] = v;
             }
             size_t nr = MLIR_GetOpNumResults(op);
-            if (nr > 1) { free(sp); return false; }
-            uint8_t *sr = (uint8_t *)malloc(1);
+            if (nr > 1) return false;
+            uint8_t *sr = (uint8_t *)arena_alloc(F->arena, 1);
             size_t snr = 0;
             if (nr == 1) {
                 uint8_t v = wasm_vt(F->ctx,
                     MLIR_GetValueType(MLIR_GetOpResult(op, 0)));
-                if (v == 0) { free(sp); free(sr); return false; }
+                if (v == 0) return false;
                 sr[0] = v;
                 snr = 1;
             }
-            int *opnds = (int *)malloc(no * sizeof(int));
+            int *opnds = (int *)arena_alloc(F->arena, no * sizeof(int));
             // wasm call_indirect pops args first then table-index, so order
             // them in operand[] as [args..., funcptr].
             for (size_t i = 0; i < snp; i++) {
-                if (!vmap_get(F, MLIR_GetOpOperand(op, i + 1), &opnds[i])) {
-                    free(opnds); free(sp); free(sr); return false;
-                }
+                if (!vmap_get(F, MLIR_GetOpOperand(op, i + 1), &opnds[i]))
+                    return false;
             }
-            if (!vmap_get(F, MLIR_GetOpOperand(op, 0), &opnds[snp])) {
-                free(opnds); free(sp); free(sr); return false;
-            }
+            if (!vmap_get(F, MLIR_GetOpOperand(op, 0), &opnds[snp]))
+                return false;
             wasmssa_op_t o = {0};
             o.type = OP_TYPE_WASMSSA_CALL_INDIRECT;
             o.n_operands = (int)no;
@@ -1669,8 +1648,8 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
                         po.valtype = WT_F64;
                         po.wasm_opcode = 0xbb; // f64.promote_f32
                         po.n_operands = 1;
-                        po.operands = (int *)malloc(sizeof(int));
-                        po.operands[0] = va;
+                        int po_ops[1] = { va };
+                        po.operands = po_ops;
                         po.has_result = true;
                         int pidx = commit_op(F, &po);
                         va = pidx;
@@ -1686,24 +1665,21 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
                     o2.memory_align_log2 = align_log2;
                     o2.memory_offset = offs[i];
                     o2.n_operands = 2;
-                    o2.operands = (int *)malloc(2 * sizeof(int));
-                    o2.operands[0] = buf_addr;
-                    o2.operands[1] = va;
+                    int o2_ops[2] = { buf_addr, va };
+                    o2.operands = o2_ops;
                     (void)commit_op(F, &o2);
                 }
                 free(offs);
 
                 // Now emit the call with fixed args + buf_addr.
                 string nm = MLIR_GetAttributeAsString(F->ctx, callee);
-                const char *cname = nm.str; size_t cn = nm.size;
-                if (cn > 0 && cname[0] == '@') { cname++; cn--; }
-                char *cstr = xstrdupn(cname, cn);
+                string cstr = nm;
+                if (cstr.size > 0 && cstr.str[0] == '@') { cstr.str++; cstr.size--; }
                 size_t nout = nfixed + 1;
-                int *opnds = (int *)malloc(nout * sizeof(int));
+                int *opnds = (int *)arena_alloc(F->arena, nout * sizeof(int));
                 for (size_t i = 0; i < nfixed; i++) {
-                    if (!vmap_get(F, MLIR_GetOpOperand(op, i), &opnds[i])) {
-                        free(opnds); free(cstr); return false;
-                    }
+                    if (!vmap_get(F, MLIR_GetOpOperand(op, i), &opnds[i]))
+                        return false;
                 }
                 opnds[nfixed] = buf_addr;
 
@@ -1730,17 +1706,14 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         }
         string nm = MLIR_GetAttributeAsString(F->ctx, callee);
         // SymbolRefAttr prints as `@name`.
-        const char *cname = nm.str; size_t cn = nm.size;
-        if (cn > 0 && cname[0] == '@') { cname++; cn--; }
-        char *cstr = xstrdupn(cname, cn);
+        string cstr = nm;
+        if (cstr.size > 0 && cstr.str[0] == '@') { cstr.str++; cstr.size--; }
 
         size_t no = MLIR_GetOpNumOperands(op);
-        int *opnds = (int *)malloc((no ? no : 1) * sizeof(int));
+        int *opnds = (int *)arena_alloc(F->arena, (no ? no : 1) * sizeof(int));
         for (size_t i = 0; i < no; i++) {
-            if (!vmap_get(F, MLIR_GetOpOperand(op, i), &opnds[i])) {
-                free(opnds); free(cstr);
+            if (!vmap_get(F, MLIR_GetOpOperand(op, i), &opnds[i]))
                 return false;
-            }
         }
 
         wasmssa_op_t o = {0};
@@ -1879,7 +1852,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
             wasmssa_op_t o = {0};
             o.type = OP_TYPE_WASMSSA_FUNC_ADDR;
             o.valtype = WT_I32;
-            o.call_target = xstrdup_str(ts);
+            o.call_target = ts;
             o.has_result = true;
             int idx = commit_op(F, &o);
             vmap_set(F, MLIR_GetOpResult(op, 0), idx);
@@ -1889,7 +1862,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         wasmssa_op_t o = {0};
         o.type = OP_TYPE_WASMSSA_ADDRESSOF;
         o.valtype = WT_I32;
-        o.call_target = xstrdup_str(ts);  // reuse field for symbol name
+        o.call_target = ts;  // reuse field for symbol name
         o.has_result = true;
         int idx = commit_op(F, &o);
         vmap_set(F, MLIR_GetOpResult(op, 0), idx);
@@ -1929,9 +1902,8 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         o.memory_align_log2 = 2;
         o.memory_offset = 0;
         o.n_operands = 2;
-        o.operands = (int *)malloc(2 * sizeof(int));
-        o.operands[0] = pa;
-        o.operands[1] = F->va_list_param_idx;
+        int o_ops[2] = { pa, F->va_list_param_idx };
+        o.operands = o_ops;
         (void)commit_op(F, &o);
         return true;
     }
@@ -1952,8 +1924,8 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         ol.memory_align_log2 = 2;
         ol.memory_offset = 0;
         ol.n_operands = 1;
-        ol.operands = (int *)malloc(sizeof(int));
-        ol.operands[0] = sa;
+        int ol_ops[1] = { sa };
+        ol.operands = ol_ops;
         ol.has_result = true;
         int lidx = commit_op(F, &ol);
         wasmssa_op_t os = {0};
@@ -1963,9 +1935,8 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         os.memory_align_log2 = 2;
         os.memory_offset = 0;
         os.n_operands = 2;
-        os.operands = (int *)malloc(2 * sizeof(int));
-        os.operands[0] = da;
-        os.operands[1] = lidx;
+        int os_ops[2] = { da, lidx };
+        os.operands = os_ops;
         (void)commit_op(F, &os);
         return true;
     }
@@ -1985,8 +1956,8 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         o.valtype = vt;
         o.wasm_opcode = opc;
         o.n_operands = 1;
-        o.operands = (int *)malloc(sizeof(int));
-        o.operands[0] = sa;
+        int o_ops[1] = { sa };
+        o.operands = o_ops;
         o.has_result = true;
         int idx = commit_op(F, &o);
         vmap_set(F, r, idx);
