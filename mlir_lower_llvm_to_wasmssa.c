@@ -29,10 +29,10 @@
 #include <string.h>
 
 #include "mlir_api.h"
-#include "mlir_wasm_dialect.h"
+#include "mlir_wasm_pipeline_internal.h"
 
-wasmssa_module_t *mlir_lower_llvm_to_wasmssa(MLIR_Context *ctx,
-                                             MLIR_OpHandle module);
+wasmssa_module_t *mlir_lower_llvm_to_wasmssa_struct(MLIR_Context *ctx,
+                                                    MLIR_OpHandle module);
 
 // =============================================================================
 // String / type helpers (mirror the old single-stage translator).
@@ -2168,8 +2168,8 @@ static bool lower_global(MLIR_Context *ctx, wasmssa_module_t *out,
     return true;
 }
 
-wasmssa_module_t *mlir_lower_llvm_to_wasmssa(MLIR_Context *ctx,
-                                             MLIR_OpHandle module) {
+wasmssa_module_t *mlir_lower_llvm_to_wasmssa_struct(MLIR_Context *ctx,
+                                                    MLIR_OpHandle module) {
     MLIR_RegionHandle mr = MLIR_GetOpRegion(module, 0);
     MLIR_BlockHandle  mb = MLIR_GetRegionBlock(mr, 0);
     size_t nops = MLIR_GetBlockNumOps(mb);

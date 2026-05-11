@@ -10,7 +10,7 @@
 #include <platform/platform.h>
 
 #include "mlir_api.h"
-#include "mlir_wasm_dialect.h"
+#include "mlir_wasm_pipeline.h"
 #include "tinyc.h"
 
 extern string read_file_ok(Arena *arena, string path);
@@ -170,30 +170,27 @@ int app_main(void) {
     }
     string out;
     if (emit_wasmssa) {
-        wasmssa_module_t *ssa = mlir_lower_llvm_to_wasmssa(&ctx, module);
-        if (!ssa) {
+        MLIR_OpHandle ssa = mlir_lower_llvm_to_wasmssa(&ctx, module);
+        if (ssa == MLIR_INVALID_HANDLE) {
             arena_destroy(arena);
             arena_destroy(boot_arena);
             return 1;
         }
-        out = wasmssa_module_print(&ctx, ssa);
-        wasmssa_module_free(ssa);
+        out = MLIR_PrintOperationGeneric(&ctx, ssa);
     } else if (emit_wasmstack) {
-        wasmssa_module_t *ssa = mlir_lower_llvm_to_wasmssa(&ctx, module);
-        if (!ssa) {
+        MLIR_OpHandle ssa = mlir_lower_llvm_to_wasmssa(&ctx, module);
+        if (ssa == MLIR_INVALID_HANDLE) {
             arena_destroy(arena);
             arena_destroy(boot_arena);
             return 1;
         }
-        wasmstack_module_t *stk = mlir_stackify_wasmssa(ssa);
-        wasmssa_module_free(ssa);
-        if (!stk) {
+        MLIR_OpHandle stk = mlir_stackify_wasmssa(&ctx, ssa);
+        if (stk == MLIR_INVALID_HANDLE) {
             arena_destroy(arena);
             arena_destroy(boot_arena);
             return 1;
         }
-        out = wasmstack_module_print(&ctx, stk);
-        wasmstack_module_free(stk);
+        out = MLIR_PrintOperationGeneric(&ctx, stk);
     } else if (emit_wat) {
         string bin = MLIR_TranslateModuleToWasm(&ctx, module, lowering);
         if (bin.size == 0) {

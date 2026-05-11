@@ -24,10 +24,10 @@
 #include <base/string.h>
 
 #include "mlir_api.h"
-#include "mlir_wasm_dialect.h"
+#include "mlir_wasm_pipeline_internal.h"
 
-string mlir_translate_wasmstack_to_binary(MLIR_Context *ctx,
-                                          wasmstack_module_t *m);
+string mlir_translate_wasmstack_to_binary_struct(MLIR_Context *ctx,
+                                                 wasmstack_module_t *m);
 
 // =============================================================================
 // Growable byte buffer + LEB128 encoders.
@@ -641,8 +641,8 @@ static void build_reloc_code_section(EmFunc *funcs, size_t n_funcs,
 // =============================================================================
 // Top-level translator.
 // =============================================================================
-string mlir_translate_wasmstack_to_binary(MLIR_Context *ctx,
-                                          wasmstack_module_t *m) {
+string mlir_translate_wasmstack_to_binary_struct(MLIR_Context *ctx,
+                                                 wasmstack_module_t *m) {
     string fail = {0};
     if (!m) return fail;
 

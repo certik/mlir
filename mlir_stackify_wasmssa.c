@@ -27,9 +27,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "mlir_wasm_dialect.h"
+#include "mlir_wasm_pipeline_internal.h"
 
-wasmstack_module_t *mlir_stackify_wasmssa(wasmssa_module_t *m);
+wasmstack_module_t *mlir_stackify_wasmssa_struct(wasmssa_module_t *m);
 
 // Helpers to append simple wasmstack ops.
 static void emit_local_get(wasmstack_func_t *f, uint32_t idx) {
@@ -207,7 +207,7 @@ fail:
     return false;
 }
 
-wasmstack_module_t *mlir_stackify_wasmssa(wasmssa_module_t *m) {
+wasmstack_module_t *mlir_stackify_wasmssa_struct(wasmssa_module_t *m) {
     if (!m) return NULL;
     wasmstack_module_t *out = wasmstack_module_new();
     for (size_t i = 0; i < m->n_funcs; i++) {
