@@ -42,27 +42,10 @@
 #include <base/string.h>
 
 // =============================================================================
-// Private working representation for this stage. `wasm_global_t` is a
-// scratch buffer used while lowering a single global; `wasmssa_op_t` is
-// a stack-local descriptor handed to `commit_op` once per emitted op.
-// Neither escapes this file.
+// Private working representation for this stage. `wasmssa_op_t` is a
+// stack-local descriptor handed to `commit_op` once per emitted op. It
+// never escapes this file.
 // =============================================================================
-typedef struct {
-    uint32_t offset;
-    char    *target;
-    int32_t  addend;
-} wasm_data_reloc_t;
-
-typedef struct {
-    char    *name;
-    uint8_t *data;
-    uint32_t size;
-    uint32_t align_pow;
-    bool     is_const;
-    wasm_data_reloc_t *relocs;
-    size_t   n_relocs, c_relocs;
-} wasm_global_t;
-
 typedef struct {
     MLIR_OpType type;
     uint8_t     valtype;
@@ -99,29 +82,6 @@ typedef struct {
     size_t           n_func_names, c_func_names;
 } ModCtx;
 
-#define ENSURE(arr, n, c, T) do { \
-    if ((n) == (c)) { \
-        (c) = (c) ? (c) * 2 : 8; \
-        (arr) = (T *)realloc((arr), (c) * sizeof(T)); \
-    } \
-} while (0)
-
-static void wasm_global_free_contents(wasm_global_t *g) {
-    free(g->name);
-    free(g->data);
-    for (size_t j = 0; j < g->n_relocs; j++) free(g->relocs[j].target);
-    free(g->relocs);
-}
-static void wasm_global_add_reloc(wasm_global_t *g, uint32_t off,
-                                  const char *target, int32_t addend) {
-    ENSURE(g->relocs, g->n_relocs, g->c_relocs, wasm_data_reloc_t);
-    wasm_data_reloc_t *r = &g->relocs[g->n_relocs++];
-    r->offset = off;
-    size_t n = strlen(target);
-    r->target = (char *)malloc(n + 1);
-    memcpy(r->target, target, n + 1);
-    r->addend = addend;
-}
 static void modctx_add_func_name(ModCtx *m, const char *name) {
     if (m->n_func_names == m->c_func_names) {
         m->c_func_names = m->c_func_names ? m->c_func_names * 2 : 8;
@@ -399,6 +359,8 @@ static MLIR_AttributeHandle attr_i32(MLIR_Context *ctx, const char *name, int64_
 static MLIR_AttributeHandle attr_i64(MLIR_Context *ctx, const char *name, int64_t v);
 static MLIR_AttributeHandle attr_s_cstr(MLIR_Context *ctx, const char *name, const char *v);
 static MLIR_AttributeHandle attr_b(MLIR_Context *ctx, const char *name, bool v);
+static MLIR_AttributeHandle attr_s(MLIR_Context *ctx, const char *name,
+                                   const char *v, size_t vlen);
 static MLIR_AttributeHandle attr_s_hex(MLIR_Context *ctx, Arena *arena,
                                        const char *name,
                                        const uint8_t *p, size_t n);
@@ -2318,71 +2280,107 @@ static uint32_t align_pow_for_type(MLIR_Context *ctx, MLIR_TypeHandle ty) {
     return p;
 }
 
-// Lower one llvm.mlir.global op into the caller-provided `g` wasm_global_t.
-// `g` must be zero-initialized on entry. Returns false on failure (caller
-// frees `g` in either case).
-static bool lower_global(MLIR_Context *ctx, wasm_global_t *g,
-                         MLIR_OpHandle op) {
+// Helper: emit a wasmssa.import_global op into `body` with the given
+// fields. `data` may be NULL when `size == 0`.
+static void emit_import_global(MLIR_Context *ctx, Arena *arena,
+                               MLIR_BlockHandle body,
+                               const char *name, uint32_t size,
+                               uint32_t align_pow, bool is_const,
+                               const uint8_t *data, const char *relocs_str,
+                               size_t relocs_len) {
+    MLIR_AttributeHandle attrs[16];
+    size_t na = 0;
+    attrs[na++] = attr_s_cstr(ctx, "sym_name", name ? name : "");
+    attrs[na++] = attr_i32(ctx, "size", size);
+    attrs[na++] = attr_i32(ctx, "align_pow", align_pow);
+    attrs[na++] = attr_b(ctx, "is_const", is_const);
+    if (size) {
+        attrs[na++] = attr_s(ctx, "init_data", (const char *)data, size);
+    } else {
+        attrs[na++] = attr_s(ctx, "init_data", "", 0);
+    }
+    if (relocs_str) {
+        attrs[na++] = attr_s(ctx, "relocs", relocs_str, relocs_len);
+    }
+    MLIR_OpHandle op = make_op(ctx, OP_TYPE_WASMSSA_IMPORT_GLOBAL,
+                               attrs, na, NULL, 0, NULL, 0, 0, NULL);
+    MLIR_AppendBlockOp(ctx, body, op);
+    (void)arena;
+}
+
+// Lower one llvm.mlir.global op directly into a wasmssa.import_global op
+// appended to `body`. Returns false on failure (no op is appended).
+static bool lower_global(MLIR_Context *ctx, Arena *arena,
+                         MLIR_BlockHandle body, MLIR_OpHandle op) {
     MLIR_AttributeHandle sa = find_attr(op, "sym_name");
     if (sa == MLIR_INVALID_HANDLE) return false;
     string sym = MLIR_GetAttributeString(sa);
+    char *name = xstrdup_str(sym);
 
+    uint32_t size = 0;
+    uint32_t align_pow = 0;
     MLIR_AttributeHandle ga = find_attr(op, "global_type");
-    MLIR_TypeHandle gty = MLIR_INVALID_HANDLE;
-    if (ga != MLIR_INVALID_HANDLE) gty = MLIR_GetAttributeTypeValue(ga);
-
-    g->name = xstrdup_str(sym);
-    if (gty != MLIR_INVALID_HANDLE) {
-        g->size = type_size_bytes(ctx, gty);
-        g->align_pow = align_pow_for_type(ctx, gty);
+    if (ga != MLIR_INVALID_HANDLE) {
+        MLIR_TypeHandle gty = MLIR_GetAttributeTypeValue(ga);
+        size = type_size_bytes(ctx, gty);
+        align_pow = align_pow_for_type(ctx, gty);
     }
 
-    // Constness: presence of attr "constant" (any value).
-    g->is_const = (find_attr(op, "constant") != MLIR_INVALID_HANDLE);
+    bool is_const = (find_attr(op, "constant") != MLIR_INVALID_HANDLE);
+
+    uint8_t *data = NULL;
+    bool data_owned = false;
 
     MLIR_AttributeHandle va = find_attr(op, "value");
     if (va != MLIR_INVALID_HANDLE) {
         MLIR_AttrKind ak = MLIR_GetAttributeKind(va);
         if (ak == MLIR_ATTR_KIND_STRING) {
             string s = MLIR_GetAttributeString(va);
-            g->size = (uint32_t)s.size;
-            g->data = (uint8_t *)malloc(g->size ? g->size : 1);
-            memcpy(g->data, s.str, g->size);
-            if (g->align_pow == 0) g->align_pow = 0;
+            size = (uint32_t)s.size;
+            data = (uint8_t *)malloc(size ? size : 1);
+            data_owned = true;
+            memcpy(data, s.str, size);
+            emit_import_global(ctx, arena, body, name, size, align_pow,
+                               is_const, data, NULL, 0);
+            free(name); if (data_owned) free(data);
             return true;
         }
         if (ak == MLIR_ATTR_KIND_INTEGER || ak == MLIR_ATTR_KIND_FLOAT) {
-            if (g->size == 0) return false;
-            g->data = (uint8_t *)calloc(1, g->size);
+            if (size == 0) { free(name); return false; }
+            data = (uint8_t *)calloc(1, size);
+            data_owned = true;
             uint64_t bits = 0;
             if (ak == MLIR_ATTR_KIND_INTEGER) {
                 bits = (uint64_t)MLIR_GetAttributeInteger(va);
             } else {
                 double d = MLIR_GetAttributeFloat(va);
-                if (g->size == 4) {
+                if (size == 4) {
                     float f = (float)d; uint32_t b32;
                     memcpy(&b32, &f, 4); bits = b32;
-                } else if (g->size == 8) {
+                } else if (size == 8) {
                     memcpy(&bits, &d, 8);
-                } else return false;
+                } else { free(name); free(data); return false; }
             }
-            for (uint32_t i = 0; i < g->size && i < 8; i++)
-                g->data[i] = (uint8_t)(bits >> (8 * i));
+            for (uint32_t i = 0; i < size && i < 8; i++)
+                data[i] = (uint8_t)(bits >> (8 * i));
+            emit_import_global(ctx, arena, body, name, size, align_pow,
+                               is_const, data, NULL, 0);
+            free(name); free(data);
             return true;
         }
         // Unknown attr kind -- fall through to zero-init.
     }
 
     // Region-init globals: walk for an llvm.mlir.addressof + llvm.return.
+    // The only pattern produced by tinyc is:
+    //   %0 = llvm.mlir.addressof @other : !llvm.ptr
+    //   llvm.return %0 : !llvm.ptr
+    // which becomes a 4-byte pointer slot with an R_WASM_MEMORY_ADDR reloc.
     if (MLIR_GetOpNumRegions(op) > 0) {
         MLIR_RegionHandle rgn = MLIR_GetOpRegion(op, 0);
         if (MLIR_GetRegionNumBlocks(rgn) > 0) {
             MLIR_BlockHandle blk = MLIR_GetRegionBlock(rgn, 0);
             size_t nb = MLIR_GetBlockNumOps(blk);
-            // Map block-internal ssa value -> tagged "addressof @target".
-            // We only support the trivial pattern produced by tinyc:
-            //   %0 = llvm.mlir.addressof @other : !llvm.ptr
-            //   llvm.return %0 : !llvm.ptr
             char *pending_target = NULL;
             for (size_t bi = 0; bi < nb; bi++) {
                 MLIR_OpHandle bop = MLIR_GetBlockOp(blk, bi);
@@ -2401,20 +2399,27 @@ static bool lower_global(MLIR_Context *ctx, wasm_global_t *g,
                             }
                         }
                     }
-                    if (ta == MLIR_INVALID_HANDLE) return false;
-                    string ts = MLIR_GetAttributeString(ta);
-                    if (ts.size && ts.str[0] == '@') {
-                        ts.str++; ts.size--;
+                    if (ta == MLIR_INVALID_HANDLE) {
+                        free(pending_target); free(name); return false;
                     }
+                    string ts = MLIR_GetAttributeString(ta);
+                    if (ts.size && ts.str[0] == '@') { ts.str++; ts.size--; }
                     free(pending_target);
                     pending_target = xstrdup_str(ts);
                 } else if (name_eq(bn, "llvm.return")) {
                     if (!pending_target) break;
-                    g->size = 4;
-                    if (g->align_pow == 0) g->align_pow = 2;
-                    g->data = (uint8_t *)calloc(1, g->size);
-                    wasm_global_add_reloc(g, 0, pending_target, 0);
-                    free(pending_target);
+                    size = 4;
+                    if (align_pow == 0) align_pow = 2;
+                    data = (uint8_t *)calloc(1, size);
+                    data_owned = true;
+                    // Build the relocs string inline: "<off>:<target>:<addend>".
+                    size_t cap = strlen(pending_target) + 32;
+                    char *buf = (char *)arena_alloc(arena, cap);
+                    int n = snprintf(buf, cap, "%u:%s:%d", 0u, pending_target, 0);
+                    size_t off = (n > 0) ? (size_t)n : 0;
+                    emit_import_global(ctx, arena, body, name, size, align_pow,
+                                       is_const, data, buf, off);
+                    free(pending_target); free(name); free(data);
                     return true;
                 }
             }
@@ -2423,8 +2428,11 @@ static bool lower_global(MLIR_Context *ctx, wasm_global_t *g,
     }
 
     // No initializer found (e.g. uninitialized scalar global). Zero-init.
-    if (g->size == 0) return false;
-    g->data = (uint8_t *)calloc(1, g->size);
+    if (size == 0) { free(name); return false; }
+    data = (uint8_t *)calloc(1, size);
+    emit_import_global(ctx, arena, body, name, size, align_pow,
+                       is_const, data, NULL, 0);
+    free(name); free(data);
     return true;
 }
 
@@ -2499,42 +2507,6 @@ static MLIR_OpHandle make_op(MLIR_Context *ctx, MLIR_OpType type,
         MLIR_INVALID_HANDLE, (string){0}, -1);
     if (out_result) *out_result = n_res ? res_vals[0] : MLIR_INVALID_HANDLE;
     return op;
-}
-
-static void emit_global_to_mlir(MLIR_Context *ctx, Arena *arena,
-                                MLIR_BlockHandle body, const wasm_global_t *g) {
-    MLIR_AttributeHandle attrs[16];
-    size_t na = 0;
-    attrs[na++] = attr_s_cstr(ctx, "sym_name", g->name ? g->name : "");
-    attrs[na++] = attr_i32(ctx, "size", g->size);
-    attrs[na++] = attr_i32(ctx, "align_pow", g->align_pow);
-    attrs[na++] = attr_b(ctx, "is_const", g->is_const);
-    if (g->size) {
-        attrs[na++] = attr_s(ctx, "init_data", (const char *)g->data, g->size);
-    } else {
-        attrs[na++] = attr_s(ctx, "init_data", "", 0);
-    }
-    if (g->n_relocs) {
-        size_t cap = 1;
-        for (size_t i = 0; i < g->n_relocs; i++) {
-            cap += strlen(g->relocs[i].target ? g->relocs[i].target : "") + 32;
-        }
-        char *buf = (char *)arena_alloc(arena, cap);
-        size_t off = 0;
-        for (size_t i = 0; i < g->n_relocs; i++) {
-            int n = snprintf(buf + off, cap - off, "%s%u:%s:%d",
-                             i ? "," : "",
-                             g->relocs[i].offset,
-                             g->relocs[i].target ? g->relocs[i].target : "",
-                             g->relocs[i].addend);
-            if (n < 0) break;
-            off += (size_t)n;
-        }
-        attrs[na++] = attr_s(ctx, "relocs", buf, off);
-    }
-    MLIR_OpHandle op = make_op(ctx, OP_TYPE_WASMSSA_IMPORT_GLOBAL,
-                               attrs, na, NULL, 0, NULL, 0, 0, NULL);
-    MLIR_AppendBlockOp(ctx, body, op);
 }
 
 // Emit an imported (body-less) wasmssa.func op directly into the module body.
@@ -2635,15 +2607,11 @@ MLIR_OpHandle mlir_lower_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
         if (!name_eq(MLIR_GetOpName(op), "llvm.mlir.global")) continue;
-        wasm_global_t g = {0};
-        if (!lower_global(ctx, &g, op)) {
+        if (!lower_global(ctx, arena, body, op)) {
             fprintf(stderr, "wasmssa-lower: failed to lower global\n");
-            wasm_global_free_contents(&g);
             modctx_free_contents(&mod);
             return MLIR_INVALID_HANDLE;
         }
-        emit_global_to_mlir(ctx, arena, body, &g);
-        wasm_global_free_contents(&g);
     }
 
     modctx_free_contents(&mod);
