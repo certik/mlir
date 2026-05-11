@@ -349,6 +349,7 @@ test_tinyc_upstream = { cmd = "python examples/tinyc/run_tinyc_tests.py", depend
 test_tinyc_upstream_wasm = { cmd = "TINYC_TARGET=wasm python examples/tinyc/run_tinyc_tests.py", depends-on = ["build_tinyc_upstream"], description = "Run tinyC example compiler tests against a wasm32 backend (wasm-ld + wasmtime)" }
 build_tinyc_native = { cmd = "bash examples/tinyc/build_tinyc_native.sh", description = "Build the tinyC example compiler against the native MLIR backend (mlir_api_impl.c)" }
 test_tinyc_native = { cmd = "TINYC=./tinyc_native python examples/tinyc/run_tinyc_tests.py", depends-on = ["build_tinyc_native"], description = "Run tinyC example compiler tests against the native-backend binary" }
+test_tinyc_native_wasm = { cmd = "TINYC=./tinyc_native TINYC_TARGET=wasm TINYC_LOWERING=native python examples/tinyc/run_tinyc_tests.py", depends-on = ["build_tinyc_native"], description = "Run tinyC example compiler tests against the native backend with the native LLVM->wasm pipeline (wasm-ld + wasmtime)" }
 
 [feature.upstream.target.win-64.tasks]
 build_cross_upstream = { cmd = "tests\\build_cross_upstream.bat", description = "Build cross-impl driver against upstream LLVM/MLIR (Windows)" }
@@ -360,6 +361,7 @@ test_tinyc_upstream = { cmd = "python examples/tinyc/run_tinyc_tests.py", depend
 test_tinyc_upstream_wasm = { cmd = "set TINYC_TARGET=wasm && python examples/tinyc/run_tinyc_tests.py", depends-on = ["build_tinyc_upstream"], description = "Run tinyC example compiler tests against a wasm32 backend (Windows)" }
 build_tinyc_native = { cmd = "examples\\tinyc\\build_tinyc_native.bat", description = "Build the tinyC example compiler against the native MLIR backend (mlir_api_impl.c) (Windows)" }
 test_tinyc_native = { cmd = "TINYC=./tinyc_native.exe python examples/tinyc/run_tinyc_tests.py", depends-on = ["build_tinyc_native"], description = "Run tinyC example compiler tests against the native-backend binary (Windows)" }
+test_tinyc_native_wasm = { cmd = "cmd /c \"set TINYC=./tinyc_native.exe&& set TINYC_TARGET=wasm&& set TINYC_LOWERING=native&& python examples/tinyc/run_tinyc_tests.py\"", depends-on = ["build_tinyc_native"], description = "Run tinyC example compiler tests against the native backend with the native LLVM->wasm pipeline (Windows)" }
 
 
 [environments]
