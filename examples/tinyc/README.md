@@ -112,9 +112,9 @@ wasmtime /tmp/p.wasm   # prints 55
 ./tinyc --emit=wat        sum_to_10.tc     # 6. final wasm binary as WAT
 ```
 
-`--emit=wasmssa` and `--emit=wasmstack` print the C-struct intermediate
-forms used by the native pipeline (`mlir_wasm_dialect.h`) in an
-MLIR-like generic text format; both require `--lowering=native`.
+`--emit=wasmssa` and `--emit=wasmstack` print the intermediate
+wasmssa / wasmstack MLIR modules used by the native pipeline in the
+generic MLIR text format; both require `--lowering=native`.
 `--emit=wat` disassembles the final `.wasm.o` bytes to a WAT-like text
 form and works with either lowering.
 
@@ -140,8 +140,8 @@ only; for that binary use `pixi run test_tinyc_native`.
 
 ### How the native pipeline is structured
 
-The native LLVM-dialect → wasm path lives in three stages plus a
-shared C-struct IR:
+The native LLVM-dialect → wasm path lives in three MLIR-to-MLIR stages
+plus a thin façade:
 
 - `mlir_lower_llvm_to_wasmssa.c` — Stage 1: LLVM dialect → wasmssa
   (also runs `lift-cf-to-scf` first to recover structured control
@@ -152,7 +152,8 @@ shared C-struct IR:
   (emits the wasm binary including type/import/function/table/memory/
   global/export/element/code/data sections plus relocation metadata
   consumed by `wasm-ld`).
-- `mlir_wasm_dialect.h` / `.c` — shared C-struct IR.
+- `mlir_wasm_print.c` — generic-MLIR printer used by `--emit=wasmssa`
+  and `--emit=wasmstack`.
 - `mlir_translate_to_wasm.c` — façade chaining the three stages.
 
 ## Why this exists

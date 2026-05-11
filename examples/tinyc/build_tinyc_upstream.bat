@@ -25,7 +25,7 @@ if errorlevel 1 exit /b 1
 
 link /nologo /out:tinyc.exe ^
     upstream_main.obj lex.obj preprocess.obj parse.obj emit.obj driver.obj ^
-    mlir_op_names.obj mlir_lower_to_llvm.obj mlir_translate_to_llvm_ir.obj mlir_translate_to_wasm.objbj mlir_wasm_print.obj mlir_lower_llvm_to_wasmssa.obj mlir_stackify_wasmssa.obj mlir_translate_wasmstack_to_binary.obj mlir_generic_printer.obj mlir_api_impl_upstream.obj ^
+    mlir_op_names.obj mlir_lower_to_llvm.obj mlir_translate_to_llvm_ir.obj mlir_translate_to_wasm.obj mlir_wasm_print.obj mlir_lower_llvm_to_wasmssa.obj mlir_stackify_wasmssa.obj mlir_translate_wasmstack_to_binary.obj mlir_generic_printer.obj mlir_api_impl_upstream.obj ^
     io.obj buddy.obj arena.obj scratch.obj format.obj math.obj string.obj mem.obj numconv.obj assert.obj exit.obj platform_windows.obj ^
     /LIBPATH:"%CONDA_PREFIX%\Library\lib" @mlir_libs.rsp %LLVM_LIBS% ntdll.lib zlib.lib zstd.lib
 if errorlevel 1 exit /b 1
