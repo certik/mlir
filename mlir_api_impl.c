@@ -8,6 +8,11 @@
 #include "mlir_api.h"
 #include "mlir_op_names.h"
 #include "mlir_parser.h"
+#ifdef MLIR_HAS_NATIVE_LOWERING
+#include "mlir_llvm_to_wasmssa.h"
+#include "mlir_wasmssa_to_wasmstack.h"
+#include "mlir_wasmstack_to_bin.h"
+#endif
 #include <string.h>
 
 #ifdef __cplusplus
@@ -509,6 +514,18 @@ MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle oh, size_t idx) {
     IR_Op *op = resolve_op(oh);
     if (!op || idx >= op->n_attributes) return MLIR_INVALID_HANDLE;
     return op->attributes[idx];
+}
+
+MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle oh, const char *name) {
+    IR_Op *op = resolve_op(oh);
+    if (!op) return MLIR_INVALID_HANDLE;
+    size_t nlen = strlen(name);
+    for (size_t i = 0; i < op->n_attributes; i++) {
+        string an = MLIR_GetAttributeName(op->attributes[i]);
+        if (an.size == nlen && memcmp(an.str, name, nlen) == 0)
+            return op->attributes[i];
+    }
+    return MLIR_INVALID_HANDLE;
 }
 
 size_t MLIR_GetOpNumOperands(MLIR_OpHandle oh) {
@@ -1080,6 +1097,13 @@ MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_TypeHandle th, size_t idx) {
     return MLIR_INVALID_HANDLE;
 }
 
+bool MLIR_GetTypeFunctionIsVarArg(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    if (!t) return false;
+    if (t->kind == TYPE_KIND_LLVM_FUNCTION) return t->data.llvm_function.is_var_arg;
+    return false;
+}
+
 MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle th) {
     IR_Type *t = resolve_type(th);
     if (!t) return MLIR_INVALID_HANDLE;
@@ -1087,6 +1111,36 @@ MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle th) {
         return t->data.shaped.element_type;
     }
     return MLIR_INVALID_HANDLE;
+}
+
+bool MLIR_IsTypeLLVMStruct(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    return t && t->kind == TYPE_KIND_LLVM_STRUCT;
+}
+size_t MLIR_GetTypeLLVMStructNumFields(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    if (!t || t->kind != TYPE_KIND_LLVM_STRUCT) return 0;
+    return t->data.llvm_struct.n_fields;
+}
+MLIR_TypeHandle MLIR_GetTypeLLVMStructField(MLIR_TypeHandle th, size_t idx) {
+    IR_Type *t = resolve_type(th);
+    if (!t || t->kind != TYPE_KIND_LLVM_STRUCT) return MLIR_INVALID_HANDLE;
+    if (idx >= t->data.llvm_struct.n_fields) return MLIR_INVALID_HANDLE;
+    return t->data.llvm_struct.fields[idx];
+}
+bool MLIR_IsTypeLLVMArray(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    return t && t->kind == TYPE_KIND_LLVM_ARRAY;
+}
+MLIR_TypeHandle MLIR_GetTypeLLVMArrayElement(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    if (!t || t->kind != TYPE_KIND_LLVM_ARRAY) return MLIR_INVALID_HANDLE;
+    return t->data.llvm_array.element;
+}
+uint64_t MLIR_GetTypeLLVMArrayNumElements(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    if (!t || t->kind != TYPE_KIND_LLVM_ARRAY) return 0;
+    return t->data.llvm_array.count;
 }
 
 void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle th, uint32_t width, bool is_signed) {
@@ -1707,25 +1761,50 @@ bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module,
     return mlir_lower_to_llvm_native(ctx, module);
 }
 
+bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx, MLIR_OpHandle module,
+                                    MLIR_LoweringBackend backend) {
+    // The pure-native binary only links the in-tree lowering; there is no
+    // upstream `lift-cf-to-scf` pass available here. We therefore ignore
+    // `backend` and always take the native path. Callers requesting
+    // MLIR_LOWERING_UPSTREAM in this build get the native lowering with a
+    // diagnostic printed via the API's existing fprintf-on-stderr style;
+    // the bare-metal parser build can't print and silently falls through.
+    if (backend == MLIR_LOWERING_UPSTREAM) {
+#ifdef MLIR_HAS_NATIVE_LOWERING
+        fprintf(stderr,
+                "MLIR_LowerToLLVMDialectForWasm: upstream backend is not "
+                "available in the native build; using native lowering\n");
+#endif
+    }
+    return mlir_lower_to_llvm_native(ctx, module);
+}
+
 string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module,
                                     MLIR_LoweringBackend backend) {
     (void)backend;
     return mlir_translate_to_llvm_ir_native(ctx, module);
 }
 
-// MLIR_TranslateModuleToWasm: not yet implemented for the native backend.
-// Returns an empty string so callers can detect failure. The upstream
-// backend (mlir_api_impl_upstream.cpp) provides the real implementation
-// via LLVM's WebAssembly target.
+// MLIR_TranslateModuleToWasm: native backend chains the three stages
+// (llvm->wasmssa, wasmssa->wasmstack, wasmstack->bin) directly. Bare-metal
+// builds (parser only) don't define MLIR_HAS_NATIVE_LOWERING and get an
+// empty-string fallback. The upstream backend is only available in the
+// upstream-backed build (mlir_api_impl_upstream.cpp).
 string MLIR_TranslateModuleToWasm(MLIR_Context *ctx, MLIR_OpHandle module,
                                   MLIR_LoweringBackend backend) {
-    (void)ctx; (void)module; (void)backend;
-    // Native backend is not yet implemented; callers should use
-    // MLIR_LOWERING_UPSTREAM. Return an empty string to signal failure.
-    // (Native parser builds with -nostdlib/-nostdinc, so we can't print
-    // a diagnostic via stdio here.)
+    (void)backend;
+#ifdef MLIR_HAS_NATIVE_LOWERING
+    string fail = {0};
+    MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(ctx, module);
+    if (!ssa) return fail;
+    MLIR_OpHandle stk = mlir_wasmssa_to_wasmstack(ctx, ssa);
+    if (!stk) return fail;
+    return mlir_wasmstack_to_bin(ctx, stk);
+#else
+    (void)ctx; (void)module;
     string s = {0};
     return s;
+#endif
 }
 
 #ifdef __cplusplus

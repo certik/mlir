@@ -36,8 +36,8 @@ LOWERING = os.environ.get("TINYC_LOWERING", "upstream")
 # Code-generation/runtime target for the suite. "native" (default) emits
 # LLVM IR via tinyc, then llc + host CC + runtime.c. "wasm" emits a
 # wasm32 object via tinyc, then wasm-ld + runtime_wasm.c, and runs the
-# resulting .wasm via wasmtime. The wasm target requires
-# TINYC_LOWERING=upstream (the native lowering does not implement wasm).
+# resulting .wasm via wasmtime. Both TINYC_LOWERING values are valid
+# with the wasm target.
 TARGET = os.environ.get("TINYC_TARGET", "native")
 
 
@@ -126,11 +126,10 @@ def main():
     else:
         plat_key = plat
 
-    if TARGET == "wasm" and LOWERING != "upstream":
-        print(f"error: TINYC_TARGET=wasm requires TINYC_LOWERING=upstream "
-              f"(got {LOWERING!r}); the native lowering does not implement wasm",
-              file=sys.stderr)
-        return 2
+    # The native lowering is allowed with the wasm target: the upstream
+    # `MLIR_TranslateModuleToWasm` is responsible for the LLVM->wasm step,
+    # and the lowering choice only affects how MLIR is reduced to the LLVM
+    # dialect beforehand.
 
     # Pre-build the wasm runtime object once per run.
     wasm_runtime_obj = HERE / "tests" / "runtime_wasm.o"
@@ -156,6 +155,16 @@ def main():
         # rely on host-libc behavior wasm32-wasi can't reproduce).
         if TARGET == "wasm" and t.get("wasm_skip"):
             print(f"SKIP {name} (wasm_skip)")
+            skipped += 1
+            continue
+        # Optional opt-out for the native LLVM->WASM pipeline only
+        # (mlir_llvm_to_wasmssa.c + mlir_wasmssa_to_wasmstack.c +
+        # mlir_wasmstack_to_bin.c). Covers the few corners the in-tree
+        # pipeline doesn't implement yet; the upstream wasm path still
+        # runs the test.
+        if (TARGET == "wasm" and LOWERING == "native"
+                and t.get("wasm_native_skip")):
+            print(f"SKIP {name} (wasm_native_skip)")
             skipped += 1
             continue
         # Multi-file tests pass `sources = [...]`; single-file tests

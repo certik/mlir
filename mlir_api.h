@@ -170,6 +170,24 @@ typedef enum {
     OP_TYPE_LLVM_MLIR_GLOBAL,
     OP_TYPE_LLVM_RETURN,
     OP_TYPE_LLVM_PTRTOINT,
+    OP_TYPE_LLVM_FUNC,
+    OP_TYPE_LLVM_CALL,
+    OP_TYPE_LLVM_SEXT,
+    OP_TYPE_LLVM_ADD,
+    OP_TYPE_LLVM_SUB,
+    OP_TYPE_LLVM_MUL,
+    OP_TYPE_LLVM_SDIV,
+    OP_TYPE_LLVM_UDIV,
+    OP_TYPE_LLVM_SREM,
+    OP_TYPE_LLVM_UREM,
+    OP_TYPE_LLVM_AND,
+    OP_TYPE_LLVM_OR,
+    OP_TYPE_LLVM_XOR,
+    OP_TYPE_LLVM_SHL,
+    OP_TYPE_LLVM_LSHR,
+    OP_TYPE_LLVM_ASHR,
+    OP_TYPE_LLVM_TRUNC,
+    OP_TYPE_LLVM_ZEXT,
     OP_TYPE_ARITH_XORI,
     OP_TYPE_ARITH_SHLI,
     OP_TYPE_ARITH_SHRSI,
@@ -177,6 +195,93 @@ typedef enum {
     // Return operations
     OP_TYPE_RETURN,
     OP_TYPE_TT_REDUCE_RETURN,
+
+    // -------------------------------------------------------------------------
+    // wasmssa dialect — high-level SSA-form WebAssembly ops. Produced by
+    // the LLVM-dialect -> wasmssa lowering pass and consumed by the
+    // wasmssa -> wasmstack stackification pass. All values are SSA;
+    // there are no explicit local.get / local.set / local.tee here.
+    //
+    // Op operand-order convention (non-commutative ops):
+    //   sub:   %r = wasmssa.sub %lhs, %rhs   ; emits "lhs rhs i32.sub"
+    //   load:  %r = wasmssa.load %addr       ; offset/align as attrs
+    //   store: wasmssa.store %addr, %val
+    // -------------------------------------------------------------------------
+    OP_TYPE_WASMSSA_FUNC,
+    OP_TYPE_WASMSSA_IMPORT_FUNC,
+    OP_TYPE_WASMSSA_IMPORT_GLOBAL,
+    OP_TYPE_WASMSSA_CONST,
+    OP_TYPE_WASMSSA_ADD,
+    OP_TYPE_WASMSSA_SUB,
+    OP_TYPE_WASMSSA_BINOP,
+    OP_TYPE_WASMSSA_UNOP,
+    OP_TYPE_WASMSSA_LOAD,
+    OP_TYPE_WASMSSA_STORE,
+    OP_TYPE_WASMSSA_GLOBAL_GET,
+    OP_TYPE_WASMSSA_GLOBAL_SET,
+    OP_TYPE_WASMSSA_EXTEND_I32_S,
+    OP_TYPE_WASMSSA_RETURN,
+    OP_TYPE_WASMSSA_CALL,
+    // Structured control-flow markers. Linearized into the flat per-func
+    // op stream in stage 1; stage 2 pairs BEGINs to ENDs to compute br
+    // depths.
+    OP_TYPE_WASMSSA_BLOCK_BEGIN,
+    OP_TYPE_WASMSSA_LOOP_BEGIN,
+    OP_TYPE_WASMSSA_IF_BEGIN,
+    OP_TYPE_WASMSSA_IF_ELSE,
+    OP_TYPE_WASMSSA_END,
+    OP_TYPE_WASMSSA_BR,
+    OP_TYPE_WASMSSA_BR_IF,
+    OP_TYPE_WASMSSA_SELECT,
+    OP_TYPE_WASMSSA_EQZ,
+    // Carrier ops materialize scf.yield-ed values across structured-CF
+    // boundaries via per-function shared locals (allocated lazily by
+    // stage 2). Each carrier_id refers to one local of a fixed valtype.
+    OP_TYPE_WASMSSA_CARRIER_SET,
+    OP_TYPE_WASMSSA_CARRIER_GET,
+    OP_TYPE_WASMSSA_ADDRESSOF,
+    // Function-pointer support: FUNC_ADDR pushes the table-index of a
+    // named function (lowered via R_WASM_TABLE_INDEX_SLEB); CALL_INDIRECT
+    // pops args + table-index and dispatches via wasm `call_indirect`.
+    OP_TYPE_WASMSSA_FUNC_ADDR,
+    OP_TYPE_WASMSSA_CALL_INDIRECT,
+
+    // -------------------------------------------------------------------------
+    // wasmstack dialect — low-level stack-machine WebAssembly ops. 1:1
+    // with the wasm bytecode opcodes. Produced by the wasmssa -> wasmstack
+    // stackification pass and consumed by the binary emitter.
+    // -------------------------------------------------------------------------
+    OP_TYPE_WASMSTACK_FUNC,
+    OP_TYPE_WASMSTACK_IMPORT_FUNC,
+    OP_TYPE_WASMSTACK_IMPORT_GLOBAL,
+    OP_TYPE_WASMSTACK_LOCAL_GET,
+    OP_TYPE_WASMSTACK_LOCAL_SET,
+    OP_TYPE_WASMSTACK_LOCAL_TEE,
+    OP_TYPE_WASMSTACK_CONST,
+    OP_TYPE_WASMSTACK_ADD,
+    OP_TYPE_WASMSTACK_SUB,
+    OP_TYPE_WASMSTACK_BINOP,
+    OP_TYPE_WASMSTACK_UNOP,
+    OP_TYPE_WASMSTACK_LOAD,
+    OP_TYPE_WASMSTACK_STORE,
+    OP_TYPE_WASMSTACK_GLOBAL_GET,
+    OP_TYPE_WASMSTACK_GLOBAL_SET,
+    OP_TYPE_WASMSTACK_EXTEND_I32_S,
+    OP_TYPE_WASMSTACK_RETURN,
+    OP_TYPE_WASMSTACK_CALL,
+    // Structured-CF + select.
+    OP_TYPE_WASMSTACK_BLOCK,
+    OP_TYPE_WASMSTACK_LOOP,
+    OP_TYPE_WASMSTACK_IF,
+    OP_TYPE_WASMSTACK_ELSE,
+    OP_TYPE_WASMSTACK_END,
+    OP_TYPE_WASMSTACK_BR,
+    OP_TYPE_WASMSTACK_BR_IF,
+    OP_TYPE_WASMSTACK_SELECT,
+    OP_TYPE_WASMSTACK_EQZ,
+    OP_TYPE_WASMSTACK_ADDRESSOF,
+    OP_TYPE_WASMSTACK_FUNC_ADDR,
+    OP_TYPE_WASMSTACK_CALL_INDIRECT,
 
     OP_TYPE_COUNT
 } MLIR_OpType;
@@ -268,6 +373,18 @@ typedef enum {
 bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module,
                              MLIR_LoweringBackend backend);
 
+// Same as MLIR_LowerToLLVMDialect, but tailored to feed the native
+// LLVM-dialect-MLIR -> WASM emitter (mlir_translate_to_wasm.c). The
+// difference matters only for MLIR_LOWERING_NATIVE: instead of running
+// scf->cf and cf->llvm (which destroys structured control flow that
+// wasm needs), this entry point runs upstream's `lift-cf-to-scf`
+// pass first and then lowers arith/memref/func/vector/etc. to LLVM,
+// leaving scf.* ops in place for stage 1 of the wasm pipeline to
+// consume directly. For MLIR_LOWERING_UPSTREAM it is identical to
+// MLIR_LowerToLLVMDialect.
+bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx, MLIR_OpHandle module,
+                                    MLIR_LoweringBackend backend);
+
 // Translate a `builtin.module` op already lowered to the LLVM dialect into
 // LLVM IR text (`.ll`). Returns the IR text on success or an empty string
 // on failure. See MLIR_LoweringBackend above for backend semantics.
@@ -305,6 +422,10 @@ size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle op);
 MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle op, size_t idx);
 size_t MLIR_GetOpNumAttributes(MLIR_OpHandle op);
 MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle op, size_t idx);
+// Like MLIR_GetOpAttribute, but looks up by name including inherent
+// attributes that are stored in the op's Properties (e.g. LLVM::CallOp
+// `callee` and `var_callee_type`). Returns MLIR_INVALID_HANDLE on miss.
+MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle op, const char *name);
 size_t MLIR_GetOpNumRegions(MLIR_OpHandle op);
 MLIR_RegionHandle MLIR_GetOpRegion(MLIR_OpHandle op, size_t idx);
 size_t MLIR_GetOpNumSuccessors(MLIR_OpHandle op);
@@ -460,9 +581,20 @@ size_t MLIR_GetTypeFunctionNumInputs(MLIR_TypeHandle type);
 MLIR_TypeHandle MLIR_GetTypeFunctionInput(MLIR_TypeHandle type, size_t idx);
 size_t MLIR_GetTypeFunctionNumResults(MLIR_TypeHandle type);
 MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_TypeHandle type, size_t idx);
+// True if the type is an `LLVMFunctionType` whose `isVarArg` flag is set.
+// Returns false for the standard `FunctionType` (which is never variadic).
+bool MLIR_GetTypeFunctionIsVarArg(MLIR_TypeHandle type);
 // Element type of a tensor/memref/vector type, or invalid if the type is
 // not a shaped type.
 MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle type);
+// LLVM struct/array type introspection. Used by lowering passes that
+// need to compute byte offsets and sizes (e.g. native LLVM->WASM).
+bool            MLIR_IsTypeLLVMStruct(MLIR_TypeHandle type);
+size_t          MLIR_GetTypeLLVMStructNumFields(MLIR_TypeHandle type);
+MLIR_TypeHandle MLIR_GetTypeLLVMStructField(MLIR_TypeHandle type, size_t idx);
+bool            MLIR_IsTypeLLVMArray(MLIR_TypeHandle type);
+MLIR_TypeHandle MLIR_GetTypeLLVMArrayElement(MLIR_TypeHandle type);
+uint64_t        MLIR_GetTypeLLVMArrayNumElements(MLIR_TypeHandle type);
 string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle type);
 
 // -----------------------------------------------------------------------------

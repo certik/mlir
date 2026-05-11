@@ -2174,6 +2174,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
         }
     }
     switch (ex->kind) {
+        case EX_GENERIC:
+            // Handled above; listed here only to silence -Wswitch.
+            break;
         case EX_INT:
             if (ex->is_i64) {
                 r.val = emit_const_i64(e, ex->int_value);

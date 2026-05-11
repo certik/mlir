@@ -22,6 +22,7 @@ jobs:
               pixi run -e upstream test_tinyc_upstream
               TINYC_LOWERING=native pixi run -e upstream test_tinyc_upstream
               pixi run -e upstream test_tinyc_upstream_wasm
+              TINYC_LOWERING=native pixi run -e upstream test_tinyc_upstream_wasm
               pixi run -e upstream test_tinyc_native
               pixi run -e linux test_linux_tinyc
           - platform: macos
@@ -34,6 +35,7 @@ jobs:
               pixi run -e upstream test_tinyc_upstream
               TINYC_LOWERING=native pixi run -e upstream test_tinyc_upstream
               pixi run -e upstream test_tinyc_upstream_wasm
+              TINYC_LOWERING=native pixi run -e upstream test_tinyc_upstream_wasm
               pixi run -e upstream test_tinyc_native
               pixi run -e macos test_macos_tinyc
           - platform: windows
@@ -47,6 +49,7 @@ jobs:
               pixi run -e upstream test_tinyc_upstream || exit /b 1
               cmd /c "set TINYC_LOWERING=native&& pixi run -e upstream test_tinyc_upstream" || exit /b 1
               pixi run -e upstream test_tinyc_upstream_wasm || exit /b 1
+              cmd /c "set TINYC_LOWERING=native&& pixi run -e upstream test_tinyc_upstream_wasm" || exit /b 1
               pixi run -e upstream test_tinyc_native || exit /b 1
 
     runs-on: ${{ matrix.os }}

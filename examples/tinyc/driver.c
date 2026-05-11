@@ -10,6 +10,9 @@
 #include <platform/platform.h>
 
 #include "mlir_api.h"
+#include "mlir_llvm_to_wasmssa.h"
+#include "mlir_wasmssa_to_wasmstack.h"
+#include "mlir_wasm_to_wat.h"
 #include "tinyc.h"
 
 extern string read_file_ok(Arena *arena, string path);
@@ -60,7 +63,11 @@ int app_main(void) {
     bool emit_llvm = false;
     bool emit_lowered = false;
     bool emit_wasm = false;
+    bool emit_wasmssa = false;
+    bool emit_wasmstack = false;
+    bool emit_wat = false;
     MLIR_LoweringBackend lowering = MLIR_LOWERING_UPSTREAM;
+    bool lowering_explicit = false;
     char *output_file = NULL;
 
     // Multiple positional input files (multi-file compilation merges them
@@ -77,12 +84,15 @@ int app_main(void) {
     size_t n_defines = 0;
 
     for (int i = 1; i < argc; i++) {
-        if      (strcmp(argv[i], "--emit=mlir")    == 0) { emit_llvm = false; emit_lowered = false; emit_wasm = false; }
-        else if (strcmp(argv[i], "--emit=lowered") == 0) { emit_lowered = true;  emit_llvm = false; emit_wasm = false; }
-        else if (strcmp(argv[i], "--emit=llvm")    == 0) { emit_llvm = true;     emit_lowered = false; emit_wasm = false; }
-        else if (strcmp(argv[i], "--emit=wasm")    == 0) { emit_wasm = true;     emit_llvm = false; emit_lowered = false; }
-        else if (strcmp(argv[i], "--lowering=upstream") == 0) { lowering = MLIR_LOWERING_UPSTREAM; }
-        else if (strcmp(argv[i], "--lowering=native")   == 0) { lowering = MLIR_LOWERING_NATIVE; }
+        if      (strcmp(argv[i], "--emit=mlir")    == 0) { emit_llvm = false; emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; }
+        else if (strcmp(argv[i], "--emit=lowered") == 0) { emit_lowered = true;  emit_llvm = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; }
+        else if (strcmp(argv[i], "--emit=llvm")    == 0) { emit_llvm = true;     emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; }
+        else if (strcmp(argv[i], "--emit=wasm")    == 0) { emit_wasm = true;     emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; }
+        else if (strcmp(argv[i], "--emit=wasmssa") == 0) { emit_wasmssa = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmstack = false; emit_wat = false; }
+        else if (strcmp(argv[i], "--emit=wasmstack") == 0) { emit_wasmstack = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wat = false; }
+        else if (strcmp(argv[i], "--emit=wat")     == 0) { emit_wat = true;     emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; }
+        else if (strcmp(argv[i], "--lowering=upstream") == 0) { lowering = MLIR_LOWERING_UPSTREAM; lowering_explicit = true; }
+        else if (strcmp(argv[i], "--lowering=native")   == 0) { lowering = MLIR_LOWERING_NATIVE; lowering_explicit = true; }
         else if (strncmp(argv[i], "-I", 2) == 0 && argv[i][2] != '\0') {
             include_dirs[n_include_dirs++] = str_from_cstr_view(argv[i] + 2);
         } else if (strcmp(argv[i], "-I") == 0 && i + 1 < argc) {
@@ -101,9 +111,21 @@ int app_main(void) {
     }
 
     if (n_input_files == 0) {
-        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm|wasm] [--lowering=upstream|native] [-I dir ...] [-D name[=value] ...] [-o OUT] FILE.tc [FILE2.tc ...]"));
+        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm|wasm|wasmssa|wasmstack|wat] [--lowering=upstream|native] [-I dir ...] [-D name[=value] ...] [-o OUT] FILE.tc [FILE2.tc ...]"));
         arena_destroy(boot_arena);
         return 1;
+    }
+
+    if ((emit_wasmssa || emit_wasmstack) && lowering_explicit &&
+            lowering == MLIR_LOWERING_UPSTREAM) {
+        fprintf(stderr,
+                "tinyc: --emit=wasmssa/wasmstack require --lowering=native "
+                "(upstream lowering does not produce these IRs)\n");
+        arena_destroy(boot_arena);
+        return 1;
+    }
+    if (emit_wasmssa || emit_wasmstack) {
+        lowering = MLIR_LOWERING_NATIVE;
     }
 
     Arena *arena = arena_create(64 * 1024 * 1024);
@@ -137,15 +159,49 @@ int app_main(void) {
         return 1;
     }
 
-    if (emit_lowered || emit_llvm || emit_wasm) {
-        if (!MLIR_LowerToLLVMDialect(&ctx, module, lowering)) {
+    if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat) {
+        bool needs_wasm_lowering = emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat;
+        bool ok = needs_wasm_lowering
+                      ? MLIR_LowerToLLVMDialectForWasm(&ctx, module, lowering)
+                      : MLIR_LowerToLLVMDialect(&ctx, module, lowering);
+        if (!ok) {
             arena_destroy(arena);
             arena_destroy(boot_arena);
             return 1;
         }
     }
     string out;
-    if (emit_wasm) {
+    if (emit_wasmssa) {
+        MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(&ctx, module);
+        if (ssa == MLIR_INVALID_HANDLE) {
+            arena_destroy(arena);
+            arena_destroy(boot_arena);
+            return 1;
+        }
+        out = MLIR_PrintOperationGeneric(&ctx, ssa);
+    } else if (emit_wasmstack) {
+        MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(&ctx, module);
+        if (ssa == MLIR_INVALID_HANDLE) {
+            arena_destroy(arena);
+            arena_destroy(boot_arena);
+            return 1;
+        }
+        MLIR_OpHandle stk = mlir_wasmssa_to_wasmstack(&ctx, ssa);
+        if (stk == MLIR_INVALID_HANDLE) {
+            arena_destroy(arena);
+            arena_destroy(boot_arena);
+            return 1;
+        }
+        out = MLIR_PrintOperationGeneric(&ctx, stk);
+    } else if (emit_wat) {
+        string bin = MLIR_TranslateModuleToWasm(&ctx, module, lowering);
+        if (bin.size == 0) {
+            arena_destroy(arena);
+            arena_destroy(boot_arena);
+            return 1;
+        }
+        out = mlir_wasm_binary_to_wat(&ctx, bin);
+    } else if (emit_wasm) {
         out = MLIR_TranslateModuleToWasm(&ctx, module, lowering);
         if (out.size == 0) {
             arena_destroy(arena);

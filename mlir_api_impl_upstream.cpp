@@ -35,6 +35,7 @@
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/AsmParser/AsmParser.h"
+#include "llvm/IR/Module.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -58,6 +59,7 @@
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
+#include "mlir/Conversion/ControlFlowToSCF/ControlFlowToSCF.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
 #include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVMPass.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
@@ -138,6 +140,23 @@ std::unordered_map<const mlir::Operation *, std::vector<mlir::NamedAttribute>> &
 opUserAttrs() {
     static std::unordered_map<const mlir::Operation *,
                               std::vector<mlir::NamedAttribute>> m;
+    return m;
+}
+
+// Separate stash for MLIR_GetOpAttributeByName, which sometimes needs to
+// materialise a NamedAttribute that doesn't live in `op->getAttrs()` (e.g.
+// LLVM::CallOp's inherent `callee` / `var_callee_type` properties). Using
+// unique_ptr keeps element addresses stable across subsequent push_backs
+// so previously-returned MLIR_AttributeHandle pointers stay valid.
+//
+// Keyed by op so it can be cleared alongside opUserAttrs() when ops are
+// erased by a conversion pass, avoiding the unbounded process-lifetime
+// growth a single thread_local stash would suffer in a long-running host.
+std::unordered_map<const mlir::Operation *,
+                   std::vector<std::unique_ptr<mlir::NamedAttribute>>> &
+opByNameAttrs() {
+    static std::unordered_map<const mlir::Operation *,
+                              std::vector<std::unique_ptr<mlir::NamedAttribute>>> m;
     return m;
 }
 
@@ -441,20 +460,56 @@ extern "C" size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle h) {
 extern "C" MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle h, size_t i) {
     return typeH(F<mlir::Operation>(h)->getResult(i).getType());
 }
-extern "C" size_t MLIR_GetOpNumAttributes(MLIR_OpHandle h) {
-    auto *op = F<mlir::Operation>(h);
+// op->getAttrs() may return an ArrayRef whose elements are not stable across
+// calls (especially on newer MLIR where some "inherent" attributes are kept
+// in inline property storage and the dictionary view is rebuilt on demand).
+// Cache a stable copy on first access so MLIR_AttributeHandle pointers stay
+// valid for the rest of the lowering pass.
+static std::vector<mlir::NamedAttribute> &
+ensureCachedAttrs(mlir::Operation *op) {
     auto &m = opUserAttrs();
     auto it = m.find(op);
-    if (it != m.end()) return it->second.size();
-    return op->getAttrs().size();
+    if (it != m.end()) return it->second;
+    auto attrs = op->getAttrs();
+    auto &v = m[op];
+    v.assign(attrs.begin(), attrs.end());
+    return v;
+}
+extern "C" size_t MLIR_GetOpNumAttributes(MLIR_OpHandle h) {
+    auto *op = F<mlir::Operation>(h);
+    return ensureCachedAttrs(op).size();
 }
 extern "C" MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle h, size_t i) {
     auto *op = F<mlir::Operation>(h);
-    auto &m = opUserAttrs();
-    auto it = m.find(op);
-    if (it != m.end()) return reinterpret_cast<uintptr_t>(&it->second[i]);
-    auto attrs = op->getAttrs();
-    return reinterpret_cast<uintptr_t>(&attrs[i]);
+    return reinterpret_cast<uintptr_t>(&ensureCachedAttrs(op)[i]);
+}
+extern "C" MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle h,
+                                                          const char *name) {
+    auto *op = F<mlir::Operation>(h);
+    auto &keep = opByNameAttrs()[op];
+    auto stash = [&](mlir::Attribute a) -> MLIR_AttributeHandle {
+        keep.emplace_back(std::make_unique<mlir::NamedAttribute>(
+            mlir::StringAttr::get(op->getContext(), name), a));
+        return reinterpret_cast<uintptr_t>(keep.back().get());
+    };
+    if (auto call = mlir::dyn_cast<mlir::LLVM::CallOp>(op)) {
+        llvm::StringRef nm(name);
+        if (nm == "callee") {
+            if (auto c = call.getCalleeAttr()) return stash(c);
+            return MLIR_INVALID_HANDLE;
+        }
+        if (nm == "var_callee_type") {
+            if (auto t = call.getVarCalleeTypeAttr()) return stash(t);
+            return MLIR_INVALID_HANDLE;
+        }
+    }
+    if (auto a = op->getAttr(name)) return stash(a);
+    auto dict = op->getAttrDictionary();
+    if (auto na = dict.getNamed(name)) {
+        keep.emplace_back(std::make_unique<mlir::NamedAttribute>(*na));
+        return reinterpret_cast<uintptr_t>(keep.back().get());
+    }
+    return MLIR_INVALID_HANDLE;
 }
 extern "C" size_t MLIR_GetOpNumRegions(MLIR_OpHandle h) {
     return F<mlir::Operation>(h)->getNumRegions();
@@ -754,12 +809,47 @@ extern "C" MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_TypeHandle h, size_t 
     return MLIR_INVALID_HANDLE;
 }
 
+extern "C" bool MLIR_GetTypeFunctionIsVarArg(MLIR_TypeHandle h) {
+    auto t = typeF(h);
+    if (auto ft = llvm::dyn_cast<mlir::LLVM::LLVMFunctionType>(t)) {
+        return ft.isVarArg();
+    }
+    return false;
+}
+
 extern "C" MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle h) {
     auto t = typeF(h);
     if (auto st = llvm::dyn_cast<mlir::ShapedType>(t)) {
         return typeH(st.getElementType());
     }
     return MLIR_INVALID_HANDLE;
+}
+
+extern "C" bool MLIR_IsTypeLLVMStruct(MLIR_TypeHandle h) {
+    return llvm::isa<mlir::LLVM::LLVMStructType>(typeF(h));
+}
+extern "C" size_t MLIR_GetTypeLLVMStructNumFields(MLIR_TypeHandle h) {
+    auto st = llvm::dyn_cast<mlir::LLVM::LLVMStructType>(typeF(h));
+    if (!st) return 0;
+    return st.getBody().size();
+}
+extern "C" MLIR_TypeHandle MLIR_GetTypeLLVMStructField(MLIR_TypeHandle h, size_t idx) {
+    auto st = llvm::dyn_cast<mlir::LLVM::LLVMStructType>(typeF(h));
+    if (!st || idx >= st.getBody().size()) return MLIR_INVALID_HANDLE;
+    return typeH(st.getBody()[idx]);
+}
+extern "C" bool MLIR_IsTypeLLVMArray(MLIR_TypeHandle h) {
+    return llvm::isa<mlir::LLVM::LLVMArrayType>(typeF(h));
+}
+extern "C" MLIR_TypeHandle MLIR_GetTypeLLVMArrayElement(MLIR_TypeHandle h) {
+    auto at = llvm::dyn_cast<mlir::LLVM::LLVMArrayType>(typeF(h));
+    if (!at) return MLIR_INVALID_HANDLE;
+    return typeH(at.getElementType());
+}
+extern "C" uint64_t MLIR_GetTypeLLVMArrayNumElements(MLIR_TypeHandle h) {
+    auto at = llvm::dyn_cast<mlir::LLVM::LLVMArrayType>(typeF(h));
+    if (!at) return 0;
+    return at.getNumElements();
 }
 
 extern "C" string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle h) {
@@ -1245,6 +1335,10 @@ extern "C" void MLIR_MoveBlockToRegionEnd(MLIR_Context *, MLIR_BlockHandle blk_h
 // -----------------------------------------------------------------------------
 
 extern "C" bool mlir_lower_to_llvm_native(MLIR_Context *ctx, MLIR_OpHandle module);
+extern "C" MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module);
+extern "C" MLIR_OpHandle mlir_wasmssa_to_wasmstack(MLIR_Context *ctx,
+                                                  MLIR_OpHandle ssa_module);
+extern "C" string mlir_wasmstack_to_bin(MLIR_Context *ctx, MLIR_OpHandle stk_module);
 
 extern "C" bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module_h,
                                         MLIR_LoweringBackend backend) {
@@ -1293,6 +1387,122 @@ extern "C" bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module_
         std::fprintf(stderr, "MLIR_LowerToLLVMDialect: pass pipeline failed\n");
         return false;
     }
+    return true;
+}
+
+// For the native wasm backend, MLIR's `--lift-cf-to-scf` only walks
+// `func.func` ops, so any `llvm.func` body containing cf.br/cf.cond_br is
+// left unstructured and our wasmssa lowerer cannot handle it. tinyc emits
+// variadic functions (e.g. `int sum(int n, ...)`) as `llvm.func` because
+// `func.func` has no var-arg representation, which is exactly the case that
+// trips the wasm pipeline.
+//
+// Run the same CFG-to-SCF lifting that the stock pass applies to func.func,
+// but extend it to llvm.func by subclassing the transformation so it can
+// also emit an `llvm.return` (with poison operands) when an unreachable
+// terminator is needed.
+namespace {
+class CFGToSCFForWasm : public mlir::ControlFlowToSCFTransformation {
+public:
+    mlir::FailureOr<mlir::Operation *>
+    createUnreachableTerminator(mlir::Location loc, mlir::OpBuilder &builder,
+                                mlir::Region &region) override {
+        mlir::Operation *parentOp = region.getParentOp();
+        if (auto funcOp = llvm::dyn_cast<mlir::func::FuncOp>(parentOp)) {
+            return mlir::ControlFlowToSCFTransformation::
+                createUnreachableTerminator(loc, builder, region);
+        }
+        if (auto llvmFn = llvm::dyn_cast<mlir::LLVM::LLVMFuncOp>(parentOp)) {
+            auto fnTy = llvmFn.getFunctionType();
+            llvm::SmallVector<mlir::Value> operands;
+            mlir::Type retTy = fnTy.getReturnType();
+            if (!llvm::isa<mlir::LLVM::LLVMVoidType>(retTy))
+                operands.push_back(getUndefValue(loc, builder, retTy));
+            return builder.create<mlir::LLVM::ReturnOp>(loc, operands)
+                .getOperation();
+        }
+        return mlir::emitError(loc, "Cannot create unreachable terminator for '")
+               << parentOp->getName() << "'";
+    }
+};
+}
+
+static void liftLLVMFuncCFGToSCF(mlir::ModuleOp module) {
+    using namespace mlir;
+    CFGToSCFForWasm transformation;
+    llvm::SmallVector<LLVM::LLVMFuncOp> fns;
+    module.walk([&](LLVM::LLVMFuncOp fn) {
+        if (!fn.getBody().empty()) fns.push_back(fn);
+    });
+    for (auto fn : fns) {
+        DominanceInfo domInfo(fn);
+        // Post-order so nested regions are lifted first, matching the stock
+        // LiftControlFlowToSCF pass.
+        fn->walk<WalkOrder::PostOrder>([&](Operation *innerOp) {
+            for (Region &reg : innerOp->getRegions())
+                (void)transformCFGToSCF(reg, transformation, domInfo);
+        });
+    }
+}
+
+extern "C" bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx,
+                                               MLIR_OpHandle module_h,
+                                               MLIR_LoweringBackend backend) {
+    auto *op = F<mlir::Operation>(module_h);
+    auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
+    if (!module) {
+        std::fprintf(stderr,
+                     "MLIR_LowerToLLVMDialectForWasm: handle is not a ModuleOp\n");
+        return false;
+    }
+    if (backend != MLIR_LOWERING_NATIVE) {
+        // Upstream backend: just defer to the standard lowering. The wasm
+        // emitter for the upstream backend uses LLVM's WebAssembly target
+        // which expects fully-lowered LLVM-dialect input.
+        return MLIR_LowerToLLVMDialect(ctx, module_h, backend);
+    }
+    auto &mctx = globalCtx().mctx;
+    // The opUserAttrs / opByNameAttrs caches are keyed by Operation* and
+    // may contain stale entries for ops about to be erased by the
+    // conversion passes below. Allocator reuse can produce false hits
+    // later; clear them before lowering.
+    opUserAttrs().clear();
+    opByNameAttrs().clear();
+    bool has_vector_op = false;
+    module.walk([&](mlir::Operation *o) {
+        if (o->getDialect() && o->getDialect()->getNamespace() == "vector") {
+            has_vector_op = true;
+            return mlir::WalkResult::interrupt();
+        }
+        return mlir::WalkResult::advance();
+    });
+    {
+        mlir::IRRewriter rewriter(&mctx);
+        (void)mlir::eraseUnreachableBlocks(rewriter, module->getRegions());
+    }
+    // Lift CF to SCF on both func.func and llvm.func bodies. tinyc emits
+    // variadic functions as llvm.func (since func.func has no var-arg form),
+    // and the stock `LiftControlFlowToSCFPass` only walks func.func; do it
+    // ourselves so the wasm backend can see structured loops/ifs.
+    liftLLVMFuncCFGToSCF(module);
+    mlir::PassManager pm(&mctx);
+    pm.addPass(mlir::createLiftControlFlowToSCFPass());
+    if (has_vector_op) {
+        pm.addPass(mlir::createConvertVectorToLLVMPass());
+    }
+    pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
+    pm.addPass(mlir::createArithToLLVMConversionPass());
+    pm.addPass(mlir::createConvertFuncToLLVMPass());
+    pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+    if (mlir::failed(pm.run(module))) {
+        std::fprintf(stderr,
+                     "MLIR_LowerToLLVMDialectForWasm: pass pipeline failed\n");
+        return false;
+    }
+    // Drop any cached attrs from before / during the pipeline: the ops they
+    // were keyed on may have been erased and the addresses recycled.
+    opUserAttrs().clear();
+    opByNameAttrs().clear();
     return true;
 }
 
@@ -1348,22 +1558,32 @@ extern "C" string MLIR_TranslateModuleToWasm(MLIR_Context *ctx,
                      "MLIR_TranslateModuleToWasm: handle is not a ModuleOp\n");
         return mkRefString(llvm::StringRef());
     }
+
+    // For backend==MLIR_LOWERING_NATIVE we dispatch to the in-tree
+    // three-stage pipeline (llvm.dialect -> wasmssa -> wasmstack -> wasm
+    // bytes) and bypass LLVM's WebAssembly target entirely. For the
+    // upstream backend we go through MLIR's LLVM-IR translator and feed
+    // the resulting llvm::Module to LLVM's WebAssembly TargetMachine.
     if (backend == MLIR_LOWERING_NATIVE) {
-        std::fprintf(stderr,
-                     "MLIR_TranslateModuleToWasm: native backend is not "
-                     "implemented; use MLIR_LOWERING_UPSTREAM\n");
-        return mkRefString(llvm::StringRef());
+        string fail = {0};
+        MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(ctx, module_h);
+        if (!ssa) return fail;
+        MLIR_OpHandle stk = mlir_wasmssa_to_wasmstack(ctx, ssa);
+        if (!stk) return fail;
+        return mlir_wasmstack_to_bin(ctx, stk);
     }
 
-    // Translate the LLVM-dialect MLIR module to an LLVM IR module.
-    mlir::registerBuiltinDialectTranslation(globalCtx().mctx);
-    mlir::registerLLVMDialectTranslation(globalCtx().mctx);
     llvm::LLVMContext llctx;
-    auto llmod = mlir::translateModuleToLLVMIR(module, llctx);
-    if (!llmod) {
-        std::fprintf(stderr,
-                     "MLIR_TranslateModuleToWasm: translation to LLVM IR failed\n");
-        return mkRefString(llvm::StringRef());
+    std::unique_ptr<llvm::Module> llmod;
+    {
+        mlir::registerBuiltinDialectTranslation(globalCtx().mctx);
+        mlir::registerLLVMDialectTranslation(globalCtx().mctx);
+        llmod = mlir::translateModuleToLLVMIR(module, llctx);
+        if (!llmod) {
+            std::fprintf(stderr,
+                         "MLIR_TranslateModuleToWasm: translation to LLVM IR failed\n");
+            return mkRefString(llvm::StringRef());
+        }
     }
 
     // Initialize the WebAssembly target. Idempotent: LLVM guards these
