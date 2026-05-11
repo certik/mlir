@@ -59,7 +59,10 @@ int app_main(void) {
     argv[argc] = NULL;
 
     typedef string (*PrintFn)(MLIR_Context *, MLIR_OpHandle);
-    PrintFn print_fn = MLIR_PrintOperationUpstream;
+    // Use the generic printer: works with both backends (native + upstream)
+    // and against any op, so `--emit=mlir` and `--emit=lowered` produce
+    // identical output regardless of which tinyc binary was built.
+    PrintFn print_fn = MLIR_PrintOperationGeneric;
     bool emit_llvm = false;
     bool emit_lowered = false;
     bool emit_wasm = false;
