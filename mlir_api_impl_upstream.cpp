@@ -1318,6 +1318,10 @@ extern "C" void MLIR_MoveBlockToRegionEnd(MLIR_Context *, MLIR_BlockHandle blk_h
 // -----------------------------------------------------------------------------
 
 extern "C" bool mlir_lower_to_llvm_native(MLIR_Context *ctx, MLIR_OpHandle module);
+extern "C" MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module);
+extern "C" MLIR_OpHandle mlir_wasmssa_to_wasmstack(MLIR_Context *ctx,
+                                                  MLIR_OpHandle ssa_module);
+extern "C" string mlir_wasmstack_to_bin(MLIR_Context *ctx, MLIR_OpHandle stk_module);
 
 extern "C" bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module_h,
                                         MLIR_LoweringBackend backend) {
@@ -1534,21 +1538,12 @@ extern "C" string MLIR_TranslateModuleToWasm(MLIR_Context *ctx,
         return mkRefString(llvm::StringRef());
     }
 
-    // Translate the LLVM-dialect MLIR module to an LLVM IR module. With
-    // backend==MLIR_LOWERING_NATIVE we route through the native MLIR->LLVM
-    // IR translator (printed as text) and re-parse it via LLVM's IR parser,
-    // mirroring how MLIR_TranslateModuleToLLVMIR delegates. The resulting
-    // llvm::Module is then fed to LLVM's WebAssembly TargetMachine — so
-    // "native lowering + upstream wasm emit" exercises our own translator
-    // while still producing real wasm.
+    // For backend==MLIR_LOWERING_NATIVE we dispatch to the in-tree
+    // three-stage pipeline (llvm.dialect -> wasmssa -> wasmstack -> wasm
+    // bytes) and bypass LLVM's WebAssembly target entirely. For the
+    // upstream backend we go through MLIR's LLVM-IR translator and feed
+    // the resulting llvm::Module to LLVM's WebAssembly TargetMachine.
     if (backend == MLIR_LOWERING_NATIVE) {
-        // Pure-C native LLVM-dialect-MLIR -> wasm32 relocatable object
-        // emitter (three-stage pipeline). Bypasses LLVM entirely.
-        extern MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *,
-                                                 MLIR_OpHandle);
-        extern MLIR_OpHandle mlir_wasmssa_to_wasmstack(MLIR_Context *,
-                                                      MLIR_OpHandle);
-        extern string mlir_wasmstack_to_bin(MLIR_Context *, MLIR_OpHandle);
         string fail = {0};
         MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(ctx, module_h);
         if (!ssa) return fail;
