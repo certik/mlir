@@ -101,6 +101,23 @@ wasmtime /tmp/p.wasm   # prints 55
 # (link + run identical to above)
 ```
 
+### Inspect intermediate stages
+
+```sh
+./tinyc --emit=mlir       sum_to_10.tc     # 1. high-level MLIR (funcs in mixed dialects)
+./tinyc --emit=lowered    sum_to_10.tc     # 2. lowered to LLVM dialect
+./tinyc --emit=llvm       sum_to_10.tc     # 3. LLVM IR text
+./tinyc --emit=wasmssa  --lowering=native sum_to_10.tc   # 4. native pipeline stage 1
+./tinyc --emit=wasmstack --lowering=native sum_to_10.tc  # 5. native pipeline stage 2
+./tinyc --emit=wat        sum_to_10.tc     # 6. final wasm binary as WAT
+```
+
+`--emit=wasmssa` and `--emit=wasmstack` print the C-struct intermediate
+forms used by the native pipeline (`mlir_wasm_dialect.h`) in an
+MLIR-like generic text format; both require `--lowering=native`.
+`--emit=wat` disassembles the final `.wasm.o` bytes to a WAT-like text
+form and works with either lowering.
+
 ### Run the test suite
 
 The four supported (lowering × target) combinations and the pixi tasks

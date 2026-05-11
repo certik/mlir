@@ -234,6 +234,20 @@ wasmstack_module_t *mlir_stackify_wasmssa(wasmssa_module_t *m);
 string mlir_translate_wasmstack_to_binary(MLIR_Context *ctx,
                                           wasmstack_module_t *m);
 
+// =============================================================================
+// Pretty-printers (mlir_wasm_print.c). All allocate into ctx's arena.
+// =============================================================================
+
+// MLIR-like generic-form dump of a wasmssa module (stage 1 output).
+string wasmssa_module_print(MLIR_Context *ctx, wasmssa_module_t *m);
+
+// MLIR-like generic-form dump of a wasmstack module (stage 2 output).
+string wasmstack_module_print(MLIR_Context *ctx, wasmstack_module_t *m);
+
+// Disassemble wasm32 binary bytes (e.g. stage 3 output) to a WAT-like
+// human-readable text form.
+string mlir_wasm_binary_to_wat(MLIR_Context *ctx, string bin);
+
 #ifdef __cplusplus
 }
 #endif
