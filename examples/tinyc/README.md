@@ -58,6 +58,7 @@ To inspect the IR at any pipeline stage:
 ./tinyc                    examples/tinyc/tests/sum_to_10.tc   # high-level MLIR
 ./tinyc --emit=lowered     examples/tinyc/tests/sum_to_10.tc   # LLVM dialect
 ./tinyc --emit=llvm        examples/tinyc/tests/sum_to_10.tc   # LLVM IR (.ll)
+./tinyc --emit=wasm -o /tmp/p.wasm.o examples/tinyc/tests/sum_to_10.tc  # wasm32 object
 ```
 
 To produce a binary by hand (the test runner does this for you):
@@ -67,6 +68,75 @@ To produce a binary by hand (the test runner does this for you):
 $CC /tmp/p.ll examples/tinyc/runtime.c -o /tmp/p
 /tmp/p   # prints 55
 ```
+
+## WebAssembly backend
+
+`tinyc` can emit a wasm32 (WASI) object via `--emit=wasm`. There are two
+independent axes you can vary:
+
+| Flag                  | Choice              | What it controls                                |
+| --------------------- | ------------------- | ----------------------------------------------- |
+| `--lowering=upstream` | (default)           | MLIR `llvm`/`scf`/`cf` → LLVM IR via upstream MLIR conversion passes, then LLVM's WebAssembly backend. |
+| `--lowering=native`   |                     | MLIR `llvm` dialect → wasm32 directly via the in-tree three-stage pipeline (no LLVM backend on the WASM side). |
+
+The two paths produce equivalent `.wasm.o` objects which are then linked
+with `wasm-ld` and run under `wasmtime`. Both pass the full tinyC test
+suite (150 wasm tests on Linux/macOS; 11 are skipped under wasm for
+unrelated reasons).
+
+### Compile and run a single program
+
+```sh
+# Upstream lowering (LLVM's WASM backend)
+./tinyc --emit=wasm --lowering=upstream \
+    -o /tmp/p.wasm.o examples/tinyc/tests/sum_to_10.tc
+wasm-ld --no-entry --export=_start --allow-undefined \
+    /tmp/p.wasm.o examples/tinyc/runtime_wasm.o examples/tinyc/start_wasm.o \
+    -o /tmp/p.wasm
+wasmtime /tmp/p.wasm   # prints 55
+
+# Native lowering (in-tree wasmssa → wasmstack → binary pipeline)
+./tinyc --emit=wasm --lowering=native \
+    -o /tmp/p.wasm.o examples/tinyc/tests/sum_to_10.tc
+# (link + run identical to above)
+```
+
+### Run the test suite
+
+The four supported (lowering × target) combinations and the pixi tasks
+that drive them:
+
+| Lowering | Target | pixi command |
+| -------- | ------ | ------------ |
+| upstream | native | `pixi run -e upstream test_tinyc_upstream` |
+| native   | native | `TINYC_LOWERING=native pixi run -e upstream test_tinyc_upstream` |
+| upstream | wasm   | `pixi run -e upstream test_tinyc_upstream_wasm` |
+| native   | wasm   | `TINYC_LOWERING=native pixi run -e upstream test_tinyc_upstream_wasm` |
+
+`TINYC_LOWERING` (default `upstream`) selects the lowering used by the
+test runner; `TINYC_TARGET` (default `native`) selects the target. The
+`*_wasm` task simply sets `TINYC_TARGET=wasm`.
+
+The `tinyc_native` binary (built without upstream MLIR/LLVM, via
+`pixi run build_tinyc_native`) currently supports the native target
+only; for that binary use `pixi run test_tinyc_native`.
+
+### How the native pipeline is structured
+
+The native LLVM-dialect → wasm path lives in three stages plus a
+shared C-struct IR:
+
+- `mlir_lower_llvm_to_wasmssa.c` — Stage 1: LLVM dialect → wasmssa
+  (also runs `lift-cf-to-scf` first to recover structured control
+  flow from `cf.br`/`cf.cond_br`).
+- `mlir_stackify_wasmssa.c` — Stage 2: wasmssa → wasmstack (linearises
+  SSA results onto the wasm value stack, inserts block/loop/if/end).
+- `mlir_translate_wasmstack_to_binary.c` — Stage 3: wasmstack → `.wasm.o`
+  (emits the wasm binary including type/import/function/table/memory/
+  global/export/element/code/data sections plus relocation metadata
+  consumed by `wasm-ld`).
+- `mlir_wasm_dialect.h` / `.c` — shared C-struct IR.
+- `mlir_translate_to_wasm.c` — façade chaining the three stages.
 
 ## Why this exists
 
