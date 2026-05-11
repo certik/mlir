@@ -8,11 +8,6 @@
 #include "mlir_api.h"
 #include "mlir_op_names.h"
 #include "mlir_parser.h"
-#ifdef MLIR_HAS_NATIVE_LOWERING
-#include "mlir_llvm_to_wasmssa.h"
-#include "mlir_wasmssa_to_wasmstack.h"
-#include "mlir_wasmstack_to_bin.h"
-#endif
 #include <string.h>
 
 #ifdef __cplusplus
@@ -1724,95 +1719,12 @@ void MLIR_MoveBlockToRegionEnd(MLIR_Context *ctx, MLIR_BlockHandle block,
     MLIR_AppendRegionBlock(ctx, dest, block);
 }
 
-// Native lowering & LLVM-IR translation. Both delegate to the shared
-// implementations in mlir_lower_to_llvm.c / mlir_translate_to_llvm_ir.c
-// which only use the public mlir_api.h surface and therefore work
-// against the native backend.
-//
-// Bare-metal builds (parser, parser.exe, parser.wasm) only use the
-// MLIR parser surface and never call these entry points, so we provide
-// weak fallback definitions here. Hosted builds (tinyc_native,
-// tinyc_upstream) link mlir_lower_to_llvm.c / mlir_translate_to_llvm_ir.c
-// which override these with the real implementations. On compilers
-// without weak-symbol support (e.g. MSVC for the Windows parser build)
-// the strong stubs satisfy the link without conflict because those
-// builds don't pull in the real translation units. Hosted builds on
-// MSVC must define MLIR_HAS_NATIVE_LOWERING so the real symbols win.
-#if defined(__GNUC__) || defined(__clang__)
-#define MLIR_NATIVE_LOWERING_WEAK __attribute__((weak))
-#else
-#define MLIR_NATIVE_LOWERING_WEAK
-#endif
-
-bool mlir_lower_to_llvm_native(MLIR_Context *ctx, MLIR_OpHandle module);
-string mlir_translate_to_llvm_ir_native(MLIR_Context *ctx, MLIR_OpHandle module);
-
-#ifndef MLIR_HAS_NATIVE_LOWERING
-MLIR_NATIVE_LOWERING_WEAK bool
-mlir_lower_to_llvm_native(MLIR_Context *ctx, MLIR_OpHandle module) {
-    (void)ctx; (void)module;
-    return false;
-}
-
-MLIR_NATIVE_LOWERING_WEAK string
-mlir_translate_to_llvm_ir_native(MLIR_Context *ctx, MLIR_OpHandle module) {
-    (void)ctx; (void)module;
-    string s = {0};
-    return s;
-}
-#endif
-
-bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module,
-                             MLIR_LoweringBackend backend) {
-    (void)backend; // Native backend has no upstream pipeline to fall back on.
-    return mlir_lower_to_llvm_native(ctx, module);
-}
-
-bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx, MLIR_OpHandle module,
-                                    MLIR_LoweringBackend backend) {
-    // The pure-native binary only links the in-tree lowering; there is no
-    // upstream `lift-cf-to-scf` pass available here. We therefore ignore
-    // `backend` and always take the native path. Callers requesting
-    // MLIR_LOWERING_UPSTREAM in this build get the native lowering with a
-    // diagnostic printed via the API's existing fprintf-on-stderr style;
-    // the bare-metal parser build can't print and silently falls through.
-    if (backend == MLIR_LOWERING_UPSTREAM) {
-#ifdef MLIR_HAS_NATIVE_LOWERING
-        fprintf(stderr,
-                "MLIR_LowerToLLVMDialectForWasm: upstream backend is not "
-                "available in the native build; using native lowering\n");
-#endif
-    }
-    return mlir_lower_to_llvm_native(ctx, module);
-}
-
-string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module,
-                                    MLIR_LoweringBackend backend) {
-    (void)backend;
-    return mlir_translate_to_llvm_ir_native(ctx, module);
-}
-
-// MLIR_TranslateModuleToWasm: native backend chains the three stages
-// (llvm->wasmssa, wasmssa->wasmstack, wasmstack->bin) directly. Bare-metal
-// builds (parser only) don't define MLIR_HAS_NATIVE_LOWERING and get an
-// empty-string fallback. The upstream backend is only available in the
-// upstream-backed build (mlir_api_impl_upstream.cpp).
-string MLIR_TranslateModuleToWasm(MLIR_Context *ctx, MLIR_OpHandle module,
-                                  MLIR_LoweringBackend backend) {
-    (void)backend;
-#ifdef MLIR_HAS_NATIVE_LOWERING
-    string fail = {0};
-    MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(ctx, module);
-    if (!ssa) return fail;
-    MLIR_OpHandle stk = mlir_wasmssa_to_wasmstack(ctx, ssa);
-    if (!stk) return fail;
-    return mlir_wasmstack_to_bin(ctx, stk);
-#else
-    (void)ctx; (void)module;
-    string s = {0};
-    return s;
-#endif
-}
+// The lowering / LLVM-IR-translation / wasm-translation entry points
+// declared in mlir_api.h are implemented in dedicated agnostic
+// translation units (mlir_lower_to_llvm.c, mlir_translate_to_llvm_ir.c,
+// mlir_translate_to_wasm.c). They are linked into hosted builds
+// alongside this file. There is no parser-only "native" build, so we
+// no longer need fallback stubs here.
 
 #ifdef __cplusplus
 }

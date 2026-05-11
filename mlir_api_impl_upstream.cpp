@@ -1331,25 +1331,21 @@ extern "C" void MLIR_MoveBlockToRegionEnd(MLIR_Context *, MLIR_BlockHandle blk_h
 }
 
 // -----------------------------------------------------------------------------
-// Lowering to LLVM dialect + translation to LLVM IR text
+// Upstream-only lowering / translation entry points (the *Upstream
+// siblings of the agnostic functions in mlir_lower_to_llvm.c,
+// mlir_translate_to_llvm_ir.c, mlir_translate_to_wasm.c). Each runs
+// upstream MLIR's pass pipeline / translator / LLVM target machine.
 // -----------------------------------------------------------------------------
 
-extern "C" bool mlir_lower_to_llvm_native(MLIR_Context *ctx, MLIR_OpHandle module);
-extern "C" MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module);
-extern "C" MLIR_OpHandle mlir_wasmssa_to_wasmstack(MLIR_Context *ctx,
-                                                  MLIR_OpHandle ssa_module);
-extern "C" string mlir_wasmstack_to_bin(MLIR_Context *ctx, MLIR_OpHandle stk_module);
-
-extern "C" bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module_h,
-                                        MLIR_LoweringBackend backend) {
+extern "C" bool MLIR_LowerToLLVMDialectUpstream(MLIR_Context *ctx,
+                                                MLIR_OpHandle module_h) {
+    (void)ctx;
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
-        std::fprintf(stderr, "MLIR_LowerToLLVMDialect: handle is not a ModuleOp\n");
+        std::fprintf(stderr,
+                     "MLIR_LowerToLLVMDialectUpstream: handle is not a ModuleOp\n");
         return false;
-    }
-    if (backend == MLIR_LOWERING_NATIVE) {
-        return mlir_lower_to_llvm_native(ctx, module_h);
     }
     auto &mctx = globalCtx().mctx;
     // Only run vector-to-LLVM if the module actually contains a vector op.
@@ -1384,7 +1380,8 @@ extern "C" bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module_
     pm.addPass(mlir::createConvertFuncToLLVMPass());
     pm.addPass(mlir::createReconcileUnrealizedCastsPass());
     if (mlir::failed(pm.run(module))) {
-        std::fprintf(stderr, "MLIR_LowerToLLVMDialect: pass pipeline failed\n");
+        std::fprintf(stderr,
+                     "MLIR_LowerToLLVMDialectUpstream: pass pipeline failed\n");
         return false;
     }
     return true;
@@ -1445,21 +1442,15 @@ static void liftLLVMFuncCFGToSCF(mlir::ModuleOp module) {
     }
 }
 
-extern "C" bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx,
-                                               MLIR_OpHandle module_h,
-                                               MLIR_LoweringBackend backend) {
+extern "C" bool MLIR_LowerToLLVMDialectForWasmUpstream(MLIR_Context *ctx,
+                                                       MLIR_OpHandle module_h) {
+    (void)ctx;
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
         std::fprintf(stderr,
-                     "MLIR_LowerToLLVMDialectForWasm: handle is not a ModuleOp\n");
+                     "MLIR_LowerToLLVMDialectForWasmUpstream: handle is not a ModuleOp\n");
         return false;
-    }
-    if (backend != MLIR_LOWERING_NATIVE) {
-        // Upstream backend: just defer to the standard lowering. The wasm
-        // emitter for the upstream backend uses LLVM's WebAssembly target
-        // which expects fully-lowered LLVM-dialect input.
-        return MLIR_LowerToLLVMDialect(ctx, module_h, backend);
     }
     auto &mctx = globalCtx().mctx;
     // The opUserAttrs / opByNameAttrs caches are keyed by Operation* and
@@ -1496,7 +1487,7 @@ extern "C" bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx,
     pm.addPass(mlir::createReconcileUnrealizedCastsPass());
     if (mlir::failed(pm.run(module))) {
         std::fprintf(stderr,
-                     "MLIR_LowerToLLVMDialectForWasm: pass pipeline failed\n");
+                     "MLIR_LowerToLLVMDialectForWasmUpstream: pass pipeline failed\n");
         return false;
     }
     // Drop any cached attrs from before / during the pipeline: the ops they
@@ -1506,19 +1497,14 @@ extern "C" bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx,
     return true;
 }
 
-extern "C" string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module_h,
-                                               MLIR_LoweringBackend backend) {
+extern "C" string MLIR_TranslateModuleToLLVMIRUpstream(MLIR_Context *ctx,
+                                                       MLIR_OpHandle module_h) {
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
-        std::fprintf(stderr, "MLIR_TranslateModuleToLLVMIR: not a ModuleOp\n");
+        std::fprintf(stderr,
+                     "MLIR_TranslateModuleToLLVMIRUpstream: not a ModuleOp\n");
         return mkRefString(llvm::StringRef());
-    }
-    // For now, MLIR_LOWERING_NATIVE delegates to the upstream translator.
-    // Stage C will replace this branch with a walk via mlir_api.h.
-    if (backend == MLIR_LOWERING_NATIVE) {
-        extern string mlir_translate_to_llvm_ir_native(MLIR_Context *, MLIR_OpHandle);
-        return mlir_translate_to_llvm_ir_native(ctx, module_h);
     }
     // Register the LLVM-IR translation interfaces (idempotent).
     mlir::registerBuiltinDialectTranslation(globalCtx().mctx);
@@ -1527,7 +1513,8 @@ extern "C" string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle 
     llvm::LLVMContext llctx;
     auto llmod = mlir::translateModuleToLLVMIR(module, llctx);
     if (!llmod) {
-        std::fprintf(stderr, "MLIR_TranslateModuleToLLVMIR: translation failed\n");
+        std::fprintf(stderr,
+                     "MLIR_TranslateModuleToLLVMIRUpstream: translation failed\n");
         return mkRefString(llvm::StringRef());
     }
     std::string out;
@@ -1543,34 +1530,19 @@ extern "C" string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle 
     return result;
 }
 
-// Translate a `builtin.module` op already lowered to the LLVM dialect into
-// a wasm32-wasi relocatable object file using LLVM's WebAssembly target.
-// The returned bytes are NOT a runnable wasm module — they still need to
-// be linked (typically with `wasm-ld`) against any runtime/imports the
-// program uses.
-extern "C" string MLIR_TranslateModuleToWasm(MLIR_Context *ctx,
-                                             MLIR_OpHandle module_h,
-                                             MLIR_LoweringBackend backend) {
+// Translate a `builtin.module` op already lowered to the LLVM dialect
+// into a wasm32-wasi relocatable object file using LLVM's WebAssembly
+// target. The returned bytes are NOT a runnable wasm module — they
+// still need to be linked (typically with `wasm-ld`) against any
+// runtime/imports the program uses.
+extern "C" string MLIR_TranslateModuleToWasmUpstream(MLIR_Context *ctx,
+                                                     MLIR_OpHandle module_h) {
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
         std::fprintf(stderr,
-                     "MLIR_TranslateModuleToWasm: handle is not a ModuleOp\n");
+                     "MLIR_TranslateModuleToWasmUpstream: handle is not a ModuleOp\n");
         return mkRefString(llvm::StringRef());
-    }
-
-    // For backend==MLIR_LOWERING_NATIVE we dispatch to the in-tree
-    // three-stage pipeline (llvm.dialect -> wasmssa -> wasmstack -> wasm
-    // bytes) and bypass LLVM's WebAssembly target entirely. For the
-    // upstream backend we go through MLIR's LLVM-IR translator and feed
-    // the resulting llvm::Module to LLVM's WebAssembly TargetMachine.
-    if (backend == MLIR_LOWERING_NATIVE) {
-        string fail = {0};
-        MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(ctx, module_h);
-        if (!ssa) return fail;
-        MLIR_OpHandle stk = mlir_wasmssa_to_wasmstack(ctx, ssa);
-        if (!stk) return fail;
-        return mlir_wasmstack_to_bin(ctx, stk);
     }
 
     llvm::LLVMContext llctx;
@@ -1581,7 +1553,7 @@ extern "C" string MLIR_TranslateModuleToWasm(MLIR_Context *ctx,
         llmod = mlir::translateModuleToLLVMIR(module, llctx);
         if (!llmod) {
             std::fprintf(stderr,
-                         "MLIR_TranslateModuleToWasm: translation to LLVM IR failed\n");
+                         "MLIR_TranslateModuleToWasmUpstream: translation to LLVM IR failed\n");
             return mkRefString(llvm::StringRef());
         }
     }
@@ -1601,7 +1573,7 @@ extern "C" string MLIR_TranslateModuleToWasm(MLIR_Context *ctx,
     const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, err);
     if (!target) {
         std::fprintf(stderr,
-                     "MLIR_TranslateModuleToWasm: lookupTarget failed: %s\n",
+                     "MLIR_TranslateModuleToWasmUpstream: lookupTarget failed: %s\n",
                      err.c_str());
         return mkRefString(llvm::StringRef());
     }
@@ -1613,7 +1585,7 @@ extern "C" string MLIR_TranslateModuleToWasm(MLIR_Context *ctx,
         triple, /*CPU*/ "generic", /*Features*/ "", opts, rm, cm));
     if (!tm) {
         std::fprintf(stderr,
-                     "MLIR_TranslateModuleToWasm: createTargetMachine failed\n");
+                     "MLIR_TranslateModuleToWasmUpstream: createTargetMachine failed\n");
         return mkRefString(llvm::StringRef());
     }
     llmod->setDataLayout(tm->createDataLayout());
@@ -1627,7 +1599,7 @@ extern "C" string MLIR_TranslateModuleToWasm(MLIR_Context *ctx,
     if (tm->addPassesToEmitFile(pm, obj_os, /*DwoOut*/ nullptr,
                                 llvm::CodeGenFileType::ObjectFile)) {
         std::fprintf(stderr,
-                     "MLIR_TranslateModuleToWasm: target cannot emit object file\n");
+                     "MLIR_TranslateModuleToWasmUpstream: target cannot emit object file\n");
         return mkRefString(llvm::StringRef());
     }
     pm.run(*llmod);

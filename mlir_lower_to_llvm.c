@@ -10,9 +10,9 @@
 // already in the LLVM dialect (or have no lowering needed) are left
 // alone.
 //
-// This is the entry point that mlir_api_impl_upstream.cpp (Stage B) and
-// mlir_api_impl.c (Stage D) call from the NATIVE arm of
-// MLIR_LowerToLLVMDialect.
+// This file is C, linked into both the upstream-backed and native-backed
+// builds (no upstream MLIR headers), so the same translation unit
+// supplies the agnostic `MLIR_LowerToLLVMDialect` in both binaries.
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -24,9 +24,6 @@
 
 #include "mlir_api.h"
 #include "mlir_op_names.h"
-
-// Forward declaration — defined at the bottom.
-bool mlir_lower_to_llvm_native(MLIR_Context *ctx, MLIR_OpHandle module);
 
 // -----------------------------------------------------------------------------
 // Small helpers
@@ -810,7 +807,7 @@ static void walk_block(LowerState *st, MLIR_BlockHandle block) {
     }
 }
 
-bool mlir_lower_to_llvm_native(MLIR_Context *ctx, MLIR_OpHandle module) {
+bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module) {
     if (module == MLIR_INVALID_HANDLE) return false;
     if (MLIR_GetOpNumRegions(module) == 0) return false;
     MLIR_RegionHandle body_region = MLIR_GetOpRegion(module, 0);
@@ -823,4 +820,14 @@ bool mlir_lower_to_llvm_native(MLIR_Context *ctx, MLIR_OpHandle module) {
 
     walk_block(&st, st.module_body);
     return true;
+}
+
+// In-tree LLVM-dialect lowering tailored for the wasm pipeline. Today
+// this is just MLIR_LowerToLLVMDialect — the wasm pipeline already
+// expects scf-form control flow, but the in-tree lift-cf-to-scf pass
+// is not yet implemented (TODO). Callers feeding the wasm pipeline
+// should use this entry point so that, once the native lifter lands,
+// they pick it up without any further call-site changes.
+bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx, MLIR_OpHandle module) {
+    return MLIR_LowerToLLVMDialect(ctx, module);
 }

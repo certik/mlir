@@ -350,61 +350,65 @@ string MLIR_PrintOperationGeneric(MLIR_Context *ctx, MLIR_OpHandle op);
 MLIR_OpHandle MLIR_ParseTextUpstream(MLIR_Context *ctx, string text);
 MLIR_OpHandle MLIR_ParseTextClassic(MLIR_Context *ctx, string text);
 
-// Backend selector for the lowering / LLVM-IR translation entry points.
+// Lowering / translation entry points.
 //
-// MLIR_LOWERING_UPSTREAM uses upstream MLIR's pass pipeline / translator
-// (only available when linked against mlir_api_impl_upstream.cpp).
+// Two parallel families:
 //
-// MLIR_LOWERING_NATIVE uses our own implementation, walking the IR
-// through mlir_api.h only. It is the path that makes the native build
-// (mlir_api_impl.c) self-contained.
-typedef enum {
-    MLIR_LOWERING_UPSTREAM = 0,
-    MLIR_LOWERING_NATIVE   = 1,
-} MLIR_LoweringBackend;
-
-// Lower a `builtin.module` op to the LLVM dialect by running the standard
-// conversion passes (scf -> cf, arith/memref/cf/func/vector -> llvm,
-// reconcile-unrealized-casts). Mutates `module` in place. Returns true on
-// success. With MLIR_LOWERING_UPSTREAM available only when linked against
-// the upstream backend; with MLIR_LOWERING_NATIVE this is the native
-// implementation. Diagnostic messages from failed passes are printed to
-// stderr.
-bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module,
-                             MLIR_LoweringBackend backend);
-
-// Same as MLIR_LowerToLLVMDialect, but tailored to feed the native
-// LLVM-dialect-MLIR -> WASM emitter (mlir_translate_to_wasm.c). The
-// difference matters only for MLIR_LOWERING_NATIVE: instead of running
-// scf->cf and cf->llvm (which destroys structured control flow that
-// wasm needs), this entry point runs upstream's `lift-cf-to-scf`
-// pass first and then lowers arith/memref/func/vector/etc. to LLVM,
-// leaving scf.* ops in place for stage 1 of the wasm pipeline to
-// consume directly. For MLIR_LOWERING_UPSTREAM it is identical to
-// MLIR_LowerToLLVMDialect.
-bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx, MLIR_OpHandle module,
-                                    MLIR_LoweringBackend backend);
-
-// Translate a `builtin.module` op already lowered to the LLVM dialect into
-// LLVM IR text (`.ll`). Returns the IR text on success or an empty string
-// on failure. See MLIR_LoweringBackend above for backend semantics.
-string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module,
-                                    MLIR_LoweringBackend backend);
-
-// Translate a `builtin.module` op already lowered to the LLVM dialect into
-// a WebAssembly relocatable object file (wasm32-wasi). Returns the raw
-// object bytes on success or an empty string on failure. The returned
-// bytes are NOT a runnable wasm module — they still need to be linked
-// (typically with `wasm-ld`) against any runtime/imports the program
-// uses, producing a final `.wasm` module that can be run by wasmtime.
+//   - Backend-agnostic functions (MLIR_LowerToLLVMDialect{,ForWasm},
+//     MLIR_TranslateModuleTo{LLVMIR,Wasm}) are implemented in dedicated
+//     translation units (mlir_lower_to_llvm.c,
+//     mlir_translate_to_llvm_ir.c, mlir_translate_to_wasm.c) that use
+//     only this very header — no upstream MLIR types. The same .o files
+//     link into both the native and upstream tinyc builds, so these
+//     functions are always available and produce identical output
+//     regardless of which core API implementation is linked in.
 //
-// Backend semantics:
-//   MLIR_LOWERING_UPSTREAM uses LLVM's WebAssembly target machine to
-//   emit the object file. Requires the upstream backend.
-//   MLIR_LOWERING_NATIVE is not implemented and returns an empty string
-//   (a diagnostic is printed to stderr).
-string MLIR_TranslateModuleToWasm(MLIR_Context *ctx, MLIR_OpHandle module,
-                                  MLIR_LoweringBackend backend);
+//   - *Upstream siblings (MLIR_LowerToLLVMDialect{,ForWasm}Upstream,
+//     MLIR_TranslateModuleTo{LLVMIR,Wasm}Upstream, plus
+//     MLIR_PrintOperationUpstream and MLIR_ParseTextUpstream above) are
+//     implemented only by mlir_api_impl_upstream.cpp. They run upstream
+//     MLIR's pass pipeline / translator / LLVM target machine and are
+//     therefore unavailable in the native-only build (calls fail at
+//     link time). They exist so callers can run upstream side-by-side
+//     with the in-tree implementation for reference, performance, or
+//     correctness comparisons.
+//
+// All entry points print diagnostics to stderr on failure.
+
+// Lower a `builtin.module` op to the LLVM dialect by running the
+// in-tree conversion (scf->cf, then arith/memref/cf/func/vector ->
+// llvm). Mutates `module` in place. Returns true on success.
+bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module);
+
+// Same as MLIR_LowerToLLVMDialect, but tailored to feed the in-tree
+// LLVM-dialect-MLIR -> WASM emitter (mlir_translate_to_wasm.c).
+// Instead of running scf->cf (which destroys structured control flow
+// that wasm needs), this entry point first lifts cf back to scf and
+// then lowers arith/memref/func/vector/etc. to LLVM, leaving scf.* ops
+// in place for stage 1 of the wasm pipeline to consume directly.
+bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx, MLIR_OpHandle module);
+
+// Translate a `builtin.module` op already lowered to the LLVM dialect
+// into LLVM IR text (`.ll`). Returns the IR text on success or an
+// empty string on failure.
+string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module);
+
+// Translate a `builtin.module` op already lowered to the LLVM dialect
+// into a WebAssembly relocatable object file (wasm32-wasi). Returns
+// the raw object bytes on success or an empty string on failure. The
+// returned bytes are NOT a runnable wasm module — they still need to
+// be linked (typically with `wasm-ld`) against any runtime/imports the
+// program uses, producing a final `.wasm` module that can be run by
+// wasmtime. This implementation chains the in-tree native pipeline
+// (mlir_llvm_to_wasmssa -> mlir_wasmssa_to_wasmstack ->
+// mlir_wasmstack_to_bin).
+string MLIR_TranslateModuleToWasm(MLIR_Context *ctx, MLIR_OpHandle module);
+
+// Upstream-only siblings. See the family description above.
+bool MLIR_LowerToLLVMDialectUpstream(MLIR_Context *ctx, MLIR_OpHandle module);
+bool MLIR_LowerToLLVMDialectForWasmUpstream(MLIR_Context *ctx, MLIR_OpHandle module);
+string MLIR_TranslateModuleToLLVMIRUpstream(MLIR_Context *ctx, MLIR_OpHandle module);
+string MLIR_TranslateModuleToWasmUpstream(MLIR_Context *ctx, MLIR_OpHandle module);
 
 // Accessors
 MLIR_OpType MLIR_GetOpType(MLIR_OpHandle op);
