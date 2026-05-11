@@ -650,11 +650,10 @@ string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle th) {
         case TYPE_KIND_OPAQUE:
             return str_lit("unknown");
         case TYPE_KIND_INTEGER:
-            if (type->data.integer.is_signed) {
-                return format(arena, str_lit("i{}"), (int64_t)type->data.integer.width);
-            } else {
-                return format(arena, str_lit("ui{}"), (int64_t)type->data.integer.width);
-            }
+            // Signless `i{w}` regardless of `is_signed` — MLIR integers are
+            // signless by default and the upstream backend always produces
+            // `i{w}` from `MLIR_CreateTypeInteger`, so match it.
+            return format(arena, str_lit("i{}"), (int64_t)type->data.integer.width);
         case TYPE_KIND_FLOAT:
             if (type->data.floating.is_bfloat && type->data.floating.width == 16) {
                 return str_lit("bf16");
@@ -787,10 +786,16 @@ string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle th) {
 
 // Type creation
 MLIR_TypeHandle MLIR_CreateTypeInteger(MLIR_Context *ctx, uint32_t width, bool is_signed) {
+    // MLIR integer types are signless by default. The public API takes an
+    // `is_signed` flag for forward-compat, but the upstream backend ignores
+    // it (always constructs a signless `IntegerType`). Match that so both
+    // backends produce the same canonical type identity for `i{w}` and the
+    // wasm pipeline / lowering passes can compare types via handle equality.
+    (void)is_signed;
     IR_Type t = {0};
     t.kind = TYPE_KIND_INTEGER;
     t.data.integer.width = width;
-    t.data.integer.is_signed = is_signed;
+    t.data.integer.is_signed = false;
     return alloc_type(ctx, t);
 }
 
@@ -1144,11 +1149,13 @@ uint64_t MLIR_GetTypeLLVMArrayNumElements(MLIR_TypeHandle th) {
 }
 
 void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle th, uint32_t width, bool is_signed) {
+    // `is_signed` is intentionally ignored — see MLIR_CreateTypeInteger.
+    (void)is_signed;
     IR_Type *t = resolve_type(th);
     if (!t) return;
     t->kind = TYPE_KIND_INTEGER;
     t->data.integer.width = width;
-    t->data.integer.is_signed = is_signed;
+    t->data.integer.is_signed = false;
 }
 
 void MLIR_SetTypeFloatProperties(MLIR_TypeHandle th, uint32_t width, bool is_bfloat) {
