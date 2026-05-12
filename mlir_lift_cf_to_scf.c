@@ -87,6 +87,9 @@ struct LiftState_S {
 static MLIR_ValueHandle get_switch_value(LiftState *st, unsigned v);
 static MLIR_ValueHandle get_undef_value(LiftState *st, MLIR_TypeHandle ty);
 static string           fresh_ssa_name(Arena *arena);
+static void             lift_state_init(LiftState *st, MLIR_Context *ctx,
+                                        Arena *arena, MLIR_OpHandle fn_op,
+                                        MLIR_BlockHandle entry_block);
 
 // Forward declaration of branch op constructor used by EdgeMultiplexer
 // (defined further down with the other op constructors).
@@ -683,12 +686,12 @@ static void combiner_combine_exit(MLIR_Context *ctx, Combiner *c,
 // Top-level driver: scan every block of `region`; for each block with no
 // successors (block ending in a return-like op), funnel through the
 // combiner. Mirrors CFGToSCF.cpp:1221-1234.
-static void create_single_exit_blocks_for_return_like(MLIR_Context *ctx,
-                                                      Arena *arena,
-                                                      MLIR_RegionHandle region) {
-    Combiner c = {0};
-    c.region = region;
-    c.arena = arena;
+static void create_single_exit_blocks_for_return_like_into(MLIR_Context *ctx,
+                                                            Arena *arena,
+                                                            MLIR_RegionHandle region,
+                                                            Combiner *c) {
+    c->region = region;
+    c->arena = arena;
 
     // Snapshot blocks first (the loop mutates the region by appending
     // new exit blocks at the end).
@@ -709,8 +712,15 @@ static void create_single_exit_blocks_for_return_like(MLIR_Context *ctx,
         string n = MLIR_GetOpName(term);
         if (!string_eq_string(n, str_lit("func.return")) &&
             !string_eq_string(n, str_lit("llvm.return"))) continue;
-        combiner_combine_exit(ctx, &c, term);
+        combiner_combine_exit(ctx, c, term);
     }
+}
+
+static void create_single_exit_blocks_for_return_like(MLIR_Context *ctx,
+                                                      Arena *arena,
+                                                      MLIR_RegionHandle region) {
+    Combiner c = {0};
+    create_single_exit_blocks_for_return_like_into(ctx, arena, region, &c);
 }
 
 // ============================================================================
@@ -1001,8 +1011,12 @@ static size_t scc_collect_reachable(Arena *arena, MLIR_RegionHandle region,
         for (size_t i = 0; i < ns; ++i) {
             MLIR_BlockHandle s = MLIR_GetOpSuccessor(term, i);
             if (s == MLIR_INVALID_HANDLE) continue;
+            // Only follow successors that live in this region; cross-region
+            // successors (e.g., exit edges left dangling after a partial M7
+            // transform) are handled by the caller, not us.
+            if (MLIR_GetBlockParentRegion(s) != region) continue;
             if (scc_block_index(list, n, s) != SIZE_MAX) continue;
-            if (n >= cap) return n; // shouldn't happen — region has cap blocks
+            if (n >= cap) break; // shouldn't happen for a well-formed region
             list[n++] = s;
         }
     }
@@ -3658,6 +3672,106 @@ static bool try_duplicate_passthrough_block(MLIR_Context *ctx, Arena *arena,
     return true;
 }
 
+// ============================================================================
+// transform_cfg_to_scf_region  (CFGToSCF.cpp:1300-1376).
+//
+// Drives the worklist that turns the cf graph of a single region into
+// structured scf control flow. The worklist holds region-entry blocks
+// to process. For each:
+//   1. Run M7 (transform_cycles_to_scf_loops) — turns SCCs into scf.while.
+//   2. Run M8 (transform_to_structured_cf_branches) — turns cf.cond_br
+//      into scf.if (cf.switch not yet handled — falls through).
+// ============================================================================
+static bool transform_cfg_to_scf_region(LiftState *st, Combiner *combiner,
+                                        MLIR_RegionHandle region) {
+    const char *dbg = getenv("TINYC_LIFT_DBG");
+    if (MLIR_GetRegionNumBlocks(region) == 0) return false;
+    if (MLIR_GetRegionNumBlocks(region) == 1) return false;
+
+    if (!check_preconditions(region)) return false;
+    if (dbg) fprintf(stderr, "[lift] region(%zu blocks): combine_exits\n",
+                     MLIR_GetRegionNumBlocks(region));
+    create_single_exit_blocks_for_return_like_into(st->ctx, st->arena, region,
+                                                   combiner);
+
+    Arena *arena = st->arena;
+    MLIR_BlockHandle *worklist = arena_new_array(arena, MLIR_BlockHandle, 32);
+    size_t wl_n = 0, wl_cap = 32;
+    worklist[wl_n++] = MLIR_GetRegionBlock(region, 0);
+
+    bool changed_any = false;
+    size_t safety_iter = 0;
+    size_t safety_limit = 4096;
+    while (wl_n > 0 && safety_iter++ < safety_limit) {
+        MLIR_BlockHandle cur = worklist[--wl_n];
+        MLIR_RegionHandle cur_region = MLIR_GetBlockParentRegion(cur);
+        if (MLIR_GetRegionNumBlocks(cur_region) <= 1) continue;
+
+        if (dbg) fprintf(stderr, "[lift] iter %zu: process block, region has %zu blocks\n",
+                         safety_iter, MLIR_GetRegionNumBlocks(cur_region));
+
+        // M7: cycles -> scf.while.
+        size_t n_new7 = 0;
+        MLIR_BlockHandle *new7 = NULL;
+        if (!getenv("TINYC_LIFT_SKIP_M7")) {
+            new7 = transform_cycles_to_scf_loops(st, combiner, cur, &n_new7);
+        }
+        if (dbg) fprintf(stderr, "[lift]   cycles produced %zu sub-regions\n", n_new7);
+        for (size_t i = 0; i < n_new7; ++i) {
+            if (wl_n == wl_cap) {
+                size_t nc = wl_cap * 2;
+                MLIR_BlockHandle *nw = arena_new_array(arena, MLIR_BlockHandle, nc);
+                memcpy(nw, worklist, sizeof(MLIR_BlockHandle) * wl_n);
+                worklist = nw; wl_cap = nc;
+            }
+            worklist[wl_n++] = new7[i];
+        }
+        if (n_new7) changed_any = true;
+
+        if (getenv("TINYC_LIFT_SKIP_M8")) continue;
+
+        // M8: cond_br -> scf.if.
+        DomInfo dom = dom_compute(arena, cur_region, /*is_post=*/false);
+        BranchXformResult r = transform_to_structured_cf_branches(st, cur, &dom);
+        if (dbg) fprintf(stderr, "[lift]   branches: ok=%d prog=%d new=%zu\n",
+                         (int)r.ok, (int)r.made_progress, r.n_new_sub_regions);
+        if (!r.ok) continue;
+        if (r.made_progress) changed_any = true;
+        for (size_t i = 0; i < r.n_new_sub_regions; ++i) {
+            if (r.new_sub_regions[i] == cur && !r.made_progress) continue;
+            if (wl_n == wl_cap) {
+                size_t nc = wl_cap * 2;
+                MLIR_BlockHandle *nw = arena_new_array(arena, MLIR_BlockHandle, nc);
+                memcpy(nw, worklist, sizeof(MLIR_BlockHandle) * wl_n);
+                worklist = nw; wl_cap = nc;
+            }
+            worklist[wl_n++] = r.new_sub_regions[i];
+        }
+    }
+    return changed_any;
+}
+
+// Walk every region of every op in `region` recursively (post-order),
+// calling `transform_cfg_to_scf_region` on each. Matches upstream's
+// `funcOp->walk<PostOrder>` over all op-regions inside the function.
+static void walk_and_transform_regions(LiftState *st, Combiner *combiner,
+                                       MLIR_RegionHandle region) {
+    size_t nb = MLIR_GetRegionNumBlocks(region);
+    for (size_t bi = 0; bi < nb; ++bi) {
+        MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
+        size_t no = MLIR_GetBlockNumOps(b);
+        for (size_t oi = 0; oi < no; ++oi) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(b, oi);
+            size_t nr = MLIR_GetOpNumRegions(op);
+            for (size_t ri = 0; ri < nr; ++ri) {
+                MLIR_RegionHandle sub = MLIR_GetOpRegion(op, ri);
+                walk_and_transform_regions(st, combiner, sub);
+            }
+        }
+    }
+    transform_cfg_to_scf_region(st, combiner, region);
+}
+
 static bool fold_simple_loops_and_ifs(MLIR_Context *ctx, Arena *arena,
                                       MLIR_BlockHandle entry) {
     bool any = false;
@@ -3726,16 +3840,9 @@ bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module) {
     (void)ctx;
     if (module == MLIR_INVALID_HANDLE) return false;
     if (MLIR_GetOpNumRegions(module) == 0) return true;
-    // Allow staged enablement of the partial port without touching IR
-    // on the default opt-in path. TINYC_LIFT_USE_NATIVE_PARTIAL=1 runs
-    // the return-like exit combiner on each function body before
-    // returning false so the upstream lift finishes the rest.
-    // Always run the partial transforms we have ported. Anything left
-    // unhandled (loops, multi-way switches, non-clean diamonds) falls
-    // through; downstream (wasmssa-lower) will report it. We return
-    // true unconditionally so the caller proceeds with the lowered
-    // (or partially-lowered) IR.
-    (void)getenv;
+
+    const char *use_faithful = getenv("TINYC_LIFT_FAITHFUL");
+    bool faithful = use_faithful && use_faithful[0] && use_faithful[0] != '0';
 
     Arena *scratch = arena_create(4096);
     MLIR_RegionHandle mod_body = MLIR_GetOpRegion(module, 0);
@@ -3755,9 +3862,17 @@ bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module) {
                 return false;
             }
             if (!region_has_cf_branch(body)) continue;
-            create_single_exit_blocks_for_return_like(ctx, scratch, body);
-            MLIR_BlockHandle entry = MLIR_GetRegionBlock(body, 0);
-            fold_simple_loops_and_ifs(ctx, scratch, entry);
+            if (faithful) {
+                LiftState st = {0};
+                MLIR_BlockHandle entry = MLIR_GetRegionBlock(body, 0);
+                lift_state_init(&st, ctx, scratch, o, entry);
+                Combiner combiner = {0};
+                walk_and_transform_regions(&st, &combiner, body);
+            } else {
+                create_single_exit_blocks_for_return_like(ctx, scratch, body);
+                MLIR_BlockHandle entry = MLIR_GetRegionBlock(body, 0);
+                fold_simple_loops_and_ifs(ctx, scratch, entry);
+            }
         }
     }
     arena_destroy(scratch);
@@ -3816,7 +3931,11 @@ static MLIR_ValueHandle get_switch_value(LiftState *st, unsigned v) {
     as[0] = val;
     MLIR_OpHandle op = MLIR_CreateOp(
         st->ctx, OP_TYPE_ARITH_CONSTANT, str_lit("arith.constant"),
-        rt, 1, rs, 1, NULL, 0, NULL, 0, as, 1,
+        as, 1,        // attributes
+        rt, 1,        // result_types
+        rs, 1,        // results
+        NULL, 0,      // operands
+        NULL, 0,      // regions
         st->unk_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
     MLIR_InsertBlockOpAtIndex(st->ctx, st->entry_block, op, 0);
     st->switch_value_cache[v] = r;
@@ -3848,7 +3967,11 @@ static MLIR_ValueHandle get_undef_value(LiftState *st, MLIR_TypeHandle ty) {
     rs[0] = r;
     MLIR_OpHandle op = MLIR_CreateOp(
         st->ctx, OP_TYPE_LLVM_MLIR_UNDEF, str_lit("llvm.mlir.undef"),
-        rt, 1, rs, 1, NULL, 0, NULL, 0, NULL, 0,
+        NULL, 0,      // attributes
+        rt, 1,        // result_types
+        rs, 1,        // results
+        NULL, 0,      // operands
+        NULL, 0,      // regions
         st->unk_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
     MLIR_InsertBlockOpAtIndex(st->ctx, st->entry_block, op, 0);
     TypedValueEntry e = { ty, r };
@@ -3880,7 +4003,11 @@ static MLIR_OpHandle create_cf_cond_br_in_block(MLIR_Context *ctx, Arena *arena,
     snums[0] = n_t_args; snums[1] = n_f_args;
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
         ctx, OP_TYPE_CF_COND_BR, str_lit("cf.cond_br"),
-        NULL, 0, NULL, 0, ops, 1, NULL, 0, NULL, 0,
+        NULL, 0,          // attributes
+        NULL, 0,          // result_types
+        NULL, 0,          // results
+        ops, 1,           // operands (the condition)
+        NULL, 0,          // regions
         succs, 2, sops, snums,
         loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
     MLIR_AppendBlockOp(ctx, in_block, op);
@@ -3933,7 +4060,11 @@ static MLIR_OpHandle create_cf_switch_in_block(MLIR_Context *ctx, Arena *arena,
     as[0] = ca;
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
         ctx, OP_TYPE_CF_SWITCH, str_lit("cf.switch"),
-        NULL, 0, NULL, 0, ops, 1, NULL, 0, as, 1,
+        as, 1,            // attributes
+        NULL, 0,          // result_types
+        NULL, 0,          // results
+        ops, 1,           // operands (the flag)
+        NULL, 0,          // regions
         succs, n_succ, sops, snums,
         loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
     MLIR_AppendBlockOp(ctx, in_block, op);
