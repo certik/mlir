@@ -1186,6 +1186,96 @@ found:;
     return true;
 }
 
+// ============================================================================
+// Local-merge insertion (preprocessing for diamond patterns whose merge
+// has more than two predecessors). Given:
+//
+//   ^entry: ... cf.cond_br %c, ^a(args_a), ^b(args_b)
+//   ^a:     ...; cf.br ^merge(yield_a)
+//   ^b:     ...; cf.br ^merge(yield_b)
+//   ^merge(M_args): ...                  (>2 predecessors)
+//
+// insert ^local_merge between {a, b} and merge so the inner diamond
+// becomes liftable as a clean diamond:
+//
+//   ^entry: ... cf.cond_br %c, ^a(args_a), ^b(args_b)
+//   ^a:     ...; cf.br ^local_merge(yield_a)
+//   ^b:     ...; cf.br ^local_merge(yield_b)
+//   ^local_merge(L_args: M_arg_types): cf.br ^merge(L_args)
+//   ^merge: ...
+//
+// Returns true if the rewrite fired.
+// ============================================================================
+static bool try_split_diamond_merge(MLIR_Context *ctx, Arena *arena,
+                                    MLIR_BlockHandle entry) {
+    MLIR_OpHandle cond_br = MLIR_GetBlockTerminator(entry);
+    if (cond_br == MLIR_INVALID_HANDLE) return false;
+    if (!string_eq_string(MLIR_GetOpName(cond_br), str_lit("cf.cond_br")))
+        return false;
+    if (MLIR_GetOpNumSuccessors(cond_br) != 2) return false;
+    MLIR_BlockHandle then_b = MLIR_GetOpSuccessor(cond_br, 0);
+    MLIR_BlockHandle else_b = MLIR_GetOpSuccessor(cond_br, 1);
+    if (then_b == MLIR_INVALID_HANDLE || else_b == MLIR_INVALID_HANDLE) return false;
+    if (then_b == else_b || then_b == entry || else_b == entry) return false;
+    if (MLIR_GetBlockNumPredecessors(then_b) != 1) return false;
+    if (MLIR_GetBlockNumPredecessors(else_b) != 1) return false;
+    MLIR_OpHandle then_term = MLIR_GetBlockTerminator(then_b);
+    MLIR_OpHandle else_term = MLIR_GetBlockTerminator(else_b);
+    if (then_term == MLIR_INVALID_HANDLE || else_term == MLIR_INVALID_HANDLE) return false;
+    if (!string_eq_string(MLIR_GetOpName(then_term), str_lit("cf.br"))) return false;
+    if (!string_eq_string(MLIR_GetOpName(else_term), str_lit("cf.br"))) return false;
+    MLIR_BlockHandle merge = MLIR_GetOpSuccessor(then_term, 0);
+    if (merge == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetOpSuccessor(else_term, 0) != merge) return false;
+    if (merge == entry || merge == then_b || merge == else_b) return false;
+    // Only fire when merge has MORE than 2 preds (otherwise the simple
+    // diamond lifter handles it directly).
+    if (MLIR_GetBlockNumPredecessors(merge) <= 2) return false;
+
+    size_t n_args = MLIR_GetBlockNumArgs(merge);
+    // Arity sanity.
+    if (MLIR_GetOpNumSuccessorOperands(then_term, 0) != n_args) return false;
+    if (MLIR_GetOpNumSuccessorOperands(else_term, 0) != n_args) return false;
+
+    // Snapshot then/else cf.br operands and merge arg types.
+    MLIR_LocationHandle loc = MLIR_GetOpLocation(then_term);
+    MLIR_ValueHandle *then_yield = n_args
+        ? arena_new_array(arena, MLIR_ValueHandle, n_args) : NULL;
+    MLIR_ValueHandle *else_yield = n_args
+        ? arena_new_array(arena, MLIR_ValueHandle, n_args) : NULL;
+    for (size_t i = 0; i < n_args; ++i) {
+        then_yield[i] = MLIR_GetOpSuccessorOperand(then_term, 0, i);
+        else_yield[i] = MLIR_GetOpSuccessorOperand(else_term, 0, i);
+    }
+    MLIR_TypeHandle *arg_types = n_args
+        ? arena_new_array(arena, MLIR_TypeHandle, n_args) : NULL;
+    for (size_t i = 0; i < n_args; ++i) {
+        arg_types[i] = MLIR_GetValueType(MLIR_GetBlockArg(merge, i));
+    }
+
+    // Build the new local-merge block with N args mirroring merge's args
+    // and a cf.br trampoline back to merge.
+    MLIR_BlockHandle local_merge = MLIR_CreateBlock(ctx);
+    MLIR_ValueHandle *local_args = n_args
+        ? arena_new_array(arena, MLIR_ValueHandle, n_args) : NULL;
+    for (size_t i = 0; i < n_args; ++i) {
+        local_args[i] = MLIR_AddBlockArgument(ctx, local_merge,
+                                              arg_types[i], loc);
+        (void)fresh_ssa_name;
+    }
+    create_cf_br_in_block(ctx, arena, local_merge, merge, local_args, n_args, loc);
+
+    // Insert the local_merge block right after else_b in the parent
+    // region (placement is cosmetic — anywhere in the region works).
+    MLIR_RegionHandle region = MLIR_GetBlockParentRegion(else_b);
+    MLIR_InsertRegionBlockAfter(ctx, region, local_merge, else_b);
+
+    // Retarget then_term and else_term to local_merge (operands stay).
+    MLIR_SetOpSuccessor(ctx, then_term, 0, local_merge);
+    MLIR_SetOpSuccessor(ctx, else_term, 0, local_merge);
+    return true;
+}
+
 static bool fold_simple_loops_and_ifs(MLIR_Context *ctx, Arena *arena,
                                       MLIR_BlockHandle entry) {
     bool any = false;
@@ -1209,6 +1299,9 @@ static bool fold_simple_loops_and_ifs(MLIR_Context *ctx, Arena *arena,
                     changed = true; lifted_any = true; break;
                 }
                 if (try_lift_simple_while(ctx, arena, b)) {
+                    changed = true; lifted_any = true; break;
+                }
+                if (try_split_diamond_merge(ctx, arena, b)) {
                     changed = true; lifted_any = true; break;
                 }
             }
