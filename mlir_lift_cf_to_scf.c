@@ -102,6 +102,15 @@ static MLIR_OpHandle create_cf_switch_in_block(MLIR_Context *ctx, Arena *arena,
                                                size_t n_cases,
                                                MLIR_LocationHandle loc);
 
+static MLIR_OpHandle create_cf_cond_br_in_block(MLIR_Context *ctx, Arena *arena,
+                                                MLIR_BlockHandle in_block,
+                                                MLIR_ValueHandle cond,
+                                                MLIR_BlockHandle t_dst,
+                                                MLIR_ValueHandle *t_args, size_t n_t_args,
+                                                MLIR_BlockHandle f_dst,
+                                                MLIR_ValueHandle *f_args, size_t n_f_args,
+                                                MLIR_LocationHandle loc);
+
 // ============================================================================
 // EdgeMultiplexer (port of CFGToSCF.cpp:212-387).
 //
@@ -693,6 +702,168 @@ static void create_single_exit_blocks_for_return_like(MLIR_Context *ctx,
     }
 }
 
+// ============================================================================
+// createSingleEntryBlock + createSingleExitingLatch  (CFGToSCF.cpp:513-635).
+//
+// `create_single_entry_block` funnels N entry edges of a region (e.g. all
+// edges entering a cycle) through a single synthetic block carrying the
+// union of distinct-entry args + an i32 discriminator. Returns the
+// EdgeMultiplexer that owns the synthetic block.
+//
+// `create_single_exiting_latch` turns a multi-back-edge / multi-exit-edge
+// loop into a structured one with exactly one back edge and one exit edge
+// originating from a freshly-built latch block. The latch carries a
+// `shouldRepeat: i32` discriminator passed by every redirected edge:
+//   - back edges pass shouldRepeat=1, exit edges pass shouldRepeat=0.
+// The latch branches on shouldRepeat to either the loop header (one back
+// edge) or to a separate exit block which then dispatches by switch to the
+// original exit destinations.
+// ============================================================================
+typedef struct {
+    MLIR_BlockHandle latch_block;
+    MLIR_ValueHandle condition;     // i32 'shouldRepeat'
+    MLIR_BlockHandle exit_block;
+    bool             ok;
+} StructuredLoopProps;
+
+static EdgeMultiplexer create_single_entry_block(LiftState *st,
+                                                 const Edge *entry_edges,
+                                                 size_t n_entry_edges,
+                                                 MLIR_LocationHandle loc) {
+    MLIR_BlockHandle *succs = arena_new_array(st->arena, MLIR_BlockHandle,
+                                              n_entry_edges ? n_entry_edges : 1);
+    for (size_t i = 0; i < n_entry_edges; ++i) {
+        succs[i] = edge_successor(entry_edges[i]);
+    }
+
+    EdgeMultiplexer m = edge_multiplexer_create(st, loc, succs, n_entry_edges,
+                                                /*n_extra_args=*/0);
+
+    for (size_t i = 0; i < n_entry_edges; ++i) {
+        edge_multiplexer_redirect_edge(&m, entry_edges[i], NULL, 0);
+    }
+
+    edge_multiplexer_create_switch(&m, m.mux_block, loc,
+                                   /*excluded=*/NULL, /*n_excluded=*/0);
+    return m;
+}
+
+// Emit a return-like terminator carrying undef values for each result of
+// the surrounding function. Used as the fallback terminator for the
+// statically-infinite-loop case in create_single_exiting_latch. Mirrors
+// CFGToSCFForWasm::createUnreachableTerminator in mlir_api_impl_upstream.cpp.
+static MLIR_OpHandle create_unreachable_terminator(LiftState *st,
+                                                   MLIR_BlockHandle block,
+                                                   MLIR_LocationHandle loc) {
+    string fn_name = MLIR_GetOpName(st->fn_op);
+    bool is_llvm = string_eq_string(fn_name, str_lit("llvm.func"));
+
+    MLIR_AttributeHandle ty_attr =
+        MLIR_GetOpAttributeByName(st->fn_op, "function_type");
+    MLIR_TypeHandle fn_ty = (ty_attr == MLIR_INVALID_HANDLE)
+        ? MLIR_INVALID_HANDLE : MLIR_GetAttributeType(ty_attr);
+    size_t n_res = (fn_ty == MLIR_INVALID_HANDLE)
+        ? 0 : MLIR_GetTypeFunctionNumResults(fn_ty);
+
+    MLIR_ValueHandle *args = n_res
+        ? arena_new_array(st->arena, MLIR_ValueHandle, n_res) : NULL;
+    for (size_t i = 0; i < n_res; ++i) {
+        MLIR_TypeHandle rt = MLIR_GetTypeFunctionResult(fn_ty, i);
+        args[i] = get_undef_value(st, rt);
+    }
+
+    MLIR_OpType ot = is_llvm ? OP_TYPE_LLVM_RETURN : OP_TYPE_FUNC_RETURN;
+    string op_name = is_llvm ? str_lit("llvm.return") : str_lit("func.return");
+    MLIR_OpHandle ret = MLIR_CreateOp(
+        st->ctx, ot, op_name,
+        NULL, 0, NULL, 0, NULL, 0,
+        args, n_res, NULL, 0,
+        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_AppendBlockOp(st->ctx, block, ret);
+    return ret;
+}
+
+static StructuredLoopProps create_single_exiting_latch(
+    LiftState *st, Combiner *exit_combiner,
+    const Edge *back_edges, size_t n_back,
+    const Edge *exit_edges, size_t n_exit,
+    MLIR_LocationHandle loc)
+{
+    StructuredLoopProps res = {0};
+    if (n_back == 0) return res;
+
+    // All back edges point to the same loop header (precondition).
+    MLIR_BlockHandle loop_header = edge_successor(back_edges[0]);
+
+    // Multiplexer: successors = [back-edge dests..., exit-edge dests...],
+    // with one trailing extra i32 arg (shouldRepeat).
+    size_t n_all = n_back + n_exit;
+    MLIR_BlockHandle *succs = arena_new_array(st->arena, MLIR_BlockHandle,
+                                              n_all ? n_all : 1);
+    for (size_t i = 0; i < n_back; ++i) {
+        succs[i] = edge_successor(back_edges[i]);
+    }
+    for (size_t i = 0; i < n_exit; ++i) {
+        succs[n_back + i] = edge_successor(exit_edges[i]);
+    }
+    EdgeMultiplexer mux = edge_multiplexer_create(st, loc, succs, n_all,
+                                                  /*n_extra_args=*/1);
+    MLIR_BlockHandle latch = mux.mux_block;
+
+    // Fresh exit block placed immediately after the latch.
+    MLIR_BlockHandle exit_block = MLIR_CreateBlock(st->ctx);
+    MLIR_InsertRegionBlockAfter(st->ctx, MLIR_GetBlockParentRegion(latch),
+                                exit_block, latch);
+
+    // Redirect back edges with shouldRepeat=1, exit edges with shouldRepeat=0.
+    {
+        MLIR_ValueHandle one = get_switch_value(st, 1);
+        MLIR_ValueHandle zero = get_switch_value(st, 0);
+        for (size_t i = 0; i < n_back; ++i) {
+            edge_multiplexer_redirect_edge(&mux, back_edges[i], &one, 1);
+        }
+        for (size_t i = 0; i < n_exit; ++i) {
+            edge_multiplexer_redirect_edge(&mux, exit_edges[i], &zero, 1);
+        }
+    }
+
+    // shouldRepeat is the *last* block-arg of the latch.
+    size_t n_latch_args = MLIR_GetBlockNumArgs(latch);
+    MLIR_ValueHandle should_repeat = MLIR_GetBlockArg(latch, n_latch_args - 1);
+
+    // cf.cond_br shouldRepeat, loop_header(first N args), exit_block()
+    size_t n_hdr_args = MLIR_GetBlockNumArgs(loop_header);
+    MLIR_ValueHandle *hdr_args = n_hdr_args
+        ? arena_new_array(st->arena, MLIR_ValueHandle, n_hdr_args) : NULL;
+    for (size_t i = 0; i < n_hdr_args; ++i) {
+        hdr_args[i] = MLIR_GetBlockArg(latch, i);
+    }
+    create_cf_cond_br_in_block(st->ctx, st->arena, latch, should_repeat,
+                               loop_header, hdr_args, n_hdr_args,
+                               exit_block, NULL, 0, loc);
+
+    if (n_exit > 0) {
+        // Dispatch from exit_block to the original exit destinations.
+        // Exclude loop_header (it must already be reachable via back edge).
+        edge_multiplexer_create_switch(&mux, exit_block, loc,
+                                       /*excluded=*/&loop_header,
+                                       /*n_excluded=*/1);
+    } else {
+        // Statically infinite loop: terminate exit_block with a fresh
+        // return op carrying undef args, then fold it via the combiner so
+        // it shares the function's single exit block.
+        MLIR_OpHandle term = create_unreachable_terminator(st, exit_block, loc);
+        combiner_combine_exit(st->ctx, exit_combiner, term);
+    }
+
+    res.latch_block = latch;
+    res.condition   = should_repeat;
+    res.exit_block  = exit_block;
+    res.ok          = true;
+    return res;
+}
+
+// ============================================================================
 // or llvm.func body. The lift algorithm runs once per such region.
 // ============================================================================
 static bool string_eq(string a, const char *b) {
