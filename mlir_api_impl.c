@@ -1812,6 +1812,295 @@ void MLIR_InsertRegionBlockAfter(MLIR_Context *ctx, MLIR_RegionHandle region,
     b->parent_region = region;
 }
 
+void MLIR_InsertRegionBlockBefore(MLIR_Context *ctx, MLIR_RegionHandle region,
+                                  MLIR_BlockHandle block, MLIR_BlockHandle before) {
+    if (region == MLIR_INVALID_HANDLE || block == MLIR_INVALID_HANDLE) return;
+    IR_Block *b = resolve_block(block);
+    if (!b) return;
+    IR_Region *cur = resolve_region(b->parent_region);
+    if (cur) {
+        size_t w = 0;
+        for (size_t i = 0; i < cur->n_blocks; i++) {
+            if (cur->blocks[i] != block) cur->blocks[w++] = cur->blocks[i];
+        }
+        cur->n_blocks = w;
+    }
+    b->parent_region = MLIR_INVALID_HANDLE;
+
+    IR_Region *r = resolve_region(region);
+    if (!r) return;
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
+    size_t insert_at = r->n_blocks; // append if not found / invalid
+    if (before != MLIR_INVALID_HANDLE) {
+        for (size_t i = 0; i < r->n_blocks; i++) {
+            if (r->blocks[i] == before) { insert_at = i; break; }
+        }
+    }
+    MLIR_BlockHandle *nb = arena_new_array(arena, MLIR_BlockHandle, r->n_blocks + 1);
+    if (insert_at > 0) memcpy(nb, r->blocks, insert_at * sizeof(MLIR_BlockHandle));
+    nb[insert_at] = block;
+    if (insert_at < r->n_blocks)
+        memcpy(nb + insert_at + 1, r->blocks + insert_at, (r->n_blocks - insert_at) * sizeof(MLIR_BlockHandle));
+    r->blocks = nb;
+    r->n_blocks++;
+    b->parent_region = region;
+}
+
+MLIR_OpHandle MLIR_GetBlockTerminator(MLIR_BlockHandle block) {
+    IR_Block *b = resolve_block(block);
+    if (!b || b->n_operations == 0) return MLIR_INVALID_HANDLE;
+    return b->operations[b->n_operations - 1];
+}
+
+MLIR_OpHandle MLIR_GetBlockParentOp(MLIR_BlockHandle block) {
+    IR_Block *b = resolve_block(block);
+    if (!b) return MLIR_INVALID_HANDLE;
+    MLIR_RegionHandle r = b->parent_region;
+    if (r == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
+    // Scan global op list to find which op owns this region.
+    for (size_t i = 0; i < g_n_all_ops; i++) {
+        IR_Op *op = resolve_op(g_all_ops[i]);
+        if (!op) continue;
+        for (size_t j = 0; j < op->n_regions; j++) {
+            if (op->regions[j] == r) return g_all_ops[i];
+        }
+    }
+    return MLIR_INVALID_HANDLE;
+}
+
+bool MLIR_BlockIsEntry(MLIR_BlockHandle block) {
+    IR_Block *b = resolve_block(block);
+    if (!b) return false;
+    IR_Region *r = resolve_region(b->parent_region);
+    if (!r || r->n_blocks == 0) return false;
+    return r->blocks[0] == block;
+}
+
+// Helper: count and enumerate predecessors of `block`. Walks all blocks in
+// the parent region; each terminator successor slot equal to `block` is one
+// predecessor entry. The (predecessor block, successor slot) pair is unique.
+static size_t native_collect_preds(MLIR_BlockHandle block,
+                                    MLIR_BlockHandle *out_preds,
+                                    size_t *out_succ_idxs,
+                                    size_t cap) {
+    IR_Block *b = resolve_block(block);
+    if (!b) return 0;
+    IR_Region *r = resolve_region(b->parent_region);
+    if (!r) return 0;
+    size_t n = 0;
+    for (size_t i = 0; i < r->n_blocks; i++) {
+        IR_Block *pb = resolve_block(r->blocks[i]);
+        if (!pb || pb->n_operations == 0) continue;
+        IR_Op *term = resolve_op(pb->operations[pb->n_operations - 1]);
+        if (!term) continue;
+        for (size_t s = 0; s < term->n_successors; s++) {
+            if (term->successors[s] == block) {
+                if (out_preds && n < cap) out_preds[n] = r->blocks[i];
+                if (out_succ_idxs && n < cap) out_succ_idxs[n] = s;
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+size_t MLIR_GetBlockNumPredecessors(MLIR_BlockHandle block) {
+    return native_collect_preds(block, NULL, NULL, 0);
+}
+
+MLIR_BlockHandle MLIR_GetBlockPredecessor(MLIR_BlockHandle block, size_t idx,
+                                          size_t *out_succ_idx) {
+    IR_Block *b = resolve_block(block);
+    if (!b) return MLIR_INVALID_HANDLE;
+    IR_Region *r = resolve_region(b->parent_region);
+    if (!r) return MLIR_INVALID_HANDLE;
+    size_t n = 0;
+    for (size_t i = 0; i < r->n_blocks; i++) {
+        IR_Block *pb = resolve_block(r->blocks[i]);
+        if (!pb || pb->n_operations == 0) continue;
+        IR_Op *term = resolve_op(pb->operations[pb->n_operations - 1]);
+        if (!term) continue;
+        for (size_t s = 0; s < term->n_successors; s++) {
+            if (term->successors[s] == block) {
+                if (n == idx) {
+                    if (out_succ_idx) *out_succ_idx = s;
+                    return r->blocks[i];
+                }
+                n++;
+            }
+        }
+    }
+    if (out_succ_idx) *out_succ_idx = SIZE_MAX;
+    return MLIR_INVALID_HANDLE;
+}
+
+MLIR_ValueHandle MLIR_AddBlockArgument(MLIR_Context *ctx, MLIR_BlockHandle block,
+                                       MLIR_TypeHandle type,
+                                       MLIR_LocationHandle loc) {
+    IR_Block *b = resolve_block(block);
+    if (!b) return MLIR_INVALID_HANDLE;
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
+    // Create the BlockArg value.
+    IR_Value *v = arena_new(arena, IR_Value);
+    *v = (IR_Value){0};
+    v->kind = BLOCK_ARG;
+    v->def_handle = (uintptr_t)block;
+    v->result_index = (uint32_t)b->n_arguments;
+    v->type = type;
+    v->register_name = (string){0};
+    v->location = loc;
+    MLIR_ValueHandle vh = (MLIR_ValueHandle)(uintptr_t)v;
+    // Append to block->arguments.
+    MLIR_ValueHandle *na = arena_new_array(arena, MLIR_ValueHandle,
+                                            b->n_arguments + 1);
+    if (b->n_arguments > 0)
+        memcpy(na, b->arguments, b->n_arguments * sizeof(MLIR_ValueHandle));
+    na[b->n_arguments] = vh;
+    b->arguments = na;
+    b->n_arguments++;
+    return vh;
+}
+
+void MLIR_EraseBlockArguments(MLIR_Context *ctx, MLIR_BlockHandle block,
+                              size_t start, size_t count) {
+    (void)ctx;
+    IR_Block *b = resolve_block(block);
+    if (!b || count == 0) return;
+    if (start >= b->n_arguments) return;
+    if (start + count > b->n_arguments) count = b->n_arguments - start;
+    // Shift remaining arguments down.
+    for (size_t i = start; i + count < b->n_arguments; i++)
+        b->arguments[i] = b->arguments[i + count];
+    b->n_arguments -= count;
+    // Re-number result_index of remaining args.
+    for (size_t i = start; i < b->n_arguments; i++) {
+        IR_Value *v = resolve_value(b->arguments[i]);
+        if (v) v->result_index = (uint32_t)i;
+    }
+}
+
+MLIR_BlockHandle MLIR_GetValueParentBlock(MLIR_ValueHandle value) {
+    IR_Value *v = resolve_value(value);
+    if (!v) return MLIR_INVALID_HANDLE;
+    if (v->kind == BLOCK_ARG)
+        return (MLIR_BlockHandle)v->def_handle;
+    if (v->kind == OP_RESULT) {
+        IR_Op *op = resolve_op((MLIR_OpHandle)v->def_handle);
+        if (!op) return MLIR_INVALID_HANDLE;
+        return op->parent_block;
+    }
+    return MLIR_INVALID_HANDLE;
+}
+
+size_t MLIR_GetValueNumUses(MLIR_Context *ctx, MLIR_ValueHandle value) {
+    (void)ctx;
+    if (value == MLIR_INVALID_HANDLE) return 0;
+    size_t n = 0;
+    for (size_t i = 0; i < g_n_all_ops; i++) {
+        IR_Op *op = resolve_op(g_all_ops[i]);
+        if (!op) continue;
+        for (size_t k = 0; k < op->n_operands; k++)
+            if (op->operands[k] == value) n++;
+        for (size_t s = 0; s < op->n_successors; s++)
+            for (size_t k = 0; k < op->n_successor_operands[s]; k++)
+                if (op->successor_operands[s][k] == value) n++;
+    }
+    return n;
+}
+
+MLIR_OpHandle MLIR_GetValueUseOwner(MLIR_Context *ctx, MLIR_ValueHandle value,
+                                    size_t idx, size_t *out_operand_idx) {
+    (void)ctx;
+    if (value == MLIR_INVALID_HANDLE) {
+        if (out_operand_idx) *out_operand_idx = SIZE_MAX;
+        return MLIR_INVALID_HANDLE;
+    }
+    size_t n = 0;
+    // Iterate in the same order as GetValueNumUses: regular operands first,
+    // then successor operands per successor.
+    for (size_t i = 0; i < g_n_all_ops; i++) {
+        IR_Op *op = resolve_op(g_all_ops[i]);
+        if (!op) continue;
+        for (size_t k = 0; k < op->n_operands; k++) {
+            if (op->operands[k] == value) {
+                if (n == idx) {
+                    if (out_operand_idx) *out_operand_idx = k;
+                    return g_all_ops[i];
+                }
+                n++;
+            }
+        }
+        // Successor-operand uses report a synthetic operand_idx of
+        // n_operands + sum-of-previous-segments + k. This matches MLIR's
+        // unified operand storage on the upstream side and lets callers
+        // pass the index to mutate via setOperand-style APIs.
+        size_t off = op->n_operands;
+        for (size_t s = 0; s < op->n_successors; s++) {
+            for (size_t k = 0; k < op->n_successor_operands[s]; k++) {
+                if (op->successor_operands[s][k] == value) {
+                    if (n == idx) {
+                        if (out_operand_idx) *out_operand_idx = off + k;
+                        return g_all_ops[i];
+                    }
+                    n++;
+                }
+            }
+            off += op->n_successor_operands[s];
+        }
+    }
+    if (out_operand_idx) *out_operand_idx = SIZE_MAX;
+    return MLIR_INVALID_HANDLE;
+}
+
+void MLIR_SetOpOperands(MLIR_Context *ctx, MLIR_OpHandle op,
+                        const MLIR_ValueHandle *values, size_t n) {
+    IR_Op *o = resolve_op(op);
+    if (!o) return;
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
+    MLIR_ValueHandle *nv = n ? arena_new_array(arena, MLIR_ValueHandle, n) : NULL;
+    for (size_t i = 0; i < n; i++) nv[i] = values ? values[i] : MLIR_INVALID_HANDLE;
+    o->operands = nv;
+    o->n_operands = n;
+}
+
+void MLIR_AppendOpSuccessorOperand(MLIR_Context *ctx, MLIR_OpHandle op,
+                                   size_t succ_idx, MLIR_ValueHandle value) {
+    IR_Op *o = resolve_op(op);
+    if (!o || succ_idx >= o->n_successors) return;
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
+    size_t old_n = o->n_successor_operands[succ_idx];
+    MLIR_ValueHandle *na = arena_new_array(arena, MLIR_ValueHandle, old_n + 1);
+    if (old_n > 0)
+        memcpy(na, o->successor_operands[succ_idx],
+               old_n * sizeof(MLIR_ValueHandle));
+    na[old_n] = value;
+    o->successor_operands[succ_idx] = na;
+    o->n_successor_operands[succ_idx] = old_n + 1;
+}
+
+void MLIR_SpliceBlockOps(MLIR_Context *ctx, MLIR_BlockHandle dst,
+                         MLIR_BlockHandle src) {
+    IR_Block *d = resolve_block(dst);
+    IR_Block *s = resolve_block(src);
+    if (!d || !s || s->n_operations == 0) return;
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
+    MLIR_OpHandle *no = arena_new_array(arena, MLIR_OpHandle,
+                                         d->n_operations + s->n_operations);
+    if (d->n_operations > 0)
+        memcpy(no, d->operations, d->n_operations * sizeof(MLIR_OpHandle));
+    memcpy(no + d->n_operations, s->operations,
+           s->n_operations * sizeof(MLIR_OpHandle));
+    // Reparent moved ops.
+    for (size_t i = 0; i < s->n_operations; i++) {
+        IR_Op *op = resolve_op(s->operations[i]);
+        if (op) op->parent_block = dst;
+    }
+    d->operations = no;
+    d->n_operations = d->n_operations + s->n_operations;
+    s->operations = NULL;
+    s->n_operations = 0;
+}
+
 // Native cf->scf lift: stub. The faithful Bahmann/Reissmann port to plain
 // C lives outside this file (mlir_lift_cf_to_scf.c, TODO). Returning true
 // here is harmless when the input has no cf ops; on input that does have

@@ -728,6 +728,83 @@ void MLIR_EraseBlock(MLIR_Context *ctx, MLIR_BlockHandle block);
 void MLIR_InsertRegionBlockAfter(MLIR_Context *ctx, MLIR_RegionHandle region,
                                  MLIR_BlockHandle block, MLIR_BlockHandle after);
 
+// Insert `block` into `region` immediately before `before`. If
+// `before` is MLIR_INVALID_HANDLE the block is appended to the region.
+// `block` must not already belong to a region; otherwise it is
+// detached from its current parent first.
+void MLIR_InsertRegionBlockBefore(MLIR_Context *ctx, MLIR_RegionHandle region,
+                                  MLIR_BlockHandle block, MLIR_BlockHandle before);
+
+// Returns the last operation in `block` (its terminator), or
+// MLIR_INVALID_HANDLE if the block is empty.
+MLIR_OpHandle MLIR_GetBlockTerminator(MLIR_BlockHandle block);
+
+// Returns the op that contains the parent region of `block`. If the
+// region is a top-level (orphan) region, returns MLIR_INVALID_HANDLE.
+MLIR_OpHandle MLIR_GetBlockParentOp(MLIR_BlockHandle block);
+
+// Returns true if `block` is the first block of its parent region.
+bool MLIR_BlockIsEntry(MLIR_BlockHandle block);
+
+// Returns the number of incoming edges to `block` from terminators in
+// other blocks of the same parent region. Each (predecessor block,
+// successor slot) pair is counted once even if a predecessor branches
+// to `block` from multiple slots.
+size_t MLIR_GetBlockNumPredecessors(MLIR_BlockHandle block);
+
+// Returns the predecessor at index `idx` of `block`. The 0-indexed
+// successor slot in the predecessor's terminator that points at
+// `block` is written to *out_succ_idx (if non-null). Returns
+// MLIR_INVALID_HANDLE if `idx` is out of range.
+MLIR_BlockHandle MLIR_GetBlockPredecessor(MLIR_BlockHandle block, size_t idx,
+                                          size_t *out_succ_idx);
+
+// Adds a new block argument of type `type` to the end of `block`'s
+// argument list and returns its Value handle.
+MLIR_ValueHandle MLIR_AddBlockArgument(MLIR_Context *ctx, MLIR_BlockHandle block,
+                                       MLIR_TypeHandle type,
+                                       MLIR_LocationHandle loc);
+
+// Erases the `count` consecutive block arguments starting at `start`.
+// Each argument must have no remaining uses; the caller is responsible
+// for replacing them first via MLIR_ReplaceAllUsesOfValue.
+void MLIR_EraseBlockArguments(MLIR_Context *ctx, MLIR_BlockHandle block,
+                              size_t start, size_t count);
+
+// Returns the block containing the definition of `value`. For block
+// arguments this is the block carrying the argument; for op results it
+// is the parent block of the defining op. Returns MLIR_INVALID_HANDLE
+// if the value is detached.
+MLIR_BlockHandle MLIR_GetValueParentBlock(MLIR_ValueHandle value);
+
+// Returns the number of uses of `value`. A use is a single operand
+// reference (operand, successor-operand of a terminator, etc.).
+size_t MLIR_GetValueNumUses(MLIR_Context *ctx, MLIR_ValueHandle value);
+
+// Returns one use of `value`. The owning operation is returned; the
+// operand index within that op is written to *out_operand_idx (if
+// non-null). Uses are returned in implementation-defined order. The
+// order may change if any operand of any op is mutated; callers must
+// capture uses into a vector before mutating.
+MLIR_OpHandle MLIR_GetValueUseOwner(MLIR_Context *ctx, MLIR_ValueHandle value,
+                                    size_t idx, size_t *out_operand_idx);
+
+// Replaces all of `op`'s operands with the `n` values in `values`.
+void MLIR_SetOpOperands(MLIR_Context *ctx, MLIR_OpHandle op,
+                        const MLIR_ValueHandle *values, size_t n);
+
+// Appends `value` to the successor-operand list at `succ_idx` of `op`.
+// On the upstream backend this resizes the segment via
+// `BranchOpInterface::SuccessorOperands::append`; on the native backend
+// the per-successor operand vector is reallocated.
+void MLIR_AppendOpSuccessorOperand(MLIR_Context *ctx, MLIR_OpHandle op,
+                                   size_t succ_idx, MLIR_ValueHandle value);
+
+// Moves all ops of `src` to the end of `dst`. `src` becomes empty but
+// remains attached to its parent region.
+void MLIR_SpliceBlockOps(MLIR_Context *ctx, MLIR_BlockHandle dst,
+                         MLIR_BlockHandle src);
+
 // Lift control-flow-graph operations (cf.br / cf.cond_br) in `module`
 // into structured control flow (scf.if / scf.while / scf.index_switch).
 // This is a prerequisite for the wasm pipeline, which rejects
