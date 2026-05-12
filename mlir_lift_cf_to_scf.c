@@ -1716,6 +1716,316 @@ static DomInfo dom_compute(Arena *arena, MLIR_RegionHandle region,
     return d;
 }
 
+// ============================================================================
+// transformToReduceLoop  (CFGToSCF.cpp:654-794).
+//
+// Given a STRUCTURED loop (single back edge + single exit edge originating
+// from the same latch block) and the set of blocks that belong to the
+// loop, rewrites the loop into REDUCE FORM:
+//   (0) No values defined inside the loop are used outside the loop —
+//       outside uses are routed through new exit-block arguments.
+//   (1) The block arguments + successor operands of the exit block equal
+//       the block arguments of the loop header + the successor operands
+//       of the back edge. This is what scf.while requires for its results.
+//
+// Returns the array of values to be passed to the loop header along the
+// (sole) back edge in `out_lhso` / `*out_n_lhso`.
+//
+// Assumptions (created by create_single_exiting_latch):
+// - exit_block has zero block arguments at entry to this function and
+//   exactly one predecessor (the latch).
+// - latch is the only block branching to both loop_header (back) and
+//   exit_block (exit).
+// ============================================================================
+
+static bool block_set_contains(const MLIR_BlockHandle *list, size_t n,
+                               MLIR_BlockHandle b) {
+    for (size_t i = 0; i < n; ++i) if (list[i] == b) return true;
+    return false;
+}
+
+// Walk up the block→region→op chain from `start_block` until we land in
+// `target_region`; return the block at that level, or INVALID. (When the
+// use is in a nested scf.if/scf.while body, we want to know which of the
+// loop's blocks contains it.) Currently the API does not expose
+// region→op walk, so we approximate: if the start_block is directly in
+// target_region, return it; otherwise treat as "external". For tinyc
+// cycles we lift bottom-up (innermost first), so by the time the outer
+// cycle is processed, an inner cycle's body is encapsulated in scf.while
+// — its values can no longer escape directly.
+static MLIR_BlockHandle find_block_at_region_level(MLIR_BlockHandle start_block,
+                                                   MLIR_RegionHandle target_region) {
+    if (start_block == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
+    MLIR_RegionHandle r = MLIR_GetBlockParentRegion(start_block);
+    if (r == target_region) return start_block;
+    return MLIR_INVALID_HANDLE;
+}
+
+// Single "use" of a value: which op owns it, at what operand index.
+typedef struct { MLIR_OpHandle op; size_t operand_idx; } UseRecord;
+
+// Snapshot all uses of `v` into a fresh arena array, since the use list
+// may be invalidated when we start mutating operands.
+static UseRecord *snapshot_uses(LiftState *st, MLIR_ValueHandle v, size_t *out_n) {
+    size_t nu = MLIR_GetValueNumUses(st->ctx, v);
+    *out_n = nu;
+    if (nu == 0) return NULL;
+    UseRecord *uses = arena_new_array(st->arena, UseRecord, nu);
+    for (size_t i = 0; i < nu; ++i) {
+        size_t op_idx = 0;
+        MLIR_OpHandle owner = MLIR_GetValueUseOwner(st->ctx, v, i, &op_idx);
+        uses[i].op = owner;
+        uses[i].operand_idx = op_idx;
+    }
+    return uses;
+}
+
+// State threaded through check_value.
+typedef struct {
+    LiftState        *st;
+    const DomInfo    *dom;
+    MLIR_BlockHandle  loop_header;
+    MLIR_BlockHandle  exit_block;
+    MLIR_BlockHandle  latch;
+    MLIR_RegionHandle loop_region;
+    const MLIR_BlockHandle *loop_blocks;
+    size_t                  n_loop_blocks;
+
+    // Growable list of values to be passed to loop_header via the back
+    // edge. Initialized from the latch's existing back-edge operands.
+    MLIR_ValueHandle *lhso;
+    size_t            n_lhso;
+    size_t            cap_lhso;
+
+    MLIR_LocationHandle loc;
+} ReduceCtx;
+
+static void rctx_lhso_push(ReduceCtx *r, MLIR_ValueHandle v) {
+    if (r->n_lhso == r->cap_lhso) {
+        size_t nc = r->cap_lhso ? r->cap_lhso * 2 : 16;
+        MLIR_ValueHandle *na = arena_new_array(r->st->arena, MLIR_ValueHandle, nc);
+        if (r->n_lhso) memcpy(na, r->lhso, sizeof(MLIR_ValueHandle) * r->n_lhso);
+        r->lhso = na; r->cap_lhso = nc;
+    }
+    r->lhso[r->n_lhso++] = v;
+}
+
+// Replace one use (op operand) with `replacement`.
+static void replace_use(LiftState *st, UseRecord u, MLIR_ValueHandle replacement) {
+    if (u.op == MLIR_INVALID_HANDLE) return;
+    MLIR_SetOpOperand(st->ctx, u.op, u.operand_idx, replacement);
+}
+
+// Per upstream's `checkValue` — replace every external use of `value`
+// with a fresh exit_block argument (lazily created). Also extends latch
+// + loop_header with the same argument so the value is forwarded along
+// the back edge (requirement 1 of reduce form).
+static void check_value(ReduceCtx *r, MLIR_ValueHandle value) {
+    if (value == MLIR_INVALID_HANDLE) return;
+    MLIR_TypeHandle ty = MLIR_GetValueType(value);
+
+    MLIR_ValueHandle block_arg = MLIR_INVALID_HANDLE;
+    size_t n_uses = 0;
+    UseRecord *uses = snapshot_uses(r->st, value, &n_uses);
+
+    for (size_t i = 0; i < n_uses; ++i) {
+        MLIR_OpHandle owner = uses[i].op;
+        if (owner == MLIR_INVALID_HANDLE) continue;
+        MLIR_BlockHandle owner_block = MLIR_GetOpParentBlock(owner);
+        MLIR_BlockHandle curr = find_block_at_region_level(owner_block, r->loop_region);
+        if (curr == MLIR_INVALID_HANDLE) {
+            // Detached or in a region we don't recognize; conservative
+            // skip rather than mis-replace.
+            continue;
+        }
+        if (block_set_contains(r->loop_blocks, r->n_loop_blocks, curr))
+            continue;
+
+        // External use found. Lazily build the exit/loop-header args.
+        if (block_arg == MLIR_INVALID_HANDLE) {
+            block_arg = MLIR_AddBlockArgument(r->st->ctx, r->exit_block, ty, r->loc);
+            MLIR_AddBlockArgument(r->st->ctx, r->loop_header, ty, r->loc);
+
+            // The argument we *flow* along latch's exit edge. If `value`
+            // is not a block-arg of latch and some predecessor of the
+            // latch is not dominated by value's defining block, we need
+            // a fresh latch arg + per-pred forwarding.
+            MLIR_ValueHandle argument = value;
+            MLIR_BlockHandle def_block = MLIR_GetValueParentBlock(value);
+            if (def_block != r->latch) {
+                bool need_latch_arg = false;
+                size_t np = MLIR_GetBlockNumPredecessors(r->latch);
+                for (size_t k = 0; k < np && !need_latch_arg; ++k) {
+                    MLIR_BlockHandle p = MLIR_GetBlockPredecessor(r->latch, k, NULL);
+                    if (!dom_dominates(r->dom, def_block, p)) need_latch_arg = true;
+                }
+                if (need_latch_arg) {
+                    argument = MLIR_AddBlockArgument(r->st->ctx, r->latch, ty, r->loc);
+                    for (size_t k = 0; k < np; ++k) {
+                        size_t pred_succ_idx = 0;
+                        MLIR_BlockHandle p = MLIR_GetBlockPredecessor(r->latch, k, &pred_succ_idx);
+                        MLIR_OpHandle pterm = MLIR_GetBlockTerminator(p);
+                        MLIR_ValueHandle forwarded =
+                            dom_dominates(r->dom, def_block, p)
+                                ? value : get_undef_value(r->st, ty);
+                        MLIR_AppendOpSuccessorOperand(r->st->ctx, pterm,
+                                                     pred_succ_idx, forwarded);
+                    }
+                }
+            }
+
+            rctx_lhso_push(r, argument);
+            // Append `argument` to EVERY successor operand list of latch:
+            // both the back edge (so the new loop_header arg is fed) and
+            // the exit edge (so the new exit_block arg is fed).
+            MLIR_OpHandle latch_term = MLIR_GetBlockTerminator(r->latch);
+            size_t n_succ = MLIR_GetOpNumSuccessors(latch_term);
+            for (size_t s = 0; s < n_succ; ++s) {
+                MLIR_AppendOpSuccessorOperand(r->st->ctx, latch_term, s, argument);
+            }
+        }
+
+        replace_use(r->st, uses[i], block_arg);
+    }
+}
+
+static MLIR_ValueHandle *transform_to_reduce_loop(
+    LiftState *st, const DomInfo *dom,
+    MLIR_BlockHandle loop_header,
+    MLIR_BlockHandle exit_block,
+    const MLIR_BlockHandle *loop_blocks, size_t n_loop_blocks,
+    size_t *out_n_lhso,
+    MLIR_LocationHandle loc)
+{
+    *out_n_lhso = 0;
+    if (MLIR_GetBlockNumPredecessors(exit_block) != 1) return NULL;
+    MLIR_BlockHandle latch = MLIR_GetBlockPredecessor(exit_block, 0, NULL);
+    MLIR_OpHandle latch_term = MLIR_GetBlockTerminator(latch);
+    if (latch_term == MLIR_INVALID_HANDLE) return NULL;
+    if (MLIR_GetOpNumSuccessors(latch_term) != 2) return NULL;
+
+    size_t lh_idx = 0, ex_idx = 1;
+    if (MLIR_GetOpSuccessor(latch_term, lh_idx) != loop_header) {
+        lh_idx = 1; ex_idx = 0;
+    }
+    if (MLIR_GetOpSuccessor(latch_term, lh_idx) != loop_header) return NULL;
+    if (MLIR_GetOpSuccessor(latch_term, ex_idx) != exit_block) return NULL;
+
+    // Snapshot the existing loop_header successor operands of latch.
+    size_t n_init = MLIR_GetOpNumSuccessorOperands(latch_term, lh_idx);
+    ReduceCtx r = {0};
+    r.st = st;
+    r.dom = dom;
+    r.loop_header = loop_header;
+    r.exit_block = exit_block;
+    r.latch = latch;
+    r.loop_region = MLIR_GetBlockParentRegion(loop_header);
+    r.loop_blocks = loop_blocks;
+    r.n_loop_blocks = n_loop_blocks;
+    r.loc = loc;
+    r.cap_lhso = n_init + 16;
+    r.lhso = arena_new_array(st->arena, MLIR_ValueHandle, r.cap_lhso);
+    for (size_t i = 0; i < n_init; ++i) {
+        r.lhso[i] = MLIR_GetOpSuccessorOperand(latch_term, lh_idx, i);
+    }
+    r.n_lhso = n_init;
+
+    // (4) For each value passed along the back edge already, add an exit
+    // block arg + extend latch's exit edge with that value so external
+    // uses can be routed through.
+    for (size_t i = 0; i < n_init; ++i) {
+        MLIR_ValueHandle v = r.lhso[i];
+        MLIR_TypeHandle ty = MLIR_GetValueType(v);
+        MLIR_ValueHandle exit_arg = MLIR_AddBlockArgument(st->ctx, exit_block, ty, loc);
+        MLIR_AppendOpSuccessorOperand(st->ctx, latch_term, ex_idx, v);
+
+        // Replace v's external uses with exit_arg.
+        size_t n_uses = 0;
+        UseRecord *uses = snapshot_uses(st, v, &n_uses);
+        for (size_t u = 0; u < n_uses; ++u) {
+            MLIR_OpHandle owner = uses[u].op;
+            if (owner == MLIR_INVALID_HANDLE) continue;
+            MLIR_BlockHandle ob = MLIR_GetOpParentBlock(owner);
+            MLIR_BlockHandle curr = find_block_at_region_level(ob, r.loop_region);
+            if (curr == MLIR_INVALID_HANDLE) continue;
+            if (block_set_contains(loop_blocks, n_loop_blocks, curr)) continue;
+            // Don't replace the use that IS the back-edge successor operand
+            // we just iterated past: we still want that operand to be the
+            // original value `v`. But by definition, that use is *inside*
+            // the loop (the latch's terminator), so it would have been
+            // skipped by the loop-membership check above.
+            replace_use(st, uses[u], exit_arg);
+        }
+    }
+
+    // (5)-(6) Snapshot loop-header/latch args BEFORE mutation, then for
+    // each value defined inside the loop, route external uses through
+    // exit_block.
+    size_t n_latch_args_prior = MLIR_GetBlockNumArgs(latch);
+    MLIR_ValueHandle *latch_args_prior =
+        n_latch_args_prior
+            ? arena_new_array(st->arena, MLIR_ValueHandle, n_latch_args_prior)
+            : NULL;
+    for (size_t i = 0; i < n_latch_args_prior; ++i) {
+        latch_args_prior[i] = MLIR_GetBlockArg(latch, i);
+    }
+
+    size_t n_lh_args_prior = MLIR_GetBlockNumArgs(loop_header);
+    MLIR_ValueHandle *lh_args_prior =
+        n_lh_args_prior
+            ? arena_new_array(st->arena, MLIR_ValueHandle, n_lh_args_prior)
+            : NULL;
+    for (size_t i = 0; i < n_lh_args_prior; ++i) {
+        lh_args_prior[i] = MLIR_GetBlockArg(loop_header, i);
+    }
+
+    for (size_t i = 0; i < n_loop_blocks; ++i) {
+        MLIR_BlockHandle B = loop_blocks[i];
+
+        if (B == latch) {
+            for (size_t j = 0; j < n_latch_args_prior; ++j)
+                check_value(&r, latch_args_prior[j]);
+        } else if (B == loop_header) {
+            for (size_t j = 0; j < n_lh_args_prior; ++j)
+                check_value(&r, lh_args_prior[j]);
+        } else {
+            size_t na = MLIR_GetBlockNumArgs(B);
+            for (size_t j = 0; j < na; ++j)
+                check_value(&r, MLIR_GetBlockArg(B, j));
+        }
+
+        size_t no = MLIR_GetBlockNumOps(B);
+        for (size_t j = 0; j < no; ++j) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(B, j);
+            size_t nr = MLIR_GetOpNumResults(op);
+            for (size_t k = 0; k < nr; ++k) {
+                check_value(&r, MLIR_GetOpResult(op, k));
+            }
+        }
+    }
+
+    // (7) For each pred of loop_header other than latch: pad with undef
+    // for the args that were appended above.
+    size_t n_lh_args_now = MLIR_GetBlockNumArgs(loop_header);
+    size_t n_lh_preds = MLIR_GetBlockNumPredecessors(loop_header);
+    for (size_t i = 0; i < n_lh_preds; ++i) {
+        size_t pred_succ_idx = 0;
+        MLIR_BlockHandle pred = MLIR_GetBlockPredecessor(loop_header, i,
+                                                         &pred_succ_idx);
+        if (pred == latch) continue;
+        MLIR_OpHandle pterm = MLIR_GetBlockTerminator(pred);
+        size_t cur_n = MLIR_GetOpNumSuccessorOperands(pterm, pred_succ_idx);
+        for (size_t k = cur_n; k < n_lh_args_now; ++k) {
+            MLIR_TypeHandle ty = MLIR_GetValueType(MLIR_GetBlockArg(loop_header, k));
+            MLIR_AppendOpSuccessorOperand(st->ctx, pterm, pred_succ_idx,
+                                          get_undef_value(st, ty));
+        }
+    }
+
+    *out_n_lhso = r.n_lhso;
+    return r.lhso;
+}
+
 static bool try_lift_simple_if(MLIR_Context *ctx, Arena *arena,
                                MLIR_BlockHandle entry) {
     MLIR_OpHandle cond_br = MLIR_GetBlockTerminator(entry);
