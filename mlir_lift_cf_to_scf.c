@@ -1419,6 +1419,206 @@ static bool try_lift_self_loop_while(MLIR_Context *ctx, Arena *arena,
     return true;
 }
 
+// ============================================================================
+// Tail-duplicate a pass-through block (all ops have no regions, single
+// cf.br terminator, no block args, multiple predecessors). Each pred
+// edge gets its own clone of the block. After this every successor of
+// those preds has a sole predecessor, so try_split_diamond_merge /
+// try_lift_simple_if can fire on cond_br cascades.
+//
+// Cloning is shallow: each op is recreated via MLIR_CreateOp with the
+// same name/attrs/operand-types/result-types. Operands defined inside
+// the block are remapped to the clone's local copies; operands defined
+// outside the block pass through unchanged.
+// ============================================================================
+static bool try_duplicate_passthrough_block(MLIR_Context *ctx, Arena *arena,
+                                            MLIR_BlockHandle B) {
+    if (MLIR_BlockIsEntry(B)) return false;
+    if (MLIR_GetBlockNumArgs(B) != 0) return false;
+    size_t n_ops = MLIR_GetBlockNumOps(B);
+    if (n_ops < 1) return false;
+    MLIR_OpHandle term = MLIR_GetBlockTerminator(B);
+    if (term == MLIR_INVALID_HANDLE) return false;
+    if (!string_eq_string(MLIR_GetOpName(term), str_lit("cf.br"))) return false;
+    MLIR_BlockHandle dest = MLIR_GetOpSuccessor(term, 0);
+    if (dest == MLIR_INVALID_HANDLE || dest == B) return false;
+    size_t n_dest_args = MLIR_GetOpNumSuccessorOperands(term, 0);
+    // Restrict ops: no regions, no successors (other than the terminator).
+    for (size_t i = 0; i < n_ops; ++i) {
+        MLIR_OpHandle o = MLIR_GetBlockOp(B, i);
+        if (MLIR_GetOpNumRegions(o) != 0) return false;
+        if (o != term && MLIR_GetOpNumSuccessors(o) != 0) return false;
+    }
+    if (MLIR_GetBlockNumPredecessors(B) < 2) return false;
+
+    // Restrict: only duplicate when the destination is a multi-pred
+    // merge (otherwise duplication doesn't enable any subsequent lift).
+    if (MLIR_GetBlockNumPredecessors(dest) <= 2) return false;
+    // Restrict: all preds must be cf.cond_br (the switch-cascade shape).
+    // This avoids duplicating blocks in the middle of richer CFGs where
+    // duplication may interact poorly with subsequent lifts.
+
+    // Reject if any op result is used outside the block (would break SSA
+    // when we duplicate without inserting a phi-like merge).
+    for (size_t i = 0; i < n_ops; ++i) {
+        MLIR_OpHandle o = MLIR_GetBlockOp(B, i);
+        size_t nr = MLIR_GetOpNumResults(o);
+        for (size_t k = 0; k < nr; ++k) {
+            MLIR_ValueHandle v = MLIR_GetOpResult(o, k);
+            size_t nu = MLIR_GetValueNumUses(ctx, v);
+            for (size_t u = 0; u < nu; ++u) {
+                MLIR_OpHandle uo = MLIR_GetValueUseOwner(ctx, v, u, NULL);
+                if (uo == MLIR_INVALID_HANDLE) continue;
+                if (MLIR_GetOpParentBlock(uo) != B) return false;
+            }
+        }
+    }
+
+    MLIR_LocationHandle loc = MLIR_GetOpLocation(term);
+    MLIR_RegionHandle region = MLIR_GetBlockParentRegion(B);
+
+    typedef struct { MLIR_OpHandle term; size_t succ_idx; } PredEdge;
+    size_t nb = MLIR_GetRegionNumBlocks(region);
+    PredEdge *edges = arena_new_array(arena, PredEdge, nb * 2 + 4);
+    size_t n_edges = 0;
+    for (size_t i = 0; i < nb; ++i) {
+        MLIR_BlockHandle pb = MLIR_GetRegionBlock(region, i);
+        if (pb == B) continue;
+        MLIR_OpHandle pt = MLIR_GetBlockTerminator(pb);
+        if (pt == MLIR_INVALID_HANDLE) continue;
+        size_t ns = MLIR_GetOpNumSuccessors(pt);
+        for (size_t s = 0; s < ns; ++s) {
+            if (MLIR_GetOpSuccessor(pt, s) == B) {
+                edges[n_edges].term = pt;
+                edges[n_edges].succ_idx = s;
+                n_edges++;
+            }
+        }
+    }
+    if (n_edges < 2) return false;
+
+    // Snapshot attribute handles + result types for each op (immutable,
+    // safely shared across clones).
+    typedef struct {
+        string opname;
+        MLIR_OpType opty;
+        size_t n_attrs;
+        MLIR_AttributeHandle *attrs;
+        size_t n_operands;
+        MLIR_ValueHandle *operand_vs;
+        size_t n_results;
+        MLIR_TypeHandle *result_types;
+        MLIR_LocationHandle loc;
+    } OpSnap;
+    OpSnap *snaps = arena_new_array(arena, OpSnap, n_ops);
+    for (size_t i = 0; i < n_ops; ++i) {
+        MLIR_OpHandle o = MLIR_GetBlockOp(B, i);
+        snaps[i].opname = MLIR_GetOpName(o);
+        snaps[i].opty   = MLIR_GetOpType(o);
+        snaps[i].loc    = MLIR_GetOpLocation(o);
+        snaps[i].n_attrs = MLIR_GetOpNumAttributes(o);
+        snaps[i].attrs = snaps[i].n_attrs
+            ? arena_new_array(arena, MLIR_AttributeHandle, snaps[i].n_attrs) : NULL;
+        for (size_t k = 0; k < snaps[i].n_attrs; ++k)
+            snaps[i].attrs[k] = MLIR_GetOpAttribute(o, k);
+        snaps[i].n_operands = MLIR_GetOpNumOperands(o);
+        snaps[i].operand_vs = snaps[i].n_operands
+            ? arena_new_array(arena, MLIR_ValueHandle, snaps[i].n_operands) : NULL;
+        for (size_t k = 0; k < snaps[i].n_operands; ++k)
+            snaps[i].operand_vs[k] = MLIR_GetOpOperand(o, k);
+        snaps[i].n_results = MLIR_GetOpNumResults(o);
+        snaps[i].result_types = snaps[i].n_results
+            ? arena_new_array(arena, MLIR_TypeHandle, snaps[i].n_results) : NULL;
+        for (size_t k = 0; k < snaps[i].n_results; ++k)
+            snaps[i].result_types[k] = MLIR_GetOpResult_type(o, k);
+    }
+    // Snapshot original op result handles (to build remap per clone).
+    MLIR_ValueHandle **orig_results = arena_new_array(arena, MLIR_ValueHandle*, n_ops);
+    for (size_t i = 0; i < n_ops; ++i) {
+        orig_results[i] = snaps[i].n_results
+            ? arena_new_array(arena, MLIR_ValueHandle, snaps[i].n_results) : NULL;
+        MLIR_OpHandle o = MLIR_GetBlockOp(B, i);
+        for (size_t k = 0; k < snaps[i].n_results; ++k)
+            orig_results[i][k] = MLIR_GetOpResult(o, k);
+    }
+    // Snapshot terminator's destination operands (just before the term op).
+    MLIR_ValueHandle *term_succ_ops = n_dest_args
+        ? arena_new_array(arena, MLIR_ValueHandle, n_dest_args) : NULL;
+    for (size_t k = 0; k < n_dest_args; ++k)
+        term_succ_ops[k] = MLIR_GetOpSuccessorOperand(term, 0, k);
+
+    // For each pred edge, build a clone block.
+    for (size_t e = 0; e < n_edges; ++e) {
+        MLIR_BlockHandle clone = MLIR_CreateBlock(ctx);
+        MLIR_InsertRegionBlockAfter(ctx, region, clone, B);
+        for (size_t i = 0; i < n_ops; ++i) {
+            if (i + 1 == n_ops) break;  // skip terminator (rebuild with succ)
+            OpSnap *s = &snaps[i];
+            MLIR_ValueHandle *new_ops = s->n_operands
+                ? arena_new_array(arena, MLIR_ValueHandle, s->n_operands) : NULL;
+            for (size_t k = 0; k < s->n_operands; ++k) {
+                MLIR_ValueHandle v = s->operand_vs[k];
+                // Remap if v is a result of a previously cloned op in this block.
+                MLIR_ValueHandle nv = v;
+                for (size_t pi = 0; pi < i; ++pi) {
+                    for (size_t pk = 0; pk < snaps[pi].n_results; ++pk) {
+                        if (orig_results[pi][pk] == v) {
+                            // Look up clone's i-th op's result.
+                            MLIR_OpHandle co = MLIR_GetBlockOp(clone, pi);
+                            nv = MLIR_GetOpResult(co, pk);
+                            break;
+                        }
+                    }
+                }
+                new_ops[k] = nv;
+            }
+            MLIR_ValueHandle *new_results = s->n_results
+                ? arena_new_array(arena, MLIR_ValueHandle, s->n_results) : NULL;
+            for (size_t k = 0; k < s->n_results; ++k) {
+                new_results[k] = MLIR_CreateValueOpResult(
+                    ctx, MLIR_INVALID_HANDLE, (uint32_t)k,
+                    s->result_types[k], fresh_ssa_name(arena), s->loc);
+            }
+            MLIR_OpHandle no = MLIR_CreateOp(
+                ctx, s->opty, s->opname,
+                s->attrs, s->n_attrs,
+                s->result_types, s->n_results,
+                new_results, s->n_results,
+                new_ops, s->n_operands,
+                NULL, 0,
+                s->loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+            MLIR_AppendBlockOp(ctx, clone, no);
+        }
+        // Rebuild terminator's successor operands with remapped values.
+        MLIR_ValueHandle *new_dest_ops = n_dest_args
+            ? arena_new_array(arena, MLIR_ValueHandle, n_dest_args) : NULL;
+        for (size_t k = 0; k < n_dest_args; ++k) {
+            MLIR_ValueHandle v = term_succ_ops[k];
+            MLIR_ValueHandle nv = v;
+            for (size_t pi = 0; pi + 1 < n_ops; ++pi) {
+                for (size_t pk = 0; pk < snaps[pi].n_results; ++pk) {
+                    if (orig_results[pi][pk] == v) {
+                        MLIR_OpHandle co = MLIR_GetBlockOp(clone, pi);
+                        nv = MLIR_GetOpResult(co, pk);
+                        break;
+                    }
+                }
+            }
+            new_dest_ops[k] = nv;
+        }
+        create_cf_br_in_block(ctx, arena, clone, dest, new_dest_ops, n_dest_args, loc);
+        MLIR_SetOpSuccessor(ctx, edges[e].term, edges[e].succ_idx, clone);
+    }
+
+    // Erase original block. First erase its ops in reverse order.
+    while (MLIR_GetBlockNumOps(B) > 0) {
+        MLIR_OpHandle o = MLIR_GetBlockOp(B, MLIR_GetBlockNumOps(B) - 1);
+        MLIR_EraseOp(ctx, o);
+    }
+    MLIR_EraseBlock(ctx, B);
+    return true;
+}
+
 static bool fold_simple_loops_and_ifs(MLIR_Context *ctx, Arena *arena,
                                       MLIR_BlockHandle entry) {
     bool any = false;
@@ -1450,6 +1650,12 @@ static bool fold_simple_loops_and_ifs(MLIR_Context *ctx, Arena *arena,
                 if (try_lift_self_loop_while(ctx, arena, b)) {
                     changed = true; lifted_any = true; break;
                 }
+                // TODO: try_duplicate_passthrough_block is disabled — current
+                // implementation regresses re2c_keyword_longest_match under
+                // TINYC_LIFT_USE_NATIVE=1 (likely a remap miss when an op
+                // result is consumed by a successor-operand of cf.br). Keep
+                // for future debugging; needs a real EdgeMultiplexer port.
+                (void)try_duplicate_passthrough_block;
             }
         }
         if (!spliced && !lifted_any) break;
