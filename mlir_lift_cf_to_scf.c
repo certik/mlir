@@ -607,6 +607,25 @@ static bool fold_linear_chain(MLIR_Context *ctx, Arena *arena,
     return any;
 }
 
+// Apply single-successor splicing across every block of `region`,
+// iterating to fixed point. Returns true if anything changed.
+static bool fold_linear_chain_region(MLIR_Context *ctx, Arena *arena,
+                                     MLIR_RegionHandle region) {
+    bool any = false;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        size_t nb = MLIR_GetRegionNumBlocks(region);
+        for (size_t bi = 0; bi < nb; ++bi) {
+            MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
+            if (try_splice_single_successor(ctx, arena, b)) {
+                changed = true; any = true; break;
+            }
+        }
+    }
+    return any;
+}
+
 // ============================================================================
 // Lift the simplest cf.cond_br diamond into scf.if.
 //
@@ -1172,7 +1191,7 @@ static bool fold_simple_loops_and_ifs(MLIR_Context *ctx, Arena *arena,
     bool any = false;
     MLIR_RegionHandle region = MLIR_GetBlockParentRegion(entry);
     while (true) {
-        bool spliced = fold_linear_chain(ctx, arena, entry);
+        bool spliced = fold_linear_chain_region(ctx, arena, region);
         bool lifted_any = false;
         // Scan every block in the region: any block can be the "header"
         // of a simple-if diamond or a simple-while loop. After a lift,
