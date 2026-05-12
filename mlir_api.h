@@ -728,6 +728,19 @@ void MLIR_EraseBlock(MLIR_Context *ctx, MLIR_BlockHandle block);
 void MLIR_InsertRegionBlockAfter(MLIR_Context *ctx, MLIR_RegionHandle region,
                                  MLIR_BlockHandle block, MLIR_BlockHandle after);
 
+// Lift control-flow-graph operations (cf.br / cf.cond_br) in `module`
+// into structured control flow (scf.if / scf.while / scf.index_switch).
+// This is a prerequisite for the wasm pipeline, which rejects
+// unstructured CFGs. Walks every func.func and llvm.func body in the
+// module.
+//
+// Returns true on success, false on failure (e.g. a CFG that the lift
+// could not transform into SCF). On the upstream backend this calls
+// upstream MLIR's `transformCFGToSCF` (Bahmann/Reissmann 2015). On
+// the native backend this currently returns true with no work done
+// (TODO: native C port of the algorithm).
+bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module);
+
 // Introspection
 typedef enum {
     MLIR_ATTR_KIND_INTEGER,

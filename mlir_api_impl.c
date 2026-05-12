@@ -1812,6 +1812,15 @@ void MLIR_InsertRegionBlockAfter(MLIR_Context *ctx, MLIR_RegionHandle region,
     b->parent_region = region;
 }
 
+// Native cf->scf lift: stub. The faithful Bahmann/Reissmann port to plain
+// C lives outside this file (mlir_lift_cf_to_scf.c, TODO). Returning true
+// here is harmless when the input has no cf ops; on input that does have
+// cf ops, the wasm backend will reject them at the wasmssa-lower stage.
+bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module) {
+    (void)ctx; (void)module;
+    return true;
+}
+
 // The lowering / LLVM-IR-translation / wasm-translation entry points
 // declared in mlir_api.h are implemented in dedicated agnostic
 // translation units (mlir_lower_to_llvm.c, mlir_translate_to_llvm_ir.c,

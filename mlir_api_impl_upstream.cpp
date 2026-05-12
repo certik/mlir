@@ -1512,6 +1512,36 @@ static void liftLLVMFuncCFGToSCF(mlir::ModuleOp module) {
     }
 }
 
+// Agnostic-API: lift cf -> scf in `module`. Used by the wasm pipeline
+// regardless of which lowering binary is doing the work. Implemented by
+// reusing upstream MLIR's `transformCFGToSCF` algorithm, applied to both
+// func.func bodies (via the stock `LiftControlFlowToSCFPass`) and
+// llvm.func bodies (via `liftLLVMFuncCFGToSCF`).
+extern "C" bool MLIR_LiftCfToScf(MLIR_Context *, MLIR_OpHandle module_h) {
+    if (module_h == MLIR_INVALID_HANDLE) return false;
+    auto *op = F<mlir::Operation>(module_h);
+    auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
+    if (!module) {
+        std::fprintf(stderr,
+                     "MLIR_LiftCfToScf: handle is not a ModuleOp\n");
+        return false;
+    }
+    auto &mctx = globalCtx().mctx;
+    {
+        mlir::IRRewriter rewriter(&mctx);
+        (void)mlir::eraseUnreachableBlocks(rewriter, module->getRegions());
+    }
+    liftLLVMFuncCFGToSCF(module);
+    mlir::PassManager pm(&mctx);
+    pm.addPass(mlir::createLiftControlFlowToSCFPass());
+    if (mlir::failed(pm.run(module))) {
+        std::fprintf(stderr,
+                     "MLIR_LiftCfToScf: pass pipeline failed\n");
+        return false;
+    }
+    return true;
+}
+
 extern "C" bool MLIR_LowerToLLVMDialectForWasmUpstream(MLIR_Context *ctx,
                                                        MLIR_OpHandle module_h) {
     (void)ctx;
