@@ -586,10 +586,6 @@ expected_stdout = "16\n"
 [[test]]
 name = "goto_label"
 expected_stdout = "10\n"
-# wasm_native_skip: arbitrary goto/label — irreducible CFG. Needs full
-# EdgeMultiplexer + dominance port from upstream CFGToSCF.cpp in the
-# native cf->scf lifter (see `return`).
-wasm_native_skip = true
 
 [[test]]
 name = "compound_designated"

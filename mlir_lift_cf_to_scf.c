@@ -3969,8 +3969,15 @@ bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module) {
     if (module == MLIR_INVALID_HANDLE) return false;
     if (MLIR_GetOpNumRegions(module) == 0) return true;
 
+    // The faithful CFGToSCF port is the default. Set TINYC_LIFT_FAITHFUL=0
+    // to fall back to the legacy pattern-based lifter (linear-chain,
+    // simple-if/while, diamond-merge split, self-loop while, etc.).
+    // The legacy lifter is preserved for now because the faithful port
+    // still misses 7 patterns (break/continue/early-return inside loops,
+    // and cf.switch lowering); the legacy fallback handles a subset of
+    // those cases differently.
     const char *use_faithful = getenv("TINYC_LIFT_FAITHFUL");
-    bool faithful = use_faithful && use_faithful[0] && use_faithful[0] != '0';
+    bool faithful = !use_faithful || use_faithful[0] != '0';
 
     Arena *scratch = arena_create(4096);
     MLIR_RegionHandle mod_body = MLIR_GetOpRegion(module, 0);
