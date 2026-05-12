@@ -28,10 +28,12 @@ WASM_LD = os.environ.get("WASM_LD", "wasm-ld")
 WASMTIME = os.environ.get("WASMTIME", "wasmtime")
 WASM_CC = os.environ.get("WASM_CC", "clang")
 
-# Backend used by `tinyc --lowering=...`. Defaults to upstream; override
-# with TINYC_LOWERING=native (or any other valid value) to exercise the
-# native lowering path through the same suite.
-LOWERING = os.environ.get("TINYC_LOWERING", "upstream")
+# Backend used by `tinyc --lowering=...`. If unset, no `--lowering=` flag
+# is passed and each binary uses its own default (upstream for tinyc,
+# native for tinyc_native). Set TINYC_LOWERING=upstream or =native to
+# force a specific path through the suite.
+LOWERING = os.environ.get("TINYC_LOWERING")
+LOWERING_FLAG = [f"--lowering={LOWERING}"] if LOWERING else []
 
 # Code-generation/runtime target for the suite. "native" (default) emits
 # LLVM IR via tinyc, then llc + host CC + runtime.c. "wasm" emits a
@@ -39,6 +41,13 @@ LOWERING = os.environ.get("TINYC_LOWERING", "upstream")
 # resulting .wasm via wasmtime. Both TINYC_LOWERING values are valid
 # with the wasm target.
 TARGET = os.environ.get("TINYC_TARGET", "native")
+# When TINYC_LIFT_USE_NATIVE=1, the upstream tinyc binary first runs the
+# (partial) native cf->scf lifter and then finishes any leftover cf ops
+# with upstream's CFGToSCF pass. That fallback handles all the patterns
+# the native lifter doesn't yet cover (loops with break/continue/early-
+# return, switch cascades, etc), so wasm_native_skip should NOT skip in
+# this configuration.
+LIFT_USE_NATIVE = os.environ.get("TINYC_LIFT_USE_NATIVE") == "1"
 
 
 def run(cmd, **kw):
@@ -163,6 +172,7 @@ def main():
         # pipeline doesn't implement yet; the upstream wasm path still
         # runs the test.
         if (TARGET == "wasm" and LOWERING == "native"
+                and not LIFT_USE_NATIVE
                 and t.get("wasm_native_skip")):
             print(f"SKIP {name} (wasm_native_skip)")
             skipped += 1
@@ -177,7 +187,7 @@ def main():
             wasm = HERE / "tests" / f"{name}.wasm"
 
             # Stage 1: tinyc emits wasm32 object directly.
-            r = run([str(TINYC), "--emit=wasm", f"--lowering={LOWERING}",
+            r = run([str(TINYC), "--emit=wasm", *LOWERING_FLAG,
                      "-I", str(HERE / "tests"),
                      "-o", str(obj),
                      *[str(s) for s in srcs]])
@@ -214,7 +224,7 @@ def main():
         # Stage 1: emit LLVM IR. The driver accepts multiple input files
         # and merges them into a single MLIR module.
         # `-I tests` so multi-file tests can `#include "shared.h"`.
-        r = run([str(TINYC), "--emit=llvm", f"--lowering={LOWERING}",
+        r = run([str(TINYC), "--emit=llvm", *LOWERING_FLAG,
                  "-I", str(HERE / "tests"),
                  *[str(s) for s in srcs]])
         if r.returncode != 0:

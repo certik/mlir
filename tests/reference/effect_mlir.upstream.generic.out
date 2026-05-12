@@ -8,61 +8,61 @@ module() {
         %3 = arith.constant() {value = 0} -> i64
         %4 = arith.cmpi(%2: i64, %3: i64) {predicate = 1} -> i1
         %5 = arith.constant() {value = false} -> i1
-        cf.cond_br(%4: i1, %5: i1, %1: i64) {operandSegmentSizes = array<i32: 1, 0, 2>}
+        cf.cond_br(%4: i1, %5: i1, %1: i64) [^bb1, ^bb2] {operandSegmentSizes = array<i32: 1, 0, 2>}
     ^bb1:
         %6 = func.call() {callee = @effect} -> i64
         %7 = arith.constant() {value = 0} -> i64
         %8 = arith.cmpi(%6: i64, %7: i64) {predicate = 1} -> i1
-        cf.br(%8: i1, %6: i64)
+        cf.br(%8: i1, %6: i64) [^bb2]
     ^bb2(%arg0: i1, %arg1: i64):
         %9 = arith.extui(%67: i1) -> i64
         %10 = arith.constant() {value = 0} -> i64
         %11 = arith.cmpi(%9: i64, %10: i64) {predicate = 1} -> i1
-        cf.cond_br(%11: i1) {operandSegmentSizes = array<i32: 1, 0, 0>}
+        cf.cond_br(%11: i1) [^bb3, ^bb4] {operandSegmentSizes = array<i32: 1, 0, 0>}
     ^bb3:
         %12 = arith.constant() {value = 1} -> i64
         func.return(%12: i64)
     ^bb4:
-        cf.br()
+        cf.br() [^bb5]
     ^bb5:
         %13 = arith.constant() {value = 0} -> i64
         %14 = arith.cmpi(%68: i64, %13: i64) {predicate = 1} -> i1
-        cf.cond_br(%14: i1) {operandSegmentSizes = array<i32: 1, 0, 0>}
+        cf.cond_br(%14: i1) [^bb6, ^bb7] {operandSegmentSizes = array<i32: 1, 0, 0>}
     ^bb6:
         %15 = arith.constant() {value = 2} -> i64
         func.return(%15: i64)
     ^bb7:
-        cf.br()
+        cf.br() [^bb8]
     ^bb8:
         %16 = arith.constant() {value = 1} -> i64
         %17 = arith.constant() {value = 0} -> i64
         %18 = arith.cmpi(%16: i64, %17: i64) {predicate = 1} -> i1
         %19 = arith.constant() {value = false} -> i1
-        cf.cond_br(%18: i1, %19: i1, %68: i64) {operandSegmentSizes = array<i32: 1, 0, 2>}
+        cf.cond_br(%18: i1, %19: i1, %68: i64) [^bb9, ^bb10] {operandSegmentSizes = array<i32: 1, 0, 2>}
     ^bb9:
         %20 = func.call() {callee = @effect} -> i64
         %21 = arith.constant() {value = 0} -> i64
         %22 = arith.cmpi(%20: i64, %21: i64) {predicate = 1} -> i1
-        cf.br(%22: i1, %20: i64)
+        cf.br(%22: i1, %20: i64) [^bb10]
     ^bb10(%arg0: i1, %arg1: i64):
         %23 = arith.extui(%69: i1) -> i64
         %24 = arith.constant() {value = 0} -> i64
         %25 = arith.cmpi(%23: i64, %24: i64) {predicate = 1} -> i1
-        cf.cond_br(%25: i1) {operandSegmentSizes = array<i32: 1, 0, 0>}
+        cf.cond_br(%25: i1) [^bb11, ^bb15] {operandSegmentSizes = array<i32: 1, 0, 0>}
     ^bb11:
         %26 = arith.constant() {value = 1} -> i64
         %27 = arith.cmpi(%70: i64, %26: i64) {predicate = 1} -> i1
         %28 = arith.extui(%27: i1) -> i64
         %29 = arith.constant() {value = 0} -> i64
         %30 = arith.cmpi(%28: i64, %29: i64) {predicate = 1} -> i1
-        cf.cond_br(%30: i1) {operandSegmentSizes = array<i32: 1, 0, 0>}
+        cf.cond_br(%30: i1) [^bb12, ^bb13] {operandSegmentSizes = array<i32: 1, 0, 0>}
     ^bb12:
         %31 = arith.constant() {value = 3} -> i64
         func.return(%31: i64)
     ^bb13:
-        cf.br()
+        cf.br() [^bb14]
     ^bb14:
-        cf.br()
+        cf.br() [^bb16]
     ^bb15:
         %32 = arith.constant() {value = 4} -> i64
         func.return(%32: i64)
@@ -72,28 +72,28 @@ module() {
         %35 = arith.constant() {value = 0} -> i64
         %36 = arith.cmpi(%34: i64, %35: i64) {predicate = 1} -> i1
         %37 = arith.constant() {value = true} -> i1
-        cf.cond_br(%36: i1, %37: i1, %33: i64) {operandSegmentSizes = array<i32: 1, 2, 0>}
+        cf.cond_br(%36: i1, %37: i1, %33: i64) [^bb18, ^bb17] {operandSegmentSizes = array<i32: 1, 2, 0>}
     ^bb17:
         %38 = func.call() {callee = @effect} -> i64
         %39 = arith.constant() {value = 0} -> i64
         %40 = arith.cmpi(%38: i64, %39: i64) {predicate = 1} -> i1
-        cf.br(%40: i1, %38: i64)
+        cf.br(%40: i1, %38: i64) [^bb18]
     ^bb18(%arg0: i1, %arg1: i64):
         %41 = arith.extui(%71: i1) -> i64
         %42 = arith.constant() {value = 0} -> i64
         %43 = arith.cmpi(%41: i64, %42: i64) {predicate = 1} -> i1
-        cf.cond_br(%43: i1) {operandSegmentSizes = array<i32: 1, 0, 0>}
+        cf.cond_br(%43: i1) [^bb19, ^bb23] {operandSegmentSizes = array<i32: 1, 0, 0>}
     ^bb19:
         %44 = arith.constant() {value = 0} -> i64
         %45 = arith.cmpi(%72: i64, %44: i64) {predicate = 1} -> i1
-        cf.cond_br(%45: i1) {operandSegmentSizes = array<i32: 1, 0, 0>}
+        cf.cond_br(%45: i1) [^bb20, ^bb21] {operandSegmentSizes = array<i32: 1, 0, 0>}
     ^bb20:
         %46 = arith.constant() {value = 5} -> i64
         func.return(%46: i64)
     ^bb21:
-        cf.br()
+        cf.br() [^bb22]
     ^bb22:
-        cf.br()
+        cf.br() [^bb24]
     ^bb23:
         %47 = arith.constant() {value = 6} -> i64
         func.return(%47: i64)
@@ -102,31 +102,31 @@ module() {
         %49 = arith.constant() {value = 0} -> i64
         %50 = arith.cmpi(%48: i64, %49: i64) {predicate = 1} -> i1
         %51 = arith.constant() {value = true} -> i1
-        cf.cond_br(%50: i1, %51: i1, %72: i64) {operandSegmentSizes = array<i32: 1, 2, 0>}
+        cf.cond_br(%50: i1, %51: i1, %72: i64) [^bb26, ^bb25] {operandSegmentSizes = array<i32: 1, 2, 0>}
     ^bb25:
         %52 = func.call() {callee = @effect} -> i64
         %53 = arith.constant() {value = 0} -> i64
         %54 = arith.cmpi(%52: i64, %53: i64) {predicate = 1} -> i1
-        cf.br(%54: i1, %52: i64)
+        cf.br(%54: i1, %52: i64) [^bb26]
     ^bb26(%arg0: i1, %arg1: i64):
         %55 = arith.extui(%73: i1) -> i64
         %56 = arith.constant() {value = 0} -> i64
         %57 = arith.cmpi(%55: i64, %56: i64) {predicate = 1} -> i1
-        cf.cond_br(%57: i1) {operandSegmentSizes = array<i32: 1, 0, 0>}
+        cf.cond_br(%57: i1) [^bb27, ^bb31] {operandSegmentSizes = array<i32: 1, 0, 0>}
     ^bb27:
         %58 = arith.constant() {value = 1} -> i64
         %59 = arith.cmpi(%74: i64, %58: i64) {predicate = 1} -> i1
         %60 = arith.extui(%59: i1) -> i64
         %61 = arith.constant() {value = 0} -> i64
         %62 = arith.cmpi(%60: i64, %61: i64) {predicate = 1} -> i1
-        cf.cond_br(%62: i1) {operandSegmentSizes = array<i32: 1, 0, 0>}
+        cf.cond_br(%62: i1) [^bb28, ^bb29] {operandSegmentSizes = array<i32: 1, 0, 0>}
     ^bb28:
         %63 = arith.constant() {value = 7} -> i64
         func.return(%63: i64)
     ^bb29:
-        cf.br()
+        cf.br() [^bb30]
     ^bb30:
-        cf.br()
+        cf.br() [^bb32]
     ^bb31:
         %64 = arith.constant() {value = 8} -> i64
         func.return(%64: i64)

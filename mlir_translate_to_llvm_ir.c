@@ -1,11 +1,10 @@
 // Native implementation of MLIR_TranslateModuleToLLVMIR.
 //
 // Walks an `llvm`-dialect builtin.module via the public mlir_api.h
-// surface and emits LLVM IR text suitable for `llc`. Used by the NATIVE
-// arm of MLIR_TranslateModuleToLLVMIR (Stage C).
-//
-// This file is C, linked into both the upstream-backed and native-backed
-// builds. No upstream MLIR headers.
+// surface and emits LLVM IR text suitable for `llc`. This file is C,
+// linked into both the upstream-backed and native-backed builds (no
+// upstream MLIR headers), so the same translation unit supplies the
+// agnostic `MLIR_TranslateModuleToLLVMIR` in both binaries.
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -19,9 +18,6 @@
 #include <base/string.h>
 
 #include "mlir_api.h"
-
-// Forward-declared entry point — invoked from MLIR_TranslateModuleToLLVMIR.
-string mlir_translate_to_llvm_ir_native(MLIR_Context *ctx, MLIR_OpHandle module);
 
 // -----------------------------------------------------------------------------
 // Growable byte buffer (heap-backed; result is copied into the arena at the
@@ -1184,7 +1180,7 @@ static void scan_op_for_structs(MLIR_Context *ctx, MLIR_OpHandle op, StructList 
 // Module entry.
 // -----------------------------------------------------------------------------
 
-string mlir_translate_to_llvm_ir_native(MLIR_Context *ctx, MLIR_OpHandle module) {
+string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module) {
     Buf out = {0};
     buf_cstr(&out, "; ModuleID = 'LLVMDialectModule'\n");
     buf_cstr(&out, "source_filename = \"LLVMDialectModule\"\n\n");

@@ -969,6 +969,14 @@ extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *
                          mlir::DenseI32ArrayAttr::get(&ctx, v));
 }
 
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *, string name,
+                                                                    const int64_t *values, size_t count) {
+    auto &ctx = globalCtx().mctx;
+    llvm::SmallVector<int64_t, 8> v(values, values + count);
+    return makeNamedAttr(llvm::StringRef(name.str, name.size),
+                         mlir::DenseI64ArrayAttr::get(&ctx, v));
+}
+
 extern "C" MLIR_TypeHandle MLIR_CreateTypeLLVMPointer(MLIR_Context *) {
     auto &ctx = globalCtx().mctx;
     return typeH(mlir::LLVM::LLVMPointerType::get(&ctx));
@@ -1330,26 +1338,262 @@ extern "C" void MLIR_MoveBlockToRegionEnd(MLIR_Context *, MLIR_BlockHandle blk_h
     }
 }
 
+extern "C" void MLIR_SetOpOperand(MLIR_Context *, MLIR_OpHandle op_h,
+                                  size_t idx, MLIR_ValueHandle v_h) {
+    if (op_h == MLIR_INVALID_HANDLE) return;
+    auto *op = F<mlir::Operation>(op_h);
+    if (idx >= op->getNumOperands()) return;
+    auto *box = F<ValueBox>(v_h);
+    if (!box || !box->v) return;
+    op->setOperand(static_cast<unsigned>(idx), box->v);
+}
+
+extern "C" void MLIR_SetOpSuccessor(MLIR_Context *, MLIR_OpHandle op_h,
+                                    size_t succ_idx, MLIR_BlockHandle blk_h) {
+    if (op_h == MLIR_INVALID_HANDLE) return;
+    auto *op = F<mlir::Operation>(op_h);
+    if (succ_idx >= op->getNumSuccessors()) return;
+    auto *blk = (blk_h == MLIR_INVALID_HANDLE) ? nullptr : F<mlir::Block>(blk_h);
+    op->setSuccessor(blk, static_cast<unsigned>(succ_idx));
+}
+
+extern "C" void MLIR_SetOpSuccessorOperands(MLIR_Context *, MLIR_OpHandle op_h,
+                                            size_t succ_idx,
+                                            const MLIR_ValueHandle *values, size_t n) {
+    if (op_h == MLIR_INVALID_HANDLE) return;
+    auto *op = F<mlir::Operation>(op_h);
+    auto branch = mlir::dyn_cast<mlir::BranchOpInterface>(op);
+    if (!branch) return;
+    if (succ_idx >= op->getNumSuccessors()) return;
+    mlir::SuccessorOperands sops = branch.getSuccessorOperands(static_cast<unsigned>(succ_idx));
+    mlir::MutableOperandRange mut = sops.getMutableForwardedOperands();
+    llvm::SmallVector<mlir::Value, 8> vals;
+    vals.reserve(n);
+    for (size_t i = 0; i < n; i++) {
+        if (values && values[i] != MLIR_INVALID_HANDLE) {
+            auto *box = F<ValueBox>(values[i]);
+            vals.push_back(box ? box->v : mlir::Value());
+        } else {
+            vals.push_back(mlir::Value());
+        }
+    }
+    mut.assign(vals);
+}
+
+extern "C" void MLIR_EraseBlock(MLIR_Context *, MLIR_BlockHandle blk_h) {
+    if (blk_h == MLIR_INVALID_HANDLE) return;
+    auto *blk = F<mlir::Block>(blk_h);
+    if (blk->getParent() != nullptr) {
+        // Detach without freeing contained ops/args.
+        blk->getParent()->getBlocks().remove(blk);
+    }
+}
+
+extern "C" void MLIR_InsertRegionBlockAfter(MLIR_Context *, MLIR_RegionHandle region_h,
+                                            MLIR_BlockHandle blk_h,
+                                            MLIR_BlockHandle after_h) {
+    if (region_h == MLIR_INVALID_HANDLE || blk_h == MLIR_INVALID_HANDLE) return;
+    auto *region = F<mlir::Region>(region_h);
+    auto *blk = F<mlir::Block>(blk_h);
+    // Detach block from any current region first.
+    if (blk->getParent() != nullptr)
+        blk->getParent()->getBlocks().remove(blk);
+    if (after_h == MLIR_INVALID_HANDLE) {
+        region->getBlocks().push_front(blk);
+        return;
+    }
+    auto *after = F<mlir::Block>(after_h);
+    // Insert right after `after`.
+    auto it = std::next(after->getIterator());
+    region->getBlocks().insert(it, blk);
+}
+
+extern "C" void MLIR_InsertRegionBlockBefore(MLIR_Context *, MLIR_RegionHandle region_h,
+                                             MLIR_BlockHandle blk_h,
+                                             MLIR_BlockHandle before_h) {
+    if (region_h == MLIR_INVALID_HANDLE || blk_h == MLIR_INVALID_HANDLE) return;
+    auto *region = F<mlir::Region>(region_h);
+    auto *blk = F<mlir::Block>(blk_h);
+    if (blk->getParent() != nullptr)
+        blk->getParent()->getBlocks().remove(blk);
+    if (before_h == MLIR_INVALID_HANDLE) {
+        region->push_back(blk);
+        return;
+    }
+    auto *before = F<mlir::Block>(before_h);
+    region->getBlocks().insert(before->getIterator(), blk);
+}
+
+extern "C" MLIR_OpHandle MLIR_GetBlockTerminator(MLIR_BlockHandle blk_h) {
+    if (blk_h == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
+    auto *blk = F<mlir::Block>(blk_h);
+    if (blk->empty()) return MLIR_INVALID_HANDLE;
+    return H(&blk->back());
+}
+
+extern "C" MLIR_OpHandle MLIR_GetBlockParentOp(MLIR_BlockHandle blk_h) {
+    if (blk_h == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
+    auto *blk = F<mlir::Block>(blk_h);
+    auto *r = blk->getParent();
+    if (!r) return MLIR_INVALID_HANDLE;
+    auto *op = r->getParentOp();
+    return op ? H(op) : MLIR_INVALID_HANDLE;
+}
+
+extern "C" bool MLIR_BlockIsEntry(MLIR_BlockHandle blk_h) {
+    if (blk_h == MLIR_INVALID_HANDLE) return false;
+    auto *blk = F<mlir::Block>(blk_h);
+    return blk->isEntryBlock();
+}
+
+extern "C" size_t MLIR_GetBlockNumPredecessors(MLIR_BlockHandle blk_h) {
+    if (blk_h == MLIR_INVALID_HANDLE) return 0;
+    auto *blk = F<mlir::Block>(blk_h);
+    size_t n = 0;
+    for (auto it = blk->pred_begin(); it != blk->pred_end(); ++it) ++n;
+    return n;
+}
+
+extern "C" MLIR_BlockHandle MLIR_GetBlockPredecessor(MLIR_BlockHandle blk_h,
+                                                    size_t idx,
+                                                    size_t *out_succ_idx) {
+    if (blk_h == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
+    auto *blk = F<mlir::Block>(blk_h);
+    size_t i = 0;
+    for (auto it = blk->pred_begin(); it != blk->pred_end(); ++it, ++i) {
+        if (i == idx) {
+            if (out_succ_idx) *out_succ_idx = it.getSuccessorIndex();
+            return H(*it);
+        }
+    }
+    if (out_succ_idx) *out_succ_idx = SIZE_MAX;
+    return MLIR_INVALID_HANDLE;
+}
+
+extern "C" MLIR_ValueHandle MLIR_AddBlockArgument(MLIR_Context *,
+                                                  MLIR_BlockHandle blk_h,
+                                                  MLIR_TypeHandle type_h,
+                                                  MLIR_LocationHandle loc_h) {
+    if (blk_h == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
+    auto *blk = F<mlir::Block>(blk_h);
+    mlir::Type ty = typeF(type_h);
+    mlir::Location loc = (loc_h == MLIR_INVALID_HANDLE)
+        ? mlir::Location(mlir::UnknownLoc::get(&globalCtx().mctx))
+        : locF(loc_h);
+    auto arg = blk->addArgument(ty, loc);
+    return H(boxFor(arg));
+}
+
+extern "C" void MLIR_EraseBlockArguments(MLIR_Context *,
+                                          MLIR_BlockHandle blk_h,
+                                          size_t start, size_t count) {
+    if (blk_h == MLIR_INVALID_HANDLE || count == 0) return;
+    auto *blk = F<mlir::Block>(blk_h);
+    // Clear cached ValueBox entries for the args being erased before
+    // they are destroyed.
+    auto &idx = valueIndex();
+    for (size_t i = 0; i < count; i++) {
+        unsigned argIdx = static_cast<unsigned>(start + i);
+        if (argIdx >= blk->getNumArguments()) break;
+        idx.erase(blk->getArgument(argIdx).getAsOpaquePointer());
+    }
+    blk->eraseArguments(static_cast<unsigned>(start),
+                        static_cast<unsigned>(count));
+}
+
+extern "C" MLIR_BlockHandle MLIR_GetValueParentBlock(MLIR_ValueHandle v_h) {
+    if (v_h == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
+    auto *box = F<ValueBox>(v_h);
+    if (!box->v) return MLIR_INVALID_HANDLE;
+    auto *blk = box->v.getParentBlock();
+    return blk ? H(blk) : MLIR_INVALID_HANDLE;
+}
+
+extern "C" size_t MLIR_GetValueNumUses(MLIR_Context *, MLIR_ValueHandle v_h) {
+    if (v_h == MLIR_INVALID_HANDLE) return 0;
+    auto *box = F<ValueBox>(v_h);
+    if (!box->v) return 0;
+    size_t n = 0;
+    for (auto &u : box->v.getUses()) { (void)u; ++n; }
+    return n;
+}
+
+extern "C" MLIR_OpHandle MLIR_GetValueUseOwner(MLIR_Context *,
+                                                MLIR_ValueHandle v_h,
+                                                size_t idx,
+                                                size_t *out_operand_idx) {
+    if (v_h == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
+    auto *box = F<ValueBox>(v_h);
+    if (!box->v) return MLIR_INVALID_HANDLE;
+    size_t i = 0;
+    for (auto &u : box->v.getUses()) {
+        if (i == idx) {
+            if (out_operand_idx) *out_operand_idx = u.getOperandNumber();
+            return H(u.getOwner());
+        }
+        ++i;
+    }
+    if (out_operand_idx) *out_operand_idx = SIZE_MAX;
+    return MLIR_INVALID_HANDLE;
+}
+
+extern "C" void MLIR_SetOpOperands(MLIR_Context *, MLIR_OpHandle op_h,
+                                    const MLIR_ValueHandle *values, size_t n) {
+    if (op_h == MLIR_INVALID_HANDLE) return;
+    auto *op = F<mlir::Operation>(op_h);
+    llvm::SmallVector<mlir::Value, 8> vs;
+    vs.reserve(n);
+    for (size_t i = 0; i < n; i++) {
+        if (values && values[i] != MLIR_INVALID_HANDLE) {
+            auto *box = F<ValueBox>(values[i]);
+            vs.push_back(box ? box->v : mlir::Value());
+        } else {
+            vs.push_back(mlir::Value());
+        }
+    }
+    op->setOperands(vs);
+}
+
+extern "C" void MLIR_AppendOpSuccessorOperand(MLIR_Context *, MLIR_OpHandle op_h,
+                                               size_t succ_idx,
+                                               MLIR_ValueHandle v_h) {
+    if (op_h == MLIR_INVALID_HANDLE || v_h == MLIR_INVALID_HANDLE) return;
+    auto *op = F<mlir::Operation>(op_h);
+    auto branch = mlir::dyn_cast<mlir::BranchOpInterface>(op);
+    if (!branch) return;
+    if (succ_idx >= op->getNumSuccessors()) return;
+    auto *box = F<ValueBox>(v_h);
+    if (!box || !box->v) return;
+    mlir::SuccessorOperands sops =
+        branch.getSuccessorOperands(static_cast<unsigned>(succ_idx));
+    mlir::MutableOperandRange mut = sops.getMutableForwardedOperands();
+    mut.append({box->v});
+}
+
+extern "C" void MLIR_SpliceBlockOps(MLIR_Context *, MLIR_BlockHandle dst_h,
+                                     MLIR_BlockHandle src_h) {
+    if (dst_h == MLIR_INVALID_HANDLE || src_h == MLIR_INVALID_HANDLE) return;
+    auto *dst = F<mlir::Block>(dst_h);
+    auto *src = F<mlir::Block>(src_h);
+    dst->getOperations().splice(dst->end(), src->getOperations());
+}
+
 // -----------------------------------------------------------------------------
-// Lowering to LLVM dialect + translation to LLVM IR text
+// Upstream-only lowering / translation entry points (the *Upstream
+// siblings of the agnostic functions in mlir_lower_to_llvm.c,
+// mlir_translate_to_llvm_ir.c, mlir_translate_to_wasm.c). Each runs
+// upstream MLIR's pass pipeline / translator / LLVM target machine.
 // -----------------------------------------------------------------------------
 
-extern "C" bool mlir_lower_to_llvm_native(MLIR_Context *ctx, MLIR_OpHandle module);
-extern "C" MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module);
-extern "C" MLIR_OpHandle mlir_wasmssa_to_wasmstack(MLIR_Context *ctx,
-                                                  MLIR_OpHandle ssa_module);
-extern "C" string mlir_wasmstack_to_bin(MLIR_Context *ctx, MLIR_OpHandle stk_module);
-
-extern "C" bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module_h,
-                                        MLIR_LoweringBackend backend) {
+extern "C" bool MLIR_LowerToLLVMDialectUpstream(MLIR_Context *ctx,
+                                                MLIR_OpHandle module_h) {
+    (void)ctx;
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
-        std::fprintf(stderr, "MLIR_LowerToLLVMDialect: handle is not a ModuleOp\n");
+        std::fprintf(stderr,
+                     "MLIR_LowerToLLVMDialectUpstream: handle is not a ModuleOp\n");
         return false;
-    }
-    if (backend == MLIR_LOWERING_NATIVE) {
-        return mlir_lower_to_llvm_native(ctx, module_h);
     }
     auto &mctx = globalCtx().mctx;
     // Only run vector-to-LLVM if the module actually contains a vector op.
@@ -1384,7 +1628,8 @@ extern "C" bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module_
     pm.addPass(mlir::createConvertFuncToLLVMPass());
     pm.addPass(mlir::createReconcileUnrealizedCastsPass());
     if (mlir::failed(pm.run(module))) {
-        std::fprintf(stderr, "MLIR_LowerToLLVMDialect: pass pipeline failed\n");
+        std::fprintf(stderr,
+                     "MLIR_LowerToLLVMDialectUpstream: pass pipeline failed\n");
         return false;
     }
     return true;
@@ -1404,6 +1649,30 @@ extern "C" bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module_
 namespace {
 class CFGToSCFForWasm : public mlir::ControlFlowToSCFTransformation {
 public:
+    // Override switch-flag generation to use i32 instead of `index`. The
+    // wasm backend has no native `index` type and rejects
+    // arith.index_cast(ui), which the stock implementation introduces to
+    // bridge the index discriminator with cf.switch's i32-typed cases.
+    // Using i32 throughout side-steps the cast entirely.
+    mlir::Value getCFGSwitchValue(mlir::Location loc, mlir::OpBuilder &builder,
+                                  unsigned value) override {
+        return builder.create<mlir::arith::ConstantOp>(
+            loc, builder.getI32IntegerAttr(static_cast<int32_t>(value)));
+    }
+
+    void createCFGSwitchOp(mlir::Location loc, mlir::OpBuilder &builder,
+                           mlir::Value flag,
+                           llvm::ArrayRef<unsigned> caseValues,
+                           mlir::BlockRange caseDestinations,
+                           llvm::ArrayRef<mlir::ValueRange> caseArguments,
+                           mlir::Block *defaultDest,
+                           mlir::ValueRange defaultArgs) override {
+        builder.create<mlir::cf::SwitchOp>(
+            loc, flag, defaultDest, defaultArgs,
+            llvm::to_vector_of<int32_t>(caseValues),
+            caseDestinations, caseArguments);
+    }
+
     mlir::FailureOr<mlir::Operation *>
     createUnreachableTerminator(mlir::Location loc, mlir::OpBuilder &builder,
                                 mlir::Region &region) override {
@@ -1430,11 +1699,20 @@ public:
 static void liftLLVMFuncCFGToSCF(mlir::ModuleOp module) {
     using namespace mlir;
     CFGToSCFForWasm transformation;
-    llvm::SmallVector<LLVM::LLVMFuncOp> fns;
-    module.walk([&](LLVM::LLVMFuncOp fn) {
-        if (!fn.getBody().empty()) fns.push_back(fn);
+    // Walk both func.func and llvm.func bodies so the wasm-flavored
+    // overrides (i32 switch values, llvm.return for unreachable) are
+    // applied uniformly. The stock LiftControlFlowToSCF pass only
+    // visits func.func, and would otherwise lift those bodies with
+    // index-typed switch values that the wasm backend rejects.
+    llvm::SmallVector<Operation *> fns;
+    module.walk([&](Operation *fn) {
+        if (auto fOp = llvm::dyn_cast<func::FuncOp>(fn)) {
+            if (!fOp.getBody().empty()) fns.push_back(fn);
+        } else if (auto lOp = llvm::dyn_cast<LLVM::LLVMFuncOp>(fn)) {
+            if (!lOp.getBody().empty()) fns.push_back(fn);
+        }
     });
-    for (auto fn : fns) {
+    for (auto *fn : fns) {
         DominanceInfo domInfo(fn);
         // Post-order so nested regions are lifted first, matching the stock
         // LiftControlFlowToSCF pass.
@@ -1445,21 +1723,50 @@ static void liftLLVMFuncCFGToSCF(mlir::ModuleOp module) {
     }
 }
 
-extern "C" bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx,
-                                               MLIR_OpHandle module_h,
-                                               MLIR_LoweringBackend backend) {
+// Agnostic-API: lift cf -> scf in `module`. Used by the wasm pipeline
+// regardless of which lowering binary is doing the work. Implemented by
+// reusing upstream MLIR's `transformCFGToSCF` algorithm, applied to both
+// func.func bodies (via the stock `LiftControlFlowToSCFPass`) and
+// llvm.func bodies (via `liftLLVMFuncCFGToSCF`).
+extern "C" bool MLIR_LiftCfToScfNative(MLIR_Context *ctx,
+                                       MLIR_OpHandle module);
+
+extern "C" bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module_h) {
+    if (module_h == MLIR_INVALID_HANDLE) return false;
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
         std::fprintf(stderr,
-                     "MLIR_LowerToLLVMDialectForWasm: handle is not a ModuleOp\n");
+                     "MLIR_LiftCfToScf: handle is not a ModuleOp\n");
         return false;
     }
-    if (backend != MLIR_LOWERING_NATIVE) {
-        // Upstream backend: just defer to the standard lowering. The wasm
-        // emitter for the upstream backend uses LLVM's WebAssembly target
-        // which expects fully-lowered LLVM-dialect input.
-        return MLIR_LowerToLLVMDialect(ctx, module_h, backend);
+    auto &mctx = globalCtx().mctx;
+    {
+        mlir::IRRewriter rewriter(&mctx);
+        (void)mlir::eraseUnreachableBlocks(rewriter, module->getRegions());
+    }
+    // Opt-in path for the agnostic C port. When TINYC_LIFT_USE_NATIVE is
+    // set, run the native port first to normalize / lift what it can,
+    // then let upstream's liftLLVMFuncCFGToSCF finish the remainder.
+    // The native port always returns true (best effort); it leaves the
+    // IR in a valid state that upstream can complete.
+    const char *opt_in = std::getenv("TINYC_LIFT_USE_NATIVE");
+    if (opt_in && opt_in[0] && opt_in[0] != '0') {
+        MLIR_LiftCfToScfNative(ctx, module_h);
+    }
+    liftLLVMFuncCFGToSCF(module);
+    return true;
+}
+
+extern "C" bool MLIR_LowerToLLVMDialectForWasmUpstream(MLIR_Context *ctx,
+                                                       MLIR_OpHandle module_h) {
+    (void)ctx;
+    auto *op = F<mlir::Operation>(module_h);
+    auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
+    if (!module) {
+        std::fprintf(stderr,
+                     "MLIR_LowerToLLVMDialectForWasmUpstream: handle is not a ModuleOp\n");
+        return false;
     }
     auto &mctx = globalCtx().mctx;
     // The opUserAttrs / opByNameAttrs caches are keyed by Operation* and
@@ -1496,7 +1803,7 @@ extern "C" bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx,
     pm.addPass(mlir::createReconcileUnrealizedCastsPass());
     if (mlir::failed(pm.run(module))) {
         std::fprintf(stderr,
-                     "MLIR_LowerToLLVMDialectForWasm: pass pipeline failed\n");
+                     "MLIR_LowerToLLVMDialectForWasmUpstream: pass pipeline failed\n");
         return false;
     }
     // Drop any cached attrs from before / during the pipeline: the ops they
@@ -1506,19 +1813,14 @@ extern "C" bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx,
     return true;
 }
 
-extern "C" string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module_h,
-                                               MLIR_LoweringBackend backend) {
+extern "C" string MLIR_TranslateModuleToLLVMIRUpstream(MLIR_Context *ctx,
+                                                       MLIR_OpHandle module_h) {
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
-        std::fprintf(stderr, "MLIR_TranslateModuleToLLVMIR: not a ModuleOp\n");
+        std::fprintf(stderr,
+                     "MLIR_TranslateModuleToLLVMIRUpstream: not a ModuleOp\n");
         return mkRefString(llvm::StringRef());
-    }
-    // For now, MLIR_LOWERING_NATIVE delegates to the upstream translator.
-    // Stage C will replace this branch with a walk via mlir_api.h.
-    if (backend == MLIR_LOWERING_NATIVE) {
-        extern string mlir_translate_to_llvm_ir_native(MLIR_Context *, MLIR_OpHandle);
-        return mlir_translate_to_llvm_ir_native(ctx, module_h);
     }
     // Register the LLVM-IR translation interfaces (idempotent).
     mlir::registerBuiltinDialectTranslation(globalCtx().mctx);
@@ -1527,7 +1829,8 @@ extern "C" string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle 
     llvm::LLVMContext llctx;
     auto llmod = mlir::translateModuleToLLVMIR(module, llctx);
     if (!llmod) {
-        std::fprintf(stderr, "MLIR_TranslateModuleToLLVMIR: translation failed\n");
+        std::fprintf(stderr,
+                     "MLIR_TranslateModuleToLLVMIRUpstream: translation failed\n");
         return mkRefString(llvm::StringRef());
     }
     std::string out;
@@ -1543,34 +1846,19 @@ extern "C" string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle 
     return result;
 }
 
-// Translate a `builtin.module` op already lowered to the LLVM dialect into
-// a wasm32-wasi relocatable object file using LLVM's WebAssembly target.
-// The returned bytes are NOT a runnable wasm module — they still need to
-// be linked (typically with `wasm-ld`) against any runtime/imports the
-// program uses.
-extern "C" string MLIR_TranslateModuleToWasm(MLIR_Context *ctx,
-                                             MLIR_OpHandle module_h,
-                                             MLIR_LoweringBackend backend) {
+// Translate a `builtin.module` op already lowered to the LLVM dialect
+// into a wasm32-wasi relocatable object file using LLVM's WebAssembly
+// target. The returned bytes are NOT a runnable wasm module — they
+// still need to be linked (typically with `wasm-ld`) against any
+// runtime/imports the program uses.
+extern "C" string MLIR_TranslateModuleToWasmUpstream(MLIR_Context *ctx,
+                                                     MLIR_OpHandle module_h) {
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
         std::fprintf(stderr,
-                     "MLIR_TranslateModuleToWasm: handle is not a ModuleOp\n");
+                     "MLIR_TranslateModuleToWasmUpstream: handle is not a ModuleOp\n");
         return mkRefString(llvm::StringRef());
-    }
-
-    // For backend==MLIR_LOWERING_NATIVE we dispatch to the in-tree
-    // three-stage pipeline (llvm.dialect -> wasmssa -> wasmstack -> wasm
-    // bytes) and bypass LLVM's WebAssembly target entirely. For the
-    // upstream backend we go through MLIR's LLVM-IR translator and feed
-    // the resulting llvm::Module to LLVM's WebAssembly TargetMachine.
-    if (backend == MLIR_LOWERING_NATIVE) {
-        string fail = {0};
-        MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(ctx, module_h);
-        if (!ssa) return fail;
-        MLIR_OpHandle stk = mlir_wasmssa_to_wasmstack(ctx, ssa);
-        if (!stk) return fail;
-        return mlir_wasmstack_to_bin(ctx, stk);
     }
 
     llvm::LLVMContext llctx;
@@ -1581,7 +1869,7 @@ extern "C" string MLIR_TranslateModuleToWasm(MLIR_Context *ctx,
         llmod = mlir::translateModuleToLLVMIR(module, llctx);
         if (!llmod) {
             std::fprintf(stderr,
-                         "MLIR_TranslateModuleToWasm: translation to LLVM IR failed\n");
+                         "MLIR_TranslateModuleToWasmUpstream: translation to LLVM IR failed\n");
             return mkRefString(llvm::StringRef());
         }
     }
@@ -1601,7 +1889,7 @@ extern "C" string MLIR_TranslateModuleToWasm(MLIR_Context *ctx,
     const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, err);
     if (!target) {
         std::fprintf(stderr,
-                     "MLIR_TranslateModuleToWasm: lookupTarget failed: %s\n",
+                     "MLIR_TranslateModuleToWasmUpstream: lookupTarget failed: %s\n",
                      err.c_str());
         return mkRefString(llvm::StringRef());
     }
@@ -1613,7 +1901,7 @@ extern "C" string MLIR_TranslateModuleToWasm(MLIR_Context *ctx,
         triple, /*CPU*/ "generic", /*Features*/ "", opts, rm, cm));
     if (!tm) {
         std::fprintf(stderr,
-                     "MLIR_TranslateModuleToWasm: createTargetMachine failed\n");
+                     "MLIR_TranslateModuleToWasmUpstream: createTargetMachine failed\n");
         return mkRefString(llvm::StringRef());
     }
     llmod->setDataLayout(tm->createDataLayout());
@@ -1627,7 +1915,7 @@ extern "C" string MLIR_TranslateModuleToWasm(MLIR_Context *ctx,
     if (tm->addPassesToEmitFile(pm, obj_os, /*DwoOut*/ nullptr,
                                 llvm::CodeGenFileType::ObjectFile)) {
         std::fprintf(stderr,
-                     "MLIR_TranslateModuleToWasm: target cannot emit object file\n");
+                     "MLIR_TranslateModuleToWasmUpstream: target cannot emit object file\n");
         return mkRefString(llvm::StringRef());
     }
     pm.run(*llmod);

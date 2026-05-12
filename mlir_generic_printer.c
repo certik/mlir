@@ -190,6 +190,23 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
     }
     result = str_concat(arena, result, str_lit(")"));
     {
+        size_t n_succ = MLIR_GetOpNumSuccessors(op);
+        if (n_succ > 0) {
+            result = str_concat(arena, result, str_lit(" ["));
+            for (size_t s = 0; s < n_succ; s++) {
+                if (s > 0) result = str_concat(arena, result, str_lit(", "));
+                MLIR_BlockHandle sb = MLIR_GetOpSuccessor(op, s);
+                if (sb) {
+                    size_t bi = MLIR_GetBlockIndex(sb);
+                    result = str_concat(arena, result, format(arena, str_lit("^bb{}"), (int64_t)bi));
+                } else {
+                    result = str_concat(arena, result, str_lit("^bb?"));
+                }
+            }
+            result = str_concat(arena, result, str_lit("]"));
+        }
+    }
+    {
         size_t n_attrs = MLIR_GetOpNumAttributes(op);
         if (n_attrs > 0) {
             bool opened = false; bool first = true;
