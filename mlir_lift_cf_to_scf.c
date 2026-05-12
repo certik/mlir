@@ -1276,6 +1276,149 @@ static bool try_split_diamond_merge(MLIR_Context *ctx, Arena *arena,
     return true;
 }
 
+// ============================================================================
+// Lift a self-loop block (H -> cf.cond_br [H, exit] or [exit, H]) into
+// scf.while. This handles do-while loops after fold_linear_chain has
+// collapsed the cond block into the body block.
+//
+//   ^entry:     ... cf.br ^H(init...)
+//   ^H(iter...):  body_ops; %c = ...; cf.cond_br %c, ^H(self...), ^exit(res...)
+//   ^exit(res...): ...
+//
+// Constraints: H has exactly 2 preds (entry-style + self), exit has sole
+// pred = H, n_iter == n_self (back-edge args feed iter), exit_b's arg
+// types/count match cond_br's exit-side payload.
+//
+// Lifting:
+//   - Move all of H's ops (except the cond_br terminator) into a new
+//     before-block (in a fresh before-region). before's block args
+//     mirror H's iter args; RAUW H's old args -> before's new args.
+//   - Replace cond_br with scf.condition(c, self_args) in before. (The
+//     payload feeds after's args, which then yield back as next iter.)
+//   - Build empty after-region with after-block whose args match
+//     iter_types; terminate with scf.yield(after_args).
+//   - In H (now empty of ops), append scf.while(init=H's old args)
+//     producing res_types, then cf.br ^exit(while_results).
+//   - RAUW exit's args with scf.while results; splice exit into H? No —
+//     exit was already a separate block reachable only from H; we leave
+//     exit standalone and let subsequent linear-fold splice it.
+// ============================================================================
+static bool try_lift_self_loop_while(MLIR_Context *ctx, Arena *arena,
+                                     MLIR_BlockHandle H) {
+    MLIR_OpHandle cond_br = MLIR_GetBlockTerminator(H);
+    if (cond_br == MLIR_INVALID_HANDLE) return false;
+    if (!string_eq_string(MLIR_GetOpName(cond_br), str_lit("cf.cond_br"))) return false;
+    if (MLIR_GetOpNumSuccessors(cond_br) != 2) return false;
+    MLIR_BlockHandle s0 = MLIR_GetOpSuccessor(cond_br, 0);
+    MLIR_BlockHandle s1 = MLIR_GetOpSuccessor(cond_br, 1);
+    if (s0 == MLIR_INVALID_HANDLE || s1 == MLIR_INVALID_HANDLE) return false;
+    // Exactly one successor must be H itself (the self-loop).
+    bool self_is_then;
+    MLIR_BlockHandle exit_b;
+    if (s0 == H && s1 != H) { self_is_then = true; exit_b = s1; }
+    else if (s1 == H && s0 != H) { self_is_then = false; exit_b = s0; }
+    else return false;
+    if (exit_b == H) return false;
+    if (MLIR_GetBlockNumPredecessors(H) != 2) return false;
+    if (MLIR_GetBlockNumPredecessors(exit_b) != 1) return false;
+    if (MLIR_BlockIsEntry(H)) return false; // need a real predecessor
+
+    size_t self_idx = self_is_then ? 0 : 1;
+    size_t exit_idx = self_is_then ? 1 : 0;
+    size_t n_iter = MLIR_GetBlockNumArgs(H);
+    size_t n_self = MLIR_GetOpNumSuccessorOperands(cond_br, self_idx);
+    size_t n_res  = MLIR_GetOpNumSuccessorOperands(cond_br, exit_idx);
+    size_t n_exit_args = MLIR_GetBlockNumArgs(exit_b);
+    if (n_self != n_iter) return false;
+    if (n_res != n_exit_args) return false;
+
+    MLIR_LocationHandle loc = MLIR_GetOpLocation(cond_br);
+
+    // Snapshot.
+    MLIR_ValueHandle cond_v = MLIR_GetOpOperand(cond_br, 0);
+    MLIR_ValueHandle *self_args = n_self
+        ? arena_new_array(arena, MLIR_ValueHandle, n_self) : NULL;
+    for (size_t i = 0; i < n_self; ++i)
+        self_args[i] = MLIR_GetOpSuccessorOperand(cond_br, self_idx, i);
+    MLIR_ValueHandle *exit_args = n_res
+        ? arena_new_array(arena, MLIR_ValueHandle, n_res) : NULL;
+    for (size_t i = 0; i < n_res; ++i)
+        exit_args[i] = MLIR_GetOpSuccessorOperand(cond_br, exit_idx, i);
+
+    MLIR_TypeHandle *iter_types = n_iter
+        ? arena_new_array(arena, MLIR_TypeHandle, n_iter) : NULL;
+    for (size_t i = 0; i < n_iter; ++i)
+        iter_types[i] = MLIR_GetValueType(MLIR_GetBlockArg(H, i));
+    MLIR_TypeHandle *res_types = n_res
+        ? arena_new_array(arena, MLIR_TypeHandle, n_res) : NULL;
+    for (size_t i = 0; i < n_res; ++i)
+        res_types[i] = MLIR_GetValueType(MLIR_GetBlockArg(exit_b, i));
+
+    // Build before block (in a new before region).
+    MLIR_RegionHandle before_region = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle  before = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, before_region, before);
+    for (size_t i = 0; i < n_iter; ++i) {
+        MLIR_ValueHandle ba = MLIR_AddBlockArgument(ctx, before, iter_types[i], loc);
+        MLIR_ReplaceAllUsesOfValue(ctx, MLIR_GetBlockArg(H, i), ba);
+    }
+
+    // Move all of H's ops EXCEPT the terminator into before.
+    // Walk H's ops by always taking op[0] until only the terminator
+    // remains (since each move shifts indices).
+    while (MLIR_GetBlockNumOps(H) > 1) {
+        MLIR_OpHandle op0 = MLIR_GetBlockOp(H, 0);
+        MLIR_MoveOpToBlockEnd(ctx, op0, before);
+    }
+
+    // Erase H's old cond_br and add scf.condition to before.
+    MLIR_EraseOp(ctx, cond_br);
+    create_scf_condition(ctx, arena, before, cond_v, self_args, n_self, loc);
+
+    // Build after region with empty after-block whose args mirror
+    // iter_types; terminate with scf.yield(after_args).
+    MLIR_RegionHandle after_region = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle  after = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, after_region, after);
+    MLIR_ValueHandle *after_args = n_iter
+        ? arena_new_array(arena, MLIR_ValueHandle, n_iter) : NULL;
+    for (size_t i = 0; i < n_iter; ++i)
+        after_args[i] = MLIR_AddBlockArgument(ctx, after, iter_types[i], loc);
+    create_scf_yield(ctx, arena, after, after_args, n_iter, loc);
+
+    // H is now empty of ops. Erase H's old args (they were RAUW'd to
+    // before's args). We then re-add them to receive entry's init values
+    // and feed the new scf.while op.
+    MLIR_ValueHandle *init_vs = n_iter
+        ? arena_new_array(arena, MLIR_ValueHandle, n_iter) : NULL;
+    for (size_t i = 0; i < n_iter; ++i)
+        init_vs[i] = MLIR_GetBlockArg(H, i);
+
+    // Build scf.while op.
+    MLIR_ValueHandle *result_vs = n_res
+        ? arena_new_array(arena, MLIR_ValueHandle, n_res) : NULL;
+    for (size_t i = 0; i < n_res; ++i) {
+        result_vs[i] = MLIR_CreateValueOpResult(
+            ctx, MLIR_INVALID_HANDLE, (uint32_t)i, res_types[i],
+            fresh_ssa_name(arena), loc);
+    }
+    MLIR_RegionHandle *regions = arena_new_array(arena, MLIR_RegionHandle, 2);
+    regions[0] = before_region; regions[1] = after_region;
+    MLIR_OpHandle scf_while = MLIR_CreateOp(
+        ctx, OP_TYPE_SCF_WHILE, str_lit("scf.while"),
+        NULL, 0,
+        res_types, n_res,
+        result_vs, n_res,
+        init_vs, n_iter,
+        regions, 2,
+        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_AppendBlockOp(ctx, H, scf_while);
+
+    // Add cf.br [exit](while_results) to H.
+    create_cf_br_in_block(ctx, arena, H, exit_b, result_vs, n_res, loc);
+    return true;
+}
+
 static bool fold_simple_loops_and_ifs(MLIR_Context *ctx, Arena *arena,
                                       MLIR_BlockHandle entry) {
     bool any = false;
@@ -1302,6 +1445,9 @@ static bool fold_simple_loops_and_ifs(MLIR_Context *ctx, Arena *arena,
                     changed = true; lifted_any = true; break;
                 }
                 if (try_split_diamond_merge(ctx, arena, b)) {
+                    changed = true; lifted_any = true; break;
+                }
+                if (try_lift_self_loop_while(ctx, arena, b)) {
                     changed = true; lifted_any = true; break;
                 }
             }
