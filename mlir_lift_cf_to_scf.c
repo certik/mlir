@@ -809,6 +809,25 @@ static bool fold_simple_ifs(MLIR_Context *ctx, Arena *arena,
     return any;
 }
 
+// Erase non-entry blocks with no predecessors, iterating to fixed point
+// (erasing one may leave another unreachable). Mirrors upstream's
+// `eraseUnreachableBlocks`.
+static void erase_unreachable_blocks(MLIR_Context *ctx, MLIR_RegionHandle region) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        size_t nb = MLIR_GetRegionNumBlocks(region);
+        for (size_t bi = 0; bi < nb; ++bi) {
+            MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
+            if (MLIR_BlockIsEntry(b)) continue;
+            if (MLIR_GetBlockNumPredecessors(b) != 0) continue;
+            MLIR_EraseBlock(ctx, b);
+            changed = true;
+            break;
+        }
+    }
+}
+
 bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module) {
     (void)ctx;
     if (module == MLIR_INVALID_HANDLE) return false;
@@ -836,6 +855,7 @@ bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module) {
             if (MLIR_GetOpNumRegions(o) == 0) continue;
             MLIR_RegionHandle body = MLIR_GetOpRegion(o, 0);
             if (MLIR_GetRegionNumBlocks(body) == 0) continue;
+            erase_unreachable_blocks(ctx, body);
             if (!check_preconditions(body)) {
                 arena_destroy(scratch);
                 return false;
