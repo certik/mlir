@@ -51,33 +51,21 @@ static void edge_set_successor(MLIR_Context *ctx, Edge e, MLIR_BlockHandle dst) 
     MLIR_SetOpSuccessor(ctx, term, e.succ_idx, dst);
 }
 
-// ============================================================================
-// EdgeMultiplexer: helper that turns N entries into a single multiplexer
-// block with a discriminator argument. See the diagrams at the top of
-// CFGToSCF.cpp.
-//
-// Pure-C version: block_arg_offsets[i] is the index into the multiplexer
-// block's argument list where the `i`-th entry block's args were copied.
-// ============================================================================
-typedef struct {
-    MLIR_BlockHandle mux_block;
-    MLIR_BlockHandle *entries;       // distinct entry blocks
-    size_t           *entry_arg_off; // arg-list offset per entry
-    size_t            n_entries;
-    MLIR_ValueHandle  discriminator; // INVALID if only one entry
-    size_t            n_extra_args;
-} EdgeMultiplexer;
+// Forward declarations for cross-references between EdgeMultiplexer and
+// LiftState. Full definitions appear below.
+typedef struct LiftState_S       LiftState;
+typedef struct TypedValueEntry_S TypedValueEntry;
 
 // ============================================================================
 // Switch value / undef value caches. Mirror the typedUndefCache and
 // switchValueCache lambdas of transformCFGToSCF in CFGToSCF.cpp:1309-1338.
 // ============================================================================
-typedef struct {
+struct TypedValueEntry_S {
     MLIR_TypeHandle  type;
     MLIR_ValueHandle value;
-} TypedValueEntry;
+};
 
-typedef struct {
+struct LiftState_S {
     MLIR_Context     *ctx;
     Arena            *arena;
     MLIR_OpHandle     fn_op;        // func.func or llvm.func being processed
@@ -94,7 +82,258 @@ typedef struct {
     TypedValueEntry  *undef_cache;
     size_t            undef_cache_n;
     size_t            undef_cache_cap;
-} LiftState;
+};
+
+static MLIR_ValueHandle get_switch_value(LiftState *st, unsigned v);
+static MLIR_ValueHandle get_undef_value(LiftState *st, MLIR_TypeHandle ty);
+static string           fresh_ssa_name(Arena *arena);
+
+// Forward declaration of branch op constructor used by EdgeMultiplexer
+// (defined further down with the other op constructors).
+static MLIR_OpHandle create_cf_switch_in_block(MLIR_Context *ctx, Arena *arena,
+                                               MLIR_BlockHandle in_block,
+                                               MLIR_ValueHandle flag,
+                                               MLIR_BlockHandle dflt_dst,
+                                               MLIR_ValueHandle *dflt_args, size_t n_dflt_args,
+                                               const int32_t *case_values,
+                                               MLIR_BlockHandle *case_dsts,
+                                               MLIR_ValueHandle **case_args,
+                                               size_t *n_case_args,
+                                               size_t n_cases,
+                                               MLIR_LocationHandle loc);
+
+// ============================================================================
+// EdgeMultiplexer (port of CFGToSCF.cpp:212-387).
+//
+// A multiplexer takes N "entry edges" (each leading to one of several
+// distinct entry blocks) and funnels them through a single new
+// multiplexer block carrying:
+//   - the UNION of all distinct entry blocks' arguments,
+//   - optionally a discriminator i32 arg (only when >1 distinct entries),
+//   - optionally `n_extra_args` extra args at the end (for the latch case
+//     where we add a `shouldRepeat` flag).
+//
+// edge_multiplexer_redirect_edge() retargets an existing edge to the
+// multiplexer, passing the original successor operands into THIS edge's
+// slot of the union and undef into all other slots.
+//
+// edge_multiplexer_create_switch() emits a cf.switch in the SUPPLIED
+// destination block (typically the multiplexer block itself, or a
+// downstream exit-dispatch block) that dispatches to the original
+// successors based on the discriminator.
+// ============================================================================
+typedef struct {
+    MLIR_BlockHandle  mux_block;
+    // Distinct entry-block list. block_arg_off[i] is the offset in
+    // `mux_block`'s arg list where the args of `entries[i]` start.
+    MLIR_BlockHandle *entries;
+    size_t           *block_arg_off;
+    size_t            n_entries;
+    // Index of the discriminator in mux_block's args, or SIZE_MAX if
+    // single-entry (no discriminator needed).
+    size_t            discriminator_idx;
+    // Number of extra args appended at the very end of mux_block's args.
+    size_t            n_extra_args;
+    // Cached getters.
+    LiftState        *st;
+} EdgeMultiplexer;
+
+// Find the index in `m->entries` of the given block, or SIZE_MAX.
+static size_t edge_multiplexer_entry_index(const EdgeMultiplexer *m,
+                                           MLIR_BlockHandle block) {
+    for (size_t i = 0; i < m->n_entries; ++i) {
+        if (m->entries[i] == block) return i;
+    }
+    return SIZE_MAX;
+}
+
+// Copy block_arg types from `src` into `dst`. Mirrors upstream's
+// `addBlockArgumentsFromOther`.
+static void mux_copy_block_args(MLIR_Context *ctx,
+                                MLIR_BlockHandle dst, MLIR_BlockHandle src,
+                                MLIR_LocationHandle loc) {
+    size_t n = MLIR_GetBlockNumArgs(src);
+    for (size_t i = 0; i < n; ++i) {
+        MLIR_ValueHandle a = MLIR_GetBlockArg(src, i);
+        MLIR_AddBlockArgument(ctx, dst, MLIR_GetValueType(a), loc);
+    }
+}
+
+// Construct a multiplexer block targeted by all edges in `entry_blocks`
+// (which may contain duplicates — the multiplexer only allocates one
+// slot per distinct entry block). `n_extra_args` is the number of extra
+// args (e.g. 1 for the latch's shouldRepeat flag); the types of these
+// extras are i32 by convention (matches what
+// `create_single_exiting_latch` needs).
+//
+// The new block is inserted immediately AFTER the first entry block in
+// the parent region.
+//
+// Note: this only constructs the multiplexer. Use
+// `edge_multiplexer_redirect_edge` to actually route an existing edge
+// to it, and `edge_multiplexer_create_switch` to install the dispatch
+// in a downstream block.
+static EdgeMultiplexer edge_multiplexer_create(LiftState *st,
+                                               MLIR_LocationHandle loc,
+                                               const MLIR_BlockHandle *entry_blocks,
+                                               size_t n_entries_in,
+                                               size_t n_extra_args) {
+    EdgeMultiplexer m = {0};
+    m.st = st;
+    m.discriminator_idx = SIZE_MAX;
+    m.n_extra_args = n_extra_args;
+    m.mux_block = MLIR_CreateBlock(st->ctx);
+
+    // Insert the mux block right after the first entry block in its
+    // parent region. (The parent is shared by all entry blocks.)
+    MLIR_RegionHandle parent_region = MLIR_GetBlockParentRegion(entry_blocks[0]);
+    MLIR_InsertRegionBlockAfter(st->ctx, parent_region, m.mux_block, entry_blocks[0]);
+
+    // Deduplicate entry blocks while preserving insertion order, and
+    // record the arg offset for each distinct entry block.
+    m.entries = arena_new_array(st->arena, MLIR_BlockHandle, n_entries_in ? n_entries_in : 1);
+    m.block_arg_off = arena_new_array(st->arena, size_t, n_entries_in ? n_entries_in : 1);
+    size_t current_offset = 0;
+    for (size_t i = 0; i < n_entries_in; ++i) {
+        MLIR_BlockHandle b = entry_blocks[i];
+        // Skip if already inserted.
+        if (edge_multiplexer_entry_index(&m, b) != SIZE_MAX) continue;
+        m.entries[m.n_entries] = b;
+        m.block_arg_off[m.n_entries] = current_offset;
+        m.n_entries++;
+        mux_copy_block_args(st->ctx, m.mux_block, b, loc);
+        current_offset += MLIR_GetBlockNumArgs(b);
+    }
+
+    // Add a discriminator if there is more than one distinct entry.
+    if (m.n_entries > 1) {
+        MLIR_AddBlockArgument(st->ctx, m.mux_block, st->i32_ty, loc);
+        m.discriminator_idx = current_offset;
+        current_offset += 1;
+    }
+
+    // Add the extra args (i32 each).
+    for (size_t i = 0; i < n_extra_args; ++i) {
+        MLIR_AddBlockArgument(st->ctx, m.mux_block, st->i32_ty, loc);
+    }
+
+    return m;
+}
+
+// Redirect the given edge to the multiplexer block. The edge's
+// successor MUST be one of the entries passed to
+// edge_multiplexer_create. `extra_args` provides values for the extra
+// slots (must have exactly m.n_extra_args entries).
+static void edge_multiplexer_redirect_edge(EdgeMultiplexer *m, Edge edge,
+                                           MLIR_ValueHandle *extra_args,
+                                           size_t n_extra_args_in) {
+    if (n_extra_args_in != m->n_extra_args) return;
+    MLIR_OpHandle term = MLIR_GetBlockTerminator(edge.from_block);
+    if (term == MLIR_INVALID_HANDLE) return;
+    MLIR_BlockHandle orig_succ = MLIR_GetOpSuccessor(term, edge.succ_idx);
+    size_t entry_idx = edge_multiplexer_entry_index(m, orig_succ);
+    if (entry_idx == SIZE_MAX) return;
+
+    size_t n_mux_args = MLIR_GetBlockNumArgs(m->mux_block);
+    size_t my_off     = m->block_arg_off[entry_idx];
+    size_t my_n_args  = MLIR_GetBlockNumArgs(m->entries[entry_idx]);
+    size_t extra_off  = n_mux_args - m->n_extra_args;
+
+    // Capture original successor operands before mutation.
+    size_t n_orig = MLIR_GetOpNumSuccessorOperands(term, edge.succ_idx);
+    MLIR_ValueHandle *orig = n_orig
+        ? arena_new_array(m->st->arena, MLIR_ValueHandle, n_orig) : NULL;
+    for (size_t i = 0; i < n_orig; ++i) {
+        orig[i] = MLIR_GetOpSuccessorOperand(term, edge.succ_idx, i);
+    }
+
+    // Build new operand list of length n_mux_args.
+    MLIR_ValueHandle *new_ops = arena_new_array(m->st->arena, MLIR_ValueHandle, n_mux_args);
+    for (size_t i = 0; i < n_mux_args; ++i) {
+        if (i >= my_off && i < my_off + my_n_args) {
+            // Original arg slot.
+            size_t local = i - my_off;
+            new_ops[i] = (local < n_orig) ? orig[local]
+                                          : get_undef_value(m->st, MLIR_GetValueType(MLIR_GetBlockArg(m->mux_block, i)));
+            continue;
+        }
+        if (m->discriminator_idx != SIZE_MAX && i == m->discriminator_idx) {
+            new_ops[i] = get_switch_value(m->st, (unsigned)entry_idx);
+            continue;
+        }
+        if (i >= extra_off) {
+            new_ops[i] = extra_args[i - extra_off];
+            continue;
+        }
+        // Other entry's slot or padding: undef.
+        new_ops[i] = get_undef_value(m->st, MLIR_GetValueType(MLIR_GetBlockArg(m->mux_block, i)));
+    }
+
+    // Apply.
+    MLIR_SetOpSuccessor(m->st->ctx, term, edge.succ_idx, m->mux_block);
+    MLIR_SetOpSuccessorOperands(m->st->ctx, term, edge.succ_idx, new_ops, n_mux_args);
+}
+
+// Emit a cf.switch in `in_block` that dispatches to the original
+// successors of the multiplexer (excluding any blocks in `excluded`).
+// The switch reads the discriminator block-arg (or, if no
+// discriminator, a freshly-built constant 0 that effectively forces
+// the default arm). `in_block` MUST be dominated by the multiplexer
+// block — typically it IS the multiplexer block, or the latch's exit
+// block in createSingleExitingLatch.
+static void edge_multiplexer_create_switch(EdgeMultiplexer *m,
+                                           MLIR_BlockHandle in_block,
+                                           MLIR_LocationHandle loc,
+                                           const MLIR_BlockHandle *excluded,
+                                           size_t n_excluded) {
+    // Decide which entries to dispatch.
+    MLIR_BlockHandle *case_dsts = arena_new_array(m->st->arena, MLIR_BlockHandle, m->n_entries);
+    MLIR_ValueHandle **case_args = arena_new_array(m->st->arena, MLIR_ValueHandle *, m->n_entries);
+    size_t *n_case_args = arena_new_array(m->st->arena, size_t, m->n_entries);
+    int32_t *case_values = arena_new_array(m->st->arena, int32_t, m->n_entries);
+    size_t n_pick = 0;
+    for (size_t i = 0; i < m->n_entries; ++i) {
+        bool skip = false;
+        for (size_t j = 0; j < n_excluded; ++j) {
+            if (m->entries[i] == excluded[j]) { skip = true; break; }
+        }
+        if (skip) continue;
+        size_t off = m->block_arg_off[i];
+        size_t na  = MLIR_GetBlockNumArgs(m->entries[i]);
+        MLIR_ValueHandle *args = na ? arena_new_array(m->st->arena, MLIR_ValueHandle, na) : NULL;
+        for (size_t k = 0; k < na; ++k) {
+            args[k] = MLIR_GetBlockArg(m->mux_block, off + k);
+        }
+        case_dsts[n_pick] = m->entries[i];
+        case_args[n_pick] = args;
+        n_case_args[n_pick] = na;
+        case_values[n_pick] = (int32_t)i;
+        n_pick++;
+    }
+
+    // Need at least one survivor.
+    if (n_pick == 0) return;
+
+    // Decide discriminator value.
+    MLIR_ValueHandle disc_v;
+    if (m->discriminator_idx != SIZE_MAX) {
+        disc_v = MLIR_GetBlockArg(m->mux_block, m->discriminator_idx);
+    } else {
+        disc_v = get_switch_value(m->st, 0);
+    }
+
+    // The LAST surviving entry becomes the default case.
+    MLIR_BlockHandle dflt_dst = case_dsts[n_pick - 1];
+    MLIR_ValueHandle *dflt_args = case_args[n_pick - 1];
+    size_t n_dflt = n_case_args[n_pick - 1];
+    n_pick -= 1;
+
+    create_cf_switch_in_block(m->st->ctx, m->st->arena, in_block, disc_v,
+                              dflt_dst, dflt_args, n_dflt,
+                              case_values, case_dsts, case_args, n_case_args,
+                              n_pick, loc);
+}
+
 
 // ============================================================================
 // TODO(get_switch_value):
