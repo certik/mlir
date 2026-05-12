@@ -542,6 +542,70 @@ static bool check_preconditions(MLIR_RegionHandle region) {
 //   - for each: run cycle-to-loop pass, then branch-to-if pass; push
 //     any new sub-regions returned.
 // ============================================================================
+// ============================================================================
+// Single-successor splice (CFGToSCF.cpp:955-967): if `region_entry` has
+// exactly one successor reached via cf.br, replace that successor's
+// block-arg uses with the cf.br's branch operands, splice the
+// successor's ops into `region_entry`, drop the cf.br, and erase the
+// (now empty, no-predecessors) successor block. Returns true if a
+// splice happened.
+// ============================================================================
+static bool try_splice_single_successor(MLIR_Context *ctx, Arena *arena,
+                                        MLIR_BlockHandle region_entry) {
+    MLIR_OpHandle term = MLIR_GetBlockTerminator(region_entry);
+    if (term == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetOpNumSuccessors(term) != 1) return false;
+    // Only handle the cf.br case; cf.cond_br with both successors equal
+    // is theoretically also single-edge but ports differently.
+    string nm = MLIR_GetOpName(term);
+    if (!string_eq_string(nm, str_lit("cf.br"))) return false;
+
+    MLIR_BlockHandle succ = MLIR_GetOpSuccessor(term, 0);
+    if (succ == MLIR_INVALID_HANDLE || succ == region_entry) return false;
+    // Algorithm prerequisite: the successor's only predecessor is us.
+    // Otherwise splicing the successor's ops up would change semantics.
+    if (MLIR_GetBlockNumPredecessors(succ) != 1) return false;
+
+    size_t n_args = MLIR_GetBlockNumArgs(succ);
+    size_t n_branch_ops = MLIR_GetOpNumSuccessorOperands(term, 0);
+    if (n_args != n_branch_ops) return false;
+
+    // Snapshot branch operands before mutation (RAUW will rewrite the
+    // op's operand list otherwise).
+    MLIR_ValueHandle *new_vals = n_args
+        ? arena_new_array(arena, MLIR_ValueHandle, n_args) : NULL;
+    for (size_t i = 0; i < n_args; ++i) {
+        new_vals[i] = MLIR_GetOpSuccessorOperand(term, 0, i);
+    }
+    for (size_t i = 0; i < n_args; ++i) {
+        MLIR_ValueHandle old_arg = MLIR_GetBlockArg(succ, i);
+        MLIR_ReplaceAllUsesOfValue(ctx, old_arg, new_vals[i]);
+    }
+
+    MLIR_EraseOp(ctx, term);
+    MLIR_SpliceBlockOps(ctx, region_entry, succ);
+    // Successor is now empty and has no predecessors (we just removed
+    // the only one). Erase the args first (no remaining uses) then the
+    // block itself.
+    if (n_args) {
+        MLIR_EraseBlockArguments(ctx, succ, 0, n_args);
+    }
+    MLIR_EraseBlock(ctx, succ);
+    return true;
+}
+
+// Apply single-successor splicing repeatedly until the region entry's
+// terminator has 0 or >1 successors (or is not cf.br). Returns true if
+// any splice happened.
+static bool fold_linear_chain(MLIR_Context *ctx, Arena *arena,
+                              MLIR_BlockHandle region_entry) {
+    bool any = false;
+    while (try_splice_single_successor(ctx, arena, region_entry)) {
+        any = true;
+    }
+    return any;
+}
+
 bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module) {
     (void)ctx;
     if (module == MLIR_INVALID_HANDLE) return false;
@@ -573,6 +637,18 @@ bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module) {
             if (!region_has_cf_branch(body)) continue;
             if (run_partial) {
                 create_single_exit_blocks_for_return_like(ctx, scratch, body);
+                MLIR_BlockHandle entry = MLIR_GetRegionBlock(body, 0);
+                fold_linear_chain(ctx, scratch, entry);
+                // Re-check: if linear folding plus return-like combining
+                // produced a single-successor-or-less terminator (i.e.
+                // function is now linear all the way through), the lift
+                // is complete for this body — no cf.cond_br/switch left.
+                MLIR_OpHandle entry_term = MLIR_GetBlockTerminator(entry);
+                if (entry_term != MLIR_INVALID_HANDLE &&
+                    MLIR_GetOpNumSuccessors(entry_term) == 0 &&
+                    !region_has_cf_branch(body)) {
+                    continue;
+                }
             }
             // Cycle/branch transforms are not yet ported.
             any_unsupported = true;
