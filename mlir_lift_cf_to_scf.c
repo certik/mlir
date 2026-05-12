@@ -2417,11 +2417,13 @@ static BranchXformResult transform_to_structured_cf_branches(
         return res;
     }
 
-    // Multi-successor. Only cf.cond_br is supported for now (cf.switch
-    // would need arith.index_castui + scf.index_switch; left as TODO).
+    // Multi-successor. cf.cond_br -> scf.if; cf.switch -> scf.index_switch.
+    // Any other multi-successor terminator is left in place and we recurse
+    // into the children.
     string term_name = MLIR_GetOpName(term);
     bool is_cond_br = string_eq_string(term_name, str_lit("cf.cond_br"));
-    if (!is_cond_br) {
+    bool is_switch  = string_eq_string(term_name, str_lit("cf.switch"));
+    if (!is_cond_br && !is_switch) {
         // Not lifted; caller's worklist should still try children.
         res.made_progress = false;
         MLIR_BlockHandle *succs = arena_new_array(arena, MLIR_BlockHandle, num_succ);
@@ -2794,7 +2796,12 @@ static BranchXformResult transform_to_structured_cf_branches(
         new_sub[n_new++] = entry_b;
     }
 
-    // Build the structured branch op (scf.if for 2-successor cond_br).
+    // Build the structured branch op:
+    //   cf.cond_br -> scf.if  (regions = [then, else])
+    //   cf.switch  -> scf.index_switch  (regions = [case0, ..., caseN-1, default];
+    //                                     CFGToSCF reorders so the default
+    //                                     (= our regions[0]) goes LAST and
+    //                                     case_values map onto cases attr).
     size_t n_cont_args = MLIR_GetBlockNumArgs(continuation);
     MLIR_TypeHandle *result_types = n_cont_args
         ? arena_new_array(arena, MLIR_TypeHandle, n_cont_args) : NULL;
@@ -2803,10 +2810,6 @@ static BranchXformResult transform_to_structured_cf_branches(
 
     MLIR_LocationHandle term_loc = MLIR_GetOpLocation(term);
 
-    // cf.cond_br operand 0 is the i1 condition; cf.cond_br has 2 succs:
-    // successor 0 is then, successor 1 is else.
-    // scf.if wants (cond, then_region, else_region) and result types.
-    MLIR_ValueHandle cond_v = MLIR_GetOpOperand(term, 0);
     MLIR_ValueHandle *if_results = n_cont_args
         ? arena_new_array(arena, MLIR_ValueHandle, n_cont_args) : NULL;
     for (size_t i = 0; i < n_cont_args; ++i) {
@@ -2814,14 +2817,84 @@ static BranchXformResult transform_to_structured_cf_branches(
             st->ctx, MLIR_INVALID_HANDLE, (uint32_t)i, result_types[i],
             fresh_ssa_name(arena), term_loc);
     }
-    MLIR_OpHandle if_op = MLIR_CreateOp(
-        st->ctx, OP_TYPE_SCF_IF, str_lit("scf.if"),
-        NULL, 0, result_types, n_cont_args, if_results, n_cont_args,
-        &cond_v, 1, regions, 2,
-        term_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
-    MLIR_AppendBlockOp(st->ctx, region_entry, if_op);
 
-    // Erase the original cf.cond_br.
+    MLIR_OpHandle if_op;
+    if (is_cond_br) {
+        // cf.cond_br operand 0 is the i1 condition; succs are [then, else].
+        MLIR_ValueHandle cond_v = MLIR_GetOpOperand(term, 0);
+        if_op = MLIR_CreateOp(
+            st->ctx, OP_TYPE_SCF_IF, str_lit("scf.if"),
+            NULL, 0, result_types, n_cont_args, if_results, n_cont_args,
+            &cond_v, 1, regions, 2,
+            term_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_AppendBlockOp(st->ctx, region_entry, if_op);
+    } else {
+        // cf.switch: operand 0 is the i32 flag; succs are [default, case0..caseN-1].
+        // case_values attr (DenseI32Array) gives the case values.
+        // scf.index_switch wants the flag as `index` (we insert arith.index_castui),
+        // regions = [case0..caseN-1, default], and a `cases` DenseI64Array attr.
+        MLIR_ValueHandle flag = MLIR_GetOpOperand(term, 0);
+
+        // Parse case_values attribute: "array<i32: V0, V1, ...>".
+        size_t n_cases = num_succ - 1;
+        int64_t *cases_i64 = n_cases
+            ? arena_new_array(arena, int64_t, n_cases) : NULL;
+        bool parsed = false;
+        MLIR_AttributeHandle cva = MLIR_GetOpAttributeByName(term, "case_values");
+        if (cva != MLIR_INVALID_HANDLE) {
+            string s = MLIR_GetAttributeAsString(st->ctx, cva);
+            size_t p = 0;
+            while (p < s.size && s.str[p] != ':') p++;
+            if (p < s.size) p++;
+            size_t n_parsed = 0;
+            while (p < s.size && n_parsed < n_cases) {
+                while (p < s.size && (s.str[p] == ' ' || s.str[p] == ',')) p++;
+                if (p >= s.size || s.str[p] == '>') break;
+                int64_t sign = 1;
+                if (s.str[p] == '-') { sign = -1; p++; }
+                int64_t v = 0;
+                while (p < s.size && s.str[p] >= '0' && s.str[p] <= '9') {
+                    v = v * 10 + (s.str[p] - '0');
+                    p++;
+                }
+                cases_i64[n_parsed++] = sign * v;
+            }
+            parsed = (n_parsed == n_cases);
+        }
+        if (!parsed) {
+            // Couldn't parse - bail out. Should not happen.
+            res.ok = false;
+            return res;
+        }
+
+        // Emit arith.index_castui : i32 -> index in region_entry.
+        MLIR_TypeHandle idx_ty = MLIR_CreateTypeIndex(st->ctx);
+        MLIR_ValueHandle idx_v = MLIR_CreateValueOpResult(
+            st->ctx, MLIR_INVALID_HANDLE, 0, idx_ty,
+            fresh_ssa_name(arena), term_loc);
+        MLIR_OpHandle cast_op = MLIR_CreateOp(
+            st->ctx, OP_TYPE_ARITH_INDEX_CAST, str_lit("arith.index_castui"),
+            NULL, 0, &idx_ty, 1, &idx_v, 1, &flag, 1, NULL, 0,
+            term_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_AppendBlockOp(st->ctx, region_entry, cast_op);
+
+        // scf.index_switch region order: regions[0] = default,
+        // regions[1..N] = case 0..N-1 (matches cf.switch's successor
+        // order, where succs[0] = default, succs[1..N] = cases).
+        MLIR_AttributeHandle cases_attr = MLIR_CreateAttributeDenseI64Array(
+            st->ctx, str_lit("cases"), cases_i64, n_cases);
+        MLIR_AttributeHandle *attrs = arena_new_array(arena, MLIR_AttributeHandle, 1);
+        attrs[0] = cases_attr;
+
+        if_op = MLIR_CreateOp(
+            st->ctx, OP_TYPE_SCF_INDEX_SWITCH, str_lit("scf.index_switch"),
+            attrs, 1, result_types, n_cont_args, if_results, n_cont_args,
+            &idx_v, 1, regions, num_succ,
+            term_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_AppendBlockOp(st->ctx, region_entry, if_op);
+    }
+
+    // Erase the original cf.cond_br / cf.switch.
     MLIR_EraseOp(st->ctx, term);
 
     // Emit scf.yield in each empty block. We do this for both
@@ -2836,8 +2909,24 @@ static BranchXformResult transform_to_structured_cf_branches(
     // scf.yield carrying their successor-operands. We use the pred
     // snapshot taken before MoveBlockToRegionEnd dragged these tails
     // out of `continuation`'s region.
+    //
+    // Note: between the snapshot and here, createSingleExitBranchRegion
+    // may have redirected some edges to a single_exit_block (those
+    // become unconditional cf.br -> single_exit, which itself gets a
+    // scf.yield via empty_blocks). For those entries the snapshot's
+    // (op, succ_idx) no longer points to `continuation`, so we skip
+    // them — the scf.yield is already emitted in single_exit.
     for (size_t i = 0; i < n_preds; ++i) {
         MLIR_OpHandle u = preds[i].op;
+        if (MLIR_GetOpSuccessor(u, preds[i].succ_idx) != continuation)
+            continue;
+        // The terminator must be unconditional (cf.br) at this point —
+        // any conditional cf.cond_br with an edge to continuation got
+        // redirected through single_exit (or, if it was the sole edge,
+        // would have an edge to continuation but the other arm would
+        // still be inside the branch region, which violates
+        // single-entry single-exit; createSingleExitBranchRegion only
+        // permits one direct cf.br to continuation per branch region).
         size_t n_so = MLIR_GetOpNumSuccessorOperands(u, preds[i].succ_idx);
         MLIR_ValueHandle *vals = n_so
             ? arena_new_array(arena, MLIR_ValueHandle, n_so) : NULL;

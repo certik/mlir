@@ -21,27 +21,14 @@ expected_stdout = "0\n1\n1\n1\n"
 [[test]]
 name = "return"
 expected_stdout = "3\n-1\n"
-# wasm_native_skip: early `return` inside a loop body. The native cf->scf
-# lifter (mlir_lift_cf_to_scf.c) needs an EdgeMultiplexer port to funnel
-# multiple loop-exit edges (return / fallthrough) through one synthetic
-# exit before the simple-while pattern can fire. Passes under
-# TINYC_LIFT_USE_NATIVE=1 because that path falls back to upstream's
-# CFGToSCF pass.
-wasm_native_skip = true
 
 [[test]]
 name = "break_continue"
 expected_stdout = "17\n7\n"
-# wasm_native_skip: break/continue inside a while loop. Needs
-# EdgeMultiplexer in the native cf->scf lifter (see `return`).
-wasm_native_skip = true
 
 [[test]]
 name = "for"
 expected_stdout = "55\n10\n"
-# wasm_native_skip: `for` loop with `break`. Needs EdgeMultiplexer in
-# the native cf->scf lifter (see `return`).
-wasm_native_skip = true
 
 [[test]]
 name = "float"
@@ -138,12 +125,6 @@ expected_stdout = "10\n30\n40\n50\n4\n150\n"
 [[test]]
 name = "switch_case"
 expected_stdout = "100\n200\n200\n301\n0\n999\n22\n"
-# wasm_native_skip: switch/case lowers to a cascade of cf.cond_br with a
-# pass-through tail block reused across cases. The native cf->scf lifter
-# would need either a tail-duplicator (currently committed but disabled —
-# see mlir_lift_cf_to_scf.c::try_duplicate_passthrough_block) or proper
-# scf.index_switch support. Passes under TINYC_LIFT_USE_NATIVE=1.
-wasm_native_skip = true
 
 [[test]]
 name = "fnptr_basic"
@@ -442,10 +423,6 @@ expected_stdout = "42\n7\n"
 [[test]]
 name = "do_while"
 expected_stdout = "10\n101\n7\n18\n"
-# wasm_native_skip: do-while with break/continue. The native cf->scf
-# lifter handles bare do-while (do_while_macro passes) but break/continue
-# inside the body needs EdgeMultiplexer (see `return`).
-wasm_native_skip = true
 
 [[test]]
 name = "do_while_macro"
@@ -685,9 +662,6 @@ expected_stdout = """\
 sum=476
 found_at=9
 """
-# wasm_native_skip: loop with early-exit pattern. Needs EdgeMultiplexer
-# in the native cf->scf lifter (see `return`).
-wasm_native_skip = true
 
 [[test]]
 name = "ptr_postfix_stride"
@@ -714,10 +688,6 @@ expected_stdout = """\
 [[test]]
 name = "re2c_keyword_longest_match"
 expected_stdout = "OK\n"
-# wasm_native_skip: re2c-style state machine — many cf.cond_br with
-# shared tail blocks and early returns. Needs EdgeMultiplexer +
-# tail-duplicator in the native cf->scf lifter (see `return`).
-wasm_native_skip = true
 
 [[test]]
 name = "float_literal_0_75"
