@@ -4,10 +4,34 @@
 // Graphs"). Drives the lift entirely through mlir_api.h so the same
 // implementation runs against both backends.
 //
-// Status: scaffolding only. The transformation entry currently returns
-// false. See the TODO comments inside mlir_lift_cf_to_scf.c for the
-// remaining work to land the three transforms (cycle lifting, branch
-// lifting, return-like exit combining).
+// Status: complete. Mirrors the wasm-flavored variant
+// (CFGToSCFForWasm in mlir_api_impl_upstream.cpp): i32 switch
+// discriminators, ub.poison/llvm.mlir.undef for undef values,
+// llvm.return when an unreachable terminator is needed inside an
+// llvm.func. Test coverage: test_tinyc_native_wasm passes 150/150 on
+// linux/macos/windows in CI.
+//
+// Known limitations:
+//   - Only `func.func` and `llvm.func` are recognised as carriers of
+//     a CFG body. Other dialect function ops (gpu.func, spirv.func,
+//     etc.) are silently skipped.
+//   - Only walks the module's top-level region. Nested module-like
+//     ops (e.g. builtin.module nested inside another op's region) are
+//     not visited.
+//   - When every arm of a multi-successor terminator returns with a
+//     *different* return-like op kind (e.g. one arm `func.return`,
+//     another `llvm.return`) the algorithm provably cannot lift it
+//     and leaves the cf.* terminator in place. Downstream
+//     (wasmssa-lower) rejects this and reports a hard error.
+//   - The M9 driver caps the per-region worklist at 4096 iterations
+//     as a runaway guard; bodies that would need more are rare in
+//     practice but would silently bail out with leftover cf.* ops.
+//   - No predecessor cache: MLIR_GetBlockNumPredecessors /
+//     MLIR_GetBlockPredecessor are O(R) per call. Cycle-edge and
+//     reduce-loop analyses query them repeatedly, so the algorithm
+//     is O(R^2) in the number of blocks per region. Fine in practice
+//     (functions stay small) but a single shared region-scoped cache
+//     would make this O(R).
 
 #ifndef MLIR_LIFT_CF_TO_SCF_H
 #define MLIR_LIFT_CF_TO_SCF_H

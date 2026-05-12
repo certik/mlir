@@ -8,15 +8,24 @@
 // Reconstructability of Control Flow from Demand Dependence Graphs",
 // ACM TACO 11(4):66. https://doi.org/10.1145/2693261
 //
-// Status: scaffolding. The top-level entry returns false; see TODO
-// markers below for each of the three transforms still to land:
-//   1. createSingleExitBlocksForReturnLike
-//   2. transformCyclesToSCFLoops
-//   3. transformToStructuredCFBranches
-// plus the supporting predecessor cache, dominance analysis (iterative
-// data-flow on the cf graph), and Tarjan SCC iteration. Each transform
-// is a faithful port of the corresponding static function in
-// CFGToSCF.cpp, modulo data-structure adaptations to plain C.
+// Layout (~3260 LOC). The big pieces, in order:
+//   - Edge / EdgeMultiplexer scaffolding (M3-M4).
+//   - cf.* / scf.* op constructor helpers.
+//   - get_switch_value / get_undef_value (cached i32-const / typed
+//     zero hoisted to the function's entry block).
+//   - Tarjan SCC analysis + cycle edge classification.
+//   - Cooper-Harvey-Kennedy iterative dominance.
+//   - create_single_exit_blocks_for_return_like_into  (M5).
+//   - transform_to_reduce_loop  (LCSSA-like SSA escape fixup, M6).
+//   - transform_cycles_to_scf_loops  (M7: SCC -> scf.while).
+//   - transform_to_structured_cf_branches  (M8: cf.cond_br -> scf.if,
+//     cf.switch -> scf.index_switch, + inline continuation synthesis
+//     for nested arms that all terminate cleanly).
+//   - transform_cfg_to_scf_region (M9 worklist driver).
+//   - walk_and_transform_regions (post-order walk over every op-region).
+//   - erase_unreachable_blocks.
+//
+// See `mlir_lift_cf_to_scf.h` for the documented limitations.
 
 #include "mlir_lift_cf_to_scf.h"
 
@@ -367,159 +376,11 @@ static void edge_multiplexer_create_switch(EdgeMultiplexer *m,
 }
 
 
-// ============================================================================
-// TODO(get_switch_value):
-// ----------------------------------------------------------------------------
-// Construct (or return cached) `arith.constant <i32 value> : i32` op,
-// inserted at the start of the entry block of the function under
-// transformation. Returns the SSA value of its result.
-//
-// Mirrors `interface.getCFGSwitchValue` from CFGToSCFForWasm, which uses
-// i32 (not `index`) so the wasm backend's `arith.index_cast` handling is
-// not required when the cf.switch / scf.index_switch dispatchers fire.
-// ============================================================================
+// Forward declarations for the cached value providers + lift-state init.
+// Implementations live near the bottom of the file alongside the cache
+// invalidation policy.
 static MLIR_ValueHandle get_switch_value(LiftState *st, unsigned v);
-
-// ============================================================================
-// TODO(get_undef_value):
-// ----------------------------------------------------------------------------
-// Construct (or return cached) an `ub.poison : T` op at the start of the
-// function entry. For `!llvm.ptr` and similar non-ub-compatible types
-// the upstream wasm flavor uses `llvm.mlir.zero` / `llvm.mlir.undef`;
-// pick the variant matching the function dialect (llvm.* vs builtin).
-// ============================================================================
 static MLIR_ValueHandle get_undef_value(LiftState *st, MLIR_TypeHandle ty);
-
-// ============================================================================
-// TODO(create_cf_switch / create_cond_branch / create_unconditional_branch):
-// ----------------------------------------------------------------------------
-// Emit the cf.* terminator ops via MLIR_CreateOpWithSuccessors. The
-// algorithm builds cf.switch / cf.cond_br / cf.br when it needs to
-// rewire flow inside the lifted body (multiplexer dispatch, single
-// destination, latch back-edge). Operand-segment layout for cf.switch
-// matches upstream: [flag, default_args..., case_args[0]..., ...]. The
-// `case_operand_segments` attribute lists per-case operand counts.
-// ============================================================================
-// static MLIR_OpHandle create_cf_switch(...);
-// static MLIR_OpHandle create_cf_cond_br(...);
-// static MLIR_OpHandle create_cf_br(...);
-
-// ============================================================================
-// TODO(create_scf_if / create_scf_index_switch / create_scf_while):
-// ----------------------------------------------------------------------------
-// Emit the structured op replacing the cf terminator in the region
-// entry. Layout follows upstream:
-//   scf.if           - one i1 condition operand, two regions, results
-//                      forwarded from each region's scf.yield.
-//   scf.index_switch - one index operand (we feed an arith.index_castui
-//                      of an i32 flag), one region per case + default.
-//   scf.while        - do-while: body+condition; we synthesize a single
-//                      `scf.condition %cond [%iter_args...]` in the
-//                      latch and an scf.yield in the body.
-// All three need correct result-type vectors (matching the merged
-// continuation's block-argument types per upstream `createStructured*`).
-// ============================================================================
-// static MLIR_OpHandle create_scf_if(...);
-// static MLIR_OpHandle create_scf_index_switch(...);
-// static MLIR_OpHandle create_scf_while(...);
-// static MLIR_OpHandle create_scf_yield(...);
-
-// ============================================================================
-// TODO(predecessor_cache):
-// ----------------------------------------------------------------------------
-// Maintain a region-scoped cache mapping block -> list<Edge> of incoming
-// edges. MLIR_GetBlockNumPredecessors does an O(R) scan; caching is a
-// significant constant-factor win when the algorithm queries the same
-// block repeatedly (e.g. when collecting cycle entry edges, or when
-// transformToReduceLoop walks all predecessors of the latch). Invalidate
-// whenever we mutate terminators (setSuccessor, redirectEdge,
-// createConditionalBranch, etc.).
-// ============================================================================
-
-// ============================================================================
-// TODO(dominance):
-// ----------------------------------------------------------------------------
-// Iterative data-flow Lengauer-Tarjan is overkill; the Cooper, Harvey,
-// Kennedy (2006) "A Simple, Fast Dominance Algorithm" suffices and is
-// ~80 LOC in C. State: per-region postorder, idom array, dominates(a,b)
-// answered by walking idom chain from b until either a is hit or root.
-// Used in two places:
-//   1. transformToStructuredCFBranches: enumerating dominator-tree
-//      successors of each branch entry (depth-first walk of the dom
-//      tree subtree rooted at the entry) — see CFGToSCF.cpp:984-990.
-//   2. transformToReduceLoop: `dominanceInfo.dominates(loopBlock, X)`
-//      queries — CFGToSCF.cpp:706-714 / 743-755.
-// Both are read-only; we recompute after invalidation.
-// ============================================================================
-
-// ============================================================================
-// TODO(scc):
-// ----------------------------------------------------------------------------
-// Tarjan's SCC iteration over the region's CFG, returning SCCs in
-// reverse-topological order. We only act on SCCs that "have a cycle"
-// (size > 1, or size == 1 with self-loop). Used by
-// transformCyclesToSCFLoops (CFGToSCF.cpp:805-815). ~100 LOC in C.
-// ============================================================================
-
-// ============================================================================
-// TODO(check_preconditions):
-// ----------------------------------------------------------------------------
-// Port checkTransformationPreconditions (CFGToSCF.cpp:1237-1297):
-//   * Reject unreachable blocks (block has no preds and is not entry).
-//   * Every terminator with successors must be a known cf.* op (we know
-//     the universe: cf.br, cf.cond_br, cf.switch).
-//   * Reject ops with producedOperandCount > 0 (none of the cf.* ops we
-//     accept produce successor operands, so this passes trivially).
-//   * Reject multi-successor terminators we cannot convert (cf.* only,
-//     we always can).
-// ============================================================================
-
-// ============================================================================
-// TODO(transform_cycles_to_scf_loops):
-// ----------------------------------------------------------------------------
-// Port transformCyclesToSCFLoops (CFGToSCF.cpp:800-893). Steps per SCC:
-//   1. calculateCycleEdges (entry, exit, back)
-//   2. If multiple entry edges, createSingleEntryBlock multiplexing
-//      both entry and back edges; new mux block becomes the header.
-//   3. createSingleExitingLatch: multiplex back+exit edges into a latch
-//      block; conditional branch on shouldRepeat to header vs an exit
-//      block that dispatches to original exit destinations.
-//   4. transformToReduceLoop: ensure no SSA escape from loop body, and
-//      that exit block args == loop header args (modulo extras).
-//   5. Build a fresh `newLoopParentBlock` before the header; move
-//      header+body+latch into a fresh Region; emit scf.while with that
-//      region as the body; splice in the exit block's ops after the
-//      scf.while; replace exit block uses with scf.while results.
-// Push each emitted scf.while body's header onto the work list so the
-// caller re-runs the lift inside it.
-// ============================================================================
-
-// ============================================================================
-// TODO(transform_to_structured_cf_branches):
-// ----------------------------------------------------------------------------
-// Port transformToStructuredCFBranches (CFGToSCF.cpp:947-1216). Steps:
-//   1. If region entry has 0 successors -> nothing to do.
-//   2. If region entry has 1 successor -> splice successor into entry.
-//   3. Otherwise: split successors into "branch regions" via dominance,
-//      classify against case 1/2/3 (see header comment at top of
-//      CFGToSCF.cpp:946-1053), maybe create a continuation mux,
-//      createSingleExitBranchRegion per branch region, then build
-//      scf.if (if 2-way) or scf.index_switch (n-way) op replacing the
-//      cf terminator; splice continuation into entry.
-// Push each new sub-region onto the work list.
-// ============================================================================
-
-// ============================================================================
-// TODO(create_single_exit_blocks_for_return_like):
-// ----------------------------------------------------------------------------
-// Port createSingleExitBlocksForReturnLike + ReturnLikeExitCombiner
-// (CFGToSCF.cpp:417-466, 1221-1234). Two-pass:
-//   1. Enumerate every block with no successors; classify its terminator
-//      kind (func.return / llvm.return / cf.assert / etc.).
-//   2. For each kind, create one shared exit block hosting that
-//      terminator; redirect each occurrence to branch (cf.br) to the
-//      shared block, passing its operands through block arguments.
-// ============================================================================
 
 static bool string_eq(string a, const char *b);
 static bool string_eq_string(string a, string b);
@@ -2872,43 +2733,10 @@ static BranchXformResult transform_to_structured_cf_branches(
 }
 
 // ============================================================================
-// Lift the simplest cf-style structured while loop into scf.while.
-//
-// Pattern recognized (after return-like combining + linear folding):
-//
-//   ^entry: ...
-//     cf.br ^header(init...)
-//   ^header(iter...):                  (preds = {entry, body})
-//     ...
-//     cf.cond_br %cond, ^body(then...), ^exit(else...)
-//   ^body(after...):                   (sole pred = ^header)
-//     ...
-//     cf.br ^header(yield...)
-//   ^exit(res...):                     (sole pred = ^header)
-//     ...
-//
-// Constraints (intentionally narrow for the first cut, matching the
-// shape tinyc emits where everything flows through alloca/load):
-//   - entry's terminator is cf.br with single successor = ^header.
-//   - ^header's terminator is cf.cond_br with successors {^body, ^exit},
-//     ^body and ^exit distinct, neither equal to ^header or ^entry.
-//   - ^body's sole predecessor is ^header; ^body's terminator is cf.br
-//     to ^header (the back-edge).
-//   - ^exit's sole predecessor is ^header.
-//   - ^header has exactly two predecessors (entry + body).
-//   - All operand list arities (init, iter, then, after, yield) match
-//     the corresponding block arg counts; ^body's args (R) and ^exit's
-//     args (R) must have matching types (because scf.condition's
-//     payload is shared between scf.while results and after-block args).
-//
-// Lifting:
-//   - Move ^header into a fresh `before` region; replace its cf.cond_br
-//     with scf.condition(%cond, exit_args...).
-//   - Move ^body into a fresh `after` region; replace its cf.br back-edge
-//     with scf.yield(yield_args...).
-//   - Build scf.while(init...) -> (R...) with the two regions, append it
-//     to ^entry, RAUW ^exit's block args with scf.while's results, splice
-//     ^exit's ops into ^entry, erase the entry's old cf.br and ^exit.
+// scf.condition op constructor used by M7 (latch) and the loop builder.
+// scf.condition takes (cond: i1, payload...) and lives in scf.while's
+// before-region; the payload becomes both scf.while's results and the
+// after-region's block args.
 // ============================================================================
 
 static MLIR_OpHandle create_scf_condition(MLIR_Context *ctx, Arena *arena,
@@ -2933,11 +2761,12 @@ static MLIR_OpHandle create_scf_condition(MLIR_Context *ctx, Arena *arena,
 // transform_cfg_to_scf_region  (CFGToSCF.cpp:1300-1376).
 //
 // Drives the worklist that turns the cf graph of a single region into
-// structured scf control flow. The worklist holds region-entry blocks
-// to process. For each:
-//   1. Run M7 (transform_cycles_to_scf_loops) — turns SCCs into scf.while.
-//   2. Run M8 (transform_to_structured_cf_branches) — turns cf.cond_br
-//      into scf.if (cf.switch not yet handled — falls through).
+// ============================================================================
+// M9 driver: top-level worklist over the function body. Run M5
+// (single-exit-blocks-for-return-like) once, then for each region entry
+// run M7 (cycles -> scf.while) and M8 (cf.cond_br -> scf.if,
+// cf.switch -> scf.index_switch). Newly-created sub-regions get pushed
+// onto the worklist so the algorithm reaches a fixed point.
 // ============================================================================
 static bool transform_cfg_to_scf_region(LiftState *st, Combiner *combiner,
                                         MLIR_RegionHandle region) {
