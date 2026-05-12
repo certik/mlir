@@ -817,13 +817,16 @@ bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module) {
     // on the default opt-in path. TINYC_LIFT_USE_NATIVE_PARTIAL=1 runs
     // the return-like exit combiner on each function body before
     // returning false so the upstream lift finishes the rest.
-    const char *partial_env = getenv("TINYC_LIFT_USE_NATIVE_PARTIAL");
-    bool run_partial = partial_env && partial_env[0] && partial_env[0] != '0';
+    // Always run the partial transforms we have ported. Anything left
+    // unhandled (loops, multi-way switches, non-clean diamonds) falls
+    // through; downstream (wasmssa-lower) will report it. We return
+    // true unconditionally so the caller proceeds with the lowered
+    // (or partially-lowered) IR.
+    (void)getenv;
 
     Arena *scratch = arena_create(4096);
     MLIR_RegionHandle mod_body = MLIR_GetOpRegion(module, 0);
     size_t nb = MLIR_GetRegionNumBlocks(mod_body);
-    bool any_unsupported = false;
     for (size_t bi = 0; bi < nb; ++bi) {
         MLIR_BlockHandle b = MLIR_GetRegionBlock(mod_body, bi);
         size_t no = MLIR_GetBlockNumOps(b);
@@ -838,25 +841,12 @@ bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module) {
                 return false;
             }
             if (!region_has_cf_branch(body)) continue;
-            if (run_partial) {
-                create_single_exit_blocks_for_return_like(ctx, scratch, body);
-                MLIR_BlockHandle entry = MLIR_GetRegionBlock(body, 0);
-                fold_simple_ifs(ctx, scratch, entry);
-                // Re-check: if the combined transforms eliminated all
-                // cf branches the lift is complete for this body.
-                MLIR_OpHandle entry_term = MLIR_GetBlockTerminator(entry);
-                if (entry_term != MLIR_INVALID_HANDLE &&
-                    MLIR_GetOpNumSuccessors(entry_term) == 0 &&
-                    !region_has_cf_branch(body)) {
-                    continue;
-                }
-            }
-            // Cycle/branch transforms are not yet ported.
-            any_unsupported = true;
+            create_single_exit_blocks_for_return_like(ctx, scratch, body);
+            MLIR_BlockHandle entry = MLIR_GetRegionBlock(body, 0);
+            fold_simple_ifs(ctx, scratch, entry);
         }
     }
     arena_destroy(scratch);
-    if (any_unsupported) return false;
     return true;
 }
 

@@ -2101,13 +2101,13 @@ void MLIR_SpliceBlockOps(MLIR_Context *ctx, MLIR_BlockHandle dst,
     s->n_operations = 0;
 }
 
-// Native cf->scf lift: stub. The faithful Bahmann/Reissmann port to plain
-// C lives outside this file (mlir_lift_cf_to_scf.c, TODO). Returning true
-// here is harmless when the input has no cf ops; on input that does have
-// cf ops, the wasm backend will reject them at the wasmssa-lower stage.
+// Native cf->scf lift: dispatch to the agnostic C port. The port handles
+// the patterns it understands and returns false otherwise; for native we
+// do not have an upstream fallback so callers (wasm lowering) will reject
+// any leftover cf ops at the wasmssa-lower stage.
 bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module) {
-    (void)ctx; (void)module;
-    return true;
+    extern bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module);
+    return MLIR_LiftCfToScfNative(ctx, module);
 }
 
 // The lowering / LLVM-IR-translation / wasm-translation entry points

@@ -1738,16 +1738,13 @@ extern "C" bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module_h) {
         (void)mlir::eraseUnreachableBlocks(rewriter, module->getRegions());
     }
     // Opt-in path for the agnostic C port. When TINYC_LIFT_USE_NATIVE is
-    // set, try the native port first; fall back to upstream's
-    // liftLLVMFuncCFGToSCF on any unhandled case (current default while
-    // the port is incremental). This lets us exercise the C port through
-    // the upstream binary without losing test coverage.
+    // set, run the native port first to normalize / lift what it can,
+    // then let upstream's liftLLVMFuncCFGToSCF finish the remainder.
+    // The native port always returns true (best effort); it leaves the
+    // IR in a valid state that upstream can complete.
     const char *opt_in = std::getenv("TINYC_LIFT_USE_NATIVE");
     if (opt_in && opt_in[0] && opt_in[0] != '0') {
-        if (MLIR_LiftCfToScfNative(ctx, module_h)) {
-            return true;
-        }
-        // Fall through to the upstream algorithm on partial-port misses.
+        MLIR_LiftCfToScfNative(ctx, module_h);
     }
     liftLLVMFuncCFGToSCF(module);
     return true;
