@@ -82,14 +82,18 @@ typedef struct {
     Arena            *arena;
     MLIR_OpHandle     fn_op;        // func.func or llvm.func being processed
     MLIR_BlockHandle  entry_block;  // first block of the region under lift
+    MLIR_TypeHandle   i32_ty;       // cached i32 type
+    MLIR_LocationHandle unk_loc;    // cached unknown location
 
     // Cached arith.constant of i32 for switch flag values.
     MLIR_ValueHandle *switch_value_cache;
     size_t            switch_value_cache_n;
+    size_t            switch_value_cache_cap;
 
-    // Cached ub.poison (or llvm.mlir.undef) per type.
+    // Cached llvm.mlir.undef per type.
     TypedValueEntry  *undef_cache;
     size_t            undef_cache_n;
+    size_t            undef_cache_cap;
 } LiftState;
 
 // ============================================================================
@@ -2011,18 +2015,177 @@ bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module) {
 }
 
 // ---------------------------------------------------------------------------
-// Placeholder definitions so the TUs build even before the algorithm
-// lands. Each aborts loudly if invoked from the stub entry (which it
-// can't, since the entry returns false before touching anything).
+// LiftState init + cached constant/undef value providers.
 // ---------------------------------------------------------------------------
-static MLIR_ValueHandle get_switch_value(LiftState *st, unsigned v) {
-    (void)st; (void)v;
-    fprintf(stderr, "mlir_lift_cf_to_scf: get_switch_value not implemented\n");
-    return MLIR_INVALID_HANDLE;
+static void lift_state_init(LiftState *st, MLIR_Context *ctx, Arena *arena,
+                            MLIR_OpHandle fn_op, MLIR_BlockHandle entry_block) {
+    memset(st, 0, sizeof(*st));
+    st->ctx = ctx;
+    st->arena = arena;
+    st->fn_op = fn_op;
+    st->entry_block = entry_block;
+    st->i32_ty = MLIR_CreateTypeInteger(ctx, 32, true);
+    st->unk_loc = MLIR_INVALID_HANDLE;
+    if (MLIR_GetBlockNumOps(entry_block) > 0) {
+        st->unk_loc = MLIR_GetOpLocation(MLIR_GetBlockOp(entry_block, 0));
+    }
 }
 
+// Emit a fresh `arith.constant <v> : i32` op inserted at the BEGINNING of
+// the function entry block. Used to lazily build the switchValueCache.
+// Mirrors `CFGToSCFForWasm::getCFGSwitchValue`.
+static MLIR_ValueHandle get_switch_value(LiftState *st, unsigned v) {
+    if (v < st->switch_value_cache_n) {
+        MLIR_ValueHandle cached = st->switch_value_cache[v];
+        if (cached != MLIR_INVALID_HANDLE) return cached;
+    }
+    // Grow cache if needed.
+    if (v >= st->switch_value_cache_cap) {
+        size_t new_cap = st->switch_value_cache_cap ? st->switch_value_cache_cap : 4;
+        while (new_cap <= v) new_cap *= 2;
+        MLIR_ValueHandle *na = arena_new_array(st->arena, MLIR_ValueHandle, new_cap);
+        for (size_t i = 0; i < new_cap; ++i) na[i] = MLIR_INVALID_HANDLE;
+        for (size_t i = 0; i < st->switch_value_cache_n; ++i)
+            na[i] = st->switch_value_cache[i];
+        st->switch_value_cache = na;
+        st->switch_value_cache_cap = new_cap;
+    }
+    if (v >= st->switch_value_cache_n) st->switch_value_cache_n = v + 1;
+
+    // Build `arith.constant <v> : i32` and insert at start of entry.
+    MLIR_TypeHandle  *rt = arena_new_array(st->arena, MLIR_TypeHandle, 1);
+    rt[0] = st->i32_ty;
+    MLIR_ValueHandle r = MLIR_CreateValueOpResult(
+        st->ctx, MLIR_INVALID_HANDLE, 0, st->i32_ty,
+        fresh_ssa_name(st->arena), st->unk_loc);
+    MLIR_ValueHandle *rs = arena_new_array(st->arena, MLIR_ValueHandle, 1);
+    rs[0] = r;
+    MLIR_AttributeHandle  val = MLIR_CreateAttributeInteger(
+        st->ctx, str_lit("value"), (int64_t)(int32_t)v, st->i32_ty);
+    MLIR_AttributeHandle *as = arena_new_array(st->arena, MLIR_AttributeHandle, 1);
+    as[0] = val;
+    MLIR_OpHandle op = MLIR_CreateOp(
+        st->ctx, OP_TYPE_ARITH_CONSTANT, str_lit("arith.constant"),
+        rt, 1, rs, 1, NULL, 0, NULL, 0, as, 1,
+        st->unk_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_InsertBlockOpAtIndex(st->ctx, st->entry_block, op, 0);
+    st->switch_value_cache[v] = r;
+    return r;
+}
+
+// Emit a fresh `llvm.mlir.undef : T` op at the start of the entry block
+// and cache it per-type. Mirrors `getUndefValue` / `ub.poison` in the
+// upstream wasm-flavored interface (we use llvm.mlir.undef because our
+// generic printer + native parser understands it, and wasmssa-lower
+// already supports llvm.mlir.undef -> typed zero).
 static MLIR_ValueHandle get_undef_value(LiftState *st, MLIR_TypeHandle ty) {
-    (void)st; (void)ty;
-    fprintf(stderr, "mlir_lift_cf_to_scf: get_undef_value not implemented\n");
-    return MLIR_INVALID_HANDLE;
+    for (size_t i = 0; i < st->undef_cache_n; ++i) {
+        if (st->undef_cache[i].type == ty) return st->undef_cache[i].value;
+    }
+    if (st->undef_cache_n == st->undef_cache_cap) {
+        size_t new_cap = st->undef_cache_cap ? st->undef_cache_cap * 2 : 8;
+        TypedValueEntry *na = arena_new_array(st->arena, TypedValueEntry, new_cap);
+        for (size_t i = 0; i < st->undef_cache_n; ++i) na[i] = st->undef_cache[i];
+        st->undef_cache = na;
+        st->undef_cache_cap = new_cap;
+    }
+    MLIR_TypeHandle  *rt = arena_new_array(st->arena, MLIR_TypeHandle, 1);
+    rt[0] = ty;
+    MLIR_ValueHandle r = MLIR_CreateValueOpResult(
+        st->ctx, MLIR_INVALID_HANDLE, 0, ty,
+        fresh_ssa_name(st->arena), st->unk_loc);
+    MLIR_ValueHandle *rs = arena_new_array(st->arena, MLIR_ValueHandle, 1);
+    rs[0] = r;
+    MLIR_OpHandle op = MLIR_CreateOp(
+        st->ctx, OP_TYPE_LLVM_MLIR_UNDEF, str_lit("llvm.mlir.undef"),
+        rt, 1, rs, 1, NULL, 0, NULL, 0, NULL, 0,
+        st->unk_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_InsertBlockOpAtIndex(st->ctx, st->entry_block, op, 0);
+    TypedValueEntry e = { ty, r };
+    st->undef_cache[st->undef_cache_n++] = e;
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// Branch-op constructors.
+// ---------------------------------------------------------------------------
+
+// Emit `cf.cond_br %cond, ^t(t_args...), ^f(f_args...)` at the end of
+// `in_block`. Returns the new op handle.
+static MLIR_OpHandle create_cf_cond_br_in_block(MLIR_Context *ctx, Arena *arena,
+                                                MLIR_BlockHandle in_block,
+                                                MLIR_ValueHandle cond,
+                                                MLIR_BlockHandle t_dst,
+                                                MLIR_ValueHandle *t_args, size_t n_t_args,
+                                                MLIR_BlockHandle f_dst,
+                                                MLIR_ValueHandle *f_args, size_t n_f_args,
+                                                MLIR_LocationHandle loc) {
+    MLIR_ValueHandle *ops = arena_new_array(arena, MLIR_ValueHandle, 1);
+    ops[0] = cond;
+    MLIR_BlockHandle *succs = arena_new_array(arena, MLIR_BlockHandle, 2);
+    succs[0] = t_dst; succs[1] = f_dst;
+    MLIR_ValueHandle **sops = arena_new_array(arena, MLIR_ValueHandle *, 2);
+    sops[0] = t_args; sops[1] = f_args;
+    size_t *snums = arena_new_array(arena, size_t, 2);
+    snums[0] = n_t_args; snums[1] = n_f_args;
+    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
+        ctx, OP_TYPE_CF_COND_BR, str_lit("cf.cond_br"),
+        NULL, 0, NULL, 0, ops, 1, NULL, 0, NULL, 0,
+        succs, 2, sops, snums,
+        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_AppendBlockOp(ctx, in_block, op);
+    return op;
+}
+
+// Emit `cf.switch %flag : i32, [ default: ^dflt(args), Vi: ^Bi(args), ... ]`
+// at the end of `in_block`. `case_values` and `case_dests`/`case_args` are
+// parallel arrays of length `n_cases`. The default destination + args
+// come last in the successor list (per MLIR's cf.SwitchOp printing
+// convention). Returns the new op handle.
+//
+// Operands: [flag] followed by all per-case+default operand values
+// flattened (cf.switch is variadic with `operand_segment_sizes` listing
+// per-segment counts). Successors: [default, case0, case1, ...].
+// case_values is a DenseI32ArrayAttr; case_operand_segments is a
+// DenseI32ArrayAttr listing the number of operands per case.
+static MLIR_OpHandle create_cf_switch_in_block(MLIR_Context *ctx, Arena *arena,
+                                               MLIR_BlockHandle in_block,
+                                               MLIR_ValueHandle flag,
+                                               MLIR_BlockHandle dflt_dst,
+                                               MLIR_ValueHandle *dflt_args, size_t n_dflt_args,
+                                               const int32_t *case_values,
+                                               MLIR_BlockHandle *case_dsts,
+                                               MLIR_ValueHandle **case_args,
+                                               size_t *n_case_args,
+                                               size_t n_cases,
+                                               MLIR_LocationHandle loc) {
+    // Build successor + per-successor operand arrays:
+    //   succs[0]   = default
+    //   succs[1..] = cases
+    size_t n_succ = 1 + n_cases;
+    MLIR_BlockHandle *succs = arena_new_array(arena, MLIR_BlockHandle, n_succ);
+    MLIR_ValueHandle **sops = arena_new_array(arena, MLIR_ValueHandle *, n_succ);
+    size_t *snums = arena_new_array(arena, size_t, n_succ);
+    succs[0] = dflt_dst; sops[0] = dflt_args; snums[0] = n_dflt_args;
+    for (size_t i = 0; i < n_cases; ++i) {
+        succs[1 + i] = case_dsts[i];
+        sops[1 + i] = case_args[i];
+        snums[1 + i] = n_case_args[i];
+    }
+    // Operands: just the flag (the successor-operands live on
+    // succession metadata, not in the operand list).
+    MLIR_ValueHandle *ops = arena_new_array(arena, MLIR_ValueHandle, 1);
+    ops[0] = flag;
+    // Attribute: case_values: array<i32: V0, V1, ...>.
+    MLIR_AttributeHandle ca = MLIR_CreateAttributeDenseI32Array(
+        ctx, str_lit("case_values"), case_values, n_cases);
+    MLIR_AttributeHandle *as = arena_new_array(arena, MLIR_AttributeHandle, 1);
+    as[0] = ca;
+    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
+        ctx, OP_TYPE_CF_SWITCH, str_lit("cf.switch"),
+        NULL, 0, NULL, 0, ops, 1, NULL, 0, as, 1,
+        succs, n_succ, sops, snums,
+        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_AppendBlockOp(ctx, in_block, op);
+    return op;
 }
