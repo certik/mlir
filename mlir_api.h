@@ -820,8 +820,9 @@ void MLIR_SpliceBlockOps(MLIR_Context *ctx, MLIR_BlockHandle dst,
 // Returns true on success, false on failure (e.g. a CFG that the lift
 // could not transform into SCF). On the upstream backend this calls
 // upstream MLIR's `transformCFGToSCF` (Bahmann/Reissmann 2015). On
-// the native backend this currently returns true with no work done
-// (TODO: native C port of the algorithm).
+// the native backend this calls the in-tree agnostic C port of the
+// same algorithm in `mlir_lift_cf_to_scf.c` (see that file's header
+// for the documented limitations).
 bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module);
 
 // Introspection
