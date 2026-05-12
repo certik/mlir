@@ -1255,6 +1255,24 @@ MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *ctx, string
     return alloc_attr_obj(ctx, a);
 }
 
+// DenseI64 array attribute. Same string-encoded shape as DenseI32 but
+// with `i64` element type. Used by `scf.index_switch`'s `cases` attr.
+MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *ctx, string name,
+                                                       const int64_t *values, size_t count) {
+    IR_Attribute a = {0};
+    a.kind = ATTR_KIND_STRING;
+    a.name = name;
+    Arena *arena = ctx->arena;
+    string s = str_lit("array<i64");
+    for (size_t i = 0; i < count; i++) {
+        s = str_concat(arena, s, i == 0 ? str_lit(": ") : str_lit(", "));
+        s = str_concat(arena, s, format(arena, str_lit("{}"), values[i]));
+    }
+    s = str_concat(arena, s, str_lit(">"));
+    a.data.string_value = s;
+    return alloc_attr_obj(ctx, a);
+}
+
 // LLVM linkage attribute. Native backend stores the printable form
 // (e.g. "#llvm.linkage<internal>") in a string attr — this matches the
 // upstream backend's MLIR_GetAttributeAsString result, so the native

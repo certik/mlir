@@ -969,6 +969,14 @@ extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *
                          mlir::DenseI32ArrayAttr::get(&ctx, v));
 }
 
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *, string name,
+                                                                    const int64_t *values, size_t count) {
+    auto &ctx = globalCtx().mctx;
+    llvm::SmallVector<int64_t, 8> v(values, values + count);
+    return makeNamedAttr(llvm::StringRef(name.str, name.size),
+                         mlir::DenseI64ArrayAttr::get(&ctx, v));
+}
+
 extern "C" MLIR_TypeHandle MLIR_CreateTypeLLVMPointer(MLIR_Context *) {
     auto &ctx = globalCtx().mctx;
     return typeH(mlir::LLVM::LLVMPointerType::get(&ctx));

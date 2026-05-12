@@ -52,15 +52,6 @@ static void edge_set_successor(MLIR_Context *ctx, Edge e, MLIR_BlockHandle dst) 
 }
 
 // ============================================================================
-// CycleEdges: entry, exit, back edge buckets for an SCC.
-// ============================================================================
-typedef struct {
-    Edge   *entry;     size_t n_entry;
-    Edge   *exit;      size_t n_exit;
-    Edge   *back;      size_t n_back;
-} CycleEdges;
-
-// ============================================================================
 // EdgeMultiplexer: helper that turns N entries into a single multiplexer
 // block with a discriminator argument. See the diagrams at the top of
 // CFGToSCF.cpp.

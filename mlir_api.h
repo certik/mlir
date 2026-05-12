@@ -115,6 +115,7 @@ typedef enum {
     OP_TYPE_SCF_IF,
     OP_TYPE_SCF_YIELD,
     OP_TYPE_SCF_CONDITION,
+    OP_TYPE_SCF_INDEX_SWITCH,
 
     // Triton dialect
     OP_TYPE_TT_GET_PROGRAM_ID,
@@ -624,6 +625,10 @@ MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *ctx, string name, M
 // `llvm.getelementptr`'s `rawConstantIndices`.
 MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *ctx, string name,
                                                         const int32_t *values, size_t count);
+// Dense i64 array attribute (DenseI64ArrayAttr) — used e.g. for
+// `scf.index_switch`'s `cases` attribute.
+MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *ctx, string name,
+                                                        const int64_t *values, size_t count);
 MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count);
 // TypeAttr: an attribute that wraps a Type (e.g. func.func's
 // `function_type` attribute, which wraps a FunctionType).

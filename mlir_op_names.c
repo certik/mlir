@@ -39,6 +39,7 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_SCF_IF: return str_lit("scf.if");
         case OP_TYPE_SCF_YIELD: return str_lit("scf.yield");
         case OP_TYPE_SCF_CONDITION: return str_lit("scf.condition");
+        case OP_TYPE_SCF_INDEX_SWITCH: return str_lit("scf.index_switch");
         case OP_TYPE_TT_GET_PROGRAM_ID: return str_lit("tt.get_program_id");
         case OP_TYPE_TT_LOAD: return str_lit("tt.load");
         case OP_TYPE_TT_STORE: return str_lit("tt.store");
