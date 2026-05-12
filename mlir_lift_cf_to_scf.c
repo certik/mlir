@@ -28,6 +28,7 @@
 #include <string.h>
 
 #include <base/arena.h>
+#include <base/format.h>
 #include <base/string.h>
 
 // ============================================================================
@@ -606,6 +607,208 @@ static bool fold_linear_chain(MLIR_Context *ctx, Arena *arena,
     return any;
 }
 
+// ============================================================================
+// Lift the simplest cf.cond_br diamond into scf.if.
+//
+// Pattern recognized (after return-like combining + linear folding):
+//
+//   ^entry:
+//     ...
+//     cf.cond_br %cond, ^then(then_args), ^else(else_args)
+//   ^then:                       (sole pred = ^entry)
+//     ...
+//     cf.br ^merge(then_yield)
+//   ^else:                       (sole pred = ^entry)
+//     ...
+//     cf.br ^merge(else_yield)
+//   ^merge(merge_args):          (sole preds = {^then, ^else})
+//     ...
+//
+// becomes:
+//
+//   ^entry:
+//     ...
+//     %r:N = scf.if %cond -> (merge_arg_types) {
+//       ...                  (then's ops)
+//       scf.yield then_yield
+//     } else {
+//       ...                  (else's ops)
+//       scf.yield else_yield
+//     }
+//     ...                    (merge's ops, with merge_args replaced by %r:N)
+//
+// Returns true if the transform fired. Mirrors the 2-way structured
+// branch case of CFGToSCF.cpp:947-1216 limited to the simplest shape.
+// ============================================================================
+
+static uint64_t g_lift_ssa_counter = 0;
+
+static string fresh_ssa_name(Arena *arena) {
+    return format(arena, str_lit("%lift_{}"),
+                  (int64_t)(g_lift_ssa_counter++));
+}
+
+static MLIR_OpHandle create_scf_yield(MLIR_Context *ctx, Arena *arena,
+                                      MLIR_BlockHandle in_block,
+                                      MLIR_ValueHandle *args, size_t n_args,
+                                      MLIR_LocationHandle loc) {
+    MLIR_ValueHandle *operand_arr = n_args
+        ? arena_new_array(arena, MLIR_ValueHandle, n_args) : NULL;
+    for (size_t i = 0; i < n_args; ++i) operand_arr[i] = args[i];
+    MLIR_OpHandle y = MLIR_CreateOp(
+        ctx, OP_TYPE_SCF_YIELD, str_lit("scf.yield"),
+        NULL, 0, NULL, 0, NULL, 0,
+        operand_arr, n_args, NULL, 0,
+        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_AppendBlockOp(ctx, in_block, y);
+    return y;
+}
+
+static bool try_lift_simple_if(MLIR_Context *ctx, Arena *arena,
+                               MLIR_BlockHandle entry) {
+    MLIR_OpHandle cond_br = MLIR_GetBlockTerminator(entry);
+    if (cond_br == MLIR_INVALID_HANDLE) return false;
+    if (!string_eq_string(MLIR_GetOpName(cond_br), str_lit("cf.cond_br")))
+        return false;
+    if (MLIR_GetOpNumSuccessors(cond_br) != 2) return false;
+    MLIR_BlockHandle then_b = MLIR_GetOpSuccessor(cond_br, 0);
+    MLIR_BlockHandle else_b = MLIR_GetOpSuccessor(cond_br, 1);
+    if (then_b == MLIR_INVALID_HANDLE || else_b == MLIR_INVALID_HANDLE) return false;
+    if (then_b == else_b) return false;
+    if (then_b == entry || else_b == entry) return false;
+    if (MLIR_GetBlockNumPredecessors(then_b) != 1) return false;
+    if (MLIR_GetBlockNumPredecessors(else_b) != 1) return false;
+
+    MLIR_OpHandle then_term = MLIR_GetBlockTerminator(then_b);
+    MLIR_OpHandle else_term = MLIR_GetBlockTerminator(else_b);
+    if (then_term == MLIR_INVALID_HANDLE || else_term == MLIR_INVALID_HANDLE) return false;
+    if (!string_eq_string(MLIR_GetOpName(then_term), str_lit("cf.br"))) return false;
+    if (!string_eq_string(MLIR_GetOpName(else_term), str_lit("cf.br"))) return false;
+
+    MLIR_BlockHandle merge = MLIR_GetOpSuccessor(then_term, 0);
+    if (merge == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetOpSuccessor(else_term, 0) != merge) return false;
+    if (merge == entry || merge == then_b || merge == else_b) return false;
+    if (MLIR_GetBlockNumPredecessors(merge) != 2) return false;
+
+    // ---- Snapshot all the values we need before mutating IR. ----
+    MLIR_LocationHandle loc = MLIR_GetOpLocation(cond_br);
+
+    // cf.cond_br: operand 0 = condition; successor operands 0 = then args,
+    // successor operands 1 = else args.
+    MLIR_ValueHandle cond_v = MLIR_GetOpOperand(cond_br, 0);
+
+    size_t n_then_args = MLIR_GetOpNumSuccessorOperands(cond_br, 0);
+    size_t n_else_args = MLIR_GetOpNumSuccessorOperands(cond_br, 1);
+    if (n_then_args != MLIR_GetBlockNumArgs(then_b)) return false;
+    if (n_else_args != MLIR_GetBlockNumArgs(else_b)) return false;
+
+    MLIR_ValueHandle *then_args = n_then_args
+        ? arena_new_array(arena, MLIR_ValueHandle, n_then_args) : NULL;
+    for (size_t i = 0; i < n_then_args; ++i)
+        then_args[i] = MLIR_GetOpSuccessorOperand(cond_br, 0, i);
+    MLIR_ValueHandle *else_args = n_else_args
+        ? arena_new_array(arena, MLIR_ValueHandle, n_else_args) : NULL;
+    for (size_t i = 0; i < n_else_args; ++i)
+        else_args[i] = MLIR_GetOpSuccessorOperand(cond_br, 1, i);
+
+    size_t n_then_yield = MLIR_GetOpNumSuccessorOperands(then_term, 0);
+    size_t n_else_yield = MLIR_GetOpNumSuccessorOperands(else_term, 0);
+    size_t n_merge_args = MLIR_GetBlockNumArgs(merge);
+    if (n_then_yield != n_merge_args || n_else_yield != n_merge_args)
+        return false;
+
+    MLIR_ValueHandle *then_yield = n_then_yield
+        ? arena_new_array(arena, MLIR_ValueHandle, n_then_yield) : NULL;
+    for (size_t i = 0; i < n_then_yield; ++i)
+        then_yield[i] = MLIR_GetOpSuccessorOperand(then_term, 0, i);
+    MLIR_ValueHandle *else_yield = n_else_yield
+        ? arena_new_array(arena, MLIR_ValueHandle, n_else_yield) : NULL;
+    for (size_t i = 0; i < n_else_yield; ++i)
+        else_yield[i] = MLIR_GetOpSuccessorOperand(else_term, 0, i);
+
+    MLIR_TypeHandle *result_types = n_merge_args
+        ? arena_new_array(arena, MLIR_TypeHandle, n_merge_args) : NULL;
+    for (size_t i = 0; i < n_merge_args; ++i)
+        result_types[i] = MLIR_GetValueType(MLIR_GetBlockArg(merge, i));
+
+    // ---- Replace then_b/else_b's block args with cond_br's branch ops. ----
+    for (size_t i = 0; i < n_then_args; ++i) {
+        MLIR_ReplaceAllUsesOfValue(ctx, MLIR_GetBlockArg(then_b, i), then_args[i]);
+    }
+    if (n_then_args) MLIR_EraseBlockArguments(ctx, then_b, 0, n_then_args);
+    for (size_t i = 0; i < n_else_args; ++i) {
+        MLIR_ReplaceAllUsesOfValue(ctx, MLIR_GetBlockArg(else_b, i), else_args[i]);
+    }
+    if (n_else_args) MLIR_EraseBlockArguments(ctx, else_b, 0, n_else_args);
+
+    // ---- Replace then_term/else_term with scf.yield in their blocks. ----
+    MLIR_LocationHandle then_loc = MLIR_GetOpLocation(then_term);
+    MLIR_LocationHandle else_loc = MLIR_GetOpLocation(else_term);
+    MLIR_EraseOp(ctx, then_term);
+    create_scf_yield(ctx, arena, then_b, then_yield, n_then_yield, then_loc);
+    MLIR_EraseOp(ctx, else_term);
+    create_scf_yield(ctx, arena, else_b, else_yield, n_else_yield, else_loc);
+
+    // ---- Move then_b / else_b into fresh regions for the scf.if op. ----
+    MLIR_RegionHandle then_region = MLIR_CreateRegion(ctx);
+    MLIR_RegionHandle else_region = MLIR_CreateRegion(ctx);
+    MLIR_MoveBlockToRegionEnd(ctx, then_b, then_region);
+    MLIR_MoveBlockToRegionEnd(ctx, else_b, else_region);
+
+    // ---- Build the scf.if op + result handles. ----
+    MLIR_ValueHandle *result_vs = n_merge_args
+        ? arena_new_array(arena, MLIR_ValueHandle, n_merge_args) : NULL;
+    for (size_t i = 0; i < n_merge_args; ++i) {
+        result_vs[i] = MLIR_CreateValueOpResult(
+            ctx, MLIR_INVALID_HANDLE, (uint32_t)i, result_types[i],
+            fresh_ssa_name(arena), loc);
+    }
+    MLIR_RegionHandle *regions = arena_new_array(arena, MLIR_RegionHandle, 2);
+    regions[0] = then_region; regions[1] = else_region;
+    MLIR_ValueHandle *operands = arena_new_array(arena, MLIR_ValueHandle, 1);
+    operands[0] = cond_v;
+
+    // Erase cond_br first so the entry's terminator slot is free.
+    MLIR_EraseOp(ctx, cond_br);
+
+    MLIR_OpHandle scf_if = MLIR_CreateOp(
+        ctx, OP_TYPE_SCF_IF, str_lit("scf.if"),
+        NULL, 0,
+        result_types, n_merge_args,
+        result_vs, n_merge_args,
+        operands, 1,
+        regions, 2,
+        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_AppendBlockOp(ctx, entry, scf_if);
+
+    // ---- Replace merge's block args with scf.if's results. ----
+    for (size_t i = 0; i < n_merge_args; ++i) {
+        MLIR_ReplaceAllUsesOfValue(ctx, MLIR_GetBlockArg(merge, i), result_vs[i]);
+    }
+    if (n_merge_args) MLIR_EraseBlockArguments(ctx, merge, 0, n_merge_args);
+
+    // ---- Splice merge's ops into entry, then erase merge. ----
+    MLIR_SpliceBlockOps(ctx, entry, merge);
+    MLIR_EraseBlock(ctx, merge);
+    return true;
+}
+
+static bool fold_simple_ifs(MLIR_Context *ctx, Arena *arena,
+                            MLIR_BlockHandle entry) {
+    bool any = false;
+    // After lifting an if, the entry's new tail (merge's spliced ops)
+    // may end in another cf.br/cond_br; loop with the linear chain
+    // folder so we keep making progress.
+    while (true) {
+        bool spliced = fold_linear_chain(ctx, arena, entry);
+        bool lifted  = try_lift_simple_if(ctx, arena, entry);
+        if (!spliced && !lifted) break;
+        any = any || spliced || lifted;
+    }
+    return any;
+}
+
 bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module) {
     (void)ctx;
     if (module == MLIR_INVALID_HANDLE) return false;
@@ -638,11 +841,9 @@ bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module) {
             if (run_partial) {
                 create_single_exit_blocks_for_return_like(ctx, scratch, body);
                 MLIR_BlockHandle entry = MLIR_GetRegionBlock(body, 0);
-                fold_linear_chain(ctx, scratch, entry);
-                // Re-check: if linear folding plus return-like combining
-                // produced a single-successor-or-less terminator (i.e.
-                // function is now linear all the way through), the lift
-                // is complete for this body — no cf.cond_br/switch left.
+                fold_simple_ifs(ctx, scratch, entry);
+                // Re-check: if the combined transforms eliminated all
+                // cf branches the lift is complete for this body.
                 MLIR_OpHandle entry_term = MLIR_GetBlockTerminator(entry);
                 if (entry_term != MLIR_INVALID_HANDLE &&
                     MLIR_GetOpNumSuccessors(entry_term) == 0 &&
