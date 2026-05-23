@@ -29,14 +29,13 @@ WASMTIME = os.environ.get("WASMTIME", "wasmtime")
 WASM_CC = os.environ.get("WASM_CC", "clang")
 
 # When TINYC_USE_NATIVE_LINK=1, link wasm32 objects with the in-tree
-# `mlir_wasm_link` linker instead of host wasm-ld. The native linker is
-# invoked via `tinyc_native --link` (or whichever binary `NATIVE_LINK`
-# points at).
+# `mlir_wasm_link` linker instead of host wasm-ld. The native linker
+# code lives in `mlir_wasm_link.c` and is compiled into both `tinyc`
+# and `tinyc_native`, so by default we reuse whichever binary is
+# already in $TINYC (no separate build needed). Set NATIVE_LINK
+# explicitly to point at a different binary if needed.
 USE_NATIVE_LINK = os.environ.get("TINYC_USE_NATIVE_LINK") == "1"
-NATIVE_LINK = Path(os.environ.get(
-    "NATIVE_LINK",
-    str(ROOT / ("tinyc_native.exe" if IS_WIN else "tinyc_native"))
-)).resolve()
+NATIVE_LINK = Path(os.environ.get("NATIVE_LINK", str(TINYC))).resolve()
 
 # Backend used by `tinyc --lowering=...`. If unset, no `--lowering=` flag
 # is passed and each binary uses its own default (upstream for tinyc,
