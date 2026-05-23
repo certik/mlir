@@ -28,6 +28,16 @@ WASM_LD = os.environ.get("WASM_LD", "wasm-ld")
 WASMTIME = os.environ.get("WASMTIME", "wasmtime")
 WASM_CC = os.environ.get("WASM_CC", "clang")
 
+# When TINYC_USE_NATIVE_LINK=1, link wasm32 objects with the in-tree
+# `mlir_wasm_link` linker instead of host wasm-ld. The native linker is
+# invoked via `tinyc_native --link` (or whichever binary `NATIVE_LINK`
+# points at).
+USE_NATIVE_LINK = os.environ.get("TINYC_USE_NATIVE_LINK") == "1"
+NATIVE_LINK = Path(os.environ.get(
+    "NATIVE_LINK",
+    str(ROOT / ("tinyc_native.exe" if IS_WIN else "tinyc_native"))
+)).resolve()
+
 # Backend used by `tinyc --lowering=...`. If unset, no `--lowering=` flag
 # is passed and each binary uses its own default (upstream for tinyc,
 # native for tinyc_native). Set TINYC_LOWERING=upstream or =native to
@@ -104,7 +114,15 @@ def build_wasm_runtime(out_path: Path, start_obj: Path):
 def link_wasm(obj_path: Path, runtime_obj: Path, start_obj: Path,
               wasm_path: Path):
     """Link a tinyc-emitted wasm32 object together with the wasm runtime
-    + _start shim using wasm-ld, producing a runnable .wasm module."""
+    + _start shim. Either uses host `wasm-ld` (default) or the in-tree
+    native linker (`TINYC_USE_NATIVE_LINK=1`)."""
+    if USE_NATIVE_LINK:
+        return run([
+            str(NATIVE_LINK), "--link",
+            "-o", str(wasm_path),
+            "--export=_start",
+            str(obj_path), str(runtime_obj), str(start_obj),
+        ])
     return run([
         WASM_LD, "--no-entry", "--export=_start",
         str(obj_path), str(runtime_obj), str(start_obj),
