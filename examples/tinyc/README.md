@@ -32,18 +32,29 @@ native binary
 
 ## Language subset
 
-- Types: `int` only (i32).
-- Locals: `int x;` and `int x = expr;` — stored in `memref<i32>`.
-- Operators: `+ - * / %`, `< <= > >= == !=`, `&& || !`, unary `-`.
-- Statements: assignment, `if`/`else`, `while`, `return`, `_tinyc_print(expr);`,
-  blocks `{ … }`. `print` lowers to `vector.print`.
-- Functions: `int name(int p, int q, …) { … }` returning int.
-- `main()` is the program entry point.
+tinyC has grown well past the initial "int-only" prototype. The `tests/`
+directory is the working capability matrix; in broad strokes the
+frontend now supports:
 
-Notable limitations (kept minimal on purpose):
-- No early `return` from inside `if`/`while` — use a result variable.
-- No arrays, pointers, structs, floats, chars, strings, `for`,
-  `break`/`continue`.
+- Types: `int`, `char`, signed/unsigned variants, `float`, `double`,
+  pointers, fixed-size arrays, `struct`/`union`, `typedef`.
+- Locals and globals, with zero / designated / compound initializers.
+- All the usual operators (`+ - * / %`, comparisons, `&& || !`, bitwise,
+  unary `-`, `sizeof`, `& *`, postfix/prefix `++ --`).
+- Statements: assignment, `if`/`else`, `while`, `do`/`while`, `for`,
+  `break`, `continue`, early `return`, `switch`/`case`/`default`,
+  blocks `{ … }`, expression statements.
+- Functions: fixed-arity (`int name(int p, …)`) and variadic
+  (`int sum(int n, ...)` — emitted as `llvm.func` since `func.func`
+  has no var-arg form).
+- A small built-in runtime (`runtime.c` / `runtime_wasm.c`) supplying
+  `printf`, `memcpy`, `memset`, `sqrt`, etc.
+- A `#define` / `#include` preprocessor (`preprocess.c`), with `-I`
+  include dirs and `-D` definitions on the CLI.
+
+The wasm target is a strict subset of the native one — a handful of
+tests are tagged `wasm_skip` because they rely on host-libc behaviour
+wasm32-wasi cannot reproduce.
 
 ## Build & run
 
@@ -135,16 +146,21 @@ test runner; `TINYC_TARGET` (default `native`) selects the target. The
 `*_wasm` task simply sets `TINYC_TARGET=wasm`.
 
 The `tinyc_native` binary (built without upstream MLIR/LLVM, via
-`pixi run build_tinyc_native`) currently supports the native target
-only; for that binary use `pixi run test_tinyc_native`.
+`pixi run build_tinyc_native`) supports both the native and wasm
+targets — the wasm pipeline is entirely in-tree. Use
+`pixi run test_tinyc_native` for the native target and
+`pixi run test_tinyc_native_wasm` for the wasm target.
 
 ### How the native pipeline is structured
 
-The native LLVM-dialect → wasm path lives in three MLIR-to-MLIR stages:
+The cf→scf lift is performed up front by `MLIR_LowerToLLVMDialectForWasm`
+(`mlir_lower_to_llvm.c`, calling `MLIR_LiftCfToScf` →
+`mlir_lift_cf_to_scf.c`) so the wasm stages see already-structured
+control flow. The LLVM-dialect → wasm path then runs three MLIR-to-MLIR
+stages:
 
 - `mlir_llvm_to_wasmssa.c` — Stage 1: LLVM dialect → wasmssa
-  (also runs `lift-cf-to-scf` first to recover structured control
-  flow from `cf.br`/`cf.cond_br`).
+  (lowers ops in-place; the cf→scf lift has already happened above).
 - `mlir_wasmssa_to_wasmstack.c` — Stage 2: wasmssa → wasmstack (linearises
   SSA results onto the wasm value stack, inserts block/loop/if/end).
 - `mlir_wasmstack_to_bin.c` — Stage 3: wasmstack → `.wasm.o`
@@ -154,8 +170,9 @@ The native LLVM-dialect → wasm path lives in three MLIR-to-MLIR stages:
 - `mlir_wasm_to_wat.c` — generic-MLIR printer used by `--emit=wasmssa`
   and `--emit=wasmstack`, plus a `.wasm` → WAT disassembler.
 
-`MLIR_TranslateModuleToWasm` chains the three stages directly inside
-`mlir_api_impl.c` / `mlir_api_impl_upstream.cpp`.
+`MLIR_TranslateModuleToWasm` (in `mlir_translate_to_wasm.c`) chains the
+three stages and is linked into both the native- and upstream-backed
+tinyc binaries.
 
 ## Why this exists
 
@@ -168,8 +185,15 @@ that were filled in `mlir_api.h` along the way:
   is rejected by the verifier; you need a real `FlatSymbolRefAttr`).
 - `MLIR_LowerToLLVMDialect` — runs the standard MLIR conversion passes
   (`scf-to-cf`, `*-to-llvm`, `reconcile-unrealized-casts`).
+- `MLIR_LowerToLLVMDialectForWasm` + `MLIR_LiftCfToScf` — the wasm
+  variant that lifts cf→scf first and keeps `scf.*` ops in place.
 - `MLIR_TranslateModuleToLLVMIR` — emits portable LLVM IR text.
+- `MLIR_TranslateModuleToWasm` — emits a wasm32-wasi object file via
+  the three-stage in-tree pipeline.
 
-The native backend stubs the lowering APIs (returns false / empty
-string) and accepts `MLIR_CreateAttributeSymbolRef` by storing the
-symbol name as a plain string attribute — sufficient for printing.
+Both backends implement all of the above. The native backend's
+lowering, lift, and wasm pipeline are written in plain C against
+`mlir_api.h` only (see `mlir_lower_to_llvm.c`, `mlir_lift_cf_to_scf.c`,
+`mlir_translate_to_wasm.c`, and the three `mlir_*_to_wasm*` stages),
+so `tinyc_native` produces functionally equivalent output without
+linking any LLVM/MLIR libraries.
