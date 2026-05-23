@@ -8,8 +8,8 @@
 // (CFGToSCFForWasm in mlir_api_impl_upstream.cpp): i32 switch
 // discriminators, ub.poison/llvm.mlir.undef for undef values,
 // llvm.return when an unreachable terminator is needed inside an
-// llvm.func. Test coverage: test_tinyc_native_wasm passes 150/150 on
-// linux/macos/windows in CI.
+// llvm.func. Exercised end-to-end by `test_tinyc_native_wasm` on
+// Linux/macOS/Windows in CI; that suite must stay green.
 //
 // Known limitations:
 //   - Only `func.func` and `llvm.func` are recognised as carriers of
@@ -25,7 +25,9 @@
 //     (wasmssa-lower) rejects this and reports a hard error.
 //   - The M9 driver caps the per-region worklist at 4096 iterations
 //     as a runaway guard; bodies that would need more are rare in
-//     practice but would silently bail out with leftover cf.* ops.
+//     practice. The driver emits a diagnostic to stderr when the cap
+//     fires and leaves any unlifted cf.* ops behind for downstream
+//     stages to flag.
 //   - No predecessor cache: MLIR_GetBlockNumPredecessors /
 //     MLIR_GetBlockPredecessor are O(R) per call. Cycle-edge and
 //     reduce-loop analyses query them repeatedly, so the algorithm

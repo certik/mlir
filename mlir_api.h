@@ -811,18 +811,27 @@ void MLIR_AppendOpSuccessorOperand(MLIR_Context *ctx, MLIR_OpHandle op,
 void MLIR_SpliceBlockOps(MLIR_Context *ctx, MLIR_BlockHandle dst,
                          MLIR_BlockHandle src);
 
-// Lift control-flow-graph operations (cf.br / cf.cond_br) in `module`
-// into structured control flow (scf.if / scf.while / scf.index_switch).
-// This is a prerequisite for the wasm pipeline, which rejects
-// unstructured CFGs. Walks every func.func and llvm.func body in the
-// module.
+// Lift control-flow-graph operations (cf.br / cf.cond_br / cf.switch)
+// in `module` into structured control flow (scf.if / scf.while /
+// scf.index_switch). This is a prerequisite for the wasm pipeline,
+// which rejects unstructured CFGs. Walks every `func.func` and
+// `llvm.func` body in the module.
 //
 // Returns true on success, false on failure (e.g. a CFG that the lift
 // could not transform into SCF). On the upstream backend this calls
-// upstream MLIR's `transformCFGToSCF` (Bahmann/Reissmann 2015). On
-// the native backend this calls the in-tree agnostic C port of the
-// same algorithm in `mlir_lift_cf_to_scf.c` (see that file's header
-// for the documented limitations).
+// upstream MLIR's `transformCFGToSCF` (Bahmann/Reissmann 2015) via the
+// in-tree `liftLLVMFuncCFGToSCF` shim so both `func.func` and
+// `llvm.func` bodies are covered. On the native backend this calls
+// the in-tree agnostic C port of the same algorithm in
+// `mlir_lift_cf_to_scf.c` (see that file's header for the documented
+// limitations).
+//
+// In the upstream-backed build, setting the environment variable
+// `TINYC_LIFT_USE_NATIVE=1` opts into running the native port first
+// (best effort; any leftover cf.* ops are then finished off by the
+// upstream pass). This is a debugging / cross-validation knob; it has
+// no effect in the native-only build (which always uses the native
+// port).
 bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module);
 
 // Introspection

@@ -169,6 +169,25 @@ shrink.
 * `mlir_generic_printer.c` — `"op.name"(operands) : (intypes) -> outtypes`
   printer.
 * `mlir_op_names.c` — op enum ↔ string mapping.
+* `mlir_lift_cf_to_scf.c` — agnostic in-tree port of upstream's
+  CFGToSCF (Bahmann/Reissmann 2015). Lifts `cf.br` / `cf.cond_br` /
+  `cf.switch` into `scf.if` / `scf.while` / `scf.index_switch`; runs
+  through `mlir_api.h` so the same code services both backends.
+* `mlir_lower_to_llvm.c` — agnostic in-tree lowering from the high-level
+  dialects (`scf`, `arith`, `memref`, `cf`, `func`, …) into the LLVM
+  dialect. Provides `MLIR_LowerToLLVMDialect` and the wasm-tailored
+  `MLIR_LowerToLLVMDialectForWasm` (which runs the cf→scf lift first
+  and keeps `scf.*` ops in place for the wasm pipeline).
+* `mlir_translate_to_llvm_ir.c` — agnostic LLVM-dialect-MLIR → LLVM IR
+  text emitter (`MLIR_TranslateModuleToLLVMIR`).
+* `mlir_translate_to_wasm.c` — agnostic LLVM-dialect-MLIR → wasm32-wasi
+  object file emitter (`MLIR_TranslateModuleToWasm`); chains the three
+  in-tree stages below.
+* `mlir_llvm_to_wasmssa.c`, `mlir_wasmssa_to_wasmstack.c`,
+  `mlir_wasmstack_to_bin.c` — the three-stage in-tree wasm pipeline
+  (LLVM dialect → wasmssa MLIR → wasmstack MLIR → `.wasm.o` bytes).
+* `mlir_wasm_to_wat.c` — disassembler from wasm32 binary bytes to a
+  WAT-like text form.
 * `parser.c` — native CLI: `./parser [--construct] [--parse=K] [--print=K] file`.
 * `corec/`, `corec-stdlib/` — pinned submodules; the only sources of
   allocators, strings, formatting, I/O and the stdlib subset.

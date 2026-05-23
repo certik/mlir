@@ -36,7 +36,10 @@
 
 #include <base/arena.h>
 #include <base/format.h>
+#include <base/io.h>
+#include <base/scratch.h>
 #include <base/string.h>
+#include <platform/platform.h>
 
 // ============================================================================
 // Edge: (from_block, successor_index). Mirrors upstream's `Edge` class.
@@ -61,12 +64,6 @@ static MLIR_BlockHandle edge_successor(Edge e) {
     MLIR_OpHandle term = MLIR_GetBlockTerminator(e.from_block);
     if (term == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
     return MLIR_GetOpSuccessor(term, e.succ_idx);
-}
-
-static void edge_set_successor(MLIR_Context *ctx, Edge e, MLIR_BlockHandle dst) {
-    MLIR_OpHandle term = MLIR_GetBlockTerminator(e.from_block);
-    if (term == MLIR_INVALID_HANDLE) return;
-    MLIR_SetOpSuccessor(ctx, term, e.succ_idx, dst);
 }
 
 // Forward declarations for cross-references between EdgeMultiplexer and
@@ -100,11 +97,17 @@ struct LiftState_S {
     TypedValueEntry  *undef_cache;
     size_t            undef_cache_n;
     size_t            undef_cache_cap;
+
+    // Monotonically-increasing counter for fresh `%lift_N` SSA names.
+    // Lives per-LiftState so each function gets a private counter and the
+    // implementation is reentrant-safe in principle (the driver is still
+    // single-threaded today, but this avoids a hidden file-scope global).
+    uint64_t          ssa_counter;
 };
 
 static MLIR_ValueHandle get_switch_value(LiftState *st, unsigned v);
 static MLIR_ValueHandle get_undef_value(LiftState *st, MLIR_TypeHandle ty);
-static string           fresh_ssa_name(Arena *arena);
+static string           fresh_ssa_name(LiftState *st);
 static void             lift_state_init(LiftState *st, MLIR_Context *ctx,
                                         Arena *arena, MLIR_OpHandle fn_op,
                                         MLIR_BlockHandle entry_block);
@@ -558,10 +561,20 @@ static void combiner_combine_exit(MLIR_Context *ctx, Combiner *c,
 // Top-level driver: scan every block of `region`; for each block with no
 // successors (block ending in a return-like op), funnel through the
 // combiner. Mirrors CFGToSCF.cpp:1221-1234.
+//
+// The combiner is reset whenever `region` differs from the region it was
+// last keyed against. This keeps exit_blocks region-scoped: a func.return
+// in region X must never be redirected (via cf.br) to an exit_block that
+// lives in region Y, since cf.br cannot cross region boundaries.
 static void create_single_exit_blocks_for_return_like_into(MLIR_Context *ctx,
                                                             Arena *arena,
                                                             MLIR_RegionHandle region,
                                                             Combiner *c) {
+    if (c->region != region) {
+        c->entries = NULL;
+        c->n_entries = 0;
+        c->cap = 0;
+    }
     c->region = region;
     c->arena = arena;
 
@@ -1146,11 +1159,9 @@ static CycleEdges calculate_cycle_edges(Arena *arena, const SccResult *r,
 // patterns the legacy code did, plus break/continue/early-return and
 // cf.switch lifting.
 
-static uint64_t g_lift_ssa_counter = 0;
-
-static string fresh_ssa_name(Arena *arena) {
-    return format(arena, str_lit("%lift_{}"),
-                  (int64_t)(g_lift_ssa_counter++));
+static string fresh_ssa_name(LiftState *st) {
+    return format(st->arena, str_lit("%lift_{}"),
+                  (int64_t)(st->ssa_counter++));
 }
 
 static MLIR_OpHandle create_scf_yield(MLIR_Context *ctx, Arena *arena,
@@ -1229,19 +1240,6 @@ static bool dom_dominates(const DomInfo *d, MLIR_BlockHandle a,
         if (bi == SIZE_MAX) return false;
     }
     return bi == ai;
-}
-
-// Common (post-)dominator. Returns MLIR_INVALID_HANDLE if either input is
-// unknown to the analysis.
-static MLIR_BlockHandle dom_common(const DomInfo *d, MLIR_BlockHandle a,
-                                   MLIR_BlockHandle b) {
-    size_t ai = dom_po_index_of(d, a);
-    size_t bi = dom_po_index_of(d, b);
-    if (ai == SIZE_MAX || bi == SIZE_MAX) return MLIR_INVALID_HANDLE;
-    if (d->idom[ai] == SIZE_MAX || d->idom[bi] == SIZE_MAX)
-        return MLIR_INVALID_HANDLE;
-    size_t ci = dom_intersect(d, ai, bi);
-    return d->po_blocks[ci];
 }
 
 // DFS post-order traversal helper. Frame-based, iterative.
@@ -1848,7 +1846,7 @@ static MLIR_ValueHandle create_arith_trunci(LiftState *st, MLIR_BlockHandle in_b
     operands[0] = src;
     MLIR_ValueHandle *results = arena_new_array(st->arena, MLIR_ValueHandle, 1);
     results[0] = MLIR_CreateValueOpResult(st->ctx, MLIR_INVALID_HANDLE, 0,
-                                          dst_ty, fresh_ssa_name(st->arena),
+                                          dst_ty, fresh_ssa_name(st),
                                           loc);
     MLIR_OpHandle op = MLIR_CreateOp(
         st->ctx, OP_TYPE_ARITH_TRUNCI, str_lit("arith.trunci"),
@@ -2042,7 +2040,7 @@ static MLIR_BlockHandle *transform_cycles_to_scf_loops(
         for (size_t i = 0; i < n_lh_args; ++i) {
             results[i] = MLIR_CreateValueOpResult(
                 st->ctx, MLIR_INVALID_HANDLE, (uint32_t)i, iter_arg_types[i],
-                fresh_ssa_name(arena), hdr_loc);
+                fresh_ssa_name(st), hdr_loc);
         }
         MLIR_RegionHandle *regions = arena_new_array(arena, MLIR_RegionHandle, 2);
         regions[0] = body_region;
@@ -2594,7 +2592,7 @@ static BranchXformResult transform_to_structured_cf_branches(
     for (size_t i = 0; i < n_cont_args; ++i) {
         if_results[i] = MLIR_CreateValueOpResult(
             st->ctx, MLIR_INVALID_HANDLE, (uint32_t)i, result_types[i],
-            fresh_ssa_name(arena), term_loc);
+            fresh_ssa_name(st), term_loc);
     }
 
     MLIR_OpHandle if_op;
@@ -2650,7 +2648,7 @@ static BranchXformResult transform_to_structured_cf_branches(
         MLIR_TypeHandle idx_ty = MLIR_CreateTypeIndex(st->ctx);
         MLIR_ValueHandle idx_v = MLIR_CreateValueOpResult(
             st->ctx, MLIR_INVALID_HANDLE, 0, idx_ty,
-            fresh_ssa_name(arena), term_loc);
+            fresh_ssa_name(st), term_loc);
         MLIR_OpHandle cast_op = MLIR_CreateOp(
             st->ctx, OP_TYPE_ARITH_INDEX_CAST, str_lit("arith.index_castui"),
             NULL, 0, &idx_ty, 1, &idx_v, 1, &flag, 1, NULL, 0,
@@ -2821,6 +2819,34 @@ static bool transform_cfg_to_scf_region(LiftState *st, Combiner *combiner,
             worklist[wl_n++] = r.new_sub_regions[i];
         }
     }
+    if (wl_n > 0) {
+        // Worklist still non-empty after `safety_limit` iterations.
+        // The remaining cf.* ops will fail downstream (wasmssa-lower
+        // rejects unstructured CFGs with a hard error); surface the
+        // cause here so the user can attribute it correctly. We use
+        // the corec io primitives rather than libc <stdio.h> because
+        // the native parser binary is built with `-nostdlib -nostdinc`.
+        string fn_op_name = MLIR_GetOpName(st->fn_op);
+        string fn_sym_name = str_lit("?");
+        MLIR_AttributeHandle sa =
+            MLIR_GetOpAttributeByName(st->fn_op, "sym_name");
+        if (sa != MLIR_INVALID_HANDLE &&
+            MLIR_GetAttributeKind(sa) == MLIR_ATTR_KIND_STRING) {
+            string s = MLIR_GetAttributeString(sa);
+            if (s.size > 0) fn_sym_name = s;
+        }
+        Scratch scratch = scratch_begin_avoid_conflict(st->arena);
+        string msg = format(
+            scratch.arena,
+            str_lit("lift-cf-to-scf: bailing out of {} @{} after {} "
+                    "worklist iterations (safety cap = {}); {} cf.* op(s) "
+                    "will remain in this region\n"),
+            fn_op_name, fn_sym_name,
+            (int64_t)safety_iter, (int64_t)safety_limit, (int64_t)wl_n);
+        ciovec_t iov = {.buf = msg.str, .buf_len = msg.size};
+        write_all(PLATFORM_STDERR_FD, &iov, 1);
+        scratch_end(scratch);
+    }
     return changed_any;
 }
 
@@ -2940,7 +2966,7 @@ static MLIR_ValueHandle get_switch_value(LiftState *st, unsigned v) {
     rt[0] = st->i32_ty;
     MLIR_ValueHandle r = MLIR_CreateValueOpResult(
         st->ctx, MLIR_INVALID_HANDLE, 0, st->i32_ty,
-        fresh_ssa_name(st->arena), st->unk_loc);
+        fresh_ssa_name(st), st->unk_loc);
     MLIR_ValueHandle *rs = arena_new_array(st->arena, MLIR_ValueHandle, 1);
     rs[0] = r;
     MLIR_AttributeHandle  val = MLIR_CreateAttributeInteger(
@@ -2980,7 +3006,7 @@ static MLIR_ValueHandle get_undef_value(LiftState *st, MLIR_TypeHandle ty) {
     rt[0] = ty;
     MLIR_ValueHandle r = MLIR_CreateValueOpResult(
         st->ctx, MLIR_INVALID_HANDLE, 0, ty,
-        fresh_ssa_name(st->arena), st->unk_loc);
+        fresh_ssa_name(st), st->unk_loc);
     MLIR_ValueHandle *rs = arena_new_array(st->arena, MLIR_ValueHandle, 1);
     rs[0] = r;
     MLIR_OpHandle op = MLIR_CreateOp(
