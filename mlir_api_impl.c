@@ -8,11 +8,6 @@
 #include "mlir_api.h"
 #include "mlir_op_names.h"
 #include "mlir_parser.h"
-#ifdef MLIR_HAS_NATIVE_LOWERING
-#include "mlir_llvm_to_wasmssa.h"
-#include "mlir_wasmssa_to_wasmstack.h"
-#include "mlir_wasmstack_to_bin.h"
-#endif
 #include <string.h>
 
 #ifdef __cplusplus
@@ -650,11 +645,10 @@ string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle th) {
         case TYPE_KIND_OPAQUE:
             return str_lit("unknown");
         case TYPE_KIND_INTEGER:
-            if (type->data.integer.is_signed) {
-                return format(arena, str_lit("i{}"), (int64_t)type->data.integer.width);
-            } else {
-                return format(arena, str_lit("ui{}"), (int64_t)type->data.integer.width);
-            }
+            // Signless `i{w}` regardless of `is_signed` — MLIR integers are
+            // signless by default and the upstream backend always produces
+            // `i{w}` from `MLIR_CreateTypeInteger`, so match it.
+            return format(arena, str_lit("i{}"), (int64_t)type->data.integer.width);
         case TYPE_KIND_FLOAT:
             if (type->data.floating.is_bfloat && type->data.floating.width == 16) {
                 return str_lit("bf16");
@@ -787,10 +781,16 @@ string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle th) {
 
 // Type creation
 MLIR_TypeHandle MLIR_CreateTypeInteger(MLIR_Context *ctx, uint32_t width, bool is_signed) {
+    // MLIR integer types are signless by default. The public API takes an
+    // `is_signed` flag for forward-compat, but the upstream backend ignores
+    // it (always constructs a signless `IntegerType`). Match that so both
+    // backends produce the same canonical type identity for `i{w}` and the
+    // wasm pipeline / lowering passes can compare types via handle equality.
+    (void)is_signed;
     IR_Type t = {0};
     t.kind = TYPE_KIND_INTEGER;
     t.data.integer.width = width;
-    t.data.integer.is_signed = is_signed;
+    t.data.integer.is_signed = false;
     return alloc_type(ctx, t);
 }
 
@@ -1144,11 +1144,13 @@ uint64_t MLIR_GetTypeLLVMArrayNumElements(MLIR_TypeHandle th) {
 }
 
 void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle th, uint32_t width, bool is_signed) {
+    // `is_signed` is intentionally ignored — see MLIR_CreateTypeInteger.
+    (void)is_signed;
     IR_Type *t = resolve_type(th);
     if (!t) return;
     t->kind = TYPE_KIND_INTEGER;
     t->data.integer.width = width;
-    t->data.integer.is_signed = is_signed;
+    t->data.integer.is_signed = false;
 }
 
 void MLIR_SetTypeFloatProperties(MLIR_TypeHandle th, uint32_t width, bool is_bfloat) {
@@ -1247,6 +1249,24 @@ MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *ctx, string
     for (size_t i = 0; i < count; i++) {
         s = str_concat(arena, s, i == 0 ? str_lit(": ") : str_lit(", "));
         s = str_concat(arena, s, format(arena, str_lit("{}"), (int64_t)values[i]));
+    }
+    s = str_concat(arena, s, str_lit(">"));
+    a.data.string_value = s;
+    return alloc_attr_obj(ctx, a);
+}
+
+// DenseI64 array attribute. Same string-encoded shape as DenseI32 but
+// with `i64` element type. Used by `scf.index_switch`'s `cases` attr.
+MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *ctx, string name,
+                                                       const int64_t *values, size_t count) {
+    IR_Attribute a = {0};
+    a.kind = ATTR_KIND_STRING;
+    a.name = name;
+    Arena *arena = ctx->arena;
+    string s = str_lit("array<i64");
+    for (size_t i = 0; i < count; i++) {
+        s = str_concat(arena, s, i == 0 ? str_lit(": ") : str_lit(", "));
+        s = str_concat(arena, s, format(arena, str_lit("{}"), values[i]));
     }
     s = str_concat(arena, s, str_lit(">"));
     a.data.string_value = s;
@@ -1717,95 +1737,403 @@ void MLIR_MoveBlockToRegionEnd(MLIR_Context *ctx, MLIR_BlockHandle block,
     MLIR_AppendRegionBlock(ctx, dest, block);
 }
 
-// Native lowering & LLVM-IR translation. Both delegate to the shared
-// implementations in mlir_lower_to_llvm.c / mlir_translate_to_llvm_ir.c
-// which only use the public mlir_api.h surface and therefore work
-// against the native backend.
-//
-// Bare-metal builds (parser, parser.exe, parser.wasm) only use the
-// MLIR parser surface and never call these entry points, so we provide
-// weak fallback definitions here. Hosted builds (tinyc_native,
-// tinyc_upstream) link mlir_lower_to_llvm.c / mlir_translate_to_llvm_ir.c
-// which override these with the real implementations. On compilers
-// without weak-symbol support (e.g. MSVC for the Windows parser build)
-// the strong stubs satisfy the link without conflict because those
-// builds don't pull in the real translation units. Hosted builds on
-// MSVC must define MLIR_HAS_NATIVE_LOWERING so the real symbols win.
-#if defined(__GNUC__) || defined(__clang__)
-#define MLIR_NATIVE_LOWERING_WEAK __attribute__((weak))
-#else
-#define MLIR_NATIVE_LOWERING_WEAK
-#endif
-
-bool mlir_lower_to_llvm_native(MLIR_Context *ctx, MLIR_OpHandle module);
-string mlir_translate_to_llvm_ir_native(MLIR_Context *ctx, MLIR_OpHandle module);
-
-#ifndef MLIR_HAS_NATIVE_LOWERING
-MLIR_NATIVE_LOWERING_WEAK bool
-mlir_lower_to_llvm_native(MLIR_Context *ctx, MLIR_OpHandle module) {
-    (void)ctx; (void)module;
-    return false;
+void MLIR_SetOpOperand(MLIR_Context *ctx, MLIR_OpHandle op,
+                       size_t idx, MLIR_ValueHandle value) {
+    (void)ctx;
+    IR_Op *o = resolve_op(op);
+    if (!o || idx >= o->n_operands) return;
+    o->operands[idx] = value;
 }
 
-MLIR_NATIVE_LOWERING_WEAK string
-mlir_translate_to_llvm_ir_native(MLIR_Context *ctx, MLIR_OpHandle module) {
-    (void)ctx; (void)module;
-    string s = {0};
-    return s;
-}
-#endif
-
-bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module,
-                             MLIR_LoweringBackend backend) {
-    (void)backend; // Native backend has no upstream pipeline to fall back on.
-    return mlir_lower_to_llvm_native(ctx, module);
+void MLIR_SetOpSuccessor(MLIR_Context *ctx, MLIR_OpHandle op,
+                         size_t succ_idx, MLIR_BlockHandle block) {
+    (void)ctx;
+    IR_Op *o = resolve_op(op);
+    if (!o || succ_idx >= o->n_successors) return;
+    o->successors[succ_idx] = block;
 }
 
-bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx, MLIR_OpHandle module,
-                                    MLIR_LoweringBackend backend) {
-    // The pure-native binary only links the in-tree lowering; there is no
-    // upstream `lift-cf-to-scf` pass available here. We therefore ignore
-    // `backend` and always take the native path. Callers requesting
-    // MLIR_LOWERING_UPSTREAM in this build get the native lowering with a
-    // diagnostic printed via the API's existing fprintf-on-stderr style;
-    // the bare-metal parser build can't print and silently falls through.
-    if (backend == MLIR_LOWERING_UPSTREAM) {
-#ifdef MLIR_HAS_NATIVE_LOWERING
-        fprintf(stderr,
-                "MLIR_LowerToLLVMDialectForWasm: upstream backend is not "
-                "available in the native build; using native lowering\n");
-#endif
+void MLIR_SetOpSuccessorOperands(MLIR_Context *ctx, MLIR_OpHandle op,
+                                 size_t succ_idx,
+                                 const MLIR_ValueHandle *values, size_t n) {
+    IR_Op *o = resolve_op(op);
+    if (!o || succ_idx >= o->n_successors) return;
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
+    if (!o->successor_operands) {
+        o->successor_operands = arena_new_array(arena, MLIR_ValueHandle *, o->n_successors);
+        for (size_t s = 0; s < o->n_successors; s++) o->successor_operands[s] = NULL;
     }
-    return mlir_lower_to_llvm_native(ctx, module);
+    if (!o->n_successor_operands) {
+        o->n_successor_operands = arena_new_array(arena, uint64_t, o->n_successors);
+        for (size_t s = 0; s < o->n_successors; s++) o->n_successor_operands[s] = 0;
+    }
+    if (n > 0) {
+        MLIR_ValueHandle *arr = arena_new_array(arena, MLIR_ValueHandle, n);
+        if (values) memcpy(arr, values, n * sizeof(MLIR_ValueHandle));
+        o->successor_operands[succ_idx] = arr;
+    } else {
+        o->successor_operands[succ_idx] = NULL;
+    }
+    o->n_successor_operands[succ_idx] = (uint64_t)n;
 }
 
-string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module,
-                                    MLIR_LoweringBackend backend) {
-    (void)backend;
-    return mlir_translate_to_llvm_ir_native(ctx, module);
+void MLIR_EraseBlock(MLIR_Context *ctx, MLIR_BlockHandle block) {
+    (void)ctx;
+    IR_Block *b = resolve_block(block);
+    if (!b) return;
+    IR_Region *r = resolve_region(b->parent_region);
+    if (r) {
+        size_t w = 0;
+        for (size_t i = 0; i < r->n_blocks; i++) {
+            if (r->blocks[i] != block) r->blocks[w++] = r->blocks[i];
+        }
+        r->n_blocks = w;
+    }
+    b->parent_region = MLIR_INVALID_HANDLE;
 }
 
-// MLIR_TranslateModuleToWasm: native backend chains the three stages
-// (llvm->wasmssa, wasmssa->wasmstack, wasmstack->bin) directly. Bare-metal
-// builds (parser only) don't define MLIR_HAS_NATIVE_LOWERING and get an
-// empty-string fallback. The upstream backend is only available in the
-// upstream-backed build (mlir_api_impl_upstream.cpp).
-string MLIR_TranslateModuleToWasm(MLIR_Context *ctx, MLIR_OpHandle module,
-                                  MLIR_LoweringBackend backend) {
-    (void)backend;
-#ifdef MLIR_HAS_NATIVE_LOWERING
-    string fail = {0};
-    MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(ctx, module);
-    if (!ssa) return fail;
-    MLIR_OpHandle stk = mlir_wasmssa_to_wasmstack(ctx, ssa);
-    if (!stk) return fail;
-    return mlir_wasmstack_to_bin(ctx, stk);
-#else
-    (void)ctx; (void)module;
-    string s = {0};
-    return s;
-#endif
+void MLIR_InsertRegionBlockAfter(MLIR_Context *ctx, MLIR_RegionHandle region,
+                                 MLIR_BlockHandle block, MLIR_BlockHandle after) {
+    if (region == MLIR_INVALID_HANDLE || block == MLIR_INVALID_HANDLE) return;
+    IR_Block *b = resolve_block(block);
+    if (!b) return;
+    // Detach from current region if any.
+    IR_Region *cur = resolve_region(b->parent_region);
+    if (cur) {
+        size_t w = 0;
+        for (size_t i = 0; i < cur->n_blocks; i++) {
+            if (cur->blocks[i] != block) cur->blocks[w++] = cur->blocks[i];
+        }
+        cur->n_blocks = w;
+    }
+    b->parent_region = MLIR_INVALID_HANDLE;
+
+    IR_Region *r = resolve_region(region);
+    if (!r) return;
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
+    // Find insertion index. after == MLIR_INVALID_HANDLE means insert at front.
+    size_t insert_at = 0;
+    if (after != MLIR_INVALID_HANDLE) {
+        insert_at = r->n_blocks; // default: append if `after` not found
+        for (size_t i = 0; i < r->n_blocks; i++) {
+            if (r->blocks[i] == after) { insert_at = i + 1; break; }
+        }
+    }
+    // Grow.
+    MLIR_BlockHandle *nb = arena_new_array(arena, MLIR_BlockHandle, r->n_blocks + 1);
+    if (insert_at > 0) memcpy(nb, r->blocks, insert_at * sizeof(MLIR_BlockHandle));
+    nb[insert_at] = block;
+    if (insert_at < r->n_blocks)
+        memcpy(nb + insert_at + 1, r->blocks + insert_at, (r->n_blocks - insert_at) * sizeof(MLIR_BlockHandle));
+    r->blocks = nb;
+    r->n_blocks++;
+    b->parent_region = region;
 }
+
+void MLIR_InsertRegionBlockBefore(MLIR_Context *ctx, MLIR_RegionHandle region,
+                                  MLIR_BlockHandle block, MLIR_BlockHandle before) {
+    if (region == MLIR_INVALID_HANDLE || block == MLIR_INVALID_HANDLE) return;
+    IR_Block *b = resolve_block(block);
+    if (!b) return;
+    IR_Region *cur = resolve_region(b->parent_region);
+    if (cur) {
+        size_t w = 0;
+        for (size_t i = 0; i < cur->n_blocks; i++) {
+            if (cur->blocks[i] != block) cur->blocks[w++] = cur->blocks[i];
+        }
+        cur->n_blocks = w;
+    }
+    b->parent_region = MLIR_INVALID_HANDLE;
+
+    IR_Region *r = resolve_region(region);
+    if (!r) return;
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
+    size_t insert_at = r->n_blocks; // append if not found / invalid
+    if (before != MLIR_INVALID_HANDLE) {
+        for (size_t i = 0; i < r->n_blocks; i++) {
+            if (r->blocks[i] == before) { insert_at = i; break; }
+        }
+    }
+    MLIR_BlockHandle *nb = arena_new_array(arena, MLIR_BlockHandle, r->n_blocks + 1);
+    if (insert_at > 0) memcpy(nb, r->blocks, insert_at * sizeof(MLIR_BlockHandle));
+    nb[insert_at] = block;
+    if (insert_at < r->n_blocks)
+        memcpy(nb + insert_at + 1, r->blocks + insert_at, (r->n_blocks - insert_at) * sizeof(MLIR_BlockHandle));
+    r->blocks = nb;
+    r->n_blocks++;
+    b->parent_region = region;
+}
+
+MLIR_OpHandle MLIR_GetBlockTerminator(MLIR_BlockHandle block) {
+    IR_Block *b = resolve_block(block);
+    if (!b || b->n_operations == 0) return MLIR_INVALID_HANDLE;
+    return b->operations[b->n_operations - 1];
+}
+
+MLIR_OpHandle MLIR_GetBlockParentOp(MLIR_BlockHandle block) {
+    IR_Block *b = resolve_block(block);
+    if (!b) return MLIR_INVALID_HANDLE;
+    MLIR_RegionHandle r = b->parent_region;
+    if (r == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
+    // Scan global op list to find which op owns this region.
+    for (size_t i = 0; i < g_n_all_ops; i++) {
+        IR_Op *op = resolve_op(g_all_ops[i]);
+        if (!op) continue;
+        for (size_t j = 0; j < op->n_regions; j++) {
+            if (op->regions[j] == r) return g_all_ops[i];
+        }
+    }
+    return MLIR_INVALID_HANDLE;
+}
+
+bool MLIR_BlockIsEntry(MLIR_BlockHandle block) {
+    IR_Block *b = resolve_block(block);
+    if (!b) return false;
+    IR_Region *r = resolve_region(b->parent_region);
+    if (!r || r->n_blocks == 0) return false;
+    return r->blocks[0] == block;
+}
+
+// Helper: count and enumerate predecessors of `block`. Walks all blocks in
+// the parent region; each terminator successor slot equal to `block` is one
+// predecessor entry. The (predecessor block, successor slot) pair is unique.
+static size_t native_collect_preds(MLIR_BlockHandle block,
+                                    MLIR_BlockHandle *out_preds,
+                                    size_t *out_succ_idxs,
+                                    size_t cap) {
+    IR_Block *b = resolve_block(block);
+    if (!b) return 0;
+    IR_Region *r = resolve_region(b->parent_region);
+    if (!r) return 0;
+    size_t n = 0;
+    for (size_t i = 0; i < r->n_blocks; i++) {
+        IR_Block *pb = resolve_block(r->blocks[i]);
+        if (!pb || pb->n_operations == 0) continue;
+        IR_Op *term = resolve_op(pb->operations[pb->n_operations - 1]);
+        if (!term) continue;
+        for (size_t s = 0; s < term->n_successors; s++) {
+            if (term->successors[s] == block) {
+                if (out_preds && n < cap) out_preds[n] = r->blocks[i];
+                if (out_succ_idxs && n < cap) out_succ_idxs[n] = s;
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+size_t MLIR_GetBlockNumPredecessors(MLIR_BlockHandle block) {
+    return native_collect_preds(block, NULL, NULL, 0);
+}
+
+MLIR_BlockHandle MLIR_GetBlockPredecessor(MLIR_BlockHandle block, size_t idx,
+                                          size_t *out_succ_idx) {
+    IR_Block *b = resolve_block(block);
+    if (!b) return MLIR_INVALID_HANDLE;
+    IR_Region *r = resolve_region(b->parent_region);
+    if (!r) return MLIR_INVALID_HANDLE;
+    size_t n = 0;
+    for (size_t i = 0; i < r->n_blocks; i++) {
+        IR_Block *pb = resolve_block(r->blocks[i]);
+        if (!pb || pb->n_operations == 0) continue;
+        IR_Op *term = resolve_op(pb->operations[pb->n_operations - 1]);
+        if (!term) continue;
+        for (size_t s = 0; s < term->n_successors; s++) {
+            if (term->successors[s] == block) {
+                if (n == idx) {
+                    if (out_succ_idx) *out_succ_idx = s;
+                    return r->blocks[i];
+                }
+                n++;
+            }
+        }
+    }
+    if (out_succ_idx) *out_succ_idx = SIZE_MAX;
+    return MLIR_INVALID_HANDLE;
+}
+
+MLIR_ValueHandle MLIR_AddBlockArgument(MLIR_Context *ctx, MLIR_BlockHandle block,
+                                       MLIR_TypeHandle type,
+                                       MLIR_LocationHandle loc) {
+    IR_Block *b = resolve_block(block);
+    if (!b) return MLIR_INVALID_HANDLE;
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
+    // Create the BlockArg value.
+    IR_Value *v = arena_new(arena, IR_Value);
+    *v = (IR_Value){0};
+    v->kind = BLOCK_ARG;
+    v->def_handle = (uintptr_t)block;
+    v->result_index = (uint32_t)b->n_arguments;
+    v->type = type;
+    v->register_name = (string){0};
+    v->location = loc;
+    MLIR_ValueHandle vh = (MLIR_ValueHandle)(uintptr_t)v;
+    // Append to block->arguments.
+    MLIR_ValueHandle *na = arena_new_array(arena, MLIR_ValueHandle,
+                                            b->n_arguments + 1);
+    if (b->n_arguments > 0)
+        memcpy(na, b->arguments, b->n_arguments * sizeof(MLIR_ValueHandle));
+    na[b->n_arguments] = vh;
+    b->arguments = na;
+    b->n_arguments++;
+    return vh;
+}
+
+void MLIR_EraseBlockArguments(MLIR_Context *ctx, MLIR_BlockHandle block,
+                              size_t start, size_t count) {
+    (void)ctx;
+    IR_Block *b = resolve_block(block);
+    if (!b || count == 0) return;
+    if (start >= b->n_arguments) return;
+    if (start + count > b->n_arguments) count = b->n_arguments - start;
+    // Shift remaining arguments down.
+    for (size_t i = start; i + count < b->n_arguments; i++)
+        b->arguments[i] = b->arguments[i + count];
+    b->n_arguments -= count;
+    // Re-number result_index of remaining args.
+    for (size_t i = start; i < b->n_arguments; i++) {
+        IR_Value *v = resolve_value(b->arguments[i]);
+        if (v) v->result_index = (uint32_t)i;
+    }
+}
+
+MLIR_BlockHandle MLIR_GetValueParentBlock(MLIR_ValueHandle value) {
+    IR_Value *v = resolve_value(value);
+    if (!v) return MLIR_INVALID_HANDLE;
+    if (v->kind == BLOCK_ARG)
+        return (MLIR_BlockHandle)v->def_handle;
+    if (v->kind == OP_RESULT) {
+        IR_Op *op = resolve_op((MLIR_OpHandle)v->def_handle);
+        if (!op) return MLIR_INVALID_HANDLE;
+        return op->parent_block;
+    }
+    return MLIR_INVALID_HANDLE;
+}
+
+size_t MLIR_GetValueNumUses(MLIR_Context *ctx, MLIR_ValueHandle value) {
+    (void)ctx;
+    if (value == MLIR_INVALID_HANDLE) return 0;
+    size_t n = 0;
+    for (size_t i = 0; i < g_n_all_ops; i++) {
+        IR_Op *op = resolve_op(g_all_ops[i]);
+        if (!op) continue;
+        for (size_t k = 0; k < op->n_operands; k++)
+            if (op->operands[k] == value) n++;
+        for (size_t s = 0; s < op->n_successors; s++)
+            for (size_t k = 0; k < op->n_successor_operands[s]; k++)
+                if (op->successor_operands[s][k] == value) n++;
+    }
+    return n;
+}
+
+MLIR_OpHandle MLIR_GetValueUseOwner(MLIR_Context *ctx, MLIR_ValueHandle value,
+                                    size_t idx, size_t *out_operand_idx) {
+    (void)ctx;
+    if (value == MLIR_INVALID_HANDLE) {
+        if (out_operand_idx) *out_operand_idx = SIZE_MAX;
+        return MLIR_INVALID_HANDLE;
+    }
+    size_t n = 0;
+    // Iterate in the same order as GetValueNumUses: regular operands first,
+    // then successor operands per successor.
+    for (size_t i = 0; i < g_n_all_ops; i++) {
+        IR_Op *op = resolve_op(g_all_ops[i]);
+        if (!op) continue;
+        for (size_t k = 0; k < op->n_operands; k++) {
+            if (op->operands[k] == value) {
+                if (n == idx) {
+                    if (out_operand_idx) *out_operand_idx = k;
+                    return g_all_ops[i];
+                }
+                n++;
+            }
+        }
+        // Successor-operand uses report a synthetic operand_idx of
+        // n_operands + sum-of-previous-segments + k. This matches MLIR's
+        // unified operand storage on the upstream side and lets callers
+        // pass the index to mutate via setOperand-style APIs.
+        size_t off = op->n_operands;
+        for (size_t s = 0; s < op->n_successors; s++) {
+            for (size_t k = 0; k < op->n_successor_operands[s]; k++) {
+                if (op->successor_operands[s][k] == value) {
+                    if (n == idx) {
+                        if (out_operand_idx) *out_operand_idx = off + k;
+                        return g_all_ops[i];
+                    }
+                    n++;
+                }
+            }
+            off += op->n_successor_operands[s];
+        }
+    }
+    if (out_operand_idx) *out_operand_idx = SIZE_MAX;
+    return MLIR_INVALID_HANDLE;
+}
+
+void MLIR_SetOpOperands(MLIR_Context *ctx, MLIR_OpHandle op,
+                        const MLIR_ValueHandle *values, size_t n) {
+    IR_Op *o = resolve_op(op);
+    if (!o) return;
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
+    MLIR_ValueHandle *nv = n ? arena_new_array(arena, MLIR_ValueHandle, n) : NULL;
+    for (size_t i = 0; i < n; i++) nv[i] = values ? values[i] : MLIR_INVALID_HANDLE;
+    o->operands = nv;
+    o->n_operands = n;
+}
+
+void MLIR_AppendOpSuccessorOperand(MLIR_Context *ctx, MLIR_OpHandle op,
+                                   size_t succ_idx, MLIR_ValueHandle value) {
+    IR_Op *o = resolve_op(op);
+    if (!o || succ_idx >= o->n_successors) return;
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
+    size_t old_n = o->n_successor_operands[succ_idx];
+    MLIR_ValueHandle *na = arena_new_array(arena, MLIR_ValueHandle, old_n + 1);
+    if (old_n > 0)
+        memcpy(na, o->successor_operands[succ_idx],
+               old_n * sizeof(MLIR_ValueHandle));
+    na[old_n] = value;
+    o->successor_operands[succ_idx] = na;
+    o->n_successor_operands[succ_idx] = old_n + 1;
+}
+
+void MLIR_SpliceBlockOps(MLIR_Context *ctx, MLIR_BlockHandle dst,
+                         MLIR_BlockHandle src) {
+    IR_Block *d = resolve_block(dst);
+    IR_Block *s = resolve_block(src);
+    if (!d || !s || s->n_operations == 0) return;
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
+    MLIR_OpHandle *no = arena_new_array(arena, MLIR_OpHandle,
+                                         d->n_operations + s->n_operations);
+    if (d->n_operations > 0)
+        memcpy(no, d->operations, d->n_operations * sizeof(MLIR_OpHandle));
+    memcpy(no + d->n_operations, s->operations,
+           s->n_operations * sizeof(MLIR_OpHandle));
+    // Reparent moved ops.
+    for (size_t i = 0; i < s->n_operations; i++) {
+        IR_Op *op = resolve_op(s->operations[i]);
+        if (op) op->parent_block = dst;
+    }
+    d->operations = no;
+    d->n_operations = d->n_operations + s->n_operations;
+    s->operations = NULL;
+    s->n_operations = 0;
+}
+
+// Native cf->scf lift: dispatch to the agnostic C port. The port handles
+// the patterns it understands and returns false otherwise; for native we
+// do not have an upstream fallback so callers (wasm lowering) will reject
+// any leftover cf ops at the wasmssa-lower stage.
+#include "mlir_lift_cf_to_scf.h"
+bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module) {
+    return MLIR_LiftCfToScfNative(ctx, module);
+}
+
+// The lowering / LLVM-IR-translation / wasm-translation entry points
+// declared in mlir_api.h are implemented in dedicated agnostic
+// translation units (mlir_lower_to_llvm.c, mlir_translate_to_llvm_ir.c,
+// mlir_translate_to_wasm.c). They are linked into hosted builds
+// alongside this file. There is no parser-only "native" build, so we
+// no longer need fallback stubs here.
 
 #ifdef __cplusplus
 }

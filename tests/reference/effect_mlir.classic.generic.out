@@ -8,61 +8,61 @@ module() {
         %c0_i64_2 = arith.constant() {value = 0} -> i64
         %0 = arith.cmpi(%c0_i64_1: i64, %c0_i64_2: i64) {predicate = "ne"} -> i1
         %false = arith.constant() {value = false} -> i1
-        cf.cond_br(%0: i1, %false: i1, %c0_i64_0: i64)
+        cf.cond_br(%0: i1, %false: i1, %c0_i64_0: i64) [^bb1, ^bb2]
     ^bb1:
         %1 = func.call() {callee = @effect} -> i64
         %c0_i64_3 = arith.constant() {value = 0} -> i64
         %2 = arith.cmpi(%1: i64, %c0_i64_3: i64) {predicate = "ne"} -> i1
-        cf.br(%2: i1, %1: i64)
+        cf.br(%2: i1, %1: i64) [^bb2]
     ^bb2(%3: i1, %4: i64):
         %5 = arith.extui(%3: i1) -> i64
         %c0_i64_4 = arith.constant() {value = 0} -> i64
         %6 = arith.cmpi(%5: i64, %c0_i64_4: i64) {predicate = "ne"} -> i1
-        cf.cond_br(%6: i1)
+        cf.cond_br(%6: i1) [^bb3, ^bb4]
     ^bb3:
         %c1_i64 = arith.constant() {value = 1} -> i64
         return(%c1_i64: i64)
     ^bb4:
-        cf.br()
+        cf.br() [^bb5]
     ^bb5:
         %c0_i64_5 = arith.constant() {value = 0} -> i64
         %7 = arith.cmpi(%4: i64, %c0_i64_5: i64) {predicate = "ne"} -> i1
-        cf.cond_br(%7: i1)
+        cf.cond_br(%7: i1) [^bb6, ^bb7]
     ^bb6:
         %c2_i64 = arith.constant() {value = 2} -> i64
         return(%c2_i64: i64)
     ^bb7:
-        cf.br()
+        cf.br() [^bb8]
     ^bb8:
         %c1_i64_6 = arith.constant() {value = 1} -> i64
         %c0_i64_7 = arith.constant() {value = 0} -> i64
         %8 = arith.cmpi(%c1_i64_6: i64, %c0_i64_7: i64) {predicate = "ne"} -> i1
         %false_8 = arith.constant() {value = false} -> i1
-        cf.cond_br(%8: i1, %false_8: i1, %4: i64)
+        cf.cond_br(%8: i1, %false_8: i1, %4: i64) [^bb9, ^bb10]
     ^bb9:
         %9 = func.call() {callee = @effect} -> i64
         %c0_i64_9 = arith.constant() {value = 0} -> i64
         %10 = arith.cmpi(%9: i64, %c0_i64_9: i64) {predicate = "ne"} -> i1
-        cf.br(%10: i1, %9: i64)
+        cf.br(%10: i1, %9: i64) [^bb10]
     ^bb10(%11: i1, %12: i64):
         %13 = arith.extui(%11: i1) -> i64
         %c0_i64_10 = arith.constant() {value = 0} -> i64
         %14 = arith.cmpi(%13: i64, %c0_i64_10: i64) {predicate = "ne"} -> i1
-        cf.cond_br(%14: i1)
+        cf.cond_br(%14: i1) [^bb11, ^bb15]
     ^bb11:
         %c1_i64_11 = arith.constant() {value = 1} -> i64
         %15 = arith.cmpi(%12: i64, %c1_i64_11: i64) {predicate = "ne"} -> i1
         %16 = arith.extui(%15: i1) -> i64
         %c0_i64_12 = arith.constant() {value = 0} -> i64
         %17 = arith.cmpi(%16: i64, %c0_i64_12: i64) {predicate = "ne"} -> i1
-        cf.cond_br(%17: i1)
+        cf.cond_br(%17: i1) [^bb12, ^bb13]
     ^bb12:
         %c3_i64 = arith.constant() {value = 3} -> i64
         return(%c3_i64: i64)
     ^bb13:
-        cf.br()
+        cf.br() [^bb14]
     ^bb14:
-        cf.br()
+        cf.br() [^bb16]
     ^bb15:
         %c4_i64 = arith.constant() {value = 4} -> i64
         return(%c4_i64: i64)
@@ -72,28 +72,28 @@ module() {
         %c0_i64_15 = arith.constant() {value = 0} -> i64
         %18 = arith.cmpi(%c1_i64_14: i64, %c0_i64_15: i64) {predicate = "ne"} -> i1
         %true = arith.constant() {value = true} -> i1
-        cf.cond_br(%18: i1, %true: i1, %c0_i64_13: i64)
+        cf.cond_br(%18: i1, %true: i1, %c0_i64_13: i64) [^bb18, ^bb17]
     ^bb17:
         %19 = func.call() {callee = @effect} -> i64
         %c0_i64_16 = arith.constant() {value = 0} -> i64
         %20 = arith.cmpi(%19: i64, %c0_i64_16: i64) {predicate = "ne"} -> i1
-        cf.br(%20: i1, %19: i64)
+        cf.br(%20: i1, %19: i64) [^bb18]
     ^bb18(%21: i1, %22: i64):
         %23 = arith.extui(%21: i1) -> i64
         %c0_i64_17 = arith.constant() {value = 0} -> i64
         %24 = arith.cmpi(%23: i64, %c0_i64_17: i64) {predicate = "ne"} -> i1
-        cf.cond_br(%24: i1)
+        cf.cond_br(%24: i1) [^bb19, ^bb23]
     ^bb19:
         %c0_i64_18 = arith.constant() {value = 0} -> i64
         %25 = arith.cmpi(%22: i64, %c0_i64_18: i64) {predicate = "ne"} -> i1
-        cf.cond_br(%25: i1)
+        cf.cond_br(%25: i1) [^bb20, ^bb21]
     ^bb20:
         %c5_i64 = arith.constant() {value = 5} -> i64
         return(%c5_i64: i64)
     ^bb21:
-        cf.br()
+        cf.br() [^bb22]
     ^bb22:
-        cf.br()
+        cf.br() [^bb24]
     ^bb23:
         %c6_i64 = arith.constant() {value = 6} -> i64
         return(%c6_i64: i64)
@@ -102,31 +102,31 @@ module() {
         %c0_i64_20 = arith.constant() {value = 0} -> i64
         %26 = arith.cmpi(%c0_i64_19: i64, %c0_i64_20: i64) {predicate = "ne"} -> i1
         %true_21 = arith.constant() {value = true} -> i1
-        cf.cond_br(%26: i1, %true_21: i1, %22: i64)
+        cf.cond_br(%26: i1, %true_21: i1, %22: i64) [^bb26, ^bb25]
     ^bb25:
         %27 = func.call() {callee = @effect} -> i64
         %c0_i64_22 = arith.constant() {value = 0} -> i64
         %28 = arith.cmpi(%27: i64, %c0_i64_22: i64) {predicate = "ne"} -> i1
-        cf.br(%28: i1, %27: i64)
+        cf.br(%28: i1, %27: i64) [^bb26]
     ^bb26(%29: i1, %30: i64):
         %31 = arith.extui(%29: i1) -> i64
         %c0_i64_23 = arith.constant() {value = 0} -> i64
         %32 = arith.cmpi(%31: i64, %c0_i64_23: i64) {predicate = "ne"} -> i1
-        cf.cond_br(%32: i1)
+        cf.cond_br(%32: i1) [^bb27, ^bb31]
     ^bb27:
         %c1_i64_24 = arith.constant() {value = 1} -> i64
         %33 = arith.cmpi(%30: i64, %c1_i64_24: i64) {predicate = "ne"} -> i1
         %34 = arith.extui(%33: i1) -> i64
         %c0_i64_25 = arith.constant() {value = 0} -> i64
         %35 = arith.cmpi(%34: i64, %c0_i64_25: i64) {predicate = "ne"} -> i1
-        cf.cond_br(%35: i1)
+        cf.cond_br(%35: i1) [^bb28, ^bb29]
     ^bb28:
         %c7_i64 = arith.constant() {value = 7} -> i64
         return(%c7_i64: i64)
     ^bb29:
-        cf.br()
+        cf.br() [^bb30]
     ^bb30:
-        cf.br()
+        cf.br() [^bb32]
     ^bb31:
         %c8_i64 = arith.constant() {value = 8} -> i64
         return(%c8_i64: i64)

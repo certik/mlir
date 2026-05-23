@@ -368,6 +368,10 @@ MLIR_OpType op_string_to_type(string opname) {
         return OP_TYPE_SCF_IF;
     } else if (str_eq(opname, str_lit("scf.yield"))) {
         return OP_TYPE_SCF_YIELD;
+    } else if (str_eq(opname, str_lit("scf.condition"))) {
+        return OP_TYPE_SCF_CONDITION;
+    } else if (str_eq(opname, str_lit("scf.index_switch"))) {
+        return OP_TYPE_SCF_INDEX_SWITCH;
     } else if (str_eq(opname, str_lit("tt.get_program_id"))) {
         return OP_TYPE_TT_GET_PROGRAM_ID;
     } else if (str_eq(opname, str_lit("tt.load"))) {

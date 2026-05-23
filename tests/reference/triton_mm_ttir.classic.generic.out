@@ -21,7 +21,7 @@ module() {
         %c256_i32 = arith.constant() {value = 256} -> i32
         %0 = arith.muli(%arg3: i32, %c256_i32: i32) -> i32
         %1 = arith.cmpi(%0: i32, %c0_i32: i32) {predicate = "eq"} -> i1
-        cf.cond_br(%1: i1)
+        cf.cond_br(%1: i1) [^bb1, ^bb2]
     ^bb1:
         tt.return()
     ^bb2:

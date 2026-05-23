@@ -2,6 +2,7 @@
 // MLIR module, print to stdout (or to -o <path>).
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <base/arena.h>
@@ -59,15 +60,31 @@ int app_main(void) {
     argv[argc] = NULL;
 
     typedef string (*PrintFn)(MLIR_Context *, MLIR_OpHandle);
-    PrintFn print_fn = MLIR_PrintOperationUpstream;
+    // Use the generic printer: works with both backends (native + upstream)
+    // and against any op, so `--emit=mlir` and `--emit=lowered` produce
+    // identical output regardless of which tinyc binary was built.
+    PrintFn print_fn = MLIR_PrintOperationGeneric;
     bool emit_llvm = false;
     bool emit_lowered = false;
     bool emit_wasm = false;
     bool emit_wasmssa = false;
     bool emit_wasmstack = false;
     bool emit_wat = false;
-    MLIR_LoweringBackend lowering = MLIR_LOWERING_UPSTREAM;
-    bool lowering_explicit = false;
+    // `--lowering=upstream` switches the four lowering / translation calls
+    // below to the *Upstream variants (which run upstream MLIR's pass
+    // pipeline / translator / LLVM target machine). Only available in the
+    // upstream-backed tinyc binary, which is the only build that defines
+    // TINYC_HAS_UPSTREAM and links the *Upstream implementations.
+    typedef bool (*LowerFn)(MLIR_Context *, MLIR_OpHandle);
+    typedef string (*TranslateFn)(MLIR_Context *, MLIR_OpHandle);
+    LowerFn lower_fn;
+    LowerFn lower_for_wasm_fn;
+    TranslateFn translate_to_llvm_fn;
+    TranslateFn translate_to_wasm_fn;
+#ifdef TINYC_HAS_UPSTREAM
+    bool use_upstream = true;       // default in the upstream build
+    bool lowering_explicit = false; // tracks whether user passed --lowering=
+#endif
     char *output_file = NULL;
 
     // Multiple positional input files (multi-file compilation merges them
@@ -91,8 +108,24 @@ int app_main(void) {
         else if (strcmp(argv[i], "--emit=wasmssa") == 0) { emit_wasmssa = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmstack = false; emit_wat = false; }
         else if (strcmp(argv[i], "--emit=wasmstack") == 0) { emit_wasmstack = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wat = false; }
         else if (strcmp(argv[i], "--emit=wat")     == 0) { emit_wat = true;     emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; }
-        else if (strcmp(argv[i], "--lowering=upstream") == 0) { lowering = MLIR_LOWERING_UPSTREAM; lowering_explicit = true; }
-        else if (strcmp(argv[i], "--lowering=native")   == 0) { lowering = MLIR_LOWERING_NATIVE; lowering_explicit = true; }
+        else if (strcmp(argv[i], "--lowering=upstream") == 0) {
+#ifdef TINYC_HAS_UPSTREAM
+            use_upstream = true; lowering_explicit = true;
+#else
+            fprintf(stderr,
+                    "tinyc: --lowering=upstream is not supported in this "
+                    "build (rebuild with the upstream backend to use it)\n");
+            arena_destroy(boot_arena);
+            return 1;
+#endif
+        }
+        else if (strcmp(argv[i], "--lowering=native") == 0) {
+#ifdef TINYC_HAS_UPSTREAM
+            use_upstream = false; lowering_explicit = true;
+#endif
+            // In the native-only build this is already the only option;
+            // accept it silently.
+        }
         else if (strncmp(argv[i], "-I", 2) == 0 && argv[i][2] != '\0') {
             include_dirs[n_include_dirs++] = str_from_cstr_view(argv[i] + 2);
         } else if (strcmp(argv[i], "-I") == 0 && i + 1 < argc) {
@@ -116,16 +149,40 @@ int app_main(void) {
         return 1;
     }
 
-    if ((emit_wasmssa || emit_wasmstack) && lowering_explicit &&
-            lowering == MLIR_LOWERING_UPSTREAM) {
+    if ((emit_wasmssa || emit_wasmstack) &&
+#ifdef TINYC_HAS_UPSTREAM
+            lowering_explicit && use_upstream
+#else
+            false
+#endif
+            ) {
         fprintf(stderr,
                 "tinyc: --emit=wasmssa/wasmstack require --lowering=native "
                 "(upstream lowering does not produce these IRs)\n");
         arena_destroy(boot_arena);
         return 1;
     }
+#ifdef TINYC_HAS_UPSTREAM
     if (emit_wasmssa || emit_wasmstack) {
-        lowering = MLIR_LOWERING_NATIVE;
+        use_upstream = false;
+    }
+    if (use_upstream) {
+        lower_fn = MLIR_LowerToLLVMDialectUpstream;
+        // Upstream's wasm path goes through LLVM's WebAssembly target,
+        // which expects full LLVM-dialect (post scf->cf) input. The
+        // *ForWasmUpstream variant (cf->scf lift + leave scf in place)
+        // exists for the cross-case "upstream lift, native wasm
+        // pipeline" comparison, not for the regular upstream wasm flow.
+        lower_for_wasm_fn = MLIR_LowerToLLVMDialectUpstream;
+        translate_to_llvm_fn = MLIR_TranslateModuleToLLVMIRUpstream;
+        translate_to_wasm_fn = MLIR_TranslateModuleToWasmUpstream;
+    } else
+#endif
+    {
+        lower_fn = MLIR_LowerToLLVMDialect;
+        lower_for_wasm_fn = MLIR_LowerToLLVMDialectForWasm;
+        translate_to_llvm_fn = MLIR_TranslateModuleToLLVMIR;
+        translate_to_wasm_fn = MLIR_TranslateModuleToWasm;
     }
 
     Arena *arena = arena_create(64 * 1024 * 1024);
@@ -162,12 +219,16 @@ int app_main(void) {
     if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat) {
         bool needs_wasm_lowering = emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat;
         bool ok = needs_wasm_lowering
-                      ? MLIR_LowerToLLVMDialectForWasm(&ctx, module, lowering)
-                      : MLIR_LowerToLLVMDialect(&ctx, module, lowering);
+                      ? lower_for_wasm_fn(&ctx, module)
+                      : lower_fn(&ctx, module);
         if (!ok) {
             arena_destroy(arena);
             arena_destroy(boot_arena);
             return 1;
+        }
+        if (getenv("TINYC_DUMP_LOWERED")) {
+            string s = MLIR_PrintOperationGeneric(&ctx, module);
+            println(str_lit("{}"), s);
         }
     }
     string out;
@@ -194,7 +255,7 @@ int app_main(void) {
         }
         out = MLIR_PrintOperationGeneric(&ctx, stk);
     } else if (emit_wat) {
-        string bin = MLIR_TranslateModuleToWasm(&ctx, module, lowering);
+        string bin = translate_to_wasm_fn(&ctx, module);
         if (bin.size == 0) {
             arena_destroy(arena);
             arena_destroy(boot_arena);
@@ -202,14 +263,14 @@ int app_main(void) {
         }
         out = mlir_wasm_binary_to_wat(&ctx, bin);
     } else if (emit_wasm) {
-        out = MLIR_TranslateModuleToWasm(&ctx, module, lowering);
+        out = translate_to_wasm_fn(&ctx, module);
         if (out.size == 0) {
             arena_destroy(arena);
             arena_destroy(boot_arena);
             return 1;
         }
     } else if (emit_llvm) {
-        out = MLIR_TranslateModuleToLLVMIR(&ctx, module, lowering);
+        out = translate_to_llvm_fn(&ctx, module);
         if (out.size == 0) {
             arena_destroy(arena);
             arena_destroy(boot_arena);

@@ -39,6 +39,7 @@ SOURCES=(
     op_parsers.c
     mlir_api_impl.c
     mlir_op_names.c
+    mlir_lift_cf_to_scf.c
     corec-stdlib/stdlib/stdio.c
     corec-stdlib/stdlib/stdlib.c
     corec-stdlib/stdlib/printf.c
