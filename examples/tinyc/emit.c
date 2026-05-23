@@ -3231,14 +3231,18 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
                 r.val = res; r.is_float = true; r.is_f64 = !is_f32; return r;
             }
-            // Built-in malloc(size) -> !llvm.ptr; size is i32 (typically
-            // sizeof), extended to i64 for the libc signature.
+            // Built-in malloc(size) -> !llvm.ptr. The libc signature
+            // takes i64, so accept any integer expression (i32, i64,
+            // pointer-sized) and coerce up to i64. Using emit_expr +
+            // coerce_eval avoids emitting a no-op `arith.extsi i64->i64`
+            // when the source is already size_t-sized (e.g. `size_t n;
+            // malloc(n)` on a 64-bit host).
             if (!indirect_fnty && str_eq(ex->callee, str_lit("malloc"))) {                if (ex->args.size != 1) {
                     EMIT_ERR(e, "malloc expects 1 argument");
                     r.val = emit_null_ptr(e); r.is_ptr = true; return r;
                 }
-                MLIR_ValueHandle sz_i32 = emit_expr_i32(e, sc, ex->args.data[0]);
-                MLIR_ValueHandle sz_i64 = emit_extsi_i32_to_i64(e, sz_i32);
+                EVal sz_v = emit_expr(e, sc, ex->args.data[0]);
+                MLIR_ValueHandle sz_i64 = coerce_eval(e, sz_v, e->i64);
                 MLIR_ValueHandle res = MLIR_CreateValueOpResult(
                     e->ctx, MLIR_INVALID_HANDLE, 0, e->ptr, ssa_name(e), eloc(e, 0));
                 MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->ptr;
