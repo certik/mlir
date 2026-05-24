@@ -2459,8 +2459,17 @@ static BranchXformResult transform_to_structured_cf_branches(
     // takes the blocks out of `continuation`'s region — afterwards
     // MLIR_GetBlockNumPredecessors(continuation) can no longer see them
     // (predecessor lookup is region-scoped). PredRec is at file scope.
+    // The upper bound on entries is the total number of terminator
+    // successor slots (a cf.switch terminator can contribute multiple
+    // edges into `continuation` from a single branch block).
     size_t max_preds = 0;
-    for (size_t i = 0; i < num_succ; ++i) max_preds += n_br[i];
+    for (size_t i = 0; i < num_succ; ++i) {
+        for (size_t k = 0; k < n_br[i]; ++k) {
+            MLIR_OpHandle bterm = MLIR_GetBlockTerminator(branch_regions[i][k]);
+            if (bterm == MLIR_INVALID_HANDLE) continue;
+            max_preds += MLIR_GetOpNumSuccessors(bterm);
+        }
+    }
     PredRec *preds = max_preds
         ? arena_new_array(arena, PredRec, max_preds) : NULL;
     size_t n_preds = 0;
