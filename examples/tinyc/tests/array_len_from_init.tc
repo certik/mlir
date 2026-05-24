@@ -1,0 +1,41 @@
+// Regression test: `T arr[] = { ... };` must infer `array_len` from the
+// number of initializers. Previously tinyc left `array_len = 0` for an
+// empty `[]` and an aggregate initializer, so `sizeof(arr) / sizeof(arr[0])`
+// evaluated to 0 / sizeof(elem) = 0. Loops over the array (`for (i = 0;
+// i < N; i++)` where `N` is that expression) ran zero iterations.
+//
+// This is exactly the shape used by `mlir_llvm_to_wasmssa.c`'s `btab[]`
+// (anonymous struct of `{ const char *, uint8_t, uint8_t }`) — when
+// stage-1 tinyc compiled it, the inferred-length-0 baked into the binary
+// caused stage-2 to silently fall through the loop and report every op
+// (`llvm.add`, `llvm.sub`, etc.) as "unsupported".
+
+typedef unsigned char uint8_t;
+
+int main() {
+    // Anonymous local struct array, length implied by initializer count.
+    struct { const char *nm; uint8_t a; uint8_t b; } tab[] = {
+        { "llvm.add", 0x6a, 0x7c },
+        { "llvm.sub", 0x6b, 0x7d },
+        { "llvm.mul", 0x6c, 0x7e },
+    };
+    int n = (int)(sizeof(tab) / sizeof(tab[0]));
+    _tinyc_print(n);  // 3
+
+    // Same shape for an int array — length implied from initializer count.
+    int ints[] = { 10, 20, 30, 40 };
+    int m = (int)(sizeof(ints) / sizeof(ints[0]));
+    _tinyc_print(m);  // 4
+
+    // And for char arrays initialised from an aggregate (not a string lit).
+    char chars[] = { 'a', 'b', 'c' };
+    int k = (int)sizeof(chars);
+    _tinyc_print(k);  // 3
+
+    // Loop using the inferred length — must visit all entries.
+    int sum = 0;
+    for (int i = 0; i < n; i++) sum += (int)tab[i].a + (int)tab[i].b;
+    _tinyc_print(sum);  // 0x6a+0x7c + 0x6b+0x7d + 0x6c+0x7e = 696
+
+    return 0;
+}

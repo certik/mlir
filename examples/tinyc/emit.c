@@ -5241,8 +5241,24 @@ static int64_t type_size(E *e, Type t) {
         return off;
     }
     if (t.kind == TY_ARRAY_STRUCT) {
-        Type elt = (Type){.kind = TY_STRUCT, .struct_name = t.struct_name};
-        return type_size(e, elt) * t.array_len;
+        // Inline the TY_STRUCT branch by name rather than recursing
+        // with a Type-by-value parameter — passing a Type with
+        // `kind == TY_STRUCT` re-into `type_size` (which itself takes
+        // `Type` by value) hit a clang -Os miscompile on wasm32-wasi
+        // that returned 0 for the array's element size.
+        StructDef *sd = find_struct(e, t.struct_name);
+        if (!sd) return 0;
+        int64_t off = 0, max_align = 1;
+        for (size_t i = 0; i < sd->fields.size; i++) {
+            Type ft = sd->fields.data[i].type;
+            int64_t fa = type_align(e, ft);
+            int64_t fs = type_size(e, ft);
+            if (fa > max_align) max_align = fa;
+            off = (off + fa - 1) / fa * fa;
+            off += fs;
+        }
+        if (max_align > 0) off = (off + max_align - 1) / max_align * max_align;
+        return off * t.array_len;
     }
     return 0;
 }

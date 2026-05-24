@@ -934,3 +934,12 @@ name = "sizeof_struct_ptr_wasm32"
 # which manifested as stage-2 selfhost zeroing internal pass state
 # inside `mlir_llvm_to_wasmssa`.
 expected_stdout = "0\n"
+
+[[test]]
+name = "array_len_from_init"
+# Regression for parser bug #37: `T arr[] = { e1, e2, ... };` must
+# infer `array_len` from the initializer count. Previously tinyc left
+# `array_len = 0`, so `sizeof(arr) / sizeof(arr[0])` was 0 and any
+# loop `for (i = 0; i < N; i++)` ran zero iterations. Exactly the
+# shape used by `btab[]` in `mlir_llvm_to_wasmssa.c`.
+expected_stdout = "3\n4\n3\n696\n"
