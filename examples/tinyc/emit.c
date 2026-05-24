@@ -4725,7 +4725,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             for (size_t i = 0; i < nc; i++) {
                 SwitchCase *c = &st->switch_cases.data[i];
                 if (c->is_default) continue;
-                MLIR_ValueHandle val = emit_const_i32(e, c->value);
+                MLIR_ValueHandle val = cv.is_i64 ? emit_const_i64(e, c->value)
+                                                 : emit_const_i32(e, c->value);
                 MLIR_ValueHandle eq = emit_cmpi(e, /*eq*/ 0, cond_v, val);
                 MLIR_BlockHandle next_test = new_cfg_block(e);
                 emit_cond_branch(e, eq, case_blocks[i], next_test);

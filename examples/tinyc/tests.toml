@@ -789,3 +789,7 @@ expected_stdout = "50\n"
 name = "builtin_wasm_memory"
 native_skip = true
 expected_stdout = "42\n"
+
+[[test]]
+name = "i64_compare_intlit"
+expected_stdout = "10\n20\n30\n10\n30\n60\n-1\n"

@@ -1,0 +1,49 @@
+// Regression test: comparing an i64 lvalue against an unsuffixed int
+// literal should emit a properly-typed wasm comparison. Specifically,
+// switch() on an `int64_t` previously emitted `i32.const N` for each
+// case label and ran `arith.cmpi` between an i64 and an i32, producing
+// a wasm validation failure of the form
+//
+//   type mismatch in i64.eq, expected [i64, i64] but got [i64, i32]
+//
+// This blocked the wasm32-wasi self-host of tinyc because
+// `mlir_llvm_to_wasmssa.c` switches on `int64_t pred` values.
+//
+// We use `long long` to force the i64 type (tinyc's `int` is i32 on
+// its native target).
+
+long long g_count;
+
+long long get_one() { return 1; }
+
+int classify(long long v) {
+    switch (v) {
+    case 1: return 10;
+    case 2: return 20;
+    case 3: return 30;
+    case 4: return 40;
+    case 5: return 50;
+    case 6: return 60;
+    default: return -1;
+    }
+}
+
+int main() {
+    g_count = 1;
+    if (g_count == 1) {
+        _tinyc_print(10);
+    }
+    g_count = 5;
+    if (g_count == 5) {
+        _tinyc_print(20);
+    }
+    long long x = get_one();
+    if (x != 0) {
+        _tinyc_print(30);
+    }
+    _tinyc_print(classify(1));
+    _tinyc_print(classify(3));
+    _tinyc_print(classify(6));
+    _tinyc_print(classify(99));
+    return 0;
+}
