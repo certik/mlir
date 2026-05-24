@@ -1226,6 +1226,39 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                     }
                 }
             }
+            // Array-of-char-pointers chained indexing:
+            //   `const char *T[N]; ... T[i][j]`.
+            // Step 1: GEP into the local array at index i to get the slot
+            //         that holds the inner char*.
+            // Step 2: load that slot to obtain the inner char*.
+            // Step 3: GEP char* + j (stride 1) -> ptr-to-char.
+            if (ex->lhs->kind == EX_INDEX &&
+                ex->lhs->lhs->kind == EX_VAR) {
+                Sym *s = lookup(e, sc, ex->lhs->lhs->name);
+                if (s && (s->type.kind == TY_ARRAY_PTR_CHAR ||
+                          s->type.kind == TY_ARRAY_PTR_STRUCT)) {
+                    MLIR_ValueHandle i_v = emit_expr_i32(e, sc, ex->lhs->rhs);
+                    MLIR_ValueHandle j_v = emit_expr_i32(e, sc, ex->rhs);
+                    MLIR_TypeHandle arr_ty = MLIR_CreateTypeLLVMArray(
+                        e->ctx, e->ptr, (uint64_t)s->type.array_len);
+                    int32_t *path1 = arena_new_array(e->arena, int32_t, 2);
+                    path1[0] = 0; path1[1] = LLVM_GEP_DYN;
+                    MLIR_ValueHandle *dyn1 = arena_new_array(e->arena, MLIR_ValueHandle, 1);
+                    dyn1[0] = i_v;
+                    MLIR_ValueHandle slot = emit_gep(e, sym_addr(e, s),
+                        arr_ty, path1, 2, dyn1, 1);
+                    MLIR_ValueHandle inner = emit_load_v(e, slot, e->ptr);
+                    MLIR_TypeHandle elem = (s->type.kind == TY_ARRAY_PTR_CHAR)
+                        ? e->i8 : e->ptr;
+                    int32_t *path2 = arena_new_array(e->arena, int32_t, 1);
+                    path2[0] = LLVM_GEP_DYN;
+                    MLIR_ValueHandle *dyn2 = arena_new_array(e->arena, MLIR_ValueHandle, 1);
+                    dyn2[0] = j_v;
+                    r.base_ptr = emit_gep(e, inner, elem, path2, 1, dyn2, 1);
+                    r.elem_ty = elem;
+                    return r;
+                }
+            }
             // Pointer-to-pointer chained indexing: pp[i][j] where pp is T**.
             // Step 1: GEP pp+i (stride sizeof(ptr)) -> ptr-to-ptr.
             // Step 2: load that to obtain the inner T*.

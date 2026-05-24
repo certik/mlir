@@ -27,6 +27,10 @@ name = "nested_aggregate_init"
 expected_stdout = "7\n3\n4\n11\n1\n2\n30\n40\n99\n"
 
 [[test]]
+name = "array_of_charptr_index"
+expected_stdout = "597\n97\n102\n"
+
+[[test]]
 name = "return"
 expected_stdout = "3\n-1\n"
 

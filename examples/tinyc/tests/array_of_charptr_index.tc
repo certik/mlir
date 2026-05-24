@@ -1,0 +1,31 @@
+// Regression test for chained indexing into a local array of `char *`.
+//
+// `const char *T[N]; ... T[i][j]` is the pattern used in
+// examples/tinyc/preprocess.c (the MULTI3/MULTI2 dispatch tables).
+// Tinyc's lvalue path previously only handled the analogous `pp[i][j]`
+// for `T **pp`, and rejected the array-typed source with
+//   "only simple-array indexing is supported".
+//
+// The fix mirrors the TY_PTR_PTR case: GEP the array to obtain the
+// slot, load the inner `char *`, then GEP by the inner index with
+// stride 1.
+
+int main(void) {
+    const char *T[4];
+    T[0] = "ab";
+    T[1] = "cd";
+    T[2] = "ef";
+    T[3] = 0;
+
+    int total = 0;
+    int k = 0;
+    while (T[k]) {
+        total = total + T[k][0];
+        total = total + T[k][1];
+        k++;
+    }
+    _tinyc_print(total);
+    _tinyc_print(T[0][0]);
+    _tinyc_print(T[2][1]);
+    return 0;
+}
