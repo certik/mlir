@@ -3617,11 +3617,17 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                             ae->cast_type.kind == TY_VOID) {
                             ae->cast_type = ft;
                         }
-                        EVal vv = emit_expr(e, sc, ae);
-                        if (vv.is_ptr && vv.val != MLIR_INVALID_HANDLE) {
-                            emit_struct_copy(e, p, vv.val, fsd);
+                        StructDef *src_sd = NULL;
+                        MLIR_ValueHandle src = resolve_struct_source(e, sc, ae, &src_sd);
+                        if (src != MLIR_INVALID_HANDLE && src_sd == fsd) {
+                            emit_struct_copy(e, p, src, fsd);
                         } else {
-                            EMIT_ERR(e, "compound-literal struct field needs a struct value");
+                            EVal vv = emit_expr(e, sc, ae);
+                            if (vv.is_ptr && vv.val != MLIR_INVALID_HANDLE) {
+                                emit_struct_copy(e, p, vv.val, fsd);
+                            } else {
+                                EMIT_ERR(e, "compound-literal struct field needs a struct value");
+                            }
                         }
                         continue;
                     }

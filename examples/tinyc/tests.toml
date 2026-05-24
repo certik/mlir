@@ -35,6 +35,10 @@ name = "ptr_ptr_field_arrow"
 expected_stdout = "666\n11\n200\n33\n100\n300\n"
 
 [[test]]
+name = "compound_literal_struct_field"
+expected_stdout = "12\n7\n99\n33\n50\n7\n99\n77\n99\n4\n5\n1\n"
+
+[[test]]
 name = "return"
 expected_stdout = "3\n-1\n"
 
