@@ -108,8 +108,10 @@ int app_main(void) {
             // tinyc flags are ignored.
             const char *link_out = NULL;
             const char *link_entry = "_start";
-            #define MAX_LINK_INPUTS 64
-            const char *link_inputs[MAX_LINK_INPUTS];
+            // Upper bound on input count: every remaining argv slot.
+            size_t link_inputs_cap = (size_t)(argc - (i + 1));
+            const char **link_inputs = arena_new_array(
+                boot_arena, const char *, link_inputs_cap ? link_inputs_cap : 1);
             size_t n_link_inputs = 0;
             for (int j = i + 1; j < argc; j++) {
                 if (strcmp(argv[j], "-o") == 0 && j + 1 < argc) {
@@ -119,11 +121,6 @@ int app_main(void) {
                 } else if (strncmp(argv[j], "--export=", 9) == 0) {
                     link_entry = argv[j] + 9;
                 } else if (argv[j][0] != '-') {
-                    if (n_link_inputs >= MAX_LINK_INPUTS) {
-                        fprintf(stderr, "tinyc --link: too many inputs (max %d)\n", MAX_LINK_INPUTS);
-                        arena_destroy(boot_arena);
-                        return 1;
-                    }
                     link_inputs[n_link_inputs++] = argv[j];
                 }
             }
