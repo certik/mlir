@@ -233,6 +233,16 @@ typedef struct {
     uint32_t       size;
 } WasmDataSeg;
 
+// Active element segment for table 0: places `funcs[0..n_funcs)` at
+// table slots [offset, offset + n_funcs). Only the variant-0 form
+// (active, table 0, with i32.const offset, vec(funcidx)) is supported,
+// which is what clang / wasm-ld emit for &func and call_indirect.
+typedef struct {
+    uint32_t  offset;
+    uint32_t  n_funcs;
+    uint32_t *funcs;
+} WasmElem;
+
 typedef struct {
     const uint8_t *types_blob;     // points just past the count uleb
     uint32_t       n_types;
@@ -255,6 +265,19 @@ typedef struct {
     WasmDataSeg   *datas;
     uint32_t       n_datas;
 
+    // Function table (section 4) and element segments (section 9).
+    // table_min is the minimum size of table 0; we use it to size the
+    // runtime fnptr table placed in __DATA.
+    uint32_t       table_min;
+    WasmElem      *elems;
+    uint32_t       n_elems;
+    // Runtime fnptr-table layout, finalised after parse.
+    // fnptr_table_off is the byte offset within __DATA at which the
+    // table begins (i.e. relative to globals_vmaddr, since globals
+    // are first in __DATA). Zero when there is no table.
+    uint32_t       fnptr_table_off;
+    uint32_t       fnptr_table_size; // 8 * table_min, rounded to 16
+
     // Filled in by MLIR_WasmToMachoArm64 after layout.
     uint64_t       linmem_vmaddr;
     uint64_t       globals_vmaddr;
@@ -263,6 +286,8 @@ typedef struct {
 
 static void wasm_module_free(WasmModule *m) {
     free(m->funcs); free(m->globals); free(m->datas);
+    for (uint32_t i = 0; i < m->n_elems; i++) free(m->elems[i].funcs);
+    free(m->elems);
 }
 
 static bool wasm_parse(const uint8_t *bytes, size_t size, WasmModule *out) {
@@ -352,6 +377,25 @@ static bool wasm_parse(const uint8_t *bytes, size_t size, WasmModule *out) {
                 }
                 break;
             }
+            case 4: { // TABLE
+                // Only table 0 matters for call_indirect — record its
+                // min size and skip the rest. Each table is encoded as
+                // reftype (1 byte) followed by limits (flag, min, [max]).
+                uint32_t n = (uint32_t)rd_uleb(&s);
+                if (n > 0) {
+                    rd_u8(&s);                              // reftype
+                    uint8_t fl = rd_u8(&s);                 // limits flag
+                    out->table_min = (uint32_t)rd_uleb(&s); // min
+                    if (fl & 1) (void)rd_uleb(&s);          // max
+                }
+                for (uint32_t i = 1; i < n && !s.overflow; i++) {
+                    rd_u8(&s);
+                    uint8_t fl = rd_u8(&s);
+                    (void)rd_uleb(&s);
+                    if (fl & 1) (void)rd_uleb(&s);
+                }
+                break;
+            }
             case 6: { // GLOBAL
                 uint32_t n = (uint32_t)rd_uleb(&s);
                 out->globals = (WasmGlobal *)calloc(
@@ -413,6 +457,52 @@ static bool wasm_parse(const uint8_t *bytes, size_t size, WasmModule *out) {
                     out->funcs[i].code      = body_p;
                     out->funcs[i].code_size = body_sz;
                     s.p += body_sz;
+                }
+                break;
+            }
+            case 9: { // ELEMENT
+                uint32_t n = (uint32_t)rd_uleb(&s);
+                out->elems = (WasmElem *)calloc(n ? n : 1, sizeof(WasmElem));
+                out->n_elems = n;
+                for (uint32_t i = 0; i < n && !s.overflow; i++) {
+                    // Only variant 0 (active, table 0, with i32.const
+                    // offset followed by vec(funcidx)) is supported.
+                    // This is what clang / wasm-ld emit for our test
+                    // suite. Other variants are passive / declarative
+                    // / multi-table / expr-form and would need real
+                    // support if they appear in the future.
+                    uint32_t variant = (uint32_t)rd_uleb(&s);
+                    if (variant != 0) {
+                        fprintf(stderr,
+                                "wasm->macho: elem %u uses unsupported "
+                                "variant %u (only 0 is supported)\n",
+                                i, variant);
+                        s.overflow = true; break;
+                    }
+                    uint8_t op = rd_u8(&s);
+                    if (op != 0x41) {
+                        fprintf(stderr,
+                                "wasm->macho: elem %u offset uses "
+                                "unsupported opcode 0x%02x\n", i, op);
+                        s.overflow = true; break;
+                    }
+                    uint32_t off = (uint32_t)(int32_t)rd_sleb(&s);
+                    uint8_t e = rd_u8(&s);
+                    if (e != 0x0b) {
+                        fprintf(stderr,
+                                "wasm->macho: elem %u offset expr does "
+                                "not end with 0x0b (got 0x%02x)\n", i, e);
+                        s.overflow = true; break;
+                    }
+                    uint32_t nf = (uint32_t)rd_uleb(&s);
+                    uint32_t *fns = (uint32_t *)calloc(
+                        nf ? nf : 1, sizeof(uint32_t));
+                    for (uint32_t k = 0; k < nf; k++) {
+                        fns[k] = (uint32_t)rd_uleb(&s);
+                    }
+                    out->elems[i].offset  = off;
+                    out->elems[i].n_funcs = nf;
+                    out->elems[i].funcs   = fns;
                 }
                 break;
             }
@@ -617,6 +707,16 @@ static uint32_t arm64_ldr_x_xn(uint32_t rt, uint32_t rn, uint32_t imm) {
 static uint32_t arm64_str_x_xn(uint32_t rt, uint32_t rn, uint32_t imm) {
     return 0xf9000000u | (((imm >> 3) & 0xfffu) << 10)
          | ((rn & 0x1fu) << 5) | (rt & 0x1fu);
+}
+// LDR Xt, [Xn, Wm, UXTW #3]   zero-extend Wm, shift left 3, add to Xn.
+// Used to index an 8-byte-element table by a 32-bit index in Wm.
+static uint32_t arm64_ldr_x_xn_wm_uxtw3(uint32_t rt, uint32_t rn, uint32_t rm) {
+    return 0xf8605800u | ((rm & 0x1fu) << 16)
+         | ((rn & 0x1fu) << 5) | (rt & 0x1fu);
+}
+// BLR Xn   indirect call-and-link.
+static uint32_t arm64_blr(uint32_t rn) {
+    return 0xd63f0000u | ((rn & 0x1fu) << 5);
 }
 // CMP Wn, Wm   alias for SUBS WZR, Wn, Wm.
 static uint32_t arm64_cmp_w(uint32_t rn, uint32_t rm) {
@@ -1147,10 +1247,22 @@ typedef struct {
     uint8_t  is_b;      // 1 == use `b` (tail-call), 0 == `bl`
 } CallReloc;
 
+// Records an ADRP / ADD x_imm pair that needs to materialise the
+// runtime VM address of a wasm function. Used by call_indirect to
+// populate the in-data fnptr table at program startup. Patched after
+// __TEXT layout once each function's text_off is known.
+typedef struct {
+    uint32_t adrp_off;    // byte offset of ADRP within the EmittedFunc's code
+    uint32_t add_off;     // byte offset of ADD x, x, #imm12 (must follow adrp)
+    uint32_t target;      // combined wasm funcidx of the target function
+} FnAddrReloc;
+
 typedef struct {
     Buf        code;
     CallReloc *relocs;
     size_t     n_relocs, cap_relocs;
+    FnAddrReloc *fn_addr_relocs;
+    size_t       n_fn_addr_relocs, cap_fn_addr_relocs;
     uint32_t   text_off;  // assigned during layout
     uint32_t   adrp_off;  // byte offset (within code) of program-entry
                           // ADRP x27, page_of(globals_vmaddr); or
@@ -1166,6 +1278,16 @@ static void ef_push_reloc(EmittedFunc *e, CallReloc r) {
             e->cap_relocs * sizeof(CallReloc));
     }
     e->relocs[e->n_relocs++] = r;
+}
+
+static void ef_push_fn_addr_reloc(EmittedFunc *e, FnAddrReloc r) {
+    if (e->n_fn_addr_relocs == e->cap_fn_addr_relocs) {
+        e->cap_fn_addr_relocs = e->cap_fn_addr_relocs ?
+            e->cap_fn_addr_relocs * 2 : 4;
+        e->fn_addr_relocs = (FnAddrReloc *)realloc(e->fn_addr_relocs,
+            e->cap_fn_addr_relocs * sizeof(FnAddrReloc));
+    }
+    e->fn_addr_relocs[e->n_fn_addr_relocs++] = r;
 }
 
 // Advance `r` past one WASM instruction. Knows the immediate-operand
@@ -1407,7 +1529,8 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
     // setup needed for the lifetime of the program.
     uint32_t fidx_combined = wm->n_imported_funcs + fidx;
     bool is_program_entry = (fidx_combined == wm->start_export_idx);
-    if (is_program_entry && (wm->has_memory || wm->n_globals > 0)) {
+    if (is_program_entry &&
+        (wm->has_memory || wm->n_globals > 0 || wm->n_elems > 0)) {
         // page_of(__DATA) relative to page_of(_start). Both targets
         // are 4 KiB-aligned. The actual addresses are finalised after
         // all functions are emitted (we need the exact text size to
@@ -1433,6 +1556,31 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
             } else {
                 emit_word(&e->code,
                     arm64_add_x_imm(28, 27, (uint16_t)globals_padded));
+            }
+        }
+        // ---- fnptr table init ---------------------------------------
+        // For every (table_slot, funcidx) in every elem segment, emit
+        //     adrp x10, page_of(fn_funcidx_vmaddr)   <- FnAddrReloc
+        //     add  x10, x10, #off_in_page            <- FnAddrReloc
+        //     str  x10, [x27, #(fnptr_table_off + slot * 8)]
+        // The ADRP/ADD pair is patched after the final text layout is
+        // known. We use x10 as a scratch register (callee-clobberable).
+        for (uint32_t ei = 0; ei < wm->n_elems; ei++) {
+            WasmElem *el = &wm->elems[ei];
+            for (uint32_t k = 0; k < el->n_funcs; k++) {
+                uint32_t slot = el->offset + k;
+                uint32_t fn_combined = el->funcs[k];
+                uint32_t slot_off = wm->fnptr_table_off + slot * 8;
+
+                FnAddrReloc r;
+                r.adrp_off = (uint32_t)e->code.len;
+                r.add_off  = r.adrp_off + 4;
+                r.target   = fn_combined;
+                ef_push_fn_addr_reloc(e, r);
+                // Placeholders; patched in post-pass.
+                emit_word(&e->code, arm64_adrp(10, 0));
+                emit_word(&e->code, arm64_add_x_imm(10, 10, 0));
+                emit_word(&e->code, arm64_str_x_xn(10, 27, slot_off));
             }
         }
     }
@@ -2259,6 +2407,109 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                 break;
             }
 
+            case 0x11: { // call_indirect typeidx tableidx
+                uint32_t typeidx  = (uint32_t)rd_uleb(&r);
+                uint32_t tableidx = (uint32_t)rd_uleb(&r);
+                if (tableidx != 0) {
+                    fprintf(stderr,
+                            "wasm->macho: call_indirect: only table 0 "
+                            "supported (got %u)\n", tableidx);
+                    free(local_types); return false;
+                }
+                uint32_t np = 0, nr = 0;
+                uint8_t param_types[8] = {0};
+                uint8_t result_types[1] = {0};
+                if (!type_arity_params(wm, typeidx, &np, &nr,
+                                       param_types, result_types)) {
+                    free(local_types); return false;
+                }
+                if (np > 8) {
+                    fprintf(stderr,
+                            "wasm->macho: call_indirect with %u params "
+                            "not supported\n", np);
+                    free(local_types); return false;
+                }
+                if (nr > 1) {
+                    fprintf(stderr,
+                            "wasm->macho: call_indirect with %u results "
+                            "not supported\n", nr);
+                    free(local_types); return false;
+                }
+                // Pop the table index (i32, top of stack) into w8.
+                // x8 is a scratch register not used by the PCS for the
+                // args we are about to load (x0..x7 / d0..d7), so it
+                // survives the arg-load loop intact.
+                emit_word(&e->code, arm64_ldr_w_sp(8, 0));
+                emit_word(&e->code, arm64_add_sp_imm(16));
+
+                uint8_t arg_reg[8] = {0};
+                uint32_t n_gpr = 0, n_fpr = 0;
+                for (uint32_t k = 0; k < np; k++) {
+                    uint8_t t = param_types[k];
+                    bool fp = (t == 0x7c) || (t == 0x7d);
+                    if (fp) {
+                        if (n_fpr >= 8) {
+                            fprintf(stderr,
+                                "wasm->macho: too many fp args (indirect)\n");
+                            free(local_types); return false;
+                        }
+                        arg_reg[k] = (uint8_t)n_fpr++;
+                    } else {
+                        if (n_gpr >= 8) {
+                            fprintf(stderr,
+                                "wasm->macho: too many int args (indirect)\n");
+                            free(local_types); return false;
+                        }
+                        arg_reg[k] = (uint8_t)n_gpr++;
+                    }
+                }
+                for (int k = (int)np - 1; k >= 0; k--) {
+                    uint8_t t = param_types[k];
+                    uint32_t r_idx = arg_reg[k];
+                    if (t == 0x7c)
+                        emit_word(&e->code, arm64_ldr_d_sp(r_idx, 0));
+                    else if (t == 0x7d)
+                        emit_word(&e->code, arm64_ldr_s_sp(r_idx, 0));
+                    else
+                        emit_word(&e->code, arm64_ldr_x_sp(r_idx, 0));
+                    emit_word(&e->code, arm64_add_sp_imm(16));
+                }
+                // x10 = x27 + fnptr_table_off  (table base in __DATA).
+                uint32_t fto = wm->fnptr_table_off;
+                if (fto > 0xffffffu) {
+                    fprintf(stderr,
+                            "wasm->macho: fnptr_table offset too large\n");
+                    free(local_types); return false;
+                }
+                uint32_t hi = (fto >> 12) & 0xfffu;
+                uint32_t lo = fto & 0xfffu;
+                if (hi != 0) {
+                    emit_word(&e->code,
+                        arm64_add_x_imm_lsl12(10, 27, (uint16_t)hi));
+                    if (lo != 0)
+                        emit_word(&e->code,
+                            arm64_add_x_imm(10, 10, (uint16_t)lo));
+                } else {
+                    emit_word(&e->code,
+                        arm64_add_x_imm(10, 27, (uint16_t)lo));
+                }
+                // x9 = *(x10 + w8 * 8)   ; w8 zero-extended to 64.
+                emit_word(&e->code, arm64_ldr_x_xn_wm_uxtw3(9, 10, 8));
+                emit_word(&e->code, arm64_blr(9));
+
+                if (nr == 1) {
+                    emit_word(&e->code, arm64_sub_sp_imm(16));
+                    uint8_t rt = result_types[0];
+                    if (rt == 0x7c)
+                        emit_word(&e->code, arm64_str_d_sp(0, 0));
+                    else if (rt == 0x7d)
+                        emit_word(&e->code, arm64_str_s_sp(0, 0));
+                    else
+                        emit_word(&e->code, arm64_str_x_sp(0, 0));
+                }
+                value_depth = value_depth - 1 - np + nr;
+                break;
+            }
             // --- i32 comparisons (2 pop, 1 push). Pattern:
             //     ldr w1,[sp,#0]; ldr w0,[sp,#16]; cmp w0,w1; cset w0,COND;
             //     add sp,#16; str w0,[sp].
@@ -2992,6 +3243,15 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     // -----------------------------------------------------------------
     uint64_t globals_bytes = (uint64_t)wm.n_globals * 8ULL;
     uint64_t globals_padded = (globals_bytes + 15ULL) & ~15ULL;
+    // ---- fnptr table -------------------------------------------------
+    // If the wasm module declares a table with `table_min` entries we
+    // reserve `table_min * 8` bytes inside __DATA, immediately after
+    // the globals block, to hold runtime function addresses. The table
+    // is materialised at _start time from the wasm element segments.
+    uint64_t fnptr_table_bytes  = (uint64_t)wm.table_min * 8ULL;
+    uint64_t fnptr_table_padded = (fnptr_table_bytes + 15ULL) & ~15ULL;
+    wm.fnptr_table_off  = (uint32_t)globals_padded;
+    wm.fnptr_table_size = (uint32_t)fnptr_table_padded;
     uint64_t linmem_size = 0;
     if (wm.has_memory) {
         linmem_size = (uint64_t)wm.memory_min_pages * 65536ULL;
@@ -3001,7 +3261,8 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
             if (end_off > linmem_size) linmem_size = end_off;
         }
     }
-    uint64_t data_seg_payload = globals_padded + linmem_size;
+    uint64_t data_seg_payload = globals_padded + fnptr_table_padded
+                              + linmem_size;
     uint64_t data_seg_vmsize  = (data_seg_payload + 0x3fffULL) & ~0x3fffULL;
     bool     has_data_seg     = (data_seg_vmsize > 0);
     if (data_seg_vmsize > 0xffffffffULL) {
@@ -3013,7 +3274,8 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     uint32_t data_seg_size32 = (uint32_t)data_seg_vmsize;
 
     wm.globals_vmaddr = TEXT_VM_BASE + 2 * VMSEG_SIZE;
-    wm.linmem_vmaddr  = wm.globals_vmaddr + globals_padded;
+    wm.linmem_vmaddr  = wm.globals_vmaddr + globals_padded
+                      + fnptr_table_padded;
     // NOTE: globals_vmaddr / linmem_vmaddr above are *placeholders*
     // used during function emission so the prologue ADRP gets a
     // well-formed (if eventually wrong) immediate. They are
@@ -3052,6 +3314,19 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     size_t   wlen = 0;
     reachable[wm.start_export_idx] = true;
     worklist[wlen++] = wm.start_export_idx;
+    // Any function referenced by an active element segment may be
+    // dynamically invoked via call_indirect, so seed those too. We
+    // don't have flow-sensitive type info to narrow the set further.
+    for (uint32_t ei = 0; ei < wm.n_elems; ei++) {
+        WasmElem *el = &wm.elems[ei];
+        for (uint32_t k = 0; k < el->n_funcs; k++) {
+            uint32_t c = el->funcs[k];
+            if (c < n_total && !reachable[c]) {
+                reachable[c] = true;
+                worklist[wlen++] = c;
+            }
+        }
+    }
     while (wlen) {
         uint32_t f = worklist[--wlen];
         if (f < wm.n_imported_funcs) continue;        // imports have no body
@@ -3100,6 +3375,7 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
         if (!emit_function(&wm, i, e)) {
             for (uint32_t j = 0; j < n_total; j++) {
                 free(efs[j].code.data); free(efs[j].relocs);
+                free(efs[j].fn_addr_relocs);
             }
             free(efs); free(reachable);
             wasm_module_free(&wm);
@@ -3169,7 +3445,7 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
 
     // Finalise globals/linmem placement.
     wm.globals_vmaddr = data_vm_base;
-    wm.linmem_vmaddr  = data_vm_base + globals_padded;
+    wm.linmem_vmaddr  = data_vm_base + globals_padded + fnptr_table_padded;
 
     linkedit_vm_base   = data_vm_base + (has_data_seg ? data_seg_vmsize : 0);
     linkedit_file_base = data_file_base + (has_data_seg ? data_seg_size32 : 0);
@@ -3192,6 +3468,51 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
             e->code.data[e->adrp_off + 1] = (uint8_t)(adrp >>  8);
             e->code.data[e->adrp_off + 2] = (uint8_t)(adrp >> 16);
             e->code.data[e->adrp_off + 3] = (uint8_t)(adrp >> 24);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Patch ADRP/ADD pairs that materialise per-function VM addresses
+    // for the fnptr table initialisation (one pair per (slot, funcidx)
+    // in every element segment). The target_vmaddr of function
+    // `target` is `entry_vmaddr + efs[target].text_off`.
+    // -----------------------------------------------------------------
+    for (uint32_t i = 0; i < n_total; i++) {
+        if (!efs[i].emitted) continue;
+        EmittedFunc *e = &efs[i];
+        for (size_t k = 0; k < e->n_fn_addr_relocs; k++) {
+            FnAddrReloc *fr = &e->fn_addr_relocs[k];
+            if (fr->target >= n_total || !efs[fr->target].emitted) {
+                fprintf(stderr,
+                        "wasm->macho: fnptr table references "
+                        "unemitted func %u\n", fr->target);
+                // Continue; the entry will hold a bogus address, but
+                // call_indirect to an uninvoked slot is a wasm trap
+                // anyway. We don't fail hard so partial coverage
+                // can still ship.
+                continue;
+            }
+            uint64_t target_vmaddr = wm.entry_vmaddr
+                                   + (uint64_t)efs[fr->target].text_off;
+            uint64_t pc_pc      = wm.entry_vmaddr
+                                + (uint64_t)e->text_off
+                                + (uint64_t)fr->adrp_off;
+            uint64_t pc_page    = pc_pc & ~0xfffULL;
+            uint64_t tgt_page   = target_vmaddr & ~0xfffULL;
+            int64_t  rel_pages  = (int64_t)(tgt_page - pc_page) >> 12;
+            uint32_t off_in_pg  = (uint32_t)(target_vmaddr & 0xfffULL);
+
+            uint32_t adrp = arm64_adrp(10, rel_pages);
+            e->code.data[fr->adrp_off + 0] = (uint8_t)(adrp >>  0);
+            e->code.data[fr->adrp_off + 1] = (uint8_t)(adrp >>  8);
+            e->code.data[fr->adrp_off + 2] = (uint8_t)(adrp >> 16);
+            e->code.data[fr->adrp_off + 3] = (uint8_t)(adrp >> 24);
+
+            uint32_t add = arm64_add_x_imm(10, 10, (uint16_t)off_in_pg);
+            e->code.data[fr->add_off + 0] = (uint8_t)(add >>  0);
+            e->code.data[fr->add_off + 1] = (uint8_t)(add >>  8);
+            e->code.data[fr->add_off + 2] = (uint8_t)(add >> 16);
+            e->code.data[fr->add_off + 3] = (uint8_t)(add >> 24);
         }
     }
 
@@ -3483,7 +3804,8 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
         buf_le64(&img, v);
     }
 
-    // __DATA segment payload (optional): [globals bytes][linmem bytes].
+    // __DATA segment payload (optional):
+    //     [globals bytes][fnptr table zero bytes][linmem bytes].
     if (has_data_seg) {
         buf_pad_to(&img, data_file_base);
         size_t data_seg_start = img.len;
@@ -3493,6 +3815,10 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
         }
         // Pad globals region to globals_padded.
         while ((img.len - data_seg_start) < globals_padded) buf_u8(&img, 0);
+        // Fnptr table region: zero-initialised. The table contents are
+        // materialised at _start runtime via ADRP/ADD/STR triples.
+        while ((img.len - data_seg_start)
+               < globals_padded + fnptr_table_padded) buf_u8(&img, 0);
         // Linear memory: zeros first, then overlay each data segment
         // at its declared offset.
         size_t linmem_start = img.len;
@@ -3508,6 +3834,7 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
                 // Best-effort cleanup before returning.
                 for (uint32_t j = 0; j < n_total; j++) {
                     free(efs[j].code.data); free(efs[j].relocs);
+                    free(efs[j].fn_addr_relocs);
                 }
                 free(efs);
                 free(img.data);
@@ -3823,6 +4150,7 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     for (uint32_t i = 0; i < n_total; i++) {
         free(efs[i].code.data);
         free(efs[i].relocs);
+        free(efs[i].fn_addr_relocs);
     }
     free(efs);
     wasm_module_free(&wm);
