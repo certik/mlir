@@ -377,9 +377,18 @@ static bool encode_op(EmFunc *F, MLIR_OpHandle op, uint32_t sp_sym_idx,
         uint32_t mem_off = (uint32_t)at_i(op, "memory_offset");
         uint8_t opc;
         if (valtype == WT_I32) {
+            // For sub-i32 loads we always use the zero-extending opcode
+            // (i32.load8_u / i32.load16_u). Sign extension is then handled
+            // explicitly by the following `llvm.sext` lowering, which
+            // emits an `i32.extend8_s` / `i32.extend16_s`. Defaulting to
+            // zero-extension is necessary so that a `load i8` followed
+            // by `llvm.zext i8 to i32` (e.g. for `uint8_t` operands)
+            // produces the correct zero-extended value — the `zext` is a
+            // no-op at the wasmssa level because wasm has no sub-i32
+            // result type.
             if (mem_size == 4)      opc = 0x28;
-            else if (mem_size == 2) opc = 0x2e;
-            else if (mem_size == 1) opc = 0x2c;
+            else if (mem_size == 2) opc = 0x2f;
+            else if (mem_size == 1) opc = 0x2d;
             else return false;
         } else if (valtype == WT_I64) {
             opc = 0x29;

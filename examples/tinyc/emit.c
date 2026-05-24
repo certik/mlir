@@ -522,6 +522,19 @@ static MLIR_ValueHandle emit_extsi_i8_to_i32(E *e, MLIR_ValueHandle v) {
     return r;
 }
 
+// Zero-extend i8 -> i32 (arith.extui), used to widen loads from
+// `unsigned char` / `uint8_t` arrays and pointers.
+static MLIR_ValueHandle emit_extui_i8_to_i32(E *e, MLIR_ValueHandle v) {
+    MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
+                                                  e->i32, ssa_name(e), eloc(e, 0));
+    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i32;
+    MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
+    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = v;
+    emit_op(e, OP_TYPE_ARITH_EXTUI, str_lit("arith.extui"),
+            rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
+    return r;
+}
+
 // Truncate i64 -> i32 (arith.trunci).
 static MLIR_ValueHandle emit_trunci_i64_to_i32(E *e, MLIR_ValueHandle v) {
     MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
@@ -933,9 +946,11 @@ static EVal load_lvalue(E *e, LVal lv) {
     MLIR_ValueHandle p = lval_address(e, lv);
     r.val = emit_load_v(e, p, lv.elem_ty);
     if (lv.elem_ty == e->i8) {
-        // Sign-extend char to int so subsequent arithmetic / comparisons
-        // type-check against i32 operands.
-        r.val = emit_extsi_i8_to_i32(e, r.val);
+        // Widen char/uint8 to int. `unsigned char` / `uint8_t` zero-extend
+        // (lv.is_unsigned); signed/plain `char` sign-extend so negative
+        // values stay negative for subsequent arithmetic.
+        r.val = lv.is_unsigned ? emit_extui_i8_to_i32(e, r.val)
+                               : emit_extsi_i8_to_i32(e, r.val);
     }
     r.is_float = (lv.elem_ty == e->f32 || lv.elem_ty == e->f64);
     r.is_f64 = (lv.elem_ty == e->f64);
@@ -1206,9 +1221,12 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                             EMIT_ERR(e, "2D pointer-array fields are not supported");
                             return r;
                         }
-                        MLIR_TypeHandle elem = is_arr_f32 ? e->f32
-                                              : (is_arr_pst || is_arr_pch) ? e->ptr
-                                              : e->i32;
+                        MLIR_TypeHandle elem;
+                        if (is_arr_f32) elem = e->f32;
+                        else if (is_arr_pst || is_arr_pch) elem = e->ptr;
+                        else if (ft.array_elem_is_i64) elem = e->i64;
+                        else if (ft.array_elem_is_i8) elem = e->i8;
+                        else elem = e->i32;
                         MLIR_ValueHandle iv = emit_expr_i32(e, sc, idx_a);
                         MLIR_ValueHandle jv = is_2d ? emit_expr_i32(e, sc, idx_b)
                                                    : MLIR_INVALID_HANDLE;
@@ -1231,6 +1249,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                             parent.source_elem, path, total, dyn, n_dyn);
                         r.base_ptr = gep;
                         r.elem_ty = elem;
+                        r.is_unsigned = ft.int_unsigned;
                         return r;
                     }
                     // Pointer field indexed: `s.f[i]` / `p->f[i]` where
@@ -1532,6 +1551,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 dyn[0] = idx_i32;
                 r.base_ptr = emit_gep(e, base, elem, path, 1, dyn, 1);
                 r.elem_ty = elem;
+                r.is_unsigned = s->type.int_unsigned;
                 return r;
             }
             // Pointer-to-pointer indexing: pp[i] for T** (e.g. char **argv).
@@ -1579,6 +1599,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
             r.const_path = path; r.n_const_path = 2;
             r.dyn_index = idx_i32;
             r.elem_ty = aelem;
+            r.is_unsigned = s->type.int_unsigned;
             return r;
         }
         case EX_DEREF: {
@@ -1598,6 +1619,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 else if (s->type.ptr_is_f32) r.elem_ty = e->f32;
                 else if (s->type.ptr_is_f64) r.elem_ty = e->f64;
                 else r.elem_ty = e->i32;
+                r.is_unsigned = s->type.int_unsigned;
                 return r;
             }
             // General `*<expr>` form (e.g. *(p+i)). Evaluate the operand
@@ -1609,6 +1631,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
             }
             r.base_ptr = v.val;
             r.elem_ty = (v.ptr_elem != MLIR_INVALID_HANDLE) ? v.ptr_elem : e->i32;
+            r.is_unsigned = v.is_unsigned;
             return r;
         }
         case EX_FIELD: {
@@ -1641,6 +1664,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                      ft.kind == TY_PTR_CHAR || ft.kind == TY_PTR_VOID ||
                      ft.kind == TY_FNPTR || ft.kind == TY_PTR_PTR) r.elem_ty = e->ptr;
             else r.elem_ty = e->i32;
+            r.is_unsigned = ft.int_unsigned;
             return r;
         }
         default:
@@ -1885,6 +1909,8 @@ static void emit_struct_copy_path(E *e, MLIR_ValueHandle dst, MLIR_ValueHandle s
             MLIR_TypeHandle elem;
             if (ft.kind == TY_ARRAY_F32) elem = e->f32;
             else if (ft.kind == TY_ARRAY_PTR_STRUCT || ft.kind == TY_ARRAY_PTR_CHAR) elem = e->ptr;
+            else if (ft.array_elem_is_i64) elem = e->i64;
+            else if (ft.array_elem_is_i8) elem = e->i8;
             else elem = e->i32;
             for (int64_t a = 0; a < n1; a++) {
                 for (int64_t b = 0; b < n2; b++) {
@@ -2481,7 +2507,14 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 }
                 bool want_i64 = (ck == TY_I64);
                 if (want_i64 && !v.is_i64) {
-                    v.val = emit_extsi_i32_to_i64(e, v.val);
+                    // Use unsigned widening when the source carried an
+                    // `unsigned` C type — otherwise an i32 value with
+                    // its top bit set (e.g. `(int64_t)<uint32_t>` with
+                    // bit 31 set) sign-extends to a huge "negative"
+                    // i64. The cast itself doesn't change signedness,
+                    // so propagate `is_unsigned` to the widened value.
+                    v.val = v.is_unsigned ? emit_extui_i32_to_i64(e, v.val)
+                                          : emit_extsi_i32_to_i64(e, v.val);
                     v.is_i64 = true;
                 } else if (!want_i64 && v.is_i64) {
                     v.val = emit_trunci_i64_to_i32(e, v.val);
@@ -3054,8 +3087,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             if (lv.elem_ty == e->i8) {
                 // The stored value is i8, but the EVal we hand back to the
                 // surrounding expression must be i32 (tinyc treats `char`
-                // as `int` in arithmetic / comparisons), so sign-extend.
-                v.val = emit_extsi_i8_to_i32(e, v.val);
+                // as `int` in arithmetic / comparisons). Match the load
+                // path: zero-extend for `unsigned char`/`uint8_t`,
+                // sign-extend otherwise.
+                v.val = lv.is_unsigned ? emit_extui_i8_to_i32(e, v.val)
+                                       : emit_extsi_i8_to_i32(e, v.val);
             }
             return v;
         }
@@ -3656,6 +3692,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 r.is_float = (fnty->fnptr_ret->kind == TY_F32 || fnty->fnptr_ret->kind == TY_F64);
                 r.is_f64 = (fnty->fnptr_ret->kind == TY_F64);
                 r.is_i64 = (fnty->fnptr_ret->kind == TY_I64);
+                r.is_unsigned = fnty->fnptr_ret->int_unsigned;
                 r.is_ptr = (rty == e->ptr);
                 return r;
             }
@@ -3680,6 +3717,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             r.is_float = (sig->ret.type.kind == TY_F32 || sig->ret.type.kind == TY_F64);
             r.is_f64 = (sig->ret.type.kind == TY_F64);
             r.is_i64 = (sig->ret.type.kind == TY_I64);
+            r.is_unsigned = sig->ret.type.int_unsigned;
             if (sig->ret.type.kind == TY_PTR_STRUCT) {
                 r.is_ptr = true;
                 r.sdef = sig->ret.sdef;
@@ -3916,7 +3954,9 @@ static void emit_struct_zero(E *e, MLIR_ValueHandle base, MLIR_TypeHandle source
             if (ft.kind == TY_ARRAY_F32) { z = emit_const_f32(e, 0.0); }
             else if (ft.kind == TY_ARRAY_PTR_STRUCT || ft.kind == TY_ARRAY_PTR_CHAR) {
                 z = emit_null_ptr(e);
-            } else { z = emit_const_i32(e, 0); }
+            } else if (ft.array_elem_is_i64) { z = emit_const_i64(e, 0); }
+            else if (ft.array_elem_is_i8) { z = emit_const_i8(e, 0); }
+            else { z = emit_const_i32(e, 0); }
             for (int64_t a = 0; a < n1; a++) {
                 for (int64_t b = 0; b < n2; b++) {
                     size_t inner_n = is_2d ? 2 : 1;
@@ -5490,7 +5530,11 @@ static void init_struct_types(E *e) {
                 MLIR_TypeHandle t = find_struct_type(e, inner);
                 body[k] = t;
             } else if (ft.kind == TY_ARRAY_I32 || ft.kind == TY_ARRAY_F32) {
-                MLIR_TypeHandle elem = (ft.kind == TY_ARRAY_F32) ? e->f32 : e->i32;
+                MLIR_TypeHandle elem;
+                if (ft.kind == TY_ARRAY_F32) elem = e->f32;
+                else if (ft.array_elem_is_i64) elem = e->i64;
+                else if (ft.array_elem_is_i8) elem = e->i8;
+                else elem = e->i32;
                 MLIR_TypeHandle inner;
                 if (ft.array_len2 != 0) {
                     MLIR_TypeHandle in2 = MLIR_CreateTypeLLVMArray(

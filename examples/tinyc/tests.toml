@@ -1276,3 +1276,18 @@ targets = ["native", "wasm", "macho"]
 # This test file is intentionally stored with CRLF line endings (see
 # .gitattributes) so the preprocessor must accept `\\\r\n` to compile it.
 expected_stdout = "7\n"
+
+[[test]]
+name = "uint8_array_zext"
+targets = ["native", "wasm", "macho"]
+expected_stdout = "253\n254\n255\n"
+
+[[test]]
+name = "uint32_widen_to_i64"
+targets = ["native", "wasm", "macho"]
+expected_stdout = "2147483648\n2147483648\n2147483648\n"
+
+[[test]]
+name = "struct_uint8_array"
+targets = ["native", "wasm", "macho"]
+expected_stdout = "1\n35\n0\n255\n42\n"

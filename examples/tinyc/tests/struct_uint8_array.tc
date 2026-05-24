@@ -1,0 +1,44 @@
+// MRE: tinyc lays out `uint8_t buf[N]` declared as a struct field as
+// `[N x i32]` instead of `[N x i8]`. That is, the per-element stride
+// is 4 bytes, the struct grows by 4x what C says it should, and most
+// importantly: stores never truncate to 8 bits, so any byte value >
+// 0xff (e.g. `(uint8_t)(bitlen >> 0)` where bitlen is 512) is stored
+// verbatim as i32 and reads back unchanged instead of wrapping to a
+// byte.
+//
+// This breaks SHA-256 inside `mlir_wasm_to_macho.c`: the 8-byte
+// big-endian bit-length trailer that closes every SHA-256 block goes
+// into `Sha::data[56..63]`, and the low-byte slot holds
+// `(uint8_t)(bitlen >> 0)`. For typical inputs `bitlen` is a 16-bit
+// number (0x0200 = 512 for one 64-byte block) — the high byte
+// (`>> 8`) is 2, the low byte (`>> 0`) is 0. tinyc stored 512
+// instead of 0, corrupting the SHA block and every page hash that
+// followed. macOS then rejected the binary's ad-hoc code signature
+// with "Killed: 9".
+//
+// The reduced reproducer below stores `(uint8_t)257` (which must
+// truncate to 1) and `(uint8_t)(0x123)` (= 0x23 = 35) into a struct's
+// `uint8_t buf[]` field. The buggy compiler reads back 257 / 291.
+
+typedef unsigned char uint8_t;
+typedef long long     int64_t;
+
+typedef struct S {
+    uint8_t buf[4];
+    int     after;
+} S;
+
+int main() {
+    S s;
+    s.after = 42;
+    s.buf[0] = (uint8_t)257;       // expect 1   (low byte of 0x0101)
+    s.buf[1] = (uint8_t)0x123;     // expect 35  (low byte of 0x0123)
+    s.buf[2] = (uint8_t)512;       // expect 0   (low byte of 0x0200)
+    s.buf[3] = (uint8_t)0xff;      // expect 255
+    _tinyc_print((int64_t)s.buf[0]);
+    _tinyc_print((int64_t)s.buf[1]);
+    _tinyc_print((int64_t)s.buf[2]);
+    _tinyc_print((int64_t)s.buf[3]);
+    _tinyc_print((int64_t)s.after);
+    return 0;
+}

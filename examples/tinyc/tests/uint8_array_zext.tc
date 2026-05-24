@@ -1,0 +1,33 @@
+// MRE: tinyc sign-extends loads from `uint8_t` arrays and `uint8_t *`
+// dereferences, treating them as signed `char`. Any byte with the high
+// bit set then propagates as 0xffffffXX instead of 0x000000XX. Even an
+// explicit `(unsigned int)` cast on the result is a no-op (the value
+// is already i32), so the bug isn't recoverable at the call site.
+//
+// The bug breaks SHA-256 inside `mlir_wasm_to_macho.c` when the
+// backend is run via the wasm32-wasi self-hosted `tinyc_stage2.wasm`:
+// the 8-byte big-endian bit-length trailer that closes every SHA-256
+// block has bit 7 set (e.g. 0x8000 = 4 KB worth of bits), so every
+// page hash comes out wrong. macOS then rejects the binary's ad-hoc
+// code signature with "Killed: 9" at exec time.
+//
+// We check the i8->i32 widened values via _tinyc_print so the wasm
+// runtime's minimal printf doesn't need to grow width specifiers.
+typedef unsigned char uint8_t;
+
+static int read_byte(const uint8_t *p) {
+    return (int)p[0];
+}
+
+int main() {
+    uint8_t arr[3];
+    arr[0] = 0xfd;
+    arr[1] = 0xfe;
+    arr[2] = 0xff;
+    // With sign-extension these print -3, -2, -1; the unsigned widening
+    // produces 253, 254, 255.
+    _tinyc_print((int64_t)(int)arr[0]);
+    _tinyc_print((int64_t)(int)arr[1]);
+    _tinyc_print((int64_t)(int)read_byte(arr + 2));
+    return 0;
+}
