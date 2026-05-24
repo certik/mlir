@@ -5535,7 +5535,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                 gty = e.f64;
             } else if (g->type.kind == TY_PTR_CHAR || g->type.kind == TY_PTR_I32 ||
                        g->type.kind == TY_PTR_STRUCT || g->type.kind == TY_PTR_VOID ||
-                       g->type.kind == TY_FNPTR) {
+                       g->type.kind == TY_FNPTR || g->type.kind == TY_PTR_PTR) {
                 gty = e.ptr;
             } else {
                 gty = e.i32;
@@ -5586,7 +5586,8 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                 NULL, e.loc);
             MLIR_AppendBlockOp(ctx, mb, gop);
         } else if (g->type.kind == TY_PTR_I32 || g->type.kind == TY_PTR_STRUCT ||
-                   g->type.kind == TY_PTR_VOID || g->type.kind == TY_FNPTR) {
+                   g->type.kind == TY_PTR_VOID || g->type.kind == TY_FNPTR ||
+                   g->type.kind == TY_PTR_PTR) {
             // Emit a zero-initialized pointer global.
             MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.ptr,

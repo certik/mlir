@@ -988,3 +988,16 @@ name = "i64_init_narrows_to_i32_slot"
 # without the continuation bit — producing "truncated section" /
 # "unexpected end-of-file" errors on stage-3 outputs.
 expected_stdout = "197\n3\n"
+
+[[test]]
+name = "global_ptr_ptr"
+# Regression for the macOS self-host segfault: file-scope `T**` globals
+# (and any pointer global of kind TY_PTR_PTR) were emitted by tinyc as
+# `@g = internal global i32 0` because the global-emit switch in emit.c
+# didn't list TY_PTR_PTR among the pointer kinds. The linker then
+# allocated only 4 bytes for `g`, but every load/store on `g` used 8
+# bytes, so two adjacent T** globals overlapped and corrupted each
+# other's upper halves. macOS's tinyC-built parser_tinyc segfaulted in
+# platform_args_sizes_get with an argv pointer whose upper 4 bytes came
+# from the adjacent stored_envp global.
+expected_stdout = "1\n1\n"

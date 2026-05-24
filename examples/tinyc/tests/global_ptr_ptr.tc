@@ -1,0 +1,46 @@
+// Regression: file-scope `static char** g = NULL;` (and any T** global) was
+// emitted by tinyc as `@g = internal global i32 0` because the global-emit
+// switch in emit.c didn't list TY_PTR_PTR among the pointer kinds. The
+// linker then allocated only 4 bytes for `g`, but every load/store on `g`
+// used 8 bytes — so two adjacent T** globals overlapped, and the upper
+// half of the first global was overwritten by the lower half of the
+// second. Reproduced on the macOS tinyC-built parser, where
+// platform_macos.c declares static `char** stored_argv` and
+// `char** stored_envp` side by side and the parser segfaulted in
+// platform_args_sizes_get with a synthetic argv pointer like
+// 0x<envp_low32>_<argv_low32>.
+//
+// This MRE writes two distinct, recognizable pointer values into two
+// adjacent char** globals through a setter, then reads them back and
+// prints the low byte of each. With the bug, the second store's bytes
+// spill into the first global and at least one of the reads returns a
+// corrupted pointer; with the fix both reads return the original pointers
+// intact.
+
+static char** g_a = 0;
+static char** g_b = 0;
+
+void set_a(char** p) { g_a = p; }
+void set_b(char** p) { g_b = p; }
+
+int low_byte(char** p) {
+    char *raw = (char*)p;
+    long bits = (long)raw;
+    return (int)(bits & 0xff);
+}
+
+int main() {
+    char a_buf;
+    char b_buf;
+    char** pa = (char**)&a_buf;
+    char** pb = (char**)&b_buf;
+    // Two writes into adjacent globals. With the bug, the second write
+    // overflows the first global's 4-byte slot and corrupts g_a's upper
+    // bytes (or vice versa, depending on alignment).
+    set_a(pa);
+    set_b(pb);
+    // Read both back as pointers and compare.
+    _tinyc_print(g_a == pa);
+    _tinyc_print(g_b == pb);
+    return 0;
+}
