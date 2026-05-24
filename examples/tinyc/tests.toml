@@ -798,6 +798,11 @@ targets = ["native", "wasm", "macho"]
 expected_stdout = "0 0\n1 4\n2 8\n3 12\n"
 
 [[test]]
+name = "param_array_decay"
+targets = ["native", "wasm", "macho"]
+expected_stdout = "7\n"
+
+[[test]]
 name = "inttoptr_cast"
 targets = ["native", "wasm", "macho"]
 expected_stdout = "42\n"

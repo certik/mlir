@@ -1,0 +1,20 @@
+// MRE: function parameter declared with array dimension. C decays
+//   T name[N]  ==>  T *name
+// in parameter position. The fixed source from mlir_wasm_to_macho.c is:
+//   static void sha256(const uint8_t *data, size_t n, uint8_t out[32]) { ... }
+// tinyc's parameter parser rejects the `[32]` suffix with "expected ')'".
+//
+// Expected: clang and tinyc both accept and print "7\n".
+extern int printf(const char *fmt, ...);
+
+static void fill_bytes(int out[32]) {
+    out[0] = 7;
+}
+
+int main() {
+    int buf[32];
+    buf[0] = 0;
+    fill_bytes(buf);
+    printf("%d\n", buf[0]);
+    return 0;
+}
