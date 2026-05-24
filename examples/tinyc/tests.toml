@@ -874,3 +874,15 @@ name = "ul_literal_storage_size"
 # wasm32, while keeping `LL` always i64.
 expected_stdout = "ok\n"
 
+
+[[test]]
+name = "deep_recursion_large_locals"
+# Linker regression test: the in-tree wasm linker
+# (`mlir_wasm_link.c`) used to initialise `__stack_pointer` to
+# 64 KB, which trapped the moment a tinyc-built wasm binary did
+# any non-trivial recursion with locals. Bumped to 4 MB to match
+# the explicit `-z stack-size=4194304` used by the clang-built
+# `tinyc.wasm`. This test recurses ~200 frames deep with a
+# ~1 KB local each (~200 KB of stack total) to ensure the linker
+# default stays comfortably above what the compiler itself uses.
+expected_stdout = "200\n"

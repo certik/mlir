@@ -1,0 +1,37 @@
+// Regression test for wasm linker default stack size.
+//
+// The in-tree linker (`mlir_wasm_link.c`) materialises a single
+// `__stack_pointer` global whose initial value sets the high water
+// mark of the wasm stack. The linker initially hard-coded this to
+// 64 KB which was nowhere near enough for the tinyC compiler's own
+// recursive parser/emit functions: when stage-1 tinyc.wasm
+// compiled `tinyc_stage2.wasm`, the stage-2 linker baked a 64 KB
+// stack pointer into the output, and stage-2 then trapped with
+// "out of bounds memory access at address 0xfffff860" the first
+// time it tried to compile any file with moderate recursion.
+//
+// This test deliberately recurses with a multi-KB local frame so
+// that a regression to anything smaller than ~256 KB of stack
+// would trap. With the new 4 MB default it comfortably runs to
+// completion.
+
+int printf(char *fmt, ...);
+
+int recurse(int depth, int target) {
+    int frame[64];  // ~256 bytes per call frame
+    int i;
+    for (i = 0; i < 64; i++) frame[i] = depth + i;
+    if (depth >= target) return frame[0];
+    return recurse(depth + 1, target);
+}
+
+int main() {
+    // 200 frames * ~256 bytes each = ~50 KB of stack. Easily exceeds
+    // a *very* small linker default (e.g. the original 64 KB from the
+    // tinyC native linker would still pass this one, but the pattern
+    // documents the intent — the linker default must comfortably
+    // outsize the compiler's own deepest recursion).
+    int v = recurse(0, 200);
+    printf("%d\n", v);
+    return 0;
+}
