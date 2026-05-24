@@ -169,14 +169,17 @@ typedef struct IR_Op {
 typedef struct IR_Block {
     MLIR_OpHandle *operations;
     uint64_t n_operations;
+    uint64_t cap_operations;
     MLIR_ValueHandle *arguments;
     uint64_t n_arguments;
+    uint64_t cap_arguments;
     MLIR_RegionHandle parent_region;
 } IR_Block;
 
 typedef struct IR_Region {
     MLIR_BlockHandle *blocks;
     uint64_t n_blocks;
+    uint64_t cap_blocks;
 } IR_Region;
 
 static inline IR_Op *resolve_op(MLIR_OpHandle h) {
@@ -397,10 +400,14 @@ void MLIR_AppendBlockOp(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHandle op
     IR_Block *block = resolve_block(bh);
     if (!block || !ctx || !ctx->arena) return;
     Arena *arena = ctx->arena;
-    MLIR_OpHandle *new_ops = arena_new_array(arena, MLIR_OpHandle, block->n_operations + 1);
-    if (block->operations) memcpy(new_ops, block->operations, block->n_operations * sizeof(MLIR_OpHandle));
-    new_ops[block->n_operations] = op;
-    block->operations = new_ops;
+    if (block->n_operations >= block->cap_operations) {
+        uint64_t new_cap = block->cap_operations ? block->cap_operations * 2 : 4;
+        MLIR_OpHandle *new_ops = arena_new_array(arena, MLIR_OpHandle, new_cap);
+        if (block->operations) memcpy(new_ops, block->operations, block->n_operations * sizeof(MLIR_OpHandle));
+        block->operations = new_ops;
+        block->cap_operations = new_cap;
+    }
+    block->operations[block->n_operations] = op;
     block->n_operations++;
     IR_Op *o = resolve_op(op);
     if (o) o->parent_block = bh;
@@ -416,14 +423,23 @@ void MLIR_InsertBlockOpAtIndex(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHa
     if (!block || !ctx || !ctx->arena) return;
     if (idx > block->n_operations) idx = block->n_operations;
     Arena *arena = ctx->arena;
-    MLIR_OpHandle *new_ops = arena_new_array(arena, MLIR_OpHandle, block->n_operations + 1);
-    if (block->operations && idx > 0)
-        memcpy(new_ops, block->operations, idx * sizeof(MLIR_OpHandle));
-    new_ops[idx] = op;
-    if (block->operations && idx < block->n_operations)
-        memcpy(new_ops + idx + 1, block->operations + idx,
-               (block->n_operations - idx) * sizeof(MLIR_OpHandle));
-    block->operations = new_ops;
+    if (block->n_operations >= block->cap_operations) {
+        uint64_t new_cap = block->cap_operations ? block->cap_operations * 2 : 4;
+        MLIR_OpHandle *new_ops = arena_new_array(arena, MLIR_OpHandle, new_cap);
+        if (block->operations && idx > 0)
+            memcpy(new_ops, block->operations, idx * sizeof(MLIR_OpHandle));
+        if (block->operations && idx < block->n_operations)
+            memcpy(new_ops + idx + 1, block->operations + idx,
+                   (block->n_operations - idx) * sizeof(MLIR_OpHandle));
+        block->operations = new_ops;
+        block->cap_operations = new_cap;
+    } else {
+        // In-place shift right to make room at idx.
+        if (idx < block->n_operations)
+            memmove(block->operations + idx + 1, block->operations + idx,
+                    (block->n_operations - idx) * sizeof(MLIR_OpHandle));
+    }
+    block->operations[idx] = op;
     block->n_operations++;
     IR_Op *o = resolve_op(op);
     if (o) o->parent_block = bh;
@@ -433,10 +449,14 @@ void MLIR_AppendBlockArg(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_ValueHandl
     IR_Block *block = resolve_block(bh);
     if (!block || !ctx || !ctx->arena) return;
     Arena *arena = ctx->arena;
-    MLIR_ValueHandle *new_args = arena_new_array(arena, MLIR_ValueHandle, block->n_arguments + 1);
-    if (block->arguments) memcpy(new_args, block->arguments, block->n_arguments * sizeof(MLIR_ValueHandle));
-    new_args[block->n_arguments] = arg;
-    block->arguments = new_args;
+    if (block->n_arguments >= block->cap_arguments) {
+        uint64_t new_cap = block->cap_arguments ? block->cap_arguments * 2 : 4;
+        MLIR_ValueHandle *new_args = arena_new_array(arena, MLIR_ValueHandle, new_cap);
+        if (block->arguments) memcpy(new_args, block->arguments, block->n_arguments * sizeof(MLIR_ValueHandle));
+        block->arguments = new_args;
+        block->cap_arguments = new_cap;
+    }
+    block->arguments[block->n_arguments] = arg;
     block->n_arguments++;
 
     // Set def_handle to block for block arguments
@@ -448,10 +468,14 @@ void MLIR_AppendRegionBlock(MLIR_Context *ctx, MLIR_RegionHandle rh, MLIR_BlockH
     IR_Region *region = resolve_region(rh);
     if (!region || !ctx || !ctx->arena) return;
     Arena *arena = ctx->arena;
-    MLIR_BlockHandle *new_blocks = arena_new_array(arena, MLIR_BlockHandle, region->n_blocks + 1);
-    if (region->blocks) memcpy(new_blocks, region->blocks, region->n_blocks * sizeof(MLIR_BlockHandle));
-    new_blocks[region->n_blocks] = block;
-    region->blocks = new_blocks;
+    if (region->n_blocks >= region->cap_blocks) {
+        uint64_t new_cap = region->cap_blocks ? region->cap_blocks * 2 : 4;
+        MLIR_BlockHandle *new_blocks = arena_new_array(arena, MLIR_BlockHandle, new_cap);
+        if (region->blocks) memcpy(new_blocks, region->blocks, region->n_blocks * sizeof(MLIR_BlockHandle));
+        region->blocks = new_blocks;
+        region->cap_blocks = new_cap;
+    }
+    region->blocks[region->n_blocks] = block;
     region->n_blocks++;
     IR_Block *b = resolve_block(block);
     if (b) b->parent_region = rh;
@@ -1819,13 +1843,21 @@ void MLIR_InsertRegionBlockAfter(MLIR_Context *ctx, MLIR_RegionHandle region,
             if (r->blocks[i] == after) { insert_at = i + 1; break; }
         }
     }
-    // Grow.
-    MLIR_BlockHandle *nb = arena_new_array(arena, MLIR_BlockHandle, r->n_blocks + 1);
-    if (insert_at > 0) memcpy(nb, r->blocks, insert_at * sizeof(MLIR_BlockHandle));
-    nb[insert_at] = block;
-    if (insert_at < r->n_blocks)
-        memcpy(nb + insert_at + 1, r->blocks + insert_at, (r->n_blocks - insert_at) * sizeof(MLIR_BlockHandle));
-    r->blocks = nb;
+    if (r->n_blocks >= r->cap_blocks) {
+        uint64_t new_cap = r->cap_blocks ? r->cap_blocks * 2 : 4;
+        MLIR_BlockHandle *nb = arena_new_array(arena, MLIR_BlockHandle, new_cap);
+        if (insert_at > 0) memcpy(nb, r->blocks, insert_at * sizeof(MLIR_BlockHandle));
+        if (insert_at < r->n_blocks)
+            memcpy(nb + insert_at + 1, r->blocks + insert_at,
+                   (r->n_blocks - insert_at) * sizeof(MLIR_BlockHandle));
+        r->blocks = nb;
+        r->cap_blocks = new_cap;
+    } else {
+        if (insert_at < r->n_blocks)
+            memmove(r->blocks + insert_at + 1, r->blocks + insert_at,
+                    (r->n_blocks - insert_at) * sizeof(MLIR_BlockHandle));
+    }
+    r->blocks[insert_at] = block;
     r->n_blocks++;
     b->parent_region = region;
 }
@@ -1854,12 +1886,21 @@ void MLIR_InsertRegionBlockBefore(MLIR_Context *ctx, MLIR_RegionHandle region,
             if (r->blocks[i] == before) { insert_at = i; break; }
         }
     }
-    MLIR_BlockHandle *nb = arena_new_array(arena, MLIR_BlockHandle, r->n_blocks + 1);
-    if (insert_at > 0) memcpy(nb, r->blocks, insert_at * sizeof(MLIR_BlockHandle));
-    nb[insert_at] = block;
-    if (insert_at < r->n_blocks)
-        memcpy(nb + insert_at + 1, r->blocks + insert_at, (r->n_blocks - insert_at) * sizeof(MLIR_BlockHandle));
-    r->blocks = nb;
+    if (r->n_blocks >= r->cap_blocks) {
+        uint64_t new_cap = r->cap_blocks ? r->cap_blocks * 2 : 4;
+        MLIR_BlockHandle *nb = arena_new_array(arena, MLIR_BlockHandle, new_cap);
+        if (insert_at > 0) memcpy(nb, r->blocks, insert_at * sizeof(MLIR_BlockHandle));
+        if (insert_at < r->n_blocks)
+            memcpy(nb + insert_at + 1, r->blocks + insert_at,
+                   (r->n_blocks - insert_at) * sizeof(MLIR_BlockHandle));
+        r->blocks = nb;
+        r->cap_blocks = new_cap;
+    } else {
+        if (insert_at < r->n_blocks)
+            memmove(r->blocks + insert_at + 1, r->blocks + insert_at,
+                    (r->n_blocks - insert_at) * sizeof(MLIR_BlockHandle));
+    }
+    r->blocks[insert_at] = block;
     r->n_blocks++;
     b->parent_region = region;
 }
@@ -1976,6 +2017,7 @@ MLIR_ValueHandle MLIR_AddBlockArgument(MLIR_Context *ctx, MLIR_BlockHandle block
     na[b->n_arguments] = vh;
     b->arguments = na;
     b->n_arguments++;
+    b->cap_arguments = b->n_arguments;
     return vh;
 }
 
@@ -2102,8 +2144,8 @@ void MLIR_SpliceBlockOps(MLIR_Context *ctx, MLIR_BlockHandle dst,
     IR_Block *s = resolve_block(src);
     if (!d || !s || s->n_operations == 0) return;
     Arena *arena = MLIR_GetArenaAllocator(ctx);
-    MLIR_OpHandle *no = arena_new_array(arena, MLIR_OpHandle,
-                                         d->n_operations + s->n_operations);
+    uint64_t new_n = d->n_operations + s->n_operations;
+    MLIR_OpHandle *no = arena_new_array(arena, MLIR_OpHandle, new_n);
     if (d->n_operations > 0)
         memcpy(no, d->operations, d->n_operations * sizeof(MLIR_OpHandle));
     memcpy(no + d->n_operations, s->operations,
@@ -2114,9 +2156,11 @@ void MLIR_SpliceBlockOps(MLIR_Context *ctx, MLIR_BlockHandle dst,
         if (op) op->parent_block = dst;
     }
     d->operations = no;
-    d->n_operations = d->n_operations + s->n_operations;
+    d->n_operations = new_n;
+    d->cap_operations = new_n;
     s->operations = NULL;
     s->n_operations = 0;
+    s->cap_operations = 0;
 }
 
 // Native cf->scf lift: dispatch to the agnostic C port. The port handles

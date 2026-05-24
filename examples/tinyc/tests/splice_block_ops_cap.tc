@@ -1,0 +1,45 @@
+// Regression test for MLIR_SpliceBlockOps not updating cap_operations.
+//
+// Before the fix, splicing a block's ops into another block kept the
+// destination's `cap_operations` at its old value while `n_operations`
+// grew past it. A subsequent Append* would then memcpy `n` items into a
+// `cap*2`-slot array (where `cap*2 < n`), corrupting the arena and the
+// next operation that happened to live there.
+//
+// To trigger the bug we need:
+//   1. The entry block to accumulate enough ops that its cap_operations
+//      doubles a few times (4 -> 8 -> 16 -> 32 -> 64).
+//   2. A single-successor branch (M8 case) so MLIR_SpliceBlockOps gets
+//      called on the entry block.
+//   3. More ops after the splice so cap_operations becomes stale enough
+//      to fail the next doubling memcpy.
+//
+// `if (cond) { body; }` (no else) produces exactly the single-successor
+// splice pattern when lifted through cf->scf. We chain many such
+// statements with enough ops between them to grow the entry block.
+
+int main() {
+    int x = 1;
+    int a01 = x + 1; int a02 = a01 + 1; int a03 = a02 + 1; int a04 = a03 + 1;
+    int a05 = a04 + 1; int a06 = a05 + 1; int a07 = a06 + 1; int a08 = a07 + 1;
+    int a09 = a08 + 1; int a10 = a09 + 1; int a11 = a10 + 1; int a12 = a11 + 1;
+    int a13 = a12 + 1; int a14 = a13 + 1; int a15 = a14 + 1; int a16 = a15 + 1;
+    if (a16 > 0) { x = x + a16; }
+    int b01 = x + 1; int b02 = b01 + 1; int b03 = b02 + 1; int b04 = b03 + 1;
+    int b05 = b04 + 1; int b06 = b05 + 1; int b07 = b06 + 1; int b08 = b07 + 1;
+    if (b08 > 0) { x = x + b08; }
+    int c01 = x + 1; int c02 = c01 + 1; int c03 = c02 + 1; int c04 = c03 + 1;
+    int c05 = c04 + 1; int c06 = c05 + 1; int c07 = c06 + 1; int c08 = c07 + 1;
+    if (c08 > 0) { x = x + c08; }
+    int d01 = x + 1; int d02 = d01 + 1; int d03 = d02 + 1; int d04 = d03 + 1;
+    int d05 = d04 + 1; int d06 = d05 + 1; int d07 = d06 + 1; int d08 = d07 + 1;
+    if (d08 > 0) { x = x + d08; }
+    int e01 = x + 1; int e02 = e01 + 1; int e03 = e02 + 1; int e04 = e03 + 1;
+    int e05 = e04 + 1; int e06 = e05 + 1; int e07 = e06 + 1; int e08 = e07 + 1;
+    if (e08 > 0) { x = x + e08; }
+    int f01 = x + 1; int f02 = f01 + 1; int f03 = f02 + 1; int f04 = f03 + 1;
+    int f05 = f04 + 1; int f06 = f05 + 1; int f07 = f06 + 1; int f08 = f07 + 1;
+    if (f08 > 0) { x = x + f08; }
+    _tinyc_print(x);
+    return 0;
+}

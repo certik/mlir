@@ -752,3 +752,7 @@ expected_stdout = "1\n"
 [[test]]
 name = "struct_field_designated_init"
 expected_stdout = "3\n"
+
+[[test]]
+name = "splice_block_ops_cap"
+expected_stdout = "824\n"
