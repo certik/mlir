@@ -1,0 +1,23 @@
+// MRE: multi-declarator local where one of the declarators has an
+// array suffix, with a typedef'd type. Comes from:
+//   uint32_t a,b,c,e,f,g,h,t1,t2,m[64];   (sha256_xform)
+// in mlir_wasm_to_macho.c. tinyc's typedef-name local-decl parser
+// only checks for `[N]` on the *first* declarator; subsequent ones
+// blow up with "expected ';'" / "expected expression".
+//
+// Expected: clang accepts and prints 23; tinyc must too.
+extern int printf(const char *fmt, ...);
+
+typedef unsigned int u32;
+
+int main() {
+    u32 a, b, c[4];
+    a = 1;
+    b = 2;
+    c[0] = 10;
+    c[1] = 0;
+    c[2] = 0;
+    c[3] = 0;
+    printf("%u\n", a + b + c[0] + 10);
+    return 0;
+}

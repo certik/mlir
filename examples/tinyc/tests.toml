@@ -788,6 +788,11 @@ targets = ["native", "wasm", "macho"]
 expected_stdout = "100\n"
 
 [[test]]
+name = "typedef_array_in_multidecl"
+targets = ["native", "wasm", "macho"]
+expected_stdout = "23\n"
+
+[[test]]
 name = "inttoptr_cast"
 targets = ["native", "wasm", "macho"]
 expected_stdout = "42\n"
