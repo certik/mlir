@@ -65,6 +65,7 @@ NATIVE_C_FILES=(
     mlir_translate_to_llvm_ir.c
     mlir_translate_to_wasm.c
     mlir_wasm_to_wat.c
+    mlir_wasm_to_macho.c
     mlir_llvm_to_wasmssa.c
     mlir_wasmssa_to_wasmstack.c
     mlir_wasmstack_to_bin.c
@@ -76,12 +77,6 @@ NATIVE_C_FILES=(
     mlir_generic_printer.c
     mlir_lift_cf_to_scf.c
 )
-# NOTE: mlir_wasm_to_macho.c is intentionally excluded from the
-# tinyc selfhost build (only built into the clang-compiled tinyc.wasm
-# via build_tinyc_wasm.sh). The translator's SHA-256 K-table is a
-# non-zero global array initializer, which the tinyC compiler doesn't
-# yet support. driver.c stubs the corresponding MLIR_WasmToMachoArm64
-# call under `#ifdef __TINYC__`.
 PLATFORM_C_FILES=(
     corec/platform/platform_wasm.c
 )
