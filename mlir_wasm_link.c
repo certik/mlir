@@ -1315,6 +1315,15 @@ static bool resolve_sym_value(const Obj *o, const ObjSymbol *s,
 // Top-level link()
 // =============================================================================
 
+// Signature-mismatch trampoline descriptor (one per (caller-expected-type,
+// undefined-symbol) pair). Filed at file scope so the cleanup path can
+// reach it.
+typedef struct {
+    int32_t  global_sym;     // gst sym this stub redirects from
+    uint32_t expected_type;  // final type idx the caller expects
+    uint32_t final_idx;      // assigned final func idx
+} StubFunc;
+
 // Configuration constants.
 enum {
     PAGE_SIZE     = 65536u,
@@ -1329,22 +1338,30 @@ bool MLIR_WasmLink(const MLIR_WasmLinkInput *inputs, size_t n_inputs,
     *out_data = NULL; *out_size = 0;
     if (n_inputs == 0) return false;
 
-    Obj *objs = (Obj *)calloc(n_inputs, sizeof(Obj));
-    bool ok = true;
+    // All owned resources live here so the `done:` path can free them
+    // unconditionally without per-error-site duplication. Every type
+    // below is safe to `*_free()` when zero-initialised.
+    Obj         *objs = (Obj *)calloc(n_inputs, sizeof(Obj));
+    GlobalSymTab gst = {0};
+    TypeTab      ttab = {0};
+    uint32_t    *table_slot_map = NULL;
+    StubFunc    *stubs = NULL;
+    uint32_t     n_stubs = 0;
+    Buf          img = {0};
+    bool         ok = true;
+
     for (size_t i = 0; i < n_inputs && ok; i++) {
         if (!parse_object(&objs[i], &inputs[i])) ok = false;
     }
     if (!ok) goto done;
 
     // ---- Symbol table merge ---------------------------------------------
-    GlobalSymTab gst = {0};
     bool need_indirect_table = false;
     if (!merge_symbols(objs, (uint32_t)n_inputs, &gst, &need_indirect_table)) {
         ok = false; goto done;
     }
 
     // ---- Type table dedup ----------------------------------------------
-    TypeTab ttab = {0};
     for (size_t oi = 0; oi < n_inputs; oi++) {
         Obj *o = &objs[oi];
         o->type_remap = (uint32_t *)calloc(o->n_types ? o->n_types : 1,
@@ -1391,13 +1408,6 @@ bool MLIR_WasmLink(const MLIR_WasmLinkInput *inputs, size_t n_inputs,
     // import signature differs from the resolved definition's signature,
     // route through a trapping stub (matches wasm-ld's
     // `signature_mismatch:<name>` behaviour).
-    typedef struct {
-        int32_t  global_sym;     // gst sym this stub redirects from
-        uint32_t expected_type;  // final type idx the caller expects
-        uint32_t final_idx;      // assigned final func idx
-    } StubFunc;
-    StubFunc *stubs = NULL;
-    uint32_t  n_stubs = 0;
     for (size_t oi = 0; oi < n_inputs; oi++) {
         Obj *o = &objs[oi];
         for (uint32_t si = 0; si < o->n_syms; si++) {
@@ -1453,7 +1463,6 @@ bool MLIR_WasmLink(const MLIR_WasmLinkInput *inputs, size_t n_inputs,
         if (gst.e[gi].kind != K_GLOBAL || !gst.e[gi].is_host_import) continue;
         gst.e[gi].final_idx = next_global_idx++;
     }
-    uint32_t first_defined_global = next_global_idx;
     for (size_t oi = 0; oi < n_inputs; oi++) {
         Obj *o = &objs[oi];
         for (uint32_t i = 0; i < o->n_globals; i++) {
@@ -1539,7 +1548,7 @@ bool MLIR_WasmLink(const MLIR_WasmLinkInput *inputs, size_t n_inputs,
     // unique table slot starting at 1 (slot 0 reserved as null). The
     // slot map is keyed by final function index.
     uint32_t  table_slot_map_n = next_func_idx;
-    uint32_t *table_slot_map = (uint32_t *)calloc(table_slot_map_n ? table_slot_map_n : 1, sizeof(uint32_t));
+    table_slot_map = (uint32_t *)calloc(table_slot_map_n ? table_slot_map_n : 1, sizeof(uint32_t));
     uint32_t  table_slots_used = 1; // slot 0 reserved
     for (size_t oi = 0; oi < n_inputs; oi++) {
         Obj *o = &objs[oi];
@@ -1562,15 +1571,7 @@ bool MLIR_WasmLink(const MLIR_WasmLinkInput *inputs, size_t n_inputs,
     // every data segment so we can patch in place. Patching happens in
     // the emit pass below (per-function and per-segment).
 
-reloc_fail:
-    if (!ok) {
-        ttab_free(&ttab);
-        gst_free(&gst);
-        goto done;
-    }
-
     // ---- Emit final wasm module ----------------------------------------
-    Buf img = {0};
     static const uint8_t magic[8] = {0,'a','s','m', 1,0,0,0};
     buf_append(&img, magic, 8);
 
@@ -1677,8 +1678,9 @@ reloc_fail:
     buf_free(&m_pl);
 
     // Global section. __stack_pointer (mutable i32) at the head, then
-    // defined globals from each object (init_expr copied as-is — but
-    // if it contains a relocation, we apply it).
+    // defined globals from each object. The init_expr bytes are copied
+    // verbatim from each object; the wasm spec doesn't permit relocs
+    // against global init expressions, so no patching is needed here.
     Buf g_pl = {0};
     uint32_t n_globals_total = 1; // __stack_pointer
     for (size_t oi = 0; oi < n_inputs; oi++) {
@@ -1700,7 +1702,6 @@ reloc_fail:
     }
     emit_section(&img, SEC_GLOBAL, &g_pl);
     buf_free(&g_pl);
-    (void)first_defined_global;
 
     // Export section. The caller asked for `entry_export` (typically
     // "_start"); failing to resolve it leaves us with a non-runnable
@@ -1711,7 +1712,6 @@ reloc_fail:
         link_err("entry export not found: %s", entry_export);
         ok = false;
         buf_free(&e_pl);
-        ttab_free(&ttab); gst_free(&gst); free(table_slot_map); free(stubs);
         goto done;
     }
     leb_u(&e_pl, 2); // memory + entry
@@ -1837,7 +1837,7 @@ reloc_fail:
         buf_putc(&code_pl, 0x00); // unreachable
         buf_putc(&code_pl, 0x0b); // end
     }
-    if (!ok) { buf_free(&code_pl); ttab_free(&ttab); gst_free(&gst); free(table_slot_map); free(stubs); goto done; }
+    if (!ok) { buf_free(&code_pl); goto done; }
     emit_section(&img, SEC_CODE, &code_pl);
     buf_free(&code_pl);
 
@@ -1946,17 +1946,18 @@ reloc_fail:
         buf_free(&d_pl);
     }
 
-    if (!ok) { ttab_free(&ttab); gst_free(&gst); free(table_slot_map); free(stubs); goto done; }
+    if (!ok) goto done;
 
     *out_data = img.data;
     *out_size = img.len;
     img.data = NULL; img.len = img.cap = 0;
+
+done:
     ttab_free(&ttab);
     gst_free(&gst);
     free(table_slot_map);
     free(stubs);
-
-done:
+    buf_free(&img);
     for (size_t i = 0; i < n_inputs; i++) free_object(&objs[i]);
     free(objs);
     return ok;
