@@ -312,6 +312,43 @@ static int64_t rd_leb_s(Reader *r) {
     return v;
 }
 
+// Skip one constant init expression and verify it ends with 0x0b. The
+// init expr is a single constant instruction followed by the `end`
+// opcode (0x0b). We can't byte-walk to the first 0x0b because const
+// payload bytes can legitimately equal 0x0b (e.g. `i32.const 11`
+// encodes as 0x41 0x0b 0x0b).
+//
+// Returns true on success; on success, `r->p` points past the trailing
+// 0x0b. Caller can compute the expression range from the saved `start`.
+static bool skip_init_expr(Reader *r) {
+    if (!rd_avail(r, 1)) return false;
+    uint8_t op = *r->p++;
+    switch (op) {
+        case 0x41: (void)rd_leb_s(r); break;   // i32.const
+        case 0x42: (void)rd_leb_s(r); break;   // i64.const
+        case 0x43:                              // f32.const
+            if (!rd_avail(r, 4)) return false;
+            r->p += 4; break;
+        case 0x44:                              // f64.const
+            if (!rd_avail(r, 8)) return false;
+            r->p += 8; break;
+        case 0x23: (void)rd_leb_u(r); break;   // global.get
+        case 0xd0:                              // ref.null t
+            if (!rd_avail(r, 1)) return false;
+            r->p += 1; break;
+        case 0xd2: (void)rd_leb_u(r); break;   // ref.func
+        default:
+            // Unknown opcode in an init_expr; we can't safely skip it
+            // without knowing its operand layout.
+            r->ok = false;
+            return false;
+    }
+    if (!r->ok) return false;
+    if (!rd_avail(r, 1) || *r->p != 0x0b) { r->ok = false; return false; }
+    r->p++;
+    return true;
+}
+
 // =============================================================================
 // Per-input parsed-object IR
 // =============================================================================
@@ -616,12 +653,14 @@ static bool obj_parse_globals(Obj *o) {
     for (uint32_t i = 0; i < n; i++) {
         uint8_t vt = rd_u8(&r);
         uint8_t mut = rd_u8(&r);
-        // Read init expr until terminating 0x0b.
+        // Opcode-aware skip of the init expression (handles const
+        // payloads that contain 0x0b bytes).
         const uint8_t *start = r.p;
-        while (r.ok && r.p < r.end && *r.p != 0x0b) r.p++;
-        if (!rd_avail(&r, 1)) return false;
-        const uint8_t *end = r.p + 1; // include 0x0b
-        r.p = end;
+        if (!skip_init_expr(&r)) {
+            link_err("bad global init expr at %u in %s", i, o->src->name);
+            return false;
+        }
+        const uint8_t *end = r.p; // already past trailing 0x0b
         o->globals = (ObjGlobal *)realloc(o->globals, (o->n_globals + 1) * sizeof(ObjGlobal));
         ObjGlobal *g = &o->globals[o->n_globals++];
         memset(g, 0, sizeof(*g));
@@ -1159,6 +1198,52 @@ static void patch_i32_le(uint8_t *p, uint32_t v) {
     p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
 }
 
+// Number of bytes a given reloc patches (5 for the padded {U,S}LEB
+// encodings, 4 for the I32 encodings). Returns 0 for unsupported reloc
+// kinds — caller treats that as an error.
+static uint32_t reloc_patch_width(uint8_t t) {
+    switch (t) {
+        case R_WASM_FUNCTION_INDEX_LEB:
+        case R_WASM_TYPE_INDEX_LEB:
+        case R_WASM_GLOBAL_INDEX_LEB:
+        case R_WASM_MEMORY_ADDR_LEB:
+        case R_WASM_TAG_INDEX_LEB:
+        case R_WASM_TABLE_NUMBER_LEB:
+        case R_WASM_TABLE_INDEX_SLEB:
+        case R_WASM_MEMORY_ADDR_SLEB:
+        case R_WASM_MEMORY_ADDR_REL_SLEB:
+        case R_WASM_TABLE_INDEX_REL_SLEB:
+            return 5;
+        case R_WASM_TABLE_INDEX_I32:
+        case R_WASM_MEMORY_ADDR_I32:
+        case R_WASM_GLOBAL_INDEX_I32:
+        case R_WASM_FUNCTION_OFFSET_I32:
+        case R_WASM_SECTION_OFFSET_I32:
+        case R_WASM_MEMORY_ADDR_LOCREL_I32:
+            return 4;
+        default:
+            return 0;
+    }
+}
+
+// Function symbols referenced via a TABLE_INDEX reloc must resolve to the
+// indirect-function-table slot, not the final function index. The slot
+// map is keyed by final func idx and is built once during link layout.
+// Returns the original value when the symbol/reloc combination doesn't
+// require remapping, or when the function hasn't been assigned a slot.
+static uint32_t remap_func_to_table_slot(uint32_t value,
+                                         uint8_t reloc_type,
+                                         SymKind sym_kind,
+                                         const uint32_t *slot_map,
+                                         uint32_t slot_map_n) {
+    if (sym_kind != SYM_FUNCTION) return value;
+    if (reloc_type != R_WASM_TABLE_INDEX_SLEB
+        && reloc_type != R_WASM_TABLE_INDEX_I32
+        && reloc_type != R_WASM_TABLE_INDEX_REL_SLEB) return value;
+    if (value < slot_map_n && slot_map[value] != 0) return slot_map[value];
+    return value;
+}
+
 // Resolve a symbol reference to its final value.
 //   - SYM_FUNCTION → final function index
 //   - SYM_GLOBAL   → final global index
@@ -1230,6 +1315,15 @@ static bool resolve_sym_value(const Obj *o, const ObjSymbol *s,
 // Top-level link()
 // =============================================================================
 
+// Signature-mismatch trampoline descriptor (one per (caller-expected-type,
+// undefined-symbol) pair). Filed at file scope so the cleanup path can
+// reach it.
+typedef struct {
+    int32_t  global_sym;     // gst sym this stub redirects from
+    uint32_t expected_type;  // final type idx the caller expects
+    uint32_t final_idx;      // assigned final func idx
+} StubFunc;
+
 // Configuration constants.
 enum {
     PAGE_SIZE     = 65536u,
@@ -1244,22 +1338,30 @@ bool MLIR_WasmLink(const MLIR_WasmLinkInput *inputs, size_t n_inputs,
     *out_data = NULL; *out_size = 0;
     if (n_inputs == 0) return false;
 
-    Obj *objs = (Obj *)calloc(n_inputs, sizeof(Obj));
-    bool ok = true;
+    // All owned resources live here so the `done:` path can free them
+    // unconditionally without per-error-site duplication. Every type
+    // below is safe to `*_free()` when zero-initialised.
+    Obj         *objs = (Obj *)calloc(n_inputs, sizeof(Obj));
+    GlobalSymTab gst = {0};
+    TypeTab      ttab = {0};
+    uint32_t    *table_slot_map = NULL;
+    StubFunc    *stubs = NULL;
+    uint32_t     n_stubs = 0;
+    Buf          img = {0};
+    bool         ok = true;
+
     for (size_t i = 0; i < n_inputs && ok; i++) {
         if (!parse_object(&objs[i], &inputs[i])) ok = false;
     }
     if (!ok) goto done;
 
     // ---- Symbol table merge ---------------------------------------------
-    GlobalSymTab gst = {0};
     bool need_indirect_table = false;
     if (!merge_symbols(objs, (uint32_t)n_inputs, &gst, &need_indirect_table)) {
         ok = false; goto done;
     }
 
     // ---- Type table dedup ----------------------------------------------
-    TypeTab ttab = {0};
     for (size_t oi = 0; oi < n_inputs; oi++) {
         Obj *o = &objs[oi];
         o->type_remap = (uint32_t *)calloc(o->n_types ? o->n_types : 1,
@@ -1306,13 +1408,6 @@ bool MLIR_WasmLink(const MLIR_WasmLinkInput *inputs, size_t n_inputs,
     // import signature differs from the resolved definition's signature,
     // route through a trapping stub (matches wasm-ld's
     // `signature_mismatch:<name>` behaviour).
-    typedef struct {
-        int32_t  global_sym;     // gst sym this stub redirects from
-        uint32_t expected_type;  // final type idx the caller expects
-        uint32_t final_idx;      // assigned final func idx
-    } StubFunc;
-    StubFunc *stubs = NULL;
-    uint32_t  n_stubs = 0;
     for (size_t oi = 0; oi < n_inputs; oi++) {
         Obj *o = &objs[oi];
         for (uint32_t si = 0; si < o->n_syms; si++) {
@@ -1368,7 +1463,6 @@ bool MLIR_WasmLink(const MLIR_WasmLinkInput *inputs, size_t n_inputs,
         if (gst.e[gi].kind != K_GLOBAL || !gst.e[gi].is_host_import) continue;
         gst.e[gi].final_idx = next_global_idx++;
     }
-    uint32_t first_defined_global = next_global_idx;
     for (size_t oi = 0; oi < n_inputs; oi++) {
         Obj *o = &objs[oi];
         for (uint32_t i = 0; i < o->n_globals; i++) {
@@ -1454,7 +1548,7 @@ bool MLIR_WasmLink(const MLIR_WasmLinkInput *inputs, size_t n_inputs,
     // unique table slot starting at 1 (slot 0 reserved as null). The
     // slot map is keyed by final function index.
     uint32_t  table_slot_map_n = next_func_idx;
-    uint32_t *table_slot_map = (uint32_t *)calloc(table_slot_map_n ? table_slot_map_n : 1, sizeof(uint32_t));
+    table_slot_map = (uint32_t *)calloc(table_slot_map_n ? table_slot_map_n : 1, sizeof(uint32_t));
     uint32_t  table_slots_used = 1; // slot 0 reserved
     for (size_t oi = 0; oi < n_inputs; oi++) {
         Obj *o = &objs[oi];
@@ -1477,15 +1571,7 @@ bool MLIR_WasmLink(const MLIR_WasmLinkInput *inputs, size_t n_inputs,
     // every data segment so we can patch in place. Patching happens in
     // the emit pass below (per-function and per-segment).
 
-reloc_fail:
-    if (!ok) {
-        ttab_free(&ttab);
-        gst_free(&gst);
-        goto done;
-    }
-
     // ---- Emit final wasm module ----------------------------------------
-    Buf img = {0};
     static const uint8_t magic[8] = {0,'a','s','m', 1,0,0,0};
     buf_append(&img, magic, 8);
 
@@ -1592,8 +1678,9 @@ reloc_fail:
     buf_free(&m_pl);
 
     // Global section. __stack_pointer (mutable i32) at the head, then
-    // defined globals from each object (init_expr copied as-is — but
-    // if it contains a relocation, we apply it).
+    // defined globals from each object. The init_expr bytes are copied
+    // verbatim from each object; the wasm spec doesn't permit relocs
+    // against global init expressions, so no patching is needed here.
     Buf g_pl = {0};
     uint32_t n_globals_total = 1; // __stack_pointer
     for (size_t oi = 0; oi < n_inputs; oi++) {
@@ -1615,21 +1702,24 @@ reloc_fail:
     }
     emit_section(&img, SEC_GLOBAL, &g_pl);
     buf_free(&g_pl);
-    (void)first_defined_global;
 
-    // Export section.
+    // Export section. The caller asked for `entry_export` (typically
+    // "_start"); failing to resolve it leaves us with a non-runnable
+    // module, so error instead of silently producing one.
     Buf e_pl = {0};
     int entry_gi = gst_find(&gst, entry_export);
-    uint32_t n_exports = 1; // memory
-    if (entry_gi >= 0) n_exports++;
-    leb_u(&e_pl, n_exports);
+    if (entry_gi < 0) {
+        link_err("entry export not found: %s", entry_export);
+        ok = false;
+        buf_free(&e_pl);
+        goto done;
+    }
+    leb_u(&e_pl, 2); // memory + entry
     emit_string(&e_pl, "memory");
     buf_putc(&e_pl, 0x02); leb_u(&e_pl, 0);
-    if (entry_gi >= 0) {
-        emit_string(&e_pl, entry_export);
-        buf_putc(&e_pl, 0x00);
-        leb_u(&e_pl, gst.e[entry_gi].final_idx);
-    }
+    emit_string(&e_pl, entry_export);
+    buf_putc(&e_pl, 0x00);
+    leb_u(&e_pl, gst.e[entry_gi].final_idx);
     emit_section(&img, SEC_EXPORT, &e_pl);
     buf_free(&e_pl);
 
@@ -1671,6 +1761,15 @@ reloc_fail:
                 if (r->sym_idx >= o->n_syms) {
                     link_err("reloc bad sym in %s", o->src->name); ok = false; break;
                 }
+                uint32_t w = reloc_patch_width(r->type);
+                if (w == 0) {
+                    link_err("unsupported reloc type %u in %s",
+                             r->type, o->src->name); ok = false; break;
+                }
+                if (off + w > f->code_len) {
+                    link_err("reloc patch out of bounds in %s (code)", o->src->name);
+                    ok = false; break;
+                }
                 ObjSymbol *s = &o->syms[r->sym_idx];
                 uint32_t value = 0;
                 int32_t  svalue = 0;
@@ -1692,14 +1791,8 @@ reloc_fail:
                     // For table-index relocations to function symbols,
                     // remap from final-func-idx to its slot in the
                     // merged indirect_function_table.
-                    if (s->kind == SYM_FUNCTION
-                        && (r->type == R_WASM_TABLE_INDEX_SLEB
-                            || r->type == R_WASM_TABLE_INDEX_I32
-                            || r->type == R_WASM_TABLE_INDEX_REL_SLEB)) {
-                        if (value < table_slot_map_n && table_slot_map[value] != 0) {
-                            value = table_slot_map[value];
-                        }
-                    }
+                    value = remap_func_to_table_slot(value, r->type, s->kind,
+                                                     table_slot_map, table_slot_map_n);
                     svalue = (int32_t)value;
                 }
                 switch (r->type) {
@@ -1744,7 +1837,7 @@ reloc_fail:
         buf_putc(&code_pl, 0x00); // unreachable
         buf_putc(&code_pl, 0x0b); // end
     }
-    if (!ok) { buf_free(&code_pl); ttab_free(&ttab); gst_free(&gst); free(table_slot_map); free(stubs); goto done; }
+    if (!ok) { buf_free(&code_pl); goto done; }
     emit_section(&img, SEC_CODE, &code_pl);
     buf_free(&code_pl);
 
@@ -1791,6 +1884,16 @@ reloc_fail:
                     uint32_t off = r->section_off - body_off[i];
                     if (r->sym_idx >= o->n_syms) { ok = false; break; }
                     ObjSymbol *s = &o->syms[r->sym_idx];
+                    uint32_t w = reloc_patch_width(r->type);
+                    if (w == 0) {
+                        link_err("unsupported data reloc %u in %s",
+                                 r->type, o->src->name);
+                        ok = false; break;
+                    }
+                    if (off + w > o->datasegs[i].size) {
+                        link_err("reloc patch out of bounds in %s (data)", o->src->name);
+                        ok = false; break;
+                    }
                     uint32_t value = 0;
                     if (r->type == R_WASM_TYPE_INDEX_LEB) {
                         if (r->sym_idx < o->n_types) value = o->type_remap[r->sym_idx];
@@ -1801,6 +1904,14 @@ reloc_fail:
                             ok = false; break;
                         }
                         if (s->kind == SYM_DATA) value += (uint32_t)r->addend;
+                        // For table-index relocations to function symbols
+                        // in *data* (e.g. a static initializer that stores
+                        // &fn), patch with the table slot, not the final
+                        // function index. Matches the CODE-path remap so
+                        // indirect calls through that slot land on the
+                        // right body.
+                        value = remap_func_to_table_slot(value, r->type, s->kind,
+                                                         table_slot_map, table_slot_map_n);
                     }
                     switch (r->type) {
                         case R_WASM_MEMORY_ADDR_I32:
@@ -1835,17 +1946,18 @@ reloc_fail:
         buf_free(&d_pl);
     }
 
-    if (!ok) { ttab_free(&ttab); gst_free(&gst); free(table_slot_map); free(stubs); goto done; }
+    if (!ok) goto done;
 
     *out_data = img.data;
     *out_size = img.len;
     img.data = NULL; img.len = img.cap = 0;
+
+done:
     ttab_free(&ttab);
     gst_free(&gst);
     free(table_slot_map);
     free(stubs);
-
-done:
+    buf_free(&img);
     for (size_t i = 0; i < n_inputs; i++) free_object(&objs[i]);
     free(objs);
     return ok;

@@ -27,6 +27,7 @@ jobs:
               TINYC_USE_NATIVE_LINK=1 pixi run -e upstream test_tinyc_upstream_wasm
               pixi run -e upstream test_tinyc_native
               pixi run -e upstream test_tinyc_native_wasm
+              TINYC_USE_NATIVE_LINK=1 pixi run -e upstream test_tinyc_native_wasm
               pixi run -e linux test_linux_tinyc
           - platform: macos
             os: macos-latest
@@ -43,6 +44,7 @@ jobs:
               TINYC_USE_NATIVE_LINK=1 pixi run -e upstream test_tinyc_upstream_wasm
               pixi run -e upstream test_tinyc_native
               pixi run -e upstream test_tinyc_native_wasm
+              TINYC_USE_NATIVE_LINK=1 pixi run -e upstream test_tinyc_native_wasm
               pixi run -e macos test_macos_tinyc
           - platform: windows
             os: windows-latest
@@ -60,6 +62,7 @@ jobs:
               cmd /c "set TINYC_USE_NATIVE_LINK=1&& pixi run -e upstream test_tinyc_upstream_wasm" || exit /b 1
               pixi run -e upstream test_tinyc_native || exit /b 1
               pixi run -e upstream test_tinyc_native_wasm || exit /b 1
+              cmd /c "set TINYC_USE_NATIVE_LINK=1&& pixi run -e upstream test_tinyc_native_wasm" || exit /b 1
 
     runs-on: ${{ matrix.os }}
     name: Test ${{ matrix.platform }}
