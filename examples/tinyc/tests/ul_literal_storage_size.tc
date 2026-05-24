@@ -1,0 +1,33 @@
+// MRE for the self-host wasm bug: integer literals with a single 'L'/'UL'
+// suffix (e.g. `4096UL`) must have the same width as `long` on the target.
+// On wasm32 `long` is 32-bit, so `4096UL` must lex as a 32-bit constant;
+// before the fix, tinyC always typed L/LL-suffixed literals as i64. That
+// made expressions like `start % 4096UL` (with `start` of type
+// `size_t == unsigned long`) be evaluated at 64-bit width, and the
+// 8-byte i64.store of the result then spilled into adjacent 4-byte stack
+// slots in the wasm frame, clobbering live locals (e.g. caller params).
+//
+// We exercise the issue by checking the *width* of `4096UL` directly via
+// the standard C trick `sizeof(expr)`. On wasm32 with the bug, this
+// prints "8"; with the fix, "4". On native it always prints "8".
+
+extern int printf(const char *fmt, ...);
+
+typedef unsigned long size_t;
+
+int main(void) {
+    // `4096UL` and `1L` must follow the size of `long` on the target.
+    // `1LL` must always be 8 bytes regardless of target.
+    int ok = 1;
+    if (sizeof(4096UL) != sizeof(unsigned long)) ok = 0;
+    if (sizeof(1L)     != sizeof(long))          ok = 0;
+    if (sizeof(1LL)    != 8)                      ok = 0;
+    // An L-suffix literal used in arithmetic with a size_t/unsigned long
+    // value must not promote the result to 64-bit on wasm32. Equivalent
+    // statement: `(size_t)x % 4096UL` has type `size_t`, which is the
+    // same width as `long` on the target.
+    size_t s = 0x12345UL;
+    if (sizeof(s % 4096UL) != sizeof(size_t)) ok = 0;
+    printf("%s\n", ok ? "ok" : "BAD");
+    return 0;
+}

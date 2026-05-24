@@ -861,3 +861,16 @@ name = "unsigned_i32_to_i64_zext"
 # extended u64 when block_size had its top bit set, printing
 # "-2147483648" / "18446744071562067968" instead of "2147483648".
 expected_stdout = "2147483648\n"
+
+[[test]]
+name = "ul_literal_storage_size"
+# wasm32 self-host bug: an integer literal with a single 'L'/'UL'
+# suffix (e.g. `4096UL`) was lexed as i64 even on wasm32, where
+# `long` is 32-bit. That made `start % 4096UL` (with `start` of
+# type `size_t == unsigned long`) compute via i64.rem_u and then
+# spill an 8-byte i64.store into a 4-byte slot of the wasm stack
+# frame, clobbering the next-up locals (e.g. caller parameters).
+# The fix narrows single-L int literals to i32 when targeting
+# wasm32, while keeping `LL` always i64.
+expected_stdout = "ok\n"
+

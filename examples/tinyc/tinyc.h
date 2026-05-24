@@ -223,8 +223,13 @@ struct Expr {
     ExprKind kind;
     // For EX_INT
     int64_t int_value;
-    bool    is_i64;          // true iff the integer literal had L/LL suffix
-                             // and so should be emitted as TY_I64.
+    bool    is_i64;          // true iff the integer literal had L/LL suffix.
+                             // When `is_i64 && !is_long_long`, the literal had
+                             // a single L: it is TY_I64 on native targets but
+                             // TY_I32 on wasm32 (where `long` is the size of
+                             // `int`).
+    bool    is_long_long;    // true iff the integer literal had an LL suffix.
+                             // LL always means TY_I64 regardless of target.
     bool    is_f64;          // true iff the float literal has TY_F64 type
                              // (i.e. no `f` suffix; C's default for `1.0`).
     // For EX_FLOAT
@@ -497,6 +502,11 @@ typedef struct {
     TcTokKind kind;
     int64_t int_value;
     bool    is_i64;          // EX_INT / TC_TK_INT_LIT marked with L/LL suffix
+    bool    is_long_long;    // EX_INT / TC_TK_INT_LIT marked with LL suffix
+                             // (always 64-bit). When `is_i64 && !is_long_long`
+                             // the literal had a single L: it is 64-bit on
+                             // native targets but 32-bit on wasm32 (where
+                             // `long` is `int`).
     bool    is_f64;          // TC_TK_FLOAT_LIT without `f` suffix (i.e. double)
     double  float_value;
     string text;             // interned identifier text (for IDENT)

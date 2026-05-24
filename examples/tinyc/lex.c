@@ -250,12 +250,15 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                 TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
                 // Optional integer-literal suffix: any mix of 'l'/'L' /
                 // 'u'/'U' in any order (see below for the decimal path).
+                int n_l = 0;
                 for (int k = 0; k < 3 && j < src.size; k++) {
                     char c2 = src.str[j];
-                    if (c2 == 'l' || c2 == 'L') { t.is_i64 = true; j++; }
+                    if (c2 == 'l' || c2 == 'L') { n_l++; j++; }
                     else if (c2 == 'u' || c2 == 'U') { j++; }
                     else break;
                 }
+                if (n_l >= 1) t.is_i64 = true;
+                if (n_l >= 2) t.is_long_long = true;
                 VecTcTok_push_back(arena, &toks, t);
                 i = j; continue;
             }
@@ -331,15 +334,21 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
             }
             TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
             // Optional integer-literal suffix: any combination of 'l'/'L'
-            // (denoting TY_I64) and 'u'/'U' (signedness, silently dropped),
-            // in either order. So 'L', 'LL', 'UL', 'LU', 'ULL', 'LLU', 'U'
-            // are all accepted. We do not distinguish signedness.
+            // and 'u'/'U' in either order. So 'L', 'LL', 'UL', 'LU', 'ULL',
+            // 'LLU', 'U' are all accepted. We do not distinguish signedness.
+            // A single L denotes `long` (target-dependent: 32-bit on wasm32,
+            // 64-bit on native); LL always denotes `long long` (64-bit). The
+            // emitter consults `target_wasm32` to decide the size for a
+            // single-L literal.
+            int n_l_dec = 0;
             for (int k = 0; k < 3 && j < src.size; k++) {
                 char c2 = src.str[j];
-                if (c2 == 'l' || c2 == 'L') { t.is_i64 = true; j++; }
+                if (c2 == 'l' || c2 == 'L') { n_l_dec++; j++; }
                 else if (c2 == 'u' || c2 == 'U') { j++; }
                 else break;
             }
+            if (n_l_dec >= 1) t.is_i64 = true;
+            if (n_l_dec >= 2) t.is_long_long = true;
             VecTcTok_push_back(arena, &toks, t);
             i = j; continue;
         }

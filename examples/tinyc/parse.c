@@ -467,6 +467,10 @@ static Expr *parse_primary(P *p) {
         Expr *e = new_expr(p, EX_INT, t.line);
         e->int_value = t.int_value;
         e->is_i64 = t.is_i64;
+        e->is_long_long = t.is_long_long;
+        // On wasm32, a single-L suffix (`long`) is 32-bit, not 64-bit. Only
+        // `LL` (or having no L at all) is target-independent.
+        if (e->is_i64 && !e->is_long_long && p->target_wasm32) e->is_i64 = false;
         return e;
     }
     if (t.kind == TC_TK_FLOAT_LIT) {
