@@ -850,3 +850,14 @@ name = "generic_ternary_str"
 # the A() = _Generic(...) macro) fail to compile any tinyC
 # source that called EMIT_ERR with a ternary string argument.
 expected_stdout = "got-char-ptr\n"
+
+[[test]]
+name = "unsigned_i32_to_i64_zext"
+# Widening an `unsigned` 32-bit value to a 64-bit function argument
+# must zero-extend, not sign-extend. tinyC's coerce_eval used to
+# always emit `arith.extsi` for i32 -> i64, even when the source
+# value carried an `unsigned` C type. That bit corec's wasm32
+# self-host: `uint64_to_str(block_size, ...)` received a sign-
+# extended u64 when block_size had its top bit set, printing
+# "-2147483648" / "18446744071562067968" instead of "2147483648".
+expected_stdout = "2147483648\n"

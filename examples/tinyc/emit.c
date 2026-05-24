@@ -836,7 +836,12 @@ static MLIR_ValueHandle coerce_eval(E *e, EVal v, MLIR_TypeHandle want) {
             EVal as_i32 = (EVal){.val = coerce_eval(e, v, e->i32)};
             return emit_extsi_i32_to_i64(e, as_i32.val);
         }
-        return emit_extsi_i32_to_i64(e, v.val);
+        // Use unsigned widening when the source carried an `unsigned`
+        // C type — otherwise an i32 value with its top bit set (e.g.
+        // a wasm32 `size_t` of 2 GiB) would sign-extend to a huge
+        // "negative" u64.
+        return v.is_unsigned ? emit_extui_i32_to_i64(e, v.val)
+                             : emit_extsi_i32_to_i64(e, v.val);
     }
     if (want == e->i32 && v.is_i64) {
         return emit_trunci_i64_to_i32(e, v.val);

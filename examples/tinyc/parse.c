@@ -967,10 +967,16 @@ static Expr *parse_expr(P *p) { return parse_assign_or_or(p); }
 // `Type` should copy this into `t.is_long` so that `_Generic` can
 // disambiguate `int` from `long` on wasm32 where both have storage
 // kind TY_I32 / int_bits == 32.
+//
+// `out_is_unsigned` (out) is set to true when the type was declared
+// with the `unsigned` keyword. Callers must propagate this into
+// `Type.int_unsigned` so that i32 -> i64 widening uses `arith.extui`
+// (zero-extend) instead of `arith.extsi` (sign-extend).
 static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char,
-                             bool *out_is_long) {
+                             bool *out_is_long, bool *out_is_unsigned) {
     *out_was_char = false;
     *out_is_long = false;
+    *out_is_unsigned = false;
     skip_const(p);
     // C-style integer base specifier: any sequence of signed / unsigned /
     // short / long / int / char / _Bool / bool. `long long` is always
@@ -980,6 +986,7 @@ static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char,
     bool saw_int_kw = false;
     int  n_long_kw = 0;
     bool saw_signedness_kw = false;
+    bool saw_unsigned_kw = false;
     bool saw_short_kw = false;
     bool saw_char_kw = false;
     bool saw_bool_kw = false;
@@ -987,7 +994,9 @@ static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char,
     while (progress) {
         progress = false;
         while (cur(p).kind == TC_TK_KW_SIGNED || cur(p).kind == TC_TK_KW_UNSIGNED) {
-            saw_signedness_kw = true; p->i++; skip_const(p); progress = true;
+            saw_signedness_kw = true;
+            if (cur(p).kind == TC_TK_KW_UNSIGNED) saw_unsigned_kw = true;
+            p->i++; skip_const(p); progress = true;
         }
         while (cur(p).kind == TC_TK_KW_LONG) {
             n_long_kw++; p->i++; skip_const(p); progress = true;
@@ -1007,6 +1016,7 @@ static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char,
     }
     *out_was_char = saw_char_kw;
     *out_is_long = (n_long_kw >= 1);
+    *out_is_unsigned = saw_unsigned_kw;
     if (n_long_kw > 0) {
         bool is_64 = (n_long_kw >= 2) || !p->target_wasm32;
         *out = is_64 ? TY_I64 : TY_I32;
@@ -1035,7 +1045,8 @@ static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char,
 static bool parse_base_type(P *p, TypeKind *out) {
     bool dummy = false;
     bool dummy_is_long = false;
-    return parse_base_type2(p, out, &dummy, &dummy_is_long);
+    bool dummy_is_unsigned = false;
+    return parse_base_type2(p, out, &dummy, &dummy_is_long, &dummy_is_unsigned);
 }
 
 static Stmt *parse_stmt(P *p);
@@ -1246,12 +1257,14 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     TypeKind base = TY_I32;
     bool was_char = false;
     bool is_long = false;
-    parse_base_type2(p, &base, &was_char, &is_long);
+    bool is_unsigned = false;
+    parse_base_type2(p, &base, &was_char, &is_long, &is_unsigned);
     // Function-pointer local: `int (*name)(types)`.
     if (cur(p).kind == TC_TK_LPAREN && peek(p, 1).kind == TC_TK_STAR) {
         Stmt *s = new_stmt(p, ST_DECL, line);
         s->decl_type.kind = base;
         if (is_long) s->decl_type.int_bits = 64;
+        s->decl_type.int_unsigned = is_unsigned;
         string nm = (string){0};
         try_parse_fnptr_suffix(p, &s->decl_type, &nm);
         if (nm.size == 0) {
@@ -1276,6 +1289,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     s->decl_name = name.text;
     s->decl_type.kind = base;
     if (is_long) s->decl_type.int_bits = 64;
+    if (!is_ptr) s->decl_type.int_unsigned = is_unsigned;
     if (is_ptr) {
         if (was_char) s->decl_type.kind = TY_PTR_CHAR;
         else if (base == TY_I32) s->decl_type.kind = TY_PTR_I32;
@@ -2152,14 +2166,16 @@ static StructDef *parse_struct_def(P *p) {
             TypeKind k;
             was_char = false;
             bool field_is_long = false;
+            bool field_is_unsigned = false;
             was_float = (cur(p).kind == TC_TK_KW_FLOAT);
-            if (!parse_base_type2(p, &k, &was_char, &field_is_long)) {
+            if (!parse_base_type2(p, &k, &was_char, &field_is_long, &field_is_unsigned)) {
                 perror_at(p, cur(p).line, str_lit("expected field type (int|float|char|struct)"));
                 p->i++;
                 continue;
             }
             ft.kind = k;
             if (field_is_long) ft.int_bits = 64;
+            ft.int_unsigned = field_is_unsigned;
             // Optional pointer suffix on base types: `T *` (single) or
             // `T **` (pointer-to-pointer). The `**` form wraps the
             // single-level pointer kind into a TY_PTR_PTR.
