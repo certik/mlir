@@ -224,6 +224,13 @@ static void pp_tokenize(Arena *arena, string src, string file, VecPPTok *out) {
             line++;
             continue;
         }
+        if (c == '\\' && i + 2 < src.size && src.str[i + 1] == '\r' &&
+                src.str[i + 2] == '\n') {
+            // CRLF line continuation (Windows / git core.autocrlf checkouts).
+            i += 3;
+            line++;
+            continue;
+        }
         if (c == '\n') {
             PPTok t = {0};
             t.kind = PP_NEWLINE;

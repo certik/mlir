@@ -1001,3 +1001,17 @@ name = "global_ptr_ptr"
 # platform_args_sizes_get with an argv pointer whose upper 4 bytes came
 # from the adjacent stored_envp global.
 expected_stdout = "1\n1\n"
+
+[[test]]
+name = "crlf_line_continuation"
+# Regression for tinyc preprocessor not recognizing `\\\r\n` line
+# continuations. On Windows, git's default `core.autocrlf=true` checks
+# files out with CRLF endings, so every multi-line macro (e.g. the
+# `println` macro in corec/base/io.h) became `\\\r\n` instead of `\\\n`
+# and the preprocessor's `\\\n` check missed it. The bare `\\` then fell
+# through to the token loop as an unexpected character — the Windows CI
+# selfhost step failed at `corec/base/io.c` with
+#     tinyc lex error at line 36: unexpected '\'
+# This test file is intentionally stored with CRLF line endings (see
+# .gitattributes) so the preprocessor must accept `\\\r\n` to compile it.
+expected_stdout = "7\n"

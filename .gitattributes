@@ -18,6 +18,10 @@
 *.out     text eol=lf
 *.stderr  text eol=lf
 
+# Tinyc test inputs are normally LF, except one targeted CRLF regression.
+examples/tinyc/tests/*.tc text eol=lf
+examples/tinyc/tests/crlf_line_continuation.tc text eol=crlf
+
 # Treat anything else as binary by default.
 *.wasm  binary
 *.exe   binary
