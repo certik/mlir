@@ -1010,6 +1010,34 @@ MLIR_OpHandle MLIR_CreateLLVMGlobalString(MLIR_Context *ctx, string sym_name,
                          str_lit(""), -1);
 }
 
+// Aggregate-array global with a raw-bytes initializer:
+//   llvm.mlir.global internal @<sym>("<bytes>") : !llvm.array<N x iX>
+// Used for `static const T arr[N] = { v1, v2, ... };` at file scope.
+// The `bytes` buffer holds the packed little-endian element bytes
+// (size must equal N * sizeof(elem)).
+// Backends interpret the STRING `value` attribute as raw initializer
+// bytes (see lower_global in mlir_llvm_to_wasmssa.c and emit_global in
+// mlir_translate_to_llvm_ir.c).
+MLIR_OpHandle MLIR_CreateLLVMGlobalArrayInit(MLIR_Context *ctx, string sym_name,
+                                              MLIR_TypeHandle array_ty,
+                                              bool is_constant,
+                                              string bytes,
+                                              MLIR_LocationHandle loc) {
+    MLIR_AttributeHandle attrs[5];
+    size_t na = 0;
+    attrs[na++] = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), sym_name);
+    attrs[na++] = MLIR_CreateAttributeType(ctx, str_lit("global_type"), array_ty);
+    attrs[na++] = make_llvm_linkage_attr(ctx, str_lit("internal"));
+    if (is_constant) {
+        attrs[na++] = MLIR_CreateAttributeBool(ctx, str_lit("constant"), true);
+    }
+    attrs[na++] = MLIR_CreateAttributeString(ctx, str_lit("value"), bytes);
+    return MLIR_CreateOp(ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.mlir.global"),
+                         attrs, na, NULL, 0, NULL, 0, NULL, 0,
+                         NULL, 0, loc, MLIR_INVALID_HANDLE,
+                         str_lit(""), -1);
+}
+
 MLIR_OpHandle MLIR_CreateLLVMGlobal(MLIR_Context *ctx, string sym_name,
                                     MLIR_TypeHandle elem_ty, bool is_constant,
                                     int init_kind, int64_t init_int, double init_float,

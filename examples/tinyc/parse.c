@@ -2883,17 +2883,51 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                         g.has_init = true;
                         TcTok lit = cur(&p);
                         if (lit.kind == TC_TK_LBRACE) {
-                            // Aggregate initializer for global array.
-                            // Currently only supported when all elements are
-                            // 0 / NULL — emit as zero-init aggregate.
+                            // Aggregate initializer for a global array.
+                            // Each element must be an int/long literal
+                            // (optionally negated), NULL, or a `(cast)0`
+                            // sequence — i.e. constant-evaluable at
+                            // parse time. Pack the values little-endian
+                            // into init_array_data when at least one
+                            // non-zero value is present; otherwise fall
+                            // through to the existing zero-init path.
                             p.i++;
+                            size_t elem_size = 4;
+                            if (g.type.kind == TY_ARRAY_I32) {
+                                elem_size = g.type.array_elem_is_i64 ? 8
+                                          : g.type.array_elem_is_i8  ? 1
+                                          : 4;
+                            }
+                            int64_t alen = g.type.array_len;
+                            uint8_t *bytes = NULL;
+                            size_t   bcap  = 0;
+                            if (alen > 0 && (g.type.kind == TY_ARRAY_I32)) {
+                                bcap  = (size_t)alen * elem_size;
+                                bytes = (uint8_t *)arena_alloc(p.arena, bcap);
+                                for (size_t bi = 0; bi < bcap; bi++) bytes[bi] = 0;
+                            }
+                            size_t  ei = 0;
+                            bool    any_nonzero = false;
                             if (cur(&p).kind != TC_TK_RBRACE) {
                                 for (;;) {
                                     TcTok el = cur(&p);
                                     bool ok = false;
-                                    if (el.kind == TC_TK_INT_LIT && el.int_value == 0) ok = true;
-                                    else if (el.kind == TC_TK_KW_NULL) ok = true;
-                                    else if (el.kind == TC_TK_LPAREN) {
+                                    int64_t val = 0;
+                                    bool have_int_val = false;
+                                    if (el.kind == TC_TK_INT_LIT) {
+                                        val = el.int_value;
+                                        have_int_val = true;
+                                        ok = true;
+                                    } else if (el.kind == TC_TK_KW_NULL) {
+                                        val = 0; have_int_val = true; ok = true;
+                                    } else if (el.kind == TC_TK_MINUS &&
+                                               peek(&p, 1).kind == TC_TK_INT_LIT) {
+                                        val = -peek(&p, 1).int_value;
+                                        have_int_val = true;
+                                        ok = true;
+                                        p.i++;       // skip the '-'
+                                        el = cur(&p); // now the int lit
+                                    } else if (el.kind == TC_TK_LPAREN) {
                                         // tolerate `(void*)0`-style tokens by
                                         // skipping to matching ')'. Followed
                                         // by an int 0 constant.
@@ -2903,18 +2937,29 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                             else if (cur(&p).kind == TC_TK_RPAREN) depth--;
                                             p.i++;
                                         }
-                                        // optional int 0 after the cast
-                                        if (cur(&p).kind == TC_TK_INT_LIT &&
-                                            cur(&p).int_value == 0) p.i++;
+                                        // optional int after the cast
+                                        if (cur(&p).kind == TC_TK_INT_LIT) {
+                                            val = cur(&p).int_value;
+                                            have_int_val = true;
+                                            p.i++;
+                                        }
                                         ok = true;
                                     }
                                     if (!ok) {
                                         perror_at(&p, el.line,
-                                            str_lit("global array initializer element must be 0/NULL"));
+                                            str_lit("global array initializer element must be int/long literal or NULL"));
                                         p.i++;
                                     } else if (el.kind != TC_TK_LPAREN) {
                                         p.i++;
                                     }
+                                    if (have_int_val && bytes && ei < (size_t)alen) {
+                                        uint64_t uv = (uint64_t)val;
+                                        for (size_t b = 0; b < elem_size; b++) {
+                                            bytes[ei * elem_size + b] = (uint8_t)(uv >> (8 * b));
+                                        }
+                                        if (val != 0) any_nonzero = true;
+                                    }
+                                    if (have_int_val) ei++;
                                     if (cur(&p).kind == TC_TK_COMMA) {
                                         p.i++;
                                         if (cur(&p).kind == TC_TK_RBRACE) break;
@@ -2925,6 +2970,10 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                             }
                             expect(&p, TC_TK_RBRACE,
                                    str_lit("expected '}' in global array initializer"));
+                            if (any_nonzero && bytes && bcap > 0) {
+                                g.init_array_data.str  = (char *)bytes;
+                                g.init_array_data.size = bcap;
+                            }
                         } else if (lit.kind == TC_TK_INT_LIT &&
                                    peek(&p, 1).kind == TC_TK_SHL &&
                                    peek(&p, 2).kind == TC_TK_INT_LIT) {

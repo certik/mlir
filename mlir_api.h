@@ -555,6 +555,16 @@ MLIR_OpHandle MLIR_CreateLLVMGlobal(MLIR_Context *ctx,
                                     double init_float,
                                     MLIR_BlockHandle *out_init_block,
                                     MLIR_LocationHandle loc);
+// Aggregate-array global with a raw-bytes initializer:
+//   llvm.mlir.global internal @<sym>("<bytes>") : !llvm.array<N x iX>
+// `bytes` is the packed little-endian initializer (size must equal
+// N * sizeof(elem)). Backends interpret it as raw bytes.
+MLIR_OpHandle MLIR_CreateLLVMGlobalArrayInit(MLIR_Context *ctx,
+                                              string sym_name,
+                                              MLIR_TypeHandle array_ty,
+                                              bool is_constant,
+                                              string bytes,
+                                              MLIR_LocationHandle loc);
 
 MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *ctx, string name);
 // Function type: (input_types) -> (result_types). Both arrays are

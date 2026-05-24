@@ -5635,27 +5635,39 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             }
             MLIR_TypeHandle arr_ty = MLIR_CreateTypeLLVMArray(
                 ctx, elem, (uint64_t)g->type.array_len);
-            MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
-            MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, arr_ty,
-                /*is_constant=*/false,
-                /*init_kind=*/2, 0, 0.0, &init_blk, e.loc);
-            MLIR_BlockHandle save_blk = e.cur_block;
-            bool save_term = e.terminated;
-            e.cur_block = init_blk;
-            e.terminated = false;
-            // Materialize a zero of the array type.
-            MLIR_ValueHandle zv = MLIR_CreateValueOpResult(e.ctx, MLIR_INVALID_HANDLE, 0,
-                                                          arr_ty, ssa_name(&e), eloc(&e, 0));
-            MLIR_TypeHandle *zrts = arena_new_array(e.arena, MLIR_TypeHandle, 1); zrts[0] = arr_ty;
-            MLIR_ValueHandle *zrs = arena_new_array(e.arena, MLIR_ValueHandle, 1); zrs[0] = zv;
-            emit_op(&e, OP_TYPE_LLVM_MLIR_ZERO, str_lit("llvm.mlir.zero"),
-                    zrts, 1, zrs, 1, NULL, 0, NULL, 0, NULL, 0);
-            MLIR_ValueHandle *rops = arena_new_array(arena, MLIR_ValueHandle, 1);
-            rops[0] = zv;
-            emit_op(&e, OP_TYPE_LLVM_RETURN, str_lit("llvm.return"),
-                    NULL, 0, NULL, 0, rops, 1, NULL, 0, NULL, 0);
-            e.cur_block = save_blk;
-            e.terminated = save_term;
+            MLIR_OpHandle gop;
+            if (g->init_array_data.size > 0 &&
+                g->type.kind == TY_ARRAY_I32) {
+                // Non-zero aggregate initializer: emit the raw bytes
+                // as the global's `value` STRING attribute. lower_global
+                // (wasm) and emit_global (native) both interpret it as
+                // packed little-endian element bytes.
+                gop = MLIR_CreateLLVMGlobalArrayInit(ctx, g->name, arr_ty,
+                    /*is_constant=*/false,
+                    g->init_array_data, e.loc);
+            } else {
+                MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
+                gop = MLIR_CreateLLVMGlobal(ctx, g->name, arr_ty,
+                    /*is_constant=*/false,
+                    /*init_kind=*/2, 0, 0.0, &init_blk, e.loc);
+                MLIR_BlockHandle save_blk = e.cur_block;
+                bool save_term = e.terminated;
+                e.cur_block = init_blk;
+                e.terminated = false;
+                // Materialize a zero of the array type.
+                MLIR_ValueHandle zv = MLIR_CreateValueOpResult(e.ctx, MLIR_INVALID_HANDLE, 0,
+                                                              arr_ty, ssa_name(&e), eloc(&e, 0));
+                MLIR_TypeHandle *zrts = arena_new_array(e.arena, MLIR_TypeHandle, 1); zrts[0] = arr_ty;
+                MLIR_ValueHandle *zrs = arena_new_array(e.arena, MLIR_ValueHandle, 1); zrs[0] = zv;
+                emit_op(&e, OP_TYPE_LLVM_MLIR_ZERO, str_lit("llvm.mlir.zero"),
+                        zrts, 1, zrs, 1, NULL, 0, NULL, 0, NULL, 0);
+                MLIR_ValueHandle *rops = arena_new_array(arena, MLIR_ValueHandle, 1);
+                rops[0] = zv;
+                emit_op(&e, OP_TYPE_LLVM_RETURN, str_lit("llvm.return"),
+                        NULL, 0, NULL, 0, rops, 1, NULL, 0, NULL, 0);
+                e.cur_block = save_blk;
+                e.terminated = save_term;
+            }
             // Record the struct sdef on the symbol for indexed access.
             if (g->type.kind == TY_ARRAY_STRUCT) {
                 sy->sdef = find_struct(&e, g->type.struct_name);

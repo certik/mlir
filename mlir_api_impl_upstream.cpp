@@ -1097,6 +1097,73 @@ extern "C" MLIR_OpHandle MLIR_CreateLLVMGlobal(MLIR_Context *,
     return H(op.getOperation());
 }
 
+extern "C" MLIR_OpHandle MLIR_CreateLLVMGlobalArrayInit(MLIR_Context *,
+                                                        string sym_name,
+                                                        MLIR_TypeHandle array_ty,
+                                                        bool is_constant,
+                                                        string bytes,
+                                                        MLIR_LocationHandle location) {
+    auto &ctx = globalCtx().mctx;
+    mlir::Location loc = (location == MLIR_INVALID_HANDLE)
+                             ? mlir::Location(mlir::UnknownLoc::get(&ctx))
+                             : locF(location);
+    mlir::Type arrTy = typeF(array_ty);
+    // Build a region initializer with a chain of `llvm.insertvalue`s
+    // off a `llvm.mlir.undef` so the result matches the global's array
+    // type. MLIR's LLVM dialect only accepts a `StringAttr` value for
+    // !llvm.array<N x i8>; for any other element type we *must* go
+    // through a region initializer.
+    mlir::OpBuilder b(&ctx);
+    auto op = b.create<mlir::LLVM::GlobalOp>(
+        loc, arrTy, is_constant,
+        mlir::LLVM::Linkage::Internal,
+        llvm::StringRef(sym_name.str, sym_name.size),
+        /*value=*/mlir::Attribute(), /*alignment=*/0);
+    mlir::Region &region = op.getInitializerRegion();
+    mlir::Block *entry = new mlir::Block();
+    region.push_back(entry);
+    b.setInsertionPointToStart(entry);
+    auto arr = llvm::dyn_cast<mlir::LLVM::LLVMArrayType>(arrTy);
+    if (!arr) {
+        // Fallback to zero-init.
+        auto zero = b.create<mlir::LLVM::ZeroOp>(loc, arrTy);
+        b.create<mlir::LLVM::ReturnOp>(loc, zero.getRes());
+        return H(op.getOperation());
+    }
+    mlir::Type elemTy = arr.getElementType();
+    uint64_t n = arr.getNumElements();
+    uint64_t elem_size = 0;
+    if (auto it = llvm::dyn_cast<mlir::IntegerType>(elemTy)) {
+        elem_size = (uint64_t)((it.getWidth() + 7) / 8);
+    }
+    if (elem_size == 0 || bytes.size != n * elem_size) {
+        auto zero = b.create<mlir::LLVM::ZeroOp>(loc, arrTy);
+        b.create<mlir::LLVM::ReturnOp>(loc, zero.getRes());
+        return H(op.getOperation());
+    }
+    mlir::Value cur = b.create<mlir::LLVM::UndefOp>(loc, arrTy).getRes();
+    const unsigned char *raw = (const unsigned char *)bytes.str;
+    for (uint64_t i = 0; i < n; i++) {
+        uint64_t v = 0;
+        for (uint64_t b2 = 0; b2 < elem_size; b2++) {
+            v |= (uint64_t)raw[i * elem_size + b2] << (8 * b2);
+        }
+        // Sign-extend small element types to their natural width before
+        // building the IntegerAttr.
+        int64_t sv;
+        if (elem_size == 1) sv = (int64_t)(int8_t)v;
+        else if (elem_size == 2) sv = (int64_t)(int16_t)v;
+        else if (elem_size == 4) sv = (int64_t)(int32_t)v;
+        else sv = (int64_t)v;
+        auto cst = b.create<mlir::LLVM::ConstantOp>(
+            loc, elemTy, mlir::IntegerAttr::get(elemTy, sv));
+        cur = b.create<mlir::LLVM::InsertValueOp>(
+            loc, cur, cst.getRes(), llvm::ArrayRef<int64_t>{(int64_t)i});
+    }
+    b.create<mlir::LLVM::ReturnOp>(loc, cur);
+    return H(op.getOperation());
+}
+
 extern "C" MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle h) {
     auto value = F<mlir::NamedAttribute>(h)->getValue();
     if (llvm::isa<mlir::StringAttr>(value))  return MLIR_ATTR_KIND_STRING;

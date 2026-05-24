@@ -1016,21 +1016,65 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
         MLIR_AttrKind k = MLIR_GetAttributeKind(va);
         if (k == MLIR_ATTR_KIND_STRING) {
             string s = MLIR_GetAttributeString(va);
-            // Build c"..." with escapes.
-            Buf tmp = {0};
-            buf_cstr(&tmp, "c\"");
-            for (size_t i = 0; i < s.size; i++) {
-                unsigned char c = (unsigned char)s.str[i];
-                if (c == '\\' || c == '"' || c < 32 || c >= 127) {
-                    buf_printf(&tmp, "\\%02X", c);
-                } else {
-                    buf_putc(&tmp, (char)c);
+            // For !llvm.array<N x iX> with X > 8, LLVM IR cannot use a
+            // c"..." byte string — that form is reserved for i8 arrays.
+            // Unpack the raw bytes into an `[N x iX] [iX v1, iX v2, ...]`
+            // typed array constant.
+            unsigned elem_w = 0;
+            uint64_t arr_n = 0;
+            if (gty != MLIR_INVALID_HANDLE && MLIR_IsTypeLLVMArray(gty)) {
+                arr_n = MLIR_GetTypeLLVMArrayNumElements(gty);
+                MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(gty);
+                string ets = MLIR_GetTypeString(ctx, et);
+                if (ets.size >= 2 && ets.str[0] == 'i') {
+                    int w = 0;
+                    for (size_t i = 1; i < ets.size; i++) {
+                        if (ets.str[i] >= '0' && ets.str[i] <= '9') {
+                            w = w * 10 + (ets.str[i] - '0');
+                        } else { w = 0; break; }
+                    }
+                    if (w == 8 || w == 16 || w == 32 || w == 64) elem_w = (unsigned)w;
                 }
             }
-            buf_cstr(&tmp, "\"");
-            init = (char *)malloc(tmp.len + 1);
-            memcpy(init, tmp.data, tmp.len); init[tmp.len] = 0;
-            free(tmp.data);
+            if (elem_w > 8 && arr_n > 0 &&
+                s.size == arr_n * (elem_w / 8)) {
+                unsigned esz = elem_w / 8;
+                Buf tmp = {0};
+                buf_putc(&tmp, '[');
+                const unsigned char *bs = (const unsigned char *)s.str;
+                for (uint64_t i = 0; i < arr_n; i++) {
+                    if (i) buf_cstr(&tmp, ", ");
+                    uint64_t v = 0;
+                    for (unsigned b2 = 0; b2 < esz; b2++) {
+                        v |= (uint64_t)bs[i * esz + b2] << (8 * b2);
+                    }
+                    int64_t sv;
+                    if      (esz == 2) sv = (int64_t)(int16_t)v;
+                    else if (esz == 4) sv = (int64_t)(int32_t)v;
+                    else               sv = (int64_t)v;
+                    buf_printf(&tmp, "i%u %lld", elem_w, (long long)sv);
+                }
+                buf_putc(&tmp, ']');
+                init = (char *)malloc(tmp.len + 1);
+                memcpy(init, tmp.data, tmp.len); init[tmp.len] = 0;
+                free(tmp.data);
+            } else {
+                // Build c"..." with escapes (i8 array or generic string).
+                Buf tmp = {0};
+                buf_cstr(&tmp, "c\"");
+                for (size_t i = 0; i < s.size; i++) {
+                    unsigned char c = (unsigned char)s.str[i];
+                    if (c == '\\' || c == '"' || c < 32 || c >= 127) {
+                        buf_printf(&tmp, "\\%02X", c);
+                    } else {
+                        buf_putc(&tmp, (char)c);
+                    }
+                }
+                buf_cstr(&tmp, "\"");
+                init = (char *)malloc(tmp.len + 1);
+                memcpy(init, tmp.data, tmp.len); init[tmp.len] = 0;
+                free(tmp.data);
+            }
         } else if (k == MLIR_ATTR_KIND_INTEGER) {
             init = fmt_alloc("%lld", (long long)MLIR_GetAttributeInteger(va));
         } else if (k == MLIR_ATTR_KIND_FLOAT) {

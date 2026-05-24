@@ -404,6 +404,11 @@ DEFINE_VECTOR_FOR_TYPE(StructDef*, VecStructDefPtr)
 //   float f = 1.5;  (init_float)
 //   char *s = "hi"; (init_str carries the decoded bytes incl. NUL)
 //   int *p = null;  (TY_PTR_I32 + has_init=true, init_int=0 means null)
+//   int a[3] = {1,2,3}; (init_array_data carries the packed
+//                       little-endian element bytes; size equals
+//                       array_len * elem_size. Empty if every
+//                       element is 0/NULL — those still go through
+//                       the zero-init path.)
 typedef struct {
     string  name;
     Type    type;
@@ -414,6 +419,7 @@ typedef struct {
     int64_t init_int;
     double  init_float;
     string  init_str;       // for TY_PTR_CHAR initialized from string literal
+    string  init_array_data;
     int     line;
 } Global;
 
