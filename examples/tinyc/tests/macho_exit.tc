@@ -1,0 +1,5 @@
+// Smallest possible end-to-end test for the WASM->Mach-O backend.
+// No I/O, no memory, no control flow — just return an exit code.
+int main() {
+    return 42;
+}

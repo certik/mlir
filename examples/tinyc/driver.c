@@ -14,8 +14,13 @@
 #include "mlir_llvm_to_wasmssa.h"
 #include "mlir_wasmssa_to_wasmstack.h"
 #include "mlir_wasm_to_wat.h"
+#include "mlir_wasm_to_macho.h"
 #include "mlir_wasm_link.h"
 #include "tinyc.h"
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 extern string read_file_ok(Arena *arena, string path);
 
@@ -71,6 +76,7 @@ int app_main(void) {
     bool emit_wasmssa = false;
     bool emit_wasmstack = false;
     bool emit_wat = false;
+    bool emit_macho = false;
     // `--lowering=upstream` switches the four lowering / translation calls
     // below to the *Upstream variants (which run upstream MLIR's pass
     // pipeline / translator / LLVM target machine). Only available in the
@@ -100,6 +106,13 @@ int app_main(void) {
     // -D define list (repeatable). Each entry is "NAME" or "NAME=BODY".
     string *defines = arena_new_array(boot_arena, string, argc + 1);
     size_t n_defines = 0;
+
+    // --wasm-runtime-obj=PATH (repeatable). Paths of additional .wasm.o
+    // objects to link into the module when producing a Mach-O binary.
+    // For the macho_exit test, the test runner passes
+    // `runtime_wasm.wasm.o` and `start_wasm.wasm.o`.
+    char **wasm_runtime_objs = arena_new_array(boot_arena, char *, argc + 1);
+    size_t n_wasm_runtime_objs = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--link") == 0) {
@@ -152,13 +165,17 @@ int app_main(void) {
             arena_destroy(boot_arena);
             return wrc;
         }
-        if      (strcmp(argv[i], "--emit=mlir")    == 0) { emit_llvm = false; emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; }
-        else if (strcmp(argv[i], "--emit=lowered") == 0) { emit_lowered = true;  emit_llvm = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; }
-        else if (strcmp(argv[i], "--emit=llvm")    == 0) { emit_llvm = true;     emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; }
-        else if (strcmp(argv[i], "--emit=wasm")    == 0) { emit_wasm = true;     emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; }
-        else if (strcmp(argv[i], "--emit=wasmssa") == 0) { emit_wasmssa = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmstack = false; emit_wat = false; }
-        else if (strcmp(argv[i], "--emit=wasmstack") == 0) { emit_wasmstack = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wat = false; }
-        else if (strcmp(argv[i], "--emit=wat")     == 0) { emit_wat = true;     emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; }
+        if      (strcmp(argv[i], "--emit=mlir")    == 0) { emit_llvm = false; emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; }
+        else if (strcmp(argv[i], "--emit=lowered") == 0) { emit_lowered = true;  emit_llvm = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; }
+        else if (strcmp(argv[i], "--emit=llvm")    == 0) { emit_llvm = true;     emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; }
+        else if (strcmp(argv[i], "--emit=wasm")    == 0) { emit_wasm = true;     emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; }
+        else if (strcmp(argv[i], "--emit=wasmssa") == 0) { emit_wasmssa = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; }
+        else if (strcmp(argv[i], "--emit=wasmstack") == 0) { emit_wasmstack = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wat = false; emit_macho = false; }
+        else if (strcmp(argv[i], "--emit=wat")     == 0) { emit_wat = true;     emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_macho = false; }
+        else if (strcmp(argv[i], "--emit=macho")   == 0) { emit_macho = true;   emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; }
+        else if (strncmp(argv[i], "--wasm-runtime-obj=", 19) == 0) {
+            wasm_runtime_objs[n_wasm_runtime_objs++] = argv[i] + 19;
+        }
         else if (strcmp(argv[i], "--lowering=upstream") == 0) {
 #ifdef TINYC_HAS_UPSTREAM
             use_upstream = true; lowering_explicit = true;
@@ -195,7 +212,7 @@ int app_main(void) {
     }
 
     if (n_input_files == 0) {
-        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm|wasm|wasmssa|wasmstack|wat] [--lowering=upstream|native] [-I dir ...] [-D name[=value] ...] [-o OUT] FILE.tc [FILE2.tc ...]"));
+        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm|wasm|wasmssa|wasmstack|wat|macho] [--lowering=upstream|native] [--wasm-runtime-obj=PATH ...] [-I dir ...] [-D name[=value] ...] [-o OUT] FILE.tc [FILE2.tc ...]"));
         arena_destroy(boot_arena);
         return 1;
     }
@@ -267,8 +284,8 @@ int app_main(void) {
         return 1;
     }
 
-    if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat) {
-        bool needs_wasm_lowering = emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat;
+    if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho) {
+        bool needs_wasm_lowering = emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho;
         bool ok = needs_wasm_lowering
                       ? lower_for_wasm_fn(&ctx, module)
                       : lower_fn(&ctx, module);
@@ -320,6 +337,51 @@ int app_main(void) {
             arena_destroy(boot_arena);
             return 1;
         }
+    } else if (emit_macho) {
+        // Pipeline: lower to wasm32 object, link with the provided
+        // --wasm-runtime-obj inputs, then translate the linked wasm
+        // module to a signed Mach-O ARM64 binary.
+        string obj = translate_to_wasm_fn(&ctx, module);
+        if (obj.size == 0) {
+            arena_destroy(arena);
+            arena_destroy(boot_arena);
+            return 1;
+        }
+
+        size_t n_link_inputs = n_wasm_runtime_objs + 1;
+        MLIR_WasmLinkInput *ins = (MLIR_WasmLinkInput *)arena_new_array(
+            arena, MLIR_WasmLinkInput, n_link_inputs);
+        ins[0].data = (const uint8_t *)obj.str;
+        ins[0].size = obj.size;
+        ins[0].name = "<input>.wasm.o";
+        for (size_t k = 0; k < n_wasm_runtime_objs; k++) {
+            string buf = read_file_ok(arena, str_from_cstr_view(wasm_runtime_objs[k]));
+            ins[1 + k].data = (const uint8_t *)buf.str;
+            // read_file_ok appends a trailing NUL — strip it for the
+            // linker, which expects the exact file size.
+            ins[1 + k].size = buf.size > 0 ? buf.size - 1 : 0;
+            ins[1 + k].name = wasm_runtime_objs[k];
+        }
+        uint8_t *linked_data = NULL; size_t linked_size = 0;
+        if (!MLIR_WasmLink(ins, n_link_inputs, "_start", &linked_data, &linked_size)) {
+            fprintf(stderr, "tinyc --emit=macho: wasm link failed\n");
+            arena_destroy(arena);
+            arena_destroy(boot_arena);
+            return 1;
+        }
+
+        uint8_t *macho_data = NULL; size_t macho_size = 0;
+        bool macho_ok = MLIR_WasmToMachoArm64(linked_data, linked_size,
+                                              &macho_data, &macho_size);
+        free(linked_data);
+        if (!macho_ok) {
+            fprintf(stderr, "tinyc --emit=macho: wasm->macho translation failed\n");
+            arena_destroy(arena);
+            arena_destroy(boot_arena);
+            return 1;
+        }
+        out.str = (char *)macho_data;
+        out.size = macho_size;
     } else if (emit_llvm) {
         out = translate_to_llvm_fn(&ctx, module);
         if (out.size == 0) {
@@ -332,13 +394,24 @@ int app_main(void) {
     }
     int wrc = 0;
     if (output_file) {
-        if (emit_wasm) {
+        if (emit_wasm || emit_macho) {
             wrc = write_bytes_to_file(out, output_file);
+#ifndef _WIN32
+            if (wrc == 0 && emit_macho) {
+                // chmod 0755 so the resulting Mach-O is directly runnable.
+                chmod(output_file, 0755);
+            }
+#endif
         } else {
             wrc = write_string_to_file(out, output_file);
         }
     } else {
         println(str_lit("{}"), out);
+    }
+
+    if (emit_macho) {
+        // out.str was malloc'd by MLIR_WasmToMachoArm64. Free it.
+        free(out.str);
     }
 
     arena_destroy(arena);
