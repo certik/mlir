@@ -2319,6 +2319,14 @@ static void emit_import_global(MLIR_Context *ctx, Arena *arena,
     (void)arena;
 }
 
+// Per-slot scratch used by the insertvalue-chain folder in lower_global.
+// Declared at file scope so tinyc (which lacks function-local struct
+// declarations) accepts it.
+typedef struct LowerGlobalCEntry {
+    MLIR_ValueHandle v;
+    uint64_t bits;
+} LowerGlobalCEntry;
+
 // Lower one llvm.mlir.global op directly into a wasmssa.import_global op
 // appended to `body`. Returns false on failure (no op is appended).
 static bool lower_global(MLIR_Context *ctx, Arena *arena,
@@ -2423,6 +2431,119 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
                     emit_import_global(ctx, arena, body, sym, size, align_pow,
                                        is_const, data, buf, off);
                     return true;
+                }
+            }
+        }
+    }
+
+    // Region-init globals (alternative pattern): a chain of
+    //   %u = llvm.mlir.undef : !llvm.array<N x iX>
+    //   %c0 = llvm.mlir.constant : iX
+    //   %1 = llvm.insertvalue %u, %c0 [0]
+    //   ...
+    //   llvm.return %k : !llvm.array<N x iX>
+    // produced by MLIR_CreateLLVMGlobalArrayInit's upstream impl. Unpack
+    // the constants into a raw byte buffer matching the global's layout.
+    if (MLIR_GetOpNumRegions(op) > 0 && ga != MLIR_INVALID_HANDLE) {
+        MLIR_TypeHandle gty = MLIR_GetAttributeTypeValue(ga);
+        if (gty != MLIR_INVALID_HANDLE && MLIR_IsTypeLLVMArray(gty)) {
+            uint64_t arr_n = MLIR_GetTypeLLVMArrayNumElements(gty);
+            MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(gty);
+            unsigned esz = type_size_bytes(ctx, et);
+            if (esz > 0 && esz <= 8 && arr_n > 0 && size > 0 &&
+                size == arr_n * esz) {
+                MLIR_RegionHandle rgn = MLIR_GetOpRegion(op, 0);
+                if (MLIR_GetRegionNumBlocks(rgn) > 0) {
+                    MLIR_BlockHandle blk = MLIR_GetRegionBlock(rgn, 0);
+                    size_t nb = MLIR_GetBlockNumOps(blk);
+                    // Collect (value, int) pairs for llvm.mlir.constant ops.
+                    LowerGlobalCEntry *cs = (LowerGlobalCEntry *)arena_alloc(arena,
+                        sizeof(LowerGlobalCEntry) * (nb + 1));
+                    size_t ncs = 0;
+                    uint8_t *buf = (uint8_t *)arena_alloc(arena, size);
+                    memset(buf, 0, size);
+                    bool ok = true;
+                    bool saw_undef_or_zero = false;
+                    bool saw_return = false;
+                    for (size_t bi = 0; bi < nb && ok; bi++) {
+                        MLIR_OpHandle bop = MLIR_GetBlockOp(blk, bi);
+                        string bn = MLIR_GetOpName(bop);
+                        if (name_eq(bn, "llvm.mlir.undef") ||
+                            name_eq(bn, "llvm.mlir.zero") ||
+                            name_eq(bn, "llvm.mlir.poison")) {
+                            saw_undef_or_zero = true;
+                        } else if (name_eq(bn, "llvm.mlir.constant")) {
+                            MLIR_AttributeHandle ca = find_attr(bop, "value");
+                            if (ca == MLIR_INVALID_HANDLE) { ok = false; break; }
+                            MLIR_AttrKind ck = MLIR_GetAttributeKind(ca);
+                            uint64_t bits = 0;
+                            if (ck == MLIR_ATTR_KIND_INTEGER) {
+                                bits = (uint64_t)MLIR_GetAttributeInteger(ca);
+                            } else if (ck == MLIR_ATTR_KIND_FLOAT) {
+                                double d = MLIR_GetAttributeFloat(ca);
+                                if (esz == 4) {
+                                    float f = (float)d; uint32_t b32;
+                                    memcpy(&b32, &f, 4); bits = b32;
+                                } else if (esz == 8) {
+                                    memcpy(&bits, &d, 8);
+                                } else { ok = false; break; }
+                            } else { ok = false; break; }
+                            if (MLIR_GetOpNumResults(bop) > 0) {
+                                cs[ncs].v = MLIR_GetOpResult(bop, 0);
+                                cs[ncs].bits = bits;
+                                ncs++;
+                            }
+                        } else if (name_eq(bn, "llvm.insertvalue")) {
+                            if (MLIR_GetOpNumOperands(bop) < 2) { ok = false; break; }
+                            // Position attr — printed as "array<i64: N, ...>".
+                            MLIR_AttributeHandle pa = find_attr(bop, "position");
+                            if (pa == MLIR_INVALID_HANDLE) { ok = false; break; }
+                            string ps = MLIR_GetAttributeAsString(ctx, pa);
+                            // Skip past first ':' (or '[').
+                            const char *p = ps.str;
+                            const char *end = ps.str + ps.size;
+                            const char *colon = NULL;
+                            for (const char *q = p; q < end; q++) {
+                                if (*q == ':') { colon = q; break; }
+                            }
+                            if (colon) p = colon + 1;
+                            else if (p < end && *p == '[') p++;
+                            while (p < end && (*p == ' ' || *p == '\t')) p++;
+                            int64_t idx = 0;
+                            bool neg = false;
+                            if (p < end && (*p == '-' || *p == '+')) { neg = (*p == '-'); p++; }
+                            if (p >= end || *p < '0' || *p > '9') { ok = false; break; }
+                            while (p < end && *p >= '0' && *p <= '9') { idx = idx * 10 + (*p - '0'); p++; }
+                            if (neg) idx = -idx;
+                            if (idx < 0 || (uint64_t)idx >= arr_n) { ok = false; break; }
+                            // Look up the scalar value's integer literal.
+                            MLIR_ValueHandle sv = MLIR_GetOpOperand(bop, 1);
+                            bool found = false;
+                            uint64_t bits = 0;
+                            for (size_t i = 0; i < ncs; i++) {
+                                if (cs[i].v == sv) { bits = cs[i].bits; found = true; break; }
+                            }
+                            if (!found) { ok = false; break; }
+                            // Encode `bits` into buf at offset idx*esz (LE).
+                            for (unsigned b2 = 0; b2 < esz; b2++)
+                                buf[(uint64_t)idx * esz + b2] = (uint8_t)(bits >> (8 * b2));
+                            // Track the insertvalue's result too so
+                            // nested chains could be supported.
+                            if (MLIR_GetOpNumResults(bop) > 0) {
+                                cs[ncs].v = MLIR_GetOpResult(bop, 0);
+                                cs[ncs].bits = 0;  // not a scalar
+                                ncs++;
+                            }
+                        } else if (name_eq(bn, "llvm.return")) {
+                            saw_return = true;
+                            break;
+                        }
+                    }
+                    if (ok && saw_undef_or_zero && saw_return) {
+                        emit_import_global(ctx, arena, body, sym, size, align_pow,
+                                           is_const, buf, NULL, 0);
+                        return true;
+                    }
                 }
             }
         }
