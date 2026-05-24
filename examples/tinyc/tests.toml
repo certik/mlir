@@ -107,6 +107,10 @@ name = "ternary_i64"
 expected_stdout = "1\n3\n0\n0\n"
 
 [[test]]
+name = "ternary_void_stmt"
+expected_stdout = "1\n99\n2\n"
+
+[[test]]
 name = "typedef"
 expected_stdout = "16\n100\n7\n"
 

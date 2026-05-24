@@ -1,0 +1,25 @@
+// Regression: a ternary whose arms are both void-typed used as a
+// statement (the shape produced by the standard `assert(cond)` macro
+// expansion `((cond) ? (void)0 : abort())`) must compile cleanly.
+// Previously tinyC's emit_expr would reach the call-returning-void
+// path and abort with "void-returning call has no value (use as a
+// statement)" instead of lowering the ternary as an if/else.
+
+void noisy(void) {
+    _tinyc_print(99);
+}
+
+// Mirrors the shape of <assert.h>'s `assert(cond)` exactly: a ternary
+// whose true-arm is `(void)0` and whose false-arm is a void call. The
+// only difference is `noisy()` returns normally instead of aborting,
+// so we can observe both branches.
+#define CHECK(cond) ((void)((cond) ? (void)0 : noisy()))
+
+int main(void) {
+    int x = 1;
+    CHECK(x == 1);          // true arm: prints nothing
+    _tinyc_print(1);
+    CHECK(x == 2);          // false arm: prints 99
+    _tinyc_print(2);
+    return 0;
+}

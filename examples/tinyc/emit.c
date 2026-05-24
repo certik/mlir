@@ -753,6 +753,7 @@ static int64_t type_align(E *e, Type t);
 static Type infer_expr_type(E *e, Scope *sc, Expr *ex);
 static void emit_struct_zero(E *e, MLIR_ValueHandle base, MLIR_TypeHandle source_elem,
                              StructDef *sd, int32_t *prefix, size_t n_prefix);
+static void emit_expr_for_side_effect(E *e, Scope *sc, Expr *ex);
 
 static MLIR_ValueHandle emit_expr_i32(E *e, Scope *sc, Expr *ex) {
     EVal v = emit_expr(e, sc, ex);
@@ -3673,23 +3674,78 @@ static void emit_struct_zero(E *e, MLIR_ValueHandle base, MLIR_TypeHandle source
     }
 }
 
+// Emit `ex` for its side effects only — the result value is discarded.
+// Handles a few "void-typed" expression forms (void calls, `(void)X`,
+// and `cond ? a : b` where both arms are themselves statement-level)
+// without trying to compute a result value; falls back to plain
+// `emit_expr` for the general case. This is what makes idioms like
+//     ((cond) ? (void)0 : abort())   // as produced by assert()
+// compile cleanly: emit_expr would otherwise error on the void-returning
+// arm "void-returning call has no value (use as a statement)".
+static bool expr_is_void_statement(E *e, Expr *ex) {
+    if (!ex) return false;
+    if (ex->kind == EX_CALL) {
+        FuncSig *sig = find_sig(e, ex->callee);
+        return sig && (sig->ret.type.kind == TY_VOID ||
+                       sig->ret.type.kind == TY_STRUCT);
+    }
+    if (ex->kind == EX_CAST && ex->cast_type.kind == TY_VOID) return true;
+    if (ex->kind == EX_TERNARY) {
+        return expr_is_void_statement(e, ex->rhs) &&
+               expr_is_void_statement(e, ex->lvalue);
+    }
+    return false;
+}
+
+static void emit_expr_for_side_effect(E *e, Scope *sc, Expr *ex) {
+    if (e->terminated) return;
+    if (ex->kind == EX_CALL) {
+        FuncSig *sig = find_sig(e, ex->callee);
+        if (sig && sig->ret.type.kind == TY_STRUCT) {
+            emit_flat_call(e, sc, sig, ex->args, NULL, MLIR_INVALID_HANDLE);
+            return;
+        }
+        if (sig && sig->ret.type.kind == TY_VOID) {
+            emit_flat_call(e, sc, sig, ex->args, NULL, MLIR_INVALID_HANDLE);
+            return;
+        }
+    }
+    if (ex->kind == EX_CAST && ex->cast_type.kind == TY_VOID) {
+        emit_expr_for_side_effect(e, sc, ex->lhs);
+        return;
+    }
+    if (ex->kind == EX_TERNARY &&
+        expr_is_void_statement(e, ex->rhs) &&
+        expr_is_void_statement(e, ex->lvalue)) {
+        // `c ? a : b` as a statement where both arms are void: lower as
+        // an if/else branch without an alloca/load for the result.
+        EVal cv = emit_expr(e, sc, ex->lhs);
+        MLIR_ValueHandle cb = emit_to_bool_i1(e, cv);
+        MLIR_BlockHandle then_blk = new_cfg_block(e);
+        MLIR_BlockHandle else_blk = new_cfg_block(e);
+        MLIR_BlockHandle merge_blk = new_cfg_block(e);
+        emit_cond_branch(e, cb, then_blk, else_blk);
+
+        e->cur_block = then_blk; e->terminated = false;
+        emit_expr_for_side_effect(e, sc, ex->rhs);
+        if (!e->terminated) emit_branch(e, merge_blk);
+
+        e->cur_block = else_blk; e->terminated = false;
+        emit_expr_for_side_effect(e, sc, ex->lvalue);
+        if (!e->terminated) emit_branch(e, merge_blk);
+
+        e->cur_block = merge_blk; e->terminated = false;
+        return;
+    }
+    (void)emit_expr(e, sc, ex);
+}
+
 static void emit_stmt(E *e, Scope *sc, Stmt *st) {
     if (e->terminated && st->kind != ST_LABEL) return;
     e->cur_line = st->line;
     switch (st->kind) {
         case ST_EXPR: {
-            if (st->expr->kind == EX_CALL) {
-                FuncSig *sig = find_sig(e, st->expr->callee);
-                if (sig && sig->ret.type.kind == TY_STRUCT) {
-                    emit_flat_call(e, sc, sig, st->expr->args, NULL, MLIR_INVALID_HANDLE);
-                    return;
-                }
-                if (sig && sig->ret.type.kind == TY_VOID) {
-                    emit_flat_call(e, sc, sig, st->expr->args, NULL, MLIR_INVALID_HANDLE);
-                    return;
-                }
-            }
-            (void)emit_expr(e, sc, st->expr);
+            emit_expr_for_side_effect(e, sc, st->expr);
             return;
         }
         case ST_DECL: {
