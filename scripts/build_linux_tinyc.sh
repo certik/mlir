@@ -51,6 +51,7 @@ SOURCES=(
     corec/base/format.c
     corec/base/math.c
     corec/base/string.c
+    corec/base/strbuf.c
     corec/base/mem.c
     corec/base/numconv.c
     corec/base/assert.c
