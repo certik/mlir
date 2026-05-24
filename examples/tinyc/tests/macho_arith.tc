@@ -1,0 +1,7 @@
+// Mach-O backend: i32 arithmetic + locals.
+// Exercises i32.const, local.set/local.get, i32.add, return.
+int main() {
+    int a = 20;
+    int b = 22;
+    return a + b;
+}

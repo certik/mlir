@@ -160,10 +160,20 @@ def main():
     # Pre-build the wasm runtime object once per run.
     wasm_runtime_obj = HERE / "tests" / "runtime_wasm.o"
     wasm_start_obj   = HERE / "tests" / "start_wasm.o"
-    if TARGET == "wasm":
+    if TARGET == "wasm" or TARGET == "macho":
         r = build_wasm_runtime(wasm_runtime_obj, wasm_start_obj)
         if r is not None and r.returncode != 0:
             print(f"error: failed to compile wasm runtime\nstderr:\n{r.stderr}",
+                  file=sys.stderr)
+            return 2
+
+    # The macho backend only runs on Apple Silicon (arm64). The binary it
+    # produces is a Mach-O ARM64 executable.
+    if TARGET == "macho":
+        import platform as _platform
+        if sys.platform != "darwin" or _platform.machine() != "arm64":
+            print(f"error: TINYC_TARGET=macho is only supported on Darwin/arm64 "
+                  f"(got sys.platform={sys.platform!r}, machine={_platform.machine()!r})",
                   file=sys.stderr)
             return 2
 
@@ -171,7 +181,19 @@ def main():
     skipped = 0
     for t in tests:
         name = t["name"]
-        expected = t["expected_stdout"]
+        # `expected_stdout` is optional (default ""): macho-only tests that
+        # don't exercise stdout don't need to set it. `expected_exit_code`
+        # is also optional (default 0): macho_exit-style tests set it.
+        expected         = t.get("expected_stdout", "")
+        expected_rc      = t.get("expected_exit_code", 0)
+        # `targets` lists the runner targets a test may run under. Default
+        # (omitted) is ["native", "wasm"] — the established backends.
+        # Mach-O-only tests opt in explicitly with `targets = ["macho"]`.
+        targets = t.get("targets", ["native", "wasm"])
+        if TARGET not in targets:
+            print(f"SKIP {name} (targets={targets}, current={TARGET})")
+            skipped += 1
+            continue
         platforms = t.get("platforms")
         if platforms is not None and plat_key not in platforms:
             print(f"SKIP {name} (platforms={platforms}, current={plat_key})")
@@ -222,8 +244,40 @@ def main():
 
             # Stage 3: run under wasmtime.
             r = run([WASMTIME, str(wasm)])
+            if r.returncode != expected_rc:
+                print(f"FAIL {name}: wasm exited with status {r.returncode} (expected {expected_rc})\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
+                failures += 1
+                continue
+            if r.stdout != expected:
+                print(f"FAIL {name}: stdout mismatch\n  expected: {expected!r}\n  got:      {r.stdout!r}")
+                failures += 1
+                continue
+
+            print(f"PASS {name}")
+            continue
+
+        if TARGET == "macho":
+            obj = HERE / "tests" / f"{name}.macho.wasm.o"
+            exe = HERE / "tests" / f"{name}.macho"
+
+            # Stage 1: tinyc emits wasm32 object, links it with the wasm
+            # runtime + _start shim, and translates the linked module to
+            # a signed Mach-O ARM64 binary — all in one invocation.
+            r = run([str(TINYC), "--emit=macho", *LOWERING_FLAG,
+                     "-I", str(HERE / "tests"),
+                     "-o", str(exe),
+                     f"--wasm-runtime-obj={wasm_runtime_obj}",
+                     f"--wasm-runtime-obj={wasm_start_obj}",
+                     *[str(s) for s in srcs]])
             if r.returncode != 0:
-                print(f"FAIL {name}: wasm exited with status {r.returncode}\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
+                print(f"FAIL {name}: tinyc returned {r.returncode}\nstderr:\n{r.stderr}")
+                failures += 1
+                continue
+
+            # Stage 2: run the produced Mach-O binary directly.
+            r = run([str(exe)])
+            if r.returncode != expected_rc:
+                print(f"FAIL {name}: macho exited with status {r.returncode} (expected {expected_rc})\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
                 failures += 1
                 continue
             if r.stdout != expected:
@@ -269,8 +323,8 @@ def main():
 
         # Stage 3: run
         r = run([str(exe)])
-        if r.returncode != 0:
-            print(f"FAIL {name}: binary exited with status {r.returncode}\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
+        if r.returncode != expected_rc:
+            print(f"FAIL {name}: binary exited with status {r.returncode} (expected {expected_rc})\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
             failures += 1
             continue
         if r.stdout != expected:

@@ -700,3 +700,16 @@ expected_stdout = "1\n"
 [[test]]
 name = "struct_field_designated_init"
 expected_stdout = "3\n"
+
+# Mach-O backend tests. Only run under `TINYC_TARGET=macho`
+# (pixi run test_tinyc_macho); the existing native/wasm targets skip them.
+
+[[test]]
+name = "macho_exit"
+expected_exit_code = 42
+targets = ["macho"]
+
+[[test]]
+name = "macho_arith"
+expected_exit_code = 42
+targets = ["macho"]

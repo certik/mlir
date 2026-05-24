@@ -393,6 +393,13 @@ int app_main(void) {
         out = print_fn(&ctx, module);
     }
     int wrc = 0;
+    if (emit_macho && !output_file) {
+        fprintf(stderr, "tinyc --emit=macho: -o PATH is required\n");
+        if (emit_macho) free(out.str);
+        arena_destroy(arena);
+        arena_destroy(boot_arena);
+        return 1;
+    }
     if (output_file) {
         if (emit_wasm || emit_macho) {
             wrc = write_bytes_to_file(out, output_file);

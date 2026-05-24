@@ -21,3 +21,4 @@ compiler_tester/__pycache__/
 _libc_io_tmp.txt
 parser_tinyc
 build_tinyc/
+examples/tinyc/tests/*.macho
