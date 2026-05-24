@@ -93,6 +93,12 @@ typedef struct FuncSig {
     bool           is_variadic;      // C `f(T, ...)` — emitted as `llvm.func`
                                      // and called via `llvm.call` with a
                                      // `var_callee_type` attribute.
+    bool           is_used;          // any reachable call site referenced this
+                                     // signature; used to suppress extern
+                                     // decls for forward-declared functions
+                                     // that are never called (otherwise they
+                                     // turn into spurious wasm imports that
+                                     // fail to resolve at link time).
     MLIR_TypeHandle *flat_in_tys;    // including sret arg if sret
     size_t         n_flat_in;
     MLIR_TypeHandle *flat_out_tys;   // 0 if void/sret, 1 otherwise
@@ -199,7 +205,16 @@ static int struct_field_index(StructDef *sd, string name) {
 
 static FuncSig *find_sig(E *e, string name) {
     for (size_t i = 0; i < e->n_sigs; i++) {
-        if (str_eq(e->sigs[i].name, name)) return &e->sigs[i];
+        if (str_eq(e->sigs[i].name, name)) {
+            // Mark the signature as referenced. Forward-declared
+            // functions that never end up being looked up here are
+            // skipped in the late `emit extern decls` pass — emitting
+            // a `func.func` declaration for an unreferenced extern
+            // would otherwise turn into a spurious wasm import that
+            // fails to resolve at link time.
+            e->sigs[i].is_used = true;
+            return &e->sigs[i];
+        }
     }
     return NULL;
 }
@@ -3356,7 +3371,17 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // coerce_eval avoids emitting a no-op `arith.extsi i64->i64`
             // when the source is already size_t-sized (e.g. `size_t n;
             // malloc(n)` on a 64-bit host).
-            if (!indirect_fnty && str_eq(ex->callee, str_lit("malloc"))) {                if (ex->args.size != 1) {
+            if (!indirect_fnty && str_eq(ex->callee, str_lit("malloc"))) {
+                // If the user provided their own `extern void *malloc(...);`
+                // prototype, mark that signature as referenced so the
+                // forward-decl loop in emit_program emits a proper
+                // `func.func` declaration for it. The special-case path
+                // here bypasses find_sig (which is what normally tracks
+                // usage), so without this we'd drop the user decl AND
+                // skip our auto-decl (because have_user_malloc is true),
+                // leaving the @malloc call unresolved.
+                (void)find_sig(e, ex->callee);
+                if (ex->args.size != 1) {
                     EMIT_ERR(e, "malloc expects 1 argument");
                     r.val = emit_null_ptr(e); r.is_ptr = true; return r;
                 }
@@ -3375,6 +3400,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 r.val = res; r.is_ptr = true; return r;
             }
             if (!indirect_fnty && str_eq(ex->callee, str_lit("free"))) {
+                (void)find_sig(e, ex->callee);
                 if (ex->args.size != 1) {
                     EMIT_ERR(e, "free expects 1 argument");
                     return r;
@@ -5548,6 +5574,11 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             if (str_eq(e.sigs[j].name, fwd->name)) { sig = &e.sigs[j]; break; }
         }
         if (!sig) continue;
+        // Skip extern decls for forward-declared functions nobody
+        // actually called. Without this, every prototype reachable
+        // through an `#include` becomes a wasm import that the link
+        // step can't resolve.
+        if (!sig->is_used) continue;
         MLIR_AttributeHandle a0 = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), fwd->name);
         MLIR_TypeHandle ft = sig->is_variadic ? sig->llvm_fn_ty : sig->fn_ty;
         MLIR_AttributeHandle a1 = MLIR_CreateAttributeType(ctx, str_lit("function_type"), ft);

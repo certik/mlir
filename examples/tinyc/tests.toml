@@ -809,3 +809,10 @@ expected_stdout = """\
 105
 205
 """
+
+[[test]]
+name = "unused_extern_decl"
+# A forward `extern` declaration nobody references must be dropped
+# at codegen time. Previously the resulting wasm contained spurious
+# imports for these names, which the linker couldn't resolve.
+expected_stdout = "42\n"
