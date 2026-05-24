@@ -4055,11 +4055,138 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 }
                 sy->sdef = sd;
                 MLIR_TypeHandle st_ty = find_struct_type(e, sd);
+                // Allow `S name[] = { ... };` — infer length from the
+                // initializer count when no explicit dimension was given.
+                int64_t alen = st->decl_type.array_len;
+                if (st->decl_init &&
+                    st->decl_init->kind == EX_COMPOUND &&
+                    alen == 0 && !st->decl_type.array_len_expr) {
+                    alen = (int64_t)st->decl_init->args.size;
+                    st->decl_type.array_len = alen;
+                    sy->type.array_len = alen;
+                }
                 MLIR_TypeHandle arr_ty = MLIR_CreateTypeLLVMArray(
-                    e->ctx, st_ty, (uint64_t)st->decl_type.array_len);
+                    e->ctx, st_ty, (uint64_t)alen);
                 sy->addr = emit_alloca(e, arr_ty);
                 if (st->decl_init) {
-                    EMIT_ERR(e, "array-of-struct initializers are not supported");
+                    if (st->decl_init->kind != EX_COMPOUND) {
+                        EMIT_ERR(e, "array-of-struct initializer must be a brace list");
+                    } else {
+                        size_t n = st->decl_init->args.size;
+                        if ((int64_t)n > alen) {
+                            EMIT_ERR(e, "too many array-of-struct initializers");
+                            n = (size_t)alen;
+                        }
+                        for (size_t k = 0; k < n; k++) {
+                            Expr *elem = st->decl_init->args.data[k];
+                            int32_t epath[2] = {0, (int32_t)k};
+                            MLIR_ValueHandle pelem = emit_gep(
+                                e, sy->addr, arr_ty, epath, 2, NULL, 0);
+                            // Zero this slot first so any unspecified
+                            // fields read back as 0 / null. emit_struct_zero
+                            // descends through nested struct fields.
+                            int32_t *zprefix = arena_new_array(e->arena, int32_t, 1);
+                            zprefix[0] = 0;
+                            emit_struct_zero(e, pelem, st_ty, sd, zprefix, 1);
+                            if (elem->kind == EX_INT && elem->int_value == 0) {
+                                continue;
+                            }
+                            if (elem->kind == EX_COMPOUND) {
+                                // Element is a nested brace list — fill in
+                                // each field positionally / by designator.
+                                size_t fn = elem->args.size;
+                                if (fn > sd->fields.size) {
+                                    EMIT_ERR(e, "too many initializers for "
+                                                "array element {}", (int64_t)k);
+                                    fn = sd->fields.size;
+                                }
+                                for (size_t i = 0; i < fn; i++) {
+                                    int fidx = (int)i;
+                                    if (elem->compound_field_names) {
+                                        string fname = elem->compound_field_names[i];
+                                        if (fname.size != 0) {
+                                            fidx = struct_field_index(sd, fname);
+                                            if (fidx < 0) {
+                                                EMIT_ERR(e, "unknown struct field "
+                                                            "{} in initializer", fname);
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    Type ft = sd->fields.data[fidx].type;
+                                    int32_t fp[2] = {0, (int32_t)fidx};
+                                    MLIR_ValueHandle pf = emit_gep(
+                                        e, pelem, st_ty, fp, 2, NULL, 0);
+                                    Expr *fe = elem->args.data[i];
+                                    if (ft.kind == TY_STRUCT) {
+                                        StructDef *fsd = find_struct(e, ft.struct_name);
+                                        if (!fsd) {
+                                            EMIT_ERR(e, "unknown struct type "
+                                                        "for nested-struct field "
+                                                        "initializer");
+                                            continue;
+                                        }
+                                        if (fe->kind == EX_INT && fe->int_value == 0) {
+                                            continue;
+                                        }
+                                        if (fe->kind == EX_COMPOUND &&
+                                            fe->cast_type.kind == TY_VOID) {
+                                            fe->cast_type = ft;
+                                        }
+                                        StructDef *src_sd = NULL;
+                                        MLIR_ValueHandle src = resolve_struct_source(
+                                            e, sc, fe, &src_sd);
+                                        if (src != MLIR_INVALID_HANDLE &&
+                                            src_sd == fsd) {
+                                            emit_struct_copy(e, pf, src, fsd);
+                                        } else {
+                                            EVal vv = emit_expr(e, sc, fe);
+                                            if (vv.is_ptr && vv.val != MLIR_INVALID_HANDLE) {
+                                                emit_struct_copy(e, pf, vv.val, fsd);
+                                            } else {
+                                                EMIT_ERR(e, "nested-struct field "
+                                                            "initializer needs a "
+                                                            "struct value");
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                    EVal v = emit_expr(e, sc, fe);
+                                    MLIR_ValueHandle sv;
+                                    if (ft.kind == TY_PTR_I32 ||
+                                        ft.kind == TY_PTR_CHAR ||
+                                        ft.kind == TY_PTR_VOID ||
+                                        ft.kind == TY_PTR_STRUCT ||
+                                        ft.kind == TY_FNPTR ||
+                                        ft.kind == TY_PTR_PTR) {
+                                        sv = v.is_ptr ? v.val : emit_null_ptr(e);
+                                    } else if (ft.kind == TY_I64) {
+                                        sv = coerce_eval(e, v, e->i64);
+                                    } else if (ft.kind == TY_F64) {
+                                        sv = coerce_eval(e, v, e->f64);
+                                    } else {
+                                        sv = coerce_eval(
+                                            e, v, scalar_mlir_type(e, ft.kind));
+                                    }
+                                    emit_store_v(e, sv, pf);
+                                }
+                            } else {
+                                // Element is a single struct value (e.g.
+                                // copy from another struct lvalue): use
+                                // resolve_struct_source + emit_struct_copy.
+                                StructDef *src_sd = NULL;
+                                MLIR_ValueHandle src = resolve_struct_source(
+                                    e, sc, elem, &src_sd);
+                                if (src != MLIR_INVALID_HANDLE && src_sd == sd) {
+                                    emit_struct_copy(e, pelem, src, sd);
+                                } else {
+                                    EMIT_ERR(e, "array-of-struct initializer "
+                                                "element must be a brace list "
+                                                "or struct value");
+                                }
+                            }
+                        }
+                    }
                 }
             } else if (st->decl_type.kind == TY_STRUCT) {
                 StructDef *sd = find_struct(e, st->decl_type.struct_name);

@@ -1,0 +1,45 @@
+// Regression test: array-of-struct local declarations with aggregate
+// brace initializers.
+//
+//     T items[N] = { {f0, f1}, {f0, f1}, ... };
+//     T items[]  = { {f0}, {f0}, {f0} };          // unsized
+//
+// Previously emit.c rejected this with
+//     "array-of-struct initializers are not supported"
+// even though the parser accepted it. tinyc's own emit.c uses the
+// pattern at line 5429 to set up a small va_arg-helper table.
+
+typedef struct Item_s {
+    int v;
+    int w;
+} Item;
+
+int main(void) {
+    // Sized, positional initializers.
+    Item a[3] = {{1, 10}, {2, 20}, {3, 30}};
+    _tinyc_print(a[0].v);
+    _tinyc_print(a[0].w);
+    _tinyc_print(a[2].v);
+    _tinyc_print(a[2].w);
+
+    // Unsized — length inferred from initializer count.
+    Item b[] = {{100, 1}, {200, 2}, {300, 3}, {400, 4}};
+    _tinyc_print(b[0].v + b[3].v);
+    _tinyc_print((int)(sizeof(b) / sizeof(b[0])));
+
+    // Partial initialization: missing fields default to zero.
+    Item c[2] = {{7}, {9}};
+    _tinyc_print(c[0].v);
+    _tinyc_print(c[0].w);   // 0
+    _tinyc_print(c[1].v);
+    _tinyc_print(c[1].w);   // 0
+
+    // Designated field initializer inside an element.
+    Item d[2] = {{.w = 5, .v = 4}, {.v = 8, .w = 6}};
+    _tinyc_print(d[0].v);
+    _tinyc_print(d[0].w);
+    _tinyc_print(d[1].v);
+    _tinyc_print(d[1].w);
+
+    return 0;
+}
