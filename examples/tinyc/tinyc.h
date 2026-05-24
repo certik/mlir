@@ -347,6 +347,16 @@ typedef struct {
                              // ABI is modeled at the call site.
     bool       is_static;    // `static` at file scope: emit with private
                              // visibility/internal linkage.
+    // GCC/Clang `__attribute__((...))` annotations relevant to wasm
+    // codegen. Empty string means "not set". When import_module/name are
+    // set the function MUST be a forward declaration; the emitter records
+    // them on the resulting func op so the wasm pipeline can emit the
+    // appropriate import section entry. export_name is honored on
+    // function definitions and causes the function to be exported under
+    // that name (used by wasm_buddy_alloc / wasm_buddy_free).
+    string     wasm_import_module;
+    string     wasm_import_name;
+    string     wasm_export_name;
     int        line;
 } Func;
 
@@ -453,6 +463,7 @@ typedef enum {
     TC_TK_KW_VA_LIST,
     TC_TK_KW_GENERIC,
     TC_TK_KW_GOTO,
+    TC_TK_KW_ATTRIBUTE,
     TC_TK_STRING_LIT,
     TC_TK_LPAREN, TC_TK_RPAREN,
     TC_TK_LBRACE, TC_TK_RBRACE,

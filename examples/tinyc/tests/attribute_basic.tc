@@ -1,0 +1,35 @@
+// Regression test for tinyc parsing of `__attribute__((...))`.
+//
+// tinyc previously failed to compile any source that used GCC/Clang
+// `__attribute__((...))` annotations (e.g. corec/platform/platform_wasm.c
+// uses `__attribute__((export_name("...")))` and
+// `__attribute__((__import_module__("..."), __import_name__("...")))`
+// for its WASI imports/exports).
+//
+// We exercise three placement positions used by real code:
+//   - before the return type (most common);
+//   - between the return type and the function name (matches the WASI
+//     macro expansion: `uint32_t __attribute__((...)) fd_write(...);`);
+//   - trailing after the parameter list (e.g. `int foo() __attribute__((const));`).
+//
+// Multi-attribute and multiple-argument forms are also covered so a
+// future refactor doesn't accidentally re-introduce a single-attribute
+// limit.
+
+__attribute__((noinline))
+int add1(int x) { return x + 1; }
+
+int __attribute__((unused)) add2(int x) { return x + 2; }
+
+int add3(int x) __attribute__((const));
+int add3(int x) { return x + 3; }
+
+__attribute__((noinline, unused))
+__attribute__((__used__))
+int add4(int x) { return x + 4; }
+
+int main() {
+    int s = add1(10) + add2(10) + add3(10) + add4(10);
+    _tinyc_print(s);
+    return 0;
+}

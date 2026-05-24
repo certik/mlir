@@ -780,3 +780,7 @@ expected_stdout = "3\n"
 [[test]]
 name = "splice_block_ops_cap"
 expected_stdout = "824\n"
+
+[[test]]
+name = "attribute_basic"
+expected_stdout = "50\n"

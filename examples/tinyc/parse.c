@@ -153,6 +153,95 @@ static Stmt *new_stmt(P *p, StmtKind k, int line) {
 
 static Expr *parse_expr(P *p);
 static bool parse_sig_type(P *p, Type *out);
+
+// Holder for the subset of `__attribute__((...))` annotations that
+// affect codegen. Empty strings mean "not present". Used by the
+// declaration parser to collect attributes that appear before, after,
+// or in the middle of a declaration and then attach them to the
+// resulting Func.
+typedef struct {
+    string import_module;
+    string import_name;
+    string export_name;
+} AttrInfo;
+
+// Parse zero or more `__attribute__((...))` attribute lists. Recognized
+// attribute names: `import_module("...")`, `import_name("...")`,
+// `export_name("...")` (and the gcc-style `__import_module__` /
+// `__import_name__` / `__export_name__` underscore variants used by
+// corec/platform/platform_wasm.c). Unknown attributes are silently
+// skipped via balanced-paren scanning so that arbitrary GCC/Clang
+// annotations like `__attribute__((weak))` or `__attribute__((noinline))`
+// are accepted without modification of the source.
+//
+// `out` may be NULL when the caller doesn't care about the semantic
+// effect (e.g. attributes on a struct definition that we don't model).
+// In that case the attributes are still parsed and skipped so we can
+// continue past them.
+static bool attr_name_eq(string s, const char *bare) {
+    string b = str_from_cstr_view((char *)bare);
+    if (str_eq(s, b)) return true;
+    // Accept the `__name__` underscore-wrapped GCC spelling as well.
+    if (s.size != b.size + 4) return false;
+    if (s.str[0] != '_' || s.str[1] != '_') return false;
+    if (s.str[s.size - 2] != '_' || s.str[s.size - 1] != '_') return false;
+    for (size_t i = 0; i < b.size; i++) {
+        if (s.str[i + 2] != b.str[i]) return false;
+    }
+    return true;
+}
+static void parse_attributes(P *p, AttrInfo *out) {
+    while (cur(p).kind == TC_TK_KW_ATTRIBUTE) {
+        p->i++;
+        // `__attribute__` must be followed by `((` and end with `))`.
+        if (!expect(p, TC_TK_LPAREN, str_lit("expected '(' after __attribute__"))) return;
+        if (!expect(p, TC_TK_LPAREN, str_lit("expected '((' after __attribute__"))) return;
+        // Each attribute is either an identifier or
+        // identifier(args...). Multiple are comma-separated.
+        // Identifier `()` is also valid (no args).
+        for (;;) {
+            // Empty attribute list `()` — bail out.
+            if (cur(p).kind == TC_TK_RPAREN) break;
+            // An attribute name is an identifier; accept keywords like
+            // `const` and `static` as identifiers in this position too
+            // (gcc allows things like `__attribute__((const))`).
+            TcTok nm = cur(p);
+            string aname = nm.text;
+            if (nm.kind != TC_TK_IDENT && aname.size == 0) {
+                // Skip whatever token this is.
+                p->i++;
+            } else {
+                p->i++;
+            }
+            // Optional `(args)`.
+            if (accept(p, TC_TK_LPAREN)) {
+                // Capture the first string-literal argument for the
+                // attributes we care about.
+                string str_arg = (string){0};
+                if (cur(p).kind == TC_TK_STRING_LIT) {
+                    str_arg = cur(p).text;
+                }
+                // Skip the entire argument list, tracking parens.
+                int depth = 1;
+                while (depth > 0 && cur(p).kind != TC_TK_EOF) {
+                    if (cur(p).kind == TC_TK_LPAREN) depth++;
+                    else if (cur(p).kind == TC_TK_RPAREN) { depth--; if (depth == 0) break; }
+                    p->i++;
+                }
+                expect(p, TC_TK_RPAREN, str_lit("expected ')' in __attribute__"));
+                if (out) {
+                    if (attr_name_eq(aname, "import_module")) out->import_module = str_arg;
+                    else if (attr_name_eq(aname, "import_name")) out->import_name = str_arg;
+                    else if (attr_name_eq(aname, "export_name")) out->export_name = str_arg;
+                }
+            }
+            if (!accept(p, TC_TK_COMMA)) break;
+        }
+        expect(p, TC_TK_RPAREN, str_lit("expected ')' in __attribute__"));
+        expect(p, TC_TK_RPAREN, str_lit("expected '))' in __attribute__"));
+    }
+}
+
 // Parse the contents of `[ ... ]` as an array-length specifier. The
 // caller has already consumed the opening `[`. Consumes the closing `]`.
 // Behavior:
@@ -1810,10 +1899,20 @@ static bool parse_abstract_type(P *p, Type *out) {
 
 static Func *parse_func(P *p) {
     int line = cur(p).line;
+    // Allow `__attribute__((...))` between the storage class (already
+    // consumed by the caller) and the return type — this covers the
+    // common `__attribute__((export_name("..."))) <type> name(...)`
+    // pattern.
+    AttrInfo attrs = (AttrInfo){0};
+    parse_attributes(p, &attrs);
     Type ret_ty = {0};
     if (!parse_sig_type(p, &ret_ty)) {
         perror_at(p, cur(p).line, str_lit("expected return type"));
     }
+    // Also between the return type and the function name (the WASI
+    // macro expansion in corec/platform/platform_wasm.c produces this
+    // shape after preprocessing: `uint32_t __attribute__((...)) name(...)`).
+    parse_attributes(p, &attrs);
     TcTok name = cur(p);
     expect(p, TC_TK_IDENT, str_lit("expected function name"));
     expect(p, TC_TK_LPAREN, str_lit("expected '('"));
@@ -1822,6 +1921,9 @@ static Func *parse_func(P *p) {
     f->name = name.text;
     f->return_type = ret_ty;
     f->line = line;
+    f->wasm_import_module = attrs.import_module;
+    f->wasm_import_name = attrs.import_name;
+    f->wasm_export_name = attrs.export_name;
     VecParam_reserve(p->arena, &f->params, 4);
     VecStmtPtr_reserve(p->arena, &f->body, 8);
     // `f(void)` — single `void` token (not `void*` or named) means no params.
@@ -1864,6 +1966,14 @@ static Func *parse_func(P *p) {
         }
     }
     expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
+    // Trailing `__attribute__((...))` (e.g. `int foo(void) __attribute__((const));`).
+    {
+        AttrInfo trailing = (AttrInfo){0};
+        parse_attributes(p, &trailing);
+        if (trailing.import_module.size > 0) f->wasm_import_module = trailing.import_module;
+        if (trailing.import_name.size > 0) f->wasm_import_name = trailing.import_name;
+        if (trailing.export_name.size > 0) f->wasm_export_name = trailing.export_name;
+    }
     if (accept(p, TC_TK_SEMI)) {
         // Forward declaration / prototype: no body.
         f->is_forward = true;
@@ -2412,6 +2522,12 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
             if (cur(&p).kind == TC_TK_KW_STATIC) tl_saw_static = true;
             p.i++;
         }
+        // Leading `__attribute__((...))` annotations at file scope.
+        // Attach the recognized wasm import/export attributes to the
+        // function (or drop them silently for globals where we don't
+        // model them yet).
+        AttrInfo tl_attrs = (AttrInfo){0};
+        parse_attributes(&p, &tl_attrs);
         if (cur(&p).kind == TC_TK_EOF) break;
         if ((cur(&p).kind == TC_TK_KW_STRUCT || cur(&p).kind == TC_TK_KW_UNION) &&
             (peek(&p, 1).kind == TC_TK_LBRACE ||
@@ -2697,6 +2813,13 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
         p.i = save;
         Func *f = parse_func(&p);
         f->is_static = saw_static;
+        // Merge top-level `__attribute__((...))` annotations (parsed
+        // before the storage-class / return type) into the function. If
+        // both the leading and the inner attribute lists set the same
+        // field, prefer the more specific (inner) one already populated.
+        if (f->wasm_import_module.size == 0) f->wasm_import_module = tl_attrs.import_module;
+        if (f->wasm_import_name.size == 0)   f->wasm_import_name   = tl_attrs.import_name;
+        if (f->wasm_export_name.size == 0)   f->wasm_export_name   = tl_attrs.export_name;
         // Check for an existing entry with the same name. Forward decls can
         // be replaced by a definition; duplicate forward decls are merged;
         // a forward decl after a definition is dropped.

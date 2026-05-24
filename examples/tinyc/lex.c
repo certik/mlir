@@ -51,6 +51,7 @@ static TcTokKind keyword_or_ident(string s) {
     if (str_eq(s, str_lit("va_list"))) return TC_TK_KW_VA_LIST;
     if (str_eq(s, str_lit("__builtin_va_list"))) return TC_TK_KW_VA_LIST;
     if (str_eq(s, str_lit("goto")))     return TC_TK_KW_GOTO;
+    if (str_eq(s, str_lit("__attribute__"))) return TC_TK_KW_ATTRIBUTE;
     return TC_TK_IDENT;
 }
 
