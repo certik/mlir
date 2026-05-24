@@ -1,0 +1,57 @@
+// Regression test: a typedef'd pointer type followed by `[N]` in a
+// local declaration was rejected with
+//     "only int[N] / long long[N] arrays are supported"
+//
+// Hit by mlir_lower_to_llvm.c on patterns like
+//     MLIR_ValueHandle *succ_ops_arr[1] = { operands };
+//     MLIR_ValueHandle *empty_ops[2]   = { NULL, NULL };
+// where MLIR_ValueHandle is a typedef (uintptr_t / unsigned long),
+// so the parsed type just before `[` is TY_PTR_I32 — neither i32
+// nor i64 — and the typedef-array branch of parse_decl refused it.
+//
+// Fix: collapse any typedef'd pointer kind (TY_PTR_I32 / TY_PTR_CHAR /
+// TY_PTR_VOID / TY_PTR_STRUCT) into the existing TY_ARRAY_PTR_CHAR
+// kind. All pointer types share the same 8-byte storage and treating
+// the slots as generic pointers is sufficient for tinyc's downstream
+// uses (storing pointer expressions, passing the array name as a
+// function argument, etc).
+
+typedef int *IntPtr;
+
+int sum2(int *p, int *q) {
+    return *p + *q;
+}
+
+int main(void) {
+    int a = 10;
+    int b = 20;
+    int c = 30;
+    int *pa = &a;
+    int *pb = &b;
+    int *pc = &c;
+
+    // Typedef'd pointer array — used to fail parse.
+    IntPtr arr[3] = { pa, pb, pc };
+    _tinyc_print(*arr[0]);
+    _tinyc_print(*arr[1]);
+    _tinyc_print(*arr[2]);
+
+    // Reassign one slot then read back.
+    arr[1] = pc;
+    _tinyc_print(*arr[1]);
+
+    // Pass the array name (decays to pointer) to a helper that
+    // mirrors how mlir_lower_to_llvm.c hands an `MLIR_ValueHandle*`
+    // array to MLIR_CreateOpWithSuccessors.
+    _tinyc_print(sum2(arr[0], arr[2]));
+
+    // Inline pointer typedef variant — uintptr_t-style.
+    typedef unsigned long *U64Ptr;
+    unsigned long u0 = 7;
+    unsigned long u1 = 11;
+    U64Ptr uarr[2] = { &u0, &u1 };
+    _tinyc_print((int)*uarr[0]);
+    _tinyc_print((int)*uarr[1]);
+
+    return 0;
+}

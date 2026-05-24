@@ -63,6 +63,10 @@ name = "anon_struct_array_init"
 expected_stdout = "90\n120\n210\n10\n"
 
 [[test]]
+name = "typedef_ptr_array"
+expected_stdout = "10\n20\n30\n30\n40\n7\n11\n"
+
+[[test]]
 name = "array_of_struct_init"
 expected_stdout = "1\n10\n3\n30\n500\n4\n7\n0\n9\n0\n4\n5\n8\n6\n"
 

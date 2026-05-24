@@ -897,6 +897,20 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 s->decl_type.kind = TY_ARRAY_STRUCT;
                 s->decl_type.array_len = alen;
                 s->decl_type.array_len_expr = aexpr;
+            } else if (s->decl_type.kind == TY_PTR_I32 ||
+                       s->decl_type.kind == TY_PTR_CHAR ||
+                       s->decl_type.kind == TY_PTR_VOID ||
+                       s->decl_type.kind == TY_PTR_STRUCT) {
+                // T *arr[N] (typedef'd): collapse to TY_ARRAY_PTR_CHAR
+                // since every pointer type stores as the same 8-byte
+                // !llvm.ptr regardless of element kind. The element
+                // type info is intentionally erased here; downstream
+                // uses (loads, stores, passing the array name as a
+                // function argument) all operate on the raw pointer.
+                s->decl_type = (Type){0};
+                s->decl_type.kind = TY_ARRAY_PTR_CHAR;
+                s->decl_type.array_len = alen;
+                s->decl_type.array_len_expr = aexpr;
             } else {
                 bool is_i64 = (s->decl_type.kind == TY_I64);
                 if (s->decl_type.kind != TY_I32 && s->decl_type.kind != TY_I64) {
