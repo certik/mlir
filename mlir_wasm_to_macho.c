@@ -593,6 +593,37 @@ static uint32_t arm64_str_w_xn(uint32_t rt, uint32_t rn, uint32_t imm) {
     return 0xb9000000u | (((imm >> 2) & 0xfffu) << 10)
          | ((rn & 0x1fu) << 5) | (rt & 0x1fu);
 }
+// LDR Xt, [Xn|SP, #pimm]   pimm scaled by 8 (0..32760).
+static uint32_t arm64_ldr_x_xn(uint32_t rt, uint32_t rn, uint32_t imm) {
+    return 0xf9400000u | (((imm >> 3) & 0xfffu) << 10)
+         | ((rn & 0x1fu) << 5) | (rt & 0x1fu);
+}
+// STR Xt, [Xn|SP, #pimm]   pimm scaled by 8 (0..32760).
+static uint32_t arm64_str_x_xn(uint32_t rt, uint32_t rn, uint32_t imm) {
+    return 0xf9000000u | (((imm >> 3) & 0xfffu) << 10)
+         | ((rn & 0x1fu) << 5) | (rt & 0x1fu);
+}
+// CMP Wn, Wm   alias for SUBS WZR, Wn, Wm.
+static uint32_t arm64_cmp_w(uint32_t rn, uint32_t rm) {
+    return 0x6b00001fu | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5);
+}
+// CSET Wd, <cond>   alias for CSINC Wd, WZR, WZR, invert(<cond>). The
+// caller passes the *inverted* condition code (e.g. EQ=0 to make CSET
+// produce 1 when NE).
+static uint32_t arm64_cset_w(uint32_t rd, uint32_t cond_inv) {
+    return 0x1a800400u | (31u << 16) | ((cond_inv & 0xfu) << 12)
+         | (31u << 5) | (rd & 0x1fu);
+}
+// CBZ Wt, <pc-relative byte offset>. Encodes a 19-bit signed
+// instruction-count offset.
+static uint32_t arm64_cbz_w(uint32_t rt, int32_t off_bytes) {
+    int32_t imm19 = off_bytes >> 2;
+    return 0x34000000u | (((uint32_t)imm19 & 0x7ffffu) << 5) | (rt & 0x1fu);
+}
+// MOV Xd, SP   alias for ADD Xd, SP, #0 (only valid when Rd != 31).
+static uint32_t arm64_mov_x_sp(uint32_t rd) {
+    return 0x91000000u | (31u << 5) | (rd & 0x1fu);
+}
 // ADD Xd, Xn, #imm12 (LSL #0).
 static uint32_t arm64_add_x_imm(uint32_t rd, uint32_t rn, uint16_t imm12) {
     return 0x91000000u | (((uint32_t)imm12 & 0xfffu) << 10)
@@ -613,6 +644,36 @@ static uint32_t arm64_bl(int32_t off_bytes) {
 static uint32_t arm64_b(int32_t off_bytes) {
     int32_t imm26 = off_bytes >> 2;
     return 0x14000000u | ((uint32_t)imm26 & 0x03ffffffu);
+}
+
+// Patch a CBZ Wt at site_off so the imm19 field encodes
+// (target_off - site_off) in instructions.
+static void patch_cbz_local(uint8_t *code_data, uint32_t site_off,
+                            uint32_t target_off) {
+    int32_t off_bytes = (int32_t)target_off - (int32_t)site_off;
+    int32_t imm19 = off_bytes >> 2;
+    uint8_t *p = code_data + site_off;
+    uint32_t enc = ((uint32_t)p[0]) | ((uint32_t)p[1] << 8)
+                 | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    enc &= ~((uint32_t)0x7ffffu << 5);
+    enc |= ((uint32_t)imm19 & 0x7ffffu) << 5;
+    p[0] = (uint8_t)(enc & 0xff);
+    p[1] = (uint8_t)((enc >> 8) & 0xff);
+    p[2] = (uint8_t)((enc >> 16) & 0xff);
+    p[3] = (uint8_t)((enc >> 24) & 0xff);
+}
+// Patch an unconditional B at site_off so its imm26 field encodes
+// (target_off - site_off) in instructions.
+static void patch_b_local(uint8_t *code_data, uint32_t site_off,
+                          uint32_t target_off) {
+    int32_t off_bytes = (int32_t)target_off - (int32_t)site_off;
+    int32_t imm26 = off_bytes >> 2;
+    uint8_t *p = code_data + site_off;
+    uint32_t enc = 0x14000000u | ((uint32_t)imm26 & 0x03ffffffu);
+    p[0] = (uint8_t)(enc & 0xff);
+    p[1] = (uint8_t)((enc >> 8) & 0xff);
+    p[2] = (uint8_t)((enc >> 16) & 0xff);
+    p[3] = (uint8_t)((enc >> 24) & 0xff);
 }
 
 static void emit_mov_w_imm32(Buf *b, uint32_t rd, uint32_t imm32) {
@@ -857,26 +918,30 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
     }
 
     uint32_t n_locals_total = np_self + n_decl_locals;
-    if (n_locals_total > 15) {
-        // STUR/LDUR offsets are 9-bit signed: -256..255. Locals start
-        // at fp-16 and decrement by 16, so we can address up to local
-        // index 15 (offset -256). For more we'd need an extra base
-        // register; not yet supported.
+    // With x25-relative LDR/STR (unsigned imm12 scaled by 4 for w,
+    // by 8 for x), we can index up to (4095*4) / 16 ≈ 1023 i32 locals,
+    // or roughly twice that for i64. Cap conservatively below the i32
+    // limit; the cap leaves room for the saved-x25 slot at the bottom
+    // of the slab.
+    if (n_locals_total > 1022) {
         fprintf(stderr,
-                "wasm->macho: function %u uses %u locals (>15 not supported)\n",
-                fidx, n_locals_total);
+                "wasm->macho: function %u uses %u locals (>1022 "
+                "not supported)\n", fidx, n_locals_total);
         return false;
     }
 
     // Local index -> WASM valtype byte (0x7f i32, 0x7e i64, …).
     // Params come first; their types come from the function's type
     // signature.
-    uint8_t local_types[16] = {0};
+    uint8_t *local_types = (uint8_t *)calloc(
+        n_locals_total ? n_locals_total : 1, 1);
     uint8_t param_types_buf[8] = {0};
     {
         uint32_t np_check, nr_check;
         if (!type_arity_params(wm, wf->type_idx, &np_check, &nr_check,
-                               param_types_buf)) return false;
+                               param_types_buf)) {
+            free(local_types); return false;
+        }
         for (uint32_t k = 0; k < np_self; k++)
             local_types[k] = param_types_buf[k];
     }
@@ -927,38 +992,138 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
     }
     emit_word(&e->code, arm64_stp_fp_lr_pre());
     emit_word(&e->code, arm64_mov_fp_sp());
+    // Reserve (n_locals_total + 1) 16-byte slots when we have any
+    // locals: N for the locals themselves plus one for the caller's
+    // x25, which we spill before claiming x25 as our locals base.
+    // The saved x25 lives at the lowest address (== sp post-prologue
+    // == new x25 + 0), and local i lives at new x25 + (N - i) * 16
+    // so it grows upward in offset as i decreases — matching the
+    // existing fp - (i+1)*16 layout. For functions with no locals
+    // we skip the x25 dance entirely.
     if (n_locals_total > 0) {
-        emit_word(&e->code, arm64_sub_sp_imm((uint16_t)(n_locals_total * 16)));
+        uint32_t reserved_slots = n_locals_total + 1;
+        emit_word(&e->code, arm64_sub_sp_imm(
+                (uint16_t)(reserved_slots * 16)));
+        // str x25, [sp, #0]   (save caller's x25 at lowest slot)
+        emit_word(&e->code, arm64_str_x_xn(25, 31 /* SP */, 0));
+        // mov x25, sp
+        emit_word(&e->code, arm64_mov_x_sp(25));
     }
 
     // Copy params (in x0..x7) into local slots 0..np_self-1, and
     // zero-initialise the declared locals (WASM spec requires).
+    // Local i lives at [x25, #(n_locals_total - i) * 16].
     for (uint32_t k = 0; k < np_self; k++) {
-        int32_t off = -(int32_t)(k + 1) * 16;
+        uint32_t off = (n_locals_total - k) * 16;
         // Store the full 64-bit register; an i32 param's low 4 bytes
         // still occupy the slot correctly.
-        emit_word(&e->code, arm64_stur_x_fp(k, off));
+        emit_word(&e->code, arm64_str_x_xn(k, 25, off));
     }
     for (uint32_t k = 0; k < n_decl_locals; k++) {
-        int32_t off = -(int32_t)(np_self + k + 1) * 16;
-        emit_word(&e->code, arm64_stur_x_fp(31 /* xzr */, off));
+        uint32_t li = np_self + k;
+        uint32_t off = (n_locals_total - li) * 16;
+        emit_word(&e->code, arm64_str_x_xn(31 /* xzr */, 25, off));
     }
 
-    // Helper macro: emit the function's epilogue (used by both
-    // `end` falling through and explicit `return`).
-    // Pops the return value into x0/w0 if any, restores sp+fp+lr, ret.
+    // Block frame stack — tracks structured control-flow nesting
+    // (block/loop/if). For milestone 5a we only handle `if`/`else`/
+    // `end`, which need to remember:
+    //   - the site of the conditional CBZ that branches over the
+    //     `then` body (so we can patch it to land at the start of
+    //     the `else` body, or at `end` if there is no `else`),
+    //   - the site of an unconditional B at the end of the `then`
+    //     body (if there is an `else`), which is patched to skip the
+    //     `else` body and land at the matching `end`.
+    typedef struct {
+        uint8_t  kind;             // 1 = if (only kind we support yet)
+        uint8_t  has_else;
+        uint32_t cond_branch_site; // site of CBZ for an if
+        uint32_t else_jump_site;   // site of B at end of `then`
+    } BlockFrame;
+    BlockFrame block_stack[64];
+    uint32_t block_depth = 0;
+
+    // Helper to emit the epilogue (used by both explicit `return` and
+    // the fall-through end-of-function). When the function has locals
+    // we restore the caller's x25 from the bottom of our local slab.
+    #define EMIT_EPILOGUE() do {                                          \
+        if (nr_self == 1) emit_word(&e->code, arm64_ldr_x_sp(0, 0));      \
+        if (n_locals_total > 0)                                           \
+            emit_word(&e->code, arm64_ldr_x_xn(25, 25, 0));               \
+        emit_word(&e->code, arm64_mov_sp_fp());                           \
+        emit_word(&e->code, arm64_ldp_fp_lr_post());                      \
+        emit_word(&e->code, arm64_ret());                                 \
+    } while (0)
+
     bool ended = false;
     while (r.p < r.end && !r.overflow && !ended) {
         uint8_t op = rd_u8(&r);
         switch (op) {
-            case 0x0b: ended = true; break;          // end
-            case 0x0f: {                              // return
-                if (nr_self == 1) {
-                    emit_word(&e->code, arm64_ldr_x_sp(0, 0));
+            case 0x0b: {                              // end
+                if (block_depth == 0) {
+                    ended = true;
+                    break;
                 }
-                emit_word(&e->code, arm64_mov_sp_fp());
-                emit_word(&e->code, arm64_ldp_fp_lr_post());
-                emit_word(&e->code, arm64_ret());
+                BlockFrame *frame = &block_stack[--block_depth];
+                uint32_t here = (uint32_t)e->code.len;
+                if (frame->kind == 1) {
+                    if (frame->has_else) {
+                        patch_b_local(e->code.data,
+                                      frame->else_jump_site, here);
+                    } else {
+                        patch_cbz_local(e->code.data,
+                                        frame->cond_branch_site, here);
+                    }
+                }
+                break;
+            }
+            case 0x04: {                              // if blocktype
+                // Skip the block-type byte. Tinyc-emitted code uses
+                // the void shape (0x40); a single-byte valtype or a
+                // negative sleb encoding would also fit in the same
+                // single byte here.
+                rd_u8(&r);
+                // Pop the condition off the value stack into w0.
+                emit_word(&e->code, arm64_ldr_w_sp(0, 0));
+                emit_word(&e->code, arm64_add_sp_imm(16));
+                // CBZ placeholder: branch to `else` (or `end` if no
+                // `else`), patched when we get there.
+                if (block_depth >= 64) {
+                    fprintf(stderr,
+                            "wasm->macho: block depth >64 in func %u\n",
+                            fidx);
+                    free(local_types); return false;
+                }
+                uint32_t site = (uint32_t)e->code.len;
+                emit_word(&e->code, arm64_cbz_w(0, 0));
+                BlockFrame *frame = &block_stack[block_depth++];
+                frame->kind = 1;
+                frame->has_else = 0;
+                frame->cond_branch_site = site;
+                frame->else_jump_site = 0;
+                break;
+            }
+            case 0x05: {                              // else
+                if (block_depth == 0
+                    || block_stack[block_depth-1].kind != 1) {
+                    fprintf(stderr,
+                            "wasm->macho: stray else in func %u\n", fidx);
+                    free(local_types); return false;
+                }
+                BlockFrame *frame = &block_stack[block_depth-1];
+                // Emit an unconditional jump that skips the `else`
+                // body once the `then` body finishes executing.
+                uint32_t jump_site = (uint32_t)e->code.len;
+                emit_word(&e->code, arm64_b(0));
+                // Patch the CBZ to land here (start of `else` body).
+                patch_cbz_local(e->code.data, frame->cond_branch_site,
+                                (uint32_t)e->code.len);
+                frame->has_else = 1;
+                frame->else_jump_site = jump_site;
+                break;
+            }
+            case 0x0f: {                              // return
+                EMIT_EPILOGUE();
                 break;
             }
             case 0x20:                                // local.get
@@ -969,13 +1134,13 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                     fprintf(stderr,
                             "wasm->macho: local %u out of range in func %u\n",
                             li, fidx);
-                    return false;
+                    free(local_types); return false;
                 }
-                int32_t off = -(int32_t)(li + 1) * 16;
+                uint32_t off = (n_locals_total - li) * 16;
                 bool is_i64 = (local_types[li] == 0x7e);
                 if (op == 0x20) {                      // local.get
-                    if (is_i64) emit_word(&e->code, arm64_ldur_x_fp(0, off));
-                    else        emit_word(&e->code, arm64_ldur_w_fp(0, off));
+                    if (is_i64) emit_word(&e->code, arm64_ldr_x_xn(0, 25, off));
+                    else        emit_word(&e->code, arm64_ldr_w_xn(0, 25, off));
                     emit_word(&e->code, arm64_sub_sp_imm(16));
                     if (is_i64) emit_word(&e->code, arm64_str_x_sp(0, 0));
                     else        emit_word(&e->code, arm64_str_w_sp(0, 0));
@@ -985,8 +1150,8 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                     if (op == 0x21) {                  // set: pop
                         emit_word(&e->code, arm64_add_sp_imm(16));
                     }
-                    if (is_i64) emit_word(&e->code, arm64_stur_x_fp(0, off));
-                    else        emit_word(&e->code, arm64_stur_w_fp(0, off));
+                    if (is_i64) emit_word(&e->code, arm64_str_x_xn(0, 25, off));
+                    else        emit_word(&e->code, arm64_str_w_xn(0, 25, off));
                 }
                 break;
             }
@@ -1020,6 +1185,17 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                 emit_word(&e->code, arm64_str_w_sp(0, 0));   // overwrite remaining
                 break;
             }
+            case 0x47: { // i32.ne
+                // CSET writes 1 when the inverted condition is *false*;
+                // pass EQ so the result is 1 iff w0 != w1.
+                emit_word(&e->code, arm64_ldr_w_sp(1, 0));   // top   -> w1
+                emit_word(&e->code, arm64_ldr_w_sp(0, 16));  // below -> w0
+                emit_word(&e->code, arm64_cmp_w(0, 1));
+                emit_word(&e->code, arm64_cset_w(0, 0));     // cset w0, ne
+                emit_word(&e->code, arm64_add_sp_imm(16));
+                emit_word(&e->code, arm64_str_w_sp(0, 0));
+                break;
+            }
             case 0x23: {                                     // global.get
                 uint32_t gi = (uint32_t)rd_uleb(&r);
                 if (gi >= wm->n_globals) {
@@ -1027,7 +1203,7 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                             "wasm->macho: global.get %u out of range in "
                             "func %u (n_globals=%u)\n",
                             gi, fidx, wm->n_globals);
-                    return false;
+                    free(local_types); return false;
                 }
                 bool gi64 = (wm->globals[gi].valtype == 0x7e);
                 uint32_t slot_off = gi * 8;
@@ -1048,7 +1224,7 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                             "wasm->macho: global.set %u out of range in "
                             "func %u (n_globals=%u)\n",
                             gi, fidx, wm->n_globals);
-                    return false;
+                    free(local_types); return false;
                 }
                 bool gi64 = (wm->globals[gi].valtype == 0x7e);
                 uint32_t slot_off = gi * 8;
@@ -1069,13 +1245,13 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                     fprintf(stderr,
                             "wasm->macho: i32.load offset %u too large "
                             "in func %u\n", off, fidx);
-                    return false;
+                    free(local_types); return false;
                 }
                 if (!wm->has_memory) {
                     fprintf(stderr,
                             "wasm->macho: i32.load with no memory in "
                             "func %u\n", fidx);
-                    return false;
+                    free(local_types); return false;
                 }
                 emit_word(&e->code, arm64_ldr_w_sp(0, 0));   // pop addr -> w0
                 emit_word(&e->code,
@@ -1092,13 +1268,13 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                     fprintf(stderr,
                             "wasm->macho: i32.store offset %u too large "
                             "in func %u\n", off, fidx);
-                    return false;
+                    free(local_types); return false;
                 }
                 if (!wm->has_memory) {
                     fprintf(stderr,
                             "wasm->macho: i32.store with no memory in "
                             "func %u\n", fidx);
-                    return false;
+                    free(local_types); return false;
                 }
                 emit_word(&e->code, arm64_ldr_w_sp(1, 0));   // value -> w1
                 emit_word(&e->code, arm64_ldr_w_sp(0, 16));  // addr  -> w0
@@ -1118,23 +1294,24 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                         fprintf(stderr,
                                 "wasm->macho: unsupported import call (idx %u)\n",
                                 cidx);
-                        return false;
+                        free(local_types); return false;
                     }
                 } else {
                     uint32_t cfidx = cidx - wm->n_imported_funcs;
                     if (cfidx >= wm->n_funcs) {
                         fprintf(stderr,
                                 "wasm->macho: call out of range: %u\n", cidx);
-                        return false;
+                        free(local_types); return false;
                     }
-                    if (!type_arity(wm, wm->funcs[cfidx].type_idx, &np, &nr))
-                        return false;
+                    if (!type_arity(wm, wm->funcs[cfidx].type_idx, &np, &nr)) {
+                        free(local_types); return false;
+                    }
                 }
                 if (np > 8) {
                     fprintf(stderr,
                             "wasm->macho: call with %u params not supported\n",
                             np);
-                    return false;
+                    free(local_types); return false;
                 }
                 // Pop args from CPU stack into x(np-1)..x0 (top of WASM
                 // stack -> highest-numbered arg). We pop the full
@@ -1158,7 +1335,7 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                     fprintf(stderr,
                             "wasm->macho: call with %u results not supported\n",
                             nr);
-                    return false;
+                    free(local_types); return false;
                 }
                 break;
             }
@@ -1166,18 +1343,23 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                 fprintf(stderr,
                         "wasm->macho: unsupported opcode 0x%02x in func %u\n",
                         op, fidx);
-                return false;
+                free(local_types); return false;
         }
     }
 
-    // Trailing fall-through epilogue.
-    if (nr_self == 1) {
-        emit_word(&e->code, arm64_ldr_x_sp(0, 0));
-    } else if (nr_self > 1) return false;
-    emit_word(&e->code, arm64_mov_sp_fp());
-    emit_word(&e->code, arm64_ldp_fp_lr_post());
-    emit_word(&e->code, arm64_ret());
+    if (block_depth != 0) {
+        fprintf(stderr,
+                "wasm->macho: unclosed block (depth %u) in func %u\n",
+                block_depth, fidx);
+        free(local_types); return false;
+    }
 
+    // Trailing fall-through epilogue.
+    if (nr_self > 1) { free(local_types); return false; }
+    EMIT_EPILOGUE();
+    #undef EMIT_EPILOGUE
+
+    free(local_types);
     return !r.overflow;
 }
 

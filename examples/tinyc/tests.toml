@@ -713,3 +713,8 @@ targets = ["macho"]
 name = "macho_arith"
 expected_exit_code = 42
 targets = ["macho"]
+
+[[test]]
+name = "macho_if"
+expected_exit_code = 0
+targets = ["macho"]
