@@ -1280,4 +1280,4 @@ expected_stdout = "7\n"
 [[test]]
 name = "uint8_array_zext"
 targets = ["native", "wasm", "macho"]
-expected_stdout = "fd\nfe\nff\n"
+expected_stdout = "253\n254\n255\n"
