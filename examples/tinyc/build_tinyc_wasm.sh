@@ -47,4 +47,12 @@ clang --target=wasm32-wasi -O2 -nostdinc -fno-builtin \
 clang --target=wasm32 -O2 -nostdlib -fno-builtin \
     -c -o start_wasm.wasm.o examples/tinyc/start_wasm.s
 
-ls -l tinyc.wasm runtime_wasm.wasm.o start_wasm.wasm.o
+# Minimal `tinyc_va_arg_*` shim used by tinyC-compiled wasm binaries
+# (selfhost stage 2+, or any program tinyC compiles that uses varargs
+# in a non-browser context). Kept separate from runtime_wasm.wasm.o so
+# it can be linked alongside a tinyC-compiled corec-stdlib without
+# duplicating printf/strlen/etc.
+clang --target=wasm32-wasi -O2 -fno-builtin \
+    -c -o tinyc_wasm_vararg.wasm.o examples/tinyc/tinyc_wasm_vararg.c
+
+ls -l tinyc.wasm runtime_wasm.wasm.o start_wasm.wasm.o tinyc_wasm_vararg.wasm.o
