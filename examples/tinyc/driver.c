@@ -14,6 +14,7 @@
 #include "mlir_llvm_to_wasmssa.h"
 #include "mlir_wasmssa_to_wasmstack.h"
 #include "mlir_wasm_to_wat.h"
+#include "mlir_wasm_link.h"
 #include "tinyc.h"
 
 extern string read_file_ok(Arena *arena, string path);
@@ -101,6 +102,59 @@ int app_main(void) {
     size_t n_defines = 0;
 
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--link") == 0) {
+            // Linker mode: collect remaining positional arguments as
+            // input .wasm.o files, expect -o <out.wasm>. All other
+            // tinyc flags are ignored.
+            const char *link_out = NULL;
+            const char *link_entry = "_start";
+            #define MAX_LINK_INPUTS 64
+            const char *link_inputs[MAX_LINK_INPUTS];
+            size_t n_link_inputs = 0;
+            for (int j = i + 1; j < argc; j++) {
+                if (strcmp(argv[j], "-o") == 0 && j + 1 < argc) {
+                    link_out = argv[++j];
+                } else if (strncmp(argv[j], "-o", 2) == 0 && argv[j][2] != '\0') {
+                    link_out = argv[j] + 2;
+                } else if (strncmp(argv[j], "--export=", 9) == 0) {
+                    link_entry = argv[j] + 9;
+                } else if (argv[j][0] != '-') {
+                    if (n_link_inputs >= MAX_LINK_INPUTS) {
+                        fprintf(stderr, "tinyc --link: too many inputs (max %d)\n", MAX_LINK_INPUTS);
+                        arena_destroy(boot_arena);
+                        return 1;
+                    }
+                    link_inputs[n_link_inputs++] = argv[j];
+                }
+            }
+            if (!link_out || n_link_inputs == 0) {
+                fprintf(stderr, "usage: tinyc --link [--export=NAME] -o OUT.wasm IN1.wasm.o [IN2.wasm.o ...]\n");
+                arena_destroy(boot_arena);
+                return 1;
+            }
+            // Read each input.
+            MLIR_WasmLinkInput *ins = (MLIR_WasmLinkInput *)arena_new_array(
+                boot_arena, MLIR_WasmLinkInput, n_link_inputs);
+            for (size_t k = 0; k < n_link_inputs; k++) {
+                string buf = read_file_ok(boot_arena, str_from_cstr_view((char *)link_inputs[k]));
+                ins[k].data = (const uint8_t *)buf.str;
+                // read_file_ok stores filesize+1 (it appends a NUL).
+                // The linker needs the exact file size.
+                ins[k].size = buf.size > 0 ? buf.size - 1 : 0;
+                ins[k].name = link_inputs[k];
+            }
+            uint8_t *out_data = NULL; size_t out_size = 0;
+            if (!MLIR_WasmLink(ins, n_link_inputs, link_entry, &out_data, &out_size)) {
+                fprintf(stderr, "tinyc --link: link failed\n");
+                arena_destroy(boot_arena);
+                return 1;
+            }
+            string out_buf = { .str = (char *)out_data, .size = out_size };
+            int wrc = write_bytes_to_file(out_buf, link_out);
+            free(out_data);
+            arena_destroy(boot_arena);
+            return wrc;
+        }
         if      (strcmp(argv[i], "--emit=mlir")    == 0) { emit_llvm = false; emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; }
         else if (strcmp(argv[i], "--emit=lowered") == 0) { emit_lowered = true;  emit_llvm = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; }
         else if (strcmp(argv[i], "--emit=llvm")    == 0) { emit_llvm = true;     emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; }

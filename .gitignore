@@ -14,7 +14,10 @@ parser.native.bak
 compiler_tester/__pycache__/
 /tinyc
 /tinyc.exe
+/tinyc.wasm
 /tinyc_native
+/runtime_wasm.wasm.o
+/start_wasm.wasm.o
 _libc_io_tmp.txt
 parser_tinyc
 build_tinyc/

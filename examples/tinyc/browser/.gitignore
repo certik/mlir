@@ -1,0 +1,7 @@
+# Staged copies of compiled artifacts — populated by `pixi run -e wasm
+# serve_tinyc_demo`. The originals live at repo root after
+# `pixi run -e wasm build_tinyc_wasm`.
+tinyc.wasm
+runtime_wasm.wasm.o
+start_wasm.wasm.o
+_dist/
