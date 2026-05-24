@@ -1915,7 +1915,8 @@ static bool parse_sig_type(P *p, Type *out) {
                 // else: ignore (e.g. typedef'd pointer + extra '*' not supported)
                 skip_const(p);
                 if (accept(p, TC_TK_STAR) &&
-                    (out->kind == TY_PTR_I32 || out->kind == TY_PTR_STRUCT)) {
+                    (out->kind == TY_PTR_I32 || out->kind == TY_PTR_STRUCT ||
+                     out->kind == TY_PTR_CHAR || out->kind == TY_PTR_VOID)) {
                     wrap_ptr_to_ptr(p, out);
                 }
             }

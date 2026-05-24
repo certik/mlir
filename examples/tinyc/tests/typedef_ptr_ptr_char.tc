@@ -1,0 +1,65 @@
+// Regression test for parsing `Td **` where `Td` is a typedef for a
+// char-sized type (`uint8_t`, `int8_t`, etc.). Previously the second
+// `*` was silently dropped because parse_sig_type only wrapped to
+// TY_PTR_PTR for TY_PTR_I32 / TY_PTR_STRUCT typedefs, leaving
+// `uint8_t **` parsed as `uint8_t *`. As a result `*out_p = buf;`
+// in `produce` truncated the source pointer to i8 (storing only the
+// low byte) instead of storing the full pointer.
+//
+// We exercise both:
+//   1. A by-reference output param: `void produce(uint8_t **out_p)`.
+//   2. Direct reading of `(*pp)[i]` and `pp[0][i]`.
+
+typedef unsigned char uint8_t;
+typedef signed char int8_t;
+
+static uint8_t g_buf[4];
+
+void produce(uint8_t **out_p) {
+    g_buf[0] = 127;
+    g_buf[1] = 254;
+    g_buf[2] = 0;
+    g_buf[3] = 42;
+    *out_p = g_buf;
+}
+
+int read_first(uint8_t **pp) {
+    // (*pp)[0]: load the inner pointer, then index. Should yield g_buf[0]
+    // (= 127). The earlier bug made *pp store only 1 byte, so this read
+    // would also be wrong.
+    return (*pp)[0];
+}
+
+int read_third_via_index(uint8_t **pp) {
+    // pp[0][2]: equivalent to (*pp)[2]. Same path, exercises the
+    // "indexing through TY_PTR_PTR" lvalue code as well.
+    return pp[0][3];
+}
+
+static int8_t g_buf2[4];
+
+int main() {
+    uint8_t *p;
+    produce(&p);
+
+    // Should print: 127 then 42.
+    _tinyc_print(p[0]);
+    _tinyc_print(p[3]);
+
+    // Same observations via the helper functions.
+    _tinyc_print(read_first(&p));
+    _tinyc_print(read_third_via_index(&p));
+
+    // Mirror the test for int8_t **: same path, signed variant.
+    // (We deliberately use small non-negative values here because
+    // tinyC's TY_PTR_CHAR load is currently always 8-bit zero-extend,
+    // which is a separate pre-existing limitation independent of the
+    // TY_PTR_PTR parser fix this test is for.)
+    g_buf2[0] = 1;
+    g_buf2[1] = 99;
+    int8_t *q = g_buf2;
+    int8_t **qq = &q;
+    _tinyc_print((*qq)[0]);  // 1
+    _tinyc_print((*qq)[1]);  // 99
+    return 0;
+}

@@ -886,3 +886,12 @@ name = "deep_recursion_large_locals"
 # ~1 KB local each (~200 KB of stack total) to ensure the linker
 # default stays comfortably above what the compiler itself uses.
 expected_stdout = "200\n"
+
+[[test]]
+name = "typedef_ptr_ptr_char"
+# Regression for parser bug: `uint8_t **out_p` (typedef'd `uint8_t`)
+# previously dropped the second `*`, producing a single-pointer
+# parameter. `*out_p = src;` then truncated the pointer to its
+# low byte (`trunci !llvm.ptr -> i8` + i8 store), corrupting any
+# code that returned a buffer through a `T **out` parameter.
+expected_stdout = "127\n42\n127\n42\n1\n99\n"
