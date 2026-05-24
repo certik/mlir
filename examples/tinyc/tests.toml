@@ -895,3 +895,23 @@ name = "typedef_ptr_ptr_char"
 # low byte (`trunci !llvm.ptr -> i8` + i8 store), corrupting any
 # code that returned a buffer through a `T **out` parameter.
 expected_stdout = "127\n42\n127\n42\n1\n99\n"
+
+[[test]]
+name = "sret_in_ternary"
+# Investigation MRE for stage-2 selfhost: `at_s()` in
+# `mlir_wasmstack_to_bin.c` is `return a ? sretfn(a) : (T){0};`
+# and the stage-2 build read truncated strings out of it. This
+# test reproduces the same shape; it now passes (the bug was
+# elsewhere) and is kept as a regression guard for the sret-in-
+# ternary lowering.
+expected_stdout = "a.size=5 a.str[0]=h\nb.size=0\n"
+
+[[test]]
+name = "u64_size_field_narrowing"
+# Investigation MRE for stage-2 selfhost: emit.c calls
+# `attr_s(ctx, \"target\", o->call_target.str, o->call_target.size)`
+# where `.size` is uint64_t but `attr_s`'s 4th arg is size_t (i32 on
+# wasm32). Caller-side narrowing must drop the high half of the i64
+# without corrupting the previous arg. Reproduces the same struct
+# layout / argument-narrowing shape.
+expected_stdout = "size=6 str0=a\n"

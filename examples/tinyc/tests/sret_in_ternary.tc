@@ -1,0 +1,36 @@
+// Regression test for stage-2 wasm bug: stage-2 returned 's' / size-1
+// strings from `at_s()` in mlir_wasmstack_to_bin.c. That helper is a
+// ternary returning either an sret call result or a zero-initialised
+// struct literal:
+//
+//     static string at_s(MLIR_OpHandle op, const char *name) {
+//         MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(op, name);
+//         return a ? MLIR_GetAttributeString(a) : (string){0};
+//     }
+//
+// tinyC's sret lowering for this pattern was buggy when the sret-
+// returning function was itself called inside a ternary. We mimic
+// the same shape with a fake "string" and a fake "MLIR_GetAttributeString".
+
+int printf(char *fmt, ...);
+
+typedef struct { char *str; unsigned long size; } str_t;
+
+str_t make(char *p, unsigned long n) {
+    str_t s;
+    s.str = p;
+    s.size = n;
+    return s;
+}
+
+str_t pick(int has) {
+    return has ? make("hello", 5) : (str_t){0};
+}
+
+int main() {
+    str_t a = pick(1);
+    str_t b = pick(0);
+    printf("a.size=%lu a.str[0]=%c\n", a.size, a.str[0]);
+    printf("b.size=%lu\n", b.size);
+    return 0;
+}
