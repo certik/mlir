@@ -1255,6 +1255,45 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 Stmt *ds = new_stmt(p, ST_DECL, dname.line);
                 ds->decl_name = dname.text;
                 ds->decl_type = ty;
+                // Optional `[N]` (or `[N][M]`) suffix on this declarator
+                // — promote the per-declarator type into the matching
+                // array kind, mirroring the first-declarator branch
+                // above.
+                if (accept(p, TC_TK_LBRACK)) {
+                    int64_t alen = 0; Expr *aexpr = NULL;
+                    parse_array_len_bracket(p, &alen, &aexpr);
+                    if (ds->decl_type.kind == TY_STRUCT) {
+                        ds->decl_type.kind = TY_ARRAY_STRUCT;
+                        ds->decl_type.array_len = alen;
+                        ds->decl_type.array_len_expr = aexpr;
+                    } else if (ds->decl_type.kind == TY_PTR_I32 ||
+                               ds->decl_type.kind == TY_PTR_CHAR ||
+                               ds->decl_type.kind == TY_PTR_VOID ||
+                               ds->decl_type.kind == TY_PTR_STRUCT) {
+                        ds->decl_type = (Type){0};
+                        ds->decl_type.kind = TY_ARRAY_PTR_CHAR;
+                        ds->decl_type.array_len = alen;
+                        ds->decl_type.array_len_expr = aexpr;
+                    } else {
+                        bool is_i64 = (ds->decl_type.kind == TY_I64);
+                        bool is_i8  = (ds->decl_type.kind == TY_I32 &&
+                                       ds->decl_type.int_bits == 8);
+                        if (ds->decl_type.kind != TY_I32 && ds->decl_type.kind != TY_I64) {
+                            perror_at(p, line, str_lit("only int[N] / long long[N] arrays are supported"));
+                        }
+                        ds->decl_type.kind = TY_ARRAY_I32;
+                        ds->decl_type.array_elem_is_i64 = is_i64;
+                        ds->decl_type.array_elem_is_i8  = is_i8;
+                        ds->decl_type.array_len = alen;
+                        ds->decl_type.array_len_expr = aexpr;
+                        if (accept(p, TC_TK_LBRACK)) {
+                            int64_t alen2 = 0; Expr *aexpr2 = NULL;
+                            parse_array_len_bracket(p, &alen2, &aexpr2);
+                            ds->decl_type.array_len2 = alen2;
+                            if (aexpr2) perror_at(p, line, str_lit("2D array second dim must be a literal"));
+                        }
+                    }
+                }
                 if (accept(p, TC_TK_ASSIGN)) {
                     Expr *agg = parse_aggregate_init(p, ds->decl_type);
                     ds->decl_init = agg ? agg : parse_expr(p);
