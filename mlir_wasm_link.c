@@ -1198,6 +1198,34 @@ static void patch_i32_le(uint8_t *p, uint32_t v) {
     p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
 }
 
+// Number of bytes a given reloc patches (5 for the padded {U,S}LEB
+// encodings, 4 for the I32 encodings). Returns 0 for unsupported reloc
+// kinds — caller treats that as an error.
+static uint32_t reloc_patch_width(uint8_t t) {
+    switch (t) {
+        case R_WASM_FUNCTION_INDEX_LEB:
+        case R_WASM_TYPE_INDEX_LEB:
+        case R_WASM_GLOBAL_INDEX_LEB:
+        case R_WASM_MEMORY_ADDR_LEB:
+        case R_WASM_TAG_INDEX_LEB:
+        case R_WASM_TABLE_NUMBER_LEB:
+        case R_WASM_TABLE_INDEX_SLEB:
+        case R_WASM_MEMORY_ADDR_SLEB:
+        case R_WASM_MEMORY_ADDR_REL_SLEB:
+        case R_WASM_TABLE_INDEX_REL_SLEB:
+            return 5;
+        case R_WASM_TABLE_INDEX_I32:
+        case R_WASM_MEMORY_ADDR_I32:
+        case R_WASM_GLOBAL_INDEX_I32:
+        case R_WASM_FUNCTION_OFFSET_I32:
+        case R_WASM_SECTION_OFFSET_I32:
+        case R_WASM_MEMORY_ADDR_LOCREL_I32:
+            return 4;
+        default:
+            return 0;
+    }
+}
+
 // Function symbols referenced via a TABLE_INDEX reloc must resolve to the
 // indirect-function-table slot, not the final function index. The slot
 // map is keyed by final func idx and is built once during link layout.
@@ -1674,19 +1702,24 @@ reloc_fail:
     buf_free(&g_pl);
     (void)first_defined_global;
 
-    // Export section.
+    // Export section. The caller asked for `entry_export` (typically
+    // "_start"); failing to resolve it leaves us with a non-runnable
+    // module, so error instead of silently producing one.
     Buf e_pl = {0};
     int entry_gi = gst_find(&gst, entry_export);
-    uint32_t n_exports = 1; // memory
-    if (entry_gi >= 0) n_exports++;
-    leb_u(&e_pl, n_exports);
+    if (entry_gi < 0) {
+        link_err("entry export not found: %s", entry_export);
+        ok = false;
+        buf_free(&e_pl);
+        ttab_free(&ttab); gst_free(&gst); free(table_slot_map); free(stubs);
+        goto done;
+    }
+    leb_u(&e_pl, 2); // memory + entry
     emit_string(&e_pl, "memory");
     buf_putc(&e_pl, 0x02); leb_u(&e_pl, 0);
-    if (entry_gi >= 0) {
-        emit_string(&e_pl, entry_export);
-        buf_putc(&e_pl, 0x00);
-        leb_u(&e_pl, gst.e[entry_gi].final_idx);
-    }
+    emit_string(&e_pl, entry_export);
+    buf_putc(&e_pl, 0x00);
+    leb_u(&e_pl, gst.e[entry_gi].final_idx);
     emit_section(&img, SEC_EXPORT, &e_pl);
     buf_free(&e_pl);
 
@@ -1727,6 +1760,15 @@ reloc_fail:
                 uint32_t off = r->section_off - f->code_off;
                 if (r->sym_idx >= o->n_syms) {
                     link_err("reloc bad sym in %s", o->src->name); ok = false; break;
+                }
+                uint32_t w = reloc_patch_width(r->type);
+                if (w == 0) {
+                    link_err("unsupported reloc type %u in %s",
+                             r->type, o->src->name); ok = false; break;
+                }
+                if (off + w > f->code_len) {
+                    link_err("reloc patch out of bounds in %s (code)", o->src->name);
+                    ok = false; break;
                 }
                 ObjSymbol *s = &o->syms[r->sym_idx];
                 uint32_t value = 0;
@@ -1842,6 +1884,16 @@ reloc_fail:
                     uint32_t off = r->section_off - body_off[i];
                     if (r->sym_idx >= o->n_syms) { ok = false; break; }
                     ObjSymbol *s = &o->syms[r->sym_idx];
+                    uint32_t w = reloc_patch_width(r->type);
+                    if (w == 0) {
+                        link_err("unsupported data reloc %u in %s",
+                                 r->type, o->src->name);
+                        ok = false; break;
+                    }
+                    if (off + w > o->datasegs[i].size) {
+                        link_err("reloc patch out of bounds in %s (data)", o->src->name);
+                        ok = false; break;
+                    }
                     uint32_t value = 0;
                     if (r->type == R_WASM_TYPE_INDEX_LEB) {
                         if (r->sym_idx < o->n_types) value = o->type_remap[r->sym_idx];
