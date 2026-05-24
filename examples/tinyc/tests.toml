@@ -63,6 +63,10 @@ name = "array_of_struct_init"
 expected_stdout = "1\n10\n3\n30\n500\n4\n7\n0\n9\n0\n4\n5\n8\n6\n"
 
 [[test]]
+name = "addr_struct_arrow"
+expected_stdout = "99\n1\n42\n7\n49\n"
+
+[[test]]
 name = "return"
 expected_stdout = "3\n-1\n"
 

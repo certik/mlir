@@ -2767,6 +2767,14 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     // !llvm.ptr) whose deref loads another !llvm.ptr.
                     r.ptr_elem = e->ptr;
                 }
+                else if (s->type.kind == TY_STRUCT) {
+                    // &s where s is a struct value: the result is a real
+                    // struct pointer. Carry the struct sdef + element type
+                    // so downstream `(&s)->field` accesses (and the general
+                    // `EX_DEREF` walk) can resolve the field chain.
+                    r.sdef = s->sdef;
+                    if (s->sdef) r.ptr_elem = find_struct_type(e, s->sdef);
+                }
                 return r;
             }
             if (ex->lhs->kind == EX_INDEX) {

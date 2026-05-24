@@ -1,0 +1,52 @@
+// Regression test: `&local_struct_var` must produce a struct-pointer
+// EVal whose `sdef` is set, so that follow-on `->field` accesses (and
+// any other walk_struct_lhs consumer) resolve the field chain through
+// the address-of result.
+//
+// Previously emit.c's EX_ADDR(EX_VAR) branch only populated `ptr_elem`
+// for scalar / pointer / array kinds; for TY_STRUCT it left `sdef = NULL`
+// on the result EVal. A pattern like
+//
+//     Ctx c;
+//     (&c)->line = 42;          // walk_struct_lhs -> general EX_DEREF
+//
+// then failed with "-> requires a struct pointer".
+//
+// This shows up in tinyc's own emit.c whenever a function takes the
+// address of its local `E e` and forwards it to a macro that does
+// `(e)->field`, e.g. `EMIT_ERR(&e, "...")` expands to
+//     (&e)->cur_line
+// and
+//     (&e)->err_count++
+// inside `tinyc_emit_module()`.
+
+typedef struct {
+    int line;
+    int err_count;
+} Ctx;
+
+void use_arrow(Ctx *p) {
+    p->line = 99;
+    p->err_count += 1;
+}
+
+int main(void) {
+    Ctx c;
+    c.line = 0;
+    c.err_count = 0;
+
+    // Pass &local-struct to a function that takes a struct pointer
+    // (sanity check: this path already worked).
+    use_arrow(&c);
+    _tinyc_print(c.line);
+    _tinyc_print(c.err_count);
+
+    // Direct `(&local)->field` assign and read — the regressed path.
+    (&c)->line = 42;
+    (&c)->err_count = 7;
+    _tinyc_print(c.line);
+    _tinyc_print(c.err_count);
+    _tinyc_print((&c)->line + (&c)->err_count);
+
+    return 0;
+}
