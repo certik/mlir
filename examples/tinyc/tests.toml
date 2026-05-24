@@ -943,3 +943,14 @@ name = "array_len_from_init"
 # loop `for (i = 0; i < N; i++)` ran zero iterations. Exactly the
 # shape used by `btab[]` in `mlir_llvm_to_wasmssa.c`.
 expected_stdout = "3\n4\n3\n696\n"
+
+[[test]]
+name = "uint8_array_typedef"
+# Regression for parser bug #38: `uint8_t arr[N]` (typedef-driven
+# 8-bit alias) must produce a TY_ARRAY_I32 with `array_elem_is_i8=1`
+# so emit.c allocates 1-byte-stride storage. Previously only the
+# raw `char arr[N]` path set the flag, so `uint8_t magic[8]` was laid
+# out as 32 bytes (i32 stride) and `buf_append(&img, magic, 8)` in
+# `mlir_wasmstack_to_bin.c` wrote `00 00 00 00 61 00 00 00` instead
+# of the wasm magic `00 61 73 6d 01 00 00 00`.
+expected_stdout = "8\n0\n97\n115\n109\n1\n0\n0\n0\n"

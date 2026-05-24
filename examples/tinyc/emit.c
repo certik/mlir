@@ -4080,8 +4080,18 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                      (int64_t)n, st->decl_type.array_len);
                         }
                         int64_t lim = (int64_t)n < st->decl_type.array_len ? (int64_t)n : st->decl_type.array_len;
+                        bool elem_i8  = st->decl_type.array_elem_is_i8;
+                        bool elem_i64 = st->decl_type.array_elem_is_i64;
                         for (int64_t a = 0; a < lim; a++) {
                             MLIR_ValueHandle iv = emit_expr_i32(e, sc, st->decl_init->args.data[a]);
+                            // The element load/store width must match the
+                            // declared element type. emit_expr_i32 yields i32;
+                            // truncate to i8 (or extend to i64) so the store
+                            // doesn't overflow the slot and clobber adjacent
+                            // memory (which on wasm32 can corrupt the
+                            // immediately-following rodata page).
+                            if (elem_i8)       iv = emit_trunci_to_i8(e, iv);
+                            else if (elem_i64) iv = emit_extsi_i32_to_i64(e, iv);
                             int32_t path[2] = {0, (int32_t)a};
                             MLIR_ValueHandle p = emit_gep(e, sy->addr, arr_ty, path, 2, NULL, 0);
                             emit_store_v(e, iv, p);
@@ -4090,7 +4100,14 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                         int64_t n1 = st->decl_type.array_len;
                         int64_t n2 = st->decl_type.array_len2 ? st->decl_type.array_len2 : 1;
                         bool is_2d = (st->decl_type.array_len2 != 0);
-                        MLIR_ValueHandle z = emit_const_i32(e, 0);
+                        // Use a zero value whose width matches the element
+                        // type so the i32 store doesn't overflow narrower
+                        // (i8) slots.
+                        MLIR_ValueHandle z = st->decl_type.array_elem_is_i8
+                            ? emit_const_i8(e, 0)
+                            : st->decl_type.array_elem_is_i64
+                                ? emit_const_i64(e, 0)
+                                : emit_const_i32(e, 0);
                         for (int64_t a = 0; a < n1; a++) {
                             for (int64_t b = 0; b < n2; b++) {
                                 int32_t path[3];

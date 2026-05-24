@@ -1111,11 +1111,14 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 s->decl_type.array_len_expr = aexpr;
             } else {
                 bool is_i64 = (s->decl_type.kind == TY_I64);
+                bool is_i8  = (s->decl_type.kind == TY_I32 &&
+                               s->decl_type.int_bits == 8);
                 if (s->decl_type.kind != TY_I32 && s->decl_type.kind != TY_I64) {
                     perror_at(p, line, str_lit("only int[N] / long long[N] arrays are supported"));
                 }
                 s->decl_type.kind = TY_ARRAY_I32;
                 s->decl_type.array_elem_is_i64 = is_i64;
+                s->decl_type.array_elem_is_i8  = is_i8;
                 s->decl_type.array_len = alen;
                 s->decl_type.array_len_expr = aexpr;
                 if (accept(p, TC_TK_LBRACK)) {
@@ -1945,7 +1948,11 @@ static bool parse_abstract_type(P *p, Type *out) {
         } else if (out->kind == TY_PTR_CHAR) {
             out->kind = TY_ARRAY_PTR_CHAR;
         } else {
+            bool is_i64 = (out->kind == TY_I64);
+            bool is_i8  = (out->kind == TY_I32 && out->int_bits == 8);
             out->kind = TY_ARRAY_I32;
+            out->array_elem_is_i64 = is_i64;
+            out->array_elem_is_i8  = is_i8;
         }
         out->array_len = alen;
         out->array_len_expr = aexpr;
@@ -2251,9 +2258,13 @@ static StructDef *parse_struct_def(P *p) {
                     ft.array_len = n1;
                     ft.array_len2 = n2;
                 } else {
+                    bool is_i64 = (ft.kind == TY_I64);
+                    bool is_i8  = (ft.kind == TY_I32 && ft.int_bits == 8);
                     ft.kind = TY_ARRAY_I32;
                     ft.array_len = n1;
                     ft.array_len2 = n2;
+                    ft.array_elem_is_i64 = is_i64;
+                    ft.array_elem_is_i8  = is_i8;
                 }
             }
             VecStructField_push_back(p->arena, &sd->fields,
@@ -2503,7 +2514,9 @@ static void parse_typedef_decl(P *p) {
         expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
         expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
         if (ty.kind == TY_I32) {
+            bool is_i8 = (ty.int_bits == 8);
             ty.kind = TY_ARRAY_I32;
+            ty.array_elem_is_i8 = is_i8;
             ty.array_len = lit.int_value;
         } else {
             perror_at(p, line, str_lit("typedef array only supported for int"));
