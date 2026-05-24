@@ -3,6 +3,7 @@
 #include "tinyc.h"
 
 #include <base/arena.h>
+#include <base/format.h>
 #include <base/io.h>
 #include <base/string.h>
 
@@ -36,6 +37,11 @@ typedef struct {
     // false (the default for native host targets) they're 64-bit.
     // `long long` and `int64_t` are always 64-bit regardless.
     bool target_wasm32;
+    // Name of the function currently being parsed (set by parse_func
+    // around the body). Used to mangle function-local `static`
+    // variables into unique module-scope global names.
+    string cur_func_name;
+    int    static_local_counter;
 } P;
 
 static TcTok cur(P *p) { return p->toks[p->i]; }
@@ -1072,12 +1078,92 @@ static void parse_block(P *p, VecStmtPtr *out) {
     expect(p, TC_TK_RBRACE, str_lit("expected '}'"));
 }
 
+// Promote a function-local `static` declaration to a module-scope global.
+// The original local name is preserved on the Stmt (so subsequent
+// references within the function still bind to it via the local scope),
+// but the Stmt is tagged with the mangled global name so the emitter
+// substitutes the global's address for an `alloca` slot.
+//
+// Only the simple init forms supported by `Global` (no init / int / float
+// / string literal) are accepted. Anything richer (compound initializer,
+// function call, etc.) is rejected at parse time.
+static void promote_static_local(P *p, Stmt *ds, int line) {
+    if (ds->kind != ST_DECL) return;
+    if (p->cur_func_name.size == 0) return;  // file-scope: handled elsewhere
+    Type ty = ds->decl_type;
+    if (ty.kind != TY_I32 && ty.kind != TY_I64 &&
+        ty.kind != TY_F32 && ty.kind != TY_F64 &&
+        ty.kind != TY_PTR_CHAR) {
+        perror_at(p, line,
+            str_lit("function-local 'static' is only supported for int/long/float/double/char* scalars"));
+        return;
+    }
+    Global g = (Global){0};
+    int sid = ++p->static_local_counter;
+    g.name = format(p->arena,
+                    str_lit("__static.{}.{}.{}"),
+                    p->cur_func_name, ds->decl_name, (int64_t)sid);
+    g.type = ty;
+    g.line = line;
+    g.is_static = true;
+    if (ds->decl_init) {
+        Expr *e = ds->decl_init;
+        if (e->kind == EX_INT) {
+            g.has_init = true;
+            g.init_int = e->int_value;
+        } else if (e->kind == EX_FLOAT) {
+            g.has_init = true;
+            g.init_float = e->float_value;
+        } else if (e->kind == EX_STR && ty.kind == TY_PTR_CHAR) {
+            g.has_init = true;
+            g.init_str = e->name;
+        } else {
+            perror_at(p, line,
+                str_lit("function-local 'static' init must be a literal"));
+            return;
+        }
+    }
+    VecGlobal_push_back(p->arena, &p->prog->globals, g);
+    ds->decl_static_global_sym = g.name;
+    ds->decl_init = NULL;  // emitter must not re-emit the init at the use site
+}
+
+// Walk a parse_decl result (single ST_DECL or a no-scope ST_BLOCK of
+// ST_DECLs) and promote every declarator to a static global.
+static void promote_static_locals(P *p, Stmt *s, int line) {
+    if (!s) return;
+    if (s->kind == ST_DECL) {
+        promote_static_local(p, s, line);
+    } else if (s->kind == ST_BLOCK) {
+        for (size_t i = 0; i < s->block_body.size; i++) {
+            promote_static_local(p, s->block_body.data[i], line);
+        }
+    }
+}
+
 // Parse a decl statement: <type> [*] name [ '[' N ']' [ '[' M ']' ] ] [ '=' expr ] ';'
 //   or                  : struct Name [*] name [ '[' N ']' ] [ '=' &<var> ] ';'
 //   or                  : <typedef-name> name [ ... ] [ '=' expr ] ';'
 // Caller has already verified that current token starts a decl.
 static Stmt *parse_decl(P *p, bool require_semi) {
     int line = cur(p).line;
+    bool saw_static = false;
+    // Detect a leading `static` storage-class qualifier before the type
+    // qualifiers so we can promote the declaration to a module-scope
+    // global (function-local static semantics). `skip_const` below still
+    // accepts `static` (and `inline`), but only this prefix position is
+    // promoted; `static` appearing later in the qualifier list is
+    // silently ignored as before.
+    {
+        size_t save = p->i;
+        while (cur(p).kind == TC_TK_KW_CONST ||
+               cur(p).kind == TC_TK_KW_STATIC ||
+               cur(p).kind == TC_TK_KW_INLINE) {
+            if (cur(p).kind == TC_TK_KW_STATIC) saw_static = true;
+            p->i++;
+        }
+        p->i = save;
+    }
     skip_const(p);
     // Typedef'd type-name takes precedence over manual parsing.
     if (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, cur(p).text)) {
@@ -1156,9 +1242,11 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 VecStmtPtr_push_back(p->arena, &blk->block_body, ds);
             }
             if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+            if (saw_static) promote_static_locals(p, blk, line);
             return blk;
         }
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+        if (saw_static) promote_static_locals(p, s, line);
         return s;
     }
     // struct decl: `struct Name var;` or `struct Name * p = &s;`
@@ -1247,6 +1335,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             { Expr *agg = parse_aggregate_init(p, s->decl_type); s->decl_init = agg ? agg : parse_expr(p); }
         }
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+        if (saw_static) promote_static_locals(p, s, line);
         return s;
     }
     // `va_list ap;` — special atomic type: must declare a single named
@@ -1259,6 +1348,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         s->decl_name = name.text;
         s->decl_type.kind = TY_VA_LIST;
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+        if (saw_static) promote_static_locals(p, s, line);
         return s;
     }
     TypeKind base = TY_I32;
@@ -1282,6 +1372,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             { Expr *agg = parse_aggregate_init(p, s->decl_type); s->decl_init = agg ? agg : parse_expr(p); }
         }
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+        if (saw_static) promote_static_locals(p, s, line);
         return s;
     }
     bool is_ptr = false;
@@ -1412,9 +1503,11 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             VecStmtPtr_push_back(p->arena, &blk->block_body, ds);
         }
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+        if (saw_static) promote_static_locals(p, blk, line);
         return blk;
     }
     if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+    if (saw_static) promote_static_locals(p, s, line);
     return s;
 }
 
@@ -2042,7 +2135,10 @@ static Func *parse_func(P *p) {
         f->is_forward = true;
         return f;
     }
+    string saved_func = p->cur_func_name;
+    p->cur_func_name = f->name;
     parse_block(p, &f->body);
+    p->cur_func_name = saved_func;
     return f;
 }
 

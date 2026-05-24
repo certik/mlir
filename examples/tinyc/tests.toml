@@ -954,3 +954,13 @@ name = "uint8_array_typedef"
 # `mlir_wasmstack_to_bin.c` wrote `00 00 00 00 61 00 00 00` instead
 # of the wasm magic `00 61 73 6d 01 00 00 00`.
 expected_stdout = "8\n0\n97\n115\n109\n1\n0\n0\n0\n"
+
+[[test]]
+name = "static_local_var"
+# Regression: function-local `static` variables must persist across
+# calls instead of being reset to their initializer. Previously tinyc's
+# parser silently dropped the `static` storage class, so this is what
+# broke stage-2 self-host: `static int anon_counter` in parse.c was
+# reinitialized to 0 on every nested anonymous-struct parse, collapsing
+# every union member to the same synthesized struct name.
+expected_stdout = "1\n2\n3\n110\n120\n4\n"

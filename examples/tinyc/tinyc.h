@@ -313,6 +313,11 @@ struct Stmt {
     Type  decl_type;
     string decl_name;
     Expr *decl_init;
+    // For function-local `static` variables: when non-empty, this is the
+    // mangled module-scope symbol name registered in `program->globals`.
+    // The emitter treats the local as an alias for that global instead
+    // of allocating an `alloca` slot.
+    string decl_static_global_sym;
     // ST_IF / ST_WHILE / ST_FOR / ST_SWITCH
     Expr *cond;
     VecStmtPtr then_body;

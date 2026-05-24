@@ -3918,6 +3918,18 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             sy->name = st->decl_name;
             sy->type = st->decl_type;
 
+            // Function-local `static`: the parser has already registered
+            // a module-scope global for this declaration. Bind the local
+            // name to that global; do not allocate a stack slot and do
+            // not re-emit the initializer (the Global captures it).
+            if (st->decl_static_global_sym.size > 0) {
+                sy->is_global = true;
+                sy->global_sym = st->decl_static_global_sym;
+                sy->next = sc->head;
+                sc->head = sy;
+                return;
+            }
+
             // Unsized `T arr[] = {a, b, ...}`: infer length from the
             // aggregate initializer's argument count.
             if ((st->decl_type.kind == TY_ARRAY_I32 ||
