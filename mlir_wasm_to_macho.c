@@ -500,18 +500,27 @@ static bool type_arity(const WasmModule *m, uint32_t type_idx,
 }
 
 // Variant of type_arity that also writes the param valtype bytes into
-// `out_param_types[0..np)`. Caller must provide an array large enough.
+// `out_param_types[0..np)` and the result valtype bytes into
+// `out_result_types[0..nr)`. Either array pointer may be NULL.
 static bool type_arity_params(const WasmModule *m, uint32_t type_idx,
                               uint32_t *out_np, uint32_t *out_nr,
-                              uint8_t *out_param_types) {
+                              uint8_t *out_param_types,
+                              uint8_t *out_result_types) {
     if (type_idx >= m->n_types) return false;
     Rd s = { m->types_blob, m->types_blob + (1 << 30), false };
     for (uint32_t i = 0; i <= type_idx; i++) {
         rd_u8(&s); // 0x60
         uint32_t np = (uint32_t)rd_uleb(&s);
         if (i == type_idx) {
-            for (uint32_t k = 0; k < np; k++) out_param_types[k] = rd_u8(&s);
+            for (uint32_t k = 0; k < np; k++) {
+                uint8_t v = rd_u8(&s);
+                if (out_param_types) out_param_types[k] = v;
+            }
             uint32_t nr = (uint32_t)rd_uleb(&s);
+            for (uint32_t k = 0; k < nr; k++) {
+                uint8_t v = rd_u8(&s);
+                if (out_result_types) out_result_types[k] = v;
+            }
             *out_np = np; *out_nr = nr;
             return true;
         }
@@ -865,6 +874,180 @@ static uint32_t arm64_b(int32_t off_bytes) {
     return 0x14000000u | ((uint32_t)imm26 & 0x03ffffffu);
 }
 
+// ---- ARM64 FP/SIMD scalar encoders ---------------------------------------
+// All operate on the lower lane of V0..V31 (Dn = double, Sn = float).
+
+// LDR Dt, [Xn|SP, #pimm]  pimm scaled by 8.
+static uint32_t arm64_ldr_d_xn(uint32_t rt, uint32_t rn, uint32_t imm) {
+    return 0xfd400000u | (((imm >> 3) & 0xfffu) << 10)
+         | ((rn & 0x1fu) << 5) | (rt & 0x1fu);
+}
+// STR Dt, [Xn|SP, #pimm].
+static uint32_t arm64_str_d_xn(uint32_t rt, uint32_t rn, uint32_t imm) {
+    return 0xfd000000u | (((imm >> 3) & 0xfffu) << 10)
+         | ((rn & 0x1fu) << 5) | (rt & 0x1fu);
+}
+// LDR St, [Xn|SP, #pimm]  pimm scaled by 4.
+static uint32_t arm64_ldr_s_xn(uint32_t rt, uint32_t rn, uint32_t imm) {
+    return 0xbd400000u | (((imm >> 2) & 0xfffu) << 10)
+         | ((rn & 0x1fu) << 5) | (rt & 0x1fu);
+}
+// STR St, [Xn|SP, #pimm].
+static uint32_t arm64_str_s_xn(uint32_t rt, uint32_t rn, uint32_t imm) {
+    return 0xbd000000u | (((imm >> 2) & 0xfffu) << 10)
+         | ((rn & 0x1fu) << 5) | (rt & 0x1fu);
+}
+static uint32_t arm64_ldr_d_sp(uint32_t rt, uint32_t imm) {
+    return arm64_ldr_d_xn(rt, 31, imm);
+}
+static uint32_t arm64_str_d_sp(uint32_t rt, uint32_t imm) {
+    return arm64_str_d_xn(rt, 31, imm);
+}
+static uint32_t arm64_ldr_s_sp(uint32_t rt, uint32_t imm) {
+    return arm64_ldr_s_xn(rt, 31, imm);
+}
+static uint32_t arm64_str_s_sp(uint32_t rt, uint32_t imm) {
+    return arm64_str_s_xn(rt, 31, imm);
+}
+// FMOV Dd, Xn — move 64-bit GPR into D-reg, bit-preserving.
+static uint32_t arm64_fmov_d_x(uint32_t rd, uint32_t rn) {
+    return 0x9e670000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+// FMOV Sd, Wn — move 32-bit GPR into S-reg, bit-preserving.
+static uint32_t arm64_fmov_s_w(uint32_t rd, uint32_t rn) {
+    return 0x1e270000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+// FMOV Xd, Dn — bit-preserving reverse (used by reinterpret).
+static uint32_t arm64_fmov_x_d(uint32_t rd, uint32_t rn) {
+    return 0x9e660000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+// FMOV Wd, Sn — bit-preserving reverse for 32-bit.
+static uint32_t arm64_fmov_w_s(uint32_t rd, uint32_t rn) {
+    return 0x1e260000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+
+// Binary scalar FP arithmetic (Dd = Dn OP Dm or Sd = Sn OP Sm).
+//   FADD d/s, FSUB d/s, FMUL d/s, FDIV d/s.
+static uint32_t arm64_fadd_d(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x1e602800u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+static uint32_t arm64_fsub_d(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x1e603800u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+static uint32_t arm64_fmul_d(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x1e600800u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+static uint32_t arm64_fdiv_d(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x1e601800u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+static uint32_t arm64_fadd_s(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x1e202800u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+static uint32_t arm64_fsub_s(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x1e203800u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+static uint32_t arm64_fmul_s(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x1e200800u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+static uint32_t arm64_fdiv_s(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x1e201800u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+
+// Unary scalar FP (FABS, FNEG, FSQRT).
+static uint32_t arm64_fabs_d(uint32_t rd, uint32_t rn) {
+    return 0x1e60c000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_fneg_d(uint32_t rd, uint32_t rn) {
+    return 0x1e614000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_fsqrt_d(uint32_t rd, uint32_t rn) {
+    return 0x1e61c000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_fabs_s(uint32_t rd, uint32_t rn) {
+    return 0x1e20c000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_fneg_s(uint32_t rd, uint32_t rn) {
+    return 0x1e214000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_fsqrt_s(uint32_t rd, uint32_t rn) {
+    return 0x1e21c000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+
+// FCMP Dn, Dm   /  FCMP Sn, Sm.
+static uint32_t arm64_fcmp_d(uint32_t rn, uint32_t rm) {
+    return 0x1e602000u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5);
+}
+static uint32_t arm64_fcmp_s(uint32_t rn, uint32_t rm) {
+    return 0x1e202000u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5);
+}
+
+// FP↔int conversions. All use round-toward-zero (FCVTZS/FCVTZU) for
+// truncation, which matches the wasm trunc_* semantics.
+static uint32_t arm64_fcvtzs_w_d(uint32_t rd, uint32_t rn) {
+    return 0x1e780000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_fcvtzs_x_d(uint32_t rd, uint32_t rn) {
+    return 0x9e780000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_fcvtzs_w_s(uint32_t rd, uint32_t rn) {
+    return 0x1e380000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_fcvtzs_x_s(uint32_t rd, uint32_t rn) {
+    return 0x9e380000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_fcvtzu_w_d(uint32_t rd, uint32_t rn) {
+    return 0x1e790000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_fcvtzu_x_d(uint32_t rd, uint32_t rn) {
+    return 0x9e790000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_fcvtzu_w_s(uint32_t rd, uint32_t rn) {
+    return 0x1e390000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_fcvtzu_x_s(uint32_t rd, uint32_t rn) {
+    return 0x9e390000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_scvtf_d_w(uint32_t rd, uint32_t rn) {
+    return 0x1e620000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_scvtf_s_w(uint32_t rd, uint32_t rn) {
+    return 0x1e220000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_scvtf_d_x(uint32_t rd, uint32_t rn) {
+    return 0x9e620000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_scvtf_s_x(uint32_t rd, uint32_t rn) {
+    return 0x9e220000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_ucvtf_d_w(uint32_t rd, uint32_t rn) {
+    return 0x1e630000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_ucvtf_s_w(uint32_t rd, uint32_t rn) {
+    return 0x1e230000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_ucvtf_d_x(uint32_t rd, uint32_t rn) {
+    return 0x9e630000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_ucvtf_s_x(uint32_t rd, uint32_t rn) {
+    return 0x9e230000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+
+// FCVT: precision change. FCVT Sd, Dn  (demote d→s);  FCVT Dd, Sn (promote).
+static uint32_t arm64_fcvt_s_d(uint32_t rd, uint32_t rn) {
+    return 0x1e624000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+static uint32_t arm64_fcvt_d_s(uint32_t rd, uint32_t rn) {
+    return 0x1e22c000u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+
 // Materialize the effective address of a wasm load/store entirely into
 // x10. Assumes the popped wasm address (i32) is in w0. The caller then
 // uses #0 as the immediate offset on the LDR/STR.
@@ -963,6 +1146,10 @@ typedef struct {
     CallReloc *relocs;
     size_t     n_relocs, cap_relocs;
     uint32_t   text_off;  // assigned during layout
+    uint32_t   adrp_off;  // byte offset (within code) of program-entry
+                          // ADRP x27, page_of(globals_vmaddr); or
+                          // UINT32_MAX if this function is not _start
+                          // or the module has no globals/memory.
     bool       emitted;
 } EmittedFunc;
 
@@ -1186,10 +1373,11 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
     uint8_t *local_types = (uint8_t *)calloc(
         n_locals_total ? n_locals_total : 1, 1);
     uint8_t param_types_buf[8] = {0};
+    uint8_t result_type_buf[1] = {0};
     {
         uint32_t np_check, nr_check;
         if (!type_arity_params(wm, wf->type_idx, &np_check, &nr_check,
-                               param_types_buf)) {
+                               param_types_buf, result_type_buf)) {
             free(local_types); return false;
         }
         for (uint32_t k = 0; k < np_self; k++)
@@ -1214,15 +1402,17 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
     uint32_t fidx_combined = wm->n_imported_funcs + fidx;
     bool is_program_entry = (fidx_combined == wm->start_export_idx);
     if (is_program_entry && (wm->has_memory || wm->n_globals > 0)) {
-        // page_of(__DATA) relative to page_of(_start) (both are
-        // 4 KiB-aligned values, _start lies on the first page of
-        // __TEXT in current layouts so the diff is just
-        // (DATA_VM_BASE - TEXT_VM_BASE) / 4096 = 8).
+        // page_of(__DATA) relative to page_of(_start). Both targets
+        // are 4 KiB-aligned. The actual addresses are finalised after
+        // all functions are emitted (we need the exact text size to
+        // size __TEXT and place __DATA_CONST / __DATA), so we just
+        // record the offset of the ADRP instruction here and patch
+        // its immediate in a post-pass.
         uint64_t pc_page     = wm->entry_vmaddr & ~0xfffULL;
         uint64_t target_page = wm->globals_vmaddr & ~0xfffULL;
         int64_t  rel_pages   = (int64_t)(target_page - pc_page) >> 12;
         uint32_t off_in_page = (uint32_t)(wm->globals_vmaddr & 0xfffULL);
-        // x27 = page_of(__DATA) + off_in_page  =  globals_vmaddr.
+        e->adrp_off = (uint32_t)e->code.len;
         emit_word(&e->code, arm64_adrp(27, rel_pages));
         if (off_in_page != 0) {
             emit_word(&e->code, arm64_add_x_imm(27, 27, (uint16_t)off_in_page));
@@ -1260,14 +1450,23 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
         emit_word(&e->code, arm64_mov_x_sp(25));
     }
 
-    // Copy params (in x0..x7) into local slots 0..np_self-1, and
-    // zero-initialise the declared locals (WASM spec requires).
-    // Local i lives at [x25, #(n_locals_total - i) * 16].
-    for (uint32_t k = 0; k < np_self; k++) {
-        uint32_t off = (n_locals_total - k) * 16;
-        // Store the full 64-bit register; an i32 param's low 4 bytes
-        // still occupy the slot correctly.
-        emit_word(&e->code, arm64_str_x_xn(k, 25, off));
+    // Copy params (received in x0..x7 / d0..d7 via the ARM64 PCS) into
+    // local slots 0..np_self-1, and zero-initialise the declared locals
+    // (WASM spec requires).  Local i lives at [x25, #(n_locals_total - i) * 16].
+    // The PCS uses *independent* sequences for GPR and FPR args, so we
+    // walk left-to-right tracking each.
+    {
+        uint32_t gpr_idx = 0, fpr_idx = 0;
+        for (uint32_t k = 0; k < np_self; k++) {
+            uint32_t off = (n_locals_total - k) * 16;
+            uint8_t t = param_types_buf[k];
+            if (t == 0x7c) // f64
+                emit_word(&e->code, arm64_str_d_xn(fpr_idx++, 25, off));
+            else if (t == 0x7d) // f32
+                emit_word(&e->code, arm64_str_s_xn(fpr_idx++, 25, off));
+            else // i32/i64 — store the full 64-bit register
+                emit_word(&e->code, arm64_str_x_xn(gpr_idx++, 25, off));
+        }
     }
     for (uint32_t k = 0; k < n_decl_locals; k++) {
         uint32_t li = np_self + k;
@@ -1308,7 +1507,14 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
     // the fall-through end-of-function). When the function has locals
     // we restore the caller's x25 from the bottom of our local slab.
     #define EMIT_EPILOGUE() do {                                          \
-        if (nr_self == 1) emit_word(&e->code, arm64_ldr_x_sp(0, 0));      \
+        if (nr_self == 1) {                                               \
+            if (result_type_buf[0] == 0x7c)                               \
+                emit_word(&e->code, arm64_ldr_d_sp(0, 0));                \
+            else if (result_type_buf[0] == 0x7d)                          \
+                emit_word(&e->code, arm64_ldr_s_sp(0, 0));                \
+            else                                                          \
+                emit_word(&e->code, arm64_ldr_x_sp(0, 0));                \
+        }                                                                 \
         if (n_locals_total > 0)                                           \
             emit_word(&e->code, arm64_ldr_x_xn(25, 25, 0));               \
         emit_word(&e->code, arm64_mov_sp_fp());                           \
@@ -1543,23 +1749,24 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                     free(local_types); return false;
                 }
                 uint32_t off = (n_locals_total - li) * 16;
-                bool is_i64 = (local_types[li] == 0x7e);
+                bool is_64 = (local_types[li] == 0x7e) // i64
+                          || (local_types[li] == 0x7c); // f64
                 if (op == 0x20) {                      // local.get
-                    if (is_i64) emit_word(&e->code, arm64_ldr_x_xn(0, 25, off));
-                    else        emit_word(&e->code, arm64_ldr_w_xn(0, 25, off));
+                    if (is_64) emit_word(&e->code, arm64_ldr_x_xn(0, 25, off));
+                    else       emit_word(&e->code, arm64_ldr_w_xn(0, 25, off));
                     emit_word(&e->code, arm64_sub_sp_imm(16));
-                    if (is_i64) emit_word(&e->code, arm64_str_x_sp(0, 0));
-                    else        emit_word(&e->code, arm64_str_w_sp(0, 0));
+                    if (is_64) emit_word(&e->code, arm64_str_x_sp(0, 0));
+                    else       emit_word(&e->code, arm64_str_w_sp(0, 0));
                     value_depth += 1;
                 } else {                              // set / tee
-                    if (is_i64) emit_word(&e->code, arm64_ldr_x_sp(0, 0));
-                    else        emit_word(&e->code, arm64_ldr_w_sp(0, 0));
+                    if (is_64) emit_word(&e->code, arm64_ldr_x_sp(0, 0));
+                    else       emit_word(&e->code, arm64_ldr_w_sp(0, 0));
                     if (op == 0x21) {                  // set: pop
                         emit_word(&e->code, arm64_add_sp_imm(16));
                         value_depth -= 1;
                     }
-                    if (is_i64) emit_word(&e->code, arm64_str_x_xn(0, 25, off));
-                    else        emit_word(&e->code, arm64_str_w_xn(0, 25, off));
+                    if (is_64) emit_word(&e->code, arm64_str_x_xn(0, 25, off));
+                    else       emit_word(&e->code, arm64_str_w_xn(0, 25, off));
                 }
                 break;
             }
@@ -1807,10 +2014,18 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
             case 0x10: { // call funcidx
                 uint32_t cidx = (uint32_t)rd_uleb(&r);
                 uint32_t np = 0, nr = 0;
+                uint8_t param_types[8] = {0};
+                uint8_t result_types[1] = {0};
                 if (cidx < wm->n_imported_funcs) {
-                    if (cidx == wm->import_idx_proc_exit) { np = 1; nr = 0; }
+                    if (cidx == wm->import_idx_proc_exit) {
+                        np = 1; nr = 0;
+                        param_types[0] = 0x7f;
+                    }
                     else if (cidx == wm->import_idx_fd_write) {
                         np = 4; nr = 1;
+                        param_types[0] = 0x7f; param_types[1] = 0x7f;
+                        param_types[2] = 0x7f; param_types[3] = 0x7f;
+                        result_types[0] = 0x7f;
                     }
                     else {
                         fprintf(stderr,
@@ -1825,7 +2040,9 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                                 "wasm->macho: call out of range: %u\n", cidx);
                         free(local_types); return false;
                     }
-                    if (!type_arity(wm, wm->funcs[cfidx].type_idx, &np, &nr)) {
+                    if (!type_arity_params(wm, wm->funcs[cfidx].type_idx,
+                                           &np, &nr,
+                                           param_types, result_types)) {
                         free(local_types); return false;
                     }
                 }
@@ -1835,11 +2052,51 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                             np);
                     free(local_types); return false;
                 }
-                // Pop args from CPU stack into x(np-1)..x0 (top of WASM
-                // stack -> highest-numbered arg). We pop the full
-                // 64-bit slot so i64 args are handled correctly.
+                if (nr > 1) {
+                    fprintf(stderr,
+                            "wasm->macho: call with %u results not supported\n",
+                            nr);
+                    free(local_types); return false;
+                }
+                // ARM64 PCS: GPRs (x0..x7) and FPRs (d0..d7) are
+                // *independent* sequences. Assign each param its
+                // register *first* by walking left-to-right, then pop
+                // them off the value stack in right-to-left order.
+                uint8_t arg_reg[8] = {0};
+                uint8_t arg_is_fp[8] = {0};
+                uint32_t n_gpr = 0, n_fpr = 0;
+                for (uint32_t k = 0; k < np; k++) {
+                    uint8_t t = param_types[k];
+                    bool fp = (t == 0x7c) || (t == 0x7d);
+                    arg_is_fp[k] = fp;
+                    if (fp) {
+                        if (n_fpr >= 8) {
+                            fprintf(stderr,
+                                    "wasm->macho: too many fp args\n");
+                            free(local_types); return false;
+                        }
+                        arg_reg[k] = (uint8_t)n_fpr++;
+                    } else {
+                        if (n_gpr >= 8) {
+                            fprintf(stderr,
+                                    "wasm->macho: too many int args\n");
+                            free(local_types); return false;
+                        }
+                        arg_reg[k] = (uint8_t)n_gpr++;
+                    }
+                }
+                // Pop args off the CPU stack from top (= last param)
+                // down to bottom (= first param), loading each into
+                // its assigned register.
                 for (int k = (int)np - 1; k >= 0; k--) {
-                    emit_word(&e->code, arm64_ldr_x_sp((uint32_t)k, 0));
+                    uint8_t t = param_types[k];
+                    uint32_t r_idx = arg_reg[k];
+                    if (t == 0x7c)
+                        emit_word(&e->code, arm64_ldr_d_sp(r_idx, 0));
+                    else if (t == 0x7d)
+                        emit_word(&e->code, arm64_ldr_s_sp(r_idx, 0));
+                    else
+                        emit_word(&e->code, arm64_ldr_x_sp(r_idx, 0));
                     emit_word(&e->code, arm64_add_sp_imm(16));
                 }
                 // Place a `bl` placeholder.
@@ -1852,12 +2109,13 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                 emit_word(&e->code, arm64_bl(0));
                 if (nr == 1) {
                     emit_word(&e->code, arm64_sub_sp_imm(16));
-                    emit_word(&e->code, arm64_str_x_sp(0, 0));
-                } else if (nr > 1) {
-                    fprintf(stderr,
-                            "wasm->macho: call with %u results not supported\n",
-                            nr);
-                    free(local_types); return false;
+                    uint8_t rt = result_types[0];
+                    if (rt == 0x7c)
+                        emit_word(&e->code, arm64_str_d_sp(0, 0));
+                    else if (rt == 0x7d)
+                        emit_word(&e->code, arm64_str_s_sp(0, 0));
+                    else
+                        emit_word(&e->code, arm64_str_x_sp(0, 0));
                 }
                 value_depth = value_depth - np + nr;
                 break;
@@ -2108,6 +2366,296 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                 break;
             }
 
+            // --- f32.const / f64.const: read raw IEEE-754 bytes and
+            // push as bit-identical 32-bit / 64-bit value.
+            case 0x43: { // f32.const (4-byte LE)
+                if (r.p + 4 > r.end) { r.overflow = true; break; }
+                uint32_t bits = (uint32_t)r.p[0]
+                              | ((uint32_t)r.p[1] << 8)
+                              | ((uint32_t)r.p[2] << 16)
+                              | ((uint32_t)r.p[3] << 24);
+                r.p += 4;
+                emit_mov_w_imm32(&e->code, 0, bits);
+                emit_word(&e->code, arm64_sub_sp_imm(16));
+                emit_word(&e->code, arm64_str_w_sp(0, 0));
+                value_depth += 1;
+                break;
+            }
+            case 0x44: { // f64.const (8-byte LE)
+                if (r.p + 8 > r.end) { r.overflow = true; break; }
+                uint64_t bits = 0;
+                for (int i = 0; i < 8; i++)
+                    bits |= ((uint64_t)r.p[i]) << (i * 8);
+                r.p += 8;
+                emit_mov_x_imm64(&e->code, 0, bits);
+                emit_word(&e->code, arm64_sub_sp_imm(16));
+                emit_word(&e->code, arm64_str_x_sp(0, 0));
+                value_depth += 1;
+                break;
+            }
+
+            // --- f32 / f64 comparisons (2 pop, 1 push i32).
+            //   FCMP sets NZCV; CSET emits 1 when COND holds, else 0.
+            // The COND used is the *inverse* of the wasm op, matching
+            // the i32 cmp handler pattern.
+            case 0x5b:   // f32.eq    cond_inv = NE = 1
+            case 0x5c:   // f32.ne    cond_inv = EQ = 0
+            case 0x5d:   // f32.lt    cond_inv = PL = 5  (N==0)  -- NOTE: see below
+            case 0x5e:   // f32.gt    cond_inv = LE = 0xd
+            case 0x5f:   // f32.le    cond_inv = GT = 0xc
+            case 0x60:   // f32.ge    cond_inv = LT = 0xb
+            case 0x61:   // f64.eq
+            case 0x62:   // f64.ne
+            case 0x63:   // f64.lt
+            case 0x64:   // f64.gt
+            case 0x65:   // f64.le
+            case 0x66: { // f64.ge
+                bool is_double = (op >= 0x61);
+                int sub = (op >= 0x61) ? (op - 0x61) : (op - 0x5b);
+                // For floating-point comparisons we need ordered
+                // semantics: lt/gt/le/ge must return 0 when either
+                // operand is NaN; eq must return 0; ne must return 1.
+                // ARM64 FCMP sets NZCV with V=1 on unordered (NaN).
+                // The conditions LT/LE/GT/GE on FP use special codes:
+                //   FP-LT = "MI" (N==1) = cond 4
+                //   FP-LE = "LS" (C==0 || Z==1) = cond 9
+                //   FP-GT = "GT" (Z==0 && N==V) = cond 0xc
+                //   FP-GE = "GE" (N==V) = cond 0xa
+                //   FP-EQ = "EQ" = cond 0
+                //   FP-NE = "NE" = cond 1
+                // (See ARM ARM table "Condition flags for FP".)
+                // We invert because the existing cset helper uses the
+                // *inverse* of the desired truth value.
+                uint32_t cond_for_true;
+                switch (sub) {
+                    case 0: cond_for_true = 0;    break; // eq
+                    case 1: cond_for_true = 1;    break; // ne
+                    case 2: cond_for_true = 4;    break; // lt (MI)
+                    case 3: cond_for_true = 0xc;  break; // gt (GT)
+                    case 4: cond_for_true = 9;    break; // le (LS)
+                    case 5: cond_for_true = 0xa;  break; // ge (GE)
+                    default: cond_for_true = 0;   break;
+                }
+                if (is_double) {
+                    emit_word(&e->code, arm64_ldr_d_sp(1, 0));
+                    emit_word(&e->code, arm64_ldr_d_sp(0, 16));
+                    emit_word(&e->code, arm64_fcmp_d(0, 1));
+                } else {
+                    emit_word(&e->code, arm64_ldr_s_sp(1, 0));
+                    emit_word(&e->code, arm64_ldr_s_sp(0, 16));
+                    emit_word(&e->code, arm64_fcmp_s(0, 1));
+                }
+                // cset Wd, cond  encodes the *inverse* of the desired
+                // condition, matching the i32-cmp scheme used above.
+                uint32_t cond_inv = cond_for_true ^ 1u;
+                emit_word(&e->code, arm64_cset_w(0, cond_inv));
+                emit_word(&e->code, arm64_add_sp_imm(16));
+                emit_word(&e->code, arm64_str_w_sp(0, 0));
+                value_depth -= 1;
+                break;
+            }
+
+            // --- f32 binary ops: add / sub / mul / div.
+            case 0x92:   // f32.add
+            case 0x93:   // f32.sub
+            case 0x94:   // f32.mul
+            case 0x95: { // f32.div
+                emit_word(&e->code, arm64_ldr_s_sp(1, 0));
+                emit_word(&e->code, arm64_ldr_s_sp(0, 16));
+                uint32_t insn;
+                switch (op) {
+                    case 0x92: insn = arm64_fadd_s(0, 0, 1); break;
+                    case 0x93: insn = arm64_fsub_s(0, 0, 1); break;
+                    case 0x94: insn = arm64_fmul_s(0, 0, 1); break;
+                    case 0x95: insn = arm64_fdiv_s(0, 0, 1); break;
+                    default: insn = 0; break;
+                }
+                emit_word(&e->code, insn);
+                emit_word(&e->code, arm64_add_sp_imm(16));
+                emit_word(&e->code, arm64_str_s_sp(0, 0));
+                value_depth -= 1;
+                break;
+            }
+
+            // --- f32 unary: abs / neg / sqrt.
+            case 0x8b:   // f32.abs
+            case 0x8c:   // f32.neg
+            case 0x91: { // f32.sqrt
+                emit_word(&e->code, arm64_ldr_s_sp(0, 0));
+                uint32_t insn;
+                switch (op) {
+                    case 0x8b: insn = arm64_fabs_s (0, 0); break;
+                    case 0x8c: insn = arm64_fneg_s (0, 0); break;
+                    case 0x91: insn = arm64_fsqrt_s(0, 0); break;
+                    default: insn = 0; break;
+                }
+                emit_word(&e->code, insn);
+                emit_word(&e->code, arm64_str_s_sp(0, 0));
+                break;
+            }
+
+            // --- f64 binary ops: add / sub / mul / div.
+            case 0xa0:   // f64.add
+            case 0xa1:   // f64.sub
+            case 0xa2:   // f64.mul
+            case 0xa3: { // f64.div
+                emit_word(&e->code, arm64_ldr_d_sp(1, 0));
+                emit_word(&e->code, arm64_ldr_d_sp(0, 16));
+                uint32_t insn;
+                switch (op) {
+                    case 0xa0: insn = arm64_fadd_d(0, 0, 1); break;
+                    case 0xa1: insn = arm64_fsub_d(0, 0, 1); break;
+                    case 0xa2: insn = arm64_fmul_d(0, 0, 1); break;
+                    case 0xa3: insn = arm64_fdiv_d(0, 0, 1); break;
+                    default: insn = 0; break;
+                }
+                emit_word(&e->code, insn);
+                emit_word(&e->code, arm64_add_sp_imm(16));
+                emit_word(&e->code, arm64_str_d_sp(0, 0));
+                value_depth -= 1;
+                break;
+            }
+
+            // --- f64 unary: abs / neg / sqrt.
+            case 0x99:   // f64.abs
+            case 0x9a:   // f64.neg
+            case 0x9f: { // f64.sqrt
+                emit_word(&e->code, arm64_ldr_d_sp(0, 0));
+                uint32_t insn;
+                switch (op) {
+                    case 0x99: insn = arm64_fabs_d (0, 0); break;
+                    case 0x9a: insn = arm64_fneg_d (0, 0); break;
+                    case 0x9f: insn = arm64_fsqrt_d(0, 0); break;
+                    default: insn = 0; break;
+                }
+                emit_word(&e->code, insn);
+                emit_word(&e->code, arm64_str_d_sp(0, 0));
+                break;
+            }
+
+            // --- FP→int conversions (round-toward-zero).
+            case 0xa8: { // i32.trunc_f32_s
+                emit_word(&e->code, arm64_ldr_s_sp(0, 0));
+                emit_word(&e->code, arm64_fcvtzs_w_s(0, 0));
+                emit_word(&e->code, arm64_str_w_sp(0, 0));
+                break;
+            }
+            case 0xa9: { // i32.trunc_f32_u
+                emit_word(&e->code, arm64_ldr_s_sp(0, 0));
+                emit_word(&e->code, arm64_fcvtzu_w_s(0, 0));
+                emit_word(&e->code, arm64_str_w_sp(0, 0));
+                break;
+            }
+            case 0xaa: { // i32.trunc_f64_s
+                emit_word(&e->code, arm64_ldr_d_sp(0, 0));
+                emit_word(&e->code, arm64_fcvtzs_w_d(0, 0));
+                emit_word(&e->code, arm64_str_w_sp(0, 0));
+                break;
+            }
+            case 0xab: { // i32.trunc_f64_u
+                emit_word(&e->code, arm64_ldr_d_sp(0, 0));
+                emit_word(&e->code, arm64_fcvtzu_w_d(0, 0));
+                emit_word(&e->code, arm64_str_w_sp(0, 0));
+                break;
+            }
+            case 0xae: { // i64.trunc_f32_s
+                emit_word(&e->code, arm64_ldr_s_sp(0, 0));
+                emit_word(&e->code, arm64_fcvtzs_x_s(0, 0));
+                emit_word(&e->code, arm64_str_x_sp(0, 0));
+                break;
+            }
+            case 0xaf: { // i64.trunc_f32_u
+                emit_word(&e->code, arm64_ldr_s_sp(0, 0));
+                emit_word(&e->code, arm64_fcvtzu_x_s(0, 0));
+                emit_word(&e->code, arm64_str_x_sp(0, 0));
+                break;
+            }
+            case 0xb0: { // i64.trunc_f64_s
+                emit_word(&e->code, arm64_ldr_d_sp(0, 0));
+                emit_word(&e->code, arm64_fcvtzs_x_d(0, 0));
+                emit_word(&e->code, arm64_str_x_sp(0, 0));
+                break;
+            }
+            case 0xb1: { // i64.trunc_f64_u
+                emit_word(&e->code, arm64_ldr_d_sp(0, 0));
+                emit_word(&e->code, arm64_fcvtzu_x_d(0, 0));
+                emit_word(&e->code, arm64_str_x_sp(0, 0));
+                break;
+            }
+
+            // --- int→FP conversions.
+            case 0xb2: { // f32.convert_i32_s
+                emit_word(&e->code, arm64_ldr_w_sp(0, 0));
+                emit_word(&e->code, arm64_scvtf_s_w(0, 0));
+                emit_word(&e->code, arm64_str_s_sp(0, 0));
+                break;
+            }
+            case 0xb3: { // f32.convert_i32_u
+                emit_word(&e->code, arm64_ldr_w_sp(0, 0));
+                emit_word(&e->code, arm64_ucvtf_s_w(0, 0));
+                emit_word(&e->code, arm64_str_s_sp(0, 0));
+                break;
+            }
+            case 0xb4: { // f32.convert_i64_s
+                emit_word(&e->code, arm64_ldr_x_sp(0, 0));
+                emit_word(&e->code, arm64_scvtf_s_x(0, 0));
+                emit_word(&e->code, arm64_str_s_sp(0, 0));
+                break;
+            }
+            case 0xb5: { // f32.convert_i64_u
+                emit_word(&e->code, arm64_ldr_x_sp(0, 0));
+                emit_word(&e->code, arm64_ucvtf_s_x(0, 0));
+                emit_word(&e->code, arm64_str_s_sp(0, 0));
+                break;
+            }
+            case 0xb7: { // f64.convert_i32_s
+                emit_word(&e->code, arm64_ldr_w_sp(0, 0));
+                emit_word(&e->code, arm64_scvtf_d_w(0, 0));
+                emit_word(&e->code, arm64_str_d_sp(0, 0));
+                break;
+            }
+            case 0xb8: { // f64.convert_i32_u
+                emit_word(&e->code, arm64_ldr_w_sp(0, 0));
+                emit_word(&e->code, arm64_ucvtf_d_w(0, 0));
+                emit_word(&e->code, arm64_str_d_sp(0, 0));
+                break;
+            }
+            case 0xb9: { // f64.convert_i64_s
+                emit_word(&e->code, arm64_ldr_x_sp(0, 0));
+                emit_word(&e->code, arm64_scvtf_d_x(0, 0));
+                emit_word(&e->code, arm64_str_d_sp(0, 0));
+                break;
+            }
+            case 0xba: { // f64.convert_i64_u
+                emit_word(&e->code, arm64_ldr_x_sp(0, 0));
+                emit_word(&e->code, arm64_ucvtf_d_x(0, 0));
+                emit_word(&e->code, arm64_str_d_sp(0, 0));
+                break;
+            }
+
+            // --- f32 ↔ f64 precision conversions.
+            case 0xb6: { // f32.demote_f64
+                emit_word(&e->code, arm64_ldr_d_sp(0, 0));
+                emit_word(&e->code, arm64_fcvt_s_d(0, 0));
+                emit_word(&e->code, arm64_str_s_sp(0, 0));
+                break;
+            }
+            case 0xbb: { // f64.promote_f32
+                emit_word(&e->code, arm64_ldr_s_sp(0, 0));
+                emit_word(&e->code, arm64_fcvt_d_s(0, 0));
+                emit_word(&e->code, arm64_str_d_sp(0, 0));
+                break;
+            }
+
+            // --- Bit-identical reinterprets (no-op for our slot layout).
+            // The bits are already in place; we just acknowledge them.
+            case 0xbc:   // i32.reinterpret_f32
+            case 0xbd:   // i64.reinterpret_f64
+            case 0xbe:   // f32.reinterpret_i32
+            case 0xbf: { // f64.reinterpret_i64
+                break;
+            }
+
             default:
                 fprintf(stderr,
                         "wasm->macho: unsupported opcode 0x%02x in func %u\n",
@@ -2273,12 +2821,8 @@ static void patch_branch(EmittedFunc *e, uint32_t target_text_off,
 #define VM_PROT_EXECUTE        4u
 
 #define TEXT_VM_BASE           0x100000000ULL
-#define DATA_CONST_VM_BASE     0x100004000ULL
-#define DATA_VM_BASE           0x100008000ULL
 #define TEXT_FILE_BASE         0u
-#define DATA_CONST_FILE_BASE   16384u
-#define DATA_FILE_BASE         32768u
-#define VMSEG_SIZE             0x4000u  // 16 KB per non-__DATA segment
+#define VMSEG_SIZE             0x4000u  // 16 KB minimum mach-o page
 
 // =============================================================================
 // The main translator.
@@ -2330,11 +2874,16 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     }
     uint32_t data_seg_size32 = (uint32_t)data_seg_vmsize;
 
-    wm.globals_vmaddr = DATA_VM_BASE;
-    wm.linmem_vmaddr  = DATA_VM_BASE + globals_padded;
+    wm.globals_vmaddr = TEXT_VM_BASE + 2 * VMSEG_SIZE;
+    wm.linmem_vmaddr  = wm.globals_vmaddr + globals_padded;
+    // NOTE: globals_vmaddr / linmem_vmaddr above are *placeholders*
+    // used during function emission so the prologue ADRP gets a
+    // well-formed (if eventually wrong) immediate. They are
+    // finalised below after the actual __TEXT size is known, and
+    // the ADRP is then patched in-place.
 
-    uint64_t linkedit_vm_base   = DATA_VM_BASE + (has_data_seg ? data_seg_vmsize : 0);
-    uint32_t linkedit_file_base = DATA_FILE_BASE + (has_data_seg ? data_seg_size32 : 0);
+    uint64_t linkedit_vm_base   = 0; // finalised after text_seg_size known
+    uint32_t linkedit_file_base = 0;
 
     // ncmds / sizeofcmds. Adding __DATA contributes one LC_SEGMENT_64
     // of size 72 (segment header) + 80 (one section header) = 152.
@@ -2392,6 +2941,7 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     // reachable defined function. We index by combined func space.
     // -----------------------------------------------------------------
     EmittedFunc *efs = (EmittedFunc *)calloc(n_total, sizeof(EmittedFunc));
+    for (uint32_t i = 0; i < n_total; i++) efs[i].adrp_off = UINT32_MAX;
 
     if (reachable[wm.import_idx_proc_exit]) {
         emit_proc_exit_shim(&efs[wm.import_idx_proc_exit]);
@@ -2461,6 +3011,53 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     const uint32_t got_size = n_stubs * 8;
 
     // -----------------------------------------------------------------
+    // Finalise segment layout now that we know the real text size.
+    //
+    // __TEXT segment file/vm size = round_up(text_section_off + text +
+    //                                        stubs + cstring, 16 KiB)
+    // and never below VMSEG_SIZE so the simplest macho_exit case is
+    // unchanged byte-for-byte.
+    // __DATA_CONST and __DATA each occupy one VMSEG_SIZE-aligned slab
+    // right after __TEXT in both VM and file space.
+    // -----------------------------------------------------------------
+    uint32_t text_seg_end = cstring_off + cstring_size;
+    uint32_t text_seg_size = (text_seg_end + (VMSEG_SIZE - 1u))
+                             & ~(VMSEG_SIZE - 1u);
+    if (text_seg_size < VMSEG_SIZE) text_seg_size = VMSEG_SIZE;
+    const uint64_t data_const_vm_base   = TEXT_VM_BASE + text_seg_size;
+    const uint32_t data_const_file_base = text_seg_size;
+    const uint64_t data_vm_base         = data_const_vm_base + VMSEG_SIZE;
+    const uint32_t data_file_base       = data_const_file_base + VMSEG_SIZE;
+
+    // Finalise globals/linmem placement.
+    wm.globals_vmaddr = data_vm_base;
+    wm.linmem_vmaddr  = data_vm_base + globals_padded;
+
+    linkedit_vm_base   = data_vm_base + (has_data_seg ? data_seg_vmsize : 0);
+    linkedit_file_base = data_file_base + (has_data_seg ? data_seg_size32 : 0);
+
+    // Patch _start's prologue ADRP to materialise the now-final
+    // globals_vmaddr. The matching `add x28, x27, #globals_padded`
+    // and the (optional) `add x27, x27, #off_in_page` are independent
+    // of where __DATA lands because globals_padded is fixed and
+    // globals_vmaddr is page-aligned (off_in_page == 0).
+    {
+        EmittedFunc *e = &efs[wm.start_export_idx];
+        if (e->adrp_off != UINT32_MAX) {
+            uint64_t pc_pc       = wm.entry_vmaddr
+                                 + (uint64_t)e->adrp_off;
+            uint64_t pc_page     = pc_pc & ~0xfffULL;
+            uint64_t target_page = wm.globals_vmaddr & ~0xfffULL;
+            int64_t  rel_pages   = (int64_t)(target_page - pc_page) >> 12;
+            uint32_t adrp = arm64_adrp(27, rel_pages);
+            e->code.data[e->adrp_off + 0] = (uint8_t)(adrp >>  0);
+            e->code.data[e->adrp_off + 1] = (uint8_t)(adrp >>  8);
+            e->code.data[e->adrp_off + 2] = (uint8_t)(adrp >> 16);
+            e->code.data[e->adrp_off + 3] = (uint8_t)(adrp >> 24);
+        }
+    }
+
+    // -----------------------------------------------------------------
     // Patch every emitted function's call relocations.
     // -----------------------------------------------------------------
     // Each stub lives at __text-relative offset `text_size + i*stub_size`.
@@ -2507,9 +3104,9 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     buf_le32(&img, LC_SEGMENT_64); buf_le32(&img, 312);
     { static const char SEG[16] = "__TEXT"; buf_append(&img, SEG, 16); }
     buf_le64(&img, TEXT_VM_BASE);
-    buf_le64(&img, VMSEG_SIZE);
+    buf_le64(&img, (uint64_t)text_seg_size);
     buf_le64(&img, TEXT_FILE_BASE);
-    buf_le64(&img, VMSEG_SIZE);
+    buf_le64(&img, (uint64_t)text_seg_size);
     buf_le32(&img, VM_PROT_READ | VM_PROT_EXECUTE);
     buf_le32(&img, VM_PROT_READ | VM_PROT_EXECUTE);
     buf_le32(&img, 3);
@@ -2562,9 +3159,9 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     // LC_SEGMENT_64 __DATA_CONST (1 section: __got)
     buf_le32(&img, LC_SEGMENT_64); buf_le32(&img, 152);
     { static const char SEG[16] = "__DATA_CONST"; buf_append(&img, SEG, 16); }
-    buf_le64(&img, DATA_CONST_VM_BASE);
+    buf_le64(&img, data_const_vm_base);
     buf_le64(&img, VMSEG_SIZE);
-    buf_le64(&img, DATA_CONST_FILE_BASE);
+    buf_le64(&img, (uint64_t)data_const_file_base);
     buf_le64(&img, VMSEG_SIZE);
     buf_le32(&img, VM_PROT_READ | VM_PROT_WRITE);
     buf_le32(&img, VM_PROT_READ | VM_PROT_WRITE);
@@ -2574,9 +3171,9 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
         static const char SN[16] = "__got";
         static const char SG[16] = "__DATA_CONST";
         buf_append(&img, SN, 16); buf_append(&img, SG, 16);
-        buf_le64(&img, DATA_CONST_VM_BASE);
+        buf_le64(&img, data_const_vm_base);
         buf_le64(&img, (uint64_t)got_size);
-        buf_le32(&img, DATA_CONST_FILE_BASE);
+        buf_le32(&img, data_const_file_base);
         buf_le32(&img, 3);
         buf_le32(&img, 0); buf_le32(&img, 0);
         buf_le32(&img, 6);                // S_NON_LAZY_SYMBOL_POINTERS
@@ -2590,9 +3187,9 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     if (has_data_seg) {
         buf_le32(&img, LC_SEGMENT_64); buf_le32(&img, 152);
         { static const char SEG[16] = "__DATA"; buf_append(&img, SEG, 16); }
-        buf_le64(&img, DATA_VM_BASE);
+        buf_le64(&img, data_vm_base);
         buf_le64(&img, data_seg_vmsize);
-        buf_le64(&img, DATA_FILE_BASE);
+        buf_le64(&img, (uint64_t)data_file_base);
         buf_le64(&img, data_seg_vmsize);
         buf_le32(&img, VM_PROT_READ | VM_PROT_WRITE);
         buf_le32(&img, VM_PROT_READ | VM_PROT_WRITE);
@@ -2602,9 +3199,9 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
             static const char SN[16] = "__data";
             static const char SG[16] = "__DATA";
             buf_append(&img, SN, 16); buf_append(&img, SG, 16);
-            buf_le64(&img, DATA_VM_BASE);
+            buf_le64(&img, data_vm_base);
             buf_le64(&img, (uint64_t)data_seg_payload);
-            buf_le32(&img, DATA_FILE_BASE);
+            buf_le32(&img, data_file_base);
             buf_le32(&img, 3);            // align = 2^3 = 8
             buf_le32(&img, 0); buf_le32(&img, 0);
             buf_le32(&img, 0);            // S_REGULAR
@@ -2713,7 +3310,7 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
 
     // __stubs: one entry per libSystem import. Stub 0 is _exit.
     for (uint32_t i = 0; i < n_stubs; i++) {
-        uint64_t got_target = DATA_CONST_VM_BASE + 8ULL * i;
+        uint64_t got_target = data_const_vm_base + 8ULL * i;
         uint64_t stub_addr  = TEXT_VM_BASE + stubs_off + (uint64_t)i * stub_size;
         uint64_t page_dst   = got_target & ~0xfffULL;
         uint64_t page_src   = stub_addr  & ~0xfffULL;
@@ -2732,7 +3329,7 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     // __cstring is empty for macho_exit.
 
     // Pad to __DATA_CONST.
-    buf_pad_to(&img, DATA_CONST_FILE_BASE);
+    buf_pad_to(&img, data_const_file_base);
     // __got: one chained-fixup-format pointer per import. The format
     // is DYLD_CHAINED_PTR_64_OFFSET (pointer_format=6). Layout
     // (LSB-first):
@@ -2750,7 +3347,7 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
 
     // __DATA segment payload (optional): [globals bytes][linmem bytes].
     if (has_data_seg) {
-        buf_pad_to(&img, DATA_FILE_BASE);
+        buf_pad_to(&img, data_file_base);
         size_t data_seg_start = img.len;
         for (uint32_t i = 0; i < wm.n_globals; i++) {
             // Each global stored as 8 bytes (zero-extended for i32).
@@ -2831,7 +3428,7 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     buf_le32(&img, 0x18);                  // size
     buf_le16(&img, 0x4000);                // page_size
     buf_le16(&img, 6);                    // pointer_format (DYLD_CHAINED_PTR_64_OFFSET)
-    buf_le64(&img, 0x4000);                // segment_offset
+    buf_le64(&img, (uint64_t)data_const_file_base); // segment_offset (file)
     buf_le32(&img, 0);                    // max_valid_pointer
     buf_le16(&img, 1);                    // page_count
     buf_le16(&img, 0);                    // page_start[0]

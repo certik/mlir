@@ -39,6 +39,7 @@ expected_stdout = "55\n10\n"
 
 [[test]]
 name = "float"
+targets = ["native", "wasm", "macho"]
 expected_stdout = "4.375\n1\n6\n"
 
 [[test]]
@@ -53,14 +54,17 @@ expected_stdout = "42\n42\n"
 
 [[test]]
 name = "struct"
+targets = ["native", "wasm", "macho"]
 expected_stdout = "3\n4\n25\n5\n7.5\n"
 
 [[test]]
 name = "struct_pass"
+targets = ["native", "wasm", "macho"]
 expected_stdout = "11\n4\n6\n20\n30\n13\n24\n7\n3.5\n"
 
 [[test]]
 name = "struct_ptr"
+targets = ["native", "wasm", "macho"]
 expected_stdout = "15\n5\n10\n15\n15\n55\n1\n1\n"
 
 [[test]]
@@ -105,6 +109,7 @@ expected_stdout = "Hello, world!\nFoo\n\n"
 
 [[test]]
 name = "globals"
+targets = ["native", "wasm", "macho"]
 expected_stdout = "Hi\n1\n3\n30\n3\n"
 
 [[test]]
@@ -358,6 +363,7 @@ expected_stdout = "7\n11\n104\n"
 
 [[test]]
 name = "deref_index_pp"
+targets = ["native", "wasm", "macho"]
 expected_stdout = "101\n102\n103\n"
 
 [[test]]
@@ -601,6 +607,7 @@ expected_stdout = "0\n0\n0\n0\n0\n0\n99\n7\n"
 
 [[test]]
 name = "double_basic"
+targets = ["native", "wasm", "macho"]
 expected_stdout = "3.75\n3.375\n-1.5\n2\n7\n3.5\n1\n"
 
 [[test]]
@@ -773,12 +780,14 @@ wasm_skip = true
 
 [[test]]
 name = "struct_zero_init_64bit"
+targets = ["native", "wasm", "macho"]
 expected_stdout = """\
 0
 """
 
 [[test]]
 name = "union_field_offset"
+targets = ["native", "wasm", "macho"]
 expected_stdout = """\
 0
 """
