@@ -213,6 +213,35 @@ string mkRefString(llvm::StringRef src) {
     return s;
 }
 
+// One-slot cache for MLIR_GetBlockOp / MLIR_GetBlockNumOps. mlir::Block
+// stores its ops in an intrusive linked list, so `std::advance(begin(), i)`
+// is O(i) and a natural `for (i=0; i<n; i++) GetBlockOp(b, i)` loop is
+// O(n^2). The cache lets sequential and locally-bounded accesses
+// (forward by one, backward by one, small jumps near the last position)
+// run in amortized O(1) by walking `Operation::getNextNode()` from the
+// last position instead of restarting at `begin()`.
+//
+// Every API entry point that mutates a block's op list — or that runs an
+// upstream pass that may mutate the IR — calls `resetBlockOpCache()` so
+// the cached `Operation*` never dangles past an erase.
+struct BlockOpIterCache {
+    mlir::Block *block = nullptr;
+    size_t idx = 0;
+    mlir::Operation *op = nullptr;
+    size_t cached_size = SIZE_MAX;  // SIZE_MAX = unknown; valid otherwise
+};
+inline BlockOpIterCache &blockOpCache() {
+    static BlockOpIterCache c;
+    return c;
+}
+inline void resetBlockOpCache() {
+    auto &c = blockOpCache();
+    c.block = nullptr;
+    c.idx = 0;
+    c.op = nullptr;
+    c.cached_size = SIZE_MAX;
+}
+
 } // namespace
 
 // -----------------------------------------------------------------------------
@@ -239,11 +268,13 @@ extern "C" void MLIR_AppendRegionBlock(MLIR_Context *, MLIR_RegionHandle r,
 }
 extern "C" void MLIR_AppendBlockOp(MLIR_Context *, MLIR_BlockHandle b,
                                     MLIR_OpHandle op) {
+    resetBlockOpCache();
     F<mlir::Block>(b)->push_back(F<mlir::Operation>(op));
 }
 extern "C" void MLIR_InsertBlockOpBeforeTerminator(MLIR_Context *,
                                                    MLIR_BlockHandle b,
                                                    MLIR_OpHandle op) {
+    resetBlockOpCache();
     auto *block = F<mlir::Block>(b);
     auto *o = F<mlir::Operation>(op);
     if (!block->empty() && block->back().hasTrait<mlir::OpTrait::IsTerminator>()) {
@@ -255,6 +286,7 @@ extern "C" void MLIR_InsertBlockOpBeforeTerminator(MLIR_Context *,
 extern "C" void MLIR_InsertBlockOpAtIndex(MLIR_Context *,
                                           MLIR_BlockHandle b,
                                           MLIR_OpHandle op, size_t idx) {
+    resetBlockOpCache();
     auto *block = F<mlir::Block>(b);
     auto *o = F<mlir::Operation>(op);
     auto &ops = block->getOperations();
@@ -568,13 +600,73 @@ extern "C" MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_RegionHandle h, size_t i) {
 
 extern "C" size_t MLIR_GetBlockNumOps(MLIR_BlockHandle h) {
     auto *b = F<mlir::Block>(h);
-    return std::distance(b->begin(), b->end());
+    auto &c = blockOpCache();
+    if (c.block == b && c.cached_size != SIZE_MAX) {
+        return c.cached_size;
+    }
+    size_t n = std::distance(b->begin(), b->end());
+    if (c.block == b) {
+        c.cached_size = n;
+    }
+    return n;
 }
 extern "C" MLIR_OpHandle MLIR_GetBlockOp(MLIR_BlockHandle h, size_t i) {
     auto *b = F<mlir::Block>(h);
+    auto &c = blockOpCache();
+    if (c.block == b && c.op != nullptr) {
+        if (i == c.idx) {
+            return H(c.op);
+        }
+        if (i == c.idx + 1) {
+            auto *nx = c.op->getNextNode();
+            if (nx) {
+                c.idx = i;
+                c.op = nx;
+                return H(nx);
+            }
+        }
+        if (c.idx > 0 && i + 1 == c.idx) {
+            auto *pv = c.op->getPrevNode();
+            if (pv) {
+                c.idx = i;
+                c.op = pv;
+                return H(pv);
+            }
+        }
+        // Small jumps near the cached position: walk via getNextNode /
+        // getPrevNode from the cache instead of restarting from begin().
+        // The 64-step cap keeps worst-case behavior bounded if the caller
+        // does scattered access.
+        if (i > c.idx && i - c.idx < 64) {
+            auto *cur = c.op;
+            size_t delta = i - c.idx;
+            for (size_t k = 0; k < delta && cur; k++) cur = cur->getNextNode();
+            if (cur) {
+                c.idx = i;
+                c.op = cur;
+                return H(cur);
+            }
+        }
+        if (i < c.idx && c.idx - i < 64) {
+            auto *cur = c.op;
+            size_t delta = c.idx - i;
+            for (size_t k = 0; k < delta && cur; k++) cur = cur->getPrevNode();
+            if (cur) {
+                c.idx = i;
+                c.op = cur;
+                return H(cur);
+            }
+        }
+    }
+    // Fallback: scan from begin and seed the cache.
     auto it = b->begin();
     std::advance(it, i);
-    return H(&*it);
+    mlir::Operation *op = &*it;
+    c.block = b;
+    c.idx = i;
+    c.op = op;
+    c.cached_size = SIZE_MAX;  // unknown; will be filled by NumOps if called
+    return H(op);
 }
 extern "C" size_t MLIR_GetBlockNumArgs(MLIR_BlockHandle h) {
     return F<mlir::Block>(h)->getNumArguments();
@@ -1357,6 +1449,7 @@ extern "C" void MLIR_ReplaceAllUsesOfValue(MLIR_Context *,
 
 extern "C" void MLIR_EraseOp(MLIR_Context *, MLIR_OpHandle op_h) {
     if (op_h == MLIR_INVALID_HANDLE) return;
+    resetBlockOpCache();
     auto *op = F<mlir::Operation>(op_h);
     // Drop any cached attribute snapshot for this Operation* — once the
     // op is erased the MLIR allocator may reuse the same address for a
@@ -1370,6 +1463,7 @@ extern "C" void MLIR_EraseOp(MLIR_Context *, MLIR_OpHandle op_h) {
 extern "C" void MLIR_SetOpRegion(MLIR_Context *, MLIR_OpHandle op_h,
                                  size_t idx, MLIR_RegionHandle region_h) {
     if (op_h == MLIR_INVALID_HANDLE) return;
+    resetBlockOpCache();
     auto *op = F<mlir::Operation>(op_h);
     if (idx >= op->getNumRegions()) return;
     auto *newRegion = F<mlir::Region>(region_h);
@@ -1382,6 +1476,7 @@ extern "C" MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *,
                                                 MLIR_OpHandle op_h,
                                                 size_t idx) {
     if (op_h == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
+    resetBlockOpCache();
     auto *op = F<mlir::Operation>(op_h);
     if (idx >= op->getNumRegions()) return MLIR_INVALID_HANDLE;
     auto *out = new mlir::Region();
@@ -1420,6 +1515,7 @@ extern "C" MLIR_RegionHandle MLIR_GetBlockParentRegion(MLIR_BlockHandle blk_h) {
 extern "C" void MLIR_MoveOpToBlockEnd(MLIR_Context *, MLIR_OpHandle op_h,
                                        MLIR_BlockHandle dest_h) {
     if (op_h == MLIR_INVALID_HANDLE || dest_h == MLIR_INVALID_HANDLE) return;
+    resetBlockOpCache();
     auto *op = F<mlir::Operation>(op_h);
     auto *dest = F<mlir::Block>(dest_h);
     op->moveBefore(dest, dest->end());
@@ -1483,6 +1579,7 @@ extern "C" void MLIR_SetOpSuccessorOperands(MLIR_Context *, MLIR_OpHandle op_h,
 
 extern "C" void MLIR_EraseBlock(MLIR_Context *, MLIR_BlockHandle blk_h) {
     if (blk_h == MLIR_INVALID_HANDLE) return;
+    resetBlockOpCache();
     auto *blk = F<mlir::Block>(blk_h);
     if (blk->getParent() != nullptr) {
         // Detach without freeing contained ops/args.
@@ -1674,6 +1771,7 @@ extern "C" void MLIR_AppendOpSuccessorOperand(MLIR_Context *, MLIR_OpHandle op_h
 extern "C" void MLIR_SpliceBlockOps(MLIR_Context *, MLIR_BlockHandle dst_h,
                                      MLIR_BlockHandle src_h) {
     if (dst_h == MLIR_INVALID_HANDLE || src_h == MLIR_INVALID_HANDLE) return;
+    resetBlockOpCache();
     auto *dst = F<mlir::Block>(dst_h);
     auto *src = F<mlir::Block>(src_h);
     dst->getOperations().splice(dst->end(), src->getOperations());
@@ -1739,6 +1837,7 @@ static void rewriteWasmMemoryIntrinsicsForUpstream(mlir::ModuleOp module) {
 extern "C" bool MLIR_LowerToLLVMDialectUpstream(MLIR_Context *ctx,
                                                 MLIR_OpHandle module_h) {
     (void)ctx;
+    resetBlockOpCache();
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
@@ -1903,6 +2002,7 @@ extern "C" bool MLIR_LiftCfToScfNative(MLIR_Context *ctx,
 
 extern "C" bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module_h) {
     if (module_h == MLIR_INVALID_HANDLE) return false;
+    resetBlockOpCache();
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
@@ -1931,6 +2031,7 @@ extern "C" bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module_h) {
 extern "C" bool MLIR_LowerToLLVMDialectForWasmUpstream(MLIR_Context *ctx,
                                                        MLIR_OpHandle module_h) {
     (void)ctx;
+    resetBlockOpCache();
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
