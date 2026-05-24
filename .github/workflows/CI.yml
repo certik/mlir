@@ -45,6 +45,7 @@ jobs:
               pixi run -e upstream test_tinyc_native
               pixi run -e upstream test_tinyc_native_wasm
               TINYC_USE_NATIVE_LINK=1 pixi run -e upstream test_tinyc_native_wasm
+              pixi run -e upstream test_tinyc_macho
               pixi run -e macos test_macos_tinyc
           - platform: windows
             os: windows-latest
