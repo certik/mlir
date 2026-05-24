@@ -121,6 +121,7 @@ static void parse_enum_decl_top(P *p);
 static void parse_enum_body(P *p);
 static void parse_typedef_decl(P *p);
 static bool struct_def_equal(StructDef *a, StructDef *b);
+static StructDef *parse_struct_def(P *p);
 
 // Aggregate initializer: `{ v0, v1, ... }` or `{ .f1 = v0, .f2 = v1, ... }`.
 // Builds an EX_COMPOUND whose cast_type is the decl's type (struct or
@@ -947,10 +948,52 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     }
     // struct decl: `struct Name var;` or `struct Name * p = &s;`
     //              or `struct Name var[N];`
+    //              or `struct [Name] { fields... } var [...];` (inline def)
     if (cur(p).kind == TC_TK_KW_STRUCT || cur(p).kind == TC_TK_KW_UNION) {
-        p->i++;
-        TcTok sn = cur(p);
-        expect(p, TC_TK_IDENT, str_lit("expected struct name"));
+        // Inline struct/union body as the declaration type:
+        //   struct { fields... } name [...];        — anonymous
+        //   struct Tag { fields... } name [...];    — tagged-and-defined here
+        bool inline_def = (peek(p, 1).kind == TC_TK_LBRACE) ||
+                          (peek(p, 1).kind == TC_TK_IDENT &&
+                           peek(p, 2).kind == TC_TK_LBRACE);
+        TcTok sn;
+        if (inline_def) {
+            StructDef *sd = parse_struct_def(p);
+            if (sd->name.size == 0) {
+                // Synthesize an anonymous tag so the existing TY_STRUCT
+                // / TY_ARRAY_STRUCT plumbing has a name to look up.
+                static int local_anon_counter = 0;
+                local_anon_counter++;
+                char *buf = arena_new_array(p->arena, char, 32);
+                int n = 0; int v = local_anon_counter;
+                char digits[16]; int dn = 0;
+                if (v == 0) digits[dn++] = '0';
+                while (v > 0) { digits[dn++] = (char)('0' + (v % 10)); v /= 10; }
+                const char *prefix = "__anon_local_";
+                for (size_t k = 0; prefix[k]; k++) buf[n++] = prefix[k];
+                while (dn > 0) buf[n++] = digits[--dn];
+                sd->name = (string){.str = buf, .size = (size_t)n};
+            }
+            // Register in the program-level struct table (skipping
+            // duplicates by tag name).
+            bool already = false;
+            for (size_t i = 0; i < p->prog->structs.size; i++) {
+                if (str_eq(p->prog->structs.data[i]->name, sd->name)) {
+                    already = true; break;
+                }
+            }
+            if (!already) {
+                VecStructDefPtr_push_back(p->arena, &p->prog->structs, sd);
+            }
+            sn = (TcTok){0};
+            sn.kind = TC_TK_IDENT;
+            sn.text = sd->name;
+            sn.line = line;
+        } else {
+            p->i++;
+            sn = cur(p);
+            expect(p, TC_TK_IDENT, str_lit("expected struct name"));
+        }
         bool is_ptr = accept(p, TC_TK_STAR);
         bool is_ptr_ptr = is_ptr && accept(p, TC_TK_STAR);
         TcTok name = cur(p);
