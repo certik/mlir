@@ -239,6 +239,7 @@ typedef struct {
 
     uint32_t       n_imported_funcs;
     uint32_t       import_idx_proc_exit;
+    uint32_t       import_idx_fd_write;
 
     WasmFunc      *funcs;
     uint32_t       n_funcs;
@@ -267,6 +268,7 @@ static void wasm_module_free(WasmModule *m) {
 static bool wasm_parse(const uint8_t *bytes, size_t size, WasmModule *out) {
     memset(out, 0, sizeof(*out));
     out->import_idx_proc_exit = UINT32_MAX;
+    out->import_idx_fd_write  = UINT32_MAX;
     out->start_export_idx     = UINT32_MAX;
 
     if (size < 8 || memcmp(bytes, "\x00" "asm" "\x01\x00\x00\x00", 8) != 0) {
@@ -307,6 +309,10 @@ static bool wasm_parse(const uint8_t *bytes, size_t size, WasmModule *out) {
                             memcmp(mod_p, "wasi_snapshot_preview1", 22) == 0 &&
                             nm_len == 9 && memcmp(nm_p, "proc_exit", 9) == 0) {
                             out->import_idx_proc_exit = fi;
+                        } else if (mod_len == 22 &&
+                            memcmp(mod_p, "wasi_snapshot_preview1", 22) == 0 &&
+                            nm_len == 8 && memcmp(nm_p, "fd_write", 8) == 0) {
+                            out->import_idx_fd_write = fi;
                         }
                         out->n_imported_funcs++;
                     } else if (kind == 1) {
@@ -645,6 +651,148 @@ static uint32_t arm64_adrp(uint32_t rd, int64_t rel_pages) {
     uint32_t immhi = (uint32_t)((rel_pages >> 2) & 0x7ffffu);
     return 0x90000000u | (immlo << 29) | (immhi << 5) | (rd & 0x1fu);
 }
+// MOV Wd, Wm   alias for ORR Wd, WZR, Wm.
+static uint32_t arm64_mov_w_reg(uint32_t rd, uint32_t rm) {
+    return 0x2a000000u | ((rm & 0x1fu) << 16) | (31u << 5) | (rd & 0x1fu);
+}
+// ADD Wd, Wn, #imm12 (LSL #0).
+static uint32_t arm64_add_w_imm(uint32_t rd, uint32_t rn, uint16_t imm12) {
+    return 0x11000000u | (((uint32_t)imm12 & 0xfffu) << 10)
+         | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+// SUB Wd, Wn, #imm12 (LSL #0).
+static uint32_t arm64_sub_w_imm(uint32_t rd, uint32_t rn, uint16_t imm12) {
+    return 0x51000000u | (((uint32_t)imm12 & 0xfffu) << 10)
+         | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+// ADD Xd, Xn, Xm (LSL #0).
+static uint32_t arm64_add_x_reg(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x8b000000u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// SUB Xd, Xn, Xm (LSL #0).
+static uint32_t arm64_sub_x_reg(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0xcb000000u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// CMP Xn, Xm   alias for SUBS XZR, Xn, Xm.
+static uint32_t arm64_cmp_x(uint32_t rn, uint32_t rm) {
+    return 0xeb00001fu | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5);
+}
+// CMP Xn, #0   alias for SUBS XZR, Xn, #0.
+static uint32_t arm64_cmp_x_imm0(uint32_t rn) {
+    return 0xf100001fu | ((rn & 0x1fu) << 5);
+}
+// ORR Wd, Wn, Wm (LSL #0).
+static uint32_t arm64_orr_w_reg(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x2a000000u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// ORR Xd, Xn, Xm (LSL #0).
+static uint32_t arm64_orr_x_reg(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0xaa000000u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// EOR Wd, Wn, Wm (LSL #0).
+static uint32_t arm64_eor_w_reg(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x4a000000u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// EOR Xd, Xn, Xm (LSL #0).
+static uint32_t arm64_eor_x_reg(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0xca000000u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// AND Wd, Wn, Wm (LSL #0).
+static uint32_t arm64_and_w_reg(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x0a000000u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// AND Xd, Xn, Xm (LSL #0).
+static uint32_t arm64_and_x_reg(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x8a000000u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// MUL Wd, Wn, Wm   alias for MADD Wd, Wn, Wm, WZR.
+static uint32_t arm64_mul_w(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x1b007c00u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// MUL Xd, Xn, Xm.
+static uint32_t arm64_mul_x(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x9b007c00u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// UDIV Wd, Wn, Wm.
+static uint32_t arm64_udiv_w(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x1ac00800u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// UDIV Xd, Xn, Xm.
+static uint32_t arm64_udiv_x(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x9ac00800u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// SDIV Wd, Wn, Wm.
+static uint32_t arm64_sdiv_w(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x1ac00c00u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// SDIV Xd, Xn, Xm.
+static uint32_t arm64_sdiv_x(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x9ac00c00u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// LSL Wd, Wn, Wm (variable shift, alias of LSLV).
+static uint32_t arm64_lsl_w_reg(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x1ac02000u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// LSL Xd, Xn, Xm.
+static uint32_t arm64_lsl_x_reg(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x9ac02000u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// LSR Wd, Wn, Wm (variable, LSRV).
+static uint32_t arm64_lsr_w_reg(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x1ac02400u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// LSR Xd, Xn, Xm.
+static uint32_t arm64_lsr_x_reg(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x9ac02400u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// ASR Wd, Wn, Wm (variable, ASRV).
+static uint32_t arm64_asr_w_reg(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x1ac02800u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// ASR Xd, Xn, Xm.
+static uint32_t arm64_asr_x_reg(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x9ac02800u | ((rm & 0x1fu) << 16) | ((rn & 0x1fu) << 5)
+         | (rd & 0x1fu);
+}
+// SXTW Xd, Wn   alias for SBFM Xd, Xn, #0, #31.
+static uint32_t arm64_sxtw(uint32_t rd, uint32_t rn) {
+    return 0x93407c00u | ((rn & 0x1fu) << 5) | (rd & 0x1fu);
+}
+// LDRB Wt, [Xn, #imm12]  (unsigned offset, scaled by 1).
+static uint32_t arm64_ldrb_w_xn(uint32_t rt, uint32_t rn, uint32_t imm12) {
+    return 0x39400000u | ((imm12 & 0xfffu) << 10) | ((rn & 0x1fu) << 5)
+         | (rt & 0x1fu);
+}
+// STRB Wt, [Xn, #imm12]  (unsigned offset, scaled by 1).
+static uint32_t arm64_strb_w_xn(uint32_t rt, uint32_t rn, uint32_t imm12) {
+    return 0x39000000u | ((imm12 & 0xfffu) << 10) | ((rn & 0x1fu) << 5)
+         | (rt & 0x1fu);
+}
+// STRH Wt, [Xn, #imm12]  (unsigned offset, scaled by 2 — imm12 is in
+// halfword units, i.e. byte offset / 2).
+static uint32_t arm64_strh_w_xn(uint32_t rt, uint32_t rn, uint32_t imm12) {
+    return 0x79000000u | ((imm12 & 0xfffu) << 10) | ((rn & 0x1fu) << 5)
+         | (rt & 0x1fu);
+}
 // bl <pc-relative byte offset>
 static uint32_t arm64_bl(int32_t off_bytes) {
     int32_t imm26 = off_bytes >> 2;
@@ -710,11 +858,18 @@ static void emit_mov_x_imm64(Buf *b, uint32_t rd, uint64_t imm64) {
 // the call site offset and the target function index. After we lay
 // out functions in __text we know each function's offset and can
 // patch the imm26 to a PC-relative byte offset.
+//
+// `target` values:
+//   < n_total       — wasm-space function index (resolves to efs[target]).
+//   STUB_EXIT       — call the `_exit` libSystem stub (stub index 0).
+//   STUB_WRITE      — call the `_write` libSystem stub (stub index 1).
 // =============================================================================
+#define STUB_EXIT   UINT32_MAX
+#define STUB_WRITE  (UINT32_MAX - 1u)
+
 typedef struct {
     uint32_t site_off;  // offset (in bytes) within the EmittedFunc's code Buf
-    uint32_t target;    // target function index in combined space, or the
-                        // sentinel UINT32_MAX meaning "the _exit stub".
+    uint32_t target;    // wasm funcidx OR STUB_EXIT / STUB_WRITE sentinel
     uint8_t  is_b;      // 1 == use `b` (tail-call), 0 == `bl`
 } CallReloc;
 
@@ -1483,6 +1638,9 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                 uint32_t np = 0, nr = 0;
                 if (cidx < wm->n_imported_funcs) {
                     if (cidx == wm->import_idx_proc_exit) { np = 1; nr = 0; }
+                    else if (cidx == wm->import_idx_fd_write) {
+                        np = 4; nr = 1;
+                    }
                     else {
                         fprintf(stderr,
                                 "wasm->macho: unsupported import call (idx %u)\n",
@@ -1533,6 +1691,297 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                 value_depth = value_depth - np + nr;
                 break;
             }
+
+            // --- i32 comparisons (2 pop, 1 push). Pattern:
+            //     ldr w1,[sp,#0]; ldr w0,[sp,#16]; cmp w0,w1; cset w0,COND;
+            //     add sp,#16; str w0,[sp].
+            case 0x46:   // i32.eq      cset cond_inv = NE = 1
+            case 0x49:   // i32.lt_u    cset cond_inv = HS = 2
+            case 0x4a:   // i32.gt_s    cset cond_inv = LE = 0xd
+            case 0x4b:   // i32.gt_u    cset cond_inv = LS = 9
+            case 0x4c:   // i32.le_s    cset cond_inv = GT = 0xc
+            case 0x4d:   // i32.le_u    cset cond_inv = HI = 8
+            case 0x4e:   // i32.ge_s    cset cond_inv = LT = 0xb
+            case 0x4f: { // i32.ge_u    cset cond_inv = LO = 3
+                uint32_t cond_inv;
+                switch (op) {
+                    case 0x46: cond_inv = 1;    break;
+                    case 0x49: cond_inv = 2;    break;
+                    case 0x4a: cond_inv = 0xd;  break;
+                    case 0x4b: cond_inv = 9;    break;
+                    case 0x4c: cond_inv = 0xc;  break;
+                    case 0x4d: cond_inv = 8;    break;
+                    case 0x4e: cond_inv = 0xb;  break;
+                    case 0x4f: cond_inv = 3;    break;
+                    default:   cond_inv = 0;    break;
+                }
+                emit_word(&e->code, arm64_ldr_w_sp(1, 0));
+                emit_word(&e->code, arm64_ldr_w_sp(0, 16));
+                emit_word(&e->code, arm64_cmp_w(0, 1));
+                emit_word(&e->code, arm64_cset_w(0, cond_inv));
+                emit_word(&e->code, arm64_add_sp_imm(16));
+                emit_word(&e->code, arm64_str_w_sp(0, 0));
+                value_depth -= 1;
+                break;
+            }
+
+            // --- i32 binary arithmetic (2 pop, 1 push). Same envelope as
+            // i32.add; only the middle instruction differs.
+            case 0x6c:   // i32.mul
+            case 0x6d:   // i32.div_s
+            case 0x6e:   // i32.div_u
+            case 0x71:   // i32.and
+            case 0x72:   // i32.or
+            case 0x73:   // i32.xor
+            case 0x74:   // i32.shl
+            case 0x75:   // i32.shr_s
+            case 0x76: { // i32.shr_u
+                emit_word(&e->code, arm64_ldr_w_sp(1, 0));
+                emit_word(&e->code, arm64_ldr_w_sp(0, 16));
+                uint32_t insn = 0;
+                switch (op) {
+                    case 0x6c: insn = arm64_mul_w   (0, 0, 1); break;
+                    case 0x6d: insn = arm64_sdiv_w  (0, 0, 1); break;
+                    case 0x6e: insn = arm64_udiv_w  (0, 0, 1); break;
+                    case 0x71: insn = arm64_and_w_reg(0, 0, 1); break;
+                    case 0x72: insn = arm64_orr_w_reg(0, 0, 1); break;
+                    case 0x73: insn = arm64_eor_w_reg(0, 0, 1); break;
+                    case 0x74: insn = arm64_lsl_w_reg(0, 0, 1); break;
+                    case 0x75: insn = arm64_asr_w_reg(0, 0, 1); break;
+                    case 0x76: insn = arm64_lsr_w_reg(0, 0, 1); break;
+                }
+                emit_word(&e->code, insn);
+                emit_word(&e->code, arm64_add_sp_imm(16));
+                emit_word(&e->code, arm64_str_w_sp(0, 0));
+                value_depth -= 1;
+                break;
+            }
+
+            // --- i64.eqz (1 pop, 1 push).
+            case 0x50: {
+                emit_word(&e->code, arm64_ldr_x_sp(0, 0));
+                emit_word(&e->code, arm64_cmp_x_imm0(0));
+                emit_word(&e->code, arm64_cset_w(0, 1));  // cset w0, eq
+                emit_word(&e->code, arm64_str_w_sp(0, 0));
+                break;
+            }
+
+            // --- i64 comparisons (2 pop, 1 push). Same as the i32 set but
+            // 64-bit operands. Result is an i32 (0/1).
+            case 0x51:   // i64.eq    cond_inv = NE = 1
+            case 0x52:   // i64.ne    cond_inv = EQ = 0
+            case 0x53:   // i64.lt_s  cond_inv = GE = 0xa
+            case 0x54:   // i64.lt_u  cond_inv = HS = 2
+            case 0x55:   // i64.gt_s  cond_inv = LE = 0xd
+            case 0x56:   // i64.gt_u  cond_inv = LS = 9
+            case 0x57:   // i64.le_s  cond_inv = GT = 0xc
+            case 0x58:   // i64.le_u  cond_inv = HI = 8
+            case 0x59:   // i64.ge_s  cond_inv = LT = 0xb
+            case 0x5a: { // i64.ge_u  cond_inv = LO = 3
+                uint32_t cond_inv;
+                switch (op) {
+                    case 0x51: cond_inv = 1;    break;
+                    case 0x52: cond_inv = 0;    break;
+                    case 0x53: cond_inv = 0xa;  break;
+                    case 0x54: cond_inv = 2;    break;
+                    case 0x55: cond_inv = 0xd;  break;
+                    case 0x56: cond_inv = 9;    break;
+                    case 0x57: cond_inv = 0xc;  break;
+                    case 0x58: cond_inv = 8;    break;
+                    case 0x59: cond_inv = 0xb;  break;
+                    case 0x5a: cond_inv = 3;    break;
+                    default:   cond_inv = 0;    break;
+                }
+                emit_word(&e->code, arm64_ldr_x_sp(1, 0));
+                emit_word(&e->code, arm64_ldr_x_sp(0, 16));
+                emit_word(&e->code, arm64_cmp_x(0, 1));
+                emit_word(&e->code, arm64_cset_w(0, cond_inv));
+                emit_word(&e->code, arm64_add_sp_imm(16));
+                emit_word(&e->code, arm64_str_w_sp(0, 0));
+                value_depth -= 1;
+                break;
+            }
+
+            // --- i64 binary arithmetic (2 pop, 1 push). 64-bit operands +
+            // result.
+            case 0x7c:   // i64.add
+            case 0x7d:   // i64.sub
+            case 0x7e:   // i64.mul
+            case 0x7f:   // i64.div_s
+            case 0x80:   // i64.div_u
+            case 0x83:   // i64.and
+            case 0x84:   // i64.or
+            case 0x85:   // i64.xor
+            case 0x86:   // i64.shl
+            case 0x87:   // i64.shr_s
+            case 0x88: { // i64.shr_u
+                emit_word(&e->code, arm64_ldr_x_sp(1, 0));
+                emit_word(&e->code, arm64_ldr_x_sp(0, 16));
+                uint32_t insn = 0;
+                switch (op) {
+                    case 0x7c: insn = arm64_add_x_reg(0, 0, 1); break;
+                    case 0x7d: insn = arm64_sub_x_reg(0, 0, 1); break;
+                    case 0x7e: insn = arm64_mul_x    (0, 0, 1); break;
+                    case 0x7f: insn = arm64_sdiv_x   (0, 0, 1); break;
+                    case 0x80: insn = arm64_udiv_x   (0, 0, 1); break;
+                    case 0x83: insn = arm64_and_x_reg(0, 0, 1); break;
+                    case 0x84: insn = arm64_orr_x_reg(0, 0, 1); break;
+                    case 0x85: insn = arm64_eor_x_reg(0, 0, 1); break;
+                    case 0x86: insn = arm64_lsl_x_reg(0, 0, 1); break;
+                    case 0x87: insn = arm64_asr_x_reg(0, 0, 1); break;
+                    case 0x88: insn = arm64_lsr_x_reg(0, 0, 1); break;
+                }
+                emit_word(&e->code, insn);
+                emit_word(&e->code, arm64_add_sp_imm(16));
+                emit_word(&e->code, arm64_str_x_sp(0, 0));
+                value_depth -= 1;
+                break;
+            }
+
+            // --- i32.load8_u: 1 pop (addr), 1 push (zero-extended byte).
+            case 0x2d: {
+                (void)rd_uleb(&r);
+                uint32_t off = (uint32_t)rd_uleb(&r);
+                if (off > 4095u) {
+                    fprintf(stderr,
+                            "wasm->macho: i32.load8_u offset %u too large "
+                            "in func %u\n", off, fidx);
+                    free(local_types); return false;
+                }
+                if (!wm->has_memory) {
+                    fprintf(stderr,
+                            "wasm->macho: i32.load8_u with no memory in "
+                            "func %u\n", fidx);
+                    free(local_types); return false;
+                }
+                emit_word(&e->code, arm64_ldr_w_sp(0, 0));
+                emit_word(&e->code, arm64_add_x_xn_wm_uxtw(10, 28, 0));
+                emit_word(&e->code, arm64_ldrb_w_xn(0, 10, off));
+                emit_word(&e->code, arm64_str_w_sp(0, 0));
+                break;
+            }
+
+            // --- i32.store8: 2 pop (addr, value).
+            case 0x3a: {
+                (void)rd_uleb(&r);
+                uint32_t off = (uint32_t)rd_uleb(&r);
+                if (off > 4095u) {
+                    fprintf(stderr,
+                            "wasm->macho: i32.store8 offset %u too large "
+                            "in func %u\n", off, fidx);
+                    free(local_types); return false;
+                }
+                if (!wm->has_memory) {
+                    fprintf(stderr,
+                            "wasm->macho: i32.store8 with no memory in "
+                            "func %u\n", fidx);
+                    free(local_types); return false;
+                }
+                emit_word(&e->code, arm64_ldr_w_sp(1, 0));
+                emit_word(&e->code, arm64_ldr_w_sp(0, 16));
+                emit_word(&e->code, arm64_add_sp_imm(32));
+                emit_word(&e->code, arm64_add_x_xn_wm_uxtw(10, 28, 0));
+                emit_word(&e->code, arm64_strb_w_xn(1, 10, off));
+                value_depth -= 2;
+                break;
+            }
+
+            // --- i32.store16: 2 pop (addr, value).
+            case 0x3b: {
+                (void)rd_uleb(&r);
+                uint32_t off = (uint32_t)rd_uleb(&r);
+                if (off > 8190u || (off & 1) != 0) {
+                    fprintf(stderr,
+                            "wasm->macho: i32.store16 offset %u out of "
+                            "range or unaligned in func %u\n", off, fidx);
+                    free(local_types); return false;
+                }
+                if (!wm->has_memory) {
+                    fprintf(stderr,
+                            "wasm->macho: i32.store16 with no memory in "
+                            "func %u\n", fidx);
+                    free(local_types); return false;
+                }
+                emit_word(&e->code, arm64_ldr_w_sp(1, 0));
+                emit_word(&e->code, arm64_ldr_w_sp(0, 16));
+                emit_word(&e->code, arm64_add_sp_imm(32));
+                emit_word(&e->code, arm64_add_x_xn_wm_uxtw(10, 28, 0));
+                emit_word(&e->code, arm64_strh_w_xn(1, 10, off / 2));
+                value_depth -= 2;
+                break;
+            }
+
+            // --- i64.load: 1 pop (addr), 1 push (8 bytes).
+            case 0x29: {
+                (void)rd_uleb(&r);
+                uint32_t off = (uint32_t)rd_uleb(&r);
+                if (off > 32760u || (off & 7) != 0) {
+                    fprintf(stderr,
+                            "wasm->macho: i64.load offset %u out of range "
+                            "or unaligned in func %u\n", off, fidx);
+                    free(local_types); return false;
+                }
+                if (!wm->has_memory) {
+                    fprintf(stderr,
+                            "wasm->macho: i64.load with no memory in "
+                            "func %u\n", fidx);
+                    free(local_types); return false;
+                }
+                emit_word(&e->code, arm64_ldr_w_sp(0, 0));
+                emit_word(&e->code, arm64_add_x_xn_wm_uxtw(10, 28, 0));
+                emit_word(&e->code, arm64_ldr_x_xn(0, 10, off));
+                emit_word(&e->code, arm64_str_x_sp(0, 0));
+                break;
+            }
+
+            // --- i64.store: 2 pop (addr, value).
+            case 0x37: {
+                (void)rd_uleb(&r);
+                uint32_t off = (uint32_t)rd_uleb(&r);
+                if (off > 32760u || (off & 7) != 0) {
+                    fprintf(stderr,
+                            "wasm->macho: i64.store offset %u out of range "
+                            "or unaligned in func %u\n", off, fidx);
+                    free(local_types); return false;
+                }
+                if (!wm->has_memory) {
+                    fprintf(stderr,
+                            "wasm->macho: i64.store with no memory in "
+                            "func %u\n", fidx);
+                    free(local_types); return false;
+                }
+                emit_word(&e->code, arm64_ldr_x_sp(1, 0));
+                emit_word(&e->code, arm64_ldr_w_sp(0, 16));
+                emit_word(&e->code, arm64_add_sp_imm(32));
+                emit_word(&e->code, arm64_add_x_xn_wm_uxtw(10, 28, 0));
+                emit_word(&e->code, arm64_str_x_xn(1, 10, off));
+                value_depth -= 2;
+                break;
+            }
+
+            // --- i32.wrap_i64: 1 pop (i64), 1 push (i32). The top slot
+            // holds the i64; consumers that read it as i32 only look at
+            // the low 32 bits, so codegen is effectively a no-op.
+            case 0xa7: {
+                break;
+            }
+
+            // --- i64.extend_i32_s: sign-extend the low 32 bits.
+            case 0xac: {
+                emit_word(&e->code, arm64_ldr_w_sp(0, 0));   // w0 = low32
+                emit_word(&e->code, arm64_sxtw(0, 0));        // x0 = sxtw w0
+                emit_word(&e->code, arm64_str_x_sp(0, 0));   // overwrite
+                break;
+            }
+
+            // --- i64.extend_i32_u: zero-extend the low 32 bits. ldr w0
+            // already zero-extends into x0, so just rewrite the slot.
+            case 0xad: {
+                emit_word(&e->code, arm64_ldr_w_sp(0, 0));
+                emit_word(&e->code, arm64_str_x_sp(0, 0));
+                break;
+            }
+
             default:
                 fprintf(stderr,
                         "wasm->macho: unsupported opcode 0x%02x in func %u\n",
@@ -1562,11 +2011,92 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
 static void emit_proc_exit_shim(EmittedFunc *e) {
     CallReloc rel = {
         .site_off = (uint32_t)e->code.len,
-        .target = UINT32_MAX,   // _exit stub
+        .target = STUB_EXIT,
         .is_b = 1,
     };
     ef_push_reloc(e, rel);
     emit_word(&e->code, arm64_b(0));
+}
+
+// Emit the fd_write shim. WASI signature:
+//
+//   i32 fd_write(i32 fd, i32 iovs_ptr, i32 iovs_len, i32 nwritten_ptr);
+//
+// Iterates over the iovec array in linear memory, calls libSystem
+// `_write(fd, linmem+buf_ptr, buf_len)` for each chunk, accumulates
+// the total bytes written into `*nwritten_ptr`, and returns 0.
+// Errors from `_write` are not propagated to errno — sufficient for
+// the tinyC test suite which writes to stdout only.
+//
+// Register usage (callee-saved):
+//   x19  fd                  x22  total written
+//   x20  iovs_ptr (wasm32)   x23  nwritten_ptr (wasm32)
+//   x21  iovs_len
+//
+// x28 holds the linear-memory base (set up at `_start`) and is
+// preserved by AArch64 PCS across libSystem calls.
+static void emit_fd_write_shim(EmittedFunc *e) {
+    // Prologue: stp fp, lr / mov fp, sp / sub sp, sp, #48
+    emit_word(&e->code, arm64_stp_fp_lr_pre());
+    emit_word(&e->code, arm64_mov_fp_sp());
+    emit_word(&e->code, arm64_sub_sp_imm(48));
+    emit_word(&e->code, arm64_str_x_sp(19, 0));
+    emit_word(&e->code, arm64_str_x_sp(20, 8));
+    emit_word(&e->code, arm64_str_x_sp(21, 16));
+    emit_word(&e->code, arm64_str_x_sp(22, 24));
+    emit_word(&e->code, arm64_str_x_sp(23, 32));
+
+    // Move args into callee-saved registers; total = 0.
+    emit_word(&e->code, arm64_mov_w_reg(19, 0));   // fd
+    emit_word(&e->code, arm64_mov_w_reg(20, 1));   // iovs_ptr
+    emit_word(&e->code, arm64_mov_w_reg(21, 2));   // iovs_len
+    emit_word(&e->code, arm64_mov_w_reg(23, 3));   // nwritten_ptr
+    emit_word(&e->code, arm64_movz_x(22, 0, 0));   // total = 0
+
+    // loop_top:
+    uint32_t loop_top = (uint32_t)e->code.len;
+    uint32_t cbz_site = (uint32_t)e->code.len;
+    emit_word(&e->code, arm64_cbz_w(21, 0));        // patched -> loop_done
+    // x10 = linmem + iovs_ptr
+    emit_word(&e->code, arm64_add_x_xn_wm_uxtw(10, 28, 20));
+    emit_word(&e->code, arm64_ldr_w_xn(11, 10, 0));  // buf_ptr
+    emit_word(&e->code, arm64_ldr_w_xn(12, 10, 4));  // buf_len
+    // _write(fd, linmem+buf_ptr, buf_len)
+    emit_word(&e->code, arm64_mov_w_reg(0, 19));
+    emit_word(&e->code, arm64_add_x_xn_wm_uxtw(1, 28, 11));
+    emit_word(&e->code, arm64_mov_w_reg(2, 12));
+    CallReloc rel = {
+        .site_off = (uint32_t)e->code.len,
+        .target = STUB_WRITE,
+        .is_b = 0,
+    };
+    ef_push_reloc(e, rel);
+    emit_word(&e->code, arm64_bl(0));
+    // total += x0  (treat negative returns as 0-ish; minimal handling)
+    emit_word(&e->code, arm64_add_x_reg(22, 22, 0));
+    // iovs_ptr += 8; iovs_len -= 1
+    emit_word(&e->code, arm64_add_w_imm(20, 20, 8));
+    emit_word(&e->code, arm64_sub_w_imm(21, 21, 1));
+    // b loop_top
+    int32_t back = (int32_t)loop_top - (int32_t)e->code.len;
+    emit_word(&e->code, arm64_b(back));
+
+    // loop_done:
+    patch_cbz_local(e->code.data, cbz_site, (uint32_t)e->code.len);
+    // *nwritten_ptr = (i32)total
+    emit_word(&e->code, arm64_add_x_xn_wm_uxtw(10, 28, 23));
+    emit_word(&e->code, arm64_str_w_xn(22, 10, 0));
+
+    // Epilogue
+    emit_word(&e->code, arm64_movz_w(0, 0));        // return 0
+    emit_word(&e->code, arm64_ldr_x_sp(19, 0));
+    emit_word(&e->code, arm64_ldr_x_sp(20, 8));
+    emit_word(&e->code, arm64_ldr_x_sp(21, 16));
+    emit_word(&e->code, arm64_ldr_x_sp(22, 24));
+    emit_word(&e->code, arm64_ldr_x_sp(23, 32));
+    emit_word(&e->code, arm64_add_sp_imm(48));
+    emit_word(&e->code, arm64_ldp_fp_lr_post());
+    emit_word(&e->code, arm64_ret());
 }
 
 // Patch a single bl/b at site_off so that PC-relative addressing
@@ -1741,6 +2271,13 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
         emit_proc_exit_shim(&efs[wm.import_idx_proc_exit]);
         efs[wm.import_idx_proc_exit].emitted = true;
     }
+    bool need_write_stub = false;
+    if (wm.import_idx_fd_write != UINT32_MAX
+        && reachable[wm.import_idx_fd_write]) {
+        emit_fd_write_shim(&efs[wm.import_idx_fd_write]);
+        efs[wm.import_idx_fd_write].emitted = true;
+        need_write_stub = true;
+    }
 
     for (uint32_t i = 0; i < wm.n_funcs; i++) {
         uint32_t fidx_combined = wm.n_imported_funcs + i;
@@ -1782,8 +2319,10 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     // align=2^2=4).
     while (text_size % 4) text_size++;
 
-    // __stubs: one entry per libSystem import. For now just `_exit`.
-    const uint32_t n_stubs = 1;
+    // __stubs: one entry per reachable libSystem import.
+    //   stub 0: _exit
+    //   stub 1: _write (only when fd_write is reachable)
+    const uint32_t n_stubs = need_write_stub ? 2u : 1u;
     const uint32_t stub_size = 12;
     const uint32_t stubs_off  = text_section_off + text_size;
     const uint32_t stubs_size = n_stubs * stub_size;
@@ -1798,18 +2337,17 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     // -----------------------------------------------------------------
     // Patch every emitted function's call relocations.
     // -----------------------------------------------------------------
-    // Address of the _exit stub (within file = its offset within __text
-    // = stubs_off - TEXT_SECTION_OFF, treated as if part of __text for
-    // the PC-relative math — but stubs follows __text so this is just
-    // text_size + (stub_idx * stub_size).
-    uint32_t exit_stub_text_off = text_size + 0 * stub_size;
+    // Each stub lives at __text-relative offset `text_size + i*stub_size`.
+    uint32_t exit_stub_text_off  = text_size + 0u * stub_size;
+    uint32_t write_stub_text_off = text_size + 1u * stub_size;
     for (uint32_t i = 0; i < n_total; i++) {
         if (!efs[i].emitted) continue;
         for (size_t k = 0; k < efs[i].n_relocs; k++) {
             CallReloc *cr = &efs[i].relocs[k];
-            uint32_t target_off = (cr->target == UINT32_MAX)
-                                  ? exit_stub_text_off
-                                  : efs[cr->target].text_off;
+            uint32_t target_off;
+            if (cr->target == STUB_EXIT)       target_off = exit_stub_text_off;
+            else if (cr->target == STUB_WRITE) target_off = write_stub_text_off;
+            else                               target_off = efs[cr->target].text_off;
             patch_branch(&efs[i], target_off, cr);
         }
     }
@@ -1875,7 +2413,7 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
         buf_le32(&img, 2);
         buf_le32(&img, 0); buf_le32(&img, 0);
         buf_le32(&img, 0x80000408u);
-        buf_le32(&img, 0);
+        buf_le32(&img, n_stubs);             // reserved1 = idx in indirect syms
         buf_le32(&img, stub_size);
         buf_le32(&img, 0);   // struct trailing pad
     }
@@ -2070,12 +2608,19 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     // Pad to __DATA_CONST.
     buf_pad_to(&img, DATA_CONST_FILE_BASE);
     // __got: one chained-fixup-format pointer per import. The format
-    // is DYLD_CHAINED_PTR_64_OFFSET (pointer_format=6). For a single
-    // import:
-    //   bit63=1 (is_bind), next=0 (end of chain), ordinal=0.
-    // The "ordinal=0" indexes the imports table where we place
-    // _exit at index 0.
-    buf_le64(&img, 0x8000000000000000ULL);
+    // is DYLD_CHAINED_PTR_64_OFFSET (pointer_format=6). Layout
+    // (LSB-first):
+    //   bits  0..23  ordinal (= imports[] index)
+    //   bits 24..31  addend
+    //   bits 32..50  reserved
+    //   bits 51..62  next (stride is 4 bytes -> step 2 to reach the next
+    //                       8-byte GOT pointer)
+    //   bit       63 bind (1)
+    for (uint32_t i = 0; i < n_stubs; i++) {
+        uint64_t v = (1ULL << 63) | (uint64_t)i;
+        if (i + 1 < n_stubs) v |= (2ULL << 51);    // next = 2 -> +8 bytes
+        buf_le64(&img, v);
+    }
 
     // __DATA segment payload (optional): [globals bytes][linmem bytes].
     if (has_data_seg) {
@@ -2167,15 +2712,24 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
 
     // imports table: one dyld_chained_import per import.
     //   { lib_ordinal: 8, weak_import: 1, name_offset: 23 }
-    // ordinal=1 (the only LC_LOAD_DYLIB, libSystem). Name "_exit"
-    // sits at offset 1 in the symbols table (after the leading 0).
+    // ordinal=1 (the only LC_LOAD_DYLIB, libSystem). Symbols are
+    // listed in the same order as stubs: _exit, then _write (if
+    // present). Each name_offset points into the symbols table
+    // following the leading 0.
     {
-        uint32_t entry = 1u | (0u << 8) | (1u << 9);
+        uint32_t name_off = 1;            // skip leading NUL
+        uint32_t entry = 1u | (0u << 8) | (name_off << 9);
+        buf_le32(&img, entry);
+    }
+    if (need_write_stub) {
+        uint32_t name_off = 1 + (uint32_t)strlen("_exit") + 1;
+        uint32_t entry = 1u | (0u << 8) | (name_off << 9);
         buf_le32(&img, entry);
     }
     // symbols table: leading 0 + cstrs + trailing 0s for alignment.
     buf_u8(&img, 0);
     buf_cstr(&img, "_exit");
+    if (need_write_stub) buf_cstr(&img, "_write");
     buf_u8(&img, 0);
     buf_u8(&img, 0);
     while ((img.len - chained_start) % 8) buf_u8(&img, 0);
@@ -2231,9 +2785,14 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     Buf strtab = {0};
     buf_u8(&strtab, 0x20);
     buf_u8(&strtab, 0x00);
-    uint32_t str_mh   = (uint32_t)strtab.len; buf_cstr(&strtab, "__mh_execute_header");
-    uint32_t str_main = (uint32_t)strtab.len; buf_cstr(&strtab, "_main");
-    uint32_t str_exit = (uint32_t)strtab.len; buf_cstr(&strtab, "_exit");
+    uint32_t str_mh    = (uint32_t)strtab.len; buf_cstr(&strtab, "__mh_execute_header");
+    uint32_t str_main  = (uint32_t)strtab.len; buf_cstr(&strtab, "_main");
+    uint32_t str_exit  = (uint32_t)strtab.len; buf_cstr(&strtab, "_exit");
+    uint32_t str_write = 0;
+    if (need_write_stub) {
+        str_write = (uint32_t)strtab.len;
+        buf_cstr(&strtab, "_write");
+    }
     while (strtab.len % 8) buf_u8(&strtab, 0);
 
     Buf symtab = {0};
@@ -2252,19 +2811,26 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     buf_u8(&symtab, 0x01); buf_u8(&symtab, 0);
     buf_le16(&symtab, 0x0100);
     buf_le64(&symtab, 0);
+    if (need_write_stub) {
+        // _write (undefined, dynamic-lookup)
+        buf_le32(&symtab, str_write);
+        buf_u8(&symtab, 0x01); buf_u8(&symtab, 0);
+        buf_le16(&symtab, 0x0100);
+        buf_le64(&symtab, 0);
+    }
+    uint32_t n_syms       = 2u + n_stubs;
+    uint32_t n_undefs     = n_stubs;
+    uint32_t iundefsym    = 2;
+    uint32_t first_undef  = iundefsym;   // first undefined symbol index
 
     // Indirect symbols: one per __got entry and one per __stubs entry.
-    // The reference puts indirect_syms BEFORE strtab; we'll do the
-    // same. Layout: __got indirect (1 entry), then __stubs indirect
-    // (1 entry). Indirect-sym value = index into symtab of the
-    // undefined symbol that backs that slot. Our symtab is:
-    //   0: __mh_execute_header
-    //   1: _main
-    //   2: _exit
-    // so both indirects reference index 2.
+    // Layout: __got[0..n_stubs-1] then __stubs[0..n_stubs-1]. Each value
+    // is an index into the symtab pointing at the undefined symbol
+    // that backs that GOT / stub slot. Our symtab undefs are laid out
+    // in the same order as stubs (stub i -> undef symbol first_undef+i).
     Buf indsyms = {0};
-    buf_le32(&indsyms, 2);   // __got[0]
-    buf_le32(&indsyms, 2);   // __stubs[0]
+    for (uint32_t i = 0; i < n_stubs; i++) buf_le32(&indsyms, first_undef + i); // GOT
+    for (uint32_t i = 0; i < n_stubs; i++) buf_le32(&indsyms, first_undef + i); // stubs
 
     // Emit symtab, indsyms, strtab in that order (matches the
     // reference's offset ordering and the dysymtab indirectsymoff
@@ -2309,15 +2875,15 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     buf_patch_le32(&img, pos_lc_exports_trie     + 8,  (uint32_t)exports_start);
     buf_patch_le32(&img, pos_lc_exports_trie     + 12, exports_size);
     buf_patch_le32(&img, pos_lc_symtab           + 8,  (uint32_t)symtab_off);
-    buf_patch_le32(&img, pos_lc_symtab           + 12, 3);                       // nsyms
+    buf_patch_le32(&img, pos_lc_symtab           + 12, n_syms);                  // nsyms
     buf_patch_le32(&img, pos_lc_symtab           + 16, (uint32_t)strtab_off);
     buf_patch_le32(&img, pos_lc_symtab           + 20, (uint32_t)strtab.len);
-    buf_patch_le32(&img, pos_lc_dysymtab         + 8,  0);
-    buf_patch_le32(&img, pos_lc_dysymtab         + 12, 0);
-    buf_patch_le32(&img, pos_lc_dysymtab         + 16, 0);
-    buf_patch_le32(&img, pos_lc_dysymtab         + 20, 2);
-    buf_patch_le32(&img, pos_lc_dysymtab         + 24, 2);
-    buf_patch_le32(&img, pos_lc_dysymtab         + 28, 1);
+    buf_patch_le32(&img, pos_lc_dysymtab         + 8,  0);                       // ilocalsym
+    buf_patch_le32(&img, pos_lc_dysymtab         + 12, 0);                       // nlocalsym
+    buf_patch_le32(&img, pos_lc_dysymtab         + 16, 0);                       // iextdefsym
+    buf_patch_le32(&img, pos_lc_dysymtab         + 20, 2);                       // nextdefsym
+    buf_patch_le32(&img, pos_lc_dysymtab         + 24, iundefsym);               // iundefsym
+    buf_patch_le32(&img, pos_lc_dysymtab         + 28, n_undefs);                // nundefsym
     buf_patch_le32(&img, pos_lc_dysymtab         + 32, 0);
     buf_patch_le32(&img, pos_lc_dysymtab         + 36, 0);
     buf_patch_le32(&img, pos_lc_dysymtab         + 40, 0);
@@ -2325,7 +2891,7 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     buf_patch_le32(&img, pos_lc_dysymtab         + 48, 0);
     buf_patch_le32(&img, pos_lc_dysymtab         + 52, 0);
     buf_patch_le32(&img, pos_lc_dysymtab         + 56, (uint32_t)indsyms_off);
-    buf_patch_le32(&img, pos_lc_dysymtab         + 60, 2);
+    buf_patch_le32(&img, pos_lc_dysymtab         + 60, 2u * n_stubs);            // nindirectsyms
     buf_patch_le32(&img, pos_lc_dysymtab         + 64, 0);
     buf_patch_le32(&img, pos_lc_dysymtab         + 68, 0);
     buf_patch_le32(&img, pos_lc_dysymtab         + 72, 0);

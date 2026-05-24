@@ -723,3 +723,8 @@ targets = ["macho"]
 name = "macho_loop"
 expected_exit_code = 3
 targets = ["macho"]
+
+[[test]]
+name = "macho_hello"
+expected_stdout = "3\n"
+targets = ["macho"]

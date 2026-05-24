@@ -1,0 +1,4 @@
+int main() {
+    _tinyc_print(3);
+    return 0;
+}
