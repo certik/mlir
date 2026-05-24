@@ -61,6 +61,7 @@
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/ControlFlowToSCF/ControlFlowToSCF.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
+#include "mlir/Conversion/UBToLLVM/UBToLLVM.h"
 #include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVMPass.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Target/LLVMIR/Export.h"
@@ -1585,6 +1586,11 @@ extern "C" void MLIR_SpliceBlockOps(MLIR_Context *, MLIR_BlockHandle dst_h,
 // upstream MLIR's pass pipeline / translator / LLVM target machine.
 // -----------------------------------------------------------------------------
 
+// Forward declaration: applies upstream's LiftControlFlowToSCF transform to
+// `llvm.func` bodies (the stock pass only walks `func.func`). Implemented
+// further down in this file.
+static void liftLLVMFuncCFGToSCF(mlir::ModuleOp module);
+
 extern "C" bool MLIR_LowerToLLVMDialectUpstream(MLIR_Context *ctx,
                                                 MLIR_OpHandle module_h) {
     (void)ctx;
@@ -1617,7 +1623,17 @@ extern "C" bool MLIR_LowerToLLVMDialectUpstream(MLIR_Context *ctx,
         mlir::IRRewriter rewriter(&mctx);
         (void)mlir::eraseUnreachableBlocks(rewriter, module->getRegions());
     }
+    // Lift any CFG (cf.cond_br/cf.br) inside structured ops (scf.if/scf.for/
+    // scf.while) up to nested SCF form first. tinyc's `&&` / `||` lowering
+    // builds an `scf.if` whose then/else regions evaluate the rhs, and if
+    // that rhs itself emits CFG (e.g. a nested ternary), the result is a
+    // multi-block `scf.if` region — which violates `scf.if`'s SizedRegion<1>
+    // invariant and trips `createConvertSCFToCFPass` later in the pipeline.
+    // Running the lift first rewrites the multi-block region into a nested
+    // single-block `scf.if`, restoring `scf.if`'s invariant.
+    liftLLVMFuncCFGToSCF(module);
     mlir::PassManager pm(&mctx);
+    pm.addPass(mlir::createLiftControlFlowToSCFPass());
     pm.addPass(mlir::createConvertSCFToCFPass());
     if (has_vector_op) {
         pm.addPass(mlir::createConvertVectorToLLVMPass());
@@ -1626,6 +1642,10 @@ extern "C" bool MLIR_LowerToLLVMDialectUpstream(MLIR_Context *ctx,
     pm.addPass(mlir::createConvertControlFlowToLLVMPass());
     pm.addPass(mlir::createArithToLLVMConversionPass());
     pm.addPass(mlir::createConvertFuncToLLVMPass());
+    // The lift-to-SCF pass above can introduce `ub.poison` values for
+    // SSA edges it cannot prove a concrete value for; convert them to
+    // `llvm.poison` so LLVM-IR translation accepts the module.
+    pm.addPass(mlir::createUBToLLVMConversionPass());
     pm.addPass(mlir::createReconcileUnrealizedCastsPass());
     if (mlir::failed(pm.run(module))) {
         std::fprintf(stderr,
