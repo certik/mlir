@@ -2410,10 +2410,24 @@ static StructDef *parse_struct_def(P *p) {
         }
         // One or more comma-separated declarators sharing the base type
         // `ft` parsed above. Each may add its own `[N]`/`[N][M]` suffix.
+        // We also accept (and tolerate) per-declarator pointer suffixes
+        // matching the one already applied to the base, e.g.
+        //   const uint8_t *p, *end;
+        // which is equivalent to two pointer fields. The first `*` was
+        // already consumed when the base type was parsed; the second
+        // `*` is redundant given how the base-type code already applies
+        // the pointer to all declarators in the list. We don't yet
+        // model the `int *a, b;` case where `b` is non-pointer.
         Type base_ft = ft;
         bool more_decls = true;
         while (more_decls) {
             Type ft = base_ft;
+            // Consume optional `*` (or `**`) leader on this declarator.
+            // The pointer kind was already applied to base_ft, so we
+            // just skip the tokens.
+            if (accept(p, TC_TK_STAR)) {
+                (void)accept(p, TC_TK_STAR);
+            }
             TcTok fn = cur(p);
             expect(p, TC_TK_IDENT, str_lit("expected field name"));
             // Optional array suffix `[N]` or `[N][M]`.
