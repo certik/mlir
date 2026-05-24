@@ -1,0 +1,35 @@
+// Regression test: `uint8_t arr[N]` (i.e. an array of a *typedef'd*
+// 8-bit integer alias) must allocate 1-byte-stride storage, not
+// 4-byte-stride.
+//
+// Previously the typedef-driven declaration path in parse.c left
+// `array_elem_is_i8` unset, so emit.c chose `i32` as the element type
+// for `uint8_t arr[N]` (32 bytes for N=8) while still selecting `i8`
+// for raw `char arr[N]` (8 bytes). This bit tinyc itself once it tried
+// to compile its own backend (`mlir_wasmstack_to_bin.c`) — the wasm
+// header
+//
+//     static const uint8_t magic[8] = {0,'a','s','m', 1,0,0,0};
+//     buf_append(&img, magic, 8);
+//
+// ended up appending the first 8 bytes of an i32-strided buffer
+// (`00 00 00 00 61 00 00 00`) instead of the expected wasm magic
+// (`00 61 73 6d 01 00 00 00`).
+//
+// The test exercises three call sites simultaneously:
+//   * a local `uint8_t magic[8]` with an aggregate initializer,
+//   * `sizeof(magic)` (which must equal the array length in bytes — 8),
+//   * an indexed read of every element (must round-trip the 8 init values
+//     without overlap or truncation).
+
+typedef unsigned char uint8_t;
+
+int main() {
+    uint8_t magic[8] = {0, 97, 115, 109, 1, 0, 0, 0};
+    int sz = (int)sizeof(magic);
+    _tinyc_print(sz);
+    for (int i = 0; i < 8; i++) {
+        _tinyc_print((int)magic[i]);
+    }
+    return 0;
+}

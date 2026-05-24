@@ -1,0 +1,52 @@
+// Regression test: enum initializers accept full constant expressions.
+// Previously tinyc only accepted a single int literal or a previously-
+// declared enumerator (optionally with a unary minus). Standard C allows
+// any integer constant expression, including arithmetic, bitwise ops,
+// shifts, comparisons, and ternaries built from integer literals and
+// already-declared enumerators.
+//
+// Used in mlir_wasm_link.c (~line 1330):
+//     enum {
+//         PAGE_SIZE     = 65536u,
+//         STACK_SIZE    = 64u * 1024u,
+//         INITIAL_PAGES = 2u,
+//         GLOBAL_BASE_OFFSET = 1024u,
+//     };
+
+enum {
+    PAGE_SIZE          = 65536u,
+    STACK_SIZE         = 64u * 1024u,
+    INITIAL_PAGES      = 2u,
+    GLOBAL_BASE_OFFSET = 1024u,
+};
+
+enum {
+    A = 1,
+    B = A + 2,
+    C = A * 10 + B,
+    D = (1 << 8) | 0xff,
+    E = ~0,
+    F = A == 1 ? 100 : 200,
+    G = -A,
+    H = A < B ? B - A : 0,
+    I = (5 + 3) * 2 - 1,
+};
+
+int main(void) {
+    _tinyc_print(PAGE_SIZE);            // 65536
+    _tinyc_print(STACK_SIZE);           // 65536
+    _tinyc_print(INITIAL_PAGES);        // 2
+    _tinyc_print(GLOBAL_BASE_OFFSET);   // 1024
+
+    _tinyc_print(A);  // 1
+    _tinyc_print(B);  // 3
+    _tinyc_print(C);  // 13
+    _tinyc_print(D);  // 511
+    _tinyc_print(E);  // -1
+    _tinyc_print(F);  // 100
+    _tinyc_print(G);  // -1
+    _tinyc_print(H);  // 2
+    _tinyc_print(I);  // 15
+
+    return 0;
+}

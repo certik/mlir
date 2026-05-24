@@ -17,6 +17,7 @@ jobs:
             pixi-command: |
               pixi run -e linux test_linux
               pixi run -e wasm test_wasm
+              pixi run -e wasm verify_tinyc_wasm_selfhost
               pixi run -e upstream test_cross
               pixi run -e upstream validate_refs
               pixi run -e upstream test_tinyc_upstream
@@ -34,6 +35,7 @@ jobs:
             pixi-command: |
               pixi run -e macos test_macos
               pixi run -e wasm test_wasm
+              pixi run -e wasm verify_tinyc_wasm_selfhost
               pixi run -e upstream test_cross
               pixi run -e upstream validate_refs
               pixi run -e upstream test_tinyc_upstream
@@ -52,6 +54,7 @@ jobs:
               call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
               pixi run -e windows test_windows || exit /b 1
               pixi run -e wasm test_wasm || exit /b 1
+              pixi run -e wasm verify_tinyc_wasm_selfhost || exit /b 1
               pixi run -e upstream test_cross || exit /b 1
               pixi run -e upstream validate_refs || exit /b 1
               pixi run -e upstream test_tinyc_upstream || exit /b 1

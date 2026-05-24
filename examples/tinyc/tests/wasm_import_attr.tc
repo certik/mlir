@@ -1,0 +1,40 @@
+// MRE for the wasm `import_module` / `import_name` attribute pipeline.
+//
+// `corec/platform/platform_wasm.c` declares WASI imports as
+//   __attribute__((__import_module__("wasi_snapshot_preview1"),
+//                  __import_name__("fd_write"))) fd_write(...);
+// so the wasm binary imports `fd_write` from the `wasi_snapshot_preview1`
+// module (which wasmtime resolves via its built-in WASI implementation),
+// not from the default `env` module.
+//
+// tinyc's parser previously dropped these attribute payloads, so the
+// emitter placed every import in `env` — which caused the resulting
+// wasm to fail instantiation: `unknown import: env::fd_write`.
+//
+// This test re-declares `fd_write` from tinyc-compiled code, calls it
+// to write "hi\n" to stdout, and asserts the wasm runs end-to-end
+// under wasmtime. The same import line also appears in the clang-built
+// `runtime_wasm.c`; wasm-ld dedupes them — but only if both sides
+// agree on the import module name, which is exactly what we verify.
+//
+// native_skip: the host libc has no `fd_write`, so the native runner
+// can't satisfy the link.
+
+typedef struct {
+    unsigned char *buf;
+    unsigned int   buf_len;
+} ciovec_t;
+
+__attribute__((__import_module__("wasi_snapshot_preview1"),
+               __import_name__("fd_write")))
+unsigned int fd_write(unsigned int fd, const ciovec_t *iovs,
+                      unsigned int iovs_len, unsigned int *nwritten);
+
+int main() {
+    ciovec_t iov;
+    iov.buf     = (unsigned char *)"hi\n";
+    iov.buf_len = 3;
+    unsigned int nw;
+    fd_write(1, &iov, 1, &nw);
+    return 0;
+}

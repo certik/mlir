@@ -1,0 +1,14 @@
+// Regression: a forward `extern` declaration for a function that
+// nobody actually calls must NOT leak into the wasm binary as an
+// import — otherwise self-host builds fail to link (the linker has
+// no definition to bind the import to). Before the fix, emit_program
+// emitted a `func.func {sym_visibility = "private"}` for every
+// forward declaration regardless of whether it was referenced.
+
+extern int unused_extern_never_called(int x);
+extern void *unused_extern_returns_ptr(void);
+
+int main() {
+    _tinyc_print(42);
+    return 0;
+}

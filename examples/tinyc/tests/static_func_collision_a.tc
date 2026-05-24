@@ -1,0 +1,21 @@
+// Regression test (file A) for tinyc emitting wasm `static` function
+// symbols with default (global) binding, causing cross-object name
+// collisions in the wasm linker. Each translation unit has its own
+// `static int helper(int)` with a different body — under correct
+// linkage handling they must NOT shadow each other, and main() must
+// call each TU's own copy.
+//
+// Bug history: the wasmstack-to-bin emitter wrote
+//   flags = (imported ? UNDEFINED : 0)
+// for every defined function symbol. Under wasm linking semantics a
+// zero flag is BINDING_GLOBAL, so two .wasm.o files both defining
+// `static int helper(int)` were linked as a single global symbol with
+// signature mismatch, producing
+//   error: type mismatch in call, expected [...] but got [...]
+// when validating the linked module.
+
+static int helper(int v) { return v + 100; }
+
+int call_a(int v) {
+    return helper(v);
+}

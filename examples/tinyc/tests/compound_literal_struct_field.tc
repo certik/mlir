@@ -1,0 +1,42 @@
+// Regression test: compound literal with a designated struct-typed field.
+//
+//   ((Param){ .name = pname, .type = pty, .line = N })
+//
+// failed with
+//   tinyc emit error: compound-literal struct field needs a struct value
+// because the EX_COMPOUND path called emit_expr() on the arg, which for
+// an EX_VAR of struct type does not return is_ptr=true with the source
+// address. The fix routes struct-typed fields through
+// resolve_struct_source(), the same helper used for struct-typed call
+// arguments, with a fallback to emit_expr for nested compound literals.
+//
+// Pattern used in examples/tinyc/parse.c
+//   VecParam_push_back(p->arena, &f->params,
+//       ((Param){.name = pname, .type = pty, .line = cur(p).line}));
+
+typedef struct Type  { int kind; int n; } Type;
+typedef struct Param { int line; Type type; int id; } Param;
+
+void use(Param p) {
+    _tinyc_print(p.line);
+    _tinyc_print(p.type.kind);
+    _tinyc_print(p.type.n);
+    _tinyc_print(p.id);
+}
+
+int main(void) {
+    Type t;
+    t.kind = 7;
+    t.n = 99;
+
+    // Designated init reorders fields and includes a struct-typed one.
+    use(((Param){ .line = 12, .type = t, .id = 33 }));
+
+    // Positional init with struct-typed field at non-leading position.
+    use(((Param){ 50, t, 77 }));
+
+    // Nested compound literal in the struct field still works.
+    use(((Param){ .line = 99, .type = ((Type){ .kind = 4, .n = 5 }), .id = 1 }));
+
+    return 0;
+}

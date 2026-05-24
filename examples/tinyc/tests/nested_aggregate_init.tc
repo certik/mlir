@@ -1,0 +1,39 @@
+// Regression test: aggregate initializers must allow nested `{...}`
+// for struct-typed fields.
+//
+// Before this fix, tinyc's parser called parse_expr on each element of
+// an aggregate, so `{ 7, { 3, 4 } }` was rejected with
+//   "expected expression / expected '}' in initializer".
+// The fix recurses into parse_aggregate_init when an element starts
+// with `{`, and the emitter propagates the surrounding field's type
+// down to the inner EX_COMPOUND.
+//
+// Mirrors the shape of `static PPTok eof = { PP_END, {NULL,0}, ... };`
+// from examples/tinyc/preprocess.c, but uses block-scope locals so the
+// test does not also depend on function-scope `static` storage.
+
+typedef struct { int a; int b; } Inner;
+typedef struct { int kind; Inner text; } Outer;
+
+int main(void) {
+    Outer eof = { 7, { 3, 4 } };
+    _tinyc_print(eof.kind);
+    _tinyc_print(eof.text.a);
+    _tinyc_print(eof.text.b);
+
+    // Multiple nested struct fields + a trailing scalar field.
+    typedef struct {
+        int code;
+        Inner ll;
+        Inner ur;
+        int tail;
+    } Multi;
+    Multi m = { 11, { 1, 2 }, { 30, 40 }, 99 };
+    _tinyc_print(m.code);
+    _tinyc_print(m.ll.a);
+    _tinyc_print(m.ll.b);
+    _tinyc_print(m.ur.a);
+    _tinyc_print(m.ur.b);
+    _tinyc_print(m.tail);
+    return 0;
+}

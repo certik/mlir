@@ -1,0 +1,54 @@
+// Regression test for type_size/type_align hard-coding pointers as 8 bytes
+// regardless of target. On wasm32, pointers are 4 bytes, so `sizeof(S)` for
+// a struct of pointer fields used to be twice the actual layout, causing
+// `memset(&s, 0, sizeof s)` to write past the end of the struct and clobber
+// adjacent locals on the C stack.
+//
+// We declare a struct with four pointer fields surrounded by two `int`
+// canaries. If `sizeof(S)` is too large, the `my_memset` will overwrite the
+// canary that immediately follows `s` on the stack.
+
+typedef unsigned long size_t;
+
+static void my_memset(void *s, int c, size_t n) {
+    unsigned char *p = s;
+    unsigned char b = (unsigned char)c;
+    for (size_t i = 0; i < n; i = i + 1) p[i] = b;
+}
+
+struct S {
+    char *a;
+    char *b;
+    void *c;
+    int  *d;
+};
+
+int main() {
+    int before = 0x11111111;
+    struct S s;
+    int after = 0x22222222;
+
+    my_memset(&s, 0, sizeof(s));
+
+    // The canaries on either side of `s` must remain untouched, regardless
+    // of whether wasm32 (4-byte ptr) or native (8-byte ptr) is in use.
+    if (before != 0x11111111) {
+        _tinyc_print(101);
+        return 1;
+    }
+    if (after != 0x22222222) {
+        _tinyc_print(102);
+        return 2;
+    }
+
+    // Also sanity-check sizeof against the pointer width that's actually
+    // used at runtime: `sizeof(void *)` and `sizeof(struct S)` must agree.
+    // `sizeof(struct S)` should equal 4 * sizeof(void *).
+    if (sizeof(struct S) != 4 * sizeof(void *)) {
+        _tinyc_print(103);
+        return 3;
+    }
+
+    _tinyc_print(0);
+    return 0;
+}

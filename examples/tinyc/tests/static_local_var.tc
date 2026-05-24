@@ -1,0 +1,37 @@
+// Regression test: function-local `static` variables must persist
+// across calls, not be reset to their initializer on every call.
+//
+// Previously tinyc's parser silently dropped the `static` storage
+// class (treating it identically to a plain local), so the counter
+// below was reinitialized to 0 each call and the function returned
+// 1, 1, 1 instead of 1, 2, 3. The `static int anon_counter = 0;`
+// inside parse_struct_def relies on this: when the counter resets,
+// every anonymous struct ends up with the same synthesized name and
+// later field lookups for the second/third anonymous member all hit
+// the *first* registered struct, failing with "unknown struct field"
+// during stage-2 self-host of tinyc itself.
+
+int counter() {
+    static int n = 0;
+    n++;
+    return n;
+}
+
+// A second function with its own static local must NOT alias the
+// `counter`-local `n` even though both are named `n`. The parser
+// mangles the global name with the function name.
+int second() {
+    static int n = 100;
+    n += 10;
+    return n;
+}
+
+int main() {
+    _tinyc_print(counter());
+    _tinyc_print(counter());
+    _tinyc_print(counter());
+    _tinyc_print(second());
+    _tinyc_print(second());
+    _tinyc_print(counter());
+    return 0;
+}

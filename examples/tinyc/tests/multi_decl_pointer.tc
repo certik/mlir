@@ -1,0 +1,38 @@
+// Regression test: multi-declarator local declarations where each
+// declarator has its own pointer suffix:
+//
+//     T *a, *b;
+//
+// Previously tinyc accepted `T *a, b;` (re-using the base typedef
+// type) but choked on the second `*` with
+//     "expected identifier" / "expected ';'"
+// because the comma-loop did not consume per-declarator pointer
+// suffixes.
+//
+// Used in examples/tinyc/emit.c at line 1126:
+//     Expr *idx_a = NULL, *idx_b = NULL;
+
+typedef struct Expr_s { int v; } Expr;
+
+int main(void) {
+    Expr a;
+    a.v = 11;
+    Expr b;
+    b.v = 22;
+
+    Expr *p = &a, *q = &b;
+    _tinyc_print(p->v);
+    _tinyc_print(q->v);
+
+    // Mixed: pointer + non-pointer (currently both end up pointers,
+    // matching tinyc's existing simplification).
+    Expr *r = &a, *s = &b;
+    if (r == p) _tinyc_print(100);
+    if (s == q) _tinyc_print(200);
+
+    // int* with multiple decls + inits.
+    int x = 7, y = 8;
+    int *px = &x, *py = &y;
+    _tinyc_print(*px + *py);
+    return 0;
+}

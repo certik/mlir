@@ -5,6 +5,7 @@
 #include <assert.h>
 
 #include <base/string.h>
+#include <base/strbuf.h>
 #include <base/io.h>
 #include <base/vector.h>
 
@@ -642,12 +643,13 @@ bool parse_type_string(Parser *parser, string *out) {
         return false;
     }
 
-    string ty = parser_token_str(parser);
+    strbuf ty = strbuf_make();
+    strbuf_append(parser->arena, &ty, parser_token_str(parser));
     parser_next_token(parser);
 
     // Dialect types starting with '!'
     if (ty.size == 1 && ty.str[0] == '!' && (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME))) {
-        ty = str_concat(parser->arena, ty, parser_token_str(parser));
+        strbuf_append(parser->arena, &ty, parser_token_str(parser));
         parser_next_token(parser);
     }
 
@@ -657,12 +659,12 @@ bool parse_type_string(Parser *parser, string *out) {
         do {
             if (parser_peek(parser, TK_LANGLE)) depth++;
             else if (parser_peek(parser, TK_RANGLE)) depth--;
-            ty = str_concat(parser->arena, ty, parser_token_str(parser));
+            strbuf_append(parser->arena, &ty, parser_token_str(parser));
             parser_next_token(parser);
         } while (depth > 0 && !parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_NEWLINE));
     }
 
-    *out = ty;
+    *out = strbuf_to_string(ty);
     return true;
 }
 
@@ -908,7 +910,8 @@ MLIR_LocationHandle parse_loc(Parser *parser) {
     // Check what kind of location this is
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("callsite"))) {
         // Capture loc(callsite(...)) verbatim as original_text
-        string text = str_lit("loc(");
+        strbuf text = strbuf_make();
+        strbuf_append(parser->arena, &text, str_lit("loc("));
         // Accumulate tokens until we hit the matching ')' of loc(
         int depth = 0;
         while (!parser_peek(parser, TK_EOF)) {
@@ -925,14 +928,14 @@ MLIR_LocationHandle parse_loc(Parser *parser) {
                 if ((c0 == '#' || (c0 >= 'A' && c0 <= 'z')) && last != '(' && last != ' ' && last != ',') {
                     need_space = true;
                 }
-                if (need_space) text = str_concat(parser->arena, text, str_lit(" "));
+                if (need_space) strbuf_append(parser->arena, &text, str_lit(" "));
             }
-            text = str_concat(parser->arena, text, tok);
+            strbuf_append(parser->arena, &text, tok);
             parser_next_token(parser);
         }
         parser_expect(parser, TK_RPAREN);
-        text = str_concat(parser->arena, text, str_lit(")"));
-        loc = MLIR_CreateLocationUnknown(parser->ctx, text);
+        strbuf_append(parser->arena, &text, str_lit(")"));
+        loc = MLIR_CreateLocationUnknown(parser->ctx, strbuf_to_string(text));
         return loc;
     } else if (parser_peek(parser, TK_STRING)) {
         // loc("filename":line:col) or loc("name")
@@ -1500,19 +1503,21 @@ MLIR_OpHandle parse_operation(Parser *parser) {
     // Parse operation name
     string opname = str_lit("");
     if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
-        opname = parser_token_str(parser);
+        strbuf name_buf = strbuf_make();
+        strbuf_append(parser->arena, &name_buf, parser_token_str(parser));
         parser_next_token(parser);
         // Accumulate dotted segments into full opname, e.g., tt.reduce.return
         while (parser_peek(parser, TK_DOT)) {
             parser_expect(parser, TK_DOT);
             if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
-                opname = str_concat(parser->arena, opname, str_lit("."));
-                opname = str_concat(parser->arena, opname, parser_token_str(parser));
+                strbuf_append(parser->arena, &name_buf, str_lit("."));
+                strbuf_append(parser->arena, &name_buf, parser_token_str(parser));
                 parser_next_token(parser);
             } else {
                 break;
             }
         }
+        opname = strbuf_to_string(name_buf);
     } else if (parser_peek(parser, TK_STRING)) {
         opname = parser_token_str(parser);
         opname = str_substr(opname, 1, opname.size-2);

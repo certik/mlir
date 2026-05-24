@@ -1,0 +1,32 @@
+// Regression for tinyc bug #41 (parser/codegen bug surfaced during
+// stage-3 self-host): when an array-indexed `char **` is followed by
+// pointer arithmetic — e.g. `argv[j] + 9` — tinyc miscompiled the
+// pointer arithmetic to advance by `9 * sizeof(char *)` (= 36 bytes
+// on wasm32) instead of 9 bytes. The miscompile was visible in
+// driver.c's `--export=NAME` argument parser: `link_entry = argv[j]
+// + 9;` was supposed to skip past the "--export=" prefix (9 chars)
+// to point at the entry name, but instead jumped 36 bytes into the
+// next argv string, so the linker tried to find an export named e.g.
+// "tage3/corec_base_arena.c.wasm.o".
+//
+// The bug only triggered when the indexed base was `char **` and
+// the result of indexing was used directly in pointer arithmetic
+// without an intermediate `char *` temporary; assigning to a `char *`
+// first masked the bug because the assignment forced re-evaluation
+// of the type to `char *`. The MRE here exercises both forms.
+int main() {
+    char *s = "--export=_start_more_chars_for_safety";
+    char *arr[3];
+    arr[0] = s;
+    arr[1] = s;
+    arr[2] = s;
+    char **a = arr;
+    char *p1 = a[1] + 9;
+    _tinyc_print(*p1);
+    _tinyc_print(*(p1 + 1));
+    _tinyc_print(*(p1 + 2));
+    _tinyc_print(*(p1 + 3));
+    _tinyc_print(*(p1 + 4));
+    _tinyc_print(*(p1 + 5));
+    return 0;
+}

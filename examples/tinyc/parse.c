@@ -3,6 +3,7 @@
 #include "tinyc.h"
 
 #include <base/arena.h>
+#include <base/format.h>
 #include <base/io.h>
 #include <base/string.h>
 
@@ -31,6 +32,16 @@ typedef struct {
     Enumerator *enums;
     int err_count;
     struct Program *prog;
+    // When true, `long` / `size_t` / `intptr_t` / `uintptr_t` /
+    // `ptrdiff_t` / `ssize_t` are 32-bit (wasm32-wasi ABI). When
+    // false (the default for native host targets) they're 64-bit.
+    // `long long` and `int64_t` are always 64-bit regardless.
+    bool target_wasm32;
+    // Name of the function currently being parsed (set by parse_func
+    // around the body). Used to mangle function-local `static`
+    // variables into unique module-scope global names.
+    string cur_func_name;
+    int    static_local_counter;
 } P;
 
 static TcTok cur(P *p) { return p->toks[p->i]; }
@@ -48,6 +59,71 @@ static Enumerator *enum_lookup(P *p, string name) {
         if (str_eq(e->name, name)) return e;
     }
     return NULL;
+}
+
+// Best-effort constant-folder used by enum-body parsing. Returns true iff
+// `ex` is a constant integer expression whose value can be computed using
+// only int literals and previously-declared enumerators. Recognizes the
+// common arithmetic, bitwise, shift, comparison and ternary forms; runs
+// before the emitter's `ast_fold_int`, so it intentionally only handles
+// the subset that doesn't need scope/type information.
+static bool parse_const_eval(P *p, Expr *ex, int64_t *out) {
+    if (!ex) return false;
+    switch (ex->kind) {
+        case EX_INT:
+            *out = ex->int_value;
+            return true;
+        case EX_VAR: {
+            Enumerator *en = enum_lookup(p, ex->name);
+            if (!en) return false;
+            *out = en->value;
+            return true;
+        }
+        case EX_UN: {
+            int64_t a;
+            if (!parse_const_eval(p, ex->lhs, &a)) return false;
+            switch (ex->op) {
+                case OP_NEG:  *out = -a;        return true;
+                case OP_BNOT: *out = ~a;        return true;
+                case OP_NOT:  *out = (a == 0);  return true;
+                default: return false;
+            }
+        }
+        case EX_BIN: {
+            int64_t a, b;
+            if (!parse_const_eval(p, ex->lhs, &a)) return false;
+            if (!parse_const_eval(p, ex->rhs, &b)) return false;
+            switch (ex->op) {
+                case OP_ADD:  *out = a + b; return true;
+                case OP_SUB:  *out = a - b; return true;
+                case OP_MUL:  *out = a * b; return true;
+                case OP_DIV:  if (b == 0) return false; *out = a / b; return true;
+                case OP_MOD:  if (b == 0) return false; *out = a % b; return true;
+                case OP_BAND: *out = a & b; return true;
+                case OP_BOR:  *out = a | b; return true;
+                case OP_BXOR: *out = a ^ b; return true;
+                case OP_SHL:  *out = a << b; return true;
+                case OP_SHR:  *out = a >> b; return true;
+                case OP_LT:   *out = a <  b; return true;
+                case OP_LE:   *out = a <= b; return true;
+                case OP_GT:   *out = a >  b; return true;
+                case OP_GE:   *out = a >= b; return true;
+                case OP_EQ:   *out = a == b; return true;
+                case OP_NE:   *out = a != b; return true;
+                case OP_AND:  *out = (a != 0 && b != 0); return true;
+                case OP_OR:   *out = (a != 0 || b != 0); return true;
+                default: return false;
+            }
+        }
+        case EX_TERNARY: {
+            int64_t c;
+            if (!parse_const_eval(p, ex->lhs, &c)) return false;
+            Expr *pick = c ? ex->rhs : ex->lvalue;
+            return parse_const_eval(p, pick, out);
+        }
+        default:
+            return false;
+    }
 }
 
 static void perror_at(P *p, int line, string msg) {
@@ -88,6 +164,95 @@ static Stmt *new_stmt(P *p, StmtKind k, int line) {
 
 static Expr *parse_expr(P *p);
 static bool parse_sig_type(P *p, Type *out);
+
+// Holder for the subset of `__attribute__((...))` annotations that
+// affect codegen. Empty strings mean "not present". Used by the
+// declaration parser to collect attributes that appear before, after,
+// or in the middle of a declaration and then attach them to the
+// resulting Func.
+typedef struct {
+    string import_module;
+    string import_name;
+    string export_name;
+} AttrInfo;
+
+// Parse zero or more `__attribute__((...))` attribute lists. Recognized
+// attribute names: `import_module("...")`, `import_name("...")`,
+// `export_name("...")` (and the gcc-style `__import_module__` /
+// `__import_name__` / `__export_name__` underscore variants used by
+// corec/platform/platform_wasm.c). Unknown attributes are silently
+// skipped via balanced-paren scanning so that arbitrary GCC/Clang
+// annotations like `__attribute__((weak))` or `__attribute__((noinline))`
+// are accepted without modification of the source.
+//
+// `out` may be NULL when the caller doesn't care about the semantic
+// effect (e.g. attributes on a struct definition that we don't model).
+// In that case the attributes are still parsed and skipped so we can
+// continue past them.
+static bool attr_name_eq(string s, const char *bare) {
+    string b = str_from_cstr_view((char *)bare);
+    if (str_eq(s, b)) return true;
+    // Accept the `__name__` underscore-wrapped GCC spelling as well.
+    if (s.size != b.size + 4) return false;
+    if (s.str[0] != '_' || s.str[1] != '_') return false;
+    if (s.str[s.size - 2] != '_' || s.str[s.size - 1] != '_') return false;
+    for (size_t i = 0; i < b.size; i++) {
+        if (s.str[i + 2] != b.str[i]) return false;
+    }
+    return true;
+}
+static void parse_attributes(P *p, AttrInfo *out) {
+    while (cur(p).kind == TC_TK_KW_ATTRIBUTE) {
+        p->i++;
+        // `__attribute__` must be followed by `((` and end with `))`.
+        if (!expect(p, TC_TK_LPAREN, str_lit("expected '(' after __attribute__"))) return;
+        if (!expect(p, TC_TK_LPAREN, str_lit("expected '((' after __attribute__"))) return;
+        // Each attribute is either an identifier or
+        // identifier(args...). Multiple are comma-separated.
+        // Identifier `()` is also valid (no args).
+        for (;;) {
+            // Empty attribute list `()` — bail out.
+            if (cur(p).kind == TC_TK_RPAREN) break;
+            // An attribute name is an identifier; accept keywords like
+            // `const` and `static` as identifiers in this position too
+            // (gcc allows things like `__attribute__((const))`).
+            TcTok nm = cur(p);
+            string aname = nm.text;
+            if (nm.kind != TC_TK_IDENT && aname.size == 0) {
+                // Skip whatever token this is.
+                p->i++;
+            } else {
+                p->i++;
+            }
+            // Optional `(args)`.
+            if (accept(p, TC_TK_LPAREN)) {
+                // Capture the first string-literal argument for the
+                // attributes we care about.
+                string str_arg = (string){0};
+                if (cur(p).kind == TC_TK_STRING_LIT) {
+                    str_arg = cur(p).text;
+                }
+                // Skip the entire argument list, tracking parens.
+                int depth = 1;
+                while (depth > 0 && cur(p).kind != TC_TK_EOF) {
+                    if (cur(p).kind == TC_TK_LPAREN) depth++;
+                    else if (cur(p).kind == TC_TK_RPAREN) { depth--; if (depth == 0) break; }
+                    p->i++;
+                }
+                expect(p, TC_TK_RPAREN, str_lit("expected ')' in __attribute__"));
+                if (out) {
+                    if (attr_name_eq(aname, "import_module")) out->import_module = str_arg;
+                    else if (attr_name_eq(aname, "import_name")) out->import_name = str_arg;
+                    else if (attr_name_eq(aname, "export_name")) out->export_name = str_arg;
+                }
+            }
+            if (!accept(p, TC_TK_COMMA)) break;
+        }
+        expect(p, TC_TK_RPAREN, str_lit("expected ')' in __attribute__"));
+        expect(p, TC_TK_RPAREN, str_lit("expected '))' in __attribute__"));
+    }
+}
+
 // Parse the contents of `[ ... ]` as an array-length specifier. The
 // caller has already consumed the opening `[`. Consumes the closing `]`.
 // Behavior:
@@ -121,6 +286,7 @@ static void parse_enum_decl_top(P *p);
 static void parse_enum_body(P *p);
 static void parse_typedef_decl(P *p);
 static bool struct_def_equal(StructDef *a, StructDef *b);
+static StructDef *parse_struct_def(P *p);
 
 // Aggregate initializer: `{ v0, v1, ... }` or `{ .f1 = v0, .f2 = v1, ... }`.
 // Builds an EX_COMPOUND whose cast_type is the decl's type (struct or
@@ -148,7 +314,22 @@ static Expr *parse_aggregate_init(P *p, Type decl_type) {
                 fname = ft.text;
                 any_designated = true;
             }
-            Expr *v = parse_expr(p);
+            Expr *v;
+            if (cur(p).kind == TC_TK_LBRACE) {
+                // Nested aggregate initializer (e.g. `{ {a,b}, c }` for a
+                // struct field that is itself a struct or array). The
+                // element type isn't known here without resolving the
+                // surrounding struct definition, so flag the type as
+                // TY_VOID (a sentinel: void cannot otherwise appear as a
+                // cast_type). The emitter looks up the field type by
+                // position / designated name and fills it in before
+                // emitting the inner compound.
+                Type unset = (Type){0};
+                unset.kind = TY_VOID;
+                v = parse_aggregate_init(p, unset);
+            } else {
+                v = parse_expr(p);
+            }
             VecExprPtr_push_back(p->arena, &e->args, v);
             if (nn == cap) {
                 size_t ncap = cap ? cap * 2 : 4;
@@ -292,6 +473,10 @@ static Expr *parse_primary(P *p) {
         Expr *e = new_expr(p, EX_INT, t.line);
         e->int_value = t.int_value;
         e->is_i64 = t.is_i64;
+        e->is_long_long = t.is_long_long;
+        // On wasm32, a single-L suffix (`long`) is 32-bit, not 64-bit. Only
+        // `LL` (or having no L at all) is target-independent.
+        if (e->is_i64 && !e->is_long_long && p->target_wasm32) e->is_i64 = false;
         return e;
     }
     if (t.kind == TC_TK_FLOAT_LIT) {
@@ -308,11 +493,18 @@ static Expr *parse_primary(P *p) {
     }
     if (t.kind == TC_TK_KW_SIZEOF) {
         p->i++;
-        expect(p, TC_TK_LPAREN, str_lit("expected '(' after sizeof"));
+        Expr *e = new_expr(p, EX_SIZEOF, t.line);
+        // C also accepts `sizeof <unary-expression>` (no parens). In that
+        // form the operand is always an expression, never a type-name.
+        if (cur(p).kind != TC_TK_LPAREN) {
+            e->lhs = parse_primary(p);
+            e->sizeof_is_expr = true;
+            return e;
+        }
+        p->i++;  // consume '('
         // Disambiguate `sizeof(<type>)` vs `sizeof(<expr>)`. A type-name
         // starts with a base-type keyword, `const`, `enum`, or a typedef
         // identifier. Anything else is parsed as an expression.
-        Expr *e = new_expr(p, EX_SIZEOF, t.line);
         TcTokKind nxt = cur(p).kind;
         bool looks_like_type =
             nxt == TC_TK_KW_INT || nxt == TC_TK_KW_FLOAT || nxt == TC_TK_KW_DOUBLE ||
@@ -779,15 +971,32 @@ static Expr *parse_expr(P *p) { return parse_assign_or_or(p); }
 
 // Parse a base type keyword. Returns true if we consumed one and writes
 // the kind to *out. Pointer/array suffixes are handled at decl time.
-static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char) {
+//
+// `out_is_long` (out) is set to true when the type was declared with the
+// `long` keyword (one or more), false otherwise. Callers that build a
+// `Type` should copy this into `t.is_long` so that `_Generic` can
+// disambiguate `int` from `long` on wasm32 where both have storage
+// kind TY_I32 / int_bits == 32.
+//
+// `out_is_unsigned` (out) is set to true when the type was declared
+// with the `unsigned` keyword. Callers must propagate this into
+// `Type.int_unsigned` so that i32 -> i64 widening uses `arith.extui`
+// (zero-extend) instead of `arith.extsi` (sign-extend).
+static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char,
+                             bool *out_is_long, bool *out_is_unsigned) {
     *out_was_char = false;
+    *out_is_long = false;
+    *out_is_unsigned = false;
     skip_const(p);
     // C-style integer base specifier: any sequence of signed / unsigned /
-    // short / long / int / char / _Bool / bool. Any 'long' promotes to
-    // TY_I64; everything else is TY_I32.
+    // short / long / int / char / _Bool / bool. `long long` is always
+    // 64-bit; a single `long` is 64-bit on the native host but 32-bit
+    // on wasm32 (matching clang's wasm32-wasi ABI). Everything else is
+    // 32-bit.
     bool saw_int_kw = false;
-    bool saw_long_kw = false;
+    int  n_long_kw = 0;
     bool saw_signedness_kw = false;
+    bool saw_unsigned_kw = false;
     bool saw_short_kw = false;
     bool saw_char_kw = false;
     bool saw_bool_kw = false;
@@ -795,10 +1004,12 @@ static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char) {
     while (progress) {
         progress = false;
         while (cur(p).kind == TC_TK_KW_SIGNED || cur(p).kind == TC_TK_KW_UNSIGNED) {
-            saw_signedness_kw = true; p->i++; skip_const(p); progress = true;
+            saw_signedness_kw = true;
+            if (cur(p).kind == TC_TK_KW_UNSIGNED) saw_unsigned_kw = true;
+            p->i++; skip_const(p); progress = true;
         }
         while (cur(p).kind == TC_TK_KW_LONG) {
-            saw_long_kw = true; p->i++; skip_const(p); progress = true;
+            n_long_kw++; p->i++; skip_const(p); progress = true;
         }
         while (cur(p).kind == TC_TK_KW_SHORT) {
             saw_short_kw = true; p->i++; skip_const(p); progress = true;
@@ -814,7 +1025,14 @@ static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char) {
         }
     }
     *out_was_char = saw_char_kw;
-    if (saw_long_kw)         { *out = TY_I64; skip_const(p); return true; }
+    *out_is_long = (n_long_kw >= 1);
+    *out_is_unsigned = saw_unsigned_kw;
+    if (n_long_kw > 0) {
+        bool is_64 = (n_long_kw >= 2) || !p->target_wasm32;
+        *out = is_64 ? TY_I64 : TY_I32;
+        skip_const(p);
+        return true;
+    }
     if (saw_int_kw || saw_signedness_kw || saw_short_kw || saw_char_kw || saw_bool_kw) {
         *out = TY_I32; skip_const(p); return true;
     }
@@ -836,7 +1054,9 @@ static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char) {
 
 static bool parse_base_type(P *p, TypeKind *out) {
     bool dummy = false;
-    return parse_base_type2(p, out, &dummy);
+    bool dummy_is_long = false;
+    bool dummy_is_unsigned = false;
+    return parse_base_type2(p, out, &dummy, &dummy_is_long, &dummy_is_unsigned);
 }
 
 static Stmt *parse_stmt(P *p);
@@ -858,12 +1078,112 @@ static void parse_block(P *p, VecStmtPtr *out) {
     expect(p, TC_TK_RBRACE, str_lit("expected '}'"));
 }
 
+// Promote a function-local `static` declaration to a module-scope
+// global so the variable's value persists across calls. The original
+// local name is preserved on the Stmt (so subsequent references within
+// the function still bind to it via the local scope), but the Stmt is
+// tagged with the mangled global name so the emitter substitutes the
+// global's address for an `alloca` slot.
+//
+// We only promote scalars with literal initializers — the patterns
+// actually used by tinyc (counters, init flags, sentinel pointers).
+// Non-scalar statics (`static const char *arr[] = {...};` /
+// `static struct T eof = {...};`) are left as regular locals: their
+// initializers are constant data, so reinitializing on each call is
+// observationally identical to a true static. The compiler emits an
+// MRE-detectable error if a non-scalar `static` is genuinely mutated
+// across calls (none in tinyc's own source).
+static void promote_static_local(P *p, Stmt *ds, int line) {
+    if (ds->kind != ST_DECL) return;
+    if (p->cur_func_name.size == 0) return;  // file-scope: handled elsewhere
+    Type ty = ds->decl_type;
+    bool is_scalar = (ty.kind == TY_I32 || ty.kind == TY_I64 ||
+                      ty.kind == TY_F32 || ty.kind == TY_F64 ||
+                      ty.kind == TY_PTR_CHAR || ty.kind == TY_PTR_I32 ||
+                      ty.kind == TY_PTR_VOID || ty.kind == TY_PTR_PTR ||
+                      ty.kind == TY_PTR_STRUCT || ty.kind == TY_FNPTR);
+    if (!is_scalar) {
+        // Leave as a regular local. Non-scalar statics in tinyc's own
+        // source are all const-initialized read-only tables; on every
+        // call the local re-initializes to the same data, which is
+        // observationally identical to a true static for these uses.
+        return;
+    }
+    Global g = (Global){0};
+    int sid = ++p->static_local_counter;
+    g.name = format(p->arena,
+                    str_lit("__static.{}.{}.{}"),
+                    p->cur_func_name, ds->decl_name, (int64_t)sid);
+    g.type = ty;
+    g.line = line;
+    g.is_static = true;
+    if (ds->decl_init) {
+        Expr *e = ds->decl_init;
+        // Unwrap `(T)0` / `(T*)0` / `(void*)0` casts written by NULL-like
+        // macros around an integer-zero literal so the result is treated
+        // as a null pointer initializer.
+        while (e && e->kind == EX_CAST && e->lhs) {
+            e = e->lhs;
+        }
+        if (e && e->kind == EX_NULL) {
+            g.has_init = true;
+            g.init_int = 0;
+        } else if (e && e->kind == EX_INT) {
+            g.has_init = true;
+            g.init_int = e->int_value;
+        } else if (e && e->kind == EX_FLOAT) {
+            g.has_init = true;
+            g.init_float = e->float_value;
+        } else if (e && e->kind == EX_STR && ty.kind == TY_PTR_CHAR) {
+            g.has_init = true;
+            g.init_str = e->name;
+        } else {
+            perror_at(p, line,
+                str_lit("function-local 'static' scalar init must be a literal"));
+            return;
+        }
+    }
+    VecGlobal_push_back(p->arena, &p->prog->globals, g);
+    ds->decl_static_global_sym = g.name;
+    ds->decl_init = NULL;  // emitter must not re-emit the init at the use site
+}
+
+// Walk a parse_decl result (single ST_DECL or a no-scope ST_BLOCK of
+// ST_DECLs) and promote every declarator to a static global.
+static void promote_static_locals(P *p, Stmt *s, int line) {
+    if (!s) return;
+    if (s->kind == ST_DECL) {
+        promote_static_local(p, s, line);
+    } else if (s->kind == ST_BLOCK) {
+        for (size_t i = 0; i < s->block_body.size; i++) {
+            promote_static_local(p, s->block_body.data[i], line);
+        }
+    }
+}
+
 // Parse a decl statement: <type> [*] name [ '[' N ']' [ '[' M ']' ] ] [ '=' expr ] ';'
 //   or                  : struct Name [*] name [ '[' N ']' ] [ '=' &<var> ] ';'
 //   or                  : <typedef-name> name [ ... ] [ '=' expr ] ';'
 // Caller has already verified that current token starts a decl.
 static Stmt *parse_decl(P *p, bool require_semi) {
     int line = cur(p).line;
+    bool saw_static = false;
+    // Detect a leading `static` storage-class qualifier before the type
+    // qualifiers so we can promote the declaration to a module-scope
+    // global (function-local static semantics). `skip_const` below still
+    // accepts `static` (and `inline`), but only this prefix position is
+    // promoted; `static` appearing later in the qualifier list is
+    // silently ignored as before.
+    {
+        size_t save = p->i;
+        while (cur(p).kind == TC_TK_KW_CONST ||
+               cur(p).kind == TC_TK_KW_STATIC ||
+               cur(p).kind == TC_TK_KW_INLINE) {
+            if (cur(p).kind == TC_TK_KW_STATIC) saw_static = true;
+            p->i++;
+        }
+        p->i = save;
+    }
     skip_const(p);
     // Typedef'd type-name takes precedence over manual parsing.
     if (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, cur(p).text)) {
@@ -881,13 +1201,30 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 s->decl_type.kind = TY_ARRAY_STRUCT;
                 s->decl_type.array_len = alen;
                 s->decl_type.array_len_expr = aexpr;
+            } else if (s->decl_type.kind == TY_PTR_I32 ||
+                       s->decl_type.kind == TY_PTR_CHAR ||
+                       s->decl_type.kind == TY_PTR_VOID ||
+                       s->decl_type.kind == TY_PTR_STRUCT) {
+                // T *arr[N] (typedef'd): collapse to TY_ARRAY_PTR_CHAR
+                // since every pointer type stores as the same 8-byte
+                // !llvm.ptr regardless of element kind. The element
+                // type info is intentionally erased here; downstream
+                // uses (loads, stores, passing the array name as a
+                // function argument) all operate on the raw pointer.
+                s->decl_type = (Type){0};
+                s->decl_type.kind = TY_ARRAY_PTR_CHAR;
+                s->decl_type.array_len = alen;
+                s->decl_type.array_len_expr = aexpr;
             } else {
                 bool is_i64 = (s->decl_type.kind == TY_I64);
+                bool is_i8  = (s->decl_type.kind == TY_I32 &&
+                               s->decl_type.int_bits == 8);
                 if (s->decl_type.kind != TY_I32 && s->decl_type.kind != TY_I64) {
                     perror_at(p, line, str_lit("only int[N] / long long[N] arrays are supported"));
                 }
                 s->decl_type.kind = TY_ARRAY_I32;
                 s->decl_type.array_elem_is_i64 = is_i64;
+                s->decl_type.array_elem_is_i8  = is_i8;
                 s->decl_type.array_len = alen;
                 s->decl_type.array_len_expr = aexpr;
                 if (accept(p, TC_TK_LBRACK)) {
@@ -907,6 +1244,12 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             blk->block_no_scope = true;
             VecStmtPtr_push_back(p->arena, &blk->block_body, s);
             while (accept(p, TC_TK_COMMA)) {
+                // Accept (and ignore) any leading `*`s that match the
+                // pointer-ness already absorbed into `ty` by parse_sig_type.
+                // This lets `Td *a, *b;` and `Td *a, **b;` declare a/b with
+                // the same pointer type as `Td*` / `Td**` without choking
+                // on the per-declarator `*` tokens.
+                while (cur(p).kind == TC_TK_STAR) p->i++;
                 TcTok dname = cur(p);
                 expect(p, TC_TK_IDENT, str_lit("expected identifier"));
                 Stmt *ds = new_stmt(p, ST_DECL, dname.line);
@@ -919,17 +1262,61 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 VecStmtPtr_push_back(p->arena, &blk->block_body, ds);
             }
             if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+            if (saw_static) promote_static_locals(p, blk, line);
             return blk;
         }
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+        if (saw_static) promote_static_locals(p, s, line);
         return s;
     }
     // struct decl: `struct Name var;` or `struct Name * p = &s;`
     //              or `struct Name var[N];`
+    //              or `struct [Name] { fields... } var [...];` (inline def)
     if (cur(p).kind == TC_TK_KW_STRUCT || cur(p).kind == TC_TK_KW_UNION) {
-        p->i++;
-        TcTok sn = cur(p);
-        expect(p, TC_TK_IDENT, str_lit("expected struct name"));
+        // Inline struct/union body as the declaration type:
+        //   struct { fields... } name [...];        — anonymous
+        //   struct Tag { fields... } name [...];    — tagged-and-defined here
+        bool inline_def = (peek(p, 1).kind == TC_TK_LBRACE) ||
+                          (peek(p, 1).kind == TC_TK_IDENT &&
+                           peek(p, 2).kind == TC_TK_LBRACE);
+        TcTok sn;
+        if (inline_def) {
+            StructDef *sd = parse_struct_def(p);
+            if (sd->name.size == 0) {
+                // Synthesize an anonymous tag so the existing TY_STRUCT
+                // / TY_ARRAY_STRUCT plumbing has a name to look up.
+                static int local_anon_counter = 0;
+                local_anon_counter++;
+                char *buf = arena_new_array(p->arena, char, 32);
+                int n = 0; int v = local_anon_counter;
+                char digits[16]; int dn = 0;
+                if (v == 0) digits[dn++] = '0';
+                while (v > 0) { digits[dn++] = (char)('0' + (v % 10)); v /= 10; }
+                const char *prefix = "__anon_local_";
+                for (size_t k = 0; prefix[k]; k++) buf[n++] = prefix[k];
+                while (dn > 0) buf[n++] = digits[--dn];
+                sd->name = (string){.str = buf, .size = (size_t)n};
+            }
+            // Register in the program-level struct table (skipping
+            // duplicates by tag name).
+            bool already = false;
+            for (size_t i = 0; i < p->prog->structs.size; i++) {
+                if (str_eq(p->prog->structs.data[i]->name, sd->name)) {
+                    already = true; break;
+                }
+            }
+            if (!already) {
+                VecStructDefPtr_push_back(p->arena, &p->prog->structs, sd);
+            }
+            sn = (TcTok){0};
+            sn.kind = TC_TK_IDENT;
+            sn.text = sd->name;
+            sn.line = line;
+        } else {
+            p->i++;
+            sn = cur(p);
+            expect(p, TC_TK_IDENT, str_lit("expected struct name"));
+        }
         bool is_ptr = accept(p, TC_TK_STAR);
         bool is_ptr_ptr = is_ptr && accept(p, TC_TK_STAR);
         TcTok name = cur(p);
@@ -961,12 +1348,14 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         if (accept(p, TC_TK_ASSIGN)) {
             if (s->decl_type.kind != TY_PTR_STRUCT &&
                 s->decl_type.kind != TY_PTR_PTR &&
-                s->decl_type.kind != TY_STRUCT) {
+                s->decl_type.kind != TY_STRUCT &&
+                s->decl_type.kind != TY_ARRAY_STRUCT) {
                 perror_at(p, line, str_lit("struct/array initializers are not supported"));
             }
             { Expr *agg = parse_aggregate_init(p, s->decl_type); s->decl_init = agg ? agg : parse_expr(p); }
         }
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+        if (saw_static) promote_static_locals(p, s, line);
         return s;
     }
     // `va_list ap;` — special atomic type: must declare a single named
@@ -979,15 +1368,20 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         s->decl_name = name.text;
         s->decl_type.kind = TY_VA_LIST;
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+        if (saw_static) promote_static_locals(p, s, line);
         return s;
     }
     TypeKind base = TY_I32;
     bool was_char = false;
-    parse_base_type2(p, &base, &was_char);
+    bool is_long = false;
+    bool is_unsigned = false;
+    parse_base_type2(p, &base, &was_char, &is_long, &is_unsigned);
     // Function-pointer local: `int (*name)(types)`.
     if (cur(p).kind == TC_TK_LPAREN && peek(p, 1).kind == TC_TK_STAR) {
         Stmt *s = new_stmt(p, ST_DECL, line);
         s->decl_type.kind = base;
+        if (is_long) s->decl_type.int_bits = 64;
+        s->decl_type.int_unsigned = is_unsigned;
         string nm = (string){0};
         try_parse_fnptr_suffix(p, &s->decl_type, &nm);
         if (nm.size == 0) {
@@ -998,6 +1392,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             { Expr *agg = parse_aggregate_init(p, s->decl_type); s->decl_init = agg ? agg : parse_expr(p); }
         }
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+        if (saw_static) promote_static_locals(p, s, line);
         return s;
     }
     bool is_ptr = false;
@@ -1011,6 +1406,8 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     Stmt *s = new_stmt(p, ST_DECL, line);
     s->decl_name = name.text;
     s->decl_type.kind = base;
+    if (is_long) s->decl_type.int_bits = 64;
+    if (!is_ptr) s->decl_type.int_unsigned = is_unsigned;
     if (is_ptr) {
         if (was_char) s->decl_type.kind = TY_PTR_CHAR;
         else if (base == TY_I32) s->decl_type.kind = TY_PTR_I32;
@@ -1126,9 +1523,11 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             VecStmtPtr_push_back(p->arena, &blk->block_body, ds);
         }
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+        if (saw_static) promote_static_locals(p, blk, line);
         return blk;
     }
     if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+    if (saw_static) promote_static_locals(p, s, line);
     return s;
 }
 
@@ -1460,7 +1859,7 @@ static bool parse_sig_type(P *p, Type *out) {
     if (cur(p).kind == TC_TK_KW_SIGNED || cur(p).kind == TC_TK_KW_UNSIGNED ||
         cur(p).kind == TC_TK_KW_LONG   || cur(p).kind == TC_TK_KW_SHORT  ||
         cur(p).kind == TC_TK_KW_BOOL) {
-        bool saw_long = false;
+        int  n_long = 0;
         bool saw_short = false;
         bool saw_char = false;
         bool saw_bool = false;
@@ -1469,15 +1868,24 @@ static bool parse_sig_type(P *p, Type *out) {
                cur(p).kind == TC_TK_KW_LONG   || cur(p).kind == TC_TK_KW_INT     ||
                cur(p).kind == TC_TK_KW_SHORT  || cur(p).kind == TC_TK_KW_CHAR    ||
                cur(p).kind == TC_TK_KW_BOOL) {
-            if (cur(p).kind == TC_TK_KW_LONG) saw_long = true;
+            if (cur(p).kind == TC_TK_KW_LONG) n_long++;
             if (cur(p).kind == TC_TK_KW_SHORT) saw_short = true;
             if (cur(p).kind == TC_TK_KW_CHAR) saw_char = true;
             if (cur(p).kind == TC_TK_KW_BOOL) saw_bool = true;
             if (cur(p).kind == TC_TK_KW_UNSIGNED) saw_unsigned = true;
             p->i++; skip_const(p);
         }
-        out->kind = saw_long ? TY_I64 : TY_I32;
-        if (saw_long) out->int_bits = 64;
+        // `long long` is always 64-bit storage; a single `long` is
+        // 64-bit storage on the native host but 32-bit on wasm32
+        // (matching clang's wasm32-wasi ABI). We tag the type with
+        // int_bits = 64 in BOTH cases so that `_Generic` can keep
+        // `long` distinct from `int` even on wasm32 where the
+        // storage kind collides (both TY_I32). The storage width is
+        // tracked by `kind` (TY_I32 / TY_I64), independent of this
+        // semantic tag.
+        bool long_storage_64 = (n_long >= 2) || (n_long == 1 && !p->target_wasm32);
+        out->kind = long_storage_64 ? TY_I64 : TY_I32;
+        if (n_long >= 1) out->int_bits = 64;
         else if (saw_char) out->int_bits = 8;
         else if (saw_short) out->int_bits = 16;
         else if (saw_bool) out->int_bits = 8;
@@ -1485,8 +1893,11 @@ static bool parse_sig_type(P *p, Type *out) {
         out->int_unsigned = saw_unsigned;
         skip_const(p);
         if (accept(p, TC_TK_STAR)) {
-            out->kind = saw_char ? TY_PTR_CHAR : (saw_long ? TY_PTR_I32 : TY_PTR_I32);
-            if (saw_long && !saw_char) out->ptr_is_i64 = true;
+            // `long *` → pointer to long. Storage element width matches
+            // the long storage width: i64 on native, i32 on wasm32. We
+            // model the i64 element via TY_PTR_I32 with ptr_is_i64.
+            out->kind = saw_char ? TY_PTR_CHAR : TY_PTR_I32;
+            if (long_storage_64 && !saw_char) out->ptr_is_i64 = true;
             skip_const(p);
             if (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
         }
@@ -1620,7 +2031,8 @@ static bool parse_sig_type(P *p, Type *out) {
                 // else: ignore (e.g. typedef'd pointer + extra '*' not supported)
                 skip_const(p);
                 if (accept(p, TC_TK_STAR) &&
-                    (out->kind == TY_PTR_I32 || out->kind == TY_PTR_STRUCT)) {
+                    (out->kind == TY_PTR_I32 || out->kind == TY_PTR_STRUCT ||
+                     out->kind == TY_PTR_CHAR || out->kind == TY_PTR_VOID)) {
                     wrap_ptr_to_ptr(p, out);
                 }
             }
@@ -1649,7 +2061,11 @@ static bool parse_abstract_type(P *p, Type *out) {
         } else if (out->kind == TY_PTR_CHAR) {
             out->kind = TY_ARRAY_PTR_CHAR;
         } else {
+            bool is_i64 = (out->kind == TY_I64);
+            bool is_i8  = (out->kind == TY_I32 && out->int_bits == 8);
             out->kind = TY_ARRAY_I32;
+            out->array_elem_is_i64 = is_i64;
+            out->array_elem_is_i8  = is_i8;
         }
         out->array_len = alen;
         out->array_len_expr = aexpr;
@@ -1659,10 +2075,20 @@ static bool parse_abstract_type(P *p, Type *out) {
 
 static Func *parse_func(P *p) {
     int line = cur(p).line;
+    // Allow `__attribute__((...))` between the storage class (already
+    // consumed by the caller) and the return type — this covers the
+    // common `__attribute__((export_name("..."))) <type> name(...)`
+    // pattern.
+    AttrInfo attrs = (AttrInfo){0};
+    parse_attributes(p, &attrs);
     Type ret_ty = {0};
     if (!parse_sig_type(p, &ret_ty)) {
         perror_at(p, cur(p).line, str_lit("expected return type"));
     }
+    // Also between the return type and the function name (the WASI
+    // macro expansion in corec/platform/platform_wasm.c produces this
+    // shape after preprocessing: `uint32_t __attribute__((...)) name(...)`).
+    parse_attributes(p, &attrs);
     TcTok name = cur(p);
     expect(p, TC_TK_IDENT, str_lit("expected function name"));
     expect(p, TC_TK_LPAREN, str_lit("expected '('"));
@@ -1671,6 +2097,9 @@ static Func *parse_func(P *p) {
     f->name = name.text;
     f->return_type = ret_ty;
     f->line = line;
+    f->wasm_import_module = attrs.import_module;
+    f->wasm_import_name = attrs.import_name;
+    f->wasm_export_name = attrs.export_name;
     VecParam_reserve(p->arena, &f->params, 4);
     VecStmtPtr_reserve(p->arena, &f->body, 8);
     // `f(void)` — single `void` token (not `void*` or named) means no params.
@@ -1713,12 +2142,23 @@ static Func *parse_func(P *p) {
         }
     }
     expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
+    // Trailing `__attribute__((...))` (e.g. `int foo(void) __attribute__((const));`).
+    {
+        AttrInfo trailing = (AttrInfo){0};
+        parse_attributes(p, &trailing);
+        if (trailing.import_module.size > 0) f->wasm_import_module = trailing.import_module;
+        if (trailing.import_name.size > 0) f->wasm_import_name = trailing.import_name;
+        if (trailing.export_name.size > 0) f->wasm_export_name = trailing.export_name;
+    }
     if (accept(p, TC_TK_SEMI)) {
         // Forward declaration / prototype: no body.
         f->is_forward = true;
         return f;
     }
+    string saved_func = p->cur_func_name;
+    p->cur_func_name = f->name;
     parse_block(p, &f->body);
+    p->cur_func_name = saved_func;
     return f;
 }
 
@@ -1778,6 +2218,14 @@ static StructDef *parse_struct_def(P *p) {
             ft.kind = TY_STRUCT;
             ft.struct_name = nested->name;
             is_struct_kind = true;
+            // Optional pointer suffix: `struct Tag { ... } *name;`
+            // promotes the field type to TY_PTR_STRUCT. Used for
+            // self-referential / forward-list-style fields in tinyc itself
+            // (e.g. `struct LabelBlock { ...; struct LabelBlock *next; } *labels;`).
+            if (accept(p, TC_TK_STAR)) {
+                is_ptr = true;
+                ft.kind = TY_PTR_STRUCT;
+            }
         } else if (cur(p).kind == TC_TK_KW_STRUCT || cur(p).kind == TC_TK_KW_UNION) {
             // Nested struct field: `struct Inner name;` (by-value),
             // `struct Inner* name;` (pointer to struct), or
@@ -1845,13 +2293,17 @@ static StructDef *parse_struct_def(P *p) {
         } else {
             TypeKind k;
             was_char = false;
+            bool field_is_long = false;
+            bool field_is_unsigned = false;
             was_float = (cur(p).kind == TC_TK_KW_FLOAT);
-            if (!parse_base_type2(p, &k, &was_char)) {
+            if (!parse_base_type2(p, &k, &was_char, &field_is_long, &field_is_unsigned)) {
                 perror_at(p, cur(p).line, str_lit("expected field type (int|float|char|struct)"));
                 p->i++;
                 continue;
             }
             ft.kind = k;
+            if (field_is_long) ft.int_bits = 64;
+            ft.int_unsigned = field_is_unsigned;
             // Optional pointer suffix on base types: `T *` (single) or
             // `T **` (pointer-to-pointer). The `**` form wraps the
             // single-level pointer kind into a TY_PTR_PTR.
@@ -1922,9 +2374,13 @@ static StructDef *parse_struct_def(P *p) {
                     ft.array_len = n1;
                     ft.array_len2 = n2;
                 } else {
+                    bool is_i64 = (ft.kind == TY_I64);
+                    bool is_i8  = (ft.kind == TY_I32 && ft.int_bits == 8);
                     ft.kind = TY_ARRAY_I32;
                     ft.array_len = n1;
                     ft.array_len2 = n2;
+                    ft.array_elem_is_i64 = is_i64;
+                    ft.array_elem_is_i8  = is_i8;
                 }
             }
             VecStructField_push_back(p->arena, &sd->fields,
@@ -1956,20 +2412,16 @@ static void parse_enum_body(P *p) {
         if (!expect(p, TC_TK_IDENT, str_lit("expected enumerator name"))) break;
         int64_t value = next_value;
         if (accept(p, TC_TK_ASSIGN)) {
-            bool neg = accept(p, TC_TK_MINUS);
-            TcTok lit = cur(p);
-            if (lit.kind == TC_TK_INT_LIT) {
-                value = neg ? -lit.int_value : lit.int_value;
-                p->i++;
-            } else if (lit.kind == TC_TK_IDENT && enum_lookup(p, lit.text)) {
-                int64_t v = enum_lookup(p, lit.text)->value;
-                value = neg ? -v : v;
-                p->i++;
+            int line = cur(p).line;
+            Expr *init = parse_ternary(p);
+            int64_t v;
+            if (!parse_const_eval(p, init, &v)) {
+                perror_at(p, line,
+                    str_lit("enum initializer must be a constant "
+                            "expression of int literals and previously-"
+                            "declared enumerators"));
             } else {
-                perror_at(p, lit.line,
-                    str_lit("enum initializer must be an int literal "
-                            "or a previously-declared enumerator"));
-                p->i++;
+                value = v;
             }
         }
         if (enum_lookup(p, nm.text)) {
@@ -2001,7 +2453,7 @@ static void parse_enum_decl_top(P *p) {
 Program *tinyc_parse(Arena *arena, VecTcTok toks) {
     Program *prog = arena_new(arena, Program);
     *prog = (Program){0};
-    tinyc_parse_into(arena, prog, toks);
+    tinyc_parse_into(arena, prog, toks, /*target_wasm32=*/false);
     return prog;
 }
 
@@ -2178,7 +2630,9 @@ static void parse_typedef_decl(P *p) {
         expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
         expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
         if (ty.kind == TY_I32) {
+            bool is_i8 = (ty.int_bits == 8);
             ty.kind = TY_ARRAY_I32;
+            ty.array_elem_is_i8 = is_i8;
             ty.array_len = lit.int_value;
         } else {
             perror_at(p, line, str_lit("typedef array only supported for int"));
@@ -2192,14 +2646,22 @@ static void parse_typedef_decl(P *p) {
     p->typedefs = td;
 }
 
-int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
+int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_wasm32) {
+    prog->target_wasm32 = target_wasm32;
     P p = {.arena = arena, .toks = toks.data, .n = toks.size, .i = 0,
-           .typedefs = NULL, .enums = NULL, .prog = prog};
-    // Built-in typedefs (treated as TY_I64, signedness ignored).
+           .typedefs = NULL, .enums = NULL, .prog = prog,
+           .target_wasm32 = target_wasm32};
+    // Built-in typedefs. `int64_t` / `uint64_t` are always 64-bit;
+    // `size_t` / `ssize_t` / `intptr_t` / `uintptr_t` / `ptrdiff_t`
+    // are pointer-sized in C, which means 32-bit on wasm32 and
+    // 64-bit on the native (host) targets we support.
     {
         const char *names[] = {"int64_t", "uint64_t", "size_t", "ssize_t",
                                "intptr_t", "uintptr_t", "ptrdiff_t"};
         bool unsigneds[] = {false, true, true, false, false, true, false};
+        // int64_t/uint64_t are always 64-bit; the rest follow the
+        // pointer/long sizing for the target.
+        bool always_64[]  = {true,  true,  false, false, false, false, false};
         for (size_t k = 0; k < sizeof(names) / sizeof(names[0]); k++) {
             Typedef *td = arena_new(arena, Typedef);
             *td = (Typedef){0};
@@ -2207,8 +2669,9 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
             // Compute string length without libc.
             const char *s = names[k]; size_t len = 0; while (s[len]) len++;
             td->name.size = len;
-            td->ty.kind = TY_I64;
-            td->ty.int_bits = 64;
+            bool is_64 = always_64[k] || !target_wasm32;
+            td->ty.kind = is_64 ? TY_I64 : TY_I32;
+            td->ty.int_bits = is_64 ? 64 : 32;
             td->ty.int_unsigned = unsigneds[k];
             td->next = p.typedefs;
             p.typedefs = td;
@@ -2257,6 +2720,12 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
             if (cur(&p).kind == TC_TK_KW_STATIC) tl_saw_static = true;
             p.i++;
         }
+        // Leading `__attribute__((...))` annotations at file scope.
+        // Attach the recognized wasm import/export attributes to the
+        // function (or drop them silently for globals where we don't
+        // model them yet).
+        AttrInfo tl_attrs = (AttrInfo){0};
+        parse_attributes(&p, &tl_attrs);
         if (cur(&p).kind == TC_TK_EOF) break;
         if ((cur(&p).kind == TC_TK_KW_STRUCT || cur(&p).kind == TC_TK_KW_UNION) &&
             (peek(&p, 1).kind == TC_TK_LBRACE ||
@@ -2492,13 +2961,30 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
                             p.i++;
                         } else if (lit.kind == TC_TK_LPAREN) {
                             // `((void*)0)` — scalar null pointer init via cast.
+                            // Also `(int32_t)<int-lit>` and similar simple
+                            // single-token cast forms used in tinyc's own
+                            // source (e.g. `(int32_t)0x80000000`); recognise
+                            // these by looking for an INT_LIT or MINUS+INT_LIT
+                            // after a single matching `)`.
                             int depth = 0;
                             while (cur(&p).kind == TC_TK_LPAREN) { depth++; p.i++; }
                             while (cur(&p).kind != TC_TK_RPAREN &&
                                    cur(&p).kind != TC_TK_EOF) p.i++;
                             if (cur(&p).kind == TC_TK_RPAREN) { p.i++; depth--; }
-                            if (cur(&p).kind == TC_TK_INT_LIT &&
-                                cur(&p).int_value == 0) p.i++;
+                            bool neg = accept(&p, TC_TK_MINUS);
+                            if (cur(&p).kind == TC_TK_INT_LIT) {
+                                int64_t iv = cur(&p).int_value;
+                                g.init_int = neg ? -iv : iv;
+                                p.i++;
+                            } else if (cur(&p).kind == TC_TK_FLOAT_LIT) {
+                                double fv = cur(&p).float_value;
+                                g.init_float = neg ? -fv : fv;
+                                p.i++;
+                            } else if (neg) {
+                                // Roll back the consumed MINUS — it wasn't a
+                                // negative number literal.
+                                p.i--;
+                            }
                             while (depth > 0 && cur(&p).kind == TC_TK_RPAREN) {
                                 p.i++; depth--;
                             }
@@ -2525,6 +3011,13 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
         p.i = save;
         Func *f = parse_func(&p);
         f->is_static = saw_static;
+        // Merge top-level `__attribute__((...))` annotations (parsed
+        // before the storage-class / return type) into the function. If
+        // both the leading and the inner attribute lists set the same
+        // field, prefer the more specific (inner) one already populated.
+        if (f->wasm_import_module.size == 0) f->wasm_import_module = tl_attrs.import_module;
+        if (f->wasm_import_name.size == 0)   f->wasm_import_name   = tl_attrs.import_name;
+        if (f->wasm_export_name.size == 0)   f->wasm_export_name   = tl_attrs.export_name;
         // Check for an existing entry with the same name. Forward decls can
         // be replaced by a definition; duplicate forward decls are merged;
         // a forward decl after a definition is dropped.

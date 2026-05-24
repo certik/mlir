@@ -244,6 +244,12 @@ int app_main(void) {
     // preprocessor is per-file (so #define / #pragma once do NOT leak
     // across files); -I dirs are shared. Cross-file func / global /
     // struct dedup happens inside tinyc_parse_into.
+    //
+    // `target_wasm32` flips `long` (and `size_t`/`intptr_t`/...) to
+    // 32-bit so the imported function signatures we generate match
+    // wasm32-wasi's ABI. tinyC otherwise hardcodes them at 64-bit
+    // (the size on every 64-bit native host we support).
+    bool target_wasm32 = emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat;
     Program *prog = arena_new(arena, Program);
     *prog = (Program){0};
     int total_errs = 0;
@@ -253,7 +259,7 @@ int app_main(void) {
                                       defines, n_defines);
         if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
         VecTcTok toks = tinyc_lex(arena, src);
-        total_errs += tinyc_parse_into(arena, prog, toks);
+        total_errs += tinyc_parse_into(arena, prog, toks, target_wasm32);
     }
     if (total_errs > 0) {
         arena_destroy(arena);

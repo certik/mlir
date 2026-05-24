@@ -1,0 +1,31 @@
+// MRE: widening an `unsigned int` value to a `uint64_t` argument must
+// zero-extend, not sign-extend.
+//
+// tinyC's `coerce_eval` used to always emit `arith.extsi` (sign-extend)
+// when widening an i32 SSA value to i64, even when the source was
+// `unsigned`. For values whose top bit is set this turns the
+// zero-extended result `0x0000_0000_8000_0000` (2_147_483_648) into the
+// sign-extended `0xFFFF_FFFF_8000_0000` (18_446_744_071_562_067_968 as
+// uint64, or -2_147_483_648 as int64).
+//
+// This bug ate the wasm32 self-host: `corec/base/buddy.c` calls
+// `uint64_to_str(block_size, ...)` where `block_size` is `size_t` (u32
+// on wasm32). For high orders the u32 value has its top bit set; tinyC
+// emitted `extsi`, the function received a huge "negative" u64, the
+// printed string was 20+ chars long, and the right-padding loop
+// (`for (i = 0; i < 14 - size_len; i++)`) underflowed and looped
+// effectively forever, producing tens of MiB of spaces.
+//
+// We exercise the same widening directly. With sign-extension we'd
+// print "-2147483648"; with zero-extension we print "2147483648".
+
+extern int printf(const char *fmt, ...);
+
+long long widen(long long v) { return v; }
+
+int main() {
+    unsigned int x = 0x80000000u;
+    long long y = widen(x);
+    printf("%lld\n", y);
+    return 0;
+}

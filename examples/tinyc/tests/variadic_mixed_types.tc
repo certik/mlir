@@ -1,4 +1,4 @@
-// va_arg on mixed types: pull an int, a long, and a char* from the same
+// va_arg on mixed types: pull an int, a long long, and a char* from the same
 // variadic call.
 extern int printf(const char *fmt, ...);
 
@@ -16,8 +16,8 @@ void show(int n, ...) {
             printf("int=%d\n", v);
         } else {
             if (kind == 1) {
-                long v;
-                v = va_arg(ap, long);
+                long long v;
+                v = va_arg(ap, long long);
                 printf("long=%lld\n", v);
             } else {
                 char *s;

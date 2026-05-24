@@ -1,0 +1,27 @@
+// Regression test for tinyc's `__builtin_wasm_memory_size` and
+// `__builtin_wasm_memory_grow` builtins. These map to the wasm
+// `memory.size` (0x3F) and `memory.grow` (0x40) instructions and
+// are required to compile corec/platform/platform_wasm.c with
+// tinyc itself for the wasm32-wasi self-host stage.
+//
+// We can't observe the absolute memory size portably (it depends on
+// runtime initial pages), so the test exercises the encoding by:
+//   - calling memory.size and checking it's > 0
+//   - calling memory.grow(0) which always succeeds and returns the
+//     current size in pages (same value as memory.size returned)
+//   - calling memory.size again and verifying it equals the result
+//     of memory.grow(0)
+// On non-wasm targets these builtins are skipped (see SKIP comment
+// in the runner: this test runs only under wasm32-wasi via
+// test_tinyc_native_wasm).
+
+int main() {
+    int sz1 = __builtin_wasm_memory_size(0);
+    int prev = __builtin_wasm_memory_grow(0, 0);
+    int sz2 = __builtin_wasm_memory_size(0);
+    if (sz1 <= 0) return 1;
+    if (prev != sz1) return 2;
+    if (sz2 != sz1) return 3;
+    _tinyc_print(42);
+    return 0;
+}

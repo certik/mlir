@@ -1,0 +1,26 @@
+// Regression test: `sizeof <unary-expression>` (no parentheses).
+// Previously tinyc required `sizeof(...)` and erred out at parse time
+// with "expected '(' after sizeof", even though standard C accepts
+// the unparenthesized form for expression operands.
+//
+// Used in mlir_translate_to_llvm_ir.c (~line 944):
+//     FnCtx F; memset(&F, 0, sizeof F);
+
+int main(void) {
+    int x = 42;
+    int arr[5];
+    char buf[16];
+
+    _tinyc_print((int)sizeof x);          // 4
+    _tinyc_print((int)sizeof(x));         // 4 (parenthesized form still works)
+    _tinyc_print((int)sizeof arr);        // 20
+    _tinyc_print((int)sizeof(arr));       // 20
+    _tinyc_print((int)sizeof buf);        // 16
+    _tinyc_print((int)sizeof *arr);       // 4 (sizeof unary-deref)
+    _tinyc_print((int)sizeof &x);         // 8 (sizeof unary-addr-of)
+
+    long long ll = 1;
+    _tinyc_print((int)sizeof ll);         // 8
+
+    return 0;
+}

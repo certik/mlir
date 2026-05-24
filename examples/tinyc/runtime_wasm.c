@@ -318,17 +318,13 @@ int printf(const char *fmt, ...) {
 // strlen/strcmp/memcmp/memchr). Provide minimal implementations so the
 // suite can be linked under wasm32 without a real wasi-libc sysroot.
 //
-// IMPORTANT: tinyC compiles tests using *host* type sizes (long is
-// 64-bit on macOS/Linux x86_64 and arm64), so the LLVM IR it emits
-// declares `malloc(i64)`, `strlen` returning `i64`, etc. We must
-// match those signatures here even though native wasm32 `unsigned
-// long` is 32-bit — otherwise wasm-ld leaves the call as an
-// `unreachable signature_mismatch:malloc` trap. Use `long long` /
-// `unsigned long long` (always 64-bit) for any "long"-typed
-// parameter or return value.
+// On wasm32-wasi `unsigned long` and `size_t` are both 32-bit, and
+// since tinyC's parser sizes `long` per-target (32-bit when emitting
+// wasm) the signatures we expose here match exactly what tinyC-
+// compiled tests reference.
 
-long long strlen(const char *s) {
-    long long n = 0;
+unsigned long strlen(const char *s) {
+    unsigned long n = 0;
     while (s[n]) n++;
     return n;
 }
@@ -338,19 +334,19 @@ int strcmp(const char *a, const char *b) {
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
-int memcmp(const void *a, const void *b, long long n) {
+int memcmp(const void *a, const void *b, unsigned long n) {
     const unsigned char *x = (const unsigned char *)a;
     const unsigned char *y = (const unsigned char *)b;
-    for (long long i = 0; i < n; i++) {
+    for (unsigned long i = 0; i < n; i++) {
         if (x[i] != y[i]) return (int)x[i] - (int)y[i];
     }
     return 0;
 }
 
-void *memchr(const void *s, int c, unsigned long long n) {
+void *memchr(const void *s, int c, unsigned long n) {
     const unsigned char *p = (const unsigned char *)s;
     unsigned char target = (unsigned char)c;
-    for (unsigned long long i = 0; i < n; i++) {
+    for (unsigned long i = 0; i < n; i++) {
         if (p[i] == target) return (void *)(p + i);
     }
     return (void *)0;
@@ -362,20 +358,20 @@ void *memchr(const void *s, int c, unsigned long long n) {
 static unsigned char wasm_heap[WASM_HEAP_BYTES];
 static unsigned long wasm_heap_off = 0;
 
-void *malloc(long long size) {
-    if (size <= 0) return (void *)0;
+void *malloc(unsigned long size) {
+    if (size == 0) return (void *)0;
     unsigned long off = (wasm_heap_off + 15u) & ~(unsigned long)15u;
-    if (off + (unsigned long)size > WASM_HEAP_BYTES) return (void *)0;
-    wasm_heap_off = off + (unsigned long)size;
+    if (off + size > WASM_HEAP_BYTES) return (void *)0;
+    wasm_heap_off = off + size;
     return &wasm_heap[off];
 }
 
-void *calloc(long long n, long long size) {
-    long long total = n * size;
+void *calloc(unsigned long n, unsigned long size) {
+    unsigned long total = n * size;
     void *p = malloc(total);
     if (!p) return p;
     unsigned char *b = (unsigned char *)p;
-    for (long long i = 0; i < total; i++) b[i] = 0;
+    for (unsigned long i = 0; i < total; i++) b[i] = 0;
     return p;
 }
 

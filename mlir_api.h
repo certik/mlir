@@ -247,6 +247,14 @@ typedef enum {
     // pops args + table-index and dispatches via wasm `call_indirect`.
     OP_TYPE_WASMSSA_FUNC_ADDR,
     OP_TYPE_WASMSSA_CALL_INDIRECT,
+    // WebAssembly memory instructions: `memory.size` (0x3F 0x00) and
+    // `memory.grow` (0x40 0x00). MEMORY_SIZE has no operands and an i32
+    // result (size in pages). MEMORY_GROW takes one i32 operand (pages
+    // to grow by) and returns the previous size in pages (or -1 on
+    // failure) as i32. Both carry a trailing single-byte immediate
+    // identifying the memory index (always 0 for the default memory).
+    OP_TYPE_WASMSSA_MEMORY_SIZE,
+    OP_TYPE_WASMSSA_MEMORY_GROW,
 
     // -------------------------------------------------------------------------
     // wasmstack dialect — low-level stack-machine WebAssembly ops. 1:1
@@ -284,6 +292,9 @@ typedef enum {
     OP_TYPE_WASMSTACK_ADDRESSOF,
     OP_TYPE_WASMSTACK_FUNC_ADDR,
     OP_TYPE_WASMSTACK_CALL_INDIRECT,
+    // 1:1 wasmstack mirrors of OP_TYPE_WASMSSA_MEMORY_{SIZE,GROW}.
+    OP_TYPE_WASMSTACK_MEMORY_SIZE,
+    OP_TYPE_WASMSTACK_MEMORY_GROW,
 
     OP_TYPE_COUNT
 } MLIR_OpType;

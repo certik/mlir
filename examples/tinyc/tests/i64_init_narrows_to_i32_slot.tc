@@ -1,0 +1,48 @@
+// Regression test: a function-local declaration whose type is a
+// default-i32 storage class (`int`, `unsigned char`, `uint8_t`, ...)
+// must truncate any i64-typed initializer down to i32 before storing
+// it. Without truncation, the emitter would lower
+//
+//     uint8_t byte = v & 0x7f;   // v is uint64_t
+//
+// to an `llvm.store i64, ptr` writing eight bytes into the four-byte
+// stack slot reserved for `byte`. The trailing four bytes spilled
+// into whatever lived right after `byte` on the frame.
+//
+// In tinyc's own `leb_u(Buf *b, uint64_t v)` the frame layout is
+// `b@sp+0, byte@sp+4, v@sp+8`, so the overflow wiped out `v`'s low
+// half. The next iteration of the LEB128 loop then read `v == 0` and
+// terminated after a single byte without the continuation bit set —
+// breaking *every* wasm section size larger than 127 bytes the
+// self-hosted compiler tried to emit, which manifested as
+// "truncated section" link errors and `wasm-tools` "unexpected
+// end-of-file" errors on the stage-3 self-host outputs.
+//
+// We reproduce that layout here: `b` is a struct pointer (i32 param),
+// `v` is a uint64_t param, and `byte` is the first local declared in
+// the function body. Without the fix, `v >>= 7` reads a clobbered
+// `v` and the loop exits after one iteration, so we print "69" once
+// instead of the LEB128 of 453: "197\n3\n".
+
+typedef unsigned long long uint64_t;
+typedef unsigned char uint8_t;
+
+typedef struct {
+    int x;
+} Buf;
+
+void test_leb(Buf *b, uint64_t v) {
+    do {
+        uint8_t byte = v & 0x7f;
+        v >>= 7;
+        if (v) byte |= 0x80;
+        _tinyc_print(byte);
+    } while (v);
+}
+
+int main() {
+    Buf b;
+    b.x = 0;
+    test_leb(&b, 453);
+    return 0;
+}

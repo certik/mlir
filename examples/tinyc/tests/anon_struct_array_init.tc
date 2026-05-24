@@ -1,0 +1,41 @@
+// Regression test: inline / anonymous struct array declaration with
+// an aggregate initializer at local scope.
+//
+//     struct { int a; int b; } pairs[3] = { {1,2}, {3,4}, {5,6} };
+//
+// Previously parse_decl's `struct ... var [= init]` branch rejected
+// any kind that wasn't TY_PTR_STRUCT / TY_PTR_PTR / TY_STRUCT with
+// the "struct/array initializers are not supported" error, missing
+// the TY_ARRAY_STRUCT case that array-of-struct produces.
+//
+// Used in examples/tinyc/emit.c at line ~5564 to declare a local
+// dispatch table of (string name, MLIR_TypeHandle ret) helpers.
+
+int main(void) {
+    struct { int a; int b; } pairs[3] = {
+        { 10, 20 },
+        { 30, 40 },
+        { 50, 60 },
+    };
+
+    int sum_a = 0;
+    int sum_b = 0;
+    int i;
+    for (i = 0; i < 3; i = i + 1) {
+        sum_a = sum_a + pairs[i].a;
+        sum_b = sum_b + pairs[i].b;
+    }
+    _tinyc_print(sum_a);
+    _tinyc_print(sum_b);
+    _tinyc_print(sum_a + sum_b);
+
+    // Tagged-inline variant: the tag is still introduced and the
+    // initializer-with-tag case must also pass the same check.
+    struct Pt { int x; int y; } pts[2] = {
+        { 1, 2 },
+        { 3, 4 },
+    };
+    _tinyc_print(pts[0].x + pts[0].y + pts[1].x + pts[1].y);
+
+    return 0;
+}

@@ -245,6 +245,7 @@ typedef struct {
     uint32_t sig;
     bool     imported;
     bool     exported;
+    bool     internal;
     Buf      body;
     uint32_t func_index;
     uint32_t sym_index;
@@ -254,6 +255,12 @@ typedef struct {
     MLIR_OpHandle src_op;
     // Locals layout (decoded from local_types attr).
     uint8_t *local_types; size_t n_locals;
+    // Optional wasm.* attribute overrides (from
+    // `__attribute__((__import_module__("...")))` etc.). NULL means
+    // "use the default" (env / sym name).
+    char *import_module;
+    char *import_name;
+    char *export_name;
 } EmFunc;
 
 typedef struct {
@@ -496,6 +503,17 @@ static bool encode_op(EmFunc *F, MLIR_OpHandle op, uint32_t sp_sym_idx,
         return true;
     }
 
+    case OP_TYPE_WASMSTACK_MEMORY_SIZE:
+        // wasm `memory.size` (0x3F) takes a single immediate memory
+        // index byte (always 0 for the default memory) and returns
+        // the current size in pages on the stack.
+        buf_putc(b, 0x3f); buf_putc(b, 0x00); return true;
+
+    case OP_TYPE_WASMSTACK_MEMORY_GROW:
+        // wasm `memory.grow` (0x40) pops a page count and pushes
+        // either the previous size in pages or -1.
+        buf_putc(b, 0x40); buf_putc(b, 0x00); return true;
+
     default: {
         string nm = MLIR_GetOpName(op);
         fprintf(stderr, "wasm-emit: unsupported wasmstack op '%.*s' (enum=%d)\n",
@@ -602,7 +620,19 @@ static void build_linking_section(EmFunc *funcs, size_t n_funcs,
     for (size_t i = 0; i < n_funcs; i++) {
         EmFunc *f = &funcs[i];
         buf_putc(&sub, SYM_FUNCTION);
-        uint32_t flags = f->imported ? SYMF_UNDEFINED : 0;
+        // Imported functions are referenced by name (UNDEFINED).
+        // Static / file-local C functions get BINDING_LOCAL +
+        // VISIBILITY_HIDDEN so the wasm linker won't merge two
+        // same-named statics from different TUs into one global
+        // symbol (which causes signature-mismatch link errors).
+        uint32_t flags;
+        if (f->imported) {
+            flags = SYMF_UNDEFINED;
+        } else if (f->internal) {
+            flags = SYMF_BINDING_LOCAL | SYMF_VISIBILITY_HIDDEN;
+        } else {
+            flags = 0;
+        }
         leb_u(&sub, flags);
         leb_u(&sub, f->func_index);
         if (!f->imported) emit_string(&sub, f->name);
@@ -736,6 +766,10 @@ string mlir_wasmstack_to_bin(MLIR_Context *ctx,
         funcs[n_funcs].sig = sig_intern(&sigs, p, np, r, nr);
         funcs[n_funcs].imported = true;
         funcs[n_funcs].func_index = (uint32_t)n_funcs;
+        string imod = at_s(op, "import_module");
+        if (imod.size) funcs[n_funcs].import_module = strdup_str(imod);
+        string inm = at_s(op, "import_name");
+        if (inm.size) funcs[n_funcs].import_name = strdup_str(inm);
         free(p); free(r);
         n_funcs++;
     }
@@ -754,10 +788,13 @@ string mlir_wasmstack_to_bin(MLIR_Context *ctx,
         funcs[n_funcs].sig = sig_intern(&sigs, p, np, r, nr);
         funcs[n_funcs].imported = false;
         funcs[n_funcs].exported = at_b(op, "exported");
+        funcs[n_funcs].internal = at_b(op, "internal");
         funcs[n_funcs].func_index = (uint32_t)n_funcs;
         funcs[n_funcs].src_op = op;
         funcs[n_funcs].local_types = ll;
         funcs[n_funcs].n_locals = nl;
+        string en = at_s(op, "export_name");
+        if (en.size) funcs[n_funcs].export_name = strdup_str(en);
         free(p); free(r);
         n_funcs++;
     }
@@ -860,8 +897,12 @@ string mlir_wasmstack_to_bin(MLIR_Context *ctx,
 
         for (size_t i = 0; i < n_funcs; i++) {
             if (!funcs[i].imported) continue;
-            emit_string(&import_payload, "env");
-            emit_string(&import_payload, funcs[i].name);
+            // Default to "env" but honor `__attribute__((__import_module__("...")))`
+            // (e.g. `wasi_snapshot_preview1` for WASI imports).
+            const char *mod = funcs[i].import_module ? funcs[i].import_module : "env";
+            const char *nm  = funcs[i].import_name   ? funcs[i].import_name   : funcs[i].name;
+            emit_string(&import_payload, mod);
+            emit_string(&import_payload, nm);
             buf_putc(&import_payload, IMP_FUNC);
             leb_u(&import_payload, funcs[i].sig);
         }

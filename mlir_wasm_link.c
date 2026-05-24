@@ -1327,7 +1327,12 @@ typedef struct {
 // Configuration constants.
 enum {
     PAGE_SIZE     = 65536u,
-    STACK_SIZE    = 64u * 1024u,    // 64 KB stack, matches wasm-ld default
+    STACK_SIZE    = 4u * 1024u * 1024u, // 4 MB stack: deep recursion in the
+                                        // tinyC compiler itself (parse/emit)
+                                        // routinely overflows the 64 KB
+                                        // default. Matches the explicit
+                                        // `-z stack-size=4194304` used by
+                                        // build_tinyc_wasm.sh's clang link.
     INITIAL_PAGES = 2u,             // grown as needed below
     GLOBAL_BASE_OFFSET = 1024u,     // wasm-ld default: leave low 1 KB unused
 };

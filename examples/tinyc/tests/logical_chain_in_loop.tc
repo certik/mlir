@@ -1,0 +1,32 @@
+// Regression test for tinyc.wasm stack-size: deeply chained `||` with
+// an assignment-yielding-i32 result recurses N levels in emit_expr, and
+// the per-frame locals (scf.if regions/blocks, MLIR_*Handle, EVal, etc.)
+// add up. With the prior 64 KiB default wasm stack, anything ≥ 7
+// disjuncts inside a loop body overflowed the stack mid-emit and either
+// trapped or corrupted internal `format()` arguments. We now link
+// tinyc.wasm with a 4 MiB stack. This test exercises a wide chain to
+// keep that regression covered for both the native and wasm builds.
+int classify(int t) {
+    int hits = 0;
+    int i = 0;
+    while (i < 3) {
+        int x = (t == 1) || (t == 2) || (t == 3) || (t == 4) ||
+                (t == 5) || (t == 6) || (t == 7) || (t == 8) ||
+                (t == 9) || (t == 10);
+        int y = (t != 11) && (t != 12) && (t != 13) && (t != 14) &&
+                (t != 15) && (t != 16) && (t != 17) && (t != 18) &&
+                (t != 19) && (t != 20);
+        if (x) hits++;
+        if (y) hits++;
+        i++;
+    }
+    return hits;
+}
+
+int main() {
+    _tinyc_print(classify(3));   // x=1,y=1 per iter ×3 -> 6
+    _tinyc_print(classify(15));  // x=0,y=0 per iter ×3 -> 0
+    _tinyc_print(classify(11));  // x=0,y=0 per iter ×3 -> 0
+    _tinyc_print(classify(0));   // x=0,y=1 per iter ×3 -> 3
+    return 0;
+}

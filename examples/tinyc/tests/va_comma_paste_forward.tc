@@ -1,0 +1,50 @@
+// Regression test: GNU `, ## __VA_ARGS__` ("comma swallowing") when
+// the variadic forwarder is itself a function-like macro and the
+// callee is *also* a function-like macro that has to re-scan and
+// re-expand its own variadic arguments.
+//
+// The wrapping macro `WRAP(...)` forwards `(int64_t)42, name` through
+// `, ## __VA_ARGS__` into `INNER(fmt, ...)`. Before the fix tinyc
+// would *paste* the comma onto the first variadic token, producing
+// invalid `,(int64_t)` garbage at the start of INNER's argument list
+// and cascading parse errors like "expected ')' in _Generic" once
+// INNER's body invoked a _Generic-using helper.
+//
+// The matrix below exercises three scenarios:
+//   * empty __VA_ARGS__ — comma must be dropped.
+//   * one variadic arg  — comma stays, arg passes through.
+//   * many variadic args of mixed types passed through _Generic-using
+//     helpers (matches the corec/base println / format expansion).
+
+typedef long long int64_t;
+
+void _tinyc_print_str(char *s);
+
+void variadic_sink(int n, ...) {
+    (void)n;
+}
+
+// Reads `flag` then a count followed by COUNT (int, char*) pairs, so we
+// can verify that exactly the right number of arguments are forwarded.
+void typed_pairs(int flag, int n, ...);
+
+#define INNER(fmt, ...) typed_pairs(fmt, __VA_ARGS__)
+
+// `, ## __VA_ARGS__` in a forwarder.
+#define WRAP_0() INNER(0, 0)
+#define WRAP_NUM(...) INNER(1, 2, 100, "a" , ##__VA_ARGS__)
+#define WRAP_FWD(...) INNER(2, 2, 200, "b" , ##__VA_ARGS__)
+
+int main(void) {
+    WRAP_0();
+    WRAP_NUM();
+    WRAP_FWD(300, "c");
+    // Echo a value back so the test can verify it actually ran.
+    _tinyc_print(7);
+    return 0;
+}
+
+void typed_pairs(int flag, int n, ...) {
+    _tinyc_print(flag);
+    _tinyc_print(n);
+}

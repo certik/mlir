@@ -146,6 +146,8 @@ static MLIR_OpType ssa_to_stack(MLIR_OpType t) {
     case OP_TYPE_WASMSSA_ADDRESSOF:    return OP_TYPE_WASMSTACK_ADDRESSOF;
     case OP_TYPE_WASMSSA_FUNC_ADDR:    return OP_TYPE_WASMSTACK_FUNC_ADDR;
     case OP_TYPE_WASMSSA_CALL_INDIRECT: return OP_TYPE_WASMSTACK_CALL_INDIRECT;
+    case OP_TYPE_WASMSSA_MEMORY_SIZE:   return OP_TYPE_WASMSTACK_MEMORY_SIZE;
+    case OP_TYPE_WASMSSA_MEMORY_GROW:   return OP_TYPE_WASMSTACK_MEMORY_GROW;
     default: return (MLIR_OpType)0;
     }
 }
@@ -166,6 +168,8 @@ static bool ssa_op_has_result(MLIR_OpType t) {
     case OP_TYPE_WASMSSA_ADDRESSOF:
     case OP_TYPE_WASMSSA_FUNC_ADDR:
     case OP_TYPE_WASMSSA_CARRIER_GET:
+    case OP_TYPE_WASMSSA_MEMORY_SIZE:
+    case OP_TYPE_WASMSSA_MEMORY_GROW:
         return true;
     default:
         return false;
@@ -385,17 +389,27 @@ static bool stackify_body(MLIR_Context *ctx, Arena *arena,
 static MLIR_OpHandle convert_func(MLIR_Context *ctx, Arena *arena, MLIR_OpHandle src) {
     string name = at_s(src, "sym_name");
     bool exported = at_b(src, "exported");
+    bool internal = at_b(src, "internal");
     string pt = at_s(src, "param_types");
     string rt = at_s(src, "result_types");
     size_t n_params = pt.size / 2;
     uint8_t *param_types = hex_decode(pt, &n_params);
+    // Optional wasm-attribute forwarding: import_module/import_name on
+    // imports, export_name on definitions.
+    string imod = at_s(src, "import_module");
+    string iname = at_s(src, "import_name");
+    string ename = at_s(src, "export_name");
 
-    MLIR_AttributeHandle attrs[8];
+    MLIR_AttributeHandle attrs[12];
     size_t na = 0;
     attrs[na++] = attr_s(ctx, "sym_name", name.str, name.size);
     attrs[na++] = attr_s(ctx, "param_types", pt.str, pt.size);
     attrs[na++] = attr_s(ctx, "result_types", rt.str, rt.size);
     attrs[na++] = attr_b(ctx, "exported", exported);
+    attrs[na++] = attr_b(ctx, "internal", internal);
+    if (imod.size > 0)  attrs[na++] = attr_s(ctx, "import_module", imod.str, imod.size);
+    if (iname.size > 0) attrs[na++] = attr_s(ctx, "import_name", iname.str, iname.size);
+    if (ename.size > 0) attrs[na++] = attr_s(ctx, "export_name", ename.str, ename.size);
 
     bool is_import = MLIR_GetOpType(src) == OP_TYPE_WASMSSA_IMPORT_FUNC;
     if (is_import) {

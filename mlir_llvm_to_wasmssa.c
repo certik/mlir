@@ -1927,6 +1927,48 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         return true;
     }
 
+    // ---- llvm.intr.wasm.memory.size ---------------------------------------
+    // `__builtin_wasm_memory_size(0)` lowers to this. No operands (the
+    // memory index byte is hard-coded to 0 in the binary encoder); the
+    // single i32 result is the current memory size in 64KiB pages.
+    if (name_eq(name, "llvm.intr.wasm.memory.size")) {
+        if (MLIR_GetOpNumResults(op) != 1) return false;
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
+        if (vt != WT_I32) return false;
+        wasmssa_op_t o = {0};
+        o.type = OP_TYPE_WASMSSA_MEMORY_SIZE;
+        o.valtype = vt;
+        o.n_operands = 0;
+        o.has_result = true;
+        MLIR_ValueHandle idx = commit_op(F, &o);
+        vmap_set(F, r, idx);
+        return true;
+    }
+
+    // ---- llvm.intr.wasm.memory.grow ---------------------------------------
+    // `__builtin_wasm_memory_grow(0, n)` lowers to this. One i32 operand
+    // (pages to grow by) and one i32 result (previous size in pages or -1).
+    if (name_eq(name, "llvm.intr.wasm.memory.grow")) {
+        if (MLIR_GetOpNumResults(op) != 1 ||
+            MLIR_GetOpNumOperands(op) != 1) return false;
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
+        if (vt != WT_I32) return false;
+        MLIR_ValueHandle sa;
+        if (!vmap_get(F, MLIR_GetOpOperand(op, 0), &sa)) return false;
+        wasmssa_op_t o = {0};
+        o.type = OP_TYPE_WASMSSA_MEMORY_GROW;
+        o.valtype = vt;
+        o.n_operands = 1;
+        MLIR_ValueHandle o_ops[1] = { sa };
+        o.operands = o_ops;
+        o.has_result = true;
+        MLIR_ValueHandle idx = commit_op(F, &o);
+        vmap_set(F, r, idx);
+        return true;
+    }
+
     fprintf(stderr, "wasmssa-lower: unsupported op '%.*s'\n",
             (int)name.size, name.str);
     return false;
@@ -2152,6 +2194,32 @@ static bool lower_function(MLIR_Context *ctx, Arena *arena, ModCtx *mod,
         attrs[na++] = attr_s_hex(ctx, arena, "param_types", param_types, n_params);
         attrs[na++] = attr_s_hex(ctx, arena, "result_types", result_types, n_results);
         attrs[na++] = attr_b(ctx, "exported", exported);
+        // `static` C functions arrive as `llvm.func` with a
+        // `llvm.linkage = "#llvm.linkage<internal>"` attribute (set in
+        // emit.c). Forward that as a boolean `internal` flag on the
+        // wasmssa.func so the wasm binary emitter can mark the
+        // function's symbol-table entry BINDING_LOCAL — otherwise two
+        // `static`s with the same name in different TUs collide at
+        // link time.
+        bool internal = false;
+        MLIR_AttributeHandle linka = find_attr(fn, "llvm.linkage");
+        if (linka != MLIR_INVALID_HANDLE) {
+            string ls = MLIR_GetAttributeString(linka);
+            const char *want = "#llvm.linkage<internal>";
+            size_t wantn = strlen(want);
+            if (ls.size == wantn && memcmp(ls.str, want, wantn) == 0) {
+                internal = true;
+            }
+        }
+        attrs[na++] = attr_b(ctx, "internal", internal);
+        // Forward `wasm.export_name` (from `__attribute__((__export_name__("...")))`)
+        // so the binary emitter can publish the function under the
+        // user-requested export name.
+        MLIR_AttributeHandle exa = find_attr(fn, "wasm.export_name");
+        if (exa != MLIR_INVALID_HANDLE) {
+            string es = MLIR_GetAttributeString(exa);
+            attrs[na++] = attr_s(ctx, "export_name", es.str, es.size);
+        }
         attrs[na++] = attr_s_hex(ctx, arena, "carrier_types",
                                  F.carrier_vts.data, F.carrier_vts.size);
 
@@ -2435,6 +2503,7 @@ static MLIR_OpHandle make_op(MLIR_Context *ctx, MLIR_OpType type,
 // Emit an imported (body-less) wasmssa.func op directly into the module body.
 static void emit_import_func(MLIR_Context *ctx, Arena *arena,
                              MLIR_BlockHandle body, string sym_name,
+                             string import_module, string import_name,
                              const uint8_t *param_types, size_t n_params,
                              const uint8_t *result_types, size_t n_results) {
     MLIR_AttributeHandle attrs[8];
@@ -2445,6 +2514,12 @@ static void emit_import_func(MLIR_Context *ctx, Arena *arena,
     attrs[na++] = attr_s_hex(ctx, arena, "param_types", param_types, n_params);
     attrs[na++] = attr_s_hex(ctx, arena, "result_types", result_types, n_results);
     attrs[na++] = attr_b(ctx, "exported", false);
+    if (import_module.size > 0) {
+        attrs[na++] = attr_s(ctx, "import_module", import_module.str, import_module.size);
+    }
+    if (import_name.size > 0) {
+        attrs[na++] = attr_s(ctx, "import_name", import_name.str, import_name.size);
+    }
     MLIR_OpHandle op = make_op(ctx, OP_TYPE_WASMSSA_IMPORT_FUNC,
                                attrs, na, NULL, 0, NULL, 0, 0, NULL);
     MLIR_AppendBlockOp(ctx, body, op);
@@ -2493,7 +2568,18 @@ MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module) {
         MLIR_AttributeHandle sa = find_attr(op, "sym_name");
         string nm = MLIR_GetAttributeString(sa);
 
-        emit_import_func(ctx, arena, body, nm, p, np, r, nr);
+        // Forward `wasm.import_module` / `wasm.import_name` annotations
+        // (from `__attribute__((__import_module__("...")))`) so the
+        // binary emitter can place this import in the requested module
+        // (e.g. WASI's `wasi_snapshot_preview1`) instead of the default
+        // `env`.
+        string imod = {0}, iname = {0};
+        MLIR_AttributeHandle iam = find_attr(op, "wasm.import_module");
+        if (iam != MLIR_INVALID_HANDLE) imod = MLIR_GetAttributeString(iam);
+        MLIR_AttributeHandle ian = find_attr(op, "wasm.import_name");
+        if (ian != MLIR_INVALID_HANDLE) iname = MLIR_GetAttributeString(ian);
+
+        emit_import_func(ctx, arena, body, nm, imod, iname, p, np, r, nr);
     }
 
     // Pass 2: defined funcs in source order. `is_function_symbol`

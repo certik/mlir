@@ -110,21 +110,26 @@ def build_wasm_runtime(out_path: Path, start_obj: Path):
     return None
 
 
-def link_wasm(obj_path: Path, runtime_obj: Path, start_obj: Path,
+def link_wasm(obj_paths, runtime_obj: Path, start_obj: Path,
               wasm_path: Path):
-    """Link a tinyc-emitted wasm32 object together with the wasm runtime
-    + _start shim. Either uses host `wasm-ld` (default) or the in-tree
+    """Link tinyc-emitted wasm32 object(s) together with the wasm runtime
+    + _start shim. Accepts either a single Path or a list of Paths so
+    that multi-object tests (one .wasm.o per source) can be linked in
+    the same call. Either uses host `wasm-ld` (default) or the in-tree
     native linker (`TINYC_USE_NATIVE_LINK=1`)."""
+    if isinstance(obj_paths, Path):
+        obj_paths = [obj_paths]
+    obj_args = [str(p) for p in obj_paths]
     if USE_NATIVE_LINK:
         return run([
             str(NATIVE_LINK), "--link",
             "-o", str(wasm_path),
             "--export=_start",
-            str(obj_path), str(runtime_obj), str(start_obj),
+            *obj_args, str(runtime_obj), str(start_obj),
         ])
     return run([
         WASM_LD, "--no-entry", "--export=_start",
-        str(obj_path), str(runtime_obj), str(start_obj),
+        *obj_args, str(runtime_obj), str(start_obj),
         "-o", str(wasm_path),
     ])
 
@@ -172,6 +177,11 @@ def main():
     for t in tests:
         name = t["name"]
         expected = t["expected_stdout"]
+        # Tests that differ between wasm32 (4-byte pointers, 4-byte long)
+        # and the host (8-byte pointers on x86_64/aarch64) can override
+        # the expected stdout with `expected_stdout_wasm`.
+        if TARGET == "wasm" and "expected_stdout_wasm" in t:
+            expected = t["expected_stdout_wasm"]
         platforms = t.get("platforms")
         if platforms is not None and plat_key not in platforms:
             print(f"SKIP {name} (platforms={platforms}, current={plat_key})")
@@ -181,6 +191,14 @@ def main():
         # rely on host-libc behavior wasm32-wasi can't reproduce).
         if TARGET == "wasm" and t.get("wasm_skip"):
             print(f"SKIP {name} (wasm_skip)")
+            skipped += 1
+            continue
+        # Inverse opt-out: tests that exercise wasm-only builtins
+        # (e.g. `__builtin_wasm_memory_size`) cannot be run on the
+        # native (LLVM-IR / llc) target — those intrinsics aren't
+        # valid for x86/aarch64 codegen.
+        if TARGET == "native" and t.get("native_skip"):
+            print(f"SKIP {name} (native_skip)")
             skipped += 1
             continue
         # Optional opt-out for the native LLVM->WASM pipeline only
@@ -194,6 +212,18 @@ def main():
             print(f"SKIP {name} (wasm_native_skip)")
             skipped += 1
             continue
+        # Inverse opt-out: tests that exercise wasm-specific custom
+        # function attributes (e.g.
+        # `__attribute__((__import_module__("...")))`) which are
+        # honored by the in-tree native LLVM->WASM pipeline but not
+        # by the upstream LLVM WebAssembly backend (which would need
+        # a separate `passthrough = ...` attribute plumbing to forward
+        # them through MLIR's `convert-func-to-llvm` pass).
+        if (TARGET == "wasm" and LOWERING != "native"
+                and t.get("wasm_upstream_skip")):
+            print(f"SKIP {name} (wasm_upstream_skip)")
+            skipped += 1
+            continue
         # Multi-file tests pass `sources = [...]`; single-file tests
         # default to `<name>.tc` for backwards compatibility.
         sources = t.get("sources", [f"{name}.tc"])
@@ -203,18 +233,45 @@ def main():
             obj  = HERE / "tests" / f"{name}.wasm.o"
             wasm = HERE / "tests" / f"{name}.wasm"
 
-            # Stage 1: tinyc emits wasm32 object directly.
-            r = run([str(TINYC), "--emit=wasm", *LOWERING_FLAG,
-                     "-I", str(HERE / "tests"),
-                     "-o", str(obj),
-                     *[str(s) for s in srcs]])
-            if r.returncode != 0:
-                print(f"FAIL {name}: tinyc returned {r.returncode}\nstderr:\n{r.stderr}")
-                failures += 1
-                continue
+            # When `link_separately = true`, compile each source into
+            # its own .wasm.o and link them with wasm-ld (or the
+            # in-tree linker). This exercises cross-object symbol
+            # resolution — the default flow of "merge all sources into
+            # one MLIR module first" cannot regress static-linkage
+            # bugs that only manifest across object boundaries.
+            link_separately = bool(t.get("link_separately"))
+            objs = []
+
+            if link_separately:
+                fail = False
+                for src in srcs:
+                    obj_i = HERE / "tests" / f"{src.stem}.wasm.o"
+                    r = run([str(TINYC), "--emit=wasm", *LOWERING_FLAG,
+                             "-I", str(HERE / "tests"),
+                             "-o", str(obj_i),
+                             str(src)])
+                    if r.returncode != 0:
+                        print(f"FAIL {name}: tinyc returned {r.returncode} on {src.name}\nstderr:\n{r.stderr}")
+                        failures += 1
+                        fail = True
+                        break
+                    objs.append(obj_i)
+                if fail:
+                    continue
+            else:
+                # Stage 1: tinyc emits wasm32 object directly.
+                r = run([str(TINYC), "--emit=wasm", *LOWERING_FLAG,
+                         "-I", str(HERE / "tests"),
+                         "-o", str(obj),
+                         *[str(s) for s in srcs]])
+                if r.returncode != 0:
+                    print(f"FAIL {name}: tinyc returned {r.returncode}\nstderr:\n{r.stderr}")
+                    failures += 1
+                    continue
+                objs = [obj]
 
             # Stage 2: link with wasm-ld + runtime_wasm.o + start_wasm.o.
-            r = link_wasm(obj, wasm_runtime_obj, wasm_start_obj, wasm)
+            r = link_wasm(objs, wasm_runtime_obj, wasm_start_obj, wasm)
             if r.returncode != 0:
                 print(f"FAIL {name}: wasm-ld failed\nstderr:\n{r.stderr}\nstdout:\n{r.stdout}")
                 failures += 1

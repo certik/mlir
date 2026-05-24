@@ -152,6 +152,8 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_WASMSSA_ADDRESSOF:   return str_lit("wasmssa.addressof");
         case OP_TYPE_WASMSSA_FUNC_ADDR:   return str_lit("wasmssa.func_addr");
         case OP_TYPE_WASMSSA_CALL_INDIRECT: return str_lit("wasmssa.call_indirect");
+        case OP_TYPE_WASMSSA_MEMORY_SIZE: return str_lit("wasmssa.memory_size");
+        case OP_TYPE_WASMSSA_MEMORY_GROW: return str_lit("wasmssa.memory_grow");
         // wasmstack dialect
         case OP_TYPE_WASMSTACK_FUNC: return str_lit("wasmstack.func");
         case OP_TYPE_WASMSTACK_IMPORT_FUNC: return str_lit("wasmstack.import_func");
@@ -183,6 +185,8 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_WASMSTACK_ADDRESSOF: return str_lit("wasmstack.addressof");
         case OP_TYPE_WASMSTACK_FUNC_ADDR: return str_lit("wasmstack.func_addr");
         case OP_TYPE_WASMSTACK_CALL_INDIRECT: return str_lit("wasmstack.call_indirect");
+        case OP_TYPE_WASMSTACK_MEMORY_SIZE: return str_lit("wasmstack.memory_size");
+        case OP_TYPE_WASMSTACK_MEMORY_GROW: return str_lit("wasmstack.memory_grow");
         default: return str_lit("unknown");
     }
 }

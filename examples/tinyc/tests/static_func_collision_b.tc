@@ -1,0 +1,9 @@
+// Regression test (file B). Companion to static_func_collision_a.tc.
+// Same `static int helper(int)` name, different body — must resolve
+// to this TU's copy, not the one in static_func_collision_a.tc.
+
+static int helper(int v) { return v + 200; }
+
+int call_b(int v) {
+    return helper(v);
+}

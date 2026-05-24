@@ -1,0 +1,27 @@
+// Regression test: module-scope globals initialised with a parenthesised
+// type cast.
+//
+//   static const int32_t LLVM_GEP_DYN = (int32_t)0x80000000;
+//
+// The global-initializer parser only recognised `((void*)0)` as the
+// parenthesised form and treated everything else under TC_TK_LPAREN
+// as a null pointer, losing the actual literal value and then
+// stranding the trailing INT_LIT token (cascading
+// "expected ';' after global" errors).
+//
+// Used in examples/tinyc/emit.c (line 649).
+
+typedef int   int32_t;
+typedef float float32_t;
+
+static const int32_t MAGIC_NEG = (int32_t)0x80000000;
+static const int32_t MAGIC_POS = (int32_t)42;
+static const int32_t MAGIC_NEG_EXPLICIT = (int32_t)-7;
+static const float32_t HALF = (float32_t)0.5;
+
+int main(void) {
+    _tinyc_print(MAGIC_NEG);
+    _tinyc_print(MAGIC_POS);
+    _tinyc_print(MAGIC_NEG_EXPLICIT);
+    return 0;
+}

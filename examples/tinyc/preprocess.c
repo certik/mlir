@@ -224,6 +224,13 @@ static void pp_tokenize(Arena *arena, string src, string file, VecPPTok *out) {
             line++;
             continue;
         }
+        if (c == '\\' && i + 2 < src.size && src.str[i + 1] == '\r' &&
+                src.str[i + 2] == '\n') {
+            // CRLF line continuation (Windows / git core.autocrlf checkouts).
+            i += 3;
+            line++;
+            continue;
+        }
         if (c == '\n') {
             PPTok t = {0};
             t.kind = PP_NEWLINE;
@@ -715,7 +722,27 @@ static void substitute(PP *pp, Macro *m, VecPPTok *args, VecPPTok *out) {
                 int p = -1;
                 for (size_t k = 0; k < m->n_params; k++)
                     if (str_eq(m->params[k], right_default.text)) { p = (int)k; break; }
-                if (p < 0 && va_idx >= 0 && str_eq(right_default.text, s_lit("__VA_ARGS__"))) p = va_idx;
+                bool is_va = (p < 0 && va_idx >= 0 &&
+                              str_eq(right_default.text, s_lit("__VA_ARGS__")));
+                if (is_va) p = va_idx;
+                // GNU extension: `, ## __VA_ARGS__` ("comma swallowing").
+                //   * If __VA_ARGS__ is empty, drop the preceding comma.
+                //   * If __VA_ARGS__ is non-empty, leave the comma intact
+                //     and emit the variadic arguments as-is — do NOT paste
+                //     the comma to the first variadic token.
+                // This matches the behaviour clang/gcc give to widely-used
+                // logging macros of the form `f(fixed, ## __VA_ARGS__)`.
+                if (is_va && left.kind == PP_PUNCT && str_eq(left.text, s_lit(","))) {
+                    if (args[p].size == 0) {
+                        // Drop the comma already pushed into `out`.
+                        out->size--;
+                    } else {
+                        for (size_t k = 0; k < args[p].size; k++) {
+                            VecPPTok_push_back(pp->arena, out, args[p].data[k]);
+                        }
+                    }
+                    continue;
+                }
                 if (p >= 0) {
                     if (args[p].size == 0) {
                         // Right is empty: pasted result is just left.

@@ -5,6 +5,7 @@
 #include <assert.h>
 
 #include <base/string.h>
+#include <base/strbuf.h>
 #include <base/io.h>
 #include <base/vector.h>
 
@@ -1831,18 +1832,19 @@ OperationParserResult parse_tensor_splat_op(Parser *parser, const OperationParse
             parser_expect(parser, TK_NAME);
             if (parser_peek(parser, TK_LANGLE)) {
                 parser_expect(parser, TK_LANGLE);
-                string tensor_type = str_lit("tensor<");
+                strbuf tensor_type = strbuf_make();
+                strbuf_append(parser->arena, &tensor_type, str_lit("tensor<"));
                 int depth = 1;
                 while (depth > 0 && !parser_peek(parser, TK_EOF)) {
                     string token_str = parser_token_str(parser);
                     if (parser_peek(parser, TK_LANGLE)) depth++;
                     else if (parser_peek(parser, TK_RANGLE)) depth--;
-                    tensor_type = str_concat(parser->arena, tensor_type, token_str);
+                    strbuf_append(parser->arena, &tensor_type, token_str);
                     parser_next_token(parser);
                 }
 
                 result_types = arena_new_array(params->arena, MLIR_TypeHandle, 1);
-                result_types[0] = mlir_type_create_from_string(params->ctx, tensor_type);
+                result_types[0] = mlir_type_create_from_string(params->ctx, strbuf_to_string(tensor_type));
                 n_result_types = 1;
             }
         }
@@ -1932,23 +1934,19 @@ OperationParserResult parse_arith_select_op(Parser *parser, const OperationParse
             parser_expect(parser, TK_COMMA);
 
             // Parse the second type (result type)
-            string result_type = str_lit("");
+            strbuf result_type = strbuf_make();
             while (!parser_peek(parser, TK_EOF) &&
                    !parser_peek(parser, TK_NEWLINE) &&
                    !(parser_peek(parser, TK_NAME) &&
                      str_eq(parser_token_str(parser), str_lit("loc")))) {
-                if (result_type.size > 0) {
-                    result_type = str_concat(parser->arena, result_type, parser_token_str(parser));
-                } else {
-                    result_type = parser_token_str(parser);
-                }
+                strbuf_append(parser->arena, &result_type, parser_token_str(parser));
                 parser_next_token(parser);
                 if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("loc"))) break;
             }
 
             if (result_type.size > 0) {
                 result_types = arena_new_array(params->arena, MLIR_TypeHandle, 1);
-                result_types[0] = mlir_type_create_from_string(params->ctx, result_type);
+                result_types[0] = mlir_type_create_from_string(params->ctx, strbuf_to_string(result_type));
                 n_result_types = 1;
             }
         }
@@ -2428,7 +2426,7 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
         // Arguments will be collected in the func_args vector
 
         // Accumulate a textual params signature when args are type-only (declarations)
-        string params_sig = str_lit("");
+        strbuf params_sig = strbuf_make();
 
         // Parse arguments directly in one pass
         int paren_depth = 0;
@@ -2477,16 +2475,16 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                                     parser_expect(parser, TK_LANGLE);
 
                                     // Parse everything inside angle brackets
-                                    string type_content = str_lit("");
+                                    strbuf type_content = strbuf_make();
                                     while (!parser_peek(parser, TK_RANGLE) && !parser_peek(parser, TK_EOF)) {
                                         string token_str = parser_token_str(parser);
-                                        type_content = str_concat(parser->arena, type_content, token_str);
+                                        strbuf_append(parser->arena, &type_content, token_str);
                                         parser_next_token(parser);
                                     }
 
                                     if (parser_peek(parser, TK_RANGLE)) {
                                         parser_expect(parser, TK_RANGLE);
-                                        string full_type_str = str_concat(parser->arena, str_lit("!tt.ptr<"), str_concat(parser->arena, type_content, str_lit(">")));
+                                        string full_type_str = str_concat(parser->arena, str_lit("!tt.ptr<"), str_concat(parser->arena, strbuf_to_string(type_content), str_lit(">")));
                                         arg_type = mlir_type_create_from_string(parser->ctx, full_type_str);
                                     }
                                 } else {
@@ -2506,7 +2504,7 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                         // Handle complex types with angle brackets (e.g., tensor<2x256xf32>)
                         if (parser_peek(parser, TK_LANGLE)) {
                             parser_expect(parser, TK_LANGLE);
-                            string angle_content = str_lit("");
+                            strbuf angle_content = strbuf_make();
                             int bracket_depth = 1;
                             while (bracket_depth > 0 && !parser_peek(parser, TK_EOF)) {
                                 if (parser_peek(parser, TK_LANGLE)) {
@@ -2519,11 +2517,11 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                                     }
                                 }
                                 string token_str = parser_token_str(parser);
-                                angle_content = str_concat(parser->arena, angle_content, token_str);
+                                strbuf_append(parser->arena, &angle_content, token_str);
                                 parser_next_token(parser);
                             }
                             // Reconstruct the full type string
-                            string full_type = str_concat(parser->arena, type_name, str_concat(parser->arena, str_lit("<"), str_concat(parser->arena, angle_content, str_lit(">"))));
+                            string full_type = str_concat(parser->arena, type_name, str_concat(parser->arena, str_lit("<"), str_concat(parser->arena, strbuf_to_string(angle_content), str_lit(">"))));
                             arg_type = mlir_type_create_from_string(parser->ctx, full_type);
                         } else {
                             arg_type = mlir_type_create_from_string(parser->ctx, type_name);
@@ -2643,8 +2641,8 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                 // Type-only param (no SSA name); accumulate its textual form
                 string ty = str_lit("");
                 if (parse_type_string(parser, &ty)) {
-                    if (params_sig.size > 0) params_sig = str_concat(parser->arena, params_sig, str_lit(", "));
-                    params_sig = str_concat(parser->arena, params_sig, ty);
+                    if (params_sig.size > 0) strbuf_append(parser->arena, &params_sig, str_lit(", "));
+                    strbuf_append(parser->arena, &params_sig, ty);
                 } else {
                     parser_next_token(parser);
                 }
@@ -2666,12 +2664,12 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
 
         // Save params signature if any
         if (params_sig.size > 0) {
-            append_attr(parser, &attrs, &n_attrs, &cap_attrs, create_string_attr(parser, str_lit("params_sig"), params_sig));
+            append_attr(parser, &attrs, &n_attrs, &cap_attrs, create_string_attr(parser, str_lit("params_sig"), strbuf_to_string(params_sig)));
         }
     }
 
     // Optional return signature after '->' (capture conservatively until 'attributes' or body)
-    string ret_sig = str_lit("");
+    strbuf ret_sig = strbuf_make();
     if (parser_peek(parser, TK_ARROW)) {
         parser_expect(parser, TK_ARROW);
         while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_LBRACE_END)) {
@@ -2679,10 +2677,11 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                 string nm = parser_token_str(parser);
                 if (str_eq(nm, str_lit("attributes")) || str_eq(nm, str_lit("loc"))) break;
             }
-            ret_sig = str_concat(parser->arena, ret_sig, parser_token_str(parser));
+            strbuf_append(parser->arena, &ret_sig, parser_token_str(parser));
             parser_next_token(parser);
         }
     }
+    (void)ret_sig;
 
     // Optionally capture function attributes: attributes { ... }
     if (parser_peek(parser, TK_NAME) && str_eq(parser_token_str(parser), str_lit("attributes"))) {
@@ -3732,10 +3731,11 @@ OperationParserResult parse_tt_load_op(Parser *parser, const OperationParserPara
                     string before = str_substr(pointer_sig, 0, pos);
                     string after = str_substr(pointer_sig, close, pointer_sig.size - close);
 
-                    string val_sig = before;
-                    val_sig = str_concat(parser->arena, val_sig, elem.size > 0 ? elem : str_lit("f32"));
-                    val_sig = str_concat(parser->arena, val_sig, after);
-                    result_sig = val_sig;
+                    strbuf val_sig = strbuf_make();
+                    strbuf_append(parser->arena, &val_sig, before);
+                    strbuf_append(parser->arena, &val_sig, elem.size > 0 ? elem : str_lit("f32"));
+                    strbuf_append(parser->arena, &val_sig, after);
+                    result_sig = strbuf_to_string(val_sig);
                 }
             }
 

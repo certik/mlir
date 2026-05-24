@@ -170,7 +170,10 @@ struct Type {
     bool     array_elem_is_i8;
     // For TY_I32/TY_I64: optional explicit bit width hint (0 = unspecified,
     // 8/16/32/64 = explicit width). Used by `_Generic` for typedef
-    // matching on narrow-int aliases (`int8_t`, `int16_t`, ...).
+    // matching on narrow-int aliases (`int8_t`, `int16_t`, ...). For
+    // wasm32 we also use int_bits == 64 with kind == TY_I32 to tag
+    // `long`-semantic types (storage is i32 because of the ABI, but
+    // `_Generic` must keep them distinct from `int`).
     int      int_bits;
     bool     int_unsigned;
 };
@@ -220,8 +223,13 @@ struct Expr {
     ExprKind kind;
     // For EX_INT
     int64_t int_value;
-    bool    is_i64;          // true iff the integer literal had L/LL suffix
-                             // and so should be emitted as TY_I64.
+    bool    is_i64;          // true iff the integer literal had L/LL suffix.
+                             // When `is_i64 && !is_long_long`, the literal had
+                             // a single L: it is TY_I64 on native targets but
+                             // TY_I32 on wasm32 (where `long` is the size of
+                             // `int`).
+    bool    is_long_long;    // true iff the integer literal had an LL suffix.
+                             // LL always means TY_I64 regardless of target.
     bool    is_f64;          // true iff the float literal has TY_F64 type
                              // (i.e. no `f` suffix; C's default for `1.0`).
     // For EX_FLOAT
@@ -305,6 +313,11 @@ struct Stmt {
     Type  decl_type;
     string decl_name;
     Expr *decl_init;
+    // For function-local `static` variables: when non-empty, this is the
+    // mangled module-scope symbol name registered in `program->globals`.
+    // The emitter treats the local as an alias for that global instead
+    // of allocating an `alloca` slot.
+    string decl_static_global_sym;
     // ST_IF / ST_WHILE / ST_FOR / ST_SWITCH
     Expr *cond;
     VecStmtPtr then_body;
@@ -347,6 +360,16 @@ typedef struct {
                              // ABI is modeled at the call site.
     bool       is_static;    // `static` at file scope: emit with private
                              // visibility/internal linkage.
+    // GCC/Clang `__attribute__((...))` annotations relevant to wasm
+    // codegen. Empty string means "not set". When import_module/name are
+    // set the function MUST be a forward declaration; the emitter records
+    // them on the resulting func op so the wasm pipeline can emit the
+    // appropriate import section entry. export_name is honored on
+    // function definitions and causes the function to be exported under
+    // that name (used by wasm_buddy_alloc / wasm_buddy_free).
+    string     wasm_import_module;
+    string     wasm_import_name;
+    string     wasm_export_name;
     int        line;
 } Func;
 
@@ -409,6 +432,12 @@ typedef struct Program {
     VecStructDefPtr structs;
     VecGlobal       globals;
     ProgramEnum    *enums;   // singly-linked list, module scope
+    // True when the program was parsed for the wasm32 target (set by
+    // `tinyc_parse_into` from its `target_wasm32` arg). The emitter
+    // uses this to size hardcoded libc-extern signatures (malloc /
+    // free / printStr / tinyc_va_arg_struct) so they match the
+    // wasm32-wasi ABI's 32-bit `size_t` instead of the host's 64-bit.
+    bool target_wasm32;
 } Program;
 
 // ---------------- Lexer ----------------
@@ -453,6 +482,7 @@ typedef enum {
     TC_TK_KW_VA_LIST,
     TC_TK_KW_GENERIC,
     TC_TK_KW_GOTO,
+    TC_TK_KW_ATTRIBUTE,
     TC_TK_STRING_LIT,
     TC_TK_LPAREN, TC_TK_RPAREN,
     TC_TK_LBRACE, TC_TK_RBRACE,
@@ -477,6 +507,11 @@ typedef struct {
     TcTokKind kind;
     int64_t int_value;
     bool    is_i64;          // EX_INT / TC_TK_INT_LIT marked with L/LL suffix
+    bool    is_long_long;    // EX_INT / TC_TK_INT_LIT marked with LL suffix
+                             // (always 64-bit). When `is_i64 && !is_long_long`
+                             // the literal had a single L: it is 64-bit on
+                             // native targets but 32-bit on wasm32 (where
+                             // `long` is `int`).
     bool    is_f64;          // TC_TK_FLOAT_LIT without `f` suffix (i.e. double)
     double  float_value;
     string text;             // interned identifier text (for IDENT)
@@ -511,8 +546,15 @@ Program *tinyc_parse(Arena *arena, VecTcTok toks);
 //     keeps the initialized one; two initialized errors.
 // Each call has its own typedef / enumerator scope (matching per-file
 // preprocessor isolation): typedefs do not leak across files.
+// `target_wasm32` controls the sizes of `long`, `size_t`, `intptr_t`
+// and friends: on wasm32-wasi they're 32-bit; on every other supported
+// host they're 64-bit (since tinyC currently runs only on
+// 64-bit Linux/macOS/Windows). The flag MUST be set whenever any
+// `--emit=wasm*` output is requested — otherwise tinyC will emit
+// imports declared with `size_t iovs_len` as `i64`, which doesn't
+// match the wasm32-wasi ABI.
 // Returns the number of parse errors encountered (0 on success).
-int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks);
+int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_wasm32);
 
 // ---------------- Emitter ----------------
 

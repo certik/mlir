@@ -1,0 +1,44 @@
+// Regression test: `struct Tag { ... } *field;` inside an outer struct.
+//
+//   typedef struct {
+//       struct LabelBlock { int v; struct LabelBlock *next; } *labels;
+//       ...
+//   } E;
+//
+// failed because the nested-struct-body field parser at parse.c set
+// ft.kind = TY_STRUCT and didn't check for an optional `*` after the
+// closing brace, so the trailing pointer suffix and field name were
+// rejected with "expected field name" / "expected field type".
+//
+// Used in examples/tinyc/emit.c by the per-function label list:
+//   struct LabelBlock { string name; MLIR_BlockHandle block;
+//                       struct LabelBlock *next; } *labels;
+
+typedef struct E {
+    int header;
+    struct LabelBlock {
+        int v;
+        struct LabelBlock *next;
+    } *labels;
+    int trailer;
+} E;
+
+int main(void) {
+    E e;
+    e.header = 100;
+    e.trailer = 200;
+    e.labels = 0;
+    _tinyc_print(e.header);
+    _tinyc_print(e.trailer);
+    if (e.labels == 0) _tinyc_print(1);
+
+    // Walking a self-referential list pointed at by the inner-struct
+    // field exercises the TY_PTR_STRUCT typing on `labels`.
+    struct LabelBlock first;
+    first.v = 7;
+    first.next = 0;
+    e.labels = &first;
+    _tinyc_print(e.labels->v);
+    if (e.labels->next == 0) _tinyc_print(2);
+    return 0;
+}

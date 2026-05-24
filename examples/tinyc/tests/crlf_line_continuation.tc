@@ -1,0 +1,35 @@
+// Regression: tinyc's preprocessor only treated `\\\n` (backslash + LF) as a
+// line continuation. Source files checked out on Windows with the default
+// `core.autocrlf=true` end up with `\r\n` line endings, so a macro like
+//
+//     #define FOO(x) \\\r\n
+//         do_something(x)
+//
+// reached the preprocessor as `\\\r\n` and the line-continuation check at
+// preprocess.c:221 failed (it required the byte after `\` to be exactly
+// `\n`, not `\r`). The backslash then fell through to the token loop as an
+// unexpected character, producing
+//
+//     tinyc lex error at line <N>: unexpected '\\'
+//     tinyc parse error at line <N+1>: expected return type
+//
+// on the macOS/Linux clones of any header that defined a multi-line macro
+// (e.g. corec/base/io.h's `println`). The Windows CI selfhost step
+// (build_tinyc_wasm.sh → wasmtime + tinyc.wasm on Windows-checked-out
+// sources) failed at the very first source file because of this.
+//
+// The MRE embeds CRLF line endings literally in a multi-line macro so the
+// preprocessor MUST accept `\\\r\n` to compile the program at all. With
+// the bug, compilation fails before main runs; with the fix the macro
+// expands cleanly and main prints 7.
+
+#define ADD3(a, b, c) \
+    (a) + \
+    (b) + \
+    (c)
+
+int main() {
+    int x = ADD3(1, 2, 4);
+    _tinyc_print(x);
+    return 0;
+}

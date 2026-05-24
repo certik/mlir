@@ -51,6 +51,7 @@ static TcTokKind keyword_or_ident(string s) {
     if (str_eq(s, str_lit("va_list"))) return TC_TK_KW_VA_LIST;
     if (str_eq(s, str_lit("__builtin_va_list"))) return TC_TK_KW_VA_LIST;
     if (str_eq(s, str_lit("goto")))     return TC_TK_KW_GOTO;
+    if (str_eq(s, str_lit("__attribute__"))) return TC_TK_KW_ATTRIBUTE;
     return TC_TK_IDENT;
 }
 
@@ -128,6 +129,28 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                         case '\'': ch = '\''; break;
                         case '?': ch = '?'; break;
                         case '0': ch = '\0'; break;
+                        case 'x': {
+                            // Hex escape: \xHH... — consume hex digits until
+                            // a non-hex byte. Result is the low 8 bits.
+                            int v = 0;
+                            int nh = 0;
+                            while (j < src.size) {
+                                char h = src.str[j];
+                                int dv;
+                                if (h >= '0' && h <= '9') dv = h - '0';
+                                else if (h >= 'a' && h <= 'f') dv = 10 + (h - 'a');
+                                else if (h >= 'A' && h <= 'F') dv = 10 + (h - 'A');
+                                else break;
+                                v = v * 16 + dv;
+                                j++; nh++;
+                            }
+                            if (nh == 0) {
+                                println(str_lit("tinyc lex error at line {}: \\x with no hex digits"),
+                                        (int64_t)line);
+                            }
+                            ch = (char)(v & 0xff);
+                            break;
+                        }
                         default:
                             println(str_lit("tinyc lex error at line {}: unknown escape '\\{}'"),
                                     (int64_t)line, str_substr(src, j - 1, 1));
@@ -170,6 +193,28 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                     case '"': v = '"'; break;
                     case '?': v = '?'; break;
                     case '0': v = '\0'; break;
+                    case 'x': {
+                        // Hex char escape: '\xHH...' — accept as many hex
+                        // digits as appear; result is the low 8 bits.
+                        int hv = 0;
+                        int nh = 0;
+                        while (j < src.size) {
+                            char h = src.str[j];
+                            int dv;
+                            if (h >= '0' && h <= '9') dv = h - '0';
+                            else if (h >= 'a' && h <= 'f') dv = 10 + (h - 'a');
+                            else if (h >= 'A' && h <= 'F') dv = 10 + (h - 'A');
+                            else break;
+                            hv = hv * 16 + dv;
+                            j++; nh++;
+                        }
+                        if (nh == 0) {
+                            println(str_lit("tinyc lex error at line {}: \\x with no hex digits"),
+                                    (int64_t)line);
+                        }
+                        v = (int64_t)(hv & 0xff);
+                        break;
+                    }
                     default:
                         println(str_lit("tinyc lex error at line {}: unknown char escape"),
                                 (int64_t)line);
@@ -205,12 +250,15 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                 TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
                 // Optional integer-literal suffix: any mix of 'l'/'L' /
                 // 'u'/'U' in any order (see below for the decimal path).
+                int n_l = 0;
                 for (int k = 0; k < 3 && j < src.size; k++) {
                     char c2 = src.str[j];
-                    if (c2 == 'l' || c2 == 'L') { t.is_i64 = true; j++; }
+                    if (c2 == 'l' || c2 == 'L') { n_l++; j++; }
                     else if (c2 == 'u' || c2 == 'U') { j++; }
                     else break;
                 }
+                if (n_l >= 1) t.is_i64 = true;
+                if (n_l >= 2) t.is_long_long = true;
                 VecTcTok_push_back(arena, &toks, t);
                 i = j; continue;
             }
@@ -286,15 +334,21 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
             }
             TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
             // Optional integer-literal suffix: any combination of 'l'/'L'
-            // (denoting TY_I64) and 'u'/'U' (signedness, silently dropped),
-            // in either order. So 'L', 'LL', 'UL', 'LU', 'ULL', 'LLU', 'U'
-            // are all accepted. We do not distinguish signedness.
+            // and 'u'/'U' in either order. So 'L', 'LL', 'UL', 'LU', 'ULL',
+            // 'LLU', 'U' are all accepted. We do not distinguish signedness.
+            // A single L denotes `long` (target-dependent: 32-bit on wasm32,
+            // 64-bit on native); LL always denotes `long long` (64-bit). The
+            // emitter consults `target_wasm32` to decide the size for a
+            // single-L literal.
+            int n_l_dec = 0;
             for (int k = 0; k < 3 && j < src.size; k++) {
                 char c2 = src.str[j];
-                if (c2 == 'l' || c2 == 'L') { t.is_i64 = true; j++; }
+                if (c2 == 'l' || c2 == 'L') { n_l_dec++; j++; }
                 else if (c2 == 'u' || c2 == 'U') { j++; }
                 else break;
             }
+            if (n_l_dec >= 1) t.is_i64 = true;
+            if (n_l_dec >= 2) t.is_long_long = true;
             VecTcTok_push_back(arena, &toks, t);
             i = j; continue;
         }

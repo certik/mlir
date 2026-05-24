@@ -1,0 +1,14 @@
+// Regression test driver. Compiled separately from the helper TUs and
+// linked against them — exercises wasm-link symbol resolution for
+// `static` symbols defined in multiple TUs with the same C name.
+
+int call_a(int v);
+int call_b(int v);
+
+int main() {
+    _tinyc_print(call_a(1));  // 1 + 100 = 101
+    _tinyc_print(call_b(1));  // 1 + 200 = 201
+    _tinyc_print(call_a(5));  // 105
+    _tinyc_print(call_b(5));  // 205
+    return 0;
+}

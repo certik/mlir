@@ -1,0 +1,41 @@
+// MRE: on the wasm32 target, `long` (and therefore `size_t`, which corec
+// typedefs as `unsigned long`) must be a 32-bit integer to match the
+// wasm32-wasi ABI. tinyC previously treated `long` as 64-bit for every
+// target — including wasm32 — which produced wasm imports whose
+// signatures didn't match what wasmtime exposes:
+//
+//   incompatible import type for `wasi_snapshot_preview1::fd_write`
+//   types incompatible:
+//     expected (func (param i32 i32 i64 i32) (result i32)),
+//     found    (func (param i32 i32 i32 i32) (result i32))
+//
+// This MRE re-declares fd_write with the spec signature (size_t for
+// `iovs_len`) and asks wasmtime to instantiate the module. The test
+// only passes when tinyC sizes `long` per-target.
+//
+// native_skip:        no host fd_write.
+// wasm_upstream_skip: the upstream LLVM WebAssembly target already
+//                     handles the long-sizing question via its own
+//                     data layout; this MRE specifically exercises
+//                     tinyC's own parser sizing.
+
+typedef unsigned long size_t;
+
+typedef struct {
+    unsigned char *buf;
+    size_t         buf_len;
+} ciovec_t;
+
+__attribute__((__import_module__("wasi_snapshot_preview1"),
+               __import_name__("fd_write")))
+unsigned int fd_write(unsigned int fd, const ciovec_t *iovs,
+                      size_t iovs_len, size_t *nwritten);
+
+int main() {
+    ciovec_t iov;
+    iov.buf     = (unsigned char *)"ok\n";
+    iov.buf_len = 3;
+    size_t nw;
+    fd_write(1, &iov, 1, &nw);
+    return 0;
+}

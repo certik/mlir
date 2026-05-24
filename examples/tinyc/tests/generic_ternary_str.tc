@@ -1,0 +1,24 @@
+// _Generic on a ternary expression whose then/else branches both return
+// `char*`. The static type of the ternary is `char*`, regardless of the
+// condition's type. The matcher must see `char*` here, not the
+// condition's `int`.
+//
+// MRE for a bug in tinyC's `infer_expr_type` where EX_TERNARY returned
+// the condition's type instead of the (then-branch) value type. This
+// surfaced during the wasm32 selfhost: tinyC compiles its own emit.c
+// which calls EMIT_ERR(... , want == 1 ? str_lit("1") : str_lit("2")).
+// The argument is wrapped in corec's A() = _Generic((x), ..., string: ARG_STRING2, ...).
+// The condition's type is `bool` / `int`, not `string`, so without the
+// fix the controlling expression matches no association and tinyC
+// emits "_Generic: no matching association and no default".
+
+int main() {
+    int want = 5;
+    char *r;
+    r = _Generic((want == 1 ? "yes" : "no"),
+                 char*:   "got-char-ptr",
+                 int:     "got-int",
+                 default: "got-other");
+    _tinyc_print(r);
+    return 0;
+}

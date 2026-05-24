@@ -1,0 +1,59 @@
+// Regression test: a ternary (or any CFG-emitting expression form) used
+// inside the rhs of a short-circuit && / || produced cf.cond_br ops
+// whose successors lived in the OUTER function-body region instead of
+// the surrounding scf.if's then/else region.
+//
+//     n && (n < 7 ? n : 7)
+//
+// emit.c lowers &&/|| via an scf.if op with two single-block regions
+// (then = "evaluate rhs", else = "yield 0/1"). It then recurses into
+// emit_expr to lower the rhs. When that rhs contained a ternary, the
+// ternary's `new_cfg_block` helper appended its bb_true / bb_false /
+// merge blocks unconditionally to e->func_region — the function body —
+// even though e->cur_block was already inside scf.if's then-region.
+// The resulting cf.cond_br pointed at blocks across a region boundary
+// (invalid IR), and downstream passes (cf->scf lift, wasmssa lower)
+// rejected the module with
+//     wasmssa-lower: control flow not lifted to scf (cf.cond_br)
+//
+// Fix: new_cfg_block appends to the parent region of e->cur_block, so
+// CFG-emitting helpers stay inside whatever region the caller has set
+// up.
+//
+// Triggered by mlir_wasm_to_wat.c around line 490:
+//     nm.size && (memcmp(nm.str, "linking", nm.size < 7 ? nm.size : 7) == 0)
+
+int main(void) {
+    int n = 4;
+
+    // Plain case: && with a ternary in the rhs.
+    int r1 = (n && (n < 7 ? n : 7));
+    _tinyc_print(r1);
+
+    // RHS short-circuits away when lhs is 0 — must NOT evaluate ternary.
+    int z = 0;
+    int r2 = (z && (n < 7 ? n : 7));
+    _tinyc_print(r2);
+
+    // || version of the same pattern.
+    int r3 = (z || (n < 7 ? n : 7));
+    _tinyc_print(r3);
+
+    // Ternary in rhs of && that itself selects between two ternaries.
+    int r4 = (n && (n > 0 ? (n < 7 ? n : 7) : -1));
+    _tinyc_print(r4);
+
+    // Inside an if condition.
+    if (n && (n < 7 ? n : 7)) {
+        _tinyc_print(1);
+    } else {
+        _tinyc_print(0);
+    }
+
+    // Inside a call argument.
+    int big = 20;
+    int r5 = (n && (big < 7 ? big : 7));
+    _tinyc_print(r5);
+
+    return 0;
+}

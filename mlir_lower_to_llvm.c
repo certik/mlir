@@ -288,7 +288,11 @@ static bool lower_func_func(LowerState *st, MLIR_OpHandle op,
         if (name_eq(an, "sym_name") ||
             name_eq(an, "sym_visibility") ||
             name_eq(an, "arg_attrs") ||
-            name_eq(an, "res_attrs")) {
+            name_eq(an, "res_attrs") ||
+            name_eq(an, "llvm.linkage") ||
+            name_eq(an, "wasm.import_module") ||
+            name_eq(an, "wasm.import_name") ||
+            name_eq(an, "wasm.export_name")) {
             attrs_buf[n_attrs++] = a;
         } else if (name_eq(an, "function_type")) {
             // Convert FunctionType -> LLVMFunctionType (which carries

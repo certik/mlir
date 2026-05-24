@@ -19,6 +19,80 @@ name = "short_circuit"
 expected_stdout = "0\n1\n1\n1\n"
 
 [[test]]
+name = "logical_chain_in_loop"
+expected_stdout = "6\n0\n0\n3\n"
+
+[[test]]
+name = "nested_aggregate_init"
+expected_stdout = "7\n3\n4\n11\n1\n2\n30\n40\n99\n"
+
+[[test]]
+name = "array_of_charptr_index"
+expected_stdout = "597\n97\n102\n"
+
+[[test]]
+name = "ptr_ptr_field_arrow"
+expected_stdout = "666\n11\n200\n33\n100\n300\n"
+
+[[test]]
+name = "compound_literal_struct_field"
+expected_stdout = "12\n7\n99\n33\n50\n7\n99\n77\n99\n4\n5\n1\n"
+
+[[test]]
+name = "nested_struct_pointer_field"
+expected_stdout = "100\n200\n1\n7\n2\n"
+
+[[test]]
+name = "global_cast_init"
+expected_stdout = "-2147483648\n42\n-7\n"
+
+[[test]]
+name = "va_comma_paste_forward"
+expected_stdout = "0\n0\n1\n2\n2\n2\n7\n"
+
+[[test]]
+name = "multi_decl_pointer"
+expected_stdout = "11\n22\n100\n200\n15\n"
+
+[[test]]
+name = "anon_local_struct"
+expected_stdout = "11\n22\n33\n12\n"
+
+[[test]]
+name = "anon_struct_array_init"
+expected_stdout = "90\n120\n210\n10\n"
+
+[[test]]
+name = "typedef_ptr_array"
+expected_stdout = "10\n20\n30\n30\n40\n7\n11\n"
+
+[[test]]
+name = "sizeof_no_parens"
+expected_stdout = "4\n4\n20\n20\n16\n4\n8\n8\n"
+# On wasm32, `sizeof &x` is 4 (pointer width) instead of 8.
+expected_stdout_wasm = "4\n4\n20\n20\n16\n4\n4\n8\n"
+
+[[test]]
+name = "hex_escape"
+expected_stdout = "0\n97\n115\n109\n1\n0\n0\n0\n65\n127\n10\n"
+
+[[test]]
+name = "ternary_in_short_circuit"
+expected_stdout = "1\n0\n1\n1\n1\n1\n"
+
+[[test]]
+name = "enum_const_expr"
+expected_stdout = "65536\n65536\n2\n1024\n1\n3\n13\n511\n-1\n100\n-1\n2\n15\n"
+
+[[test]]
+name = "array_of_struct_init"
+expected_stdout = "1\n10\n3\n30\n500\n4\n7\n0\n9\n0\n4\n5\n8\n6\n"
+
+[[test]]
+name = "addr_struct_arrow"
+expected_stdout = "99\n1\n42\n7\n49\n"
+
+[[test]]
 name = "return"
 expected_stdout = "3\n-1\n"
 
@@ -77,6 +151,8 @@ expected_stdout = "1\n0\n1\n0\n0\n42\n99\n"
 [[test]]
 name = "sizeof_basic"
 expected_stdout = "4\n4\n8\n16\n"
+# On wasm32, pointers are 4 bytes, so `struct WithPtr` = int(4)+ptr(4) = 8.
+expected_stdout_wasm = "4\n4\n8\n8\n"
 
 [[test]]
 name = "struct_ptr_return"
@@ -105,6 +181,10 @@ expected_stdout = "7\n3\n5\n3\n1\n"
 [[test]]
 name = "ternary_i64"
 expected_stdout = "1\n3\n0\n0\n"
+
+[[test]]
+name = "ternary_void_stmt"
+expected_stdout = "1\n99\n2\n"
 
 [[test]]
 name = "typedef"
@@ -239,6 +319,8 @@ expected_stdout = "55\n5050\n0\n"
 [[test]]
 name = "sizeof_expr"
 expected_stdout = "4\n4\n8\n8\n8\n4\n4\n8\n"
+# On wasm32, `sizeof(char *)` is 4 (the 4th value).
+expected_stdout_wasm = "4\n4\n8\n4\n8\n4\n4\n8\n"
 
 [[test]]
 name = "compound_literal"
@@ -642,6 +724,8 @@ expected_stdout = "tag=7 x=11 y=22\ntag=1 x=0 y=0\n"
 [[test]]
 name = "sizeof_string_lit"
 expected_stdout = "hi=3 empty=1 hello=6 ptr=8\n"
+# On wasm32, `sizeof(char *)` is 4.
+expected_stdout_wasm = "hi=3 empty=1 hello=6 ptr=4\n"
 
 [[test]]
 name = "variadic_struct_arg_count"
@@ -700,3 +784,234 @@ expected_stdout = "1\n"
 [[test]]
 name = "struct_field_designated_init"
 expected_stdout = "3\n"
+
+[[test]]
+name = "splice_block_ops_cap"
+expected_stdout = "824\n"
+
+[[test]]
+name = "attribute_basic"
+expected_stdout = "50\n"
+
+[[test]]
+name = "builtin_wasm_memory"
+native_skip = true
+expected_stdout = "42\n"
+
+[[test]]
+name = "i64_compare_intlit"
+expected_stdout = "10\n20\n30\n10\n30\n60\n-1\n"
+
+[[test]]
+name = "static_func_collision"
+# Multi-TU test: each helper TU defines `static int helper(int)` with
+# a different body. Verifies wasm-link respects per-object static
+# binding so cross-TU symbol-name collisions don't merge into a
+# single global function.
+sources = ["static_func_collision.tc", "static_func_collision_a.tc", "static_func_collision_b.tc"]
+link_separately = true
+native_skip = true
+expected_stdout = """\
+101
+201
+105
+205
+"""
+
+[[test]]
+name = "unused_extern_decl"
+# A forward `extern` declaration nobody references must be dropped
+# at codegen time. Previously the resulting wasm contained spurious
+# imports for these names, which the linker couldn't resolve.
+expected_stdout = "42\n"
+
+[[test]]
+name = "wasm_import_attr"
+# Verifies that `__attribute__((__import_module__("..."),
+# __import_name__("...")))` on a forward declaration makes its way
+# all the way into the wasm import section. Without this, every
+# import lands in `env` and wasmtime fails to instantiate the
+# module with `unknown import: env::fd_write`.
+native_skip = true
+wasm_upstream_skip = true
+expected_stdout = "hi\n"
+
+[[test]]
+name = "wasm32_long_is_i32"
+# On wasm32, `long` (and `size_t` = `unsigned long` in corec/types.h)
+# must be a 32-bit integer to match the wasm32-wasi ABI — otherwise
+# imports declared with `size_t` parameters get an i64 type in the
+# emitted wasm and wasmtime rejects the module with a signature
+# mismatch on `wasi_snapshot_preview1::fd_write`.
+native_skip = true
+wasm_upstream_skip = true
+expected_stdout = "ok\n"
+
+[[test]]
+name = "generic_ternary_str"
+# _Generic dispatch on a ternary controlling expression whose
+# then/else branches both have type `char*`. The selected
+# association must be `char*` — not `int` from the condition.
+# Regression test for a bug in tinyc's infer_expr_type where
+# EX_TERNARY returned the condition type instead of the value
+# type, which made the corec `format`/`println` plumbing (via
+# the A() = _Generic(...) macro) fail to compile any tinyC
+# source that called EMIT_ERR with a ternary string argument.
+expected_stdout = "got-char-ptr\n"
+
+[[test]]
+name = "unsigned_i32_to_i64_zext"
+# Widening an `unsigned` 32-bit value to a 64-bit function argument
+# must zero-extend, not sign-extend. tinyC's coerce_eval used to
+# always emit `arith.extsi` for i32 -> i64, even when the source
+# value carried an `unsigned` C type. That bit corec's wasm32
+# self-host: `uint64_to_str(block_size, ...)` received a sign-
+# extended u64 when block_size had its top bit set, printing
+# "-2147483648" / "18446744071562067968" instead of "2147483648".
+expected_stdout = "2147483648\n"
+
+[[test]]
+name = "ul_literal_storage_size"
+# wasm32 self-host bug: an integer literal with a single 'L'/'UL'
+# suffix (e.g. `4096UL`) was lexed as i64 even on wasm32, where
+# `long` is 32-bit. That made `start % 4096UL` (with `start` of
+# type `size_t == unsigned long`) compute via i64.rem_u and then
+# spill an 8-byte i64.store into a 4-byte slot of the wasm stack
+# frame, clobbering the next-up locals (e.g. caller parameters).
+# The fix narrows single-L int literals to i32 when targeting
+# wasm32, while keeping `LL` always i64.
+expected_stdout = "ok\n"
+
+
+[[test]]
+name = "deep_recursion_large_locals"
+# Linker regression test: the in-tree wasm linker
+# (`mlir_wasm_link.c`) used to initialise `__stack_pointer` to
+# 64 KB, which trapped the moment a tinyc-built wasm binary did
+# any non-trivial recursion with locals. Bumped to 4 MB to match
+# the explicit `-z stack-size=4194304` used by the clang-built
+# `tinyc.wasm`. This test recurses ~200 frames deep with a
+# ~1 KB local each (~200 KB of stack total) to ensure the linker
+# default stays comfortably above what the compiler itself uses.
+expected_stdout = "200\n"
+
+[[test]]
+name = "typedef_ptr_ptr_char"
+# Regression for parser bug: `uint8_t **out_p` (typedef'd `uint8_t`)
+# previously dropped the second `*`, producing a single-pointer
+# parameter. `*out_p = src;` then truncated the pointer to its
+# low byte (`trunci !llvm.ptr -> i8` + i8 store), corrupting any
+# code that returned a buffer through a `T **out` parameter.
+expected_stdout = "127\n42\n127\n42\n1\n99\n"
+
+[[test]]
+name = "sret_in_ternary"
+# Investigation MRE for stage-2 selfhost: `at_s()` in
+# `mlir_wasmstack_to_bin.c` is `return a ? sretfn(a) : (T){0};`
+# and the stage-2 build read truncated strings out of it. This
+# test reproduces the same shape; it now passes (the bug was
+# elsewhere) and is kept as a regression guard for the sret-in-
+# ternary lowering.
+expected_stdout = "a.size=5 a.str[0]=h\nb.size=0\n"
+
+[[test]]
+name = "u64_size_field_narrowing"
+# Investigation MRE for stage-2 selfhost: emit.c calls
+# `attr_s(ctx, \"target\", o->call_target.str, o->call_target.size)`
+# where `.size` is uint64_t but `attr_s`'s 4th arg is size_t (i32 on
+# wasm32). Caller-side narrowing must drop the high half of the i64
+# without corrupting the previous arg. Reproduces the same struct
+# layout / argument-narrowing shape.
+expected_stdout = "size=6 str0=a\n"
+
+[[test]]
+name = "sizeof_struct_ptr_wasm32"
+# Regression for emit.c `type_size`/`type_align` hard-coding pointers
+# as 8 bytes regardless of target. On wasm32, pointers are 4 bytes,
+# so a struct of N pointers was reported as 8*N bytes but the actual
+# layout used 4*N bytes. `memset(&s, 0, sizeof s)` would then write
+# past the struct's end and clobber adjacent locals on the C stack —
+# which manifested as stage-2 selfhost zeroing internal pass state
+# inside `mlir_llvm_to_wasmssa`.
+expected_stdout = "0\n"
+
+[[test]]
+name = "array_len_from_init"
+# Regression for parser bug #37: `T arr[] = { e1, e2, ... };` must
+# infer `array_len` from the initializer count. Previously tinyc left
+# `array_len = 0`, so `sizeof(arr) / sizeof(arr[0])` was 0 and any
+# loop `for (i = 0; i < N; i++)` ran zero iterations. Exactly the
+# shape used by `btab[]` in `mlir_llvm_to_wasmssa.c`.
+expected_stdout = "3\n4\n3\n696\n"
+
+[[test]]
+name = "uint8_array_typedef"
+# Regression for parser bug #38: `uint8_t arr[N]` (typedef-driven
+# 8-bit alias) must produce a TY_ARRAY_I32 with `array_elem_is_i8=1`
+# so emit.c allocates 1-byte-stride storage. Previously only the
+# raw `char arr[N]` path set the flag, so `uint8_t magic[8]` was laid
+# out as 32 bytes (i32 stride) and `buf_append(&img, magic, 8)` in
+# `mlir_wasmstack_to_bin.c` wrote `00 00 00 00 61 00 00 00` instead
+# of the wasm magic `00 61 73 6d 01 00 00 00`.
+expected_stdout = "8\n0\n97\n115\n109\n1\n0\n0\n0\n"
+
+[[test]]
+name = "static_local_var"
+# Regression: function-local `static` variables must persist across
+# calls instead of being reset to their initializer. Previously tinyc's
+# parser silently dropped the `static` storage class, so this is what
+# broke stage-2 self-host: `static int anon_counter` in parse.c was
+# reinitialized to 0 on every nested anonymous-struct parse, collapsing
+# every union member to the same synthesized struct name.
+expected_stdout = "1\n2\n3\n110\n120\n4\n"
+
+[[test]]
+name = "ptr_arith_after_index_char_pp"
+# Regression for tinyc bug #41 (parser/codegen bug surfaced during
+# stage-3 self-host): when an array-indexed `char **` is followed by
+# pointer arithmetic — `argv[j] + 9` in driver.c's --export= parser —
+# tinyc advanced by `9 * sizeof(char *)` (= 36 bytes on wasm32) rather
+# than 9 bytes, so `link_entry` pointed past the export name into the
+# next argv slot. The MRE exercises `a[1] + 9` then dereferences
+# successive bytes to confirm the resulting pointer lands 9 bytes
+# inside the indexed char* (i.e., at "_start...").
+expected_stdout = "95\n115\n116\n97\n114\n116\n"
+
+[[test]]
+name = "i64_init_narrows_to_i32_slot"
+# Regression for tinyc bug #40 (parser bug discovered during stage-3
+# self-host): `uint8_t byte = v & 0x7f` (where v is uint64_t) emitted
+# `llvm.store i64, ptr` into a 4-byte slot, overflowing into the next
+# stack slot. In `leb_u`, the next slot held `v` itself, so v got
+# clobbered to 0 after one iteration and every multi-byte LEB128 size
+# the self-hosted compiler tried to emit truncated to its low byte
+# without the continuation bit — producing "truncated section" /
+# "unexpected end-of-file" errors on stage-3 outputs.
+expected_stdout = "197\n3\n"
+
+[[test]]
+name = "global_ptr_ptr"
+# Regression for the macOS self-host segfault: file-scope `T**` globals
+# (and any pointer global of kind TY_PTR_PTR) were emitted by tinyc as
+# `@g = internal global i32 0` because the global-emit switch in emit.c
+# didn't list TY_PTR_PTR among the pointer kinds. The linker then
+# allocated only 4 bytes for `g`, but every load/store on `g` used 8
+# bytes, so two adjacent T** globals overlapped and corrupted each
+# other's upper halves. macOS's tinyC-built parser_tinyc segfaulted in
+# platform_args_sizes_get with an argv pointer whose upper 4 bytes came
+# from the adjacent stored_envp global.
+expected_stdout = "1\n1\n"
+
+[[test]]
+name = "crlf_line_continuation"
+# Regression for tinyc preprocessor not recognizing `\\\r\n` line
+# continuations. On Windows, git's default `core.autocrlf=true` checks
+# files out with CRLF endings, so every multi-line macro (e.g. the
+# `println` macro in corec/base/io.h) became `\\\r\n` instead of `\\\n`
+# and the preprocessor's `\\\n` check missed it. The bare `\\` then fell
+# through to the token loop as an unexpected character — the Windows CI
+# selfhost step failed at `corec/base/io.c` with
+#     tinyc lex error at line 36: unexpected '\'
+# This test file is intentionally stored with CRLF line endings (see
+# .gitattributes) so the preprocessor must accept `\\\r\n` to compile it.
+expected_stdout = "7\n"

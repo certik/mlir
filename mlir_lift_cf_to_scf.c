@@ -292,7 +292,8 @@ static void edge_multiplexer_redirect_edge(EdgeMultiplexer *m, Edge edge,
     }
 
     // Build new operand list of length n_mux_args.
-    MLIR_ValueHandle *new_ops = arena_new_array(m->st->arena, MLIR_ValueHandle, n_mux_args);
+    MLIR_ValueHandle *new_ops = n_mux_args
+        ? arena_new_array(m->st->arena, MLIR_ValueHandle, n_mux_args) : NULL;
     for (size_t i = 0; i < n_mux_args; ++i) {
         if (i >= my_off && i < my_off + my_n_args) {
             // Original arg slot.

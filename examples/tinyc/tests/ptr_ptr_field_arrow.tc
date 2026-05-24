@@ -1,0 +1,56 @@
+// Regression test for `->` chained through a struct field of type T**.
+//
+// `vec.data[i]->field` was rejected with
+//   tinyc emit error: -> requires a struct pointer
+// because emit_expr's tagging for EX_INDEX on a struct field handled
+// only TY_ARRAY_PTR_STRUCT / TY_ARRAY_PTR_CHAR — not TY_PTR_PTR. After
+// loading `vec.data[i]` (a single T*), the result lacked an sdef tag,
+// so the outer walk_struct_lhs rejected `(...)->field` as not a struct
+// pointer.
+//
+// Pattern used heavily in examples/tinyc/parse.c's
+// `prog->structs.data[i]->name` and similar.
+
+typedef struct Item { int id; int x; } Item;
+typedef struct Vec  { Item **data; int size; } Vec;
+
+typedef struct Pool {
+    struct Item *slots[4];   // TY_ARRAY_PTR_STRUCT — provides Item** storage.
+} Pool;
+
+void run(Vec *v) {
+    int sum = 0;
+    for (int i = 0; i < v->size; i++) {
+        sum = sum + v->data[i]->id;
+        sum = sum + v->data[i]->x;
+    }
+    _tinyc_print(sum);
+    _tinyc_print(v->data[0]->id);
+    _tinyc_print(v->data[1]->x);
+    _tinyc_print(v->data[2]->id);
+
+    // Field-of-local-struct: lv.data[i]->field works the same way.
+    Vec lv;
+    lv.data = v->data;
+    lv.size = v->size;
+    _tinyc_print(lv.data[0]->x);
+    _tinyc_print(lv.data[2]->x);
+}
+
+int main(void) {
+    Item a; a.id = 11; a.x = 100;
+    Item b; b.id = 22; b.x = 200;
+    Item c; c.id = 33; c.x = 300;
+
+    Pool p;
+    p.slots[0] = &a;
+    p.slots[1] = &b;
+    p.slots[2] = &c;
+    p.slots[3] = 0;
+
+    Vec v;
+    v.data = &p.slots[0];
+    v.size = 3;
+    run(&v);
+    return 0;
+}

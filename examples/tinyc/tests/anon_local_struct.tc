@@ -1,0 +1,32 @@
+// Regression test: anonymous local struct definition as a variable
+// type, both as a single value and as the element type of an array.
+// Previously the local-decl parser required a struct *tag*:
+//
+//     struct { int a; int b; } pair;
+//
+// would error out with
+//     "expected struct name" / "expected variable name"
+//
+// Used in examples/tinyc/emit.c at line 5429 to declare a small
+// helper table:
+//
+//     struct { string name; MLIR_TypeHandle ret; } helpers[] = { ... };
+
+int main(void) {
+    // Anonymous single struct local — fields, assign, read back.
+    struct { int a; int b; } pair;
+    pair.a = 11;
+    pair.b = 22;
+    _tinyc_print(pair.a);
+    _tinyc_print(pair.b);
+    _tinyc_print(pair.a + pair.b);
+
+    // Tagged inline definition: the tag becomes a usable type name.
+    struct PairLocal { int u; int v; } combo;
+    combo.u = 7;
+    combo.v = 5;
+    struct PairLocal *cp = &combo;
+    _tinyc_print(cp->u + cp->v);
+
+    return 0;
+}
