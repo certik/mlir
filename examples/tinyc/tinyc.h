@@ -173,6 +173,10 @@ struct Type {
     // matching on narrow-int aliases (`int8_t`, `int16_t`, ...).
     int      int_bits;
     bool     int_unsigned;
+    // True when the type was declared with the `long` keyword (including
+    // `long long`). Used by `_Generic` to disambiguate `int` from `long`
+    // on wasm32 where both have storage kind TY_I32 and int_bits == 32.
+    bool     is_long;
 };
 
 typedef enum {
@@ -419,6 +423,12 @@ typedef struct Program {
     VecStructDefPtr structs;
     VecGlobal       globals;
     ProgramEnum    *enums;   // singly-linked list, module scope
+    // True when the program was parsed for the wasm32 target (set by
+    // `tinyc_parse_into` from its `target_wasm32` arg). The emitter
+    // uses this to size hardcoded libc-extern signatures (malloc /
+    // free / printStr / tinyc_va_arg_struct) so they match the
+    // wasm32-wasi ABI's 32-bit `size_t` instead of the host's 64-bit.
+    bool target_wasm32;
 } Program;
 
 // ---------------- Lexer ----------------
@@ -522,8 +532,15 @@ Program *tinyc_parse(Arena *arena, VecTcTok toks);
 //     keeps the initialized one; two initialized errors.
 // Each call has its own typedef / enumerator scope (matching per-file
 // preprocessor isolation): typedefs do not leak across files.
+// `target_wasm32` controls the sizes of `long`, `size_t`, `intptr_t`
+// and friends: on wasm32-wasi they're 32-bit; on every other supported
+// host they're 64-bit (since tinyC currently runs only on
+// 64-bit Linux/macOS/Windows). The flag MUST be set whenever any
+// `--emit=wasm*` output is requested — otherwise tinyC will emit
+// imports declared with `size_t iovs_len` as `i64`, which doesn't
+// match the wasm32-wasi ABI.
 // Returns the number of parse errors encountered (0 on success).
-int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks);
+int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_wasm32);
 
 // ---------------- Emitter ----------------
 

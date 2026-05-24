@@ -827,3 +827,14 @@ name = "wasm_import_attr"
 native_skip = true
 wasm_upstream_skip = true
 expected_stdout = "hi\n"
+
+[[test]]
+name = "wasm32_long_is_i32"
+# On wasm32, `long` (and `size_t` = `unsigned long` in corec/types.h)
+# must be a 32-bit integer to match the wasm32-wasi ABI — otherwise
+# imports declared with `size_t` parameters get an i64 type in the
+# emitted wasm and wasmtime rejects the module with a signature
+# mismatch on `wasi_snapshot_preview1::fd_write`.
+native_skip = true
+wasm_upstream_skip = true
+expected_stdout = "ok\n"

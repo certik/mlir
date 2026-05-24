@@ -31,6 +31,11 @@ typedef struct {
     Enumerator *enums;
     int err_count;
     struct Program *prog;
+    // When true, `long` / `size_t` / `intptr_t` / `uintptr_t` /
+    // `ptrdiff_t` / `ssize_t` are 32-bit (wasm32-wasi ABI). When
+    // false (the default for native host targets) they're 64-bit.
+    // `long long` and `int64_t` are always 64-bit regardless.
+    bool target_wasm32;
 } P;
 
 static TcTok cur(P *p) { return p->toks[p->i]; }
@@ -956,14 +961,24 @@ static Expr *parse_expr(P *p) { return parse_assign_or_or(p); }
 
 // Parse a base type keyword. Returns true if we consumed one and writes
 // the kind to *out. Pointer/array suffixes are handled at decl time.
-static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char) {
+//
+// `out_is_long` (out) is set to true when the type was declared with the
+// `long` keyword (one or more), false otherwise. Callers that build a
+// `Type` should copy this into `t.is_long` so that `_Generic` can
+// disambiguate `int` from `long` on wasm32 where both have storage
+// kind TY_I32 / int_bits == 32.
+static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char,
+                             bool *out_is_long) {
     *out_was_char = false;
+    *out_is_long = false;
     skip_const(p);
     // C-style integer base specifier: any sequence of signed / unsigned /
-    // short / long / int / char / _Bool / bool. Any 'long' promotes to
-    // TY_I64; everything else is TY_I32.
+    // short / long / int / char / _Bool / bool. `long long` is always
+    // 64-bit; a single `long` is 64-bit on the native host but 32-bit
+    // on wasm32 (matching clang's wasm32-wasi ABI). Everything else is
+    // 32-bit.
     bool saw_int_kw = false;
-    bool saw_long_kw = false;
+    int  n_long_kw = 0;
     bool saw_signedness_kw = false;
     bool saw_short_kw = false;
     bool saw_char_kw = false;
@@ -975,7 +990,7 @@ static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char) {
             saw_signedness_kw = true; p->i++; skip_const(p); progress = true;
         }
         while (cur(p).kind == TC_TK_KW_LONG) {
-            saw_long_kw = true; p->i++; skip_const(p); progress = true;
+            n_long_kw++; p->i++; skip_const(p); progress = true;
         }
         while (cur(p).kind == TC_TK_KW_SHORT) {
             saw_short_kw = true; p->i++; skip_const(p); progress = true;
@@ -991,7 +1006,13 @@ static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char) {
         }
     }
     *out_was_char = saw_char_kw;
-    if (saw_long_kw)         { *out = TY_I64; skip_const(p); return true; }
+    *out_is_long = (n_long_kw >= 1);
+    if (n_long_kw > 0) {
+        bool is_64 = (n_long_kw >= 2) || !p->target_wasm32;
+        *out = is_64 ? TY_I64 : TY_I32;
+        skip_const(p);
+        return true;
+    }
     if (saw_int_kw || saw_signedness_kw || saw_short_kw || saw_char_kw || saw_bool_kw) {
         *out = TY_I32; skip_const(p); return true;
     }
@@ -1013,7 +1034,8 @@ static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char) {
 
 static bool parse_base_type(P *p, TypeKind *out) {
     bool dummy = false;
-    return parse_base_type2(p, out, &dummy);
+    bool dummy_is_long = false;
+    return parse_base_type2(p, out, &dummy, &dummy_is_long);
 }
 
 static Stmt *parse_stmt(P *p);
@@ -1223,11 +1245,13 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     }
     TypeKind base = TY_I32;
     bool was_char = false;
-    parse_base_type2(p, &base, &was_char);
+    bool is_long = false;
+    parse_base_type2(p, &base, &was_char, &is_long);
     // Function-pointer local: `int (*name)(types)`.
     if (cur(p).kind == TC_TK_LPAREN && peek(p, 1).kind == TC_TK_STAR) {
         Stmt *s = new_stmt(p, ST_DECL, line);
         s->decl_type.kind = base;
+        s->decl_type.is_long = is_long;
         string nm = (string){0};
         try_parse_fnptr_suffix(p, &s->decl_type, &nm);
         if (nm.size == 0) {
@@ -1251,6 +1275,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     Stmt *s = new_stmt(p, ST_DECL, line);
     s->decl_name = name.text;
     s->decl_type.kind = base;
+    s->decl_type.is_long = is_long;
     if (is_ptr) {
         if (was_char) s->decl_type.kind = TY_PTR_CHAR;
         else if (base == TY_I32) s->decl_type.kind = TY_PTR_I32;
@@ -1700,7 +1725,7 @@ static bool parse_sig_type(P *p, Type *out) {
     if (cur(p).kind == TC_TK_KW_SIGNED || cur(p).kind == TC_TK_KW_UNSIGNED ||
         cur(p).kind == TC_TK_KW_LONG   || cur(p).kind == TC_TK_KW_SHORT  ||
         cur(p).kind == TC_TK_KW_BOOL) {
-        bool saw_long = false;
+        int  n_long = 0;
         bool saw_short = false;
         bool saw_char = false;
         bool saw_bool = false;
@@ -1709,24 +1734,30 @@ static bool parse_sig_type(P *p, Type *out) {
                cur(p).kind == TC_TK_KW_LONG   || cur(p).kind == TC_TK_KW_INT     ||
                cur(p).kind == TC_TK_KW_SHORT  || cur(p).kind == TC_TK_KW_CHAR    ||
                cur(p).kind == TC_TK_KW_BOOL) {
-            if (cur(p).kind == TC_TK_KW_LONG) saw_long = true;
+            if (cur(p).kind == TC_TK_KW_LONG) n_long++;
             if (cur(p).kind == TC_TK_KW_SHORT) saw_short = true;
             if (cur(p).kind == TC_TK_KW_CHAR) saw_char = true;
             if (cur(p).kind == TC_TK_KW_BOOL) saw_bool = true;
             if (cur(p).kind == TC_TK_KW_UNSIGNED) saw_unsigned = true;
             p->i++; skip_const(p);
         }
-        out->kind = saw_long ? TY_I64 : TY_I32;
-        if (saw_long) out->int_bits = 64;
+        // `long long` is always 64-bit; a single `long` is 64-bit on
+        // the native host but 32-bit on wasm32 (matching clang's
+        // wasm32-wasi ABI).
+        bool long_is_64 = (n_long >= 2) || (n_long == 1 && !p->target_wasm32);
+        bool saw_long_64 = long_is_64;
+        out->kind = saw_long_64 ? TY_I64 : TY_I32;
+        if (saw_long_64) out->int_bits = 64;
         else if (saw_char) out->int_bits = 8;
         else if (saw_short) out->int_bits = 16;
         else if (saw_bool) out->int_bits = 8;
         else out->int_bits = 32;
         out->int_unsigned = saw_unsigned;
+        out->is_long = (n_long >= 1);
         skip_const(p);
         if (accept(p, TC_TK_STAR)) {
-            out->kind = saw_char ? TY_PTR_CHAR : (saw_long ? TY_PTR_I32 : TY_PTR_I32);
-            if (saw_long && !saw_char) out->ptr_is_i64 = true;
+            out->kind = saw_char ? TY_PTR_CHAR : (saw_long_64 ? TY_PTR_I32 : TY_PTR_I32);
+            if (saw_long_64 && !saw_char) out->ptr_is_i64 = true;
             skip_const(p);
             if (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
         }
@@ -2114,13 +2145,15 @@ static StructDef *parse_struct_def(P *p) {
         } else {
             TypeKind k;
             was_char = false;
+            bool field_is_long = false;
             was_float = (cur(p).kind == TC_TK_KW_FLOAT);
-            if (!parse_base_type2(p, &k, &was_char)) {
+            if (!parse_base_type2(p, &k, &was_char, &field_is_long)) {
                 perror_at(p, cur(p).line, str_lit("expected field type (int|float|char|struct)"));
                 p->i++;
                 continue;
             }
             ft.kind = k;
+            ft.is_long = field_is_long;
             // Optional pointer suffix on base types: `T *` (single) or
             // `T **` (pointer-to-pointer). The `**` form wraps the
             // single-level pointer kind into a TY_PTR_PTR.
@@ -2266,7 +2299,7 @@ static void parse_enum_decl_top(P *p) {
 Program *tinyc_parse(Arena *arena, VecTcTok toks) {
     Program *prog = arena_new(arena, Program);
     *prog = (Program){0};
-    tinyc_parse_into(arena, prog, toks);
+    tinyc_parse_into(arena, prog, toks, /*target_wasm32=*/false);
     return prog;
 }
 
@@ -2457,14 +2490,22 @@ static void parse_typedef_decl(P *p) {
     p->typedefs = td;
 }
 
-int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
+int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_wasm32) {
+    prog->target_wasm32 = target_wasm32;
     P p = {.arena = arena, .toks = toks.data, .n = toks.size, .i = 0,
-           .typedefs = NULL, .enums = NULL, .prog = prog};
-    // Built-in typedefs (treated as TY_I64, signedness ignored).
+           .typedefs = NULL, .enums = NULL, .prog = prog,
+           .target_wasm32 = target_wasm32};
+    // Built-in typedefs. `int64_t` / `uint64_t` are always 64-bit;
+    // `size_t` / `ssize_t` / `intptr_t` / `uintptr_t` / `ptrdiff_t`
+    // are pointer-sized in C, which means 32-bit on wasm32 and
+    // 64-bit on the native (host) targets we support.
     {
         const char *names[] = {"int64_t", "uint64_t", "size_t", "ssize_t",
                                "intptr_t", "uintptr_t", "ptrdiff_t"};
         bool unsigneds[] = {false, true, true, false, false, true, false};
+        // int64_t/uint64_t are always 64-bit; the rest follow the
+        // pointer/long sizing for the target.
+        bool always_64[]  = {true,  true,  false, false, false, false, false};
         for (size_t k = 0; k < sizeof(names) / sizeof(names[0]); k++) {
             Typedef *td = arena_new(arena, Typedef);
             *td = (Typedef){0};
@@ -2472,8 +2513,9 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks) {
             // Compute string length without libc.
             const char *s = names[k]; size_t len = 0; while (s[len]) len++;
             td->name.size = len;
-            td->ty.kind = TY_I64;
-            td->ty.int_bits = 64;
+            bool is_64 = always_64[k] || !target_wasm32;
+            td->ty.kind = is_64 ? TY_I64 : TY_I32;
+            td->ty.int_bits = is_64 ? 64 : 32;
             td->ty.int_unsigned = unsigneds[k];
             td->next = p.typedefs;
             p.typedefs = td;

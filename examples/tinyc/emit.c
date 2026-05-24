@@ -130,6 +130,8 @@ typedef struct {
     MLIR_TypeHandle f64;
     MLIR_TypeHandle index;
     MLIR_TypeHandle ptr;             // !llvm.ptr
+    MLIR_TypeHandle size_t_ty;       // i32 on wasm32, i64 on native (matches `unsigned long`)
+    bool             target_wasm32;  // mirrors program->target_wasm32, cached on E for convenience
     MLIR_BlockHandle cur_block;
     MLIR_BlockHandle entry_block;    // function entry block, alloca insertion point
     MLIR_ValueHandle entry_const_one; // i64 constant 1 in entry_block, shared by all allocas
@@ -2163,6 +2165,9 @@ static bool generic_type_matches(Type a, Type b) {
     if (a.kind == TY_I32 || a.kind == TY_I64) {
         if (a.int_bits != 0 && b.int_bits != 0 && a.int_bits != b.int_bits)
             return false;
+        // `int` vs `long`: on wasm32 both have kind TY_I32 with int_bits == 32,
+        // so distinguish them by the `is_long` parser flag.
+        if (a.is_long != b.is_long) return false;
         return true;
     }
     return true;
@@ -3386,12 +3391,12 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     r.val = emit_null_ptr(e); r.is_ptr = true; return r;
                 }
                 EVal sz_v = emit_expr(e, sc, ex->args.data[0]);
-                MLIR_ValueHandle sz_i64 = coerce_eval(e, sz_v, e->i64);
+                MLIR_ValueHandle sz_coerced = coerce_eval(e, sz_v, e->size_t_ty);
                 MLIR_ValueHandle res = MLIR_CreateValueOpResult(
                     e->ctx, MLIR_INVALID_HANDLE, 0, e->ptr, ssa_name(e), eloc(e, 0));
                 MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->ptr;
                 MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = res;
-                MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = sz_i64;
+                MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = sz_coerced;
                 MLIR_AttributeHandle ca = MLIR_CreateAttributeSymbolRef(
                     e->ctx, str_lit("callee"), str_lit("malloc"));
                 MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = ca;
@@ -5367,6 +5372,8 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
     e.f64 = MLIR_CreateTypeFloat(ctx, 64, false);
     e.index = MLIR_CreateTypeIndex(ctx);
     e.ptr = MLIR_CreateTypeLLVMPointer(ctx);
+    e.target_wasm32 = program->target_wasm32;
+    e.size_t_ty = program->target_wasm32 ? e.i32 : e.i64;
     e.loc = MLIR_CreateLocationUnknown(ctx, str_lit(""));
     e.next_ssa = 0;
     e.cur_block = MLIR_INVALID_HANDLE;
@@ -5636,7 +5643,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         else if (str_eq(fwd->name, str_lit("free"))) have_user_free = true;
     }
     if (!have_user_malloc) {
-        MLIR_TypeHandle *ins = arena_new_array(arena, MLIR_TypeHandle, 1); ins[0] = e.i64;
+        MLIR_TypeHandle *ins = arena_new_array(arena, MLIR_TypeHandle, 1); ins[0] = e.size_t_ty;
         MLIR_TypeHandle *outs = arena_new_array(arena, MLIR_TypeHandle, 1); outs[0] = e.ptr;
         MLIR_TypeHandle fty = MLIR_CreateTypeFunction(ctx, ins, 1, outs, 1);
         MLIR_AttributeHandle a0 = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("malloc"));
