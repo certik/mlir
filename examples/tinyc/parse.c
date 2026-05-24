@@ -50,6 +50,71 @@ static Enumerator *enum_lookup(P *p, string name) {
     return NULL;
 }
 
+// Best-effort constant-folder used by enum-body parsing. Returns true iff
+// `ex` is a constant integer expression whose value can be computed using
+// only int literals and previously-declared enumerators. Recognizes the
+// common arithmetic, bitwise, shift, comparison and ternary forms; runs
+// before the emitter's `ast_fold_int`, so it intentionally only handles
+// the subset that doesn't need scope/type information.
+static bool parse_const_eval(P *p, Expr *ex, int64_t *out) {
+    if (!ex) return false;
+    switch (ex->kind) {
+        case EX_INT:
+            *out = ex->int_value;
+            return true;
+        case EX_VAR: {
+            Enumerator *en = enum_lookup(p, ex->name);
+            if (!en) return false;
+            *out = en->value;
+            return true;
+        }
+        case EX_UN: {
+            int64_t a;
+            if (!parse_const_eval(p, ex->lhs, &a)) return false;
+            switch (ex->op) {
+                case OP_NEG:  *out = -a;        return true;
+                case OP_BNOT: *out = ~a;        return true;
+                case OP_NOT:  *out = (a == 0);  return true;
+                default: return false;
+            }
+        }
+        case EX_BIN: {
+            int64_t a, b;
+            if (!parse_const_eval(p, ex->lhs, &a)) return false;
+            if (!parse_const_eval(p, ex->rhs, &b)) return false;
+            switch (ex->op) {
+                case OP_ADD:  *out = a + b; return true;
+                case OP_SUB:  *out = a - b; return true;
+                case OP_MUL:  *out = a * b; return true;
+                case OP_DIV:  if (b == 0) return false; *out = a / b; return true;
+                case OP_MOD:  if (b == 0) return false; *out = a % b; return true;
+                case OP_BAND: *out = a & b; return true;
+                case OP_BOR:  *out = a | b; return true;
+                case OP_BXOR: *out = a ^ b; return true;
+                case OP_SHL:  *out = a << b; return true;
+                case OP_SHR:  *out = a >> b; return true;
+                case OP_LT:   *out = a <  b; return true;
+                case OP_LE:   *out = a <= b; return true;
+                case OP_GT:   *out = a >  b; return true;
+                case OP_GE:   *out = a >= b; return true;
+                case OP_EQ:   *out = a == b; return true;
+                case OP_NE:   *out = a != b; return true;
+                case OP_AND:  *out = (a != 0 && b != 0); return true;
+                case OP_OR:   *out = (a != 0 || b != 0); return true;
+                default: return false;
+            }
+        }
+        case EX_TERNARY: {
+            int64_t c;
+            if (!parse_const_eval(p, ex->lhs, &c)) return false;
+            Expr *pick = c ? ex->rhs : ex->lvalue;
+            return parse_const_eval(p, pick, out);
+        }
+        default:
+            return false;
+    }
+}
+
 static void perror_at(P *p, int line, string msg) {
     println(str_lit("tinyc parse error at line {}: {}"), (int64_t)line, msg);
     p->err_count++;
@@ -2050,20 +2115,16 @@ static void parse_enum_body(P *p) {
         if (!expect(p, TC_TK_IDENT, str_lit("expected enumerator name"))) break;
         int64_t value = next_value;
         if (accept(p, TC_TK_ASSIGN)) {
-            bool neg = accept(p, TC_TK_MINUS);
-            TcTok lit = cur(p);
-            if (lit.kind == TC_TK_INT_LIT) {
-                value = neg ? -lit.int_value : lit.int_value;
-                p->i++;
-            } else if (lit.kind == TC_TK_IDENT && enum_lookup(p, lit.text)) {
-                int64_t v = enum_lookup(p, lit.text)->value;
-                value = neg ? -v : v;
-                p->i++;
+            int line = cur(p).line;
+            Expr *init = parse_ternary(p);
+            int64_t v;
+            if (!parse_const_eval(p, init, &v)) {
+                perror_at(p, line,
+                    str_lit("enum initializer must be a constant "
+                            "expression of int literals and previously-"
+                            "declared enumerators"));
             } else {
-                perror_at(p, lit.line,
-                    str_lit("enum initializer must be an int literal "
-                            "or a previously-declared enumerator"));
-                p->i++;
+                value = v;
             }
         }
         if (enum_lookup(p, nm.text)) {
