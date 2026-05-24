@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <base/arena.h>
 #include <base/string.h>
+#include <base/strbuf.h>
 #include <base/format.h>
 #include <base/hashtable.h>
 #include <base/vector.h>
@@ -683,16 +684,16 @@ string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle th) {
             if (elem_h != MLIR_INVALID_HANDLE) {
                 string elem_str = MLIR_GetTypeString(ctx, elem_h);
                 if (type->data.shaped.rank > 0 && type->data.shaped.shape) {
-                    string shape_str = str_lit("");
+                    strbuf shape_str = strbuf_make();
                     for (uint32_t i = 0; i < type->data.shaped.rank; i++) {
                         int64_t dim = type->data.shaped.shape[i];
                         if (dim < 0) {
-                            shape_str = str_concat(arena, shape_str, str_lit("?x"));
+                            strbuf_append(arena, &shape_str, str_lit("?x"));
                         } else {
-                            shape_str = str_concat(arena, shape_str, format(arena, str_lit("{}x"), dim));
+                            strbuf_append(arena, &shape_str, format(arena, str_lit("{}x"), dim));
                         }
                     }
-                    return format(arena, str_lit("tensor<{}{}>"), shape_str, elem_str);
+                    return format(arena, str_lit("tensor<{}{}>"), strbuf_to_string(shape_str), elem_str);
                 } else {
                     return format(arena, str_lit("tensor<{}>"), elem_str);
                 }
@@ -704,16 +705,16 @@ string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle th) {
             if (elem_h != MLIR_INVALID_HANDLE) {
                 string elem_str = MLIR_GetTypeString(ctx, elem_h);
                 if (type->data.shaped.rank > 0 && type->data.shaped.shape) {
-                    string shape_str = str_lit("");
+                    strbuf shape_str = strbuf_make();
                     for (uint32_t i = 0; i < type->data.shaped.rank; i++) {
                         int64_t dim = type->data.shaped.shape[i];
                         if (dim < 0) {
-                            shape_str = str_concat(arena, shape_str, str_lit("?x"));
+                            strbuf_append(arena, &shape_str, str_lit("?x"));
                         } else {
-                            shape_str = str_concat(arena, shape_str, format(arena, str_lit("{}x"), dim));
+                            strbuf_append(arena, &shape_str, format(arena, str_lit("{}x"), dim));
                         }
                     }
-                    return format(arena, str_lit("memref<{}{}>"), shape_str, elem_str);
+                    return format(arena, str_lit("memref<{}{}>"), strbuf_to_string(shape_str), elem_str);
                 } else {
                     return format(arena, str_lit("memref<{}>"), elem_str);
                 }
@@ -735,26 +736,26 @@ string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle th) {
         case TYPE_KIND_INDEX:
             return str_lit("index");
         case TYPE_KIND_FUNCTION: {
-            string in_str = str_lit("");
+            strbuf in_str = strbuf_make();
             for (size_t i = 0; i < type->data.function.n_inputs; i++) {
-                if (i > 0) in_str = str_concat(arena, in_str, str_lit(", "));
-                in_str = str_concat(arena, in_str,
-                                    MLIR_GetTypeString(ctx, type->data.function.inputs[i]));
+                if (i > 0) strbuf_append(arena, &in_str, str_lit(", "));
+                strbuf_append(arena, &in_str,
+                              MLIR_GetTypeString(ctx, type->data.function.inputs[i]));
             }
             string out_str = str_lit("");
             size_t nr = type->data.function.n_results;
             if (nr == 1) {
                 out_str = MLIR_GetTypeString(ctx, type->data.function.results[0]);
             } else {
-                string body = str_lit("");
+                strbuf body = strbuf_make();
                 for (size_t i = 0; i < nr; i++) {
-                    if (i > 0) body = str_concat(arena, body, str_lit(", "));
-                    body = str_concat(arena, body,
-                                      MLIR_GetTypeString(ctx, type->data.function.results[i]));
+                    if (i > 0) strbuf_append(arena, &body, str_lit(", "));
+                    strbuf_append(arena, &body,
+                                  MLIR_GetTypeString(ctx, type->data.function.results[i]));
                 }
-                out_str = format(arena, str_lit("({})"), body);
+                out_str = format(arena, str_lit("({})"), strbuf_to_string(body));
             }
-            return format(arena, str_lit("({}) -> {}"), in_str, out_str);
+            return format(arena, str_lit("({}) -> {}"), strbuf_to_string(in_str), out_str);
         }
         case TYPE_KIND_LLVM_PTR:
             return str_lit("!llvm.ptr");
@@ -770,33 +771,35 @@ string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle th) {
             // Within nested struct fields MLIR omits the outer "!llvm." prefix —
             // but the translator's print_llvm_type_text accepts both, so we
             // always emit the canonical form here for simplicity.
-            string body = str_lit("(");
+            strbuf body = strbuf_make();
+            strbuf_append(arena, &body, str_lit("("));
             for (size_t i = 0; i < type->data.llvm_struct.n_fields; i++) {
-                if (i > 0) body = str_concat(arena, body, str_lit(", "));
-                body = str_concat(arena, body,
-                                  MLIR_GetTypeString(ctx, type->data.llvm_struct.fields[i]));
+                if (i > 0) strbuf_append(arena, &body, str_lit(", "));
+                strbuf_append(arena, &body,
+                              MLIR_GetTypeString(ctx, type->data.llvm_struct.fields[i]));
             }
-            body = str_concat(arena, body, str_lit(")"));
+            strbuf_append(arena, &body, str_lit(")"));
             if (type->data.llvm_struct.name.size > 0) {
                 return format(arena, str_lit("!llvm.struct<\"{}\", {}>"),
-                              type->data.llvm_struct.name, body);
+                              type->data.llvm_struct.name, strbuf_to_string(body));
             }
-            return format(arena, str_lit("!llvm.struct<{}>"), body);
+            return format(arena, str_lit("!llvm.struct<{}>"), strbuf_to_string(body));
         }
         case TYPE_KIND_LLVM_FUNCTION: {
             string ret = MLIR_GetTypeString(ctx, type->data.llvm_function.result);
-            string body = str_lit("");
+            strbuf body = strbuf_make();
             for (size_t i = 0; i < type->data.llvm_function.n_inputs; i++) {
-                if (i > 0) body = str_concat(arena, body, str_lit(", "));
-                body = str_concat(arena, body,
-                                  MLIR_GetTypeString(ctx, type->data.llvm_function.inputs[i]));
+                if (i > 0) strbuf_append(arena, &body, str_lit(", "));
+                strbuf_append(arena, &body,
+                              MLIR_GetTypeString(ctx, type->data.llvm_function.inputs[i]));
             }
             if (type->data.llvm_function.is_var_arg) {
-                body = str_concat(arena,
-                                  type->data.llvm_function.n_inputs ? str_concat(arena, body, str_lit(", ")) : body,
-                                  str_lit("..."));
+                if (type->data.llvm_function.n_inputs) {
+                    strbuf_append(arena, &body, str_lit(", "));
+                }
+                strbuf_append(arena, &body, str_lit("..."));
             }
-            return format(arena, str_lit("!llvm.func<{} ({})>"), ret, body);
+            return format(arena, str_lit("!llvm.func<{} ({})>"), ret, strbuf_to_string(body));
         }
         default:
             return str_lit("unknown");
@@ -983,9 +986,11 @@ static MLIR_AttributeHandle make_llvm_linkage_attr(MLIR_Context *ctx, string lin
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_STRING;
     a.name = str_lit("linkage");
-    string body = str_concat(ctx->arena, str_lit("#llvm.linkage<"), linkage_kind);
-    body = str_concat(ctx->arena, body, str_lit(">"));
-    a.data.string_value = body;
+    strbuf body = strbuf_make();
+    strbuf_append(ctx->arena, &body, str_lit("#llvm.linkage<"));
+    strbuf_append(ctx->arena, &body, linkage_kind);
+    strbuf_append(ctx->arena, &body, str_lit(">"));
+    a.data.string_value = strbuf_to_string(body);
     return alloc_attr_obj(ctx, a);
 }
 
@@ -1269,13 +1274,14 @@ MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *ctx, string
     a.kind = ATTR_KIND_STRING;
     a.name = name;
     Arena *arena = ctx->arena;
-    string s = str_lit("array<i32");
+    strbuf s = strbuf_make();
+    strbuf_append(arena, &s, str_lit("array<i32"));
     for (size_t i = 0; i < count; i++) {
-        s = str_concat(arena, s, i == 0 ? str_lit(": ") : str_lit(", "));
-        s = str_concat(arena, s, format(arena, str_lit("{}"), (int64_t)values[i]));
+        strbuf_append(arena, &s, i == 0 ? str_lit(": ") : str_lit(", "));
+        strbuf_append(arena, &s, format(arena, str_lit("{}"), (int64_t)values[i]));
     }
-    s = str_concat(arena, s, str_lit(">"));
-    a.data.string_value = s;
+    strbuf_append(arena, &s, str_lit(">"));
+    a.data.string_value = strbuf_to_string(s);
     return alloc_attr_obj(ctx, a);
 }
 
@@ -1287,13 +1293,14 @@ MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *ctx, string
     a.kind = ATTR_KIND_STRING;
     a.name = name;
     Arena *arena = ctx->arena;
-    string s = str_lit("array<i64");
+    strbuf s = strbuf_make();
+    strbuf_append(arena, &s, str_lit("array<i64"));
     for (size_t i = 0; i < count; i++) {
-        s = str_concat(arena, s, i == 0 ? str_lit(": ") : str_lit(", "));
-        s = str_concat(arena, s, format(arena, str_lit("{}"), values[i]));
+        strbuf_append(arena, &s, i == 0 ? str_lit(": ") : str_lit(", "));
+        strbuf_append(arena, &s, format(arena, str_lit("{}"), values[i]));
     }
-    s = str_concat(arena, s, str_lit(">"));
-    a.data.string_value = s;
+    strbuf_append(arena, &s, str_lit(">"));
+    a.data.string_value = strbuf_to_string(s);
     return alloc_attr_obj(ctx, a);
 }
 
