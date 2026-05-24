@@ -151,6 +151,24 @@ targets — the wasm pipeline is entirely in-tree. Use
 `pixi run test_tinyc_native` for the native target and
 `pixi run test_tinyc_native_wasm` for the wasm target.
 
+### Self-host under wasmtime
+
+`tinyc.wasm` is built once with clang (`pixi run build_tinyc_wasm`),
+then under wasmtime it compiles its own source set into a stage-2
+`tinyc.wasm`, and the stage-2 module re-compiles the same source set
+into a stage-3 module. A bit-identical comparison of the stage-2 and
+stage-3 binaries is the self-hosting fixed-point check:
+
+```sh
+pixi run -e wasm verify_tinyc_wasm_selfhost
+# tinyc.wasm self-host is bit-identical (stage2 == stage3)
+```
+
+The individual steps (`selfhost_tinyc_wasm_stage2`,
+`selfhost_tinyc_wasm_stage3`) are also available as standalone pixi
+tasks. Each stage drops its per-file `.wasm.o` outputs under
+`selfhost_stage2/` / `selfhost_stage3/` for inspection.
+
 ### How the native pipeline is structured
 
 The cf→scf lift is performed up front by `MLIR_LowerToLLVMDialectForWasm`
