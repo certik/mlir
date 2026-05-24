@@ -1,0 +1,29 @@
+// MRE: tinyc sign-extends loads from `uint8_t` arrays and `uint8_t *`
+// dereferences, treating them as signed `char`. Any byte with the high
+// bit set then propagates as 0xffffffXX instead of 0x000000XX. This
+// breaks SHA-256 inside `mlir_wasm_to_macho.c` when run via
+// `wasmtime tinyc_stage2.wasm -- --emit=macho ...`: the bit-length
+// trailer at the end of every SHA block has bit 7 set, so every page
+// hash comes out wrong and macOS rejects the binary's ad-hoc
+// code signature (Killed: 9).
+//
+// Expected ("fd" + "fe" + "ff"): every byte read back unchanged.
+// Buggy output sign-extends them to "fffffffd" / "fffffffe" / "ffffffff".
+extern int printf(const char *fmt, ...);
+
+typedef unsigned char uint8_t;
+
+static int read_byte(const uint8_t *p) {
+    return (int)p[0];
+}
+
+int main() {
+    uint8_t arr[3];
+    arr[0] = 0xfd;
+    arr[1] = 0xfe;
+    arr[2] = 0xff;
+    printf("%02x\n", (unsigned int)arr[0]);
+    printf("%02x\n", (unsigned int)arr[1]);
+    printf("%02x\n", (unsigned int)read_byte(arr + 2));
+    return 0;
+}
