@@ -312,6 +312,43 @@ static int64_t rd_leb_s(Reader *r) {
     return v;
 }
 
+// Skip one constant init expression and verify it ends with 0x0b. The
+// init expr is a single constant instruction followed by the `end`
+// opcode (0x0b). We can't byte-walk to the first 0x0b because const
+// payload bytes can legitimately equal 0x0b (e.g. `i32.const 11`
+// encodes as 0x41 0x0b 0x0b).
+//
+// Returns true on success; on success, `r->p` points past the trailing
+// 0x0b. Caller can compute the expression range from the saved `start`.
+static bool skip_init_expr(Reader *r) {
+    if (!rd_avail(r, 1)) return false;
+    uint8_t op = *r->p++;
+    switch (op) {
+        case 0x41: (void)rd_leb_s(r); break;   // i32.const
+        case 0x42: (void)rd_leb_s(r); break;   // i64.const
+        case 0x43:                              // f32.const
+            if (!rd_avail(r, 4)) return false;
+            r->p += 4; break;
+        case 0x44:                              // f64.const
+            if (!rd_avail(r, 8)) return false;
+            r->p += 8; break;
+        case 0x23: (void)rd_leb_u(r); break;   // global.get
+        case 0xd0:                              // ref.null t
+            if (!rd_avail(r, 1)) return false;
+            r->p += 1; break;
+        case 0xd2: (void)rd_leb_u(r); break;   // ref.func
+        default:
+            // Unknown opcode in an init_expr; we can't safely skip it
+            // without knowing its operand layout.
+            r->ok = false;
+            return false;
+    }
+    if (!r->ok) return false;
+    if (!rd_avail(r, 1) || *r->p != 0x0b) { r->ok = false; return false; }
+    r->p++;
+    return true;
+}
+
 // =============================================================================
 // Per-input parsed-object IR
 // =============================================================================
@@ -616,12 +653,14 @@ static bool obj_parse_globals(Obj *o) {
     for (uint32_t i = 0; i < n; i++) {
         uint8_t vt = rd_u8(&r);
         uint8_t mut = rd_u8(&r);
-        // Read init expr until terminating 0x0b.
+        // Opcode-aware skip of the init expression (handles const
+        // payloads that contain 0x0b bytes).
         const uint8_t *start = r.p;
-        while (r.ok && r.p < r.end && *r.p != 0x0b) r.p++;
-        if (!rd_avail(&r, 1)) return false;
-        const uint8_t *end = r.p + 1; // include 0x0b
-        r.p = end;
+        if (!skip_init_expr(&r)) {
+            link_err("bad global init expr at %u in %s", i, o->src->name);
+            return false;
+        }
+        const uint8_t *end = r.p; // already past trailing 0x0b
         o->globals = (ObjGlobal *)realloc(o->globals, (o->n_globals + 1) * sizeof(ObjGlobal));
         ObjGlobal *g = &o->globals[o->n_globals++];
         memset(g, 0, sizeof(*g));
