@@ -18,26 +18,9 @@
 # and stage-3 binaries can be compared bit-for-bit to verify
 # self-hosting reproducibility.
 #
-# KNOWN ISSUE — STAGE 2+ IS FLAKY (2026-05-24):
-#
-# The stage-1 build (driving tinyc.wasm via wasmtime) is reliable.
-# Stage-2 and stage-3 (which invoke the produced Mach-O binary
-# directly) currently die intermittently with `Killed: 9` on
-# random translation units. The crash has no `.ips` report and
-# no kernel-log entry. Standalone re-runs of the same compile
-# command always succeed. Reasonable hypotheses:
-#
-#   * Some kernel-level resource accounting that trips when we
-#     repeatedly spawn binaries with 1.5 GiB virtual __DATA.
-#   * Spotlight/mds touching the freshly-written .wasm.o output
-#     racing with our exec.
-#   * An ASLR-slide edge case that infrequently lands `__LINKEDIT`
-#     too close to the dyld shared cache.
-#
-# This script is therefore NOT wired into CI yet. It is checked in
-# so that `tinyc --link --emit=macho` and the macho backend's
-# self-hosting story can be exercised manually while we diagnose
-# the flake.
+# Wired into pixi via the macOS-arm64 tasks
+# `selfhost_tinyc_macho_stage{1,2,3}` and `verify_tinyc_macho_selfhost`
+# (under `pixi run -e wasm`).
 
 set -euo pipefail
 
