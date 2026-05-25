@@ -119,8 +119,16 @@ int app_main(void) {
             // Linker mode: collect remaining positional arguments as
             // input .wasm.o files, expect -o <out.wasm>. All other
             // tinyc flags are ignored.
+            //
+            // If --emit=macho is also present, instead of writing the
+            // linked wasm module we translate it to a signed Mach-O
+            // ARM64 binary. This lets a tinyC-compiled Mach-O `tinyc`
+            // self-host: stage 2 is the binary produced by upstream
+            // tinyc; stage 3 is the binary produced by stage 2 from
+            // the same inputs. The two are compared byte-for-byte.
             const char *link_out = NULL;
             const char *link_entry = "_start";
+            bool link_emit_macho = false;
             // Upper bound on input count: every remaining argv slot.
             size_t link_inputs_cap = (size_t)(argc - (i + 1));
             const char **link_inputs = arena_new_array(
@@ -133,12 +141,14 @@ int app_main(void) {
                     link_out = argv[j] + 2;
                 } else if (strncmp(argv[j], "--export=", 9) == 0) {
                     link_entry = argv[j] + 9;
+                } else if (strcmp(argv[j], "--emit=macho") == 0) {
+                    link_emit_macho = true;
                 } else if (argv[j][0] != '-') {
                     link_inputs[n_link_inputs++] = argv[j];
                 }
             }
             if (!link_out || n_link_inputs == 0) {
-                fprintf(stderr, "usage: tinyc --link [--export=NAME] -o OUT.wasm IN1.wasm.o [IN2.wasm.o ...]\n");
+                fprintf(stderr, "usage: tinyc --link [--emit=macho] [--export=NAME] -o OUT.wasm IN1.wasm.o [IN2.wasm.o ...]\n");
                 arena_destroy(boot_arena);
                 return 1;
             }
@@ -158,6 +168,29 @@ int app_main(void) {
                 fprintf(stderr, "tinyc --link: link failed\n");
                 arena_destroy(boot_arena);
                 return 1;
+            }
+            if (link_emit_macho) {
+                uint8_t *macho_data = NULL; size_t macho_size = 0;
+                bool macho_ok = MLIR_WasmToMachoArm64(out_data, out_size,
+                                                     &macho_data, &macho_size);
+                free(out_data);
+                if (!macho_ok) {
+                    fprintf(stderr, "tinyc --link --emit=macho: wasm->macho translation failed\n");
+                    arena_destroy(boot_arena);
+                    return 1;
+                }
+                string macho_buf = { .str = (char *)macho_data, .size = macho_size };
+                int wrc = write_bytes_to_file(macho_buf, link_out);
+                free(macho_data);
+#if !defined(_WIN32) && !defined(__wasm__) && !defined(__TINYC__)
+                if (wrc == 0) {
+                    // chmod 0755 so the resulting Mach-O is directly
+                    // runnable without an explicit `chmod +x` step.
+                    chmod(link_out, 0755);
+                }
+#endif
+                arena_destroy(boot_arena);
+                return wrc;
             }
             string out_buf = { .str = (char *)out_data, .size = out_size };
             int wrc = write_bytes_to_file(out_buf, link_out);
