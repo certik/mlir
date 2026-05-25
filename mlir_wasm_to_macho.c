@@ -107,9 +107,11 @@ static inline uint32_t rotr32(uint32_t x, uint32_t n) { return (x >> n) | (x << 
 static void sha256_xform(Sha256 *s, const uint8_t *d) {
     uint32_t a,b,c,e,f,g,h,t1,t2,m[64];
     uint32_t dd;
+    // Mask each byte with 0xFFu so the result is unambiguously zero-extended
+    // (works around tinyc-self-host miscompile where uint8_t reads sign-extend).
     for (int i = 0, j = 0; i < 16; i++, j += 4) {
-        m[i] = ((uint32_t)d[j] << 24) | ((uint32_t)d[j+1] << 16) |
-               ((uint32_t)d[j+2] << 8) | (uint32_t)d[j+3];
+        m[i] = ((uint32_t)(d[j]   & 0xFFu) << 24) | ((uint32_t)(d[j+1] & 0xFFu) << 16) |
+               ((uint32_t)(d[j+2] & 0xFFu) << 8)  |  (uint32_t)(d[j+3] & 0xFFu);
     }
     for (int i = 16; i < 64; i++) {
         uint32_t s0 = rotr32(m[i-15], 7) ^ rotr32(m[i-15], 18) ^ (m[i-15] >> 3);
@@ -1262,8 +1264,11 @@ static void patch_cbz_local(uint8_t *code_data, uint32_t site_off,
         abort();
     }
     uint8_t *p = code_data + site_off;
-    uint32_t enc = ((uint32_t)p[0]) | ((uint32_t)p[1] << 8)
-                 | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    // Mask each byte with 0xFFu so the result is unambiguously zero-extended
+    // even when the compiler in use sign-extends uint8_t reads (a known
+    // tinyc-self-host miscompile).
+    uint32_t enc = ((uint32_t)(p[0] & 0xFFu)) | ((uint32_t)(p[1] & 0xFFu) << 8)
+                 | ((uint32_t)(p[2] & 0xFFu) << 16) | ((uint32_t)(p[3] & 0xFFu) << 24);
     enc &= ~((uint32_t)0x7ffffu << 5);
     enc |= ((uint32_t)imm19 & 0x7ffffu) << 5;
     p[0] = (uint8_t)(enc & 0xff);
@@ -3162,10 +3167,13 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
             // push as bit-identical 32-bit / 64-bit value.
             case 0x43: { // f32.const (4-byte LE)
                 if (r.p + 4 > r.end) { r.overflow = true; break; }
-                uint32_t bits = (uint32_t)r.p[0]
-                              | ((uint32_t)r.p[1] << 8)
-                              | ((uint32_t)r.p[2] << 16)
-                              | ((uint32_t)r.p[3] << 24);
+                // Mask each byte with 0xFFu so the result is unambiguously
+                // zero-extended (works around tinyc-self-host miscompile
+                // where uint8_t reads sign-extend).
+                uint32_t bits = (uint32_t)(r.p[0] & 0xFFu)
+                              | ((uint32_t)(r.p[1] & 0xFFu) << 8)
+                              | ((uint32_t)(r.p[2] & 0xFFu) << 16)
+                              | ((uint32_t)(r.p[3] & 0xFFu) << 24);
                 r.p += 4;
                 emit_mov_w_imm32(&e->code, 0, bits);
                 emit_word(&e->code, arm64_sub_sp_imm(16));
@@ -3176,8 +3184,11 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
             case 0x44: { // f64.const (8-byte LE)
                 if (r.p + 8 > r.end) { r.overflow = true; break; }
                 uint64_t bits = 0;
+                // Mask each byte with 0xFFu so the result is unambiguously
+                // zero-extended (works around tinyc-self-host miscompile
+                // where uint8_t reads sign-extend).
                 for (int i = 0; i < 8; i++)
-                    bits |= ((uint64_t)r.p[i]) << (i * 8);
+                    bits |= ((uint64_t)(r.p[i] & 0xFFu)) << (i * 8);
                 r.p += 8;
                 emit_mov_x_imm64(&e->code, 0, bits);
                 emit_word(&e->code, arm64_sub_sp_imm(16));
@@ -3450,7 +3461,7 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
 
             default:
                 fprintf(stderr,
-                        "wasm->macho: unsupported opcode 0x%02x in func %u\n",
+                        "wasm->macho: unsupported opcode 0x%x in func %u\n",
                         op, fidx);
                 free(local_types); return false;
         }
