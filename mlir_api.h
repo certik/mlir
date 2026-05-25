@@ -224,23 +224,36 @@ typedef enum {
     OP_TYPE_WASMSSA_EXTEND_I32_S,
     OP_TYPE_WASMSSA_RETURN,
     OP_TYPE_WASMSSA_CALL,
-    // Structured control-flow markers. Linearized into the flat per-func
-    // op stream in stage 1; stage 2 pairs BEGINs to ENDs to compute br
-    // depths.
-    OP_TYPE_WASMSSA_BLOCK_BEGIN,
-    OP_TYPE_WASMSSA_LOOP_BEGIN,
-    OP_TYPE_WASMSSA_IF_BEGIN,
-    OP_TYPE_WASMSSA_IF_ELSE,
-    OP_TYPE_WASMSSA_END,
+    // Region-bearing structured control flow. Cross-CF value passing is
+    // modelled via MLIR block arguments on the region's entry block (for
+    // loops) and via the variadic operands of block_return / br (for all
+    // three op kinds). Results of the region-bearing op carry the values
+    // that flow out via fall-through or `br` to its label.
+    //
+    //   %r:R* = wasmssa.block ()           : (R*)  { ... }
+    //   %r:R* = wasmssa.loop  (init:T*)    : (R*)  { ^entry(a:T*): ... }
+    //   %r:R* = wasmssa.if    (%cond:i32)  : (R*)  { then } else { else }
+    //
+    // Region terminators: block_return | br | br_if (non-terminator) |
+    //                     unreachable | return.
+    OP_TYPE_WASMSSA_BLOCK,
+    OP_TYPE_WASMSSA_LOOP,
+    OP_TYPE_WASMSSA_IF,
+    // Region terminator carrying the values that flow out of the enclosing
+    // wasmssa.block / wasmssa.loop / wasmssa.if via fall-through.
+    OP_TYPE_WASMSSA_BLOCK_RETURN,
+    // Terminator emitting wasm `unreachable` (0x00). Used after wasmssa.loop
+    // when the loop never falls through (every back-edge `br 0` or outward
+    // `br N` exits the loop's own end).
+    OP_TYPE_WASMSSA_UNREACHABLE,
+    // Branch carrying variadic values matching the target label's signature
+    // (depth-relative). Terminator.
     OP_TYPE_WASMSSA_BR,
+    // Conditional branch carrying only the condition; no value operands.
+    // For value-carrying conditional branches we use `wasmssa.if %cond { br N (vals) }`.
     OP_TYPE_WASMSSA_BR_IF,
     OP_TYPE_WASMSSA_SELECT,
     OP_TYPE_WASMSSA_EQZ,
-    // Carrier ops materialize scf.yield-ed values across structured-CF
-    // boundaries via per-function shared locals (allocated lazily by
-    // stage 2). Each carrier_id refers to one local of a fixed valtype.
-    OP_TYPE_WASMSSA_CARRIER_SET,
-    OP_TYPE_WASMSSA_CARRIER_GET,
     OP_TYPE_WASMSSA_ADDRESSOF,
     // Function-pointer support: FUNC_ADDR pushes the table-index of a
     // named function (lowered via R_WASM_TABLE_INDEX_SLEB); CALL_INDIRECT
@@ -287,6 +300,8 @@ typedef enum {
     OP_TYPE_WASMSTACK_END,
     OP_TYPE_WASMSTACK_BR,
     OP_TYPE_WASMSTACK_BR_IF,
+    // Terminator emitting wasm `unreachable` (0x00).
+    OP_TYPE_WASMSTACK_UNREACHABLE,
     OP_TYPE_WASMSTACK_SELECT,
     OP_TYPE_WASMSTACK_EQZ,
     OP_TYPE_WASMSTACK_ADDRESSOF,
