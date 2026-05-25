@@ -512,11 +512,13 @@ static MLIR_OpHandle make_op_n(MLIR_Context *ctx, MLIR_OpType type,
                                MLIR_RegionHandle *regions, size_t n_regions,
                                const uint8_t *result_vts, size_t n_results,
                                MLIR_ValueHandle *out_results /* size n_results, or NULL */) {
-    MLIR_TypeHandle res_tys[16];
-    MLIR_ValueHandle res_vals[16];
+    MLIR_TypeHandle   res_tys_inline[16];
+    MLIR_ValueHandle  res_vals_inline[16];
+    MLIR_TypeHandle  *res_tys  = res_tys_inline;
+    MLIR_ValueHandle *res_vals = res_vals_inline;
     if (n_results > 16) {
-        fprintf(stderr, "wasmssa-lower: make_op_n n_results=%zu exceeds buffer\n", n_results);
-        abort();
+        res_tys  = (MLIR_TypeHandle  *)arena_alloc(ctx->arena, n_results * sizeof(MLIR_TypeHandle));
+        res_vals = (MLIR_ValueHandle *)arena_alloc(ctx->arena, n_results * sizeof(MLIR_ValueHandle));
     }
     for (size_t i = 0; i < n_results; i++) {
         res_tys[i] = vt_to_type(ctx, result_vts[i]);
@@ -652,7 +654,9 @@ static bool lower_scf_if(FnCtx *F, MLIR_OpHandle op) {
         as[nas++] = attr_s_hex(F->ctx, F->arena, "result_types", res_vts, n_res);
     }
 
-    MLIR_ValueHandle res_vals[16];
+    MLIR_ValueHandle res_vals_inline[16];
+    MLIR_ValueHandle *res_vals = n_res <= 16 ? res_vals_inline
+        : (MLIR_ValueHandle *)arena_alloc(F->arena, n_res * sizeof(MLIR_ValueHandle));
     MLIR_ValueHandle cond_ops[1] = { cond_idx };
     MLIR_OpHandle ifop = make_op_n(F->ctx, OP_TYPE_WASMSSA_IF, as, nas,
                                    cond_ops, 1, regs, n_regs,
@@ -839,7 +843,9 @@ static bool lower_scf_while(FnCtx *F, MLIR_OpHandle op) {
     }
     MLIR_RegionHandle block_r = MLIR_CreateRegion(F->ctx);
     MLIR_AppendRegionBlock(F->ctx, block_r, outer_blk);
-    MLIR_ValueHandle block_res_vals[16];
+    MLIR_ValueHandle block_res_inline[16];
+    MLIR_ValueHandle *block_res_vals = n_res <= 16 ? block_res_inline
+        : (MLIR_ValueHandle *)arena_alloc(F->arena, n_res * sizeof(MLIR_ValueHandle));
     MLIR_OpHandle block_op = make_op_n(F->ctx, OP_TYPE_WASMSSA_BLOCK, NULL, 0,
                                        NULL, 0, &block_r, 1,
                                        res_vts, n_res, block_res_vals);
@@ -893,7 +899,9 @@ static bool isw_build_chain(FnCtx *F, MLIR_OpHandle op,
         ok = lower_block(F, MLIR_GetRegionBlock(MLIR_GetOpRegion(op, 0), 0));
         if (!ok) { F->body_block = saved; return false; }
     } else {
-        MLIR_ValueHandle inner_res[16];
+        MLIR_ValueHandle inner_inline[16];
+        MLIR_ValueHandle *inner_res = n_res <= 16 ? inner_inline
+            : (MLIR_ValueHandle *)arena_alloc(F->arena, n_res * sizeof(MLIR_ValueHandle));
         if (!isw_build_chain(F, op, i + 1, n_cases, case_vals, cond_idx,
                              n_res, res_vts, inner_res)) {
             F->body_block = saved; return false;
@@ -913,7 +921,9 @@ static bool isw_build_chain(FnCtx *F, MLIR_OpHandle op,
     size_t nas = 0;
     if (n_res) as[nas++] = attr_s_hex(F->ctx, F->arena, "result_types", res_vts, n_res);
     MLIR_ValueHandle cond_ops[1] = { cmp };
-    MLIR_ValueHandle res_vals[16];
+    MLIR_ValueHandle res_inline[16];
+    MLIR_ValueHandle *res_vals = n_res <= 16 ? res_inline
+        : (MLIR_ValueHandle *)arena_alloc(F->arena, n_res * sizeof(MLIR_ValueHandle));
     MLIR_OpHandle ifop = make_op_n(F->ctx, OP_TYPE_WASMSSA_IF, as, nas,
                                    cond_ops, 1, regs, 2,
                                    res_vts, n_res, res_vals);
@@ -985,7 +995,9 @@ static bool lower_scf_index_switch(FnCtx *F, MLIR_OpHandle op) {
         MLIR_AttributeHandle as[1];
         size_t nas = 0;
         if (n_res) as[nas++] = attr_s_hex(F->ctx, F->arena, "result_types", res_vts, n_res);
-        MLIR_ValueHandle res_vals[16];
+        MLIR_ValueHandle res_inline[16];
+        MLIR_ValueHandle *res_vals = n_res <= 16 ? res_inline
+            : (MLIR_ValueHandle *)arena_alloc(F->arena, n_res * sizeof(MLIR_ValueHandle));
         MLIR_OpHandle bop = make_op_n(F->ctx, OP_TYPE_WASMSSA_BLOCK, as, nas,
                                       NULL, 0, &reg, 1, res_vts, n_res, res_vals);
         MLIR_AppendBlockOp(F->ctx, F->body_block, bop);
@@ -995,7 +1007,9 @@ static bool lower_scf_index_switch(FnCtx *F, MLIR_OpHandle op) {
         return true;
     }
 
-    MLIR_ValueHandle res_vals[16];
+    MLIR_ValueHandle outer_inline[16];
+    MLIR_ValueHandle *res_vals = n_res <= 16 ? outer_inline
+        : (MLIR_ValueHandle *)arena_alloc(F->arena, n_res * sizeof(MLIR_ValueHandle));
     if (!isw_build_chain(F, op, 0, n_cases, case_vals, cond_idx,
                          n_res, res_vts, res_vals)) return false;
     for (size_t i = 0; i < n_res; i++) {
