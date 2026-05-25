@@ -386,6 +386,15 @@ verify_tinyc_native_upstream_identical = { cmd = "python examples/tinyc/verify_n
 [feature.upstream.target.osx-arm64.tasks]
 test_tinyc_macho = { cmd = "TINYC=./tinyc_native TINYC_TARGET=macho TINYC_LOWERING=native python examples/tinyc/run_tinyc_tests.py", depends-on = ["build_tinyc_native"], description = "Run tinyC example compiler tests against the WASM->Mach-O ARM64 backend (Darwin/arm64 only)" }
 
+[feature.wasm.target.osx-arm64.tasks]
+selfhost_tinyc_macho_stage1 = { cmd = "bash examples/tinyc/selfhost_tinyc_macho.sh tinyc.wasm tinyc_stage1_macho selfhost_macho_stage1", depends-on = ["build_tinyc_wasm"], description = "Self-host stage 1 (macho): drive tinyc.wasm under wasmtime to recompile every tinyc source and link them into tinyc_stage1_macho (Darwin/arm64 only)" }
+
+selfhost_tinyc_macho_stage2 = { cmd = "bash examples/tinyc/selfhost_tinyc_macho.sh ./tinyc_stage1_macho tinyc_stage2_macho selfhost_macho_stage2", depends-on = ["selfhost_tinyc_macho_stage1"], description = "Self-host stage 2 (macho): use tinyc_stage1_macho to recompile every tinyc source and link them into tinyc_stage2_macho (Darwin/arm64 only)" }
+
+selfhost_tinyc_macho_stage3 = { cmd = "bash examples/tinyc/selfhost_tinyc_macho.sh ./tinyc_stage2_macho tinyc_stage3_macho selfhost_macho_stage3", depends-on = ["selfhost_tinyc_macho_stage2"], description = "Self-host stage 3 (macho): use tinyc_stage2_macho to recompile every tinyc source and link them into tinyc_stage3_macho (Darwin/arm64 only)" }
+
+verify_tinyc_macho_selfhost = { cmd = "cmp tinyc_stage2_macho tinyc_stage3_macho && echo 'tinyc macho self-host is bit-identical (stage2 == stage3)'", depends-on = ["selfhost_tinyc_macho_stage3"], description = "Compare stage 2 and stage 3 macho binaries byte-for-byte to verify the self-hosting cycle reaches a fixed point (Darwin/arm64 only)" }
+
 [feature.upstream.target.win-64.tasks]
 build_cross_upstream = { cmd = "tests\\build_cross_upstream.bat", description = "Build cross-impl driver against upstream LLVM/MLIR (Windows)" }
 test_cross = { cmd = "./cross_upstream.exe > tests/cross/out_upstream.txt && python tests/file_diff.py tests/cross/expected.txt tests/cross/out_upstream.txt", depends-on = ["build_cross_upstream"], description = "Run upstream cross-impl driver and diff against reference (Windows)" }

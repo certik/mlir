@@ -23,6 +23,12 @@ compiler_tester/__pycache__/
 /tinyc_stage3.wasm
 /stage2/
 /stage3/
+/tinyc_stage1_macho
+/tinyc_stage2_macho
+/tinyc_stage3_macho
+/selfhost_macho_stage1/
+/selfhost_macho_stage2/
+/selfhost_macho_stage3/
 _libc_io_tmp.txt
 parser_tinyc
 build_tinyc/

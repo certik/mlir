@@ -54,6 +54,8 @@ jobs:
               pixi run -e upstream build_tinyc_upstream_opt
               pixi run -e upstream verify_tinyc_native_upstream_identical
               pixi run -e upstream test_tinyc_macho
+              # Works, but too slow:
+              #pixi run -e wasm verify_tinyc_macho_selfhost
               pixi run -e macos test_macos_tinyc
           - platform: windows
             os: windows-latest
