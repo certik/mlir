@@ -671,16 +671,24 @@ extern "C" MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle h,
     // pass it in / read it out as a DenseI32ArrayAttr and parse the
     // resulting `array<i32: V0, V1, ...>` text format. Round-trip the
     // attribute back to DenseI32ArrayAttr here so reads under upstream
-    // produce the same text format as native.
+    // produce the same text format as native. Only safe when the IR's
+    // case_values element type is i32 (the only width the agnostic API
+    // currently supports); for wider integer types fall through and
+    // return the underlying DenseIntElementsAttr unchanged so callers
+    // see the full-width values instead of silently truncated i32s.
     if (mlir::isa<mlir::cf::SwitchOp>(op) &&
         llvm::StringRef(name) == "case_values") {
         if (auto sw = mlir::dyn_cast<mlir::cf::SwitchOp>(op)) {
             if (auto cv = sw.getCaseValuesAttr()) {
-                llvm::SmallVector<int32_t, 8> vals;
-                vals.reserve(cv.getNumElements());
-                for (auto apv : cv.getValues<llvm::APInt>())
-                    vals.push_back((int32_t)apv.getSExtValue());
-                return stash(mlir::DenseI32ArrayAttr::get(&mctx, vals));
+                auto elemTy = cv.getElementType();
+                if (elemTy.isInteger(32)) {
+                    llvm::SmallVector<int32_t, 8> vals;
+                    vals.reserve(cv.getNumElements());
+                    for (auto apv : cv.getValues<llvm::APInt>())
+                        vals.push_back((int32_t)apv.getSExtValue());
+                    return stash(mlir::DenseI32ArrayAttr::get(&mctx, vals));
+                }
+                return stash(cv);
             }
         }
     }
