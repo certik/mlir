@@ -445,6 +445,8 @@ static bool encode_op(EmFunc *F, MLIR_OpHandle op, uint32_t sp_sym_idx,
         buf_putc(b, 0x0c); leb_u(b, (uint64_t)at_i(op, "depth")); return true;
     case OP_TYPE_WASMSTACK_BR_IF:
         buf_putc(b, 0x0d); leb_u(b, (uint64_t)at_i(op, "depth")); return true;
+    case OP_TYPE_WASMSTACK_UNREACHABLE:
+        buf_putc(b, 0x00); return true;
     case OP_TYPE_WASMSTACK_SELECT:
         buf_putc(b, 0x1b); return true;
     case OP_TYPE_WASMSTACK_EQZ:

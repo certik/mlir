@@ -14,9 +14,11 @@
 //       emit  wasmstack.local.set new_local
 //       vmap[op_result_value] = new_local
 //
-// Carriers (`wasmssa.carrier_{set,get}`) desugar to direct local.set /
-// local.get pairs on per-carrier locals, allocated lazily on first
-// reference.
+// Structured CF ops (`wasmssa.block`/`loop`/`if`) open/close wasmstack
+// labels with blocktype 0x40 (empty signature). Per-region "result locals"
+// receive values from `wasmssa.block_return` and from `wasmssa.br` to that
+// label; loops additionally allocate "entry-arg locals" that receive
+// back-edge values.
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -134,11 +136,6 @@ static MLIR_OpType ssa_to_stack(MLIR_OpType t) {
     case OP_TYPE_WASMSSA_EXTEND_I32_S: return OP_TYPE_WASMSTACK_EXTEND_I32_S;
     case OP_TYPE_WASMSSA_RETURN:       return OP_TYPE_WASMSTACK_RETURN;
     case OP_TYPE_WASMSSA_CALL:         return OP_TYPE_WASMSTACK_CALL;
-    case OP_TYPE_WASMSSA_BLOCK_BEGIN:  return OP_TYPE_WASMSTACK_BLOCK;
-    case OP_TYPE_WASMSSA_LOOP_BEGIN:   return OP_TYPE_WASMSTACK_LOOP;
-    case OP_TYPE_WASMSSA_IF_BEGIN:     return OP_TYPE_WASMSTACK_IF;
-    case OP_TYPE_WASMSSA_IF_ELSE:      return OP_TYPE_WASMSTACK_ELSE;
-    case OP_TYPE_WASMSSA_END:          return OP_TYPE_WASMSTACK_END;
     case OP_TYPE_WASMSSA_BR:           return OP_TYPE_WASMSTACK_BR;
     case OP_TYPE_WASMSSA_BR_IF:        return OP_TYPE_WASMSTACK_BR_IF;
     case OP_TYPE_WASMSSA_SELECT:       return OP_TYPE_WASMSTACK_SELECT;
@@ -167,7 +164,6 @@ static bool ssa_op_has_result(MLIR_OpType t) {
     case OP_TYPE_WASMSSA_EQZ:
     case OP_TYPE_WASMSSA_ADDRESSOF:
     case OP_TYPE_WASMSSA_FUNC_ADDR:
-    case OP_TYPE_WASMSSA_CARRIER_GET:
     case OP_TYPE_WASMSSA_MEMORY_SIZE:
     case OP_TYPE_WASMSSA_MEMORY_GROW:
         return true;
@@ -218,6 +214,37 @@ static uint32_t locals_add(Locals *L, uint8_t vt) {
     }
     L->types[L->n] = vt;
     return (uint32_t)(L->n_params + L->n++);
+}
+
+// =============================================================================
+// Region-stack: tracks open wasmstack labels (block/loop/if) so that
+// wasmssa.br {depth=N} (vals) can route values into the right per-target
+// locals.
+// =============================================================================
+typedef struct RegionFrame {
+    MLIR_OpType  op_type;            // OP_TYPE_WASMSSA_BLOCK/LOOP/IF
+    uint32_t    *result_locals;      // for fall-through values out of label
+    size_t       n_results;
+    uint32_t    *entry_arg_locals;   // loop only: locals for entry-block args
+    size_t       n_entry_args;
+} RegionFrame;
+
+typedef struct {
+    RegionFrame *data;
+    size_t       n, cap;
+} RegionStack;
+
+static void rs_push(RegionStack *rs, RegionFrame f) {
+    if (rs->n == rs->cap) {
+        rs->cap = rs->cap ? rs->cap * 2 : 8;
+        rs->data = (RegionFrame *)realloc(rs->data, rs->cap * sizeof(RegionFrame));
+    }
+    rs->data[rs->n++] = f;
+}
+static void rs_pop(RegionStack *rs) { rs->n--; }
+static RegionFrame *rs_at_depth(RegionStack *rs, uint32_t depth) {
+    if (depth >= rs->n) return NULL;
+    return &rs->data[rs->n - 1 - depth];
 }
 
 // =============================================================================
@@ -287,24 +314,264 @@ static void copy_imms(MLIR_Context *ctx, Arena *arena, MLIR_OpHandle bo,
 // =============================================================================
 // Stackify a wasmssa.func body region into a wasmstack.func body block.
 // =============================================================================
+
+// Determine the wasm valtype of an MLIR Value (i32/i64/f32/f64).
+static uint8_t value_to_vt(MLIR_Context *ctx, MLIR_ValueHandle v) {
+    MLIR_TypeHandle ty = MLIR_GetValueType(v);
+    string s = MLIR_GetTypeString(ctx, ty);
+    if (s.size >= 9 && memcmp(s.str, "!llvm.ptr", 9) == 0) return WT_I32;
+    if (s.size == 3 && memcmp(s.str, "ptr", 3) == 0) return WT_I32;
+    if (s.size == 5 && memcmp(s.str, "index", 5) == 0) return WT_I32;
+    if (s.size == 3 && memcmp(s.str, "f32", 3) == 0) return WT_F32;
+    if (s.size == 3 && memcmp(s.str, "f64", 3) == 0) return WT_F64;
+    if (s.size > 1 && s.str[0] == 'i') {
+        int w = 0;
+        for (size_t i = 1; i < s.size; i++) {
+            if (s.str[i] >= '0' && s.str[i] <= '9') w = w * 10 + (s.str[i] - '0');
+            else { w = -1; break; }
+        }
+        if (w == 1 || w == 8 || w == 16 || w == 32) return WT_I32;
+        if (w == 64) return WT_I64;
+    }
+    return WT_I32;
+}
+
+// Emit `wasmstack.<op>` with no operands (any source operands have already
+// been pushed via local.get). copy_imms handles the per-op attrs.
+static void emit_stack_simple(MLIR_Context *ctx, Arena *arena, MLIR_BlockHandle blk,
+                              MLIR_OpHandle bo, MLIR_OpType st, uint8_t valtype) {
+    MLIR_AttributeHandle as[8];
+    size_t nas = 0;
+    as[nas++] = attr_i32(ctx, "valtype", valtype);
+    copy_imms(ctx, arena, bo, as, &nas);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, st, as, nas));
+}
+
+// Walk one wasmssa block, emitting wasmstack ops. Recursively descends
+// into region-bearing ops (BLOCK/LOOP/IF).
+static bool stackify_walk_block(MLIR_Context *ctx, Arena *arena,
+                                MLIR_BlockHandle src_blk, MLIR_BlockHandle dst_blk,
+                                VMap *vmap, Locals *L, RegionStack *rs);
+
+// Open a region-bearing wasmssa op: emit its wasmstack opener (block/loop/if),
+// recursively walk the inner block(s), emit `wasmstack.end`, and bind the
+// wasmssa op's results to fresh locals. Returns false on error.
+static bool stackify_region_op(MLIR_Context *ctx, Arena *arena,
+                               MLIR_OpHandle bo, MLIR_BlockHandle dst_blk,
+                               VMap *vmap, Locals *L, RegionStack *rs) {
+    MLIR_OpType t = MLIR_GetOpType(bo);
+    size_t n_results = MLIR_GetOpNumResults(bo);
+    size_t n_operands = MLIR_GetOpNumOperands(bo);
+
+    // Pre-allocate result locals.
+    RegionFrame fr = {0};
+    fr.op_type = t;
+    fr.n_results = n_results;
+    if (n_results) {
+        fr.result_locals = (uint32_t *)arena_alloc(arena, n_results * sizeof(uint32_t));
+        for (size_t i = 0; i < n_results; i++) {
+            MLIR_ValueHandle r = MLIR_GetOpResult(bo, i);
+            fr.result_locals[i] = locals_add(L, value_to_vt(ctx, r));
+        }
+    }
+
+    if (t == OP_TYPE_WASMSSA_LOOP) {
+        // Loop: copy init operands into entry-arg locals before opening.
+        fr.n_entry_args = n_operands;
+        if (n_operands) {
+            fr.entry_arg_locals = (uint32_t *)arena_alloc(arena, n_operands * sizeof(uint32_t));
+        }
+        if (MLIR_GetOpNumRegions(bo) < 1) return false;
+        MLIR_BlockHandle entry = MLIR_GetRegionBlock(MLIR_GetOpRegion(bo, 0), 0);
+        if (MLIR_GetBlockNumArgs(entry) != n_operands) return false;
+        for (size_t i = 0; i < n_operands; i++) {
+            MLIR_ValueHandle ba = MLIR_GetBlockArg(entry, i);
+            uint8_t vt = value_to_vt(ctx, ba);
+            fr.entry_arg_locals[i] = locals_add(L, vt);
+            uint32_t li;
+            if (!vmap_get(vmap, MLIR_GetOpOperand(bo, i), &li)) return false;
+            emit_local_get(ctx, dst_blk, li);
+            emit_local_set(ctx, dst_blk, fr.entry_arg_locals[i]);
+            vmap_set(vmap, ba, fr.entry_arg_locals[i]);
+        }
+    } else if (t == OP_TYPE_WASMSSA_IF) {
+        // If: push condition local before the wasmstack.if op.
+        if (n_operands != 1) return false;
+        uint32_t cli;
+        if (!vmap_get(vmap, MLIR_GetOpOperand(bo, 0), &cli)) return false;
+        emit_local_get(ctx, dst_blk, cli);
+    }
+
+    // Open the wasmstack label. Always blocktype 0x40 (empty); cross-CF
+    // values flow via the per-region locals we allocated above.
+    MLIR_OpType opener = (t == OP_TYPE_WASMSSA_BLOCK) ? OP_TYPE_WASMSTACK_BLOCK
+                       : (t == OP_TYPE_WASMSSA_LOOP)  ? OP_TYPE_WASMSTACK_LOOP
+                       :                                 OP_TYPE_WASMSTACK_IF;
+    {
+        MLIR_AttributeHandle as[1];
+        as[0] = attr_i32(ctx, "valtype", 0x40);
+        MLIR_AppendBlockOp(ctx, dst_blk, build_op(ctx, opener, as, 1));
+    }
+
+    rs_push(rs, fr);
+
+    // Walk inner region(s).
+    if (t == OP_TYPE_WASMSSA_IF) {
+        // then-region.
+        if (MLIR_GetOpNumRegions(bo) < 1) { rs_pop(rs); return false; }
+        MLIR_BlockHandle then_blk = MLIR_GetRegionBlock(MLIR_GetOpRegion(bo, 0), 0);
+        if (!stackify_walk_block(ctx, arena, then_blk, dst_blk, vmap, L, rs)) {
+            rs_pop(rs); return false;
+        }
+        bool has_else = MLIR_GetOpNumRegions(bo) >= 2 &&
+                        MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(bo, 1)) > 0;
+        if (has_else) {
+            MLIR_AttributeHandle as[1];
+            as[0] = attr_i32(ctx, "valtype", 0);
+            MLIR_AppendBlockOp(ctx, dst_blk, build_op(ctx, OP_TYPE_WASMSTACK_ELSE, as, 1));
+            MLIR_BlockHandle else_blk = MLIR_GetRegionBlock(MLIR_GetOpRegion(bo, 1), 0);
+            if (!stackify_walk_block(ctx, arena, else_blk, dst_blk, vmap, L, rs)) {
+                rs_pop(rs); return false;
+            }
+        }
+    } else {
+        // block / loop: single region.
+        if (MLIR_GetOpNumRegions(bo) < 1) { rs_pop(rs); return false; }
+        MLIR_BlockHandle inner = MLIR_GetRegionBlock(MLIR_GetOpRegion(bo, 0), 0);
+        if (!stackify_walk_block(ctx, arena, inner, dst_blk, vmap, L, rs)) {
+            rs_pop(rs); return false;
+        }
+    }
+
+    rs_pop(rs);
+
+    // Close the label.
+    {
+        MLIR_AttributeHandle as[1];
+        as[0] = attr_i32(ctx, "valtype", 0);
+        MLIR_AppendBlockOp(ctx, dst_blk, build_op(ctx, OP_TYPE_WASMSTACK_END, as, 1));
+    }
+
+    // Bind wasmssa op's results to result_locals.
+    for (size_t i = 0; i < n_results; i++) {
+        vmap_set(vmap, MLIR_GetOpResult(bo, i), fr.result_locals[i]);
+    }
+    return true;
+}
+
+static bool stackify_walk_block(MLIR_Context *ctx, Arena *arena,
+                                MLIR_BlockHandle src_blk, MLIR_BlockHandle dst_blk,
+                                VMap *vmap, Locals *L, RegionStack *rs) {
+    size_t n_body = MLIR_GetBlockNumOps(src_blk);
+    for (size_t i = 0; i < n_body; i++) {
+        MLIR_OpHandle bo = MLIR_GetBlockOp(src_blk, i);
+        MLIR_OpType t = MLIR_GetOpType(bo);
+        uint8_t valtype = (uint8_t)at_i(bo, "valtype");
+
+        // ---- Region-bearing structured CF ops ----
+        if (t == OP_TYPE_WASMSSA_BLOCK || t == OP_TYPE_WASMSSA_LOOP || t == OP_TYPE_WASMSSA_IF) {
+            if (!stackify_region_op(ctx, arena, bo, dst_blk, vmap, L, rs)) {
+                return false;
+            }
+            continue;
+        }
+        if (t == OP_TYPE_WASMSSA_BLOCK_RETURN) {
+            // Copy yield operands into the enclosing region's result_locals.
+            RegionFrame *top = rs->n ? &rs->data[rs->n - 1] : NULL;
+            if (!top) { fprintf(stderr, "stackify: block_return with no enclosing region\n"); return false; }
+            size_t no = MLIR_GetOpNumOperands(bo);
+            if (no != top->n_results) {
+                fprintf(stderr, "stackify: block_return arity %zu != region results %zu\n", no, top->n_results);
+                return false;
+            }
+            for (size_t k = 0; k < no; k++) {
+                uint32_t li;
+                if (!vmap_get(vmap, MLIR_GetOpOperand(bo, k), &li)) {
+                    fprintf(stderr, "stackify: unbound block_return operand %zu\n", k); return false;
+                }
+                emit_local_get(ctx, dst_blk, li);
+                emit_local_set(ctx, dst_blk, top->result_locals[k]);
+            }
+            continue;
+        }
+        if (t == OP_TYPE_WASMSSA_UNREACHABLE) {
+            MLIR_AttributeHandle as[1];
+            as[0] = attr_i32(ctx, "valtype", 0);
+            MLIR_AppendBlockOp(ctx, dst_blk, build_op(ctx, OP_TYPE_WASMSTACK_UNREACHABLE, as, 1));
+            continue;
+        }
+
+        // ---- wasmssa.br with operands: transfer values into target locals ----
+        if (t == OP_TYPE_WASMSSA_BR && MLIR_GetOpNumOperands(bo) > 0) {
+            uint32_t depth = (uint32_t)at_i(bo, "depth");
+            RegionFrame *target = rs_at_depth(rs, depth);
+            if (!target) { fprintf(stderr, "stackify: br depth %u out of range\n", depth); return false; }
+            uint32_t *dst_locals;
+            size_t n_dst;
+            if (target->op_type == OP_TYPE_WASMSSA_LOOP) {
+                // br to a loop label = back-edge: feed entry-arg locals.
+                dst_locals = target->entry_arg_locals; n_dst = target->n_entry_args;
+            } else {
+                dst_locals = target->result_locals; n_dst = target->n_results;
+            }
+            size_t no = MLIR_GetOpNumOperands(bo);
+            if (no != n_dst) {
+                fprintf(stderr, "stackify: br arity %zu != target slot count %zu\n", no, n_dst);
+                return false;
+            }
+            for (size_t k = 0; k < no; k++) {
+                uint32_t li;
+                if (!vmap_get(vmap, MLIR_GetOpOperand(bo, k), &li)) {
+                    fprintf(stderr, "stackify: unbound br operand %zu\n", k); return false;
+                }
+                emit_local_get(ctx, dst_blk, li);
+                emit_local_set(ctx, dst_blk, dst_locals[k]);
+            }
+            MLIR_AttributeHandle as[2];
+            as[0] = attr_i32(ctx, "valtype", 0);
+            as[1] = attr_i32(ctx, "depth", (int64_t)depth);
+            MLIR_AppendBlockOp(ctx, dst_blk, build_op(ctx, OP_TYPE_WASMSTACK_BR, as, 2));
+            continue;
+        }
+
+        // ---- Generic: push operands as local.get, emit op, stash result ----
+        size_t n_ops = MLIR_GetOpNumOperands(bo);
+        for (size_t k = 0; k < n_ops; k++) {
+            uint32_t li;
+            MLIR_ValueHandle ov = MLIR_GetOpOperand(bo, k);
+            if (!vmap_get(vmap, ov, &li)) {
+                fprintf(stderr, "stackify: unbound operand on op (idx %zu)\n", k);
+                return false;
+            }
+            emit_local_get(ctx, dst_blk, li);
+        }
+
+        MLIR_OpType st = ssa_to_stack(t);
+        if (!st) {
+            fprintf(stderr, "stackify: unknown wasmssa op enum=%d\n", (int)t);
+            return false;
+        }
+        emit_stack_simple(ctx, arena, dst_blk, bo, st, valtype);
+
+        if (MLIR_GetOpNumResults(bo) > 0) {
+            uint32_t li = locals_add(L, valtype);
+            emit_local_set(ctx, dst_blk, li);
+            vmap_set(vmap, MLIR_GetOpResult(bo, 0), li);
+        }
+    }
+    return true;
+}
+
 static bool stackify_body(MLIR_Context *ctx, Arena *arena,
                           MLIR_OpHandle src_func, MLIR_BlockHandle dst_blk,
                           const uint8_t *param_types, size_t n_params,
                           Locals *L) {
+    (void)param_types;
     L->n_params = n_params;
 
-    size_t n_carriers = 0;
-    uint8_t *carrier_vts = hex_decode(at_s(src_func, "carrier_types"), &n_carriers);
-    uint32_t *cmap = NULL;
-    bool *cbound = NULL;
-    if (n_carriers) {
-        cmap = (uint32_t *)calloc(n_carriers, sizeof(uint32_t));
-        cbound = (bool *)calloc(n_carriers, sizeof(bool));
-    }
-
-    if (MLIR_GetOpNumRegions(src_func) < 1) { free(carrier_vts); free(cmap); free(cbound); return true; }
+    if (MLIR_GetOpNumRegions(src_func) < 1) return true;
     MLIR_RegionHandle r = MLIR_GetOpRegion(src_func, 0);
-    if (MLIR_GetRegionNumBlocks(r) < 1) { free(carrier_vts); free(cmap); free(cbound); return true; }
+    if (MLIR_GetRegionNumBlocks(r) < 1) return true;
     MLIR_BlockHandle src_blk = MLIR_GetRegionBlock(r, 0);
 
     VMap vmap = {0};
@@ -313,73 +580,11 @@ static bool stackify_body(MLIR_Context *ctx, Arena *arena,
         vmap_set(&vmap, MLIR_GetBlockArg(src_blk, i), (uint32_t)i);
     }
 
-    size_t n_body = MLIR_GetBlockNumOps(src_blk);
-    bool ok = true;
-    for (size_t i = 0; i < n_body; i++) {
-        MLIR_OpHandle bo = MLIR_GetBlockOp(src_blk, i);
-        MLIR_OpType t = MLIR_GetOpType(bo);
-        uint8_t valtype = (uint8_t)at_i(bo, "valtype");
+    RegionStack rs = {0};
+    bool ok = stackify_walk_block(ctx, arena, src_blk, dst_blk, &vmap, L, &rs);
 
-        if (t == OP_TYPE_WASMSSA_CARRIER_SET) {
-            uint32_t cid = (uint32_t)at_i(bo, "carrier_id");
-            if (cid >= n_carriers) { fprintf(stderr, "stackify: carrier id %u oob\n", cid); ok = false; break; }
-            if (!cbound[cid]) { cmap[cid] = locals_add(L, carrier_vts[cid]); cbound[cid] = true; }
-            uint32_t li;
-            if (MLIR_GetOpNumOperands(bo) < 1 ||
-                !vmap_get(&vmap, MLIR_GetOpOperand(bo, 0), &li)) {
-                fprintf(stderr, "stackify: unbound carrier_set operand\n"); ok = false; break;
-            }
-            emit_local_get(ctx, dst_blk, li);
-            emit_local_set(ctx, dst_blk, cmap[cid]);
-            continue;
-        }
-        if (t == OP_TYPE_WASMSSA_CARRIER_GET) {
-            uint32_t cid = (uint32_t)at_i(bo, "carrier_id");
-            if (cid >= n_carriers) { fprintf(stderr, "stackify: carrier id %u oob\n", cid); ok = false; break; }
-            if (!cbound[cid]) { cmap[cid] = locals_add(L, carrier_vts[cid]); cbound[cid] = true; }
-            emit_local_get(ctx, dst_blk, cmap[cid]);
-            uint32_t li = locals_add(L, valtype);
-            emit_local_set(ctx, dst_blk, li);
-            if (MLIR_GetOpNumResults(bo) > 0) {
-                vmap_set(&vmap, MLIR_GetOpResult(bo, 0), li);
-            }
-            continue;
-        }
-
-        // Push each operand as local.get.
-        size_t n_ops = MLIR_GetOpNumOperands(bo);
-        for (size_t k = 0; k < n_ops; k++) {
-            uint32_t li;
-            MLIR_ValueHandle ov = MLIR_GetOpOperand(bo, k);
-            if (!vmap_get(&vmap, ov, &li)) {
-                fprintf(stderr, "stackify: unbound operand on op %zu (idx %zu)\n", i, k);
-                ok = false; break;
-            }
-            emit_local_get(ctx, dst_blk, li);
-        }
-        if (!ok) break;
-
-        MLIR_OpType st = ssa_to_stack(t);
-        if (!st) {
-            fprintf(stderr, "stackify: unknown wasmssa op enum=%d\n", (int)t);
-            ok = false; break;
-        }
-        MLIR_AttributeHandle as[8];
-        size_t nas = 0;
-        as[nas++] = attr_i32(ctx, "valtype", valtype);
-        copy_imms(ctx, arena, bo, as, &nas);
-        MLIR_AppendBlockOp(ctx, dst_blk, build_op(ctx, st, as, nas));
-
-        // If wasmssa op produces a result, stash to a fresh local.
-        if (MLIR_GetOpNumResults(bo) > 0) {
-            uint32_t li = locals_add(L, valtype);
-            emit_local_set(ctx, dst_blk, li);
-            vmap_set(&vmap, MLIR_GetOpResult(bo, 0), li);
-        }
-    }
-
+    free(rs.data);
     free(vmap.keys); free(vmap.vals);
-    free(carrier_vts); free(cmap); free(cbound);
     return ok;
 }
 
