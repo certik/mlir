@@ -311,6 +311,90 @@ static uint32_t arm64_str_w_uoff(uint8_t rt, uint8_t rn, uint16_t off_bytes) {
     return 0xb9000000u | (((uint32_t)(off_bytes >> 2) & 0xfffu) << 10)
                        | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rt & 0x1f);
 }
+// LDR Xt, [Xn, #pimm] / STR Xt, [Xn, #pimm]  (8-byte aligned).
+static uint32_t arm64_ldr_x_uoff(uint8_t rt, uint8_t rn, uint16_t off_bytes) {
+    return 0xf9400000u | (((uint32_t)(off_bytes >> 3) & 0xfffu) << 10)
+                       | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rt & 0x1f);
+}
+static uint32_t arm64_str_x_uoff(uint8_t rt, uint8_t rn, uint16_t off_bytes) {
+    return 0xf9000000u | (((uint32_t)(off_bytes >> 3) & 0xfffu) << 10)
+                       | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rt & 0x1f);
+}
+// MUL Wd, Wn, Wm == MADD Wd, Wn, Wm, WZR
+//   W base: 0x1B007C00, X base: 0x9B007C00
+static uint32_t arm64_mul(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
+    uint32_t base = sf ? 0x9b007c00u : 0x1b007c00u;
+    return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5)
+                | (uint32_t)(rd & 0x1f);
+}
+// SDIV / UDIV.
+//   sdiv W base: 0x1AC00C00, X base: 0x9AC00C00
+//   udiv W base: 0x1AC00800, X base: 0x9AC00800
+static uint32_t arm64_sdiv(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
+    uint32_t base = sf ? 0x9ac00c00u : 0x1ac00c00u;
+    return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5)
+                | (uint32_t)(rd & 0x1f);
+}
+static uint32_t arm64_udiv(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
+    uint32_t base = sf ? 0x9ac00800u : 0x1ac00800u;
+    return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5)
+                | (uint32_t)(rd & 0x1f);
+}
+// MSUB Wd, Wn, Wm, Wa  (Wd = Wa - Wn*Wm). Used to compute remainder
+// after a div: rem = a - (a/b)*b = msub(a/b, b, a).
+//   W base: 0x1B008000, X base: 0x9B008000  (Ra at bits[14:10])
+static uint32_t arm64_msub(uint8_t rd, uint8_t rn, uint8_t rm, uint8_t ra, bool sf) {
+    uint32_t base = sf ? 0x9b008000u : 0x1b008000u;
+    return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(ra & 0x1f) << 10)
+                | ((uint32_t)(rn & 0x1f) << 5)  | (uint32_t)(rd & 0x1f);
+}
+// AND/ORR/EOR (shifted register, LSL #0).
+//   AND W base: 0x0A000000, X base: 0x8A000000
+//   ORR W base: 0x2A000000, X base: 0xAA000000
+//   EOR W base: 0x4A000000, X base: 0xCA000000
+static uint32_t arm64_and_reg(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
+    uint32_t base = sf ? 0x8a000000u : 0x0a000000u;
+    return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5)
+                | (uint32_t)(rd & 0x1f);
+}
+static uint32_t arm64_orr_reg(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
+    uint32_t base = sf ? 0xaa000000u : 0x2a000000u;
+    return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5)
+                | (uint32_t)(rd & 0x1f);
+}
+static uint32_t arm64_eor_reg(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
+    uint32_t base = sf ? 0xca000000u : 0x4a000000u;
+    return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5)
+                | (uint32_t)(rd & 0x1f);
+}
+// LSLV / LSRV / ASRV (variable shift by register, lsl/lsr/asr Rm).
+//   LSLV W base: 0x1AC02000, X base: 0x9AC02000
+//   LSRV W base: 0x1AC02400, X base: 0x9AC02400
+//   ASRV W base: 0x1AC02800, X base: 0x9AC02800
+static uint32_t arm64_lslv(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
+    uint32_t base = sf ? 0x9ac02000u : 0x1ac02000u;
+    return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5)
+                | (uint32_t)(rd & 0x1f);
+}
+static uint32_t arm64_lsrv(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
+    uint32_t base = sf ? 0x9ac02400u : 0x1ac02400u;
+    return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5)
+                | (uint32_t)(rd & 0x1f);
+}
+static uint32_t arm64_asrv(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
+    uint32_t base = sf ? 0x9ac02800u : 0x1ac02800u;
+    return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5)
+                | (uint32_t)(rd & 0x1f);
+}
+// SXTW Xd, Wn  ==  SBFM Xd, Xn, #0, #31 :: 0x93407C00 | Rn<<5 | Rd
+static uint32_t arm64_sxtw(uint8_t rd, uint8_t rn) {
+    return 0x93407c00u | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rd & 0x1f);
+}
+// UXTW: zero-extend W to X. == ORR Wd, WZR, Wn (writes to W which zeros
+// the upper half of X). 0x2A0003E0 | Rn<<16 | Rd  (sf=0).
+static uint32_t arm64_uxtw(uint8_t rd, uint8_t rn) {
+    return 0x2a0003e0u | ((uint32_t)(rn & 0x1f) << 16) | (uint32_t)(rd & 0x1f);
+}
 
 // ---- ADRP / ADD ---------------------------------------------------
 // ADRP Xd, #rel_pages*4096 (rel_pages is a signed 21-bit value).
@@ -553,6 +637,113 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
                 uint8_t  rn = (uint8_t)attr_i(op, "rn");
                 uint16_t of = (uint16_t)attr_i(op, "off_bytes");
                 emit_word(&out->code, arm64_str_w_uoff(rt, rn, of));
+                break;
+            }
+            case OP_TYPE_AARCH64_LDR_X: {
+                uint8_t  rt = (uint8_t)attr_i(op, "rt");
+                uint8_t  rn = (uint8_t)attr_i(op, "rn");
+                uint16_t of = (uint16_t)attr_i(op, "off_bytes");
+                emit_word(&out->code, arm64_ldr_x_uoff(rt, rn, of));
+                break;
+            }
+            case OP_TYPE_AARCH64_STR_X: {
+                uint8_t  rt = (uint8_t)attr_i(op, "rt");
+                uint8_t  rn = (uint8_t)attr_i(op, "rn");
+                uint16_t of = (uint16_t)attr_i(op, "off_bytes");
+                emit_word(&out->code, arm64_str_x_uoff(rt, rn, of));
+                break;
+            }
+            case OP_TYPE_AARCH64_MUL: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_mul(rd, rn, rm, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_SDIV: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_sdiv(rd, rn, rm, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_UDIV: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_udiv(rd, rn, rm, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_MSUB: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                uint8_t ra = (uint8_t)attr_i(op, "ra");
+                bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_msub(rd, rn, rm, ra, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_AND_REG: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_and_reg(rd, rn, rm, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_ORR_REG: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_orr_reg(rd, rn, rm, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_EOR_REG: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_eor_reg(rd, rn, rm, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_LSL_REG: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_lslv(rd, rn, rm, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_LSR_REG: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_lsrv(rd, rn, rm, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_ASR_REG: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_asrv(rd, rn, rm, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_SXTW: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                emit_word(&out->code, arm64_sxtw(rd, rn));
+                break;
+            }
+            case OP_TYPE_AARCH64_UXTW: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                emit_word(&out->code, arm64_uxtw(rd, rn));
                 break;
             }
             case OP_TYPE_AARCH64_ADRP_DATA: {

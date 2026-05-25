@@ -91,6 +91,14 @@ static string at_s(MLIR_OpHandle op, const char *name) {
     return a ? MLIR_GetAttributeString(a) : (string){0};
 }
 
+// Returns true if `v` has type `i64`. Used to pick X-form vs W-form
+// instructions for binops and loads/stores into local slots.
+static bool is_i64(MLIR_Context *ctx, MLIR_ValueHandle v) {
+    MLIR_TypeHandle ty = MLIR_GetValueType(v);
+    string s = MLIR_GetTypeString(ctx, ty);
+    return s.size == 3 && memcmp(s.str, "i64", 3) == 0;
+}
+
 static MLIR_OpHandle build_op(MLIR_Context *ctx, MLIR_OpType t,
                               MLIR_AttributeHandle *attrs, size_t na) {
     return MLIR_CreateOp(ctx, t, op_type_to_string(t),
@@ -187,6 +195,48 @@ static void emit_str_w(MLIR_Context *ctx, MLIR_BlockHandle blk,
     a[2] = attr_i32(ctx, "off_bytes", off_bytes);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_STR_W, a, 3));
 }
+static void emit_ldr_x(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                       uint8_t rt, uint8_t rn, uint16_t off_bytes) {
+    MLIR_AttributeHandle a[3];
+    a[0] = attr_i32(ctx, "rt", rt);
+    a[1] = attr_i32(ctx, "rn", rn);
+    a[2] = attr_i32(ctx, "off_bytes", off_bytes);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_LDR_X, a, 3));
+}
+static void emit_str_x(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                       uint8_t rt, uint8_t rn, uint16_t off_bytes) {
+    MLIR_AttributeHandle a[3];
+    a[0] = attr_i32(ctx, "rt", rt);
+    a[1] = attr_i32(ctx, "rn", rn);
+    a[2] = attr_i32(ctx, "off_bytes", off_bytes);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_STR_X, a, 3));
+}
+static void emit_3reg(MLIR_Context *ctx, MLIR_BlockHandle blk, MLIR_OpType t,
+                      uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
+    MLIR_AttributeHandle a[4];
+    a[0] = attr_i32(ctx, "rd", rd);
+    a[1] = attr_i32(ctx, "rn", rn);
+    a[2] = attr_i32(ctx, "rm", rm);
+    a[3] = attr_b(ctx, "sf", sf);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, t, a, 4));
+}
+static void emit_msub(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                      uint8_t rd, uint8_t rn, uint8_t rm, uint8_t ra, bool sf) {
+    MLIR_AttributeHandle a[5];
+    a[0] = attr_i32(ctx, "rd", rd);
+    a[1] = attr_i32(ctx, "rn", rn);
+    a[2] = attr_i32(ctx, "rm", rm);
+    a[3] = attr_i32(ctx, "ra", ra);
+    a[4] = attr_b(ctx, "sf", sf);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_MSUB, a, 5));
+}
+static void emit_2reg_no_sf(MLIR_Context *ctx, MLIR_BlockHandle blk, MLIR_OpType t,
+                            uint8_t rd, uint8_t rn) {
+    MLIR_AttributeHandle a[2];
+    a[0] = attr_i32(ctx, "rd", rd);
+    a[1] = attr_i32(ctx, "rn", rn);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, t, a, 2));
+}
 static void emit_adrp_data(MLIR_Context *ctx, MLIR_BlockHandle blk,
                            uint8_t rd, const char *target) {
     MLIR_AttributeHandle a[2];
@@ -278,6 +328,22 @@ static void emit_mov_imm32(MLIR_Context *ctx, MLIR_BlockHandle blk,
     if ((v >> 16) != 0) {
         emit_movk(ctx, blk, rd, (uint16_t)((v >> 16) & 0xffff), 1, /*sf=*/false);
     }
+}
+// Materialise a 64-bit immediate into Xn (worst case 4 instructions).
+static void emit_mov_imm64(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                           uint8_t rd, uint64_t v) {
+    bool emitted = false;
+    for (uint8_t hw = 0; hw < 4; hw++) {
+        uint16_t chunk = (uint16_t)((v >> (hw * 16)) & 0xffffu);
+        if (chunk == 0 && emitted) continue;
+        if (!emitted) {
+            emit_movz(ctx, blk, rd, chunk, hw, /*sf=*/true);
+            emitted = true;
+        } else {
+            emit_movk(ctx, blk, rd, chunk, hw, /*sf=*/true);
+        }
+    }
+    if (!emitted) emit_movz(ctx, blk, rd, 0, 0, /*sf=*/true);
 }
 
 // =============================================================================
@@ -441,14 +507,24 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                     sm_free(&sm); bm_free(&bm);                            \
                     return MLIR_INVALID_HANDLE;                            \
                 }                                                          \
-                emit_ldr_w(ctx, dst_blk, (REG), 31, (uint16_t)(_s * 8u));  \
+                if (is_i64(ctx, _v))                                       \
+                    emit_ldr_x(ctx, dst_blk, (REG), 31,                    \
+                        (uint16_t)(_s * 8u));                              \
+                else                                                       \
+                    emit_ldr_w(ctx, dst_blk, (REG), 31,                    \
+                        (uint16_t)(_s * 8u));                              \
             } while (0)
         #define ST_RESULT(REG, IDX)                                        \
             do {                                                           \
                 MLIR_ValueHandle _v = MLIR_GetOpResult(op, (IDX));         \
                 uint16_t _s;                                               \
                 sm_get(&sm, _v, &_s);                                      \
-                emit_str_w(ctx, dst_blk, (REG), 31, (uint16_t)(_s * 8u));  \
+                if (is_i64(ctx, _v))                                       \
+                    emit_str_x(ctx, dst_blk, (REG), 31,                    \
+                        (uint16_t)(_s * 8u));                              \
+                else                                                       \
+                    emit_str_w(ctx, dst_blk, (REG), 31,                    \
+                        (uint16_t)(_s * 8u));                              \
             } while (0)
 
         size_t n_ops = MLIR_GetBlockNumOps(src_blk);
@@ -460,35 +536,141 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
                 MLIR_TypeHandle  ty = MLIR_GetValueType(r);
                 string ts = MLIR_GetTypeString(ctx, ty);
-                if (!(ts.size == 3 && memcmp(ts.str, "i32", 3) == 0)) {
-                    if (ts.size == 3 && memcmp(ts.str, "i64", 3) == 0) continue;
+                int64_t v = at_i(op, "value");
+                if (ts.size == 3 && memcmp(ts.str, "i32", 3) == 0) {
+                    emit_mov_imm32(ctx, dst_blk, 9, (uint32_t)v);
+                    ST_RESULT(9, 0);
+                } else if (ts.size == 3 && memcmp(ts.str, "i64", 3) == 0) {
+                    emit_mov_imm64(ctx, dst_blk, 9, (uint64_t)v);
+                    ST_RESULT(9, 0);
+                } else {
                     fprintf(stderr,
                         "wmir->aarch64: wmir.const of unsupported type '%.*s'\n",
                         (int)ts.size, ts.str);
                     sm_free(&sm); bm_free(&bm);
                     return MLIR_INVALID_HANDLE;
                 }
-                int64_t v = at_i(op, "value");
-                emit_mov_imm32(ctx, dst_blk, 9, (uint32_t)v);
-                ST_RESULT(9, 0);
                 break;
             }
             case OP_TYPE_WMIR_IADD: {
+                bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
                 LD_OPERAND(9, 0); LD_OPERAND(10, 1);
-                emit_add_reg(ctx, dst_blk, 9, 9, 10, /*sf=*/false);
+                emit_add_reg(ctx, dst_blk, 9, 9, 10, sf);
                 ST_RESULT(9, 0);
                 break;
             }
             case OP_TYPE_WMIR_ISUB: {
+                bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
                 LD_OPERAND(9, 0); LD_OPERAND(10, 1);
-                emit_sub_reg(ctx, dst_blk, 9, 9, 10, /*sf=*/false);
+                emit_sub_reg(ctx, dst_blk, 9, 9, 10, sf);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_IMUL: {
+                bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
+                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_MUL, 9, 9, 10, sf);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_SDIV: {
+                bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
+                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_SDIV, 9, 9, 10, sf);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_UDIV: {
+                bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
+                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_UDIV, 9, 9, 10, sf);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_SREM: {
+                // rem = a - (a / b) * b  ==  msub(sdiv(a,b), b, a).
+                bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
+                LD_OPERAND(9, 0);   // a
+                LD_OPERAND(10, 1);  // b
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_SDIV, 11, 9, 10, sf);
+                emit_msub(ctx, dst_blk, 9, 11, 10, 9, sf);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_UREM: {
+                bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
+                LD_OPERAND(9, 0);
+                LD_OPERAND(10, 1);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_UDIV, 11, 9, 10, sf);
+                emit_msub(ctx, dst_blk, 9, 11, 10, 9, sf);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_IAND: {
+                bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
+                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_AND_REG, 9, 9, 10, sf);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_IOR: {
+                bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
+                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_ORR_REG, 9, 9, 10, sf);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_IXOR: {
+                bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
+                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_EOR_REG, 9, 9, 10, sf);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_ISHL: {
+                bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
+                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_LSL_REG, 9, 9, 10, sf);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_USHR: {
+                bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
+                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_LSR_REG, 9, 9, 10, sf);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_SSHR: {
+                bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
+                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_ASR_REG, 9, 9, 10, sf);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_SEXT: {
+                // i32 -> i64 sign-extend.
+                LD_OPERAND(9, 0);    // ldr_w zero-extends; we then sxtw.
+                emit_2reg_no_sf(ctx, dst_blk, OP_TYPE_AARCH64_SXTW, 9, 9);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_ZEXT: {
+                // i32 -> i64 zero-extend. ldr_w already zero-extends in x9.
+                LD_OPERAND(9, 0);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_TRUNC: {
+                // i64 -> i32 truncate. ldr_x x9; we store the low 32 bits.
+                LD_OPERAND(9, 0);
                 ST_RESULT(9, 0);
                 break;
             }
             case OP_TYPE_WMIR_ICMP: {
-                // cmp Wn, Wm; cset Wd, <pred>.
+                bool sf = is_i64(ctx, MLIR_GetOpOperand(op, 0));
                 LD_OPERAND(9, 0); LD_OPERAND(10, 1);
-                emit_cmp_reg(ctx, dst_blk, 9, 10, /*sf=*/false);
+                emit_cmp_reg(ctx, dst_blk, 9, 10, sf);
                 string pred = at_s(op, "pred");
                 uint8_t cond = cond_for_pred(pred);
                 emit_cset(ctx, dst_blk, 9, cond, /*sf=*/false);
@@ -496,21 +678,20 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 break;
             }
             case OP_TYPE_WMIR_EQZ: {
+                bool sf = is_i64(ctx, MLIR_GetOpOperand(op, 0));
                 LD_OPERAND(9, 0);
-                emit_cmp_imm(ctx, dst_blk, 9, 0, /*sf=*/false);
+                emit_cmp_imm(ctx, dst_blk, 9, 0, sf);
                 emit_cset(ctx, dst_blk, 9, COND_EQ, /*sf=*/false);
                 ST_RESULT(9, 0);
                 break;
             }
             case OP_TYPE_WMIR_SELECT: {
-                // result = cond != 0 ? a : b.
-                // ldr w9,a / ldr w10,b / ldr w11,cond; cmp w11,#0;
-                // csel w9, w9, w10, NE.
+                bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
                 LD_OPERAND(9, 0);  // a
                 LD_OPERAND(10, 1); // b
-                LD_OPERAND(11, 2); // cond
+                LD_OPERAND(11, 2); // cond (always i32 by Wasm convention)
                 emit_cmp_imm(ctx, dst_blk, 11, 0, /*sf=*/false);
-                emit_csel(ctx, dst_blk, 9, 9, 10, COND_NE, /*sf=*/false);
+                emit_csel(ctx, dst_blk, 9, 9, 10, COND_NE, sf);
                 ST_RESULT(9, 0);
                 break;
             }
@@ -603,8 +784,13 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                     MLIR_ValueHandle tgt_a = MLIR_GetBlockArg(s_target, k);
                     uint16_t tgt_s; sm_get(&sm, tgt_a, &tgt_s);
                     if (src_s == tgt_s) continue;
-                    emit_ldr_w(ctx, dst_blk, 9, 31, (uint16_t)(src_s * 8u));
-                    emit_str_w(ctx, dst_blk, 9, 31, (uint16_t)(tgt_s * 8u));
+                    if (is_i64(ctx, src_v) || is_i64(ctx, tgt_a)) {
+                        emit_ldr_x(ctx, dst_blk, 9, 31, (uint16_t)(src_s * 8u));
+                        emit_str_x(ctx, dst_blk, 9, 31, (uint16_t)(tgt_s * 8u));
+                    } else {
+                        emit_ldr_w(ctx, dst_blk, 9, 31, (uint16_t)(src_s * 8u));
+                        emit_str_w(ctx, dst_blk, 9, 31, (uint16_t)(tgt_s * 8u));
+                    }
                 }
                 emit_b(ctx, dst_blk, d_target);
                 break;

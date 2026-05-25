@@ -222,6 +222,7 @@ static bool lower_region(Lowerer *L, MLIR_RegionHandle r);
 // =============================================================================
 static const char *icmp_pred_for_binop(int64_t opc) {
     switch (opc) {
+        // i32 compares
         case 0x46: return "eq";
         case 0x47: return "ne";
         case 0x48: return "slt";
@@ -232,6 +233,17 @@ static const char *icmp_pred_for_binop(int64_t opc) {
         case 0x4d: return "ule";
         case 0x4e: return "sge";
         case 0x4f: return "uge";
+        // i64 compares
+        case 0x51: return "eq";
+        case 0x52: return "ne";
+        case 0x53: return "slt";
+        case 0x54: return "ult";
+        case 0x55: return "sgt";
+        case 0x56: return "ugt";
+        case 0x57: return "sle";
+        case 0x58: return "ule";
+        case 0x59: return "sge";
+        case 0x5a: return "uge";
     }
     return NULL;
 }
@@ -312,8 +324,34 @@ static bool lower_wasmssa_op(Lowerer *L, MLIR_OpHandle src_op) {
         }
         MLIR_OpType out_t;
         switch (opc) {
+            // i32 arithmetic
             case 0x6a: out_t = OP_TYPE_WMIR_IADD; break;
             case 0x6b: out_t = OP_TYPE_WMIR_ISUB; break;
+            case 0x6c: out_t = OP_TYPE_WMIR_IMUL; break;
+            case 0x6d: out_t = OP_TYPE_WMIR_SDIV; break;
+            case 0x6e: out_t = OP_TYPE_WMIR_UDIV; break;
+            case 0x6f: out_t = OP_TYPE_WMIR_SREM; break;
+            case 0x70: out_t = OP_TYPE_WMIR_UREM; break;
+            case 0x71: out_t = OP_TYPE_WMIR_IAND; break;
+            case 0x72: out_t = OP_TYPE_WMIR_IOR;  break;
+            case 0x73: out_t = OP_TYPE_WMIR_IXOR; break;
+            case 0x74: out_t = OP_TYPE_WMIR_ISHL; break;
+            case 0x75: out_t = OP_TYPE_WMIR_SSHR; break;
+            case 0x76: out_t = OP_TYPE_WMIR_USHR; break;
+            // i64 arithmetic
+            case 0x7c: out_t = OP_TYPE_WMIR_IADD; break;
+            case 0x7d: out_t = OP_TYPE_WMIR_ISUB; break;
+            case 0x7e: out_t = OP_TYPE_WMIR_IMUL; break;
+            case 0x7f: out_t = OP_TYPE_WMIR_SDIV; break;
+            case 0x80: out_t = OP_TYPE_WMIR_UDIV; break;
+            case 0x81: out_t = OP_TYPE_WMIR_SREM; break;
+            case 0x82: out_t = OP_TYPE_WMIR_UREM; break;
+            case 0x83: out_t = OP_TYPE_WMIR_IAND; break;
+            case 0x84: out_t = OP_TYPE_WMIR_IOR;  break;
+            case 0x85: out_t = OP_TYPE_WMIR_IXOR; break;
+            case 0x86: out_t = OP_TYPE_WMIR_ISHL; break;
+            case 0x87: out_t = OP_TYPE_WMIR_SSHR; break;
+            case 0x88: out_t = OP_TYPE_WMIR_USHR; break;
             default:
                 fprintf(stderr,
                     "wmir: wasmssa.binop opcode 0x%llx not yet supported\n",
@@ -340,6 +378,28 @@ static bool lower_wasmssa_op(Lowerer *L, MLIR_OpHandle src_op) {
                 (string){0}, MLIR_CreateLocationUnknown(ctx, (string){0}))
         };
         MLIR_OpHandle out = build_op_simple(ctx, OP_TYPE_WMIR_EQZ,
+            NULL, 0, res_ty, 1, res, &a, 1);
+        L_append(L, out);
+        vmap_set(L->vmap, MLIR_GetOpResult(src_op, 0), res[0]);
+        return true;
+    }
+
+    // wasmssa.extend_i32_s %x : i32 -> i64 (sign-extend). The valtype
+    // attribute carries the result type byte (0x7e for i64). Lowers to
+    // wmir.sext.
+    case OP_TYPE_WASMSSA_EXTEND_I32_S: {
+        MLIR_ValueHandle a;
+        if (!vmap_get(L->vmap, MLIR_GetOpOperand(src_op, 0), &a)) {
+            fprintf(stderr, "wmir: unbound operand on wasmssa.extend_i32_s\n");
+            return false;
+        }
+        uint8_t vt = (uint8_t)at_i(src_op, "valtype");
+        MLIR_TypeHandle res_ty[1] = { vt_to_type(ctx, vt) };
+        MLIR_ValueHandle res[1] = {
+            MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0, res_ty[0],
+                (string){0}, MLIR_CreateLocationUnknown(ctx, (string){0}))
+        };
+        MLIR_OpHandle out = build_op_simple(ctx, OP_TYPE_WMIR_SEXT,
             NULL, 0, res_ty, 1, res, &a, 1);
         L_append(L, out);
         vmap_set(L->vmap, MLIR_GetOpResult(src_op, 0), res[0]);

@@ -322,9 +322,24 @@ typedef enum {
     OP_TYPE_WMIR_FUNC,
     OP_TYPE_WMIR_CONST,
     OP_TYPE_WMIR_RETURN,
-    // Integer arithmetic (i32; i64 added when first test needs it).
+    // Integer arithmetic (i32 / i64, dispatched on result type).
     OP_TYPE_WMIR_IADD,
     OP_TYPE_WMIR_ISUB,
+    OP_TYPE_WMIR_IMUL,
+    OP_TYPE_WMIR_SDIV,
+    OP_TYPE_WMIR_UDIV,
+    OP_TYPE_WMIR_SREM,
+    OP_TYPE_WMIR_UREM,
+    OP_TYPE_WMIR_IAND,
+    OP_TYPE_WMIR_IOR,
+    OP_TYPE_WMIR_IXOR,
+    OP_TYPE_WMIR_ISHL,
+    OP_TYPE_WMIR_SSHR,   // arithmetic shift right
+    OP_TYPE_WMIR_USHR,   // logical  shift right
+    // Integer conversions (between i32 and i64).
+    OP_TYPE_WMIR_SEXT,   // sign-extend i32 -> i64
+    OP_TYPE_WMIR_ZEXT,   // zero-extend i32 -> i64
+    OP_TYPE_WMIR_TRUNC,  // truncate    i64 -> i32
     // Wasm global access (vmctx-relative; first-light: i32 globals only).
     OP_TYPE_WMIR_GLOBAL_GET,
     OP_TYPE_WMIR_GLOBAL_SET,
@@ -371,8 +386,22 @@ typedef enum {
     OP_TYPE_AARCH64_SUB_IMM,  // sub Wd|Xd, Wn|Xn, #imm12 (LSL 0)
     OP_TYPE_AARCH64_ADD_REG,  // add Wd|Xd, Wn|Xn, Wm|Xm
     OP_TYPE_AARCH64_SUB_REG,  // sub Wd|Xd, Wn|Xn, Wm|Xm
+    OP_TYPE_AARCH64_MUL,      // mul Wd|Xd, Wn|Xn, Wm|Xm  (== madd ..., xzr)
+    OP_TYPE_AARCH64_SDIV,     // sdiv Wd|Xd, Wn|Xn, Wm|Xm
+    OP_TYPE_AARCH64_UDIV,     // udiv Wd|Xd, Wn|Xn, Wm|Xm
+    OP_TYPE_AARCH64_MSUB,     // msub Wd, Wn, Wm, Wa  (used for srem/urem)
+    OP_TYPE_AARCH64_AND_REG,  // and  Wd|Xd, Wn|Xn, Wm|Xm
+    OP_TYPE_AARCH64_ORR_REG,  // orr  Wd|Xd, Wn|Xn, Wm|Xm
+    OP_TYPE_AARCH64_EOR_REG,  // eor  Wd|Xd, Wn|Xn, Wm|Xm
+    OP_TYPE_AARCH64_LSL_REG,  // lslv Wd|Xd, Wn|Xn, Wm|Xm
+    OP_TYPE_AARCH64_LSR_REG,  // lsrv Wd|Xd, Wn|Xn, Wm|Xm
+    OP_TYPE_AARCH64_ASR_REG,  // asrv Wd|Xd, Wn|Xn, Wm|Xm
+    OP_TYPE_AARCH64_SXTW,     // sxtw Xd, Wn  (alias for SBFM)
+    OP_TYPE_AARCH64_UXTW,     // mov  Wd, Wn  (== orr Wd, WZR, Wn ; zero-extends)
     OP_TYPE_AARCH64_LDR_W,    // ldr Wd, [Xn, #imm] (i32 unsigned-offset)
     OP_TYPE_AARCH64_STR_W,    // str Wd, [Xn, #imm] (i32 unsigned-offset)
+    OP_TYPE_AARCH64_LDR_X,    // ldr Xd, [Xn, #imm] (i64 unsigned-offset)
+    OP_TYPE_AARCH64_STR_X,    // str Xd, [Xn, #imm] (i64 unsigned-offset)
     // Pseudo: ADRP+ADD pair that resolves to the runtime base address
     // of one of the predeclared __DATA regions (vmctx, globals, linmem).
     // The macho backend patches the encoded PC-relative immediates
