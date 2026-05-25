@@ -3,6 +3,11 @@ intern i64: yes
 intern index: yes
 intern !llvm.ptr: yes
 intern i32==i64: no
+cf.br succ_op use registered: yes
+use owner is cf.br: yes
+SetOpOperand updates succ_op: yes
+old value uses cleared: yes
+new value uses registered: yes
 module() {
 ^bb0:
     func.func() {sym_name = "add"} {

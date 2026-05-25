@@ -56,6 +56,71 @@ int app_main(void) {
         print_string(i32_a == i64_a ? str_lit("intern i32==i64: yes\n") : str_lit("intern i32==i64: no\n"));
     }
 
+    // Verify that the flat-operand contract of MLIR_GetValueUseOwner /
+    // MLIR_SetOpOperand also covers successor-operand uses. The cf->scf
+    // lifter's `replace_use` helper round-trips a use through
+    // SetOpOperand using the synthetic index returned by GetValueUseOwner,
+    // which on the upstream backend addresses both regular and
+    // successor-operand slots of a BranchOpInterface op uniformly. The
+    // native backend used to silently no-op when idx >= n_operands,
+    // which left cf.switch / cf.cond_br successor operands pointing to
+    // stale values across the cf->scf RAUW chain and produced
+    // semantically-equivalent but byte-different wasm. See
+    // mlir_api_impl.c's MLIR_SetOpOperand for the fix.
+    {
+        MLIR_RegionHandle r = MLIR_CreateRegion(&ctx);
+        MLIR_BlockHandle entry = MLIR_CreateBlock(&ctx);
+        MLIR_BlockHandle tgt = MLIR_CreateBlock(&ctx);
+        MLIR_AppendRegionBlock(&ctx, r, entry);
+        MLIR_AppendRegionBlock(&ctx, r, tgt);
+
+        MLIR_ValueHandle defv = MLIR_CreateValueBlockArg(
+            &ctx, str_lit("%d"), 0, i32_ty, MLIR_INVALID_HANDLE);
+        MLIR_AppendBlockArg(&ctx, entry, defv);
+        MLIR_ValueHandle replv = MLIR_CreateValueBlockArg(
+            &ctx, str_lit("%r"), 1, i32_ty, MLIR_INVALID_HANDLE);
+        MLIR_AppendBlockArg(&ctx, entry, replv);
+
+        // Build cf.br tgt(defv : i32) — zero regular operands, one successor
+        // with one successor-operand.
+        MLIR_BlockHandle *succs = arena_new_array(arena, MLIR_BlockHandle, 1);
+        succs[0] = tgt;
+        MLIR_ValueHandle **sops = arena_new_array(arena, MLIR_ValueHandle *, 1);
+        sops[0] = arena_new_array(arena, MLIR_ValueHandle, 1);
+        sops[0][0] = defv;
+        size_t *snums = arena_new_array(arena, size_t, 1);
+        snums[0] = 1;
+        MLIR_OpHandle br = MLIR_CreateOpWithSuccessors(
+            &ctx, OP_TYPE_CF_BR, str_lit("cf.br"),
+            NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
+            succs, 1, sops, snums,
+            MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_AppendBlockOp(&ctx, entry, br);
+
+        size_t n_uses = MLIR_GetValueNumUses(&ctx, defv);
+        print_string(n_uses == 1 ? str_lit("cf.br succ_op use registered: yes\n")
+                                 : str_lit("cf.br succ_op use registered: no\n"));
+
+        size_t op_idx = (size_t)-1;
+        MLIR_OpHandle owner = MLIR_GetValueUseOwner(&ctx, defv, 0, &op_idx);
+        print_string(owner == br ? str_lit("use owner is cf.br: yes\n")
+                                 : str_lit("use owner is cf.br: no\n"));
+
+        // Round-trip the synthetic flat index through SetOpOperand. After
+        // the call, cf.br's successor operand at slot 0 must point to
+        // `replv` instead of `defv`.
+        MLIR_SetOpOperand(&ctx, br, op_idx, replv);
+        MLIR_ValueHandle after = MLIR_GetOpSuccessorOperand(br, 0, 0);
+        print_string(after == replv ? str_lit("SetOpOperand updates succ_op: yes\n")
+                                    : str_lit("SetOpOperand updates succ_op: no\n"));
+        print_string(MLIR_GetValueNumUses(&ctx, defv) == 0
+                         ? str_lit("old value uses cleared: yes\n")
+                         : str_lit("old value uses cleared: no\n"));
+        print_string(MLIR_GetValueNumUses(&ctx, replv) == 1
+                         ? str_lit("new value uses registered: yes\n")
+                         : str_lit("new value uses registered: no\n"));
+    }
+
     // ---- module region/block ------------------------------------------------
     MLIR_RegionHandle module_region = MLIR_CreateRegion(&ctx);
     MLIR_BlockHandle  module_block  = MLIR_CreateBlock(&ctx);

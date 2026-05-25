@@ -31,6 +31,7 @@ jobs:
               TINYC_USE_NATIVE_LINK=1 pixi run -e upstream test_tinyc_native_wasm
               pixi run -e upstream build_tinyc_native_opt
               pixi run -e upstream build_tinyc_upstream_opt
+              pixi run -e upstream verify_tinyc_native_upstream_identical
               pixi run -e linux test_linux_tinyc
           - platform: macos
             os: macos-latest
@@ -51,6 +52,7 @@ jobs:
               TINYC_USE_NATIVE_LINK=1 pixi run -e upstream test_tinyc_native_wasm
               pixi run -e upstream build_tinyc_native_opt
               pixi run -e upstream build_tinyc_upstream_opt
+              pixi run -e upstream verify_tinyc_native_upstream_identical
               pixi run -e upstream test_tinyc_macho
               pixi run -e macos test_macos_tinyc
           - platform: windows

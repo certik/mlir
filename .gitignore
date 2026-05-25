@@ -32,3 +32,5 @@ examples/tinyc/tests/*.macho
 /build_opt_native/
 /build_opt_upstream/
 /bench_tinyc_out/
+/verify_tinyc_out/
+examples/tinyc/__pycache__/

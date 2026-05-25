@@ -2068,17 +2068,55 @@ void MLIR_SetOpOperand(MLIR_Context *ctx, MLIR_OpHandle op,
                        size_t idx, MLIR_ValueHandle value) {
     (void)ctx;
     IR_Op *o = resolve_op(op);
-    if (!o || idx >= o->n_operands) return;
-    MLIR_ValueHandle old = o->operands[idx];
-    if (old == value) return;
-    if (o->operand_uses) {
-        use_unregister(old, o->operand_uses[idx]);
-        o->operand_uses[idx] = NULL;
+    if (!o) return;
+    // The contract (matching upstream's MLIR_SetOpOperand on MLIR core,
+    // where `op->setOperand(idx, ...)` indexes the *flat* operand range)
+    // is that `idx` indexes into the combined sequence:
+    //   [0 .. n_operands)               -> regular operands
+    //   [n_operands ..)                 -> successor operands, segmented
+    //                                       by successor in declaration
+    //                                       order.
+    // `MLIR_GetValueUseOwner` returns these same synthetic flat indices
+    // for kind=1 (successor-operand) uses; callers like `replace_use`
+    // in the cf->scf lift round-trip a use back through SetOpOperand
+    // expecting it to update either segment.
+    if (idx < o->n_operands) {
+        MLIR_ValueHandle old = o->operands[idx];
+        if (old == value) return;
+        if (o->operand_uses) {
+            use_unregister(old, o->operand_uses[idx]);
+            o->operand_uses[idx] = NULL;
+        }
+        o->operands[idx] = value;
+        if (o->operand_uses) {
+            o->operand_uses[idx] = use_register_operand(ctx, op, value, (uint32_t)idx);
+        }
+        return;
     }
-    o->operands[idx] = value;
-    if (o->operand_uses) {
-        o->operand_uses[idx] = use_register_operand(ctx, op, value, (uint32_t)idx);
+    // Map the post-operand index into the successor-operand segments.
+    size_t rem = idx - o->n_operands;
+    for (uint64_t s = 0; s < o->n_successors; ++s) {
+        uint64_t cnt = o->n_successor_operands ? o->n_successor_operands[s] : 0;
+        if (rem < cnt) {
+            MLIR_ValueHandle *seg = o->successor_operands
+                ? o->successor_operands[s] : NULL;
+            if (!seg) return;
+            MLIR_ValueHandle old = seg[rem];
+            if (old == value) return;
+            if (o->successor_operand_uses && o->successor_operand_uses[s].arr) {
+                use_unregister(old, o->successor_operand_uses[s].arr[rem]);
+                o->successor_operand_uses[s].arr[rem] = NULL;
+            }
+            seg[rem] = value;
+            if (o->successor_operand_uses && o->successor_operand_uses[s].arr) {
+                o->successor_operand_uses[s].arr[rem] = use_register_succ_operand(
+                    ctx, op, value, (uint32_t)s, (uint32_t)rem);
+            }
+            return;
+        }
+        rem -= cnt;
     }
+    // idx out of range: silently no-op (matches the original guard).
 }
 
 void MLIR_SetOpSuccessor(MLIR_Context *ctx, MLIR_OpHandle op,
