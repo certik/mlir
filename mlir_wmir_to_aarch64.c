@@ -1,43 +1,32 @@
-// wmir -> aarch64 lowering. Second slice (arithmetic + memory + globals
-// + direct calls). The first-light scaffold lived in this file; this
-// version supersedes it.
+// wmir -> aarch64 lowering. See mlir_wmir_to_aarch64.h for the public
+// API and rationale.
 //
-// Strategy: trivial "stack-slot per SSA value" allocator.
-//   * Pre-pass: walk each wmir.func body. Number every block argument
-//     and every op result with a unique slot index (0, 1, 2, …). Each
-//     slot is 8 bytes (over-aligned even for i32; matches AArch64 LDP
-//     friendliness and lets us promote to i64 later without reshuffling).
+// Strategy (still pre-register-allocation, expanded for multi-block
+// control flow):
+//   * Pre-pass: walk every block of each wmir.func body. Number every
+//     block argument and every op result with a unique slot index
+//     (0, 1, 2, …). Each slot is 8 bytes (over-aligned even for i32).
 //   * Function prologue:
-//         stp x29, x30, [sp, #-16]!     ; save FP/LR
-//         mov x29, sp                   ; FP <- SP
-//         sub sp, sp, #frame_size       ; allocate slot area
-//         str w0,  [sp, #slot(param0)*8] ; spill parameters into slots
-//         str w1,  [sp, #slot(param1)*8] ; …
-//   * Each op materialises operands into scratch registers (w9, w10,
-//     w11), computes the result into w9, then stores it back to the
-//     result's slot. Scratches are clobbered between ops, so there's
-//     no register-allocation problem to solve.
-//   * Prologue/epilogue and per-op spill code are emitted as explicit
-//     aarch64.* ops; the Mach-O encoder is a 1:1 translation from op
-//     to bytes.
-//
-// Global / linear-memory access is mediated through three callee-
-// callee-saved registers set up once by `_start`:
-//   * x26 = vmctx pointer (data_priv region; unused in this slice but
-//     reserved to match the existing wasm-to-macho backend's ABI).
-//   * x27 = globals base. global_get/set lower to ldr/str at offset
-//     global_idx*8.
-//   * x28 = linear-memory base. load/store lower to
-//         add xT, x28, wAddr, uxtw
-//         ldr/str wValue, [xT, #memory_offset]
-//
-// The lowering also synthesises an `_start` aarch64.func that:
-//   adrp/add x26, data_priv@page       ; vmctx
-//   adrp/add x27, globals@page         ; globals base
-//   adrp/add x28, linmem@page          ; linear-memory base
-//   bl __original_main                 ; call user entry; retval -> w0
-//   movz x16, #1                       ; mach trap #1 = exit
-//   svc #0x80
+//         stp x29, x30, [sp, #-16]!
+//         mov x29, sp
+//         sub sp, sp, #frame_size
+//         str w0,  [sp, #slot(param0)*8]    ; spill parameters
+//   * Each non-branch op materialises operands into scratch registers
+//     (w9, w10, w11), computes the result into w9, then stores it back.
+//   * Branches (wmir.br / wmir.cond_br) preserve the wmir block
+//     structure: each wmir block becomes an aarch64 block, and the
+//     aarch64 branch op carries its successor handle so the Mach-O
+//     backend can resolve the PC-relative displacement once block
+//     offsets are known.
+//   * `wmir.br ^bb(%v1, %v2)` lowers to a sequence of `ldr/str` pairs
+//     that copy each operand into the target block's argument slot,
+//     followed by an unconditional `aarch64.b`.
+//   * `wmir.cond_br %c, ^t, ^f` (no successor args; the wasmssa->wmir
+//     pass arranges that cond_br targets never receive operands)
+//     lowers to:
+//         ldr w9, [sp, #cond_slot]
+//         cbnz w9, ^t
+//         b    ^f
 //
 // Module-level metadata (n_globals, linmem_size, …) is attached as
 // attributes on the aarch64 builtin.module so the downstream Mach-O
@@ -64,8 +53,8 @@
 // new pipeline is observationally identical to the existing one).
 // =============================================================================
 enum {
-    DEFAULT_STACK_SIZE        = 4u * 1024u * 1024u,    // 4 MiB
-    DEFAULT_GLOBAL_BASE_OFFS  = 1024u,                 // wasm-ld default
+    DEFAULT_STACK_SIZE        = 4u * 1024u * 1024u,
+    DEFAULT_GLOBAL_BASE_OFFS  = 1024u,
     WASM_PAGE_SIZE            = 65536u,
 };
 
@@ -110,6 +99,21 @@ static MLIR_OpHandle build_op(MLIR_Context *ctx, MLIR_OpType t,
         MLIR_INVALID_HANDLE, (string){0}, -1);
 }
 
+// Build a 0-result op with one block successor (no successor operands).
+static MLIR_OpHandle build_branch_op(MLIR_Context *ctx, MLIR_OpType t,
+                                     MLIR_AttributeHandle *attrs, size_t na,
+                                     MLIR_BlockHandle target) {
+    MLIR_BlockHandle succs[1] = { target };
+    MLIR_ValueHandle *succ_ops[1] = { NULL };
+    size_t           n_succ_ops[1] = { 0 };
+    return MLIR_CreateOpWithSuccessors(ctx, t, op_type_to_string(t),
+        attrs, na, NULL, 0, NULL, 0,
+        NULL, 0, NULL, 0,
+        succs, 1, succ_ops, n_succ_ops,
+        MLIR_CreateLocationUnknown(ctx, (string){0}),
+        MLIR_INVALID_HANDLE, (string){0}, -1);
+}
+
 // =============================================================================
 // Emit helpers — one per aarch64.* op kind.
 // =============================================================================
@@ -131,13 +135,6 @@ static void emit_movk(MLIR_Context *ctx, MLIR_BlockHandle blk,
     a[3] = attr_b(ctx, "sf", sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_MOVK, a, 4));
 }
-static void emit_mov_x(MLIR_Context *ctx, MLIR_BlockHandle blk,
-                       uint8_t rd, uint8_t rn) {
-    MLIR_AttributeHandle a[2];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "rn", rn);
-    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_MOV_X, a, 2));
-}
 static void emit_bl(MLIR_Context *ctx, MLIR_BlockHandle blk, string callee) {
     MLIR_AttributeHandle a[1];
     a[0] = attr_s(ctx, "callee", callee.str, callee.size);
@@ -151,28 +148,11 @@ static void emit_svc(MLIR_Context *ctx, MLIR_BlockHandle blk, uint16_t imm16) {
 static void emit_ret(MLIR_Context *ctx, MLIR_BlockHandle blk) {
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_RET, NULL, 0));
 }
-
-// `add Xd, Xn, #imm12` (sf=1) or `add Wd, Wn, #imm12` (sf=0).
-// Also encodes `add SP, SP, #imm12` when rd=rn=31 (SP).
-static void emit_add_imm(MLIR_Context *ctx, MLIR_BlockHandle blk,
-                         uint8_t rd, uint8_t rn, uint16_t imm12, bool sf) {
-    MLIR_AttributeHandle a[4];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "imm12", imm12);
-    a[3] = attr_b(ctx, "sf", sf);
-    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_ADD_IMM, a, 4));
+static void emit_brk(MLIR_Context *ctx, MLIR_BlockHandle blk, uint16_t imm16) {
+    MLIR_AttributeHandle a[1];
+    a[0] = attr_i32(ctx, "imm16", imm16);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_BRK, a, 1));
 }
-static void emit_sub_imm(MLIR_Context *ctx, MLIR_BlockHandle blk,
-                         uint8_t rd, uint8_t rn, uint16_t imm12, bool sf) {
-    MLIR_AttributeHandle a[4];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "imm12", imm12);
-    a[3] = attr_b(ctx, "sf", sf);
-    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_SUB_IMM, a, 4));
-}
-// 32-bit (sf=0) or 64-bit (sf=1) shifted-register add/sub.
 static void emit_add_reg(MLIR_Context *ctx, MLIR_BlockHandle blk,
                          uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
     MLIR_AttributeHandle a[4];
@@ -191,8 +171,6 @@ static void emit_sub_reg(MLIR_Context *ctx, MLIR_BlockHandle blk,
     a[3] = attr_b(ctx, "sf", sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_SUB_REG, a, 4));
 }
-// 32-bit word load/store with unsigned 12-bit immediate offset (in bytes;
-// encoder divides by 4 to produce the scaled imm12 field).
 static void emit_ldr_w(MLIR_Context *ctx, MLIR_BlockHandle blk,
                        uint8_t rt, uint8_t rn, uint16_t off_bytes) {
     MLIR_AttributeHandle a[3];
@@ -209,10 +187,6 @@ static void emit_str_w(MLIR_Context *ctx, MLIR_BlockHandle blk,
     a[2] = attr_i32(ctx, "off_bytes", off_bytes);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_STR_W, a, 3));
 }
-// ADRP / ADD imm12 pair, with the target identified by a symbolic
-// `target` attribute. The Mach-O backend patches the imm21/imm12
-// fields after laying out the __DATA segment.
-//   target ∈ { "data_priv", "globals", "linmem" }
 static void emit_adrp_data(MLIR_Context *ctx, MLIR_BlockHandle blk,
                            uint8_t rd, const char *target) {
     MLIR_AttributeHandle a[2];
@@ -228,9 +202,6 @@ static void emit_add_data_lo(MLIR_Context *ctx, MLIR_BlockHandle blk,
     a[2] = attr_s(ctx, "target", target, strlen(target));
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_ADD_DATA_LO, a, 3));
 }
-// Compound prologue/epilogue pseudo-ops with a single `frame_size`
-// (16-byte aligned) attribute. The encoder expands each into the
-// corresponding stp/mov/sub or add/ldp/ret sequence.
 static void emit_prologue(MLIR_Context *ctx, MLIR_BlockHandle blk,
                           uint16_t frame_size) {
     MLIR_AttributeHandle a[1];
@@ -243,6 +214,62 @@ static void emit_epilogue(MLIR_Context *ctx, MLIR_BlockHandle blk,
     a[0] = attr_i32(ctx, "frame_size", frame_size);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_EPILOGUE, a, 1));
 }
+static void emit_cmp_reg(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                         uint8_t rn, uint8_t rm, bool sf) {
+    MLIR_AttributeHandle a[3];
+    a[0] = attr_i32(ctx, "rn", rn);
+    a[1] = attr_i32(ctx, "rm", rm);
+    a[2] = attr_b(ctx, "sf", sf);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_CMP_REG, a, 3));
+}
+static void emit_cmp_imm(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                         uint8_t rn, uint16_t imm12, bool sf) {
+    MLIR_AttributeHandle a[3];
+    a[0] = attr_i32(ctx, "rn", rn);
+    a[1] = attr_i32(ctx, "imm12", imm12);
+    a[2] = attr_b(ctx, "sf", sf);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_CMP_IMM, a, 3));
+}
+static void emit_cset(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                      uint8_t rd, uint8_t cond, bool sf) {
+    MLIR_AttributeHandle a[3];
+    a[0] = attr_i32(ctx, "rd", rd);
+    a[1] = attr_i32(ctx, "cond", cond);
+    a[2] = attr_b(ctx, "sf", sf);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_CSET, a, 3));
+}
+static void emit_csel(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                      uint8_t rd, uint8_t rn, uint8_t rm,
+                      uint8_t cond, bool sf) {
+    MLIR_AttributeHandle a[5];
+    a[0] = attr_i32(ctx, "rd", rd);
+    a[1] = attr_i32(ctx, "rn", rn);
+    a[2] = attr_i32(ctx, "rm", rm);
+    a[3] = attr_i32(ctx, "cond", cond);
+    a[4] = attr_b(ctx, "sf", sf);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_CSEL, a, 5));
+}
+static void emit_b(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                   MLIR_BlockHandle target) {
+    MLIR_AppendBlockOp(ctx, blk,
+        build_branch_op(ctx, OP_TYPE_AARCH64_B, NULL, 0, target));
+}
+static void emit_cbz(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                     uint8_t rt, bool sf, MLIR_BlockHandle target) {
+    MLIR_AttributeHandle a[2];
+    a[0] = attr_i32(ctx, "rt", rt);
+    a[1] = attr_b(ctx, "sf", sf);
+    MLIR_AppendBlockOp(ctx, blk,
+        build_branch_op(ctx, OP_TYPE_AARCH64_CBZ, a, 2, target));
+}
+static void emit_cbnz(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                      uint8_t rt, bool sf, MLIR_BlockHandle target) {
+    MLIR_AttributeHandle a[2];
+    a[0] = attr_i32(ctx, "rt", rt);
+    a[1] = attr_b(ctx, "sf", sf);
+    MLIR_AppendBlockOp(ctx, blk,
+        build_branch_op(ctx, OP_TYPE_AARCH64_CBNZ, a, 2, target));
+}
 
 // Materialise a 32-bit immediate into Wn.
 static void emit_mov_imm32(MLIR_Context *ctx, MLIR_BlockHandle blk,
@@ -254,8 +281,7 @@ static void emit_mov_imm32(MLIR_Context *ctx, MLIR_BlockHandle blk,
 }
 
 // =============================================================================
-// Slot map: SSA value -> stack-slot index. Linear-scan, fine at this
-// size; will be replaced once we have a real register allocator.
+// Slot map: SSA value -> stack-slot index.
 // =============================================================================
 typedef struct {
     MLIR_ValueHandle *vs;
@@ -284,6 +310,53 @@ static int sm_get(const SlotMap *m, MLIR_ValueHandle v, uint16_t *out) {
 static void sm_free(SlotMap *m) { free(m->vs); free(m->slot); memset(m, 0, sizeof(*m)); }
 
 // =============================================================================
+// Block map: source wmir block -> destination aarch64 block.
+// =============================================================================
+typedef struct {
+    MLIR_BlockHandle *src;
+    MLIR_BlockHandle *dst;
+    size_t            n, cap;
+} BlockMap;
+static void bm_set(BlockMap *m, MLIR_BlockHandle k, MLIR_BlockHandle v) {
+    if (m->n == m->cap) {
+        m->cap = m->cap ? m->cap * 2 : 8;
+        m->src = realloc(m->src, m->cap * sizeof(*m->src));
+        m->dst = realloc(m->dst, m->cap * sizeof(*m->dst));
+    }
+    m->src[m->n] = k; m->dst[m->n] = v; m->n++;
+}
+static MLIR_BlockHandle bm_get(const BlockMap *m, MLIR_BlockHandle k) {
+    for (size_t i = 0; i < m->n; i++) {
+        if (m->src[i] == k) return m->dst[i];
+    }
+    return MLIR_INVALID_HANDLE;
+}
+static void bm_free(BlockMap *m) { free(m->src); free(m->dst); memset(m, 0, sizeof(*m)); }
+
+// =============================================================================
+// AArch64 condition codes (subset).
+// =============================================================================
+enum {
+    COND_EQ = 0, COND_NE = 1, COND_CS = 2, COND_CC = 3,
+    COND_HI = 8, COND_LS = 9, COND_GE = 10, COND_LT = 11,
+    COND_GT = 12, COND_LE = 13,
+};
+
+static uint8_t cond_for_pred(string pred) {
+    if (pred.size == 2 && memcmp(pred.str, "eq", 2) == 0) return COND_EQ;
+    if (pred.size == 2 && memcmp(pred.str, "ne", 2) == 0) return COND_NE;
+    if (pred.size == 3 && memcmp(pred.str, "slt", 3) == 0) return COND_LT;
+    if (pred.size == 3 && memcmp(pred.str, "sgt", 3) == 0) return COND_GT;
+    if (pred.size == 3 && memcmp(pred.str, "sle", 3) == 0) return COND_LE;
+    if (pred.size == 3 && memcmp(pred.str, "sge", 3) == 0) return COND_GE;
+    if (pred.size == 3 && memcmp(pred.str, "ult", 3) == 0) return COND_CC;
+    if (pred.size == 3 && memcmp(pred.str, "ugt", 3) == 0) return COND_HI;
+    if (pred.size == 3 && memcmp(pred.str, "ule", 3) == 0) return COND_LS;
+    if (pred.size == 3 && memcmp(pred.str, "uge", 3) == 0) return COND_CS;
+    return COND_EQ;
+}
+
+// =============================================================================
 // Per-function lowering.
 // =============================================================================
 static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
@@ -296,29 +369,30 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
         return MLIR_INVALID_HANDLE;
     }
     MLIR_RegionHandle src_region = MLIR_GetOpRegion(src, 0);
-    if (MLIR_GetRegionNumBlocks(src_region) < 1) {
+    size_t n_blocks = MLIR_GetRegionNumBlocks(src_region);
+    if (n_blocks < 1) {
         fprintf(stderr, "wmir->aarch64: wmir.func has no entry block\n");
         return MLIR_INVALID_HANDLE;
     }
-    MLIR_BlockHandle src_blk = MLIR_GetRegionBlock(src_region, 0);
 
-    // Pre-pass: allocate slots for parameters and op results.
+    // ---------- Pre-pass: assign a slot to every block arg + op result.
     SlotMap sm = {0};
     uint16_t next_slot = 0;
-    size_t n_params = MLIR_GetBlockNumArgs(src_blk);
-    for (size_t i = 0; i < n_params; i++) {
-        MLIR_ValueHandle pa = MLIR_GetBlockArg(src_blk, i);
-        sm_set(&sm, pa, next_slot++);
-    }
-    size_t n_ops = MLIR_GetBlockNumOps(src_blk);
-    for (size_t i = 0; i < n_ops; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(src_blk, i);
-        size_t nr = MLIR_GetOpNumResults(op);
-        for (size_t k = 0; k < nr; k++) {
-            sm_set(&sm, MLIR_GetOpResult(op, k), next_slot++);
+    for (size_t bi = 0; bi < n_blocks; bi++) {
+        MLIR_BlockHandle b = MLIR_GetRegionBlock(src_region, bi);
+        size_t na = MLIR_GetBlockNumArgs(b);
+        for (size_t i = 0; i < na; i++) {
+            sm_set(&sm, MLIR_GetBlockArg(b, i), next_slot++);
+        }
+        size_t no = MLIR_GetBlockNumOps(b);
+        for (size_t i = 0; i < no; i++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(b, i);
+            size_t nr = MLIR_GetOpNumResults(op);
+            for (size_t k = 0; k < nr; k++) {
+                sm_set(&sm, MLIR_GetOpResult(op, k), next_slot++);
+            }
         }
     }
-    // 8 bytes per slot; round frame up to 16 for sp alignment.
     uint32_t frame_size = (uint32_t)next_slot * 8u;
     frame_size = (frame_size + 15u) & ~15u;
     if (frame_size > 0xfff) {
@@ -329,150 +403,254 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
         return MLIR_INVALID_HANDLE;
     }
 
-    MLIR_BlockHandle blk = MLIR_CreateBlock(ctx);
+    // ---------- Create destination region + blocks (one per src block).
+    MLIR_RegionHandle dst_region = MLIR_CreateRegion(ctx);
+    BlockMap bm = {0};
+    for (size_t bi = 0; bi < n_blocks; bi++) {
+        MLIR_BlockHandle s = MLIR_GetRegionBlock(src_region, bi);
+        MLIR_BlockHandle d = MLIR_CreateBlock(ctx);
+        MLIR_AppendRegionBlock(ctx, dst_region, d);
+        bm_set(&bm, s, d);
+    }
+    MLIR_BlockHandle entry_dst = bm_get(&bm, MLIR_GetRegionBlock(src_region, 0));
 
-    // Prologue + spill params.
-    emit_prologue(ctx, blk, (uint16_t)frame_size);
-    for (size_t i = 0; i < n_params; i++) {
-        uint16_t s; sm_get(&sm, MLIR_GetBlockArg(src_blk, i), &s);
-        emit_str_w(ctx, blk, /*rt=*/(uint8_t)i, /*rn=*/31 /*SP*/,
-                   (uint16_t)(s * 8u));
+    // ---------- Entry prologue + parameter spill.
+    emit_prologue(ctx, entry_dst, (uint16_t)frame_size);
+    {
+        MLIR_BlockHandle src_entry = MLIR_GetRegionBlock(src_region, 0);
+        size_t n_params = MLIR_GetBlockNumArgs(src_entry);
+        for (size_t i = 0; i < n_params; i++) {
+            uint16_t s; sm_get(&sm, MLIR_GetBlockArg(src_entry, i), &s);
+            emit_str_w(ctx, entry_dst, (uint8_t)i, 31, (uint16_t)(s * 8u));
+        }
     }
 
-    // Helper macros to keep the per-op code below readable.
-    #define LD_OPERAND(REG, IDX)                                            \
-        do {                                                                \
-            MLIR_ValueHandle _v = MLIR_GetOpOperand(op, (IDX));             \
-            uint16_t _s;                                                    \
-            if (!sm_get(&sm, _v, &_s)) {                                    \
-                fprintf(stderr,                                             \
-                    "wmir->aarch64: operand %zu unbound (op idx %zu)\n",    \
-                    (size_t)(IDX), i);                                      \
-                sm_free(&sm); return MLIR_INVALID_HANDLE;                   \
-            }                                                               \
-            emit_ldr_w(ctx, blk, (REG), 31, (uint16_t)(_s * 8u));           \
-        } while (0)
-    #define ST_RESULT(REG, IDX)                                             \
-        do {                                                                \
-            MLIR_ValueHandle _v = MLIR_GetOpResult(op, (IDX));              \
-            uint16_t _s;                                                    \
-            sm_get(&sm, _v, &_s);                                           \
-            emit_str_w(ctx, blk, (REG), 31, (uint16_t)(_s * 8u));           \
-        } while (0)
+    // ---------- Walk each block and lower its ops.
+    for (size_t bi = 0; bi < n_blocks; bi++) {
+        MLIR_BlockHandle src_blk = MLIR_GetRegionBlock(src_region, bi);
+        MLIR_BlockHandle dst_blk = bm_get(&bm, src_blk);
 
-    for (size_t i = 0; i < n_ops; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(src_blk, i);
-        MLIR_OpType   t  = MLIR_GetOpType(op);
-        switch (t) {
-        case OP_TYPE_WMIR_CONST: {
-            // Only emit code for i32 constants; skip unused i64 stragglers.
-            MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
-            MLIR_TypeHandle  ty = MLIR_GetValueType(r);
-            string ts = MLIR_GetTypeString(ctx, ty);
-            if (!(ts.size == 3 && memcmp(ts.str, "i32", 3) == 0)) {
-                if (ts.size == 3 && memcmp(ts.str, "i64", 3) == 0) continue;
-                fprintf(stderr,
-                    "wmir->aarch64: wmir.const of unsupported type '%.*s'\n",
-                    (int)ts.size, ts.str);
-                sm_free(&sm); return MLIR_INVALID_HANDLE;
+        #define LD_OPERAND(REG, IDX)                                       \
+            do {                                                           \
+                MLIR_ValueHandle _v = MLIR_GetOpOperand(op, (IDX));        \
+                uint16_t _s;                                               \
+                if (!sm_get(&sm, _v, &_s)) {                               \
+                    fprintf(stderr,                                        \
+                        "wmir->aarch64: operand %zu unbound\n",            \
+                        (size_t)(IDX));                                    \
+                    sm_free(&sm); bm_free(&bm);                            \
+                    return MLIR_INVALID_HANDLE;                            \
+                }                                                          \
+                emit_ldr_w(ctx, dst_blk, (REG), 31, (uint16_t)(_s * 8u));  \
+            } while (0)
+        #define ST_RESULT(REG, IDX)                                        \
+            do {                                                           \
+                MLIR_ValueHandle _v = MLIR_GetOpResult(op, (IDX));         \
+                uint16_t _s;                                               \
+                sm_get(&sm, _v, &_s);                                      \
+                emit_str_w(ctx, dst_blk, (REG), 31, (uint16_t)(_s * 8u));  \
+            } while (0)
+
+        size_t n_ops = MLIR_GetBlockNumOps(src_blk);
+        for (size_t i = 0; i < n_ops; i++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(src_blk, i);
+            MLIR_OpType  t  = MLIR_GetOpType(op);
+            switch (t) {
+            case OP_TYPE_WMIR_CONST: {
+                MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+                MLIR_TypeHandle  ty = MLIR_GetValueType(r);
+                string ts = MLIR_GetTypeString(ctx, ty);
+                if (!(ts.size == 3 && memcmp(ts.str, "i32", 3) == 0)) {
+                    if (ts.size == 3 && memcmp(ts.str, "i64", 3) == 0) continue;
+                    fprintf(stderr,
+                        "wmir->aarch64: wmir.const of unsupported type '%.*s'\n",
+                        (int)ts.size, ts.str);
+                    sm_free(&sm); bm_free(&bm);
+                    return MLIR_INVALID_HANDLE;
+                }
+                int64_t v = at_i(op, "value");
+                emit_mov_imm32(ctx, dst_blk, 9, (uint32_t)v);
+                ST_RESULT(9, 0);
+                break;
             }
-            int64_t v = at_i(op, "value");
-            emit_mov_imm32(ctx, blk, 9, (uint32_t)v);
-            ST_RESULT(9, 0);
-            break;
-        }
-        case OP_TYPE_WMIR_IADD: {
-            LD_OPERAND(9, 0);
-            LD_OPERAND(10, 1);
-            emit_add_reg(ctx, blk, 9, 9, 10, /*sf=*/false);
-            ST_RESULT(9, 0);
-            break;
-        }
-        case OP_TYPE_WMIR_ISUB: {
-            LD_OPERAND(9, 0);
-            LD_OPERAND(10, 1);
-            emit_sub_reg(ctx, blk, 9, 9, 10, /*sf=*/false);
-            ST_RESULT(9, 0);
-            break;
-        }
-        case OP_TYPE_WMIR_GLOBAL_GET: {
-            int64_t gi = at_i(op, "global_idx");
-            // ldr w9, [x27, #(gi * 8)]
-            emit_ldr_w(ctx, blk, 9, 27, (uint16_t)(gi * 8));
-            ST_RESULT(9, 0);
-            break;
-        }
-        case OP_TYPE_WMIR_GLOBAL_SET: {
-            int64_t gi = at_i(op, "global_idx");
-            LD_OPERAND(9, 0);
-            emit_str_w(ctx, blk, 9, 27, (uint16_t)(gi * 8));
-            break;
-        }
-        case OP_TYPE_WMIR_LOAD: {
-            int64_t off = at_i(op, "memory_offset");
-            // w9 := addr; x10 := x28 + zext(w9); w9 := *(x10 + off)
-            LD_OPERAND(9, 0);
-            emit_add_reg(ctx, blk, 10, 28, 9, /*sf=*/true);
-            // (the encoder treats add_reg with sf=1 as a 64-bit shifted-reg
-            // add of the 64-bit form of w9 — fine here because globals
-            // wrote a fresh 32-bit value that the W-form load already
-            // zero-extended into x9.)
-            emit_ldr_w(ctx, blk, 9, 10, (uint16_t)off);
-            ST_RESULT(9, 0);
-            break;
-        }
-        case OP_TYPE_WMIR_STORE: {
-            int64_t off = at_i(op, "memory_offset");
-            LD_OPERAND(9, 0);  // address
-            LD_OPERAND(11, 1); // value
-            emit_add_reg(ctx, blk, 10, 28, 9, /*sf=*/true);
-            emit_str_w(ctx, blk, 11, 10, (uint16_t)off);
-            break;
-        }
-        case OP_TYPE_WMIR_RETURN: {
-            size_t no = MLIR_GetOpNumOperands(op);
-            if (no > 1) {
-                fprintf(stderr,
-                    "wmir->aarch64: wmir.return with %zu results not yet "
-                    "supported\n", no);
-                sm_free(&sm); return MLIR_INVALID_HANDLE;
+            case OP_TYPE_WMIR_IADD: {
+                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
+                emit_add_reg(ctx, dst_blk, 9, 9, 10, /*sf=*/false);
+                ST_RESULT(9, 0);
+                break;
             }
-            if (no == 1) LD_OPERAND(0, 0);
-            emit_epilogue(ctx, blk, (uint16_t)frame_size);
-            emit_ret(ctx, blk);
-            break;
-        }
-        case OP_TYPE_WMIR_CALL: {
-            // Marshal args into w0, w1, …, wN. Caller-saved regs are
-            // not preserved across calls, but every wmir SSA value
-            // lives in a stack slot — nothing is in flight in a reg
-            // at this point, so we just emit loads → bl → store.
-            size_t na = MLIR_GetOpNumOperands(op);
-            if (na > 8) {
-                fprintf(stderr,
-                    "wmir->aarch64: wmir.call with %zu args (>8) not "
-                    "yet supported\n", na);
-                sm_free(&sm); return MLIR_INVALID_HANDLE;
+            case OP_TYPE_WMIR_ISUB: {
+                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
+                emit_sub_reg(ctx, dst_blk, 9, 9, 10, /*sf=*/false);
+                ST_RESULT(9, 0);
+                break;
             }
-            for (size_t k = 0; k < na; k++) LD_OPERAND((uint8_t)k, k);
-            string callee = at_s(op, "callee");
-            emit_bl(ctx, blk, callee);
-            if (MLIR_GetOpNumResults(op) > 0) ST_RESULT(0, 0);
-            break;
+            case OP_TYPE_WMIR_ICMP: {
+                // cmp Wn, Wm; cset Wd, <pred>.
+                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
+                emit_cmp_reg(ctx, dst_blk, 9, 10, /*sf=*/false);
+                string pred = at_s(op, "pred");
+                uint8_t cond = cond_for_pred(pred);
+                emit_cset(ctx, dst_blk, 9, cond, /*sf=*/false);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_EQZ: {
+                LD_OPERAND(9, 0);
+                emit_cmp_imm(ctx, dst_blk, 9, 0, /*sf=*/false);
+                emit_cset(ctx, dst_blk, 9, COND_EQ, /*sf=*/false);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_SELECT: {
+                // result = cond != 0 ? a : b.
+                // ldr w9,a / ldr w10,b / ldr w11,cond; cmp w11,#0;
+                // csel w9, w9, w10, NE.
+                LD_OPERAND(9, 0);  // a
+                LD_OPERAND(10, 1); // b
+                LD_OPERAND(11, 2); // cond
+                emit_cmp_imm(ctx, dst_blk, 11, 0, /*sf=*/false);
+                emit_csel(ctx, dst_blk, 9, 9, 10, COND_NE, /*sf=*/false);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_GLOBAL_GET: {
+                int64_t gi = at_i(op, "global_idx");
+                emit_ldr_w(ctx, dst_blk, 9, 27, (uint16_t)(gi * 8));
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_GLOBAL_SET: {
+                int64_t gi = at_i(op, "global_idx");
+                LD_OPERAND(9, 0);
+                emit_str_w(ctx, dst_blk, 9, 27, (uint16_t)(gi * 8));
+                break;
+            }
+            case OP_TYPE_WMIR_LOAD: {
+                int64_t off = at_i(op, "memory_offset");
+                LD_OPERAND(9, 0);
+                emit_add_reg(ctx, dst_blk, 10, 28, 9, /*sf=*/true);
+                emit_ldr_w(ctx, dst_blk, 9, 10, (uint16_t)off);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_STORE: {
+                int64_t off = at_i(op, "memory_offset");
+                LD_OPERAND(9, 0); LD_OPERAND(11, 1);
+                emit_add_reg(ctx, dst_blk, 10, 28, 9, /*sf=*/true);
+                emit_str_w(ctx, dst_blk, 11, 10, (uint16_t)off);
+                break;
+            }
+            case OP_TYPE_WMIR_CALL: {
+                size_t na = MLIR_GetOpNumOperands(op);
+                if (na > 8) {
+                    fprintf(stderr,
+                        "wmir->aarch64: wmir.call with %zu args (>8) not "
+                        "yet supported\n", na);
+                    sm_free(&sm); bm_free(&bm);
+                    return MLIR_INVALID_HANDLE;
+                }
+                for (size_t k = 0; k < na; k++) LD_OPERAND((uint8_t)k, k);
+                string callee = at_s(op, "target");
+                if (callee.size == 0) callee = at_s(op, "callee");
+                emit_bl(ctx, dst_blk, callee);
+                if (MLIR_GetOpNumResults(op) > 0) ST_RESULT(0, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_RETURN: {
+                size_t no = MLIR_GetOpNumOperands(op);
+                if (no > 1) {
+                    fprintf(stderr,
+                        "wmir->aarch64: wmir.return with %zu results not yet "
+                        "supported\n", no);
+                    sm_free(&sm); bm_free(&bm);
+                    return MLIR_INVALID_HANDLE;
+                }
+                if (no == 1) LD_OPERAND(0, 0);
+                emit_epilogue(ctx, dst_blk, (uint16_t)frame_size);
+                emit_ret(ctx, dst_blk);
+                break;
+            }
+            case OP_TYPE_WMIR_UNREACHABLE: {
+                emit_brk(ctx, dst_blk, 1);
+                break;
+            }
+            case OP_TYPE_WMIR_BR: {
+                // Copy each successor operand into the corresponding
+                // target block-arg slot, then branch. Successor operands
+                // are NOT regular operands — they are attached to the
+                // successor edge and queried separately.
+                MLIR_BlockHandle s_target = MLIR_GetOpSuccessor(op, 0);
+                MLIR_BlockHandle d_target = bm_get(&bm, s_target);
+                if (d_target == MLIR_INVALID_HANDLE) {
+                    fprintf(stderr,
+                        "wmir->aarch64: wmir.br target block not mapped\n");
+                    sm_free(&sm); bm_free(&bm);
+                    return MLIR_INVALID_HANDLE;
+                }
+                size_t n_sops = MLIR_GetOpNumSuccessorOperands(op, 0);
+                size_t n_args = MLIR_GetBlockNumArgs(s_target);
+                if (n_sops != n_args) {
+                    fprintf(stderr,
+                        "wmir->aarch64: wmir.br operand count %zu != target "
+                        "arg count %zu\n", n_sops, n_args);
+                    sm_free(&sm); bm_free(&bm);
+                    return MLIR_INVALID_HANDLE;
+                }
+                for (size_t k = 0; k < n_sops; k++) {
+                    MLIR_ValueHandle src_v = MLIR_GetOpSuccessorOperand(op, 0, k);
+                    uint16_t src_s; sm_get(&sm, src_v, &src_s);
+                    MLIR_ValueHandle tgt_a = MLIR_GetBlockArg(s_target, k);
+                    uint16_t tgt_s; sm_get(&sm, tgt_a, &tgt_s);
+                    if (src_s == tgt_s) continue;
+                    emit_ldr_w(ctx, dst_blk, 9, 31, (uint16_t)(src_s * 8u));
+                    emit_str_w(ctx, dst_blk, 9, 31, (uint16_t)(tgt_s * 8u));
+                }
+                emit_b(ctx, dst_blk, d_target);
+                break;
+            }
+            case OP_TYPE_WMIR_COND_BR: {
+                // Two successors, no successor operands by construction.
+                if (MLIR_GetOpNumSuccessors(op) < 2) {
+                    fprintf(stderr,
+                        "wmir->aarch64: wmir.cond_br needs 2 successors\n");
+                    sm_free(&sm); bm_free(&bm);
+                    return MLIR_INVALID_HANDLE;
+                }
+                MLIR_BlockHandle t_src = MLIR_GetOpSuccessor(op, 0);
+                MLIR_BlockHandle f_src = MLIR_GetOpSuccessor(op, 1);
+                MLIR_BlockHandle t_dst = bm_get(&bm, t_src);
+                MLIR_BlockHandle f_dst = bm_get(&bm, f_src);
+                if (t_dst == MLIR_INVALID_HANDLE || f_dst == MLIR_INVALID_HANDLE) {
+                    fprintf(stderr,
+                        "wmir->aarch64: wmir.cond_br target block not mapped\n");
+                    sm_free(&sm); bm_free(&bm);
+                    return MLIR_INVALID_HANDLE;
+                }
+                // Load cond into w9; test against zero. Wasm boolean
+                // convention: 0 = false, non-zero = true.
+                LD_OPERAND(9, 0);
+                emit_cbnz(ctx, dst_blk, 9, /*sf=*/false, t_dst);
+                emit_b(ctx, dst_blk, f_dst);
+                break;
+            }
+            default: {
+                string nm = MLIR_GetOpName(op);
+                fprintf(stderr,
+                    "wmir->aarch64: unsupported wmir op '%.*s' (kind=%d)\n",
+                    (int)nm.size, nm.str, (int)t);
+                sm_free(&sm); bm_free(&bm);
+                return MLIR_INVALID_HANDLE;
+            }
+            }
         }
-        default: {
-            string nm = MLIR_GetOpName(op);
-            fprintf(stderr,
-                "wmir->aarch64: unsupported wmir op '%.*s' (kind=%d)\n",
-                (int)nm.size, nm.str, (int)t);
-            sm_free(&sm); return MLIR_INVALID_HANDLE;
-        }
-        }
+
+        #undef LD_OPERAND
+        #undef ST_RESULT
     }
-    #undef LD_OPERAND
-    #undef ST_RESULT
 
     sm_free(&sm);
+    bm_free(&bm);
 
     MLIR_AttributeHandle attrs[4];
     size_t naf = 0;
@@ -480,9 +658,7 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
     attrs[naf++] = attr_b(ctx, "exported", exported);
     attrs[naf++] = attr_s(ctx, "param_types", pt.str, pt.size);
 
-    MLIR_RegionHandle region = MLIR_CreateRegion(ctx);
-    MLIR_AppendRegionBlock(ctx, region, blk);
-    MLIR_RegionHandle regs[1] = { region };
+    MLIR_RegionHandle regs[1] = { dst_region };
     return MLIR_CreateOp(ctx, OP_TYPE_AARCH64_FUNC,
         op_type_to_string(OP_TYPE_AARCH64_FUNC),
         attrs, naf, NULL, 0, NULL, 0, NULL, 0, regs, 1,
@@ -496,7 +672,9 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
 static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name,
                                  bool use_data_priv, bool use_globals,
                                  bool use_linmem) {
+    MLIR_RegionHandle region = MLIR_CreateRegion(ctx);
     MLIR_BlockHandle blk = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, region, blk);
 
     if (use_data_priv) {
         emit_adrp_data(ctx, blk, 26, "data_priv");
@@ -512,7 +690,6 @@ static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name,
     }
 
     emit_bl(ctx, blk, main_name);
-    // mach trap #1 = exit; movz w16,#1 zero-extends to x16, fine for syscall.
     emit_movz(ctx, blk, /*rd=*/16, /*imm16=*/1, /*hw=*/0, /*sf=*/true);
     emit_svc(ctx, blk, 0x80);
 
@@ -521,8 +698,6 @@ static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name,
     attrs[na++] = attr_s(ctx, "sym_name", "_start", 6);
     attrs[na++] = attr_b(ctx, "exported", true);
 
-    MLIR_RegionHandle region = MLIR_CreateRegion(ctx);
-    MLIR_AppendRegionBlock(ctx, region, blk);
     MLIR_RegionHandle regs[1] = { region };
     return MLIR_CreateOp(ctx, OP_TYPE_AARCH64_FUNC,
         op_type_to_string(OP_TYPE_AARCH64_FUNC),
@@ -533,11 +708,10 @@ static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name,
 
 // =============================================================================
 // Walk the module to compute the highest global_idx referenced and
-// whether linmem is touched. This drives __DATA sizing in the Mach-O
-// backend.
+// whether linmem is touched.
 // =============================================================================
 typedef struct {
-    int32_t n_globals;       // max global_idx + 1, capped at >=1 if any g* op seen
+    int32_t n_globals;
     bool    uses_linmem;
 } ModInfo;
 
@@ -552,8 +726,6 @@ static void scan_block(MLIR_BlockHandle blk, ModInfo *mi) {
         } else if (t == OP_TYPE_WMIR_LOAD || t == OP_TYPE_WMIR_STORE) {
             mi->uses_linmem = true;
         }
-        // Recurse into regions (no nested regions in the current
-        // dialect, but the loop is cheap).
         size_t nr = MLIR_GetOpNumRegions(op);
         for (size_t r = 0; r < nr; r++) {
             MLIR_RegionHandle rh = MLIR_GetOpRegion(op, r);
@@ -574,22 +746,11 @@ MLIR_OpHandle mlir_wmir_to_aarch64(MLIR_Context *ctx, MLIR_OpHandle wmir_module)
     if (MLIR_GetRegionNumBlocks(mr) < 1) return MLIR_INVALID_HANDLE;
     MLIR_BlockHandle mb = MLIR_GetRegionBlock(mr, 0);
 
-    // Scan for resource usage to size __DATA.
     ModInfo mi = {0};
     scan_block(mb, &mi);
 
-    // Compute layout numbers that mirror what wasm-link produces.
-    // n_globals is at least 1 if any global op was seen (the wasm-link
-    // implicit __stack_pointer global lives at idx 0). If no globals
-    // are touched at all (e.g. macho_exit), we still want zero so the
-    // Mach-O backend can elide the section.
     uint32_t n_globals = (uint32_t)mi.n_globals;
-    // Initial value for global 0 = STACK_SIZE; remaining globals = 0
-    // (sufficient for the macho_arith level of complexity; will need
-    // to thread real init values once the wmir lowering surfaces
-    // module-level wasmssa.global ops).
     uint64_t global0_init = DEFAULT_STACK_SIZE;
-    // linmem_size: stack + GLOBAL_BASE_OFFSET, rounded up to a wasm page.
     uint64_t lm_bytes = (uint64_t)DEFAULT_STACK_SIZE + DEFAULT_GLOBAL_BASE_OFFS;
     uint64_t lm_pages = (lm_bytes + WASM_PAGE_SIZE - 1) / WASM_PAGE_SIZE;
     uint64_t linmem_size = lm_pages * WASM_PAGE_SIZE;
@@ -599,7 +760,6 @@ MLIR_OpHandle mlir_wmir_to_aarch64(MLIR_Context *ctx, MLIR_OpHandle wmir_module)
     MLIR_AppendRegionBlock(ctx, out_region, out_body);
     MLIR_RegionHandle out_regs[1] = { out_region };
 
-    // Module-level attributes carrying __DATA-layout metadata.
     MLIR_AttributeHandle mattrs[4];
     size_t nma = 0;
     mattrs[nma++] = attr_i32(ctx, "n_globals",     (int64_t)n_globals);
@@ -641,7 +801,6 @@ MLIR_OpHandle mlir_wmir_to_aarch64(MLIR_Context *ctx, MLIR_OpHandle wmir_module)
         return MLIR_INVALID_HANDLE;
     }
 
-    // _start sets up only the data-base regs we actually need.
     bool use_globals = n_globals > 0;
     bool use_linmem  = mi.uses_linmem;
     MLIR_OpHandle start = synth_start(ctx, entry_name,

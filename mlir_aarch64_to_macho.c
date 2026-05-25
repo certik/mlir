@@ -208,6 +208,61 @@ static uint32_t arm64_svc(uint16_t imm16) {
 }
 static uint32_t arm64_ret(void) { return 0xd65f03c0u; }
 
+// ---- compare + cset/csel + branches ------------------------------
+// CMP Wn, Wm  ==  SUBS Wzr, Wn, Wm (W form base 0x6B00001F; X 0xEB00001F)
+static uint32_t arm64_cmp_reg(uint8_t rn, uint8_t rm, bool sf) {
+    uint32_t base = sf ? 0xeb00001fu : 0x6b00001fu;
+    return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5);
+}
+// CMP Wn, #imm12  ==  SUBS Wzr, Wn, #imm12 (W base 0x7100001F; X 0xF100001F)
+static uint32_t arm64_cmp_imm(uint8_t rn, uint16_t imm12, bool sf) {
+    uint32_t base = sf ? 0xf100001fu : 0x7100001fu;
+    return base | (((uint32_t)imm12 & 0xfffu) << 10)
+                | ((uint32_t)(rn & 0x1f) << 5);
+}
+// CSET Wd, COND == CSINC Wd, WZR, WZR, invert(COND).
+// CSINC encoding: sf 0 0 1101 0100 Rm 4-bit-cond 0 1 Rn Rd
+//   W form base: 0x1A9F07E0 (Rm=WZR=31, Rn=WZR=31; cond field at bits[15:12]).
+//   X form base: 0x9A9F07E0.
+// The condition we pass here is the ORIGINAL (uninverted) condition;
+// CSET inverts it internally to feed CSINC.
+static uint32_t arm64_cset(uint8_t rd, uint8_t cond, bool sf) {
+    uint32_t base = sf ? 0x9a9f07e0u : 0x1a9f07e0u;
+    uint8_t  invc = (uint8_t)(cond ^ 1);
+    return base | (((uint32_t)invc & 0xfu) << 12) | (uint32_t)(rd & 0x1f);
+}
+// CSEL Wd, Wn, Wm, COND: sf 0 0 1101 0100 Rm 4-bit-cond 0 0 Rn Rd
+//   W base: 0x1A800000.  X base: 0x9A800000.
+static uint32_t arm64_csel(uint8_t rd, uint8_t rn, uint8_t rm,
+                           uint8_t cond, bool sf) {
+    uint32_t base = sf ? 0x9a800000u : 0x1a800000u;
+    return base | ((uint32_t)(rm & 0x1f) << 16)
+                | (((uint32_t)cond & 0xfu) << 12)
+                | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rd & 0x1f);
+}
+// B  imm26 ; PC-relative (imm26 holds byte_offset / 4, sign-extended).
+static uint32_t arm64_b(int32_t imm26) {
+    return 0x14000000u | ((uint32_t)imm26 & 0x03ffffffu);
+}
+// B.cond imm19 ; PC-relative (imm19 holds byte_offset / 4, sign-extended).
+static uint32_t arm64_b_cond(int32_t imm19, uint8_t cond) {
+    return 0x54000000u | (((uint32_t)imm19 & 0x7ffffu) << 5)
+                       | ((uint32_t)cond & 0xfu);
+}
+// CBZ/CBNZ Wn, imm19 (W base 0x34000000/0x35000000; X 0xB4.../0xB5...).
+static uint32_t arm64_cbz(uint8_t rt, int32_t imm19, bool sf) {
+    uint32_t base = sf ? 0xb4000000u : 0x34000000u;
+    return base | (((uint32_t)imm19 & 0x7ffffu) << 5) | (uint32_t)(rt & 0x1f);
+}
+static uint32_t arm64_cbnz(uint8_t rt, int32_t imm19, bool sf) {
+    uint32_t base = sf ? 0xb5000000u : 0x35000000u;
+    return base | (((uint32_t)imm19 & 0x7ffffu) << 5) | (uint32_t)(rt & 0x1f);
+}
+// BRK #imm16: 0xD4200000 | (imm16 << 5).
+static uint32_t arm64_brk(uint16_t imm16) {
+    return 0xd4200000u | ((uint32_t)imm16 << 5);
+}
+
 // ---- frame ops ----------------------------------------------------
 static uint32_t arm64_stp_fp_lr_pre(void)   { return 0xa9bf7bfdu; } // stp x29,x30,[sp,#-16]!
 static uint32_t arm64_ldp_fp_lr_post(void)  { return 0xa8c17bfdu; } // ldp x29,x30,[sp],#16
@@ -288,15 +343,38 @@ typedef struct {
     uint32_t fn_off;
 } DataReloc;
 
+// Branch reloc. Identifies a placeholder branch instruction emitted
+// for an aarch64.b / b_cond / cbz / cbnz op so we can resolve it to a
+// PC-relative imm once all blocks have known function offsets.
+enum BranchKind { BR_B, BR_B_COND, BR_CBZ, BR_CBNZ };
 typedef struct {
-    string     name;
-    bool       exported;
-    Buf        code;
-    BlReloc   *relocs;
-    size_t     n_relocs, c_relocs;
-    DataReloc *dr;
-    size_t     n_dr, c_dr;
-    uint32_t   text_off;     // assigned after layout
+    int              kind;            // enum BranchKind
+    MLIR_BlockHandle target;
+    uint32_t         fn_off;          // offset of the branch insn within fn
+    uint8_t          cond_or_rt;      // cond for B_COND, rt for CBZ/CBNZ
+    bool             sf;              // for CBZ/CBNZ
+} BranchReloc;
+
+// Position of a block within the function's code buffer. Filled in as
+// blocks are emitted, consumed by the branch patcher.
+typedef struct {
+    MLIR_BlockHandle blk;
+    uint32_t         fn_off;
+} BlockPos;
+
+typedef struct {
+    string       name;
+    bool         exported;
+    Buf          code;
+    BlReloc     *relocs;
+    size_t       n_relocs, c_relocs;
+    DataReloc   *dr;
+    size_t       n_dr, c_dr;
+    BranchReloc *br;
+    size_t       n_br, c_br;
+    BlockPos    *bp;
+    size_t       n_bp, c_bp;
+    uint32_t     text_off;   // assigned after layout
 } EmittedFunc;
 
 static void ef_add_reloc(EmittedFunc *e, string callee, uint32_t off) {
@@ -321,6 +399,28 @@ static void ef_add_dr(EmittedFunc *e, string kind, bool is_add_lo,
     e->dr[e->n_dr].fn_off    = off;
     e->n_dr++;
 }
+static void ef_add_br(EmittedFunc *e, int kind, MLIR_BlockHandle target,
+                      uint32_t off, uint8_t cond_or_rt, bool sf) {
+    if (e->n_br == e->c_br) {
+        e->c_br = e->c_br ? e->c_br * 2 : 4;
+        e->br = (BranchReloc *)realloc(e->br, e->c_br * sizeof(BranchReloc));
+    }
+    e->br[e->n_br].kind       = kind;
+    e->br[e->n_br].target     = target;
+    e->br[e->n_br].fn_off     = off;
+    e->br[e->n_br].cond_or_rt = cond_or_rt;
+    e->br[e->n_br].sf         = sf;
+    e->n_br++;
+}
+static void ef_add_bp(EmittedFunc *e, MLIR_BlockHandle blk, uint32_t off) {
+    if (e->n_bp == e->c_bp) {
+        e->c_bp = e->c_bp ? e->c_bp * 2 : 4;
+        e->bp = (BlockPos *)realloc(e->bp, e->c_bp * sizeof(BlockPos));
+    }
+    e->bp[e->n_bp].blk    = blk;
+    e->bp[e->n_bp].fn_off = off;
+    e->n_bp++;
+}
 
 static int64_t attr_i(MLIR_OpHandle op, const char *name) {
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(op, name);
@@ -343,135 +443,244 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
         fprintf(stderr, "aarch64->macho: aarch64.func has no region\n");
         return false;
     }
-    MLIR_BlockHandle blk = MLIR_GetRegionBlock(MLIR_GetOpRegion(fn, 0), 0);
-    size_t n = MLIR_GetBlockNumOps(blk);
+    MLIR_RegionHandle reg = MLIR_GetOpRegion(fn, 0);
+    size_t nb = MLIR_GetRegionNumBlocks(reg);
+    for (size_t bi = 0; bi < nb; bi++) {
+        MLIR_BlockHandle blk = MLIR_GetRegionBlock(reg, bi);
+        // Record the position of this block's first instruction.
+        ef_add_bp(out, blk, (uint32_t)out->code.len);
+        size_t n = MLIR_GetBlockNumOps(blk);
+        for (size_t i = 0; i < n; i++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(blk, i);
+            MLIR_OpType  t  = MLIR_GetOpType(op);
+            switch (t) {
+            case OP_TYPE_AARCH64_MOVZ: {
+                uint8_t rd  = (uint8_t)attr_i(op, "rd");
+                uint16_t im = (uint16_t)attr_i(op, "imm16");
+                uint8_t hw  = (uint8_t)attr_i(op, "hw");
+                bool   sf   = attr_b(op, "sf");
+                emit_word(&out->code, arm64_movz(rd, im, hw, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_MOVK: {
+                uint8_t rd  = (uint8_t)attr_i(op, "rd");
+                uint16_t im = (uint16_t)attr_i(op, "imm16");
+                uint8_t hw  = (uint8_t)attr_i(op, "hw");
+                bool   sf   = attr_b(op, "sf");
+                emit_word(&out->code, arm64_movk(rd, im, hw, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_MOV_X: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                emit_word(&out->code, arm64_mov_x(rd, rn));
+                break;
+            }
+            case OP_TYPE_AARCH64_BL: {
+                string callee = attr_s(op, "callee");
+                uint32_t off = (uint32_t)out->code.len;
+                emit_word(&out->code, arm64_bl(0));
+                ef_add_reloc(out, callee, off);
+                break;
+            }
+            case OP_TYPE_AARCH64_SVC: {
+                uint16_t im = (uint16_t)attr_i(op, "imm16");
+                emit_word(&out->code, arm64_svc(im));
+                break;
+            }
+            case OP_TYPE_AARCH64_RET:
+                emit_word(&out->code, arm64_ret());
+                break;
+            case OP_TYPE_AARCH64_BRK: {
+                uint16_t im = (uint16_t)attr_i(op, "imm16");
+                emit_word(&out->code, arm64_brk(im));
+                break;
+            }
+            case OP_TYPE_AARCH64_PROLOGUE: {
+                uint32_t fs = (uint32_t)attr_i(op, "frame_size");
+                emit_word(&out->code, arm64_stp_fp_lr_pre());
+                emit_word(&out->code, arm64_mov_fp_sp());
+                if (fs > 0) emit_word(&out->code, arm64_sub_sp_imm((uint16_t)fs));
+                break;
+            }
+            case OP_TYPE_AARCH64_EPILOGUE: {
+                uint32_t fs = (uint32_t)attr_i(op, "frame_size");
+                if (fs > 0) emit_word(&out->code, arm64_add_sp_imm((uint16_t)fs));
+                emit_word(&out->code, arm64_ldp_fp_lr_post());
+                break;
+            }
+            case OP_TYPE_AARCH64_ADD_IMM: {
+                uint8_t  rd = (uint8_t)attr_i(op, "rd");
+                uint8_t  rn = (uint8_t)attr_i(op, "rn");
+                uint16_t im = (uint16_t)attr_i(op, "imm12");
+                bool     sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_add_imm(rd, rn, im, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_SUB_IMM: {
+                uint8_t  rd = (uint8_t)attr_i(op, "rd");
+                uint8_t  rn = (uint8_t)attr_i(op, "rn");
+                uint16_t im = (uint16_t)attr_i(op, "imm12");
+                bool     sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_sub_imm(rd, rn, im, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_ADD_REG: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_add_reg(rd, rn, rm, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_SUB_REG: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_sub_reg(rd, rn, rm, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_LDR_W: {
+                uint8_t  rt = (uint8_t)attr_i(op, "rt");
+                uint8_t  rn = (uint8_t)attr_i(op, "rn");
+                uint16_t of = (uint16_t)attr_i(op, "off_bytes");
+                emit_word(&out->code, arm64_ldr_w_uoff(rt, rn, of));
+                break;
+            }
+            case OP_TYPE_AARCH64_STR_W: {
+                uint8_t  rt = (uint8_t)attr_i(op, "rt");
+                uint8_t  rn = (uint8_t)attr_i(op, "rn");
+                uint16_t of = (uint16_t)attr_i(op, "off_bytes");
+                emit_word(&out->code, arm64_str_w_uoff(rt, rn, of));
+                break;
+            }
+            case OP_TYPE_AARCH64_ADRP_DATA: {
+                uint8_t rd      = (uint8_t)attr_i(op, "rd");
+                string  target  = attr_s(op, "target");
+                uint32_t off    = (uint32_t)out->code.len;
+                emit_word(&out->code, arm64_adrp(rd, 0));
+                ef_add_dr(out, target, /*is_add_lo=*/false, rd, /*rn=*/0, off);
+                break;
+            }
+            case OP_TYPE_AARCH64_ADD_DATA_LO: {
+                uint8_t rd     = (uint8_t)attr_i(op, "rd");
+                uint8_t rn     = (uint8_t)attr_i(op, "rn");
+                string  target = attr_s(op, "target");
+                uint32_t off   = (uint32_t)out->code.len;
+                emit_word(&out->code, arm64_add_imm(rd, rn, 0, /*sf=*/true));
+                ef_add_dr(out, target, /*is_add_lo=*/true, rd, rn, off);
+                break;
+            }
+            case OP_TYPE_AARCH64_CMP_REG: {
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_cmp_reg(rn, rm, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_CMP_IMM: {
+                uint8_t  rn = (uint8_t)attr_i(op, "rn");
+                uint16_t im = (uint16_t)attr_i(op, "imm12");
+                bool     sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_cmp_imm(rn, im, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_CSET: {
+                uint8_t rd   = (uint8_t)attr_i(op, "rd");
+                uint8_t cond = (uint8_t)attr_i(op, "cond");
+                bool    sf   = attr_b(op, "sf");
+                emit_word(&out->code, arm64_cset(rd, cond, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_CSEL: {
+                uint8_t rd   = (uint8_t)attr_i(op, "rd");
+                uint8_t rn   = (uint8_t)attr_i(op, "rn");
+                uint8_t rm   = (uint8_t)attr_i(op, "rm");
+                uint8_t cond = (uint8_t)attr_i(op, "cond");
+                bool    sf   = attr_b(op, "sf");
+                emit_word(&out->code, arm64_csel(rd, rn, rm, cond, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_B: {
+                MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(op, 0);
+                uint32_t off = (uint32_t)out->code.len;
+                emit_word(&out->code, arm64_b(0));
+                ef_add_br(out, BR_B, tgt, off, 0, false);
+                break;
+            }
+            case OP_TYPE_AARCH64_B_COND: {
+                MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(op, 0);
+                uint8_t cond = (uint8_t)attr_i(op, "cond");
+                uint32_t off = (uint32_t)out->code.len;
+                emit_word(&out->code, arm64_b_cond(0, cond));
+                ef_add_br(out, BR_B_COND, tgt, off, cond, false);
+                break;
+            }
+            case OP_TYPE_AARCH64_CBZ: {
+                MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(op, 0);
+                uint8_t rt = (uint8_t)attr_i(op, "rt");
+                bool    sf = attr_b(op, "sf");
+                uint32_t off = (uint32_t)out->code.len;
+                emit_word(&out->code, arm64_cbz(rt, 0, sf));
+                ef_add_br(out, BR_CBZ, tgt, off, rt, sf);
+                break;
+            }
+            case OP_TYPE_AARCH64_CBNZ: {
+                MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(op, 0);
+                uint8_t rt = (uint8_t)attr_i(op, "rt");
+                bool    sf = attr_b(op, "sf");
+                uint32_t off = (uint32_t)out->code.len;
+                emit_word(&out->code, arm64_cbnz(rt, 0, sf));
+                ef_add_br(out, BR_CBNZ, tgt, off, rt, sf);
+                break;
+            }
+            case OP_TYPE_AARCH64_LABEL:
+                // Pseudo: marks a position; emits no bytes. Block boundary
+                // tracking already happened above.
+                break;
+            default: {
+                string nm = MLIR_GetOpName(op);
+                fprintf(stderr,
+                    "aarch64->macho: unsupported aarch64 op '%.*s' "
+                    "(kind=%d)\n", (int)nm.size, nm.str, (int)t);
+                return false;
+            }
+            }
+        }
+    }
+    return true;
+}
 
-    for (size_t i = 0; i < n; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(blk, i);
-        MLIR_OpType  t  = MLIR_GetOpType(op);
-        switch (t) {
-        case OP_TYPE_AARCH64_MOVZ: {
-            uint8_t rd  = (uint8_t)attr_i(op, "rd");
-            uint16_t im = (uint16_t)attr_i(op, "imm16");
-            uint8_t hw  = (uint8_t)attr_i(op, "hw");
-            bool   sf   = attr_b(op, "sf");
-            emit_word(&out->code, arm64_movz(rd, im, hw, sf));
-            break;
+// Resolve intra-function branch targets to PC-relative immediates. Done
+// AFTER all blocks have been emitted (and their offsets recorded) but
+// BEFORE the function is laid out within __text — branches are
+// function-local, so we don't need text_off here.
+static bool patch_branches(EmittedFunc *e) {
+    for (size_t i = 0; i < e->n_br; i++) {
+        BranchReloc *r = &e->br[i];
+        uint32_t tgt_off = (uint32_t)-1;
+        for (size_t k = 0; k < e->n_bp; k++) {
+            if (e->bp[k].blk == r->target) { tgt_off = e->bp[k].fn_off; break; }
         }
-        case OP_TYPE_AARCH64_MOVK: {
-            uint8_t rd  = (uint8_t)attr_i(op, "rd");
-            uint16_t im = (uint16_t)attr_i(op, "imm16");
-            uint8_t hw  = (uint8_t)attr_i(op, "hw");
-            bool   sf   = attr_b(op, "sf");
-            emit_word(&out->code, arm64_movk(rd, im, hw, sf));
-            break;
-        }
-        case OP_TYPE_AARCH64_MOV_X: {
-            uint8_t rd = (uint8_t)attr_i(op, "rd");
-            uint8_t rn = (uint8_t)attr_i(op, "rn");
-            emit_word(&out->code, arm64_mov_x(rd, rn));
-            break;
-        }
-        case OP_TYPE_AARCH64_BL: {
-            string callee = attr_s(op, "callee");
-            uint32_t off = (uint32_t)out->code.len;
-            // Placeholder displacement; patched in post-pass.
-            emit_word(&out->code, arm64_bl(0));
-            ef_add_reloc(out, callee, off);
-            break;
-        }
-        case OP_TYPE_AARCH64_SVC: {
-            uint16_t im = (uint16_t)attr_i(op, "imm16");
-            emit_word(&out->code, arm64_svc(im));
-            break;
-        }
-        case OP_TYPE_AARCH64_RET:
-            emit_word(&out->code, arm64_ret());
-            break;
-        case OP_TYPE_AARCH64_PROLOGUE: {
-            uint32_t fs = (uint32_t)attr_i(op, "frame_size");
-            emit_word(&out->code, arm64_stp_fp_lr_pre());
-            emit_word(&out->code, arm64_mov_fp_sp());
-            if (fs > 0) emit_word(&out->code, arm64_sub_sp_imm((uint16_t)fs));
-            break;
-        }
-        case OP_TYPE_AARCH64_EPILOGUE: {
-            uint32_t fs = (uint32_t)attr_i(op, "frame_size");
-            if (fs > 0) emit_word(&out->code, arm64_add_sp_imm((uint16_t)fs));
-            emit_word(&out->code, arm64_ldp_fp_lr_post());
-            break;
-        }
-        case OP_TYPE_AARCH64_ADD_IMM: {
-            uint8_t  rd = (uint8_t)attr_i(op, "rd");
-            uint8_t  rn = (uint8_t)attr_i(op, "rn");
-            uint16_t im = (uint16_t)attr_i(op, "imm12");
-            bool     sf = attr_b(op, "sf");
-            emit_word(&out->code, arm64_add_imm(rd, rn, im, sf));
-            break;
-        }
-        case OP_TYPE_AARCH64_SUB_IMM: {
-            uint8_t  rd = (uint8_t)attr_i(op, "rd");
-            uint8_t  rn = (uint8_t)attr_i(op, "rn");
-            uint16_t im = (uint16_t)attr_i(op, "imm12");
-            bool     sf = attr_b(op, "sf");
-            emit_word(&out->code, arm64_sub_imm(rd, rn, im, sf));
-            break;
-        }
-        case OP_TYPE_AARCH64_ADD_REG: {
-            uint8_t rd = (uint8_t)attr_i(op, "rd");
-            uint8_t rn = (uint8_t)attr_i(op, "rn");
-            uint8_t rm = (uint8_t)attr_i(op, "rm");
-            bool    sf = attr_b(op, "sf");
-            emit_word(&out->code, arm64_add_reg(rd, rn, rm, sf));
-            break;
-        }
-        case OP_TYPE_AARCH64_SUB_REG: {
-            uint8_t rd = (uint8_t)attr_i(op, "rd");
-            uint8_t rn = (uint8_t)attr_i(op, "rn");
-            uint8_t rm = (uint8_t)attr_i(op, "rm");
-            bool    sf = attr_b(op, "sf");
-            emit_word(&out->code, arm64_sub_reg(rd, rn, rm, sf));
-            break;
-        }
-        case OP_TYPE_AARCH64_LDR_W: {
-            uint8_t  rt = (uint8_t)attr_i(op, "rt");
-            uint8_t  rn = (uint8_t)attr_i(op, "rn");
-            uint16_t of = (uint16_t)attr_i(op, "off_bytes");
-            emit_word(&out->code, arm64_ldr_w_uoff(rt, rn, of));
-            break;
-        }
-        case OP_TYPE_AARCH64_STR_W: {
-            uint8_t  rt = (uint8_t)attr_i(op, "rt");
-            uint8_t  rn = (uint8_t)attr_i(op, "rn");
-            uint16_t of = (uint16_t)attr_i(op, "off_bytes");
-            emit_word(&out->code, arm64_str_w_uoff(rt, rn, of));
-            break;
-        }
-        case OP_TYPE_AARCH64_ADRP_DATA: {
-            uint8_t rd      = (uint8_t)attr_i(op, "rd");
-            string  target  = attr_s(op, "target");
-            uint32_t off    = (uint32_t)out->code.len;
-            emit_word(&out->code, arm64_adrp(rd, 0));    // patched
-            ef_add_dr(out, target, /*is_add_lo=*/false, rd, /*rn=*/0, off);
-            break;
-        }
-        case OP_TYPE_AARCH64_ADD_DATA_LO: {
-            uint8_t rd     = (uint8_t)attr_i(op, "rd");
-            uint8_t rn     = (uint8_t)attr_i(op, "rn");
-            string  target = attr_s(op, "target");
-            uint32_t off   = (uint32_t)out->code.len;
-            emit_word(&out->code, arm64_add_imm(rd, rn, 0, /*sf=*/true)); // patched
-            ef_add_dr(out, target, /*is_add_lo=*/true, rd, rn, off);
-            break;
-        }
-        default: {
-            string nm = MLIR_GetOpName(op);
+        if (tgt_off == (uint32_t)-1) {
             fprintf(stderr,
-                "aarch64->macho: unsupported aarch64 op '%.*s' "
-                "(kind=%d)\n", (int)nm.size, nm.str, (int)t);
+                "aarch64->macho: branch target block has no recorded offset\n");
             return false;
         }
+        int32_t rel = (int32_t)tgt_off - (int32_t)r->fn_off;
+        int32_t imm = rel >> 2;
+        uint32_t insn = 0;
+        switch (r->kind) {
+            case BR_B:      insn = arm64_b(imm); break;
+            case BR_B_COND: insn = arm64_b_cond(imm, r->cond_or_rt); break;
+            case BR_CBZ:    insn = arm64_cbz(r->cond_or_rt, imm, r->sf); break;
+            case BR_CBNZ:   insn = arm64_cbnz(r->cond_or_rt, imm, r->sf); break;
         }
+        e->code.data[r->fn_off + 0] = (uint8_t)(insn      );
+        e->code.data[r->fn_off + 1] = (uint8_t)(insn >>  8);
+        e->code.data[r->fn_off + 2] = (uint8_t)(insn >> 16);
+        e->code.data[r->fn_off + 3] = (uint8_t)(insn >> 24);
     }
     return true;
 }
@@ -554,6 +763,14 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
         if (!emit_aarch64_func(op, &efs[n_funcs])) {
             for (size_t k = 0; k <= n_funcs; k++) {
                 free(efs[k].code.data); free(efs[k].relocs); free(efs[k].dr);
+                free(efs[k].br); free(efs[k].bp);
+            }
+            free(efs); return false;
+        }
+        if (!patch_branches(&efs[n_funcs])) {
+            for (size_t k = 0; k <= n_funcs; k++) {
+                free(efs[k].code.data); free(efs[k].relocs); free(efs[k].dr);
+                free(efs[k].br); free(efs[k].bp);
             }
             free(efs); return false;
         }
@@ -567,6 +784,7 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
         fprintf(stderr, "aarch64->macho: no `_start` function in module\n");
         for (size_t k = 0; k < n_funcs; k++) {
             free(efs[k].code.data); free(efs[k].relocs); free(efs[k].dr);
+            free(efs[k].br); free(efs[k].bp);
         }
         free(efs); return false;
     }
@@ -606,6 +824,7 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
                     (int)r->callee.size, r->callee.str);
                 for (size_t k2 = 0; k2 < n_funcs; k2++) {
                     free(efs[k2].code.data); free(efs[k2].relocs); free(efs[k2].dr);
+                    free(efs[k2].br); free(efs[k2].bp);
                 }
                 free(efs); return false;
             }
@@ -1224,6 +1443,8 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
         free(efs[i].code.data);
         free(efs[i].relocs);
         free(efs[i].dr);
+        free(efs[i].br);
+        free(efs[i].bp);
     }
     free(efs);
 

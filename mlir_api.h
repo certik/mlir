@@ -334,6 +334,21 @@ typedef enum {
     OP_TYPE_WMIR_STORE,
     // Direct function call by symbol name.
     OP_TYPE_WMIR_CALL,
+    // Integer compare. `pred` attribute is one of:
+    //   "eq", "ne", "slt", "sgt", "sle", "sge", "ult", "ugt", "ule", "uge".
+    // Returns i32 with the Wasm 0/1 boolean convention.
+    OP_TYPE_WMIR_ICMP,
+    // Compare-to-zero. Returns i32 0/1 (1 if operand == 0).
+    OP_TYPE_WMIR_EQZ,
+    // Unconditional branch to a block (with operands forwarded as block args).
+    OP_TYPE_WMIR_BR,
+    // Conditional branch. operand[0] = i32 condition (zero -> false branch,
+    // non-zero -> true branch). `true_block` and `false_block` are successors.
+    OP_TYPE_WMIR_COND_BR,
+    // Unreachable terminator. Lowers to a trap (currently brk #1).
+    OP_TYPE_WMIR_UNREACHABLE,
+    // 3-operand select. result = cond != 0 ? a : b.
+    OP_TYPE_WMIR_SELECT,
 
     // -------------------------------------------------------------------------
     // aarch64 dialect — 1:1 with the AArch64 instruction encoding. The
@@ -370,6 +385,22 @@ typedef enum {
     // sp/fp/lr handling baked into the encoder).
     OP_TYPE_AARCH64_PROLOGUE,
     OP_TYPE_AARCH64_EPILOGUE,
+    // Comparison + condition-set. Used to materialise i32 booleans for
+    // `wmir.icmp` and `wmir.eqz` results.
+    OP_TYPE_AARCH64_CMP_REG,    // cmp Wn, Wm  (== subs Wzr, Wn, Wm)
+    OP_TYPE_AARCH64_CMP_IMM,    // cmp Wn, #imm12  (== subs Wzr, Wn, #imm12)
+    OP_TYPE_AARCH64_CSET,       // cset Wd, COND (== csinc Wd, Wzr, Wzr, invert(COND))
+    // Conditional select. `csel Wd, Wn, Wm, COND`. Used for wmir.select.
+    OP_TYPE_AARCH64_CSEL,
+    // Control-flow ops. `target` attribute is the symbolic label name.
+    // The macho backend tracks all `aarch64.label` positions inside a
+    // function and patches the branch immediates after layout.
+    OP_TYPE_AARCH64_B,          // b <label>     (PC-relative imm26)
+    OP_TYPE_AARCH64_B_COND,     // b.<cond> <label> (PC-relative imm19)
+    OP_TYPE_AARCH64_CBZ,        // cbz Wn, <label>
+    OP_TYPE_AARCH64_CBNZ,       // cbnz Wn, <label>
+    OP_TYPE_AARCH64_LABEL,      // pseudo: marks a position; emits 0 bytes
+    OP_TYPE_AARCH64_BRK,        // brk #imm16 (trap)
 
     OP_TYPE_COUNT
 } MLIR_OpType;

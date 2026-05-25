@@ -197,6 +197,12 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_WMIR_LOAD:       return str_lit("wmir.load");
         case OP_TYPE_WMIR_STORE:      return str_lit("wmir.store");
         case OP_TYPE_WMIR_CALL:       return str_lit("wmir.call");
+        case OP_TYPE_WMIR_ICMP:       return str_lit("wmir.icmp");
+        case OP_TYPE_WMIR_EQZ:        return str_lit("wmir.eqz");
+        case OP_TYPE_WMIR_BR:         return str_lit("wmir.br");
+        case OP_TYPE_WMIR_COND_BR:    return str_lit("wmir.cond_br");
+        case OP_TYPE_WMIR_UNREACHABLE:return str_lit("wmir.unreachable");
+        case OP_TYPE_WMIR_SELECT:     return str_lit("wmir.select");
         // aarch64 dialect
         case OP_TYPE_AARCH64_FUNC:         return str_lit("aarch64.func");
         case OP_TYPE_AARCH64_MOVZ:         return str_lit("aarch64.movz");
@@ -215,6 +221,16 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_AARCH64_ADD_DATA_LO:  return str_lit("aarch64.add_data_lo");
         case OP_TYPE_AARCH64_PROLOGUE:     return str_lit("aarch64.prologue");
         case OP_TYPE_AARCH64_EPILOGUE:     return str_lit("aarch64.epilogue");
+        case OP_TYPE_AARCH64_CMP_REG:      return str_lit("aarch64.cmp_reg");
+        case OP_TYPE_AARCH64_CMP_IMM:      return str_lit("aarch64.cmp_imm");
+        case OP_TYPE_AARCH64_CSET:         return str_lit("aarch64.cset");
+        case OP_TYPE_AARCH64_CSEL:         return str_lit("aarch64.csel");
+        case OP_TYPE_AARCH64_B:            return str_lit("aarch64.b");
+        case OP_TYPE_AARCH64_B_COND:       return str_lit("aarch64.b_cond");
+        case OP_TYPE_AARCH64_CBZ:          return str_lit("aarch64.cbz");
+        case OP_TYPE_AARCH64_CBNZ:         return str_lit("aarch64.cbnz");
+        case OP_TYPE_AARCH64_LABEL:        return str_lit("aarch64.label");
+        case OP_TYPE_AARCH64_BRK:          return str_lit("aarch64.brk");
         default: return str_lit("unknown");
     }
 }
