@@ -2674,7 +2674,7 @@ MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module) {
     MLIR_AppendRegionBlock(ctx, region, body);
     MLIR_RegionHandle regs[1] = { region };
     MLIR_OpHandle out_module = MLIR_CreateOp(ctx, OP_TYPE_MODULE,
-        str_lit("builtin.module"),
+        str_lit("module"),
         NULL, 0, NULL, 0, NULL, 0, NULL, 0, regs, 1,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);

@@ -468,7 +468,7 @@ MLIR_OpHandle mlir_wasmssa_to_wasmstack(MLIR_Context *ctx, MLIR_OpHandle ssa_mod
     MLIR_AppendRegionBlock(ctx, out_region, out_body);
     MLIR_RegionHandle out_regs[1] = { out_region };
     MLIR_OpHandle out_module = MLIR_CreateOp(ctx, OP_TYPE_MODULE,
-        str_lit("builtin.module"),
+        str_lit("module"),
         NULL, 0, NULL, 0, NULL, 0, NULL, 0, out_regs, 1,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
