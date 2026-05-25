@@ -278,10 +278,24 @@ static bool lower_func_func(LowerState *st, MLIR_OpHandle op,
     MLIR_LocationHandle loc = MLIR_GetOpLocation(op);
 
     // Copy attributes that matter: sym_name, function_type, sym_visibility,
-    // arg_attrs, res_attrs. We don't need `passthrough` at this stage.
+    // arg_attrs, res_attrs.
+    //
+    // We also keep the `wasm.import_module`/`wasm.import_name`/
+    // `wasm.export_name` attributes (used by the native LLVM->wasmssa
+    // backend in `mlir_llvm_to_wasmssa.c`), and additionally synthesize
+    // an upstream-MLIR `passthrough` array attribute carrying the
+    // standard LLVM IR function-attribute strings
+    // (`wasm-import-module`, `wasm-import-name`, `wasm-export-name`).
+    //
+    // Upstream MLIR's `translateModuleToLLVMIR` ignores unknown MLIR
+    // attributes, so without this the imports end up in module `env`
+    // instead of `wasi_snapshot_preview1` when going through the
+    // upstream WebAssembly backend. Clang attaches these same string
+    // attributes when compiling `__attribute__((import_module(...)))`.
     size_t na = MLIR_GetOpNumAttributes(op);
-    MLIR_AttributeHandle attrs_buf[16];
+    MLIR_AttributeHandle attrs_buf[18];
     size_t n_attrs = 0;
+    string imp_module = {0}, imp_name = {0}, exp_name = {0};
     for (size_t i = 0; i < na && n_attrs < 16; i++) {
         MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
         string an = MLIR_GetAttributeName(a);
@@ -289,11 +303,17 @@ static bool lower_func_func(LowerState *st, MLIR_OpHandle op,
             name_eq(an, "sym_visibility") ||
             name_eq(an, "arg_attrs") ||
             name_eq(an, "res_attrs") ||
-            name_eq(an, "llvm.linkage") ||
-            name_eq(an, "wasm.import_module") ||
-            name_eq(an, "wasm.import_name") ||
-            name_eq(an, "wasm.export_name")) {
+            name_eq(an, "llvm.linkage")) {
             attrs_buf[n_attrs++] = a;
+        } else if (name_eq(an, "wasm.import_module")) {
+            attrs_buf[n_attrs++] = a;
+            imp_module = MLIR_GetAttributeString(a);
+        } else if (name_eq(an, "wasm.import_name")) {
+            attrs_buf[n_attrs++] = a;
+            imp_name = MLIR_GetAttributeString(a);
+        } else if (name_eq(an, "wasm.export_name")) {
+            attrs_buf[n_attrs++] = a;
+            exp_name = MLIR_GetAttributeString(a);
         } else if (name_eq(an, "function_type")) {
             // Convert FunctionType -> LLVMFunctionType (which carries
             // is_var_arg and uses LLVM void instead of zero-results).
@@ -313,6 +333,35 @@ static bool lower_func_func(LowerState *st, MLIR_OpHandle op,
                 st->ctx, ret_ty, ins, ni, false);
             attrs_buf[n_attrs++] = MLIR_CreateAttributeType(
                 st->ctx, str_lit("function_type"), llvmft);
+        }
+    }
+
+    // Synthesize `passthrough` from the wasm.* attributes so the upstream
+    // MLIR -> LLVM IR translator emits the corresponding LLVM IR function
+    // attribute strings on the declaration. LLVM's WebAssembly backend
+    // reads these to decide the import-module / import-name / export-name
+    // of each function.
+    if (imp_module.size > 0 || imp_name.size > 0 || exp_name.size > 0) {
+        MLIR_AttributeHandle pt_elems[3];
+        size_t n_pt = 0;
+        string keys[3] = {
+            str_lit("wasm-import-module"),
+            str_lit("wasm-import-name"),
+            str_lit("wasm-export-name"),
+        };
+        string vals[3] = { imp_module, imp_name, exp_name };
+        for (size_t i = 0; i < 3; i++) {
+            if (vals[i].size == 0) continue;
+            MLIR_AttributeHandle pair[2] = {
+                MLIR_CreateAttributeString(st->ctx, str_lit(""), keys[i]),
+                MLIR_CreateAttributeString(st->ctx, str_lit(""), vals[i]),
+            };
+            pt_elems[n_pt++] = MLIR_CreateAttributeArray(
+                st->ctx, str_lit(""), pair, 2);
+        }
+        if (n_pt > 0 && n_attrs < 18) {
+            attrs_buf[n_attrs++] = MLIR_CreateAttributeArray(
+                st->ctx, str_lit("passthrough"), pt_elems, n_pt);
         }
     }
 

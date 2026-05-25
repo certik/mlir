@@ -1074,11 +1074,18 @@ name = "wasm_import_attr"
 targets = ["native", "wasm", "macho"]
 # Verifies that `__attribute__((__import_module__("..."),
 # __import_name__("...")))` on a forward declaration makes its way
-# all the way into the wasm import section. Without this, every
-# import lands in `env` and wasmtime fails to instantiate the
-# module with `unknown import: env::fd_write`.
+# all the way into the wasm import section, both on the native
+# llvm->wasmssa pipeline and on the upstream
+# llvm->LLVM-IR->wasm-backend pipeline. Without this, every import
+# lands in `env` and wasmtime fails to instantiate the module with
+# `unknown import: env::fd_write`. The upstream path requires
+# `wasm.import_module` / `wasm.import_name` MLIR attributes to be
+# translated into the LLVM IR function-attribute strings
+# `wasm-import-module` / `wasm-import-name` via the LLVM dialect's
+# `passthrough` array attribute (see
+# `liftWasmImportExportAttrsToPassthrough` in
+# `mlir_api_impl_upstream.cpp`).
 native_skip = true
-wasm_upstream_skip = true
 expected_stdout = "hi\n"
 
 [[test]]

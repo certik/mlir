@@ -228,10 +228,18 @@ static void parse_attributes(P *p, AttrInfo *out) {
             // Optional `(args)`.
             if (accept(p, TC_TK_LPAREN)) {
                 // Capture the first string-literal argument for the
-                // attributes we care about.
+                // attributes we care about. tinyc's lexer includes a
+                // trailing NUL in the literal's text (so string-literal
+                // values stored in `.rodata` are NUL-terminated); strip
+                // it here so the attribute value is a clean view of the
+                // string contents.
                 string str_arg = (string){0};
                 if (cur(p).kind == TC_TK_STRING_LIT) {
                     str_arg = cur(p).text;
+                    if (str_arg.size > 0 &&
+                        str_arg.str[str_arg.size - 1] == '\0') {
+                        str_arg.size--;
+                    }
                 }
                 // Skip the entire argument list, tracking parens.
                 int depth = 1;

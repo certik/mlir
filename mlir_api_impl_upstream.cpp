@@ -430,7 +430,25 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     }
     for (size_t i = 0; i < n_attrs; i++) {
         const auto *na = F<mlir::NamedAttribute>(attrs[i]);
-        state.addAttribute(na->getName(), na->getValue());
+        mlir::Attribute val = na->getValue();
+        // cf.switch's `case_values` is declared as `AnyIntElementsAttr`
+        // (DenseIntElementsAttr) in upstream MLIR. The agnostic C lifter
+        // creates it as DenseI32ArrayAttr (since it has no concept of
+        // shaped types). Upstream silently drops the property when the
+        // attribute type doesn't match, which then makes the
+        // intermediate cf.switch fail to lift to scf.index_switch.
+        // Convert here so the typed property storage accepts it.
+        if (nm == "cf.switch" && na->getName().strref() == "case_values") {
+            if (auto arr = mlir::dyn_cast<mlir::DenseI32ArrayAttr>(val)) {
+                auto i32Ty = mlir::IntegerType::get(&ctx, 32);
+                auto shaped = mlir::RankedTensorType::get(
+                    {(int64_t)arr.size()}, i32Ty);
+                val = mlir::DenseIntElementsAttr::get(
+                    shaped, llvm::ArrayRef<int32_t>(arr.asArrayRef().data(),
+                                                    arr.size()));
+            }
+        }
+        state.addAttribute(na->getName(), val);
     }
     for (size_t i = 0; i < n_regions; i++) {
         state.addRegion(std::unique_ptr<mlir::Region>(F<mlir::Region>(regions[i])));
@@ -454,6 +472,28 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
             }
             state.addAttribute("operandSegmentSizes",
                 mlir::DenseI32ArrayAttr::get(&ctx, seg));
+        } else if (nm == "cf.switch") {
+            // cf.switch has 3 operand segments: flag (always 1), default
+            // operands (successor 0), and case operands (sum across
+            // successors 1..N-1). It also needs case_operand_segments —
+            // one int per case telling BranchOpInterface how to slice
+            // the flat case-operand range per case.
+            size_t n_default = (n_successors >= 1) ? n_successor_operands[0] : 0;
+            int32_t n_case_total = 0;
+            llvm::SmallVector<int32_t, 4> case_seg;
+            for (size_t s = 1; s < n_successors; s++) {
+                int32_t c = (int32_t)n_successor_operands[s];
+                case_seg.push_back(c);
+                n_case_total += c;
+            }
+            llvm::SmallVector<int32_t, 3> seg;
+            seg.push_back((int32_t)n_operands);
+            seg.push_back((int32_t)n_default);
+            seg.push_back(n_case_total);
+            state.addAttribute("operandSegmentSizes",
+                mlir::DenseI32ArrayAttr::get(&ctx, seg));
+            state.addAttribute("case_operand_segments",
+                mlir::DenseI32ArrayAttr::get(&ctx, case_seg));
         }
     }
 
@@ -609,6 +649,7 @@ extern "C" MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle h,
                                                           const char *name) {
     auto *op = F<mlir::Operation>(h);
     auto &keep = opByNameAttrs()[op];
+    auto &mctx = globalCtx().mctx;
     auto stash = [&](mlir::Attribute a) -> MLIR_AttributeHandle {
         keep.emplace_back(std::make_unique<mlir::NamedAttribute>(
             mlir::StringAttr::get(op->getContext(), name), a));
@@ -623,6 +664,24 @@ extern "C" MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle h,
         if (nm == "var_callee_type") {
             if (auto t = call.getVarCalleeTypeAttr()) return stash(t);
             return MLIR_INVALID_HANDLE;
+        }
+    }
+    // cf.switch stores case_values as a DenseIntElementsAttr (typed
+    // property). The agnostic-API consumers (e.g. the C CF-to-SCF lifter)
+    // pass it in / read it out as a DenseI32ArrayAttr and parse the
+    // resulting `array<i32: V0, V1, ...>` text format. Round-trip the
+    // attribute back to DenseI32ArrayAttr here so reads under upstream
+    // produce the same text format as native.
+    if (mlir::isa<mlir::cf::SwitchOp>(op) &&
+        llvm::StringRef(name) == "case_values") {
+        if (auto sw = mlir::dyn_cast<mlir::cf::SwitchOp>(op)) {
+            if (auto cv = sw.getCaseValuesAttr()) {
+                llvm::SmallVector<int32_t, 8> vals;
+                vals.reserve(cv.getNumElements());
+                for (auto apv : cv.getValues<llvm::APInt>())
+                    vals.push_back((int32_t)apv.getSExtValue());
+                return stash(mlir::DenseI32ArrayAttr::get(&mctx, vals));
+            }
         }
     }
     if (auto a = op->getAttr(name)) return stash(a);
@@ -1944,6 +2003,48 @@ static void rewriteWasmMemoryIntrinsicsForUpstream(mlir::ModuleOp module) {
     }
 }
 
+// After the LLVM-lowering pass pipeline runs, convert our MLIR-level
+// `wasm.import_module` / `wasm.import_name` / `wasm.export_name`
+// attributes on `llvm.func` ops into the upstream LLVM dialect's
+// `passthrough` attribute. `passthrough` is the canonical mechanism for
+// forwarding arbitrary LLVM IR function attribute strings through
+// `translateModuleToLLVMIR`; LLVM's WebAssembly backend reads
+// `wasm-import-module` / `wasm-import-name` / `wasm-export-name`
+// function attributes to place imports in the correct WASI module
+// (`wasi_snapshot_preview1`) and to honor explicit exports. Without
+// this conversion, the upstream translator drops these on the floor
+// and all imports fall back to module `env`. (Clang itself attaches
+// these same strings when compiling `__attribute__((import_module(...)))`.)
+static void liftWasmImportExportAttrsToPassthrough(mlir::ModuleOp module) {
+    using namespace mlir;
+    module.walk([&](LLVM::LLVMFuncOp fn) {
+        struct KV { llvm::StringRef key; llvm::StringRef val; };
+        llvm::SmallVector<KV, 3> kvs;
+        if (auto a = fn->getAttrOfType<StringAttr>("wasm.import_module"))
+            kvs.push_back({"wasm-import-module", a.getValue()});
+        if (auto a = fn->getAttrOfType<StringAttr>("wasm.import_name"))
+            kvs.push_back({"wasm-import-name", a.getValue()});
+        if (auto a = fn->getAttrOfType<StringAttr>("wasm.export_name"))
+            kvs.push_back({"wasm-export-name", a.getValue()});
+        if (kvs.empty()) return;
+        auto &mctx = *module.getContext();
+        llvm::SmallVector<Attribute, 4> elements;
+        // Preserve any existing passthrough entries (the pass pipeline
+        // does not currently add any, but be defensive).
+        if (auto existing = fn.getPassthroughAttr()) {
+            for (Attribute e : existing) elements.push_back(e);
+        }
+        for (const KV &kv : kvs) {
+            Attribute pair_elts[2] = {
+                StringAttr::get(&mctx, kv.key),
+                StringAttr::get(&mctx, kv.val),
+            };
+            elements.push_back(ArrayAttr::get(&mctx, pair_elts));
+        }
+        fn.setPassthroughAttr(ArrayAttr::get(&mctx, elements));
+    });
+}
+
 extern "C" bool MLIR_LowerToLLVMDialectUpstream(MLIR_Context *ctx,
                                                 MLIR_OpHandle module_h) {
     (void)ctx;
@@ -2011,6 +2112,7 @@ extern "C" bool MLIR_LowerToLLVMDialectUpstream(MLIR_Context *ctx,
                      "MLIR_LowerToLLVMDialectUpstream: pass pipeline failed\n");
         return false;
     }
+    liftWasmImportExportAttrsToPassthrough(module);
     return true;
 }
 
@@ -2125,17 +2227,25 @@ extern "C" bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module_h) {
         mlir::IRRewriter rewriter(&mctx);
         (void)mlir::eraseUnreachableBlocks(rewriter, module->getRegions());
     }
-    // Opt-in path for the agnostic C port. When TINYC_LIFT_USE_NATIVE is
-    // set, run the native port first to normalize / lift what it can,
-    // then let upstream's liftLLVMFuncCFGToSCF finish the remainder.
-    // The native port always returns true (best effort); it leaves the
-    // IR in a valid state that upstream can complete.
-    const char *opt_in = std::getenv("TINYC_LIFT_USE_NATIVE");
-    if (opt_in && opt_in[0] && opt_in[0] != '0') {
-        MLIR_LiftCfToScfNative(ctx, module_h);
-    }
-    liftLLVMFuncCFGToSCF(module);
-    return true;
+    // Route the native (agnostic C) lift port for both API impls. The two
+    // impls used to diverge here: native ran `MLIR_LiftCfToScfNative` while
+    // upstream ran `liftLLVMFuncCFGToSCF` + `createLiftControlFlowToSCFPass`.
+    // Both lifts are individually valid, but they produce structurally
+    // different SCF (different scf.if result threading, different number
+    // of trivially-dead consts). When the native wasm pipeline
+    // (`mlir_llvm_to_wasmssa.c`) consumes the upstream-lifted IR, the
+    // resulting wasm has different carrier counts and local layouts;
+    // accumulated across all of tinyc's source files this produces a
+    // self-hosted `tinyc.wasm` that miscompiles its own input
+    // (e.g. `int main(){return 42;}` lowers to `func.return(NULL_OPERAND)`).
+    // The agnostic lifter only relies on MLIR_GetOpRegion / MLIR_GetBlockOp
+    // / MLIR_CreateOp etc, all of which dispatch through the upstream API
+    // impl correctly. Running the same lifter on both sides keeps the wasm
+    // output bit-identical between the `native` and `upstream_api` configs
+    // for the simple cases we test, and functionally correct for all of
+    // tinyc's self-host.
+    resetBlockOpCache();
+    return MLIR_LiftCfToScfNative(ctx, module_h);
 }
 
 extern "C" bool MLIR_LowerToLLVMDialectForWasmUpstream(MLIR_Context *ctx,

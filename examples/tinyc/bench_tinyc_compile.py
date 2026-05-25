@@ -18,21 +18,34 @@ Configurations:
 
 Linking always uses tinyc itself in --link mode (mlir_wasm_link.c).
 That keeps every step of the pipeline inside the benchmarked binary,
-which is what we want to measure.
+which is what we want to measure. The link step pulls in
+tinyc_wasm_vararg.wasm.o (the tinyc_va_arg_* shim), so the produced
+tinyc_bench.wasm is also runnable under wasmtime.
 
 Each (config, file) measurement is repeated --repeats times and the
 best run is reported (standard practice for compiler benchmarks: filters
 out OS noise without giving outliers undue weight). The per-config
 total is the sum of the best per-file times plus the best link time.
 
+Pass `--wasmtime` to run a second stage that uses each produced
+tinyc_bench.wasm under wasmtime to recompile every .c file again. The
+C source code inside every produced wasm is the same (our native tinyc),
+so functionally the three wasm binaries are equivalent — the only thing
+that varies is the code-generation quality of the backend that built
+the wasm. The wasmtime stage also reports pairwise bit-identity between
+the three produced wasm binaries.
+
 Usage:
     python examples/tinyc/bench_tinyc_compile.py            # default 3 repeats
     python examples/tinyc/bench_tinyc_compile.py --repeats 5
     python examples/tinyc/bench_tinyc_compile.py --csv out.csv
+    python examples/tinyc/bench_tinyc_compile.py --wasmtime # also run wasmtime stage
 
 Prereqs (pixi takes care of these for you):
     pixi run -e upstream build_tinyc_native_opt
     pixi run -e upstream build_tinyc_upstream_opt
+    pixi run build_tinyc_wasm        # needed for the --wasmtime stage
+                                     # (provides tinyc_wasm_vararg.wasm.o)
 """
 
 from __future__ import annotations
@@ -87,6 +100,7 @@ NATIVE_C_FILES = [
     "mlir_translate_to_llvm_ir.c",
     "mlir_translate_to_wasm.c",
     "mlir_wasm_to_wat.c",
+    "mlir_wasm_to_macho.c",
     "mlir_llvm_to_wasmssa.c",
     "mlir_wasmssa_to_wasmstack.c",
     "mlir_wasmstack_to_bin.c",
@@ -129,12 +143,13 @@ class Config:
             str(src),
         ]
 
-    def cmd_link(self, objs: list[Path], out: Path) -> list[str]:
+    def cmd_link(self, objs: list[Path], out: Path, extras: list[Path] | None = None) -> list[str]:
         return [
             str(self.binary), "--link",
             "--export=_start",
             "-o", str(out),
             *[str(o) for o in objs],
+            *([str(p) for p in (extras or [])]),
         ]
 
     def env(self) -> dict[str, str]:
@@ -185,13 +200,14 @@ def bench_compile_one(cfg: Config, src: Path, obj_dir: Path, repeats: int) -> tu
     return best, None
 
 
-def bench_link(cfg: Config, objs: list[Path], out: Path, repeats: int) -> tuple[float, str | None]:
+def bench_link(cfg: Config, objs: list[Path], out: Path, repeats: int,
+               extras: list[Path] | None = None) -> tuple[float, str | None]:
     env = cfg.env()
     best = float("inf")
     for _ in range(repeats):
         if out.exists():
             out.unlink()
-        elapsed, proc = time_run(cfg.cmd_link(objs, out), ROOT, env)
+        elapsed, proc = time_run(cfg.cmd_link(objs, out, extras), ROOT, env)
         if proc.returncode != 0:
             err = (proc.stderr or "").strip().splitlines()
             tail = err[-1] if err else f"rc={proc.returncode}"
@@ -242,6 +258,229 @@ def discover_configs() -> list[Config]:
             description="upstream API impl + upstream MLIR/LLVM lowering",
         ),
     ]
+
+
+# -----------------------------------------------------------------------------
+# Wasmtime stage: re-bench using the per-config tinyc.wasm produced above as
+# the compiler, executed under wasmtime. Every tinyc.wasm we produce was
+# linked with `tinyc_wasm_vararg.wasm.o`, so it runs under wasmtime with no
+# extra setup. The C source code inside every tinyc.wasm is the same (the
+# native tinyc), so functionally all three are equivalent — the only thing
+# that varies is the code quality produced by each backend.
+# -----------------------------------------------------------------------------
+
+def _rel(p: Path) -> str:
+    """Render p as a path relative to ROOT (since the wasmtime stage
+    runs with cwd=ROOT and mounts ROOT as `.`). wasm32-wasi resolves
+    paths via preopened FDs + relative components; passing absolute
+    paths or paths outside the preopened mount causes the wasm to
+    fail to open the file."""
+    try:
+        return str(Path(p).resolve().relative_to(ROOT))
+    except ValueError:
+        # Fall back to whatever the caller gave us; the wasm will
+        # likely fail to open it but we'll get a clearer error.
+        return str(p)
+
+
+def wasmtime_cmd_compile(wasmtime: str, wasm: Path, src: Path, obj: Path) -> list[str]:
+    return [
+        wasmtime, "--dir", ".",
+        _rel(wasm),
+        "--emit=wasm",
+        "--lowering=native",
+        *INCLUDE_FLAGS,
+        "-o", _rel(obj),
+        _rel(src),
+    ]
+
+
+def wasmtime_cmd_link(wasmtime: str, wasm: Path, objs: list[Path], out: Path,
+                      extras: list[Path]) -> list[str]:
+    return [
+        wasmtime, "--dir", ".",
+        _rel(wasm), "--link",
+        "--export=_start",
+        "-o", _rel(out),
+        *[_rel(o) for o in objs],
+        *[_rel(p) for p in extras],
+    ]
+
+
+def bench_wasmtime_compile_one(wasmtime: str, wasm: Path, src: Path,
+                                obj_dir: Path, repeats: int
+                                ) -> tuple[float, str | None]:
+    rel = src.relative_to(ROOT)
+    flat = str(rel).replace("/", "_").replace("\\", "_")
+    obj = obj_dir / f"{flat}.wasm.o"
+    best = float("inf")
+    for _ in range(repeats):
+        if obj.exists():
+            obj.unlink()
+        elapsed, proc = time_run(wasmtime_cmd_compile(wasmtime, wasm, src, obj), ROOT)
+        if proc.returncode != 0:
+            tail = _summarize_proc_output(proc)
+            return float("inf"), tail
+        if elapsed < best:
+            best = elapsed
+    return best, None
+
+
+def bench_wasmtime_link(wasmtime: str, wasm: Path, objs: list[Path], out: Path,
+                         extras: list[Path], repeats: int
+                         ) -> tuple[float, str | None]:
+    best = float("inf")
+    for _ in range(repeats):
+        if out.exists():
+            out.unlink()
+        elapsed, proc = time_run(wasmtime_cmd_link(wasmtime, wasm, objs, out, extras), ROOT)
+        if proc.returncode != 0:
+            tail = _summarize_proc_output(proc)
+            return float("inf"), tail
+        if elapsed < best:
+            best = elapsed
+    return best, None
+
+
+def _summarize_proc_output(proc: subprocess.CompletedProcess) -> str:
+    """Pick a single representative line from a failed run. tinyc itself
+    writes diagnostics to stdout (the wasm has no way to distinguish);
+    wasmtime / our linker write to stderr. Prefer stdout if present so
+    miscompilation reports come through cleanly; fall back to stderr; fall
+    back to rc."""
+    out_lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    err_lines = [ln for ln in (proc.stderr or "").splitlines() if ln.strip()]
+    if out_lines:
+        return out_lines[0]
+    if err_lines:
+        return err_lines[-1]
+    return f"rc={proc.returncode}"
+
+
+def run_wasmtime_stage(
+    configs: list[Config],
+    wasmtime: str,
+    repeats: int,
+) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, str]],
+           dict[str, float], dict[str, str | None], dict[str, float]]:
+    """Run the wasmtime stage. Returns (per-file results, per-file errors,
+    link times, link errors, compile totals)."""
+    results: dict[str, dict[str, float]] = {c.name: {} for c in configs}
+    errors: dict[str, dict[str, str]] = {c.name: {} for c in configs}
+    link_times: dict[str, float] = {}
+    link_errors: dict[str, str | None] = {}
+    compile_totals: dict[str, float] = {}
+
+    vararg = ROOT / "tinyc_wasm_vararg.wasm.o"
+    extras = [vararg] if vararg.exists() else []
+    if not extras:
+        print("warning: tinyc_wasm_vararg.wasm.o not found; the produced "
+              "tinyc.wasm may not be runnable under wasmtime. "
+              "Run `pixi run build_tinyc_wasm` first.")
+
+    print("\n" + "=" * 90)
+    print(" wasmtime stage: use each produced tinyc.wasm under wasmtime to")
+    print(" recompile the tinyc source tree to .wasm.o + link.")
+    print(" (functionally equivalent inputs — only the code-gen quality of")
+    print("  each backend affects the timings below)")
+    print("=" * 90)
+
+    for c in configs:
+        cfg_dir = BENCH_DIR / c.name
+        wasm = cfg_dir / "tinyc_bench.wasm"
+        if not wasm.exists():
+            print(f"\n[{c.name}] tinyc_bench.wasm not built — skipping wasmtime stage")
+            for src in ALL_SOURCES:
+                errors[c.name][src] = "no compiler wasm"
+                results[c.name][src] = float("inf")
+            link_times[c.name] = float("inf")
+            link_errors[c.name] = "no compiler wasm"
+            compile_totals[c.name] = 0.0
+            continue
+        out_dir = cfg_dir / "wasmtime_stage"
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
+        out_dir.mkdir(parents=True)
+        print(f"\n== wasmtime + {c.name} ({wasm.relative_to(ROOT)}) ==")
+        for src in ALL_SOURCES:
+            best, err = bench_wasmtime_compile_one(
+                wasmtime, wasm, ROOT / src, out_dir, repeats
+            )
+            results[c.name][src] = best
+            if err is not None:
+                errors[c.name][src] = err
+                print(f"  {src:55s}  FAIL  {err}")
+            else:
+                print(f"  {src:55s}  {fmt_ms(best)}")
+        compile_totals[c.name] = sum(
+            t for t in results[c.name].values() if t != float("inf")
+        )
+        if errors[c.name]:
+            print(
+                f"  (link)                                                   SKIPPED "
+                f"({len(errors[c.name])} compile failure(s))"
+            )
+            link_times[c.name] = float("inf")
+            link_errors[c.name] = "compile failures"
+            print(f"  {'TOTAL compile only':55s}  {fmt_s(compile_totals[c.name])}")
+        else:
+            objs = [
+                out_dir / f"{src.replace('/', '_').replace(os.sep, '_')}.wasm.o"
+                for src in ALL_SOURCES
+            ]
+            out_wasm = out_dir / "tinyc_stage2.wasm"
+            link_t, link_err = bench_wasmtime_link(
+                wasmtime, wasm, objs, out_wasm, extras, repeats
+            )
+            link_times[c.name] = link_t
+            link_errors[c.name] = link_err
+            if link_err is not None:
+                print(f"  (link)                                                   FAIL  {link_err}")
+            else:
+                print(f"  {'(link)':55s}  {fmt_ms(link_t)}")
+                print(f"  {'TOTAL':55s}  {fmt_s(compile_totals[c.name] + link_t)}")
+    return results, errors, link_times, link_errors, compile_totals
+
+
+def compare_produced_wasms(configs: list[Config]) -> None:
+    """Report sizes of, and pairwise bit-identity between, the
+    tinyc_bench.wasm binaries produced by the three configs. The
+    interesting pair is native vs upstream_api: they use identical
+    lowering (--lowering=native), so functionally equivalent output is
+    expected — but the API impls differ slightly in IR construction
+    order, so the bytes typically don't match."""
+    print("\n" + "=" * 90)
+    print(" produced tinyc.wasm comparison")
+    print("=" * 90)
+    wasms: dict[str, Path] = {}
+    for c in configs:
+        wasm = BENCH_DIR / c.name / "tinyc_bench.wasm"
+        if wasm.exists():
+            wasms[c.name] = wasm
+            print(f"  {c.name:15s}  {wasm.relative_to(ROOT)}  ({wasm.stat().st_size:>10} bytes)")
+        else:
+            print(f"  {c.name:15s}  (not built)")
+    names = list(wasms.keys())
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a_name, b_name = names[i], names[j]
+            a, b = wasms[a_name], wasms[b_name]
+            a_bytes = a.read_bytes()
+            b_bytes = b.read_bytes()
+            if a_bytes == b_bytes:
+                verdict = "BIT-IDENTICAL"
+            else:
+                # Find first differing offset for context.
+                n = min(len(a_bytes), len(b_bytes))
+                first_diff = next(
+                    (k for k in range(n) if a_bytes[k] != b_bytes[k]),
+                    n,
+                )
+                verdict = (
+                    f"DIFFER (sizes {len(a_bytes)} vs {len(b_bytes)}, "
+                    f"first diff at byte {first_diff})"
+                )
+            print(f"  {a_name} vs {b_name}: {verdict}")
 
 
 def print_per_file_table(
@@ -378,6 +617,14 @@ def main() -> int:
     ap.add_argument("--csv", type=Path, default=None, help="write detailed timings to this CSV")
     ap.add_argument("--only", action="append", default=None,
                     help="restrict to a specific config name (repeatable)")
+    ap.add_argument("--wasmtime", action="store_true",
+                    help="after the native bench, also run each produced "
+                         "tinyc.wasm under wasmtime to compile the tinyc "
+                         "source tree again and report per-file timings. "
+                         "Useful for measuring the runtime cost of the "
+                         "code produced by each backend.")
+    ap.add_argument("--wasmtime-binary", default="wasmtime",
+                    help="wasmtime executable to use (default: PATH lookup)")
     args = ap.parse_args()
 
     configs = discover_configs()
@@ -440,7 +687,16 @@ def main() -> int:
                 for src in ALL_SOURCES
             ]
             out_wasm = cfg_dir / "tinyc_bench.wasm"
-            link_t, link_err = bench_link(c, objs, out_wasm, args.repeats)
+            # Pull in the tinyc_va_arg_* shim so the produced wasm is
+            # actually runnable under wasmtime (this is also what
+            # selfhost_tinyc_wasm.sh does at its final link). The shim
+            # is built lazily by `pixi run build_tinyc_wasm`; if it
+            # isn't there, just link without it.
+            extras: list[Path] = []
+            vararg = ROOT / "tinyc_wasm_vararg.wasm.o"
+            if vararg.exists():
+                extras.append(vararg)
+            link_t, link_err = bench_link(c, objs, out_wasm, args.repeats, extras)
             link_times[c.name] = link_t
             link_errors[c.name] = link_err
             if link_err is not None:
@@ -456,6 +712,47 @@ def main() -> int:
 
     if args.csv:
         write_csv(args.csv, results, link_times, configs)
+
+    if args.wasmtime:
+        compare_produced_wasms(configs)
+        wasmtime_bin = shutil.which(args.wasmtime_binary) or args.wasmtime_binary
+        if not Path(wasmtime_bin).exists():
+            print(
+                f"\nerror: wasmtime binary {args.wasmtime_binary!r} not found "
+                f"on PATH; install wasmtime or pass --wasmtime-binary",
+                file=sys.stderr,
+            )
+            return 1
+        wt_results, wt_errors, wt_link_times, wt_link_errors, wt_compile_totals = (
+            run_wasmtime_stage(configs, wasmtime_bin, args.repeats)
+        )
+        print_per_file_table(wt_results, wt_errors, configs)
+        print_link_and_grand_total(wt_compile_totals, wt_link_times, wt_link_errors, configs)
+        # Speedup framing: with wasmtime, the most-optimized backend
+        # (upstream_full) should produce the fastest compiler. Report
+        # ratios relative to native (the slowest produced binary, since
+        # our own backend does no optimization).
+        if "native" in wt_compile_totals and wt_compile_totals["native"] > 0:
+            base_name = "native"
+            base_lt = wt_link_times.get(base_name, 0.0)
+            base_total = wt_compile_totals[base_name] + (
+                0.0 if base_lt == float("inf") else base_lt
+            )
+            if base_total > 0:
+                print(f"\nrelative to {base_name} (wasmtime stage, lower = faster):")
+                for c in configs:
+                    if c.name == base_name:
+                        continue
+                    lt = wt_link_times.get(c.name, 0.0)
+                    total = wt_compile_totals[c.name] + (
+                        0.0 if lt == float("inf") else lt
+                    )
+                    if total <= 0:
+                        continue
+                    ratio = total / base_total
+                    label = "slower" if ratio >= 1.0 else "faster"
+                    magnitude = ratio if ratio >= 1.0 else (base_total / total)
+                    print(f"  {c.name:18s} {magnitude:6.2f}x {label}")
 
     return 0
 

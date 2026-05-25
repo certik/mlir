@@ -380,6 +380,7 @@ test_tinyc_native_wasm = { cmd = "TINYC=./tinyc_native TINYC_TARGET=wasm TINYC_L
 build_tinyc_native_opt = { cmd = "bash examples/tinyc/build_tinyc_native_opt.sh", description = "Build a release-optimized (-O3 -flto) tinyc_native_opt for benchmarking" }
 build_tinyc_upstream_opt = { cmd = "bash examples/tinyc/build_tinyc_upstream_opt.sh", description = "Build a release-optimized (-O3) tinyc_upstream_opt for benchmarking" }
 bench_tinyc_compile = { cmd = "python examples/tinyc/bench_tinyc_compile.py", depends-on = ["build_tinyc_native_opt", "build_tinyc_upstream_opt"], description = "Benchmark the three tinyc configurations (native, upstream-api-only, upstream-full) compiling the tinyc source tree to wasm32; reports per-file + link + total wall-clock time" }
+bench_tinyc_compile_wasmtime = { cmd = "python examples/tinyc/bench_tinyc_compile.py --wasmtime", depends-on = ["build_tinyc_native_opt", "build_tinyc_upstream_opt", "build_tinyc_wasm"], description = "Same as bench_tinyc_compile, plus: take each produced tinyc.wasm and use it under wasmtime to recompile the tinyc source tree, reporting per-file wasmtime timings. Also reports pairwise bit-identity between the three produced tinyc.wasm binaries." }
 
 [feature.upstream.target.osx-arm64.tasks]
 test_tinyc_macho = { cmd = "TINYC=./tinyc_native TINYC_TARGET=macho TINYC_LOWERING=native python examples/tinyc/run_tinyc_tests.py", depends-on = ["build_tinyc_native"], description = "Run tinyC example compiler tests against the WASM->Mach-O ARM64 backend (Darwin/arm64 only)" }
