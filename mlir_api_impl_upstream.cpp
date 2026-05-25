@@ -184,15 +184,25 @@ mlir::Location locF(uintptr_t h) {
 }
 
 MLIR_OpType opTypeFromName(llvm::StringRef name) {
-    if (name == "builtin.module") return OP_TYPE_MODULE;
-    // Walk the canonical name table backwards. OP_TYPE_UNREGISTERED is the
-    // fallback.
-    for (int t = 0; t < 256; t++) {
-        string s = op_type_to_string((MLIR_OpType)t);
-        if (s.size == 0) continue;
-        if (name.size() == s.size && std::memcmp(name.data(), s.str, s.size) == 0)
-            return (MLIR_OpType)t;
+    // Lazily-populated reverse map. Built once on first call from the
+    // canonical name table (the linear scan we used to do here was hot
+    // in profiles — ~5% of total time during wasm lowering).
+    static llvm::DenseMap<llvm::StringRef, MLIR_OpType> *map = nullptr;
+    if (!map) {
+        map = new llvm::DenseMap<llvm::StringRef, MLIR_OpType>();
+        map->reserve(256);
+        for (int t = 0; t < 256; t++) {
+            string s = op_type_to_string((MLIR_OpType)t);
+            if (s.size == 0) continue;
+            // The canonical table entries are static string literals, so
+            // we can safely take a StringRef without copying.
+            (*map)[llvm::StringRef(s.str, s.size)] = (MLIR_OpType)t;
+        }
+        // Special case kept for parity with the old linear-scan path.
+        (*map)[llvm::StringRef("builtin.module")] = OP_TYPE_MODULE;
     }
+    auto it = map->find(name);
+    if (it != map->end()) return it->second;
     return OP_TYPE_UNREGISTERED;
 }
 
@@ -211,6 +221,82 @@ string mkRefString(llvm::StringRef src) {
     s.str  = const_cast<char *>(src.data());
     s.size = src.size();
     return s;
+}
+
+// Small LRU cache for MLIR_GetBlockOp / MLIR_GetBlockNumOps. mlir::Block
+// stores its ops in an intrusive linked list, so `std::advance(begin(), i)`
+// is O(i) and a natural `for (i=0; i<n; i++) GetBlockOp(b, i)` loop is
+// O(n^2). The cache lets sequential and locally-bounded accesses
+// (forward by one, backward by one, small jumps near the last position)
+// run in amortized O(1) by walking `Operation::getNextNode()` from the
+// last position instead of restarting at `begin()`.
+//
+// Multi-slot, not single-slot: the wasm lowering walks the IR recursively
+// (walk_block -> walk_op -> walk_block -> ...) AND interleaves iteration
+// over one block with mutations of another block (read from `mb`, append
+// to `out_body`). A single slot — or coarse-grained "nuke everything"
+// invalidation — would be clobbered on every mutation. NUM_SLOTS is sized
+// to comfortably exceed any nesting depth we hit in practice.
+//
+// Invalidation is per-block: each API entry point that mutates the op list
+// of block B (append, insert, erase, splice) clears only B's slot. Erase
+// also clears any slot whose cached `op` pointer matches the erased op
+// (so it never dangles past the erase). Upstream passes that run on the
+// IR (MLIR_LowerToLLVMDialect*, MLIR_LiftCfToScf) call `resetAll()` to
+// nuke everything, because they can arbitrarily rewrite the IR.
+struct BlockOpIterSlot {
+    mlir::Block *block = nullptr;
+    size_t idx = 0;
+    mlir::Operation *op = nullptr;
+    size_t cached_size = SIZE_MAX;  // SIZE_MAX = unknown; valid otherwise
+};
+struct BlockOpIterCache {
+    static constexpr size_t NUM_SLOTS = 16;
+    BlockOpIterSlot slots[NUM_SLOTS];
+    size_t next_evict = 0;  // round-robin replacement.
+
+    BlockOpIterSlot *find(mlir::Block *b) {
+        for (size_t i = 0; i < NUM_SLOTS; i++) {
+            if (slots[i].block == b && slots[i].op != nullptr) return &slots[i];
+        }
+        return nullptr;
+    }
+    BlockOpIterSlot *findOrEvict(mlir::Block *b) {
+        if (auto *s = find(b)) return s;
+        for (size_t i = 0; i < NUM_SLOTS; i++) {
+            if (slots[i].block == nullptr) {
+                slots[i] = {};
+                return &slots[i];
+            }
+        }
+        auto *s = &slots[next_evict];
+        next_evict = (next_evict + 1) % NUM_SLOTS;
+        *s = {};
+        return s;
+    }
+    void invalidateBlock(mlir::Block *b) {
+        if (!b) return;
+        for (size_t i = 0; i < NUM_SLOTS; i++) {
+            if (slots[i].block == b) slots[i] = {};
+        }
+    }
+    void invalidateOp(mlir::Operation *op) {
+        if (!op) return;
+        for (size_t i = 0; i < NUM_SLOTS; i++) {
+            if (slots[i].op == op) slots[i] = {};
+        }
+    }
+    void resetAll() {
+        for (size_t i = 0; i < NUM_SLOTS; i++) slots[i] = {};
+        next_evict = 0;
+    }
+};
+inline BlockOpIterCache &blockOpCache() {
+    static BlockOpIterCache c;
+    return c;
+}
+inline void resetBlockOpCache() {
+    blockOpCache().resetAll();
 }
 
 } // namespace
@@ -239,13 +325,22 @@ extern "C" void MLIR_AppendRegionBlock(MLIR_Context *, MLIR_RegionHandle r,
 }
 extern "C" void MLIR_AppendBlockOp(MLIR_Context *, MLIR_BlockHandle b,
                                     MLIR_OpHandle op) {
-    F<mlir::Block>(b)->push_back(F<mlir::Operation>(op));
+    auto *target = F<mlir::Block>(b);
+    auto *o = F<mlir::Operation>(op);
+    auto &cache = blockOpCache();
+    // op may be migrating from another block — invalidate its old slot.
+    if (auto *src = o->getBlock()) cache.invalidateBlock(src);
+    cache.invalidateBlock(target);
+    target->push_back(o);
 }
 extern "C" void MLIR_InsertBlockOpBeforeTerminator(MLIR_Context *,
                                                    MLIR_BlockHandle b,
                                                    MLIR_OpHandle op) {
     auto *block = F<mlir::Block>(b);
     auto *o = F<mlir::Operation>(op);
+    auto &cache = blockOpCache();
+    if (auto *src = o->getBlock()) cache.invalidateBlock(src);
+    cache.invalidateBlock(block);
     if (!block->empty() && block->back().hasTrait<mlir::OpTrait::IsTerminator>()) {
         block->getOperations().insert(mlir::Block::iterator(&block->back()), o);
     } else {
@@ -257,6 +352,9 @@ extern "C" void MLIR_InsertBlockOpAtIndex(MLIR_Context *,
                                           MLIR_OpHandle op, size_t idx) {
     auto *block = F<mlir::Block>(b);
     auto *o = F<mlir::Operation>(op);
+    auto &cache = blockOpCache();
+    if (auto *src = o->getBlock()) cache.invalidateBlock(src);
+    cache.invalidateBlock(block);
     auto &ops = block->getOperations();
     size_t n = 0;
     for (auto it = ops.begin(); it != ops.end(); ++it, ++n) {
@@ -414,7 +512,20 @@ extern "C" void MLIR_AppendOpAttribute(MLIR_Context *, MLIR_OpHandle oh,
 // -----------------------------------------------------------------------------
 
 extern "C" MLIR_OpType MLIR_GetOpType(MLIR_OpHandle h) {
-    return opTypeFromName(F<mlir::Operation>(h)->getName().getStringRef());
+    auto *op = F<mlir::Operation>(h);
+    // mlir::OperationName::getAsOpaquePointer() returns the interned
+    // Impl pointer — unique per registered op name. Cache the
+    // (name pointer -> MLIR_OpType) mapping so the common case is a
+    // single DenseMap lookup instead of a 256-entry string scan.
+    auto name = op->getName();
+    const void *key = name.getAsOpaquePointer();
+    static llvm::DenseMap<const void *, MLIR_OpType> *nameCache = nullptr;
+    if (!nameCache) nameCache = new llvm::DenseMap<const void *, MLIR_OpType>();
+    auto it = nameCache->find(key);
+    if (it != nameCache->end()) return it->second;
+    MLIR_OpType t = opTypeFromName(name.getStringRef());
+    (*nameCache)[key] = t;
+    return t;
 }
 extern "C" string MLIR_GetOpName(MLIR_OpHandle h) {
     auto sr = F<mlir::Operation>(h)->getName().getStringRef();
@@ -568,13 +679,73 @@ extern "C" MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_RegionHandle h, size_t i) {
 
 extern "C" size_t MLIR_GetBlockNumOps(MLIR_BlockHandle h) {
     auto *b = F<mlir::Block>(h);
+    auto &cache = blockOpCache();
+    if (auto *s = cache.find(b)) {
+        if (s->cached_size != SIZE_MAX) return s->cached_size;
+        size_t n = std::distance(b->begin(), b->end());
+        s->cached_size = n;
+        return n;
+    }
     return std::distance(b->begin(), b->end());
 }
 extern "C" MLIR_OpHandle MLIR_GetBlockOp(MLIR_BlockHandle h, size_t i) {
     auto *b = F<mlir::Block>(h);
+    auto &cache = blockOpCache();
+    if (auto *s = cache.find(b)) {
+        if (i == s->idx) {
+            return H(s->op);
+        }
+        if (i == s->idx + 1) {
+            auto *nx = s->op->getNextNode();
+            if (nx) {
+                s->idx = i;
+                s->op = nx;
+                return H(nx);
+            }
+        }
+        if (s->idx > 0 && i + 1 == s->idx) {
+            auto *pv = s->op->getPrevNode();
+            if (pv) {
+                s->idx = i;
+                s->op = pv;
+                return H(pv);
+            }
+        }
+        // Small jumps near the cached position: walk via getNextNode /
+        // getPrevNode from the cache instead of restarting from begin().
+        // The 64-step cap keeps worst-case behavior bounded if the caller
+        // does scattered access.
+        if (i > s->idx && i - s->idx < 64) {
+            auto *cur = s->op;
+            size_t delta = i - s->idx;
+            for (size_t k = 0; k < delta && cur; k++) cur = cur->getNextNode();
+            if (cur) {
+                s->idx = i;
+                s->op = cur;
+                return H(cur);
+            }
+        }
+        if (i < s->idx && s->idx - i < 64) {
+            auto *cur = s->op;
+            size_t delta = s->idx - i;
+            for (size_t k = 0; k < delta && cur; k++) cur = cur->getPrevNode();
+            if (cur) {
+                s->idx = i;
+                s->op = cur;
+                return H(cur);
+            }
+        }
+    }
+    // Fallback: scan from begin and seed the cache.
     auto it = b->begin();
     std::advance(it, i);
-    return H(&*it);
+    mlir::Operation *op = &*it;
+    auto *s = cache.findOrEvict(b);
+    s->block = b;
+    s->idx = i;
+    s->op = op;
+    s->cached_size = SIZE_MAX;  // unknown; will be filled by NumOps if called
+    return H(op);
 }
 extern "C" size_t MLIR_GetBlockNumArgs(MLIR_BlockHandle h) {
     return F<mlir::Block>(h)->getNumArguments();
@@ -873,10 +1044,28 @@ extern "C" string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle h) {
             return mkArenaString(ctx, std::string("unknown"));
         }
     }
+    // Cache the printed form keyed by the interned Type pointer. mlir::Type
+    // is uniqued in the MLIRContext, so the same logical type always maps
+    // to the same opaque pointer — repeated GetTypeString on the same type
+    // (extremely common during wasm lowering: every operand and result of
+    // every op queries its type's name) becomes a hash lookup + arena copy.
+    //
+    // We keep the canonical std::string in this long-lived cache and copy
+    // it into the (per-compile) arena on each hit, because the arena may
+    // be reset between compiles even though the MLIRContext lives on.
+    static llvm::DenseMap<const void *, std::string> *typeStringCache = nullptr;
+    if (!typeStringCache)
+        typeStringCache = new llvm::DenseMap<const void *, std::string>();
+    const void *key = t.getAsOpaquePointer();
+    auto it = typeStringCache->find(key);
+    if (it != typeStringCache->end()) {
+        return mkArenaString(ctx, it->second);
+    }
     std::string buf;
     llvm::raw_string_ostream os(buf);
     t.print(os);
     os.flush();
+    (*typeStringCache)[key] = buf;
     return mkArenaString(ctx, buf);
 }
 
@@ -1358,6 +1547,9 @@ extern "C" void MLIR_ReplaceAllUsesOfValue(MLIR_Context *,
 extern "C" void MLIR_EraseOp(MLIR_Context *, MLIR_OpHandle op_h) {
     if (op_h == MLIR_INVALID_HANDLE) return;
     auto *op = F<mlir::Operation>(op_h);
+    auto &cache = blockOpCache();
+    if (auto *blk = op->getBlock()) cache.invalidateBlock(blk);
+    cache.invalidateOp(op);  // cached pointer would dangle past erase
     // Drop any cached attribute snapshot for this Operation* — once the
     // op is erased the MLIR allocator may reuse the same address for a
     // freshly-constructed op (potentially of a different kind), and the
@@ -1374,6 +1566,13 @@ extern "C" void MLIR_SetOpRegion(MLIR_Context *, MLIR_OpHandle op_h,
     if (idx >= op->getNumRegions()) return;
     auto *newRegion = F<mlir::Region>(region_h);
     auto &dst = op->getRegion(idx);
+    // Blocks (and their op lists) are moved between regions. The blocks
+    // themselves are unchanged, so their cached op pointers stay valid —
+    // but to be safe against any block whose identity changes, clear
+    // cache entries for all blocks in either region.
+    auto &cache = blockOpCache();
+    for (auto &b : dst) cache.invalidateBlock(&b);
+    for (auto &b : *newRegion) cache.invalidateBlock(&b);
     dst.takeBody(*newRegion);
     delete newRegion;
 }
@@ -1384,6 +1583,8 @@ extern "C" MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *,
     if (op_h == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
     auto *op = F<mlir::Operation>(op_h);
     if (idx >= op->getNumRegions()) return MLIR_INVALID_HANDLE;
+    auto &cache = blockOpCache();
+    for (auto &b : op->getRegion(idx)) cache.invalidateBlock(&b);
     auto *out = new mlir::Region();
     out->takeBody(op->getRegion(idx));
     return H(out);
@@ -1422,6 +1623,9 @@ extern "C" void MLIR_MoveOpToBlockEnd(MLIR_Context *, MLIR_OpHandle op_h,
     if (op_h == MLIR_INVALID_HANDLE || dest_h == MLIR_INVALID_HANDLE) return;
     auto *op = F<mlir::Operation>(op_h);
     auto *dest = F<mlir::Block>(dest_h);
+    auto &cache = blockOpCache();
+    if (auto *src = op->getBlock()) cache.invalidateBlock(src);
+    cache.invalidateBlock(dest);
     op->moveBefore(dest, dest->end());
 }
 
@@ -1484,6 +1688,7 @@ extern "C" void MLIR_SetOpSuccessorOperands(MLIR_Context *, MLIR_OpHandle op_h,
 extern "C" void MLIR_EraseBlock(MLIR_Context *, MLIR_BlockHandle blk_h) {
     if (blk_h == MLIR_INVALID_HANDLE) return;
     auto *blk = F<mlir::Block>(blk_h);
+    blockOpCache().invalidateBlock(blk);
     if (blk->getParent() != nullptr) {
         // Detach without freeing contained ops/args.
         blk->getParent()->getBlocks().remove(blk);
@@ -1676,6 +1881,9 @@ extern "C" void MLIR_SpliceBlockOps(MLIR_Context *, MLIR_BlockHandle dst_h,
     if (dst_h == MLIR_INVALID_HANDLE || src_h == MLIR_INVALID_HANDLE) return;
     auto *dst = F<mlir::Block>(dst_h);
     auto *src = F<mlir::Block>(src_h);
+    auto &cache = blockOpCache();
+    cache.invalidateBlock(dst);
+    cache.invalidateBlock(src);
     dst->getOperations().splice(dst->end(), src->getOperations());
 }
 
@@ -1739,6 +1947,7 @@ static void rewriteWasmMemoryIntrinsicsForUpstream(mlir::ModuleOp module) {
 extern "C" bool MLIR_LowerToLLVMDialectUpstream(MLIR_Context *ctx,
                                                 MLIR_OpHandle module_h) {
     (void)ctx;
+    resetBlockOpCache();
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
@@ -1903,6 +2112,7 @@ extern "C" bool MLIR_LiftCfToScfNative(MLIR_Context *ctx,
 
 extern "C" bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module_h) {
     if (module_h == MLIR_INVALID_HANDLE) return false;
+    resetBlockOpCache();
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
@@ -1931,6 +2141,7 @@ extern "C" bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module_h) {
 extern "C" bool MLIR_LowerToLLVMDialectForWasmUpstream(MLIR_Context *ctx,
                                                        MLIR_OpHandle module_h) {
     (void)ctx;
+    resetBlockOpCache();
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
