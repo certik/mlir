@@ -1,3 +1,8 @@
+intern i32: yes
+intern i64: yes
+intern index: yes
+intern !llvm.ptr: yes
+intern i32==i64: no
 module() {
 ^bb0:
     func.func() {sym_name = "add"} {

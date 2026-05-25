@@ -32,6 +32,30 @@ int app_main(void) {
 
     MLIR_TypeHandle i32_ty = MLIR_CreateTypeInteger(&ctx, 32, true);
 
+    // Verify that semantically-equivalent simple types share a single
+    // MLIR_TypeHandle. The upstream backend has always done this (MLIR
+    // interns IntegerType / IndexType / ptr / etc. via `::get`); the
+    // native backend used to allocate a fresh IR_Type per call, which
+    // broke type-handle equality checks in the cf->scf lifter
+    // (get_undef_value / get_switch_value caches) and produced extra
+    // llvm.mlir.undef ops when the same i32 was looked up by handle.
+    // See mlir_api_impl.c's intern_type for the native fix.
+    {
+        MLIR_TypeHandle i32_a = MLIR_CreateTypeInteger(&ctx, 32, true);
+        MLIR_TypeHandle i32_b = MLIR_CreateTypeInteger(&ctx, 32, true);
+        MLIR_TypeHandle i64_a = MLIR_CreateTypeInteger(&ctx, 64, false);
+        MLIR_TypeHandle i64_b = MLIR_CreateTypeInteger(&ctx, 64, false);
+        MLIR_TypeHandle idx_a = MLIR_CreateTypeIndex(&ctx);
+        MLIR_TypeHandle idx_b = MLIR_CreateTypeIndex(&ctx);
+        MLIR_TypeHandle ptr_a = MLIR_CreateTypeLLVMPointer(&ctx);
+        MLIR_TypeHandle ptr_b = MLIR_CreateTypeLLVMPointer(&ctx);
+        print_string(i32_a == i32_b ? str_lit("intern i32: yes\n") : str_lit("intern i32: no\n"));
+        print_string(i64_a == i64_b ? str_lit("intern i64: yes\n") : str_lit("intern i64: no\n"));
+        print_string(idx_a == idx_b ? str_lit("intern index: yes\n") : str_lit("intern index: no\n"));
+        print_string(ptr_a == ptr_b ? str_lit("intern !llvm.ptr: yes\n") : str_lit("intern !llvm.ptr: no\n"));
+        print_string(i32_a == i64_a ? str_lit("intern i32==i64: yes\n") : str_lit("intern i32==i64: no\n"));
+    }
+
     // ---- module region/block ------------------------------------------------
     MLIR_RegionHandle module_region = MLIR_CreateRegion(&ctx);
     MLIR_BlockHandle  module_block  = MLIR_CreateBlock(&ctx);
