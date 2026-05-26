@@ -25,7 +25,7 @@ if errorlevel 1 exit /b 1
 
 link /nologo /out:tinyc.exe ^
     upstream_main.obj lex.obj preprocess.obj parse.obj emit.obj driver.obj ^
-    mlir_op_names.obj mlir_lower_to_llvm.obj mlir_translate_to_llvm_ir.obj mlir_translate_to_wasm.obj mlir_wasm_to_wat.obj mlir_wasm_to_macho.obj mlir_llvm_to_wasmssa.obj mlir_wasmssa_to_wasmstack.obj mlir_wasmstack_to_bin.obj mlir_wasm_link.obj mlir_generic_printer.obj mlir_lift_cf_to_scf.obj mlir_api_impl_upstream.obj ^
+    mlir_op_names.obj mlir_lower_to_llvm.obj mlir_translate_to_llvm_ir.obj mlir_translate_to_wasm.obj mlir_wasm_to_wat.obj mlir_wasm_to_macho.obj mlir_llvm_to_wasmssa.obj mlir_wasmssa_to_wasmstack.obj mlir_wasmstack_to_bin.obj mlir_wasm_link.obj mlir_wasmssa_to_wmir.obj mlir_wmir_to_aarch64.obj mlir_aarch64_to_macho.obj mlir_generic_printer.obj mlir_lift_cf_to_scf.obj mlir_api_impl_upstream.obj ^
     io.obj buddy.obj arena.obj scratch.obj format.obj math.obj string.obj strbuf.obj mem.obj numconv.obj assert.obj exit.obj platform_windows.obj ^
     /LIBPATH:"%CONDA_PREFIX%\Library\lib" @mlir_libs.rsp %LLVM_LIBS% ntdll.lib zlib.lib zstd.lib
 if errorlevel 1 exit /b 1

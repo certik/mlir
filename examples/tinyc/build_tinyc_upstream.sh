@@ -24,7 +24,7 @@ $CC -c -g -DTINYC_HAS_UPSTREAM -I corec -I . $COREC_C_FILES $TINYC_C_FILES tests
 $CC -c -g -I corec -I . -DPLATFORM_SKIP_ENTRY $PLATFORM_C
 $CXX -c -std=c++17 -fno-rtti -g -I corec -I . -I "$CONDA_PREFIX/include" mlir_api_impl_upstream.cpp
 $CXX -g -o tinyc \
-    upstream_main.o lex.o preprocess.o parse.o emit.o driver.o mlir_api_impl_upstream.o mlir_op_names.o mlir_lower_to_llvm.o mlir_translate_to_llvm_ir.o mlir_translate_to_wasm.o mlir_wasm_to_wat.o mlir_wasm_to_macho.o mlir_llvm_to_wasmssa.o mlir_wasmssa_to_wasmstack.o mlir_wasmstack_to_bin.o mlir_wasm_link.o mlir_generic_printer.o mlir_lift_cf_to_scf.o \
+    upstream_main.o lex.o preprocess.o parse.o emit.o driver.o mlir_api_impl_upstream.o mlir_op_names.o mlir_lower_to_llvm.o mlir_translate_to_llvm_ir.o mlir_translate_to_wasm.o mlir_wasm_to_wat.o mlir_wasm_to_macho.o mlir_llvm_to_wasmssa.o mlir_wasmssa_to_wasmstack.o mlir_wasmstack_to_bin.o mlir_wasm_link.o mlir_wasmssa_to_wmir.o mlir_wmir_to_aarch64.o mlir_aarch64_to_macho.o mlir_generic_printer.o mlir_lift_cf_to_scf.o \
     io.o buddy.o arena.o scratch.o format.o math.o string.o strbuf.o mem.o numconv.o assert.o exit.o $PLATFORM_OBJ \
     -L "$CONDA_PREFIX/lib" $GROUP_START $MLIR_LIBS $LLVM_LIBS $GROUP_END $SYS_LIBS \
     -Wl,-rpath,"$CONDA_PREFIX/lib"

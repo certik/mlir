@@ -19,7 +19,7 @@ if errorlevel 1 exit /b 1
 
 link /nologo /out:tinyc_native.exe ^
     upstream_main.obj lex.obj preprocess.obj parse.obj emit.obj driver.obj ^
-    mlir_api_impl.obj mlir_op_names.obj mlir_lower_to_llvm.obj mlir_translate_to_llvm_ir.obj mlir_translate_to_wasm.obj mlir_wasm_to_wat.obj mlir_wasm_to_macho.obj mlir_llvm_to_wasmssa.obj mlir_wasmssa_to_wasmstack.obj mlir_wasmstack_to_bin.obj mlir_wasm_link.obj mlir_lift_cf_to_scf.obj ^
+    mlir_api_impl.obj mlir_op_names.obj mlir_lower_to_llvm.obj mlir_translate_to_llvm_ir.obj mlir_translate_to_wasm.obj mlir_wasm_to_wat.obj mlir_wasm_to_macho.obj mlir_llvm_to_wasmssa.obj mlir_wasmssa_to_wasmstack.obj mlir_wasmstack_to_bin.obj mlir_wasm_link.obj mlir_wasmssa_to_wmir.obj mlir_wmir_to_aarch64.obj mlir_aarch64_to_macho.obj mlir_lift_cf_to_scf.obj ^
     tokenizer.obj mlir_parser.obj op_parsers.obj mlir_classic_printer.obj mlir_generic_printer.obj ^
     io.obj buddy.obj arena.obj scratch.obj format.obj math.obj string.obj strbuf.obj mem.obj numconv.obj assert.obj exit.obj platform_windows.obj ^
     ntdll.lib shell32.lib
