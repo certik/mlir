@@ -2284,6 +2284,25 @@ static MLIR_OpHandle synth_fd_write(MLIR_Context *ctx) {
 }
 
 // -----------------------------------------------------------------------------
+// WASI proc_exit(i32 exit_code) -> noreturn: x16=1, svc #0x80.
+// Used by the wasm->wasmstack->wasmssa lifter pipeline: wasm-ld synthesises
+// a `_start` that calls `__original_main` then `proc_exit`, and the lifter
+// preserves that call. The C-frontend pipeline doesn't generate this call
+// at all (the wmir backend's own synth_start does the syscall directly).
+// -----------------------------------------------------------------------------
+static MLIR_OpHandle synth_proc_exit(MLIR_Context *ctx) {
+    MLIR_BlockHandle entry;
+    MLIR_RegionHandle region = synth_leaf_begin(ctx, &entry, 16);
+    // exit_code already in x0/w0 per AAPCS; just set syscall # and trap.
+    emit_movz(ctx, entry, /*rd=*/16, /*imm16=*/1, /*hw=*/0, /*sf=*/true);
+    emit_svc(ctx, entry, 0x80);
+    // Unreachable, but emit a clean ret for IR well-formedness.
+    emit_epilogue(ctx, entry, /*frame_size=*/16);
+    emit_ret(ctx, entry);
+    return synth_leaf_finish(ctx, region, "proc_exit", 9);
+}
+
+// -----------------------------------------------------------------------------
 // tinyc_va_arg_i32(i32 ap_ofs) -> i32: read i32 at *ap, advance *ap by 4.
 // `ap` is a wasm offset to a 4-byte cell that itself stores the current
 // va_list cursor (a wasm offset to the next arg in linmem).
@@ -3095,6 +3114,7 @@ typedef struct {
     bool    needs_memcmp;
     bool    needs_memchr;
     bool    needs_fd_write;
+    bool    needs_proc_exit;
     bool    needs_va_arg_i32;
     bool    needs_va_arg_i64;
     bool    needs_va_arg_ptr;
@@ -3136,6 +3156,7 @@ static void scan_block(MLIR_BlockHandle blk, ModInfo *mi) {
             if (EQ_LIT(callee, "memcmp"))        mi->needs_memcmp      = true;
             if (EQ_LIT(callee, "memchr"))        mi->needs_memchr      = true;
             if (EQ_LIT(callee, "fd_write"))      mi->needs_fd_write    = true;
+            if (EQ_LIT(callee, "proc_exit"))     mi->needs_proc_exit   = true;
             if (EQ_LIT(callee, "tinyc_va_arg_i32")) mi->needs_va_arg_i32 = true;
             if (EQ_LIT(callee, "tinyc_va_arg_i64")) mi->needs_va_arg_i64 = true;
             if (EQ_LIT(callee, "tinyc_va_arg_ptr")) mi->needs_va_arg_ptr = true;
@@ -3302,6 +3323,11 @@ MLIR_OpHandle mlir_wmir_to_aarch64(MLIR_Context *ctx, MLIR_OpHandle wmir_module)
     }
     if (mi.needs_fd_write) {
         MLIR_OpHandle p = synth_fd_write(ctx);
+        if (!p) return MLIR_INVALID_HANDLE;
+        MLIR_AppendBlockOp(ctx, out_body, p);
+    }
+    if (mi.needs_proc_exit) {
+        MLIR_OpHandle p = synth_proc_exit(ctx);
         if (!p) return MLIR_INVALID_HANDLE;
         MLIR_AppendBlockOp(ctx, out_body, p);
     }
