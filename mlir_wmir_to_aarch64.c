@@ -749,17 +749,29 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
             }
             case OP_TYPE_WMIR_LOAD: {
                 int64_t off = at_i(op, "memory_offset");
+                int64_t sz  = at_i(op, "mem_size");
+                if (sz == 0) sz = 4;
                 LD_OPERAND(9, 0);
                 emit_add_reg(ctx, dst_blk, 10, 28, 9, /*sf=*/true);
-                emit_ldr_w(ctx, dst_blk, 9, 10, (uint16_t)off);
+                if (sz == 8) {
+                    emit_ldr_x(ctx, dst_blk, 9, 10, (uint16_t)off);
+                } else {
+                    emit_ldr_w(ctx, dst_blk, 9, 10, (uint16_t)off);
+                }
                 ST_RESULT(9, 0);
                 break;
             }
             case OP_TYPE_WMIR_STORE: {
                 int64_t off = at_i(op, "memory_offset");
+                int64_t sz  = at_i(op, "mem_size");
+                if (sz == 0) sz = 4;
                 LD_OPERAND(9, 0); LD_OPERAND(11, 1);
                 emit_add_reg(ctx, dst_blk, 10, 28, 9, /*sf=*/true);
-                emit_str_w(ctx, dst_blk, 11, 10, (uint16_t)off);
+                if (sz == 8) {
+                    emit_str_x(ctx, dst_blk, 11, 10, (uint16_t)off);
+                } else {
+                    emit_str_w(ctx, dst_blk, 11, 10, (uint16_t)off);
+                }
                 break;
             }
             case OP_TYPE_WMIR_CALL: {

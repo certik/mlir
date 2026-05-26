@@ -406,6 +406,48 @@ static bool lower_wasmssa_op(Lowerer *L, MLIR_OpHandle src_op) {
         return true;
     }
 
+    // wasmssa.unop {wasm_opcode = ...}. We only handle the integer
+    // conversion opcodes here; floats are deferred.
+    //   0xa7 (167) i32.wrap_i64       -> wmir.trunc i64 -> i32
+    //   0xac (172) i64.extend_i32_s   -> wmir.sext  i32 -> i64
+    //   0xad (173) i64.extend_i32_u   -> wmir.zext  i32 -> i64
+    //   0xc0 (192) i32.extend8_s      -> trunc to i8 then sext to i32 (we
+    //                                    just emit a sext via i8 conceptually;
+    //                                    for now masked via and+sxtb path)
+    case OP_TYPE_WASMSSA_UNOP: {
+        int64_t opc = at_i(src_op, "wasm_opcode");
+        MLIR_ValueHandle a;
+        if (!vmap_get(L->vmap, MLIR_GetOpOperand(src_op, 0), &a)) {
+            fprintf(stderr, "wmir: unbound operand on wasmssa.unop\n");
+            return false;
+        }
+        MLIR_OpType k;
+        MLIR_TypeHandle rt;
+        switch (opc) {
+        case 0xa7: k = OP_TYPE_WMIR_TRUNC;
+                   rt = MLIR_CreateTypeInteger(ctx, 32, true); break;
+        case 0xac: k = OP_TYPE_WMIR_SEXT;
+                   rt = MLIR_CreateTypeInteger(ctx, 64, true); break;
+        case 0xad: k = OP_TYPE_WMIR_ZEXT;
+                   rt = MLIR_CreateTypeInteger(ctx, 64, true); break;
+        default:
+            fprintf(stderr,
+                "wmir: wasmssa.unop opcode 0x%llx not yet supported\n",
+                (long long)opc);
+            return false;
+        }
+        MLIR_TypeHandle res_ty[1] = { rt };
+        MLIR_ValueHandle res[1] = {
+            MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0, rt,
+                (string){0}, MLIR_CreateLocationUnknown(ctx, (string){0}))
+        };
+        MLIR_OpHandle out = build_op_simple(ctx, k,
+            NULL, 0, res_ty, 1, res, &a, 1);
+        L_append(L, out);
+        vmap_set(L->vmap, MLIR_GetOpResult(src_op, 0), res[0]);
+        return true;
+    }
+
     case OP_TYPE_WASMSSA_SELECT: {
         // wasmssa.select(%a, %b, %cond) -> R   (cond is the LAST operand;
         // see mlir_llvm_to_wasmssa.c which orders args as a,b,cond).
@@ -465,7 +507,9 @@ static bool lower_wasmssa_op(Lowerer *L, MLIR_OpHandle src_op) {
         int64_t off = at_i(src_op, "memory_offset");
         int64_t sz  = at_i(src_op, "mem_size_bytes");
         uint8_t vt  = (uint8_t)at_i(src_op, "valtype");
-        if (!(sz == 4 && vt == WT_I32)) {
+        bool ok = (sz == 4 && vt == WT_I32) ||
+                  (sz == 8 && vt == WT_I64);
+        if (!ok) {
             fprintf(stderr,
                 "wmir: wasmssa.load mem_size=%lld valtype=%u not yet supported\n",
                 (long long)sz, (unsigned)vt);
@@ -476,15 +520,21 @@ static bool lower_wasmssa_op(Lowerer *L, MLIR_OpHandle src_op) {
             fprintf(stderr, "wmir: unbound operand on wasmssa.load\n");
             return false;
         }
-        MLIR_AttributeHandle attrs[1] = { attr_i32(ctx, "memory_offset", off) };
-        MLIR_TypeHandle res_ty[1] = { MLIR_CreateTypeInteger(ctx, 32, true) };
+        MLIR_AttributeHandle attrs[2] = {
+            attr_i32(ctx, "memory_offset", off),
+            attr_i32(ctx, "mem_size",      sz),
+        };
+        MLIR_TypeHandle res_ty[1] = {
+            (vt == WT_I64) ? MLIR_CreateTypeInteger(ctx, 64, true)
+                           : MLIR_CreateTypeInteger(ctx, 32, true)
+        };
         MLIR_ValueHandle res[1] = {
             MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0, res_ty[0],
                 (string){0}, MLIR_CreateLocationUnknown(ctx, (string){0}))
         };
         MLIR_ValueHandle ops[1] = { addr };
         MLIR_OpHandle out = build_op_simple(ctx, OP_TYPE_WMIR_LOAD,
-            attrs, 1, res_ty, 1, res, ops, 1);
+            attrs, 2, res_ty, 1, res, ops, 1);
         L_append(L, out);
         vmap_set(L->vmap, MLIR_GetOpResult(src_op, 0), res[0]);
         return true;
@@ -494,7 +544,9 @@ static bool lower_wasmssa_op(Lowerer *L, MLIR_OpHandle src_op) {
         int64_t off = at_i(src_op, "memory_offset");
         int64_t sz  = at_i(src_op, "mem_size_bytes");
         uint8_t vt  = (uint8_t)at_i(src_op, "valtype");
-        if (!(sz == 4 && vt == WT_I32)) {
+        bool ok = (sz == 4 && vt == WT_I32) ||
+                  (sz == 8 && vt == WT_I64);
+        if (!ok) {
             fprintf(stderr,
                 "wmir: wasmssa.store mem_size=%lld valtype=%u not yet supported\n",
                 (long long)sz, (unsigned)vt);
@@ -506,10 +558,13 @@ static bool lower_wasmssa_op(Lowerer *L, MLIR_OpHandle src_op) {
             fprintf(stderr, "wmir: unbound operand on wasmssa.store\n");
             return false;
         }
-        MLIR_AttributeHandle attrs[1] = { attr_i32(ctx, "memory_offset", off) };
+        MLIR_AttributeHandle attrs[2] = {
+            attr_i32(ctx, "memory_offset", off),
+            attr_i32(ctx, "mem_size",      sz),
+        };
         MLIR_ValueHandle ops[2] = { addr, val };
         MLIR_OpHandle out = build_op_simple(ctx, OP_TYPE_WMIR_STORE,
-            attrs, 1, NULL, 0, NULL, ops, 2);
+            attrs, 2, NULL, 0, NULL, ops, 2);
         L_append(L, out);
         return true;
     }
