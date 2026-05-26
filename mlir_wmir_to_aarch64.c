@@ -1740,8 +1740,7 @@ static MLIR_OpHandle synth_print_i64(MLIR_Context *ctx) {
     }
     emit_movz(ctx, bskip, /*rd=*/0, /*imm16=*/1, /*hw=*/0, /*sf=*/true);
     emit_mov_x(ctx, bskip, /*rd=*/1, /*rn=*/11);
-    emit_movz(ctx, bskip, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, bskip, 0x80);
+    emit_bl(ctx, bskip, str_lit("_write"));
     emit_epilogue(ctx, bskip, /*frame_size=*/32);
     emit_ret(ctx, bskip);
 
@@ -1771,8 +1770,7 @@ static MLIR_OpHandle synth_print_newline(MLIR_Context *ctx) {
     // x1 = sp  ->  add x1, sp, #0
     emit_add_imm(ctx, blk, /*rd=*/1, /*rn=*/31, /*imm12=*/0, /*sf=*/true);
     emit_movz(ctx, blk, /*rd=*/2, /*imm16=*/1, /*hw=*/0, /*sf=*/true);
-    emit_movz(ctx, blk, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, blk, 0x80);
+    emit_bl(ctx, blk, str_lit("_write"));
     emit_epilogue(ctx, blk, /*frame_size=*/16);
     emit_ret(ctx, blk);
 
@@ -1832,8 +1830,7 @@ static MLIR_OpHandle synth_print_str(MLIR_Context *ctx) {
     emit_sub_reg(ctx, bdone, /*rd=*/2, /*rn=*/11, /*rm=*/10, /*sf=*/true);
     emit_mov_x(ctx, bdone, /*rd=*/1, /*rn=*/10);
     emit_movz(ctx, bdone, /*rd=*/0, /*imm16=*/1, /*hw=*/0, /*sf=*/true);
-    emit_movz(ctx, bdone, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, bdone, 0x80);
+    emit_bl(ctx, bdone, str_lit("_write"));
     // Append '\n' (matches runtime.c semantics: printStr always emits
     // a trailing newline). Reuse the prologue stack slot at [sp, #0].
     emit_movz(ctx, bdone, /*rd=*/9, /*imm16=*/0x0a, /*hw=*/0, /*sf=*/false);
@@ -1841,8 +1838,7 @@ static MLIR_OpHandle synth_print_str(MLIR_Context *ctx) {
     emit_movz(ctx, bdone, /*rd=*/0, /*imm16=*/1, /*hw=*/0, /*sf=*/true);
     emit_add_imm(ctx, bdone, /*rd=*/1, /*rn=*/31, /*imm12=*/0, /*sf=*/true);
     emit_movz(ctx, bdone, /*rd=*/2, /*imm16=*/1, /*hw=*/0, /*sf=*/true);
-    emit_movz(ctx, bdone, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, bdone, 0x80);
+    emit_bl(ctx, bdone, str_lit("_write"));
     emit_epilogue(ctx, bdone, /*frame_size=*/16);
     emit_ret(ctx, bdone);
 
@@ -1865,8 +1861,7 @@ static void emit_write_stdout(MLIR_Context *ctx, MLIR_BlockHandle blk,
     if (len_reg != 2) emit_mov_x(ctx, blk, /*rd=*/2, /*rn=*/len_reg);
     if (ptr_reg != 1) emit_mov_x(ctx, blk, /*rd=*/1, /*rn=*/ptr_reg);
     emit_movz(ctx, blk, /*rd=*/0,  /*imm16=*/1, /*hw=*/0, /*sf=*/true);
-    emit_movz(ctx, blk, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, blk, 0x80);
+    emit_bl(ctx, blk, str_lit("_write"));
 }
 
 // =============================================================================
@@ -1977,8 +1972,7 @@ static MLIR_OpHandle synth_printf(MLIR_Context *ctx) {
     emit_movz(ctx, write_lit, /*rd=*/2, /*imm16=*/1, /*hw=*/0, /*sf=*/true);
     emit_add_imm(ctx, write_lit, /*rd=*/1, /*rn=*/31, /*imm12=*/0, /*sf=*/true);
     emit_movz(ctx, write_lit, /*rd=*/0,  /*imm16=*/1, /*hw=*/0, /*sf=*/true);
-    emit_movz(ctx, write_lit, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, write_lit, 0x80);
+    emit_bl(ctx, write_lit, str_lit("_write"));
     emit_b(ctx, write_lit, loop_top);
 
     // ---------- saw_pct ----------
@@ -2036,8 +2030,7 @@ static MLIR_OpHandle synth_printf(MLIR_Context *ctx) {
     emit_movz(ctx, spec_pct, /*rd=*/2, /*imm16=*/1, /*hw=*/0, /*sf=*/true);
     emit_add_imm(ctx, spec_pct, /*rd=*/1, /*rn=*/31, /*imm12=*/0, /*sf=*/true);
     emit_movz(ctx, spec_pct, /*rd=*/0,  /*imm16=*/1, /*hw=*/0, /*sf=*/true);
-    emit_movz(ctx, spec_pct, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, spec_pct, 0x80);
+    emit_bl(ctx, spec_pct, str_lit("_write"));
     emit_b(ctx, spec_pct, loop_top);
 
     // ---------- spec_decimal ----------
@@ -2109,8 +2102,7 @@ static MLIR_OpHandle synth_printf(MLIR_Context *ctx) {
     emit_sub_reg(ctx, spec_s_done, /*rd=*/2, /*rn=*/11, /*rm=*/10, /*sf=*/true);
     emit_mov_x(ctx, spec_s_done, /*rd=*/1, /*rn=*/10);
     emit_movz(ctx, spec_s_done, /*rd=*/0,  /*imm16=*/1, /*hw=*/0, /*sf=*/true);
-    emit_movz(ctx, spec_s_done, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, spec_s_done, 0x80);
+    emit_bl(ctx, spec_s_done, str_lit("_write"));
     emit_b(ctx, spec_s_done, loop_top);
 
     // ---------- spec_c ----------
@@ -2122,8 +2114,7 @@ static MLIR_OpHandle synth_printf(MLIR_Context *ctx) {
     emit_movz(ctx, spec_c, /*rd=*/2, /*imm16=*/1, /*hw=*/0, /*sf=*/true);
     emit_add_imm(ctx, spec_c, /*rd=*/1, /*rn=*/31, /*imm12=*/0, /*sf=*/true);
     emit_movz(ctx, spec_c, /*rd=*/0,  /*imm16=*/1, /*hw=*/0, /*sf=*/true);
-    emit_movz(ctx, spec_c, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, spec_c, 0x80);
+    emit_bl(ctx, spec_c, str_lit("_write"));
     emit_b(ctx, spec_c, loop_top);
 
     // ---------- spec_f ----------
@@ -2505,8 +2496,7 @@ static MLIR_OpHandle synth_fd_write(MLIR_Context *ctx) {
     emit_mov_x(ctx, loop, /*rd=*/0, /*rn=*/19);
     emit_mov_x(ctx, loop, /*rd=*/1, /*rn=*/11);
     emit_mov_x(ctx, loop, /*rd=*/2, /*rn=*/12);
-    emit_movz(ctx, loop, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, loop, 0x80);
+    emit_bl(ctx, loop, str_lit("_write"));
     // Accumulate bytes-written. x0 holds ssize_t (negative on error). We
     // intentionally don't branch on error here — the simplest tinyc
     // pipelines all just call write to a known-good fd, and dropping a
@@ -3252,8 +3242,7 @@ static MLIR_OpHandle synth_print_f64(MLIR_Context *ctx) {
     emit_movz(ctx, bdo_write, /*rd=*/0, /*imm16=*/1, /*hw=*/0, /*sf=*/true);
     emit_mov_x(ctx, bdo_write, /*rd=*/1, /*rn=*/13);
     emit_mov_x(ctx, bdo_write, /*rd=*/2, /*rn=*/9);
-    emit_movz(ctx, bdo_write, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, bdo_write, 0x80);
+    emit_bl(ctx, bdo_write, str_lit("_write"));
     emit_epilogue(ctx, bdo_write, /*frame_size=*/96);
     emit_ret(ctx, bdo_write);
 
@@ -3574,8 +3563,7 @@ static MLIR_OpHandle synth_fd_close(MLIR_Context *ctx) {
     MLIR_BlockHandle entry;
     MLIR_RegionHandle region = synth_leaf_begin(ctx, &entry, 16);
     // x0 already has fd (low 32 bits valid). svc clobbers x16.
-    emit_movz(ctx, entry, /*rd=*/16, /*imm16=*/6, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, entry, 0x80);
+    emit_bl(ctx, entry, str_lit("_close"));
     emit_movz(ctx, entry, /*rd=*/0, /*imm16=*/0, /*hw=*/0, /*sf=*/false);
     emit_epilogue(ctx, entry, /*frame_size=*/16);
     emit_ret(ctx, entry);
@@ -3628,8 +3616,7 @@ static MLIR_OpHandle synth_fd_read(MLIR_Context *ctx) {
     emit_mov_x(ctx, loop, /*rd=*/0, /*rn=*/19);
     emit_mov_x(ctx, loop, /*rd=*/1, /*rn=*/11);
     emit_mov_x(ctx, loop, /*rd=*/2, /*rn=*/12);
-    emit_movz(ctx, loop, /*rd=*/16, /*imm16=*/3, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, loop, 0x80);
+    emit_bl(ctx, loop, str_lit("_read"));
     // x0 = bytes read (or -errno). Check sign bit.
     emit_cmp_imm(ctx, loop, /*rn=*/0, /*imm12=*/0, /*sf=*/false);
     emit_b_cond(ctx, loop, COND_LT, err);
@@ -3689,8 +3676,7 @@ static MLIR_OpHandle synth_fd_seek(MLIR_Context *ctx) {
         a[0] = attr_i32(ctx, "rd", 2); a[1] = attr_i32(ctx, "rn", 2);
         MLIR_AppendBlockOp(ctx, entry, build_op(ctx, OP_TYPE_AARCH64_UXTW, a, 2));
     }
-    emit_movz(ctx, entry, /*rd=*/16, /*imm16=*/199, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, entry, 0x80);
+    emit_bl(ctx, entry, str_lit("_lseek"));
     // x0 = new offset on success, or -1 on error (kernel returns -1 with
     // C flag set). Check sign bit on the 64-bit result.
     emit_cmp_imm(ctx, entry, /*rn=*/0, /*imm12=*/0, /*sf=*/true);
@@ -3736,8 +3722,7 @@ static MLIR_OpHandle synth_fd_tell(MLIR_Context *ctx) {
     }
     emit_movz(ctx, entry, /*rd=*/1, /*imm16=*/0, /*hw=*/0, /*sf=*/true);
     emit_movz(ctx, entry, /*rd=*/2, /*imm16=*/1, /*hw=*/0, /*sf=*/true);
-    emit_movz(ctx, entry, /*rd=*/16, /*imm16=*/199, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, entry, 0x80);
+    emit_bl(ctx, entry, str_lit("_lseek"));
     emit_cmp_imm(ctx, entry, /*rn=*/0, /*imm12=*/0, /*sf=*/true);
     emit_b_cond(ctx, entry, COND_LT, err);
     emit_b(ctx, entry, ok);
@@ -3903,8 +3888,7 @@ static MLIR_OpHandle synth_path_open(MLIR_Context *ctx) {
     emit_add_imm(ctx, do_open, /*rd=*/0, /*rn=*/31, /*imm12=*/0, /*sf=*/true);
     emit_mov_x(ctx, do_open, /*rd=*/1, /*rn=*/14);
     emit_movz(ctx, do_open, /*rd=*/2, /*imm16=*/0x1a4, /*hw=*/0, /*sf=*/true);
-    emit_movz(ctx, do_open, /*rd=*/16, /*imm16=*/5, /*hw=*/0, /*sf=*/true);
-    emit_svc(ctx, do_open, 0x80);
+    emit_bl(ctx, do_open, str_lit("_open"));
     emit_cmp_imm(ctx, do_open, /*rn=*/0, /*imm12=*/0, /*sf=*/false);
     emit_b_cond(ctx, do_open, COND_LT, err);
     emit_b(ctx, do_open, ok);

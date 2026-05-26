@@ -642,44 +642,61 @@ static string attr_s(MLIR_OpHandle op, const char *name) {
 // LDR x16, [x16, GOT_lo12]; BR x16`. dyld fills the corresponding
 // __DATA_CONST,__got slot at load time via chained fixups.
 //
-// `kLibSysNames` lists every libSystem symbol the wmir backend may
+// LibSysSym enumerates every libSystem symbol the wmir backend may
 // reference from its synth_* shims. The actual set used by any given
 // program is discovered by walking BL relocs after function emission
-// (see `n_libsys_stubs` further down). Order matters: it controls the
-// dense stub index assigned to each symbol, which in turn determines
-// the order of entries in __stubs / __got / chained-fixups imports /
-// dysymtab indirect-syms.
+// (see `n_libsys_stubs` further down). Enum order matters: it controls
+// the dense stub index assigned to each symbol, which in turn
+// determines the order of entries in __stubs / __got / chained-fixups
+// imports / dysymtab indirect-syms.
+//
+// The lookup helpers are written as if/else cascades rather than as a
+// `static const char *names[N] = {...};` table because tinyc (which
+// must compile this file for selfhost) does not yet support string-
+// literal initialisers in global arrays of `char *`, nor `sizeof(arr)`
+// in a constant expression.
 // =============================================================================
-static const char *kLibSysNames[] = {
-    "_exit",       // void _exit(int status) __attribute__((noreturn));
-    "_write",      // ssize_t write(int fd, const void *buf, size_t n);
-    "_read",       // ssize_t read(int fd, void *buf, size_t n);
-    "_open",       // int open(const char *path, int flags, ...);
-    "_close",      // int close(int fd);
-    "_lseek",      // off_t lseek(int fd, off_t off, int whence);
-    "___error",    // int *__error(void);  // errno indirection
-};
-#define N_LIBSYS_NAMES (sizeof(kLibSysNames)/sizeof(kLibSysNames[0]))
+typedef enum {
+    LS_EXIT  = 0,
+    LS_WRITE,
+    LS_READ,
+    LS_OPEN,
+    LS_CLOSE,
+    LS_LSEEK,
+    LS_ERRNO
+} LibSysSym;
+#define LS_COUNT 7
 
-// Returns the index into kLibSysNames[] matching `callee`, or -1 if
-// `callee` is not a known libSystem symbol.
+static const char *libsys_name(int sym) {
+    if (sym == LS_EXIT)  return "_exit";
+    if (sym == LS_WRITE) return "_write";
+    if (sym == LS_READ)  return "_read";
+    if (sym == LS_OPEN)  return "_open";
+    if (sym == LS_CLOSE) return "_close";
+    if (sym == LS_LSEEK) return "_lseek";
+    if (sym == LS_ERRNO) return "___error";
+    return "";
+}
+
+// Returns the LibSysSym value matching `callee`, or -1 if `callee` is
+// not a known libSystem symbol.
 static int libsys_lookup(string callee) {
-    for (size_t i = 0; i < N_LIBSYS_NAMES; i++) {
-        size_t kl = strlen(kLibSysNames[i]);
-        if (callee.size == kl
-            && memcmp(callee.str, kLibSysNames[i], kl) == 0) {
-            return (int)i;
+    for (int i = 0; i < LS_COUNT; i++) {
+        const char *nm = libsys_name(i);
+        size_t kl = strlen(nm);
+        if (callee.size == kl && memcmp(callee.str, nm, kl) == 0) {
+            return i;
         }
     }
     return -1;
 }
 
-// Per-translation registry: which kLibSysNames[i] are referenced, and
+// Per-translation registry: which LibSysSym values are referenced, and
 // in what dense order. Populated by a discovery pass before layout.
 typedef struct {
-    bool     used[N_LIBSYS_NAMES];
-    uint32_t stub_index[N_LIBSYS_NAMES];   // dense index, valid iff used[i]
-    uint32_t n_stubs;                       // total libSystem symbols used
+    bool     used[LS_COUNT];
+    uint32_t stub_index[LS_COUNT];   // dense index, valid iff used[i]
+    uint32_t n_stubs;                 // total libSystem symbols used
 } LibSysRegistry;
 
 static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
@@ -1864,7 +1881,7 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     // For each stub_index i, we find which libsys name has stub_index==i
     // and emit it in that order — the linker builds the chained-fixup
     // chain in this order, so import[i] must match GOT slot i.
-    uint32_t libsys_name_offsets[N_LIBSYS_NAMES] = {0};
+    uint32_t libsys_name_offsets[LS_COUNT] = {0};
     {
         // Pre-compute the byte offset of each libsys name in the
         // symbol-names blob. Leading 0 byte is at offset 0; first name
@@ -1872,17 +1889,17 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
         uint32_t off = 1;  // skip the leading 0
         for (uint32_t i = 0; i < n_stubs; i++) {
             // Find which libsys name has stub_index == i.
-            for (size_t k = 0; k < N_LIBSYS_NAMES; k++) {
+            for (size_t k = 0; k < LS_COUNT; k++) {
                 if (libsys.used[k] && libsys.stub_index[k] == i) {
                     libsys_name_offsets[k] = off;
-                    off += (uint32_t)strlen(kLibSysNames[k]) + 1u;
+                    off += (uint32_t)strlen(libsys_name(k)) + 1u;
                     break;
                 }
             }
         }
     }
     for (uint32_t i = 0; i < n_stubs; i++) {
-        for (size_t k = 0; k < N_LIBSYS_NAMES; k++) {
+        for (size_t k = 0; k < LS_COUNT; k++) {
             if (libsys.used[k] && libsys.stub_index[k] == i) {
                 uint32_t lib_ordinal = 1;
                 uint32_t name_off    = libsys_name_offsets[k];
@@ -1898,9 +1915,9 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     // stub-index order, NUL-terminated. Padded to multiple of 8 below.
     buf_u8(&img, 0);
     for (uint32_t i = 0; i < n_stubs; i++) {
-        for (size_t k = 0; k < N_LIBSYS_NAMES; k++) {
+        for (size_t k = 0; k < LS_COUNT; k++) {
             if (libsys.used[k] && libsys.stub_index[k] == i) {
-                const char *nm = kLibSysNames[k];
+                const char *nm = libsys_name(k);
                 size_t nl = strlen(nm);
                 for (size_t j = 0; j < nl; j++) buf_u8(&img, (uint8_t)nm[j]);
                 buf_u8(&img, 0);
@@ -1951,12 +1968,12 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     uint32_t str_mh   = (uint32_t)strtab.len; buf_cstr(&strtab, "__mh_execute_header");
     uint32_t str_main = (uint32_t)strtab.len; buf_cstr(&strtab, "_main");
     // libsys symbol names in stub-index order.
-    uint32_t libsys_str_off[N_LIBSYS_NAMES] = {0};
+    uint32_t libsys_str_off[LS_COUNT] = {0};
     for (uint32_t i = 0; i < n_stubs; i++) {
-        for (size_t k = 0; k < N_LIBSYS_NAMES; k++) {
+        for (size_t k = 0; k < LS_COUNT; k++) {
             if (libsys.used[k] && libsys.stub_index[k] == i) {
                 libsys_str_off[k] = (uint32_t)strtab.len;
-                buf_cstr(&strtab, kLibSysNames[k]);
+                buf_cstr(&strtab, libsys_name(k));
                 break;
             }
         }
@@ -1978,7 +1995,7 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     // n_value=0). Order MUST match stub_index so indirect-syms can
     // point at symtab index (2 + stub_index).
     for (uint32_t i = 0; i < n_stubs; i++) {
-        for (size_t k = 0; k < N_LIBSYS_NAMES; k++) {
+        for (size_t k = 0; k < LS_COUNT; k++) {
             if (libsys.used[k] && libsys.stub_index[k] == i) {
                 buf_le32(&symtab, libsys_str_off[k]);
                 buf_u8(&symtab, 0x01);          // N_UNDF | N_EXT
