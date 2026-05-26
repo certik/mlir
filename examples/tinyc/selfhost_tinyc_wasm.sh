@@ -71,6 +71,7 @@ NATIVE_C_FILES=(
     mlir_wasmstack_to_bin.c
     mlir_wasm_link.c
     mlir_wasmssa_to_wmir.c
+    mlir_wmir_regalloc.c
     mlir_wmir_to_aarch64.c
     mlir_aarch64_to_macho.c
     tokenizer.c

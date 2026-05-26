@@ -47,6 +47,7 @@
 
 #include "mlir_api.h"
 #include "mlir_op_names.h"
+#include "mlir_wmir_regalloc.h"
 
 // =============================================================================
 // Module-wide constants (must match the wasm-link conventions so the
@@ -462,35 +463,6 @@ static void emit_fp_cvt(MLIR_Context *ctx, MLIR_BlockHandle blk,
 }
 
 // =============================================================================
-// Slot map: SSA value -> stack-slot index.
-// =============================================================================
-typedef struct {
-    MLIR_ValueHandle *vs;
-    uint16_t         *slot;
-    size_t            size;
-    size_t            cap;
-} SlotMap;
-
-static void sm_set(SlotMap *m, MLIR_ValueHandle v, uint16_t s) {
-    if (m->size == m->cap) {
-        size_t nc = m->cap ? m->cap * 2 : 16;
-        m->vs   = realloc(m->vs,   nc * sizeof(MLIR_ValueHandle));
-        m->slot = realloc(m->slot, nc * sizeof(uint16_t));
-        m->cap  = nc;
-    }
-    m->vs[m->size]   = v;
-    m->slot[m->size] = s;
-    m->size++;
-}
-static int sm_get(const SlotMap *m, MLIR_ValueHandle v, uint16_t *out) {
-    for (size_t i = 0; i < m->size; i++) {
-        if (m->vs[i] == v) { *out = m->slot[i]; return 1; }
-    }
-    return 0;
-}
-static void sm_free(SlotMap *m) { free(m->vs); free(m->slot); memset(m, 0, sizeof(*m)); }
-
-// =============================================================================
 // Block map: source wmir block -> destination aarch64 block.
 // =============================================================================
 typedef struct {
@@ -539,6 +511,239 @@ static uint8_t cond_for_pred(string pred) {
 }
 
 // =============================================================================
+// Register-allocator-aware operand/result accessors.
+//
+// `ra` is the per-function `WmirRegAlloc` produced by `wmir_regalloc_run`.
+// Every SSA value defined in the function has a `ValueHome`: either a
+// physical register (HOME_REG) or a stack slot (HOME_SLOT).
+//
+// `ld_operand_into(... idx, scratch)` ensures the operand `idx` of `op`
+// is available in some register and returns that register. If the
+// operand's home is a register, no instruction is emitted and that
+// register is returned. Otherwise a `ldr` from the slot into `scratch`
+// is emitted and `scratch` is returned.
+//
+// `pick_result_reg(ra, op, idx, scratch)` returns the register a
+// computation should write its result into. If the result is assigned
+// to a register, that register is returned; otherwise `scratch`.
+//
+// `st_result(... idx, produced_reg)` finalises a result. If the home
+// is a register and matches `produced_reg`, no instruction is emitted.
+// If the home is a register but differs, an `mov` is emitted. If the
+// home is a slot, a `str` is emitted.
+// =============================================================================
+static uint8_t ld_operand_into(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                               const WmirRegAlloc *ra, MLIR_OpHandle op,
+                               size_t idx, uint8_t scratch) {
+    MLIR_ValueHandle v = MLIR_GetOpOperand(op, idx);
+    ValueHome h;
+    if (!wmir_regalloc_lookup(ra, v, &h)) {
+        fprintf(stderr, "wmir->aarch64: unbound operand %zu\n", idx);
+        return scratch;
+    }
+    if (h.kind == HOME_REG) return h.idx;
+    if (is_i64(ctx, v))
+        emit_ldr_x(ctx, blk, scratch, 31, (uint16_t)(h.idx * 8u));
+    else
+        emit_ldr_w(ctx, blk, scratch, 31, (uint16_t)(h.idx * 8u));
+    return scratch;
+}
+
+static uint8_t pick_result_reg(const WmirRegAlloc *ra, MLIR_OpHandle op,
+                               size_t idx, uint8_t scratch) {
+    MLIR_ValueHandle v = MLIR_GetOpResult(op, idx);
+    ValueHome h;
+    if (!wmir_regalloc_lookup(ra, v, &h)) return scratch;
+    if (h.kind == HOME_REG) return h.idx;
+    return scratch;
+}
+
+static void st_result(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                      const WmirRegAlloc *ra, MLIR_OpHandle op,
+                      size_t idx, uint8_t produced_reg) {
+    MLIR_ValueHandle v = MLIR_GetOpResult(op, idx);
+    ValueHome h;
+    if (!wmir_regalloc_lookup(ra, v, &h)) return;
+    if (h.kind == HOME_REG) {
+        if (h.idx != produced_reg) {
+            // mov dst, src. We use the X-form (mov_x): for i32 the
+            // upper bits are don't-care, and aarch64 mov_x is the
+            // alias `orr xd, xzr, xn` — always a single instruction.
+            emit_mov_x(ctx, blk, h.idx, produced_reg);
+        }
+        return;
+    }
+    if (is_i64(ctx, v))
+        emit_str_x(ctx, blk, produced_reg, 31, (uint16_t)(h.idx * 8u));
+    else
+        emit_str_w(ctx, blk, produced_reg, 31, (uint16_t)(h.idx * 8u));
+}
+
+// Force `op`'s operand `idx` into a specific physical register `reg`.
+// Used for call-arg passing (x0..x7) and return-value materialisation.
+// Emits `mov` from a register home or `ldr` from a slot home as
+// needed; no-op if already in `reg`.
+static void ld_operand_into_fixed(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                                  const WmirRegAlloc *ra, MLIR_OpHandle op,
+                                  size_t idx, uint8_t reg) {
+    MLIR_ValueHandle v = MLIR_GetOpOperand(op, idx);
+    ValueHome h;
+    if (!wmir_regalloc_lookup(ra, v, &h)) {
+        fprintf(stderr, "wmir->aarch64: unbound operand %zu\n", idx);
+        return;
+    }
+    if (h.kind == HOME_REG) {
+        if (h.idx != reg) emit_mov_x(ctx, blk, reg, h.idx);
+        return;
+    }
+    if (is_i64(ctx, v))
+        emit_ldr_x(ctx, blk, reg, 31, (uint16_t)(h.idx * 8u));
+    else
+        emit_ldr_w(ctx, blk, reg, 31, (uint16_t)(h.idx * 8u));
+}
+
+// Persist `reg` into the home of result `idx` of `op`. If the home is
+// the same register, no-op. Used for call results (x0) materialisation.
+static void st_result_from_fixed(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                                 const WmirRegAlloc *ra, MLIR_OpHandle op,
+                                 size_t idx, uint8_t reg) {
+    st_result(ctx, blk, ra, op, idx, reg);
+}
+
+// Emit the per-branch parallel-copy that moves successor operands
+// into the target block's argument homes. Handles the four
+// {reg,slot} × {reg,slot} combinations and resolves reg→reg cycles
+// (e.g. swap) by routing the cycle break through scratch register x9.
+static void emit_branch_arg_copies(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                                   const WmirRegAlloc *ra,
+                                   MLIR_OpHandle op, size_t succ_idx,
+                                   MLIR_BlockHandle target_src_block) {
+    size_t n = MLIR_GetOpNumSuccessorOperands(op, succ_idx);
+    if (n == 0) return;
+    if (n != MLIR_GetBlockNumArgs(target_src_block)) {
+        // mismatched — caller already verifies/diagnoses this; bail.
+        return;
+    }
+    enum { MAX_PAIRS = 16 };
+    typedef struct {
+        ValueHome src;
+        ValueHome dst;
+        bool      is_i64;
+        bool      done;
+    } Pair;
+    Pair pairs[MAX_PAIRS];
+    if (n > MAX_PAIRS) {
+        // Fallback: route every pair through scratch r9. Same as the
+        // pre-regalloc lowering. Safe for arbitrary fan-in.
+        for (size_t k = 0; k < n; k++) {
+            MLIR_ValueHandle src_v = MLIR_GetOpSuccessorOperand(op, succ_idx, k);
+            MLIR_ValueHandle dst_v = MLIR_GetBlockArg(target_src_block, k);
+            ValueHome sh, dh;
+            wmir_regalloc_lookup(ra, src_v, &sh);
+            wmir_regalloc_lookup(ra, dst_v, &dh);
+            bool i64 = is_i64(ctx, dst_v);
+            uint8_t r = 9;
+            if (sh.kind == HOME_REG) {
+                r = sh.idx;
+            } else {
+                if (i64) emit_ldr_x(ctx, blk, r, 31, (uint16_t)(sh.idx * 8u));
+                else     emit_ldr_w(ctx, blk, r, 31, (uint16_t)(sh.idx * 8u));
+            }
+            if (dh.kind == HOME_REG) {
+                if (dh.idx != r) emit_mov_x(ctx, blk, dh.idx, r);
+            } else {
+                if (i64) emit_str_x(ctx, blk, r, 31, (uint16_t)(dh.idx * 8u));
+                else     emit_str_w(ctx, blk, r, 31, (uint16_t)(dh.idx * 8u));
+            }
+        }
+        return;
+    }
+    for (size_t k = 0; k < n; k++) {
+        MLIR_ValueHandle src_v = MLIR_GetOpSuccessorOperand(op, succ_idx, k);
+        MLIR_ValueHandle dst_v = MLIR_GetBlockArg(target_src_block, k);
+        wmir_regalloc_lookup(ra, src_v, &pairs[k].src);
+        wmir_regalloc_lookup(ra, dst_v, &pairs[k].dst);
+        pairs[k].is_i64 = is_i64(ctx, dst_v);
+        pairs[k].done   = false;
+    }
+
+    // Phase 1: emit every pair whose destination is a slot. These
+    // never participate in conflicts (slot writes can't clobber a
+    // register source another pair is waiting on).
+    for (size_t k = 0; k < n; k++) {
+        if (pairs[k].dst.kind != HOME_SLOT) continue;
+        uint8_t r = 9;
+        if (pairs[k].src.kind == HOME_REG) {
+            r = pairs[k].src.idx;
+        } else {
+            if (pairs[k].is_i64)
+                emit_ldr_x(ctx, blk, r, 31, (uint16_t)(pairs[k].src.idx * 8u));
+            else
+                emit_ldr_w(ctx, blk, r, 31, (uint16_t)(pairs[k].src.idx * 8u));
+        }
+        if (pairs[k].is_i64)
+            emit_str_x(ctx, blk, r, 31, (uint16_t)(pairs[k].dst.idx * 8u));
+        else
+            emit_str_w(ctx, blk, r, 31, (uint16_t)(pairs[k].dst.idx * 8u));
+        pairs[k].done = true;
+    }
+
+    // Phase 2: emit reg-dest pairs in topological order. A pair is
+    // safe to emit when no other un-done pair still reads its dst
+    // register. When all remaining pairs participate in a cycle,
+    // break the cycle by spilling the chosen src into scratch x9.
+    for (;;) {
+        bool any_remaining = false;
+        for (size_t k = 0; k < n; k++) {
+            if (!pairs[k].done) { any_remaining = true; break; }
+        }
+        if (!any_remaining) return;
+
+        bool progress = false;
+        for (size_t k = 0; k < n; k++) {
+            if (pairs[k].done) continue;
+            // pairs[k].dst is HOME_REG (phase 1 handled HOME_SLOT).
+            uint8_t dst_reg = pairs[k].dst.idx;
+            bool blocked = false;
+            for (size_t j = 0; j < n; j++) {
+                if (j == k || pairs[j].done) continue;
+                if (pairs[j].src.kind == HOME_REG && pairs[j].src.idx == dst_reg) {
+                    blocked = true; break;
+                }
+            }
+            if (blocked) continue;
+            if (pairs[k].src.kind == HOME_SLOT) {
+                if (pairs[k].is_i64)
+                    emit_ldr_x(ctx, blk, dst_reg, 31, (uint16_t)(pairs[k].src.idx * 8u));
+                else
+                    emit_ldr_w(ctx, blk, dst_reg, 31, (uint16_t)(pairs[k].src.idx * 8u));
+            } else {
+                if (pairs[k].src.idx != dst_reg)
+                    emit_mov_x(ctx, blk, dst_reg, pairs[k].src.idx);
+            }
+            pairs[k].done = true;
+            progress = true;
+        }
+        if (progress) continue;
+        // Cycle: pick any unfinished pair whose src is a reg, save
+        // that src to scratch x9, rewrite all remaining pairs that
+        // read that src to read x9 instead, then loop.
+        int cyc = -1;
+        for (size_t k = 0; k < n; k++) {
+            if (!pairs[k].done && pairs[k].src.kind == HOME_REG) { cyc = (int)k; break; }
+        }
+        if (cyc < 0) return;  // shouldn't reach here
+        uint8_t cyc_src = pairs[cyc].src.idx;
+        emit_mov_x(ctx, blk, 9, cyc_src);
+        for (size_t k = 0; k < n; k++) {
+            if (!pairs[k].done && pairs[k].src.kind == HOME_REG && pairs[k].src.idx == cyc_src) {
+                pairs[k].src.idx = 9;
+            }
+        }
+    }
+}
+
+// =============================================================================
 // Per-function lowering.
 // =============================================================================
 static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
@@ -557,25 +762,15 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
         return MLIR_INVALID_HANDLE;
     }
 
-    // ---------- Pre-pass: assign a slot to every block arg + op result.
-    SlotMap sm = {0};
-    uint16_t next_slot = 0;
-    for (size_t bi = 0; bi < n_blocks; bi++) {
-        MLIR_BlockHandle b = MLIR_GetRegionBlock(src_region, bi);
-        size_t na = MLIR_GetBlockNumArgs(b);
-        for (size_t i = 0; i < na; i++) {
-            sm_set(&sm, MLIR_GetBlockArg(b, i), next_slot++);
-        }
-        size_t no = MLIR_GetBlockNumOps(b);
-        for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(b, i);
-            size_t nr = MLIR_GetOpNumResults(op);
-            for (size_t k = 0; k < nr; k++) {
-                sm_set(&sm, MLIR_GetOpResult(op, k), next_slot++);
-            }
-        }
+    // ---------- Pre-pass: register allocation. Each SSA value gets a
+    // ---------- home (HOME_REG or HOME_SLOT) via linear-scan.
+    WmirRegAlloc *ra = wmir_regalloc_run(ctx, src);
+    if (!ra) {
+        fprintf(stderr, "wmir->aarch64: register allocation failed for '%.*s'\n",
+                (int)name.size, name.str);
+        return MLIR_INVALID_HANDLE;
     }
-    uint32_t frame_size = (uint32_t)next_slot * 8u;
+    uint32_t frame_size = (uint32_t)ra->n_slots * 8u;
     frame_size = (frame_size + 15u) & ~15u;
     // SUB SP, SP, #imm12 [LSL #12] supports up to ~16 MB. LDR W with
     // unsigned imm12 supports up to 16380 bytes; LDR X up to 32760. We
@@ -584,7 +779,7 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
         fprintf(stderr,
             "wmir->aarch64: function '%.*s' frame size %u exceeds 16 KiB budget\n",
             (int)name.size, name.str, frame_size);
-        sm_free(&sm);
+        wmir_regalloc_free(ra);
         return MLIR_INVALID_HANDLE;
     }
 
@@ -606,15 +801,19 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
         size_t n_params = MLIR_GetBlockNumArgs(src_entry);
         for (size_t i = 0; i < n_params; i++) {
             MLIR_ValueHandle pv = MLIR_GetBlockArg(src_entry, i);
-            uint16_t s; sm_get(&sm, pv, &s);
-            // i64 params must be spilled as full 8 bytes; w0..w7 alone
-            // would drop the upper half (caused ternary_i64 regression).
-            if (is_i64(ctx, pv)) {
-                emit_str_x(ctx, entry_dst, (uint8_t)i, 31,
-                           (uint16_t)(s * 8u));
+            ValueHome h;
+            if (!wmir_regalloc_lookup(ra, pv, &h)) continue;
+            // Param i arrives in xI (i64) or wI (i32). Move it to
+            // its home (mov if reg, str if slot). No-op if reg==i.
+            if (h.kind == HOME_REG) {
+                if (h.idx != (uint8_t)i) emit_mov_x(ctx, entry_dst, h.idx, (uint8_t)i);
             } else {
-                emit_str_w(ctx, entry_dst, (uint8_t)i, 31,
-                           (uint16_t)(s * 8u));
+                // i64 params must be spilled as full 8 bytes; w0..w7 alone
+                // would drop the upper half (caused ternary_i64 regression).
+                if (is_i64(ctx, pv))
+                    emit_str_x(ctx, entry_dst, (uint8_t)i, 31, (uint16_t)(h.idx * 8u));
+                else
+                    emit_str_w(ctx, entry_dst, (uint8_t)i, 31, (uint16_t)(h.idx * 8u));
             }
         }
     }
@@ -624,36 +823,17 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
         MLIR_BlockHandle src_blk = MLIR_GetRegionBlock(src_region, bi);
         MLIR_BlockHandle dst_blk = bm_get(&bm, src_blk);
 
-        #define LD_OPERAND(REG, IDX)                                       \
-            do {                                                           \
-                MLIR_ValueHandle _v = MLIR_GetOpOperand(op, (IDX));        \
-                uint16_t _s;                                               \
-                if (!sm_get(&sm, _v, &_s)) {                               \
-                    fprintf(stderr,                                        \
-                        "wmir->aarch64: operand %zu unbound\n",            \
-                        (size_t)(IDX));                                    \
-                    sm_free(&sm); bm_free(&bm);                            \
-                    return MLIR_INVALID_HANDLE;                            \
-                }                                                          \
-                if (is_i64(ctx, _v))                                       \
-                    emit_ldr_x(ctx, dst_blk, (REG), 31,                    \
-                        (uint16_t)(_s * 8u));                              \
-                else                                                       \
-                    emit_ldr_w(ctx, dst_blk, (REG), 31,                    \
-                        (uint16_t)(_s * 8u));                              \
-            } while (0)
-        #define ST_RESULT(REG, IDX)                                        \
-            do {                                                           \
-                MLIR_ValueHandle _v = MLIR_GetOpResult(op, (IDX));         \
-                uint16_t _s;                                               \
-                sm_get(&sm, _v, &_s);                                      \
-                if (is_i64(ctx, _v))                                       \
-                    emit_str_x(ctx, dst_blk, (REG), 31,                    \
-                        (uint16_t)(_s * 8u));                              \
-                else                                                       \
-                    emit_str_w(ctx, dst_blk, (REG), 31,                    \
-                        (uint16_t)(_s * 8u));                              \
-            } while (0)
+        // Macro form for the common pattern: read operand IDX into
+        // a register (returning the actual reg used — either the
+        // operand's assigned home reg or the scratch if it had to be
+        // loaded from a slot). For the result side use PICK_RES /
+        // ST_RES — see comments on the underlying helpers above.
+        #define LD_OPERAND(SCRATCH, IDX) \
+            ld_operand_into(ctx, dst_blk, ra, op, (IDX), (SCRATCH))
+        #define PICK_RES(SCRATCH, IDX) \
+            pick_result_reg(ra, op, (IDX), (SCRATCH))
+        #define ST_RESULT(PRODUCED_REG, IDX) \
+            st_result(ctx, dst_blk, ra, op, (IDX), (PRODUCED_REG))
 
         size_t n_ops = MLIR_GetBlockNumOps(src_blk);
         for (size_t i = 0; i < n_ops; i++) {
@@ -665,115 +845,148 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 MLIR_TypeHandle  ty = MLIR_GetValueType(r);
                 string ts = MLIR_GetTypeString(ctx, ty);
                 int64_t v = at_i(op, "value");
+                uint8_t rd = PICK_RES(9, 0);
                 if (ts.size == 3 && memcmp(ts.str, "i32", 3) == 0) {
-                    emit_mov_imm32(ctx, dst_blk, 9, (uint32_t)v);
-                    ST_RESULT(9, 0);
+                    emit_mov_imm32(ctx, dst_blk, rd, (uint32_t)v);
+                    ST_RESULT(rd, 0);
                 } else if (ts.size == 3 && memcmp(ts.str, "i64", 3) == 0) {
-                    emit_mov_imm64(ctx, dst_blk, 9, (uint64_t)v);
-                    ST_RESULT(9, 0);
+                    emit_mov_imm64(ctx, dst_blk, rd, (uint64_t)v);
+                    ST_RESULT(rd, 0);
                 } else {
                     fprintf(stderr,
                         "wmir->aarch64: wmir.const of unsupported type '%.*s'\n",
                         (int)ts.size, ts.str);
-                    sm_free(&sm); bm_free(&bm);
+                    wmir_regalloc_free(ra); bm_free(&bm);
                     return MLIR_INVALID_HANDLE;
                 }
                 break;
             }
             case OP_TYPE_WMIR_IADD: {
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
-                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
-                emit_add_reg(ctx, dst_blk, 9, 9, 10, sf);
-                ST_RESULT(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t r1 = LD_OPERAND(10, 1);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_add_reg(ctx, dst_blk, rd, r0, r1, sf);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_ISUB: {
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
-                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
-                emit_sub_reg(ctx, dst_blk, 9, 9, 10, sf);
-                ST_RESULT(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t r1 = LD_OPERAND(10, 1);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_sub_reg(ctx, dst_blk, rd, r0, r1, sf);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_IMUL: {
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
-                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
-                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_MUL, 9, 9, 10, sf);
-                ST_RESULT(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t r1 = LD_OPERAND(10, 1);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_MUL, rd, r0, r1, sf);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_SDIV: {
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
-                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
-                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_SDIV, 9, 9, 10, sf);
-                ST_RESULT(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t r1 = LD_OPERAND(10, 1);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_SDIV, rd, r0, r1, sf);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_UDIV: {
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
-                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
-                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_UDIV, 9, 9, 10, sf);
-                ST_RESULT(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t r1 = LD_OPERAND(10, 1);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_UDIV, rd, r0, r1, sf);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_SREM: {
                 // rem = a - (a / b) * b  ==  msub(sdiv(a,b), b, a).
+                // Uses scratch x9 for the intermediate division result.
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
-                LD_OPERAND(9, 0);   // a
-                LD_OPERAND(10, 1);  // b
-                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_SDIV, 11, 9, 10, sf);
-                emit_msub(ctx, dst_blk, 9, 11, 10, 9, sf);
-                ST_RESULT(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);   // a — may be x9 if loaded
+                uint8_t r1 = LD_OPERAND(10, 1);  // b — may be x10 if loaded
+                // Need a temp that doesn't collide with r0 or r1.
+                // x9 is the load scratch; if r0 happened to come from x9,
+                // we'd clobber it before msub reads it. Use x10 as the
+                // temp if r0 == 9, otherwise x9.
+                uint8_t tmp = (r0 == 9 || r1 == 9) ? (r0 == 10 || r1 == 10 ? 11 : 10) : 9;
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_SDIV, tmp, r0, r1, sf);
+                uint8_t rd = PICK_RES(9, 0);
+                // msub reads tmp, r1, r0 then writes rd — reads-before-writes.
+                emit_msub(ctx, dst_blk, rd, tmp, r1, r0, sf);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_UREM: {
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
-                LD_OPERAND(9, 0);
-                LD_OPERAND(10, 1);
-                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_UDIV, 11, 9, 10, sf);
-                emit_msub(ctx, dst_blk, 9, 11, 10, 9, sf);
-                ST_RESULT(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t r1 = LD_OPERAND(10, 1);
+                uint8_t tmp = (r0 == 9 || r1 == 9) ? (r0 == 10 || r1 == 10 ? 11 : 10) : 9;
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_UDIV, tmp, r0, r1, sf);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_msub(ctx, dst_blk, rd, tmp, r1, r0, sf);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_IAND: {
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
-                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
-                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_AND_REG, 9, 9, 10, sf);
-                ST_RESULT(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t r1 = LD_OPERAND(10, 1);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_AND_REG, rd, r0, r1, sf);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_IOR: {
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
-                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
-                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_ORR_REG, 9, 9, 10, sf);
-                ST_RESULT(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t r1 = LD_OPERAND(10, 1);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_ORR_REG, rd, r0, r1, sf);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_IXOR: {
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
-                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
-                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_EOR_REG, 9, 9, 10, sf);
-                ST_RESULT(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t r1 = LD_OPERAND(10, 1);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_EOR_REG, rd, r0, r1, sf);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_ISHL: {
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
-                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
-                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_LSL_REG, 9, 9, 10, sf);
-                ST_RESULT(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t r1 = LD_OPERAND(10, 1);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_LSL_REG, rd, r0, r1, sf);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_USHR: {
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
-                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
-                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_LSR_REG, 9, 9, 10, sf);
-                ST_RESULT(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t r1 = LD_OPERAND(10, 1);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_LSR_REG, rd, r0, r1, sf);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_SSHR: {
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
-                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
-                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_ASR_REG, 9, 9, 10, sf);
-                ST_RESULT(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t r1 = LD_OPERAND(10, 1);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_3reg(ctx, dst_blk, OP_TYPE_AARCH64_ASR_REG, rd, r0, r1, sf);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_SEXT: {
@@ -783,90 +996,94 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 int64_t sb = at_i(op, "src_bits");
                 if (sb == 0) sb = 32;
                 bool dst_is64 = is_i64(ctx, MLIR_GetOpResult(op, 0));
-                LD_OPERAND(9, 0);
-                MLIR_AttributeHandle a[3];
-                a[0] = attr_i32(ctx, "rd", 9);
-                a[1] = attr_i32(ctx, "rn", 9);
-                MLIR_OpType ext_op;
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t rd = PICK_RES(9, 0);
                 if (sb == 8) {
-                    ext_op = OP_TYPE_AARCH64_SXTB;
+                    MLIR_AttributeHandle a[3];
+                    a[0] = attr_i32(ctx, "rd", rd);
+                    a[1] = attr_i32(ctx, "rn", r0);
                     a[2] = attr_b(ctx, "sf", dst_is64);
-                    MLIR_AppendBlockOp(ctx, dst_blk, build_op(ctx, ext_op, a, 3));
+                    MLIR_AppendBlockOp(ctx, dst_blk, build_op(ctx, OP_TYPE_AARCH64_SXTB, a, 3));
                 } else if (sb == 16) {
-                    ext_op = OP_TYPE_AARCH64_SXTH;
+                    MLIR_AttributeHandle a[3];
+                    a[0] = attr_i32(ctx, "rd", rd);
+                    a[1] = attr_i32(ctx, "rn", r0);
                     a[2] = attr_b(ctx, "sf", dst_is64);
-                    MLIR_AppendBlockOp(ctx, dst_blk, build_op(ctx, ext_op, a, 3));
+                    MLIR_AppendBlockOp(ctx, dst_blk, build_op(ctx, OP_TYPE_AARCH64_SXTH, a, 3));
                 } else {
                     // src_bits == 32 (or unspecified): sxtw is X-form only.
-                    emit_2reg_no_sf(ctx, dst_blk, OP_TYPE_AARCH64_SXTW, 9, 9);
+                    emit_2reg_no_sf(ctx, dst_blk, OP_TYPE_AARCH64_SXTW, rd, r0);
                 }
-                ST_RESULT(9, 0);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_ZEXT: {
                 // ldr_w already zero-extends; for byte/half-width source
-                // values stored as i32, mask the upper bits via an AND.
+                // values stored as i32, the producer (e.g. ldrb) already
+                // zeroed the upper bits. See pre-regalloc comment for
+                // history. For now ZEXT is a value-bearing pass-through:
+                // mov rd, r0 if regs differ; nothing if same.
                 int64_t sb = at_i(op, "src_bits");
                 if (sb == 0) sb = 32;
-                LD_OPERAND(9, 0);
-                if (sb == 8) {
-                    // and w9, w9, #0xff via UBFM (alias UBFX/UBFIZ). For
-                    // simplicity, use AND immediate is complex; fall back
-                    // to a tiny sequence: lsl by 24, lsr by 24 — but we
-                    // don't have lsl_imm easily either. The common path
-                    // is that the producer already zero-extended (e.g.
-                    // an ldrb_imm which writes only low byte and zeros).
-                    // Leave value as-is for now; consumers that need a
-                    // strict mask should be revisited.
-                }
-                ST_RESULT(9, 0);
+                (void)sb;
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t rd = PICK_RES(9, 0);
+                if (rd != r0) emit_mov_x(ctx, dst_blk, rd, r0);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_TRUNC: {
-                // i64 -> i32 truncate. ldr_x x9; we store the low 32 bits.
-                LD_OPERAND(9, 0);
-                ST_RESULT(9, 0);
+                // i64 -> i32 truncate. We store only the low 32 bits via
+                // the i32-width store, so a mov w_rd, w_r0 (zero-extending)
+                // is sufficient.
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t rd = PICK_RES(9, 0);
+                if (rd != r0) emit_mov_x(ctx, dst_blk, rd, r0);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_ICMP: {
                 bool sf = is_i64(ctx, MLIR_GetOpOperand(op, 0));
-                LD_OPERAND(9, 0); LD_OPERAND(10, 1);
-                emit_cmp_reg(ctx, dst_blk, 9, 10, sf);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t r1 = LD_OPERAND(10, 1);
+                emit_cmp_reg(ctx, dst_blk, r0, r1, sf);
                 string pred = at_s(op, "pred");
                 uint8_t cond = cond_for_pred(pred);
-                emit_cset(ctx, dst_blk, 9, cond, /*sf=*/false);
-                ST_RESULT(9, 0);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_cset(ctx, dst_blk, rd, cond, /*sf=*/false);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_EQZ: {
                 bool sf = is_i64(ctx, MLIR_GetOpOperand(op, 0));
-                LD_OPERAND(9, 0);
-                emit_cmp_imm(ctx, dst_blk, 9, 0, sf);
-                emit_cset(ctx, dst_blk, 9, COND_EQ, /*sf=*/false);
-                ST_RESULT(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                emit_cmp_imm(ctx, dst_blk, r0, 0, sf);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_cset(ctx, dst_blk, rd, COND_EQ, /*sf=*/false);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_SELECT: {
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
-                LD_OPERAND(9, 0);  // a
-                LD_OPERAND(10, 1); // b
-                LD_OPERAND(11, 2); // cond (always i32 by Wasm convention)
-                emit_cmp_imm(ctx, dst_blk, 11, 0, /*sf=*/false);
-                emit_csel(ctx, dst_blk, 9, 9, 10, COND_NE, sf);
-                ST_RESULT(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);   // a
+                uint8_t r1 = LD_OPERAND(10, 1);  // b
+                uint8_t r2 = LD_OPERAND(11, 2);  // cond (always i32)
+                emit_cmp_imm(ctx, dst_blk, r2, 0, /*sf=*/false);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_csel(ctx, dst_blk, rd, r0, r1, COND_NE, sf);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_FBINOP: {
                 string k = at_s(op, "kind");
                 int64_t fw = at_i(op, "fwidth");
                 bool sf = (fw == 64);
-                // Load both operand bit patterns into x/w9 and x/w10.
-                LD_OPERAND(9, 0);
-                LD_OPERAND(10, 1);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t r1 = LD_OPERAND(10, 1);
                 emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/true, sf,
-                               /*rd=*/0, /*rn=*/9);
+                               /*rd=*/0, /*rn=*/r0);
                 emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/true, sf,
-                               /*rd=*/1, /*rn=*/10);
+                               /*rd=*/1, /*rn=*/r1);
                 const char *kind_lit = NULL;
                 if      (k.size == 4 && memcmp(k.str, "fadd", 4) == 0) kind_lit = "fadd";
                 else if (k.size == 4 && memcmp(k.str, "fsub", 4) == 0) kind_lit = "fsub";
@@ -876,23 +1093,24 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                     fprintf(stderr,
                         "wmir->aarch64: wmir.fbinop unknown kind '%.*s'\n",
                         (int)k.size, k.str);
-                    sm_free(&sm); bm_free(&bm);
+                    wmir_regalloc_free(ra); bm_free(&bm);
                     return MLIR_INVALID_HANDLE;
                 }
                 emit_fp_binop(ctx, dst_blk, kind_lit, (int)fw,
                               /*rd=*/0, /*rn=*/0, /*rm=*/1);
+                uint8_t rd = PICK_RES(9, 0);
                 emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/false, sf,
-                               /*rd=*/9, /*rn=*/0);
-                ST_RESULT(9, 0);
+                               /*rd=*/rd, /*rn=*/0);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_FUNOP: {
                 string k = at_s(op, "kind");
                 int64_t fw = at_i(op, "fwidth");
                 bool sf = (fw == 64);
-                LD_OPERAND(9, 0);
+                uint8_t r0 = LD_OPERAND(9, 0);
                 emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/true, sf,
-                               /*rd=*/0, /*rn=*/9);
+                               /*rd=*/0, /*rn=*/r0);
                 const char *kind_lit = NULL;
                 if      (k.size == 4 && memcmp(k.str, "fabs", 4) == 0)  kind_lit = "fabs";
                 else if (k.size == 4 && memcmp(k.str, "fneg", 4) == 0)  kind_lit = "fneg";
@@ -901,50 +1119,38 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                     fprintf(stderr,
                         "wmir->aarch64: wmir.funop unknown kind '%.*s'\n",
                         (int)k.size, k.str);
-                    sm_free(&sm); bm_free(&bm);
+                    wmir_regalloc_free(ra); bm_free(&bm);
                     return MLIR_INVALID_HANDLE;
                 }
                 emit_fp_unop(ctx, dst_blk, kind_lit, (int)fw,
                              /*rd=*/0, /*rn=*/0);
+                uint8_t rd = PICK_RES(9, 0);
                 emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/false, sf,
-                               /*rd=*/9, /*rn=*/0);
-                ST_RESULT(9, 0);
+                               /*rd=*/rd, /*rn=*/0);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_FCMP: {
                 string pred = at_s(op, "pred");
                 int64_t fw = at_i(op, "fwidth");
                 bool sf = (fw == 64);
-                LD_OPERAND(9, 0);
-                LD_OPERAND(10, 1);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                uint8_t r1 = LD_OPERAND(10, 1);
                 emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/true, sf,
-                               /*rd=*/0, /*rn=*/9);
+                               /*rd=*/0, /*rn=*/r0);
                 emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/true, sf,
-                               /*rd=*/1, /*rn=*/10);
+                               /*rd=*/1, /*rn=*/r1);
                 emit_fcmp(ctx, dst_blk, (int)fw, /*rn=*/0, /*rm=*/1);
-                // Translate the wmir.fcmp pred into an aarch64 cond.
-                // FCMP sets NZCV; unordered (NaN) operands set V (overflow).
-                //   oeq => EQ  (Z=1, no NaN)
-                //   une => NE  (or unordered)
-                //   olt => MI  (signed-less; ARM uses MI/PL for FP ordered)
-                //                actually FP ordered lt = MI? In ARM,
-                //                FP lt is "less" -> N=1,Z=0 -> MI. But
-                //                MI matches unordered too; standard is
-                //                to use B.MI for ordered lt (CC), with
-                //                NaN producing C=1 V=1 N=0 Z=0 which
-                //                makes b.lt (N!=V) fail — correct.
-                //   ole => LS  (unsigned less-or-equal)
-                //   ogt => GT  (signed greater)
-                //   oge => GE  (signed greater-or-equal)
                 uint8_t cond = COND_EQ;
                 if      (pred.size == 3 && memcmp(pred.str, "oeq", 3) == 0) cond = COND_EQ;
                 else if (pred.size == 3 && memcmp(pred.str, "une", 3) == 0) cond = COND_NE;
-                else if (pred.size == 3 && memcmp(pred.str, "olt", 3) == 0) cond = COND_CC; // LO/CC
+                else if (pred.size == 3 && memcmp(pred.str, "olt", 3) == 0) cond = COND_CC;
                 else if (pred.size == 3 && memcmp(pred.str, "ole", 3) == 0) cond = COND_LS;
                 else if (pred.size == 3 && memcmp(pred.str, "ogt", 3) == 0) cond = COND_HI;
-                else if (pred.size == 3 && memcmp(pred.str, "oge", 3) == 0) cond = COND_CS; // HS/CS
-                emit_cset(ctx, dst_blk, 9, cond, /*sf=*/false);
-                ST_RESULT(9, 0);
+                else if (pred.size == 3 && memcmp(pred.str, "oge", 3) == 0) cond = COND_CS;
+                uint8_t rd = PICK_RES(9, 0);
+                emit_cset(ctx, dst_blk, rd, cond, /*sf=*/false);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_FCONV: {
@@ -953,84 +1159,87 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 int64_t dst_w = at_i(op, "dst_w");
                 bool sign = at_b(op, "sign");
                 if (k.size == 3 && memcmp(k.str, "f2f", 3) == 0) {
-                    // FP precision change. Both operand and result are
-                    // bit patterns (i32 for f32, i64 for f64).
-                    LD_OPERAND(9, 0);
+                    uint8_t r0 = LD_OPERAND(9, 0);
                     emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/true,
-                                   /*sf=*/src_w == 64, /*rd=*/0, /*rn=*/9);
+                                   /*sf=*/src_w == 64, /*rd=*/0, /*rn=*/r0);
                     emit_fp_cvt(ctx, dst_blk, "f2f", (int)src_w, (int)dst_w,
                                 /*sign=*/false, /*rd=*/0, /*rn=*/0);
+                    uint8_t rd = PICK_RES(9, 0);
                     emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/false,
-                                   /*sf=*/dst_w == 64, /*rd=*/9, /*rn=*/0);
-                    ST_RESULT(9, 0);
+                                   /*sf=*/dst_w == 64, /*rd=*/rd, /*rn=*/0);
+                    ST_RESULT(rd, 0);
                 } else if (k.size == 3 && memcmp(k.str, "f2i", 3) == 0) {
-                    // FP -> integer (FCVTZS/FCVTZU). Source is bit pattern.
-                    LD_OPERAND(9, 0);
+                    uint8_t r0 = LD_OPERAND(9, 0);
                     emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/true,
-                                   /*sf=*/src_w == 64, /*rd=*/0, /*rn=*/9);
+                                   /*sf=*/src_w == 64, /*rd=*/0, /*rn=*/r0);
+                    uint8_t rd = PICK_RES(9, 0);
                     emit_fp_cvt(ctx, dst_blk, "f2i", (int)src_w, (int)dst_w,
-                                sign, /*rd=*/9, /*rn=*/0);
-                    ST_RESULT(9, 0);
+                                sign, /*rd=*/rd, /*rn=*/0);
+                    ST_RESULT(rd, 0);
                 } else if (k.size == 3 && memcmp(k.str, "i2f", 3) == 0) {
-                    // Integer -> FP (SCVTF/UCVTF). Result is bit pattern.
-                    LD_OPERAND(9, 0);
+                    uint8_t r0 = LD_OPERAND(9, 0);
                     emit_fp_cvt(ctx, dst_blk, "i2f", (int)src_w, (int)dst_w,
-                                sign, /*rd=*/0, /*rn=*/9);
+                                sign, /*rd=*/0, /*rn=*/r0);
+                    uint8_t rd = PICK_RES(9, 0);
                     emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/false,
-                                   /*sf=*/dst_w == 64, /*rd=*/9, /*rn=*/0);
-                    ST_RESULT(9, 0);
+                                   /*sf=*/dst_w == 64, /*rd=*/rd, /*rn=*/0);
+                    ST_RESULT(rd, 0);
                 } else {
                     fprintf(stderr,
                         "wmir->aarch64: wmir.fconv unknown kind '%.*s'\n",
                         (int)k.size, k.str);
-                    sm_free(&sm); bm_free(&bm);
+                    wmir_regalloc_free(ra); bm_free(&bm);
                     return MLIR_INVALID_HANDLE;
                 }
                 break;
             }
             case OP_TYPE_WMIR_GLOBAL_GET: {
                 int64_t gi = at_i(op, "global_idx");
-                emit_ldr_w(ctx, dst_blk, 9, 27, (uint16_t)(gi * 8));
-                ST_RESULT(9, 0);
+                uint8_t rd = PICK_RES(9, 0);
+                emit_ldr_w(ctx, dst_blk, rd, 27, (uint16_t)(gi * 8));
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_GLOBAL_SET: {
                 int64_t gi = at_i(op, "global_idx");
-                LD_OPERAND(9, 0);
-                emit_str_w(ctx, dst_blk, 9, 27, (uint16_t)(gi * 8));
+                uint8_t r0 = LD_OPERAND(9, 0);
+                emit_str_w(ctx, dst_blk, r0, 27, (uint16_t)(gi * 8));
                 break;
             }
             case OP_TYPE_WMIR_LOAD: {
                 int64_t off = at_i(op, "memory_offset");
                 int64_t sz  = at_i(op, "mem_size");
                 if (sz == 0) sz = 4;
-                LD_OPERAND(9, 0);
-                emit_add_reg(ctx, dst_blk, 10, 28, 9, /*sf=*/true);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                // x10 is scratch (not in pool, not r0). Use it for the
+                // heap-addr computation: addr = linmem(x28) + r0.
+                emit_add_reg(ctx, dst_blk, 10, 28, r0, /*sf=*/true);
+                uint8_t rd = PICK_RES(9, 0);
                 if (sz == 8) {
-                    emit_ldr_x(ctx, dst_blk, 9, 10, (uint16_t)off);
+                    emit_ldr_x(ctx, dst_blk, rd, 10, (uint16_t)off);
                 } else if (sz == 1) {
-                    emit_ldrb_imm(ctx, dst_blk, 9, 10, (uint16_t)off);
+                    emit_ldrb_imm(ctx, dst_blk, rd, 10, (uint16_t)off);
                 } else {
-                    // sz == 2 falls back to a wider load for now; the
-                    // operand width is rarely exercised and we can add
-                    // ldrh later. sz == 4 uses ldr w.
-                    emit_ldr_w(ctx, dst_blk, 9, 10, (uint16_t)off);
+                    emit_ldr_w(ctx, dst_blk, rd, 10, (uint16_t)off);
                 }
-                ST_RESULT(9, 0);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_STORE: {
                 int64_t off = at_i(op, "memory_offset");
                 int64_t sz  = at_i(op, "mem_size");
                 if (sz == 0) sz = 4;
-                LD_OPERAND(9, 0); LD_OPERAND(11, 1);
-                emit_add_reg(ctx, dst_blk, 10, 28, 9, /*sf=*/true);
+                uint8_t r0 = LD_OPERAND(9, 0);   // index
+                uint8_t r1 = LD_OPERAND(11, 1);  // value (use x11 scratch
+                                                 // to leave x10 free for
+                                                 // the heap_addr compute)
+                emit_add_reg(ctx, dst_blk, 10, 28, r0, /*sf=*/true);
                 if (sz == 8) {
-                    emit_str_x(ctx, dst_blk, 11, 10, (uint16_t)off);
+                    emit_str_x(ctx, dst_blk, r1, 10, (uint16_t)off);
                 } else if (sz == 1) {
-                    emit_strb_imm(ctx, dst_blk, 11, 10, (uint16_t)off);
+                    emit_strb_imm(ctx, dst_blk, r1, 10, (uint16_t)off);
                 } else {
-                    emit_str_w(ctx, dst_blk, 11, 10, (uint16_t)off);
+                    emit_str_w(ctx, dst_blk, r1, 10, (uint16_t)off);
                 }
                 break;
             }
@@ -1040,14 +1249,23 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                     fprintf(stderr,
                         "wmir->aarch64: wmir.call with %zu args (>8) not "
                         "yet supported\n", na);
-                    sm_free(&sm); bm_free(&bm);
+                    wmir_regalloc_free(ra); bm_free(&bm);
                     return MLIR_INVALID_HANDLE;
                 }
-                for (size_t k = 0; k < na; k++) LD_OPERAND((uint8_t)k, k);
+                // ABI arg regs x0..x7 are outside our allocation pool
+                // (which is x11..x18), so no operand's home register
+                // can collide with the target arg reg. We can simply
+                // mov / ldr each one into place in source order.
+                for (size_t k = 0; k < na; k++) {
+                    ld_operand_into_fixed(ctx, dst_blk, ra, op, k, (uint8_t)k);
+                }
                 string callee = at_s(op, "target");
                 if (callee.size == 0) callee = at_s(op, "callee");
                 emit_bl(ctx, dst_blk, callee);
-                if (MLIR_GetOpNumResults(op) > 0) ST_RESULT(0, 0);
+                if (MLIR_GetOpNumResults(op) > 0) {
+                    // Result arrives in x0; persist to its home.
+                    st_result_from_fixed(ctx, dst_blk, ra, op, 0, 0);
+                }
                 break;
             }
             case OP_TYPE_WMIR_RETURN: {
@@ -1056,10 +1274,12 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                     fprintf(stderr,
                         "wmir->aarch64: wmir.return with %zu results not yet "
                         "supported\n", no);
-                    sm_free(&sm); bm_free(&bm);
+                    wmir_regalloc_free(ra); bm_free(&bm);
                     return MLIR_INVALID_HANDLE;
                 }
-                if (no == 1) LD_OPERAND(0, 0);
+                if (no == 1) {
+                    ld_operand_into_fixed(ctx, dst_blk, ra, op, 0, /*reg=*/0);
+                }
                 emit_epilogue(ctx, dst_blk, frame_size);
                 emit_ret(ctx, dst_blk);
                 break;
@@ -1070,15 +1290,14 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
             }
             case OP_TYPE_WMIR_BR: {
                 // Copy each successor operand into the corresponding
-                // target block-arg slot, then branch. Successor operands
-                // are NOT regular operands — they are attached to the
-                // successor edge and queried separately.
+                // target block-arg home, then branch. emit_branch_arg_copies
+                // resolves reg→reg cycles via scratch x9.
                 MLIR_BlockHandle s_target = MLIR_GetOpSuccessor(op, 0);
                 MLIR_BlockHandle d_target = bm_get(&bm, s_target);
                 if (d_target == MLIR_INVALID_HANDLE) {
                     fprintf(stderr,
                         "wmir->aarch64: wmir.br target block not mapped\n");
-                    sm_free(&sm); bm_free(&bm);
+                    wmir_regalloc_free(ra); bm_free(&bm);
                     return MLIR_INVALID_HANDLE;
                 }
                 size_t n_sops = MLIR_GetOpNumSuccessorOperands(op, 0);
@@ -1087,23 +1306,10 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                     fprintf(stderr,
                         "wmir->aarch64: wmir.br operand count %zu != target "
                         "arg count %zu\n", n_sops, n_args);
-                    sm_free(&sm); bm_free(&bm);
+                    wmir_regalloc_free(ra); bm_free(&bm);
                     return MLIR_INVALID_HANDLE;
                 }
-                for (size_t k = 0; k < n_sops; k++) {
-                    MLIR_ValueHandle src_v = MLIR_GetOpSuccessorOperand(op, 0, k);
-                    uint16_t src_s; sm_get(&sm, src_v, &src_s);
-                    MLIR_ValueHandle tgt_a = MLIR_GetBlockArg(s_target, k);
-                    uint16_t tgt_s; sm_get(&sm, tgt_a, &tgt_s);
-                    if (src_s == tgt_s) continue;
-                    if (is_i64(ctx, src_v) || is_i64(ctx, tgt_a)) {
-                        emit_ldr_x(ctx, dst_blk, 9, 31, (uint16_t)(src_s * 8u));
-                        emit_str_x(ctx, dst_blk, 9, 31, (uint16_t)(tgt_s * 8u));
-                    } else {
-                        emit_ldr_w(ctx, dst_blk, 9, 31, (uint16_t)(src_s * 8u));
-                        emit_str_w(ctx, dst_blk, 9, 31, (uint16_t)(tgt_s * 8u));
-                    }
-                }
+                emit_branch_arg_copies(ctx, dst_blk, ra, op, 0, s_target);
                 emit_b(ctx, dst_blk, d_target);
                 break;
             }
@@ -1112,7 +1318,7 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 if (MLIR_GetOpNumSuccessors(op) < 2) {
                     fprintf(stderr,
                         "wmir->aarch64: wmir.cond_br needs 2 successors\n");
-                    sm_free(&sm); bm_free(&bm);
+                    wmir_regalloc_free(ra); bm_free(&bm);
                     return MLIR_INVALID_HANDLE;
                 }
                 MLIR_BlockHandle t_src = MLIR_GetOpSuccessor(op, 0);
@@ -1122,13 +1328,11 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 if (t_dst == MLIR_INVALID_HANDLE || f_dst == MLIR_INVALID_HANDLE) {
                     fprintf(stderr,
                         "wmir->aarch64: wmir.cond_br target block not mapped\n");
-                    sm_free(&sm); bm_free(&bm);
+                    wmir_regalloc_free(ra); bm_free(&bm);
                     return MLIR_INVALID_HANDLE;
                 }
-                // Load cond into w9; test against zero. Wasm boolean
-                // convention: 0 = false, non-zero = true.
-                LD_OPERAND(9, 0);
-                emit_cbnz(ctx, dst_blk, 9, /*sf=*/false, t_dst);
+                uint8_t r0 = LD_OPERAND(9, 0);
+                emit_cbnz(ctx, dst_blk, r0, /*sf=*/false, t_dst);
                 emit_b(ctx, dst_blk, f_dst);
                 break;
             }
@@ -1137,17 +1341,18 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 fprintf(stderr,
                     "wmir->aarch64: unsupported wmir op '%.*s' (kind=%d)\n",
                     (int)nm.size, nm.str, (int)t);
-                sm_free(&sm); bm_free(&bm);
+                wmir_regalloc_free(ra); bm_free(&bm);
                 return MLIR_INVALID_HANDLE;
             }
             }
         }
 
         #undef LD_OPERAND
+        #undef PICK_RES
         #undef ST_RESULT
     }
 
-    sm_free(&sm);
+    wmir_regalloc_free(ra);
     bm_free(&bm);
 
     MLIR_AttributeHandle attrs[4];

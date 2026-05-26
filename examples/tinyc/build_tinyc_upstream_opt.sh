@@ -33,7 +33,7 @@ fi
 OPT_FLAGS="-O3 -DNDEBUG"
 
 COREC_C_FILES="corec/base/io.c corec/base/buddy.c corec/base/arena.c corec/base/scratch.c corec/base/format.c corec/base/math.c corec/base/string.c corec/base/strbuf.c corec/base/mem.c corec/base/numconv.c corec/base/assert.c corec/base/exit.c"
-TINYC_C_FILES="examples/tinyc/lex.c examples/tinyc/preprocess.c examples/tinyc/parse.c examples/tinyc/emit.c examples/tinyc/driver.c mlir_op_names.c mlir_lower_to_llvm.c mlir_translate_to_llvm_ir.c mlir_translate_to_wasm.c mlir_wasm_to_wat.c mlir_wasm_to_macho.c mlir_llvm_to_wasmssa.c mlir_wasmssa_to_wasmstack.c mlir_wasmstack_to_bin.c mlir_wasm_link.c mlir_wasmssa_to_wmir.c mlir_wmir_to_aarch64.c mlir_aarch64_to_macho.c mlir_generic_printer.c mlir_lift_cf_to_scf.c"
+TINYC_C_FILES="examples/tinyc/lex.c examples/tinyc/preprocess.c examples/tinyc/parse.c examples/tinyc/emit.c examples/tinyc/driver.c mlir_op_names.c mlir_lower_to_llvm.c mlir_translate_to_llvm_ir.c mlir_translate_to_wasm.c mlir_wasm_to_wat.c mlir_wasm_to_macho.c mlir_llvm_to_wasmssa.c mlir_wasmssa_to_wasmstack.c mlir_wasmstack_to_bin.c mlir_wasm_link.c mlir_wasmssa_to_wmir.c mlir_wmir_regalloc.c mlir_wmir_to_aarch64.c mlir_aarch64_to_macho.c mlir_generic_printer.c mlir_lift_cf_to_scf.c"
 
 OBJ_DIR="build_opt_upstream"
 rm -rf "$OBJ_DIR"
@@ -55,7 +55,7 @@ $CXX $OPT_FLAGS -o tinyc_upstream_opt \
     "$OBJ_DIR"/mlir_translate_to_llvm_ir.o "$OBJ_DIR"/mlir_translate_to_wasm.o "$OBJ_DIR"/mlir_wasm_to_wat.o \
     "$OBJ_DIR"/mlir_wasm_to_macho.o \
     "$OBJ_DIR"/mlir_llvm_to_wasmssa.o "$OBJ_DIR"/mlir_wasmssa_to_wasmstack.o "$OBJ_DIR"/mlir_wasmstack_to_bin.o \
-    "$OBJ_DIR"/mlir_wasm_link.o "$OBJ_DIR"/mlir_wasmssa_to_wmir.o "$OBJ_DIR"/mlir_wmir_to_aarch64.o \
+    "$OBJ_DIR"/mlir_wasm_link.o "$OBJ_DIR"/mlir_wasmssa_to_wmir.o "$OBJ_DIR"/mlir_wmir_regalloc.o "$OBJ_DIR"/mlir_wmir_to_aarch64.o \
     "$OBJ_DIR"/mlir_aarch64_to_macho.o \
     "$OBJ_DIR"/mlir_generic_printer.o "$OBJ_DIR"/mlir_lift_cf_to_scf.o \
     "$OBJ_DIR"/io.o "$OBJ_DIR"/buddy.o "$OBJ_DIR"/arena.o "$OBJ_DIR"/scratch.o "$OBJ_DIR"/format.o \
