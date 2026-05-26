@@ -310,6 +310,29 @@ typedef enum {
     // 1:1 wasmstack mirrors of OP_TYPE_WASMSSA_MEMORY_{SIZE,GROW}.
     OP_TYPE_WASMSTACK_MEMORY_SIZE,
     OP_TYPE_WASMSTACK_MEMORY_GROW,
+    // `drop` (wasm 0x1a): pop one stack value, no result. Only used by
+    // the wasm -> wasmstack lifter; the C-frontend wasmssa pipeline
+    // never emits this op.
+    OP_TYPE_WASMSTACK_DROP,
+    // `br_table`: emitted by clang for switch dispatch in linked
+    // runtime objects. Carries a comma-separated list of target depths
+    // plus a default depth.
+    OP_TYPE_WASMSTACK_BR_TABLE,
+    // Module-level data segment lifted from a wasm DATA section. The
+    // wasmstack -> wasmssa pass converts this into a wasmssa.import_global
+    // sized appropriately.
+    OP_TYPE_WASMSTACK_DATA_SEGMENT,
+    // Module-level global declaration with an initial value. Lifted
+    // from the wasm GLOBAL section. The wmir backend allocates a static
+    // i64 slot per global; only the initial value matters.
+    OP_TYPE_WASMSTACK_GLOBAL_DECL,
+
+    // Module-level table entry lifted from a wasm ELEM section. Carries
+    // (slot, target) — i.e. table_slot_index N now contains a reference
+    // to function `target`. The wasmstack -> wasmssa pass collects these
+    // and emits a synthetic wasmssa.func "_tinyc_fnptr_init" containing
+    // one wasmssa.func_addr per entry, so the wmir pre-pass sees them.
+    OP_TYPE_WASMSTACK_FUNC_ADDR_DECL,
 
     // -------------------------------------------------------------------------
     // wmir dialect — flat-CFG, post-wasmssa middle IR. The plan is to make
@@ -384,6 +407,11 @@ typedef enum {
     //   attrs: kind (string: f2f|f2i|i2f), src_w, dst_w, sign (bool, for
     //     f2i / i2f). Operand and result are i32 / i64 bit patterns.
     OP_TYPE_WMIR_FCONV,
+
+    //   No operands; result is i32 (linmem size in 64 KiB pages).
+    OP_TYPE_WMIR_MEMORY_SIZE,
+    //   1 operand (i32 delta pages); result is i32 (prev size, or -1).
+    OP_TYPE_WMIR_MEMORY_GROW,
 
     // -------------------------------------------------------------------------
     // aarch64 dialect — 1:1 with the AArch64 instruction encoding. The

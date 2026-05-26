@@ -15,6 +15,8 @@
 #include "mlir_wasmssa_to_wasmstack.h"
 #include "mlir_wasm_to_wat.h"
 #include "mlir_wasm_to_macho.h"
+#include "mlir_wasm_to_wasmstack.h"
+#include "mlir_wasmstack_to_wasmssa.h"
 #include "mlir_wasm_link.h"
 #include "mlir_wasmssa_to_wmir.h"
 #include "mlir_wmir_to_aarch64.h"
@@ -124,6 +126,12 @@ int app_main(void) {
     char **wasm_runtime_objs = arena_new_array(boot_arena, char *, argc + 1);
     size_t n_wasm_runtime_objs = 0;
 
+    // --from-wasm=PATH: bypass the C/MLIR front end and read a linked
+    // wasm32 module directly. This routes the wasm bytes through
+    // wasm -> wasmstack -> wasmssa -> ... -> chosen emit target. Used
+    // by the new wmir-via-wasm Mach-O backend.
+    char *from_wasm_path = NULL;
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--link") == 0) {
             // Linker mode: collect remaining positional arguments as
@@ -223,6 +231,12 @@ int app_main(void) {
         else if (strncmp(argv[i], "--wasm-runtime-obj=", 19) == 0) {
             wasm_runtime_objs[n_wasm_runtime_objs++] = argv[i] + 19;
         }
+        else if (strncmp(argv[i], "--from-wasm=", 12) == 0) {
+            from_wasm_path = argv[i] + 12;
+        }
+        else if (strcmp(argv[i], "--from-wasm") == 0 && i + 1 < argc) {
+            from_wasm_path = argv[++i];
+        }
         else if (strcmp(argv[i], "--lowering=upstream") == 0) {
 #ifdef TINYC_HAS_UPSTREAM
             use_upstream = true; lowering_explicit = true;
@@ -258,8 +272,8 @@ int app_main(void) {
         }
     }
 
-    if (n_input_files == 0) {
-        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm|wasm|wasmssa|wasmstack|wat|macho] [--lowering=upstream|native] [--wasm-runtime-obj=PATH ...] [-I dir ...] [-D name[=value] ...] [-o OUT] FILE.tc [FILE2.tc ...]"));
+    if (n_input_files == 0 && from_wasm_path == NULL) {
+        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm|wasm|wasmssa|wasmstack|wat|macho] [--lowering=upstream|native] [--from-wasm PATH] [--wasm-runtime-obj=PATH ...] [-I dir ...] [-D name[=value] ...] [-o OUT] FILE.tc [FILE2.tc ...]"));
         arena_destroy(boot_arena);
         return 1;
     }
@@ -309,6 +323,112 @@ int app_main(void) {
     Arena *arena = arena_create(64 * 1024 * 1024);
     MLIR_Context ctx = {0};
     MLIR_SetArenaAllocator(&ctx, arena);
+
+    // --from-wasm short-circuits the C/MLIR front end entirely. We
+    // read the linked wasm bytes, lift to wasmstack, then to wasmssa,
+    // and from there reuse the existing wasmssa -> wmir -> aarch64 ->
+    // macho pipeline. Only the wmir family of emit targets is meaningful
+    // for this path: wasmstack / wasmssa (for inspection), wmir,
+    // aarch64, and macho with --macho-backend=wmir.
+    if (from_wasm_path) {
+        string wasm_buf = read_file_ok(arena, str_from_cstr_view(from_wasm_path));
+        // read_file_ok appends a trailing NUL — strip it for the lifter,
+        // which expects the exact wasm file size.
+        size_t wasm_size = wasm_buf.size > 0 ? wasm_buf.size - 1 : 0;
+        MLIR_OpHandle stack_mod = mlir_wasm_to_wasmstack(
+            &ctx, (const uint8_t *)wasm_buf.str, wasm_size);
+        if (stack_mod == MLIR_INVALID_HANDLE) {
+            arena_destroy(arena);
+            arena_destroy(boot_arena);
+            return 1;
+        }
+        string out_fw;
+        if (emit_wasmstack) {
+            out_fw = MLIR_PrintOperationGeneric(&ctx, stack_mod);
+        } else {
+            MLIR_OpHandle ssa = mlir_wasmstack_to_wasmssa(&ctx, stack_mod);
+            if (ssa == MLIR_INVALID_HANDLE) {
+                arena_destroy(arena);
+                arena_destroy(boot_arena);
+                return 1;
+            }
+            if (emit_wasmssa) {
+                out_fw = MLIR_PrintOperationGeneric(&ctx, ssa);
+            } else if (emit_wmir) {
+                MLIR_OpHandle wmir = mlir_wasmssa_to_wmir(&ctx, ssa);
+                if (wmir == MLIR_INVALID_HANDLE) {
+                    arena_destroy(arena);
+                    arena_destroy(boot_arena);
+                    return 1;
+                }
+                out_fw = MLIR_PrintOperationGeneric(&ctx, wmir);
+            } else if (emit_aarch64) {
+                MLIR_OpHandle wmir = mlir_wasmssa_to_wmir(&ctx, ssa);
+                if (wmir == MLIR_INVALID_HANDLE) {
+                    arena_destroy(arena);
+                    arena_destroy(boot_arena);
+                    return 1;
+                }
+                MLIR_OpHandle a64 = mlir_wmir_to_aarch64(&ctx, wmir);
+                if (a64 == MLIR_INVALID_HANDLE) {
+                    arena_destroy(arena);
+                    arena_destroy(boot_arena);
+                    return 1;
+                }
+                out_fw = MLIR_PrintOperationGeneric(&ctx, a64);
+            } else if (emit_macho) {
+                MLIR_OpHandle wmir = mlir_wasmssa_to_wmir(&ctx, ssa);
+                if (wmir == MLIR_INVALID_HANDLE) {
+                    arena_destroy(arena);
+                    arena_destroy(boot_arena);
+                    return 1;
+                }
+                MLIR_OpHandle a64 = mlir_wmir_to_aarch64(&ctx, wmir);
+                if (a64 == MLIR_INVALID_HANDLE) {
+                    arena_destroy(arena);
+                    arena_destroy(boot_arena);
+                    return 1;
+                }
+                uint8_t *macho_data = NULL; size_t macho_size = 0;
+                if (!mlir_aarch64_to_macho(&ctx, a64, &macho_data, &macho_size)) {
+                    arena_destroy(arena);
+                    arena_destroy(boot_arena);
+                    return 1;
+                }
+                out_fw.str = (char *)macho_data;
+                out_fw.size = macho_size;
+            } else {
+                fprintf(stderr,
+                    "tinyc --from-wasm: requires --emit=wasmstack|wasmssa|wmir|aarch64|macho\n");
+                arena_destroy(arena);
+                arena_destroy(boot_arena);
+                return 1;
+            }
+        }
+        int wr;
+        if (emit_macho) {
+            if (!output_file) {
+                fprintf(stderr, "tinyc --from-wasm --emit=macho: -o OUT required\n");
+                arena_destroy(arena);
+                arena_destroy(boot_arena);
+                return 1;
+            }
+            wr = write_bytes_to_file(out_fw, output_file);
+#if !defined(_WIN32) && !defined(__wasm__) && !defined(__TINYC__)
+            if (wr == 0) {
+                chmod(output_file, 0755);
+            }
+#endif
+        } else if (output_file) {
+            wr = write_string_to_file(out_fw, output_file);
+        } else {
+            println(str_lit("{}"), out_fw);
+            wr = 0;
+        }
+        arena_destroy(arena);
+        arena_destroy(boot_arena);
+        return wr;
+    }
 
     // Per-file preprocess + lex + parse-into accumulating Program. The
     // preprocessor is per-file (so #define / #pragma once do NOT leak

@@ -201,6 +201,11 @@ static string op_type_to_string_half2(MLIR_OpType type) {
         case OP_TYPE_WASMSTACK_CALL_INDIRECT: return str_lit("wasmstack.call_indirect");
         case OP_TYPE_WASMSTACK_MEMORY_SIZE: return str_lit("wasmstack.memory_size");
         case OP_TYPE_WASMSTACK_MEMORY_GROW: return str_lit("wasmstack.memory_grow");
+        case OP_TYPE_WASMSTACK_DROP:        return str_lit("wasmstack.drop");
+        case OP_TYPE_WASMSTACK_BR_TABLE:    return str_lit("wasmstack.br_table");
+        case OP_TYPE_WASMSTACK_DATA_SEGMENT: return str_lit("wasmstack.data_segment");
+        case OP_TYPE_WASMSTACK_GLOBAL_DECL: return str_lit("wasmstack.global_decl");
+        case OP_TYPE_WASMSTACK_FUNC_ADDR_DECL: return str_lit("wasmstack.func_addr_decl");
         // wmir dialect
         case OP_TYPE_WMIR_FUNC:       return str_lit("wmir.func");
         case OP_TYPE_WMIR_CONST:      return str_lit("wmir.const");
@@ -237,6 +242,8 @@ static string op_type_to_string_half2(MLIR_OpType type) {
         case OP_TYPE_WMIR_FUNOP:      return str_lit("wmir.funop");
         case OP_TYPE_WMIR_FCMP:       return str_lit("wmir.fcmp");
         case OP_TYPE_WMIR_FCONV:      return str_lit("wmir.fconv");
+        case OP_TYPE_WMIR_MEMORY_SIZE: return str_lit("wmir.memory_size");
+        case OP_TYPE_WMIR_MEMORY_GROW: return str_lit("wmir.memory_grow");
         // aarch64 dialect
         case OP_TYPE_AARCH64_FUNC:         return str_lit("aarch64.func");
         case OP_TYPE_AARCH64_MOVZ:         return str_lit("aarch64.movz");

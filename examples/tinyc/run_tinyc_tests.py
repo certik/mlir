@@ -64,7 +64,17 @@ LIFT_USE_NATIVE = os.environ.get("TINYC_LIFT_USE_NATIVE") == "1"
 
 
 def run(cmd, **kw):
-    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    kw.setdefault("timeout", 60)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    except subprocess.TimeoutExpired as e:
+        class _R:
+            pass
+        r = _R()
+        r.returncode = -124
+        r.stdout = e.stdout or ""
+        r.stderr = (e.stderr or "") + "\n[timeout]"
+        return r
 
 
 def link_native(obj_path: Path, exe_path: Path):
@@ -324,6 +334,79 @@ def main():
         if TARGET == "macho":
             obj = HERE / "tests" / f"{name}.macho.wasm.o"
             exe = HERE / "tests" / f"{name}.macho"
+
+            # The wmir_via_wasm sub-backend goes through the new lifter:
+            #   per-source --emit=wasm + wasm-ld + --from-wasm <linked.wasm>
+            # so it always exercises the full wasm-linker pipeline before
+            # touching the wmir backend. This is the only way to get
+            # per-TU isolation that tinyc itself doesn't provide for the
+            # joint multi-source --emit=macho invocation.
+            if MACHO_BACKEND == "wmir_via_wasm":
+                # Per-source emit -> link -> from-wasm -> macho.
+                # Mirror the wasm-target convention: by default the
+                # sources are compiled jointly (so cross-file calls
+                # without a forward decl resolve, etc); with
+                # link_separately = true each source is compiled to
+                # its own .wasm.o to exercise wasm-ld symbol
+                # resolution. The latter is the path that the
+                # existing test_tinyc_wasm task uses.
+                link_separately = bool(t.get("link_separately"))
+                fail = False
+                wasm_objs = []
+                if link_separately:
+                    for src in srcs:
+                        obj_i = HERE / "tests" / f"{src.stem}.macho.wasm.o"
+                        r = run([str(TINYC), "--emit=wasm", *LOWERING_FLAG,
+                                 "-I", str(HERE / "tests"),
+                                 "-o", str(obj_i),
+                                 str(src)])
+                        if r.returncode != 0:
+                            print(f"FAIL {name}: tinyc --emit=wasm on {src.name} returned {r.returncode}\nstderr:\n{r.stderr}")
+                            failures += 1
+                            fail = True
+                            break
+                        wasm_objs.append(obj_i)
+                else:
+                    obj_j = HERE / "tests" / f"{name}.macho.wasm.o"
+                    r = run([str(TINYC), "--emit=wasm", *LOWERING_FLAG,
+                             "-I", str(HERE / "tests"),
+                             "-o", str(obj_j),
+                             *[str(s) for s in srcs]])
+                    if r.returncode != 0:
+                        print(f"FAIL {name}: tinyc --emit=wasm returned {r.returncode}\nstderr:\n{r.stderr}")
+                        failures += 1
+                        fail = True
+                    else:
+                        wasm_objs.append(obj_j)
+                if fail:
+                    continue
+                linked_wasm = HERE / "tests" / f"{name}.macho.linked.wasm"
+                r = link_wasm(wasm_objs, wasm_runtime_obj, wasm_start_obj, linked_wasm)
+                if r.returncode != 0:
+                    print(f"FAIL {name}: wasm-ld failed\nstderr:\n{r.stderr}\nstdout:\n{r.stdout}")
+                    failures += 1
+                    continue
+                r = run([str(TINYC), "--from-wasm", str(linked_wasm),
+                         "--emit=macho", "--macho-backend=wmir",
+                         "-o", str(exe)])
+                if r.returncode != 0:
+                    print(f"FAIL {name}: tinyc --from-wasm returned {r.returncode}\nstderr:\n{r.stderr}")
+                    failures += 1
+                    continue
+                # Same retry-on-SIGKILL dance as the regular macho path.
+                r = run([str(exe)])
+                if r.returncode == -9:
+                    r = run([str(exe)])
+                if r.returncode != expected_rc:
+                    print(f"FAIL {name}: macho exited with status {r.returncode} (expected {expected_rc})\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
+                    failures += 1
+                    continue
+                if r.stdout != expected:
+                    print(f"FAIL {name}: stdout mismatch\n  expected: {expected!r}\n  got:      {r.stdout!r}")
+                    failures += 1
+                    continue
+                print(f"PASS {name}")
+                continue
 
             # Stage 1: tinyc emits wasm32 object, links it with the wasm
             # runtime + _start shim, and translates the linked module to
