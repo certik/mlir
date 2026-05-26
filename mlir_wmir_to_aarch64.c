@@ -270,12 +270,29 @@ static void rebase_for_imm12(MLIR_Context *ctx, MLIR_BlockHandle blk,
                              uint32_t scale) {
     uint32_t off = *p_off_bytes;
     if (off <= (uint32_t)(4095u * scale) && (off % scale) == 0) return;
-    // movz x16, low; movk x16, high (if needed); add x16, rn, x16
-    emit_movz(ctx, blk, 16, (uint16_t)(off & 0xffffu), 0, /*sf=*/true);
-    if ((off >> 16) != 0) {
-        emit_movk(ctx, blk, 16, (uint16_t)((off >> 16) & 0xffffu), 1, /*sf=*/true);
+    // The shifted-register form of ADD/SUB treats register encoding
+    // 31 as XZR (the zero register), NOT as SP. So when the base is
+    // SP and the offset exceeds imm12, we must materialise SP via
+    // the immediate form first (where Rn=31 IS SP, an architectural
+    // quirk of the ADD instruction family). Materialise the offset
+    // in x17 (also a linker scratch reg, free between BL boundaries
+    // like x16) so we can then combine `(mov x16, sp) + x17` into
+    // x16 via a register ADD where both inputs are real registers.
+    if (*p_rn == 31) {
+        emit_movz(ctx, blk, 17, (uint16_t)(off & 0xffffu), 0, /*sf=*/true);
+        if ((off >> 16) != 0) {
+            emit_movk(ctx, blk, 17, (uint16_t)((off >> 16) & 0xffffu), 1, /*sf=*/true);
+        }
+        emit_add_imm(ctx, blk, /*rd=*/16, /*rn=*/31, /*imm12=*/0, /*sf=*/true);
+        emit_add_reg(ctx, blk, /*rd=*/16, /*rn=*/16, /*rm=*/17, /*sf=*/true);
+    } else {
+        // movz x16, low; movk x16, high (if needed); add x16, rn, x16
+        emit_movz(ctx, blk, 16, (uint16_t)(off & 0xffffu), 0, /*sf=*/true);
+        if ((off >> 16) != 0) {
+            emit_movk(ctx, blk, 16, (uint16_t)((off >> 16) & 0xffffu), 1, /*sf=*/true);
+        }
+        emit_add_reg(ctx, blk, /*rd=*/16, /*rn=*/*p_rn, /*rm=*/16, /*sf=*/true);
     }
-    emit_add_reg(ctx, blk, /*rd=*/16, /*rn=*/*p_rn, /*rm=*/16, /*sf=*/true);
     *p_rn = 16;
     *p_off_bytes = 0;
 }
