@@ -418,6 +418,88 @@ static uint32_t arm64_uxtw(uint8_t rd, uint8_t rn) {
     return 0x2a0003e0u | ((uint32_t)(rn & 0x1f) << 16) | (uint32_t)(rd & 0x1f);
 }
 
+// ---- Floating-point encodings ------------------------------------
+// FMOV Sd, Wn (GP -> V, 32-bit): 0x1E270000 | (Rn<<5) | Rd.
+// FMOV Dd, Xn (GP -> V, 64-bit): 0x9E670000 | ...
+static uint32_t arm64_fmov_gp_to_v(uint8_t rd, uint8_t rn, bool sf) {
+    uint32_t base = sf ? 0x9e670000u : 0x1e270000u;
+    return base | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rd & 0x1f);
+}
+// FMOV Wd, Sn / Xd, Dn: 0x1E260000 / 0x9E660000.
+static uint32_t arm64_fmov_v_to_gp(uint8_t rd, uint8_t rn, bool sf) {
+    uint32_t base = sf ? 0x9e660000u : 0x1e260000u;
+    return base | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rd & 0x1f);
+}
+// FADD/FSUB/FMUL/FDIV Sd/Dd, Sn/Dn, Sm/Dm.
+//   ftype at bit 22 (0=single, 1=double).
+//   opcode at bits[13:12]: fmul=00, fdiv=01, fadd=10, fsub=11.
+// Base for FMUL Sd: 0x1E200800.
+static uint32_t arm64_fp_binop(uint8_t kind, int fwidth,
+                               uint8_t rd, uint8_t rn, uint8_t rm) {
+    // kind: 0=fmul, 1=fdiv, 2=fadd, 3=fsub.
+    uint32_t base = 0x1e200800u;
+    if (fwidth == 64) base |= 0x00400000u;
+    base |= ((uint32_t)kind & 0x3u) << 12;
+    return base | ((uint32_t)(rm & 0x1f) << 16)
+                | ((uint32_t)(rn & 0x1f) << 5)
+                | (uint32_t)(rd & 0x1f);
+}
+// FABS/FNEG/FSQRT Sd/Dd, Sn/Dn.
+//   opcode at bits[20:15] (only bits 15..17 used here):
+//     fabs=000001, fneg=000010, fsqrt=000011.
+// Base for FABS Sd: 0x1E20C000.
+static uint32_t arm64_fp_unop(uint8_t kind, int fwidth,
+                              uint8_t rd, uint8_t rn) {
+    // kind: 1=fabs, 2=fneg, 3=fsqrt.
+    uint32_t base = 0x1e204000u;
+    if (fwidth == 64) base |= 0x00400000u;
+    base |= ((uint32_t)kind & 0x3fu) << 15;
+    return base | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rd & 0x1f);
+}
+// FCMP Sn/Dn, Sm/Dm (no result reg; writes NZCV).
+//   Base FCMP Sn, Sm: 0x1E202000 | Rm<<16 | Rn<<5.
+static uint32_t arm64_fcmp(int fwidth, uint8_t rn, uint8_t rm) {
+    uint32_t base = 0x1e202000u;
+    if (fwidth == 64) base |= 0x00400000u;
+    return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5);
+}
+// FCVT Dd, Sn (single -> double): 0x1E22C000 | Rn<<5 | Rd.
+// FCVT Sd, Dn (double -> single): 0x1E624000 | Rn<<5 | Rd.
+static uint32_t arm64_fcvt_f2f(int src_w, int dst_w, uint8_t rd, uint8_t rn) {
+    uint32_t insn;
+    if (src_w == 32 && dst_w == 64) insn = 0x1e22c000u;
+    else                            insn = 0x1e624000u;
+    return insn | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rd & 0x1f);
+}
+// FCVTZS / FCVTZU (FP -> integer; round toward zero).
+//   FCVTZS Wd, Sn: 0x1E380000
+//   FCVTZS Wd, Dn: 0x1E780000
+//   FCVTZS Xd, Sn: 0x9E380000
+//   FCVTZS Xd, Dn: 0x9E780000
+//   FCVTZU: add 0x10000 (opcode bit 16).
+static uint32_t arm64_fp_to_int(bool sign, int src_w, int dst_w,
+                                uint8_t rd, uint8_t rn) {
+    uint32_t insn = 0x1e380000u;
+    if (src_w == 64) insn |= 0x00400000u;
+    if (dst_w == 64) insn |= 0x80000000u;
+    if (!sign)       insn |= 0x00010000u;
+    return insn | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rd & 0x1f);
+}
+// SCVTF / UCVTF (integer -> FP).
+//   SCVTF Sd, Wn: 0x1E220000
+//   SCVTF Dd, Wn: 0x1E620000
+//   SCVTF Sd, Xn: 0x9E220000
+//   SCVTF Dd, Xn: 0x9E620000
+//   UCVTF: add 0x10000 (opcode bit 16).
+static uint32_t arm64_int_to_fp(bool sign, int src_w, int dst_w,
+                                uint8_t rd, uint8_t rn) {
+    uint32_t insn = 0x1e220000u;
+    if (dst_w == 64) insn |= 0x00400000u;
+    if (src_w == 64) insn |= 0x80000000u;
+    if (!sign)       insn |= 0x00010000u;
+    return insn | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rd & 0x1f);
+}
+
 // ---- ADRP / ADD ---------------------------------------------------
 // ADRP Xd, #rel_pages*4096 (rel_pages is a signed 21-bit value).
 static uint32_t arm64_adrp(uint8_t rd, int64_t rel_pages) {
@@ -880,6 +962,84 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
                 // Pseudo: marks a position; emits no bytes. Block boundary
                 // tracking already happened above.
                 break;
+            case OP_TYPE_AARCH64_FMOV_GP_V: {
+                bool dir_to_v = attr_b(op, "dir_to_v");
+                bool sf       = attr_b(op, "sf");
+                uint8_t rd    = (uint8_t)attr_i(op, "rd");
+                uint8_t rn    = (uint8_t)attr_i(op, "rn");
+                emit_word(&out->code, dir_to_v
+                    ? arm64_fmov_gp_to_v(rd, rn, sf)
+                    : arm64_fmov_v_to_gp(rd, rn, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_FP_BINOP: {
+                string k = attr_s(op, "kind");
+                int fwidth = (int)attr_i(op, "fwidth");
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                uint8_t kind = 0;
+                if      (k.size == 4 && memcmp(k.str, "fmul", 4) == 0) kind = 0;
+                else if (k.size == 4 && memcmp(k.str, "fdiv", 4) == 0) kind = 1;
+                else if (k.size == 4 && memcmp(k.str, "fadd", 4) == 0) kind = 2;
+                else if (k.size == 4 && memcmp(k.str, "fsub", 4) == 0) kind = 3;
+                else {
+                    fprintf(stderr,
+                        "aarch64->macho: aarch64.fp_binop unknown kind '%.*s'\n",
+                        (int)k.size, k.str);
+                    return false;
+                }
+                emit_word(&out->code, arm64_fp_binop(kind, fwidth, rd, rn, rm));
+                break;
+            }
+            case OP_TYPE_AARCH64_FP_UNOP: {
+                string k = attr_s(op, "kind");
+                int fwidth = (int)attr_i(op, "fwidth");
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t kind = 0;
+                if      (k.size == 4 && memcmp(k.str, "fabs", 4) == 0)  kind = 1;
+                else if (k.size == 4 && memcmp(k.str, "fneg", 4) == 0)  kind = 2;
+                else if (k.size == 5 && memcmp(k.str, "fsqrt", 5) == 0) kind = 3;
+                else {
+                    fprintf(stderr,
+                        "aarch64->macho: aarch64.fp_unop unknown kind '%.*s'\n",
+                        (int)k.size, k.str);
+                    return false;
+                }
+                emit_word(&out->code, arm64_fp_unop(kind, fwidth, rd, rn));
+                break;
+            }
+            case OP_TYPE_AARCH64_FCMP: {
+                int fwidth = (int)attr_i(op, "fwidth");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                emit_word(&out->code, arm64_fcmp(fwidth, rn, rm));
+                break;
+            }
+            case OP_TYPE_AARCH64_FP_CVT: {
+                string k = attr_s(op, "kind");
+                int src_w = (int)attr_i(op, "src_w");
+                int dst_w = (int)attr_i(op, "dst_w");
+                bool sign = attr_b(op, "sign");
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint32_t insn;
+                if      (k.size == 3 && memcmp(k.str, "f2f", 3) == 0)
+                    insn = arm64_fcvt_f2f(src_w, dst_w, rd, rn);
+                else if (k.size == 3 && memcmp(k.str, "f2i", 3) == 0)
+                    insn = arm64_fp_to_int(sign, src_w, dst_w, rd, rn);
+                else if (k.size == 3 && memcmp(k.str, "i2f", 3) == 0)
+                    insn = arm64_int_to_fp(sign, src_w, dst_w, rd, rn);
+                else {
+                    fprintf(stderr,
+                        "aarch64->macho: aarch64.fp_cvt unknown kind '%.*s'\n",
+                        (int)k.size, k.str);
+                    return false;
+                }
+                emit_word(&out->code, insn);
+                break;
+            }
             default: {
                 string nm = MLIR_GetOpName(op);
                 fprintf(stderr,

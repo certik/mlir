@@ -218,6 +218,10 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_WMIR_UNREACHABLE:return str_lit("wmir.unreachable");
         case OP_TYPE_WMIR_SELECT:     return str_lit("wmir.select");
         case OP_TYPE_WMIR_DATA_INIT:  return str_lit("wmir.data_init");
+        case OP_TYPE_WMIR_FBINOP:     return str_lit("wmir.fbinop");
+        case OP_TYPE_WMIR_FUNOP:      return str_lit("wmir.funop");
+        case OP_TYPE_WMIR_FCMP:       return str_lit("wmir.fcmp");
+        case OP_TYPE_WMIR_FCONV:      return str_lit("wmir.fconv");
         // aarch64 dialect
         case OP_TYPE_AARCH64_FUNC:         return str_lit("aarch64.func");
         case OP_TYPE_AARCH64_MOVZ:         return str_lit("aarch64.movz");
@@ -264,6 +268,11 @@ string op_type_to_string(MLIR_OpType type) {
         case OP_TYPE_AARCH64_CBNZ:         return str_lit("aarch64.cbnz");
         case OP_TYPE_AARCH64_LABEL:        return str_lit("aarch64.label");
         case OP_TYPE_AARCH64_BRK:          return str_lit("aarch64.brk");
+        case OP_TYPE_AARCH64_FMOV_GP_V:    return str_lit("aarch64.fmov_gp_v");
+        case OP_TYPE_AARCH64_FP_BINOP:     return str_lit("aarch64.fp_binop");
+        case OP_TYPE_AARCH64_FP_UNOP:      return str_lit("aarch64.fp_unop");
+        case OP_TYPE_AARCH64_FCMP:         return str_lit("aarch64.fcmp");
+        case OP_TYPE_AARCH64_FP_CVT:       return str_lit("aarch64.fp_cvt");
         case OP_TYPE_AARCH64_DATA_INIT:    return str_lit("aarch64.data_init");
         default: return str_lit("unknown");
     }

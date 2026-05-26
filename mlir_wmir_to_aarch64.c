@@ -395,6 +395,73 @@ static void emit_mov_imm64(MLIR_Context *ctx, MLIR_BlockHandle blk,
 }
 
 // =============================================================================
+// Floating-point op emitters. All take *V register* numbers for rd/rn/rm
+// where the slot is V, and *GP register* numbers (W/X) for GP slots.
+// =============================================================================
+// FMOV gp <-> V. dir_to_v=true: GP->V; false: V->GP. sf=false picks
+// W<->S, sf=true picks X<->D.
+static void emit_fmov_gp_v(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                           bool dir_to_v, bool sf, uint8_t rd, uint8_t rn) {
+    MLIR_AttributeHandle a[4];
+    a[0] = attr_b  (ctx, "dir_to_v", dir_to_v);
+    a[1] = attr_b  (ctx, "sf",       sf);
+    a[2] = attr_i32(ctx, "rd",       rd);
+    a[3] = attr_i32(ctx, "rn",       rn);
+    MLIR_AppendBlockOp(ctx, blk,
+        build_op(ctx, OP_TYPE_AARCH64_FMOV_GP_V, a, 4));
+}
+// FADD/FSUB/FMUL/FDIV (V regs). kind = "fadd"|"fsub"|"fmul"|"fdiv".
+static void emit_fp_binop(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                          const char *kind, int fwidth,
+                          uint8_t rd, uint8_t rn, uint8_t rm) {
+    MLIR_AttributeHandle a[5];
+    a[0] = attr_s  (ctx, "kind",   kind, strlen(kind));
+    a[1] = attr_i32(ctx, "fwidth", fwidth);
+    a[2] = attr_i32(ctx, "rd",     rd);
+    a[3] = attr_i32(ctx, "rn",     rn);
+    a[4] = attr_i32(ctx, "rm",     rm);
+    MLIR_AppendBlockOp(ctx, blk,
+        build_op(ctx, OP_TYPE_AARCH64_FP_BINOP, a, 5));
+}
+// FNEG/FABS/FSQRT.
+static void emit_fp_unop(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                         const char *kind, int fwidth,
+                         uint8_t rd, uint8_t rn) {
+    MLIR_AttributeHandle a[4];
+    a[0] = attr_s  (ctx, "kind",   kind, strlen(kind));
+    a[1] = attr_i32(ctx, "fwidth", fwidth);
+    a[2] = attr_i32(ctx, "rd",     rd);
+    a[3] = attr_i32(ctx, "rn",     rn);
+    MLIR_AppendBlockOp(ctx, blk,
+        build_op(ctx, OP_TYPE_AARCH64_FP_UNOP, a, 4));
+}
+// FCMP Sn/Dn, Sm/Dm (sets NZCV, no result reg).
+static void emit_fcmp(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                      int fwidth, uint8_t rn, uint8_t rm) {
+    MLIR_AttributeHandle a[3];
+    a[0] = attr_i32(ctx, "fwidth", fwidth);
+    a[1] = attr_i32(ctx, "rn",     rn);
+    a[2] = attr_i32(ctx, "rm",     rm);
+    MLIR_AppendBlockOp(ctx, blk,
+        build_op(ctx, OP_TYPE_AARCH64_FCMP, a, 3));
+}
+// FP conversion. kind ∈ {"f2f","f2i","i2f"}. sign matters only for
+// f2i / i2f; for f2f it should be set to false.
+static void emit_fp_cvt(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                        const char *kind, int src_w, int dst_w,
+                        bool sign, uint8_t rd, uint8_t rn) {
+    MLIR_AttributeHandle a[6];
+    a[0] = attr_s  (ctx, "kind",  kind, strlen(kind));
+    a[1] = attr_i32(ctx, "src_w", src_w);
+    a[2] = attr_i32(ctx, "dst_w", dst_w);
+    a[3] = attr_b  (ctx, "sign",  sign);
+    a[4] = attr_i32(ctx, "rd",    rd);
+    a[5] = attr_i32(ctx, "rn",    rn);
+    MLIR_AppendBlockOp(ctx, blk,
+        build_op(ctx, OP_TYPE_AARCH64_FP_CVT, a, 6));
+}
+
+// =============================================================================
 // Slot map: SSA value -> stack-slot index.
 // =============================================================================
 typedef struct {
@@ -783,6 +850,138 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 emit_cmp_imm(ctx, dst_blk, 11, 0, /*sf=*/false);
                 emit_csel(ctx, dst_blk, 9, 9, 10, COND_NE, sf);
                 ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_FBINOP: {
+                string k = at_s(op, "kind");
+                int64_t fw = at_i(op, "fwidth");
+                bool sf = (fw == 64);
+                // Load both operand bit patterns into x/w9 and x/w10.
+                LD_OPERAND(9, 0);
+                LD_OPERAND(10, 1);
+                emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/true, sf,
+                               /*rd=*/0, /*rn=*/9);
+                emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/true, sf,
+                               /*rd=*/1, /*rn=*/10);
+                const char *kind_lit = NULL;
+                if      (k.size == 4 && memcmp(k.str, "fadd", 4) == 0) kind_lit = "fadd";
+                else if (k.size == 4 && memcmp(k.str, "fsub", 4) == 0) kind_lit = "fsub";
+                else if (k.size == 4 && memcmp(k.str, "fmul", 4) == 0) kind_lit = "fmul";
+                else if (k.size == 4 && memcmp(k.str, "fdiv", 4) == 0) kind_lit = "fdiv";
+                else {
+                    fprintf(stderr,
+                        "wmir->aarch64: wmir.fbinop unknown kind '%.*s'\n",
+                        (int)k.size, k.str);
+                    sm_free(&sm); bm_free(&bm);
+                    return MLIR_INVALID_HANDLE;
+                }
+                emit_fp_binop(ctx, dst_blk, kind_lit, (int)fw,
+                              /*rd=*/0, /*rn=*/0, /*rm=*/1);
+                emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/false, sf,
+                               /*rd=*/9, /*rn=*/0);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_FUNOP: {
+                string k = at_s(op, "kind");
+                int64_t fw = at_i(op, "fwidth");
+                bool sf = (fw == 64);
+                LD_OPERAND(9, 0);
+                emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/true, sf,
+                               /*rd=*/0, /*rn=*/9);
+                const char *kind_lit = NULL;
+                if      (k.size == 4 && memcmp(k.str, "fabs", 4) == 0)  kind_lit = "fabs";
+                else if (k.size == 4 && memcmp(k.str, "fneg", 4) == 0)  kind_lit = "fneg";
+                else if (k.size == 5 && memcmp(k.str, "fsqrt", 5) == 0) kind_lit = "fsqrt";
+                else {
+                    fprintf(stderr,
+                        "wmir->aarch64: wmir.funop unknown kind '%.*s'\n",
+                        (int)k.size, k.str);
+                    sm_free(&sm); bm_free(&bm);
+                    return MLIR_INVALID_HANDLE;
+                }
+                emit_fp_unop(ctx, dst_blk, kind_lit, (int)fw,
+                             /*rd=*/0, /*rn=*/0);
+                emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/false, sf,
+                               /*rd=*/9, /*rn=*/0);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_FCMP: {
+                string pred = at_s(op, "pred");
+                int64_t fw = at_i(op, "fwidth");
+                bool sf = (fw == 64);
+                LD_OPERAND(9, 0);
+                LD_OPERAND(10, 1);
+                emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/true, sf,
+                               /*rd=*/0, /*rn=*/9);
+                emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/true, sf,
+                               /*rd=*/1, /*rn=*/10);
+                emit_fcmp(ctx, dst_blk, (int)fw, /*rn=*/0, /*rm=*/1);
+                // Translate the wmir.fcmp pred into an aarch64 cond.
+                // FCMP sets NZCV; unordered (NaN) operands set V (overflow).
+                //   oeq => EQ  (Z=1, no NaN)
+                //   une => NE  (or unordered)
+                //   olt => MI  (signed-less; ARM uses MI/PL for FP ordered)
+                //                actually FP ordered lt = MI? In ARM,
+                //                FP lt is "less" -> N=1,Z=0 -> MI. But
+                //                MI matches unordered too; standard is
+                //                to use B.MI for ordered lt (CC), with
+                //                NaN producing C=1 V=1 N=0 Z=0 which
+                //                makes b.lt (N!=V) fail — correct.
+                //   ole => LS  (unsigned less-or-equal)
+                //   ogt => GT  (signed greater)
+                //   oge => GE  (signed greater-or-equal)
+                uint8_t cond = COND_EQ;
+                if      (pred.size == 3 && memcmp(pred.str, "oeq", 3) == 0) cond = COND_EQ;
+                else if (pred.size == 3 && memcmp(pred.str, "une", 3) == 0) cond = COND_NE;
+                else if (pred.size == 3 && memcmp(pred.str, "olt", 3) == 0) cond = COND_CC; // LO/CC
+                else if (pred.size == 3 && memcmp(pred.str, "ole", 3) == 0) cond = COND_LS;
+                else if (pred.size == 3 && memcmp(pred.str, "ogt", 3) == 0) cond = COND_HI;
+                else if (pred.size == 3 && memcmp(pred.str, "oge", 3) == 0) cond = COND_CS; // HS/CS
+                emit_cset(ctx, dst_blk, 9, cond, /*sf=*/false);
+                ST_RESULT(9, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_FCONV: {
+                string k = at_s(op, "kind");
+                int64_t src_w = at_i(op, "src_w");
+                int64_t dst_w = at_i(op, "dst_w");
+                bool sign = at_b(op, "sign");
+                if (k.size == 3 && memcmp(k.str, "f2f", 3) == 0) {
+                    // FP precision change. Both operand and result are
+                    // bit patterns (i32 for f32, i64 for f64).
+                    LD_OPERAND(9, 0);
+                    emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/true,
+                                   /*sf=*/src_w == 64, /*rd=*/0, /*rn=*/9);
+                    emit_fp_cvt(ctx, dst_blk, "f2f", (int)src_w, (int)dst_w,
+                                /*sign=*/false, /*rd=*/0, /*rn=*/0);
+                    emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/false,
+                                   /*sf=*/dst_w == 64, /*rd=*/9, /*rn=*/0);
+                    ST_RESULT(9, 0);
+                } else if (k.size == 3 && memcmp(k.str, "f2i", 3) == 0) {
+                    // FP -> integer (FCVTZS/FCVTZU). Source is bit pattern.
+                    LD_OPERAND(9, 0);
+                    emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/true,
+                                   /*sf=*/src_w == 64, /*rd=*/0, /*rn=*/9);
+                    emit_fp_cvt(ctx, dst_blk, "f2i", (int)src_w, (int)dst_w,
+                                sign, /*rd=*/9, /*rn=*/0);
+                    ST_RESULT(9, 0);
+                } else if (k.size == 3 && memcmp(k.str, "i2f", 3) == 0) {
+                    // Integer -> FP (SCVTF/UCVTF). Result is bit pattern.
+                    LD_OPERAND(9, 0);
+                    emit_fp_cvt(ctx, dst_blk, "i2f", (int)src_w, (int)dst_w,
+                                sign, /*rd=*/0, /*rn=*/9);
+                    emit_fmov_gp_v(ctx, dst_blk, /*dir_to_v=*/false,
+                                   /*sf=*/dst_w == 64, /*rd=*/9, /*rn=*/0);
+                    ST_RESULT(9, 0);
+                } else {
+                    fprintf(stderr,
+                        "wmir->aarch64: wmir.fconv unknown kind '%.*s'\n",
+                        (int)k.size, k.str);
+                    sm_free(&sm); bm_free(&bm);
+                    return MLIR_INVALID_HANDLE;
+                }
                 break;
             }
             case OP_TYPE_WMIR_GLOBAL_GET: {

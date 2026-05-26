@@ -368,6 +368,22 @@ typedef enum {
     // linmem at link time. Lowers 1:1 to aarch64.data_init.
     //   attrs: sym_name (string, debug), offset (i32), init_data (string).
     OP_TYPE_WMIR_DATA_INIT,
+    // Float arithmetic, modelled on i32/i64 bit-pattern values. The
+    // f32/f64 type distinction is carried by the `fwidth` attribute
+    // (32 or 64) rather than the MLIR result type, which stays i32 /
+    // i64 throughout wmir. This lets the existing spill/reload machinery
+    // (which keys on i32 vs i64) just work — the wmir->aarch64 stage
+    // detours through a V register only for the duration of the FP
+    // instruction itself.
+    //   attrs: kind (string: fadd|fsub|fmul|fdiv), fwidth (i32: 32|64).
+    OP_TYPE_WMIR_FBINOP,
+    //   attrs: kind (string: fneg|fabs|fsqrt), fwidth.
+    OP_TYPE_WMIR_FUNOP,
+    //   attrs: pred (oeq|une|olt|ole|ogt|oge), fwidth. Result is i32 (0|1).
+    OP_TYPE_WMIR_FCMP,
+    //   attrs: kind (string: f2f|f2i|i2f), src_w, dst_w, sign (bool, for
+    //     f2i / i2f). Operand and result are i32 / i64 bit patterns.
+    OP_TYPE_WMIR_FCONV,
 
     // -------------------------------------------------------------------------
     // aarch64 dialect — 1:1 with the AArch64 instruction encoding. The
@@ -438,6 +454,35 @@ typedef enum {
     OP_TYPE_AARCH64_CBNZ,       // cbnz Wn, <label>
     OP_TYPE_AARCH64_LABEL,      // pseudo: marks a position; emits 0 bytes
     OP_TYPE_AARCH64_BRK,        // brk #imm16 (trap)
+    // Floating-point ops. Operand and result registers in attributes are
+    // *V register* numbers (0..31) for the FP slots and GP register
+    // numbers for the GP slots; the two register files are disjoint, so
+    // a number like `0` means V0 in an FP slot and W0/X0 in a GP slot.
+    //
+    // FMOV between a GP and an FP register; `dir_to_v` chooses direction
+    // (true: GP→V, false: V→GP). `sf` selects W↔S (false) or X↔D (true).
+    //   attrs: dir_to_v (bool), sf (bool), rd (i32), rn (i32).
+    OP_TYPE_AARCH64_FMOV_GP_V,
+    // FADD/FSUB/FMUL/FDIV between two V regs into a V reg.
+    //   attrs: kind (string: fadd|fsub|fmul|fdiv), fwidth (32|64),
+    //          rd (i32), rn (i32), rm (i32).
+    OP_TYPE_AARCH64_FP_BINOP,
+    // FNEG/FABS/FSQRT on a V reg → V reg.
+    //   attrs: kind (string), fwidth, rd, rn.
+    OP_TYPE_AARCH64_FP_UNOP,
+    // FCMP Sn/Dn, Sm/Dm — sets NZCV (no rd).
+    //   attrs: fwidth (32|64), rn (i32), rm (i32).
+    OP_TYPE_AARCH64_FCMP,
+    // FP conversion family. `kind` is one of:
+    //   "f2f"   — FP-to-FP precision change (FCVT Dd,Sn / FCVT Sd,Dn).
+    //             rd and rn are both V registers.
+    //   "f2i"   — FP-to-integer (FCVTZS / FCVTZU). `sign` true => FCVTZS,
+    //             false => FCVTZU. rd is a GP register, rn is V.
+    //   "i2f"   — Integer-to-FP (SCVTF / UCVTF). rd is V, rn is GP.
+    // src_w / dst_w in {32, 64} pick S/W vs D/X.
+    //   attrs: kind (string), src_w (i32), dst_w (i32), sign (bool),
+    //          rd (i32), rn (i32).
+    OP_TYPE_AARCH64_FP_CVT,
     // Module-level: a slice of bytes to overlay onto the linmem __DATA
     // section at the given offset. The macho backend gathers all of
     // these into a single file-backed section that precedes the

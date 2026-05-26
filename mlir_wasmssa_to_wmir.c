@@ -117,15 +117,40 @@ static string at_s(MLIR_OpHandle op, const char *name) {
 }
 
 // Translate a wasm value-type byte to the matching MLIR integer / float
-// type used inside wmir.
+// type used inside wmir. *Note*: f32 / f64 wasm values are carried by
+// i32 / i64 bit-pattern wmir values throughout the pipeline. The actual
+// float-ness is recorded per-op (e.g. via the `fwidth` attribute on
+// wmir.fbinop). This lets the existing i32/i64-aware spill/reload
+// machinery in wmir->aarch64 just work; FP arithmetic detours through
+// a V register only for the duration of the FP instruction.
 static MLIR_TypeHandle vt_to_type(MLIR_Context *ctx, uint8_t vt) {
     switch (vt) {
         case WT_I32: return MLIR_CreateTypeInteger(ctx, 32, true);
         case WT_I64: return MLIR_CreateTypeInteger(ctx, 64, true);
-        case WT_F32: return MLIR_CreateTypeFloat(ctx, 32, false);
-        case WT_F64: return MLIR_CreateTypeFloat(ctx, 64, false);
+        case WT_F32: return MLIR_CreateTypeInteger(ctx, 32, true);
+        case WT_F64: return MLIR_CreateTypeInteger(ctx, 64, true);
     }
     return MLIR_CreateTypeInteger(ctx, 32, true);
+}
+
+// Width of a wasm value type in bytes (4 or 8). Used to pick the
+// integer carrier width for f32/f64.
+static uint32_t vt_width(uint8_t vt) {
+    return (vt == WT_I64 || vt == WT_F64) ? 8 : 4;
+}
+
+// Normalise an MLIR type to its integer carrier: f32/f64 collapse to
+// i32/i64 so wmir block args, params, and result types only ever see
+// integer types. Integer / index / function / pointer types pass
+// through unchanged.
+static MLIR_TypeHandle normalise_carrier(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    if (!ty) return ty;
+    string ts = MLIR_GetTypeString(ctx, ty);
+    if (ts.size == 3 && memcmp(ts.str, "f32", 3) == 0)
+        return MLIR_CreateTypeInteger(ctx, 32, true);
+    if (ts.size == 3 && memcmp(ts.str, "f64", 3) == 0)
+        return MLIR_CreateTypeInteger(ctx, 64, true);
+    return ty;
 }
 
 // =============================================================================
@@ -278,6 +303,37 @@ static const char *icmp_pred_for_binop(int64_t opc) {
     return NULL;
 }
 
+// Float comparisons that wasmssa.binop encodes the same way as integer
+// ones. Returns the wmir.fcmp pred + fwidth, or NULL if not a float
+// compare. Caller checks return value to dispatch.
+//   f32: 0x5b eq, 0x5c ne, 0x5d lt, 0x5e gt, 0x5f le, 0x60 ge
+//   f64: 0x61 eq, 0x62 ne, 0x63 lt, 0x64 gt, 0x65 le, 0x66 ge
+static const char *fcmp_pred_for_binop(int64_t opc, int *fwidth_out) {
+    if (opc >= 0x5b && opc <= 0x60) { *fwidth_out = 32; }
+    else if (opc >= 0x61 && opc <= 0x66) { *fwidth_out = 64; }
+    else return NULL;
+    int rel = (int)((opc - 0x5b) % 6);
+    switch (rel) {
+        case 0: return "oeq";
+        case 1: return "une";
+        case 2: return "olt";
+        case 3: return "ogt";
+        case 4: return "ole";
+        case 5: return "oge";
+    }
+    return NULL;
+}
+
+// Float binops that produce a same-typed float result.
+//   f32: 0x92 fadd, 0x93 fsub, 0x94 fmul, 0x95 fdiv
+//   f64: 0xa0 fadd, 0xa1 fsub, 0xa2 fmul, 0xa3 fdiv
+static const char *fbinop_kind(int64_t opc, int *fwidth_out) {
+    static const char *kinds[] = { "fadd", "fsub", "fmul", "fdiv" };
+    if (opc >= 0x92 && opc <= 0x95) { *fwidth_out = 32; return kinds[opc - 0x92]; }
+    if (opc >= 0xa0 && opc <= 0xa3) { *fwidth_out = 64; return kinds[opc - 0xa0]; }
+    return NULL;
+}
+
 // =============================================================================
 // Per-op lowering. Appends ops to L->cur and updates L->vmap as
 // needed. Returns false on an unsupported op.
@@ -348,6 +404,39 @@ static bool lower_wasmssa_op(Lowerer *L, MLIR_OpHandle src_op) {
             MLIR_AttributeHandle attrs[1] = { attr_s(ctx, "pred", pred, strlen(pred)) };
             MLIR_OpHandle out = build_op_simple(ctx, OP_TYPE_WMIR_ICMP,
                 attrs, 1, res_ty, 1, res, ops, 2);
+            L_append(L, out);
+            vmap_set(L->vmap, MLIR_GetOpResult(src_op, 0), res[0]);
+            return true;
+        }
+        int fwidth = 0;
+        const char *fpred = fcmp_pred_for_binop(opc, &fwidth);
+        if (fpred) {
+            // wmir.fcmp produces an i32 boolean (0 or 1), matching the
+            // wasm convention for compare opcodes.
+            MLIR_TypeHandle ity = MLIR_CreateTypeInteger(ctx, 32, true);
+            MLIR_TypeHandle rty[1] = { ity };
+            MLIR_ValueHandle r2[1] = {
+                MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0, ity,
+                    (string){0}, MLIR_CreateLocationUnknown(ctx, (string){0}))
+            };
+            MLIR_AttributeHandle attrs[2] = {
+                attr_s  (ctx, "pred",   fpred, strlen(fpred)),
+                attr_i32(ctx, "fwidth", fwidth),
+            };
+            MLIR_OpHandle out = build_op_simple(ctx, OP_TYPE_WMIR_FCMP,
+                attrs, 2, rty, 1, r2, ops, 2);
+            L_append(L, out);
+            vmap_set(L->vmap, MLIR_GetOpResult(src_op, 0), r2[0]);
+            return true;
+        }
+        const char *fkind = fbinop_kind(opc, &fwidth);
+        if (fkind) {
+            MLIR_AttributeHandle attrs[2] = {
+                attr_s  (ctx, "kind",   fkind, strlen(fkind)),
+                attr_i32(ctx, "fwidth", fwidth),
+            };
+            MLIR_OpHandle out = build_op_simple(ctx, OP_TYPE_WMIR_FBINOP,
+                attrs, 2, res_ty, 1, res, ops, 2);
             L_append(L, out);
             vmap_set(L->vmap, MLIR_GetOpResult(src_op, 0), res[0]);
             return true;
@@ -450,6 +539,97 @@ static bool lower_wasmssa_op(Lowerer *L, MLIR_OpHandle src_op) {
         if (!vmap_get(L->vmap, MLIR_GetOpOperand(src_op, 0), &a)) {
             fprintf(stderr, "wmir: unbound operand on wasmssa.unop\n");
             return false;
+        }
+        // Float unops (fabs/fneg/fsqrt) become wmir.funop preserving
+        // the bit-pattern carrier width.
+        {
+            const char *fkind = NULL;
+            int fwidth = 0;
+            switch (opc) {
+            case 0x8b: fkind = "fabs";  fwidth = 32; break;
+            case 0x8c: fkind = "fneg";  fwidth = 32; break;
+            case 0x91: fkind = "fsqrt"; fwidth = 32; break;
+            case 0x99: fkind = "fabs";  fwidth = 64; break;
+            case 0x9a: fkind = "fneg";  fwidth = 64; break;
+            case 0x9f: fkind = "fsqrt"; fwidth = 64; break;
+            }
+            if (fkind) {
+                MLIR_TypeHandle rty[1] = {
+                    MLIR_CreateTypeInteger(ctx, fwidth, true)
+                };
+                MLIR_ValueHandle r[1] = {
+                    MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0,
+                        rty[0], (string){0},
+                        MLIR_CreateLocationUnknown(ctx, (string){0}))
+                };
+                MLIR_AttributeHandle attrs[2] = {
+                    attr_s  (ctx, "kind",   fkind, strlen(fkind)),
+                    attr_i32(ctx, "fwidth", fwidth),
+                };
+                MLIR_OpHandle out = build_op_simple(ctx, OP_TYPE_WMIR_FUNOP,
+                    attrs, 2, rty, 1, r, &a, 1);
+                L_append(L, out);
+                vmap_set(L->vmap, MLIR_GetOpResult(src_op, 0), r[0]);
+                return true;
+            }
+        }
+        // FP <-> int conversion family (wmir.fconv).
+        //   src_w / dst_w in {32, 64}, kind one of "f2f"/"f2i"/"i2f",
+        //   sign matters for f2i / i2f (signed vs unsigned variants).
+        {
+            const char *fkind = NULL;
+            int src_w = 0, dst_w = 0;
+            bool sign = false;
+            switch (opc) {
+            // i32.trunc_f32_s..i64.trunc_f64_u
+            case 0xa8: fkind="f2i"; src_w=32; dst_w=32; sign=true;  break;
+            case 0xa9: fkind="f2i"; src_w=32; dst_w=32; sign=false; break;
+            case 0xaa: fkind="f2i"; src_w=64; dst_w=32; sign=true;  break;
+            case 0xab: fkind="f2i"; src_w=64; dst_w=32; sign=false; break;
+            case 0xae: fkind="f2i"; src_w=32; dst_w=64; sign=true;  break;
+            case 0xaf: fkind="f2i"; src_w=32; dst_w=64; sign=false; break;
+            case 0xb0: fkind="f2i"; src_w=64; dst_w=64; sign=true;  break;
+            case 0xb1: fkind="f2i"; src_w=64; dst_w=64; sign=false; break;
+            // f32/f64 convert_i32/64_s/u
+            case 0xb2: fkind="i2f"; src_w=32; dst_w=32; sign=true;  break;
+            case 0xb3: fkind="i2f"; src_w=32; dst_w=32; sign=false; break;
+            case 0xb4: fkind="i2f"; src_w=64; dst_w=32; sign=true;  break;
+            case 0xb5: fkind="i2f"; src_w=64; dst_w=32; sign=false; break;
+            case 0xb7: fkind="i2f"; src_w=32; dst_w=64; sign=true;  break;
+            case 0xb8: fkind="i2f"; src_w=32; dst_w=64; sign=false; break;
+            case 0xb9: fkind="i2f"; src_w=64; dst_w=64; sign=true;  break;
+            case 0xba: fkind="i2f"; src_w=64; dst_w=64; sign=false; break;
+            // f32.demote_f64 / f64.promote_f32
+            case 0xb6: fkind="f2f"; src_w=64; dst_w=32; break;
+            case 0xbb: fkind="f2f"; src_w=32; dst_w=64; break;
+            // *.reinterpret_* — pure bitcast; in our bit-pattern model
+            // this is the identity (operand and result already share the
+            // same i32/i64 carrier). Forward the operand directly.
+            case 0xbc: case 0xbd: case 0xbe: case 0xbf:
+                vmap_set(L->vmap, MLIR_GetOpResult(src_op, 0), a);
+                return true;
+            }
+            if (fkind) {
+                MLIR_TypeHandle rty[1] = {
+                    MLIR_CreateTypeInteger(ctx, dst_w, true)
+                };
+                MLIR_ValueHandle r[1] = {
+                    MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0,
+                        rty[0], (string){0},
+                        MLIR_CreateLocationUnknown(ctx, (string){0}))
+                };
+                MLIR_AttributeHandle attrs[4] = {
+                    attr_s  (ctx, "kind",  fkind, strlen(fkind)),
+                    attr_i32(ctx, "src_w", src_w),
+                    attr_i32(ctx, "dst_w", dst_w),
+                    attr_b  (ctx, "sign",  sign),
+                };
+                MLIR_OpHandle out = build_op_simple(ctx, OP_TYPE_WMIR_FCONV,
+                    attrs, 4, rty, 1, r, &a, 1);
+                L_append(L, out);
+                vmap_set(L->vmap, MLIR_GetOpResult(src_op, 0), r[0]);
+                return true;
+            }
         }
         MLIR_OpType k;
         MLIR_TypeHandle rt;
@@ -685,7 +865,7 @@ static bool lower_wasmssa_op(Lowerer *L, MLIR_OpHandle src_op) {
         MLIR_ValueHandle res[1];
         if (nr == 1) {
             MLIR_ValueHandle rv = MLIR_GetOpResult(src_op, 0);
-            MLIR_TypeHandle rt = MLIR_GetValueType(rv);
+            MLIR_TypeHandle rt = normalise_carrier(ctx, MLIR_GetValueType(rv));
             res_ty[0] = rt;
             res[0] = MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0, rt,
                 (string){0}, MLIR_CreateLocationUnknown(ctx, (string){0}));
@@ -785,7 +965,7 @@ static bool lower_wasmssa_op(Lowerer *L, MLIR_OpHandle src_op) {
         MLIR_BlockHandle merge = L_new_block(L);
         for (size_t i = 0; i < n_results; i++) {
             MLIR_ValueHandle src_res = MLIR_GetOpResult(src_op, i);
-            MLIR_TypeHandle ty = MLIR_GetValueType(src_res);
+            MLIR_TypeHandle ty = normalise_carrier(ctx, MLIR_GetValueType(src_res));
             MLIR_ValueHandle ba = MLIR_CreateValueBlockArg(ctx, (string){0},
                 (uint32_t)i, ty,
                 MLIR_CreateLocationUnknown(ctx, (string){0}));
@@ -840,7 +1020,7 @@ static bool lower_wasmssa_op(Lowerer *L, MLIR_OpHandle src_op) {
 
         for (size_t i = 0; i < n_results; i++) {
             MLIR_ValueHandle src_res = MLIR_GetOpResult(src_op, i);
-            MLIR_TypeHandle ty = MLIR_GetValueType(src_res);
+            MLIR_TypeHandle ty = normalise_carrier(ctx, MLIR_GetValueType(src_res));
             MLIR_ValueHandle ba = MLIR_CreateValueBlockArg(ctx, (string){0},
                 (uint32_t)i, ty,
                 MLIR_CreateLocationUnknown(ctx, (string){0}));
@@ -920,7 +1100,7 @@ static bool lower_wasmssa_op(Lowerer *L, MLIR_OpHandle src_op) {
         size_t n_loop_args = MLIR_GetBlockNumArgs(src_loop_blk);
         for (size_t i = 0; i < n_loop_args; i++) {
             MLIR_ValueHandle sa = MLIR_GetBlockArg(src_loop_blk, i);
-            MLIR_TypeHandle ty = MLIR_GetValueType(sa);
+            MLIR_TypeHandle ty = normalise_carrier(ctx, MLIR_GetValueType(sa));
             MLIR_ValueHandle ba = MLIR_CreateValueBlockArg(ctx, (string){0},
                 (uint32_t)i, ty,
                 MLIR_CreateLocationUnknown(ctx, (string){0}));
@@ -1011,7 +1191,7 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
     size_t n_params = MLIR_GetBlockNumArgs(src_blk);
     for (size_t i = 0; i < n_params; i++) {
         MLIR_ValueHandle sa = MLIR_GetBlockArg(src_blk, i);
-        MLIR_TypeHandle  ty = MLIR_GetValueType(sa);
+        MLIR_TypeHandle  ty = normalise_carrier(ctx, MLIR_GetValueType(sa));
         MLIR_ValueHandle da = MLIR_CreateValueBlockArg(ctx, (string){0},
             (uint32_t)i, ty,
             MLIR_CreateLocationUnknown(ctx, (string){0}));
