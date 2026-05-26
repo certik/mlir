@@ -456,7 +456,8 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
         // happen on a well-formed IR; assign a slot defensively.
         if (vp->def_pos == UINT32_MAX) {
             ra->homes[vi].kind = HOME_SLOT;
-            ra->homes[vi].idx  = (uint8_t)next_slot;
+            if (next_slot >= 2047) goto fail_slot_overflow;
+            ra->homes[vi].idx  = next_slot;
             next_slot++;
             continue;
         }
@@ -480,8 +481,8 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
 
         if (force_slot) {
             ra->homes[vi].kind = HOME_SLOT;
-            if (next_slot >= 255) goto fail_slot_overflow;
-            ra->homes[vi].idx  = (uint8_t)next_slot;
+            if (next_slot >= 2047) goto fail_slot_overflow;
+            ra->homes[vi].idx  = next_slot;
             next_slot++;
             continue;
         }
@@ -515,8 +516,8 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
             uint8_t  reg       = active[evict_a].reg;
             uint8_t  pool_idx  = active[evict_a].pool_idx;
             ra->homes[evict_vi].kind = HOME_SLOT;
-            if (next_slot >= 255) goto fail_slot_overflow;
-            ra->homes[evict_vi].idx  = (uint8_t)next_slot;
+            if (next_slot >= 2047) goto fail_slot_overflow;
+            ra->homes[evict_vi].idx  = next_slot;
             next_slot++;
             active[evict_a] = (Active){ vi, reg, pool_idx };
             ra->homes[vi].kind = HOME_REG;
@@ -524,8 +525,8 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
         } else {
             // Spill the current value.
             ra->homes[vi].kind = HOME_SLOT;
-            if (next_slot >= 255) goto fail_slot_overflow;
-            ra->homes[vi].idx  = (uint8_t)next_slot;
+            if (next_slot >= 2047) goto fail_slot_overflow;
+            ra->homes[vi].idx  = next_slot;
             next_slot++;
         }
     }
@@ -540,7 +541,7 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
     return ra;
 
 fail_slot_overflow:
-    fprintf(stderr, "wmir_regalloc: more than 255 slots — frame too large\n");
+    fprintf(stderr, "wmir_regalloc: more than 2047 slots — frame too large for W LDR/STR imm12 offset\n");
     free(order); free(active); free(reg_busy);
     free(live_in); free(live_out); free(gen); free(kill); free(scratch);
     free(block_first_pos); free(block_last_pos); free(blocks);
