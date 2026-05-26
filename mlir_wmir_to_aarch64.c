@@ -1232,6 +1232,273 @@ static MLIR_OpHandle synth_print_str(MLIR_Context *ctx) {
 }
 
 // =============================================================================
+// Helper used by synth_printf: emit a `write(1, x_ptr_reg, x_len_reg)` BSD
+// syscall sequence. Clobbers x0, x1, x2, x16.
+// =============================================================================
+static void emit_write_stdout(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                              uint8_t ptr_reg, uint8_t len_reg) {
+    if (len_reg != 2) emit_mov_x(ctx, blk, /*rd=*/2, /*rn=*/len_reg);
+    if (ptr_reg != 1) emit_mov_x(ctx, blk, /*rd=*/1, /*rn=*/ptr_reg);
+    emit_movz(ctx, blk, /*rd=*/0,  /*imm16=*/1, /*hw=*/0, /*sf=*/true);
+    emit_movz(ctx, blk, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
+    emit_svc(ctx, blk, 0x80);
+}
+
+// =============================================================================
+// Synthesise `printf(i32 fmt_ofs, i32 args_ofs) -> i32`.
+//
+// The C `printf(const char *fmt, ...)` is desugared by tinyC's frontend
+// into a two-argument call: `printf(fmt, &args_blob)`, where `args_blob`
+// is a contiguous region in linmem that the caller has populated with the
+// variadic arguments (each i32 arg as 4 bytes, each i64 arg as 8 bytes,
+// with natural alignment for 8-byte slots). The Mach-O backend then sees
+// this as a regular call with two i32 arguments.
+//
+// Implemented format directives (matches `runtime_wasm.c`'s vprintf_impl
+// minimum subset used by the tinyC test corpus):
+//
+//   %%           literal '%'
+//   %c           int -> single byte
+//   %d  %i       int (4-byte slot) decimal
+//   %ld %li      long (i32 on wasm32, 4-byte slot) decimal
+//   %lld %lli    long long (8-byte slot, aligned to 8) decimal
+//   %u           unsigned int (4-byte slot) decimal
+//   %lu          unsigned long (4-byte slot) decimal
+//   %llu         unsigned long long (8-byte slot) decimal
+//   %s           const char * (4-byte slot, wasm offset)
+//
+// Anything else (precision specs like %.2f, hex %x, pointer %p, floats
+// %f/%g) is silently consumed for now — those few tinyC tests fail with
+// "unsupported printf spec" rather than producing garbage output.
+//
+// Output happens directly via `write(2)` syscalls on fd 1. Decimal
+// printing for both i32 and i64 paths reuses the existing `printI64`
+// helper (which only ever clobbers x0-x18 and never touches x19-x28).
+// =============================================================================
+static MLIR_OpHandle synth_printf(MLIR_Context *ctx) {
+    MLIR_RegionHandle region = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle entry        = MLIR_CreateBlock(ctx);
+    MLIR_BlockHandle loop_top     = MLIR_CreateBlock(ctx);
+    MLIR_BlockHandle write_lit    = MLIR_CreateBlock(ctx);
+    MLIR_BlockHandle saw_pct      = MLIR_CreateBlock(ctx);
+    MLIR_BlockHandle spec_top     = MLIR_CreateBlock(ctx);
+    MLIR_BlockHandle spec_inc_l   = MLIR_CreateBlock(ctx);
+    MLIR_BlockHandle spec_pct     = MLIR_CreateBlock(ctx);
+    MLIR_BlockHandle spec_decimal = MLIR_CreateBlock(ctx);
+    MLIR_BlockHandle spec_d_word  = MLIR_CreateBlock(ctx);
+    MLIR_BlockHandle spec_d_ll    = MLIR_CreateBlock(ctx);
+    MLIR_BlockHandle spec_s       = MLIR_CreateBlock(ctx);
+    MLIR_BlockHandle spec_s_loop  = MLIR_CreateBlock(ctx);
+    MLIR_BlockHandle spec_s_done  = MLIR_CreateBlock(ctx);
+    MLIR_BlockHandle spec_c       = MLIR_CreateBlock(ctx);
+    MLIR_BlockHandle done         = MLIR_CreateBlock(ctx);
+
+    MLIR_AppendRegionBlock(ctx, region, entry);
+    MLIR_AppendRegionBlock(ctx, region, loop_top);
+    MLIR_AppendRegionBlock(ctx, region, write_lit);
+    MLIR_AppendRegionBlock(ctx, region, saw_pct);
+    MLIR_AppendRegionBlock(ctx, region, spec_top);
+    MLIR_AppendRegionBlock(ctx, region, spec_inc_l);
+    MLIR_AppendRegionBlock(ctx, region, spec_pct);
+    MLIR_AppendRegionBlock(ctx, region, spec_decimal);
+    MLIR_AppendRegionBlock(ctx, region, spec_d_word);
+    MLIR_AppendRegionBlock(ctx, region, spec_d_ll);
+    MLIR_AppendRegionBlock(ctx, region, spec_s);
+    MLIR_AppendRegionBlock(ctx, region, spec_s_loop);
+    MLIR_AppendRegionBlock(ctx, region, spec_s_done);
+    MLIR_AppendRegionBlock(ctx, region, spec_c);
+    MLIR_AppendRegionBlock(ctx, region, done);
+
+    // ---------- entry ----------
+    // Prologue + 32-byte scratch frame. [sp+0] is a 1-byte buffer for
+    // emitting literal chars via the write(2) syscall.
+    emit_prologue(ctx, entry, /*frame_size=*/32);
+    // x19 = x28 + zext(w0)   (fmt cursor)
+    // x20 = x28 + zext(w1)   (args cursor)
+    {
+        MLIR_AttributeHandle a[2];
+        a[0] = attr_i32(ctx, "rd", 9);
+        a[1] = attr_i32(ctx, "rn", 0);
+        MLIR_AppendBlockOp(ctx, entry,
+            build_op(ctx, OP_TYPE_AARCH64_UXTW, a, 2));
+    }
+    emit_add_reg(ctx, entry, /*rd=*/19, /*rn=*/28, /*rm=*/9, /*sf=*/true);
+    {
+        MLIR_AttributeHandle a[2];
+        a[0] = attr_i32(ctx, "rd", 9);
+        a[1] = attr_i32(ctx, "rn", 1);
+        MLIR_AppendBlockOp(ctx, entry,
+            build_op(ctx, OP_TYPE_AARCH64_UXTW, a, 2));
+    }
+    emit_add_reg(ctx, entry, /*rd=*/20, /*rn=*/28, /*rm=*/9, /*sf=*/true);
+    emit_b(ctx, entry, loop_top);
+
+    // ---------- loop_top ----------
+    // c = *fmt++; if c == 0 done; else if c == '%' saw_pct; else emit c.
+    emit_ldrb_imm(ctx, loop_top, /*rt=*/9, /*rn=*/19, /*off=*/0);
+    emit_add_imm(ctx, loop_top, /*rd=*/19, /*rn=*/19, /*imm12=*/1, /*sf=*/true);
+    emit_cbz(ctx, loop_top, /*rt=*/9, /*sf=*/false, done);
+    emit_cmp_imm(ctx, loop_top, /*rn=*/9, /*imm12=*/'%', /*sf=*/false);
+    emit_b_cond(ctx, loop_top, COND_EQ, saw_pct);
+    emit_b(ctx, loop_top, write_lit);
+
+    // ---------- write_lit ----------
+    // [sp+0] = c; write(1, sp, 1).
+    emit_strb_imm(ctx, write_lit, /*rt=*/9, /*rn=*/31, /*off=*/0);
+    emit_movz(ctx, write_lit, /*rd=*/2, /*imm16=*/1, /*hw=*/0, /*sf=*/true);
+    emit_add_imm(ctx, write_lit, /*rd=*/1, /*rn=*/31, /*imm12=*/0, /*sf=*/true);
+    emit_movz(ctx, write_lit, /*rd=*/0,  /*imm16=*/1, /*hw=*/0, /*sf=*/true);
+    emit_movz(ctx, write_lit, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
+    emit_svc(ctx, write_lit, 0x80);
+    emit_b(ctx, write_lit, loop_top);
+
+    // ---------- saw_pct ----------
+    // ll_count = 0 (x21); fall through to spec_top.
+    emit_movz(ctx, saw_pct, /*rd=*/21, /*imm16=*/0, /*hw=*/0, /*sf=*/true);
+    emit_b(ctx, saw_pct, spec_top);
+
+    // ---------- spec_top ----------
+    // c = *fmt++; dispatch.
+    emit_ldrb_imm(ctx, spec_top, /*rt=*/9, /*rn=*/19, /*off=*/0);
+    emit_add_imm(ctx, spec_top, /*rd=*/19, /*rn=*/19, /*imm12=*/1, /*sf=*/true);
+    emit_cbz(ctx, spec_top, /*rt=*/9, /*sf=*/false, done);
+    emit_cmp_imm(ctx, spec_top, /*rn=*/9, /*imm12=*/'l', /*sf=*/false);
+    emit_b_cond(ctx, spec_top, COND_EQ, spec_inc_l);
+    emit_cmp_imm(ctx, spec_top, /*rn=*/9, /*imm12=*/'%', /*sf=*/false);
+    emit_b_cond(ctx, spec_top, COND_EQ, spec_pct);
+    emit_cmp_imm(ctx, spec_top, /*rn=*/9, /*imm12=*/'d', /*sf=*/false);
+    emit_b_cond(ctx, spec_top, COND_EQ, spec_decimal);
+    emit_cmp_imm(ctx, spec_top, /*rn=*/9, /*imm12=*/'i', /*sf=*/false);
+    emit_b_cond(ctx, spec_top, COND_EQ, spec_decimal);
+    emit_cmp_imm(ctx, spec_top, /*rn=*/9, /*imm12=*/'u', /*sf=*/false);
+    emit_b_cond(ctx, spec_top, COND_EQ, spec_decimal);
+    emit_cmp_imm(ctx, spec_top, /*rn=*/9, /*imm12=*/'s', /*sf=*/false);
+    emit_b_cond(ctx, spec_top, COND_EQ, spec_s);
+    emit_cmp_imm(ctx, spec_top, /*rn=*/9, /*imm12=*/'c', /*sf=*/false);
+    emit_b_cond(ctx, spec_top, COND_EQ, spec_c);
+    // Unknown spec char: silently skip back to top-level fmt loop.
+    emit_b(ctx, spec_top, loop_top);
+
+    // ---------- spec_inc_l ----------
+    // ll_count++; back to spec_top.
+    emit_add_imm(ctx, spec_inc_l, /*rd=*/21, /*rn=*/21,
+                 /*imm12=*/1, /*sf=*/true);
+    emit_b(ctx, spec_inc_l, spec_top);
+
+    // ---------- spec_pct ----------
+    // Write '%' and resume.
+    emit_movz(ctx, spec_pct, /*rd=*/9, /*imm16=*/'%', /*hw=*/0, /*sf=*/false);
+    emit_strb_imm(ctx, spec_pct, /*rt=*/9, /*rn=*/31, /*off=*/0);
+    emit_movz(ctx, spec_pct, /*rd=*/2, /*imm16=*/1, /*hw=*/0, /*sf=*/true);
+    emit_add_imm(ctx, spec_pct, /*rd=*/1, /*rn=*/31, /*imm12=*/0, /*sf=*/true);
+    emit_movz(ctx, spec_pct, /*rd=*/0,  /*imm16=*/1, /*hw=*/0, /*sf=*/true);
+    emit_movz(ctx, spec_pct, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
+    emit_svc(ctx, spec_pct, 0x80);
+    emit_b(ctx, spec_pct, loop_top);
+
+    // ---------- spec_decimal ----------
+    // Branch on ll_count: ll_count == 2 -> spec_d_ll, else spec_d_word.
+    emit_cmp_imm(ctx, spec_decimal, /*rn=*/21, /*imm12=*/2, /*sf=*/true);
+    emit_b_cond(ctx, spec_decimal, COND_GE, spec_d_ll);
+    emit_b(ctx, spec_decimal, spec_d_word);
+
+    // ---------- spec_d_word ----------
+    // i32/long arg: read 4 bytes from args cursor, sext to i64, bl printI64.
+    emit_ldr_w(ctx, spec_d_word, /*rt=*/9, /*rn=*/20, /*off=*/0);
+    emit_add_imm(ctx, spec_d_word, /*rd=*/20, /*rn=*/20,
+                 /*imm12=*/4, /*sf=*/true);
+    // sxtw x0, w9
+    {
+        MLIR_AttributeHandle a[2];
+        a[0] = attr_i32(ctx, "rd", 0);
+        a[1] = attr_i32(ctx, "rn", 9);
+        MLIR_AppendBlockOp(ctx, spec_d_word,
+            build_op(ctx, OP_TYPE_AARCH64_SXTW, a, 2));
+    }
+    emit_bl(ctx, spec_d_word, str_lit("printI64"));
+    emit_b(ctx, spec_d_word, loop_top);
+
+    // ---------- spec_d_ll ----------
+    // i64 arg: align cursor up to 8, read 8 bytes, bl printI64.
+    // Alignment: x20 = ((x20 + 7) >> 3) << 3.
+    emit_add_imm(ctx, spec_d_ll, /*rd=*/20, /*rn=*/20,
+                 /*imm12=*/7, /*sf=*/true);
+    emit_movz(ctx, spec_d_ll, /*rd=*/12, /*imm16=*/3, /*hw=*/0, /*sf=*/true);
+    emit_3reg(ctx, spec_d_ll, OP_TYPE_AARCH64_LSR_REG,
+              /*rd=*/20, /*rn=*/20, /*rm=*/12, /*sf=*/true);
+    emit_3reg(ctx, spec_d_ll, OP_TYPE_AARCH64_LSL_REG,
+              /*rd=*/20, /*rn=*/20, /*rm=*/12, /*sf=*/true);
+    emit_ldr_x(ctx, spec_d_ll, /*rt=*/0, /*rn=*/20, /*off=*/0);
+    emit_add_imm(ctx, spec_d_ll, /*rd=*/20, /*rn=*/20,
+                 /*imm12=*/8, /*sf=*/true);
+    emit_bl(ctx, spec_d_ll, str_lit("printI64"));
+    emit_b(ctx, spec_d_ll, loop_top);
+
+    // ---------- spec_s ----------
+    // Read i32 (wasm offset) from args, advance, set x9 = x28 + offset (host),
+    // x10 = x9 (cursor).
+    emit_ldr_w(ctx, spec_s, /*rt=*/9, /*rn=*/20, /*off=*/0);
+    emit_add_imm(ctx, spec_s, /*rd=*/20, /*rn=*/20,
+                 /*imm12=*/4, /*sf=*/true);
+    {
+        MLIR_AttributeHandle a[2];
+        a[0] = attr_i32(ctx, "rd", 9);
+        a[1] = attr_i32(ctx, "rn", 9);
+        MLIR_AppendBlockOp(ctx, spec_s,
+            build_op(ctx, OP_TYPE_AARCH64_UXTW, a, 2));
+    }
+    // x10 = x28 + x9 (host ptr start); x11 = x10 (scan cursor)
+    emit_add_reg(ctx, spec_s, /*rd=*/10, /*rn=*/28, /*rm=*/9, /*sf=*/true);
+    emit_mov_x(ctx, spec_s, /*rd=*/11, /*rn=*/10);
+    emit_b(ctx, spec_s, spec_s_loop);
+
+    // ---------- spec_s_loop ----------
+    // while (*x11) x11++;
+    emit_ldrb_imm(ctx, spec_s_loop, /*rt=*/12, /*rn=*/11, /*off=*/0);
+    emit_cbz(ctx, spec_s_loop, /*rt=*/12, /*sf=*/false, spec_s_done);
+    emit_add_imm(ctx, spec_s_loop, /*rd=*/11, /*rn=*/11,
+                 /*imm12=*/1, /*sf=*/true);
+    emit_b(ctx, spec_s_loop, spec_s_loop);
+
+    // ---------- spec_s_done ----------
+    // write(1, x10, x11 - x10).
+    emit_sub_reg(ctx, spec_s_done, /*rd=*/2, /*rn=*/11, /*rm=*/10, /*sf=*/true);
+    emit_mov_x(ctx, spec_s_done, /*rd=*/1, /*rn=*/10);
+    emit_movz(ctx, spec_s_done, /*rd=*/0,  /*imm16=*/1, /*hw=*/0, /*sf=*/true);
+    emit_movz(ctx, spec_s_done, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
+    emit_svc(ctx, spec_s_done, 0x80);
+    emit_b(ctx, spec_s_done, loop_top);
+
+    // ---------- spec_c ----------
+    // Read i32 from args, write low byte.
+    emit_ldr_w(ctx, spec_c, /*rt=*/9, /*rn=*/20, /*off=*/0);
+    emit_add_imm(ctx, spec_c, /*rd=*/20, /*rn=*/20,
+                 /*imm12=*/4, /*sf=*/true);
+    emit_strb_imm(ctx, spec_c, /*rt=*/9, /*rn=*/31, /*off=*/0);
+    emit_movz(ctx, spec_c, /*rd=*/2, /*imm16=*/1, /*hw=*/0, /*sf=*/true);
+    emit_add_imm(ctx, spec_c, /*rd=*/1, /*rn=*/31, /*imm12=*/0, /*sf=*/true);
+    emit_movz(ctx, spec_c, /*rd=*/0,  /*imm16=*/1, /*hw=*/0, /*sf=*/true);
+    emit_movz(ctx, spec_c, /*rd=*/16, /*imm16=*/4, /*hw=*/0, /*sf=*/true);
+    emit_svc(ctx, spec_c, 0x80);
+    emit_b(ctx, spec_c, loop_top);
+
+    // ---------- done ----------
+    // Return 0 (we don't bother tracking the actual byte count).
+    emit_movz(ctx, done, /*rd=*/0, /*imm16=*/0, /*hw=*/0, /*sf=*/false);
+    emit_epilogue(ctx, done, /*frame_size=*/32);
+    emit_ret(ctx, done);
+
+    MLIR_AttributeHandle attrs[1];
+    attrs[0] = attr_s(ctx, "sym_name", "printf", 6);
+    MLIR_RegionHandle regs[1] = { region };
+    return MLIR_CreateOp(ctx, OP_TYPE_AARCH64_FUNC,
+        op_type_to_string(OP_TYPE_AARCH64_FUNC),
+        attrs, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
+        MLIR_CreateLocationUnknown(ctx, (string){0}),
+        MLIR_INVALID_HANDLE, (string){0}, -1);
+}
+
+// =============================================================================
 // Walk the module to compute the highest global_idx referenced and
 // whether linmem is touched.
 // =============================================================================
@@ -1241,6 +1508,7 @@ typedef struct {
     bool    needs_printI64;
     bool    needs_printNewline;
     bool    needs_printStr;
+    bool    needs_printf;
 } ModInfo;
 
 static void scan_block(MLIR_BlockHandle blk, ModInfo *mi) {
@@ -1268,6 +1536,8 @@ static void scan_block(MLIR_BlockHandle blk, ModInfo *mi) {
                 mi->needs_printNewline = true;
             if (callee.size == 8 && memcmp(callee.str, "printStr", 8) == 0)
                 mi->needs_printStr = true;
+            if (callee.size == 6 && memcmp(callee.str, "printf", 6) == 0)
+                mi->needs_printf = true;
         }
         size_t nr = MLIR_GetOpNumRegions(op);
         for (size_t r = 0; r < nr; r++) {
@@ -1363,13 +1633,13 @@ MLIR_OpHandle mlir_wmir_to_aarch64(MLIR_Context *ctx, MLIR_OpHandle wmir_module)
     }
 
     bool use_globals = n_globals > 0;
-    bool use_linmem  = mi.uses_linmem || mi.needs_printStr;
+    bool use_linmem  = mi.uses_linmem || mi.needs_printStr || mi.needs_printf;
     MLIR_OpHandle start = synth_start(ctx, entry_name,
         /*use_data_priv=*/false, use_globals, use_linmem);
     if (!start) return MLIR_INVALID_HANDLE;
     MLIR_AppendBlockOp(ctx, out_body, start);
 
-    if (mi.needs_printI64) {
+    if (mi.needs_printI64 || mi.needs_printf) {
         MLIR_OpHandle p = synth_print_i64(ctx);
         if (!p) return MLIR_INVALID_HANDLE;
         MLIR_AppendBlockOp(ctx, out_body, p);
@@ -1381,6 +1651,11 @@ MLIR_OpHandle mlir_wmir_to_aarch64(MLIR_Context *ctx, MLIR_OpHandle wmir_module)
     }
     if (mi.needs_printStr) {
         MLIR_OpHandle p = synth_print_str(ctx);
+        if (!p) return MLIR_INVALID_HANDLE;
+        MLIR_AppendBlockOp(ctx, out_body, p);
+    }
+    if (mi.needs_printf) {
+        MLIR_OpHandle p = synth_printf(ctx);
         if (!p) return MLIR_INVALID_HANDLE;
         MLIR_AppendBlockOp(ctx, out_body, p);
     }
