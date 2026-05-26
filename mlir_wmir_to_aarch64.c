@@ -57,6 +57,26 @@ enum {
     DEFAULT_STACK_SIZE        = 4u * 1024u * 1024u,
     DEFAULT_GLOBAL_BASE_OFFS  = 1024u,
     WASM_PAGE_SIZE            = 65536u,
+    // Maximum linmem size, in wasm pages (64 KiB each). We pre-reserve
+    // this much virtual address space as a zero-fill BSS section in the
+    // Mach-O envelope; macOS lazily commits pages as they are touched,
+    // so the on-disk binary size is unaffected. The wasm-side
+    // `memory.size` / `memory.grow` then bump a counter against this
+    // cap, mirroring real WASI semantics. 4096 pages = 256 MiB; small
+    // enough that dyld is happy with the __DATA segment vmsize, large
+    // enough for the entire tinyC test suite. Selfhost (which needs
+    // much more) bumps this via the upstream wasm-backend's path or
+    // via a per-module override (TODO).
+    MAX_LINMEM_PAGES          = 24576u,
+    // Slot offsets within linmem used by synthesised libc shims.
+    // See the full linmem-layout doc later in the file. Hoisted here
+    // because lowering of `memory.size` / `memory.grow` (which uses
+    // MEM_PAGES_SLOT) appears earlier than the doc.
+    MALLOC_HEAP_OFF_SLOT      = 16,
+    MEM_PAGES_SLOT            = 24,
+    ARGC_SLOT                 = 40,
+    ARGV_SLOT                 = 48,
+    MALLOC_HEAP_BASE_BYTES    = 1u * 1024u * 1024u,
 };
 
 // Set by mlir_wmir_to_aarch64() once per module; read by lower_func() when
@@ -920,16 +940,64 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 break;
             }
             case OP_TYPE_WMIR_MEMORY_SIZE: {
+                // Load current wasm page count from linmem[MEM_PAGES_SLOT].
+                // x28 is the callee-saved linmem base register
+                // established at function entry.
                 uint8_t rd = PICK_RES(9, 0);
-                emit_mov_imm32(ctx, dst_blk, rd, g_linmem_pages);
+                emit_ldr_w(ctx, dst_blk, rd, /*rn=*/28, /*off=*/MEM_PAGES_SLOT);
                 ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_MEMORY_GROW: {
-                // Static linmem; can't grow. Always return -1 (failure).
-                // The operand (delta pages) is ignored.
-                uint8_t rd = PICK_RES(9, 0);
-                emit_mov_imm32(ctx, dst_blk, rd, (uint32_t)-1);
+                // memory.grow(delta) — bump linmem[MEM_PAGES_SLOT] by
+                // delta wasm pages, capping at MAX_LINMEM_PAGES. The
+                // backing virtual address space is already reserved by
+                // the Mach-O envelope (large __linmem_bss S_ZEROFILL
+                // section); macOS commits real pages lazily on touch.
+                //
+                // Returns the previous page count on success, or -1
+                // (cast to i32) on failure.
+                //
+                // ABI:
+                //   in:  r_delta (i32) = delta pages requested
+                //   out: rd     (i32) = previous count, or 0xffffffff
+                //
+                // Codegen (uses scratch x9/x10/x11; lowering scratch):
+                //   ldr  w9 , [x28, #MEM_PAGES_SLOT]   ; old
+                //   add  w10, w9 , w_delta              ; new
+                //   mov  w11, #MAX_LINMEM_PAGES
+                //   cmp  w10, w11
+                //   b.hi ^fail
+                //   str  w10, [x28, #MEM_PAGES_SLOT]   ; commit
+                //   mov  w_rd, w9                       ; return old
+                //   b    ^done
+                // ^fail:
+                //   mov  w_rd, #-1
+                //   b    ^done
+                // ^done:
+                uint8_t r_delta = LD_OPERAND(10, 0);
+                uint8_t rd      = PICK_RES(9, 0);
+
+                MLIR_BlockHandle fail_blk = MLIR_CreateBlock(ctx);
+                MLIR_BlockHandle done_blk = MLIR_CreateBlock(ctx);
+                MLIR_AppendRegionBlock(ctx, dst_region, fail_blk);
+                MLIR_AppendRegionBlock(ctx, dst_region, done_blk);
+
+                emit_ldr_w(ctx, dst_blk, /*rt=*/9 , /*rn=*/28, MEM_PAGES_SLOT);
+                emit_add_reg(ctx, dst_blk, /*rd=*/10, /*rn=*/9, /*rm=*/r_delta,
+                             /*sf=*/false);
+                emit_mov_imm32(ctx, dst_blk, /*rd=*/11, MAX_LINMEM_PAGES);
+                emit_cmp_reg(ctx, dst_blk, /*rn=*/10, /*rm=*/11, /*sf=*/false);
+                // b.hi (unsigned higher) — new > cap.
+                emit_b_cond(ctx, dst_blk, /*cond=*/0x8 /* HI */, fail_blk);
+                emit_str_w(ctx, dst_blk, /*rt=*/10, /*rn=*/28, MEM_PAGES_SLOT);
+                emit_mov_x(ctx, dst_blk, /*rd=*/rd, /*rm=*/9);
+                emit_b(ctx, dst_blk, done_blk);
+
+                emit_mov_imm32(ctx, fail_blk, /*rd=*/rd, (uint32_t)-1);
+                emit_b(ctx, fail_blk, done_blk);
+
+                dst_blk = done_blk;
                 ST_RESULT(rd, 0);
                 break;
             }
@@ -1515,6 +1583,12 @@ static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name,
         // the linmem layout doc).
         emit_str_w   (ctx, blk, /*rt=*/ 0, /*rn=*/28, /*off=*/40);
         emit_str_x   (ctx, blk, /*rt=*/ 1, /*rn=*/28, /*off=*/48);
+        // Initialise mem_pages slot with the static page count. The
+        // `wmir.memory_size` op loads from this slot, and
+        // `wmir.memory_grow` updates it (capped at MAX_LINMEM_PAGES).
+        // See the linmem layout doc for MEM_PAGES_SLOT.
+        emit_mov_imm32(ctx, blk, /*rd=*/9, g_linmem_pages);
+        emit_str_w   (ctx, blk, /*rt=*/ 9, /*rn=*/28, /*off=*/24);
     }
 
     emit_bl(ctx, blk, main_name);
@@ -2107,11 +2181,17 @@ static MLIR_OpHandle synth_leaf_finish(MLIR_Context *ctx,
 //               offset within the synthesised heap. Initialised lazily
 //               to MALLOC_HEAP_BASE on the first malloc call (zero is
 //               the sentinel "uninitialised" value).
-//   [40..43]    `argc` (i32) — captured by `_start` from sp+0.
-//   [48..55]    `argv` (host ptr, 8 bytes) — captured by `_start` as
-//               sp+8 (kernel argv vector base). Used by synth_args_get
-//               / synth_args_sizes_get.
-//   [20..1023]  reserved (modulo the argc/argv slots above).
+//   [24..27]    `mem_pages` (i32) — current wasm linear-memory size in
+//               pages; initialised by `_start` to the static page
+//               count derived from the wasm module's MEMORY section
+//               (`g_linmem_pages`), and bumped by `memory_grow` up to
+//               MAX_LINMEM_PAGES. `memory_size` returns this value.
+//   [40..43]    `argc` (i32) — captured by `_start` from x0 on entry.
+//   [48..55]    `argv` (host ptr, 8 bytes) — captured by `_start` from
+//               x1 on entry (LC_MAIN ABI; LC_UNIXTHREAD would use
+//               sp+0 / sp+8 instead). Used by synth_args_get /
+//               synth_args_sizes_get.
+//   [20..1023]  reserved (modulo the slots above).
 //   [ 1024 .. WASM_DATA_BASE + linmem_init_size ] static data globals
 //   [ ... .. MALLOC_HEAP_BASE )                  BSS-equivalent zero pages
 //   [ MALLOC_HEAP_BASE .. MALLOC_HEAP_TOP )      bump-allocated heap
@@ -2120,13 +2200,12 @@ static MLIR_OpHandle synth_leaf_finish(MLIR_Context *ctx,
 // MALLOC_HEAP_BASE = 1 MiB and MALLOC_HEAP_TOP = 2 MiB. That leaves the
 // upper 2 MiB of linmem for the wasm stack (global 0 starts at the very
 // top, growing down). 1 MiB of heap is plenty for the tinyC test suite.
+//
+// The slot offsets above (MALLOC_HEAP_OFF_SLOT, MEM_PAGES_SLOT,
+// ARGC_SLOT, ARGV_SLOT) and MALLOC_HEAP_BASE_BYTES are defined in the
+// hoisted enum near the top of this file (they're referenced before
+// this comment by the `wmir.memory_size` / `memory.grow` lowering).
 // =============================================================================
-enum {
-    MALLOC_HEAP_OFF_SLOT = 16,
-    MALLOC_HEAP_BASE_BYTES = 1u * 1024u * 1024u,
-    ARGC_SLOT  = 40,
-    ARGV_SLOT  = 48,
-};
 
 // -----------------------------------------------------------------------------
 // malloc(i32 size) -> i32: bump-allocate (size+15 & ~15) bytes from the
@@ -3953,8 +4032,13 @@ MLIR_OpHandle mlir_wmir_to_aarch64(MLIR_Context *ctx, MLIR_OpHandle wmir_module)
             lm_pages = min_pages;
         }
     }
-    uint64_t linmem_size = lm_pages * WASM_PAGE_SIZE;
     g_linmem_pages = (uint32_t)lm_pages;
+    // The Mach-O envelope reserves the whole MAX_LINMEM_PAGES range as
+    // an S_ZEROFILL BSS section (zero on-disk cost, lazy commit at
+    // touch time). The wasm-side `memory.size` returns the CURRENT
+    // page count tracked in linmem[MEM_PAGES_SLOT], initialised to
+    // g_linmem_pages and grown by `memory.grow` up to MAX_LINMEM_PAGES.
+    uint64_t linmem_size = (uint64_t)MAX_LINMEM_PAGES * WASM_PAGE_SIZE;
 
     MLIR_BlockHandle out_body = MLIR_CreateBlock(ctx);
     MLIR_RegionHandle out_region = MLIR_CreateRegion(ctx);
