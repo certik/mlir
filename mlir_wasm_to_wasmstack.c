@@ -518,6 +518,26 @@ static bool wasm_parse(Arena *a, const uint8_t *bytes, size_t size,
         }
     }
 
+    // Disambiguate duplicate function names. Two static C functions
+    // named "foo" in different translation units linked together by
+    // wasm-ld both end up in the wasm name section as "foo", but they
+    // are distinct functions at the wasm-binary level (distinct func
+    // indices). The wasmstack→wasmssa lifter resolves calls by name,
+    // so name collisions cause the wrong signature to be picked and
+    // either stack underflow or wrong arity. Append ".<index>" to
+    // every duplicate so each function has a unique symbol.
+    for (uint32_t i = 0; i < out->n_funcs; i++) {
+        if (!out->funcs[i].name) continue;
+        for (uint32_t j = 0; j < i; j++) {
+            if (!out->funcs[j].name) continue;
+            if (strcmp(out->funcs[i].name, out->funcs[j].name) == 0) {
+                out->funcs[i].name = arena_printf(a, "%s.%u",
+                    out->funcs[i].name, i);
+                break;
+            }
+        }
+    }
+
     return true;
 }
 

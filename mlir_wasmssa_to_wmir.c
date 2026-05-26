@@ -902,6 +902,43 @@ static bool lower_wasmssa_op(Lowerer *L, MLIR_OpHandle src_op) {
         return true;
     }
 
+    case OP_TYPE_WASMSSA_MEMORY_SIZE: {
+        // i32 result.
+        MLIR_TypeHandle res_ty[1] = {
+            MLIR_CreateTypeInteger(ctx, 32, true)
+        };
+        MLIR_ValueHandle res[1] = {
+            MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0, res_ty[0],
+                (string){0}, MLIR_CreateLocationUnknown(ctx, (string){0}))
+        };
+        MLIR_OpHandle out = build_op_simple(ctx, OP_TYPE_WMIR_MEMORY_SIZE,
+            NULL, 0, res_ty, 1, res, NULL, 0);
+        L_append(L, out);
+        vmap_set(L->vmap, MLIR_GetOpResult(src_op, 0), res[0]);
+        return true;
+    }
+
+    case OP_TYPE_WASMSSA_MEMORY_GROW: {
+        MLIR_ValueHandle delta;
+        if (!vmap_get(L->vmap, MLIR_GetOpOperand(src_op, 0), &delta)) {
+            fprintf(stderr, "wmir: unbound operand on wasmssa.memory_grow\n");
+            return false;
+        }
+        MLIR_TypeHandle res_ty[1] = {
+            MLIR_CreateTypeInteger(ctx, 32, true)
+        };
+        MLIR_ValueHandle res[1] = {
+            MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0, res_ty[0],
+                (string){0}, MLIR_CreateLocationUnknown(ctx, (string){0}))
+        };
+        MLIR_ValueHandle ops[1] = { delta };
+        MLIR_OpHandle out = build_op_simple(ctx, OP_TYPE_WMIR_MEMORY_GROW,
+            NULL, 0, res_ty, 1, res, ops, 1);
+        L_append(L, out);
+        vmap_set(L->vmap, MLIR_GetOpResult(src_op, 0), res[0]);
+        return true;
+    }
+
     case OP_TYPE_WASMSSA_STORE: {
         int64_t off = at_i(src_op, "memory_offset");
         int64_t sz  = at_i(src_op, "mem_size_bytes");

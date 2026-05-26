@@ -408,6 +408,11 @@ typedef enum {
     //     f2i / i2f). Operand and result are i32 / i64 bit patterns.
     OP_TYPE_WMIR_FCONV,
 
+    //   No operands; result is i32 (linmem size in 64 KiB pages).
+    OP_TYPE_WMIR_MEMORY_SIZE,
+    //   1 operand (i32 delta pages); result is i32 (prev size, or -1).
+    OP_TYPE_WMIR_MEMORY_GROW,
+
     // -------------------------------------------------------------------------
     // aarch64 dialect — 1:1 with the AArch64 instruction encoding. The
     // `aarch64 → Mach-O` backend is a "dumb" byte emitter; all isel /

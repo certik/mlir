@@ -59,6 +59,10 @@ enum {
     WASM_PAGE_SIZE            = 65536u,
 };
 
+// Set by mlir_wmir_to_aarch64() once per module; read by lower_func() when
+// expanding wmir.memory_size into a movz of the static page count.
+static uint32_t g_linmem_pages = 0;
+
 // =============================================================================
 // Attribute helpers.
 // =============================================================================
@@ -228,36 +232,68 @@ static void emit_sub_reg(MLIR_Context *ctx, MLIR_BlockHandle blk,
     a[3] = attr_b(ctx, "sf", sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_SUB_REG, a, 4));
 }
+// Choose an addressing form that fits a 12-bit scaled-imm offset.
+//
+//   `scale` is 4 for W loads/stores and 8 for X loads/stores. The
+//   final hardware encoding holds `off_bytes / scale` in 12 bits, so
+//   the largest representable byte offset is `4095 * scale`.
+//
+// For larger offsets we materialise the byte offset into x16, add it
+// to the base register (returning the sum in x16), and return
+// `*p_rn = 16`, `*p_off_bytes = 0`. The caller then emits the load
+// or store using `[x16, #0]`. x16 (IP0) is reserved by the linker
+// for stubs but is otherwise free between BL boundaries, which is
+// always the case for these helpers (we never call between
+// the prologue computation and the load/store).
+static void rebase_for_imm12(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                             uint8_t *p_rn, uint32_t *p_off_bytes,
+                             uint32_t scale) {
+    uint32_t off = *p_off_bytes;
+    if (off <= (uint32_t)(4095u * scale) && (off % scale) == 0) return;
+    // movz x16, low; movk x16, high (if needed); add x16, rn, x16
+    emit_movz(ctx, blk, 16, (uint16_t)(off & 0xffffu), 0, /*sf=*/true);
+    if ((off >> 16) != 0) {
+        emit_movk(ctx, blk, 16, (uint16_t)((off >> 16) & 0xffffu), 1, /*sf=*/true);
+    }
+    emit_add_reg(ctx, blk, /*rd=*/16, /*rn=*/*p_rn, /*rm=*/16, /*sf=*/true);
+    *p_rn = 16;
+    *p_off_bytes = 0;
+}
+
 static void emit_ldr_w(MLIR_Context *ctx, MLIR_BlockHandle blk,
-                       uint8_t rt, uint8_t rn, uint16_t off_bytes) {
+                       uint8_t rt, uint8_t rn, uint32_t off_bytes) {
+    rebase_for_imm12(ctx, blk, &rn, &off_bytes, /*scale=*/4);
     MLIR_AttributeHandle a[3];
     a[0] = attr_i32(ctx, "rt", rt);
     a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "off_bytes", off_bytes);
+    a[2] = attr_i32(ctx, "off_bytes", (int64_t)off_bytes);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_LDR_W, a, 3));
 }
 static void emit_str_w(MLIR_Context *ctx, MLIR_BlockHandle blk,
-                       uint8_t rt, uint8_t rn, uint16_t off_bytes) {
+                       uint8_t rt, uint8_t rn, uint32_t off_bytes) {
+    rebase_for_imm12(ctx, blk, &rn, &off_bytes, /*scale=*/4);
     MLIR_AttributeHandle a[3];
     a[0] = attr_i32(ctx, "rt", rt);
     a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "off_bytes", off_bytes);
+    a[2] = attr_i32(ctx, "off_bytes", (int64_t)off_bytes);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_STR_W, a, 3));
 }
 static void emit_ldr_x(MLIR_Context *ctx, MLIR_BlockHandle blk,
-                       uint8_t rt, uint8_t rn, uint16_t off_bytes) {
+                       uint8_t rt, uint8_t rn, uint32_t off_bytes) {
+    rebase_for_imm12(ctx, blk, &rn, &off_bytes, /*scale=*/8);
     MLIR_AttributeHandle a[3];
     a[0] = attr_i32(ctx, "rt", rt);
     a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "off_bytes", off_bytes);
+    a[2] = attr_i32(ctx, "off_bytes", (int64_t)off_bytes);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_LDR_X, a, 3));
 }
 static void emit_str_x(MLIR_Context *ctx, MLIR_BlockHandle blk,
-                       uint8_t rt, uint8_t rn, uint16_t off_bytes) {
+                       uint8_t rt, uint8_t rn, uint32_t off_bytes) {
+    rebase_for_imm12(ctx, blk, &rn, &off_bytes, /*scale=*/8);
     MLIR_AttributeHandle a[3];
     a[0] = attr_i32(ctx, "rt", rt);
     a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "off_bytes", off_bytes);
+    a[2] = attr_i32(ctx, "off_bytes", (int64_t)off_bytes);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_STR_X, a, 3));
 }
 static void emit_3reg(MLIR_Context *ctx, MLIR_BlockHandle blk, MLIR_OpType t,
@@ -543,9 +579,9 @@ static uint8_t ld_operand_into(MLIR_Context *ctx, MLIR_BlockHandle blk,
     }
     if (h.kind == HOME_REG) return h.idx;
     if (is_i64(ctx, v))
-        emit_ldr_x(ctx, blk, scratch, 31, (uint16_t)(h.idx * 8u));
+        emit_ldr_x(ctx, blk, scratch, 31, (uint32_t)(h.idx * 8u));
     else
-        emit_ldr_w(ctx, blk, scratch, 31, (uint16_t)(h.idx * 8u));
+        emit_ldr_w(ctx, blk, scratch, 31, (uint32_t)(h.idx * 8u));
     return scratch;
 }
 
@@ -574,9 +610,9 @@ static void st_result(MLIR_Context *ctx, MLIR_BlockHandle blk,
         return;
     }
     if (is_i64(ctx, v))
-        emit_str_x(ctx, blk, produced_reg, 31, (uint16_t)(h.idx * 8u));
+        emit_str_x(ctx, blk, produced_reg, 31, (uint32_t)(h.idx * 8u));
     else
-        emit_str_w(ctx, blk, produced_reg, 31, (uint16_t)(h.idx * 8u));
+        emit_str_w(ctx, blk, produced_reg, 31, (uint32_t)(h.idx * 8u));
 }
 
 // Force `op`'s operand `idx` into a specific physical register `reg`.
@@ -597,9 +633,9 @@ static void ld_operand_into_fixed(MLIR_Context *ctx, MLIR_BlockHandle blk,
         return;
     }
     if (is_i64(ctx, v))
-        emit_ldr_x(ctx, blk, reg, 31, (uint16_t)(h.idx * 8u));
+        emit_ldr_x(ctx, blk, reg, 31, (uint32_t)(h.idx * 8u));
     else
-        emit_ldr_w(ctx, blk, reg, 31, (uint16_t)(h.idx * 8u));
+        emit_ldr_w(ctx, blk, reg, 31, (uint32_t)(h.idx * 8u));
 }
 
 // Persist `reg` into the home of result `idx` of `op`. If the home is
@@ -646,14 +682,14 @@ static void emit_branch_arg_copies(MLIR_Context *ctx, MLIR_BlockHandle blk,
             if (sh.kind == HOME_REG) {
                 r = sh.idx;
             } else {
-                if (i64) emit_ldr_x(ctx, blk, r, 31, (uint16_t)(sh.idx * 8u));
-                else     emit_ldr_w(ctx, blk, r, 31, (uint16_t)(sh.idx * 8u));
+                if (i64) emit_ldr_x(ctx, blk, r, 31, (uint32_t)(sh.idx * 8u));
+                else     emit_ldr_w(ctx, blk, r, 31, (uint32_t)(sh.idx * 8u));
             }
             if (dh.kind == HOME_REG) {
                 if (dh.idx != r) emit_mov_x(ctx, blk, dh.idx, r);
             } else {
-                if (i64) emit_str_x(ctx, blk, r, 31, (uint16_t)(dh.idx * 8u));
-                else     emit_str_w(ctx, blk, r, 31, (uint16_t)(dh.idx * 8u));
+                if (i64) emit_str_x(ctx, blk, r, 31, (uint32_t)(dh.idx * 8u));
+                else     emit_str_w(ctx, blk, r, 31, (uint32_t)(dh.idx * 8u));
             }
         }
         return;
@@ -677,14 +713,14 @@ static void emit_branch_arg_copies(MLIR_Context *ctx, MLIR_BlockHandle blk,
             r = pairs[k].src.idx;
         } else {
             if (pairs[k].is_i64)
-                emit_ldr_x(ctx, blk, r, 31, (uint16_t)(pairs[k].src.idx * 8u));
+                emit_ldr_x(ctx, blk, r, 31, (uint32_t)(pairs[k].src.idx * 8u));
             else
-                emit_ldr_w(ctx, blk, r, 31, (uint16_t)(pairs[k].src.idx * 8u));
+                emit_ldr_w(ctx, blk, r, 31, (uint32_t)(pairs[k].src.idx * 8u));
         }
         if (pairs[k].is_i64)
-            emit_str_x(ctx, blk, r, 31, (uint16_t)(pairs[k].dst.idx * 8u));
+            emit_str_x(ctx, blk, r, 31, (uint32_t)(pairs[k].dst.idx * 8u));
         else
-            emit_str_w(ctx, blk, r, 31, (uint16_t)(pairs[k].dst.idx * 8u));
+            emit_str_w(ctx, blk, r, 31, (uint32_t)(pairs[k].dst.idx * 8u));
         pairs[k].done = true;
     }
 
@@ -714,9 +750,9 @@ static void emit_branch_arg_copies(MLIR_Context *ctx, MLIR_BlockHandle blk,
             if (blocked) continue;
             if (pairs[k].src.kind == HOME_SLOT) {
                 if (pairs[k].is_i64)
-                    emit_ldr_x(ctx, blk, dst_reg, 31, (uint16_t)(pairs[k].src.idx * 8u));
+                    emit_ldr_x(ctx, blk, dst_reg, 31, (uint32_t)(pairs[k].src.idx * 8u));
                 else
-                    emit_ldr_w(ctx, blk, dst_reg, 31, (uint16_t)(pairs[k].src.idx * 8u));
+                    emit_ldr_w(ctx, blk, dst_reg, 31, (uint32_t)(pairs[k].src.idx * 8u));
             } else {
                 if (pairs[k].src.idx != dst_reg)
                     emit_mov_x(ctx, blk, dst_reg, pairs[k].src.idx);
@@ -772,12 +808,13 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
     }
     uint32_t frame_size = (uint32_t)ra->n_slots * 8u;
     frame_size = (frame_size + 15u) & ~15u;
-    // SUB SP, SP, #imm12 [LSL #12] supports up to ~16 MB. LDR W with
-    // unsigned imm12 supports up to 16380 bytes; LDR X up to 32760. We
-    // cap at 16 KiB so every spill slot fits in either accessor.
-    if (frame_size > 0x4000) {
+    // SUB SP, SP, #imm12 [LSL #12] supports up to ~16 MiB. The LDR/STR
+    // helpers above transparently rematerialise large offsets via x16,
+    // so any frame that fits the prologue's reach is reachable from
+    // any slot.
+    if (frame_size > 0xfff000) {
         fprintf(stderr,
-            "wmir->aarch64: function '%.*s' frame size %u exceeds 16 KiB budget\n",
+            "wmir->aarch64: function '%.*s' frame size %u exceeds 16 MiB budget\n",
             (int)name.size, name.str, frame_size);
         wmir_regalloc_free(ra);
         return MLIR_INVALID_HANDLE;
@@ -814,9 +851,9 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                     // i64 params must be spilled as full 8 bytes; w0..w7 alone
                     // would drop the upper half (caused ternary_i64 regression).
                     if (i64)
-                        emit_str_x(ctx, entry_dst, (uint8_t)i, 31, (uint16_t)(h.idx * 8u));
+                        emit_str_x(ctx, entry_dst, (uint8_t)i, 31, (uint32_t)(h.idx * 8u));
                     else
-                        emit_str_w(ctx, entry_dst, (uint8_t)i, 31, (uint16_t)(h.idx * 8u));
+                        emit_str_w(ctx, entry_dst, (uint8_t)i, 31, (uint32_t)(h.idx * 8u));
                 }
             } else {
                 // Stack-passed param: caller put it at [old_sp, #(i-8)*8],
@@ -831,9 +868,9 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 else     emit_ldr_w(ctx, entry_dst, scratch, /*rn=*/29, fp_off);
                 if (h.kind == HOME_SLOT) {
                     if (i64)
-                        emit_str_x(ctx, entry_dst, scratch, 31, (uint16_t)(h.idx * 8u));
+                        emit_str_x(ctx, entry_dst, scratch, 31, (uint32_t)(h.idx * 8u));
                     else
-                        emit_str_w(ctx, entry_dst, scratch, 31, (uint16_t)(h.idx * 8u));
+                        emit_str_w(ctx, entry_dst, scratch, 31, (uint32_t)(h.idx * 8u));
                 }
             }
         }
@@ -880,6 +917,20 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                     wmir_regalloc_free(ra); bm_free(&bm);
                     return MLIR_INVALID_HANDLE;
                 }
+                break;
+            }
+            case OP_TYPE_WMIR_MEMORY_SIZE: {
+                uint8_t rd = PICK_RES(9, 0);
+                emit_mov_imm32(ctx, dst_blk, rd, g_linmem_pages);
+                ST_RESULT(rd, 0);
+                break;
+            }
+            case OP_TYPE_WMIR_MEMORY_GROW: {
+                // Static linmem; can't grow. Always return -1 (failure).
+                // The operand (delta pages) is ignored.
+                uint8_t rd = PICK_RES(9, 0);
+                emit_mov_imm32(ctx, dst_blk, rd, (uint32_t)-1);
+                ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_IADD: {
@@ -1217,14 +1268,14 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
             case OP_TYPE_WMIR_GLOBAL_GET: {
                 int64_t gi = at_i(op, "global_idx");
                 uint8_t rd = PICK_RES(9, 0);
-                emit_ldr_w(ctx, dst_blk, rd, 27, (uint16_t)(gi * 8));
+                emit_ldr_w(ctx, dst_blk, rd, 27, (uint32_t)(gi * 8));
                 ST_RESULT(rd, 0);
                 break;
             }
             case OP_TYPE_WMIR_GLOBAL_SET: {
                 int64_t gi = at_i(op, "global_idx");
                 uint8_t r0 = LD_OPERAND(9, 0);
-                emit_str_w(ctx, dst_blk, r0, 27, (uint16_t)(gi * 8));
+                emit_str_w(ctx, dst_blk, r0, 27, (uint32_t)(gi * 8));
                 break;
             }
             case OP_TYPE_WMIR_LOAD: {
@@ -1237,11 +1288,11 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 emit_add_reg(ctx, dst_blk, 10, 28, r0, /*sf=*/true);
                 uint8_t rd = PICK_RES(9, 0);
                 if (sz == 8) {
-                    emit_ldr_x(ctx, dst_blk, rd, 10, (uint16_t)off);
+                    emit_ldr_x(ctx, dst_blk, rd, 10, (uint32_t)off);
                 } else if (sz == 1) {
                     emit_ldrb_imm(ctx, dst_blk, rd, 10, (uint16_t)off);
                 } else {
-                    emit_ldr_w(ctx, dst_blk, rd, 10, (uint16_t)off);
+                    emit_ldr_w(ctx, dst_blk, rd, 10, (uint32_t)off);
                 }
                 ST_RESULT(rd, 0);
                 break;
@@ -1256,11 +1307,11 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                                                  // the heap_addr compute)
                 emit_add_reg(ctx, dst_blk, 10, 28, r0, /*sf=*/true);
                 if (sz == 8) {
-                    emit_str_x(ctx, dst_blk, r1, 10, (uint16_t)off);
+                    emit_str_x(ctx, dst_blk, r1, 10, (uint32_t)off);
                 } else if (sz == 1) {
                     emit_strb_imm(ctx, dst_blk, r1, 10, (uint16_t)off);
                 } else {
-                    emit_str_w(ctx, dst_blk, r1, 10, (uint16_t)off);
+                    emit_str_w(ctx, dst_blk, r1, 10, (uint32_t)off);
                 }
                 break;
             }
@@ -1309,11 +1360,11 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                             src_reg = h.idx;
                         } else {
                             src_reg = 9;
-                            uint16_t off = (uint16_t)(stack_bytes + h.idx * 8u);
+                            uint32_t off = (uint32_t)stack_bytes + (uint32_t)h.idx * 8u;
                             if (i64) emit_ldr_x(ctx, dst_blk, src_reg, 31, off);
                             else     emit_ldr_w(ctx, dst_blk, src_reg, 31, off);
                         }
-                        uint16_t dst_off = (uint16_t)((k - 8) * 8u);
+                        uint32_t dst_off = (uint32_t)((k - 8) * 8u);
                         if (i64) emit_str_x(ctx, dst_blk, src_reg, 31, dst_off);
                         else     emit_str_w(ctx, dst_blk, src_reg, 31, dst_off);
                     }
@@ -3257,6 +3308,7 @@ MLIR_OpHandle mlir_wmir_to_aarch64(MLIR_Context *ctx, MLIR_OpHandle wmir_module)
     uint64_t lm_bytes = (uint64_t)DEFAULT_STACK_SIZE + DEFAULT_GLOBAL_BASE_OFFS;
     uint64_t lm_pages = (lm_bytes + WASM_PAGE_SIZE - 1) / WASM_PAGE_SIZE;
     uint64_t linmem_size = lm_pages * WASM_PAGE_SIZE;
+    g_linmem_pages = (uint32_t)lm_pages;
 
     MLIR_BlockHandle out_body = MLIR_CreateBlock(ctx);
     MLIR_RegionHandle out_region = MLIR_CreateRegion(ctx);

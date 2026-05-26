@@ -242,6 +242,8 @@ static string op_type_to_string_half2(MLIR_OpType type) {
         case OP_TYPE_WMIR_FUNOP:      return str_lit("wmir.funop");
         case OP_TYPE_WMIR_FCMP:       return str_lit("wmir.fcmp");
         case OP_TYPE_WMIR_FCONV:      return str_lit("wmir.fconv");
+        case OP_TYPE_WMIR_MEMORY_SIZE: return str_lit("wmir.memory_size");
+        case OP_TYPE_WMIR_MEMORY_GROW: return str_lit("wmir.memory_grow");
         // aarch64 dialect
         case OP_TYPE_AARCH64_FUNC:         return str_lit("aarch64.func");
         case OP_TYPE_AARCH64_MOVZ:         return str_lit("aarch64.movz");

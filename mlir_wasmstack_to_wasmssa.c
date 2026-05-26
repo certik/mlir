@@ -151,9 +151,19 @@ static void st_push(Stack *s, MLIR_ValueHandle v) {
     s->data[s->n++] = v;
 }
 static MLIR_ValueHandle st_pop(Stack *s) {
-    if (s->n == 0) return MLIR_INVALID_HANDLE;
+    if (s->n == 0) {
+        extern const char *g_current_fn_name;
+        extern const char *g_current_op_name;
+        fprintf(stderr, "ws->ssa: stack underflow in st_pop (fn='%s' op='%s')\n",
+            g_current_fn_name ? g_current_fn_name : "?",
+            g_current_op_name ? g_current_op_name : "?");
+        return MLIR_INVALID_HANDLE;
+    }
     return s->data[--s->n];
 }
+
+const char *g_current_fn_name = NULL;
+const char *g_current_op_name = NULL;
 static MLIR_ValueHandle st_peek(Stack *s) {
     if (s->n == 0) return MLIR_INVALID_HANDLE;
     return s->data[s->n - 1];
@@ -560,6 +570,13 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
         MLIR_OpHandle bo = MLIR_GetBlockOp(src_blk, i);
         MLIR_OpType t = MLIR_GetOpType(bo);
         uint8_t valtype = (uint8_t)at_i(bo, "valtype");
+        {
+            string opnm = MLIR_GetOpName(bo);
+            static char buf[64];
+            size_t sz = opnm.size < sizeof(buf) - 1 ? opnm.size : sizeof(buf) - 1;
+            memcpy(buf, opnm.str, sz); buf[sz] = 0;
+            g_current_op_name = buf;
+        }
 
         // Honour `cur_terminated`: skip ops in dead code until we hit
         // an END or ELSE that resets the state.
@@ -593,6 +610,12 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
                 continue;
             }
             if (t == OP_TYPE_WASMSTACK_END) {
+                // If we're at the function-level end while in dead
+                // code, the explicit `wasmstack.return` already emitted
+                // everything. Nothing left to do.
+                if (F->frames.n == 0) {
+                    return true;
+                }
                 // Pop the current frame and switch back to parent.
                 Frame top = fs_pop(&F->frames);
                 MLIR_ValueHandle results[1];
@@ -1057,11 +1080,19 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
         case OP_TYPE_WASMSTACK_END: {
             // End of function or end of innermost frame.
             if (F->frames.n == 0) {
-                // Function-level end: implicit return.
+                // Function-level end. If the body has already issued
+                // a wasmstack.return (so F->cur_terminated is set),
+                // the value stack is empty by definition and we must
+                // NOT pop F->nr times — that's an underflow. The
+                // earlier return already emitted everything.
+                if (F->cur_terminated) {
+                    return true;
+                }
+                // Implicit return.
                 MLIR_ValueHandle *opnds = (MLIR_ValueHandle *)arena_alloc(F->arena,
                     (F->nr ? F->nr : 1) * sizeof(MLIR_ValueHandle));
                 for (size_t k = F->nr; k > 0; k--) opnds[k - 1] = st_pop(&F->stack);
-                if (!F->cur_terminated) emit_locals_pop(F);
+                emit_locals_pop(F);
                 MLIR_AttributeHandle as[1];
                 as[0] = attr_i32(F->ctx, "valtype", 0);
                 emit(F, build_op_no_res(F->ctx, OP_TYPE_WASMSSA_RETURN,
@@ -1325,6 +1356,14 @@ static MLIR_OpHandle lift_func(MLIR_Context *ctx, Arena *arena,
     F.ctx = ctx;
     F.arena = arena;
     F.siblings = siblings;
+    {
+        extern const char *g_current_fn_name;
+        // Need a stable C string; sym_name is not NUL-terminated.
+        char *buf = (char *)arena_alloc(arena, sym_name.size + 1);
+        memcpy(buf, sym_name.str, sym_name.size);
+        buf[sym_name.size] = '\0';
+        g_current_fn_name = buf;
+    }
     F.nl_total = nl_total;
     F.local_types = locals;
     F.local_offs = local_offs;

@@ -41,7 +41,8 @@ typedef enum {
 typedef struct {
     uint8_t  kind;  // HomeKind
     uint8_t  pad;
-    uint16_t idx;   // register number (0..30) or slot index (0..n_slots-1)
+    uint16_t pad2;
+    uint32_t idx;   // register number (0..30) or slot index (0..n_slots-1)
 } ValueHome;
 
 typedef struct {
@@ -54,7 +55,7 @@ typedef struct {
     size_t            cap;
     // Number of 8-byte stack slots allocated. Frame size in bytes
     // (before 16-byte alignment) is `n_slots * 8`.
-    uint16_t          n_slots;
+    uint32_t          n_slots;
 } WmirRegAlloc;
 
 // Compute the assignment for one `wmir.func` op. Returns a heap-

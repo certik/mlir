@@ -445,7 +445,9 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
     size_t  n_active = 0;
     bool   *reg_busy = calloc(POOL_N ? POOL_N : 1, sizeof(bool));
 
-    uint16_t next_slot = 0;
+    uint32_t next_slot = 0;
+    const uint32_t MAX_SLOTS = 1u << 24;  // 128 MiB frame — way beyond
+                                          // any reasonable function.
 
     for (uint32_t k = 0; k < n_values; k++) {
         uint32_t vi = order[k];
@@ -456,7 +458,7 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
         // happen on a well-formed IR; assign a slot defensively.
         if (vp->def_pos == UINT32_MAX) {
             ra->homes[vi].kind = HOME_SLOT;
-            if (next_slot >= 2047) goto fail_slot_overflow;
+            if (next_slot >= MAX_SLOTS) goto fail_slot_overflow;
             ra->homes[vi].idx  = next_slot;
             next_slot++;
             continue;
@@ -481,7 +483,7 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
 
         if (force_slot) {
             ra->homes[vi].kind = HOME_SLOT;
-            if (next_slot >= 2047) goto fail_slot_overflow;
+            if (next_slot >= MAX_SLOTS) goto fail_slot_overflow;
             ra->homes[vi].idx  = next_slot;
             next_slot++;
             continue;
@@ -516,7 +518,7 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
             uint8_t  reg       = active[evict_a].reg;
             uint8_t  pool_idx  = active[evict_a].pool_idx;
             ra->homes[evict_vi].kind = HOME_SLOT;
-            if (next_slot >= 2047) goto fail_slot_overflow;
+            if (next_slot >= MAX_SLOTS) goto fail_slot_overflow;
             ra->homes[evict_vi].idx  = next_slot;
             next_slot++;
             active[evict_a] = (Active){ vi, reg, pool_idx };
@@ -525,7 +527,7 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
         } else {
             // Spill the current value.
             ra->homes[vi].kind = HOME_SLOT;
-            if (next_slot >= 2047) goto fail_slot_overflow;
+            if (next_slot >= MAX_SLOTS) goto fail_slot_overflow;
             ra->homes[vi].idx  = next_slot;
             next_slot++;
         }
@@ -541,7 +543,8 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
     return ra;
 
 fail_slot_overflow:
-    fprintf(stderr, "wmir_regalloc: more than 2047 slots — frame too large for W LDR/STR imm12 offset\n");
+    fprintf(stderr, "wmir_regalloc: more than %u slots — frame too large\n",
+        (unsigned)MAX_SLOTS);
     free(order); free(active); free(reg_busy);
     free(live_in); free(live_out); free(gen); free(kill); free(scratch);
     free(block_first_pos); free(block_last_pos); free(blocks);
