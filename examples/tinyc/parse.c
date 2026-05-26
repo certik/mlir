@@ -1455,7 +1455,11 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     s->decl_name = name.text;
     s->decl_type.kind = base;
     if (is_long) s->decl_type.int_bits = 64;
-    if (!is_ptr) s->decl_type.int_unsigned = is_unsigned;
+    // int_unsigned is meaningful for both value types AND pointer types
+    // (it controls zero- vs sign-extension on byte loads through
+    // `unsigned char *` — see load_lvalue in emit.c). Setting it on
+    // pointer decls preserves the `unsigned char *p;` distinction.
+    s->decl_type.int_unsigned = is_unsigned;
     if (is_ptr) {
         if (was_char) s->decl_type.kind = TY_PTR_CHAR;
         else if (base == TY_I32) s->decl_type.kind = TY_PTR_I32;

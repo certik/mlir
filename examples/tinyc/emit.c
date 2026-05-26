@@ -1286,6 +1286,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                         gdyn[0] = iv;
                         r.base_ptr = emit_gep(e, base, elem, gpath, 1, gdyn, 1);
                         r.elem_ty = elem;
+                        r.is_unsigned = ft.int_unsigned;
                         return r;
                     }
                 }
