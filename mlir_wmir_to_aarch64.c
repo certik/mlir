@@ -62,12 +62,18 @@ enum {
     // Mach-O envelope; macOS lazily commits pages as they are touched,
     // so the on-disk binary size is unaffected. The wasm-side
     // `memory.size` / `memory.grow` then bump a counter against this
-    // cap, mirroring real WASI semantics. 4096 pages = 256 MiB; small
-    // enough that dyld is happy with the __DATA segment vmsize, large
-    // enough for the entire tinyC test suite. Selfhost (which needs
-    // much more) bumps this via the upstream wasm-backend's path or
-    // via a per-module override (TODO).
-    MAX_LINMEM_PAGES          = 24576u,
+    // cap, mirroring real WASI semantics.
+    //
+    // 49152 pages = 3 GiB — enough headroom for stage1 tinyc to
+    // selfhost emit.c (~1.88 GiB linmem needed). Anything larger
+    // than ~3.5 GiB pushes the __DATA segment past addresses dyld
+    // is willing to load on macOS.
+    // macOS arm64 dyld shared cache typically begins around
+    // 0x180000000, so __LINKEDIT must end before that. Our __TEXT
+    // starts at 0x100000000 and __DATA follows it; with a small
+    // header that leaves ~2 GiB - 32 KiB for the __DATA segment.
+    // 30720 pages = 1.875 GiB is the practical ceiling.
+    MAX_LINMEM_PAGES          = 30720u,
     // Slot offsets within linmem used by synthesised libc shims.
     // See the full linmem-layout doc later in the file. Hoisted here
     // because lowering of `memory.size` / `memory.grow` (which uses
@@ -856,6 +862,10 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
     uint32_t locals_bytes = locals_count * 8u;
     uint32_t frame_size   = spill_bytes + locals_bytes;
     frame_size = (frame_size + 15u) & ~15u;
+    if (getenv("WMIR_DEBUG_FRAMES")) {
+        fprintf(stderr, "wmir-frame: %.*s spill=%u locals=%u total=%u\n",
+                (int)name.size, name.str, spill_bytes, locals_bytes, frame_size);
+    }
     // SUB SP, SP, #imm12 [LSL #12] supports up to ~16 MiB. The LDR/STR
     // helpers above transparently rematerialise large offsets via x16,
     // so any frame that fits the prologue's reach is reachable from

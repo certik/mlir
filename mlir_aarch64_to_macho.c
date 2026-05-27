@@ -1670,9 +1670,18 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     buf_le64(&img, 0);
 
     // LC_MAIN
+    // Initial stack size: 256 MB. This is large because the wmir
+    // backend currently doesn't promote wasm locals to physical
+    // registers — every local lives in an 8-byte stack cell, and
+    // the regalloc spills aggressively (no live-range splitting).
+    // Real-world tinyc functions like emit_expr end up with ~225 KB
+    // per-call frames, so the parser only gets ~35 levels of
+    // recursion on the macOS default 8 MB stack and OOMs on
+    // deeply-nested expressions. 256 MB gives ~1100 emit_expr
+    // levels which is plenty for tinyc's selfhost workload.
     buf_le32(&img, LC_MAIN); buf_le32(&img, 24);
     buf_le64(&img, (uint64_t)text_section_off);
-    buf_le64(&img, 32ULL * 1024 * 1024);
+    buf_le64(&img, 256ULL * 1024 * 1024);
 
     // LC_LOAD_DYLIB libSystem (kept so the load-command layout matches
     // the macho_exit reference even though we don't import anything).
