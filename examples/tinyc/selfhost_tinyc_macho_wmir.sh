@@ -5,11 +5,19 @@
 # driven by wasmtime or a previously-bootstrapped native Mach-O
 # `tinyc` binary) to recompile every source file that makes up the
 # tinyc wasm32-wasi build into per-source `.wasm.o` objects, link
-# them with `wasm-ld` into a single linked module, and then translate
-# that linked module to a native Mach-O ARM64 binary via the new
+# them with `tinyc --link` into a single linked module, and then
+# translate that linked module to a native Mach-O ARM64 binary via
+# the new
 #   wasm -> wasmstack -> wasmssa -> wmir -> aarch64 -> Mach-O
 # pipeline (`tinyc --from-wasm <linked.wasm> --emit=macho
 # --macho-backend=wmir`).
+#
+# Note: we deliberately use `tinyc --link` rather than `wasm-ld`
+# here. wasm-ld silently miscompiles the resulting binary in the
+# linker pass — the produced `_start` faults on dereferences of
+# pointers loaded from the data segment (e.g. emit_line_directive
+# reads junk for pp->cur_file.str). tinyc's own linker produces
+# byte-identical output to the canonical wasm selfhost.
 #
 # Usage:
 #   selfhost_tinyc_macho_wmir.sh <INPUT_TINYC> <OUTPUT_TINYC_MACHO> <STAGE_DIR>
@@ -137,16 +145,18 @@ for src in "${ALL_SOURCES[@]}"; do
     OBJS+=("$obj")
 done
 
-# wasm-ld step: produce a single linked wasm module with `_start`
-# exported. The wmir backend's --from-wasm path consumes this linked
-# module and lowers it to Mach-O directly. `--allow-undefined` is
-# required because tinyc's wasm32-wasi compilation produces calls to
-# WASI imports (`fd_write`, `proc_exit`, `path_open`, …) that the
-# wmir backend re-synthesises as direct libSystem syscalls; wasm-ld
-# would otherwise refuse the link with "undefined symbol" errors.
+# tinyc --link step: produce a single linked wasm module with
+# `_start` exported. The wmir backend's --from-wasm path consumes
+# this linked module and lowers it to Mach-O directly.
+#
+# We use `tinyc --link` (not `wasm-ld`) because wasm-ld miscompiles
+# our `.wasm.o` set: the resulting `_start` faults on the first
+# dereference inside `emit_line_directive_if_needed` (likely a
+# relocation or data-segment layout mismatch). tinyc's own linker
+# produces a working binary byte-identical to `selfhost_tinyc_wasm.sh`.
 LINKED_WASM="$STAGE_DIR/linked.wasm"
-printf '[selfhost-macho-wmir] wasm-ld -> %s\n' "$LINKED_WASM"
-wasm-ld --no-entry --export=_start --allow-undefined \
+printf '[selfhost-macho-wmir] tinyc --link -> %s\n' "$LINKED_WASM"
+"${TINYC_INVOKE[@]}" --link --export=_start \
     -o "$LINKED_WASM" \
     "${OBJS[@]}" "$VARARG_OBJ"
 
