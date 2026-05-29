@@ -320,7 +320,16 @@ int app_main(void) {
         translate_to_wasm_fn = MLIR_TranslateModuleToWasm;
     }
 
-    Arena *arena = arena_create(64 * 1024 * 1024);
+    // Size IR-arena chunks so the *total* buddy request (this 64 MiB data
+    // area plus the arena_chunk header, alignment padding, and the buddy
+    // block header) stays just under 64 MiB and therefore fits in a single
+    // 64 MiB (power-of-two) buddy block. A bare 64 MiB request spills a few
+    // dozen bytes past 2^26 and forces buddy to round up to a 128 MiB block,
+    // wasting ~50% of every chunk. On the host that waste is only virtual
+    // (untouched pages never become resident), but on the wasm32 path the
+    // doubled block reservations push the linear-memory high-water past the
+    // hard 4 GiB cap, so this halves linmem use on the self-host lift.
+    Arena *arena = arena_create(64 * 1024 * 1024 - 64 * 1024);
     MLIR_Context ctx = {0};
     MLIR_SetArenaAllocator(&ctx, arena);
 
@@ -390,7 +399,7 @@ int app_main(void) {
                 // can be released. This keeps the early modules from coexisting
                 // with the (larger) aarch64 module, cutting peak RSS by roughly
                 // the size of wasmstack + wasmssa.
-                Arena *late_arena = arena_create(64 * 1024 * 1024);
+                Arena *late_arena = arena_create(64 * 1024 * 1024 - 64 * 1024);
                 MLIR_SetArenaAllocator(&ctx, late_arena);
                 MLIR_ResetInternRegistry();
                 MLIR_OpHandle wmir = mlir_wasmssa_to_wmir(&ctx, ssa);
