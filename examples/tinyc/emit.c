@@ -2512,8 +2512,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     // `unsigned` C type — otherwise an i32 value with
                     // its top bit set (e.g. `(int64_t)<uint32_t>` with
                     // bit 31 set) sign-extends to a huge "negative"
-                    // i64. The cast itself doesn't change signedness,
-                    // so propagate `is_unsigned` to the widened value.
+                    // i64. The widening decision uses the SOURCE
+                    // signedness; the result's signedness is the cast
+                    // target's (set below).
                     v.val = v.is_unsigned ? emit_extui_i32_to_i64(e, v.val)
                                           : emit_extsi_i32_to_i64(e, v.val);
                     v.is_i64 = true;
@@ -2521,6 +2522,10 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     v.val = emit_trunci_i64_to_i32(e, v.val);
                     v.is_i64 = false;
                 }
+                // A cast to an unsigned integer type yields an unsigned
+                // value: subsequent comparisons / div / shr must use the
+                // unsigned form (e.g. `(unsigned long)x >= CONST`).
+                v.is_unsigned = ex->cast_type.int_unsigned;
                 return v;
             }
             // Pointer-to-integer cast: emit llvm.ptrtoint, then optionally
@@ -2544,6 +2549,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     v.val = emit_trunci_i64_to_i32(e, v.val);
                     v.is_i64 = false;
                 }
+                // `(uintptr_t)p` / `(unsigned long)p` produce an unsigned
+                // integer: select unsigned comparisons / div / shr below.
+                v.is_unsigned = ex->cast_type.int_unsigned;
                 return v;
             }
             // Pointer-to-pointer cast: opaque !llvm.ptr is universal, so
