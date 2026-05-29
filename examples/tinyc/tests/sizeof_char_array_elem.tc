@@ -1,0 +1,21 @@
+extern int printf(const char *fmt, ...);
+
+// sizeof of an element of a `char` / `unsigned char` array must be 1: C
+// mandates sizeof(char) == 1. tinyc stores char arrays with genuine i8
+// elements, but infer_expr_type returned a plain i32 for the indexed
+// element, so sizeof(arr[0]) folded to 4. That broke the common idiom
+// sizeof(arr)/sizeof(arr[0]) for byte arrays (it yielded 1 instead of the
+// element count), which in turn miscompiled the self-hosted register
+// allocator's POOL table.
+
+int main(void) {
+    unsigned char a[4];
+    char b[4];
+    static const unsigned char POOL[] = {12, 13, 14, 15};
+    if (sizeof(a[0]) != 1) { printf("FAIL 1\n"); return 1; }
+    if (sizeof(b[0]) != 1) { printf("FAIL 2\n"); return 2; }
+    if (sizeof(POOL) != 4) { printf("FAIL 3\n"); return 3; }
+    if (sizeof(POOL) / sizeof(POOL[0]) != 4) { printf("FAIL 4\n"); return 4; }
+    printf("OK\n");
+    return 0;
+}

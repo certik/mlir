@@ -1313,3 +1313,8 @@ expected_stdout = "OK\n"
 name = "sizeof_deref_in_own_init"
 targets = ["native", "wasm", "macho"]
 expected_stdout = "OK\n"
+
+[[test]]
+name = "sizeof_char_array_elem"
+targets = ["native", "wasm", "macho"]
+expected_stdout = "OK\n"
