@@ -157,18 +157,32 @@ typedef struct UseSlot {
     UseNode **arr;
 } UseSlot;
 
-typedef struct IR_Value {
-    MLIR_ValueKind kind;
-    uint32_t result_index;
-    uintptr_t def_handle;  // MLIR_OpHandle if OP_RESULT, MLIR_BlockHandle if BLOCK_ARG
-    MLIR_TypeHandle type;
+// Lazily-allocated side struct for IR_Value metadata that is unused on the
+// wasm->macho lift path (which disables def-use tracking and supplies no
+// register names). See IR_Value::aux.
+typedef struct IR_ValueAux {
     string register_name;
-    MLIR_LocationHandle location;
     // Head of the doubly-linked list of UseNodes whose owner ops currently
     // reference this value as an operand. `n_uses` is the cached length so
     // MLIR_GetValueNumUses is O(1).
     UseNode *use_head;
     uint32_t n_uses;
+} IR_ValueAux;
+
+typedef struct IR_Value {
+    MLIR_ValueKind kind;
+    uint32_t result_index;
+    uintptr_t def_handle;  // MLIR_OpHandle if OP_RESULT, MLIR_BlockHandle if BLOCK_ARG
+    MLIR_TypeHandle type;
+    MLIR_LocationHandle location;
+    // Rarely-needed-on-the-hot-path value metadata: the SSA register name
+    // (only set on the parser/printer roundtrip path) and the def-use list
+    // (only populated when the context tracks uses — the wasm->macho pipeline
+    // opts out). Stored in a side struct allocated lazily so values on the
+    // macho lift path, which set neither, cost one pointer instead of 28
+    // bytes. aux is non-NULL whenever the context tracks uses or a register
+    // name was supplied.
+    IR_ValueAux *aux;
 } IR_Value;
 
 // Rarely-used op metadata consulted only by the classic printer and the
@@ -282,21 +296,21 @@ static size_t         g_cap_all_ops = 0;
 // non-trivial functions.
 
 static inline void use_list_unlink(IR_Value *v, UseNode *u) {
-    if (!v || !u) return;
+    if (!v || !v->aux || !u) return;
     if (u->prev) u->prev->next = u->next;
-    else         v->use_head = u->next;
+    else         v->aux->use_head = u->next;
     if (u->next) u->next->prev = u->prev;
     u->prev = u->next = NULL;
-    if (v->n_uses) v->n_uses--;
+    if (v->aux->n_uses) v->aux->n_uses--;
 }
 
 static inline void use_list_push_front(IR_Value *v, UseNode *u) {
-    if (!v || !u) return;
+    if (!v || !v->aux || !u) return;
     u->prev = NULL;
-    u->next = v->use_head;
-    if (v->use_head) v->use_head->prev = u;
-    v->use_head = u;
-    v->n_uses++;
+    u->next = v->aux->use_head;
+    if (v->aux->use_head) v->aux->use_head->prev = u;
+    v->aux->use_head = u;
+    v->aux->n_uses++;
 }
 
 // Register `slot_value` as a use by `owner_op` at the indicated
@@ -388,6 +402,21 @@ static inline MLIR_ValueHandle alloc_value(MLIR_Context *ctx, IR_Value v) {
     IR_Value *slot = arena_new(ctx->arena, IR_Value);
     *slot = v;
     return (MLIR_ValueHandle)(uintptr_t)slot;
+}
+
+// Allocate an IR_ValueAux for a freshly-created value, or return NULL when
+// none is needed. An aux is required whenever the context tracks uses (so the
+// def-use list can be populated as ops reference the value) or a register name
+// was supplied. On the wasm->macho lift path neither holds, so values cost
+// only the inline aux pointer.
+static inline IR_ValueAux *value_aux_create(MLIR_Context *ctx, string register_name) {
+    if (!ctx || !ctx->arena) return NULL;
+    bool tracking = !ctx->no_def_use_tracking;
+    if (!tracking && register_name.size == 0) return NULL;
+    IR_ValueAux *a = arena_new(ctx->arena, IR_ValueAux);
+    *a = (IR_ValueAux){0};
+    a->register_name = register_name;
+    return a;
 }
 
 static inline MLIR_TypeHandle alloc_type(MLIR_Context *ctx, IR_Type t) {
@@ -1638,7 +1667,7 @@ MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *ctx, 
 MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_name, uint32_t result_index, MLIR_TypeHandle type, MLIR_LocationHandle location) {
     IR_Value v = {0};
     v.kind = BLOCK_ARG;
-    v.register_name = register_name;
+    v.aux = value_aux_create(ctx, register_name);
     v.result_index = result_index;
     v.type = type;
     v.location = location;
@@ -1652,7 +1681,7 @@ MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_Context *ctx, MLIR_OpHandle def, 
     v.def_handle = def;
     v.result_index = result_index;
     v.type = type;
-    v.register_name = register_name;
+    v.aux = value_aux_create(ctx, register_name);
     v.location = location;
     return alloc_value(ctx, v);
 }
@@ -1795,7 +1824,7 @@ MLIR_TypeHandle MLIR_GetValueType(MLIR_ValueHandle vh) {
 
 string MLIR_GetValueRegisterName(MLIR_ValueHandle vh) {
     IR_Value *v = resolve_value(vh);
-    return v ? v->register_name : str_lit("");
+    return (v && v->aux) ? v->aux->register_name : str_lit("");
 }
 
 uint32_t MLIR_GetValueResultIndex(MLIR_ValueHandle vh) {
@@ -1982,10 +2011,10 @@ void MLIR_ReplaceAllUsesOfValue(MLIR_Context *ctx,
     (void)ctx;
     if (old_value == MLIR_INVALID_HANDLE || old_value == new_value) return;
     IR_Value *ov = resolve_value(old_value);
-    if (!ov || !ov->use_head) return;
+    if (!ov || !ov->aux || !ov->aux->use_head) return;
     IR_Value *nv = (new_value == MLIR_INVALID_HANDLE) ? NULL : resolve_value(new_value);
     // Walk the use list, repointing each operand slot to new_value.
-    UseNode *u = ov->use_head;
+    UseNode *u = ov->aux->use_head;
     while (u) {
         UseNode *next = u->next;
         IR_Op *o = resolve_op(u->owner);
@@ -2002,24 +2031,24 @@ void MLIR_ReplaceAllUsesOfValue(MLIR_Context *ctx,
         u = next;
     }
     // Splice the whole list from ov onto nv (or just drop it if nv==NULL).
-    if (nv) {
-        UseNode *head = ov->use_head;
+    if (nv && nv->aux) {
+        UseNode *head = ov->aux->use_head;
         // Append ov's chain to nv's chain — find ov's tail, then link.
         UseNode *tail = head;
         while (tail->next) tail = tail->next;
-        tail->next = nv->use_head;
-        if (nv->use_head) nv->use_head->prev = tail;
-        nv->use_head = head;
-        nv->n_uses += ov->n_uses;
+        tail->next = nv->aux->use_head;
+        if (nv->aux->use_head) nv->aux->use_head->prev = tail;
+        nv->aux->use_head = head;
+        nv->aux->n_uses += ov->aux->n_uses;
     } else {
         // Drop chain; UseNodes leak in the arena but that's fine (arena
         // is freed at context end).
-        for (UseNode *x = ov->use_head; x; x = x->next) {
+        for (UseNode *x = ov->aux->use_head; x; x = x->next) {
             x->prev = x->next = NULL;
         }
     }
-    ov->use_head = NULL;
-    ov->n_uses = 0;
+    ov->aux->use_head = NULL;
+    ov->aux->n_uses = 0;
 }
 
 void MLIR_EraseOp(MLIR_Context *ctx, MLIR_OpHandle op) {
@@ -2443,7 +2472,7 @@ MLIR_ValueHandle MLIR_AddBlockArgument(MLIR_Context *ctx, MLIR_BlockHandle block
     v->def_handle = (uintptr_t)block;
     v->result_index = (uint32_t)b->n_arguments;
     v->type = type;
-    v->register_name = (string){0};
+    v->aux = value_aux_create(ctx, (string){0});
     v->location = loc;
     MLIR_ValueHandle vh = (MLIR_ValueHandle)(uintptr_t)v;
     // Append to block->arguments, growing geometrically so repeated
@@ -2498,7 +2527,7 @@ size_t MLIR_GetValueNumUses(MLIR_Context *ctx, MLIR_ValueHandle value) {
     (void)ctx;
     if (value == MLIR_INVALID_HANDLE) return 0;
     IR_Value *v = resolve_value(value);
-    return v ? v->n_uses : 0;
+    return (v && v->aux) ? v->aux->n_uses : 0;
 }
 
 MLIR_OpHandle MLIR_GetValueUseOwner(MLIR_Context *ctx, MLIR_ValueHandle value,
@@ -2512,7 +2541,7 @@ MLIR_OpHandle MLIR_GetValueUseOwner(MLIR_Context *ctx, MLIR_ValueHandle value,
     // linked first" because use_list_push_front prepends. Callers don't
     // depend on a specific iteration order (snapshot_uses copies into an
     // owned array, then iterates regardless).
-    UseNode *u = v->use_head;
+    UseNode *u = v->aux ? v->aux->use_head : NULL;
     size_t n = 0;
     while (u && n < idx) { u = u->next; n++; }
     if (!u) return MLIR_INVALID_HANDLE;
