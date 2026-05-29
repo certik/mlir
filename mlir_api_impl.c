@@ -159,8 +159,8 @@ typedef struct UseSlot {
 
 typedef struct IR_Value {
     MLIR_ValueKind kind;
-    uintptr_t def_handle;  // MLIR_OpHandle if OP_RESULT, MLIR_BlockHandle if BLOCK_ARG
     uint32_t result_index;
+    uintptr_t def_handle;  // MLIR_OpHandle if OP_RESULT, MLIR_BlockHandle if BLOCK_ARG
     MLIR_TypeHandle type;
     string register_name;
     MLIR_LocationHandle location;
@@ -172,21 +172,20 @@ typedef struct IR_Value {
 } IR_Value;
 
 typedef struct IR_Op {
+    // 32-bit fields grouped to avoid padding. Counts and line numbers never
+    // approach 2^32, so uint32_t is ample and keeps IR_Op compact — the op
+    // count dominates peak memory on the wasm->macho pipeline.
     MLIR_OpType op_type;
+    uint32_t n_operands;
     MLIR_ValueHandle *operands;
-    uint64_t n_operands;
     // Parallel to `operands`: operand_uses[i] is the UseNode linking
     // operands[i] into its value's use list (or NULL if operands[i] is
     // MLIR_INVALID_HANDLE).
     UseNode **operand_uses;
     MLIR_TypeHandle *result_types;
-    uint64_t n_result_types;
     MLIR_AttributeHandle *attributes;
-    uint64_t n_attributes;
     MLIR_RegionHandle *regions;
-    uint64_t n_regions;
     MLIR_BlockHandle *successors;
-    uint64_t n_successors;
     MLIR_ValueHandle **successor_operands;
     // Parallel to `successor_operands`:
     // successor_operand_uses[s].arr[i] mirrors successor_operands[s][i].
@@ -194,22 +193,26 @@ typedef struct IR_Op {
     uint64_t *n_successor_operands;
     string opname;
     MLIR_ValueHandle *results;
-    uint64_t n_results;
     MLIR_LocationHandle location;
     MLIR_LocationHandle unnumbered_loc_def;
     string trailing_comment;
-    int64_t source_line_start;
     MLIR_BlockHandle parent_block;
+    uint32_t n_result_types;
+    uint32_t n_attributes;
+    uint32_t n_regions;
+    uint32_t n_successors;
+    uint32_t n_results;
+    int32_t source_line_start;
 } IR_Op;
 
 typedef struct IR_Block {
     MLIR_OpHandle *operations;
-    uint64_t n_operations;
-    uint64_t cap_operations;
     MLIR_ValueHandle *arguments;
-    uint64_t n_arguments;
-    uint64_t cap_arguments;
     MLIR_RegionHandle parent_region;
+    uint32_t n_operations;
+    uint32_t cap_operations;
+    uint32_t n_arguments;
+    uint32_t cap_arguments;
 } IR_Block;
 
 typedef struct IR_Region {
