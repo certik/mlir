@@ -5,12 +5,13 @@ extern int printf(const char *fmt, ...);
 // a union is therefore grossly over-sized. The largest member here is
 // `arr` ({pointer, long}), so a struct with the union must have the same
 // size as the same struct with the union replaced by just that member.
+// (All members share the same alignment so the comparison is valid on both
+// 32-bit and 64-bit targets.)
 
 typedef struct {
     int kind;
     union {
         long i;
-        double d;
         char *s;
         int b;
         struct { int *p; long n; } arr;
