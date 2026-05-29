@@ -4099,14 +4099,20 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             resolve_array_len(e, sc, &st->decl_type);
             sy->type.array_len = st->decl_type.array_len;
 
+            // C semantics: an identifier's scope begins immediately after its
+            // declarator, so it is visible inside its own initializer (e.g.
+            // `T *p = alloc(sizeof(*p))`). Register the symbol now, before the
+            // initializer is emitted, so type/size queries on it resolve
+            // correctly. (The static-global case above has already returned.)
+            sy->next = sc->head;
+            sc->head = sy;
+
             if (st->decl_type.kind == TY_VA_LIST) {
                 // Allocate a 32-byte buffer (sufficient for x86_64-SysV
                 // and aarch64 va_list layouts on Linux/macOS/Windows). We
                 // hand out the pointer; va_start/va_arg/va_end consume it.
                 MLIR_TypeHandle buf_ty = MLIR_CreateTypeLLVMArray(e->ctx, e->i8, 32);
                 sy->addr = emit_alloca(e, buf_ty);
-                sy->next = sc->head;
-                sc->head = sy;
                 break;
             }
             if (st->decl_type.kind == TY_PTR_I32 || st->decl_type.kind == TY_PTR_VOID ||
@@ -4209,8 +4215,6 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                 emit_store_v(e, z8, p);
                             }
                         }
-                        sy->next = sc->head;
-                        sc->head = sy;
                         return;
                     }
                     // Support `= {0}` (zero-initialize) by zeroing every
@@ -4479,8 +4483,6 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                         if (sig && sig->ret.type.kind == TY_STRUCT &&
                             sig->ret.sdef == sd) {
                             emit_flat_call(e, sc, sig, st->decl_init->args, NULL, sy->addr);
-                            sy->next = sc->head;
-                            sc->head = sy;
                             return;
                         }
                     }
@@ -4493,8 +4495,6 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                             e, sc, st->decl_init, &src_sd);
                         if (src != MLIR_INVALID_HANDLE && src_sd == sd) {
                             emit_struct_copy(e, sy->addr, src, sd);
-                            sy->next = sc->head;
-                            sc->head = sy;
                             return;
                         }
                     }
@@ -4637,8 +4637,6 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                     emit_store_v(e, emit_const_i32(e, 0), sy->addr);
                 }
             }
-            sy->next = sc->head;
-            sc->head = sy;
             return;
         }
         case ST_RETURN: {
