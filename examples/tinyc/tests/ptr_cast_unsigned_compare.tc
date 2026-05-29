@@ -1,0 +1,44 @@
+extern int printf(const char *fmt, ...);
+
+// tinyC bug: an unsigned integer comparison whose operand is a *cast
+// expression* (e.g. `(unsigned long)ptr`) used directly in the comparison is
+// emitted as a SIGNED comparison (`icmp sge`) instead of unsigned (`icmp uge`).
+//
+// On a 64-bit host the bug is masked unless the constant has the high bit set;
+// on wasm32 (32-bit pointers) the everyday constant 0xfffff000 already has the
+// high bit set, so `(uintptr_t)p >= 0xfffff000` wrongly returns 1 for small
+// addresses. This corrupts the buddy allocator's heap-bounds check
+// (`buddy_addr >= heap_end`) and leaves a 0xffffffff pointer in a free list,
+// crashing the self-hosted tinyC compiler at high memory pressure.
+//
+// Storing the cast into a variable first compiles correctly, so the defect is
+// specific to a cast expression appearing directly as a comparison operand.
+
+typedef unsigned long uintptr_t;
+
+struct blk { int order; };
+
+// High-bit-set constant exposes the signed/unsigned defect on any pointer width.
+static int above_const(struct blk *p) {
+    return (uintptr_t)p >= 0xfffffffffffff000UL;
+}
+
+// The buddy-allocator heap-bounds idiom that the bug actually breaks:
+// a cast expression compared against high constant bounds.
+static int out_of_bounds(struct blk *p) {
+    return (uintptr_t)p < 0x1000UL || (uintptr_t)p >= 0xfffffffffffff000UL;
+}
+
+int main(void) {
+    struct blk *p = (struct blk *)0x1b57000; // small address, high bit clear
+
+    // Correct unsigned result is 0; the signed-compare bug returns 1.
+    if (above_const(p)) { printf("FAIL 1\n"); return 1; }
+
+    // A valid block address is neither below 0x1000 nor at/above the high
+    // bound, so it must NOT be reported out of bounds.
+    if (out_of_bounds(p)) { printf("FAIL 2\n"); return 2; }
+
+    printf("OK\n");
+    return 0;
+}

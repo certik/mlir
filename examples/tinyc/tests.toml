@@ -1298,3 +1298,8 @@ expected_stdout = "2147483648\n2147483648\n2147483648\n"
 name = "struct_uint8_array"
 targets = ["native", "wasm", "macho"]
 expected_stdout = "1\n35\n0\n255\n42\n"
+
+[[test]]
+name = "ptr_cast_unsigned_compare"
+targets = ["native", "wasm", "macho"]
+expected_stdout = "OK\n"
