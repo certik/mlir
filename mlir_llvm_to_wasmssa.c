@@ -1741,14 +1741,24 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
                 if (!va_call_layout(F, op, &total, &nf2, offs)) {
                     return false;
                 }
-                if (F->sp_value == MLIR_INVALID_HANDLE) { return false; }
-                // buf_addr = sp_def + va_buf_offset
+                // buf_addr = sp_def + va_buf_offset. When this call passes no
+                // variadic args (total == 0) the buffer is empty and never
+                // dereferenced, so it needs no shadow-stack frame — pass a null
+                // pointer as the hidden va_list arg. (Without this, a variadic
+                // call with zero variadic args in a function that has no other
+                // stack frame — e.g. after mem2reg promotes all locals — would
+                // fail for lack of sp_value.)
                 MLIR_ValueHandle buf_addr;
-                if (F->va_buf_offset == 0) {
-                    buf_addr = F->sp_value;
+                if (total == 0) {
+                    buf_addr = emit_const_i32(F, 0);
                 } else {
-                    MLIR_ValueHandle koff = emit_const_i32(F, (int32_t)F->va_buf_offset);
-                    buf_addr = emit_add_i32(F, F->sp_value, koff);
+                    if (F->sp_value == MLIR_INVALID_HANDLE) { return false; }
+                    if (F->va_buf_offset == 0) {
+                        buf_addr = F->sp_value;
+                    } else {
+                        MLIR_ValueHandle koff = emit_const_i32(F, (int32_t)F->va_buf_offset);
+                        buf_addr = emit_add_i32(F, F->sp_value, koff);
+                    }
                 }
                 // Emit a store for each variadic arg, then the call.
                 for (size_t i = 0; i < nvar; i++) {
