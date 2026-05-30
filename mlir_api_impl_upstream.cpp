@@ -306,6 +306,11 @@ inline void resetBlockOpCache() {
 // -----------------------------------------------------------------------------
 
 extern "C" void MLIR_InitApi(MLIR_Context *, MLIR_OpHandle) {}
+// The native implementation keeps process-wide intern/dedup registries that
+// reference the active arena; multi-pass pipelines reset them before swapping
+// arenas. The upstream implementation has no such global state, so this is a
+// no-op here (provided only to satisfy the shared driver's link references).
+extern "C" void MLIR_ResetInternRegistry(void) {}
 extern "C" void MLIR_SetArenaAllocator(MLIR_Context *ctx, Arena *arena) { ctx->arena = arena; }
 extern "C" Arena *MLIR_GetArenaAllocator(MLIR_Context *ctx) { return ctx->arena; }
 
