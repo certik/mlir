@@ -55,6 +55,8 @@ jobs:
               pixi run -e upstream verify_tinyc_native_upstream_identical
               pixi run -e upstream test_tinyc_macho
               pixi run -e wasm verify_tinyc_macho_selfhost
+              pixi run -e upstream test_tinyc_macho_wmir
+              pixi run -e wasm verify_tinyc_macho_wmir_selfhost
               pixi run -e macos test_macos_tinyc
           - platform: windows
             os: windows-latest
