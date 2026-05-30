@@ -339,31 +339,35 @@ static uint32_t arm64_ldrb_imm(uint8_t rt, uint8_t rn, uint16_t off_bytes) {
     return 0x39400000u | (((uint32_t)off_bytes & 0xfffu) << 10)
                        | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rt & 0x1f);
 }
-// ---- register-offset loads/stores: <op> Rt, [Xn, Xm, LSL #0] -------
-// Rm is a full 64-bit X register (wasm i32 indices are already
-// zero-extended into the high half), so option=LSL(011), S=0.
+// ---- register-offset loads/stores: <op> Rt, [Xn, Wm, UXTW #0] -------
+// Rm carries a wasm i32 linear-memory index. It must be treated as a
+// 32-bit value zero-extended to 64 bits (option=UXTW(010), S=0), NOT as
+// a full 64-bit X register: nothing guarantees the high half of the
+// producing register is clear (e.g. mem2reg can route an index through a
+// register still holding stale upper bits), and using LSL(011) would add
+// that garbage to the base x28, faulting far outside linear memory.
 static uint32_t arm64_ldr_w_reg(uint8_t rt, uint8_t rn, uint8_t rm) {
-    return 0xb8606800u | ((uint32_t)(rm & 0x1f) << 16)
+    return 0xb8604800u | ((uint32_t)(rm & 0x1f) << 16)
                        | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rt & 0x1f);
 }
 static uint32_t arm64_str_w_reg(uint8_t rt, uint8_t rn, uint8_t rm) {
-    return 0xb8206800u | ((uint32_t)(rm & 0x1f) << 16)
+    return 0xb8204800u | ((uint32_t)(rm & 0x1f) << 16)
                        | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rt & 0x1f);
 }
 static uint32_t arm64_ldr_x_reg(uint8_t rt, uint8_t rn, uint8_t rm) {
-    return 0xf8606800u | ((uint32_t)(rm & 0x1f) << 16)
+    return 0xf8604800u | ((uint32_t)(rm & 0x1f) << 16)
                        | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rt & 0x1f);
 }
 static uint32_t arm64_str_x_reg(uint8_t rt, uint8_t rn, uint8_t rm) {
-    return 0xf8206800u | ((uint32_t)(rm & 0x1f) << 16)
+    return 0xf8204800u | ((uint32_t)(rm & 0x1f) << 16)
                        | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rt & 0x1f);
 }
 static uint32_t arm64_ldrb_reg(uint8_t rt, uint8_t rn, uint8_t rm) {
-    return 0x38606800u | ((uint32_t)(rm & 0x1f) << 16)
+    return 0x38604800u | ((uint32_t)(rm & 0x1f) << 16)
                        | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rt & 0x1f);
 }
 static uint32_t arm64_strb_reg(uint8_t rt, uint8_t rn, uint8_t rm) {
-    return 0x38206800u | ((uint32_t)(rm & 0x1f) << 16)
+    return 0x38204800u | ((uint32_t)(rm & 0x1f) << 16)
                        | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rt & 0x1f);
 }
 // MUL Wd, Wn, Wm == MADD Wd, Wn, Wm, WZR
