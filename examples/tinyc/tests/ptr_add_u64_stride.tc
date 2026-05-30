@@ -1,0 +1,41 @@
+extern int printf(const char *fmt, ...);
+
+// Pointer + integer arithmetic must scale by the pointee size. For an 8-byte
+// scalar pointee (unsigned long long / double / long long) the stride must be
+// 8, not the 4-byte machine word. tinyc once scaled `p + n` for scalar pointees
+// by the word size (4) while array subscript `p[n]` scaled correctly by 8, so a
+// store through `p + 5` landed at the wrong address and `arr[5]` stayed unset.
+
+typedef unsigned long long u64;
+typedef unsigned int u32;
+typedef unsigned long usize;
+
+static u64 arr[9];
+
+int main(void) {
+    // Stride of `p + 1` must equal sizeof(*p) = 8 for a u64 pointer.
+    u64 *p = arr;
+    usize stride = (usize)(p + 1) - (usize)p;
+    if (stride != 8) { printf("FAIL 1 stride=%u\n", (u32)stride); return 1; }
+
+    // Store through a derived pointer `arr + 5`, read back via subscript.
+    u64 *G = arr + 5;
+    G[0] = 0x800000008ull;
+    u64 v = arr[5];
+    if ((u32)(v >> 32) != 8 || (u32)v != 8) {
+        printf("FAIL 2 hi=%u lo=%u\n", (u32)(v >> 32), (u32)v);
+        return 2;
+    }
+
+    // Reading the same element via the derived pointer must agree.
+    u64 v2 = G[0];
+    if (v2 != v) { printf("FAIL 3\n"); return 3; }
+
+    // double pointee must also stride by 8.
+    double *dp = (double *)0;
+    usize dstride = (usize)(dp + 1) - (usize)dp;
+    if (dstride != 8) { printf("FAIL 4 dstride=%u\n", (u32)dstride); return 4; }
+
+    printf("OK\n");
+    return 0;
+}

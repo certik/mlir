@@ -1318,3 +1318,8 @@ expected_stdout = "OK\n"
 name = "sizeof_char_array_elem"
 targets = ["native", "wasm", "macho"]
 expected_stdout = "OK\n"
+
+[[test]]
+name = "ptr_add_u64_stride"
+targets = ["native", "wasm", "macho"]
+expected_stdout = "OK\n"
