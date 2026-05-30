@@ -13,7 +13,7 @@ set -e
 COREC_C_FILES="corec/base/io.c corec/base/buddy.c corec/base/arena.c corec/base/scratch.c corec/base/format.c corec/base/math.c corec/base/string.c corec/base/strbuf.c corec/base/mem.c corec/base/numconv.c corec/base/assert.c corec/base/exit.c"
 COREC_STDLIB_C_FILES="corec-stdlib/stdlib/stdio.c corec-stdlib/stdlib/stdlib.c corec-stdlib/stdlib/printf.c corec-stdlib/stdlib/string_impl.c"
 TINYC_C_FILES="examples/tinyc/lex.c examples/tinyc/preprocess.c examples/tinyc/parse.c examples/tinyc/emit.c examples/tinyc/driver.c"
-NATIVE_C_FILES="mlir_api_impl.c mlir_op_names.c mlir_lower_to_llvm.c mlir_translate_to_llvm_ir.c mlir_translate_to_wasm.c mlir_wasm_to_wat.c mlir_wasm_to_macho.c mlir_llvm_to_wasmssa.c mlir_wasmssa_to_wasmstack.c mlir_wasmstack_to_bin.c mlir_wasm_link.c mlir_wasm_to_wasmstack.c mlir_wasmstack_to_wasmssa.c mlir_wasmssa_to_wmir.c mlir_wmir_regalloc.c mlir_wmir_to_aarch64.c mlir_aarch64_to_macho.c tokenizer.c mlir_parser.c op_parsers.c mlir_classic_printer.c mlir_generic_printer.c mlir_lift_cf_to_scf.c"
+NATIVE_C_FILES="mlir_api_impl.c mlir_op_names.c mlir_lower_to_llvm.c mlir_translate_to_llvm_ir.c mlir_translate_to_wasm.c mlir_wasm_to_wat.c mlir_wasm_to_macho.c mlir_llvm_to_wasmssa.c mlir_wasmssa_to_wasmstack.c mlir_wasmstack_to_bin.c mlir_wasm_link.c mlir_wasm_to_wasmstack.c mlir_wasmstack_to_wasmssa.c mlir_wasmssa_to_wmir.c mlir_wmir_mem2reg.c mlir_wmir_regalloc.c mlir_wmir_to_aarch64.c mlir_aarch64_to_macho.c tokenizer.c mlir_parser.c op_parsers.c mlir_classic_printer.c mlir_generic_printer.c mlir_lift_cf_to_scf.c"
 
 clang \
     --target=wasm32-wasi \

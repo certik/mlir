@@ -19,6 +19,7 @@
 // declarations when a test needs an actual external call.
 
 #include "mlir_wasmssa_to_wmir.h"
+#include "mlir_wmir_mem2reg.h"
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -1664,12 +1665,22 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
     free(L.frames);
     if (!ok) return MLIR_INVALID_HANDLE;
 
+    // Promote wasm locals to SSA values + block-arg phis (mem2reg). After this
+    // the body holds no wmir.local_get/local_set ops, so the frame allocates no
+    // local slots: emit local_types="" below.
+    bool promoted = false;
+    if (lt.size > 0)
+        promoted = mlir_wmir_mem2reg(ctx, dst_region, lt.str, lt.size);
+
     MLIR_AttributeHandle attrs[6];
     size_t na = 0;
     attrs[na++] = attr_s(ctx, "sym_name",     name.str, name.size);
     attrs[na++] = attr_s(ctx, "param_types",  pt.str,   pt.size);
     attrs[na++] = attr_s(ctx, "result_types", rt.str,   rt.size);
-    attrs[na++] = attr_s(ctx, "local_types",  lt.str,   lt.size);
+    if (promoted)
+        attrs[na++] = attr_s(ctx, "local_types", "", 0);
+    else
+        attrs[na++] = attr_s(ctx, "local_types", lt.str, lt.size);
     attrs[na++] = attr_b(ctx, "exported",     exported);
 
     MLIR_RegionHandle regs[1] = { dst_region };

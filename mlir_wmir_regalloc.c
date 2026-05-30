@@ -173,6 +173,11 @@ typedef struct {
     MLIR_ValueHandle handle;
     bool             is_int;        // false for f32/f64/ptr/etc -> always slot
     uint32_t         def_pos;       // INT32_MAX if undefined yet
+    uint32_t         first_pos;     // interval START: min(def_pos, earliest use/live-in).
+                                    // For mem2reg block args a use can appear BEFORE the
+                                    // def in linear (source) order (e.g. a loop-exit block
+                                    // ordered before the header that defines the phi); the
+                                    // live interval must cover that earlier position too.
     uint32_t         last_use_pos;  // 0 if no use seen yet
     bool             crosses_call;
 } VInfo;
@@ -229,6 +234,7 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
     VInfo *vinfo = calloc(n_values, sizeof(*vinfo));
     for (size_t i = 0; i < n_values; i++) {
         vinfo[i].def_pos = UINT32_MAX;
+        vinfo[i].first_pos = UINT32_MAX;
     }
     uint32_t next_vidx = 0;
 
@@ -246,6 +252,7 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
             vinfo[vi].handle  = a;
             vinfo[vi].is_int  = value_is_int(ctx, a);
             vinfo[vi].def_pos = pos;
+            vinfo[vi].first_pos = pos;
         }
 
         size_t no = MLIR_GetBlockNumOps(b);
@@ -259,6 +266,7 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
                 vinfo[vi].handle  = r;
                 vinfo[vi].is_int  = value_is_int(ctx, r);
                 vinfo[vi].def_pos = pos;
+                vinfo[vi].first_pos = pos;
             }
             pos++;  // one position per op
         }
@@ -369,10 +377,19 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
     for (size_t bi = 0; bi < n_blocks; bi++) {
         MLIR_BlockHandle b = blocks[bi];
         uint64_t *LO = live_out + bi * bw;
+        uint64_t *LI = live_in  + bi * bw;
         for (uint32_t vi = 0; vi < n_values; vi++) {
             if (bs_test(LO, vi)) {
                 if (block_last_pos[bi] > vinfo[vi].last_use_pos)
                     vinfo[vi].last_use_pos = block_last_pos[bi];
+            }
+            // A value live-in to this block occupies its register from the
+            // block's first position onward; lower the interval start so it
+            // covers uses that precede the value's def in linear order
+            // (mem2reg loop-carried block args).
+            if (bs_test(LI, vi)) {
+                if (block_first_pos[bi] < vinfo[vi].first_pos)
+                    vinfo[vi].first_pos = block_first_pos[bi];
             }
         }
         // Walk ops in-order to refine intra-block last uses.
@@ -386,6 +403,8 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
                 if (vmap_get(&vmap, MLIR_GetOpOperand(op, k), &vi)) {
                     if (op_pos > vinfo[vi].last_use_pos)
                         vinfo[vi].last_use_pos = op_pos;
+                    if (op_pos < vinfo[vi].first_pos)
+                        vinfo[vi].first_pos = op_pos;
                 }
             }
             size_t ns = MLIR_GetOpNumSuccessors(op);
@@ -396,6 +415,8 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
                     if (vmap_get(&vmap, MLIR_GetOpSuccessorOperand(op, s, k), &vi)) {
                         if (op_pos > vinfo[vi].last_use_pos)
                             vinfo[vi].last_use_pos = op_pos;
+                        if (op_pos < vinfo[vi].first_pos)
+                            vinfo[vi].first_pos = op_pos;
                     }
                 }
             }
@@ -421,8 +442,8 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
     }
     for (uint32_t vi = 0; vi < n_values; vi++) {
         if (vinfo[vi].def_pos == UINT32_MAX) continue;
-        if (vinfo[vi].last_use_pos < vinfo[vi].def_pos) continue;
-        for (uint32_t p = vinfo[vi].def_pos; p <= vinfo[vi].last_use_pos && p < (uint32_t)pos; p++) {
+        if (vinfo[vi].last_use_pos < vinfo[vi].first_pos) continue;
+        for (uint32_t p = vinfo[vi].first_pos; p <= vinfo[vi].last_use_pos && p < (uint32_t)pos; p++) {
             if (is_call[p]) { vinfo[vi].crosses_call = true; break; }
         }
     }
@@ -493,7 +514,7 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
                 size_t hi  = lo + 2 * width;   if (hi  > n_values) hi  = n_values;
                 size_t a = lo, b = mid, o = lo;
                 while (a < mid && b < hi) {
-                    if (vinfo[order[b]].def_pos < vinfo[order[a]].def_pos)
+                    if (vinfo[order[b]].first_pos < vinfo[order[a]].first_pos)
                         tmp[o++] = order[b++];
                     else
                         tmp[o++] = order[a++];
@@ -532,10 +553,10 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
             continue;
         }
 
-        // Retire active intervals that end before this def.
+        // Retire active intervals that end before this interval starts.
         for (size_t a = 0; a < n_active; ) {
             uint32_t avi = active[a].vi;
-            if (vinfo[avi].last_use_pos < vp->def_pos) {
+            if (vinfo[avi].last_use_pos < vp->first_pos) {
                 reg_busy[active[a].pool_idx] = false;
                 active[a] = active[--n_active];
             } else {
@@ -548,7 +569,7 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
         // `callee_only` below restricts them to that subset.
         bool force_slot =
             !vp->is_int ||
-            vp->last_use_pos <= vp->def_pos;  // dead-on-def: still needs a slot for correctness
+            vp->last_use_pos <= vp->first_pos;  // dead-on-def: still needs a slot for correctness
 
         if (force_slot) {
             ra->homes[vi].kind = HOME_SLOT;
