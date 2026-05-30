@@ -2792,7 +2792,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     if (s) {
                         v.sdef = s->sdef;
                         if (s->type.kind == TY_PTR_CHAR) { v.is_str = true; v.ptr_elem = e->i8; }
-                        else if (s->type.kind == TY_PTR_I32) v.ptr_elem = e->i32;
+                        else if (s->type.kind == TY_PTR_I32)
+                            v.ptr_elem = s->type.ptr_is_i64 ? e->i64
+                                       : s->type.ptr_is_f32 ? e->f32
+                                       : s->type.ptr_is_f64 ? e->f64
+                                       : e->i32;
                         else if (s->type.kind == TY_PTR_VOID) v.is_void_ptr = true;
                         else if (s->type.kind == TY_PTR_PTR) {
                             // Reading the value of a T** yields a T* — tag
