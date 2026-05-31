@@ -331,6 +331,392 @@ static void wmir_simplify_bools(MLIR_Context *ctx, MLIR_RegionHandle region) {
 }
 
 // =============================================================================
+// Algebraic simplification + strength reduction + constant folding (mid-end).
+//
+// Operates on integer wmir SSA ops. Like wmir_simplify_bools it is fully
+// self-contained (no global use list): it builds a result->replacement map,
+// repoints every flat operand, then erases the folded ops. Newly materialised
+// const/strength-reduced ops are created (but not yet block-inserted) during
+// the scan, spliced in just before the op they replace (which they dominate by
+// SSA), and then participate in the same repoint pass.
+//
+// Two independently-gateable families:
+//   constant folding (both operands const, or const-condition select/eqz/icmp)
+//     -> WMIR_NO_CONSTFOLD disables.
+//   algebraic identities + strength reduction (one const operand, or x==x)
+//     -> WMIR_NO_ALGEBRAIC disables.
+// Runs to an internal fixpoint so freshly materialised consts cascade.
+// =============================================================================
+
+static int simp_width(MLIR_Context *ctx, MLIR_ValueHandle v) {
+    MLIR_TypeHandle ty = MLIR_GetValueType(v);
+    string ts = MLIR_GetTypeString(ctx, ty);
+    if (ts.size >= 3 && ts.str[0] == 'i' && ts.str[1] == '6' && ts.str[2] == '4')
+        return 64;
+    return 32;
+}
+
+// Mask of the low `w` bits.
+static uint64_t simp_wmask(int w) {
+    return (w >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << w) - 1);
+}
+
+// Sign-extend the low `w` bits of u to a full int64.
+static int64_t simp_sext(uint64_t u, int w) {
+    if (w >= 64) return (int64_t)u;
+    uint64_t m = (uint64_t)1 << (w - 1);
+    return (int64_t)((u ^ m) - m);
+}
+
+// Canonical stored form of an integer result of width w (sign-extended low
+// bits, matching how the lowering stores const "value" and how GVN dedups).
+static int64_t simp_canon(uint64_t u, int w) { return simp_sext(u, w); }
+
+// If c is a power of two, return its log2; else -1.
+static int simp_log2_pow2(uint64_t c) {
+    if (c == 0 || (c & (c - 1)) != 0) return -1;
+    int k = 0;
+    while ((c & 1) == 0) { c >>= 1; k++; }
+    return k;
+}
+
+// Is v defined by a wmir.const? If so store its (raw int64) value.
+static bool simp_const_val(MLIR_ValueHandle v, int64_t *out) {
+    MLIR_OpHandle d = MLIR_GetValueDefiningOp(v);
+    if (!d || MLIR_GetOpType(d) != OP_TYPE_WMIR_CONST) return false;
+    *out = at_i(d, "value");
+    return true;
+}
+
+static bool simp_pred_eq(string p, const char *s) {
+    size_t n = strlen(s);
+    if (p.size != n) return false;
+    for (size_t i = 0; i < n; i++) if (p.str[i] != s[i]) return false;
+    return true;
+}
+
+// Evaluate a foldable binop on masked operands. Returns false (do NOT fold)
+// for traps (div/rem by zero, sdiv INT_MIN/-1). *res is the masked result.
+static bool simp_eval_binop(MLIR_OpType t, uint64_t ua, uint64_t ub, int w,
+                            uint64_t *res) {
+    uint64_t m = simp_wmask(w);
+    int64_t sa = simp_sext(ua, w), sb = simp_sext(ub, w);
+    int64_t minw = (w >= 64) ? INT64_MIN : -((int64_t)1 << (w - 1));
+    uint64_t r;
+    switch (t) {
+        case OP_TYPE_WMIR_IADD: r = ua + ub; break;
+        case OP_TYPE_WMIR_ISUB: r = ua - ub; break;
+        case OP_TYPE_WMIR_IMUL: r = ua * ub; break;
+        case OP_TYPE_WMIR_IAND: r = ua & ub; break;
+        case OP_TYPE_WMIR_IOR:  r = ua | ub; break;
+        case OP_TYPE_WMIR_IXOR: r = ua ^ ub; break;
+        case OP_TYPE_WMIR_ISHL: r = ua << (ub & (uint64_t)(w - 1)); break;
+        case OP_TYPE_WMIR_USHR: r = (ua & m) >> (ub & (uint64_t)(w - 1)); break;
+        case OP_TYPE_WMIR_SSHR: r = (uint64_t)(sa >> (ub & (uint64_t)(w - 1))); break;
+        case OP_TYPE_WMIR_UDIV:
+            if ((ub & m) == 0) return false;
+            r = (ua & m) / (ub & m); break;
+        case OP_TYPE_WMIR_UREM:
+            if ((ub & m) == 0) return false;
+            r = (ua & m) % (ub & m); break;
+        case OP_TYPE_WMIR_SDIV:
+            if (sb == 0) return false;
+            if (sa == minw && sb == -1) return false;  // traps
+            r = (uint64_t)(sa / sb); break;
+        case OP_TYPE_WMIR_SREM:
+            if (sb == 0) return false;
+            if (sa == minw && sb == -1) r = 0;          // defined, = 0
+            else r = (uint64_t)(sa % sb);
+            break;
+        default: return false;
+    }
+    *res = r & m;
+    return true;
+}
+
+static bool simp_eval_icmp(string pred, uint64_t ua, uint64_t ub, int w,
+                           uint64_t *res) {
+    uint64_t m = simp_wmask(w);
+    uint64_t a = ua & m, b = ub & m;
+    int64_t sa = simp_sext(ua, w), sb = simp_sext(ub, w);
+    bool r;
+    if      (simp_pred_eq(pred, "eq"))  r = a == b;
+    else if (simp_pred_eq(pred, "ne"))  r = a != b;
+    else if (simp_pred_eq(pred, "ult")) r = a < b;
+    else if (simp_pred_eq(pred, "ule")) r = a <= b;
+    else if (simp_pred_eq(pred, "ugt")) r = a > b;
+    else if (simp_pred_eq(pred, "uge")) r = a >= b;
+    else if (simp_pred_eq(pred, "slt")) r = sa < sb;
+    else if (simp_pred_eq(pred, "sle")) r = sa <= sb;
+    else if (simp_pred_eq(pred, "sgt")) r = sa > sb;
+    else if (simp_pred_eq(pred, "sge")) r = sa >= sb;
+    else return false;
+    *res = r ? 1 : 0;
+    return true;
+}
+
+// Materialise a wmir.const of the given type (not yet inserted into a block).
+static MLIR_OpHandle simp_mk_const(MLIR_Context *ctx, int64_t v, MLIR_TypeHandle ty,
+                                   MLIR_ValueHandle *res_out) {
+    MLIR_AttributeHandle attrs[1] = {
+        MLIR_CreateAttributeInteger(ctx, str_lit("value"), v, ty)
+    };
+    MLIR_TypeHandle rty[1] = { ty };
+    MLIR_ValueHandle res[1] = {
+        MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0, ty,
+            (string){0}, MLIR_CreateLocationUnknown(ctx, (string){0}))
+    };
+    MLIR_OpHandle op = build_op_simple(ctx, OP_TYPE_WMIR_CONST,
+        attrs, 1, rty, 1, res, NULL, 0);
+    *res_out = res[0];
+    return op;
+}
+
+// Materialise a binary wmir op (not yet inserted).
+static MLIR_OpHandle simp_mk_binop(MLIR_Context *ctx, MLIR_OpType t,
+                                   MLIR_ValueHandle x, MLIR_ValueHandle y,
+                                   MLIR_TypeHandle ty, MLIR_ValueHandle *res_out) {
+    MLIR_TypeHandle rty[1] = { ty };
+    MLIR_ValueHandle res[1] = {
+        MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0, ty,
+            (string){0}, MLIR_CreateLocationUnknown(ctx, (string){0}))
+    };
+    MLIR_ValueHandle ops[2] = { x, y };
+    MLIR_OpHandle op = build_op_simple(ctx, t, NULL, 0, rty, 1, res, ops, 2);
+    *res_out = res[0];
+    return op;
+}
+
+typedef struct {
+    MLIR_BlockHandle blk;
+    MLIR_OpHandle before;  // insert a (then b) immediately before this op
+    MLIR_OpHandle a, b;     // b may be MLIR_INVALID_HANDLE (single const)
+} SimpInsert;
+
+static void wmir_simplify(MLIR_Context *ctx, MLIR_RegionHandle region) {
+    bool do_cf  = (getenv("WMIR_NO_CONSTFOLD") == NULL);
+    bool do_alg = (getenv("WMIR_NO_ALGEBRAIC") == NULL);
+    if (!do_cf && !do_alg) return;
+
+    size_t nb = MLIR_GetRegionNumBlocks(region);
+
+    for (int iter = 0; iter < 12; iter++) {
+        size_t total = 0;
+        for (size_t bi = 0; bi < nb; bi++)
+            total += MLIR_GetBlockNumOps(MLIR_GetRegionBlock(region, bi));
+        if (total == 0) return;
+
+        size_t cap = 16;
+        while (cap < total * 2) cap <<= 1;
+        size_t mask = cap - 1;
+        SimpEnt *map = (SimpEnt *)calloc(cap, sizeof(*map));
+        MLIR_OpHandle *erase = (MLIR_OpHandle *)malloc(total * sizeof(*erase));
+        SimpInsert *ins = (SimpInsert *)malloc(total * sizeof(*ins));
+        if (!map || !erase || !ins) { free(map); free(erase); free(ins); return; }
+        size_t nerase = 0, nins = 0;
+
+        // Scan: decide a replacement for each foldable op.
+        for (size_t bi = 0; bi < nb; bi++) {
+            MLIR_BlockHandle blk = MLIR_GetRegionBlock(region, bi);
+            size_t no = MLIR_GetBlockNumOps(blk);
+            for (size_t oi = 0; oi < no; oi++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(blk, oi);
+                MLIR_OpType t = MLIR_GetOpType(op);
+                MLIR_ValueHandle R = MLIR_GetOpResult(op, 0);
+                if (R == MLIR_INVALID_HANDLE) continue;
+
+                MLIR_ValueHandle fwd = MLIR_INVALID_HANDLE;  // forward to existing
+                int      mk = 0;          // 1 = new const, 2 = new op
+                int64_t  cval = 0;        // new const value / strength k-const
+                MLIR_OpType nt = 0;       // strength op type
+                MLIR_ValueHandle nx = MLIR_INVALID_HANDLE;  // strength op operand
+
+                bool is_binop =
+                    (t == OP_TYPE_WMIR_IADD || t == OP_TYPE_WMIR_ISUB ||
+                     t == OP_TYPE_WMIR_IMUL || t == OP_TYPE_WMIR_IAND ||
+                     t == OP_TYPE_WMIR_IOR  || t == OP_TYPE_WMIR_IXOR ||
+                     t == OP_TYPE_WMIR_ISHL || t == OP_TYPE_WMIR_USHR ||
+                     t == OP_TYPE_WMIR_SSHR || t == OP_TYPE_WMIR_UDIV ||
+                     t == OP_TYPE_WMIR_SDIV || t == OP_TYPE_WMIR_UREM ||
+                     t == OP_TYPE_WMIR_SREM);
+
+                if (is_binop && MLIR_GetOpNumOperands(op) == 2) {
+                    MLIR_ValueHandle x = MLIR_GetOpOperand(op, 0);
+                    MLIR_ValueHandle y = MLIR_GetOpOperand(op, 1);
+                    int w = simp_width(ctx, R);
+                    uint64_t m = simp_wmask(w);
+                    int64_t xc, yc;
+                    bool cx = simp_const_val(x, &xc);
+                    bool cy = simp_const_val(y, &yc);
+
+                    if (do_cf && cx && cy) {
+                        uint64_t r;
+                        if (simp_eval_binop(t, (uint64_t)xc, (uint64_t)yc, w, &r)) {
+                            mk = 1; cval = simp_canon(r, w);
+                        }
+                    }
+                    if (mk == 0 && do_alg) {
+                        bool same = (x == y);
+                        uint64_t yu = (uint64_t)yc & m, xu = (uint64_t)xc & m;
+                        switch (t) {
+                        case OP_TYPE_WMIR_IADD:
+                            if (cy && yu == 0) fwd = x;
+                            else if (cx && xu == 0) fwd = y;
+                            break;
+                        case OP_TYPE_WMIR_ISUB:
+                            if (cy && yu == 0) fwd = x;
+                            else if (same) { mk = 1; cval = 0; }
+                            break;
+                        case OP_TYPE_WMIR_IMUL:
+                            if ((cy && yu == 0) || (cx && xu == 0)) { mk = 1; cval = 0; }
+                            else if (cy && yu == 1) fwd = x;
+                            else if (cx && xu == 1) fwd = y;
+                            else if (cy && simp_log2_pow2(yu) > 0) {
+                                mk = 2; nt = OP_TYPE_WMIR_ISHL; nx = x;
+                                cval = simp_log2_pow2(yu);
+                            } else if (cx && simp_log2_pow2(xu) > 0) {
+                                mk = 2; nt = OP_TYPE_WMIR_ISHL; nx = y;
+                                cval = simp_log2_pow2(xu);
+                            }
+                            break;
+                        case OP_TYPE_WMIR_IAND:
+                            if ((cy && yu == 0) || (cx && xu == 0)) { mk = 1; cval = 0; }
+                            else if (cy && yu == m) fwd = x;
+                            else if (cx && xu == m) fwd = y;
+                            else if (same) fwd = x;
+                            break;
+                        case OP_TYPE_WMIR_IOR:
+                            if (cy && yu == m) { mk = 1; cval = simp_canon(m, w); }
+                            else if (cx && xu == m) { mk = 1; cval = simp_canon(m, w); }
+                            else if (cy && yu == 0) fwd = x;
+                            else if (cx && xu == 0) fwd = y;
+                            else if (same) fwd = x;
+                            break;
+                        case OP_TYPE_WMIR_IXOR:
+                            if (cy && yu == 0) fwd = x;
+                            else if (cx && xu == 0) fwd = y;
+                            else if (same) { mk = 1; cval = 0; }
+                            break;
+                        case OP_TYPE_WMIR_ISHL:
+                        case OP_TYPE_WMIR_USHR:
+                        case OP_TYPE_WMIR_SSHR:
+                            if (cy && (yu & (uint64_t)(w - 1)) == 0) fwd = x;
+                            else if (cx && xu == 0) { mk = 1; cval = 0; }
+                            break;
+                        case OP_TYPE_WMIR_UDIV:
+                            if (cy && yu == 1) fwd = x;
+                            else if (cy) {
+                                int k = simp_log2_pow2(yu);
+                                if (k > 0) { mk = 2; nt = OP_TYPE_WMIR_USHR; nx = x; cval = k; }
+                            }
+                            break;
+                        case OP_TYPE_WMIR_SDIV:
+                            if (cy && yu == 1) fwd = x;
+                            break;
+                        case OP_TYPE_WMIR_UREM:
+                            if (cy && yu == 1) { mk = 1; cval = 0; }
+                            else if (cy) {
+                                int k = simp_log2_pow2(yu);
+                                if (k > 0) { mk = 2; nt = OP_TYPE_WMIR_IAND; nx = x;
+                                             cval = simp_canon(yu - 1, w); }
+                            }
+                            break;
+                        case OP_TYPE_WMIR_SREM:
+                            if (cy && yu == 1) { mk = 1; cval = 0; }
+                            break;
+                        default: break;
+                        }
+                    }
+                } else if (t == OP_TYPE_WMIR_ICMP && MLIR_GetOpNumOperands(op) == 2) {
+                    if (do_cf) {
+                        MLIR_ValueHandle x = MLIR_GetOpOperand(op, 0);
+                        MLIR_ValueHandle y = MLIR_GetOpOperand(op, 1);
+                        int64_t xc, yc;
+                        if (simp_const_val(x, &xc) && simp_const_val(y, &yc)) {
+                            int w = simp_width(ctx, x);
+                            uint64_t r;
+                            if (simp_eval_icmp(at_s(op, "pred"), (uint64_t)xc,
+                                               (uint64_t)yc, w, &r)) {
+                                mk = 1; cval = (int64_t)r;
+                            }
+                        }
+                    }
+                } else if (t == OP_TYPE_WMIR_EQZ && MLIR_GetOpNumOperands(op) == 1) {
+                    if (do_cf) {
+                        int64_t xc;
+                        MLIR_ValueHandle x = MLIR_GetOpOperand(op, 0);
+                        if (simp_const_val(x, &xc)) {
+                            int w = simp_width(ctx, x);
+                            mk = 1; cval = (((uint64_t)xc & simp_wmask(w)) == 0) ? 1 : 0;
+                        }
+                    }
+                } else if (t == OP_TYPE_WMIR_SELECT && MLIR_GetOpNumOperands(op) == 3) {
+                    if (do_cf) {
+                        int64_t cc;
+                        MLIR_ValueHandle cond = MLIR_GetOpOperand(op, 2);
+                        if (simp_const_val(cond, &cc))
+                            fwd = (cc != 0) ? MLIR_GetOpOperand(op, 0)
+                                            : MLIR_GetOpOperand(op, 1);
+                    }
+                }
+
+                if (fwd != MLIR_INVALID_HANDLE) {
+                    simp_put(map, mask, R, fwd);
+                    erase[nerase++] = op;
+                } else if (mk == 1) {
+                    MLIR_ValueHandle cres;
+                    MLIR_OpHandle c = simp_mk_const(ctx, cval, MLIR_GetValueType(R), &cres);
+                    simp_put(map, mask, R, cres);
+                    ins[nins++] = (SimpInsert){ blk, op, c, MLIR_INVALID_HANDLE };
+                    erase[nerase++] = op;
+                } else if (mk == 2) {
+                    MLIR_TypeHandle ty = MLIR_GetValueType(R);
+                    MLIR_ValueHandle kres, bres;
+                    MLIR_OpHandle kc = simp_mk_const(ctx, cval, ty, &kres);
+                    MLIR_OpHandle bo = simp_mk_binop(ctx, nt, nx, kres, ty, &bres);
+                    simp_put(map, mask, R, bres);
+                    ins[nins++] = (SimpInsert){ blk, op, kc, bo };
+                    erase[nerase++] = op;
+                }
+            }
+        }
+
+        if (nerase == 0) { free(map); free(erase); free(ins); break; }
+
+        // Splice materialised ops in just before the op they replace.
+        for (size_t i = 0; i < nins; i++) {
+            size_t idx = MLIR_GetBlockOpIndex(ins[i].blk, ins[i].before);
+            if (idx == (size_t)-1) continue;
+            MLIR_InsertBlockOpAtIndex(ctx, ins[i].blk, ins[i].a, idx);
+            if (ins[i].b != MLIR_INVALID_HANDLE)
+                MLIR_InsertBlockOpAtIndex(ctx, ins[i].blk, ins[i].b, idx + 1);
+        }
+
+        // Repoint every flat operand onto its resolved replacement.
+        for (size_t bi = 0; bi < nb; bi++) {
+            MLIR_BlockHandle blk = MLIR_GetRegionBlock(region, bi);
+            size_t no = MLIR_GetBlockNumOps(blk);
+            for (size_t oi = 0; oi < no; oi++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(blk, oi);
+                size_t nf = simp_flat_count(op);
+                for (size_t i = 0; i < nf; i++) {
+                    MLIR_ValueHandle cur = simp_flat_get(op, i);
+                    MLIR_ValueHandle r = simp_resolve(map, mask, cur);
+                    if (r != cur) MLIR_SetOpOperand(ctx, op, i, r);
+                }
+            }
+        }
+
+        for (size_t k = 0; k < nerase; k++)
+            MLIR_EraseOp(ctx, erase[k]);
+
+        free(map);
+        free(erase);
+        free(ins);
+    }
+}
+
+// =============================================================================
 // Local value numbering (GVN/CSE) + redundant-load elimination.
 //
 // Within each basic block, identical pure computations (integer arith / bitwise
@@ -2204,6 +2590,12 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
     // icmp_ne(b,0)) that the frontend emits around comparisons. Matches
     // what an optimising wasm JIT does, shrinking hot compare/branch code.
     wmir_simplify_bools(ctx, dst_region);
+
+    // Algebraic simplification + strength reduction + constant folding. The
+    // frozen wasm is tinyc's own naive output (no optimiser), full of unfolded
+    // constants and identities; folding them here cascades into the GVN/DCE
+    // below. Gateable via WMIR_NO_ALGEBRAIC / WMIR_NO_CONSTFOLD.
+    wmir_simplify(ctx, dst_region);
 
     // Local value numbering (CSE) + redundant-load elimination. Removes the
     // repeated address arithmetic and field reloads the wasm frontend leaves
