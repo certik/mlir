@@ -690,6 +690,25 @@ static void st_result(MLIR_Context *ctx, MLIR_BlockHandle blk,
         emit_str_w(ctx, blk, produced_reg, 31, (uint32_t)(h.idx * 8u));
 }
 
+// Lever B: if operand `idx` of `op` is a rematerialized constant whose
+// value fits in an aarch64 12-bit unsigned immediate (0..4095), return
+// true and set *out. This lets add/sub/cmp fold the constant into their
+// immediate form instead of first materialising it into a scratch
+// register (which lever A's remat would otherwise force). Negative or
+// large constants are rejected (return false) and fall back to the
+// register form.
+static bool operand_const_u12(const WmirRegAlloc *ra, MLIR_OpHandle op,
+                              size_t idx, uint16_t *out) {
+    MLIR_ValueHandle v = MLIR_GetOpOperand(op, idx);
+    ValueHome h;
+    if (!wmir_regalloc_lookup(ra, v, &h)) return false;
+    if (h.kind != HOME_CONST) return false;
+    uint64_t u = h.is_i64 ? (uint64_t)h.cval : (uint64_t)(uint32_t)h.cval;
+    if (u > 0xFFFu) return false;
+    *out = (uint16_t)u;
+    return true;
+}
+
 // Force `op`'s operand `idx` into a specific physical register `reg`.
 // Used for call-arg passing (x0..x7) and return-value materialisation.
 // Emits `mov` from a register home or `ldr` from a slot home as
@@ -1081,6 +1100,22 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
             }
             case OP_TYPE_WMIR_IADD: {
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
+                // Lever B: fold a small constant addend into `add rd,rn,#imm`.
+                // iadd is commutative, so try either operand.
+                uint16_t imm; int cidx = -1;
+                if (operand_const_u12(ra, op, 1, &imm)) cidx = 0;
+                else if (operand_const_u12(ra, op, 0, &imm)) cidx = 1;
+                if (cidx >= 0) {
+                    uint8_t rn = LD_OPERAND(10, (size_t)cidx);
+                    uint8_t rd = PICK_RES(9, 0);
+                    if (imm == 0) {
+                        if (rd != rn) emit_mov_x(ctx, dst_blk, rd, rn);
+                    } else {
+                        emit_add_imm(ctx, dst_blk, rd, rn, imm, sf);
+                    }
+                    ST_RESULT(rd, 0);
+                    break;
+                }
                 uint8_t r0 = LD_OPERAND(9, 0);
                 uint8_t r1 = LD_OPERAND(10, 1);
                 uint8_t rd = PICK_RES(9, 0);
@@ -1090,6 +1125,20 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
             }
             case OP_TYPE_WMIR_ISUB: {
                 bool sf = is_i64(ctx, MLIR_GetOpResult(op, 0));
+                // Lever B: fold a small constant subtrahend into
+                // `sub rd,rn,#imm` (operand 1 only — sub is not commutative).
+                uint16_t imm;
+                if (operand_const_u12(ra, op, 1, &imm)) {
+                    uint8_t rn = LD_OPERAND(10, 0);
+                    uint8_t rd = PICK_RES(9, 0);
+                    if (imm == 0) {
+                        if (rd != rn) emit_mov_x(ctx, dst_blk, rd, rn);
+                    } else {
+                        emit_sub_imm(ctx, dst_blk, rd, rn, imm, sf);
+                    }
+                    ST_RESULT(rd, 0);
+                    break;
+                }
                 uint8_t r0 = LD_OPERAND(9, 0);
                 uint8_t r1 = LD_OPERAND(10, 1);
                 uint8_t rd = PICK_RES(9, 0);
@@ -1262,11 +1311,18 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
             }
             case OP_TYPE_WMIR_ICMP: {
                 bool sf = is_i64(ctx, MLIR_GetOpOperand(op, 0));
-                uint8_t r0 = LD_OPERAND(9, 0);
-                uint8_t r1 = LD_OPERAND(10, 1);
-                emit_cmp_reg(ctx, dst_blk, r0, r1, sf);
                 string pred = at_s(op, "pred");
                 uint8_t cond = cond_for_pred(pred);
+                // Lever B: fold a small constant rhs into `cmp rn,#imm`.
+                uint16_t imm;
+                if (operand_const_u12(ra, op, 1, &imm)) {
+                    uint8_t r0 = LD_OPERAND(9, 0);
+                    emit_cmp_imm(ctx, dst_blk, r0, imm, sf);
+                } else {
+                    uint8_t r0 = LD_OPERAND(9, 0);
+                    uint8_t r1 = LD_OPERAND(10, 1);
+                    emit_cmp_reg(ctx, dst_blk, r0, r1, sf);
+                }
                 uint8_t rd = PICK_RES(9, 0);
                 emit_cset(ctx, dst_blk, rd, cond, /*sf=*/false);
                 ST_RESULT(rd, 0);
