@@ -173,27 +173,61 @@ static bool ssa_op_has_result(MLIR_OpType t) {
 }
 
 // =============================================================================
-// Value->local map (linear scan; functions are small).
+// Value->local map. Open-addressing hash table (key 0 == empty sentinel;
+// wasmssa value handles are always non-zero). Replaces an earlier linear scan
+// that dominated the wasmssa->wasmstack pass (O(n^2) per function).
 // =============================================================================
 typedef struct {
-    MLIR_ValueHandle *keys;
+    MLIR_ValueHandle *keys;   // hash slots; 0 == empty
     uint32_t *vals;
-    size_t n, cap;
+    size_t n, cap;            // cap is 0 or a power of two
 } VMap;
 
-static void vmap_set(VMap *m, MLIR_ValueHandle k, uint32_t v) {
-    if (m->n == m->cap) {
-        m->cap = m->cap ? m->cap * 2 : 16;
-        m->keys = (MLIR_ValueHandle *)realloc(m->keys, m->cap * sizeof(*m->keys));
-        m->vals = (uint32_t *)realloc(m->vals, m->cap * sizeof(*m->vals));
+static size_t vmap_hash(MLIR_ValueHandle k) {
+    // 32-bit-safe mix (identical on the wasm32 self-host and 64-bit host).
+    size_t h = (size_t)k;
+    h ^= h >> 15;
+    h *= 2654435761u;
+    h ^= h >> 13;
+    return h;
+}
+static void vmap_grow(VMap *m) {
+    size_t ncap = m->cap ? m->cap * 2 : 32;
+    MLIR_ValueHandle *nk = (MLIR_ValueHandle *)calloc(ncap, sizeof(*nk));
+    uint32_t *nv = (uint32_t *)malloc(ncap * sizeof(*nv));
+    size_t mask = ncap - 1;
+    for (size_t i = 0; i < m->cap; i++) {
+        if (m->keys[i] == MLIR_INVALID_HANDLE) continue;
+        size_t j = vmap_hash(m->keys[i]) & mask;
+        while (nk[j] != MLIR_INVALID_HANDLE) j = (j + 1) & mask;
+        nk[j] = m->keys[i];
+        nv[j] = m->vals[i];
     }
-    m->keys[m->n] = k;
-    m->vals[m->n] = v;
+    free(m->keys);
+    free(m->vals);
+    m->keys = nk;
+    m->vals = nv;
+    m->cap = ncap;
+}
+static void vmap_set(VMap *m, MLIR_ValueHandle k, uint32_t v) {
+    if ((m->n + 1) * 4 >= m->cap * 3) vmap_grow(m);
+    size_t mask = m->cap - 1;
+    size_t i = vmap_hash(k) & mask;
+    while (m->keys[i] != MLIR_INVALID_HANDLE) {
+        if (m->keys[i] == k) return;  // first insert wins
+        i = (i + 1) & mask;
+    }
+    m->keys[i] = k;
+    m->vals[i] = v;
     m->n++;
 }
 static int vmap_get(VMap *m, MLIR_ValueHandle k, uint32_t *out) {
-    for (size_t i = 0; i < m->n; i++) {
+    if (m->cap == 0) return 0;
+    size_t mask = m->cap - 1;
+    size_t i = vmap_hash(k) & mask;
+    while (m->keys[i] != MLIR_INVALID_HANDLE) {
         if (m->keys[i] == k) { *out = m->vals[i]; return 1; }
+        i = (i + 1) & mask;
     }
     return 0;
 }
