@@ -469,7 +469,13 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
                                                 state.attributes.end());
 
     if (n_successors > 0 && n_successor_operands) {
-        if (nm == "cf.cond_br") {
+        if (nm == "cf.cond_br" || nm == "llvm.cond_br") {
+            // Both ops use AttrSizedOperandSegments with the layout
+            // [condition, trueDestOperands, falseDestOperands]; without the
+            // synthesized operandSegmentSizes the BranchOpInterface slices
+            // the forwarded operands wrongly (e.g. returns the condition as
+            // a successor operand), corrupting phi wiring for any block-arg
+            // edge — exactly what mem2reg introduces.
             llvm::SmallVector<int32_t, 4> seg;
             seg.push_back((int32_t)n_operands);
             for (size_t s = 0; s < n_successors; s++) {
