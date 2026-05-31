@@ -868,6 +868,70 @@ static void emit_branch_arg_copies(MLIR_Context *ctx, MLIR_BlockHandle blk,
 // =============================================================================
 // Per-function lowering.
 // =============================================================================
+// Use-count map (def-use-independent). Counts how many times each SSA value
+// appears as an operand (regular or successor block-arg) across a function's
+// wmir. Used by the icmp/eqz -> cond_br branch-fusion peephole below to prove a
+// comparison result feeds nothing but the branch. Scans operands directly, so
+// it works on the --from-wasm self-host path where global def-use tracking is
+// disabled (issue #175 memory cap).
+// =============================================================================
+typedef struct { MLIR_ValueHandle key; uint32_t cnt; } UCEnt;
+typedef struct { UCEnt *e; size_t mask; } UCMap;
+
+static size_t uc_hash(MLIR_ValueHandle k, size_t mask) {
+    return (size_t)(((uint64_t)k * 0x9E3779B97F4A7C15ull) >> 24) & mask;
+}
+static void uc_bump(UCMap *m, MLIR_ValueHandle k) {
+    if (!m->e || k == MLIR_INVALID_HANDLE) return;
+    size_t h = uc_hash(k, m->mask);
+    while (m->e[h].key != MLIR_INVALID_HANDLE && m->e[h].key != k) h = (h + 1) & m->mask;
+    m->e[h].key = k;
+    m->e[h].cnt++;
+}
+static uint32_t uc_get(const UCMap *m, MLIR_ValueHandle k) {
+    if (!m->e || k == MLIR_INVALID_HANDLE) return 0;
+    size_t h = uc_hash(k, m->mask);
+    while (m->e[h].key != MLIR_INVALID_HANDLE) {
+        if (m->e[h].key == k) return m->e[h].cnt;
+        h = (h + 1) & m->mask;
+    }
+    return 0;
+}
+static void uc_build(UCMap *m, MLIR_RegionHandle region) {
+    size_t total = 0, nb = MLIR_GetRegionNumBlocks(region);
+    for (size_t b = 0; b < nb; b++) {
+        MLIR_BlockHandle blk = MLIR_GetRegionBlock(region, b);
+        size_t no = MLIR_GetBlockNumOps(blk);
+        for (size_t o = 0; o < no; o++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(blk, o);
+            total += MLIR_GetOpNumOperands(op);
+            size_t ns = MLIR_GetOpNumSuccessors(op);
+            for (size_t s = 0; s < ns; s++) total += MLIR_GetOpNumSuccessorOperands(op, s);
+        }
+    }
+    size_t cap = 16;
+    while (cap < total * 2 + 16) cap <<= 1;
+    m->e = (UCEnt *)calloc(cap, sizeof(UCEnt));
+    m->mask = m->e ? cap - 1 : 0;
+    if (!m->e) return;  // OOM: uc_get returns 0 -> fusion simply never fires.
+    for (size_t b = 0; b < nb; b++) {
+        MLIR_BlockHandle blk = MLIR_GetRegionBlock(region, b);
+        size_t no = MLIR_GetBlockNumOps(blk);
+        for (size_t o = 0; o < no; o++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(blk, o);
+            size_t nop = MLIR_GetOpNumOperands(op);
+            for (size_t k = 0; k < nop; k++) uc_bump(m, MLIR_GetOpOperand(op, k));
+            size_t ns = MLIR_GetOpNumSuccessors(op);
+            for (size_t s = 0; s < ns; s++) {
+                size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                for (size_t k = 0; k < nso; k++)
+                    uc_bump(m, MLIR_GetOpSuccessorOperand(op, s, k));
+            }
+        }
+    }
+}
+
+// =============================================================================
 static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
     string name     = at_s(src, "sym_name");
     bool   exported = at_b(src, "exported");
@@ -901,6 +965,11 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 (int)name.size, name.str);
         return MLIR_INVALID_HANDLE;
     }
+    // Use counts for the icmp/eqz -> cond_br branch-fusion peephole. Freed on
+    // the success path below; error paths abort the whole compile so leaking
+    // there is harmless.
+    UCMap uc = {0};
+    uc_build(&uc, src_region);
     uint32_t spill_bytes  = (uint32_t)ra->n_slots * 8u;
     uint32_t locals_bytes = locals_count * 8u;
     // Callee-saved registers x19..x26 the allocator used are saved in a
@@ -1006,9 +1075,12 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
             st_result(ctx, dst_blk, ra, op, (IDX), (PRODUCED_REG))
 
         size_t n_ops = MLIR_GetBlockNumOps(src_blk);
+        int pending_fuse_cond = -1;  // set by a fused icmp/eqz, consumed by cond_br
         for (size_t i = 0; i < n_ops; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(src_blk, i);
             MLIR_OpType  t  = MLIR_GetOpType(op);
+            int fuse_cond = pending_fuse_cond;
+            pending_fuse_cond = -1;
             switch (t) {
             case OP_TYPE_WMIR_CONST: {
                 MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
@@ -1324,6 +1396,19 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                     emit_cmp_reg(ctx, dst_blk, r0, r1, sf);
                 }
                 uint8_t rd = PICK_RES(9, 0);
+                // Lever F: if the sole use of this comparison is an
+                // immediately-following cond_br, skip the cset/store and let
+                // the cond_br branch directly on the live NZCV flags (b.<cond>).
+                if (i + 1 < n_ops) {
+                    MLIR_OpHandle nxt = MLIR_GetBlockOp(src_blk, i + 1);
+                    if (MLIR_GetOpType(nxt) == OP_TYPE_WMIR_COND_BR &&
+                        MLIR_GetOpNumOperands(nxt) >= 1 &&
+                        MLIR_GetOpOperand(nxt, 0) == MLIR_GetOpResult(op, 0) &&
+                        uc_get(&uc, MLIR_GetOpResult(op, 0)) == 1) {
+                        pending_fuse_cond = cond;
+                        break;
+                    }
+                }
                 emit_cset(ctx, dst_blk, rd, cond, /*sf=*/false);
                 ST_RESULT(rd, 0);
                 break;
@@ -1333,6 +1418,16 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 uint8_t r0 = LD_OPERAND(9, 0);
                 emit_cmp_imm(ctx, dst_blk, r0, 0, sf);
                 uint8_t rd = PICK_RES(9, 0);
+                if (i + 1 < n_ops) {
+                    MLIR_OpHandle nxt = MLIR_GetBlockOp(src_blk, i + 1);
+                    if (MLIR_GetOpType(nxt) == OP_TYPE_WMIR_COND_BR &&
+                        MLIR_GetOpNumOperands(nxt) >= 1 &&
+                        MLIR_GetOpOperand(nxt, 0) == MLIR_GetOpResult(op, 0) &&
+                        uc_get(&uc, MLIR_GetOpResult(op, 0)) == 1) {
+                        pending_fuse_cond = COND_EQ;
+                        break;
+                    }
+                }
                 emit_cset(ctx, dst_blk, rd, COND_EQ, /*sf=*/false);
                 ST_RESULT(rd, 0);
                 break;
@@ -1706,6 +1801,24 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 // Read the condition BEFORE any block-arg copies so the
                 // parallel copies (which may overwrite the condition's
                 // register home) cannot clobber it.
+                // Lever F: when a fused icmp/eqz precedes us, NZCV is still
+                // live (no flag-clobbering op was emitted in between), so branch
+                // directly with b.<cond> instead of reloading + cbnz.
+                if (fuse_cond >= 0) {
+                    if (n_t == 0 && n_f == 0) {
+                        emit_b_cond(ctx, dst_blk, (uint8_t)fuse_cond, t_dst);
+                        emit_b(ctx, dst_blk, f_dst);
+                    } else {
+                        MLIR_BlockHandle land = MLIR_CreateBlock(ctx);
+                        MLIR_AppendRegionBlock(ctx, dst_region, land);
+                        emit_b_cond(ctx, dst_blk, (uint8_t)fuse_cond, land);
+                        emit_branch_arg_copies(ctx, dst_blk, ra, op, 1, f_src);
+                        emit_b(ctx, dst_blk, f_dst);
+                        emit_branch_arg_copies(ctx, land, ra, op, 0, t_src);
+                        emit_b(ctx, land, t_dst);
+                    }
+                    break;
+                }
                 uint8_t r0 = LD_OPERAND(9, 0);
                 if (n_t == 0 && n_f == 0) {
                     emit_cbnz(ctx, dst_blk, r0, /*sf=*/false, t_dst);
@@ -1743,6 +1856,7 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
 
     wmir_regalloc_free(ra);
     bm_free(&bm);
+    free(uc.e);
 
     MLIR_AttributeHandle attrs[4];
     size_t naf = 0;
