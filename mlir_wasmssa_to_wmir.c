@@ -501,6 +501,35 @@ static void wmir_value_number(MLIR_Context *ctx, MLIR_RegionHandle region) {
             MLIR_OpHandle op = MLIR_GetBlockOp(blk, oi);
             MLIR_OpType t = MLIR_GetOpType(op);
 
+            if (t == OP_TYPE_WMIR_STORE) {
+                // Store-to-load forwarding. A store may alias any cached load,
+                // so first invalidate the whole load table (bump lgen). Then,
+                // for a FULL-WIDTH store (the stored value occupies all `sz`
+                // bytes, so no sub-word zero-extension mismatch can arise),
+                // record the stored value as the available content of
+                // (addr, offset, size): a later must-alias load — identical
+                // resolved address, memory_offset and mem_size, with no
+                // intervening memory write — then forwards the value instead of
+                // reloading. Keyed as a synthetic LOAD so a real load collides.
+                MLIR_ValueHandle saddr =
+                    simp_resolve(rmap, mask, MLIR_GetOpOperand(op, 0));
+                MLIR_ValueHandle sval =
+                    simp_resolve(rmap, mask, MLIR_GetOpOperand(op, 1));
+                int64_t soff = at_i(op, "memory_offset");
+                int64_t ssz  = at_i(op, "mem_size");
+                int sw = vn_width(ctx, sval);
+                lgen++;
+                if (ssz * 8 == sw) {
+                    int64_t sdisc = (soff << 8) | (ssz & 0xff);
+                    bool fdummy;
+                    vn_lookup_insert(load, mask, lgen,
+                        (int)OP_TYPE_WMIR_LOAD, sw, sdisc, saddr,
+                        MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE,
+                        sval, &fdummy);
+                }
+                continue;
+            }
+
             if (vn_writes_memory(t)) { lgen++; continue; }
 
             if (t == OP_TYPE_WMIR_LOAD) {
