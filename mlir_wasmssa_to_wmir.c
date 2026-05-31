@@ -719,22 +719,24 @@ static void wmir_simplify(MLIR_Context *ctx, MLIR_RegionHandle region) {
 // =============================================================================
 // Local value numbering (GVN/CSE) + redundant-load elimination.
 //
-// Within each basic block, identical pure computations (integer arith / bitwise
-// / shift / div / rem, compares, eqz, sign|zero|truncate conversions, selects,
-// constants) are computed once: the second and later occurrences are forwarded
-// to the first via the rewrite map and erased. Redundant LOADs (same address +
-// offset + size with no intervening memory write) are likewise forwarded to the
-// earlier load. This shrinks both the op count AND the number of simultaneously
-// live values, which directly relieves the register pressure that drives the
-// backend's spill traffic. It is the optimisation an optimising wasm JIT
-// (Cranelift in wasmtime) performs that the straight-line wmir backend otherwise
-// lacks (measured: wasmtime -O0 vs -O2 is the entire native-vs-wasmtime gap).
+// Identical pure computations (integer arith / bitwise / shift / div / rem,
+// compares, eqz, sign|zero|truncate conversions, selects, constants) are
+// computed once: later occurrences are forwarded to the dominating first
+// occurrence via the rewrite map and erased. Pure CSE is GLOBAL — it runs over
+// the dominator tree with a scoped value table, so a cached definition always
+// dominates its reuse (sound without alias analysis, since a pure value's
+// operands are SSA and its def dominates every use). Redundant LOADs (same
+// address + offset + size with no intervening memory write) are forwarded to
+// the earlier load INTRA-block only (the load cache resets per block; a
+// cross-block load reuse would need alias analysis). This shrinks both the op
+// count AND the number of simultaneously live values, which directly relieves
+// the register pressure that drives the backend's spill traffic. It is the
+// optimisation an optimising wasm JIT (Cranelift in wasmtime) performs that the
+// straight-line wmir backend otherwise lacks (measured: wasmtime -O0 vs -O2 is
+// the entire native-vs-wasmtime gap).
 //
-// Scope is intra-block: both caches reset at every block entry, so a cached
-// definition always dominates its reuse (no dominator / alias analysis needed,
-// always correct). Pure entries are never invalidated within a block (their
-// operands are SSA and immutable); the load cache is invalidated by any op that
-// may write linear memory (store / call / memory.grow / data_init).
+// The load cache is invalidated by any op that may write linear memory
+// (store / call / memory.grow / data_init).
 //
 // Disable with WMIR_NO_GVN=1 (A/B aid).
 // =============================================================================
@@ -855,6 +857,52 @@ static int32_t vn_cnt_get(CntEnt *m, size_t mask, MLIR_ValueHandle k) {
     return 0;
 }
 
+// Block-handle -> region block index, open-addressing (key 0 == empty).
+typedef struct { uintptr_t k; size_t v; } VNBIdx;
+static size_t vn_bidx_get(VNBIdx *m, size_t mask, MLIR_BlockHandle b) {
+    size_t h = (size_t)(((uint64_t)(uintptr_t)b * 0x9E3779B97F4A7C15ull) >> 16) & mask;
+    while (m[h].k != 0) {
+        if (m[h].k == (uintptr_t)b) return m[h].v;
+        h = (h + 1) & mask;
+    }
+    return (size_t)-1;
+}
+
+// Scoped (dominator-tree) pure-value lookup/insert. The `gen` field is reused
+// as an occupied flag (1 = occupied, 0 = empty, calloc-clean). On a miss the
+// slot index is appended to `log` so the entry can be removed when its
+// defining block's dominator-tree scope is left (undo back to a marker). A hit
+// always returns a value defined in a dominator of the current block, so
+// forwarding to it is sound.
+static MLIR_ValueHandle vn_pure_scoped(VNEnt *t, size_t mask, int op, int tw,
+        int64_t disc, MLIR_ValueHandle a, MLIR_ValueHandle b, MLIR_ValueHandle c,
+        MLIR_ValueHandle result, bool *found, size_t *log, size_t *logn) {
+    size_t h = vn_hash(op, tw, disc, a, b, c, mask);
+    while (t[h].gen != 0) {
+        if (t[h].op == op && t[h].tw == tw && t[h].disc == disc &&
+            t[h].a == a && t[h].b == b && t[h].c == c) {
+            *found = true;
+            return t[h].result;
+        }
+        h = (h + 1) & mask;
+    }
+    t[h].gen = 1; t[h].op = op; t[h].tw = tw; t[h].disc = disc;
+    t[h].a = a; t[h].b = b; t[h].c = c; t[h].result = result;
+    log[(*logn)++] = h;
+    *found = false;
+    return result;
+}
+
+// Cooper-Harvey-Kennedy intersect over postorder numbers (higher = closer to
+// entry): walk the two fingers up the dominator chain until they meet.
+static int vn_intersect(const int *doms, int a, int b) {
+    while (a != b) {
+        while (a < b) a = doms[a];
+        while (b < a) b = doms[b];
+    }
+    return a;
+}
+
 static void wmir_value_number(MLIR_Context *ctx, MLIR_RegionHandle region) {
     if (getenv("WMIR_NO_GVN")) return;
     size_t nb = MLIR_GetRegionNumBlocks(region);
@@ -877,11 +925,180 @@ static void wmir_value_number(MLIR_Context *ctx, MLIR_RegionHandle region) {
         free(rmap); free(pure); free(load); free(erase); return;
     }
     size_t nerase = 0;
-    uint32_t pgen = 0, lgen = 0;
+    uint32_t lgen = 0;
 
+    // ---- Build the CFG (block index map, successors, predecessors) --------
+    VNBIdx *bidx = (VNBIdx *)calloc(cap, sizeof(*bidx));
+    MLIR_BlockHandle *blocks = (MLIR_BlockHandle *)malloc(nb * sizeof(*blocks));
+    size_t *succ_off = (size_t *)calloc(nb + 1, sizeof(*succ_off));
+    size_t *pred_off = (size_t *)calloc(nb + 1, sizeof(*pred_off));
+    if (!bidx || !blocks || !succ_off || !pred_off) {
+        free(bidx); free(blocks); free(succ_off); free(pred_off);
+        free(rmap); free(pure); free(load); free(erase); return;
+    }
     for (size_t bi = 0; bi < nb; bi++) {
-        MLIR_BlockHandle blk = MLIR_GetRegionBlock(region, bi);
-        pgen++; lgen++;                       // reset both caches at block entry
+        MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
+        blocks[bi] = b;
+        size_t h = (size_t)(((uint64_t)(uintptr_t)b * 0x9E3779B97F4A7C15ull) >> 16) & mask;
+        while (bidx[h].k != 0) h = (h + 1) & mask;
+        bidx[h].k = (uintptr_t)b; bidx[h].v = bi;
+    }
+    for (size_t bi = 0; bi < nb; bi++) {
+        MLIR_OpHandle term = MLIR_GetBlockTerminator(blocks[bi]);
+        size_t ns = term == MLIR_INVALID_HANDLE ? 0 : MLIR_GetOpNumSuccessors(term);
+        succ_off[bi + 1] = ns;
+    }
+    for (size_t bi = 0; bi < nb; bi++) succ_off[bi + 1] += succ_off[bi];
+    size_t nsucc = succ_off[nb];
+    size_t *succ = (size_t *)malloc((nsucc ? nsucc : 1) * sizeof(*succ));
+    if (!succ) {
+        free(bidx); free(blocks); free(succ_off); free(pred_off);
+        free(rmap); free(pure); free(load); free(erase); return;
+    }
+    for (size_t bi = 0; bi < nb; bi++) {
+        MLIR_OpHandle term = MLIR_GetBlockTerminator(blocks[bi]);
+        size_t ns = term == MLIR_INVALID_HANDLE ? 0 : MLIR_GetOpNumSuccessors(term);
+        for (size_t s = 0; s < ns; s++) {
+            size_t k = vn_bidx_get(bidx, mask, MLIR_GetOpSuccessor(term, s));
+            succ[succ_off[bi] + s] = k;
+            if (k != (size_t)-1) pred_off[k + 1]++;
+        }
+    }
+    for (size_t bi = 0; bi < nb; bi++) pred_off[bi + 1] += pred_off[bi];
+    size_t npred = pred_off[nb];
+    size_t *pred = (size_t *)malloc((npred ? npred : 1) * sizeof(*pred));
+    size_t *pfill = (size_t *)malloc((nb + 1) * sizeof(*pfill));
+    if (!pred || !pfill) {
+        free(succ); free(bidx); free(blocks); free(succ_off); free(pred_off);
+        free(pred); free(pfill);
+        free(rmap); free(pure); free(load); free(erase); return;
+    }
+    for (size_t bi = 0; bi <= nb; bi++) pfill[bi] = pred_off[bi];
+    for (size_t bi = 0; bi < nb; bi++)
+        for (size_t s = succ_off[bi]; s < succ_off[bi + 1]; s++) {
+            size_t k = succ[s];
+            if (k != (size_t)-1) pred[pfill[k]++] = bi;
+        }
+
+    // ---- Postorder DFS from the entry (block 0) ---------------------------
+    int    *pon   = (int *)malloc(nb * sizeof(*pon));
+    size_t *order = (size_t *)malloc(nb * sizeof(*order));
+    size_t *stk   = (size_t *)malloc(nb * sizeof(*stk));
+    size_t *it    = (size_t *)malloc(nb * sizeof(*it));
+    char   *seen  = (char *)calloc(nb, 1);
+    if (!pon || !order || !stk || !it || !seen) {
+        free(pon); free(order); free(stk); free(it); free(seen);
+        free(succ); free(pred); free(pfill); free(bidx); free(blocks);
+        free(succ_off); free(pred_off);
+        free(rmap); free(pure); free(load); free(erase); return;
+    }
+    for (size_t bi = 0; bi < nb; bi++) pon[bi] = -1;
+    size_t npo = 0, sp = 0;
+    stk[sp] = 0; it[sp] = succ_off[0]; seen[0] = 1; sp++;
+    while (sp > 0) {
+        size_t b = stk[sp - 1];
+        if (it[sp - 1] < succ_off[b + 1]) {
+            size_t c = succ[it[sp - 1]++];
+            if (c != (size_t)-1 && !seen[c]) {
+                seen[c] = 1; stk[sp] = c; it[sp] = succ_off[c]; sp++;
+            }
+        } else {
+            pon[b] = (int)npo; order[npo] = b; npo++; sp--;
+        }
+    }
+
+    // ---- Iterative dominators (Cooper-Harvey-Kennedy) over postorder ------
+    int *doms = (int *)malloc((npo ? npo : 1) * sizeof(*doms));
+    if (!doms) {
+        free(pon); free(order); free(stk); free(it); free(seen);
+        free(succ); free(pred); free(pfill); free(bidx); free(blocks);
+        free(succ_off); free(pred_off);
+        free(rmap); free(pure); free(load); free(erase); return;
+    }
+    for (size_t i = 0; i < npo; i++) doms[i] = -1;
+    if (npo > 0) doms[npo - 1] = (int)(npo - 1);    // entry dominates itself
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (ssize_t k = (ssize_t)npo - 2; k >= 0; k--) {
+            size_t b = order[k];
+            int new_idom = -1;
+            for (size_t j = pred_off[b]; j < pred_off[b + 1]; j++) {
+                size_t p = pred[j];
+                if (pon[p] < 0 || doms[pon[p]] == -1) continue;
+                new_idom = new_idom == -1 ? pon[p]
+                                          : vn_intersect(doms, pon[p], new_idom);
+            }
+            if (new_idom != -1 && doms[pon[b]] != new_idom) {
+                doms[pon[b]] = new_idom; changed = true;
+            }
+        }
+    }
+
+    // ---- Dominator-tree children (CSR) ------------------------------------
+    size_t *ch_off = (size_t *)calloc(nb + 1, sizeof(*ch_off));
+    size_t *cfill  = (size_t *)malloc((nb + 1) * sizeof(*cfill));
+    if (!ch_off || !cfill) {
+        free(ch_off); free(cfill); free(doms);
+        free(pon); free(order); free(stk); free(it); free(seen);
+        free(succ); free(pred); free(pfill); free(bidx); free(blocks);
+        free(succ_off); free(pred_off);
+        free(rmap); free(pure); free(load); free(erase); return;
+    }
+    for (size_t i = 0; npo > 0 && i < npo - 1; i++) {
+        size_t b = order[i];
+        size_t parent = order[doms[pon[b]]];
+        ch_off[parent + 1]++;
+    }
+    for (size_t bi = 0; bi < nb; bi++) ch_off[bi + 1] += ch_off[bi];
+    size_t nchild = ch_off[nb];
+    size_t *ch = (size_t *)malloc((nchild ? nchild : 1) * sizeof(*ch));
+    if (!ch) {
+        free(ch_off); free(cfill); free(doms);
+        free(pon); free(order); free(stk); free(it); free(seen);
+        free(succ); free(pred); free(pfill); free(bidx); free(blocks);
+        free(succ_off); free(pred_off);
+        free(rmap); free(pure); free(load); free(erase); return;
+    }
+    for (size_t bi = 0; bi <= nb; bi++) cfill[bi] = ch_off[bi];
+    for (size_t i = 0; npo > 0 && i < npo - 1; i++) {
+        size_t b = order[i];
+        size_t parent = order[doms[pon[b]]];
+        ch[cfill[parent]++] = b;
+    }
+
+    // ---- DFS the dominator tree with a scoped pure-value table ------------
+    // A pure value cached while visiting a block stays live for that block and
+    // all blocks it dominates (its dominator-tree subtree); it is removed when
+    // the subtree is left (undo log back to the scope marker). A hit therefore
+    // always names a value defined in a dominator of the current block, so
+    // forwarding the duplicate to it is sound. Redundant-LOAD elimination stays
+    // intra-block (the load cache resets each block via lgen) — cross-block
+    // load reuse would need alias analysis.
+    size_t *scope_mark = (size_t *)malloc(nb * sizeof(*scope_mark));
+    size_t *plog       = (size_t *)malloc((total ? total : 1) * sizeof(*plog));
+    size_t *dstk       = (size_t *)malloc(2 * nb * sizeof(*dstk));
+    char   *dph        = (char *)malloc(2 * nb);
+    if (!scope_mark || !plog || !dstk || !dph) {
+        free(scope_mark); free(plog); free(dstk); free(dph); free(ch);
+        free(ch_off); free(cfill); free(doms);
+        free(pon); free(order); free(stk); free(it); free(seen);
+        free(succ); free(pred); free(pfill); free(bidx); free(blocks);
+        free(succ_off); free(pred_off);
+        free(rmap); free(pure); free(load); free(erase); return;
+    }
+    size_t logn = 0, dsp = 0;
+    if (npo > 0) { dstk[dsp] = order[npo - 1]; dph[dsp] = 0; dsp++; }
+    while (dsp > 0) {
+        size_t bi = dstk[--dsp];
+        char ph = dph[dsp];
+        if (ph == 1) {
+            while (logn > scope_mark[bi]) pure[plog[--logn]].gen = 0;
+            continue;
+        }
+        scope_mark[bi] = logn;
+        MLIR_BlockHandle blk = blocks[bi];
+        lgen++;                               // load cache resets per block
         size_t no = MLIR_GetBlockNumOps(blk);
         for (size_t oi = 0; oi < no; oi++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(blk, oi);
@@ -949,9 +1166,9 @@ static void wmir_value_number(MLIR_Context *ctx, MLIR_RegionHandle region) {
             int64_t disc = 0;
             if (t == OP_TYPE_WMIR_ICMP) {
                 string p = at_s(op, "pred");
-                uint64_t ph = 1469598103934665603ull;
-                for (size_t i = 0; i < p.size; i++) ph = vn_mix(ph, (uint8_t)p.str[i]);
-                disc = (int64_t)ph;
+                uint64_t ph2 = 1469598103934665603ull;
+                for (size_t i = 0; i < p.size; i++) ph2 = vn_mix(ph2, (uint8_t)p.str[i]);
+                disc = (int64_t)ph2;
             } else if (t == OP_TYPE_WMIR_CONST) {
                 disc = at_i(op, "value");
             } else if (t == OP_TYPE_WMIR_SEXT || t == OP_TYPE_WMIR_ZEXT ||
@@ -959,12 +1176,22 @@ static void wmir_value_number(MLIR_Context *ctx, MLIR_RegionHandle region) {
                 disc = at_i(op, "src_bits");
             }
             bool found;
-            MLIR_ValueHandle canon = vn_lookup_insert(
-                pure, mask, pgen, (int)t, vn_width(ctx, res), disc,
-                a, b, c, res, &found);
+            MLIR_ValueHandle canon = vn_pure_scoped(
+                pure, mask, (int)t, vn_width(ctx, res), disc,
+                a, b, c, res, &found, plog, &logn);
             if (found) { simp_put(rmap, mask, res, canon); erase[nerase++] = op; }
         }
+        dstk[dsp] = bi; dph[dsp] = 1; dsp++;       // exit after subtree
+        for (size_t j = ch_off[bi]; j < ch_off[bi + 1]; j++) {
+            dstk[dsp] = ch[j]; dph[dsp] = 0; dsp++;
+        }
     }
+
+    free(scope_mark); free(plog); free(dstk); free(dph); free(ch);
+    free(ch_off); free(cfill); free(doms);
+    free(pon); free(order); free(stk); free(it); free(seen);
+    free(succ); free(pred); free(pfill); free(bidx); free(blocks);
+    free(succ_off); free(pred_off);
 
     if (nerase > 0) {
         // Repoint every flat operand (regular + successor block-arg) that
