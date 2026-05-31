@@ -330,6 +330,304 @@ static void wmir_simplify_bools(MLIR_Context *ctx, MLIR_RegionHandle region) {
     free(erase);
 }
 
+// =============================================================================
+// Local value numbering (GVN/CSE) + redundant-load elimination.
+//
+// Within each basic block, identical pure computations (integer arith / bitwise
+// / shift / div / rem, compares, eqz, sign|zero|truncate conversions, selects,
+// constants) are computed once: the second and later occurrences are forwarded
+// to the first via the rewrite map and erased. Redundant LOADs (same address +
+// offset + size with no intervening memory write) are likewise forwarded to the
+// earlier load. This shrinks both the op count AND the number of simultaneously
+// live values, which directly relieves the register pressure that drives the
+// backend's spill traffic. It is the optimisation an optimising wasm JIT
+// (Cranelift in wasmtime) performs that the straight-line wmir backend otherwise
+// lacks (measured: wasmtime -O0 vs -O2 is the entire native-vs-wasmtime gap).
+//
+// Scope is intra-block: both caches reset at every block entry, so a cached
+// definition always dominates its reuse (no dominator / alias analysis needed,
+// always correct). Pure entries are never invalidated within a block (their
+// operands are SSA and immutable); the load cache is invalidated by any op that
+// may write linear memory (store / call / memory.grow / data_init).
+//
+// Disable with WMIR_NO_GVN=1 (A/B aid).
+// =============================================================================
+typedef struct {
+    uint32_t gen;            // generation tag; entry valid iff gen == cur gen
+    int      op;             // MLIR_OpType
+    int      tw;             // result width (32 / 64)
+    int64_t  disc;           // pred-hash / const value / src_bits / off<<8|size
+    MLIR_ValueHandle a, b, c;// up to three resolved operands (INVALID if absent)
+    MLIR_ValueHandle result; // canonical defining value
+} VNEnt;
+
+static uint64_t vn_mix(uint64_t h, uint64_t x) {
+    h ^= x + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+    return h;
+}
+static size_t vn_hash(int op, int tw, int64_t disc, MLIR_ValueHandle a,
+                      MLIR_ValueHandle b, MLIR_ValueHandle c, size_t mask) {
+    uint64_t h = 1469598103934665603ull;
+    h = vn_mix(h, (uint64_t)op);
+    h = vn_mix(h, (uint64_t)tw);
+    h = vn_mix(h, (uint64_t)disc);
+    h = vn_mix(h, (uint64_t)a);
+    h = vn_mix(h, (uint64_t)b);
+    h = vn_mix(h, (uint64_t)c);
+    return (size_t)(h >> 16) & mask;
+}
+
+// Probe `t` for (op,tw,disc,a,b,c). On hit set *found and return the canonical
+// result. On miss insert (with `result`) and return `result`. Generation-tagged
+// lazy clearing: a slot whose gen != `gen` is treated as empty, so bumping the
+// generation logically empties the whole table in O(1). Linear probing stays
+// correct because both lookup and insert stop at the first non-current slot.
+static MLIR_ValueHandle vn_lookup_insert(VNEnt *t, size_t mask, uint32_t gen,
+        int op, int tw, int64_t disc, MLIR_ValueHandle a, MLIR_ValueHandle b,
+        MLIR_ValueHandle c, MLIR_ValueHandle result, bool *found) {
+    size_t h = vn_hash(op, tw, disc, a, b, c, mask);
+    while (t[h].gen == gen) {
+        if (t[h].op == op && t[h].tw == tw && t[h].disc == disc &&
+            t[h].a == a && t[h].b == b && t[h].c == c) {
+            *found = true;
+            return t[h].result;
+        }
+        h = (h + 1) & mask;
+    }
+    t[h].gen = gen; t[h].op = op; t[h].tw = tw; t[h].disc = disc;
+    t[h].a = a; t[h].b = b; t[h].c = c; t[h].result = result;
+    *found = false;
+    return result;
+}
+
+static int vn_width(MLIR_Context *ctx, MLIR_ValueHandle v) {
+    MLIR_TypeHandle ty = MLIR_GetValueType(v);
+    string ts = MLIR_GetTypeString(ctx, ty);
+    if (ts.size >= 3 && ts.str[0] == 'i' && ts.str[1] == '6' && ts.str[2] == '4')
+        return 64;
+    return 32;  // i32 / f32 (and bool results) carried as 32-bit
+}
+
+// True for pure, side-effect-free, value-numberable opcodes whose result is
+// FULLY determined by (opcode, operands, result width, and a known
+// discriminator attribute). Conservatively excludes float ops, global.get,
+// memory.size and anything with side effects.
+static bool vn_is_pure(MLIR_OpType t) {
+    switch (t) {
+    case OP_TYPE_WMIR_IADD: case OP_TYPE_WMIR_ISUB: case OP_TYPE_WMIR_IMUL:
+    case OP_TYPE_WMIR_IAND: case OP_TYPE_WMIR_IOR:  case OP_TYPE_WMIR_IXOR:
+    case OP_TYPE_WMIR_ISHL: case OP_TYPE_WMIR_SSHR: case OP_TYPE_WMIR_USHR:
+    case OP_TYPE_WMIR_SDIV: case OP_TYPE_WMIR_UDIV:
+    case OP_TYPE_WMIR_SREM: case OP_TYPE_WMIR_UREM:
+    case OP_TYPE_WMIR_ICMP: case OP_TYPE_WMIR_EQZ:
+    case OP_TYPE_WMIR_SEXT: case OP_TYPE_WMIR_ZEXT: case OP_TYPE_WMIR_TRUNC:
+    case OP_TYPE_WMIR_SELECT: case OP_TYPE_WMIR_CONST:
+        return true;
+    default:
+        return false;
+    }
+}
+static bool vn_is_commutative(MLIR_OpType t) {
+    return t == OP_TYPE_WMIR_IADD || t == OP_TYPE_WMIR_IMUL ||
+           t == OP_TYPE_WMIR_IAND || t == OP_TYPE_WMIR_IOR  ||
+           t == OP_TYPE_WMIR_IXOR;
+}
+// Ops that may write linear memory, invalidating the load cache.
+static bool vn_writes_memory(MLIR_OpType t) {
+    return t == OP_TYPE_WMIR_STORE || t == OP_TYPE_WMIR_CALL ||
+           t == OP_TYPE_WMIR_MEMORY_GROW || t == OP_TYPE_WMIR_DATA_INIT;
+}
+
+// Single-result, side-effect-free opcodes whose result may be deleted when
+// unused. Linear-memory loads do not trap in this model, so a dead load is
+// removable; global.get and memory.size are likewise pure reads.
+static bool vn_dce_eligible(MLIR_OpType t) {
+    if (vn_is_pure(t)) return true;
+    return t == OP_TYPE_WMIR_LOAD || t == OP_TYPE_WMIR_GLOBAL_GET ||
+           t == OP_TYPE_WMIR_MEMORY_SIZE;
+}
+
+// Open-addressing value -> use-count map for DCE. Key 0 (INVALID) is the empty
+// sentinel and is treated as "always used" so block arguments (which have no
+// defining op) and absent operands never trigger erasure.
+typedef struct { MLIR_ValueHandle k; int32_t v; } CntEnt;
+static int32_t vn_cnt_inc(CntEnt *m, size_t mask, MLIR_ValueHandle k, int32_t d) {
+    if (k == MLIR_INVALID_HANDLE) return 1;
+    size_t h = (size_t)(((uint64_t)k * 0x9E3779B97F4A7C15ull) >> 16) & mask;
+    while (m[h].k != MLIR_INVALID_HANDLE && m[h].k != k) h = (h + 1) & mask;
+    m[h].k = k;
+    m[h].v += d;
+    return m[h].v;
+}
+static int32_t vn_cnt_get(CntEnt *m, size_t mask, MLIR_ValueHandle k) {
+    if (k == MLIR_INVALID_HANDLE) return 1;
+    size_t h = (size_t)(((uint64_t)k * 0x9E3779B97F4A7C15ull) >> 16) & mask;
+    while (m[h].k != MLIR_INVALID_HANDLE) {
+        if (m[h].k == k) return m[h].v;
+        h = (h + 1) & mask;
+    }
+    return 0;
+}
+
+static void wmir_value_number(MLIR_Context *ctx, MLIR_RegionHandle region) {
+    if (getenv("WMIR_NO_GVN")) return;
+    size_t nb = MLIR_GetRegionNumBlocks(region);
+    if (nb == 0) return;
+
+    size_t total = 0;
+    for (size_t bi = 0; bi < nb; bi++)
+        total += MLIR_GetBlockNumOps(MLIR_GetRegionBlock(region, bi));
+    if (total == 0) return;
+
+    size_t cap = 16;
+    while (cap < total * 2) cap <<= 1;
+    size_t mask = cap - 1;
+
+    SimpEnt *rmap = (SimpEnt *)calloc(cap, sizeof(*rmap));   // result -> canonical
+    VNEnt   *pure = (VNEnt *)calloc(cap, sizeof(*pure));
+    VNEnt   *load = (VNEnt *)calloc(cap, sizeof(*load));
+    MLIR_OpHandle *erase = (MLIR_OpHandle *)malloc(total * sizeof(*erase));
+    if (!rmap || !pure || !load || !erase) {
+        free(rmap); free(pure); free(load); free(erase); return;
+    }
+    size_t nerase = 0;
+    uint32_t pgen = 0, lgen = 0;
+
+    for (size_t bi = 0; bi < nb; bi++) {
+        MLIR_BlockHandle blk = MLIR_GetRegionBlock(region, bi);
+        pgen++; lgen++;                       // reset both caches at block entry
+        size_t no = MLIR_GetBlockNumOps(blk);
+        for (size_t oi = 0; oi < no; oi++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(blk, oi);
+            MLIR_OpType t = MLIR_GetOpType(op);
+
+            if (vn_writes_memory(t)) { lgen++; continue; }
+
+            if (t == OP_TYPE_WMIR_LOAD) {
+                MLIR_ValueHandle addr =
+                    simp_resolve(rmap, mask, MLIR_GetOpOperand(op, 0));
+                MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
+                int64_t off = at_i(op, "memory_offset");
+                int64_t sz  = at_i(op, "mem_size");
+                int64_t disc = (off << 8) | (sz & 0xff);
+                bool found;
+                MLIR_ValueHandle canon = vn_lookup_insert(
+                    load, mask, lgen, (int)t, vn_width(ctx, res), disc,
+                    addr, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, res, &found);
+                if (found) { simp_put(rmap, mask, res, canon); erase[nerase++] = op; }
+                continue;
+            }
+
+            if (!vn_is_pure(t)) continue;
+
+            MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
+            size_t nop = MLIR_GetOpNumOperands(op);
+            MLIR_ValueHandle a = nop > 0 ?
+                simp_resolve(rmap, mask, MLIR_GetOpOperand(op, 0)) : MLIR_INVALID_HANDLE;
+            MLIR_ValueHandle b = nop > 1 ?
+                simp_resolve(rmap, mask, MLIR_GetOpOperand(op, 1)) : MLIR_INVALID_HANDLE;
+            MLIR_ValueHandle c = nop > 2 ?
+                simp_resolve(rmap, mask, MLIR_GetOpOperand(op, 2)) : MLIR_INVALID_HANDLE;
+            if (vn_is_commutative(t) && (uintptr_t)a > (uintptr_t)b) {
+                MLIR_ValueHandle tmp = a; a = b; b = tmp;
+            }
+            int64_t disc = 0;
+            if (t == OP_TYPE_WMIR_ICMP) {
+                string p = at_s(op, "pred");
+                uint64_t ph = 1469598103934665603ull;
+                for (size_t i = 0; i < p.size; i++) ph = vn_mix(ph, (uint8_t)p.str[i]);
+                disc = (int64_t)ph;
+            } else if (t == OP_TYPE_WMIR_CONST) {
+                disc = at_i(op, "value");
+            } else if (t == OP_TYPE_WMIR_SEXT || t == OP_TYPE_WMIR_ZEXT ||
+                       t == OP_TYPE_WMIR_TRUNC) {
+                disc = at_i(op, "src_bits");
+            }
+            bool found;
+            MLIR_ValueHandle canon = vn_lookup_insert(
+                pure, mask, pgen, (int)t, vn_width(ctx, res), disc,
+                a, b, c, res, &found);
+            if (found) { simp_put(rmap, mask, res, canon); erase[nerase++] = op; }
+        }
+    }
+
+    if (nerase > 0) {
+        // Repoint every flat operand (regular + successor block-arg) that
+        // references a forwarded result onto its canonical value.
+        for (size_t bi = 0; bi < nb; bi++) {
+            MLIR_BlockHandle blk = MLIR_GetRegionBlock(region, bi);
+            size_t no = MLIR_GetBlockNumOps(blk);
+            for (size_t oi = 0; oi < no; oi++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(blk, oi);
+                size_t nf = simp_flat_count(op);
+                for (size_t i = 0; i < nf; i++) {
+                    MLIR_ValueHandle cur = simp_flat_get(op, i);
+                    MLIR_ValueHandle r = simp_resolve(rmap, mask, cur);
+                    if (r != cur) MLIR_SetOpOperand(ctx, op, i, r);
+                }
+            }
+        }
+        for (size_t k = 0; k < nerase; k++) MLIR_EraseOp(ctx, erase[k]);
+    }
+
+    // --- Dead-code elimination -------------------------------------------
+    // Remove side-effect-free ops whose result is now unused (dead code from
+    // the input plus operand subtrees orphaned by the forwarding above). Uses
+    // a use-count map and a worklist: erasing an op decrements its operands'
+    // counts, which may expose further dead ops. Only single-result,
+    // side-effect-free opcodes are eligible; stores, calls, global.set,
+    // memory.grow, data_init and terminators are always kept.
+    {
+        // Collect the live ops and seed use counts.
+        CntEnt *cnt = (CntEnt *)calloc(cap, sizeof(*cnt));
+        if (cnt) {
+            for (size_t bi = 0; bi < nb; bi++) {
+                MLIR_BlockHandle blk = MLIR_GetRegionBlock(region, bi);
+                size_t no = MLIR_GetBlockNumOps(blk);
+                for (size_t oi = 0; oi < no; oi++) {
+                    MLIR_OpHandle op = MLIR_GetBlockOp(blk, oi);
+                    size_t nf = simp_flat_count(op);
+                    for (size_t i = 0; i < nf; i++)
+                        vn_cnt_inc(cnt, mask, simp_flat_get(op, i), 1);
+                }
+            }
+            // Worklist of dead-eligible ops to erase.
+            MLIR_OpHandle *work = (MLIR_OpHandle *)malloc(total * sizeof(*work));
+            size_t nwork = 0;
+            for (size_t bi = 0; bi < nb && work; bi++) {
+                MLIR_BlockHandle blk = MLIR_GetRegionBlock(region, bi);
+                size_t no = MLIR_GetBlockNumOps(blk);
+                for (size_t oi = 0; oi < no; oi++) {
+                    MLIR_OpHandle op = MLIR_GetBlockOp(blk, oi);
+                    if (!vn_dce_eligible(MLIR_GetOpType(op))) continue;
+                    if (vn_cnt_get(cnt, mask, MLIR_GetOpResult(op, 0)) == 0)
+                        work[nwork++] = op;
+                }
+            }
+            for (size_t w = 0; w < nwork; w++) {
+                MLIR_OpHandle op = work[w];
+                // Decrement operand use counts; an operand that drops to 0 and
+                // is itself dead-eligible joins the worklist.
+                size_t nf = simp_flat_count(op);
+                for (size_t i = 0; i < nf; i++) {
+                    MLIR_ValueHandle v = simp_flat_get(op, i);
+                    if (vn_cnt_inc(cnt, mask, v, -1) == 0) {
+                        MLIR_OpHandle d = MLIR_GetValueDefiningOp(v);
+                        if (d && vn_dce_eligible(MLIR_GetOpType(d)) &&
+                            MLIR_GetOpResult(d, 0) == v)
+                            work[nwork++] = d;
+                    }
+                }
+                MLIR_EraseOp(ctx, op);
+            }
+            free(work);
+            free(cnt);
+        }
+    }
+
+    free(rmap); free(pure); free(load); free(erase);
+}
+
 // Translate a wasm value-type byte to the matching MLIR integer / float
 // type used inside wmir. *Note*: f32 / f64 wasm values are carried by
 // i32 / i64 bit-pattern wmir values throughout the pipeline. The actual
@@ -1877,6 +2175,11 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
     // icmp_ne(b,0)) that the frontend emits around comparisons. Matches
     // what an optimising wasm JIT does, shrinking hot compare/branch code.
     wmir_simplify_bools(ctx, dst_region);
+
+    // Local value numbering (CSE) + redundant-load elimination. Removes the
+    // repeated address arithmetic and field reloads the wasm frontend leaves
+    // behind, cutting op count and (more importantly) register pressure.
+    wmir_value_number(ctx, dst_region);
 
     MLIR_AttributeHandle attrs[6];
     size_t na = 0;
