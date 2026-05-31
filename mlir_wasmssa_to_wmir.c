@@ -493,6 +493,138 @@ typedef struct {
     MLIR_OpHandle a, b;     // b may be MLIR_INVALID_HANDLE (single const)
 } SimpInsert;
 
+// ---- WMIR_STATS=1 diagnostic: size each missing-optimization opportunity ----
+static long g_st_total, g_st_sext, g_st_zext, g_st_trunc, g_st_ext_redundant;
+static long g_st_load, g_st_store, g_st_div, g_st_div_const, g_st_div_nonpow2;
+static long g_st_mul_const_nonpow2, g_st_funcs, g_st_blocks;
+static long g_st_load_distinct, g_st_load_redundant_ub;
+static long g_st_load_redundant_real;
+static bool g_st_registered;
+
+static void wmir_stats_dump(void) {
+    fprintf(stderr,
+        "\n=== WMIR_STATS (post-optimization, what the backend emits) ===\n"
+        "  funcs=%ld blocks=%ld total_ops=%ld\n"
+        "  sext=%ld zext=%ld trunc=%ld  (extends+trunc = %ld, %.1f%% of ops)\n"
+        "    of which operand is already an extend/trunc (redundant): %ld\n"
+        "  load=%ld store=%ld  (loads = %.1f%% of ops; cross-block reload cand.)\n"
+        "    same-addr reloads (upper bound, ignores stores): %ld over %ld distinct addrs\n"
+        "    same-addr reloads (coarse alias: any store/call kills cache): %ld\n"
+        "  div/rem total=%ld  const-divisor=%ld  non-pow2-const=%ld (magic-num cand.)\n"
+        "  imul const non-pow2=%ld (shift/add strength-reduce cand.)\n",
+        g_st_funcs, g_st_blocks, g_st_total,
+        g_st_sext, g_st_zext, g_st_trunc, g_st_sext + g_st_zext + g_st_trunc,
+        g_st_total ? 100.0 * (g_st_sext + g_st_zext + g_st_trunc) / g_st_total : 0.0,
+        g_st_ext_redundant,
+        g_st_load, g_st_store,
+        g_st_total ? 100.0 * g_st_load / g_st_total : 0.0,
+        g_st_load_redundant_ub, g_st_load_distinct,
+        g_st_load_redundant_real,
+        g_st_div, g_st_div_const, g_st_div_nonpow2,
+        g_st_mul_const_nonpow2);
+}
+
+static void wmir_stats(MLIR_Context *ctx, MLIR_RegionHandle region) {
+    if (!getenv("WMIR_STATS")) return;
+    if (!g_st_registered) { atexit(wmir_stats_dump); g_st_registered = true; }
+    (void)ctx;
+    size_t nb = MLIR_GetRegionNumBlocks(region);
+    g_st_funcs++;
+    g_st_blocks += nb;
+    // Per-function set of (load address value, width) keys to upper-bound the
+    // cross-block redundant-load opportunity. Address values are function-global
+    // SSA handles already canonicalized by GVN, so equal handle == same address.
+    size_t lcap = 16, ltot = 0;
+    for (size_t bi = 0; bi < nb; bi++)
+        ltot += MLIR_GetBlockNumOps(MLIR_GetRegionBlock(region, bi));
+    while (lcap < ltot * 2 + 16) lcap <<= 1;
+    uint64_t *lkey = (uint64_t *)calloc(lcap, sizeof(*lkey));
+    uint64_t *rkey = (uint64_t *)calloc(lcap, sizeof(*rkey));  // cleared on store/call
+    size_t rcount = 0;
+    for (size_t bi = 0; bi < nb; bi++) {
+        MLIR_BlockHandle blk = MLIR_GetRegionBlock(region, bi);
+        size_t no = MLIR_GetBlockNumOps(blk);
+        for (size_t oi = 0; oi < no; oi++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(blk, oi);
+            MLIR_OpType t = MLIR_GetOpType(op);
+            g_st_total++;
+            if (t == OP_TYPE_WMIR_SEXT || t == OP_TYPE_WMIR_ZEXT ||
+                t == OP_TYPE_WMIR_TRUNC) {
+                if (t == OP_TYPE_WMIR_SEXT) g_st_sext++;
+                else if (t == OP_TYPE_WMIR_ZEXT) g_st_zext++;
+                else g_st_trunc++;
+                if (MLIR_GetOpNumOperands(op) >= 1) {
+                    MLIR_OpHandle d = MLIR_GetValueDefiningOp(MLIR_GetOpOperand(op, 0));
+                    if (d) {
+                        MLIR_OpType dt = MLIR_GetOpType(d);
+                        if (dt == OP_TYPE_WMIR_SEXT || dt == OP_TYPE_WMIR_ZEXT ||
+                            dt == OP_TYPE_WMIR_TRUNC)
+                            g_st_ext_redundant++;
+                    }
+                }
+            } else if (t == OP_TYPE_WMIR_LOAD) {
+                g_st_load++;
+                if (lkey && MLIR_GetOpNumOperands(op) >= 1) {
+                    uint64_t a = (uint64_t)MLIR_GetOpOperand(op, 0);
+                    int w = simp_width(ctx, MLIR_GetOpResult(op, 0));
+                    uint64_t k = (a * 0x9E3779B97F4A7C15ull) ^ (uint64_t)w;
+                    if (k == 0) k = 1;
+                    size_t h = (size_t)(k >> 40) & (lcap - 1);
+                    bool found = false;
+                    while (lkey[h] != 0) {
+                        if (lkey[h] == k) { found = true; break; }
+                        h = (h + 1) & (lcap - 1);
+                    }
+                    if (found) g_st_load_redundant_ub++;
+                    else { lkey[h] = k; g_st_load_distinct++; }
+                    if (rkey) {
+                        size_t h2 = (size_t)(k >> 40) & (lcap - 1);
+                        bool f2 = false;
+                        while (rkey[h2] != 0) {
+                            if (rkey[h2] == k) { f2 = true; break; }
+                            h2 = (h2 + 1) & (lcap - 1);
+                        }
+                        if (f2) g_st_load_redundant_real++;
+                        else { rkey[h2] = k; rcount++; }
+                    }
+                }
+            } else if (t == OP_TYPE_WMIR_STORE) {
+                g_st_store++;
+                if (rkey && rcount) { memset(rkey, 0, lcap * sizeof(*rkey)); rcount = 0; }
+            } else if (t == OP_TYPE_WMIR_UDIV || t == OP_TYPE_WMIR_SDIV ||
+                       t == OP_TYPE_WMIR_UREM || t == OP_TYPE_WMIR_SREM) {
+                g_st_div++;
+                int64_t dv;
+                if (MLIR_GetOpNumOperands(op) == 2 &&
+                    simp_const_val(MLIR_GetOpOperand(op, 1), &dv)) {
+                    g_st_div_const++;
+                    int w = simp_width(ctx, MLIR_GetOpResult(op, 0));
+                    uint64_t u = (uint64_t)dv & simp_wmask(w);
+                    if (simp_log2_pow2(u) < 0) g_st_div_nonpow2++;
+                }
+            } else if (t == OP_TYPE_WMIR_IMUL) {
+                int64_t mv;
+                if (MLIR_GetOpNumOperands(op) == 2) {
+                    MLIR_ValueHandle a = MLIR_GetOpOperand(op, 0);
+                    MLIR_ValueHandle b = MLIR_GetOpOperand(op, 1);
+                    int64_t cv;
+                    bool ca = simp_const_val(a, &cv);
+                    bool cb = simp_const_val(b, &mv);
+                    if ((ca || cb)) {
+                        int w = simp_width(ctx, MLIR_GetOpResult(op, 0));
+                        uint64_t u = (uint64_t)(cb ? mv : cv) & simp_wmask(w);
+                        if (simp_log2_pow2(u) < 0) g_st_mul_const_nonpow2++;
+                    }
+                }
+            } else if (t == OP_TYPE_WMIR_CALL) {
+                if (rkey && rcount) { memset(rkey, 0, lcap * sizeof(*rkey)); rcount = 0; }
+            }
+        }
+    }
+    free(lkey);
+    free(rkey);
+}
+
 static void wmir_simplify(MLIR_Context *ctx, MLIR_RegionHandle region) {
     bool do_cf  = (getenv("WMIR_NO_CONSTFOLD") == NULL);
     bool do_alg = (getenv("WMIR_NO_ALGEBRAIC") == NULL);
@@ -2601,6 +2733,10 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
     // repeated address arithmetic and field reloads the wasm frontend leaves
     // behind, cutting op count and (more importantly) register pressure.
     wmir_value_number(ctx, dst_region);
+
+    // WMIR_STATS=1: tally remaining optimization opportunities (extends, loads,
+    // const divides) after all our passes, to size the gap vs Cranelift.
+    wmir_stats(ctx, dst_region);
 
     MLIR_AttributeHandle attrs[6];
     size_t na = 0;
