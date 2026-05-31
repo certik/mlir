@@ -184,6 +184,9 @@ typedef struct {
                                     // ordered before the header that defines the phi); the
                                     // live interval must cover that earlier position too.
     uint32_t         last_use_pos;  // 0 if no use seen yet
+    uint64_t         use_weight;    // sum over uses of 8^(loop depth at use);
+                                    // the spill-victim selection keeps the
+                                    // highest-weight (hottest) values in regs.
     bool             crosses_call;
     bool             is_const;      // result of a wmir.const (rematerializable)
     bool             c_is_i64;      // is_const: 1 if i64 else 0
@@ -294,6 +297,59 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
         }
         block_last_pos[bi] = pos;  // exclusive
     }
+
+    // --- 1b. Per-block loop nesting depth (for spill weights). ---
+    // Detect back-edges and count, for each block, how many loops contain it.
+    // A branch edge src->tgt with tgt's linear index <= src's is treated as a
+    // back-edge (wasm-derived CFGs are reducible and emit loop bodies as a
+    // contiguous index range [header..back-edge source]). For each back-edge we
+    // bump a difference array over [tgt_idx, src_idx]; the prefix sum is the
+    // nesting depth. This is a heuristic — it only steers spill choices, never
+    // correctness — so an occasional irreducible miscount is harmless.
+    uint32_t *loop_depth = calloc(n_blocks ? n_blocks : 1, sizeof(uint32_t));
+    {
+        // Open-addressing block-handle -> index map (O(1) successor lookup).
+        size_t hc = 16; while (hc < n_blocks * 2) hc *= 2;
+        MLIR_BlockHandle *hk = calloc(hc, sizeof(*hk));
+        uint32_t *hv = malloc(hc * sizeof(*hv));
+        size_t hmask = hc - 1;
+        for (size_t bi = 0; bi < n_blocks; bi++) {
+            size_t p = (size_t)vmap_hash((MLIR_ValueHandle)blocks[bi]) & hmask;
+            while (hk[p] != 0) p = (p + 1) & hmask;
+            hk[p] = blocks[bi]; hv[p] = (uint32_t)bi;
+        }
+        int64_t *delta = calloc(n_blocks + 1, sizeof(int64_t));
+        for (size_t bi = 0; bi < n_blocks; bi++) {
+            MLIR_BlockHandle b = blocks[bi];
+            size_t no = MLIR_GetBlockNumOps(b);
+            for (size_t i = 0; i < no; i++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(b, i);
+                size_t ns = MLIR_GetOpNumSuccessors(op);
+                for (size_t s = 0; s < ns; s++) {
+                    MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(op, s);
+                    size_t p = (size_t)vmap_hash((MLIR_ValueHandle)tgt) & hmask;
+                    uint32_t tidx = UINT32_MAX;
+                    while (hk[p] != 0) {
+                        if (hk[p] == tgt) { tidx = hv[p]; break; }
+                        p = (p + 1) & hmask;
+                    }
+                    if (tidx != UINT32_MAX && tidx <= (uint32_t)bi) {
+                        delta[tidx]    += 1;
+                        delta[bi + 1]  -= 1;
+                    }
+                }
+            }
+        }
+        int64_t acc = 0;
+        for (size_t bi = 0; bi < n_blocks; bi++) {
+            acc += delta[bi];
+            loop_depth[bi] = acc < 0 ? 0 : (uint32_t)acc;
+        }
+        free(delta); free(hk); free(hv);
+    }
+    // Weighted cost of one use at the given loop depth (8^depth, capped so the
+    // 64-bit accumulator can never overflow even with absurd nesting).
+    #define USE_WEIGHT_AT(d) (1ull << (((d) * 3u) < 60u ? ((d) * 3u) : 60u))
 
     // --- 2. Liveness dataflow. ---
     // For each block we maintain live_in and live_out bitsets sized
@@ -416,6 +472,7 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
         }
         // Walk ops in-order to refine intra-block last uses.
         uint32_t op_pos = block_first_pos[bi];
+        uint64_t w = USE_WEIGHT_AT(loop_depth[bi]);
         size_t no = MLIR_GetBlockNumOps(b);
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(b, i);
@@ -427,6 +484,7 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
                         vinfo[vi].last_use_pos = op_pos;
                     if (op_pos < vinfo[vi].first_pos)
                         vinfo[vi].first_pos = op_pos;
+                    vinfo[vi].use_weight += w;
                 }
             }
             size_t ns = MLIR_GetOpNumSuccessors(op);
@@ -440,6 +498,7 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
                             vinfo[vi].last_use_pos = op_pos;
                         if (op_pos < vinfo[vi].first_pos)
                             vinfo[vi].first_pos = op_pos;
+                        vinfo[vi].use_weight += w;
                     }
                     // The branch STORES the k-th successor operand into the
                     // successor block's k-th block-arg home. That write
@@ -717,17 +776,42 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
             continue;
         }
 
-        // No free eligible reg. Among the active intervals occupying an
-        // ELIGIBLE register, evict the one with the latest end — unless
-        // the current value ends even later (then spill it to a slot).
+        // No free eligible reg. Choose a spill victim among {current value}
+        // ∪ {active intervals occupying an ELIGIBLE register} that minimises
+        // reload TRAFFIC: spill the one with the LOWEST use weight (fewest
+        // weighted uses → cheapest to reload). This keeps hot / deep-loop
+        // values resident, unlike the old latest-end (Belady) rule which only
+        // minimised the spill COUNT. Tie-break on the latest end so equally
+        // cold values still favour fewer spills. Set WMIR_OLD_SPILL=1 to fall
+        // back to the latest-end rule (A/B measurement).
+        bool old_spill = getenv("WMIR_OLD_SPILL") != NULL;
         size_t   evict_a   = (size_t)-1;
-        uint32_t evict_end = 0;
-        for (size_t a = 0; a < n_active; a++) {
-            if (callee_only && !POOL_CALLSAFE[active[a].pool_idx]) continue;
-            uint32_t e = vinfo[active[a].vi].last_use_pos;
-            if (evict_a == (size_t)-1 || e > evict_end) { evict_end = e; evict_a = a; }
+        if (old_spill) {
+            uint32_t evict_end = 0;
+            for (size_t a = 0; a < n_active; a++) {
+                if (callee_only && !POOL_CALLSAFE[active[a].pool_idx]) continue;
+                uint32_t e = vinfo[active[a].vi].last_use_pos;
+                if (evict_a == (size_t)-1 || e > evict_end) { evict_end = e; evict_a = a; }
+            }
+            if (evict_a != (size_t)-1 && evict_end <= vp->last_use_pos)
+                evict_a = (size_t)-1;  // current ends latest → spill current
+        } else {
+            uint64_t best_w = 0; uint32_t best_end = 0;
+            for (size_t a = 0; a < n_active; a++) {
+                if (callee_only && !POOL_CALLSAFE[active[a].pool_idx]) continue;
+                uint64_t w = vinfo[active[a].vi].use_weight;
+                uint32_t e = vinfo[active[a].vi].last_use_pos;
+                if (evict_a == (size_t)-1 || w < best_w ||
+                    (w == best_w && e > best_end)) {
+                    evict_a = a; best_w = w; best_end = e;
+                }
+            }
+            // Only evict if the victim is strictly cheaper to reload than the
+            // current value; otherwise spill the current value itself.
+            if (evict_a != (size_t)-1 && best_w >= vp->use_weight)
+                evict_a = (size_t)-1;
         }
-        if (evict_a != (size_t)-1 && evict_end > vp->last_use_pos) {
+        if (evict_a != (size_t)-1) {
             // Spill the evicted one; take its register.
             uint32_t evict_vi  = active[evict_a].vi;
             uint8_t  reg       = active[evict_a].reg;
@@ -801,7 +885,7 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
     free(sactive); free(free_slots);
     free(live_in); free(live_out); free(gen); free(kill); free(scratch);
     free(block_first_pos); free(block_last_pos); free(blocks);
-    free(vinfo);
+    free(vinfo); free(loop_depth);
     bmap_free(&bmap); vmap_free(&vmap);
     return ra;
 
@@ -812,7 +896,7 @@ fail_slot_overflow:
     free(sactive); free(free_slots);
     free(live_in); free(live_out); free(gen); free(kill); free(scratch);
     free(block_first_pos); free(block_last_pos); free(blocks);
-    free(vinfo);
+    free(vinfo); free(loop_depth);
     bmap_free(&bmap); vmap_free(&vmap);
     wmir_regalloc_free(ra);
     return NULL;
