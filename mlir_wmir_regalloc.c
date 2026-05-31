@@ -515,21 +515,36 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
     // ONLY x24/x25 (else they fall back to a stack slot). They are
     // placed last in the pool so non-crossing values prefer the others
     // and leave x24/x25 available for the call-crossing case.
-    // Effective pool: x12..x15, x19..x23, x26, then x24, x25 → 12-deep.
+    //
+    // x0..x8 are the AAPCS argument/result registers. They are caller-
+    // saved (every call clobbers them), so a `crosses_call` value may not
+    // live there — but the vast majority of values are short-lived and
+    // call-free, so adding x0..x8 roughly doubles the usable pool and cuts
+    // spill traffic dramatically. They are NOT scratch for ordinary op
+    // lowering (which only uses x9/x10/x11 and the x16/x17 rebase pair),
+    // and the call-arg / entry-param / call-result paths route through a
+    // general parallel-move resolver, so an operand homed in an arg reg
+    // never clobbers another live arg. They come first in the pool so
+    // they are preferred over the callee-saved registers (which then need
+    // prologue save/restore only under real pressure).
+    // Effective pool: x0..x8, x12..x15, x19..x23, x26, then x24, x25 → 21.
     //
     // To disable register allocation entirely (debugging aid that
     // forces every value to a stack slot), set WMIR_NO_REGALLOC=1
     // in the environment.
-    static const uint8_t POOL[] = { 12, 13, 14, 15,
+    static const uint8_t POOL[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8,
+                                    12, 13, 14, 15,
                                     19, 20, 21, 22, 23, 26,
                                     24, 25 };
     // Parallel marker: is POOL[i] safe to hold a value across a call?
-    // x24/x25 are call-safe because no synthesised runtime shim touches
-    // them. x19..x23 are now also call-safe: every hand-written shim that
-    // uses them (printf, fd_write, fd_read, fd_seek, fd_tell, path_open)
-    // saves/restores them per the AAPCS. x26 stays non-call-safe — it is
-    // the data_priv base register set up in synth_start.
-    static const bool POOL_CALLSAFE[] = { 0, 0, 0, 0,
+    // x0..x8 and x12..x15 are caller-saved -> NOT call-safe. x24/x25 are
+    // call-safe because no synthesised runtime shim touches them. x19..x23
+    // are also call-safe: every hand-written shim that uses them (printf,
+    // fd_write, fd_read, fd_seek, fd_tell, path_open) saves/restores them
+    // per the AAPCS. x26 stays non-call-safe — it is the data_priv base
+    // register set up in synth_start.
+    static const bool POOL_CALLSAFE[] = { 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                          0, 0, 0, 0,
                                           1, 1, 1, 1, 1, 0,
                                           1, 1 };
     size_t POOL_N = sizeof(POOL) / sizeof(POOL[0]);

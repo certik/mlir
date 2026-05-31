@@ -759,8 +759,10 @@ typedef struct {
 // Emit a single src->dst move for the parallel-move resolver. A slot->slot
 // move (or a const/slot source feeding a slot dest) is routed through scratch
 // register x9; register and constant destinations are written directly.
+// `sp_bias` is added to every slot byte offset (non-zero when SP has been
+// lowered for outgoing stack-call arguments).
 static void emit_pmove(MLIR_Context *ctx, MLIR_BlockHandle blk,
-                       const BranchArgPair *p) {
+                       const BranchArgPair *p, uint32_t sp_bias) {
     bool i64 = p->is_i64;
     if (p->dst.kind == HOME_REG) {
         uint8_t rd = p->dst.idx;
@@ -770,8 +772,8 @@ static void emit_pmove(MLIR_Context *ctx, MLIR_BlockHandle blk,
             if (p->src.is_i64) emit_mov_imm64(ctx, blk, rd, (uint64_t)p->src.cval);
             else               emit_mov_imm32(ctx, blk, rd, (uint32_t)p->src.cval);
         } else { // HOME_SLOT
-            if (i64) emit_ldr_x(ctx, blk, rd, 31, (uint32_t)(p->src.idx * 8u));
-            else     emit_ldr_w(ctx, blk, rd, 31, (uint32_t)(p->src.idx * 8u));
+            if (i64) emit_ldr_x(ctx, blk, rd, 31, p->src.idx * 8u + sp_bias);
+            else     emit_ldr_w(ctx, blk, rd, 31, p->src.idx * 8u + sp_bias);
         }
         return;
     }
@@ -785,11 +787,72 @@ static void emit_pmove(MLIR_Context *ctx, MLIR_BlockHandle blk,
         else               emit_mov_imm32(ctx, blk, 9, (uint32_t)p->src.cval);
     } else { // HOME_SLOT
         r = 9;
-        if (i64) emit_ldr_x(ctx, blk, 9, 31, (uint32_t)(p->src.idx * 8u));
-        else     emit_ldr_w(ctx, blk, 9, 31, (uint32_t)(p->src.idx * 8u));
+        if (i64) emit_ldr_x(ctx, blk, 9, 31, p->src.idx * 8u + sp_bias);
+        else     emit_ldr_w(ctx, blk, 9, 31, p->src.idx * 8u + sp_bias);
     }
-    if (i64) emit_str_x(ctx, blk, r, 31, (uint32_t)(p->dst.idx * 8u));
-    else     emit_str_w(ctx, blk, r, 31, (uint32_t)(p->dst.idx * 8u));
+    if (i64) emit_str_x(ctx, blk, r, 31, p->dst.idx * 8u + sp_bias);
+    else     emit_str_w(ctx, blk, r, 31, p->dst.idx * 8u + sp_bias);
+}
+
+// Resolve a general parallel move described by `pairs[0..n)` (src/dst homes
+// and is_i64 already populated). Each pair's value moves from its src location
+// to its dst location, with all sources read as of their ORIGINAL contents.
+// Constant sources have no location and never conflict. A pair is safe to
+// emit when no other un-done pair still reads the destination's exact location
+// (same kind and index). When the remaining pairs form a cycle, break it by
+// saving one source value into scratch x10 and rewriting the pairs that read
+// that location to read x10 instead. Slot->slot moves ferry through scratch x9
+// (inside emit_pmove); x9 and x10 are distinct so the ferry never clobbers the
+// saved cycle value. `sp_bias` shifts every slot byte offset. Mutates `pairs`.
+static void resolve_parallel_move(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                                  BranchArgPair *pairs, size_t n,
+                                  uint32_t sp_bias) {
+    for (;;) {
+        bool any_remaining = false;
+        for (size_t k = 0; k < n; k++)
+            if (!pairs[k].done) { any_remaining = true; break; }
+        if (!any_remaining) break;
+
+        bool progress = false;
+        for (size_t k = 0; k < n; k++) {
+            if (pairs[k].done) continue;
+            bool blocked = false;
+            for (size_t j = 0; j < n; j++) {
+                if (j == k || pairs[j].done) continue;
+                if (pairs[j].src.kind == pairs[k].dst.kind &&
+                    pairs[j].src.idx  == pairs[k].dst.idx) { blocked = true; break; }
+            }
+            if (blocked) continue;
+            emit_pmove(ctx, blk, &pairs[k], sp_bias);
+            pairs[k].done = true;
+            progress = true;
+        }
+        if (progress) continue;
+
+        int cyc = -1;
+        for (size_t k = 0; k < n; k++)
+            if (!pairs[k].done &&
+                (pairs[k].src.kind == HOME_REG || pairs[k].src.kind == HOME_SLOT)) {
+                cyc = (int)k; break;
+            }
+        if (cyc < 0) break;  // only const sources left — cannot form a cycle
+        ValueHome loc = pairs[cyc].src;
+        if (loc.kind == HOME_SLOT) {
+            if (pairs[cyc].is_i64)
+                emit_ldr_x(ctx, blk, 10, 31, loc.idx * 8u + sp_bias);
+            else
+                emit_ldr_w(ctx, blk, 10, 31, loc.idx * 8u + sp_bias);
+        } else {
+            emit_mov_x(ctx, blk, 10, loc.idx);
+        }
+        for (size_t k = 0; k < n; k++) {
+            if (!pairs[k].done &&
+                pairs[k].src.kind == loc.kind && pairs[k].src.idx == loc.idx) {
+                pairs[k].src.kind = HOME_REG;
+                pairs[k].src.idx  = 10;
+            }
+        }
+    }
 }
 
 static void emit_branch_arg_copies(MLIR_Context *ctx, MLIR_BlockHandle blk,
@@ -816,62 +879,10 @@ static void emit_branch_arg_copies(MLIR_Context *ctx, MLIR_BlockHandle blk,
         pairs[k].done   = false;
     }
 
-    // General parallel move over {reg,slot} locations. Constant sources have
-    // no location and never conflict. With spill-slot reuse a destination slot
-    // may alias another pair's source slot, so the move order must read every
-    // source before its location is overwritten. A pair is safe to emit when
-    // no other un-done pair still reads the destination's exact location
-    // (same kind and index). When the remaining pairs form a cycle, break it
-    // by saving one source value into scratch x10 and rewriting the pairs that
-    // read that location to read x10 instead. Slot->slot moves ferry through
-    // scratch x9 (inside emit_pmove); x9 and x10 are distinct so the ferry
-    // never clobbers the saved cycle value.
-    for (;;) {
-        bool any_remaining = false;
-        for (size_t k = 0; k < n; k++)
-            if (!pairs[k].done) { any_remaining = true; break; }
-        if (!any_remaining) break;
-
-        bool progress = false;
-        for (size_t k = 0; k < n; k++) {
-            if (pairs[k].done) continue;
-            bool blocked = false;
-            for (size_t j = 0; j < n; j++) {
-                if (j == k || pairs[j].done) continue;
-                if (pairs[j].src.kind == pairs[k].dst.kind &&
-                    pairs[j].src.idx  == pairs[k].dst.idx) { blocked = true; break; }
-            }
-            if (blocked) continue;
-            emit_pmove(ctx, blk, &pairs[k]);
-            pairs[k].done = true;
-            progress = true;
-        }
-        if (progress) continue;
-
-        int cyc = -1;
-        for (size_t k = 0; k < n; k++)
-            if (!pairs[k].done &&
-                (pairs[k].src.kind == HOME_REG || pairs[k].src.kind == HOME_SLOT)) {
-                cyc = (int)k; break;
-            }
-        if (cyc < 0) break;  // only const sources left — cannot form a cycle
-        ValueHome loc = pairs[cyc].src;
-        if (loc.kind == HOME_SLOT) {
-            if (pairs[cyc].is_i64)
-                emit_ldr_x(ctx, blk, 10, 31, (uint32_t)(loc.idx * 8u));
-            else
-                emit_ldr_w(ctx, blk, 10, 31, (uint32_t)(loc.idx * 8u));
-        } else {
-            emit_mov_x(ctx, blk, 10, loc.idx);
-        }
-        for (size_t k = 0; k < n; k++) {
-            if (!pairs[k].done &&
-                pairs[k].src.kind == loc.kind && pairs[k].src.idx == loc.idx) {
-                pairs[k].src.kind = HOME_REG;
-                pairs[k].src.idx  = 10;
-            }
-        }
-    }
+    // General parallel move over {reg,slot} locations. With spill-slot reuse a
+    // destination slot may alias another pair's source slot, so the resolver
+    // must read every source before its location is overwritten.
+    resolve_parallel_move(ctx, blk, pairs, n, /*sp_bias=*/0);
     free(pairs);
 }
 
@@ -1027,42 +1038,49 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
     {
         MLIR_BlockHandle src_entry = MLIR_GetRegionBlock(src_region, 0);
         size_t n_params = MLIR_GetBlockNumArgs(src_entry);
-        for (size_t i = 0; i < n_params; i++) {
+        size_t reg_params = n_params < 8 ? n_params : 8;
+        // Reg params arrive in x0..x7. Move them to their homes with a general
+        // parallel move: now that x0..x8 are allocatable, a param's home may be
+        // a different arg register, so sequential moves could clobber an
+        // incoming value before it is read. SP is at its prologue position, so
+        // slot homes sit at [sp, #slot*8] (sp_bias 0).
+        if (reg_params > 0) {
+            BranchArgPair *ppairs = malloc(reg_params * sizeof(*ppairs));
+            size_t np = 0;
+            for (size_t i = 0; i < reg_params; i++) {
+                MLIR_ValueHandle pv = MLIR_GetBlockArg(src_entry, i);
+                ValueHome h;
+                if (!wmir_regalloc_lookup(ra, pv, &h)) continue;
+                ppairs[np].src.kind = HOME_REG;
+                ppairs[np].src.idx  = (uint8_t)i;
+                ppairs[np].dst      = h;
+                ppairs[np].is_i64   = is_i64(ctx, pv);
+                ppairs[np].done     = false;
+                np++;
+            }
+            resolve_parallel_move(ctx, entry_dst, ppairs, np, /*sp_bias=*/0);
+            free(ppairs);
+        }
+        // Stack-passed params (i>=8): caller put each at [old_sp, #(i-8)*8],
+        // which is [fp, #16 + (i-8)*8] from our frame (fp -> saved x29,
+        // fp+8 -> saved x30, fp+16 -> first stack arg). Done AFTER the reg
+        // move so a stack param whose home is an arg register does not clobber
+        // an incoming x0..x7 before it has been consumed.
+        for (size_t i = reg_params; i < n_params; i++) {
             MLIR_ValueHandle pv = MLIR_GetBlockArg(src_entry, i);
             ValueHome h;
             if (!wmir_regalloc_lookup(ra, pv, &h)) continue;
             bool i64 = is_i64(ctx, pv);
-            if (i < 8) {
-                // Param i arrives in xI (i64) or wI (i32). Move it to
-                // its home (mov if reg, str if slot). No-op if reg==i.
-                if (h.kind == HOME_REG) {
-                    if (h.idx != (uint8_t)i)
-                        emit_mov_x(ctx, entry_dst, h.idx, (uint8_t)i);
-                } else {
-                    // i64 params must be spilled as full 8 bytes; w0..w7 alone
-                    // would drop the upper half (caused ternary_i64 regression).
-                    if (i64)
-                        emit_str_x(ctx, entry_dst, (uint8_t)i, 31, (uint32_t)(h.idx * 8u));
-                    else
-                        emit_str_w(ctx, entry_dst, (uint8_t)i, 31, (uint32_t)(h.idx * 8u));
-                }
-            } else {
-                // Stack-passed param: caller put it at [old_sp, #(i-8)*8],
-                // which is at [fp, #16 + (i-8)*8] from our perspective
-                // (fp -> saved x29, fp+8 -> saved x30, fp+16 -> first
-                // stack arg). Bring it into a scratch reg first, then
-                // store / move to its home.
-                uint16_t fp_off = (uint16_t)(16u + (i - 8u) * 8u);
-                uint8_t scratch = 9;
-                if (h.kind == HOME_REG) scratch = h.idx;
-                if (i64) emit_ldr_x(ctx, entry_dst, scratch, /*rn=*/29, fp_off);
-                else     emit_ldr_w(ctx, entry_dst, scratch, /*rn=*/29, fp_off);
-                if (h.kind == HOME_SLOT) {
-                    if (i64)
-                        emit_str_x(ctx, entry_dst, scratch, 31, (uint32_t)(h.idx * 8u));
-                    else
-                        emit_str_w(ctx, entry_dst, scratch, 31, (uint32_t)(h.idx * 8u));
-                }
+            uint16_t fp_off = (uint16_t)(16u + (i - 8u) * 8u);
+            uint8_t scratch = 9;
+            if (h.kind == HOME_REG) scratch = h.idx;
+            if (i64) emit_ldr_x(ctx, entry_dst, scratch, /*rn=*/29, fp_off);
+            else     emit_ldr_w(ctx, entry_dst, scratch, /*rn=*/29, fp_off);
+            if (h.kind == HOME_SLOT) {
+                if (i64)
+                    emit_str_x(ctx, entry_dst, scratch, 31, (uint32_t)(h.idx * 8u));
+                else
+                    emit_str_w(ctx, entry_dst, scratch, 31, (uint32_t)(h.idx * 8u));
             }
         }
     }
@@ -1675,20 +1693,15 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                     wmir_regalloc_free(ra); bm_free(&bm);
                     return MLIR_INVALID_HANDLE;
                 }
-                // ABI arg regs x0..x7 are outside our allocation pool
-                // (which is x11..x18), so no operand's home register
-                // can collide with the target arg reg. Load reg args
-                // FIRST while SP is still at its "local slots" position.
-                for (size_t k = 0; k < reg_args; k++) {
-                    ld_operand_into_fixed(ctx, dst_blk, ra, op, k, (uint8_t)k);
-                }
+                // Stack args (operands 8+) are stored to the outgoing-arg
+                // area FIRST, while every operand still sits in its original
+                // home: the reg-arg parallel move below may clobber x0..x7,
+                // which are now allocatable homes. SP is lowered up front so
+                // the outgoing area is exposed; HOME_SLOT operands then sit at
+                // [sp, #stack_bytes + slot*8].
                 if (stack_bytes > 0) {
-                    // Shift SP down to expose the outgoing-arg area.
                     emit_sub_imm(ctx, dst_blk, /*rd=*/31, /*rn=*/31,
                                  (uint16_t)stack_bytes, /*sf=*/true);
-                    // Now [sp, #0..stack_bytes-1] is the outgoing arg
-                    // area, and any HOME_SLOT operand sits at
-                    // [sp, #stack_bytes + slot*8] because we moved sp.
                     for (size_t k = 8; k < na; k++) {
                         MLIR_ValueHandle v = MLIR_GetOpOperand(op, k);
                         ValueHome h;
@@ -1708,7 +1721,7 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                             else          emit_mov_imm32(ctx, dst_blk, src_reg, (uint32_t)h.cval);
                         } else {
                             src_reg = 9;
-                            uint32_t off = (uint32_t)stack_bytes + (uint32_t)h.idx * 8u;
+                            uint32_t off = stack_bytes + (uint32_t)h.idx * 8u;
                             if (i64) emit_ldr_x(ctx, dst_blk, src_reg, 31, off);
                             else     emit_ldr_w(ctx, dst_blk, src_reg, 31, off);
                         }
@@ -1716,6 +1729,25 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                         if (i64) emit_str_x(ctx, dst_blk, src_reg, 31, dst_off);
                         else     emit_str_w(ctx, dst_blk, src_reg, 31, dst_off);
                     }
+                }
+                // Reg args 0..reg_args-1 go into x0..x(reg_args-1) via a
+                // general parallel move: with x0..x8 now allocatable, an
+                // operand's home register may be a different arg register, so
+                // a sequential load could clobber a not-yet-read source. Slot
+                // sources sit at +stack_bytes because SP was lowered above.
+                if (reg_args > 0) {
+                    BranchArgPair *apairs = malloc(reg_args * sizeof(*apairs));
+                    for (size_t k = 0; k < reg_args; k++) {
+                        MLIR_ValueHandle v = MLIR_GetOpOperand(op, k);
+                        wmir_regalloc_lookup(ra, v, &apairs[k].src);
+                        apairs[k].dst.kind = HOME_REG;
+                        apairs[k].dst.idx  = (uint8_t)k;
+                        apairs[k].is_i64   = is_i64(ctx, v);
+                        apairs[k].done     = false;
+                    }
+                    resolve_parallel_move(ctx, dst_blk, apairs, reg_args,
+                                          /*sp_bias=*/stack_bytes);
+                    free(apairs);
                 }
                 string callee = at_s(op, "target");
                 if (callee.size == 0) callee = at_s(op, "callee");
