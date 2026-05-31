@@ -1110,7 +1110,12 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
     size_t nb = MLIR_GetRegionNumBlocks(body);
     for (size_t bi = 0; bi < nb; bi++) {
         MLIR_BlockHandle blk = MLIR_GetRegionBlock(body, bi);
-        if (bi != 0) buf_printf(out, "%s:\n", bname(&F, blk));
+        // Always emit the block label, including for the entry block: after
+        // mem2reg a phi in a successor block may name the entry block as an
+        // incoming predecessor (e.g. "[ 1, %entry ]"), which requires the
+        // entry block to carry an "entry:" label. LLVM permits this — the
+        // entry block simply may not be used as a branch *target*.
+        buf_printf(out, "%s:\n", bname(&F, blk));
         if (bi != 0) emit_phis(&F, blk, all, an);
         size_t nops = MLIR_GetBlockNumOps(blk);
         for (size_t oi = 0; oi < nops; oi++) {

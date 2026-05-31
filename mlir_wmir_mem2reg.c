@@ -260,14 +260,23 @@ static uintptr_t m2r_resolve_phi(M *m, uintptr_t r) {
 // a phi-ref, to a concrete materialised value handle.
 static MLIR_ValueHandle m2r_concrete(M *m, uintptr_t v) {
     uintptr_t cur = v;
-    for (int guard = 0; guard < (1 << 24); guard++) {
-        if (M2R_IS_PHI(cur)) break;
-        uintptr_t nx;
-        if (!hmap_get(&m->remap, cur, &nx)) break;
-        if (nx == cur) break;
-        cur = nx;
+    // Alternate remap-chasing (erased local_get result -> its reaching value)
+    // and trivial-phi resolution until a fixpoint. Both are needed because a
+    // promoted local's stored value can itself be an erased local_get of
+    // another promoted local (e.g. `local.set x, (local.get y)`), and a
+    // trivial phi can resolve to such an erased local_get result.
+    for (int guard = 0; guard < (1 << 26); guard++) {
+        uintptr_t before = cur;
+        for (int g2 = 0; g2 < (1 << 24); g2++) {
+            if (M2R_IS_PHI(cur)) break;
+            uintptr_t nx;
+            if (!hmap_get(&m->remap, cur, &nx)) break;
+            if (nx == cur) break;
+            cur = nx;
+        }
+        cur = m2r_resolve_phi(m, cur);
+        if (cur == before) break;
     }
-    cur = m2r_resolve_phi(m, cur);
     if (M2R_IS_PHI(cur)) return m->p_handle[M2R_PHI_ID(cur)];
     return (MLIR_ValueHandle)cur;
 }

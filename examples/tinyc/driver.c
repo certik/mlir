@@ -11,6 +11,7 @@
 #include <platform/platform.h>
 
 #include "mlir_api.h"
+#include "mlir_llvm_mem2reg.h"
 #include "mlir_llvm_to_wasmssa.h"
 #include "mlir_wasmssa_to_wasmstack.h"
 #include "mlir_wasm_to_wat.h"
@@ -491,6 +492,14 @@ int app_main(void) {
         arena_destroy(boot_arena);
         return 1;
     }
+
+    // Promote non-escaping `llvm.alloca` locals to SSA (mem2reg) on the flat
+    // cf CFG, before any lowering. This keeps non-address-taken locals out of
+    // the linear-memory shadow stack so the downstream register allocator can
+    // hold them in registers instead of spilling every access. Skippable via
+    // TINYC_NO_MEM2REG for A/B debugging.
+    if (!getenv("TINYC_NO_MEM2REG"))
+        mlir_llvm_mem2reg(&ctx, module);
 
     if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_wmir || emit_aarch64) {
         bool needs_wasm_lowering = emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_wmir || emit_aarch64;

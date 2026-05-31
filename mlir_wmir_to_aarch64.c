@@ -719,7 +719,6 @@ static void st_result_from_fixed(MLIR_Context *ctx, MLIR_BlockHandle blk,
 // into the target block's argument homes. Handles the four
 // {reg,slot} × {reg,slot} combinations and resolves reg→reg cycles
 // (e.g. swap) by routing the cycle break through scratch register x9.
-#define MAX_PAIRS 16
 typedef struct {
     ValueHome src;
     ValueHome dst;
@@ -736,33 +735,11 @@ static void emit_branch_arg_copies(MLIR_Context *ctx, MLIR_BlockHandle blk,
         // mismatched — caller already verifies/diagnoses this; bail.
         return;
     }
-    BranchArgPair pairs[MAX_PAIRS];
-    if (n > MAX_PAIRS) {
-        // Fallback: route every pair through scratch r9. Same as the
-        // pre-regalloc lowering. Safe for arbitrary fan-in.
-        for (size_t k = 0; k < n; k++) {
-            MLIR_ValueHandle src_v = MLIR_GetOpSuccessorOperand(op, succ_idx, k);
-            MLIR_ValueHandle dst_v = MLIR_GetBlockArg(target_src_block, k);
-            ValueHome sh, dh;
-            wmir_regalloc_lookup(ra, src_v, &sh);
-            wmir_regalloc_lookup(ra, dst_v, &dh);
-            bool i64 = is_i64(ctx, dst_v);
-            uint8_t r = 9;
-            if (sh.kind == HOME_REG) {
-                r = sh.idx;
-            } else {
-                if (i64) emit_ldr_x(ctx, blk, r, 31, (uint32_t)(sh.idx * 8u));
-                else     emit_ldr_w(ctx, blk, r, 31, (uint32_t)(sh.idx * 8u));
-            }
-            if (dh.kind == HOME_REG) {
-                if (dh.idx != r) emit_mov_x(ctx, blk, dh.idx, r);
-            } else {
-                if (i64) emit_str_x(ctx, blk, r, 31, (uint32_t)(dh.idx * 8u));
-                else     emit_str_w(ctx, blk, r, 31, (uint32_t)(dh.idx * 8u));
-            }
-        }
-        return;
-    }
+    // `n` is unbounded (mem2reg loop headers can have many block args), so
+    // size the work array dynamically and always run the correct phase-1/
+    // phase-2 parallel-move resolver below — there is no sequential
+    // fallback, which would clobber a register another pair still reads.
+    BranchArgPair *pairs = malloc(n * sizeof(*pairs));
     for (size_t k = 0; k < n; k++) {
         MLIR_ValueHandle src_v = MLIR_GetOpSuccessorOperand(op, succ_idx, k);
         MLIR_ValueHandle dst_v = MLIR_GetBlockArg(target_src_block, k);
@@ -802,7 +779,7 @@ static void emit_branch_arg_copies(MLIR_Context *ctx, MLIR_BlockHandle blk,
         for (size_t k = 0; k < n; k++) {
             if (!pairs[k].done) { any_remaining = true; break; }
         }
-        if (!any_remaining) return;
+        if (!any_remaining) { free(pairs); return; }
 
         bool progress = false;
         for (size_t k = 0; k < n; k++) {
@@ -837,7 +814,7 @@ static void emit_branch_arg_copies(MLIR_Context *ctx, MLIR_BlockHandle blk,
         for (size_t k = 0; k < n; k++) {
             if (!pairs[k].done && pairs[k].src.kind == HOME_REG) { cyc = (int)k; break; }
         }
-        if (cyc < 0) return;  // shouldn't reach here
+        if (cyc < 0) { free(pairs); return; }  // shouldn't reach here
         uint8_t cyc_src = pairs[cyc].src.idx;
         emit_mov_x(ctx, blk, 9, cyc_src);
         for (size_t k = 0; k < n; k++) {
