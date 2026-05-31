@@ -1439,33 +1439,76 @@ static DomInfo dom_compute(Arena *arena, MLIR_RegionHandle region,
     //                neighbor when has_virt is true.
     d.neighbors   = arena_new_array(arena, size_t *, d.n_total);
     d.n_neighbors = arena_new_array(arena, size_t,   d.n_total);
+    // Build a handle -> postorder-index hash over the real blocks so each
+    // CFG edge resolves in O(1) instead of a linear scan of po_blocks.
+    // Open addressing, power-of-two capacity, MLIR_INVALID_HANDLE (0) as the
+    // empty sentinel (real block handles are never 0). This turns the whole
+    // neighbor construction from O(n_blocks^2) into O(n_blocks + n_edges) --
+    // it was a dominant hot spot in the cf->scf lift (dom_compute).
+    size_t hcap = 8;
+    while (hcap < d.n_real * 2u + 1u) hcap <<= 1;
+    size_t hmask = hcap - 1u;
+    MLIR_BlockHandle *hk = arena_new_array(arena, MLIR_BlockHandle, hcap);
+    size_t *hv = arena_new_array(arena, size_t, hcap);
+    for (size_t t = 0; t < hcap; ++t) hk[t] = MLIR_INVALID_HANDLE;
     for (size_t i = 0; i < d.n_real; ++i) {
-        MLIR_BlockHandle b = d.po_blocks[i];
-        size_t cap = 8;
-        size_t *buf = arena_new_array(arena, size_t, cap);
-        size_t cnt = 0;
-        if (!is_post) {
-            size_t np = MLIR_GetBlockNumPredecessors(b);
-            for (size_t k = 0; k < np; ++k) {
-                MLIR_BlockHandle p = MLIR_GetBlockPredecessor(b, k, NULL);
-                size_t pi = SIZE_MAX;
-                for (size_t j = 0; j < d.n_real; ++j) if (d.po_blocks[j] == p) { pi = j; break; }
-                if (pi == SIZE_MAX) continue;
-                if (cnt == cap) {
-                    size_t nc = cap * 2;
-                    size_t *nb2 = arena_new_array(arena, size_t, nc);
-                    memcpy(nb2, buf, sizeof(size_t) * cnt);
-                    buf = nb2; cap = nc;
-                }
-                buf[cnt++] = pi;
+        MLIR_BlockHandle h = d.po_blocks[i];
+        size_t slot = (size_t)((uint64_t)h * 0x9E3779B97F4A7C15ull >> 32) & hmask;
+        while (hk[slot] != MLIR_INVALID_HANDLE) slot = (slot + 1u) & hmask;
+        hk[slot] = h; hv[slot] = i;
+    }
+    #define PO_INDEX_OF(H, OUT) do {                                          \
+        (OUT) = SIZE_MAX;                                                     \
+        MLIR_BlockHandle _h = (H);                                           \
+        if (_h != MLIR_INVALID_HANDLE) {                                     \
+            size_t _s = (size_t)((uint64_t)_h * 0x9E3779B97F4A7C15ull >> 32) \
+                        & hmask;                                             \
+            while (hk[_s] != MLIR_INVALID_HANDLE) {                          \
+                if (hk[_s] == _h) { (OUT) = hv[_s]; break; }                 \
+                _s = (_s + 1u) & hmask;                                      \
+            }                                                                \
+        }                                                                    \
+    } while (0)
+
+    if (!is_post) {
+        // Forward dominators: neighbors[j] = predecessors of po-block j.
+        // One O(n+E) pass: for each block i (a predecessor) and each of its
+        // successors s in postorder, append i to neighbors[po_index(s)].
+        for (size_t i = 0; i < d.n_real; ++i) d.n_neighbors[i] = 0;
+        for (size_t i = 0; i < d.n_real; ++i) {
+            MLIR_OpHandle term = MLIR_GetBlockTerminator(d.po_blocks[i]);
+            size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(term);
+            for (size_t k = 0; k < ns; ++k) {
+                size_t si; PO_INDEX_OF(MLIR_GetOpSuccessor(term, k), si);
+                if (si != SIZE_MAX) d.n_neighbors[si]++;
             }
-        } else {
+        }
+        for (size_t i = 0; i < d.n_real; ++i) {
+            d.neighbors[i] = d.n_neighbors[i]
+                ? arena_new_array(arena, size_t, d.n_neighbors[i]) : NULL;
+            d.n_neighbors[i] = 0;  // reused below as a fill cursor
+        }
+        for (size_t i = 0; i < d.n_real; ++i) {
+            MLIR_OpHandle term = MLIR_GetBlockTerminator(d.po_blocks[i]);
+            size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(term);
+            for (size_t k = 0; k < ns; ++k) {
+                size_t si; PO_INDEX_OF(MLIR_GetOpSuccessor(term, k), si);
+                if (si != SIZE_MAX) d.neighbors[si][d.n_neighbors[si]++] = i;
+            }
+        }
+    } else {
+        // Post-dominators: neighbors[i] = successors of po-block i (plus a
+        // virtual-exit neighbor for leaves). Already O(E); the hash removes
+        // the former linear po_blocks scan per edge.
+        for (size_t i = 0; i < d.n_real; ++i) {
+            MLIR_BlockHandle b = d.po_blocks[i];
+            size_t cap = 8;
+            size_t *buf = arena_new_array(arena, size_t, cap);
+            size_t cnt = 0;
             MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
             size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(term);
             for (size_t k = 0; k < ns; ++k) {
-                MLIR_BlockHandle s = MLIR_GetOpSuccessor(term, k);
-                size_t si = SIZE_MAX;
-                for (size_t j = 0; j < d.n_real; ++j) if (d.po_blocks[j] == s) { si = j; break; }
+                size_t si; PO_INDEX_OF(MLIR_GetOpSuccessor(term, k), si);
                 if (si == SIZE_MAX) continue;
                 if (cnt == cap) {
                     size_t nc = cap * 2;
@@ -1485,10 +1528,11 @@ static DomInfo dom_compute(Arena *arena, MLIR_RegionHandle region,
                 }
                 buf[cnt++] = po_n;  // virt index
             }
+            d.neighbors[i] = buf;
+            d.n_neighbors[i] = cnt;
         }
-        d.neighbors[i] = buf;
-        d.n_neighbors[i] = cnt;
     }
+    #undef PO_INDEX_OF
     if (need_virt) {
         d.neighbors[po_n] = NULL;
         d.n_neighbors[po_n] = 0;
