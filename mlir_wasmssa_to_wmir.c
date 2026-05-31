@@ -517,6 +517,178 @@ static int vn_intersect(const int *doms, int a, int b) {
     return a;
 }
 
+// Control-flow graph + dominator tree for a wmir function region. Blocks are
+// indexed by their position in the region. Successors/predecessors and the
+// dominator-tree children are stored as CSR adjacency. `idom[b]` is b's
+// immediate dominator block index (entry maps to itself; blocks unreachable
+// from the entry map to -1). Shared by the global-CSE and LICM passes.
+typedef struct {
+    size_t nb;
+    MLIR_BlockHandle *blocks;
+    size_t *succ_off, *succ;     // successor block indices ((size_t)-1 if unmapped)
+    size_t *pred_off, *pred;     // predecessor block indices
+    int    *idom;                // immediate dominator block index
+    size_t *ch_off, *ch;         // dominator-tree children block indices
+} VNCfg;
+
+static void vn_free_cfg(VNCfg *g) {
+    if (!g) return;
+    free(g->blocks); free(g->succ_off); free(g->succ);
+    free(g->pred_off); free(g->pred); free(g->idom);
+    free(g->ch_off); free(g->ch);
+    memset(g, 0, sizeof(*g));
+}
+
+// True iff block index `a` dominates block index `b` (walk b up the idom chain).
+static bool vn_dominates(const VNCfg *g, size_t a, size_t b) {
+    if (g->idom[b] < 0) return false;
+    for (;;) {
+        if (b == a) return true;
+        if (b == 0) return a == 0;        // reached the entry without meeting a
+        size_t nb = (size_t)g->idom[b];
+        if (nb == b) return false;        // self (entry) — done
+        b = nb;
+    }
+}
+
+static bool vn_build_cfg(MLIR_RegionHandle region, VNCfg *g) {
+    memset(g, 0, sizeof(*g));
+    size_t nb = MLIR_GetRegionNumBlocks(region);
+    g->nb = nb;
+    if (nb == 0) return true;
+
+    size_t bcap = 16;
+    while (bcap < nb * 2) bcap <<= 1;
+    size_t bmask = bcap - 1;
+
+    VNBIdx *bidx     = (VNBIdx *)calloc(bcap, sizeof(*bidx));
+    g->blocks        = (MLIR_BlockHandle *)malloc(nb * sizeof(*g->blocks));
+    g->succ_off      = (size_t *)calloc(nb + 1, sizeof(*g->succ_off));
+    g->pred_off      = (size_t *)calloc(nb + 1, sizeof(*g->pred_off));
+    int    *pon      = (int *)malloc(nb * sizeof(*pon));
+    size_t *order    = (size_t *)malloc(nb * sizeof(*order));
+    size_t *stk      = (size_t *)malloc(nb * sizeof(*stk));
+    size_t *it       = (size_t *)malloc(nb * sizeof(*it));
+    char   *seen     = (char *)calloc(nb, 1);
+    size_t *pfill    = (size_t *)malloc((nb + 1) * sizeof(*pfill));
+    g->idom          = (int *)malloc(nb * sizeof(*g->idom));
+    g->ch_off        = (size_t *)calloc(nb + 1, sizeof(*g->ch_off));
+    size_t *cfill    = (size_t *)malloc((nb + 1) * sizeof(*cfill));
+    if (!bidx || !g->blocks || !g->succ_off || !g->pred_off || !pon || !order ||
+        !stk || !it || !seen || !pfill || !g->idom || !g->ch_off || !cfill) {
+        free(bidx); free(pon); free(order); free(stk); free(it); free(seen);
+        free(pfill); free(cfill); vn_free_cfg(g); return false;
+    }
+
+    for (size_t bi = 0; bi < nb; bi++) {
+        MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
+        g->blocks[bi] = b;
+        size_t h = (size_t)(((uint64_t)(uintptr_t)b * 0x9E3779B97F4A7C15ull) >> 16) & bmask;
+        while (bidx[h].k != 0) h = (h + 1) & bmask;
+        bidx[h].k = (uintptr_t)b; bidx[h].v = bi;
+    }
+    for (size_t bi = 0; bi < nb; bi++) {
+        MLIR_OpHandle term = MLIR_GetBlockTerminator(g->blocks[bi]);
+        size_t ns = term == MLIR_INVALID_HANDLE ? 0 : MLIR_GetOpNumSuccessors(term);
+        g->succ_off[bi + 1] = ns;
+    }
+    for (size_t bi = 0; bi < nb; bi++) g->succ_off[bi + 1] += g->succ_off[bi];
+    size_t nsucc = g->succ_off[nb];
+    g->succ = (size_t *)malloc((nsucc ? nsucc : 1) * sizeof(*g->succ));
+    if (!g->succ) {
+        free(bidx); free(pon); free(order); free(stk); free(it); free(seen);
+        free(pfill); free(cfill); vn_free_cfg(g); return false;
+    }
+    for (size_t bi = 0; bi < nb; bi++) {
+        MLIR_OpHandle term = MLIR_GetBlockTerminator(g->blocks[bi]);
+        size_t ns = term == MLIR_INVALID_HANDLE ? 0 : MLIR_GetOpNumSuccessors(term);
+        for (size_t s = 0; s < ns; s++) {
+            size_t k = vn_bidx_get(bidx, bmask, MLIR_GetOpSuccessor(term, s));
+            g->succ[g->succ_off[bi] + s] = k;
+            if (k != (size_t)-1) g->pred_off[k + 1]++;
+        }
+    }
+    for (size_t bi = 0; bi < nb; bi++) g->pred_off[bi + 1] += g->pred_off[bi];
+    size_t npred = g->pred_off[nb];
+    g->pred = (size_t *)malloc((npred ? npred : 1) * sizeof(*g->pred));
+    if (!g->pred) {
+        free(bidx); free(pon); free(order); free(stk); free(it); free(seen);
+        free(pfill); free(cfill); vn_free_cfg(g); return false;
+    }
+    for (size_t bi = 0; bi <= nb; bi++) pfill[bi] = g->pred_off[bi];
+    for (size_t bi = 0; bi < nb; bi++)
+        for (size_t s = g->succ_off[bi]; s < g->succ_off[bi + 1]; s++) {
+            size_t k = g->succ[s];
+            if (k != (size_t)-1) g->pred[pfill[k]++] = bi;
+        }
+
+    // Postorder DFS from the entry (block 0).
+    for (size_t bi = 0; bi < nb; bi++) pon[bi] = -1;
+    size_t npo = 0, sp = 0;
+    stk[sp] = 0; it[sp] = g->succ_off[0]; seen[0] = 1; sp++;
+    while (sp > 0) {
+        size_t b = stk[sp - 1];
+        if (it[sp - 1] < g->succ_off[b + 1]) {
+            size_t c = g->succ[it[sp - 1]++];
+            if (c != (size_t)-1 && !seen[c]) {
+                seen[c] = 1; stk[sp] = c; it[sp] = g->succ_off[c]; sp++;
+            }
+        } else {
+            pon[b] = (int)npo; order[npo] = b; npo++; sp--;
+        }
+    }
+
+    // Iterative dominators (Cooper-Harvey-Kennedy) over postorder numbers.
+    int *doms = (int *)malloc((npo ? npo : 1) * sizeof(*doms));
+    if (!doms) {
+        free(bidx); free(pon); free(order); free(stk); free(it); free(seen);
+        free(pfill); free(cfill); vn_free_cfg(g); return false;
+    }
+    for (size_t i = 0; i < npo; i++) doms[i] = -1;
+    if (npo > 0) doms[npo - 1] = (int)(npo - 1);
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (ssize_t k = (ssize_t)npo - 2; k >= 0; k--) {
+            size_t b = order[k];
+            int new_idom = -1;
+            for (size_t j = g->pred_off[b]; j < g->pred_off[b + 1]; j++) {
+                size_t p = g->pred[j];
+                if (pon[p] < 0 || doms[pon[p]] == -1) continue;
+                new_idom = new_idom == -1 ? pon[p]
+                                          : vn_intersect(doms, pon[p], new_idom);
+            }
+            if (new_idom != -1 && doms[pon[b]] != new_idom) {
+                doms[pon[b]] = new_idom; changed = true;
+            }
+        }
+    }
+    for (size_t bi = 0; bi < nb; bi++)
+        g->idom[bi] = pon[bi] < 0 ? -1 : (int)order[doms[pon[bi]]];
+
+    // Dominator-tree children (CSR).
+    for (size_t i = 0; npo > 0 && i < npo - 1; i++) {
+        size_t b = order[i];
+        g->ch_off[(size_t)g->idom[b] + 1]++;
+    }
+    for (size_t bi = 0; bi < nb; bi++) g->ch_off[bi + 1] += g->ch_off[bi];
+    size_t nchild = g->ch_off[nb];
+    g->ch = (size_t *)malloc((nchild ? nchild : 1) * sizeof(*g->ch));
+    if (!g->ch) {
+        free(bidx); free(pon); free(order); free(stk); free(it); free(seen);
+        free(pfill); free(cfill); free(doms); vn_free_cfg(g); return false;
+    }
+    for (size_t bi = 0; bi <= nb; bi++) cfill[bi] = g->ch_off[bi];
+    for (size_t i = 0; npo > 0 && i < npo - 1; i++) {
+        size_t b = order[i];
+        g->ch[cfill[(size_t)g->idom[b]]++] = b;
+    }
+
+    free(bidx); free(pon); free(order); free(stk); free(it); free(seen);
+    free(pfill); free(cfill); free(doms);
+    return true;
+}
+
 static void wmir_value_number(MLIR_Context *ctx, MLIR_RegionHandle region) {
     if (getenv("WMIR_NO_GVN")) return;
     size_t nb = MLIR_GetRegionNumBlocks(region);
@@ -541,144 +713,9 @@ static void wmir_value_number(MLIR_Context *ctx, MLIR_RegionHandle region) {
     size_t nerase = 0;
     uint32_t lgen = 0;
 
-    // ---- Build the CFG (block index map, successors, predecessors) --------
-    VNBIdx *bidx = (VNBIdx *)calloc(cap, sizeof(*bidx));
-    MLIR_BlockHandle *blocks = (MLIR_BlockHandle *)malloc(nb * sizeof(*blocks));
-    size_t *succ_off = (size_t *)calloc(nb + 1, sizeof(*succ_off));
-    size_t *pred_off = (size_t *)calloc(nb + 1, sizeof(*pred_off));
-    if (!bidx || !blocks || !succ_off || !pred_off) {
-        free(bidx); free(blocks); free(succ_off); free(pred_off);
+    VNCfg g;
+    if (!vn_build_cfg(region, &g)) {
         free(rmap); free(pure); free(load); free(erase); return;
-    }
-    for (size_t bi = 0; bi < nb; bi++) {
-        MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
-        blocks[bi] = b;
-        size_t h = (size_t)(((uint64_t)(uintptr_t)b * 0x9E3779B97F4A7C15ull) >> 16) & mask;
-        while (bidx[h].k != 0) h = (h + 1) & mask;
-        bidx[h].k = (uintptr_t)b; bidx[h].v = bi;
-    }
-    for (size_t bi = 0; bi < nb; bi++) {
-        MLIR_OpHandle term = MLIR_GetBlockTerminator(blocks[bi]);
-        size_t ns = term == MLIR_INVALID_HANDLE ? 0 : MLIR_GetOpNumSuccessors(term);
-        succ_off[bi + 1] = ns;
-    }
-    for (size_t bi = 0; bi < nb; bi++) succ_off[bi + 1] += succ_off[bi];
-    size_t nsucc = succ_off[nb];
-    size_t *succ = (size_t *)malloc((nsucc ? nsucc : 1) * sizeof(*succ));
-    if (!succ) {
-        free(bidx); free(blocks); free(succ_off); free(pred_off);
-        free(rmap); free(pure); free(load); free(erase); return;
-    }
-    for (size_t bi = 0; bi < nb; bi++) {
-        MLIR_OpHandle term = MLIR_GetBlockTerminator(blocks[bi]);
-        size_t ns = term == MLIR_INVALID_HANDLE ? 0 : MLIR_GetOpNumSuccessors(term);
-        for (size_t s = 0; s < ns; s++) {
-            size_t k = vn_bidx_get(bidx, mask, MLIR_GetOpSuccessor(term, s));
-            succ[succ_off[bi] + s] = k;
-            if (k != (size_t)-1) pred_off[k + 1]++;
-        }
-    }
-    for (size_t bi = 0; bi < nb; bi++) pred_off[bi + 1] += pred_off[bi];
-    size_t npred = pred_off[nb];
-    size_t *pred = (size_t *)malloc((npred ? npred : 1) * sizeof(*pred));
-    size_t *pfill = (size_t *)malloc((nb + 1) * sizeof(*pfill));
-    if (!pred || !pfill) {
-        free(succ); free(bidx); free(blocks); free(succ_off); free(pred_off);
-        free(pred); free(pfill);
-        free(rmap); free(pure); free(load); free(erase); return;
-    }
-    for (size_t bi = 0; bi <= nb; bi++) pfill[bi] = pred_off[bi];
-    for (size_t bi = 0; bi < nb; bi++)
-        for (size_t s = succ_off[bi]; s < succ_off[bi + 1]; s++) {
-            size_t k = succ[s];
-            if (k != (size_t)-1) pred[pfill[k]++] = bi;
-        }
-
-    // ---- Postorder DFS from the entry (block 0) ---------------------------
-    int    *pon   = (int *)malloc(nb * sizeof(*pon));
-    size_t *order = (size_t *)malloc(nb * sizeof(*order));
-    size_t *stk   = (size_t *)malloc(nb * sizeof(*stk));
-    size_t *it    = (size_t *)malloc(nb * sizeof(*it));
-    char   *seen  = (char *)calloc(nb, 1);
-    if (!pon || !order || !stk || !it || !seen) {
-        free(pon); free(order); free(stk); free(it); free(seen);
-        free(succ); free(pred); free(pfill); free(bidx); free(blocks);
-        free(succ_off); free(pred_off);
-        free(rmap); free(pure); free(load); free(erase); return;
-    }
-    for (size_t bi = 0; bi < nb; bi++) pon[bi] = -1;
-    size_t npo = 0, sp = 0;
-    stk[sp] = 0; it[sp] = succ_off[0]; seen[0] = 1; sp++;
-    while (sp > 0) {
-        size_t b = stk[sp - 1];
-        if (it[sp - 1] < succ_off[b + 1]) {
-            size_t c = succ[it[sp - 1]++];
-            if (c != (size_t)-1 && !seen[c]) {
-                seen[c] = 1; stk[sp] = c; it[sp] = succ_off[c]; sp++;
-            }
-        } else {
-            pon[b] = (int)npo; order[npo] = b; npo++; sp--;
-        }
-    }
-
-    // ---- Iterative dominators (Cooper-Harvey-Kennedy) over postorder ------
-    int *doms = (int *)malloc((npo ? npo : 1) * sizeof(*doms));
-    if (!doms) {
-        free(pon); free(order); free(stk); free(it); free(seen);
-        free(succ); free(pred); free(pfill); free(bidx); free(blocks);
-        free(succ_off); free(pred_off);
-        free(rmap); free(pure); free(load); free(erase); return;
-    }
-    for (size_t i = 0; i < npo; i++) doms[i] = -1;
-    if (npo > 0) doms[npo - 1] = (int)(npo - 1);    // entry dominates itself
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (ssize_t k = (ssize_t)npo - 2; k >= 0; k--) {
-            size_t b = order[k];
-            int new_idom = -1;
-            for (size_t j = pred_off[b]; j < pred_off[b + 1]; j++) {
-                size_t p = pred[j];
-                if (pon[p] < 0 || doms[pon[p]] == -1) continue;
-                new_idom = new_idom == -1 ? pon[p]
-                                          : vn_intersect(doms, pon[p], new_idom);
-            }
-            if (new_idom != -1 && doms[pon[b]] != new_idom) {
-                doms[pon[b]] = new_idom; changed = true;
-            }
-        }
-    }
-
-    // ---- Dominator-tree children (CSR) ------------------------------------
-    size_t *ch_off = (size_t *)calloc(nb + 1, sizeof(*ch_off));
-    size_t *cfill  = (size_t *)malloc((nb + 1) * sizeof(*cfill));
-    if (!ch_off || !cfill) {
-        free(ch_off); free(cfill); free(doms);
-        free(pon); free(order); free(stk); free(it); free(seen);
-        free(succ); free(pred); free(pfill); free(bidx); free(blocks);
-        free(succ_off); free(pred_off);
-        free(rmap); free(pure); free(load); free(erase); return;
-    }
-    for (size_t i = 0; npo > 0 && i < npo - 1; i++) {
-        size_t b = order[i];
-        size_t parent = order[doms[pon[b]]];
-        ch_off[parent + 1]++;
-    }
-    for (size_t bi = 0; bi < nb; bi++) ch_off[bi + 1] += ch_off[bi];
-    size_t nchild = ch_off[nb];
-    size_t *ch = (size_t *)malloc((nchild ? nchild : 1) * sizeof(*ch));
-    if (!ch) {
-        free(ch_off); free(cfill); free(doms);
-        free(pon); free(order); free(stk); free(it); free(seen);
-        free(succ); free(pred); free(pfill); free(bidx); free(blocks);
-        free(succ_off); free(pred_off);
-        free(rmap); free(pure); free(load); free(erase); return;
-    }
-    for (size_t bi = 0; bi <= nb; bi++) cfill[bi] = ch_off[bi];
-    for (size_t i = 0; npo > 0 && i < npo - 1; i++) {
-        size_t b = order[i];
-        size_t parent = order[doms[pon[b]]];
-        ch[cfill[parent]++] = b;
     }
 
     // ---- DFS the dominator tree with a scoped pure-value table ------------
@@ -694,15 +731,12 @@ static void wmir_value_number(MLIR_Context *ctx, MLIR_RegionHandle region) {
     size_t *dstk       = (size_t *)malloc(2 * nb * sizeof(*dstk));
     char   *dph        = (char *)malloc(2 * nb);
     if (!scope_mark || !plog || !dstk || !dph) {
-        free(scope_mark); free(plog); free(dstk); free(dph); free(ch);
-        free(ch_off); free(cfill); free(doms);
-        free(pon); free(order); free(stk); free(it); free(seen);
-        free(succ); free(pred); free(pfill); free(bidx); free(blocks);
-        free(succ_off); free(pred_off);
+        free(scope_mark); free(plog); free(dstk); free(dph);
+        vn_free_cfg(&g);
         free(rmap); free(pure); free(load); free(erase); return;
     }
     size_t logn = 0, dsp = 0;
-    if (npo > 0) { dstk[dsp] = order[npo - 1]; dph[dsp] = 0; dsp++; }
+    if (g.idom[0] >= 0) { dstk[dsp] = 0; dph[dsp] = 0; dsp++; }   // entry
     while (dsp > 0) {
         size_t bi = dstk[--dsp];
         char ph = dph[dsp];
@@ -711,7 +745,7 @@ static void wmir_value_number(MLIR_Context *ctx, MLIR_RegionHandle region) {
             continue;
         }
         scope_mark[bi] = logn;
-        MLIR_BlockHandle blk = blocks[bi];
+        MLIR_BlockHandle blk = g.blocks[bi];
         lgen++;                               // load cache resets per block
         size_t no = MLIR_GetBlockNumOps(blk);
         for (size_t oi = 0; oi < no; oi++) {
@@ -767,16 +801,13 @@ static void wmir_value_number(MLIR_Context *ctx, MLIR_RegionHandle region) {
             if (found) { simp_put(rmap, mask, res, canon); erase[nerase++] = op; }
         }
         dstk[dsp] = bi; dph[dsp] = 1; dsp++;       // exit after subtree
-        for (size_t j = ch_off[bi]; j < ch_off[bi + 1]; j++) {
-            dstk[dsp] = ch[j]; dph[dsp] = 0; dsp++;
+        for (size_t j = g.ch_off[bi]; j < g.ch_off[bi + 1]; j++) {
+            dstk[dsp] = g.ch[j]; dph[dsp] = 0; dsp++;
         }
     }
 
-    free(scope_mark); free(plog); free(dstk); free(dph); free(ch);
-    free(ch_off); free(cfill); free(doms);
-    free(pon); free(order); free(stk); free(it); free(seen);
-    free(succ); free(pred); free(pfill); free(bidx); free(blocks);
-    free(succ_off); free(pred_off);
+    free(scope_mark); free(plog); free(dstk); free(dph);
+    vn_free_cfg(&g);
 
     if (nerase > 0) {
         // Repoint every flat operand (regular + successor block-arg) that
@@ -853,6 +884,214 @@ static void wmir_value_number(MLIR_Context *ctx, MLIR_RegionHandle region) {
     }
 
     free(rmap); free(pure); free(load); free(erase);
+}
+
+// =============================================================================
+// Loop-invariant code motion (LICM).
+//
+// For each natural loop (detected via a back-edge b -> h where the header h
+// dominates b), pure loop-invariant computations are moved out of the loop
+// into the loop's preheader (the header's immediate dominator, which for a
+// reducible natural loop lies outside the loop and dominates every loop block).
+// An op is invariant when every operand is defined outside the loop or is
+// itself already-hoisted. Hoisting is sound because (1) the moved value's def
+// dominates all loop uses from the preheader, and (2) each invariant operand's
+// def dominates the preheader. Only total (non-trapping) pure ops are hoisted:
+// div / rem are excluded (would speculate a trap), loads are excluded (would
+// need alias analysis), and constants are excluded (cheap; rematerialised
+// later). This is the dynamic-execution win an optimising wasm JIT (Cranelift)
+// performs that the straight-line backend otherwise repeats every iteration.
+//
+// Outer loops are processed before inner ones (header dominator depth
+// ascending) so invariant code reaches its highest valid level directly.
+//
+// NOTE: gated OFF by default (opt in with WMIR_LICM=1). Measured net-neutral
+// to slightly negative right now because the backend is register-bound: a
+// hoisted invariant value lengthens its live range across the whole loop and,
+// with only ~21 GPRs, usually spills — trading a cheap recompute for a
+// stack reload. LICM is expected to pay off once register-pressure / spill
+// traffic is reduced (then flip the default on and re-measure).
+// =============================================================================
+static bool vn_licm_hoistable(MLIR_OpType t) {
+    if (!vn_is_pure(t)) return false;
+    switch (t) {
+    case OP_TYPE_WMIR_CONST:                                   // cheap; remat'd
+    case OP_TYPE_WMIR_SDIV: case OP_TYPE_WMIR_UDIV:            // may trap
+    case OP_TYPE_WMIR_SREM: case OP_TYPE_WMIR_UREM:
+        return false;
+    default:
+        return true;
+    }
+}
+
+// Generation-tagged value set (O(1) reset by bumping `gen`).
+typedef struct { uint32_t gen; MLIR_ValueHandle v; } VSet;
+static bool vset_has(VSet *s, size_t mask, uint32_t gen, MLIR_ValueHandle v) {
+    if (v == MLIR_INVALID_HANDLE) return false;
+    size_t h = (size_t)(((uint64_t)v * 0x9E3779B97F4A7C15ull) >> 16) & mask;
+    while (s[h].gen == gen) {
+        if (s[h].v == v) return true;
+        h = (h + 1) & mask;
+    }
+    return false;
+}
+static void vset_add(VSet *s, size_t mask, uint32_t gen, MLIR_ValueHandle v) {
+    if (v == MLIR_INVALID_HANDLE) return;
+    size_t h = (size_t)(((uint64_t)v * 0x9E3779B97F4A7C15ull) >> 16) & mask;
+    while (s[h].gen == gen) {
+        if (s[h].v == v) return;
+        h = (h + 1) & mask;
+    }
+    s[h].gen = gen; s[h].v = v;
+}
+
+static void wmir_licm(MLIR_Context *ctx, MLIR_RegionHandle region) {
+    if (!getenv("WMIR_LICM")) return;         // opt-in; see note above
+    size_t nb = MLIR_GetRegionNumBlocks(region);
+    if (nb < 2) return;                       // a loop needs >= 2 blocks
+
+    size_t total = 0;
+    for (size_t bi = 0; bi < nb; bi++)
+        total += MLIR_GetBlockNumOps(MLIR_GetRegionBlock(region, bi));
+    if (total == 0) return;
+
+    VNCfg g;
+    if (!vn_build_cfg(region, &g)) return;
+
+    size_t cap = 16;
+    while (cap < total * 2) cap <<= 1;
+    size_t vmask = cap - 1;
+
+    char    *member  = (char *)malloc(nb);
+    size_t  *headers = (size_t *)malloc(nb * sizeof(*headers));
+    int     *hdepth  = (int *)malloc(nb * sizeof(*hdepth));
+    size_t  *wl      = (size_t *)malloc(nb * sizeof(*wl));
+    MLIR_OpHandle *cand = (MLIR_OpHandle *)malloc(total * sizeof(*cand));
+    char    *hoisted = (char *)malloc(total);
+    VSet    *definloop = (VSet *)calloc(cap, sizeof(*definloop));
+    VSet    *hoistres  = (VSet *)calloc(cap, sizeof(*hoistres));
+    if (!member || !headers || !hdepth || !wl || !cand || !hoisted ||
+        !definloop || !hoistres) {
+        free(member); free(headers); free(hdepth); free(wl); free(cand);
+        free(hoisted); free(definloop); free(hoistres); vn_free_cfg(&g); return;
+    }
+
+    // ---- Collect loop headers (targets of a back-edge) --------------------
+    size_t nh = 0;
+    for (size_t h = 0; h < nb; h++) {
+        if (g.idom[h] < 0) continue;                       // unreachable
+        bool is_header = false;
+        for (size_t j = g.pred_off[h]; j < g.pred_off[h + 1]; j++) {
+            if (vn_dominates(&g, h, g.pred[j])) { is_header = true; break; }
+        }
+        if (!is_header) continue;
+        int d = 0;
+        for (size_t x = h; (size_t)g.idom[x] != x && d <= (int)nb; ) {
+            x = (size_t)g.idom[x]; d++;
+        }
+        headers[nh] = h; hdepth[nh] = d; nh++;
+    }
+    // Sort headers by dominator depth ascending (outermost loops first).
+    for (size_t i = 1; i < nh; i++) {
+        size_t hv = headers[i]; int dv = hdepth[i]; size_t k = i;
+        while (k > 0 && hdepth[k - 1] > dv) {
+            headers[k] = headers[k - 1]; hdepth[k] = hdepth[k - 1]; k--;
+        }
+        headers[k] = hv; hdepth[k] = dv;
+    }
+
+    uint32_t dgen = 0, hgen = 0;
+    for (size_t hi = 0; hi < nh; hi++) {
+        size_t h = headers[hi];
+        int pre_i = g.idom[h];
+        if (pre_i < 0 || (size_t)pre_i == h) continue;     // no preheader (entry)
+
+        // Natural loop: h plus every block that reaches a back-edge source
+        // without passing through h.
+        memset(member, 0, nb);
+        member[h] = 1;
+        size_t wn = 0;
+        for (size_t j = g.pred_off[h]; j < g.pred_off[h + 1]; j++) {
+            size_t p = g.pred[j];
+            if (vn_dominates(&g, h, p) && !member[p]) { member[p] = 1; wl[wn++] = p; }
+        }
+        while (wn > 0) {
+            size_t m = wl[--wn];
+            for (size_t j = g.pred_off[m]; j < g.pred_off[m + 1]; j++) {
+                size_t q = g.pred[j];
+                if (!member[q]) { member[q] = 1; wl[wn++] = q; }
+            }
+        }
+        if (member[(size_t)pre_i]) continue;               // preheader inside loop
+
+        // Values defined inside the loop (op results + block arguments).
+        dgen++;
+        for (size_t bi = 0; bi < nb; bi++) {
+            if (!member[bi]) continue;
+            MLIR_BlockHandle blk = g.blocks[bi];
+            size_t na = MLIR_GetBlockNumArgs(blk);
+            for (size_t ai = 0; ai < na; ai++)
+                vset_add(definloop, vmask, dgen, MLIR_GetBlockArg(blk, ai));
+            size_t no = MLIR_GetBlockNumOps(blk);
+            for (size_t oi = 0; oi < no; oi++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(blk, oi);
+                size_t nr = MLIR_GetOpNumResults(op);
+                for (size_t ri = 0; ri < nr; ri++)
+                    vset_add(definloop, vmask, dgen, MLIR_GetOpResult(op, ri));
+            }
+        }
+
+        // Candidate hoistable ops, in program order.
+        size_t nc = 0;
+        for (size_t bi = 0; bi < nb; bi++) {
+            if (!member[bi]) continue;
+            MLIR_BlockHandle blk = g.blocks[bi];
+            size_t no = MLIR_GetBlockNumOps(blk);
+            for (size_t oi = 0; oi < no; oi++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(blk, oi);
+                if (vn_licm_hoistable(MLIR_GetOpType(op))) {
+                    cand[nc] = op; hoisted[nc] = 0; nc++;
+                }
+            }
+        }
+        if (nc == 0) continue;
+
+        hgen++;
+        MLIR_BlockHandle preblk = g.blocks[(size_t)pre_i];
+        MLIR_OpHandle preterm = MLIR_GetBlockTerminator(preblk);
+
+        // Fixpoint: hoist ops all of whose operands are loop-invariant (defined
+        // outside the loop) or already hoisted, until nothing more moves.
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (size_t ci = 0; ci < nc; ci++) {
+                if (hoisted[ci]) continue;
+                MLIR_OpHandle op = cand[ci];
+                size_t nop = MLIR_GetOpNumOperands(op);
+                bool inv = true;
+                for (size_t oi = 0; oi < nop; oi++) {
+                    MLIR_ValueHandle v = MLIR_GetOpOperand(op, oi);
+                    if (vset_has(definloop, vmask, dgen, v) &&
+                        !vset_has(hoistres, vmask, hgen, v)) { inv = false; break; }
+                }
+                if (!inv) continue;
+                // Hoist: append to the preheader, then push the terminator back
+                // to the end so it stays last.
+                MLIR_MoveOpToBlockEnd(ctx, op, preblk);
+                if (preterm != MLIR_INVALID_HANDLE)
+                    MLIR_MoveOpToBlockEnd(ctx, preterm, preblk);
+                size_t nr = MLIR_GetOpNumResults(op);
+                for (size_t ri = 0; ri < nr; ri++)
+                    vset_add(hoistres, vmask, hgen, MLIR_GetOpResult(op, ri));
+                hoisted[ci] = 1; changed = true;
+            }
+        }
+    }
+
+    free(member); free(headers); free(hdepth); free(wl); free(cand);
+    free(hoisted); free(definloop); free(hoistres);
+    vn_free_cfg(&g);
 }
 
 // Translate a wasm value-type byte to the matching MLIR integer / float
@@ -2407,6 +2646,12 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
     // repeated address arithmetic and field reloads the wasm frontend leaves
     // behind, cutting op count and (more importantly) register pressure.
     wmir_value_number(ctx, dst_region);
+
+    // Loop-invariant code motion (opt-in, WMIR_LICM=1): hoist invariant pure
+    // computations out of loops into their preheaders. Currently gated off —
+    // net-neutral while the backend is register-bound (hoisted values spill);
+    // expected to pay off after spill-traffic reduction.
+    wmir_licm(ctx, dst_region);
 
     MLIR_AttributeHandle attrs[6];
     size_t na = 0;
