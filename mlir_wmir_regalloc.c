@@ -63,6 +63,11 @@ static bool value_is_int(MLIR_Context *ctx, MLIR_ValueHandle v) {
     return type_is_int(ctx, MLIR_GetValueType(v));
 }
 
+static bool value_is_i64(MLIR_Context *ctx, MLIR_ValueHandle v) {
+    string s = MLIR_GetTypeString(ctx, MLIR_GetValueType(v));
+    return s.size == 3 && s.str[0] == 'i' && memcmp(s.str + 1, "64", 2) == 0;
+}
+
 // =============================================================================
 // Value -> internal index map. Built once per function.
 // =============================================================================
@@ -180,6 +185,9 @@ typedef struct {
                                     // live interval must cover that earlier position too.
     uint32_t         last_use_pos;  // 0 if no use seen yet
     bool             crosses_call;
+    bool             is_const;      // result of a wmir.const (rematerializable)
+    bool             c_is_i64;      // is_const: 1 if i64 else 0
+    int64_t          cval;          // is_const: the constant value
 } VInfo;
 
 // One slot in the linear-scan active list.
@@ -258,6 +266,12 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
         size_t no = MLIR_GetBlockNumOps(b);
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(b, i);
+            bool is_const_op = (MLIR_GetOpType(op) == OP_TYPE_WMIR_CONST);
+            int64_t cval = 0;
+            if (is_const_op) {
+                MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(op, "value");
+                cval = a ? MLIR_GetAttributeInteger(a) : 0;
+            }
             size_t nr = MLIR_GetOpNumResults(op);
             for (size_t k = 0; k < nr; k++) {
                 MLIR_ValueHandle r = MLIR_GetOpResult(op, k);
@@ -267,6 +281,14 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
                 vinfo[vi].is_int  = value_is_int(ctx, r);
                 vinfo[vi].def_pos = pos;
                 vinfo[vi].first_pos = pos;
+                // A wmir.const result is rematerializable: it is re-emitted as
+                // a mov-immediate at each use, so it never needs a register or
+                // a spill slot and adds no register pressure.
+                if (is_const_op && vinfo[vi].is_int) {
+                    vinfo[vi].is_const = true;
+                    vinfo[vi].c_is_i64 = value_is_i64(ctx, r);
+                    vinfo[vi].cval     = cval;
+                }
             }
             pos++;  // one position per op
         }
@@ -562,6 +584,14 @@ WmirRegAlloc *wmir_regalloc_run(MLIR_Context *ctx, MLIR_OpHandle func) {
             } else {
                 a++;
             }
+        }
+
+        // Rematerializable constants never occupy a register or slot.
+        if (vp->is_const) {
+            ra->homes[vi].kind   = HOME_CONST;
+            ra->homes[vi].is_i64 = vp->c_is_i64 ? 1 : 0;
+            ra->homes[vi].cval   = vp->cval;
+            continue;
         }
 
         // Pin to slot if FP or never used. Call-crossing values are NOT

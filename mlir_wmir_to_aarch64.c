@@ -647,6 +647,11 @@ static uint8_t ld_operand_into(MLIR_Context *ctx, MLIR_BlockHandle blk,
         return scratch;
     }
     if (h.kind == HOME_REG) return h.idx;
+    if (h.kind == HOME_CONST) {
+        if (h.is_i64) emit_mov_imm64(ctx, blk, scratch, (uint64_t)h.cval);
+        else          emit_mov_imm32(ctx, blk, scratch, (uint32_t)h.cval);
+        return scratch;
+    }
     if (is_i64(ctx, v))
         emit_ldr_x(ctx, blk, scratch, 31, (uint32_t)(h.idx * 8u));
     else
@@ -669,6 +674,7 @@ static void st_result(MLIR_Context *ctx, MLIR_BlockHandle blk,
     MLIR_ValueHandle v = MLIR_GetOpResult(op, idx);
     ValueHome h;
     if (!wmir_regalloc_lookup(ra, v, &h)) return;
+    if (h.kind == HOME_CONST) return;  // rematerialized at use sites; no store
     if (h.kind == HOME_REG) {
         if (h.idx != produced_reg) {
             // mov dst, src. We use the X-form (mov_x): for i32 the
@@ -699,6 +705,11 @@ static void ld_operand_into_fixed(MLIR_Context *ctx, MLIR_BlockHandle blk,
     }
     if (h.kind == HOME_REG) {
         if (h.idx != reg) emit_mov_x(ctx, blk, reg, h.idx);
+        return;
+    }
+    if (h.kind == HOME_CONST) {
+        if (h.is_i64) emit_mov_imm64(ctx, blk, reg, (uint64_t)h.cval);
+        else          emit_mov_imm32(ctx, blk, reg, (uint32_t)h.cval);
         return;
     }
     if (is_i64(ctx, v))
@@ -757,6 +768,11 @@ static void emit_branch_arg_copies(MLIR_Context *ctx, MLIR_BlockHandle blk,
         uint8_t r = 9;
         if (pairs[k].src.kind == HOME_REG) {
             r = pairs[k].src.idx;
+        } else if (pairs[k].src.kind == HOME_CONST) {
+            if (pairs[k].src.is_i64)
+                emit_mov_imm64(ctx, blk, r, (uint64_t)pairs[k].src.cval);
+            else
+                emit_mov_imm32(ctx, blk, r, (uint32_t)pairs[k].src.cval);
         } else {
             if (pairs[k].is_i64)
                 emit_ldr_x(ctx, blk, r, 31, (uint32_t)(pairs[k].src.idx * 8u));
@@ -799,6 +815,11 @@ static void emit_branch_arg_copies(MLIR_Context *ctx, MLIR_BlockHandle blk,
                     emit_ldr_x(ctx, blk, dst_reg, 31, (uint32_t)(pairs[k].src.idx * 8u));
                 else
                     emit_ldr_w(ctx, blk, dst_reg, 31, (uint32_t)(pairs[k].src.idx * 8u));
+            } else if (pairs[k].src.kind == HOME_CONST) {
+                if (pairs[k].src.is_i64)
+                    emit_mov_imm64(ctx, blk, dst_reg, (uint64_t)pairs[k].src.cval);
+                else
+                    emit_mov_imm32(ctx, blk, dst_reg, (uint32_t)pairs[k].src.cval);
             } else {
                 if (pairs[k].src.idx != dst_reg)
                     emit_mov_x(ctx, blk, dst_reg, pairs[k].src.idx);
@@ -975,6 +996,11 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 MLIR_TypeHandle  ty = MLIR_GetValueType(r);
                 string ts = MLIR_GetTypeString(ctx, ty);
                 int64_t v = at_i(op, "value");
+                // Rematerializable int constants emit nothing here; every use
+                // re-materialises the immediate via ld_operand_into.
+                ValueHome ch;
+                if (wmir_regalloc_lookup(ra, r, &ch) && ch.kind == HOME_CONST)
+                    break;
                 uint8_t rd = PICK_RES(9, 0);
                 if (ts.size == 3 && memcmp(ts.str, "i32", 3) == 0) {
                     emit_mov_imm32(ctx, dst_blk, rd, (uint32_t)v);
@@ -1515,6 +1541,10 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                         uint8_t src_reg;
                         if (h.kind == HOME_REG) {
                             src_reg = h.idx;
+                        } else if (h.kind == HOME_CONST) {
+                            src_reg = 9;
+                            if (h.is_i64) emit_mov_imm64(ctx, dst_blk, src_reg, (uint64_t)h.cval);
+                            else          emit_mov_imm32(ctx, dst_blk, src_reg, (uint32_t)h.cval);
                         } else {
                             src_reg = 9;
                             uint32_t off = (uint32_t)stack_bytes + (uint32_t)h.idx * 8u;

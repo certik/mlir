@@ -41,15 +41,20 @@ extern "C" {
 
 // Where an SSA value lives after allocation.
 typedef enum {
-    HOME_SLOT = 0,  // 8-byte stack slot at offset `idx * 8` from sp
-    HOME_REG  = 1,  // physical AArch64 register `idx` (0..30; W or X chosen by type)
+    HOME_SLOT  = 0,  // 8-byte stack slot at offset `idx * 8` from sp
+    HOME_REG   = 1,  // physical AArch64 register `idx` (0..30; W or X chosen by type)
+    HOME_CONST = 2,  // rematerializable integer constant; never occupies a
+                     // register or slot. The lowering re-emits a `mov`-immediate
+                     // at each use site, so identical constants cost no spill/
+                     // reload and add no register pressure.
 } HomeKind;
 
 typedef struct {
-    uint8_t  kind;  // HomeKind
-    uint8_t  pad;
+    uint8_t  kind;    // HomeKind
+    uint8_t  is_i64;  // HOME_CONST: 1 if the constant is i64, else 0
     uint16_t pad2;
-    uint32_t idx;   // register number (0..30) or slot index (0..n_slots-1)
+    uint32_t idx;     // register number (0..30) or slot index (0..n_slots-1)
+    int64_t  cval;    // HOME_CONST: the constant's integer value
 } ValueHome;
 
 typedef struct {
