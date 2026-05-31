@@ -659,6 +659,23 @@ static uint8_t ld_operand_into(MLIR_Context *ctx, MLIR_BlockHandle blk,
     return scratch;
 }
 
+// Like ld_operand_into, but when the operand is a rematerialized constant
+// equal to 0 it returns the architectural zero register (31 = wzr/xzr)
+// WITHOUT emitting a `mov scratch,#0`. The caller MUST only use the result
+// in a context where register 31 is interpreted as the zero register
+// (e.g. the transfer register Rt of a store, or the source Rm/Rn of a
+// data-processing register instruction) — NOT as a base register or the
+// Rn of an immediate add/sub, where 31 means SP.
+static uint8_t ld_operand_or_zr(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                                const WmirRegAlloc *ra, MLIR_OpHandle op,
+                                size_t idx, uint8_t scratch) {
+    MLIR_ValueHandle v = MLIR_GetOpOperand(op, idx);
+    ValueHome h;
+    if (wmir_regalloc_lookup(ra, v, &h) && h.kind == HOME_CONST && h.cval == 0)
+        return 31;
+    return ld_operand_into(ctx, blk, ra, op, idx, scratch);
+}
+
 static uint8_t pick_result_reg(const WmirRegAlloc *ra, MLIR_OpHandle op,
                                size_t idx, uint8_t scratch) {
     MLIR_ValueHandle v = MLIR_GetOpResult(op, idx);
@@ -782,9 +799,13 @@ static void emit_pmove(MLIR_Context *ctx, MLIR_BlockHandle blk,
     if (p->src.kind == HOME_REG) {
         r = p->src.idx;
     } else if (p->src.kind == HOME_CONST) {
-        r = 9;
-        if (p->src.is_i64) emit_mov_imm64(ctx, blk, 9, (uint64_t)p->src.cval);
-        else               emit_mov_imm32(ctx, blk, 9, (uint32_t)p->src.cval);
+        if (p->src.cval == 0) {
+            r = 31;  // store the zero register directly; no mov needed
+        } else {
+            r = 9;
+            if (p->src.is_i64) emit_mov_imm64(ctx, blk, 9, (uint64_t)p->src.cval);
+            else               emit_mov_imm32(ctx, blk, 9, (uint32_t)p->src.cval);
+        }
     } else { // HOME_SLOT
         r = 9;
         if (i64) emit_ldr_x(ctx, blk, 9, 31, p->src.idx * 8u + sp_bias);
@@ -1097,6 +1118,8 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
         // ST_RES — see comments on the underlying helpers above.
         #define LD_OPERAND(SCRATCH, IDX) \
             ld_operand_into(ctx, dst_blk, ra, op, (IDX), (SCRATCH))
+        #define LD_OPERAND_ZR(SCRATCH, IDX) \
+            ld_operand_or_zr(ctx, dst_blk, ra, op, (IDX), (SCRATCH))
         #define PICK_RES(SCRATCH, IDX) \
             pick_result_reg(ra, op, (IDX), (SCRATCH))
         #define ST_RESULT(PRODUCED_REG, IDX) \
@@ -1657,9 +1680,10 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src) {
                 int64_t sz  = at_i(op, "mem_size");
                 if (sz == 0) sz = 4;
                 uint8_t r0 = LD_OPERAND(9, 0);   // index
-                uint8_t r1 = LD_OPERAND(11, 1);  // value (use x11 scratch
+                uint8_t r1 = LD_OPERAND_ZR(11, 1); // value (use x11 scratch
                                                  // to leave x10 free for
-                                                 // the heap_addr compute)
+                                                 // the heap_addr compute;
+                                                 // a zero value uses wzr/xzr)
                 if (off == 0) {
                     MLIR_OpType t = (sz == 8) ? OP_TYPE_AARCH64_STR_X_REG
                                   : (sz == 1) ? OP_TYPE_AARCH64_STRB_REG
