@@ -494,10 +494,21 @@ typedef struct {
 } SimpInsert;
 
 // ---- WMIR_STATS=1 diagnostic: size each missing-optimization opportunity ----
-static long g_st_total, g_st_sext, g_st_zext, g_st_trunc, g_st_ext_redundant;
-static long g_st_load, g_st_store, g_st_div, g_st_div_const, g_st_div_nonpow2;
-static long g_st_mul_const_nonpow2, g_st_funcs, g_st_blocks;
-static long g_st_load_distinct, g_st_load_redundant_ub;
+static long g_st_total;
+static long g_st_sext;
+static long g_st_zext;
+static long g_st_trunc;
+static long g_st_ext_redundant;
+static long g_st_load;
+static long g_st_store;
+static long g_st_div;
+static long g_st_div_const;
+static long g_st_div_nonpow2;
+static long g_st_mul_const_nonpow2;
+static long g_st_funcs;
+static long g_st_blocks;
+static long g_st_load_distinct;
+static long g_st_load_redundant_ub;
 static long g_st_load_redundant_real;
 static bool g_st_registered;
 
@@ -527,10 +538,11 @@ static void wmir_stats_dump(void) {
 
 static void wmir_stats(MLIR_Context *ctx, MLIR_RegionHandle region) {
     if (!getenv("WMIR_STATS")) return;
-    // atexit isn't available in the freestanding wasm build (no libc); the
-    // WMIR_STATS diagnostic is only ever used from the hosted native binary,
-    // so register the end-of-run dump only there.
-#ifndef __wasm__
+    // atexit isn't available in the freestanding wasm build (no libc) and the
+    // tinyC self-host frontend has no atexit either; the WMIR_STATS diagnostic
+    // is only ever used from the hosted native binary, so register the
+    // end-of-run dump only there.
+#if !defined(__wasm__) && !defined(__TINYC__)
     if (!g_st_registered) { atexit(wmir_stats_dump); g_st_registered = true; }
 #endif
     (void)ctx;
