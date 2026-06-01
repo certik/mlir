@@ -502,6 +502,7 @@ static long g_st_load_redundant_real;
 static bool g_st_registered;
 
 static void wmir_stats_dump(void) {
+    if (!getenv("WMIR_STATS")) return;
     fprintf(stderr,
         "\n=== WMIR_STATS (post-optimization, what the backend emits) ===\n"
         "  funcs=%ld blocks=%ld total_ops=%ld\n"
@@ -526,7 +527,12 @@ static void wmir_stats_dump(void) {
 
 static void wmir_stats(MLIR_Context *ctx, MLIR_RegionHandle region) {
     if (!getenv("WMIR_STATS")) return;
+    // atexit isn't available in the freestanding wasm build (no libc); the
+    // WMIR_STATS diagnostic is only ever used from the hosted native binary,
+    // so register the end-of-run dump only there.
+#ifndef __wasm__
     if (!g_st_registered) { atexit(wmir_stats_dump); g_st_registered = true; }
+#endif
     (void)ctx;
     size_t nb = MLIR_GetRegionNumBlocks(region);
     g_st_funcs++;
