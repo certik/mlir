@@ -1077,6 +1077,7 @@ expected_stdout = "42\n"
 [[test]]
 name = "wasm_import_attr"
 targets = ["native", "wasm", "macho"]
+macho_llvm_skip = true
 # Verifies that `__attribute__((__import_module__("..."),
 # __import_name__("...")))` on a forward declaration makes its way
 # all the way into the wasm import section, both on the native
@@ -1096,6 +1097,7 @@ expected_stdout = "hi\n"
 [[test]]
 name = "wasm32_long_is_i32"
 targets = ["native", "wasm", "macho"]
+macho_llvm_skip = true
 # On wasm32, `long` (and `size_t` = `unsigned long` in corec/types.h)
 # must be a 32-bit integer to match the wasm32-wasi ABI — otherwise
 # imports declared with `size_t` parameters get an i64 type in the

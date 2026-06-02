@@ -207,10 +207,12 @@ def main():
         expected_rc      = t.get("expected_exit_code", 0)
         # Tests that differ between wasm32 (4-byte pointers, 4-byte long)
         # and the host (8-byte pointers on x86_64/aarch64) can override
-        # the expected stdout with `expected_stdout_wasm`. The macho
-        # backend consumes the same wasm pipeline output, so it also uses
-        # the wasm32-flavored expected stdout when one is provided.
-        if TARGET in ("wasm", "macho") and "expected_stdout_wasm" in t:
+        # the expected stdout with `expected_stdout_wasm`. The wasm and
+        # wmir macho backends consume the wasm32-sized pipeline, so they
+        # use the wasm32-flavored expected stdout. The `llvm` macho backend
+        # is LP64 (native sizing), so it keeps the native `expected_stdout`.
+        if (TARGET in ("wasm", "macho") and "expected_stdout_wasm" in t
+                and not (TARGET == "macho" and MACHO_BACKEND == "llvm")):
             expected = t["expected_stdout_wasm"]
         # `targets` lists the runner targets a test may run under. Default
         # (omitted) is ["native", "wasm"] — the established backends.
@@ -262,6 +264,14 @@ def main():
         if (TARGET == "wasm" and LOWERING != "native"
                 and t.get("wasm_upstream_skip")):
             print(f"SKIP {name} (wasm_upstream_skip)")
+            skipped += 1
+            continue
+        # Inverse opt-out: tests that exercise wasm-only semantics (WASI
+        # imports, wasm32 long-sizing) which cannot run on the LP64
+        # `llvm` macho backend — there is no WASI host there.
+        if (TARGET == "macho" and MACHO_BACKEND == "llvm"
+                and t.get("macho_llvm_skip")):
+            print(f"SKIP {name} (macho_llvm_skip)")
             skipped += 1
             continue
         # Multi-file tests pass `sources = [...]`; single-file tests
