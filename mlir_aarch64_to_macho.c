@@ -569,6 +569,7 @@ typedef struct {
     uint8_t  rd;
     uint8_t  rn;
     uint32_t fn_off;
+    uint32_t addend;        // byte offset added to the resolved section base
 } DataReloc;
 
 // Branch reloc. Identifies a placeholder branch instruction emitted
@@ -615,7 +616,7 @@ static void ef_add_reloc(EmittedFunc *e, string callee, uint32_t off) {
     e->n_relocs++;
 }
 static void ef_add_dr(EmittedFunc *e, string kind, bool is_add_lo,
-                      uint8_t rd, uint8_t rn, uint32_t off) {
+                      uint8_t rd, uint8_t rn, uint32_t off, uint32_t addend) {
     if (e->n_dr == e->c_dr) {
         e->c_dr = e->c_dr ? e->c_dr * 2 : 4;
         e->dr = (DataReloc *)realloc(e->dr, e->c_dr * sizeof(DataReloc));
@@ -625,6 +626,7 @@ static void ef_add_dr(EmittedFunc *e, string kind, bool is_add_lo,
     e->dr[e->n_dr].rd        = rd;
     e->dr[e->n_dr].rn        = rn;
     e->dr[e->n_dr].fn_off    = off;
+    e->dr[e->n_dr].addend    = addend;
     e->n_dr++;
 }
 static void ef_add_br(EmittedFunc *e, int kind, MLIR_BlockHandle target,
@@ -1043,18 +1045,20 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
             case OP_TYPE_AARCH64_ADRP_DATA: {
                 uint8_t rd      = (uint8_t)attr_i(op, "rd");
                 string  target  = attr_s(op, "target");
+                uint32_t addend = (uint32_t)attr_i(op, "addend");
                 uint32_t off    = (uint32_t)out->code.len;
                 emit_word(&out->code, arm64_adrp(rd, 0));
-                ef_add_dr(out, target, /*is_add_lo=*/false, rd, /*rn=*/0, off);
+                ef_add_dr(out, target, /*is_add_lo=*/false, rd, /*rn=*/0, off, addend);
                 break;
             }
             case OP_TYPE_AARCH64_ADD_DATA_LO: {
                 uint8_t rd     = (uint8_t)attr_i(op, "rd");
                 uint8_t rn     = (uint8_t)attr_i(op, "rn");
                 string  target = attr_s(op, "target");
+                uint32_t addend = (uint32_t)attr_i(op, "addend");
                 uint32_t off   = (uint32_t)out->code.len;
                 emit_word(&out->code, arm64_add_imm(rd, rn, 0, /*sf=*/true));
-                ef_add_dr(out, target, /*is_add_lo=*/true, rd, rn, off);
+                ef_add_dr(out, target, /*is_add_lo=*/true, rd, rn, off, addend);
                 break;
             }
             case OP_TYPE_AARCH64_CMP_REG: {
@@ -1338,6 +1342,10 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     if (linmem_init_size > 0) {
         // Round up to 16 for ARM64 alignment expectations.
         linmem_init_size = (linmem_init_size + 15u) & ~15u;
+        // The native llvm->aarch64 path stores globals in the linmem
+        // template section without any wmir linmem/globals; ensure the
+        // __DATA segment (and its 32-byte data_priv prefix) is emitted.
+        if (!has_data_seg) { has_data_seg = true; data_priv_size = 32u; }
     }
 
     for (size_t i = 0; i < n_top; i++) {
@@ -1885,6 +1893,7 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
             }
             uint64_t src_pc = TEXT_VM_BASE + (uint64_t)text_section_off
                             + (uint64_t)efs[i].text_off + (uint64_t)dr->fn_off;
+            dst_vm += dr->addend;
             size_t   img_off = text_section_off + efs[i].text_off + dr->fn_off;
             uint32_t insn;
             if (!dr->is_add_lo) {

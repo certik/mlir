@@ -28,6 +28,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <stdint.h>
 
 #include "mlir_llvm_to_aarch64.h"
@@ -83,6 +84,27 @@ static void emit_bl(MLIR_Context *ctx, MLIR_BlockHandle blk, string callee) {
 }
 static void emit_ret(MLIR_Context *ctx, MLIR_BlockHandle blk) {
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_RET, NULL, 0));
+}
+// ADRP rd, <section page>  /  ADD rd, rn, #<section lo12 + addend>. The
+// encoder resolves `target` (a section kind or, for native globals, the
+// "linmem_template" data section) and adds `addend` to the base address.
+static void emit_adrp_data(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                           uint8_t rd, string target, uint32_t addend) {
+    MLIR_AttributeHandle a[3];
+    a[0] = attr_i32(ctx, "rd", rd);
+    a[1] = attr_s(ctx, "target", target.str, target.size);
+    a[2] = attr_i32(ctx, "addend", (int32_t)addend);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_ADRP_DATA, a, 3));
+}
+static void emit_add_data_lo(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                             uint8_t rd, uint8_t rn, string target,
+                             uint32_t addend) {
+    MLIR_AttributeHandle a[4];
+    a[0] = attr_i32(ctx, "rd", rd);
+    a[1] = attr_i32(ctx, "rn", rn);
+    a[2] = attr_s(ctx, "target", target.str, target.size);
+    a[3] = attr_i32(ctx, "addend", (int32_t)addend);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_ADD_DATA_LO, a, 4));
 }
 
 // Materialise a 64-bit immediate into `rd` with a movz + movk chain,
@@ -465,6 +487,18 @@ static bool simple_binop_optype(string on, MLIR_OpType *out) {
 // currently being appended to; control-flow ops create new blocks and move
 // `cur`. `ok` is cleared (with a stderr diagnostic) on the first failure.
 // ---------------------------------------------------------------------------
+typedef struct { string name; uint32_t off; } GlobalEnt;
+typedef struct { GlobalEnt *e; size_t n; } GlobalMap;
+
+static bool gmap_get(GlobalMap *g, string nm, uint32_t *out) {
+    for (size_t i = 0; i < g->n; i++)
+        if (g->e[i].name.size == nm.size &&
+            memcmp(g->e[i].name.str, nm.str, nm.size) == 0) {
+            *out = g->e[i].off; return true;
+        }
+    return false;
+}
+
 typedef struct {
     MLIR_Context     *ctx;
     SlotMap          *sm;
@@ -474,6 +508,7 @@ typedef struct {
     uint32_t          frame_size;
     SlotMap          *am;          // alloca result value -> byte offset in frame
     uint32_t          slot_bytes;  // size of the slot region (allocas sit above)
+    GlobalMap        *gm;          // global symbol name -> byte offset in __data
     bool              ok;
 } LowerCtx;
 
@@ -919,6 +954,23 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         }
         store_value(ctx, blk, sm, res, 9);
 
+    } else if (name_eq(on, "llvm.mlir.addressof")) {
+        // Materialise the address of a module-level global: ADRP+ADD against
+        // the native data section, offset by the global's slot.
+        MLIR_AttributeHandle ga = MLIR_GetOpAttributeByName(op, "global_name");
+        if (ga == MLIR_INVALID_HANDLE)
+            LFAIL("llvm->aarch64: addressof missing global_name\n");
+        string gnm = MLIR_GetAttributeAsString(ctx, ga);
+        if (gnm.size > 0 && gnm.str[0] == '@') { gnm.str++; gnm.size--; }
+        uint32_t off = 0;
+        if (!L->gm || !gmap_get(L->gm, gnm, &off))
+            LFAIL("llvm->aarch64: addressof of unknown global '%.*s'\n",
+                  (int)gnm.size, gnm.str);
+        string tgt = str_from_cstr_view("linmem_template");
+        emit_adrp_data(ctx, blk, 9, tgt, off);
+        emit_add_data_lo(ctx, blk, 9, 9, tgt, off);
+        store_value(ctx, blk, sm, MLIR_GetOpResult(op, 0), 9);
+
     } else if (name_eq(on, "scf.if")) {
         lower_scf_if(L, op);
     } else if (name_eq(on, "scf.while")) {
@@ -996,15 +1048,147 @@ static bool collect_allocas(MLIR_Context *ctx, SlotMap *am,
     return true;
 }
 
+typedef struct { uint32_t slot_off; uint32_t target_off; } PtrReloc;
+
 // ---------------------------------------------------------------------------
-// Select one defined `llvm.func` into an `aarch64.func`. Supports straight-
+// Pre-scan the module for `llvm.mlir.global` ops. Each global gets an
+// 8-aligned byte offset in a single native data blob (emitted as one
+// `aarch64.data_init` record into the __linmem_template data section). The
+// name->offset map drives `llvm.mlir.addressof` lowering. Scalar globals
+// store their integer/float `value`; aggregate globals (e.g. string
+// literals) store the raw bytes of a string `value`; pointer globals
+// initialised with the address of another global (region: addressof +
+// return) become an internal data->data pointer reloc (emitted as an
+// `aarch64.data_ptr`). Absent values are zero-filled. Returns false on an
+// unsupported global.
+static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
+                            GlobalMap *gm, uint8_t **blob_out,
+                            uint32_t *blob_len_out,
+                            PtrReloc **relocs_out, size_t *n_relocs_out) {
+    size_t nops = MLIR_GetBlockNumOps(mb);
+    size_t cap = 0;
+    for (size_t i = 0; i < nops; i++)
+        if (name_eq(MLIR_GetOpName(MLIR_GetBlockOp(mb, i)), "llvm.mlir.global"))
+            cap++;
+    gm->e = cap ? (GlobalEnt *)calloc(cap, sizeof(GlobalEnt)) : NULL;
+    gm->n = 0;
+
+    // Pending pointer relocs hold the target global NAME (it may be a
+    // forward reference), resolved to an offset after all globals are placed.
+    typedef struct { uint32_t slot_off; string target; } PendingReloc;
+    PendingReloc *pend = cap ? (PendingReloc *)calloc(cap, sizeof(PendingReloc))
+                             : NULL;
+    size_t n_pend = 0;
+
+    uint8_t *blob = NULL;
+    uint32_t blen = 0, bcap = 0;
+
+    for (size_t i = 0; i < nops; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
+        if (!name_eq(MLIR_GetOpName(op), "llvm.mlir.global")) continue;
+
+        MLIR_AttributeHandle na = MLIR_GetOpAttributeByName(op, "sym_name");
+        MLIR_AttributeHandle ta = MLIR_GetOpAttributeByName(op, "global_type");
+        if (na == MLIR_INVALID_HANDLE || ta == MLIR_INVALID_HANDLE) {
+            free(blob); free(pend); return false;
+        }
+        string name = MLIR_GetAttributeString(na);
+        unsigned sz = a64_type_size(ctx, MLIR_GetAttributeTypeValue(ta));
+        if (sz == 0) { free(blob); free(pend); return false; }
+
+        uint32_t off = (blen + 7u) & ~7u;
+        uint32_t need = off + sz;
+        if (need > bcap) {
+            uint32_t ncap = bcap ? bcap * 2 : 64;
+            while (ncap < need) ncap *= 2;
+            blob = (uint8_t *)realloc(blob, ncap);
+            memset(blob + bcap, 0, ncap - bcap);
+            bcap = ncap;
+        }
+        memset(blob + blen, 0, off - blen);   // alignment padding
+        memset(blob + off, 0, sz);
+
+        MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(op, "value");
+        if (va != MLIR_INVALID_HANDLE) {
+            MLIR_AttrKind vk = MLIR_GetAttributeKind(va);
+            if (vk == MLIR_ATTR_KIND_STRING) {
+                string s = MLIR_GetAttributeAsString(ctx, va);
+                size_t n = s.size < sz ? s.size : sz;
+                memcpy(blob + off, s.str, n);
+            } else if (vk == MLIR_ATTR_KIND_INTEGER ||
+                       vk == MLIR_ATTR_KIND_BOOL) {
+                uint64_t v = (uint64_t)MLIR_GetAttributeInteger(va);
+                for (unsigned b = 0; b < sz && b < 8; b++)
+                    blob[off + b] = (uint8_t)(v >> (8 * b));
+            } else if (vk == MLIR_ATTR_KIND_FLOAT) {
+                double d = MLIR_GetAttributeFloat(va);
+                uint64_t bits = 0;
+                if (sz == 4) { float f = (float)d; uint32_t b32;
+                               memcpy(&b32, &f, 4); bits = b32; }
+                else if (sz == 8) { memcpy(&bits, &d, 8); }
+                else { free(blob); free(pend); return false; }
+                for (unsigned b = 0; b < sz && b < 8; b++)
+                    blob[off + b] = (uint8_t)(bits >> (8 * b));
+            } else {
+                free(blob); free(pend); return false;
+            }
+        } else if (MLIR_GetOpNumRegions(op) > 0 &&
+                   MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(op, 0)) > 0) {
+            // Region-init pointer global: scan for addressof @target + return.
+            MLIR_BlockHandle blk = MLIR_GetRegionBlock(MLIR_GetOpRegion(op, 0), 0);
+            size_t nb = MLIR_GetBlockNumOps(blk);
+            string target = (string){0};
+            for (size_t bi = 0; bi < nb; bi++) {
+                MLIR_OpHandle bop = MLIR_GetBlockOp(blk, bi);
+                if (name_eq(MLIR_GetOpName(bop), "llvm.mlir.addressof")) {
+                    MLIR_AttributeHandle ga =
+                        MLIR_GetOpAttributeByName(bop, "global_name");
+                    if (ga == MLIR_INVALID_HANDLE) { free(blob); free(pend); return false; }
+                    string ts = MLIR_GetAttributeAsString(ctx, ga);
+                    if (ts.size && ts.str[0] == '@') { ts.str++; ts.size--; }
+                    target = ts;
+                }
+            }
+            if (!target.str || sz < 8) { free(blob); free(pend); return false; }
+            pend[n_pend].slot_off = off;
+            pend[n_pend].target   = target;
+            n_pend++;
+        }
+        blen = need;
+
+        gm->e[gm->n].name = name;
+        gm->e[gm->n].off  = off;
+        gm->n++;
+    }
+
+    // Resolve pending pointer relocs now that every global has an offset.
+    PtrReloc *relocs = n_pend ? (PtrReloc *)calloc(n_pend, sizeof(PtrReloc))
+                              : NULL;
+    for (size_t k = 0; k < n_pend; k++) {
+        uint32_t toff = 0;
+        if (!gmap_get(gm, pend[k].target, &toff)) {
+            free(blob); free(pend); free(relocs); return false;
+        }
+        relocs[k].slot_off   = pend[k].slot_off;
+        relocs[k].target_off = toff;
+    }
+    free(pend);
+
+    *blob_out = blob;
+    *blob_len_out = blen;
+    *relocs_out = relocs;
+    *n_relocs_out = n_pend;
+    return true;
+}
+
+
 // line integer code plus structured control flow (scf.if / scf.while /
 // scf.index_switch). Uses the trivial spill-everything allocator: every SSA
 // value (incl. block args / scf results) lives in a frame slot, so phi /
 // block-arg resolution is a slot-to-slot copy at each edge.
 // ---------------------------------------------------------------------------
 static MLIR_OpHandle select_func(MLIR_Context *ctx, MLIR_OpHandle fn,
-                                 string sym) {
+                                 string sym, GlobalMap *gm) {
     MLIR_RegionHandle src_region = MLIR_GetOpRegion(fn, 0);
     if (MLIR_GetRegionNumBlocks(src_region) != 1) {
         A64_FAIL("llvm->aarch64: function '%.*s' has a non-structured CFG "
@@ -1048,7 +1232,7 @@ static MLIR_OpHandle select_func(MLIR_Context *ctx, MLIR_OpHandle fn,
         store_value(ctx, out_blk, &sm, MLIR_GetBlockArg(src_blk, i), (uint8_t)i);
 
     LowerCtx L = { ctx, &sm, out_reg, out_blk, sym, frame_size,
-                   &am, slot_bytes, true };
+                   &am, slot_bytes, gm, true };
     MLIR_OpHandle term = lower_block_ops(&L, src_blk);
     if (!L.ok) return MLIR_INVALID_HANDLE;
 
@@ -1077,12 +1261,25 @@ static MLIR_OpHandle select_func(MLIR_Context *ctx, MLIR_OpHandle fn,
         MLIR_INVALID_HANDLE, (string){0}, -1);
 }
 
-// Synthesise `_start`: `bl main; bl _exit`. Exported and emitted first so
-// the Mach-O encoder lands LC_MAIN.entryoff on it.
-static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name) {
+// Synthesise `_start`: initialise pointer globals (PC-relative, so they work
+// under ASLR), then `bl main; bl _exit`. Exported and emitted first so the
+// Mach-O encoder lands LC_MAIN.entryoff on it.
+static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name,
+                                 PtrReloc *relocs, size_t n_relocs) {
     MLIR_BlockHandle  blk = MLIR_CreateBlock(ctx);
     MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
     MLIR_AppendRegionBlock(ctx, reg, blk);
+
+    // For each pointer global, compute target address (PC-relative) and the
+    // slot address (PC-relative), then store target into the slot.
+    string tgt = str_from_cstr_view("linmem_template");
+    for (size_t k = 0; k < n_relocs; k++) {
+        emit_adrp_data(ctx, blk, 9, tgt, relocs[k].target_off);
+        emit_add_data_lo(ctx, blk, 9, 9, tgt, relocs[k].target_off);
+        emit_adrp_data(ctx, blk, 10, tgt, relocs[k].slot_off);
+        emit_add_data_lo(ctx, blk, 10, 10, tgt, relocs[k].slot_off);
+        emit_str_x(ctx, blk, 9, 10, 0);
+    }
 
     emit_bl(ctx, blk, main_name);
     emit_bl(ctx, blk, str_lit("_exit"));
@@ -1108,8 +1305,23 @@ MLIR_OpHandle mlir_llvm_to_aarch64(MLIR_Context *ctx,
     MLIR_RegionHandle out_region = MLIR_CreateRegion(ctx);
     MLIR_AppendRegionBlock(ctx, out_region, out_body);
 
-    // `_start` first (entry point).
-    MLIR_AppendBlockOp(ctx, out_body, synth_start(ctx, str_lit("main")));
+    // Pre-scan module-level globals into a single native data blob.
+    GlobalMap gm = {0};
+    uint8_t  *gblob = NULL;
+    uint32_t  gblob_len = 0;
+    PtrReloc *grelocs = NULL;
+    size_t    n_grelocs = 0;
+    if (!collect_globals(ctx, mb, &gm, &gblob, &gblob_len,
+                         &grelocs, &n_grelocs)) {
+        fprintf(stderr, "llvm->aarch64: unsupported module-level global\n");
+        free(gm.e); free(gblob); free(grelocs);
+        return MLIR_INVALID_HANDLE;
+    }
+
+    // `_start` first (entry point); it initialises pointer globals then
+    // calls main. PC-relative init keeps things correct under ASLR.
+    MLIR_AppendBlockOp(ctx, out_body,
+        synth_start(ctx, str_lit("main"), grelocs, n_grelocs));
 
     bool saw_main = false;
     for (size_t i = 0; i < nops; i++) {
@@ -1119,14 +1331,26 @@ MLIR_OpHandle mlir_llvm_to_aarch64(MLIR_Context *ctx,
         MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
         if (sa == MLIR_INVALID_HANDLE) {
             fprintf(stderr, "llvm->aarch64: llvm.func without sym_name\n");
+            free(gm.e); free(gblob); free(grelocs);
             return MLIR_INVALID_HANDLE;
         }
         string sym = MLIR_GetAttributeString(sa);
         if (sym.size == 4 && memcmp(sym.str, "main", 4) == 0) saw_main = true;
-        MLIR_OpHandle fn = select_func(ctx, op, sym);
-        if (fn == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
+        MLIR_OpHandle fn = select_func(ctx, op, sym, &gm);
+        if (fn == MLIR_INVALID_HANDLE) { free(gm.e); free(gblob); free(grelocs); return MLIR_INVALID_HANDLE; }
         MLIR_AppendBlockOp(ctx, out_body, fn);
     }
+
+    // Emit the global data blob as one data_init record (the encoder copies
+    // these bytes into the __linmem_template data section).
+    if (gblob_len > 0) {
+        MLIR_AttributeHandle a[2];
+        a[0] = attr_i32(ctx, "offset", 0);
+        a[1] = attr_s(ctx, "init_data", (const char *)gblob, gblob_len);
+        MLIR_AppendBlockOp(ctx, out_body,
+            build_op(ctx, OP_TYPE_AARCH64_DATA_INIT, a, 2));
+    }
+    free(gm.e); free(gblob); free(grelocs);
 
     if (!saw_main) {
         fprintf(stderr, "llvm->aarch64: no defined 'main' function\n");
