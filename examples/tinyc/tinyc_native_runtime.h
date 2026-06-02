@@ -186,14 +186,35 @@ static const TinycRuntimeFn TINYC_RUNTIME_FNS[] = {
       "}\n" },
     { "printF64",
       "void printF64(double v){ char b[64]; int n; n=tinyc_rt_fmt_f64(v,b); _write(1,b,(long)n); }\n" },
+    { "tinyc_rt_fmt_f64_prec",
+      "int tinyc_rt_fmt_f64_prec(double v, char *buf, int prec){\n"
+      "  int out; double scale; int i; long ip; double rounded; double frac;\n"
+      "  out=0;\n"
+      "  if(v != v){ buf[0]='n'; buf[1]='a'; buf[2]='n'; return 3; }\n"
+      "  if(v < 0.0){ buf[out]='-'; out=out+1; v=-v; }\n"
+      "  scale=1.0;\n"
+      "  for(i=0;i<prec;i=i+1){ scale=scale*10.0; }\n"
+      "  rounded=(double)(long)(v*scale+0.5)/scale;\n"
+      "  ip=(long)rounded;\n"
+      "  out=out+tinyc_rt_fmt_i64(ip, buf+out);\n"
+      "  if(prec>0){\n"
+      "    buf[out]='.'; out=out+1;\n"
+      "    frac=rounded-(double)ip;\n"
+      "    if(frac<0.0){ frac=-frac; }\n"
+      "    for(i=0;i<prec;i=i+1){\n"
+      "      int d; frac=frac*10.0; d=(int)frac; if(d<0){ d=0; } if(d>9){ d=9; }\n"
+      "      buf[out]=(char)(48+d); out=out+1; frac=frac-(double)d;\n"
+      "    }\n"
+      "  }\n"
+      "  return out;\n"
+      "}\n" },
     { "printF32",
       "void printF32(float v){ char b[64]; int n; n=tinyc_rt_fmt_f64((double)v,b); _write(1,b,(long)n); }\n" },
-    // Minimal printf: supports %d %i %u %x %X %p %c %s %% (and length modifiers
-    // l/ll). Float specifiers (%f %g) are not yet implemented. Semantics mirror
-    // runtime_wasm.c's vprintf_impl for the integer/string subset.
+    // Minimal printf: supports %d %i %u %x %X %p %c %s %f %g %% (and length
+    // modifiers l/ll). Semantics mirror runtime_wasm.c's vprintf_impl.
     { "printf",
       "int printf(char *fmt, ...){\n"
-      "  char buf[40]; int total; int i; int prec; int lcount; char c;\n"
+      "  char buf[64]; int total; int i; int prec; int lcount; char c;\n"
       "  __builtin_va_list ap; __builtin_va_start(ap, fmt);\n"
       "  total=0; i=0;\n"
       "  while(fmt[i]){\n"
@@ -228,6 +249,13 @@ static const TinycRuntimeFn TINYC_RUNTIME_FNS[] = {
       "      char *s; long sn; s=__builtin_va_arg(ap,char*);\n"
       "      if(!s){ s=\"(null)\"; }\n"
       "      sn=0; while(s[sn]){ sn=sn+1; } _write(1,s,sn); total=total+(int)sn;\n"
+      "    } else if(c=='f' || c=='F'){\n"
+      "      double v; int n; int p; v=__builtin_va_arg(ap,double);\n"
+      "      p=prec; if(p<0){ p=6; }\n"
+      "      n=tinyc_rt_fmt_f64_prec(v,buf,p); _write(1,buf,(long)n); total=total+n;\n"
+      "    } else if(c=='g' || c=='G'){\n"
+      "      double v; int n; v=__builtin_va_arg(ap,double);\n"
+      "      n=tinyc_rt_fmt_f64(v,buf); _write(1,buf,(long)n); total=total+n;\n"
       "    } else if(c=='%'){\n"
       "      _write(1,\"%\",1); total=total+1;\n"
       "    } else {\n"
