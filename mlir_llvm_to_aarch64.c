@@ -1404,21 +1404,36 @@ static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
             MLIR_BlockHandle blk = MLIR_GetRegionBlock(MLIR_GetOpRegion(op, 0), 0);
             size_t nb = MLIR_GetBlockNumOps(blk);
             string target = (string){0};
+            bool only_trivial = true;
             for (size_t bi = 0; bi < nb; bi++) {
                 MLIR_OpHandle bop = MLIR_GetBlockOp(blk, bi);
-                if (name_eq(MLIR_GetOpName(bop), "llvm.mlir.addressof")) {
+                string opn = MLIR_GetOpName(bop);
+                if (name_eq(opn, "llvm.mlir.addressof")) {
                     MLIR_AttributeHandle ga =
                         MLIR_GetOpAttributeByName(bop, "global_name");
                     if (ga == MLIR_INVALID_HANDLE) { free(blob); free(pend); return false; }
                     string ts = MLIR_GetAttributeAsString(ctx, ga);
                     if (ts.size && ts.str[0] == '@') { ts.str++; ts.size--; }
                     target = ts;
+                } else if (!name_eq(opn, "llvm.mlir.zero") &&
+                           !name_eq(opn, "llvm.mlir.undef") &&
+                           !name_eq(opn, "llvm.return")) {
+                    // Anything other than zero/undef/return/addressof means a
+                    // non-trivial initializer we can't lower here.
+                    only_trivial = false;
                 }
             }
-            if (!target.str || sz < 8) { free(blob); free(pend); return false; }
-            pend[n_pend].slot_off = off;
-            pend[n_pend].target   = target;
-            n_pend++;
+            if (target.str) {
+                // Pointer global initialised to the address of another global.
+                if (sz < 8) { free(blob); free(pend); return false; }
+                pend[n_pend].slot_off = off;
+                pend[n_pend].target   = target;
+                n_pend++;
+            } else if (!only_trivial) {
+                // Unsupported non-zero aggregate/scalar initializer.
+                free(blob); free(pend); return false;
+            }
+            // else: zeroinitializer / undef — blob is already zero-filled.
         }
         blen = need;
 
