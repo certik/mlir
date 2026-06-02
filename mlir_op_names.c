@@ -254,6 +254,7 @@ static string op_type_to_string_half2(MLIR_OpType type) {
         case OP_TYPE_AARCH64_MOVK:         return str_lit("aarch64.movk");
         case OP_TYPE_AARCH64_MOV_X:        return str_lit("aarch64.mov_x");
         case OP_TYPE_AARCH64_BL:           return str_lit("aarch64.bl");
+        case OP_TYPE_AARCH64_BLR:          return str_lit("aarch64.blr");
         case OP_TYPE_AARCH64_SVC:          return str_lit("aarch64.svc");
         case OP_TYPE_AARCH64_RET:          return str_lit("aarch64.ret");
         case OP_TYPE_AARCH64_ADD_IMM:      return str_lit("aarch64.add_imm");

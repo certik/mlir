@@ -85,6 +85,12 @@ static void emit_bl(MLIR_Context *ctx, MLIR_BlockHandle blk, string callee) {
 static void emit_ret(MLIR_Context *ctx, MLIR_BlockHandle blk) {
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_RET, NULL, 0));
 }
+// blr Xn — indirect branch-and-link via register (for indirect calls).
+static void emit_blr(MLIR_Context *ctx, MLIR_BlockHandle blk, uint8_t rn) {
+    MLIR_AttributeHandle a[1];
+    a[0] = attr_i32(ctx, "rn", rn);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_BLR, a, 1));
+}
 // ADRP rd, <section page>  /  ADD rd, rn, #<section lo12 + addend>. The
 // encoder resolves `target` (a section kind or, for native globals, the
 // "linmem_template" data section) and adds `addend` to the base address.
@@ -890,8 +896,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
 
     } else if (name_eq(on, "llvm.call")) {
         MLIR_AttributeHandle callee = MLIR_GetOpAttributeByName(op, "callee");
-        if (callee == MLIR_INVALID_HANDLE)
-            LFAIL("llvm->aarch64: indirect calls not yet supported\n");
+        bool is_indirect = (callee == MLIR_INVALID_HANDLE);
         MLIR_AttributeHandle vct = MLIR_GetOpAttributeByName(op, "var_callee_type");
         bool is_variadic = false;
         size_t n_fixed = 0;
@@ -902,11 +907,24 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
                 n_fixed = MLIR_GetTypeFunctionNumInputs(ft);
             }
         }
-        size_t no = MLIR_GetOpNumOperands(op);
+        // For an indirect call operand 0 is the function-pointer value; the
+        // actual arguments start at operand 1. Materialise the target into
+        // x16 (an intra-procedure scratch reg not used for arguments) BEFORE
+        // any stack adjustment, since the slot is sp-relative.
+        size_t arg_base = is_indirect ? 1 : 0;
+        if (is_indirect) {
+            if (!load_value(ctx, blk, sm, MLIR_GetOpOperand(op, 0), 16))
+                LFAIL("llvm->aarch64: undefined indirect callee in '%.*s'\n",
+                      (int)L->sym.size, L->sym.str);
+        }
+        size_t no = MLIR_GetOpNumOperands(op) - arg_base;
         if (no > 64)
             LFAIL("llvm->aarch64: call with %zu args (>64 not supported)\n", no);
-        string nm = MLIR_GetAttributeAsString(ctx, callee);
-        if (nm.size > 0 && nm.str[0] == '@') { nm.str++; nm.size--; }
+        string nm = (string){0};
+        if (!is_indirect) {
+            nm = MLIR_GetAttributeAsString(ctx, callee);
+            if (nm.size > 0 && nm.str[0] == '@') { nm.str++; nm.size--; }
+        }
         // n_reg = args passed in x0..x7. Darwin arm64 passes ALL variadic args
         // on the stack, so only the fixed params (capped at 8) go in registers.
         size_t n_reg = no;
@@ -915,10 +933,11 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         if (n_reg > no)    n_reg = no;
         if (no == n_reg) {
             for (size_t k = 0; k < no; k++)
-                if (!load_value(ctx, blk, sm, MLIR_GetOpOperand(op, k), (uint8_t)k))
+                if (!load_value(ctx, blk, sm, MLIR_GetOpOperand(op, arg_base + k), (uint8_t)k))
                     LFAIL("llvm->aarch64: undefined call arg in '%.*s'\n",
                           (int)L->sym.size, L->sym.str);
-            emit_bl(ctx, blk, nm);
+            if (is_indirect) emit_blr(ctx, blk, 16);
+            else             emit_bl(ctx, blk, nm);
         } else {
             // AAPCS64: first n_reg args in x0..x{n_reg-1}, the rest on the stack
             // at the call sp. Reserve a 16-aligned arg area below sp; address
@@ -930,20 +949,21 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             emit_add_imm(ctx, blk, 12, 31, (uint16_t)area, true); // x12 = orig sp
             for (size_t k = 0; k < n_reg; k++) {
                 int32_t slot;
-                if (!sm_get(sm, MLIR_GetOpOperand(op, k), &slot))
+                if (!sm_get(sm, MLIR_GetOpOperand(op, arg_base + k), &slot))
                     LFAIL("llvm->aarch64: undefined call arg in '%.*s'\n",
                           (int)L->sym.size, L->sym.str);
                 emit_ldr_x(ctx, blk, (uint8_t)k, 12, (uint32_t)slot * 8u);
             }
             for (size_t k = n_reg; k < no; k++) {
                 int32_t slot;
-                if (!sm_get(sm, MLIR_GetOpOperand(op, k), &slot))
+                if (!sm_get(sm, MLIR_GetOpOperand(op, arg_base + k), &slot))
                     LFAIL("llvm->aarch64: undefined call arg in '%.*s'\n",
                           (int)L->sym.size, L->sym.str);
                 emit_ldr_x(ctx, blk, 9, 12, (uint32_t)slot * 8u);
                 emit_str_x(ctx, blk, 9, 31, (uint32_t)(k - n_reg) * 8u);
             }
-            emit_bl(ctx, blk, nm);
+            if (is_indirect) emit_blr(ctx, blk, 16);
+            else             emit_bl(ctx, blk, nm);
             emit_add_imm(ctx, blk, 31, 31, (uint16_t)area, true); // restore sp
         }
         if (MLIR_GetOpNumResults(op) == 1)
@@ -1129,12 +1149,17 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         string gnm = MLIR_GetAttributeAsString(ctx, ga);
         if (gnm.size > 0 && gnm.str[0] == '@') { gnm.str++; gnm.size--; }
         uint32_t off = 0;
-        if (!L->gm || !gmap_get(L->gm, gnm, &off))
-            LFAIL("llvm->aarch64: addressof of unknown global '%.*s'\n",
-                  (int)gnm.size, gnm.str);
-        string tgt = str_from_cstr_view("linmem_template");
-        emit_adrp_data(ctx, blk, 9, tgt, off);
-        emit_add_data_lo(ctx, blk, 9, 9, tgt, off);
+        if (L->gm && gmap_get(L->gm, gnm, &off)) {
+            string tgt = str_from_cstr_view("linmem_template");
+            emit_adrp_data(ctx, blk, 9, tgt, off);
+            emit_add_data_lo(ctx, blk, 9, 9, tgt, off);
+        } else {
+            // Not a data global — materialise the address of a function
+            // symbol (ADRP+ADD resolved against the function's text address
+            // by the Mach-O encoder).
+            emit_adrp_data(ctx, blk, 9, gnm, 0);
+            emit_add_data_lo(ctx, blk, 9, 9, gnm, 0);
+        }
         store_value(ctx, blk, sm, MLIR_GetOpResult(op, 0), 9);
 
     } else if (name_eq(on, "llvm.fadd") || name_eq(on, "llvm.fsub") ||

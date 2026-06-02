@@ -449,6 +449,7 @@ typedef enum {
     OP_TYPE_AARCH64_MOVK,   // movk Wd|Xd, #imm16, LSL #(hw*16)
     OP_TYPE_AARCH64_MOV_X,  // mov Xd, Xn  (register move; X-form)
     OP_TYPE_AARCH64_BL,     // bl <symbol>  (branch-and-link, PC-relative)
+    OP_TYPE_AARCH64_BLR,    // blr Xn  (indirect branch-and-link via register)
     OP_TYPE_AARCH64_SVC,    // svc #imm16
     OP_TYPE_AARCH64_RET,    // ret (== ret x30)
 

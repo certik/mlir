@@ -206,6 +206,10 @@ static uint32_t arm64_bl(int32_t imm26) {
 static uint32_t arm64_svc(uint16_t imm16) {
     return 0xd4000001u | ((uint32_t)imm16 << 5);
 }
+// `blr Xn` — indirect branch-and-link via register.
+static uint32_t arm64_blr(uint8_t rn) {
+    return 0xd63f0000u | ((uint32_t)(rn & 0x1f) << 5);
+}
 static uint32_t arm64_ret(void) { return 0xd65f03c0u; }
 
 // ---- compare + cset/csel + branches ------------------------------
@@ -782,6 +786,11 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
                 uint32_t off = (uint32_t)out->code.len;
                 emit_word(&out->code, arm64_bl(0));
                 ef_add_reloc(out, callee, off);
+                break;
+            }
+            case OP_TYPE_AARCH64_BLR: {
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                emit_word(&out->code, arm64_blr(rn));
                 break;
             }
             case OP_TYPE_AARCH64_SVC: {
@@ -1883,13 +1892,28 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
             } else if (dr->kind.size == 15 && memcmp(dr->kind.str, "linmem_template", 15) == 0) {
                 dst_vm = linmem_tpl_vmaddr;
             } else {
-                fprintf(stderr,
-                    "aarch64->macho: unknown data reloc kind '%.*s'\n",
-                    (int)dr->kind.size, dr->kind.str);
-                for (size_t k2 = 0; k2 < n_funcs; k2++) {
-                    free(efs[k2].code.data); free(efs[k2].relocs); free(efs[k2].dr);
+                // Otherwise treat the reloc kind as a local function symbol:
+                // resolve to that function's absolute VM address. Used to
+                // materialise function-pointer values (addressof @func).
+                bool found = false;
+                for (size_t j = 0; j < n_funcs; j++) {
+                    if (efs[j].name.size == dr->kind.size &&
+                        memcmp(efs[j].name.str, dr->kind.str, dr->kind.size) == 0) {
+                        dst_vm = TEXT_VM_BASE + (uint64_t)text_section_off
+                               + (uint64_t)efs[j].text_off;
+                        found = true;
+                        break;
+                    }
                 }
-                free(efs); free(inits); free(img.data); return false;
+                if (!found) {
+                    fprintf(stderr,
+                        "aarch64->macho: unknown data reloc kind '%.*s'\n",
+                        (int)dr->kind.size, dr->kind.str);
+                    for (size_t k2 = 0; k2 < n_funcs; k2++) {
+                        free(efs[k2].code.data); free(efs[k2].relocs); free(efs[k2].dr);
+                    }
+                    free(efs); free(inits); free(img.data); return false;
+                }
             }
             uint64_t src_pc = TEXT_VM_BASE + (uint64_t)text_section_off
                             + (uint64_t)efs[i].text_off + (uint64_t)dr->fn_off;
