@@ -1325,3 +1325,8 @@ expected_stdout = "OK\n"
 name = "ptr_add_u64_stride"
 targets = ["native", "wasm", "macho"]
 expected_stdout = "OK\n"
+
+[[test]]
+name = "octal_literal"
+targets = ["native", "wasm", "macho"]
+expected_stdout = "493\n8\n0\n511\n31\n100\n512\n"

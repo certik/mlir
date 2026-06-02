@@ -2493,7 +2493,7 @@ static void synth_path_open(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
             emit_const(&L, i32, fl[k].posix), i32);
         osf = emit_binop2(&L, OP_TYPE_LLVM_ADD, osf, contrib, i32);
     }
-    MLIR_ValueHandle oargs[3] = { buf, osf, emit_const(&L, i32, 0x1a4) };
+    MLIR_ValueHandle oargs[3] = { buf, osf, emit_const(&L, i32, 0644) };
     MLIR_ValueHandle fd = emit_libc_call(&L, "_open", oargs, 3, i32);
     MLIR_BlockHandle ook = new_block(&L);
     MLIR_ValueHandle ofail = build_icmp(&L, /*slt*/2, fd, emit_const(&L, i32, 0));
@@ -2514,7 +2514,7 @@ static void synth_path_open(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
     term_cond_br(&L, created, do_chmod, ret_ok);
 
     L.cur = do_chmod; L.terminated = false;
-    MLIR_ValueHandle cargs[2] = { fd, emit_const(&L, i32, 0x1a4) };
+    MLIR_ValueHandle cargs[2] = { fd, emit_const(&L, i32, 0644) };
     (void)emit_libc_call(&L, "_fchmod", cargs, 2, i32);
     term_br(&L, ret_ok);
 
