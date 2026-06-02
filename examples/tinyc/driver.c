@@ -21,6 +21,7 @@
 #include "mlir_wasm_link.h"
 #include "mlir_wasmssa_to_wmir.h"
 #include "mlir_wmir_to_aarch64.h"
+#include "mlir_llvm_to_aarch64.h"
 #include "mlir_aarch64_to_macho.h"
 #include "tinyc.h"
 
@@ -90,6 +91,9 @@ int app_main(void) {
     // wasm->macho path. "wmir" routes the wasmssa IR through the new
     // wmir -> aarch64 -> macho path.
     bool macho_backend_wmir = false;
+    // "llvm" routes the `llvm` dialect directly through the new unified
+    // llvm -> aarch64 -> macho backend (Option 1, work-in-progress).
+    bool macho_backend_llvm = false;
     // `--lowering=upstream` switches the four lowering / translation calls
     // below to the *Upstream variants (which run upstream MLIR's pass
     // pipeline / translator / LLVM target machine). Only available in the
@@ -227,8 +231,9 @@ int app_main(void) {
         else if (strcmp(argv[i], "--emit=macho")   == 0) { emit_macho = true;   emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_wmir = false; emit_aarch64 = false; }
         else if (strcmp(argv[i], "--emit=wmir")    == 0) { emit_wmir = true;    emit_macho = false; emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_aarch64 = false; }
         else if (strcmp(argv[i], "--emit=aarch64") == 0) { emit_aarch64 = true; emit_wmir = false; emit_macho = false; emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; }
-        else if (strcmp(argv[i], "--macho-backend=wmir") == 0) { macho_backend_wmir = true; }
-        else if (strcmp(argv[i], "--macho-backend=wasm") == 0) { macho_backend_wmir = false; }
+        else if (strcmp(argv[i], "--macho-backend=wmir") == 0) { macho_backend_wmir = true; macho_backend_llvm = false; }
+        else if (strcmp(argv[i], "--macho-backend=wasm") == 0) { macho_backend_wmir = false; macho_backend_llvm = false; }
+        else if (strcmp(argv[i], "--macho-backend=llvm") == 0) { macho_backend_llvm = true; macho_backend_wmir = false; }
         else if (strncmp(argv[i], "--wasm-runtime-obj=", 19) == 0) {
             wasm_runtime_objs[n_wasm_runtime_objs++] = argv[i] + 19;
         }
@@ -562,7 +567,23 @@ int app_main(void) {
         //   aarch64 -> macho pipeline. The new pipeline is being
         //   built up op-by-op; on unsupported wasmssa shapes it
         //   returns a clear error from its respective stage.
-        if (macho_backend_wmir) {
+        if (macho_backend_llvm) {
+            // Option 1: unified llvm -> aarch64 -> macho backend (WIP).
+            MLIR_OpHandle aarch64 = mlir_llvm_to_aarch64(&ctx, module);
+            if (aarch64 == MLIR_INVALID_HANDLE) {
+                arena_destroy(arena);
+                arena_destroy(boot_arena);
+                return 1;
+            }
+            uint8_t *macho_data = NULL; size_t macho_size = 0;
+            if (!mlir_aarch64_to_macho(&ctx, aarch64, &macho_data, &macho_size)) {
+                arena_destroy(arena);
+                arena_destroy(boot_arena);
+                return 1;
+            }
+            out.str = (char *)macho_data;
+            out.size = macho_size;
+        } else if (macho_backend_wmir) {
             MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(&ctx, module);
             if (ssa == MLIR_INVALID_HANDLE) {
                 arena_destroy(arena);
