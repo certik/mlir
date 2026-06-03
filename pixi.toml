@@ -418,6 +418,18 @@ selfhost_tinyc_macho_wmir_stage3 = { cmd = "bash examples/tinyc/selfhost_tinyc_m
 
 verify_tinyc_macho_wmir_selfhost = { cmd = "cmp tinyc_stage2_macho_wmir tinyc_stage3_macho_wmir && echo 'tinyc macho-via-wmir self-host is bit-identical (stage2 == stage3)'", depends-on = ["selfhost_tinyc_macho_wmir_stage3"], description = "Compare stage 2 and stage 3 macho binaries (wmir backend) byte-for-byte to verify the self-hosting cycle reaches a fixed point (Darwin/arm64 only)" }
 
+# Self-host through the new unified llvm backend, which goes
+#   wasm -> wasmstack -> wasmssa -> llvm -> aarch64 -> Mach-O
+# (Step 5). Same stage1/2/3 + bit-identity verify shape as
+# `selfhost_tinyc_macho_wmir_*`. This is the path that will replace wmir.
+selfhost_tinyc_macho_llvm_stage1 = { cmd = "bash examples/tinyc/selfhost_tinyc_macho_llvm.sh tinyc.wasm tinyc_stage1_macho_llvm selfhost_macho_llvm_stage1", depends-on = ["build_tinyc_wasm"], description = "Self-host stage 1 (macho via llvm): drive tinyc.wasm under wasmtime to recompile every tinyc source, link them into one wasm, and lift+lower to tinyc_stage1_macho_llvm (Darwin/arm64 only)" }
+
+selfhost_tinyc_macho_llvm_stage2 = { cmd = "bash examples/tinyc/selfhost_tinyc_macho_llvm.sh ./tinyc_stage1_macho_llvm tinyc_stage2_macho_llvm selfhost_macho_llvm_stage2", depends-on = ["selfhost_tinyc_macho_llvm_stage1"], description = "Self-host stage 2 (macho via llvm): use tinyc_stage1_macho_llvm to recompile every tinyc source and lift+lower into tinyc_stage2_macho_llvm (Darwin/arm64 only)" }
+
+selfhost_tinyc_macho_llvm_stage3 = { cmd = "bash examples/tinyc/selfhost_tinyc_macho_llvm.sh ./tinyc_stage2_macho_llvm tinyc_stage3_macho_llvm selfhost_macho_llvm_stage3", depends-on = ["selfhost_tinyc_macho_llvm_stage2"], description = "Self-host stage 3 (macho via llvm): use tinyc_stage2_macho_llvm to recompile every tinyc source and lift+lower into tinyc_stage3_macho_llvm (Darwin/arm64 only)" }
+
+verify_tinyc_macho_llvm_selfhost = { cmd = "cmp tinyc_stage2_macho_llvm tinyc_stage3_macho_llvm && echo 'tinyc macho-via-llvm self-host is bit-identical (stage2 == stage3)'", depends-on = ["selfhost_tinyc_macho_llvm_stage3"], description = "Compare stage 2 and stage 3 macho binaries (llvm backend) byte-for-byte to verify the self-hosting cycle reaches a fixed point (Darwin/arm64 only)" }
+
 [feature.upstream.target.win-64.tasks]
 build_cross_upstream = { cmd = "tests\\build_cross_upstream.bat", description = "Build cross-impl driver against upstream LLVM/MLIR (Windows)" }
 test_cross = { cmd = "./cross_upstream.exe > tests/cross/out_upstream.txt && python tests/file_diff.py tests/cross/expected.txt tests/cross/out_upstream.txt", depends-on = ["build_cross_upstream"], description = "Run upstream cross-impl driver and diff against reference (Windows)" }
