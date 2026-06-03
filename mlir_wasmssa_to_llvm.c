@@ -1059,11 +1059,51 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         return true;
     }
 
+    case OP_TYPE_WASMSSA_UNOP: {
+        int64_t opc = at_i(op, "wasm_opcode");
+        MLIR_ValueHandle a;
+        if (!vmap_get(L->vmap, MLIR_GetOpOperand(op, 0), &a)) {
+            fprintf(stderr, "wasmssa->llvm: unbound operand on unop\n");
+            return false;
+        }
+        MLIR_TypeHandle i8  = MLIR_CreateTypeInteger(ctx, 8, true);
+        MLIR_TypeHandle i16 = MLIR_CreateTypeInteger(ctx, 16, true);
+        MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
+        MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
+        MLIR_ValueHandle res;
+        switch (opc) {
+        case 0xa7: // i32.wrap_i64
+            res = emit_cast(L, OP_TYPE_LLVM_TRUNC, a, i32); break;
+        case 0xac: // i64.extend_i32_s
+            res = emit_cast(L, OP_TYPE_LLVM_SEXT, a, i64); break;
+        case 0xad: // i64.extend_i32_u
+            res = emit_cast(L, OP_TYPE_LLVM_ZEXT, a, i64); break;
+        case 0xc0: // i32.extend8_s
+            res = emit_cast(L, OP_TYPE_LLVM_SEXT,
+                emit_cast(L, OP_TYPE_LLVM_TRUNC, a, i8), i32); break;
+        case 0xc1: // i32.extend16_s
+            res = emit_cast(L, OP_TYPE_LLVM_SEXT,
+                emit_cast(L, OP_TYPE_LLVM_TRUNC, a, i16), i32); break;
+        case 0xc2: // i64.extend8_s
+            res = emit_cast(L, OP_TYPE_LLVM_SEXT,
+                emit_cast(L, OP_TYPE_LLVM_TRUNC, a, i8), i64); break;
+        case 0xc3: // i64.extend16_s
+            res = emit_cast(L, OP_TYPE_LLVM_SEXT,
+                emit_cast(L, OP_TYPE_LLVM_TRUNC, a, i16), i64); break;
+        case 0xc4: // i64.extend32_s
+            res = emit_cast(L, OP_TYPE_LLVM_SEXT,
+                emit_cast(L, OP_TYPE_LLVM_TRUNC, a, i32), i64); break;
+        default:
+            fprintf(stderr,
+                "wasmssa->llvm: unop opcode 0x%llx not yet supported\n",
+                (long long)opc);
+            return false;
+        }
+        vmap_set(L->vmap, MLIR_GetOpResult(op, 0), res);
+        return true;
+    }
+
     default:
-        fprintf(stderr,
-            "wasmssa->llvm: op '%.*s' not yet supported\n",
-            (int)MLIR_GetOpName(op).size, MLIR_GetOpName(op).str);
-        return false;
     }
 }
 
