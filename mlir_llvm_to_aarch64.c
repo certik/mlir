@@ -682,6 +682,22 @@ static void copy_slot(LowerCtx *L, MLIR_ValueHandle src, MLIR_ValueHandle dst) {
               (int)L->sym.size, L->sym.str);
 }
 
+// Emit the phi edge copies for successor `s` of branch `term` into L->cur:
+// each successor operand is copied into the matching block-argument slot of
+// the destination block. Under the spill-everything model every value (incl.
+// block args) owns a stable frame slot, and a destination block-arg slot is
+// always disjoint from any source-value slot, so these sequential memory
+// copies need no parallel-copy / swap handling.
+static void emit_edge_copies(LowerCtx *L, MLIR_OpHandle term, size_t s) {
+    MLIR_BlockHandle dst = MLIR_GetOpSuccessor(term, s);
+    size_t n = MLIR_GetOpNumSuccessorOperands(term, s);
+    for (size_t k = 0; k < n; k++) {
+        copy_slot(L, MLIR_GetOpSuccessorOperand(term, s, k),
+                  MLIR_GetBlockArg(dst, k));
+        if (!L->ok) return;
+    }
+}
+
 // Store an scf.yield's operands into the enclosing op's result slots.
 static void store_yield(LowerCtx *L, MLIR_OpHandle yield, MLIR_OpHandle owner) {
     size_t n = MLIR_GetOpNumOperands(yield);
@@ -1628,10 +1644,6 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
     for (size_t b = 0; b < n_blocks; b++) {
         L.cur = out_blks[b];
         MLIR_BlockHandle sb = src_blks[b];
-        if (b != 0 && MLIR_GetBlockNumArgs(sb) != 0)
-            A64_FAIL("llvm->aarch64: non-entry block %zu in '%.*s' has %zu "
-                     "block arg(s) (phi edge copies not implemented)\n",
-                     b, (int)sym.size, sym.str, MLIR_GetBlockNumArgs(sb));
         size_t no = MLIR_GetBlockNumOps(sb);
         if (no == 0) {
             fprintf(stderr, "llvm->aarch64: empty block in '%.*s'\n",
@@ -1662,30 +1674,58 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
             emit_epilogue(ctx, L.cur, frame_size);
             emit_ret(ctx, L.cur);
         } else if (name_eq(tn, "cf.br")) {
-            if (MLIR_GetOpNumOperands(term) != 0)
-                A64_FAIL("llvm->aarch64: cf.br with %zu block-arg operand(s) "
-                         "in '%.*s' (edge copies not implemented)\n",
-                         MLIR_GetOpNumOperands(term), (int)sym.size, sym.str);
+            emit_edge_copies(&L, term, 0);
+            if (!L.ok) { free(src_blks); free(out_blks); return MLIR_INVALID_HANDLE; }
             MLIR_BlockHandle d = map_block(src_blks, out_blks, n_blocks,
                                            MLIR_GetOpSuccessor(term, 0));
             emit_b(ctx, L.cur, d);
         } else if (name_eq(tn, "cf.cond_br")) {
-            if (MLIR_GetOpNumOperands(term) != 1)
-                A64_FAIL("llvm->aarch64: cf.cond_br with %zu operand(s) "
-                         "in '%.*s' (block-arg edge copies not implemented)\n",
-                         MLIR_GetOpNumOperands(term), (int)sym.size, sym.str);
+            if (MLIR_GetOpNumOperands(term) < 1) {
+                fprintf(stderr, "llvm->aarch64: cf.cond_br missing condition "
+                        "in '%.*s'\n", (int)sym.size, sym.str);
+                free(src_blks); free(out_blks);
+                return MLIR_INVALID_HANDLE;
+            }
             if (!load_value(ctx, L.cur, &sm, MLIR_GetOpOperand(term, 0), 9)) {
                 fprintf(stderr, "llvm->aarch64: undefined cond_br condition "
                         "in '%.*s'\n", (int)sym.size, sym.str);
                 free(src_blks); free(out_blks);
                 return MLIR_INVALID_HANDLE;
             }
-            MLIR_BlockHandle tb = map_block(src_blks, out_blks, n_blocks,
-                                            MLIR_GetOpSuccessor(term, 0));
-            MLIR_BlockHandle fb = map_block(src_blks, out_blks, n_blocks,
-                                            MLIR_GetOpSuccessor(term, 1));
-            emit_cbnz(ctx, L.cur, 9, false, tb);
-            emit_b(ctx, L.cur, fb);
+            MLIR_BlockHandle real_t = map_block(src_blks, out_blks, n_blocks,
+                                                MLIR_GetOpSuccessor(term, 0));
+            MLIR_BlockHandle real_f = map_block(src_blks, out_blks, n_blocks,
+                                                MLIR_GetOpSuccessor(term, 1));
+            size_t nso_t = MLIR_GetOpNumSuccessorOperands(term, 0);
+            size_t nso_f = MLIR_GetOpNumSuccessorOperands(term, 1);
+            // Edges that carry block-arg operands get a landing block that
+            // performs the copies before jumping to the real successor; this
+            // splits exactly the operand-carrying edges (no critical-edge
+            // hazard). Operand-free edges branch straight to the successor.
+            MLIR_BlockHandle br_t = real_t, br_f = real_f;
+            MLIR_BlockHandle cur = L.cur;
+            if (nso_t) {
+                br_t = MLIR_CreateBlock(ctx);
+                MLIR_AppendRegionBlock(ctx, out_reg, br_t);
+            }
+            if (nso_f) {
+                br_f = MLIR_CreateBlock(ctx);
+                MLIR_AppendRegionBlock(ctx, out_reg, br_f);
+            }
+            emit_cbnz(ctx, cur, 9, false, br_t);
+            emit_b(ctx, cur, br_f);
+            if (nso_t) {
+                L.cur = br_t;
+                emit_edge_copies(&L, term, 0);
+                if (!L.ok) { free(src_blks); free(out_blks); return MLIR_INVALID_HANDLE; }
+                emit_b(ctx, br_t, real_t);
+            }
+            if (nso_f) {
+                L.cur = br_f;
+                emit_edge_copies(&L, term, 1);
+                if (!L.ok) { free(src_blks); free(out_blks); return MLIR_INVALID_HANDLE; }
+                emit_b(ctx, br_f, real_f);
+            }
         } else {
             fprintf(stderr, "llvm->aarch64: block in '%.*s' ends in "
                     "non-terminator '%.*s'\n",

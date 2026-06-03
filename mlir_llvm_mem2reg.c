@@ -1020,7 +1020,8 @@ void mlir_llvm_mem2reg(MLIR_Context *ctx, MLIR_OpHandle module) {
     size_t nops = MLIR_GetBlockNumOps(mb);
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        if (MLIR_GetOpType(op) != OP_TYPE_FUNC_FUNC) continue;
+        MLIR_OpType ft = MLIR_GetOpType(op);
+        if (ft != OP_TYPE_FUNC_FUNC && ft != OP_TYPE_LLVM_FUNC) continue;
         if (MLIR_GetOpNumRegions(op) == 0) continue;
         MLIR_RegionHandle body = MLIR_GetOpRegion(op, 0);
         sroa_region(ctx, body);

@@ -387,6 +387,11 @@ int app_main(void) {
                     arena_destroy(boot_arena);
                     return 1;
                 }
+                // Promote non-escaping local allocas to SSA so the backend
+                // can keep them in registers instead of a load/store per
+                // access. Skippable via TINYC_NO_MEM2REG for A/B debugging.
+                if (!getenv("TINYC_NO_MEM2REG"))
+                    mlir_llvm_mem2reg(&ctx, llvm_mod);
                 arena_destroy(arena);
                 arena = late_arena;
                 if (!mlir_llvm_to_macho(&ctx, llvm_mod,
