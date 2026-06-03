@@ -1625,6 +1625,92 @@ static void synth_print_str(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
     MLIR_AppendBlockOp(ctx, out_body, fn);
     free(L.frames);
 }
+
+// i32 fd_write(i32 fd, i32 iovs, i32 iovs_len, i32 nwritten): WASI shim. Walks
+// `iovs_len` (buf_ofs, len) iovec pairs in linmem starting at `iovs`, _write's
+// each chunk, accumulates the byte count to linmem[nwritten], returns 0.
+static void synth_fd_write(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
+    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle  entry = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, reg, entry);
+
+    MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
+    MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
+
+    MLIR_ValueHandle pfd = MLIR_CreateValueBlockArg(ctx, (string){0}, 0, i32,
+        MLIR_CreateLocationUnknown(ctx, (string){0}));
+    MLIR_ValueHandle piov = MLIR_CreateValueBlockArg(ctx, (string){0}, 1, i32,
+        MLIR_CreateLocationUnknown(ctx, (string){0}));
+    MLIR_ValueHandle plen = MLIR_CreateValueBlockArg(ctx, (string){0}, 2, i32,
+        MLIR_CreateLocationUnknown(ctx, (string){0}));
+    MLIR_ValueHandle pnw = MLIR_CreateValueBlockArg(ctx, (string){0}, 3, i32,
+        MLIR_CreateLocationUnknown(ctx, (string){0}));
+    MLIR_AppendBlockArg(ctx, entry, pfd);
+    MLIR_AppendBlockArg(ctx, entry, piov);
+    MLIR_AppendBlockArg(ctx, entry, plen);
+    MLIR_AppendBlockArg(ctx, entry, pnw);
+
+    FLower L = {0};
+    L.ctx = ctx; L.dreg = reg; L.cur = entry;
+
+    MLIR_ValueHandle iovpr = emit_alloca(&L, i32, 1); // current iovec offset
+    MLIR_ValueHandle rempr = emit_alloca(&L, i32, 1); // remaining count
+    MLIR_ValueHandle totpr = emit_alloca(&L, i64, 1); // bytes-written accumulator
+    emit_store_v(&L, piov, iovpr);
+    emit_store_v(&L, plen, rempr);
+    emit_store_v(&L, emit_const(&L, i64, 0), totpr);
+
+    MLIR_BlockHandle loop = new_block(&L);
+    MLIR_BlockHandle body = new_block(&L);
+    MLIR_BlockHandle done = new_block(&L);
+    term_br(&L, loop);
+
+    // loop: if rem==0 goto done
+    L.cur = loop; L.terminated = false;
+    MLIR_ValueHandle rem = emit_load_ty(&L, rempr, i32);
+    MLIR_ValueHandle rz = build_icmp(&L, /*eq*/0, rem, emit_const(&L, i32, 0));
+    term_cond_br(&L, rz, done, body);
+
+    // body: read iovec (buf_ofs, len), _write, accumulate, advance
+    L.cur = body; L.terminated = false;
+    MLIR_ValueHandle iov = emit_load_ty(&L, iovpr, i32);
+    MLIR_ValueHandle bufp = linmem_ptr(&L, iov, 0);
+    MLIR_ValueHandle bufofs = emit_load_ty(&L, bufp, i32);
+    MLIR_ValueHandle lenp = linmem_ptr(&L, iov, 4);
+    MLIR_ValueHandle clen = emit_load_ty(&L, lenp, i32);
+    MLIR_ValueHandle host = linmem_ptr(&L, bufofs, 0);
+    MLIR_ValueHandle clen64 = emit_cast(&L, OP_TYPE_LLVM_ZEXT, clen, i64);
+    // r = _write(fd, host, clen64)
+    MLIR_AttributeHandle wa[1] = { attr_s(ctx, "callee", (char *)"_write", 6) };
+    MLIR_ValueHandle wops[3] = { pfd, host, clen64 };
+    MLIR_TypeHandle wrt[1] = { i64 };
+    MLIR_ValueHandle wr[1] = { mk_res(ctx, i64) };
+    MLIR_OpHandle wc = build_op(ctx, OP_TYPE_LLVM_CALL, wa, 1, wrt, 1, wr, wops, 3);
+    emit(&L, wc);
+    MLIR_ValueHandle tot = emit_load_ty(&L, totpr, i64);
+    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_ADD, tot, wr[0], i64), totpr);
+    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_ADD, iov, emit_const(&L, i32, 8), i32), iovpr);
+    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_SUB, rem, emit_const(&L, i32, 1), i32), rempr);
+    term_br(&L, loop);
+
+    // done: linmem[nwritten] = (i32)total; return 0
+    L.cur = done; L.terminated = false;
+    MLIR_ValueHandle ftot = emit_load_ty(&L, totpr, i64);
+    MLIR_ValueHandle nwp = linmem_ptr(&L, pnw, 0);
+    emit_store_v(&L, emit_cast(&L, OP_TYPE_LLVM_TRUNC, ftot, i32), nwp);
+    MLIR_ValueHandle zero = emit_const(&L, i32, 0);
+    MLIR_ValueHandle rops[1] = { zero };
+    MLIR_OpHandle ret = build_op(ctx, OP_TYPE_LLVM_RETURN, NULL, 0, NULL, 0, NULL, rops, 1);
+    emit(&L, ret);
+
+    MLIR_AttributeHandle fa[1] = { attr_s(ctx, "sym_name", (char *)"fd_write", 8) };
+    MLIR_RegionHandle regs[1] = { reg };
+    MLIR_OpHandle fn = MLIR_CreateOp(ctx, OP_TYPE_LLVM_FUNC,
+        op_type_to_string(OP_TYPE_LLVM_FUNC), fa, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
+        MLIR_CreateLocationUnknown(ctx, (string){0}), MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_AppendBlockOp(ctx, out_body, fn);
+    free(L.frames);
+}
 static void scan_max_global(MLIR_OpHandle op, int64_t *max_idx) {
     MLIR_OpType t = MLIR_GetOpType(op);
     if (t == OP_TYPE_WASMSSA_GLOBAL_GET || t == OP_TYPE_WASMSSA_GLOBAL_SET) {
@@ -1898,6 +1984,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
 
     // -- Imports: allow the known WASI/print imports; reject others. --
     bool need_printI64 = false, need_printNewline = false, need_printStr = false;
+    bool need_fd_write = false;
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
         if (MLIR_GetOpType(op) != OP_TYPE_WASMSSA_IMPORT_FUNC) continue;
@@ -1906,7 +1993,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
         if (nm.size == 8 && memcmp(nm.str, "printI64", 8) == 0) { need_printI64 = true; continue; }
         if (nm.size == 12 && memcmp(nm.str, "printNewline", 12) == 0) { need_printNewline = true; continue; }
         if (nm.size == 8 && memcmp(nm.str, "printStr", 8) == 0) { need_printStr = true; continue; }
-        if (nm.size == 8 && memcmp(nm.str, "fd_write", 8) == 0) continue; // resolved if called
+        if (nm.size == 8 && memcmp(nm.str, "fd_write", 8) == 0) { need_fd_write = true; continue; }
         fprintf(stderr,
             "wasmssa->llvm: import '%.*s' not yet supported\n",
             (int)nm.size, nm.str);
@@ -1967,6 +2054,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     }
     if (need_printNewline) synth_print_newline(ctx, out_body);
     if (need_printStr) synth_print_str(ctx, out_body);
+    if (need_fd_write) synth_fd_write(ctx, out_body);
 
     free(globals.names); free(globals.offsets);
     free(fnptrs.names); free(fnptrs.slots);
