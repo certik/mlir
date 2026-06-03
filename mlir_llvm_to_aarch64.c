@@ -582,7 +582,7 @@ static bool simple_binop_optype(string on, MLIR_OpType *out) {
 // currently being appended to; control-flow ops create new blocks and move
 // `cur`. `ok` is cleared (with a stderr diagnostic) on the first failure.
 // ---------------------------------------------------------------------------
-typedef struct { string name; uint32_t off; } GlobalEnt;
+typedef struct { string name; uint32_t off; uint32_t size; } GlobalEnt;
 typedef struct { GlobalEnt *e; size_t n; } GlobalMap;
 
 static bool gmap_get(GlobalMap *g, string nm, uint32_t *out) {
@@ -590,6 +590,22 @@ static bool gmap_get(GlobalMap *g, string nm, uint32_t *out) {
         if (g->e[i].name.size == nm.size &&
             memcmp(g->e[i].name.str, nm.str, nm.size) == 0) {
             *out = g->e[i].off; return true;
+        }
+    return false;
+}
+
+// Look up a global by its NUL-terminated name, returning its byte offset in
+// the data blob and its size. Used by `synth_start` to locate the wasm
+// linear-memory template / argc / argv slots.
+static bool gmap_get_cstr(GlobalMap *g, const char *nm,
+                          uint32_t *off, uint32_t *size) {
+    size_t len = strlen(nm);
+    for (size_t i = 0; i < g->n; i++)
+        if (g->e[i].name.size == len &&
+            memcmp(g->e[i].name.str, nm, len) == 0) {
+            if (off)  *off  = g->e[i].off;
+            if (size) *size = g->e[i].size;
+            return true;
         }
     return false;
 }
@@ -1468,6 +1484,7 @@ static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
 
         gm->e[gm->n].name = name;
         gm->e[gm->n].off  = off;
+        gm->e[gm->n].size = sz;
         gm->n++;
     }
 
@@ -1723,15 +1740,86 @@ static MLIR_OpHandle select_func(MLIR_Context *ctx, MLIR_OpHandle fn,
 // Synthesise `_start`: initialise pointer globals (PC-relative, so they work
 // under ASLR), then `bl main; bl _exit`. Exported and emitted first so the
 // Mach-O encoder lands LC_MAIN.entryoff on it.
+//
+// For the `--from-wasm` path the lifter emits a `__wasm_linmem_base` i64
+// global; when present we additionally:
+//   * mmap a 4 GiB lazily-backed anonymous region (the wasm32 linear memory),
+//     store its base into `__wasm_linmem_base`, and memcpy the initialised
+//     data image (the `__wasm_linmem` template) into its front;
+//   * stash the process argc/argv into `__wasm_argc` / `__wasm_argv` so the
+//     WASI args_get / args_sizes_get shims can recover them.
+// The 4 GiB reservation means `memory.grow` never needs real allocation
+// (pages fault in on first touch), mirroring the wmir backend's crt0.
 static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name,
-                                 PtrReloc *relocs, size_t n_relocs) {
+                                 PtrReloc *relocs, size_t n_relocs,
+                                 GlobalMap *gm) {
     MLIR_BlockHandle  blk = MLIR_CreateBlock(ctx);
     MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
     MLIR_AppendRegionBlock(ctx, reg, blk);
 
+    string tgt = str_from_cstr_view("linmem_template");
+
+    // wasm linear-memory setup (from-wasm path only).
+    uint32_t base_off = 0, base_sz = 0;
+    bool has_linmem = gm && gmap_get_cstr(gm, "__wasm_linmem_base",
+                                          &base_off, &base_sz);
+    uint32_t tmpl_off = 0, tmpl_sz = 0;
+    bool has_tmpl = gm && gmap_get_cstr(gm, "__wasm_linmem",
+                                        &tmpl_off, &tmpl_sz);
+    uint32_t argc_off = 0, argv_off = 0;
+    bool has_argc = gm && gmap_get_cstr(gm, "__wasm_argc", &argc_off, NULL) &&
+                    gmap_get_cstr(gm, "__wasm_argv", &argv_off, NULL);
+
+    if (has_linmem) {
+        // Save dyld-supplied argc (x0) / argv (x1) across the mmap/memcpy
+        // calls (which clobber x0..x18). 16-byte frame: [sp,#0]=argc, [sp,#8]=argv.
+        emit_prologue(ctx, blk, 16);
+        emit_str_x(ctx, blk, 0, 31, 0);
+        emit_str_x(ctx, blk, 1, 31, 8);
+
+        // mmap(NULL, 4 GiB, PROT_READ|WRITE, MAP_ANON|MAP_PRIVATE, -1, 0).
+        emit_movz(ctx, blk, 0, 0, 0, true);        // x0 = NULL
+        emit_movz(ctx, blk, 1, 1, 2, true);        // x1 = 1<<32 = 4 GiB
+        emit_movz(ctx, blk, 2, 3, 0, false);       // w2 = PROT_READ|PROT_WRITE
+        emit_movz(ctx, blk, 3, 0x1002, 0, false);  // w3 = MAP_ANON|MAP_PRIVATE
+        emit_movz(ctx, blk, 4, 0xffff, 0, false);  // w4 = -1 (fd)
+        emit_movk(ctx, blk, 4, 0xffff, 1, false);
+        emit_movz(ctx, blk, 5, 0, 0, true);        // x5 = 0 (offset)
+        emit_bl(ctx, blk, str_lit("_mmap"));
+        emit_mov_x(ctx, blk, 28, 0);               // x28 = base (callee-saved)
+
+        // __wasm_linmem_base = base.
+        emit_adrp_data(ctx, blk, 10, tgt, base_off);
+        emit_add_data_lo(ctx, blk, 10, 10, tgt, base_off);
+        emit_str_x(ctx, blk, 28, 10, 0);
+
+        // memcpy(base, __wasm_linmem_template, init_size).
+        if (has_tmpl && tmpl_sz > 0) {
+            emit_mov_x(ctx, blk, 0, 28);
+            emit_adrp_data(ctx, blk, 1, tgt, tmpl_off);
+            emit_add_data_lo(ctx, blk, 1, 1, tgt, tmpl_off);
+            emit_movz(ctx, blk, 2, (uint16_t)(tmpl_sz & 0xffff), 0, true);
+            if (tmpl_sz >> 16)
+                emit_movk(ctx, blk, 2, (uint16_t)((tmpl_sz >> 16) & 0xffff), 1, true);
+            emit_bl(ctx, blk, str_lit("_memcpy"));
+        }
+
+        // Reload argc/argv and stash into their globals.
+        if (has_argc) {
+            emit_ldr_x(ctx, blk, 0, 31, 0);
+            emit_ldr_x(ctx, blk, 1, 31, 8);
+            emit_adrp_data(ctx, blk, 10, tgt, argc_off);
+            emit_add_data_lo(ctx, blk, 10, 10, tgt, argc_off);
+            emit_ldst_x(ctx, blk, OP_TYPE_AARCH64_STR_W, 0, 10, 0);
+            emit_adrp_data(ctx, blk, 10, tgt, argv_off);
+            emit_add_data_lo(ctx, blk, 10, 10, tgt, argv_off);
+            emit_str_x(ctx, blk, 1, 10, 0);
+        }
+        emit_epilogue(ctx, blk, 16);
+    }
+
     // For each pointer global, compute target address (PC-relative) and the
     // slot address (PC-relative), then store target into the slot.
-    string tgt = str_from_cstr_view("linmem_template");
     for (size_t k = 0; k < n_relocs; k++) {
         emit_adrp_data(ctx, blk, 9, tgt, relocs[k].target_off);
         emit_add_data_lo(ctx, blk, 9, 9, tgt, relocs[k].target_off);
@@ -1780,7 +1868,7 @@ MLIR_OpHandle mlir_llvm_to_aarch64(MLIR_Context *ctx,
     // `_start` first (entry point); it initialises pointer globals then
     // calls main. PC-relative init keeps things correct under ASLR.
     MLIR_AppendBlockOp(ctx, out_body,
-        synth_start(ctx, str_lit("main"), grelocs, n_grelocs));
+        synth_start(ctx, str_lit("main"), grelocs, n_grelocs, &gm));
 
     bool saw_main = false;
     for (size_t i = 0; i < nops; i++) {

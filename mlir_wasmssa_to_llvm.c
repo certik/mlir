@@ -91,6 +91,7 @@ static uint8_t type_byte_at(string s, size_t i) {
 // Names of the synthesised module-level globals backing the lifted linear
 // memory and runtime.
 #define LINMEM_GLOBAL  "__wasm_linmem"
+#define LINMEM_BASE_GLOBAL "__wasm_linmem_base"
 #define FMT_NL_GLOBAL  "__wasm_fmt_nl"
 
 // =============================================================================
@@ -322,6 +323,10 @@ static MLIR_OpHandle build_op_named(MLIR_Context *ctx, const char *nm,
 static void emit(FLower *L, MLIR_OpHandle op) {
     MLIR_AppendBlockOp(L->ctx, L->cur, op);
 }
+
+// Forward declarations (defined later) used by linmem_ptr / memory.grow.
+static MLIR_ValueHandle emit_load_ty(FLower *L, MLIR_ValueHandle p, MLIR_TypeHandle ty);
+static void emit_store_v(FLower *L, MLIR_ValueHandle v, MLIR_ValueHandle p);
 
 // Create a fresh CFG block appended to the destination region.
 static MLIR_BlockHandle new_block(FLower *L) {
@@ -584,15 +589,30 @@ static MLIR_ValueHandle emit_binop2(FLower *L, MLIR_OpType ot,
     return r[0];
 }
 
+// Emit `llvm.select(cond, tval, fval)` -> `ty`. `cond` is an i32 (0/1).
+static MLIR_ValueHandle emit_select(FLower *L, MLIR_ValueHandle cond,
+                                    MLIR_ValueHandle tval, MLIR_ValueHandle fval,
+                                    MLIR_TypeHandle ty) {
+    MLIR_TypeHandle rt[1] = { ty };
+    MLIR_ValueHandle r[1] = { mk_res(L->ctx, ty) };
+    MLIR_ValueHandle ops[3] = { cond, tval, fval };
+    MLIR_OpHandle out = build_op_named(L->ctx, "llvm.select", NULL, 0, rt, 1, r, ops, 3);
+    emit(L, out);
+    return r[0];
+}
+
 // Materialise the host pointer for wasm address `addr_i32` + static `off`:
-//   p = inttoptr( ptrtoint(addressof(@__wasm_linmem)) + zext(addr) + off )
+//   p = inttoptr( load(@__wasm_linmem_base) + zext(addr) + off )
+// `__wasm_linmem_base` is set once at process start by the backend's `_start`
+// to the base of a 4 GiB mmap'd region (see synth_start in
+// mlir_llvm_to_aarch64.c); the initial data image is memcpy'd into its front.
 static MLIR_ValueHandle linmem_ptr(FLower *L, MLIR_ValueHandle addr_i32,
                                    int64_t off) {
     MLIR_Context *ctx = L->ctx;
     MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
     MLIR_TypeHandle ptr = MLIR_CreateTypeLLVMPointer(ctx);
-    MLIR_ValueHandle base_ptr = emit_addressof(L, LINMEM_GLOBAL);
-    MLIR_ValueHandle base_i64 = emit_cast(L, OP_TYPE_LLVM_PTRTOINT, base_ptr, i64);
+    MLIR_ValueHandle base_slot = emit_addressof(L, LINMEM_BASE_GLOBAL);
+    MLIR_ValueHandle base_i64 = emit_load_ty(L, base_slot, i64);
     MLIR_ValueHandle addr64 = emit_cast(L, OP_TYPE_LLVM_ZEXT, addr_i32, i64);
     MLIR_ValueHandle ea = emit_binop2(L, OP_TYPE_LLVM_ADD, base_i64, addr64, i64);
     if (off != 0) {
@@ -1286,25 +1306,33 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
     }
 
     case OP_TYPE_WASMSSA_MEMORY_GROW: {
-        // No real growth: bump the page-count global and return the old value.
+        // Bump the page-count global by `delta`, capped at the wasm32 limit of
+        // 65536 pages (the 4 GiB region `_start` reserved). Returns the old
+        // page count on success, or -1 if the grow would exceed the cap. The
+        // mmap is lazily backed so no real allocation is needed.
         MLIR_ValueHandle delta;
         if (!vmap_get(L->vmap, MLIR_GetOpOperand(op, 0), &delta)) {
             fprintf(stderr, "wasmssa->llvm: unbound operand on memory_grow\n");
             return false;
         }
         MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
+        MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
         MLIR_ValueHandle p = emit_addressof(L, "__wasm_mem_pages");
-        MLIR_TypeHandle lrt[1] = { i32 };
-        MLIR_ValueHandle lr[1] = { mk_res(ctx, i32) };
-        MLIR_ValueHandle lops[1] = { p };
-        MLIR_OpHandle lop = build_op(ctx, OP_TYPE_LLVM_LOAD, NULL, 0, lrt, 1, lr, lops, 1);
-        emit(L, lop);
-        MLIR_ValueHandle nw = emit_binop2(L, OP_TYPE_LLVM_ADD, lr[0], delta, i32);
-        MLIR_ValueHandle p2 = emit_addressof(L, "__wasm_mem_pages");
-        MLIR_ValueHandle sops[2] = { nw, p2 };
-        MLIR_OpHandle sop = build_op(ctx, OP_TYPE_LLVM_STORE, NULL, 0, NULL, 0, NULL, sops, 2);
-        emit(L, sop);
-        vmap_set(L->vmap, MLIR_GetOpResult(op, 0), lr[0]);
+        MLIR_ValueHandle old = emit_load_ty(L, p, i32);
+        // new = old + delta computed in i64 to avoid i32 overflow.
+        MLIR_ValueHandle old64 = emit_cast(L, OP_TYPE_LLVM_ZEXT, old, i64);
+        MLIR_ValueHandle delta64 = emit_cast(L, OP_TYPE_LLVM_ZEXT, delta, i64);
+        MLIR_ValueHandle new64 = emit_binop2(L, OP_TYPE_LLVM_ADD, old64, delta64, i64);
+        MLIR_ValueHandle cap = emit_const(L, i64, 65536);
+        MLIR_ValueHandle ok = build_icmp(L, /*ule*/7, new64, cap);
+        MLIR_ValueHandle new32 = emit_cast(L, OP_TYPE_LLVM_TRUNC, new64, i32);
+        // Keep old page count on failure; store the (possibly unchanged) value.
+        MLIR_ValueHandle stored = emit_select(L, ok, new32, old, i32);
+        emit_store_v(L, stored, emit_addressof(L, "__wasm_mem_pages"));
+        // Result: old on success, -1 on failure.
+        MLIR_ValueHandle neg1 = emit_const(L, i32, -1);
+        MLIR_ValueHandle res = emit_select(L, ok, old, neg1, i32);
+        vmap_set(L->vmap, MLIR_GetOpResult(op, 0), res);
         return true;
     }
 
@@ -1903,6 +1931,456 @@ static void synth_fd_write(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
     free(L.frames);
 }
 
+// =============================================================================
+// WASI file-I/O + args shims (`--from-wasm` selfhost path).
+//
+// Each is emitted as an `llvm.func` that calls libc (_read/_lseek/_open/_close)
+// with host pointers, translating wasm linear-memory offsets via `linmem_ptr`.
+// They mirror the wmir backend's raw-aarch64 synth_* shims
+// (mlir_wmir_to_aarch64.c) but at the `llvm`-dialect level. argc/argv are
+// recovered from the @__wasm_argc / @__wasm_argv globals that `_start` fills.
+// =============================================================================
+
+// Append a block argument of type `ty` at index `idx` to `entry`.
+static MLIR_ValueHandle mk_arg(MLIR_Context *ctx, MLIR_BlockHandle entry,
+                               int idx, MLIR_TypeHandle ty) {
+    MLIR_ValueHandle v = MLIR_CreateValueBlockArg(ctx, (string){0}, idx, ty,
+        MLIR_CreateLocationUnknown(ctx, (string){0}));
+    MLIR_AppendBlockArg(ctx, entry, v);
+    return v;
+}
+
+// Wrap region `reg` as an `llvm.func` named `name` and append to out_body.
+static void finish_func(MLIR_Context *ctx, MLIR_BlockHandle out_body,
+                        MLIR_RegionHandle reg, const char *name) {
+    MLIR_AttributeHandle fa[1] = { attr_s(ctx, "sym_name", (char *)name, strlen(name)) };
+    MLIR_RegionHandle regs[1] = { reg };
+    MLIR_OpHandle fn = MLIR_CreateOp(ctx, OP_TYPE_LLVM_FUNC,
+        op_type_to_string(OP_TYPE_LLVM_FUNC), fa, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
+        MLIR_CreateLocationUnknown(ctx, (string){0}), MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_AppendBlockOp(ctx, out_body, fn);
+}
+
+// Emit `llvm.return %v`.
+static void emit_ret_v(FLower *L, MLIR_ValueHandle v) {
+    MLIR_ValueHandle ops[1] = { v };
+    emit(L, build_op(L->ctx, OP_TYPE_LLVM_RETURN, NULL, 0, NULL, 0, NULL, ops, 1));
+}
+
+// Emit `llvm.call @name(args...)` returning `rty`.
+static MLIR_ValueHandle emit_libc_call(FLower *L, const char *name,
+                                       MLIR_ValueHandle *args, size_t na,
+                                       MLIR_TypeHandle rty) {
+    MLIR_AttributeHandle a[1] = { attr_s(L->ctx, "callee", (char *)name, strlen(name)) };
+    MLIR_TypeHandle rt[1] = { rty };
+    MLIR_ValueHandle r[1] = { mk_res(L->ctx, rty) };
+    MLIR_OpHandle out = build_op(L->ctx, OP_TYPE_LLVM_CALL, a, 1, rt, 1, r, args, na);
+    emit(L, out);
+    return r[0];
+}
+
+// inttoptr(i64) -> !llvm.ptr (a raw host pointer, no linmem base added).
+static MLIR_ValueHandle emit_i2p(FLower *L, MLIR_ValueHandle i64v) {
+    MLIR_TypeHandle ptr = MLIR_CreateTypeLLVMPointer(L->ctx);
+    MLIR_TypeHandle rt[1] = { ptr };
+    MLIR_ValueHandle r[1] = { mk_res(L->ctx, ptr) };
+    MLIR_ValueHandle ops[1] = { i64v };
+    emit(L, build_op_named(L->ctx, "llvm.inttoptr", NULL, 0, rt, 1, r, ops, 1));
+    return r[0];
+}
+
+// i32 fd_close(i32 fd): _close(fd); return 0.
+static void synth_fd_close(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
+    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle entry = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, reg, entry);
+    MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
+    MLIR_ValueHandle fd = mk_arg(ctx, entry, 0, i32);
+    FLower L = {0}; L.ctx = ctx; L.dreg = reg; L.cur = entry;
+    MLIR_ValueHandle a[1] = { fd };
+    emit_libc_call(&L, "_close", a, 1, i32);
+    emit_ret_v(&L, emit_const(&L, i32, 0));
+    finish_func(ctx, out_body, reg, "fd_close");
+}
+
+// i32 fd_read(i32 fd, i32 iovs, i32 iovs_len, i32 nread): walk (buf,len)
+// iovecs in linmem, _read each, accumulate into *nread. Stops on short read.
+static void synth_fd_read(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
+    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle entry = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, reg, entry);
+    MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
+    MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
+    MLIR_ValueHandle pfd  = mk_arg(ctx, entry, 0, i32);
+    MLIR_ValueHandle piov = mk_arg(ctx, entry, 1, i32);
+    MLIR_ValueHandle plen = mk_arg(ctx, entry, 2, i32);
+    MLIR_ValueHandle pnw  = mk_arg(ctx, entry, 3, i32);
+    FLower L = {0}; L.ctx = ctx; L.dreg = reg; L.cur = entry;
+
+    MLIR_ValueHandle iovpr = emit_alloca(&L, i32, 1);
+    MLIR_ValueHandle rempr = emit_alloca(&L, i32, 1);
+    MLIR_ValueHandle totpr = emit_alloca(&L, i64, 1);
+    emit_store_v(&L, piov, iovpr);
+    emit_store_v(&L, plen, rempr);
+    emit_store_v(&L, emit_const(&L, i64, 0), totpr);
+
+    MLIR_BlockHandle loop = new_block(&L);
+    MLIR_BlockHandle body = new_block(&L);
+    MLIR_BlockHandle cont = new_block(&L);
+    MLIR_BlockHandle done = new_block(&L);
+    MLIR_BlockHandle err  = new_block(&L);
+    term_br(&L, loop);
+
+    L.cur = loop; L.terminated = false;
+    MLIR_ValueHandle rem = emit_load_ty(&L, rempr, i32);
+    MLIR_ValueHandle rz = build_icmp(&L, /*eq*/0, rem, emit_const(&L, i32, 0));
+    term_cond_br(&L, rz, done, body);
+
+    L.cur = body; L.terminated = false;
+    MLIR_ValueHandle iov = emit_load_ty(&L, iovpr, i32);
+    MLIR_ValueHandle bufofs = emit_load_ty(&L, linmem_ptr(&L, iov, 0), i32);
+    MLIR_ValueHandle clen = emit_load_ty(&L, linmem_ptr(&L, iov, 4), i32);
+    MLIR_ValueHandle host = linmem_ptr(&L, bufofs, 0);
+    MLIR_ValueHandle clen64 = emit_cast(&L, OP_TYPE_LLVM_ZEXT, clen, i64);
+    MLIR_ValueHandle rargs[3] = { pfd, host, clen64 };
+    MLIR_ValueHandle n = emit_libc_call(&L, "_read", rargs, 3, i64);
+    MLIR_ValueHandle isneg = build_icmp(&L, /*slt*/2, n, emit_const(&L, i64, 0));
+    term_cond_br(&L, isneg, err, cont);
+
+    L.cur = cont; L.terminated = false;
+    MLIR_ValueHandle tot = emit_load_ty(&L, totpr, i64);
+    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_ADD, tot, n, i64), totpr);
+    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_ADD, iov, emit_const(&L, i32, 8), i32), iovpr);
+    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_SUB, rem, emit_const(&L, i32, 1), i32), rempr);
+    // Short read (n < requested): stop the whole call.
+    MLIR_ValueHandle shortr = build_icmp(&L, /*slt*/2, n, clen64);
+    term_cond_br(&L, shortr, done, loop);
+
+    L.cur = done; L.terminated = false;
+    MLIR_ValueHandle ftot = emit_load_ty(&L, totpr, i64);
+    emit_store_v(&L, emit_cast(&L, OP_TYPE_LLVM_TRUNC, ftot, i32), linmem_ptr(&L, pnw, 0));
+    emit_ret_v(&L, emit_const(&L, i32, 0));
+
+    L.cur = err; L.terminated = false;
+    emit_ret_v(&L, emit_const(&L, i32, 8));
+
+    finish_func(ctx, out_body, reg, "fd_read");
+    free(L.frames);
+}
+
+// i32 fd_seek(i32 fd, i64 offset, i32 whence, i32 newoff): _lseek; store the
+// resulting 64-bit offset to *newoff; return 0 (or 8 on error).
+static void synth_fd_seek(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
+    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle entry = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, reg, entry);
+    MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
+    MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
+    MLIR_ValueHandle pfd = mk_arg(ctx, entry, 0, i32);
+    MLIR_ValueHandle poff = mk_arg(ctx, entry, 1, i64);
+    MLIR_ValueHandle pwh = mk_arg(ctx, entry, 2, i32);
+    MLIR_ValueHandle pno = mk_arg(ctx, entry, 3, i32);
+    FLower L = {0}; L.ctx = ctx; L.dreg = reg; L.cur = entry;
+
+    MLIR_ValueHandle sargs[3] = { pfd, poff, pwh };
+    MLIR_ValueHandle r = emit_libc_call(&L, "_lseek", sargs, 3, i64);
+    MLIR_BlockHandle ok = new_block(&L);
+    MLIR_BlockHandle err = new_block(&L);
+    MLIR_ValueHandle isneg = build_icmp(&L, /*slt*/2, r, emit_const(&L, i64, 0));
+    term_cond_br(&L, isneg, err, ok);
+
+    L.cur = ok; L.terminated = false;
+    emit_store_v(&L, r, linmem_ptr(&L, pno, 0));
+    emit_ret_v(&L, emit_const(&L, i32, 0));
+
+    L.cur = err; L.terminated = false;
+    emit_ret_v(&L, emit_const(&L, i32, 8));
+
+    finish_func(ctx, out_body, reg, "fd_seek");
+    free(L.frames);
+}
+
+// i32 path_open(dirfd, dirflags, path, path_len, oflags, rights:i64,
+//               rights_inh:i64, fdflags, opened_fd): copy the path to a stack
+// buffer, translate WASI flags to POSIX open() flags, _open, store the fd to
+// *opened_fd. Ignores dirfd (relies on the process cwd matching the preopen).
+static void synth_path_open(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
+    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle entry = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, reg, entry);
+    MLIR_TypeHandle i8  = MLIR_CreateTypeInteger(ctx, 8, true);
+    MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
+    MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
+    (void)mk_arg(ctx, entry, 0, i32);                 // dirfd (unused)
+    (void)mk_arg(ctx, entry, 1, i32);                 // dirflags (unused)
+    MLIR_ValueHandle ppath = mk_arg(ctx, entry, 2, i32);
+    MLIR_ValueHandle plen  = mk_arg(ctx, entry, 3, i32);
+    MLIR_ValueHandle poflags = mk_arg(ctx, entry, 4, i32);
+    MLIR_ValueHandle prights = mk_arg(ctx, entry, 5, i64);
+    (void)mk_arg(ctx, entry, 6, i64);                 // rights_inh (unused)
+    MLIR_ValueHandle pfdflags = mk_arg(ctx, entry, 7, i32);
+    MLIR_ValueHandle popened = mk_arg(ctx, entry, 8, i32);
+    FLower L = {0}; L.ctx = ctx; L.dreg = reg; L.cur = entry;
+
+    MLIR_ValueHandle buf = emit_alloca(&L, i8, 1056);
+    MLIR_BlockHandle copy_init = new_block(&L);
+    MLIR_BlockHandle err = new_block(&L);
+    // Guard against overlong paths (buffer is 1056 incl. nul).
+    MLIR_ValueHandle toolong = build_icmp(&L, /*uge*/9, plen, emit_const(&L, i32, 1055));
+    term_cond_br(&L, toolong, err, copy_init);
+
+    L.cur = copy_init; L.terminated = false;
+    MLIR_ValueHandle ipr = emit_alloca(&L, i32, 1);
+    emit_store_v(&L, emit_const(&L, i32, 0), ipr);
+    MLIR_BlockHandle cploop = new_block(&L);
+    MLIR_BlockHandle cpbody = new_block(&L);
+    MLIR_BlockHandle cpdone = new_block(&L);
+    term_br(&L, cploop);
+
+    L.cur = cploop; L.terminated = false;
+    MLIR_ValueHandle ci = emit_load_ty(&L, ipr, i32);
+    MLIR_ValueHandle more = build_icmp(&L, /*ult*/6, ci, plen);
+    term_cond_br(&L, more, cpbody, cpdone);
+
+    L.cur = cpbody; L.terminated = false;
+    MLIR_ValueHandle saddr = emit_binop2(&L, OP_TYPE_LLVM_ADD, ppath, ci, i32);
+    MLIR_ValueHandle byte = emit_load_ty(&L, linmem_ptr(&L, saddr, 0), i8);
+    MLIR_ValueHandle dst = emit_byte_ptr(&L, buf, emit_cast(&L, OP_TYPE_LLVM_ZEXT, ci, i64));
+    emit_store_v(&L, byte, dst);
+    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_ADD, ci, emit_const(&L, i32, 1), i32), ipr);
+    term_br(&L, cploop);
+
+    L.cur = cpdone; L.terminated = false;
+    // nul terminator at buf[path_len].
+    MLIR_ValueHandle nuldst = emit_byte_ptr(&L, buf,
+        emit_cast(&L, OP_TYPE_LLVM_ZEXT, plen, i64));
+    emit_store_v(&L, emit_cast(&L, OP_TYPE_LLVM_TRUNC, emit_const(&L, i64, 0), i8), nuldst);
+
+    // POSIX open() flags (branchless). WASI: oflags CREAT=1,EXCL=4,TRUNC=8;
+    // rights FD_READ=0x02, FD_WRITE=0x40; fdflags APPEND=1.
+    MLIR_ValueHandle rights32 = emit_cast(&L, OP_TYPE_LLVM_TRUNC, prights, i32);
+    MLIR_ValueHandle hw = build_icmp(&L, /*ne*/1,
+        emit_binop2(&L, OP_TYPE_LLVM_AND, rights32, emit_const(&L, i32, 0x40), i32),
+        emit_const(&L, i32, 0));
+    MLIR_ValueHandle hr = build_icmp(&L, /*ne*/1,
+        emit_binop2(&L, OP_TYPE_LLVM_AND, rights32, emit_const(&L, i32, 0x02), i32),
+        emit_const(&L, i32, 0));
+    // access = hw * (1 + hr): 0=RDONLY, 1=WRONLY, 2=RDWR.
+    MLIR_ValueHandle access = emit_binop2(&L, OP_TYPE_LLVM_MUL, hw,
+        emit_binop2(&L, OP_TYPE_LLVM_ADD, emit_const(&L, i32, 1), hr, i32), i32);
+    MLIR_ValueHandle osf = access;
+    struct { int mask; int oflag_src; int posix; } fl[4] = {
+        { 1, 1, 0x200 },   // O_CREAT  (oflags bit0)
+        { 8, 1, 0x400 },   // O_TRUNC  (oflags bit3)
+        { 4, 1, 0x800 },   // O_EXCL   (oflags bit2)
+        { 1, 0, 0x08  },   // O_APPEND (fdflags bit0)
+    };
+    for (int k = 0; k < 4; k++) {
+        MLIR_ValueHandle src = fl[k].oflag_src ? poflags : pfdflags;
+        MLIR_ValueHandle set = build_icmp(&L, /*ne*/1,
+            emit_binop2(&L, OP_TYPE_LLVM_AND, src, emit_const(&L, i32, fl[k].mask), i32),
+            emit_const(&L, i32, 0));
+        MLIR_ValueHandle contrib = emit_binop2(&L, OP_TYPE_LLVM_MUL, set,
+            emit_const(&L, i32, fl[k].posix), i32);
+        osf = emit_binop2(&L, OP_TYPE_LLVM_ADD, osf, contrib, i32);
+    }
+    MLIR_ValueHandle oargs[3] = { buf, osf, emit_const(&L, i32, 0x1a4) };
+    MLIR_ValueHandle fd = emit_libc_call(&L, "_open", oargs, 3, i32);
+    MLIR_BlockHandle ook = new_block(&L);
+    MLIR_ValueHandle ofail = build_icmp(&L, /*slt*/2, fd, emit_const(&L, i32, 0));
+    term_cond_br(&L, ofail, err, ook);
+
+    L.cur = ook; L.terminated = false;
+    emit_store_v(&L, fd, linmem_ptr(&L, popened, 0));
+    emit_ret_v(&L, emit_const(&L, i32, 0));
+
+    L.cur = err; L.terminated = false;
+    emit_ret_v(&L, emit_const(&L, i32, 44));   // WASI ENOENT
+
+    finish_func(ctx, out_body, reg, "path_open");
+    free(L.frames);
+}
+
+// Load argc (i32) and the host argv base pointer (from @__wasm_argv).
+static void load_argc_argv(FLower *L, MLIR_ValueHandle *argc_out,
+                           MLIR_ValueHandle *argvp_out) {
+    MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(L->ctx, 32, true);
+    MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(L->ctx, 64, true);
+    *argc_out = emit_load_ty(L, emit_addressof(L, "__wasm_argc"), i32);
+    *argvp_out = emit_i2p(L, emit_load_ty(L, emit_addressof(L, "__wasm_argv"), i64));
+}
+
+// host char* of argv[i] (a host pointer), read from the argv vector.
+static MLIR_ValueHandle argv_str_ptr(FLower *L, MLIR_ValueHandle argvp,
+                                     MLIR_ValueHandle i_i32) {
+    MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(L->ctx, 64, true);
+    MLIR_ValueHandle off = emit_binop2(L, OP_TYPE_LLVM_MUL,
+        emit_cast(L, OP_TYPE_LLVM_ZEXT, i_i32, i64), emit_const(L, i64, 8), i64);
+    MLIR_ValueHandle slot = emit_byte_ptr(L, argvp, off);
+    return emit_i2p(L, emit_load_ty(L, slot, i64));
+}
+
+// i32 args_sizes_get(i32 out_argc, i32 out_buf_size): write argc and the total
+// byte size of all argv strings (incl. nul terminators) into linmem.
+static void synth_args_sizes_get(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
+    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle entry = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, reg, entry);
+    MLIR_TypeHandle i8  = MLIR_CreateTypeInteger(ctx, 8, true);
+    MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
+    MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
+    MLIR_ValueHandle poutc = mk_arg(ctx, entry, 0, i32);
+    MLIR_ValueHandle poutsz = mk_arg(ctx, entry, 1, i32);
+    FLower L = {0}; L.ctx = ctx; L.dreg = reg; L.cur = entry;
+
+    MLIR_ValueHandle argc, argvp;
+    load_argc_argv(&L, &argc, &argvp);
+    emit_store_v(&L, argc, linmem_ptr(&L, poutc, 0));
+    MLIR_ValueHandle totpr = emit_alloca(&L, i64, 1);
+    MLIR_ValueHandle ipr = emit_alloca(&L, i32, 1);
+    MLIR_ValueHandle sppr = emit_alloca(&L, i64, 1);
+    emit_store_v(&L, emit_const(&L, i64, 0), totpr);
+    emit_store_v(&L, emit_const(&L, i32, 0), ipr);
+
+    MLIR_BlockHandle outer = new_block(&L);
+    MLIR_BlockHandle scan = new_block(&L);
+    MLIR_BlockHandle walk = new_block(&L);
+    MLIR_BlockHandle wcont = new_block(&L);
+    MLIR_BlockHandle nextarg = new_block(&L);
+    MLIR_BlockHandle done = new_block(&L);
+    term_br(&L, outer);
+
+    L.cur = outer; L.terminated = false;
+    MLIR_ValueHandle i = emit_load_ty(&L, ipr, i32);
+    MLIR_ValueHandle more = build_icmp(&L, /*ult*/6, i, argc);
+    term_cond_br(&L, more, scan, done);
+
+    L.cur = scan; L.terminated = false;
+    emit_store_v(&L, emit_cast(&L, OP_TYPE_LLVM_PTRTOINT,
+        argv_str_ptr(&L, argvp, i), i64), sppr);
+    term_br(&L, walk);
+
+    L.cur = walk; L.terminated = false;
+    MLIR_ValueHandle sp = emit_load_ty(&L, sppr, i64);
+    MLIR_ValueHandle ch = emit_load_ty(&L, emit_i2p(&L, sp), i8);
+    MLIR_ValueHandle isnul = build_icmp(&L, /*eq*/0, ch,
+        emit_cast(&L, OP_TYPE_LLVM_TRUNC, emit_const(&L, i64, 0), i8));
+    term_cond_br(&L, isnul, nextarg, wcont);
+
+    L.cur = wcont; L.terminated = false;
+    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_ADD,
+        emit_load_ty(&L, totpr, i64), emit_const(&L, i64, 1), i64), totpr);
+    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_ADD, sp, emit_const(&L, i64, 1), i64), sppr);
+    term_br(&L, walk);
+
+    L.cur = nextarg; L.terminated = false;
+    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_ADD,
+        emit_load_ty(&L, totpr, i64), emit_const(&L, i64, 1), i64), totpr);  // nul
+    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_ADD,
+        emit_load_ty(&L, ipr, i32), emit_const(&L, i32, 1), i32), ipr);
+    term_br(&L, outer);
+
+    L.cur = done; L.terminated = false;
+    emit_store_v(&L, emit_cast(&L, OP_TYPE_LLVM_TRUNC,
+        emit_load_ty(&L, totpr, i64), i32), linmem_ptr(&L, poutsz, 0));
+    emit_ret_v(&L, emit_const(&L, i32, 0));
+
+    finish_func(ctx, out_body, reg, "args_sizes_get");
+    free(L.frames);
+}
+
+// i32 args_get(i32 argv_ofs_arr, i32 argv_buf_ofs): fill argv_ofs_arr[i] with
+// the linmem offset of argv[i] and copy each string (incl. nul) into linmem.
+static void synth_args_get(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
+    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle entry = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, reg, entry);
+    MLIR_TypeHandle i8  = MLIR_CreateTypeInteger(ctx, 8, true);
+    MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
+    MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
+    MLIR_ValueHandle parr = mk_arg(ctx, entry, 0, i32);
+    MLIR_ValueHandle pbuf = mk_arg(ctx, entry, 1, i32);
+    FLower L = {0}; L.ctx = ctx; L.dreg = reg; L.cur = entry;
+
+    MLIR_ValueHandle argc, argvp;
+    load_argc_argv(&L, &argc, &argvp);
+    MLIR_ValueHandle curpr = emit_alloca(&L, i32, 1);  // current linmem write offset
+    MLIR_ValueHandle ipr = emit_alloca(&L, i32, 1);
+    MLIR_ValueHandle sppr = emit_alloca(&L, i64, 1);
+    emit_store_v(&L, pbuf, curpr);
+    emit_store_v(&L, emit_const(&L, i32, 0), ipr);
+
+    MLIR_BlockHandle outer = new_block(&L);
+    MLIR_BlockHandle setup = new_block(&L);
+    MLIR_BlockHandle copy = new_block(&L);
+    MLIR_BlockHandle nextarg = new_block(&L);
+    MLIR_BlockHandle done = new_block(&L);
+    term_br(&L, outer);
+
+    L.cur = outer; L.terminated = false;
+    MLIR_ValueHandle i = emit_load_ty(&L, ipr, i32);
+    MLIR_ValueHandle more = build_icmp(&L, /*ult*/6, i, argc);
+    term_cond_br(&L, more, setup, done);
+
+    L.cur = setup; L.terminated = false;
+    // argv_ofs_arr[i] = cur.
+    MLIR_ValueHandle slot = emit_binop2(&L, OP_TYPE_LLVM_ADD, parr,
+        emit_binop2(&L, OP_TYPE_LLVM_MUL, i, emit_const(&L, i32, 4), i32), i32);
+    emit_store_v(&L, emit_load_ty(&L, curpr, i32), linmem_ptr(&L, slot, 0));
+    emit_store_v(&L, emit_cast(&L, OP_TYPE_LLVM_PTRTOINT,
+        argv_str_ptr(&L, argvp, i), i64), sppr);
+    term_br(&L, copy);
+
+    L.cur = copy; L.terminated = false;
+    MLIR_ValueHandle sp = emit_load_ty(&L, sppr, i64);
+    MLIR_ValueHandle ch = emit_load_ty(&L, emit_i2p(&L, sp), i8);
+    MLIR_ValueHandle cur = emit_load_ty(&L, curpr, i32);
+    emit_store_v(&L, ch, linmem_ptr(&L, cur, 0));
+    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_ADD, cur, emit_const(&L, i32, 1), i32), curpr);
+    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_ADD, sp, emit_const(&L, i64, 1), i64), sppr);
+    MLIR_ValueHandle isnul = build_icmp(&L, /*eq*/0, ch,
+        emit_cast(&L, OP_TYPE_LLVM_TRUNC, emit_const(&L, i64, 0), i8));
+    term_cond_br(&L, isnul, nextarg, copy);
+
+    L.cur = nextarg; L.terminated = false;
+    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_ADD, i, emit_const(&L, i32, 1), i32), ipr);
+    term_br(&L, outer);
+
+    L.cur = done; L.terminated = false;
+    emit_ret_v(&L, emit_const(&L, i32, 0));
+
+    finish_func(ctx, out_body, reg, "args_get");
+    free(L.frames);
+}
+
+// i32 environ_sizes_get(i32 out_count, i32 out_buf_size): no env vars.
+static void synth_environ_sizes_get(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
+    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle entry = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, reg, entry);
+    MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
+    MLIR_ValueHandle pc = mk_arg(ctx, entry, 0, i32);
+    MLIR_ValueHandle pb = mk_arg(ctx, entry, 1, i32);
+    FLower L = {0}; L.ctx = ctx; L.dreg = reg; L.cur = entry;
+    emit_store_v(&L, emit_const(&L, i32, 0), linmem_ptr(&L, pc, 0));
+    emit_store_v(&L, emit_const(&L, i32, 0), linmem_ptr(&L, pb, 0));
+    emit_ret_v(&L, emit_const(&L, i32, 0));
+    finish_func(ctx, out_body, reg, "environ_sizes_get");
+}
+
+// i32 environ_get(i32 environ, i32 buf): no env vars.
+static void synth_environ_get(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
+    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle entry = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, reg, entry);
+    MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
+    (void)mk_arg(ctx, entry, 0, i32);
+    (void)mk_arg(ctx, entry, 1, i32);
+    FLower L = {0}; L.ctx = ctx; L.dreg = reg; L.cur = entry;
+    emit_ret_v(&L, emit_const(&L, i32, 0));
+    finish_func(ctx, out_body, reg, "environ_get");
+}
+
 // tinyc_va_arg_i32/ptr(i32 ap) -> i32  and  tinyc_va_arg_i64/f64(i32 ap) -> i64
 // `ap` is a wasm offset to a 4-byte cell holding the current va_list cursor
 // (itself a wasm offset to the next arg in linmem). Read the value at the
@@ -2276,6 +2754,21 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
         MLIR_CreateLocationUnknown(ctx, (string){0}));
     MLIR_AppendBlockOp(ctx, out_body, linmem_g);
 
+    // -- Emit @__wasm_linmem_base / @__wasm_argc / @__wasm_argv. --
+    // `_start` (backend) mmaps the 4 GiB linear memory and stores its base
+    // here; it also stashes the process argc (i32) and argv (host char**, i64).
+    MLIR_TypeHandle i64t = MLIR_CreateTypeInteger(ctx, 64, true);
+    MLIR_TypeHandle i32g = MLIR_CreateTypeInteger(ctx, 32, true);
+    MLIR_AppendBlockOp(ctx, out_body, MLIR_CreateLLVMGlobal(ctx,
+        str_from_cstr_view((char *)LINMEM_BASE_GLOBAL), i64t, false, 0, 0, 0.0, NULL,
+        MLIR_CreateLocationUnknown(ctx, (string){0})));
+    MLIR_AppendBlockOp(ctx, out_body, MLIR_CreateLLVMGlobal(ctx,
+        str_from_cstr_view((char *)"__wasm_argc"), i32g, false, 0, 0, 0.0, NULL,
+        MLIR_CreateLocationUnknown(ctx, (string){0})));
+    MLIR_AppendBlockOp(ctx, out_body, MLIR_CreateLLVMGlobal(ctx,
+        str_from_cstr_view((char *)"__wasm_argv"), i64t, false, 0, 0, 0.0, NULL,
+        MLIR_CreateLocationUnknown(ctx, (string){0})));
+
     // -- Emit wasm globals @__wasm_g0..gN (g0 = shadow stack pointer). --
     int64_t max_global = -1;
     for (size_t i = 0; i < nops; i++)
@@ -2299,6 +2792,9 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     // -- Imports: allow the known WASI/print imports; reject others. --
     bool need_printI64 = false, need_printNewline = false, need_printStr = false;
     bool need_fd_write = false;
+    bool need_fd_read = false, need_fd_seek = false, need_fd_close = false;
+    bool need_path_open = false, need_args_get = false, need_args_sizes = false;
+    bool need_environ_get = false, need_environ_sizes = false;
     bool need_va_i32 = false, need_va_i64 = false, need_va_ptr = false;
     bool need_va_f64 = false, need_va_struct = false;
     for (size_t i = 0; i < nops; i++) {
@@ -2310,6 +2806,14 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
         if (nm.size == 12 && memcmp(nm.str, "printNewline", 12) == 0) { need_printNewline = true; continue; }
         if (nm.size == 8 && memcmp(nm.str, "printStr", 8) == 0) { need_printStr = true; continue; }
         if (nm.size == 8 && memcmp(nm.str, "fd_write", 8) == 0) { need_fd_write = true; continue; }
+        if (nm.size == 7 && memcmp(nm.str, "fd_read", 7) == 0) { need_fd_read = true; continue; }
+        if (nm.size == 7 && memcmp(nm.str, "fd_seek", 7) == 0) { need_fd_seek = true; continue; }
+        if (nm.size == 8 && memcmp(nm.str, "fd_close", 8) == 0) { need_fd_close = true; continue; }
+        if (nm.size == 9 && memcmp(nm.str, "path_open", 9) == 0) { need_path_open = true; continue; }
+        if (nm.size == 8 && memcmp(nm.str, "args_get", 8) == 0) { need_args_get = true; continue; }
+        if (nm.size == 14 && memcmp(nm.str, "args_sizes_get", 14) == 0) { need_args_sizes = true; continue; }
+        if (nm.size == 11 && memcmp(nm.str, "environ_get", 11) == 0) { need_environ_get = true; continue; }
+        if (nm.size == 17 && memcmp(nm.str, "environ_sizes_get", 17) == 0) { need_environ_sizes = true; continue; }
         if (nm.size == 16 && memcmp(nm.str, "tinyc_va_arg_i32", 16) == 0) { need_va_i32 = true; continue; }
         if (nm.size == 16 && memcmp(nm.str, "tinyc_va_arg_i64", 16) == 0) { need_va_i64 = true; continue; }
         if (nm.size == 16 && memcmp(nm.str, "tinyc_va_arg_ptr", 16) == 0) { need_va_ptr = true; continue; }
@@ -2376,6 +2880,14 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     if (need_printNewline) synth_print_newline(ctx, out_body);
     if (need_printStr) synth_print_str(ctx, out_body);
     if (need_fd_write) synth_fd_write(ctx, out_body);
+    if (need_fd_read) synth_fd_read(ctx, out_body);
+    if (need_fd_seek) synth_fd_seek(ctx, out_body);
+    if (need_fd_close) synth_fd_close(ctx, out_body);
+    if (need_path_open) synth_path_open(ctx, out_body);
+    if (need_args_get) synth_args_get(ctx, out_body);
+    if (need_args_sizes) synth_args_sizes_get(ctx, out_body);
+    if (need_environ_get) synth_environ_get(ctx, out_body);
+    if (need_environ_sizes) synth_environ_sizes_get(ctx, out_body);
     if (need_va_i32) synth_va_arg_scalar(ctx, out_body, "tinyc_va_arg_i32", 16, false);
     if (need_va_ptr) synth_va_arg_scalar(ctx, out_body, "tinyc_va_arg_ptr", 16, false);
     if (need_va_i64) synth_va_arg_scalar(ctx, out_body, "tinyc_va_arg_i64", 16, true);
