@@ -1412,7 +1412,65 @@ static void synth_print_i64(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
     free(L.frames);
 }
 
-// Recursively find the largest global_idx referenced by global_get/set.
+// void printStr(i32 wasm_offset): scan a NUL-terminated string in linmem,
+// _write it to stdout, then a newline (matches runtime.c printStr).
+static void synth_print_str(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
+    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle  entry = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, reg, entry);
+
+    MLIR_TypeHandle i8  = MLIR_CreateTypeInteger(ctx, 8, true);
+    MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
+    MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
+
+    MLIR_ValueHandle arg = MLIR_CreateValueBlockArg(ctx, (string){0}, 0, i32,
+        MLIR_CreateLocationUnknown(ctx, (string){0}));
+    MLIR_AppendBlockArg(ctx, entry, arg);
+
+    FLower L = {0};
+    L.ctx = ctx; L.dreg = reg; L.cur = entry;
+
+    MLIR_ValueHandle host = linmem_ptr(&L, arg, 0);
+    MLIR_ValueHandle host_i = emit_cast(&L, OP_TYPE_LLVM_PTRTOINT, host, i64);
+    MLIR_ValueHandle curpr = emit_alloca(&L, i64, 1);
+    emit_store_v(&L, host_i, curpr);
+
+    MLIR_BlockHandle loop = new_block(&L);
+    MLIR_BlockHandle body = new_block(&L);
+    MLIR_BlockHandle done = new_block(&L);
+    term_br(&L, loop);
+
+    // loop: b = *cur; if b==0 goto done else body
+    L.cur = loop; L.terminated = false;
+    MLIR_ValueHandle cur = emit_load_ty(&L, curpr, i64);
+    MLIR_ValueHandle cp  = emit_byte_ptr(&L, host, emit_binop2(&L, OP_TYPE_LLVM_SUB, cur, host_i, i64));
+    MLIR_ValueHandle b   = emit_load_ty(&L, cp, i8);
+    MLIR_ValueHandle bz  = build_icmp(&L, /*eq*/0, emit_cast(&L, OP_TYPE_LLVM_ZEXT, b, i64), emit_const(&L, i64, 0));
+    term_cond_br(&L, bz, done, body);
+
+    // body: cur++
+    L.cur = body; L.terminated = false;
+    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_ADD, cur, emit_const(&L, i64, 1), i64), curpr);
+    term_br(&L, loop);
+
+    // done: len = cur - host_i; write(1, host, len); write(1, "\n", 1)
+    L.cur = done; L.terminated = false;
+    MLIR_ValueHandle endv = emit_load_ty(&L, curpr, i64);
+    MLIR_ValueHandle len  = emit_binop2(&L, OP_TYPE_LLVM_SUB, endv, host_i, i64);
+    emit_write_call(&L, emit_const(&L, i32, 1), host, len);
+    MLIR_ValueHandle nlp = emit_addressof(&L, FMT_NL_GLOBAL);
+    emit_write_call(&L, emit_const(&L, i32, 1), nlp, emit_const(&L, i64, 1));
+    MLIR_OpHandle ret = build_op(ctx, OP_TYPE_LLVM_RETURN, NULL, 0, NULL, 0, NULL, NULL, 0);
+    emit(&L, ret);
+
+    MLIR_AttributeHandle fa[1] = { attr_s(ctx, "sym_name", (char *)"printStr", 8) };
+    MLIR_RegionHandle regs[1] = { reg };
+    MLIR_OpHandle fn = MLIR_CreateOp(ctx, OP_TYPE_LLVM_FUNC,
+        op_type_to_string(OP_TYPE_LLVM_FUNC), fa, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
+        MLIR_CreateLocationUnknown(ctx, (string){0}), MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_AppendBlockOp(ctx, out_body, fn);
+    free(L.frames);
+}
 static void scan_max_global(MLIR_OpHandle op, int64_t *max_idx) {
     MLIR_OpType t = MLIR_GetOpType(op);
     if (t == OP_TYPE_WASMSSA_GLOBAL_GET || t == OP_TYPE_WASMSSA_GLOBAL_SET) {
@@ -1549,7 +1607,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     MLIR_AppendBlockOp(ctx, out_body, pg);
 
     // -- Imports: allow the known WASI/print imports; reject others. --
-    bool need_printI64 = false, need_printNewline = false;
+    bool need_printI64 = false, need_printNewline = false, need_printStr = false;
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
         if (MLIR_GetOpType(op) != OP_TYPE_WASMSSA_IMPORT_FUNC) continue;
@@ -1557,6 +1615,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
         if (nm.size == 9 && memcmp(nm.str, "proc_exit", 9) == 0) continue;
         if (nm.size == 8 && memcmp(nm.str, "printI64", 8) == 0) { need_printI64 = true; continue; }
         if (nm.size == 12 && memcmp(nm.str, "printNewline", 12) == 0) { need_printNewline = true; continue; }
+        if (nm.size == 8 && memcmp(nm.str, "printStr", 8) == 0) { need_printStr = true; continue; }
         if (nm.size == 8 && memcmp(nm.str, "fd_write", 8) == 0) continue; // resolved if called
         fprintf(stderr,
             "wasmssa->llvm: import '%.*s' not yet supported\n",
@@ -1581,15 +1640,16 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
 
     // -- Synthesise print runtime (via _write) for the imports used. --
     if (need_printI64) synth_print_i64(ctx, out_body);
-    if (need_printNewline) {
+    if (need_printNewline || need_printStr) {
         char nl[2] = { '\n', '\0' };
         string b = { nl, 2 };
         MLIR_OpHandle g = MLIR_CreateLLVMGlobalString(ctx,
             str_from_cstr_view((char *)FMT_NL_GLOBAL), b,
             MLIR_CreateLocationUnknown(ctx, (string){0}));
         MLIR_AppendBlockOp(ctx, out_body, g);
-        synth_print_newline(ctx, out_body);
     }
+    if (need_printNewline) synth_print_newline(ctx, out_body);
+    if (need_printStr) synth_print_str(ctx, out_body);
 
     free(globals.names); free(globals.offsets);
     free(image);
