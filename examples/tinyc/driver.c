@@ -410,11 +410,12 @@ int app_main(void) {
                 Arena *late_arena = arena_create(64 * 1024 * 1024 - 64 * 1024);
                 MLIR_SetArenaAllocator(&ctx, late_arena);
                 MLIR_ResetInternRegistry();
-                MLIR_OpHandle a64;
+                uint8_t *macho_data = NULL; size_t macho_size = 0;
                 if (macho_backend_llvm) {
                     // New unified path: lift wasmssa to the in-house `llvm`
-                    // dialect, then reuse the C-frontend's llvm->aarch64
-                    // backend. This is what ultimately retires `wmir`.
+                    // dialect, then stream it straight to Mach-O one function
+                    // at a time (low peak memory). This is what ultimately
+                    // retires `wmir`.
                     MLIR_OpHandle llvm_mod = mlir_wasmssa_to_llvm(&ctx, ssa);
                     if (llvm_mod == MLIR_INVALID_HANDLE) {
                         arena_destroy(late_arena);
@@ -424,7 +425,12 @@ int app_main(void) {
                     }
                     arena_destroy(arena);
                     arena = late_arena;
-                    a64 = mlir_llvm_to_aarch64(&ctx, llvm_mod);
+                    if (!mlir_llvm_to_macho(&ctx, llvm_mod,
+                                            &macho_data, &macho_size)) {
+                        arena_destroy(arena);
+                        arena_destroy(boot_arena);
+                        return 1;
+                    }
                 } else {
                     MLIR_OpHandle wmir = mlir_wasmssa_to_wmir(&ctx, ssa);
                     if (wmir == MLIR_INVALID_HANDLE) {
@@ -436,18 +442,17 @@ int app_main(void) {
                     // wasmstack + wasmssa + the input wasm bytes are now dead.
                     arena_destroy(arena);
                     arena = late_arena;
-                    a64 = mlir_wmir_to_aarch64(&ctx, wmir);
-                }
-                if (a64 == MLIR_INVALID_HANDLE) {
-                    arena_destroy(arena);
-                    arena_destroy(boot_arena);
-                    return 1;
-                }
-                uint8_t *macho_data = NULL; size_t macho_size = 0;
-                if (!mlir_aarch64_to_macho(&ctx, a64, &macho_data, &macho_size)) {
-                    arena_destroy(arena);
-                    arena_destroy(boot_arena);
-                    return 1;
+                    MLIR_OpHandle a64 = mlir_wmir_to_aarch64(&ctx, wmir);
+                    if (a64 == MLIR_INVALID_HANDLE) {
+                        arena_destroy(arena);
+                        arena_destroy(boot_arena);
+                        return 1;
+                    }
+                    if (!mlir_aarch64_to_macho(&ctx, a64, &macho_data, &macho_size)) {
+                        arena_destroy(arena);
+                        arena_destroy(boot_arena);
+                        return 1;
+                    }
                 }
                 out_fw.str = (char *)macho_data;
                 out_fw.size = macho_size;

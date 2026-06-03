@@ -1953,3 +1953,100 @@ MLIR_OpHandle mlir_llvm_to_aarch64(MLIR_Context *ctx,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
 }
+
+// ===========================================================================
+// Streaming selection API (see mlir_llvm_to_aarch64.h). Reuses the static
+// collect_globals / select_func / synth_start helpers above; the only new
+// state is the precomputed global blob/relocs and the list of defined funcs.
+// ===========================================================================
+struct LlvmSelState {
+    MLIR_BlockHandle mb;
+    GlobalMap        gm;
+    uint8_t         *gblob;
+    uint32_t         gblob_len;
+    PtrReloc        *grelocs;
+    size_t           n_grelocs;
+    MLIR_OpHandle   *funcs;   // defined functions, in source order
+    string          *syms;    // their sym_name strings (point into llvm IR)
+    size_t           n_funcs;
+    bool             saw_main;
+};
+
+LlvmSelState *mlir_llvm_sel_begin(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
+                                  uint8_t **out_gblob, uint32_t *out_gblob_len) {
+    if (out_gblob) *out_gblob = NULL;
+    if (out_gblob_len) *out_gblob_len = 0;
+    MLIR_RegionHandle mr = MLIR_GetOpRegion(llvm_module, 0);
+    MLIR_BlockHandle  mb = MLIR_GetRegionBlock(mr, 0);
+    size_t nops = MLIR_GetBlockNumOps(mb);
+
+    LlvmSelState *st = (LlvmSelState *)calloc(1, sizeof(LlvmSelState));
+    if (!st) return NULL;
+    st->mb = mb;
+
+    if (!collect_globals(ctx, mb, &st->gm, &st->gblob, &st->gblob_len,
+                         &st->grelocs, &st->n_grelocs)) {
+        fprintf(stderr, "llvm->aarch64: unsupported module-level global\n");
+        free(st->gm.e); free(st->gblob); free(st->grelocs); free(st);
+        return NULL;
+    }
+
+    st->funcs = (MLIR_OpHandle *)calloc(nops ? nops : 1, sizeof(MLIR_OpHandle));
+    st->syms  = (string *)calloc(nops ? nops : 1, sizeof(string));
+    if (!st->funcs || !st->syms) {
+        free(st->funcs); free(st->syms);
+        free(st->gm.e); free(st->gblob); free(st->grelocs); free(st);
+        return NULL;
+    }
+    for (size_t i = 0; i < nops; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
+        if (!name_eq(MLIR_GetOpName(op), "llvm.func")) continue;
+        if (!func_has_body(op)) continue;  // skip declarations (malloc/free).
+        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
+        if (sa == MLIR_INVALID_HANDLE) {
+            fprintf(stderr, "llvm->aarch64: llvm.func without sym_name\n");
+            free(st->funcs); free(st->syms);
+            free(st->gm.e); free(st->gblob); free(st->grelocs); free(st);
+            return NULL;
+        }
+        string sym = MLIR_GetAttributeString(sa);
+        if (sym.size == 4 && memcmp(sym.str, "main", 4) == 0) st->saw_main = true;
+        st->funcs[st->n_funcs] = op;
+        st->syms[st->n_funcs]  = sym;
+        st->n_funcs++;
+    }
+
+    if (out_gblob) *out_gblob = st->gblob;
+    if (out_gblob_len) *out_gblob_len = st->gblob_len;
+    return st;
+}
+
+size_t mlir_llvm_sel_num_funcs(LlvmSelState *st) {
+    return st ? st->n_funcs : 0;
+}
+
+bool mlir_llvm_sel_saw_main(LlvmSelState *st) {
+    return st ? st->saw_main : false;
+}
+
+MLIR_OpHandle mlir_llvm_sel_synth_start(MLIR_Context *ctx, LlvmSelState *st) {
+    return synth_start(ctx, str_lit("main"), st->grelocs, st->n_grelocs,
+                       &st->gm);
+}
+
+MLIR_OpHandle mlir_llvm_sel_func(MLIR_Context *ctx, LlvmSelState *st,
+                                 size_t idx) {
+    if (idx >= st->n_funcs) return MLIR_INVALID_HANDLE;
+    return select_func(ctx, st->funcs[idx], st->syms[idx], &st->gm);
+}
+
+void mlir_llvm_sel_end(LlvmSelState *st) {
+    if (!st) return;
+    // Note: st->gblob ownership was handed to the caller via out_gblob; the
+    // caller frees it. Everything else is owned here.
+    free(st->gm.e);
+    free(st->grelocs);
+    free(st->funcs);
+    free(st->syms);
+    free(st);
+}

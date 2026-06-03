@@ -38,6 +38,14 @@ typedef struct MLIR_Context {
     // disabling it there removes a large per-op memory overhead. Defaults
     // to false (tracking on) so all existing callers are unaffected.
     bool no_def_use_tracking;
+    // When non-NULL, the process-wide type/struct intern registry allocates
+    // its IR_Type objects AND its handle arrays into this arena instead of
+    // `arena`. The streaming llvm->aarch64->macho backend lowers each function
+    // into a throwaway temp arena (swapping `arena`) but must keep interned
+    // types — which are cached in the global registry across functions — in a
+    // persistent arena so cached handles never dangle after a temp arena is
+    // released. Defaults to NULL (= use `arena`, no behaviour change).
+    Arena *type_arena;
 } MLIR_Context;
 
 typedef struct MLIR_LocationMap {

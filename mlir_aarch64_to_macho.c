@@ -18,6 +18,7 @@
 // diagnostic; coverage grows as new aarch64.* ops are added.
 
 #include "mlir_aarch64_to_macho.h"
+#include "mlir_llvm_to_aarch64.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -26,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <base/arena.h>
 #include <base/string.h>
 
 #include "mlir_api.h"
@@ -1299,6 +1301,21 @@ static bool patch_branches(EmittedFunc *e) {
 // =============================================================================
 // Top-level translator.
 // =============================================================================
+
+// A contribution to the linmem __DATA image: `bytes` placed at `offset`.
+typedef struct { uint32_t offset; string bytes; } LinInit;
+
+// Assemble the final Mach-O image from per-function `EmittedFunc` records and
+// the linmem data-init contributions. Owns nothing on entry; frees `efs` and
+// `inits` (and the per-function heap buffers) before returning. This is the
+// shared back half of both the whole-module path (mlir_aarch64_to_macho) and
+// the streaming per-function path (mlir_llvm_to_macho).
+static bool finalize_macho(EmittedFunc *efs, size_t n_funcs, size_t start_idx,
+                           LinInit *inits, size_t n_inits,
+                           uint32_t n_globals, uint64_t global0_init,
+                           uint64_t linmem_size,
+                           uint8_t **out_data, size_t *out_size);
+
 bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
                            uint8_t **out_data, size_t *out_size) {
     (void)ctx;
@@ -1315,11 +1332,6 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     uint64_t global0_init = (uint64_t)attr_i(module, "global0_init");
     uint64_t linmem_size  = (uint64_t)attr_i(module, "linmem_size");
 
-    uint32_t globals_bytes  = n_globals * 8u;
-    uint32_t globals_padded = (globals_bytes + 15u) & ~15u;
-    bool     has_data_seg   = (n_globals > 0) || (linmem_size > 0);
-    uint32_t data_priv_size = has_data_seg ? 32u : 0u;
-
     // -----------------------------------------------------------------
     // Collect functions, find `_start`. `_start` must be placed first
     // in __text so LC_MAIN.entryoff equals text_section_off.
@@ -1329,13 +1341,10 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     size_t start_idx = (size_t)-1;
     // -----------------------------------------------------------------
     // Walk top-level for data_init ops first: collect the contributions
-    // to the linmem __DATA section. linmem_init_size is the high-water
-    // mark across all (offset+size) records.
+    // to the linmem __DATA section.
     // -----------------------------------------------------------------
-    typedef struct { uint32_t offset; string bytes; } LinInit;
     LinInit  *inits = NULL;
     size_t    n_inits = 0;
-    uint32_t  linmem_init_size = 0;
     for (size_t i = 0; i < n_top; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
         if (MLIR_GetOpType(op) != OP_TYPE_AARCH64_DATA_INIT) continue;
@@ -1345,16 +1354,6 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
         inits[n_inits].offset = (uint32_t)off;
         inits[n_inits].bytes  = bs;
         n_inits++;
-        uint32_t end = (uint32_t)off + (uint32_t)bs.size;
-        if (end > linmem_init_size) linmem_init_size = end;
-    }
-    if (linmem_init_size > 0) {
-        // Round up to 16 for ARM64 alignment expectations.
-        linmem_init_size = (linmem_init_size + 15u) & ~15u;
-        // The native llvm->aarch64 path stores globals in the linmem
-        // template section without any wmir linmem/globals; ensure the
-        // __DATA segment (and its 32-byte data_priv prefix) is emitted.
-        if (!has_data_seg) { has_data_seg = true; data_priv_size = 32u; }
     }
 
     for (size_t i = 0; i < n_top; i++) {
@@ -1395,6 +1394,41 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
             free(efs[k].br); free(efs[k].bp);
         }
         free(efs); free(inits); return false;
+    }
+
+    return finalize_macho(efs, n_funcs, start_idx, inits, n_inits,
+                          n_globals, global0_init, linmem_size,
+                          out_data, out_size);
+}
+
+static bool finalize_macho(EmittedFunc *efs, size_t n_funcs, size_t start_idx,
+                           LinInit *inits, size_t n_inits,
+                           uint32_t n_globals, uint64_t global0_init,
+                           uint64_t linmem_size,
+                           uint8_t **out_data, size_t *out_size) {
+    *out_data = NULL; *out_size = 0;
+
+    // Derived layout values (recomputed here so this entry is self-contained
+    // for both the whole-module and streaming callers).
+    uint32_t globals_bytes  = n_globals * 8u;
+    uint32_t globals_padded = (globals_bytes + 15u) & ~15u;
+    bool     has_data_seg   = (n_globals > 0) || (linmem_size > 0);
+    uint32_t data_priv_size = has_data_seg ? 32u : 0u;
+    (void)globals_bytes;
+
+    // linmem_init_size = high-water mark across all data-init records.
+    uint32_t linmem_init_size = 0;
+    for (size_t i = 0; i < n_inits; i++) {
+        uint32_t end = inits[i].offset + (uint32_t)inits[i].bytes.size;
+        if (end > linmem_init_size) linmem_init_size = end;
+    }
+    if (linmem_init_size > 0) {
+        // Round up to 16 for ARM64 alignment expectations.
+        linmem_init_size = (linmem_init_size + 15u) & ~15u;
+        // The native llvm->aarch64 path stores globals in the linmem
+        // template section without any wmir linmem/globals; ensure the
+        // __DATA segment (and its 32-byte data_priv prefix) is emitted.
+        if (!has_data_seg) { has_data_seg = true; data_priv_size = 32u; }
     }
 
     // -----------------------------------------------------------------
@@ -2279,4 +2313,140 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     *out_data = img.data;
     *out_size = img.len;
     return true;
+}
+
+// ===========================================================================
+// Streaming llvm -> Mach-O backend (low peak memory).
+//
+// The whole-module path (mlir_llvm_to_aarch64 + mlir_aarch64_to_macho) keeps
+// every function's aarch64 IR live at once, which — with the trivial
+// spill-everything allocator — balloons peak RSS past the 4GB self-host
+// budget. Here we instead lower ONE function at a time into a throwaway temp
+// arena, encode it to a heap `EmittedFunc`, deep-copy the few strings the
+// finalizer needs out of the temp arena, then reset the temp arena before the
+// next function. Type interning is pinned to the persistent arena for the
+// duration so cached type handles never dangle across a reset.
+// ===========================================================================
+
+// Track heap copies of EmittedFunc strings so they can be freed after the
+// finalizer (which only reads, never frees, the string contents).
+typedef struct { char **p; size_t n, c; } OwnedStrs;
+
+static char *owned_dup(OwnedStrs *o, string s) {
+    char *p = (char *)malloc(s.size + 1);
+    memcpy(p, s.str, s.size);
+    p[s.size] = 0;
+    if (o->n == o->c) {
+        o->c = o->c ? o->c * 2 : 256;
+        o->p = (char **)realloc(o->p, o->c * sizeof(char *));
+    }
+    o->p[o->n++] = p;
+    return p;
+}
+
+// Deep-copy name + reloc callees + data-reloc kinds out of the temp arena.
+static void ef_heapdup_strings(EmittedFunc *e, OwnedStrs *o) {
+    if (e->name.size) e->name = (string){ owned_dup(o, e->name), e->name.size };
+    for (size_t i = 0; i < e->n_relocs; i++) {
+        string c = e->relocs[i].callee;
+        if (c.size) e->relocs[i].callee = (string){ owned_dup(o, c), c.size };
+    }
+    for (size_t i = 0; i < e->n_dr; i++) {
+        string k = e->dr[i].kind;
+        if (k.size) e->dr[i].kind = (string){ owned_dup(o, k), k.size };
+    }
+}
+
+static void ef_free_one(EmittedFunc *e) {
+    free(e->code.data); free(e->relocs); free(e->dr);
+    free(e->br); free(e->bp);
+}
+
+bool mlir_llvm_to_macho(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
+                        uint8_t **out_data, size_t *out_size) {
+    *out_data = NULL; *out_size = 0;
+
+    uint8_t *gblob = NULL; uint32_t gblob_len = 0;
+    LlvmSelState *sel = mlir_llvm_sel_begin(ctx, llvm_module, &gblob, &gblob_len);
+    if (!sel) return false;
+    if (!mlir_llvm_sel_saw_main(sel)) {
+        fprintf(stderr, "llvm->aarch64: no defined 'main' function\n");
+        mlir_llvm_sel_end(sel); free(gblob); return false;
+    }
+
+    size_t nf = mlir_llvm_sel_num_funcs(sel);
+    EmittedFunc *efs = (EmittedFunc *)calloc(nf + 1, sizeof(EmittedFunc));
+    size_t n_funcs = 0;
+    size_t start_idx = (size_t)-1;
+    OwnedStrs owned = {0};
+
+    Arena *persist = MLIR_GetArenaAllocator(ctx);
+    ctx->type_arena = persist;   // pin type interning to the persistent arena
+
+    Arena *tmp = arena_create(1 * 1024 * 1024);
+    arena_pos_t tmp0 = arena_get_pos(tmp);
+
+    bool ok = true;
+    // Lower _start first, then each defined function in source order.
+    for (size_t i = 0; ok && i <= nf; i++) {
+        MLIR_SetArenaAllocator(ctx, tmp);
+        MLIR_OpHandle fn = (i == 0)
+            ? mlir_llvm_sel_synth_start(ctx, sel)
+            : mlir_llvm_sel_func(ctx, sel, i - 1);
+        EmittedFunc *e = &efs[n_funcs];
+        if (fn == MLIR_INVALID_HANDLE) {
+            ok = false;
+        } else if (!emit_aarch64_func(fn, e) || !patch_branches(e)) {
+            ef_free_one(e);
+            *e = (EmittedFunc){0};
+            ok = false;
+        }
+        MLIR_SetArenaAllocator(ctx, persist);
+        if (ok) {
+            // br/bp are only needed by patch_branches; drop them now.
+            free(e->br); e->br = NULL; e->n_br = e->c_br = 0;
+            free(e->bp); e->bp = NULL; e->n_bp = e->c_bp = 0;
+            ef_heapdup_strings(e, &owned);
+            if (e->name.size == 6 && memcmp(e->name.str, "_start", 6) == 0)
+                start_idx = n_funcs;
+            n_funcs++;
+        }
+        arena_reset(tmp, tmp0);
+    }
+
+    arena_destroy(tmp);
+    ctx->type_arena = NULL;       // unpin
+    mlir_llvm_sel_end(sel);
+
+    if (!ok || start_idx == (size_t)-1) {
+        if (ok)
+            fprintf(stderr, "llvm->aarch64: no `_start` after streaming\n");
+        for (size_t k = 0; k < n_funcs; k++) ef_free_one(&efs[k]);
+        free(efs);
+        for (size_t k = 0; k < owned.n; k++) free(owned.p[k]);
+        free(owned.p);
+        free(gblob);
+        return false;
+    }
+
+    // One data-init record carrying the global blob (offset 0).
+    LinInit *inits = NULL; size_t n_inits = 0;
+    if (gblob_len > 0) {
+        inits = (LinInit *)malloc(sizeof(LinInit));
+        inits[0].offset = 0;
+        inits[0].bytes  = (string){ (char *)gblob, gblob_len };
+        n_inits = 1;
+    }
+
+    // The llvm path carries no wmir-style linmem/globals layout attrs; the
+    // data blob alone drives the __DATA segment.
+    bool r = finalize_macho(efs, n_funcs, start_idx, inits, n_inits,
+                            0, 0, 0, out_data, out_size);
+
+    // finalize_macho consumed/freed efs and inits; the blob bytes and the
+    // duped strings are no longer referenced.
+    for (size_t k = 0; k < owned.n; k++) free(owned.p[k]);
+    free(owned.p);
+    free(gblob);
+    return r;
 }

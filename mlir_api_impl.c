@@ -510,6 +510,11 @@ static MLIR_TypeHandle intern_type(MLIR_Context *ctx, IR_Type t) {
         IR_Type *cur = resolve_type(g_type_handles[i]);
         if (cur && type_eq(cur, &t)) return g_type_handles[i];
     }
+    // Pin the interned object and the registry array to a persistent arena
+    // when requested, so cached handles survive temp-arena churn in the
+    // streaming backend (see MLIR_Context.type_arena).
+    Arena *save = ctx->arena;
+    if (ctx->type_arena) ctx->arena = ctx->type_arena;
     MLIR_TypeHandle h = alloc_type(ctx, t);
     if (g_n_types == g_cap_types) {
         size_t nc = g_cap_types ? g_cap_types * 2 : 64;
@@ -520,6 +525,7 @@ static MLIR_TypeHandle intern_type(MLIR_Context *ctx, IR_Type t) {
         g_type_handles = nh;
         g_cap_types = nc;
     }
+    ctx->arena = save;
     g_type_handles[g_n_types++] = h;
     return h;
 }
@@ -1220,6 +1226,9 @@ static MLIR_TypeHandle intern_llvm_struct(MLIR_Context *ctx, string name) {
             return g_struct_handles[i];
         }
     }
+    // Pin to the persistent type arena when requested (see intern_type).
+    Arena *save = ctx->arena;
+    if (ctx->type_arena) ctx->arena = ctx->type_arena;
     if (g_n_structs == g_cap_structs) {
         size_t nc = g_cap_structs ? g_cap_structs * 2 : 32;
         MLIR_TypeHandle *nh = arena_new_array(ctx->arena, MLIR_TypeHandle, nc);
@@ -1234,6 +1243,7 @@ static MLIR_TypeHandle intern_llvm_struct(MLIR_Context *ctx, string name) {
     t.kind = TYPE_KIND_LLVM_STRUCT;
     t.data.llvm_struct.name = name;
     MLIR_TypeHandle h = alloc_type(ctx, t);
+    ctx->arena = save;
     g_struct_handles[g_n_structs] = h;
     g_struct_names[g_n_structs] = name;
     g_n_structs++;
