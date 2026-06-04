@@ -1783,6 +1783,20 @@ static MLIR_BlockHandle map_block(MLIR_BlockHandle *src, MLIR_BlockHandle *dst,
 #define A64_NSAVED 10
 #define A64_SAVE_BASE 19
 
+// Register-allocation pool: caller-saved x12..x15 (clobbered by `bl`, so usable
+// only by values that don't cross a call, but needing no prologue save/restore)
+// followed by callee-saved x19..x28 (survive calls, but must be saved/restored
+// when used). Caller-saved come first so call-light blocks prefer them. Pool
+// index pk maps to a physical register via a64_pool_reg() (kept as arithmetic
+// rather than a brace-initialized global array, which the self-hosting tinyC
+// front end does not lower).
+#define A64_NPOOL  14
+#define A64_NCALLER 4
+static inline uint8_t a64_pool_reg(int pk) {
+    return (uint8_t)(pk < A64_NCALLER ? 12 + pk
+                                      : A64_SAVE_BASE + (pk - A64_NCALLER));
+}
+
 // Save (or, with restore=true, reload) the callee-saved registers selected by
 // `mask` (bit k = x(19+k)) to/from the per-frame save area at byte offset
 // `base` and up. Emitted just after the prologue and just before each epilogue.
@@ -1814,9 +1828,11 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
                                size_t n_blocks, SlotMap *rm) {
     Arena *ar = MLIR_GetArenaAllocator(ctx);
     size_t cap = 0;
+    size_t maxops = 0;
     for (size_t b = 0; b < n_blocks; b++) {
         MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
         size_t no = MLIR_GetBlockNumOps(bk);
+        if (no > maxops) maxops = no;
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
             if (MLIR_GetOpNumRegions(op) > 0) return 0;   // bail: nested regions
@@ -1830,6 +1846,7 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
     int32_t *last_use  = (int32_t *)arena_alloc(ar, cap * sizeof(int32_t));
     uint8_t *disq      = (uint8_t *)arena_alloc(ar, cap * sizeof(uint8_t));
     uint8_t *usedv     = (uint8_t *)arena_alloc(ar, cap * sizeof(uint8_t));
+    uint8_t *crosses   = (uint8_t *)arena_alloc(ar, cap * sizeof(uint8_t));
     MLIR_ValueHandle *vals =
         (MLIR_ValueHandle *)arena_alloc(ar, cap * sizeof(MLIR_ValueHandle));
     SlotMap idx = {0}; idx.arena = ar;   // value -> array index
@@ -1847,7 +1864,7 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
             for (size_t r = 0; r < nr; r++) {
                 vals[nv] = MLIR_GetOpResult(op, r);
                 def_block[nv] = (int32_t)b; def_pos[nv] = (int32_t)i;
-                last_use[nv] = -1; disq[nv] = 0; usedv[nv] = 0;
+                last_use[nv] = -1; disq[nv] = 0; usedv[nv] = 0; crosses[nv] = 0;
                 sm_put(&idx, vals[nv], (int32_t)nv);
                 nv++;
             }
@@ -1890,34 +1907,65 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
         }
     }
 
-    // Per-block linear scan. Block-local values never overlap across blocks, so
-    // each block independently reuses the whole x19..x28 pool. Expiry uses a
-    // strict `end < start` test so an operand whose last use coincides with a
-    // result's definition keeps its register — preventing a multi-instruction
-    // lowering from clobbering an operand it still reads.
+    // Pass 3: mark block-local values whose live range [def, last_use] spans an
+    // llvm.call. Such values are clobbered by the `bl`, so they may only be
+    // homed in callee-saved registers (never the caller-saved x12..x15 pool).
+    int32_t *callpos = (int32_t *)arena_alloc(ar, (maxops ? maxops : 1) *
+                                              sizeof(int32_t));
+    for (size_t b = 0; b < n_blocks; b++) {
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+        size_t no = MLIR_GetBlockNumOps(bk);
+        size_t ncall = 0;
+        for (size_t i = 0; i < no; i++)
+            if (name_eq(MLIR_GetOpName(MLIR_GetBlockOp(bk, i)), "llvm.call"))
+                callpos[ncall++] = (int32_t)i;
+        if (ncall == 0) continue;
+        for (size_t vi = 0; vi < nv; vi++) {
+            if (def_block[vi] != (int32_t)b) continue;
+            for (size_t c = 0; c < ncall; c++)
+                if (def_pos[vi] < callpos[c] && callpos[c] <= last_use[vi]) {
+                    crosses[vi] = 1; break;
+                }
+        }
+    }
+
+    // Per-block linear scan over the pool (caller-saved x12..x15 then callee-
+    // saved x19..x28). Block-local values never overlap across blocks, so each
+    // block independently reuses the whole pool. Expiry uses a strict
+    // `end < start` test so an operand whose last use coincides with a result's
+    // definition keeps its register — preventing a multi-instruction lowering
+    // from clobbering an operand it still reads. `used_mask` reports only the
+    // callee-saved registers actually used (bit k = x(19+k)), driving the
+    // prologue/epilogue save/restore; caller-saved homes need none. State is
+    // kept in pool-index space (0..A64_NPOOL-1), mapped to physical regs via
+    // A64_POOL; allocation is deterministic for the bit-identical self-host.
     uint32_t used_mask = 0;
     for (size_t b = 0; b < n_blocks; b++) {
-        uint16_t freemask = (uint16_t)((1u << A64_NSAVED) - 1);
-        int32_t act_end[A64_NSAVED]; uint8_t act_reg[A64_NSAVED]; size_t nact = 0;
+        uint32_t freemask = (1u << A64_NPOOL) - 1u;
+        int32_t act_end[A64_NPOOL]; uint8_t act_pi[A64_NPOOL]; size_t nact = 0;
         for (size_t vi = 0; vi < nv; vi++) {
             if (def_block[vi] != (int32_t)b) continue;
             if (disq[vi] || !usedv[vi] || last_use[vi] < def_pos[vi]) continue;
             int32_t s = def_pos[vi];
             for (size_t a = 0; a < nact; ) {
                 if (act_end[a] < s) {
-                    freemask |= (uint16_t)(1u << (act_reg[a] - A64_SAVE_BASE));
-                    act_reg[a] = act_reg[nact - 1];
+                    freemask |= (1u << act_pi[a]);
+                    act_pi[a]  = act_pi[nact - 1];
                     act_end[a] = act_end[nact - 1];
                     nact--;
                 } else a++;
             }
-            if (freemask == 0) continue;     // no free reg: value stays in memory
-            int rk = 0; while (!(freemask & (1u << rk))) rk++;
-            freemask &= (uint16_t)~(1u << rk);
-            uint8_t regn = (uint8_t)(A64_SAVE_BASE + rk);
+            // Values that cross a call may only use callee-saved pool entries.
+            uint32_t avail = crosses[vi]
+                ? (freemask & ~((1u << A64_NCALLER) - 1u))
+                : freemask;
+            if (avail == 0) continue;        // no eligible reg: stay in memory
+            int pk = 0; while (!(avail & (1u << pk))) pk++;
+            freemask &= ~(1u << pk);
+            uint8_t regn = a64_pool_reg(pk);
             sm_put(rm, vals[vi], regn);
-            used_mask |= (1u << rk);
-            act_end[nact] = last_use[vi]; act_reg[nact] = regn; nact++;
+            if (pk >= A64_NCALLER) used_mask |= (1u << (pk - A64_NCALLER));
+            act_end[nact] = last_use[vi]; act_pi[nact] = (uint8_t)pk; nact++;
         }
     }
     return used_mask;
