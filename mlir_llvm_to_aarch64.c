@@ -2219,6 +2219,454 @@ static bool cast_src(MLIR_OpHandle op, MLIR_ValueHandle *src) {
     return false;
 }
 
+// ===========================================================================
+// Global (whole-function) linear-scan register allocator.
+//
+// A faithful port of the deleted WMIR allocator (mlir_wmir_regalloc.c) over
+// this lowering's existing pool: caller-saved x12..x15 then callee-saved
+// x19..x28 (a64_pool_reg). Unlike the block-local alloc_regs_cfg it keeps
+// cross-block and loop-carried values (block args / induction vars /
+// accumulators) resident in registers across their whole live range via
+// iterative dataflow liveness + loop-depth-weighted spilling, then resolves
+// block-arg homes at edges through the existing parallel-move resolver
+// (emit_edge_copies). The win over block-local is exactly the hot loop
+// values that block-local forces to memory.
+//
+// This path reuses the lowering's pre-assigned frame slots (assign_slots_block
+// gives EVERY value a slot), so there is no slot allocation here: a value is
+// either homed in a register (written to `rm`) or left in its slot. "Eviction"
+// simply un-homes a value (clears its tentative register); the final `rm` is
+// written once from the per-value home decision, so a partially-built scan
+// never corrupts state.
+//
+// Memory is malloc/free'd (NOT arena) so the per-function liveness bitsets are
+// reclaimed; a size gate (below) bails to block-local for very large functions
+// (the self-host's giant dispatch function) so the wasm32 buddy heap never
+// OOMs. Bailing returns A64_GLOBAL_BAIL with `rm` untouched.
+// ===========================================================================
+#define A64_GLOBAL_BAIL 0xFFFFFFFFu
+
+static inline size_t a64_bs_words(size_t n) { return (n + 63u) / 64u; }
+static inline void a64_bs_set(uint64_t *bs, uint32_t i) { bs[i >> 6] |= (1ull << (i & 63u)); }
+static inline bool a64_bs_test(const uint64_t *bs, uint32_t i) { return (bs[i >> 6] >> (i & 63u)) & 1u; }
+static inline void a64_bs_zero(uint64_t *bs, size_t n) { memset(bs, 0, a64_bs_words(n) * 8u); }
+static inline bool a64_bs_equal(const uint64_t *a, const uint64_t *b, size_t n) {
+    return memcmp(a, b, a64_bs_words(n) * 8u) == 0;
+}
+static inline void a64_bs_or(uint64_t *d, const uint64_t *a, const uint64_t *b, size_t n) {
+    size_t w = a64_bs_words(n); for (size_t i = 0; i < w; i++) d[i] = a[i] | b[i];
+}
+static inline void a64_bs_diff(uint64_t *d, const uint64_t *a, const uint64_t *b, size_t n) {
+    size_t w = a64_bs_words(n); for (size_t i = 0; i < w; i++) d[i] = a[i] & ~b[i];
+}
+
+// Open-addressing handle -> uint32 hash (malloc-backed, pre-sized, no grow).
+// Key 0 (MLIR_INVALID_HANDLE) marks empty; handles are non-zero. Probe order
+// is irrelevant to output determinism (only get/set by key are used).
+typedef struct { MLIR_ValueHandle *k; uint32_t *v; size_t cap; } A64HHash;
+static uint32_t a64_hh_hash(MLIR_ValueHandle v) {
+    uint32_t h = (uint32_t)v ^ (uint32_t)(v >> 16);
+    h ^= h >> 15; h *= 2654435761u; h ^= h >> 13; return h;
+}
+static void a64_hh_init(A64HHash *m, size_t want) {
+    size_t c = 16; while (c < want * 2u) c *= 2;
+    m->cap = c;
+    m->k = (MLIR_ValueHandle *)calloc(c, sizeof(*m->k));
+    m->v = (uint32_t *)malloc(c * sizeof(*m->v));
+}
+static void a64_hh_put(A64HHash *m, MLIR_ValueHandle key, uint32_t val) {
+    size_t mask = m->cap - 1, p = (size_t)a64_hh_hash(key) & mask;
+    while (m->k[p] != 0) { if (m->k[p] == key) { m->v[p] = val; return; } p = (p + 1) & mask; }
+    m->k[p] = key; m->v[p] = val;
+}
+static bool a64_hh_get(const A64HHash *m, MLIR_ValueHandle key, uint32_t *out) {
+    if (m->cap == 0) return false;
+    size_t mask = m->cap - 1, p = (size_t)a64_hh_hash(key) & mask;
+    while (m->k[p] != 0) { if (m->k[p] == key) { *out = m->v[p]; return true; } p = (p + 1) & mask; }
+    return false;
+}
+static void a64_hh_free(A64HHash *m) { free(m->k); free(m->v); m->k = NULL; m->v = NULL; m->cap = 0; }
+
+// True if `op` is a folded linmem spine op (single result in memspine): it
+// emits no code, so its operand uses must NOT extend liveness (base+idx are
+// re-injected at the fused load/store instead).
+static bool a64_is_spine(MLIR_OpHandle op, SlotMap *memspine) {
+    if (!memspine || MLIR_GetOpNumResults(op) != 1) return false;
+    int32_t mt;
+    return sm_get(memspine, MLIR_GetOpResult(op, 0), &mt);
+}
+// If `op` is a memfuse'd load/store, output its base+idx register operands.
+static bool a64_memfuse_uses(MLIR_Context *ctx, MLIR_OpHandle op, SlotMap *memfuse,
+                             MLIR_ValueHandle *base, MLIR_ValueHandle *idx) {
+    if (!memfuse) return false;
+    string opn = MLIR_GetOpName(op);
+    size_t nop = MLIR_GetOpNumOperands(op);
+    MLIR_ValueHandle P = MLIR_INVALID_HANDLE;
+    if (name_eq(opn, "llvm.load") && nop >= 1)        P = MLIR_GetOpOperand(op, 0);
+    else if (name_eq(opn, "llvm.store") && nop >= 2)  P = MLIR_GetOpOperand(op, 1);
+    if (P == MLIR_INVALID_HANDLE) return false;
+    int32_t mt;
+    if (!sm_get(memfuse, P, &mt)) return false;
+    MLIR_OpHandle z, e, p;
+    return memfuse_match(ctx, P, base, idx, &z, &e, &p);
+}
+
+static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
+                                  size_t n_blocks, SlotMap *rm,
+                                  SlotMap *memfuse, SlotMap *memspine) {
+    if (n_blocks == 0) return A64_GLOBAL_BAIL;
+
+    // --- 0. Count register-candidate values; bail on nested regions. Entry
+    //        block args (incoming params) are EXCLUDED: the prologue spills
+    //        them to slots and never writes a home register, so they must stay
+    //        slot-resident. Constants and folded spine results get no value
+    //        number (rematerialized / fused). Positions still advance per op. ---
+    size_t nv_max = 0;
+    for (size_t b = 0; b < n_blocks; b++) {
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+        if (b > 0) nv_max += MLIR_GetBlockNumArgs(bk);
+        size_t no = MLIR_GetBlockNumOps(bk);
+        for (size_t i = 0; i < no; i++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
+            if (MLIR_GetOpNumRegions(op) > 0) return A64_GLOBAL_BAIL;
+            nv_max += MLIR_GetOpNumResults(op);
+        }
+    }
+    if (nv_max == 0) return 0;
+    // Memory gate: bound the liveness bitsets (n_blocks * bw words, four of
+    // them) so the self-host's giant function falls back to block-local rather
+    // than exhausting the wasm32 heap. Tuned conservatively; most functions are
+    // far below this and get global allocation.
+    {
+        size_t bwg = a64_bs_words(nv_max);
+        if (nv_max > 20000u || (uint64_t)n_blocks * (uint64_t)bwg > 262144ull)
+            return A64_GLOBAL_BAIL;
+    }
+
+    // --- 1. Linearise + number values. One position per op (incl. const/spine
+    //        ops, so is_call[] and use positions stay consistent). ---
+    uint32_t *block_first = (uint32_t *)malloc(n_blocks * sizeof(uint32_t));
+    uint32_t *block_last  = (uint32_t *)malloc(n_blocks * sizeof(uint32_t));
+    MLIR_ValueHandle *handle = (MLIR_ValueHandle *)malloc(nv_max * sizeof(MLIR_ValueHandle));
+    uint32_t *def_pos   = (uint32_t *)malloc(nv_max * sizeof(uint32_t));
+    uint32_t *first_pos = (uint32_t *)malloc(nv_max * sizeof(uint32_t));
+    uint32_t *last_use  = (uint32_t *)malloc(nv_max * sizeof(uint32_t));
+    uint64_t *weight    = (uint64_t *)malloc(nv_max * sizeof(uint64_t));
+    uint8_t  *crosses   = (uint8_t  *)malloc(nv_max * sizeof(uint8_t));
+    int8_t   *home_pk   = (int8_t   *)malloc(nv_max * sizeof(int8_t));
+    A64HHash vmap; a64_hh_init(&vmap, nv_max);
+    A64HHash bmap; a64_hh_init(&bmap, n_blocks);
+
+    for (size_t b = 0; b < n_blocks; b++)
+        a64_hh_put(&bmap, (MLIR_ValueHandle)MLIR_GetRegionBlock(reg, b), (uint32_t)b);
+
+    uint32_t pos = 0, nv = 0;
+    for (size_t b = 0; b < n_blocks; b++) {
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+        block_first[b] = pos;
+        if (b > 0) {
+            size_t na = MLIR_GetBlockNumArgs(bk);
+            for (size_t a = 0; a < na; a++) {
+                MLIR_ValueHandle arg = MLIR_GetBlockArg(bk, a);
+                handle[nv] = arg; def_pos[nv] = pos; first_pos[nv] = pos;
+                last_use[nv] = 0; weight[nv] = 0; crosses[nv] = 0; home_pk[nv] = -1;
+                a64_hh_put(&vmap, arg, nv); nv++;
+            }
+        }
+        size_t no = MLIR_GetBlockNumOps(bk);
+        for (size_t i = 0; i < no; i++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
+            int64_t cv; uint8_t c64;
+            bool skip = const_int_val(ctx, op, &cv, &c64) || a64_is_spine(op, memspine);
+            if (!skip) {
+                size_t nr = MLIR_GetOpNumResults(op);
+                for (size_t r = 0; r < nr; r++) {
+                    MLIR_ValueHandle rv = MLIR_GetOpResult(op, r);
+                    handle[nv] = rv; def_pos[nv] = pos; first_pos[nv] = pos;
+                    last_use[nv] = 0; weight[nv] = 0; crosses[nv] = 0; home_pk[nv] = -1;
+                    a64_hh_put(&vmap, rv, nv); nv++;
+                }
+            }
+            pos++;
+        }
+        block_last[b] = pos;
+    }
+
+    // --- 1b. Per-block loop depth via back-edge difference array. ---
+    uint32_t *loop_depth = (uint32_t *)calloc(n_blocks, sizeof(uint32_t));
+    {
+        int64_t *delta = (int64_t *)calloc(n_blocks + 1, sizeof(int64_t));
+        for (size_t b = 0; b < n_blocks; b++) {
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+            size_t no = MLIR_GetBlockNumOps(bk);
+            for (size_t i = 0; i < no; i++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
+                size_t ns = MLIR_GetOpNumSuccessors(op);
+                for (size_t s = 0; s < ns; s++) {
+                    uint32_t ti;
+                    if (a64_hh_get(&bmap, (MLIR_ValueHandle)MLIR_GetOpSuccessor(op, s), &ti) &&
+                        ti <= (uint32_t)b) { delta[ti] += 1; delta[b + 1] -= 1; }
+                }
+            }
+        }
+        int64_t acc = 0;
+        for (size_t b = 0; b < n_blocks; b++) {
+            acc += delta[b]; loop_depth[b] = acc < 0 ? 0 : (uint32_t)acc;
+        }
+        free(delta);
+    }
+    #define A64_USE_WEIGHT_AT(d) (1ull << (((d) * 3u) < 60u ? ((d) * 3u) : 60u))
+
+    // --- 2. Liveness dataflow: gen/kill then live_in/live_out fixpoint. ---
+    size_t bw = a64_bs_words(nv ? nv : 1);
+    uint64_t *live_in  = (uint64_t *)calloc(n_blocks * bw, sizeof(uint64_t));
+    uint64_t *live_out = (uint64_t *)calloc(n_blocks * bw, sizeof(uint64_t));
+    uint64_t *gen      = (uint64_t *)calloc(n_blocks * bw, sizeof(uint64_t));
+    uint64_t *kill     = (uint64_t *)calloc(n_blocks * bw, sizeof(uint64_t));
+    uint64_t *scratch  = (uint64_t *)calloc(bw, sizeof(uint64_t));
+
+    for (size_t b = 0; b < n_blocks; b++) {
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+        uint64_t *G = gen + b * bw, *K = kill + b * bw;
+        if (b > 0) {
+            size_t na = MLIR_GetBlockNumArgs(bk);
+            for (size_t a = 0; a < na; a++) {
+                uint32_t vi;
+                if (a64_hh_get(&vmap, MLIR_GetBlockArg(bk, a), &vi)) a64_bs_set(K, vi);
+            }
+        }
+        size_t no = MLIR_GetBlockNumOps(bk);
+        for (size_t i = 0; i < no; i++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
+            if (a64_is_spine(op, memspine)) continue;
+            size_t nop = MLIR_GetOpNumOperands(op);
+            for (size_t k = 0; k < nop; k++) {
+                uint32_t vi;
+                if (a64_hh_get(&vmap, MLIR_GetOpOperand(op, k), &vi) && !a64_bs_test(K, vi))
+                    a64_bs_set(G, vi);
+            }
+            size_t ns = MLIR_GetOpNumSuccessors(op);
+            for (size_t s = 0; s < ns; s++) {
+                size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                for (size_t k = 0; k < nso; k++) {
+                    uint32_t vi;
+                    if (a64_hh_get(&vmap, MLIR_GetOpSuccessorOperand(op, s, k), &vi) &&
+                        !a64_bs_test(K, vi)) a64_bs_set(G, vi);
+                }
+            }
+            MLIR_ValueHandle mbase, midx;
+            if (a64_memfuse_uses(ctx, op, memfuse, &mbase, &midx)) {
+                MLIR_ValueHandle uu[2] = { mbase, midx };
+                for (int u = 0; u < 2; u++) {
+                    uint32_t vi;
+                    if (a64_hh_get(&vmap, uu[u], &vi) && !a64_bs_test(K, vi)) a64_bs_set(G, vi);
+                }
+            }
+            size_t nr = MLIR_GetOpNumResults(op);
+            for (size_t r = 0; r < nr; r++) {
+                uint32_t vi;
+                if (a64_hh_get(&vmap, MLIR_GetOpResult(op, r), &vi)) a64_bs_set(K, vi);
+            }
+        }
+    }
+
+    bool changed = true; int iters = 0;
+    while (changed && iters++ < 4096) {
+        changed = false;
+        for (size_t br = 0; br < n_blocks; br++) {
+            size_t b = n_blocks - 1 - br;
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+            uint64_t *LO = live_out + b * bw;
+            a64_bs_zero(LO, nv);
+            size_t no = MLIR_GetBlockNumOps(bk);
+            for (size_t i = 0; i < no; i++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
+                size_t ns = MLIR_GetOpNumSuccessors(op);
+                for (size_t s = 0; s < ns; s++) {
+                    uint32_t si;
+                    if (a64_hh_get(&bmap, (MLIR_ValueHandle)MLIR_GetOpSuccessor(op, s), &si))
+                        a64_bs_or(LO, LO, live_in + si * bw, nv);
+                }
+            }
+            uint64_t *LI = live_in + b * bw;
+            a64_bs_diff(scratch, LO, kill + b * bw, nv);
+            a64_bs_or(scratch, scratch, gen + b * bw, nv);
+            if (!a64_bs_equal(scratch, LI, nv)) {
+                memcpy(LI, scratch, bw * sizeof(uint64_t)); changed = true;
+            }
+        }
+    }
+
+    // --- 3. Per-value first_pos / last_use_pos / use_weight. ---
+    for (size_t b = 0; b < n_blocks; b++) {
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+        uint64_t *LO = live_out + b * bw, *LI = live_in + b * bw;
+        for (uint32_t vi = 0; vi < nv; vi++) {
+            if (a64_bs_test(LO, vi) && block_last[b] > last_use[vi])  last_use[vi]  = block_last[b];
+            if (a64_bs_test(LI, vi) && block_first[b] < first_pos[vi]) first_pos[vi] = block_first[b];
+        }
+        uint32_t op_pos = block_first[b];
+        uint64_t w = A64_USE_WEIGHT_AT(loop_depth[b]);
+        size_t no = MLIR_GetBlockNumOps(bk);
+        for (size_t i = 0; i < no; i++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
+            if (a64_is_spine(op, memspine)) { op_pos++; continue; }
+            size_t nop = MLIR_GetOpNumOperands(op);
+            for (size_t k = 0; k < nop; k++) {
+                uint32_t vi;
+                if (a64_hh_get(&vmap, MLIR_GetOpOperand(op, k), &vi)) {
+                    if (op_pos > last_use[vi]) last_use[vi] = op_pos;
+                    if (op_pos < first_pos[vi]) first_pos[vi] = op_pos;
+                    weight[vi] += w;
+                }
+            }
+            size_t ns = MLIR_GetOpNumSuccessors(op);
+            for (size_t s = 0; s < ns; s++) {
+                MLIR_BlockHandle succ = MLIR_GetOpSuccessor(op, s);
+                size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                for (size_t k = 0; k < nso; k++) {
+                    uint32_t vi;
+                    if (a64_hh_get(&vmap, MLIR_GetOpSuccessorOperand(op, s, k), &vi)) {
+                        if (op_pos > last_use[vi]) last_use[vi] = op_pos;
+                        if (op_pos < first_pos[vi]) first_pos[vi] = op_pos;
+                        weight[vi] += w;
+                    }
+                    // The branch writes the k-th successor block arg's home at
+                    // THIS position; extend that arg's interval start to cover
+                    // the write (forward edges define the arg before its own
+                    // block-entry position).
+                    uint32_t avi;
+                    if (a64_hh_get(&vmap, MLIR_GetBlockArg(succ, k), &avi) &&
+                        op_pos < first_pos[avi]) first_pos[avi] = op_pos;
+                }
+            }
+            MLIR_ValueHandle mbase, midx;
+            if (a64_memfuse_uses(ctx, op, memfuse, &mbase, &midx)) {
+                MLIR_ValueHandle uu[2] = { mbase, midx };
+                for (int u = 0; u < 2; u++) {
+                    uint32_t vi;
+                    if (a64_hh_get(&vmap, uu[u], &vi)) {
+                        if (op_pos > last_use[vi]) last_use[vi] = op_pos;
+                        if (op_pos < first_pos[vi]) first_pos[vi] = op_pos;
+                        weight[vi] += w;
+                    }
+                }
+            }
+            op_pos++;
+        }
+    }
+
+    // crosses_call: any "llvm.call" between first_pos and last_use.
+    {
+        uint8_t *is_call = (uint8_t *)calloc(pos ? pos : 1, sizeof(uint8_t));
+        uint32_t op_pos = 0;
+        for (size_t b = 0; b < n_blocks; b++) {
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+            size_t no = MLIR_GetBlockNumOps(bk);
+            for (size_t i = 0; i < no; i++) {
+                if (name_eq(MLIR_GetOpName(MLIR_GetBlockOp(bk, i)), "llvm.call"))
+                    is_call[op_pos] = 1;
+                op_pos++;
+            }
+        }
+        for (uint32_t vi = 0; vi < nv; vi++) {
+            if (last_use[vi] < first_pos[vi]) continue;
+            for (uint32_t p = first_pos[vi]; p <= last_use[vi] && p < pos; p++)
+                if (is_call[p]) { crosses[vi] = 1; break; }
+        }
+        free(is_call);
+    }
+
+    // --- 4. Linear scan over the pool, loop-weighted eviction. ---
+    uint32_t *order = (uint32_t *)malloc((nv ? nv : 1) * sizeof(uint32_t));
+    for (uint32_t i = 0; i < nv; i++) order[i] = i;
+    {   // stable bottom-up merge sort by first_pos (ties keep numbering order).
+        uint32_t *tmp = (uint32_t *)malloc((nv ? nv : 1) * sizeof(uint32_t));
+        for (size_t width = 1; width < nv; width *= 2) {
+            for (size_t lo = 0; lo < nv; lo += 2 * width) {
+                size_t mid = lo + width;     if (mid > nv) mid = nv;
+                size_t hi  = lo + 2 * width; if (hi  > nv) hi  = nv;
+                size_t a = lo, bb = mid, o = lo;
+                while (a < mid && bb < hi)
+                    tmp[o++] = (first_pos[order[bb]] < first_pos[order[a]]) ? order[bb++] : order[a++];
+                while (a < mid) tmp[o++] = order[a++];
+                while (bb < hi) tmp[o++] = order[bb++];
+            }
+            uint32_t *sw = order; order = tmp; tmp = sw;
+        }
+        free(tmp);
+    }
+
+    // Active list: (value index, pool index). reg_busy[pk].
+    uint32_t *act_vi = (uint32_t *)malloc(A64_NPOOL * sizeof(uint32_t));
+    uint8_t  *act_pk = (uint8_t  *)malloc(A64_NPOOL * sizeof(uint8_t));
+    size_t nact = 0;
+    bool reg_busy[A64_NPOOL]; for (int i = 0; i < A64_NPOOL; i++) reg_busy[i] = false;
+
+    for (uint32_t k = 0; k < nv; k++) {
+        uint32_t vi = order[k];
+        // Retire active intervals ending before this one starts (strict, so an
+        // operand whose last use == this def keeps its register).
+        for (size_t a = 0; a < nact; ) {
+            if (last_use[act_vi[a]] < first_pos[vi]) {
+                reg_busy[act_pk[a]] = false;
+                act_vi[a] = act_vi[nact - 1]; act_pk[a] = act_pk[nact - 1]; nact--;
+            } else a++;
+        }
+        // Dead-on-def / never-used values keep their slot.
+        if (last_use[vi] <= first_pos[vi]) continue;
+        bool callee_only = crosses[vi];
+        int found = -1;
+        for (int pk = 0; pk < A64_NPOOL; pk++) {
+            if (reg_busy[pk]) continue;
+            if (callee_only && pk < A64_NCALLER) continue;
+            found = pk; break;
+        }
+        if (found >= 0) {
+            reg_busy[found] = true;
+            act_vi[nact] = vi; act_pk[nact] = (uint8_t)found; nact++;
+            home_pk[vi] = (int8_t)found;
+            continue;
+        }
+        // No free eligible reg: evict the active interval with the lowest use
+        // weight (cheapest to reload), tie-break latest end — but only if it is
+        // strictly cheaper than the current value, else spill the current one.
+        size_t evict_a = (size_t)-1; uint64_t best_w = 0; uint32_t best_end = 0;
+        for (size_t a = 0; a < nact; a++) {
+            if (callee_only && act_pk[a] < A64_NCALLER) continue;
+            uint64_t aw = weight[act_vi[a]]; uint32_t ae = last_use[act_vi[a]];
+            if (evict_a == (size_t)-1 || aw < best_w || (aw == best_w && ae > best_end)) {
+                evict_a = a; best_w = aw; best_end = ae;
+            }
+        }
+        if (evict_a != (size_t)-1 && best_w >= weight[vi]) evict_a = (size_t)-1;
+        if (evict_a != (size_t)-1) {
+            home_pk[act_vi[evict_a]] = -1;          // evicted -> slot
+            act_vi[evict_a] = vi;                   // reuse its register
+            home_pk[vi] = (int8_t)act_pk[evict_a];
+        }
+        // else: current value stays in its slot (home_pk already -1).
+    }
+
+    // --- 5. Emit results: write rm for register homes; report used_mask. ---
+    uint32_t used_mask = 0;
+    for (uint32_t vi = 0; vi < nv; vi++) {
+        if (home_pk[vi] < 0) continue;
+        int pk = home_pk[vi];
+        sm_put(rm, handle[vi], a64_pool_reg(pk));
+        if (pk >= A64_NCALLER) used_mask |= (1u << (pk - A64_NCALLER));
+    }
+
+    #undef A64_USE_WEIGHT_AT
+    free(order); free(act_vi); free(act_pk);
+    free(live_in); free(live_out); free(gen); free(kill); free(scratch);
+    free(block_first); free(block_last); free(handle);
+    free(def_pos); free(first_pos); free(last_use);
+    free(weight); free(crosses); free(home_pk); free(loop_depth);
+    a64_hh_free(&vmap); a64_hh_free(&bmap);
+    return used_mask;
+}
+
 // Linear-scan register allocator for the CFG (from-wasm) lowering path. Assigns
 // block-local SSA values (def and all uses in one block, never a block arg, and
 // never consumed by a terminator or an llvm.call — those paths read frame slots
@@ -2904,9 +3352,19 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
     rm.arena = MLIR_GetArenaAllocator(ctx);
     uint32_t saved_mask = 0;
     if (!getenv("TINYC_NO_REGALLOC")) {
-        saved_mask = alloc_regs_cfg(ctx, src_region, n_blocks, &rm,
-                                    do_memfuse ? &memfuse : NULL,
-                                    do_memfuse ? &memspine : NULL);
+        // Global (whole-function) linear scan by default; it keeps cross-block
+        // and loop-carried values resident across their live range. Very large
+        // functions bail (A64_GLOBAL_BAIL) and fall back to the block-local
+        // allocator, as does TINYC_BLOCK_REGALLOC=1 (A/B debugging aid).
+        saved_mask = A64_GLOBAL_BAIL;
+        if (!getenv("TINYC_BLOCK_REGALLOC"))
+            saved_mask = alloc_regs_global(ctx, src_region, n_blocks, &rm,
+                                           do_memfuse ? &memfuse : NULL,
+                                           do_memfuse ? &memspine : NULL);
+        if (saved_mask == A64_GLOBAL_BAIL)
+            saved_mask = alloc_regs_cfg(ctx, src_region, n_blocks, &rm,
+                                        do_memfuse ? &memfuse : NULL,
+                                        do_memfuse ? &memspine : NULL);
     }
     uint32_t num_saved = 0;
     for (uint32_t mtmp = saved_mask; mtmp; mtmp &= mtmp - 1) num_saved++;
