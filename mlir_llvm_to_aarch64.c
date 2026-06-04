@@ -917,6 +917,29 @@ static MLIR_BlockHandle new_block(LowerCtx *L) {
     return b;
 }
 
+// True if `v`'s producing op already leaves the upper 32 bits of its 64-bit
+// home/slot zero (all i32 results are produced in W-form data-processing
+// instructions, W-form load/csel/cset, or the zero-extending casts, and spills
+// are full 8-byte str/ldr). For such a source a `zext i32 -> i64` is a no-op, so
+// it can be lowered as a plain copy (which copy-coalescing then elides) instead
+// of an explicit UXTW. Conservative: an unrecognised or absent producer
+// (function params, block args, sign-extends, index casts) keeps the UXTW.
+static bool i32_src_zero_extended(MLIR_ValueHandle v) {
+    MLIR_OpHandle d = MLIR_GetValueDefiningOp(v);
+    if (d == MLIR_INVALID_HANDLE) return false;
+    string nm = MLIR_GetOpName(d);
+    return name_eq(nm, "llvm.add")  || name_eq(nm, "llvm.sub")  ||
+           name_eq(nm, "llvm.mul")  || name_eq(nm, "llvm.sdiv") ||
+           name_eq(nm, "llvm.udiv") || name_eq(nm, "llvm.srem") ||
+           name_eq(nm, "llvm.urem") || name_eq(nm, "llvm.and")  ||
+           name_eq(nm, "llvm.or")   || name_eq(nm, "llvm.xor")  ||
+           name_eq(nm, "llvm.shl")  || name_eq(nm, "llvm.lshr") ||
+           name_eq(nm, "llvm.ashr") || name_eq(nm, "llvm.icmp") ||
+           name_eq(nm, "llvm.zext") || name_eq(nm, "llvm.trunc")||
+           name_eq(nm, "llvm.select") || name_eq(nm, "llvm.load") ||
+           name_eq(nm, "llvm.inttoptr") || name_eq(nm, "llvm.ptrtoint");
+}
+
 // Slot-to-slot copy (block-arg / phi resolution and yield forwarding).
 static void copy_slot(LowerCtx *L, MLIR_ValueHandle src, MLIR_ValueHandle dst) {
     int64_t cv; uint8_t c64;
@@ -1638,7 +1661,15 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         if (!L->ok) return;
         uint8_t rd = def_val(L, res, 9);
         if (w == 32) {
-            emit_uxtw(ctx, blk, rd, r0);        // mov wd,wn -> hardware zero-ext
+            // zext i32->i64: UXTW (mov wd,wn) hardware-zeroes the top half. When
+            // the source is already zero-extended (its producer wrote a W-form
+            // result), the extension is a no-op: emit a plain copy so copy-
+            // coalescing can elide it entirely.
+            if (name_eq(on, "llvm.zext") &&
+                i32_src_zero_extended(MLIR_GetOpOperand(op, 0)))
+                emit_mov_reg(ctx, blk, rd, r0);
+            else
+                emit_uxtw(ctx, blk, rd, r0);        // mov wd,wn -> hardware zero-ext
         } else if (w > 0 && w < 64) {
             emit_load_imm(ctx, blk, 10, (w >= 64) ? ~0ull : ((1ull << w) - 1), true);
             emit_3reg(ctx, blk, OP_TYPE_AARCH64_AND_REG, rd, r0, 10, true);
@@ -2089,6 +2120,24 @@ static void emit_callee_saves(MLIR_Context *ctx, MLIR_BlockHandle blk,
     }
 }
 
+// Returns true and sets *src to operand 0 if `op` is a single-source cast that
+// lowers to instructions reading only operand 0 and writing the result (so the
+// result may safely share operand 0's home register: every branch in these
+// handlers is correct when rd == r0, and the pure-move cases collapse to a
+// `mov rd,rd` that emit_mov_reg drops entirely). Drives copy coalescing.
+static bool cast_src(MLIR_OpHandle op, MLIR_ValueHandle *src) {
+    string nm = MLIR_GetOpName(op);
+    if (name_eq(nm, "llvm.inttoptr") || name_eq(nm, "llvm.ptrtoint") ||
+        name_eq(nm, "arith.index_cast") || name_eq(nm, "arith.index_castui") ||
+        name_eq(nm, "llvm.trunc") || name_eq(nm, "llvm.zext") ||
+        name_eq(nm, "llvm.sext") || name_eq(nm, "llvm.bitcast")) {
+        if (MLIR_GetOpNumOperands(op) != 1) return false;
+        *src = MLIR_GetOpOperand(op, 0);
+        return true;
+    }
+    return false;
+}
+
 // Linear-scan register allocator for the CFG (from-wasm) lowering path. Assigns
 // block-local SSA values (def and all uses in one block, never a block arg, and
 // never consumed by a terminator or an llvm.call — those paths read frame slots
@@ -2124,6 +2173,7 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
     uint8_t *disq      = (uint8_t *)arena_alloc(ar, cap * sizeof(uint8_t));
     uint8_t *usedv     = (uint8_t *)arena_alloc(ar, cap * sizeof(uint8_t));
     uint8_t *crosses   = (uint8_t *)arena_alloc(ar, cap * sizeof(uint8_t));
+    int8_t  *home_pk   = (int8_t *)arena_alloc(ar, cap * sizeof(int8_t));
     MLIR_ValueHandle *vals =
         (MLIR_ValueHandle *)arena_alloc(ar, cap * sizeof(MLIR_ValueHandle));
     SlotMap idx = {0}; idx.arena = ar;   // value -> array index
@@ -2142,6 +2192,7 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 vals[nv] = MLIR_GetOpResult(op, r);
                 def_block[nv] = (int32_t)b; def_pos[nv] = (int32_t)i;
                 last_use[nv] = -1; disq[nv] = 0; usedv[nv] = 0; crosses[nv] = 0;
+                home_pk[nv] = -1;
                 sm_put(&idx, vals[nv], (int32_t)nv);
                 nv++;
             }
@@ -2302,6 +2353,38 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
                     nact--;
                 } else a++;
             }
+            // Copy coalescing: if this value is the result of a single-source
+            // cast whose source is a pool-homed, block-local value dying exactly
+            // at this op, reuse the source's register. For the pure-move casts
+            // this turns emit_mov_reg into a no-op (the copy disappears); for the
+            // extend casts it merely lowers register pressure. Provably safe:
+            // the source's live range ends here and these handlers tolerate
+            // rd == r0, so no value is clobbered before its last read.
+            if (!getenv("TINYC_NO_COALESCE")) {
+                MLIR_ValueHandle csrc;
+                MLIR_OpHandle dop = MLIR_GetValueDefiningOp(vals[vi]);
+                int32_t ui;
+                if (dop != MLIR_INVALID_HANDLE && cast_src(dop, &csrc) &&
+                    sm_get(&idx, csrc, &ui) && def_block[ui] == (int32_t)b &&
+                    home_pk[ui] >= 0 && last_use[ui] == s &&
+                    !(crosses[vi] && home_pk[ui] < A64_NCALLER)) {
+                    int pk = home_pk[ui];
+                    // The source still occupies pk (strict expiry keeps an entry
+                    // whose end == s active); extend it to cover this value.
+                    bool ext = false;
+                    for (size_t a = 0; a < nact; a++)
+                        if (act_pi[a] == (uint8_t)pk) {
+                            act_end[a] = last_use[vi]; ext = true; break;
+                        }
+                    if (ext) {
+                        home_pk[vi] = (int8_t)pk;
+                        sm_put(rm, vals[vi], a64_pool_reg(pk));
+                        if (pk >= A64_NCALLER)
+                            used_mask |= (1u << (pk - A64_NCALLER));
+                        continue;
+                    }
+                }
+            }
             // Values that cross a call may only use callee-saved pool entries.
             uint32_t avail = crosses[vi]
                 ? (freemask & ~((1u << A64_NCALLER) - 1u))
@@ -2311,6 +2394,7 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
             freemask &= ~(1u << pk);
             uint8_t regn = a64_pool_reg(pk);
             sm_put(rm, vals[vi], regn);
+            home_pk[vi] = (int8_t)pk;
             if (pk >= A64_NCALLER) used_mask |= (1u << (pk - A64_NCALLER));
             act_end[nact] = last_use[vi]; act_pi[nact] = (uint8_t)pk; nact++;
         }
