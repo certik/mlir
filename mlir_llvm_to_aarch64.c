@@ -479,6 +479,36 @@ static bool memfuse_match(MLIR_Context *ctx, MLIR_ValueHandle P,
     return false;
 }
 
+// True if `op` materialises the address of the `__wasm_linmem_base` global
+// (the i64 linear-memory base slot written by synth_start). Used to recognise
+// the per-function base load so it can be pinned to the reserved x28 register
+// instead of being reloaded from memory on every linmem access.
+static bool is_linmem_base_addressof(MLIR_Context *ctx, MLIR_OpHandle op) {
+    if (op == MLIR_INVALID_HANDLE) return false;
+    if (!name_eq(MLIR_GetOpName(op), "llvm.mlir.addressof")) return false;
+    MLIR_AttributeHandle ga = MLIR_GetOpAttributeByName(op, "global_name");
+    if (ga == MLIR_INVALID_HANDLE) return false;
+    string g = MLIR_GetAttributeAsString(ctx, ga);
+    if (g.size > 0 && g.str[0] == '@') { g.str++; g.size--; }
+    const char *target = "__wasm_linmem_base";
+    size_t tlen = 18; // strlen("__wasm_linmem_base")
+    return g.size == tlen && memcmp(g.str, target, tlen) == 0;
+}
+
+// True if `op` is `llvm.load` of `addressof @__wasm_linmem_base` (the linmem
+// base load). On success *aof receives the addressof op (which can then also be
+// skipped from emission, being single-use feeding only this load).
+static bool is_linmem_base_load(MLIR_Context *ctx, MLIR_OpHandle op,
+                                MLIR_OpHandle *aof) {
+    if (op == MLIR_INVALID_HANDLE) return false;
+    if (!name_eq(MLIR_GetOpName(op), "llvm.load")) return false;
+    if (MLIR_GetOpNumOperands(op) != 1) return false;
+    MLIR_OpHandle d = MLIR_GetValueDefiningOp(MLIR_GetOpOperand(op, 0));
+    if (!is_linmem_base_addressof(ctx, d)) return false;
+    if (aof) *aof = d;
+    return true;
+}
+
 // FP width of an f32/f64-typed value: 32, 64, or 0 if not a float type.
 static int fp_width(MLIR_Context *ctx, MLIR_ValueHandle v) {
     string s = MLIR_GetTypeString(ctx, MLIR_GetValueType(v));
@@ -2162,18 +2192,25 @@ static MLIR_BlockHandle map_block(MLIR_BlockHandle *src, MLIR_BlockHandle *dst,
     return MLIR_INVALID_HANDLE;
 }
 
-// Callee-saved register pool for the linear-scan allocator: x19..x28.
-#define A64_NSAVED 10
+// Callee-saved register pool for the linear-scan allocator: x19..x27. x28 is
+// RESERVED as the linear-memory base register (set once in synth_start, then
+// preserved for the lifetime of the program — every function treats x28 as
+// callee-saved and never clobbers it because it is outside the pool, so the
+// base value flows through the whole call tree with no per-function reload).
+// Linmem loads/stores read base from x28 directly (see base-pinning in
+// select_func_cfg). Mirrors the deleted WMIR backend, which dedicated x28 to
+// the linmem base.
+#define A64_NSAVED 9
 #define A64_SAVE_BASE 19
 
 // Register-allocation pool: caller-saved x12..x15 (clobbered by `bl`, so usable
 // only by values that don't cross a call, but needing no prologue save/restore)
-// followed by callee-saved x19..x28 (survive calls, but must be saved/restored
+// followed by callee-saved x19..x27 (survive calls, but must be saved/restored
 // when used). Caller-saved come first so call-light blocks prefer them. Pool
 // index pk maps to a physical register via a64_pool_reg() (kept as arithmetic
 // rather than a brace-initialized global array, which the self-hosting tinyC
 // front end does not lower).
-#define A64_NPOOL  14
+#define A64_NPOOL  13
 #define A64_NCALLER 4
 // Number of block-arg home registers reserved from the top of the callee-saved
 // range (pool 13 -> x28, 12 -> x27, ... down). Tuned empirically (frozen bench):
@@ -3354,9 +3391,43 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
         }
     }
 
-    // Linear-scan register allocation over callee-saved x19..x28 (CFG path).
+    // Linear-scan register allocation over callee-saved x19..x27 (CFG path).
     SlotMap rm = {0};
     rm.arena = MLIR_GetArenaAllocator(ctx);
+
+    // Base-register pinning: the wasm->llvm lifter loads the linear-memory base
+    // (`llvm.load` of `addressof @__wasm_linmem_base`) once per function and
+    // every linmem access adds an index to it. synth_start sets x28 = base and,
+    // because x28 is reserved out of the allocation pool (above), no generated
+    // function ever clobbers it — so the base value persists program-wide. Pin
+    // every base load's result to x28 (rm) and drop the load + its addressof
+    // from emission (skip) and from allocation (memspine), eliminating a
+    // per-function base load plus a per-access reload in functions that spill.
+    // Gated on do_fuse so the allocator (memspine) and the lowering skip-check
+    // stay consistent (the skip-check is do_fuse-gated below).
+    if (do_fuse && !getenv("TINYC_NO_BASEPIN")) {
+        for (size_t b = 0; b < n_blocks; b++) {
+            MLIR_BlockHandle sb = MLIR_GetRegionBlock(src_region, b);
+            size_t no = MLIR_GetBlockNumOps(sb);
+            for (size_t i = 0; i < no; i++) {
+                MLIR_OpHandle o = MLIR_GetBlockOp(sb, i);
+                MLIR_OpHandle aof = MLIR_INVALID_HANDLE;
+                if (!is_linmem_base_load(ctx, o, &aof)) continue;
+                MLIR_ValueHandle lr = MLIR_GetOpResult(o, 0);
+                sm_put(&rm, lr, 28);
+                sm_put(&memspine, lr, 1);
+                sm_put(&skip, lr, 1);
+                // Drop the addressof too when it feeds only this load.
+                int32_t c;
+                MLIR_ValueHandle ar = MLIR_GetOpResult(aof, 0);
+                if (sm_get(&uc, ar, &c) && c == 1) {
+                    sm_put(&memspine, ar, 1);
+                    sm_put(&skip, ar, 1);
+                }
+            }
+        }
+    }
+
     uint32_t saved_mask = 0;
     if (!getenv("TINYC_NO_REGALLOC")) {
         // Global (whole-function) linear scan by default; it keeps cross-block
@@ -3367,11 +3438,11 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
         if (!getenv("TINYC_BLOCK_REGALLOC"))
             saved_mask = alloc_regs_global(ctx, src_region, n_blocks, &rm,
                                            do_memfuse ? &memfuse : NULL,
-                                           do_memfuse ? &memspine : NULL);
+                                           &memspine);
         if (saved_mask == A64_GLOBAL_BAIL)
             saved_mask = alloc_regs_cfg(ctx, src_region, n_blocks, &rm,
                                         do_memfuse ? &memfuse : NULL,
-                                        do_memfuse ? &memspine : NULL);
+                                        &memspine);
     }
     uint32_t num_saved = 0;
     for (uint32_t mtmp = saved_mask; mtmp; mtmp &= mtmp - 1) num_saved++;
