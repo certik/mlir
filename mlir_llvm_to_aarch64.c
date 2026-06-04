@@ -437,6 +437,48 @@ static int int_type_bits(MLIR_Context *ctx, MLIR_ValueHandle v) {
     return w;
 }
 
+// Structurally match the linmem host-pointer spine produced by the wasm->llvm
+// lifter's linmem_ptr (no static offset):
+//   z   = llvm.zext  idx32 : i32 to i64        (idx32 = a linear-memory index)
+//   ea  = llvm.add   base, z                    (base = cached linmem base, i64)
+//   p   = llvm.inttoptr ea : i64 to ptr         (== the value `P`)
+// On success fills *base (i64), *idx (i32) and the three spine ops, and the
+// whole spine collapses to a single register-offset load/store
+// `Rt, [base, Widx, UXTW #0]` (the encoder already treats the index register as
+// a 32-bit value zero-extended to 64 bits). The `add` is commutative; the zext
+// may be either operand. (See memfuse handling in alloc_regs_cfg/lower_op.)
+static bool memfuse_match(MLIR_Context *ctx, MLIR_ValueHandle P,
+                          MLIR_ValueHandle *base, MLIR_ValueHandle *idx,
+                          MLIR_OpHandle *zop, MLIR_OpHandle *eop,
+                          MLIR_OpHandle *pop) {
+    MLIR_OpHandle pdef = MLIR_GetValueDefiningOp(P);
+    if (pdef == MLIR_INVALID_HANDLE) return false;
+    if (!name_eq(MLIR_GetOpName(pdef), "llvm.inttoptr")) return false;
+    if (MLIR_GetOpNumOperands(pdef) != 1) return false;
+    MLIR_ValueHandle E = MLIR_GetOpOperand(pdef, 0);
+    MLIR_OpHandle edef = MLIR_GetValueDefiningOp(E);
+    if (edef == MLIR_INVALID_HANDLE) return false;
+    if (!name_eq(MLIR_GetOpName(edef), "llvm.add")) return false;
+    if (MLIR_GetOpNumOperands(edef) != 2) return false;
+    MLIR_ValueHandle a[2] = { MLIR_GetOpOperand(edef, 0),
+                              MLIR_GetOpOperand(edef, 1) };
+    for (int k = 0; k < 2; k++) {
+        MLIR_OpHandle zdef = MLIR_GetValueDefiningOp(a[k]);
+        if (zdef == MLIR_INVALID_HANDLE) continue;
+        if (!name_eq(MLIR_GetOpName(zdef), "llvm.zext")) continue;
+        if (MLIR_GetOpNumOperands(zdef) != 1) continue;
+        MLIR_ValueHandle src = MLIR_GetOpOperand(zdef, 0);
+        if (int_type_bits(ctx, src) != 32) continue;   // UXTW reads 32 bits
+        *base = a[1 - k];
+        *idx  = src;
+        *zop  = zdef;
+        *eop  = edef;
+        *pop  = pdef;
+        return true;
+    }
+    return false;
+}
+
 // FP width of an f32/f64-typed value: 32, 64, or 0 if not a float type.
 static int fp_width(MLIR_Context *ctx, MLIR_ValueHandle v) {
     string s = MLIR_GetTypeString(ctx, MLIR_GetValueType(v));
@@ -797,6 +839,11 @@ typedef struct {
                                    // (folded into a fused branch); NULL = none
     MLIR_OpHandle     fuse_root;   // icmp op lowered "cmp-only" (flags feed the
                                    // terminator's b.cond); INVALID = none
+    SlotMap          *memfuse;     // inttoptr result value (a linmem host ptr
+                                   // = base + zext(i32 idx)) whose zext/add/
+                                   // inttoptr spine is folded into a register-
+                                   // offset load/store [base, Widx, UXTW]; the
+                                   // spine ops are in `skip`. NULL = none.
     bool              ok;
 } LowerCtx;
 
@@ -1609,6 +1656,23 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         unsigned sz = a64_type_size(ctx, MLIR_GetValueType(val));
         if (sz != 1 && sz != 4 && sz != 8)
             LFAIL("llvm->aarch64: unsupported store size %u\n", sz);
+        int32_t mtag;
+        if (L->memfuse && sm_get(L->memfuse, ptr, &mtag)) {
+            // ptr = inttoptr(base + zext(idx_i32)): one register-offset store
+            // str Rt, [base, Widx, UXTW]. The zext/add/inttoptr spine is skipped.
+            MLIR_ValueHandle mbase, midx; MLIR_OpHandle z, e, p;
+            if (!memfuse_match(ctx, ptr, &mbase, &midx, &z, &e, &p))
+                LFAIL("llvm->aarch64: memfuse store spine mismatch\n");
+            uint8_t rv = use_val(L, val, 9);
+            uint8_t rn = use_val(L, mbase, 10);
+            uint8_t rm = use_val(L, midx, 11);
+            if (!L->ok) return;
+            MLIR_OpType t = sz == 1 ? OP_TYPE_AARCH64_STRB_REG
+                          : sz == 4 ? OP_TYPE_AARCH64_STR_W_REG
+                                    : OP_TYPE_AARCH64_STR_X_REG;
+            emit_ldst_x_reg(ctx, blk, t, rv, rn, rm);
+            return;
+        }
         uint8_t rv = use_val(L, val, 9);
         uint8_t rp = use_val(L, ptr, 10);
         if (!L->ok) return;
@@ -1616,10 +1680,27 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
 
     } else if (name_eq(on, "llvm.load")) {
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
+        MLIR_ValueHandle ptr = MLIR_GetOpOperand(op, 0);
         unsigned sz = a64_type_size(ctx, MLIR_GetValueType(res));
         if (sz != 1 && sz != 4 && sz != 8)
             LFAIL("llvm->aarch64: unsupported load size %u\n", sz);
-        uint8_t rp = use_val(L, MLIR_GetOpOperand(op, 0), 10);
+        int32_t mtag;
+        if (L->memfuse && sm_get(L->memfuse, ptr, &mtag)) {
+            MLIR_ValueHandle mbase, midx; MLIR_OpHandle z, e, p;
+            if (!memfuse_match(ctx, ptr, &mbase, &midx, &z, &e, &p))
+                LFAIL("llvm->aarch64: memfuse load spine mismatch\n");
+            uint8_t rn = use_val(L, mbase, 10);
+            uint8_t rm = use_val(L, midx, 11);
+            if (!L->ok) return;
+            uint8_t rd = def_val(L, res, 9);
+            MLIR_OpType t = sz == 1 ? OP_TYPE_AARCH64_LDRB_REG
+                          : sz == 4 ? OP_TYPE_AARCH64_LDR_W_REG
+                                    : OP_TYPE_AARCH64_LDR_X_REG;
+            emit_ldst_x_reg(ctx, blk, t, rd, rn, rm);
+            fin_val(L, res, rd);
+            return;
+        }
+        uint8_t rp = use_val(L, ptr, 10);
         if (!L->ok) return;
         uint8_t rd = def_val(L, res, 9);
         emit_mem_load(ctx, blk, rd, rp, sz);
@@ -2151,7 +2232,8 @@ static bool cast_src(MLIR_OpHandle op, MLIR_ValueHandle *src) {
 // spill-around-call handling. Functions containing ops with nested regions are
 // not allocated (returns 0) — the CFG path is flat in practice.
 static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
-                               size_t n_blocks, SlotMap *rm) {
+                               size_t n_blocks, SlotMap *rm,
+                               SlotMap *memfuse, SlotMap *memspine) {
     Arena *ar = MLIR_GetArenaAllocator(ctx);
     size_t cap = 0;
     size_t maxops = 0;
@@ -2187,6 +2269,12 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
             MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
             int64_t cv; uint8_t c64;
             if (const_int_val(ctx, op, &cv, &c64)) continue; // remat'd, no home
+            // Folded linmem spine ops (zext/add/inttoptr) emit no code and get
+            // no home register; their result is consumed by the fused load/store.
+            if (memspine && MLIR_GetOpNumResults(op) == 1) {
+                int32_t mt;
+                if (sm_get(memspine, MLIR_GetOpResult(op, 0), &mt)) continue;
+            }
             size_t nr = MLIR_GetOpNumResults(op);
             for (size_t r = 0; r < nr; r++) {
                 vals[nv] = MLIR_GetOpResult(op, r);
@@ -2209,6 +2297,13 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
             MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
             bool is_term = (i + 1 == no);
             bool is_call = name_eq(MLIR_GetOpName(op), "llvm.call");
+            // A folded spine op (zext/add/inttoptr) emits no code: its operand
+            // reads must NOT extend liveness. The fused load/store re-registers
+            // base+idx as live uses at its own position (below).
+            if (memspine && MLIR_GetOpNumResults(op) == 1) {
+                int32_t mt;
+                if (sm_get(memspine, MLIR_GetOpResult(op, 0), &mt)) continue;
+            }
             size_t nop = MLIR_GetOpNumOperands(op);
             for (size_t k = 0; k < nop; k++) {
                 int32_t vi;
@@ -2230,6 +2325,35 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
                     if (!sm_get(&idx, MLIR_GetOpSuccessorOperand(op, s, k), &vi))
                         continue;
                     usedv[vi] = 1; disq[vi] = 1;
+                }
+            }
+            // Fused linmem access: the rewritten load/store reads `base` and
+            // `idx` directly (not the skipped inttoptr spine). Register those as
+            // live uses at this position so the allocator keeps them in regs /
+            // models their lifetimes correctly (base is cross-block -> spilled,
+            // idx is block-local -> stays live until here, never aliased).
+            if (memfuse) {
+                string opn = MLIR_GetOpName(op);
+                MLIR_ValueHandle P = MLIR_INVALID_HANDLE;
+                if (name_eq(opn, "llvm.load") && nop >= 1)
+                    P = MLIR_GetOpOperand(op, 0);
+                else if (name_eq(opn, "llvm.store") && nop >= 2)
+                    P = MLIR_GetOpOperand(op, 1);
+                int32_t mt;
+                if (P != MLIR_INVALID_HANDLE && sm_get(memfuse, P, &mt)) {
+                    MLIR_ValueHandle mb, mi; MLIR_OpHandle z, e, p;
+                    if (memfuse_match(ctx, P, &mb, &mi, &z, &e, &p)) {
+                        MLIR_ValueHandle uu[2] = { mb, mi };
+                        for (int u = 0; u < 2; u++) {
+                            int32_t vi;
+                            if (!sm_get(&idx, uu[u], &vi)) continue;
+                            usedv[vi] = 1;
+                            if ((int32_t)b != def_block[vi] || is_call)
+                                disq[vi] = 1;
+                            else if ((int32_t)i > last_use[vi])
+                                last_use[vi] = (int32_t)i;
+                        }
+                    }
                 }
             }
         }
@@ -2706,12 +2830,83 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
                      "alloca\n", (int)sym.size, sym.str);
     uint32_t base_bytes = slot_bytes + alloca_bytes;
 
+    // Branch-condition fusion + linmem addressing-mode fusion both need a
+    // function-wide use-count map (operands plus successor block-arg operands).
+    // Build it BEFORE register allocation so the allocator can model the
+    // post-fusion liveness of memfuse'd loads/stores.
+    bool do_fuse = !getenv("TINYC_NO_FUSE");
+    bool do_memfuse = do_fuse && !getenv("TINYC_NO_MEMFUSE");
+    SlotMap uc = {0};   uc.arena = MLIR_GetArenaAllocator(ctx);
+    SlotMap skip = {0}; skip.arena = MLIR_GetArenaAllocator(ctx);
+    if (do_fuse) {
+        for (size_t b = 0; b < n_blocks; b++) {
+            MLIR_BlockHandle sb = MLIR_GetRegionBlock(src_region, b);
+            size_t no = MLIR_GetBlockNumOps(sb);
+            for (size_t i = 0; i < no; i++) {
+                MLIR_OpHandle o = MLIR_GetBlockOp(sb, i);
+                size_t non = MLIR_GetOpNumOperands(o);
+                for (size_t k = 0; k < non; k++)
+                    uc_inc(&uc, MLIR_GetOpOperand(o, k));
+                size_t nsucc = MLIR_GetOpNumSuccessors(o);
+                for (size_t s = 0; s < nsucc; s++) {
+                    size_t nso = MLIR_GetOpNumSuccessorOperands(o, s);
+                    for (size_t k = 0; k < nso; k++)
+                        uc_inc(&uc, MLIR_GetOpSuccessorOperand(o, s, k));
+                }
+            }
+        }
+    }
+
+    // memfuse pre-pass: find linmem loads/stores whose host pointer is the
+    // single-use inttoptr(base + zext(i32 idx)) spine. Record the inttoptr
+    // result in `memfuse`, the three spine results in `memspine` (no home, no
+    // emitted code), and add the spine results to the lowering `skip` set.
+    SlotMap memfuse = {0};  memfuse.arena = MLIR_GetArenaAllocator(ctx);
+    SlotMap memspine = {0}; memspine.arena = MLIR_GetArenaAllocator(ctx);
+    if (do_memfuse) {
+        for (size_t b = 0; b < n_blocks; b++) {
+            MLIR_BlockHandle sb = MLIR_GetRegionBlock(src_region, b);
+            size_t no = MLIR_GetBlockNumOps(sb);
+            for (size_t i = 0; i < no; i++) {
+                MLIR_OpHandle o = MLIR_GetBlockOp(sb, i);
+                string opn = MLIR_GetOpName(o);
+                MLIR_ValueHandle P = MLIR_INVALID_HANDLE; unsigned vsz = 0;
+                if (name_eq(opn, "llvm.load") && MLIR_GetOpNumOperands(o) >= 1) {
+                    P = MLIR_GetOpOperand(o, 0);
+                    vsz = a64_type_size(ctx, MLIR_GetValueType(MLIR_GetOpResult(o, 0)));
+                } else if (name_eq(opn, "llvm.store") && MLIR_GetOpNumOperands(o) >= 2) {
+                    P = MLIR_GetOpOperand(o, 1);
+                    vsz = a64_type_size(ctx, MLIR_GetValueType(MLIR_GetOpOperand(o, 0)));
+                }
+                if (P == MLIR_INVALID_HANDLE) continue;
+                if (vsz != 1 && vsz != 4 && vsz != 8) continue; // no LDRH_REG
+                MLIR_ValueHandle mb, mi; MLIR_OpHandle z, e, p;
+                if (!memfuse_match(ctx, P, &mb, &mi, &z, &e, &p)) continue;
+                // Only fold when the spine is single-use (no other reader of the
+                // inttoptr / add / zext results); else the spine ops still emit.
+                int32_t c;
+                if (!sm_get(&uc, P, &c) || c != 1) continue;
+                if (!sm_get(&uc, MLIR_GetOpResult(e, 0), &c) || c != 1) continue;
+                if (!sm_get(&uc, MLIR_GetOpResult(z, 0), &c) || c != 1) continue;
+                sm_put(&memfuse, P, 1);
+                sm_put(&memspine, P, 1);
+                sm_put(&memspine, MLIR_GetOpResult(e, 0), 1);
+                sm_put(&memspine, MLIR_GetOpResult(z, 0), 1);
+                sm_put(&skip, P, 1);
+                sm_put(&skip, MLIR_GetOpResult(e, 0), 1);
+                sm_put(&skip, MLIR_GetOpResult(z, 0), 1);
+            }
+        }
+    }
+
     // Linear-scan register allocation over callee-saved x19..x28 (CFG path).
     SlotMap rm = {0};
     rm.arena = MLIR_GetArenaAllocator(ctx);
     uint32_t saved_mask = 0;
     if (!getenv("TINYC_NO_REGALLOC")) {
-        saved_mask = alloc_regs_cfg(ctx, src_region, n_blocks, &rm);
+        saved_mask = alloc_regs_cfg(ctx, src_region, n_blocks, &rm,
+                                    do_memfuse ? &memfuse : NULL,
+                                    do_memfuse ? &memspine : NULL);
     }
     uint32_t num_saved = 0;
     for (uint32_t mtmp = saved_mask; mtmp; mtmp &= mtmp - 1) num_saved++;
@@ -2748,33 +2943,10 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
     for (size_t b = 0; b < n_blocks; b++)
         build_const_map(ctx, &cm, MLIR_GetRegionBlock(src_region, b));
 
-    // Branch-condition fusion: build a function-wide use-count map (operands
-    // plus successor block-arg operands) and a skip set of folded chain ops.
-    bool do_fuse = !getenv("TINYC_NO_FUSE");
-    SlotMap uc = {0};   uc.arena = MLIR_GetArenaAllocator(ctx);
-    SlotMap skip = {0}; skip.arena = MLIR_GetArenaAllocator(ctx);
-    if (do_fuse) {
-        for (size_t b = 0; b < n_blocks; b++) {
-            MLIR_BlockHandle sb = src_blks[b];
-            size_t no = MLIR_GetBlockNumOps(sb);
-            for (size_t i = 0; i < no; i++) {
-                MLIR_OpHandle o = MLIR_GetBlockOp(sb, i);
-                size_t non = MLIR_GetOpNumOperands(o);
-                for (size_t k = 0; k < non; k++)
-                    uc_inc(&uc, MLIR_GetOpOperand(o, k));
-                size_t nsucc = MLIR_GetOpNumSuccessors(o);
-                for (size_t s = 0; s < nsucc; s++) {
-                    size_t nso = MLIR_GetOpNumSuccessorOperands(o, s);
-                    for (size_t k = 0; k < nso; k++)
-                        uc_inc(&uc, MLIR_GetOpSuccessorOperand(o, s, k));
-                }
-            }
-        }
-    }
-
     LowerCtx L = { ctx, &sm, out_reg, out_blks[0], sym, frame_size,
                    &am, slot_bytes, gm, nargs, &rm, &cm,
-                   do_fuse ? &skip : NULL, MLIR_INVALID_HANDLE, true };
+                   do_fuse ? &skip : NULL, MLIR_INVALID_HANDLE,
+                   do_memfuse ? &memfuse : NULL, true };
 
     for (size_t b = 0; b < n_blocks; b++) {
         L.cur = out_blks[b];
@@ -2974,7 +3146,7 @@ static MLIR_OpHandle select_func(MLIR_Context *ctx, MLIR_OpHandle fn,
 
     LowerCtx L = { ctx, &sm, out_reg, out_blk, sym, frame_size,
                    &am, slot_bytes, gm, nargs, NULL, &cm,
-                   NULL, MLIR_INVALID_HANDLE, true };
+                   NULL, MLIR_INVALID_HANDLE, NULL, true };
     MLIR_OpHandle term = lower_block_ops(&L, src_blk);
     if (!L.ok) return MLIR_INVALID_HANDLE;
 
