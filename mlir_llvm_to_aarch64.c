@@ -2317,14 +2317,21 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     if (n_blocks == 0) return A64_GLOBAL_BAIL;
 
     // --- 0. Count register-candidate values; bail on nested regions. Entry
-    //        block args (incoming params) are EXCLUDED: the prologue spills
-    //        them to slots and never writes a home register, so they must stay
-    //        slot-resident. Constants and folded spine results get no value
-    //        number (rematerialized / fused). Positions still advance per op. ---
+    //        block args (incoming params) ARE allocated like any other value:
+    //        the prologue moves them from x0..x7 (or the caller's stack) into
+    //        their assigned home register, so a param used throughout the
+    //        function (e.g. a parser/lexer state pointer) stays resident instead
+    //        of being reloaded from its slot at every use. Param homing is in
+    //        the existing pool (x12..x28), none of which alias the incoming
+    //        x0..x7, so the prologue move is a safe sequential copy (no parallel
+    //        move needed). Disable via TINYC_NO_PARAM_HOME for A/B measurement.
+    //        Constants and folded spine results get no value number
+    //        (rematerialized / fused). Positions still advance per op. ---
+    bool home_params = !getenv("TINYC_NO_PARAM_HOME");
     size_t nv_max = 0;
     for (size_t b = 0; b < n_blocks; b++) {
         MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
-        if (b > 0) nv_max += MLIR_GetBlockNumArgs(bk);
+        if (b > 0 || home_params) nv_max += MLIR_GetBlockNumArgs(bk);
         size_t no = MLIR_GetBlockNumOps(bk);
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
@@ -2364,7 +2371,7 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     for (size_t b = 0; b < n_blocks; b++) {
         MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
         block_first[b] = pos;
-        if (b > 0) {
+        if (b > 0 || home_params) {
             size_t na = MLIR_GetBlockNumArgs(bk);
             for (size_t a = 0; a < na; a++) {
                 MLIR_ValueHandle arg = MLIR_GetBlockArg(bk, a);
@@ -3385,15 +3392,34 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
         MLIR_AppendRegionBlock(ctx, out_reg, out_blks[b]);
     }
 
-    // Prologue + incoming-param spill in the entry block.
+    // Prologue + incoming-param placement in the entry block. A param the
+    // allocator homed (present in `rm`) is moved straight into its home
+    // register; otherwise it is spilled to its frame slot (the block-local
+    // fallback never homes params, so it always takes the slot path). Home
+    // registers are x12..x28, none of which alias the incoming x0..x7, so the
+    // reg-param moves are a safe sequential copy. emit_callee_saves ran first,
+    // so a param homed in a callee-saved register overwrites an already-saved
+    // value.
     emit_prologue(ctx, out_blks[0], frame_size);
     emit_callee_saves(ctx, out_blks[0], saved_mask, save_base, false);
-    for (size_t i = 0; i < nargs && i < 8; i++)
-        store_value(ctx, out_blks[0], &sm, MLIR_GetBlockArg(entry_src, i),
-                    (uint8_t)i);
+    for (size_t i = 0; i < nargs && i < 8; i++) {
+        MLIR_ValueHandle pv = MLIR_GetBlockArg(entry_src, i);
+        int32_t hr;
+        if (sm_get(&rm, pv, &hr))
+            emit_mov_reg(ctx, out_blks[0], (uint8_t)hr, (uint8_t)i);
+        else
+            store_value(ctx, out_blks[0], &sm, pv, (uint8_t)i);
+    }
     for (size_t i = 8; i < nargs; i++) {
-        emit_ldr_x_off(ctx, out_blks[0], 9, 29, (uint32_t)(16u + (i - 8) * 8u));
-        store_value(ctx, out_blks[0], &sm, MLIR_GetBlockArg(entry_src, i), 9);
+        MLIR_ValueHandle pv = MLIR_GetBlockArg(entry_src, i);
+        int32_t hr;
+        if (sm_get(&rm, pv, &hr)) {
+            emit_ldr_x_off(ctx, out_blks[0], (uint8_t)hr, 29,
+                           (uint32_t)(16u + (i - 8) * 8u));
+        } else {
+            emit_ldr_x_off(ctx, out_blks[0], 9, 29, (uint32_t)(16u + (i - 8) * 8u));
+            store_value(ctx, out_blks[0], &sm, pv, 9);
+        }
     }
 
     ConstMap cm = {0};
