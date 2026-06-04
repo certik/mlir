@@ -200,6 +200,19 @@ static void emit_3reg(MLIR_Context *ctx, MLIR_BlockHandle blk, MLIR_OpType t,
     a[3] = attr_b(ctx, "sf", sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, t, a, 4));
 }
+// add rd, rn, rm, LSL #lsl  (the encoder reads the optional "lsl" attribute,
+// defaulting to 0 for every other ADD_REG emission). Used to fold a power-of-2
+// gep stride into a single shifted-add instead of a mov+mul+add sequence.
+static void emit_add_reg_lsl(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                             uint8_t rd, uint8_t rn, uint8_t rm, uint8_t lsl) {
+    MLIR_AttributeHandle a[5];
+    a[0] = attr_i32(ctx, "rd", rd);
+    a[1] = attr_i32(ctx, "rn", rn);
+    a[2] = attr_i32(ctx, "rm", rm);
+    a[3] = attr_b(ctx, "sf", true);
+    a[4] = attr_i32(ctx, "lsl", lsl);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_ADD_REG, a, 5));
+}
 static void emit_msub(MLIR_Context *ctx, MLIR_BlockHandle blk,
                       uint8_t rd, uint8_t rn, uint8_t rm, uint8_t ra, bool sf) {
     MLIR_AttributeHandle a[5];
@@ -280,6 +293,20 @@ static void emit_sub_imm(MLIR_Context *ctx, MLIR_BlockHandle blk,
     a[2] = attr_i32(ctx, "imm12", imm12);
     a[3] = attr_b(ctx, "sf", sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_SUB_IMM, a, 4));
+}
+// Add a signed constant byte offset to the running gep address in x9, using a
+// single add/sub immediate when it fits 12 bits, else materialising it.
+static void emit_gep_const_off(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                               int64_t off) {
+    if (off == 0) return;
+    if (off > 0 && off <= 0xFFF) {
+        emit_add_imm(ctx, blk, 9, 9, (uint16_t)off, true);
+    } else if (off < 0 && -off <= 0xFFF) {
+        emit_sub_imm(ctx, blk, 9, 9, (uint16_t)(-off), true);
+    } else {
+        emit_load_imm(ctx, blk, 10, (uint64_t)off, true);
+        emit_3reg(ctx, blk, OP_TYPE_AARCH64_ADD_REG, 9, 9, 10, true);
+    }
 }
 static bool emit_mem_load(MLIR_Context *ctx, MLIR_BlockHandle blk,
                           uint8_t rt, uint8_t base, unsigned sz) {
@@ -1465,8 +1492,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
                     LFAIL("llvm->aarch64: dynamic struct index in gep\n");
                 unsigned foff = a64_struct_field_offset(ctx, cur_ty, (size_t)cidx[i]);
                 cur_ty = MLIR_GetTypeLLVMStructField(cur_ty, (size_t)cidx[i]);
-                if (foff) { emit_load_imm(ctx, blk, 10, (uint64_t)foff, true);
-                            emit_3reg(ctx, blk, OP_TYPE_AARCH64_ADD_REG, 9, 9, 10, true); }
+                emit_gep_const_off(ctx, blk, (int64_t)foff);
                 continue;
             } else if (MLIR_IsTypeLLVMArray(cur_ty)) {
                 MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(cur_ty);
@@ -1481,12 +1507,18 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
                     LFAIL("llvm->aarch64: gep dynamic index operand missing\n");
                 uint8_t ri = use_val(L, MLIR_GetOpOperand(op, op_idx++), 10);
                 if (!L->ok) return;
-                emit_load_imm(ctx, blk, 11, (uint64_t)stride, true);
-                emit_3reg(ctx, blk, OP_TYPE_AARCH64_MUL, 10, ri, 11, true);
-                emit_3reg(ctx, blk, OP_TYPE_AARCH64_ADD_REG, 9, 9, 10, true);
+                // Power-of-2 stride folds into a single shifted-add; otherwise
+                // materialise the stride and multiply.
+                if (stride != 0 && (stride & (stride - 1)) == 0) {
+                    unsigned sh = 0; while ((1u << sh) != stride) sh++;
+                    emit_add_reg_lsl(ctx, blk, 9, 9, ri, (uint8_t)sh);
+                } else {
+                    emit_load_imm(ctx, blk, 11, (uint64_t)stride, true);
+                    emit_3reg(ctx, blk, OP_TYPE_AARCH64_MUL, 10, ri, 11, true);
+                    emit_3reg(ctx, blk, OP_TYPE_AARCH64_ADD_REG, 9, 9, 10, true);
+                }
             } else if ((cst = cidx[i]) != 0) {
-                emit_load_imm(ctx, blk, 10, (uint64_t)(cst * (int64_t)stride), true);
-                emit_3reg(ctx, blk, OP_TYPE_AARCH64_ADD_REG, 9, 9, 10, true);
+                emit_gep_const_off(ctx, blk, cst * (int64_t)stride);
             }
         }
         fin_val(L, res, 9);

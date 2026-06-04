@@ -856,8 +856,10 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
                 uint8_t rd = (uint8_t)attr_i(op, "rd");
                 uint8_t rn = (uint8_t)attr_i(op, "rn");
                 uint8_t rm = (uint8_t)attr_i(op, "rm");
+                uint8_t lsl = (uint8_t)attr_i(op, "lsl");
                 bool    sf = attr_b(op, "sf");
-                emit_word(&out->code, arm64_add_reg(rd, rn, rm, sf));
+                emit_word(&out->code,
+                          arm64_add_reg(rd, rn, rm, sf) | ((uint32_t)(lsl & 0x3f) << 10));
                 break;
             }
             case OP_TYPE_AARCH64_SUB_REG: {
