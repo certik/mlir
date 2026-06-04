@@ -1965,9 +1965,11 @@ static MLIR_BlockHandle map_block(MLIR_BlockHandle *src, MLIR_BlockHandle *dst,
 #define A64_NPOOL  14
 #define A64_NCALLER 4
 // Number of block-arg home registers reserved from the top of the callee-saved
-// range (pool 13 -> x28, pool 12 -> x27). Kept at 2 so the only possible edge
-// parallel-copy cycle is a 2-cycle (one scratch-x9 break suffices).
-#define A64_NHOME  2
+// range (pool 13 -> x28, 12 -> x27, ... down). Tuned empirically (frozen bench):
+// 6 homes the hottest loop-carried args while still leaving 8 registers in the
+// block-local pool. The edge parallel-move resolver (emit_edge_copies) handles
+// arbitrary cycles, so any count is correct.
+#define A64_NHOME  6
 static inline uint8_t a64_pool_reg(int pk) {
     return (uint8_t)(pk < A64_NCALLER ? 12 + pk
                                       : A64_SAVE_BASE + (pk - A64_NCALLER));
