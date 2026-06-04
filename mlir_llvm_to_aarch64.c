@@ -806,6 +806,30 @@ static void emit_mov_reg(MLIR_Context *ctx, MLIR_BlockHandle blk,
     if (rd == rn) return;
     emit_3reg(ctx, blk, OP_TYPE_AARCH64_ORR_REG, rd, 31, rn, true);
 }
+// Single-instruction width extensions (replace movz+and / movz+lsl+asr triples).
+// UXTW/SXTW are 2-register (rd,rn); SXTB/SXTH take sf to pick Wd/Xd.
+static void emit_uxtw(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                      uint8_t rd, uint8_t rn) {
+    MLIR_AttributeHandle a[2] = { attr_i32(ctx, "rd", rd), attr_i32(ctx, "rn", rn) };
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_UXTW, a, 2));
+}
+static void emit_sxtw(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                      uint8_t rd, uint8_t rn) {
+    MLIR_AttributeHandle a[2] = { attr_i32(ctx, "rd", rd), attr_i32(ctx, "rn", rn) };
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_SXTW, a, 2));
+}
+static void emit_sxtb(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                      uint8_t rd, uint8_t rn, bool sf) {
+    MLIR_AttributeHandle a[3] = { attr_i32(ctx, "rd", rd), attr_i32(ctx, "rn", rn),
+                                  attr_b(ctx, "sf", sf) };
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_SXTB, a, 3));
+}
+static void emit_sxth(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                      uint8_t rd, uint8_t rn, bool sf) {
+    MLIR_AttributeHandle a[3] = { attr_i32(ctx, "rd", rd), attr_i32(ctx, "rn", rn),
+                                  attr_b(ctx, "sf", sf) };
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_SXTH, a, 3));
+}
 
 // Allocation-aware operand read: returns the register holding `v`. If `v` has a
 // home register, it is returned with no code emitted; otherwise `v` is loaded
@@ -1584,7 +1608,9 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         if (!L->ok) return;
         int w = int_type_bits(ctx, res);   // 0 for ptr (64-bit, no mask)
         uint8_t rd = def_val(L, res, 9);
-        if (w > 0 && w < 64) {
+        if (w == 32) {
+            emit_uxtw(ctx, blk, rd, r0);
+        } else if (w > 0 && w < 64) {
             emit_load_imm(ctx, blk, 10, (1ull << w) - 1, true);
             emit_3reg(ctx, blk, OP_TYPE_AARCH64_AND_REG, rd, r0, 10, true);
         } else {
@@ -1611,7 +1637,9 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         uint8_t r0 = use_val(L, MLIR_GetOpOperand(op, 0), 9);
         if (!L->ok) return;
         uint8_t rd = def_val(L, res, 9);
-        if (w > 0 && w < 64) {
+        if (w == 32) {
+            emit_uxtw(ctx, blk, rd, r0);        // mov wd,wn -> hardware zero-ext
+        } else if (w > 0 && w < 64) {
             emit_load_imm(ctx, blk, 10, (w >= 64) ? ~0ull : ((1ull << w) - 1), true);
             emit_3reg(ctx, blk, OP_TYPE_AARCH64_AND_REG, rd, r0, 10, true);
         } else {
@@ -1627,7 +1655,13 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         uint8_t r0 = use_val(L, MLIR_GetOpOperand(op, 0), 9);
         if (!L->ok) return;
         uint8_t rd = def_val(L, res, 9);
-        if (w > 0 && w < 64) {
+        if (w == 8) {
+            emit_sxtb(ctx, blk, rd, r0, true);
+        } else if (w == 16) {
+            emit_sxth(ctx, blk, rd, r0, true);
+        } else if (w == 32) {
+            emit_sxtw(ctx, blk, rd, r0);
+        } else if (w > 0 && w < 64) {
             emit_load_imm(ctx, blk, 10, (uint64_t)(64 - w), true);
             emit_3reg(ctx, blk, OP_TYPE_AARCH64_LSL_REG, rd, r0, 10, true);
             emit_3reg(ctx, blk, OP_TYPE_AARCH64_ASR_REG, rd, rd, 10, true);
