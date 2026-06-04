@@ -2006,6 +2006,40 @@ static void assign_slots_block(MLIR_Context *ctx, SlotMap *sm,
     }
 }
 
+// Post-pass for the global allocator path (alloc_regs_global already filled
+// `sm` with reused slots for spilled values and `rm` with register homes). Walk
+// every value and give a UNIQUE slot ONLY to those the allocator did not place:
+//   * already in `sm` (spilled, reused slot) or in `rm` (register-homed): skip;
+//   * integer constants: rematerialized, no slot;
+//   * anything else: a fresh unique slot. This covers (a) entry params when
+//     TINYC_NO_PARAM_HOME disables param homing (the allocator never numbers
+//     them) and (b) memfuse-spine / base-pin values in the `skip` set, which
+//     emit no code but, per b7ba0fb, must occupy isolated storage that never
+//     ALIASES a live spilled slot (sharing a single scratch slot among them
+//     re-triggers a latent miscompile -> infinite recursion in self-host).
+static void assign_post_slots(MLIR_Context *ctx, SlotMap *sm, SlotMap *rm,
+                              MLIR_BlockHandle block, int32_t *nslots) {
+    int32_t dummy;
+    size_t na = MLIR_GetBlockNumArgs(block);
+    for (size_t i = 0; i < na; i++) {
+        MLIR_ValueHandle a = MLIR_GetBlockArg(block, i);
+        if (sm_get(sm, a, &dummy) || (rm && sm_get(rm, a, &dummy))) continue;
+        sm_put(sm, a, (*nslots)++);
+    }
+    size_t no = MLIR_GetBlockNumOps(block);
+    for (size_t i = 0; i < no; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(block, i);
+        int64_t cv; uint8_t c64;
+        if (const_int_val(ctx, op, &cv, &c64)) continue;
+        size_t nr = MLIR_GetOpNumResults(op);
+        for (size_t r = 0; r < nr; r++) {
+            MLIR_ValueHandle rv = MLIR_GetOpResult(op, r);
+            if (sm_get(sm, rv, &dummy) || (rm && sm_get(rm, rv, &dummy))) continue;
+            sm_put(sm, rv, (*nslots)++);
+        }
+    }
+}
+
 // Recursive prepass: assign each llvm.alloca result a byte offset within the
 // alloca region (placed above the slot region). Returns total alloca bytes.
 static bool collect_allocas(MLIR_Context *ctx, SlotMap *am,
@@ -2381,7 +2415,9 @@ static bool a64_memfuse_uses(MLIR_Context *ctx, MLIR_OpHandle op, SlotMap *memfu
 
 static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                                   size_t n_blocks, SlotMap *rm,
-                                  SlotMap *memfuse, SlotMap *memspine) {
+                                  SlotMap *memfuse, SlotMap *memspine,
+                                  SlotMap *sm, int32_t *out_nslots) {
+    *out_nslots = 0;
     if (n_blocks == 0) return A64_GLOBAL_BAIL;
 
     // --- 0. Count register-candidate values; bail on nested regions. Entry
@@ -2409,12 +2445,15 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     }
     if (nv_max == 0) return 0;
     // Memory gate: bound the liveness bitsets (n_blocks * bw words, four of
-    // them) so the self-host's giant function falls back to block-local rather
-    // than exhausting the wasm32 heap. Tuned conservatively; most functions are
-    // far below this and get global allocation.
+    // them) so a truly pathological function falls back to block-local rather
+    // than exhausting the wasm32 heap during self-host (stage1 runs this backend
+    // under wasmtime). The deleted WMIR allocator ran the SAME O(n_blocks*bw)
+    // liveness with NO gate and self-hosted, so these thresholds are set high
+    // enough that every real tinyC function (largest ~2628 blocks / ~60K values
+    // / ~60MB peak, freed per function) gets global allocation + slot reuse.
     {
         size_t bwg = a64_bs_words(nv_max);
-        if (nv_max > 20000u || (uint64_t)n_blocks * (uint64_t)bwg > 262144ull)
+        if (nv_max > 100000u || (uint64_t)n_blocks * (uint64_t)bwg > 4000000ull)
             return A64_GLOBAL_BAIL;
     }
 
@@ -2725,6 +2764,47 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         }
         // else: current value stays in its slot (home_pk already -1).
     }
+
+    // --- 4b. Assign frame slots to spilled values with WMIR-style reuse.
+    //         Walking values in first_pos order (the existing `order[]`), a slot
+    //         whose occupant's interval ended strictly before the current
+    //         value's first_pos is reclaimed onto a free list and handed to the
+    //         current value. This is the SAME non-overlap invariant the register
+    //         active-list retires on (last_use < first_pos), reusing the very
+    //         intervals the allocator already trusts, so sharing is sound. Each
+    //         value is processed at ITS OWN first_pos (never at an eviction
+    //         point), so reused slots are always free as of that position and no
+    //         WMIR-style "fresh, no-reuse" special case is needed. The frame is
+    //         then sized to PEAK simultaneous spills, not TOTAL spills, keeping
+    //         most offsets inside aarch64's scaled imm12 load/store range. ---
+    int32_t next_slot = 0;
+    {
+        bool no_reuse = getenv("TINYC_NO_SLOT_REUSE") != NULL;
+        uint32_t *sl_slot = (uint32_t *)malloc((nv ? nv : 1) * sizeof(uint32_t));
+        uint32_t *sl_end  = (uint32_t *)malloc((nv ? nv : 1) * sizeof(uint32_t));
+        uint32_t *freelist= (uint32_t *)malloc((nv ? nv : 1) * sizeof(uint32_t));
+        size_t n_sact = 0, n_free = 0;
+        for (uint32_t k = 0; k < nv; k++) {
+            uint32_t vi = order[k];
+            for (size_t s = 0; s < n_sact; ) {
+                if (sl_end[s] < first_pos[vi]) {
+                    freelist[n_free++] = sl_slot[s];
+                    sl_slot[s] = sl_slot[n_sact - 1];
+                    sl_end[s]  = sl_end[n_sact - 1];
+                    n_sact--;
+                } else s++;
+            }
+            if (home_pk[vi] >= 0) continue;           // register-homed: no slot
+            uint32_t end = last_use[vi] < first_pos[vi] ? first_pos[vi]
+                                                        : last_use[vi];
+            uint32_t slot = (!no_reuse && n_free > 0) ? freelist[--n_free]
+                                                      : (uint32_t)next_slot++;
+            sl_slot[n_sact] = slot; sl_end[n_sact] = end; n_sact++;
+            sm_put(sm, handle[vi], (int32_t)slot);
+        }
+        free(sl_slot); free(sl_end); free(freelist);
+    }
+    *out_nslots = next_slot;
 
     // --- 5. Emit results: write rm for register homes; report used_mask. ---
     uint32_t used_mask = 0;
@@ -3339,14 +3419,7 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
 
     SlotMap sm = {0};
     sm.arena = MLIR_GetArenaAllocator(ctx);
-    int32_t nslots = 0;
-    for (size_t b = 0; b < n_blocks; b++)
-        assign_slots_block(ctx, &sm, MLIR_GetRegionBlock(src_region, b), &nslots);
-    if (nslots > (1 << 20))
-        A64_FAIL("llvm->aarch64: function '%.*s' needs %d slots "
-                 "(frame too large for the trivial allocator)\n",
-                 (int)sym.size, sym.str, nslots);
-    uint32_t slot_bytes = (uint32_t)nslots * 8u;
+    int32_t nslots = 0;       // frame slots assigned AFTER register allocation
 
     SlotMap am = {0};
     am.arena = MLIR_GetArenaAllocator(ctx);
@@ -3356,7 +3429,6 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
                              &alloca_bytes))
             A64_FAIL("llvm->aarch64: function '%.*s' has an unsupported "
                      "alloca\n", (int)sym.size, sym.str);
-    uint32_t base_bytes = slot_bytes + alloca_bytes;
 
     // Branch-condition fusion + linmem addressing-mode fusion both need a
     // function-wide use-count map (operands plus successor block-arg operands).
@@ -3465,6 +3537,7 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
     }
 
     uint32_t saved_mask = 0;
+    bool global_ok = false;
     if (!getenv("TINYC_NO_REGALLOC")) {
         // Global (whole-function) linear scan by default; it keeps cross-block
         // and loop-carried values resident across their live range. Very large
@@ -3474,12 +3547,40 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
         if (!getenv("TINYC_BLOCK_REGALLOC"))
             saved_mask = alloc_regs_global(ctx, src_region, n_blocks, &rm,
                                            do_memfuse ? &memfuse : NULL,
-                                           &memspine);
-        if (saved_mask == A64_GLOBAL_BAIL)
+                                           &memspine, &sm, &nslots);
+        global_ok = (saved_mask != A64_GLOBAL_BAIL);
+        if (!global_ok)
             saved_mask = alloc_regs_cfg(ctx, src_region, n_blocks, &rm,
                                         do_memfuse ? &memfuse : NULL,
                                         &memspine);
     }
+
+    // Assign frame slots. On the global path alloc_regs_global already filled
+    // `sm` with REUSED slots for spilled values and set `nslots`; the post-pass
+    // only places allocator-missed values (params under no-homing, and the
+    // emit-no-code skip/memspine values) into isolated unique slots. On every
+    // other path (block-local, global bail, or regalloc disabled) fall back to
+    // the simple unique-slot-per-value assignment (no reuse) which the
+    // block-local path and giant bailed functions still use.
+    if (global_ok) {
+        for (size_t b = 0; b < n_blocks; b++)
+            assign_post_slots(ctx, &sm, &rm,
+                              MLIR_GetRegionBlock(src_region, b), &nslots);
+    } else {
+        for (size_t b = 0; b < n_blocks; b++)
+            assign_slots_block(ctx, &sm, MLIR_GetRegionBlock(src_region, b),
+                               &nslots);
+    }
+    if (getenv("TINYC_SLOT_STATS"))
+        fprintf(stderr, "SLOTSTAT %.*s nslots=%d blocks=%zu global=%d\n",
+                (int)sym.size, sym.str, nslots, n_blocks, global_ok);
+    if (nslots > (1 << 20))
+        A64_FAIL("llvm->aarch64: function '%.*s' needs %d slots "
+                 "(frame too large for the trivial allocator)\n",
+                 (int)sym.size, sym.str, nslots);
+    uint32_t slot_bytes = (uint32_t)nslots * 8u;
+    uint32_t base_bytes = slot_bytes + alloca_bytes;
+
     uint32_t num_saved = 0;
     for (uint32_t mtmp = saved_mask; mtmp; mtmp &= mtmp - 1) num_saved++;
     uint32_t save_base = (base_bytes + 7u) & ~7u;
