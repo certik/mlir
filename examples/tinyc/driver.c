@@ -12,6 +12,7 @@
 
 #include "mlir_api.h"
 #include "mlir_llvm_mem2reg.h"
+#include "mlir_llvm_load_cse.h"
 #include "mlir_llvm_to_wasmssa.h"
 #include "mlir_wasmssa_to_wasmstack.h"
 #include "mlir_wasm_to_wat.h"
@@ -392,6 +393,15 @@ int app_main(void) {
                 // access. Skippable via TINYC_NO_MEM2REG for A/B debugging.
                 if (!getenv("TINYC_NO_MEM2REG"))
                     mlir_llvm_mem2reg(&ctx, llvm_mod);
+                // Load CSE on the lifted llvm CFG: within single-entry
+                // regions, removes redundant llvm.loads of a structurally
+                // identical address (no memory clobber in between) and DCEs the
+                // now-detached inttoptr(add(base,zext(idx))) address chains.
+                // Targets the repeated mem[i] reloads that the short-circuit
+                // `||` comparison chains emit, which dominate the runtime of the
+                // code we generate. Skippable via TINYC_NO_LOAD_CSE for A/B.
+                if (!getenv("TINYC_NO_LOAD_CSE"))
+                    mlir_llvm_load_cse(&ctx, llvm_mod);
                 arena_destroy(arena);
                 arena = late_arena;
                 if (!mlir_llvm_to_macho(&ctx, llvm_mod,
