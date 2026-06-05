@@ -13,6 +13,7 @@
 #include "mlir_api.h"
 #include "mlir_llvm_mem2reg.h"
 #include "mlir_llvm_load_cse.h"
+#include "mlir_llvm_arith_gvn.h"
 #include "mlir_llvm_to_wasmssa.h"
 #include "mlir_wasmssa_to_wasmstack.h"
 #include "mlir_wasm_to_wat.h"
@@ -402,6 +403,12 @@ int app_main(void) {
                 // code we generate. Skippable via TINYC_NO_LOAD_CSE for A/B.
                 if (!getenv("TINYC_NO_LOAD_CSE"))
                     mlir_llvm_load_cse(&ctx, llvm_mod);
+                // Intra-block value numbering of pure integer arithmetic: dedups
+                // the repeated index/address arithmetic (base+index*stride) the
+                // wasm frontend emits, cutting op count and register pressure.
+                // The memfuse address spine is excluded so [x28,Widx,UXTW]
+                // fusion is preserved. Skippable via TINYC_NO_ARITH_GVN.
+                mlir_llvm_arith_gvn(&ctx, llvm_mod);
                 arena_destroy(arena);
                 arena = late_arena;
                 if (!mlir_llvm_to_macho(&ctx, llvm_mod,
