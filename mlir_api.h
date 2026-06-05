@@ -392,6 +392,9 @@ typedef enum {
     OP_TYPE_AARCH64_LSL_REG,  // lslv Wd|Xd, Wn|Xn, Wm|Xm
     OP_TYPE_AARCH64_LSR_REG,  // lsrv Wd|Xd, Wn|Xn, Wm|Xm
     OP_TYPE_AARCH64_ASR_REG,  // asrv Wd|Xd, Wn|Xn, Wm|Xm
+    OP_TYPE_AARCH64_LSL_IMM,  // lsl Wd|Xd, Wn|Xn, #shift  (UBFM alias)
+    OP_TYPE_AARCH64_LSR_IMM,  // lsr Wd|Xd, Wn|Xn, #shift  (UBFM alias)
+    OP_TYPE_AARCH64_ASR_IMM,  // asr Wd|Xd, Wn|Xn, #shift  (SBFM alias)
     OP_TYPE_AARCH64_SXTW,     // sxtw Xd, Wn  (alias for SBFM)
     OP_TYPE_AARCH64_SXTB,     // sxtb Wd|Xd, Wn  (sign-extend low byte)
     OP_TYPE_AARCH64_SXTH,     // sxth Wd|Xd, Wn  (sign-extend low half)

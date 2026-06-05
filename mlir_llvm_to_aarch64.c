@@ -200,6 +200,17 @@ static void emit_3reg(MLIR_Context *ctx, MLIR_BlockHandle blk, MLIR_OpType t,
     a[3] = attr_b(ctx, "sf", sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, t, a, 4));
 }
+// Immediate shift (lsl/lsr/asr #shift), used for mul-by-2^k strength reduction
+// and constant-amount shifts.
+static void emit_shift_imm(MLIR_Context *ctx, MLIR_BlockHandle blk, MLIR_OpType t,
+                           uint8_t rd, uint8_t rn, uint8_t shift, bool sf) {
+    MLIR_AttributeHandle a[4];
+    a[0] = attr_i32(ctx, "rd", rd);
+    a[1] = attr_i32(ctx, "rn", rn);
+    a[2] = attr_i32(ctx, "shift", shift);
+    a[3] = attr_b(ctx, "sf", sf);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, t, a, 4));
+}
 // add rd, rn, rm, LSL #lsl  (the encoder reads the optional "lsl" attribute,
 // defaulting to 0 for every other ADD_REG emission). Used to fold a power-of-2
 // gep stride into a single shifted-add instead of a mov+mul+add sequence.
@@ -988,6 +999,13 @@ static bool operand_const_u12(LowerCtx *L, MLIR_ValueHandle v, uint16_t *imm) {
     return true;
 }
 
+// Read the full integer value of a remat-constant operand (any magnitude).
+static bool operand_const_any(LowerCtx *L, MLIR_ValueHandle v,
+                              int64_t *cv, uint8_t *c64) {
+    if (!L->cm) return false;
+    return cm_get(L->cm, v, cv, c64);
+}
+
 static MLIR_BlockHandle new_block(LowerCtx *L) {
     MLIR_BlockHandle b = MLIR_CreateBlock(L->ctx);
     MLIR_AppendRegionBlock(L->ctx, L->out_region, b);
@@ -1416,6 +1434,90 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             if (!L->ok) return;
             uint8_t rd = def_val(L, res, 9);
             emit_3reg(ctx, blk, OP_TYPE_AARCH64_SUB_REG, rd, r0, r1, sf);
+            fin_val(L, res, rd);
+        }
+
+    } else if (name_eq(on, "llvm.mul")) {
+        // Strength-reduce mul by a constant: x*0 -> 0, x*1 -> copy,
+        // x*2^k -> lsl #k. Other constants / non-constant keep register mul.
+        MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
+        bool sf = type_is_gp64(ctx, res);
+        MLIR_ValueHandle a0 = MLIR_GetOpOperand(op, 0);
+        MLIR_ValueHandle a1 = MLIR_GetOpOperand(op, 1);
+        int64_t cv; uint8_t c64;
+        MLIR_ValueHandle rv = MLIR_INVALID_HANDLE;   // non-constant operand
+        bool have_c = false;
+        if (!getenv("TINYC_NO_MUL_STRENGTH")) {
+            if (operand_const_any(L, a1, &cv, &c64))      { rv = a0; have_c = true; }
+            else if (operand_const_any(L, a0, &cv, &c64)) { rv = a1; have_c = true; }
+        }
+        uint64_t uc = have_c ? (sf ? (uint64_t)cv : (uint64_t)(uint32_t)cv) : 0;
+        if (have_c && uc == 0) {
+            uint8_t rd = def_val(L, res, 9);
+            emit_load_imm(ctx, blk, rd, 0, sf);
+            fin_val(L, res, rd);
+        } else if (have_c && uc == 1) {
+            uint8_t r = use_val(L, rv, 9);
+            if (!L->ok) return;
+            uint8_t rd = def_val(L, res, 9);
+            // i32 result must keep the upper 32 bits zero (the W-form mul did);
+            // a 64-bit mov would not, breaking downstream zext elision.
+            if (sf) emit_mov_reg(ctx, blk, rd, r);
+            else    emit_uxtw(ctx, blk, rd, r);
+            fin_val(L, res, rd);
+        } else if (have_c && uc >= 2 && (uc & (uc - 1)) == 0) {
+            uint8_t k = 0; while ((uc >> k) != 1u) k++;
+            uint8_t r = use_val(L, rv, 9);
+            if (!L->ok) return;
+            uint8_t rd = def_val(L, res, 9);
+            emit_shift_imm(ctx, blk, OP_TYPE_AARCH64_LSL_IMM, rd, r, k, sf);
+            fin_val(L, res, rd);
+        } else {
+            uint8_t r0 = use_val(L, a0, 9);
+            uint8_t r1 = use_val(L, a1, 10);
+            if (!L->ok) return;
+            uint8_t rd = def_val(L, res, 9);
+            emit_3reg(ctx, blk, OP_TYPE_AARCH64_MUL, rd, r0, r1, sf);
+            fin_val(L, res, rd);
+        }
+
+    } else if (name_eq(on, "llvm.shl") || name_eq(on, "llvm.lshr") ||
+               name_eq(on, "llvm.ashr")) {
+        // Constant-amount shift -> immediate shift (no scratch mov of the count).
+        MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
+        bool sf = type_is_gp64(ctx, res);
+        MLIR_ValueHandle a0 = MLIR_GetOpOperand(op, 0);
+        MLIR_ValueHandle a1 = MLIR_GetOpOperand(op, 1);
+        uint8_t ds = sf ? 64 : 32;
+        int64_t cv; uint8_t c64;
+        bool have_c = !getenv("TINYC_NO_MUL_STRENGTH") &&
+                      operand_const_any(L, a1, &cv, &c64);
+        uint64_t sh = have_c ? (uint64_t)cv : 0;
+        if (have_c && sh != 0 && sh < ds) {
+            uint8_t r = use_val(L, a0, 9);
+            if (!L->ok) return;
+            uint8_t rd = def_val(L, res, 9);
+            MLIR_OpType it = name_eq(on, "llvm.shl") ? OP_TYPE_AARCH64_LSL_IMM
+                           : name_eq(on, "llvm.lshr") ? OP_TYPE_AARCH64_LSR_IMM
+                                                       : OP_TYPE_AARCH64_ASR_IMM;
+            emit_shift_imm(ctx, blk, it, rd, r, (uint8_t)sh, sf);
+            fin_val(L, res, rd);
+        } else if (have_c && sh == 0) {
+            uint8_t r = use_val(L, a0, 9);
+            if (!L->ok) return;
+            uint8_t rd = def_val(L, res, 9);
+            if (sf) emit_mov_reg(ctx, blk, rd, r);
+            else    emit_uxtw(ctx, blk, rd, r);
+            fin_val(L, res, rd);
+        } else {
+            uint8_t r0 = use_val(L, a0, 9);
+            uint8_t r1 = use_val(L, a1, 10);
+            if (!L->ok) return;
+            uint8_t rd = def_val(L, res, 9);
+            MLIR_OpType rt = name_eq(on, "llvm.shl") ? OP_TYPE_AARCH64_LSL_REG
+                           : name_eq(on, "llvm.lshr") ? OP_TYPE_AARCH64_LSR_REG
+                                                       : OP_TYPE_AARCH64_ASR_REG;
+            emit_3reg(ctx, blk, rt, rd, r0, r1, sf);
             fin_val(L, res, rd);
         }
 
@@ -3259,6 +3361,8 @@ static void peephole_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
         case OP_TYPE_AARCH64_LSL_REG: case OP_TYPE_AARCH64_LSR_REG:
         case OP_TYPE_AARCH64_MUL: case OP_TYPE_AARCH64_MSUB:
         case OP_TYPE_AARCH64_SDIV: case OP_TYPE_AARCH64_UDIV:
+        case OP_TYPE_AARCH64_LSL_IMM: case OP_TYPE_AARCH64_LSR_IMM:
+        case OP_TYPE_AARCH64_ASR_IMM:
         case OP_TYPE_AARCH64_CSEL: case OP_TYPE_AARCH64_CSET:
         case OP_TYPE_AARCH64_MOV_X: case OP_TYPE_AARCH64_MOVZ:
         case OP_TYPE_AARCH64_MOVK: case OP_TYPE_AARCH64_ADRP_DATA:

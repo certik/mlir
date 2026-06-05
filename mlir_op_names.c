@@ -231,6 +231,9 @@ static string op_type_to_string_half2(MLIR_OpType type) {
         case OP_TYPE_AARCH64_LSL_REG:      return str_lit("aarch64.lsl_reg");
         case OP_TYPE_AARCH64_LSR_REG:      return str_lit("aarch64.lsr_reg");
         case OP_TYPE_AARCH64_ASR_REG:      return str_lit("aarch64.asr_reg");
+        case OP_TYPE_AARCH64_LSL_IMM:      return str_lit("aarch64.lsl_imm");
+        case OP_TYPE_AARCH64_LSR_IMM:      return str_lit("aarch64.lsr_imm");
+        case OP_TYPE_AARCH64_ASR_IMM:      return str_lit("aarch64.asr_imm");
         case OP_TYPE_AARCH64_SXTW:         return str_lit("aarch64.sxtw");
         case OP_TYPE_AARCH64_SXTB:         return str_lit("aarch64.sxtb");
         case OP_TYPE_AARCH64_SXTH:         return str_lit("aarch64.sxth");

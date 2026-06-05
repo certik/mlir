@@ -400,6 +400,19 @@ static uint32_t arm64_udiv(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
     return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5)
                 | (uint32_t)(rd & 0x1f);
 }
+// UBFM / SBFM (bitfield moves). LSL/LSR are UBFM aliases, ASR is SBFM.
+//   UBFM W base: 0x53000000, X base (N=1): 0xD3400000
+//   SBFM W base: 0x13000000, X base (N=1): 0x93400000
+static uint32_t arm64_ubfm(uint8_t rd, uint8_t rn, uint8_t immr, uint8_t imms, bool sf) {
+    uint32_t base = sf ? 0xD3400000u : 0x53000000u;
+    return base | ((uint32_t)(immr & 0x3f) << 16) | ((uint32_t)(imms & 0x3f) << 10)
+                | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rd & 0x1f);
+}
+static uint32_t arm64_sbfm(uint8_t rd, uint8_t rn, uint8_t immr, uint8_t imms, bool sf) {
+    uint32_t base = sf ? 0x93400000u : 0x13000000u;
+    return base | ((uint32_t)(immr & 0x3f) << 16) | ((uint32_t)(imms & 0x3f) << 10)
+                | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rd & 0x1f);
+}
 // MSUB Wd, Wn, Wm, Wa  (Wd = Wa - Wn*Wm). Used to compute remainder
 // after a div: rem = a - (a/b)*b = msub(a/b, b, a).
 //   W base: 0x1B008000, X base: 0x9B008000  (Ra at bits[14:10])
@@ -1041,6 +1054,35 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
                 uint8_t rm = (uint8_t)attr_i(op, "rm");
                 bool    sf = attr_b(op, "sf");
                 emit_word(&out->code, arm64_asrv(rd, rn, rm, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_LSL_IMM: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t sh = (uint8_t)attr_i(op, "shift");
+                bool    sf = attr_b(op, "sf");
+                uint8_t ds = sf ? 64 : 32;
+                uint8_t immr = (uint8_t)((ds - sh) & (ds - 1));
+                uint8_t imms = (uint8_t)(ds - 1 - sh);
+                emit_word(&out->code, arm64_ubfm(rd, rn, immr, imms, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_LSR_IMM: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t sh = (uint8_t)attr_i(op, "shift");
+                bool    sf = attr_b(op, "sf");
+                uint8_t ds = sf ? 64 : 32;
+                emit_word(&out->code, arm64_ubfm(rd, rn, sh, (uint8_t)(ds - 1), sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_ASR_IMM: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t sh = (uint8_t)attr_i(op, "shift");
+                bool    sf = attr_b(op, "sf");
+                uint8_t ds = sf ? 64 : 32;
+                emit_word(&out->code, arm64_sbfm(rd, rn, sh, (uint8_t)(ds - 1), sf));
                 break;
             }
             case OP_TYPE_AARCH64_SXTW: {
