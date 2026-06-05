@@ -2585,6 +2585,26 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             return A64_GLOBAL_BAIL;
     }
 
+    // Half-open live intervals. With one integer position per op, an operand's
+    // last read and a result's def land on the SAME position, so the strict
+    // active-list retirement (last_use < first_pos) cannot retire the dying
+    // operand before the consumer is allocated -- they falsely overlap and
+    // demand two registers for what is logically one value (the induction
+    // `%next = %a + 1` / loop-carried case). Numbering operand reads at 2g+1,
+    // result defs at 2g+2, and block args at 2g makes a value dying at op g
+    // retire (2g+1 < 2g+2) before the same-op result, so the consumer reuses
+    // its register; and a block arg (2g) sits strictly before its block's first
+    // op read (2g+1) so a block arg consumed by the first op is no longer
+    // falsely flagged dead-on-def. Safe because every aarch64 op this backend
+    // emits reads all source registers before writing its result register.
+    // TINYC_NO_HALFOPEN restores integer positions.
+    bool halfopen = (getenv("TINYC_NO_HALFOPEN") == NULL);
+    #define A64_USEP(g)  (halfopen ? (2u * (uint32_t)(g) + 1u) : (uint32_t)(g))
+    #define A64_DEFP(g)  (halfopen ? (2u * (uint32_t)(g) + 2u) : (uint32_t)(g))
+    #define A64_BARGP(g) (halfopen ? (2u * (uint32_t)(g))      : (uint32_t)(g))
+    #define A64_COVL(g)  (halfopen ? (2u * (uint32_t)(g) + 1u) : (uint32_t)(g))
+    #define A64_COVF(g)  (halfopen ? (2u * (uint32_t)(g))      : (uint32_t)(g))
+
     // --- 1. Linearise + number values. One position per op (incl. const/spine
     //        ops, so is_call[] and use positions stay consistent). ---
     uint32_t *block_first = (uint32_t *)malloc(n_blocks * sizeof(uint32_t));
@@ -2610,7 +2630,7 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             size_t na = MLIR_GetBlockNumArgs(bk);
             for (size_t a = 0; a < na; a++) {
                 MLIR_ValueHandle arg = MLIR_GetBlockArg(bk, a);
-                handle[nv] = arg; def_pos[nv] = pos; first_pos[nv] = pos;
+                handle[nv] = arg; def_pos[nv] = A64_BARGP(pos); first_pos[nv] = A64_BARGP(pos);
                 last_use[nv] = 0; weight[nv] = 0; crosses[nv] = 0; home_pk[nv] = -1;
                 a64_hh_put(&vmap, arg, nv); nv++;
             }
@@ -2624,7 +2644,7 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 size_t nr = MLIR_GetOpNumResults(op);
                 for (size_t r = 0; r < nr; r++) {
                     MLIR_ValueHandle rv = MLIR_GetOpResult(op, r);
-                    handle[nv] = rv; def_pos[nv] = pos; first_pos[nv] = pos;
+                    handle[nv] = rv; def_pos[nv] = A64_DEFP(pos); first_pos[nv] = A64_DEFP(pos);
                     last_use[nv] = 0; weight[nv] = 0; crosses[nv] = 0; home_pk[nv] = -1;
                     a64_hh_put(&vmap, rv, nv); nv++;
                 }
@@ -2744,8 +2764,8 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
         uint64_t *LO = live_out + b * bw, *LI = live_in + b * bw;
         for (uint32_t vi = 0; vi < nv; vi++) {
-            if (a64_bs_test(LO, vi) && block_last[b] > last_use[vi])  last_use[vi]  = block_last[b];
-            if (a64_bs_test(LI, vi) && block_first[b] < first_pos[vi]) first_pos[vi] = block_first[b];
+            if (a64_bs_test(LO, vi) && A64_COVL(block_last[b]) > last_use[vi])  last_use[vi]  = A64_COVL(block_last[b]);
+            if (a64_bs_test(LI, vi) && A64_COVF(block_first[b]) < first_pos[vi]) first_pos[vi] = A64_COVF(block_first[b]);
         }
         uint32_t op_pos = block_first[b];
         uint64_t w = A64_USE_WEIGHT_AT(loop_depth[b]);
@@ -2753,12 +2773,13 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
             if (a64_is_spine(op, memspine)) { op_pos++; continue; }
+            uint32_t up = A64_USEP(op_pos);
             size_t nop = MLIR_GetOpNumOperands(op);
             for (size_t k = 0; k < nop; k++) {
                 uint32_t vi;
                 if (a64_hh_get(&vmap, MLIR_GetOpOperand(op, k), &vi)) {
-                    if (op_pos > last_use[vi]) last_use[vi] = op_pos;
-                    if (op_pos < first_pos[vi]) first_pos[vi] = op_pos;
+                    if (up > last_use[vi]) last_use[vi] = up;
+                    if (up < first_pos[vi]) first_pos[vi] = up;
                     weight[vi] += w;
                 }
             }
@@ -2769,8 +2790,8 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 for (size_t k = 0; k < nso; k++) {
                     uint32_t vi;
                     if (a64_hh_get(&vmap, MLIR_GetOpSuccessorOperand(op, s, k), &vi)) {
-                        if (op_pos > last_use[vi]) last_use[vi] = op_pos;
-                        if (op_pos < first_pos[vi]) first_pos[vi] = op_pos;
+                        if (up > last_use[vi]) last_use[vi] = up;
+                        if (up < first_pos[vi]) first_pos[vi] = up;
                         weight[vi] += w;
                     }
                     // The branch writes the k-th successor block arg's home at
@@ -2779,7 +2800,7 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                     // block-entry position).
                     uint32_t avi;
                     if (a64_hh_get(&vmap, MLIR_GetBlockArg(succ, k), &avi) &&
-                        op_pos < first_pos[avi]) first_pos[avi] = op_pos;
+                        up < first_pos[avi]) first_pos[avi] = up;
                 }
             }
             MLIR_ValueHandle mbase, midx;
@@ -2788,8 +2809,8 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 for (int u = 0; u < 2; u++) {
                     uint32_t vi;
                     if (a64_hh_get(&vmap, uu[u], &vi)) {
-                        if (op_pos > last_use[vi]) last_use[vi] = op_pos;
-                        if (op_pos < first_pos[vi]) first_pos[vi] = op_pos;
+                        if (up > last_use[vi]) last_use[vi] = up;
+                        if (up < first_pos[vi]) first_pos[vi] = up;
                         weight[vi] += w;
                     }
                 }
@@ -2816,8 +2837,13 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             // Strict: a value used only as a call argument (last_use == the call)
             // is NOT crossing -- the arg is read into the parameter register
             // before the `bl` clobbers it, so it may live in a caller-saved reg.
-            for (uint32_t p = first_pos[vi]; p < last_use[vi] && p < pos; p++)
-                if (is_call[p]) { crosses[vi] = 1; break; }
+            uint32_t lo = halfopen ? first_pos[vi] / 2u : first_pos[vi];
+            uint32_t hi = halfopen ? last_use[vi]  / 2u : last_use[vi];
+            for (uint32_t g = lo; g <= hi && g < pos; g++) {
+                if (!is_call[g]) continue;
+                uint32_t cs = A64_USEP(g);
+                if (cs >= first_pos[vi] && cs < last_use[vi]) { crosses[vi] = 1; break; }
+            }
         }
         free(is_call);
     }
@@ -2932,6 +2958,18 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         }
         free(sl_slot); free(sl_end); free(freelist);
     }
+    if (getenv("TINYC_SPILL_STATS")) {
+        for (uint32_t vi = 0; vi < nv; vi++) {
+            if (home_pk[vi] >= 0) continue;
+            MLIR_OpHandle dop = MLIR_GetValueDefiningOp(handle[vi]);
+            const char *nm = "(blockarg)";
+            int nl = 10;
+            if (dop) { string s = MLIR_GetOpName(dop); nm = s.str; nl = (int)s.size; }
+            const char *dead = (last_use[vi] <= first_pos[vi]) ? "deaddef" : "live";
+            fprintf(stderr, "SPILL\t%s\t%s\t%.*s\n",
+                    weight[vi] > 1 ? "hot" : "cold", dead, nl, nm);
+        }
+    }
     *out_nslots = next_slot;
 
     // --- 5. Emit results: write rm for register homes; report used_mask. ---
@@ -2944,6 +2982,11 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     }
 
     #undef A64_USE_WEIGHT_AT
+    #undef A64_USEP
+    #undef A64_DEFP
+    #undef A64_BARGP
+    #undef A64_COVL
+    #undef A64_COVF
     free(order); free(act_vi); free(act_pk);
     free(live_in); free(live_out); free(gen); free(kill); free(scratch);
     free(block_first); free(block_last); free(handle);
