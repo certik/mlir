@@ -307,6 +307,19 @@ static void emit_sub_imm(MLIR_Context *ctx, MLIR_BlockHandle blk,
     a[3] = attr_b(ctx, "sf", sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_SUB_IMM, a, 4));
 }
+// Mask the low `w` bits: `and rd, rn, #((1<<w)-1)` in a SINGLE instruction
+// (the aarch64 logical bitmask immediate covers every contiguous-low-ones
+// mask), replacing the 2-instr `mov scratch,#mask; and rd,rn,scratch`. Caller
+// must ensure 1 <= w <= (sf?63:31); w==0/>=64 has no single-AND form.
+static void emit_and_imm_lowbits(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                                 uint8_t rd, uint8_t rn, uint8_t w, bool sf) {
+    MLIR_AttributeHandle a[4];
+    a[0] = attr_i32(ctx, "rd", rd);
+    a[1] = attr_i32(ctx, "rn", rn);
+    a[2] = attr_i32(ctx, "w", w);
+    a[3] = attr_b(ctx, "sf", sf);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_AND_IMM, a, 4));
+}
 // Add a signed constant byte offset to the running gep address in x9, using a
 // single add/sub immediate when it fits 12 bits, else materialising it.
 static void emit_gep_const_off(MLIR_Context *ctx, MLIR_BlockHandle blk,
@@ -1153,6 +1166,20 @@ static bool i32_src_zero_extended(MLIR_ValueHandle v) {
            name_eq(nm, "llvm.zext") || name_eq(nm, "llvm.trunc")||
            name_eq(nm, "llvm.select") || name_eq(nm, "llvm.load") ||
            name_eq(nm, "llvm.inttoptr") || name_eq(nm, "llvm.ptrtoint");
+}
+
+// True when a `zext`/sub-width mask to `w` low bits is REDUNDANT because the
+// source value already has every bit at/above position w clear. A byte/half/
+// word `llvm.load` zero-extends to its declared width in hardware (ldrb/ldrh/
+// ldr-w) and our slots keep that result zero-extended, so an i<=w load has bits
+// >= w clear. Restricted to loads (unlike i32 W-form ops, generic i8/i16
+// arithmetic does NOT clear the high bits, so masking those IS required).
+static bool src_low_bits_clear(MLIR_Context *ctx, MLIR_ValueHandle v, int w) {
+    MLIR_OpHandle d = MLIR_GetValueDefiningOp(v);
+    if (d == MLIR_INVALID_HANDLE) return false;
+    if (!name_eq(MLIR_GetOpName(d), "llvm.load")) return false;
+    int lw = int_type_bits(ctx, v);
+    return lw > 0 && lw <= w;
 }
 
 // Slot-to-slot copy (block-arg / phi resolution and yield forwarding).
@@ -2040,8 +2067,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         if (w == 32) {
             emit_uxtw(ctx, blk, rd, r0);
         } else if (w > 0 && w < 64) {
-            emit_load_imm(ctx, blk, 10, (1ull << w) - 1, true);
-            emit_3reg(ctx, blk, OP_TYPE_AARCH64_AND_REG, rd, r0, 10, true);
+            emit_and_imm_lowbits(ctx, blk, rd, r0, (uint8_t)w, true);
         } else {
             emit_mov_reg(ctx, blk, rd, r0);
         }
@@ -2077,8 +2103,14 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             else
                 emit_uxtw(ctx, blk, rd, r0);        // mov wd,wn -> hardware zero-ext
         } else if (w > 0 && w < 64) {
-            emit_load_imm(ctx, blk, 10, (w >= 64) ? ~0ull : ((1ull << w) - 1), true);
-            emit_3reg(ctx, blk, OP_TYPE_AARCH64_AND_REG, rd, r0, 10, true);
+            // A `zext` whose source already has bits >= w clear (a narrow load)
+            // needs no mask at all: emit a plain copy for copy-coalescing to
+            // elide. Otherwise mask the low w bits in ONE `and rd,r0,#(1<<w)-1`.
+            if (name_eq(on, "llvm.zext") &&
+                src_low_bits_clear(ctx, MLIR_GetOpOperand(op, 0), w))
+                emit_mov_reg(ctx, blk, rd, r0);
+            else
+                emit_and_imm_lowbits(ctx, blk, rd, r0, (uint8_t)w, true);
         } else {
             emit_mov_reg(ctx, blk, rd, r0);
         }
@@ -2200,8 +2232,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         uint8_t rd = def_val(L, res, 9);
         emit_fp_cvt(ctx, blk, "f2i", src_w, dst_w, sign, /*rd GP*/rd, /*rn V*/0);
         if (rw > 0 && rw < 32) {
-            emit_load_imm(ctx, blk, 10, (1ull << rw) - 1, true);
-            emit_3reg(ctx, blk, OP_TYPE_AARCH64_AND_REG, rd, rd, 10, true);
+            emit_and_imm_lowbits(ctx, blk, rd, rd, (uint8_t)rw, true);
         }
         fin_val(L, res, rd);
 
@@ -3756,6 +3787,7 @@ static void peephole_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
         case OP_TYPE_AARCH64_ADD_IMM: case OP_TYPE_AARCH64_SUB_IMM:
         case OP_TYPE_AARCH64_ADD_REG: case OP_TYPE_AARCH64_SUB_REG:
         case OP_TYPE_AARCH64_AND_REG: case OP_TYPE_AARCH64_ORR_REG:
+        case OP_TYPE_AARCH64_AND_IMM:
         case OP_TYPE_AARCH64_EOR_REG: case OP_TYPE_AARCH64_ASR_REG:
         case OP_TYPE_AARCH64_LSL_REG: case OP_TYPE_AARCH64_LSR_REG:
         case OP_TYPE_AARCH64_MUL: case OP_TYPE_AARCH64_MSUB:

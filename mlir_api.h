@@ -387,6 +387,7 @@ typedef enum {
     OP_TYPE_AARCH64_UDIV,     // udiv Wd|Xd, Wn|Xn, Wm|Xm
     OP_TYPE_AARCH64_MSUB,     // msub Wd, Wn, Wm, Wa  (used for srem/urem)
     OP_TYPE_AARCH64_AND_REG,  // and  Wd|Xd, Wn|Xn, Wm|Xm
+    OP_TYPE_AARCH64_AND_IMM,  // and  Wd|Xd, Wn|Xn, #(1<<w)-1  (low-w-bits mask)
     OP_TYPE_AARCH64_ORR_REG,  // orr  Wd|Xd, Wn|Xn, Wm|Xm
     OP_TYPE_AARCH64_EOR_REG,  // eor  Wd|Xd, Wn|Xn, Wm|Xm
     OP_TYPE_AARCH64_LSL_REG,  // lslv Wd|Xd, Wn|Xn, Wm|Xm

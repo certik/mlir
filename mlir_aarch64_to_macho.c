@@ -430,6 +430,16 @@ static uint32_t arm64_and_reg(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
     return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5)
                 | (uint32_t)(rd & 0x1f);
 }
+// AND (immediate) with a low-bits mask #((1<<w)-1), 1 <= w <= (sf?63:31).
+// (1<<w)-1 is `w` contiguous low ones, always a valid aarch64 logical bitmask
+// immediate: element size = register size (N=sf), no rotation (immr=0), run
+// length = w (imms = w-1). 64-bit base 0x92400000 (N=1), 32-bit base 0x12000000.
+static uint32_t arm64_and_imm_lowbits(uint8_t rd, uint8_t rn, uint8_t w, bool sf) {
+    uint32_t base = sf ? 0x92400000u : 0x12000000u;   // sf=1 sets N via 0x400000
+    uint32_t imms = (uint32_t)(w - 1) & 0x3f;          // immr = 0
+    return base | (imms << 10) | ((uint32_t)(rn & 0x1f) << 5)
+                | (uint32_t)(rd & 0x1f);
+}
 static uint32_t arm64_orr_reg(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
     uint32_t base = sf ? 0xaa000000u : 0x2a000000u;
     return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5)
@@ -1014,6 +1024,14 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
                 uint8_t rm = (uint8_t)attr_i(op, "rm");
                 bool    sf = attr_b(op, "sf");
                 emit_word(&out->code, arm64_and_reg(rd, rn, rm, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_AND_IMM: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t w  = (uint8_t)attr_i(op, "w");
+                bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_and_imm_lowbits(rd, rn, w, sf));
                 break;
             }
             case OP_TYPE_AARCH64_ORR_REG: {
