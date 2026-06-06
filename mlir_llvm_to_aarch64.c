@@ -2499,6 +2499,7 @@ static bool cast_src(MLIR_OpHandle op, MLIR_ValueHandle *src) {
 
 static inline size_t a64_bs_words(size_t n) { return (n + 63u) / 64u; }
 static inline void a64_bs_set(uint64_t *bs, uint32_t i) { bs[i >> 6] |= (1ull << (i & 63u)); }
+static inline void a64_bs_clear(uint64_t *bs, uint32_t i) { bs[i >> 6] &= ~(1ull << (i & 63u)); }
 static inline bool a64_bs_test(const uint64_t *bs, uint32_t i) { return (bs[i >> 6] >> (i & 63u)) & 1u; }
 static inline void a64_bs_zero(uint64_t *bs, size_t n) { memset(bs, 0, a64_bs_words(n) * 8u); }
 static inline bool a64_bs_equal(const uint64_t *a, const uint64_t *b, size_t n) {
@@ -2931,8 +2932,17 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         }
     }
 
-    // crosses_call: any "llvm.call" between first_pos and last_use.
-    {
+    // crosses_call: a value must live in a callee-saved register iff it is live
+    // across a call -- i.e. live immediately AFTER some llvm.call and not that
+    // call's own result (the result is born at the call, it does not cross it).
+    // This is computed PRECISELY from the per-block live_out by a backward walk:
+    // `live_out(call) \ {result}` is exactly the set of values live across the
+    // call, which is sound (a caller-saved reg live across a call is clobbered)
+    // and exact. The legacy linear first_pos..last_use span (kept under
+    // TINYC_LINEAR_CROSSES for A/B) over-approximates across mutually-exclusive
+    // CFG paths, falsely forcing phi/block-arg values into the 9 callee-saved
+    // registers and inflating spill pressure.
+    if (getenv("TINYC_LINEAR_CROSSES")) {
         uint8_t *is_call = (uint8_t *)calloc(pos ? pos : 1, sizeof(uint8_t));
         uint32_t op_pos = 0;
         for (size_t b = 0; b < n_blocks; b++) {
@@ -2946,9 +2956,6 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         }
         for (uint32_t vi = 0; vi < nv; vi++) {
             if (last_use[vi] < first_pos[vi]) continue;
-            // Strict: a value used only as a call argument (last_use == the call)
-            // is NOT crossing -- the arg is read into the parameter register
-            // before the `bl` clobbers it, so it may live in a caller-saved reg.
             uint32_t lo = halfopen ? first_pos[vi] / 2u : first_pos[vi];
             uint32_t hi = halfopen ? last_use[vi]  / 2u : last_use[vi];
             for (uint32_t g = lo; g <= hi && g < pos; g++) {
@@ -2958,6 +2965,58 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             }
         }
         free(is_call);
+    } else {
+        uint64_t *live = (uint64_t *)calloc(bw, sizeof(uint64_t));
+        for (size_t b = 0; b < n_blocks; b++) {
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+            memcpy(live, live_out + b * bw, bw * sizeof(uint64_t));
+            size_t no = MLIR_GetBlockNumOps(bk);
+            for (size_t ii = no; ii-- > 0; ) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(bk, ii);
+                if (a64_is_spine(op, memspine)) continue;
+                // `live` holds the live set immediately AFTER op.
+                if (name_eq(MLIR_GetOpName(op), "llvm.call")) {
+                    uint32_t rvi = 0; bool has_r = false;
+                    if (MLIR_GetOpNumResults(op) &&
+                        a64_hh_get(&vmap, MLIR_GetOpResult(op, 0), &rvi)) has_r = true;
+                    for (uint32_t vi = 0; vi < nv; vi++)
+                        if (a64_bs_test(live, vi) && !(has_r && vi == rvi))
+                            crosses[vi] = 1;
+                }
+                // Transform to live-in(op): live = (live \ defs) U uses.
+                size_t nr = MLIR_GetOpNumResults(op);
+                for (size_t r = 0; r < nr; r++) {
+                    uint32_t vi;
+                    if (a64_hh_get(&vmap, MLIR_GetOpResult(op, r), &vi)) a64_bs_clear(live, vi);
+                }
+                size_t nop = MLIR_GetOpNumOperands(op);
+                for (size_t k = 0; k < nop; k++) {
+                    uint32_t vi;
+                    if (a64_hh_get(&vmap, MLIR_GetOpOperand(op, k), &vi)) a64_bs_set(live, vi);
+                }
+                size_t ns = MLIR_GetOpNumSuccessors(op);
+                for (size_t s = 0; s < ns; s++) {
+                    size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                    for (size_t k = 0; k < nso; k++) {
+                        uint32_t vi;
+                        if (a64_hh_get(&vmap, MLIR_GetOpSuccessorOperand(op, s, k), &vi))
+                            a64_bs_set(live, vi);
+                    }
+                }
+                MLIR_ValueHandle mbase, midx;
+                if (a64_memfuse_uses(ctx, op, memfuse, &mbase, &midx)) {
+                    uint32_t vi;
+                    if (a64_hh_get(&vmap, mbase, &vi)) a64_bs_set(live, vi);
+                    if (a64_hh_get(&vmap, midx, &vi))  a64_bs_set(live, vi);
+                }
+                MLIR_ValueHandle sfx;
+                if (a64_shiftfuse_uses(ctx, op, shiftfuse, &sfx)) {
+                    uint32_t vi;
+                    if (a64_hh_get(&vmap, sfx, &vi)) a64_bs_set(live, vi);
+                }
+            }
+        }
+        free(live);
     }
 
     // --- 4. Linear scan over the pool, loop-weighted eviction. ---
