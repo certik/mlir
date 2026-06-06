@@ -1346,11 +1346,23 @@ static void a64_write_word(EmittedFunc *e, uint32_t off, uint32_t insn) {
     e->code.data[off + 3] = (uint8_t)(insn >> 24);
 }
 
+// Count of sorted-ascending `a[]` entries strictly less than `key` (lower
+// bound index). Used to map a pre-compaction byte offset to its position after
+// some earlier words have been deleted: newoff(o) = o - 4*count(del < o).
+static size_t a64_lower_count(const uint32_t *a, size_t n, uint32_t key) {
+    size_t lo = 0, hi = n;
+    while (lo < hi) { size_t m = (lo + hi) / 2; if (a[m] < key) lo = m + 1; else hi = m; }
+    return lo;
+}
+
 // Resolve intra-function branch targets to PC-relative immediates. Done
 // AFTER all blocks have been emitted (and their offsets recorded) but
 // BEFORE the function is laid out within __text — branches are
 // function-local, so we don't need text_off here.
 //
+// Conditional-branch form chosen by patch_branches (see the compaction logic).
+enum { FORM_B = 0, FORM_DIRECT = 1, FORM_FALLBACK = 2 };
+
 // Branch threading: a "pure trampoline" block — one whose entire body is a
 // single unconditional `b TARGET` (exactly 4 bytes, no edge-copy movs) — adds
 // a hop to every branch that lands on it. Such a block carries no block-arg
@@ -1430,10 +1442,28 @@ static bool patch_branches(EmittedFunc *e) {
     }
 
     bool ok = true;
-    for (size_t i = 0; i < e->n_br; i++) {
+
+    // ---------------------------------------------------------------------
+    // Resolve + compact. Conditional branches are emitted as a two-word
+    // `b.!cond +8 ; b target` placeholder so the unconditional `b` gives
+    // imm26 reach. When `target` fits the direct conditional imm19 reach the
+    // first word becomes a single `b.cond target` and the second word is dead.
+    // Rather than leave a NOP there (~3% of all instructions, one per in-range
+    // conditional branch -- WMIR emits none), DELETE the dead word and compact
+    // the function, remapping every later offset. KEY INVARIANT: deleting words
+    // only ever shrinks |displacement|, so a branch that fits imm19 in the
+    // padded layout still fits after compaction -- the form decided here with
+    // padded offsets stays valid and no NOP is ever reintroduced. Gated by
+    // TINYC_NO_COMPACT for A/B (then the dead word is kept as a NOP).
+    //
+    // Phase A: resolve each branch's threaded target offset and classify its
+    // form using the *padded* offsets, writing nothing yet.
+    size_t    nbr     = e->n_br;
+    uint8_t  *form    = (uint8_t  *)malloc((nbr ? nbr : 1) * sizeof(uint8_t));
+    uint32_t *tgt_old = (uint32_t *)malloc((nbr ? nbr : 1) * sizeof(uint32_t));
+    bool      no_direct = (getenv("TINYC_NO_DIRECT_COND") != NULL);
+    for (size_t i = 0; i < nbr; i++) {
         BranchReloc *r = &e->br[i];
-        // Locate the target block (binary search), then thread through any
-        // trampoline chain to the ultimate destination.
         int idx = -1;
         size_t lo = 0, hi = nbp;
         while (lo < hi) {
@@ -1442,7 +1472,7 @@ static bool patch_branches(EmittedFunc *e) {
             if (mh == r->target) { idx = (int)byhandle[m]; break; }
             if (mh < r->target) lo = m + 1; else hi = m;
         }
-        uint32_t tgt_off = (uint32_t)-1;
+        uint32_t to = (uint32_t)-1;
         if (idx >= 0) {
             if (fwd) {
                 size_t steps = 0;
@@ -1450,31 +1480,72 @@ static bool patch_branches(EmittedFunc *e) {
                     idx = fwd[idx]; steps++;
                 }
             }
-            tgt_off = e->bp[idx].fn_off;
+            to = e->bp[idx].fn_off;
         }
-        if (tgt_off == (uint32_t)-1) {
+        if (to == (uint32_t)-1) {
             fprintf(stderr,
                 "aarch64->macho: branch target block has no recorded offset\n");
             ok = false;
             break;
         }
-        int32_t rel = (int32_t)tgt_off - (int32_t)r->fn_off;
-        int32_t imm = rel >> 2;
+        tgt_old[i] = to;
         if (r->kind == BR_B) {
-            a64_write_word(e, r->fn_off, arm64_b(imm));
+            form[i] = FORM_B;
         } else {
-            // Conditional branch lowered as `b.!cond +8; b target` (skip + b)
-            // for the imm26 reach of the unconditional `b`. When `target` fits
-            // the direct conditional imm19 reach (±1MiB from the conditional
-            // slot, which sits one word before the recorded `b`), emit the
-            // single direct form and NOP out the now-dead `b` slot. WMIR uses
-            // the direct form; this matches it whenever in range.
-            uint32_t cs = r->fn_off - 4;                  // conditional slot
-            int32_t  rel_c = (int32_t)tgt_off - (int32_t)cs;
-            int32_t  imm_c = rel_c >> 2;
-            bool     fits19 = (getenv("TINYC_NO_DIRECT_COND") == NULL) &&
-                              imm_c >= -(1 << 18) && imm_c <= (1 << 18) - 1;
-            if (fits19) {
+            uint32_t cs = r->fn_off - 4;
+            int32_t  imm_c = ((int32_t)to - (int32_t)cs) >> 2;
+            bool fits19 = !no_direct && imm_c >= -(1 << 18) && imm_c <= (1 << 18) - 1;
+            form[i] = fits19 ? FORM_DIRECT : FORM_FALLBACK;
+        }
+    }
+
+    if (ok) {
+        // Phase B: deletion set = dead second slots of direct conditionals.
+        // br[] is appended in emission order, so br[i].fn_off is strictly
+        // increasing and the filtered list is already sorted ascending.
+        bool do_compact = (getenv("TINYC_NO_COMPACT") == NULL);
+        uint32_t *del = (uint32_t *)malloc((nbr ? nbr : 1) * sizeof(uint32_t));
+        size_t ndel = 0;
+        if (do_compact) {
+            for (size_t i = 0; i < nbr; i++)
+                if (form[i] == FORM_DIRECT) {
+                    if (ndel > 0 && e->br[i].fn_off <= del[ndel - 1]) {
+                        do_compact = false; ndel = 0; break;  // not monotonic: bail safely
+                    }
+                    del[ndel++] = e->br[i].fn_off;
+                }
+        }
+        bool compacted = do_compact && ndel > 0;
+
+        // Phase C: compact the code buffer in place (drop every deleted word).
+        if (compacted) {
+            size_t w = 0, di = 0;
+            for (uint32_t o = 0; o < e->code.len; o += 4) {
+                if (di < ndel && del[di] == o) { di++; continue; }
+                if (w != o) memcpy(e->code.data + w, e->code.data + o, 4);
+                w += 4;
+            }
+            e->code.len = w;
+            // Remap the only intra-function offsets consumed downstream.
+            for (size_t i = 0; i < e->n_relocs; i++)
+                e->relocs[i].fn_off -= 4u * (uint32_t)a64_lower_count(del, ndel, e->relocs[i].fn_off);
+            for (size_t i = 0; i < e->n_dr; i++)
+                e->dr[i].fn_off -= 4u * (uint32_t)a64_lower_count(del, ndel, e->dr[i].fn_off);
+        }
+
+        // Phase D: write each branch at its (possibly remapped) offset against
+        // remapped target offsets. With compaction off, the dead direct slot is
+        // kept as an explicit NOP exactly as before.
+        #define NEWOFF(o) ((uint32_t)((o) - (compacted ? 4u * (uint32_t)a64_lower_count(del, ndel, (o)) : 0u)))
+        for (size_t i = 0; i < nbr && ok; i++) {
+            BranchReloc *r = &e->br[i];
+            uint32_t tnew = NEWOFF(tgt_old[i]);
+            if (form[i] == FORM_B) {
+                uint32_t fo = NEWOFF(r->fn_off);
+                a64_write_word(e, fo, arm64_b((int32_t)(tnew - fo) >> 2));
+            } else if (form[i] == FORM_DIRECT) {
+                uint32_t cs = NEWOFF(r->fn_off - 4);
+                int32_t  imm_c = (int32_t)(tnew - cs) >> 2;
                 uint32_t c = 0;
                 switch (r->kind) {
                     case BR_B_COND: c = arm64_b_cond(imm_c, r->cond_or_rt); break;
@@ -1483,9 +1554,10 @@ static bool patch_branches(EmittedFunc *e) {
                     default: break;
                 }
                 a64_write_word(e, cs, c);
-                a64_write_word(e, r->fn_off, 0xD503201Fu); // NOP
-            } else {
-                // Fallback: keep the inverted-condition skip + unconditional b.
+                if (!compacted) a64_write_word(e, NEWOFF(r->fn_off), 0xD503201Fu); // NOP
+            } else {  // FORM_FALLBACK: inverted skip (+8) over an unconditional b
+                uint32_t cs = NEWOFF(r->fn_off - 4);
+                uint32_t fo = NEWOFF(r->fn_off);
                 uint32_t skip = 0;
                 switch (r->kind) {
                     case BR_B_COND:
@@ -1497,10 +1569,14 @@ static bool patch_branches(EmittedFunc *e) {
                     default: break;
                 }
                 a64_write_word(e, cs, skip);
-                a64_write_word(e, r->fn_off, arm64_b(imm));
+                a64_write_word(e, fo, arm64_b((int32_t)(tnew - fo) >> 2));
             }
         }
+        #undef NEWOFF
+        free(del);
     }
+
+    free(form); free(tgt_old);
     free(byhandle); free(fwd);
     return ok;
 }
