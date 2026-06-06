@@ -865,6 +865,53 @@ static bool gmap_get_cstr(GlobalMap *g, const char *nm,
     return false;
 }
 
+// x27 anchor offset: the byte offset within __data that x27 points at. The
+// scalar wasm globals (__wasm_linmem_base, __wasm_argc/argv, __wasm_g0 the hot
+// shadow-stack pointer, __wasm_mem_pages) are clustered at the very end of the
+// data blob (the big linmem template precedes them), at offsets ~4.39 MB which
+// do NOT fit a scaled imm12 from offset 0. We anchor x27 at the first such
+// global (__wasm_linmem_base) so the rest sit at tiny positive deltas that fit.
+static uint32_t gfuse_anchor(GlobalMap *gm) {
+    uint32_t a = 0;
+    if (gm && gmap_get_cstr(gm, "__wasm_linmem_base", &a, NULL)) return a;
+    return 0;
+}
+
+// If `ptr` is the result of a single-use `llvm.mlir.addressof @G` where G is a
+// data global whose byte offset, relative to the x27 anchor, fits the unsigned
+// scaled imm12 range for access size `sz` (1/4/8), return true and set *off to
+// that relative offset. Such a load/store folds to a single `ldr/str [x27,
+// #off]`: x27 is the reserved globals-cluster base set once in synth_start
+// (mirrors x28 = linmem base), so the wasm-global access drops from adrp+add+ldr
+// (3 insns) to one. `uc` is the value use-count map; only single-use addressofs
+// fold (else a sibling use would still need it). `__wasm_linmem_base` itself is
+// excluded — its loads are owned by the x28 base-pin (a64_is_linmem_base_load).
+static bool gfuse_match(MLIR_Context *ctx, GlobalMap *gm, SlotMap *uc,
+                        MLIR_ValueHandle ptr, unsigned sz, uint32_t anchor,
+                        uint32_t *off) {
+    if (gm == NULL) return false;
+    if (sz != 1 && sz != 4 && sz != 8) return false;
+    MLIR_OpHandle d = MLIR_GetValueDefiningOp(ptr);
+    if (d == MLIR_INVALID_HANDLE) return false;
+    if (!name_eq(MLIR_GetOpName(d), "llvm.mlir.addressof")) return false;
+    MLIR_AttributeHandle ga = MLIR_GetOpAttributeByName(d, "global_name");
+    if (ga == MLIR_INVALID_HANDLE) return false;
+    string gnm = MLIR_GetAttributeAsString(ctx, ga);
+    if (gnm.size > 0 && gnm.str[0] == '@') { gnm.str++; gnm.size--; }
+    if (gnm.size == 18 && memcmp(gnm.str, "__wasm_linmem_base", 18) == 0)
+        return false;       // owned by the x28 base-pin
+    uint32_t o = 0;
+    if (!gmap_get(gm, gnm, &o)) return false;       // must be a data global
+    if (o < anchor) return false;                   // below the x27 anchor
+    uint32_t rel = o - anchor;
+    if ((rel & (sz - 1u)) != 0) return false;       // natural alignment
+    if (rel / sz > 4095u) return false;             // scaled imm12 range
+    int32_t c;
+    if (!sm_get(uc, ptr, &c) || c != 1) return false;  // addressof single-use
+    *off = rel;
+    return true;
+}
+
 typedef struct {
     MLIR_Context     *ctx;
     SlotMap          *sm;
@@ -892,6 +939,11 @@ typedef struct {
                                    // shifted-register `add Rd,Ra,Rx,lsl #amt`;
                                    // the shl/mul op is in `skip`. NULL = none.
                                    // Map value = (amt<<1)|shift_operand_index.
+    SlotMap          *gfuse;       // scalar-global addressof result value -> byte
+                                   // offset (relative to the x27 anchor); the
+                                   // load/store folds to a single `ldr/str [x27,
+                                   // #off]` (x27 = reserved globals-cluster base).
+                                   // The addressof is in skip/memspine. NULL=none.
     bool              ok;
 } LowerCtx;
 
@@ -1873,6 +1925,17 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             emit_ldst_x_reg(ctx, blk, t, rv, rn, rm);
             return;
         }
+        int32_t goff;
+        if (L->gfuse && sm_get(L->gfuse, ptr, &goff)) {
+            // ptr = addressof @global: one [x27,#off] store (x27 = globals base).
+            uint8_t rv = use_val_zr(L, val, 9);
+            if (!L->ok) return;
+            MLIR_OpType t = sz == 1 ? OP_TYPE_AARCH64_STRB_IMM
+                          : sz == 4 ? OP_TYPE_AARCH64_STR_W
+                                    : OP_TYPE_AARCH64_STR_X;
+            emit_ldst_x(ctx, blk, t, rv, 27, (uint32_t)goff);
+            return;
+        }
         uint8_t rv = use_val_zr(L, val, 9);
         uint8_t rp = use_val(L, ptr, 10);
         if (!L->ok) return;
@@ -1897,6 +1960,17 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
                           : sz == 4 ? OP_TYPE_AARCH64_LDR_W_REG
                                     : OP_TYPE_AARCH64_LDR_X_REG;
             emit_ldst_x_reg(ctx, blk, t, rd, rn, rm);
+            fin_val(L, res, rd);
+            return;
+        }
+        int32_t goff;
+        if (L->gfuse && sm_get(L->gfuse, ptr, &goff)) {
+            // ptr = addressof @global: one [x27,#off] load (x27 = globals base).
+            uint8_t rd = def_val(L, res, 9);
+            MLIR_OpType t = sz == 1 ? OP_TYPE_AARCH64_LDRB_IMM
+                          : sz == 4 ? OP_TYPE_AARCH64_LDR_W
+                                    : OP_TYPE_AARCH64_LDR_X;
+            emit_ldst_x(ctx, blk, t, rd, 27, (uint32_t)goff);
             fin_val(L, res, rd);
             return;
         }
@@ -2396,15 +2470,16 @@ static MLIR_BlockHandle map_block(MLIR_BlockHandle *src, MLIR_BlockHandle *dst,
     return MLIR_INVALID_HANDLE;
 }
 
-// Callee-saved register pool for the linear-scan allocator: x19..x27. x28 is
-// RESERVED as the linear-memory base register (set once in synth_start, then
-// preserved for the lifetime of the program — every function treats x28 as
-// callee-saved and never clobbers it because it is outside the pool, so the
-// base value flows through the whole call tree with no per-function reload).
-// Linmem loads/stores read base from x28 directly (see base-pinning in
-// select_func_cfg). Mirrors the deleted WMIR backend, which dedicated x28 to
-// the linmem base.
-#define A64_NSAVED 9
+// Callee-saved register pool for the linear-scan allocator: x19..x26. x27 and
+// x28 are RESERVED (x28 = linear-memory base, x27 = data/globals base), each
+// set once in synth_start, then preserved for the lifetime of the program —
+// every function treats them as callee-saved and never clobbers them because
+// they are outside the pool, so the base values flow through the whole call
+// tree with no per-function reload). Linmem loads/stores read base from x28
+// directly (see base-pinning in select_func_cfg); wasm-global loads/stores read
+// the data base from x27 (see global-pinning in select_func_cfg). Mirrors the
+// deleted WMIR backend, which dedicated x28 to linmem and x27 to wasm globals.
+#define A64_NSAVED 8
 #define A64_SAVE_BASE 19
 
 // Register-allocation pool. Caller-saved registers come FIRST so non-call-
@@ -2413,7 +2488,8 @@ static MLIR_BlockHandle map_block(MLIR_BlockHandle *src, MLIR_BlockHandle *dst,
 // call-crossing values that can live nowhere else.
 //   pool index 0..8   -> x0..x8    (caller-saved: AAPCS arg/result regs)
 //   pool index 9..12  -> x12..x15  (caller-saved: temporaries)
-//   pool index 13..21 -> x19..x27  (callee-saved: x28 reserved as linmem base)
+//   pool index 13..20 -> x19..x26  (callee-saved: x27=data base, x28=linmem
+//                                   base both reserved out of the pool)
 // x0..x8 are clobbered by every `bl`, so a call-crossing value may not live
 // there, but the vast majority of values are short-lived and call-free, so
 // adding them roughly doubles the usable pool and cuts spill traffic. The
@@ -2424,17 +2500,17 @@ static MLIR_BlockHandle map_block(MLIR_BlockHandle *src, MLIR_BlockHandle *dst,
 // they are NOT in the pool. Mirrors the deleted WMIR backend's 21-register pool.
 // a64_pool_reg() maps pool index -> phys reg by arithmetic (no brace-init array,
 // which the self-hosting tinyC front end does not lower).
-#define A64_NPOOL  22
+#define A64_NPOOL  21
 #define A64_NCALLER 13
 // Number of block-arg home registers reserved from the top of the callee-saved
-// range (pool 21 -> x27, 20 -> x26, ... down). Tuned empirically (frozen bench):
+// range (pool 20 -> x26, 19 -> x25, ... down). Tuned empirically (frozen bench):
 // 6 homes the hottest loop-carried args. The edge parallel-move resolver
 // (emit_edge_copies) handles arbitrary cycles, so any count is correct.
 #define A64_NHOME  6
 static inline uint8_t a64_pool_reg(int pk) {
     if (pk < 9)  return (uint8_t)pk;                  // x0..x8
     if (pk < 13) return (uint8_t)(12 + (pk - 9));     // x12..x15
-    return (uint8_t)(A64_SAVE_BASE + (pk - A64_NCALLER)); // x19..x27
+    return (uint8_t)(A64_SAVE_BASE + (pk - A64_NCALLER)); // x19..x26
 }
 
 // Save (or, with restore=true, reload) the callee-saved registers selected by
@@ -3435,7 +3511,7 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
                     if (best < 0 || bscore[j] > bscore[best]) best = (int)j;
                 }
                 if (best < 0) break;
-                int pk = A64_NPOOL - 1 - h;          // 13 -> x28, 12 -> x27
+                int pk = A64_NPOOL - 1 - h;          // 20 -> x26, 19 -> x25, ...
                 sm_put(rm, bv[best], a64_pool_reg(pk));
                 reserved_mask |= (1u << pk);
                 used_mask |= (1u << (pk - A64_NCALLER));
@@ -3906,7 +3982,44 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
         }
     }
 
-    // Linear-scan register allocation over callee-saved x19..x27 (CFG path).
+    // global-pinning pre-pass: fold a load/store whose pointer is a single-use
+    // `addressof @G` of a small-offset data global into one `ldr/str [x27,#off]`
+    // (x27 = reserved data base, set in synth_start). Drops the per-access
+    // adrp+add (3 insns -> 1). The addressof result goes in skip (no emission)
+    // and memspine (no allocation); the offset is recorded in `gfuse`. Mirrors
+    // the deleted WMIR backend's x27 globals base. Gated on a data section
+    // existing so x27 is always validly set up.
+    SlotMap gfuse = {0}; gfuse.arena = MLIR_GetArenaAllocator(ctx);
+    bool do_globalpin = do_fuse && !getenv("TINYC_NO_GLOBALPIN") &&
+                        gm && gm->n > 0;
+    uint32_t gp_anchor = gfuse_anchor(gm);
+    if (do_globalpin) {
+        for (size_t b = 0; b < n_blocks; b++) {
+            MLIR_BlockHandle sb = MLIR_GetRegionBlock(src_region, b);
+            size_t no = MLIR_GetBlockNumOps(sb);
+            for (size_t i = 0; i < no; i++) {
+                MLIR_OpHandle o = MLIR_GetBlockOp(sb, i);
+                string opn = MLIR_GetOpName(o);
+                MLIR_ValueHandle P = MLIR_INVALID_HANDLE; unsigned vsz = 0;
+                if (name_eq(opn, "llvm.load") && MLIR_GetOpNumOperands(o) >= 1) {
+                    P = MLIR_GetOpOperand(o, 0);
+                    vsz = a64_type_size(ctx, MLIR_GetValueType(MLIR_GetOpResult(o, 0)));
+                } else if (name_eq(opn, "llvm.store") && MLIR_GetOpNumOperands(o) >= 2) {
+                    P = MLIR_GetOpOperand(o, 1);
+                    vsz = a64_type_size(ctx, MLIR_GetValueType(MLIR_GetOpOperand(o, 0)));
+                }
+                if (P == MLIR_INVALID_HANDLE) continue;
+                uint32_t goff;
+                if (!gfuse_match(ctx, gm, &uc, P, vsz, gp_anchor, &goff))
+                    continue;
+                sm_put(&gfuse, P, (int32_t)goff);
+                sm_put(&memspine, P, 1);   // addressof result: no home register
+                sm_put(&skip, P, 1);       // addressof op: not emitted
+            }
+        }
+    }
+
+    // Linear-scan register allocation over callee-saved x19..x26 (CFG path).
     SlotMap rm = {0};
     rm.arena = MLIR_GetArenaAllocator(ctx);
 
@@ -4021,7 +4134,8 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
                    &am, slot_bytes, gm, nargs, &rm, &cm,
                    do_fuse ? &skip : NULL, MLIR_INVALID_HANDLE,
                    do_memfuse ? &memfuse : NULL,
-                   do_shiftfuse ? &shiftfuse : NULL, true };
+                   do_shiftfuse ? &shiftfuse : NULL,
+                   do_globalpin ? &gfuse : NULL, true };
 
     // Prologue + incoming-param placement in the entry block. Now that the
     // allocator pool includes the argument registers x0..x8, a param may be
@@ -4264,7 +4378,7 @@ static MLIR_OpHandle select_func(MLIR_Context *ctx, MLIR_OpHandle fn,
 
     LowerCtx L = { ctx, &sm, out_reg, out_blk, sym, frame_size,
                    &am, slot_bytes, gm, nargs, NULL, &cm,
-                   NULL, MLIR_INVALID_HANDLE, NULL, NULL, true };
+                   NULL, MLIR_INVALID_HANDLE, NULL, NULL, NULL, true };
     MLIR_OpHandle term = lower_block_ops(&L, src_blk);
     if (!L.ok) return MLIR_INVALID_HANDLE;
 
@@ -4384,6 +4498,20 @@ static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name,
         emit_adrp_data(ctx, blk, 10, tgt, relocs[k].slot_off);
         emit_add_data_lo(ctx, blk, 10, 10, tgt, relocs[k].slot_off);
         emit_str_x(ctx, blk, 9, 10, 0);
+    }
+
+    // Pin x27 = the wasm-globals cluster base (mirrors x28 = linmem base). x27 is
+    // reserved out of the allocation pool and callee-saved, so this single setup
+    // flows program-wide; every scalar wasm-global access then folds to one
+    // ldr/str [x27,#off] (see global-pinning in select_func_cfg). The cluster
+    // sits at a ~4.39 MB offset (past the linmem template), so x27 is anchored at
+    // that offset (gfuse_anchor), not at the data-section start. Emitted last,
+    // after all external startup calls (mmap/memcpy preserve x27 anyway), before
+    // `bl main`. Only when a data section exists, so the relocation resolves.
+    if (gm && gm->n > 0) {
+        uint32_t anchor = gfuse_anchor(gm);
+        emit_adrp_data(ctx, blk, 27, tgt, anchor);
+        emit_add_data_lo(ctx, blk, 27, 27, tgt, anchor);
     }
 
     emit_bl(ctx, blk, main_name);
