@@ -225,7 +225,7 @@ static bool wasm_parse(Arena *a, const uint8_t *bytes, size_t size,
                     uint32_t fi = out->n_imported_funcs;
                     out->import_func_types[fi] = tidx;
                     // Use the unprefixed import name when it's a known
-                    // WASI import — the wmir backend matches by name.
+                    // WASI import — the backend matches by name.
                     bool is_wasi = (ml == 22 &&
                         memcmp(mp, "wasi_snapshot_preview1", 22) == 0);
                     if (is_wasi) {
@@ -270,7 +270,7 @@ static bool wasm_parse(Arena *a, const uint8_t *bytes, size_t size,
             // load time. wasm-ld emits one ACTIVE segment per
             // address-taken function, e.g.:
             //   (elem (i32.const N) func $foo)
-            // We collect (table_slot, func_index) pairs so the wmir
+            // We collect (table_slot, func_index) pairs so the
             // lowering can pre-populate the call_indirect dispatcher
             // with real table slots (rather than auto-interned ones).
             uint32_t n = (uint32_t)rd_uleb(&s);
@@ -503,7 +503,7 @@ static bool wasm_parse(Arena *a, const uint8_t *bytes, size_t size,
 
     // Name defined functions. Priority: explicit name from EXPORT/name
     // section > placeholder `func_N`. The wasm `_start` export is
-    // renamed to `wasi_start` so the wmir backend's synth_start (which
+    // renamed to `wasi_start` so the backend's synth_start (which
     // generates a fresh `_start` from `__original_main`) doesn't
     // collide.
     for (uint32_t i = out->n_imported_funcs; i < out->n_funcs; i++) {
@@ -1240,8 +1240,8 @@ MLIR_OpHandle mlir_wasm_to_wasmstack(MLIR_Context *ctx,
     MLIR_RegionHandle out_regs[1] = { out_region };
 
     // Propagate the wasm MEMORY section's `min_pages` so downstream
-    // passes (wmir -> aarch64 -> Mach-O) can size the linear memory
-    // image correctly. Without this the wmir backend hardcoded
+    // passes (llvm -> aarch64 -> Mach-O) can size the linear memory
+    // image correctly. Without this the backend hardcoded
     // a tiny 4 MiB default and any module with >4 MiB of static
     // data would silently overflow __heap_base past the end of
     // linmem, causing platform_heap_size() to wrap to a huge value
@@ -1282,7 +1282,7 @@ MLIR_OpHandle mlir_wasm_to_wasmstack(MLIR_Context *ctx,
 
     // Emit module-level function-pointer table entries (the wasm ELEM
     // section). Each entry says "wasm table slot N now holds a
-    // reference to function f". The wmir lowering uses these to build
+    // reference to function f". The backend lowering uses these to build
     // call_indirect dispatchers keyed on the actual wasm table slot
     // (rather than an auto-interned slot — that mismatch would make
     // the slot value the program sees at runtime not match the slot

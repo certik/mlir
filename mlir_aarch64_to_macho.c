@@ -18,6 +18,7 @@
 // diagnostic; coverage grows as new aarch64.* ops are added.
 
 #include "mlir_aarch64_to_macho.h"
+#include "mlir_llvm_to_aarch64.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -26,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <base/arena.h>
 #include <base/string.h>
 
 #include "mlir_api.h"
@@ -86,6 +88,10 @@ static void buf_uleb(Buf *b, uint64_t v) {
 }
 static void buf_cstr(Buf *b, const char *s) {
     while (*s) buf_u8(b, (uint8_t)*s++);
+    buf_u8(b, 0);
+}
+static void buf_strn(Buf *b, const char *s, size_t n) {
+    for (size_t i = 0; i < n; i++) buf_u8(b, (uint8_t)s[i]);
     buf_u8(b, 0);
 }
 static void buf_patch_le32(Buf *b, size_t pos, uint32_t v) {
@@ -206,6 +212,10 @@ static uint32_t arm64_bl(int32_t imm26) {
 static uint32_t arm64_svc(uint16_t imm16) {
     return 0xd4000001u | ((uint32_t)imm16 << 5);
 }
+// `blr Xn` — indirect branch-and-link via register.
+static uint32_t arm64_blr(uint8_t rn) {
+    return 0xd63f0000u | ((uint32_t)(rn & 0x1f) << 5);
+}
 static uint32_t arm64_ret(void) { return 0xd65f03c0u; }
 
 // ---- compare + cset/csel + branches ------------------------------
@@ -296,7 +306,7 @@ static uint32_t arm64_sub_imm(uint8_t rd, uint8_t rn, uint16_t imm12, bool sf) {
                 | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rd & 0x1f);
 }
 // add/sub Xd, Xn, Xm (shifted-register, LSL #0). With sf=false we get
-// the W form. NB: for our wmir.load lowering we use sf=true on values
+// the W form. NB: for our load lowering we use sf=true on values
 // produced by W-form loads, which zero-extend into the full X register
 // — so a plain X-form add is equivalent to "add Xd, Xn, Wm, UXTW".
 static uint32_t arm64_add_reg(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
@@ -390,6 +400,19 @@ static uint32_t arm64_udiv(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
     return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5)
                 | (uint32_t)(rd & 0x1f);
 }
+// UBFM / SBFM (bitfield moves). LSL/LSR are UBFM aliases, ASR is SBFM.
+//   UBFM W base: 0x53000000, X base (N=1): 0xD3400000
+//   SBFM W base: 0x13000000, X base (N=1): 0x93400000
+static uint32_t arm64_ubfm(uint8_t rd, uint8_t rn, uint8_t immr, uint8_t imms, bool sf) {
+    uint32_t base = sf ? 0xD3400000u : 0x53000000u;
+    return base | ((uint32_t)(immr & 0x3f) << 16) | ((uint32_t)(imms & 0x3f) << 10)
+                | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rd & 0x1f);
+}
+static uint32_t arm64_sbfm(uint8_t rd, uint8_t rn, uint8_t immr, uint8_t imms, bool sf) {
+    uint32_t base = sf ? 0x93400000u : 0x13000000u;
+    return base | ((uint32_t)(immr & 0x3f) << 16) | ((uint32_t)(imms & 0x3f) << 10)
+                | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rd & 0x1f);
+}
 // MSUB Wd, Wn, Wm, Wa  (Wd = Wa - Wn*Wm). Used to compute remainder
 // after a div: rem = a - (a/b)*b = msub(a/b, b, a).
 //   W base: 0x1B008000, X base: 0x9B008000  (Ra at bits[14:10])
@@ -405,6 +428,16 @@ static uint32_t arm64_msub(uint8_t rd, uint8_t rn, uint8_t rm, uint8_t ra, bool 
 static uint32_t arm64_and_reg(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
     uint32_t base = sf ? 0x8a000000u : 0x0a000000u;
     return base | ((uint32_t)(rm & 0x1f) << 16) | ((uint32_t)(rn & 0x1f) << 5)
+                | (uint32_t)(rd & 0x1f);
+}
+// AND (immediate) with a low-bits mask #((1<<w)-1), 1 <= w <= (sf?63:31).
+// (1<<w)-1 is `w` contiguous low ones, always a valid aarch64 logical bitmask
+// immediate: element size = register size (N=sf), no rotation (immr=0), run
+// length = w (imms = w-1). 64-bit base 0x92400000 (N=1), 32-bit base 0x12000000.
+static uint32_t arm64_and_imm_lowbits(uint8_t rd, uint8_t rn, uint8_t w, bool sf) {
+    uint32_t base = sf ? 0x92400000u : 0x12000000u;   // sf=1 sets N via 0x400000
+    uint32_t imms = (uint32_t)(w - 1) & 0x3f;          // immr = 0
+    return base | (imms << 10) | ((uint32_t)(rn & 0x1f) << 5)
                 | (uint32_t)(rd & 0x1f);
 }
 static uint32_t arm64_orr_reg(uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
@@ -569,6 +602,7 @@ typedef struct {
     uint8_t  rd;
     uint8_t  rn;
     uint32_t fn_off;
+    uint32_t addend;        // byte offset added to the resolved section base
 } DataReloc;
 
 // Branch reloc. Identifies a placeholder branch instruction emitted
@@ -615,7 +649,7 @@ static void ef_add_reloc(EmittedFunc *e, string callee, uint32_t off) {
     e->n_relocs++;
 }
 static void ef_add_dr(EmittedFunc *e, string kind, bool is_add_lo,
-                      uint8_t rd, uint8_t rn, uint32_t off) {
+                      uint8_t rd, uint8_t rn, uint32_t off, uint32_t addend) {
     if (e->n_dr == e->c_dr) {
         e->c_dr = e->c_dr ? e->c_dr * 2 : 4;
         e->dr = (DataReloc *)realloc(e->dr, e->c_dr * sizeof(DataReloc));
@@ -625,6 +659,7 @@ static void ef_add_dr(EmittedFunc *e, string kind, bool is_add_lo,
     e->dr[e->n_dr].rd        = rd;
     e->dr[e->n_dr].rn        = rn;
     e->dr[e->n_dr].fn_off    = off;
+    e->dr[e->n_dr].addend    = addend;
     e->n_dr++;
 }
 static void ef_add_br(EmittedFunc *e, int kind, MLIR_BlockHandle target,
@@ -673,7 +708,7 @@ static string attr_s(MLIR_OpHandle op, const char *name) {
 // LDR x16, [x16, GOT_lo12]; BR x16`. dyld fills the corresponding
 // __DATA_CONST,__got slot at load time via chained fixups.
 //
-// LibSysSym enumerates every libSystem symbol the wmir backend may
+// LibSysSym enumerates every libSystem symbol the backend may
 // reference from its synth_* shims. The actual set used by any given
 // program is discovered by walking BL relocs after function emission
 // (see `n_libsys_stubs` further down). Enum order matters: it controls
@@ -696,9 +731,10 @@ typedef enum {
     LS_LSEEK,
     LS_ERRNO,
     LS_MMAP,
-    LS_MEMCPY
+    LS_MEMCPY,
+    LS_FCHMOD
 } LibSysSym;
-#define LS_COUNT 9
+#define LS_COUNT 10
 
 static const char *libsys_name(int sym) {
     if (sym == LS_EXIT)   return "_exit";
@@ -710,6 +746,7 @@ static const char *libsys_name(int sym) {
     if (sym == LS_ERRNO)  return "___error";
     if (sym == LS_MMAP)   return "_mmap";
     if (sym == LS_MEMCPY) return "_memcpy";
+    if (sym == LS_FCHMOD) return "_fchmod";
     return "";
 }
 
@@ -744,8 +781,16 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
     }
     MLIR_RegionHandle reg = MLIR_GetOpRegion(fn, 0);
     size_t nb = MLIR_GetRegionNumBlocks(reg);
+    // Fallthrough elision: a terminator `aarch64.b` whose target is the very
+    // next block in layout is a no-op jump to PC+4. Dropping it lets control
+    // fall through. The lifted `cf` CFG (and its cond_br trampoline blocks)
+    // produces many such branches; eliding them removes ~1.5% of all
+    // instructions, concentrated in hot loops. Skippable for A/B measurement.
+    bool elide_fallthrough = (getenv("TINYC_NO_FALLTHROUGH") == NULL);
     for (size_t bi = 0; bi < nb; bi++) {
         MLIR_BlockHandle blk = MLIR_GetRegionBlock(reg, bi);
+        MLIR_BlockHandle next_blk = (bi + 1 < nb)
+            ? MLIR_GetRegionBlock(reg, bi + 1) : MLIR_INVALID_HANDLE;
         // Record the position of this block's first instruction.
         ef_add_bp(out, blk, (uint32_t)out->code.len);
         size_t n = MLIR_GetBlockNumOps(blk);
@@ -780,6 +825,11 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
                 uint32_t off = (uint32_t)out->code.len;
                 emit_word(&out->code, arm64_bl(0));
                 ef_add_reloc(out, callee, off);
+                break;
+            }
+            case OP_TYPE_AARCH64_BLR: {
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                emit_word(&out->code, arm64_blr(rn));
                 break;
             }
             case OP_TYPE_AARCH64_SVC: {
@@ -837,8 +887,10 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
                 uint8_t rd = (uint8_t)attr_i(op, "rd");
                 uint8_t rn = (uint8_t)attr_i(op, "rn");
                 uint8_t rm = (uint8_t)attr_i(op, "rm");
+                uint8_t lsl = (uint8_t)attr_i(op, "lsl");
                 bool    sf = attr_b(op, "sf");
-                emit_word(&out->code, arm64_add_reg(rd, rn, rm, sf));
+                emit_word(&out->code,
+                          arm64_add_reg(rd, rn, rm, sf) | ((uint32_t)(lsl & 0x3f) << 10));
                 break;
             }
             case OP_TYPE_AARCH64_SUB_REG: {
@@ -974,6 +1026,14 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
                 emit_word(&out->code, arm64_and_reg(rd, rn, rm, sf));
                 break;
             }
+            case OP_TYPE_AARCH64_AND_IMM: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t w  = (uint8_t)attr_i(op, "w");
+                bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_and_imm_lowbits(rd, rn, w, sf));
+                break;
+            }
             case OP_TYPE_AARCH64_ORR_REG: {
                 uint8_t rd = (uint8_t)attr_i(op, "rd");
                 uint8_t rn = (uint8_t)attr_i(op, "rn");
@@ -1014,6 +1074,35 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
                 emit_word(&out->code, arm64_asrv(rd, rn, rm, sf));
                 break;
             }
+            case OP_TYPE_AARCH64_LSL_IMM: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t sh = (uint8_t)attr_i(op, "shift");
+                bool    sf = attr_b(op, "sf");
+                uint8_t ds = sf ? 64 : 32;
+                uint8_t immr = (uint8_t)((ds - sh) & (ds - 1));
+                uint8_t imms = (uint8_t)(ds - 1 - sh);
+                emit_word(&out->code, arm64_ubfm(rd, rn, immr, imms, sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_LSR_IMM: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t sh = (uint8_t)attr_i(op, "shift");
+                bool    sf = attr_b(op, "sf");
+                uint8_t ds = sf ? 64 : 32;
+                emit_word(&out->code, arm64_ubfm(rd, rn, sh, (uint8_t)(ds - 1), sf));
+                break;
+            }
+            case OP_TYPE_AARCH64_ASR_IMM: {
+                uint8_t rd = (uint8_t)attr_i(op, "rd");
+                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t sh = (uint8_t)attr_i(op, "shift");
+                bool    sf = attr_b(op, "sf");
+                uint8_t ds = sf ? 64 : 32;
+                emit_word(&out->code, arm64_sbfm(rd, rn, sh, (uint8_t)(ds - 1), sf));
+                break;
+            }
             case OP_TYPE_AARCH64_SXTW: {
                 uint8_t rd = (uint8_t)attr_i(op, "rd");
                 uint8_t rn = (uint8_t)attr_i(op, "rn");
@@ -1043,18 +1132,20 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
             case OP_TYPE_AARCH64_ADRP_DATA: {
                 uint8_t rd      = (uint8_t)attr_i(op, "rd");
                 string  target  = attr_s(op, "target");
+                uint32_t addend = (uint32_t)attr_i(op, "addend");
                 uint32_t off    = (uint32_t)out->code.len;
                 emit_word(&out->code, arm64_adrp(rd, 0));
-                ef_add_dr(out, target, /*is_add_lo=*/false, rd, /*rn=*/0, off);
+                ef_add_dr(out, target, /*is_add_lo=*/false, rd, /*rn=*/0, off, addend);
                 break;
             }
             case OP_TYPE_AARCH64_ADD_DATA_LO: {
                 uint8_t rd     = (uint8_t)attr_i(op, "rd");
                 uint8_t rn     = (uint8_t)attr_i(op, "rn");
                 string  target = attr_s(op, "target");
+                uint32_t addend = (uint32_t)attr_i(op, "addend");
                 uint32_t off   = (uint32_t)out->code.len;
                 emit_word(&out->code, arm64_add_imm(rd, rn, 0, /*sf=*/true));
-                ef_add_dr(out, target, /*is_add_lo=*/true, rd, rn, off);
+                ef_add_dr(out, target, /*is_add_lo=*/true, rd, rn, off, addend);
                 break;
             }
             case OP_TYPE_AARCH64_CMP_REG: {
@@ -1089,16 +1180,27 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
             }
             case OP_TYPE_AARCH64_B: {
                 MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(op, 0);
+                // Elide a terminator branch that just falls through to the
+                // next block in layout.
+                if (elide_fallthrough && i + 1 == n && tgt == next_blk)
+                    break;
                 uint32_t off = (uint32_t)out->code.len;
                 emit_word(&out->code, arm64_b(0));
                 ef_add_br(out, BR_B, tgt, off, 0, false);
                 break;
             }
+            // Conditional branches (B.cond / CBZ / CBNZ) only reach ±1 MiB
+            // (a signed 19-bit word offset), which overflows in large
+            // self-host functions and silently wraps to a wrong target. Emit
+            // every conditional branch as a fixed inverted skip (imm19 = 2,
+            // i.e. PC+8) over an unconditional B, whose imm26 reaches ±128 MiB
+            // and is enough for any function we emit.
             case OP_TYPE_AARCH64_B_COND: {
                 MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(op, 0);
                 uint8_t cond = (uint8_t)attr_i(op, "cond");
+                emit_word(&out->code, arm64_b_cond(2, (uint8_t)(cond ^ 1u)));
                 uint32_t off = (uint32_t)out->code.len;
-                emit_word(&out->code, arm64_b_cond(0, cond));
+                emit_word(&out->code, arm64_b(0));
                 ef_add_br(out, BR_B_COND, tgt, off, cond, false);
                 break;
             }
@@ -1106,8 +1208,9 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
                 MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(op, 0);
                 uint8_t rt = (uint8_t)attr_i(op, "rt");
                 bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_cbnz(rt, 2, sf));
                 uint32_t off = (uint32_t)out->code.len;
-                emit_word(&out->code, arm64_cbz(rt, 0, sf));
+                emit_word(&out->code, arm64_b(0));
                 ef_add_br(out, BR_CBZ, tgt, off, rt, sf);
                 break;
             }
@@ -1115,8 +1218,9 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
                 MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(op, 0);
                 uint8_t rt = (uint8_t)attr_i(op, "rt");
                 bool    sf = attr_b(op, "sf");
+                emit_word(&out->code, arm64_cbz(rt, 2, sf));
                 uint32_t off = (uint32_t)out->code.len;
-                emit_word(&out->code, arm64_cbnz(rt, 0, sf));
+                emit_word(&out->code, arm64_b(0));
                 ef_add_br(out, BR_CBNZ, tgt, off, rt, sf);
                 break;
             }
@@ -1215,37 +1319,266 @@ static bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
     return true;
 }
 
+// Stable bottom-up mergesort of an index array by a uint64 key array.
+static void a64_sort_idx_u64(uint32_t *idx, size_t n, const uint64_t *key) {
+    if (n < 2) return;
+    uint32_t *tmp = (uint32_t *)malloc(n * sizeof(uint32_t));
+    for (size_t w = 1; w < n; w *= 2) {
+        for (size_t lo = 0; lo < n; lo += 2 * w) {
+            size_t mid = lo + w;     if (mid > n) mid = n;
+            size_t hi  = lo + 2 * w; if (hi  > n) hi  = n;
+            size_t a = lo, b = mid, o = lo;
+            while (a < mid && b < hi)
+                tmp[o++] = (key[idx[b]] < key[idx[a]]) ? idx[b++] : idx[a++];
+            while (a < mid) tmp[o++] = idx[a++];
+            while (b < hi)  tmp[o++] = idx[b++];
+        }
+        for (size_t i = 0; i < n; i++) idx[i] = tmp[i];
+    }
+    free(tmp);
+}
+
+// Patch a 32-bit little-endian instruction word into the code buffer.
+static void a64_write_word(EmittedFunc *e, uint32_t off, uint32_t insn) {
+    e->code.data[off + 0] = (uint8_t)(insn      );
+    e->code.data[off + 1] = (uint8_t)(insn >>  8);
+    e->code.data[off + 2] = (uint8_t)(insn >> 16);
+    e->code.data[off + 3] = (uint8_t)(insn >> 24);
+}
+
+// Count of sorted-ascending `a[]` entries strictly less than `key` (lower
+// bound index). Used to map a pre-compaction byte offset to its position after
+// some earlier words have been deleted: newoff(o) = o - 4*count(del < o).
+static size_t a64_lower_count(const uint32_t *a, size_t n, uint32_t key) {
+    size_t lo = 0, hi = n;
+    while (lo < hi) { size_t m = (lo + hi) / 2; if (a[m] < key) lo = m + 1; else hi = m; }
+    return lo;
+}
+
 // Resolve intra-function branch targets to PC-relative immediates. Done
 // AFTER all blocks have been emitted (and their offsets recorded) but
 // BEFORE the function is laid out within __text — branches are
 // function-local, so we don't need text_off here.
+//
+// Conditional-branch form chosen by patch_branches (see the compaction logic).
+enum { FORM_B = 0, FORM_DIRECT = 1, FORM_FALLBACK = 2 };
+
+// Branch threading: a "pure trampoline" block — one whose entire body is a
+// single unconditional `b TARGET` (exactly 4 bytes, no edge-copy movs) — adds
+// a hop to every branch that lands on it. Such a block carries no block-arg
+// forwarding (forwarding would require movs, making it >4 bytes), so any
+// branch to it can be redirected straight to TARGET. Chains are followed (with
+// a cycle cap) so a branch reaches its ultimate destination in one hop. This
+// removes the per-iteration trampoline bounce that the structured-CFG lowering
+// emits in hot loops. Trampoline blocks are left in place (now cold). Gated by
+// TINYC_NO_THREAD for A/B.
 static bool patch_branches(EmittedFunc *e) {
-    for (size_t i = 0; i < e->n_br; i++) {
-        BranchReloc *r = &e->br[i];
-        uint32_t tgt_off = (uint32_t)-1;
-        for (size_t k = 0; k < e->n_bp; k++) {
-            if (e->bp[k].blk == r->target) { tgt_off = e->bp[k].fn_off; break; }
+    size_t nbp = e->n_bp;
+    uint32_t *byhandle = NULL;   // bp indices sorted by block handle
+    int32_t  *fwd = NULL;        // bp index -> bp index it trampolines to (-1 none)
+    if (nbp > 0) {
+        byhandle = (uint32_t *)malloc(nbp * sizeof(uint32_t));
+        uint64_t *hkey = (uint64_t *)malloc(nbp * sizeof(uint64_t));
+        for (size_t k = 0; k < nbp; k++) {
+            byhandle[k] = (uint32_t)k; hkey[k] = (uint64_t)e->bp[k].blk;
         }
-        if (tgt_off == (uint32_t)-1) {
+        a64_sort_idx_u64(byhandle, nbp, hkey);
+        free(hkey);
+
+        if (getenv("TINYC_NO_THREAD") == NULL) {
+            // Offset order, to compute block lengths and look a block up by its
+            // start offset.
+            uint32_t *byoff = (uint32_t *)malloc(nbp * sizeof(uint32_t));
+            uint64_t *okey = (uint64_t *)malloc(nbp * sizeof(uint64_t));
+            for (size_t k = 0; k < nbp; k++) {
+                byoff[k] = (uint32_t)k; okey[k] = e->bp[k].fn_off;
+            }
+            a64_sort_idx_u64(byoff, nbp, okey);
+            free(okey);
+            uint32_t *blen = (uint32_t *)malloc(nbp * sizeof(uint32_t));
+            for (size_t i = 0; i < nbp; i++) {
+                uint32_t o   = e->bp[byoff[i]].fn_off;
+                uint32_t end = (i + 1 < nbp) ? e->bp[byoff[i + 1]].fn_off
+                                             : (uint32_t)e->code.len;
+                blen[byoff[i]] = end - o;
+            }
+            fwd = (int32_t *)malloc(nbp * sizeof(int32_t));
+            for (size_t k = 0; k < nbp; k++) fwd[k] = -1;
+            for (size_t r = 0; r < e->n_br; r++) {
+                if (e->br[r].kind != BR_B) continue;
+                uint32_t roff = e->br[r].fn_off;
+                // The block whose single `b` sits at roff (binary search byoff).
+                // Several blocks can share roff when zero-length fallthrough-
+                // elided blocks precede the real one; among an equal-offset run
+                // only the actually-emitted block has nonzero length, so scan
+                // the run for the len==4 entry.
+                size_t lo = 0, hi = nbp; int blk_i = -1;
+                while (lo < hi) {
+                    size_t m = (lo + hi) / 2;
+                    uint32_t mo = e->bp[byoff[m]].fn_off;
+                    if (mo == roff) {
+                        size_t s = m;
+                        while (s > 0 && e->bp[byoff[s - 1]].fn_off == roff) s--;
+                        for (; s < nbp && e->bp[byoff[s]].fn_off == roff; s++)
+                            if (blen[byoff[s]] == 4) { blk_i = (int)byoff[s]; break; }
+                        break;
+                    }
+                    if (mo < roff) lo = m + 1; else hi = m;
+                }
+                if (blk_i < 0) continue;
+                // Forward target = bp index of this `b`'s target block.
+                MLIR_BlockHandle t = e->br[r].target;
+                size_t l2 = 0, h2 = nbp; int t_i = -1;
+                while (l2 < h2) {
+                    size_t m = (l2 + h2) / 2;
+                    MLIR_BlockHandle mh = e->bp[byhandle[m]].blk;
+                    if (mh == t) { t_i = (int)byhandle[m]; break; }
+                    if (mh < t) l2 = m + 1; else h2 = m;
+                }
+                if (t_i >= 0) fwd[blk_i] = t_i;
+            }
+            free(byoff); free(blen);
+        }
+    }
+
+    bool ok = true;
+
+    // ---------------------------------------------------------------------
+    // Resolve + compact. Conditional branches are emitted as a two-word
+    // `b.!cond +8 ; b target` placeholder so the unconditional `b` gives
+    // imm26 reach. When `target` fits the direct conditional imm19 reach the
+    // first word becomes a single `b.cond target` and the second word is dead.
+    // Rather than leave a NOP there (~3% of all instructions, one per in-range
+    // conditional branch -- WMIR emits none), DELETE the dead word and compact
+    // the function, remapping every later offset. KEY INVARIANT: deleting words
+    // only ever shrinks |displacement|, so a branch that fits imm19 in the
+    // padded layout still fits after compaction -- the form decided here with
+    // padded offsets stays valid and no NOP is ever reintroduced. Gated by
+    // TINYC_NO_COMPACT for A/B (then the dead word is kept as a NOP).
+    //
+    // Phase A: resolve each branch's threaded target offset and classify its
+    // form using the *padded* offsets, writing nothing yet.
+    size_t    nbr     = e->n_br;
+    uint8_t  *form    = (uint8_t  *)malloc((nbr ? nbr : 1) * sizeof(uint8_t));
+    uint32_t *tgt_old = (uint32_t *)malloc((nbr ? nbr : 1) * sizeof(uint32_t));
+    bool      no_direct = (getenv("TINYC_NO_DIRECT_COND") != NULL);
+    for (size_t i = 0; i < nbr; i++) {
+        BranchReloc *r = &e->br[i];
+        int idx = -1;
+        size_t lo = 0, hi = nbp;
+        while (lo < hi) {
+            size_t m = (lo + hi) / 2;
+            MLIR_BlockHandle mh = e->bp[byhandle[m]].blk;
+            if (mh == r->target) { idx = (int)byhandle[m]; break; }
+            if (mh < r->target) lo = m + 1; else hi = m;
+        }
+        uint32_t to = (uint32_t)-1;
+        if (idx >= 0) {
+            if (fwd) {
+                size_t steps = 0;
+                while (fwd[idx] >= 0 && fwd[idx] != idx && steps < nbp) {
+                    idx = fwd[idx]; steps++;
+                }
+            }
+            to = e->bp[idx].fn_off;
+        }
+        if (to == (uint32_t)-1) {
             fprintf(stderr,
                 "aarch64->macho: branch target block has no recorded offset\n");
-            return false;
+            ok = false;
+            break;
         }
-        int32_t rel = (int32_t)tgt_off - (int32_t)r->fn_off;
-        int32_t imm = rel >> 2;
-        uint32_t insn = 0;
-        switch (r->kind) {
-            case BR_B:      insn = arm64_b(imm); break;
-            case BR_B_COND: insn = arm64_b_cond(imm, r->cond_or_rt); break;
-            case BR_CBZ:    insn = arm64_cbz(r->cond_or_rt, imm, r->sf); break;
-            case BR_CBNZ:   insn = arm64_cbnz(r->cond_or_rt, imm, r->sf); break;
+        tgt_old[i] = to;
+        if (r->kind == BR_B) {
+            form[i] = FORM_B;
+        } else {
+            uint32_t cs = r->fn_off - 4;
+            int32_t  imm_c = ((int32_t)to - (int32_t)cs) >> 2;
+            bool fits19 = !no_direct && imm_c >= -(1 << 18) && imm_c <= (1 << 18) - 1;
+            form[i] = fits19 ? FORM_DIRECT : FORM_FALLBACK;
         }
-        e->code.data[r->fn_off + 0] = (uint8_t)(insn      );
-        e->code.data[r->fn_off + 1] = (uint8_t)(insn >>  8);
-        e->code.data[r->fn_off + 2] = (uint8_t)(insn >> 16);
-        e->code.data[r->fn_off + 3] = (uint8_t)(insn >> 24);
     }
-    return true;
+
+    if (ok) {
+        // Phase B: deletion set = dead second slots of direct conditionals.
+        // br[] is appended in emission order, so br[i].fn_off is strictly
+        // increasing and the filtered list is already sorted ascending.
+        bool do_compact = (getenv("TINYC_NO_COMPACT") == NULL);
+        uint32_t *del = (uint32_t *)malloc((nbr ? nbr : 1) * sizeof(uint32_t));
+        size_t ndel = 0;
+        if (do_compact) {
+            for (size_t i = 0; i < nbr; i++)
+                if (form[i] == FORM_DIRECT) {
+                    if (ndel > 0 && e->br[i].fn_off <= del[ndel - 1]) {
+                        do_compact = false; ndel = 0; break;  // not monotonic: bail safely
+                    }
+                    del[ndel++] = e->br[i].fn_off;
+                }
+        }
+        bool compacted = do_compact && ndel > 0;
+
+        // Phase C: compact the code buffer in place (drop every deleted word).
+        if (compacted) {
+            size_t w = 0, di = 0;
+            for (uint32_t o = 0; o < e->code.len; o += 4) {
+                if (di < ndel && del[di] == o) { di++; continue; }
+                if (w != o) memcpy(e->code.data + w, e->code.data + o, 4);
+                w += 4;
+            }
+            e->code.len = w;
+            // Remap the only intra-function offsets consumed downstream.
+            for (size_t i = 0; i < e->n_relocs; i++)
+                e->relocs[i].fn_off -= 4u * (uint32_t)a64_lower_count(del, ndel, e->relocs[i].fn_off);
+            for (size_t i = 0; i < e->n_dr; i++)
+                e->dr[i].fn_off -= 4u * (uint32_t)a64_lower_count(del, ndel, e->dr[i].fn_off);
+        }
+
+        // Phase D: write each branch at its (possibly remapped) offset against
+        // remapped target offsets. With compaction off, the dead direct slot is
+        // kept as an explicit NOP exactly as before.
+        #define NEWOFF(o) ((uint32_t)((o) - (compacted ? 4u * (uint32_t)a64_lower_count(del, ndel, (o)) : 0u)))
+        for (size_t i = 0; i < nbr && ok; i++) {
+            BranchReloc *r = &e->br[i];
+            uint32_t tnew = NEWOFF(tgt_old[i]);
+            if (form[i] == FORM_B) {
+                uint32_t fo = NEWOFF(r->fn_off);
+                a64_write_word(e, fo, arm64_b((int32_t)(tnew - fo) >> 2));
+            } else if (form[i] == FORM_DIRECT) {
+                uint32_t cs = NEWOFF(r->fn_off - 4);
+                int32_t  imm_c = (int32_t)(tnew - cs) >> 2;
+                uint32_t c = 0;
+                switch (r->kind) {
+                    case BR_B_COND: c = arm64_b_cond(imm_c, r->cond_or_rt); break;
+                    case BR_CBZ:    c = arm64_cbz(r->cond_or_rt, imm_c, r->sf); break;
+                    case BR_CBNZ:   c = arm64_cbnz(r->cond_or_rt, imm_c, r->sf); break;
+                    default: break;
+                }
+                a64_write_word(e, cs, c);
+                if (!compacted) a64_write_word(e, NEWOFF(r->fn_off), 0xD503201Fu); // NOP
+            } else {  // FORM_FALLBACK: inverted skip (+8) over an unconditional b
+                uint32_t cs = NEWOFF(r->fn_off - 4);
+                uint32_t fo = NEWOFF(r->fn_off);
+                uint32_t skip = 0;
+                switch (r->kind) {
+                    case BR_B_COND:
+                        skip = arm64_b_cond(2, (uint8_t)(r->cond_or_rt ^ 1u)); break;
+                    case BR_CBZ:
+                        skip = arm64_cbnz(r->cond_or_rt, 2, r->sf); break;
+                    case BR_CBNZ:
+                        skip = arm64_cbz(r->cond_or_rt, 2, r->sf); break;
+                    default: break;
+                }
+                a64_write_word(e, cs, skip);
+                a64_write_word(e, fo, arm64_b((int32_t)(tnew - fo) >> 2));
+            }
+        }
+        #undef NEWOFF
+        free(del);
+    }
+
+    free(form); free(tgt_old);
+    free(byhandle); free(fwd);
+    return ok;
 }
 
 // =============================================================================
@@ -1286,6 +1619,21 @@ static bool patch_branches(EmittedFunc *e) {
 // =============================================================================
 // Top-level translator.
 // =============================================================================
+
+// A contribution to the linmem __DATA image: `bytes` placed at `offset`.
+typedef struct { uint32_t offset; string bytes; } LinInit;
+
+// Assemble the final Mach-O image from per-function `EmittedFunc` records and
+// the linmem data-init contributions. Owns nothing on entry; frees `efs` and
+// `inits` (and the per-function heap buffers) before returning. This is the
+// shared back half of both the whole-module path (mlir_aarch64_to_macho) and
+// the streaming per-function path (mlir_llvm_to_macho).
+static bool finalize_macho(EmittedFunc *efs, size_t n_funcs, size_t start_idx,
+                           LinInit *inits, size_t n_inits,
+                           uint32_t n_globals, uint64_t global0_init,
+                           uint64_t linmem_size,
+                           uint8_t **out_data, size_t *out_size);
+
 bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
                            uint8_t **out_data, size_t *out_size) {
     (void)ctx;
@@ -1296,16 +1644,11 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     size_t n_top = MLIR_GetBlockNumOps(mb);
 
     // -----------------------------------------------------------------
-    // Read module-level layout attributes set by mlir_wmir_to_aarch64.
+    // Read module-level layout attributes set by mlir_llvm_to_aarch64.c.
     // -----------------------------------------------------------------
     uint32_t n_globals    = (uint32_t)attr_i(module, "n_globals");
     uint64_t global0_init = (uint64_t)attr_i(module, "global0_init");
     uint64_t linmem_size  = (uint64_t)attr_i(module, "linmem_size");
-
-    uint32_t globals_bytes  = n_globals * 8u;
-    uint32_t globals_padded = (globals_bytes + 15u) & ~15u;
-    bool     has_data_seg   = (n_globals > 0) || (linmem_size > 0);
-    uint32_t data_priv_size = has_data_seg ? 32u : 0u;
 
     // -----------------------------------------------------------------
     // Collect functions, find `_start`. `_start` must be placed first
@@ -1316,13 +1659,10 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     size_t start_idx = (size_t)-1;
     // -----------------------------------------------------------------
     // Walk top-level for data_init ops first: collect the contributions
-    // to the linmem __DATA section. linmem_init_size is the high-water
-    // mark across all (offset+size) records.
+    // to the linmem __DATA section.
     // -----------------------------------------------------------------
-    typedef struct { uint32_t offset; string bytes; } LinInit;
     LinInit  *inits = NULL;
     size_t    n_inits = 0;
-    uint32_t  linmem_init_size = 0;
     for (size_t i = 0; i < n_top; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
         if (MLIR_GetOpType(op) != OP_TYPE_AARCH64_DATA_INIT) continue;
@@ -1332,12 +1672,6 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
         inits[n_inits].offset = (uint32_t)off;
         inits[n_inits].bytes  = bs;
         n_inits++;
-        uint32_t end = (uint32_t)off + (uint32_t)bs.size;
-        if (end > linmem_init_size) linmem_init_size = end;
-    }
-    if (linmem_init_size > 0) {
-        // Round up to 16 for ARM64 alignment expectations.
-        linmem_init_size = (linmem_init_size + 15u) & ~15u;
     }
 
     for (size_t i = 0; i < n_top; i++) {
@@ -1378,6 +1712,41 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
             free(efs[k].br); free(efs[k].bp);
         }
         free(efs); free(inits); return false;
+    }
+
+    return finalize_macho(efs, n_funcs, start_idx, inits, n_inits,
+                          n_globals, global0_init, linmem_size,
+                          out_data, out_size);
+}
+
+static bool finalize_macho(EmittedFunc *efs, size_t n_funcs, size_t start_idx,
+                           LinInit *inits, size_t n_inits,
+                           uint32_t n_globals, uint64_t global0_init,
+                           uint64_t linmem_size,
+                           uint8_t **out_data, size_t *out_size) {
+    *out_data = NULL; *out_size = 0;
+
+    // Derived layout values (recomputed here so this entry is self-contained
+    // for both the whole-module and streaming callers).
+    uint32_t globals_bytes  = n_globals * 8u;
+    uint32_t globals_padded = (globals_bytes + 15u) & ~15u;
+    bool     has_data_seg   = (n_globals > 0) || (linmem_size > 0);
+    uint32_t data_priv_size = has_data_seg ? 32u : 0u;
+    (void)globals_bytes;
+
+    // linmem_init_size = high-water mark across all data-init records.
+    uint32_t linmem_init_size = 0;
+    for (size_t i = 0; i < n_inits; i++) {
+        uint32_t end = inits[i].offset + (uint32_t)inits[i].bytes.size;
+        if (end > linmem_init_size) linmem_init_size = end;
+    }
+    if (linmem_init_size > 0) {
+        // Round up to 16 for ARM64 alignment expectations.
+        linmem_init_size = (linmem_init_size + 15u) & ~15u;
+        // The native llvm->aarch64 path stores globals in the linmem
+        // template section without any linmem/globals; ensure the
+        // __DATA segment (and its 32-byte data_priv prefix) is emitted.
+        if (!has_data_seg) { has_data_seg = true; data_priv_size = 32u; }
     }
 
     // -----------------------------------------------------------------
@@ -1480,7 +1849,7 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     // sizeofcmds varies with __DATA presence. We use up to 2 sections in
     // __DATA: __data + __linmem_template. Linear memory itself is
     // allocated dynamically by `_start` via mmap (see synth_start in
-    // mlir_wmir_to_aarch64.c), so the binary no longer reserves a
+    // mlir_llvm_to_aarch64.c), so the binary no longer reserves a
     // multi-GiB __linmem_bss zerofill section — that placement is
     // incompatible with the dyld shared cache on macOS arm64.
     uint32_t n_data_sections  = 0;
@@ -1732,8 +2101,8 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     buf_le64(&img, 0);
 
     // LC_MAIN
-    // Initial stack size: 256 MB. This is large because the wmir
-    // backend currently doesn't promote wasm locals to physical
+    // Initial stack size: 256 MB. This is large because the
+    // backend does not promote wasm locals to physical
     // registers — every local lives in an 8-byte stack cell, and
     // the regalloc spills aggressively (no live-range splitting).
     // Real-world tinyc functions like emit_expr end up with ~225 KB
@@ -1875,16 +2244,32 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
             } else if (dr->kind.size == 15 && memcmp(dr->kind.str, "linmem_template", 15) == 0) {
                 dst_vm = linmem_tpl_vmaddr;
             } else {
-                fprintf(stderr,
-                    "aarch64->macho: unknown data reloc kind '%.*s'\n",
-                    (int)dr->kind.size, dr->kind.str);
-                for (size_t k2 = 0; k2 < n_funcs; k2++) {
-                    free(efs[k2].code.data); free(efs[k2].relocs); free(efs[k2].dr);
+                // Otherwise treat the reloc kind as a local function symbol:
+                // resolve to that function's absolute VM address. Used to
+                // materialise function-pointer values (addressof @func).
+                bool found = false;
+                for (size_t j = 0; j < n_funcs; j++) {
+                    if (efs[j].name.size == dr->kind.size &&
+                        memcmp(efs[j].name.str, dr->kind.str, dr->kind.size) == 0) {
+                        dst_vm = TEXT_VM_BASE + (uint64_t)text_section_off
+                               + (uint64_t)efs[j].text_off;
+                        found = true;
+                        break;
+                    }
                 }
-                free(efs); free(inits); free(img.data); return false;
+                if (!found) {
+                    fprintf(stderr,
+                        "aarch64->macho: unknown data reloc kind '%.*s'\n",
+                        (int)dr->kind.size, dr->kind.str);
+                    for (size_t k2 = 0; k2 < n_funcs; k2++) {
+                        free(efs[k2].code.data); free(efs[k2].relocs); free(efs[k2].dr);
+                    }
+                    free(efs); free(inits); free(img.data); return false;
+                }
             }
             uint64_t src_pc = TEXT_VM_BASE + (uint64_t)text_section_off
                             + (uint64_t)efs[i].text_off + (uint64_t)dr->fn_off;
+            dst_vm += dr->addend;
             size_t   img_off = text_section_off + efs[i].text_off + dr->fn_off;
             uint32_t insn;
             if (!dr->is_add_lo) {
@@ -2048,7 +2433,39 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     }
     while (strtab.len % 8) buf_u8(&strtab, 0);
 
+    // Optional: per-function local symbols (gated by env var) so `sample`/
+    // `nm`/`atos` can name functions in the stripped output. Names are the
+    // lifter's `func_<wasmidx>` (or import name); n_value points at the
+    // function's text VM address.
+    bool emit_local_syms = (getenv("A64_LOCAL_SYMS") != NULL);
+    Buf locals_strs = {0};
+    uint32_t *local_stroff = NULL;
+    if (emit_local_syms) {
+        local_stroff = (uint32_t *)malloc(n_funcs * sizeof(uint32_t));
+        for (size_t i = 0; i < n_funcs; i++) {
+            local_stroff[i] = (uint32_t)strtab.len + (uint32_t)locals_strs.len;
+            // leading '_' for tool friendliness
+            buf_u8(&locals_strs, (uint8_t)'_');
+            for (size_t k = 0; k < efs[i].name.size; k++)
+                buf_u8(&locals_strs, (uint8_t)efs[i].name.str[k]);
+            buf_u8(&locals_strs, 0);
+        }
+        buf_append(&strtab, locals_strs.data, locals_strs.len);
+        while (strtab.len % 8) buf_u8(&strtab, 0);
+    }
+
     Buf symtab = {0};
+    // Local function symbols come FIRST (dysymtab requires locals, then
+    // external-defined, then undefined, each contiguous).
+    if (emit_local_syms) {
+        for (size_t i = 0; i < n_funcs; i++) {
+            buf_le32(&symtab, local_stroff[i]);
+            buf_u8(&symtab, 0x0e);  // N_SECT (local, not external)
+            buf_u8(&symtab, 1);     // n_sect = __text
+            buf_le16(&symtab, 0);
+            buf_le64(&symtab, TEXT_VM_BASE + text_section_off + efs[i].text_off);
+        }
+    }
     // __mh_execute_header
     buf_le32(&symtab, str_mh);
     buf_u8(&symtab, 0x0f); buf_u8(&symtab, 1);
@@ -2077,18 +2494,20 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
         }
     }
 
-    uint32_t n_syms       = 2u + n_stubs;
+    uint32_t n_locals     = emit_local_syms ? (uint32_t)n_funcs : 0u;
+    uint32_t n_syms       = n_locals + 2u + n_stubs;
     uint32_t n_undefs     = n_stubs;
-    uint32_t iundefsym    = 2;
+    uint32_t iextdefsym   = n_locals;
+    uint32_t iundefsym    = n_locals + 2u;
 
     // Indirect-symbols table: 2*n_stubs entries. The first n_stubs are
     // for the __got section (reserved1=0 in the section header); the
     // next n_stubs are for __stubs (reserved1=n_stubs). Both blocks
     // hold the same values: indirect_sym[i] = symtab index of the
-    // undef sym that backs slot i. Our undefs start at symtab[2].
+    // undef sym that backs slot i. Undefs start at iundefsym.
     Buf indsyms = {0};
-    for (uint32_t i = 0; i < n_stubs; i++) buf_le32(&indsyms, 2u + i);  // GOT
-    for (uint32_t i = 0; i < n_stubs; i++) buf_le32(&indsyms, 2u + i);  // stubs
+    for (uint32_t i = 0; i < n_stubs; i++) buf_le32(&indsyms, iundefsym + i);  // GOT
+    for (uint32_t i = 0; i < n_stubs; i++) buf_le32(&indsyms, iundefsym + i);  // stubs
 
     size_t symtab_off  = img.len;
     buf_append(&img, symtab.data, symtab.len);
@@ -2128,8 +2547,8 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     buf_patch_le32(&img, pos_lc_symtab           + 16, (uint32_t)strtab_off);
     buf_patch_le32(&img, pos_lc_symtab           + 20, (uint32_t)strtab.len);
     buf_patch_le32(&img, pos_lc_dysymtab         + 8,  0);
-    buf_patch_le32(&img, pos_lc_dysymtab         + 12, 0);
-    buf_patch_le32(&img, pos_lc_dysymtab         + 16, 0);
+    buf_patch_le32(&img, pos_lc_dysymtab         + 12, n_locals);
+    buf_patch_le32(&img, pos_lc_dysymtab         + 16, iextdefsym);
     buf_patch_le32(&img, pos_lc_dysymtab         + 20, 2);
     buf_patch_le32(&img, pos_lc_dysymtab         + 24, iundefsym);
     buf_patch_le32(&img, pos_lc_dysymtab         + 28, n_undefs);
@@ -2246,4 +2665,140 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     *out_data = img.data;
     *out_size = img.len;
     return true;
+}
+
+// ===========================================================================
+// Streaming llvm -> Mach-O backend (low peak memory).
+//
+// The whole-module path (mlir_llvm_to_aarch64 + mlir_aarch64_to_macho) keeps
+// every function's aarch64 IR live at once, which — with the trivial
+// spill-everything allocator — balloons peak RSS past the 4GB self-host
+// budget. Here we instead lower ONE function at a time into a throwaway temp
+// arena, encode it to a heap `EmittedFunc`, deep-copy the few strings the
+// finalizer needs out of the temp arena, then reset the temp arena before the
+// next function. Type interning is pinned to the persistent arena for the
+// duration so cached type handles never dangle across a reset.
+// ===========================================================================
+
+// Track heap copies of EmittedFunc strings so they can be freed after the
+// finalizer (which only reads, never frees, the string contents).
+typedef struct { char **p; size_t n, c; } OwnedStrs;
+
+static char *owned_dup(OwnedStrs *o, string s) {
+    char *p = (char *)malloc(s.size + 1);
+    memcpy(p, s.str, s.size);
+    p[s.size] = 0;
+    if (o->n == o->c) {
+        o->c = o->c ? o->c * 2 : 256;
+        o->p = (char **)realloc(o->p, o->c * sizeof(char *));
+    }
+    o->p[o->n++] = p;
+    return p;
+}
+
+// Deep-copy name + reloc callees + data-reloc kinds out of the temp arena.
+static void ef_heapdup_strings(EmittedFunc *e, OwnedStrs *o) {
+    if (e->name.size) e->name = (string){ owned_dup(o, e->name), e->name.size };
+    for (size_t i = 0; i < e->n_relocs; i++) {
+        string c = e->relocs[i].callee;
+        if (c.size) e->relocs[i].callee = (string){ owned_dup(o, c), c.size };
+    }
+    for (size_t i = 0; i < e->n_dr; i++) {
+        string k = e->dr[i].kind;
+        if (k.size) e->dr[i].kind = (string){ owned_dup(o, k), k.size };
+    }
+}
+
+static void ef_free_one(EmittedFunc *e) {
+    free(e->code.data); free(e->relocs); free(e->dr);
+    free(e->br); free(e->bp);
+}
+
+bool mlir_llvm_to_macho(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
+                        uint8_t **out_data, size_t *out_size) {
+    *out_data = NULL; *out_size = 0;
+
+    uint8_t *gblob = NULL; uint32_t gblob_len = 0;
+    LlvmSelState *sel = mlir_llvm_sel_begin(ctx, llvm_module, &gblob, &gblob_len);
+    if (!sel) return false;
+    if (!mlir_llvm_sel_saw_main(sel)) {
+        fprintf(stderr, "llvm->aarch64: no defined 'main' function\n");
+        mlir_llvm_sel_end(sel); free(gblob); return false;
+    }
+
+    size_t nf = mlir_llvm_sel_num_funcs(sel);
+    EmittedFunc *efs = (EmittedFunc *)calloc(nf + 1, sizeof(EmittedFunc));
+    size_t n_funcs = 0;
+    size_t start_idx = (size_t)-1;
+    OwnedStrs owned = {0};
+
+    Arena *persist = MLIR_GetArenaAllocator(ctx);
+    ctx->type_arena = persist;   // pin type interning to the persistent arena
+
+    Arena *tmp = arena_create(1 * 1024 * 1024);
+    arena_pos_t tmp0 = arena_get_pos(tmp);
+
+    bool ok = true;
+    // Lower _start first, then each defined function in source order.
+    for (size_t i = 0; ok && i <= nf; i++) {
+        MLIR_SetArenaAllocator(ctx, tmp);
+        MLIR_OpHandle fn = (i == 0)
+            ? mlir_llvm_sel_synth_start(ctx, sel)
+            : mlir_llvm_sel_func(ctx, sel, i - 1);
+        EmittedFunc *e = &efs[n_funcs];
+        if (fn == MLIR_INVALID_HANDLE) {
+            ok = false;
+        } else if (!emit_aarch64_func(fn, e) || !patch_branches(e)) {
+            ef_free_one(e);
+            *e = (EmittedFunc){0};
+            ok = false;
+        }
+        MLIR_SetArenaAllocator(ctx, persist);
+        if (ok) {
+            // br/bp are only needed by patch_branches; drop them now.
+            free(e->br); e->br = NULL; e->n_br = e->c_br = 0;
+            free(e->bp); e->bp = NULL; e->n_bp = e->c_bp = 0;
+            ef_heapdup_strings(e, &owned);
+            if (e->name.size == 6 && memcmp(e->name.str, "_start", 6) == 0)
+                start_idx = n_funcs;
+            n_funcs++;
+        }
+        arena_reset(tmp, tmp0);
+    }
+
+    arena_destroy(tmp);
+    ctx->type_arena = NULL;       // unpin
+    mlir_llvm_sel_end(sel);
+
+    if (!ok || start_idx == (size_t)-1) {
+        if (ok)
+            fprintf(stderr, "llvm->aarch64: no `_start` after streaming\n");
+        for (size_t k = 0; k < n_funcs; k++) ef_free_one(&efs[k]);
+        free(efs);
+        for (size_t k = 0; k < owned.n; k++) free(owned.p[k]);
+        free(owned.p);
+        free(gblob);
+        return false;
+    }
+
+    // One data-init record carrying the global blob (offset 0).
+    LinInit *inits = NULL; size_t n_inits = 0;
+    if (gblob_len > 0) {
+        inits = (LinInit *)malloc(sizeof(LinInit));
+        inits[0].offset = 0;
+        inits[0].bytes  = (string){ (char *)gblob, gblob_len };
+        n_inits = 1;
+    }
+
+    // The llvm path carries no separate linmem/globals layout attrs; the
+    // data blob alone drives the __DATA segment.
+    bool r = finalize_macho(efs, n_funcs, start_idx, inits, n_inits,
+                            0, 0, 0, out_data, out_size);
+
+    // finalize_macho consumed/freed efs and inits; the blob bytes and the
+    // duped strings are no longer referenced.
+    for (size_t k = 0; k < owned.n; k++) free(owned.p[k]);
+    free(owned.p);
+    free(gblob);
+    return r;
 }

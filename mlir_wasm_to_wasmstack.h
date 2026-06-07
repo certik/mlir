@@ -2,14 +2,14 @@
 //
 // First-light scaffold: parses a linked wasm32 module produced by
 // wasm-ld and emits a wasmstack MLIR module compatible with the
-// existing wasmstack -> wasmssa -> wmir -> aarch64 -> macho pipeline.
+// existing wasmstack -> wasmssa -> llvm -> aarch64 -> macho pipeline.
 //
 // Function naming convention:
 //   * Imports get `<module>_<name>` (e.g. "wasi_snapshot_preview1_proc_exit").
 //     The recognised WASI imports use just their unprefixed name (e.g.
-//     "proc_exit", "fd_write") so the wmir synth helpers can match them.
+//     "proc_exit", "fd_write") so the backend runtime helpers can match them.
 //   * The function exported as "_start" is renamed to "wasi_start" so
-//     that the wmir backend's synth_start does not collide with it.
+//     that the backend's synthesised start does not collide with it.
 //   * Other defined functions: "func_<idx>" where <idx> is the linked
 //     wasm function index. Callers reference targets by that name.
 //

@@ -52,7 +52,8 @@ LOWERING_FLAG = [f"--lowering={LOWERING}"] if LOWERING else []
 TARGET = os.environ.get("TINYC_TARGET", "native")
 # Selects which macho backend to use when TARGET=macho. The default
 # `wasm` backend goes wasmssa -> wasmstack -> wasm.o -> Mach-O. The
-# `wmir` backend goes wasmssa -> wmir -> aarch64 -> Mach-O.
+# `llvm` backend goes wasmssa -> llvm -> aarch64 -> Mach-O (native,
+# LP64); `llvm_via_wasm` lifts a linked wasm module through it.
 MACHO_BACKEND = os.environ.get("TINYC_MACHO_BACKEND", "wasm")
 # When TINYC_LIFT_USE_NATIVE=1, the upstream tinyc binary first runs the
 # (partial) native cf->scf lifter and then finishes any leftover cf ops
@@ -207,10 +208,13 @@ def main():
         expected_rc      = t.get("expected_exit_code", 0)
         # Tests that differ between wasm32 (4-byte pointers, 4-byte long)
         # and the host (8-byte pointers on x86_64/aarch64) can override
-        # the expected stdout with `expected_stdout_wasm`. The macho
-        # backend consumes the same wasm pipeline output, so it also uses
-        # the wasm32-flavored expected stdout when one is provided.
-        if TARGET in ("wasm", "macho") and "expected_stdout_wasm" in t:
+        # the expected stdout with `expected_stdout_wasm`. The wasm and
+        # llvm_via_wasm macho backends consume the wasm32-sized pipeline,
+        # so they use the wasm32-flavored expected stdout. The native
+        # `llvm` macho backend
+        # is LP64 (native sizing), so it keeps the native `expected_stdout`.
+        if (TARGET in ("wasm", "macho") and "expected_stdout_wasm" in t
+                and not (TARGET == "macho" and MACHO_BACKEND == "llvm")):
             expected = t["expected_stdout_wasm"]
         # `targets` lists the runner targets a test may run under. Default
         # (omitted) is ["native", "wasm"] — the established backends.
@@ -262,6 +266,14 @@ def main():
         if (TARGET == "wasm" and LOWERING != "native"
                 and t.get("wasm_upstream_skip")):
             print(f"SKIP {name} (wasm_upstream_skip)")
+            skipped += 1
+            continue
+        # Inverse opt-out: tests that exercise wasm-only semantics (WASI
+        # imports, wasm32 long-sizing) which cannot run on the LP64
+        # `llvm` macho backend — there is no WASI host there.
+        if (TARGET == "macho" and MACHO_BACKEND == "llvm"
+                and t.get("macho_llvm_skip")):
+            print(f"SKIP {name} (macho_llvm_skip)")
             skipped += 1
             continue
         # Multi-file tests pass `sources = [...]`; single-file tests
@@ -335,13 +347,14 @@ def main():
             obj = HERE / "tests" / f"{name}.macho.wasm.o"
             exe = HERE / "tests" / f"{name}.macho"
 
-            # The wmir_via_wasm sub-backend goes through the new lifter:
+            # The llvm_via_wasm sub-backend goes through the lifter:
             #   per-source --emit=wasm + wasm-ld + --from-wasm <linked.wasm>
             # so it always exercises the full wasm-linker pipeline before
-            # touching the wmir backend. This is the only way to get
+            # touching the llvm backend. This is the only way to get
             # per-TU isolation that tinyc itself doesn't provide for the
             # joint multi-source --emit=macho invocation.
-            if MACHO_BACKEND == "wmir_via_wasm":
+            if MACHO_BACKEND == "llvm_via_wasm":
+                via_backend = "llvm"
                 # Per-source emit -> link -> from-wasm -> macho.
                 # Mirror the wasm-target convention: by default the
                 # sources are compiled jointly (so cross-file calls
@@ -387,7 +400,7 @@ def main():
                     failures += 1
                     continue
                 r = run([str(TINYC), "--from-wasm", str(linked_wasm),
-                         "--emit=macho", "--macho-backend=wmir",
+                         "--emit=macho", f"--macho-backend={via_backend}",
                          "-o", str(exe)])
                 if r.returncode != 0:
                     print(f"FAIL {name}: tinyc --from-wasm returned {r.returncode}\nstderr:\n{r.stderr}")
@@ -411,14 +424,13 @@ def main():
             # Stage 1: tinyc emits wasm32 object, links it with the wasm
             # runtime + _start shim, and translates the linked module to
             # a signed Mach-O ARM64 binary — all in one invocation.
-            # For the experimental `wmir` backend the wasm runtime
-            # objects are not needed (the backend synthesises its own
-            # `_start` and uses a direct svc-based exit).
+            # The `llvm` backend uses native host pointers and synthesises
+            # its own runtime, so the wasm runtime objects are not needed.
             tinyc_cmd = [str(TINYC), "--emit=macho", *LOWERING_FLAG,
                          "-I", str(HERE / "tests"),
                          "-o", str(exe)]
-            if MACHO_BACKEND == "wmir":
-                tinyc_cmd.append("--macho-backend=wmir")
+            if MACHO_BACKEND == "llvm":
+                tinyc_cmd.append("--macho-backend=llvm")
             else:
                 tinyc_cmd.append(f"--wasm-runtime-obj={wasm_runtime_obj}")
                 tinyc_cmd.append(f"--wasm-runtime-obj={wasm_start_obj}")

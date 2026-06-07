@@ -35,6 +35,12 @@ compiler_tester/__pycache__/
 /selfhost_macho_wmir_stage1/
 /selfhost_macho_wmir_stage2/
 /selfhost_macho_wmir_stage3/
+/tinyc_stage1_macho_llvm
+/tinyc_stage2_macho_llvm
+/tinyc_stage3_macho_llvm
+/selfhost_macho_llvm_stage1/
+/selfhost_macho_llvm_stage2/
+/selfhost_macho_llvm_stage3/
 _libc_io_tmp.txt
 parser_tinyc
 build_tinyc/

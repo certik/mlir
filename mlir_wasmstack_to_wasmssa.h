@@ -3,7 +3,7 @@
 // Reverse of mlir_wasmssa_to_wasmstack.c. Walks each wasmstack func's
 // flat opcode sequence, simulates the operand stack and the local
 // variable array, and reconstructs SSA values for downstream
-// consumption by the wasmssa -> wmir pipeline.
+// consumption by the wasmssa -> llvm pipeline.
 //
 // First-light scope (macho_exit): linear functions with no structured
 // control flow. Each wasmstack op pops its operands, produces (at

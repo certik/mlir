@@ -1,6 +1,6 @@
 // aarch64 (MLIR dialect) -> Mach-O ARM64 binary translator.
 //
-// Pairs with mlir_wmir_to_aarch64.{h,c}: that pass produces an MLIR
+// Pairs with mlir_llvm_to_aarch64.{h,c}: that pass produces an MLIR
 // module whose top-level ops are `aarch64.func`, each containing a
 // flat sequence of aarch64 instruction ops (1:1 with the binary
 // encoding). This file is the "dumb" byte emitter that turns that

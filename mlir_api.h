@@ -34,10 +34,18 @@ typedef struct MLIR_Context {
     // chains (UseNode allocations + the parallel operand_uses /
     // successor_operand_uses arrays). The def-use machinery is only needed
     // by the cf->scf and lower-to-LLVM passes; the wasm -> wasmstack ->
-    // wasmssa -> wmir -> aarch64 -> macho pipeline never queries uses, so
+    // wasmssa -> llvm -> aarch64 -> macho pipeline never queries uses, so
     // disabling it there removes a large per-op memory overhead. Defaults
     // to false (tracking on) so all existing callers are unaffected.
     bool no_def_use_tracking;
+    // When non-NULL, the process-wide type/struct intern registry allocates
+    // its IR_Type objects AND its handle arrays into this arena instead of
+    // `arena`. The streaming llvm->aarch64->macho backend lowers each function
+    // into a throwaway temp arena (swapping `arena`) but must keep interned
+    // types — which are cached in the global registry across functions — in a
+    // persistent arena so cached handles never dangle after a temp arena is
+    // released. Defaults to NULL (= use `arena`, no behaviour change).
+    Arena *type_arena;
 } MLIR_Context;
 
 typedef struct MLIR_LocationMap {
@@ -272,7 +280,7 @@ typedef enum {
     // typed locals (params + declared locals). LOCAL_GET reads slot
     // `local_idx`, LOCAL_SET writes it. Locals are NEVER address-taken
     // in wasm semantics, so they live in a native (non-linmem) stack
-    // frame that the wmir->aarch64 backend allocates. The lifter used
+    // frame that the llvm->aarch64 backend allocates. The lifter used
     // to spill them into linmem cells (8 bytes each), which inflated
     // the wasm stack by ~20x and forced unrealistic stack-size grows.
     //   attrs: valtype (i32 byte: i32|i64|f32|f64), local_idx (i32).
@@ -341,7 +349,7 @@ typedef enum {
     // sized appropriately.
     OP_TYPE_WASMSTACK_DATA_SEGMENT,
     // Module-level global declaration with an initial value. Lifted
-    // from the wasm GLOBAL section. The wmir backend allocates a static
+    // from the wasm GLOBAL section. The backend allocates a static
     // i64 slot per global; only the initial value matters.
     OP_TYPE_WASMSTACK_GLOBAL_DECL,
 
@@ -349,97 +357,13 @@ typedef enum {
     // (slot, target) — i.e. table_slot_index N now contains a reference
     // to function `target`. The wasmstack -> wasmssa pass collects these
     // and emits a synthetic wasmssa.func "_tinyc_fnptr_init" containing
-    // one wasmssa.func_addr per entry, so the wmir pre-pass sees them.
+    // one wasmssa.func_addr per entry, so the lifter pre-pass sees them.
     OP_TYPE_WASMSTACK_FUNC_ADDR_DECL,
-
-    // -------------------------------------------------------------------------
-    // wmir dialect — flat-CFG, post-wasmssa middle IR. The plan is to make
-    // this the "computation, not bytecode" representation that the AArch64
-    // selector consumes: real iN/fN/ptr types, explicit `trap_if`,
-    // explicit heap-address computation, explicit indirect-call type
-    // checks. The first-light slice (`macho_exit`) only needs three ops;
-    // everything else will be added test-by-test in subsequent passes.
-    // -------------------------------------------------------------------------
-    OP_TYPE_WMIR_FUNC,
-    OP_TYPE_WMIR_CONST,
-    OP_TYPE_WMIR_RETURN,
-    // Integer arithmetic (i32 / i64, dispatched on result type).
-    OP_TYPE_WMIR_IADD,
-    OP_TYPE_WMIR_ISUB,
-    OP_TYPE_WMIR_IMUL,
-    OP_TYPE_WMIR_SDIV,
-    OP_TYPE_WMIR_UDIV,
-    OP_TYPE_WMIR_SREM,
-    OP_TYPE_WMIR_UREM,
-    OP_TYPE_WMIR_IAND,
-    OP_TYPE_WMIR_IOR,
-    OP_TYPE_WMIR_IXOR,
-    OP_TYPE_WMIR_ISHL,
-    OP_TYPE_WMIR_SSHR,   // arithmetic shift right
-    OP_TYPE_WMIR_USHR,   // logical  shift right
-    // Integer conversions (between i32 and i64).
-    OP_TYPE_WMIR_SEXT,   // sign-extend i32 -> i64
-    OP_TYPE_WMIR_ZEXT,   // zero-extend i32 -> i64
-    OP_TYPE_WMIR_TRUNC,  // truncate    i64 -> i32
-    // Wasm global access (vmctx-relative; first-light: i32 globals only).
-    OP_TYPE_WMIR_GLOBAL_GET,
-    OP_TYPE_WMIR_GLOBAL_SET,
-    // Wasm linear-memory access. operand is a wasm32 byte offset; the
-    // wmir->aarch64 lowering adds linmem_base + zext(offset).
-    OP_TYPE_WMIR_LOAD,
-    OP_TYPE_WMIR_STORE,
-    // Wasm function-locals access on the native (non-linmem) stack
-    // frame. See OP_TYPE_WASMSSA_LOCAL_GET/SET for rationale.
-    //   attrs: valtype (i32 byte), local_idx (i32).
-    OP_TYPE_WMIR_LOCAL_GET,
-    OP_TYPE_WMIR_LOCAL_SET,
-    // Direct function call by symbol name.
-    OP_TYPE_WMIR_CALL,
-    // Integer compare. `pred` attribute is one of:
-    //   "eq", "ne", "slt", "sgt", "sle", "sge", "ult", "ugt", "ule", "uge".
-    // Returns i32 with the Wasm 0/1 boolean convention.
-    OP_TYPE_WMIR_ICMP,
-    // Compare-to-zero. Returns i32 0/1 (1 if operand == 0).
-    OP_TYPE_WMIR_EQZ,
-    // Unconditional branch to a block (with operands forwarded as block args).
-    OP_TYPE_WMIR_BR,
-    // Conditional branch. operand[0] = i32 condition (zero -> false branch,
-    // non-zero -> true branch). `true_block` and `false_block` are successors.
-    OP_TYPE_WMIR_COND_BR,
-    // Unreachable terminator. Lowers to a trap (currently brk #1).
-    OP_TYPE_WMIR_UNREACHABLE,
-    // 3-operand select. result = cond != 0 ? a : b.
-    OP_TYPE_WMIR_SELECT,
-    // Module-level: a slice of bytes to place at the given offset within
-    // linmem at link time. Lowers 1:1 to aarch64.data_init.
-    //   attrs: sym_name (string, debug), offset (i32), init_data (string).
-    OP_TYPE_WMIR_DATA_INIT,
-    // Float arithmetic, modelled on i32/i64 bit-pattern values. The
-    // f32/f64 type distinction is carried by the `fwidth` attribute
-    // (32 or 64) rather than the MLIR result type, which stays i32 /
-    // i64 throughout wmir. This lets the existing spill/reload machinery
-    // (which keys on i32 vs i64) just work — the wmir->aarch64 stage
-    // detours through a V register only for the duration of the FP
-    // instruction itself.
-    //   attrs: kind (string: fadd|fsub|fmul|fdiv), fwidth (i32: 32|64).
-    OP_TYPE_WMIR_FBINOP,
-    //   attrs: kind (string: fneg|fabs|fsqrt), fwidth.
-    OP_TYPE_WMIR_FUNOP,
-    //   attrs: pred (oeq|une|olt|ole|ogt|oge), fwidth. Result is i32 (0|1).
-    OP_TYPE_WMIR_FCMP,
-    //   attrs: kind (string: f2f|f2i|i2f), src_w, dst_w, sign (bool, for
-    //     f2i / i2f). Operand and result are i32 / i64 bit patterns.
-    OP_TYPE_WMIR_FCONV,
-
-    //   No operands; result is i32 (linmem size in 64 KiB pages).
-    OP_TYPE_WMIR_MEMORY_SIZE,
-    //   1 operand (i32 delta pages); result is i32 (prev size, or -1).
-    OP_TYPE_WMIR_MEMORY_GROW,
 
     // -------------------------------------------------------------------------
     // aarch64 dialect — 1:1 with the AArch64 instruction encoding. The
     // `aarch64 → Mach-O` backend is a "dumb" byte emitter; all isel /
-    // register-allocation knowledge lives in the `wmir → aarch64` lowering.
+    // register-allocation knowledge lives in the `llvm → aarch64` lowering.
     // First-light slice: just enough to run `int main() { return 42; }`
     // and have its return value become the process exit code via a
     // direct `svc #0x80` Mach syscall (no `proc_exit` shim required).
@@ -449,6 +373,7 @@ typedef enum {
     OP_TYPE_AARCH64_MOVK,   // movk Wd|Xd, #imm16, LSL #(hw*16)
     OP_TYPE_AARCH64_MOV_X,  // mov Xd, Xn  (register move; X-form)
     OP_TYPE_AARCH64_BL,     // bl <symbol>  (branch-and-link, PC-relative)
+    OP_TYPE_AARCH64_BLR,    // blr Xn  (indirect branch-and-link via register)
     OP_TYPE_AARCH64_SVC,    // svc #imm16
     OP_TYPE_AARCH64_RET,    // ret (== ret x30)
 
@@ -462,11 +387,15 @@ typedef enum {
     OP_TYPE_AARCH64_UDIV,     // udiv Wd|Xd, Wn|Xn, Wm|Xm
     OP_TYPE_AARCH64_MSUB,     // msub Wd, Wn, Wm, Wa  (used for srem/urem)
     OP_TYPE_AARCH64_AND_REG,  // and  Wd|Xd, Wn|Xn, Wm|Xm
+    OP_TYPE_AARCH64_AND_IMM,  // and  Wd|Xd, Wn|Xn, #(1<<w)-1  (low-w-bits mask)
     OP_TYPE_AARCH64_ORR_REG,  // orr  Wd|Xd, Wn|Xn, Wm|Xm
     OP_TYPE_AARCH64_EOR_REG,  // eor  Wd|Xd, Wn|Xn, Wm|Xm
     OP_TYPE_AARCH64_LSL_REG,  // lslv Wd|Xd, Wn|Xn, Wm|Xm
     OP_TYPE_AARCH64_LSR_REG,  // lsrv Wd|Xd, Wn|Xn, Wm|Xm
     OP_TYPE_AARCH64_ASR_REG,  // asrv Wd|Xd, Wn|Xn, Wm|Xm
+    OP_TYPE_AARCH64_LSL_IMM,  // lsl Wd|Xd, Wn|Xn, #shift  (UBFM alias)
+    OP_TYPE_AARCH64_LSR_IMM,  // lsr Wd|Xd, Wn|Xn, #shift  (UBFM alias)
+    OP_TYPE_AARCH64_ASR_IMM,  // asr Wd|Xd, Wn|Xn, #shift  (SBFM alias)
     OP_TYPE_AARCH64_SXTW,     // sxtw Xd, Wn  (alias for SBFM)
     OP_TYPE_AARCH64_SXTB,     // sxtb Wd|Xd, Wn  (sign-extend low byte)
     OP_TYPE_AARCH64_SXTH,     // sxth Wd|Xd, Wn  (sign-extend low half)
@@ -496,11 +425,11 @@ typedef enum {
     OP_TYPE_AARCH64_PROLOGUE,
     OP_TYPE_AARCH64_EPILOGUE,
     // Comparison + condition-set. Used to materialise i32 booleans for
-    // `wmir.icmp` and `wmir.eqz` results.
+    // `llvm.icmp` and eqz results.
     OP_TYPE_AARCH64_CMP_REG,    // cmp Wn, Wm  (== subs Wzr, Wn, Wm)
     OP_TYPE_AARCH64_CMP_IMM,    // cmp Wn, #imm12  (== subs Wzr, Wn, #imm12)
     OP_TYPE_AARCH64_CSET,       // cset Wd, COND (== csinc Wd, Wzr, Wzr, invert(COND))
-    // Conditional select. `csel Wd, Wn, Wm, COND`. Used for wmir.select.
+    // Conditional select. `csel Wd, Wn, Wm, COND`. Used for llvm.select.
     OP_TYPE_AARCH64_CSEL,
     // Control-flow ops. `target` attribute is the symbolic label name.
     // The macho backend tracks all `aarch64.label` positions inside a

@@ -88,16 +88,17 @@ NATIVE_C_FILES=(
     mlir_wasm_to_wat.c
     mlir_wasm_to_macho.c
     mlir_llvm_to_wasmssa.c
+    mlir_wasmssa_to_llvm.c
     mlir_wasmssa_to_wasmstack.c
     mlir_wasmstack_to_bin.c
     mlir_wasm_link.c
     mlir_wasm_to_wasmstack.c
     mlir_wasmstack_to_wasmssa.c
-    mlir_wasmssa_to_wmir.c
     mlir_llvm_mem2reg.c
-    mlir_wmir_mem2reg.c
-    mlir_wmir_regalloc.c
-    mlir_wmir_to_aarch64.c
+    mlir_llvm_load_cse.c
+    mlir_llvm_arith_gvn.c
+    mlir_llvm_dce.c
+    mlir_llvm_to_aarch64.c
     mlir_aarch64_to_macho.c
     tokenizer.c
     mlir_parser.c

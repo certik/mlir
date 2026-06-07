@@ -2,23 +2,23 @@
 // See mlir_wasmstack_to_wasmssa.h for the public API and rationale.
 //
 // Lifts a flat wasmstack module (the 1:1 textual mirror of wasm bytecode)
-// to wasmssa, which is what the wmir backend consumes. Two responsibilities:
+// to wasmssa, which is what the llvm backend consumes. Two responsibilities:
 //
 //   1. Stack -> SSA: walk the flat opcode sequence, simulate the operand
 //      stack, and emit wasmssa ops whose operands are real SSA values.
 //
 //   2. Structured CF reconstruction: re-nest block/loop/if/end into
-//      wasmssa.block / .loop / .if region ops. The wmir backend then
+//      wasmssa.block / .loop / .if region ops. The llvm backend then
 //      flattens them into a real CFG with explicit br ops.
 //
 // Synth-helper short-circuit: any wasmstack.func whose `sym_name`
-// matches a known runtime helper that the wmir backend synthesises
+// matches a known runtime helper that the backend synthesises
 // from scratch (printI64, printNewline, printStr, printf, malloc,
 // free, strlen, strcmp, memcmp, memchr, fd_write, proc_exit,
 // printF32, printF64, tinyc_va_arg_*) is replaced by a body-less
 // `wasmssa.import_func` declaration. This avoids having to lift the
 // full WASI runtime — its definition will be ignored anyway when the
-// wmir backend emits its own version of the helper.
+// backend emits its own version of the helper.
 
 #include "mlir_wasmstack_to_wasmssa.h"
 
@@ -48,25 +48,25 @@
 #define WOP_I32_SUB  0x6b
 
 // =============================================================================
-// Synth-helper detection. Returns true when `name` is a wmir runtime
+// Synth-helper detection. Returns true when `name` is a backend runtime
 // helper that gets re-synthesised; in that case the wasmstack.func's
 // body is discarded and the function is lifted as an import_func
 // declaration.
 //
 // Notable absence: malloc/free. The corec-stdlib selfhost path
 // compiles a real malloc that tags each block with a size header so
-// realloc can find the old block size; the wmir synth_malloc is a
+// realloc can find the old block size; the backend synth_malloc is a
 // header-less bump allocator. If we discarded the user body and let
 // synth_malloc shadow the corec malloc, realloc would read garbage
-// out of the missing header. The wmir backend's `user_provides_*`
-// gate (see ModInfo in mlir_wmir_to_aarch64.c) suppresses the synth
+// out of the missing header. The backend's `user_provides_*`
+// gate (see ModInfo in the llvm backend) suppresses the synth
 // helpers when the user already provides them, so leaving the user
 // body in place is correct.
 //
 // strlen/strcmp/memcmp/memchr used to be in this list as a workaround
 // for a wasm `loop` lowering bug where the implicit fall-off-end
 // branched back to the loop header instead of the post-loop exit.
-// That bug is now fixed in mlir_wasmssa_to_wmir.c (the loop frame
+// That bug is now fixed in the wasm lifter (the loop frame
 // tracks `br_target` and `fall_target` separately so block_return
 // targets the correct exit). These four lifted bodies are now used
 // in preference to the hand-coded synth versions.
@@ -78,7 +78,7 @@ static bool is_synth_helper(string nm) {
         "fd_write", "proc_exit",
         "tinyc_va_arg_i32", "tinyc_va_arg_i64", "tinyc_va_arg_ptr",
         "tinyc_va_arg_struct", "tinyc_va_arg_f64",
-        // WASI host imports synthesised in the wmir aarch64 backend.
+        // WASI host imports synthesised in the aarch64 backend.
         "path_open", "fd_close", "fd_read", "fd_seek", "fd_tell",
         "args_get", "args_sizes_get",
         "environ_get", "environ_sizes_get",
@@ -333,7 +333,7 @@ typedef struct {
 
     // Wasm function locals (params followed by declared locals). These
     // are NOT spilled into linmem: lifter emits wasmssa.local_get/set
-    // ops carrying `local_idx`, which the wmir->aarch64 backend lowers
+    // ops carrying `local_idx`, which the llvm->aarch64 backend lowers
     // to ldr/str on the native stack frame. (The old design spilled
     // every local into an 8-byte linmem cell, which inflated wasm SP
     // usage by ~20x and forced unrealistic stack-size grows.)
@@ -374,7 +374,7 @@ static bool pop_n(FnCtx *F, size_t n, MLIR_ValueHandle *args) {
 
 // -----------------------------------------------------------------------------
 // Locals-as-frame-slots helpers. Each wasm local lives in a slot on the
-// native AArch64 stack frame (allocated by the wmir->aarch64 prologue).
+// native AArch64 stack frame (allocated by the llvm->aarch64 prologue).
 // The lifter just emits wasmssa.local_get / wasmssa.local_set ops
 // carrying `local_idx`; downstream lowering allocates and addresses
 // the slots. Locals are NEVER address-taken in wasm, so we don't need
@@ -403,7 +403,7 @@ static void emit_local_store(FnCtx *F, uint32_t li, MLIR_ValueHandle val) {
 
 // (Removed emit_locals_pop: there is no wasm-SP-based locals region
 // to free anymore. The native AArch64 frame allocation/deallocation
-// is fully managed by the wmir->aarch64 prologue/epilogue.)
+// is fully managed by the llvm->aarch64 prologue/epilogue.)
 
 // =============================================================================
 // Build a wasmssa.block / .loop / .if op from a populated body block.
@@ -489,14 +489,14 @@ static MLIR_OpHandle finalize_frame(FnCtx *F, Frame *f,
         return op;
     }
 
-    // LOOP: emit a plain wasmssa.loop. The wmir lowering handles
+    // LOOP: emit a plain wasmssa.loop. The backend lowering handles
     // fall-through (no `br` at end-of-body) by branching to the
     // post-loop block, and pushes a single F_LOOP frame whose target
     // is the loop header — `br depth=0` then continues correctly.
     // NOTE: we previously wrapped the loop in an outer wasmssa.block
     // + unreachable to match the llvm->wasmssa convention. That extra
     // frame off-by-one'd every `br depth>=1` inside the loop body
-    // because wmir saw N+1 enclosing frames where wasm saw N.
+    // because the backend saw N+1 enclosing frames where wasm saw N.
     MLIR_RegionHandle loop_r = MLIR_CreateRegion(F->ctx);
     MLIR_AppendRegionBlock(F->ctx, loop_r, f->body_block);
     MLIR_RegionHandle loop_regs[1] = { loop_r };
@@ -605,7 +605,7 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
                 size_t n_results = 0;
 
                 // If the body was actually dead the entire time, we
-                // still need to terminate it with something the wmir
+                // still need to terminate it with something the
                 // lowering can flatten. Add an unreachable if not
                 // already terminated.
                 if (top.kind == F_IF) {
@@ -1354,7 +1354,7 @@ static MLIR_OpHandle lift_func(MLIR_Context *ctx, Arena *arena,
 
     // Function prologue: copy params (entry block args) into their
     // corresponding local slots, then zero-initialise non-param
-    // locals (wasm semantics). The wmir->aarch64 backend reads
+    // locals (wasm semantics). The llvm->aarch64 backend reads
     // `local_types` off wasmssa.func to size the native frame.
     for (size_t i = 0; i < np; i++) {
         emit_local_store(&F, (uint32_t)i, param_args[i]);
@@ -1389,7 +1389,7 @@ static MLIR_OpHandle lift_func(MLIR_Context *ctx, Arena *arena,
     attrs[na++] = attr_s(ctx, "param_types", pt_s.str, pt_s.size);
     attrs[na++] = attr_s(ctx, "result_types", rt_s.str, rt_s.size);
     // `local_types` carries the full vt sequence for *all* locals
-    // (params first, then declared locals). The wmir->aarch64 backend
+    // (params first, then declared locals). The llvm->aarch64 backend
     // reads it to size the per-function native stack frame area used
     // for wasmssa.local_get / wasmssa.local_set ops.
     attrs[na++] = attr_s(ctx, "local_types", local_types_s.str,
@@ -1450,7 +1450,7 @@ static MLIR_OpHandle synth_to_import(MLIR_Context *ctx, MLIR_OpHandle src) {
 
 // =============================================================================
 // Lift wasmstack.data_segment to wasmssa.import_global with the
-// explicit `fixed_offset` attribute the wmir backend now honours.
+// explicit `fixed_offset` attribute the backend now honours.
 // =============================================================================
 static MLIR_OpHandle lift_data_segment(MLIR_Context *ctx, MLIR_OpHandle src,
                                        uint32_t seg_idx) {
@@ -1500,15 +1500,30 @@ MLIR_OpHandle mlir_wasmstack_to_wasmssa(MLIR_Context *ctx,
     MLIR_RegionHandle out_regs[1] = { out_region };
 
     // Propagate `memory_min_pages` from the wasmstack module so the
-    // wasmssa -> wmir -> aarch64 chain can size the linear memory image
+    // wasmssa -> llvm -> aarch64 chain can size the linear memory image
     // correctly (see mlir_wasm_to_wasmstack.c for the rationale).
-    MLIR_AttributeHandle mod_attrs[1];
+    MLIR_AttributeHandle mod_attrs[2];
     size_t n_mod_attrs = 0;
     MLIR_AttributeHandle a_min_pages = MLIR_GetOpAttributeByName(
         stack_module, "memory_min_pages");
     if (a_min_pages) {
         mod_attrs[n_mod_attrs++] = attr_i32(ctx, "memory_min_pages",
             MLIR_GetAttributeInteger(a_min_pages));
+    }
+
+    // Propagate global 0's init value (the wasm shadow stack pointer =
+    // wasm-ld's __stack_pointer). The GLOBAL_DECL ops are dropped below
+    // (the backends synthesise their own global storage), but g0's init
+    // is the top of the stack region and MUST match what wasm-ld chose:
+    // the stack grows down from it and the heap (__heap_base) starts at
+    // it, so picking the wrong value collides the stack with the heap.
+    for (size_t i = 0; i < MLIR_GetBlockNumOps(mb); i++) {
+        MLIR_OpHandle top = MLIR_GetBlockOp(mb, i);
+        if (MLIR_GetOpType(top) != OP_TYPE_WASMSTACK_GLOBAL_DECL) continue;
+        if (at_i(top, "global_idx") != 0) continue;
+        mod_attrs[n_mod_attrs++] = attr_i64(ctx, "global0_init",
+            at_i(top, "init_value"));
+        break;
     }
 
     MLIR_OpHandle out_module = MLIR_CreateOp(ctx, OP_TYPE_MODULE,
@@ -1538,7 +1553,7 @@ MLIR_OpHandle mlir_wasmstack_to_wasmssa(MLIR_Context *ctx,
     // Collect ELEM entries (slot, target) so we can emit a synthetic
     // helper after all user functions. The helper is a no-op at runtime
     // (it's not called) but its wasmssa.func_addr ops with explicit
-    // {slot=…} attributes feed the wmir prepass with the actual wasm
+    // {slot=…} attributes feed the backend prepass with the actual wasm
     // table slot indices.
     typedef struct { int64_t slot; string target; } ElemEntry;
     ElemEntry *elems = NULL;
@@ -1560,7 +1575,7 @@ MLIR_OpHandle mlir_wasmstack_to_wasmssa(MLIR_Context *ctx,
         } else if (tt == OP_TYPE_WASMSTACK_DATA_SEGMENT) {
             out_op = lift_data_segment(ctx, top, data_idx++);
         } else if (tt == OP_TYPE_WASMSTACK_GLOBAL_DECL) {
-            // The wmir backend manages global slots automatically; we
+            // The backend manages global slots automatically; we
             // don't need to forward the declaration. (Initial values
             // are handled by synth_start for global 0; others default
             // to zero.)

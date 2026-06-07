@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
 # Self-host the tinyC compiler into a native Mach-O binary via the
-# wmir backend: use an existing tinyC compiler (either `tinyc.wasm`
+# llvm backend: use an existing tinyC compiler (either `tinyc.wasm`
 # driven by wasmtime or a previously-bootstrapped native Mach-O
 # `tinyc` binary) to recompile every source file that makes up the
 # tinyc wasm32-wasi build into per-source `.wasm.o` objects, link
 # them with `tinyc --link` into a single linked module, and then
 # translate that linked module to a native Mach-O ARM64 binary via
 # the new
-#   wasm -> wasmstack -> wasmssa -> wmir -> aarch64 -> Mach-O
+#   wasm -> wasmstack -> wasmssa -> llvm -> aarch64 -> Mach-O
 # pipeline (`tinyc --from-wasm <linked.wasm> --emit=macho
-# --macho-backend=wmir`).
+# --macho-backend=llvm`).
 #
 # Note: we deliberately use `tinyc --link` rather than `wasm-ld`
 # here. wasm-ld silently miscompiles the resulting binary in the
@@ -20,7 +20,7 @@
 # byte-identical output to the canonical wasm selfhost.
 #
 # Usage:
-#   selfhost_tinyc_macho_wmir.sh <INPUT_TINYC> <OUTPUT_TINYC_MACHO> <STAGE_DIR>
+#   selfhost_tinyc_macho_llvm.sh <INPUT_TINYC> <OUTPUT_TINYC_MACHO> <STAGE_DIR>
 #
 # `<INPUT_TINYC>` ending in `.wasm` is invoked via `wasmtime --dir .`.
 # Anything else is invoked directly (must be an executable native
@@ -28,7 +28,7 @@
 #
 # The source set mirrors `selfhost_tinyc_wasm.sh` exactly so stage-2
 # and stage-3 binaries can be compared bit-for-bit to verify
-# self-hosting reproducibility through the wmir backend.
+# self-hosting reproducibility through the llvm backend.
 
 set -euo pipefail
 
@@ -99,11 +99,9 @@ NATIVE_C_FILES=(
     mlir_wasm_link.c
     mlir_wasm_to_wasmstack.c
     mlir_wasmstack_to_wasmssa.c
-    mlir_wasmssa_to_wmir.c
-    mlir_llvm_mem2reg.c
-    mlir_wmir_mem2reg.c
-    mlir_wmir_regalloc.c
-    mlir_wmir_to_aarch64.c
+    mlir_wasmssa_to_llvm.c
+    mlir_llvm_mem2reg.c mlir_llvm_load_cse.c mlir_llvm_arith_gvn.c mlir_llvm_dce.c
+    mlir_llvm_to_aarch64.c
     mlir_aarch64_to_macho.c
     tokenizer.c
     mlir_parser.c
@@ -139,7 +137,7 @@ OBJS=()
 for src in "${ALL_SOURCES[@]}"; do
     base="$(echo "$src" | tr '/' '_')"
     obj="$STAGE_DIR/${base}.wasm.o"
-    printf '[selfhost-macho-wmir] %s -> %s\n' "$src" "$obj"
+    printf '[selfhost-macho-llvm] %s -> %s\n' "$src" "$obj"
     "${TINYC_INVOKE[@]}" \
         --emit=wasm --lowering=native \
         "${INCLUDES[@]}" \
@@ -148,7 +146,7 @@ for src in "${ALL_SOURCES[@]}"; do
 done
 
 # tinyc --link step: produce a single linked wasm module with
-# `_start` exported. The wmir backend's --from-wasm path consumes
+# `_start` exported. The llvm backend's --from-wasm path consumes
 # this linked module and lowers it to Mach-O directly.
 #
 # We use `tinyc --link` (not `wasm-ld`) because wasm-ld miscompiles
@@ -157,16 +155,16 @@ done
 # relocation or data-segment layout mismatch). tinyc's own linker
 # produces a working binary byte-identical to `selfhost_tinyc_wasm.sh`.
 LINKED_WASM="$STAGE_DIR/linked.wasm"
-printf '[selfhost-macho-wmir] tinyc --link -> %s\n' "$LINKED_WASM"
+printf '[selfhost-macho-llvm] tinyc --link -> %s\n' "$LINKED_WASM"
 "${TINYC_INVOKE[@]}" --link --export=_start \
     -o "$LINKED_WASM" \
     "${OBJS[@]}" "$VARARG_OBJ"
 
-# Final stage: lift wasm back into wasmssa, then run the new wmir
+# Final stage: lift wasm back into wasmssa, then run the new llvm
 # pipeline all the way to a signed ad-hoc Mach-O ARM64 binary.
-printf '[selfhost-macho-wmir] --from-wasm --emit=macho --macho-backend=wmir -> %s\n' "$OUTPUT_MACHO"
+printf '[selfhost-macho-llvm] --from-wasm --emit=macho --macho-backend=llvm -> %s\n' "$OUTPUT_MACHO"
 "${TINYC_INVOKE[@]}" --from-wasm "$LINKED_WASM" \
-    --emit=macho --macho-backend=wmir \
+    --emit=macho --macho-backend=llvm \
     -o "$OUTPUT_MACHO"
 
 chmod +x "$OUTPUT_MACHO"
