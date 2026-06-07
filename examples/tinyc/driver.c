@@ -87,6 +87,13 @@ int app_main(void) {
     bool emit_wasmstack = false;
     bool emit_wat = false;
     bool emit_macho = false;
+    // `--emit=aarch64` stops the unified llvm -> aarch64 -> macho backend
+    // at the physical-register `aarch64` dialect and prints it (the
+    // "MachO MLIR"), instead of encoding the final Mach-O bytes. It is a
+    // debugging view of the same pipeline `--emit=macho --macho-backend=llvm`
+    // drives, so `--emit=mlir`, `--emit=llvm`, `--emit=aarch64` give the
+    // three successive IRs for the native llvm backend.
+    bool emit_aarch64 = false;
     // --macho-backend selects which pipeline produces the final Mach-O
     // binary. "wasm" (default) keeps the established wasm-link +
     // wasm->macho path. "llvm" routes the `llvm` dialect directly through
@@ -219,14 +226,15 @@ int app_main(void) {
             arena_destroy(boot_arena);
             return wrc;
         }
-        if      (strcmp(argv[i], "--emit=mlir")    == 0) { emit_llvm = false; emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; }
-        else if (strcmp(argv[i], "--emit=lowered") == 0) { emit_lowered = true;  emit_llvm = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; }
-        else if (strcmp(argv[i], "--emit=llvm")    == 0) { emit_llvm = true;     emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; }
-        else if (strcmp(argv[i], "--emit=wasm")    == 0) { emit_wasm = true;     emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; }
-        else if (strcmp(argv[i], "--emit=wasmssa") == 0) { emit_wasmssa = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; }
-        else if (strcmp(argv[i], "--emit=wasmstack") == 0) { emit_wasmstack = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wat = false; emit_macho = false; }
-        else if (strcmp(argv[i], "--emit=wat")     == 0) { emit_wat = true;     emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_macho = false; }
-        else if (strcmp(argv[i], "--emit=macho")   == 0) { emit_macho = true;   emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; }
+        if      (strcmp(argv[i], "--emit=mlir")    == 0) { emit_llvm = false; emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; }
+        else if (strcmp(argv[i], "--emit=lowered") == 0) { emit_lowered = true;  emit_llvm = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; }
+        else if (strcmp(argv[i], "--emit=llvm")    == 0) { emit_llvm = true;     emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; }
+        else if (strcmp(argv[i], "--emit=wasm")    == 0) { emit_wasm = true;     emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; }
+        else if (strcmp(argv[i], "--emit=wasmssa") == 0) { emit_wasmssa = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; }
+        else if (strcmp(argv[i], "--emit=wasmstack") == 0) { emit_wasmstack = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; }
+        else if (strcmp(argv[i], "--emit=wat")     == 0) { emit_wat = true;     emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_macho = false; emit_aarch64 = false; }
+        else if (strcmp(argv[i], "--emit=macho")   == 0) { emit_macho = true;   emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_aarch64 = false; }
+        else if (strcmp(argv[i], "--emit=aarch64") == 0) { emit_aarch64 = true; emit_macho = false; emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; }
         else if (strcmp(argv[i], "--macho-backend=wasm") == 0) { macho_backend_llvm = false; }
         else if (strcmp(argv[i], "--macho-backend=llvm") == 0) { macho_backend_llvm = true; }
         else if (strncmp(argv[i], "--wasm-runtime-obj=", 19) == 0) {
@@ -274,7 +282,7 @@ int app_main(void) {
     }
 
     if (n_input_files == 0 && from_wasm_path == NULL) {
-        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm|wasm|wasmssa|wasmstack|wat|macho] [--lowering=upstream|native] [--from-wasm PATH] [--wasm-runtime-obj=PATH ...] [-I dir ...] [-D name[=value] ...] [-o OUT] FILE.tc [FILE2.tc ...]"));
+        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm|wasm|wasmssa|wasmstack|wat|aarch64|macho] [--lowering=upstream|native] [--from-wasm PATH] [--wasm-runtime-obj=PATH ...] [-I dir ...] [-D name[=value] ...] [-o OUT] FILE.tc [FILE2.tc ...]"));
         arena_destroy(boot_arena);
         return 1;
     }
@@ -299,7 +307,9 @@ int app_main(void) {
     }
     // The native llvm Mach-O backend consumes the in-house `llvm` dialect,
     // which is only produced by the native lowering. Force native lowering on.
-    if (emit_macho && macho_backend_llvm) {
+    // `--emit=aarch64` drives the same backend (stopping at the aarch64
+    // dialect), so it needs native lowering too.
+    if ((emit_macho && macho_backend_llvm) || emit_aarch64) {
         use_upstream = false;
     }
     if (use_upstream) {
@@ -428,9 +438,34 @@ int app_main(void) {
                 }
                 out_fw.str = (char *)macho_data;
                 out_fw.size = macho_size;
+            } else if (emit_aarch64) {
+                // Same wasmssa -> llvm lift + optimization passes as the
+                // macho path above, but stop at the physical-register
+                // `aarch64` dialect and print it (the "MachO MLIR"). No
+                // late-arena swap: this is a debug view, not the memory-
+                // constrained self-host emit.
+                MLIR_OpHandle llvm_mod = mlir_wasmssa_to_llvm(&ctx, ssa);
+                if (llvm_mod == MLIR_INVALID_HANDLE) {
+                    arena_destroy(arena);
+                    arena_destroy(boot_arena);
+                    return 1;
+                }
+                if (!getenv("TINYC_NO_MEM2REG"))
+                    mlir_llvm_mem2reg(&ctx, llvm_mod);
+                if (!getenv("TINYC_NO_LOAD_CSE"))
+                    mlir_llvm_load_cse(&ctx, llvm_mod);
+                mlir_llvm_arith_gvn(&ctx, llvm_mod);
+                mlir_llvm_dce(&ctx, llvm_mod);
+                MLIR_OpHandle aarch64 = mlir_llvm_to_aarch64(&ctx, llvm_mod);
+                if (aarch64 == MLIR_INVALID_HANDLE) {
+                    arena_destroy(arena);
+                    arena_destroy(boot_arena);
+                    return 1;
+                }
+                out_fw = MLIR_PrintOperationGeneric(&ctx, aarch64);
             } else {
                 fprintf(stderr,
-                    "tinyc --from-wasm: requires --emit=wasmstack|wasmssa|macho\n");
+                    "tinyc --from-wasm: requires --emit=wasmstack|wasmssa|aarch64|macho\n");
                 arena_destroy(arena);
                 arena_destroy(boot_arena);
                 return 1;
@@ -500,7 +535,7 @@ int app_main(void) {
     // printStr, ...) as tinyC-subset C parsed into this same module, so it
     // lowers through the llvm -> aarch64 path alongside user code. Only
     // functions the user hasn't defined are injected.
-    if (macho_backend_llvm)
+    if (macho_backend_llvm || emit_aarch64)
         tinyc_inject_native_runtime(arena, prog, target_wasm32);
     MLIR_OpHandle module = tinyc_emit_module(&ctx, prog);
     if (tinyc_last_emit_errors() > 0) {
@@ -517,8 +552,8 @@ int app_main(void) {
     if (!getenv("TINYC_NO_MEM2REG"))
         mlir_llvm_mem2reg(&ctx, module);
 
-    if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho) {
-        bool needs_wasm_lowering = emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho;
+    if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64) {
+        bool needs_wasm_lowering = emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64;
         bool ok = needs_wasm_lowering
                       ? lower_for_wasm_fn(&ctx, module)
                       : lower_fn(&ctx, module);
@@ -646,6 +681,16 @@ int app_main(void) {
             out.str = (char *)macho_data;
             out.size = macho_size;
         }
+    } else if (emit_aarch64) {
+        // Stop the unified llvm -> aarch64 -> macho backend at the
+        // physical-register `aarch64` dialect and print it (the "MachO MLIR").
+        MLIR_OpHandle aarch64 = mlir_llvm_to_aarch64(&ctx, module);
+        if (aarch64 == MLIR_INVALID_HANDLE) {
+            arena_destroy(arena);
+            arena_destroy(boot_arena);
+            return 1;
+        }
+        out = MLIR_PrintOperationGeneric(&ctx, aarch64);
     } else if (emit_llvm) {
         out = translate_to_llvm_fn(&ctx, module);
         if (out.size == 0) {
