@@ -3916,12 +3916,31 @@ static uint8_t a64_ldst_width(MLIR_OpType t) {
     }
 }
 
-static void peephole_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
+// Cross-register spill-slot forwarding: `str X,[sp,#k]; ...; ldr Y,[sp,#k]`
+// (Y != X, the slot value still resident in X per the cache) becomes
+// `mov Y, X`, deleting a real load on the hot spill path. SOUND ONLY for
+// spill slots (off < slot_bytes): those are the allocator's private storage
+// and never have their address taken, so no escaped host pointer or callee
+// can write them behind the cache's back -- the only way the value changes is
+// an explicit `str ...,[sp,#k]` (which updates the cache) or the holder
+// register being redefined / clobbered by a call (a64sc_kill_reg /
+// a64sc_kill_caller drop the mapping). Alloca slots (off >= slot_bytes) CAN be
+// aliased via an escaped pointer, so they are deliberately excluded (this was
+// the soundness hole that crashed an earlier unconstrained version). The
+// replacement `mov` is rename-eliminated (zero latency) on Apple Silicon, so
+// this is a strict win: one fewer load issued, no extra cost.
+typedef struct { MLIR_OpHandle op; uint8_t src, dst, sf; } A64Fwd;
+
+static void peephole_block(MLIR_Context *ctx, MLIR_BlockHandle blk,
+                           uint32_t slot_bytes) {
+    bool no_fwd = getenv("TINYC_NO_SLOTFWD") != NULL;
     A64SlotReg cache[A64_SLOTCACHE_CAP];
     size_t nc = 0;
     size_t nops = MLIR_GetBlockNumOps(blk);
     MLIR_OpHandle *erase = (MLIR_OpHandle *)malloc(nops * sizeof(MLIR_OpHandle));
     size_t nerase = 0;
+    A64Fwd *fwd = (A64Fwd *)malloc((nops ? nops : 1) * sizeof(A64Fwd));
+    size_t nfwd = 0;
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(blk, i);
         MLIR_OpType t = MLIR_GetOpType(op);
@@ -3938,6 +3957,17 @@ static void peephole_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
                     cache[idx].reg == (uint8_t)rt) {
                     erase[nerase++] = op;        // reloads a still-resident slot
                     break;                       // rt unchanged, cache intact
+                }
+                // Spill-slot cross-register forwarding (sound: off < slot_bytes).
+                if (!no_fwd && idx >= 0 && cache[idx].width == w &&
+                    (w == 4 || w == 8) && off >= 0 &&
+                    off < (int32_t)slot_bytes && cache[idx].reg != (uint8_t)rt) {
+                    fwd[nfwd].op = op; fwd[nfwd].src = cache[idx].reg;
+                    fwd[nfwd].dst = (uint8_t)rt; fwd[nfwd].sf = (uint8_t)(w == 8);
+                    nfwd++;
+                    a64sc_kill_reg(cache, &nc, (uint8_t)rt);
+                    a64sc_set(cache, &nc, off, (uint8_t)rt, w);
+                    break;                       // load becomes a mov in rebuild
                 }
                 a64sc_kill_reg(cache, &nc, (uint8_t)rt);
                 a64sc_set(cache, &nc, off, (uint8_t)rt, w);
@@ -3990,8 +4020,16 @@ static void peephole_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
                 }
             }
             int32_t krd;
-            if (a64_attr_i(op, "rd", &krd)) a64sc_kill_reg(cache, &nc, (uint8_t)krd);
-            else nc = 0;
+            if (a64_attr_i(op, "rd", &krd)) {
+                // Writing sp (rd==31) moves the [sp,#off] frame base: every
+                // sp-relative cache entry is invalidated (e.g. the >8-arg call
+                // path does `sub sp,#area; str r,[sp,#k]; bl; add sp,#area`,
+                // whose outgoing-arg stores must NOT be forwarded to a later
+                // real spill load at the restored sp). kill_reg(31) is a no-op
+                // (no value lives in reg 31), so a full reset is required.
+                if (krd == 31) nc = 0;
+                else a64sc_kill_reg(cache, &nc, (uint8_t)krd);
+            } else nc = 0;
             break;
         }
         case OP_TYPE_AARCH64_AND_REG: case OP_TYPE_AARCH64_ORR_REG:
@@ -4028,15 +4066,48 @@ static void peephole_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
             break;
         }
     }
-    for (size_t i = 0; i < nerase; i++) MLIR_EraseOp(ctx, erase[i]);
+    if (nfwd == 0) {
+        for (size_t i = 0; i < nerase; i++) MLIR_EraseOp(ctx, erase[i]);
+    } else {
+        // Rebuild the block in original order, substituting a `mov dst,src` for
+        // each forwarded load and dropping erased ops. Snapshot the op handles
+        // first (the block is mutated below). Every KEPT op is moved to the
+        // block end in original order, so the final order matches the original
+        // with forwarded loads replaced and erased ops removed; the block
+        // identity (branch-target) and its arguments are preserved.
+        MLIR_OpHandle *snap = (MLIR_OpHandle *)malloc((nops ? nops : 1) *
+                                                      sizeof(MLIR_OpHandle));
+        for (size_t i = 0; i < nops; i++) snap[i] = MLIR_GetBlockOp(blk, i);
+        for (size_t i = 0; i < nops; i++) {
+            MLIR_OpHandle op = snap[i];
+            int fi = -1;
+            for (size_t f = 0; f < nfwd; f++)
+                if (fwd[f].op == op) { fi = (int)f; break; }
+            if (fi >= 0) {
+                emit_3reg(ctx, blk, OP_TYPE_AARCH64_ORR_REG, fwd[fi].dst, 31,
+                          fwd[fi].src, fwd[fi].sf != 0);  // mov dst,src -> end
+                continue;                                  // op erased below
+            }
+            bool er = false;
+            for (size_t e = 0; e < nerase; e++)
+                if (erase[e] == op) { er = true; break; }
+            if (er) continue;                              // erased below
+            MLIR_MoveOpToBlockEnd(ctx, op, blk);
+        }
+        for (size_t f = 0; f < nfwd; f++)   MLIR_EraseOp(ctx, fwd[f].op);
+        for (size_t i = 0; i < nerase; i++) MLIR_EraseOp(ctx, erase[i]);
+        free(snap);
+    }
     free(erase);
+    free(fwd);
 }
 
-static void peephole_region(MLIR_Context *ctx, MLIR_RegionHandle reg) {
+static void peephole_region(MLIR_Context *ctx, MLIR_RegionHandle reg,
+                            uint32_t slot_bytes) {
     if (getenv("TINYC_NO_PEEPHOLE")) return;
     size_t nb = MLIR_GetRegionNumBlocks(reg);
     for (size_t b = 0; b < nb; b++)
-        peephole_block(ctx, MLIR_GetRegionBlock(reg, b));
+        peephole_block(ctx, MLIR_GetRegionBlock(reg, b), slot_bytes);
 }
 
 // True if value `v` is an integer constant equal to `want`.
@@ -4634,7 +4705,7 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
     free(src_blks);
     free(out_blks);
 
-    peephole_region(ctx, out_reg);
+    peephole_region(ctx, out_reg, slot_bytes);
 
     MLIR_AttributeHandle attrs[1];
     attrs[0] = attr_s(ctx, "sym_name", sym.str, sym.size);
@@ -4731,7 +4802,7 @@ static MLIR_OpHandle select_func(MLIR_Context *ctx, MLIR_OpHandle fn,
     emit_epilogue(ctx, L.cur, frame_size);
     emit_ret(ctx, L.cur);
 
-    peephole_region(ctx, out_reg);
+    peephole_region(ctx, out_reg, slot_bytes);
 
     MLIR_AttributeHandle attrs[1];
     attrs[0] = attr_s(ctx, "sym_name", sym.str, sym.size);
