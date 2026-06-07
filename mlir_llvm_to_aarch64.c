@@ -3794,8 +3794,31 @@ static void peephole_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
         }
         case OP_TYPE_AARCH64_ADD_IMM: case OP_TYPE_AARCH64_SUB_IMM:
         case OP_TYPE_AARCH64_ADD_REG: case OP_TYPE_AARCH64_SUB_REG:
+        case OP_TYPE_AARCH64_AND_IMM: {
+            // Redundant low-bits mask: `and Rd,Rd,#((1<<w)-1)` (w>=8) right
+            // after a `ldrb Rd,[...]` is a no-op -- ldrb already zero-extends
+            // bits 8..63, so masking the low byte (or more) changes nothing.
+            // This `and` sits on the hot lexer load->compare dependency chain.
+            int32_t rd, rn, w;
+            if (!getenv("TINYC_NO_MASK_ELIDE") && i > 0 &&
+                a64_attr_i(op, "rd", &rd) && a64_attr_i(op, "rn", &rn) &&
+                rd == rn && a64_attr_i(op, "w", &w) && w >= 8) {
+                MLIR_OpHandle prev = MLIR_GetBlockOp(blk, i - 1);
+                MLIR_OpType pt = MLIR_GetOpType(prev);
+                int32_t prt;
+                if ((pt == OP_TYPE_AARCH64_LDRB_IMM ||
+                     pt == OP_TYPE_AARCH64_LDRB_REG) &&
+                    a64_attr_i(prev, "rt", &prt) && prt == rd) {
+                    erase[nerase++] = op;   // value already byte-zero-extended
+                    break;                  // Rd unchanged; cache stays valid
+                }
+            }
+            int32_t krd;
+            if (a64_attr_i(op, "rd", &krd)) a64sc_kill_reg(cache, &nc, (uint8_t)krd);
+            else nc = 0;
+            break;
+        }
         case OP_TYPE_AARCH64_AND_REG: case OP_TYPE_AARCH64_ORR_REG:
-        case OP_TYPE_AARCH64_AND_IMM:
         case OP_TYPE_AARCH64_EOR_REG: case OP_TYPE_AARCH64_ASR_REG:
         case OP_TYPE_AARCH64_LSL_REG: case OP_TYPE_AARCH64_LSR_REG:
         case OP_TYPE_AARCH64_MUL: case OP_TYPE_AARCH64_MSUB:
