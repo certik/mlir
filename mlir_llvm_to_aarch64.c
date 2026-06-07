@@ -3185,6 +3185,95 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         free(live);
     }
 
+    // --- 3c. Phi edge-copy coalescing hints. -----------------------------------
+    // For each block-arg B, find a predecessor edge whose source value V (a) is
+    // used exactly once (its sole use is that edge) and (b) dies exactly where B
+    // is born (last_use[V] == first_pos[B], the defining edge). If the linear
+    // scan then gives B the SAME register V occupies, the edge `mov R_B, R_V`
+    // becomes an identity copy that emit_edge_copies elides -- removing a link
+    // from the loop-carried dependency chain (the IPC lever). The copies for
+    // each cf.cond_br successor run in their own isolated landing block, so the
+    // only unsoundness is passing B's own value through the same terminator to
+    // another arg (then V's def would clobber it before the move): guard by
+    // requiring B not appear as any successor operand of the terminator.
+    int32_t *hint_src = (int32_t *)malloc((nv ? nv : 1) * sizeof(int32_t));
+    for (uint32_t i = 0; i < nv; i++) hint_src[i] = -1;
+    if (!getenv("TINYC_NO_PHI_COALESCE")) {
+        uint32_t *nuse = (uint32_t *)calloc(nv ? nv : 1, sizeof(uint32_t));
+        // Pass A: count every use of every value (regular operands, successor
+        // operands, and re-injected memfuse/shiftfuse operands).
+        for (size_t b = 0; b < n_blocks; b++) {
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+            size_t no = MLIR_GetBlockNumOps(bk);
+            for (size_t i = 0; i < no; i++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
+                if (a64_is_spine(op, memspine)) continue;
+                size_t nop = MLIR_GetOpNumOperands(op);
+                for (size_t k = 0; k < nop; k++) {
+                    uint32_t vi;
+                    if (a64_hh_get(&vmap, MLIR_GetOpOperand(op, k), &vi)) nuse[vi]++;
+                }
+                size_t ns = MLIR_GetOpNumSuccessors(op);
+                for (size_t s = 0; s < ns; s++) {
+                    size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                    for (size_t k = 0; k < nso; k++) {
+                        uint32_t vi;
+                        if (a64_hh_get(&vmap, MLIR_GetOpSuccessorOperand(op, s, k), &vi))
+                            nuse[vi]++;
+                    }
+                }
+                MLIR_ValueHandle mbase, midx;
+                if (a64_memfuse_uses(ctx, op, memfuse, &mbase, &midx)) {
+                    uint32_t vi;
+                    if (a64_hh_get(&vmap, mbase, &vi)) nuse[vi]++;
+                    if (a64_hh_get(&vmap, midx, &vi))  nuse[vi]++;
+                }
+                MLIR_ValueHandle sfx;
+                if (a64_shiftfuse_uses(ctx, op, shiftfuse, &sfx)) {
+                    uint32_t vi;
+                    if (a64_hh_get(&vmap, sfx, &vi)) nuse[vi]++;
+                }
+            }
+        }
+        // Pass B: build hints from sole-use edge sources.
+        for (size_t b = 0; b < n_blocks; b++) {
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+            size_t no = MLIR_GetBlockNumOps(bk);
+            for (size_t i = 0; i < no; i++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
+                size_t ns = MLIR_GetOpNumSuccessors(op);
+                if (ns == 0) continue;
+                for (size_t s = 0; s < ns; s++) {
+                    MLIR_BlockHandle succ = MLIR_GetOpSuccessor(op, s);
+                    size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                    for (size_t k = 0; k < nso; k++) {
+                        uint32_t vV, vB;
+                        MLIR_ValueHandle Vh = MLIR_GetOpSuccessorOperand(op, s, k);
+                        MLIR_ValueHandle Bh = MLIR_GetBlockArg(succ, k);
+                        if (!a64_hh_get(&vmap, Vh, &vV)) continue;
+                        if (!a64_hh_get(&vmap, Bh, &vB)) continue;
+                        if (nuse[vV] != 1) continue;            // sole use = this edge
+                        if (last_use[vV] != first_pos[vB]) continue; // V dies into B
+                        if (hint_src[vB] >= 0) continue;        // already hinted
+                        // Guard: B's own value must not be passed through this
+                        // terminator to another arg (would be clobbered by V's def).
+                        bool through = false;
+                        for (size_t s2 = 0; s2 < ns && !through; s2++) {
+                            size_t n2 = MLIR_GetOpNumSuccessorOperands(op, s2);
+                            for (size_t k2 = 0; k2 < n2; k2++)
+                                if (MLIR_GetOpSuccessorOperand(op, s2, k2) == Bh) {
+                                    through = true; break;
+                                }
+                        }
+                        if (through) continue;
+                        hint_src[vB] = (int32_t)vV;
+                    }
+                }
+            }
+        }
+        free(nuse);
+    }
+
     // --- 4. Linear scan over the pool, loop-weighted eviction. ---
     uint32_t *order = (uint32_t *)malloc((nv ? nv : 1) * sizeof(uint32_t));
     for (uint32_t i = 0; i < nv; i++) order[i] = i;
@@ -3224,6 +3313,27 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         // Dead-on-def / never-used values keep their slot.
         if (last_use[vi] <= first_pos[vi]) continue;
         bool callee_only = crosses[vi];
+        // Phi coalescing: if vi (a block arg) has a hint source V that is still
+        // active and dies exactly at vi's birth (last_use[V] == first_pos[vi],
+        // and V has no other use), retire V now and let vi inherit V's register.
+        // The edge copy then sees edge_src_loc(V) == edge_dst_loc(vi) and is
+        // elided. Sound: V is truly dead at this point (sole use is this edge),
+        // so transferring its register to vi clobbers nothing; the register was
+        // exclusive to V's interval [V.def, edge] and becomes exclusive to vi
+        // from the edge onward (contiguous, no gap).
+        if (hint_src[vi] >= 0) {
+            int32_t vV = hint_src[vi];
+            for (size_t a = 0; a < nact; a++) {
+                if (act_vi[a] != (uint32_t)vV) continue;
+                if (last_use[vV] != first_pos[vi]) break;   // not a clean death
+                if (callee_only && act_pk[a] < A64_NCALLER) break; // reg class
+                uint8_t pk = act_pk[a];
+                home_pk[vi] = (int8_t)pk;        // inherit V's physical register
+                act_vi[a] = vi;                   // ownership transfers; reg stays busy
+                break;
+            }
+            if (home_pk[vi] >= 0) continue;
+        }
         int found = -1;
         for (int pk = 0; pk < A64_NPOOL; pk++) {
             if (reg_busy[pk]) continue;
@@ -3344,6 +3454,7 @@ static uint32_t alloc_regs_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     free(block_first); free(block_last); free(handle);
     free(def_pos); free(first_pos); free(last_use);
     free(weight); free(crosses); free(home_pk); free(loop_depth);
+    free(hint_src);
     a64_hh_free(&vmap); a64_hh_free(&bmap);
     return used_mask;
 }
@@ -3386,6 +3497,14 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
     uint8_t *usedv     = (uint8_t *)arena_alloc(ar, cap * sizeof(uint8_t));
     uint8_t *crosses   = (uint8_t *)arena_alloc(ar, cap * sizeof(uint8_t));
     int8_t  *home_pk   = (int8_t *)arena_alloc(ar, cap * sizeof(int8_t));
+    // Phi edge-copy coalescing bookkeeping: total use count of each value, and
+    // (when it is used exactly once as a branch successor operand) the
+    // destination block-arg value + the terminator carrying that edge.
+    int32_t *use_cnt   = (int32_t *)arena_alloc(ar, cap * sizeof(int32_t));
+    MLIR_ValueHandle *edge_arg =
+        (MLIR_ValueHandle *)arena_alloc(ar, cap * sizeof(MLIR_ValueHandle));
+    MLIR_OpHandle *edge_term =
+        (MLIR_OpHandle *)arena_alloc(ar, cap * sizeof(MLIR_OpHandle));
     MLIR_ValueHandle *vals =
         (MLIR_ValueHandle *)arena_alloc(ar, cap * sizeof(MLIR_ValueHandle));
     SlotMap idx = {0}; idx.arena = ar;   // value -> array index
@@ -3411,6 +3530,8 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 def_block[nv] = (int32_t)b; def_pos[nv] = (int32_t)i;
                 last_use[nv] = -1; disq[nv] = 0; usedv[nv] = 0; crosses[nv] = 0;
                 home_pk[nv] = -1;
+                use_cnt[nv] = 0; edge_arg[nv] = MLIR_INVALID_HANDLE;
+                edge_term[nv] = MLIR_INVALID_HANDLE;
                 sm_put(&idx, vals[nv], (int32_t)nv);
                 nv++;
             }
@@ -3438,7 +3559,7 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
             for (size_t k = 0; k < nop; k++) {
                 int32_t vi;
                 if (!sm_get(&idx, MLIR_GetOpOperand(op, k), &vi)) continue;
-                usedv[vi] = 1;
+                usedv[vi] = 1; use_cnt[vi]++;
                 if ((int32_t)b != def_block[vi] || is_term || is_call)
                     disq[vi] = 1;
                 else if ((int32_t)i > last_use[vi])
@@ -3454,7 +3575,12 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
                     int32_t vi;
                     if (!sm_get(&idx, MLIR_GetOpSuccessorOperand(op, s, k), &vi))
                         continue;
-                    usedv[vi] = 1; disq[vi] = 1;
+                    usedv[vi] = 1; disq[vi] = 1; use_cnt[vi]++;
+                    // Record the destination block-arg + terminator so a sole-use
+                    // edge operand can later be coalesced into the block-arg's
+                    // home register (the mov vanishes in emit_edge_copies).
+                    edge_arg[vi]  = MLIR_GetBlockArg(MLIR_GetOpSuccessor(op, s), k);
+                    edge_term[vi] = op;
                 }
             }
             // Fused linmem access: the rewritten load/store reads `base` and
@@ -3477,7 +3603,7 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
                         for (int u = 0; u < 2; u++) {
                             int32_t vi;
                             if (!sm_get(&idx, uu[u], &vi)) continue;
-                            usedv[vi] = 1;
+                            usedv[vi] = 1; use_cnt[vi]++;
                             if ((int32_t)b != def_block[vi] || is_call)
                                 disq[vi] = 1;
                             else if ((int32_t)i > last_use[vi])
@@ -3494,7 +3620,7 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 if (a64_shiftfuse_uses(ctx, op, shiftfuse, &sfx)) {
                     int32_t vi;
                     if (sm_get(&idx, sfx, &vi)) {
-                        usedv[vi] = 1;
+                        usedv[vi] = 1; use_cnt[vi]++;
                         if ((int32_t)b != def_block[vi] || is_call)
                             disq[vi] = 1;
                         else if ((int32_t)i > last_use[vi])
@@ -3607,6 +3733,56 @@ static uint32_t alloc_regs_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 used_mask |= (1u << (pk - A64_NCALLER));
                 bscore[best] = -1;                   // consumed
             }
+        }
+    }
+
+    // ---- Phi edge-copy coalescing (ISEL-time direct-write) ----
+    // A value whose SOLE use is one branch successor-operand feeding a
+    // register-homed block-arg is normally forced to a frame slot (disq above),
+    // so emit_edge_copies materialises a `mov R_arg, R_val` (or a slot reload)
+    // at the edge -- a link on the loop-carried dependency chain. If instead we
+    // home the value DIRECTLY in the block-arg's reserved register, the edge
+    // copy becomes an identity move (edge_src_loc == edge_dst_loc) and vanishes,
+    // shortening the chain (the IPC lever).
+    //
+    // Safe only under tight conditions: the value's def is the last op before an
+    // UNCONDITIONAL (single-successor) terminator, it has exactly one use (that
+    // edge), and the destination register is not read by any OTHER operand of
+    // the same edge (i.e. the old block-arg value is not also passed through).
+    // Under these the block-arg register is dead from the def point onward
+    // except for this edge, so writing the new value into it early is sound; the
+    // value's own def-op may freely read the register as an input (the isel
+    // already tolerates result-into-home-reg aliasing for every homed value).
+    if (!getenv("TINYC_NO_PHI_COALESCE")) {
+        for (size_t vi = 0; vi < nv; vi++) {
+            if (!disq[vi] || use_cnt[vi] != 1) continue;
+            MLIR_OpHandle term = edge_term[vi];
+            MLIR_ValueHandle ba = edge_arg[vi];
+            if (term == MLIR_INVALID_HANDLE || ba == MLIR_INVALID_HANDLE) continue;
+            // Single-successor (unconditional) terminator only.
+            if (MLIR_GetOpNumSuccessors(term) != 1) continue;
+            // Value must be defined immediately before its block's terminator.
+            MLIR_BlockHandle db = MLIR_GetRegionBlock(reg, def_block[vi]);
+            size_t dno = MLIR_GetBlockNumOps(db);
+            if (dno < 2 || def_pos[vi] != (int32_t)dno - 2) continue;
+            if (MLIR_GetBlockOp(db, dno - 1) != term) continue;
+            // Destination block-arg must be register-homed.
+            int32_t R;
+            if (!sm_get(rm, ba, &R)) continue;
+            // The block-arg's register must not be read by any OTHER operand of
+            // this edge (no pass-through of the old phi value into R).
+            bool conflict = false;
+            size_t nso = MLIR_GetOpNumSuccessorOperands(term, 0);
+            for (size_t k = 0; k < nso && !conflict; k++) {
+                MLIR_ValueHandle o = MLIR_GetOpSuccessorOperand(term, 0, k);
+                if (o == ba) { conflict = true; break; }   // old arg passed through
+                if (o == vals[vi]) continue;                // the value itself
+                int32_t or_;
+                if (sm_get(rm, o, &or_) && or_ == R) conflict = true;
+            }
+            if (conflict) continue;
+            // Home the value directly in the block-arg's register.
+            sm_put(rm, vals[vi], R);
         }
     }
 
