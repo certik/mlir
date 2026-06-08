@@ -4495,14 +4495,11 @@ static void emit_path_open_shim(EmittedFunc *e, LibSysRegistry *ls) {
     // = "-w-r-----" on macOS, which made the produced .wasm.o files
     // unreadable to their own owner).
     //
-    // The immediate is written in hex (0x1a4 == 0o644) on purpose:
-    // tinyC's lexer does not parse C octal literals (a literal
-    // beginning with `0` is read as decimal), so when this file is
-    // compiled by a tinyC-self-host binary an octal literal `0644`
-    // would silently mean 644 decimal == 0o1204, which the kernel
-    // strips down to 0o204 ("-w----r--") on regular files.
+    // The mode is the octal literal 0o644 (rw-r--r--). tinyC's lexer
+    // now parses C octal literals, so both clang and a tinyC-self-host
+    // build read `0644` identically.
     emit_word(&e->code, arm64_sub_sp_imm(16));
-    emit_word(&e->code, arm64_movz_x(12, 0x1a4, 0));           // x12 = 0o644 (rw-r--r--)
+    emit_word(&e->code, arm64_movz_x(12, 0644, 0));            // x12 = 0o644 (rw-r--r--)
     emit_word(&e->code, arm64_str_x_sp(12, 0));                // [sp+0] = mode
     emit_word(&e->code, arm64_add_x_imm(0, 31 /*SP*/, 48));    // x0 = &buf (buf is now sp+48)
     emit_word(&e->code, arm64_mov_w_reg(1, 9));                // x1 = flags

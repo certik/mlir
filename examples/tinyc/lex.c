@@ -332,6 +332,24 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                 VecTcTok_push_back(arena, &toks, t);
                 i = j; continue;
             }
+            // Octal integer literal (C semantics): a digit run that begins
+            // with '0', has more than one digit, is not a float (handled
+            // above) and is not hex (0x, handled above) is base-8. The loop
+            // above accumulated it in base-10, so re-scan [i, j) in base-8.
+            // A lone '0' stays 0; a run containing '8'/'9' is left as-is
+            // (decimal) rather than rejected, matching the lexer's lenient
+            // style. `i` still points at the first digit; `j` is one past
+            // the last (suffix parsing has not run yet).
+            if (src.str[i] == '0' && j - i > 1) {
+                int64_t ov = 0;
+                bool octal_ok = true;
+                for (size_t k = i; k < j; k++) {
+                    char d = src.str[k];
+                    if (d < '0' || d > '7') { octal_ok = false; break; }
+                    ov = ov * 8 + (d - '0');
+                }
+                if (octal_ok) v = ov;
+            }
             TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
             // Optional integer-literal suffix: any combination of 'l'/'L'
             // and 'u'/'U' in either order. So 'L', 'LL', 'UL', 'LU', 'ULL',

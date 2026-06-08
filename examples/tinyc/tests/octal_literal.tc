@@ -1,0 +1,10 @@
+int main() {
+    _tinyc_print(0755);
+    _tinyc_print(010);
+    _tinyc_print(0);
+    _tinyc_print(0777);
+    _tinyc_print(0x1F);
+    _tinyc_print(100);
+    _tinyc_print(01000);
+    return 0;
+}
