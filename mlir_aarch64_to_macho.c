@@ -685,9 +685,12 @@ typedef enum {
     LS_ERRNO,
     LS_MMAP,
     LS_MEMCPY,
-    LS_FCHMOD
+    LS_FCHMOD,
+    LS_WRITEV,
+    LS_READV,
+    LS_FCNTL
 } LibSysSym;
-#define LS_COUNT 10
+#define LS_COUNT 13
 
 static const char *libsys_name(int sym) {
     if (sym == LS_EXIT)   return "_exit";
@@ -700,6 +703,9 @@ static const char *libsys_name(int sym) {
     if (sym == LS_MMAP)   return "_mmap";
     if (sym == LS_MEMCPY) return "_memcpy";
     if (sym == LS_FCHMOD) return "_fchmod";
+    if (sym == LS_WRITEV) return "_writev";
+    if (sym == LS_READV)  return "_readv";
+    if (sym == LS_FCNTL)  return "_fcntl";
     return "";
 }
 
