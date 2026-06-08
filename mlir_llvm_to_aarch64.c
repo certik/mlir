@@ -91,6 +91,13 @@ static void emit_blr(MLIR_Context *ctx, MLIR_BlockHandle blk, uint8_t rn) {
     a[0] = attr_i32(ctx, "rn", rn);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_BLR, a, 1));
 }
+// svc #imm16 — supervisor call (raw syscall trap). The OS-specific syscall
+// number register and `imm16` are set by the caller (macOS: x16 + #0x80).
+static void emit_svc(MLIR_Context *ctx, MLIR_BlockHandle blk, uint16_t imm16) {
+    MLIR_AttributeHandle a[1];
+    a[0] = attr_i32(ctx, "imm16", imm16);
+    MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_SVC, a, 1));
+}
 // ADRP rd, <section page>  /  ADD rd, rn, #<section lo12 + addend>. The
 // encoder resolves `target` (a section kind or, for native globals, the
 // "linmem_template" data section) and adds `addend` to the base address.
@@ -4814,6 +4821,42 @@ static MLIR_OpHandle select_func(MLIR_Context *ctx, MLIR_OpHandle fn,
         MLIR_INVALID_HANDLE, (string){0}, -1);
 }
 
+// Synthesise the `__tinyc_syscall6` intrinsic stub: the body for the call that
+// `__builtin_syscall6(num, a1..a6)` lowers to. It receives (num, a1..a6) in
+// x0..x6 per the C ABI, moves them into the kernel's syscall registers, traps,
+// and returns the kernel result (left in x0 by the trap).
+//
+// The trap sequence is OS-specific. This is the macOS/arm64 convention
+// (syscall number in x16, `svc #0x80`); a future ELF/Linux backend lowers the
+// same `__tinyc_syscall6` symbol to the Linux convention (number in x8,
+// `svc #0`). The stub is a leaf — it touches only caller-saved scratch
+// registers (x0..x6, x16) — so it needs no prologue/frame.
+static MLIR_OpHandle synth_syscall6(MLIR_Context *ctx) {
+    MLIR_BlockHandle  blk = MLIR_CreateBlock(ctx);
+    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
+    MLIR_AppendRegionBlock(ctx, reg, blk);
+
+    // x16 = num (incoming x0), then shift args x1..x6 down into x0..x5.
+    emit_mov_x(ctx, blk, 16, 0);
+    emit_mov_x(ctx, blk, 0, 1);
+    emit_mov_x(ctx, blk, 1, 2);
+    emit_mov_x(ctx, blk, 2, 3);
+    emit_mov_x(ctx, blk, 3, 4);
+    emit_mov_x(ctx, blk, 4, 5);
+    emit_mov_x(ctx, blk, 5, 6);
+    emit_svc(ctx, blk, 0x80);
+    emit_ret(ctx, blk);
+
+    MLIR_AttributeHandle attrs[1];
+    attrs[0] = attr_s(ctx, "sym_name", "__tinyc_syscall6", 16);
+    MLIR_RegionHandle regs[1] = { reg };
+    return MLIR_CreateOp(ctx, OP_TYPE_AARCH64_FUNC,
+        op_type_to_string(OP_TYPE_AARCH64_FUNC),
+        attrs, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
+        MLIR_CreateLocationUnknown(ctx, (string){0}),
+        MLIR_INVALID_HANDLE, (string){0}, -1);
+}
+
 // Synthesise `_start`: initialise pointer globals (PC-relative, so they work
 // under ASLR), then `bl main; bl _exit`. Exported and emitted first so the
 // Mach-O encoder lands LC_MAIN.entryoff on it.
@@ -4965,14 +5008,22 @@ MLIR_OpHandle mlir_llvm_to_aarch64(MLIR_Context *ctx,
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
         if (!name_eq(MLIR_GetOpName(op), "llvm.func")) continue;
-        if (!func_has_body(op)) continue;  // skip declarations (malloc/free).
         MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
+        string sym = (sa != MLIR_INVALID_HANDLE)
+            ? MLIR_GetAttributeString(sa) : (string){0};
+        if (!func_has_body(op)) {
+            // Most declarations (malloc/free, libSystem imports) are skipped —
+            // they resolve to imports. The `__tinyc_syscall6` intrinsic is the
+            // exception: synthesise its `svc` stub body here, on demand.
+            if (sym.size == 16 && memcmp(sym.str, "__tinyc_syscall6", 16) == 0)
+                MLIR_AppendBlockOp(ctx, out_body, synth_syscall6(ctx));
+            continue;
+        }
         if (sa == MLIR_INVALID_HANDLE) {
             fprintf(stderr, "llvm->aarch64: llvm.func without sym_name\n");
             free(gm.e); free(gblob); free(grelocs);
             return MLIR_INVALID_HANDLE;
         }
-        string sym = MLIR_GetAttributeString(sa);
         if (sym.size == 4 && memcmp(sym.str, "main", 4) == 0) saw_main = true;
         MLIR_OpHandle fn = select_func(ctx, op, sym, &gm);
         if (fn == MLIR_INVALID_HANDLE) { free(gm.e); free(gblob); free(grelocs); return MLIR_INVALID_HANDLE; }

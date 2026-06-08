@@ -1,0 +1,12 @@
+// Exercise the __builtin_syscall6 raw-syscall intrinsic on the native
+// llvm -> aarch64 -> Mach-O backend. Both the write and the non-zero exit
+// status go straight through the kernel via the macOS `svc #0x80` trap that
+// the backend synthesises for the __tinyc_syscall6 stub — no libSystem.
+//
+// macOS/arm64 BSD syscall numbers: write = 4, exit = 1.
+int main(void) {
+    char *msg = "syscall6 ok\n";
+    __builtin_syscall6(4, 1, (long)msg, 12, 0, 0, 0);   // write(1, msg, 12)
+    __builtin_syscall6(1, 5, 0, 0, 0, 0, 0);            // exit(5)
+    return 0;                                            // not reached
+}
