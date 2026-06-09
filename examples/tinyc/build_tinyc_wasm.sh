@@ -52,7 +52,8 @@ clang --target=wasm32 -O2 -nostdlib -fno-builtin \
 # in a non-browser context). Kept separate from runtime_wasm.wasm.o so
 # it can be linked alongside a tinyC-compiled corec-stdlib without
 # duplicating printf/strlen/etc.
-clang --target=wasm32-wasi -O2 -fno-builtin \
+clang --target=wasm32-wasi -O2 -nostdinc -fno-builtin \
+    -I corec -I corec-stdlib/stdlib \
     -c -o tinyc_wasm_vararg.wasm.o examples/tinyc/tinyc_wasm_vararg.c
 
 ls -l tinyc.wasm runtime_wasm.wasm.o start_wasm.wasm.o tinyc_wasm_vararg.wasm.o
