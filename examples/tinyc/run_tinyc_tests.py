@@ -379,6 +379,7 @@ def main():
             continue
 
         if TARGET == "macho":
+            exe = HERE / "tests" / f"{name}.macho"
 
             # The llvm_via_wasm sub-backend goes through the lifter:
             #   per-source --emit=wasm + wasm-ld + --from-wasm <linked.wasm>
