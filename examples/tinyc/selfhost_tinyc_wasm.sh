@@ -77,6 +77,7 @@ NATIVE_C_FILES=(
     mlir_llvm_load_cse.c
     mlir_llvm_arith_gvn.c
     mlir_llvm_dce.c
+    mlir_regalloc.c
     mlir_llvm_to_aarch64.c
     mlir_aarch64_to_macho.c
     tokenizer.c

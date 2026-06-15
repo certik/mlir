@@ -101,6 +101,7 @@ NATIVE_C_FILES=(
     mlir_wasmstack_to_wasmssa.c
     mlir_wasmssa_to_llvm.c
     mlir_llvm_mem2reg.c mlir_llvm_load_cse.c mlir_llvm_arith_gvn.c mlir_llvm_dce.c
+    mlir_regalloc.c
     mlir_llvm_to_aarch64.c
     mlir_aarch64_to_macho.c
     tokenizer.c
