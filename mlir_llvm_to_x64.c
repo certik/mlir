@@ -24,12 +24,13 @@
 #include "mlir_api.h"
 #include "mlir_obj.h"
 #include "mlir_elf.h"
+#include "mlir_regalloc.h"
 
 // ---------------------------------------------------------------------------
 // x86-64 register numbers.
 // ---------------------------------------------------------------------------
 enum { RAX=0, RCX=1, RDX=2, RBX=3, RSP=4, RBP=5, RSI=6, RDI=7,
-       R8=8, R9=9, R10=10, R11=11 };
+       R8=8, R9=9, R10=10, R11=11, R12=12, R13=13, R14=14, R15=15 };
 // SysV integer argument registers, in order.
 static const uint8_t ARG_REGS[6] = { RDI, RSI, RDX, RCX, R8, R9 };
 // Linux x86_64 syscall numbers.
@@ -91,12 +92,38 @@ typedef struct {
     GMap         *gm;
     uint32_t      frame;     // total frame size (16-aligned)
     uint32_t      edge_tmp;  // rbp offset base of the parallel-move temp area
+    // register allocation (shared mlir_regalloc): value -> physical register.
+    // Values absent from `rm` live in their frame slot.
+    SlotMap       rm;
+    uint32_t      used_mask; // callee-saved pool regs the allocator used
+    int32_t       cs_base;   // rbp offset base of the callee-saved spill area
+    int           n_cs;      // # of callee-saved regs to save/restore
+    uint8_t       cs_reg[8]; // those registers, in save order
     // block layout
     uint32_t     *block_off; // code offset of each block (filled as emitted)
     size_t        n_blocks;
     BrFix        *fix; size_t n_fix, c_fix;
     bool          ok;
 } FnCtx;
+
+// Register pool for the x86_64 backend. Arg registers (rcx/rdx/rsi/rdi/r8/r9)
+// and the implicit-clobber registers (rdx by mul/div, rcx by shifts) are kept
+// OUT of the pool, along with the rax/r11 scratch pair, so that param homing and
+// call-argument setup never alias a live home and need no parallel move. That
+// leaves r10 (caller-saved) + rbx/r12..r15 (callee-saved) allocatable.
+static RegTarget x64_regtarget(void) {
+    RegTarget T; memset(&T, 0, sizeof(T));
+    T.npool = 6; T.ncaller = 1; T.nhome = 3;
+    T.pool[0] = R10;
+    T.pool[1] = RBX; T.pool[2] = R12; T.pool[3] = R13; T.pool[4] = R14; T.pool[5] = R15;
+    return T;
+}
+// True (with *reg set) if value `v` has a physical-register home.
+static bool val_in_reg(FnCtx *F, MLIR_ValueHandle v, uint8_t *reg) {
+    int32_t r;
+    if (sm_get(&F->rm, v, &r)) { *reg = (uint8_t)r; return true; }
+    return false;
+}
 
 static void fail(FnCtx *F, const char *msg, string extra) {
     if (F->ok) {
@@ -256,11 +283,15 @@ static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
         if (!gn.size || !gmap_get(F->gm, gn, &off)) { fail(F, "unknown global", gn); return; }
         lea_rip_data(F, reg, off); return;
     }
+    uint8_t rH;
+    if (val_in_reg(F, v, &rH)) { mov_rr(F, reg, rH, val_w(F->ctx, v)); return; }
     int32_t slot;
     if (!vmap_get(&F->slots, v, &slot)) { fail(F, "value with no slot", (string){0}); return; }
     load_rbp(F, reg, slot, val_w(F->ctx, v));
 }
 static void store_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
+    uint8_t rH;
+    if (val_in_reg(F, v, &rH)) { mov_rr(F, rH, reg, val_w(F->ctx, v)); return; }
     int32_t slot;
     if (!vmap_get(&F->slots, v, &slot)) { fail(F, "result with no slot", (string){0}); return; }
     store_rbp(F, slot, reg, val_w(F->ctx, v));

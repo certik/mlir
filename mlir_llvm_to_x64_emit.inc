@@ -66,14 +66,19 @@ static void emit_edge(FnCtx *F, MLIR_OpHandle term, size_t si, MLIR_BlockHandle 
         load_val(F, src, RAX);
         store_rbp(F, (int32_t)(F->edge_tmp - i * 8), RAX, 1);
     }
-    // pass 2: temps -> destination block-arg slots
+    // pass 2: temps -> destination block-arg homes (register or slot)
     for (size_t i = 0; i < n; i++) {
         MLIR_ValueHandle darg = MLIR_GetBlockArg(target, i);
-        int32_t slot;
-        if (!vmap_get(&F->slots, darg, &slot)) { fail(F, "block arg no slot", (string){0}); return; }
         load_rbp(F, RAX, (int32_t)(F->edge_tmp - i * 8), 1);
-        store_rbp(F, slot, RAX, val_w(F->ctx, darg));
+        store_val(F, darg, RAX);
     }
+}
+
+// Restore callee-saved registers, then `leave ; ret`.
+static void emit_epilogue(FnCtx *F) {
+    for (int j = F->n_cs - 1; j >= 0; j--)
+        load_rbp(F, F->cs_reg[j], F->cs_base + 8 * (j + 1), 1);
+    eb(F, 0xC9); eb(F, 0xC3);   // leave ; ret
 }
 
 // module-wide lowering state shared across the helpers below
@@ -285,7 +290,7 @@ static void lower_term(FnCtx *F, MLIR_OpHandle op) {
     if (str_eqz(nm, "llvm.return") || str_eqz(nm, "func.return")) {
         if (MLIR_GetOpNumOperands(op) >= 1)
             load_val(F, MLIR_GetOpOperand(op, 0), RAX);
-        eb(F, 0xC9); eb(F, 0xC3);                       // leave ; ret
+        emit_epilogue(F);
         return;
     }
     if (str_eqz(nm, "llvm.unreachable")) { eb(F, 0x0F); eb(F, 0x0B); return; }  // ud2
@@ -357,6 +362,26 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     F.n_blocks = nb;
     F.block_off = (uint32_t *)calloc(nb ? nb : 1, sizeof(uint32_t));
 
+    // --- register allocation: shared linear-scan allocator -> F.rm
+    //     (value -> physical register). Values it leaves out stay in frame
+    //     slots. TINYC_X64_NOREGALLOC forces the pure slot model (A/B aid). ---
+    F.rm.arena = MLIR_GetArenaAllocator(ctx);
+    if (!getenv("TINYC_X64_NOREGALLOC")) {
+        SlotMap sm_spill; memset(&sm_spill, 0, sizeof(sm_spill));
+        sm_spill.arena = MLIR_GetArenaAllocator(ctx);
+        int32_t nslots = 0;
+        RegTarget T = x64_regtarget();
+        uint32_t um = mlir_regalloc_global(ctx, reg, nb, &F.rm, &sm_spill, &nslots, &T);
+        if (um == RA_BAIL) {
+            memset(&F.rm, 0, sizeof(F.rm));
+            F.rm.arena = MLIR_GetArenaAllocator(ctx);
+            um = mlir_regalloc_cfg(ctx, reg, nb, &F.rm, &T);
+        }
+        F.used_mask = um;
+        for (int k = 0; k < T.npool - T.ncaller; k++)
+            if (um & (1u << k)) F.cs_reg[F.n_cs++] = T.pool[T.ncaller + k];
+    }
+
     // --- frame pre-pass: assign slots to every block arg + op result; reserve
     //     alloca regions; size the parallel-move temp area. ---
     size_t want = 0;
@@ -391,6 +416,8 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     }
     cur += (int32_t)(max_edge * 8);
     F.edge_tmp = (uint32_t)cur;          // temps occupy [rbp-cur .. ]
+    F.cs_base = cur;                     // callee-saved spill area follows
+    cur += (int32_t)(F.n_cs * 8);
     F.frame = (uint32_t)((cur + 15) & ~15);
 
     // --- prologue: push rbp ; mov rbp,rsp ; sub rsp, frame ---
@@ -398,14 +425,18 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     rex(&F, 1, 0, 0, RBP); eb(&F, 0x89); modrm(&F, 3, RSP, RBP);    // mov rbp, rsp
     if (F.frame) { rex(&F, 1, 0, 0, RSP); eb(&F, 0x81); modrm(&F, 3, 5, RSP); e32(&F, F.frame); } // sub rsp, imm32
 
-    // --- entry params: incoming arg regs -> entry block-arg slots ---
+    // save the callee-saved registers the allocator used
+    for (int j = 0; j < F.n_cs; j++)
+        store_rbp(&F, F.cs_base + 8 * (j + 1), F.cs_reg[j], 1);
+
+    // --- entry params: incoming arg regs -> entry block-arg homes (reg/slot).
+    //     Homes never alias an incoming arg register (arg regs are out of the
+    //     pool), so the sequential moves need no parallel-move resolution. ---
     if (nb > 0) {
         MLIR_BlockHandle e0 = MLIR_GetRegionBlock(reg, 0);
         size_t na = MLIR_GetBlockNumArgs(e0);
-        for (size_t a = 0; a < na && a < 6; a++) {
-            int32_t slot; vmap_get(&F.slots, MLIR_GetBlockArg(e0, a), &slot);
-            store_rbp(&F, slot, ARG_REGS[a], 1);
-        }
+        for (size_t a = 0; a < na && a < 6; a++)
+            store_val(&F, MLIR_GetBlockArg(e0, a), ARG_REGS[a]);
     }
 
     // --- emit blocks ---
