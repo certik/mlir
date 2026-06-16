@@ -103,6 +103,7 @@ typedef struct {
     uint32_t     *block_off; // code offset of each block (filled as emitted)
     size_t        n_blocks;
     BrFix        *fix; size_t n_fix, c_fix;
+    uint32_t      n_fixed;   // # of fixed (named) params, for llvm.intr.vastart
     bool          ok;
 } FnCtx;
 

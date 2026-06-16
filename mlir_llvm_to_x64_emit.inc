@@ -423,19 +423,31 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                 store_val(F, MLIR_GetOpResult(op, 0), RAX);
             return;
         }
-        // General SysV call: args 0..5 in registers, args 6.. on the stack
-        // (pushed right-to-left so operand[6] lands at [rsp+0] at the call). An
-        // extra 8-byte pad is inserted when the number of stack args is odd so
-        // rsp stays 16-aligned at the `call`, as the ABI requires.
-        size_t nstack = (no > 6) ? (no - 6) : 0;
+        // Register/stack split. For a variadic callee only the fixed params go
+        // in registers; ALL variadic args are passed on the stack so the
+        // callee's va_list is a simple cursor over them (see llvm.intr.vastart).
+        // Non-variadic: the usual SysV split (args 0..5 in registers, 6.. on the
+        // stack). Stack args are pushed right-to-left so operand[reg_cutoff]
+        // lands at [rsp+0] at the call; an 8-byte pad keeps rsp 16-aligned when
+        // the number of stack args is odd.
+        size_t reg_cutoff = 6;
+        MLIR_AttributeHandle vct = MLIR_GetOpAttributeByName(op, "var_callee_type");
+        if (vct != MLIR_INVALID_HANDLE) {
+            MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(vct);
+            if (ft != MLIR_INVALID_HANDLE && MLIR_GetTypeFunctionIsVarArg(ft)) {
+                size_t nf = MLIR_GetTypeFunctionNumInputs(ft);
+                reg_cutoff = nf < 6 ? nf : 6;
+            }
+        }
+        if (reg_cutoff > no) reg_cutoff = no;
+        size_t nstack = no - reg_cutoff;
         size_t pad = nstack & 1;
         if (pad) { eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 5, RSP); eb(F, 0x08); }  // sub rsp, 8
-        for (size_t i = no; i > 6; i--) {
+        for (size_t i = no; i > reg_cutoff; i--) {
             load_val(F, MLIR_GetOpOperand(op, i - 1), RAX);
             eb(F, 0x50);                                  // push rax
         }
-        size_t nreg = no < 6 ? no : 6;
-        for (size_t i = 0; i < nreg; i++)
+        for (size_t i = 0; i < reg_cutoff; i++)
             load_val(F, MLIR_GetOpOperand(op, i), ARG_REGS[i]);
         eb(F, 0xE8);
         uint32_t field = here(F); e32(F, 0);
@@ -449,6 +461,29 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         }
         if (MLIR_GetOpNumResults(op) == 1)
             store_val(F, MLIR_GetOpResult(op, 0), RAX);
+        return;
+    }
+
+    // variadics: va_list is a single `char*` cursor over the on-stack variadic
+    // args (matching the tinyc_va_arg_* runtime helpers). va_start writes the
+    // address of the first variadic arg; va_arg is lowered to helper calls by
+    // the front end, so nothing is needed here for it.
+    if (str_eqz(nm, "llvm.intr.vastart")) {
+        // First variadic arg sits just past the saved rbp + return address and
+        // any fixed params that spilled to the stack: [rbp + 16 + max(0,
+        // n_fixed-6)*8]. Store that address into the va_list slot (operand 0).
+        int32_t disp = 16 + (F->n_fixed > 6 ? (int32_t)(F->n_fixed - 6) * 8 : 0);
+        load_val(F, MLIR_GetOpOperand(op, 0), RCX);              // va_list address
+        rex(F, 1, RAX, 0, 0); eb(F, 0x8D); modrm(F, 2, RAX, RBP); e32(F, (uint32_t)disp); // lea rax,[rbp+disp]
+        store_mem(F, RCX, RAX, 8);                               // *va_list = cursor
+        return;
+    }
+    if (str_eqz(nm, "llvm.intr.vaend")) return;                  // stack cursor: no teardown
+    if (str_eqz(nm, "llvm.intr.vacopy")) {
+        load_val(F, MLIR_GetOpOperand(op, 1), RCX);              // src va_list address
+        load_mem(F, RAX, RCX, 8, false);                        // rax = *src
+        load_val(F, MLIR_GetOpOperand(op, 0), RCX);              // dst va_list address
+        store_mem(F, RCX, RAX, 8);                               // *dst = *src
         return;
     }
 
@@ -600,6 +635,7 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     if (nb > 0) {
         MLIR_BlockHandle e0 = MLIR_GetRegionBlock(reg, 0);
         size_t na = MLIR_GetBlockNumArgs(e0);
+        F.n_fixed = (uint32_t)na;
         for (size_t a = 0; a < na && a < 6; a++)
             store_val(&F, MLIR_GetBlockArg(e0, a), ARG_REGS[a]);
         for (size_t a = 6; a < na; a++) {

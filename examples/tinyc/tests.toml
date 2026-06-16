@@ -417,7 +417,7 @@ expected_stdout = "1 2 3\nanswer = 42\n"
 
 [[test]]
 name = "variadic_define_sum"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "60\n15\n99\n"
 
 [[test]]
@@ -427,7 +427,7 @@ expected_stdout = "int=7\nlong=1234567890123\nstr=hi\n"
 
 [[test]]
 name = "variadic_forward_decl"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "10\n300\n"
 
 [[test]]
@@ -1079,7 +1079,7 @@ expected_stdout = "10\n20\n30\n10\n30\n60\n-1\n"
 
 [[test]]
 name = "static_func_collision"
-targets = ["native", "wasm"]
+targets = ["native", "wasm", "elf"]
 # Multi-TU test: each helper TU defines `static int helper(int)` with
 # a different body. Verifies wasm-link respects per-object static
 # binding so cross-TU symbol-name collisions don't merge into a
