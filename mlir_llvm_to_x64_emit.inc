@@ -423,8 +423,19 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                 store_val(F, MLIR_GetOpResult(op, 0), RAX);
             return;
         }
-        if (no > 6) { fail(F, "call with >6 args", callee); return; }
-        for (size_t i = 0; i < no; i++)
+        // General SysV call: args 0..5 in registers, args 6.. on the stack
+        // (pushed right-to-left so operand[6] lands at [rsp+0] at the call). An
+        // extra 8-byte pad is inserted when the number of stack args is odd so
+        // rsp stays 16-aligned at the `call`, as the ABI requires.
+        size_t nstack = (no > 6) ? (no - 6) : 0;
+        size_t pad = nstack & 1;
+        if (pad) { eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 5, RSP); eb(F, 0x08); }  // sub rsp, 8
+        for (size_t i = no; i > 6; i--) {
+            load_val(F, MLIR_GetOpOperand(op, i - 1), RAX);
+            eb(F, 0x50);                                  // push rax
+        }
+        size_t nreg = no < 6 ? no : 6;
+        for (size_t i = 0; i < nreg; i++)
             load_val(F, MLIR_GetOpOperand(op, i), ARG_REGS[i]);
         eb(F, 0xE8);
         uint32_t field = here(F); e32(F, 0);
@@ -432,6 +443,10 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         memcpy(cs, callee.str, callee.size); cs[callee.size] = 0;
         obj_add_reloc(F->f, field, field + 4, false, cs, 0);
         sym_add(refs, callee);
+        if (nstack) {
+            uint32_t cleanup = (uint32_t)((nstack + pad) * 8);   // pop stack args + pad
+            rex(F, 1, 0, 0, RSP); eb(F, 0x81); modrm(F, 3, 0, RSP); e32(F, cleanup);  // add rsp, imm32
+        }
         if (MLIR_GetOpNumResults(op) == 1)
             store_val(F, MLIR_GetOpResult(op, 0), RAX);
         return;
@@ -480,24 +495,15 @@ static void lower_term(FnCtx *F, MLIR_OpHandle op) {
 // Function emission: frame pre-pass, prologue, blocks, branch patch.
 // ---------------------------------------------------------------------------
 static unsigned alloca_bytes(MLIR_Context *ctx, MLIR_OpHandle op) {
-    // element type size * count; default 8. Handles `[N x i8]` and scalar.
+    // element type size * count; default 8. Uses the shared LP64 layout
+    // (x64_type_size), so nested arrays / structs / unions are sized correctly.
     MLIR_AttributeHandle et = MLIR_GetOpAttributeByName(op, "elem_type");
     unsigned esz = 8;
     if (et) {
-        MLIR_TypeHandle t = MLIR_GetAttributeType(et);
+        MLIR_TypeHandle t = MLIR_GetAttributeTypeValue(et);
         if (t != MLIR_INVALID_HANDLE) {
-            if (MLIR_IsTypeLLVMArray(t)) {
-                MLIR_TypeHandle el = MLIR_GetTypeLLVMArrayElement(t);
-                uint64_t nel = MLIR_GetTypeLLVMArrayNumElements(t);
-                int eb2 = MLIR_IsTypeInteger(el) ? 0 : 0; (void)eb2;
-                string es = MLIR_GetTypeString(ctx, el);
-                unsigned per = 8;
-                if (es.size >= 2 && es.str[0] == 'i') { int b=0; for(size_t i=1;i<es.size;i++) b=b*10+(es.str[i]-'0'); per=(b+7)/8; }
-                esz = (unsigned)(per * nel);
-            } else if (MLIR_IsTypeInteger(t)) {
-                string es = MLIR_GetTypeString(ctx, t);
-                int b=0; for(size_t i=1;i<es.size;i++) b=b*10+(es.str[i]-'0'); esz=(unsigned)((b+7)/8);
-            }
+            unsigned s = x64_type_size(ctx, t);
+            if (s) esz = s;
         }
     }
     if (esz == 0) esz = 8;
@@ -589,12 +595,18 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
 
     // --- entry params: incoming arg regs -> entry block-arg homes (reg/slot).
     //     Homes never alias an incoming arg register (arg regs are out of the
-    //     pool), so the sequential moves need no parallel-move resolution. ---
+    //     pool), so the sequential moves need no parallel-move resolution.
+    //     Params 6.. arrive on the caller's stack at [rbp+16], [rbp+24], ... ---
     if (nb > 0) {
         MLIR_BlockHandle e0 = MLIR_GetRegionBlock(reg, 0);
         size_t na = MLIR_GetBlockNumArgs(e0);
         for (size_t a = 0; a < na && a < 6; a++)
             store_val(&F, MLIR_GetBlockArg(e0, a), ARG_REGS[a]);
+        for (size_t a = 6; a < na; a++) {
+            int32_t disp = (int32_t)(16 + (a - 6) * 8);   // [rbp + disp]
+            load_rbp(&F, RAX, -disp, 1);
+            store_val(&F, MLIR_GetBlockArg(e0, a), RAX);
+        }
     }
 
     // --- emit blocks ---

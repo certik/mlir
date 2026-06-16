@@ -59,9 +59,25 @@ static void tinyc_rt_add(Arena *arena, Program *prog, string *combined,
 //
 // Definitions are ordered so that a function only calls ones added earlier.
 static void tinyc_inject_native_runtime(Arena *arena, Program *prog,
-                                        bool target_wasm32) {
+                                        bool target_wasm32, bool use_host_platform) {
     string combined = (string){0};
     bool any = false;
+
+    // When a host platform_<os>.c is compiled into the module (--host-platform),
+    // route the raw write primitive through corec's platform_fd_write (compiled,
+    // not a synthesized syscall thunk) so all I/O goes through the real platform
+    // layer. `_write` keeps its (fd, buf, n) shape; the wrapper marshals a
+    // single-entry ciovec for platform_fd_write (whose ciovec_t is {ptr; size_t}).
+    if (use_host_platform) {
+        tinyc_rt_add(arena, prog, &combined, &any, "_write",
+            "long _write(long fd, char *buf, long n){\n"
+            "  struct __tinyc_ciov { char *b; unsigned long len; } v;\n"
+            "  unsigned long nw;\n"
+            "  v.b=buf; v.len=(unsigned long)n;\n"
+            "  platform_fd_write((int)fd, (void*)&v, 1, (void*)&nw);\n"
+            "  return n;\n"
+            "}\n");
+    }
 
     tinyc_rt_add(arena, prog, &combined, &any, "printNewline",
         "void printNewline(void){ char c; c=10; _write(1,&c,1); }\n");
@@ -302,9 +318,14 @@ static void tinyc_inject_native_runtime(Arena *arena, Program *prog,
     if (!any) return;
 
     // Forward declarations for the raw syscall stubs the runtime binds to.
-    const char *prelude =
-        "long _write(long fd, char *buf, long n);\n"
-        "char *_mmap(long addr, long len, long prot, long flags, long fd, long off);\n";
+    // With a host platform, `_write` is defined above as a wrapper over corec's
+    // compiled platform_fd_write, so declare that symbol too.
+    const char *prelude = use_host_platform
+        ? "long _write(long fd, char *buf, long n);\n"
+          "char *_mmap(long addr, long len, long prot, long flags, long fd, long off);\n"
+          "unsigned int platform_fd_write(int fd, void *iovs, unsigned long n, void *nw);\n"
+        : "long _write(long fd, char *buf, long n);\n"
+          "char *_mmap(long addr, long len, long prot, long flags, long fd, long off);\n";
     string full = str_concat(arena,
                              str_from_cstr_view((char *)prelude),
                              combined);
