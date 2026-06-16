@@ -1,0 +1,15 @@
+// Regression test for the x86_64 -> ELF backend:
+//  - getelementptr must scale array indices by the element stride
+//    (int -> 4 bytes), for both dynamic (a[i]) and constant (a[k]) indices.
+//  - a typed integer global initializer must be serialized as its numeric
+//    value, not via the string accessor.
+// a = {5, 10, 15, 20}; sum = 50; g = 100; exit code = 150.
+int g = 100;
+int main() {
+    int a[4];
+    int i;
+    for (i = 0; i < 4; i = i + 1) {
+        a[i] = (i + 1) * 5;
+    }
+    return a[0] + a[1] + a[2] + a[3] + g;
+}

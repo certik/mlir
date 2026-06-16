@@ -1024,6 +1024,11 @@ expected_exit_code = 3
 targets = ["macho", "elf"]
 
 [[test]]
+name = "elf_array_global"
+expected_exit_code = 150
+targets = ["macho", "elf"]
+
+[[test]]
 name = "macho_hello"
 expected_stdout = "3\n"
 targets = ["macho"]

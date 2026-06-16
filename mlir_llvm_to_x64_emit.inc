@@ -18,6 +18,111 @@ static int type_bytes(MLIR_Context *ctx, MLIR_ValueHandle v) {
     return (b + 7) / 8;
 }
 
+// --- LLVM-type layout (LP64: pointers are 8 bytes) -------------------------
+// Shared by getelementptr stride math and typed global serialization.
+static unsigned x64_type_size(MLIR_Context *ctx, MLIR_TypeHandle ty);
+static unsigned x64_align_up(unsigned x, unsigned a) { return (x + a - 1) & ~(a - 1); }
+static unsigned x64_type_align(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    if (MLIR_IsTypeLLVMArray(ty))
+        return x64_type_align(ctx, MLIR_GetTypeLLVMArrayElement(ty));
+    if (MLIR_IsTypeLLVMStruct(ty)) {
+        size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
+        unsigned ma = 1;
+        for (size_t i = 0; i < nf; i++) {
+            unsigned fa = x64_type_align(ctx, MLIR_GetTypeLLVMStructField(ty, i));
+            if (fa > ma) ma = fa;
+        }
+        return ma;
+    }
+    unsigned sz = x64_type_size(ctx, ty);
+    return sz ? sz : 1;
+}
+static unsigned x64_struct_size(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
+    unsigned off = 0, max_align = 1;
+    for (size_t i = 0; i < nf; i++) {
+        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(ty, i);
+        unsigned fsz = x64_type_size(ctx, ft);
+        unsigned fal = x64_type_align(ctx, ft);
+        if (fsz == 0 || fal == 0) return 0;
+        off = x64_align_up(off, fal);
+        off += fsz;
+        if (fal > max_align) max_align = fal;
+    }
+    return x64_align_up(off, max_align);
+}
+// Byte offset of field `fld` within an LLVM struct (native LP64 layout).
+static unsigned x64_struct_field_offset(MLIR_Context *ctx, MLIR_TypeHandle sty, size_t fld) {
+    unsigned off = 0;
+    for (size_t i = 0; i <= fld; i++) {
+        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(sty, i);
+        off = x64_align_up(off, x64_type_align(ctx, ft));
+        if (i == fld) return off;
+        off += x64_type_size(ctx, ft);
+    }
+    return off;
+}
+static unsigned x64_type_size(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    string s = MLIR_GetTypeString(ctx, ty);
+    if (s.size >= 9 && memcmp(s.str, "!llvm.ptr", 9) == 0) return 8;
+    if (s.size == 3 && memcmp(s.str, "ptr", 3) == 0) return 8;
+    if (s.size == 3 && memcmp(s.str, "f32", 3) == 0) return 4;
+    if (s.size == 3 && memcmp(s.str, "f64", 3) == 0) return 8;
+    if (s.size > 1 && s.str[0] == 'i') {
+        int w = 0;
+        for (size_t i = 1; i < s.size; i++) {
+            if (s.str[i] >= '0' && s.str[i] <= '9') w = w * 10 + (s.str[i] - '0');
+            else { w = -1; break; }
+        }
+        if (w == 1 || w == 8) return 1;
+        if (w == 16) return 2;
+        if (w == 32) return 4;
+        if (w == 64) return 8;
+    }
+    if (MLIR_IsTypeLLVMArray(ty)) {
+        unsigned esz = x64_type_size(ctx, MLIR_GetTypeLLVMArrayElement(ty));
+        if (esz == 0) return 0;
+        return esz * (unsigned)MLIR_GetTypeLLVMArrayNumElements(ty);
+    }
+    if (MLIR_IsTypeLLVMStruct(ty)) return x64_struct_size(ctx, ty);
+    return 0;
+}
+
+// Parse a decimal i32 list "...: a, b, c>" (GEP rawConstantIndices). The
+// sentinel 0x80000000 marks a dynamic index supplied as an SSA operand.
+static size_t parse_i32_array(string cs, int32_t *out, size_t cap) {
+    size_t p = 0, got = 0;
+    while (p < cs.size && cs.str[p] != ':') p++;
+    if (p < cs.size) p++;
+    while (p < cs.size && got < cap) {
+        while (p < cs.size && (cs.str[p] == ' ' || cs.str[p] == ',')) p++;
+        if (p >= cs.size || cs.str[p] == '>') break;
+        int64_t sign = 1;
+        if (cs.str[p] == '-') { sign = -1; p++; }
+        int64_t v = 0;
+        while (p < cs.size && cs.str[p] >= '0' && cs.str[p] <= '9')
+            v = v * 10 + (cs.str[p++] - '0');
+        out[got++] = (int32_t)(sign * v);
+    }
+    return got;
+}
+
+// imul dst, src, imm32   (REX.W 69 /r id)
+static void imul_ri(FnCtx *F, uint8_t dst, uint8_t src, int32_t imm, int w) {
+    rex(F, w, dst, 0, src); eb(F, 0x69); modrm(F, 3, dst, src); e32(F, (uint32_t)imm);
+}
+// reg += off: folds into `add reg, imm32` when it fits, else materialises the
+// 64-bit offset in rcx (a scratch reg) and adds that.
+static void add_const_off(FnCtx *F, uint8_t reg, int64_t off) {
+    if (off == 0) return;
+    if (off >= INT32_MIN && off <= INT32_MAX) {
+        rex(F, 1, 0, 0, reg); eb(F, 0x81); modrm(F, 3, 0, reg); e32(F, (uint32_t)(int32_t)off);
+    } else {
+        mov_ri(F, RCX, off, 1);
+        alu_rr(F, 0x01, reg, RCX, 1);
+    }
+}
+
 // llvm.icmp predicate -> setcc/jcc condition code
 static int icmp_cc(int64_t pred) {
     switch (pred) {
@@ -238,11 +343,43 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
     }
     if (str_eqz(nm, "llvm.getelementptr")) {
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
-        load_val(F, MLIR_GetOpOperand(op, 0), RAX);   // base
-        size_t no = MLIR_GetOpNumOperands(op);
-        for (size_t i = 1; i < no; i++) {             // byte-stride indices (i8 element)
-            load_val(F, MLIR_GetOpOperand(op, i), RCX);
-            alu_rr(F, 0x01, RAX, RCX, 1);             // add rax, rcx
+        MLIR_AttributeHandle eta = MLIR_GetOpAttributeByName(op, "elem_type");
+        MLIR_AttributeHandle ria = MLIR_GetOpAttributeByName(op, "rawConstantIndices");
+        if (!eta || !ria) { fail(F, "getelementptr missing elem_type/indices", (string){0}); return; }
+        MLIR_TypeHandle elem_ty = MLIR_GetAttributeTypeValue(eta);
+        int32_t cidx[64];
+        size_t n_idx = parse_i32_array(MLIR_GetAttributeAsString(ctx, ria), cidx, 64);
+        if (n_idx == 0) { fail(F, "getelementptr with no indices", (string){0}); return; }
+        load_val(F, MLIR_GetOpOperand(op, 0), RAX);       // running address
+        size_t op_idx = 1;                                 // next dynamic operand
+        MLIR_TypeHandle cur_ty = elem_ty;
+        for (size_t i = 0; i < n_idx; i++) {
+            bool is_dyn = (cidx[i] == (int32_t)0x80000000);
+            unsigned stride;
+            if (i == 0) {                                  // index over `elem_type`
+                stride = x64_type_size(ctx, elem_ty);
+            } else if (MLIR_IsTypeLLVMStruct(cur_ty)) {    // struct field: constant offset
+                if (is_dyn) { fail(F, "dynamic struct index in gep", (string){0}); return; }
+                unsigned foff = x64_struct_field_offset(ctx, cur_ty, (size_t)cidx[i]);
+                cur_ty = MLIR_GetTypeLLVMStructField(cur_ty, (size_t)cidx[i]);
+                add_const_off(F, RAX, (int64_t)foff);
+                continue;
+            } else if (MLIR_IsTypeLLVMArray(cur_ty)) {     // array element stride
+                MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(cur_ty);
+                stride = x64_type_size(ctx, et);
+                cur_ty = et;
+            } else {
+                fail(F, "gep into non-aggregate type", (string){0}); return;
+            }
+            if (stride == 0) continue;
+            if (is_dyn) {
+                if (op_idx >= MLIR_GetOpNumOperands(op)) { fail(F, "gep dynamic index operand missing", (string){0}); return; }
+                load_val(F, MLIR_GetOpOperand(op, op_idx++), RCX);
+                if (stride != 1) imul_ri(F, RCX, RCX, (int32_t)stride, 1);  // rcx *= stride
+                alu_rr(F, 0x01, RAX, RCX, 1);              // add rax, rcx
+            } else if (cidx[i] != 0) {
+                add_const_off(F, RAX, (int64_t)cidx[i] * (int64_t)stride);
+            }
         }
         store_val(F, r, RAX);
         return;
@@ -486,16 +623,42 @@ static void collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb, GMap *gm, Bu
         if (!str_eqz(MLIR_GetOpName(op), "llvm.mlir.global")) continue;
         string name = attr_str(op, "sym_name");
         uint32_t off = (uint32_t)data->len;
+        MLIR_AttributeHandle gt = MLIR_GetOpAttributeByName(op, "global_type");
+        size_t sz = 0;
+        if (gt) {
+            MLIR_TypeHandle t = MLIR_GetAttributeTypeValue(gt);
+            if (t != MLIR_INVALID_HANDLE) sz = x64_type_size(ctx, t);
+        }
         MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(op, "value");
         if (va) {
-            string s = MLIR_GetAttributeString(va);
-            buf_append(data, s.str, s.size);
+            // Serialize the initializer per its actual attribute kind. Using the
+            // string accessor for an integer/float/bool attribute would read an
+            // unrelated field and emit garbage (or read an invalid pointer).
+            MLIR_AttrKind vk = MLIR_GetAttributeKind(va);
+            if (vk == MLIR_ATTR_KIND_STRING) {
+                string s = MLIR_GetAttributeString(va);
+                buf_append(data, s.str, s.size);
+                for (size_t z = s.size; z < sz; z++) buf_u8(data, 0);   // zero-fill tail
+            } else if (vk == MLIR_ATTR_KIND_INTEGER || vk == MLIR_ATTR_KIND_BOOL) {
+                if (sz == 0) sz = 8;
+                uint64_t v = (uint64_t)MLIR_GetAttributeInteger(va);
+                for (size_t b = 0; b < sz; b++)
+                    buf_u8(data, (uint8_t)(b < 8 ? (v >> (8 * b)) : 0));
+            } else if (vk == MLIR_ATTR_KIND_FLOAT) {
+                if (sz != 4 && sz != 8) sz = 8;
+                double d = MLIR_GetAttributeFloat(va);
+                uint64_t bits = 0;
+                if (sz == 4) { float f = (float)d; uint32_t b32; memcpy(&b32, &f, 4); bits = b32; }
+                else         { memcpy(&bits, &d, 8); }
+                for (size_t b = 0; b < sz; b++) buf_u8(data, (uint8_t)(bits >> (8 * b)));
+            } else {
+                fprintf(stderr, "x64: unsupported global initializer kind for '%.*s'\n",
+                        (int)name.size, name.str);
+                g_x64_ok = false;
+                for (size_t z = 0; z < (sz ? sz : 8); z++) buf_u8(data, 0);
+            }
         } else {
-            // zero-initialized: size from global_type array length
-            MLIR_AttributeHandle gt = MLIR_GetOpAttributeByName(op, "global_type");
-            size_t sz = 8;
-            if (gt) { MLIR_TypeHandle t = MLIR_GetAttributeType(gt);
-                if (t != MLIR_INVALID_HANDLE && MLIR_IsTypeLLVMArray(t)) sz = (size_t)MLIR_GetTypeLLVMArrayNumElements(t); }
+            if (sz == 0) sz = 8;   // unknown layout: conservative 8-byte zero slot
             for (size_t z = 0; z < sz; z++) buf_u8(data, 0);
         }
         gmap_put(gm, name, off);
