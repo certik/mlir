@@ -197,6 +197,16 @@ def main():
                   file=sys.stderr)
             return 2
 
+    # The elf backend produces a static x86_64 Linux ELF executable (direct
+    # syscalls, no libc), so it only runs on Linux/x86_64.
+    if TARGET == "elf":
+        import platform as _platform
+        if not sys.platform.startswith("linux") or _platform.machine() not in ("x86_64", "amd64"):
+            print(f"error: TINYC_TARGET=elf is only supported on Linux/x86_64 "
+                  f"(got sys.platform={sys.platform!r}, machine={_platform.machine()!r})",
+                  file=sys.stderr)
+            return 2
+
     failures = 0
     skipped = 0
     for t in tests:
@@ -343,8 +353,32 @@ def main():
             print(f"PASS {name}")
             continue
 
+        if TARGET == "elf":
+            # Native x86_64 -> static ELF executable (Linux). One invocation
+            # compiles + links + emits a directly-runnable binary; run it and
+            # compare stdout + exit code against the LP64 expectations.
+            exe = HERE / "tests" / f"{name}.elf"
+            tinyc_cmd = [str(TINYC), "--emit=elf", *LOWERING_FLAG,
+                         "-I", str(HERE / "tests"), "-o", str(exe)]
+            tinyc_cmd.extend(str(s) for s in srcs)
+            r = run(tinyc_cmd)
+            if r.returncode != 0:
+                print(f"FAIL {name}: tinyc returned {r.returncode}\nstderr:\n{r.stderr}")
+                failures += 1
+                continue
+            r = run([str(exe)])
+            if r.returncode != expected_rc:
+                print(f"FAIL {name}: elf exited with status {r.returncode} (expected {expected_rc})\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
+                failures += 1
+                continue
+            if r.stdout != expected:
+                print(f"FAIL {name}: stdout mismatch\n  expected: {expected!r}\n  got:      {r.stdout!r}")
+                failures += 1
+                continue
+            print(f"PASS {name}")
+            continue
+
         if TARGET == "macho":
-            obj = HERE / "tests" / f"{name}.macho.wasm.o"
             exe = HERE / "tests" / f"{name}.macho"
 
             # The llvm_via_wasm sub-backend goes through the lifter:

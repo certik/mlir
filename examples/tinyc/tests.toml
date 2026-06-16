@@ -4,7 +4,7 @@
 
 [[test]]
 name = "simple"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "3\n"
 
 [[test]]
@@ -198,7 +198,7 @@ expected_stdout = "60\n99\n99\n99\n"
 
 [[test]]
 name = "hello_world"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "Hello, world!\nFoo\n\n"
 
 [[test]]
@@ -380,7 +380,7 @@ expected_stdout = "5\n7\n"
 
 [[test]]
 name = "i64_basic"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "300\n900\n"
 
 [[test]]
@@ -1006,22 +1006,22 @@ expected_stdout = "3\n"
 [[test]]
 name = "macho_exit"
 expected_exit_code = 42
-targets = ["macho"]
+targets = ["macho", "elf"]
 
 [[test]]
 name = "macho_arith"
 expected_exit_code = 42
-targets = ["macho"]
+targets = ["macho", "elf"]
 
 [[test]]
 name = "macho_if"
 expected_exit_code = 0
-targets = ["macho"]
+targets = ["macho", "elf"]
 
 [[test]]
 name = "macho_loop"
 expected_exit_code = 3
-targets = ["macho"]
+targets = ["macho", "elf"]
 
 [[test]]
 name = "macho_hello"

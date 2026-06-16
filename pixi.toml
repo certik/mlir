@@ -385,6 +385,9 @@ bench_tinyc_compile = { cmd = "python examples/tinyc/bench_tinyc_compile.py", de
 bench_tinyc_compile_wasmtime = { cmd = "python examples/tinyc/bench_tinyc_compile.py --wasmtime", depends-on = ["build_tinyc_native_opt", "build_tinyc_upstream_opt", "build_tinyc_wasm"], description = "Same as bench_tinyc_compile, plus: take each produced tinyc.wasm and use it under wasmtime to recompile the tinyc source tree, reporting per-file wasmtime timings. Also reports pairwise bit-identity between the three produced tinyc.wasm binaries." }
 verify_tinyc_native_upstream_identical = { cmd = "python examples/tinyc/verify_native_upstream_identical.py", depends-on = ["build_tinyc_native_opt", "build_tinyc_upstream_opt", { task = "build_tinyc_wasm", environment = "wasm" }], description = "Compile the full tinyc self-host source set with both 'native' and 'upstream_api' configs and assert every produced .wasm.o and the linked tinyc.wasm are byte-identical. Exits nonzero on any divergence." }
 
+[feature.upstream.target.linux-64.tasks]
+test_tinyc_elf = { cmd = "TINYC=./tinyc_native TINYC_TARGET=elf python examples/tinyc/run_tinyc_tests.py", depends-on = ["build_tinyc_native"], description = "Run tinyC example compiler tests against the native x86_64 -> ELF backend (Linux/x86_64 only)" }
+
 [feature.upstream.target.osx-arm64.tasks]
 test_tinyc_macho = { cmd = "TINYC=./tinyc_native TINYC_TARGET=macho TINYC_LOWERING=native python examples/tinyc/run_tinyc_tests.py", depends-on = ["build_tinyc_native"], description = "Run tinyC example compiler tests against the WASM->Mach-O ARM64 backend (Darwin/arm64 only)" }
 test_tinyc_macho_llvm = { cmd = "TINYC=./tinyc_native TINYC_TARGET=macho TINYC_LOWERING=native TINYC_MACHO_BACKEND=llvm python examples/tinyc/run_tinyc_tests.py", depends-on = ["build_tinyc_native"], description = "Run tinyC example compiler tests against the native llvm->aarch64->Mach-O backend (Darwin/arm64 only)" }

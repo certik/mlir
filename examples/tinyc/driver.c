@@ -25,6 +25,15 @@
 #include "mlir_wasmssa_to_llvm.h"
 #include "mlir_llvm_to_aarch64.h"
 #include "mlir_aarch64_to_macho.h"
+// The x86_64 -> ELF backend is native-Linux-only (it emits x86_64 machine code
+// and a Linux ELF, and is not part of the tinyC self-host source set), so it is
+// compiled in only for Linux/x86_64 hosts, where mlir_llvm_to_x64.c /
+// mlir_elf.c are linked. Every other build (wasm/self-host, macOS, Windows)
+// omits it.
+#if defined(__linux__) && defined(__x86_64__) && !defined(__TINYC__)
+#include "mlir_llvm_to_x64.h"
+#define TINYC_HAS_ELF 1
+#endif
 #include "tinyc.h"
 #include "tinyc_native_runtime.h"
 
@@ -99,6 +108,10 @@ int app_main(void) {
     // wasm->macho path. "llvm" routes the `llvm` dialect directly through
     // the unified llvm -> aarch64 -> macho backend.
     bool macho_backend_llvm = false;
+    // `--emit=elf` lowers the (native, LP64) `llvm` dialect through the flat
+    // (scf->cf) standard lowering and the in-tree x86_64 code generator to a
+    // statically-linked Linux ELF executable (direct syscalls, no libc).
+    bool emit_elf = false;
     // `--lowering=upstream` switches the four lowering / translation calls
     // below to the *Upstream variants (which run upstream MLIR's pass
     // pipeline / translator / LLVM target machine). Only available in the
@@ -235,6 +248,9 @@ int app_main(void) {
         else if (strcmp(argv[i], "--emit=wat")     == 0) { emit_wat = true;     emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_macho = false; emit_aarch64 = false; }
         else if (strcmp(argv[i], "--emit=macho")   == 0) { emit_macho = true;   emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_aarch64 = false; }
         else if (strcmp(argv[i], "--emit=aarch64") == 0) { emit_aarch64 = true; emit_macho = false; emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; }
+#ifdef TINYC_HAS_ELF
+        else if (strcmp(argv[i], "--emit=elf")     == 0) { emit_elf = true; emit_aarch64 = false; emit_macho = false; emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; }
+#endif
         else if (strcmp(argv[i], "--macho-backend=wasm") == 0) { macho_backend_llvm = false; }
         else if (strcmp(argv[i], "--macho-backend=llvm") == 0) { macho_backend_llvm = true; }
         else if (strncmp(argv[i], "--wasm-runtime-obj=", 19) == 0) {
@@ -535,7 +551,7 @@ int app_main(void) {
     // printStr, ...) as tinyC-subset C parsed into this same module, so it
     // lowers through the llvm -> aarch64 path alongside user code. Only
     // functions the user hasn't defined are injected.
-    if (macho_backend_llvm || emit_aarch64)
+    if (macho_backend_llvm || emit_aarch64 || emit_elf)
         tinyc_inject_native_runtime(arena, prog, target_wasm32);
     MLIR_OpHandle module = tinyc_emit_module(&ctx, prog);
     if (tinyc_last_emit_errors() > 0) {
@@ -552,7 +568,7 @@ int app_main(void) {
     if (!getenv("TINYC_NO_MEM2REG"))
         mlir_llvm_mem2reg(&ctx, module);
 
-    if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64) {
+    if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64 || emit_elf) {
         bool needs_wasm_lowering = emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64;
         bool ok = needs_wasm_lowering
                       ? lower_for_wasm_fn(&ctx, module)
@@ -691,6 +707,18 @@ int app_main(void) {
             return 1;
         }
         out = MLIR_PrintOperationGeneric(&ctx, aarch64);
+#ifdef TINYC_HAS_ELF
+    } else if (emit_elf) {
+        // Native x86_64 -> static ELF executable (Linux, direct syscalls).
+        uint8_t *elf_data = NULL; size_t elf_size = 0;
+        if (!mlir_llvm_to_elf(&ctx, module, &elf_data, &elf_size)) {
+            arena_destroy(arena);
+            arena_destroy(boot_arena);
+            return 1;
+        }
+        out.str = (char *)elf_data;
+        out.size = elf_size;
+#endif
     } else if (emit_llvm) {
         out = translate_to_llvm_fn(&ctx, module);
         if (out.size == 0) {
@@ -702,19 +730,20 @@ int app_main(void) {
         out = print_fn(&ctx, module);
     }
     int wrc = 0;
-    if (emit_macho && !output_file) {
-        fprintf(stderr, "tinyc --emit=macho: -o PATH is required\n");
-        if (emit_macho) free(out.str);
+    if ((emit_macho || emit_elf) && !output_file) {
+        fprintf(stderr, "tinyc --emit=%s: -o PATH is required\n",
+                emit_elf ? "elf" : "macho");
+        if (emit_macho || emit_elf) free(out.str);
         arena_destroy(arena);
         arena_destroy(boot_arena);
         return 1;
     }
     if (output_file) {
-        if (emit_wasm || emit_macho) {
+        if (emit_wasm || emit_macho || emit_elf) {
             wrc = write_bytes_to_file(out, output_file);
 #if !defined(_WIN32) && !defined(__wasm__) && !defined(__TINYC__)
-            if (wrc == 0 && emit_macho) {
-                // chmod 0755 so the resulting Mach-O is directly runnable.
+            if (wrc == 0 && (emit_macho || emit_elf)) {
+                // chmod 0755 so the resulting binary is directly runnable.
                 chmod(output_file, 0755);
             }
 #endif
@@ -725,8 +754,8 @@ int app_main(void) {
         println(str_lit("{}"), out);
     }
 
-    if (emit_macho) {
-        // out.str was malloc'd by MLIR_WasmToMachoArm64. Free it.
+    if (emit_macho || emit_elf) {
+        // out.str was malloc'd by the backend. Free it.
         free(out.str);
     }
 

@@ -33,6 +33,7 @@ jobs:
               pixi run -e upstream build_tinyc_upstream_opt
               pixi run -e upstream verify_tinyc_native_upstream_identical
               pixi run -e linux test_linux_tinyc
+              pixi run -e upstream test_tinyc_elf
           - platform: macos
             os: macos-latest
             pixi-command: |
@@ -61,7 +62,8 @@ jobs:
           - platform: windows
             os: windows-latest
             pixi-command: |
-              call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+              for /f "usebackq tokens=*" %%i in (`"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+              call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
               pixi run -e windows test_windows || exit /b 1
               pixi run -e wasm test_wasm || exit /b 1
               pixi run -e wasm verify_tinyc_wasm_selfhost || exit /b 1

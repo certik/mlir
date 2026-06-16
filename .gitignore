@@ -45,6 +45,7 @@ _libc_io_tmp.txt
 parser_tinyc
 build_tinyc/
 examples/tinyc/tests/*.macho
+examples/tinyc/tests/*.elf
 /tinyc_native_opt
 /tinyc_upstream_opt
 /build_opt_native/
