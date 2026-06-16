@@ -1,7 +1,7 @@
 // aarch64 instruction assembler: aarch64-dialect ops -> machine-code bytes +
-// relocation records (the EmittedFunc object model). Split out of
+// relocation records (the MachineFunc object model). Split out of
 // mlir_aarch64_to_macho.c so the architecture assembler is separated from the
-// Mach-O binary-format container (which now consumes EmittedFunc via
+// Mach-O binary-format container (which now consumes MachineFunc via
 // mlir_aarch64_asm.h). See mlir_aarch64_asm.h.
 
 #include "mlir_aarch64_asm.h"
@@ -412,20 +412,20 @@ uint32_t arm64_adrp(uint8_t rd, int64_t rel_pages) {
 static void emit_word(Buf *b, uint32_t w) { buf_le32(b, w); }
 
 
-static void ef_add_reloc(EmittedFunc *e, string callee, uint32_t off) {
+static void ef_add_reloc(MachineFunc *e, string callee, uint32_t off) {
     if (e->n_relocs == e->c_relocs) {
         e->c_relocs = e->c_relocs ? e->c_relocs * 2 : 4;
-        e->relocs = (BlReloc *)realloc(e->relocs, e->c_relocs * sizeof(BlReloc));
+        e->relocs = (MachineCallReloc *)realloc(e->relocs, e->c_relocs * sizeof(MachineCallReloc));
     }
     e->relocs[e->n_relocs].callee = callee;
     e->relocs[e->n_relocs].fn_off = off;
     e->n_relocs++;
 }
-static void ef_add_dr(EmittedFunc *e, string kind, bool is_add_lo,
+static void ef_add_dr(MachineFunc *e, string kind, bool is_add_lo,
                       uint8_t rd, uint8_t rn, uint32_t off, uint32_t addend) {
     if (e->n_dr == e->c_dr) {
         e->c_dr = e->c_dr ? e->c_dr * 2 : 4;
-        e->dr = (DataReloc *)realloc(e->dr, e->c_dr * sizeof(DataReloc));
+        e->dr = (MachineDataReloc *)realloc(e->dr, e->c_dr * sizeof(MachineDataReloc));
     }
     e->dr[e->n_dr].kind      = kind;
     e->dr[e->n_dr].is_add_lo = is_add_lo;
@@ -435,11 +435,11 @@ static void ef_add_dr(EmittedFunc *e, string kind, bool is_add_lo,
     e->dr[e->n_dr].addend    = addend;
     e->n_dr++;
 }
-static void ef_add_br(EmittedFunc *e, int kind, MLIR_BlockHandle target,
+static void ef_add_br(MachineFunc *e, int kind, MLIR_BlockHandle target,
                       uint32_t off, uint8_t cond_or_rt, bool sf) {
     if (e->n_br == e->c_br) {
         e->c_br = e->c_br ? e->c_br * 2 : 4;
-        e->br = (BranchReloc *)realloc(e->br, e->c_br * sizeof(BranchReloc));
+        e->br = (MachineBranchReloc *)realloc(e->br, e->c_br * sizeof(MachineBranchReloc));
     }
     e->br[e->n_br].kind       = kind;
     e->br[e->n_br].target     = target;
@@ -448,10 +448,10 @@ static void ef_add_br(EmittedFunc *e, int kind, MLIR_BlockHandle target,
     e->br[e->n_br].sf         = sf;
     e->n_br++;
 }
-static void ef_add_bp(EmittedFunc *e, MLIR_BlockHandle blk, uint32_t off) {
+static void ef_add_bp(MachineFunc *e, MLIR_BlockHandle blk, uint32_t off) {
     if (e->n_bp == e->c_bp) {
         e->c_bp = e->c_bp ? e->c_bp * 2 : 4;
-        e->bp = (BlockPos *)realloc(e->bp, e->c_bp * sizeof(BlockPos));
+        e->bp = (MachineBlockPos *)realloc(e->bp, e->c_bp * sizeof(MachineBlockPos));
     }
     e->bp[e->n_bp].blk    = blk;
     e->bp[e->n_bp].fn_off = off;
@@ -472,7 +472,7 @@ string attr_s(MLIR_OpHandle op, const char *name) {
 }
 
 
-bool emit_aarch64_func(MLIR_OpHandle fn, EmittedFunc *out) {
+bool emit_aarch64_func(MLIR_OpHandle fn, MachineFunc *out) {
     out->name     = attr_s(fn, "sym_name");
     out->exported = attr_b(fn, "exported");
 
@@ -1040,7 +1040,7 @@ static void a64_sort_idx_u64(uint32_t *idx, size_t n, const uint64_t *key) {
 }
 
 // Patch a 32-bit little-endian instruction word into the code buffer.
-static void a64_write_word(EmittedFunc *e, uint32_t off, uint32_t insn) {
+static void a64_write_word(MachineFunc *e, uint32_t off, uint32_t insn) {
     e->code.data[off + 0] = (uint8_t)(insn      );
     e->code.data[off + 1] = (uint8_t)(insn >>  8);
     e->code.data[off + 2] = (uint8_t)(insn >> 16);
@@ -1073,7 +1073,7 @@ enum { FORM_B = 0, FORM_DIRECT = 1, FORM_FALLBACK = 2 };
 // removes the per-iteration trampoline bounce that the structured-CFG lowering
 // emits in hot loops. Trampoline blocks are left in place (now cold). Gated by
 // TINYC_NO_THREAD for A/B.
-bool patch_branches(EmittedFunc *e) {
+bool patch_branches(MachineFunc *e) {
     size_t nbp = e->n_bp;
     uint32_t *byhandle = NULL;   // bp indices sorted by block handle
     int32_t  *fwd = NULL;        // bp index -> bp index it trampolines to (-1 none)
@@ -1164,7 +1164,7 @@ bool patch_branches(EmittedFunc *e) {
     uint32_t *tgt_old = (uint32_t *)malloc((nbr ? nbr : 1) * sizeof(uint32_t));
     bool      no_direct = (getenv("TINYC_NO_DIRECT_COND") != NULL);
     for (size_t i = 0; i < nbr; i++) {
-        BranchReloc *r = &e->br[i];
+        MachineBranchReloc *r = &e->br[i];
         int idx = -1;
         size_t lo = 0, hi = nbp;
         while (lo < hi) {
@@ -1239,7 +1239,7 @@ bool patch_branches(EmittedFunc *e) {
         // kept as an explicit NOP exactly as before.
         #define NEWOFF(o) ((uint32_t)((o) - (compacted ? 4u * (uint32_t)a64_lower_count(del, ndel, (o)) : 0u)))
         for (size_t i = 0; i < nbr && ok; i++) {
-            BranchReloc *r = &e->br[i];
+            MachineBranchReloc *r = &e->br[i];
             uint32_t tnew = NEWOFF(tgt_old[i]);
             if (form[i] == FORM_B) {
                 uint32_t fo = NEWOFF(r->fn_off);

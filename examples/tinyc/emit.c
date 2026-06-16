@@ -164,6 +164,7 @@ typedef struct {
     bool             use_print_str;  // emit @printStr extern decl
     bool             need_va_arg_helpers;  // emit tinyc_va_arg_* externs
     bool             need_va_arg_struct;   // emit tinyc_va_arg_struct extern
+    bool             need_syscall6_stub;   // emit @__tinyc_syscall6 extern decl
     int              cur_line;       // last AST node line entered; used by
                                      // EMIT_ERR for diagnostic line numbers.
     int              err_count;      // count of EMIT_ERR diagnostics
@@ -506,6 +507,19 @@ static MLIR_ValueHandle emit_extui_i32_to_i64(E *e, MLIR_ValueHandle v) {
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
     MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = v;
     emit_op(e, OP_TYPE_ARITH_EXTUI, str_lit("arith.extui"),
+            rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
+    return r;
+}
+
+// Reinterpret a pointer as an i64 (llvm.ptrtoint). Used to pass pointer
+// arguments to __builtin_syscall6 without requiring an explicit (long) cast.
+static MLIR_ValueHandle emit_ptrtoint_i64(E *e, MLIR_ValueHandle v) {
+    MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
+                                                  e->i64, ssa_name(e), eloc(e, 0));
+    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i64;
+    MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
+    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = v;
+    emit_op(e, OP_TYPE_LLVM_PTRTOINT, str_lit("llvm.ptrtoint"),
             rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
     return r;
 }
@@ -3509,6 +3523,46 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
                 r.val = res; r.is_float = true; r.is_f64 = !is_f32; return r;
             }
+            // Built-in __builtin_unreachable(): marks an unreachable point
+            // (e.g. after a noreturn syscall). tinyC does no flow analysis on
+            // it, so treat it as a no-op — any code the C author placed after
+            // it is already dead. Returns a dummy i32 for expression contexts.
+            if (!indirect_fnty && str_eq(ex->callee, str_lit("__builtin_unreachable"))) {
+                if (ex->args.size != 0) {
+                    EMIT_ERR(e, "__builtin_unreachable expects 0 arguments");
+                }
+                r.val = emit_const_i32(e, 0); return r;
+            }
+            // Built-in __builtin_syscall6(num, a1, a2, a3, a4, a5, a6): a raw
+            // OS syscall. Lowers to `func.call @__tinyc_syscall6` (a stub the
+            // native llvm->aarch64 backend synthesises as a `svc` trap). All
+            // seven operands and the result are `long` (i64). This is the
+            // primitive corec's platform_*.c builds raw syscalls from; it has
+            // meaning only for native targets (there are no raw syscalls on
+            // wasm — use the WASI platform there).
+            if (!indirect_fnty && str_eq(ex->callee, str_lit("__builtin_syscall6"))) {
+                if (ex->args.size != 7) {
+                    EMIT_ERR(e, "__builtin_syscall6 expects 7 arguments (num + 6)");
+                    r.val = emit_const_i64(e, 0); r.is_i64 = true; return r;
+                }
+                e->need_syscall6_stub = true;
+                MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 7);
+                for (size_t k = 0; k < 7; k++) {
+                    EVal av = emit_expr(e, sc, ex->args.data[k]);
+                    ops[k] = av.is_ptr ? emit_ptrtoint_i64(e, av.val)
+                                       : coerce_eval(e, av, e->i64);
+                }
+                MLIR_ValueHandle res = MLIR_CreateValueOpResult(
+                    e->ctx, MLIR_INVALID_HANDLE, 0, e->i64, ssa_name(e), eloc(e, 0));
+                MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i64;
+                MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = res;
+                MLIR_AttributeHandle ca = MLIR_CreateAttributeSymbolRef(
+                    e->ctx, str_lit("callee"), str_lit("__tinyc_syscall6"));
+                MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = ca;
+                emit_op(e, OP_TYPE_FUNC_CALL, str_lit("func.call"),
+                        rts, 1, rs, 1, ops, 7, as, 1, NULL, 0);
+                r.val = res; r.is_i64 = true; return r;
+            }
             // Built-in __builtin_wasm_memory_size(0) and
             // __builtin_wasm_memory_grow(0, n): lower to the
             // LLVM-style wasm intrinsics that the
@@ -5997,6 +6051,27 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         MLIR_TypeHandle *ins = arena_new_array(arena, MLIR_TypeHandle, 1); ins[0] = e.ptr;
         MLIR_TypeHandle fty = MLIR_CreateTypeFunction(ctx, ins, 1, NULL, 0);
         MLIR_AttributeHandle a0 = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("free"));
+        MLIR_AttributeHandle a1 = MLIR_CreateAttributeType(ctx, str_lit("function_type"), fty);
+        MLIR_AttributeHandle a2 = MLIR_CreateAttributeString(ctx, str_lit("sym_visibility"), str_lit("private"));
+        MLIR_AttributeHandle *attrs = arena_new_array(arena, MLIR_AttributeHandle, 3);
+        attrs[0] = a0; attrs[1] = a1; attrs[2] = a2;
+        MLIR_RegionHandle body = MLIR_CreateRegion(ctx);
+        MLIR_RegionHandle *regs = arena_new_array(arena, MLIR_RegionHandle, 1); regs[0] = body;
+        MLIR_OpHandle decl = MLIR_CreateOp(ctx, OP_TYPE_FUNC_FUNC, str_lit("func.func"),
+                                           attrs, 3, NULL, 0, NULL, 0, NULL, 0,
+                                           regs, 1, e.loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_AppendBlockOp(ctx, mb, decl);
+    }
+
+    // __tinyc_syscall6 — the raw-syscall intrinsic stub. Declared (i64 x7) ->
+    // i64; the native llvm->aarch64 backend synthesises its `svc` body. Only
+    // emitted when user code used __builtin_syscall6.
+    if (e.need_syscall6_stub) {
+        MLIR_TypeHandle *ins = arena_new_array(arena, MLIR_TypeHandle, 7);
+        for (size_t k = 0; k < 7; k++) ins[k] = e.i64;
+        MLIR_TypeHandle *outs = arena_new_array(arena, MLIR_TypeHandle, 1); outs[0] = e.i64;
+        MLIR_TypeHandle fty = MLIR_CreateTypeFunction(ctx, ins, 7, outs, 1);
+        MLIR_AttributeHandle a0 = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("__tinyc_syscall6"));
         MLIR_AttributeHandle a1 = MLIR_CreateAttributeType(ctx, str_lit("function_type"), fty);
         MLIR_AttributeHandle a2 = MLIR_CreateAttributeString(ctx, str_lit("sym_visibility"), str_lit("private"));
         MLIR_AttributeHandle *attrs = arena_new_array(arena, MLIR_AttributeHandle, 3);

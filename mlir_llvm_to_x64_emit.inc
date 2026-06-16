@@ -402,6 +402,27 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         if (!callee.size) callee = strip_at(attr_str(op, "callee_name"));
         if (!callee.size) { fail(F, "indirect call unsupported", (string){0}); return; }
         size_t no = MLIR_GetOpNumOperands(op);
+        // __builtin_syscall6(num, a1..a6) -> @__tinyc_syscall6 (7 args). The
+        // SysV C ABI passes 6 args in registers and the 7th (a6) on the stack;
+        // the synthesised thunk reads it from [rsp+8] and traps via `syscall`.
+        bool is_sc6 = str_eqz(callee, "__tinyc_syscall6");
+        if (is_sc6) {
+            if (no != 7) { fail(F, "__tinyc_syscall6 expects 7 args", callee); return; }
+            load_val(F, MLIR_GetOpOperand(op, 6), RAX);
+            eb(F, 0x50);                                 // push rax (a6)
+            for (size_t i = 0; i < 6; i++)
+                load_val(F, MLIR_GetOpOperand(op, i), ARG_REGS[i]);
+            eb(F, 0xE8);
+            uint32_t field = here(F); e32(F, 0);
+            char *cs = (char *)malloc(callee.size + 1);
+            memcpy(cs, callee.str, callee.size); cs[callee.size] = 0;
+            obj_add_reloc(F->f, field, field + 4, false, cs, 0);
+            sym_add(refs, callee);
+            eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 0, RSP); eb(F, 0x08);  // add rsp, 8
+            if (MLIR_GetOpNumResults(op) == 1)
+                store_val(F, MLIR_GetOpResult(op, 0), RAX);
+            return;
+        }
         if (no > 6) { fail(F, "call with >6 args", callee); return; }
         for (size_t i = 0; i < no; i++)
             load_val(F, MLIR_GetOpOperand(op, i), ARG_REGS[i]);
@@ -679,6 +700,26 @@ static void synth_start(ObjModule *m) {
 // synth a Linux syscall thunk for `name`; returns false if `name` is not a
 // known syscall primitive.
 static bool synth_thunk(ObjModule *m, const char *name) {
+    // __tinyc_syscall6(num, a1..a6): the runtime syscall number is the first C
+    // argument, so we cannot bake an NR_* constant — instead reshuffle the SysV
+    // argument registers into the Linux x86_64 kernel convention (number in
+    // rax; args in rdi/rsi/rdx/r10/r8/r9) and trap. a6 arrives on the stack.
+    if (!strcmp(name, "__tinyc_syscall6")) {
+        ObjFunc *f = obj_add_func(m, strdup(name), false);
+        FnCtx F; memset(&F,0,sizeof(F)); F.f = f;
+        mov_rr(&F, RAX, RDI, 1);   // rax = num
+        mov_rr(&F, RDI, RSI, 1);   // arg1
+        mov_rr(&F, RSI, RDX, 1);   // arg2
+        mov_rr(&F, RDX, RCX, 1);   // arg3
+        mov_rr(&F, R10, R8, 1);    // arg4 (kernel uses r10, not rcx)
+        mov_rr(&F, R8, R9, 1);     // arg5
+        // arg6: mov r9, [rsp+8]  (just above the call return address)
+        rex(&F, 1, R9, 0, RSP); eb(&F, 0x8B); modrm(&F, 1, R9, RSP);
+        eb(&F, 0x24); eb(&F, 0x08);
+        eb(&F, 0x0F); eb(&F, 0x05);                                        // syscall
+        eb(&F, 0xC3);                                                      // ret
+        return true;
+    }
     int nr; bool needs_r10 = false;
     if (!strcmp(name, "_write")) nr = NR_WRITE;
     else if (!strcmp(name, "_read")) nr = NR_READ;

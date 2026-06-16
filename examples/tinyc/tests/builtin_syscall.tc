@@ -1,0 +1,15 @@
+// Exercise the __builtin_syscall6 raw-syscall intrinsic on the native
+// llvm -> x86_64 -> ELF backend (Linux). Both the write and the non-zero exit
+// status go straight through the kernel via the `syscall` trap that the
+// backend synthesises for the __tinyc_syscall6 thunk — no libc.
+//
+// macOS has no stable raw-syscall ABI, so this intrinsic is rejected on the
+// Mach-O backend; raw syscalls are a Linux-only primitive.
+//
+// Linux x86_64 syscall numbers: write = 1, exit = 60.
+int main(void) {
+    char *msg = "syscall6 ok\n";
+    __builtin_syscall6(1, 1, (long)msg, 12, 0, 0, 0);   // write(1, msg, 12)
+    __builtin_syscall6(60, 5, 0, 0, 0, 0, 0);           // exit(5)
+    return 0;                                            // not reached
+}

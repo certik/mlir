@@ -1034,6 +1034,12 @@ expected_stdout = "3\n"
 targets = ["macho"]
 
 [[test]]
+name = "builtin_syscall"
+expected_stdout = "syscall6 ok\n"
+expected_exit_code = 5
+targets = ["elf"]
+
+[[test]]
 name = "splice_block_ops_cap"
 targets = ["native", "wasm", "macho"]
 expected_stdout = "824\n"

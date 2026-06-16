@@ -3808,14 +3808,31 @@ MLIR_OpHandle mlir_llvm_to_aarch64(MLIR_Context *ctx,
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
         if (!name_eq(MLIR_GetOpName(op), "llvm.func")) continue;
-        if (!func_has_body(op)) continue;  // skip declarations (malloc/free).
         MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
+        string sym = (sa != MLIR_INVALID_HANDLE)
+            ? MLIR_GetAttributeString(sa) : (string){0};
+        if (!func_has_body(op)) {
+            // Most declarations (malloc/free, libSystem imports) are skipped —
+            // they resolve to imports. macOS has no stable raw-syscall ABI:
+            // every OS interaction must go through libSystem, so the
+            // __builtin_syscall6 intrinsic (lowered to @__tinyc_syscall6) is
+            // rejected here. Raw syscalls belong to the Linux/ELF backend
+            // (mlir_llvm_to_x64.c), which lowers the same symbol to `syscall`.
+            if (sym.size == 16 && memcmp(sym.str, "__tinyc_syscall6", 16) == 0) {
+                fprintf(stderr,
+                    "llvm->aarch64: __builtin_syscall6 is not supported on "
+                    "macOS (no stable raw-syscall ABI); use libSystem calls "
+                    "instead\n");
+                free(gm.e); free(gblob); free(grelocs);
+                return MLIR_INVALID_HANDLE;
+            }
+            continue;
+        }
         if (sa == MLIR_INVALID_HANDLE) {
             fprintf(stderr, "llvm->aarch64: llvm.func without sym_name\n");
             free(gm.e); free(gblob); free(grelocs);
             return MLIR_INVALID_HANDLE;
         }
-        string sym = MLIR_GetAttributeString(sa);
         if (sym.size == 4 && memcmp(sym.str, "main", 4) == 0) saw_main = true;
         MLIR_OpHandle fn = select_func(ctx, op, sym, &gm);
         if (fn == MLIR_INVALID_HANDLE) { free(gm.e); free(gblob); free(grelocs); return MLIR_INVALID_HANDLE; }

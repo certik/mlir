@@ -163,10 +163,14 @@ printf '[selfhost-macho-llvm] tinyc --link -> %s\n' "$LINKED_WASM"
     "${OBJS[@]}" "$VARARG_OBJ"
 
 # Final stage: lift wasm back into wasmssa, then run the new llvm
-# pipeline all the way to a signed ad-hoc Mach-O ARM64 binary.
+# pipeline all the way to a signed ad-hoc Mach-O ARM64 binary. The
+# WASI adapters call corec's platform_macos.c (spliced in via
+# --host-platform) for the actual OS I/O + exit.
 printf '[selfhost-macho-llvm] --from-wasm --emit=macho --macho-backend=llvm -> %s\n' "$OUTPUT_MACHO"
 "${TINYC_INVOKE[@]}" --from-wasm "$LINKED_WASM" \
     --emit=macho --macho-backend=llvm \
+    --host-platform corec/platform/platform_macos.c \
+    -I corec -I . \
     -o "$OUTPUT_MACHO"
 
 chmod +x "$OUTPUT_MACHO"
