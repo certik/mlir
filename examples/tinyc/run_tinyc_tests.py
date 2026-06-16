@@ -23,6 +23,10 @@ RUNTIME_WASM_START = HERE / "start_wasm.s"
 # corec platform_<os>.c whose file-I/O + exit primitives the via-wasm Mach-O
 # backend's WASI adapters call (spliced in via --host-platform).
 HOST_PLATFORM = ROOT / "corec" / "platform" / "platform_macos.c"
+# corec platform_linux.c compiled into the direct x86_64->ELF module so the
+# runtime's I/O binds to the real platform layer (platform_fd_write) instead of
+# a synthesized syscall thunk.
+HOST_PLATFORM_ELF = ROOT / "corec" / "platform" / "platform_linux.c"
 COREC_DIR = ROOT / "corec"
 TESTS_TOML = HERE / "tests.toml"
 
@@ -371,7 +375,9 @@ def main():
             # compare stdout + exit code against the LP64 expectations.
             exe = HERE / "tests" / f"{name}.elf"
             tinyc_cmd = [str(TINYC), "--emit=elf", *LOWERING_FLAG,
-                         "-I", str(HERE / "tests"), "-o", str(exe)]
+                         "--host-platform", str(HOST_PLATFORM_ELF),
+                         "-I", str(COREC_DIR), "-I", str(HERE / "tests"),
+                         "-o", str(exe)]
             tinyc_cmd.extend(str(s) for s in srcs)
             r = run(tinyc_cmd)
             if r.returncode != 0:

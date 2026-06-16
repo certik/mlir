@@ -9,12 +9,12 @@ expected_stdout = "3\n"
 
 [[test]]
 name = "sum_to_10"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "55\n"
 
 [[test]]
 name = "fib"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "55\n"
 
 [[test]]
@@ -24,109 +24,109 @@ expected_stdout = "0\n1\n1\n1\n"
 
 [[test]]
 name = "logical_chain_in_loop"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "6\n0\n0\n3\n"
 
 [[test]]
 name = "nested_aggregate_init"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "7\n3\n4\n11\n1\n2\n30\n40\n99\n"
 
 [[test]]
 name = "array_of_charptr_index"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "597\n97\n102\n"
 
 [[test]]
 name = "ptr_ptr_field_arrow"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "666\n11\n200\n33\n100\n300\n"
 
 [[test]]
 name = "compound_literal_struct_field"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "12\n7\n99\n33\n50\n7\n99\n77\n99\n4\n5\n1\n"
 
 [[test]]
 name = "nested_struct_pointer_field"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "100\n200\n1\n7\n2\n"
 
 [[test]]
 name = "global_cast_init"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "-2147483648\n42\n-7\n"
 
 [[test]]
 name = "va_comma_paste_forward"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "0\n0\n1\n2\n2\n2\n7\n"
 
 [[test]]
 name = "multi_decl_pointer"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "11\n22\n100\n200\n15\n"
 
 [[test]]
 name = "anon_local_struct"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "11\n22\n33\n12\n"
 
 [[test]]
 name = "anon_struct_array_init"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "90\n120\n210\n10\n"
 
 [[test]]
 name = "typedef_ptr_array"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "10\n20\n30\n30\n40\n7\n11\n"
 
 [[test]]
 name = "sizeof_no_parens"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "4\n4\n20\n20\n16\n4\n8\n8\n"
 # On wasm32, `sizeof &x` is 4 (pointer width) instead of 8.
 expected_stdout_wasm = "4\n4\n20\n20\n16\n4\n4\n8\n"
 
 [[test]]
 name = "hex_escape"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "0\n97\n115\n109\n1\n0\n0\n0\n65\n127\n10\n"
 
 [[test]]
 name = "ternary_in_short_circuit"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n0\n1\n1\n1\n1\n"
 
 [[test]]
 name = "enum_const_expr"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "65536\n65536\n2\n1024\n1\n3\n13\n511\n-1\n100\n-1\n2\n15\n"
 
 [[test]]
 name = "array_of_struct_init"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n10\n3\n30\n500\n4\n7\n0\n9\n0\n4\n5\n8\n6\n"
 
 [[test]]
 name = "addr_struct_arrow"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "99\n1\n42\n7\n49\n"
 
 [[test]]
 name = "return"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "3\n-1\n"
 
 [[test]]
 name = "break_continue"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "17\n7\n"
 
 [[test]]
 name = "for"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "55\n10\n"
 
 [[test]]
@@ -136,12 +136,12 @@ expected_stdout = "4.375\n1\n6\n"
 
 [[test]]
 name = "array"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "30\n9\n"
 
 [[test]]
 name = "pointer"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "42\n42\n"
 
 [[test]]
@@ -161,12 +161,12 @@ expected_stdout = "15\n5\n10\n15\n15\n55\n1\n1\n"
 
 [[test]]
 name = "struct_nested"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "10\n20\n30\n60\n60\n1\n2\n3\n6\n"
 
 [[test]]
 name = "struct_array"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "6\n60\n4\n"
 
 [[test]]
@@ -186,7 +186,7 @@ expected_stdout = "1\n0\n1\n0\n0\n42\n99\n"
 
 [[test]]
 name = "sizeof_basic"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "4\n4\n8\n16\n"
 # On wasm32, pointers are 4 bytes, so `struct WithPtr` = int(4)+ptr(4) = 8.
 expected_stdout_wasm = "4\n4\n8\n8\n"
@@ -208,52 +208,57 @@ expected_stdout = "Hi\n1\n3\n30\n3\n"
 
 [[test]]
 name = "compound_ops"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "15\n13\n39\n9\n4\n10\n2\n1\n"
 
 [[test]]
 name = "bitwise"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n7\n6\n-1\n8\n4\n8\n5\n2\n16\n4\n"
 
 [[test]]
 name = "ternary"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "7\n3\n5\n3\n1\n"
 
 [[test]]
 name = "ternary_i64"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n3\n0\n0\n"
 
 [[test]]
 name = "ternary_void_stmt"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n99\n2\n"
 
 [[test]]
 name = "typedef"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "16\n100\n7\n"
 
 [[test]]
 name = "forward_decl"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n1\n0\n6\n"
 
 [[test]]
+name = "call_many_args"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "28\n45\n280\n"
+
+[[test]]
 name = "multi_array"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "0\n12\n23\n138\n"
 
 [[test]]
 name = "ptr_arith"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "10\n30\n40\n50\n4\n150\n"
 
 [[test]]
 name = "switch_case"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "100\n200\n200\n301\n0\n999\n22\n"
 
 [[test]]
@@ -273,7 +278,7 @@ expected_stdout = "42\n42\n"
 
 [[test]]
 name = "struct_array_field"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "8\n0\n9\n49\n0\n25\n140\n"
 
 [[test]]
@@ -285,92 +290,92 @@ wasm_skip = true
 
 [[test]]
 name = "struct_ptr_array_field"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "10\n20\n30\n40\n100\n10\n"
 
 [[test]]
 name = "struct_str_array_field"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "alpha\nbeta\ngamma\nBETA!\n"
 
 [[test]]
 name = "enum_basic"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "0\n1\n2\n1\n2\n10\n11\n1\n2\n10\n100\n200\n300\n16\n"
 
 [[test]]
 name = "enum_typed"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n2\n3\n2\n1\n5\n"
 
 [[test]]
 name = "const_fold"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "7\n19\n8\n2\n2\n-1\n1\n0\n15\n1\n0\n42\n99\n1\n0\n16\n"
 
 [[test]]
 name = "const_qualifier"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "25\n7\n4\n4\n10\n"
 
 [[test]]
 name = "nested_scope"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n2\n3\n2\n1\n10\n11\n12\n1\n7\n9\n"
 
 [[test]]
 name = "enum_shadow"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n2\n3\n1\n"
 
 [[test]]
 name = "pp_define"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "42\n7\n25\n9\n42\n0\n30\n6\n0\n101\nhello\n"
 
 [[test]]
 name = "pp_ifdef"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n2\n3\n4\n5\n6\n"
 
 [[test]]
 name = "pp_include"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "7\n25\n13\n"
 
 [[test]]
 name = "pp_pragma_once"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "7\n7\n"
 
 [[test]]
 name = "pp_if_expr"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n2\n3\n4\n5\n6\n7\n8\n9\n"
 
 [[test]]
 name = "void_return"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "7\n-1\n42\n"
 
 [[test]]
 name = "void_param"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "42\n7\n42\n"
 
 [[test]]
 name = "void_ptr"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "17\n17\n99\n99\n5\n99\n"
 
 [[test]]
 name = "storage_class"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n2\n3\n25\n27\n30\n"
 
 [[test]]
 name = "ptr_to_ptr"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "41\n42\n"
 
 [[test]]
@@ -385,24 +390,24 @@ expected_stdout = "300\n900\n"
 
 [[test]]
 name = "i64_mixed"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "15\n5\n50\n"
 
 [[test]]
 name = "i64_size_t"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "55\n5050\n0\n"
 
 [[test]]
 name = "sizeof_expr"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "4\n4\n8\n8\n8\n4\n4\n8\n"
 # On wasm32, `sizeof(char *)` is 4 (the 4th value).
 expected_stdout_wasm = "4\n4\n8\n4\n8\n4\n4\n8\n"
 
 [[test]]
 name = "compound_literal"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "42\n7\n3\n4\n7\n"
 
 [[test]]
@@ -432,17 +437,17 @@ expected_stdout = "42\n99\n"
 
 [[test]]
 name = "struct_multi_decl_field"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n2\n100\n200\n7\n9\n"
 
 [[test]]
 name = "string_concat"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "104\n32\n119\n100\n"
 
 [[test]]
 name = "ptr_ptr_chained_index"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "97\n98\n99\n120\n121\n122\n"
 # wasm_skip: main(int,char**) signature; not exported as wasi __original_main shape
 wasm_skip = true
@@ -459,84 +464,84 @@ expected_stdout = "700\n2000\n"
 
 [[test]]
 name = "addr_of_struct_field_index"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n10\n2\n20\n3\n30\n"
 
 [[test]]
 name = "null_ptr_init"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n2\n3\n7\n"
 
 [[test]]
 name = "field_of_call_result"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "7\n11\n104\n"
 
 [[test]]
 name = "deref_index_pp"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "101\n102\n103\n"
 
 [[test]]
 name = "struct_call_in_short_circuit"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "109\n"
 
 [[test]]
 name = "null_arg_to_ptr_param"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "42\n"
 needs_libc = true
 
 [[test]]
 name = "struct_ternary"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "70\n15\n"
 
 [[test]]
 name = "struct_return_ternary"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "3\n17\n"
 
 [[test]]
 name = "define_malloc_free"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "7\n13\n"
 # wasm_skip: redefines malloc/free; duplicate symbol vs runtime_wasm.c
 wasm_skip = true
 
 [[test]]
 name = "escape_chars"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "11\n12\n7\n8\n63\n11\n12\n7\n8\n63\n"
 
 [[test]]
 name = "multi_basic"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 sources = ["multi_basic_a.tc", "multi_basic_b.tc"]
 expected_stdout = "5\n"
 
 [[test]]
 name = "multi_global"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 sources = ["multi_global_a.tc", "multi_global_b.tc"]
 expected_stdout = "10\n15\n"
 
 [[test]]
 name = "multi_struct"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 sources = ["multi_struct_a.tc", "multi_struct_b.tc"]
 expected_stdout = "11\n"
 
 [[test]]
 name = "multi_pp_isolation"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 sources = ["multi_pp_isolation_a.tc", "multi_pp_isolation_b.tc"]
 expected_stdout = "1\n2\n"
 
 [[test]]
 name = "multi_three_files"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 sources = ["multi_three_files_a.tc", "multi_three_files_b.tc", "multi_three_files_c.tc"]
 expected_stdout = "20\n100\n8\n"
 
@@ -550,17 +555,17 @@ expected_stdout = "20\n100\n8\n"
 
 [[test]]
 name = "libc_strcmp"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "0\n-1\n1\n"
 
 [[test]]
 name = "libc_memcmp"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "0\n-1\n1\n"
 
 [[test]]
 name = "libc_strlen"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "0\n5\n11\n"
 
 [[test]]
@@ -614,52 +619,52 @@ expected_stdout = "hello 6\nabc 10 0 0 0\njello\n"
 
 [[test]]
 name = "typedef_local"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "42\n7\n"
 
 [[test]]
 name = "do_while"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "10\n101\n7\n18\n"
 
 [[test]]
 name = "do_while_macro"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "42\n"
 
 [[test]]
 name = "braceless_if"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "8\n7\n7\n7\n"
 
 [[test]]
 name = "typedef_struct_anon"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "7\n30\n"
 
 [[test]]
 name = "typedef_enum"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n200\n2\n"
 
 [[test]]
 name = "struct_field_i64"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "2\n16\n18\n"
 
 [[test]]
 name = "variadic_struct_return"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "13\n7\n25\n15\n"
 
 [[test]]
 name = "cast_int"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "100\n7000\n-1\n"
 
 [[test]]
 name = "typedef_ptr_decl"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "3\n4\n7\n"
 
 [[test]]
@@ -669,7 +674,7 @@ expected_stdout = "10\n11\n12\n1000000\n2000000\n3000000\n"
 
 [[test]]
 name = "struct_call_in_arg"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n10\n20\n2\n30\n40\n"
 
 [[test]]
@@ -679,47 +684,47 @@ expected_stdout = "100\n101\n102\n103\n"
 
 [[test]]
 name = "cast_null"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n2\n"
 
 [[test]]
 name = "struct_init"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n2\n3\n10\n20\n30\n100\n400\n700\n"
 
 [[test]]
 name = "generic"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n2\n3\n4\n5\n9\n100\n8\n16\n32\n"
 
 [[test]]
 name = "hex_int"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "64\n100\n255\n43981\n"
 
 [[test]]
 name = "multi_decl"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n2\n3\n10\n5\n20\n1\n2\n100\n200\n"
 
 [[test]]
 name = "struct_ptr_init_call"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "10\n11\n20\n21\n"
 
 [[test]]
 name = "structptr_index_field"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "100\n200\n"
 
 [[test]]
 name = "struct_return_decl"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "7\n42\n100\n200\n"
 
 [[test]]
 name = "array_zero_init"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "0\n0\n0\n0\n0\n0\n99\n7\n"
 
 [[test]]
@@ -734,17 +739,17 @@ expected_stdout = "2.5\n3.75\n1.5\n"
 
 [[test]]
 name = "deref_struct_pass"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "3\n4\n"
 
 [[test]]
 name = "array_unsized_init"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "10\n40\n4\n3\n98\n97\n"
 
 [[test]]
 name = "array_len_sizeof_div"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "8\n5\n16\n"
 
 [[test]]
@@ -970,7 +975,7 @@ expected_stdout = """\
 
 [[test]]
 name = "union_field_offset"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = """\
 0
 """
@@ -1031,7 +1036,7 @@ targets = ["macho", "elf"]
 [[test]]
 name = "macho_hello"
 expected_stdout = "3\n"
-targets = ["macho"]
+targets = ["macho", "elf"]
 
 [[test]]
 name = "builtin_syscall"
@@ -1041,12 +1046,12 @@ targets = ["elf"]
 
 [[test]]
 name = "splice_block_ops_cap"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "824\n"
 
 [[test]]
 name = "attribute_basic"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "50\n"
 
 [[test]]
@@ -1057,7 +1062,7 @@ expected_stdout = "42\n"
 
 [[test]]
 name = "i64_compare_intlit"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "10\n20\n30\n10\n30\n60\n-1\n"
 
 [[test]]
@@ -1079,7 +1084,7 @@ expected_stdout = """\
 
 [[test]]
 name = "unused_extern_decl"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # A forward `extern` declaration nobody references must be dropped
 # at codegen time. Previously the resulting wasm contained spurious
 # imports for these names, which the linker couldn't resolve.
@@ -1120,7 +1125,7 @@ expected_stdout = "ok\n"
 
 [[test]]
 name = "generic_ternary_str"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # _Generic dispatch on a ternary controlling expression whose
 # then/else branches both have type `char*`. The selected
 # association must be `char*` — not `int` from the condition.
@@ -1172,7 +1177,7 @@ expected_stdout = "200\n"
 
 [[test]]
 name = "typedef_ptr_ptr_char"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # Regression for parser bug: `uint8_t **out_p` (typedef'd `uint8_t`)
 # previously dropped the second `*`, producing a single-pointer
 # parameter. `*out_p = src;` then truncated the pointer to its
@@ -1204,7 +1209,7 @@ expected_stdout = "size=6 str0=a\n"
 
 [[test]]
 name = "sizeof_struct_ptr_wasm32"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # Regression for emit.c `type_size`/`type_align` hard-coding pointers
 # as 8 bytes regardless of target. On wasm32, pointers are 4 bytes,
 # so a struct of N pointers was reported as 8*N bytes but the actual
@@ -1216,7 +1221,7 @@ expected_stdout = "0\n"
 
 [[test]]
 name = "array_len_from_init"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # Regression for parser bug #37: `T arr[] = { e1, e2, ... };` must
 # infer `array_len` from the initializer count. Previously tinyc left
 # `array_len = 0`, so `sizeof(arr) / sizeof(arr[0])` was 0 and any
@@ -1226,7 +1231,7 @@ expected_stdout = "3\n4\n3\n696\n"
 
 [[test]]
 name = "uint8_array_typedef"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # Regression for parser bug #38: `uint8_t arr[N]` (typedef-driven
 # 8-bit alias) must produce a TY_ARRAY_I32 with `array_elem_is_i8=1`
 # so emit.c allocates 1-byte-stride storage. Previously only the
@@ -1238,7 +1243,7 @@ expected_stdout = "8\n0\n97\n115\n109\n1\n0\n0\n0\n"
 
 [[test]]
 name = "static_local_var"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # Regression: function-local `static` variables must persist across
 # calls instead of being reset to their initializer. Previously tinyc's
 # parser silently dropped the `static` storage class, so this is what
@@ -1249,7 +1254,7 @@ expected_stdout = "1\n2\n3\n110\n120\n4\n"
 
 [[test]]
 name = "ptr_arith_after_index_char_pp"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # Regression for tinyc bug #41 (parser/codegen bug surfaced during
 # stage-3 self-host): when an array-indexed `char **` is followed by
 # pointer arithmetic — `argv[j] + 9` in driver.c's --export= parser —
@@ -1262,7 +1267,7 @@ expected_stdout = "95\n115\n116\n97\n114\n116\n"
 
 [[test]]
 name = "i64_init_narrows_to_i32_slot"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # Regression for tinyc bug #40 (parser bug discovered during stage-3
 # self-host): `uint8_t byte = v & 0x7f` (where v is uint64_t) emitted
 # `llvm.store i64, ptr` into a 4-byte slot, overflowing into the next
@@ -1275,7 +1280,7 @@ expected_stdout = "197\n3\n"
 
 [[test]]
 name = "global_ptr_ptr"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # Regression for the macOS self-host segfault: file-scope `T**` globals
 # (and any pointer global of kind TY_PTR_PTR) were emitted by tinyc as
 # `@g = internal global i32 0` because the global-emit switch in emit.c
@@ -1289,7 +1294,7 @@ expected_stdout = "1\n1\n"
 
 [[test]]
 name = "crlf_line_continuation"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # Regression for tinyc preprocessor not recognizing `\\\r\n` line
 # continuations. On Windows, git's default `core.autocrlf=true` checks
 # files out with CRLF endings, so every multi-line macro (e.g. the
@@ -1304,17 +1309,17 @@ expected_stdout = "7\n"
 
 [[test]]
 name = "uint8_array_zext"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "253\n254\n255\n"
 
 [[test]]
 name = "uint32_widen_to_i64"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "2147483648\n2147483648\n2147483648\n"
 
 [[test]]
 name = "struct_uint8_array"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n35\n0\n255\n42\n"
 
 [[test]]
@@ -1339,5 +1344,5 @@ expected_stdout = "OK\n"
 
 [[test]]
 name = "octal_literal"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "493\n8\n0\n511\n31\n100\n512\n"

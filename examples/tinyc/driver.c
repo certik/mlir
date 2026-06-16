@@ -714,12 +714,35 @@ int app_main(void) {
         return 1;
     }
 
+    // --emit=elf --host-platform=PATH: compile corec's platform_<os>.c into the
+    // same module so the runtime's OS primitives bind to the real platform layer
+    // (e.g. _write -> platform_fd_write -> __builtin_syscall6) instead of
+    // synthesized syscall thunks. PLATFORM_SKIP_ENTRY drops its _start (tinyC
+    // supplies its own); unreached platform funcs are trimmed by the backend.
+    if (emit_elf && host_platform_path) {
+        string *pdefs = arena_new_array(arena, string, n_defines + 1);
+        for (size_t k = 0; k < n_defines; k++) pdefs[k] = defines[k];
+        pdefs[n_defines] = str_from_cstr_view((char *)"PLATFORM_SKIP_ENTRY=1");
+        string psrc = tinyc_preprocess(arena, str_from_cstr_view(host_platform_path),
+                                       include_dirs, n_include_dirs, pdefs, n_defines + 1);
+        if (psrc.size > 0 && psrc.str[psrc.size - 1] == '\0') psrc.size -= 1;
+        VecTcTok ptoks = tinyc_lex(arena, psrc);
+        if (tinyc_parse_into(arena, prog, ptoks, target_wasm32) > 0) {
+            fprintf(stderr, "tinyc: parse failed for host platform '%s'\n",
+                    host_platform_path);
+            arena_destroy(arena);
+            arena_destroy(boot_arena);
+            return 1;
+        }
+    }
+
     // The native llvm backend has no libc; provide its runtime (printI64,
     // printStr, ...) as tinyC-subset C parsed into this same module, so it
     // lowers through the llvm -> aarch64 path alongside user code. Only
     // functions the user hasn't defined are injected.
     if (macho_backend_llvm || emit_aarch64 || emit_elf)
-        tinyc_inject_native_runtime(arena, prog, target_wasm32);
+        tinyc_inject_native_runtime(arena, prog, target_wasm32,
+                                    emit_elf && host_platform_path != NULL);
     MLIR_OpHandle module = tinyc_emit_module(&ctx, prog);
     if (tinyc_last_emit_errors() > 0) {
         arena_destroy(arena);
