@@ -1,0 +1,5 @@
+// Amalgamation: a strong definition of `over` overrides the weak one when all
+// files are merged into a single module (mirrors corec's weak memcpy/memset
+// yielding to a libc-style strong definition).
+int over(void);
+int main(void) { _tinyc_print(over()); return 0; }   // 22 (strong wins)

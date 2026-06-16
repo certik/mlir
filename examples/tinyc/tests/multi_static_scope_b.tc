@@ -1,0 +1,2 @@
+static int scoped_val(void) { return 200; }
+int from_b(void) { return scoped_val(); }

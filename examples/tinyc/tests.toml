@@ -545,6 +545,18 @@ targets = ["native", "wasm", "macho", "elf"]
 sources = ["multi_three_files_a.tc", "multi_three_files_b.tc", "multi_three_files_c.tc"]
 expected_stdout = "20\n100\n8\n"
 
+[[test]]
+name = "multi_static_scope"
+targets = ["native", "wasm", "macho", "elf"]
+sources = ["multi_static_scope.tc", "multi_static_scope_a.tc", "multi_static_scope_b.tc"]
+expected_stdout = "100\n200\n"
+
+[[test]]
+name = "weak_override"
+targets = ["native", "wasm", "macho", "elf"]
+sources = ["weak_override.tc", "weak_override_weak.tc", "weak_override_strong.tc"]
+expected_stdout = "22\n"
+
 # ---------------------------------------------------------------------------
 # libc interop: tinyC programs that declare libc functions via `extern`
 # and link against the system libc through the test harness's $CC. These

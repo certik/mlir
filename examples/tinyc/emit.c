@@ -84,7 +84,13 @@ typedef struct {
 } SlotInfo;
 
 typedef struct FuncSig {
-    string         name;
+    string         name;             // source-level name (for resolution)
+    string         emit_name;        // unique MLIR symbol name. Equals `name`
+                                     // except for `static` functions whose name
+                                     // collides with another file's symbol, which
+                                     // are mangled per translation unit.
+    int            tu_id;            // translation unit this definition came from
+    bool           is_static;        // internal linkage (file-local)
     Func          *func;
     SlotInfo       ret;
     SlotInfo      *params;
@@ -153,6 +159,9 @@ typedef struct {
     FuncSig *sigs;
     size_t   n_sigs;
     FuncSig *cur_sig;
+    int      cur_tu;                 // tu_id of the function being emitted, so
+                                     // find_sig() resolves `static` references
+                                     // to the same file's copy.
     MLIR_ValueHandle cur_sret_ptr;   // for struct-returning functions
     StructTypeEntry *struct_types;
     size_t           n_struct_types;
@@ -207,17 +216,32 @@ static int struct_field_index(StructDef *sd, string name) {
 }
 
 static FuncSig *find_sig(E *e, string name) {
+    // Resolve a name to a signature. With multiple files compiled together a
+    // name can match both a file-local `static` and an external symbol; a
+    // reference resolves to the `static` from the *same* translation unit
+    // first, otherwise to the external (or, failing that, any match — the
+    // single-definition fast path most programs hit).
+    FuncSig *external = NULL, *any = NULL;
     for (size_t i = 0; i < e->n_sigs; i++) {
-        if (str_eq(e->sigs[i].name, name)) {
-            // Mark the signature as referenced. Forward-declared
-            // functions that never end up being looked up here are
-            // skipped in the late `emit extern decls` pass — emitting
-            // a `func.func` declaration for an unreferenced extern
-            // would otherwise turn into a spurious wasm import that
-            // fails to resolve at link time.
-            e->sigs[i].is_used = true;
-            return &e->sigs[i];
+        if (!str_eq(e->sigs[i].name, name)) continue;
+        if (e->sigs[i].is_static) {
+            if (e->sigs[i].tu_id == e->cur_tu) {
+                e->sigs[i].is_used = true;
+                return &e->sigs[i];
+            }
+        } else if (!external) {
+            external = &e->sigs[i];
         }
+        if (!any) any = &e->sigs[i];
+    }
+    FuncSig *hit = external ? external : any;
+    if (hit) {
+        // Forward-declared functions that never end up being looked up here are
+        // skipped in the late `emit extern decls` pass — emitting a `func.func`
+        // declaration for an unreferenced extern would otherwise turn into a
+        // spurious wasm import that fails to resolve at link time.
+        hit->is_used = true;
+        return hit;
     }
     return NULL;
 }
@@ -2096,7 +2120,7 @@ static void emit_flat_call(E *e, Scope *sc, FuncSig *sig, VecExprPtr args,
                                           rts[i], ssa_name(e), eloc(e, 0));
     }
     MLIR_AttributeHandle callee_attr = MLIR_CreateAttributeSymbolRef(
-        e->ctx, str_lit("callee"), sig->name);
+        e->ctx, str_lit("callee"), sig->emit_name);
     if (sig->is_variadic) {
         MLIR_AttributeHandle var_ty = MLIR_CreateAttributeType(
             e->ctx, str_lit("var_callee_type"), sig->llvm_fn_ty);
@@ -2671,7 +2695,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         MLIR_ValueHandle *frs = arena_new_array(e->arena,
                             MLIR_ValueHandle, 1); frs[0] = fn_v;
                         MLIR_AttributeHandle va = MLIR_CreateAttributeSymbolRef(
-                            e->ctx, str_lit("value"), fsig->name);
+                            e->ctx, str_lit("value"), fsig->emit_name);
                         MLIR_AttributeHandle *fas = arena_new_array(e->arena,
                             MLIR_AttributeHandle, 1); fas[0] = va;
                         emit_op(e, OP_TYPE_FUNC_CONSTANT, str_lit("func.constant"),
@@ -5134,6 +5158,9 @@ static void build_signatures(E *e) {
         FuncSig *sig = &e->sigs[f_i];
         *sig = (FuncSig){0};
         sig->name = f->name;
+        sig->emit_name = f->name;
+        sig->tu_id = f->tu_id;
+        sig->is_static = f->is_static;
         sig->func = f;
         sig->is_variadic = f->is_variadic;
         slot_resolve(e, f->return_type, &sig->ret);
@@ -5175,6 +5202,22 @@ static void build_signatures(E *e) {
                 ret_ty, sig->flat_in_tys, sig->n_flat_in,
                 /*is_var_arg=*/sig->is_variadic);
         }
+    }
+    // Mangle `static` functions whose name collides with another definition
+    // (typically the same `static inline` from a shared header pulled into
+    // several files, or a private helper that happens to share a name). Each
+    // gets a per-translation-unit emit name so the one merged module has no
+    // duplicate symbols; non-colliding names are left untouched so output for
+    // single-file programs is unchanged.
+    for (size_t i = 0; i < e->n_sigs; i++) {
+        if (!e->sigs[i].is_static) continue;
+        bool collides = false;
+        for (size_t j = 0; j < e->n_sigs; j++) {
+            if (j != i && str_eq(e->sigs[j].name, e->sigs[i].name)) { collides = true; break; }
+        }
+        if (collides)
+            e->sigs[i].emit_name = format(e->arena, str_lit("{}__tu{}"),
+                                          e->sigs[i].name, (int64_t)e->sigs[i].tu_id);
     }
 }
 
@@ -5219,7 +5262,14 @@ static void collect_labels(E *e, VecStmtPtr body) {
 
 static MLIR_OpHandle emit_func(E *e, Func *f) {
     e->cur_line = f->line;
-    FuncSig *sig = find_sig(e, f->name);
+    // The signature that belongs to THIS function (1:1 with funcs by build
+    // order). Must not go through find_sig(name): with several files merged a
+    // name can map to multiple `static` sigs, and the right one is selected by
+    // identity here, not by the (still-stale) cur_tu.
+    FuncSig *sig = NULL;
+    for (size_t i = 0; i < e->n_sigs; i++)
+        if (e->sigs[i].func == f) { sig = &e->sigs[i]; break; }
+    if (!sig) sig = find_sig(e, f->name);
 
     MLIR_RegionHandle body_r = MLIR_CreateRegion(e->ctx);
     MLIR_BlockHandle entry = MLIR_CreateBlock(e->ctx);
@@ -5247,6 +5297,7 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
     e->entry_alloca_insert_idx = 1;
     e->func_region = body_r;
     e->cur_sig = sig;
+    e->cur_tu = sig->tu_id;
     e->cur_sret_ptr = MLIR_INVALID_HANDLE;
     e->terminated = false;
     e->next_ssa = 0;
@@ -5324,7 +5375,7 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
     e->cur_sig = saved_sig;
     e->cur_sret_ptr = saved_sret;
 
-    MLIR_AttributeHandle sym_name = MLIR_CreateAttributeString(e->ctx, str_lit("sym_name"), f->name);
+    MLIR_AttributeHandle sym_name = MLIR_CreateAttributeString(e->ctx, str_lit("sym_name"), sig->emit_name);
     // Variadic functions are emitted as `llvm.func` with an LLVMFunctionType
     // attribute (which carries the var_arg flag); non-variadic ones stay as
     // `func.func` with a regular FunctionType. Static functions add an

@@ -363,6 +363,12 @@ typedef struct {
                              // ABI is modeled at the call site.
     bool       is_static;    // `static` at file scope: emit with private
                              // visibility/internal linkage.
+    int        tu_id;        // index of the translation unit (one per
+                             // tinyc_parse_into call) this came from. Used to
+                             // scope `static` symbols when several source files
+                             // are compiled together into one module.
+    bool       is_weak;      // __attribute__((weak)): yields to a strong
+                             // definition of the same symbol when merged.
     // GCC/Clang `__attribute__((...))` annotations relevant to wasm
     // codegen. Empty string means "not set". When import_module/name are
     // set the function MUST be a forward declaration; the emitter records
@@ -419,6 +425,7 @@ typedef struct {
     bool    is_extern;      // `extern T x;` — emit external-linkage global
     bool    is_static;      // `static` at file scope: emit with internal
                             // linkage.
+    int     tu_id;          // translation-unit index (see Func.tu_id).
     int64_t init_int;
     double  init_float;
     string  init_str;       // for TY_PTR_CHAR initialized from string literal
@@ -447,6 +454,10 @@ typedef struct Program {
     // free / printStr / tinyc_va_arg_struct) so they match the
     // wasm32-wasi ABI's 32-bit `size_t` instead of the host's 64-bit.
     bool target_wasm32;
+    // Monotonic counter handing each compiled source file (one per
+    // tinyc_parse_into call) a distinct translation-unit id, so `static`
+    // symbols from different files merged into this Program stay file-local.
+    int tu_counter;
 } Program;
 
 // ---------------- Lexer ----------------

@@ -1,0 +1,10 @@
+// Amalgamation: two source files each define a file-local `static` helper of
+// the same name. Compiled together into one module they must stay distinct
+// (internal linkage / per-TU scoping), so from_a() and from_b() see their own.
+int from_a(void);
+int from_b(void);
+int main(void) {
+    _tinyc_print(from_a());   // 100
+    _tinyc_print(from_b());   // 200
+    return 0;
+}

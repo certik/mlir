@@ -42,6 +42,7 @@ typedef struct {
     // variables into unique module-scope global names.
     string cur_func_name;
     int    static_local_counter;
+    int    tu_id;          // translation-unit id for this parse (file).
 } P;
 
 static TcTok cur(P *p) { return p->toks[p->i]; }
@@ -175,6 +176,9 @@ typedef struct {
     string import_module;
     string import_name;
     string export_name;
+    bool   is_weak;          // __attribute__((weak)): a weak definition yields
+                             // to any strong (non-weak) definition of the same
+                             // symbol when files are merged into one module.
 } AttrInfo;
 
 // Parse zero or more `__attribute__((...))` attribute lists. Recognized
@@ -226,6 +230,10 @@ static void parse_attributes(P *p, AttrInfo *out) {
                 p->i++;
             }
             // Optional `(args)`.
+            if (cur(p).kind != TC_TK_LPAREN) {
+                // Bare attribute (no argument list), e.g. `weak`, `noinline`.
+                if (out && attr_name_eq(aname, "weak")) out->is_weak = true;
+            }
             if (accept(p, TC_TK_LPAREN)) {
                 // Capture the first string-literal argument for the
                 // attributes we care about. tinyc's lexer includes a
@@ -2587,9 +2595,13 @@ static bool struct_def_equal(StructDef *a, StructDef *b) {
 //   * existing has_init=true  + new has_init=false -> drop new.
 //   * both has_init=true                           -> error.
 static void merge_push_global(P *p, Program *prog, Global g) {
+    g.tu_id = p->tu_id;
     for (size_t i = 0; i < prog->globals.size; i++) {
         Global *ex = &prog->globals.data[i];
         if (!str_eq(ex->name, g.name)) continue;
+        // `static` globals are file-local (see merge logic for funcs): a static
+        // only aliases another declaration in the same translation unit.
+        if ((ex->is_static || g.is_static) && ex->tu_id != g.tu_id) continue;
         if (ex->type.kind != g.type.kind) {
             perror_at(p, g.line,
                 str_lit("conflicting global declaration types"));
@@ -2757,7 +2769,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
     prog->target_wasm32 = target_wasm32;
     P p = {.arena = arena, .toks = toks.data, .n = toks.size, .i = 0,
            .typedefs = NULL, .enums = NULL, .prog = prog,
-           .target_wasm32 = target_wasm32};
+           .target_wasm32 = target_wasm32, .tu_id = prog->tu_counter++};
     // Built-in typedefs. `int64_t` / `uint64_t` are always 64-bit;
     // `size_t` / `ssize_t` / `intptr_t` / `uintptr_t` / `ptrdiff_t`
     // are pointer-sized in C, which means 32-bit on wasm32 and
@@ -3167,6 +3179,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
         p.i = save;
         Func *f = parse_func(&p);
         f->is_static = saw_static;
+        f->tu_id = p.tu_id;
         // Merge top-level `__attribute__((...))` annotations (parsed
         // before the storage-class / return type) into the function. If
         // both the leading and the inner attribute lists set the same
@@ -3174,17 +3187,25 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
         if (f->wasm_import_module.size == 0) f->wasm_import_module = tl_attrs.import_module;
         if (f->wasm_import_name.size == 0)   f->wasm_import_name   = tl_attrs.import_name;
         if (f->wasm_export_name.size == 0)   f->wasm_export_name   = tl_attrs.export_name;
+        if (tl_attrs.is_weak) f->is_weak = true;
         // Check for an existing entry with the same name. Forward decls can
         // be replaced by a definition; duplicate forward decls are merged;
         // a forward decl after a definition is dropped.
         Func *existing = NULL;
         size_t existing_idx = 0;
         for (size_t i = 0; i < prog->funcs.size; i++) {
-            if (str_eq(prog->funcs.data[i]->name, f->name)) {
-                existing = prog->funcs.data[i];
-                existing_idx = i;
-                break;
-            }
+            if (!str_eq(prog->funcs.data[i]->name, f->name)) continue;
+            // A `static` function has internal linkage: it is only the *same*
+            // symbol as another declaration in the *same* translation unit.
+            // Statics with the same name from different files (or a static vs a
+            // global extern) are distinct symbols, so don't merge them here —
+            // they are scoped apart at emit time (FuncSig.emit_name).
+            if ((prog->funcs.data[i]->is_static || f->is_static) &&
+                prog->funcs.data[i]->tu_id != f->tu_id)
+                continue;
+            existing = prog->funcs.data[i];
+            existing_idx = i;
+            break;
         }
         if (!existing) {
             VecFuncPtr_push_back(arena, &prog->funcs, f);
@@ -3200,6 +3221,13 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
             } else if (existing->is_forward && !f->is_forward) {
                 // Replace the forward decl with the real definition.
                 prog->funcs.data[existing_idx] = f;
+            } else if (existing->is_weak && !f->is_weak) {
+                // Strong definition overrides a weak one (e.g. a libc memcpy
+                // overriding corec's weak fallback).
+                prog->funcs.data[existing_idx] = f;
+            } else if (f->is_weak) {
+                // Weak definition yields to the existing (strong or first-weak)
+                // definition: drop it.
             } else {
                 perror_at(&p, f->line, str_lit("function redefinition"));
             }
