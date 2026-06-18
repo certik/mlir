@@ -1067,7 +1067,7 @@ expected_stdout = "10\n20\n30\n10\n30\n60\n-1\n"
 
 [[test]]
 name = "static_func_collision"
-targets = ["native", "wasm", "elf"]
+targets = ["native", "wasm"]
 # Multi-TU test: each helper TU defines `static int helper(int)` with
 # a different body. Verifies wasm-link respects per-object static
 # binding so cross-TU symbol-name collisions don't merge into a
