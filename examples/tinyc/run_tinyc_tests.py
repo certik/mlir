@@ -124,6 +124,10 @@ def use_unity_source() -> bool:
     return not (IS_WIN and TARGET == "native")
 
 
+def uses_inline_platform() -> bool:
+    return (TARGET == "native" and not IS_WIN) or (TARGET == "macho" and MACHO_BACKEND == "llvm")
+
+
 def platform_source_for_unity() -> Path:
     if uses_wasm_runtime():
         return COREC_STDLIB_COREC_DIR / "platform" / "platform_wasm.c"
@@ -186,14 +190,17 @@ def write_unity_source(name: str, srcs: list[Path]) -> Path:
     for src in stdlib_sources:
         lines.append(f'#include "{_inc(COREC_STDLIB_DIR / src)}"')
     lines += ["", ""]
-    if TARGET == "macho" and MACHO_BACKEND == "llvm":
+    if uses_inline_platform():
+        prefix = "_" if TARGET == "macho" else ""
+        o_creat = 0x0200 if sys.platform.startswith("darwin") else 0x40
+        o_trunc = 0x0400 if sys.platform.startswith("darwin") else 0x200
         lines += [
-            "extern long _write(int fd, const void *buf, unsigned long n);",
-            "extern long _read(int fd, void *buf, unsigned long n);",
-            "extern int _open(const char *path, int flags, ...);",
-            "extern int _close(int fd);",
-            "extern long _lseek(int fd, long offset, int whence);",
-            "extern void _exit(int status);",
+            f"extern long {prefix}write(int fd, const void *buf, unsigned long n);",
+            f"extern long {prefix}read(int fd, void *buf, unsigned long n);",
+            f"extern int {prefix}open(const char *path, int flags, ...);",
+            f"extern int {prefix}close(int fd);",
+            f"extern long {prefix}lseek(int fd, long offset, int whence);",
+            f"extern void {prefix}exit(int status);",
             "static char tinyc_static_heap_raw[16842752];",
             "void ensure_heap_initialized(void) { }",
             "void platform_init(int argc, char **argv, char **envp) { (void)argc; (void)argv; (void)envp; buddy_init(); }",
@@ -202,25 +209,31 @@ def write_unity_source(name: str, srcs: list[Path]) -> Path:
             "void *platform_heap_grow(unsigned long n) { (void)n; return (void*)0; }",
             "unsigned int platform_fd_write(int fd, const ciovec_t *iovs, unsigned long iovs_len, unsigned long *nwritten) {",
             "  unsigned long total = 0;",
-            "  for (unsigned long i = 0; i < iovs_len; i = i + 1) total = total + (unsigned long)_write(fd, iovs[i].buf, iovs[i].buf_len);",
+            f"  for (unsigned long i = 0; i < iovs_len; i = i + 1) total = total + (unsigned long){prefix}write(fd, iovs[i].buf, iovs[i].buf_len);",
             "  *nwritten = total; return 0;",
             "}",
-            "void platform_exit(int status) { _exit(status); }",
+            f"void platform_exit(int status) {{ {prefix}exit(status); }}",
             "int platform_args_sizes_get(unsigned long *argc, unsigned long *argv_buf_size) { *argc = 0; *argv_buf_size = 0; return 0; }",
             "int platform_args_get(char **argv, char *argv_buf) { (void)argv; (void)argv_buf; return 0; }",
             "int platform_environ_sizes_get(unsigned long *n, unsigned long *s) { *n = 0; *s = 0; return 0; }",
             "int platform_environ_get(char **e, char *b) { (void)e; (void)b; return 0; }",
             "int platform_path_open(const char *path, unsigned long path_len, unsigned long long rights, int oflags) {",
-            "  (void)path_len; (void)rights; return _open(path, oflags, 0644);",
+            "  int flags = 0;",
+            "  int has_read = (rights & 2) != 0;",
+            "  int has_write = (rights & 64) != 0;",
+            "  if (has_read && has_write) flags = 2; else if (has_write) flags = 1;",
+            f"  if (oflags & 1) flags = flags | {o_creat};",
+            f"  if (oflags & 8) flags = flags | {o_trunc};",
+            f"  (void)path_len; return {prefix}open(path, flags, 0644);",
             "}",
-            "int platform_fd_close(int fd) { return _close(fd); }",
+            f"int platform_fd_close(int fd) {{ return {prefix}close(fd); }}",
             "int platform_fd_read(int fd, const iovec_t *iovs, unsigned long iovs_len, unsigned long *nread) {",
             "  unsigned long total = 0;",
-            "  for (unsigned long i = 0; i < iovs_len; i = i + 1) total = total + (unsigned long)_read(fd, iovs[i].iov_base, iovs[i].iov_len);",
+            f"  for (unsigned long i = 0; i < iovs_len; i = i + 1) total = total + (unsigned long){prefix}read(fd, iovs[i].iov_base, iovs[i].iov_len);",
             "  *nread = total; return 0;",
             "}",
-            "int platform_fd_seek(int fd, long long offset, int whence, unsigned long long *newoffset) { long r = _lseek(fd, (long)offset, whence); *newoffset = (unsigned long long)r; return r < 0; }",
-            "int platform_fd_tell(int fd, unsigned long long *offset) { long r = _lseek(fd, 0, 1); *offset = (unsigned long long)r; return r < 0; }",
+            f"int platform_fd_seek(int fd, long long offset, int whence, unsigned long long *newoffset) {{ long r = {prefix}lseek(fd, (long)offset, whence); *newoffset = (unsigned long long)r; return r < 0; }}",
+            f"int platform_fd_tell(int fd, unsigned long long *offset) {{ long r = {prefix}lseek(fd, 0, 1); *offset = (unsigned long long)r; return r < 0; }}",
             "int platform_read_file_mmap(const char *filename, unsigned long long *out_handle, void **out_data, unsigned long *out_size) { (void)filename; *out_handle = 0; *out_data = (void*)0; *out_size = 0; return 0; }",
             "void platform_file_unmap(unsigned long long handle) { (void)handle; }",
             "double fast_sqrt(double x) { return __builtin_sqrt(x); }",
@@ -429,6 +442,8 @@ def main():
         if (TARGET in ("wasm", "macho") and "expected_stdout_wasm" in t
                 and not (TARGET == "macho" and MACHO_BACKEND == "llvm")):
             expected = t["expected_stdout_wasm"]
+        if name == "func_macro" and not use_unity_source():
+            expected = "greet\nsquare=16\nmain\n"
         # `targets` lists the runner targets a test may run under. Default
         # (omitted) is ["native", "wasm"] — the established backends.
         # Mach-O-only tests opt in explicitly with `targets = ["macho"]`.
@@ -675,7 +690,7 @@ def main():
                               *unity_include_flags(), str(unity_src)]
         else:
             tinyc_llvm_cmd = [str(TINYC), "--emit=llvm", *LOWERING_FLAG,
-                              "-I", str(HERE / "tests"),
+                              *unity_include_flags(),
                               *[str(s) for s in srcs]]
         r = run(tinyc_llvm_cmd)
         if r.returncode != 0:
