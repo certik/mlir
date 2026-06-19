@@ -636,8 +636,15 @@ static void emit_printf_call(E *e, MLIR_ValueHandle fmt, MLIR_ValueHandle arg,
     rts[0] = e->i32;
     rs[0] = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
                                      e->i32, ssa_name(e), eloc(e, 0));
-    MLIR_TypeHandle ins[1] = { e->ptr };
-    MLIR_TypeHandle fn_ty = MLIR_CreateTypeLLVMFunction(e->ctx, e->i32, ins, 1, true);
+    FuncSig *sig = find_sig(e, str_lit("printf"));
+    MLIR_TypeHandle fn_ty;
+    if (sig && sig->llvm_fn_ty != MLIR_INVALID_HANDLE) {
+        fn_ty = sig->llvm_fn_ty;
+    } else {
+        MLIR_TypeHandle ins[1] = { e->ptr };
+        fn_ty = MLIR_CreateTypeLLVMFunction(e->ctx, e->i32, ins, 1, true);
+        e->need_printf_decl = true;
+    }
     MLIR_AttributeHandle ca = MLIR_CreateAttributeSymbolRef(
         e->ctx, str_lit("callee"), str_lit("printf"));
     MLIR_AttributeHandle vt = MLIR_CreateAttributeType(
@@ -646,7 +653,6 @@ static void emit_printf_call(E *e, MLIR_ValueHandle fmt, MLIR_ValueHandle arg,
     as[0] = ca; as[1] = vt;
     emit_op(e, OP_TYPE_UNREGISTERED, str_lit("llvm.call"),
             rts, 1, rs, 1, ops, has_arg ? 2 : 1, as, 2, NULL, 0);
-    e->need_printf_decl = true;
 }
 
 // Address of a symbol: either the local alloca slot or a freshly-emitted
