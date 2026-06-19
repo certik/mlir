@@ -16,7 +16,6 @@ HERE = Path(__file__).parent
 ROOT = HERE.parent.parent
 IS_WIN = sys.platform == "win32"
 TINYC = Path(os.environ.get("TINYC", str(ROOT / ("tinyc.exe" if IS_WIN else "tinyc")))).resolve()
-RUNTIME = HERE / "runtime.c"
 RUNTIME_WASM = HERE / "runtime_wasm.c"
 RUNTIME_WASM_START = HERE / "start_wasm.s"
 # corec platform_<os>.c whose file-I/O + exit primitives the via-wasm Mach-O
@@ -54,7 +53,7 @@ LOWERING = os.environ.get("TINYC_LOWERING")
 LOWERING_FLAG = [f"--lowering={LOWERING}"] if LOWERING else []
 
 # Code-generation/runtime target for the suite. "native" (default) emits
-# LLVM IR via tinyc, then llc + host CC + runtime.c. "wasm" emits a
+# LLVM IR via tinyc, then llc + host CC. "wasm" emits a
 # wasm32 object via tinyc, then wasm-ld + runtime_wasm.c, and runs the
 # resulting .wasm via wasmtime. Both TINYC_LOWERING values are valid
 # with the wasm target.
@@ -119,13 +118,11 @@ def uses_wasm_runtime() -> bool:
 
 
 def use_unity_source() -> bool:
-    # tinyC's Windows frontend path cannot compile corec's raw Win32 platform
-    # layer as part of every native test in CI within the per-test timeout.
-    return not (IS_WIN and TARGET == "native")
+    return True
 
 
 def uses_inline_platform() -> bool:
-    return (TARGET == "native" and not IS_WIN) or (TARGET == "macho" and MACHO_BACKEND == "llvm")
+    return TARGET == "native" or (TARGET == "macho" and MACHO_BACKEND == "llvm")
 
 
 def platform_source_for_unity() -> Path:
@@ -190,10 +187,28 @@ def write_unity_source(name: str, srcs: list[Path]) -> Path:
     for src in stdlib_sources:
         lines.append(f'#include "{_inc(COREC_STDLIB_DIR / src)}"')
     lines += ["", ""]
+    if TARGET == "native":
+        lines += [
+            "int tinyc_va_arg_i32(char **ap) { char *p; int *q; p=*ap; *ap=p+8; q=(int*)p; return *q; }",
+            "long long tinyc_va_arg_i64(char **ap) { char *p; long long *q; p=*ap; *ap=p+8; q=(long long*)p; return *q; }",
+            "double tinyc_va_arg_f64(char **ap) { char *p; double *q; p=*ap; *ap=p+8; q=(double*)p; return *q; }",
+            "void *tinyc_va_arg_ptr(char **ap) { char *p; void **q; p=*ap; *ap=p+8; q=(void**)p; return *q; }",
+            "void tinyc_va_arg_struct(char **ap, void *out, long long size) {",
+            "  char *p; long long words; long long i; long long *o; long long *s;",
+            "  p=*ap; words=(size+7)/8; o=(long long*)out; s=(long long*)p;",
+            "  for(i=0;i<words;i=i+1){ o[i]=s[i]; }",
+            "  *ap=p+words*8;",
+            "}",
+            "",
+        ]
     if uses_inline_platform():
-        prefix = "_" if TARGET == "macho" else ""
-        o_creat = 0x0200 if sys.platform.startswith("darwin") else 0x40
-        o_trunc = 0x0400 if sys.platform.startswith("darwin") else 0x200
+        prefix = "_" if (TARGET == "macho" or IS_WIN) else ""
+        if IS_WIN:
+            o_creat = 0x0100
+            o_trunc = 0x0200
+        else:
+            o_creat = 0x0200 if sys.platform.startswith("darwin") else 0x40
+            o_trunc = 0x0400 if sys.platform.startswith("darwin") else 0x200
         lines += [
             f"extern long {prefix}write(int fd, const void *buf, unsigned long n);",
             f"extern long {prefix}read(int fd, void *buf, unsigned long n);",
@@ -287,15 +302,15 @@ def unity_include_flags() -> list[str]:
 
 
 def link_native(obj_path: Path, exe_path: Path):
-    """Link the llc-produced single-TU object with tinyC's va_arg helpers."""
+    """Link the llc-produced single-TU object."""
     if IS_WIN:
-        # MSVC: cl /nologo /MD obj runtime.c /Fe:exe.exe
+        # MSVC: cl /nologo /MD obj /Fe:exe.exe
         return run([
             CC, "/nologo", "/MD",
-            str(obj_path), str(RUNTIME),
+            str(obj_path),
             f"/Fe:{exe_path}",
         ])
-    cmd = [CC, str(obj_path), str(RUNTIME), "-o", str(exe_path)]
+    cmd = [CC, str(obj_path), "-o", str(exe_path)]
     # llc emits non-PIC by default; some Linux toolchains default to -pie which
     # rejects R_X86_64_32 relocations from .rodata. Force -no-pie on Linux.
     if sys.platform.startswith("linux"):
@@ -704,7 +719,7 @@ def main():
         ll.write_text(r.stdout)
 
         # Stage 2: compile .ll -> .o/.obj with llc (works regardless of $CC),
-        # then link with the platform compiler + runtime.c.
+        # then link with the platform compiler.
         r = run([LLC, "-filetype=obj", str(ll), "-o", str(obj)])
         if r.returncode != 0:
             print(f"FAIL {name}: llc failed\nstderr:\n{r.stderr}")

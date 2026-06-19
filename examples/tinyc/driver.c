@@ -740,9 +740,13 @@ int app_main(void) {
     // printStr, ...) as tinyC-subset C parsed into this same module, so it
     // lowers through the llvm -> aarch64 path alongside user code. Only
     // functions the user hasn't defined are injected.
-    if (macho_backend_llvm || emit_aarch64 || emit_elf)
+    if (macho_backend_llvm || emit_aarch64 || emit_elf) {
+        bool runtime_uses_platform =
+            (emit_elf && host_platform_path != NULL)
+            ;
         tinyc_inject_native_runtime(arena, prog, target_wasm32,
-                                    emit_elf && host_platform_path != NULL);
+                                    runtime_uses_platform);
+    }
     MLIR_OpHandle module = tinyc_emit_module(&ctx, prog);
     if (tinyc_last_emit_errors() > 0) {
         arena_destroy(arena);

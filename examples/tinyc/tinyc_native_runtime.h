@@ -78,7 +78,6 @@ static void tinyc_inject_native_runtime(Arena *arena, Program *prog,
             "  return n;\n"
             "}\n");
     }
-
     tinyc_rt_add(arena, prog, &combined, &any, "printNewline",
         "void printNewline(void){ char c; c=10; _write(1,&c,1); }\n");
     tinyc_rt_add(arena, prog, &combined, &any, "printI64",

@@ -25,7 +25,7 @@ LLVM dialect IR
    │  MLIR_TranslateModuleToLLVMIR
    ▼
 LLVM IR text
-   │  $CC out.ll runtime.c -o a.out
+   │  $CC out.ll -o a.out
    ▼
 native binary
 ```
@@ -47,8 +47,8 @@ frontend now supports:
 - Functions: fixed-arity (`int name(int p, …)`) and variadic
   (`int sum(int n, ...)` — emitted as `llvm.func` since `func.func`
   has no var-arg form).
-- A small built-in runtime (`runtime.c` / `runtime_wasm.c`) supplying
-  `printf`, `memcpy`, `memset`, `sqrt`, etc.
+- A generated single-TU test root that supplies corec/corec-stdlib for
+  native tests, plus a wasm runtime object for wasm tests.
 - A `#define` / `#include` preprocessor (`preprocess.c`), with `-I`
   include dirs and `-D` definitions on the CLI.
 
@@ -76,7 +76,7 @@ To produce a binary by hand (the test runner does this for you):
 
 ```sh
 ./tinyc --emit=llvm examples/tinyc/tests/sum_to_10.tc > /tmp/p.ll
-$CC /tmp/p.ll examples/tinyc/runtime.c -o /tmp/p
+$CC /tmp/p.ll -o /tmp/p
 /tmp/p   # prints 55
 ```
 

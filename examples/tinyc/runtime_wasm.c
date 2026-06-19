@@ -1,6 +1,6 @@
-// WebAssembly/WASI runtime for tinyC. Provides the same lowered hooks as
-// runtime.c (printI64, printNewline, printI32, printF32, printF64,
-// printStr, plus tinyc_va_arg_*) but built on raw WASI
+// WebAssembly/WASI runtime for tinyC. Provides lowered print hooks
+// (printI64, printNewline, printI32, printF32, printF64, printStr,
+// plus tinyc_va_arg_*) built on raw WASI
 // `fd_write`/`proc_exit` imports so that it can be compiled with
 // `clang --target=wasm32-wasi -nostdlib -nostdinc -fno-builtin` and
 // linked with `wasm-ld` without a wasi-libc sysroot.
@@ -127,7 +127,7 @@ static uint32_t fmt_f64(double v, char *buf) {
     return out;
 }
 
-// --- tinyC print helpers (mirror runtime.c contract) ---------------------
+// --- tinyC print helpers -------------------------------------------------
 
 void printI64(int64_t v) { char b[32]; uint32_t n = fmt_i64(v, b); wasm_write(b, n); }
 void printNewline(void)  { wasm_write("\n", 1); }

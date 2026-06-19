@@ -2097,7 +2097,7 @@ static void synth_print_i64(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
 }
 
 // void printStr(i32 wasm_offset): scan a NUL-terminated string in linmem,
-// _write it to stdout, then a newline (matches runtime.c printStr).
+// _write it to stdout, then a newline (matches tinyC string-print semantics).
 static void synth_print_str(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
     MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
     MLIR_BlockHandle  entry = MLIR_CreateBlock(ctx);

@@ -84,7 +84,7 @@ clang -O0 -x c -o /tmp/ref examples/tinyc/tests/$NAME.tc && /tmp/ref
 # tinyc reproduction:
 ./tinyc --emit=llvm -o /tmp/$NAME.ll examples/tinyc/tests/$NAME.tc
 # If that succeeds, link and run:
-clang -nostdlib -lSystem /tmp/$NAME.ll examples/tinyc/runtime.c -o /tmp/$NAME && /tmp/$NAME
+clang -nostdlib -lSystem /tmp/$NAME.ll -o /tmp/$NAME && /tmp/$NAME
 ```
 
 Confirm the observed failure matches the **failure signature** from the
@@ -102,8 +102,8 @@ The tinyC source layout (in `corec/examples/tinyc/`):
 | `tinyc emit error ...` | `corec/examples/tinyc/emit.c` |
 | Wrong MLIR / unknown op in output | `corec/examples/tinyc/emit.c` |
 | MLIR lowering / pass-pipeline failure | this repo's `mlir_*.c`, `op_parsers.c` |
-| Link error (undefined symbol) | `examples/tinyc/runtime.c` or extern decl |
-| Wrong runtime output | `emit.c` (codegen) → `runtime.c` (helpers) |
+| Link error (undefined symbol) | missing extern decl or generated single-TU support |
+| Wrong runtime output | `emit.c` codegen or corec-stdlib formatting |
 
 Search for symbols / error strings:
 
@@ -125,7 +125,7 @@ Rebuild and re-run the MRE (fast loop):
 ```bash
 pixi run -e upstream build_tinyc_upstream
 ./tinyc --emit=llvm -o /tmp/$NAME.ll examples/tinyc/tests/$NAME.tc
-clang -nostdlib -lSystem /tmp/$NAME.ll examples/tinyc/runtime.c -o /tmp/$NAME && /tmp/$NAME
+clang -nostdlib -lSystem /tmp/$NAME.ll -o /tmp/$NAME && /tmp/$NAME
 ```
 
 Iterate until the MRE passes (output matches the `expected_stdout` from

@@ -1,6 +1,6 @@
-# tinyC end-to-end tests. Each entry compiles tests/<name>.tc to LLVM IR
-# via the tinyc driver, links it with runtime.c using $CC, runs the
-# resulting binary, and compares stdout to expected_stdout exactly.
+# tinyC end-to-end tests. Each entry compiles tests/<name>.tc through a
+# generated single-TU root, runs the result, and compares stdout to
+# expected_stdout exactly.
 
 [[test]]
 name = "simple"
@@ -555,7 +555,7 @@ expected_stdout = "20\n100\n8\n"
 # libc interop: tinyC programs that declare libc functions via `extern`
 # and link against the system libc through the test harness's $CC. These
 # tests prove that the language can be used end-to-end against the real
-# libc surface, not just runtime.c. FILE* is modeled as `void *` (Option
+# libc surface. FILE* is modeled as `void *` (Option
 # A in PR #120) — tinyC has no need for the layout of FILE.
 # ---------------------------------------------------------------------------
 

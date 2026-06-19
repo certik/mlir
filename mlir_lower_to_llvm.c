@@ -116,8 +116,27 @@ static void append_llvm_func_decl(LowerState *st, const char *name,
     MLIR_AppendBlockOp(st->ctx, st->module_body, decl);
 }
 
+static bool module_has_symbol(LowerState *st, const char *name) {
+    size_t name_len = 0; while (name[name_len]) name_len++;
+    string llvm_func = str_lit("llvm.func");
+    string func_func = str_lit("func.func");
+    size_t n = MLIR_GetBlockNumOps(st->module_body);
+    for (size_t i = 0; i < n; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(st->module_body, i);
+        string opname = MLIR_GetOpName(op);
+        if (!str_eq(opname, llvm_func) && !str_eq(opname, func_func)) continue;
+        MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(op, "sym_name");
+        if (a == MLIR_INVALID_HANDLE) continue;
+        string sym = MLIR_GetAttributeString(a);
+        if (sym.size == name_len && memcmp(sym.str, name, name_len) == 0)
+            return true;
+    }
+    return false;
+}
+
 static void ensure_vp_decl_i64(LowerState *st) {
     if (st->vp_decl_i64) return;
+    if (module_has_symbol(st, "printI64")) { st->vp_decl_i64 = true; return; }
     MLIR_TypeHandle params[1] = { ty_i64(st->ctx) };
     append_llvm_func_decl(st, "printI64", params, 1);
     st->vp_decl_i64 = true;
@@ -125,6 +144,7 @@ static void ensure_vp_decl_i64(LowerState *st) {
 
 static void ensure_vp_decl_f32(LowerState *st) {
     if (st->vp_decl_f32) return;
+    if (module_has_symbol(st, "printF32")) { st->vp_decl_f32 = true; return; }
     MLIR_TypeHandle params[1] = { MLIR_CreateTypeFloat(st->ctx, 32, false) };
     append_llvm_func_decl(st, "printF32", params, 1);
     st->vp_decl_f32 = true;
@@ -132,6 +152,7 @@ static void ensure_vp_decl_f32(LowerState *st) {
 
 static void ensure_vp_decl_f64(LowerState *st) {
     if (st->vp_decl_f64) return;
+    if (module_has_symbol(st, "printF64")) { st->vp_decl_f64 = true; return; }
     MLIR_TypeHandle params[1] = { MLIR_CreateTypeFloat(st->ctx, 64, false) };
     append_llvm_func_decl(st, "printF64", params, 1);
     st->vp_decl_f64 = true;
@@ -139,6 +160,7 @@ static void ensure_vp_decl_f64(LowerState *st) {
 
 static void ensure_vp_decl_newline(LowerState *st) {
     if (st->vp_decl_newline) return;
+    if (module_has_symbol(st, "printNewline")) { st->vp_decl_newline = true; return; }
     append_llvm_func_decl(st, "printNewline", NULL, 0);
     st->vp_decl_newline = true;
 }
