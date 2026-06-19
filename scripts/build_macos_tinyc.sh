@@ -69,10 +69,8 @@ for src in "${SOURCES[@]}"; do
 done
 
 printf '[clang   ] link -> %s\n' "$BIN"
-# Compile examples/tinyc/runtime.c with clang (it intentionally uses system
-# stdio.h for the print* helpers and stdarg.h for the va_arg helpers — see
-# corec/scripts/build_macos_tinyc.sh for the same pattern). Only the
-# va_arg helpers are referenced by the mlir parser bootstrap.
-clang -nostdlib -fno-builtin -o "$BIN" "${LL_FILES[@]}" examples/tinyc/runtime.c -lSystem -Wl,-e,__start
+clang -nostdlib -fno-builtin -o "$BIN" \
+    "${LL_FILES[@]}" examples/tinyc/tinyc_wasm_vararg.c \
+    -lSystem -Wl,-e,__start
 
 printf 'Built %s via tinyC.\n' "$BIN"

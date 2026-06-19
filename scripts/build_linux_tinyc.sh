@@ -60,8 +60,7 @@ SOURCES=(
 
 # platform_linux.c uses GCC/Clang-specific features (__attribute__((weak)),
 # inline assembly for raw syscalls) that tinyc doesn't support, so compile
-# it directly with clang and link the resulting .o, mirroring how
-# examples/tinyc/runtime.c is handled below.
+# it directly with clang and link the resulting .o.
 LL_FILES=()
 for src in "${SOURCES[@]}"; do
     base="$(basename "$src")"
@@ -77,15 +76,7 @@ clang -c -nostdlib -fno-builtin -I corec -I corec-stdlib/stdlib -I . -DNDEBUG \
     -o "$PLATFORM_OBJ" corec/platform/platform_linux.c
 
 printf '[clang   ] link -> %s\n' "$BIN"
-# Compile examples/tinyc/runtime.c with clang (it intentionally uses system
-# stdio.h for the print* helpers and stdarg.h for the va_arg helpers — see
-# scripts/build_macos_tinyc.sh for the same pattern). Only the va_arg
-# helpers are referenced by the mlir parser bootstrap; the print* helpers
-# pull in libc symbols (stdout, fputs, printf) which we can't satisfy
-# under -nostdlib on Linux. Build runtime.c with per-function sections so
-# the linker garbage-collects the unreferenced print* helpers.
-clang -c -ffunction-sections -fdata-sections -o "$OUT/runtime.o" examples/tinyc/runtime.c
 clang -nostdlib -fno-builtin -Wl,--gc-sections -o "$BIN" \
-    "${LL_FILES[@]}" "$PLATFORM_OBJ" "$OUT/runtime.o"
+    "${LL_FILES[@]}" "$PLATFORM_OBJ" examples/tinyc/tinyc_wasm_vararg.c
 
 printf 'Built %s via tinyC.\n' "$BIN"
