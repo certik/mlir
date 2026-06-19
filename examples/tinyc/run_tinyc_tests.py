@@ -191,45 +191,6 @@ def write_unity_source(name: str, srcs: list[Path]) -> Path:
     for src in stdlib_sources:
         lines.append(f'#include "{_inc(COREC_STDLIB_DIR / src)}"')
     lines += ["", ""]
-    if TARGET == "native":
-        if sys.platform.startswith("linux"):
-            lines += [
-                "struct tinyc_va_list_x64 { unsigned int gp_offset; unsigned int fp_offset; void *overflow_arg_area; void *reg_save_area; };",
-                "long long tinyc_va_arg_i64(struct tinyc_va_list_x64 *ap) {",
-                "  char *p;",
-                "  if (ap->gp_offset < 48) { p = (char*)ap->reg_save_area + ap->gp_offset; ap->gp_offset = ap->gp_offset + 8; }",
-                "  else { p = (char*)ap->overflow_arg_area; ap->overflow_arg_area = p + 8; }",
-                "  return *(long long*)p;",
-                "}",
-                "int tinyc_va_arg_i32(struct tinyc_va_list_x64 *ap) { return (int)tinyc_va_arg_i64(ap); }",
-                "void *tinyc_va_arg_ptr(struct tinyc_va_list_x64 *ap) { return (void*)tinyc_va_arg_i64(ap); }",
-                "double tinyc_va_arg_f64(struct tinyc_va_list_x64 *ap) {",
-                "  char *p;",
-                "  if (ap->fp_offset < 176) { p = (char*)ap->reg_save_area + ap->fp_offset; ap->fp_offset = ap->fp_offset + 16; }",
-                "  else { p = (char*)ap->overflow_arg_area; ap->overflow_arg_area = p + 8; }",
-                "  return *(double*)p;",
-                "}",
-                "void tinyc_va_arg_struct(struct tinyc_va_list_x64 *ap, void *out, long long size) {",
-                "  long long words; long long i; long long *o;",
-                "  words=(size+7)/8; o=(long long*)out;",
-                "  for(i=0;i<words;i=i+1){ o[i]=tinyc_va_arg_i64(ap); }",
-                "}",
-                "",
-            ]
-        else:
-            lines += [
-                "int tinyc_va_arg_i32(char **ap) { char *p; int *q; p=*ap; *ap=p+8; q=(int*)p; return *q; }",
-                "long long tinyc_va_arg_i64(char **ap) { char *p; long long *q; p=*ap; *ap=p+8; q=(long long*)p; return *q; }",
-                "double tinyc_va_arg_f64(char **ap) { char *p; double *q; p=*ap; *ap=p+8; q=(double*)p; return *q; }",
-                "void *tinyc_va_arg_ptr(char **ap) { char *p; void **q; p=*ap; *ap=p+8; q=(void**)p; return *q; }",
-                "void tinyc_va_arg_struct(char **ap, void *out, long long size) {",
-                "  char *p; long long words; long long i; long long *o; long long *s;",
-                "  p=*ap; words=(size+7)/8; o=(long long*)out; s=(long long*)p;",
-                "  for(i=0;i<words;i=i+1){ o[i]=s[i]; }",
-                "  *ap=p+words*8;",
-                "}",
-                "",
-            ]
     if uses_inline_platform():
         prefix = "_" if (TARGET == "macho" or IS_WIN) else ""
         if IS_WIN:
@@ -337,9 +298,10 @@ def link_native(obj_path: Path, exe_path: Path):
         return run([
             CC, "/nologo", "/MD",
             str(obj_path), str(HERE / "tinyc_wasm_vararg.c"),
+            "ucrt.lib", "vcruntime.lib", "legacy_stdio_definitions.lib",
             f"/Fe:{exe_path}",
         ])
-    cmd = [CC, str(obj_path), "-o", str(exe_path)]
+    cmd = [CC, str(obj_path), str(HERE / "tinyc_wasm_vararg.c"), "-o", str(exe_path)]
     # llc emits non-PIC by default; some Linux toolchains default to -pie which
     # rejects R_X86_64_32 relocations from .rodata. Force -no-pie on Linux.
     if sys.platform.startswith("linux"):
