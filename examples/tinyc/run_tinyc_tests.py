@@ -184,9 +184,11 @@ def write_unity_source(name: str, srcs: list[Path]) -> Path:
         # runtime_wasm.c supplies printf/vprintf for wasm-shaped tests. Keep the
         # rest of stdio (FILE, fputs, fputc, fopen, ...) in the unity root.
         stdlib_sources.remove("stdlib/printf.c")
-    if TARGET == "native":
+    if TARGET == "native" or TARGET == "elf":
         # Native tests link against the host C library; use its variadic printf
-        # ABI instead of compiling corec-stdlib's printf with tinyC.
+        # ABI instead of compiling corec-stdlib's printf with tinyC. ELF uses
+        # tinyC's injected runtime printf because the x64 backend intentionally
+        # supports a smaller operation subset than corec-stdlib/printf.c needs.
         stdlib_sources.remove("stdlib/printf.c")
     for src in stdlib_sources:
         lines.append(f'#include "{_inc(COREC_STDLIB_DIR / src)}"')

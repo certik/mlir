@@ -699,6 +699,7 @@ int app_main(void) {
                          !macho_backend_llvm;
     Program *prog = arena_new(arena, Program);
     *prog = (Program){0};
+    prog->print_via_printf = emit_llvm || (emit_macho && macho_backend_llvm);
     int total_errs = 0;
     for (size_t k = 0; k < n_input_files; k++) {
         string src = tinyc_preprocess(arena, str_from_cstr_view(input_files[k]),

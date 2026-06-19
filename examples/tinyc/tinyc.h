@@ -447,6 +447,11 @@ typedef struct Program {
     // free / printStr / tinyc_va_arg_struct) so they match the
     // wasm32-wasi ABI's 32-bit `size_t` instead of the host's 64-bit.
     bool target_wasm32;
+    // Lower tinyC's `_tinyc_print` helper directly to `printf` calls.
+    // Native host LLVM tests use this to avoid external runtime objects;
+    // ELF keeps the older injected-runtime path because the x64 backend
+    // intentionally supports only a smaller operation subset.
+    bool print_via_printf;
 } Program;
 
 // ---------------- Lexer ----------------

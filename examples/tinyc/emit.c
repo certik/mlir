@@ -4900,7 +4900,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
         }
         case ST_PRINT: {
             EVal v = emit_expr(e, sc, st->expr);
-            if (e->target_wasm32) {
+            if (e->target_wasm32 || !e->program->print_via_printf) {
                 if (v.is_str) {
                     e->use_print_str = true;
                     MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1);
