@@ -374,7 +374,16 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
             if (stride == 0) continue;
             if (is_dyn) {
                 if (op_idx >= MLIR_GetOpNumOperands(op)) { fail(F, "gep dynamic index operand missing", (string){0}); return; }
-                load_val(F, MLIR_GetOpOperand(op, op_idx++), RCX);
+                MLIR_ValueHandle idx_v = MLIR_GetOpOperand(op, op_idx++);
+                load_val(F, idx_v, RCX);
+                // GEP indices are signed and sign-extend to the pointer width.
+                // load_val zero-extends a 32-bit index, so a negative index
+                // (e.g. `p - 1`) would scale as 0xFFFFFFFF*stride; sign-extend
+                // narrow indices first.
+                int ib = int_bits(ctx, idx_v);
+                if (ib == 32)      { rex(F,1,RCX,0,RCX); eb(F,0x63); modrm(F,3,RCX,RCX); }              // movsxd rcx,ecx
+                else if (ib == 16) { rex(F,1,RCX,0,RCX); eb(F,0x0F); eb(F,0xBF); modrm(F,3,RCX,RCX); }  // movsx rcx,cx
+                else if (ib && ib < 16) { rex(F,1,RCX,0,RCX); eb(F,0x0F); eb(F,0xBE); modrm(F,3,RCX,RCX); } // movsx rcx,cl
                 if (stride != 1) imul_ri(F, RCX, RCX, (int32_t)stride, 1);  // rcx *= stride
                 alu_rr(F, 0x01, RAX, RCX, 1);              // add rax, rcx
             } else if (cidx[i] != 0) {
