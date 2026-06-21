@@ -4931,28 +4931,21 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             }
             MLIR_ValueHandle arg = v.val;
             MLIR_ValueHandle fmt;
-            MLIR_TypeHandle arg_ty;
             if (v.is_float && v.is_f64) {
                 fmt = emit_string_ptr(e, str_lit("%g\n\0"));
-                arg_ty = e->f64;
             } else if (v.is_float) {
                 fmt = emit_string_ptr(e, str_lit("%g\n\0"));
                 arg = emit_fpext_f32_to_f64(e, v.val);
-                arg_ty = e->f64;
             } else if (v.is_i64) {
                 fmt = emit_string_ptr(e, str_lit("%lld\n\0"));
-                arg_ty = e->i64;
             } else if (v.is_ptr) {
                 fmt = emit_string_ptr(e, str_lit("%lld\n\0"));
                 arg = emit_ptrtoint_i64(e, v.val);
-                arg_ty = e->i64;
             } else {
                 fmt = emit_string_ptr(e, str_lit("%lld\n\0"));
                 arg = v.is_unsigned ? emit_extui_i32_to_i64(e, v.val)
                                     : emit_extsi_i32_to_i64(e, v.val);
-                arg_ty = e->i64;
             }
-            (void)arg_ty;
             emit_printf_call(e, fmt, arg, true);
             return;
         }

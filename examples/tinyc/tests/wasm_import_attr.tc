@@ -13,9 +13,9 @@
 //
 // This test re-declares `fd_write` from tinyc-compiled code, calls it
 // to write "hi\n" to stdout, and asserts the wasm runs end-to-end
-// under wasmtime. The same import line also appears in the clang-built
-// `runtime_wasm.c`; wasm-ld dedupes them — but only if both sides
-// agree on the import module name, which is exactly what we verify.
+// under wasmtime. The same WASI imports also come from corec's wasm
+// platform (corec/platform/platform_wasm.c); instantiation only succeeds
+// if both sides agree on the import module name, which is what we verify.
 //
 // native_skip: the host libc has no `fd_write`, so the native runner
 // can't satisfy the link.

@@ -198,7 +198,7 @@ expected_stdout = "60\n99\n99\n99\n"
 
 [[test]]
 name = "hello_world"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "Hello, world!\nFoo\n\n"
 
 [[test]]
