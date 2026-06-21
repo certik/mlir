@@ -19,7 +19,7 @@ expected_stdout = "55\n"
 
 [[test]]
 name = "short_circuit"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "0\n1\n1\n1\n"
 
 [[test]]

@@ -143,6 +143,12 @@ static void add_fix(FnCtx *F, int target_block, uint32_t field_off) {
     F->n_fix++;
 }
 
+// Patch a rel32 field emitted at `field_off` to branch to `target_off`.
+static void patch_rel32_at(FnCtx *F, uint32_t field_off, uint32_t target_off) {
+    int32_t rel = (int32_t)target_off - (int32_t)(field_off + 4);
+    buf_patch_le32(&F->f->code, field_off, (uint32_t)rel);
+}
+
 // block index of a successor block within this function's single region
 static int block_index(MLIR_RegionHandle reg, MLIR_BlockHandle blk) {
     size_t n = MLIR_GetRegionNumBlocks(reg);
@@ -475,17 +481,39 @@ static void lower_term(FnCtx *F, MLIR_OpHandle op) {
         return;
     }
     if (str_eqz(nm, "llvm.cond_br")) {
+        // Operand-carrying edges get a landing pad (edge copies, then jmp to the
+        // real successor), matching llvm->aarch64: copies run only on the taken
+        // path. Operand-free edges branch straight to the successor block.
         MLIR_BlockHandle tt = MLIR_GetOpSuccessor(op, 0);
         MLIR_BlockHandle ft = MLIR_GetOpSuccessor(op, 1);
-        emit_edge(F, op, 0, tt);
-        emit_edge(F, op, 1, ft);
+        size_t nso_t = MLIR_GetOpNumSuccessorOperands(op, 0);
+        size_t nso_f = MLIR_GetOpNumSuccessorOperands(op, 1);
+        bool need_t = nso_t > 0;
+        bool need_f = nso_f > 0;
+
         load_val(F, MLIR_GetOpOperand(op, 0), RAX);      // cond
         alu_rr(F, 0x85, RAX, RAX, 0);                    // test eax, eax
         eb(F, 0x0F); eb(F, (uint8_t)(0x80 + CC_NE));     // jne true
-        uint32_t f1 = here(F); e32(F, 0);
-        add_fix(F, block_index(reg, tt), f1);
-        eb(F, 0xE9); uint32_t f2 = here(F); e32(F, 0);   // jmp false
-        add_fix(F, block_index(reg, ft), f2);
+        uint32_t f_jne = here(F); e32(F, 0);
+        eb(F, 0xE9); uint32_t f_jmp = here(F); e32(F, 0); // jmp false
+
+        if (need_t) {
+            patch_rel32_at(F, f_jne, here(F));
+            emit_edge(F, op, 0, tt);
+            eb(F, 0xE9); uint32_t f_br = here(F); e32(F, 0);
+            add_fix(F, block_index(reg, tt), f_br);
+        } else {
+            add_fix(F, block_index(reg, tt), f_jne);
+        }
+
+        if (need_f) {
+            patch_rel32_at(F, f_jmp, here(F));
+            emit_edge(F, op, 1, ft);
+            eb(F, 0xE9); uint32_t f_br = here(F); e32(F, 0);
+            add_fix(F, block_index(reg, ft), f_br);
+        } else {
+            add_fix(F, block_index(reg, ft), f_jmp);
+        }
         return;
     }
     fail(F, "unsupported terminator", nm);
