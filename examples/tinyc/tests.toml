@@ -203,7 +203,7 @@ expected_stdout = "Hello, world!\nFoo\n\n"
 
 [[test]]
 name = "globals"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "Hi\n1\n3\n30\n3\n"
 
 [[test]]

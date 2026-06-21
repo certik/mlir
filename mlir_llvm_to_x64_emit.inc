@@ -935,10 +935,20 @@ static void gmap_put(GMap *g, string nm, uint32_t off) {
     g->off[g->n] = off; g->n++;
 }
 
-// Collect llvm.mlir.global string/zero initializers into the data blob.
-static void collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb, GMap *gm, Buf *data) {
-    (void)ctx;
+typedef struct { uint32_t slot_off; uint32_t target_off; } X64PtrReloc;
+
+// Collect llvm.mlir.global initializers into the data blob. Scalar/aggregate
+// globals store their `value` attribute; pointer globals whose initializer
+// region is just `addressof @other; return` become runtime stores in _start.
+static void collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb, GMap *gm, Buf *data,
+                            X64PtrReloc **relocs_out, size_t *n_relocs_out) {
+    *relocs_out = NULL;
+    *n_relocs_out = 0;
     size_t no = MLIR_GetBlockNumOps(mb);
+    size_t pend_cap = 0, n_pend = 0;
+    typedef struct { uint32_t slot_off; string target; } PendingPtrReloc;
+    PendingPtrReloc *pend = NULL;
+
     for (size_t i = 0; i < no; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
         if (!str_eqz(MLIR_GetOpName(op), "llvm.mlir.global")) continue;
@@ -950,6 +960,9 @@ static void collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb, GMap *gm, Bu
             MLIR_TypeHandle t = MLIR_GetAttributeTypeValue(gt);
             if (t != MLIR_INVALID_HANDLE) sz = x64_type_size(ctx, t);
         }
+        if (sz == 0) sz = 8;
+        for (size_t z = 0; z < sz; z++) buf_u8(data, 0);
+
         MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(op, "value");
         if (va) {
             // Serialize the initializer per its actual attribute kind. Using the
@@ -958,38 +971,103 @@ static void collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb, GMap *gm, Bu
             MLIR_AttrKind vk = MLIR_GetAttributeKind(va);
             if (vk == MLIR_ATTR_KIND_STRING) {
                 string s = MLIR_GetAttributeString(va);
-                buf_append(data, s.str, s.size);
-                for (size_t z = s.size; z < sz; z++) buf_u8(data, 0);   // zero-fill tail
+                if (s.size > sz) s.size = sz;
+                memcpy(data->data + off, s.str, s.size);
             } else if (vk == MLIR_ATTR_KIND_INTEGER || vk == MLIR_ATTR_KIND_BOOL) {
-                if (sz == 0) sz = 8;
                 uint64_t v = (uint64_t)MLIR_GetAttributeInteger(va);
                 for (size_t b = 0; b < sz; b++)
-                    buf_u8(data, (uint8_t)(b < 8 ? (v >> (8 * b)) : 0));
+                    data->data[off + b] = (uint8_t)(b < 8 ? (v >> (8 * b)) : 0);
             } else if (vk == MLIR_ATTR_KIND_FLOAT) {
-                if (sz != 4 && sz != 8) sz = 8;
                 double d = MLIR_GetAttributeFloat(va);
                 uint64_t bits = 0;
                 if (sz == 4) { float f = (float)d; uint32_t b32; memcpy(&b32, &f, 4); bits = b32; }
                 else         { memcpy(&bits, &d, 8); }
-                for (size_t b = 0; b < sz; b++) buf_u8(data, (uint8_t)(bits >> (8 * b)));
+                for (size_t b = 0; b < sz; b++)
+                    data->data[off + b] = (uint8_t)(bits >> (8 * b));
             } else {
                 fprintf(stderr, "x64: unsupported global initializer kind for '%.*s'\n",
                         (int)name.size, name.str);
                 g_x64_ok = false;
-                for (size_t z = 0; z < (sz ? sz : 8); z++) buf_u8(data, 0);
             }
-        } else {
-            if (sz == 0) sz = 8;   // unknown layout: conservative 8-byte zero slot
-            for (size_t z = 0; z < sz; z++) buf_u8(data, 0);
+        } else if (MLIR_GetOpNumRegions(op) > 0 &&
+                   MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(op, 0)) > 0) {
+            MLIR_BlockHandle blk = MLIR_GetRegionBlock(MLIR_GetOpRegion(op, 0), 0);
+            size_t nb = MLIR_GetBlockNumOps(blk);
+            string target = (string){0};
+            bool only_trivial = true;
+            for (size_t bi = 0; bi < nb; bi++) {
+                MLIR_OpHandle bop = MLIR_GetBlockOp(blk, bi);
+                string opn = MLIR_GetOpName(bop);
+                if (str_eqz(opn, "llvm.mlir.addressof")) {
+                    MLIR_AttributeHandle ga =
+                        MLIR_GetOpAttributeByName(bop, "global_name");
+                    if (ga == MLIR_INVALID_HANDLE) {
+                        fprintf(stderr, "x64: addressof global missing name in '%.*s'\n",
+                                (int)name.size, name.str);
+                        g_x64_ok = false;
+                        break;
+                    }
+                    target = strip_at(MLIR_GetAttributeString(ga));
+                } else if (!str_eqz(opn, "llvm.mlir.zero") &&
+                           !str_eqz(opn, "llvm.mlir.undef") &&
+                           !str_eqz(opn, "llvm.return")) {
+                    only_trivial = false;
+                }
+            }
+            if (target.size) {
+                if (sz < 8) {
+                    fprintf(stderr, "x64: pointer global '%.*s' is too small\n",
+                            (int)name.size, name.str);
+                    g_x64_ok = false;
+                } else {
+                    if (n_pend == pend_cap) {
+                        pend_cap = pend_cap ? pend_cap * 2 : 4;
+                        pend = (PendingPtrReloc *)realloc(pend,
+                                                          pend_cap * sizeof(*pend));
+                    }
+                    pend[n_pend].slot_off = off;
+                    pend[n_pend].target = target;
+                    n_pend++;
+                }
+            } else if (!only_trivial) {
+                fprintf(stderr, "x64: unsupported global initializer for '%.*s'\n",
+                        (int)name.size, name.str);
+                g_x64_ok = false;
+            }
         }
         gmap_put(gm, name, off);
         while (data->len & 7) buf_u8(data, 0);   // 8-align next global
     }
+
+    if (n_pend && g_x64_ok) {
+        X64PtrReloc *relocs = (X64PtrReloc *)calloc(n_pend, sizeof(X64PtrReloc));
+        for (size_t k = 0; k < n_pend; k++) {
+            if (!gmap_get(gm, pend[k].target, &relocs[k].target_off)) {
+                fprintf(stderr, "x64: pointer global target '%.*s' not found\n",
+                        (int)pend[k].target.size, pend[k].target.str);
+                g_x64_ok = false;
+                break;
+            }
+            relocs[k].slot_off = pend[k].slot_off;
+        }
+        if (g_x64_ok) {
+            *relocs_out = relocs;
+            *n_relocs_out = n_pend;
+        } else {
+            free(relocs);
+        }
+    }
+    free(pend);
 }
 
-static void synth_start(ObjModule *m) {
+static void synth_start(ObjModule *m, GMap *gm, X64PtrReloc *relocs, size_t n_relocs) {
     ObjFunc *f = obj_add_func(m, strdup("_start"), true);
-    FnCtx F; memset(&F,0,sizeof(F)); F.f = f;
+    FnCtx F; memset(&F,0,sizeof(F)); F.f = f; F.gm = gm; F.ok = true;
+    for (size_t k = 0; k < n_relocs; k++) {
+        lea_rip_data(&F, R10, relocs[k].target_off);
+        lea_rip_data(&F, R11, relocs[k].slot_off);
+        store_mem(&F, R11, R10, 8);
+    }
     eb(&F, 0xE8); uint32_t fld = here(&F); e32(&F, 0);          // call main
     obj_add_reloc(f, fld, fld+4, false, strdup("main"), 0);
     mov_rr(&F, RDI, RAX, 0);                                    // mov edi, eax
@@ -1046,7 +1124,9 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     // globals
     GMap gm; memset(&gm, 0, sizeof(gm));
     Buf data = {0};
-    collect_globals(ctx, mb, &gm, &data);
+    X64PtrReloc *ptr_relocs = NULL;
+    size_t n_ptr_relocs = 0;
+    collect_globals(ctx, mb, &gm, &data, &ptr_relocs, &n_ptr_relocs);
     g_x64_gmap = &gm;
     g_x64_mod_mb = mb;
 
@@ -1055,7 +1135,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     SymSet refs; memset(&refs, 0, sizeof(refs));
 
     ObjModule m; memset(&m, 0, sizeof(m));
-    synth_start(&m);             // index 0
+    synth_start(&m, &gm, ptr_relocs, n_ptr_relocs);   // index 0
     m.start_idx = 0;
 
     // reachability from main over direct-call edges (trims unused runtime)
@@ -1147,6 +1227,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     free(refs.n);
     for (size_t i = 0; i < reach.c; i++) free(reach.n[i]);
     free(reach.n);
+    free(ptr_relocs);
     g_x64_gmap = NULL;
     g_x64_mod_mb = MLIR_INVALID_HANDLE;
     return ok;
