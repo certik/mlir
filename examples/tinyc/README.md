@@ -99,9 +99,8 @@ unrelated reasons).
 
 A standalone program links against the corec runtime prelude
 (`examples/tinyc/browser/prelude.c` — `printf` / `malloc` / the WASI
-platform layer + the `_start` entry) plus the tinyC `va_arg` helpers
-(`tinyc_wasm_vararg.wasm.o`, produced by `pixi run -e wasm
-build_tinyc_wasm`). Build the prelude once:
+platform layer + the `_start` entry). tinyC lowers `va_arg` inline, so no
+external va_arg object is needed. Build the prelude once:
 
 ```sh
 ./tinyc --emit=wasm -I corec-stdlib/stdlib -I corec-stdlib/corec \
@@ -119,7 +118,7 @@ prelude's `_start` reach the program entry:
 # Upstream lowering (LLVM's WASM backend)
 ./tinyc --emit=wasm --lowering=upstream -o /tmp/p.wasm.o /tmp/p.tc
 wasm-ld --no-entry --export=_start --allow-undefined \
-    /tmp/p.wasm.o /tmp/corec_runtime.wasm.o tinyc_wasm_vararg.wasm.o \
+    /tmp/p.wasm.o /tmp/corec_runtime.wasm.o \
     -o /tmp/p.wasm
 wasmtime /tmp/p.wasm   # prints 55
 

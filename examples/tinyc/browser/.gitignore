@@ -3,5 +3,4 @@
 # `pixi run -e wasm build_tinyc_wasm`.
 tinyc.wasm
 corec_runtime.wasm.o
-tinyc_wasm_vararg.wasm.o
 _dist/

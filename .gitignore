@@ -18,7 +18,6 @@ compiler_tester/__pycache__/
 /tinyc_native
 /runtime_wasm.wasm.o
 /corec_runtime.wasm.o
-/tinyc_wasm_vararg.wasm.o
 /tinyc_stage2.wasm
 /tinyc_stage3.wasm
 /stage2/

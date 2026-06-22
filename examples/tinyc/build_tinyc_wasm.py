@@ -116,18 +116,8 @@ def main():
          "-o", "corec_runtime.wasm.o", "examples/tinyc/browser/prelude.c"]
     )
 
-    # Minimal `tinyc_va_arg_*` shim used by tinyC-compiled wasm binaries
-    # (selfhost stage 2+, or any program tinyC compiles that uses varargs).
-    run(
-        ["clang", "--target=wasm32-wasi", "-O2", "-nostdinc", "-fno-builtin",
-         "-I", "corec", "-I", "corec-stdlib/stdlib",
-         "-c", "-o", "tinyc_wasm_vararg.wasm.o",
-         "examples/tinyc/tinyc_wasm_vararg.c"]
-    )
-
     import os
-    for f in ["tinyc.wasm", "corec_runtime.wasm.o",
-              "tinyc_wasm_vararg.wasm.o"]:
+    for f in ["tinyc.wasm", "corec_runtime.wasm.o"]:
         print("%10d  %s" % (os.path.getsize(f), f))
 
 

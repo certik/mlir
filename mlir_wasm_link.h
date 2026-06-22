@@ -1,8 +1,7 @@
 // In-tree minimal wasm linker. Replaces the host `wasm-ld` invocation
-// used by `examples/tinyc/run_tinyc_tests.py` to combine a tinyc-emitted
+// used by `examples/tinyc/run_tinyc_tests.py` to combine tinyc-emitted
 // relocatable wasm32 objects with support objects such as the corec
-// runtime prelude / `tinyc_wasm_vararg.o` into a single executable wasm
-// module.
+// runtime prelude into a single executable wasm module.
 //
 // Scope: handles exactly the slice of the wasm linking spec that the
 // tinyc pipeline exercises today — TYPE / IMPORT / FUNCTION / TABLE /

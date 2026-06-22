@@ -119,19 +119,9 @@ def main():
 
     os.makedirs(stage_dir, exist_ok=True)
 
-    # A tinyC-compiled wasm executable needs a tiny clang-built runtime shim
-    # with the `tinyc_va_arg_*` helpers (tinyC lowers va_arg to direct calls
-    # into them). `_start` is provided by tinyC-compiled
-    # `corec/platform/platform_wasm.c`, so we only pull in the va_arg object
-    # here (no external entry-point shim).
-    vararg_obj = "tinyc_wasm_vararg.wasm.o"
-    if not os.path.isfile(vararg_obj):
-        sys.stderr.write(
-            "error: required object %s not found; run "
-            "`pixi run build_tinyc_wasm` first\n" % vararg_obj
-        )
-        sys.exit(1)
-
+    # tinyC lowers va_arg inline (the portable 8-byte cursor model) and `_start`
+    # comes from tinyC-compiled `corec/platform/platform_wasm.c`, so the
+    # self-hosted wasm needs no external support objects at link time.
     objs = []
     for src in ALL_SOURCES:
         obj = "%s/%s.wasm.o" % (stage_dir, src.replace("/", "_"))
@@ -149,7 +139,6 @@ def main():
         ["wasmtime", "--dir", ".", "--dir", stage_dir, input_wasm, "--link",
          "--export=_start", "-o", output_wasm]
         + objs
-        + [vararg_obj]
     )
 
     print("wrote %s" % output_wasm)

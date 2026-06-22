@@ -126,14 +126,8 @@ ALL_SOURCES=(
 
 INCLUDES=(-I corec -I corec-stdlib/stdlib -I .)
 
-# A tinyC-compiled wasm executable needs a tiny clang-built runtime
-# shim with the `tinyc_va_arg_*` helpers (tinyC lowers va_arg to
-# direct calls into them). Mirrors `selfhost_tinyc_wasm.py`.
-VARARG_OBJ=tinyc_wasm_vararg.wasm.o
-if [ ! -f "$VARARG_OBJ" ]; then
-    echo "error: required object $VARARG_OBJ not found; run \`pixi run build_tinyc_wasm\` first" >&2
-    exit 1
-fi
+# tinyC lowers va_arg inline (the portable 8-byte cursor model), so the
+# self-hosted module needs no external support objects at link time.
 
 OBJS=()
 for src in "${ALL_SOURCES[@]}"; do
@@ -160,7 +154,7 @@ LINKED_WASM="$STAGE_DIR/linked.wasm"
 printf '[selfhost-macho-llvm] tinyc --link -> %s\n' "$LINKED_WASM"
 "${TINYC_INVOKE[@]}" --link --export=_start \
     -o "$LINKED_WASM" \
-    "${OBJS[@]}" "$VARARG_OBJ"
+    "${OBJS[@]}"
 
 # Final stage: lift wasm back into wasmssa, then run the new llvm
 # pipeline all the way to a signed ad-hoc Mach-O ARM64 binary. The

@@ -97,7 +97,7 @@ python -c "import sys; a=open('tinyc_stage2.wasm','rb').read(); b=open('tinyc_st
 
 serve_tinyc_demo = { cmd = """
 mkdir -p examples/tinyc/browser/_dist && \
-cp tinyc.wasm corec_runtime.wasm.o tinyc_wasm_vararg.wasm.o examples/tinyc/browser/ && \
+cp tinyc.wasm corec_runtime.wasm.o examples/tinyc/browser/ && \
 echo "Serving on http://localhost:8000/examples/tinyc/browser/" && \
 python -m http.server --bind 127.0.0.1 8000
 """, depends-on = ["build_tinyc_wasm"], description = "Launch a local web server that hosts the tinyC-in-browser demo. Open http://localhost:8000/examples/tinyc/browser/ to compile and run tinyC programs entirely in the browser." }

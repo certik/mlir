@@ -1,10 +1,9 @@
 // Browser host for tinyc.wasm. Drives the full pipeline:
 //   1. fetch tinyc.wasm + the corec runtime prelude (corec_runtime.wasm.o)
-//      + the tinyC va_arg helpers (tinyc_wasm_vararg.wasm.o)
 //   2. compile tinyC source via `tinyc.wasm --emit=wasm` (in an in-memory
 //      FS over the WASI shim we already use for Node.js / wasmtime)
-//   3. link the produced object + the corec runtime prelude + va_arg helpers
-//      via `tinyc.wasm --link --export=_start`
+//   3. link the produced object + the corec runtime prelude via
+//      `tinyc.wasm --link --export=_start`
 //   4. instantiate the resulting wasm + the same WASI shim, route its
 //      stdout/stderr into the output panel.
 
@@ -22,18 +21,15 @@ const clearOutput = () => { $("output").textContent = ""; };
 // Pre-fetched assets, populated once at page load.
 let tinycWasmBytes = null;
 let preludeObj     = null;
-let varargObj      = null;
 
 async function loadAssets() {
     status("loading tinyc.wasm…");
-    const [tc, prelude, vararg] = await Promise.all([
+    const [tc, prelude] = await Promise.all([
         fetch("./tinyc.wasm").then(r => r.arrayBuffer()),
         fetch("./corec_runtime.wasm.o").then(r => r.arrayBuffer()),
-        fetch("./tinyc_wasm_vararg.wasm.o").then(r => r.arrayBuffer()),
     ]);
     tinycWasmBytes = new Uint8Array(tc);
     preludeObj     = new Uint8Array(prelude);
-    varargObj      = new Uint8Array(vararg);
     status(`ready (${(tinycWasmBytes.length / 1024).toFixed(0)} KB)`);
     $("runBtn").disabled = false;
 }
@@ -95,19 +91,18 @@ async function compileAndRun() {
 
         // -------- Stage 2: tinyc.wasm --link  -----------------------------
         // Link the snippet against the corec runtime prelude (printf /
-        // malloc / platform_wasm.c + WASI `_start`) and the tinyC va_arg
-        // helpers — the same objects the selfhost/wasm build links.
+        // malloc / platform_wasm.c + WASI `_start`) — the same object the
+        // selfhost/wasm build links. va_arg is lowered inline, so no
+        // separate va_arg object is needed.
         status("linking…");
         const fs2 = makeMemoryFS({
-            "hello.wasm.o":             obj,
-            "corec_runtime.wasm.o":     preludeObj,
-            "tinyc_wasm_vararg.wasm.o": varargObj,
+            "hello.wasm.o":         obj,
+            "corec_runtime.wasm.o": preludeObj,
         });
         const r2 = await runTinyc(
             ["tinyc", "--link", "--export=_start",
              "-o", "hello.wasm",
-             "hello.wasm.o", "corec_runtime.wasm.o",
-             "tinyc_wasm_vararg.wasm.o"], fs2);
+             "hello.wasm.o", "corec_runtime.wasm.o"], fs2);
         if (r2.stderr) appendOutput(r2.stderr);
         if (r2.status !== 0) {
             status(`link failed (exit ${r2.status})`, true);
