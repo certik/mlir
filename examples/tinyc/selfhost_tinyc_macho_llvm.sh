@@ -170,6 +170,7 @@ printf '[selfhost-macho-llvm] --from-wasm --emit=macho --macho-backend=llvm -> %
 "${TINYC_INVOKE[@]}" --from-wasm "$LINKED_WASM" \
     --emit=macho --macho-backend=llvm \
     --host-platform corec/platform/platform_macos.c \
+    --wasi-adapter corec/wasm/wasi_adapter.c \
     -I corec -I . \
     -o "$OUTPUT_MACHO"
 

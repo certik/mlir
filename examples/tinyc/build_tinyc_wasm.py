@@ -6,8 +6,8 @@ source on its argv (via the WASI virtual FS), produces a wasm32 object on
 stdout or ``-o <path>``. Combined with ``--link``, the same binary also
 acts as the linker. This is what the browser demo loads.
 
-Also pre-builds the runtime/start/vararg objects shipped alongside
-``tinyc.wasm`` and used by ``tinyc --link``.
+Also pre-builds the runtime prelude + vararg objects shipped alongside
+``tinyc.wasm`` and used by ``tinyc --link`` / the browser demo.
 
 This is a Python driver (rather than a shell script) so it runs unchanged
 on Linux, macOS, and Windows. pixi runs tasks through deno_task_shell
@@ -105,9 +105,15 @@ def main():
         + SOURCES
     )
 
+    # Pre-build the browser runtime prelude: the real corec runtime
+    # (printf / malloc / platform_wasm.c + the WASI `_start`) that the
+    # in-browser demo links a compiled snippet against. Built with the
+    # freshly produced tinyc.wasm under wasmtime, so it is tinyC-compiled
+    # (matching the snippet's ABI) rather than an external clang shim.
     run(
-        ["clang", "--target=wasm32", "-O2", "-nostdlib", "-fno-builtin",
-         "-c", "-o", "start_wasm.wasm.o", "examples/tinyc/start_wasm.s"]
+        ["wasmtime", "--dir", ".", "tinyc.wasm", "--emit=wasm",
+         "-I", "corec-stdlib/stdlib", "-I", "corec-stdlib/corec",
+         "-o", "corec_runtime.wasm.o", "examples/tinyc/browser/prelude.c"]
     )
 
     # Minimal `tinyc_va_arg_*` shim used by tinyC-compiled wasm binaries
@@ -120,7 +126,7 @@ def main():
     )
 
     import os
-    for f in ["tinyc.wasm", "start_wasm.wasm.o",
+    for f in ["tinyc.wasm", "corec_runtime.wasm.o",
               "tinyc_wasm_vararg.wasm.o"]:
         print("%10d  %s" % (os.path.getsize(f), f))
 

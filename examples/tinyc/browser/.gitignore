@@ -2,6 +2,6 @@
 # serve_tinyc_demo`. The originals live at repo root after
 # `pixi run -e wasm build_tinyc_wasm`.
 tinyc.wasm
-runtime_wasm.wasm.o
-start_wasm.wasm.o
+corec_runtime.wasm.o
+tinyc_wasm_vararg.wasm.o
 _dist/

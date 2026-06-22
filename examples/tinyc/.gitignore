@@ -4,3 +4,4 @@ tests/*.o
 tests/*.obj
 tests/*.exe
 tests/*.wasm
+tests/*.single_tu.c

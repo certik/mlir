@@ -26,6 +26,9 @@
 extern "C" {
 #endif
 
+// The WASI shims (fd_write/path_open/args_*/environ_*) are not synthesised
+// here; a C adapter (corec/wasm/wasi_adapter.c) is spliced into the module by
+// the driver (--wasi-adapter) to provide them.
 MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx,
                                    MLIR_OpHandle ssa_module);
 

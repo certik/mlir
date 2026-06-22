@@ -97,7 +97,9 @@ static bool driver_llvm_func_has_body(MLIR_OpHandle op) {
 static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
                                         string *include_dirs, size_t n_include_dirs,
                                         bool (*lower_fn)(MLIR_Context *, MLIR_OpHandle),
-                                        MLIR_OpHandle *picks, size_t *n_picks) {
+                                        bool is_wasi_adapter,
+                                        MLIR_OpHandle *picks, size_t *n_picks,
+                                        size_t max_picks) {
     *n_picks = 0;
     Arena *saved_arena = MLIR_GetArenaAllocator(ctx);
     Arena *pmod_arena = arena_create(16 * 1024 * 1024);
@@ -112,6 +114,11 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
     ctx->no_def_use_tracking = false;
 
     string defs[16]; size_t nd = 0;
+    if (is_wasi_adapter) {
+        // The WASI adapter defines fd_write/path_open/... and calls the
+        // already-renamed __host_platform_* plus fchmod (Mach-O: _fchmod).
+        defs[nd++] = str_from_cstr_view((char *)"fchmod=_fchmod");
+    } else {
     defs[nd++] = str_from_cstr_view((char *)"PLATFORM_SKIP_ENTRY=1");
     defs[nd++] = str_from_cstr_view((char *)"platform_fd_write=__host_platform_fd_write");
     defs[nd++] = str_from_cstr_view((char *)"platform_fd_read=__host_platform_fd_read");
@@ -127,6 +134,7 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
     defs[nd++] = str_from_cstr_view((char *)"close=_close");
     defs[nd++] = str_from_cstr_view((char *)"lseek=_lseek");
     defs[nd++] = str_from_cstr_view((char *)"__error=___error");
+    }
 
     string src = tinyc_preprocess(pmod_arena, str_from_cstr_view((char *)path),
                                   include_dirs, n_include_dirs, defs, nd);
@@ -158,19 +166,23 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
     MLIR_BlockHandle pbody = MLIR_GetRegionBlock(MLIR_GetOpRegion(pmod, 0), 0);
     size_t pn = MLIR_GetBlockNumOps(pbody);
     size_t np = 0;
-    for (size_t i = 0; i < pn && np < 8; i++) {
+    for (size_t i = 0; i < pn && np < max_picks; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(pbody, i);
         if (!driver_llvm_func_has_body(op)) continue;
         MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
         if (sa == MLIR_INVALID_HANDLE) continue;
         string s = MLIR_GetAttributeString(sa);
-        if (s.size < 16 || memcmp(s.str, "__host_platform_", 16) != 0) continue;
+        // The platform file also defines non-renamed platform_* that collide
+        // with the wasm-side copies, so pick only the __host_platform_* entry
+        // points. The WASI adapter has no such collisions: pick every func.
+        if (!is_wasi_adapter &&
+            (s.size < 16 || memcmp(s.str, "__host_platform_", 16) != 0)) continue;
         picks[np++] = op;
     }
     MLIR_SetArenaAllocator(ctx, saved_arena);
         ctx->no_def_use_tracking = saved_no_def_use;
     if (np == 0) {
-        fprintf(stderr, "tinyc: no __host_platform_* definitions in '%s'\n", path);
+        fprintf(stderr, "tinyc: no spliceable definitions in '%s'\n", path);
         return false;
     }
     *n_picks = np;
@@ -249,7 +261,7 @@ int app_main(void) {
     // --wasm-runtime-obj=PATH (repeatable). Paths of additional .wasm.o
     // objects to link into the module when producing a Mach-O binary.
     // For the macho_exit test, the test runner passes
-    // `start_wasm.wasm.o` and optional support objects.
+    // `tinyc_wasm_vararg.wasm.o` and optional support objects.
     char **wasm_runtime_objs = arena_new_array(boot_arena, char *, argc + 1);
     size_t n_wasm_runtime_objs = 0;
 
@@ -264,6 +276,11 @@ int app_main(void) {
     // the WASI adapters call the real platform implementation. Only meaningful
     // on the `--from-wasm --emit=macho --macho-backend=llvm` path.
     char *host_platform_path = NULL;
+    // --wasi-adapter=PATH: corec/wasm/wasi_adapter.c, the C WASI shim
+    // (fd_write/path_open/args_*/...) spliced into the lifted module instead of
+    // synthesising the shims in mlir_wasmssa_to_llvm.c. Used with --from-wasm
+    // --emit=macho.
+    char *wasi_adapter_path = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--link") == 0) {
@@ -377,6 +394,12 @@ int app_main(void) {
         }
         else if (strcmp(argv[i], "--host-platform") == 0 && i + 1 < argc) {
             host_platform_path = argv[++i];
+        }
+        else if (strncmp(argv[i], "--wasi-adapter=", 15) == 0) {
+            wasi_adapter_path = argv[i] + 15;
+        }
+        else if (strcmp(argv[i], "--wasi-adapter") == 0 && i + 1 < argc) {
+            wasi_adapter_path = argv[++i];
         }
         else if (strcmp(argv[i], "--lowering=upstream") == 0) {
 #ifdef TINYC_HAS_UPSTREAM
@@ -528,8 +551,21 @@ int app_main(void) {
                 MLIR_OpHandle hp_picks[8]; size_t hp_n = 0;
                 if (!tinyc_compile_host_platform(&ctx, host_platform_path,
                                                  include_dirs, n_include_dirs,
-                                                 lower_for_wasm_fn,
-                                                 hp_picks, &hp_n)) {
+                                                 lower_for_wasm_fn, false,
+                                                 hp_picks, &hp_n, 8)) {
+                    arena_destroy(arena);
+                    arena_destroy(boot_arena);
+                    return 1;
+                }
+                // Compile + splice the C WASI adapter (fd_write/path_open/...)
+                // the same way, when provided; otherwise the lifter's
+                // synthesised shims are used. Baked while the epoch is clean.
+                MLIR_OpHandle ad_picks[16]; size_t ad_n = 0;
+                if (wasi_adapter_path &&
+                    !tinyc_compile_host_platform(&ctx, wasi_adapter_path,
+                                                 include_dirs, n_include_dirs,
+                                                 lower_for_wasm_fn, true,
+                                                 ad_picks, &ad_n, 16)) {
                     arena_destroy(arena);
                     arena_destroy(boot_arena);
                     return 1;
@@ -588,11 +624,13 @@ int app_main(void) {
                 // linmem shapes and must not see the LP64 platform funcs). The
                 // funcs were baked while the epoch was clean; moving them is a
                 // pure re-parent that preserves their operands.
-                if (hp_n > 0) {
+                if (hp_n > 0 || ad_n > 0) {
                     MLIR_BlockHandle dbody =
                         MLIR_GetRegionBlock(MLIR_GetOpRegion(llvm_mod, 0), 0);
                     for (size_t hi = 0; hi < hp_n; hi++)
                         MLIR_MoveOpToBlockEnd(&ctx, hp_picks[hi], dbody);
+                    for (size_t hi = 0; hi < ad_n; hi++)
+                        MLIR_MoveOpToBlockEnd(&ctx, ad_picks[hi], dbody);
                 }
                 arena_destroy(arena);
                 arena = late_arena;
@@ -614,8 +652,8 @@ int app_main(void) {
                 if (host_platform_path &&
                     !tinyc_compile_host_platform(&ctx, host_platform_path,
                                                  include_dirs, n_include_dirs,
-                                                 lower_for_wasm_fn,
-                                                 hp_picks2, &hp_n2)) {
+                                                 lower_for_wasm_fn, false,
+                                                 hp_picks2, &hp_n2, 8)) {
                     arena_destroy(arena);
                     arena_destroy(boot_arena);
                     return 1;

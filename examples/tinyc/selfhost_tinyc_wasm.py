@@ -122,9 +122,8 @@ def main():
     # A tinyC-compiled wasm executable needs a tiny clang-built runtime shim
     # with the `tinyc_va_arg_*` helpers (tinyC lowers va_arg to direct calls
     # into them). `_start` is provided by tinyC-compiled
-    # `corec/platform/platform_wasm.c`, so unlike the clang-built `tinyc.wasm`
-    # we do NOT pull in `start_wasm.wasm.o` here (its hand-written stub
-    # references the clang-only `__original_main`).
+    # `corec/platform/platform_wasm.c`, so we only pull in the va_arg object
+    # here (no external entry-point shim).
     vararg_obj = "tinyc_wasm_vararg.wasm.o"
     if not os.path.isfile(vararg_obj):
         sys.stderr.write(
