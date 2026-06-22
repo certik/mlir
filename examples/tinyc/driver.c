@@ -261,7 +261,7 @@ int app_main(void) {
     // --wasm-runtime-obj=PATH (repeatable). Paths of additional .wasm.o
     // objects to link into the module when producing a Mach-O binary.
     // For the macho_exit test, the test runner passes
-    // `start_wasm.wasm.o` and optional support objects.
+    // `tinyc_wasm_vararg.wasm.o` and optional support objects.
     char **wasm_runtime_objs = arena_new_array(boot_arena, char *, argc + 1);
     size_t n_wasm_runtime_objs = 0;
 

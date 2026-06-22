@@ -97,18 +97,34 @@ unrelated reasons).
 
 ### Compile and run a single program
 
+A standalone program links against the corec runtime prelude
+(`examples/tinyc/browser/prelude.c` — `printf` / `malloc` / the WASI
+platform layer + the `_start` entry) plus the tinyC `va_arg` helpers
+(`tinyc_wasm_vararg.wasm.o`, produced by `pixi run -e wasm
+build_tinyc_wasm`). Build the prelude once:
+
 ```sh
+./tinyc --emit=wasm -I corec-stdlib/stdlib -I corec-stdlib/corec \
+    -o /tmp/corec_runtime.wasm.o examples/tinyc/browser/prelude.c
+```
+
+Then compile and link a program. `_tinyc_print` lowers to a real `printf`
+call once `printf` is declared, and `#define main app_main` lets the
+prelude's `_start` reach the program entry:
+
+```sh
+{ printf '#define main app_main\nextern int printf(const char*,...);\n'; \
+  cat examples/tinyc/tests/sum_to_10.tc; } > /tmp/p.tc
+
 # Upstream lowering (LLVM's WASM backend)
-./tinyc --emit=wasm --lowering=upstream \
-    -o /tmp/p.wasm.o examples/tinyc/tests/sum_to_10.tc
+./tinyc --emit=wasm --lowering=upstream -o /tmp/p.wasm.o /tmp/p.tc
 wasm-ld --no-entry --export=_start --allow-undefined \
-    /tmp/p.wasm.o examples/tinyc/start_wasm.o \
+    /tmp/p.wasm.o /tmp/corec_runtime.wasm.o tinyc_wasm_vararg.wasm.o \
     -o /tmp/p.wasm
 wasmtime /tmp/p.wasm   # prints 55
 
 # Native lowering (in-tree wasmssa → wasmstack → binary pipeline)
-./tinyc --emit=wasm --lowering=native \
-    -o /tmp/p.wasm.o examples/tinyc/tests/sum_to_10.tc
+./tinyc --emit=wasm --lowering=native -o /tmp/p.wasm.o /tmp/p.tc
 # (link + run identical to above)
 ```
 
