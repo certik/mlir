@@ -73,7 +73,7 @@
 // =============================================================================
 static bool is_synth_helper(string nm) {
     static const char *kHelpers[] = {
-        "printI64", "printNewline", "printStr", "printf",
+        "printI64", "printNewline", "printStr",
         "printF32", "printF64",
         "fd_write", "proc_exit",
         "tinyc_va_arg_i32", "tinyc_va_arg_i64", "tinyc_va_arg_ptr",
