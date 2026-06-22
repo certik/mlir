@@ -20,6 +20,9 @@ RUNTIME_WASM_START = HERE / "start_wasm.s"
 # corec platform_<os>.c whose file-I/O + exit primitives the via-wasm Mach-O
 # backend's WASI adapters call (spliced in via --host-platform).
 HOST_PLATFORM = ROOT / "corec" / "platform" / "platform_macos.c"
+# C WASI adapter (fd_write/path_open/args_*/...) spliced into the lifted module
+# in place of the compiler-synthesised shims.
+WASI_ADAPTER = ROOT / "corec" / "wasm" / "wasi_adapter.c"
 # corec platform_linux.c compiled into the direct x86_64->ELF module so the
 # runtime's I/O binds to the real platform layer (platform_fd_write) instead of
 # a synthesized syscall thunk.
@@ -654,6 +657,7 @@ def main():
                 r = run([str(TINYC), "--from-wasm", str(linked_wasm),
                          "--emit=macho", f"--macho-backend={via_backend}",
                          "--host-platform", str(HOST_PLATFORM),
+                         "--wasi-adapter", str(WASI_ADAPTER),
                          "-I", str(COREC_DIR), "-I", str(ROOT),
                          "-o", str(exe)])
                 if r.returncode != 0:

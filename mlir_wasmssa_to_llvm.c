@@ -3006,7 +3006,8 @@ static bool synth_dispatchers(MLIR_Context *ctx, MLIR_BlockHandle out_body,
     return true;
 }
 
-MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) {    MLIR_RegionHandle mr = MLIR_GetOpRegion(ssa_module, 0);
+MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module,
+                                   bool use_wasi_adapter) {    MLIR_RegionHandle mr = MLIR_GetOpRegion(ssa_module, 0);
     MLIR_BlockHandle  mb = MLIR_GetRegionBlock(mr, 0);
     size_t nops = MLIR_GetBlockNumOps(mb);
 
@@ -3236,16 +3237,16 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     }
     if (need_printNewline) synth_print_newline(ctx, out_body);
     if (need_printStr) synth_print_str(ctx, out_body);
-    if (need_fd_write) synth_fd_write(ctx, out_body);
-    if (need_fd_read) synth_fd_read(ctx, out_body);
-    if (need_fd_seek) synth_fd_seek(ctx, out_body);
-    if (need_fd_tell) synth_fd_tell(ctx, out_body);
-    if (need_fd_close) synth_fd_close(ctx, out_body);
-    if (need_path_open) synth_path_open(ctx, out_body);
-    if (need_args_get) synth_args_get(ctx, out_body);
-    if (need_args_sizes) synth_args_sizes_get(ctx, out_body);
-    if (need_environ_get) synth_environ_get(ctx, out_body);
-    if (need_environ_sizes) synth_environ_sizes_get(ctx, out_body);
+    if (need_fd_write && !use_wasi_adapter) synth_fd_write(ctx, out_body);
+    if (need_fd_read && !use_wasi_adapter) synth_fd_read(ctx, out_body);
+    if (need_fd_seek && !use_wasi_adapter) synth_fd_seek(ctx, out_body);
+    if (need_fd_tell && !use_wasi_adapter) synth_fd_tell(ctx, out_body);
+    if (need_fd_close && !use_wasi_adapter) synth_fd_close(ctx, out_body);
+    if (need_path_open && !use_wasi_adapter) synth_path_open(ctx, out_body);
+    if (need_args_get && !use_wasi_adapter) synth_args_get(ctx, out_body);
+    if (need_args_sizes && !use_wasi_adapter) synth_args_sizes_get(ctx, out_body);
+    if (need_environ_get && !use_wasi_adapter) synth_environ_get(ctx, out_body);
+    if (need_environ_sizes && !use_wasi_adapter) synth_environ_sizes_get(ctx, out_body);
     if (need_va_i32) synth_va_arg_scalar(ctx, out_body, "tinyc_va_arg_i32", 16, false);
     if (need_va_ptr) synth_va_arg_scalar(ctx, out_body, "tinyc_va_arg_ptr", 16, false);
     if (need_va_i64) synth_va_arg_scalar(ctx, out_body, "tinyc_va_arg_i64", 16, true);
