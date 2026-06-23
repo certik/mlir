@@ -160,9 +160,11 @@ typedef enum {
     LS_FCHMOD,
     LS_WRITEV,
     LS_READV,
-    LS_FCNTL
+    LS_FCNTL,
+    LS_MPROTECT,
+    LS_MUNMAP
 } LibSysSym;
-#define LS_COUNT 13
+#define LS_COUNT 15
 
 static const char *libsys_name(int sym) {
     if (sym == LS_EXIT)   return "_exit";
@@ -178,6 +180,8 @@ static const char *libsys_name(int sym) {
     if (sym == LS_WRITEV) return "_writev";
     if (sym == LS_READV)  return "_readv";
     if (sym == LS_FCNTL)  return "_fcntl";
+    if (sym == LS_MPROTECT) return "_mprotect";
+    if (sym == LS_MUNMAP) return "_munmap";
     return "";
 }
 
@@ -187,7 +191,16 @@ static int libsys_lookup(string callee) {
     for (int i = 0; i < LS_COUNT; i++) {
         const char *nm = libsys_name(i);
         size_t kl = strlen(nm);
+        // Match the callee as written, or with a leading '_' added — the macOS
+        // C-symbol mangling. The inline test shims call the libSystem symbol
+        // names directly (e.g. `_write`), while corec/platform/platform_macos.c
+        // calls the plain C names (`mprotect`, `writev`, `mmap`), which the C
+        // ABI turns into `_mprotect` / `_writev` / `_mmap`.
         if (callee.size == kl && memcmp(callee.str, nm, kl) == 0) {
+            return i;
+        }
+        if (kl > 0 && nm[0] == '_' && callee.size + 1 == kl &&
+            memcmp(callee.str, nm + 1, callee.size) == 0) {
             return i;
         }
     }
