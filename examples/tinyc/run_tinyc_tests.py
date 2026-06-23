@@ -311,10 +311,15 @@ def link_native(obj_path: Path, exe_path: Path):
     """Link the llc-produced single-TU object."""
     if IS_WIN:
         # MSVC: cl /nologo /MD obj /Fe:exe.exe
+        # The llc-produced object carries no /DEFAULTLIB directive, so name the
+        # /MD CRT umbrella lib (msvcrt.lib) explicitly — it provides the
+        # mainCRTStartup entry point. (Previously cl added it implicitly because
+        # we also handed it a .c source to compile.)
         return run([
             CC, "/nologo", "/MD",
             str(obj_path),
-            "ucrt.lib", "vcruntime.lib", "legacy_stdio_definitions.lib",
+            "msvcrt.lib", "ucrt.lib", "vcruntime.lib",
+            "legacy_stdio_definitions.lib",
             f"/Fe:{exe_path}",
         ])
     cmd = [CC, str(obj_path), "-o", str(exe_path)]
