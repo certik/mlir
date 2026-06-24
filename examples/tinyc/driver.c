@@ -8,6 +8,7 @@
 #include <base/arena.h>
 #include <base/io.h>
 #include <base/string.h>
+#include <base/strbuf.h>
 #include <platform/platform.h>
 
 #include "mlir_api.h"
@@ -187,6 +188,48 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
     }
     *n_picks = np;
     return true;
+}
+
+// On the native `--emit=llvm` -> llc -> host-link path, the raw-syscall
+// intrinsic __builtin_syscall6 lowers to a call to @__tinyc_syscall6. The
+// in-tree x86_64 ELF backend synthesises that symbol as a `syscall` trap, but
+// llc leaves it undefined, so corec/platform/platform_linux.c (which routes
+// every raw syscall through it) would fail to link on the host toolchain.
+// Define it here as an x86_64 `syscall` via LLVM inline asm — the same
+// SysV->kernel register marshalling the clang/gcc polyfill in
+// corec/platform/syscall6.h uses, preserving the raw (negative-errno) return
+// convention platform_linux.c relies on. Both LLVM-IR translators (in-tree and
+// upstream) emit the identical declaration line, so one textual rewrite covers
+// both. Only the x86_64-Linux native build reaches this (macOS/Windows use the
+// libc/WinAPI platforms; the ELF backend keeps its own thunk), so it is a no-op
+// everywhere else.
+static string inject_syscall6_definition(Arena *arena, string ir) {
+#if defined(__linux__) && defined(__x86_64__) && !defined(__TINYC__)
+    const char *decl =
+        "declare i64 @__tinyc_syscall6(i64, i64, i64, i64, i64, i64, i64)";
+    uint64_t dl = strlen(decl);
+    uint64_t pos = ir.size;
+    for (uint64_t i = 0; i + dl <= ir.size; i++) {
+        if (memcmp(ir.str + i, decl, dl) == 0) { pos = i; break; }
+    }
+    if (pos == ir.size) return ir;  // intrinsic unused; nothing to inject
+    const char *def =
+        "define internal i64 @__tinyc_syscall6(i64 %n, i64 %a1, i64 %a2, "
+        "i64 %a3, i64 %a4, i64 %a5, i64 %a6) {\n"
+        "  %r = call i64 asm sideeffect \"syscall\", "
+        "\"={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},~{memory}\""
+        "(i64 %n, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6)\n"
+        "  ret i64 %r\n"
+        "}";
+    strbuf sb = strbuf_make_cap(arena, ir.size + 256);
+    strbuf_append_bytes(arena, &sb, ir.str, pos);
+    strbuf_append_cstr(arena, &sb, def);
+    strbuf_append_bytes(arena, &sb, ir.str + pos + dl, ir.size - pos - dl);
+    return strbuf_to_string(sb);
+#else
+    (void)arena;
+    return ir;
+#endif
 }
 
 int app_main(void) {
@@ -951,6 +994,7 @@ int app_main(void) {
             arena_destroy(boot_arena);
             return 1;
         }
+        out = inject_syscall6_definition(arena, out);
     } else {
         out = print_fn(&ctx, module);
     }
