@@ -28,7 +28,6 @@
 //     Struct params and returns are scalarized at the function boundary
 //     (one MLIR scalar per LEAF field, in declaration order — Clang-style
 //     ABI lowering, recursive through nested structs).
-//   - `print(expr);` builtin -> vector.print
 //   - Top-level entry point: int main()
 //
 // Pointer-mediated recursive data structures:
@@ -279,7 +278,6 @@ typedef enum {
     ST_DO_WHILE,       // do { body } while (c);
     ST_FOR,            // for (init; cond; step) body
     ST_BLOCK,          // { ... }
-    ST_PRINT,          // print(expr);
     ST_BREAK,          // break;
     ST_CONTINUE,       // continue;
     ST_SWITCH,         // switch (e) { case 1: ... default: ... }
@@ -307,7 +305,7 @@ DEFINE_VECTOR_FOR_TYPE(SwitchCase, VecSwitchCase)
 
 struct Stmt {
     StmtKind kind;
-    // ST_EXPR / ST_RETURN / ST_PRINT
+    // ST_EXPR / ST_RETURN
     Expr *expr;
     // ST_DECL
     Type  decl_type;
@@ -444,14 +442,9 @@ typedef struct Program {
     // True when the program was parsed for the wasm32 target (set by
     // `tinyc_parse_into` from its `target_wasm32` arg). The emitter
     // uses this to size hardcoded libc-extern signatures (malloc /
-    // free / printStr / tinyc_va_arg_struct) so they match the
+    // free / tinyc_va_arg_struct) so they match the
     // wasm32-wasi ABI's 32-bit `size_t` instead of the host's 64-bit.
     bool target_wasm32;
-    // Lower tinyC's `_tinyc_print` helper directly to `printf` calls.
-    // Native host LLVM tests use this to avoid external runtime objects;
-    // ELF keeps the older injected-runtime path because the x64 backend
-    // intentionally supports only a smaller operation subset.
-    bool print_via_printf;
     // When set, variadic functions that are NOT defined in this TU keep the
     // target's native C varargs ABI (for linking against host libc printf on
     // the native-llc / ELF test path). When clear (the default), EVERY
@@ -479,7 +472,6 @@ typedef enum {
     TC_TK_KW_FOR,
     TC_TK_KW_BREAK,
     TC_TK_KW_CONTINUE,
-    TC_TK_KW_PRINT,
     TC_TK_KW_STRUCT,
     TC_TK_KW_UNION,
     TC_TK_KW_NULL,

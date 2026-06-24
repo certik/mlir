@@ -171,8 +171,6 @@ typedef struct {
     size_t           cap_strings;
     MLIR_BlockHandle module_block;
     Sym             *globals;        // module-scope symbols
-    bool             need_printf_decl; // emit @printf extern decl when absent
-    bool             use_print_str;    // wasm path: emit @printStr extern decl
 
     bool             need_syscall6_stub;   // emit @__tinyc_syscall6 extern decl
     int              cur_line;       // last AST node line entered; used by
@@ -631,64 +629,11 @@ static string intern_string(E *e, string bytes) {
     return sym;
 }
 
-static MLIR_ValueHandle emit_string_ptr(E *e, string bytes) {
-    return emit_addressof(e, intern_string(e, bytes));
-}
-
 static MLIR_ValueHandle emit_alloca(E *e, MLIR_TypeHandle elem_ty);
 static void emit_store_v(E *e, MLIR_ValueHandle val, MLIR_ValueHandle ptr);
 static MLIR_ValueHandle emit_gep(E *e, MLIR_ValueHandle base,
         MLIR_TypeHandle source_elem_ty, const int32_t *raw_idx, size_t n_raw,
         MLIR_ValueHandle *dyn_idx, size_t n_dyn);
-
-static void emit_printf_call(E *e, MLIR_ValueHandle fmt, MLIR_ValueHandle arg,
-                             bool has_arg) {
-    FuncSig *sig = find_sig(e, str_lit("printf"));
-    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1);
-    MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1);
-    rts[0] = e->i32;
-    rs[0] = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
-                                     e->i32, ssa_name(e), eloc(e, 0));
-    MLIR_AttributeHandle ca = MLIR_CreateAttributeSymbolRef(
-        e->ctx, str_lit("callee"), str_lit("printf"));
-    if (sig && sig->cursor_va) {
-        // printf is DEFINED in this TU (corec-stdlib): it uses tinyC's cursor
-        // va_list, so pack the single vararg into a 1-slot buffer and call it
-        // non-variadically as printf(fmt, __va).
-        MLIR_TypeHandle buf_ty = MLIR_CreateTypeLLVMArray(e->ctx, e->i64, 1);
-        MLIR_ValueHandle buf = emit_alloca(e, buf_ty);
-        if (has_arg) {
-            int32_t path[2] = {0, 0};
-            MLIR_ValueHandle slot = emit_gep(e, buf, buf_ty, path, 2, NULL, 0);
-            emit_store_v(e, arg, slot);
-        }
-        MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 2);
-        ops[0] = fmt; ops[1] = buf;
-        MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1);
-        as[0] = ca;
-        emit_op(e, OP_TYPE_FUNC_CALL, str_lit("func.call"),
-                rts, 1, rs, 1, ops, 2, as, 1, NULL, 0);
-        return;
-    }
-    // Extern printf (host libc on the native/llc path): real variadic call.
-    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, has_arg ? 2 : 1);
-    ops[0] = fmt;
-    if (has_arg) ops[1] = arg;
-    MLIR_TypeHandle fn_ty;
-    if (sig && sig->llvm_fn_ty != MLIR_INVALID_HANDLE) {
-        fn_ty = sig->llvm_fn_ty;
-    } else {
-        MLIR_TypeHandle ins[1] = { e->ptr };
-        fn_ty = MLIR_CreateTypeLLVMFunction(e->ctx, e->i32, ins, 1, true);
-        e->need_printf_decl = true;
-    }
-    MLIR_AttributeHandle vt = MLIR_CreateAttributeType(
-        e->ctx, str_lit("var_callee_type"), fn_ty);
-    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 2);
-    as[0] = ca; as[1] = vt;
-    emit_op(e, OP_TYPE_UNREGISTERED, str_lit("llvm.call"),
-            rts, 1, rs, 1, ops, has_arg ? 2 : 1, as, 2, NULL, 0);
-}
 
 // Address of a symbol: either the local alloca slot or a freshly-emitted
 // addressof for a module-level global.
@@ -2973,7 +2918,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 } else if (ex->kind == EX_INDEX) {
                     // Reading an element of a struct-field array of
                     // pointers: tag the result so downstream consumers
-                    // (_tinyc_print(), -> chains) see the right element kind.
+                    // (-> chains) see the right element kind.
                     Expr *fe = NULL;
                     if (ex->lhs->kind == EX_FIELD) fe = ex->lhs;
                     else if (ex->lhs->kind == EX_INDEX &&
@@ -4964,57 +4909,6 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             emit_branch(e, lb->block);
             return;
         }
-        case ST_PRINT: {
-            EVal v = emit_expr(e, sc, st->expr);
-            bool have_printf_for_print = e->program->print_via_printf ||
-                (e->target_wasm32 && find_sig(e, str_lit("printf")) != NULL);
-            if (!have_printf_for_print) {
-                if (v.is_str) {
-                    e->use_print_str = true;
-                    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1);
-                    ops[0] = v.val;
-                    MLIR_AttributeHandle ca = MLIR_CreateAttributeSymbolRef(
-                        e->ctx, str_lit("callee"), str_lit("printStr"));
-                    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = ca;
-                    emit_op(e, OP_TYPE_FUNC_CALL, str_lit("func.call"),
-                            NULL, 0, NULL, 0, ops, 1, as, 1, NULL, 0);
-                    return;
-                }
-                MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1);
-                if (v.is_float && v.is_f64) {
-                    ops[0] = emit_fptrunc_f64_to_f32(e, v.val);
-                } else {
-                    ops[0] = v.val;
-                }
-                emit_op(e, OP_TYPE_VECTOR_PRINT, str_lit("vector.print"),
-                        NULL, 0, NULL, 0, ops, 1, NULL, 0, NULL, 0);
-                return;
-            }
-            if (v.is_str) {
-                MLIR_ValueHandle fmt = emit_string_ptr(e, str_lit("%s\n\0"));
-                emit_printf_call(e, fmt, v.val, true);
-                return;
-            }
-            MLIR_ValueHandle arg = v.val;
-            MLIR_ValueHandle fmt;
-            if (v.is_float && v.is_f64) {
-                fmt = emit_string_ptr(e, str_lit("%g\n\0"));
-            } else if (v.is_float) {
-                fmt = emit_string_ptr(e, str_lit("%g\n\0"));
-                arg = emit_fpext_f32_to_f64(e, v.val);
-            } else if (v.is_i64) {
-                fmt = emit_string_ptr(e, str_lit("%lld\n\0"));
-            } else if (v.is_ptr) {
-                fmt = emit_string_ptr(e, str_lit("%lld\n\0"));
-                arg = emit_ptrtoint_i64(e, v.val);
-            } else {
-                fmt = emit_string_ptr(e, str_lit("%lld\n\0"));
-                arg = v.is_unsigned ? emit_extui_i32_to_i64(e, v.val)
-                                    : emit_extsi_i32_to_i64(e, v.val);
-            }
-            emit_printf_call(e, fmt, arg, true);
-            return;
-        }
         case ST_BLOCK: {
             if (st->block_no_scope) {
                 for (size_t i = 0; i < st->block_body.size && !e->terminated; i++)
@@ -6239,59 +6133,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         MLIR_AppendBlockOp(ctx, mb, decl);
     }
 
-    if (e.need_printf_decl) {
-        bool have_printf = false;
-        for (size_t i = 0; i < program->funcs.size; i++) {
-            Func *f = program->funcs.data[i];
-            if (str_eq(f->name, str_lit("printf"))) {
-                have_printf = true;
-                break;
-            }
-        }
-        if (!have_printf) {
-            MLIR_TypeHandle *ins = arena_new_array(arena, MLIR_TypeHandle, 1);
-            ins[0] = e.ptr;
-            MLIR_TypeHandle fty = MLIR_CreateTypeLLVMFunction(ctx, e.i32, ins, 1, true);
-            MLIR_AttributeHandle a0 = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("printf"));
-            MLIR_AttributeHandle a1 = MLIR_CreateAttributeType(ctx, str_lit("function_type"), fty);
-            MLIR_AttributeHandle *attrs = arena_new_array(arena, MLIR_AttributeHandle, 2);
-            attrs[0] = a0; attrs[1] = a1;
-            MLIR_RegionHandle body = MLIR_CreateRegion(ctx);
-            MLIR_RegionHandle *regs = arena_new_array(arena, MLIR_RegionHandle, 1); regs[0] = body;
-            MLIR_OpHandle decl = MLIR_CreateOp(ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.func"),
-                                               attrs, 2, NULL, 0, NULL, 0, NULL, 0,
-                                               regs, 1, e.loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
-            MLIR_AppendBlockOp(ctx, mb, decl);
-        }
-    }
-
-    if (e.use_print_str) {
-        bool have_print_str = false;
-        for (size_t i = 0; i < program->funcs.size; i++) {
-            Func *f = program->funcs.data[i];
-            if (!f->is_forward && str_eq(f->name, str_lit("printStr"))) {
-                have_print_str = true;
-                break;
-            }
-        }
-        if (!have_print_str) {
-        MLIR_TypeHandle *ins = arena_new_array(arena, MLIR_TypeHandle, 1); ins[0] = e.ptr;
-        MLIR_TypeHandle fty = MLIR_CreateTypeFunction(ctx, ins, 1, NULL, 0);
-        MLIR_AttributeHandle a0 = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("printStr"));
-        MLIR_AttributeHandle a1 = MLIR_CreateAttributeType(ctx, str_lit("function_type"), fty);
-        MLIR_AttributeHandle a2 = MLIR_CreateAttributeString(ctx, str_lit("sym_visibility"), str_lit("private"));
-        MLIR_AttributeHandle *attrs = arena_new_array(arena, MLIR_AttributeHandle, 3);
-        attrs[0] = a0; attrs[1] = a1; attrs[2] = a2;
-        MLIR_RegionHandle body = MLIR_CreateRegion(ctx);
-        MLIR_RegionHandle *regs = arena_new_array(arena, MLIR_RegionHandle, 1); regs[0] = body;
-        MLIR_OpHandle decl = MLIR_CreateOp(ctx, OP_TYPE_FUNC_FUNC, str_lit("func.func"),
-                                           attrs, 3, NULL, 0, NULL, 0, NULL, 0,
-                                           regs, 1, e.loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
-        MLIR_AppendBlockOp(ctx, mb, decl);
-        }
-    }
-
-    // Emit any string-literal globals collected by ST_PRINT/EX_STR.
+    // Emit any string-literal globals collected by EX_STR.
     for (size_t i = 0; i < e.n_strings; i++) {
         StringEntry *se = &e.strings[i];
         MLIR_OpHandle gop = MLIR_CreateLLVMGlobalString(

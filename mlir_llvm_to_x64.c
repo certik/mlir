@@ -261,7 +261,7 @@ static bool op_is(MLIR_OpHandle op, const char *n) {
     return nm.size == l && memcmp(nm.str, n, l) == 0;
 }
 
-// SymbolRef attributes print with a leading '@' (e.g. "@printI64"); function
+// SymbolRef attributes print with a leading '@' (e.g. "@malloc"); function
 // sym_name attributes do not. Strip it so the two match.
 static string strip_at(string s) {
     if (s.size && s.str[0] == '@') { s.str++; s.size--; }

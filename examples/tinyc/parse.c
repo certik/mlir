@@ -1716,15 +1716,6 @@ static Stmt *parse_stmt(P *p) {
         parse_block(p, &s->for_body);
         return s;
     }
-    if (t.kind == TC_TK_KW_PRINT) {
-        p->i++;
-        Stmt *s = new_stmt(p, ST_PRINT, t.line);
-        expect(p, TC_TK_LPAREN, str_lit("expected '('"));
-        s->expr = parse_expr(p);
-        expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
-        expect(p, TC_TK_SEMI, str_lit("expected ';'"));
-        return s;
-    }
     if (t.kind == TC_TK_KW_SWITCH) {
         p->i++;
         Stmt *s = new_stmt(p, ST_SWITCH, t.line);

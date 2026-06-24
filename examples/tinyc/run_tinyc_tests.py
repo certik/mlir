@@ -294,7 +294,7 @@ def write_unity_source(name: str, srcs: list[Path]) -> Path:
         lines.append(f'#include "{_inc(src)}"')
     if host_main:
         lines.append("#undef main")
-    lines += ["#undef _tinyc_print", ""]
+    lines += [""]
     for src in COREC_BASE_SOURCES:
         lines.append(f'#include "{_inc(COREC_STDLIB_COREC_DIR / src)}"')
     stdlib_sources = list(STDLIB_SOURCES)
@@ -365,12 +365,6 @@ def write_unity_source(name: str, srcs: list[Path]) -> Path:
     if TARGET == "elf":
         lines += [
             ELF_RUNTIME_PRINTF,
-            "void printI64(long long v) { char b[32]; unsigned long n; ciovec_t io; n=int64_to_str(v,b); io.buf=b; io.buf_len=n; write_all(1,&io,1); }",
-            "void printI32(int v) { printI64((long long)v); printNewline(); }",
-            "void printNewline(void) { ciovec_t io; io.buf=\"\\n\"; io.buf_len=1; write_all(1,&io,1); }",
-            "void printStr(char *s) { ciovec_t io; unsigned long n; n=0; if(s){ while(s[n]) n=n+1; if(n){ io.buf=s; io.buf_len=n; write_all(1,&io,1); } } printNewline(); }",
-            "void printF32(float v) { (void)v; }",
-            "void printF64(double v) { (void)v; }",
             "",
         ]
     if host_main and not uses_wasm_runtime():
