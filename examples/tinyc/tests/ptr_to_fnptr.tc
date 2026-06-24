@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 int add(int a, int b) {
     return a + b;
 }
@@ -11,8 +12,8 @@ int main() {
     int (**pop)(int, int);
     op = &add;
     pop = &op;
-    _tinyc_print((*pop)(2, 3));
+    printf("%lld\n", (long long)((*pop)(2, 3)));
     op = &sub;
-    _tinyc_print((*pop)(10, 3));
+    printf("%lld\n", (long long)((*pop)(10, 3)));
     return 0;
 }

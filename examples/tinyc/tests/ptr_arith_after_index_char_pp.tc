@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression for tinyc bug #41 (parser/codegen bug surfaced during
 // stage-3 self-host): when an array-indexed `char **` is followed by
 // pointer arithmetic — e.g. `argv[j] + 9` — tinyc miscompiled the
@@ -22,11 +23,11 @@ int main() {
     arr[2] = s;
     char **a = arr;
     char *p1 = a[1] + 9;
-    _tinyc_print(*p1);
-    _tinyc_print(*(p1 + 1));
-    _tinyc_print(*(p1 + 2));
-    _tinyc_print(*(p1 + 3));
-    _tinyc_print(*(p1 + 4));
-    _tinyc_print(*(p1 + 5));
+    printf("%lld\n", (long long)(*p1));
+    printf("%lld\n", (long long)(*(p1 + 1)));
+    printf("%lld\n", (long long)(*(p1 + 2)));
+    printf("%lld\n", (long long)(*(p1 + 3)));
+    printf("%lld\n", (long long)(*(p1 + 4)));
+    printf("%lld\n", (long long)(*(p1 + 5)));
     return 0;
 }

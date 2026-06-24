@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Aggregate initializer for struct locals: positional and designated.
 
 typedef struct Pt {
@@ -10,8 +11,8 @@ int main() {
     Pt a = {1, 2, 3};
     Pt b = {.x = 10, .y = 20, .z = 30};
     Pt c = {.z = 700, .x = 100, .y = 400};
-    _tinyc_print(a.x); _tinyc_print(a.y); _tinyc_print(a.z);
-    _tinyc_print(b.x); _tinyc_print(b.y); _tinyc_print(b.z);
-    _tinyc_print(c.x); _tinyc_print(c.y); _tinyc_print(c.z);
+    printf("%lld\n", (long long)(a.x)); printf("%lld\n", (long long)(a.y)); printf("%lld\n", (long long)(a.z));
+    printf("%lld\n", (long long)(b.x)); printf("%lld\n", (long long)(b.y)); printf("%lld\n", (long long)(b.z));
+    printf("%lld\n", (long long)(c.x)); printf("%lld\n", (long long)(c.y)); printf("%lld\n", (long long)(c.z));
     return 0;
 }

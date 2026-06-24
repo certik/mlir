@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: enum initializers accept full constant expressions.
 // Previously tinyc only accepted a single int literal or a previously-
 // declared enumerator (optionally with a unary minus). Standard C allows
@@ -33,20 +34,20 @@ enum {
 };
 
 int main(void) {
-    _tinyc_print(PAGE_SIZE);            // 65536
-    _tinyc_print(STACK_SIZE);           // 65536
-    _tinyc_print(INITIAL_PAGES);        // 2
-    _tinyc_print(GLOBAL_BASE_OFFSET);   // 1024
+    printf("%lld\n", (long long)(PAGE_SIZE));            // 65536
+    printf("%lld\n", (long long)(STACK_SIZE));           // 65536
+    printf("%lld\n", (long long)(INITIAL_PAGES));        // 2
+    printf("%lld\n", (long long)(GLOBAL_BASE_OFFSET));   // 1024
 
-    _tinyc_print(A);  // 1
-    _tinyc_print(B);  // 3
-    _tinyc_print(C);  // 13
-    _tinyc_print(D);  // 511
-    _tinyc_print(E);  // -1
-    _tinyc_print(F);  // 100
-    _tinyc_print(G);  // -1
-    _tinyc_print(H);  // 2
-    _tinyc_print(I);  // 15
+    printf("%lld\n", (long long)(A));  // 1
+    printf("%lld\n", (long long)(B));  // 3
+    printf("%lld\n", (long long)(C));  // 13
+    printf("%lld\n", (long long)(D));  // 511
+    printf("%lld\n", (long long)(E));  // -1
+    printf("%lld\n", (long long)(F));  // 100
+    printf("%lld\n", (long long)(G));  // -1
+    printf("%lld\n", (long long)(H));  // 2
+    printf("%lld\n", (long long)(I));  // 15
 
     return 0;
 }

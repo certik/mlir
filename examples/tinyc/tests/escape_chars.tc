@@ -1,17 +1,18 @@
+extern int printf(const char *fmt, ...);
 // Regression: tinyc must accept the full C escape set in both string
 // and character literals. Previously \v \f \a \b \? were rejected.
 int main() {
     char *s;
     s = "\v\f\a\b\?";
-    _tinyc_print(s[0]);
-    _tinyc_print(s[1]);
-    _tinyc_print(s[2]);
-    _tinyc_print(s[3]);
-    _tinyc_print(s[4]);
-    _tinyc_print('\v');
-    _tinyc_print('\f');
-    _tinyc_print('\a');
-    _tinyc_print('\b');
-    _tinyc_print('\?');
+    printf("%lld\n", (long long)(s[0]));
+    printf("%lld\n", (long long)(s[1]));
+    printf("%lld\n", (long long)(s[2]));
+    printf("%lld\n", (long long)(s[3]));
+    printf("%lld\n", (long long)(s[4]));
+    printf("%lld\n", (long long)('\v'));
+    printf("%lld\n", (long long)('\f'));
+    printf("%lld\n", (long long)('\a'));
+    printf("%lld\n", (long long)('\b'));
+    printf("%lld\n", (long long)('\?'));
     return 0;
 }

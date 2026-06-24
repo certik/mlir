@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Struct with an array of struct pointers. Fills items with stack node
 // addresses and reads back items[i]->v.
 
@@ -31,15 +32,15 @@ int main() {
     int total = 0;
     int i = 0;
     while (i < p.count) {
-        _tinyc_print(p.items[i]->v);
+        printf("%lld\n", (long long)(p.items[i]->v));
         total = total + p.items[i]->v;
         i = i + 1;
     }
-    _tinyc_print(total);                 // 100
+    printf("%lld\n", (long long)(total));                 // 100
 
     // Reassign one slot and verify.
     p.items[2] = &a;
-    _tinyc_print(p.items[2]->v);         // 10
+    printf("%lld\n", (long long)(p.items[2]->v));         // 10
 
     return 0;
 }

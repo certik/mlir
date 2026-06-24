@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: a function-local declaration whose type is a
 // default-i32 storage class (`int`, `unsigned char`, `uint8_t`, ...)
 // must truncate any i64-typed initializer down to i32 before storing
@@ -36,7 +37,7 @@ void test_leb(Buf *b, uint64_t v) {
         uint8_t byte = v & 0x7f;
         v >>= 7;
         if (v) byte |= 0x80;
-        _tinyc_print(byte);
+        printf("%lld\n", (long long)(byte));
     } while (v);
 }
 

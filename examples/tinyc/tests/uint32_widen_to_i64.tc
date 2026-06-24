@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // MRE: tinyc sign-extends `(int64_t)<uint32_t>` casts. Any uint32_t
 // value with bit 31 set widens to 0xffffffff80000000 in i64 instead of
 // 0x0000000080000000, so when it's later printed or used in a 64-bit
@@ -32,12 +33,12 @@ static uint32_t mask_high_bit(uint32_t x) {
 int main() {
     uint32_t a = 0x80000000u;
     // (int64_t)<unsigned variable> — direct widening of an l-value.
-    _tinyc_print((int64_t)a);
+    printf("%lld\n", (long long)((int64_t)a));
     // (int64_t)<unsigned call result> — widening of an EX_CALL value.
-    _tinyc_print((int64_t)mask_high_bit(0));
+    printf("%lld\n", (long long)((int64_t)mask_high_bit(0)));
     // (int64_t)<unsigned shift result> — widening of an arith result
     // whose `is_unsigned` came from the LHS shift operand.
     uint32_t v = ((uint32_t)1) << 31;
-    _tinyc_print((int64_t)v);
+    printf("%lld\n", (long long)((int64_t)v));
     return 0;
 }

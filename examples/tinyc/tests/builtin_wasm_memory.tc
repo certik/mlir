@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test for tinyc's `__builtin_wasm_memory_size` and
 // `__builtin_wasm_memory_grow` builtins. These map to the wasm
 // `memory.size` (0x3F) and `memory.grow` (0x40) instructions and
@@ -22,6 +23,6 @@ int main() {
     if (sz1 <= 0) return 1;
     if (prev != sz1) return 2;
     if (sz2 != sz1) return 3;
-    _tinyc_print(42);
+    printf("%lld\n", (long long)(42));
     return 0;
 }

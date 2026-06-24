@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: `uint8_t arr[N]` (i.e. an array of a *typedef'd*
 // 8-bit integer alias) must allocate 1-byte-stride storage, not
 // 4-byte-stride.
@@ -27,9 +28,9 @@ typedef unsigned char uint8_t;
 int main() {
     uint8_t magic[8] = {0, 97, 115, 109, 1, 0, 0, 0};
     int sz = (int)sizeof(magic);
-    _tinyc_print(sz);
+    printf("%lld\n", (long long)(sz));
     for (int i = 0; i < 8; i++) {
-        _tinyc_print((int)magic[i]);
+        printf("%lld\n", (long long)((int)magic[i]));
     }
     return 0;
 }

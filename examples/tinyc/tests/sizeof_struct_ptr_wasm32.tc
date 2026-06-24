@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test for type_size/type_align hard-coding pointers as 8 bytes
 // regardless of target. On wasm32, pointers are 4 bytes, so `sizeof(S)` for
 // a struct of pointer fields used to be twice the actual layout, causing
@@ -33,11 +34,11 @@ int main() {
     // The canaries on either side of `s` must remain untouched, regardless
     // of whether wasm32 (4-byte ptr) or native (8-byte ptr) is in use.
     if (before != 0x11111111) {
-        _tinyc_print(101);
+        printf("%lld\n", (long long)(101));
         return 1;
     }
     if (after != 0x22222222) {
-        _tinyc_print(102);
+        printf("%lld\n", (long long)(102));
         return 2;
     }
 
@@ -45,10 +46,10 @@ int main() {
     // used at runtime: `sizeof(void *)` and `sizeof(struct S)` must agree.
     // `sizeof(struct S)` should equal 4 * sizeof(void *).
     if (sizeof(struct S) != 4 * sizeof(void *)) {
-        _tinyc_print(103);
+        printf("%lld\n", (long long)(103));
         return 3;
     }
 
-    _tinyc_print(0);
+    printf("%lld\n", (long long)(0));
     return 0;
 }

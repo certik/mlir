@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Conditional compilation: #ifdef, #ifndef, #else, #endif, #undef,
 // #if defined(X), #elif.
 
@@ -6,43 +7,43 @@
 
 int main() {
 #ifdef FEATURE_A
-    _tinyc_print(1);            // 1
+    printf("%lld\n", (long long)(1));            // 1
 #else
-    _tinyc_print(99);
+    printf("%lld\n", (long long)(99));
 #endif
 
 #ifndef FEATURE_A
-    _tinyc_print(99);
+    printf("%lld\n", (long long)(99));
 #else
-    _tinyc_print(2);            // 2
+    printf("%lld\n", (long long)(2));            // 2
 #endif
 
 #undef FEATURE_A
 
 #ifdef FEATURE_A
-    _tinyc_print(99);
+    printf("%lld\n", (long long)(99));
 #else
-    _tinyc_print(3);            // 3
+    printf("%lld\n", (long long)(3));            // 3
 #endif
 
 #if defined(VERSION) && VERSION == 2
-    _tinyc_print(4);            // 4
+    printf("%lld\n", (long long)(4));            // 4
 #elif defined(VERSION)
-    _tinyc_print(99);
+    printf("%lld\n", (long long)(99));
 #else
-    _tinyc_print(99);
+    printf("%lld\n", (long long)(99));
 #endif
 
 #if !defined(FEATURE_A)
-    _tinyc_print(5);            // 5
+    printf("%lld\n", (long long)(5));            // 5
 #endif
 
 #if VERSION > 5
-    _tinyc_print(99);
+    printf("%lld\n", (long long)(99));
 #elif VERSION > 1
-    _tinyc_print(6);            // 6
+    printf("%lld\n", (long long)(6));            // 6
 #else
-    _tinyc_print(99);
+    printf("%lld\n", (long long)(99));
 #endif
     return 0;
 }

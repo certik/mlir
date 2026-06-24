@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression: tinyc's preprocessor only treated `\\\n` (backslash + LF) as a
 // line continuation. Source files checked out on Windows with the default
 // `core.autocrlf=true` end up with `\r\n` line endings, so a macro like
@@ -30,6 +31,6 @@
 
 int main() {
     int x = ADD3(1, 2, 4);
-    _tinyc_print(x);
+    printf("%lld\n", (long long)(x));
     return 0;
 }

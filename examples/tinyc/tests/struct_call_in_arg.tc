@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Use a struct-returning call directly as a struct argument to another call.
 
 typedef struct Pt {
@@ -13,9 +14,9 @@ Pt make_pt(int a, int b) {
 }
 
 void show(Pt p, int tag) {
-    _tinyc_print(tag);
-    _tinyc_print(p.x);
-    _tinyc_print(p.y);
+    printf("%lld\n", (long long)(tag));
+    printf("%lld\n", (long long)(p.x));
+    printf("%lld\n", (long long)(p.y));
 }
 
 int main() {

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test for `->` chained through a struct field of type T**.
 //
 // `vec.data[i]->field` was rejected with
@@ -24,17 +25,17 @@ void run(Vec *v) {
         sum = sum + v->data[i]->id;
         sum = sum + v->data[i]->x;
     }
-    _tinyc_print(sum);
-    _tinyc_print(v->data[0]->id);
-    _tinyc_print(v->data[1]->x);
-    _tinyc_print(v->data[2]->id);
+    printf("%lld\n", (long long)(sum));
+    printf("%lld\n", (long long)(v->data[0]->id));
+    printf("%lld\n", (long long)(v->data[1]->x));
+    printf("%lld\n", (long long)(v->data[2]->id));
 
     // Field-of-local-struct: lv.data[i]->field works the same way.
     Vec lv;
     lv.data = v->data;
     lv.size = v->size;
-    _tinyc_print(lv.data[0]->x);
-    _tinyc_print(lv.data[2]->x);
+    printf("%lld\n", (long long)(lv.data[0]->x));
+    printf("%lld\n", (long long)(lv.data[2]->x));
 }
 
 int main(void) {

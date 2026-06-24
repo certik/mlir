@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression: a forward `extern` declaration for a function that
 // nobody actually calls must NOT leak into the wasm binary as an
 // import — otherwise self-host builds fail to link (the linker has
@@ -9,6 +10,6 @@ extern int unused_extern_never_called(int x);
 extern void *unused_extern_returns_ptr(void);
 
 int main() {
-    _tinyc_print(42);
+    printf("%lld\n", (long long)(42));
     return 0;
 }

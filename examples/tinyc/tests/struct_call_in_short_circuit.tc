@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 struct S { int a; int b; };
 
 struct S make() { struct S s; s.a = 5; s.b = 9; return s; }
@@ -5,9 +6,9 @@ struct S make() { struct S s; s.a = 5; s.b = 9; return s; }
 int main() {
     int x = 1;
     if (x && make().a == 5) {
-        _tinyc_print(100 + make().b);
+        printf("%lld\n", (long long)(100 + make().b));
     } else {
-        _tinyc_print(0);
+        printf("%lld\n", (long long)(0));
     }
     return 0;
 }

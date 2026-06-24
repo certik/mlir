@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // `(void)` as the only-parameter form, plus a normal void-returning
 // function that takes one parameter.
 int answer(void) {
@@ -5,11 +6,11 @@ int answer(void) {
 }
 
 void announce(int x) {
-    _tinyc_print(x);
+    printf("%lld\n", (long long)(x));
 }
 
 int main() {
-    _tinyc_print(answer());   // 42
+    printf("%lld\n", (long long)(answer()));   // 42
     announce(7);       // 7
     announce(answer());// 42
     return 0;

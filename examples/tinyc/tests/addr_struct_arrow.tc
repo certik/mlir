@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: `&local_struct_var` must produce a struct-pointer
 // EVal whose `sdef` is set, so that follow-on `->field` accesses (and
 // any other walk_struct_lhs consumer) resolve the field chain through
@@ -38,15 +39,15 @@ int main(void) {
     // Pass &local-struct to a function that takes a struct pointer
     // (sanity check: this path already worked).
     use_arrow(&c);
-    _tinyc_print(c.line);
-    _tinyc_print(c.err_count);
+    printf("%lld\n", (long long)(c.line));
+    printf("%lld\n", (long long)(c.err_count));
 
     // Direct `(&local)->field` assign and read — the regressed path.
     (&c)->line = 42;
     (&c)->err_count = 7;
-    _tinyc_print(c.line);
-    _tinyc_print(c.err_count);
-    _tinyc_print((&c)->line + (&c)->err_count);
+    printf("%lld\n", (long long)(c.line));
+    printf("%lld\n", (long long)(c.err_count));
+    printf("%lld\n", (long long)((&c)->line + (&c)->err_count));
 
     return 0;
 }

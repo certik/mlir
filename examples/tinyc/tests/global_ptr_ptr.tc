@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression: file-scope `static char** g = NULL;` (and any T** global) was
 // emitted by tinyc as `@g = internal global i32 0` because the global-emit
 // switch in emit.c didn't list TY_PTR_PTR among the pointer kinds. The
@@ -40,7 +41,7 @@ int main() {
     set_a(pa);
     set_b(pb);
     // Read both back as pointers and compare.
-    _tinyc_print(g_a == pa);
-    _tinyc_print(g_b == pb);
+    printf("%lld\n", (long long)(g_a == pa));
+    printf("%lld\n", (long long)(g_b == pb));
     return 0;
 }

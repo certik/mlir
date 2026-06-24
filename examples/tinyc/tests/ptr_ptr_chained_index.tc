@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression: chained subscript pp[i][j] for char**/int** — used by
 // `argv[i][0]` flag-parsing in mlir/parser.c.
 int main(int argc, char **argv) {
@@ -7,11 +8,11 @@ int main(int argc, char **argv) {
     arr[0] = a;
     arr[1] = b;
     char **pp = arr;
-    _tinyc_print(pp[0][0]);
-    _tinyc_print(pp[0][1]);
-    _tinyc_print(pp[0][2]);
-    _tinyc_print(pp[1][0]);
-    _tinyc_print(pp[1][1]);
-    _tinyc_print(pp[1][2]);
+    printf("%lld\n", (long long)(pp[0][0]));
+    printf("%lld\n", (long long)(pp[0][1]));
+    printf("%lld\n", (long long)(pp[0][2]));
+    printf("%lld\n", (long long)(pp[1][0]));
+    printf("%lld\n", (long long)(pp[1][1]));
+    printf("%lld\n", (long long)(pp[1][2]));
     return 0;
 }

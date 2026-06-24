@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Early `return` from inside if/while is now legal under cf-style lowering.
 int find_first_pos(int n) {
     int i = 0;
@@ -11,7 +12,7 @@ int find_first_pos(int n) {
 }
 
 int main() {
-    _tinyc_print(find_first_pos(10));   // 3
-    _tinyc_print(find_first_pos(2));    // -1
+    printf("%lld\n", (long long)(find_first_pos(10)));   // 3
+    printf("%lld\n", (long long)(find_first_pos(2)));    // -1
     return 0;
 }

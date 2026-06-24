@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: `struct Tag { ... } *field;` inside an outer struct.
 //
 //   typedef struct {
@@ -28,9 +29,9 @@ int main(void) {
     e.header = 100;
     e.trailer = 200;
     e.labels = 0;
-    _tinyc_print(e.header);
-    _tinyc_print(e.trailer);
-    if (e.labels == 0) _tinyc_print(1);
+    printf("%lld\n", (long long)(e.header));
+    printf("%lld\n", (long long)(e.trailer));
+    if (e.labels == 0) printf("%lld\n", (long long)(1));
 
     // Walking a self-referential list pointed at by the inner-struct
     // field exercises the TY_PTR_STRUCT typing on `labels`.
@@ -38,7 +39,7 @@ int main(void) {
     first.v = 7;
     first.next = 0;
     e.labels = &first;
-    _tinyc_print(e.labels->v);
-    if (e.labels->next == 0) _tinyc_print(2);
+    printf("%lld\n", (long long)(e.labels->v));
+    if (e.labels->next == 0) printf("%lld\n", (long long)(2));
     return 0;
 }

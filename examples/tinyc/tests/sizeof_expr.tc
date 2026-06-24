@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 struct Point {
     int x;
     int y;
@@ -13,13 +14,13 @@ int main() {
     s = "hi";
     p.x = 0;
     p.y = 0;
-    _tinyc_print(sizeof(int));
-    _tinyc_print(sizeof(a));
-    _tinyc_print(sizeof(b));
-    _tinyc_print(sizeof(s));
-    _tinyc_print(sizeof(p));
-    _tinyc_print(sizeof(p.x));
-    _tinyc_print(sizeof(a + 1));
-    _tinyc_print(sizeof(a + b));
+    printf("%lld\n", (long long)(sizeof(int)));
+    printf("%lld\n", (long long)(sizeof(a)));
+    printf("%lld\n", (long long)(sizeof(b)));
+    printf("%lld\n", (long long)(sizeof(s)));
+    printf("%lld\n", (long long)(sizeof(p)));
+    printf("%lld\n", (long long)(sizeof(p.x)));
+    printf("%lld\n", (long long)(sizeof(a + 1)));
+    printf("%lld\n", (long long)(sizeof(a + b)));
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Tests struct-pointer return types and mid-chain pointer-field walks.
 //
 //   - make_node returns struct Node*; lets us factor out the malloc.
@@ -39,16 +40,16 @@ int main() {
     c = make_node(30);
     a->next = b;
     b->next = c;
-    _tinyc_print(sum_three(a));            // 60
+    printf("%lld\n", (long long)(sum_three(a)));            // 60
 
     // Mid-chain assignment through two pointer fields.
     a->next->next->value = 99;
-    _tinyc_print(a->next->next->value);    // 99
-    _tinyc_print(c->value);                // 99 (same node)
+    printf("%lld\n", (long long)(a->next->next->value));    // 99
+    printf("%lld\n", (long long)(c->value));                // 99 (same node)
 
     struct Node* tail;
     tail = find_tail(a);
-    _tinyc_print(tail->value);             // 99
+    printf("%lld\n", (long long)(tail->value));             // 99
 
     free(a); free(b); free(c);
     return 0;

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Anonymous enum: implicit 0..N counting.
 enum { RED, GREEN, BLUE };
 
@@ -18,22 +19,22 @@ int classify(int color) {
 }
 
 int main() {
-    _tinyc_print(RED);          // 0
-    _tinyc_print(GREEN);        // 1
-    _tinyc_print(BLUE);         // 2
-    _tinyc_print(A);            // 1
-    _tinyc_print(B);            // 2
-    _tinyc_print(C);            // 10
-    _tinyc_print(D);            // 11
-    _tinyc_print(ALPHA);        // 1
-    _tinyc_print(BETA);         // 2
-    _tinyc_print(GAMMA);        // 10
-    _tinyc_print(classify(RED));    // 100
-    _tinyc_print(classify(GREEN));  // 200
-    _tinyc_print(classify(BLUE));   // 300
+    printf("%lld\n", (long long)(RED));          // 0
+    printf("%lld\n", (long long)(GREEN));        // 1
+    printf("%lld\n", (long long)(BLUE));         // 2
+    printf("%lld\n", (long long)(A));            // 1
+    printf("%lld\n", (long long)(B));            // 2
+    printf("%lld\n", (long long)(C));            // 10
+    printf("%lld\n", (long long)(D));            // 11
+    printf("%lld\n", (long long)(ALPHA));        // 1
+    printf("%lld\n", (long long)(BETA));         // 2
+    printf("%lld\n", (long long)(GAMMA));        // 10
+    printf("%lld\n", (long long)(classify(RED)));    // 100
+    printf("%lld\n", (long long)(classify(GREEN)));  // 200
+    printf("%lld\n", (long long)(classify(BLUE)));   // 300
 
     // Enumerators are usable in arbitrary integer contexts.
     int x = D + 5;
-    _tinyc_print(x);            // 16
+    printf("%lld\n", (long long)(x));            // 16
     return 0;
 }

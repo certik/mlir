@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression: tinyc must accept multiple comma-separated declarators
 // in a single struct field declaration: `int first, last;` is just
 // shorthand for two fields of the same base type.
@@ -15,11 +16,11 @@ int main() {
     s.b = 200;
     s.arr1[0] = 7;
     s.scalar = 9;
-    _tinyc_print(s.first);
-    _tinyc_print(s.last);
-    _tinyc_print((int)s.a);
-    _tinyc_print((int)s.b);
-    _tinyc_print(s.arr1[0]);
-    _tinyc_print(s.scalar);
+    printf("%lld\n", (long long)(s.first));
+    printf("%lld\n", (long long)(s.last));
+    printf("%lld\n", (long long)((int)s.a));
+    printf("%lld\n", (long long)((int)s.b));
+    printf("%lld\n", (long long)(s.arr1[0]));
+    printf("%lld\n", (long long)(s.scalar));
     return 0;
 }

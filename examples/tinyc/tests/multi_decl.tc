@@ -1,18 +1,19 @@
+extern int printf(const char *fmt, ...);
 int main() {
     int i = 1, j = 2, k = 3;
     int a, b = 5, c;
     a = 10; c = 20;
     int *p = &i, *q = &j;
     int64_t x = 100, y = 200;
-    _tinyc_print((int64_t)i);
-    _tinyc_print((int64_t)j);
-    _tinyc_print((int64_t)k);
-    _tinyc_print((int64_t)a);
-    _tinyc_print((int64_t)b);
-    _tinyc_print((int64_t)c);
-    _tinyc_print((int64_t)*p);
-    _tinyc_print((int64_t)*q);
-    _tinyc_print(x);
-    _tinyc_print(y);
+    printf("%lld\n", (long long)((int64_t)i));
+    printf("%lld\n", (long long)((int64_t)j));
+    printf("%lld\n", (long long)((int64_t)k));
+    printf("%lld\n", (long long)((int64_t)a));
+    printf("%lld\n", (long long)((int64_t)b));
+    printf("%lld\n", (long long)((int64_t)c));
+    printf("%lld\n", (long long)((int64_t)*p));
+    printf("%lld\n", (long long)((int64_t)*q));
+    printf("%lld\n", (long long)(x));
+    printf("%lld\n", (long long)(y));
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 void grow(int **arr, int *cap) {
     int new_cap = *cap * 2;
     int *new_arr = (int*)0;
@@ -15,8 +16,8 @@ int main() {
     int **pp = &p;
     int cap = 3;
     grow(pp, &cap);
-    _tinyc_print((*pp)[0]);
-    _tinyc_print((*pp)[1]);
-    _tinyc_print((*pp)[2]);
+    printf("%lld\n", (long long)((*pp)[0]));
+    printf("%lld\n", (long long)((*pp)[1]));
+    printf("%lld\n", (long long)((*pp)[2]));
     return 0;
 }

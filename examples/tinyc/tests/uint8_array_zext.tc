@@ -11,7 +11,7 @@
 // page hash comes out wrong. macOS then rejects the binary's ad-hoc
 // code signature with "Killed: 9" at exec time.
 //
-// We check the i8->i32 widened values via _tinyc_print so the wasm
+// We check the i8->i32 widened values via printf so the wasm
 // runtime's minimal printf doesn't need to grow width specifiers.
 typedef unsigned char uint8_t;
 
@@ -26,8 +26,8 @@ int main() {
     arr[2] = 0xff;
     // With sign-extension these print -3, -2, -1; the unsigned widening
     // produces 253, 254, 255.
-    _tinyc_print((int64_t)(int)arr[0]);
-    _tinyc_print((int64_t)(int)arr[1]);
-    _tinyc_print((int64_t)(int)read_byte(arr + 2));
+    printf("%lld\n", (long long)((int64_t)(int)arr[0]));
+    printf("%lld\n", (long long)((int64_t)(int)arr[1]));
+    printf("%lld\n", (long long)((int64_t)(int)read_byte(arr + 2)));
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 struct Point {
     int x;
     int y;
@@ -20,10 +21,10 @@ int main() {
         sy = sy + pts[j].y;
         j = j + 1;
     }
-    _tinyc_print(sx);
-    _tinyc_print(sy);
+    printf("%lld\n", (long long)(sx));
+    printf("%lld\n", (long long)(sy));
 
     pts[1].x = pts[0].x + pts[2].x;
-    _tinyc_print(pts[1].x);
+    printf("%lld\n", (long long)(pts[1].x));
     return 0;
 }

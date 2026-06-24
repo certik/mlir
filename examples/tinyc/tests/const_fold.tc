@@ -1,23 +1,24 @@
+extern int printf(const char *fmt, ...);
 // Verify constant folding of literal-only integer expressions: the
 // generated MLIR should reduce these to single `arith.constant` ops,
 // and the runtime values must match plain C semantics.
 
 int main() {
-    _tinyc_print(1 + 2 * 3);             // 7
-    _tinyc_print((1 << 4) | 3);          // 19
-    _tinyc_print(10 - 4 / 2);            // 8
-    _tinyc_print(100 % 7);               // 2
-    _tinyc_print(-5 + 7);                // 2
-    _tinyc_print(~0);                    // -1
-    _tinyc_print(!0);                    // 1
-    _tinyc_print(!5);                    // 0
-    _tinyc_print(255 & 15);              // 15
-    _tinyc_print(1 < 2);                 // 1
-    _tinyc_print(3 == 4);                // 0
-    _tinyc_print(1 ? 42 : 99);           // 42
-    _tinyc_print(0 ? 42 : 99);           // 99
-    _tinyc_print(1 && 1);                // 1
-    _tinyc_print(0 || 0);                // 0
-    _tinyc_print(sizeof(int) * 4);       // 16
+    printf("%lld\n", (long long)(1 + 2 * 3));             // 7
+    printf("%lld\n", (long long)((1 << 4) | 3));          // 19
+    printf("%lld\n", (long long)(10 - 4 / 2));            // 8
+    printf("%lld\n", (long long)(100 % 7));               // 2
+    printf("%lld\n", (long long)(-5 + 7));                // 2
+    printf("%lld\n", (long long)(~0));                    // -1
+    printf("%lld\n", (long long)(!0));                    // 1
+    printf("%lld\n", (long long)(!5));                    // 0
+    printf("%lld\n", (long long)(255 & 15));              // 15
+    printf("%lld\n", (long long)(1 < 2));                 // 1
+    printf("%lld\n", (long long)(3 == 4));                // 0
+    printf("%lld\n", (long long)(1 ? 42 : 99));           // 42
+    printf("%lld\n", (long long)(0 ? 42 : 99));           // 99
+    printf("%lld\n", (long long)(1 && 1));                // 1
+    printf("%lld\n", (long long)(0 || 0));                // 0
+    printf("%lld\n", (long long)(sizeof(int) * 4));       // 16
     return 0;
 }

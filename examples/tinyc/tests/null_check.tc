@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Exercise pointer comparisons against null.
 
 struct Box {
@@ -27,20 +28,20 @@ int main() {
     a->value = 1; a->link = b;
     b->value = 2; b->link = null;
 
-    _tinyc_print(has_link(a));     // 1
-    _tinyc_print(has_link(b));     // 0
-    _tinyc_print(has_link_ne(a));  // 1
-    _tinyc_print(has_link_ne(b));  // 0
+    printf("%lld\n", (long long)(has_link(a)));     // 1
+    printf("%lld\n", (long long)(has_link(b)));     // 0
+    printf("%lld\n", (long long)(has_link_ne(a)));  // 1
+    printf("%lld\n", (long long)(has_link_ne(b)));  // 0
 
     // Reassign a's link to null and re-check.
     a->link = null;
-    _tinyc_print(has_link(a));     // 0
+    printf("%lld\n", (long long)(has_link(a)));     // 0
 
     // Compare two pointers directly.
     struct Box* c;
     c = a;
-    if (a == c) { _tinyc_print(42); }       // 42
-    if (a != b) { _tinyc_print(99); }       // 99
+    if (a == c) { printf("%lld\n", (long long)(42)); }       // 42
+    if (a != b) { printf("%lld\n", (long long)(99)); }       // 99
 
     free(a); free(b);
     return 0;

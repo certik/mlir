@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Struct with a 2-D array-of-float field. Exercises s.m[i][j] reads/writes.
 
 struct Mat {
@@ -13,12 +14,12 @@ int main() {
             M.m[i][j] = i * 10 + j;
         }
     }
-    _tinyc_print(M.m[0][0]);    // 0
-    _tinyc_print(M.m[0][2]);    // 2
-    _tinyc_print(M.m[1][0]);    // 10
-    _tinyc_print(M.m[1][2]);    // 12
+    printf("%lld\n", (long long)(M.m[0][0]));    // 0
+    printf("%lld\n", (long long)(M.m[0][2]));    // 2
+    printf("%lld\n", (long long)(M.m[1][0]));    // 10
+    printf("%lld\n", (long long)(M.m[1][2]));    // 12
 
     M.m[1][1] = M.m[0][2] + M.m[1][0] + 0.5;
-    _tinyc_print(M.m[1][1]);    // 12.5
+    printf("%g\n", (double)(M.m[1][1]));    // 12.5
     return 0;
 }

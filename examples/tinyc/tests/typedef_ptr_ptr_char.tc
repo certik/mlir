@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test for parsing `Td **` where `Td` is a typedef for a
 // char-sized type (`uint8_t`, `int8_t`, etc.). Previously the second
 // `*` was silently dropped because parse_sig_type only wrapped to
@@ -43,12 +44,12 @@ int main() {
     produce(&p);
 
     // Should print: 127 then 42.
-    _tinyc_print(p[0]);
-    _tinyc_print(p[3]);
+    printf("%lld\n", (long long)(p[0]));
+    printf("%lld\n", (long long)(p[3]));
 
     // Same observations via the helper functions.
-    _tinyc_print(read_first(&p));
-    _tinyc_print(read_third_via_index(&p));
+    printf("%lld\n", (long long)(read_first(&p)));
+    printf("%lld\n", (long long)(read_third_via_index(&p)));
 
     // Mirror the test for int8_t **: same path, signed variant.
     // (We deliberately use small non-negative values here because
@@ -59,7 +60,7 @@ int main() {
     g_buf2[1] = 99;
     int8_t *q = g_buf2;
     int8_t **qq = &q;
-    _tinyc_print((*qq)[0]);  // 1
-    _tinyc_print((*qq)[1]);  // 99
+    printf("%lld\n", (long long)((*qq)[0]));  // 1
+    printf("%lld\n", (long long)((*qq)[1]));  // 99
     return 0;
 }

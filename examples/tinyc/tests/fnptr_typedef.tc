@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 typedef int (*BinOp)(int, int);
 
 int add(int a, int b) {
@@ -15,7 +16,7 @@ int run(BinOp op, int x, int y) {
 int main() {
     BinOp f;
     f = &add;
-    _tinyc_print(f(20, 22));
-    _tinyc_print(run(sub, 50, 8));
+    printf("%lld\n", (long long)(f(20, 22)));
+    printf("%lld\n", (long long)(run(sub, 50, 8)));
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 struct Pair { int a; int b; };
 
 struct Pair make(int a, int b) {
@@ -6,8 +7,8 @@ struct Pair make(int a, int b) {
 }
 
 int main() {
-    _tinyc_print(make(7, 11).a);
-    _tinyc_print(make(7, 11).b);
-    _tinyc_print(make(100, 200).a + make(3, 4).b);
+    printf("%lld\n", (long long)(make(7, 11).a));
+    printf("%lld\n", (long long)(make(7, 11).b));
+    printf("%lld\n", (long long)(make(100, 200).a + make(3, 4).b));
     return 0;
 }

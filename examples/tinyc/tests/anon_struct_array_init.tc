@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: inline / anonymous struct array declaration with
 // an aggregate initializer at local scope.
 //
@@ -25,9 +26,9 @@ int main(void) {
         sum_a = sum_a + pairs[i].a;
         sum_b = sum_b + pairs[i].b;
     }
-    _tinyc_print(sum_a);
-    _tinyc_print(sum_b);
-    _tinyc_print(sum_a + sum_b);
+    printf("%lld\n", (long long)(sum_a));
+    printf("%lld\n", (long long)(sum_b));
+    printf("%lld\n", (long long)(sum_a + sum_b));
 
     // Tagged-inline variant: the tag is still introduced and the
     // initializer-with-tag case must also pass the same check.
@@ -35,7 +36,7 @@ int main(void) {
         { 1, 2 },
         { 3, 4 },
     };
-    _tinyc_print(pts[0].x + pts[0].y + pts[1].x + pts[1].y);
+    printf("%lld\n", (long long)(pts[0].x + pts[0].y + pts[1].x + pts[1].y));
 
     return 0;
 }

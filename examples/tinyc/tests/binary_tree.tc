@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Tiny binary search tree with recursive sum. Exercises recursive
 // pointer-mediated struct types, malloc, free, null comparison.
 
@@ -40,7 +41,7 @@ int main() {
     r->value    = 15; r->left    = null; r->right    = null;
     ll->value   = 3;  ll->left   = null; ll->right   = null;
     lr->value   = 7;  lr->left   = null; lr->right   = null;
-    _tinyc_print(sum_tree(root));     // 10+5+15+3+7 = 40
+    printf("%lld\n", (long long)(sum_tree(root)));     // 10+5+15+3+7 = 40
     free_tree(root);
     return 0;
 }

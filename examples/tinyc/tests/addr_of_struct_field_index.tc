@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 struct Inner { int a; int b; };
 
 struct Container {
@@ -16,9 +17,9 @@ int main() {
     set(&c.items[1], 2);
     struct Container *cp = &c;
     set(&cp->items[2], 3);
-    _tinyc_print(storage[0].a); _tinyc_print(storage[0].b);
-    _tinyc_print(storage[1].a); _tinyc_print(storage[1].b);
-    _tinyc_print(storage[2].a); _tinyc_print(storage[2].b);
+    printf("%lld\n", (long long)(storage[0].a)); printf("%lld\n", (long long)(storage[0].b));
+    printf("%lld\n", (long long)(storage[1].a)); printf("%lld\n", (long long)(storage[1].b));
+    printf("%lld\n", (long long)(storage[2].a)); printf("%lld\n", (long long)(storage[2].b));
     return 0;
 }
 

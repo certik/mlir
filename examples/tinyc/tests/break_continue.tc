@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 int main() {
     int s = 0;
     int i = 0;
@@ -11,7 +12,7 @@ int main() {
         }
         s = s + i;
     }
-    _tinyc_print(s);    // 1+2+3+5+6 = 17
-    _tinyc_print(i);    // 7
+    printf("%lld\n", (long long)(s));    // 1+2+3+5+6 = 17
+    printf("%lld\n", (long long)(i));    // 7
     return 0;
 }

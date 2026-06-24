@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: compound literal with a designated struct-typed field.
 //
 //   ((Param){ .name = pname, .type = pty, .line = N })
@@ -18,10 +19,10 @@ typedef struct Type  { int kind; int n; } Type;
 typedef struct Param { int line; Type type; int id; } Param;
 
 void use(Param p) {
-    _tinyc_print(p.line);
-    _tinyc_print(p.type.kind);
-    _tinyc_print(p.type.n);
-    _tinyc_print(p.id);
+    printf("%lld\n", (long long)(p.line));
+    printf("%lld\n", (long long)(p.type.kind));
+    printf("%lld\n", (long long)(p.type.n));
+    printf("%lld\n", (long long)(p.id));
 }
 
 int main(void) {

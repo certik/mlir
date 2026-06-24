@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 int main() {
     int a[5];
     int i;
@@ -6,13 +7,13 @@ int main() {
     }
 
     int* p = &a[0];
-    _tinyc_print(*p);          // 10
-    _tinyc_print(*(p + 2));    // 30
-    _tinyc_print(p[3]);        // 40
+    printf("%lld\n", (long long)(*p));          // 10
+    printf("%lld\n", (long long)(*(p + 2)));    // 30
+    printf("%lld\n", (long long)(p[3]));        // 40
 
     int* q = p + 4;
-    _tinyc_print(*q);          // 50
-    _tinyc_print(q - p);       // 4
+    printf("%lld\n", (long long)(*q));          // 50
+    printf("%lld\n", (long long)(q - p));       // 4
 
     int sum = 0;
     int* it = &a[0];
@@ -21,6 +22,6 @@ int main() {
         sum = sum + *it;
         it = it + 1;
     }
-    _tinyc_print(sum);         // 10+20+30+40+50 = 150
+    printf("%lld\n", (long long)(sum));         // 10+20+30+40+50 = 150
     return 0;
 }

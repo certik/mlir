@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // do-while inside a `do { ... } while (0)` macro-style guard.
 #define ONCE(s) do { s; } while (0)
 
@@ -5,6 +6,6 @@ int main() {
     int x;
     x = 0;
     ONCE(x = 42);
-    _tinyc_print(x);  // 42
+    printf("%lld\n", (long long)(x));  // 42
     return 0;
 }

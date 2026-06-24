@@ -1,9 +1,10 @@
+extern int printf(const char *fmt, ...);
 #define X 2
 
 int get_b_x() { return X; }
 
 int main() {
-    _tinyc_print(get_a_x());  // 1 — value of X in a.tc
-    _tinyc_print(get_b_x());  // 2 — value of X in b.tc
+    printf("%lld\n", (long long)(get_a_x()));  // 1 — value of X in a.tc
+    printf("%lld\n", (long long)(get_b_x()));  // 2 — value of X in b.tc
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression: a local variable must shadow a module-scope enum constant
 // of the same name. Previously the parser eagerly substituted the
 // enumerator's value into every identifier, producing the enum constant
@@ -19,11 +20,11 @@ int use_param(int B) {  // parameter shadows enum B
 }
 
 int main() {
-    _tinyc_print(use_enum() - 99);    // 100 - 99 = 1
-    _tinyc_print(use_local());        // 2
-    _tinyc_print(use_param(3));       // 3
+    printf("%lld\n", (long long)(use_enum() - 99));    // 100 - 99 = 1
+    printf("%lld\n", (long long)(use_local()));        // 2
+    printf("%lld\n", (long long)(use_param(3)));       // 3
     int A;
     A = 1;
-    _tinyc_print(A);                  // 1, not 100
+    printf("%lld\n", (long long)(A));                  // 1, not 100
     return 0;
 }

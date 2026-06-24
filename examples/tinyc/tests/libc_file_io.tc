@@ -15,13 +15,13 @@ int main() {
 
     void *fw;
     fw = fopen(path, "w");
-    if (fw == null) { _tinyc_print("open-w failed"); return 1; }
+    if (fw == null) { printf("%s\n", "open-w failed"); return 1; }
     fputs("hello libc\n", fw);
     fclose(fw);
 
     void *fr;
     fr = fopen(path, "r");
-    if (fr == null) { _tinyc_print("open-r failed"); return 1; }
+    if (fr == null) { printf("%s\n", "open-r failed"); return 1; }
     // calloc zeros the buffer so the C string is naturally NUL-terminated
     // after fread copies the payload (we read at most 31 bytes into 32).
     char *buf;

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 struct Pos { int chunk_id; int ofs; };
 
 struct Pos make(int a, int b) {
@@ -7,10 +8,10 @@ struct Pos make(int a, int b) {
 
 int main() {
     struct Pos p = make(7, 42);
-    _tinyc_print((int64_t)p.chunk_id);
-    _tinyc_print((int64_t)p.ofs);
+    printf("%lld\n", (long long)((int64_t)p.chunk_id));
+    printf("%lld\n", (long long)((int64_t)p.ofs));
     struct Pos q = make(100, 200);
-    _tinyc_print((int64_t)q.chunk_id);
-    _tinyc_print((int64_t)q.ofs);
+    printf("%lld\n", (long long)((int64_t)q.chunk_id));
+    printf("%lld\n", (long long)((int64_t)q.ofs));
     return 0;
 }

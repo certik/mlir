@@ -1,9 +1,10 @@
+extern int printf(const char *fmt, ...);
 // #include "..." — relative to the source directory.
 #include "pp_helper.h"
 
 int main() {
-    _tinyc_print(helper_add(3, 4));     // 7
-    _tinyc_print(helper_square(5));     // 25
-    _tinyc_print(helper_add(helper_square(2), helper_square(3))); // 13
+    printf("%lld\n", (long long)(helper_add(3, 4)));     // 7
+    printf("%lld\n", (long long)(helper_square(5)));     // 25
+    printf("%lld\n", (long long)(helper_add(helper_square(2), helper_square(3)))); // 13
     return 0;
 }

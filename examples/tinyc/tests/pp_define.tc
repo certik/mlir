@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Object-like macros, function-like macros, stringize, token paste,
 // variadic + __VA_ARGS__ + __VA_OPT__, recursion guard.
 
@@ -12,7 +13,7 @@
 MK_GET(answer, 42)
 MK_GET(zero, 0)
 
-// Stringize: produces a string literal for use with _tinyc_print().
+// Stringize: produces a string literal for use with printf.
 #define STR(x) #x
 
 // Variadic with __VA_OPT__ — emits a leading comma when args are present.
@@ -35,20 +36,20 @@ int foo_var = 100;
 #define foo (1 + foo_var)
 
 int main() {
-    _tinyc_print(ANSWER);            // 42
-    _tinyc_print(ADD(3, 4));         // 7
-    _tinyc_print(SQ(5));             // 25
-    _tinyc_print(SQ(1 + 2));         // 9 — parens guard against precedence
-    _tinyc_print(get_answer());      // 42
-    _tinyc_print(get_zero());        // 0
+    printf("%lld\n", (long long)(ANSWER));            // 42
+    printf("%lld\n", (long long)(ADD(3, 4)));         // 7
+    printf("%lld\n", (long long)(SQ(5)));             // 25
+    printf("%lld\n", (long long)(SQ(1 + 2)));         // 9 — parens guard against precedence
+    printf("%lld\n", (long long)(get_answer()));      // 42
+    printf("%lld\n", (long long)(get_zero()));        // 0
 
-    _tinyc_print(SUM2(10, 20));      // 30
-    _tinyc_print(SUM3(1, 2, 3));     // 6
-    _tinyc_print(SUM0());            // 0
+    printf("%lld\n", (long long)(SUM2(10, 20)));      // 30
+    printf("%lld\n", (long long)(SUM3(1, 2, 3)));     // 6
+    printf("%lld\n", (long long)(SUM0()));            // 0
 
-    _tinyc_print(foo);               // 101
+    printf("%lld\n", (long long)(foo));               // 101
 
     // Stringize: STR(hello) becomes the literal "hello".
-    _tinyc_print(STR(hello));        // hello
+    printf("%s\n", STR(hello));        // hello
     return 0;
 }

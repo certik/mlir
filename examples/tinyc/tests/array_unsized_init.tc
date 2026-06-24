@@ -1,16 +1,17 @@
+extern int printf(const char *fmt, ...);
 // Unsized array `T arr[]` with aggregate initializer: length is inferred
 // from the number of initializer elements.
 int main() {
     int a[] = {10, 20, 30, 40};
-    _tinyc_print((int64_t)a[0]);
-    _tinyc_print((int64_t)a[3]);
-    _tinyc_print((int64_t)(sizeof(a) / sizeof(a[0])));
+    printf("%lld\n", (long long)((int64_t)a[0]));
+    printf("%lld\n", (long long)((int64_t)a[3]));
+    printf("%lld\n", (long long)((int64_t)(sizeof(a) / sizeof(a[0]))));
 
     const char *names[] = {"alpha", "beta", "gamma"};
-    _tinyc_print((int64_t)(sizeof(names) / sizeof(names[0])));
+    printf("%lld\n", (long long)((int64_t)(sizeof(names) / sizeof(names[0]))));
     // Index a char* array element and call a libc-style strlen via builtin.
     const char *m = names[1];
-    _tinyc_print((int64_t)m[0]);  // 'b' = 98
-    _tinyc_print((int64_t)m[3]);  // 'a' = 97
+    printf("%lld\n", (long long)((int64_t)m[0]));  // 'b' = 98
+    printf("%lld\n", (long long)((int64_t)m[3]));  // 'a' = 97
     return 0;
 }

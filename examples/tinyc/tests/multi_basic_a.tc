@@ -1,9 +1,10 @@
+extern int printf(const char *fmt, ...);
 // multi_basic: cross-file call without a forward decl in a.tc.
 // add(int, int) is defined in multi_basic_b.tc. The driver merges
 // both files into a single Program before emit, so a.tc can call
 // add() even though it has no prototype here.
 
 int main() {
-    _tinyc_print(add(2, 3));
+    printf("%lld\n", (long long)(add(2, 3)));
     return 0;
 }

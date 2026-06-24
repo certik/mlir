@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 int counter = 1;
 int total;
 float pi = 3.0;
@@ -9,13 +10,13 @@ int bump() {
 }
 
 int main() {
-    _tinyc_print(greeting);
-    _tinyc_print(counter);
+    printf("%s\n", greeting);
+    printf("%lld\n", (long long)(counter));
     bump();
     bump();
-    _tinyc_print(counter);
+    printf("%lld\n", (long long)(counter));
     total = counter * 10;
-    _tinyc_print(total);
-    _tinyc_print(pi);
+    printf("%lld\n", (long long)(total));
+    printf("%g\n", (double)(pi));
     return 0;
 }

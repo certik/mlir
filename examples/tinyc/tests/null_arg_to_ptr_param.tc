@@ -1,8 +1,9 @@
+extern int printf(const char *fmt, ...);
 extern int strlen(char *p);
 
 int main() {
     char *p = 0;
-    if (p) _tinyc_print(strlen(p));
-    _tinyc_print(42);
+    if (p) printf("%lld\n", (long long)(strlen(p)));
+    printf("%lld\n", (long long)(42));
     return 0;
 }

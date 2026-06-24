@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Verify short-circuit semantics: in `(n != 0) && (100/n > 0)`, the
 // RHS must NOT execute when n == 0, otherwise the program traps on
 // integer divide-by-zero. Same for `||` with the negated guard.
@@ -21,10 +22,10 @@ int test_or(int n) {
 }
 
 int main() {
-    _tinyc_print(test_and(0));
-    _tinyc_print(test_and(5));
-    _tinyc_print(test_or(0));
-    _tinyc_print(test_or(5));
+    printf("%lld\n", (long long)(test_and(0)));
+    printf("%lld\n", (long long)(test_and(5)));
+    printf("%lld\n", (long long)(test_or(0)));
+    printf("%lld\n", (long long)(test_or(5)));
     return 0;
 }
 

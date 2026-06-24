@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Block-local typedef inside a function body. Real C allows typedef
 // declarations anywhere a declaration is allowed, including statement
 // scope. Used by corec's test_base.c and similar.
@@ -7,11 +8,11 @@ int main() {
     S s;
     s.x = 10;
     s.y = 32;
-    _tinyc_print(s.x + s.y);  // 42
+    printf("%lld\n", (long long)(s.x + s.y));  // 42
 
     // Local typedef of a primitive aliased to size_t-style name.
     typedef int MyInt;
     MyInt n = 7;
-    _tinyc_print(n);          // 7
+    printf("%lld\n", (long long)(n));          // 7
     return 0;
 }

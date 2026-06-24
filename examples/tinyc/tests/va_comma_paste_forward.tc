@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: GNU `, ## __VA_ARGS__` ("comma swallowing") when
 // the variadic forwarder is itself a function-like macro and the
 // callee is *also* a function-like macro that has to re-scan and
@@ -40,11 +41,11 @@ int main(void) {
     WRAP_NUM();
     WRAP_FWD(300, "c");
     // Echo a value back so the test can verify it actually ran.
-    _tinyc_print(7);
+    printf("%lld\n", (long long)(7));
     return 0;
 }
 
 void typed_pairs(int flag, int n, ...) {
-    _tinyc_print(flag);
-    _tinyc_print(n);
+    printf("%lld\n", (long long)(flag));
+    printf("%lld\n", (long long)(n));
 }

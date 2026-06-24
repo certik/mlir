@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // libc interop: declare strcmp via extern and call it. Print the
 // normalized sign so the expected output is deterministic across libc
 // implementations (some return ±1, others the byte difference).
@@ -10,8 +11,8 @@ int sign(int x) {
 }
 
 int main() {
-    _tinyc_print(sign(strcmp("abc", "abc")));
-    _tinyc_print(sign(strcmp("abc", "abd")));
-    _tinyc_print(sign(strcmp("abd", "abc")));
+    printf("%lld\n", (long long)(sign(strcmp("abc", "abc"))));
+    printf("%lld\n", (long long)(sign(strcmp("abc", "abd"))));
+    printf("%lld\n", (long long)(sign(strcmp("abd", "abc"))));
     return 0;
 }

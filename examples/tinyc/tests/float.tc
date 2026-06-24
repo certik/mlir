@@ -1,15 +1,16 @@
+extern int printf(const char *fmt, ...);
 int main() {
     float x = 1.5;
     float y = 2.25;
     float z = x * y + 1.0;     // 4.375
-    _tinyc_print(z);
+    printf("%g\n", (double)(z));
     if (z > 4.0) {
-        _tinyc_print(1);
+        printf("%lld\n", (long long)(1));
     } else {
-        _tinyc_print(0);
+        printf("%lld\n", (long long)(0));
     }
     // mixed int/float: int promoted to float
     float w = 2.0 * 3;
-    _tinyc_print(w);                  // 6
+    printf("%g\n", (double)(w));                  // 6
     return 0;
 }

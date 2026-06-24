@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: module-scope globals initialised with a parenthesised
 // type cast.
 //
@@ -20,8 +21,8 @@ static const int32_t MAGIC_NEG_EXPLICIT = (int32_t)-7;
 static const float32_t HALF = (float32_t)0.5;
 
 int main(void) {
-    _tinyc_print(MAGIC_NEG);
-    _tinyc_print(MAGIC_POS);
-    _tinyc_print(MAGIC_NEG_EXPLICIT);
+    printf("%lld\n", (long long)(MAGIC_NEG));
+    printf("%lld\n", (long long)(MAGIC_POS));
+    printf("%lld\n", (long long)(MAGIC_NEG_EXPLICIT));
     return 0;
 }

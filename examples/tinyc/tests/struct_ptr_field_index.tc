@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Pointer-field indexing: `vec->data[i]` and `s.f[i]` where `f` is
 // `int *` or `int64_t *`. Both load the pointer from the field, then GEP
 // it by `i` (using the right element width, which differs for i64).
@@ -26,9 +27,9 @@ int main() {
     iv.n = 3LL;
     fill_iv(&iv);
 
-    _tinyc_print(iv.data[0]); // 10
-    _tinyc_print(iv.data[1]); // 11
-    _tinyc_print(iv.data[2]); // 12
+    printf("%lld\n", (long long)(iv.data[0])); // 10
+    printf("%lld\n", (long long)(iv.data[1])); // 11
+    printf("%lld\n", (long long)(iv.data[2])); // 12
 
     long *lbuf;
     lbuf = (long *)malloc(sizeof(long) * 3);
@@ -37,9 +38,9 @@ int main() {
     lv.n = 3LL;
     fill_lv(&lv);
 
-    _tinyc_print(lv.data[0]);  // 1000000
-    _tinyc_print(lv.data[1]);  // 2000000
-    _tinyc_print(lv.data[2]);  // 3000000
+    printf("%lld\n", (long long)(lv.data[0]));  // 1000000
+    printf("%lld\n", (long long)(lv.data[1]));  // 2000000
+    printf("%lld\n", (long long)(lv.data[2]));  // 3000000
     free(lbuf);
     free(ibuf);
     return 0;

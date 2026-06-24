@@ -1,11 +1,12 @@
+extern int printf(const char *fmt, ...);
 int main() {
     int a[5] = {0};
     char b[8] = {0};
     int c[3][4] = {0};
-    _tinyc_print((int64_t)a[0]); _tinyc_print((int64_t)a[4]);
-    _tinyc_print((int64_t)b[0]); _tinyc_print((int64_t)b[7]);
-    _tinyc_print((int64_t)c[0][0]); _tinyc_print((int64_t)c[2][3]);
+    printf("%lld\n", (long long)((int64_t)a[0])); printf("%lld\n", (long long)((int64_t)a[4]));
+    printf("%lld\n", (long long)((int64_t)b[0])); printf("%lld\n", (long long)((int64_t)b[7]));
+    printf("%lld\n", (long long)((int64_t)c[0][0])); printf("%lld\n", (long long)((int64_t)c[2][3]));
     a[2] = 99; b[3] = 7;
-    _tinyc_print((int64_t)a[2]); _tinyc_print((int64_t)b[3]);
+    printf("%lld\n", (long long)((int64_t)a[2])); printf("%lld\n", (long long)((int64_t)b[3]));
     return 0;
 }

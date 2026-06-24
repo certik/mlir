@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // MRE: tinyc lays out `uint8_t buf[N]` declared as a struct field as
 // `[N x i32]` instead of `[N x i8]`. That is, the per-element stride
 // is 4 bytes, the struct grows by 4x what C says it should, and most
@@ -35,10 +36,10 @@ int main() {
     s.buf[1] = (uint8_t)0x123;     // expect 35  (low byte of 0x0123)
     s.buf[2] = (uint8_t)512;       // expect 0   (low byte of 0x0200)
     s.buf[3] = (uint8_t)0xff;      // expect 255
-    _tinyc_print((int64_t)s.buf[0]);
-    _tinyc_print((int64_t)s.buf[1]);
-    _tinyc_print((int64_t)s.buf[2]);
-    _tinyc_print((int64_t)s.buf[3]);
-    _tinyc_print((int64_t)s.after);
+    printf("%lld\n", (long long)((int64_t)s.buf[0]));
+    printf("%lld\n", (long long)((int64_t)s.buf[1]));
+    printf("%lld\n", (long long)((int64_t)s.buf[2]));
+    printf("%lld\n", (long long)((int64_t)s.buf[3]));
+    printf("%lld\n", (long long)((int64_t)s.after));
     return 0;
 }
