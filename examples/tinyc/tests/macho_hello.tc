@@ -1,4 +1,5 @@
+extern int printf(const char *fmt, ...);
 int main() {
-    _tinyc_print(3);
+    printf("%lld\n", (long long)(3));
     return 0;
 }

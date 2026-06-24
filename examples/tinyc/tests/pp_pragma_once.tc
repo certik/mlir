@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // pragma once: pp_a.h is included transitively via pp_b.h AND directly.
 // Without pragma once we'd get a duplicate-symbol error from emitting
 // once_value twice.
@@ -5,7 +6,7 @@
 #include "pp_b.h"
 
 int main() {
-    _tinyc_print(once_value()); // 7
-    _tinyc_print(b_call());     // 7
+    printf("%lld\n", (long long)(once_value())); // 7
+    printf("%lld\n", (long long)(b_call()));     // 7
     return 0;
 }

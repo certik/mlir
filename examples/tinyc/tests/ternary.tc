@@ -1,16 +1,17 @@
+extern int printf(const char *fmt, ...);
 int abs_val(int n) {
     return n < 0 ? -n : n;
 }
 
 int main() {
-    _tinyc_print(abs_val(-7));
-    _tinyc_print(abs_val(3));
+    printf("%lld\n", (long long)(abs_val(-7)));
+    printf("%lld\n", (long long)(abs_val(3)));
     int x = 5;
     int y = x > 0 ? x : 0;
-    _tinyc_print(y);
+    printf("%lld\n", (long long)(y));
     int z = x > 100 ? 1 : x > 10 ? 2 : 3;
-    _tinyc_print(z);
+    printf("%lld\n", (long long)(z));
     int big = 1000;
-    _tinyc_print(big > 500 ? 1 : 0);
+    printf("%lld\n", (long long)(big > 500 ? 1 : 0));
     return 0;
 }

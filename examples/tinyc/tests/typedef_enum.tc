@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // `typedef enum { ... } Name;` registers Name as a typedef for int and
 // brings the enumerators into scope as int constants.
 typedef enum {
@@ -15,8 +16,8 @@ int classify(Color c) {
 int main() {
     Color c;
     c = COLOR_GREEN;
-    _tinyc_print(c);            // 1
-    _tinyc_print(classify(c));  // 200
-    _tinyc_print(COLOR_BLUE);   // 2
+    printf("%lld\n", (long long)(c));            // 1
+    printf("%lld\n", (long long)(classify(c)));  // 200
+    printf("%lld\n", (long long)(COLOR_BLUE));   // 2
     return 0;
 }

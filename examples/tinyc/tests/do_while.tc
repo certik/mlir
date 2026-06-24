@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // do-while: body always executes once before condition is tested.
 int main() {
     int i;
@@ -8,14 +9,14 @@ int main() {
         s = s + i;
         i = i + 1;
     } while (i < 5);
-    _tinyc_print(s);  // 0+1+2+3+4 = 10
+    printf("%lld\n", (long long)(s));  // 0+1+2+3+4 = 10
 
     // body runs at least once even when cond is false initially.
     i = 100;
     do {
         i = i + 1;
     } while (i < 0);
-    _tinyc_print(i);  // 101
+    printf("%lld\n", (long long)(i));  // 101
 
     // break / continue inside do-while.
     i = 0;
@@ -26,7 +27,7 @@ int main() {
         if (i == 7) { break; }
         s = s + i;
     } while (i < 100);
-    _tinyc_print(i);  // 7
-    _tinyc_print(s);  // 1+2+4+5+6 = 18
+    printf("%lld\n", (long long)(i));  // 7
+    printf("%lld\n", (long long)(s));  // 1+2+4+5+6 = 18
     return 0;
 }

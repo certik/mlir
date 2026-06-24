@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 struct S { int a; int b; };
 
 struct S mk(int a, int b) { struct S r; r.a = a; r.b = b; return r; }
@@ -9,9 +10,9 @@ int main() {
     int i = 1;
     int cond = 1;
     struct S s = cond ? arr[i] : mk(0, 0);
-    _tinyc_print(s.a + s.b);
+    printf("%lld\n", (long long)(s.a + s.b));
     cond = 0;
     struct S t = cond ? arr[i] : mk(7, 8);
-    _tinyc_print(t.a + t.b);
+    printf("%lld\n", (long long)(t.a + t.b));
     return 0;
 }

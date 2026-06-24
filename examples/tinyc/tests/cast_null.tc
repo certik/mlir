@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // `(void*)0` literal cast should produce a null pointer; functions can
 // then return it where a typed pointer is expected.
 
@@ -13,7 +14,7 @@ int main() {
     Pt *b;
     a = find(-1);
     b = find(7);
-    if (a == ((Pt *)0)) _tinyc_print(1);
-    if (b == ((void*)0)) _tinyc_print(2);
+    if (a == ((Pt *)0)) printf("%lld\n", (long long)(1));
+    if (b == ((void*)0)) printf("%lld\n", (long long)(2));
     return 0;
 }

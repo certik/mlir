@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Exercise the `const` qualifier across the positions a parser-only
 // implementation needs to accept: globals, function return types,
 // function parameters (including `const T*`), local decls, typedef
@@ -26,13 +27,13 @@ int main() {
     CInt a = 3;
     const int b = 4;
     int x = square(a) + square(b);
-    _tinyc_print(x);                       // 25
-    _tinyc_print(N);                       // 7
-    _tinyc_print(read_through(&b));        // 4
-    _tinyc_print(sizeof(const int));       // 4
+    printf("%lld\n", (long long)(x));                       // 25
+    printf("%lld\n", (long long)(N));                       // 7
+    printf("%lld\n", (long long)(read_through(&b)));        // 4
+    printf("%lld\n", (long long)(sizeof(const int)));       // 4
 
     struct Box bx;
     bx.v = 10;
-    _tinyc_print(bx.v);                    // 10
+    printf("%lld\n", (long long)(bx.v));                    // 10
     return 0;
 }

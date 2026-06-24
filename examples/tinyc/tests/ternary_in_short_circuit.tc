@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: a ternary (or any CFG-emitting expression form) used
 // inside the rhs of a short-circuit && / || produced cf.cond_br ops
 // whose successors lived in the OUTER function-body region instead of
@@ -28,32 +29,32 @@ int main(void) {
 
     // Plain case: && with a ternary in the rhs.
     int r1 = (n && (n < 7 ? n : 7));
-    _tinyc_print(r1);
+    printf("%lld\n", (long long)(r1));
 
     // RHS short-circuits away when lhs is 0 — must NOT evaluate ternary.
     int z = 0;
     int r2 = (z && (n < 7 ? n : 7));
-    _tinyc_print(r2);
+    printf("%lld\n", (long long)(r2));
 
     // || version of the same pattern.
     int r3 = (z || (n < 7 ? n : 7));
-    _tinyc_print(r3);
+    printf("%lld\n", (long long)(r3));
 
     // Ternary in rhs of && that itself selects between two ternaries.
     int r4 = (n && (n > 0 ? (n < 7 ? n : 7) : -1));
-    _tinyc_print(r4);
+    printf("%lld\n", (long long)(r4));
 
     // Inside an if condition.
     if (n && (n < 7 ? n : 7)) {
-        _tinyc_print(1);
+        printf("%lld\n", (long long)(1));
     } else {
-        _tinyc_print(0);
+        printf("%lld\n", (long long)(0));
     }
 
     // Inside a call argument.
     int big = 20;
     int r5 = (n && (big < 7 ? big : 7));
-    _tinyc_print(r5);
+    printf("%lld\n", (long long)(r5));
 
     return 0;
 }

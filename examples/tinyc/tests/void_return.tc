@@ -1,10 +1,11 @@
+extern int printf(const char *fmt, ...);
 // `void` return type with a bare `return;` early exit.
 void greet(int n) {
     if (n < 0) {
-        _tinyc_print(-1);
+        printf("%lld\n", (long long)(-1));
         return;
     }
-    _tinyc_print(n);
+    printf("%lld\n", (long long)(n));
 }
 
 int main() {

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: aggregate initializers must allow nested `{...}`
 // for struct-typed fields.
 //
@@ -17,9 +18,9 @@ typedef struct { int kind; Inner text; } Outer;
 
 int main(void) {
     Outer eof = { 7, { 3, 4 } };
-    _tinyc_print(eof.kind);
-    _tinyc_print(eof.text.a);
-    _tinyc_print(eof.text.b);
+    printf("%lld\n", (long long)(eof.kind));
+    printf("%lld\n", (long long)(eof.text.a));
+    printf("%lld\n", (long long)(eof.text.b));
 
     // Multiple nested struct fields + a trailing scalar field.
     typedef struct {
@@ -29,11 +30,11 @@ int main(void) {
         int tail;
     } Multi;
     Multi m = { 11, { 1, 2 }, { 30, 40 }, 99 };
-    _tinyc_print(m.code);
-    _tinyc_print(m.ll.a);
-    _tinyc_print(m.ll.b);
-    _tinyc_print(m.ur.a);
-    _tinyc_print(m.ur.b);
-    _tinyc_print(m.tail);
+    printf("%lld\n", (long long)(m.code));
+    printf("%lld\n", (long long)(m.ll.a));
+    printf("%lld\n", (long long)(m.ll.b));
+    printf("%lld\n", (long long)(m.ur.a));
+    printf("%lld\n", (long long)(m.ur.b));
+    printf("%lld\n", (long long)(m.tail));
     return 0;
 }

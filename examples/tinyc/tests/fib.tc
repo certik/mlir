@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 int fib(int n) {
     int r = 0;
     if (n < 2) {
@@ -9,6 +10,6 @@ int fib(int n) {
 }
 
 int main() {
-    _tinyc_print(fib(10));
+    printf("%lld\n", (long long)(fib(10)));
     return 0;
 }

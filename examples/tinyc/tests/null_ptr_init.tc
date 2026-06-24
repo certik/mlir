@@ -1,12 +1,13 @@
+extern int printf(const char *fmt, ...);
 int main() {
     int *p = 0;
     void *q = 0;
     int **pp = 0;
-    if (p == 0) _tinyc_print(1);
-    if (q == 0) _tinyc_print(2);
-    if (pp == 0) _tinyc_print(3);
+    if (p == 0) printf("%lld\n", (long long)(1));
+    if (q == 0) printf("%lld\n", (long long)(2));
+    if (pp == 0) printf("%lld\n", (long long)(3));
     int x = 7;
     p = &x;
-    if (p != 0) _tinyc_print(*p);
+    if (p != 0) printf("%lld\n", (long long)(*p));
     return 0;
 }

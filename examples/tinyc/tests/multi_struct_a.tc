@@ -1,9 +1,10 @@
+extern int printf(const char *fmt, ...);
 #include "multi_struct_shared.h"
 
 int main() {
     struct Foo s;
     s.x = 4;
     s.y = 7;
-    _tinyc_print(foo_sum(s));    // 11
+    printf("%lld\n", (long long)(foo_sum(s)));    // 11
     return 0;
 }

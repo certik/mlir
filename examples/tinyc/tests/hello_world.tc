@@ -1,6 +1,7 @@
+extern int printf(const char *fmt, ...);
 int main() {
-    _tinyc_print("Hello, world!");
-    _tinyc_print("Foo");
-    _tinyc_print("");
+    printf("%s\n", "Hello, world!");
+    printf("%s\n", "Foo");
+    printf("%s\n", "");
     return 0;
 }

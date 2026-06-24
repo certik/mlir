@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Pass `*p` (a struct rvalue) by value to a function that takes the
 // struct by value. The compiler should treat the deref as a struct
 // source and emit a byval copy.
@@ -7,8 +8,8 @@ struct Point {
 };
 
 void show(struct Point p) {
-    _tinyc_print(p.x);
-    _tinyc_print(p.y);
+    printf("%lld\n", (long long)(p.x));
+    printf("%lld\n", (long long)(p.y));
 }
 
 int main() {

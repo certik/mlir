@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Define a variadic function and consume its varargs via the standard
 // va_list / va_start / va_arg / va_end machinery.
 int sum(int n, ...) {
@@ -16,8 +17,8 @@ int sum(int n, ...) {
 }
 
 int main() {
-    _tinyc_print(sum(3, 10, 20, 30));   // 60
-    _tinyc_print(sum(5, 1, 2, 3, 4, 5)); // 15
-    _tinyc_print(sum(1, 99));            // 99
+    printf("%lld\n", (long long)(sum(3, 10, 20, 30)));   // 60
+    printf("%lld\n", (long long)(sum(5, 1, 2, 3, 4, 5))); // 15
+    printf("%lld\n", (long long)(sum(1, 99)));            // 99
     return 0;
 }

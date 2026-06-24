@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test for tinyc.wasm stack-size: deeply chained `||` with
 // an assignment-yielding-i32 result recurses N levels in emit_expr, and
 // the per-frame locals (scf.if regions/blocks, MLIR_*Handle, EVal, etc.)
@@ -24,9 +25,9 @@ int classify(int t) {
 }
 
 int main() {
-    _tinyc_print(classify(3));   // x=1,y=1 per iter ×3 -> 6
-    _tinyc_print(classify(15));  // x=0,y=0 per iter ×3 -> 0
-    _tinyc_print(classify(11));  // x=0,y=0 per iter ×3 -> 0
-    _tinyc_print(classify(0));   // x=0,y=1 per iter ×3 -> 3
+    printf("%lld\n", (long long)(classify(3)));   // x=1,y=1 per iter ×3 -> 6
+    printf("%lld\n", (long long)(classify(15)));  // x=0,y=0 per iter ×3 -> 0
+    printf("%lld\n", (long long)(classify(11)));  // x=0,y=0 per iter ×3 -> 0
+    printf("%lld\n", (long long)(classify(0)));   // x=0,y=1 per iter ×3 -> 3
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Verifies `S s = {0}` zeroes all bytes of i64/f64/ptr-to-ptr/fnptr fields
 // (regression: tinyc was emitting i32 stores for these, leaving high 32 bits
 // uninitialized).
@@ -20,11 +21,11 @@ int main(void) {
     // The compiler may reuse this stack region for `s` below.
     S s = {0};
     // High bits must be zero.
-    if (s.n != 0) { _tinyc_print(1); return 1; }
-    if (s.pp != 0) { _tinyc_print(2); return 2; }
-    if (s.d != 0.0) { _tinyc_print(3); return 3; }
-    if (s.fp != 0) { _tinyc_print(4); return 4; }
-    if (s.ppi != 0) { _tinyc_print(5); return 5; }
-    _tinyc_print(0);
+    if (s.n != 0) { printf("%lld\n", (long long)(1)); return 1; }
+    if (s.pp != 0) { printf("%lld\n", (long long)(2)); return 2; }
+    if (s.d != 0.0) { printf("%lld\n", (long long)(3)); return 3; }
+    if (s.fp != 0) { printf("%lld\n", (long long)(4)); return 4; }
+    if (s.ppi != 0) { printf("%lld\n", (long long)(5)); return 5; }
+    printf("%lld\n", (long long)(0));
     return 0;
 }

@@ -1,5 +1,6 @@
+extern int printf(const char *fmt, ...);
 int main() {
     int x = 1 + 2;
-    _tinyc_print(x);
+    printf("%lld\n", (long long)(x));
     return 0;
 }

@@ -1,10 +1,11 @@
+extern int printf(const char *fmt, ...);
 int main() {
     int x;
     long long y;
     x = 5;
     y = 10LL;
-    _tinyc_print(x + y);
-    _tinyc_print(y - x);
-    _tinyc_print(y * x);
+    printf("%lld\n", (long long)(x + y));
+    printf("%lld\n", (long long)(y - x));
+    printf("%lld\n", (long long)(y * x));
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: `\xHH...` (hex) escape in string and char literals.
 // Previously tinyc's lexer rejected '\\x' with "unknown escape '\\x'"
 // in both contexts.
@@ -18,21 +19,21 @@ int main(void) {
     // otherwise greedily consume following hex digits (e.g. "\x00asm"
     // would parse as "\x00a" + "sm").
     char *m = "\x00" "asm" "\x01\x00\x00\x00";
-    _tinyc_print((int)m[0]);  // 0
-    _tinyc_print((int)m[1]);  // 'a' = 97
-    _tinyc_print((int)m[2]);  // 's' = 115
-    _tinyc_print((int)m[3]);  // 'm' = 109
-    _tinyc_print((int)m[4]);  // 1
-    _tinyc_print((int)m[5]);  // 0
-    _tinyc_print((int)m[6]);  // 0
-    _tinyc_print((int)m[7]);  // 0
+    printf("%lld\n", (long long)((int)m[0]));  // 0
+    printf("%lld\n", (long long)((int)m[1]));  // 'a' = 97
+    printf("%lld\n", (long long)((int)m[2]));  // 's' = 115
+    printf("%lld\n", (long long)((int)m[3]));  // 'm' = 109
+    printf("%lld\n", (long long)((int)m[4]));  // 1
+    printf("%lld\n", (long long)((int)m[5]));  // 0
+    printf("%lld\n", (long long)((int)m[6]));  // 0
+    printf("%lld\n", (long long)((int)m[7]));  // 0
 
     // Upper- and lower-case hex digits in char literals.
-    _tinyc_print((int)'\x41');  // 'A' = 65
-    _tinyc_print((int)'\x7f');  // 127
+    printf("%lld\n", (long long)((int)'\x41'));  // 'A' = 65
+    printf("%lld\n", (long long)((int)'\x7f'));  // 127
 
     // Greedy multi-digit hex consumption (only stops on non-hex byte).
-    _tinyc_print((int)'\x0a');  // 10 (LF)
+    printf("%lld\n", (long long)((int)'\x0a'));  // 10 (LF)
 
     return 0;
 }

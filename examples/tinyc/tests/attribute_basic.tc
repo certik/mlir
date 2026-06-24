@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test for tinyc parsing of `__attribute__((...))`.
 //
 // tinyc previously failed to compile any source that used GCC/Clang
@@ -30,6 +31,6 @@ int add4(int x) { return x + 4; }
 
 int main() {
     int s = add1(10) + add2(10) + add3(10) + add4(10);
-    _tinyc_print(s);
+    printf("%lld\n", (long long)(s));
     return 0;
 }

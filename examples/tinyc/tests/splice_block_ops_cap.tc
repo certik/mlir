@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test for MLIR_SpliceBlockOps not updating cap_operations.
 //
 // Before the fix, splicing a block's ops into another block kept the
@@ -40,6 +41,6 @@ int main() {
     int f01 = x + 1; int f02 = f01 + 1; int f03 = f02 + 1; int f04 = f03 + 1;
     int f05 = f04 + 1; int f06 = f05 + 1; int f07 = f06 + 1; int f08 = f07 + 1;
     if (f08 > 0) { x = x + f08; }
-    _tinyc_print(x);
+    printf("%lld\n", (long long)(x));
     return 0;
 }

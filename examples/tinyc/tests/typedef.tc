@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 typedef int Int32;
 typedef int* IntPtr;
 
@@ -14,15 +15,15 @@ Int32 add(Int32 a, Int32 b) {
 int main() {
     Int32 x = 7;
     Int32 y = 9;
-    _tinyc_print(add(x, y));      // 16
+    printf("%lld\n", (long long)(add(x, y)));      // 16
 
     IntPtr p = &x;
     *p = 100;
-    _tinyc_print(x);              // 100
+    printf("%lld\n", (long long)(x));              // 100
 
     Point pt;
     pt.x = 3;
     pt.y = 4;
-    _tinyc_print(pt.x + pt.y);    // 7
+    printf("%lld\n", (long long)(pt.x + pt.y));    // 7
     return 0;
 }

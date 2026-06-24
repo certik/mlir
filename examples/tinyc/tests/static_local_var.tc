@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: function-local `static` variables must persist
 // across calls, not be reset to their initializer on every call.
 //
@@ -27,11 +28,11 @@ int second() {
 }
 
 int main() {
-    _tinyc_print(counter());
-    _tinyc_print(counter());
-    _tinyc_print(counter());
-    _tinyc_print(second());
-    _tinyc_print(second());
-    _tinyc_print(counter());
+    printf("%lld\n", (long long)(counter()));
+    printf("%lld\n", (long long)(counter()));
+    printf("%lld\n", (long long)(counter()));
+    printf("%lld\n", (long long)(second()));
+    printf("%lld\n", (long long)(second()));
+    printf("%lld\n", (long long)(counter()));
     return 0;
 }

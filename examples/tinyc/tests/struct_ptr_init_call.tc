@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 struct Pt { int x; int y; };
 
 struct Pt *get0(struct Pt *out) { out->x = 10; out->y = 11; return out; }
@@ -7,10 +8,10 @@ int main() {
     struct Pt s0;
     struct Pt s1;
     struct Pt *p = get0(&s0);
-    _tinyc_print((int64_t)p->x);
-    _tinyc_print((int64_t)p->y);
+    printf("%lld\n", (long long)((int64_t)p->x));
+    printf("%lld\n", (long long)((int64_t)p->y));
     struct Pt *q = (struct Pt *)get1(&s1);
-    _tinyc_print((int64_t)q->x);
-    _tinyc_print((int64_t)q->y);
+    printf("%lld\n", (long long)((int64_t)q->x));
+    printf("%lld\n", (long long)((int64_t)q->y));
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: multi-declarator local declarations where each
 // declarator has its own pointer suffix:
 //
@@ -21,18 +22,18 @@ int main(void) {
     b.v = 22;
 
     Expr *p = &a, *q = &b;
-    _tinyc_print(p->v);
-    _tinyc_print(q->v);
+    printf("%lld\n", (long long)(p->v));
+    printf("%lld\n", (long long)(q->v));
 
     // Mixed: pointer + non-pointer (currently both end up pointers,
     // matching tinyc's existing simplification).
     Expr *r = &a, *s = &b;
-    if (r == p) _tinyc_print(100);
-    if (s == q) _tinyc_print(200);
+    if (r == p) printf("%lld\n", (long long)(100));
+    if (s == q) printf("%lld\n", (long long)(200));
 
     // int* with multiple decls + inits.
     int x = 7, y = 8;
     int *px = &x, *py = &y;
-    _tinyc_print(*px + *py);
+    printf("%lld\n", (long long)(*px + *py));
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: `sizeof <unary-expression>` (no parentheses).
 // Previously tinyc required `sizeof(...)` and erred out at parse time
 // with "expected '(' after sizeof", even though standard C accepts
@@ -11,16 +12,16 @@ int main(void) {
     int arr[5];
     char buf[16];
 
-    _tinyc_print((int)sizeof x);          // 4
-    _tinyc_print((int)sizeof(x));         // 4 (parenthesized form still works)
-    _tinyc_print((int)sizeof arr);        // 20
-    _tinyc_print((int)sizeof(arr));       // 20
-    _tinyc_print((int)sizeof buf);        // 16
-    _tinyc_print((int)sizeof *arr);       // 4 (sizeof unary-deref)
-    _tinyc_print((int)sizeof &x);         // 8 (sizeof unary-addr-of)
+    printf("%lld\n", (long long)((int)sizeof x));          // 4
+    printf("%lld\n", (long long)((int)sizeof(x)));         // 4 (parenthesized form still works)
+    printf("%lld\n", (long long)((int)sizeof arr));        // 20
+    printf("%lld\n", (long long)((int)sizeof(arr)));       // 20
+    printf("%lld\n", (long long)((int)sizeof buf));        // 16
+    printf("%lld\n", (long long)((int)sizeof *arr));       // 4 (sizeof unary-deref)
+    printf("%lld\n", (long long)((int)sizeof &x));         // 8 (sizeof unary-addr-of)
 
     long long ll = 1;
-    _tinyc_print((int)sizeof ll);         // 8
+    printf("%lld\n", (long long)((int)sizeof ll));         // 8
 
     return 0;
 }

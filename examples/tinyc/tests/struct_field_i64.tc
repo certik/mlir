@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Read/write of an int64 struct field through both a struct local and a
 // struct pointer (->).
 typedef struct vec_s {
@@ -16,10 +17,10 @@ int main() {
     v.max = 4LL;
     grow(&v);
     grow(&v);
-    _tinyc_print(v.size);  // 2
-    _tinyc_print(v.max);   // 16
+    printf("%lld\n", (long long)(v.size));  // 2
+    printf("%lld\n", (long long)(v.max));   // 16
     long s;
     s = v.size + v.max;
-    _tinyc_print(s);       // 18
+    printf("%lld\n", (long long)(s));       // 18
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression: tinyc must concatenate adjacent string literals like C.
 // Used heavily in mlir/parser.c (multi-line MLIR text literals).
 int main() {
@@ -5,9 +6,9 @@ int main() {
     s = "hello"
         " "
         "world";
-    _tinyc_print(s[0]);
-    _tinyc_print(s[5]);
-    _tinyc_print(s[6]);
-    _tinyc_print(s[10]);
+    printf("%lld\n", (long long)(s[0]));
+    printf("%lld\n", (long long)(s[5]));
+    printf("%lld\n", (long long)(s[6]));
+    printf("%lld\n", (long long)(s[10]));
     return 0;
 }

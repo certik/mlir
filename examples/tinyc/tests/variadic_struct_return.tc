@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // A variadic function that returns a struct.
 typedef struct point_s {
     int x;
@@ -14,10 +15,10 @@ Point shift(int n, int x0, ...) {
 int main() {
     Point a;
     a = shift(10, 3);
-    _tinyc_print(a.x);  // 13
-    _tinyc_print(a.y);  // 7
+    printf("%lld\n", (long long)(a.x));  // 13
+    printf("%lld\n", (long long)(a.y));  // 7
     a = shift(20, 5, 99, 88);
-    _tinyc_print(a.x);  // 25
-    _tinyc_print(a.y);  // 15
+    printf("%lld\n", (long long)(a.x));  // 25
+    printf("%lld\n", (long long)(a.y));  // 15
     return 0;
 }

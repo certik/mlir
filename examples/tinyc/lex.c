@@ -25,7 +25,6 @@ static TcTokKind keyword_or_ident(string s) {
     if (str_eq(s, str_lit("for")))      return TC_TK_KW_FOR;
     if (str_eq(s, str_lit("break")))    return TC_TK_KW_BREAK;
     if (str_eq(s, str_lit("continue"))) return TC_TK_KW_CONTINUE;
-    if (str_eq(s, str_lit("_tinyc_print")))    return TC_TK_KW_PRINT;
     if (str_eq(s, str_lit("struct")))   return TC_TK_KW_STRUCT;
     if (str_eq(s, str_lit("union")))    return TC_TK_KW_UNION;
     if (str_eq(s, str_lit("null")))     return TC_TK_KW_NULL;

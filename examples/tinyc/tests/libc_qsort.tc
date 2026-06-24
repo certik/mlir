@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // libc interop: qsort with a tinyC function pointer comparator.
 extern void qsort(void *base, long nmemb, long size, int (*cmp)(void *, void *));
 
@@ -22,7 +23,7 @@ int main() {
     int i;
     i = 0;
     while (i < 6) {
-        _tinyc_print(a[i]);
+        printf("%lld\n", (long long)(a[i]));
         i = i + 1;
     }
     return 0;

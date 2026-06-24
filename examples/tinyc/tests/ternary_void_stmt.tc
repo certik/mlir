@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression: a ternary whose arms are both void-typed used as a
 // statement (the shape produced by the standard `assert(cond)` macro
 // expansion `((cond) ? (void)0 : abort())`) must compile cleanly.
@@ -6,7 +7,7 @@
 // statement)" instead of lowering the ternary as an if/else.
 
 void noisy(void) {
-    _tinyc_print(99);
+    printf("%lld\n", (long long)(99));
 }
 
 // Mirrors the shape of <assert.h>'s `assert(cond)` exactly: a ternary
@@ -18,8 +19,8 @@ void noisy(void) {
 int main(void) {
     int x = 1;
     CHECK(x == 1);          // true arm: prints nothing
-    _tinyc_print(1);
+    printf("%lld\n", (long long)(1));
     CHECK(x == 2);          // false arm: prints 99
-    _tinyc_print(2);
+    printf("%lld\n", (long long)(2));
     return 0;
 }

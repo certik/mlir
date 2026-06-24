@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Build a singly-linked list 1 -> 2 -> 3, traverse to compute sum,
 // then free the nodes. Exercises pointer-typed struct fields, malloc,
 // free, sizeof, the (struct Node*) cast, and the `null` sentinel.
@@ -27,7 +28,7 @@ int main() {
     a->value = 1; a->next = b;
     b->value = 2; b->next = c;
     c->value = 3; c->next = null;
-    _tinyc_print(sum_list(a));
+    printf("%lld\n", (long long)(sum_list(a)));
     free(a); free(b); free(c);
     return 0;
 }

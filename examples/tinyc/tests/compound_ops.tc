@@ -1,26 +1,27 @@
+extern int printf(const char *fmt, ...);
 int main() {
     int x = 10;
     x += 5;
-    _tinyc_print(x);
+    printf("%lld\n", (long long)(x));
     x -= 2;
-    _tinyc_print(x);
+    printf("%lld\n", (long long)(x));
     x *= 3;
-    _tinyc_print(x);
+    printf("%lld\n", (long long)(x));
     x /= 4;
-    _tinyc_print(x);
+    printf("%lld\n", (long long)(x));
     x %= 5;
-    _tinyc_print(x);
+    printf("%lld\n", (long long)(x));
     x = 0;
     int i;
     for (i = 0; i < 5; i = i + 1) {
         x += i;
     }
-    _tinyc_print(x);
+    printf("%lld\n", (long long)(x));
     int j = 0;
     j++;
     j++;
-    _tinyc_print(j);
+    printf("%lld\n", (long long)(j));
     j--;
-    _tinyc_print(j);
+    printf("%lld\n", (long long)(j));
     return 0;
 }

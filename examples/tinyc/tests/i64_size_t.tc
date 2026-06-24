@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 size_t triangle(size_t n) {
     size_t s;
     size_t i;
@@ -11,8 +12,8 @@ size_t triangle(size_t n) {
 }
 
 int main() {
-    _tinyc_print(triangle(10LL));
-    _tinyc_print(triangle(100LL));
-    _tinyc_print(triangle(0LL));
+    printf("%lld\n", (long long)(triangle(10LL)));
+    printf("%lld\n", (long long)(triangle(100LL)));
+    printf("%lld\n", (long long)(triangle(0LL)));
     return 0;
 }

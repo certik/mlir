@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Storage-class qualifiers: parser-only acceptance.
 
 static int counter = 0;
@@ -16,12 +17,12 @@ static inline int squared(int n) {
 inline static int cubed(int n);  // forward decl with both, swapped
 
 int main() {
-    _tinyc_print(incr());
-    _tinyc_print(incr());
-    _tinyc_print(incr());
-    _tinyc_print(squared(5));
-    _tinyc_print(cubed(3));
-    _tinyc_print(kSeed + kSeed2);
+    printf("%lld\n", (long long)(incr()));
+    printf("%lld\n", (long long)(incr()));
+    printf("%lld\n", (long long)(incr()));
+    printf("%lld\n", (long long)(squared(5)));
+    printf("%lld\n", (long long)(cubed(3)));
+    printf("%lld\n", (long long)(kSeed + kSeed2));
     return 0;
 }
 

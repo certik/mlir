@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression: a user `extern` declaration of malloc/free must NOT cause
 // duplicate symbols. Previously the emitter unconditionally emitted its
 // own malloc/free decls in addition to the user forward decl.
@@ -9,8 +10,8 @@ int main() {
     p = (int*)malloc(16);
     p[0] = 42;
     p[1] = 99;
-    _tinyc_print(p[0]);
-    _tinyc_print(p[1]);
+    printf("%lld\n", (long long)(p[0]));
+    printf("%lld\n", (long long)(p[1]));
     free(p);
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // _Generic on a ternary expression whose then/else branches both return
 // `char*`. The static type of the ternary is `char*`, regardless of the
 // condition's type. The matcher must see `char*` here, not the
@@ -19,6 +20,6 @@ int main() {
                  char*:   "got-char-ptr",
                  int:     "got-int",
                  default: "got-other");
-    _tinyc_print(r);
+    printf("%s\n", r);
     return 0;
 }

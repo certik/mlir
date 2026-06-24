@@ -1,10 +1,11 @@
+extern int printf(const char *fmt, ...);
 int main() {
-    _tinyc_print(0755);
-    _tinyc_print(010);
-    _tinyc_print(0);
-    _tinyc_print(0777);
-    _tinyc_print(0x1F);
-    _tinyc_print(100);
-    _tinyc_print(01000);
+    printf("%lld\n", (long long)(0755));
+    printf("%lld\n", (long long)(010));
+    printf("%lld\n", (long long)(0));
+    printf("%lld\n", (long long)(0777));
+    printf("%lld\n", (long long)(0x1F));
+    printf("%lld\n", (long long)(100));
+    printf("%lld\n", (long long)(01000));
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Anonymous struct typedef and tag-only struct typedef both register
 // a struct that can be used by the typedef name.
 typedef struct {
@@ -14,11 +15,11 @@ int main() {
     Point p;
     p.x = 3;
     p.y = 4;
-    _tinyc_print(p.x + p.y);  // 7
+    printf("%lld\n", (long long)(p.x + p.y));  // 7
 
     Box b;
     b.w = 5;
     b.h = 6;
-    _tinyc_print(b.w * b.h);  // 30
+    printf("%lld\n", (long long)(b.w * b.h));  // 30
     return 0;
 }

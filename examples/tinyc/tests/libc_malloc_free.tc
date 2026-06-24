@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // libc interop: user-declared extern malloc/free must coexist with the
 // emitter-internal decls (regression for PR #118 dedup logic). Use
 // explicit casts and write/read through the pointer.
@@ -13,7 +14,7 @@ int main() {
     p[3] = 44;
     int sum;
     sum = p[0] + p[1] + p[2] + p[3];
-    _tinyc_print(sum);
+    printf("%lld\n", (long long)(sum));
     free(p);
     return 0;
 }

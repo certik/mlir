@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression: a user *definition* (not just a forward decl) of malloc/free
 // must NOT collide with the emitter's auto-injected libc decl. Previously
 // only forward decls suppressed the auto-decl, so defining malloc in the
@@ -21,8 +22,8 @@ int main() {
     p = (int*)malloc(8);
     p[0] = 7;
     p[1] = 13;
-    _tinyc_print(p[0]);
-    _tinyc_print(p[1]);
+    printf("%lld\n", (long long)(p[0]));
+    printf("%lld\n", (long long)(p[1]));
     free(p);
     return 0;
 }

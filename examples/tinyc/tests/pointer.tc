@@ -1,8 +1,9 @@
+extern int printf(const char *fmt, ...);
 int main() {
     int x = 10;
     int* p = &x;
     *p = 42;
-    _tinyc_print(x);    // 42
-    _tinyc_print(*p);   // 42
+    printf("%lld\n", (long long)(x));    // 42
+    printf("%lld\n", (long long)(*p));   // 42
     return 0;
 }

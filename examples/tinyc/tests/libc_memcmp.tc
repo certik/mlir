@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // libc interop: memcmp on int arrays initialized in tinyC.
 extern int memcmp(void *a, void *b, long n);
 
@@ -18,8 +19,8 @@ int main() {
     pa = &a[0]; pb = &b[0]; pc = &c[0];
     long n;
     n = sizeof(int) * 3;
-    _tinyc_print(sign(memcmp(pa, pb, n)));
-    _tinyc_print(sign(memcmp(pa, pc, n)));
-    _tinyc_print(sign(memcmp(pc, pa, n)));
+    printf("%lld\n", (long long)(sign(memcmp(pa, pb, n))));
+    printf("%lld\n", (long long)(sign(memcmp(pa, pc, n))));
+    printf("%lld\n", (long long)(sign(memcmp(pc, pa, n))));
     return 0;
 }

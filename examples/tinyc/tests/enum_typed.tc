@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // `enum Tag` is accepted as a type-spec wherever `int` is — parameters,
 // return type, locals, and as a typedef target. Internally it's just int.
 enum Color { K_RED = 1, K_GREEN, K_BLUE };
@@ -20,19 +21,19 @@ Color darken(Color c) {
 
 int main() {
     enum Color c = K_RED;
-    _tinyc_print(c);                  // 1
+    printf("%lld\n", (long long)(c));                  // 1
     c = brighten(c);
-    _tinyc_print(c);                  // 2  (K_GREEN)
+    printf("%lld\n", (long long)(c));                  // 2  (K_GREEN)
     c = brighten(c);
-    _tinyc_print(c);                  // 3  (K_BLUE)
+    printf("%lld\n", (long long)(c));                  // 3  (K_BLUE)
 
     Color d = darken(c);
-    _tinyc_print(d);                  // 2
+    printf("%lld\n", (long long)(d));                  // 2
     d = darken(d);
-    _tinyc_print(d);                  // 1
+    printf("%lld\n", (long long)(d));                  // 1
 
     // Mixed arithmetic with int.
     int n = K_BLUE + K_GREEN;
-    _tinyc_print(n);                  // 5
+    printf("%lld\n", (long long)(n));                  // 5
     return 0;
 }

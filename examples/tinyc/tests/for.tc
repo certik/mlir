@@ -1,9 +1,10 @@
+extern int printf(const char *fmt, ...);
 int main() {
     int s = 0;
     for (int i = 1; i <= 10; i = i + 1) {
         s = s + i;
     }
-    _tinyc_print(s);   // 55
+    printf("%lld\n", (long long)(s));   // 55
 
     // for with break
     int t = 0;
@@ -11,6 +12,6 @@ int main() {
         if (i > 4) { break; }
         t = t + i;
     }
-    _tinyc_print(t);   // 0+1+2+3+4 = 10
+    printf("%lld\n", (long long)(t));   // 0+1+2+3+4 = 10
     return 0;
 }

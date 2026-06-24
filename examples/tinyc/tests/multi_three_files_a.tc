@@ -1,9 +1,10 @@
+extern int printf(const char *fmt, ...);
 int b_func(int x);
 int c_func(int x);
 
 int main() {
-    _tinyc_print(b_func(10));        // 20
-    _tinyc_print(c_func(10));        // 100
-    _tinyc_print(b_func(c_func(2))); // c_func(2)=4, b_func(4)=8
+    printf("%lld\n", (long long)(b_func(10)));        // 20
+    printf("%lld\n", (long long)(c_func(10)));        // 100
+    printf("%lld\n", (long long)(b_func(c_func(2)))); // c_func(2)=4, b_func(4)=8
     return 0;
 }

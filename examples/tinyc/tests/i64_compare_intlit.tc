@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Regression test: comparing an i64 lvalue against an unsuffixed int
 // literal should emit a properly-typed wasm comparison. Specifically,
 // switch() on an `int64_t` previously emitted `i32.const N` for each
@@ -31,19 +32,19 @@ int classify(long long v) {
 int main() {
     g_count = 1;
     if (g_count == 1) {
-        _tinyc_print(10);
+        printf("%lld\n", (long long)(10));
     }
     g_count = 5;
     if (g_count == 5) {
-        _tinyc_print(20);
+        printf("%lld\n", (long long)(20));
     }
     long long x = get_one();
     if (x != 0) {
-        _tinyc_print(30);
+        printf("%lld\n", (long long)(30));
     }
-    _tinyc_print(classify(1));
-    _tinyc_print(classify(3));
-    _tinyc_print(classify(6));
-    _tinyc_print(classify(99));
+    printf("%lld\n", (long long)(classify(1)));
+    printf("%lld\n", (long long)(classify(3)));
+    printf("%lld\n", (long long)(classify(6)));
+    printf("%lld\n", (long long)(classify(99)));
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // `Td *` where Td is a typedef for `long`/i64 must yield a 64-bit pointer.
 
 typedef long Long;
@@ -13,10 +14,10 @@ int main() {
     Long *p;
     p = (Long *)malloc(sizeof(long) * 4);
     fill(p, 4);
-    _tinyc_print(p[0]);
-    _tinyc_print(p[1]);
-    _tinyc_print(p[2]);
-    _tinyc_print(p[3]);
+    printf("%lld\n", (long long)(p[0]));
+    printf("%lld\n", (long long)(p[1]));
+    printf("%lld\n", (long long)(p[2]));
+    printf("%lld\n", (long long)(p[3]));
     free(p);
     return 0;
 }

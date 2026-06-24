@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 int sum_to(int n) {
     int i = 1;
     int s = 0;
@@ -10,6 +11,6 @@ int sum_to(int n) {
 
 int main() {
     int x = sum_to(10);
-    _tinyc_print(x);
+    printf("%lld\n", (long long)(x));
     return 0;
 }

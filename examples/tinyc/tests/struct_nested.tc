@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 struct Inner {
     int x;
     int y;
@@ -29,17 +30,17 @@ int main() {
     o.i.x = 10;
     o.i.y = 20;
     o.z = 30;
-    _tinyc_print(o.i.x);
-    _tinyc_print(o.i.y);
-    _tinyc_print(o.z);
-    _tinyc_print(sum(o));
-    _tinyc_print(sum_via_ptr(&o));
+    printf("%lld\n", (long long)(o.i.x));
+    printf("%lld\n", (long long)(o.i.y));
+    printf("%lld\n", (long long)(o.z));
+    printf("%lld\n", (long long)(sum(o)));
+    printf("%lld\n", (long long)(sum_via_ptr(&o)));
 
     struct Outer m;
     m = make();
-    _tinyc_print(m.i.x);
-    _tinyc_print(m.i.y);
-    _tinyc_print(m.z);
-    _tinyc_print(sum(m));
+    printf("%lld\n", (long long)(m.i.x));
+    printf("%lld\n", (long long)(m.i.y));
+    printf("%lld\n", (long long)(m.z));
+    printf("%lld\n", (long long)(sum(m)));
     return 0;
 }

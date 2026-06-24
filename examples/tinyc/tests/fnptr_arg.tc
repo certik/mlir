@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 int add(int a, int b) {
     return a + b;
 }
@@ -11,7 +12,7 @@ int apply(int (*op)(int, int), int x, int y) {
 }
 
 int main() {
-    _tinyc_print(apply(&add, 5, 7));
-    _tinyc_print(apply(mul, 6, 7));
+    printf("%lld\n", (long long)(apply(&add, 5, 7)));
+    printf("%lld\n", (long long)(apply(mul, 6, 7)));
     return 0;
 }

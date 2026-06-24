@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 struct S { int a; int b; };
 
 struct S t() { struct S r; r.a = 1; r.b = 2; return r; }
@@ -7,8 +8,8 @@ struct S choose(int c) { return c ? t() : f(); }
 
 int main() {
     struct S r = choose(1);
-    _tinyc_print(r.a + r.b);
+    printf("%lld\n", (long long)(r.a + r.b));
     struct S q = choose(0);
-    _tinyc_print(q.a + q.b);
+    printf("%lld\n", (long long)(q.a + q.b));
     return 0;
 }

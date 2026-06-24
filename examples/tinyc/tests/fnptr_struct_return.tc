@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 struct S { int a; int b; };
 
 struct S make(int x) {
@@ -12,8 +13,8 @@ typedef struct S (*Fn)(int);
 int main() {
     Fn f = make;
     struct S r = f(7);
-    _tinyc_print(r.a);
-    _tinyc_print(r.b);
-    _tinyc_print(r.a + r.b);
+    printf("%lld\n", (long long)(r.a));
+    printf("%lld\n", (long long)(r.b));
+    printf("%lld\n", (long long)(r.a + r.b));
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 int main() {
     int a[5];
     int i = 0;
@@ -8,7 +9,7 @@ int main() {
     for (i = 0; i < 5; i = i + 1) {
         sum = sum + a[i];
     }
-    _tinyc_print(sum);          // 0+1+4+9+16 = 30
-    _tinyc_print(a[3]);         // 9
+    printf("%lld\n", (long long)(sum));          // 0+1+4+9+16 = 30
+    printf("%lld\n", (long long)(a[3]));         // 9
     return 0;
 }

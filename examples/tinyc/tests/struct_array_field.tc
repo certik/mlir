@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // Struct with a 1D array-of-int field. Exercises field-array reads,
 // writes, &field[i] address-of, and pointer arithmetic on that address.
 
@@ -25,16 +26,16 @@ int main() {
         b.data[i] = i * i;
         i = i + 1;
     }
-    _tinyc_print(b.n);          // 8
-    _tinyc_print(b.data[0]);    // 0
-    _tinyc_print(b.data[3]);    // 9
-    _tinyc_print(b.data[7]);    // 49
+    printf("%lld\n", (long long)(b.n));          // 8
+    printf("%lld\n", (long long)(b.data[0]));    // 0
+    printf("%lld\n", (long long)(b.data[3]));    // 9
+    printf("%lld\n", (long long)(b.data[7]));    // 49
 
     // &b.data[i] yields int*; pointer arithmetic must work.
     int* p = &b.data[0];
-    _tinyc_print(*p);           // 0
+    printf("%lld\n", (long long)(*p));           // 0
     p = p + 5;
-    _tinyc_print(*p);           // 25
-    _tinyc_print(sum_via_ptr(&b.data[0], b.n));  // 0+1+4+9+16+25+36+49 = 140
+    printf("%lld\n", (long long)(*p));           // 25
+    printf("%lld\n", (long long)(sum_via_ptr(&b.data[0], b.n)));  // 0+1+4+9+16+25+36+49 = 140
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // `void*` as a generic pointer type. Round-trip a pointer through a
 // `void*` slot, dereference after casting back, pass `void*` through a
 // callback-style function, and use `void*` as a struct field.
@@ -21,29 +22,29 @@ int main() {
     void* vp = &x;       // typed pointer -> void*
 
     int* ip = (int*)vp;  // void* -> typed pointer
-    _tinyc_print(*ip);          // 17
+    printf("%lld\n", (long long)(*ip));          // 17
 
-    _tinyc_print(read_through(&x));  // 17
+    printf("%lld\n", (long long)(read_through(&x)));  // 17
 
     // void* round-trip through a function.
     void* vq = identity(vp);
     int* iq = (int*)vq;
     *iq = 99;
-    _tinyc_print(x);                 // 99
+    printf("%lld\n", (long long)(x));                 // 99
 
     // void* as a struct field.
     struct Box b;
     b.value = 5;
     b.ctx = &x;
     int* ic = (int*)b.ctx;
-    _tinyc_print(*ic);               // 99
-    _tinyc_print(b.value);           // 5
+    printf("%lld\n", (long long)(*ic));               // 99
+    printf("%lld\n", (long long)(b.value));           // 5
 
     // void** works too.
     void* arr_ctx = vp;
     void* alias = arr_ctx;
     int* ia = (int*)alias;
-    _tinyc_print(*ia);               // 99
+    printf("%lld\n", (long long)(*ia));               // 99
 
     return 0;
 }

@@ -80,12 +80,6 @@ typedef struct LowerState {
     MLIR_OpHandle module;
     MLIR_BlockHandle module_body;
 
-    // vector.print runtime helpers, declared lazily once per pass.
-    bool vp_decl_i64;
-    bool vp_decl_newline;
-    bool vp_decl_f32;
-    bool vp_decl_f64;
-
     // When true, the walker preserves scf.* control-flow ops and skips
     // any cf->llvm rewrites: the wasm pipeline expects the post-lift
     // scf-form to survive into the wasmssa lowering. Set by
@@ -93,149 +87,9 @@ typedef struct LowerState {
     bool keep_scf;
 } LowerState;
 
-// Append an `llvm.func` declaration (no body) to the module body. Used
-// to declare runtime helpers like `printI64` referenced by the lowered
-// `vector.print`. Always void-returning for now (covers our needs).
-static void append_llvm_func_decl(LowerState *st, const char *name,
-                                  MLIR_TypeHandle *params, size_t n_params) {
-    MLIR_TypeHandle fn_ty = MLIR_CreateTypeLLVMFunction(
-        st->ctx, ty_llvm_void(st->ctx), params, n_params, false);
-    size_t name_len = 0; while (name[name_len]) name_len++;
-    string name_str = str_from_cstr_len_view_const(name, name_len);
-    MLIR_AttributeHandle attrs[2];
-    attrs[0] = MLIR_CreateAttributeString(st->ctx, str_lit("sym_name"),
-                                          name_str);
-    attrs[1] = MLIR_CreateAttributeType(st->ctx, str_lit("function_type"),
-                                        fn_ty);
-    MLIR_RegionHandle empty_region = MLIR_CreateRegion(st->ctx);
-    MLIR_OpHandle decl = create_simple_op(
-        st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.func"),
-        attrs, 2, NULL, 0, NULL, 0, NULL, 0,
-        &empty_region, 1,
-        MLIR_CreateLocationUnknown(st->ctx, str_lit("")));
-    MLIR_AppendBlockOp(st->ctx, st->module_body, decl);
-}
-
-static bool module_has_symbol(LowerState *st, const char *name) {
-    size_t name_len = 0; while (name[name_len]) name_len++;
-    string llvm_func = str_lit("llvm.func");
-    string func_func = str_lit("func.func");
-    size_t n = MLIR_GetBlockNumOps(st->module_body);
-    for (size_t i = 0; i < n; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(st->module_body, i);
-        string opname = MLIR_GetOpName(op);
-        if (!str_eq(opname, llvm_func) && !str_eq(opname, func_func)) continue;
-        MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(op, "sym_name");
-        if (a == MLIR_INVALID_HANDLE) continue;
-        string sym = MLIR_GetAttributeString(a);
-        if (sym.size == name_len && memcmp(sym.str, name, name_len) == 0)
-            return true;
-    }
-    return false;
-}
-
-static void ensure_vp_decl_i64(LowerState *st) {
-    if (st->vp_decl_i64) return;
-    if (module_has_symbol(st, "printI64")) { st->vp_decl_i64 = true; return; }
-    MLIR_TypeHandle params[1] = { ty_i64(st->ctx) };
-    append_llvm_func_decl(st, "printI64", params, 1);
-    st->vp_decl_i64 = true;
-}
-
-static void ensure_vp_decl_f32(LowerState *st) {
-    if (st->vp_decl_f32) return;
-    if (module_has_symbol(st, "printF32")) { st->vp_decl_f32 = true; return; }
-    MLIR_TypeHandle params[1] = { MLIR_CreateTypeFloat(st->ctx, 32, false) };
-    append_llvm_func_decl(st, "printF32", params, 1);
-    st->vp_decl_f32 = true;
-}
-
-static void ensure_vp_decl_f64(LowerState *st) {
-    if (st->vp_decl_f64) return;
-    if (module_has_symbol(st, "printF64")) { st->vp_decl_f64 = true; return; }
-    MLIR_TypeHandle params[1] = { MLIR_CreateTypeFloat(st->ctx, 64, false) };
-    append_llvm_func_decl(st, "printF64", params, 1);
-    st->vp_decl_f64 = true;
-}
-
-static void ensure_vp_decl_newline(LowerState *st) {
-    if (st->vp_decl_newline) return;
-    if (module_has_symbol(st, "printNewline")) { st->vp_decl_newline = true; return; }
-    append_llvm_func_decl(st, "printNewline", NULL, 0);
-    st->vp_decl_newline = true;
-}
-
 // -----------------------------------------------------------------------------
 // Per-op lowering helpers
 // -----------------------------------------------------------------------------
-
-// Lower a `vector.print %x : T`. Sign-extends T to i64 (when needed),
-// calls `printI64`, then `printNewline`. Matches what the upstream
-// VectorToLLVM pass produces for tinyC's `vector.print<i32>`.
-static bool lower_vector_print(LowerState *st, MLIR_OpHandle op,
-                               MLIR_BlockHandle parent, size_t pos) {
-    if (MLIR_GetOpNumOperands(op) != 1) return false;
-    MLIR_ValueHandle x = MLIR_GetOpOperand(op, 0);
-    MLIR_TypeHandle xty = MLIR_GetValueType(x);
-    MLIR_LocationHandle loc = MLIR_GetOpLocation(op);
-
-    string ts = MLIR_GetTypeString(st->ctx, xty);
-    bool is_f32 = ts.size == 3 && ts.str[0] == 'f' && ts.str[1] == '3' && ts.str[2] == '2';
-    bool is_f64 = ts.size == 3 && ts.str[0] == 'f' && ts.str[1] == '6' && ts.str[2] == '4';
-
-    const char *callee;
-    MLIR_ValueHandle arg = x;
-    if (is_f32) {
-        ensure_vp_decl_f32(st);
-        callee = "printF32";
-    } else if (is_f64) {
-        ensure_vp_decl_f64(st);
-        callee = "printF64";
-    } else {
-        ensure_vp_decl_i64(st);
-        callee = "printI64";
-        // Sign-extend integers to i64 unless already i64.
-        if (MLIR_IsTypeInteger(xty) &&
-            !(ts.size == 3 && ts.str[0] == 'i' && ts.str[1] == '6' && ts.str[2] == '4')) {
-            MLIR_TypeHandle i64 = ty_i64(st->ctx);
-            MLIR_ValueHandle res = make_result_value(st->ctx, i64, loc);
-            MLIR_TypeHandle rts[1] = { i64 };
-            MLIR_ValueHandle results[1] = { res };
-            MLIR_ValueHandle ops[1] = { x };
-            MLIR_OpHandle sext = create_simple_op(
-                st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.sext"),
-                NULL, 0, rts, 1, results, 1, ops, 1, NULL, 0, loc);
-            MLIR_InsertBlockOpAtIndex(st->ctx, parent, sext, pos++);
-            arg = res;
-        }
-    }
-    ensure_vp_decl_newline(st);
-
-    {
-        MLIR_AttributeHandle attrs[1];
-        size_t cl = 0; while (callee[cl]) cl++;
-        attrs[0] = MLIR_CreateAttributeSymbolRef(
-            st->ctx, str_lit("callee"),
-            str_from_cstr_len_view_const(callee, cl));
-        MLIR_ValueHandle ops[1] = { arg };
-        MLIR_OpHandle call = create_simple_op(
-            st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.call"),
-            attrs, 1, NULL, 0, NULL, 0, ops, 1, NULL, 0, loc);
-        MLIR_InsertBlockOpAtIndex(st->ctx, parent, call, pos++);
-    }
-
-    {
-        MLIR_AttributeHandle attrs[1];
-        attrs[0] = MLIR_CreateAttributeSymbolRef(
-            st->ctx, str_lit("callee"), str_lit("printNewline"));
-        MLIR_OpHandle call = create_simple_op(
-            st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.call"),
-            attrs, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, loc);
-        MLIR_InsertBlockOpAtIndex(st->ctx, parent, call, pos++);
-    }
-
-    return true;
-}
 
 // Lower an `arith.constant value : T` to `llvm.mlir.constant(value : T) : T`.
 // Same operand/result shape — just re-create with the right name and the
@@ -814,7 +668,6 @@ static int try_lower_op(LowerState *st, MLIR_OpHandle op,
              name_eq(name, "unrealized_conversion_cast"))
                                          ok = lower_unrealized_cast(st, op, parent, pos);
     else if (name_eq(name, "arith.constant")) ok = lower_arith_constant(st, op, parent, pos);
-    else if (name_eq(name, "vector.print"))   ok = lower_vector_print(st, op, parent, pos);
     else if (name_eq(name, "arith.addi"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.add"),  OP_TYPE_UNREGISTERED);
     else if (name_eq(name, "arith.subi"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.sub"),  OP_TYPE_UNREGISTERED);
     else if (name_eq(name, "arith.muli"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.mul"),  OP_TYPE_UNREGISTERED);

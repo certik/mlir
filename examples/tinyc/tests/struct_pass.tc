@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 struct Point {
     int x;
     int y;
@@ -41,31 +42,31 @@ int main() {
     b.x = 3;
     b.y = 4;
 
-    _tinyc_print(dot(a, b));            // 1*3 + 2*4 = 11
+    printf("%lld\n", (long long)(dot(a, b)));            // 1*3 + 2*4 = 11
 
     struct Point c;
     c = add(a, b);
-    _tinyc_print(c.x);                   // 4
-    _tinyc_print(c.y);                   // 6
+    printf("%lld\n", (long long)(c.x));                   // 4
+    printf("%lld\n", (long long)(c.y));                   // 6
 
     struct Point d;
     d = scale(c, 5);
-    _tinyc_print(d.x);                   // 20
-    _tinyc_print(d.y);                   // 30
+    printf("%lld\n", (long long)(d.x));                   // 20
+    printf("%lld\n", (long long)(d.y));                   // 30
 
     // Struct-returning call result, then pass that struct as an arg
     struct Point e2;
     e2 = scale_helper_ok();
     struct Point e;
     e = add(e2, b);
-    _tinyc_print(e.x);                   // 10 + 3 = 13
-    _tinyc_print(e.y);                   // 20 + 4 = 24
+    printf("%lld\n", (long long)(e.x));                   // 10 + 3 = 13
+    printf("%lld\n", (long long)(e.y));                   // 20 + 4 = 24
 
     // Mixed scalar + struct params, struct return with float field
     struct Stat s;
     s = make_stat(7, 3.5);
-    _tinyc_print(s.n);                   // 7
-    _tinyc_print(s.mean);                // 3.5
+    printf("%lld\n", (long long)(s.n));                   // 7
+    printf("%g\n", (double)(s.mean));                // 3.5
     return 0;
 }
 

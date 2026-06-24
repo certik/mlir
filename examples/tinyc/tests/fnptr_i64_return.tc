@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 typedef long (*Fn)(int);
 
 long mul100(int x) {
@@ -7,8 +8,8 @@ long mul100(int x) {
 int main() {
     Fn f = mul100;
     long r = f(7);
-    _tinyc_print((int)r);
+    printf("%lld\n", (long long)((int)r));
     long r2 = f(20);
-    _tinyc_print((int)r2);
+    printf("%lld\n", (long long)((int)r2));
     return 0;
 }

@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 // `Td *p;` declares a pointer-to-typedef variable; the parser must
 // recognize this even though `*` (not an IDENT) immediately follows the
 // typedef name.
@@ -10,10 +11,10 @@ int main() {
 
     Point *p;
     p = &a;
-    _tinyc_print(p->x);     // 3
-    _tinyc_print(p->y);     // 4
+    printf("%lld\n", (long long)(p->x));     // 3
+    printf("%lld\n", (long long)(p->y));     // 4
 
     Point *q = &a;
-    _tinyc_print(q->x + q->y);  // 7
+    printf("%lld\n", (long long)(q->x + q->y));  // 7
     return 0;
 }

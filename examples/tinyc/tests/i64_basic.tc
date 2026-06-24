@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 int main() {
     long a;
     long long b;
@@ -5,7 +6,7 @@ int main() {
     a = 100LL;
     b = 200LL;
     c = a + b;
-    _tinyc_print(c);
-    _tinyc_print(c * 3LL);
+    printf("%lld\n", (long long)(c));
+    printf("%lld\n", (long long)(c * 3LL));
     return 0;
 }

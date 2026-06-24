@@ -1,3 +1,4 @@
+extern int printf(const char *fmt, ...);
 int main() {
     int x;
     int *p;
@@ -5,8 +6,8 @@ int main() {
     x = 41;
     p = &x;
     pp = &p;
-    _tinyc_print(**pp);
+    printf("%lld\n", (long long)(**pp));
     **pp = 42;
-    _tinyc_print(x);
+    printf("%lld\n", (long long)(x));
     return 0;
 }

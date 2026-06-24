@@ -105,7 +105,6 @@ static uint8_t type_byte_at(string s, size_t i) {
 // memory and runtime.
 #define LINMEM_GLOBAL  "__wasm_linmem"
 #define LINMEM_BASE_GLOBAL "__wasm_linmem_base"
-#define FMT_NL_GLOBAL  "__wasm_fmt_nl"
 
 // =============================================================================
 // OffsetMap: import_global sym_name -> fixed linear-memory byte offset. Built
@@ -1965,197 +1964,6 @@ static void emit_store_v(FLower *L, MLIR_ValueHandle v, MLIR_ValueHandle p) {
     emit(L, out);
 }
 
-// Emit `_write(fd, ptr, len)` (result discarded). Used by the printI64 /
-// printStr runtime shims (tinyC's own print imports, not the platform layer),
-// which write to stdout via the libSystem `_write` stub directly.
-static void emit_write_call(FLower *L, MLIR_ValueHandle fd, MLIR_ValueHandle p,
-                            MLIR_ValueHandle len) {
-    MLIR_AttributeHandle a[1] = {
-        attr_s(L->ctx, "callee", (char *)"_write", 6)
-    };
-    MLIR_ValueHandle ops[3] = { fd, p, len };
-    MLIR_OpHandle out = build_op(L->ctx, OP_TYPE_LLVM_CALL, a, 1, NULL, 0, NULL, ops, 3);
-    emit(L, out);
-}
-
-// void printNewline(): _write(1, "\n", 1).
-static void synth_print_newline(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
-    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
-    MLIR_BlockHandle  blk = MLIR_CreateBlock(ctx);
-    MLIR_AppendRegionBlock(ctx, reg, blk);
-    MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
-    MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
-    FLower L = {0}; L.ctx = ctx; L.cur = blk;
-    MLIR_ValueHandle p = emit_addressof(&L, FMT_NL_GLOBAL);
-    emit_write_call(&L, emit_const(&L, i32, 1), p, emit_const(&L, i64, 1));
-    MLIR_OpHandle ret = build_op(ctx, OP_TYPE_LLVM_RETURN, NULL, 0, NULL, 0, NULL, NULL, 0);
-    emit(&L, ret);
-    MLIR_AttributeHandle fa[1] = { attr_s(ctx, "sym_name", (char *)"printNewline", 12) };
-    MLIR_RegionHandle regs[1] = { reg };
-    MLIR_OpHandle fn = MLIR_CreateOp(ctx, OP_TYPE_LLVM_FUNC,
-        op_type_to_string(OP_TYPE_LLVM_FUNC), fa, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
-        MLIR_CreateLocationUnknown(ctx, (string){0}), MLIR_INVALID_HANDLE, (string){0}, -1);
-    MLIR_AppendBlockOp(ctx, out_body, fn);
-}
-
-// void printI64(i64 v): format v as decimal into a stack buffer and _write it.
-static void synth_print_i64(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
-    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
-    MLIR_BlockHandle  entry = MLIR_CreateBlock(ctx);
-    MLIR_AppendRegionBlock(ctx, reg, entry);
-
-    MLIR_TypeHandle i8  = MLIR_CreateTypeInteger(ctx, 8, true);
-    MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
-    MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
-
-    MLIR_ValueHandle v = MLIR_CreateValueBlockArg(ctx, (string){0}, 0, i64,
-        MLIR_CreateLocationUnknown(ctx, (string){0}));
-    MLIR_AppendBlockArg(ctx, entry, v);
-
-    FLower L = {0};
-    L.ctx = ctx; L.dreg = reg; L.cur = entry;
-
-    // Stack buffer (32 bytes) + cursor `pos` and working value `u` allocas.
-    MLIR_ValueHandle buf = emit_alloca(&L, i8, 32);
-    MLIR_ValueHandle ppr = emit_alloca(&L, i64, 1);
-    MLIR_ValueHandle upr = emit_alloca(&L, i64, 1);
-    MLIR_ValueHandle npr = emit_alloca(&L, i64, 1);
-    MLIR_ValueHandle c0  = emit_const(&L, i64, 0);
-    MLIR_ValueHandle c32 = emit_const(&L, i64, 32);
-    emit_store_v(&L, c32, ppr);
-
-    MLIR_BlockHandle negb = new_block(&L);
-    MLIR_BlockHandle posb = new_block(&L);
-    MLIR_BlockHandle head = new_block(&L);
-    MLIR_BlockHandle signb = new_block(&L);
-    MLIR_BlockHandle minusb = new_block(&L);
-    MLIR_BlockHandle wblk = new_block(&L);
-
-    MLIR_ValueHandle isneg = build_icmp(&L, /*slt*/2, v, c0);
-    term_cond_br(&L, isneg, negb, posb);
-
-    // negb: u = 0 - v; neg = 1
-    L.cur = negb; L.terminated = false;
-    MLIR_ValueHandle nv = emit_binop2(&L, OP_TYPE_LLVM_SUB, c0, v, i64);
-    emit_store_v(&L, nv, upr);
-    emit_store_v(&L, emit_const(&L, i64, 1), npr);
-    term_br(&L, head);
-
-    // posb: u = v; neg = 0
-    L.cur = posb; L.terminated = false;
-    emit_store_v(&L, v, upr);
-    emit_store_v(&L, emit_const(&L, i64, 0), npr);
-    term_br(&L, head);
-
-    // head: do { digit = u%10; buf[--pos] = '0'+digit; u /= 10; } while (u != 0)
-    L.cur = head; L.terminated = false;
-    MLIR_ValueHandle u = emit_load_ty(&L, upr, i64);
-    MLIR_ValueHandle ten = emit_const(&L, i64, 10);
-    MLIR_ValueHandle rem = emit_binop2(&L, OP_TYPE_LLVM_SREM, u, ten, i64);
-    MLIR_ValueHandle q   = emit_binop2(&L, OP_TYPE_LLVM_SDIV, u, ten, i64);
-    MLIR_ValueHandle ch  = emit_binop2(&L, OP_TYPE_LLVM_ADD, rem, emit_const(&L, i64, 48), i64);
-    MLIR_ValueHandle ch8 = emit_cast(&L, OP_TYPE_LLVM_TRUNC, ch, i8);
-    MLIR_ValueHandle pos = emit_load_ty(&L, ppr, i64);
-    MLIR_ValueHandle pos1 = emit_binop2(&L, OP_TYPE_LLVM_SUB, pos, emit_const(&L, i64, 1), i64);
-    emit_store_v(&L, pos1, ppr);
-    MLIR_ValueHandle bp = emit_byte_ptr(&L, buf, pos1);
-    emit_store_v(&L, ch8, bp);
-    emit_store_v(&L, q, upr);
-    MLIR_ValueHandle nz = build_icmp(&L, /*ne*/1, q, c0);
-    term_cond_br(&L, nz, head, signb);
-
-    // signb: if neg, prepend '-'
-    L.cur = signb; L.terminated = false;
-    MLIR_ValueHandle neg = emit_load_ty(&L, npr, i64);
-    MLIR_ValueHandle isn = build_icmp(&L, /*ne*/1, neg, c0);
-    term_cond_br(&L, isn, minusb, wblk);
-
-    L.cur = minusb; L.terminated = false;
-    MLIR_ValueHandle mp = emit_load_ty(&L, ppr, i64);
-    MLIR_ValueHandle mp1 = emit_binop2(&L, OP_TYPE_LLVM_SUB, mp, emit_const(&L, i64, 1), i64);
-    emit_store_v(&L, mp1, ppr);
-    MLIR_ValueHandle mbp = emit_byte_ptr(&L, buf, mp1);
-    emit_store_v(&L, emit_cast(&L, OP_TYPE_LLVM_TRUNC, emit_const(&L, i64, 45), i8), mbp);
-    term_br(&L, wblk);
-
-    // wblk: _write(1, buf+pos, 32-pos)
-    L.cur = wblk; L.terminated = false;
-    MLIR_ValueHandle fpos = emit_load_ty(&L, ppr, i64);
-    MLIR_ValueHandle len  = emit_binop2(&L, OP_TYPE_LLVM_SUB, c32, fpos, i64);
-    MLIR_ValueHandle wp   = emit_byte_ptr(&L, buf, fpos);
-    emit_write_call(&L, emit_const(&L, i32, 1), wp, len);
-    MLIR_OpHandle ret = build_op(ctx, OP_TYPE_LLVM_RETURN, NULL, 0, NULL, 0, NULL, NULL, 0);
-    emit(&L, ret);
-
-    MLIR_AttributeHandle fa[1] = { attr_s(ctx, "sym_name", (char *)"printI64", 8) };
-    MLIR_RegionHandle regs[1] = { reg };
-    MLIR_OpHandle fn = MLIR_CreateOp(ctx, OP_TYPE_LLVM_FUNC,
-        op_type_to_string(OP_TYPE_LLVM_FUNC), fa, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
-        MLIR_CreateLocationUnknown(ctx, (string){0}), MLIR_INVALID_HANDLE, (string){0}, -1);
-    MLIR_AppendBlockOp(ctx, out_body, fn);
-    free(L.frames);
-}
-
-// void printStr(i32 wasm_offset): scan a NUL-terminated string in linmem,
-// _write it to stdout, then a newline (matches tinyC string-print semantics).
-static void synth_print_str(MLIR_Context *ctx, MLIR_BlockHandle out_body) {
-    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
-    MLIR_BlockHandle  entry = MLIR_CreateBlock(ctx);
-    MLIR_AppendRegionBlock(ctx, reg, entry);
-
-    MLIR_TypeHandle i8  = MLIR_CreateTypeInteger(ctx, 8, true);
-    MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
-    MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
-
-    MLIR_ValueHandle arg = MLIR_CreateValueBlockArg(ctx, (string){0}, 0, i32,
-        MLIR_CreateLocationUnknown(ctx, (string){0}));
-    MLIR_AppendBlockArg(ctx, entry, arg);
-
-    FLower L = {0};
-    L.ctx = ctx; L.dreg = reg; L.cur = entry;
-
-    MLIR_ValueHandle host = linmem_ptr(&L, arg, 0);
-    MLIR_ValueHandle host_i = emit_cast(&L, OP_TYPE_LLVM_PTRTOINT, host, i64);
-    MLIR_ValueHandle curpr = emit_alloca(&L, i64, 1);
-    emit_store_v(&L, host_i, curpr);
-
-    MLIR_BlockHandle loop = new_block(&L);
-    MLIR_BlockHandle body = new_block(&L);
-    MLIR_BlockHandle done = new_block(&L);
-    term_br(&L, loop);
-
-    // loop: b = *cur; if b==0 goto done else body
-    L.cur = loop; L.terminated = false;
-    MLIR_ValueHandle cur = emit_load_ty(&L, curpr, i64);
-    MLIR_ValueHandle cp  = emit_byte_ptr(&L, host, emit_binop2(&L, OP_TYPE_LLVM_SUB, cur, host_i, i64));
-    MLIR_ValueHandle b   = emit_load_ty(&L, cp, i8);
-    MLIR_ValueHandle bz  = build_icmp(&L, /*eq*/0, emit_cast(&L, OP_TYPE_LLVM_ZEXT, b, i64), emit_const(&L, i64, 0));
-    term_cond_br(&L, bz, done, body);
-
-    // body: cur++
-    L.cur = body; L.terminated = false;
-    emit_store_v(&L, emit_binop2(&L, OP_TYPE_LLVM_ADD, cur, emit_const(&L, i64, 1), i64), curpr);
-    term_br(&L, loop);
-
-    // done: len = cur - host_i; write(1, host, len); write(1, "\n", 1)
-    L.cur = done; L.terminated = false;
-    MLIR_ValueHandle endv = emit_load_ty(&L, curpr, i64);
-    MLIR_ValueHandle len  = emit_binop2(&L, OP_TYPE_LLVM_SUB, endv, host_i, i64);
-    emit_write_call(&L, emit_const(&L, i32, 1), host, len);
-    MLIR_ValueHandle nlp = emit_addressof(&L, FMT_NL_GLOBAL);
-    emit_write_call(&L, emit_const(&L, i32, 1), nlp, emit_const(&L, i64, 1));
-    MLIR_OpHandle ret = build_op(ctx, OP_TYPE_LLVM_RETURN, NULL, 0, NULL, 0, NULL, NULL, 0);
-    emit(&L, ret);
-
-    MLIR_AttributeHandle fa[1] = { attr_s(ctx, "sym_name", (char *)"printStr", 8) };
-    MLIR_RegionHandle regs[1] = { reg };
-    MLIR_OpHandle fn = MLIR_CreateOp(ctx, OP_TYPE_LLVM_FUNC,
-        op_type_to_string(OP_TYPE_LLVM_FUNC), fa, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
-        MLIR_CreateLocationUnknown(ctx, (string){0}), MLIR_INVALID_HANDLE, (string){0}, -1);
-    MLIR_AppendBlockOp(ctx, out_body, fn);
-    free(L.frames);
-}
-
 static void scan_max_global(MLIR_OpHandle op, int64_t *max_idx) {
     MLIR_OpType t = MLIR_GetOpType(op);
     if (t == OP_TYPE_WASMSSA_GLOBAL_GET || t == OP_TYPE_WASMSSA_GLOBAL_SET) {
@@ -2450,16 +2258,12 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
         MLIR_CreateLocationUnknown(ctx, (string){0}));
     MLIR_AppendBlockOp(ctx, out_body, pg);
 
-    // -- Imports: allow the known WASI/print imports; reject others. --
-    bool need_printI64 = false, need_printNewline = false, need_printStr = false;
+    // -- Imports: allow the known WASI imports; reject others. --
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
         if (MLIR_GetOpType(op) != OP_TYPE_WASMSSA_IMPORT_FUNC) continue;
         string nm = at_s(op, "sym_name");
         if (nm.size == 9 && memcmp(nm.str, "proc_exit", 9) == 0) continue;
-        if (nm.size == 8 && memcmp(nm.str, "printI64", 8) == 0) { need_printI64 = true; continue; }
-        if (nm.size == 12 && memcmp(nm.str, "printNewline", 12) == 0) { need_printNewline = true; continue; }
-        if (nm.size == 8 && memcmp(nm.str, "printStr", 8) == 0) { need_printStr = true; continue; }
         // WASI host imports — provided by the spliced C adapter, just allow.
         if (nm.size == 8 && memcmp(nm.str, "fd_write", 8) == 0) continue;
         if (nm.size == 7 && memcmp(nm.str, "fd_read", 7) == 0) continue;
@@ -2519,18 +2323,6 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
         return MLIR_INVALID_HANDLE;
     }
 
-    // -- Synthesise print runtime (via _write) for the imports used. --
-    if (need_printI64) synth_print_i64(ctx, out_body);
-    if (need_printNewline || need_printStr) {
-        char nl[2] = { '\n', '\0' };
-        string b = { nl, 2 };
-        MLIR_OpHandle g = MLIR_CreateLLVMGlobalString(ctx,
-            str_from_cstr_view((char *)FMT_NL_GLOBAL), b,
-            MLIR_CreateLocationUnknown(ctx, (string){0}));
-        MLIR_AppendBlockOp(ctx, out_body, g);
-    }
-    if (need_printNewline) synth_print_newline(ctx, out_body);
-    if (need_printStr) synth_print_str(ctx, out_body);
     // WASI fd/path/args/environ shims are no longer synthesised here; they are
     // provided by the C adapter (corec/wasm/wasi_adapter.c) the driver splices
     // in (always, for --from-wasm --emit=macho). The import scan above still

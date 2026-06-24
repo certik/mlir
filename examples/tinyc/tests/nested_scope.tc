@@ -1,35 +1,36 @@
+extern int printf(const char *fmt, ...);
 // Regression test for nested-block scoping. Each `{}` block must get its
 // own Scope so an inner declaration shadows the outer one only within the
 // nested block, and the outer binding is restored on exit.
 
 int main() {
     int x = 1;
-    _tinyc_print(x);                 // 1
+    printf("%lld\n", (long long)(x));                 // 1
     {
         int x = 2;
-        _tinyc_print(x);             // 2
+        printf("%lld\n", (long long)(x));             // 2
         {
             int x = 3;
-            _tinyc_print(x);         // 3
+            printf("%lld\n", (long long)(x));         // 3
         }
-        _tinyc_print(x);             // 2
+        printf("%lld\n", (long long)(x));             // 2
     }
-    _tinyc_print(x);                 // 1
+    printf("%lld\n", (long long)(x));                 // 1
 
     // for-loop induction var shadows outer x within the loop body / step.
     for (int x = 10; x < 13; x = x + 1) {
-        _tinyc_print(x);             // 10, 11, 12
+        printf("%lld\n", (long long)(x));             // 10, 11, 12
     }
-    _tinyc_print(x);                 // 1
+    printf("%lld\n", (long long)(x));                 // 1
 
     // Sibling blocks: each is its own scope, no leakage between them.
     {
         int y = 7;
-        _tinyc_print(y);             // 7
+        printf("%lld\n", (long long)(y));             // 7
     }
     {
         int y = 9;
-        _tinyc_print(y);             // 9
+        printf("%lld\n", (long long)(y));             // 9
     }
     return 0;
 }
