@@ -261,6 +261,31 @@ static bool op_is(MLIR_OpHandle op, const char *n) {
     return nm.size == l && memcmp(nm.str, n, l) == 0;
 }
 
+// Float width (in bytes) of a value's type: 4 for f32, 8 for f64, else 0.
+static int fp_bytes(MLIR_Context *ctx, MLIR_ValueHandle v) {
+    string s = MLIR_GetTypeString(ctx, MLIR_GetValueType(v));
+    if (s.size == 3 && memcmp(s.str, "f64", 3) == 0) return 8;
+    if (s.size == 3 && memcmp(s.str, "f32", 3) == 0) return 4;
+    return 0;
+}
+
+// A floating-point `llvm.mlir.constant`: read its value as a raw bit pattern
+// (f32 zero-extended into the low 32 bits). Returns false for non-FP / non-const
+// values. The integer accessor used by is_const would misread a float attribute,
+// so FP constants are materialized here as their exact IEEE-754 bits.
+static bool fp_const_val(MLIR_Context *ctx, MLIR_ValueHandle v, uint64_t *bits) {
+    MLIR_OpHandle def = MLIR_GetValueDefiningOp(v);
+    if (def == MLIR_INVALID_HANDLE || !op_is(def, "llvm.mlir.constant")) return false;
+    int fb = fp_bytes(ctx, v);
+    if (fb == 0) return false;
+    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(def, "value");
+    if (a == MLIR_INVALID_HANDLE) return false;
+    double d = MLIR_GetAttributeFloat(a);
+    if (fb == 4) { float f = (float)d; uint32_t b32; memcpy(&b32, &f, 4); *bits = b32; }
+    else         { memcpy(bits, &d, 8); }
+    return true;
+}
+
 // SymbolRef attributes print with a leading '@' (e.g. "@malloc"); function
 // sym_name attributes do not. Strip it so the two match.
 static string strip_at(string s) {
@@ -271,6 +296,8 @@ static string strip_at(string s) {
 // Load an operand value into `reg`. Handles constants, globals, slots.
 static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
     MLIR_OpHandle def = MLIR_GetValueDefiningOp(v);
+    uint64_t fbits;
+    if (fp_const_val(F->ctx, v, &fbits)) { mov_ri(F, reg, (int64_t)fbits, 1); return; }
     int64_t c;
     if (is_const(def, &c)) { mov_ri(F, reg, c, val_w(F->ctx, v)); return; }
     if (def != MLIR_INVALID_HANDLE && op_is(def, "llvm.mlir.undef")) {

@@ -11,8 +11,10 @@ static bool str_eqz(string s, const char *c) {
     return s.size == l && memcmp(s.str, c, l) == 0;
 }
 
-// width in bytes of an integer/pointer-typed value
+// width in bytes of an integer/pointer/float-typed value
 static int type_bytes(MLIR_Context *ctx, MLIR_ValueHandle v) {
+    int fb = fp_bytes(ctx, v);
+    if (fb) return fb;                // f32 -> 4, f64 -> 8
     int b = int_bits(ctx, v);
     if (b == 0) return 8;           // pointer
     return (b + 7) / 8;
@@ -160,6 +162,183 @@ static void setcc_al(FnCtx *F, int cc) {
 // cmovnz dst, src
 static void cmovnz(FnCtx *F, uint8_t dst, uint8_t src, int w) {
     rex(F, w, dst, 0, src); eb(F, 0x0F); eb(F, 0x45); modrm(F, 3, dst, src);
+}
+
+// ---------------------------------------------------------------------------
+// SSE2 scalar floating-point (real FP support, issue #212 Option A).
+//
+// Double/float SSA values flow through GP regs / 8-byte stack slots as opaque
+// bits (the same path integers use). Each FP op transiently moves operand bits
+// GP -> xmm with `movq`, computes with a real SSE2 scalar instruction, and moves
+// the result xmm -> GP with `movq`. xmm0/xmm1 are pure scratch and never live
+// across ops, so no xmm allocation / spill model is required.
+// ---------------------------------------------------------------------------
+
+// movq xmm, r/m64   (66 REX.W 0F 6E /r): GP -> xmm (low 64 bits)
+static void movq_xmm_gpr(FnCtx *F, uint8_t xmm, uint8_t gpr) {
+    eb(F, 0x66); rex(F, 1, xmm, 0, gpr); eb(F, 0x0F); eb(F, 0x6E); modrm(F, 3, xmm, gpr);
+}
+// movq r/m64, xmm   (66 REX.W 0F 7E /r): xmm (low 64 bits) -> GP
+static void movq_gpr_xmm(FnCtx *F, uint8_t gpr, uint8_t xmm) {
+    eb(F, 0x66); rex(F, 1, xmm, 0, gpr); eb(F, 0x0F); eb(F, 0x7E); modrm(F, 3, xmm, gpr);
+}
+// scalar double op: F2 0F <opc> /r   (xd = xd OP xs)
+static void sse_sd(FnCtx *F, uint8_t opc, uint8_t xd, uint8_t xs) {
+    eb(F, 0xF2); rex(F, 0, xd, 0, xs); eb(F, 0x0F); eb(F, opc); modrm(F, 3, xd, xs);
+}
+// scalar single op: F3 0F <opc> /r
+static void sse_ss(FnCtx *F, uint8_t opc, uint8_t xd, uint8_t xs) {
+    eb(F, 0xF3); rex(F, 0, xd, 0, xs); eb(F, 0x0F); eb(F, opc); modrm(F, 3, xd, xs);
+}
+// cvtsi2sd/ss xmm, r/m (pfx [REX.W] 0F 2A /r): signed int (GP) -> float (xmm)
+static void cvtsi2f(FnCtx *F, uint8_t pfx, uint8_t xmm, uint8_t gpr, int w) {
+    eb(F, pfx); rex(F, w, xmm, 0, gpr); eb(F, 0x0F); eb(F, 0x2A); modrm(F, 3, xmm, gpr);
+}
+// cvttsd2si/ss r, xmm (pfx [REX.W] 0F 2C /r): float (xmm) -> signed int (GP), trunc
+static void cvtf2si(FnCtx *F, uint8_t pfx, uint8_t gpr, uint8_t xmm, int w) {
+    eb(F, pfx); rex(F, w, gpr, 0, xmm); eb(F, 0x0F); eb(F, 0x2C); modrm(F, 3, gpr, xmm);
+}
+// cvtss2sd / cvtsd2ss xmm, xmm (pfx 0F 5A /r): float-width convert
+static void cvt_f2f(FnCtx *F, uint8_t pfx, uint8_t xd, uint8_t xs) {
+    eb(F, pfx); rex(F, 0, xd, 0, xs); eb(F, 0x0F); eb(F, 0x5A); modrm(F, 3, xd, xs);
+}
+// ucomisd (66 0F 2E) / ucomiss (0F 2E): ordered compare, sets ZF/PF/CF
+static void ucomis(FnCtx *F, int is_f32, uint8_t x1, uint8_t x2) {
+    if (!is_f32) eb(F, 0x66);
+    rex(F, 0, x1, 0, x2); eb(F, 0x0F); eb(F, 0x2E); modrm(F, 3, x1, x2);
+}
+// setcc into the low byte of AL/CL (rm in {RAX,RCX})
+static void setcc8(FnCtx *F, int cc, uint8_t rm) {
+    eb(F, 0x0F); eb(F, (uint8_t)(0x90 + cc)); modrm(F, 3, 0, rm);
+}
+
+// setcc opcode low-nibble values not in the shared CC enum
+enum { CC_P = 0xA, CC_NP = 0xB };
+
+// llvm.fcmp: operands' bit patterns are already in xmm0 (a0) and xmm1 (a1);
+// leave a 0/1 i32 result in EAX. Handles all 16 LLVM FCmp predicates, mapping
+// each to ucomisd/ucomiss (with operand swap where needed) plus a one- or
+// two-setcc sequence so ordered/unordered (NaN) semantics are correct.
+static void emit_fcmp(FnCtx *F, int64_t pred, int is_f32) {
+    if (pred == 0)  { mov_ri(F, RAX, 0, 0); return; }   // _false
+    if (pred == 15) { mov_ri(F, RAX, 1, 0); return; }   // _true
+    bool swap = false; int cc1, combine = 0, cc2 = 0;   // combine: 0 none, 1 and, 2 or
+    switch (pred) {
+        case 1:  cc1 = CC_E;  combine = 1; cc2 = CC_NP; break;  // oeq: sete & setnp
+        case 2:  cc1 = CC_A;  break;                            // ogt
+        case 3:  cc1 = CC_AE; break;                            // oge
+        case 4:  swap = true; cc1 = CC_A;  break;               // olt
+        case 5:  swap = true; cc1 = CC_AE; break;               // ole
+        case 6:  cc1 = CC_NE; combine = 1; cc2 = CC_NP; break;  // one: setne & setnp
+        case 7:  cc1 = CC_NP; break;                            // ord
+        case 8:  cc1 = CC_E;  combine = 2; cc2 = CC_P;  break;  // ueq: sete | setp
+        case 9:  swap = true; cc1 = CC_B;  break;               // ugt
+        case 10: swap = true; cc1 = CC_BE; break;               // uge
+        case 11: cc1 = CC_B;  break;                            // ult
+        case 12: cc1 = CC_BE; break;                            // ule
+        case 13: cc1 = CC_NE; combine = 2; cc2 = CC_P;  break;  // une: setne | setp
+        case 14: cc1 = CC_P;  break;                            // uno
+        default: cc1 = CC_E;  break;
+    }
+    ucomis(F, is_f32, swap ? 1 : 0, swap ? 0 : 1);
+    setcc8(F, cc1, RAX);
+    if (combine) {
+        setcc8(F, cc2, RCX);
+        eb(F, combine == 1 ? 0x20 : 0x08); modrm(F, 3, RCX, RAX);  // and/or al, cl
+    }
+    eb(F, 0x0F); eb(F, 0xB6); modrm(F, 3, RAX, RAX);               // movzx eax, al
+}
+
+// Lower an FP op (arith / convert / compare). Returns false if `nm` is not an
+// FP op handled here. Floating bits travel in GP regs/slots; xmm0/xmm1 scratch.
+static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, string nm) {
+    MLIR_Context *ctx = F->ctx;
+    // arithmetic: dst = op0 OP op1
+    struct { const char *n; uint8_t opc; } fpalu[] = {
+        {"llvm.fadd",0x58},{"llvm.fsub",0x5C},{"llvm.fmul",0x59},{"llvm.fdiv",0x5E}
+    };
+    for (size_t i = 0; i < sizeof(fpalu)/sizeof(fpalu[0]); i++) {
+        if (str_eqz(nm, fpalu[i].n)) {
+            MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+            int fb = fp_bytes(ctx, r);
+            load_val(F, MLIR_GetOpOperand(op, 0), RAX);
+            load_val(F, MLIR_GetOpOperand(op, 1), RCX);
+            movq_xmm_gpr(F, 0, RAX);
+            movq_xmm_gpr(F, 1, RCX);
+            if (fb == 4) sse_ss(F, fpalu[i].opc, 0, 1);
+            else         sse_sd(F, fpalu[i].opc, 0, 1);
+            movq_gpr_xmm(F, RAX, 0);
+            store_val(F, r, RAX);
+            return true;
+        }
+    }
+    // fneg: flip the sign bit in the integer domain (exact, no xmm needed)
+    if (str_eqz(nm, "llvm.fneg")) {
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        int fb = fp_bytes(ctx, r);
+        load_val(F, MLIR_GetOpOperand(op, 0), RAX);
+        mov_ri(F, RCX, (fb == 4) ? (int64_t)0x80000000ll : (int64_t)0x8000000000000000ll, 1);
+        alu_rr(F, 0x31, RAX, RCX, 1);          // xor rax, rcx
+        store_val(F, r, RAX);
+        return true;
+    }
+    // float -> signed/unsigned int (truncating)
+    if (str_eqz(nm, "llvm.fptosi") || str_eqz(nm, "llvm.fptoui")) {
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        MLIR_ValueHandle s = MLIR_GetOpOperand(op, 0);
+        int sfb = fp_bytes(ctx, s);
+        // Unsigned: convert into a 64-bit register, then store_val truncates to
+        // the result width (correct for the full u32 range; u64 high bit is an
+        // unreachable edge case here).
+        int conv_w = str_eqz(nm, "llvm.fptoui") ? 1 : val_w(ctx, r);
+        load_val(F, s, RAX);
+        movq_xmm_gpr(F, 0, RAX);
+        cvtf2si(F, sfb == 4 ? 0xF3 : 0xF2, RAX, 0, conv_w);
+        store_val(F, r, RAX);
+        return true;
+    }
+    // signed/unsigned int -> float
+    if (str_eqz(nm, "llvm.sitofp") || str_eqz(nm, "llvm.uitofp")) {
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        MLIR_ValueHandle s = MLIR_GetOpOperand(op, 0);
+        int rfb = fp_bytes(ctx, r);
+        int sb  = int_bits(ctx, s);
+        // Signed i32: read EAX as signed 32-bit (cvtsi2sd reg32). Signed i64 and
+        // unsigned i32 (zero-extended into RAX, hence positive): read RAX 64-bit.
+        int conv_w = (str_eqz(nm, "llvm.uitofp") || sb > 32) ? 1 : 0;
+        load_val(F, s, RAX);
+        cvtsi2f(F, rfb == 4 ? 0xF3 : 0xF2, 0, RAX, conv_w);
+        movq_gpr_xmm(F, RAX, 0);
+        store_val(F, r, RAX);
+        return true;
+    }
+    // f32 -> f64 (extend) / f64 -> f32 (truncate)
+    if (str_eqz(nm, "llvm.fpext") || str_eqz(nm, "llvm.fptrunc")) {
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        load_val(F, MLIR_GetOpOperand(op, 0), RAX);
+        movq_xmm_gpr(F, 0, RAX);
+        cvt_f2f(F, str_eqz(nm, "llvm.fpext") ? 0xF3 : 0xF2, 0, 0);
+        movq_gpr_xmm(F, RAX, 0);
+        store_val(F, r, RAX);
+        return true;
+    }
+    // ordered/unordered float comparison -> 0/1
+    if (str_eqz(nm, "llvm.fcmp")) {
+        MLIR_ValueHandle r  = MLIR_GetOpResult(op, 0);
+        MLIR_ValueHandle a0 = MLIR_GetOpOperand(op, 0);
+        int is_f32 = (fp_bytes(ctx, a0) == 4);
+        int64_t pred = 0;
+        MLIR_AttributeHandle pa = MLIR_GetOpAttributeByName(op, "predicate");
+        if (pa) pred = MLIR_GetAttributeInteger(pa);
+        load_val(F, a0, RAX);
+        load_val(F, MLIR_GetOpOperand(op, 1), RCX);
+        movq_xmm_gpr(F, 0, RAX);
+        movq_xmm_gpr(F, 1, RCX);
+        emit_fcmp(F, pred, is_f32);
+        store_val(F, r, RAX);
+        return true;
+    }
+    return false;
 }
 
 // emit parallel-move-safe edge copies for the `si`-th successor of `term`
@@ -440,12 +619,14 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         // lands at [rsp+0] at the call; an 8-byte pad keeps rsp 16-aligned when
         // the number of stack args is odd.
         size_t reg_cutoff = 6;
+        bool is_vararg_call = false;
         MLIR_AttributeHandle vct = MLIR_GetOpAttributeByName(op, "var_callee_type");
         if (vct != MLIR_INVALID_HANDLE) {
             MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(vct);
             if (ft != MLIR_INVALID_HANDLE && MLIR_GetTypeFunctionIsVarArg(ft)) {
                 size_t nf = MLIR_GetTypeFunctionNumInputs(ft);
                 reg_cutoff = nf < 6 ? nf : 6;
+                is_vararg_call = true;
             }
         }
         if (reg_cutoff > no) reg_cutoff = no;
@@ -458,6 +639,9 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         }
         for (size_t i = 0; i < reg_cutoff; i++)
             load_val(F, MLIR_GetOpOperand(op, i), ARG_REGS[i]);
+        // SysV: AL = # of vector registers used for a variadic call. tinyC passes
+        // all variadic args on the stack (cursor va_list), so AL = 0.
+        if (is_vararg_call) alu_rr(F, 0x31, RAX, RAX, 0);     // xor eax, eax
         eb(F, 0xE8);
         uint32_t field = here(F); e32(F, 0);
         char *cs = (char *)malloc(callee.size + 1);
@@ -495,6 +679,9 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         store_mem(F, RCX, RAX, 8);                               // *dst = *src
         return;
     }
+
+    // floating-point arithmetic / conversion / comparison (issue #212 Option A)
+    if (lower_fp_op(F, op, nm)) return;
 
     fail(F, "unsupported op", nm);
 }
