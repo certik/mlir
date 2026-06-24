@@ -121,6 +121,92 @@ STDLIB_SOURCES = [
     "stdlib/printf.c",
 ]
 
+# A minimal, runtime-free printf for the freestanding x86_64 ELF backend.
+#
+# corec-stdlib's real printf.c routes through numconv's base_vsnprintf, whose
+# %f/%g path emits `llvm.sitofp`/`fptosi` — ops the x64 ELF backend
+# intentionally does not implement (it has no floating-point support). That
+# code is unreachable for the ELF suite (no elf-targeting test formats a
+# float — they use only %lld and %s), but it is still *compiled*, so pulling
+# in base_vsnprintf would fail to lower. Instead we inject this self-contained
+# integer/string formatter, reusing helpers already present in the unity
+# (int64_to_str / uint64_to_str from numconv, write_all + ciovec_t from io).
+# It is byte-compatible with the host libc printf for every specifier the
+# tinyC tests use: %lld %ld %d %i %u %lu %llu %x %X %p %c %s %% (plus length
+# modifiers and skipped flags/width/precision). No float specifiers.
+ELF_RUNTIME_PRINTF = r"""
+int printf(const char *fmt, ...) {
+    char buf[4096];
+    unsigned long pos = 0;
+    unsigned long cap = sizeof(buf);
+    char tmp[32];
+    va_list ap;
+    __builtin_va_start(ap, fmt);
+    unsigned long i = 0;
+    while (fmt[i]) {
+        char c = fmt[i];
+        if (c != '%') { if (pos < cap) buf[pos++] = c; i++; continue; }
+        i++;
+        /* flags, width, precision: parsed and ignored (unused by the suite) */
+        while (fmt[i]=='-'||fmt[i]=='+'||fmt[i]==' '||fmt[i]=='#'||fmt[i]=='0') i++;
+        while (fmt[i]>='0'&&fmt[i]<='9') i++;
+        if (fmt[i]=='.') { i++; while (fmt[i]>='0'&&fmt[i]<='9') i++; }
+        int lng = 0;
+        while (fmt[i]=='l') { lng++; i++; }
+        if (fmt[i]=='z'||fmt[i]=='j'||fmt[i]=='t') { lng = 2; i++; }
+        while (fmt[i]=='h') i++;
+        char conv = fmt[i]; if (conv) i++;
+        if (conv == '%') { if (pos<cap) buf[pos++]='%'; continue; }
+        if (conv == 'c') { int v = __builtin_va_arg(ap, int); if (pos<cap) buf[pos++]=(char)v; continue; }
+        if (conv == 's') {
+            char *s = __builtin_va_arg(ap, char*);
+            if (!s) s = "(null)";
+            while (*s) { if (pos<cap) buf[pos++]=*s; s++; }
+            continue;
+        }
+        if (conv=='d' || conv=='i') {
+            long long v;
+            if (lng>=2) v = __builtin_va_arg(ap, long long);
+            else if (lng==1) v = (long long)__builtin_va_arg(ap, long);
+            else v = (long long)__builtin_va_arg(ap, int);
+            unsigned long n = int64_to_str(v, tmp);
+            for (unsigned long k=0;k<n;k++) if (pos<cap) buf[pos++]=tmp[k];
+            continue;
+        }
+        if (conv=='u') {
+            unsigned long long v;
+            if (lng>=2) v = __builtin_va_arg(ap, unsigned long long);
+            else if (lng==1) v = (unsigned long long)__builtin_va_arg(ap, unsigned long);
+            else v = (unsigned long long)__builtin_va_arg(ap, unsigned int);
+            unsigned long n = uint64_to_str(v, tmp);
+            for (unsigned long k=0;k<n;k++) if (pos<cap) buf[pos++]=tmp[k];
+            continue;
+        }
+        if (conv=='x'||conv=='X'||conv=='p') {
+            unsigned long long v;
+            if (conv=='p') v = (unsigned long long)__builtin_va_arg(ap, void*);
+            else if (lng>=2) v = __builtin_va_arg(ap, unsigned long long);
+            else if (lng==1) v = (unsigned long long)__builtin_va_arg(ap, unsigned long);
+            else v = (unsigned long long)__builtin_va_arg(ap, unsigned int);
+            const char *digs = (conv=='X') ? "0123456789ABCDEF" : "0123456789abcdef";
+            if (conv=='p') { if(pos<cap)buf[pos++]='0'; if(pos<cap)buf[pos++]='x'; }
+            unsigned long n = 0;
+            if (v==0) tmp[n++]='0';
+            while (v>0) { tmp[n++]=digs[v & 15]; v >>= 4; }
+            for (unsigned long k=0;k<n;k++) if (pos<cap) buf[pos++]=tmp[n-1-k];
+            continue;
+        }
+        /* unknown conversion: emit verbatim */
+        if (pos<cap) buf[pos++]='%';
+        if (conv && pos<cap) buf[pos++]=conv;
+    }
+    __builtin_va_end(ap);
+    ciovec_t io; io.buf = buf; io.buf_len = pos;
+    write_all(1, &io, 1);
+    return (int)pos;
+}
+""".strip("\n")
+
 
 def uses_wasm_runtime() -> bool:
     return TARGET == "wasm" or (TARGET == "macho" and MACHO_BACKEND != "llvm")
@@ -278,6 +364,7 @@ def write_unity_source(name: str, srcs: list[Path]) -> Path:
         lines.append(f'#include "{_inc(platform_source_for_unity())}"')
     if TARGET == "elf":
         lines += [
+            ELF_RUNTIME_PRINTF,
             "void printI64(long long v) { char b[32]; unsigned long n; ciovec_t io; n=int64_to_str(v,b); io.buf=b; io.buf_len=n; write_all(1,&io,1); }",
             "void printI32(int v) { printI64((long long)v); printNewline(); }",
             "void printNewline(void) { ciovec_t io; io.buf=\"\\n\"; io.buf_len=1; write_all(1,&io,1); }",
