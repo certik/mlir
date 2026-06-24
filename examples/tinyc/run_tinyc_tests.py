@@ -131,14 +131,22 @@ def use_unity_source() -> bool:
 
 
 def uses_inline_platform() -> bool:
-    # On macOS the real corec platform_macos.c is libc-based (writev / readv /
-    # mmap), which tinyC compiles directly, so the native and macho-llvm paths
-    # link it instead of a generated shim. Linux/Windows native still need the
-    # inline shim: platform_linux.c uses raw __builtin_syscall (tinyC's x64
-    # backend doesn't lower it on the IR->host-link path yet) and
-    # platform_windows.c uses WinAPI / __declspec / __stdcall.
+    # macOS and Linux native link the real corec platform_*.c directly:
+    #   * macOS:  platform_macos.c is libc-based (writev / readv / mmap).
+    #   * Linux:  platform_linux.c issues raw syscalls via __builtin_syscall6,
+    #             which tinyC lowers on the native llc/host-link path too — the
+    #             driver defines @__tinyc_syscall6 as an x86_64 `syscall` (see
+    #             inject_syscall6_definition in driver.c), mirroring the ELF
+    #             backend's thunk.
+    # Windows native does not reach this at all: it uses the no-runtime path
+    # (use_unity_source() is False there), compiling each self-contained test
+    # straight against the MSVCRT without any corec platform layer. The inline
+    # shim below is only the fallback for the remaining unity-using
+    # configurations (e.g. the macho-llvm cross-target on a non-Apple host).
     if sys.platform.startswith("darwin"):
         return False
+    if sys.platform.startswith("linux"):
+        return TARGET == "macho" and MACHO_BACKEND == "llvm"
     return TARGET == "native" or (TARGET == "macho" and MACHO_BACKEND == "llvm")
 
 
