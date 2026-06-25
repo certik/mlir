@@ -1087,6 +1087,15 @@ static void synth_start(ObjModule *m, X64PtrReloc *relocs, size_t n_relocs) {
         lea_rip_data(&F, R11, relocs[k].slot_off);
         store_mem(&F, R11, R10, 8);
     }
+    // Unity ELF builds define PLATFORM_SKIP_ENTRY, so platform_linux.c does
+    // not supply _start. Per platform.h, the entry point must call
+    // platform_init() before user code — that mmap's the heap and runs
+    // buddy_init(), which stdlib malloc/free depend on.
+    mov_ri(&F, RDI, 0, 1);
+    mov_ri(&F, RSI, 0, 1);
+    mov_ri(&F, RDX, 0, 1);
+    eb(&F, 0xE8); uint32_t pi = here(&F); e32(&F, 0);           // call platform_init
+    obj_add_reloc(f, pi, pi + 4, false, strdup("platform_init"), 0);
     eb(&F, 0xE8); uint32_t fld = here(&F); e32(&F, 0);          // call main
     obj_add_reloc(f, fld, fld+4, false, strdup("main"), 0);
     mov_rr(&F, RDI, RAX, 0);                                    // mov edi, eax
@@ -1148,6 +1157,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
 
     // reachability from main over direct-call edges (trims unused runtime)
     SymSet reach; memset(&reach, 0, sizeof(reach));
+    sym_add(&reach, str_from_cstr_view("platform_init"));
     sym_add(&reach, str_from_cstr_view("main"));
     bool grew = true;
     while (grew) {
