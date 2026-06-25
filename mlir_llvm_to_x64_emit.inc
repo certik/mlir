@@ -375,14 +375,43 @@ static void emit_epilogue(FnCtx *F) {
 static GMap *g_x64_gmap = NULL;
 static bool  g_x64_ok = true;
 
-// referenced external symbols (callees), for thunk synthesis + reachability
-typedef struct { char **n; size_t c, cap; } SymSet;
-static void sym_add(SymSet *s, string nm) {
-    for (size_t i = 0; i < s->c; i++)
-        if (strlen(s->n[i]) == nm.size && memcmp(s->n[i], nm.str, nm.size) == 0) return;
-    if (s->c == s->cap) { s->cap = s->cap ? s->cap * 2 : 8; s->n = realloc(s->n, s->cap * sizeof(char*)); }
-    s->n[s->c] = (char *)malloc(nm.size + 1);
-    memcpy(s->n[s->c], nm.str, nm.size); s->n[s->c][nm.size] = 0; s->c++;
+// SysV AMD64 argument marshaling for llvm.call. `arg_base` skips the fn-pointer
+// operand on indirect calls. Returns stack-arg count and alignment pad for cleanup.
+static void emit_sysv_call_args(FnCtx *F, MLIR_OpHandle op, size_t arg_base,
+                                size_t *nstack_out, size_t *pad_out) {
+    size_t no = MLIR_GetOpNumOperands(op) - arg_base;
+    size_t reg_cutoff = 6;
+    bool is_vararg_call = false;
+    MLIR_AttributeHandle vct = MLIR_GetOpAttributeByName(op, "var_callee_type");
+    if (vct != MLIR_INVALID_HANDLE) {
+        MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(vct);
+        if (ft != MLIR_INVALID_HANDLE && MLIR_GetTypeFunctionIsVarArg(ft)) {
+            size_t nf = MLIR_GetTypeFunctionNumInputs(ft);
+            reg_cutoff = nf < 6 ? nf : 6;
+            is_vararg_call = true;
+        }
+    }
+    if (reg_cutoff > no) reg_cutoff = no;
+    size_t nstack = no - reg_cutoff;
+    size_t pad = nstack & 1;
+    if (pad) { eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 5, RSP); eb(F, 0x08); }  // sub rsp, 8
+    for (size_t i = no; i > reg_cutoff; i--) {
+        load_val(F, MLIR_GetOpOperand(op, arg_base + i - 1), RAX);
+        eb(F, 0x50);                                  // push rax
+    }
+    for (size_t i = 0; i < reg_cutoff; i++)
+        load_val(F, MLIR_GetOpOperand(op, arg_base + i), ARG_REGS[i]);
+    if (is_vararg_call) alu_rr(F, 0x31, RAX, RAX, 0);     // xor eax, eax (AL = # xmm regs)
+    *nstack_out = nstack;
+    *pad_out = pad;
+}
+
+// emit `call rel32` to a named symbol (direct-call fast path).
+static void emit_direct_call(FnCtx *F, string callee, SymSet *refs) {
+    eb(F, 0xE8);
+    uint32_t field = here(F); e32(F, 0);
+    add_text_reloc(F, field, callee);
+    sym_add(refs, callee);
 }
 
 // ---------------------------------------------------------------------------
@@ -594,66 +623,38 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
     if (str_eqz(nm, "llvm.call") || str_eqz(nm, "func.call")) {
         string callee = strip_at(attr_str(op, "callee"));
         if (!callee.size) callee = strip_at(attr_str(op, "callee_name"));
-        if (!callee.size) { fail(F, "indirect call unsupported", (string){0}); return; }
-        size_t no = MLIR_GetOpNumOperands(op);
-        // __builtin_syscall6(num, a1..a6) -> @__tinyc_syscall6 (7 args). The
-        // SysV C ABI passes 6 args in registers and the 7th (a6) on the stack;
-        // the synthesised thunk reads it from [rsp+8] and traps via `syscall`.
-        bool is_sc6 = str_eqz(callee, "__tinyc_syscall6");
-        if (is_sc6) {
-            if (no != 7) { fail(F, "__tinyc_syscall6 expects 7 args", callee); return; }
-            load_val(F, MLIR_GetOpOperand(op, 6), RAX);
-            eb(F, 0x50);                                 // push rax (a6)
-            for (size_t i = 0; i < 6; i++)
-                load_val(F, MLIR_GetOpOperand(op, i), ARG_REGS[i]);
-            eb(F, 0xE8);
-            uint32_t field = here(F); e32(F, 0);
-            char *cs = (char *)malloc(callee.size + 1);
-            memcpy(cs, callee.str, callee.size); cs[callee.size] = 0;
-            obj_add_reloc(F->f, field, field + 4, false, cs, 0);
-            sym_add(refs, callee);
-            eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 0, RSP); eb(F, 0x08);  // add rsp, 8
-            if (MLIR_GetOpNumResults(op) == 1)
-                store_val(F, MLIR_GetOpResult(op, 0), RAX);
-            return;
-        }
-        // Register/stack split. For a variadic callee only the fixed params go
-        // in registers; ALL variadic args are passed on the stack so the
-        // callee's va_list is a simple cursor over them (see llvm.intr.vastart).
-        // Non-variadic: the usual SysV split (args 0..5 in registers, 6.. on the
-        // stack). Stack args are pushed right-to-left so operand[reg_cutoff]
-        // lands at [rsp+0] at the call; an 8-byte pad keeps rsp 16-aligned when
-        // the number of stack args is odd.
-        size_t reg_cutoff = 6;
-        bool is_vararg_call = false;
-        MLIR_AttributeHandle vct = MLIR_GetOpAttributeByName(op, "var_callee_type");
-        if (vct != MLIR_INVALID_HANDLE) {
-            MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(vct);
-            if (ft != MLIR_INVALID_HANDLE && MLIR_GetTypeFunctionIsVarArg(ft)) {
-                size_t nf = MLIR_GetTypeFunctionNumInputs(ft);
-                reg_cutoff = nf < 6 ? nf : 6;
-                is_vararg_call = true;
+        bool is_indirect = (callee.size == 0);
+        if (!is_indirect) {
+            size_t no = MLIR_GetOpNumOperands(op);
+            // __builtin_syscall6(num, a1..a6) -> @__tinyc_syscall6 (7 args). The
+            // SysV C ABI passes 6 args in registers and the 7th (a6) on the stack;
+            // the synthesised thunk reads it from [rsp+8] and traps via `syscall`.
+            bool is_sc6 = str_eqz(callee, "__tinyc_syscall6");
+            if (is_sc6) {
+                if (no != 7) { fail(F, "__tinyc_syscall6 expects 7 args", callee); return; }
+                load_val(F, MLIR_GetOpOperand(op, 6), RAX);
+                eb(F, 0x50);                                 // push rax (a6)
+                for (size_t i = 0; i < 6; i++)
+                    load_val(F, MLIR_GetOpOperand(op, i), ARG_REGS[i]);
+                emit_direct_call(F, callee, refs);
+                eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 0, RSP); eb(F, 0x08);  // add rsp, 8
+                if (MLIR_GetOpNumResults(op) == 1)
+                    store_val(F, MLIR_GetOpResult(op, 0), RAX);
+                return;
             }
         }
-        if (reg_cutoff > no) reg_cutoff = no;
-        size_t nstack = no - reg_cutoff;
-        size_t pad = nstack & 1;
-        if (pad) { eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 5, RSP); eb(F, 0x08); }  // sub rsp, 8
-        for (size_t i = no; i > reg_cutoff; i--) {
-            load_val(F, MLIR_GetOpOperand(op, i - 1), RAX);
-            eb(F, 0x50);                                  // push rax
+        size_t arg_base = is_indirect ? 1 : 0;
+        if (is_indirect)
+            load_val(F, MLIR_GetOpOperand(op, 0), R11);
+        size_t nstack = 0, pad = 0;
+        emit_sysv_call_args(F, op, arg_base, &nstack, &pad);
+        if (is_indirect) {
+            rex(F, 0, 0, 0, R11);
+            eb(F, 0xFF);
+            modrm(F, 3, 2, R11);   // call *r11
+        } else {
+            emit_direct_call(F, callee, refs);
         }
-        for (size_t i = 0; i < reg_cutoff; i++)
-            load_val(F, MLIR_GetOpOperand(op, i), ARG_REGS[i]);
-        // SysV: AL = # of vector registers used for a variadic call. tinyC passes
-        // all variadic args on the stack (cursor va_list), so AL = 0.
-        if (is_vararg_call) alu_rr(F, 0x31, RAX, RAX, 0);     // xor eax, eax
-        eb(F, 0xE8);
-        uint32_t field = here(F); e32(F, 0);
-        char *cs = (char *)malloc(callee.size + 1);
-        memcpy(cs, callee.str, callee.size); cs[callee.size] = 0;
-        obj_add_reloc(F->f, field, field + 4, false, cs, 0);
-        sym_add(refs, callee);
         if (nstack) {
             uint32_t cleanup = (uint32_t)((nstack + pad) * 8);   // pop stack args + pad
             rex(F, 1, 0, 0, RSP); eb(F, 0x81); modrm(F, 3, 0, RSP); e32(F, cleanup);  // add rsp, imm32
@@ -1047,11 +1048,22 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
                     MLIR_OpHandle op = MLIR_GetBlockOp(bk, o);
                     if (str_eqz(MLIR_GetOpName(op), "llvm.call") || str_eqz(MLIR_GetOpName(op), "func.call")) {
                         string cal = strip_at(attr_str(op, "callee"));
+                        if (!cal.size) cal = strip_at(attr_str(op, "callee_name"));
                         if (cal.size) {
                             bool known = false;
                             for (size_t k = 0; k < reach.c; k++) if (str_eqz(cal, reach.n[k])) { known = true; break; }
                             if (!known) { sym_add(&reach, cal); grew = true; }
                         }
+                    } else if (str_eqz(MLIR_GetOpName(op), "llvm.mlir.addressof")) {
+                        MLIR_AttributeHandle ga = MLIR_GetOpAttributeByName(op, "global_name");
+                        if (ga == MLIR_INVALID_HANDLE) ga = MLIR_GetOpAttributeByName(op, "value");
+                        string gn = strip_at(ga ? MLIR_GetAttributeString(ga) : (string){0});
+                        if (!gn.size) continue;
+                        uint32_t dummy;
+                        if (gmap_get(&gm, gn, &dummy)) continue;   // data global
+                        bool known = false;
+                        for (size_t k = 0; k < reach.c; k++) if (str_eqz(gn, reach.n[k])) { known = true; break; }
+                        if (!known) { sym_add(&reach, gn); grew = true; }
                     }
                 }
             }

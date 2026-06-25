@@ -76,6 +76,16 @@ static bool gmap_get(GMap *g, string nm, uint32_t *out) {
     return false;
 }
 
+// Referenced external symbols (callees / addressof targets), for thunk synthesis.
+typedef struct { char **n; size_t c, cap; } SymSet;
+static void sym_add(SymSet *s, string nm) {
+    for (size_t i = 0; i < s->c; i++)
+        if (strlen(s->n[i]) == nm.size && memcmp(s->n[i], nm.str, nm.size) == 0) return;
+    if (s->c == s->cap) { s->cap = s->cap ? s->cap * 2 : 8; s->n = realloc(s->n, s->cap * sizeof(char*)); }
+    s->n[s->c] = (char *)malloc(nm.size + 1);
+    memcpy(s->n[s->c], nm.str, nm.size); s->n[s->c][nm.size] = 0; s->c++;
+}
+
 // ---------------------------------------------------------------------------
 // Per-function lowering state.
 // ---------------------------------------------------------------------------
@@ -193,14 +203,32 @@ static void lea_rbp(FnCtx *F, uint8_t reg, int32_t off) {
     modrm(F, 2, reg, RBP);
     e32(F, (uint32_t)(-off));
 }
-// lea reg, [rip + disp32]  (records a data reloc onto the global at `data_off`)
-static void lea_rip_data(FnCtx *F, uint8_t reg, int64_t data_off) {
+// Emit `lea reg, [rip+disp32]` with disp32 left at 0; return offset of disp32 field.
+static uint32_t lea_rip_emit(FnCtx *F, uint8_t reg) {
     rex(F, 1, reg, 0, 0);
     eb(F, 0x8D);
     modrm(F, 0, reg, RBP); /* rm=101 + mod=00 => RIP-relative */
     uint32_t field = here(F);
     e32(F, 0);
+    return field;
+}
+
+// Record a PC-relative text-section reloc at `field` (shared by lea/call sites).
+static void add_text_reloc(FnCtx *F, uint32_t field, string sym) {
+    char *cs = (char *)malloc(sym.size + 1);
+    memcpy(cs, sym.str, sym.size); cs[sym.size] = 0;
+    obj_add_reloc(F->f, field, field + 4, false, cs, 0);
+}
+
+// lea reg, [rip + disp32]  (records a data reloc onto the global at `data_off`)
+static void lea_rip_data(FnCtx *F, uint8_t reg, int64_t data_off) {
+    uint32_t field = lea_rip_emit(F, reg);
     obj_add_reloc(F->f, field, field + 4, true, NULL, data_off);
+}
+// lea reg, [rip + disp32]  (PC-relative to a function symbol in the text section)
+static void lea_rip_func(FnCtx *F, uint8_t reg, string sym) {
+    uint32_t field = lea_rip_emit(F, reg);
+    add_text_reloc(F, field, sym);
 }
 // width-aware memory load/store through an address already in `addr`
 static void load_mem(FnCtx *F, uint8_t dst, uint8_t addr, int bytes, bool sgn) {
@@ -306,9 +334,13 @@ static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
         MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(def, "global_name");
         if (a == MLIR_INVALID_HANDLE) a = MLIR_GetOpAttributeByName(def, "value");
         string gn = strip_at(a ? MLIR_GetAttributeString(a) : (string){0});
+        if (!gn.size) { fail(F, "addressof missing symbol", (string){0}); return; }
         uint32_t off;
-        if (!gn.size || !gmap_get(F->gm, gn, &off)) { fail(F, "unknown global", gn); return; }
-        lea_rip_data(F, reg, off); return;
+        if (gmap_get(F->gm, gn, &off))
+            lea_rip_data(F, reg, off);
+        else
+            lea_rip_func(F, reg, gn);   // function / external symbol
+        return;
     }
     uint8_t rH;
     if (val_in_reg(F, v, &rH)) { mov_rr(F, reg, rH, val_w(F->ctx, v)); return; }
