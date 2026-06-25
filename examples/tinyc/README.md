@@ -30,6 +30,13 @@ LLVM IR text
 native binary
 ```
 
+That diagram is the LLVM-IR/`llc` native path. tinyC also has direct
+(`llc`-free) ELF and Mach-O backends, a wasm32/WASI backend, and a
+wasm→native lifter. For how each of those reaches the OS — and how, with two
+documented test-harness exceptions, they all go through corec's
+`platform.h` — see [`doc/platform_paths.md`](../../doc/platform_paths.md).
+
+
 ## Language subset
 
 tinyC has grown well past the initial "int-only" prototype. The `tests/`

@@ -127,6 +127,15 @@ def uses_wasm_runtime() -> bool:
 
 
 def use_unity_source() -> bool:
+    # Every target builds one generated single-TU "unity" (test + corec +
+    # corec-stdlib + platform_<os>.c) EXCEPT Windows native, which takes the
+    # "no-runtime" path: each test .tc is compiled directly against the MSVCRT,
+    # with no unity, no corec-stdlib, and no platform_windows.c. tinyC cannot
+    # yet parse platform_windows.c's __declspec(dllimport)/__stdcall, and the
+    # suite only needs libc-providable symbols (printf), so Windows native is
+    # both runtime-shim-free AND corec-free. This is one of the two documented
+    # exceptions to "all OS access goes via corec/platform.h" — see
+    # doc/platform_paths.md.
     return not (IS_WIN and TARGET == "native")
 
 
@@ -140,9 +149,16 @@ def uses_inline_platform() -> bool:
     #             backend's thunk.
     # Windows native does not reach this at all: it uses the no-runtime path
     # (use_unity_source() is False there), compiling each self-contained test
-    # straight against the MSVCRT without any corec platform layer. The inline
-    # shim below is only the fallback for the remaining unity-using
-    # configurations (e.g. the macho-llvm cross-target on a non-Apple host).
+    # straight against the MSVCRT without any corec platform layer.
+    #
+    # Returning True synthesizes a ~45-line inline platform shim (as Python
+    # strings) into the unity instead of #include'ing the real platform_*.c.
+    # That now happens ONLY for the macho-llvm target cross-compiled on a
+    # non-Apple host (e.g. Linux building a Mach-O), where libSystem cannot be
+    # linked: the inline shim is a portable stand-in. On an actual macOS host
+    # macho-llvm uses the real platform_macos.c. This is the second of the two
+    # documented exceptions to "all OS access goes via corec/platform.h" — see
+    # doc/platform_paths.md.
     if sys.platform.startswith("darwin"):
         return False
     if sys.platform.startswith("linux"):
