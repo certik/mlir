@@ -18,9 +18,10 @@ Configurations:
 
 Linking always uses tinyc itself in --link mode (mlir_wasm_link.c).
 That keeps every step of the pipeline inside the benchmarked binary,
-which is what we want to measure. The link step pulls in
-tinyc_wasm_vararg.wasm.o (the tinyc_va_arg_* shim), so the produced
-tinyc_bench.wasm is also runnable under wasmtime.
+which is what we want to measure. va_arg is lowered inline and _start
+comes from tinyC-compiled platform_wasm.c, so no external support
+objects are linked and the produced tinyc_bench.wasm is runnable under
+wasmtime.
 
 Each (config, file) measurement is repeated --repeats times and the
 best run is reported (standard practice for compiler benchmarks: filters
@@ -45,7 +46,6 @@ Prereqs (pixi takes care of these for you):
     pixi run -e upstream build_tinyc_native_opt
     pixi run -e upstream build_tinyc_upstream_opt
     pixi run build_tinyc_wasm        # needed for the --wasmtime stage
-                                     # (provides tinyc_wasm_vararg.wasm.o)
 """
 
 from __future__ import annotations
@@ -262,11 +262,12 @@ def discover_configs() -> list[Config]:
 
 # -----------------------------------------------------------------------------
 # Wasmtime stage: re-bench using the per-config tinyc.wasm produced above as
-# the compiler, executed under wasmtime. Every tinyc.wasm we produce was
-# linked with `tinyc_wasm_vararg.wasm.o`, so it runs under wasmtime with no
-# extra setup. The C source code inside every tinyc.wasm is the same (the
-# native tinyc), so functionally all three are equivalent — the only thing
-# that varies is the code quality produced by each backend.
+# the compiler, executed under wasmtime. Every tinyc.wasm we produce lowers
+# va_arg inline and gets its _start from tinyC-compiled platform_wasm.c, so it
+# runs under wasmtime with no extra setup. The C source code inside every
+# tinyc.wasm is the same (the native tinyc), so functionally all three are
+# equivalent — the only thing that varies is the code quality produced by each
+# backend.
 # -----------------------------------------------------------------------------
 
 def _rel(p: Path) -> str:

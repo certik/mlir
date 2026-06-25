@@ -368,23 +368,27 @@ static MLIR_ValueHandle emit_libc_call(FLower *L, const char *name,
 // =============================================================================
 // WASI host bridge — how the via-wasm native lowering reaches the OS.
 //
-// The WASI imports (fd_write, proc_exit, path_open, ...) are synthesised below
-// as small `llvm`-dialect shims. The shims are deliberately THIN: they only
-// bridge the wasm32 ABI of the lifted module (pointers are 32-bit linear-memory
-// offsets; iovec/struct fields are 32-bit) to the native LP64 ABI — translate
-// offsets to host pointers, repack the iovec, store results back to linmem —
-// and then DELEGATE the actual OS work to corec's platform_<os>.c.
+// The WASI imports (fd_write, fd_read, path_open, args_*, environ_*, ...) are
+// left as ordinary calls in the lifted `llvm`-dialect module; their bodies are
+// NOT synthesised here. They are provided by corec/wasm/wasi_adapter.c — a
+// normal C file the driver compiles and splices in via the --wasi-adapter flag.
+// That adapter is deliberately THIN: it only bridges the wasm32 ABI of the
+// lifted module (pointers are 32-bit linear-memory offsets; iovec/struct fields
+// are 32-bit) to the native LP64 ABI — translate offsets to host pointers,
+// repack the iovec, store results back to linmem — and then DELEGATEs the
+// actual OS work to corec's platform_<os>.c. (proc_exit is the one exception:
+// it carries no linmem-offset args, so the lowering maps it straight to
+// __host_platform_exit below instead of routing it through the adapter.)
 //
 // Those platform functions (platform_fd_write / _read / _close / _seek / _tell
 // / _path_open / _exit) are compiled LP64 and spliced into this module by the
 // driver as __host_platform_* (see tinyc_compile_host_platform / the
 // --host-platform flag). So there is ONE implementation of the platform per OS
-// — the corec source — shared by the native and the via-wasm paths; the shims
-// no longer re-implement it.
+// — the corec source — shared by the native and the via-wasm paths.
 //
 // Retargeting to Linux/Windows is then just: splice that OS's platform_<os>.c
-// (its raw-syscall / kernel32 bodies) instead of platform_macos.c. The shim
-// bodies here are OS-independent.
+// (its raw-syscall / kernel32 bodies) instead of platform_macos.c. The adapter
+// and the lowering here are OS-independent.
 // =============================================================================
 
 
