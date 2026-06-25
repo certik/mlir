@@ -885,7 +885,7 @@ expected_stdout = "1 256\n"
 
 [[test]]
 name = "builtin_sqrt"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "4 9\n"
 
 [[test]]

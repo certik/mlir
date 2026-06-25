@@ -288,6 +288,22 @@ static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, string nm) {
         store_val(F, r, RAX);
         return true;
     }
+    // llvm.intr.sqrt: hardware sqrt (mirrors llvm->aarch64 fsqrt lowering).
+    if (str_eqz(nm, "llvm.intr.sqrt")) {
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        int fb = fp_bytes(ctx, r);
+        if (fb != 4 && fb != 8) {
+            fail(F, "sqrt on non-float result", nm);
+            return true;
+        }
+        load_val(F, MLIR_GetOpOperand(op, 0), RAX);
+        movq_xmm_gpr(F, 0, RAX);
+        if (fb == 4) sse_ss(F, 0x51, 0, 0);   // sqrtss
+        else         sse_sd(F, 0x51, 0, 0);   // sqrtsd
+        movq_gpr_xmm(F, RAX, 0);
+        store_val(F, r, RAX);
+        return true;
+    }
     // float -> signed/unsigned int (truncating)
     if (str_eqz(nm, "llvm.fptosi") || str_eqz(nm, "llvm.fptoui")) {
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
