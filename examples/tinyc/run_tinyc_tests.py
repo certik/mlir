@@ -448,7 +448,7 @@ def main():
         if (TARGET in ("wasm", "macho") and "expected_stdout_wasm" in t
                 and not (TARGET == "macho" and MACHO_BACKEND == "llvm")):
             expected = t["expected_stdout_wasm"]
-        if name == "func_macro" and not use_unity_source():
+        if name == "func_macro" and (not use_unity_source() or TARGET == "elf"):
             expected = "greet\nsquare=16\nmain\n"
         # `targets` lists the runner targets a test may run under. Default
         # (omitted) is ["native", "wasm"] — the established backends.

@@ -19,7 +19,7 @@ expected_stdout = "55\n"
 
 [[test]]
 name = "short_circuit"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "0\n1\n1\n1\n"
 
 [[test]]
@@ -146,17 +146,17 @@ expected_stdout = "42\n42\n"
 
 [[test]]
 name = "struct"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "3\n4\n25\n5\n7.5\n"
 
 [[test]]
 name = "struct_pass"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "11\n4\n6\n20\n30\n13\n24\n7\n3.5\n"
 
 [[test]]
 name = "struct_ptr"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "15\n5\n10\n15\n15\n55\n1\n1\n"
 
 [[test]]
@@ -171,17 +171,17 @@ expected_stdout = "6\n60\n4\n"
 
 [[test]]
 name = "linked_list"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "6\n"
 
 [[test]]
 name = "binary_tree"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "40\n"
 
 [[test]]
 name = "null_check"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n0\n1\n0\n0\n42\n99\n"
 
 [[test]]
@@ -193,7 +193,7 @@ expected_stdout_wasm = "4\n4\n8\n8\n"
 
 [[test]]
 name = "struct_ptr_return"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "60\n99\n99\n99\n"
 
 [[test]]
@@ -203,7 +203,7 @@ expected_stdout = "Hello, world!\nFoo\n\n"
 
 [[test]]
 name = "globals"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "Hi\n1\n3\n30\n3\n"
 
 [[test]]
@@ -263,17 +263,17 @@ expected_stdout = "100\n200\n200\n301\n0\n999\n22\n"
 
 [[test]]
 name = "fnptr_basic"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "7\n7\n"
 
 [[test]]
 name = "fnptr_arg"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "12\n42\n"
 
 [[test]]
 name = "fnptr_typedef"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "42\n42\n"
 
 [[test]]
@@ -283,7 +283,7 @@ expected_stdout = "8\n0\n9\n49\n0\n25\n140\n"
 
 [[test]]
 name = "struct_2d_array_field"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "0\n2\n10\n12\n12.5\n"
 # wasm_skip: %g float formatting differs from host (12.5 vs 11.9999)
 wasm_skip = true
@@ -380,7 +380,7 @@ expected_stdout = "41\n42\n"
 
 [[test]]
 name = "ptr_to_fnptr"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "5\n7\n"
 
 [[test]]
@@ -412,7 +412,7 @@ expected_stdout = "42\n7\n3\n4\n7\n"
 
 [[test]]
 name = "variadic_call_printf"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1 2 3\nanswer = 42\n"
 
 [[test]]
@@ -422,7 +422,7 @@ expected_stdout = "60\n15\n99\n"
 
 [[test]]
 name = "variadic_mixed_types"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "int=7\nlong=1234567890123\nstr=hi\n"
 
 [[test]]
@@ -432,12 +432,12 @@ expected_stdout = "10\n300\n"
 
 [[test]]
 name = "extern_malloc_free"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "42\n99\n"
 
 [[test]]
 name = "negative_ptr_index"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "OK\n"
 
 [[test]]
@@ -459,12 +459,12 @@ wasm_skip = true
 
 [[test]]
 name = "fnptr_struct_return"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "7\n70\n77\n"
 
 [[test]]
 name = "fnptr_i64_return"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "700\n2000\n"
 
 [[test]]
@@ -576,7 +576,7 @@ expected_stdout = "0\n5\n11\n"
 
 [[test]]
 name = "libc_malloc_free"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "110\n"
 
 # stdout-using tests: stdout is a real linker symbol only on glibc/Linux.
@@ -585,7 +585,7 @@ expected_stdout = "110\n"
 # `fputs(..., stdout)` form here; portable file I/O is in libc_file_io.
 [[test]]
 name = "libc_fputs_stdout"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 platforms = ["linux"]
 expected_stdout = "hello\nworld\n"
 # wasm_skip: needs fputs/stdout as a portable symbol.
@@ -593,7 +593,7 @@ wasm_skip = true
 
 [[test]]
 name = "libc_fputc_stdout"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 platforms = ["linux"]
 expected_stdout = "AB\n"
 # wasm_skip: needs fputc/stdout as a portable symbol.
@@ -601,7 +601,7 @@ wasm_skip = true
 
 [[test]]
 name = "libc_file_io"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "read 11 bytes: hello libc\n"
 # wasm_skip: needs host-style file I/O not provided in wasm tests.
 wasm_skip = true
@@ -620,7 +620,7 @@ expected_stdout = "42 3.5 97\n-1.25\n"
 
 [[test]]
 name = "char_array_string_init"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "hello 6\nabc 10 0 0 0\njello\n"
 
 [[test]]
@@ -675,7 +675,7 @@ expected_stdout = "3\n4\n7\n"
 
 [[test]]
 name = "struct_ptr_field_index"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "10\n11\n12\n1000000\n2000000\n3000000\n"
 
 [[test]]
@@ -685,7 +685,7 @@ expected_stdout = "1\n10\n20\n2\n30\n40\n"
 
 [[test]]
 name = "typedef_i64_ptr"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "100\n101\n102\n103\n"
 
 [[test]]
@@ -760,102 +760,102 @@ expected_stdout = "8\n5\n16\n"
 
 [[test]]
 name = "func_macro"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "greet\nsquare=16\napp_main\n"
 
 [[test]]
 name = "builtin_va"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "10\n20\n30\n"
 
 [[test]]
 name = "va_list_pass"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "7\n8\n9\n"
 
 [[test]]
 name = "addr_of_struct_index"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "333\n330\n"
 
 [[test]]
 name = "int_suffix_ul"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "4096\n4096\n4096\n4096\n7\n"
 
 [[test]]
 name = "compound_literal_array"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "2\n6\n"
 
 [[test]]
 name = "global_array"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "0 0\n1 10\n2 20\n3 30\n24\n1000000005\n"
 
 [[test]]
 name = "global_array_int_init"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "100\n"
 
 [[test]]
 name = "typedef_array_in_multidecl"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "23\n"
 
 [[test]]
 name = "for_comma_update"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "0 0\n1 4\n2 8\n3 12\n"
 
 [[test]]
 name = "param_array_decay"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "7\n"
 
 [[test]]
 name = "struct_multi_ptr_field"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "3 9\n"
 
 [[test]]
 name = "struct_array_field_decay"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "200\n"
 
 [[test]]
 name = "inttoptr_cast"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "42\n"
 
 [[test]]
 name = "struct_fwd_then_def"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "16\n"
 
 [[test]]
 name = "goto_label"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "10\n"
 
 [[test]]
 name = "compound_designated"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "3 7 10 20\n"
 
 [[test]]
 name = "bnot_i64"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "-16\n"
 
 [[test]]
 name = "global_ptr_array"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n"
 
 [[test]]
 name = "va_arg_struct"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "33\n"
 
 [[test]]
@@ -870,84 +870,84 @@ expected_stdout = "1000 200 150\n"
 
 [[test]]
 name = "empty_stmt"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "3\n"
 
 [[test]]
 name = "neg_i64"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "-1000000000000\n"
 
 [[test]]
 name = "global_cast_null_shift"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1 256\n"
 
 [[test]]
 name = "builtin_sqrt"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "4 9\n"
 
 [[test]]
 name = "static_func"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "21\n"
 [[test]]
 name = "struct_ptr_arith"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "sz=24\nq-p=24\nr-p=48\n"
 # wasm_skip: pointer arithmetic uses host i64 ABI; mismatches wasm32 i32 ptrs
 wasm_skip = true
 
 [[test]]
 name = "loop_local_alloca"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "40000200000\n"
 
 [[test]]
 name = "postfix_inc"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "a=5\nb=6\nx=5\nbuf=hi len=2\nn=786432 nlen=6\n"
 
 [[test]]
 name = "global_long"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "105 14 12\nsum=131\n"
 # wasm_skip: tests assume long==i64 (host); long is i32 on wasm32
 wasm_skip = true
 
 [[test]]
 name = "typedef_u8_ptr"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "a=ABCDEF\nb=abcdef\nc=012345\n"
 
 [[test]]
 name = "struct_field_char_ptr"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "buf=ABCDE\n"
 
 [[test]]
 name = "compound_struct_field"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "tag=7 x=11 y=22\ntag=1 x=0 y=0\n"
 
 [[test]]
 name = "sizeof_string_lit"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "hi=3 empty=1 hello=6 ptr=8\n"
 # On wasm32, `sizeof(char *)` is 4.
 expected_stdout_wasm = "hi=3 empty=1 hello=6 ptr=4\n"
 
 [[test]]
 name = "variadic_struct_arg_count"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "size=2 count=0\nsize=2 count=5\nsret size=2 count=0\nr.size=2\nsret size=2 count=7\nr2.size=2\n"
 # wasm_skip: variadic struct ABI differs on wasm32
 wasm_skip = true
 
 [[test]]
 name = "struct_param_memchr"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = """\
 n=11
 found=1
@@ -955,7 +955,7 @@ offset=9
 """
 [[test]]
 name = "unsigned_char_ptr_local"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = """\
 sum=476
 found_at=9
@@ -963,7 +963,7 @@ found_at=9
 
 [[test]]
 name = "ptr_postfix_stride"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = """\
 long: 20 30 20
 int: 8 7
@@ -974,7 +974,7 @@ wasm_skip = true
 
 [[test]]
 name = "struct_zero_init_64bit"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = """\
 0
 """
@@ -988,12 +988,12 @@ expected_stdout = """\
 
 [[test]]
 name = "union_sizeof"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "OK\n"
 
 [[test]]
 name = "re2c_keyword_longest_match"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "OK\n"
 
 [[test]]
@@ -1003,12 +1003,12 @@ expected_stdout = "OK\n"
 
 [[test]]
 name = "unsigned_modulo"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n"
 
 [[test]]
 name = "struct_field_designated_init"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "3\n"
 
 # Mach-O backend tests. Only run under `TINYC_TARGET=macho`
@@ -1144,7 +1144,7 @@ expected_stdout = "got-char-ptr\n"
 
 [[test]]
 name = "unsigned_i32_to_i64_zext"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # Widening an `unsigned` 32-bit value to a 64-bit function argument
 # must zero-extend, not sign-extend. tinyC's coerce_eval used to
 # always emit `arith.extsi` for i32 -> i64, even when the source
@@ -1156,7 +1156,7 @@ expected_stdout = "2147483648\n"
 
 [[test]]
 name = "ul_literal_storage_size"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # wasm32 self-host bug: an integer literal with a single 'L'/'UL'
 # suffix (e.g. `4096UL`) was lexed as i64 even on wasm32, where
 # `long` is 32-bit. That made `start % 4096UL` (with `start` of
@@ -1170,7 +1170,7 @@ expected_stdout = "ok\n"
 
 [[test]]
 name = "deep_recursion_large_locals"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # Linker regression test: the in-tree wasm linker
 # (`mlir_wasm_link.c`) used to initialise `__stack_pointer` to
 # 64 KB, which trapped the moment a tinyc-built wasm binary did
@@ -1193,7 +1193,7 @@ expected_stdout = "127\n42\n127\n42\n1\n99\n"
 
 [[test]]
 name = "sret_in_ternary"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # Investigation MRE for stage-2 selfhost: `at_s()` in
 # `mlir_wasmstack_to_bin.c` is `return a ? sretfn(a) : (T){0};`
 # and the stage-2 build read truncated strings out of it. This
@@ -1204,7 +1204,7 @@ expected_stdout = "a.size=5 a.str[0]=h\nb.size=0\n"
 
 [[test]]
 name = "u64_size_field_narrowing"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 # Investigation MRE for stage-2 selfhost: emit.c calls
 # `attr_s(ctx, \"target\", o->call_target.str, o->call_target.size)`
 # where `.size` is uint64_t but `attr_s`'s 4th arg is size_t (i32 on
@@ -1330,22 +1330,22 @@ expected_stdout = "1\n35\n0\n255\n42\n"
 
 [[test]]
 name = "ptr_cast_unsigned_compare"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "OK\n"
 
 [[test]]
 name = "sizeof_deref_in_own_init"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "OK\n"
 
 [[test]]
 name = "sizeof_char_array_elem"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "OK\n"
 
 [[test]]
 name = "ptr_add_u64_stride"
-targets = ["native", "wasm", "macho"]
+targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "OK\n"
 
 [[test]]

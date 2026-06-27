@@ -145,6 +145,12 @@ static void add_fix(FnCtx *F, int target_block, uint32_t field_off) {
     F->n_fix++;
 }
 
+// Patch a rel32 field emitted at `field_off` to branch to `target_off`.
+static void patch_rel32_at(FnCtx *F, uint32_t field_off, uint32_t target_off) {
+    int32_t rel = (int32_t)target_off - (int32_t)(field_off + 4);
+    buf_patch_le32(&F->f->code, field_off, (uint32_t)rel);
+}
+
 // block index of a successor block within this function's single region
 static int block_index(MLIR_RegionHandle reg, MLIR_BlockHandle blk) {
     size_t n = MLIR_GetRegionNumBlocks(reg);
@@ -282,6 +288,22 @@ static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, string nm) {
         store_val(F, r, RAX);
         return true;
     }
+    // llvm.intr.sqrt: hardware sqrt (mirrors llvm->aarch64 fsqrt lowering).
+    if (str_eqz(nm, "llvm.intr.sqrt")) {
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        int fb = fp_bytes(ctx, r);
+        if (fb != 4 && fb != 8) {
+            fail(F, "sqrt on non-float result", nm);
+            return true;
+        }
+        load_val(F, MLIR_GetOpOperand(op, 0), RAX);
+        movq_xmm_gpr(F, 0, RAX);
+        if (fb == 4) sse_ss(F, 0x51, 0, 0);   // sqrtss
+        else         sse_sd(F, 0x51, 0, 0);   // sqrtsd
+        movq_gpr_xmm(F, RAX, 0);
+        store_val(F, r, RAX);
+        return true;
+    }
     // float -> signed/unsigned int (truncating)
     if (str_eqz(nm, "llvm.fptosi") || str_eqz(nm, "llvm.fptoui")) {
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
@@ -369,14 +391,43 @@ static void emit_epilogue(FnCtx *F) {
 static GMap *g_x64_gmap = NULL;
 static bool  g_x64_ok = true;
 
-// referenced external symbols (callees), for thunk synthesis + reachability
-typedef struct { char **n; size_t c, cap; } SymSet;
-static void sym_add(SymSet *s, string nm) {
-    for (size_t i = 0; i < s->c; i++)
-        if (strlen(s->n[i]) == nm.size && memcmp(s->n[i], nm.str, nm.size) == 0) return;
-    if (s->c == s->cap) { s->cap = s->cap ? s->cap * 2 : 8; s->n = realloc(s->n, s->cap * sizeof(char*)); }
-    s->n[s->c] = (char *)malloc(nm.size + 1);
-    memcpy(s->n[s->c], nm.str, nm.size); s->n[s->c][nm.size] = 0; s->c++;
+// SysV AMD64 argument marshaling for llvm.call. `arg_base` skips the fn-pointer
+// operand on indirect calls. Returns stack-arg count and alignment pad for cleanup.
+static void emit_sysv_call_args(FnCtx *F, MLIR_OpHandle op, size_t arg_base,
+                                size_t *nstack_out, size_t *pad_out) {
+    size_t no = MLIR_GetOpNumOperands(op) - arg_base;
+    size_t reg_cutoff = 6;
+    bool is_vararg_call = false;
+    MLIR_AttributeHandle vct = MLIR_GetOpAttributeByName(op, "var_callee_type");
+    if (vct != MLIR_INVALID_HANDLE) {
+        MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(vct);
+        if (ft != MLIR_INVALID_HANDLE && MLIR_GetTypeFunctionIsVarArg(ft)) {
+            size_t nf = MLIR_GetTypeFunctionNumInputs(ft);
+            reg_cutoff = nf < 6 ? nf : 6;
+            is_vararg_call = true;
+        }
+    }
+    if (reg_cutoff > no) reg_cutoff = no;
+    size_t nstack = no - reg_cutoff;
+    size_t pad = nstack & 1;
+    if (pad) { eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 5, RSP); eb(F, 0x08); }  // sub rsp, 8
+    for (size_t i = no; i > reg_cutoff; i--) {
+        load_val(F, MLIR_GetOpOperand(op, arg_base + i - 1), RAX);
+        eb(F, 0x50);                                  // push rax
+    }
+    for (size_t i = 0; i < reg_cutoff; i++)
+        load_val(F, MLIR_GetOpOperand(op, arg_base + i), ARG_REGS[i]);
+    if (is_vararg_call) alu_rr(F, 0x31, RAX, RAX, 0);     // xor eax, eax (AL = # xmm regs)
+    *nstack_out = nstack;
+    *pad_out = pad;
+}
+
+// emit `call rel32` to a named symbol (direct-call fast path).
+static void emit_direct_call(FnCtx *F, string callee, SymSet *refs) {
+    eb(F, 0xE8);
+    uint32_t field = here(F); e32(F, 0);
+    add_text_reloc(F, field, callee);
+    sym_add(refs, callee);
 }
 
 // ---------------------------------------------------------------------------
@@ -588,66 +639,38 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
     if (str_eqz(nm, "llvm.call") || str_eqz(nm, "func.call")) {
         string callee = strip_at(attr_str(op, "callee"));
         if (!callee.size) callee = strip_at(attr_str(op, "callee_name"));
-        if (!callee.size) { fail(F, "indirect call unsupported", (string){0}); return; }
-        size_t no = MLIR_GetOpNumOperands(op);
-        // __builtin_syscall6(num, a1..a6) -> @__tinyc_syscall6 (7 args). The
-        // SysV C ABI passes 6 args in registers and the 7th (a6) on the stack;
-        // the synthesised thunk reads it from [rsp+8] and traps via `syscall`.
-        bool is_sc6 = str_eqz(callee, "__tinyc_syscall6");
-        if (is_sc6) {
-            if (no != 7) { fail(F, "__tinyc_syscall6 expects 7 args", callee); return; }
-            load_val(F, MLIR_GetOpOperand(op, 6), RAX);
-            eb(F, 0x50);                                 // push rax (a6)
-            for (size_t i = 0; i < 6; i++)
-                load_val(F, MLIR_GetOpOperand(op, i), ARG_REGS[i]);
-            eb(F, 0xE8);
-            uint32_t field = here(F); e32(F, 0);
-            char *cs = (char *)malloc(callee.size + 1);
-            memcpy(cs, callee.str, callee.size); cs[callee.size] = 0;
-            obj_add_reloc(F->f, field, field + 4, false, cs, 0);
-            sym_add(refs, callee);
-            eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 0, RSP); eb(F, 0x08);  // add rsp, 8
-            if (MLIR_GetOpNumResults(op) == 1)
-                store_val(F, MLIR_GetOpResult(op, 0), RAX);
-            return;
-        }
-        // Register/stack split. For a variadic callee only the fixed params go
-        // in registers; ALL variadic args are passed on the stack so the
-        // callee's va_list is a simple cursor over them (see llvm.intr.vastart).
-        // Non-variadic: the usual SysV split (args 0..5 in registers, 6.. on the
-        // stack). Stack args are pushed right-to-left so operand[reg_cutoff]
-        // lands at [rsp+0] at the call; an 8-byte pad keeps rsp 16-aligned when
-        // the number of stack args is odd.
-        size_t reg_cutoff = 6;
-        bool is_vararg_call = false;
-        MLIR_AttributeHandle vct = MLIR_GetOpAttributeByName(op, "var_callee_type");
-        if (vct != MLIR_INVALID_HANDLE) {
-            MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(vct);
-            if (ft != MLIR_INVALID_HANDLE && MLIR_GetTypeFunctionIsVarArg(ft)) {
-                size_t nf = MLIR_GetTypeFunctionNumInputs(ft);
-                reg_cutoff = nf < 6 ? nf : 6;
-                is_vararg_call = true;
+        bool is_indirect = (callee.size == 0);
+        if (!is_indirect) {
+            size_t no = MLIR_GetOpNumOperands(op);
+            // __builtin_syscall6(num, a1..a6) -> @__tinyc_syscall6 (7 args). The
+            // SysV C ABI passes 6 args in registers and the 7th (a6) on the stack;
+            // the synthesised thunk reads it from [rsp+8] and traps via `syscall`.
+            bool is_sc6 = str_eqz(callee, "__tinyc_syscall6");
+            if (is_sc6) {
+                if (no != 7) { fail(F, "__tinyc_syscall6 expects 7 args", callee); return; }
+                load_val(F, MLIR_GetOpOperand(op, 6), RAX);
+                eb(F, 0x50);                                 // push rax (a6)
+                for (size_t i = 0; i < 6; i++)
+                    load_val(F, MLIR_GetOpOperand(op, i), ARG_REGS[i]);
+                emit_direct_call(F, callee, refs);
+                eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 0, RSP); eb(F, 0x08);  // add rsp, 8
+                if (MLIR_GetOpNumResults(op) == 1)
+                    store_val(F, MLIR_GetOpResult(op, 0), RAX);
+                return;
             }
         }
-        if (reg_cutoff > no) reg_cutoff = no;
-        size_t nstack = no - reg_cutoff;
-        size_t pad = nstack & 1;
-        if (pad) { eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 5, RSP); eb(F, 0x08); }  // sub rsp, 8
-        for (size_t i = no; i > reg_cutoff; i--) {
-            load_val(F, MLIR_GetOpOperand(op, i - 1), RAX);
-            eb(F, 0x50);                                  // push rax
+        size_t arg_base = is_indirect ? 1 : 0;
+        if (is_indirect)
+            load_val(F, MLIR_GetOpOperand(op, 0), R11);
+        size_t nstack = 0, pad = 0;
+        emit_sysv_call_args(F, op, arg_base, &nstack, &pad);
+        if (is_indirect) {
+            rex(F, 0, 0, 0, R11);
+            eb(F, 0xFF);
+            modrm(F, 3, 2, R11);   // call *r11
+        } else {
+            emit_direct_call(F, callee, refs);
         }
-        for (size_t i = 0; i < reg_cutoff; i++)
-            load_val(F, MLIR_GetOpOperand(op, i), ARG_REGS[i]);
-        // SysV: AL = # of vector registers used for a variadic call. tinyC passes
-        // all variadic args on the stack (cursor va_list), so AL = 0.
-        if (is_vararg_call) alu_rr(F, 0x31, RAX, RAX, 0);     // xor eax, eax
-        eb(F, 0xE8);
-        uint32_t field = here(F); e32(F, 0);
-        char *cs = (char *)malloc(callee.size + 1);
-        memcpy(cs, callee.str, callee.size); cs[callee.size] = 0;
-        obj_add_reloc(F->f, field, field + 4, false, cs, 0);
-        sym_add(refs, callee);
         if (nstack) {
             uint32_t cleanup = (uint32_t)((nstack + pad) * 8);   // pop stack args + pad
             rex(F, 1, 0, 0, RSP); eb(F, 0x81); modrm(F, 3, 0, RSP); e32(F, cleanup);  // add rsp, imm32
@@ -706,17 +729,43 @@ static void lower_term(FnCtx *F, MLIR_OpHandle op) {
         return;
     }
     if (str_eqz(nm, "llvm.cond_br")) {
+        // Short-circuit edge copies for operand-carrying successors.
+        // MLIR cond_br can pass values into a successor block as block arguments
+        // (successor operands). emit_edge() performs those copies. They must run
+        // only on the branch actually taken — otherwise && / || break.
+        // Example:  if ((n != 0) && (100 / n > 0))
+        //   - lowered to: test n != 0; if false -> skip inner check; if true ->
+        //     copy edge operands and evaluate 100/n > 0
+        //   - wrong: copy BOTH edges before testing n -> inner divide runs even
+        //     when n == 0 (divide-by-zero trap)
+        //   - right: test n first; only the true-edge landing pad runs emit_edge
         MLIR_BlockHandle tt = MLIR_GetOpSuccessor(op, 0);
         MLIR_BlockHandle ft = MLIR_GetOpSuccessor(op, 1);
-        emit_edge(F, op, 0, tt);
-        emit_edge(F, op, 1, ft);
+        size_t nso_t = MLIR_GetOpNumSuccessorOperands(op, 0);
+        size_t nso_f = MLIR_GetOpNumSuccessorOperands(op, 1);
+        bool need_t = nso_t > 0;
+        bool need_f = nso_f > 0;
         load_val(F, MLIR_GetOpOperand(op, 0), RAX);      // cond
         alu_rr(F, 0x85, RAX, RAX, 0);                    // test eax, eax
         eb(F, 0x0F); eb(F, (uint8_t)(0x80 + CC_NE));     // jne true
-        uint32_t f1 = here(F); e32(F, 0);
-        add_fix(F, block_index(reg, tt), f1);
-        eb(F, 0xE9); uint32_t f2 = here(F); e32(F, 0);   // jmp false
-        add_fix(F, block_index(reg, ft), f2);
+        uint32_t f_jne = here(F); e32(F, 0);
+        eb(F, 0xE9); uint32_t f_jmp = here(F); e32(F, 0); // jmp false
+        if (need_t) {
+            patch_rel32_at(F, f_jne, here(F));
+            emit_edge(F, op, 0, tt);
+            eb(F, 0xE9); uint32_t f_br = here(F); e32(F, 0);
+            add_fix(F, block_index(reg, tt), f_br);
+        } else {
+            add_fix(F, block_index(reg, tt), f_jne);
+        }
+        if (need_f) {
+            patch_rel32_at(F, f_jmp, here(F));
+            emit_edge(F, op, 1, ft);
+            eb(F, 0xE9); uint32_t f_br = here(F); e32(F, 0);
+            add_fix(F, block_index(reg, ft), f_br);
+        } else {
+            add_fix(F, block_index(reg, ft), f_jmp);
+        }
         return;
     }
     fail(F, "unsupported terminator", nm);
@@ -879,10 +928,130 @@ static void gmap_put(GMap *g, string nm, uint32_t off) {
     g->off[g->n] = off; g->n++;
 }
 
-// Collect llvm.mlir.global string/zero initializers into the data blob.
-static void collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb, GMap *gm, Buf *data) {
-    (void)ctx;
+typedef struct { uint32_t slot_off; uint32_t target_off; } X64PtrReloc;
+typedef struct { uint32_t slot_off; string target; } PendingPtrReloc;
+
+static bool serialize_global_value_attr(MLIR_AttributeHandle va, string name,
+                                        Buf *data, uint32_t off, size_t sz) {
+    MLIR_AttrKind vk = MLIR_GetAttributeKind(va);
+    if (vk == MLIR_ATTR_KIND_STRING) {
+        string s = MLIR_GetAttributeString(va);
+        if (s.size > sz) s.size = sz;
+        memcpy(data->data + off, s.str, s.size);
+    } else if (vk == MLIR_ATTR_KIND_INTEGER || vk == MLIR_ATTR_KIND_BOOL) {
+        uint64_t v = (uint64_t)MLIR_GetAttributeInteger(va);
+        for (size_t b = 0; b < sz; b++)
+            data->data[off + b] = (uint8_t)(b < 8 ? (v >> (8 * b)) : 0);
+    } else if (vk == MLIR_ATTR_KIND_FLOAT) {
+        double d = MLIR_GetAttributeFloat(va);
+        uint64_t bits = 0;
+        if (sz == 4) { float f = (float)d; uint32_t b32; memcpy(&b32, &f, 4); bits = b32; }
+        else         { memcpy(&bits, &d, 8); }
+        for (size_t b = 0; b < sz; b++)
+            data->data[off + b] = (uint8_t)(bits >> (8 * b));
+    } else {
+        fprintf(stderr, "x64: unsupported global initializer kind for '%.*s'\n",
+                (int)name.size, name.str);
+        g_x64_ok = false;
+        return false;
+    }
+    return true;
+}
+
+static bool parse_trivial_ptr_global_init(MLIR_OpHandle op, string name, uint32_t off,
+                                          size_t sz, PendingPtrReloc **pend,
+                                          size_t *pend_cap, size_t *n_pend) {
+    if (MLIR_GetOpNumRegions(op) == 0 ||
+        MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(op, 0)) == 0)
+        return true;
+
+    MLIR_BlockHandle blk = MLIR_GetRegionBlock(MLIR_GetOpRegion(op, 0), 0);
+    size_t nb = MLIR_GetBlockNumOps(blk);
+    string target = (string){0};
+    bool only_trivial = true;
+
+    for (size_t bi = 0; bi < nb; bi++) {
+        MLIR_OpHandle bop = MLIR_GetBlockOp(blk, bi);
+        string opn = MLIR_GetOpName(bop);
+        if (str_eqz(opn, "llvm.mlir.addressof")) {
+            MLIR_AttributeHandle ga =
+                MLIR_GetOpAttributeByName(bop, "global_name");
+            if (ga == MLIR_INVALID_HANDLE)
+                ga = MLIR_GetOpAttributeByName(bop, "value");
+            if (ga == MLIR_INVALID_HANDLE) {
+                fprintf(stderr, "x64: addressof global missing name in '%.*s'\n",
+                        (int)name.size, name.str);
+                g_x64_ok = false;
+                return false;
+            }
+            target = strip_at(MLIR_GetAttributeString(ga));
+        } else if (!str_eqz(opn, "llvm.mlir.zero") &&
+                   !str_eqz(opn, "llvm.mlir.undef") &&
+                   !str_eqz(opn, "llvm.return")) {
+            only_trivial = false;
+        }
+    }
+
+    if (!target.size) {
+        if (!only_trivial) {
+            fprintf(stderr, "x64: unsupported global initializer for '%.*s'\n",
+                    (int)name.size, name.str);
+            g_x64_ok = false;
+            return false;
+        }
+        return true;
+    }
+    if (sz < 8) {
+        fprintf(stderr, "x64: pointer global '%.*s' is too small\n",
+                (int)name.size, name.str);
+        g_x64_ok = false;
+        return false;
+    }
+    if (*n_pend == *pend_cap) {
+        *pend_cap = *pend_cap ? *pend_cap * 2 : 4;
+        *pend = (PendingPtrReloc *)realloc(*pend, *pend_cap * sizeof(**pend));
+    }
+    (*pend)[*n_pend].slot_off = off;
+    (*pend)[*n_pend].target = target;
+    (*n_pend)++;
+    return true;
+}
+
+static void resolve_pending_ptr_globals(GMap *gm, PendingPtrReloc *pend, size_t n_pend,
+                                        X64PtrReloc **relocs_out, size_t *n_relocs_out) {
+    *relocs_out = NULL;
+    *n_relocs_out = 0;
+    if (!n_pend || !g_x64_ok) return;
+
+    X64PtrReloc *relocs = (X64PtrReloc *)malloc(n_pend * sizeof(X64PtrReloc));
+    for (size_t k = 0; k < n_pend; k++) {
+        if (!gmap_get(gm, pend[k].target, &relocs[k].target_off)) {
+            fprintf(stderr, "x64: pointer global target '%.*s' not found\n",
+                    (int)pend[k].target.size, pend[k].target.str);
+            g_x64_ok = false;
+            break;
+        }
+        relocs[k].slot_off = pend[k].slot_off;
+    }
+    if (g_x64_ok) {
+        *relocs_out = relocs;
+        *n_relocs_out = n_pend;
+    } else {
+        free(relocs);
+    }
+}
+
+// Collect llvm.mlir.global initializers into the data blob. Scalar/aggregate
+// globals store their `value` attribute; pointer globals whose initializer
+// region is just `addressof @other; return` become runtime stores in _start.
+static void collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb, GMap *gm, Buf *data,
+                            X64PtrReloc **relocs_out, size_t *n_relocs_out) {
+    *relocs_out = NULL;
+    *n_relocs_out = 0;
     size_t no = MLIR_GetBlockNumOps(mb);
+    size_t pend_cap = 0, n_pend = 0;
+    PendingPtrReloc *pend = NULL;
+
     for (size_t i = 0; i < no; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
         if (!str_eqz(MLIR_GetOpName(op), "llvm.mlir.global")) continue;
@@ -894,46 +1063,39 @@ static void collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb, GMap *gm, Bu
             MLIR_TypeHandle t = MLIR_GetAttributeTypeValue(gt);
             if (t != MLIR_INVALID_HANDLE) sz = x64_type_size(ctx, t);
         }
+        if (sz == 0) sz = 8;
+        for (size_t z = 0; z < sz; z++) buf_u8(data, 0);
+
         MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(op, "value");
-        if (va) {
-            // Serialize the initializer per its actual attribute kind. Using the
-            // string accessor for an integer/float/bool attribute would read an
-            // unrelated field and emit garbage (or read an invalid pointer).
-            MLIR_AttrKind vk = MLIR_GetAttributeKind(va);
-            if (vk == MLIR_ATTR_KIND_STRING) {
-                string s = MLIR_GetAttributeString(va);
-                buf_append(data, s.str, s.size);
-                for (size_t z = s.size; z < sz; z++) buf_u8(data, 0);   // zero-fill tail
-            } else if (vk == MLIR_ATTR_KIND_INTEGER || vk == MLIR_ATTR_KIND_BOOL) {
-                if (sz == 0) sz = 8;
-                uint64_t v = (uint64_t)MLIR_GetAttributeInteger(va);
-                for (size_t b = 0; b < sz; b++)
-                    buf_u8(data, (uint8_t)(b < 8 ? (v >> (8 * b)) : 0));
-            } else if (vk == MLIR_ATTR_KIND_FLOAT) {
-                if (sz != 4 && sz != 8) sz = 8;
-                double d = MLIR_GetAttributeFloat(va);
-                uint64_t bits = 0;
-                if (sz == 4) { float f = (float)d; uint32_t b32; memcpy(&b32, &f, 4); bits = b32; }
-                else         { memcpy(&bits, &d, 8); }
-                for (size_t b = 0; b < sz; b++) buf_u8(data, (uint8_t)(bits >> (8 * b)));
-            } else {
-                fprintf(stderr, "x64: unsupported global initializer kind for '%.*s'\n",
-                        (int)name.size, name.str);
-                g_x64_ok = false;
-                for (size_t z = 0; z < (sz ? sz : 8); z++) buf_u8(data, 0);
-            }
-        } else {
-            if (sz == 0) sz = 8;   // unknown layout: conservative 8-byte zero slot
-            for (size_t z = 0; z < sz; z++) buf_u8(data, 0);
-        }
+        if (va) serialize_global_value_attr(va, name, data, off, sz);
+        else parse_trivial_ptr_global_init(op, name, off, sz, &pend, &pend_cap, &n_pend);
+
         gmap_put(gm, name, off);
         while (data->len & 7) buf_u8(data, 0);   // 8-align next global
     }
+
+    resolve_pending_ptr_globals(gm, pend, n_pend, relocs_out, n_relocs_out);
+    free(pend);
 }
 
-static void synth_start(ObjModule *m) {
+static void synth_start(ObjModule *m, X64PtrReloc *relocs, size_t n_relocs) {
     ObjFunc *f = obj_add_func(m, strdup("_start"), true);
-    FnCtx F; memset(&F,0,sizeof(F)); F.f = f;
+    FnCtx F; memset(&F,0,sizeof(F)); F.f = f; F.ok = true;
+    // One-time startup: fill pointer globals (addressof @sym; return initializers).
+    for (size_t k = 0; k < n_relocs; k++) {
+        lea_rip_data(&F, R10, relocs[k].target_off);
+        lea_rip_data(&F, R11, relocs[k].slot_off);
+        store_mem(&F, R11, R10, 8);
+    }
+    // Unity ELF builds define PLATFORM_SKIP_ENTRY, so platform_linux.c does
+    // not supply _start. Per platform.h, the entry point must call
+    // platform_init() before user code — that mmap's the heap and runs
+    // buddy_init(), which stdlib malloc/free depend on.
+    mov_ri(&F, RDI, 0, 1);
+    mov_ri(&F, RSI, 0, 1);
+    mov_ri(&F, RDX, 0, 1);
+    eb(&F, 0xE8); uint32_t pi = here(&F); e32(&F, 0);           // call platform_init
+    obj_add_reloc(f, pi, pi + 4, false, strdup("platform_init"), 0);
     eb(&F, 0xE8); uint32_t fld = here(&F); e32(&F, 0);          // call main
     obj_add_reloc(f, fld, fld+4, false, strdup("main"), 0);
     mov_rr(&F, RDI, RAX, 0);                                    // mov edi, eax
@@ -945,13 +1107,17 @@ static void synth_start(ObjModule *m) {
 // known syscall primitive. The only primitive is __tinyc_syscall6 — every
 // platform_<os>.c raw syscall (write / read / exit / mmap / ...) is built on
 // top of it (see corec/platform/syscall6.h), so there are no per-call thunks.
-static bool synth_thunk(ObjModule *m, const char *name) {
+static bool synth_thunk(ObjModule *m, string name) {
     // __tinyc_syscall6(num, a1..a6): the runtime syscall number is the first C
     // argument, so we cannot bake an NR_* constant — instead reshuffle the SysV
     // argument registers into the Linux x86_64 kernel convention (number in
     // rax; args in rdi/rsi/rdx/r10/r8/r9) and trap. a6 arrives on the stack.
-    if (!strcmp(name, "__tinyc_syscall6")) {
-        ObjFunc *f = obj_add_func(m, strdup(name), false);
+    if (!str_eqz(name, "__tinyc_syscall6")) return false;
+    {
+        char *fn = (char *)malloc(name.size + 1);
+        memcpy(fn, name.str, name.size);
+        fn[name.size] = '\0';
+        ObjFunc *f = obj_add_func(m, fn, false);
         FnCtx F; memset(&F,0,sizeof(F)); F.f = f;
         mov_rr(&F, RAX, RDI, 1);   // rax = num
         mov_rr(&F, RDI, RSI, 1);   // arg1
@@ -966,7 +1132,6 @@ static bool synth_thunk(ObjModule *m, const char *name) {
         eb(&F, 0xC3);                                                      // ret
         return true;
     }
-    return false;
 }
 
 bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
@@ -980,7 +1145,9 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     // globals
     GMap gm; memset(&gm, 0, sizeof(gm));
     Buf data = {0};
-    collect_globals(ctx, mb, &gm, &data);
+    X64PtrReloc *ptr_relocs = NULL;
+    size_t n_ptr_relocs = 0;
+    collect_globals(ctx, mb, &gm, &data, &ptr_relocs, &n_ptr_relocs);
     g_x64_gmap = &gm;
 
     // index defined functions by name
@@ -988,11 +1155,12 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     SymSet refs; memset(&refs, 0, sizeof(refs));
 
     ObjModule m; memset(&m, 0, sizeof(m));
-    synth_start(&m);             // index 0
+    synth_start(&m, ptr_relocs, n_ptr_relocs);   // index 0
     m.start_idx = 0;
 
     // reachability from main over direct-call edges (trims unused runtime)
     SymSet reach; memset(&reach, 0, sizeof(reach));
+    sym_add(&reach, str_from_cstr_view("platform_init"));
     sym_add(&reach, str_from_cstr_view("main"));
     bool grew = true;
     while (grew) {
@@ -1003,7 +1171,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
             if (MLIR_GetOpNumRegions(fn) == 0 || MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(fn,0)) == 0) continue;
             string fname = attr_str(fn, "sym_name");
             bool wanted = false;
-            for (size_t k = 0; k < reach.c; k++) if (str_eqz(fname, reach.n[k])) { wanted = true; break; }
+            for (size_t k = 0; k < reach.c; k++) if (str_eq(fname, reach.n[k])) { wanted = true; break; }
             if (!wanted) continue;
             // scan calls
             MLIR_RegionHandle r = MLIR_GetOpRegion(fn, 0);
@@ -1015,11 +1183,22 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
                     MLIR_OpHandle op = MLIR_GetBlockOp(bk, o);
                     if (str_eqz(MLIR_GetOpName(op), "llvm.call") || str_eqz(MLIR_GetOpName(op), "func.call")) {
                         string cal = strip_at(attr_str(op, "callee"));
+                        if (!cal.size) cal = strip_at(attr_str(op, "callee_name"));
                         if (cal.size) {
                             bool known = false;
-                            for (size_t k = 0; k < reach.c; k++) if (str_eqz(cal, reach.n[k])) { known = true; break; }
+                            for (size_t k = 0; k < reach.c; k++) if (str_eq(cal, reach.n[k])) { known = true; break; }
                             if (!known) { sym_add(&reach, cal); grew = true; }
                         }
+                    } else if (str_eqz(MLIR_GetOpName(op), "llvm.mlir.addressof")) {
+                        MLIR_AttributeHandle ga = MLIR_GetOpAttributeByName(op, "global_name");
+                        if (ga == MLIR_INVALID_HANDLE) ga = MLIR_GetOpAttributeByName(op, "value");
+                        string gn = strip_at(ga ? MLIR_GetAttributeString(ga) : (string){0});
+                        if (!gn.size) continue;
+                        uint32_t dummy;
+                        if (gmap_get(&gm, gn, &dummy)) continue;   // data global
+                        bool known = false;
+                        for (size_t k = 0; k < reach.c; k++) if (str_eq(gn, reach.n[k])) { known = true; break; }
+                        if (!known) { sym_add(&reach, gn); grew = true; }
                     }
                 }
             }
@@ -1034,7 +1213,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
         if (MLIR_GetOpNumRegions(fn) == 0 || MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(fn,0)) == 0) continue;
         string fname = attr_str(fn, "sym_name");
         bool wanted = false;
-        for (size_t k = 0; k < reach.c; k++) if (str_eqz(fname, reach.n[k])) { wanted = true; break; }
+        for (size_t k = 0; k < reach.c; k++) if (str_eq(fname, reach.n[k])) { wanted = true; break; }
         if (!wanted) continue;
         if (str_eqz(fname, "main")) saw_main = true;
         emit_func(ctx, fn, &m, &refs);
@@ -1045,9 +1224,14 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     // synth thunks for referenced-but-undefined symbols
     for (size_t i = 0; i < refs.c && g_x64_ok; i++) {
         bool defined = false;
-        for (size_t j = 0; j < m.n_funcs; j++) if (!strcmp(m.funcs[j].name, refs.n[i])) { defined = true; break; }
+        for (size_t j = 0; j < m.n_funcs; j++)
+            if (str_eq(str_from_cstr_view(m.funcs[j].name), refs.n[i])) { defined = true; break; }
         if (defined) continue;
-        if (!synth_thunk(&m, refs.n[i])) { fprintf(stderr, "x64: unresolved symbol '%s'\n", refs.n[i]); g_x64_ok = false; }
+        if (!synth_thunk(&m, refs.n[i])) {
+            fprintf(stderr, "x64: unresolved symbol '%.*s'\n",
+                    (int)refs.n[i].size, refs.n[i].str);
+            g_x64_ok = false;
+        }
     }
 
     bool ok = g_x64_ok;
@@ -1061,10 +1245,9 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     free(data.data);
     for (size_t i = 0; i < gm.n; i++) free(gm.name[i]);
     free(gm.name); free(gm.off);
-    for (size_t i = 0; i < refs.c; i++) free(refs.n[i]);
     free(refs.n);
-    for (size_t i = 0; i < reach.c; i++) free(reach.n[i]);
     free(reach.n);
+    free(ptr_relocs);
     g_x64_gmap = NULL;
     return ok;
 }
