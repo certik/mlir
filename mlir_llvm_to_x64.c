@@ -77,13 +77,16 @@ static bool gmap_get(GMap *g, string nm, uint32_t *out) {
 }
 
 // Referenced external symbols (callees / addressof targets), for thunk synthesis.
-typedef struct { char **n; size_t c, cap; } SymSet;
+// Names are stored as views into MLIR attribute storage or string literals.
+typedef struct { string *n; size_t c, cap; } SymSet;
 static void sym_add(SymSet *s, string nm) {
     for (size_t i = 0; i < s->c; i++)
-        if (strlen(s->n[i]) == nm.size && memcmp(s->n[i], nm.str, nm.size) == 0) return;
-    if (s->c == s->cap) { s->cap = s->cap ? s->cap * 2 : 8; s->n = realloc(s->n, s->cap * sizeof(char*)); }
-    s->n[s->c] = (char *)malloc(nm.size + 1);
-    memcpy(s->n[s->c], nm.str, nm.size); s->n[s->c][nm.size] = 0; s->c++;
+        if (str_eq(s->n[i], nm)) return;
+    if (s->c == s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 8;
+        s->n = realloc(s->n, s->cap * sizeof(string));
+    }
+    s->n[s->c++] = nm;
 }
 
 // ---------------------------------------------------------------------------

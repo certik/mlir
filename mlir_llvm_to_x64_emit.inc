@@ -1107,13 +1107,17 @@ static void synth_start(ObjModule *m, X64PtrReloc *relocs, size_t n_relocs) {
 // known syscall primitive. The only primitive is __tinyc_syscall6 — every
 // platform_<os>.c raw syscall (write / read / exit / mmap / ...) is built on
 // top of it (see corec/platform/syscall6.h), so there are no per-call thunks.
-static bool synth_thunk(ObjModule *m, const char *name) {
+static bool synth_thunk(ObjModule *m, string name) {
     // __tinyc_syscall6(num, a1..a6): the runtime syscall number is the first C
     // argument, so we cannot bake an NR_* constant — instead reshuffle the SysV
     // argument registers into the Linux x86_64 kernel convention (number in
     // rax; args in rdi/rsi/rdx/r10/r8/r9) and trap. a6 arrives on the stack.
-    if (!strcmp(name, "__tinyc_syscall6")) {
-        ObjFunc *f = obj_add_func(m, strdup(name), false);
+    if (!str_eqz(name, "__tinyc_syscall6")) return false;
+    {
+        char *fn = (char *)malloc(name.size + 1);
+        memcpy(fn, name.str, name.size);
+        fn[name.size] = '\0';
+        ObjFunc *f = obj_add_func(m, fn, false);
         FnCtx F; memset(&F,0,sizeof(F)); F.f = f;
         mov_rr(&F, RAX, RDI, 1);   // rax = num
         mov_rr(&F, RDI, RSI, 1);   // arg1
@@ -1128,7 +1132,6 @@ static bool synth_thunk(ObjModule *m, const char *name) {
         eb(&F, 0xC3);                                                      // ret
         return true;
     }
-    return false;
 }
 
 bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
@@ -1168,7 +1171,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
             if (MLIR_GetOpNumRegions(fn) == 0 || MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(fn,0)) == 0) continue;
             string fname = attr_str(fn, "sym_name");
             bool wanted = false;
-            for (size_t k = 0; k < reach.c; k++) if (str_eqz(fname, reach.n[k])) { wanted = true; break; }
+            for (size_t k = 0; k < reach.c; k++) if (str_eq(fname, reach.n[k])) { wanted = true; break; }
             if (!wanted) continue;
             // scan calls
             MLIR_RegionHandle r = MLIR_GetOpRegion(fn, 0);
@@ -1183,7 +1186,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
                         if (!cal.size) cal = strip_at(attr_str(op, "callee_name"));
                         if (cal.size) {
                             bool known = false;
-                            for (size_t k = 0; k < reach.c; k++) if (str_eqz(cal, reach.n[k])) { known = true; break; }
+                            for (size_t k = 0; k < reach.c; k++) if (str_eq(cal, reach.n[k])) { known = true; break; }
                             if (!known) { sym_add(&reach, cal); grew = true; }
                         }
                     } else if (str_eqz(MLIR_GetOpName(op), "llvm.mlir.addressof")) {
@@ -1194,7 +1197,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
                         uint32_t dummy;
                         if (gmap_get(&gm, gn, &dummy)) continue;   // data global
                         bool known = false;
-                        for (size_t k = 0; k < reach.c; k++) if (str_eqz(gn, reach.n[k])) { known = true; break; }
+                        for (size_t k = 0; k < reach.c; k++) if (str_eq(gn, reach.n[k])) { known = true; break; }
                         if (!known) { sym_add(&reach, gn); grew = true; }
                     }
                 }
@@ -1210,7 +1213,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
         if (MLIR_GetOpNumRegions(fn) == 0 || MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(fn,0)) == 0) continue;
         string fname = attr_str(fn, "sym_name");
         bool wanted = false;
-        for (size_t k = 0; k < reach.c; k++) if (str_eqz(fname, reach.n[k])) { wanted = true; break; }
+        for (size_t k = 0; k < reach.c; k++) if (str_eq(fname, reach.n[k])) { wanted = true; break; }
         if (!wanted) continue;
         if (str_eqz(fname, "main")) saw_main = true;
         emit_func(ctx, fn, &m, &refs);
@@ -1221,9 +1224,14 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     // synth thunks for referenced-but-undefined symbols
     for (size_t i = 0; i < refs.c && g_x64_ok; i++) {
         bool defined = false;
-        for (size_t j = 0; j < m.n_funcs; j++) if (!strcmp(m.funcs[j].name, refs.n[i])) { defined = true; break; }
+        for (size_t j = 0; j < m.n_funcs; j++)
+            if (str_eq(str_from_cstr_view(m.funcs[j].name), refs.n[i])) { defined = true; break; }
         if (defined) continue;
-        if (!synth_thunk(&m, refs.n[i])) { fprintf(stderr, "x64: unresolved symbol '%s'\n", refs.n[i]); g_x64_ok = false; }
+        if (!synth_thunk(&m, refs.n[i])) {
+            fprintf(stderr, "x64: unresolved symbol '%.*s'\n",
+                    (int)refs.n[i].size, refs.n[i].str);
+            g_x64_ok = false;
+        }
     }
 
     bool ok = g_x64_ok;
@@ -1237,9 +1245,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     free(data.data);
     for (size_t i = 0; i < gm.n; i++) free(gm.name[i]);
     free(gm.name); free(gm.off);
-    for (size_t i = 0; i < refs.c; i++) free(refs.n[i]);
     free(refs.n);
-    for (size_t i = 0; i < reach.c; i++) free(reach.n[i]);
     free(reach.n);
     free(ptr_relocs);
     g_x64_gmap = NULL;
