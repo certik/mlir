@@ -387,8 +387,11 @@ static void emit_epilogue(FnCtx *F) {
     eb(F, 0xC9); eb(F, 0xC3);   // leave ; ret
 }
 
-// module-wide lowering state shared across the helpers below
-static GMap *g_x64_gmap = NULL;
+// Module-wide lowering state for one mlir_llvm_to_elf() call (set in that entry
+// point, cleared at x64_done). emit_func snapshots mb/data_buf into FnCtx.
+static GMap *g_x64_gmap = NULL;              // global name -> .data offset (+ size)
+static MLIR_BlockHandle g_x64_mb = MLIR_INVALID_HANDLE;  // module IR block (funcs/globals)
+static Buf *g_x64_data_buf = NULL;           // -> stack Buf in mlir_llvm_to_elf (.data blob)
 static bool  g_x64_ok = true;
 
 // SysV AMD64 argument marshaling for llvm.call. `arg_base` skips the fn-pointer
@@ -800,6 +803,8 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     FnCtx F; memset(&F, 0, sizeof(F));
     F.ctx = ctx; F.f = f; F.ok = true;
     F.gm = g_x64_gmap;
+    F.module_mb = g_x64_mb;
+    F.data_buf = g_x64_data_buf;
 
     MLIR_RegionHandle reg = MLIR_GetOpRegion(fn, 0);
     size_t nb = MLIR_GetRegionNumBlocks(reg);
@@ -922,11 +927,11 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
 // Globals, synth start + syscall thunks, reachability, entry point.
 // ---------------------------------------------------------------------------
 
-static void gmap_put(GMap *g, string nm, uint32_t off) {
-    if (g->n == g->cap) { g->cap = g->cap ? g->cap*2 : 8; g->name = realloc(g->name, g->cap*sizeof(char*)); g->off = realloc(g->off, g->cap*sizeof(uint32_t)); }
-    g->name[g->n] = (char*)malloc(nm.size+1); memcpy(g->name[g->n], nm.str, nm.size); g->name[g->n][nm.size]=0;
-    g->off[g->n] = off; g->n++;
-}
+// Wasm global names — must match mlir_wasmssa_to_llvm.c / aarch64 synth_start.
+#define X64_WASM_LINMEM_BASE  "__wasm_linmem_base"
+#define X64_WASM_LINMEM       "__wasm_linmem"
+#define X64_WASM_ARGC         "__wasm_argc"
+#define X64_WASM_ARGV         "__wasm_argv"
 
 typedef struct { uint32_t slot_off; uint32_t target_off; } X64PtrReloc;
 typedef struct { uint32_t slot_off; string target; } PendingPtrReloc;
@@ -1041,11 +1046,124 @@ static void resolve_pending_ptr_globals(GMap *gm, PendingPtrReloc *pend, size_t 
     }
 }
 
-// Collect llvm.mlir.global initializers into the data blob. Scalar/aggregate
-// globals store their `value` attribute; pointer globals whose initializer
-// region is just `addressof @other; return` become runtime stores in _start.
-static void collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb, GMap *gm, Buf *data,
-                            X64PtrReloc **relocs_out, size_t *n_relocs_out) {
+// True if `op` is llvm.mlir.global (in-tree or upstream GlobalOp form).
+static bool x64_is_global_op(MLIR_OpHandle op) {
+    if (MLIR_GetOpType(op) == OP_TYPE_LLVM_MLIR_GLOBAL) return true;
+    string nm = MLIR_GetOpName(op);
+    if (nm.size == 17 && memcmp(nm.str, "llvm.mlir.global", 17) == 0) return true;
+    if (MLIR_GetOpAttributeByName(op, "global_type") == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetOpAttributeByName(op, "sym_name") == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetOpAttributeByName(op, "function_type") != MLIR_INVALID_HANDLE) return false;
+    return true;
+}
+
+// Bare global name from sym_name (upstream stores `@foo`; strip the `@`).
+static string x64_global_sym_name(MLIR_OpHandle op) {
+    return strip_at(attr_str(op, "sym_name"));
+}
+
+// True if `op` is llvm.func (in-tree or upstream FuncOp form).
+static bool x64_is_func_op(MLIR_OpHandle op) {
+    if (MLIR_GetOpType(op) == OP_TYPE_LLVM_FUNC) return true;
+    string nm = MLIR_GetOpName(op);
+    return nm.size == 9 && memcmp(nm.str, "llvm.func", 9) == 0;
+}
+
+// True if the module has a function named `name` (defined when require_body).
+static bool x64_module_has_func(MLIR_BlockHandle mb, const char *name, bool require_body) {
+    size_t no = MLIR_GetBlockNumOps(mb);
+    for (size_t i = 0; i < no; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
+        if (!x64_is_func_op(op)) continue;
+        if (!str_eqz(attr_str(op, "sym_name"), name)) continue;
+        if (!require_body) return true;
+        if (MLIR_GetOpNumRegions(op) == 0) return false;
+        return MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(op, 0)) > 0;
+    }
+    return false;
+}
+
+// True if the module declares a global named `gn`.
+static bool x64_module_has_global_sym(MLIR_BlockHandle mb, string gn) {
+    if (!gn.size) return false;
+    size_t no = MLIR_GetBlockNumOps(mb);
+    for (size_t i = 0; i < no; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
+        if (!x64_is_global_op(op)) continue;
+        if (str_eq(x64_global_sym_name(op), gn)) return true;
+    }
+    return false;
+}
+
+// True for --from-wasm modules (wasm globals, wasi_start, or spliced host init).
+static bool x64_detect_wasm_lifted(MLIR_BlockHandle mb, GMap *gm) {
+    uint32_t dummy;
+    if (gmap_get_cstr(gm, X64_WASM_LINMEM_BASE, &dummy, NULL) ||
+        gmap_get_cstr(gm, X64_WASM_LINMEM, &dummy, NULL))
+        return true;
+    if (x64_module_has_global_sym(mb,
+            str_from_cstr_view((char *)X64_WASM_LINMEM_BASE)) ||
+        x64_module_has_global_sym(mb,
+            str_from_cstr_view((char *)X64_WASM_LINMEM)) ||
+        x64_module_has_global_sym(mb,
+            str_from_cstr_view((char *)"__wasm_argc")) ||
+        x64_module_has_global_sym(mb,
+            str_from_cstr_view((char *)"__wasm_g0")))
+        return true;
+    // Driver splices platform_linux.c as __host_platform_init; wasm-side
+    // platform_init is often DCE'd before native _start references it.
+    if (x64_module_has_func(mb, "__host_platform_init", true))
+        return true;
+    return x64_module_has_func(mb, "wasi_start", false);
+}
+
+// Allocate one global in .data, serialize its initializer, and register it in gm.
+static void x64_register_global_op(MLIR_Context *ctx, MLIR_OpHandle op, GMap *gm, Buf *data,
+                                   PendingPtrReloc **pend, size_t *pend_cap, size_t *n_pend) {
+    string name = x64_global_sym_name(op);
+    if (!name.size) {
+        fprintf(stderr, "x64: llvm.mlir.global missing sym_name\n");
+        g_x64_ok = false;
+        return;
+    }
+    uint32_t dummy;
+    if (gmap_get(gm, name, &dummy)) return;
+
+    MLIR_AttributeHandle gt = MLIR_GetOpAttributeByName(op, "global_type");
+    size_t sz = 0;
+    if (gt) {
+        MLIR_TypeHandle t = MLIR_GetAttributeTypeValue(gt);
+        if (t != MLIR_INVALID_HANDLE) sz = x64_type_size(ctx, t);
+    }
+    if (sz == 0) sz = 8;
+    uint32_t off = x64_data_begin_global(data, sz);
+
+    MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(op, "value");
+    if (va) serialize_global_value_attr(va, name, data, off, sz);
+    else parse_trivial_ptr_global_init(op, name, off, sz, pend, pend_cap, n_pend);
+
+    x64_data_finish_global(gm, data, name, off, sz);
+}
+
+// Reserve a zero-filled wasm scalar slot in .data if not already in gm.
+static void x64_ensure_wasm_scalar(GMap *gm, Buf *data, const char *name, size_t sz) {
+    uint32_t dummy;
+    if (gmap_get_cstr(gm, name, &dummy, NULL)) return;
+    x64_data_alloc_global(gm, data, str_from_cstr_view((char *)name), sz);
+}
+
+// Ensure __wasm_linmem_base / __wasm_argc / __wasm_argv slots exist in .data.
+static void x64_ensure_wasm_scalars(GMap *gm, Buf *data) {
+    x64_ensure_wasm_scalar(gm, data, X64_WASM_LINMEM_BASE, 8);
+    x64_ensure_wasm_scalar(gm, data, X64_WASM_ARGC, 4);
+    x64_ensure_wasm_scalar(gm, data, X64_WASM_ARGV, 8);
+}
+
+// Lay out .data: one IR-global pass (no second x64_register_all_module_globals
+// scan — x64_register_global_op dedupes via gmap_get), wasm scalars, ptr relocs.
+static void x64_init_data_section(MLIR_Context *ctx, MLIR_BlockHandle mb, GMap *gm,
+                                  Buf *data, bool *wasm_lifted_out,
+                                  X64PtrReloc **relocs_out, size_t *n_relocs_out) {
     *relocs_out = NULL;
     *n_relocs_out = 0;
     size_t no = MLIR_GetBlockNumOps(mb);
@@ -1054,65 +1172,175 @@ static void collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb, GMap *gm, Bu
 
     for (size_t i = 0; i < no; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        if (!str_eqz(MLIR_GetOpName(op), "llvm.mlir.global")) continue;
-        string name = attr_str(op, "sym_name");
-        uint32_t off = (uint32_t)data->len;
-        MLIR_AttributeHandle gt = MLIR_GetOpAttributeByName(op, "global_type");
-        size_t sz = 0;
-        if (gt) {
-            MLIR_TypeHandle t = MLIR_GetAttributeTypeValue(gt);
-            if (t != MLIR_INVALID_HANDLE) sz = x64_type_size(ctx, t);
-        }
-        if (sz == 0) sz = 8;
-        for (size_t z = 0; z < sz; z++) buf_u8(data, 0);
-
-        MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(op, "value");
-        if (va) serialize_global_value_attr(va, name, data, off, sz);
-        else parse_trivial_ptr_global_init(op, name, off, sz, &pend, &pend_cap, &n_pend);
-
-        gmap_put(gm, name, off);
-        while (data->len & 7) buf_u8(data, 0);   // 8-align next global
+        if (!x64_is_global_op(op)) continue;
+        x64_register_global_op(ctx, op, gm, data, &pend, &pend_cap, &n_pend);
     }
-
+    *wasm_lifted_out = x64_detect_wasm_lifted(mb, gm);
+    if (*wasm_lifted_out)
+        x64_ensure_wasm_scalars(gm, data);
     resolve_pending_ptr_globals(gm, pend, n_pend, relocs_out, n_relocs_out);
     free(pend);
 }
 
-static void synth_start(ObjModule *m, X64PtrReloc *relocs, size_t n_relocs) {
-    ObjFunc *f = obj_add_func(m, strdup("_start"), true);
+// Zero-fill a wasm data global when DCE dropped the IR op but addressof remains.
+static bool x64_synth_wasm_global(FnCtx *F, string gn, uint32_t *out_off) {
+    if (!x64_is_wasm_data_sym(gn) || !F->data_buf) return false;
+    size_t sz = 4;
+    if (gn.size == 18 && memcmp(gn.str, "__wasm_linmem_base", 18) == 0) sz = 8;
+    else if (gn.size == 11 && memcmp(gn.str, "__wasm_argv", 11) == 0) sz = 8;
+    *out_off = x64_data_alloc_global(F->gm, F->data_buf, gn, sz);
+    return true;
+}
+
+// Late-register a module global into the data blob (used when collect missed it).
+static bool x64_ensure_global_in_gmap(FnCtx *F, string gn, uint32_t *out_off) {
+    if (gmap_get(F->gm, gn, out_off)) return true;
+    if (F->module_mb == MLIR_INVALID_HANDLE || !F->data_buf) return false;
+    size_t no = MLIR_GetBlockNumOps(F->module_mb);
+    for (size_t i = 0; i < no; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(F->module_mb, i);
+        if (!x64_is_global_op(op)) continue;
+        if (!str_eq(x64_global_sym_name(op), gn)) continue;
+        size_t pend_cap = 0, n_pend = 0;
+        PendingPtrReloc *pend = NULL;
+        x64_register_global_op(F->ctx, op, F->gm, F->data_buf,
+                               &pend, &pend_cap, &n_pend);
+        if (n_pend > 0) {
+            fprintf(stderr,
+                    "x64: late global '%.*s' needs runtime init (re-run x64_init_data_section)\n",
+                    (int)gn.size, gn.str);
+            g_x64_ok = false;
+        }
+        free(pend);
+        return gmap_get(F->gm, gn, out_off);
+    }
+    return x64_synth_wasm_global(F, gn, out_off);
+}
+
+// Pick app_main, main, wasi_start, or _start as the ELF user entry symbol.
+static bool x64_resolve_entry(MLIR_BlockHandle mb, bool wasm_lifted, char **out_cstr) {
+    static const char *order[] = { "app_main", "main", "wasi_start", "_start" };
+    (void)wasm_lifted;
+    for (size_t i = 0; i < sizeof(order)/sizeof(order[0]); i++) {
+        if (x64_module_has_func(mb, order[i], false)) {
+            *out_cstr = heapdup_cstr(order[i]);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Synthesize _start: wasm linmem/argc setup, ptr inits, init+main, exit syscall.
+static void synth_start(ObjModule *m, GMap *gm, X64PtrReloc *relocs, size_t n_relocs,
+                        bool wasm_lifted, const char *entry_sym) {
+    ObjFunc *f = obj_add_func(m, heapdup_cstr("_start"), true);
     FnCtx F; memset(&F,0,sizeof(F)); F.f = f; F.ok = true;
+
+    uint32_t argc_off = 0, argv_off = 0, linmem_base_off = 0;
+    uint32_t template_off = 0, template_size = 0;
+    bool has_argc = gmap_get_cstr(gm, X64_WASM_ARGC, &argc_off, NULL) &&
+                    gmap_get_cstr(gm, X64_WASM_ARGV, &argv_off, NULL);
+    bool has_linmem_base = gmap_get_cstr(gm, X64_WASM_LINMEM_BASE, &linmem_base_off, NULL);
+    bool has_template = gmap_get_cstr(gm, X64_WASM_LINMEM, &template_off, &template_size);
+
+    if (has_argc) {
+        rex(&F, 0, RAX, 0, RSP); eb(&F, 0x8B); modrm(&F, 0, RAX, RSP); eb(&F, 0x24);
+        lea_rip_data(&F, RCX, argc_off);
+        store_mem(&F, RCX, RAX, 4);
+        rex(&F, 1, RSI, 0, RSP); eb(&F, 0x8D); modrm(&F, 1, RSI, RSP);
+        eb(&F, 0x24); eb(&F, 0x08);
+        lea_rip_data(&F, RCX, argv_off);
+        store_mem(&F, RCX, RSI, 8);
+    }
+
+    if (has_linmem_base) {
+        mov_ri(&F, RDI, 0, 1);
+        mov_ri(&F, RSI, (int64_t)(1ULL << 32), 1);
+        mov_ri(&F, RDX, 3, 1);
+        mov_ri(&F, R10, 0x22, 1);
+        mov_ri(&F, R8, -1, 1);
+        mov_ri(&F, R9, 0, 1);
+        mov_ri(&F, RAX, NR_MMAP, 0);
+        eb(&F, 0x0F); eb(&F, 0x05);
+        mov_rr(&F, RBX, RAX, 1);
+        lea_rip_data(&F, RCX, linmem_base_off);
+        store_mem(&F, RCX, RBX, 8);
+        if (has_template && template_size > 0) {
+            mov_rr(&F, RDI, RBX, 1);
+            lea_rip_data(&F, RSI, template_off);
+            mov_ri(&F, RCX, (int64_t)template_size, 1);
+            eb(&F, 0xFC);
+            eb(&F, 0xF3); eb(&F, 0xA4);
+        }
+    }
+
     // One-time startup: fill pointer globals (addressof @sym; return initializers).
     for (size_t k = 0; k < n_relocs; k++) {
         lea_rip_data(&F, R10, relocs[k].target_off);
         lea_rip_data(&F, R11, relocs[k].slot_off);
         store_mem(&F, R11, R10, 8);
     }
-    // Unity ELF builds define PLATFORM_SKIP_ENTRY, so platform_linux.c does
-    // not supply _start. Per platform.h, the entry point must call
-    // platform_init() before user code — that mmap's the heap and runs
-    // buddy_init(), which stdlib malloc/free depend on.
-    mov_ri(&F, RDI, 0, 1);
-    mov_ri(&F, RSI, 0, 1);
-    mov_ri(&F, RDX, 0, 1);
-    eb(&F, 0xE8); uint32_t pi = here(&F); e32(&F, 0);           // call platform_init
-    obj_add_reloc(f, pi, pi + 4, false, strdup("platform_init"), 0);
-    eb(&F, 0xE8); uint32_t fld = here(&F); e32(&F, 0);          // call main
-    obj_add_reloc(f, fld, fld+4, false, strdup("main"), 0);
-    mov_rr(&F, RDI, RAX, 0);                                    // mov edi, eax
-    mov_ri(&F, RAX, NR_EXIT, 0);                                // mov eax, 60
-    eb(&F, 0x0F); eb(&F, 0x05);                                 // syscall
+
+    if (wasm_lifted) {
+        mov_ri(&F, RDI, 0, 1);
+        mov_ri(&F, RSI, 0, 1);
+        mov_ri(&F, RDX, 0, 1);
+        eb(&F, 0xE8); uint32_t fld_init = here(&F); e32(&F, 0);
+        obj_add_reloc(f, fld_init, fld_init+4, false, heapdup_cstr("__host_platform_init"), 0);
+        eb(&F, 0xE8); uint32_t fld_main = here(&F); e32(&F, 0);
+        obj_add_reloc(f, fld_main, fld_main+4, false, heapdup_cstr(entry_sym), 0);
+    } else {
+        rex(&F, 1, 0, 0, RBP); eb(&F, 0x31); modrm(&F, 3, RBP, RBP);
+        rex(&F, 1, RDI, 0, RSP); eb(&F, 0x8B); modrm(&F, 0, RDI, RSP); eb(&F, 0x24);
+        rex(&F, 1, RSI, 0, RSP); eb(&F, 0x8D); modrm(&F, 1, RSI, RSP);
+        eb(&F, 0x24); eb(&F, 0x08);
+        rex(&F, 1, RDX, RDI, RSI); eb(&F, 0x8D); modrm(&F, 1, RDX, 4);
+        eb(&F, (uint8_t)((3 << 6) | ((RDI & 7) << 3) | (RSI & 7))); eb(&F, 0x08);
+        rex(&F, 1, 0, 0, RSP); eb(&F, 0x83); modrm(&F, 3, 4, RSP); eb(&F, 0xF0);
+        eb(&F, 0xE8); uint32_t fld_init = here(&F); e32(&F, 0);
+        obj_add_reloc(f, fld_init, fld_init+4, false, heapdup_cstr("platform_init"), 0);
+        eb(&F, 0xE8); uint32_t fld_main = here(&F); e32(&F, 0);
+        obj_add_reloc(f, fld_main, fld_main+4, false, heapdup_cstr(entry_sym), 0);
+    }
+    mov_rr(&F, RDI, RAX, 0);
+    mov_ri(&F, RAX, NR_EXIT, 0);
+    eb(&F, 0x0F); eb(&F, 0x05);
 }
 
-// synth the raw-syscall thunk for `name`; returns false if `name` is not a
-// known syscall primitive. The only primitive is __tinyc_syscall6 — every
-// platform_<os>.c raw syscall (write / read / exit / mmap / ...) is built on
-// top of it (see corec/platform/syscall6.h), so there are no per-call thunks.
+// Synthesize a stub for platform_init, __assert_fail, or __tinyc_syscall6/syscall.
 static bool synth_thunk(ObjModule *m, string name) {
+    // Lifted wasm still calls platform_init; host splice provides __host_platform_init.
+    if (str_eqz(name, "platform_init")) {
+        char *fn = (char *)malloc(name.size + 1);
+        memcpy(fn, name.str, name.size);
+        fn[name.size] = '\0';
+        ObjFunc *f = obj_add_func(m, fn, false);
+        FnCtx F; memset(&F,0,sizeof(F)); F.f = f;
+        eb(&F, 0xE8); uint32_t fld = here(&F); e32(&F, 0);
+        obj_add_reloc(f, fld, fld + 4, false, heapdup_cstr("__host_platform_init"), 0);
+        eb(&F, 0xC3);
+        return true;
+    }
+    // assert() from spliced host platform code; assert.c is GC'd out of the
+    // linked wasm module so lift never defines this symbol.
+    if (str_eqz(name, "__assert_fail")) {
+        char *fn = (char *)malloc(name.size + 1);
+        memcpy(fn, name.str, name.size);
+        fn[name.size] = '\0';
+        ObjFunc *f = obj_add_func(m, fn, false);
+        FnCtx F; memset(&F,0,sizeof(F)); F.f = f;
+        mov_ri(&F, RDI, 1, 0);
+        eb(&F, 0xE8); uint32_t fld = here(&F); e32(&F, 0);
+        obj_add_reloc(f, fld, fld + 4, false, heapdup_cstr("__host_platform_exit"), 0);
+        eb(&F, 0xC3);
+        return true;
+    }
     // __tinyc_syscall6(num, a1..a6): the runtime syscall number is the first C
     // argument, so we cannot bake an NR_* constant — instead reshuffle the SysV
     // argument registers into the Linux x86_64 kernel convention (number in
     // rax; args in rdi/rsi/rdx/r10/r8/r9) and trap. a6 arrives on the stack.
-    if (!str_eqz(name, "__tinyc_syscall6")) return false;
+    // Lifted wasm may also reference the helper as `syscall` (platform_linux.c).
+    if (!str_eqz(name, "__tinyc_syscall6") && !str_eqz(name, "syscall")) return false;
     {
         char *fn = (char *)malloc(name.size + 1);
         memcpy(fn, name.str, name.size);
@@ -1134,6 +1362,26 @@ static bool synth_thunk(ObjModule *m, string name) {
     }
 }
 
+// True if the emitted ObjModule already defines a text symbol `name`.
+static bool x64_obj_has_func(ObjModule *m, const char *name) {
+    for (size_t j = 0; j < m->n_funcs; j++)
+        if (strcmp(m->funcs[j].name, name) == 0) return true;
+    return false;
+}
+
+// True if some emitted reloc references `name` as a text-section callee.
+static bool x64_obj_needs_func(ObjModule *m, const char *name) {
+    for (size_t i = 0; i < m->n_funcs; i++) {
+        ObjFunc *f = &m->funcs[i];
+        for (size_t r = 0; r < f->n_relocs; r++) {
+            ObjReloc *rl = &f->relocs[r];
+            if (!rl->to_data && rl->sym && strcmp(rl->sym, name) == 0)
+                return true;
+        }
+    }
+    return false;
+}
+
 bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
                       uint8_t **out_data, size_t *out_size) {
     *out_data = NULL; *out_size = 0;
@@ -1141,27 +1389,46 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
 
     MLIR_RegionHandle mreg = MLIR_GetOpRegion(llvm_module, 0);
     MLIR_BlockHandle  mb   = MLIR_GetRegionBlock(mreg, 0);
+    g_x64_mb = mb;
 
-    // globals
+    // globals — keep g_x64_gmap live through emission, thunks, and ELF link.
     GMap gm; memset(&gm, 0, sizeof(gm));
     Buf data = {0};
+    g_x64_data_buf = &data;
     X64PtrReloc *ptr_relocs = NULL;
     size_t n_ptr_relocs = 0;
-    collect_globals(ctx, mb, &gm, &data, &ptr_relocs, &n_ptr_relocs);
+    char *entry_cstr = NULL;
+    ObjModule m; memset(&m, 0, sizeof(m));
+    SymSet refs; memset(&refs, 0, sizeof(refs));
+    SymSet reach; memset(&reach, 0, sizeof(reach));
+    bool ok = false;
+
+    bool wasm_lifted = false;
+    x64_init_data_section(ctx, mb, &gm, &data, &wasm_lifted,
+                          &ptr_relocs, &n_ptr_relocs);
     g_x64_gmap = &gm;
+
+    if (!x64_resolve_entry(mb, wasm_lifted, &entry_cstr)) {
+        fprintf(stderr,
+                "x64: no defined entry (app_main/main/wasi_start/_start)\n");
+        g_x64_ok = false;
+        goto x64_done;
+    }
 
     // index defined functions by name
     size_t no = MLIR_GetBlockNumOps(mb);
-    SymSet refs; memset(&refs, 0, sizeof(refs));
 
-    ObjModule m; memset(&m, 0, sizeof(m));
-    synth_start(&m, ptr_relocs, n_ptr_relocs);   // index 0
+    synth_start(&m, &gm, ptr_relocs, n_ptr_relocs, wasm_lifted, entry_cstr);
     m.start_idx = 0;
 
-    // reachability from main over direct-call edges (trims unused runtime)
-    SymSet reach; memset(&reach, 0, sizeof(reach));
-    sym_add(&reach, str_from_cstr_view("platform_init"));
-    sym_add(&reach, str_from_cstr_view("main"));
+    // Reachability from crt0 roots trims unused runtime.
+    if (wasm_lifted) {
+        sym_add(&reach, str_from_cstr_view((char *)"__host_platform_init"));
+        sym_add(&reach, str_from_cstr_view(entry_cstr));
+    } else {
+        sym_add(&reach, str_from_cstr_view((char *)"platform_init"));
+        sym_add(&reach, str_from_cstr_view(entry_cstr));
+    }
     bool grew = true;
     while (grew) {
         grew = false;
@@ -1185,6 +1452,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
                         string cal = strip_at(attr_str(op, "callee"));
                         if (!cal.size) cal = strip_at(attr_str(op, "callee_name"));
                         if (cal.size) {
+                            if (x64_is_wasm_data_sym(cal)) continue;
                             bool known = false;
                             for (size_t k = 0; k < reach.c; k++) if (str_eq(cal, reach.n[k])) { known = true; break; }
                             if (!known) { sym_add(&reach, cal); grew = true; }
@@ -1195,7 +1463,9 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
                         string gn = strip_at(ga ? MLIR_GetAttributeString(ga) : (string){0});
                         if (!gn.size) continue;
                         uint32_t dummy;
+                        if (x64_is_wasm_data_sym(gn)) continue;
                         if (gmap_get(&gm, gn, &dummy)) continue;   // data global
+                        if (x64_module_has_global_sym(mb, gn)) continue;
                         bool known = false;
                         for (size_t k = 0; k < reach.c; k++) if (str_eq(gn, reach.n[k])) { known = true; break; }
                         if (!known) { sym_add(&reach, gn); grew = true; }
@@ -1206,7 +1476,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     }
 
     // emit reachable defined functions
-    bool saw_main = false;
+    bool saw_entry = false;
     for (size_t i = 0; i < no; i++) {
         MLIR_OpHandle fn = MLIR_GetBlockOp(mb, i);
         if (!str_eqz(MLIR_GetOpName(fn), "llvm.func")) continue;
@@ -1215,11 +1485,14 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
         bool wanted = false;
         for (size_t k = 0; k < reach.c; k++) if (str_eq(fname, reach.n[k])) { wanted = true; break; }
         if (!wanted) continue;
-        if (str_eqz(fname, "main")) saw_main = true;
+        if (str_eqz(fname, entry_cstr)) saw_entry = true;
         emit_func(ctx, fn, &m, &refs);
     }
 
-    if (!saw_main) { fprintf(stderr, "x64: no defined main\n"); g_x64_ok = false; }
+    if (!saw_entry) {
+        fprintf(stderr, "x64: no defined entry '%s'\n", entry_cstr);
+        g_x64_ok = false;
+    }
 
     // synth thunks for referenced-but-undefined symbols
     for (size_t i = 0; i < refs.c && g_x64_ok; i++) {
@@ -1234,20 +1507,31 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
         }
     }
 
-    bool ok = g_x64_ok;
+    // synth_start records platform_init directly on _start (not via refs). If
+    // wasm-side platform_init was DCE'd, forward to __host_platform_init.
+    if (g_x64_ok && x64_obj_needs_func(&m, "platform_init") &&
+            !x64_obj_has_func(&m, "platform_init"))
+        synth_thunk(&m, str_from_cstr_view("platform_init"));
+
+    ok = g_x64_ok;
     if (ok) {
         m.data = data.data; m.data_len = data.len;
         ok = mlir_obj_to_elf(&m, out_data, out_size);
         m.data = NULL;  // owned by `data`
     }
 
+    // Free module state only after ELF link (relocs may still reference gm/data).
+x64_done:
     obj_module_free(&m);
     free(data.data);
+    free(entry_cstr);
     for (size_t i = 0; i < gm.n; i++) free(gm.name[i]);
-    free(gm.name); free(gm.off);
+    free(gm.name); free(gm.off); free(gm.sz);
     free(refs.n);
     free(reach.n);
     free(ptr_relocs);
     g_x64_gmap = NULL;
+    g_x64_mb = MLIR_INVALID_HANDLE;
+    g_x64_data_buf = NULL;
     return ok;
 }
