@@ -33,10 +33,11 @@ enum { RAX=0, RCX=1, RDX=2, RBX=3, RSP=4, RBP=5, RSI=6, RDI=7,
        R8=8, R9=9, R10=10, R11=11, R12=12, R13=13, R14=14, R15=15 };
 // SysV integer argument registers, in order.
 static const uint8_t ARG_REGS[6] = { RDI, RSI, RDX, RCX, R8, R9 };
-// Linux x86_64 syscall number used by the synthesised _start crt0 (exit).
+// Linux x86_64 syscall numbers baked into the synthesised _start crt0.
 // Every other syscall goes through the __tinyc_syscall6 thunk (the runtime
-// number is its first argument), so no other NR_* constants are needed.
+// number is its first argument).
 #define NR_EXIT  60
+#define NR_MMAP  9
 
 // condition codes (jcc/setcc low nibble)
 enum { CC_E=0x4, CC_NE=0x5, CC_B=0x2, CC_AE=0x3, CC_BE=0x6, CC_A=0x7,
@@ -66,14 +67,56 @@ static bool vmap_get(VMap *m, MLIR_ValueHandle key, int32_t *out) {
 }
 static void vmap_free(VMap *m) { free(m->k); free(m->v); m->k = NULL; m->v = NULL; }
 
-// Global symbol -> byte offset in the module data blob.
-typedef struct { char **name; uint32_t *off; size_t n, cap; } GMap;
+// Global symbol -> byte offset (and size) in the module data blob.
+typedef struct { char **name; uint32_t *off; uint32_t *sz; size_t n, cap; } GMap;
 static bool gmap_get(GMap *g, string nm, uint32_t *out) {
     for (size_t i = 0; i < g->n; i++)
         if (strlen(g->name[i]) == nm.size && memcmp(g->name[i], nm.str, nm.size) == 0) {
             *out = g->off[i]; return true;
         }
     return false;
+}
+static bool gmap_get_cstr(GMap *g, const char *nm, uint32_t *off, uint32_t *size) {
+    for (size_t i = 0; i < g->n; i++) {
+        if (strcmp(g->name[i], nm) == 0) {
+            if (off) *off = g->off[i];
+            if (size) *size = g->sz[i];
+            return true;
+        }
+    }
+    return false;
+}
+static void gmap_put(GMap *g, string nm, uint32_t off, uint32_t sz) {
+    if (g->n == g->cap) {
+        g->cap = g->cap ? g->cap * 2 : 8;
+        g->name = realloc(g->name, g->cap * sizeof(char *));
+        g->off  = realloc(g->off,  g->cap * sizeof(uint32_t));
+        g->sz   = realloc(g->sz,   g->cap * sizeof(uint32_t));
+    }
+    g->name[g->n] = (char *)malloc(nm.size + 1);
+    memcpy(g->name[g->n], nm.str, nm.size);
+    g->name[g->n][nm.size] = 0;
+    g->off[g->n] = off;
+    g->sz[g->n]  = sz;
+    g->n++;
+}
+
+// Reserve `sz` zero bytes at the end of a .data blob; return the slot offset.
+static uint32_t x64_data_begin_global(Buf *data, size_t sz) {
+    uint32_t off = (uint32_t)data->len;
+    for (size_t z = 0; z < sz; z++) buf_u8(data, 0);
+    return off;
+}
+// Register a reserved slot in gm and 8-byte-align the blob tail.
+static void x64_data_finish_global(GMap *gm, Buf *data, string name, uint32_t off, size_t sz) {
+    gmap_put(gm, name, off, (uint32_t)sz);
+    while (data->len & 7) buf_u8(data, 0);
+}
+// Zero-filled global: reserve, register, align; return offset for lea_rip_data.
+static uint32_t x64_data_alloc_global(GMap *gm, Buf *data, string name, size_t sz) {
+    uint32_t off = x64_data_begin_global(data, sz);
+    x64_data_finish_global(gm, data, name, off, sz);
+    return off;
 }
 
 // Referenced external symbols (callees / addressof targets), for thunk synthesis.
@@ -102,6 +145,12 @@ typedef struct {
     ObjFunc      *f;
     VMap          slots;     // value -> rbp-relative byte offset (positive = below rbp)
     GMap         *gm;
+    // Copies of mlir_llvm_to_elf()'s g_x64_mb / g_x64_data_buf (set in emit_func).
+    // x64_ensure_global_in_gmap uses them when llvm.mlir.addressof hits a global
+    // missing from gm after x64_init_data_section: scan module_mb for the global op,
+    // append its storage to data_buf, then lea_rip_data uses the new offset.
+    MLIR_BlockHandle module_mb;
+    Buf          *data_buf;
     uint32_t      frame;     // total frame size (16-aligned)
     uint32_t      edge_tmp;  // rbp offset base of the parallel-move temp area
     // register allocation (shared mlir_regalloc): value -> physical register.
@@ -216,6 +265,14 @@ static uint32_t lea_rip_emit(FnCtx *F, uint8_t reg) {
     return field;
 }
 
+// Heap-copy a NUL-terminated C string (ObjModule owns the result).
+static char *heapdup_cstr(const char *s) {
+    size_t n = strlen(s) + 1;
+    char *r = (char *)malloc(n);
+    if (r) memcpy(r, s, n);
+    return r;
+}
+
 // Record a PC-relative text-section reloc at `field` (shared by lea/call sites).
 static void add_text_reloc(FnCtx *F, uint32_t field, string sym) {
     char *cs = (char *)malloc(sym.size + 1);
@@ -323,6 +380,19 @@ static string strip_at(string s) {
     return s;
 }
 
+// Forward decl: defined in mlir_llvm_to_x64_emit.inc.
+static bool x64_ensure_global_in_gmap(FnCtx *F, string gn, uint32_t *out_off);
+
+static bool x64_is_wasm_data_sym(string gn) {
+    return gn.size >= 8 && memcmp(gn.str, "__wasm_", 7) == 0;
+}
+
+static bool op_is_addressof(MLIR_OpHandle op) {
+    if (op == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetOpType(op) == OP_TYPE_LLVM_MLIR_ADDRESSOF) return true;
+    return op_is(op, "llvm.mlir.addressof");
+}
+
 // Load an operand value into `reg`. Handles constants, globals, slots.
 static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
     MLIR_OpHandle def = MLIR_GetValueDefiningOp(v);
@@ -333,14 +403,16 @@ static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
     if (def != MLIR_INVALID_HANDLE && op_is(def, "llvm.mlir.undef")) {
         mov_ri(F, reg, 0, val_w(F->ctx, v)); return;
     }
-    if (def != MLIR_INVALID_HANDLE && op_is(def, "llvm.mlir.addressof")) {
+    if (def != MLIR_INVALID_HANDLE && op_is_addressof(def)) {
         MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(def, "global_name");
         if (a == MLIR_INVALID_HANDLE) a = MLIR_GetOpAttributeByName(def, "value");
         string gn = strip_at(a ? MLIR_GetAttributeString(a) : (string){0});
         if (!gn.size) { fail(F, "addressof missing symbol", (string){0}); return; }
         uint32_t off;
-        if (gmap_get(F->gm, gn, &off))
+        if (gmap_get(F->gm, gn, &off) || x64_ensure_global_in_gmap(F, gn, &off))
             lea_rip_data(F, reg, off);
+        else if (x64_is_wasm_data_sym(gn))
+            fail(F, "wasm global missing from data map", gn);
         else
             lea_rip_func(F, reg, gn);   // function / external symbol
         return;
