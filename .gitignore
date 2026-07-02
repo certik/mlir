@@ -55,3 +55,9 @@ examples/tinyc/tests/*.elf
 /verify_tinyc_out/
 examples/tinyc/__pycache__/
 /bench_frozen/
+/tinyc_stage1_elf
+/tinyc_stage2_elf
+/tinyc_stage3_elf
+/selfhost_elf_stage1/
+/selfhost_elf_stage2/
+/selfhost_elf_stage3/
