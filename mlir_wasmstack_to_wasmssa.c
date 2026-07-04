@@ -1366,6 +1366,12 @@ static MLIR_OpHandle lift_func(MLIR_Context *ctx, Arena *arena,
     }
 
     MLIR_BlockHandle src_blk = MLIR_GetRegionBlock(MLIR_GetOpRegion(src, 0), 0);
+    size_t body_ops = MLIR_GetBlockNumOps(src_blk);
+    F.stack.cap = body_ops ? body_ops : 64;   // one slot per wasmstack body op
+    F.stack.data = (MLIR_ValueHandle *)malloc(F.stack.cap * sizeof(MLIR_ValueHandle));
+    F.frames.cap = 32;
+    F.frames.n = 0;
+    F.frames.data = (Frame *)malloc(F.frames.cap * sizeof(Frame));
     bool ok = lift_body(&F, src_blk);
 
     st_free(&F.stack);
