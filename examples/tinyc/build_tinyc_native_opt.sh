@@ -38,8 +38,9 @@ $CC $OPT_FLAGS -o tinyc_native_opt \
     "$OBJ_DIR"/mlir_translate_to_llvm_ir.o "$OBJ_DIR"/mlir_translate_to_wasm.o "$OBJ_DIR"/mlir_wasm_to_wat.o \
     "$OBJ_DIR"/mlir_wasm_to_macho.o \
     "$OBJ_DIR"/mlir_llvm_to_wasmssa.o "$OBJ_DIR"/mlir_wasmssa_to_wasmstack.o "$OBJ_DIR"/mlir_wasmstack_to_bin.o \
-    "$OBJ_DIR"/mlir_wasm_link.o "$OBJ_DIR"/mlir_wasm_to_wasmstack.o "$OBJ_DIR"/mlir_wasmstack_to_wasmssa.o "$OBJ_DIR"/mlir_wasmssa_to_llvm.o "$OBJ_DIR"/mlir_llvm_mem2reg.o mlir_llvm_load_cse.o mlir_llvm_arith_gvn.o mlir_llvm_dce.o mlir_regalloc.o mlir_llvm_to_aarch64.o \
-    "$OBJ_DIR"/mlir_aarch64_asm.o mlir_aarch64_to_macho.o "$OBJ_DIR"/mlir_llvm_to_x64.o "$OBJ_DIR"/mlir_elf.o \
+    "$OBJ_DIR"/mlir_wasm_link.o "$OBJ_DIR"/mlir_wasm_to_wasmstack.o "$OBJ_DIR"/mlir_wasmstack_to_wasmssa.o "$OBJ_DIR"/mlir_wasmssa_to_llvm.o     "$OBJ_DIR"/mlir_llvm_mem2reg.o "$OBJ_DIR"/mlir_llvm_load_cse.o "$OBJ_DIR"/mlir_llvm_arith_gvn.o \
+    "$OBJ_DIR"/mlir_llvm_dce.o "$OBJ_DIR"/mlir_regalloc.o "$OBJ_DIR"/mlir_llvm_to_aarch64.o \
+    "$OBJ_DIR"/mlir_aarch64_asm.o "$OBJ_DIR"/mlir_aarch64_to_macho.o "$OBJ_DIR"/mlir_llvm_to_x64.o "$OBJ_DIR"/mlir_elf.o \
     "$OBJ_DIR"/tokenizer.o "$OBJ_DIR"/mlir_parser.o "$OBJ_DIR"/op_parsers.o \
     "$OBJ_DIR"/mlir_classic_printer.o "$OBJ_DIR"/mlir_generic_printer.o "$OBJ_DIR"/mlir_lift_cf_to_scf.o \
     "$OBJ_DIR"/io.o "$OBJ_DIR"/buddy.o "$OBJ_DIR"/arena.o "$OBJ_DIR"/scratch.o "$OBJ_DIR"/format.o \
