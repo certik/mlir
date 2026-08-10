@@ -809,8 +809,11 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 MLIR_AttributeHandle first_attr = MLIR_GetOpAttribute(op, 0);
                 if (MLIR_GetAttributeKind(first_attr) == MLIR_ATTR_KIND_STRING && str_eq(MLIR_GetAttributeName(first_attr), str_lit("value_text"))) {
                     strbuf_append(arena, &result, MLIR_GetAttributeString(first_attr));
-                } else if (MLIR_GetAttributeKind(first_attr) == MLIR_ATTR_KIND_INTEGER ||
-                           MLIR_GetAttributeKind(first_attr) == MLIR_ATTR_KIND_BOOL) {
+                } else if (MLIR_GetAttributeKind(first_attr) == MLIR_ATTR_KIND_BOOL) {
+                    strbuf_append(arena, &result,
+                                  MLIR_GetAttributeBool(first_attr) ? str_lit("true")
+                                                                  : str_lit("false"));
+                } else if (MLIR_GetAttributeKind(first_attr) == MLIR_ATTR_KIND_INTEGER) {
                     size_t n_result_types = MLIR_GetOpNumResultTypes(op);
                     bool is_i1_bool = false;
                     if (n_result_types > 0) {
@@ -825,8 +828,9 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     if (!is_i1_bool) {
                         strbuf_append(arena, &result, format(arena, str_lit("{}"), MLIR_GetAttributeInteger(first_attr)));
                     } else {
-                        // i1 as boolean
-                        strbuf_append(arena, &result, MLIR_GetAttributeInteger(first_attr) ? str_lit("true") : str_lit("false"));
+                        strbuf_append(arena, &result,
+                                      MLIR_GetAttributeInteger(first_attr) ? str_lit("true")
+                                                                           : str_lit("false"));
                     }
                 } else if (MLIR_GetAttributeKind(first_attr) == MLIR_ATTR_KIND_FLOAT) {
                     char buf[32];

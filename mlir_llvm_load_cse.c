@@ -132,9 +132,6 @@ static void kb_str(KB *k, string s)   { kb_bytes(k, s.str, s.size); kb_bytes(k, 
 // ===========================================================================
 // Op classification.
 // ===========================================================================
-static int lc_name_eq(string s, const char *c) {
-    size_t n = strlen(c); return s.size == n && memcmp(s.str, c, n) == 0;
-}
 
 // No memory / control side effect: never clobbers an available load. Not
 // value-numbered itself (CSE-ing the linmem address chain would break the
@@ -150,15 +147,17 @@ static bool lc_is_pure(MLIR_OpHandle op) {
     case OP_TYPE_LLVM_ICMP:
     case OP_TYPE_LLVM_ZEXT: case OP_TYPE_LLVM_SEXT: case OP_TYPE_LLVM_TRUNC:
     case OP_TYPE_LLVM_PTRTOINT:
+    case OP_TYPE_LLVM_INTTOPTR:
+    case OP_TYPE_LLVM_SELECT:
+    case OP_TYPE_LLVM_FCMP:
+    case OP_TYPE_LLVM_GEP:
+    case OP_TYPE_LLVM_BITCAST:
     case OP_TYPE_LLVM_MLIR_CONSTANT:
     case OP_TYPE_LLVM_MLIR_ADDRESSOF:
         return true;
-    default: break;
+    default:
+        return false;
     }
-    string nm = MLIR_GetOpName(op);
-    return lc_name_eq(nm, "llvm.inttoptr") || lc_name_eq(nm, "llvm.select") ||
-           lc_name_eq(nm, "llvm.fcmp") || lc_name_eq(nm, "llvm.getelementptr") ||
-           lc_name_eq(nm, "llvm.bitcast");
 }
 
 // Pure, deterministic value op recursed through when structurally keying a
@@ -169,13 +168,15 @@ static bool lc_is_transparent(MLIR_OpHandle op) {
     case OP_TYPE_LLVM_AND: case OP_TYPE_LLVM_OR:  case OP_TYPE_LLVM_XOR:
     case OP_TYPE_LLVM_SHL: case OP_TYPE_LLVM_LSHR: case OP_TYPE_LLVM_ASHR:
     case OP_TYPE_LLVM_ZEXT: case OP_TYPE_LLVM_SEXT: case OP_TYPE_LLVM_TRUNC:
-    case OP_TYPE_LLVM_PTRTOINT: case OP_TYPE_LLVM_MLIR_CONSTANT:
+    case OP_TYPE_LLVM_PTRTOINT:
+    case OP_TYPE_LLVM_INTTOPTR:
+    case OP_TYPE_LLVM_GEP:
+    case OP_TYPE_LLVM_BITCAST:
+    case OP_TYPE_LLVM_MLIR_CONSTANT:
         return true;
-    default: break;
+    default:
+        return false;
     }
-    string nm = MLIR_GetOpName(op);
-    return lc_name_eq(nm, "llvm.inttoptr") || lc_name_eq(nm, "llvm.getelementptr") ||
-           lc_name_eq(nm, "llvm.bitcast");
 }
 static bool lc_is_load(MLIR_OpHandle op) { return MLIR_GetOpType(op) == OP_TYPE_LLVM_LOAD; }
 static bool lc_is_store(MLIR_OpHandle op) { return MLIR_GetOpType(op) == OP_TYPE_LLVM_STORE; }

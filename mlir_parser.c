@@ -427,6 +427,100 @@ MLIR_OpType op_string_to_type(string opname) {
         return OP_TYPE_LINALG_COPY;
     } else if (str_eq(opname, str_lit("index.constant"))) {
         return OP_TYPE_INDEX_CONSTANT;
+    } else if (str_eq(opname, str_lit("llvm.alloca"))) {
+        return OP_TYPE_LLVM_ALLOCA;
+    } else if (str_eq(opname, str_lit("llvm.load"))) {
+        return OP_TYPE_LLVM_LOAD;
+    } else if (str_eq(opname, str_lit("llvm.store"))) {
+        return OP_TYPE_LLVM_STORE;
+    } else if (str_eq(opname, str_lit("llvm.getelementptr"))) {
+        return OP_TYPE_LLVM_GEP;
+    } else if (str_eq(opname, str_lit("llvm.mlir.zero"))) {
+        return OP_TYPE_LLVM_MLIR_ZERO;
+    } else if (str_eq(opname, str_lit("llvm.mlir.null"))) {
+        return OP_TYPE_LLVM_MLIR_NULL;
+    } else if (str_eq(opname, str_lit("llvm.mlir.constant"))) {
+        return OP_TYPE_LLVM_MLIR_CONSTANT;
+    } else if (str_eq(opname, str_lit("llvm.icmp"))) {
+        return OP_TYPE_LLVM_ICMP;
+    } else if (str_eq(opname, str_lit("llvm.mlir.addressof"))) {
+        return OP_TYPE_LLVM_MLIR_ADDRESSOF;
+    } else if (str_eq(opname, str_lit("llvm.mlir.global"))) {
+        return OP_TYPE_LLVM_MLIR_GLOBAL;
+    } else if (str_eq(opname, str_lit("llvm.return"))) {
+        return OP_TYPE_LLVM_RETURN;
+    } else if (str_eq(opname, str_lit("llvm.ptrtoint"))) {
+        return OP_TYPE_LLVM_PTRTOINT;
+    } else if (str_eq(opname, str_lit("llvm.func"))) {
+        return OP_TYPE_LLVM_FUNC;
+    } else if (str_eq(opname, str_lit("llvm.call"))) {
+        return OP_TYPE_LLVM_CALL;
+    } else if (str_eq(opname, str_lit("llvm.sext"))) {
+        return OP_TYPE_LLVM_SEXT;
+    } else if (str_eq(opname, str_lit("llvm.add"))) {
+        return OP_TYPE_LLVM_ADD;
+    } else if (str_eq(opname, str_lit("llvm.sub"))) {
+        return OP_TYPE_LLVM_SUB;
+    } else if (str_eq(opname, str_lit("llvm.mul"))) {
+        return OP_TYPE_LLVM_MUL;
+    } else if (str_eq(opname, str_lit("llvm.sdiv"))) {
+        return OP_TYPE_LLVM_SDIV;
+    } else if (str_eq(opname, str_lit("llvm.udiv"))) {
+        return OP_TYPE_LLVM_UDIV;
+    } else if (str_eq(opname, str_lit("llvm.srem"))) {
+        return OP_TYPE_LLVM_SREM;
+    } else if (str_eq(opname, str_lit("llvm.urem"))) {
+        return OP_TYPE_LLVM_UREM;
+    } else if (str_eq(opname, str_lit("llvm.and"))) {
+        return OP_TYPE_LLVM_AND;
+    } else if (str_eq(opname, str_lit("llvm.or"))) {
+        return OP_TYPE_LLVM_OR;
+    } else if (str_eq(opname, str_lit("llvm.xor"))) {
+        return OP_TYPE_LLVM_XOR;
+    } else if (str_eq(opname, str_lit("llvm.shl"))) {
+        return OP_TYPE_LLVM_SHL;
+    } else if (str_eq(opname, str_lit("llvm.lshr"))) {
+        return OP_TYPE_LLVM_LSHR;
+    } else if (str_eq(opname, str_lit("llvm.ashr"))) {
+        return OP_TYPE_LLVM_ASHR;
+    } else if (str_eq(opname, str_lit("llvm.trunc"))) {
+        return OP_TYPE_LLVM_TRUNC;
+    } else if (str_eq(opname, str_lit("llvm.zext"))) {
+        return OP_TYPE_LLVM_ZEXT;
+    } else if (str_eq(opname, str_lit("llvm.br"))) {
+        return OP_TYPE_LLVM_BR;
+    } else if (str_eq(opname, str_lit("llvm.cond_br"))) {
+        return OP_TYPE_LLVM_COND_BR;
+    } else if (str_eq(opname, str_lit("llvm.inttoptr"))) {
+        return OP_TYPE_LLVM_INTTOPTR;
+    } else if (str_eq(opname, str_lit("llvm.bitcast"))) {
+        return OP_TYPE_LLVM_BITCAST;
+    } else if (str_eq(opname, str_lit("llvm.select"))) {
+        return OP_TYPE_LLVM_SELECT;
+    } else if (str_eq(opname, str_lit("llvm.fcmp"))) {
+        return OP_TYPE_LLVM_FCMP;
+    } else if (str_eq(opname, str_lit("llvm.fadd"))) {
+        return OP_TYPE_LLVM_FADD;
+    } else if (str_eq(opname, str_lit("llvm.fsub"))) {
+        return OP_TYPE_LLVM_FSUB;
+    } else if (str_eq(opname, str_lit("llvm.fmul"))) {
+        return OP_TYPE_LLVM_FMUL;
+    } else if (str_eq(opname, str_lit("llvm.fdiv"))) {
+        return OP_TYPE_LLVM_FDIV;
+    } else if (str_eq(opname, str_lit("llvm.fneg"))) {
+        return OP_TYPE_LLVM_FNEG;
+    } else if (str_eq(opname, str_lit("llvm.fpext"))) {
+        return OP_TYPE_LLVM_FPEXT;
+    } else if (str_eq(opname, str_lit("llvm.fptrunc"))) {
+        return OP_TYPE_LLVM_FPTRUNC;
+    } else if (str_eq(opname, str_lit("llvm.sitofp"))) {
+        return OP_TYPE_LLVM_SITOFP;
+    } else if (str_eq(opname, str_lit("llvm.uitofp"))) {
+        return OP_TYPE_LLVM_UITOFP;
+    } else if (str_eq(opname, str_lit("llvm.fptosi"))) {
+        return OP_TYPE_LLVM_FPTOSI;
+    } else if (str_eq(opname, str_lit("llvm.fptoui"))) {
+        return OP_TYPE_LLVM_FPTOUI;
     } else if (str_eq(opname, str_lit("llvm.mlir.undef"))) {
         return OP_TYPE_LLVM_MLIR_UNDEF;
     } else if (str_eq(opname, str_lit("return"))) {

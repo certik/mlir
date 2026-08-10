@@ -148,10 +148,10 @@ static unsigned align_up(unsigned x, unsigned align) {
 // alignment that the LLVM data layout uses on wasm32 (each field aligned
 // to its own alignment; trailing padding to the struct's max-field alignment).
 static unsigned struct_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
+    size_t nf = MLIR_GetTypeStructNumFields(ty);
     unsigned off = 0, max_align = 1;
     for (size_t i = 0; i < nf; i++) {
-        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(ty, i);
+        MLIR_TypeHandle ft = MLIR_GetTypeStructField(ty, i);
         unsigned fsz = type_size_bytes(ctx, ft);
         unsigned fal = type_align_bytes(ctx, ft);
         if (fsz == 0 || fal == 0) return 0;
@@ -162,10 +162,10 @@ static unsigned struct_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
     return align_up(off, max_align);
 }
 static unsigned struct_align_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
+    size_t nf = MLIR_GetTypeStructNumFields(ty);
     unsigned ma = 1;
     for (size_t i = 0; i < nf; i++) {
-        unsigned fa = type_align_bytes(ctx, MLIR_GetTypeLLVMStructField(ty, i));
+        unsigned fa = type_align_bytes(ctx, MLIR_GetTypeStructField(ty, i));
         if (fa > ma) ma = fa;
     }
     return ma;
@@ -175,7 +175,7 @@ static unsigned struct_field_offset(MLIR_Context *ctx, MLIR_TypeHandle sty,
                                     size_t fld_idx) {
     unsigned off = 0;
     for (size_t i = 0; i <= fld_idx; i++) {
-        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(sty, i);
+        MLIR_TypeHandle ft = MLIR_GetTypeStructField(sty, i);
         unsigned fal = type_align_bytes(ctx, ft);
         off = align_up(off, fal);
         if (i == fld_idx) return off;
@@ -201,22 +201,22 @@ static unsigned type_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
         if (w == 32) return 4;
         if (w == 64) return 8;
     }
-    if (MLIR_IsTypeLLVMArray(ty)) {
-        unsigned esz = type_size_bytes(ctx, MLIR_GetTypeLLVMArrayElement(ty));
+    if (MLIR_TypeIsArray(ty, MLIR_DIALECT_LLVM)) {
+        unsigned esz = type_size_bytes(ctx, MLIR_GetTypeArrayElement(ty));
         if (esz == 0) return 0;
-        return esz * (unsigned)MLIR_GetTypeLLVMArrayNumElements(ty);
+        return esz * (unsigned)MLIR_GetTypeArrayNumElements(ty);
     }
-    if (MLIR_IsTypeLLVMStruct(ty)) {
+    if (MLIR_TypeIsStruct(ty, MLIR_DIALECT_LLVM)) {
         return struct_size_bytes(ctx, ty);
     }
     return 0;
 }
 
 static unsigned type_align_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    if (MLIR_IsTypeLLVMArray(ty)) {
-        return type_align_bytes(ctx, MLIR_GetTypeLLVMArrayElement(ty));
+    if (MLIR_TypeIsArray(ty, MLIR_DIALECT_LLVM)) {
+        return type_align_bytes(ctx, MLIR_GetTypeArrayElement(ty));
     }
-    if (MLIR_IsTypeLLVMStruct(ty)) {
+    if (MLIR_TypeIsStruct(ty, MLIR_DIALECT_LLVM)) {
         return struct_align_bytes(ctx, ty);
     }
     unsigned sz = type_size_bytes(ctx, ty);
@@ -1985,16 +1985,16 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
                     MLIR_ValueHandle k = emit_const_i32(F, (int32_t)((int64_t)cidx[i] * (int32_t)esz));
                     addr = emit_add_i32(F, addr, k);
                 }
-            } else if (MLIR_IsTypeLLVMStruct(cur_ty)) {
+            } else if (MLIR_TypeIsStruct(cur_ty, MLIR_DIALECT_LLVM)) {
                 if (is_dyn) return false;
                 unsigned off = struct_field_offset(F->ctx, cur_ty, (size_t)cidx[i]);
                 if (off != 0) {
                     MLIR_ValueHandle k = emit_const_i32(F, (int32_t)off);
                     addr = emit_add_i32(F, addr, k);
                 }
-                cur_ty = MLIR_GetTypeLLVMStructField(cur_ty, (size_t)cidx[i]);
-            } else if (MLIR_IsTypeLLVMArray(cur_ty)) {
-                MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(cur_ty);
+                cur_ty = MLIR_GetTypeStructField(cur_ty, (size_t)cidx[i]);
+            } else if (MLIR_TypeIsArray(cur_ty, MLIR_DIALECT_LLVM)) {
+                MLIR_TypeHandle et = MLIR_GetTypeArrayElement(cur_ty);
                 unsigned esz = type_size_bytes(F->ctx, et);
                 if (esz == 0) return false;
                 if (is_dyn) {
@@ -2663,9 +2663,9 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
     // the constants into a raw byte buffer matching the global's layout.
     if (MLIR_GetOpNumRegions(op) > 0 && ga != MLIR_INVALID_HANDLE) {
         MLIR_TypeHandle gty = MLIR_GetAttributeTypeValue(ga);
-        if (gty != MLIR_INVALID_HANDLE && MLIR_IsTypeLLVMArray(gty)) {
-            uint64_t arr_n = MLIR_GetTypeLLVMArrayNumElements(gty);
-            MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(gty);
+        if (gty != MLIR_INVALID_HANDLE && MLIR_TypeIsArray(gty, MLIR_DIALECT_LLVM)) {
+            uint64_t arr_n = MLIR_GetTypeArrayNumElements(gty);
+            MLIR_TypeHandle et = MLIR_GetTypeArrayElement(gty);
             unsigned esz = type_size_bytes(ctx, et);
             if (esz > 0 && esz <= 8 && arr_n > 0 && size > 0 &&
                 size == arr_n * esz) {

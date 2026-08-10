@@ -190,8 +190,8 @@ MLIR_OpType opTypeFromName(llvm::StringRef name) {
     static llvm::DenseMap<llvm::StringRef, MLIR_OpType> *map = nullptr;
     if (!map) {
         map = new llvm::DenseMap<llvm::StringRef, MLIR_OpType>();
-        map->reserve(256);
-        for (int t = 0; t < 256; t++) {
+        map->reserve(OP_TYPE_COUNT);
+        for (unsigned t = 0; t < (unsigned)OP_TYPE_COUNT; t++) {
             string s = op_type_to_string((MLIR_OpType)t);
             if (s.size == 0) continue;
             // The canonical table entries are static string literals, so
@@ -204,6 +204,63 @@ MLIR_OpType opTypeFromName(llvm::StringRef name) {
     auto it = map->find(name);
     if (it != map->end()) return it->second;
     return OP_TYPE_UNREGISTERED;
+}
+
+// Registered MLIR_OpType values map to mlir::OperationName once at first
+// use. Callers pass the enum + str_lit(""); only OP_TYPE_UNREGISTERED
+// carries a custom textual name through `opname`.
+// Create a cache to avoid the repeated operation name lookup on every op creation.
+struct OpTypeOperationNameCache {
+    llvm::DenseMap<MLIR_OpType, llvm::StringRef> canonicalRefs;
+    llvm::DenseMap<MLIR_OpType, mlir::OperationName> cachedNames;
+
+    void ensureCanonicalRefs() {
+        if (!canonicalRefs.empty()) return;
+        canonicalRefs.reserve(OP_TYPE_COUNT);
+        for (unsigned t = 0; t < (unsigned)OP_TYPE_COUNT; t++) {
+            MLIR_OpType ty = (MLIR_OpType)t;
+            if (ty == OP_TYPE_UNREGISTERED) continue;
+            string s = op_type_to_string(ty);
+            if (s.size == 0 || !s.str) continue;
+            if (ty == OP_TYPE_MODULE) {
+                canonicalRefs[ty] = llvm::StringRef("builtin.module");
+            } else {
+                canonicalRefs[ty] = llvm::StringRef(s.str, s.size);
+            }
+        }
+    }
+
+    mlir::OperationName getRegistered(MLIR_OpType type, mlir::MLIRContext &ctx) {
+        ensureCanonicalRefs();
+        auto cit = cachedNames.find(type);
+        if (cit != cachedNames.end()) return cit->second;
+        auto rit = canonicalRefs.find(type);
+        if (rit == canonicalRefs.end()) {
+            mlir::OperationName unknown("unknown", &ctx);
+            cachedNames.insert({type, unknown});
+            return unknown;
+        }
+        mlir::OperationName on(rit->second, &ctx);
+        cachedNames.insert({type, on});
+        return on;
+    }
+};
+
+OpTypeOperationNameCache &opTypeNameCache() {
+    static OpTypeOperationNameCache c;
+    return c;
+}
+
+mlir::OperationName resolveOperationName(MLIR_OpType type, string opname,
+                                         mlir::MLIRContext &ctx) {
+    if (type != OP_TYPE_UNREGISTERED) {
+        return opTypeNameCache().getRegistered(type, ctx);
+    }
+    if (opname.size > 0 && opname.str) {
+        return mlir::OperationName(llvm::StringRef(opname.str, opname.size),
+                                   &ctx);
+    }
+    return mlir::OperationName("unknown", &ctx);
 }
 
 // Copy a std::string into the C-API arena so the returned `string` is
@@ -404,20 +461,11 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     MLIR_LocationHandle location, MLIR_LocationHandle, string, int64_t) {
     auto &ctx = globalCtx().mctx;
 
-    std::string nm(opname.str, opname.size);
-    if (nm.empty()) {
-        string s = op_type_to_string(type);
-        if (s.size > 0) nm.assign(s.str, s.size);
-        else nm = "unknown";
-    }
-    if (type == OP_TYPE_MODULE && nm == "module") {
-        nm = "builtin.module";
-    }
-
     mlir::Location loc = (location == MLIR_INVALID_HANDLE)
                              ? mlir::Location(mlir::UnknownLoc::get(&ctx))
                              : locF(location);
-    mlir::OperationState state(loc, llvm::StringRef(nm));
+    mlir::OperationName opName = resolveOperationName(type, opname, ctx);
+    mlir::OperationState state(loc, opName);
 
     for (size_t i = 0; i < n_operands; i++) {
         state.addOperands(F<ValueBox>(operands[i])->v);
@@ -443,7 +491,8 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
         // attribute type doesn't match, which then makes the
         // intermediate cf.switch fail to lift to scf.index_switch.
         // Convert here so the typed property storage accepts it.
-        if (nm == "cf.switch" && na->getName().strref() == "case_values") {
+        if (type == OP_TYPE_CF_SWITCH &&
+            na->getName().strref() == "case_values") {
             if (auto arr = mlir::dyn_cast<mlir::DenseI32ArrayAttr>(val)) {
                 auto i32Ty = mlir::IntegerType::get(&ctx, 32);
                 auto shaped = mlir::RankedTensorType::get(
@@ -469,7 +518,7 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
                                                 state.attributes.end());
 
     if (n_successors > 0 && n_successor_operands) {
-        if (nm == "cf.cond_br" || nm == "llvm.cond_br") {
+        if (type == OP_TYPE_CF_COND_BR || type == OP_TYPE_LLVM_COND_BR) {
             // Both ops use AttrSizedOperandSegments with the layout
             // [condition, trueDestOperands, falseDestOperands]; without the
             // synthesized operandSegmentSizes the BranchOpInterface slices
@@ -483,7 +532,7 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
             }
             state.addAttribute("operandSegmentSizes",
                 mlir::DenseI32ArrayAttr::get(&ctx, seg));
-        } else if (nm == "cf.switch") {
+        } else if (type == OP_TYPE_CF_SWITCH) {
             // cf.switch has 3 operand segments: flag (always 1), default
             // operands (successor 0), and case operands (sum across
             // successors 1..N-1). It also needs case_operand_segments —
@@ -1005,11 +1054,86 @@ extern "C" MLIR_TypeHandle MLIR_CreateTypeFunction(MLIR_Context *,
     for (size_t i = 0; i < n_results; i++) out.push_back(typeF(results[i]));
     return typeH(mlir::FunctionType::get(&ctx, in, out));
 }
-extern "C" void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle, uint32_t, bool) {}
-extern "C" void MLIR_SetTypeFloatProperties(MLIR_TypeHandle, uint32_t, bool) {}
-extern "C" void MLIR_SetTypeTensorProperties(MLIR_TypeHandle, const int64_t *, size_t, MLIR_TypeHandle) {}
-extern "C" void MLIR_SetTypeMemrefProperties(MLIR_TypeHandle, const int64_t *, size_t, MLIR_TypeHandle) {}
-extern "C" void MLIR_SetTypePointerProperties(MLIR_TypeHandle, MLIR_TypeHandle, bool, uint32_t) {}
+extern "C" MLIR_TypeKind MLIR_GetTypeKind(MLIR_TypeHandle h) {
+    auto t = typeF(h);
+    if (!t) return MLIR_TYPE_INVALID;
+    if (llvm::isa<mlir::IntegerType>(t)) return MLIR_TYPE_INTEGER;
+    if (llvm::isa<mlir::FloatType>(t)) return MLIR_TYPE_FLOAT;
+    if (llvm::isa<mlir::IndexType>(t)) return MLIR_TYPE_INDEX;
+    if (llvm::isa<mlir::TensorType>(t)) return MLIR_TYPE_TENSOR;
+    if (llvm::isa<mlir::BaseMemRefType>(t)) return MLIR_TYPE_MEMREF;
+    if (llvm::isa<mlir::VectorType>(t)) return MLIR_TYPE_VECTOR;
+    if (llvm::isa<mlir::FunctionType>(t)) return MLIR_TYPE_FUNCTION;
+    if (llvm::isa<mlir::NoneType>(t)) return MLIR_TYPE_UNKNOWN;
+    if (llvm::isa<mlir::LLVM::LLVMPointerType>(t)) return MLIR_TYPE_POINTER;
+    if (llvm::isa<mlir::LLVM::LLVMVoidType>(t)) return MLIR_TYPE_VOID;
+    if (llvm::isa<mlir::LLVM::LLVMArrayType>(t)) return MLIR_TYPE_ARRAY;
+    if (llvm::isa<mlir::LLVM::LLVMStructType>(t)) return MLIR_TYPE_STRUCT;
+    if (llvm::isa<mlir::LLVM::LLVMFunctionType>(t)) return MLIR_TYPE_FUNCTION;
+    if (auto o = llvm::dyn_cast<mlir::OpaqueType>(t))
+        return o.getDialectNamespace() == "tt" ? MLIR_TYPE_POINTER : MLIR_TYPE_OPAQUE;
+    return MLIR_TYPE_INVALID;
+}
+
+extern "C" MLIR_Dialect MLIR_GetTypeDialect(MLIR_TypeHandle h) {
+    auto t = typeF(h);
+    if (!t) return MLIR_DIALECT_NONE;
+    if (llvm::isa<mlir::IntegerType>(t) ||
+        llvm::isa<mlir::FloatType>(t) ||
+        llvm::isa<mlir::IndexType>(t) ||
+        llvm::isa<mlir::TensorType>(t) ||
+        llvm::isa<mlir::BaseMemRefType>(t) ||
+        llvm::isa<mlir::VectorType>(t) ||
+        llvm::isa<mlir::FunctionType>(t) ||
+        llvm::isa<mlir::NoneType>(t))
+        return MLIR_DIALECT_BUILTIN;
+    if (llvm::isa<mlir::LLVM::LLVMPointerType>(t) ||
+        llvm::isa<mlir::LLVM::LLVMVoidType>(t) ||
+        llvm::isa<mlir::LLVM::LLVMArrayType>(t) ||
+        llvm::isa<mlir::LLVM::LLVMStructType>(t) ||
+        llvm::isa<mlir::LLVM::LLVMFunctionType>(t))
+        return MLIR_DIALECT_LLVM;
+    if (auto o = llvm::dyn_cast<mlir::OpaqueType>(t))
+        return o.getDialectNamespace() == "tt" ? MLIR_DIALECT_NONE : MLIR_DIALECT_NONE;
+    return MLIR_DIALECT_NONE;
+}
+
+extern "C" bool MLIR_TypeHasDialect(MLIR_TypeHandle h, MLIR_Dialect dialect) {
+    return MLIR_GetTypeDialect(h) == dialect;
+}
+
+extern "C" bool MLIR_TypeIs(MLIR_TypeHandle h, MLIR_TypeKind kind, MLIR_Dialect dialect) {
+    return MLIR_GetTypeKind(h) == kind && MLIR_GetTypeDialect(h) == dialect;
+}
+
+extern "C" bool MLIR_GetTypeIntegerWidth(MLIR_TypeHandle h, uint32_t *out_width) {
+    if (llvm::isa<mlir::IndexType>(typeF(h))) {
+        if (out_width) *out_width = 64;
+        return true;
+    }
+    auto t = llvm::dyn_cast<mlir::IntegerType>(typeF(h));
+    if (!t) return false;
+    if (out_width) *out_width = t.getWidth();
+    return true;
+}
+
+extern "C" bool MLIR_GetTypeFloatWidth(MLIR_TypeHandle h, uint32_t *out_width) {
+    auto t = llvm::dyn_cast<mlir::FloatType>(typeF(h));
+    if (!t) return false;
+    if (out_width) *out_width = t.getWidth();
+    return true;
+}
+
+extern "C" bool MLIR_GetTypeFloatEncoding(MLIR_TypeHandle h,
+                                          MLIR_FloatEncoding *out_encoding) {
+    auto t = llvm::dyn_cast<mlir::FloatType>(typeF(h));
+    if (!t) return false;
+    MLIR_FloatEncoding encoding = MLIR_FLOAT_ENCODING_IEEE_BINARY;
+    if (llvm::isa<mlir::BFloat16Type>(t)) encoding = MLIR_FLOAT_ENCODING_BFLOAT;
+    else if (llvm::isa<mlir::Float80Type>(t)) encoding = MLIR_FLOAT_ENCODING_X87_EXTENDED;
+    if (out_encoding) *out_encoding = encoding;
+    return true;
+}
 
 extern "C" bool MLIR_IsTypeInteger(MLIR_TypeHandle h) { return llvm::isa<mlir::IntegerType>(typeF(h)); }
 extern "C" bool MLIR_IsTypeFloat(MLIR_TypeHandle h)   { return llvm::isa<mlir::FloatType>(typeF(h)); }
@@ -1025,7 +1149,11 @@ extern "C" bool MLIR_IsTypeOpaque(MLIR_TypeHandle h)  {
     auto opaq = llvm::dyn_cast<mlir::OpaqueType>(typeF(h));
     return opaq && opaq.getDialectNamespace() != "tt";
 }
-extern "C" bool MLIR_IsTypeFunction(MLIR_TypeHandle h) { return llvm::isa<mlir::FunctionType>(typeF(h)); }
+extern "C" bool MLIR_IsTypeFunction(MLIR_TypeHandle h) {
+    auto t = typeF(h);
+    return llvm::isa<mlir::FunctionType>(t) ||
+           llvm::isa<mlir::LLVM::LLVMFunctionType>(t);
+}
 extern "C" size_t MLIR_GetTypeFunctionNumInputs(MLIR_TypeHandle h) {
     auto t = typeF(h);
     if (auto ft = llvm::dyn_cast<mlir::FunctionType>(t)) return ft.getNumInputs();
@@ -1085,31 +1213,38 @@ extern "C" MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle h) {
     return MLIR_INVALID_HANDLE;
 }
 
-extern "C" bool MLIR_IsTypeLLVMStruct(MLIR_TypeHandle h) {
+extern "C" bool MLIR_TypeIsStruct(MLIR_TypeHandle h, MLIR_Dialect dialect) {
+    if (dialect != MLIR_DIALECT_LLVM) return false;
     return llvm::isa<mlir::LLVM::LLVMStructType>(typeF(h));
 }
-extern "C" size_t MLIR_GetTypeLLVMStructNumFields(MLIR_TypeHandle h) {
+extern "C" size_t MLIR_GetTypeStructNumFields(MLIR_TypeHandle h) {
     auto st = llvm::dyn_cast<mlir::LLVM::LLVMStructType>(typeF(h));
     if (!st) return 0;
     return st.getBody().size();
 }
-extern "C" MLIR_TypeHandle MLIR_GetTypeLLVMStructField(MLIR_TypeHandle h, size_t idx) {
+extern "C" MLIR_TypeHandle MLIR_GetTypeStructField(MLIR_TypeHandle h, size_t idx) {
     auto st = llvm::dyn_cast<mlir::LLVM::LLVMStructType>(typeF(h));
     if (!st || idx >= st.getBody().size()) return MLIR_INVALID_HANDLE;
     return typeH(st.getBody()[idx]);
 }
-extern "C" bool MLIR_IsTypeLLVMArray(MLIR_TypeHandle h) {
+extern "C" bool MLIR_TypeIsArray(MLIR_TypeHandle h, MLIR_Dialect dialect) {
+    if (dialect != MLIR_DIALECT_LLVM) return false;
     return llvm::isa<mlir::LLVM::LLVMArrayType>(typeF(h));
 }
-extern "C" MLIR_TypeHandle MLIR_GetTypeLLVMArrayElement(MLIR_TypeHandle h) {
+extern "C" MLIR_TypeHandle MLIR_GetTypeArrayElement(MLIR_TypeHandle h) {
     auto at = llvm::dyn_cast<mlir::LLVM::LLVMArrayType>(typeF(h));
     if (!at) return MLIR_INVALID_HANDLE;
     return typeH(at.getElementType());
 }
-extern "C" uint64_t MLIR_GetTypeLLVMArrayNumElements(MLIR_TypeHandle h) {
+extern "C" uint64_t MLIR_GetTypeArrayNumElements(MLIR_TypeHandle h) {
     auto at = llvm::dyn_cast<mlir::LLVM::LLVMArrayType>(typeF(h));
     if (!at) return 0;
     return at.getNumElements();
+}
+
+extern "C" uint32_t MLIR_GetTypePointerAddressSpace(MLIR_TypeHandle h) {
+    auto p = llvm::dyn_cast<mlir::LLVM::LLVMPointerType>(typeF(h));
+    return p ? p.getAddressSpace() : 0;
 }
 
 extern "C" string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle h) {
@@ -1181,13 +1316,114 @@ static MLIR_AttributeHandle makeNamedAttr(llvm::StringRef name, mlir::Attribute 
     return reinterpret_cast<uintptr_t>(na);
 }
 
+static bool literal_width_supported(uint32_t width) {
+    return width > 0 && width <= MLIR_LITERAL_LARGER_BITS_WORDS * 64u;
+}
+
+static llvm::APInt integerLiteralToAPInt(MLIR_IntegerLiteralHandle literal,
+                                         uint32_t width) {
+    if (MLIR_IntegerLiteral_UsesLargerBits(literal)) {
+        uint32_t wc = 0;
+        if (!MLIR_IntegerLiteral_GetLargerBits(literal, nullptr, 0, &wc) || wc == 0)
+            return llvm::APInt();
+        uint64_t words[MLIR_LITERAL_LARGER_BITS_WORDS];
+        if (!MLIR_IntegerLiteral_GetLargerBits(literal, words, wc, &wc))
+            return llvm::APInt();
+        return llvm::APInt(width, llvm::ArrayRef(words, wc));
+    }
+    int64_t v = 0;
+    if (!MLIR_IntegerLiteral_GetValue(literal, &v))
+        return llvm::APInt();
+    return llvm::APInt(width, v, true);
+}
+
+static const llvm::fltSemantics *floatSemanticsFor(MLIR_FloatEncoding enc,
+                                                   uint32_t width) {
+    switch (enc) {
+    case MLIR_FLOAT_ENCODING_IEEE_BINARY:
+        if (width == 16) return &llvm::APFloat::IEEEhalf();
+        if (width == 32) return &llvm::APFloat::IEEEsingle();
+        if (width == 64) return &llvm::APFloat::IEEEdouble();
+        if (width == 128) return &llvm::APFloat::IEEEquad();
+        return nullptr;
+    case MLIR_FLOAT_ENCODING_BFLOAT:
+        return width == 16 ? &llvm::APFloat::BFloat() : nullptr;
+    case MLIR_FLOAT_ENCODING_X87_EXTENDED:
+        return width == 80 ? &llvm::APFloat::x87DoubleExtended() : nullptr;
+    default:
+        return nullptr;
+    }
+}
+
+static llvm::APFloat floatLiteralToAPFloat(MLIR_FloatLiteralHandle literal,
+                                           uint32_t width,
+                                           MLIR_FloatEncoding encoding) {
+    const llvm::fltSemantics *sem = floatSemanticsFor(encoding, width);
+    if (!sem)
+        return llvm::APFloat::getZero(llvm::APFloat::IEEEsingle());
+    if (MLIR_FloatLiteral_UsesLargerBits(literal)) {
+        uint32_t wc = 0;
+        if (!MLIR_FloatLiteral_GetLargerBits(literal, nullptr, 0, &wc) || wc == 0)
+            return llvm::APFloat(*sem, llvm::APInt::getZero(width));
+        uint64_t words[MLIR_LITERAL_LARGER_BITS_WORDS];
+        if (!MLIR_FloatLiteral_GetLargerBits(literal, words, wc, &wc))
+            return llvm::APFloat(*sem, llvm::APInt::getZero(width));
+        llvm::APInt bits(width, llvm::ArrayRef(words, wc));
+        return llvm::APFloat(*sem, bits);
+    }
+    double v = 0.0;
+    if (!MLIR_FloatLiteral_GetValue(literal, &v))
+        return llvm::APFloat(*sem, llvm::APInt::getZero(width));
+    llvm::APFloat apf(v);
+    if (sem != &llvm::APFloat::IEEEdouble()) {
+        bool losesInfo = false;
+        apf.convert(*sem, llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+        (void)losesInfo;
+    }
+    return apf;
+}
+
 extern "C" MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *, string name, int64_t value, MLIR_TypeHandle type) {
     return makeNamedAttr(llvm::StringRef(name.str, name.size),
                          mlir::IntegerAttr::get(typeF(type), value));
 }
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeIntegerLiteral(
+    MLIR_Context *, string name, MLIR_TypeHandle type, MLIR_IntegerLiteralHandle literal) {
+    uint32_t type_width = 0;
+    uint32_t lit_width = 0;
+    if (!literal || !MLIR_IntegerLiteral_GetWidth(literal, &lit_width) ||
+        !MLIR_GetTypeIntegerWidth(type, &type_width) || lit_width != type_width ||
+        !literal_width_supported(type_width))
+        return MLIR_INVALID_HANDLE;
+    llvm::APInt apint = integerLiteralToAPInt(literal, type_width);
+    if (apint.getBitWidth() != type_width)
+        return MLIR_INVALID_HANDLE;
+    return makeNamedAttr(llvm::StringRef(name.str, name.size),
+        mlir::IntegerAttr::get(typeF(type), apint));
+}
 extern "C" MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *, string name, double value, MLIR_TypeHandle type) {
     return makeNamedAttr(llvm::StringRef(name.str, name.size),
                          mlir::FloatAttr::get(typeF(type), value));
+}
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeFloatLiteral(
+    MLIR_Context *, string name, MLIR_TypeHandle type, MLIR_FloatLiteralHandle literal) {
+    uint32_t type_width = 0;
+    uint32_t lit_width = 0;
+    MLIR_FloatEncoding type_encoding = MLIR_FLOAT_ENCODING_IEEE_BINARY;
+    MLIR_FloatEncoding lit_encoding = MLIR_FLOAT_ENCODING_IEEE_BINARY;
+    auto ft = llvm::dyn_cast<mlir::FloatType>(typeF(type));
+    if (!literal || !ft || !MLIR_FloatLiteral_GetWidth(literal, &lit_width) ||
+        !MLIR_FloatLiteral_GetEncoding(literal, &lit_encoding) ||
+        !MLIR_GetTypeFloatWidth(type, &type_width) ||
+        !MLIR_GetTypeFloatEncoding(type, &type_encoding) ||
+        lit_width != type_width || lit_encoding != type_encoding ||
+        !literal_width_supported(type_width))
+        return MLIR_INVALID_HANDLE;
+    llvm::APFloat apf = floatLiteralToAPFloat(literal, type_width, type_encoding);
+    if (!floatSemanticsFor(type_encoding, type_width))
+        return MLIR_INVALID_HANDLE;
+    return makeNamedAttr(llvm::StringRef(name.str, name.size),
+        mlir::FloatAttr::get(ft, apf));
 }
 extern "C" MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *, string name, bool value) {
     auto &ctx = globalCtx().mctx;
@@ -1198,6 +1434,17 @@ extern "C" MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *, strin
     auto &ctx = globalCtx().mctx;
     return makeNamedAttr(llvm::StringRef(name.str, name.size),
                          mlir::StringAttr::get(&ctx, llvm::StringRef(value.str, value.size)));
+}
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeStringLiteral(
+    MLIR_Context *, string name, MLIR_TypeHandle, MLIR_StringLiteralHandle literal) {
+    const uint8_t *bytes = nullptr;
+    size_t byte_count = 0;
+    if (!literal || !MLIR_StringLiteral_GetBytes(literal, &bytes, &byte_count))
+        return MLIR_INVALID_HANDLE;
+    auto &ctx = globalCtx().mctx;
+    return makeNamedAttr(llvm::StringRef(name.str, name.size),
+        mlir::StringAttr::get(&ctx, llvm::StringRef(
+            reinterpret_cast<const char *>(bytes), byte_count)));
 }
 extern "C" MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *, string name) {
     auto &ctx = globalCtx().mctx;
@@ -1255,49 +1502,59 @@ extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *
                          mlir::DenseI64ArrayAttr::get(&ctx, v));
 }
 
-extern "C" MLIR_TypeHandle MLIR_CreateTypeLLVMPointer(MLIR_Context *) {
+extern "C" MLIR_TypeHandle MLIR_CreateTypePointerInAddressSpace(
+    MLIR_Context *, MLIR_Dialect dialect, uint32_t address_space) {
+    if (dialect != MLIR_DIALECT_LLVM) return MLIR_INVALID_HANDLE;
     auto &ctx = globalCtx().mctx;
-    return typeH(mlir::LLVM::LLVMPointerType::get(&ctx));
+    return typeH(mlir::LLVM::LLVMPointerType::get(&ctx, address_space));
 }
 
-extern "C" MLIR_TypeHandle MLIR_CreateTypeLLVMStructIdentified(MLIR_Context *, string name) {
+extern "C" MLIR_TypeHandle MLIR_CreateTypeStructIdentified(MLIR_Context *,
+                                                           MLIR_Dialect dialect,
+                                                           string name) {
+    if (dialect != MLIR_DIALECT_LLVM) return MLIR_INVALID_HANDLE;
     auto &ctx = globalCtx().mctx;
     return typeH(mlir::LLVM::LLVMStructType::getIdentified(&ctx,
                      llvm::StringRef(name.str, name.size)));
 }
 
-extern "C" void MLIR_SetTypeLLVMStructBody(MLIR_Context *, MLIR_TypeHandle struct_ty,
-                                            const MLIR_TypeHandle *fields, size_t n_fields) {
+extern "C" void MLIR_SetTypeStructBody(MLIR_Context *, MLIR_TypeHandle struct_ty,
+                                       const MLIR_TypeHandle *fields, size_t n_fields) {
     auto t = llvm::dyn_cast<mlir::LLVM::LLVMStructType>(typeF(struct_ty));
     if (!t) {
-        std::fprintf(stderr, "MLIR_SetTypeLLVMStructBody: not an LLVM struct type\n");
+        std::fprintf(stderr, "MLIR_SetTypeStructBody: not a dialect struct type\n");
         return;
     }
     llvm::SmallVector<mlir::Type, 8> body;
     body.reserve(n_fields);
     for (size_t i = 0; i < n_fields; i++) body.push_back(typeF(fields[i]));
     if (llvm::failed(t.setBody(body, /*isPacked=*/false))) {
-        std::fprintf(stderr, "MLIR_SetTypeLLVMStructBody: setBody failed (already set?)\n");
+        std::fprintf(stderr, "MLIR_SetTypeStructBody: setBody failed (already set?)\n");
     }
 }
 
-extern "C" MLIR_TypeHandle MLIR_CreateTypeLLVMArray(MLIR_Context *, MLIR_TypeHandle elem,
-                                                     uint64_t count) {
+extern "C" MLIR_TypeHandle MLIR_CreateTypeArray(MLIR_Context *, MLIR_Dialect dialect,
+                                                MLIR_TypeHandle elem,
+                                                uint64_t count) {
+    if (dialect != MLIR_DIALECT_LLVM) return MLIR_INVALID_HANDLE;
     return typeH(mlir::LLVM::LLVMArrayType::get(typeF(elem), count));
 }
 
-extern "C" MLIR_TypeHandle MLIR_CreateTypeLLVMFunction(MLIR_Context *,
-                                                       MLIR_TypeHandle result,
-                                                       const MLIR_TypeHandle *inputs,
-                                                       size_t n_inputs,
-                                                       bool is_var_arg) {
+extern "C" MLIR_TypeHandle MLIR_CreateTypeDialectFunction(MLIR_Context *,
+                                                          MLIR_Dialect dialect,
+                                                          MLIR_TypeHandle result,
+                                                          const MLIR_TypeHandle *inputs,
+                                                          size_t n_inputs,
+                                                          bool is_var_arg) {
+    if (dialect != MLIR_DIALECT_LLVM) return MLIR_INVALID_HANDLE;
     llvm::SmallVector<mlir::Type, 8> in;
     in.reserve(n_inputs);
     for (size_t i = 0; i < n_inputs; i++) in.push_back(typeF(inputs[i]));
     return typeH(mlir::LLVM::LLVMFunctionType::get(typeF(result), in, is_var_arg));
 }
 
-extern "C" MLIR_TypeHandle MLIR_CreateTypeLLVMVoid(MLIR_Context *) {
+extern "C" MLIR_TypeHandle MLIR_CreateTypeVoid(MLIR_Context *, MLIR_Dialect dialect) {
+    if (dialect != MLIR_DIALECT_LLVM) return MLIR_INVALID_HANDLE;
     auto &ctx = globalCtx().mctx;
     return typeH(mlir::LLVM::LLVMVoidType::get(&ctx));
 }
@@ -1451,6 +1708,67 @@ extern "C" int64_t MLIR_GetAttributeInteger(MLIR_AttributeHandle h) {
 }
 extern "C" double MLIR_GetAttributeFloat(MLIR_AttributeHandle h) {
     return llvm::cast<mlir::FloatAttr>(F<mlir::NamedAttribute>(h)->getValue()).getValueAsDouble();
+}
+extern "C" MLIR_IntegerLiteralHandle MLIR_GetAttributeIntegerLiteral(
+    MLIR_Context *ctx, MLIR_AttributeHandle h) {
+    auto attr = llvm::dyn_cast<mlir::IntegerAttr>(F<mlir::NamedAttribute>(h)->getValue());
+    if (!attr) return MLIR_INVALID_LITERAL_HANDLE;
+    uint32_t type_width = 0;
+    if (!MLIR_GetTypeIntegerWidth(typeH(attr.getType()), &type_width) ||
+        !literal_width_supported(type_width))
+        return MLIR_INVALID_LITERAL_HANDLE;
+    MLIR_IntegerLiteralHandle lit = MLIR_CreateIntegerLiteral(ctx);
+    if (!lit) return MLIR_INVALID_LITERAL_HANDLE;
+    llvm::APInt apint = attr.getValue();
+    if (type_width <= 64) {
+        if (!MLIR_IntegerLiteral_SetValue(lit, type_width, apint.getSExtValue()))
+            return MLIR_INVALID_LITERAL_HANDLE;
+    } else {
+        const uint64_t *raw = apint.getRawData();
+        uint32_t wc = (uint32_t)apint.getNumWords();
+        if (wc > MLIR_LITERAL_LARGER_BITS_WORDS) return MLIR_INVALID_LITERAL_HANDLE;
+        if (!MLIR_IntegerLiteral_SetLargerBits(lit, type_width, raw, wc))
+            return MLIR_INVALID_LITERAL_HANDLE;
+    }
+    return lit;
+}
+extern "C" MLIR_FloatLiteralHandle MLIR_GetAttributeFloatLiteral(
+    MLIR_Context *ctx, MLIR_AttributeHandle h) {
+    auto attr = llvm::dyn_cast<mlir::FloatAttr>(F<mlir::NamedAttribute>(h)->getValue());
+    if (!attr) return MLIR_INVALID_LITERAL_HANDLE;
+    uint32_t type_width = 0;
+    MLIR_FloatEncoding type_encoding = MLIR_FLOAT_ENCODING_IEEE_BINARY;
+    if (!MLIR_GetTypeFloatWidth(typeH(attr.getType()), &type_width) ||
+        !MLIR_GetTypeFloatEncoding(typeH(attr.getType()), &type_encoding) ||
+        !literal_width_supported(type_width))
+        return MLIR_INVALID_LITERAL_HANDLE;
+    MLIR_FloatLiteralHandle lit = MLIR_CreateFloatLiteral(ctx);
+    if (!lit) return MLIR_INVALID_LITERAL_HANDLE;
+    if (type_width <= 64) {
+        if (!MLIR_FloatLiteral_SetValue(lit, type_width, type_encoding,
+                                        attr.getValueAsDouble()))
+            return MLIR_INVALID_LITERAL_HANDLE;
+    } else {
+        llvm::APInt bits = attr.getValue().bitcastToAPInt();
+        const uint64_t *raw = bits.getRawData();
+        uint32_t wc = (uint32_t)bits.getNumWords();
+        if (wc > MLIR_LITERAL_LARGER_BITS_WORDS) return MLIR_INVALID_LITERAL_HANDLE;
+        if (!MLIR_FloatLiteral_SetLargerBits(lit, type_width, type_encoding, raw, wc))
+            return MLIR_INVALID_LITERAL_HANDLE;
+    }
+    return lit;
+}
+extern "C" MLIR_StringLiteralHandle MLIR_GetAttributeStringLiteral(
+    MLIR_Context *ctx, MLIR_AttributeHandle h) {
+    auto attr = llvm::dyn_cast<mlir::StringAttr>(F<mlir::NamedAttribute>(h)->getValue());
+    if (!attr) return MLIR_INVALID_LITERAL_HANDLE;
+    auto value = attr.getValue();
+    MLIR_StringLiteralHandle lit = MLIR_CreateStringLiteral(ctx);
+    if (!lit || !MLIR_StringLiteral_SetBytes(ctx, lit, 8,
+                                             reinterpret_cast<const uint8_t *>(value.data()),
+                                             value.size()))
+        return MLIR_INVALID_LITERAL_HANDLE;
+    return lit;
 }
 extern "C" MLIR_TypeHandle MLIR_GetAttributeType(MLIR_AttributeHandle h) {
     auto attr = F<mlir::NamedAttribute>(h)->getValue();

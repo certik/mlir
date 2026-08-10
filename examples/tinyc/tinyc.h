@@ -417,6 +417,7 @@ typedef struct {
     bool    is_extern;      // `extern T x;` — emit external-linkage global
     bool    is_static;      // `static` at file scope: emit with internal
                             // linkage.
+    uint32_t address_space; // LLVM pointer AS for addressof/load/store (0=default)
     int64_t init_int;
     double  init_float;
     string  init_str;       // for TY_PTR_CHAR initialized from string literal

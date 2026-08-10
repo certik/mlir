@@ -44,6 +44,7 @@ SOURCES = [
     "examples/tinyc/emit.c",
     "examples/tinyc/driver.c",
     "mlir_api_impl.c",
+    "mlir_api_common_literals.c",
     "mlir_op_names.c",
     "mlir_lower_to_llvm.c",
     "mlir_translate_to_llvm_ir.c",

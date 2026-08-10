@@ -53,6 +53,7 @@ clang \
     mlir_generic_printer.c \
     op_parsers.c \
     mlir_api_impl.c \
+    mlir_api_common_literals.c \
     mlir_op_names.c \
     corec-stdlib/stdlib/stdio.c \
     corec-stdlib/stdlib/stdlib.c \
@@ -77,7 +78,7 @@ clang \
     "mlir_classic_printer.c", "mlir_classic_printer.h",
     "mlir_generic_printer.c", "mlir_generic_printer.h",
     "op_parsers.c", "op_parsers.h",
-    "mlir_api_impl.c", "mlir_op_names.c", "mlir_op_names.h", "mlir_api.h",
+    "mlir_api_impl.c", "mlir_api_common_literals.c", "mlir_op_names.c", "mlir_op_names.h", "mlir_api.h",
     "corec-stdlib/stdlib/**/*.c", "corec-stdlib/stdlib/**/*.h",
     "corec/base/**/*.c", "corec/base/**/*.h",
     "corec/platform/platform_wasm.c", "corec/platform/platform.h",
@@ -127,6 +128,7 @@ clang \
     mlir_generic_printer.c \
     op_parsers.c \
     mlir_api_impl.c \
+    mlir_api_common_literals.c \
     mlir_op_names.c \
     mlir_lift_cf_to_scf.c \
     corec-stdlib/stdlib/stdio.c \
@@ -177,6 +179,7 @@ clang \
     mlir_generic_printer.c \
     op_parsers.c \
     mlir_api_impl.c \
+    mlir_api_common_literals.c \
     mlir_op_names.c \
     mlir_lift_cf_to_scf.c \
     corec-stdlib/stdlib/stdio.c \
@@ -218,6 +221,7 @@ clang \
     tests/cross/driver.c \
     mlir_generic_printer.c \
     mlir_api_impl.c \
+    mlir_api_common_literals.c \
     mlir_op_names.c \
     mlir_lift_cf_to_scf.c \
     corec-stdlib/stdlib/stdio.c \
@@ -267,6 +271,7 @@ cl \
     mlir_generic_printer.c \
     op_parsers.c \
     mlir_api_impl.c \
+    mlir_api_common_literals.c \
     mlir_op_names.c \
     mlir_lift_cf_to_scf.c \
     corec-stdlib/stdlib/stdio.c \
@@ -302,6 +307,7 @@ link \
     mlir_generic_printer.obj \
     op_parsers.obj \
     mlir_api_impl.obj \
+    mlir_api_common_literals.obj \
     mlir_op_names.obj \
     mlir_lift_cf_to_scf.obj \
     stdio.obj \

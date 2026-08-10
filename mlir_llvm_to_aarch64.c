@@ -615,13 +615,13 @@ static unsigned a64_align_up(unsigned x, unsigned a) {
 }
 static unsigned a64_struct_size(MLIR_Context *ctx, MLIR_TypeHandle ty);
 static unsigned a64_type_align(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    if (MLIR_IsTypeLLVMArray(ty))
-        return a64_type_align(ctx, MLIR_GetTypeLLVMArrayElement(ty));
-    if (MLIR_IsTypeLLVMStruct(ty)) {
-        size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
+    if (MLIR_TypeIsArray(ty, MLIR_DIALECT_LLVM))
+        return a64_type_align(ctx, MLIR_GetTypeArrayElement(ty));
+    if (MLIR_TypeIsStruct(ty, MLIR_DIALECT_LLVM)) {
+        size_t nf = MLIR_GetTypeStructNumFields(ty);
         unsigned ma = 1;
         for (size_t i = 0; i < nf; i++) {
-            unsigned fa = a64_type_align(ctx, MLIR_GetTypeLLVMStructField(ty, i));
+            unsigned fa = a64_type_align(ctx, MLIR_GetTypeStructField(ty, i));
             if (fa > ma) ma = fa;
         }
         return ma;
@@ -630,10 +630,10 @@ static unsigned a64_type_align(MLIR_Context *ctx, MLIR_TypeHandle ty) {
     return sz ? sz : 1;
 }
 static unsigned a64_struct_size(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
+    size_t nf = MLIR_GetTypeStructNumFields(ty);
     unsigned off = 0, max_align = 1;
     for (size_t i = 0; i < nf; i++) {
-        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(ty, i);
+        MLIR_TypeHandle ft = MLIR_GetTypeStructField(ty, i);
         unsigned fsz = a64_type_size(ctx, ft);
         unsigned fal = a64_type_align(ctx, ft);
         if (fsz == 0 || fal == 0) return 0;
@@ -648,7 +648,7 @@ static unsigned a64_struct_field_offset(MLIR_Context *ctx, MLIR_TypeHandle sty,
                                         size_t fld) {
     unsigned off = 0;
     for (size_t i = 0; i <= fld; i++) {
-        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(sty, i);
+        MLIR_TypeHandle ft = MLIR_GetTypeStructField(sty, i);
         off = a64_align_up(off, a64_type_align(ctx, ft));
         if (i == fld) return off;
         off += a64_type_size(ctx, ft);
@@ -673,12 +673,12 @@ static unsigned a64_type_size(MLIR_Context *ctx, MLIR_TypeHandle ty) {
         if (w == 32) return 4;
         if (w == 64) return 8;
     }
-    if (MLIR_IsTypeLLVMArray(ty)) {
-        unsigned esz = a64_type_size(ctx, MLIR_GetTypeLLVMArrayElement(ty));
+    if (MLIR_TypeIsArray(ty, MLIR_DIALECT_LLVM)) {
+        unsigned esz = a64_type_size(ctx, MLIR_GetTypeArrayElement(ty));
         if (esz == 0) return 0;
-        return esz * (unsigned)MLIR_GetTypeLLVMArrayNumElements(ty);
+        return esz * (unsigned)MLIR_GetTypeArrayNumElements(ty);
     }
-    if (MLIR_IsTypeLLVMStruct(ty)) return a64_struct_size(ctx, ty);
+    if (MLIR_TypeIsStruct(ty, MLIR_DIALECT_LLVM)) return a64_struct_size(ctx, ty);
     return 0;
 }
 
@@ -1890,15 +1890,15 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             int64_t  cst = 0;
             if (i == 0) {
                 stride = a64_type_size(ctx, elem_ty);
-            } else if (MLIR_IsTypeLLVMStruct(cur_ty)) {
+            } else if (MLIR_TypeIsStruct(cur_ty, MLIR_DIALECT_LLVM)) {
                 if (is_dyn)
                     LFAIL("llvm->aarch64: dynamic struct index in gep\n");
                 unsigned foff = a64_struct_field_offset(ctx, cur_ty, (size_t)cidx[i]);
-                cur_ty = MLIR_GetTypeLLVMStructField(cur_ty, (size_t)cidx[i]);
+                cur_ty = MLIR_GetTypeStructField(cur_ty, (size_t)cidx[i]);
                 emit_gep_const_off(ctx, blk, (int64_t)foff);
                 continue;
-            } else if (MLIR_IsTypeLLVMArray(cur_ty)) {
-                MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(cur_ty);
+            } else if (MLIR_TypeIsArray(cur_ty, MLIR_DIALECT_LLVM)) {
+                MLIR_TypeHandle et = MLIR_GetTypeArrayElement(cur_ty);
                 stride = a64_type_size(ctx, et);
                 cur_ty = et;
             } else {

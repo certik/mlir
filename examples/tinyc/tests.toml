@@ -145,6 +145,11 @@ targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "42\n42\n"
 
 [[test]]
+name = "pointer_addrspace"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "11\n22\n33\n"
+
+[[test]]
 name = "struct"
 targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "3\n4\n25\n5\n7.5\n"

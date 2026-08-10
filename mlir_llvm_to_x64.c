@@ -269,19 +269,16 @@ static int val_w(MLIR_Context *ctx, MLIR_ValueHandle v) {
 }
 static bool is_const(MLIR_OpHandle def, int64_t *val) {
     if (def == MLIR_INVALID_HANDLE) return false;
-    string nm = MLIR_GetOpName(def);
-    if (nm.size == sizeof("llvm.mlir.constant")-1 &&
-        memcmp(nm.str, "llvm.mlir.constant", nm.size) == 0) {
+    if (MLIR_GetOpType(def) == OP_TYPE_LLVM_MLIR_CONSTANT) {
         MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(def, "value");
         if (a == MLIR_INVALID_HANDLE) return false;
         *val = MLIR_GetAttributeInteger(a);
         return true;
     }
-    if ((nm.size == sizeof("llvm.mlir.zero")-1 &&
-         memcmp(nm.str, "llvm.mlir.zero", nm.size) == 0) ||
-        (nm.size == sizeof("llvm.mlir.null")-1 &&
-         memcmp(nm.str, "llvm.mlir.null", nm.size) == 0)) {
-        *val = 0; return true;
+    MLIR_OpType ty = MLIR_GetOpType(def);
+    if (ty == OP_TYPE_LLVM_MLIR_ZERO || ty == OP_TYPE_LLVM_MLIR_NULL) {
+        *val = 0;
+        return true;
     }
     return false;
 }
@@ -305,7 +302,7 @@ static int fp_bytes(MLIR_Context *ctx, MLIR_ValueHandle v) {
 // so FP constants are materialized here as their exact IEEE-754 bits.
 static bool fp_const_val(MLIR_Context *ctx, MLIR_ValueHandle v, uint64_t *bits) {
     MLIR_OpHandle def = MLIR_GetValueDefiningOp(v);
-    if (def == MLIR_INVALID_HANDLE || !op_is(def, "llvm.mlir.constant")) return false;
+    if (def == MLIR_INVALID_HANDLE || MLIR_GetOpType(def) != OP_TYPE_LLVM_MLIR_CONSTANT) return false;
     int fb = fp_bytes(ctx, v);
     if (fb == 0) return false;
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(def, "value");
@@ -323,6 +320,11 @@ static string strip_at(string s) {
     return s;
 }
 
+static bool op_is_addressof(MLIR_OpHandle op) {
+    if (op == MLIR_INVALID_HANDLE) return false;
+    return MLIR_GetOpType(op) == OP_TYPE_LLVM_MLIR_ADDRESSOF;
+}
+
 // Load an operand value into `reg`. Handles constants, globals, slots.
 static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
     MLIR_OpHandle def = MLIR_GetValueDefiningOp(v);
@@ -330,10 +332,10 @@ static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
     if (fp_const_val(F->ctx, v, &fbits)) { mov_ri(F, reg, (int64_t)fbits, 1); return; }
     int64_t c;
     if (is_const(def, &c)) { mov_ri(F, reg, c, val_w(F->ctx, v)); return; }
-    if (def != MLIR_INVALID_HANDLE && op_is(def, "llvm.mlir.undef")) {
+    if (def != MLIR_INVALID_HANDLE && MLIR_GetOpType(def) == OP_TYPE_LLVM_MLIR_UNDEF) {
         mov_ri(F, reg, 0, val_w(F->ctx, v)); return;
     }
-    if (def != MLIR_INVALID_HANDLE && op_is(def, "llvm.mlir.addressof")) {
+    if (def != MLIR_INVALID_HANDLE && op_is_addressof(def)) {
         MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(def, "global_name");
         if (a == MLIR_INVALID_HANDLE) a = MLIR_GetOpAttributeByName(def, "value");
         string gn = strip_at(a ? MLIR_GetAttributeString(a) : (string){0});

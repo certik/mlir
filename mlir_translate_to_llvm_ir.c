@@ -422,11 +422,11 @@ typedef struct FoldSlot {
 // aggregates today — what MLIR_CreateLLVMGlobalArrayInit produces.
 static char *fold_aggregate_init_chain(MLIR_Context *ctx, MLIR_OpHandle root,
                                        MLIR_TypeHandle agg_ty) {
-    if (agg_ty == MLIR_INVALID_HANDLE || !MLIR_IsTypeLLVMArray(agg_ty))
+    if (agg_ty == MLIR_INVALID_HANDLE || !MLIR_TypeIsArray(agg_ty, MLIR_DIALECT_LLVM))
         return NULL;
-    uint64_t n = MLIR_GetTypeLLVMArrayNumElements(agg_ty);
+    uint64_t n = MLIR_GetTypeArrayNumElements(agg_ty);
     if (n == 0 || n > (1u << 20)) return NULL;
-    MLIR_TypeHandle elem_ty = MLIR_GetTypeLLVMArrayElement(agg_ty);
+    MLIR_TypeHandle elem_ty = MLIR_GetTypeArrayElement(agg_ty);
     string ets = MLIR_GetTypeString(ctx, elem_ty);
     // Only handle integer element types iX (X in {8,16,32,64}).
     unsigned elem_w = 0;
@@ -1174,9 +1174,9 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
             // typed array constant.
             unsigned elem_w = 0;
             uint64_t arr_n = 0;
-            if (gty != MLIR_INVALID_HANDLE && MLIR_IsTypeLLVMArray(gty)) {
-                arr_n = MLIR_GetTypeLLVMArrayNumElements(gty);
-                MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(gty);
+            if (gty != MLIR_INVALID_HANDLE && MLIR_TypeIsArray(gty, MLIR_DIALECT_LLVM)) {
+                arr_n = MLIR_GetTypeArrayNumElements(gty);
+                MLIR_TypeHandle et = MLIR_GetTypeArrayElement(gty);
                 string ets = MLIR_GetTypeString(ctx, et);
                 if (ets.size >= 2 && ets.str[0] == 'i') {
                     int w = 0;

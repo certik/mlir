@@ -701,19 +701,19 @@ static bool sroa_leaf_type(MLIR_TypeHandle agg, const int32_t *idx, int n,
     for (int i = 1; i < n; i++) {
         int32_t c = idx[i];
         if (c == (int32_t)0x80000000) return false; // dynamic
-        if (MLIR_IsTypeLLVMStruct(cur)) {
-            size_t nf = MLIR_GetTypeLLVMStructNumFields(cur);
+        if (MLIR_TypeIsStruct(cur, MLIR_DIALECT_LLVM)) {
+            size_t nf = MLIR_GetTypeStructNumFields(cur);
             if (c < 0 || (size_t)c >= nf) return false;
-            cur = MLIR_GetTypeLLVMStructField(cur, (size_t)c);
-        } else if (MLIR_IsTypeLLVMArray(cur)) {
-            uint64_t ne = MLIR_GetTypeLLVMArrayNumElements(cur);
+            cur = MLIR_GetTypeStructField(cur, (size_t)c);
+        } else if (MLIR_TypeIsArray(cur, MLIR_DIALECT_LLVM)) {
+            uint64_t ne = MLIR_GetTypeArrayNumElements(cur);
             if (c < 0 || (uint64_t)c >= ne) return false;
-            cur = MLIR_GetTypeLLVMArrayElement(cur);
+            cur = MLIR_GetTypeArrayElement(cur);
         } else {
             return false; // indexing into a scalar
         }
     }
-    if (MLIR_IsTypeLLVMStruct(cur) || MLIR_IsTypeLLVMArray(cur)) return false;
+    if (MLIR_TypeIsStruct(cur, MLIR_DIALECT_LLVM) || MLIR_TypeIsArray(cur, MLIR_DIALECT_LLVM)) return false;
     *out = cur;
     return true;
 }
@@ -865,7 +865,7 @@ static MLIR_ValueHandle sroa_field_alloca(S *s, size_t ai, const int32_t *path,
     MLIR_ValueHandle rv[1] = { res };
     MLIR_ValueHandle ops[1] = { s->a_size[ai] };
     MLIR_AttributeHandle attrs[1] = { ea };
-    MLIR_OpHandle op = MLIR_CreateOp(ctx, OP_TYPE_LLVM_ALLOCA, str_lit("llvm.alloca"),
+    MLIR_OpHandle op = MLIR_CreateOp(ctx, OP_TYPE_LLVM_ALLOCA, str_lit(""),
                                      attrs, 1, rty, 1, rv, 1, ops, 1, NULL, 0,
                                      loc, MLIR_INVALID_HANDLE, (string){0}, -1);
     size_t at = sroa_block_op_index(s->a_blk[ai], s->a_op[ai]);
@@ -932,7 +932,7 @@ static void sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
             MLIR_AttributeHandle ea = MLIR_GetOpAttributeByName(op, "elem_type");
             if (ea == MLIR_INVALID_HANDLE) continue;
             MLIR_TypeHandle et = MLIR_GetAttributeTypeValue(ea);
-            if (!MLIR_IsTypeLLVMStruct(et) && !MLIR_IsTypeLLVMArray(et)) continue;
+            if (!MLIR_TypeIsStruct(et, MLIR_DIALECT_LLVM) && !MLIR_TypeIsArray(et, MLIR_DIALECT_LLVM)) continue;
             if (s.na == s.acap) {
                 s.acap <<= 1;
                 s.a_op    = realloc(s.a_op,    s.acap * sizeof(*s.a_op));
@@ -1021,18 +1021,7 @@ void mlir_llvm_mem2reg(MLIR_Context *ctx, MLIR_OpHandle module) {
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
         MLIR_OpType ft = MLIR_GetOpType(op);
-        // `func.func` is a registered op (matched by type), but `llvm.func`
-        // is UNREGISTERED in the native MLIR API impl, so MLIR_GetOpType
-        // returns OP_TYPE_UNREGISTERED for it there — only the upstream C++
-        // impl maps it to OP_TYPE_LLVM_FUNC. Variadic functions are emitted
-        // as `llvm.func`, so matching by name keeps mem2reg behaviour
-        // identical across both API impls (see verify_native_upstream_identical).
-        bool is_func = (ft == OP_TYPE_FUNC_FUNC || ft == OP_TYPE_LLVM_FUNC);
-        if (!is_func) {
-            string on = MLIR_GetOpName(op);
-            is_func = (on.size == 9 && memcmp(on.str, "llvm.func", 9) == 0);
-        }
-        if (!is_func) continue;
+        if (ft != OP_TYPE_FUNC_FUNC && ft != OP_TYPE_LLVM_FUNC) continue;
         if (MLIR_GetOpNumRegions(op) == 0) continue;
         MLIR_RegionHandle body = MLIR_GetOpRegion(op, 0);
         sroa_region(ctx, body);

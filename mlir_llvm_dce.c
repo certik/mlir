@@ -10,7 +10,6 @@
 
 #include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
 
 // ---------------------------------------------------------------------------
 // uintptr -> int64 open-addressing map (value handle -> use count). Key 0 is
@@ -61,11 +60,6 @@ static bool dcemap_get(DceMap *m, uintptr_t k, int64_t *out) {
 // removed. Mirrors arith_gvn's ag_is_dce_pure, kept independent so each pass is
 // self-contained.
 // ---------------------------------------------------------------------------
-static bool dce_name_eq(string s, const char *lit) {
-    size_t n = strlen(lit);
-    if (s.size != n) return false;
-    return memcmp(s.str, lit, n) == 0;
-}
 static bool dce_is_pure(MLIR_OpHandle op) {
     switch (MLIR_GetOpType(op)) {
     case OP_TYPE_LLVM_ADD: case OP_TYPE_LLVM_SUB: case OP_TYPE_LLVM_MUL:
@@ -75,22 +69,23 @@ static bool dce_is_pure(MLIR_OpHandle op) {
     case OP_TYPE_LLVM_SHL: case OP_TYPE_LLVM_LSHR: case OP_TYPE_LLVM_ASHR:
     case OP_TYPE_LLVM_ICMP:
     case OP_TYPE_LLVM_ZEXT: case OP_TYPE_LLVM_SEXT: case OP_TYPE_LLVM_TRUNC:
-    case OP_TYPE_LLVM_PTRTOINT: case OP_TYPE_LLVM_MLIR_CONSTANT:
+    case OP_TYPE_LLVM_PTRTOINT:
+    case OP_TYPE_LLVM_INTTOPTR:
+    case OP_TYPE_LLVM_GEP:
+    case OP_TYPE_LLVM_BITCAST:
+    case OP_TYPE_LLVM_SELECT:
+    case OP_TYPE_LLVM_FADD: case OP_TYPE_LLVM_FSUB: case OP_TYPE_LLVM_FMUL:
+    case OP_TYPE_LLVM_FDIV: case OP_TYPE_LLVM_FNEG:
+    case OP_TYPE_LLVM_FCMP:
+    case OP_TYPE_LLVM_FPEXT: case OP_TYPE_LLVM_FPTRUNC:
+    case OP_TYPE_LLVM_SITOFP: case OP_TYPE_LLVM_UITOFP:
+    case OP_TYPE_LLVM_FPTOSI: case OP_TYPE_LLVM_FPTOUI:
+    case OP_TYPE_LLVM_MLIR_CONSTANT:
     case OP_TYPE_LLVM_MLIR_ADDRESSOF:
         return true;
-    default: break;
+    default:
+        return false;
     }
-    string nm = MLIR_GetOpName(op);
-    return dce_name_eq(nm, "llvm.inttoptr") ||
-           dce_name_eq(nm, "llvm.bitcast") ||
-           dce_name_eq(nm, "llvm.getelementptr") ||
-           dce_name_eq(nm, "llvm.select") ||
-           dce_name_eq(nm, "llvm.fadd") || dce_name_eq(nm, "llvm.fsub") ||
-           dce_name_eq(nm, "llvm.fmul") || dce_name_eq(nm, "llvm.fdiv") ||
-           dce_name_eq(nm, "llvm.fneg") || dce_name_eq(nm, "llvm.fcmp") ||
-           dce_name_eq(nm, "llvm.fpext") || dce_name_eq(nm, "llvm.fptrunc") ||
-           dce_name_eq(nm, "llvm.sitofp") || dce_name_eq(nm, "llvm.uitofp") ||
-           dce_name_eq(nm, "llvm.fptosi") || dce_name_eq(nm, "llvm.fptoui");
 }
 
 // Worklist DCE driver: erase zero-use pure single-result ops, decrement their

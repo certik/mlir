@@ -618,7 +618,7 @@ static MLIR_ValueHandle emit_const(FLower *L, MLIR_TypeHandle ity, int64_t v) {
 
 // Emit `llvm.mlir.addressof @sym` -> !llvm.ptr.
 static MLIR_ValueHandle emit_addressof(FLower *L, const char *sym) {
-    MLIR_TypeHandle ptr = MLIR_CreateTypeLLVMPointer(L->ctx);
+    MLIR_TypeHandle ptr = MLIR_CreateTypePointerInAddressSpace(L->ctx, MLIR_DIALECT_LLVM, 0);
     MLIR_AttributeHandle a = MLIR_CreateAttributeSymbolRef(
         L->ctx, str_from_cstr_view((char *)"global_name"),
         str_from_cstr_view((char *)sym));
@@ -674,7 +674,7 @@ static MLIR_ValueHandle linmem_ptr(FLower *L, MLIR_ValueHandle addr_i32,
                                    int64_t off) {
     MLIR_Context *ctx = L->ctx;
     MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
-    MLIR_TypeHandle ptr = MLIR_CreateTypeLLVMPointer(ctx);
+    MLIR_TypeHandle ptr = MLIR_CreateTypePointerInAddressSpace(ctx, MLIR_DIALECT_LLVM, 0);
     // The base pointer is loaded once per function (in the entry block) and
     // reused for every access; this avoids re-emitting addressof+load on each
     // memory operation, which otherwise dominates the lifted IR size. The
@@ -1865,7 +1865,7 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
     MLIR_AppendBlockOp(ctx, entry, cnt_op);
 
     // One alloca per local index (params + declared locals).
-    MLIR_TypeHandle ptr_ty = MLIR_CreateTypeLLVMPointer(ctx);
+    MLIR_TypeHandle ptr_ty = MLIR_CreateTypePointerInAddressSpace(ctx, MLIR_DIALECT_LLVM, 0);
     for (size_t i = 0; i < n_locals; i++) {
         MLIR_TypeHandle ety = vt_to_llvm(ctx, local_vt[i]);
         MLIR_AttributeHandle a[1] = { attr_ty(ctx, "elem_type", ety) };
@@ -1930,7 +1930,7 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
 static MLIR_ValueHandle emit_alloca(FLower *L, MLIR_TypeHandle elem_ty, int64_t count) {
     MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(L->ctx, 64, true);
     MLIR_ValueHandle cnt = emit_const(L, i64, count);
-    MLIR_TypeHandle ptr = MLIR_CreateTypeLLVMPointer(L->ctx);
+    MLIR_TypeHandle ptr = MLIR_CreateTypePointerInAddressSpace(L->ctx, MLIR_DIALECT_LLVM, 0);
     MLIR_AttributeHandle a[1] = { attr_ty(L->ctx, "elem_type", elem_ty) };
     MLIR_TypeHandle rt[1] = { ptr };
     MLIR_ValueHandle r[1] = { mk_res(L->ctx, ptr) };
@@ -1943,7 +1943,7 @@ static MLIR_ValueHandle emit_alloca(FLower *L, MLIR_TypeHandle elem_ty, int64_t 
 // Compute `base_ptr + idx_i64` as a host pointer (byte offset).
 static MLIR_ValueHandle emit_byte_ptr(FLower *L, MLIR_ValueHandle base, MLIR_ValueHandle idx) {
     MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(L->ctx, 64, true);
-    MLIR_TypeHandle ptr = MLIR_CreateTypeLLVMPointer(L->ctx);
+    MLIR_TypeHandle ptr = MLIR_CreateTypePointerInAddressSpace(L->ctx, MLIR_DIALECT_LLVM, 0);
     MLIR_ValueHandle bi = emit_cast(L, OP_TYPE_LLVM_PTRTOINT, base, i64);
     MLIR_ValueHandle ea = emit_binop2(L, OP_TYPE_LLVM_ADD, bi, idx, i64);
     MLIR_TypeHandle rt[1] = { ptr };
@@ -2212,7 +2212,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
 
     // -- Emit @__wasm_linmem (the linear-memory image). --
     MLIR_TypeHandle i8 = MLIR_CreateTypeInteger(ctx, 8, true);
-    MLIR_TypeHandle arr = MLIR_CreateTypeLLVMArray(ctx, i8, (uint64_t)linmem_total);
+    MLIR_TypeHandle arr = MLIR_CreateTypeArray(ctx, MLIR_DIALECT_LLVM, i8, (uint64_t)linmem_total);
     string img_bytes = { (char *)image, (size_t)linmem_total };
     MLIR_OpHandle linmem_g = MLIR_CreateLLVMGlobalArrayInit(ctx,
         str_from_cstr_view((char *)LINMEM_GLOBAL), arr, false, img_bytes,

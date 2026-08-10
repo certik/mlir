@@ -125,9 +125,6 @@ static bool aghash_get_or_put(AgHash *m, const char *key, size_t klen,
 // ===========================================================================
 // Op classification.
 // ===========================================================================
-static int ag_name_eq(string s, const char *c) {
-    size_t n = strlen(c); return s.size == n && memcmp(s.str, c, n) == 0;
-}
 
 // Pure integer arithmetic that is value-numbered. Conversions and the address
 // spine are intentionally excluded (see header).
@@ -159,14 +156,16 @@ static bool ag_is_dce_pure(MLIR_OpHandle op) {
     if (ag_is_arith(op)) return true;
     switch (MLIR_GetOpType(op)) {
     case OP_TYPE_LLVM_ZEXT: case OP_TYPE_LLVM_SEXT: case OP_TYPE_LLVM_TRUNC:
-    case OP_TYPE_LLVM_PTRTOINT: case OP_TYPE_LLVM_MLIR_CONSTANT:
+    case OP_TYPE_LLVM_PTRTOINT:
+    case OP_TYPE_LLVM_INTTOPTR:
+    case OP_TYPE_LLVM_GEP:
+    case OP_TYPE_LLVM_BITCAST:
+    case OP_TYPE_LLVM_MLIR_CONSTANT:
     case OP_TYPE_LLVM_MLIR_ADDRESSOF:
         return true;
-    default: break;
+    default:
+        return false;
     }
-    string nm = MLIR_GetOpName(op);
-    return ag_name_eq(nm, "llvm.inttoptr") || ag_name_eq(nm, "llvm.bitcast") ||
-           ag_name_eq(nm, "llvm.getelementptr");
 }
 
 static MLIR_ValueHandle ag_canon(AgMap *repl, MLIR_ValueHandle v) {
@@ -371,7 +370,7 @@ static void ag_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
         size_t no = MLIR_GetBlockNumOps(bk);
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-            if (!ag_name_eq(MLIR_GetOpName(op), "llvm.inttoptr")) continue;
+            if (MLIR_GetOpType(op) != OP_TYPE_LLVM_INTTOPTR) continue;
             size_t non = MLIR_GetOpNumOperands(op);
             for (size_t kk = 0; kk < non; kk++)
                 agmap_put(&spine, (uintptr_t)MLIR_GetOpOperand(op, kk), 1);

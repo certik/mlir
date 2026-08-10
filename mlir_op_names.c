@@ -102,6 +102,7 @@ static string op_type_to_string_half1(MLIR_OpType type) {
         case OP_TYPE_LLVM_STORE: return str_lit("llvm.store");
         case OP_TYPE_LLVM_GEP: return str_lit("llvm.getelementptr");
         case OP_TYPE_LLVM_MLIR_ZERO: return str_lit("llvm.mlir.zero");
+        case OP_TYPE_LLVM_MLIR_NULL: return str_lit("llvm.mlir.null");
         case OP_TYPE_LLVM_MLIR_CONSTANT: return str_lit("llvm.mlir.constant");
         case OP_TYPE_LLVM_ICMP: return str_lit("llvm.icmp");
         case OP_TYPE_LLVM_MLIR_ADDRESSOF: return str_lit("llvm.mlir.addressof");
@@ -129,6 +130,23 @@ static string op_type_to_string_half1(MLIR_OpType type) {
         case OP_TYPE_ARITH_XORI: return str_lit("arith.xori");
         case OP_TYPE_ARITH_SHLI: return str_lit("arith.shli");
         case OP_TYPE_ARITH_SHRSI: return str_lit("arith.shrsi");
+        case OP_TYPE_LLVM_BR: return str_lit("llvm.br");
+        case OP_TYPE_LLVM_COND_BR: return str_lit("llvm.cond_br");
+        case OP_TYPE_LLVM_INTTOPTR: return str_lit("llvm.inttoptr");
+        case OP_TYPE_LLVM_BITCAST: return str_lit("llvm.bitcast");
+        case OP_TYPE_LLVM_SELECT: return str_lit("llvm.select");
+        case OP_TYPE_LLVM_FCMP: return str_lit("llvm.fcmp");
+        case OP_TYPE_LLVM_FADD: return str_lit("llvm.fadd");
+        case OP_TYPE_LLVM_FSUB: return str_lit("llvm.fsub");
+        case OP_TYPE_LLVM_FMUL: return str_lit("llvm.fmul");
+        case OP_TYPE_LLVM_FDIV: return str_lit("llvm.fdiv");
+        case OP_TYPE_LLVM_FNEG: return str_lit("llvm.fneg");
+        case OP_TYPE_LLVM_FPEXT: return str_lit("llvm.fpext");
+        case OP_TYPE_LLVM_FPTRUNC: return str_lit("llvm.fptrunc");
+        case OP_TYPE_LLVM_SITOFP: return str_lit("llvm.sitofp");
+        case OP_TYPE_LLVM_UITOFP: return str_lit("llvm.uitofp");
+        case OP_TYPE_LLVM_FPTOSI: return str_lit("llvm.fptosi");
+        case OP_TYPE_LLVM_FPTOUI: return str_lit("llvm.fptoui");
         case OP_TYPE_RETURN: return str_lit("return");
         case OP_TYPE_TT_REDUCE_RETURN: return str_lit("tt.reduce.return");
         // wasmssa dialect

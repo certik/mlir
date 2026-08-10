@@ -35,11 +35,55 @@ static bool name_eq(string s, const char *cstr) {
     return s.size == n && memcmp(s.str, cstr, n) == 0;
 }
 
-static MLIR_TypeHandle ty_i64(MLIR_Context *ctx) {
-    return MLIR_CreateTypeInteger(ctx, 64, false);
+// Target dialect for this lowering pass. Only MLIR_DIALECT_LLVM is lowered
+// today; other dialects are left in place by the walker.
+#define LOWER_DIALECT MLIR_DIALECT_LLVM
+
+static bool type_has_dialect(MLIR_TypeHandle ty, MLIR_Dialect dialect) {
+    return MLIR_TypeHasDialect(ty, dialect);
 }
-static MLIR_TypeHandle ty_llvm_void(MLIR_Context *ctx) {
-    return MLIR_CreateTypeLLVMVoid(ctx);
+
+static bool type_is(MLIR_TypeHandle ty, MLIR_TypeKind kind, MLIR_Dialect dialect) {
+    return MLIR_TypeIs(ty, kind, dialect);
+}
+
+static MLIR_TypeHandle ty_void(MLIR_Context *ctx) {
+    return MLIR_CreateTypeVoid(ctx, LOWER_DIALECT);
+}
+
+static MLIR_TypeHandle ty_ptr(MLIR_Context *ctx) {
+    return MLIR_CreateTypePointerInAddressSpace(ctx, LOWER_DIALECT, 0);
+}
+
+static MLIR_TypeHandle convert_function_type(MLIR_Context *ctx,
+                                             MLIR_TypeHandle ft,
+                                             bool is_var_arg) {
+    // Dialect-first: already a target-dialect function type needs no conversion.
+    if (type_has_dialect(ft, LOWER_DIALECT)) {
+        return type_is(ft, MLIR_TYPE_FUNCTION, LOWER_DIALECT) ? ft : MLIR_INVALID_HANDLE;
+    }
+    if (!MLIR_IsTypeFunction(ft)) return MLIR_INVALID_HANDLE;
+    size_t ni = MLIR_GetTypeFunctionNumInputs(ft);
+    size_t nr = MLIR_GetTypeFunctionNumResults(ft);
+    MLIR_TypeHandle ins_stk[16];
+    MLIR_TypeHandle *ins = ins_stk;
+    if (ni > 16) {
+        ins = (MLIR_TypeHandle *)arena_alloc(
+            MLIR_GetArenaAllocator(ctx), ni * sizeof(MLIR_TypeHandle));
+    }
+    for (size_t k = 0; k < ni; k++) ins[k] = MLIR_GetTypeFunctionInput(ft, k);
+    MLIR_TypeHandle ret_ty = (nr == 0)
+        ? ty_void(ctx)
+        : MLIR_GetTypeFunctionResult(ft, 0);
+    return MLIR_CreateTypeDialectFunction(ctx, LOWER_DIALECT, ret_ty,
+                                          ins, ni, is_var_arg);
+}
+
+static int integer_type_width(MLIR_TypeHandle ty) {
+    if (MLIR_IsTypeIndex(ty)) return 64;
+    uint32_t width = 0;
+    if (MLIR_GetTypeIntegerWidth(ty, &width)) return (int)width;
+    return 0;
 }
 
 // Allocate a fresh value handle (op-result) that becomes the result of
@@ -51,17 +95,19 @@ static MLIR_ValueHandle make_result_value(MLIR_Context *ctx,
                                     str_lit(""), loc);
 }
 
-// Convenience for ops that take no successors and no special blocks. Use
-// for everything except branch-like ops.
+// Convenience for LLVM ops that take no successors and no special blocks.
+// The enum is the operation identity; this is the single place where the
+// canonical textual spelling is materialized for MLIR construction.
+// Pass empty string for LLVM Op name, since its type is enough to identify the op, without strings.
 static MLIR_OpHandle create_simple_op(
-        MLIR_Context *ctx, MLIR_OpType type, string opname,
+        MLIR_Context *ctx, MLIR_OpType type,
         MLIR_AttributeHandle *attrs, size_t n_attrs,
         MLIR_TypeHandle *result_types, size_t n_result_types,
         MLIR_ValueHandle *results, size_t n_results,
         MLIR_ValueHandle *operands, size_t n_operands,
         MLIR_RegionHandle *regions, size_t n_regions,
         MLIR_LocationHandle loc) {
-    return MLIR_CreateOp(ctx, type, opname,
+    return MLIR_CreateOp(ctx, type, str_lit(""),
                          attrs, n_attrs,
                          result_types, n_result_types,
                          results, n_results,
@@ -117,7 +163,7 @@ static bool lower_arith_constant(LowerState *st, MLIR_OpHandle op,
     MLIR_TypeHandle rts[1] = { ty };
     MLIR_ValueHandle results[1] = { new_res };
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_LLVM_MLIR_CONSTANT, str_lit("llvm.mlir.constant"),
+        st->ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
         attrs, 1, rts, 1, results, 1, NULL, 0, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
     MLIR_ReplaceAllUsesOfValue(st->ctx, old_res, new_res);
@@ -136,7 +182,7 @@ static bool lower_func_return(LowerState *st, MLIR_OpHandle op,
         MLIR_GetArenaAllocator(st->ctx), no * sizeof(MLIR_ValueHandle));
     for (size_t i = 0; i < no; i++) operands[i] = MLIR_GetOpOperand(op, i);
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_LLVM_RETURN, str_lit("llvm.return"),
+        st->ctx, OP_TYPE_LLVM_RETURN,
         NULL, 0, NULL, 0, NULL, 0, operands, no, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
     return true;
@@ -191,24 +237,12 @@ static bool lower_func_func(LowerState *st, MLIR_OpHandle op,
             attrs_buf[n_attrs++] = a;
             exp_name = MLIR_GetAttributeString(a);
         } else if (name_eq(an, "function_type")) {
-            // Convert FunctionType -> LLVMFunctionType (which carries
-            // is_var_arg and uses LLVM void instead of zero-results).
+            // Convert builtin FunctionType -> dialect function type.
             MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(a);
-            size_t ni = MLIR_GetTypeFunctionNumInputs(ft);
-            size_t nr_ = MLIR_GetTypeFunctionNumResults(ft);
-            MLIR_TypeHandle ins_stk[16];
-            MLIR_TypeHandle *ins = ins_stk;
-            if (ni > 16) ins = (MLIR_TypeHandle *)arena_alloc(
-                MLIR_GetArenaAllocator(st->ctx),
-                ni * sizeof(MLIR_TypeHandle));
-            for (size_t k = 0; k < ni; k++) ins[k] = MLIR_GetTypeFunctionInput(ft, k);
-            MLIR_TypeHandle ret_ty = (nr_ == 0)
-                ? ty_llvm_void(st->ctx)
-                : MLIR_GetTypeFunctionResult(ft, 0);
-            MLIR_TypeHandle llvmft = MLIR_CreateTypeLLVMFunction(
-                st->ctx, ret_ty, ins, ni, false);
+            MLIR_TypeHandle dialect_ft = convert_function_type(st->ctx, ft, false);
+            if (dialect_ft == MLIR_INVALID_HANDLE) return false;
             attrs_buf[n_attrs++] = MLIR_CreateAttributeType(
-                st->ctx, str_lit("function_type"), llvmft);
+                st->ctx, str_lit("function_type"), dialect_ft);
         }
     }
 
@@ -242,7 +276,7 @@ static bool lower_func_func(LowerState *st, MLIR_OpHandle op,
     }
 
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.func"),
+        st->ctx, OP_TYPE_LLVM_FUNC,
         attrs_buf, n_attrs, NULL, 0, NULL, 0, NULL, 0,
         &body, 1, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
@@ -288,7 +322,7 @@ static bool lower_func_call(LowerState *st, MLIR_OpHandle op,
     }
 
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.call"),
+        st->ctx, OP_TYPE_LLVM_CALL,
         attrs_buf, n_attrs, rts, nr, results, nr,
         operands, no, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
@@ -299,13 +333,13 @@ static bool lower_func_call(LowerState *st, MLIR_OpHandle op,
     return true;
 }
 
-// Generic "rename op": build a new op with `new_name` that copies all
+// Generic "rename op": build a new operation selected by `new_type` that copies all
 // operands, results, and attributes from `op` 1:1. Used for the family
 // of arith→llvm conversions where the semantics are identical and only
 // the op name changes (arith.addi→llvm.add, arith.cmpi→llvm.icmp, ...).
 static bool lower_rename(LowerState *st, MLIR_OpHandle op,
                          MLIR_BlockHandle parent, size_t pos,
-                         string new_name, MLIR_OpType new_type) {
+                         MLIR_OpType new_type) {
     MLIR_LocationHandle loc = MLIR_GetOpLocation(op);
     size_t no = MLIR_GetOpNumOperands(op);
     size_t nr = MLIR_GetOpNumResults(op);
@@ -331,7 +365,7 @@ static bool lower_rename(LowerState *st, MLIR_OpHandle op,
     for (size_t i = 0; i < na; i++) attrs[i] = MLIR_GetOpAttribute(op, i);
 
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, new_type, new_name,
+        st->ctx, new_type,
         attrs, na, rts, nr, results, nr,
         operands, no, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
@@ -347,7 +381,7 @@ static bool lower_rename(LowerState *st, MLIR_OpHandle op,
 // use the successor-aware op constructor.
 static bool lower_cf_branch(LowerState *st, MLIR_OpHandle op,
                             MLIR_BlockHandle parent, size_t pos,
-                            string new_name) {
+                            MLIR_OpType new_type) {
     MLIR_LocationHandle loc = MLIR_GetOpLocation(op);
     Arena *alloc = MLIR_GetArenaAllocator(st->ctx);
     size_t no = MLIR_GetOpNumOperands(op);
@@ -380,7 +414,7 @@ static bool lower_cf_branch(LowerState *st, MLIR_OpHandle op,
     }
 
     MLIR_OpHandle nop = MLIR_CreateOpWithSuccessors(
-        st->ctx, OP_TYPE_UNREGISTERED, new_name,
+        st->ctx, new_type, str_lit(""),
         attrs, na, NULL, 0, NULL, 0,
         operands, no, NULL, 0,
         succs, ns, succ_ops, n_succ_ops,
@@ -415,7 +449,7 @@ static bool lower_func_constant(LowerState *st, MLIR_OpHandle op,
     }
     if (sym_name.size == 0) return false;
 
-    MLIR_TypeHandle ptr_ty = MLIR_CreateTypeLLVMPointer(st->ctx);
+    MLIR_TypeHandle ptr_ty = ty_ptr(st->ctx);
     MLIR_ValueHandle new_res = make_result_value(st->ctx, ptr_ty, loc);
     MLIR_TypeHandle rts[1] = { ptr_ty };
     MLIR_ValueHandle results[1] = { new_res };
@@ -423,7 +457,7 @@ static bool lower_func_constant(LowerState *st, MLIR_OpHandle op,
     attrs[0] = MLIR_CreateAttributeSymbolRef(
         st->ctx, str_lit("global_name"), sym_name);
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.mlir.addressof"),
+        st->ctx, OP_TYPE_LLVM_MLIR_ADDRESSOF,
         attrs, 1, rts, 1, results, 1, NULL, 0, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
     MLIR_ReplaceAllUsesOfValue(st->ctx, MLIR_GetOpResult(op, 0), new_res);
@@ -472,23 +506,23 @@ static bool lower_func_call_indirect(LowerState *st, MLIR_OpHandle op,
         results[i] = make_result_value(st->ctx, rts[i], loc);
     }
 
-    // Build a `var_callee_type` LLVMFunctionType attribute describing
+    // Build a `var_callee_type` dialect function attribute describing
     // the indirect call's signature (return + arg types).
-    MLIR_TypeHandle ret_ty = (nr == 0) ? ty_llvm_void(st->ctx) : rts[0];
+    MLIR_TypeHandle ret_ty = (nr == 0) ? ty_void(st->ctx) : rts[0];
     size_t n_args = no - 1;
     MLIR_TypeHandle *arg_tys = n_args ? (MLIR_TypeHandle *)arena_alloc(
         alloc, n_args * sizeof(MLIR_TypeHandle)) : NULL;
     for (size_t i = 0; i < n_args; i++) {
         arg_tys[i] = MLIR_GetValueType(operands[i + 1]);
     }
-    MLIR_TypeHandle llvmft = MLIR_CreateTypeLLVMFunction(
-        st->ctx, ret_ty, arg_tys, n_args, false);
+    MLIR_TypeHandle callee_ty = MLIR_CreateTypeDialectFunction(
+        st->ctx, LOWER_DIALECT, ret_ty, arg_tys, n_args, false);
     MLIR_AttributeHandle attrs[1];
     attrs[0] = MLIR_CreateAttributeType(
-        st->ctx, str_lit("var_callee_type"), llvmft);
+        st->ctx, str_lit("var_callee_type"), callee_ty);
 
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.call"),
+        st->ctx, OP_TYPE_LLVM_CALL,
         attrs, 1, rts, nr, results, nr,
         operands, no, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
@@ -515,7 +549,7 @@ static void rewrite_yield_to_br(LowerState *st, MLIR_BlockHandle blk,
     size_t n_succ_ops_arr[1] = { no };
     MLIR_LocationHandle term_loc = MLIR_GetOpLocation(term);
     MLIR_OpHandle br = MLIR_CreateOpWithSuccessors(
-        st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.br"),
+        st->ctx, OP_TYPE_LLVM_BR, str_lit(""),
         NULL, 0, NULL, 0, NULL, 0,
         NULL, 0, NULL, 0,
         succs, 1, succ_ops_arr, n_succ_ops_arr,
@@ -615,13 +649,348 @@ static bool lower_scf_if(LowerState *st, MLIR_OpHandle op,
     size_t n_empty_ops[2] = { 0, 0 };
     MLIR_ValueHandle cond_arr[1] = { cond };
     MLIR_OpHandle cbr = MLIR_CreateOpWithSuccessors(
-        st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.cond_br"),
+        st->ctx, OP_TYPE_LLVM_COND_BR, str_lit(""),
         NULL, 0, NULL, 0, NULL, 0,
         cond_arr, 1, NULL, 0,
         succs, 2, empty_ops, n_empty_ops,
         loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, cbr, pos);
     return true;
+}
+
+static void move_region_blocks_to_parent(LowerState *st, MLIR_RegionHandle reg,
+                                         MLIR_RegionHandle parent_region) {
+    while (MLIR_GetRegionNumBlocks(reg) > 0) {
+        MLIR_MoveBlockToRegionEnd(st->ctx,
+            MLIR_GetRegionBlock(reg, 0), parent_region);
+    }
+}
+
+// in scf dialect, regions add with scf.yield, which is being translated to llvm.br
+static void rewrite_yields_in_region(LowerState *st, MLIR_RegionHandle reg,
+                                     MLIR_BlockHandle target) {
+    size_t nb = MLIR_GetRegionNumBlocks(reg);
+    for (size_t bi = 0; bi < nb; bi++)
+        rewrite_yield_to_br(st, MLIR_GetRegionBlock(reg, bi), target);
+}
+
+static void rewrite_condition_to_cbr(LowerState *st, MLIR_BlockHandle blk,
+                                       MLIR_BlockHandle body,
+                                       MLIR_BlockHandle exit) {
+    size_t n = MLIR_GetBlockNumOps(blk);
+    if (n == 0) return;
+    MLIR_OpHandle term = MLIR_GetBlockOp(blk, n - 1);
+    if (!name_eq(MLIR_GetOpName(term), "scf.condition")) return;
+    Arena *alloc = MLIR_GetArenaAllocator(st->ctx);
+    size_t no = MLIR_GetOpNumOperands(term);
+    if (no < 1) return;
+    MLIR_ValueHandle cond = MLIR_GetOpOperand(term, 0);
+    size_t nf = no - 1;
+    MLIR_ValueHandle *fwd = nf ? (MLIR_ValueHandle *)arena_alloc(
+        alloc, nf * sizeof(MLIR_ValueHandle)) : NULL;
+    for (size_t i = 0; i < nf; i++) fwd[i] = MLIR_GetOpOperand(term, i + 1);
+    MLIR_BlockHandle succs[2] = { body, exit };
+    MLIR_ValueHandle *succ_ops_arr[2] = { fwd, fwd };
+    size_t n_succ_ops_arr[2] = { nf, nf };
+    MLIR_ValueHandle cond_arr[1] = { cond };
+    MLIR_LocationHandle term_loc = MLIR_GetOpLocation(term);
+    MLIR_OpHandle cbr = MLIR_CreateOpWithSuccessors(
+        st->ctx, OP_TYPE_LLVM_COND_BR, str_lit(""),
+        NULL, 0, NULL, 0, NULL, 0,
+        cond_arr, 1, NULL, 0,
+        succs, 2, succ_ops_arr, n_succ_ops_arr,
+        term_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_AppendBlockOp(st->ctx, blk, cbr);
+    MLIR_EraseOp(st->ctx, term);
+}
+
+static void rewrite_conditions_in_region(LowerState *st, MLIR_RegionHandle reg,
+                                         MLIR_BlockHandle body,
+                                         MLIR_BlockHandle exit) {
+    size_t nb = MLIR_GetRegionNumBlocks(reg);
+    for (size_t bi = 0; bi < nb; bi++)
+        rewrite_condition_to_cbr(st, MLIR_GetRegionBlock(reg, bi), body, exit);
+}
+
+static bool lower_scf_while(LowerState *st, MLIR_OpHandle op,
+                            MLIR_BlockHandle parent, size_t pos) {
+    MLIR_LocationHandle loc = MLIR_GetOpLocation(op);
+    MLIR_RegionHandle parent_region = MLIR_GetBlockParentRegion(parent);
+    if (parent_region == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetOpNumRegions(op) < 2) return false;
+
+    MLIR_RegionHandle before_reg = MLIR_TakeOpRegion(st->ctx, op, 0);
+    MLIR_RegionHandle after_reg  = MLIR_TakeOpRegion(st->ctx, op, 1);
+    if (before_reg == MLIR_INVALID_HANDLE || after_reg == MLIR_INVALID_HANDLE)
+        return false;
+    if (MLIR_GetRegionNumBlocks(before_reg) < 1 ||
+        MLIR_GetRegionNumBlocks(after_reg) < 1)
+        return false;
+
+    MLIR_BlockHandle header = MLIR_GetRegionBlock(before_reg, 0);
+    MLIR_BlockHandle body   = MLIR_GetRegionBlock(after_reg, 0);
+    size_t n_inits = MLIR_GetOpNumOperands(op);
+    size_t n_res   = MLIR_GetOpNumResults(op);
+
+    MLIR_BlockHandle exit = MLIR_CreateBlock(st->ctx);
+    MLIR_BlockHandle cont = MLIR_CreateBlock(st->ctx);
+    Arena *alloc = MLIR_GetArenaAllocator(st->ctx);
+    for (size_t i = 0; i < n_res; i++) {
+        MLIR_ValueHandle old = MLIR_GetOpResult(op, i);
+        MLIR_TypeHandle ty = MLIR_GetValueType(old);
+        MLIR_ValueHandle barg = MLIR_CreateValueBlockArg(
+            st->ctx, str_lit(""), (uint32_t)i, ty, loc);
+        MLIR_AppendBlockArg(st->ctx, exit, barg);
+        MLIR_ReplaceAllUsesOfValue(st->ctx, old, barg);
+    }
+
+    while (MLIR_GetBlockNumOps(parent) > pos + 1) {
+        MLIR_OpHandle tail = MLIR_GetBlockOp(parent, pos + 1);
+        MLIR_MoveOpToBlockEnd(st->ctx, tail, cont);
+    }
+
+    rewrite_conditions_in_region(st, before_reg, body, exit);
+    rewrite_yields_in_region(st, after_reg, header);
+
+    move_region_blocks_to_parent(st, before_reg, parent_region);
+    move_region_blocks_to_parent(st, after_reg, parent_region);
+    MLIR_MoveBlockToRegionEnd(st->ctx, exit, parent_region);
+    MLIR_MoveBlockToRegionEnd(st->ctx, cont, parent_region);
+
+    MLIR_ValueHandle *inits = n_inits ? (MLIR_ValueHandle *)arena_alloc(
+        alloc, n_inits * sizeof(MLIR_ValueHandle)) : NULL;
+    for (size_t i = 0; i < n_inits; i++) inits[i] = MLIR_GetOpOperand(op, i);
+    MLIR_BlockHandle succs[1] = { header };
+    MLIR_ValueHandle *succ_ops_arr[1] = { inits };
+    size_t n_succ_ops_arr[1] = { n_inits };
+    MLIR_OpHandle br = MLIR_CreateOpWithSuccessors(
+        st->ctx, OP_TYPE_LLVM_BR, str_lit(""),
+        NULL, 0, NULL, 0, NULL, 0,
+        NULL, 0, NULL, 0,
+        succs, 1, succ_ops_arr, n_succ_ops_arr,
+        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_InsertBlockOpAtIndex(st->ctx, parent, br, pos);
+    return true;
+}
+
+static bool parse_cases(string cs, int64_t *out, size_t n) {
+    size_t p = 0;
+    while (p < cs.size && cs.str[p] != ':') p++;
+    if (p < cs.size) p++;
+    size_t got = 0;
+    while (p < cs.size && got < n) {
+        while (p < cs.size && (cs.str[p] == ' ' || cs.str[p] == ',')) p++;
+        if (p >= cs.size || cs.str[p] == '>') break;
+        int64_t sign = 1;
+        if (cs.str[p] == '-') { sign = -1; p++; }
+        int64_t v = 0;
+        while (p < cs.size && cs.str[p] >= '0' && cs.str[p] <= '9')
+            v = v * 10 + (cs.str[p++] - '0');
+        out[got++] = sign * v;
+    }
+    return got == n;
+}
+
+static MLIR_OpHandle emit_icmp_eq(LowerState *st, MLIR_LocationHandle loc,
+                                  MLIR_ValueHandle sel, MLIR_ValueHandle cval) {
+    MLIR_TypeHandle i1 = MLIR_CreateTypeInteger(st->ctx, 1, false);
+    MLIR_ValueHandle res = make_result_value(st->ctx, i1, loc);
+    MLIR_TypeHandle rts[1] = { i1 };
+    MLIR_ValueHandle results[1] = { res };
+    MLIR_ValueHandle ops[2] = { sel, cval };
+    MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(st->ctx, 64, true);
+    MLIR_AttributeHandle pred = MLIR_CreateAttributeInteger(
+        st->ctx, str_lit("predicate"), 0, i64);
+    MLIR_AttributeHandle attrs[1] = { pred };
+    MLIR_OpHandle nop = create_simple_op(
+        st->ctx, OP_TYPE_LLVM_ICMP,
+        attrs, 1, rts, 1, results, 1, ops, 2, NULL, 0, loc);
+    return nop;
+}
+
+static MLIR_OpHandle emit_int_constant(LowerState *st, MLIR_LocationHandle loc,
+                                       MLIR_TypeHandle ty, int64_t val) {
+    MLIR_ValueHandle res = make_result_value(st->ctx, ty, loc);
+    MLIR_TypeHandle rts[1] = { ty };
+    MLIR_ValueHandle results[1] = { res };
+    MLIR_AttributeHandle val_attr = MLIR_CreateAttributeInteger(
+        st->ctx, str_lit("value"), val, ty);
+    MLIR_AttributeHandle attrs[1] = { val_attr };
+    return create_simple_op(
+        st->ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
+        attrs, 1, rts, 1, results, 1, NULL, 0, NULL, 0, loc);
+}
+
+static void emit_br_to_merge(LowerState *st, MLIR_BlockHandle blk,
+                             MLIR_BlockHandle merge, MLIR_OpHandle owner) {
+    size_t nr = MLIR_GetOpNumResults(owner);
+    MLIR_LocationHandle loc = MLIR_GetOpLocation(owner);
+    if (nr == 0) {
+        MLIR_BlockHandle succs[1] = { merge };
+        MLIR_OpHandle br = MLIR_CreateOpWithSuccessors(
+            st->ctx, OP_TYPE_LLVM_BR, str_lit(""),
+            NULL, 0, NULL, 0, NULL, 0,
+            NULL, 0, NULL, 0,
+            succs, 1, NULL, NULL,
+            loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_AppendBlockOp(st->ctx, blk, br);
+        return;
+    }
+    Arena *alloc = MLIR_GetArenaAllocator(st->ctx);
+    MLIR_ValueHandle *zeros = (MLIR_ValueHandle *)arena_alloc(
+        alloc, nr * sizeof(MLIR_ValueHandle));
+    for (size_t i = 0; i < nr; i++) {
+        MLIR_TypeHandle ty = MLIR_GetValueType(MLIR_GetOpResult(owner, i));
+        MLIR_OpHandle c = emit_int_constant(st, loc, ty, 0);
+        MLIR_AppendBlockOp(st->ctx, blk, c);
+        zeros[i] = MLIR_GetOpResult(c, 0);
+    }
+    MLIR_BlockHandle succs[1] = { merge };
+    MLIR_ValueHandle *succ_ops_arr[1] = { zeros };
+    size_t n_succ_ops_arr[1] = { nr };
+    MLIR_OpHandle br = MLIR_CreateOpWithSuccessors(
+        st->ctx, OP_TYPE_LLVM_BR, str_lit(""),
+        NULL, 0, NULL, 0, NULL, 0,
+        NULL, 0, NULL, 0,
+        succs, 1, succ_ops_arr, n_succ_ops_arr,
+        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_AppendBlockOp(st->ctx, blk, br);
+}
+
+static bool lower_scf_index_switch(LowerState *st, MLIR_OpHandle op,
+                                   MLIR_BlockHandle parent, size_t pos) {
+    MLIR_LocationHandle loc = MLIR_GetOpLocation(op);
+    MLIR_RegionHandle parent_region = MLIR_GetBlockParentRegion(parent);
+    if (parent_region == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetOpNumOperands(op) < 1) return false;
+    size_t n_regions = MLIR_GetOpNumRegions(op);
+    if (n_regions < 1) return false;
+
+    MLIR_ValueHandle sel = MLIR_GetOpOperand(op, 0);
+    MLIR_TypeHandle sel_ty = MLIR_GetValueType(sel);
+    size_t n_cases = n_regions - 1;
+    int64_t case_vals[256];
+    if (n_cases > 256) return false;
+    if (n_cases > 0) {
+        MLIR_AttributeHandle ca = MLIR_GetOpAttributeByName(op, "cases");
+        if (ca == MLIR_INVALID_HANDLE) return false;
+        string cs = MLIR_GetAttributeAsString(st->ctx, ca);
+        if (!cs.size) cs = MLIR_GetAttributeString(ca);
+        if (!parse_cases(cs, case_vals, n_cases)) return false;
+    }
+
+    size_t nr = MLIR_GetOpNumResults(op);
+    Arena *alloc = MLIR_GetArenaAllocator(st->ctx);
+    MLIR_RegionHandle *regs = (MLIR_RegionHandle *)arena_alloc(
+        alloc, n_regions * sizeof(MLIR_RegionHandle));
+    for (size_t i = 0; i < n_regions; i++)
+        regs[i] = MLIR_TakeOpRegion(st->ctx, op, i);
+
+    MLIR_BlockHandle merge = MLIR_CreateBlock(st->ctx);
+    MLIR_BlockHandle cont = MLIR_CreateBlock(st->ctx);
+    for (size_t i = 0; i < nr; i++) {
+        MLIR_ValueHandle old = MLIR_GetOpResult(op, i);
+        MLIR_TypeHandle ty = MLIR_GetValueType(old);
+        MLIR_ValueHandle barg = MLIR_CreateValueBlockArg(
+            st->ctx, str_lit(""), (uint32_t)i, ty, loc);
+        MLIR_AppendBlockArg(st->ctx, merge, barg);
+        MLIR_ReplaceAllUsesOfValue(st->ctx, old, barg);
+    }
+
+    while (MLIR_GetBlockNumOps(parent) > pos + 1) {
+        MLIR_OpHandle tail = MLIR_GetBlockOp(parent, pos + 1);
+        MLIR_MoveOpToBlockEnd(st->ctx, tail, cont);
+    }
+
+    MLIR_BlockHandle *arm_blks = (MLIR_BlockHandle *)arena_alloc(
+        alloc, n_regions * sizeof(MLIR_BlockHandle));
+    for (size_t i = 0; i < n_regions; i++) {
+        if (MLIR_GetRegionNumBlocks(regs[i]) == 0) {
+            MLIR_BlockHandle empty = MLIR_CreateBlock(st->ctx);
+            emit_br_to_merge(st, empty, merge, op);
+            arm_blks[i] = empty;
+            MLIR_MoveBlockToRegionEnd(st->ctx, empty, parent_region);
+            continue;
+        }
+        arm_blks[i] = MLIR_GetRegionBlock(regs[i], 0);
+        rewrite_yields_in_region(st, regs[i], merge);
+        move_region_blocks_to_parent(st, regs[i], parent_region);
+    }
+    MLIR_MoveBlockToRegionEnd(st->ctx, merge, parent_region);
+    MLIR_MoveBlockToRegionEnd(st->ctx, cont, parent_region);
+
+    MLIR_BlockHandle def_blk = arm_blks[0];
+    if (n_cases == 0) {
+        MLIR_BlockHandle succs[1] = { def_blk };
+        MLIR_OpHandle br = MLIR_CreateOpWithSuccessors(
+            st->ctx, OP_TYPE_LLVM_BR, str_lit(""),
+            NULL, 0, NULL, 0, NULL, 0,
+            NULL, 0, NULL, 0,
+            succs, 1, NULL, NULL,
+            loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_InsertBlockOpAtIndex(st->ctx, parent, br, pos);
+        return true;
+    }
+
+    MLIR_BlockHandle entry = MLIR_CreateBlock(st->ctx);
+    MLIR_BlockHandle entry_succs[1] = { entry };
+    MLIR_OpHandle entry_br = MLIR_CreateOpWithSuccessors(
+        st->ctx, OP_TYPE_LLVM_BR, str_lit(""),
+        NULL, 0, NULL, 0, NULL, 0,
+        NULL, 0, NULL, 0,
+        entry_succs, 1, NULL, NULL,
+        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_InsertBlockOpAtIndex(st->ctx, parent, entry_br, pos);
+    MLIR_MoveBlockToRegionEnd(st->ctx, entry, parent_region);
+
+    MLIR_BlockHandle cur = entry;
+    for (size_t i = 0; i < n_cases; i++) {
+        MLIR_BlockHandle next = (i + 1 < n_cases)
+            ? MLIR_CreateBlock(st->ctx) : def_blk;
+        if (i + 1 < n_cases)
+            MLIR_MoveBlockToRegionEnd(st->ctx, next, parent_region);
+
+        MLIR_OpHandle cval_op = emit_int_constant(st, loc, sel_ty, case_vals[i]);
+        MLIR_AppendBlockOp(st->ctx, cur, cval_op);
+        MLIR_OpHandle eq_op = emit_icmp_eq(st, loc, sel, MLIR_GetOpResult(cval_op, 0));
+        MLIR_AppendBlockOp(st->ctx, cur, eq_op);
+        MLIR_BlockHandle succs[2] = { arm_blks[i + 1], next };
+        MLIR_ValueHandle cond_arr[1] = { MLIR_GetOpResult(eq_op, 0) };
+        MLIR_OpHandle cbr = MLIR_CreateOpWithSuccessors(
+            st->ctx, OP_TYPE_LLVM_COND_BR, str_lit(""),
+            NULL, 0, NULL, 0, NULL, 0,
+            cond_arr, 1, NULL, 0,
+            succs, 2, NULL, NULL,
+            loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_AppendBlockOp(st->ctx, cur, cbr);
+        cur = next;
+    }
+    return true;
+}
+
+static bool lower_arith_index_cast(LowerState *st, MLIR_OpHandle op,
+                                   MLIR_BlockHandle parent, size_t pos,
+                                   bool is_unsigned) {
+    if (MLIR_GetOpNumOperands(op) != 1 || MLIR_GetOpNumResults(op) != 1)
+        return false;
+    MLIR_ValueHandle src = MLIR_GetOpOperand(op, 0);
+    MLIR_ValueHandle old_res = MLIR_GetOpResult(op, 0);
+    MLIR_TypeHandle src_ty = MLIR_GetValueType(src);
+    MLIR_TypeHandle dst_ty = MLIR_GetValueType(old_res);
+    int sw = integer_type_width(src_ty);
+    int dw = integer_type_width(dst_ty);
+    if (sw == 0 || dw == 0) return false;
+    if (sw == dw) {
+        MLIR_ReplaceAllUsesOfValue(st->ctx, old_res, src);
+        return true;
+    }
+    MLIR_OpType cast_type;
+    if (dw > sw) {
+        cast_type = (sw < 32 || is_unsigned) ? OP_TYPE_LLVM_ZEXT : OP_TYPE_LLVM_SEXT;
+    } else {
+        cast_type = OP_TYPE_LLVM_TRUNC;
+    }
+    return lower_rename(st, op, parent, pos, cast_type);
 }
 
 // Return values from try_lower_op:
@@ -657,6 +1026,22 @@ static int try_lower_op(LowerState *st, MLIR_OpHandle op,
         }
         return LOWER_NONE;
     }
+    if (name_eq(name, "scf.while")) {
+        if (st->keep_scf) return LOWER_NONE;
+        if (lower_scf_while(st, op, parent, pos)) {
+            MLIR_EraseOp(st->ctx, op);
+            return LOWER_DONE_BLOCK;
+        }
+        return LOWER_NONE;
+    }
+    if (name_eq(name, "scf.index_switch")) {
+        if (st->keep_scf) return LOWER_NONE;
+        if (lower_scf_index_switch(st, op, parent, pos)) {
+            MLIR_EraseOp(st->ctx, op);
+            return LOWER_DONE_BLOCK;
+        }
+        return LOWER_NONE;
+    }
     bool ok = false;
     if (name_eq(name, "func.func"))      ok = lower_func_func(st, op, parent, pos);
     else if (name_eq(name, "func.return") ||
@@ -668,38 +1053,42 @@ static int try_lower_op(LowerState *st, MLIR_OpHandle op,
              name_eq(name, "unrealized_conversion_cast"))
                                          ok = lower_unrealized_cast(st, op, parent, pos);
     else if (name_eq(name, "arith.constant")) ok = lower_arith_constant(st, op, parent, pos);
-    else if (name_eq(name, "arith.addi"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.add"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.subi"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.sub"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.muli"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.mul"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.divsi")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.sdiv"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.divui")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.udiv"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.remsi")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.srem"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.remui")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.urem"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.andi"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.and"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.ori"))   ok = lower_rename(st, op, parent, pos, str_lit("llvm.or"),   OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.xori"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.xor"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.shli"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.shl"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.shrsi")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.ashr"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.shrui")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.lshr"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.addf"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.fadd"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.subf"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.fsub"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.mulf"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.fmul"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.divf"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.fdiv"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.cmpi"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.icmp"), OP_TYPE_LLVM_ICMP);
-    else if (name_eq(name, "arith.cmpf"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.fcmp"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.select"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.select"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.extsi")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.sext"),   OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.extui")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.zext"),   OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.trunci"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.trunc"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.extf"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.fpext"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.truncf"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptrunc"),OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.sitofp"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.sitofp"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.uitofp"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.uitofp"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.fptosi"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptosi"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.fptoui"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptoui"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.bitcast"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.bitcast"),OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "cf.br"))      ok = st->keep_scf ? false : lower_cf_branch(st, op, parent, pos, str_lit("llvm.br"));
-    else if (name_eq(name, "cf.cond_br")) ok = st->keep_scf ? false : lower_cf_branch(st, op, parent, pos, str_lit("llvm.cond_br"));
+    else if (name_eq(name, "arith.index_cast"))
+        ok = st->keep_scf ? false : lower_arith_index_cast(st, op, parent, pos, false);
+    else if (name_eq(name, "arith.index_castui"))
+        ok = st->keep_scf ? false : lower_arith_index_cast(st, op, parent, pos, true);
+    else if (name_eq(name, "arith.addi"))  ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_ADD);
+    else if (name_eq(name, "arith.subi"))  ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_SUB);
+    else if (name_eq(name, "arith.muli"))  ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_MUL);
+    else if (name_eq(name, "arith.divsi")) ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_SDIV);
+    else if (name_eq(name, "arith.divui")) ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_UDIV);
+    else if (name_eq(name, "arith.remsi")) ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_SREM);
+    else if (name_eq(name, "arith.remui")) ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_UREM);
+    else if (name_eq(name, "arith.andi"))  ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_AND);
+    else if (name_eq(name, "arith.ori"))   ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_OR);
+    else if (name_eq(name, "arith.xori"))  ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_XOR);
+    else if (name_eq(name, "arith.shli"))  ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_SHL);
+    else if (name_eq(name, "arith.shrsi")) ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_ASHR);
+    else if (name_eq(name, "arith.shrui")) ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_LSHR);
+    else if (name_eq(name, "arith.addf"))  ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FADD);
+    else if (name_eq(name, "arith.subf"))  ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FSUB);
+    else if (name_eq(name, "arith.mulf"))  ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FMUL);
+    else if (name_eq(name, "arith.divf"))  ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FDIV);
+    else if (name_eq(name, "arith.cmpi"))  ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_ICMP);
+    else if (name_eq(name, "arith.cmpf"))  ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FCMP);
+    else if (name_eq(name, "arith.select"))ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_SELECT);
+    else if (name_eq(name, "arith.extsi")) ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_SEXT);
+    else if (name_eq(name, "arith.extui")) ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_ZEXT);
+    else if (name_eq(name, "arith.trunci"))ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_TRUNC);
+    else if (name_eq(name, "arith.extf"))  ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FPEXT);
+    else if (name_eq(name, "arith.truncf"))ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FPTRUNC);
+    else if (name_eq(name, "arith.sitofp"))ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_SITOFP);
+    else if (name_eq(name, "arith.uitofp"))ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_UITOFP);
+    else if (name_eq(name, "arith.fptosi"))ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FPTOSI);
+    else if (name_eq(name, "arith.fptoui"))ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FPTOUI);
+    else if (name_eq(name, "arith.bitcast"))ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_BITCAST);
+    else if (name_eq(name, "cf.br"))      ok = st->keep_scf ? false : lower_cf_branch(st, op, parent, pos, OP_TYPE_LLVM_BR);
+    else if (name_eq(name, "cf.cond_br")) ok = st->keep_scf ? false : lower_cf_branch(st, op, parent, pos, OP_TYPE_LLVM_COND_BR);
 
     return ok ? LOWER_REPLACED : LOWER_NONE;
 }

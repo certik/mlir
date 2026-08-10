@@ -47,8 +47,8 @@ int app_main(void) {
         MLIR_TypeHandle i64_b = MLIR_CreateTypeInteger(&ctx, 64, false);
         MLIR_TypeHandle idx_a = MLIR_CreateTypeIndex(&ctx);
         MLIR_TypeHandle idx_b = MLIR_CreateTypeIndex(&ctx);
-        MLIR_TypeHandle ptr_a = MLIR_CreateTypeLLVMPointer(&ctx);
-        MLIR_TypeHandle ptr_b = MLIR_CreateTypeLLVMPointer(&ctx);
+        MLIR_TypeHandle ptr_a = MLIR_CreateTypePointerInAddressSpace(&ctx, MLIR_DIALECT_LLVM, 0);
+        MLIR_TypeHandle ptr_b = MLIR_CreateTypePointerInAddressSpace(&ctx, MLIR_DIALECT_LLVM, 0);
         print_string(i32_a == i32_b ? str_lit("intern i32: yes\n") : str_lit("intern i32: no\n"));
         print_string(i64_a == i64_b ? str_lit("intern i64: yes\n") : str_lit("intern i64: no\n"));
         print_string(idx_a == idx_b ? str_lit("intern index: yes\n") : str_lit("intern index: no\n"));
