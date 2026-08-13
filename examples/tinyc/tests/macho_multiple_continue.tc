@@ -1,0 +1,36 @@
+// MRE for the LLVM-CFG -> WasmSSA loop-latch path.
+//
+// The outer continue and the inner continue each target a different loop
+// header. Both headers carry `i`/`j` as block arguments after mem2reg, while
+// the surrounding if regions add nested structured labels. Dropping either
+// branch payload, or branching to the wrong label depth, leaves an induction
+// variable unchanged and turns this finite program into an endless loop.
+
+extern int printf(const char *fmt, ...);
+
+int nested_loop_continue(int n) {
+    int total = 0;
+    int i = 0;
+
+    while (i < n) {
+        i = i + 1;
+        if ((i & 1) != 0) {
+            continue;
+        }
+
+        int j = 0;
+        while (j < n) {
+            j = j + 1;
+            if (j == 2) {
+                continue;
+            }
+            total = total + 1;
+        }
+    }
+    return total;
+}
+
+int main() {
+    printf("%d\n", nested_loop_continue(4));
+    return 0;
+}

@@ -1900,7 +1900,10 @@ static void wrap_ptr_to_ptr(P *p, Type *out) {
 // Returns false if the current tokens don't start a type.
 static bool parse_sig_type(P *p, Type *out) {
     *out = (Type){0};
+    bool saw_const = false;
+    while (cur(p).kind == TC_TK_KW_CONST) { saw_const = true; p->i++; }
     skip_const(p);
+    out->is_const = saw_const;
     // Accept signed/unsigned/short/long/char/_Bool/bool/int modifiers in any
     // order. Any 'long' promotes to TY_I64; otherwise TY_I32. If `char` is
     // among the consumed modifiers and a single trailing '*' follows, the
@@ -2932,6 +2935,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                 g.type = tty;
                 g.is_extern = saw_extern;
                 g.is_static = saw_static;
+                g.is_const = tty.is_const;
                 g.line = cur(&p).line;
                 merge_push_global(&p, prog, g);
                 continue;
@@ -2946,6 +2950,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                     g.name = nm.text;
                     g.is_extern = saw_extern;
                     g.is_static = saw_static;
+                    g.is_const = tty.is_const;
                     g.type = tty;
                     g.line = nm.line;
                     // Optional array suffix `[N]` (or `[const-expr]`).

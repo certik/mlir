@@ -976,6 +976,36 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         buf_cstr(out, ")\n");
         return;
     }
+    if (name_eq(opn, "llvm.intr.wasm.memory.size")) {
+        if (MLIR_GetOpNumResults(op) == 1) {
+            buf_cstr(out, "  ");
+            emit_use(F, MLIR_GetOpResult(op, 0));
+            buf_cstr(out, " = load i32, ptr @__wasm_mem_pages, align 4\n");
+        }
+        return;
+    }
+    if (name_eq(opn, "llvm.intr.wasm.memory.grow")) {
+        if (MLIR_GetOpNumResults(op) != 1) return;
+        char *old = fmt_alloc("%%v%d", F->next_v++);
+        char *newv = fmt_alloc("%%v%d", F->next_v++);
+        char *new64 = fmt_alloc("%%v%d", F->next_v++);
+        char *ok = fmt_alloc("%%v%d", F->next_v++);
+        char *stored = fmt_alloc("%%v%d", F->next_v++);
+        buf_printf(out, "  %s = load i32, ptr @__wasm_mem_pages, align 4\n", old);
+        buf_printf(out, "  %s = add i32 %s, ", newv, old);
+        emit_use(F, MLIR_GetOpOperand(op, 0));
+        buf_putc(out, '\n');
+        buf_printf(out, "  %s = zext i32 %s to i64\n", new64, newv);
+        buf_printf(out, "  %s = icmp ule i64 %s, 65536\n", ok, new64);
+        buf_printf(out, "  %s = select i1 %s, i32 %s, i32 %s\n", stored, ok, newv, old);
+        buf_cstr(out, "  store i32 ");
+        buf_cstr(out, stored);
+        buf_cstr(out, ", ptr @__wasm_mem_pages, align 4\n");
+        buf_cstr(out, "  ");
+        emit_use(F, MLIR_GetOpResult(op, 0));
+        buf_printf(out, " = select i1 %s, i32 %s, i32 -1\n", ok, old);
+        return;
+    }
     // Float math intrinsics: llvm.intr.sqrt / sin / cos / fabs / ...
     if (name_starts_with(opn, "llvm.intr.")) {
         // Generic shape: %r = call T @llvm.NAME.f32/f64(T %x[, T %y, ...])
@@ -1381,6 +1411,39 @@ static void scan_op_for_structs(MLIR_Context *ctx, MLIR_OpHandle op, StructList 
     }
 }
 
+static bool module_has_global(MLIR_BlockHandle mb, const char *gn) {
+    size_t n = MLIR_GetBlockNumOps(mb);
+    for (size_t i = 0; i < n; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
+        if (!name_eq(MLIR_GetOpName(op), "llvm.mlir.global")) continue;
+        MLIR_AttributeHandle syma = find_attr(op, "sym_name");
+        if (syma == MLIR_INVALID_HANDLE) continue;
+        string sym = MLIR_GetAttributeString(syma);
+        if (sym.size == strlen(gn) && memcmp(sym.str, gn, sym.size) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool op_uses_wasm_memory(MLIR_OpHandle op) {
+    string nm = MLIR_GetOpName(op);
+    if (name_eq(nm, "llvm.intr.wasm.memory.size") ||
+        name_eq(nm, "llvm.intr.wasm.memory.grow"))
+        return true;
+    size_t nr = MLIR_GetOpNumRegions(op);
+    for (size_t r = 0; r < nr; r++) {
+        MLIR_RegionHandle reg = MLIR_GetOpRegion(op, r);
+        size_t nb = MLIR_GetRegionNumBlocks(reg);
+        for (size_t b = 0; b < nb; b++) {
+            MLIR_BlockHandle blk = MLIR_GetRegionBlock(reg, b);
+            size_t no = MLIR_GetBlockNumOps(blk);
+            for (size_t i = 0; i < no; i++)
+                if (op_uses_wasm_memory(MLIR_GetBlockOp(blk, i))) return true;
+        }
+    }
+    return false;
+}
+
 // -----------------------------------------------------------------------------
 // Module entry.
 // -----------------------------------------------------------------------------
@@ -1435,6 +1498,15 @@ string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module) {
     }
     if (sl.n) buf_putc(&out, '\n');
     free(sl.e);
+
+    bool need_wasm_pages = false;
+    for (size_t i = 0; i < nops; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
+        if (name_eq(MLIR_GetOpName(op), "llvm.func") && op_uses_wasm_memory(op))
+            need_wasm_pages = true;
+    }
+    if (need_wasm_pages && !module_has_global(mb, "__wasm_mem_pages"))
+        buf_cstr(&out, "@__wasm_mem_pages = global i32 0, align 4\n\n");
 
     // Emit globals first, then functions (order doesn't really matter to llc).
     for (size_t i = 0; i < nops; i++) {

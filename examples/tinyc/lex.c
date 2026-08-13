@@ -277,12 +277,28 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                 // The naive `f += digit * 0.1; scale *= 0.1` form accumulates
                 // ulp-level error per digit and miscompiles literals like
                 // 0.75 to 0x1.8000000000001p-1 (see tests/float_literal_0_75).
+                // When the digit run does not fit in uint64_t (e.g.
+                // 3.14159265358979323846) fall back to double accumulation so
+                // we do not silently wrap the mantissa.
                 uint64_t mantissa = (uint64_t)v;
                 int dec_places = 0;
+                bool wide = (v < 0);
+                double fmant = wide ? (double)v : 0.0;
                 if (has_dot) {
                     j++; // consume '.'
                     while (j < src.size && is_digit(src.str[j])) {
-                        mantissa = mantissa * 10 + (uint64_t)(src.str[j] - '0');
+                        char d = src.str[j];
+                        if (!wide) {
+                            if (mantissa > UINT64_MAX / 10u - 9u) {
+                                wide = true;
+                                fmant = (double)mantissa;
+                            }
+                        }
+                        if (wide) {
+                            fmant = fmant * 10.0 + (double)(d - '0');
+                        } else {
+                            mantissa = mantissa * 10u + (uint64_t)(d - '0');
+                        }
                         dec_places++;
                         j++;
                     }
@@ -301,7 +317,7 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                     }
                 }
                 int net_exp = (exp_sign < 0 ? -exp : exp) - dec_places;
-                double f = (double)mantissa;
+                double f = wide ? fmant : (double)mantissa;
                 if (net_exp > 0) {
                     // Multiply by 10^net_exp using exact integer powers
                     // up to 10^22 (which is exactly representable in f64),

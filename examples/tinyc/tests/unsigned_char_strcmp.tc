@@ -1,0 +1,29 @@
+extern int printf(const char *fmt, ...);
+
+// strcmp-style subtraction through `(const unsigned char *)` must zero-extend
+// byte loads. Sign-extending i8 turns 0xFF into -1 and breaks the comparison.
+
+static int u8_strcmp(const char *s1, const char *s2) {
+    while (*s1 && (*s1 == *s2)) {
+        s1 = s1 + 1;
+        s2 = s2 + 1;
+    }
+    return *(const unsigned char *)s1 - *(const unsigned char *)s2;
+}
+
+static int sign(int x) {
+    if (x < 0) { return -1; }
+    if (x > 0) { return 1; }
+    return 0;
+}
+
+int main(void) {
+    char hi[] = { (char)0xFF, '\0' };
+    char lo[] = { '\0' };
+
+    // Unsigned difference is 255 (hi > lo). Signed i8 widening yields -1.
+    printf("%lld\n", (long long)u8_strcmp(hi, lo));
+    printf("%lld\n", (long long)sign(u8_strcmp(hi, lo)));
+    printf("%lld\n", (long long)sign(u8_strcmp(lo, hi)));
+    return 0;
+}

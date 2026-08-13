@@ -1,0 +1,22 @@
+extern int printf(const char *fmt, ...);
+
+// This declaration resolves to corec/base/mem.c, included by the generated
+// test unity. It exercises the same unsigned-byte subtraction found in E003.
+extern int base_strncmp(const char *s1, const char *s2, unsigned long n);
+
+static int sign(int x) {
+    if (x < 0) { return -1; }
+    if (x > 0) { return 1; }
+    return 0;
+}
+
+int main(void) {
+    char hi[] = { (char)0xFF, 0 };
+    char lo[] = { 0 };
+
+    // The correct unsigned-byte difference is 255, not -1.
+    printf("%lld\n", (long long)base_strncmp(hi, lo, 1));
+    printf("%lld\n", (long long)sign(base_strncmp(hi, lo, 1)));
+    printf("%lld\n", (long long)sign(base_strncmp(lo, hi, 1)));
+    return 0;
+}

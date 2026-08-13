@@ -1022,7 +1022,22 @@ static bool merge_symbols(Obj *objs, uint32_t n_objs, GlobalSymTab *gst,
         Obj *o = &objs[oi];
         for (uint32_t si = 0; si < o->n_syms; si++) {
             ObjSymbol *s = &o->syms[si];
-            if (s->flags & SYMF_BINDING_LOCAL) continue;
+            if (s->flags & SYMF_BINDING_LOCAL) {
+                // The native backend defines linker-synthesised addresses as
+                // hidden local data symbols. Route those through the global
+                // table so layout can replace their placeholder data address.
+                if (s->kind == SYM_DATA &&
+                    is_synthetic_data_symbol(s->name)) {
+                    int gi = gst_find(gst, s->name);
+                    if (gi < 0) {
+                        gi = gst_add(gst, s->name, s->kind);
+                        gst->e[gi].def_obj = (int32_t)oi;
+                        gst->e[gi].def_sym = si;
+                    }
+                    s->global_sym = gi;
+                }
+                continue;
+            }
             if (s->flags & SYMF_UNDEFINED) continue;
             if (!s->name) continue; // section symbols
             int gi = gst_find(gst, s->name);
@@ -1254,8 +1269,6 @@ static uint32_t reloc_patch_width(uint8_t t) {
 // Function symbols referenced via a TABLE_INDEX reloc must resolve to the
 // indirect-function-table slot, not the final function index. The slot
 // map is keyed by final func idx and is built once during link layout.
-// Returns the original value when the symbol/reloc combination doesn't
-// require remapping, or when the function hasn't been assigned a slot.
 static uint32_t remap_func_to_table_slot(uint32_t value,
                                          uint8_t reloc_type,
                                          SymKind sym_kind,
@@ -1267,6 +1280,21 @@ static uint32_t remap_func_to_table_slot(uint32_t value,
         && reloc_type != R_WASM_TABLE_INDEX_REL_SLEB) return value;
     if (value < slot_map_n && slot_map[value] != 0) return slot_map[value];
     return value;
+}
+
+// Assign a table slot for final function index `fin` if not already present.
+static void assign_table_slot(uint32_t fin,
+                              uint32_t **slot_map,
+                              uint32_t *slot_map_n,
+                              uint32_t *slots_used) {
+    if (fin >= *slot_map_n) {
+        uint32_t new_n = fin + 1;
+        *slot_map = (uint32_t *)realloc(*slot_map, new_n * sizeof(uint32_t));
+        memset(*slot_map + *slot_map_n, 0,
+               (new_n - *slot_map_n) * sizeof(uint32_t));
+        *slot_map_n = new_n;
+    }
+    if ((*slot_map)[fin] == 0) (*slot_map)[fin] = (*slots_used)++;
 }
 
 // Resolve a symbol reference to its final value.
@@ -1542,10 +1570,11 @@ bool MLIR_WasmLink(const MLIR_WasmLinkInput *inputs, size_t n_inputs,
     }
 
     // ---- Assign data segment base addresses ----------------------------
-    // Layout: stack [0, STACK_SIZE); data starts at GLOBAL_BASE_OFFSET
-    // past the stack — wasm-ld uses --stack-first so the stack lives
-    // below data. Match that.
-    uint32_t cur_addr = STACK_SIZE + GLOBAL_BASE_OFFSET;
+    // Layout matches wasm-ld / clang (see corec/platform/platform.h):
+    //   [reserved] [data] [stack] [heap]
+    // Data starts at GLOBAL_BASE_OFFSET; the stack sits above the data
+    // section; __heap_base marks the start of the growable heap.
+    uint32_t cur_addr = GLOBAL_BASE_OFFSET;
     // Round up to 16-byte alignment for each segment, since some
     // platforms expect at least 16B aligned heap blocks.
     for (size_t oi = 0; oi < n_inputs; oi++) {
@@ -1569,7 +1598,8 @@ bool MLIR_WasmLink(const MLIR_WasmLinkInput *inputs, size_t n_inputs,
         }
     }
     uint32_t data_end = cur_addr;
-    uint32_t heap_base = (data_end + 15u) & ~15u;
+    uint32_t stack_top = ((data_end + 15u) & ~15u) + STACK_SIZE;
+    uint32_t heap_base = (stack_top + 15u) & ~15u;
     uint32_t total_pages = ((heap_base + PAGE_SIZE - 1u) / PAGE_SIZE) + 1u;
     if (total_pages < INITIAL_PAGES) total_pages = INITIAL_PAGES;
 
@@ -1602,11 +1632,44 @@ bool MLIR_WasmLink(const MLIR_WasmLinkInput *inputs, size_t n_inputs,
             for (uint32_t j = 0; j < es->n_funcs; j++) {
                 uint32_t local = es->func_ids[j];
                 if (local >= o->n_funcs) continue;
-                uint32_t fin = o->funcs[local].final_idx;
-                if (fin < table_slot_map_n && table_slot_map[fin] == 0) {
-                    table_slot_map[fin] = table_slots_used++;
-                }
+                assign_table_slot(o->funcs[local].final_idx,
+                                  &table_slot_map, &table_slot_map_n,
+                                  &table_slots_used);
             }
+        }
+    }
+    // Native codegen emits R_WASM_TABLE_INDEX_* relocs (via wasmssa FUNC_ADDR)
+    // for every function address taken for indirect calls. Those targets are
+    // not always listed in the object's element segment, so wasm-ld assigns
+    // table slots from reloc references as well — omitting that step leaves
+    // call_indirect using a final function index as a table index.
+    for (size_t oi = 0; oi < n_inputs; oi++) {
+        Obj *o = &objs[oi];
+        for (uint32_t ri = 0; ri < o->n_code_relocs; ri++) {
+            ObjReloc *r = &o->code_relocs[ri];
+            if (r->type != R_WASM_TABLE_INDEX_SLEB
+                && r->type != R_WASM_TABLE_INDEX_I32
+                && r->type != R_WASM_TABLE_INDEX_REL_SLEB) continue;
+            if (r->sym_idx >= o->n_syms) continue;
+            ObjSymbol *s = &o->syms[r->sym_idx];
+            if (s->kind != SYM_FUNCTION) continue;
+            uint32_t fin = 0;
+            if (!resolve_sym_value(o, s, &gst, &fin)) continue;
+            assign_table_slot(fin, &table_slot_map, &table_slot_map_n,
+                              &table_slots_used);
+        }
+        for (uint32_t ri = 0; ri < o->n_data_relocs; ri++) {
+            ObjReloc *r = &o->data_relocs[ri];
+            if (r->type != R_WASM_TABLE_INDEX_SLEB
+                && r->type != R_WASM_TABLE_INDEX_I32
+                && r->type != R_WASM_TABLE_INDEX_REL_SLEB) continue;
+            if (r->sym_idx >= o->n_syms) continue;
+            ObjSymbol *s = &o->syms[r->sym_idx];
+            if (s->kind != SYM_FUNCTION) continue;
+            uint32_t fin = 0;
+            if (!resolve_sym_value(o, s, &gst, &fin)) continue;
+            assign_table_slot(fin, &table_slot_map, &table_slot_map_n,
+                              &table_slots_used);
         }
     }
     if (table_slots_used > 1) need_indirect_table = true;
@@ -1733,9 +1796,9 @@ bool MLIR_WasmLink(const MLIR_WasmLinkInput *inputs, size_t n_inputs,
         for (uint32_t i = 0; i < o->n_globals; i++) if (!o->globals[i].is_import) n_globals_total++;
     }
     leb_u(&g_pl, n_globals_total);
-    // __stack_pointer = i32 mut, init = i32.const STACK_SIZE
+    // __stack_pointer = i32 mut, init = top of stack (above data section)
     buf_putc(&g_pl, 0x7f); buf_putc(&g_pl, 0x01);
-    buf_putc(&g_pl, 0x41); leb_s(&g_pl, (int32_t)STACK_SIZE); buf_putc(&g_pl, 0x0b);
+    buf_putc(&g_pl, 0x41); leb_s(&g_pl, (int32_t)stack_top); buf_putc(&g_pl, 0x0b);
     for (size_t oi = 0; oi < n_inputs; oi++) {
         Obj *o = &objs[oi];
         for (uint32_t i = 0; i < o->n_globals; i++) {
@@ -2007,4 +2070,3 @@ done:
     free(objs);
     return ok;
 }
-

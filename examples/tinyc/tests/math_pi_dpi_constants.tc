@@ -1,0 +1,20 @@
+extern int printf(const char *fmt, ...);
+
+// static `const double PI_D` / `DPI_D` from corec/base/math.c
+// were emitted as ~5.6e-03 / ~1.1e-02 on the llvm path, breaking
+// `reduce_to_quarter` and the fast trig helpers. Scale to milli-units so
+// the check is deterministic without relying on float printf formatting.
+
+static const double PI_D  = 3.14159265358979323846;
+static const double DPI_D = 6.28318530717958647692;
+
+int main(void) {
+    long long pi_milli  = (long long)(PI_D * 1000.0 + 0.5);
+    long long dpi_milli = (long long)(DPI_D * 1000.0 + 0.5);
+    long long ratio_milli = (long long)((DPI_D / PI_D) * 1000.0 + 0.5);
+
+    printf("%lld\n", pi_milli);
+    printf("%lld\n", dpi_milli);
+    printf("%lld\n", ratio_milli);
+    return 0;
+}

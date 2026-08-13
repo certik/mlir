@@ -1,0 +1,28 @@
+// Tests that a while-loop with continue and break lowers correctly 
+// through the M7 latch block in llvm->wasm lift 
+// (not a direct branch to the loop header).
+
+extern int printf(const char *fmt, ...);
+
+int classify_ops(const unsigned char *ops, int n) {
+    int acc = 0;
+    int i = 0;
+    while (i < n) {
+        unsigned char op = ops[i++];
+        if (op == 0) {
+            continue;
+        }
+        if (op == 0xFF) {
+            break;
+        }
+        acc = acc + (int)op;
+    }
+    return acc;
+}
+
+int main() {
+    unsigned char ops[] = { 1, 2, 0, 0, 3, 4, 0xFF, 5 };
+    int n = classify_ops(ops, 8);
+    printf("%d\n", n);
+    return 0;
+}

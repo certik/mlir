@@ -7,6 +7,7 @@ that one wrapper with tinyC.
 """
 
 import os
+import re
 import subprocess
 import sys
 import tomllib
@@ -384,6 +385,9 @@ def main():
         return 2
     cfg = tomllib.loads(TESTS_TOML.read_text())
     tests = cfg.get("test", [])
+    test_filter = {name for name in os.environ.get("TINYC_TEST_FILTER", "").split(",") if name}
+    if test_filter:
+        tests = [t for t in tests if t["name"] in test_filter]
     if not tests:
         print("error: no tests found in tests.toml", file=sys.stderr)
         return 2
@@ -539,6 +543,52 @@ def main():
         sources = list(t.get("sources", [f"{name}.tc"]))
         srcs = [HERE / "tests" / s for s in sources]
         unity_src = write_unity_source(name, srcs) if use_unity_source() else None
+
+        # Compiler-probe regressions inspect a native pipeline stage directly.
+        # They validate generated WasmSSA or the WasmSSA -> LLVM -> AArch64
+        # conversion rather than executing a linked module.
+        native_wasm_emit = t.get("wasm_native_emit")
+        if native_wasm_emit is not None:
+            if TARGET != "wasm" or LOWERING != "native":
+                print(f"SKIP {name} (wasm_native_emit)")
+                skipped += 1
+                continue
+            probe_src = srcs[0] if t.get("wasm_native_direct_source") else unity_src
+            probe_out = HERE / "tests" / f"{name}.{native_wasm_emit}.probe"
+            r = run([str(TINYC), f"--emit={native_wasm_emit}", *LOWERING_FLAG,
+                     *unity_include_flags(), "-o", str(probe_out), str(probe_src)])
+            if r.returncode != 0:
+                print(f"FAIL {name}: tinyc --emit={native_wasm_emit} returned "
+                      f"{r.returncode}\nstderr:\n{r.stderr}")
+                failures += 1
+                continue
+            if native_wasm_emit == "wasmssa":
+                ir = probe_out.read_bytes().decode("latin1")
+                probe_failed = False
+                for needle in t.get("wasm_native_emit_contains", []):
+                    if needle not in ir:
+                        print(f"FAIL {name}: WasmSSA is missing {needle!r}")
+                        failures += 1
+                        probe_failed = True
+                        break
+                if not probe_failed:
+                    for pattern in t.get("wasm_native_emit_regex", []):
+                        if re.search(pattern, ir) is None:
+                            print(f"FAIL {name}: WasmSSA does not match {pattern!r}")
+                            failures += 1
+                            probe_failed = True
+                            break
+                if not probe_failed:
+                    for needle in t.get("wasm_native_emit_not_contains", []):
+                        if needle in ir:
+                            print(f"FAIL {name}: WasmSSA unexpectedly contains {needle!r}")
+                            failures += 1
+                            probe_failed = True
+                            break
+                if probe_failed:
+                    continue
+            print(f"PASS {name}")
+            continue
 
         if TARGET == "wasm":
             obj  = HERE / "tests" / f"{name}.wasm.o"

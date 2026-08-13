@@ -842,7 +842,8 @@ static bool simple_binop_optype(string on, MLIR_OpType *out) {
 #define A64_FAIL(...) do { fprintf(stderr, __VA_ARGS__); return MLIR_INVALID_HANDLE; } while (0)
 
 // ---------------------------------------------------------------------------
-// Lowering context. The selector walks the structured `llvm`+`scf` body and
+// Lowering context. The selector walks a flat `llvm` CFG (`llvm.br` /
+// `llvm.cond_br`, produced by MLIR_LowerToLLVMDialect) and emits a flat CFG
 // emits a flat CFG of `aarch64` blocks into `out_region`. `cur` is the block
 // currently being appended to; control-flow ops create new blocks and move
 // `cur`. `ok` is cleared (with a stderr diagnostic) on the first failure.
@@ -1284,15 +1285,6 @@ static void emit_edge_copies(LowerCtx *L, MLIR_OpHandle term, size_t s) {
     resolve_parallel(L, src, ds, done, n, /*sb=*/31);
 }
 
-// Store an scf.yield's operands into the enclosing op's result slots.
-static void store_yield(LowerCtx *L, MLIR_OpHandle yield, MLIR_OpHandle owner) {
-    size_t n = MLIR_GetOpNumOperands(yield);
-    for (size_t i = 0; i < n; i++) {
-        copy_slot(L, MLIR_GetOpOperand(yield, i), MLIR_GetOpResult(owner, i));
-        if (!L->ok) return;
-    }
-}
-
 static void lower_op(LowerCtx *L, MLIR_OpHandle op);
 static bool shiftfuse_decode(MLIR_Context *ctx, MLIR_OpHandle addop, SlotMap *sfm,
                              MLIR_ValueHandle *xv, MLIR_ValueHandle *av,
@@ -1308,25 +1300,6 @@ static MLIR_OpHandle lower_block_ops(LowerCtx *L, MLIR_BlockHandle block) {
         if (!L->ok) return MLIR_INVALID_HANDLE;
     }
     return MLIR_GetBlockOp(block, n - 1);
-}
-
-// Parse a `cases` attribute that prints as "array<i64: 1, 2, 3>".
-static bool parse_cases(string cs, int64_t *out, size_t n) {
-    size_t p = 0;
-    while (p < cs.size && cs.str[p] != ':') p++;
-    if (p < cs.size) p++;
-    size_t got = 0;
-    while (p < cs.size && got < n) {
-        while (p < cs.size && (cs.str[p] == ' ' || cs.str[p] == ',')) p++;
-        if (p >= cs.size || cs.str[p] == '>') break;
-        int64_t sign = 1;
-        if (cs.str[p] == '-') { sign = -1; p++; }
-        int64_t v = 0;
-        while (p < cs.size && cs.str[p] >= '0' && cs.str[p] <= '9')
-            v = v * 10 + (cs.str[p++] - '0');
-        out[got++] = sign * v;
-    }
-    return got == n;
 }
 
 // Parse "array<i32: v0, v1, ...>" into `out` (capacity `cap`); returns count.
@@ -1347,133 +1320,45 @@ static size_t parse_i32_array(string cs, int32_t *out, size_t cap) {
     return got;
 }
 
-static void lower_scf_if(LowerCtx *L, MLIR_OpHandle op) {
-    bool he = MLIR_GetOpNumRegions(op) >= 2 &&
-              MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(op, 1)) > 0;
-    if (!mat_into(L, MLIR_GetOpOperand(op, 0), 9))
-        LFAIL("llvm->aarch64: undefined scf.if condition\n");
-
-    MLIR_BlockHandle then_blk = new_block(L);
-    MLIR_BlockHandle else_blk = he ? new_block(L) : MLIR_INVALID_HANDLE;
-    MLIR_BlockHandle end_blk  = new_block(L);
-
-    emit_cbnz(L->ctx, L->cur, 9, false, then_blk);
-    emit_b(L->ctx, L->cur, he ? else_blk : end_blk);
-
-    L->cur = then_blk;
-    MLIR_OpHandle yt = lower_block_ops(L, MLIR_GetRegionBlock(MLIR_GetOpRegion(op, 0), 0));
-    if (!L->ok) return;
-    store_yield(L, yt, op);
-    if (!L->ok) return;
-    emit_b(L->ctx, L->cur, end_blk);
-
-    if (he) {
-        L->cur = else_blk;
-        MLIR_OpHandle ye = lower_block_ops(L, MLIR_GetRegionBlock(MLIR_GetOpRegion(op, 1), 0));
-        if (!L->ok) return;
-        store_yield(L, ye, op);
-        if (!L->ok) return;
-        emit_b(L->ctx, L->cur, end_blk);
+// Load / store the wasmssa->llvm `__wasm_mem_pages` counter (when present).
+static bool emit_load_wasm_mem_pages(LowerCtx *L, MLIR_BlockHandle blk, uint8_t rd) {
+    uint32_t pages_off = 0;
+    if (!L->gm || !gmap_get_cstr(L->gm, "__wasm_mem_pages", &pages_off, NULL))
+        return false;
+    MLIR_Context *ctx = L->ctx;
+    uint32_t anchor = gfuse_anchor(L->gm);
+    if (pages_off >= anchor) {
+        uint32_t rel = pages_off - anchor;
+        if ((rel & 3u) == 0 && rel / 4u <= 4095u) {
+            emit_ldst_x(ctx, blk, OP_TYPE_AARCH64_LDR_W, rd, 27, rel);
+            return true;
+        }
     }
-    L->cur = end_blk;
+    string tgt = str_from_cstr_view("linmem_template");
+    emit_adrp_data(ctx, blk, rd, tgt, pages_off);
+    emit_add_data_lo(ctx, blk, rd, rd, tgt, pages_off);
+    emit_ldst_x(ctx, blk, OP_TYPE_AARCH64_LDR_W, rd, rd, 0);
+    return true;
 }
-
-static void lower_scf_while(LowerCtx *L, MLIR_OpHandle op) {
-    MLIR_BlockHandle before_src = MLIR_GetRegionBlock(MLIR_GetOpRegion(op, 0), 0);
-    MLIR_BlockHandle after_src  = MLIR_GetRegionBlock(MLIR_GetOpRegion(op, 1), 0);
-    size_t nb = MLIR_GetBlockNumArgs(before_src);
-
-    // init operands -> before-region block-arg slots.
-    for (size_t i = 0; i < nb; i++) {
-        copy_slot(L, MLIR_GetOpOperand(op, i), MLIR_GetBlockArg(before_src, i));
-        if (!L->ok) return;
+static bool emit_store_wasm_mem_pages(LowerCtx *L, MLIR_BlockHandle blk, uint8_t val_rd) {
+    uint32_t pages_off = 0;
+    if (!L->gm || !gmap_get_cstr(L->gm, "__wasm_mem_pages", &pages_off, NULL))
+        return false;
+    MLIR_Context *ctx = L->ctx;
+    uint32_t anchor = gfuse_anchor(L->gm);
+    if (pages_off >= anchor) {
+        uint32_t rel = pages_off - anchor;
+        if ((rel & 3u) == 0 && rel / 4u <= 4095u) {
+            emit_ldst_x(ctx, blk, OP_TYPE_AARCH64_STR_W, val_rd, 27, rel);
+            return true;
+        }
     }
-    MLIR_BlockHandle before_blk = new_block(L);
-    emit_b(L->ctx, L->cur, before_blk);
-
-    L->cur = before_blk;
-    MLIR_OpHandle cterm = lower_block_ops(L, before_src);   // scf.condition
-    if (!L->ok) return;
-    size_t nf = MLIR_GetOpNumOperands(cterm) - 1;           // forwarded values
-    if (!mat_into(L, MLIR_GetOpOperand(cterm, 0), 9))
-        LFAIL("llvm->aarch64: undefined scf.condition value\n");
-
-    MLIR_BlockHandle exit_store = new_block(L);
-    MLIR_BlockHandle cont_blk   = new_block(L);
-    MLIR_BlockHandle exit_blk   = new_block(L);
-    emit_cbnz(L->ctx, L->cur, 9, false, cont_blk);          // cond true -> after
-    emit_b(L->ctx, L->cur, exit_store);                     // cond false -> exit
-
-    // exit: forwarded values become the scf.while results.
-    L->cur = exit_store;
-    for (size_t i = 0; i < nf; i++) {
-        copy_slot(L, MLIR_GetOpOperand(cterm, i + 1), MLIR_GetOpResult(op, i));
-        if (!L->ok) return;
-    }
-    emit_b(L->ctx, L->cur, exit_blk);
-
-    // continue: forwarded values become the after-region block args.
-    L->cur = cont_blk;
-    for (size_t i = 0; i < nf; i++) {
-        copy_slot(L, MLIR_GetOpOperand(cterm, i + 1), MLIR_GetBlockArg(after_src, i));
-        if (!L->ok) return;
-    }
-    MLIR_OpHandle yterm = lower_block_ops(L, after_src);    // scf.yield
-    if (!L->ok) return;
-    for (size_t i = 0; i < nb; i++) {                       // yield -> before args
-        copy_slot(L, MLIR_GetOpOperand(yterm, i), MLIR_GetBlockArg(before_src, i));
-        if (!L->ok) return;
-    }
-    emit_b(L->ctx, L->cur, before_blk);
-
-    L->cur = exit_blk;
-}
-
-static void lower_scf_index_switch(LowerCtx *L, MLIR_OpHandle op) {
-    size_t n_regions = MLIR_GetOpNumRegions(op);
-    if (n_regions < 1) LFAIL("llvm->aarch64: malformed scf.index_switch\n");
-    size_t n_cases = n_regions - 1;
-    int64_t case_vals[256];
-    if (n_cases > 256) LFAIL("llvm->aarch64: scf.index_switch too large\n");
-    if (n_cases > 0) {
-        MLIR_AttributeHandle ca = MLIR_GetOpAttributeByName(op, "cases");
-        if (ca == MLIR_INVALID_HANDLE ||
-            !parse_cases(MLIR_GetAttributeAsString(L->ctx, ca), case_vals, n_cases))
-            LFAIL("llvm->aarch64: cannot parse scf.index_switch cases\n");
-    }
-    if (!mat_into(L, MLIR_GetOpOperand(op, 0), 9))
-        LFAIL("llvm->aarch64: undefined scf.index_switch selector\n");
-
-    MLIR_BlockHandle end_blk = new_block(L);
-    MLIR_BlockHandle def_blk = new_block(L);
-    MLIR_BlockHandle case_blk[256];
-    for (size_t i = 0; i < n_cases; i++) case_blk[i] = new_block(L);
-
-    // Compare chain: cmp selector, #case; b.eq case_blk[i]. Selector stays
-    // in x9 throughout this (single) block.
-    for (size_t i = 0; i < n_cases; i++) {
-        emit_load_imm(L->ctx, L->cur, 10, (uint64_t)case_vals[i], false);
-        emit_cmp_reg(L->ctx, L->cur, 9, 10, false);
-        emit_bcond(L->ctx, L->cur, /*EQ*/0, case_blk[i]);
-    }
-    emit_b(L->ctx, L->cur, def_blk);
-
-    L->cur = def_blk;
-    MLIR_OpHandle dt = lower_block_ops(L, MLIR_GetRegionBlock(MLIR_GetOpRegion(op, 0), 0));
-    if (!L->ok) return;
-    store_yield(L, dt, op);
-    if (!L->ok) return;
-    emit_b(L->ctx, L->cur, end_blk);
-
-    for (size_t i = 0; i < n_cases; i++) {
-        L->cur = case_blk[i];
-        MLIR_OpHandle ct = lower_block_ops(L, MLIR_GetRegionBlock(MLIR_GetOpRegion(op, i + 1), 0));
-        if (!L->ok) return;
-        store_yield(L, ct, op);
-        if (!L->ok) return;
-        emit_b(L->ctx, L->cur, end_blk);
-    }
-    L->cur = end_blk;
+    uint8_t base = 10;
+    string tgt = str_from_cstr_view("linmem_template");
+    emit_adrp_data(ctx, blk, base, tgt, pages_off);
+    emit_add_data_lo(ctx, blk, base, base, tgt, pages_off);
+    emit_ldst_x(ctx, blk, OP_TYPE_AARCH64_STR_W, val_rd, base, 0);
+    return true;
 }
 
 // Lower a single non-terminator op into the current block / CFG.
@@ -2038,16 +1923,6 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         }
         fin_val(L, res, rd);
 
-    } else if (name_eq(on, "arith.index_cast") ||
-               name_eq(on, "arith.index_castui")) {
-        // index <-> integer: a plain copy in our 64-bit slot model.
-        MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
-        uint8_t r0 = use_val(L, MLIR_GetOpOperand(op, 0), 9);
-        if (!L->ok) return;
-        uint8_t rd = def_val(L, res, 9);
-        emit_mov_reg(ctx, blk, rd, r0);
-        fin_val(L, res, rd);
-
     } else if (name_eq(on, "llvm.trunc") || name_eq(on, "llvm.zext")) {
         // Both keep the low N bits (our values are stored zero-extended); a
         // mask to the destination (trunc) / source (zext) width suffices.
@@ -2237,12 +2112,45 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         emit_fmov_gp_v(ctx, blk, false, true, rd, 0);
         fin_val(L, res, rd);
 
-    } else if (name_eq(on, "scf.if")) {
-        lower_scf_if(L, op);
-    } else if (name_eq(on, "scf.while")) {
-        lower_scf_while(L, op);
-    } else if (name_eq(on, "scf.index_switch")) {
-        lower_scf_index_switch(L, op);
+    } else if (name_eq(on, "llvm.intr.wasm.memory.size")) {
+        // `__builtin_wasm_memory_size(0)` from tinyc. When the module
+        // carries a `__wasm_mem_pages` scalar (wasmssa->llvm path), read
+        // it via the x27 globals-cluster pin; otherwise the current memory
+        // size is 0 (direct-source probes with no runtime setup).
+        MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
+        uint8_t rd = def_val(L, res, 9);
+        if (emit_load_wasm_mem_pages(L, blk, rd)) {
+            fin_val(L, res, rd);
+            return;
+        }
+        emit_load_imm(ctx, blk, rd, 0, false);
+        fin_val(L, res, rd);
+
+    } else if (name_eq(on, "llvm.intr.wasm.memory.grow")) {
+        // `__builtin_wasm_memory_grow(0, delta)`: bump `__wasm_mem_pages` by
+        // `delta`, capped at 65536 pages; return the old count or -1 on failure.
+        // Mirrors mlir_wasmssa_to_llvm.c OP_TYPE_WASMSSA_MEMORY_GROW.
+        MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
+        uint8_t rd = def_val(L, res, 9);
+        if (!emit_load_wasm_mem_pages(L, blk, 9)) {
+            // Direct-source probe: grow(0,0) returns 0 pages.
+            emit_load_imm(ctx, blk, rd, 0, false);
+            fin_val(L, res, rd);
+            return;
+        }
+        uint8_t delta = use_val(L, MLIR_GetOpOperand(op, 0), 10);
+        if (!L->ok) return;
+        emit_3reg(ctx, blk, OP_TYPE_AARCH64_ADD_REG, 11, 9, 10, false); // w11 = old+delta
+        emit_load_imm(ctx, blk, 12, 65536, false);                     // w12 = cap
+        emit_cmp_reg(ctx, blk, 11, 12, false);                         // ule via LS
+        emit_csel(ctx, blk, 13, 11, 9, 9, false);                      // stored = ok? new : old
+        if (!emit_store_wasm_mem_pages(L, blk, 13)) {
+            L->ok = false;
+            return;
+        }
+        emit_load_imm(ctx, blk, 14, 0xffffffffu, false);               // w14 = -1
+        emit_csel(ctx, blk, rd, 9, 14, 9, false);                      // old or -1
+        fin_val(L, res, rd);
 
     } else {
         LFAIL("llvm->aarch64: unsupported op '%.*s' in '%.*s'\n",
@@ -2251,7 +2159,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
 }
 
 // Recursively assign an 8-byte frame slot to every block arg and op result
-// reachable in `block` (including nested scf regions).
+// reachable in `block` (including nested regions, if any).
 static void assign_slots_block(MLIR_Context *ctx, SlotMap *sm,
                                MLIR_BlockHandle block, int32_t *nslots) {
     size_t na = MLIR_GetBlockNumArgs(block);
@@ -2503,8 +2411,8 @@ static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
 
 // ---------------------------------------------------------------------------
 // Multi-block CFG lowering. Used for functions whose body is an explicit
-// `cf.br` / `cf.cond_br` control-flow graph (e.g. the `--from-wasm` lifter
-// output) rather than single-block structured `scf`. The WASM-sourced CFG
+// `llvm.br` / `llvm.cond_br` control-flow graph (e.g. the `--from-wasm` lifter
+// output or post-MLIR_LowerToLLVMDialect native input). The WASM-sourced CFG
 // has an empty operand stack at every block boundary (all cross-block state
 // flows through `llvm.alloca` locals), so branch ops carry NO block-arg
 // operands — there is no phi / edge-copy to resolve. Each source block maps
@@ -2583,7 +2491,6 @@ static void emit_callee_saves(MLIR_Context *ctx, MLIR_BlockHandle blk,
 bool cast_src(MLIR_OpHandle op, MLIR_ValueHandle *src) {
     string nm = MLIR_GetOpName(op);
     if (name_eq(nm, "llvm.inttoptr") || name_eq(nm, "llvm.ptrtoint") ||
-        name_eq(nm, "arith.index_cast") || name_eq(nm, "arith.index_castui") ||
         name_eq(nm, "llvm.trunc") || name_eq(nm, "llvm.zext") ||
         name_eq(nm, "llvm.sext") || name_eq(nm, "llvm.bitcast")) {
         if (MLIR_GetOpNumOperands(op) != 1) return false;
@@ -2972,7 +2879,7 @@ static bool operand_is_const_val(LowerCtx *L, MLIR_ValueHandle v, int64_t want) 
     return L->cm && cm_get(L->cm, v, &cv, &c64) && cv == want;
 }
 
-// Branch-condition fusion plan for a cf.cond_br terminator. tinyC lowers a
+// Branch-condition fusion plan for an llvm.cond_br terminator. tinyC lowers a
 // comparison condition as `icmp <pred>` -> `select(.,1,0)` -> `icmp ne(.,0)`
 // -> cond_br, ~10 instructions where `cmp; b.<cond>` suffices. We walk the
 // condition backward through the redundant boolean ops (each used exactly once
@@ -3444,7 +3351,7 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
         // is lowered cmp-only).
         FusePlan plan = { false, MLIR_INVALID_HANDLE, 0 };
         MLIR_OpHandle term0 = MLIR_GetBlockOp(sb, no - 1);
-        if (do_fuse && name_eq(MLIR_GetOpName(term0), "cf.cond_br") &&
+        if (do_fuse && name_eq(MLIR_GetOpName(term0), "llvm.cond_br") &&
             MLIR_GetOpNumOperands(term0) >= 1) {
             plan = analyze_cond_fusion(&L, term0, sb, &uc, &skip);
         }
@@ -3477,15 +3384,15 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
             emit_callee_saves(ctx, L.cur, saved_mask, save_base, true);
             emit_epilogue(ctx, L.cur, frame_size);
             emit_ret(ctx, L.cur);
-        } else if (name_eq(tn, "cf.br")) {
+        } else if (name_eq(tn, "llvm.br")) {
             emit_edge_copies(&L, term, 0);
             if (!L.ok) { free(src_blks); free(out_blks); return MLIR_INVALID_HANDLE; }
             MLIR_BlockHandle d = map_block(src_blks, out_blks, n_blocks,
                                            MLIR_GetOpSuccessor(term, 0));
             emit_b(ctx, L.cur, d);
-        } else if (name_eq(tn, "cf.cond_br")) {
+        } else if (name_eq(tn, "llvm.cond_br")) {
             if (MLIR_GetOpNumOperands(term) < 1) {
-                fprintf(stderr, "llvm->aarch64: cf.cond_br missing condition "
+                fprintf(stderr, "llvm->aarch64: llvm.cond_br missing condition "
                         "in '%.*s'\n", (int)sym.size, sym.str);
                 free(src_blks); free(out_blks);
                 return MLIR_INVALID_HANDLE;
@@ -3569,10 +3476,10 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
         MLIR_INVALID_HANDLE, (string){0}, -1);
 }
 
-// line integer code plus structured control flow (scf.if / scf.while /
-// scf.index_switch). Uses the trivial spill-everything allocator: every SSA
-// value (incl. block args / scf results) lives in a frame slot, so phi /
-// block-arg resolution is a slot-to-slot copy at each edge.
+// line integer code in a single-block function body. Uses the trivial
+// spill-everything allocator: every SSA value lives in a frame slot.
+// Functions with control flow are handled by select_func_cfg (flat
+// llvm.br / llvm.cond_br CFG produced by MLIR_LowerToLLVMDialect).
 // ---------------------------------------------------------------------------
 static MLIR_OpHandle select_func(MLIR_Context *ctx, MLIR_OpHandle fn,
                                  string sym, GlobalMap *gm) {
@@ -3581,7 +3488,7 @@ static MLIR_OpHandle select_func(MLIR_Context *ctx, MLIR_OpHandle fn,
         return select_func_cfg(ctx, fn, sym, gm);
     if (MLIR_GetRegionNumBlocks(src_region) != 1) {
         A64_FAIL("llvm->aarch64: function '%.*s' has a non-structured CFG "
-                 "(expected a single entry block with scf control flow)\n",
+                 "(expected a single entry block of straight-line llvm ops)\n",
                  (int)sym.size, sym.str);
     }
     MLIR_BlockHandle src_blk = MLIR_GetRegionBlock(src_region, 0);

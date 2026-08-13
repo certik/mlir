@@ -80,6 +80,49 @@ static void buf_patch_le64(Buf *b, size_t pos, uint64_t v) {
     for (int k = 0; k < 8; k++) b->data[pos + (size_t)k] = (uint8_t)(v >> (8 * k));
 }
 
+// Growable wasm local-group table: (count, valtype) pairs from each
+// function body's locals section. Capacity rises in multiples of
+// MACHO_LOCAL_GROUPS_CHUNK whenever a function needs more slots.
+#define MACHO_LOCAL_GROUPS_CHUNK 2048u
+
+typedef struct {
+    uint32_t *pairs;  // [count, valtype] × cap_slots
+    uint32_t  cap;    // reserved (count, valtype) pairs
+} MachoLocalGroups;
+
+static uint32_t macho_local_groups_round_cap(uint32_t need) {
+    uint32_t cap = MACHO_LOCAL_GROUPS_CHUNK;
+    while (cap < need) cap += MACHO_LOCAL_GROUPS_CHUNK;
+    return cap;
+}
+
+static bool macho_local_groups_init(MachoLocalGroups *lg, uint32_t need) {
+    memset(lg, 0, sizeof(*lg));
+    lg->cap = macho_local_groups_round_cap(need);
+    lg->pairs = (uint32_t *)malloc(lg->cap * 2 * sizeof(uint32_t));
+    return lg->pairs != NULL;
+}
+
+static void macho_local_groups_free(MachoLocalGroups *lg) {
+    free(lg->pairs);
+    lg->pairs = NULL;
+    lg->cap = 0;
+}
+
+// Grow by MACHO_LOCAL_GROUPS_CHUNK until `need` pairs fit (incremental
+// variant; init() already sizes for a known `need` in one shot).
+static bool macho_local_groups_ensure(MachoLocalGroups *lg, uint32_t need) {
+    if (need <= lg->cap) return true;
+    uint32_t new_cap = lg->cap ? lg->cap : MACHO_LOCAL_GROUPS_CHUNK;
+    while (new_cap < need) new_cap += MACHO_LOCAL_GROUPS_CHUNK;
+    uint32_t *next =
+        (uint32_t *)realloc(lg->pairs, new_cap * 2 * sizeof(uint32_t));
+    if (!next) return false;
+    lg->pairs = next;
+    lg->cap = new_cap;
+    return true;
+}
+
 // =============================================================================
 // SHA-256 (self-contained; CommonCrypto isn't available everywhere).
 // =============================================================================
@@ -2127,38 +2170,26 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
     // function params occupy local slots 0..nparams-1 *before* these.
     uint32_t ngroups = (uint32_t)rd_uleb(&r);
     uint32_t n_decl_locals = 0;
-    // Note the per-group valtypes so we know how to copy from
-    // x0..x7 (params) into the local slab in the prologue, and how
-    // to load/store i32 vs i64 values for local.{get,set,tee}.
-    // We record the (count, valtype) pairs and walk them later when
-    // computing each local's type.
-    //
-    // The static cap matches the largest group count we have observed
-    // in real wasm modules emitted by tinyC itself; bump as needed.
-    // The selfhost link of `tinyc.wasm` -> Mach-O reaches several
-    // hundred groups in the largest functions (e.g. parse.c's emit
-    // helpers), so we provision generously.
-    uint32_t local_groups[2048][2];
-    if (ngroups > 2048) {
-        fprintf(stderr,
-                "wasm->macho: too many local groups (%u) in func %u\n",
-                ngroups, fidx);
-        return false;
-    }
+    MachoLocalGroups local_groups;
+    if (!macho_local_groups_init(&local_groups, ngroups)) return false;
     for (uint32_t g = 0; g < ngroups; g++) {
         uint32_t cnt = (uint32_t)rd_uleb(&r);
         uint8_t  ty  = rd_u8(&r);
-        local_groups[g][0] = cnt;
-        local_groups[g][1] = ty;
+        local_groups.pairs[g * 2 + 0] = cnt;
+        local_groups.pairs[g * 2 + 1] = ty;
         n_decl_locals += cnt;
     }
 
     uint32_t np_self, nr_self;
-    if (!type_arity(wm, wf->type_idx, &np_self, &nr_self)) return false;
+    if (!type_arity(wm, wf->type_idx, &np_self, &nr_self)) {
+        macho_local_groups_free(&local_groups);
+        return false;
+    }
     if (np_self > 32) {
         fprintf(stderr,
                 "wasm->macho: function %u has %u params (>32 not supported)\n",
                 fidx, np_self);
+        macho_local_groups_free(&local_groups);
         return false;
     }
 
@@ -2179,6 +2210,7 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                     "wasm->macho: function %u local frame too large "
                     "(%llu bytes, %u locals)\n",
                     fidx, (unsigned long long)bytes, n_locals_total);
+            macho_local_groups_free(&local_groups);
             return false;
         }
     }
@@ -2200,6 +2232,7 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
         uint32_t np_check, nr_check;
         if (!type_arity_params(wm, wf->type_idx, &np_check, &nr_check,
                                param_types_buf, result_type_buf)) {
+            macho_local_groups_free(&local_groups);
             free(local_types); free(os.slots); return false;
         }
         for (uint32_t k = 0; k < np_self; k++)
@@ -2208,10 +2241,13 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
     {
         uint32_t li = np_self;
         for (uint32_t g = 0; g < ngroups; g++) {
-            for (uint32_t k = 0; k < local_groups[g][0]; k++)
-                local_types[li++] = (uint8_t)local_groups[g][1];
+            uint32_t cnt = local_groups.pairs[g * 2 + 0];
+            uint8_t  ty  = (uint8_t)local_groups.pairs[g * 2 + 1];
+            for (uint32_t k = 0; k < cnt; k++)
+                local_types[li++] = ty;
         }
     }
+    macho_local_groups_free(&local_groups);
 
     // Prologue: save fp/lr, set fp, reserve the local slab.
     // If this is the program entry (_start), first materialize the
@@ -2488,6 +2524,11 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                 // loop frame: br targets a backward edge already
                 // patched at the branch site; nothing to do here.
                 value_depth = frame->entry_depth + frame->arity;
+                // `end` is a control-flow join. An earlier unconditional br
+                // may have left `mem_count` at the pre-branch depth; after
+                // restoring the validated stack height, make the lazy-stack
+                // spill frontier agree with it before decoding the next op.
+                LAZY_SYNC();
                 break;
             }
             case 0x02:                                // block blocktype
@@ -2584,6 +2625,10 @@ static bool emit_function(const WasmModule *wm, uint32_t fidx,
                 frame->else_jump_site = jump_site;
                 // Reset depth to entry for the else body.
                 value_depth = frame->entry_depth;
+                // The then arm may have ended in an unconditional br. Its
+                // pre-branch spill frontier must not suppress spills in the
+                // independently reachable else arm.
+                LAZY_SYNC();
                 break;
             }
             case 0x0c:                                // br labelidx

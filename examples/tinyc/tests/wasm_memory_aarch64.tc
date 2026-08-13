@@ -1,0 +1,5 @@
+// native WasmSSA -> LLVM -> AArch64 must either lower this Wasm
+// intrinsic or diagnose it as an intentionally unsupported target feature.
+int main(void) {
+    return __builtin_wasm_memory_size(0) == 0;
+}

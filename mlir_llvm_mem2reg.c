@@ -207,7 +207,7 @@ static MLIR_ValueHandle l2r_make_zero(M *m, size_t bi, size_t ai) {
     MLIR_ValueHandle rv[1] = { res };
     MLIR_AttributeHandle attrs[1] = { a };
     MLIR_OpHandle op = MLIR_CreateOp(
-        ctx, OP_TYPE_ARITH_CONSTANT, str_lit("arith.constant"),
+        ctx, OP_TYPE_LLVM_MLIR_CONSTANT, str_lit("llvm.mlir.constant"),
         attrs, 1, rty, 1, rv, 1, NULL, 0, NULL, 0,
         loc, MLIR_INVALID_HANDLE, (string){0}, -1);
     MLIR_InsertBlockOpAtIndex(ctx, m->blocks[bi], op, 0);

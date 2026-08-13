@@ -1,0 +1,46 @@
+extern int printf(const char *fmt, ...);
+
+// int64_to_str-style formatting negates negatives via `(uint64_t)(-val)`.
+// INT64_MIN must still print as -9223372036854775808.
+
+typedef long long int64_t;
+typedef unsigned long long uint64_t;
+
+static size_t test_uint64_to_str(uint64_t val, char *buf) {
+    char tmp[32];
+    size_t len = 0;
+    size_t i;
+    if (val == 0) {
+        buf[0] = '0';
+        return 1;
+    }
+    while (val > 0) {
+        tmp[len++] = (char)('0' + (val % 10));
+        val = val / 10;
+    }
+    for (i = 0; i < len; i = i + 1) {
+        buf[i] = tmp[len - 1 - i];
+    }
+    return len;
+}
+
+static size_t test_int64_to_str(int64_t val, char *buf) {
+    if (val < 0) {
+        buf[0] = '-';
+        size_t len = test_uint64_to_str((uint64_t)(-val), buf + 1);
+        return len + 1;
+    }
+    return test_uint64_to_str((uint64_t)val, buf);
+}
+
+int main(void) {
+    int64_t minv = (int64_t)(1ULL << 63);
+    char out[32];
+    size_t n = test_int64_to_str(minv, out);
+    size_t i;
+    for (i = 0; i < n; i = i + 1) {
+        printf("%c", out[i]);
+    }
+    printf("\n");
+    return 0;
+}

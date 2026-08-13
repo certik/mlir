@@ -1,0 +1,49 @@
+extern int printf(const char *fmt, ...);
+
+// Module-scope `static void *` plus `static int[N]` globals must load and
+// store correctly through the wasm backend. Names are prefixed so this file
+// can be unity-built alongside buddy.c without symbol collisions.
+
+static void *static_module_heap_base;
+static int static_module_free_lists[21];
+
+void set_heap(void *p) {
+    static_module_heap_base = p;
+}
+
+void *get_heap(void) {
+    return static_module_heap_base;
+}
+
+void set_free_list(int i, int v) {
+    static_module_free_lists[i] = v;
+}
+
+int get_free_list(int i) {
+    return static_module_free_lists[i];
+}
+
+int main(void) {
+    char slot[4];
+    int i;
+
+    for (i = 0; i < 21; i = i + 1) {
+        static_module_free_lists[i] = 0;
+    }
+
+    set_heap(slot);
+    if (get_heap() != slot) {
+        printf("FAIL heap\n");
+        return 1;
+    }
+
+    set_free_list(5, 42);
+    set_free_list(20, 99);
+    if (get_free_list(5) != 42 || get_free_list(20) != 99) {
+        printf("FAIL lists\n");
+        return 2;
+    }
+
+    printf("OK\n");
+    return 0;
+}

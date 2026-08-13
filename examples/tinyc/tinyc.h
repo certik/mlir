@@ -175,6 +175,7 @@ struct Type {
     // `_Generic` must keep them distinct from `int`).
     int      int_bits;
     bool     int_unsigned;
+    bool     is_const;       // type was declared with the `const` qualifier
 };
 
 typedef enum {
@@ -417,6 +418,7 @@ typedef struct {
     bool    is_extern;      // `extern T x;` — emit external-linkage global
     bool    is_static;      // `static` at file scope: emit with internal
                             // linkage.
+    bool    is_const;       // `const` at file scope: emit as llvm constant
     int64_t init_int;
     double  init_float;
     string  init_str;       // for TY_PTR_CHAR initialized from string literal

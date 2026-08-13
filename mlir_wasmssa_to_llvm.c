@@ -8,7 +8,7 @@
 // Coverage was grown test-by-test. It handles the full self-host surface:
 // module walk, import_func recognition, per-function locals-as-alloca
 // lowering, integer/float ops, control flow (block/loop/if/br/br_if
-// flattened to cf.br/cf.cond_br), linear memory + globals, and the WASI
+// flattened to llvm.br/llvm.cond_br), linear memory + globals, and the WASI
 // runtime shims. Any unsupported op makes the lowering fail cleanly with a
 // diagnostic.
 
@@ -275,7 +275,7 @@ static int vmap_get(VMap *m, MLIR_ValueHandle k, MLIR_ValueHandle *out) {
 // Per-function lowering state.
 //
 // WASM structured control flow (block / loop / if + depth-relative br) is
-// flattened into an explicit cf.br / cf.cond_br CFG. Each enclosing scope
+// flattened into an explicit llvm.br / llvm.cond_br CFG. Each enclosing scope
 // pushes a Frame recording two target blocks:
 //   - br_target: where `br {depth}` to this scope jumps (loop header for a
 //     loop; the scope's continuation for a block / if).
@@ -399,12 +399,12 @@ static MLIR_BlockHandle new_block(FLower *L) {
     return b;
 }
 
-// Emit an unconditional cf.br to `target` and mark cur terminated.
+// Emit an unconditional llvm.br to `target` and mark cur terminated.
 static void term_br(FLower *L, MLIR_BlockHandle target) {
     MLIR_BlockHandle succs[1] = { target };
     MLIR_ValueHandle *sops[1] = { NULL };
-    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(L->ctx, OP_TYPE_CF_BR,
-        op_type_to_string(OP_TYPE_CF_BR),
+    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(L->ctx, OP_TYPE_UNREGISTERED,
+        str_lit("llvm.br"),
         NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         succs, 1, sops, 0,
         MLIR_CreateLocationUnknown(L->ctx, (string){0}),
@@ -413,13 +413,13 @@ static void term_br(FLower *L, MLIR_BlockHandle target) {
     L->terminated = true;
 }
 
-// Emit a cf.cond_br on `cond` to (t_blk, f_blk) and mark cur terminated.
+// Emit an llvm.cond_br on `cond` to (t_blk, f_blk) and mark cur terminated.
 static void term_cond_br(FLower *L, MLIR_ValueHandle cond,
                          MLIR_BlockHandle t_blk, MLIR_BlockHandle f_blk) {
     MLIR_BlockHandle succs[2] = { t_blk, f_blk };
     MLIR_ValueHandle cond_arr[1] = { cond };
-    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(L->ctx, OP_TYPE_CF_COND_BR,
-        op_type_to_string(OP_TYPE_CF_COND_BR),
+    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(L->ctx, OP_TYPE_UNREGISTERED,
+        str_lit("llvm.cond_br"),
         NULL, 0, NULL, 0, NULL, 0, cond_arr, 1, NULL, 0,
         succs, 2, NULL, 0,
         MLIR_CreateLocationUnknown(L->ctx, (string){0}),
@@ -712,9 +712,30 @@ static bool lower_region(FLower *L, MLIR_BlockHandle src_blk) {
     return true;
 }
 
+// The generic parser deliberately preserves wasmssa operations as custom
+// (OP_TYPE_UNREGISTERED) operations. Wasm modules lifted by --from-wasm
+// therefore carry their canonical textual names but not their enum tags.
+// Resolve only the contiguous wasmssa enum range here so the lifter accepts
+// both programmatically-built and parser-roundtripped input without treating
+// unrelated custom operations as wasmssa.
+static MLIR_OpType wasmssa_op_type(MLIR_OpHandle op) {
+    MLIR_OpType type = MLIR_GetOpType(op);
+    if (type != OP_TYPE_UNREGISTERED) return type;
+
+    string name = MLIR_GetOpName(op);
+    for (int t = OP_TYPE_WASMSSA_FUNC; t <= OP_TYPE_WASMSSA_MEMORY_GROW; t++) {
+        MLIR_OpType candidate = (MLIR_OpType)t;
+        string canonical = op_type_to_string(candidate);
+        if (name.size == canonical.size && name.str != NULL &&
+            memcmp(name.str, canonical.str, name.size) == 0)
+            return candidate;
+    }
+    return type;
+}
+
 static bool lower_op(FLower *L, MLIR_OpHandle op) {
     MLIR_Context *ctx = L->ctx;
-    MLIR_OpType t = MLIR_GetOpType(op);
+    MLIR_OpType t = wasmssa_op_type(op);
 
     switch (t) {
     case OP_TYPE_WASMSSA_CONST: {
@@ -1969,7 +1990,7 @@ static void emit_store_v(FLower *L, MLIR_ValueHandle v, MLIR_ValueHandle p) {
 }
 
 static void scan_max_global(MLIR_OpHandle op, int64_t *max_idx) {
-    MLIR_OpType t = MLIR_GetOpType(op);
+    MLIR_OpType t = wasmssa_op_type(op);
     if (t == OP_TYPE_WASMSSA_GLOBAL_GET || t == OP_TYPE_WASMSSA_GLOBAL_SET) {
         int64_t idx = at_i(op, "global_idx");
         if (idx > *max_idx) *max_idx = idx;
@@ -1990,7 +2011,7 @@ static void scan_max_global(MLIR_OpHandle op, int64_t *max_idx) {
 // Recursively intern every wasmssa.func_addr target into the fnptr table,
 // honouring an explicit `slot` attr (the wasm table index).
 static void scan_func_addrs(MLIR_OpHandle op, FuncPtrMap *fnptrs) {
-    if (MLIR_GetOpType(op) == OP_TYPE_WASMSSA_FUNC_ADDR) {
+    if (wasmssa_op_type(op) == OP_TYPE_WASMSSA_FUNC_ADDR) {
         string tgt = at_s(op, "target");
         int32_t es = (int32_t)at_i_or(op, "slot", -1);
         fpm_intern_with_slot(fnptrs, tgt, es);
@@ -2144,7 +2165,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     int64_t data_end = WASM_DATA_BASE;
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle top = MLIR_GetBlockOp(mb, i);
-        if (MLIR_GetOpType(top) != OP_TYPE_WASMSSA_IMPORT_GLOBAL) continue;
+        if (wasmssa_op_type(top) != OP_TYPE_WASMSSA_IMPORT_GLOBAL) continue;
         string sn = at_s(top, "sym_name");
         string id = at_s(top, "init_data");
         int64_t sz = at_i(top, "size");
@@ -2166,7 +2187,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     uint8_t *image = (uint8_t *)calloc((size_t)linmem_total, 1);
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle top = MLIR_GetBlockOp(mb, i);
-        if (MLIR_GetOpType(top) != OP_TYPE_WASMSSA_IMPORT_GLOBAL) continue;
+        if (wasmssa_op_type(top) != OP_TYPE_WASMSSA_IMPORT_GLOBAL) continue;
         string sn = at_s(top, "sym_name");
         string id = at_s(top, "init_data");
         string rl = at_s(top, "relocs");
@@ -2265,7 +2286,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     // -- Imports: allow the known WASI imports; reject others. --
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        if (MLIR_GetOpType(op) != OP_TYPE_WASMSSA_IMPORT_FUNC) continue;
+        if (wasmssa_op_type(op) != OP_TYPE_WASMSSA_IMPORT_FUNC) continue;
         string nm = at_s(op, "sym_name");
         if (nm.size == 9 && memcmp(nm.str, "proc_exit", 9) == 0) continue;
         // WASI host imports — provided by the spliced C adapter, just allow.
@@ -2292,7 +2313,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     FuncPtrMap fnptrs = {0};
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle top = MLIR_GetBlockOp(mb, i);
-        MLIR_OpType t = MLIR_GetOpType(top);
+        MLIR_OpType t = wasmssa_op_type(top);
         if (t == OP_TYPE_WASMSSA_FUNC || t == OP_TYPE_WASMSSA_IMPORT_FUNC) {
             string fnm = at_s(top, "sym_name");
             if (t == OP_TYPE_WASMSSA_FUNC && at_b(top, "exported"))
@@ -2306,7 +2327,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     // -- Lower functions. --
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        if (MLIR_GetOpType(op) != OP_TYPE_WASMSSA_FUNC) continue;
+        if (wasmssa_op_type(op) != OP_TYPE_WASMSSA_FUNC) continue;
         MLIR_OpHandle fn = lower_func(ctx, op, &globals, &fnptrs, &sigs);
         if (fn == MLIR_INVALID_HANDLE) {
             free(image);

@@ -2176,6 +2176,8 @@ static void emit_flat_call(E *e, Scope *sc, FuncSig *sig, VecExprPtr args,
     }
 }
 
+static int64_t c_sizeof_type(E *e, Type ty);
+
 // Compile-time folder for literal-only integer expressions. Returns
 // true and writes the folded i32 value (sign-extended in int64_t) when
 // `ex` and all its sub-expressions are pure integer-only computations
@@ -2218,7 +2220,7 @@ static bool ast_fold_int(E *e, Scope *sc, Expr *ex, int64_t *out) {
                 if (ex->cast_type.kind == TY_VOID) return false;
                 ty = ex->cast_type;
             }
-            *out = (int64_t)(int32_t)type_size(e, ty);
+            *out = (int64_t)(int32_t)c_sizeof_type(e, ty);
             return true;
         }
         case EX_UN: {
@@ -2558,7 +2560,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     r.val = emit_const_i32(e, 1); return r;
                 }
             }
-            r.val = emit_const_i32(e, type_size(e, ty)); return r;
+            r.val = emit_const_i32(e, c_sizeof_type(e, ty)); return r;
         }
         case EX_CAST: {
             EVal v = emit_expr(e, sc, ex->lhs);
@@ -2607,6 +2609,19 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     v.is_i64 = true;
                 } else if (!want_i64 && v.is_i64) {
                     v.val = emit_trunci_i64_to_i32(e, v.val);
+                    v.is_i64 = false;
+                }
+                // Narrow integer casts (e.g. `(unsigned char)x`) must
+                // truncate to the target width then re-extend so loads
+                // that were widened with sign-extension (plain `char`)
+                // do not leak into unsigned-byte arithmetic.
+                if (ex->cast_type.int_bits == 8 && !v.is_float && !v.is_ptr) {
+                    MLIR_ValueHandle as_i32 = v.is_i64
+                        ? emit_trunci_i64_to_i32(e, v.val) : v.val;
+                    MLIR_ValueHandle as_i8 = emit_trunci_to_i8(e, as_i32);
+                    v.val = ex->cast_type.int_unsigned
+                        ? emit_extui_i8_to_i32(e, as_i8)
+                        : emit_extsi_i8_to_i32(e, as_i8);
                     v.is_i64 = false;
                 }
                 // A cast to an unsigned integer type yields an unsigned
@@ -2684,6 +2699,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             if (ck == TY_PTR_I32) { v.ptr_elem = e->i32; v.is_str = false; }
             else if (ck == TY_PTR_CHAR) { v.ptr_elem = e->i8; v.is_str = true; }
             else if (ck == TY_PTR_VOID) { v.ptr_elem = MLIR_INVALID_HANDLE; v.is_str = false; }
+            v.is_unsigned = ex->cast_type.int_unsigned;
             return v;
         }
         case EX_VAR:
@@ -5618,6 +5634,11 @@ static int64_t type_size(E *e, Type t) {
 // matching and other callers) or type_size (which drives struct layout,
 // where scalar char stays a 4-byte i32). All other operands defer to
 // type_size, preserving tinyc's prior sizeof behavior exactly.
+static int64_t c_sizeof_type(E *e, Type ty) {
+    if ((ty.kind == TY_I32 || ty.kind == TY_I64) && ty.int_bits == 8)
+        return 1;
+    return type_size(e, ty);
+}
 static int64_t c_sizeof_expr(E *e, Scope *sc, Expr *ex) {
     if (ex->kind == EX_INDEX) {
         Type base = infer_expr_type(e, sc, ex->lhs);
@@ -5864,7 +5885,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                 gty = e.i32;
             }
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, gty,
-                /*is_constant=*/false,
+                /*is_constant=*/g->is_const,
                 /*init_kind=*/4, 0, 0.0, NULL, e.loc);
             MLIR_AppendBlockOp(ctx, mb, gop);
         } else if (g->type.kind == TY_PTR_CHAR) {
@@ -5876,7 +5897,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             // either returns the string addr or a null pointer.
             MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.ptr,
-                /*is_constant=*/false,
+                /*is_constant=*/g->is_const,
                 /*init_kind=*/2, 0, 0.0, &init_blk, e.loc);
             // Build initializer body: %0 = addressof @str ; llvm.return %0
             MLIR_BlockHandle save_blk = e.cur_block;
@@ -5898,13 +5919,13 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             MLIR_AppendBlockOp(ctx, mb, gop);
         } else if (g->type.kind == TY_F32) {
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.f32,
-                /*is_constant=*/false,
+                /*is_constant=*/g->is_const,
                 /*init_kind=*/1, 0, g->has_init ? g->init_float : 0.0,
                 NULL, e.loc);
             MLIR_AppendBlockOp(ctx, mb, gop);
         } else if (g->type.kind == TY_F64) {
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.f64,
-                /*is_constant=*/false,
+                /*is_constant=*/g->is_const,
                 /*init_kind=*/1, 0, g->has_init ? g->init_float : 0.0,
                 NULL, e.loc);
             MLIR_AppendBlockOp(ctx, mb, gop);
@@ -5914,7 +5935,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             // Emit a zero-initialized pointer global.
             MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.ptr,
-                /*is_constant=*/false,
+                /*is_constant=*/g->is_const,
                 /*init_kind=*/2, 0, 0.0, &init_blk, e.loc);
             MLIR_BlockHandle save_blk = e.cur_block;
             bool save_term = e.terminated;
@@ -5966,12 +5987,12 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                 // (wasm) and emit_global (native) both interpret it as
                 // packed little-endian element bytes.
                 gop = MLIR_CreateLLVMGlobalArrayInit(ctx, g->name, arr_ty,
-                    /*is_constant=*/false,
+                    /*is_constant=*/g->is_const,
                     g->init_array_data, e.loc);
             } else {
                 MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
                 gop = MLIR_CreateLLVMGlobal(ctx, g->name, arr_ty,
-                    /*is_constant=*/false,
+                    /*is_constant=*/g->is_const,
                     /*init_kind=*/2, 0, 0.0, &init_blk, e.loc);
                 MLIR_BlockHandle save_blk = e.cur_block;
                 bool save_term = e.terminated;
@@ -5998,14 +6019,14 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             MLIR_AppendBlockOp(ctx, mb, gop);
         } else if (g->type.kind == TY_I64) {
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.i64,
-                /*is_constant=*/false,
+                /*is_constant=*/g->is_const,
                 /*init_kind=*/0, g->has_init ? g->init_int : 0, 0.0,
                 NULL, e.loc);
             MLIR_AppendBlockOp(ctx, mb, gop);
         } else {
             // i32 (default for plain int)
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.i32,
-                /*is_constant=*/false,
+                /*is_constant=*/g->is_const,
                 /*init_kind=*/0, g->has_init ? g->init_int : 0, 0.0,
                 NULL, e.loc);
             MLIR_AppendBlockOp(ctx, mb, gop);

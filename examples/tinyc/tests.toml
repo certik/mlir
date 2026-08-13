@@ -1067,6 +1067,11 @@ native_skip = true
 expected_stdout = "42\n"
 
 [[test]]
+name = "wasm_memory_grow"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "42\n"
+
+[[test]]
 name = "i64_compare_intlit"
 targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "10\n20\n30\n10\n30\n60\n-1\n"
@@ -1367,3 +1372,88 @@ platforms = ["darwin"]
 macho_backends = ["llvm_via_wasm"]
 created_file = "_tinyc_macho_mode.tmp"
 expected_file_mode = 0o644
+
+[[test]]
+name = "loop_continue"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "10\n"
+
+[[test]]
+name = "macho_multiple_continue"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "6\n"
+
+[[test]]
+name = "macho_continue_unconditional_branch"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "10\n"
+
+[[test]]
+name = "math_pi_dpi_constants"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "3142\n6283\n2000\n"
+
+[[test]]
+name = "sizeof_char_arena_alloc"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "OK\n"
+
+[[test]]
+name = "static_module_void_ptr_array"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "OK\n"
+
+[[test]]
+name = "unsigned_char_strcmp"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "255\n1\n-1\n"
+
+[[test]]
+name = "unsigned_char_strncmp"
+targets = ["wasm"]
+# E003: base_strncmp must preserve explicit unsigned-char casts in the
+# mismatched-byte return so 0xFF - 0 yields 255, not -1.
+wasm_upstream_skip = true
+expected_stdout = "255\n1\n-1\n"
+
+[[test]]
+name = "wasm_memory_aarch64"
+targets = ["wasm"]
+# E006: __builtin_wasm_memory_size must lower through llvm -> aarch64.
+wasm_upstream_skip = true
+wasm_native_emit = "aarch64"
+wasm_native_direct_source = true
+
+[[test]]
+name = "wasm_memory_grow_aarch64"
+targets = ["wasm"]
+# E006: __builtin_wasm_memory_grow must lower through llvm -> aarch64.
+wasm_upstream_skip = true
+wasm_native_emit = "aarch64"
+wasm_native_direct_source = true
+
+[[test]]
+name = "math_const_global_immutability"
+targets = ["wasm"]
+# E007: static const math globals must stay read-only in WasmSSA.
+wasm_upstream_skip = true
+wasm_native_emit = "wasmssa"
+wasm_native_direct_source = true
+wasm_native_emit_regex = [
+  "sym_name = \"math_s0\"[^\n]*is_const = true",
+  "sym_name = \"math_pi\"[^\n]*is_const = true",
+]
+
+[[test]]
+name = "wasmssa_block_arg_printing"
+targets = ["wasm"]
+# E008: operands that are block arguments must print as %argN, not phantom %N.
+wasm_upstream_skip = true
+wasm_native_emit = "wasmssa"
+wasm_native_direct_source = true
+wasm_native_emit_regex = ["wasmssa\\.binop\\(%arg0: i32"]
+
+[[test]]
+name = "int64_min_to_str"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "-9223372036854775808\n"

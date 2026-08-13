@@ -1,0 +1,37 @@
+extern int printf(const char *fmt, ...);
+
+// `sizeof(char)` must be 1, not 4. When tinyc folds `sizeof(type) * count`
+// for arena-style `char` allocations the byte count must stay `n`, not `4*n`.
+
+typedef unsigned long size_t;
+
+#define arena_new_array_size(type, count) \
+    ((size_t)(sizeof(type) * (size_t)(count)))
+
+int main(void) {
+    size_t bytes;
+
+    if (sizeof(char) != 1) {
+        printf("FAIL sizeof(char)=%lld\n", (long long)sizeof(char));
+        return 1;
+    }
+    if (sizeof(unsigned char) != 1) {
+        printf("FAIL sizeof(unsigned char)=%lld\n", (long long)sizeof(unsigned char));
+        return 2;
+    }
+
+    bytes = arena_new_array_size(char, 10);
+    if (bytes != 10) {
+        printf("FAIL char*10=%lld\n", (long long)bytes);
+        return 3;
+    }
+
+    bytes = arena_new_array_size(unsigned char, 7);
+    if (bytes != 7) {
+        printf("FAIL uchar*7=%lld\n", (long long)bytes);
+        return 4;
+    }
+
+    printf("OK\n");
+    return 0;
+}
