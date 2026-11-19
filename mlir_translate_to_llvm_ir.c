@@ -104,6 +104,22 @@ static char *fmt_alloc(const char *fmt, ...) {
     return out;
 }
 
+// Format a floating-point constant as LLVM's hexadecimal form
+// (`0x<16 hex digits of the IEEE-754 double>`), which round-trips every bit.
+// A decimal `%e` keeps only 7 significant digits, which silently truncated
+// every `double` constant to roughly `float` precision. For an f32-typed
+// constant LLVM still spells the value as a double, but it must be exactly
+// representable as a float, so round it first.
+static char *fmt_fp_literal(MLIR_Context *ctx, MLIR_TypeHandle ty, double v) {
+    if (ty != MLIR_INVALID_HANDLE) {
+        string ts = MLIR_GetTypeString(ctx, ty);
+        if (ts.size == 3 && memcmp(ts.str, "f32", 3) == 0) v = (double)(float)v;
+    }
+    uint64_t bits;
+    memcpy(&bits, &v, sizeof bits);
+    return fmt_alloc("0x%016llX", (unsigned long long)bits);
+}
+
 // -----------------------------------------------------------------------------
 // String / op-name helpers.
 // -----------------------------------------------------------------------------
@@ -314,10 +330,7 @@ static char *inline_literal_for(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_TypeHa
                     int64_t iv = MLIR_GetAttributeInteger(a);
                     return fmt_alloc("%lld", (long long)iv);
                 } else if (k == MLIR_ATTR_KIND_FLOAT) {
-                    double fv = MLIR_GetAttributeFloat(a);
-                    // Match MLIR/LLVM "0x..." style for non-finite would be
-                    // overkill; plain printf %e suffices for tinyc.
-                    return fmt_alloc("%e", fv);
+                    return fmt_fp_literal(ctx, vty, MLIR_GetAttributeFloat(a));
                 } else if (k == MLIR_ATTR_KIND_BOOL) {
                     bool bv = MLIR_GetAttributeBool(a);
                     return xstrdup(bv ? "true" : "false");
@@ -1260,7 +1273,7 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
         } else if (k == MLIR_ATTR_KIND_INTEGER) {
             init = fmt_alloc("%lld", (long long)MLIR_GetAttributeInteger(va));
         } else if (k == MLIR_ATTR_KIND_FLOAT) {
-            init = fmt_alloc("%e", MLIR_GetAttributeFloat(va));
+            init = fmt_fp_literal(ctx, gty, MLIR_GetAttributeFloat(va));
         }
     }
     if (init == NULL && MLIR_GetOpNumRegions(gop) > 0) {
