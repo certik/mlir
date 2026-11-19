@@ -1021,17 +1021,9 @@ void mlir_llvm_mem2reg(MLIR_Context *ctx, MLIR_OpHandle module) {
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
         MLIR_OpType ft = MLIR_GetOpType(op);
-        // `func.func` is a registered op (matched by type), but `llvm.func`
-        // is UNREGISTERED in the native MLIR API impl, so MLIR_GetOpType
-        // returns OP_TYPE_UNREGISTERED for it there — only the upstream C++
-        // impl maps it to OP_TYPE_LLVM_FUNC. Variadic functions are emitted
-        // as `llvm.func`, so matching by name keeps mem2reg behaviour
-        // identical across both API impls (see verify_native_upstream_identical).
+        // Variadic functions are emitted as `llvm.func`, often by name with
+        // OP_TYPE_UNREGISTERED; both API impls derive the type from the name.
         bool is_func = (ft == OP_TYPE_FUNC_FUNC || ft == OP_TYPE_LLVM_FUNC);
-        if (!is_func) {
-            string on = MLIR_GetOpName(op);
-            is_func = (on.size == 9 && memcmp(on.str, "llvm.func", 9) == 0);
-        }
         if (!is_func) continue;
         if (MLIR_GetOpNumRegions(op) == 0) continue;
         MLIR_RegionHandle body = MLIR_GetOpRegion(op, 0);
