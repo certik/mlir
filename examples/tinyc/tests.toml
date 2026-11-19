@@ -1444,6 +1444,11 @@ wasm_native_emit = "aarch64"
 wasm_native_direct_source = true
 
 [[test]]
+name = "const_pointer_global"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "first\nsecond\n42\nthird\n"
+
+[[test]]
 name = "math_const_global_immutability"
 targets = ["wasm"]
 wasm_upstream_skip = true

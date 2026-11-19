@@ -1,0 +1,23 @@
+extern int printf(const char *fmt, ...);
+
+// `const T *p` at file scope is a WRITABLE pointer to const data: only the
+// pointee is qualified. Emitting such a global as an llvm constant puts it in
+// a read-only section (the store then faults) and lets the optimizer fold
+// later loads back to the initializer.
+
+const char *g_msg = "first";
+const int *g_ip;
+const char *g_names[2];
+static const int g_seven = 7;
+int g_x = 35;
+
+int main(void) {
+    printf("%s\n", g_msg);
+    g_msg = "second";
+    printf("%s\n", g_msg);
+    g_ip = &g_x;
+    printf("%lld\n", (long long)(*g_ip + g_seven));
+    g_names[1] = "third";
+    printf("%s\n", g_names[1]);
+    return 0;
+}
