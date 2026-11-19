@@ -2212,11 +2212,11 @@ static Func *parse_func(P *p) {
             if (try_parse_fnptr_suffix(p, &pty, &pname)) {
                 // pname (if any) was captured inside `(*name)`.
             } else if (pty.kind == TY_VOID) {
-                if (cur(p).kind == TC_TK_IDENT ||
-                    (cur(p).kind == TC_TK_LPAREN && peek(p, 1).kind == TC_TK_STAR)) {
-                    perror_at(p, pline,
-                        str_lit("'void' is only valid as the lone parameter spec"));
-                }
+                // A plain `void` parameter (the function-pointer form was
+                // handled above; `void *` is TY_PTR_VOID) is only valid as
+                // the lone `(void)` spec, which never reaches this loop.
+                perror_at(p, pline,
+                    str_lit("'void' is only valid as the lone parameter spec"));
             } else if (cur(p).kind == TC_TK_IDENT) {
                 pname = cur(p).text;
                 p->i++;

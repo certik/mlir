@@ -483,6 +483,11 @@ targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "5\n9\n42\n"
 
 [[test]]
+name = "void_fnptr_param"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "15\n"
+
+[[test]]
 name = "void_fnptr_struct_field"
 targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "2\n"
