@@ -272,34 +272,38 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
             bool has_exp_only = (!has_dot && j < src.size &&
                                  (src.str[j] == 'e' || src.str[j] == 'E'));
             if (has_dot || has_exp_only) {
-                // Build the literal from an integer mantissa (uint64_t) and
-                // a single decimal exponent so we incur at most one round.
+                // Build the literal from an integer mantissa and a single
+                // decimal exponent so we incur as little rounding as possible.
                 // The naive `f += digit * 0.1; scale *= 0.1` form accumulates
                 // ulp-level error per digit and miscompiles literals like
                 // 0.75 to 0x1.8000000000001p-1 (see tests/float_literal_0_75).
-                // When the digit run does not fit in uint64_t (e.g.
-                // 3.14159265358979323846) fall back to double accumulation so
-                // we do not silently wrap the mantissa.
-                uint64_t mantissa = (uint64_t)v;
-                int dec_places = 0;
-                bool wide = (v < 0);
-                double fmant = wide ? (double)v : 0.0;
+                //
+                // Digits are accumulated into the mantissa for as long as it
+                // stays below 2^63 (18 digits always fit, a 19th usually), so
+                // it can neither wrap nor turn negative; further digits cannot
+                // change a correctly rounded double in any but near-halfway
+                // cases, so they only adjust the exponent. This covers both
+                // long fractions such as 3.14159265358979323846 and integer
+                // parts that do not fit in 64 bits such as
+                // 18446744073709551616.0.
+                const uint64_t mant_limit = 922337203685477579ULL; // (2^63-10)/10
+                uint64_t mantissa = 0;
+                int dropped_int = 0;  // integer-part digits not in `mantissa`
+                int dec_places = 0;   // fraction digits kept in `mantissa`
+                for (size_t k = i; k < j; k++) {
+                    if (mantissa <= mant_limit) {
+                        mantissa = mantissa * 10u + (uint64_t)(src.str[k] - '0');
+                    } else {
+                        dropped_int++;
+                    }
+                }
                 if (has_dot) {
                     j++; // consume '.'
                     while (j < src.size && is_digit(src.str[j])) {
-                        char d = src.str[j];
-                        if (!wide) {
-                            if (mantissa > UINT64_MAX / 10u - 9u) {
-                                wide = true;
-                                fmant = (double)mantissa;
-                            }
+                        if (mantissa <= mant_limit) {
+                            mantissa = mantissa * 10u + (uint64_t)(src.str[j] - '0');
+                            dec_places++;
                         }
-                        if (wide) {
-                            fmant = fmant * 10.0 + (double)(d - '0');
-                        } else {
-                            mantissa = mantissa * 10u + (uint64_t)(d - '0');
-                        }
-                        dec_places++;
                         j++;
                     }
                 }
@@ -316,12 +320,19 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                         j++;
                     }
                 }
-                int net_exp = (exp_sign < 0 ? -exp : exp) - dec_places;
-                double f = wide ? fmant : (double)mantissa;
+                int net_exp = (exp_sign < 0 ? -exp : exp) - dec_places + dropped_int;
+                // mantissa < 2^63: its top 52 bits and its low 11 bits each
+                // convert to double exactly, so `f + lo` is the mantissa
+                // without any rounding. (Only int -> double conversions of
+                // non-negative values are used: tinyc lowers double -> int64
+                // through i32, and this file has to self-host.)
+                double f = (double)(int64_t)(mantissa >> 11) * 2048.0;
+                double lo = (double)(int64_t)(mantissa & 2047u);
                 if (net_exp > 0) {
                     // Multiply by 10^net_exp using exact integer powers
                     // up to 10^22 (which is exactly representable in f64),
                     // chunking larger exponents.
+                    f += lo;
                     while (net_exp > 0) {
                         int chunk = net_exp > 22 ? 22 : net_exp;
                         double p = 1.0;
@@ -329,7 +340,32 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                         f *= p;
                         net_exp -= chunk;
                     }
+                } else if (net_exp < 0 && net_exp >= -22) {
+                    // mantissa / 10^n with 10^n exact. A mantissa above 2^53
+                    // is not exactly representable, so a plain
+                    // `(double)mantissa / p` rounds twice and is off by one
+                    // ulp for about one literal in ten with 17+ digits (M_PI
+                    // among them). Carry the low mantissa bits `lo` and the
+                    // exact division remainder (Dekker two-product; every
+                    // partial product below is exact, so FMA contraction
+                    // cannot change the result) into one correction term.
+                    double p = 1.0;
+                    for (int k = 0; k < -net_exp; k++) p *= 10.0;
+                    double q = f / p;
+                    double qp = q * p;
+                    double t = 134217729.0 * q;   // 2^27 + 1
+                    double qh = t - (t - q);
+                    double ql = q - qh;
+                    t = 134217729.0 * p;
+                    double ph = t - (t - p);
+                    double pl = p - ph;
+                    double qp_err = ((qh * ph - qp) + qh * pl + ql * ph) + ql * pl;
+                    double rem = ((f - qp) - qp_err) + lo;
+                    f = q + rem / p;
+                } else if (net_exp == 0) {
+                    f += lo;
                 } else if (net_exp < 0) {
+                    f += lo;
                     int n = -net_exp;
                     while (n > 0) {
                         int chunk = n > 22 ? 22 : n;
