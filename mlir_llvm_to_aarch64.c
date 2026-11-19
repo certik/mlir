@@ -2301,18 +2301,23 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             fin_val(L, res, rd);
             return;
         }
+        // Only x9/x10/x11 are lowering scratch; x12..x15 belong to the
+        // register allocator's pool and may hold live values. `delta` may
+        // live in its home register rather than in the scratch we offered.
         uint8_t delta = use_val(L, MLIR_GetOpOperand(op, 0), 10);
         if (!L->ok) return;
-        emit_3reg(ctx, blk, OP_TYPE_AARCH64_ADD_REG, 11, 9, 10, false); // w11 = old+delta
-        emit_load_imm(ctx, blk, 12, 65536, false);                     // w12 = cap
-        emit_cmp_reg(ctx, blk, 11, 12, false);                         // ule via LS
-        emit_csel(ctx, blk, 13, 11, 9, 9, false);                      // stored = ok? new : old
-        if (!emit_store_wasm_mem_pages(L, blk, 13)) {
+        emit_3reg(ctx, blk, OP_TYPE_AARCH64_ADD_REG, 11, 9, delta, false); // w11 = old+delta
+        emit_load_imm(ctx, blk, 10, 65536, false);                     // w10 = cap
+        emit_cmp_reg(ctx, blk, 11, 10, false);                         // ule via LS
+        emit_csel(ctx, blk, 11, 11, 9, 9, false);                      // stored = ok? new : old
+        // The store may use x10 as its address scratch; it leaves the flags
+        // (and x9 = old) intact for the result select below.
+        if (!emit_store_wasm_mem_pages(L, blk, 11)) {
             L->ok = false;
             return;
         }
-        emit_load_imm(ctx, blk, 14, 0xffffffffu, false);               // w14 = -1
-        emit_csel(ctx, blk, rd, 9, 14, 9, false);                      // old or -1
+        emit_load_imm(ctx, blk, 10, 0xffffffffu, false);               // w10 = -1
+        emit_csel(ctx, blk, rd, 9, 10, 9, false);                      // old or -1
         fin_val(L, res, rd);
 
     } else {
