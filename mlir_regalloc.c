@@ -30,11 +30,6 @@ extern bool a64_memfuse_uses(MLIR_Context *ctx, MLIR_OpHandle op, SlotMap *memfu
 extern bool a64_shiftfuse_uses(MLIR_Context *ctx, MLIR_OpHandle op, SlotMap *shiftfuse,
                                MLIR_ValueHandle *xv);
 
-static bool name_eq(string s, const char *cstr) {
-    size_t l = strlen(cstr);
-    return s.size == l && memcmp(s.str, cstr, l) == 0;
-}
-
 // ---------------------------------------------------------------------------
 // SlotMap (value handle -> int32 slot/register/count).
 // ---------------------------------------------------------------------------
@@ -469,7 +464,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
             size_t no = MLIR_GetBlockNumOps(bk);
             for (size_t i = 0; i < no; i++) {
-                if (name_eq(MLIR_GetOpName(MLIR_GetBlockOp(bk, i)), "llvm.call"))
+                if (MLIR_GetOpType(MLIR_GetBlockOp(bk, i)) == OP_TYPE_LLVM_CALL)
                     is_call[op_pos] = 1;
                 op_pos++;
             }
@@ -495,7 +490,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 MLIR_OpHandle op = MLIR_GetBlockOp(bk, ii);
                 if (ra_is_folded(T, ctx, op)) continue;
                 // `live` holds the live set immediately AFTER op.
-                if (name_eq(MLIR_GetOpName(op), "llvm.call")) {
+                if (MLIR_GetOpType(op) == OP_TYPE_LLVM_CALL) {
                     uint32_t rvi = 0; bool has_r = false;
                     if (MLIR_GetOpNumResults(op) &&
                         a64_hh_get(&vmap, MLIR_GetOpResult(op, 0), &rvi)) has_r = true;
@@ -895,7 +890,7 @@ uint32_t mlir_regalloc_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
             bool is_term = (i + 1 == no);
-            bool is_call = name_eq(MLIR_GetOpName(op), "llvm.call");
+            bool is_call = MLIR_GetOpType(op) == OP_TYPE_LLVM_CALL;
             // A folded spine op (zext/add/inttoptr) emits no code: its operand
             // reads must NOT extend liveness. The fused load/store re-registers
             // base+idx as live uses at its own position (below).
@@ -979,7 +974,7 @@ uint32_t mlir_regalloc_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
         size_t no = MLIR_GetBlockNumOps(bk);
         size_t ncall = 0;
         for (size_t i = 0; i < no; i++)
-            if (name_eq(MLIR_GetOpName(MLIR_GetBlockOp(bk, i)), "llvm.call"))
+            if (MLIR_GetOpType(MLIR_GetBlockOp(bk, i)) == OP_TYPE_LLVM_CALL)
                 callpos[ncall++] = (int32_t)i;
         if (ncall == 0) continue;
         for (size_t vi = 0; vi < nv; vi++) {
