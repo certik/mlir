@@ -1,0 +1,19 @@
+extern int printf(const char *fmt, ...);
+// `__wasm_*` names are only special in a module lifted from wasm (the lifter
+// emits __wasm_g0, __wasm_linmem_base, ...). In a native program they are
+// ordinary identifiers: the ELF backend must not switch to the lifted crt0 or
+// drop the function from its reachability walk because of the prefix.
+
+int __wasm_g0 = 5;
+int __wasm_argc = 7;
+
+int __wasm_helper(int x) {
+    return x + 1;
+}
+
+int main(void) {
+    printf("%lld\n", (long long)(__wasm_g0));
+    printf("%lld\n", (long long)(__wasm_argc));
+    printf("%lld\n", (long long)(__wasm_helper(41)));
+    return 0;
+}
