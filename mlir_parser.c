@@ -11,6 +11,7 @@
 
 #include "mlir_parser.h"
 #include "mlir_api.h"
+#include "mlir_op_names.h"
 #include "op_parsers.h"
 
 // Forward decls for helper scanners (moved to op_parsers.h)
@@ -274,168 +275,55 @@ MLIR_TypeHandle parse_type_from_string(MLIR_Context *ctx, string type_str) {
 }
 
 
+// The op types the parser assigns to a parsed op. This is deliberately a
+// subset of the registered names (mlir_op_names.c): an op of any other name
+// is created as OP_TYPE_UNREGISTERED, so it round-trips through the printers
+// in the quoted generic form. (MLIR_CreateOp still derives the registered
+// type from the name, so MLIR_GetOpType() is the same either way.)
+static const MLIR_OpType g_parser_op_types[] = {
+    OP_TYPE_MODULE, OP_TYPE_ARITH_ADDI, OP_TYPE_ARITH_ADDF,
+    OP_TYPE_ARITH_SUBI, OP_TYPE_ARITH_MULI, OP_TYPE_ARITH_DIVI,
+    OP_TYPE_ARITH_SUBF, OP_TYPE_ARITH_MULF, OP_TYPE_ARITH_DIVF,
+    OP_TYPE_ARITH_CONSTANT, OP_TYPE_ARITH_CMPI, OP_TYPE_ARITH_CMPF,
+    OP_TYPE_ARITH_BITCAST, OP_TYPE_ARITH_SITOFP, OP_TYPE_ARITH_FPTOSI,
+    OP_TYPE_ARITH_INDEX_CAST, OP_TYPE_ARITH_EXTSI, OP_TYPE_ARITH_TRUNCI,
+    OP_TYPE_ARITH_EXTF, OP_TYPE_ARITH_TRUNCF, OP_TYPE_ARITH_EXTUI,
+    OP_TYPE_ARITH_MAXF, OP_TYPE_ARITH_DIVSI, OP_TYPE_ARITH_REMSI,
+    OP_TYPE_ARITH_DIVUI, OP_TYPE_ARITH_REMUI, OP_TYPE_ARITH_SHRUI,
+    OP_TYPE_ARITH_ORI, OP_TYPE_ARITH_MINSI, OP_TYPE_ARITH_ANDI,
+    OP_TYPE_MATH_EXP, OP_TYPE_MATH_LOG, OP_TYPE_MEMREF_LOAD,
+    OP_TYPE_MEMREF_STORE, OP_TYPE_MEMREF_ALLOC, OP_TYPE_MEMREF_DEALLOC,
+    OP_TYPE_CF_BR, OP_TYPE_CF_COND_BR, OP_TYPE_CF_SWITCH, OP_TYPE_FUNC_FUNC,
+    OP_TYPE_FUNC_RETURN, OP_TYPE_FUNC_CALL, OP_TYPE_SCF_FOR,
+    OP_TYPE_SCF_WHILE, OP_TYPE_SCF_IF, OP_TYPE_SCF_YIELD,
+    OP_TYPE_SCF_CONDITION, OP_TYPE_SCF_INDEX_SWITCH,
+    OP_TYPE_TT_GET_PROGRAM_ID, OP_TYPE_TT_LOAD, OP_TYPE_TT_STORE,
+    OP_TYPE_TT_MAKE_RANGE, OP_TYPE_TT_SPLAT, OP_TYPE_TT_ADDPTR,
+    OP_TYPE_TT_RETURN, OP_TYPE_ARITH_SELECT, OP_TYPE_TT_FUNC, OP_TYPE_TT_CALL,
+    OP_TYPE_TT_REDUCE, OP_TYPE_TT_BROADCAST, OP_TYPE_TT_EXPAND_DIMS,
+    OP_TYPE_TT_DOT, OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE, OP_TYPE_GPU_LAUNCH,
+    OP_TYPE_AFFINE_FOR, OP_TYPE_AFFINE_LOAD, OP_TYPE_VECTOR_PRINT,
+    OP_TYPE_STD_CONSTANT, OP_TYPE_STD_RETURN, OP_TYPE_TENSOR_EXTRACT,
+    OP_TYPE_TENSOR_SPLAT, OP_TYPE_TENSOR_COLLAPSE_SHAPE, OP_TYPE_LINALG_FILL,
+    OP_TYPE_LINALG_COPY, OP_TYPE_INDEX_CONSTANT, OP_TYPE_LLVM_MLIR_UNDEF,
+    OP_TYPE_RETURN, OP_TYPE_TT_REDUCE_RETURN,
+};
+static bool g_parser_knows_op_type[OP_TYPE_TABLE_CAPACITY];
+static bool g_parser_op_types_built = false;
+
 MLIR_OpType op_string_to_type(string opname) {
-    if (str_eq(opname, str_lit("module"))) {
-        return OP_TYPE_MODULE;
-    } else if (str_eq(opname, str_lit("arith.addi"))) {
-        return OP_TYPE_ARITH_ADDI;
-    } else if (str_eq(opname, str_lit("arith.addf"))) {
-        return OP_TYPE_ARITH_ADDF;
-    } else if (str_eq(opname, str_lit("arith.subi"))) {
-        return OP_TYPE_ARITH_SUBI;
-    } else if (str_eq(opname, str_lit("arith.muli"))) {
-        return OP_TYPE_ARITH_MULI;
-    } else if (str_eq(opname, str_lit("arith.divi"))) {
-        return OP_TYPE_ARITH_DIVI;
-    } else if (str_eq(opname, str_lit("arith.subf"))) {
-        return OP_TYPE_ARITH_SUBF;
-    } else if (str_eq(opname, str_lit("arith.mulf"))) {
-        return OP_TYPE_ARITH_MULF;
-    } else if (str_eq(opname, str_lit("arith.divf"))) {
-        return OP_TYPE_ARITH_DIVF;
-    } else if (str_eq(opname, str_lit("arith.constant"))) {
-        return OP_TYPE_ARITH_CONSTANT;
-    } else if (str_eq(opname, str_lit("arith.cmpi"))) {
-        return OP_TYPE_ARITH_CMPI;
-    } else if (str_eq(opname, str_lit("arith.cmpf"))) {
-        return OP_TYPE_ARITH_CMPF;
-    } else if (str_eq(opname, str_lit("arith.bitcast"))) {
-        return OP_TYPE_ARITH_BITCAST;
-    } else if (str_eq(opname, str_lit("arith.sitofp"))) {
-        return OP_TYPE_ARITH_SITOFP;
-    } else if (str_eq(opname, str_lit("arith.fptosi"))) {
-        return OP_TYPE_ARITH_FPTOSI;
-    } else if (str_eq(opname, str_lit("arith.index_cast"))) {
-        return OP_TYPE_ARITH_INDEX_CAST;
-    } else if (str_eq(opname, str_lit("arith.extsi"))) {
-        return OP_TYPE_ARITH_EXTSI;
-    } else if (str_eq(opname, str_lit("arith.trunci"))) {
-        return OP_TYPE_ARITH_TRUNCI;
-    } else if (str_eq(opname, str_lit("arith.extf"))) {
-        return OP_TYPE_ARITH_EXTF;
-    } else if (str_eq(opname, str_lit("arith.truncf"))) {
-        return OP_TYPE_ARITH_TRUNCF;
-    } else if (str_eq(opname, str_lit("arith.extui"))) {
-        return OP_TYPE_ARITH_EXTUI;
-    } else if (str_eq(opname, str_lit("arith.maxf"))) {
-        return OP_TYPE_ARITH_MAXF;
-    } else if (str_eq(opname, str_lit("arith.divsi"))) {
-        return OP_TYPE_ARITH_DIVSI;
-    } else if (str_eq(opname, str_lit("arith.remsi"))) {
-        return OP_TYPE_ARITH_REMSI;
-    } else if (str_eq(opname, str_lit("arith.divui"))) {
-        return OP_TYPE_ARITH_DIVUI;
-    } else if (str_eq(opname, str_lit("arith.remui"))) {
-        return OP_TYPE_ARITH_REMUI;
-    } else if (str_eq(opname, str_lit("arith.shrui"))) {
-        return OP_TYPE_ARITH_SHRUI;
-    } else if (str_eq(opname, str_lit("arith.ori"))) {
-        return OP_TYPE_ARITH_ORI;
-    } else if (str_eq(opname, str_lit("arith.minsi"))) {
-        return OP_TYPE_ARITH_MINSI;
-    } else if (str_eq(opname, str_lit("arith.andi"))) {
-        return OP_TYPE_ARITH_ANDI;
-    } else if (str_eq(opname, str_lit("math.exp"))) {
-        return OP_TYPE_MATH_EXP;
-    } else if (str_eq(opname, str_lit("math.log"))) {
-        return OP_TYPE_MATH_LOG;
-    } else if (str_eq(opname, str_lit("memref.load"))) {
-        return OP_TYPE_MEMREF_LOAD;
-    } else if (str_eq(opname, str_lit("memref.store"))) {
-        return OP_TYPE_MEMREF_STORE;
-    } else if (str_eq(opname, str_lit("memref.alloc"))) {
-        return OP_TYPE_MEMREF_ALLOC;
-    } else if (str_eq(opname, str_lit("memref.dealloc"))) {
-        return OP_TYPE_MEMREF_DEALLOC;
-    } else if (str_eq(opname, str_lit("cf.br"))) {
-        return OP_TYPE_CF_BR;
-    } else if (str_eq(opname, str_lit("cf.cond_br"))) {
-        return OP_TYPE_CF_COND_BR;
-    } else if (str_eq(opname, str_lit("cf.switch"))) {
-        return OP_TYPE_CF_SWITCH;
-    } else if (str_eq(opname, str_lit("func.func"))) {
-        return OP_TYPE_FUNC_FUNC;
-    } else if (str_eq(opname, str_lit("func.return"))) {
-        return OP_TYPE_FUNC_RETURN;
-    } else if (str_eq(opname, str_lit("func.call"))) {
-        return OP_TYPE_FUNC_CALL;
-    } else if (str_eq(opname, str_lit("call"))) {
-        return OP_TYPE_FUNC_CALL;
-    } else if (str_eq(opname, str_lit("scf.for"))) {
-        return OP_TYPE_SCF_FOR;
-    } else if (str_eq(opname, str_lit("scf.while"))) {
-        return OP_TYPE_SCF_WHILE;
-    } else if (str_eq(opname, str_lit("scf.if"))) {
-        return OP_TYPE_SCF_IF;
-    } else if (str_eq(opname, str_lit("scf.yield"))) {
-        return OP_TYPE_SCF_YIELD;
-    } else if (str_eq(opname, str_lit("scf.condition"))) {
-        return OP_TYPE_SCF_CONDITION;
-    } else if (str_eq(opname, str_lit("scf.index_switch"))) {
-        return OP_TYPE_SCF_INDEX_SWITCH;
-    } else if (str_eq(opname, str_lit("tt.get_program_id"))) {
-        return OP_TYPE_TT_GET_PROGRAM_ID;
-    } else if (str_eq(opname, str_lit("tt.load"))) {
-        return OP_TYPE_TT_LOAD;
-    } else if (str_eq(opname, str_lit("tt.store"))) {
-        return OP_TYPE_TT_STORE;
-    } else if (str_eq(opname, str_lit("tt.make_range"))) {
-        return OP_TYPE_TT_MAKE_RANGE;
-    } else if (str_eq(opname, str_lit("tt.splat"))) {
-        return OP_TYPE_TT_SPLAT;
-    } else if (str_eq(opname, str_lit("tt.addptr"))) {
-        return OP_TYPE_TT_ADDPTR;
-    } else if (str_eq(opname, str_lit("tt.return"))) {
-        return OP_TYPE_TT_RETURN;
-    } else if (str_eq(opname, str_lit("arith.select"))) {
-        return OP_TYPE_ARITH_SELECT;
-    } else if (str_eq(opname, str_lit("tt.func"))) {
-        return OP_TYPE_TT_FUNC;
-    } else if (str_eq(opname, str_lit("tt.call"))) {
-        return OP_TYPE_TT_CALL;
-    } else if (str_eq(opname, str_lit("tt.reduce"))) {
-        return OP_TYPE_TT_REDUCE;
-    } else if (str_eq(opname, str_lit("tt.broadcast"))) {
-        return OP_TYPE_TT_BROADCAST;
-    } else if (str_eq(opname, str_lit("tt.expand_dims"))) {
-        return OP_TYPE_TT_EXPAND_DIMS;
-    } else if (str_eq(opname, str_lit("tt.dot"))) {
-        return OP_TYPE_TT_DOT;
-    } else if (str_eq(opname, str_lit("tt.pure_extern_elementwise"))) {
-        return OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE;
-    } else if (str_eq(opname, str_lit("gpu.launch"))) {
-        return OP_TYPE_GPU_LAUNCH;
-    } else if (str_eq(opname, str_lit("affine.for"))) {
-        return OP_TYPE_AFFINE_FOR;
-    } else if (str_eq(opname, str_lit("affine.load"))) {
-        return OP_TYPE_AFFINE_LOAD;
-    } else if (str_eq(opname, str_lit("vector.print"))) {
-        return OP_TYPE_VECTOR_PRINT;
-    } else if (str_eq(opname, str_lit("std.constant"))) {
-        return OP_TYPE_STD_CONSTANT;
-    } else if (str_eq(opname, str_lit("std.return"))) {
-        return OP_TYPE_STD_RETURN;
-    } else if (str_eq(opname, str_lit("tensor.extract"))) {
-        return OP_TYPE_TENSOR_EXTRACT;
-    } else if (str_eq(opname, str_lit("tensor.splat"))) {
-        return OP_TYPE_TENSOR_SPLAT;
-    } else if (str_eq(opname, str_lit("tensor.collapse_shape"))) {
-        return OP_TYPE_TENSOR_COLLAPSE_SHAPE;
-    } else if (str_eq(opname, str_lit("linalg.fill"))) {
-        return OP_TYPE_LINALG_FILL;
-    } else if (str_eq(opname, str_lit("linalg.copy"))) {
-        return OP_TYPE_LINALG_COPY;
-    } else if (str_eq(opname, str_lit("index.constant"))) {
-        return OP_TYPE_INDEX_CONSTANT;
-    } else if (str_eq(opname, str_lit("llvm.mlir.undef"))) {
-        return OP_TYPE_LLVM_MLIR_UNDEF;
-    } else if (str_eq(opname, str_lit("return"))) {
-        return OP_TYPE_RETURN;
-    } else if (str_eq(opname, str_lit("tt.reduce.return"))) {
-        return OP_TYPE_TT_REDUCE_RETURN;
-    } else {
-        return OP_TYPE_UNREGISTERED;
+    if (!g_parser_op_types_built) {
+        size_t n = sizeof(g_parser_op_types) / sizeof(g_parser_op_types[0]);
+        for (size_t i = 0; i < n; i++) g_parser_knows_op_type[g_parser_op_types[i]] = true;
+        g_parser_op_types_built = true;
     }
+    MLIR_OpType type = op_type_from_string(opname);
+    if (type != OP_TYPE_UNREGISTERED) {
+        return g_parser_knows_op_type[type] ? type : OP_TYPE_UNREGISTERED;
+    }
+    // Short alias accepted by the classic syntax; the op keeps this name.
+    if (str_eq(opname, str_lit("call"))) return OP_TYPE_FUNC_CALL;
+    return OP_TYPE_UNREGISTERED;
 }
 
 void get_newlines(Arena *arena, const string s, vector_i64 *newlines) {
