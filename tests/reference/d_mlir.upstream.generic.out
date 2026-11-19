@@ -16,8 +16,8 @@ module() {
         %7 = arith.constant() {value = 1} -> i16
         %8 = memref.alloc() {operandSegmentSizes = array<i32: 0, 0>} -> memref<24xi16>
         linalg.fill(%6: i16, %8: memref<24xi16>) {operandSegmentSizes = array<i32: 1, 1>} {
-        ^bb0(%arg0: i16, %arg1: i16):
-            "linalg.yield"(%23: i16)
+        ^bb0(%arg1: i16, %arg2: i16):
+            "linalg.yield"(%arg1: i16)
         }
         %9 = affine.load(%8: memref<24xi16>, %1: index) {map = affine_map<(d0) -> (d0)>} -> i16
         %10 = "tensor.from_elements"(%9: i16, %9: i16, %9: i16, %9: i16, %9: i16, %9: i16, %9: i16, %9: i16, %9: i16, %9: i16) -> tensor<5x2xi16>
@@ -30,15 +30,15 @@ module() {
         }
         %12 = tensor.splat(%7: i16, %4: index, %3: index) -> tensor<?x?xi16>
         %13 = linalg.copy(%12: tensor<?x?xi16>, %10: tensor<5x2xi16>) {operandSegmentSizes = array<i32: 1, 1>} -> tensor<5x2xi16> {
-        ^bb0(%arg0: i16, %arg1: i16):
-            "linalg.yield"(%24: i16)
+        ^bb0(%arg3: i16, %arg4: i16):
+            "linalg.yield"(%arg3: i16)
         }
         %14 = tensor.collapse_shape(%11: tensor<5x2xi16>) {reassociation = [...]} -> tensor<10xi16>
         %15 = index.constant() {value = 10} -> index
         %18 = scf.for(%1: index, %15: index, %2: index, %6: i16) -> i16 {
-        ^bb0(%arg0: index, %arg1: i16):
-            %16 = tensor.extract(%14: tensor<10xi16>, %25: index) -> i16
-            %17 = arith.addi(%26: i16, %16: i16) {overflowFlags = #arith.overflow<none>} -> i16
+        ^bb0(%arg5: index, %arg6: i16):
+            %16 = tensor.extract(%14: tensor<10xi16>, %arg5: index) -> i16
+            %17 = arith.addi(%arg6: i16, %16: i16) {overflowFlags = #arith.overflow<none>} -> i16
             vector.print(%16: i16) {punctuation = #vector.punctuation<newline>}
             scf.yield(%17: i16)
         }

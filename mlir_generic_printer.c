@@ -17,14 +17,21 @@ typedef struct {
     Arena *arena;
     uint32_t next_ssa;
     SsaMap ssa_map;
+    // Unnamed block arguments print as %argN. N is assigned on first sight
+    // and is unique within one print, so the arguments of different blocks
+    // (a function's entry block, a nested loop body, ...) never share a name.
+    uint32_t next_arg;
+    SsaMap arg_map;
 } PrintCtx;
 
 static inline void ssa_map_init(PrintCtx *ctx, MLIR_Context *mlir_ctx) {
     ctx->mlir_ctx = mlir_ctx;
     ctx->arena = mlir_ctx ? MLIR_GetArenaAllocator(mlir_ctx) : NULL;
     ctx->next_ssa = 0;
+    ctx->next_arg = 0;
     if (ctx->arena) {
         SsaMap_init(ctx->arena, &ctx->ssa_map, 128);
+        SsaMap_init(ctx->arena, &ctx->arg_map, 32);
     }
 }
 
@@ -40,8 +47,17 @@ static string format_value_name(PrintCtx *ctx, MLIR_ValueHandle v) {
     Arena *arena = ctx->arena;
     string name = MLIR_GetValueRegisterName(v);
     if (name.size > 0) return name;
-    if (MLIR_GetValueKind(v) == BLOCK_ARG)
-        return format(arena, str_lit("%arg{}"), (int64_t)MLIR_GetValueResultIndex(v));
+    if (MLIR_GetValueKind(v) == BLOCK_ARG) {
+        uint32_t *found = SsaMap_get(&ctx->arg_map, v);
+        uint32_t n;
+        if (found) {
+            n = *found;
+        } else {
+            n = ctx->next_arg++;
+            SsaMap_insert(ctx->arena, &ctx->arg_map, v, n);
+        }
+        return format(arena, str_lit("%arg{}"), (int64_t)n);
+    }
     uint32_t num = get_or_assign_ssa(ctx, v);
     return format(arena, str_lit("%{}"), (int64_t)num);
 }
@@ -103,7 +119,7 @@ static string print_block_internal(PrintCtx *ctx, int bb_index, int indent_level
             if (arg && arg_ty) {
                 string rname = MLIR_GetValueRegisterName(arg);
                 if (rname.size > 0) strbuf_append(arena, &result, format(arena, str_lit("{}: {}"), rname, MLIR_GetTypeString(ctx->mlir_ctx, arg_ty)));
-                else strbuf_append(arena, &result, format(arena, str_lit("%arg{}: {}"), (int64_t)MLIR_GetValueResultIndex(arg), MLIR_GetTypeString(ctx->mlir_ctx, arg_ty)));
+                else strbuf_append(arena, &result, format(arena, str_lit("{}: {}"), format_value_name(ctx, arg), MLIR_GetTypeString(ctx->mlir_ctx, arg_ty)));
             } else {
                 strbuf_append(arena, &result, str_lit("null_arg"));
             }
