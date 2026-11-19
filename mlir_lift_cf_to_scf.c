@@ -4,6 +4,12 @@
 // variant defined in mlir_api_impl_upstream.cpp's `CFGToSCFForWasm`)
 // while running against either backend through the mlir_api.h surface.
 //
+// The CFG to lift is expressed either with cf.br / cf.cond_br / cf.switch or
+// (MLIR_LiftCfToScfOptions.llvm_cfg) with llvm.br / llvm.cond_br /
+// llvm.switch; the comments below say "cf.*" for both. The wasm backend
+// (mlir_llvm_to_wasmssa.c) is the in-tree user and runs the LLVM flavour on
+// its LLVM-dialect-only input.
+//
 // Algorithm reference: Bahmann, Reissmann, Jahre, Meyer (2015), "Perfect
 // Reconstructability of Control Flow from Demand Dependence Graphs",
 // ACM TACO 11(4):66. https://doi.org/10.1145/2693261
@@ -87,6 +93,10 @@ struct LiftState_S {
     MLIR_BlockHandle  entry_block;  // first block of the region under lift
     MLIR_TypeHandle   i32_ty;       // cached i32 type
     MLIR_LocationHandle unk_loc;    // cached unknown location
+    // Dialect of the branch ops this lift reads and synthesizes: false for
+    // cf.br / cf.cond_br / cf.switch, true for llvm.br / llvm.cond_br /
+    // llvm.switch (see MLIR_LiftCfToScfOptions).
+    bool              llvm_cfg;
 
     // Cached llvm.mlir.constant of i32 for switch flag values.
     MLIR_ValueHandle *switch_value_cache;
@@ -115,6 +125,7 @@ static void             lift_state_init(LiftState *st, MLIR_Context *ctx,
 // Forward declaration of branch op constructor used by EdgeMultiplexer
 // (defined further down with the other op constructors).
 static MLIR_OpHandle create_cf_switch_in_block(MLIR_Context *ctx, Arena *arena,
+                                               bool llvm_cfg,
                                                MLIR_BlockHandle in_block,
                                                MLIR_ValueHandle flag,
                                                MLIR_BlockHandle dflt_dst,
@@ -127,6 +138,7 @@ static MLIR_OpHandle create_cf_switch_in_block(MLIR_Context *ctx, Arena *arena,
                                                MLIR_LocationHandle loc);
 
 static MLIR_OpHandle create_cf_cond_br_in_block(MLIR_Context *ctx, Arena *arena,
+                                                bool llvm_cfg,
                                                 MLIR_BlockHandle in_block,
                                                 MLIR_ValueHandle cond,
                                                 MLIR_BlockHandle t_dst,
@@ -373,7 +385,8 @@ static void edge_multiplexer_create_switch(EdgeMultiplexer *m,
     size_t n_dflt = n_case_args[n_pick - 1];
     n_pick -= 1;
 
-    create_cf_switch_in_block(m->st->ctx, m->st->arena, in_block, disc_v,
+    create_cf_switch_in_block(m->st->ctx, m->st->arena, m->st->llvm_cfg,
+                              in_block, disc_v,
                               dflt_dst, dflt_args, n_dflt,
                               case_values, case_dsts, case_args, n_case_args,
                               n_pick, loc);
@@ -394,6 +407,7 @@ static bool string_eq_string(string a, string b);
 // `dst` with `args` as branch operands.
 // ============================================================================
 static MLIR_OpHandle create_cf_br_in_block(MLIR_Context *ctx, Arena *arena,
+                                           bool llvm_cfg,
                                            MLIR_BlockHandle in_block,
                                            MLIR_BlockHandle dst,
                                            MLIR_ValueHandle *args, size_t n_args,
@@ -405,7 +419,8 @@ static MLIR_OpHandle create_cf_br_in_block(MLIR_Context *ctx, Arena *arena,
     size_t *snums = arena_new_array(arena, size_t, 1);
     snums[0] = n_args;
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
-        ctx, OP_TYPE_CF_BR, str_lit("cf.br"),
+        ctx, llvm_cfg ? OP_TYPE_UNREGISTERED : OP_TYPE_CF_BR,
+        llvm_cfg ? str_lit("llvm.br") : str_lit("cf.br"),
         NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         succs, 1, sops, snums,
         loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
@@ -434,6 +449,7 @@ typedef struct {
     size_t         cap;
     MLIR_RegionHandle region;
     Arena         *arena;
+    bool           llvm_cfg;      // branch-op dialect (see LiftState)
 } Combiner;
 
 static bool string_eq_string(string a, string b) {
@@ -528,8 +544,8 @@ static void combiner_combine_exit(MLIR_Context *ctx, Combiner *c,
     // The return op is still at the end of `from_block`. Erase it, then
     // append the cf.br.
     MLIR_EraseOp(ctx, return_op);
-    create_cf_br_in_block(ctx, c->arena, from_block, e->exit_block,
-                          operands, n_ops, loc);
+    create_cf_br_in_block(ctx, c->arena, c->llvm_cfg, from_block,
+                          e->exit_block, operands, n_ops, loc);
 
     if (inserted) {
         // First occurrence: install a fresh return op in the new exit
@@ -745,7 +761,8 @@ static StructuredLoopProps create_single_exiting_latch(
     for (size_t i = 0; i < n_hdr_args; ++i) {
         hdr_args[i] = MLIR_GetBlockArg(latch, i);
     }
-    create_cf_cond_br_in_block(st->ctx, st->arena, latch, should_repeat,
+    create_cf_cond_br_in_block(st->ctx, st->arena, st->llvm_cfg, latch,
+                               should_repeat,
                                loop_header, hdr_args, n_hdr_args,
                                exit_block, NULL, 0, loc);
 
@@ -784,29 +801,37 @@ static bool op_is_func_like(MLIR_OpHandle op) {
     return string_eq(n, "func.func") || string_eq(n, "llvm.func");
 }
 
-// Returns true iff `op` is one of the cf branch ops the algorithm cares
-// about (cf.br, cf.cond_br, cf.switch).
-static bool op_is_cf_branch(MLIR_OpHandle op) {
+// Returns true iff `op` is one of the branch ops the algorithm cares about:
+// cf.br / cf.cond_br / cf.switch, or (llvm_cfg) their LLVM-dialect
+// counterparts llvm.br / llvm.cond_br / llvm.switch. The two families have
+// the same shape through mlir_api.h (successors + per-successor operands,
+// the condition / flag as operand 0, `case_values` on the switch), so the
+// rest of the algorithm is dialect-agnostic. Exactly one family is accepted
+// per run: a branch op of the other family fails check_preconditions.
+static bool op_is_cf_branch(MLIR_OpHandle op, bool llvm_cfg) {
     string n = MLIR_GetOpName(op);
+    if (llvm_cfg)
+        return string_eq(n, "llvm.br") || string_eq(n, "llvm.cond_br") ||
+               string_eq(n, "llvm.switch");
     return string_eq(n, "cf.br") || string_eq(n, "cf.cond_br") ||
            string_eq(n, "cf.switch");
 }
 
 // Returns true iff the given region contains any cf.* branch op that we
 // would have to lift. Used by the fast path.
-static bool region_has_cf_branch(MLIR_RegionHandle region) {
+static bool region_has_cf_branch(MLIR_RegionHandle region, bool llvm_cfg) {
     size_t nb = MLIR_GetRegionNumBlocks(region);
     for (size_t bi = 0; bi < nb; ++bi) {
         MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
         size_t no = MLIR_GetBlockNumOps(b);
         for (size_t oi = 0; oi < no; ++oi) {
             MLIR_OpHandle o = MLIR_GetBlockOp(b, oi);
-            if (op_is_cf_branch(o)) return true;
+            if (op_is_cf_branch(o, llvm_cfg)) return true;
             // Recurse into nested regions (e.g. scf.if/scf.while produced
             // by an earlier iteration of the algorithm).
             size_t nr = MLIR_GetOpNumRegions(o);
             for (size_t ri = 0; ri < nr; ++ri) {
-                if (region_has_cf_branch(MLIR_GetOpRegion(o, ri)))
+                if (region_has_cf_branch(MLIR_GetOpRegion(o, ri), llvm_cfg))
                     return true;
             }
         }
@@ -818,7 +843,7 @@ static bool region_has_cf_branch(MLIR_RegionHandle region) {
 // Port of checkTransformationPreconditions (CFGToSCF.cpp:1237-1297).
 // Returns true on success, false on a violated precondition.
 // ============================================================================
-static bool check_preconditions(MLIR_RegionHandle region) {
+static bool check_preconditions(MLIR_RegionHandle region, bool llvm_cfg) {
     size_t nb = MLIR_GetRegionNumBlocks(region);
     for (size_t bi = 0; bi < nb; ++bi) {
         MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
@@ -829,9 +854,10 @@ static bool check_preconditions(MLIR_RegionHandle region) {
         for (size_t oi = 0; oi < no; ++oi) {
             MLIR_OpHandle o = MLIR_GetBlockOp(b, oi);
             if (MLIR_GetOpNumSuccessors(o) == 0) continue;
-            // We accept only the cf.* branch ops as branch-op-interface
-            // carriers. Anything else with successors is unsupported.
-            if (!op_is_cf_branch(o)) {
+            // We accept only the selected family of branch ops as
+            // branch-op-interface carriers. Anything else with successors
+            // is unsupported.
+            if (!op_is_cf_branch(o, llvm_cfg)) {
                 return false;
             }
             // cf.* ops have no operation-produced successor operands.
@@ -2243,8 +2269,10 @@ static BranchXformResult transform_to_structured_cf_branches(
     // Any other multi-successor terminator is left in place and we recurse
     // into the children.
     string term_name = MLIR_GetOpName(term);
-    bool is_cond_br = string_eq_string(term_name, str_lit("cf.cond_br"));
-    bool is_switch  = string_eq_string(term_name, str_lit("cf.switch"));
+    bool is_cond_br = string_eq_string(
+        term_name, st->llvm_cfg ? str_lit("llvm.cond_br") : str_lit("cf.cond_br"));
+    bool is_switch  = string_eq_string(
+        term_name, st->llvm_cfg ? str_lit("llvm.switch") : str_lit("cf.switch"));
     if (!is_cond_br && !is_switch) {
         // Not lifted; caller's worklist should still try children.
         res.made_progress = false;
@@ -2434,7 +2462,8 @@ static BranchXformResult transform_to_structured_cf_branches(
                 MLIR_LocationHandle tloc = MLIR_GetOpLocation(t);
                 MLIR_BlockHandle bb = exit_terms[i].block;
                 MLIR_EraseOp(st->ctx, t);
-                create_cf_br_in_block(st->ctx, arena, bb, cont, ops, no, tloc);
+                create_cf_br_in_block(st->ctx, arena, st->llvm_cfg, bb, cont,
+                                      ops, no, tloc);
             }
 
             // Re-queue region_entry; next pass will lift normally.
@@ -2818,7 +2847,7 @@ static bool transform_cfg_to_scf_region(LiftState *st, Combiner *combiner,
     if (MLIR_GetRegionNumBlocks(region) == 0) return false;
     if (MLIR_GetRegionNumBlocks(region) == 1) return false;
 
-    if (!check_preconditions(region)) return false;
+    if (!check_preconditions(region, st->llvm_cfg)) return false;
     create_single_exit_blocks_for_return_like_into(st->ctx, st->arena, region,
                                                    combiner);
 
@@ -2886,7 +2915,7 @@ static bool transform_cfg_to_scf_region(LiftState *st, Combiner *combiner,
         string msg = format(
             scratch.arena,
             str_lit("lift-cf-to-scf: bailing out of {} @{} after {} "
-                    "worklist iterations (safety cap = {}); {} cf.* op(s) "
+                    "worklist iterations (safety cap = {}); {} branch op(s) "
                     "will remain in this region\n"),
             fn_op_name, fn_sym_name,
             (int64_t)safety_iter, (int64_t)safety_limit, (int64_t)wl_n);
@@ -2937,8 +2966,10 @@ static void erase_unreachable_blocks(MLIR_Context *ctx, MLIR_RegionHandle region
     }
 }
 
-bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module) {
+bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module,
+                            const MLIR_LiftCfToScfOptions *options) {
     if (module == MLIR_INVALID_HANDLE) return false;
+    bool llvm_cfg = options && options->llvm_cfg;
     if (MLIR_GetOpNumRegions(module) == 0) return true;
 
     Arena *scratch = arena_create(4096);
@@ -2954,15 +2985,17 @@ bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module) {
             MLIR_RegionHandle body = MLIR_GetOpRegion(o, 0);
             if (MLIR_GetRegionNumBlocks(body) == 0) continue;
             erase_unreachable_blocks(ctx, body);
-            if (!check_preconditions(body)) {
+            if (!check_preconditions(body, llvm_cfg)) {
                 arena_destroy(scratch);
                 return false;
             }
-            if (!region_has_cf_branch(body)) continue;
+            if (!region_has_cf_branch(body, llvm_cfg)) continue;
             LiftState st = {0};
             MLIR_BlockHandle entry = MLIR_GetRegionBlock(body, 0);
             lift_state_init(&st, ctx, scratch, o, entry);
+            st.llvm_cfg = llvm_cfg;
             Combiner combiner = {0};
+            combiner.llvm_cfg = llvm_cfg;
             walk_and_transform_regions(&st, &combiner, body);
         }
     }
@@ -3077,6 +3110,7 @@ static MLIR_ValueHandle get_undef_value(LiftState *st, MLIR_TypeHandle ty) {
 // Emit `cf.cond_br %cond, ^t(t_args...), ^f(f_args...)` at the end of
 // `in_block`. Returns the new op handle.
 static MLIR_OpHandle create_cf_cond_br_in_block(MLIR_Context *ctx, Arena *arena,
+                                                bool llvm_cfg,
                                                 MLIR_BlockHandle in_block,
                                                 MLIR_ValueHandle cond,
                                                 MLIR_BlockHandle t_dst,
@@ -3093,7 +3127,8 @@ static MLIR_OpHandle create_cf_cond_br_in_block(MLIR_Context *ctx, Arena *arena,
     size_t *snums = arena_new_array(arena, size_t, 2);
     snums[0] = n_t_args; snums[1] = n_f_args;
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
-        ctx, OP_TYPE_CF_COND_BR, str_lit("cf.cond_br"),
+        ctx, llvm_cfg ? OP_TYPE_UNREGISTERED : OP_TYPE_CF_COND_BR,
+        llvm_cfg ? str_lit("llvm.cond_br") : str_lit("cf.cond_br"),
         NULL, 0,          // attributes
         NULL, 0,          // result_types
         NULL, 0,          // results
@@ -3117,6 +3152,7 @@ static MLIR_OpHandle create_cf_cond_br_in_block(MLIR_Context *ctx, Arena *arena,
 // case_values is a DenseI32ArrayAttr; case_operand_segments is a
 // DenseI32ArrayAttr listing the number of operands per case.
 static MLIR_OpHandle create_cf_switch_in_block(MLIR_Context *ctx, Arena *arena,
+                                               bool llvm_cfg,
                                                MLIR_BlockHandle in_block,
                                                MLIR_ValueHandle flag,
                                                MLIR_BlockHandle dflt_dst,
@@ -3150,7 +3186,8 @@ static MLIR_OpHandle create_cf_switch_in_block(MLIR_Context *ctx, Arena *arena,
     MLIR_AttributeHandle *as = arena_new_array(arena, MLIR_AttributeHandle, 1);
     as[0] = ca;
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
-        ctx, OP_TYPE_CF_SWITCH, str_lit("cf.switch"),
+        ctx, llvm_cfg ? OP_TYPE_UNREGISTERED : OP_TYPE_CF_SWITCH,
+        llvm_cfg ? str_lit("llvm.switch") : str_lit("cf.switch"),
         as, 1,            // attributes
         NULL, 0,          // result_types
         NULL, 0,          // results

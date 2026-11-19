@@ -445,7 +445,9 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
         // attribute type doesn't match, which then makes the
         // intermediate cf.switch fail to lift to scf.index_switch.
         // Convert here so the typed property storage accepts it.
-        if (nm == "cf.switch" && na->getName().strref() == "case_values") {
+        // llvm.switch declares `case_values` the same way.
+        if ((nm == "cf.switch" || nm == "llvm.switch") &&
+            na->getName().strref() == "case_values") {
             if (auto arr = mlir::dyn_cast<mlir::DenseI32ArrayAttr>(val)) {
                 auto i32Ty = mlir::IntegerType::get(&ctx, 32);
                 auto shaped = mlir::RankedTensorType::get(
@@ -485,8 +487,9 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
             }
             state.addAttribute("operandSegmentSizes",
                 mlir::DenseI32ArrayAttr::get(&ctx, seg));
-        } else if (nm == "cf.switch") {
-            // cf.switch has 3 operand segments: flag (always 1), default
+        } else if (nm == "cf.switch" || nm == "llvm.switch") {
+            // cf.switch (and llvm.switch, which has the same operand
+            // layout) has 3 operand segments: flag (always 1), default
             // operands (successor 0), and case operands (sum across
             // successors 1..N-1). It also needs case_operand_segments —
             // one int per case telling BranchOpInterface how to slice
@@ -692,6 +695,24 @@ extern "C" MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle h,
     if (mlir::isa<mlir::cf::SwitchOp>(op) &&
         llvm::StringRef(name) == "case_values") {
         if (auto sw = mlir::dyn_cast<mlir::cf::SwitchOp>(op)) {
+            if (auto cv = sw.getCaseValuesAttr()) {
+                auto elemTy = cv.getElementType();
+                if (elemTy.isInteger(32)) {
+                    llvm::SmallVector<int32_t, 8> vals;
+                    vals.reserve(cv.getNumElements());
+                    for (auto apv : cv.getValues<llvm::APInt>())
+                        vals.push_back((int32_t)apv.getSExtValue());
+                    return stash(mlir::DenseI32ArrayAttr::get(&mctx, vals));
+                }
+                return stash(cv);
+            }
+        }
+    }
+    // Same round-trip for llvm.switch (the lift's switch when it runs on an
+    // LLVM-dialect CFG).
+    if (mlir::isa<mlir::LLVM::SwitchOp>(op) &&
+        llvm::StringRef(name) == "case_values") {
+        if (auto sw = mlir::dyn_cast<mlir::LLVM::SwitchOp>(op)) {
             if (auto cv = sw.getCaseValuesAttr()) {
                 auto elemTy = cv.getElementType();
                 if (elemTy.isInteger(32)) {
@@ -2242,9 +2263,11 @@ static void liftLLVMFuncCFGToSCF(mlir::ModuleOp module) {
 // func.func bodies (via the stock `LiftControlFlowToSCFPass`) and
 // llvm.func bodies (via `liftLLVMFuncCFGToSCF`).
 extern "C" bool MLIR_LiftCfToScfNative(MLIR_Context *ctx,
-                                       MLIR_OpHandle module);
+                                       MLIR_OpHandle module,
+                                       const MLIR_LiftCfToScfOptions *options);
 
-extern "C" bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module_h) {
+extern "C" bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module_h,
+                                 const MLIR_LiftCfToScfOptions *options) {
     if (module_h == MLIR_INVALID_HANDLE) return false;
     resetBlockOpCache();
     auto *op = F<mlir::Operation>(module_h);
@@ -2277,63 +2300,7 @@ extern "C" bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module_h) {
     // for the simple cases we test, and functionally correct for all of
     // tinyc's self-host.
     resetBlockOpCache();
-    return MLIR_LiftCfToScfNative(ctx, module_h);
-}
-
-extern "C" bool MLIR_LowerToLLVMDialectForWasmUpstream(MLIR_Context *ctx,
-                                                       MLIR_OpHandle module_h) {
-    (void)ctx;
-    resetBlockOpCache();
-    auto *op = F<mlir::Operation>(module_h);
-    auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
-    if (!module) {
-        std::fprintf(stderr,
-                     "MLIR_LowerToLLVMDialectForWasmUpstream: handle is not a ModuleOp\n");
-        return false;
-    }
-    auto &mctx = globalCtx().mctx;
-    // The opUserAttrs / opByNameAttrs caches are keyed by Operation* and
-    // may contain stale entries for ops about to be erased by the
-    // conversion passes below. Allocator reuse can produce false hits
-    // later; clear them before lowering.
-    opUserAttrs().clear();
-    opByNameAttrs().clear();
-    bool has_vector_op = false;
-    module.walk([&](mlir::Operation *o) {
-        if (o->getDialect() && o->getDialect()->getNamespace() == "vector") {
-            has_vector_op = true;
-            return mlir::WalkResult::interrupt();
-        }
-        return mlir::WalkResult::advance();
-    });
-    {
-        mlir::IRRewriter rewriter(&mctx);
-        (void)mlir::eraseUnreachableBlocks(rewriter, module->getRegions());
-    }
-    // Lift CF to SCF on both func.func and llvm.func bodies. tinyc emits
-    // variadic functions as llvm.func (since func.func has no var-arg form),
-    // and the stock `LiftControlFlowToSCFPass` only walks func.func; do it
-    // ourselves so the wasm backend can see structured loops/ifs.
-    liftLLVMFuncCFGToSCF(module);
-    mlir::PassManager pm(&mctx);
-    pm.addPass(mlir::createLiftControlFlowToSCFPass());
-    if (has_vector_op) {
-        pm.addPass(mlir::createConvertVectorToLLVMPass());
-    }
-    pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
-    pm.addPass(mlir::createArithToLLVMConversionPass());
-    pm.addPass(mlir::createConvertFuncToLLVMPass());
-    pm.addPass(mlir::createReconcileUnrealizedCastsPass());
-    if (mlir::failed(pm.run(module))) {
-        std::fprintf(stderr,
-                     "MLIR_LowerToLLVMDialectForWasmUpstream: pass pipeline failed\n");
-        return false;
-    }
-    // Drop any cached attrs from before / during the pipeline: the ops they
-    // were keyed on may have been erased and the addresses recycled.
-    opUserAttrs().clear();
-    opByNameAttrs().clear();
-    return true;
+    return MLIR_LiftCfToScfNative(ctx, module_h, options);
 }
 
 // Host codegen (native llc / x86 ELF) cannot lower wasm memory intrinsics.

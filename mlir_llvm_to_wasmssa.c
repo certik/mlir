@@ -1,6 +1,29 @@
 // Stage 1 of the native LLVM->WASM pipeline:
 // LLVM-dialect builtin.module --(walk)--> wasmssa-form `builtin.module`.
 //
+// Input contract: the module is LLVM dialect ONLY (the output of
+// MLIR_LowerToLLVMDialect): `llvm.func` / `llvm.mlir.global` at module
+// level, `llvm.*` ops inside function bodies, and control flow as a flat
+// CFG of llvm.br / llvm.cond_br / llvm.switch terminators with block
+// arguments. No cf.*, scf.*, arith.* or func.* op may be handed in.
+//
+// WebAssembly has no arbitrary branches, only structured block / loop / if,
+// so this stage has to rebuild structured control flow from that CFG. It
+// does so in two internal steps:
+//
+//   1. Structurization: MLIR_LiftCfToScf (mlir_lift_cf_to_scf.c, a port of
+//      upstream's CFGToSCF) rewrites each function's llvm.br / llvm.cond_br
+//      / llvm.switch CFG, in place, into scf.if / scf.while /
+//      scf.index_switch regions terminated by scf.yield / scf.condition.
+//   2. Lowering: the walk below maps llvm.* ops and those scf.* regions to
+//      wasmssa.* ops.
+//
+// scf.* is therefore a PRIVATE INTERMEDIATE FORM of the wasm backend: it is
+// produced only by step 1 above and consumed only by step 2 (lower_scf_if /
+// lower_scf_while / lower_scf_index_switch). Nothing upstream of this file
+// creates scf.* for it, and nothing downstream sees it. Note that the input
+// module is consumed (step 1 mutates it).
+//
 // Each `llvm.func` / `llvm.mlir.global` is lowered directly to `wasmssa.*`
 // MLIR ops appended into the output module body. Inside a function, each
 // emit-helper / inline call site builds a stack-local `wasmssa_op_t`
@@ -2260,11 +2283,12 @@ static bool va_call_layout(FnCtx *F, MLIR_OpHandle op, uint32_t *total_size,
 static bool prewalk_op(FnCtx *F, MLIR_OpHandle op) {
     string n = MLIR_GetOpName(op);
     if (name_eq(n, "llvm.br") || name_eq(n, "llvm.cond_br") ||
-        name_eq(n, "llvm.switch") ||
-        name_eq(n, "cf.br") || name_eq(n, "cf.cond_br") ||
-        name_eq(n, "cf.switch")) {
+        name_eq(n, "llvm.switch")) {
+        // The structurization step could not lift this branch (see the
+        // limitations listed in mlir_lift_cf_to_scf.h).
         fprintf(stderr,
-                "wasmssa-lower: control flow not lifted to scf (%.*s)\n",
+                "wasmssa-lower: control flow could not be structured "
+                "(%.*s left in the CFG)\n",
                 (int)n.size, n.str);
         return false;
     }
@@ -2879,6 +2903,16 @@ static void emit_import_func(MLIR_Context *ctx, Arena *arena,
 // byte-for-byte): import_funcs, then defined funcs, then import_globals.
 // =============================================================================
 MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module) {
+    // Step 1 (see the file header): structurize the LLVM-dialect CFG in
+    // place. The scf.* ops this creates never leave this function.
+    MLIR_LiftCfToScfOptions lift_options = {0};
+    lift_options.llvm_cfg = true;
+    if (!MLIR_LiftCfToScf(ctx, module, &lift_options)) {
+        fprintf(stderr,
+                "wasmssa-lower: control-flow structurization failed\n");
+        return MLIR_INVALID_HANDLE;
+    }
+
     MLIR_RegionHandle mr = MLIR_GetOpRegion(module, 0);
     MLIR_BlockHandle  mb = MLIR_GetRegionBlock(mr, 0);
     size_t nops = MLIR_GetBlockNumOps(mb);

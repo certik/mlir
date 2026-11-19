@@ -193,14 +193,17 @@ tasks. Each stage drops its per-file `.wasm.o` outputs under
 
 ### How the native pipeline is structured
 
-The cf→scf lift is performed up front by `MLIR_LowerToLLVMDialectForWasm`
-(`mlir_lower_to_llvm.c`, calling `MLIR_LiftCfToScf` →
-`mlir_lift_cf_to_scf.c`) so the wasm stages see already-structured
-control flow. The LLVM-dialect → wasm path then runs three MLIR-to-MLIR
-stages:
+Every backend takes the output of `MLIR_LowerToLLVMDialect`
+(`mlir_lower_to_llvm.c`): LLVM dialect only, with control flow as a flat
+`llvm.br` / `llvm.cond_br` CFG. WebAssembly has no arbitrary branches, so
+the wasm backend rebuilds structured control flow itself: its first,
+internal step runs `MLIR_LiftCfToScf` (→ `mlir_lift_cf_to_scf.c`) on the
+LLVM-dialect CFG. The resulting `scf.*` ops are a private intermediate form
+of the wasm backend; no other stage produces or sees them. The
+LLVM-dialect → wasm path runs three MLIR-to-MLIR stages:
 
 - `mlir_llvm_to_wasmssa.c` — Stage 1: LLVM dialect → wasmssa
-  (lowers ops in-place; the cf→scf lift has already happened above).
+  (structurizes the CFG, then lowers ops in-place).
 - `mlir_wasmssa_to_wasmstack.c` — Stage 2: wasmssa → wasmstack (linearises
   SSA results onto the wasm value stack, inserts block/loop/if/end).
 - `mlir_wasmstack_to_bin.c` — Stage 3: wasmstack → `.wasm.o`
@@ -225,8 +228,8 @@ that were filled in `mlir_api.h` along the way:
   is rejected by the verifier; you need a real `FlatSymbolRefAttr`).
 - `MLIR_LowerToLLVMDialect` — runs the standard MLIR conversion passes
   (`scf-to-cf`, `*-to-llvm`, `reconcile-unrealized-casts`).
-- `MLIR_LowerToLLVMDialectForWasm` + `MLIR_LiftCfToScf` — the wasm
-  variant that lifts cf→scf first and keeps `scf.*` ops in place.
+- `MLIR_LiftCfToScf` — CFG → structured control flow; used internally
+  by the wasm backend on its LLVM-dialect input.
 - `MLIR_TranslateModuleToLLVMIR` — emits portable LLVM IR text.
 - `MLIR_TranslateModuleToWasm` — emits a wasm32-wasi object file via
   the three-stage in-tree pipeline.
