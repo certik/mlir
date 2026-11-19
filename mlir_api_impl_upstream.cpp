@@ -578,6 +578,11 @@ extern "C" string MLIR_GetOpName(MLIR_OpHandle h) {
     return mkRefString(sr);
 }
 extern "C" string MLIR_GetOpName_string(MLIR_OpHandle h) { return MLIR_GetOpName(h); }
+// Upstream operations do not record the MLIR_OpType their creator passed,
+// so "created unregistered" is "has no registered type".
+extern "C" bool MLIR_IsOpCreatedUnregistered(MLIR_OpHandle h) {
+    return MLIR_GetOpType(h) == OP_TYPE_UNREGISTERED;
+}
 extern "C" MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle) { return MLIR_INVALID_HANDLE; }
 extern "C" string MLIR_GetOpTrailingComment(MLIR_OpHandle) {
     string s; s.str = nullptr; s.size = 0; return s;

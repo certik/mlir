@@ -7,6 +7,14 @@
 #include <string.h>
 
 // SSA numbering map for printer (key by API values during migration)
+// The op type as far as printing is concerned. An op created with
+// OP_TYPE_UNREGISTERED prints in the quoted generic form even when its name
+// is registered (MLIR_GetOpType() then reports the registered type, which
+// is what passes dispatch on). Printed IR must not depend on that.
+static inline MLIR_OpType printed_op_type(MLIR_OpHandle op) {
+    return MLIR_IsOpCreatedUnregistered(op) ? OP_TYPE_UNREGISTERED : MLIR_GetOpType(op);
+}
+
 static inline size_t ptr_hash(MLIR_ValueHandle p) { return ((size_t)p) >> 3; }
 static inline bool ptr_equal(MLIR_ValueHandle a, MLIR_ValueHandle b) { return a == b; }
 #define SsaMap_HASH ptr_hash
@@ -422,7 +430,7 @@ static string print_function_region_classic(PrintCtx *ctx, int indent_level, MLI
             if (no > 0) {
                 MLIR_OpHandle last = MLIR_GetBlockOp(block, no - 1);
                 string lname = MLIR_GetOpName(last);
-                if (lname.size == 0) lname = MLIR_MLIR_OpTypeToString(MLIR_GetOpType(last));
+                if (lname.size == 0) lname = MLIR_MLIR_OpTypeToString(printed_op_type(last));
                 if (str_eq(lname, str_lit("affine.yield")) &&
                     MLIR_GetOpNumOperands(last) == 0) {
                     no--;
@@ -529,7 +537,7 @@ static string print_op_generic_form_classic(PrintCtx *ctx, int indent_level, MLI
 
     // Quoted op name
     string opname = MLIR_GetOpName_string(op);
-    if (opname.size == 0) opname = MLIR_MLIR_OpTypeToString(MLIR_GetOpType(op));
+    if (opname.size == 0) opname = MLIR_MLIR_OpTypeToString(printed_op_type(op));
     strbuf_append(arena, &result, format(arena, str_lit("\"{}\"("), opname));
 
     // Operands
@@ -651,7 +659,7 @@ static string print_op_generic_form_classic(PrintCtx *ctx, int indent_level, MLI
 // know how to format and that the buggy default path would mangle.
 static bool op_force_generic_form(MLIR_OpHandle op) {
     string nm = MLIR_GetOpName_string(op);
-    if (nm.size == 0) nm = MLIR_MLIR_OpTypeToString(MLIR_GetOpType(op));
+    if (nm.size == 0) nm = MLIR_MLIR_OpTypeToString(printed_op_type(op));
     if (nm.size == 0) return false;
     static const char *names[] = {
         "linalg.yield",
@@ -773,7 +781,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
     }
 
     // Operation-specific printing with switch statement
-    switch (MLIR_GetOpType(op)) {
+    switch (printed_op_type(op)) {
         case OP_TYPE_ARITH_SELECT: {
             // Classic format: arith.select %cond, %t, %f : cond_ty, val_ty
             strbuf_append(arena, &result, str_lit("arith.select "));
@@ -1181,7 +1189,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     MLIR_BlockHandle b = MLIR_GetRegionBlock(region, MLIR_GetRegionNumBlocks(region) - 1);
                     if (b && MLIR_GetBlockNumOps(b) > 0) {
                         MLIR_OpHandle last = MLIR_GetBlockOp(b, MLIR_GetBlockNumOps(b) - 1);
-                        if (last && MLIR_GetOpType(last) == OP_TYPE_TT_RETURN && MLIR_GetOpNumOperands(last) > 0) {
+                        if (last && printed_op_type(last) == OP_TYPE_TT_RETURN && MLIR_GetOpNumOperands(last) > 0) {
                             MLIR_ValueHandle return_val = MLIR_GetOpOperand(last, 0);
                             if (return_val) {
                                 MLIR_TypeHandle return_type = MLIR_GetValueType(return_val);
@@ -1585,7 +1593,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // Typed form: linalg.fill|copy ins(%a : T, ...) outs(%b : T, ...) [-> rt, ...]
             // We treat the first half of operands as ins, second half as outs.
             // For the typical fill/copy this means 1 ins + 1 outs.
-            strbuf_append(arena, &result, MLIR_GetOpType(op) == OP_TYPE_LINALG_FILL ? str_lit("linalg.fill") : str_lit("linalg.copy"));
+            strbuf_append(arena, &result, printed_op_type(op) == OP_TYPE_LINALG_FILL ? str_lit("linalg.fill") : str_lit("linalg.copy"));
             size_t n_op = MLIR_GetOpNumOperands(op);
             size_t n_ins = n_op / 2;
             if (n_op > 0 && n_ins == 0) n_ins = 1;
@@ -1772,7 +1780,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     MLIR_AttributeHandle attr = MLIR_GetOpAttribute(op, i);
                     // Skip internal attributes
                     if (str_eq(MLIR_GetAttributeName(attr), str_lit("sym_name")) ||
-                        (str_eq(MLIR_GetAttributeName(attr), str_lit("value")) && MLIR_GetOpType(op) == OP_TYPE_ARITH_CONSTANT) ||
+                        (str_eq(MLIR_GetAttributeName(attr), str_lit("value")) && printed_op_type(op) == OP_TYPE_ARITH_CONSTANT) ||
                         str_eq(MLIR_GetAttributeName(attr), str_lit("axis")) ||
                         str_eq(MLIR_GetAttributeName(attr), str_lit("start")) ||
                         str_eq(MLIR_GetAttributeName(attr), str_lit("end"))) {
@@ -1842,7 +1850,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     MLIR_AttributeHandle attr = MLIR_GetOpAttribute(op, i);
                     // Skip internal attributes
                     if (str_eq(MLIR_GetAttributeName(attr), str_lit("sym_name")) ||
-                        (str_eq(MLIR_GetAttributeName(attr), str_lit("value")) && MLIR_GetOpType(op) == OP_TYPE_ARITH_CONSTANT) ||
+                        (str_eq(MLIR_GetAttributeName(attr), str_lit("value")) && printed_op_type(op) == OP_TYPE_ARITH_CONSTANT) ||
                         str_eq(MLIR_GetAttributeName(attr), str_lit("axis")) ||
                         str_eq(MLIR_GetAttributeName(attr), str_lit("start")) ||
                         str_eq(MLIR_GetAttributeName(attr), str_lit("end"))) {
@@ -1923,7 +1931,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
         default: {
             // Handle func.func robustly even if op_type mapping was missed
-            if (MLIR_GetOpType(op) == OP_TYPE_FUNC_FUNC) {
+            if (printed_op_type(op) == OP_TYPE_FUNC_FUNC) {
                 strbuf header = strbuf_make();
     strbuf_append(arena, &header, str_lit("func.func "));
                 string vis = str_lit(""); string name = str_lit(""); string ret = str_lit(""); strbuf params = strbuf_make();
@@ -1944,12 +1952,12 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 break;
             }
             // Before generic/default printing, handle a few named ops specially:
-            if (MLIR_GetOpType(op) == OP_TYPE_ARITH_BITCAST || MLIR_GetOpType(op) == OP_TYPE_ARITH_SITOFP ||
-                MLIR_GetOpType(op) == OP_TYPE_ARITH_FPTOSI || MLIR_GetOpType(op) == OP_TYPE_ARITH_INDEX_CAST ||
-                MLIR_GetOpType(op) == OP_TYPE_ARITH_EXTSI || MLIR_GetOpType(op) == OP_TYPE_ARITH_TRUNCI ||
-                MLIR_GetOpType(op) == OP_TYPE_ARITH_EXTF || MLIR_GetOpType(op) == OP_TYPE_ARITH_TRUNCF) {
+            if (printed_op_type(op) == OP_TYPE_ARITH_BITCAST || printed_op_type(op) == OP_TYPE_ARITH_SITOFP ||
+                printed_op_type(op) == OP_TYPE_ARITH_FPTOSI || printed_op_type(op) == OP_TYPE_ARITH_INDEX_CAST ||
+                printed_op_type(op) == OP_TYPE_ARITH_EXTSI || printed_op_type(op) == OP_TYPE_ARITH_TRUNCI ||
+                printed_op_type(op) == OP_TYPE_ARITH_EXTF || printed_op_type(op) == OP_TYPE_ARITH_TRUNCF) {
                 // op name
-                strbuf_append(arena, &result, MLIR_MLIR_OpTypeToString(MLIR_GetOpType(op)));
+                strbuf_append(arena, &result, MLIR_MLIR_OpTypeToString(printed_op_type(op)));
                 // operand
                 if (MLIR_GetOpNumOperands(op) > 0 && MLIR_GetOpOperand(op, 0)) {
                     strbuf_append(arena, &result, str_lit(" "));
@@ -1977,8 +1985,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
 
             // Print operation name
-            bool is_tt_func = (MLIR_GetOpType(op) == OP_TYPE_TT_FUNC);
-            if (MLIR_GetOpType(op) == OP_TYPE_UNREGISTERED && !is_tt_func) {
+            bool is_tt_func = (printed_op_type(op) == OP_TYPE_TT_FUNC);
+            if (printed_op_type(op) == OP_TYPE_UNREGISTERED && !is_tt_func) {
                 // Quote unregistered op names in classic format
                 strbuf_append(arena, &result, str_lit("\""));
                 string s = MLIR_GetOpName_string(op);
@@ -1988,11 +1996,11 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             } else {
                 string s = MLIR_GetOpName_string(op);
                 if (s.size > 0) strbuf_append(arena, &result, s);
-                else strbuf_append(arena, &result, MLIR_MLIR_OpTypeToString(MLIR_GetOpType(op)));
+                else strbuf_append(arena, &result, MLIR_MLIR_OpTypeToString(printed_op_type(op)));
             }
 
             // Special classic formatting for select ops
-            if (MLIR_GetOpType(op) == OP_TYPE_INDEX_CONSTANT) {
+            if (printed_op_type(op) == OP_TYPE_INDEX_CONSTANT) {
                 // index.constant N
                 for (size_t i = 0, n = MLIR_GetOpNumAttributes(op); i < n; i++) {
                     MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
@@ -2003,7 +2011,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     }
                 }
             }
-            if (MLIR_GetOpType(op) == OP_TYPE_ARITH_EXTUI) {
+            if (printed_op_type(op) == OP_TYPE_ARITH_EXTUI) {
                 // arith.extui %v : src -> dst
                 strbuf_append(arena, &result, str_lit(" "));
                 if (MLIR_GetOpNumOperands(op)>0 && MLIR_GetOpOperand(op, 0)) strbuf_append(arena, &result, print_ssa_operand_classic(ctx, MLIR_GetOpOperand(op, 0)));
@@ -2018,7 +2026,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
 
             // Special classic formatting for select tt.* ops
-            if (MLIR_GetOpType(op) == OP_TYPE_TT_BROADCAST) {
+            if (printed_op_type(op) == OP_TYPE_TT_BROADCAST) {
                 // tt.broadcast %x : (src) -> dst
                 strbuf_append(arena, &result, str_lit(" "));
                 size_t n_operands = MLIR_GetOpNumOperands(op);
@@ -2069,7 +2077,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
                 break;
             }
-            if (MLIR_GetOpType(op) == OP_TYPE_TT_EXPAND_DIMS) {
+            if (printed_op_type(op) == OP_TYPE_TT_EXPAND_DIMS) {
                 // tt.expand_dims %x {axis = i : i32} : (src) -> dst
                 strbuf_append(arena, &result, str_lit(" "));
                 size_t n_operands = MLIR_GetOpNumOperands(op);
@@ -2132,7 +2140,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
                 break;
             }
-            if (MLIR_GetOpType(op) == OP_TYPE_TT_DOT) {
+            if (printed_op_type(op) == OP_TYPE_TT_DOT) {
                 // tt.dot %a, %b, %acc {attrs} : lhs * rhs -> res
                 strbuf_append(arena, &result, str_lit(" "));
                 for (int i = 0; i < MLIR_GetOpNumOperands(op); i++) {
@@ -2187,7 +2195,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
 
             // Special case: tt.pure_extern_elementwise
-            if (MLIR_GetOpType(op) == OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE) {
+            if (printed_op_type(op) == OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE) {
                 // Name already printed
                 if (MLIR_GetOpNumOperands(op) > 0) {
                     strbuf_append(arena, &result, str_lit(" "));
@@ -2225,7 +2233,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // memref.store use subscript syntax: `memref.load %m[%i, %j]`
             // and `memref.store %v, %m[%i, %j]`. Other ops use a bare
             // space-separated list.
-            MLIR_OpType _ot = MLIR_GetOpType(op);
+            MLIR_OpType _ot = printed_op_type(op);
             bool _wants_parens = (_ot == OP_TYPE_MEMREF_ALLOC);
             bool _is_load = (_ot == OP_TYPE_MEMREF_LOAD);
             bool _is_store = (_ot == OP_TYPE_MEMREF_STORE);
@@ -2287,8 +2295,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
             }
             // Print type suffix in classic format
-            if (MLIR_GetOpType(op) == OP_TYPE_MEMREF_LOAD ||
-                MLIR_GetOpType(op) == OP_TYPE_MEMREF_STORE) {
+            if (printed_op_type(op) == OP_TYPE_MEMREF_LOAD ||
+                printed_op_type(op) == OP_TYPE_MEMREF_STORE) {
                 // memref.load/store print only the source memref type (the
                 // canonical MLIR form), not all operand types. Look up the
                 // `_source_type` hidden attr stashed by the parser; fall back
@@ -2307,14 +2315,14 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     strbuf_append(arena, &result, str_lit(" : "));
                     strbuf_append(arena, &result, src_type_str);
                 } else {
-                    size_t memref_idx = (MLIR_GetOpType(op) == OP_TYPE_MEMREF_STORE) ? 1 : 0;
+                    size_t memref_idx = (printed_op_type(op) == OP_TYPE_MEMREF_STORE) ? 1 : 0;
                     if (MLIR_GetOpNumOperands(op) > memref_idx && MLIR_GetOpOperand(op, memref_idx) &&
                         MLIR_GetValueType(MLIR_GetOpOperand(op, memref_idx))) {
                         strbuf_append(arena, &result, str_lit(" : "));
                         strbuf_append(arena, &result, MLIR_GetTypeString(ctx->mlir_ctx, MLIR_GetValueType(MLIR_GetOpOperand(op, memref_idx))));
                     }
                 }
-            } else if (MLIR_GetOpType(op) == OP_TYPE_INDEX_CONSTANT) {
+            } else if (printed_op_type(op) == OP_TYPE_INDEX_CONSTANT) {
                 // index.constant N — no type annotation
             } else if (MLIR_GetOpNumResultTypes(op) > 0 && MLIR_GetOpResult_type(op, 0)) {
                 strbuf_append(arena, &result, str_lit(" : "));
@@ -2343,19 +2351,19 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
     // Print attributes for operations that should show them in classic format
     // Skip internal attributes that shouldn't be visible
-    if (MLIR_GetOpNumAttributes(op) > 0 && MLIR_GetOpType(op) != OP_TYPE_TT_FUNC && MLIR_GetOpType(op) != OP_TYPE_TT_REDUCE &&
-        MLIR_GetOpType(op) != OP_TYPE_TT_LOAD && MLIR_GetOpType(op) != OP_TYPE_TT_STORE &&
-        MLIR_GetOpType(op) != OP_TYPE_ARITH_CMPI && MLIR_GetOpType(op) != OP_TYPE_TT_MAKE_RANGE &&
-        MLIR_GetOpType(op) != OP_TYPE_FUNC_FUNC) {
+    if (MLIR_GetOpNumAttributes(op) > 0 && printed_op_type(op) != OP_TYPE_TT_FUNC && printed_op_type(op) != OP_TYPE_TT_REDUCE &&
+        printed_op_type(op) != OP_TYPE_TT_LOAD && printed_op_type(op) != OP_TYPE_TT_STORE &&
+        printed_op_type(op) != OP_TYPE_ARITH_CMPI && printed_op_type(op) != OP_TYPE_TT_MAKE_RANGE &&
+        printed_op_type(op) != OP_TYPE_FUNC_FUNC) {
         // Skip printing here for cases handled inline above
-        if (MLIR_GetOpType(op) == OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE) {
+        if (printed_op_type(op) == OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE) {
             // already printed
         } else {
         // If there are tt.* attributes, we printed them inline already for default ops
         bool any_tt = false; for (size_t i=0, n=MLIR_GetOpNumAttributes(op); i<n; i++){ string an = MLIR_GetAttributeName(MLIR_GetOpAttribute(op,i)); if (an.size>=3 && an.str[0]=='t' && an.str[1]=='t' && an.str[2]=='.') { any_tt=true; break; } }
         if (!any_tt) {
         // Skip printing for ops where we printed inline already by name
-        if (MLIR_GetOpType(op) == OP_TYPE_TT_EXPAND_DIMS || MLIR_GetOpType(op) == OP_TYPE_TT_DOT) {
+        if (printed_op_type(op) == OP_TYPE_TT_EXPAND_DIMS || printed_op_type(op) == OP_TYPE_TT_DOT) {
             // do nothing
         } else {
         bool has_visible_attrs = false;
@@ -2381,17 +2389,17 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
             // For ops with typed forms that absorb structural attributes,
             // suppress those attributes from the trailing `{...}` block.
-            if (MLIR_GetOpType(op) == OP_TYPE_AFFINE_LOAD &&
+            if (printed_op_type(op) == OP_TYPE_AFFINE_LOAD &&
                 str_eq(attr_name, str_lit("map"))) {
                 continue;
             }
-            if (MLIR_GetOpType(op) == OP_TYPE_TENSOR_COLLAPSE_SHAPE &&
+            if (printed_op_type(op) == OP_TYPE_TENSOR_COLLAPSE_SHAPE &&
                 str_eq(attr_name, str_lit("reassociation"))) {
                 continue;
             }
             // affine.for absorbs lowerBoundMap/upperBoundMap/step into its
             // header (`= LB to UB step S`), so don't repeat them here.
-            if (MLIR_GetOpType(op) == OP_TYPE_AFFINE_FOR &&
+            if (printed_op_type(op) == OP_TYPE_AFFINE_FOR &&
                 (str_eq(attr_name, str_lit("lowerBoundMap")) ||
                  str_eq(attr_name, str_lit("upperBoundMap")) ||
                  str_eq(attr_name, str_lit("step")))) {
@@ -2402,13 +2410,13 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 continue;
             }
             // Skip 'function_type' on func.func (printed as part of header)
-            if (str_eq(attr_name, str_lit("function_type")) && MLIR_GetOpType(op) == OP_TYPE_FUNC_FUNC) {
+            if (str_eq(attr_name, str_lit("function_type")) && printed_op_type(op) == OP_TYPE_FUNC_FUNC) {
                 continue;
             }
             // Skip 'value' attribute only for arith.constant and index.constant operations
             if (str_eq(attr_name, str_lit("value")) &&
-                (MLIR_GetOpType(op) == OP_TYPE_ARITH_CONSTANT ||
-                 MLIR_GetOpType(op) == OP_TYPE_INDEX_CONSTANT)) {
+                (printed_op_type(op) == OP_TYPE_ARITH_CONSTANT ||
+                 printed_op_type(op) == OP_TYPE_INDEX_CONSTANT)) {
                 continue;
             }
             // Skip tt.* attributes here; they are printed inline before type for default ops
@@ -2416,7 +2424,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 continue;
             }
             // Skip axis attribute for tt.get_program_id
-            if (MLIR_GetOpType(op) == OP_TYPE_TT_GET_PROGRAM_ID && str_eq(attr_name, str_lit("axis"))) {
+            if (printed_op_type(op) == OP_TYPE_TT_GET_PROGRAM_ID && str_eq(attr_name, str_lit("axis"))) {
                 continue;
             }
             // No skipping of axis/start/end in classic mode
@@ -2463,19 +2471,19 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
     // For classic formatting: place regions (when present).
     // Skip here for func.func since its region was already printed in its case above.
-    if (MLIR_GetOpNumRegions(op) > 0 && MLIR_GetOpType(op) != OP_TYPE_FUNC_FUNC && MLIR_GetOpType(op) != OP_TYPE_TT_REDUCE
-        && MLIR_GetOpType(op) != OP_TYPE_LINALG_FILL && MLIR_GetOpType(op) != OP_TYPE_LINALG_COPY) {
+    if (MLIR_GetOpNumRegions(op) > 0 && printed_op_type(op) != OP_TYPE_FUNC_FUNC && printed_op_type(op) != OP_TYPE_TT_REDUCE
+        && printed_op_type(op) != OP_TYPE_LINALG_FILL && printed_op_type(op) != OP_TYPE_LINALG_COPY) {
         strbuf_append(arena, &result, str_lit(" "));
         for (size_t i = 0, nr = MLIR_GetOpNumRegions(op); i < nr; i++) {
             // Special handling for SCF if else
-            if (MLIR_GetOpType(op) == OP_TYPE_SCF_IF && i == 1 && nr == 2) {
+            if (printed_op_type(op) == OP_TYPE_SCF_IF && i == 1 && nr == 2) {
                 strbuf_append(arena, &result, str_lit(" else "));
             }
 
-            if (MLIR_GetOpType(op) == OP_TYPE_TT_FUNC || MLIR_GetOpType(op) == OP_TYPE_MODULE ||
-                MLIR_GetOpType(op) == OP_TYPE_SCF_FOR || MLIR_GetOpType(op) == OP_TYPE_SCF_IF || MLIR_GetOpType(op) == OP_TYPE_SCF_WHILE ||
-                MLIR_GetOpType(op) == OP_TYPE_AFFINE_FOR ||
-                MLIR_GetOpType(op) == OP_TYPE_GPU_LAUNCH) {
+            if (printed_op_type(op) == OP_TYPE_TT_FUNC || printed_op_type(op) == OP_TYPE_MODULE ||
+                printed_op_type(op) == OP_TYPE_SCF_FOR || printed_op_type(op) == OP_TYPE_SCF_IF || printed_op_type(op) == OP_TYPE_SCF_WHILE ||
+                printed_op_type(op) == OP_TYPE_AFFINE_FOR ||
+                printed_op_type(op) == OP_TYPE_GPU_LAUNCH) {
                 strbuf_append(arena, &result, print_function_region_classic(ctx, indent_level, MLIR_GetOpRegion(op, i))
                 );
             } else {
@@ -2484,7 +2492,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
         }
         // After regions of scf.for, restore parent pointer
-        if (MLIR_GetOpType(op) == OP_TYPE_SCF_FOR) {
+        if (printed_op_type(op) == OP_TYPE_SCF_FOR) {
             ctx->current_scf_for = MLIR_INVALID_HANDLE;
         }
     }

@@ -628,8 +628,16 @@ string MLIR_TranslateModuleToLLVMIRUpstream(MLIR_Context *ctx, MLIR_OpHandle mod
 string MLIR_TranslateModuleToWasmUpstream(MLIR_Context *ctx, MLIR_OpHandle module);
 
 // Accessors
+// The op's registered type, derived from its name: an op named `llvm.load`
+// is OP_TYPE_LLVM_LOAD whichever MLIR_OpType its creator passed. Ops whose
+// name is not registered are OP_TYPE_UNREGISTERED (unless created with an
+// explicit registered type, e.g. a parser alias).
 MLIR_OpType MLIR_GetOpType(MLIR_OpHandle op);
 string MLIR_GetOpName(MLIR_OpHandle op);
+// True if the op was created with OP_TYPE_UNREGISTERED, i.e. identified by
+// its name only, even when that name turned out to be a registered one. The
+// printers quote the names of such ops; nothing else should need this.
+bool MLIR_IsOpCreatedUnregistered(MLIR_OpHandle op);
 string MLIR_GetOpName_string(MLIR_OpHandle op);
 MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle op);
 string MLIR_GetOpTrailingComment(MLIR_OpHandle op);
