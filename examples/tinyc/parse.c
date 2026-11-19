@@ -179,6 +179,22 @@ typedef struct {
     bool has_address_space;
 } AttrInfo;
 
+// True when a file-scope object of type `t` is itself read-only. A leading
+// `const` qualifies the pointee of a pointer type (`const char *p` is a
+// writable pointer to const chars), so pointer-typed globals -- and arrays of
+// them, which share the element type here -- must not be emitted as constants.
+// `T *const p` is treated as writable too, which is merely conservative.
+static bool global_object_is_const(const Type *t) {
+    if (!t->is_const) return false;
+    switch (t->kind) {
+        case TY_PTR_I32: case TY_PTR_CHAR: case TY_PTR_STRUCT:
+        case TY_PTR_VOID: case TY_PTR_PTR: case TY_FNPTR:
+            return false;
+        default:
+            return true;
+    }
+}
+
 // Parse zero or more `__attribute__((...))` attribute lists. Recognized
 // attribute names: `import_module("...")`, `import_name("...")`,
 // `export_name("...")` (and the gcc-style `__import_module__` /
@@ -2968,7 +2984,9 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                 g.is_extern = saw_extern;
                 g.is_static = saw_static;
                 if (gattrs.has_address_space) g.address_space = gattrs.address_space;
-                g.is_const = tty.is_const;
+                // `const T (*fp)(...)`: the qualifier belongs to the return
+                // type; the pointer object itself stays writable.
+                g.is_const = false;
                 g.line = cur(&p).line;
                 merge_push_global(&p, prog, g);
                 continue;
@@ -2983,7 +3001,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                     g.name = nm.text;
                     g.is_extern = saw_extern;
                     g.is_static = saw_static;
-                    g.is_const = tty.is_const;
+                    g.is_const = global_object_is_const(&tty);
                     g.type = tty;
                     if (gattrs.has_address_space) g.address_space = gattrs.address_space;
                     g.line = nm.line;
