@@ -186,26 +186,13 @@ mlir::Location locF(uintptr_t h) {
 }
 
 MLIR_OpType opTypeFromName(llvm::StringRef name) {
-    // Lazily-populated reverse map. Built once on first call from the
-    // canonical name table (the linear scan we used to do here was hot
-    // in profiles — ~5% of total time during wasm lowering).
-    static llvm::DenseMap<llvm::StringRef, MLIR_OpType> *map = nullptr;
-    if (!map) {
-        map = new llvm::DenseMap<llvm::StringRef, MLIR_OpType>();
-        map->reserve(256);
-        for (int t = 0; t < 256; t++) {
-            string s = op_type_to_string((MLIR_OpType)t);
-            if (s.size == 0) continue;
-            // The canonical table entries are static string literals, so
-            // we can safely take a StringRef without copying.
-            (*map)[llvm::StringRef(s.str, s.size)] = (MLIR_OpType)t;
-        }
-        // Special case kept for parity with the old linear-scan path.
-        (*map)[llvm::StringRef("builtin.module")] = OP_TYPE_MODULE;
-    }
-    auto it = map->find(name);
-    if (it != map->end()) return it->second;
-    return OP_TYPE_UNREGISTERED;
+    // Same name -> type table as the native backend (mlir_op_names.c), so
+    // both backends report the same MLIR_GetOpType for the same op. It
+    // covers every enumerator up to OP_TYPE_COUNT.
+    // The C side prints OP_TYPE_MODULE as "module"; upstream names the op
+    // "builtin.module".
+    if (name == "builtin.module") return OP_TYPE_MODULE;
+    return op_type_from_string(string{(char *)name.data(), name.size()});
 }
 
 // Copy a std::string into the C-API arena so the returned `string` is

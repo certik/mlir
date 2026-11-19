@@ -147,6 +147,25 @@ static string op_type_to_string_half1(MLIR_OpType type) {
         case OP_TYPE_WASMSSA_EXTEND_I32_S: return str_lit("wasmssa.extend_i32_s");
         case OP_TYPE_WASMSSA_RETURN: return str_lit("wasmssa.return");
         case OP_TYPE_WASMSSA_CALL: return str_lit("wasmssa.call");
+        case OP_TYPE_LLVM_BR: return str_lit("llvm.br");
+        case OP_TYPE_LLVM_COND_BR: return str_lit("llvm.cond_br");
+        case OP_TYPE_LLVM_INTTOPTR: return str_lit("llvm.inttoptr");
+        case OP_TYPE_LLVM_BITCAST: return str_lit("llvm.bitcast");
+        case OP_TYPE_LLVM_SELECT: return str_lit("llvm.select");
+        case OP_TYPE_LLVM_FCMP: return str_lit("llvm.fcmp");
+        case OP_TYPE_LLVM_FADD: return str_lit("llvm.fadd");
+        case OP_TYPE_LLVM_FSUB: return str_lit("llvm.fsub");
+        case OP_TYPE_LLVM_FMUL: return str_lit("llvm.fmul");
+        case OP_TYPE_LLVM_FDIV: return str_lit("llvm.fdiv");
+        case OP_TYPE_LLVM_FREM: return str_lit("llvm.frem");
+        case OP_TYPE_LLVM_FNEG: return str_lit("llvm.fneg");
+        case OP_TYPE_LLVM_FPEXT: return str_lit("llvm.fpext");
+        case OP_TYPE_LLVM_FPTRUNC: return str_lit("llvm.fptrunc");
+        case OP_TYPE_LLVM_SITOFP: return str_lit("llvm.sitofp");
+        case OP_TYPE_LLVM_UITOFP: return str_lit("llvm.uitofp");
+        case OP_TYPE_LLVM_FPTOSI: return str_lit("llvm.fptosi");
+        case OP_TYPE_LLVM_FPTOUI: return str_lit("llvm.fptoui");
+        case OP_TYPE_LLVM_MLIR_NULL: return str_lit("llvm.mlir.null");
         default: return OP_NAME_NOT_IN_THIS_HALF;
     }
 }
@@ -281,4 +300,62 @@ string op_type_to_string(MLIR_OpType type) {
     s = op_type_to_string_half2(type);
     if (s.size != 0) return s;
     return str_lit("unknown");
+}
+
+// -----------------------------------------------------------------------------
+// Name -> op-type lookup
+// -----------------------------------------------------------------------------
+//
+// The reverse of op_type_to_string(), as an open-addressing hash table that
+// is filled once from the table above. Both API backends use it to derive an
+// op's type from its name, so MLIR_GetOpType() agrees with MLIR_GetOpName()
+// however the op was created, and passes can dispatch on the enum instead of
+// comparing name strings.
+
+// Power of two, twice OP_TYPE_TABLE_CAPACITY so probe sequences stay short.
+#define OP_NAME_TABLE_SIZE 1024
+
+static string g_op_names[OP_TYPE_TABLE_CAPACITY];
+// Slot value is an MLIR_OpType; 0 (OP_TYPE_UNREGISTERED) marks an empty slot.
+static uint16_t g_op_name_slots[OP_NAME_TABLE_SIZE];
+static bool g_op_name_table_built = false;
+
+static uint32_t op_name_hash(string name) {
+    uint32_t h = 2166136261u;  // FNV-1a
+    for (size_t i = 0; i < name.size; i++) {
+        h ^= (uint8_t)name.str[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void op_name_table_build(void) {
+    for (int t = 0; t < (int)OP_TYPE_COUNT; t++) {
+        g_op_names[t] = (string){0};
+        if (t == (int)OP_TYPE_UNREGISTERED) continue;
+        string s = op_type_to_string((MLIR_OpType)t);
+        if (str_eq(s, str_lit("unknown"))) continue;  // enumerator without a name
+        g_op_names[t] = s;
+        uint32_t i = op_name_hash(s) & (OP_NAME_TABLE_SIZE - 1);
+        bool duplicate = false;
+        while (g_op_name_slots[i] != 0) {
+            // Two enumerators with one name: the first one wins.
+            if (str_eq(g_op_names[g_op_name_slots[i]], s)) { duplicate = true; break; }
+            i = (i + 1) & (OP_NAME_TABLE_SIZE - 1);
+        }
+        if (!duplicate) g_op_name_slots[i] = (uint16_t)t;
+    }
+    g_op_name_table_built = true;
+}
+
+MLIR_OpType op_type_from_string(string name) {
+    if (!g_op_name_table_built) op_name_table_build();
+    if (name.size == 0) return OP_TYPE_UNREGISTERED;
+    uint32_t i = op_name_hash(name) & (OP_NAME_TABLE_SIZE - 1);
+    while (g_op_name_slots[i] != 0) {
+        if (str_eq(g_op_names[g_op_name_slots[i]], name))
+            return (MLIR_OpType)g_op_name_slots[i];
+        i = (i + 1) & (OP_NAME_TABLE_SIZE - 1);
+    }
+    return OP_TYPE_UNREGISTERED;
 }

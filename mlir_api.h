@@ -476,6 +476,28 @@ typedef enum {
     //   attrs: sym_name (string, debug), offset (i32), init_data (string).
     OP_TYPE_AARCH64_DATA_INIT,
 
+    // More LLVM dialect ops. Appended here (rather than next to the other
+    // OP_TYPE_LLVM_* entries) so existing enumerator values stay unchanged.
+    OP_TYPE_LLVM_BR,
+    OP_TYPE_LLVM_COND_BR,
+    OP_TYPE_LLVM_INTTOPTR,
+    OP_TYPE_LLVM_BITCAST,
+    OP_TYPE_LLVM_SELECT,
+    OP_TYPE_LLVM_FCMP,
+    OP_TYPE_LLVM_FADD,
+    OP_TYPE_LLVM_FSUB,
+    OP_TYPE_LLVM_FMUL,
+    OP_TYPE_LLVM_FDIV,
+    OP_TYPE_LLVM_FREM,
+    OP_TYPE_LLVM_FNEG,
+    OP_TYPE_LLVM_FPEXT,
+    OP_TYPE_LLVM_FPTRUNC,
+    OP_TYPE_LLVM_SITOFP,
+    OP_TYPE_LLVM_UITOFP,
+    OP_TYPE_LLVM_FPTOSI,
+    OP_TYPE_LLVM_FPTOUI,
+    OP_TYPE_LLVM_MLIR_NULL,
+
     OP_TYPE_COUNT
 } MLIR_OpType;
 
