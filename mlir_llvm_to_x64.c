@@ -151,6 +151,10 @@ typedef struct {
     // append its storage to data_buf, then lea_rip_data uses the new offset.
     MLIR_BlockHandle module_mb;
     Buf          *data_buf;
+    // True when the module was lifted from wasm (mlir_llvm_to_elf's wasm_lifted
+    // argument). Only then do `__wasm_*` names denote lifter-owned data symbols;
+    // in a native module they are ordinary user identifiers.
+    bool          wasm_lifted;
     uint32_t      frame;     // total frame size (16-aligned)
     uint32_t      edge_tmp;  // rbp offset base of the parallel-move temp area
     // register allocation (shared mlir_regalloc): value -> physical register.
@@ -411,7 +415,7 @@ static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
         uint32_t off;
         if (gmap_get(F->gm, gn, &off) || x64_ensure_global_in_gmap(F, gn, &off))
             lea_rip_data(F, reg, off);
-        else if (x64_is_wasm_data_sym(gn))
+        else if (F->wasm_lifted && x64_is_wasm_data_sym(gn))
             fail(F, "wasm global missing from data map", gn);
         else
             lea_rip_func(F, reg, gn);   // function / external symbol

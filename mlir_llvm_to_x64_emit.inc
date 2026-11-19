@@ -393,6 +393,7 @@ static void emit_epilogue(FnCtx *F) {
 // Module-wide lowering state for one mlir_llvm_to_elf() call (set in that entry
 // point, cleared at x64_done). emit_func snapshots mb/data_buf into FnCtx.
 static GMap *g_x64_gmap = NULL;              // global name -> .data offset (+ size)
+static bool  g_x64_wasm_lifted = false;      // module came from --from-wasm (caller-supplied)
 static MLIR_BlockHandle g_x64_mb = MLIR_INVALID_HANDLE;  // module IR block (funcs/globals)
 static Buf *g_x64_data_buf = NULL;           // -> stack Buf in mlir_llvm_to_elf (.data blob)
 static bool  g_x64_ok = true;
@@ -845,6 +846,7 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     F.gm = g_x64_gmap;
     F.module_mb = g_x64_mb;
     F.data_buf = g_x64_data_buf;
+    F.wasm_lifted = g_x64_wasm_lifted;
 
     MLIR_RegionHandle reg = MLIR_GetOpRegion(fn, 0);
     size_t nb = MLIR_GetRegionNumBlocks(reg);
@@ -1135,28 +1137,6 @@ static bool x64_module_has_global_sym(MLIR_BlockHandle mb, string gn) {
     return false;
 }
 
-// True for --from-wasm modules (wasm globals, wasi_start, or spliced host init).
-static bool x64_detect_wasm_lifted(MLIR_BlockHandle mb, GMap *gm) {
-    uint32_t dummy;
-    if (gmap_get_cstr(gm, X64_WASM_LINMEM_BASE, &dummy, NULL) ||
-        gmap_get_cstr(gm, X64_WASM_LINMEM, &dummy, NULL))
-        return true;
-    if (x64_module_has_global_sym(mb,
-            str_from_cstr_view((char *)X64_WASM_LINMEM_BASE)) ||
-        x64_module_has_global_sym(mb,
-            str_from_cstr_view((char *)X64_WASM_LINMEM)) ||
-        x64_module_has_global_sym(mb,
-            str_from_cstr_view((char *)"__wasm_argc")) ||
-        x64_module_has_global_sym(mb,
-            str_from_cstr_view((char *)"__wasm_g0")))
-        return true;
-    // Driver splices platform_linux.c as __host_platform_init; wasm-side
-    // platform_init is often DCE'd before native _start references it.
-    if (x64_module_has_func(mb, "__host_platform_init", true))
-        return true;
-    return x64_module_has_func(mb, "wasi_start", false);
-}
-
 // Allocate one global in .data, serialize its initializer, and register it in gm.
 static void x64_register_global_op(MLIR_Context *ctx, MLIR_OpHandle op, GMap *gm, Buf *data,
                                    PendingPtrReloc **pend, size_t *pend_cap, size_t *n_pend) {
@@ -1202,7 +1182,7 @@ static void x64_ensure_wasm_scalars(GMap *gm, Buf *data) {
 // Lay out .data: one IR-global pass (no second x64_register_all_module_globals
 // scan — x64_register_global_op dedupes via gmap_get), wasm scalars, ptr relocs.
 static void x64_init_data_section(MLIR_Context *ctx, MLIR_BlockHandle mb, GMap *gm,
-                                  Buf *data, bool *wasm_lifted_out,
+                                  Buf *data, bool wasm_lifted,
                                   X64PtrReloc **relocs_out, size_t *n_relocs_out) {
     *relocs_out = NULL;
     *n_relocs_out = 0;
@@ -1215,8 +1195,7 @@ static void x64_init_data_section(MLIR_Context *ctx, MLIR_BlockHandle mb, GMap *
         if (!x64_is_global_op(op)) continue;
         x64_register_global_op(ctx, op, gm, data, &pend, &pend_cap, &n_pend);
     }
-    *wasm_lifted_out = x64_detect_wasm_lifted(mb, gm);
-    if (*wasm_lifted_out)
+    if (wasm_lifted)
         x64_ensure_wasm_scalars(gm, data);
     resolve_pending_ptr_globals(gm, pend, n_pend, relocs_out, n_relocs_out);
     free(pend);
@@ -1224,7 +1203,7 @@ static void x64_init_data_section(MLIR_Context *ctx, MLIR_BlockHandle mb, GMap *
 
 // Zero-fill a wasm data global when DCE dropped the IR op but addressof remains.
 static bool x64_synth_wasm_global(FnCtx *F, string gn, uint32_t *out_off) {
-    if (!x64_is_wasm_data_sym(gn) || !F->data_buf) return false;
+    if (!F->wasm_lifted || !x64_is_wasm_data_sym(gn) || !F->data_buf) return false;
     size_t sz = 4;
     if (gn.size == 18 && memcmp(gn.str, "__wasm_linmem_base", 18) == 0) sz = 8;
     else if (gn.size == 11 && memcmp(gn.str, "__wasm_argv", 11) == 0) sz = 8;
@@ -1257,11 +1236,18 @@ static bool x64_ensure_global_in_gmap(FnCtx *F, string gn, uint32_t *out_off) {
     return x64_synth_wasm_global(F, gn, out_off);
 }
 
-// Pick app_main, main, wasi_start, or _start as the ELF user entry symbol.
+// Pick the ELF user entry symbol. A native module always enters at `main`
+// (the C entry point; any other function, including one that happens to be
+// called app_main, is ordinary user code). Only a module lifted from wasm uses
+// the corec entry points: app_main (skipping the wasm crt0, whose job the
+// synthesised _start does natively), else the lifted wasm entry.
 static bool x64_resolve_entry(MLIR_BlockHandle mb, bool wasm_lifted, char **out_cstr) {
-    static const char *order[] = { "app_main", "main", "wasi_start", "_start" };
-    (void)wasm_lifted;
-    for (size_t i = 0; i < sizeof(order)/sizeof(order[0]); i++) {
+    static const char *lifted_order[] = { "app_main", "main", "wasi_start" };
+    static const char *native_order[] = { "main" };
+    const char **order = wasm_lifted ? lifted_order : native_order;
+    size_t n = wasm_lifted ? sizeof(lifted_order)/sizeof(lifted_order[0])
+                           : sizeof(native_order)/sizeof(native_order[0]);
+    for (size_t i = 0; i < n; i++) {
         if (x64_module_has_func(mb, order[i], false)) {
             *out_cstr = heapdup_cstr(order[i]);
             return true;
@@ -1278,10 +1264,15 @@ static void synth_start(ObjModule *m, GMap *gm, X64PtrReloc *relocs, size_t n_re
 
     uint32_t argc_off = 0, argv_off = 0, linmem_base_off = 0;
     uint32_t template_off = 0, template_size = 0;
-    bool has_argc = gmap_get_cstr(gm, X64_WASM_ARGC, &argc_off, NULL) &&
+    // The __wasm_* slots are lifter-owned only in a lifted module; a native
+    // program may use those names for its own globals.
+    bool has_argc = wasm_lifted &&
+                    gmap_get_cstr(gm, X64_WASM_ARGC, &argc_off, NULL) &&
                     gmap_get_cstr(gm, X64_WASM_ARGV, &argv_off, NULL);
-    bool has_linmem_base = gmap_get_cstr(gm, X64_WASM_LINMEM_BASE, &linmem_base_off, NULL);
-    bool has_template = gmap_get_cstr(gm, X64_WASM_LINMEM, &template_off, &template_size);
+    bool has_linmem_base = wasm_lifted &&
+        gmap_get_cstr(gm, X64_WASM_LINMEM_BASE, &linmem_base_off, NULL);
+    bool has_template = wasm_lifted &&
+        gmap_get_cstr(gm, X64_WASM_LINMEM, &template_off, &template_size);
 
     if (has_argc) {
         rex(&F, 0, RAX, 0, RSP); eb(&F, 0x8B); modrm(&F, 0, RAX, RSP); eb(&F, 0x24);
@@ -1423,9 +1414,11 @@ static bool x64_obj_needs_func(ObjModule *m, const char *name) {
 }
 
 bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
+                      bool wasm_lifted,
                       uint8_t **out_data, size_t *out_size) {
     *out_data = NULL; *out_size = 0;
     g_x64_ok = true;
+    g_x64_wasm_lifted = wasm_lifted;
 
     MLIR_RegionHandle mreg = MLIR_GetOpRegion(llvm_module, 0);
     MLIR_BlockHandle  mb   = MLIR_GetRegionBlock(mreg, 0);
@@ -1443,14 +1436,14 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     SymSet reach; memset(&reach, 0, sizeof(reach));
     bool ok = false;
 
-    bool wasm_lifted = false;
-    x64_init_data_section(ctx, mb, &gm, &data, &wasm_lifted,
+    x64_init_data_section(ctx, mb, &gm, &data, wasm_lifted,
                           &ptr_relocs, &n_ptr_relocs);
     g_x64_gmap = &gm;
 
     if (!x64_resolve_entry(mb, wasm_lifted, &entry_cstr)) {
-        fprintf(stderr,
-                "x64: no defined entry (app_main/main/wasi_start/_start)\n");
+        fprintf(stderr, wasm_lifted
+                ? "x64: no defined entry (app_main/main/wasi_start)\n"
+                : "x64: no defined main\n");
         g_x64_ok = false;
         goto x64_done;
     }
@@ -1492,7 +1485,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
                         string cal = strip_at(attr_str(op, "callee"));
                         if (!cal.size) cal = strip_at(attr_str(op, "callee_name"));
                         if (cal.size) {
-                            if (x64_is_wasm_data_sym(cal)) continue;
+                            if (wasm_lifted && x64_is_wasm_data_sym(cal)) continue;
                             bool known = false;
                             for (size_t k = 0; k < reach.c; k++) if (str_eq(cal, reach.n[k])) { known = true; break; }
                             if (!known) { sym_add(&reach, cal); grew = true; }
@@ -1503,7 +1496,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
                         string gn = strip_at(ga ? MLIR_GetAttributeString(ga) : (string){0});
                         if (!gn.size) continue;
                         uint32_t dummy;
-                        if (x64_is_wasm_data_sym(gn)) continue;
+                        if (wasm_lifted && x64_is_wasm_data_sym(gn)) continue;
                         if (gmap_get(&gm, gn, &dummy)) continue;   // data global
                         if (x64_module_has_global_sym(mb, gn)) continue;
                         bool known = false;
@@ -1573,5 +1566,6 @@ x64_done:
     g_x64_gmap = NULL;
     g_x64_mb = MLIR_INVALID_HANDLE;
     g_x64_data_buf = NULL;
+    g_x64_wasm_lifted = false;
     return ok;
 }

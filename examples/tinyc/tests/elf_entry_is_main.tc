@@ -1,0 +1,17 @@
+extern int printf(const char *fmt, ...);
+// A native program's entry point is `main`, even when it also defines a
+// function called `app_main` (corec's entry-point name, which the ELF backend
+// only uses for modules lifted from wasm). `app_main` here is ordinary user
+// code that main calls.
+
+int app_main(void) {
+    printf("app_main\n");
+    return 3;
+}
+
+int main(void) {
+    printf("main\n");
+    int r = app_main();
+    printf("%lld\n", (long long)(r));
+    return 0;
+}

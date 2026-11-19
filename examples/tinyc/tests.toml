@@ -1389,6 +1389,19 @@ targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "493\n8\n0\n511\n31\n100\n512\n"
 
 [[test]]
+name = "elf_entry_is_main"
+# Defines both app_main and main: only meaningful where the backend picks the
+# entry symbol itself (the other runners wrap main as app_main).
+targets = ["elf"]
+expected_stdout = "main\napp_main\n3\n"
+
+[[test]]
+name = "wasm_prefixed_names"
+# Not on macho: that path lifts through wasm, where the lifter owns __wasm_*.
+targets = ["native", "wasm", "elf"]
+expected_stdout = "5\n7\n42\n"
+
+[[test]]
 name = "variadic_extern_probe"
 targets = ["native"]
 platforms = ["linux", "darwin"]

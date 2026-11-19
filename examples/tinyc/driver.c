@@ -536,7 +536,7 @@ static int driver_emit_from_wasm_elf(
     }
     arena_destroy(arena);
     *io_arena = late_arena;
-    if (!mlir_llvm_to_elf(ctx, llvm_mod, &elf_data, &elf_size)) {
+    if (!mlir_llvm_to_elf(ctx, llvm_mod, true, &elf_data, &elf_size)) {
         return 1;
     }
     out->str = (char *)elf_data;
@@ -547,7 +547,7 @@ static int driver_emit_from_wasm_elf(
 static int driver_emit_native_elf(MLIR_Context *ctx, MLIR_OpHandle module,
                                   string *out) {
     uint8_t *elf_data = NULL; size_t elf_size = 0;
-    if (!mlir_llvm_to_elf(ctx, module, &elf_data, &elf_size))
+    if (!mlir_llvm_to_elf(ctx, module, false, &elf_data, &elf_size))
         return 1;
     out->str = (char *)elf_data;
     out->size = elf_size;
