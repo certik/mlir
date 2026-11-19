@@ -220,11 +220,7 @@ static bool driver_elf_is_host_platform_support_symbol(string s) {
 static bool driver_elf_is_llvm_global_op(MLIR_OpHandle op) {
     if (MLIR_GetOpType(op) == OP_TYPE_LLVM_MLIR_GLOBAL) return true;
     string nm = MLIR_GetOpName(op);
-    if (nm.size == 17 && memcmp(nm.str, "llvm.mlir.global", 17) == 0) return true;
-    if (MLIR_GetOpAttributeByName(op, "global_type") == MLIR_INVALID_HANDLE) return false;
-    if (MLIR_GetOpAttributeByName(op, "sym_name") == MLIR_INVALID_HANDLE) return false;
-    if (MLIR_GetOpAttributeByName(op, "function_type") != MLIR_INVALID_HANDLE) return false;
-    return true;
+    return nm.size == 16 && memcmp(nm.str, "llvm.mlir.global", 16) == 0;
 }
 
 static bool driver_elf_llvm_op_is_internal(MLIR_OpHandle op) {
