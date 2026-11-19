@@ -997,7 +997,7 @@ int app_main(void) {
                 MLIR_OpHandle hp_picks[8]; size_t hp_n = 0;
                 if (!tinyc_compile_host_platform(&ctx, host_platform_path,
                                                  include_dirs, n_include_dirs,
-                                                 lower_for_wasm_fn, false,
+                                                 lower_fn, false,
                                                  hp_picks, &hp_n, 8)) {
                     arena_destroy(arena);
                     arena_destroy(boot_arena);
@@ -1010,7 +1010,7 @@ int app_main(void) {
                 if (wasi_adapter_path &&
                     !tinyc_compile_host_platform(&ctx, wasi_adapter_path,
                                                  include_dirs, n_include_dirs,
-                                                 lower_for_wasm_fn, true,
+                                                 lower_fn, true,
                                                  ad_picks, &ad_n, 16)) {
                     arena_destroy(arena);
                     arena_destroy(boot_arena);
@@ -1107,7 +1107,7 @@ int app_main(void) {
                 if (host_platform_path &&
                     !tinyc_compile_host_platform(&ctx, host_platform_path,
                                                  include_dirs, n_include_dirs,
-                                                 lower_for_wasm_fn, false,
+                                                 lower_fn, false,
                                                  hp_picks2, &hp_n2, 8)) {
                     arena_destroy(arena);
                     arena_destroy(boot_arena);
@@ -1248,7 +1248,12 @@ int app_main(void) {
         mlir_llvm_mem2reg(&ctx, module);
 
     if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64 || emit_elf) {
-        bool needs_wasm_lowering = emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64;
+        // The llvm -> aarch64 backend (`--emit=aarch64`, and `--emit=macho`
+        // with `--macho-backend=llvm`) takes the plain LLVM-dialect CFG. Only
+        // the wasm pipeline (which the default `--emit=macho` backend also
+        // goes through) still needs the wasm-flavoured lowering.
+        bool needs_wasm_lowering = emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat ||
+                                   (emit_macho && !macho_backend_llvm);
         bool ok = needs_wasm_lowering
                       ? lower_for_wasm_fn(&ctx, module)
                       : lower_fn(&ctx, module);

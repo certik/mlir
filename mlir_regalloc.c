@@ -546,7 +546,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     // scan then gives B the SAME register V occupies, the edge `mov R_B, R_V`
     // becomes an identity copy that emit_edge_copies elides -- removing a link
     // from the loop-carried dependency chain (the IPC lever). The copies for
-    // each cf.cond_br successor run in their own isolated landing block, so the
+    // each llvm.cond_br successor run in their own isolated landing block, so the
     // only unsoundness is passing B's own value through the same terminator to
     // another arg (then V's def would clobber it before the move): guard by
     // requiring B not appear as any successor operand of the terminator.

@@ -8,7 +8,7 @@
 // Coverage was grown test-by-test. It handles the full self-host surface:
 // module walk, import_func recognition, per-function locals-as-alloca
 // lowering, integer/float ops, control flow (block/loop/if/br/br_if
-// flattened to cf.br/cf.cond_br), linear memory + globals, and the WASI
+// flattened to llvm.br/llvm.cond_br), linear memory + globals, and the WASI
 // runtime shims. Any unsupported op makes the lowering fail cleanly with a
 // diagnostic.
 
@@ -275,7 +275,7 @@ static int vmap_get(VMap *m, MLIR_ValueHandle k, MLIR_ValueHandle *out) {
 // Per-function lowering state.
 //
 // WASM structured control flow (block / loop / if + depth-relative br) is
-// flattened into an explicit cf.br / cf.cond_br CFG. Each enclosing scope
+// flattened into an explicit llvm.br / llvm.cond_br CFG. Each enclosing scope
 // pushes a Frame recording two target blocks:
 //   - br_target: where `br {depth}` to this scope jumps (loop header for a
 //     loop; the scope's continuation for a block / if).
@@ -399,12 +399,12 @@ static MLIR_BlockHandle new_block(FLower *L) {
     return b;
 }
 
-// Emit an unconditional cf.br to `target` and mark cur terminated.
+// Emit an unconditional llvm.br to `target` and mark cur terminated.
 static void term_br(FLower *L, MLIR_BlockHandle target) {
     MLIR_BlockHandle succs[1] = { target };
     MLIR_ValueHandle *sops[1] = { NULL };
-    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(L->ctx, OP_TYPE_CF_BR,
-        op_type_to_string(OP_TYPE_CF_BR),
+    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(L->ctx, OP_TYPE_UNREGISTERED,
+        str_lit("llvm.br"),
         NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         succs, 1, sops, 0,
         MLIR_CreateLocationUnknown(L->ctx, (string){0}),
@@ -413,13 +413,13 @@ static void term_br(FLower *L, MLIR_BlockHandle target) {
     L->terminated = true;
 }
 
-// Emit a cf.cond_br on `cond` to (t_blk, f_blk) and mark cur terminated.
+// Emit an llvm.cond_br on `cond` to (t_blk, f_blk) and mark cur terminated.
 static void term_cond_br(FLower *L, MLIR_ValueHandle cond,
                          MLIR_BlockHandle t_blk, MLIR_BlockHandle f_blk) {
     MLIR_BlockHandle succs[2] = { t_blk, f_blk };
     MLIR_ValueHandle cond_arr[1] = { cond };
-    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(L->ctx, OP_TYPE_CF_COND_BR,
-        op_type_to_string(OP_TYPE_CF_COND_BR),
+    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(L->ctx, OP_TYPE_UNREGISTERED,
+        str_lit("llvm.cond_br"),
         NULL, 0, NULL, 0, NULL, 0, cond_arr, 1, NULL, 0,
         succs, 2, NULL, 0,
         MLIR_CreateLocationUnknown(L->ctx, (string){0}),
