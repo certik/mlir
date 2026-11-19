@@ -2662,8 +2662,11 @@ static BranchXformResult transform_to_structured_cf_branches(
     } else {
         // cf.switch: operand 0 is the i32 flag; succs are [default, case0..caseN-1].
         // case_values attr (DenseI32Array) gives the case values.
-        // scf.index_switch wants the flag as `index`; represent it as i64
-        // (LLVM dialect index width) via llvm.zext from the i32 switch flag.
+        // Upstream's scf.index_switch takes an `index` selector, which would
+        // need an arith.index_castui here. The consumers of this lift are
+        // LLVM-dialect backends (wasm, aarch64) that compare the selector as
+        // a 32-bit value, so hand them the i32 flag directly: no cast op, and
+        // no extend/wrap pair in the generated code for every switch.
         // regions = [case0..caseN-1, default], and a `cases` DenseI64Array attr.
         MLIR_ValueHandle flag = MLIR_GetOpOperand(term, 0);
 
@@ -2699,17 +2702,6 @@ static BranchXformResult transform_to_structured_cf_branches(
             return res;
         }
 
-        // Emit llvm.zext : i32 -> i64 in region_entry.
-        MLIR_TypeHandle i64_ty = MLIR_CreateTypeInteger(st->ctx, 64, false);
-        MLIR_ValueHandle idx_v = MLIR_CreateValueOpResult(
-            st->ctx, MLIR_INVALID_HANDLE, 0, i64_ty,
-            fresh_ssa_name(st), term_loc);
-        MLIR_OpHandle cast_op = MLIR_CreateOp(
-            st->ctx, OP_TYPE_LLVM_ZEXT, str_lit("llvm.zext"),
-            NULL, 0, &i64_ty, 1, &idx_v, 1, &flag, 1, NULL, 0,
-            term_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
-        MLIR_AppendBlockOp(st->ctx, region_entry, cast_op);
-
         // scf.index_switch region order: regions[0] = default,
         // regions[1..N] = case 0..N-1 (matches cf.switch's successor
         // order, where succs[0] = default, succs[1..N] = cases).
@@ -2721,7 +2713,7 @@ static BranchXformResult transform_to_structured_cf_branches(
         if_op = MLIR_CreateOp(
             st->ctx, OP_TYPE_SCF_INDEX_SWITCH, str_lit("scf.index_switch"),
             attrs, 1, result_types, n_cont_args, if_results, n_cont_args,
-            &idx_v, 1, regions, num_succ,
+            &flag, 1, regions, num_succ,
             term_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
         MLIR_AppendBlockOp(st->ctx, region_entry, if_op);
     }
