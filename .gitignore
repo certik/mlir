@@ -45,6 +45,7 @@ parser_tinyc
 build_tinyc/
 examples/tinyc/tests/*.macho
 examples/tinyc/tests/*.elf
+examples/tinyc/tests/*.probe
 /tinyc_native_opt
 /tinyc_upstream_opt
 /build_opt_native/
