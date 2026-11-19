@@ -707,8 +707,13 @@ typedef enum {
 // Returns one of LowerResult values. See enum docs above.
 static int try_lower_op(LowerState *st, MLIR_OpHandle op,
                         MLIR_BlockHandle parent, size_t pos) {
-    string name = MLIR_GetOpName(op);
-    if (name_eq(name, "scf.if")) {
+    // Dispatch on the op type: MLIR_CreateOp derives it from the op name on
+    // both API backends, so this is equivalent to comparing names, at the
+    // cost of one switch instead of ~45 string comparisons per op. Source
+    // ops without an enumerator are matched by name in the unregistered arm.
+    bool ok = false;
+    switch (MLIR_GetOpType(op)) {
+    case OP_TYPE_SCF_IF:
         // scf.if rewrites the parent block's tail: it erases its own
         // original op (after taking its regions and uses) — actually it
         // doesn't erase here; we handle that in the walker by checking
@@ -719,52 +724,62 @@ static int try_lower_op(LowerState *st, MLIR_OpHandle op,
             return LOWER_DONE_BLOCK;
         }
         return LOWER_NONE;
+    case OP_TYPE_FUNC_FUNC:          ok = lower_func_func(st, op, parent, pos); break;
+    case OP_TYPE_FUNC_RETURN:
+    case OP_TYPE_RETURN:             ok = lower_func_return(st, op, parent, pos); break;
+    case OP_TYPE_FUNC_CALL:          ok = lower_func_call(st, op, parent, pos); break;
+    case OP_TYPE_FUNC_CONSTANT:      ok = lower_func_constant(st, op, parent, pos); break;
+    case OP_TYPE_FUNC_CALL_INDIRECT: ok = lower_func_call_indirect(st, op, parent, pos); break;
+    case OP_TYPE_UNREALIZED_CONVERSION_CAST:
+                                     ok = lower_unrealized_cast(st, op, parent, pos); break;
+    case OP_TYPE_ARITH_CONSTANT:     ok = lower_arith_constant(st, op, parent, pos); break;
+    case OP_TYPE_ARITH_INDEX_CAST:
+        // `arith.index_castui` has no enumerator of its own. A creator may
+        // pass it with this type (the native backend then keeps the name),
+        // so the name decides the signedness.
+        ok = lower_arith_index_cast(st, op, parent, pos,
+                                    name_eq(MLIR_GetOpName(op), "arith.index_castui"));
+        break;
+    case OP_TYPE_ARITH_ADDI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.add"),     OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_SUBI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.sub"),     OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_MULI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.mul"),     OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_DIVSI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.sdiv"),    OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_DIVUI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.udiv"),    OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_REMSI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.srem"),    OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_REMUI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.urem"),    OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_ANDI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.and"),     OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_ORI:         ok = lower_rename(st, op, parent, pos, str_lit("llvm.or"),      OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_XORI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.xor"),     OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_SHLI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.shl"),     OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_SHRSI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.ashr"),    OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_SHRUI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.lshr"),    OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_ADDF:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.fadd"),    OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_SUBF:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.fsub"),    OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_MULF:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.fmul"),    OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_DIVF:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.fdiv"),    OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_CMPI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.icmp"),    OP_TYPE_LLVM_ICMP); break;
+    case OP_TYPE_ARITH_CMPF:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.fcmp"),    OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_SELECT:      ok = lower_rename(st, op, parent, pos, str_lit("llvm.select"),  OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_EXTSI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.sext"),    OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_EXTUI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.zext"),    OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_TRUNCI:      ok = lower_rename(st, op, parent, pos, str_lit("llvm.trunc"),   OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_EXTF:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.fpext"),   OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_TRUNCF:      ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptrunc"), OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_SITOFP:      ok = lower_rename(st, op, parent, pos, str_lit("llvm.sitofp"),  OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_FPTOSI:      ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptosi"),  OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_BITCAST:     ok = lower_rename(st, op, parent, pos, str_lit("llvm.bitcast"), OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_CF_BR:      ok = lower_cf_branch(st, op, parent, pos, str_lit("llvm.br")); break;
+    case OP_TYPE_CF_COND_BR: ok = lower_cf_branch(st, op, parent, pos, str_lit("llvm.cond_br")); break;
+    case OP_TYPE_UNREGISTERED: {
+        string name = MLIR_GetOpName(op);
+        if (name_eq(name, "unrealized_conversion_cast")) ok = lower_unrealized_cast(st, op, parent, pos);
+        else if (name_eq(name, "arith.index_castui")) ok = lower_arith_index_cast(st, op, parent, pos, true);
+        else if (name_eq(name, "arith.uitofp")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.uitofp"), OP_TYPE_UNREGISTERED);
+        else if (name_eq(name, "arith.fptoui")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptoui"), OP_TYPE_UNREGISTERED);
+        break;
     }
-    bool ok = false;
-    if (name_eq(name, "func.func"))      ok = lower_func_func(st, op, parent, pos);
-    else if (name_eq(name, "func.return") ||
-             name_eq(name, "return"))    ok = lower_func_return(st, op, parent, pos);
-    else if (name_eq(name, "func.call")) ok = lower_func_call(st, op, parent, pos);
-    else if (name_eq(name, "func.constant")) ok = lower_func_constant(st, op, parent, pos);
-    else if (name_eq(name, "func.call_indirect")) ok = lower_func_call_indirect(st, op, parent, pos);
-    else if (name_eq(name, "builtin.unrealized_conversion_cast") ||
-             name_eq(name, "unrealized_conversion_cast"))
-                                         ok = lower_unrealized_cast(st, op, parent, pos);
-    else if (name_eq(name, "arith.constant")) ok = lower_arith_constant(st, op, parent, pos);
-    else if (name_eq(name, "arith.index_cast")) ok = lower_arith_index_cast(st, op, parent, pos, false);
-    else if (name_eq(name, "arith.index_castui")) ok = lower_arith_index_cast(st, op, parent, pos, true);
-    else if (name_eq(name, "arith.addi"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.add"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.subi"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.sub"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.muli"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.mul"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.divsi")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.sdiv"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.divui")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.udiv"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.remsi")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.srem"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.remui")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.urem"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.andi"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.and"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.ori"))   ok = lower_rename(st, op, parent, pos, str_lit("llvm.or"),   OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.xori"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.xor"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.shli"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.shl"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.shrsi")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.ashr"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.shrui")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.lshr"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.addf"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.fadd"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.subf"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.fsub"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.mulf"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.fmul"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.divf"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.fdiv"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.cmpi"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.icmp"), OP_TYPE_LLVM_ICMP);
-    else if (name_eq(name, "arith.cmpf"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.fcmp"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.select"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.select"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.extsi")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.sext"),   OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.extui")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.zext"),   OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.trunci"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.trunc"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.extf"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.fpext"),  OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.truncf"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptrunc"),OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.sitofp"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.sitofp"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.uitofp"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.uitofp"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.fptosi"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptosi"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.fptoui"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptoui"), OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "arith.bitcast"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.bitcast"),OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "cf.br"))      ok = lower_cf_branch(st, op, parent, pos, str_lit("llvm.br"));
-    else if (name_eq(name, "cf.cond_br")) ok = lower_cf_branch(st, op, parent, pos, str_lit("llvm.cond_br"));
+    default: break;
+    }
 
     return ok ? LOWER_REPLACED : LOWER_NONE;
 }
