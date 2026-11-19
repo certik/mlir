@@ -29,11 +29,13 @@
 //     fires and leaves any unlifted branch ops behind for downstream
 //     stages to flag.
 //   - No predecessor cache: MLIR_GetBlockNumPredecessors /
-//     MLIR_GetBlockPredecessor are O(R) per call. Cycle-edge and
-//     reduce-loop analyses query them repeatedly, so the algorithm
-//     is O(R^2) in the number of blocks per region. Fine in practice
-//     (functions stay small) but a single shared region-scoped cache
-//     would make this O(R).
+//     MLIR_GetBlockPredecessor are O(R) per call. The per-region
+//     passes that run on every body (precondition check, unreachable-
+//     block removal, SCC, dominance DFS) avoid them and are linear in
+//     blocks + edges, but the cycle-edge, reduce-loop and branch-region
+//     analyses still query them, so the worst case remains O(R^2) in
+//     the number of blocks per region. A single shared region-scoped
+//     cache would remove that.
 
 #ifndef MLIR_LIFT_CF_TO_SCF_H
 #define MLIR_LIFT_CF_TO_SCF_H

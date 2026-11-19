@@ -796,6 +796,101 @@ static bool string_eq(string a, const char *b) {
     return a.size == bn && memcmp(a.str, b, bn) == 0;
 }
 
+// ============================================================================
+// BlockMap: block handle -> dense index, open addressing. The analyses below
+// ask "which index does this block have?" / "have I seen this block?" once
+// per CFG edge; answering by a linear scan (or by MLIR_GetBlockNumPredecessors,
+// which itself scans the whole region) makes them quadratic in the number of
+// blocks of a region. That matters now that the lift runs on whole flat
+// function CFGs.
+// ============================================================================
+typedef struct {
+    Arena            *arena;
+    MLIR_BlockHandle *keys;   // MLIR_INVALID_HANDLE = empty slot
+    size_t           *vals;
+    size_t            cap;    // power of two
+    size_t            n;      // number of stored keys (kept <= cap / 2)
+} BlockMap;
+
+static void block_map_alloc(BlockMap *m, size_t cap) {
+    m->cap = cap;
+    m->keys = arena_new_array(m->arena, MLIR_BlockHandle, cap);
+    m->vals = arena_new_array(m->arena, size_t, cap);
+    for (size_t i = 0; i < cap; ++i) m->keys[i] = MLIR_INVALID_HANDLE;
+}
+
+// `n_expected` is only a sizing hint; the map grows as needed.
+static void block_map_init(Arena *arena, BlockMap *m, size_t n_expected) {
+    size_t cap = 16;
+    while (cap < 2 * n_expected + 2) cap *= 2;
+    m->arena = arena;
+    m->n = 0;
+    block_map_alloc(m, cap);
+}
+
+static size_t block_map_slot(const BlockMap *m, MLIR_BlockHandle b) {
+    size_t h = (size_t)(b >> 3);
+    h ^= h >> 15;
+    h *= (size_t)0x9E3779B1u;
+    h ^= h >> 13;
+    size_t i = h & (m->cap - 1);
+    while (m->keys[i] != MLIR_INVALID_HANDLE && m->keys[i] != b)
+        i = (i + 1) & (m->cap - 1);
+    return i;
+}
+
+// Returns the value stored for `b`, or SIZE_MAX if absent.
+static size_t block_map_get(const BlockMap *m, MLIR_BlockHandle b) {
+    size_t i = block_map_slot(m, b);
+    return m->keys[i] == b ? m->vals[i] : SIZE_MAX;
+}
+
+// Inserts b -> v unless `b` is already present. Returns true if inserted.
+static bool block_map_insert(BlockMap *m, MLIR_BlockHandle b, size_t v) {
+    size_t i = block_map_slot(m, b);
+    if (m->keys[i] == b) return false;
+    if ((m->n + 1) * 2 > m->cap) {
+        // Keep the load factor <= 1/2 so probing always terminates.
+        MLIR_BlockHandle *old_keys = m->keys;
+        size_t *old_vals = m->vals;
+        size_t old_cap = m->cap;
+        block_map_alloc(m, old_cap * 2);
+        for (size_t k = 0; k < old_cap; ++k) {
+            if (old_keys[k] == MLIR_INVALID_HANDLE) continue;
+            size_t j = block_map_slot(m, old_keys[k]);
+            m->keys[j] = old_keys[k];
+            m->vals[j] = old_vals[k];
+        }
+        i = block_map_slot(m, b);
+    }
+    m->keys[i] = b;
+    m->vals[i] = v;
+    m->n++;
+    return true;
+}
+
+// Fills `m` with every block of `region` that is the target of some block's
+// terminator, i.e. every block with at least one predecessor. One pass over
+// the region's edges, equivalent to asking MLIR_GetBlockNumPredecessors(b) != 0
+// for each block (which costs a region scan per block).
+static void collect_blocks_with_preds(Arena *arena, MLIR_RegionHandle region,
+                                      BlockMap *m) {
+    size_t nb = MLIR_GetRegionNumBlocks(region);
+    block_map_init(arena, m, nb);
+    for (size_t bi = 0; bi < nb; ++bi) {
+        MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
+        MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
+        if (term == MLIR_INVALID_HANDLE) continue;
+        size_t ns = MLIR_GetOpNumSuccessors(term);
+        for (size_t i = 0; i < ns; ++i) {
+            MLIR_BlockHandle succ = MLIR_GetOpSuccessor(term, i);
+            if (succ == MLIR_INVALID_HANDLE) continue;
+            if (MLIR_GetBlockParentRegion(succ) != region) continue;
+            block_map_insert(m, succ, 0);
+        }
+    }
+}
+
 static bool op_is_func_like(MLIR_OpHandle op) {
     string n = MLIR_GetOpName(op);
     return string_eq(n, "func.func") || string_eq(n, "llvm.func");
@@ -843,13 +938,21 @@ static bool region_has_cf_branch(MLIR_RegionHandle region, bool llvm_cfg) {
 // Port of checkTransformationPreconditions (CFGToSCF.cpp:1237-1297).
 // Returns true on success, false on a violated precondition.
 // ============================================================================
-static bool check_preconditions(MLIR_RegionHandle region, bool llvm_cfg) {
+static bool check_preconditions(Arena *arena, MLIR_RegionHandle region,
+                                bool llvm_cfg) {
     size_t nb = MLIR_GetRegionNumBlocks(region);
+    Scratch scratch = scratch_begin_avoid_conflict(arena);
+    BlockMap has_pred;
+    collect_blocks_with_preds(scratch.arena, region, &has_pred);
+    bool all_reachable = true;
+    for (size_t bi = 1; bi < nb && all_reachable; ++bi) {
+        if (block_map_get(&has_pred, MLIR_GetRegionBlock(region, bi)) == SIZE_MAX)
+            all_reachable = false;   // non-entry block without predecessors
+    }
+    scratch_end(scratch);
+    if (!all_reachable) return false;
     for (size_t bi = 0; bi < nb; ++bi) {
         MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
-        if (!MLIR_BlockIsEntry(b) && MLIR_GetBlockNumPredecessors(b) == 0) {
-            return false;
-        }
         size_t no = MLIR_GetBlockNumOps(b);
         for (size_t oi = 0; oi < no; ++oi) {
             MLIR_OpHandle o = MLIR_GetBlockOp(b, oi);
@@ -903,9 +1006,13 @@ static size_t scc_collect_reachable(Arena *arena, MLIR_RegionHandle region,
     if (cap == 0) { *out_blocks = NULL; return 0; }
     MLIR_BlockHandle *list = arena_new_array(arena, MLIR_BlockHandle, cap);
     size_t n = 0;
+    Scratch tmp = scratch_begin_avoid_conflict(arena);
+    BlockMap seen;
+    block_map_init(tmp.arena, &seen, cap);
     // BFS from entry.
     MLIR_BlockHandle entry = MLIR_GetRegionBlock(region, 0);
     list[n++] = entry;
+    block_map_insert(&seen, entry, 0);
     for (size_t head = 0; head < n; ++head) {
         MLIR_BlockHandle b = list[head];
         MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
@@ -918,11 +1025,13 @@ static size_t scc_collect_reachable(Arena *arena, MLIR_RegionHandle region,
             // successors (e.g., exit edges left dangling after a partial M7
             // transform) are handled by the caller, not us.
             if (MLIR_GetBlockParentRegion(s) != region) continue;
-            if (scc_block_index(list, n, s) != SIZE_MAX) continue;
+            if (block_map_get(&seen, s) != SIZE_MAX) continue;
             if (n >= cap) break; // shouldn't happen for a well-formed region
+            block_map_insert(&seen, s, n);
             list[n++] = s;
         }
     }
+    scratch_end(tmp);
     *out_blocks = list;
     return n;
 }
@@ -936,6 +1045,10 @@ static SccResult scc_compute(Arena *arena, MLIR_RegionHandle region) {
     r.n_blocks = n;
     r.blocks = blocks;
     if (n == 0) return r;
+    Scratch tmp = scratch_begin_avoid_conflict(arena);
+    BlockMap dense;   // block -> index into `blocks`
+    block_map_init(tmp.arena, &dense, n);
+    for (size_t i = 0; i < n; ++i) block_map_insert(&dense, blocks[i], i);
 
     size_t *index_of    = arena_new_array(arena, size_t, n);
     size_t *lowlink     = arena_new_array(arena, size_t, n);
@@ -983,7 +1096,7 @@ static SccResult scc_compute(Arena *arena, MLIR_RegionHandle region) {
                 MLIR_OpHandle term = MLIR_GetBlockTerminator(blocks[cur->v]);
                 MLIR_BlockHandle succ = MLIR_GetOpSuccessor(term, cur->next_succ);
                 cur->next_succ++;
-                size_t w = scc_block_index(blocks, n, succ);
+                size_t w = block_map_get(&dense, succ);
                 if (w == SIZE_MAX) continue; // unreachable from entry — skip
                 if (index_of[w] == 0) {
                     // Recurse into w.
@@ -1052,6 +1165,7 @@ static SccResult scc_compute(Arena *arena, MLIR_RegionHandle region) {
         r.scc_is_cycle[i] = scc_is_cycle_tmp[i];
     }
     r.scc_starts[n_sccs_out] = scc_starts_tmp[n_sccs_out];
+    scratch_end(tmp);
     return r;
 }
 
@@ -1298,20 +1412,20 @@ static void dom_dfs_postorder(MLIR_BlockHandle root,
     DomFrame *stack = arena_new_array(arena, DomFrame, stack_cap);
     size_t sp = 0;
 
-    // visited array
+    // visited array (in visit order) + a hash set over it for the
+    // "already visited?" test, which is asked once per CFG edge.
     size_t v_cap = 64, v_n = 0;
     MLIR_BlockHandle *v_arr = arena_new_array(arena, MLIR_BlockHandle, v_cap);
+    Scratch tmp = scratch_begin_avoid_conflict(arena);
+    BlockMap v_set;
+    block_map_init(tmp.arena, &v_set, v_cap);
     // Helpers for the postorder walk; written as inline code rather
     // than statement-expression macros so tinyC can parse them.
 
     if (root_is_virt) {
         // Root is the virtual exit. Push every real leaf as first level.
         for (size_t i = 0; i < n_leaves; ++i) {
-            bool seen = false;
-            for (size_t _i = 0; _i < v_n; ++_i) {
-                if (v_arr[_i] == leaf_blocks[i]) { seen = true; break; }
-            }
-            if (seen) continue;
+            if (!block_map_insert(&v_set, leaf_blocks[i], 0)) continue;
             if (v_n == v_cap) {
                 size_t nc = v_cap * 2;
                 MLIR_BlockHandle *na = arena_new_array(arena, MLIR_BlockHandle, nc);
@@ -1337,6 +1451,7 @@ static void dom_dfs_postorder(MLIR_BlockHandle root,
             v_arr = na; v_cap = nc;
         }
         v_arr[v_n++] = root;
+        block_map_insert(&v_set, root, 0);
         stack[sp].block = root;
         stack[sp].next_child = 0;
         sp++;
@@ -1370,11 +1485,7 @@ static void dom_dfs_postorder(MLIR_BlockHandle root,
             }
             fr->next_child++;
             if (child == MLIR_INVALID_HANDLE) continue;
-            bool seen = false;
-            for (size_t _i = 0; _i < v_n; ++_i) {
-                if (v_arr[_i] == child) { seen = true; break; }
-            }
-            if (seen) continue;
+            if (!block_map_insert(&v_set, child, 0)) continue;
             if (v_n == v_cap) {
                 size_t nc = v_cap * 2;
                 MLIR_BlockHandle *na = arena_new_array(arena, MLIR_BlockHandle, nc);
@@ -1404,6 +1515,7 @@ static void dom_dfs_postorder(MLIR_BlockHandle root,
         }
     }
 
+    scratch_end(tmp);
     for (size_t i = 0; i < out_count; ++i) out_blocks[i] = out[i];
     *out_n = out_count;
     if (visited_arr) *visited_arr = v_arr;
@@ -2847,7 +2959,7 @@ static bool transform_cfg_to_scf_region(LiftState *st, Combiner *combiner,
     if (MLIR_GetRegionNumBlocks(region) == 0) return false;
     if (MLIR_GetRegionNumBlocks(region) == 1) return false;
 
-    if (!check_preconditions(region, st->llvm_cfg)) return false;
+    if (!check_preconditions(st->arena, region, st->llvm_cfg)) return false;
     create_single_exit_blocks_for_return_like_into(st->ctx, st->arena, region,
                                                    combiner);
 
@@ -2950,19 +3062,29 @@ static void walk_and_transform_regions(LiftState *st, Combiner *combiner,
 // Erase non-entry blocks with no predecessors, iterating to fixed point
 // (erasing one may leave another unreachable). Mirrors upstream's
 // `eraseUnreachableBlocks`.
-static void erase_unreachable_blocks(MLIR_Context *ctx, MLIR_RegionHandle region) {
+static void erase_unreachable_blocks(MLIR_Context *ctx, Arena *arena,
+                                     MLIR_RegionHandle region) {
     bool changed = true;
     while (changed) {
         changed = false;
         size_t nb = MLIR_GetRegionNumBlocks(region);
-        for (size_t bi = 0; bi < nb; ++bi) {
+        if (nb < 2) break;
+        // One pass finds every block that currently has no predecessor;
+        // erase them all, then look again (their out-edges are gone, which
+        // may have orphaned further blocks).
+        Scratch scratch = scratch_begin_avoid_conflict(arena);
+        BlockMap has_pred;
+        collect_blocks_with_preds(scratch.arena, region, &has_pred);
+        MLIR_BlockHandle *dead =
+            arena_new_array(scratch.arena, MLIR_BlockHandle, nb);
+        size_t n_dead = 0;
+        for (size_t bi = 1; bi < nb; ++bi) {   // block 0 is the entry
             MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
-            if (MLIR_BlockIsEntry(b)) continue;
-            if (MLIR_GetBlockNumPredecessors(b) != 0) continue;
-            MLIR_EraseBlock(ctx, b);
-            changed = true;
-            break;
+            if (block_map_get(&has_pred, b) == SIZE_MAX) dead[n_dead++] = b;
         }
+        for (size_t i = 0; i < n_dead; ++i) MLIR_EraseBlock(ctx, dead[i]);
+        if (n_dead) changed = true;
+        scratch_end(scratch);
     }
 }
 
@@ -2984,8 +3106,8 @@ bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module,
             if (MLIR_GetOpNumRegions(o) == 0) continue;
             MLIR_RegionHandle body = MLIR_GetOpRegion(o, 0);
             if (MLIR_GetRegionNumBlocks(body) == 0) continue;
-            erase_unreachable_blocks(ctx, body);
-            if (!check_preconditions(body, llvm_cfg)) {
+            erase_unreachable_blocks(ctx, scratch, body);
+            if (!check_preconditions(scratch, body, llvm_cfg)) {
                 arena_destroy(scratch);
                 return false;
             }
