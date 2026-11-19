@@ -316,8 +316,12 @@ static void emit_use(FnCtx *F, MLIR_ValueHandle v) {
 // llvm.mlir.poison), assign it an inline literal in `F->vmap` instead of an
 // SSA name.
 static char *inline_literal_for(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_TypeHandle vty) {
-    string opn = MLIR_GetOpName(op);
-    if (name_eq(opn, "llvm.mlir.constant")) {
+    MLIR_OpType ty = MLIR_GetOpType(op);
+    // llvm.mlir.poison has no enumerator; it is matched by name.
+    bool is_undef = (ty == OP_TYPE_LLVM_MLIR_UNDEF);
+    bool is_poison = (ty == OP_TYPE_UNREGISTERED &&
+                      name_eq(MLIR_GetOpName(op), "llvm.mlir.poison"));
+    if (ty == OP_TYPE_LLVM_MLIR_CONSTANT) {
         // Value is the "value" attribute. It's printed as e.g. "3 : i32" or
         // "1.5e+00 : f32".
         size_t na = MLIR_GetOpNumAttributes(op);
@@ -352,25 +356,23 @@ static char *inline_literal_for(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_TypeHa
         (void)vty;
         return xstrdup("0");
     }
-    if (name_eq(opn, "llvm.mlir.zero") || name_eq(opn, "llvm.mlir.undef") ||
-        name_eq(opn, "llvm.mlir.poison")) {
+    if (ty == OP_TYPE_LLVM_MLIR_ZERO || is_undef || is_poison) {
         // Type-driven: ptr -> null, anything aggregate -> zeroinitializer,
         // scalar -> 0 / 0.0.
         string tys = MLIR_GetTypeString(ctx, vty);
         if (tys.size >= 9 && memcmp(tys.str, "!llvm.ptr", 9) == 0) {
-            return xstrdup(name_eq(opn, "llvm.mlir.undef") ? "undef" :
-                           name_eq(opn, "llvm.mlir.poison") ? "poison" : "null");
+            return xstrdup(is_undef ? "undef" : is_poison ? "poison" : "null");
         }
-        if (name_eq(opn, "llvm.mlir.undef")) return xstrdup("undef");
-        if (name_eq(opn, "llvm.mlir.poison")) return xstrdup("poison");
+        if (is_undef) return xstrdup("undef");
+        if (is_poison) return xstrdup("poison");
         // zero
         if (tys.size >= 1 && tys.str[0] == 'i') return xstrdup("0");
         if (tys.size == 3 && (memcmp(tys.str, "f32", 3) == 0 || memcmp(tys.str, "f64", 3) == 0))
             return xstrdup("0.000000e+00");
         return xstrdup("zeroinitializer");
     }
-    if (name_eq(opn, "llvm.mlir.null")) return xstrdup("null");
-    if (name_eq(opn, "llvm.mlir.addressof")) {
+    if (ty == OP_TYPE_LLVM_MLIR_NULL) return xstrdup("null");
+    if (ty == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
         size_t na = MLIR_GetOpNumAttributes(op);
         for (size_t i = 0; i < na; i++) {
             MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
@@ -690,55 +692,78 @@ static void emit_phis(FnCtx *F, MLIR_BlockHandle blk,
 }
 
 // Returns true if the op is a constant-like producer that we inline at uses.
-static bool is_inline_constant(string opn) {
-    return name_eq(opn, "llvm.mlir.constant") ||
-           name_eq(opn, "llvm.mlir.zero") ||
-           name_eq(opn, "llvm.mlir.undef") ||
-           name_eq(opn, "llvm.mlir.poison") ||
-           name_eq(opn, "llvm.mlir.null") ||
-           name_eq(opn, "llvm.mlir.addressof");
+static bool is_inline_constant(MLIR_OpHandle op, MLIR_OpType ty) {
+    switch (ty) {
+    case OP_TYPE_LLVM_MLIR_CONSTANT:
+    case OP_TYPE_LLVM_MLIR_ZERO:
+    case OP_TYPE_LLVM_MLIR_UNDEF:
+    case OP_TYPE_LLVM_MLIR_NULL:
+    case OP_TYPE_LLVM_MLIR_ADDRESSOF:
+        return true;
+    case OP_TYPE_UNREGISTERED:  // no enumerator for llvm.mlir.poison
+        return name_eq(MLIR_GetOpName(op), "llvm.mlir.poison");
+    default:
+        return false;
+    }
 }
 
-// Map of llvm.* arith op names to LLVM IR opcodes (1 result, 2 operands,
+// Map of llvm.* arith ops to LLVM IR opcodes (1 result, 2 operands,
 // printed as "%r = OP T a, b\n").
-static const char *llvm_binop_opcode(string opn) {
-    struct { const char *mlir; const char *llvm; } tbl[] = {
-        {"llvm.add",  "add"},  {"llvm.sub", "sub"},  {"llvm.mul", "mul"},
-        {"llvm.sdiv", "sdiv"}, {"llvm.udiv","udiv"},
-        {"llvm.srem", "srem"}, {"llvm.urem","urem"},
-        {"llvm.and",  "and"},  {"llvm.or",  "or"},   {"llvm.xor", "xor"},
-        {"llvm.shl",  "shl"},  {"llvm.lshr","lshr"}, {"llvm.ashr","ashr"},
-        {"llvm.fadd", "fadd"}, {"llvm.fsub","fsub"}, {"llvm.fmul","fmul"},
-        {"llvm.fdiv", "fdiv"}, {"llvm.frem","frem"},
-        {NULL, NULL},
-    };
-    for (int i = 0; tbl[i].mlir; i++) if (name_eq(opn, tbl[i].mlir)) return tbl[i].llvm;
-    return NULL;
+static const char *llvm_binop_opcode(MLIR_OpType ty) {
+    switch (ty) {
+    case OP_TYPE_LLVM_ADD:    return "add";
+    case OP_TYPE_LLVM_SUB:    return "sub";
+    case OP_TYPE_LLVM_MUL:    return "mul";
+    case OP_TYPE_LLVM_SDIV:   return "sdiv";
+    case OP_TYPE_LLVM_UDIV:   return "udiv";
+    case OP_TYPE_LLVM_SREM:   return "srem";
+    case OP_TYPE_LLVM_UREM:   return "urem";
+    case OP_TYPE_LLVM_AND:    return "and";
+    case OP_TYPE_LLVM_OR:     return "or";
+    case OP_TYPE_LLVM_XOR:    return "xor";
+    case OP_TYPE_LLVM_SHL:    return "shl";
+    case OP_TYPE_LLVM_LSHR:   return "lshr";
+    case OP_TYPE_LLVM_ASHR:   return "ashr";
+    case OP_TYPE_LLVM_FADD:   return "fadd";
+    case OP_TYPE_LLVM_FSUB:   return "fsub";
+    case OP_TYPE_LLVM_FMUL:   return "fmul";
+    case OP_TYPE_LLVM_FDIV:   return "fdiv";
+    case OP_TYPE_LLVM_FREM:   return "frem";
+    default: return NULL;
+    }
 }
 
-static const char *llvm_cast_opcode(string opn) {
-    struct { const char *mlir; const char *llvm; } tbl[] = {
-        {"llvm.sext", "sext"},     {"llvm.zext", "zext"},
-        {"llvm.trunc","trunc"},
-        {"llvm.fpext","fpext"},    {"llvm.fptrunc","fptrunc"},
-        {"llvm.sitofp","sitofp"},  {"llvm.uitofp","uitofp"},
-        {"llvm.fptosi","fptosi"},  {"llvm.fptoui","fptoui"},
-        {"llvm.bitcast","bitcast"},{"llvm.ptrtoint","ptrtoint"},
-        {"llvm.inttoptr","inttoptr"}, {"llvm.addrspacecast","addrspacecast"},
-        {NULL, NULL},
-    };
-    for (int i = 0; tbl[i].mlir; i++) if (name_eq(opn, tbl[i].mlir)) return tbl[i].llvm;
-    return NULL;
+static const char *llvm_cast_opcode(MLIR_OpHandle op, MLIR_OpType ty) {
+    switch (ty) {
+    case OP_TYPE_LLVM_SEXT:      return "sext";
+    case OP_TYPE_LLVM_ZEXT:      return "zext";
+    case OP_TYPE_LLVM_TRUNC:     return "trunc";
+    case OP_TYPE_LLVM_FPEXT:     return "fpext";
+    case OP_TYPE_LLVM_FPTRUNC:   return "fptrunc";
+    case OP_TYPE_LLVM_SITOFP:    return "sitofp";
+    case OP_TYPE_LLVM_UITOFP:    return "uitofp";
+    case OP_TYPE_LLVM_FPTOSI:    return "fptosi";
+    case OP_TYPE_LLVM_FPTOUI:    return "fptoui";
+    case OP_TYPE_LLVM_BITCAST:   return "bitcast";
+    case OP_TYPE_LLVM_PTRTOINT:  return "ptrtoint";
+    case OP_TYPE_LLVM_INTTOPTR:  return "inttoptr";
+    case OP_TYPE_UNREGISTERED:  // no enumerator for llvm.addrspacecast
+        return name_eq(MLIR_GetOpName(op), "llvm.addrspacecast") ? "addrspacecast" : NULL;
+    default: return NULL;
+    }
 }
 
 static void emit_op(FnCtx *F, MLIR_OpHandle op) {
     Buf *out = F->out;
-    string opn = MLIR_GetOpName(op);
+    // The op type is derived from the op name by MLIR_CreateOp, so the ops
+    // with an enumerator are selected by one switch; the rest (intrinsics,
+    // llvm.unreachable) are matched by name after it.
+    MLIR_OpType ty = MLIR_GetOpType(op);
 
-    if (is_inline_constant(opn)) return; // inlined at uses
+    if (is_inline_constant(op, ty)) return; // inlined at uses
 
     const char *bop;
-    if ((bop = llvm_binop_opcode(opn)) != NULL) {
+    if ((bop = llvm_binop_opcode(ty)) != NULL) {
         // %r = OP T a, b
         buf_cstr(out, "  ");
         emit_use(F, MLIR_GetOpResult(op, 0));
@@ -756,7 +781,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         return;
     }
     const char *cop;
-    if ((cop = llvm_cast_opcode(opn)) != NULL) {
+    if ((cop = llvm_cast_opcode(op, ty)) != NULL) {
         buf_cstr(out, "  ");
         emit_use(F, MLIR_GetOpResult(op, 0));
         buf_cstr(out, " = ");
@@ -772,12 +797,13 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         return;
     }
 
-    if (name_eq(opn, "llvm.icmp") || name_eq(opn, "llvm.fcmp")) {
+    switch (ty) {
+    case OP_TYPE_LLVM_ICMP: case OP_TYPE_LLVM_FCMP: {
         // %r = icmp pred T a, b
         buf_cstr(out, "  ");
         emit_use(F, MLIR_GetOpResult(op, 0));
         buf_cstr(out, " = ");
-        buf_cstr(out, name_eq(opn, "llvm.icmp") ? "icmp " : "fcmp ");
+        buf_cstr(out, ty == OP_TYPE_LLVM_ICMP ? "icmp " : "fcmp ");
         MLIR_AttributeHandle pa = find_attr(op, "predicate");
         const char *predtbl_i[] = {"eq","ne","slt","sle","sgt","sge","ult","ule","ugt","uge"};
         const char *predtbl_f[] = {
@@ -786,7 +812,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         };
         int pi = 0;
         if (pa != MLIR_INVALID_HANDLE) pi = (int)MLIR_GetAttributeInteger(pa);
-        if (name_eq(opn, "llvm.icmp")) {
+        if (ty == OP_TYPE_LLVM_ICMP) {
             if (pi >= 0 && pi < 10) buf_cstr(out, predtbl_i[pi]); else buf_cstr(out, "eq");
         } else {
             if (pi >= 0 && pi < 16) buf_cstr(out, predtbl_f[pi]); else buf_cstr(out, "oeq");
@@ -803,7 +829,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         return;
     }
 
-    if (name_eq(opn, "llvm.select")) {
+    case OP_TYPE_LLVM_SELECT: {
         // %r = select i1 c, T a, T b
         buf_cstr(out, "  ");
         emit_use(F, MLIR_GetOpResult(op, 0));
@@ -823,7 +849,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         return;
     }
 
-    if (name_eq(opn, "llvm.alloca")) {
+    case OP_TYPE_LLVM_ALLOCA: {
         // %r = alloca T, i64 N, align A
         // The alloca element type is in the "elem_type" attribute; the
         // operand is the count (i64 typically).
@@ -842,7 +868,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         return;
     }
 
-    if (name_eq(opn, "llvm.store")) {
+    case OP_TYPE_LLVM_STORE: {
         // store T val, ptr p, align A
         MLIR_ValueHandle val = MLIR_GetOpOperand(op, 0);
         MLIR_ValueHandle ptr = MLIR_GetOpOperand(op, 1);
@@ -855,7 +881,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         buf_printf(out, ", align %u\n", type_align(F->ctx, MLIR_GetValueType(val)));
         return;
     }
-    if (name_eq(opn, "llvm.load")) {
+    case OP_TYPE_LLVM_LOAD: {
         // %r = load T, ptr p, align A
         MLIR_ValueHandle ptr = MLIR_GetOpOperand(op, 0);
         MLIR_TypeHandle rty = MLIR_GetOpResult_type(op, 0);
@@ -869,7 +895,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         return;
     }
 
-    if (name_eq(opn, "llvm.getelementptr")) {
+    case OP_TYPE_LLVM_GEP: {
         // %r = getelementptr ELEM_TY, ptr base, INDICES
         // MLIR form: llvm.getelementptr %p[0, 1, %v] : ... -> !llvm.ptr, ELEM_TY
         // The constant indices come from the "rawConstantIndices" attribute
@@ -931,9 +957,9 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         return;
     }
 
-    if (name_eq(opn, "llvm.call")) { emit_call(F, op); return; }
+    case OP_TYPE_LLVM_CALL: emit_call(F, op); return;
 
-    if (name_eq(opn, "llvm.return")) {
+    case OP_TYPE_LLVM_RETURN: {
         if (MLIR_GetOpNumOperands(op) == 0) buf_cstr(out, "  ret void\n");
         else {
             MLIR_ValueHandle v = MLIR_GetOpOperand(op, 0);
@@ -946,12 +972,12 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         return;
     }
 
-    if (name_eq(opn, "llvm.br")) {
+    case OP_TYPE_LLVM_BR: {
         MLIR_BlockHandle dst = MLIR_GetOpSuccessor(op, 0);
         buf_printf(out, "  br label %%%s\n", bname(F, dst));
         return;
     }
-    if (name_eq(opn, "llvm.cond_br")) {
+    case OP_TYPE_LLVM_COND_BR: {
         MLIR_ValueHandle c = MLIR_GetOpOperand(op, 0);
         MLIR_BlockHandle t = MLIR_GetOpSuccessor(op, 0);
         MLIR_BlockHandle f = MLIR_GetOpSuccessor(op, 1);
@@ -960,6 +986,10 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         buf_printf(out, ", label %%%s, label %%%s\n", bname(F, t), bname(F, f));
         return;
     }
+    default: break;
+    }
+
+    string opn = MLIR_GetOpName(op);
     if (name_eq(opn, "llvm.unreachable")) {
         buf_cstr(out, "  unreachable\n");
         return;
@@ -1285,7 +1315,7 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
             // initializer expression.
             for (size_t i = 0; i < nops; i++) {
                 MLIR_OpHandle op = MLIR_GetBlockOp(blk, i);
-                if (name_eq(MLIR_GetOpName(op), "llvm.return") &&
+                if (MLIR_GetOpType(op) == OP_TYPE_LLVM_RETURN &&
                     MLIR_GetOpNumOperands(op) > 0) {
                     MLIR_ValueHandle v = MLIR_GetOpOperand(op, 0);
                     MLIR_OpHandle def = MLIR_GetValueDefiningOp(v);
@@ -1428,7 +1458,7 @@ static bool module_has_global(MLIR_BlockHandle mb, const char *gn) {
     size_t n = MLIR_GetBlockNumOps(mb);
     for (size_t i = 0; i < n; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        if (!name_eq(MLIR_GetOpName(op), "llvm.mlir.global")) continue;
+        if (MLIR_GetOpType(op) != OP_TYPE_LLVM_MLIR_GLOBAL) continue;
         MLIR_AttributeHandle syma = find_attr(op, "sym_name");
         if (syma == MLIR_INVALID_HANDLE) continue;
         string sym = MLIR_GetAttributeString(syma);
@@ -1515,7 +1545,7 @@ string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module) {
     bool need_wasm_pages = false;
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        if (name_eq(MLIR_GetOpName(op), "llvm.func") && op_uses_wasm_memory(op))
+        if (MLIR_GetOpType(op) == OP_TYPE_LLVM_FUNC && op_uses_wasm_memory(op))
             need_wasm_pages = true;
     }
     if (need_wasm_pages && !module_has_global(mb, "__wasm_mem_pages"))
@@ -1524,13 +1554,11 @@ string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module) {
     // Emit globals first, then functions (order doesn't really matter to llc).
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        string n = MLIR_GetOpName(op);
-        if (name_eq(n, "llvm.mlir.global")) emit_global(ctx, &out, op);
+        if (MLIR_GetOpType(op) == OP_TYPE_LLVM_MLIR_GLOBAL) emit_global(ctx, &out, op);
     }
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        string n = MLIR_GetOpName(op);
-        if (name_eq(n, "llvm.func")) emit_function(ctx, &out, op);
+        if (MLIR_GetOpType(op) == OP_TYPE_LLVM_FUNC) emit_function(ctx, &out, op);
     }
 
     // Copy result into the arena.
