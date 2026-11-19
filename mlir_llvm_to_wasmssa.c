@@ -1226,13 +1226,10 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         return true;
     }
 
-    // ---- ub.poison / llvm.mlir.undef ---------------------------------------
-    // Inserted by --lift-cf-to-scf for "doesn't-matter" yield values on
-    // unreachable / pre-break paths. Lower either name to a typed zero
-    // constant. Upstream's CFGToSCF uses ub.poison; the native port uses
-    // llvm.mlir.undef (no UB dialect in the agnostic op table) — both are
-    // semantically equivalent here.
-    if (name_eq(name, "ub.poison") || name_eq(name, "llvm.mlir.undef")) {
+    // ---- llvm.mlir.undef ----------------------------------------------------
+    // Inserted by the structurization step for "doesn't-matter" yield values
+    // on unreachable / pre-break paths. Lower it to a typed zero constant.
+    if (name_eq(name, "llvm.mlir.undef")) {
         if (MLIR_GetOpNumResults(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
@@ -1683,37 +1680,6 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         uint8_t opc;
         if (!is_zext && in_vt == WT_I64 && out_vt == WT_I32) opc = 0xa7;
         else if (is_zext && in_vt == WT_I32 && out_vt == WT_I64) opc = 0xad;
-        else return false;
-        wasmssa_op_t o = {0};
-        o.type = OP_TYPE_WASMSSA_UNOP;
-        o.valtype = out_vt;
-        o.wasm_opcode = opc;
-        o.n_operands = 1;
-        MLIR_ValueHandle o_ops[1] = { sa };
-        o.operands = o_ops;
-        o.has_result = true;
-        MLIR_ValueHandle idx = commit_op(F, &o);
-        vmap_set(F, r, idx);
-        return true;
-    }
-
-    // ---- builtin.unrealized_conversion_cast --------------------------------
-    // Treat as identity when wasm valtypes match (e.g. ptr<->i32, index<->i32).
-    // Otherwise emit a trunc/extend (i64<->i32 unsigned).
-    if (name_eq(name, "builtin.unrealized_conversion_cast")) {
-        if (MLIR_GetOpNumOperands(op) != 1 || MLIR_GetOpNumResults(op) != 1)
-            return false;
-        MLIR_ValueHandle s = MLIR_GetOpOperand(op, 0);
-        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
-        uint8_t in_vt  = wasm_vt(F->ctx, MLIR_GetValueType(s));
-        uint8_t out_vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
-        if (in_vt == 0 || out_vt == 0) return false;
-        MLIR_ValueHandle sa;
-        if (!vmap_get(F, s, &sa)) return false;
-        if (in_vt == out_vt) { vmap_set(F, r, sa); return true; }
-        uint8_t opc;
-        if (in_vt == WT_I64 && out_vt == WT_I32) opc = 0xa7;       // i32.wrap_i64
-        else if (in_vt == WT_I32 && out_vt == WT_I64) opc = 0xad;  // i64.extend_i32_u
         else return false;
         wasmssa_op_t o = {0};
         o.type = OP_TYPE_WASMSSA_UNOP;
@@ -2902,7 +2868,70 @@ static void emit_import_func(MLIR_Context *ctx, Arena *arena,
 // retained. Output ordering (matches the prior two-pass implementation
 // byte-for-byte): import_funcs, then defined funcs, then import_globals.
 // =============================================================================
+// ---------------------------------------------------------------------------
+// Input guard. The wasm backend takes LLVM-dialect input only (see the file
+// header). Reject, naming the offending op, anything that is not an `llvm.*`
+// op -- at module level or anywhere inside a function / global-initializer
+// body -- instead of letting some later code path quietly cope with a
+// higher-level dialect (cf.*, scf.*, arith.*, func.*, ...). This is what
+// keeps a pre-backend lowering regression from going unnoticed.
+// ---------------------------------------------------------------------------
+static bool op_is_llvm_dialect(MLIR_OpHandle op) {
+    string n = MLIR_GetOpName(op);
+    return n.size > 5 && memcmp(n.str, "llvm.", 5) == 0;
+}
+
+// `owner` is the enclosing module-level op (for the diagnostic), or
+// MLIR_INVALID_HANDLE while walking the module body itself.
+static bool check_llvm_only_block(MLIR_BlockHandle block, MLIR_OpHandle owner) {
+    size_t no = MLIR_GetBlockNumOps(block);
+    for (size_t i = 0; i < no; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(block, i);
+        if (!op_is_llvm_dialect(op)) {
+            string n = MLIR_GetOpName(op);
+            string where = str_lit("<module>");
+            if (owner != MLIR_INVALID_HANDLE) {
+                MLIR_AttributeHandle sa =
+                    MLIR_GetOpAttributeByName(owner, "sym_name");
+                if (sa != MLIR_INVALID_HANDLE)
+                    where = MLIR_GetAttributeString(sa);
+            }
+            fprintf(stderr,
+                    "wasmssa-lower: op '%.*s' in '%.*s' is not in the LLVM "
+                    "dialect; the wasm backend takes LLVM-dialect input only "
+                    "(lower the module with MLIR_LowerToLLVMDialect first)\n",
+                    (int)n.size, n.str, (int)where.size, where.str);
+            return false;
+        }
+        MLIR_OpHandle inner_owner = owner != MLIR_INVALID_HANDLE ? owner : op;
+        size_t nr = MLIR_GetOpNumRegions(op);
+        for (size_t r = 0; r < nr; r++) {
+            MLIR_RegionHandle rg = MLIR_GetOpRegion(op, r);
+            size_t nb = MLIR_GetRegionNumBlocks(rg);
+            for (size_t b = 0; b < nb; b++) {
+                if (!check_llvm_only_block(MLIR_GetRegionBlock(rg, b),
+                                           inner_owner))
+                    return false;
+            }
+        }
+    }
+    return true;
+}
+
 MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module) {
+    // Step 0: enforce the input contract before anything else looks at the
+    // module (in particular before step 1 introduces the backend's own
+    // scf.* ops).
+    if (MLIR_GetOpNumRegions(module) == 0 ||
+        MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(module, 0)) == 0) {
+        fprintf(stderr, "wasmssa-lower: module has no body\n");
+        return MLIR_INVALID_HANDLE;
+    }
+    if (!check_llvm_only_block(
+            MLIR_GetRegionBlock(MLIR_GetOpRegion(module, 0), 0),
+            MLIR_INVALID_HANDLE))
+        return MLIR_INVALID_HANDLE;
+
     // Step 1 (see the file header): structurize the LLVM-dialect CFG in
     // place. The scf.* ops this creates never leave this function.
     MLIR_LiftCfToScfOptions lift_options = {0};

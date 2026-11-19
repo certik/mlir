@@ -3698,11 +3698,63 @@ static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name,
         MLIR_INVALID_HANDLE, (string){0}, -1);
 }
 
+// ---------------------------------------------------------------------------
+// Input guard. The aarch64 backend takes LLVM-dialect input only (see the file
+// header). Reject, naming the offending op, anything that is not an `llvm.*`
+// op -- at module level or anywhere inside a function / global-initializer
+// body -- instead of letting some later code path quietly cope with a
+// higher-level dialect (cf.*, scf.*, arith.*, func.*, ...). This is what
+// keeps a pre-backend lowering regression from going unnoticed.
+// ---------------------------------------------------------------------------
+static bool op_is_llvm_dialect(MLIR_OpHandle op) {
+    string n = MLIR_GetOpName(op);
+    return n.size > 5 && memcmp(n.str, "llvm.", 5) == 0;
+}
+
+// `owner` is the enclosing module-level op (for the diagnostic), or
+// MLIR_INVALID_HANDLE while walking the module body itself.
+static bool check_llvm_only_block(MLIR_BlockHandle block, MLIR_OpHandle owner) {
+    size_t no = MLIR_GetBlockNumOps(block);
+    for (size_t i = 0; i < no; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(block, i);
+        if (!op_is_llvm_dialect(op)) {
+            string n = MLIR_GetOpName(op);
+            string where = str_lit("<module>");
+            if (owner != MLIR_INVALID_HANDLE) {
+                MLIR_AttributeHandle sa =
+                    MLIR_GetOpAttributeByName(owner, "sym_name");
+                if (sa != MLIR_INVALID_HANDLE)
+                    where = MLIR_GetAttributeString(sa);
+            }
+            fprintf(stderr,
+                    "llvm->aarch64: op '%.*s' in '%.*s' is not in the LLVM "
+                    "dialect; the aarch64 backend takes LLVM-dialect input only "
+                    "(lower the module with MLIR_LowerToLLVMDialect first)\n",
+                    (int)n.size, n.str, (int)where.size, where.str);
+            return false;
+        }
+        MLIR_OpHandle inner_owner = owner != MLIR_INVALID_HANDLE ? owner : op;
+        size_t nr = MLIR_GetOpNumRegions(op);
+        for (size_t r = 0; r < nr; r++) {
+            MLIR_RegionHandle rg = MLIR_GetOpRegion(op, r);
+            size_t nb = MLIR_GetRegionNumBlocks(rg);
+            for (size_t b = 0; b < nb; b++) {
+                if (!check_llvm_only_block(MLIR_GetRegionBlock(rg, b),
+                                           inner_owner))
+                    return false;
+            }
+        }
+    }
+    return true;
+}
+
 MLIR_OpHandle mlir_llvm_to_aarch64(MLIR_Context *ctx,
                                    MLIR_OpHandle llvm_module) {
     MLIR_RegionHandle mr = MLIR_GetOpRegion(llvm_module, 0);
     MLIR_BlockHandle  mb = MLIR_GetRegionBlock(mr, 0);
     size_t nops = MLIR_GetBlockNumOps(mb);
+    if (!check_llvm_only_block(mb, MLIR_INVALID_HANDLE))
+        return MLIR_INVALID_HANDLE;
 
     MLIR_BlockHandle  out_body = MLIR_CreateBlock(ctx);
     MLIR_RegionHandle out_region = MLIR_CreateRegion(ctx);
@@ -3809,6 +3861,7 @@ LlvmSelState *mlir_llvm_sel_begin(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     MLIR_RegionHandle mr = MLIR_GetOpRegion(llvm_module, 0);
     MLIR_BlockHandle  mb = MLIR_GetRegionBlock(mr, 0);
     size_t nops = MLIR_GetBlockNumOps(mb);
+    if (!check_llvm_only_block(mb, MLIR_INVALID_HANDLE)) return NULL;
 
     LlvmSelState *st = (LlvmSelState *)calloc(1, sizeof(LlvmSelState));
     if (!st) return NULL;
