@@ -1051,12 +1051,7 @@ static void resolve_pending_ptr_globals(GMap *gm, PendingPtrReloc *pend, size_t 
 // True if `op` is llvm.mlir.global (in-tree or upstream GlobalOp form).
 static bool x64_is_global_op(MLIR_OpHandle op) {
     if (MLIR_GetOpType(op) == OP_TYPE_LLVM_MLIR_GLOBAL) return true;
-    string nm = MLIR_GetOpName(op);
-    if (nm.size == 17 && memcmp(nm.str, "llvm.mlir.global", 17) == 0) return true;
-    if (MLIR_GetOpAttributeByName(op, "global_type") == MLIR_INVALID_HANDLE) return false;
-    if (MLIR_GetOpAttributeByName(op, "sym_name") == MLIR_INVALID_HANDLE) return false;
-    if (MLIR_GetOpAttributeByName(op, "function_type") != MLIR_INVALID_HANDLE) return false;
-    return true;
+    return str_eqz(MLIR_GetOpName(op), "llvm.mlir.global");
 }
 
 // Bare global name from sym_name (upstream stores `@foo`; strip the `@`).
@@ -1067,8 +1062,7 @@ static string x64_global_sym_name(MLIR_OpHandle op) {
 // True if `op` is llvm.func (in-tree or upstream FuncOp form).
 static bool x64_is_func_op(MLIR_OpHandle op) {
     if (MLIR_GetOpType(op) == OP_TYPE_LLVM_FUNC) return true;
-    string nm = MLIR_GetOpName(op);
-    return nm.size == 9 && memcmp(nm.str, "llvm.func", 9) == 0;
+    return str_eqz(MLIR_GetOpName(op), "llvm.func");
 }
 
 // True if the module has a function named `name` (defined when require_body).
