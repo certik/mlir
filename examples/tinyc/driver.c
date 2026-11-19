@@ -365,7 +365,6 @@ static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
                                       bool (*lower_fn)(MLIR_Context *, MLIR_OpHandle),
                                       TinycElfHelperKind kind,
                                       MLIR_OpHandle *out_mod) {
-    bool is_wasi_adapter = kind == TINYC_ELF_HELPER_WASI;
     *out_mod = MLIR_INVALID_HANDLE;
     Arena *saved_arena = MLIR_GetArenaAllocator(ctx);
     Arena *pmod_arena = arena_create(16 * 1024 * 1024);
@@ -383,15 +382,10 @@ static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
     if (kind == TINYC_ELF_HELPER_WASI)
         defs[nd++] = str_from_cstr_view((char *)"PLATFORM_HOST_SHIM=1");
     if (kind == TINYC_ELF_HELPER_PLATFORM) {
+        // platform_linux.c talks to the kernel through __builtin_syscall6, so
+        // (unlike the Mach-O helper) there are no libc symbols to rename.
         defs[nd++] = str_from_cstr_view((char *)"PLATFORM_SKIP_ENTRY=1");
         defs[nd++] = str_from_cstr_view((char *)"PLATFORM_HOST_SHIM=1");
-        defs[nd++] = str_from_cstr_view((char *)"writev=_writev");
-        defs[nd++] = str_from_cstr_view((char *)"readv=_readv");
-        defs[nd++] = str_from_cstr_view((char *)"fcntl=_fcntl");
-        defs[nd++] = str_from_cstr_view((char *)"open=_open");
-        defs[nd++] = str_from_cstr_view((char *)"close=_close");
-        defs[nd++] = str_from_cstr_view((char *)"lseek=_lseek");
-        defs[nd++] = str_from_cstr_view((char *)"__error=___error");
     }
 
     string src = tinyc_preprocess(pmod_arena, str_from_cstr_view((char *)path),
@@ -421,7 +415,7 @@ static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
         ctx->no_def_use_tracking = saved_no_def_use;
         return false;
     }
-    if (out_mod) *out_mod = pmod;
+    *out_mod = pmod;
 
     MLIR_BlockHandle pbody = MLIR_GetRegionBlock(MLIR_GetOpRegion(pmod, 0), 0);
     size_t pn = MLIR_GetBlockNumOps(pbody);
@@ -438,16 +432,12 @@ static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
     }
     MLIR_SetArenaAllocator(ctx, saved_arena);
     ctx->no_def_use_tracking = saved_no_def_use;
-    if (is_wasi_adapter && n_funcs == 0) {
+    // Every helper must contribute functions; only the platform file may get
+    // by on globals alone.
+    bool globals_suffice = kind == TINYC_ELF_HELPER_PLATFORM && has_globals;
+    if (n_funcs == 0 && !globals_suffice) {
         fprintf(stderr, "tinyc: no spliceable definitions in '%s'\n", path);
-        return false;
-    }
-    if (kind == TINYC_ELF_HELPER_BUDDY && n_funcs == 0) {
-        fprintf(stderr, "tinyc: no spliceable definitions in '%s'\n", path);
-        return false;
-    }
-    if (n_funcs == 0 && !has_globals) {
-        fprintf(stderr, "tinyc: no spliceable definitions in '%s'\n", path);
+        *out_mod = MLIR_INVALID_HANDLE;
         return false;
     }
     return true;
