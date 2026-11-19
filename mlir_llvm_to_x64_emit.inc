@@ -1211,7 +1211,8 @@ static bool x64_resolve_entry(MLIR_BlockHandle mb, bool wasm_lifted, char **out_
 }
 
 // Synthesize _start: wasm linmem/argc setup, ptr inits, init+main, exit syscall.
-static void synth_start(ObjModule *m, GMap *gm, X64PtrReloc *relocs, size_t n_relocs,
+static void synth_start(ObjModule *m, GMap *gm, Buf *data,
+                        X64PtrReloc *relocs, size_t n_relocs,
                         bool wasm_lifted, const char *entry_sym) {
     ObjFunc *f = obj_add_func(m, heapdup_cstr("_start"), true);
     FnCtx F; memset(&F,0,sizeof(F)); F.f = f; F.ok = true;
@@ -1239,14 +1240,43 @@ static void synth_start(ObjModule *m, GMap *gm, X64PtrReloc *relocs, size_t n_re
     }
 
     if (has_linmem_base) {
+        // Diagnostic for a failed reservation, kept in .data. The name cannot
+        // collide with a C identifier.
+        const char *oom_msg =
+            "tinyc runtime: cannot reserve 4 GiB of address space for the wasm "
+            "linear memory (mmap failed; check `ulimit -v` / overcommit limits)\n";
+        size_t oom_len = strlen(oom_msg);
+        uint32_t oom_off = x64_data_begin_global(data, oom_len);
+        memcpy(data->data + oom_off, oom_msg, oom_len);
+        x64_data_finish_global(gm, data, str_from_cstr_view((char *)".x64.linmem_oom_msg"),
+                               oom_off, oom_len);
+
+        // rax = mmap(NULL, 4 GiB, PROT_READ|PROT_WRITE,
+        //            MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0)
+        // MAP_NORESERVE: this is an address-space reservation; pages are only
+        // committed when the program touches them.
         mov_ri(&F, RDI, 0, 1);
-        mov_ri(&F, RSI, (int64_t)(1ULL << 32), 1);
-        mov_ri(&F, RDX, 3, 1);
-        mov_ri(&F, R10, 0x22, 1);
+        mov_ri(&F, RSI, (int64_t)X64_WASM_LINMEM_RESERVE, 1);
+        mov_ri(&F, RDX, X64_PROT_READ_WRITE, 1);
+        mov_ri(&F, R10, X64_MAP_LINMEM_FLAGS, 1);
         mov_ri(&F, R8, -1, 1);
         mov_ri(&F, R9, 0, 1);
         mov_ri(&F, RAX, NR_MMAP, 0);
+        eb(&F, 0x0F); eb(&F, 0x05);                                 // syscall
+        // A raw syscall reports failure as -errno, i.e. an unsigned value in
+        // (-4096, -1]. Without this check the template copy below would
+        // `rep movsb` into that bogus address and die with a bare SIGSEGV.
+        eb(&F, 0x48); eb(&F, 0x3D); e32(&F, 0xFFFFF000u);           // cmp rax, -4096
+        eb(&F, 0x76); uint32_t ok_rel8 = here(&F); eb(&F, 0);       // jbe .mapped
+        mov_ri(&F, RDI, 2, 0);                                      //   write(2, msg, len)
+        lea_rip_data(&F, RSI, oom_off);
+        mov_ri(&F, RDX, (int64_t)oom_len, 0);
+        mov_ri(&F, RAX, NR_WRITE, 0);
         eb(&F, 0x0F); eb(&F, 0x05);
+        mov_ri(&F, RDI, 1, 0);                                      //   exit(1)
+        mov_ri(&F, RAX, NR_EXIT, 0);
+        eb(&F, 0x0F); eb(&F, 0x05);
+        f->code.data[ok_rel8] = (uint8_t)(here(&F) - (ok_rel8 + 1)); // .mapped:
         mov_rr(&F, RBX, RAX, 1);
         lea_rip_data(&F, RCX, linmem_base_off);
         store_mem(&F, RCX, RBX, 8);
@@ -1405,7 +1435,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     // index defined functions by name
     size_t no = MLIR_GetBlockNumOps(mb);
 
-    synth_start(&m, &gm, ptr_relocs, n_ptr_relocs, wasm_lifted, entry_cstr);
+    synth_start(&m, &gm, &data, ptr_relocs, n_ptr_relocs, wasm_lifted, entry_cstr);
     m.start_idx = 0;
 
     // Reachability from crt0 roots trims unused runtime.
