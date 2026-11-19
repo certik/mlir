@@ -1,0 +1,19 @@
+extern int printf(const char *fmt, ...);
+
+// A `void (*cb)(...)` parameter is a function pointer, not a `void`
+// parameter, and must be accepted (and callable) in any position.
+
+static int g_count;
+
+static void bump(int by) { g_count = g_count + by; }
+
+static void apply(int n, void (*cb)(int), int by) {
+    int i;
+    for (i = 0; i < n; i = i + 1) cb(by);
+}
+
+int main(void) {
+    apply(3, bump, 5);
+    printf("%lld\n", (long long)g_count);
+    return 0;
+}
