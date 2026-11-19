@@ -658,6 +658,15 @@ static unsigned a64_struct_field_offset(MLIR_Context *ctx, MLIR_TypeHandle sty,
 }
 // Size in bytes of an LLVM-dialect type on aarch64 (pointers are 8 bytes).
 static unsigned a64_type_size(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    // Aggregates first: their size comes from the element / field types, and
+    // MLIR_GetTypeString() formats (and allocates) the whole nested type on
+    // every call, which was a measurable share of compile time and memory.
+    if (MLIR_IsTypeLLVMArray(ty)) {
+        unsigned esz = a64_type_size(ctx, MLIR_GetTypeLLVMArrayElement(ty));
+        if (esz == 0) return 0;
+        return esz * (unsigned)MLIR_GetTypeLLVMArrayNumElements(ty);
+    }
+    if (MLIR_IsTypeLLVMStruct(ty)) return a64_struct_size(ctx, ty);
     string s = MLIR_GetTypeString(ctx, ty);
     if (s.size >= 9 && memcmp(s.str, "!llvm.ptr", 9) == 0) return 8;
     if (s.size == 3 && memcmp(s.str, "ptr", 3) == 0) return 8;
@@ -674,12 +683,6 @@ static unsigned a64_type_size(MLIR_Context *ctx, MLIR_TypeHandle ty) {
         if (w == 32) return 4;
         if (w == 64) return 8;
     }
-    if (MLIR_IsTypeLLVMArray(ty)) {
-        unsigned esz = a64_type_size(ctx, MLIR_GetTypeLLVMArrayElement(ty));
-        if (esz == 0) return 0;
-        return esz * (unsigned)MLIR_GetTypeLLVMArrayNumElements(ty);
-    }
-    if (MLIR_IsTypeLLVMStruct(ty)) return a64_struct_size(ctx, ty);
     return 0;
 }
 
