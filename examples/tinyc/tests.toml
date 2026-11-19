@@ -1476,3 +1476,10 @@ wasm_upstream_skip = true
 wasm_native_emit = "wasmssa"
 wasm_native_direct_source = true
 wasm_native_emit_regex = ["wasmssa\\.binop\\(%arg0: i32"]
+
+[[test]]
+name = "cfg_stress"
+targets = ["native", "wasm", "macho", "elf"]
+# Irreducible CFG (goto into a loop), nested loops with several exits, switch
+# fallthrough with continue, goto state machine. See the header of the test.
+expected_stdout = "12 11 10\n228 5358 5358\n2005 2005 2005\n9 136 136\n910 511 1110\n668 5017 223\n"
