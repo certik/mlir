@@ -1,0 +1,129 @@
+extern int printf(const char *fmt, ...);
+
+// Reading a struct field must evaluate the expression that yields the struct
+// exactly once. tinyc used to evaluate it once per internal type query, so a
+// side effect in it ran twice for a scalar field and three times for a
+// pointer field: `stack[--sp].bid` popped two entries instead of one.
+
+typedef struct {
+    int bid;
+    int x;
+    const char *name;
+    int arr[3];
+    const char *names[2];
+} Fr;
+
+static Fr g_frames[6];
+static Fr *g_ptrs[6];
+static int g_calls;
+
+static Fr *next_frame(void) {
+    g_calls++;
+    return &g_frames[g_calls];
+}
+
+// Pre-decrement in the index, scalar field.
+static int pop_bid(Fr *stack, int *sp_io) {
+    int sp = *sp_io;
+    int v = stack[--sp].bid;
+    *sp_io = sp;
+    return v;
+}
+
+// Post-increment in the index, scalar field.
+static int next_x(Fr *stack, int *sp_io) {
+    int sp = *sp_io;
+    int v = stack[sp++].x;
+    *sp_io = sp;
+    return v;
+}
+
+// Pointer field: the base used to be evaluated three times.
+static const char *pop_name(Fr *stack, int *sp_io) {
+    int sp = *sp_io;
+    const char *v = stack[--sp].name;
+    *sp_io = sp;
+    return v;
+}
+
+// Array field (array-to-pointer decay), then an element of it.
+static int pop_arr1(Fr *stack, int *sp_io) {
+    int sp = *sp_io;
+    int v = stack[--sp].arr[1];
+    *sp_io = sp;
+    return v;
+}
+
+// Element of an array-of-pointers field.
+static const char *pop_names1(Fr *stack, int *sp_io) {
+    int sp = *sp_io;
+    const char *v = stack[--sp].names[1];
+    *sp_io = sp;
+    return v;
+}
+
+// Array of struct pointers, `->` on the indexed element.
+static int pop_ptr_bid(Fr **pp, int *sp_io) {
+    int sp = *sp_io;
+    int v = pp[--sp]->bid;
+    *sp_io = sp;
+    return v;
+}
+
+int main(void) {
+    const char *lower[6];
+    const char *upper[6];
+    lower[0] = "a0"; lower[1] = "b1"; lower[2] = "c2";
+    lower[3] = "d3"; lower[4] = "e4"; lower[5] = "f5";
+    upper[0] = "A0"; upper[1] = "B1"; upper[2] = "C2";
+    upper[3] = "D3"; upper[4] = "E4"; upper[5] = "F5";
+    for (int i = 0; i < 6; i++) {
+        g_frames[i].bid = 10 + i;
+        g_frames[i].x = 100 + i;
+        g_frames[i].name = lower[i];
+        g_frames[i].arr[0] = 1000 + i;
+        g_frames[i].arr[1] = 2000 + i;
+        g_frames[i].arr[2] = 3000 + i;
+        g_frames[i].names[0] = lower[5 - i];
+        g_frames[i].names[1] = upper[i];
+        g_ptrs[i] = &g_frames[i];
+    }
+
+    int sp = 6;
+    int a = pop_bid(g_frames, &sp);
+    int b = pop_bid(g_frames, &sp);
+    printf("%d %d %d\n", a, b, sp);
+
+    sp = 0;
+    a = next_x(g_frames, &sp);
+    b = next_x(g_frames, &sp);
+    printf("%d %d %d\n", a, b, sp);
+
+    sp = 6;
+    const char *s = pop_name(g_frames, &sp);
+    const char *t = pop_name(g_frames, &sp);
+    printf("%s %s %d\n", s, t, sp);
+
+    sp = 6;
+    a = pop_arr1(g_frames, &sp);
+    b = pop_arr1(g_frames, &sp);
+    printf("%d %d %d\n", a, b, sp);
+
+    sp = 6;
+    s = pop_names1(g_frames, &sp);
+    t = pop_names1(g_frames, &sp);
+    printf("%s %s %d\n", s, t, sp);
+
+    sp = 6;
+    a = pop_ptr_bid(g_ptrs, &sp);
+    b = pop_ptr_bid(g_ptrs, &sp);
+    printf("%d %d %d\n", a, b, sp);
+
+    // A call as the struct base must run once per read.
+    g_calls = 0;
+    a = next_frame()->bid;
+    s = next_frame()->name;
+    b = next_frame()->arr[2];
+    printf("%d %s %d %d\n", a, s, b, g_calls);
+    return 0;
+}
