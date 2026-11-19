@@ -36,8 +36,15 @@ static const uint8_t ARG_REGS[6] = { RDI, RSI, RDX, RCX, R8, R9 };
 // Linux x86_64 syscall numbers baked into the synthesised _start crt0.
 // Every other syscall goes through the __tinyc_syscall6 thunk (the runtime
 // number is its first argument).
-#define NR_EXIT  60
+#define NR_WRITE 1
 #define NR_MMAP  9
+#define NR_EXIT  60
+// mmap() arguments for the lifted-wasm linear memory reservation in _start.
+#define X64_PROT_READ_WRITE   0x3      // PROT_READ | PROT_WRITE
+#define X64_MAP_LINMEM_FLAGS  0x4022   // MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE
+// wasm32 linear memory is addressed with zero-extended i32 offsets from
+// __wasm_linmem_base, so the whole 4 GiB range is reserved up front.
+#define X64_WASM_LINMEM_RESERVE (1ULL << 32)
 
 // condition codes (jcc/setcc low nibble)
 enum { CC_E=0x4, CC_NE=0x5, CC_B=0x2, CC_AE=0x3, CC_BE=0x6, CC_A=0x7,
