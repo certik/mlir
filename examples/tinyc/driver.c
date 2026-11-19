@@ -348,8 +348,22 @@ static bool driver_elf_lower_for_native_codegen(
     return ok;
 }
 
-static const char *driver_elf_buddy_source_path(void) {
-    return "corec/base/buddy.c";
+// Path of corec's base/buddy.c, taken from the same corec tree as the host
+// platform file: <dir of platform_<os>.c>/../base/buddy.c. The platform file
+// and the allocator it initialises must come from one checkout, and deriving
+// the path (rather than assuming "corec/base/buddy.c" under the current
+// directory) keeps `--from-wasm --emit=elf` working from any cwd.
+static const char *driver_elf_buddy_source_path(Arena *arena,
+                                                const char *host_platform_path) {
+    const char *rel = "../base/buddy.c";
+    size_t dir_len = 0;   // length of the directory prefix, incl. trailing '/'
+    for (size_t i = 0; host_platform_path[i]; i++)
+        if (host_platform_path[i] == '/') dir_len = i + 1;
+    size_t rel_len = strlen(rel);
+    char *out = (char *)arena_alloc(arena, dir_len + rel_len + 1);
+    memcpy(out, host_platform_path, dir_len);
+    memcpy(out + dir_len, rel, rel_len + 1);
+    return out;
 }
 
 // Compile corec's platform_<os>.c (or buddy.c / WASI adapter) as LP64 into a
@@ -478,7 +492,8 @@ static int driver_emit_from_wasm_elf(
         return 1;
     }
     MLIR_OpHandle buddy_mod = MLIR_INVALID_HANDLE;
-    if (!driver_elf_compile_helper(ctx, driver_elf_buddy_source_path(),
+    if (!driver_elf_compile_helper(ctx,
+                                   driver_elf_buddy_source_path(arena, host_platform_path),
                                    include_dirs, n_include_dirs,
                                    lower_fn, TINYC_ELF_HELPER_BUDDY,
                                    &buddy_mod)) {
