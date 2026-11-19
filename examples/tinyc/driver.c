@@ -27,11 +27,16 @@
 #include "mlir_llvm_to_aarch64.h"
 #include "mlir_aarch64_to_macho.h"
 // The x86_64 -> ELF backend is native-Linux-only (it emits x86_64 machine code
-// and a Linux ELF, and is not part of the tinyC self-host source set), so it is
-// compiled in only for Linux/x86_64 hosts, where mlir_llvm_to_x64.c /
-// mlir_elf.c are linked. Every other build (wasm/self-host, macOS, Windows)
+// and a Linux ELF, and is not part of the tinyC self-host source set by
+// default). It is compiled in for:
+//   - native Linux/x86_64 host builds (tinyc_native; mlir_llvm_to_x64.c /
+//     mlir_elf.c are linked), and
+//   - self-hosted ELF stages (tinyc compiled to wasm with -DTINYC_ENABLE_ELF=1,
+//     then lifted back to a native ELF that must retain --emit=elf / --from-wasm).
+// Every other build (wasm/self-host without TINYC_ENABLE_ELF, macOS, Windows)
 // omits it.
-#if defined(__linux__) && defined(__x86_64__) && !defined(__TINYC__)
+#if (defined(__linux__) && defined(__x86_64__) && !defined(__TINYC__)) \
+    || defined(TINYC_ENABLE_ELF)
 #include "mlir_llvm_to_x64.h"
 #define TINYC_HAS_ELF 1
 #endif
@@ -192,6 +197,399 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
     *n_picks = np;
     return true;
 }
+
+#ifdef TINYC_HAS_ELF
+// ELF self-host helpers: compile platform/buddy/WASI sources as LP64 modules
+// and splice globals + selected llvm.func ops into a lifted wasm->llvm module.
+// macOS Mach-O keeps the simpler pick-based tinyc_compile_host_platform above.
+
+typedef enum {
+    TINYC_ELF_HELPER_PLATFORM,
+    TINYC_ELF_HELPER_BUDDY,
+    TINYC_ELF_HELPER_WASI,
+} TinycElfHelperKind;
+
+static bool driver_elf_is_host_platform_support_symbol(string s) {
+    return (s.size == 6 && memcmp(s.str, "memcpy", 6) == 0) ||
+           (s.size == 6 && memcmp(s.str, "memset", 6) == 0) ||
+           (s.size == 18 && memcmp(s.str, "platform_heap_base", 18) == 0) ||
+           (s.size == 18 && memcmp(s.str, "platform_heap_size", 18) == 0) ||
+           (s.size == 18 && memcmp(s.str, "platform_heap_grow", 18) == 0);
+}
+
+static bool driver_elf_is_llvm_global_op(MLIR_OpHandle op) {
+    if (MLIR_GetOpType(op) == OP_TYPE_LLVM_MLIR_GLOBAL) return true;
+    string nm = MLIR_GetOpName(op);
+    if (nm.size == 17 && memcmp(nm.str, "llvm.mlir.global", 17) == 0) return true;
+    if (MLIR_GetOpAttributeByName(op, "global_type") == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetOpAttributeByName(op, "sym_name") == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetOpAttributeByName(op, "function_type") != MLIR_INVALID_HANDLE) return false;
+    return true;
+}
+
+static bool driver_elf_llvm_op_is_internal(MLIR_OpHandle op) {
+    MLIR_AttributeHandle linka = MLIR_GetOpAttributeByName(op, "llvm.linkage");
+    if (linka == MLIR_INVALID_HANDLE)
+        linka = MLIR_GetOpAttributeByName(op, "linkage");
+    if (linka != MLIR_INVALID_HANDLE) {
+        string ls = MLIR_GetAttributeString(linka);
+        const char *want = "#llvm.linkage<internal>";
+        size_t wantn = strlen(want);
+        if (ls.size == wantn && memcmp(ls.str, want, wantn) == 0)
+            return true;
+    }
+    MLIR_AttributeHandle visa = MLIR_GetOpAttributeByName(op, "sym_visibility");
+    if (visa != MLIR_INVALID_HANDLE) {
+        string vs = MLIR_GetAttributeString(visa);
+        if (vs.size == 7 && memcmp(vs.str, "private", 7) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void driver_elf_erase_module_func_by_name(MLIR_Context *ctx, MLIR_OpHandle mod,
+                                                 string name) {
+    MLIR_BlockHandle mb = MLIR_GetRegionBlock(MLIR_GetOpRegion(mod, 0), 0);
+    size_t no = MLIR_GetBlockNumOps(mb);
+    for (size_t i = no; i > 0; i--) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i - 1);
+        if (!driver_llvm_func_has_body(op)) continue;
+        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
+        if (sa == MLIR_INVALID_HANDLE) continue;
+        string s = MLIR_GetAttributeString(sa);
+        if (s.size == name.size && memcmp(s.str, name.str, name.size) == 0)
+            MLIR_EraseOp(ctx, op);
+    }
+}
+
+static void driver_elf_erase_module_global_by_name(MLIR_Context *ctx, MLIR_OpHandle mod,
+                                                   string name) {
+    MLIR_BlockHandle mb = MLIR_GetRegionBlock(MLIR_GetOpRegion(mod, 0), 0);
+    size_t no = MLIR_GetBlockNumOps(mb);
+    for (size_t i = no; i > 0; i--) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i - 1);
+        if (!driver_elf_is_llvm_global_op(op)) continue;
+        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
+        if (sa == MLIR_INVALID_HANDLE) continue;
+        string s = MLIR_GetAttributeString(sa);
+        if (s.size == name.size && memcmp(s.str, name.str, name.size) == 0)
+            MLIR_EraseOp(ctx, op);
+    }
+}
+
+static void driver_elf_splice_module_globals(MLIR_Context *ctx, MLIR_OpHandle llvm_mod,
+                                           MLIR_OpHandle src_mod) {
+    if (src_mod == MLIR_INVALID_HANDLE) return;
+    MLIR_BlockHandle sbody =
+        MLIR_GetRegionBlock(MLIR_GetOpRegion(src_mod, 0), 0);
+    MLIR_BlockHandle dbody =
+        MLIR_GetRegionBlock(MLIR_GetOpRegion(llvm_mod, 0), 0);
+    size_t no = MLIR_GetBlockNumOps(sbody);
+    for (size_t i = no; i > 0; i--) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(sbody, i - 1);
+        if (!driver_elf_is_llvm_global_op(op)) continue;
+        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
+        if (sa != MLIR_INVALID_HANDLE)
+            driver_elf_erase_module_global_by_name(ctx, llvm_mod,
+                                                   MLIR_GetAttributeString(sa));
+        MLIR_MoveOpToBlockEnd(ctx, op, dbody);
+    }
+}
+
+static bool driver_elf_helper_func_should_splice(MLIR_OpHandle op,
+                                                 TinycElfHelperKind kind) {
+    if (!driver_llvm_func_has_body(op)) return false;
+    MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
+    if (sa == MLIR_INVALID_HANDLE) return false;
+    string s = MLIR_GetAttributeString(sa);
+    if (kind == TINYC_ELF_HELPER_BUDDY || kind == TINYC_ELF_HELPER_WASI)
+        return true;
+    bool is_host = s.size >= 16 && memcmp(s.str, "__host_platform_", 16) == 0;
+    if (is_host) return true;
+    if (driver_elf_llvm_op_is_internal(op)) return true;
+    if (driver_elf_is_host_platform_support_symbol(s)) return true;
+    return false;
+}
+
+static void driver_elf_splice_module_funcs(MLIR_Context *ctx, MLIR_OpHandle llvm_mod,
+                                           MLIR_OpHandle src_mod,
+                                           TinycElfHelperKind kind) {
+    if (src_mod == MLIR_INVALID_HANDLE) return;
+    MLIR_BlockHandle sbody =
+        MLIR_GetRegionBlock(MLIR_GetOpRegion(src_mod, 0), 0);
+    MLIR_BlockHandle dbody =
+        MLIR_GetRegionBlock(MLIR_GetOpRegion(llvm_mod, 0), 0);
+    size_t no = MLIR_GetBlockNumOps(sbody);
+    for (size_t i = no; i > 0; i--) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(sbody, i - 1);
+        if (driver_elf_is_llvm_global_op(op)) continue;
+        if (!driver_elf_helper_func_should_splice(op, kind)) continue;
+        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
+        if (sa != MLIR_INVALID_HANDLE) {
+            string sym = MLIR_GetAttributeString(sa);
+            driver_elf_erase_module_func_by_name(ctx, llvm_mod, sym);
+            driver_elf_erase_module_global_by_name(ctx, llvm_mod, sym);
+        }
+        MLIR_MoveOpToBlockEnd(ctx, op, dbody);
+    }
+}
+
+static void driver_elf_splice_helper_mod(MLIR_Context *ctx, MLIR_OpHandle llvm_mod,
+                                         MLIR_OpHandle helper_mod,
+                                         TinycElfHelperKind kind) {
+    if (helper_mod == MLIR_INVALID_HANDLE) return;
+    driver_elf_splice_module_globals(ctx, llvm_mod, helper_mod);
+    driver_elf_splice_module_funcs(ctx, llvm_mod, helper_mod, kind);
+}
+
+static bool driver_elf_lower_for_native_codegen(
+        MLIR_Context *ctx, MLIR_OpHandle module,
+        bool (*lower_fn)(MLIR_Context *, MLIR_OpHandle)) {
+    bool saved_no_def_use = ctx->no_def_use_tracking;
+    ctx->no_def_use_tracking = false;
+    bool ok = lower_fn(ctx, module);
+    ctx->no_def_use_tracking = saved_no_def_use;
+    return ok;
+}
+
+static const char *driver_elf_buddy_source_path(void) {
+    return "corec/base/buddy.c";
+}
+
+// Compile corec's platform_<os>.c (or buddy.c / WASI adapter) as LP64 into a
+// standalone lowered MLIR module. A caller splices its globals and selected
+// llvm.func ops into a lifted wasm->llvm module via driver_elf_splice_helper_mod.
+// MUST be called BEFORE the wasm module is lifted: the optimization passes
+// (mem2reg / lowering) mutate per-value def-use chains, and compiling this
+// second module after the lifted one is already built corrupts its operands.
+// Compiling first — when the interning epoch is clean — keeps it correct,
+// exactly like a standalone compile.
+static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
+                                      string *include_dirs, size_t n_include_dirs,
+                                      bool (*lower_fn)(MLIR_Context *, MLIR_OpHandle),
+                                      TinycElfHelperKind kind,
+                                      MLIR_OpHandle *out_mod) {
+    bool is_wasi_adapter = kind == TINYC_ELF_HELPER_WASI;
+    *out_mod = MLIR_INVALID_HANDLE;
+    Arena *saved_arena = MLIR_GetArenaAllocator(ctx);
+    Arena *pmod_arena = arena_create(16 * 1024 * 1024);
+    MLIR_SetArenaAllocator(ctx, pmod_arena);
+    MLIR_ResetInternRegistry();
+    // The --from-wasm pipeline disables def-use tracking (ctx.no_def_use_
+    // tracking) to save memory, but mem2reg / lowering rewrite operands through
+    // ReplaceAllUsesOfValue, which needs the per-value use lists. Re-enable
+    // tracking just for this compile (only the platform funcs pay the cost),
+    // then restore the caller's setting.
+    bool saved_no_def_use = ctx->no_def_use_tracking;
+    ctx->no_def_use_tracking = false;
+
+    string defs[16]; size_t nd = 0;
+    if (kind == TINYC_ELF_HELPER_WASI)
+        defs[nd++] = str_from_cstr_view((char *)"PLATFORM_HOST_SHIM=1");
+    if (kind == TINYC_ELF_HELPER_PLATFORM) {
+        defs[nd++] = str_from_cstr_view((char *)"PLATFORM_SKIP_ENTRY=1");
+        defs[nd++] = str_from_cstr_view((char *)"PLATFORM_HOST_SHIM=1");
+        defs[nd++] = str_from_cstr_view((char *)"writev=_writev");
+        defs[nd++] = str_from_cstr_view((char *)"readv=_readv");
+        defs[nd++] = str_from_cstr_view((char *)"fcntl=_fcntl");
+        defs[nd++] = str_from_cstr_view((char *)"open=_open");
+        defs[nd++] = str_from_cstr_view((char *)"close=_close");
+        defs[nd++] = str_from_cstr_view((char *)"lseek=_lseek");
+        defs[nd++] = str_from_cstr_view((char *)"__error=___error");
+    }
+
+    string src = tinyc_preprocess(pmod_arena, str_from_cstr_view((char *)path),
+                                  include_dirs, n_include_dirs, defs, nd);
+    if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
+    VecTcTok toks = tinyc_lex(pmod_arena, src);
+    Program *prog = arena_new(pmod_arena, Program);
+    *prog = (Program){0};
+    if (tinyc_parse_into(pmod_arena, prog, toks, false) > 0) {
+        fprintf(stderr, "tinyc: parse failed for host platform '%s'\n", path);
+        MLIR_SetArenaAllocator(ctx, saved_arena);
+        ctx->no_def_use_tracking = saved_no_def_use;
+        return false;
+    }
+    MLIR_OpHandle pmod = tinyc_emit_module(ctx, prog);
+    if (tinyc_last_emit_errors() > 0 || pmod == MLIR_INVALID_HANDLE) {
+        fprintf(stderr, "tinyc: emit failed for host platform '%s'\n", path);
+        MLIR_SetArenaAllocator(ctx, saved_arena);
+        ctx->no_def_use_tracking = saved_no_def_use;
+        return false;
+    }
+    if (!getenv("TINYC_NO_MEM2REG"))
+        mlir_llvm_mem2reg(ctx, pmod);
+    if (!lower_fn(ctx, pmod)) {
+        fprintf(stderr, "tinyc: lowering failed for host platform '%s'\n", path);
+        MLIR_SetArenaAllocator(ctx, saved_arena);
+        ctx->no_def_use_tracking = saved_no_def_use;
+        return false;
+    }
+    if (out_mod) *out_mod = pmod;
+
+    MLIR_BlockHandle pbody = MLIR_GetRegionBlock(MLIR_GetOpRegion(pmod, 0), 0);
+    size_t pn = MLIR_GetBlockNumOps(pbody);
+    size_t n_funcs = 0;
+    bool has_globals = false;
+    for (size_t i = 0; i < pn; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(pbody, i);
+        if (driver_elf_is_llvm_global_op(op)) {
+            has_globals = true;
+            continue;
+        }
+        if (driver_elf_helper_func_should_splice(op, kind))
+            n_funcs++;
+    }
+    MLIR_SetArenaAllocator(ctx, saved_arena);
+    ctx->no_def_use_tracking = saved_no_def_use;
+    if (is_wasi_adapter && n_funcs == 0) {
+        fprintf(stderr, "tinyc: no spliceable definitions in '%s'\n", path);
+        return false;
+    }
+    if (kind == TINYC_ELF_HELPER_BUDDY && n_funcs == 0) {
+        fprintf(stderr, "tinyc: no spliceable definitions in '%s'\n", path);
+        return false;
+    }
+    if (n_funcs == 0 && !has_globals) {
+        fprintf(stderr, "tinyc: no spliceable definitions in '%s'\n", path);
+        return false;
+    }
+    return true;
+}
+
+// Full `--from-wasm --emit=elf` self-host pipeline: compile host helpers,
+// lift wasmssa -> llvm, run the wasm-oriented opt passes, splice helpers,
+// native-lower, and emit a static Linux/x86_64 ELF via mlir_llvm_to_elf.
+// On success `*io_arena` is swapped to the late-llvm arena (early arena
+// destroyed) and `out` receives malloc'd ELF bytes.
+static int driver_emit_from_wasm_elf(
+        MLIR_Context *ctx,
+        Arena **io_arena,
+        MLIR_OpHandle ssa,
+        const char *host_platform_path,
+        const char *wasi_adapter_path,
+        string *include_dirs,
+        size_t n_include_dirs,
+        bool (*lower_fn)(MLIR_Context *, MLIR_OpHandle),
+        string *out) {
+    Arena *arena = *io_arena;
+
+    // The via-wasm ELF backend's WASI adapters call corec's platform_<os>.c
+    // (as __host_platform_*), so the path to it is required.
+    if (!host_platform_path) {
+        fprintf(stderr,
+            "tinyc --from-wasm --emit=elf: --host-platform=PATH "
+            "is required (e.g. corec/platform/platform_linux.c)\n");
+        return 1;
+    }
+    // Compile the host platform file FIRST, while the interning epoch is clean:
+    // its funcs are spliced into the lifted module after the opt passes.
+    MLIR_OpHandle hp_mod = MLIR_INVALID_HANDLE;
+    if (!driver_elf_compile_helper(ctx, host_platform_path,
+                                   include_dirs, n_include_dirs,
+                                   lower_fn, TINYC_ELF_HELPER_PLATFORM,
+                                   &hp_mod)) {
+        return 1;
+    }
+    MLIR_OpHandle buddy_mod = MLIR_INVALID_HANDLE;
+    if (!driver_elf_compile_helper(ctx, driver_elf_buddy_source_path(),
+                                   include_dirs, n_include_dirs,
+                                   lower_fn, TINYC_ELF_HELPER_BUDDY,
+                                   &buddy_mod)) {
+        return 1;
+    }
+    // Compile + splice the C WASI adapter (fd_write/path_open/...) the same way,
+    // when provided; otherwise the lifter's synthesised shims are used.
+    MLIR_OpHandle ad_mod = MLIR_INVALID_HANDLE;
+    if (wasi_adapter_path &&
+        !driver_elf_compile_helper(ctx, wasi_adapter_path,
+                                   include_dirs, n_include_dirs,
+                                   lower_fn, TINYC_ELF_HELPER_WASI,
+                                   &ad_mod)) {
+        return 1;
+    }
+    // Lift wasmssa to the in-house `llvm` dialect, then stream it straight to
+    // ELF one function at a time (low peak memory). Move the IR into a fresh
+    // arena, then free the wasmstack/wasmssa arena.
+    Arena *late_arena = arena_create(64 * 1024 * 1024 - 64 * 1024);
+    MLIR_SetArenaAllocator(ctx, late_arena);
+    MLIR_ResetInternRegistry();
+    uint8_t *elf_data = NULL; size_t elf_size = 0;
+    MLIR_OpHandle llvm_mod = mlir_wasmssa_to_llvm(ctx, ssa);
+    if (llvm_mod == MLIR_INVALID_HANDLE) {
+        arena_destroy(late_arena);
+        return 1;
+    }
+    if (!getenv("TINYC_NO_MEM2REG"))
+        mlir_llvm_mem2reg(ctx, llvm_mod);
+    if (!getenv("TINYC_NO_LOAD_CSE"))
+        mlir_llvm_load_cse(ctx, llvm_mod);
+    mlir_llvm_arith_gvn(ctx, llvm_mod);
+    mlir_llvm_dce(ctx, llvm_mod);
+    // Splice pre-compiled host helpers (globals + funcs).
+    driver_elf_splice_helper_mod(ctx, llvm_mod, hp_mod, TINYC_ELF_HELPER_PLATFORM);
+    driver_elf_splice_helper_mod(ctx, llvm_mod, buddy_mod, TINYC_ELF_HELPER_BUDDY);
+    driver_elf_splice_helper_mod(ctx, llvm_mod, ad_mod, TINYC_ELF_HELPER_WASI);
+    if (!driver_elf_lower_for_native_codegen(ctx, llvm_mod, lower_fn)) {
+        arena_destroy(late_arena);
+        return 1;
+    }
+    arena_destroy(arena);
+    *io_arena = late_arena;
+    if (!mlir_llvm_to_elf(ctx, llvm_mod, &elf_data, &elf_size)) {
+        return 1;
+    }
+    out->str = (char *)elf_data;
+    out->size = elf_size;
+    return 0;
+}
+
+static int driver_emit_native_elf(MLIR_Context *ctx, MLIR_OpHandle module,
+                                  string *out) {
+    uint8_t *elf_data = NULL; size_t elf_size = 0;
+    if (!mlir_llvm_to_elf(ctx, module, &elf_data, &elf_size))
+        return 1;
+    out->str = (char *)elf_data;
+    out->size = elf_size;
+    return 0;
+}
+#else
+static int driver_emit_from_wasm_elf(
+        MLIR_Context *ctx,
+        Arena **io_arena,
+        MLIR_OpHandle ssa,
+        const char *host_platform_path,
+        const char *wasi_adapter_path,
+        string *include_dirs,
+        size_t n_include_dirs,
+        bool (*lower_fn)(MLIR_Context *, MLIR_OpHandle),
+        string *out) {
+    (void)ctx;
+    (void)io_arena;
+    (void)ssa;
+    (void)host_platform_path;
+    (void)wasi_adapter_path;
+    (void)include_dirs;
+    (void)n_include_dirs;
+    (void)lower_fn;
+    (void)out;
+    fprintf(stderr,
+            "tinyc: --emit=elf is not supported in this build "
+            "(rebuild with TINYC_ENABLE_ELF=1 or on Linux/x86_64)\n");
+    return 1;
+}
+
+static int driver_emit_native_elf(MLIR_Context *ctx, MLIR_OpHandle module,
+                                  string *out) {
+    (void)ctx;
+    (void)module;
+    (void)out;
+    fprintf(stderr,
+            "tinyc: --emit=elf is not supported in this build "
+            "(rebuild with TINYC_ENABLE_ELF=1 or on Linux/x86_64)\n");
+    return 1;
+}
+#endif  // TINYC_HAS_ELF
 
 // On the native `--emit=llvm` -> llc -> host-link path, the raw-syscall
 // intrinsic __builtin_syscall6 lowers to a call to @__tinyc_syscall6. The
@@ -412,18 +810,16 @@ int app_main(void) {
             arena_destroy(boot_arena);
             return wrc;
         }
-        if      (strcmp(argv[i], "--emit=mlir")    == 0) { emit_llvm = false; emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; }
-        else if (strcmp(argv[i], "--emit=lowered") == 0) { emit_lowered = true;  emit_llvm = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; }
-        else if (strcmp(argv[i], "--emit=llvm")    == 0) { emit_llvm = true;     emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; }
-        else if (strcmp(argv[i], "--emit=wasm")    == 0) { emit_wasm = true;     emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; }
-        else if (strcmp(argv[i], "--emit=wasmssa") == 0) { emit_wasmssa = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; }
-        else if (strcmp(argv[i], "--emit=wasmstack") == 0) { emit_wasmstack = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; }
-        else if (strcmp(argv[i], "--emit=wat")     == 0) { emit_wat = true;     emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_macho = false; emit_aarch64 = false; }
-        else if (strcmp(argv[i], "--emit=macho")   == 0) { emit_macho = true;   emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_aarch64 = false; }
-        else if (strcmp(argv[i], "--emit=aarch64") == 0) { emit_aarch64 = true; emit_macho = false; emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; }
-#ifdef TINYC_HAS_ELF
+        if      (strcmp(argv[i], "--emit=mlir")    == 0) { emit_llvm = false; emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; emit_elf = false; }
+        else if (strcmp(argv[i], "--emit=lowered") == 0) { emit_lowered = true;  emit_llvm = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; emit_elf = false; }
+        else if (strcmp(argv[i], "--emit=llvm")    == 0) { emit_llvm = true;     emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; emit_elf = false; }
+        else if (strcmp(argv[i], "--emit=wasm")    == 0) { emit_wasm = true;     emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; emit_elf = false; }
+        else if (strcmp(argv[i], "--emit=wasmssa") == 0) { emit_wasmssa = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; emit_elf = false; }
+        else if (strcmp(argv[i], "--emit=wasmstack") == 0) { emit_wasmstack = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; emit_elf = false; }
+        else if (strcmp(argv[i], "--emit=wat")     == 0) { emit_wat = true;     emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_macho = false; emit_aarch64 = false; emit_elf = false; }
+        else if (strcmp(argv[i], "--emit=macho")   == 0) { emit_macho = true;   emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_aarch64 = false; emit_elf = false; }
+        else if (strcmp(argv[i], "--emit=aarch64") == 0) { emit_aarch64 = true; emit_macho = false; emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_elf = false; }
         else if (strcmp(argv[i], "--emit=elf")     == 0) { emit_elf = true; emit_aarch64 = false; emit_macho = false; emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; }
-#endif
         else if (strcmp(argv[i], "--macho-backend=wasm") == 0) { macho_backend_llvm = false; }
         else if (strcmp(argv[i], "--macho-backend=llvm") == 0) { macho_backend_llvm = true; }
         else if (strncmp(argv[i], "--wasm-runtime-obj=", 19) == 0) {
@@ -691,6 +1087,15 @@ int app_main(void) {
                 }
                 out_fw.str = (char *)macho_data;
                 out_fw.size = macho_size;
+            } else if (emit_elf) {
+                if (driver_emit_from_wasm_elf(&ctx, &arena, ssa,
+                                              host_platform_path, wasi_adapter_path,
+                                              include_dirs, n_include_dirs,
+                                              lower_fn, &out_fw) != 0) {
+                    arena_destroy(arena);
+                    arena_destroy(boot_arena);
+                    return 1;
+                }
             } else if (emit_aarch64) {
                 // Same wasmssa -> llvm lift + optimization passes as the
                 // macho path above, but stop at the physical-register
@@ -734,16 +1139,18 @@ int app_main(void) {
                 out_fw = MLIR_PrintOperationGeneric(&ctx, aarch64);
             } else {
                 fprintf(stderr,
-                    "tinyc --from-wasm: requires --emit=wasmstack|wasmssa|aarch64|macho\n");
+                    "tinyc --from-wasm: requires --emit=wasmstack|wasmssa|aarch64|macho|elf\n");
                 arena_destroy(arena);
                 arena_destroy(boot_arena);
                 return 1;
             }
         }
         int wr;
-        if (emit_macho) {
+        if (emit_macho || emit_elf) {
             if (!output_file) {
-                fprintf(stderr, "tinyc --from-wasm --emit=macho: -o OUT required\n");
+                fprintf(stderr, "tinyc --from-wasm --emit=%s: -o OUT required\n",
+                        emit_elf ? "elf" : "macho");
+                if (emit_elf) free(out_fw.str);
                 arena_destroy(arena);
                 arena_destroy(boot_arena);
                 return 1;
@@ -754,6 +1161,7 @@ int app_main(void) {
                 chmod(output_file, 0755);
             }
 #endif
+            if (emit_elf) free(out_fw.str);
         } else if (output_file) {
             wr = write_string_to_file(out_fw, output_file);
         } else {
@@ -977,18 +1385,12 @@ int app_main(void) {
             return 1;
         }
         out = MLIR_PrintOperationGeneric(&ctx, aarch64);
-#ifdef TINYC_HAS_ELF
     } else if (emit_elf) {
-        // Native x86_64 -> static ELF executable (Linux, direct syscalls).
-        uint8_t *elf_data = NULL; size_t elf_size = 0;
-        if (!mlir_llvm_to_elf(&ctx, module, &elf_data, &elf_size)) {
+        if (driver_emit_native_elf(&ctx, module, &out) != 0) {
             arena_destroy(arena);
             arena_destroy(boot_arena);
             return 1;
         }
-        out.str = (char *)elf_data;
-        out.size = elf_size;
-#endif
     } else if (emit_llvm) {
         out = translate_to_llvm_fn(&ctx, module);
         if (out.size == 0) {
