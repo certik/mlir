@@ -2038,16 +2038,6 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         }
         fin_val(L, res, rd);
 
-    } else if (name_eq(on, "arith.index_cast") ||
-               name_eq(on, "arith.index_castui")) {
-        // index <-> integer: a plain copy in our 64-bit slot model.
-        MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
-        uint8_t r0 = use_val(L, MLIR_GetOpOperand(op, 0), 9);
-        if (!L->ok) return;
-        uint8_t rd = def_val(L, res, 9);
-        emit_mov_reg(ctx, blk, rd, r0);
-        fin_val(L, res, rd);
-
     } else if (name_eq(on, "llvm.trunc") || name_eq(on, "llvm.zext")) {
         // Both keep the low N bits (our values are stored zero-extended); a
         // mask to the destination (trunc) / source (zext) width suffices.
@@ -2583,7 +2573,6 @@ static void emit_callee_saves(MLIR_Context *ctx, MLIR_BlockHandle blk,
 bool cast_src(MLIR_OpHandle op, MLIR_ValueHandle *src) {
     string nm = MLIR_GetOpName(op);
     if (name_eq(nm, "llvm.inttoptr") || name_eq(nm, "llvm.ptrtoint") ||
-        name_eq(nm, "arith.index_cast") || name_eq(nm, "arith.index_castui") ||
         name_eq(nm, "llvm.trunc") || name_eq(nm, "llvm.zext") ||
         name_eq(nm, "llvm.sext") || name_eq(nm, "llvm.bitcast")) {
         if (MLIR_GetOpNumOperands(op) != 1) return false;

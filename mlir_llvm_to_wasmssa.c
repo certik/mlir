@@ -125,6 +125,7 @@ static uint8_t wasm_vt(MLIR_Context *ctx, MLIR_TypeHandle ty) {
 // is not an `iN` integer type.
 static int int_bits(MLIR_Context *ctx, MLIR_TypeHandle ty) {
     string s = MLIR_GetTypeString(ctx, ty);
+    if (s.size == 5 && memcmp(s.str, "index", 5) == 0) return 32;
     if (s.size > 1 && s.str[0] == 'i') {
         int w = 0;
         for (size_t i = 1; i < s.size; i++) {
@@ -429,6 +430,18 @@ static MLIR_ValueHandle emit_add_i32(FnCtx *F, MLIR_ValueHandle lhs, MLIR_ValueH
     wasmssa_op_t o = {0};
     o.type = OP_TYPE_WASMSSA_ADD;
     o.valtype = WT_I32;
+    o.n_operands = 2;
+    o.operands = ops;
+    o.has_result = true;
+    return commit_op(F, &o);
+}
+// Convenience: i32 and.
+static MLIR_ValueHandle emit_and_i32(FnCtx *F, MLIR_ValueHandle lhs, MLIR_ValueHandle rhs) {
+    MLIR_ValueHandle ops[2] = { lhs, rhs };
+    wasmssa_op_t o = {0};
+    o.type = OP_TYPE_WASMSSA_BINOP;
+    o.valtype = WT_I32;
+    o.wasm_opcode = 0x71;  // i32.and
     o.n_operands = 2;
     o.operands = ops;
     o.has_result = true;
@@ -1006,7 +1019,11 @@ static bool lower_scf_index_switch(FnCtx *F, MLIR_OpHandle op) {
     MLIR_ValueHandle cond_v = MLIR_GetOpOperand(op, 0);
     MLIR_ValueHandle cond_idx;
     if (!vmap_get(F, cond_v, &cond_idx)) return false;
-    if (wasm_vt(F->ctx, MLIR_GetValueType(cond_v)) != WT_I32) return false;
+    uint8_t cond_vt = wasm_vt(F->ctx, MLIR_GetValueType(cond_v));
+    if (cond_vt == WT_I64)
+        cond_idx = emit_wrap_i64_to_i32(F, cond_idx);
+    else if (cond_vt != WT_I32)
+        return false;
 
     size_t n_regions = MLIR_GetOpNumRegions(op);
     if (n_regions < 1) return false;
@@ -1609,6 +1626,8 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     // ---- llvm.trunc / llvm.zext -------------------------------------------
     // i64 -> i32 trunc:    i32.wrap_i64    (0xa7)
     // i32 -> i64 zext:     i64.extend_i32_u(0xad)
+    // i8  -> i32 zext:     i32.and %v, 255 (wasm has no unsigned extend8)
+    // i32 -> i8 trunc:     no-op on the i32 register (low byte preserved)
     // smaller-int trunc/zext within i32: no-op (wasm has no sub-i32 reg).
     if (name_eq(name, "llvm.trunc") || name_eq(name, "llvm.zext")) {
         bool is_zext = name_eq(name, "llvm.zext");
@@ -1616,11 +1635,23 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
             MLIR_GetOpNumOperands(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         MLIR_ValueHandle s = MLIR_GetOpOperand(op, 0);
+        int in_w  = int_bits(F->ctx, MLIR_GetValueType(s));
+        int out_w = int_bits(F->ctx, MLIR_GetValueType(r));
         uint8_t in_vt  = wasm_vt(F->ctx, MLIR_GetValueType(s));
         uint8_t out_vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
         if (in_vt == 0 || out_vt == 0) return false;
         MLIR_ValueHandle sa;
         if (!vmap_get(F, s, &sa)) return false;
+        if (is_zext && in_w == 8 && out_w == 32) {
+            MLIR_ValueHandle mask = emit_const_i32(F, 255);
+            MLIR_ValueHandle idx = emit_and_i32(F, sa, mask);
+            vmap_set(F, r, idx);
+            return true;
+        }
+        if (!is_zext && in_w == 32 && out_w == 8) {
+            vmap_set(F, r, sa);
+            return true;
+        }
         if (in_vt == out_vt) {
             // No-op: result alias of operand.
             vmap_set(F, r, sa);
@@ -1629,39 +1660,6 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         uint8_t opc;
         if (!is_zext && in_vt == WT_I64 && out_vt == WT_I32) opc = 0xa7;
         else if (is_zext && in_vt == WT_I32 && out_vt == WT_I64) opc = 0xad;
-        else return false;
-        wasmssa_op_t o = {0};
-        o.type = OP_TYPE_WASMSSA_UNOP;
-        o.valtype = out_vt;
-        o.wasm_opcode = opc;
-        o.n_operands = 1;
-        MLIR_ValueHandle o_ops[1] = { sa };
-        o.operands = o_ops;
-        o.has_result = true;
-        MLIR_ValueHandle idx = commit_op(F, &o);
-        vmap_set(F, r, idx);
-        return true;
-    }
-
-    // ---- arith.index_cast / arith.index_castui -----------------------------
-    // index <-> i32/i64. On wasm32, `index` is i32, so casts to/from i32 are
-    // identity; i64<->index becomes a wrap/extend.
-    if (name_eq(name, "arith.index_cast") || name_eq(name, "arith.index_castui")) {
-        bool is_unsigned = name_eq(name, "arith.index_castui");
-        if (MLIR_GetOpNumOperands(op) != 1 || MLIR_GetOpNumResults(op) != 1)
-            return false;
-        MLIR_ValueHandle s = MLIR_GetOpOperand(op, 0);
-        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
-        uint8_t in_vt  = wasm_vt(F->ctx, MLIR_GetValueType(s));
-        uint8_t out_vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
-        if (in_vt == 0 || out_vt == 0) return false;
-        MLIR_ValueHandle sa;
-        if (!vmap_get(F, s, &sa)) return false;
-        if (in_vt == out_vt) { vmap_set(F, r, sa); return true; }
-        uint8_t opc;
-        if (in_vt == WT_I64 && out_vt == WT_I32) opc = 0xa7;            // wrap
-        else if (in_vt == WT_I32 && out_vt == WT_I64)
-            opc = is_unsigned ? 0xad : 0xac;                             // extend_u/s
         else return false;
         wasmssa_op_t o = {0};
         o.type = OP_TYPE_WASMSSA_UNOP;

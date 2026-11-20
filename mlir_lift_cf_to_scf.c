@@ -88,7 +88,7 @@ struct LiftState_S {
     MLIR_TypeHandle   i32_ty;       // cached i32 type
     MLIR_LocationHandle unk_loc;    // cached unknown location
 
-    // Cached arith.constant of i32 for switch flag values.
+    // Cached llvm.mlir.constant of i32 for switch flag values.
     MLIR_ValueHandle *switch_value_cache;
     size_t            switch_value_cache_n;
     size_t            switch_value_cache_cap;
@@ -1879,12 +1879,12 @@ static MLIR_ValueHandle *transform_to_reduce_loop(
 }
 
 // ============================================================================
-// arith.trunci helper (truncate i32 shouldRepeat -> i1 for scf.condition).
+// llvm.trunc helper (truncate i32 shouldRepeat -> i1 for scf.condition).
 // ============================================================================
-static MLIR_ValueHandle create_arith_trunci(LiftState *st, MLIR_BlockHandle in_block,
-                                            MLIR_ValueHandle src,
-                                            MLIR_TypeHandle dst_ty,
-                                            MLIR_LocationHandle loc) {
+static MLIR_ValueHandle create_llvm_trunc(LiftState *st, MLIR_BlockHandle in_block,
+                                          MLIR_ValueHandle src,
+                                          MLIR_TypeHandle dst_ty,
+                                          MLIR_LocationHandle loc) {
     MLIR_TypeHandle *res_types = arena_new_array(st->arena, MLIR_TypeHandle, 1);
     res_types[0] = dst_ty;
     MLIR_ValueHandle *operands = arena_new_array(st->arena, MLIR_ValueHandle, 1);
@@ -1894,7 +1894,7 @@ static MLIR_ValueHandle create_arith_trunci(LiftState *st, MLIR_BlockHandle in_b
                                           dst_ty, fresh_ssa_name(st),
                                           loc);
     MLIR_OpHandle op = MLIR_CreateOp(
-        st->ctx, OP_TYPE_ARITH_TRUNCI, str_lit("arith.trunci"),
+        st->ctx, OP_TYPE_LLVM_TRUNC, str_lit("llvm.trunc"),
         NULL, 0, res_types, 1, results, 1,
         operands, 1, NULL, 0,
         loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
@@ -1943,7 +1943,7 @@ static void replace_block_successor_uses(MLIR_Context *ctx,
 //      exit_block args + loop_header args + back-edge succ operands.
 //   4. Make a newLoopParentBlock (replacement for loop_header), move
 //      header/body/latch into a fresh region, replace latch's cf.cond_br
-//      with arith.trunci+scf.condition, wrap everything in scf.while
+//      with llvm.trunc+scf.condition, wrap everything in scf.while
 //      attached to newLoopParentBlock with a trivial after-region.
 //   5. RAUW the exit_block's args with the scf.while results, splice
 //      the post-exit ops into newLoopParentBlock, erase the exit_block.
@@ -2061,7 +2061,7 @@ static MLIR_BlockHandle *transform_cycles_to_scf_loops(
         MLIR_EraseOp(st->ctx, old_latch_term);
 
         MLIR_ValueHandle should_repeat_i1 =
-            create_arith_trunci(st, latch, props.condition, i1_ty, latch_loc);
+            create_llvm_trunc(st, latch, props.condition, i1_ty, latch_loc);
         create_scf_condition(st->ctx, arena, latch, should_repeat_i1,
                              iter_vals, n_iter, latch_loc);
 
@@ -2662,7 +2662,8 @@ static BranchXformResult transform_to_structured_cf_branches(
     } else {
         // cf.switch: operand 0 is the i32 flag; succs are [default, case0..caseN-1].
         // case_values attr (DenseI32Array) gives the case values.
-        // scf.index_switch wants the flag as `index` (we insert arith.index_castui),
+        // scf.index_switch wants the flag as `index`; represent it as i64
+        // (LLVM dialect index width) via llvm.zext from the i32 switch flag.
         // regions = [case0..caseN-1, default], and a `cases` DenseI64Array attr.
         MLIR_ValueHandle flag = MLIR_GetOpOperand(term, 0);
 
@@ -2698,14 +2699,14 @@ static BranchXformResult transform_to_structured_cf_branches(
             return res;
         }
 
-        // Emit arith.index_castui : i32 -> index in region_entry.
-        MLIR_TypeHandle idx_ty = MLIR_CreateTypeIndex(st->ctx);
+        // Emit llvm.zext : i32 -> i64 in region_entry.
+        MLIR_TypeHandle i64_ty = MLIR_CreateTypeInteger(st->ctx, 64, false);
         MLIR_ValueHandle idx_v = MLIR_CreateValueOpResult(
-            st->ctx, MLIR_INVALID_HANDLE, 0, idx_ty,
+            st->ctx, MLIR_INVALID_HANDLE, 0, i64_ty,
             fresh_ssa_name(st), term_loc);
         MLIR_OpHandle cast_op = MLIR_CreateOp(
-            st->ctx, OP_TYPE_ARITH_INDEX_CAST, str_lit("arith.index_castui"),
-            NULL, 0, &idx_ty, 1, &idx_v, 1, &flag, 1, NULL, 0,
+            st->ctx, OP_TYPE_LLVM_ZEXT, str_lit("llvm.zext"),
+            NULL, 0, &i64_ty, 1, &idx_v, 1, &flag, 1, NULL, 0,
             term_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
         MLIR_AppendBlockOp(st->ctx, region_entry, cast_op);
 
@@ -2994,7 +2995,7 @@ static void lift_state_init(LiftState *st, MLIR_Context *ctx, Arena *arena,
     }
 }
 
-// Emit a fresh `arith.constant <v> : i32` op inserted at the BEGINNING of
+// Emit a fresh `llvm.mlir.constant <v> : i32` op inserted at the BEGINNING of
 // the function entry block. Used to lazily build the switchValueCache.
 // Mirrors `CFGToSCFForWasm::getCFGSwitchValue`.
 static MLIR_ValueHandle get_switch_value(LiftState *st, unsigned v) {
@@ -3015,7 +3016,7 @@ static MLIR_ValueHandle get_switch_value(LiftState *st, unsigned v) {
     }
     if (v >= st->switch_value_cache_n) st->switch_value_cache_n = v + 1;
 
-    // Build `arith.constant <v> : i32` and insert at start of entry.
+    // Build `llvm.mlir.constant <v> : i32` and insert at start of entry.
     MLIR_TypeHandle  *rt = arena_new_array(st->arena, MLIR_TypeHandle, 1);
     rt[0] = st->i32_ty;
     MLIR_ValueHandle r = MLIR_CreateValueOpResult(
@@ -3028,7 +3029,7 @@ static MLIR_ValueHandle get_switch_value(LiftState *st, unsigned v) {
     MLIR_AttributeHandle *as = arena_new_array(st->arena, MLIR_AttributeHandle, 1);
     as[0] = val;
     MLIR_OpHandle op = MLIR_CreateOp(
-        st->ctx, OP_TYPE_ARITH_CONSTANT, str_lit("arith.constant"),
+        st->ctx, OP_TYPE_LLVM_MLIR_CONSTANT, str_lit("llvm.mlir.constant"),
         as, 1,        // attributes
         rt, 1,        // result_types
         rs, 1,        // results

@@ -124,6 +124,76 @@ static bool lower_arith_constant(LowerState *st, MLIR_OpHandle op,
     return true;
 }
 
+static bool type_is_index(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    string s = MLIR_GetTypeString(ctx, ty);
+    return s.size == 5 && memcmp(s.str, "index", 5) == 0;
+}
+
+static bool type_is_i32(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    string s = MLIR_GetTypeString(ctx, ty);
+    return s.size == 3 && s.str[0] == 'i' && s.str[1] == '3' && s.str[2] == '2';
+}
+
+static bool type_is_i64(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    string s = MLIR_GetTypeString(ctx, ty);
+    return s.size == 3 && s.str[0] == 'i' && s.str[1] == '6' && s.str[2] == '4';
+}
+
+// Lower `arith.index_cast` / `arith.index_castui` between `index` and integer
+// types. In the LLVM dialect `index` is represented as i64.
+static bool lower_arith_index_cast(LowerState *st, MLIR_OpHandle op,
+                                   MLIR_BlockHandle parent, size_t pos,
+                                   bool is_unsigned) {
+    if (MLIR_GetOpNumOperands(op) != 1 || MLIR_GetOpNumResults(op) != 1)
+        return false;
+    MLIR_ValueHandle src = MLIR_GetOpOperand(op, 0);
+    MLIR_TypeHandle src_ty = MLIR_GetValueType(src);
+    MLIR_TypeHandle dst_ty = MLIR_GetOpResult_type(op, 0);
+    MLIR_LocationHandle loc = MLIR_GetOpLocation(op);
+    MLIR_ValueHandle old_res = MLIR_GetOpResult(op, 0);
+    MLIR_TypeHandle i64ty = ty_i64(st->ctx);
+
+    bool src_index = type_is_index(st->ctx, src_ty);
+    bool dst_index = type_is_index(st->ctx, dst_ty);
+    bool src_i64 = src_index || type_is_i64(st->ctx, src_ty);
+    bool dst_i64 = dst_index || type_is_i64(st->ctx, dst_ty);
+    bool src_i32 = type_is_i32(st->ctx, src_ty);
+    bool dst_i32 = type_is_i32(st->ctx, dst_ty);
+
+    MLIR_TypeHandle llvm_dst_ty = dst_index ? i64ty : dst_ty;
+
+    if (src_i64 && dst_i64) {
+        MLIR_ReplaceAllUsesOfValue(st->ctx, old_res, src);
+        return true;
+    }
+    if (src_i32 && dst_i32) {
+        MLIR_ReplaceAllUsesOfValue(st->ctx, old_res, src);
+        return true;
+    }
+
+    string llvm_op;
+    if (src_i64 && dst_i32) {
+        llvm_op = str_lit("llvm.trunc");
+    } else if (src_i32 && dst_i64) {
+        llvm_op = is_unsigned ? str_lit("llvm.zext") : str_lit("llvm.sext");
+    } else if (!src_index && dst_index && MLIR_IsTypeInteger(src_ty)) {
+        llvm_op = is_unsigned ? str_lit("llvm.zext") : str_lit("llvm.sext");
+    } else {
+        return false;
+    }
+
+    MLIR_ValueHandle new_res = make_result_value(st->ctx, llvm_dst_ty, loc);
+    MLIR_TypeHandle rts[1] = { llvm_dst_ty };
+    MLIR_ValueHandle results[1] = { new_res };
+    MLIR_ValueHandle ops[1] = { src };
+    MLIR_OpHandle nop = create_simple_op(
+        st->ctx, OP_TYPE_UNREGISTERED, llvm_op,
+        NULL, 0, rts, 1, results, 1, ops, 1, NULL, 0, loc);
+    MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
+    MLIR_ReplaceAllUsesOfValue(st->ctx, old_res, new_res);
+    return true;
+}
+
 // Lower `func.return [%v ...]` to `llvm.return [%v ...]` (1:1).
 static bool lower_func_return(LowerState *st, MLIR_OpHandle op,
                               MLIR_BlockHandle parent, size_t pos) {
@@ -668,6 +738,8 @@ static int try_lower_op(LowerState *st, MLIR_OpHandle op,
              name_eq(name, "unrealized_conversion_cast"))
                                          ok = lower_unrealized_cast(st, op, parent, pos);
     else if (name_eq(name, "arith.constant")) ok = lower_arith_constant(st, op, parent, pos);
+    else if (name_eq(name, "arith.index_cast")) ok = lower_arith_index_cast(st, op, parent, pos, false);
+    else if (name_eq(name, "arith.index_castui")) ok = lower_arith_index_cast(st, op, parent, pos, true);
     else if (name_eq(name, "arith.addi"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.add"),  OP_TYPE_UNREGISTERED);
     else if (name_eq(name, "arith.subi"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.sub"),  OP_TYPE_UNREGISTERED);
     else if (name_eq(name, "arith.muli"))  ok = lower_rename(st, op, parent, pos, str_lit("llvm.mul"),  OP_TYPE_UNREGISTERED);
