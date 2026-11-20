@@ -14,7 +14,7 @@ case "$(uname)" in
     *)     GROUP_START="";                  GROUP_END="" ;;
 esac
 
-OPT_FLAGS="-O3 -DNDEBUG -flto"
+OPT_FLAGS="-O3 -DNDEBUG -flto -march=native"
 
 COREC_C_FILES="corec/base/io.c corec/base/buddy.c corec/base/arena.c corec/base/scratch.c corec/base/format.c corec/base/math.c corec/base/string.c corec/base/strbuf.c corec/base/mem.c corec/base/numconv.c corec/base/assert.c corec/base/exit.c"
 TINYC_C_FILES="examples/tinyc/lex.c examples/tinyc/preprocess.c examples/tinyc/parse.c examples/tinyc/emit.c examples/tinyc/driver.c"
