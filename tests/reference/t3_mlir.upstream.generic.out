@@ -13,11 +13,11 @@ module() {
         %8 = arith.constant() {value = 1} -> index
         %9 = arith.constant() {value = 1} -> index
         gpu.launch(%3: index, %9: index, %9: index, %7: index, %9: index, %9: index) {operandSegmentSizes = array<i32: 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0>, workgroup_attributions = 0} {
-        ^bb0(%arg0: index, %arg1: index, %arg2: index, %arg3: index, %arg4: index, %arg5: index, %arg6: index, %arg7: index, %arg8: index, %arg9: index, %arg10: index, %arg11: index):
-            %10 = arith.addi(%1: index, %15: index) {overflowFlags = #arith.overflow<none>} -> index
-            %11 = arith.addi(%5: index, %16: index) {overflowFlags = #arith.overflow<none>} -> index
-            %12 = memref.load(%17: memref<10x20xf32>, %10: index, %11: index) -> f32
-            %13 = memref.load(%18: memref<10x20xf32>, %10: index, %11: index) -> f32
+        ^bb0(%arg2: index, %arg3: index, %arg4: index, %arg5: index, %arg6: index, %arg7: index, %arg8: index, %arg9: index, %arg10: index, %arg11: index, %arg12: index, %arg13: index):
+            %10 = arith.addi(%1: index, %arg2: index) {overflowFlags = #arith.overflow<none>} -> index
+            %11 = arith.addi(%5: index, %arg5: index) {overflowFlags = #arith.overflow<none>} -> index
+            %12 = memref.load(%arg0: memref<10x20xf32>, %10: index, %11: index) -> f32
+            %13 = memref.load(%arg1: memref<10x20xf32>, %10: index, %11: index) -> f32
             %14 = arith.addf(%12: f32, %13: f32) {fastmath = #arith.fastmath<none>} -> f32
             memref.store(%12: f32, %0: memref<10x20xf32>, %10: index, %11: index)
             "gpu.terminator"()

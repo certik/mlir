@@ -3957,7 +3957,7 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
                         this_arg_ty = mlir_type_create_from_string(parser->ctx, t);
                     }
                 }
-                MLIR_ValueHandle arg = MLIR_CreateValueBlockArg(parser->ctx, reg, 0, this_arg_ty, MLIR_INVALID_HANDLE);
+                MLIR_ValueHandle arg = MLIR_CreateValueBlockArg(parser->ctx, reg, (uint32_t)args.size, this_arg_ty, MLIR_INVALID_HANDLE);
                 VecValue_push_back(parser->arena, &args, arg);
             } else if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME) || parser_peek(parser, TK_EXCLAMATION)) {
                 // Type-only argument in declaration form
@@ -4024,7 +4024,18 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
     MLIR_RegionHandle *regions = MLIR_INVALID_HANDLE;
     size_t n_regions = 0;
     if (parser_peek(parser, TK_LBRACE_END)) {
+        // The header's arguments must be visible while the body is parsed
+        // (`func.func @f(%arg0: i32) { ... %arg0 ... }`), so register them in
+        // a scope that encloses the body region's own scope.
+        symbol_table_push_scope(parser->arena, &parser->symbol_table);
+        for (size_t i = 0; i < args.size; i++) {
+            string name = MLIR_GetValueRegisterName(args.data[i]);
+            if (name.size > 0) {
+                symbol_table_add_value(parser->arena, &parser->symbol_table, name, args.data[i]);
+            }
+        }
         MLIR_RegionHandle region = parse_region(parser);
+        symbol_table_pop_scope(&parser->symbol_table);
         regions = arena_new_array(parser->arena, MLIR_RegionHandle, 1);
         regions[0] = region;
         n_regions = 1;

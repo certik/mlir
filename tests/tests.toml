@@ -21,6 +21,9 @@ filename = "d.mlir"
 filename = "effect.mlir"
 
 [[test]]
+filename = "func_args.mlir"
+
+[[test]]
 filename = "simple.mlir"
 
 [[test]]

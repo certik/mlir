@@ -1,0 +1,17 @@
+module() {
+^bb0:
+    func.func() {sym_name = "identity", function_type = (i32) -> i32} {
+    ^bb0(%arg0: i32):
+        return(%arg0: i32)
+    }
+    func.func() {sym_name = "add", function_type = (i32, i32) -> i32} {
+    ^bb0(%arg0: i32, %arg1: i32):
+        %0 = arith.addi(%arg0: i32, %arg1: i32) -> i32
+        return(%0: i32)
+    }
+    func.func() {sym_name = "second", function_type = (i32, i64) -> i64} {
+    ^bb0(%arg0: i32, %arg1: i64):
+        return(%arg1: i64)
+    }
+}
+
