@@ -169,6 +169,9 @@ static void setcc_al(FnCtx *F, int cc) {
 static void cmovnz(FnCtx *F, uint8_t dst, uint8_t src, int w) {
     rex(F, w, dst, 0, src); eb(F, 0x0F); eb(F, 0x45); modrm(F, 3, dst, src);
 }
+static void cmovcc(FnCtx *F, uint8_t dst, uint8_t src, int cc, int w) {
+    rex(F, w, dst, 0, src); eb(F, 0x0F); eb(F, (uint8_t)(0x40 + cc)); modrm(F, 3, dst, src);
+}
 
 // ---------------------------------------------------------------------------
 // SSE2 scalar floating-point (real FP support, issue #212 Option A).
@@ -700,6 +703,43 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         load_mem(F, RAX, RCX, 8, false);                        // rax = *src
         load_val(F, MLIR_GetOpOperand(op, 0), RCX);              // dst va_list address
         store_mem(F, RCX, RAX, 8);                               // *dst = *src
+        return;
+    }
+
+    if (str_eqz(nm, "llvm.intr.wasm.memory.size")) {
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        uint32_t off;
+        if (!gmap_get(F->gm, str_lit("__wasm_mem_pages"), &off)) {
+            mov_ri(F, RAX, 0, 0);
+            store_val(F, r, RAX);
+            return;
+        }
+        lea_rip_data(F, RAX, off);
+        load_mem(F, RAX, RAX, 4, false);
+        store_val(F, r, RAX);
+        return;
+    }
+    if (str_eqz(nm, "llvm.intr.wasm.memory.grow")) {
+        MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+        uint32_t off;
+        if (!gmap_get(F->gm, str_lit("__wasm_mem_pages"), &off)) {
+            mov_ri(F, RAX, 0, 0);
+            store_val(F, r, RAX);
+            return;
+        }
+        load_val(F, MLIR_GetOpOperand(op, 0), RCX);               // delta
+        lea_rip_data(F, RSI, off);
+        load_mem(F, RSI, RSI, 4, false);                        // rsi = old
+        mov_rr(F, RDX, RSI, 0);                                  // rdx = old
+        alu_rr(F, 0x01, RDX, RCX, 0);                            // rdx = old+delta
+        mov_ri(F, RCX, 65536, 0);
+        alu_rr(F, 0x39, RDX, RCX, 0);                            // cmp new, cap
+        cmovcc(F, RDX, RSI, CC_A, 0);                              // rdx = ok? new : old
+        lea_rip_data(F, RAX, off);
+        store_mem(F, RAX, RDX, 4);
+        mov_ri(F, RAX, -1, 0);
+        cmovcc(F, RAX, RSI, CC_BE, 0);                           // rax = ok? old : -1
+        store_val(F, r, RAX);
         return;
     }
 

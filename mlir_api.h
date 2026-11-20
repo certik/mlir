@@ -704,6 +704,7 @@ MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *ctx, MLIR_TypeHandle elemen
 // opaque) is fully supported because the body never mentions the recursive
 // struct's body type.
 MLIR_TypeHandle MLIR_CreateTypeLLVMPointer(MLIR_Context *ctx);
+MLIR_TypeHandle MLIR_CreateTypeLLVMPointerInAddressSpace(MLIR_Context *ctx, uint32_t address_space);
 MLIR_TypeHandle MLIR_CreateTypeLLVMStructIdentified(MLIR_Context *ctx, string name);
 void            MLIR_SetTypeLLVMStructBody(MLIR_Context *ctx, MLIR_TypeHandle struct_ty,
                                            const MLIR_TypeHandle *fields, size_t n_fields);
@@ -806,6 +807,7 @@ MLIR_TypeHandle MLIR_GetTypeLLVMStructField(MLIR_TypeHandle type, size_t idx);
 bool            MLIR_IsTypeLLVMArray(MLIR_TypeHandle type);
 MLIR_TypeHandle MLIR_GetTypeLLVMArrayElement(MLIR_TypeHandle type);
 uint64_t        MLIR_GetTypeLLVMArrayNumElements(MLIR_TypeHandle type);
+uint32_t        MLIR_GetTypeLLVMPointerAddressSpace(MLIR_TypeHandle type);
 string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle type);
 
 // -----------------------------------------------------------------------------

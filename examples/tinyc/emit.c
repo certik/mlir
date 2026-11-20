@@ -49,6 +49,7 @@ typedef struct Sym {
     StructDef *sdef;            // for TY_STRUCT / TY_PTR_STRUCT / TY_ARRAY_STRUCT
     bool   is_global;           // if true, addr is unused; reload via addressof
     string global_sym;          // sym_name of the llvm.mlir.global (for globals)
+    uint32_t address_space;     // LLVM pointer AS for global addressof (0=default)
     struct Sym *next;
 } Sym;
 
@@ -126,6 +127,11 @@ typedef struct StringEntry {
 } StringEntry;
 
 typedef struct {
+    uint32_t as;
+    MLIR_TypeHandle ptr;
+} PtrAsCacheEntry;
+
+typedef struct {
     MLIR_Context *ctx;
     Arena *arena;
     MLIR_TypeHandle i32;
@@ -169,6 +175,8 @@ typedef struct {
     StringEntry     *strings;        // dedup'd string-literal pool
     size_t           n_strings;
     size_t           cap_strings;
+    PtrAsCacheEntry *ptr_as_cache;
+    size_t           n_ptr_as_cache, cap_ptr_as_cache;
     MLIR_BlockHandle module_block;
     Sym             *globals;        // module-scope symbols
 
@@ -594,11 +602,29 @@ static MLIR_ValueHandle emit_const_i8(E *e, int64_t v) {
     return r;
 }
 
-// Emit `llvm.mlir.addressof @<sym>` -> !llvm.ptr.
-static MLIR_ValueHandle emit_addressof(E *e, string sym) {
+// Emit `llvm.mlir.addressof @<sym>` -> !llvm.ptr or !llvm.ptr<N>.
+static MLIR_TypeHandle ptr_for_as(E *e, uint32_t as) {
+    if (as == 0) return e->ptr;
+    for (size_t i = 0; i < e->n_ptr_as_cache; i++) {
+        if (e->ptr_as_cache[i].as == as) return e->ptr_as_cache[i].ptr;
+    }
+    MLIR_TypeHandle p = MLIR_CreateTypeLLVMPointerInAddressSpace(e->ctx, as);
+    if (e->n_ptr_as_cache == e->cap_ptr_as_cache) {
+        size_t nc = e->cap_ptr_as_cache ? e->cap_ptr_as_cache * 2 : 4;
+        PtrAsCacheEntry *na = arena_new_array(e->arena, PtrAsCacheEntry, nc);
+        for (size_t i = 0; i < e->n_ptr_as_cache; i++) na[i] = e->ptr_as_cache[i];
+        e->ptr_as_cache = na;
+        e->cap_ptr_as_cache = nc;
+    }
+    e->ptr_as_cache[e->n_ptr_as_cache++] = (PtrAsCacheEntry){ as, p };
+    return p;
+}
+
+static MLIR_ValueHandle emit_addressof(E *e, string sym, MLIR_TypeHandle ptr_ty) {
+    if (!ptr_ty) ptr_ty = e->ptr;
     MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
-                                                  e->ptr, ssa_name(e), eloc(e, 0));
-    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->ptr;
+                                                  ptr_ty, ssa_name(e), eloc(e, 0));
+    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = ptr_ty;
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
     MLIR_AttributeHandle a = MLIR_CreateAttributeSymbolRef(
         e->ctx, str_lit("global_name"), sym);
@@ -638,7 +664,9 @@ static MLIR_ValueHandle emit_gep(E *e, MLIR_ValueHandle base,
 // Address of a symbol: either the local alloca slot or a freshly-emitted
 // addressof for a module-level global.
 static MLIR_ValueHandle sym_addr(E *e, Sym *s) {
-    if (s->is_global) return emit_addressof(e, s->global_sym);
+    if (s->is_global) {
+        return emit_addressof(e, s->global_sym, ptr_for_as(e, s->address_space));
+    }
     return s->addr;
 }
 
@@ -2368,7 +2396,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
         buf[fname.size] = '\0';
         string bytes = (string){.str = buf, .size = fname.size + 1};
         string sym = intern_string(e, bytes);
-        r.val = emit_addressof(e, sym);
+        r.val = emit_addressof(e, sym, e->ptr);
         r.is_ptr = true;
         r.is_str = true;
         return r;
@@ -2478,7 +2506,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // String literal: emit a !llvm.ptr to a deduplicated
             // module-level llvm.mlir.global string buffer.
             string sym = intern_string(e, ex->name);
-            r.val = emit_addressof(e, sym);
+            r.val = emit_addressof(e, sym, e->ptr);
             r.is_ptr = true;
             r.is_str = true;
             return r;
@@ -2685,6 +2713,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             if (ck == TY_PTR_I32) { v.ptr_elem = e->i32; v.is_str = false; }
             else if (ck == TY_PTR_CHAR) { v.ptr_elem = e->i8; v.is_str = true; }
             else if (ck == TY_PTR_VOID) { v.ptr_elem = MLIR_INVALID_HANDLE; v.is_str = false; }
+            v.is_unsigned = ex->cast_type.int_unsigned;
             return v;
         }
         case EX_VAR:
@@ -5861,6 +5890,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         sy->type = g->type;
         sy->is_global = true;
         sy->global_sym = g->name;
+        sy->address_space = g->address_space;
         // Record the struct sdef on the symbol so indexed/field accesses
         // through the global (e.g. `g_arr[i].field`) can resolve fields.
         if (g->type.kind == TY_PTR_STRUCT || g->type.kind == TY_ARRAY_STRUCT
@@ -5886,7 +5916,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                 gty = e.i32;
             }
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, gty,
-                /*is_constant=*/false,
+                /*is_constant=*/g->is_const,
                 /*init_kind=*/4, 0, 0.0, NULL, e.loc);
             MLIR_AppendBlockOp(ctx, mb, gop);
         } else if (g->type.kind == TY_PTR_CHAR) {
@@ -5898,7 +5928,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             // either returns the string addr or a null pointer.
             MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.ptr,
-                /*is_constant=*/false,
+                /*is_constant=*/g->is_const,
                 /*init_kind=*/2, 0, 0.0, &init_blk, e.loc);
             // Build initializer body: %0 = addressof @str ; llvm.return %0
             MLIR_BlockHandle save_blk = e.cur_block;
@@ -5907,7 +5937,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             e.terminated = false;
             MLIR_ValueHandle init_v;
             if (str_sym.size > 0) {
-                init_v = emit_addressof(&e, str_sym);
+                init_v = emit_addressof(&e, str_sym, e.ptr);
             } else {
                 init_v = emit_null_ptr(&e);
             }
@@ -5920,13 +5950,13 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             MLIR_AppendBlockOp(ctx, mb, gop);
         } else if (g->type.kind == TY_F32) {
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.f32,
-                /*is_constant=*/false,
+                /*is_constant=*/g->is_const,
                 /*init_kind=*/1, 0, g->has_init ? g->init_float : 0.0,
                 NULL, e.loc);
             MLIR_AppendBlockOp(ctx, mb, gop);
         } else if (g->type.kind == TY_F64) {
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.f64,
-                /*is_constant=*/false,
+                /*is_constant=*/g->is_const,
                 /*init_kind=*/1, 0, g->has_init ? g->init_float : 0.0,
                 NULL, e.loc);
             MLIR_AppendBlockOp(ctx, mb, gop);
@@ -5936,7 +5966,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             // Emit a zero-initialized pointer global.
             MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.ptr,
-                /*is_constant=*/false,
+                /*is_constant=*/g->is_const,
                 /*init_kind=*/2, 0, 0.0, &init_blk, e.loc);
             MLIR_BlockHandle save_blk = e.cur_block;
             bool save_term = e.terminated;
@@ -5988,12 +6018,12 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                 // (wasm) and emit_global (native) both interpret it as
                 // packed little-endian element bytes.
                 gop = MLIR_CreateLLVMGlobalArrayInit(ctx, g->name, arr_ty,
-                    /*is_constant=*/false,
+                    /*is_constant=*/g->is_const,
                     g->init_array_data, e.loc);
             } else {
                 MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
                 gop = MLIR_CreateLLVMGlobal(ctx, g->name, arr_ty,
-                    /*is_constant=*/false,
+                    /*is_constant=*/g->is_const,
                     /*init_kind=*/2, 0, 0.0, &init_blk, e.loc);
                 MLIR_BlockHandle save_blk = e.cur_block;
                 bool save_term = e.terminated;
@@ -6020,14 +6050,14 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             MLIR_AppendBlockOp(ctx, mb, gop);
         } else if (g->type.kind == TY_I64) {
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.i64,
-                /*is_constant=*/false,
+                /*is_constant=*/g->is_const,
                 /*init_kind=*/0, g->has_init ? g->init_int : 0, 0.0,
                 NULL, e.loc);
             MLIR_AppendBlockOp(ctx, mb, gop);
         } else {
             // i32 (default for plain int)
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.i32,
-                /*is_constant=*/false,
+                /*is_constant=*/g->is_const,
                 /*init_kind=*/0, g->has_init ? g->init_int : 0, 0.0,
                 NULL, e.loc);
             MLIR_AppendBlockOp(ctx, mb, gop);

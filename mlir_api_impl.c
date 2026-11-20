@@ -77,6 +77,9 @@ typedef struct IR_Type {
             uint64_t count;
         } llvm_array;
         struct {
+            uint32_t address_space;
+        } llvm_pointer;
+        struct {
             // Anonymous structs have name.size == 0. Identified structs are
             // interned by name (see intern_llvm_struct in this file).
             string name;
@@ -447,7 +450,6 @@ static bool type_eq(const IR_Type *a, const IR_Type *b) {
         case TYPE_KIND_UNKNOWN:
         case TYPE_KIND_OPAQUE:
         case TYPE_KIND_INDEX:
-        case TYPE_KIND_LLVM_PTR:
         case TYPE_KIND_LLVM_VOID:
             return true;
         case TYPE_KIND_INTEGER:
@@ -467,6 +469,9 @@ static bool type_eq(const IR_Type *a, const IR_Type *b) {
             return a->data.pointer.element_type == b->data.pointer.element_type &&
                    a->data.pointer.has_address_space == b->data.pointer.has_address_space &&
                    a->data.pointer.address_space == b->data.pointer.address_space;
+        case TYPE_KIND_LLVM_PTR:
+            return a->data.llvm_pointer.address_space ==
+                   b->data.llvm_pointer.address_space;
         case TYPE_KIND_LLVM_ARRAY:
             return a->data.llvm_array.element == b->data.llvm_array.element &&
                    a->data.llvm_array.count == b->data.llvm_array.count;
@@ -1079,7 +1084,9 @@ string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle th) {
             return format(arena, str_lit("({}) -> {}"), strbuf_to_string(in_str), out_str);
         }
         case TYPE_KIND_LLVM_PTR:
-            return str_lit("!llvm.ptr");
+            if (type->data.llvm_pointer.address_space == 0) return str_lit("!llvm.ptr");
+            return format(arena, str_lit("!llvm.ptr<{}>"),
+                          (int64_t)type->data.llvm_pointer.address_space);
         case TYPE_KIND_LLVM_VOID:
             return str_lit("!llvm.void");
         case TYPE_KIND_LLVM_ARRAY: {
@@ -1205,8 +1212,14 @@ MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *ctx, MLIR_TypeHandle elemen
 }
 
 MLIR_TypeHandle MLIR_CreateTypeLLVMPointer(MLIR_Context *ctx) {
+    return MLIR_CreateTypeLLVMPointerInAddressSpace(ctx, 0);
+}
+
+MLIR_TypeHandle MLIR_CreateTypeLLVMPointerInAddressSpace(
+    MLIR_Context *ctx, uint32_t address_space) {
     IR_Type t = {0};
     t.kind = TYPE_KIND_LLVM_PTR;
+    t.data.llvm_pointer.address_space = address_space;
     return intern_type(ctx, t);
 }
 
@@ -1537,6 +1550,12 @@ uint64_t MLIR_GetTypeLLVMArrayNumElements(MLIR_TypeHandle th) {
     IR_Type *t = resolve_type(th);
     if (!t || t->kind != TYPE_KIND_LLVM_ARRAY) return 0;
     return t->data.llvm_array.count;
+}
+
+uint32_t MLIR_GetTypeLLVMPointerAddressSpace(MLIR_TypeHandle th) {
+    IR_Type *t = resolve_type(th);
+    return (t && t->kind == TYPE_KIND_LLVM_PTR)
+        ? t->data.llvm_pointer.address_space : 0;
 }
 
 void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle th, uint32_t width, bool is_signed) {

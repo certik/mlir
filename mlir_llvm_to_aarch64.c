@@ -1476,6 +1476,47 @@ static void lower_scf_index_switch(LowerCtx *L, MLIR_OpHandle op) {
     L->cur = end_blk;
 }
 
+// Load / store the wasmssa->llvm `__wasm_mem_pages` counter (when present).
+static bool emit_load_wasm_mem_pages(LowerCtx *L, MLIR_BlockHandle blk, uint8_t rd) {
+    uint32_t pages_off = 0;
+    if (!L->gm || !gmap_get_cstr(L->gm, "__wasm_mem_pages", &pages_off, NULL))
+        return false;
+    MLIR_Context *ctx = L->ctx;
+    uint32_t anchor = gfuse_anchor(L->gm);
+    if (pages_off >= anchor) {
+        uint32_t rel = pages_off - anchor;
+        if ((rel & 3u) == 0 && rel / 4u <= 4095u) {
+            emit_ldst_x(ctx, blk, OP_TYPE_AARCH64_LDR_W, rd, 27, rel);
+            return true;
+        }
+    }
+    string tgt = str_from_cstr_view("linmem_template");
+    emit_adrp_data(ctx, blk, rd, tgt, pages_off);
+    emit_add_data_lo(ctx, blk, rd, rd, tgt, pages_off);
+    emit_ldst_x(ctx, blk, OP_TYPE_AARCH64_LDR_W, rd, rd, 0);
+    return true;
+}
+static bool emit_store_wasm_mem_pages(LowerCtx *L, MLIR_BlockHandle blk, uint8_t val_rd) {
+    uint32_t pages_off = 0;
+    if (!L->gm || !gmap_get_cstr(L->gm, "__wasm_mem_pages", &pages_off, NULL))
+        return false;
+    MLIR_Context *ctx = L->ctx;
+    uint32_t anchor = gfuse_anchor(L->gm);
+    if (pages_off >= anchor) {
+        uint32_t rel = pages_off - anchor;
+        if ((rel & 3u) == 0 && rel / 4u <= 4095u) {
+            emit_ldst_x(ctx, blk, OP_TYPE_AARCH64_STR_W, val_rd, 27, rel);
+            return true;
+        }
+    }
+    uint8_t base = 10;
+    string tgt = str_from_cstr_view("linmem_template");
+    emit_adrp_data(ctx, blk, base, tgt, pages_off);
+    emit_add_data_lo(ctx, blk, base, base, tgt, pages_off);
+    emit_ldst_x(ctx, blk, OP_TYPE_AARCH64_STR_W, val_rd, base, 0);
+    return true;
+}
+
 // Lower a single non-terminator op into the current block / CFG.
 static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
     MLIR_Context     *ctx = L->ctx;
@@ -2233,6 +2274,46 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         lower_scf_while(L, op);
     } else if (name_eq(on, "scf.index_switch")) {
         lower_scf_index_switch(L, op);
+
+    } else if (name_eq(on, "llvm.intr.wasm.memory.size")) {
+        // `__builtin_wasm_memory_size(0)` from tinyc. When the module
+        // carries a `__wasm_mem_pages` scalar (wasmssa->llvm path), read
+        // it via the x27 globals-cluster pin; otherwise the current memory
+        // size is 0 (direct-source probes with no runtime setup).
+        MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
+        uint8_t rd = def_val(L, res, 9);
+        if (emit_load_wasm_mem_pages(L, blk, rd)) {
+            fin_val(L, res, rd);
+            return;
+        }
+        emit_load_imm(ctx, blk, rd, 0, false);
+        fin_val(L, res, rd);
+
+    } else if (name_eq(on, "llvm.intr.wasm.memory.grow")) {
+        // `__builtin_wasm_memory_grow(0, delta)`: bump `__wasm_mem_pages` by
+        // `delta`, capped at 65536 pages; return the old count or -1 on failure.
+        // Mirrors mlir_wasmssa_to_llvm.c OP_TYPE_WASMSSA_MEMORY_GROW.
+        MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
+        uint8_t rd = def_val(L, res, 9);
+        if (!emit_load_wasm_mem_pages(L, blk, 9)) {
+            // Direct-source probe: grow(0,0) returns 0 pages.
+            emit_load_imm(ctx, blk, rd, 0, false);
+            fin_val(L, res, rd);
+            return;
+        }
+        uint8_t delta = use_val(L, MLIR_GetOpOperand(op, 0), 10);
+        if (!L->ok) return;
+        emit_3reg(ctx, blk, OP_TYPE_AARCH64_ADD_REG, 11, 9, 10, false); // w11 = old+delta
+        emit_load_imm(ctx, blk, 12, 65536, false);                     // w12 = cap
+        emit_cmp_reg(ctx, blk, 11, 12, false);                         // ule via LS
+        emit_csel(ctx, blk, 13, 11, 9, 9, false);                      // stored = ok? new : old
+        if (!emit_store_wasm_mem_pages(L, blk, 13)) {
+            L->ok = false;
+            return;
+        }
+        emit_load_imm(ctx, blk, 14, 0xffffffffu, false);               // w14 = -1
+        emit_csel(ctx, blk, rd, 9, 14, 9, false);                      // old or -1
+        fin_val(L, res, rd);
 
     } else {
         LFAIL("llvm->aarch64: unsupported op '%.*s' in '%.*s'\n",

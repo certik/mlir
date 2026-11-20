@@ -1,0 +1,25 @@
+extern int printf(const char *fmt, ...);
+
+// Regression: globals annotated with __attribute__((address_space(N))) must
+// lower through llvm.mlir.addressof as !llvm.ptr<N>, then store/load the
+// expected runtime values (distinct address spaces share flat memory in the
+// tinyc backends).
+
+__attribute__((address_space(3))) int g_as3;
+__attribute__((address_space(5))) int g_as5;
+int g_as0;
+
+int main(void) {
+    g_as3 = 10;
+    g_as5 = 20;
+    g_as0 = 30;
+
+    g_as3 = g_as3 + 1;
+    g_as5 = g_as5 + 2;
+    g_as0 = g_as0 + 3;
+
+    printf("%lld\n", (long long)g_as3);
+    printf("%lld\n", (long long)g_as5);
+    printf("%lld\n", (long long)g_as0);
+    return 0;
+}

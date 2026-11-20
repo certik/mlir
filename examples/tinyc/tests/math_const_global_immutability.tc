@@ -1,0 +1,7 @@
+// WasmSSA data globals for static C constants must retain constness.
+static const float math_s0 = -0.000000992f;
+static const double math_pi = 3.14159265358979323846;
+
+int main(void) {
+    return (math_s0 < 0.0f && math_pi > 3.0) ? 0 : 1;
+}

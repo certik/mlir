@@ -69,6 +69,8 @@
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/SmallVectorMemoryBuffer.h"
@@ -1112,6 +1114,11 @@ extern "C" uint64_t MLIR_GetTypeLLVMArrayNumElements(MLIR_TypeHandle h) {
     return at.getNumElements();
 }
 
+extern "C" uint32_t MLIR_GetTypeLLVMPointerAddressSpace(MLIR_TypeHandle h) {
+    auto p = llvm::dyn_cast<mlir::LLVM::LLVMPointerType>(typeF(h));
+    return p ? p.getAddressSpace() : 0;
+}
+
 extern "C" string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle h) {
     auto t = typeF(h);
     // Normalize opaque "unknown" types (dialect `?`, type `unknown`) to the
@@ -1256,8 +1263,14 @@ extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *
 }
 
 extern "C" MLIR_TypeHandle MLIR_CreateTypeLLVMPointer(MLIR_Context *) {
+    return MLIR_CreateTypeLLVMPointerInAddressSpace(nullptr, 0);
+}
+
+// Adds address space to the pointer type, e.g. !llvm.ptr<3> for address space 3.
+extern "C" MLIR_TypeHandle MLIR_CreateTypeLLVMPointerInAddressSpace(
+    MLIR_Context *, uint32_t address_space) {
     auto &ctx = globalCtx().mctx;
-    return typeH(mlir::LLVM::LLVMPointerType::get(&ctx));
+    return typeH(mlir::LLVM::LLVMPointerType::get(&ctx, address_space));
 }
 
 extern "C" MLIR_TypeHandle MLIR_CreateTypeLLVMStructIdentified(MLIR_Context *, string name) {
@@ -2323,6 +2336,65 @@ extern "C" bool MLIR_LowerToLLVMDialectForWasmUpstream(MLIR_Context *ctx,
     return true;
 }
 
+// Host codegen (native llc / x86 ELF) cannot lower wasm memory intrinsics.
+// Expand them to the same @__wasm_mem_pages load/store model used by the
+// native mlir_translate_to_llvm_ir.c path.
+static void expandWasmMemoryIntrinsicsForHost(llvm::Module &M) {
+    llvm::LLVMContext &C = M.getContext();
+    llvm::Type *I32 = llvm::Type::getInt32Ty(C);
+    llvm::Type *I64 = llvm::Type::getInt64Ty(C);
+    llvm::GlobalVariable *pages = nullptr;
+    auto getPages = [&]() -> llvm::GlobalVariable * {
+        if (pages) return pages;
+        if (auto *existing = M.getGlobalVariable("__wasm_mem_pages"))
+            return pages = existing;
+        pages = new llvm::GlobalVariable(
+            M, I32, false, llvm::GlobalValue::InternalLinkage,
+            llvm::ConstantInt::get(I32, 0), "__wasm_mem_pages");
+        pages->setAlignment(llvm::Align(4));
+        return pages;
+    };
+
+    llvm::SmallVector<llvm::Instruction *, 8> erase;
+    for (llvm::Function &F : M) {
+        if (F.isDeclaration()) continue;
+        for (llvm::BasicBlock &BB : F) {
+            for (llvm::Instruction &I : BB) {
+                auto *CI = llvm::dyn_cast<llvm::CallInst>(&I);
+                if (!CI) continue;
+                llvm::Function *Callee = CI->getCalledFunction();
+                if (!Callee) continue;
+                llvm::StringRef name = Callee->getName();
+                bool is_size = name.starts_with("llvm.wasm.memory.size");
+                bool is_grow = name.starts_with("llvm.wasm.memory.grow");
+                if (!is_size && !is_grow) continue;
+
+                llvm::IRBuilder<> B(CI);
+                llvm::Value *ptr = getPages();
+                if (is_size) {
+                    llvm::Value *load = B.CreateLoad(I32, ptr);
+                    CI->replaceAllUsesWith(load);
+                    erase.push_back(CI);
+                    continue;
+                }
+                llvm::Value *delta = CI->getArgOperand(CI->arg_size() - 1);
+                llvm::Value *old = B.CreateLoad(I32, ptr);
+                llvm::Value *newv = B.CreateAdd(old, delta);
+                llvm::Value *new64 = B.CreateZExt(newv, I64);
+                llvm::Value *ok = B.CreateICmpULE(
+                    new64, llvm::ConstantInt::get(I64, 65536));
+                llvm::Value *stored = B.CreateSelect(ok, newv, old);
+                B.CreateStore(stored, ptr);
+                llvm::Value *res = B.CreateSelect(
+                    ok, old, llvm::ConstantInt::getSigned(I32, -1));
+                CI->replaceAllUsesWith(res);
+                erase.push_back(CI);
+            }
+        }
+    }
+    for (llvm::Instruction *I : erase) I->eraseFromParent();
+}
+
 extern "C" string MLIR_TranslateModuleToLLVMIRUpstream(MLIR_Context *ctx,
                                                        MLIR_OpHandle module_h) {
     auto *op = F<mlir::Operation>(module_h);
@@ -2343,6 +2415,7 @@ extern "C" string MLIR_TranslateModuleToLLVMIRUpstream(MLIR_Context *ctx,
                      "MLIR_TranslateModuleToLLVMIRUpstream: translation failed\n");
         return mkRefString(llvm::StringRef());
     }
+    expandWasmMemoryIntrinsicsForHost(*llmod);
     std::string out;
     llvm::raw_string_ostream os(out);
     llmod->print(os, nullptr);

@@ -1,0 +1,32 @@
+// MRE for the wasm -> Mach-O lazy operand-stack join.
+//
+// `continue` emits an unconditional wasm `br` out of the then arm. The else
+// arm remains reachable and immediately produces lazy operands. At the else
+// and the following end, the Mach-O decoder must reset both the logical stack
+// depth and its materialized-stack frontier (`mem_count`).
+
+extern int printf(const char *fmt, ...);
+
+int branch_join_sum(int n) {
+    int i = 0;
+    int sum = 0;
+
+    while (i < n) {
+        i = i + 1;
+        if (i == 2) {
+            continue;
+        } else {
+            sum = sum + i;
+        }
+
+        if ((sum & 1) != 0) {
+            sum = sum + 1;
+        }
+    }
+    return sum;
+}
+
+int main() {
+    printf("%d\n", branch_join_sum(4));
+    return 0;
+}

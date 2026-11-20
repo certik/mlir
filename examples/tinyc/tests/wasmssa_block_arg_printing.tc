@@ -1,0 +1,11 @@
+// the WasmSSA printer must preserve a block argument name when used.
+static int choose(int condition) {
+    int value;
+    if (condition) value = 41;
+    else value = 42;
+    return value;
+}
+
+int main(void) {
+    return choose(1) != 41;
+}

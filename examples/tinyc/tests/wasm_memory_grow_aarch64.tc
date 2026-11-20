@@ -1,0 +1,5 @@
+// memory.grow is a distinct Wasm intrinsic from memory.size and must
+// lower through the native WasmSSA -> LLVM -> AArch64 path.
+int main(void) {
+    return __builtin_wasm_memory_grow(0, 0) < 0;
+}

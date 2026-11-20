@@ -175,6 +175,8 @@ typedef struct {
     string import_module;
     string import_name;
     string export_name;
+    uint32_t address_space;
+    bool has_address_space;
 } AttrInfo;
 
 // Parse zero or more `__attribute__((...))` attribute lists. Recognized
@@ -234,6 +236,12 @@ static void parse_attributes(P *p, AttrInfo *out) {
                 // it here so the attribute value is a clean view of the
                 // string contents.
                 string str_arg = (string){0};
+                int64_t int_arg = 0;
+                bool have_int_arg = false;
+                if (cur(p).kind == TC_TK_INT_LIT) {
+                    int_arg = cur(p).int_value;
+                    have_int_arg = true;
+                }
                 if (cur(p).kind == TC_TK_STRING_LIT) {
                     str_arg = cur(p).text;
                     if (str_arg.size > 0 &&
@@ -253,6 +261,11 @@ static void parse_attributes(P *p, AttrInfo *out) {
                     if (attr_name_eq(aname, "import_module")) out->import_module = str_arg;
                     else if (attr_name_eq(aname, "import_name")) out->import_name = str_arg;
                     else if (attr_name_eq(aname, "export_name")) out->export_name = str_arg;
+                    else if (attr_name_eq(aname, "address_space") && have_int_arg &&
+                             int_arg >= 0) {
+                        out->address_space = (uint32_t)int_arg;
+                        out->has_address_space = true;
+                    }
                 }
             }
             if (!accept(p, TC_TK_COMMA)) break;
@@ -1900,7 +1913,10 @@ static void wrap_ptr_to_ptr(P *p, Type *out) {
 // Returns false if the current tokens don't start a type.
 static bool parse_sig_type(P *p, Type *out) {
     *out = (Type){0};
+    bool saw_const = false;
+    while (cur(p).kind == TC_TK_KW_CONST) { saw_const = true; p->i++; }
     skip_const(p);
+    out->is_const = saw_const;
     // Accept signed/unsigned/short/long/char/_Bool/bool/int modifiers in any
     // order. Any 'long' promotes to TY_I64; otherwise TY_I32. If `char` is
     // among the consumed modifiers and a single trailing '*' follows, the
@@ -2928,12 +2944,15 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
             if (cur(&p).kind == TC_TK_KW_STATIC) saw_static = true;
             p.i++;
         }
+        AttrInfo gattrs = {0};
+        parse_attributes(&p, &gattrs);
         // Disambiguate top-level decl between a function and a global.
         // We look ahead past `<type>` (and optional `*`) for an IDENT
         // followed by `=` or `;` -> global, otherwise function.
         size_t save = p.i;
         Type tty = {0};
         if (parse_sig_type(&p, &tty)) {
+            parse_attributes(&p, &gattrs);
             // Function-pointer global: `int (*name)(types);`.
             if (cur(&p).kind == TC_TK_LPAREN && peek(&p, 1).kind == TC_TK_STAR) {
                 string fnp_name = (string){0};
@@ -2948,6 +2967,8 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                 g.type = tty;
                 g.is_extern = saw_extern;
                 g.is_static = saw_static;
+                if (gattrs.has_address_space) g.address_space = gattrs.address_space;
+                g.is_const = tty.is_const;
                 g.line = cur(&p).line;
                 merge_push_global(&p, prog, g);
                 continue;
@@ -2962,7 +2983,9 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                     g.name = nm.text;
                     g.is_extern = saw_extern;
                     g.is_static = saw_static;
+                    g.is_const = tty.is_const;
                     g.type = tty;
+                    if (gattrs.has_address_space) g.address_space = gattrs.address_space;
                     g.line = nm.line;
                     // Optional array suffix `[N]` (or `[const-expr]`).
                     // Only zero-initialized arrays are supported at file

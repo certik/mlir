@@ -1,0 +1,12 @@
+extern int printf(const char *fmt, ...);
+// Cross-backend regression: memory.grow(0) must return the current page count
+// and leave memory.size unchanged. On wasm/macho-wasm runtimes the initial
+// page count is > 0; on native/elf/macho-llvm direct paths it is 0.
+int main(void) {
+    int sz = __builtin_wasm_memory_size(0);
+    int old = __builtin_wasm_memory_grow(0, 0);
+    if (old != sz) return 1;
+    if (__builtin_wasm_memory_size(0) != sz) return 2;
+    printf("42\n");
+    return 0;
+}

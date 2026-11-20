@@ -36,6 +36,16 @@ static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, MLIR_ValueHandle v) {
     return num;
 }
 
+static string format_value_name(PrintCtx *ctx, MLIR_ValueHandle v) {
+    Arena *arena = ctx->arena;
+    string name = MLIR_GetValueRegisterName(v);
+    if (name.size > 0) return name;
+    if (MLIR_GetValueKind(v) == BLOCK_ARG)
+        return format(arena, str_lit("%arg{}"), (int64_t)MLIR_GetValueResultIndex(v));
+    uint32_t num = get_or_assign_ssa(ctx, v);
+    return format(arena, str_lit("%{}"), (int64_t)num);
+}
+
 static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpHandle op);
 static string print_region_internal(PrintCtx *ctx, int indent_level, MLIR_RegionHandle region);
 static string print_block_internal(PrintCtx *ctx, int bb_index, int indent_level, MLIR_BlockHandle block);
@@ -140,7 +150,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
                 if (res) {
                     string name = MLIR_GetValueRegisterName(res);
                     if (name.size > 0) strbuf_append(arena, &result, name);
-                    else { uint32_t num = get_or_assign_ssa(ctx, res); strbuf_append(arena, &result, format(arena, str_lit("%{}"), (int64_t)num)); }
+                    else strbuf_append(arena, &result, format_value_name(ctx, res));
                 } else {
                     strbuf_append(arena, &result, str_lit("%_"));
                 }
@@ -170,7 +180,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
         if (!operand) { strbuf_append(arena, &result, str_lit("NULL_OPERAND")); continue; }
         string name = MLIR_GetValueRegisterName(operand);
         if (name.size > 0) strbuf_append(arena, &result, name);
-        else { uint32_t num = get_or_assign_ssa(ctx, operand); strbuf_append(arena, &result, format(arena, str_lit("%{}"), (int64_t)num)); }
+        else strbuf_append(arena, &result, format_value_name(ctx, operand));
         strbuf_append(arena, &result, str_lit(": "));
         MLIR_TypeHandle ot = MLIR_GetValueType(operand);
         strbuf_append(arena, &result, MLIR_GetTypeString(ctx->mlir_ctx, ot));
@@ -185,7 +195,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
             if (!operand) { strbuf_append(arena, &result, str_lit("NULL_OPERAND")); continue; }
             string name = MLIR_GetValueRegisterName(operand);
             if (name.size > 0) strbuf_append(arena, &result, name);
-            else { uint32_t num = get_or_assign_ssa(ctx, operand); strbuf_append(arena, &result, format(arena, str_lit("%{}"), (int64_t)num)); }
+            else strbuf_append(arena, &result, format_value_name(ctx, operand));
             strbuf_append(arena, &result, str_lit(": "));
             MLIR_TypeHandle ot = MLIR_GetValueType(operand);
             strbuf_append(arena, &result, MLIR_GetTypeString(ctx->mlir_ctx, ot));
