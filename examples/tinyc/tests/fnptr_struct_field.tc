@@ -1,0 +1,20 @@
+extern int printf(const char *fmt, ...);
+// Tests inline function-pointer struct field: `int (*op)(int, int)`.
+// Also tests that field access must tag the loaded value with TY_FNPTR so
+// `s.op(args)` lowers through indirect function calls.
+
+int add(int a, int b) { return a + b; }
+int mul(int a, int b) { return a * b; }
+
+typedef struct {
+    int (*op)(int, int);
+} Slot;
+
+int main(void) {
+    Slot s;
+    s.op = add;
+    printf("%lld\n", (long long)(s.op(3, 4)));
+    s.op = mul;
+    printf("%lld\n", (long long)(s.op(5, 6)));
+    return 0;
+}

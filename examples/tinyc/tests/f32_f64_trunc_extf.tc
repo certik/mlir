@@ -1,0 +1,21 @@
+extern int printf(const char *fmt, ...);
+// Tests arith.extf (f32 -> f64) and arith.truncf (f64 -> f32) during
+// mixed-precision arithmetic and implicit narrowing assignments.
+
+int main(void) {
+    float f;
+    double d;
+    float g;
+    f = 1.5f;
+    d = 2.25;
+    double s = f + d;
+    printf("%g\n", (double)(s));
+
+    d = 5.5;
+    g = d;
+    printf("%g\n", (double)(g));
+
+    float h = (float)d;
+    printf("%g\n", (double)(h));
+    return 0;
+}

@@ -397,7 +397,7 @@ static MLIR_ValueHandle emit_fpext_f32_to_f64(E *e, MLIR_ValueHandle v) {
     MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->f64;
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
     MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = v;
-    emit_op(e, OP_TYPE_UNREGISTERED, str_lit("arith.extf"),
+    emit_op(e, OP_TYPE_ARITH_EXTF, str_lit("arith.extf"),
             rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
     return r;
 }
@@ -409,7 +409,7 @@ static MLIR_ValueHandle emit_fptrunc_f64_to_f32(E *e, MLIR_ValueHandle v) {
     MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->f32;
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
     MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = v;
-    emit_op(e, OP_TYPE_UNREGISTERED, str_lit("arith.truncf"),
+    emit_op(e, OP_TYPE_ARITH_TRUNCF, str_lit("arith.truncf"),
             rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
     return r;
 }
@@ -1952,7 +1952,8 @@ static void emit_struct_copy_path(E *e, MLIR_ValueHandle dst, MLIR_ValueHandle s
             StructDef *inner = find_struct(e, ft.struct_name);
             emit_struct_copy_path(e, dst, src, source_elem, inner, path, n_path);
         } else if (ft.kind == TY_PTR_STRUCT || ft.kind == TY_PTR_I32 ||
-                   ft.kind == TY_PTR_CHAR || ft.kind == TY_PTR_VOID) {
+                   ft.kind == TY_PTR_CHAR || ft.kind == TY_PTR_VOID ||
+                   ft.kind == TY_PTR_PTR || ft.kind == TY_FNPTR) {
             MLIR_ValueHandle sp = emit_gep(e, src, source_elem, path, n_path, NULL, 0);
             MLIR_ValueHandle val = emit_load_v(e, sp, e->ptr);
             MLIR_ValueHandle dp = emit_gep(e, dst, source_elem, path, n_path, NULL, 0);
@@ -2912,6 +2913,22 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                                 v.ptr_elem = ft.ptr_is_i64 ? e->i64 : e->i32;
                             } else if (ft.kind == TY_PTR_VOID) {
                                 v.is_void_ptr = true;
+                            } else if (ft.kind == TY_FNPTR) {
+                                Type *fnty = arena_new(e->arena, Type);
+                                *fnty = ft;
+                                v.fnptr_ty = fnty;
+                            } else if (ft.kind == TY_PTR_PTR) {
+                                v.ptr_elem = e->ptr;
+                                if (ft.pointee) {
+                                    Type *pe = ft.pointee;
+                                    if (pe->kind == TY_PTR_STRUCT) {
+                                        v.sdef = find_struct(e, pe->struct_name);
+                                    } else if (pe->kind == TY_FNPTR) {
+                                        Type *fnty = arena_new(e->arena, Type);
+                                        *fnty = *pe;
+                                        v.fnptr_ty = fnty;
+                                    }
+                                }
                             }
                         }
                     }
@@ -3729,6 +3746,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 // first !llvm.ptr param receives the buffer the callee
                 // writes the struct into; the call itself returns void.
                 bool ret_is_struct = (fnty->fnptr_ret->kind == TY_STRUCT);
+                bool ret_is_void = (fnty->fnptr_ret->kind == TY_VOID);
                 StructDef *ret_sd = NULL;
                 MLIR_TypeHandle ret_st_ty = MLIR_INVALID_HANDLE;
                 MLIR_ValueHandle sret_buf = MLIR_INVALID_HANDLE;
@@ -3760,8 +3778,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 MLIR_TypeHandle rty = ret_is_struct
                     ? e->i32 /* unused */
                     : scalar_mlir_type(e, fnty->fnptr_ret->kind);
-                MLIR_TypeHandle out_tys[1] = { rty };
-                size_t n_out_tys = ret_is_struct ? 0 : 1;
+                size_t n_out_tys = (ret_is_struct || ret_is_void) ? 0 : 1;
+                MLIR_TypeHandle *out_tys = n_out_tys ? &rty : NULL;
                 MLIR_TypeHandle f_ty = MLIR_CreateTypeFunction(e->ctx,
                     in_tys, n_in_tys, out_tys, n_out_tys);
                 // Cast !llvm.ptr -> function type so func.call_indirect's
@@ -3814,10 +3832,10 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         ops[op_off++] = coerce_eval(e, av, scalar_mlir_type(e, want));
                     }
                 }
-                size_t n_rts = ret_is_struct ? 0 : 1;
+                size_t n_rts = (ret_is_struct || ret_is_void) ? 0 : 1;
                 MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1);
                 MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1);
-                if (!ret_is_struct) {
+                if (n_rts) {
                     rts[0] = rty;
                     rs[0] = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
                                                       rty, ssa_name(e), eloc(e, 0));
@@ -3828,6 +3846,10 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     r.val = sret_buf;
                     r.is_ptr = true;
                     r.sdef = ret_sd;
+                    return r;
+                }
+                if (ret_is_void) {
+                    r.val = emit_const_i32(e, 0);
                     return r;
                 }
                 r.val = rs[0];

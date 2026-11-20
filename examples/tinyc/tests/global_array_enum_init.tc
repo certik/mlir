@@ -1,0 +1,18 @@
+extern int printf(const char *fmt, ...);
+// Test Global array initializers using enum constants
+enum Color { RED, GREEN, BLUE };
+
+static const int colors[] = { RED, GREEN, BLUE };
+
+int main(void) {
+    int s = 0;
+    int i;
+    for (i = 0; i < 3; i = i + 1) {
+        s = s + colors[i];
+    }
+    printf("%lld\n", (long long)(colors[0]));
+    printf("%lld\n", (long long)(colors[1]));
+    printf("%lld\n", (long long)(colors[2]));
+    printf("%lld\n", (long long)(s));
+    return 0;
+}

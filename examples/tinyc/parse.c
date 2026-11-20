@@ -2174,14 +2174,17 @@ static Func *parse_func(P *p) {
             if (!parse_sig_type(p, &pty)) {
                 perror_at(p, cur(p).line, str_lit("expected parameter type"));
             }
-            if (pty.kind == TY_VOID) {
-                perror_at(p, pline,
-                    str_lit("'void' is only valid as the lone parameter spec"));
-            }
             string pname = (string){0};
-            // Optional function-pointer parameter declarator: `int (*f)(int)`.
+            // Optional function-pointer parameter declarator:
+            // `int (*f)(int)` or `void (*progress)(const char *)`.
             if (try_parse_fnptr_suffix(p, &pty, &pname)) {
                 // pname (if any) was captured inside `(*name)`.
+            } else if (pty.kind == TY_VOID) {
+                if (cur(p).kind == TC_TK_IDENT ||
+                    (cur(p).kind == TC_TK_LPAREN && peek(p, 1).kind == TC_TK_STAR)) {
+                    perror_at(p, pline,
+                        str_lit("'void' is only valid as the lone parameter spec"));
+                }
             } else if (cur(p).kind == TC_TK_IDENT) {
                 pname = cur(p).text;
                 p->i++;
@@ -2407,9 +2410,15 @@ static StructDef *parse_struct_def(P *p) {
                     ft.kind = TY_PTR_PTR;
                     ft.pointee = inner;
                 }
-            } else if (k == TY_VOID) {
-                perror_at(p, cur(p).line, str_lit("'void' is not a valid struct field type"));
             }
+        }
+        // Inline function-pointer field: `void (*progress)(const char *);`
+        string fnptr_field_name = (string){0};
+        if (try_parse_fnptr_suffix(p, &ft, &fnptr_field_name)) {
+            (void)is_ptr;
+        } else if (ft.kind == TY_VOID) {
+            perror_at(p, cur(p).line,
+                str_lit("'void' is not a valid struct field type"));
         }
         // One or more comma-separated declarators sharing the base type
         // `ft` parsed above. Each may add its own `[N]`/`[N][M]` suffix.
@@ -2431,8 +2440,15 @@ static StructDef *parse_struct_def(P *p) {
             if (accept(p, TC_TK_STAR)) {
                 (void)accept(p, TC_TK_STAR);
             }
-            TcTok fn = cur(p);
-            expect(p, TC_TK_IDENT, str_lit("expected field name"));
+            TcTok fn;
+            if (fnptr_field_name.size > 0) {
+                fn = (TcTok){.kind = TC_TK_IDENT, .text = fnptr_field_name,
+                             .line = cur(p).line};
+                fnptr_field_name = (string){0};
+            } else {
+                fn = cur(p);
+                expect(p, TC_TK_IDENT, str_lit("expected field name"));
+            }
             // Optional array suffix `[N]` or `[N][M]`.
             if (accept(p, TC_TK_LBRACK)) {
                 if (cur(p).kind == TC_TK_RBRACK) {
@@ -2997,12 +3013,19 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                           : 4;
                             }
                             int64_t alen = g.type.array_len;
+                            bool unsized = (alen == 0 && !g.type.array_len_expr);
                             uint8_t *bytes = NULL;
                             size_t   bcap  = 0;
-                            if (alen > 0 && (g.type.kind == TY_ARRAY_I32)) {
-                                bcap  = (size_t)alen * elem_size;
-                                bytes = (uint8_t *)arena_alloc(p.arena, bcap);
-                                for (size_t bi = 0; bi < bcap; bi++) bytes[bi] = 0;
+                            if (g.type.kind == TY_ARRAY_I32) {
+                                if (alen > 0) {
+                                    bcap  = (size_t)alen * elem_size;
+                                    bytes = (uint8_t *)arena_alloc(p.arena, bcap);
+                                    for (size_t bi = 0; bi < bcap; bi++) bytes[bi] = 0;
+                                } else if (unsized) {
+                                    bcap  = 16 * elem_size;
+                                    bytes = (uint8_t *)arena_alloc(p.arena, bcap);
+                                    for (size_t bi = 0; bi < bcap; bi++) bytes[bi] = 0;
+                                }
                             }
                             size_t  ei = 0;
                             bool    any_nonzero = false;
@@ -3042,6 +3065,10 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                             p.i++;
                                         }
                                         ok = true;
+                                    } else if (el.kind == TC_TK_IDENT && enum_lookup(&p, el.text)) {
+                                        val = enum_lookup(&p, el.text)->value;
+                                        have_int_val = true;
+                                        ok = true;
                                     }
                                     if (!ok) {
                                         perror_at(&p, el.line,
@@ -3050,10 +3077,26 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                     } else if (el.kind != TC_TK_LPAREN) {
                                         p.i++;
                                     }
-                                    if (have_int_val && bytes && ei < (size_t)alen) {
+                                    if (have_int_val && bytes &&
+                                        (unsized || ei < (size_t)alen)) {
+                                        size_t need = (ei + 1) * elem_size;
+                                        if (unsized && need > bcap) {
+                                            size_t ncap = bcap ? bcap * 2
+                                                               : 16 * elem_size;
+                                            while (ncap < need) ncap *= 2;
+                                            uint8_t *nb =
+                                                (uint8_t *)arena_alloc(p.arena, ncap);
+                                            for (size_t bi = 0; bi < bcap; bi++)
+                                                nb[bi] = bytes[bi];
+                                            for (size_t bi = bcap; bi < ncap; bi++)
+                                                nb[bi] = 0;
+                                            bytes = nb;
+                                            bcap = ncap;
+                                        }
                                         uint64_t uv = (uint64_t)val;
                                         for (size_t b = 0; b < elem_size; b++) {
-                                            bytes[ei * elem_size + b] = (uint8_t)(uv >> (8 * b));
+                                            bytes[ei * elem_size + b] =
+                                                (uint8_t)(uv >> (8 * b));
                                         }
                                         if (val != 0) any_nonzero = true;
                                     }
@@ -3068,6 +3111,10 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                             }
                             expect(&p, TC_TK_RBRACE,
                                    str_lit("expected '}' in global array initializer"));
+                            if (unsized && ei > 0) {
+                                g.type.array_len = (int64_t)ei;
+                                bcap = (size_t)ei * elem_size;
+                            }
                             if (any_nonzero && bytes && bcap > 0) {
                                 g.init_array_data.str  = (char *)bytes;
                                 g.init_array_data.size = bcap;

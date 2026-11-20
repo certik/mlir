@@ -1,0 +1,27 @@
+extern int printf(const char *fmt, ...);
+// Tests inline void-returning function-pointer fields and parameters:
+// `void (*notify)(const char *)`.
+
+static int hits = 0;
+
+void on_msg(const char *msg) {
+    (void)msg;
+    hits = hits + 1;
+}
+
+void invoke(void (*fn)(const char *), const char *msg) {
+    fn(msg);
+}
+
+typedef struct {
+    void (*notify)(const char *);
+} Handler;
+
+int main(void) {
+    Handler h;
+    h.notify = on_msg;
+    h.notify("a");
+    invoke(h.notify, "b");
+    printf("%lld\n", (long long)(hits));
+    return 0;
+}
