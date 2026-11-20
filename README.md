@@ -170,14 +170,17 @@ shrink.
   printer.
 * `mlir_op_names.c` — op enum ↔ string mapping.
 * `mlir_lift_cf_to_scf.c` — agnostic in-tree port of upstream's
-  CFGToSCF (Bahmann/Reissmann 2015). Lifts `cf.br` / `cf.cond_br` /
-  `cf.switch` into `scf.if` / `scf.while` / `scf.index_switch`; runs
-  through `mlir_api.h` so the same code services both backends.
+  CFGToSCF (Bahmann/Reissmann 2015). Lifts a CFG (`cf.br` / `cf.cond_br` /
+  `cf.switch`, or the LLVM-dialect `llvm.br` / `llvm.cond_br` /
+  `llvm.switch`) into `scf.if` / `scf.while` / `scf.index_switch`; runs
+  through `mlir_api.h` so the same code services both backends. Its one
+  in-tree user is the wasm backend, which runs it on its LLVM-dialect
+  input as an internal structurization step.
 * `mlir_lower_to_llvm.c` — agnostic in-tree lowering from the high-level
   dialects (`scf`, `arith`, `memref`, `cf`, `func`, …) into the LLVM
-  dialect. Provides `MLIR_LowerToLLVMDialect` and the wasm-tailored
-  `MLIR_LowerToLLVMDialectForWasm` (which runs the cf→scf lift first
-  and keeps `scf.*` ops in place for the wasm pipeline).
+  dialect. Provides `MLIR_LowerToLLVMDialect`, the one lowering every
+  backend takes its input from: the result is LLVM dialect only, with
+  control flow as a flat `llvm.br` / `llvm.cond_br` CFG.
 * `mlir_translate_to_llvm_ir.c` — agnostic LLVM-dialect-MLIR → LLVM IR
   text emitter (`MLIR_TranslateModuleToLLVMIR`).
 * `mlir_translate_to_wasm.c` — agnostic LLVM-dialect-MLIR → wasm32-wasi

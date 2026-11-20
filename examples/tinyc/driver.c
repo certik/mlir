@@ -682,7 +682,6 @@ int app_main(void) {
     typedef bool (*LowerFn)(MLIR_Context *, MLIR_OpHandle);
     typedef string (*TranslateFn)(MLIR_Context *, MLIR_OpHandle);
     LowerFn lower_fn;
-    LowerFn lower_for_wasm_fn;
     TranslateFn translate_to_llvm_fn;
     TranslateFn translate_to_wasm_fn;
 #ifdef TINYC_HAS_UPSTREAM
@@ -915,19 +914,12 @@ int app_main(void) {
     }
     if (use_upstream) {
         lower_fn = MLIR_LowerToLLVMDialectUpstream;
-        // Upstream's wasm path goes through LLVM's WebAssembly target,
-        // which expects full LLVM-dialect (post scf->cf) input. The
-        // *ForWasmUpstream variant (cf->scf lift + leave scf in place)
-        // exists for the cross-case "upstream lift, native wasm
-        // pipeline" comparison, not for the regular upstream wasm flow.
-        lower_for_wasm_fn = MLIR_LowerToLLVMDialectUpstream;
         translate_to_llvm_fn = MLIR_TranslateModuleToLLVMIRUpstream;
         translate_to_wasm_fn = MLIR_TranslateModuleToWasmUpstream;
     } else
 #endif
     {
         lower_fn = MLIR_LowerToLLVMDialect;
-        lower_for_wasm_fn = MLIR_LowerToLLVMDialectForWasm;
         translate_to_llvm_fn = MLIR_TranslateModuleToLLVMIR;
         translate_to_wasm_fn = MLIR_TranslateModuleToWasm;
     }
@@ -997,7 +989,7 @@ int app_main(void) {
                 MLIR_OpHandle hp_picks[8]; size_t hp_n = 0;
                 if (!tinyc_compile_host_platform(&ctx, host_platform_path,
                                                  include_dirs, n_include_dirs,
-                                                 lower_for_wasm_fn, false,
+                                                 lower_fn, false,
                                                  hp_picks, &hp_n, 8)) {
                     arena_destroy(arena);
                     arena_destroy(boot_arena);
@@ -1010,7 +1002,7 @@ int app_main(void) {
                 if (wasi_adapter_path &&
                     !tinyc_compile_host_platform(&ctx, wasi_adapter_path,
                                                  include_dirs, n_include_dirs,
-                                                 lower_for_wasm_fn, true,
+                                                 lower_fn, true,
                                                  ad_picks, &ad_n, 16)) {
                     arena_destroy(arena);
                     arena_destroy(boot_arena);
@@ -1107,7 +1099,7 @@ int app_main(void) {
                 if (host_platform_path &&
                     !tinyc_compile_host_platform(&ctx, host_platform_path,
                                                  include_dirs, n_include_dirs,
-                                                 lower_for_wasm_fn, false,
+                                                 lower_fn, false,
                                                  hp_picks2, &hp_n2, 8)) {
                     arena_destroy(arena);
                     arena_destroy(boot_arena);
@@ -1240,7 +1232,7 @@ int app_main(void) {
     }
 
     // Promote non-escaping `llvm.alloca` locals to SSA (mem2reg) on the flat
-    // cf CFG, before any lowering. This keeps non-address-taken locals out of
+    // cf CFG, before the lowering to the LLVM dialect. This keeps non-address-taken locals out of
     // the linear-memory shadow stack so the downstream register allocator can
     // hold them in registers instead of spilling every access. Skippable via
     // TINYC_NO_MEM2REG for A/B debugging.
@@ -1248,11 +1240,10 @@ int app_main(void) {
         mlir_llvm_mem2reg(&ctx, module);
 
     if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64 || emit_elf) {
-        bool needs_wasm_lowering = emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64;
-        bool ok = needs_wasm_lowering
-                      ? lower_for_wasm_fn(&ctx, module)
-                      : lower_fn(&ctx, module);
-        if (!ok) {
+        // One lowering for every backend: the result is LLVM dialect only,
+        // with control flow as a flat llvm.br / llvm.cond_br CFG. The wasm
+        // backend rebuilds structured control flow from it internally.
+        if (!lower_fn(&ctx, module)) {
             arena_destroy(arena);
             arena_destroy(boot_arena);
             return 1;

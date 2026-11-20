@@ -2,6 +2,10 @@
 //
 //   LLVM-dialect builtin.module  -->  wasmssa builtin.module
 //
+// The input must be LLVM dialect only (MLIR_LowerToLLVMDialect output, with
+// a flat llvm.br / llvm.cond_br CFG). The stage structurizes that CFG
+// itself; see the header of mlir_llvm_to_wasmssa.c.
+//
 // Also declares the WebAssembly value-type byte encodings shared by
 // all three pipeline stages.
 
@@ -22,7 +26,7 @@ enum {
 };
 
 // Returns MLIR_INVALID_HANDLE on failure (a diagnostic is printed to
-// stderr).
+// stderr). `module` is consumed: its function bodies are rewritten in place.
 MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module);
 
 #ifdef __cplusplus

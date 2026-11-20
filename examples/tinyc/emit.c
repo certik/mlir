@@ -1216,6 +1216,28 @@ static SCtx walk_struct_lhs(E *e, Scope *sc, Expr *ex) {
     return r;
 }
 
+// Type of the struct field an EX_FIELD expression names, determined from the
+// declared types alone, i.e. WITHOUT emitting any code. Returns false when it
+// cannot be determined this way (the caller then falls back to walking the
+// struct base with walk_struct_lhs).
+//
+// This exists because walk_struct_lhs is not a pure query: it emits the code
+// that computes the struct base, including any side effect in it (the `--sp`
+// of `stack[--sp].bid`, the call of `f().x`, ...). Callers that only need to
+// know the field's type must therefore not use it, or the base expression is
+// evaluated once more per query.
+static bool field_type_noemit(E *e, Scope *sc, Expr *fe, Type *out) {
+    Type st = infer_expr_type(e, sc, fe->lhs);
+    if (st.kind != TY_STRUCT && st.kind != TY_PTR_STRUCT) return false;
+    if (st.struct_name.size == 0) return false;
+    StructDef *sd = find_struct(e, st.struct_name);
+    if (!sd) return false;
+    int idx = struct_field_index(sd, fe->name);
+    if (idx < 0) return false;
+    *out = sd->fields.data[idx].type;
+    return true;
+}
+
 static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
     e->cur_line = ex->line;
     LVal r = {0};
@@ -2824,7 +2846,21 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // ... s.data + i`). The rvalue is a pointer to the array's
             // first element; carrying the right ptr_elem lets downstream
             // pointer-arithmetic / indexing emit the correct stride.
-            if (ex->kind == EX_FIELD) {
+            //
+            // The field type is looked up without emitting code first, so that the
+            // struct base is walked (= its code emitted, side effects included)
+            // exactly once: here for an array field, or in emit_lvalue below for a
+            // scalar one. Walking it "just to look" used to evaluate the base of
+            // `stack[--sp].bid` twice (three times for a pointer field).
+            Type field_ty = (Type){0};
+            bool field_ty_known = ex->kind == EX_FIELD &&
+                                  field_type_noemit(e, sc, ex, &field_ty);
+            bool field_is_array = field_ty.kind == TY_ARRAY_I32 ||
+                                  field_ty.kind == TY_ARRAY_F32 ||
+                                  field_ty.kind == TY_ARRAY_STRUCT ||
+                                  field_ty.kind == TY_ARRAY_PTR_STRUCT ||
+                                  field_ty.kind == TY_ARRAY_PTR_CHAR;
+            if (ex->kind == EX_FIELD && (!field_ty_known || field_is_array)) {
                 SCtx parent = walk_struct_lhs(e, sc, ex->lhs);
                 if (parent.ok) {
                     int fidx = struct_field_index(parent.sd, ex->name);
@@ -2928,35 +2964,44 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         }
                     }
                 } else if (ex->kind == EX_FIELD) {
-                    SCtx parent = walk_struct_lhs(e, sc, ex->lhs);
-                    if (parent.ok) {
-                        int fidx = struct_field_index(parent.sd, ex->name);
-                        if (fidx >= 0) {
-                            Type ft = parent.sd->fields.data[fidx].type;
-                            if (ft.kind == TY_PTR_STRUCT) {
-                                v.sdef = find_struct(e, ft.struct_name);
-                            } else if (ft.kind == TY_PTR_CHAR) {
-                                v.is_str = true;
-                                v.ptr_elem = e->i8;
-                            } else if (ft.kind == TY_PTR_I32) {
-                                v.ptr_elem = ft.ptr_is_i64 ? e->i64 : e->i32;
-                            } else if (ft.kind == TY_PTR_VOID) {
-                                v.is_void_ptr = true;
-                            } else if (ft.kind == TY_FNPTR) {
-                                Type *fnty = arena_new(e->arena, Type);
-                                *fnty = ft;
-                                v.fnptr_ty = fnty;
-                            } else if (ft.kind == TY_PTR_PTR) {
-                                v.ptr_elem = e->ptr;
-                                if (ft.pointee) {
-                                    Type *pe = ft.pointee;
-                                    if (pe->kind == TY_PTR_STRUCT) {
-                                        v.sdef = find_struct(e, pe->struct_name);
-                                    } else if (pe->kind == TY_FNPTR) {
-                                        Type *fnty = arena_new(e->arena, Type);
-                                        *fnty = *pe;
-                                        v.fnptr_ty = fnty;
-                                    }
+                    // Prefer the no-code lookup: walking the struct base again here
+                    // would evaluate it (and its side effects) a second time.
+                    Type ft = field_ty;
+                    bool have_ft = field_ty_known;
+                    if (!have_ft) {
+                        SCtx parent = walk_struct_lhs(e, sc, ex->lhs);
+                        if (parent.ok) {
+                            int fidx = struct_field_index(parent.sd, ex->name);
+                            if (fidx >= 0) {
+                                ft = parent.sd->fields.data[fidx].type;
+                                have_ft = true;
+                            }
+                        }
+                    }
+                    if (have_ft) {
+                        if (ft.kind == TY_PTR_STRUCT) {
+                            v.sdef = find_struct(e, ft.struct_name);
+                        } else if (ft.kind == TY_PTR_CHAR) {
+                            v.is_str = true;
+                            v.ptr_elem = e->i8;
+                        } else if (ft.kind == TY_PTR_I32) {
+                            v.ptr_elem = ft.ptr_is_i64 ? e->i64 : e->i32;
+                        } else if (ft.kind == TY_PTR_VOID) {
+                            v.is_void_ptr = true;
+                        } else if (ft.kind == TY_FNPTR) {
+                            Type *fnty = arena_new(e->arena, Type);
+                            *fnty = ft;
+                            v.fnptr_ty = fnty;
+                        } else if (ft.kind == TY_PTR_PTR) {
+                            v.ptr_elem = e->ptr;
+                            if (ft.pointee) {
+                                Type *pe = ft.pointee;
+                                if (pe->kind == TY_PTR_STRUCT) {
+                                    v.sdef = find_struct(e, pe->struct_name);
+                                } else if (pe->kind == TY_FNPTR) {
+                                    Type *fnty = arena_new(e->arena, Type);
+                                    *fnty = *pe;
+                                    v.fnptr_ty = fnty;
                                 }
                             }
                         }
@@ -2970,39 +3015,50 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     else if (ex->lhs->kind == EX_INDEX &&
                              ex->lhs->lhs->kind == EX_FIELD) fe = ex->lhs->lhs;
                     if (fe) {
-                        SCtx parent = walk_struct_lhs(e, sc, fe->lhs);
-                        if (parent.ok) {
-                            int fidx = struct_field_index(parent.sd, fe->name);
-                            if (fidx >= 0) {
-                                Type ft = parent.sd->fields.data[fidx].type;
-                                if (ft.kind == TY_ARRAY_PTR_CHAR) {
+                        Type fe_ty = (Type){0};
+                        bool fe_ty_known = field_type_noemit(e, sc, fe, &fe_ty);
+                        // Prefer the no-code lookup: walking the struct base again here
+                        // would evaluate it (and its side effects) a second time.
+                        Type ft = fe_ty;
+                        bool have_ft = fe_ty_known;
+                        if (!have_ft) {
+                            SCtx parent = walk_struct_lhs(e, sc, fe->lhs);
+                            if (parent.ok) {
+                                int fidx = struct_field_index(parent.sd, fe->name);
+                                if (fidx >= 0) {
+                                    ft = parent.sd->fields.data[fidx].type;
+                                    have_ft = true;
+                                }
+                            }
+                        }
+                        if (have_ft) {
+                            if (ft.kind == TY_ARRAY_PTR_CHAR) {
+                                v.is_str = true;
+                                v.ptr_elem = e->i8;
+                            } else if (ft.kind == TY_ARRAY_PTR_STRUCT) {
+                                v.sdef = find_struct(e, ft.struct_name);
+                            } else if (ft.kind == TY_PTR_PTR && ft.pointee) {
+                                // Indexing a struct field of type T**:
+                                // the loaded element is a single T*.
+                                // Tag with the inner type so '->'
+                                // chains and string ops work.
+                                Type *pe = ft.pointee;
+                                if (pe->kind == TY_PTR_CHAR) {
                                     v.is_str = true;
                                     v.ptr_elem = e->i8;
-                                } else if (ft.kind == TY_ARRAY_PTR_STRUCT) {
-                                    v.sdef = find_struct(e, ft.struct_name);
-                                } else if (ft.kind == TY_PTR_PTR && ft.pointee) {
-                                    // Indexing a struct field of type T**:
-                                    // the loaded element is a single T*.
-                                    // Tag with the inner type so '->'
-                                    // chains and string ops work.
-                                    Type *pe = ft.pointee;
-                                    if (pe->kind == TY_PTR_CHAR) {
-                                        v.is_str = true;
-                                        v.ptr_elem = e->i8;
-                                    } else if (pe->kind == TY_PTR_STRUCT) {
-                                        v.sdef = find_struct(e, pe->struct_name);
-                                    } else if (pe->kind == TY_PTR_I32) {
-                                        v.ptr_elem = pe->ptr_is_i64 ? e->i64
-                                                   : pe->ptr_is_f32 ? e->f32
-                                                   : pe->ptr_is_f64 ? e->f64
-                                                   : e->i32;
-                                    } else if (pe->kind == TY_PTR_VOID) {
-                                        v.is_void_ptr = true;
-                                    } else if (pe->kind == TY_FNPTR) {
-                                        Type *fnty = arena_new(e->arena, Type);
-                                        *fnty = *pe;
-                                        v.fnptr_ty = fnty;
-                                    }
+                                } else if (pe->kind == TY_PTR_STRUCT) {
+                                    v.sdef = find_struct(e, pe->struct_name);
+                                } else if (pe->kind == TY_PTR_I32) {
+                                    v.ptr_elem = pe->ptr_is_i64 ? e->i64
+                                               : pe->ptr_is_f32 ? e->f32
+                                               : pe->ptr_is_f64 ? e->f64
+                                               : e->i32;
+                                } else if (pe->kind == TY_PTR_VOID) {
+                                    v.is_void_ptr = true;
+                                } else if (pe->kind == TY_FNPTR) {
+                                    Type *fnty = arena_new(e->arena, Type);
+                                    *fnty = *pe;
+                                    v.fnptr_ty = fnty;
                                 }
                             }
                         }

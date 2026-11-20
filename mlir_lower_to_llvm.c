@@ -79,12 +79,6 @@ typedef struct LowerState {
     MLIR_Context *ctx;
     MLIR_OpHandle module;
     MLIR_BlockHandle module_body;
-
-    // When true, the walker preserves scf.* control-flow ops and skips
-    // any cf->llvm rewrites: the wasm pipeline expects the post-lift
-    // scf-form to survive into the wasmssa lowering. Set by
-    // MLIR_LowerToLLVMDialectForWasm.
-    bool keep_scf;
 } LowerState;
 
 // -----------------------------------------------------------------------------
@@ -715,7 +709,6 @@ static int try_lower_op(LowerState *st, MLIR_OpHandle op,
                         MLIR_BlockHandle parent, size_t pos) {
     string name = MLIR_GetOpName(op);
     if (name_eq(name, "scf.if")) {
-        if (st->keep_scf) return LOWER_NONE;
         // scf.if rewrites the parent block's tail: it erases its own
         // original op (after taking its regions and uses) — actually it
         // doesn't erase here; we handle that in the walker by checking
@@ -770,8 +763,8 @@ static int try_lower_op(LowerState *st, MLIR_OpHandle op,
     else if (name_eq(name, "arith.fptosi"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptosi"), OP_TYPE_UNREGISTERED);
     else if (name_eq(name, "arith.fptoui"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptoui"), OP_TYPE_UNREGISTERED);
     else if (name_eq(name, "arith.bitcast"))ok = lower_rename(st, op, parent, pos, str_lit("llvm.bitcast"),OP_TYPE_UNREGISTERED);
-    else if (name_eq(name, "cf.br"))      ok = st->keep_scf ? false : lower_cf_branch(st, op, parent, pos, str_lit("llvm.br"));
-    else if (name_eq(name, "cf.cond_br")) ok = st->keep_scf ? false : lower_cf_branch(st, op, parent, pos, str_lit("llvm.cond_br"));
+    else if (name_eq(name, "cf.br"))      ok = lower_cf_branch(st, op, parent, pos, str_lit("llvm.br"));
+    else if (name_eq(name, "cf.cond_br")) ok = lower_cf_branch(st, op, parent, pos, str_lit("llvm.cond_br"));
 
     return ok ? LOWER_REPLACED : LOWER_NONE;
 }
@@ -824,29 +817,6 @@ bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module) {
     st.ctx = ctx;
     st.module = module;
     st.module_body = MLIR_GetRegionBlock(body_region, 0);
-
-    walk_block(&st, st.module_body);
-    return true;
-}
-
-// In-tree LLVM-dialect lowering tailored for the wasm pipeline. First
-// lifts cf.br / cf.cond_br into scf.if / scf.while via MLIR_LiftCfToScf,
-// then runs the regular lowering with `keep_scf = true` so the scf
-// operations survive into the wasmssa stage (which expects structured
-// control flow). cf->llvm.br rewrites are also skipped: any cf op
-// surviving the lift is a hard error caught later by wasmssa-lower.
-bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx, MLIR_OpHandle module) {
-    if (module == MLIR_INVALID_HANDLE) return false;
-    if (!MLIR_LiftCfToScf(ctx, module)) return false;
-    if (MLIR_GetOpNumRegions(module) == 0) return false;
-    MLIR_RegionHandle body_region = MLIR_GetOpRegion(module, 0);
-    if (MLIR_GetRegionNumBlocks(body_region) == 0) return false;
-
-    LowerState st = {0};
-    st.ctx = ctx;
-    st.module = module;
-    st.module_body = MLIR_GetRegionBlock(body_region, 0);
-    st.keep_scf = true;
 
     walk_block(&st, st.module_body);
     return true;

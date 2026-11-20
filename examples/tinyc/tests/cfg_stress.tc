@@ -1,0 +1,113 @@
+// Control-flow stress test for the backends that have to rebuild or flatten
+// control flow themselves (wasm structurizes the LLVM-dialect CFG; aarch64
+// and x86-64 consume it directly). Each function is a CFG shape that is easy
+// to get wrong:
+//   irreducible  - a cycle with two entries (goto into the middle of a loop)
+//   nested_exits - nested loops left by break, continue, return and a goto
+//                  out of both levels
+//   sw           - switch with fallthrough inside a loop, with continue,
+//                  break and a goto out of the loop from a case
+//   dw           - do-while with break/continue, then while(1) with several
+//                  returns and a break
+//   sc           - short-circuit conditions whose arms share join blocks
+//   sm           - goto state machine: multi-entry, multi-exit cycle
+// The expected output is what clang -O0 prints for the same source.
+extern int printf(const char *fmt, ...);
+
+// 1. irreducible: two entries into a cycle via goto
+int irreducible(int n, int flag) {
+    int acc = 0;
+    if (flag) goto B;
+A:
+    acc += 1;
+    if (acc > n) goto done;
+B:
+    acc += 10;
+    if (acc < n * 5) goto A;
+done:
+    return acc;
+}
+
+// 2. nested loops, multiple exits (break out of both via goto, return inside)
+int nested_exits(int n) {
+    int s = 0;
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            if (i * j == 12) goto out;
+            if (j > i) break;
+            if ((i + j) % 7 == 6) continue;
+            if (s > 1000) return -s;
+            s += i * 3 + j;
+        }
+        if (i == n - 2) continue;
+        s += 100;
+    }
+    return s;
+out:
+    return s + 5000;
+}
+
+// 3. switch with fallthrough inside a loop with continue/break
+int sw(int n) {
+    int s = 0;
+    for (int i = 0; i < n; i++) {
+        switch (i % 6) {
+            case 0: s += 1;
+            case 1: s += 2; break;
+            case 2: continue;
+            case 3: if (s > 40) goto end; s += 3;
+            case 4: s += 4; break;
+            default: s += 100;
+        }
+        s += 1000;
+    }
+end:
+    return s;
+}
+
+// 4. do-while with break/continue and a while(1) with multiple returns
+int dw(int n) {
+    int i = 0, s = 0;
+    do {
+        i++;
+        if (i % 3 == 0) continue;
+        if (i > 20) break;
+        s += i;
+    } while (i < n);
+    while (1) {
+        s -= 3;
+        if (s < 10) return s;
+        if (s % 11 == 0) return s * 2;
+        if (s % 5 == 0) break;
+    }
+    return s + 1;
+}
+
+// 5. short-circuit conditions creating shared join blocks
+int sc(int a, int b, int c) {
+    int r = 0;
+    if ((a > 1 && b > 2) || (c > 3 && a < b) || (b == c)) r += 1;
+    if (a > 0 ? (b > 0 || c > 0) : (b < 0 && c < 0)) r += 10;
+    while ((a < 10 && b < 20) || c < 5) { a++; b += 2; c++; r += 100; if (r > 2000) break; }
+    return r;
+}
+
+// 6. goto-based state machine (multi-entry, multi-exit loop)
+int sm(int x) {
+    int steps = 0;
+s0: steps++; if (x % 2 == 0) { x /= 2; goto s1; } x = 3 * x + 1; goto s2;
+s1: steps += 10; if (x == 1) goto fin; if (x % 3 == 0) goto s0; goto s2;
+s2: steps += 100; if (x == 1) goto fin; if (steps > 5000) goto fin; goto s0;
+fin:
+    return steps;
+}
+
+int main(void) {
+    printf("%d %d %d\n", irreducible(7, 0), irreducible(7, 1), irreducible(0, 1));
+    printf("%d %d %d\n", nested_exits(3), nested_exits(6), nested_exits(9));
+    printf("%d %d %d\n", sw(5), sw(12), sw(40));
+    printf("%d %d %d\n", dw(5), dw(30), dw(100));
+    printf("%d %d %d\n", sc(1, 2, 3), sc(5, 6, 7), sc(-1, -2, -3));
+    printf("%d %d %d\n", sm(6), sm(27), sm(1));
+    return 0;
+}

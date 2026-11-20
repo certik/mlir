@@ -21,19 +21,21 @@
 //   - When every arm of a multi-successor terminator returns with a
 //     *different* return-like op kind (e.g. one arm `func.return`,
 //     another `llvm.return`) the algorithm provably cannot lift it
-//     and leaves the cf.* terminator in place. Downstream
+//     and leaves the branch terminator in place. Downstream
 //     (wasmssa-lower) rejects this and reports a hard error.
 //   - The M9 driver caps the per-region worklist at 4096 iterations
 //     as a runaway guard; bodies that would need more are rare in
 //     practice. The driver emits a diagnostic to stderr when the cap
-//     fires and leaves any unlifted cf.* ops behind for downstream
+//     fires and leaves any unlifted branch ops behind for downstream
 //     stages to flag.
 //   - No predecessor cache: MLIR_GetBlockNumPredecessors /
-//     MLIR_GetBlockPredecessor are O(R) per call. Cycle-edge and
-//     reduce-loop analyses query them repeatedly, so the algorithm
-//     is O(R^2) in the number of blocks per region. Fine in practice
-//     (functions stay small) but a single shared region-scoped cache
-//     would make this O(R).
+//     MLIR_GetBlockPredecessor are O(R) per call. The per-region
+//     passes that run on every body (precondition check, unreachable-
+//     block removal, SCC, dominance DFS) avoid them and are linear in
+//     blocks + edges, but the cycle-edge, reduce-loop and branch-region
+//     analyses still query them, so the worst case remains O(R^2) in
+//     the number of blocks per region. A single shared region-scoped
+//     cache would remove that.
 
 #ifndef MLIR_LIFT_CF_TO_SCF_H
 #define MLIR_LIFT_CF_TO_SCF_H
@@ -44,14 +46,21 @@
 extern "C" {
 #endif
 
-// Lift cf.* terminators in every func.func and llvm.func body of the
-// `module` op into scf.* structured control flow. Mirrors the upstream
-// MLIR_LiftCfToScf contract: returns true on success, false on failure
-// or on input the algorithm cannot handle. On success there are no
-// remaining cf.br / cf.cond_br / cf.switch ops other than those left
-// behind for multi-kind return-like dispatches (which the algorithm
-// proves cannot be lifted further).
-bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module);
+// Lift the branch terminators in every func.func and llvm.func body of the
+// `module` op into scf.* structured control flow. `options` (may be NULL)
+// selects the branch-op family: cf.br / cf.cond_br / cf.switch by default,
+// or llvm.br / llvm.cond_br / llvm.switch with `llvm_cfg` set (see
+// MLIR_LiftCfToScfOptions in mlir_api.h). The two families have the same
+// shape through mlir_api.h, so the algorithm is identical for both; the
+// lift's own intermediate branches (loop latches, edge multiplexers) are
+// created in the selected family, so an LLVM-dialect-only module never
+// sees a cf.* op. Mirrors the MLIR_LiftCfToScf contract: returns true on
+// success, false on failure or on input the algorithm cannot handle. On
+// success there are no remaining branch ops of the selected family other
+// than those left behind for multi-kind return-like dispatches (which the
+// algorithm proves cannot be lifted further).
+bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module,
+                            const MLIR_LiftCfToScfOptions *options);
 
 #ifdef __cplusplus
 }

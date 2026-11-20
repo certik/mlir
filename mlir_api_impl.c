@@ -2689,10 +2689,11 @@ void MLIR_SpliceBlockOps(MLIR_Context *ctx, MLIR_BlockHandle dst,
 // Native cf->scf lift: dispatch to the agnostic C port. The port handles
 // the patterns it understands and returns false otherwise; for native we
 // do not have an upstream fallback so callers (wasm lowering) will reject
-// any leftover cf ops at the wasmssa-lower stage.
+// any leftover branch ops at the wasmssa-lower stage.
 #include "mlir_lift_cf_to_scf.h"
-bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module) {
-    return MLIR_LiftCfToScfNative(ctx, module);
+bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module,
+                      const MLIR_LiftCfToScfOptions *options) {
+    return MLIR_LiftCfToScfNative(ctx, module, options);
 }
 
 // The lowering / LLVM-IR-translation / wasm-translation entry points

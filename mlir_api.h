@@ -551,7 +551,7 @@ MLIR_OpHandle MLIR_ParseTextClassic(MLIR_Context *ctx, string text);
 //
 // Two parallel families:
 //
-//   - Backend-agnostic functions (MLIR_LowerToLLVMDialect{,ForWasm},
+//   - Backend-agnostic functions (MLIR_LowerToLLVMDialect,
 //     MLIR_TranslateModuleTo{LLVMIR,Wasm}) are implemented in dedicated
 //     translation units (mlir_lower_to_llvm.c,
 //     mlir_translate_to_llvm_ir.c, mlir_translate_to_wasm.c) that use
@@ -560,7 +560,7 @@ MLIR_OpHandle MLIR_ParseTextClassic(MLIR_Context *ctx, string text);
 //     functions are always available and produce identical output
 //     regardless of which core API implementation is linked in.
 //
-//   - *Upstream siblings (MLIR_LowerToLLVMDialect{,ForWasm}Upstream,
+//   - *Upstream siblings (MLIR_LowerToLLVMDialectUpstream,
 //     MLIR_TranslateModuleTo{LLVMIR,Wasm}Upstream, plus
 //     MLIR_PrintOperationUpstream and MLIR_ParseTextUpstream above) are
 //     implemented only by mlir_api_impl_upstream.cpp. They run upstream
@@ -575,15 +575,12 @@ MLIR_OpHandle MLIR_ParseTextClassic(MLIR_Context *ctx, string text);
 // Lower a `builtin.module` op to the LLVM dialect by running the
 // in-tree conversion (scf->cf, then arith/memref/cf/func/vector ->
 // llvm). Mutates `module` in place. Returns true on success.
+//
+// This is the one lowering every in-tree backend takes its input from:
+// the result is LLVM dialect only, with control flow as a flat
+// llvm.br / llvm.cond_br CFG. Backends that need structured control
+// flow (wasm) rebuild it themselves from that CFG.
 bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module);
-
-// Same as MLIR_LowerToLLVMDialect, but tailored to feed the in-tree
-// LLVM-dialect-MLIR -> WASM emitter (mlir_translate_to_wasm.c).
-// Instead of running scf->cf (which destroys structured control flow
-// that wasm needs), this entry point first lifts cf back to scf and
-// then lowers arith/memref/func/vector/etc. to LLVM, leaving scf.* ops
-// in place for stage 1 of the wasm pipeline to consume directly.
-bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx, MLIR_OpHandle module);
 
 // Translate a `builtin.module` op already lowered to the LLVM dialect
 // into LLVM IR text (`.ll`). Returns the IR text on success or an
@@ -591,6 +588,8 @@ bool MLIR_LowerToLLVMDialectForWasm(MLIR_Context *ctx, MLIR_OpHandle module);
 string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module);
 
 // Translate a `builtin.module` op already lowered to the LLVM dialect
+// (the output of MLIR_LowerToLLVMDialect; `module` is consumed: the
+// wasm backend structurizes its CFG in place)
 // into a WebAssembly relocatable object file (wasm32-wasi). Returns
 // the raw object bytes on success or an empty string on failure. The
 // returned bytes are NOT a runnable wasm module — they still need to
@@ -603,7 +602,6 @@ string MLIR_TranslateModuleToWasm(MLIR_Context *ctx, MLIR_OpHandle module);
 
 // Upstream-only siblings. See the family description above.
 bool MLIR_LowerToLLVMDialectUpstream(MLIR_Context *ctx, MLIR_OpHandle module);
-bool MLIR_LowerToLLVMDialectForWasmUpstream(MLIR_Context *ctx, MLIR_OpHandle module);
 string MLIR_TranslateModuleToLLVMIRUpstream(MLIR_Context *ctx, MLIR_OpHandle module);
 string MLIR_TranslateModuleToWasmUpstream(MLIR_Context *ctx, MLIR_OpHandle module);
 
@@ -1018,28 +1016,34 @@ void MLIR_AppendOpSuccessorOperand(MLIR_Context *ctx, MLIR_OpHandle op,
 void MLIR_SpliceBlockOps(MLIR_Context *ctx, MLIR_BlockHandle dst,
                          MLIR_BlockHandle src);
 
-// Lift control-flow-graph operations (cf.br / cf.cond_br / cf.switch)
-// in `module` into structured control flow (scf.if / scf.while /
-// scf.index_switch). This is a prerequisite for the wasm pipeline,
-// which rejects unstructured CFGs. Walks every `func.func` and
-// `llvm.func` body in the module.
+// Options for MLIR_LiftCfToScf. Zero-initialise for the defaults.
+typedef struct MLIR_LiftCfToScfOptions {
+    // Which dialect's branch ops form the CFG to structurize, and which
+    // dialect the lift's own intermediate branches are created in:
+    //   false: cf.br / cf.cond_br / cf.switch
+    //   true:  llvm.br / llvm.cond_br / llvm.switch (a module that is
+    //          already LLVM dialect only, e.g. MLIR_LowerToLLVMDialect
+    //          output). Branch ops of the other family are rejected.
+    bool llvm_cfg;
+} MLIR_LiftCfToScfOptions;
+
+// Lift the control-flow graph of every `func.func` / `llvm.func` body in
+// `module` into structured control flow (scf.if / scf.while /
+// scf.index_switch). `options` may be NULL (all defaults).
+//
+// Its one in-tree user is the wasm backend (mlir_llvm_to_wasmssa.c), which
+// runs it with `llvm_cfg = true` as its internal structurization step:
+// WebAssembly has no arbitrary branches, so the backend rebuilds
+// structured control flow from the LLVM-dialect CFG it is handed.
 //
 // Returns true on success, false on failure (e.g. a CFG that the lift
-// could not transform into SCF). On the upstream backend this calls
-// upstream MLIR's `transformCFGToSCF` (Bahmann/Reissmann 2015) via the
-// in-tree `liftLLVMFuncCFGToSCF` shim so both `func.func` and
-// `llvm.func` bodies are covered. On the native backend this calls
-// the in-tree agnostic C port of the same algorithm in
-// `mlir_lift_cf_to_scf.c` (see that file's header for the documented
-// limitations).
-//
-// In the upstream-backed build, setting the environment variable
-// `TINYC_LIFT_USE_NATIVE=1` opts into running the native port first
-// (best effort; any leftover cf.* ops are then finished off by the
-// upstream pass). This is a debugging / cross-validation knob; it has
-// no effect in the native-only build (which always uses the native
-// port).
-bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module);
+// could not transform into SCF). Both API implementations run the
+// in-tree agnostic C port of upstream MLIR's `transformCFGToSCF`
+// (Bahmann/Reissmann 2015) in `mlir_lift_cf_to_scf.c` (see that file's
+// header for the documented limitations); the upstream-backed
+// implementation additionally drops unreachable blocks first.
+bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module,
+                      const MLIR_LiftCfToScfOptions *options);
 
 // Introspection
 typedef enum {
