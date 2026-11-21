@@ -48,6 +48,7 @@
 #include "mlir_api.h"
 #include "mlir_op_names.h"
 #include "mlir_llvm_to_wasmssa.h"
+#include "mlir_llvm_type_layout.h"
 #include <base/vector.h>
 
 #include <base/arena.h>
@@ -160,94 +161,16 @@ static int int_bits(MLIR_Context *ctx, MLIR_TypeHandle ty) {
     return 0;
 }
 
-static unsigned type_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty);
-static unsigned type_align_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty);
-
-// Round x up to the nearest multiple of `align` (a power of two).
-static unsigned align_up(unsigned x, unsigned align) {
-    return (x + align - 1) & ~(align - 1);
+// Type layout (mlir_llvm_type_layout.h) on wasm32: pointers are 4 bytes.
+static unsigned type_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    return llvm_type_size(ctx, ty, 4);
 }
-
-// Sum of (padded) field sizes for an LLVM struct type, with the natural
-// alignment that the LLVM data layout uses on wasm32 (each field aligned
-// to its own alignment; trailing padding to the struct's max-field alignment).
-static unsigned struct_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
-    unsigned off = 0, max_align = 1;
-    for (size_t i = 0; i < nf; i++) {
-        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(ty, i);
-        unsigned fsz = type_size_bytes(ctx, ft);
-        unsigned fal = type_align_bytes(ctx, ft);
-        if (fsz == 0 || fal == 0) return 0;
-        off = align_up(off, fal);
-        off += fsz;
-        if (fal > max_align) max_align = fal;
-    }
-    return align_up(off, max_align);
+static unsigned type_align_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    return llvm_type_align(ctx, ty, 4);
 }
-static unsigned struct_align_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
-    unsigned ma = 1;
-    for (size_t i = 0; i < nf; i++) {
-        unsigned fa = type_align_bytes(ctx, MLIR_GetTypeLLVMStructField(ty, i));
-        if (fa > ma) ma = fa;
-    }
-    return ma;
-}
-// Byte offset of the i-th field within its containing struct.
 static unsigned struct_field_offset(MLIR_Context *ctx, MLIR_TypeHandle sty,
                                     size_t fld_idx) {
-    unsigned off = 0;
-    for (size_t i = 0; i <= fld_idx; i++) {
-        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(sty, i);
-        unsigned fal = type_align_bytes(ctx, ft);
-        off = align_up(off, fal);
-        if (i == fld_idx) return off;
-        off += type_size_bytes(ctx, ft);
-    }
-    return off;
-}
-
-static unsigned type_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    // Aggregates first: their size comes from the element / field types, and
-    // MLIR_GetTypeString() formats (and allocates) the whole nested type on
-    // every call, which was a measurable share of compile time and memory.
-    if (MLIR_IsTypeLLVMArray(ty)) {
-        unsigned esz = type_size_bytes(ctx, MLIR_GetTypeLLVMArrayElement(ty));
-        if (esz == 0) return 0;
-        return esz * (unsigned)MLIR_GetTypeLLVMArrayNumElements(ty);
-    }
-    if (MLIR_IsTypeLLVMStruct(ty)) {
-        return struct_size_bytes(ctx, ty);
-    }
-    string s = MLIR_GetTypeString(ctx, ty);
-    if (s.size >= 9 && memcmp(s.str, "!llvm.ptr", 9) == 0) return 4;
-    if (s.size == 3 && memcmp(s.str, "ptr", 3) == 0) return 4;
-    if (s.size == 3 && memcmp(s.str, "f32", 3) == 0) return 4;
-    if (s.size == 3 && memcmp(s.str, "f64", 3) == 0) return 8;
-    if (s.size > 1 && s.str[0] == 'i') {
-        int w = 0;
-        for (size_t i = 1; i < s.size; i++) {
-            if (s.str[i] >= '0' && s.str[i] <= '9') w = w * 10 + (s.str[i] - '0');
-            else { w = -1; break; }
-        }
-        if (w == 1 || w == 8) return 1;
-        if (w == 16) return 2;
-        if (w == 32) return 4;
-        if (w == 64) return 8;
-    }
-    return 0;
-}
-
-static unsigned type_align_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    if (MLIR_IsTypeLLVMArray(ty)) {
-        return type_align_bytes(ctx, MLIR_GetTypeLLVMArrayElement(ty));
-    }
-    if (MLIR_IsTypeLLVMStruct(ty)) {
-        return struct_align_bytes(ctx, ty);
-    }
-    unsigned sz = type_size_bytes(ctx, ty);
-    return sz ? sz : 1;
+    return llvm_struct_field_offset(ctx, sty, fld_idx, 4);
 }
 
 // =============================================================================
@@ -2223,7 +2146,7 @@ static bool va_call_layout(FnCtx *F, MLIR_OpHandle op, uint32_t *total_size,
         } else {
             return false;
         }
-        cur = align_up(cur, al);
+        cur = llvm_align_up(cur, al);
         if (out_offsets) out_offsets[i - nf] = cur;
         cur += sz;
         (void)sz;
@@ -2278,7 +2201,7 @@ static bool prewalk_op(FnCtx *F, MLIR_OpHandle op) {
         }
         unsigned ealign = type_align_bytes(F->ctx, et);
         if (ealign < 4) ealign = 4;
-        F->frame_size = align_up(F->frame_size, ealign);
+        F->frame_size = llvm_align_up(F->frame_size, ealign);
         uint32_t off = F->frame_size;
         F->frame_size += (uint32_t)(esz * cnt);
         amap_set(F, MLIR_GetOpResult(op, 0), off);
@@ -2306,7 +2229,7 @@ static bool prewalk_block(FnCtx *F, MLIR_BlockHandle blk) {
 static bool prewalk_func(FnCtx *F, MLIR_BlockHandle entry) {
     if (!prewalk_block(F, entry)) return false;
     if (F->va_buf_size > 0) {
-        F->frame_size = align_up(F->frame_size, 8);
+        F->frame_size = llvm_align_up(F->frame_size, 8);
         F->va_buf_offset = F->frame_size;
         F->frame_size += F->va_buf_size;
     }
