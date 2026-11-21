@@ -518,6 +518,13 @@ targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "7\n11\n104\n"
 
 [[test]]
+name = "index_call_result"
+targets = ["native", "wasm", "macho", "elf"]
+# `a[i]` for any pointer-valued `a`: a call result (#281), a cast, `(*pp++)`,
+# `(p + 1)`, `(c ? p : q)`. Expected output from clang.
+expected_stdout = "42 41 42\n222 -5 7000000000\nf h 42\n99 44 42\n6 42 3\nbgz\n222 42 42\n84\n"
+
+[[test]]
 name = "deref_index_pp"
 targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "101\n102\n103\n"
