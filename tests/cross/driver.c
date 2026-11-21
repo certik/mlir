@@ -26,13 +26,21 @@ static void print_string(string s) {
     write_all(PLATFORM_STDOUT_FD, &iov, 1);
 }
 
+// Keep the helpers below out of line so their stack frames really are gone
+// (and reused) by the time the attributes are read back.
+#ifdef _MSC_VER
+#define NOINLINE __declspec(noinline)
+#else
+#define NOINLINE __attribute__((noinline))
+#endif
+
 // Build an array attribute and a dictionary attribute from element arrays
 // that live in this function's stack frame. The attributes must stay valid
 // after the frame is gone: the API copies the elements, as upstream's
 // ArrayAttr / DictionaryAttr do. The native backend used to keep the
 // caller's pointer, which made `tinyc_native --emit=lowered` crash on the
 // `passthrough` attribute built by lower_func_func.
-__attribute__((noinline))
+NOINLINE
 static void make_stack_array_attrs(MLIR_Context *ctx, MLIR_TypeHandle i32_ty,
                                    MLIR_AttributeHandle *out_array,
                                    MLIR_AttributeHandle *out_dict) {
@@ -51,7 +59,7 @@ static void make_stack_array_attrs(MLIR_Context *ctx, MLIR_TypeHandle i32_ty,
 }
 
 // Overwrite the stack area the previous call used.
-__attribute__((noinline))
+NOINLINE
 static void clobber_stack(void) {
     volatile uintptr_t junk[256];
     for (size_t i = 0; i < 256; i++) junk[i] = (uintptr_t)0xdeadbeefu;
