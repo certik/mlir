@@ -51,9 +51,11 @@ static void make_stack_array_attrs(MLIR_Context *ctx, MLIR_TypeHandle i32_ty,
     };
     *out_array = MLIR_CreateAttributeArray(ctx, str_lit("arr"), elems, 3);
     // Keys in sorted order: upstream's DictionaryAttr sorts its entries.
+    // The key text also lives in this frame: attribute names are copied too.
+    char keys[2] = { 'a', 'b' };
     MLIR_AttributeHandle entries[2] = {
-        MLIR_CreateAttributeInteger(ctx, str_lit("a"), 44, i32_ty),
-        MLIR_CreateAttributeInteger(ctx, str_lit("b"), 55, i32_ty),
+        MLIR_CreateAttributeInteger(ctx, (string){ &keys[0], 1 }, 44, i32_ty),
+        MLIR_CreateAttributeInteger(ctx, (string){ &keys[1], 1 }, 55, i32_ty),
     };
     *out_dict = MLIR_CreateAttributeDict(ctx, str_lit("dict"), entries, 2);
 }
@@ -68,7 +70,7 @@ static void clobber_stack(void) {
 
 int app_main(void) {
     Arena *arena = arena_create(1 * 1024 * 1024);
-    MLIR_Context ctx;
+    MLIR_Context ctx = {0};
     MLIR_SetArenaAllocator(&ctx, arena);
 
     MLIR_TypeHandle i32_ty = MLIR_CreateTypeInteger(&ctx, 32, true);

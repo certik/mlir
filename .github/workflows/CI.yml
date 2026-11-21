@@ -16,6 +16,7 @@ jobs:
             os: ubuntu-latest
             pixi-command: |
               pixi run -e linux test_linux
+              pixi run -e linux test_cross_native_linux
               pixi run -e wasm test_wasm
               pixi run -e wasm verify_tinyc_wasm_selfhost
               pixi run -e upstream test_cross

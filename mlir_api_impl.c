@@ -544,7 +544,8 @@ static inline MLIR_AttributeHandle alloc_attr_obj(MLIR_Context *ctx, IR_Attribut
 }
 
 // Copy `s` into ctx->arena so the returned string is owned by the context's
-// arena rather than aliasing caller-provided memory. Multi-pass pipelines
+// arena rather than aliasing caller-provided memory. Every attribute
+// constructor copies its name (and string payload) this way, as upstream does. Multi-pass pipelines
 // (wasm->macho) free intermediate arenas between passes, so any string stored
 // in an IR object that must outlive its producing pass has to live in the
 // destination arena. Empty/NULL strings are returned unchanged.
@@ -1593,7 +1594,7 @@ void MLIR_SetTypeFloatProperties(MLIR_TypeHandle th, uint32_t width, bool is_bfl
 MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *ctx, string name, int64_t value, MLIR_TypeHandle type) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_INTEGER;
-    a.name = name;
+    a.name = arena_dup_str(ctx, name);
     a.data.integer_value = value;
     a.type = type;
     return alloc_attr_obj(ctx, a);
@@ -1610,7 +1611,7 @@ MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *ctx, string name, 
 MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, string name, double value, MLIR_TypeHandle type) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_FLOAT;
-    a.name = name;
+    a.name = arena_dup_str(ctx, name);
     a.data.float_value = value;
     a.type = type;
     return alloc_attr_obj(ctx, a);
@@ -1619,7 +1620,7 @@ MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, string name, d
 MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *ctx, string name, bool value) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_BOOL;
-    a.name = name;
+    a.name = arena_dup_str(ctx, name);
     a.data.bool_value = value;
     return alloc_attr_obj(ctx, a);
 }
@@ -1641,7 +1642,7 @@ static MLIR_AttributeHandle *dup_attr_elements(MLIR_Context *ctx,
 MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_ARRAY;
-    a.name = name;
+    a.name = arena_dup_str(ctx, name);
     a.data.array.elements = dup_attr_elements(ctx, elements, count);
     a.data.array.count = a.data.array.elements ? count : 0;
     return alloc_attr_obj(ctx, a);
@@ -1650,7 +1651,7 @@ MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *ctx, string name, M
 MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_DICT;
-    a.name = name;
+    a.name = arena_dup_str(ctx, name);
     a.data.array.elements = dup_attr_elements(ctx, elements, count);
     a.data.array.count = a.data.array.elements ? count : 0;
     return alloc_attr_obj(ctx, a);
@@ -1659,7 +1660,7 @@ MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *ctx, string name, ML
 MLIR_AttributeHandle MLIR_CreateAttributeType(MLIR_Context *ctx, string name, MLIR_TypeHandle type) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_TYPE;
-    a.name = name;
+    a.name = arena_dup_str(ctx, name);
     a.data.type_value = type;
     return alloc_attr_obj(ctx, a);
 }
@@ -1672,7 +1673,7 @@ MLIR_AttributeHandle MLIR_CreateAttributeType(MLIR_Context *ctx, string name, ML
 MLIR_AttributeHandle MLIR_CreateAttributeSymbolRef(MLIR_Context *ctx, string name, string value) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_STRING;
-    a.name = name;
+    a.name = arena_dup_str(ctx, name);
     string with_at = format(ctx->arena, str_lit("@{}"), value);
     a.data.string_value = with_at;
     return alloc_attr_obj(ctx, a);
@@ -1685,7 +1686,7 @@ MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *ctx, string
                                                        const int32_t *values, size_t count) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_STRING;
-    a.name = name;
+    a.name = arena_dup_str(ctx, name);
     Arena *arena = ctx->arena;
     strbuf s = strbuf_make();
     strbuf_append(arena, &s, str_lit("array<i32"));
@@ -1704,7 +1705,7 @@ MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *ctx, string
                                                        const int64_t *values, size_t count) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_STRING;
-    a.name = name;
+    a.name = arena_dup_str(ctx, name);
     Arena *arena = ctx->arena;
     strbuf s = strbuf_make();
     strbuf_append(arena, &s, str_lit("array<i64"));
@@ -1724,7 +1725,7 @@ MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *ctx, string
 MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *ctx, string name) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_STRING;
-    a.name = name;
+    a.name = arena_dup_str(ctx, name);
     a.data.string_value = str_lit("#llvm.linkage<internal>");
     return alloc_attr_obj(ctx, a);
 }
