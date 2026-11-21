@@ -177,6 +177,16 @@ static uint32_t arm64_ldrb_imm(uint8_t rt, uint8_t rn, uint16_t off_bytes) {
     return 0x39400000u | (((uint32_t)off_bytes & 0xfffu) << 10)
                        | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rt & 0x1f);
 }
+// STRH Wt, [Xn, #pimm]  (2-byte store, imm12 scaled by 2).
+static uint32_t arm64_strh_imm(uint8_t rt, uint8_t rn, uint16_t off_bytes) {
+    return 0x79000000u | (((uint32_t)(off_bytes >> 1) & 0xfffu) << 10)
+                       | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rt & 0x1f);
+}
+// LDRH Wt, [Xn, #pimm]  (2-byte zero-extend load, imm12 scaled by 2).
+static uint32_t arm64_ldrh_imm(uint8_t rt, uint8_t rn, uint16_t off_bytes) {
+    return 0x79400000u | (((uint32_t)(off_bytes >> 1) & 0xfffu) << 10)
+                       | ((uint32_t)(rn & 0x1f) << 5) | (uint32_t)(rt & 0x1f);
+}
 // ---- register-offset loads/stores: <op> Rt, [Xn, Wm, UXTW #0] -------
 // Rm carries a wasm i32 linear-memory index. It must be treated as a
 // 32-bit value zero-extended to 64 bits (option=UXTW(010), S=0), NOT as
@@ -642,6 +652,20 @@ bool emit_aarch64_func(MLIR_OpHandle fn, MachineFunc *out) {
                 uint8_t  rn = (uint8_t)attr_i(op, "rn");
                 uint16_t of = (uint16_t)attr_i(op, "off_bytes");
                 emit_word(&out->code, arm64_ldrb_imm(rt, rn, of));
+                break;
+            }
+            case OP_TYPE_AARCH64_STRH_IMM: {
+                uint8_t  rt = (uint8_t)attr_i(op, "rt");
+                uint8_t  rn = (uint8_t)attr_i(op, "rn");
+                uint16_t of = (uint16_t)attr_i(op, "off_bytes");
+                emit_word(&out->code, arm64_strh_imm(rt, rn, of));
+                break;
+            }
+            case OP_TYPE_AARCH64_LDRH_IMM: {
+                uint8_t  rt = (uint8_t)attr_i(op, "rt");
+                uint8_t  rn = (uint8_t)attr_i(op, "rn");
+                uint16_t of = (uint16_t)attr_i(op, "off_bytes");
+                emit_word(&out->code, arm64_ldrh_imm(rt, rn, of));
                 break;
             }
             case OP_TYPE_AARCH64_LDR_W_REG: {
