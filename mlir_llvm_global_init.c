@@ -60,6 +60,57 @@ bool llvm_aggregate_elem(MLIR_Context *ctx, MLIR_TypeHandle ty,
     return true;
 }
 
+// The last struct field located by llvm_global_init_bytes: a chain of
+// insertvalues into consecutive fields (as tinyc emits them, sorted by
+// position) then costs O(1) per field instead of O(field index).
+typedef struct {
+    bool valid;
+    int64_t prefix[16];         // position of the struct
+    size_t n;                   // its length
+    MLIR_TypeHandle sty;        // the struct type
+    unsigned soff;              // its offset
+    size_t fld;                 // the field
+    unsigned foff;              // the field's offset in the struct
+} FieldCursor;
+
+// llvm_aggregate_elem, continuing from `fc` when idx is a later field of
+// the same struct.
+static bool elem_from_cursor(MLIR_Context *ctx, MLIR_TypeHandle gty, const int64_t *idx,
+                             size_t n, unsigned ptr_bytes, FieldCursor *fc,
+                             unsigned *off, MLIR_TypeHandle *elem) {
+    bool same = fc->valid && n == fc->n + 1 && (uint64_t)idx[n - 1] >= fc->fld;
+    for (size_t k = 0; same && k + 1 < n; k++) {
+        if (idx[k] != fc->prefix[k]) same = false;
+    }
+    if (!same) {
+        // Locate the parent; continue from its first field if a struct.
+        MLIR_TypeHandle pty;
+        unsigned poff;
+        if (!llvm_aggregate_elem(ctx, gty, idx, n - 1, ptr_bytes, &poff, &pty)) return false;
+        if (!MLIR_IsTypeLLVMStruct(pty))
+            return llvm_aggregate_elem(ctx, gty, idx, n, ptr_bytes, off, elem);
+        fc->valid = true;
+        for (size_t k = 0; k + 1 < n; k++) fc->prefix[k] = idx[k];
+        fc->n = n - 1;
+        fc->sty = pty;
+        fc->soff = poff;
+        fc->fld = 0;
+        fc->foff = 0;
+    }
+    size_t nf = MLIR_GetTypeLLVMStructNumFields(fc->sty);
+    if ((uint64_t)idx[n - 1] >= nf) return false;
+    while (fc->fld < (size_t)idx[n - 1]) {
+        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(fc->sty, fc->fld);
+        MLIR_TypeHandle nt = MLIR_GetTypeLLVMStructField(fc->sty, fc->fld + 1);
+        fc->foff = llvm_align_up(fc->foff + llvm_type_size(ctx, ft, ptr_bytes),
+                                 llvm_type_align(ctx, nt, ptr_bytes));
+        fc->fld++;
+    }
+    *off = fc->soff + fc->foff;
+    *elem = MLIR_GetTypeLLVMStructField(fc->sty, fc->fld);
+    return true;
+}
+
 // Fold the initializer region of the `llvm.mlir.global` `gop`, of type `gty`,
 // into its little-endian memory image `buf` (`size` bytes, zero-filled by the
 // caller). The region must start from an `llvm.mlir.zero` (or `undef` /
@@ -77,6 +128,8 @@ bool llvm_global_init_bytes(MLIR_Context *ctx, MLIR_OpHandle gop,
     MLIR_BlockHandle blk = MLIR_GetRegionBlock(rgn, 0);
     size_t nb = MLIR_GetBlockNumOps(blk);
     MLIR_ValueHandle cur = MLIR_INVALID_HANDLE;  // the aggregate built so far
+    FieldCursor fc;
+    fc.valid = false;
     for (size_t i = 0; i < nb; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(blk, i);
         MLIR_OpType t = MLIR_GetOpType(op);
@@ -96,7 +149,7 @@ bool llvm_global_init_bytes(MLIR_Context *ctx, MLIR_OpHandle gop,
             size_t n = llvm_position_indices(ctx, pa, idx, 16);
             unsigned off = 0;
             MLIR_TypeHandle et = MLIR_INVALID_HANDLE;
-            if (n == 0 || !llvm_aggregate_elem(ctx, gty, idx, n, ptr_bytes, &off, &et))
+            if (n == 0 || !elem_from_cursor(ctx, gty, idx, n, ptr_bytes, &fc, &off, &et))
                 return false;
             unsigned esz = llvm_type_size(ctx, et, ptr_bytes);
             if (esz == 0 || esz > 8 || off + esz > size) return false;

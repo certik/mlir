@@ -1073,15 +1073,19 @@ static void print_const_bytes(Buf *out, MLIR_Context *ctx, MLIR_TypeHandle ty,
         size_t n = arr ? (size_t)MLIR_GetTypeLLVMArrayNumElements(ty)
                        : MLIR_GetTypeLLVMStructNumFields(ty);
         buf_cstr(out, arr ? "[" : "{ ");
+        unsigned off = 0;  // the field's offset, kept running for a struct
         for (size_t i = 0; i < n; i++) {
             MLIR_TypeHandle et;
-            unsigned off;
             if (arr) {
                 et = MLIR_GetTypeLLVMArrayElement(ty);
                 off = (unsigned)i * llvm_type_size(ctx, et, 8);
             } else {
                 et = MLIR_GetTypeLLVMStructField(ty, i);
-                off = llvm_struct_field_offset(ctx, ty, i, 8);
+                if (i > 0) {
+                    MLIR_TypeHandle pt = MLIR_GetTypeLLVMStructField(ty, i - 1);
+                    off = llvm_align_up(off + llvm_type_size(ctx, pt, 8),
+                                        llvm_type_align(ctx, et, 8));
+                }
             }
             if (i) buf_cstr(out, ", ");
             print_type(out, ctx, et);
@@ -1280,7 +1284,15 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
 // `%Name = type { ... }` line at the top.
 
 typedef struct { const char *name; size_t name_n; const char *body; size_t body_n; } StructDecl;
-typedef struct { StructDecl *e; size_t n, cap; } StructList;
+// `recent` are the types scanned last: an insertvalue chain repeats one
+// aggregate type (and its scalar types) thousands of times, and formatting
+// it each time is quadratic for a wide struct.
+typedef struct {
+    StructDecl *e;
+    size_t n, cap;
+    MLIR_TypeHandle recent[4];
+    size_t next_recent;
+} StructList;
 
 static bool struct_seen(StructList *L, const char *name, size_t name_n) {
     for (size_t i = 0; i < L->n; i++) {
@@ -1334,6 +1346,11 @@ static void scan_type_text(MLIR_Context *ctx, const char *s, size_t n, StructLis
 }
 static void scan_type_for_structs(MLIR_Context *ctx, MLIR_TypeHandle ty, StructList *L) {
     if (ty == MLIR_INVALID_HANDLE) return;
+    for (size_t i = 0; i < 4; i++) {
+        if (L->recent[i] == ty) return;
+    }
+    L->recent[L->next_recent] = ty;
+    L->next_recent = (L->next_recent + 1) % 4;
     string s = MLIR_GetTypeString(ctx, ty);
     scan_type_text(ctx, s.str, s.size, L);
 }

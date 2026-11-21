@@ -6485,7 +6485,9 @@ static bool gconst_eval(E *e, Expr *ex, GConst *out) {
         GConst a;
         if (gconst_eval(e, ex->lhs, &a) && a.is_float) {
             out->is_float = true;
-            out->f = -a.f;
+            // Not `-a.f`: tinyC compiles a float negation as `0 - x`, which
+            // loses the sign of -0.0 when tinyC compiles itself.
+            out->f = a.f * -1.0;
             return true;
         }
     }
@@ -6633,10 +6635,10 @@ static MLIR_ValueHandle ginit_emit(GInit *gi, MLIR_TypeHandle agg_ty, MLIR_Value
         cas[0] = sl->val;
         emit_op(e, OP_TYPE_LLVM_MLIR_CONSTANT, str_lit("llvm.mlir.constant"),
                 crts, 1, crs, 1, NULL, 0, cas, 1, NULL, 0);
-        MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
-                                                      agg_ty, ssa_name(e), eloc(e, 0));
+        MLIR_ValueHandle rv = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
+                                                       agg_ty, ssa_name(e), eloc(e, 0));
         MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = agg_ty;
-        MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
+        MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = rv;
         MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 2);
         ops[0] = agg;
         ops[1] = c;
@@ -6645,7 +6647,7 @@ static MLIR_ValueHandle ginit_emit(GInit *gi, MLIR_TypeHandle agg_ty, MLIR_Value
                                                   sl->path, sl->depth);
         emit_op(e, OP_TYPE_LLVM_INSERTVALUE, str_lit("llvm.insertvalue"),
                 rts, 1, rs, 1, ops, 2, as, 1, NULL, 0);
-        agg = r;
+        agg = rv;
     }
     return agg;
 }

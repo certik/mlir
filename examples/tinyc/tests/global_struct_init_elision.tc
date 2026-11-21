@@ -65,6 +65,9 @@ struct RO ro3 = { .in = {1, 2}, .in = {5}, .c = 6 };
 struct RO ro4 = { .c = 1, .in = 3, 4, .in = 0 };
 struct E0 {};
 struct E0 e0;
+// "opaque" in the name of an empty struct does not make it opaque.
+struct opaque_t {};
+struct opaque_t eo;
 struct T0 { int t[0]; };
 struct T0 tz;
 int rafter = 5;
@@ -73,7 +76,7 @@ static void part3(void) {
     printf("%d %d %d %d\n", ra.v[0], ra.v[1], ra.v[2], ra.x);
     printf("%d %d %d %d %d %d\n", ro2.in.a, ro2.in.b, ro2.c, ro2.in2.a, ro2.in2.b, rafter);
     printf("%d %d %d | %d %d %d\n", ro3.in.a, ro3.in.b, ro3.c, ro4.in.a, ro4.in.b, ro4.c);
-    printf("%d %d\n", (int)sizeof(e0), (int)sizeof(tz));
+    printf("%d %d %d\n", (int)sizeof(e0), (int)sizeof(tz), (int)sizeof(eo));
 }
 struct XIn { int x; int a[2]; };
 struct XOut { struct XIn in; int c; };

@@ -75,9 +75,8 @@ static inline bool llvm_type_is_empty(MLIR_Context *ctx, MLIR_TypeHandle ty,
             // An opaque struct (no body, `!llvm.struct<"S", opaque>`) has
             // no size at all.
             string s = MLIR_GetTypeString(ctx, ty);
-            for (size_t i = 0; i + 6 <= s.size; i++) {
-                if (memcmp(s.str + i, "opaque", 6) == 0) return false;
-            }
+            if (s.size >= 9 && memcmp(s.str + s.size - 9, ", opaque>", 9) == 0)
+                return false;
         }
         for (size_t i = 0; i < nf; i++) {
             if (!llvm_type_is_empty(ctx, MLIR_GetTypeLLVMStructField(ty, i), ptr_bytes))
