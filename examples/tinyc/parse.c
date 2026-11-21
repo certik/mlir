@@ -1415,14 +1415,20 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         s->decl_name = name.text;
         s->decl_type.struct_name = sn.text;
         if (accept(p, TC_TK_LBRACK)) {
-            if (is_ptr) {
-                perror_at(p, line, str_lit("array of struct pointer is not supported"));
+            if (is_ptr_ptr) {
+                perror_at(p, line, str_lit("array of struct ** is not supported"));
             }
             int64_t alen = 0; Expr *aexpr = NULL;
             parse_array_len_bracket(p, &alen, &aexpr);
-            s->decl_type.kind = TY_ARRAY_STRUCT;
-            s->decl_type.array_len = alen;
-            s->decl_type.array_len_expr = aexpr;
+            if (is_ptr) {
+                // `struct S *name[N]`: an array of struct pointers.
+                s->decl_type.kind = TY_PTR_STRUCT;
+                make_ptr_array(p, &s->decl_type, alen, aexpr);
+            } else {
+                s->decl_type.kind = TY_ARRAY_STRUCT;
+                s->decl_type.array_len = alen;
+                s->decl_type.array_len_expr = aexpr;
+            }
         } else if (is_ptr_ptr) {
             // struct Foo **var: TY_PTR_PTR(pointee=TY_PTR_STRUCT).
             Type *inner = arena_new(p->arena, Type);
@@ -1439,7 +1445,8 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             if (s->decl_type.kind != TY_PTR_STRUCT &&
                 s->decl_type.kind != TY_PTR_PTR &&
                 s->decl_type.kind != TY_STRUCT &&
-                s->decl_type.kind != TY_ARRAY_STRUCT) {
+                s->decl_type.kind != TY_ARRAY_STRUCT &&
+                s->decl_type.kind != TY_ARRAY_PTR_STRUCT) {
                 perror_at(p, line, str_lit("struct/array initializers are not supported"));
             }
             { Expr *agg = parse_aggregate_init(p, s->decl_type); s->decl_init = agg ? agg : parse_expr(p); }
@@ -2250,6 +2257,7 @@ static Func *parse_func(P *p) {
                 // promote the base type to the corresponding pointer kind.
                 // Multi-dimensional `T name[N1][N2]` is treated as a flat
                 // pointer (we don't carry the inner array shape).
+                bool decayed = false;
                 while (accept(p, TC_TK_LBRACK)) {
                     while (cur(p).kind != TC_TK_RBRACK &&
                            cur(p).kind != TC_TK_EOF) {
@@ -2257,7 +2265,13 @@ static Func *parse_func(P *p) {
                     }
                     expect(p, TC_TK_RBRACK,
                            str_lit("expected ']' in parameter array suffix"));
-                    if (pty.kind == TY_I32 && pty.int_bits == 8) {
+                    bool first = !decayed;
+                    decayed = true;
+                    if (first && kind_is_ptr(pty.kind) && pty.kind != TY_PTR_PTR) {
+                        // `T *name[N]` / `T *name[]`: a T ** whose pointee
+                        // keeps T * (for `name[i][j]`).
+                        wrap_ptr_to_ptr(p, &pty);
+                    } else if (pty.kind == TY_I32 && pty.int_bits == 8) {
                         pty.kind = TY_PTR_CHAR;
                         pty.int_bits = 0;
                     } else if (pty.kind == TY_I32) {
@@ -2274,10 +2288,9 @@ static Func *parse_func(P *p) {
                     } else if (pty.kind == TY_STRUCT) {
                         pty.kind = TY_PTR_STRUCT;
                     }
-                    // For pointer / array / fnptr base types: leave the type
-                    // as-is (we'd need TY_PTR_PTR or a richer model to
-                    // represent `char *argv[]`); but consuming the suffix
-                    // at least lets the parser keep going.
+                    // A T ** base (`T **name[N]`, a T ***) is left as-is: not
+                    // supported, but consuming the suffix lets the parser
+                    // keep going.
                 }
             }
             VecParam_push_back(p->arena, &f->params,

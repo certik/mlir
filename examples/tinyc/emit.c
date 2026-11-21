@@ -4917,6 +4917,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             // aggregate initializer's argument count.
             if ((st->decl_type.kind == TY_ARRAY_I32 ||
                  st->decl_type.kind == TY_ARRAY_PTR_CHAR ||
+                 st->decl_type.kind == TY_ARRAY_PTR_STRUCT ||
                  st->decl_type.kind == TY_ARRAY_STRUCT) &&
                 st->decl_type.array_len == 0 &&
                 !st->decl_type.array_len_expr &&
@@ -5101,7 +5102,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                         }
                     }
                 }
-            } else if (st->decl_type.kind == TY_ARRAY_PTR_CHAR) {
+            } else if (st->decl_type.kind == TY_ARRAY_PTR_CHAR ||
+                       st->decl_type.kind == TY_ARRAY_PTR_STRUCT) {
                 MLIR_TypeHandle arr_ty = MLIR_CreateTypeLLVMArray(
                     e->ctx, e->ptr, (uint64_t)st->decl_type.array_len);
                 sy->addr = emit_alloca(e, arr_ty);
@@ -6271,6 +6273,15 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
                 }
                 return int_elem_ctype(&inner);
             }
+            if ((inner.kind == TY_ARRAY_I32 || inner.kind == TY_ARRAY_F32) &&
+                inner.array_len2) {
+                // `*m` of a 2D array is its first row, a 1D array.
+                inner.array_len = inner.array_len2;
+                inner.array_len2 = 0;
+                inner.array_len_expr = NULL;
+                return inner;
+            }
+            if (inner.kind == TY_ARRAY_F32) { t.kind = TY_F32; return t; }
             if (inner.kind == TY_ARRAY_I32) {
                 if (inner.array_elem_is_i64) { t.kind = TY_I64; return t; }
                 return int_elem_ctype(&inner);
