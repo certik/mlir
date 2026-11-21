@@ -605,6 +605,19 @@ static MLIR_ValueHandle emit_ptrtoint_i64(E *e, MLIR_ValueHandle v) {
     return r;
 }
 
+// Floating-point negation (llvm.fneg): flips the sign bit, so -(+0.0) is
+// -0.0. `0.0 - x` would give +0.0 there.
+static MLIR_ValueHandle emit_fneg(E *e, MLIR_TypeHandle ft, MLIR_ValueHandle v) {
+    MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
+                                                  ft, ssa_name(e), eloc(e, 0));
+    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = ft;
+    MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
+    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = v;
+    emit_op(e, OP_TYPE_LLVM_FNEG, str_lit("llvm.fneg"),
+            rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
+    return r;
+}
+
 // Sign-extend i8 -> i32 (arith.extsi).
 static MLIR_ValueHandle emit_extsi_i8_to_i32(E *e, MLIR_ValueHandle v) {
     MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
@@ -3657,9 +3670,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             EVal a = emit_expr(e, sc, ex->lhs);
             if (ex->op == OP_NEG) {
                 if (a.is_float) {
-                    MLIR_ValueHandle z = a.is_f64 ? emit_const_f64(e, 0.0) : emit_const_f32(e, 0.0);
                     MLIR_TypeHandle ft = a.is_f64 ? e->f64 : e->f32;
-                    r.val = emit_binop(e, OP_TYPE_ARITH_SUBF, str_lit("arith.subf"), ft, z, a.val);
+                    r.val = emit_fneg(e, ft, a.val);
                     r.is_float = true; r.is_f64 = a.is_f64;
                 } else {
                     MLIR_ValueHandle z = a.is_i64 ? emit_const_i64(e, 0) : emit_const_i32(e, 0);

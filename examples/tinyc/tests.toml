@@ -917,6 +917,11 @@ targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1000 200 150\n"
 
 [[test]]
+name = "float_neg_zero"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "1\n1\n1\n1\n0\n0\n1\n1\n1\n1\n1\n1\n-5 -7\n"
+
+[[test]]
 name = "empty_stmt"
 targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "3\n"
