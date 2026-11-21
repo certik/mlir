@@ -447,8 +447,8 @@ static void emit_direct_call(FnCtx *F, string callee, SymSet *refs) {
 static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
     MLIR_Context *ctx = F->ctx;
     // The op type is derived from the op name by MLIR_CreateOp, so one switch
-    // replaces a string comparison per candidate op. Every arm returns; ops
-    // without an enumerator (the intrinsics) are matched by name below it.
+    // replaces a string comparison per candidate op. Every arm returns; the
+    // floating-point ops are selected by lower_fp_op below it.
     MLIR_OpType ty = MLIR_GetOpType(op);
     switch (ty) {
     // value-less / rematerialized-at-use ops

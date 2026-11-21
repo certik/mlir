@@ -827,24 +827,6 @@ static void build_const_map(MLIR_Context *ctx, ConstMap *cm,
     }
 }
 
-// Integer binops whose AArch64 form is a plain 3-register op.
-static bool simple_binop_optype(MLIR_OpType ty, MLIR_OpType *out) {
-    switch (ty) {
-    case OP_TYPE_LLVM_ADD:   *out = OP_TYPE_AARCH64_ADD_REG; return true;
-    case OP_TYPE_LLVM_SUB:   *out = OP_TYPE_AARCH64_SUB_REG; return true;
-    case OP_TYPE_LLVM_MUL:   *out = OP_TYPE_AARCH64_MUL; return true;
-    case OP_TYPE_LLVM_SDIV:  *out = OP_TYPE_AARCH64_SDIV; return true;
-    case OP_TYPE_LLVM_UDIV:  *out = OP_TYPE_AARCH64_UDIV; return true;
-    case OP_TYPE_LLVM_AND:   *out = OP_TYPE_AARCH64_AND_REG; return true;
-    case OP_TYPE_LLVM_OR:    *out = OP_TYPE_AARCH64_ORR_REG; return true;
-    case OP_TYPE_LLVM_XOR:   *out = OP_TYPE_AARCH64_EOR_REG; return true;
-    case OP_TYPE_LLVM_SHL:   *out = OP_TYPE_AARCH64_LSL_REG; return true;
-    case OP_TYPE_LLVM_LSHR:  *out = OP_TYPE_AARCH64_LSR_REG; return true;
-    case OP_TYPE_LLVM_ASHR:  *out = OP_TYPE_AARCH64_ASR_REG; return true;
-    default: return false;
-    }
-}
-
 #define A64_FAIL(...) do { fprintf(stderr, __VA_ARGS__); return MLIR_INVALID_HANDLE; } while (0)
 
 // ---------------------------------------------------------------------------
@@ -1117,17 +1099,19 @@ static MLIR_BlockHandle new_block(LowerCtx *L) {
 static bool i32_src_zero_extended(MLIR_ValueHandle v) {
     MLIR_OpHandle d = MLIR_GetValueDefiningOp(v);
     if (d == MLIR_INVALID_HANDLE) return false;
-    MLIR_OpType nm_ty = MLIR_GetOpType(d);
-    return nm_ty == OP_TYPE_LLVM_ADD  || nm_ty == OP_TYPE_LLVM_SUB  ||
-           nm_ty == OP_TYPE_LLVM_MUL  || nm_ty == OP_TYPE_LLVM_SDIV ||
-           nm_ty == OP_TYPE_LLVM_UDIV || nm_ty == OP_TYPE_LLVM_SREM ||
-           nm_ty == OP_TYPE_LLVM_UREM || nm_ty == OP_TYPE_LLVM_AND  ||
-           nm_ty == OP_TYPE_LLVM_OR   || nm_ty == OP_TYPE_LLVM_XOR  ||
-           nm_ty == OP_TYPE_LLVM_SHL  || nm_ty == OP_TYPE_LLVM_LSHR ||
-           nm_ty == OP_TYPE_LLVM_ASHR || nm_ty == OP_TYPE_LLVM_ICMP ||
-           nm_ty == OP_TYPE_LLVM_ZEXT || nm_ty == OP_TYPE_LLVM_TRUNC||
-           nm_ty == OP_TYPE_LLVM_SELECT || nm_ty == OP_TYPE_LLVM_LOAD ||
-           nm_ty == OP_TYPE_LLVM_INTTOPTR || nm_ty == OP_TYPE_LLVM_PTRTOINT;
+    switch (MLIR_GetOpType(d)) {
+    case OP_TYPE_LLVM_ADD: case OP_TYPE_LLVM_SUB: case OP_TYPE_LLVM_MUL:
+    case OP_TYPE_LLVM_SDIV: case OP_TYPE_LLVM_UDIV:
+    case OP_TYPE_LLVM_SREM: case OP_TYPE_LLVM_UREM:
+    case OP_TYPE_LLVM_AND: case OP_TYPE_LLVM_OR: case OP_TYPE_LLVM_XOR:
+    case OP_TYPE_LLVM_SHL: case OP_TYPE_LLVM_LSHR: case OP_TYPE_LLVM_ASHR:
+    case OP_TYPE_LLVM_ICMP: case OP_TYPE_LLVM_ZEXT: case OP_TYPE_LLVM_TRUNC:
+    case OP_TYPE_LLVM_SELECT: case OP_TYPE_LLVM_LOAD:
+    case OP_TYPE_LLVM_INTTOPTR: case OP_TYPE_LLVM_PTRTOINT:
+        return true;
+    default:
+        return false;
+    }
 }
 
 // True when a `zext`/sub-width mask to `w` low bits is REDUNDANT because the
@@ -1372,10 +1356,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
     MLIR_BlockHandle  blk = L->cur;
     SlotMap          *sm  = L->sm;
     string            on  = MLIR_GetOpName(op);
-    MLIR_OpType on_ty = MLIR_GetOpType(op);
-    MLIR_OpType       bt;
+    MLIR_OpType       ty  = MLIR_GetOpType(op);
 
-    if (on_ty == OP_TYPE_LLVM_MLIR_CONSTANT) {
+    switch (ty) {
+    case OP_TYPE_LLVM_MLIR_CONSTANT: {
         MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(op, "value");
         if (va == MLIR_INVALID_HANDLE || MLIR_GetOpNumResults(op) != 1)
             LFAIL("llvm->aarch64: malformed llvm.mlir.constant\n");
@@ -1393,8 +1377,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         else          { memcpy(&bits, &d, 8); }
         emit_load_imm(ctx, blk, rd, bits, /*sf=*/true);
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_ADD) {
+    case OP_TYPE_LLVM_ADD: {
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
         bool sf = type_is_gp64(ctx, res);
         MLIR_ValueHandle xv, av; unsigned amt;
@@ -1428,8 +1414,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             emit_3reg(ctx, blk, OP_TYPE_AARCH64_ADD_REG, rd, r0, r1, sf);
             fin_val(L, res, rd);
         }
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_SUB) {
+    case OP_TYPE_LLVM_SUB: {
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
         bool sf = type_is_gp64(ctx, res);
         MLIR_ValueHandle a0 = MLIR_GetOpOperand(op, 0);
@@ -1449,8 +1437,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             emit_3reg(ctx, blk, OP_TYPE_AARCH64_SUB_REG, rd, r0, r1, sf);
             fin_val(L, res, rd);
         }
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_MUL) {
+    case OP_TYPE_LLVM_MUL: {
         // Strength-reduce mul by a constant: x*0 -> 0, x*1 -> copy,
         // x*2^k -> lsl #k. Other constants / non-constant keep register mul.
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
@@ -1493,9 +1483,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             emit_3reg(ctx, blk, OP_TYPE_AARCH64_MUL, rd, r0, r1, sf);
             fin_val(L, res, rd);
         }
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_SHL || on_ty == OP_TYPE_LLVM_LSHR ||
-               on_ty == OP_TYPE_LLVM_ASHR) {
+    case OP_TYPE_LLVM_SHL: case OP_TYPE_LLVM_LSHR: case OP_TYPE_LLVM_ASHR: {
         // Constant-amount shift -> immediate shift (no scratch mov of the count).
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
         bool sf = type_is_gp64(ctx, res);
@@ -1510,9 +1501,9 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             uint8_t r = use_val(L, a0, 9);
             if (!L->ok) return;
             uint8_t rd = def_val(L, res, 9);
-            MLIR_OpType it = on_ty == OP_TYPE_LLVM_SHL ? OP_TYPE_AARCH64_LSL_IMM
-                           : on_ty == OP_TYPE_LLVM_LSHR ? OP_TYPE_AARCH64_LSR_IMM
-                                                       : OP_TYPE_AARCH64_ASR_IMM;
+            MLIR_OpType it = ty == OP_TYPE_LLVM_SHL ? OP_TYPE_AARCH64_LSL_IMM
+                           : ty == OP_TYPE_LLVM_LSHR ? OP_TYPE_AARCH64_LSR_IMM
+                                                    : OP_TYPE_AARCH64_ASR_IMM;
             emit_shift_imm(ctx, blk, it, rd, r, (uint8_t)sh, sf);
             fin_val(L, res, rd);
         } else if (have_c && sh == 0) {
@@ -1527,14 +1518,22 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             uint8_t r1 = use_val(L, a1, 10);
             if (!L->ok) return;
             uint8_t rd = def_val(L, res, 9);
-            MLIR_OpType rt = on_ty == OP_TYPE_LLVM_SHL ? OP_TYPE_AARCH64_LSL_REG
-                           : on_ty == OP_TYPE_LLVM_LSHR ? OP_TYPE_AARCH64_LSR_REG
-                                                       : OP_TYPE_AARCH64_ASR_REG;
+            MLIR_OpType rt = ty == OP_TYPE_LLVM_SHL ? OP_TYPE_AARCH64_LSL_REG
+                           : ty == OP_TYPE_LLVM_LSHR ? OP_TYPE_AARCH64_LSR_REG
+                                                    : OP_TYPE_AARCH64_ASR_REG;
             emit_3reg(ctx, blk, rt, rd, r0, r1, sf);
             fin_val(L, res, rd);
         }
+        break;
+    }
 
-    } else if (simple_binop_optype(on_ty, &bt)) {
+    case OP_TYPE_LLVM_SDIV: case OP_TYPE_LLVM_UDIV:
+    case OP_TYPE_LLVM_AND: case OP_TYPE_LLVM_OR: case OP_TYPE_LLVM_XOR: {
+        MLIR_OpType bt = ty == OP_TYPE_LLVM_SDIV ? OP_TYPE_AARCH64_SDIV
+                       : ty == OP_TYPE_LLVM_UDIV ? OP_TYPE_AARCH64_UDIV
+                       : ty == OP_TYPE_LLVM_AND  ? OP_TYPE_AARCH64_AND_REG
+                       : ty == OP_TYPE_LLVM_OR   ? OP_TYPE_AARCH64_ORR_REG
+                                                 : OP_TYPE_AARCH64_EOR_REG;
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
         bool sf = type_is_gp64(ctx, res);
         uint8_t r0 = use_val(L, MLIR_GetOpOperand(op, 0), 9);
@@ -1543,21 +1542,25 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         uint8_t rd = def_val(L, res, 9);
         emit_3reg(ctx, blk, bt, rd, r0, r1, sf);
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_SREM || on_ty == OP_TYPE_LLVM_UREM) {
+    case OP_TYPE_LLVM_SREM: case OP_TYPE_LLVM_UREM: {
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
         bool sf = type_is_gp64(ctx, res);
         uint8_t r0 = use_val(L, MLIR_GetOpOperand(op, 0), 9);
         uint8_t r1 = use_val(L, MLIR_GetOpOperand(op, 1), 10);
         if (!L->ok) return;
-        MLIR_OpType dt = on_ty == OP_TYPE_LLVM_SREM ? OP_TYPE_AARCH64_SDIV
-                                                  : OP_TYPE_AARCH64_UDIV;
+        MLIR_OpType dt = ty == OP_TYPE_LLVM_SREM ? OP_TYPE_AARCH64_SDIV
+                                               : OP_TYPE_AARCH64_UDIV;
         uint8_t rd = def_val(L, res, 9);
         emit_3reg(ctx, blk, dt, 11, r0, r1, sf);
         emit_msub(ctx, blk, rd, 11, r1, r0, sf);
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_ICMP) {
+    case OP_TYPE_LLVM_ICMP: {
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
         MLIR_AttributeHandle pa = MLIR_GetOpAttributeByName(op, "predicate");
         if (pa == MLIR_INVALID_HANDLE)
@@ -1593,8 +1596,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         }
         emit_cset(ctx, blk, rd, (uint8_t)cond, false);
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_SELECT) {
+    case OP_TYPE_LLVM_SELECT: {
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
         bool sf = type_is_gp64(ctx, res);
         uint8_t r0 = use_val(L, MLIR_GetOpOperand(op, 0), 9);
@@ -1605,8 +1610,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         emit_cmp_imm(ctx, blk, r0, 0, false);
         emit_csel(ctx, blk, rd, r1, r2, /*NE*/1, sf);
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_CALL) {
+    case OP_TYPE_LLVM_CALL: {
         MLIR_AttributeHandle callee = MLIR_GetOpAttributeByName(op, "callee");
         bool is_indirect = (callee == MLIR_INVALID_HANDLE);
         MLIR_AttributeHandle vct = MLIR_GetOpAttributeByName(op, "var_callee_type");
@@ -1713,8 +1720,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         }
         if (MLIR_GetOpNumResults(op) == 1)
             fin_val(L, MLIR_GetOpResult(op, 0), 0);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_INTR_VASTART) {
+    case OP_TYPE_LLVM_INTR_VASTART: {
         // Darwin arm64: all variadic args are passed on the stack and va_list is
         // just a pointer to the first one. Incoming stack args of this function
         // sit at [x29, #16 + max(0, n_fixed-8)*8] (after the saved {fp,lr} pair
@@ -1725,12 +1734,15 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         if (!L->ok) return;
         emit_add_imm(ctx, blk, 9, 29, (uint16_t)base_off, true);
         emit_str_x(ctx, blk, 9, rp, 0);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_INTR_VAEND) {
+    case OP_TYPE_LLVM_INTR_VAEND: {
         // No teardown needed for the stack-based va_list.
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_MLIR_UNDEF ||
-               on_ty == OP_TYPE_LLVM_MLIR_ZERO) {
+    case OP_TYPE_LLVM_MLIR_UNDEF: case OP_TYPE_LLVM_MLIR_ZERO: {
         // mlir.zero materialises a typed zero (null pointer / zeroed
         // aggregate scalar); mlir.undef is don't-care — 0 is fine for both.
         if (MLIR_GetOpNumResults(op) == 1) {
@@ -1739,8 +1751,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             emit_load_imm(ctx, blk, rd, 0, false);
             fin_val(L, res, rd);
         }
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_ALLOCA) {
+    case OP_TYPE_LLVM_ALLOCA: {
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
         int32_t off;
         if (!sm_get(L->am, res, &off))
@@ -1757,8 +1771,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             emit_3reg(ctx, blk, OP_TYPE_AARCH64_ADD_REG, rd, rd, 10, true);
         }
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_GEP) {
+    case OP_TYPE_LLVM_GEP: {
         MLIR_ValueHandle res  = MLIR_GetOpResult(op, 0);
         MLIR_ValueHandle base = MLIR_GetOpOperand(op, 0);
         MLIR_AttributeHandle eta = MLIR_GetOpAttributeByName(op, "elem_type");
@@ -1825,8 +1841,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             }
         }
         fin_val(L, res, 9);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_STORE) {
+    case OP_TYPE_LLVM_STORE: {
         MLIR_ValueHandle val = MLIR_GetOpOperand(op, 0);
         MLIR_ValueHandle ptr = MLIR_GetOpOperand(op, 1);
         unsigned sz = a64_type_size(ctx, MLIR_GetValueType(val));
@@ -1870,8 +1888,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         uint8_t rp = use_val(L, ptr, 10);
         if (!L->ok) return;
         emit_mem_store(ctx, blk, rv, rp, sz);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_LOAD) {
+    case OP_TYPE_LLVM_LOAD: {
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
         MLIR_ValueHandle ptr = MLIR_GetOpOperand(op, 0);
         unsigned sz = a64_type_size(ctx, MLIR_GetValueType(res));
@@ -1913,8 +1933,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         uint8_t rd = def_val(L, res, 9);
         emit_mem_load(ctx, blk, rd, rp, sz);
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_PTRTOINT || on_ty == OP_TYPE_LLVM_INTTOPTR) {
+    case OP_TYPE_LLVM_PTRTOINT: case OP_TYPE_LLVM_INTTOPTR: {
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
         uint8_t r0 = use_val(L, MLIR_GetOpOperand(op, 0), 9);
         if (!L->ok) return;
@@ -1928,13 +1950,15 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             emit_mov_reg(ctx, blk, rd, r0);
         }
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_TRUNC || on_ty == OP_TYPE_LLVM_ZEXT) {
+    case OP_TYPE_LLVM_TRUNC: case OP_TYPE_LLVM_ZEXT: {
         // Both keep the low N bits (our values are stored zero-extended); a
         // mask to the destination (trunc) / source (zext) width suffices.
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
-        int w = on_ty == OP_TYPE_LLVM_TRUNC ? int_type_bits(ctx, res)
-                                          : int_type_bits(ctx, MLIR_GetOpOperand(op, 0));
+        int w = ty == OP_TYPE_LLVM_TRUNC ? int_type_bits(ctx, res)
+                                       : int_type_bits(ctx, MLIR_GetOpOperand(op, 0));
         uint8_t r0 = use_val(L, MLIR_GetOpOperand(op, 0), 9);
         if (!L->ok) return;
         uint8_t rd = def_val(L, res, 9);
@@ -1943,7 +1967,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             // the source is already zero-extended (its producer wrote a W-form
             // result), the extension is a no-op: emit a plain copy so copy-
             // coalescing can elide it entirely.
-            if (on_ty == OP_TYPE_LLVM_ZEXT &&
+            if (ty == OP_TYPE_LLVM_ZEXT &&
                 i32_src_zero_extended(MLIR_GetOpOperand(op, 0)))
                 emit_mov_reg(ctx, blk, rd, r0);
             else
@@ -1952,7 +1976,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             // A `zext` whose source already has bits >= w clear (a narrow load)
             // needs no mask at all: emit a plain copy for copy-coalescing to
             // elide. Otherwise mask the low w bits in ONE `and rd,r0,#(1<<w)-1`.
-            if (on_ty == OP_TYPE_LLVM_ZEXT &&
+            if (ty == OP_TYPE_LLVM_ZEXT &&
                 src_low_bits_clear(ctx, MLIR_GetOpOperand(op, 0), w))
                 emit_mov_reg(ctx, blk, rd, r0);
             else
@@ -1961,8 +1985,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             emit_mov_reg(ctx, blk, rd, r0);
         }
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_SEXT) {
+    case OP_TYPE_LLVM_SEXT: {
         // Sign-extend from the source width via a left-then-arithmetic-right
         // shift pair in 64-bit registers.
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
@@ -1984,8 +2010,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             emit_mov_reg(ctx, blk, rd, r0);
         }
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
+    case OP_TYPE_LLVM_MLIR_ADDRESSOF: {
         // Materialise the address of a module-level global: ADRP+ADD against
         // the native data section, offset by the global's slot.
         MLIR_AttributeHandle ga = MLIR_GetOpAttributeByName(op, "global_name");
@@ -2008,14 +2036,16 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             emit_add_data_lo(ctx, blk, rd, rd, gnm, 0);
         }
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_FADD || on_ty == OP_TYPE_LLVM_FSUB ||
-               on_ty == OP_TYPE_LLVM_FMUL || on_ty == OP_TYPE_LLVM_FDIV) {
+    case OP_TYPE_LLVM_FADD: case OP_TYPE_LLVM_FSUB:
+    case OP_TYPE_LLVM_FMUL: case OP_TYPE_LLVM_FDIV: {
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
         int fw = fp_width(ctx, res);
-        const char *kind = on_ty == OP_TYPE_LLVM_FADD ? "fadd"
-                         : on_ty == OP_TYPE_LLVM_FSUB ? "fsub"
-                         : on_ty == OP_TYPE_LLVM_FMUL ? "fmul" : "fdiv";
+        const char *kind = ty == OP_TYPE_LLVM_FADD ? "fadd"
+                         : ty == OP_TYPE_LLVM_FSUB ? "fsub"
+                         : ty == OP_TYPE_LLVM_FMUL ? "fmul" : "fdiv";
         if (fw == 0) LFAIL("llvm->aarch64: %.*s non-float result\n",
                            (int)on.size, on.str);
         uint8_t r0 = use_val(L, MLIR_GetOpOperand(op, 0), 9);
@@ -2027,11 +2057,13 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         uint8_t rd = def_val(L, res, 9);
         emit_fmov_gp_v(ctx, blk, /*to_v=*/false, true, rd, 0);
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_FNEG || on_ty == OP_TYPE_LLVM_INTR_SQRT) {
+    case OP_TYPE_LLVM_FNEG: case OP_TYPE_LLVM_INTR_SQRT: {
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
         int fw = fp_width(ctx, res);
-        const char *kind = on_ty == OP_TYPE_LLVM_FNEG ? "fneg" : "fsqrt";
+        const char *kind = ty == OP_TYPE_LLVM_FNEG ? "fneg" : "fsqrt";
         if (fw == 0) LFAIL("llvm->aarch64: %.*s non-float result\n",
                            (int)on.size, on.str);
         uint8_t r0 = use_val(L, MLIR_GetOpOperand(op, 0), 9);
@@ -2041,8 +2073,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         uint8_t rd = def_val(L, res, 9);
         emit_fmov_gp_v(ctx, blk, false, true, rd, 0);
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_FCMP) {
+    case OP_TYPE_LLVM_FCMP: {
         MLIR_AttributeHandle pa = MLIR_GetOpAttributeByName(op, "predicate");
         if (pa == MLIR_INVALID_HANDLE)
             LFAIL("llvm->aarch64: fcmp missing predicate\n");
@@ -2061,12 +2095,14 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         uint8_t rd = def_val(L, res, 9);
         emit_cset(ctx, blk, rd, (uint8_t)cond, false);
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_FPTOSI || on_ty == OP_TYPE_LLVM_FPTOUI) {
+    case OP_TYPE_LLVM_FPTOSI: case OP_TYPE_LLVM_FPTOUI: {
         // FP -> int. Result lands in a GP reg; narrow results must be masked
         // back to the slot's zero-extended invariant.
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
-        bool sign = on_ty == OP_TYPE_LLVM_FPTOSI;
+        bool sign = ty == OP_TYPE_LLVM_FPTOSI;
         int src_w = fp_width(ctx, MLIR_GetOpOperand(op, 0));
         if (src_w == 0)
             LFAIL("llvm->aarch64: fptosi/fptoui non-float source\n");
@@ -2081,12 +2117,14 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             emit_and_imm_lowbits(ctx, blk, rd, rd, (uint8_t)rw, true);
         }
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_SITOFP || on_ty == OP_TYPE_LLVM_UITOFP) {
+    case OP_TYPE_LLVM_SITOFP: case OP_TYPE_LLVM_UITOFP: {
         // int -> FP. Slots hold zero-extended ints: uitofp can read the full
         // 64-bit slot directly; sitofp must first sign-extend the source width.
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
-        bool sign = on_ty == OP_TYPE_LLVM_SITOFP;
+        bool sign = ty == OP_TYPE_LLVM_SITOFP;
         int sw = int_type_bits(ctx, MLIR_GetOpOperand(op, 0));
         int dst_w = fp_width(ctx, res);
         if (dst_w == 0)
@@ -2103,8 +2141,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         uint8_t rd = def_val(L, res, 9);
         emit_fmov_gp_v(ctx, blk, false, true, rd, 0);
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_FPEXT || on_ty == OP_TYPE_LLVM_FPTRUNC) {
+    case OP_TYPE_LLVM_FPEXT: case OP_TYPE_LLVM_FPTRUNC: {
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
         int src_w = fp_width(ctx, MLIR_GetOpOperand(op, 0));
         int dst_w = fp_width(ctx, res);
@@ -2117,9 +2157,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         uint8_t rd = def_val(L, res, 9);
         emit_fmov_gp_v(ctx, blk, false, true, rd, 0);
         fin_val(L, res, rd);
+        break;
+    }
 
-
-    } else if (on_ty == OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE) {
+    case OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE: {
         // `__builtin_wasm_memory_size(0)` from tinyc. When the module
         // carries a `__wasm_mem_pages` scalar (wasmssa->llvm path), read
         // it via the x27 globals-cluster pin; otherwise the current memory
@@ -2132,8 +2173,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         }
         emit_load_imm(ctx, blk, rd, 0, false);
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else if (on_ty == OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW) {
+    case OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW: {
         // `__builtin_wasm_memory_grow(0, delta)`: bump `__wasm_mem_pages` by
         // `delta`, capped at 65536 pages; return the old count or -1 on failure.
         // Mirrors mlir_wasmssa_to_llvm.c OP_TYPE_WASMSSA_MEMORY_GROW.
@@ -2163,8 +2206,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         emit_load_imm(ctx, blk, 10, 0xffffffffu, false);               // w10 = -1
         emit_csel(ctx, blk, rd, 9, 10, 9, false);                      // old or -1
         fin_val(L, res, rd);
+        break;
+    }
 
-    } else {
+    default:
         LFAIL("llvm->aarch64: unsupported op '%.*s' in '%.*s'\n",
               (int)on.size, on.str, (int)L->sym.size, L->sym.str);
     }
@@ -2501,15 +2546,16 @@ static void emit_callee_saves(MLIR_Context *ctx, MLIR_BlockHandle blk,
 // handlers is correct when rd == r0, and the pure-move cases collapse to a
 // `mov rd,rd` that emit_mov_reg drops entirely). Drives copy coalescing.
 bool cast_src(MLIR_OpHandle op, MLIR_ValueHandle *src) {
-    MLIR_OpType nm_ty = MLIR_GetOpType(op);
-    if (nm_ty == OP_TYPE_LLVM_INTTOPTR || nm_ty == OP_TYPE_LLVM_PTRTOINT ||
-        nm_ty == OP_TYPE_LLVM_TRUNC || nm_ty == OP_TYPE_LLVM_ZEXT ||
-        nm_ty == OP_TYPE_LLVM_SEXT || nm_ty == OP_TYPE_LLVM_BITCAST) {
+    switch (MLIR_GetOpType(op)) {
+    case OP_TYPE_LLVM_INTTOPTR: case OP_TYPE_LLVM_PTRTOINT:
+    case OP_TYPE_LLVM_TRUNC: case OP_TYPE_LLVM_ZEXT:
+    case OP_TYPE_LLVM_SEXT: case OP_TYPE_LLVM_BITCAST:
         if (MLIR_GetOpNumOperands(op) != 1) return false;
         *src = MLIR_GetOpOperand(op, 0);
         return true;
+    default:
+        return false;
     }
-    return false;
 }
 
 

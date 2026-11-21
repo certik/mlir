@@ -165,13 +165,13 @@ static bool lower_arith_index_cast(LowerState *st, MLIR_OpHandle op,
         return true;
     }
 
-    string llvm_op;
+    MLIR_OpType llvm_op;
     if (src_i64 && dst_i32) {
-        llvm_op = str_lit("llvm.trunc");
+        llvm_op = OP_TYPE_LLVM_TRUNC;
     } else if (src_i32 && dst_i64) {
-        llvm_op = is_unsigned ? str_lit("llvm.zext") : str_lit("llvm.sext");
+        llvm_op = is_unsigned ? OP_TYPE_LLVM_ZEXT : OP_TYPE_LLVM_SEXT;
     } else if (!src_index && dst_index && MLIR_IsTypeInteger(src_ty)) {
-        llvm_op = is_unsigned ? str_lit("llvm.zext") : str_lit("llvm.sext");
+        llvm_op = is_unsigned ? OP_TYPE_LLVM_ZEXT : OP_TYPE_LLVM_SEXT;
     } else {
         return false;
     }
@@ -181,7 +181,7 @@ static bool lower_arith_index_cast(LowerState *st, MLIR_OpHandle op,
     MLIR_ValueHandle results[1] = { new_res };
     MLIR_ValueHandle ops[1] = { src };
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_UNREGISTERED, llvm_op,
+        st->ctx, llvm_op, str_lit(""),
         NULL, 0, rts, 1, results, 1, ops, 1, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
     MLIR_ReplaceAllUsesOfValue(st->ctx, old_res, new_res);
@@ -306,7 +306,7 @@ static bool lower_func_func(LowerState *st, MLIR_OpHandle op,
     }
 
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.func"),
+        st->ctx, OP_TYPE_LLVM_FUNC, str_lit("llvm.func"),
         attrs_buf, n_attrs, NULL, 0, NULL, 0, NULL, 0,
         &body, 1, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
@@ -352,7 +352,7 @@ static bool lower_func_call(LowerState *st, MLIR_OpHandle op,
     }
 
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.call"),
+        st->ctx, OP_TYPE_LLVM_CALL, str_lit("llvm.call"),
         attrs_buf, n_attrs, rts, nr, results, nr,
         operands, no, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
@@ -363,13 +363,14 @@ static bool lower_func_call(LowerState *st, MLIR_OpHandle op,
     return true;
 }
 
-// Generic "rename op": build a new op with `new_name` that copies all
-// operands, results, and attributes from `op` 1:1. Used for the family
-// of arith→llvm conversions where the semantics are identical and only
-// the op name changes (arith.addi→llvm.add, arith.cmpi→llvm.icmp, ...).
+// Generic "rename op": build a new op of type `new_type` (named by its
+// registered name) that copies all operands, results, and attributes from
+// `op` 1:1. Used for the family of arith→llvm conversions where the
+// semantics are identical and only the op changes (arith.addi→llvm.add,
+// arith.cmpi→llvm.icmp, ...).
 static bool lower_rename(LowerState *st, MLIR_OpHandle op,
                          MLIR_BlockHandle parent, size_t pos,
-                         string new_name, MLIR_OpType new_type) {
+                         MLIR_OpType new_type) {
     MLIR_LocationHandle loc = MLIR_GetOpLocation(op);
     size_t no = MLIR_GetOpNumOperands(op);
     size_t nr = MLIR_GetOpNumResults(op);
@@ -395,7 +396,7 @@ static bool lower_rename(LowerState *st, MLIR_OpHandle op,
     for (size_t i = 0; i < na; i++) attrs[i] = MLIR_GetOpAttribute(op, i);
 
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, new_type, new_name,
+        st->ctx, new_type, str_lit(""),
         attrs, na, rts, nr, results, nr,
         operands, no, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
@@ -411,7 +412,7 @@ static bool lower_rename(LowerState *st, MLIR_OpHandle op,
 // use the successor-aware op constructor.
 static bool lower_cf_branch(LowerState *st, MLIR_OpHandle op,
                             MLIR_BlockHandle parent, size_t pos,
-                            string new_name) {
+                            MLIR_OpType new_type) {
     MLIR_LocationHandle loc = MLIR_GetOpLocation(op);
     Arena *alloc = MLIR_GetArenaAllocator(st->ctx);
     size_t no = MLIR_GetOpNumOperands(op);
@@ -444,7 +445,7 @@ static bool lower_cf_branch(LowerState *st, MLIR_OpHandle op,
     }
 
     MLIR_OpHandle nop = MLIR_CreateOpWithSuccessors(
-        st->ctx, OP_TYPE_UNREGISTERED, new_name,
+        st->ctx, new_type, str_lit(""),
         attrs, na, NULL, 0, NULL, 0,
         operands, no, NULL, 0,
         succs, ns, succ_ops, n_succ_ops,
@@ -487,7 +488,7 @@ static bool lower_func_constant(LowerState *st, MLIR_OpHandle op,
     attrs[0] = MLIR_CreateAttributeSymbolRef(
         st->ctx, str_lit("global_name"), sym_name);
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.mlir.addressof"),
+        st->ctx, OP_TYPE_LLVM_MLIR_ADDRESSOF, str_lit("llvm.mlir.addressof"),
         attrs, 1, rts, 1, results, 1, NULL, 0, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
     MLIR_ReplaceAllUsesOfValue(st->ctx, MLIR_GetOpResult(op, 0), new_res);
@@ -552,7 +553,7 @@ static bool lower_func_call_indirect(LowerState *st, MLIR_OpHandle op,
         st->ctx, str_lit("var_callee_type"), llvmft);
 
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.call"),
+        st->ctx, OP_TYPE_LLVM_CALL, str_lit("llvm.call"),
         attrs, 1, rts, nr, results, nr,
         operands, no, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
@@ -579,7 +580,7 @@ static void rewrite_yield_to_br(LowerState *st, MLIR_BlockHandle blk,
     size_t n_succ_ops_arr[1] = { no };
     MLIR_LocationHandle term_loc = MLIR_GetOpLocation(term);
     MLIR_OpHandle br = MLIR_CreateOpWithSuccessors(
-        st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.br"),
+        st->ctx, OP_TYPE_LLVM_BR, str_lit("llvm.br"),
         NULL, 0, NULL, 0, NULL, 0,
         NULL, 0, NULL, 0,
         succs, 1, succ_ops_arr, n_succ_ops_arr,
@@ -679,7 +680,7 @@ static bool lower_scf_if(LowerState *st, MLIR_OpHandle op,
     size_t n_empty_ops[2] = { 0, 0 };
     MLIR_ValueHandle cond_arr[1] = { cond };
     MLIR_OpHandle cbr = MLIR_CreateOpWithSuccessors(
-        st->ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.cond_br"),
+        st->ctx, OP_TYPE_LLVM_COND_BR, str_lit("llvm.cond_br"),
         NULL, 0, NULL, 0, NULL, 0,
         cond_arr, 1, NULL, 0,
         succs, 2, empty_ops, n_empty_ops,
@@ -735,38 +736,38 @@ static int try_lower_op(LowerState *st, MLIR_OpHandle op,
     case OP_TYPE_ARITH_CONSTANT:     ok = lower_arith_constant(st, op, parent, pos); break;
     case OP_TYPE_ARITH_INDEX_CAST:   ok = lower_arith_index_cast(st, op, parent, pos, false); break;
     case OP_TYPE_ARITH_INDEX_CASTUI: ok = lower_arith_index_cast(st, op, parent, pos, true); break;
-    case OP_TYPE_ARITH_UITOFP:      ok = lower_rename(st, op, parent, pos, str_lit("llvm.uitofp"),  OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_FPTOUI:      ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptoui"),  OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_ADDI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.add"),     OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_SUBI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.sub"),     OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_MULI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.mul"),     OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_DIVSI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.sdiv"),    OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_DIVUI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.udiv"),    OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_REMSI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.srem"),    OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_REMUI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.urem"),    OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_ANDI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.and"),     OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_ORI:         ok = lower_rename(st, op, parent, pos, str_lit("llvm.or"),      OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_XORI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.xor"),     OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_SHLI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.shl"),     OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_SHRSI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.ashr"),    OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_SHRUI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.lshr"),    OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_ADDF:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.fadd"),    OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_SUBF:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.fsub"),    OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_MULF:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.fmul"),    OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_DIVF:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.fdiv"),    OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_CMPI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.icmp"),    OP_TYPE_LLVM_ICMP); break;
-    case OP_TYPE_ARITH_CMPF:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.fcmp"),    OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_SELECT:      ok = lower_rename(st, op, parent, pos, str_lit("llvm.select"),  OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_EXTSI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.sext"),    OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_EXTUI:       ok = lower_rename(st, op, parent, pos, str_lit("llvm.zext"),    OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_TRUNCI:      ok = lower_rename(st, op, parent, pos, str_lit("llvm.trunc"),   OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_EXTF:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.fpext"),   OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_TRUNCF:      ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptrunc"), OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_SITOFP:      ok = lower_rename(st, op, parent, pos, str_lit("llvm.sitofp"),  OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_FPTOSI:      ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptosi"),  OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_ARITH_BITCAST:     ok = lower_rename(st, op, parent, pos, str_lit("llvm.bitcast"), OP_TYPE_UNREGISTERED); break;
-    case OP_TYPE_CF_BR:      ok = lower_cf_branch(st, op, parent, pos, str_lit("llvm.br")); break;
-    case OP_TYPE_CF_COND_BR: ok = lower_cf_branch(st, op, parent, pos, str_lit("llvm.cond_br")); break;
+    case OP_TYPE_ARITH_UITOFP:      ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_UITOFP); break;
+    case OP_TYPE_ARITH_FPTOUI:      ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FPTOUI); break;
+    case OP_TYPE_ARITH_ADDI:        ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_ADD); break;
+    case OP_TYPE_ARITH_SUBI:        ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_SUB); break;
+    case OP_TYPE_ARITH_MULI:        ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_MUL); break;
+    case OP_TYPE_ARITH_DIVSI:       ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_SDIV); break;
+    case OP_TYPE_ARITH_DIVUI:       ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_UDIV); break;
+    case OP_TYPE_ARITH_REMSI:       ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_SREM); break;
+    case OP_TYPE_ARITH_REMUI:       ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_UREM); break;
+    case OP_TYPE_ARITH_ANDI:        ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_AND); break;
+    case OP_TYPE_ARITH_ORI:         ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_OR); break;
+    case OP_TYPE_ARITH_XORI:        ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_XOR); break;
+    case OP_TYPE_ARITH_SHLI:        ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_SHL); break;
+    case OP_TYPE_ARITH_SHRSI:       ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_ASHR); break;
+    case OP_TYPE_ARITH_SHRUI:       ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_LSHR); break;
+    case OP_TYPE_ARITH_ADDF:        ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FADD); break;
+    case OP_TYPE_ARITH_SUBF:        ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FSUB); break;
+    case OP_TYPE_ARITH_MULF:        ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FMUL); break;
+    case OP_TYPE_ARITH_DIVF:        ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FDIV); break;
+    case OP_TYPE_ARITH_CMPI:        ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_ICMP); break;
+    case OP_TYPE_ARITH_CMPF:        ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FCMP); break;
+    case OP_TYPE_ARITH_SELECT:      ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_SELECT); break;
+    case OP_TYPE_ARITH_EXTSI:       ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_SEXT); break;
+    case OP_TYPE_ARITH_EXTUI:       ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_ZEXT); break;
+    case OP_TYPE_ARITH_TRUNCI:      ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_TRUNC); break;
+    case OP_TYPE_ARITH_EXTF:        ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FPEXT); break;
+    case OP_TYPE_ARITH_TRUNCF:      ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FPTRUNC); break;
+    case OP_TYPE_ARITH_SITOFP:      ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_SITOFP); break;
+    case OP_TYPE_ARITH_FPTOSI:      ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_FPTOSI); break;
+    case OP_TYPE_ARITH_BITCAST:     ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_BITCAST); break;
+    case OP_TYPE_CF_BR:      ok = lower_cf_branch(st, op, parent, pos, OP_TYPE_LLVM_BR); break;
+    case OP_TYPE_CF_COND_BR: ok = lower_cf_branch(st, op, parent, pos, OP_TYPE_LLVM_COND_BR); break;
     case OP_TYPE_UNREGISTERED:
         // Not an op of any dialect, so it has no enumerator.
         if (name_eq(MLIR_GetOpName(op), "unrealized_conversion_cast"))
