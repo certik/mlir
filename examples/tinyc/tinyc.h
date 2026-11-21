@@ -543,6 +543,11 @@ DEFINE_VECTOR_FOR_TYPE(TcTok, VecTcTok)
 
 VecTcTok tinyc_lex(Arena *arena, string src);
 
+// Integer constant `v` converted to the C type `t` when that is a narrow
+// integer: char / short are truncated and re-extended by signedness, bool
+// becomes 0 / 1. Other types return `v` unchanged.
+int64_t tinyc_narrow_const(int64_t v, Type t);
+
 // ---------------- Preprocessor ----------------
 
 // Run the C-style preprocessor on `path`. Returns the fully-preprocessed

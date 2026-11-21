@@ -1,0 +1,112 @@
+extern int printf(const char *fmt, ...);
+// Float <-> integer conversions at every width and signedness: explicit
+// casts, initializers, assignments, call arguments, returns and mixed
+// arithmetic. Every value is in range for its target type (out-of-range
+// float -> int conversion is undefined behavior in C).
+
+static long long ret_ll(double d) { return d; }
+static unsigned long long ret_ull(double d) { return d; }
+static unsigned ret_u(float f) { return f; }
+static double ret_d_ll(long long x) { return x; }
+static double ret_d_u(unsigned x) { return x; }
+static float ret_f_ull(unsigned long long x) { return x; }
+static long long arg_ll(long long x) { return x; }
+static unsigned long long arg_ull(unsigned long long x) { return x; }
+static double arg_d(double d) { return d; }
+
+struct fic_uf { unsigned u; unsigned long long ull; };
+struct fic_nf { unsigned char b; unsigned short h; };
+
+int main() {
+    double d = 5000000000.0;
+    double dn = -5000000000.5;
+    double du = 4000000000.0;
+    double dbig = 12000000000000000000.0;
+    float f = 5000000000.0f;
+    float fn = -5000000000.0f;
+    float fu = 4000000000.0f;
+    float fbig = 12000000000000000000.0f;
+
+    // explicit casts f64 -> int
+    printf("%lld %lld %llu\n", (long long)d, (long long)dn, (unsigned long long)d);
+    printf("%llu %u %d\n", (unsigned long long)dbig, (unsigned)du, (int)-2000000000.9);
+    printf("%d %d %d %d\n", (signed char)-100.7, (unsigned char)200.9,
+           (short)-30000.5, (unsigned short)60000.5);
+    // explicit casts f32 -> int
+    printf("%lld %lld %llu\n", (long long)f, (long long)fn, (unsigned long long)f);
+    printf("%llu %u %d\n", (unsigned long long)fbig, (unsigned)fu, (int)-2000000000.0f);
+    printf("%d %d %d %d\n", (signed char)-100.7f, (unsigned char)200.9f,
+           (short)-30000.5f, (unsigned short)60000.5f);
+
+    // implicit: initializers / assignments
+    long long a = d;
+    unsigned long long b = dbig;
+    unsigned c = du;
+    long long a2;
+    a2 = fn;
+    unsigned long long b2;
+    b2 = fbig;
+    unsigned c2;
+    c2 = fu;
+    printf("%lld %llu %u %lld %llu %u\n", a, b, c, a2, b2, c2);
+
+    // implicit: returns and arguments
+    printf("%lld %llu %u\n", ret_ll(dn), ret_ull(dbig), ret_u(fu));
+    printf("%lld %llu\n", arg_ll(d), arg_ull(dbig));
+
+    // int -> float
+    long long ll = 5000000000LL;
+    long long lln = -ll;
+    unsigned u = 4000000000u;
+    unsigned long long ull = 12000000000000000000ULL;
+    unsigned char uc = 200;
+    signed char sc = -100;
+    unsigned short us = 60000;
+    short ss = -30000;
+    // (Doubles >= 2^63 are checked by converting them back, since the wasm
+    // runtime's printf cannot print them.)
+    double dull = (double)ull;
+    float full = (float)ull;
+    printf("%.1f %.1f %.1f %llu %d\n", (double)ll, (double)lln, (double)u,
+           (unsigned long long)dull, dull == 12000000000000000000.0);
+    printf("%.1f %.1f %.1f %llu %d\n", (double)(float)ll, (double)(float)lln,
+           (double)(float)u, (unsigned long long)full, full == 12000000000000000000.0f);
+    printf("%.1f %.1f %.1f %.1f\n", (double)uc, (double)sc, (double)us, (double)ss);
+    double x1 = u;
+    double x2 = ull;
+    float x3 = u;
+    double x4;
+    x4 = ll;
+    printf("%.1f %d %.1f %.1f\n", x1, x2 == dull, (double)x3, x4);
+    printf("%.1f %.1f %d %.1f\n", ret_d_ll(lln), ret_d_u(u), ret_f_ull(ull) == full,
+           arg_d(u));
+
+    // mixed arithmetic: the integer side converts at its full width
+    printf("%.1f %.1f %d %.1f\n", ll + 0.5, u + 0.5, 0.5 + ull == dull, lln * 1.0f);
+    printf("%d %d %d\n", ll > 4000000000.0, u > 3000000000.0, ull > 1e19);
+
+    // unsigned char / unsigned short promote to (signed) int, so these
+    // differences are negative.
+    unsigned char uc8 = 200, hi = 250, lo = 10;
+    unsigned short us16 = 100;
+    double n1 = uc8 - 300;
+    double n2 = us16 - 300;
+    struct fic_nf nf = {200, 100};
+    unsigned char bytes[1];
+    bytes[0] = 200;
+    unsigned char *pb = bytes;
+    printf("%.1f %.1f %.1f %.1f %d\n", n1, n2, (double)(lo - hi),
+           ((unsigned char)200.0 - 300) * 1.0, ((unsigned char)200.0 - 300) < 0);
+    printf("%.1f %.1f %.1f %d\n", (nf.b - 300) * 1.0, (nf.h - 300) * 1.0,
+           (*pb - 300) * 1.0, (pb[0] - 300) / 2);
+
+    // Unsigned targets of every implicit conversion use fptoui.
+    unsigned arr[2] = {3e9, 4e9};
+    struct fic_uf uf = {3e9, dbig};
+    struct fic_uf uf2 = (struct fic_uf){du, dbig};
+    unsigned long long (*fp)(unsigned long long) = arg_ull;
+    unsigned long long md1 = d, md2 = dbig;
+    printf("%u %u %u %llu %u %llu\n", arr[0], arr[1], uf.u, uf.ull, uf2.u, uf2.ull);
+    printf("%llu %llu %llu\n", fp(dbig), md1, md2);
+    return 0;
+}

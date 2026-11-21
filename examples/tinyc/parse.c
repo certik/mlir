@@ -126,6 +126,13 @@ static bool parse_const_eval(P *p, Expr *ex, int64_t *out) {
     }
 }
 
+int64_t tinyc_narrow_const(int64_t v, Type t) {
+    if (t.is_bool) return v != 0;
+    if (t.int_bits == 8)  return t.int_unsigned ? (int64_t)(uint8_t)v  : (int64_t)(int8_t)v;
+    if (t.int_bits == 16) return t.int_unsigned ? (int64_t)(uint16_t)v : (int64_t)(int16_t)v;
+    return v;
+}
+
 static void perror_at(P *p, int line, string msg) {
     println(str_lit("tinyc parse error at line {}: {}"), (int64_t)line, msg);
     p->err_count++;
@@ -1023,10 +1030,13 @@ static Expr *parse_expr(P *p) { return parse_assign_or_or(p); }
 // `Type.int_unsigned` so that i32 -> i64 widening uses `arith.extui`
 // (zero-extend) instead of `arith.extsi` (sign-extend).
 static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char,
-                             bool *out_is_long, bool *out_is_unsigned) {
+                             bool *out_is_long, bool *out_is_unsigned,
+                             int *out_int_bits, bool *out_is_bool) {
     *out_was_char = false;
     *out_is_long = false;
     *out_is_unsigned = false;
+    *out_int_bits = 0;
+    *out_is_bool = false;
     skip_const(p);
     // C-style integer base specifier: any sequence of signed / unsigned /
     // short / long / int / char / _Bool / bool. `long long` is always
@@ -1067,6 +1077,13 @@ static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char,
     *out_was_char = saw_char_kw;
     *out_is_long = (n_long_kw >= 1);
     *out_is_unsigned = saw_unsigned_kw;
+    // char / bool: 8 bits, short: 16 bits (as parse_sig_type tags them);
+    // `long` widths are set by the callers.
+    if (n_long_kw == 0) {
+        if (saw_char_kw || saw_bool_kw) *out_int_bits = 8;
+        else if (saw_short_kw)          *out_int_bits = 16;
+        *out_is_bool = saw_bool_kw && !saw_char_kw && !saw_short_kw;
+    }
     if (n_long_kw > 0) {
         bool is_64 = (n_long_kw >= 2) || !p->target_wasm32;
         *out = is_64 ? TY_I64 : TY_I32;
@@ -1096,7 +1113,10 @@ static bool parse_base_type(P *p, TypeKind *out) {
     bool dummy = false;
     bool dummy_is_long = false;
     bool dummy_is_unsigned = false;
-    return parse_base_type2(p, out, &dummy, &dummy_is_long, &dummy_is_unsigned);
+    int dummy_int_bits = 0;
+    bool dummy_is_bool = false;
+    return parse_base_type2(p, out, &dummy, &dummy_is_long, &dummy_is_unsigned,
+                            &dummy_int_bits, &dummy_is_bool);
 }
 
 static Stmt *parse_stmt(P *p);
@@ -1251,8 +1271,15 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 // type info is intentionally erased here; downstream
                 // uses (loads, stores, passing the array name as a
                 // function argument) all operate on the raw pointer.
+                // A `char *` element keeps its char width / signedness
+                // (for `*arr[i]` through `unsigned char *`).
+                Type elem = s->decl_type;
                 s->decl_type = (Type){0};
                 s->decl_type.kind = TY_ARRAY_PTR_CHAR;
+                if (elem.kind == TY_PTR_CHAR) {
+                    s->decl_type.int_bits = elem.int_bits;
+                    s->decl_type.int_unsigned = elem.int_unsigned;
+                }
                 s->decl_type.array_len = alen;
                 s->decl_type.array_len_expr = aexpr;
             } else {
@@ -1454,7 +1481,10 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     bool was_char = false;
     bool is_long = false;
     bool is_unsigned = false;
-    parse_base_type2(p, &base, &was_char, &is_long, &is_unsigned);
+    int int_bits = 0;
+    bool is_bool = false;
+    parse_base_type2(p, &base, &was_char, &is_long, &is_unsigned, &int_bits, &is_bool);
+    if (is_long) int_bits = 64;
     // Function-pointer local: `int (*name)(types)`.
     if (cur(p).kind == TC_TK_LPAREN && peek(p, 1).kind == TC_TK_STAR) {
         Stmt *s = new_stmt(p, ST_DECL, line);
@@ -1491,6 +1521,9 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     // `unsigned char *` — see load_lvalue in emit.c). Setting it on
     // pointer decls preserves the `unsigned char *p;` distinction.
     s->decl_type.int_unsigned = is_unsigned;
+    // char / short / bool width (array storage is still decided by was_char).
+    s->decl_type.int_bits = int_bits;
+    s->decl_type.is_bool = is_bool;
     if (is_ptr) {
         if (was_char) s->decl_type.kind = TY_PTR_CHAR;
         else if (base == TY_I32) s->decl_type.kind = TY_PTR_I32;
@@ -1567,6 +1600,9 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             Stmt *ds = new_stmt(p, ST_DECL, dname.line);
             ds->decl_name = dname.text;
             ds->decl_type.kind = base;
+            ds->decl_type.int_unsigned = is_unsigned;
+            ds->decl_type.int_bits = int_bits;
+            ds->decl_type.is_bool = is_bool;
             if (dis_ptr) {
                 if (was_char) ds->decl_type.kind = TY_PTR_CHAR;
                 else if (base == TY_I32) ds->decl_type.kind = TY_PTR_I32;
@@ -2313,6 +2349,10 @@ static StructDef *parse_struct_def(P *p) {
         bool is_ptr = false;
         bool was_char = false;
         bool was_float = false;
+        // Keyword-declared char/short field: int_bits is set for the value's
+        // width, but must not switch an array field to i8 storage (that
+        // layout change belongs to #251).
+        bool kw_int_bits = false;
         if ((cur(p).kind == TC_TK_KW_STRUCT || cur(p).kind == TC_TK_KW_UNION) &&
             (peek(p, 1).kind == TC_TK_LBRACE ||
              (peek(p, 1).kind == TC_TK_IDENT && peek(p, 2).kind == TC_TK_LBRACE))) {
@@ -2417,15 +2457,20 @@ static StructDef *parse_struct_def(P *p) {
             was_char = false;
             bool field_is_long = false;
             bool field_is_unsigned = false;
+            int field_int_bits = 0;
+            bool field_is_bool = false;
             was_float = (cur(p).kind == TC_TK_KW_FLOAT);
-            if (!parse_base_type2(p, &k, &was_char, &field_is_long, &field_is_unsigned)) {
+            if (!parse_base_type2(p, &k, &was_char, &field_is_long, &field_is_unsigned,
+                                  &field_int_bits, &field_is_bool)) {
                 perror_at(p, cur(p).line, str_lit("expected field type (int|float|char|struct)"));
                 p->i++;
                 continue;
             }
             ft.kind = k;
             if (field_is_long) ft.int_bits = 64;
+            else { ft.int_bits = field_int_bits; kw_int_bits = true; }
             ft.int_unsigned = field_is_unsigned;
+            ft.is_bool = field_is_bool;
             // Optional pointer suffix on base types: `T *` (single) or
             // `T **` (pointer-to-pointer). The `**` form wraps the
             // single-level pointer kind into a TY_PTR_PTR.
@@ -2524,7 +2569,7 @@ static StructDef *parse_struct_def(P *p) {
                     ft.array_len2 = n2;
                 } else {
                     bool is_i64 = (ft.kind == TY_I64);
-                    bool is_i8  = (ft.kind == TY_I32 && ft.int_bits == 8);
+                    bool is_i8  = (ft.kind == TY_I32 && ft.int_bits == 8 && !kw_int_bits);
                     ft.kind = TY_ARRAY_I32;
                     ft.array_len = n1;
                     ft.array_len2 = n2;
@@ -3137,7 +3182,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                             bytes = nb;
                                             bcap = ncap;
                                         }
-                                        uint64_t uv = (uint64_t)val;
+                                        uint64_t uv = (uint64_t)tinyc_narrow_const(val, g.type);
                                         for (size_t b = 0; b < elem_size; b++) {
                                             bytes[ei * elem_size + b] =
                                                 (uint8_t)(uv >> (8 * b));

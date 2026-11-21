@@ -234,13 +234,26 @@ static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, MLIR_OpType ty, string nm) {
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         MLIR_ValueHandle s = MLIR_GetOpOperand(op, 0);
         int sfb = fp_bytes(ctx, s);
+        uint8_t pfx = sfb == 4 ? 0xF3 : 0xF2;
         // Unsigned: convert into a 64-bit register, then store_val truncates to
-        // the result width (correct for the full u32 range; u64 high bit is an
-        // unreachable edge case here).
+        // the result width (correct for the full u32 range).
         int conv_w = ty == OP_TYPE_LLVM_FPTOUI ? 1 : val_w(ctx, r);
         load_val(F, s, RAX);
         movq_xmm_gpr(F, 0, RAX);
-        cvtf2si(F, sfb == 4 ? 0xF3 : 0xF2, RAX, 0, conv_w);
+        cvtf2si(F, pfx, RAX, 0, conv_w);
+        if (ty == OP_TYPE_LLVM_FPTOUI && val_w(ctx, r)) {
+            // u64 >= 2^63: the signed convert gave 0x8000000000000000. Convert
+            // x - 2^63 too and OR it in when the first result was "negative":
+            // rax |= cvt(x - 2^63) & (rax >>s 63).
+            mov_ri(F, RCX, sfb == 4 ? 0x5F000000ll : 0x43E0000000000000ll, 1);
+            movq_xmm_gpr(F, 1, RCX);
+            if (sfb == 4) sse_ss(F, 0x5C, 0, 1); else sse_sd(F, 0x5C, 0, 1);  // x - 2^63
+            cvtf2si(F, pfx, RCX, 0, 1);
+            mov_rr(F, RDX, RAX, 1);
+            rex(F, 1, 0, 0, RDX); eb(F, 0xC1); modrm(F, 3, 7, RDX); eb(F, 63);  // sar rdx, 63
+            alu_rr(F, 0x21, RCX, RDX, 1);                                       // and rcx, rdx
+            alu_rr(F, 0x09, RAX, RCX, 1);                                       // or rax, rcx
+        }
         store_val(F, r, RAX);
         return true;
     }
@@ -253,8 +266,29 @@ static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, MLIR_OpType ty, string nm) {
         // Signed i32: read EAX as signed 32-bit (cvtsi2sd reg32). Signed i64 and
         // unsigned i32 (zero-extended into RAX, hence positive): read RAX 64-bit.
         int conv_w = (ty == OP_TYPE_LLVM_UITOFP || sb > 32) ? 1 : 0;
+        uint8_t pfx = rfb == 4 ? 0xF3 : 0xF2;
         load_val(F, s, RAX);
-        cvtsi2f(F, rfb == 4 ? 0xF3 : 0xF2, 0, RAX, conv_w);
+        if (ty == OP_TYPE_LLVM_UITOFP && sb > 32) {
+            // u64 with the top bit set does not fit the signed convert: convert
+            // (x >> 1) | (x & 1) (the sticky bit keeps the rounding right) and
+            // double it, then pick that result when x is "negative".
+            mov_rr(F, RCX, RAX, 1);
+            rex(F, 1, 0, 0, RCX); eb(F, 0xD1); modrm(F, 3, 5, RCX);  // shr rcx, 1
+            mov_ri(F, RDX, 1, 1);
+            alu_rr(F, 0x21, RDX, RAX, 1);                          // and rdx, rax
+            alu_rr(F, 0x09, RCX, RDX, 1);                          // or rcx, rdx
+            alu_rr(F, 0x85, RAX, RAX, 1);                          // test rax, rax
+            cmovcc(F, RCX, RAX, 0x9 /*ns*/, 1);
+            cvtsi2f(F, pfx, 0, RCX, 1);
+            movq_gpr_xmm(F, RDX, 0);
+            if (rfb == 4) sse_ss(F, 0x58, 0, 0); else sse_sd(F, 0x58, 0, 0);  // f + f
+            movq_gpr_xmm(F, RCX, 0);
+            alu_rr(F, 0x85, RAX, RAX, 1);                          // test rax, rax
+            cmovcc(F, RDX, RCX, 0x8 /*s*/, 1);
+            store_val(F, r, RDX);
+            return true;
+        }
+        cvtsi2f(F, pfx, 0, RAX, conv_w);
         movq_gpr_xmm(F, RAX, 0);
         store_val(F, r, RAX);
         return true;

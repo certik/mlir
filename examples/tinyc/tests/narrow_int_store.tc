@@ -1,0 +1,150 @@
+extern int printf(const char *fmt, ...);
+// Every conversion into a char / short / bool type truncates to its width and
+// re-extends by its signedness (bool: != 0): initializers, assignments,
+// compound assignments, ++/--, parameters, returns, struct fields and array
+// elements. The value then promotes to (signed) int (#262).
+typedef unsigned char nis_u8;
+typedef unsigned short nis_u16;
+typedef signed char nis_i8;
+
+struct nis_s { unsigned char f; short h; bool b; };
+union nis_u { unsigned char c; unsigned i; };
+union nis_w { int i; short s; unsigned short us; };
+union nis_n { int i; struct { short s; unsigned char c; } st; };
+struct nis_fs { unsigned char *(*f)(unsigned char *); };
+
+// global and static-local initializers convert to the declared type
+unsigned char nis_g = -1;
+unsigned short nis_h[2] = { -1, 70000 };
+bool nis_gb = 2;
+static int nis_static(void) { static unsigned char a = 300; static bool b = 2; return a * 10 + b; }
+static unsigned char *nis_id(unsigned char *p) { return p; }
+typedef unsigned char *(*nis_idfn)(unsigned char *);
+
+static int high_bit(unsigned char c) { return c >= 0x80; }
+static unsigned char low_byte(int x) { return x; }
+static short as_short(int x) { return x; }
+static int count_non_ascii(const char *s) {
+    int n = 0;
+    for (int i = 0; s[i]; i++) {
+        unsigned char c = s[i];
+        if (c >= 0x80) n++;
+    }
+    return n;
+}
+
+int main() {
+    const char *s = "h\xc3\xa9llo";
+    // initializers
+    unsigned char c = 300;
+    short sh = 40000;
+    char ch = 200;
+    bool b = 256;
+    unsigned short us = -1;
+    nis_u8 tu = s[1];
+    nis_i8 ti = 200;
+    printf("%d %d %d %d %d %d %d\n", c, sh, ch, b, us, tu, ti);
+    // comparisons of promoted values
+    printf("%d %d %d %d\n", count_non_ascii(s), tu > 127, us > 0, ch < 0);
+    unsigned char a = -1;
+    printf("%d %d\n", a > 0, a >= 128);
+    // assignments, compound assignments, ++ / --
+    unsigned char d;
+    d = 511;
+    unsigned char e = 0;
+    e--;
+    unsigned char v = 10;
+    v -= 20;
+    unsigned char w = 255;
+    w++;
+    ++w;
+    c += 100;
+    signed char sc = 127;
+    sc++;
+    printf("%d %d %d %d %d %d %d\n", d, e > 0, v > 100, v, w, c, sc);
+    // the value of an assignment has the lvalue's type
+    unsigned char z;
+    printf("%d %d\n", (z = 300), (sh = 70000));
+    // parameters and returns
+    printf("%d %d %d %d\n", high_bit(s[1]), low_byte(s[1]), low_byte(s[1]) > 127,
+           as_short(70000));
+    // struct fields and array elements
+    struct nis_s st;
+    st.f = s[1];
+    st.h = 40000;
+    st.b = 2;
+    struct nis_s st2 = {300, -40000, 0};
+    nis_u16 arr[2] = {70000, -1};
+    unsigned char bytes[2];
+    bytes[0] = s[1];
+    bytes[1] = 300;
+    printf("%d %d %d %d %d %d %d %d %d\n", st.f, st.f > 127, st.h, st.b, st2.f, st2.h,
+           arr[0], arr[1] > 0, bytes[0] + bytes[1]);
+    // char -> unsigned char -> wider
+    unsigned char uc = ch;
+    unsigned long long wide = uc;
+    printf("%d %d %llu\n", uc, uc > 127, wide);
+    // a load through a cast pointer to a narrow type promotes too
+    nis_u16 halves[1];
+    halves[0] = 1000;
+    void *vp = halves;
+    void *bp = bytes;
+    printf("%d %d %d\n", *(nis_u16 *)vp - 70000 < 0, *(unsigned char *)bp - 300 < 0,
+           *(unsigned char *)bp);
+    // globals / static locals
+    printf("%d %d %d %d %d %d\n", nis_g > 0, nis_g, nis_h[0] > 0, nis_h[1], nis_gb,
+           nis_static());
+    // stores and loads through pointer arithmetic keep the pointee's signedness
+    unsigned short ua[2];
+    unsigned short *up = ua;
+    *(up + 1) = 40000;
+    unsigned char raw[3];
+    raw[0] = 0x90; raw[1] = 0xF0; raw[2] = 0x81;
+    unsigned char *rp = raw, *rq = raw + 2;
+    unsigned char **rpp = &rp;
+    int pick = 0;
+    printf("%d %d %d %d %d %d\n", ua[1], *(up + 1), *(rp + 1), *(pick ? rp : rq),
+           *(*rpp + 1), *(rp + 1) > 0x80);
+    // a call returning `unsigned char *` (directly and through a pointer)
+    nis_idfn idf = nis_id;
+    printf("%d %d %d\n", *nis_id(raw), *nis_id(raw) >= 0x80, *idf(raw) >= 0x80);
+    // a union member written through a wider member
+    union nis_u un;
+    un.i = 0xFFFFFFFF;
+    printf("%d %d\n", un.c > 0, un.c);
+    // a narrow value read through a pointer to a union member, a struct in
+    // a union, or after byte writes is narrowed when converted
+    union nis_w wu;
+    wu.i = 0x12345;
+    short *wps = &wu.s;
+    unsigned short *wpus = &wu.us;
+    short w1 = *wps;
+    unsigned short w2 = *wpus;
+    union nis_n nn;
+    nn.i = 0x1FFFF;
+    short w3 = nn.st.s;
+    short w4 = -1;
+    unsigned char *wcp = (unsigned char *)&w4;
+    wcp[0] = 0x34; wcp[1] = 0x12;
+    short w5 = w4;
+    printf("%d %d %d %d\n", w1, w2, w3, w5);
+    // int + pointer has the pointer's type
+    int ints[4];
+    ints[0] = 0; ints[1] = 1000; ints[2] = -5; ints[3] = 70000;
+    unsigned char k1 = 1;
+    short k3 = 3;
+    int *ip = ints;
+    printf("%d %d\n", *(k1 + ip), *(k3 + ip));
+    *(k1 + ints) = 1000;
+    printf("%d\n", ints[1]);
+    // pointee signedness through `char *` arrays, `&x[i]` and member calls
+    unsigned char *pa[2];
+    pa[0] = raw; pa[1] = raw + 1;
+    struct nis_fs fs;
+    fs.f = nis_id;
+    printf("%d %d %d %d\n", *pa[1] - 256, *&raw[1] - 256, *(&raw[0] + 2) - 256,
+           *fs.f(raw) - 256);
+    // `p - q` is a ptrdiff_t, as wide as a long long here
+    printf("%d\n", (int)(sizeof(ip - ip) == sizeof(long long)));
+    return 0;
+}
