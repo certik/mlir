@@ -1,0 +1,26 @@
+extern int printf(const char *fmt, ...);
+extern int snprintf(char *buf, unsigned long size, const char *fmt, ...);
+// The runtime's printf/snprintf (corec-stdlib -> corec base_vsnprintf on the
+// wasm/ELF/Mach-O targets, host libc on native) must match C: hh/h convert
+// the promoted int (#310), flags/width/precision apply (#322), %g follows C
+// (#318), and snprintf returns the full length, also for (NULL, 0) and on
+// truncation.
+int main() {
+    printf("%hhd %hhu %hhx %hd %hu\n", 200, -1, 0x1234, 70000, -1);
+    printf("[\\%02X][%5d][%-5d][%05d][%+d][% d]\n", 10, -42, -42, -42, 5, 5);
+    printf("[%.3d][%#x][%#o][%*d][%-*s][%.2s]\n", 7, 255, 8, 4, 9, 4, "ab", "xyz");
+    unsigned long long one = 1;
+    long long llmin = (long long)(one << 63);
+    unsigned long long ullmax = 0 - one;
+    printf("[%lld][%llu][%08.2f]\n", llmin, ullmax, -1.5);
+    // -0.0 via a multiply: tinyC lowers unary minus as 0.0 - x, which
+    // gives +0.0 for x == 0.0.
+    double zero = 0.0;
+    double nz = zero * -1.0;
+    printf("%g %g %g %.3g %G %#.0f\n", nz, 1e300, 1e-10, 3.14159, 1e6, 2.0);
+    char buf[4];
+    int n = snprintf(buf, sizeof(buf), "%d", 123456);
+    int m = snprintf(0, 0, "%s-%d", "abc", -7);
+    printf("%d %s %d\n", n, buf, m);
+    return 0;
+}
