@@ -9,6 +9,9 @@ typedef signed char nis_i8;
 
 struct nis_s { unsigned char f; short h; bool b; };
 union nis_u { unsigned char c; unsigned i; };
+union nis_w { int i; short s; unsigned short us; };
+union nis_n { int i; struct { short s; unsigned char c; } st; };
+struct nis_fs { unsigned char *(*f)(unsigned char *); };
 
 // global and static-local initializers convert to the declared type
 unsigned char nis_g = -1;
@@ -109,5 +112,37 @@ int main() {
     union nis_u un;
     un.i = 0xFFFFFFFF;
     printf("%d %d\n", un.c > 0, un.c);
+    // a narrow value read through a pointer to a union member, a struct in
+    // a union, or after byte writes is narrowed when converted
+    union nis_w wu;
+    wu.i = 0x12345;
+    short *wps = &wu.s;
+    unsigned short *wpus = &wu.us;
+    short w1 = *wps;
+    unsigned short w2 = *wpus;
+    union nis_n nn;
+    nn.i = 0x1FFFF;
+    short w3 = nn.st.s;
+    short w4 = -1;
+    unsigned char *wcp = (unsigned char *)&w4;
+    wcp[0] = 0x34; wcp[1] = 0x12;
+    short w5 = w4;
+    printf("%d %d %d %d\n", w1, w2, w3, w5);
+    // int + pointer has the pointer's type
+    int ints[4];
+    ints[0] = 0; ints[1] = 1000; ints[2] = -5; ints[3] = 70000;
+    unsigned char k1 = 1;
+    short k3 = 3;
+    int *ip = ints;
+    printf("%d %d\n", *(k1 + ip), *(k3 + ip));
+    *(k1 + ints) = 1000;
+    printf("%d\n", ints[1]);
+    // pointee signedness through `char *` arrays, `&x[i]` and member calls
+    unsigned char *pa[2];
+    pa[0] = raw; pa[1] = raw + 1;
+    struct nis_fs fs;
+    fs.f = nis_id;
+    printf("%d %d %d %d\n", *pa[1] - 256, *&raw[1] - 256, *(&raw[0] + 2) - 256,
+           *fs.f(raw) - 256);
     return 0;
 }

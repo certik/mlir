@@ -196,33 +196,25 @@ typedef struct {
     // What is known about the most recently emitted i32 values (see
     // fact_put): lets emit_narrow_i32 / bool conversion fold constants and
     // skip narrowing a value that is already in range.
-    // A ring of the last 16 facts, as parallel arrays:
-    MLIR_ValueHandle fact_v[16];
-    int              fact_kind[16];      // FACT_CONST or FACT_RANGE
-    int              fact_bits[16];      // FACT_RANGE: fits `bits` bits ...
-    bool             fact_unsigned[16];  // ... zero-extended (else sign-extended)
-    int64_t          fact_c[16];         // FACT_CONST: the value
-    int              n_facts;
+    // The last value a fact was recorded for, and the fact:
+    MLIR_ValueHandle fact_v;
+    int              fact_kind;          // FACT_CONST or FACT_RANGE (0: none)
+    int              fact_bits;          // FACT_RANGE: fits `bits` bits ...
+    bool             fact_unsigned;      // ... zero-extended (else sign-extended)
+    int64_t          fact_c;             // FACT_CONST: the value
 } E;
 
 enum { FACT_CONST = 1, FACT_RANGE = 2 };
 
 static void fact_put(E *e, MLIR_ValueHandle v, int kind, int bits, bool is_unsigned,
                      int64_t c) {
-    int i = e->n_facts % 16;
-    e->n_facts++;
-    e->fact_v[i] = v; e->fact_kind[i] = kind; e->fact_bits[i] = bits;
-    e->fact_unsigned[i] = is_unsigned; e->fact_c[i] = c;
+    e->fact_v = v; e->fact_kind = kind; e->fact_bits = bits;
+    e->fact_unsigned = is_unsigned; e->fact_c = c;
 }
 
-// Index of the newest fact about `v`, or -1.
+// The fact kind recorded for `v` (0 if none); its details are in e->fact_*.
 static int fact_get(E *e, MLIR_ValueHandle v) {
-    int n = e->n_facts < 16 ? e->n_facts : 16;
-    for (int k = 0; k < n; k++) {
-        int i = (e->n_facts - 1 - k) % 16;
-        if (e->fact_v[i] == v) return i;
-    }
-    return -1;
+    return (e->fact_kind && e->fact_v == v) ? e->fact_kind : 0;
 }
 
 // All emit-time diagnostics route through this macro so they carry a line
@@ -492,18 +484,18 @@ static MLIR_ValueHandle emit_binop(E *e, MLIR_OpType type, string name,
 static MLIR_ValueHandle emit_narrow_i32(E *e, MLIR_ValueHandle v, int bits,
                                         bool is_unsigned) {
     int f = fact_get(e, v);
-    if (f >= 0 && e->fact_kind[f] == FACT_CONST) {
+    if (f == FACT_CONST) {
         Type t = (Type){0};
         t.int_bits = bits;
         t.int_unsigned = is_unsigned;
-        return emit_const_i32(e, tinyc_narrow_const(e->fact_c[f], t));
+        return emit_const_i32(e, tinyc_narrow_const(e->fact_c, t));
     }
     // Already in range: an unsigned b'-bit value fits an unsigned target of
     // b >= b' bits, but a signed target only when b' < b.
-    if (f >= 0 && e->fact_kind[f] == FACT_RANGE &&
-        (is_unsigned ? (e->fact_unsigned[f] && e->fact_bits[f] <= bits)
-                     : (e->fact_unsigned[f] ? e->fact_bits[f] < bits
-                                            : e->fact_bits[f] <= bits)))
+    if (f == FACT_RANGE &&
+        (is_unsigned ? (e->fact_unsigned && e->fact_bits <= bits)
+                     : (e->fact_unsigned ? e->fact_bits < bits
+                                         : e->fact_bits <= bits)))
         return v;
     MLIR_ValueHandle r;
     if (is_unsigned) {
@@ -1098,9 +1090,8 @@ static MLIR_ValueHandle bool_to_i32(E *e, MLIR_ValueHandle b) {
 static MLIR_ValueHandle emit_bool_i32(E *e, EVal v) {
     if (!v.is_float && !v.is_ptr && !v.is_i64) {
         int f = fact_get(e, v.val);
-        if (f >= 0 && e->fact_kind[f] == FACT_CONST) return emit_const_i32(e, e->fact_c[f] != 0);
-        if (f >= 0 && e->fact_kind[f] == FACT_RANGE && e->fact_unsigned[f] &&
-            e->fact_bits[f] == 1) return v.val;
+        if (f == FACT_CONST) return emit_const_i32(e, e->fact_c != 0);
+        if (f == FACT_RANGE && e->fact_unsigned && e->fact_bits == 1) return v.val;
     }
     return bool_to_i32(e, emit_to_bool_i1(e, v));
 }
@@ -1179,9 +1170,9 @@ static EVal load_lvalue(E *e, LVal lv) {
     } else if (lv.elem_ty == e->i32 && lv.narrow_bits) {
         // A char / short / bool in an i32 slot. Every store narrows it, but a
         // union member may have been written through a wider member.
+        // (No range fact here: a store through a pointer to a union member
+        // or through an `unsigned char *` alias can leave a wider value.)
         if (lv.in_union) r.val = emit_narrow_i32(e, r.val, lv.narrow_bits, lv.is_unsigned);
-        else fact_put(e, r.val, FACT_RANGE, lv.is_bool ? 1 : lv.narrow_bits,
-                      lv.is_bool || lv.is_unsigned, 0);
     }
     r.is_float = (lv.elem_ty == e->f32 || lv.elem_ty == e->f64);
     r.is_f64 = (lv.elem_ty == e->f64);
@@ -3796,10 +3787,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     r.val = emit_binop(e, OP_TYPE_ARITH_ANDI, str_lit("arith.andi"), ity, a.val, b.val);
                     if (!i64m) {
                         // `x & 0xFF`: the result fits the mask's width.
-                        int fa = fact_get(e, a.val), fb = fact_get(e, b.val);
                         int64_t m = -1;
-                        if (fb >= 0 && e->fact_kind[fb] == FACT_CONST) m = e->fact_c[fb];
-                        else if (fa >= 0 && e->fact_kind[fa] == FACT_CONST) m = e->fact_c[fa];
+                        if (fact_get(e, b.val) == FACT_CONST ||
+                            fact_get(e, a.val) == FACT_CONST) m = e->fact_c;
                         if (m >= 0 && m <= 0xFFFF) {
                             int bits = 1;
                             while (bits < 16 && (m >> bits) != 0) bits++;
@@ -5819,6 +5809,18 @@ static int64_t type_align(E *e, Type t);
 // struct fields by name. Returns TY_VOID to signal "unsupported" (the
 // caller emits an error). Side-effecting expressions are still safe
 // because we never evaluate them.
+// A pointer or an array (which decays to one in arithmetic).
+static bool type_is_pointerish(Type t) {
+    switch (t.kind) {
+        case TY_PTR_I32: case TY_PTR_CHAR: case TY_PTR_STRUCT: case TY_PTR_VOID:
+        case TY_PTR_PTR: case TY_FNPTR: case TY_ARRAY_I32: case TY_ARRAY_F32:
+        case TY_ARRAY_PTR_STRUCT: case TY_ARRAY_PTR_CHAR: case TY_ARRAY_STRUCT:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
     Type t = (Type){0};
     switch (ex->kind) {
@@ -5853,7 +5855,12 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
         }
         case EX_ADDR: {
             Type inner = infer_expr_type(e, sc, ex->lhs);
-            if (inner.kind == TY_I32) { t.kind = TY_PTR_I32; return t; }
+            if (inner.kind == TY_I32) {
+                t.kind = TY_PTR_I32;
+                t.int_bits = inner.int_bits; t.int_unsigned = inner.int_unsigned;
+                t.is_bool = inner.is_bool;
+                return t;
+            }
             if (inner.kind == TY_I64) { t.kind = TY_PTR_I32; t.ptr_is_i64 = true; return t; }
             if (inner.kind == TY_F32) { t.kind = TY_PTR_I32; t.ptr_is_f32 = true; return t; }
             if (inner.kind == TY_F64) { t.kind = TY_PTR_I32; t.ptr_is_f64 = true; return t; }
@@ -5884,10 +5891,20 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
                 if (base.kind == TY_PTR_I32 && base.ptr_is_f64) { t.kind = TY_F64; return t; }
                 t.kind = (base.kind == TY_ARRAY_I32 && base.array_elem_is_i64) ||
                          (base.kind == TY_PTR_I32 && base.ptr_is_i64) ? TY_I64 : TY_I32;
+                t.int_bits = base.int_bits; t.int_unsigned = base.int_unsigned;
+                t.is_bool = base.is_bool;
                 return t;
             }
-            if (base.kind == TY_PTR_CHAR) { t.kind = TY_I32; return t; }
-            if (base.kind == TY_ARRAY_PTR_CHAR) { t.kind = TY_PTR_CHAR; return t; }
+            if (base.kind == TY_PTR_CHAR) {
+                t.kind = TY_I32;
+                t.int_bits = base.int_bits; t.int_unsigned = base.int_unsigned;
+                return t;
+            }
+            if (base.kind == TY_ARRAY_PTR_CHAR) {
+                t.kind = TY_PTR_CHAR;
+                t.int_bits = base.int_bits; t.int_unsigned = base.int_unsigned;
+                return t;
+            }
             if (base.kind == TY_ARRAY_PTR_STRUCT) {
                 t.kind = TY_PTR_STRUCT; t.struct_name = base.struct_name; return t;
             }
@@ -5909,6 +5926,11 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
             if (sy && sy->type.kind == TY_FNPTR && sy->type.fnptr_ret) {
                 return *sy->type.fnptr_ret;
             }
+            // Call through a callable expression (`s.f(x)`, `(*fp)(x)`).
+            if (ex->callee.size == 0 && ex->lhs) {
+                Type ft = infer_expr_type(e, sc, ex->lhs);
+                if (ft.kind == TY_FNPTR && ft.fnptr_ret) return *ft.fnptr_ret;
+            }
             return t;
         }
         case EX_CAST: return ex->cast_type;
@@ -5919,6 +5941,12 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
             Type b = infer_expr_type(e, sc, ex->rhs);
             // Usual arithmetic conversions (simplified): if either side
             // is i64 the result is i64; if either is f32, result is f32.
+            // Pointer arithmetic (`p + i`, `i + p`, `p - i`) has the
+            // pointer's type; `p - q` is an int.
+            bool ap = type_is_pointerish(a), bp = type_is_pointerish(b);
+            if (ap && bp) { t.kind = TY_I32; return t; }
+            if (ap) return a;
+            if (bp) return b;
             if (a.kind == TY_F64 || b.kind == TY_F64) { t.kind = TY_F64; return t; }
             if (a.kind == TY_F32 || b.kind == TY_F32) { t.kind = TY_F32; return t; }
             if (a.kind == TY_I64 || b.kind == TY_I64) { t.kind = TY_I64; return t; }

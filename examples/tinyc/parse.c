@@ -1271,8 +1271,15 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 // type info is intentionally erased here; downstream
                 // uses (loads, stores, passing the array name as a
                 // function argument) all operate on the raw pointer.
+                // A `char *` element keeps its char width / signedness
+                // (for `*arr[i]` through `unsigned char *`).
+                Type elem = s->decl_type;
                 s->decl_type = (Type){0};
                 s->decl_type.kind = TY_ARRAY_PTR_CHAR;
+                if (elem.kind == TY_PTR_CHAR) {
+                    s->decl_type.int_bits = elem.int_bits;
+                    s->decl_type.int_unsigned = elem.int_unsigned;
+                }
                 s->decl_type.array_len = alen;
                 s->decl_type.array_len_expr = aexpr;
             } else {
