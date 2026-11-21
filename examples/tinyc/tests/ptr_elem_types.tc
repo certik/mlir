@@ -1,0 +1,63 @@
+extern int printf(const char *fmt, ...);
+
+// Pointer values keep their element type and their pointee's signedness:
+// - `double *` / `long long *` / struct pointer differences divide by the
+//   element size (#272: they divided by 4);
+// - `*pp++` and `*(pp + 1)` on a `char **` give a `char *` that steps by
+//   1 byte, and `*lpp` on a `long long **` one that steps by 8 (#273);
+// - a struct array decays to a pointer that steps by the struct, and
+//   `sp++` on a struct pointer steps by the struct;
+// - `int + pointer` and `array + int` have the pointer's type, so
+//   `*(1 + uarr())` reads its `unsigned char` zero-extended (#274);
+// - `p - q` is a ptrdiff_t (`long`) value, not an int;
+// - `p - n` with a 64-bit `n` negates `n` at its own width.
+
+struct S { int a; double b; int c; };
+static struct S g_s[4];
+static unsigned char g_ub[4];
+static unsigned char *g_up;
+unsigned char *uarr(void) { return g_ub; }
+unsigned char **upp(void) { g_up = g_ub; return &g_up; }
+unsigned int *uint_arr(void) { static unsigned int u[2]; u[1] = 3000000000u; return u; }
+
+int main() {
+    double *a = (double *)malloc(4 * sizeof(double));
+    double *b = a;
+    b++;
+    long long n = b - a;
+    long long *l = (long long *)malloc(4 * sizeof(long long));
+    struct S *s0 = g_s;
+    struct S *s3 = &g_s[3];
+    printf("%d %d %d %d %d\n", (int)n, (int)(a + 3 - a), (int)(a - (a + 2)),
+           (int)(&l[3] - l), (int)(s3 - s0));
+    printf("%d %d\n", _Generic(s3 - s0, long: 1, default: 0), (int)((s0 - s3) * 2));
+
+    const char *names[2];
+    names[0] = "abcdef"; names[1] = "xyz";
+    const char **pp = names;
+    printf("%c", *(*pp++ + 2));
+    printf("%c", *(*pp + 1));
+    printf("%c", *(*--pp + 3));
+    printf("%c\n", *(*(pp + 1) + 2));
+    l[1] = 5000000000LL; l[2] = 6000000000LL;
+    long long **lpp = &l;
+    a[2] = 2.5;
+    double **dpp = &a;
+    printf("%lld %g\n", *(*lpp + 2), *(*dpp + 2));
+
+    int i;
+    for (i = 0; i < 4; i++) g_s[i].a = 10 * i;
+    struct S *sp = g_s + 1;
+    struct S *old = sp++;
+    printf("%d %d %d\n", old->a, sp->a, (g_s + 3)->a);
+
+    g_ub[1] = 201;
+    unsigned char *p = g_ub;
+    int k = 1;
+    printf("%d %d %d %d %d %d\n", *(uarr() + 1), *(1 + uarr()), *(p + 1),
+           *(k ? p + 1 : p), *(*upp() + 1), p[1]);
+    printf("%d\n", *(uint_arr() + 1) > 0);
+    long long one = 1;
+    printf("%d %c\n", *(p + 2 - one), *("xyz" + 2 - one));
+    return 0;
+}
