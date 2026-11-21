@@ -1597,3 +1597,10 @@ targets = ["native", "wasm", "macho", "elf"]
 # unsigned variants for hex/octal or a u suffix) that holds its value (#247);
 # mixed-width operations keep the 64-bit operand's signedness (#136).
 expected_stdout = "4294967296 4294967296 4294967296 4294967296 4294967296 922337203685477579\n2147483648 -2147483648 4294967296\n-5000000000 -5000000000 18446744073709551615\n4 8 4 4 8\n4294967295 4000000000 4294967295 9abcdef0\n1 0 1 1\n1 -3 -1\n1 -3 -1\n-4 15\n12 8\n60 8 15 1\n1 4294967295\n1 1 0\n1\n"
+
+[[test]]
+name = "printf_formats"
+targets = ["native", "wasm", "macho", "elf"]
+# printf/snprintf length modifiers, flags, width, precision, %g and the
+# snprintf return value through the target runtime (#310, #318, #322).
+expected_stdout = "-56 255 34 4464 65535\n[\\0A][  -42][-42  ][-0042][+5][ 5]\n[007][0xff][010][   9][ab  ][xy]\n[-9223372036854775808][18446744073709551615][-0001.50]\n-0 1e+300 1e-10 3.14 1E+06 2.\n6 123 6\n"
