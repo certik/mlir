@@ -1761,14 +1761,18 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                     MLIR_ValueHandle slot = emit_gep(e, sym_addr(e, s),
                         arr_ty, path1, 2, dyn1, 1);
                     MLIR_ValueHandle inner = emit_load_v(e, slot, e->ptr);
-                    MLIR_TypeHandle elem = (s->type.kind == TY_ARRAY_PTR_CHAR)
-                        ? e->i8 : e->ptr;
+                    // The element pointer type (`pointee`, when the
+                    // declaration kept it) gives the stride and the load.
+                    MLIR_TypeHandle elem = s->type.pointee
+                        ? pointee_elem_type(e, s->type.pointee)
+                        : (s->type.kind == TY_ARRAY_PTR_CHAR) ? e->i8 : e->ptr;
                     int32_t *path2 = arena_new_array(e->arena, int32_t, 1);
                     path2[0] = LLVM_GEP_DYN;
                     MLIR_ValueHandle *dyn2 = arena_new_array(e->arena, MLIR_ValueHandle, 1);
                     dyn2[0] = j_v;
                     r.base_ptr = emit_gep(e, inner, elem, path2, 1, dyn2, 1);
                     r.elem_ty = elem;
+                    lval_set_ctype(&r, s->type.pointee);
                     return r;
                 }
             }
@@ -3602,6 +3606,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         Sym *vs = lookup(e, sc, ex->lhs->name);
                         if (vs) {
                             if (vs->type.kind == TY_PTR_PTR && vs->type.pointee) {
+                                v = ptr_eval_of_type(e, v.val, vs->type.pointee);
+                            } else if ((vs->type.kind == TY_ARRAY_PTR_CHAR ||
+                                        vs->type.kind == TY_ARRAY_PTR_STRUCT) &&
+                                       vs->type.pointee) {
+                                // An element of `T *arr[N]`: a T *.
                                 v = ptr_eval_of_type(e, v.val, vs->type.pointee);
                             } else if (vs->type.kind == TY_ARRAY_PTR_CHAR) {
                                 v.is_str = true;
@@ -6363,6 +6372,9 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
                 return int_elem_ctype(&base);
             }
             if (base.kind == TY_PTR_CHAR) return int_elem_ctype(&base);
+            if ((base.kind == TY_ARRAY_PTR_CHAR || base.kind == TY_ARRAY_PTR_STRUCT) &&
+                base.pointee)
+                return *base.pointee;
             if (base.kind == TY_ARRAY_PTR_CHAR) {
                 t.kind = TY_PTR_CHAR;
                 t.int_bits = base.int_bits; t.int_unsigned = base.int_unsigned;
