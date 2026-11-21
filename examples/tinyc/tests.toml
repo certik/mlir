@@ -107,7 +107,7 @@ expected_stdout = "65536\n65536\n2\n1024\n1\n3\n13\n511\n-1\n100\n-1\n2\n15\n"
 [[test]]
 name = "enum_typed_fold"
 targets = ["native", "wasm", "macho", "elf"]
-expected_stdout = "1 -1 -2147483648 3 -1\n15 5 6 97 -1 0\n2147483647 -2147483648 -2147483648 -2147483648 -1\n20 48 24\n3 7\n"
+expected_stdout = "1 -1 -2147483648 3 -1\n15 5 6 97 -1 0\n2147483647 -2147483648 -2147483648 -2147483648 -1\n7 0 1\n20 48 24\n3 7\n"
 
 [[test]]
 name = "array_of_struct_init"

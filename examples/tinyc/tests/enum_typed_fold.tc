@@ -8,6 +8,9 @@ extern int printf(const char *fmt, ...);
 enum { B = -1u > 0, C = 0xffffffffu, D = 1 << 31, E = 10 / 3, F = -7 % 3 };
 enum { J = ~0u >> 28, K = (1 ? 5 : 6), L = K + 1, M = 'a', N = '\xff', O = -1 < 0u };
 enum { P = 2147483647, Q, R = -2147483647 - 1, S = 0x7fffffff + 1, T = 1 ? -1 : 0u };
+// Only the taken branch of ?: (and the evaluated operand of && / ||) needs
+// a value; the other only a type.
+enum { V = 1 ? 7 : 1 / 0, W = 0 && 1 % 0, X = 1 || 1 << 40 };
 
 static int g[L * 2];
 
@@ -15,6 +18,7 @@ int main(void) {
     printf("%d %d %d %d %d\n", B, C, D, E, F);
     printf("%d %d %d %d %d %d\n", J, K, L, M, N, O);
     printf("%d %d %d %d %d\n", P, Q, R, S, T);
+    printf("%d %d %d\n", V, W, X);
     int a[K];
     int i;
     for (i = 0; i < K; i++) a[i] = i * L;

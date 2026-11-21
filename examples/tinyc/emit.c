@@ -2426,18 +2426,18 @@ static FoldVal fold_int(int64_t v) {
     return r;
 }
 
-// Fold both operands of a binary expression and convert them to their
-// common type (C's usual arithmetic conversions).
-static bool fold_common(Expr *l, Expr *r, FoldLeafFn leaf, void *ctx,
-                        FoldVal *a, FoldVal *b) {
-    if (!tinyc_fold(l, leaf, ctx, a) || !tinyc_fold(r, leaf, ctx, b)) return false;
+static bool fold_expr(Expr *ex, FoldLeafFn leaf, void *ctx, bool lenient,
+                      FoldVal *out);
+
+// Convert two folded operands to their common type (C's usual arithmetic
+// conversions).
+static void fold_convert(FoldVal *a, FoldVal *b) {
     bool i64 = a->is_i64 || b->is_i64;
     bool u;
     if (a->is_i64 == b->is_i64) u = a->is_unsigned || b->is_unsigned;
     else u = a->is_i64 ? a->is_unsigned : b->is_unsigned;
     a->v = fold_norm(a->v, i64, u); a->is_i64 = i64; a->is_unsigned = u;
     b->v = fold_norm(b->v, i64, u); b->is_i64 = i64; b->is_unsigned = u;
-    return true;
 }
 
 // Constant-fold a literal-only integer expression with C semantics: each
@@ -2447,7 +2447,10 @@ static bool fold_common(Expr *l, Expr *r, FoldLeafFn leaf, void *ctx,
 //   EX_UN: OP_NEG, OP_BNOT, OP_NOT
 //   EX_BIN: + - * / % & | ^ << >> < <= > >= == != && ||
 //   EX_TERNARY when the condition and both branches fold (the result
-//     has the branches' common type, so a float branch blocks folding)
+//     has the branches' common type, so a float branch blocks folding);
+//     the branch not taken, like the right operand of && / || that is
+//     not evaluated, only needs an integer constant type, not a value
+//     (`1 ? 7 : 1 / 0`)
 //   anything else `leaf` folds (sizeof in the emitter, enumerators in
 //     the parser); `leaf` may be NULL.
 //
@@ -2456,7 +2459,14 @@ static bool fold_common(Expr *l, Expr *r, FoldLeafFn leaf, void *ctx,
 //     folds them)
 //   - division / modulo by zero and signed MIN / -1
 //   - shifts by a negative count or by the left operand's width or more
+// except in an operand that is not evaluated (`lenient`): there they give
+// 0, since only the operand's type matters.
 bool tinyc_fold(Expr *ex, FoldLeafFn leaf, void *ctx, FoldVal *out) {
+    return fold_expr(ex, leaf, ctx, false, out);
+}
+
+static bool fold_expr(Expr *ex, FoldLeafFn leaf, void *ctx, bool lenient,
+                      FoldVal *out) {
     if (!ex) return false;
     switch (ex->kind) {
         case EX_INT: {
@@ -2469,7 +2479,7 @@ bool tinyc_fold(Expr *ex, FoldLeafFn leaf, void *ctx, FoldVal *out) {
         }
         case EX_UN: {
             FoldVal a;
-            if (!tinyc_fold(ex->lhs, leaf, ctx, &a)) return false;
+            if (!fold_expr(ex->lhs, leaf, ctx, lenient, &a)) return false;
             switch (ex->op) {
                 case OP_NEG:
                     a.v = fold_norm((int64_t)(0 - (uint64_t)a.v), a.is_i64, a.is_unsigned);
@@ -2486,12 +2496,14 @@ bool tinyc_fold(Expr *ex, FoldLeafFn leaf, void *ctx, FoldVal *out) {
             FoldVal a, b;
             if (ex->op == OP_SHL || ex->op == OP_SHR) {
                 // The result has the left operand's type.
-                if (!tinyc_fold(ex->lhs, leaf, ctx, &a) ||
-                    !tinyc_fold(ex->rhs, leaf, ctx, &b))
+                if (!fold_expr(ex->lhs, leaf, ctx, lenient, &a) ||
+                    !fold_expr(ex->rhs, leaf, ctx, lenient, &b))
                     return false;
                 int width = a.is_i64 ? 64 : 32;
-                if (b.v < 0 || b.v >= width) return false;
-                if (ex->op == OP_SHL) {
+                if (b.v < 0 || b.v >= width) {
+                    if (!lenient) return false;
+                    a.v = 0;
+                } else if (ex->op == OP_SHL) {
                     a.v = fold_norm((int64_t)((uint64_t)a.v << b.v), a.is_i64, a.is_unsigned);
                 } else if (a.is_unsigned) {
                     a.v = (int64_t)((uint64_t)a.v >> b.v);  // zero-extended when 32-bit
@@ -2502,14 +2514,20 @@ bool tinyc_fold(Expr *ex, FoldLeafFn leaf, void *ctx, FoldVal *out) {
                 return true;
             }
             if (ex->op == OP_AND || ex->op == OP_OR) {
-                if (!tinyc_fold(ex->lhs, leaf, ctx, &a) ||
-                    !tinyc_fold(ex->rhs, leaf, ctx, &b))
+                // The right operand is not evaluated when the left one
+                // decides the result.
+                if (!fold_expr(ex->lhs, leaf, ctx, lenient, &a)) return false;
+                bool decided = ex->op == OP_AND ? a.v == 0 : a.v != 0;
+                if (!fold_expr(ex->rhs, leaf, ctx, lenient || decided, &b))
                     return false;
                 bool t = ex->op == OP_AND ? (a.v != 0 && b.v != 0) : (a.v != 0 || b.v != 0);
                 *out = fold_int(t ? 1 : 0);
                 return true;
             }
-            if (!fold_common(ex->lhs, ex->rhs, leaf, ctx, &a, &b)) return false;
+            if (!fold_expr(ex->lhs, leaf, ctx, lenient, &a) ||
+                !fold_expr(ex->rhs, leaf, ctx, lenient, &b))
+                return false;
+            fold_convert(&a, &b);
             bool u = a.is_unsigned;
             uint64_t ua = (uint64_t)a.v, ub = (uint64_t)b.v;
             FoldVal r = a;
@@ -2518,14 +2536,20 @@ bool tinyc_fold(Expr *ex, FoldLeafFn leaf, void *ctx, FoldVal *out) {
                 case OP_SUB: r.v = (int64_t)(ua - ub); break;
                 case OP_MUL: r.v = (int64_t)(ua * ub); break;
                 case OP_DIV: case OP_MOD: {
-                    if (b.v == 0) return false;
-                    if (u) {
+                    if (b.v == 0) {
+                        if (!lenient) return false;
+                        r.v = 0;
+                    } else if (u) {
                         r.v = (int64_t)(ex->op == OP_DIV ? ua / ub : ua % ub);
                     } else {
                         int64_t min = a.is_i64 ? (int64_t)0x8000000000000000ull
                                                : -(int64_t)0x80000000ll;
-                        if (a.v == min && b.v == -1) return false;
-                        r.v = ex->op == OP_DIV ? a.v / b.v : a.v % b.v;
+                        if (a.v == min && b.v == -1) {
+                            if (!lenient) return false;
+                            r.v = 0;
+                        } else {
+                            r.v = ex->op == OP_DIV ? a.v / b.v : a.v % b.v;
+                        }
                     }
                     break;
                 }
@@ -2546,11 +2570,16 @@ bool tinyc_fold(Expr *ex, FoldLeafFn leaf, void *ctx, FoldVal *out) {
         }
         case EX_TERNARY: {
             // The result has the branches' common type, so both must fold:
-            // `0 ? 1.5 : 3` is a double, not the int 3.
+            // `0 ? 1.5 : 3` is a double, not the int 3. Only the taken
+            // branch is evaluated.
             FoldVal c, a, b;
-            if (!tinyc_fold(ex->lhs, leaf, ctx, &c)) return false;
-            if (!fold_common(ex->rhs, ex->lvalue, leaf, ctx, &a, &b)) return false;
-            *out = c.v != 0 ? a : b;
+            if (!fold_expr(ex->lhs, leaf, ctx, lenient, &c)) return false;
+            bool then = c.v != 0;
+            if (!fold_expr(ex->rhs, leaf, ctx, lenient || !then, &a) ||
+                !fold_expr(ex->lvalue, leaf, ctx, lenient || then, &b))
+                return false;
+            fold_convert(&a, &b);
+            *out = then ? a : b;
             return true;
         }
         default:
