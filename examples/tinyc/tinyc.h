@@ -183,7 +183,7 @@ typedef enum {
     EX_FLOAT,          // float literal
     EX_STR,            // string literal (name = decoded bytes incl. NUL)
     EX_NULL,           // null pointer literal
-    EX_SIZEOF,         // sizeof(<type>) — uses cast_type
+    EX_SIZEOF,         // sizeof(<type>) / _Alignof(<type>) — uses cast_type
     EX_CAST,           // (T*)expr  — uses cast_type and lhs
     EX_VAR,            // variable reference (lvalue when used as such)
     EX_BIN,            // binary op (kind in `op`)
@@ -265,6 +265,7 @@ struct Expr {
     // case the emitter infers the type from the expression.
     Type cast_type;
     bool sizeof_is_expr;
+    bool is_alignof;       // EX_SIZEOF from `_Alignof`: the alignment, not the size
     // For EX_COMPOUND with designated initializers: parallel to `args`.
     // compound_field_names[i].size == 0 indicates a positional entry; a
     // non-empty name selects the named field. NULL when there are no
@@ -493,6 +494,7 @@ typedef enum {
     TC_TK_KW_UNION,
     TC_TK_KW_NULL,
     TC_TK_KW_SIZEOF,
+    TC_TK_KW_ALIGNOF,             // _Alignof: parsed like sizeof (EX_SIZEOF)
     TC_TK_KW_CHAR,
     TC_TK_KW_TYPEDEF,
     TC_TK_KW_EXTERN,

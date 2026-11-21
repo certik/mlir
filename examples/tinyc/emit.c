@@ -2731,16 +2731,18 @@ static bool emit_fold_leaf(void *ctx, Expr *ex, bool lenient, FoldVal *out) {
         if (ex->lhs && ex->lhs->kind == EX_STR) {
             // sizeof("string literal") yields the array size
             // including the trailing NUL, matching standard C.
-            *out = fold_size(fc->e, (int64_t)ex->lhs->name.size);
+            *out = fold_size(fc->e, ex->is_alignof ? 1 : (int64_t)ex->lhs->name.size);
             return true;
         }
         ty = infer_expr_type(fc->e, fc->sc, ex->lhs);
         if (ty.kind == TY_VOID) return false;
-        *out = fold_size(fc->e, c_sizeof_expr(fc->e, fc->sc, ex->lhs));
+        *out = fold_size(fc->e, ex->is_alignof ? type_align(fc->e, ty)
+                                               : c_sizeof_expr(fc->e, fc->sc, ex->lhs));
         return true;
     }
     if (ex->cast_type.kind == TY_VOID) return false;
-    *out = fold_size(fc->e, type_size(fc->e, ex->cast_type));
+    *out = fold_size(fc->e, ex->is_alignof ? type_align(fc->e, ex->cast_type)
+                                           : type_size(fc->e, ex->cast_type));
     return true;
 }
 
@@ -3099,16 +3101,18 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             int64_t n = 1;
             if (ex->sizeof_is_expr) {
                 if (ex->lhs && ex->lhs->kind == EX_STR) {
-                    n = (int64_t)ex->lhs->name.size;
+                    n = ex->is_alignof ? 1 : (int64_t)ex->lhs->name.size;
                 } else if (infer_expr_type(e, sc, ex->lhs).kind == TY_VOID) {
                     EMIT_ERR(e, "sizeof of unsupported expression");
                 } else {
-                    n = c_sizeof_expr(e, sc, ex->lhs);
+                    n = ex->is_alignof ? type_align(e, infer_expr_type(e, sc, ex->lhs))
+                                       : c_sizeof_expr(e, sc, ex->lhs);
                 }
             } else if (ex->cast_type.kind == TY_VOID) {
                 EMIT_ERR(e, "sizeof(void) is not allowed");
             } else {
-                n = type_size(e, ex->cast_type);
+                n = ex->is_alignof ? type_align(e, ex->cast_type)
+                                   : type_size(e, ex->cast_type);
             }
             // The result is a size_t (`unsigned long`): unsigned, and 64-bit
             // except on wasm32 (as in ast_fold and infer_expr_type).

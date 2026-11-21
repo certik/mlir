@@ -515,9 +515,10 @@ static Expr *parse_primary(P *p) {
         Expr *e = new_expr(p, EX_NULL, t.line);
         return e;
     }
-    if (t.kind == TC_TK_KW_SIZEOF) {
+    if (t.kind == TC_TK_KW_SIZEOF || t.kind == TC_TK_KW_ALIGNOF) {
         p->i++;
         Expr *e = new_expr(p, EX_SIZEOF, t.line);
+        e->is_alignof = t.kind == TC_TK_KW_ALIGNOF;
         // C also accepts `sizeof <unary-expression>` (no parens). In that
         // form the operand is always an expression, never a type-name.
         if (cur(p).kind != TC_TK_LPAREN) {
