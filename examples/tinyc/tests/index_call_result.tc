@@ -1,0 +1,46 @@
+extern int printf(const char *fmt, ...);
+
+// `a[i]` is `*(a + i)` for any pointer-valued `a`, not just a variable or
+// field: a call result (#281), a cast, `(*pp++)`, `(p + 1)` or `(c ? p : q)`.
+// The base is evaluated once, also in `f()[i] += 1` and `f()[i]++`.
+
+static int arr[4];
+static int calls;
+static unsigned char ub[4];
+static signed char sc[3];
+static long long ll[3];
+static const char *names[3];
+static int **g_pp;
+int *get(void) { return arr; }
+int *get_q(int *q) { return q; }
+int *counted(void) { calls++; return arr; }
+unsigned char *uget(void) { return ub; }
+signed char *scget(void) { return sc; }
+long long *lget(void) { return ll; }
+const char **nget(void) { return names; }
+int **ppget(void) { return g_pp; }
+
+int main() {
+    arr[1] = 41; arr[2] = 42; ub[3] = 222; sc[1] = -5; ll[2] = 7000000000LL;
+    names[0] = "abc"; names[1] = "defg"; names[2] = "hi";
+    g_pp = (int **)malloc(2 * sizeof(int *));
+    g_pp[0] = arr; g_pp[1] = arr + 1;
+    printf("%d %d %d\n", get()[2], get_q(arr)[1], get_q(arr + 1)[1]);
+    printf("%d %d %lld\n", uget()[3], scget()[1], lget()[2]);
+    printf("%c %c %d\n", nget()[1][2], *nget()[2], ppget()[1][1]);
+    get()[3] = 99;
+    uget()[0] = 300;
+    int *p = &get()[2];
+    printf("%d %d %d\n", arr[3], ub[0], *p);
+    counted()[0] += 5; counted()[0]++; ++counted()[1];
+    printf("%d %d %d\n", arr[0], arr[1], calls);
+    const char **pp = names;
+    printf("%c", (*pp++)[1]);
+    printf("%c", (*pp)[3]);
+    printf("%c\n", ((const char *)"xyz")[2]);
+    int k = 1;
+    printf("%d %d %d\n", ((unsigned char *)ub)[3], (arr + 1)[1], (k ? arr : get())[2]);
+    long idx = 2;
+    printf("%d\n", get()[idx] + get()[k]);
+    return 0;
+}

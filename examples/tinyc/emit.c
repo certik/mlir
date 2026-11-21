@@ -1461,6 +1461,18 @@ static bool field_type_noemit(E *e, Scope *sc, Expr *fe, Type *out) {
     return true;
 }
 
+// A new expression node `kind` with operands `lhs` / `rhs`, for lowering
+// one form to another (e.g. `a[i]` to `*(a + i)`).
+static Expr *synth_expr(E *e, ExprKind kind, Expr *lhs, Expr *rhs, int line) {
+    Expr *x = arena_new(e->arena, Expr);
+    *x = (Expr){0};
+    x->kind = kind;
+    x->lhs = lhs;
+    x->rhs = rhs;
+    x->line = line;
+    return x;
+}
+
 static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
     if (ex == e->compound_lv_expr) return *e->compound_lv;
     e->cur_line = ex->line;
@@ -1805,8 +1817,11 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                         return r;
                     }
                 }
-                EMIT_ERR(e, "only simple-array indexing is supported");
-                return r;
+                // Any other base (a call result, a cast, `(*pp++)`, a string
+                // literal, ...): `a[i]` is `*(a + i)`.
+                Expr *sum = synth_expr(e, EX_BIN, ex->lhs, ex->rhs, ex->line);
+                sum->op = OP_ADD;
+                return emit_lvalue(e, sc, synth_expr(e, EX_DEREF, sum, NULL, ex->line));
             }
             Sym *s = lookup(e, sc, ex->lhs->name);
             if (!s) {
