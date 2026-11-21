@@ -148,15 +148,19 @@ static char *arena_strndup(Arena *a, const char *s, size_t n) {
     o[n] = '\0';
     return o;
 }
+// Measure first, then format straight into the arena, so an output of any
+// length (e.g. a long import name) is neither truncated nor over-read.
 static char *arena_printf(Arena *a, const char *fmt, ...) {
     va_list ap;
+    va_list ap2;
     va_start(ap, fmt);
-    char tmp[128];
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_copy(ap2, ap);
+    int n = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
     if (n < 0) n = 0;
     char *o = (char *)arena_alloc(a, (size_t)n + 1);
-    memcpy(o, tmp, (size_t)n);
+    vsnprintf(o, (size_t)n + 1, fmt, ap2);
+    va_end(ap2);
     o[n] = '\0';
     return o;
 }
