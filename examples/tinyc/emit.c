@@ -6077,11 +6077,19 @@ static bool type_is_pointerish(Type t) {
 static void decay_array_type(E *e, Type *t) {
     TypeKind k = t->kind;
     if (k == TY_ARRAY_PTR_CHAR || k == TY_ARRAY_PTR_STRUCT) {
+        // The element pointer type. The parser uses TY_ARRAY_PTR_STRUCT for
+        // every non-char pointer array and keeps the element's other
+        // fields: a struct name, a function-pointer signature, or the
+        // TY_PTR_I32 flags (int / long long / float / double / void ...).
         Type *pe = arena_new(e->arena, Type);
-        *pe = (Type){0};
-        pe->kind = k == TY_ARRAY_PTR_CHAR ? TY_PTR_CHAR : TY_PTR_STRUCT;
-        pe->struct_name = t->struct_name;
-        pe->int_unsigned = t->int_unsigned;
+        *pe = *t;
+        pe->kind = k == TY_ARRAY_PTR_CHAR ? TY_PTR_CHAR
+                 : t->struct_name.size ? TY_PTR_STRUCT
+                 : t->fnptr_ret ? TY_FNPTR
+                 : TY_PTR_I32;
+        pe->array_len = 0;
+        pe->array_len2 = 0;
+        pe->array_len_expr = NULL;
         *t = (Type){0};
         t->kind = TY_PTR_PTR;
         t->pointee = pe;
@@ -6125,13 +6133,17 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
         }
         case EX_DEREF: {
             Type inner = infer_expr_type(e, sc, ex->lhs);
-            if (inner.kind == TY_PTR_I32) {
-                if (inner.ptr_is_f32) { t.kind = TY_F32; return t; }
-                if (inner.ptr_is_f64) { t.kind = TY_F64; return t; }
-                if (inner.ptr_is_i64) { t.kind = TY_I64; return t; }
-                t.kind = TY_I32; return t;
+            if (inner.kind == TY_PTR_I32 || inner.kind == TY_PTR_CHAR) {
+                // The pointee, with its width and signedness (as EX_INDEX).
+                t.kind = inner.ptr_is_f32 ? TY_F32 : inner.ptr_is_f64 ? TY_F64
+                       : inner.ptr_is_i64 ? TY_I64 : TY_I32;
+                if (t.kind == TY_I32 || t.kind == TY_I64) {
+                    t.int_bits = inner.int_bits;
+                    t.int_unsigned = inner.int_unsigned;
+                    t.is_bool = inner.is_bool;
+                }
+                return t;
             }
-            if (inner.kind == TY_PTR_CHAR) { t.kind = TY_I32; return t; }
             if (inner.kind == TY_PTR_PTR && inner.pointee) return *inner.pointee;
             if (inner.kind == TY_PTR_STRUCT) {
                 t.kind = TY_STRUCT; t.struct_name = inner.struct_name; return t;
@@ -6220,6 +6232,7 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
         }
         case EX_CAST: return ex->cast_type;
         case EX_COMPOUND: return ex->cast_type;
+        case EX_VA_ARG: return ex->cast_type;
         case EX_SIZEOF:
             // size_t is `unsigned long` (corec/base/types.h, and clang):
             // typed as the parser types `unsigned long`, with 32-bit storage
@@ -6282,6 +6295,8 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
                 if (an && bn) arith_conv_type(&a, &b);
                 else if (an && b.kind != TY_VOID) a = b;
             }
+            // An array branch decays (`sizeof(z ? arr : p)` is a pointer's).
+            decay_array_type(e, &a);
             return a;
         }
         default: return t;
