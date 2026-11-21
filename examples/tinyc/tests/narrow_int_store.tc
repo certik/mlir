@@ -144,5 +144,7 @@ int main() {
     fs.f = nis_id;
     printf("%d %d %d %d\n", *pa[1] - 256, *&raw[1] - 256, *(&raw[0] + 2) - 256,
            *fs.f(raw) - 256);
+    // `p - q` is a ptrdiff_t, as wide as a long long here
+    printf("%d\n", (int)(sizeof(ip - ip) == sizeof(long long)));
     return 0;
 }

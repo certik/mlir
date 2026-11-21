@@ -5942,9 +5942,10 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
             // Usual arithmetic conversions (simplified): if either side
             // is i64 the result is i64; if either is f32, result is f32.
             // Pointer arithmetic (`p + i`, `i + p`, `p - i`) has the
-            // pointer's type; `p - q` is an int.
+            // pointer's type; `p - q` is a ptrdiff_t, which tinyC emits as
+            // an i64.
             bool ap = type_is_pointerish(a), bp = type_is_pointerish(b);
-            if (ap && bp) { t.kind = TY_I32; return t; }
+            if (ap && bp) { t.kind = TY_I64; return t; }
             if (ap) return a;
             if (bp) return b;
             if (a.kind == TY_F64 || b.kind == TY_F64) { t.kind = TY_F64; return t; }
