@@ -1,0 +1,10 @@
+// A missing #include must stop the build with an error (#258). tinyC used
+// to report it and keep compiling the incomplete text: it exited 0 when
+// the header did not matter, and here (FILE and fopen come from the
+// header) the upstream-API build crashed on the follow-on emit errors.
+#include <tinyc_no_such_header.h>
+
+int main(void) {
+    FILE *f = fopen("x", "r");
+    return f != 0;
+}

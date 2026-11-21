@@ -1542,3 +1542,13 @@ targets = ["native", "wasm", "macho", "elf"]
 # + 1` used to step 4 bytes. A call returning T** is a pointer (#266).
 # Expected output from clang.
 expected_stdout = "5000000000 7 2.5 0.75\n3 4\n33 11 22 22\n"
+
+[[test]]
+name = "missing_include"
+targets = ["native", "wasm", "macho", "elf"]
+expected_compile_error = "cannot find include file <tinyc_no_such_header.h>"
+
+[[test]]
+name = "pp_error_directive"
+targets = ["native", "wasm", "macho", "elf"]
+expected_compile_error = "tinyc_pp_error_directive_fired"

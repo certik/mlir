@@ -138,6 +138,13 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
 
     string src = tinyc_preprocess(pmod_arena, str_from_cstr_view((char *)path),
                                   include_dirs, n_include_dirs, defs, nd);
+    if (tinyc_last_preprocess_errors() > 0) {
+        fprintf(stderr, "tinyc: preprocessing failed for %s '%s'\n",
+                is_wasi_adapter ? "WASI adapter" : "host platform", path);
+        MLIR_SetArenaAllocator(ctx, saved_arena);
+        ctx->no_def_use_tracking = saved_no_def_use;
+        return false;
+    }
     if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
     VecTcTok toks = tinyc_lex(pmod_arena, src);
     Program *prog = arena_new(pmod_arena, Program);
@@ -404,6 +411,15 @@ static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
 
     string src = tinyc_preprocess(pmod_arena, str_from_cstr_view((char *)path),
                                   include_dirs, n_include_dirs, defs, nd);
+    if (tinyc_last_preprocess_errors() > 0) {
+        fprintf(stderr, "tinyc: preprocessing failed for %s '%s'\n",
+                kind == TINYC_ELF_HELPER_WASI ? "WASI adapter" :
+                kind == TINYC_ELF_HELPER_BUDDY ? "allocator source" : "host platform",
+                path);
+        MLIR_SetArenaAllocator(ctx, saved_arena);
+        ctx->no_def_use_tracking = saved_no_def_use;
+        return false;
+    }
     if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
     VecTcTok toks = tinyc_lex(pmod_arena, src);
     Program *prog = arena_new(pmod_arena, Program);
@@ -1256,6 +1272,14 @@ int app_main(void) {
         string src = tinyc_preprocess(arena, str_from_cstr_view(input_files[k]),
                                       include_dirs, n_include_dirs,
                                       defines, n_defines);
+        // A preprocessing error (e.g. a missing #include) is fatal: the
+        // text is incomplete, and compiling it only adds follow-on errors.
+        // Keep going to report the other inputs' errors too.
+        int pp_errs = tinyc_last_preprocess_errors();
+        if (pp_errs > 0) {
+            total_errs += pp_errs;
+            continue;
+        }
         if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
         VecTcTok toks = tinyc_lex(arena, src);
         total_errs += tinyc_parse_into(arena, prog, toks, target_wasm32);
@@ -1277,6 +1301,13 @@ int app_main(void) {
         pdefs[n_defines] = str_from_cstr_view((char *)"PLATFORM_SKIP_ENTRY=1");
         string psrc = tinyc_preprocess(arena, str_from_cstr_view(host_platform_path),
                                        include_dirs, n_include_dirs, pdefs, n_defines + 1);
+        if (tinyc_last_preprocess_errors() > 0) {
+            fprintf(stderr, "tinyc: preprocessing failed for host platform '%s'\n",
+                    host_platform_path);
+            arena_destroy(arena);
+            arena_destroy(boot_arena);
+            return 1;
+        }
         if (psrc.size > 0 && psrc.str[psrc.size - 1] == '\0') psrc.size -= 1;
         VecTcTok ptoks = tinyc_lex(arena, psrc);
         if (tinyc_parse_into(arena, prog, ptoks, target_wasm32) > 0) {

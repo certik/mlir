@@ -553,6 +553,11 @@ string tinyc_preprocess(Arena *arena, string path,
                         string *include_dirs, size_t n_include_dirs,
                         string *defines, size_t n_defines);
 
+// Number of errors (missing #include, #error, malformed directives, ...)
+// the most recent tinyc_preprocess() call reported. The returned text is
+// incomplete when this is non-zero, so callers must not compile it.
+int tinyc_last_preprocess_errors(void);
+
 // ---------------- Parser ----------------
 
 Program *tinyc_parse(Arena *arena, VecTcTok toks);
