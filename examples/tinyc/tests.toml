@@ -1521,9 +1521,11 @@ name = "lift_opt_passes_fire"
 targets = ["wasm"]
 wasm_upstream_skip = true
 # The marker is a regex that picks the probed function; each key of
-# wasm_native_lift_max is a whole op name.
+# wasm_native_lift_{min,max} is a regex matching a whole op name. The two
+# p[i] loads (immediate- or register-offset form) must become exactly one.
 wasm_native_lift_marker = 'imm16\s*=\s*24301\b'
-wasm_native_lift_max = { "aarch64.ldr_w" = 1, "aarch64.fp_binop" = 0 }
+wasm_native_lift_max = { 'aarch64\.ldr_w(_reg)?' = 1, 'aarch64\.fp_binop' = 0 }
+wasm_native_lift_min = { 'aarch64\.ldr_w(_reg)?' = 1 }
 
 [[test]]
 name = "strlit_ptr_arith"
