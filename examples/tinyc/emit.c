@@ -184,6 +184,12 @@ typedef struct {
     int              cur_line;       // last AST node line entered; used by
                                      // EMIT_ERR for diagnostic line numbers.
     int              err_count;      // count of EMIT_ERR diagnostics
+    // The lvalue of the compound assignment being emitted (`a[i++] += x`,
+    // `++*p`) and its already-resolved address. The desugared rhs reads the
+    // same Expr node; emit_lvalue returns this instead of evaluating the
+    // node (and its side effects) a second time.
+    Expr            *compound_lv_expr;
+    struct LValS    *compound_lv;
 } E;
 
 // All emit-time diagnostics route through this macro so they carry a line
@@ -982,7 +988,7 @@ static MLIR_ValueHandle bool_to_i32(E *e, MLIR_ValueHandle b) {
 // base, `const_path` / `dyn_index` describe the indices). Resolution emits
 // a single GEP and then load/store.
 
-typedef struct {
+typedef struct LValS {
     MLIR_ValueHandle base_ptr;
     MLIR_TypeHandle  source_elem;     // INVALID if no GEP needed
     int32_t         *const_path;
@@ -1239,6 +1245,7 @@ static bool field_type_noemit(E *e, Scope *sc, Expr *fe, Type *out) {
 }
 
 static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
+    if (ex == e->compound_lv_expr) return *e->compound_lv;
     e->cur_line = ex->line;
     LVal r = {0};
     r.source_elem = MLIR_INVALID_HANDLE;
@@ -3280,7 +3287,28 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 store_lvalue(e, lv, stored);
                 return old;
             }
-            EVal v = emit_expr(e, sc, ex->rhs_assign);
+            EVal v;
+            if (ex->is_compound) {
+                // `lhs op= rhs` / `++lhs`: rhs_assign is `lhs op rhs` with the
+                // same `lhs` node. Resolve the address once and let the read
+                // of `lhs` inside rhs_assign reuse it (see emit_lvalue).
+                LVal at = lv;
+                at.base_ptr = lval_address(e, lv);
+                at.source_elem = MLIR_INVALID_HANDLE;
+                at.const_path = NULL;
+                at.n_const_path = 0;
+                at.dyn_index = MLIR_INVALID_HANDLE;
+                lv = at;
+                Expr *saved_expr = e->compound_lv_expr;
+                LVal *saved_lv = e->compound_lv;
+                e->compound_lv_expr = ex->lvalue;
+                e->compound_lv = &at;
+                v = emit_expr(e, sc, ex->rhs_assign);
+                e->compound_lv_expr = saved_expr;
+                e->compound_lv = saved_lv;
+            } else {
+                v = emit_expr(e, sc, ex->rhs_assign);
+            }
             v.val = coerce_eval(e, v, lv.elem_ty);
             v.is_float = (lv.elem_ty == e->f32 || lv.elem_ty == e->f64);
             v.is_f64 = (lv.elem_ty == e->f64);

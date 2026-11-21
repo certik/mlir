@@ -59,9 +59,8 @@
 //     supported; the only use of `char` in this PR is via `char*`
 //     pointers, populated from string literals / casts, and printed.
 //   - Compound assignment: `+= -= *= /= %= &= |= ^= <<= >>=` desugar to
-//     `lhs = lhs OP rhs` (the lvalue is evaluated twice — keep it
-//     simple: a plain variable / field / `arr[i]` with side-effect-free
-//     index).
+//     `lhs = lhs OP rhs`, with the lvalue's address computed once
+//     (Expr.is_compound), so `a[i++] += 1` increments `i` once.
 //   - `++x` / `--x` (prefix) and `x++` / `x--` (postfix) desugar to
 //     `x = x ± 1`. Both forms produce the *new* value (post-increment
 //     value semantics differ from C; only safe in expression-statements
@@ -249,6 +248,11 @@ struct Expr {
     bool is_post_step;     // EX_ASSIGN that originated from a postfix `x++` /
                            // `x--`. Emit reads the old value of the lvalue,
                            // stores `old ± 1`, and yields the OLD value.
+    bool is_compound;      // EX_ASSIGN from `lhs op= rhs` or prefix `++x` /
+                           // `--x`: rhs_assign is an EX_BIN whose lhs is the
+                           // same node as `lvalue`. Emit computes the lvalue
+                           // address once and uses it for the load and the
+                           // store, so side effects in it happen once.
     // For EX_INDEX (lhs = array, rhs = index)
     // For EX_ADDR / EX_DEREF (lhs = inner)
     // For EX_SIZEOF / EX_CAST: cast_type is the type being asked about /

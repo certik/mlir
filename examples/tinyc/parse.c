@@ -701,6 +701,7 @@ static Expr *parse_primary(P *p) {
         bin->op = op; bin->lhs = target; bin->rhs = one;
         Expr *as = new_expr(p, EX_ASSIGN, t.line);
         as->lvalue = target; as->rhs_assign = bin;
+        as->is_compound = true;
         return as;
     }
     if (t.kind == TC_TK_AMP) {
@@ -991,6 +992,7 @@ static Expr *parse_assign_or_or(P *p) {
         bin->op = compound; bin->lhs = lhs; bin->rhs = rhs;
         Expr *e = new_expr(p, EX_ASSIGN, line);
         e->lvalue = lhs; e->rhs_assign = bin;
+        e->is_compound = true;
         return e;
     }
     if (cur(p).kind == TC_TK_ASSIGN) {

@@ -1,0 +1,128 @@
+extern int printf(const char *fmt, ...);
+
+// A compound assignment `lhs op= rhs` and a prefix `++lhs` / `--lhs` evaluate
+// `lhs` exactly once. tinyc used to desugar them to `lhs = lhs op rhs` and
+// evaluate `lhs` twice, so `a[i++] += 1` incremented `i` twice and stored
+// `a[1] + 1` into `a[0]`.
+
+typedef struct {
+    int x;
+    long long big;
+    unsigned char tag;
+    double d;
+} S;
+
+static int g_calls;
+static int g_arr[8];
+static S g_s[4];
+
+static int *next_slot(void) {
+    g_calls++;
+    return &g_arr[g_calls];
+}
+
+static S *next_s(void) {
+    g_calls++;
+    return &g_s[g_calls];
+}
+
+static int idx(int i) {
+    g_calls++;
+    return i;
+}
+
+int main() {
+    // Index with a post-increment.
+    int a[4];
+    a[0] = 10; a[1] = 20; a[2] = 30; a[3] = 40;
+    int i = 0;
+    a[i++] += 1;
+    printf("%d %d %d\n", i, a[0], a[1]);
+
+    // Index with a pre-decrement, every compound operator.
+    int b[12];
+    for (int k = 0; k < 12; k++) b[k] = 100 + k;
+    int j = 12;
+    b[--j] -= 1;
+    b[--j] *= 2;
+    b[--j] /= 3;
+    b[--j] %= 7;
+    b[--j] &= 6;
+    b[--j] |= 1;
+    b[--j] ^= 3;
+    b[--j] <<= 2;
+    b[--j] >>= 1;
+    b[--j] += 5;
+    printf("%d", j);
+    for (int k = 0; k < 12; k++) printf(" %d", b[k]);
+    printf("\n");
+
+    // Deref of a post-incremented pointer.
+    int c[3];
+    c[0] = 1; c[1] = 2; c[2] = 3;
+    int *p = c;
+    *p++ += 10;
+    *p++ *= 10;
+    printf("%d %d %d %d\n", (int)(p - c), c[0], c[1], c[2]);
+
+    // A call in the lvalue: called once per compound assignment.
+    g_calls = 0;
+    *next_slot() += 7;
+    *next_slot() += 8;
+    printf("%d %d %d %d\n", g_calls, g_arr[1], g_arr[2], g_arr[3]);
+
+    g_calls = 0;
+    g_arr[idx(5)] += 3;
+    g_arr[idx(5)] -= 1;
+    printf("%d %d\n", g_calls, g_arr[5]);
+
+    // Struct fields reached through a call and through an indexed base.
+    g_calls = 0;
+    next_s()->x += 4;
+    next_s()->big += 5000000000LL;
+    next_s()->tag += 250;
+    printf("%d %d %lld %d\n", g_calls, g_s[1].x, g_s[2].big, g_s[3].tag);
+    S st[3];
+    for (int k = 0; k < 3; k++) { st[k].x = k; st[k].d = 0.5 * k; st[k].tag = 200; }
+    int m = 0;
+    st[m++].x += 100;
+    st[m++].d *= 3.0;
+    st[m++].tag += 10;
+    printf("%d %d %g %d\n", m, st[0].x, st[1].d, st[2].tag);
+
+    // Prefix ++ / -- on lvalues with side effects; the value is the new one.
+    int q[4];
+    q[0] = 0; q[1] = 0; q[2] = 0; q[3] = 0;
+    int n = 0;
+    int r1 = ++q[n++];
+    int r2 = ++q[n++];
+    int r3 = --q[--n];
+    printf("%d %d %d %d %d %d %d\n", n, r1, r2, r3, q[0], q[1], q[2]);
+    g_calls = 0;
+    g_arr[6] = 50;
+    ++g_arr[idx(6)];
+    --*next_slot();
+    printf("%d %d %d\n", g_calls, g_arr[6], g_arr[2]);
+
+    // Postfix ++ / -- on the same lvalues (already evaluated them once).
+    int t = 0;
+    int r4 = q[t++]++;
+    int r5 = q[t++]--;
+    printf("%d %d %d %d %d\n", t, r4, r5, q[0], q[1]);
+
+    // Compound assignment as a value, nested in another one.
+    int u[4];
+    u[0] = 1; u[1] = 2; u[2] = 3; u[3] = 4;
+    int v = 0, w = 3;
+    int r6 = (u[v++] += (u[w--] *= 2));
+    printf("%d %d %d %d %d %d %d\n", r6, v, w, u[0], u[1], u[2], u[3]);
+
+    // Pointer compound assignment through an indexed lvalue.
+    const char *strs[2];
+    strs[0] = "hello";
+    strs[1] = "world";
+    int s = 0;
+    strs[s++] += 2;
+    printf("%d %s %s\n", s, strs[0], strs[1]);
+    return 0;
+}
