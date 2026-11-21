@@ -1,0 +1,30 @@
+// The heap starts above all static data: string literals, initialized and
+// zero-initialized globals and static locals sit below platform_heap_base(),
+// so malloc never hands out memory that overlaps them. The in-tree wasm
+// linker (TINYC_USE_NATIVE_LINK=1) used to lay out the string literals of the
+// object that defines __heap_base above it.
+extern int printf(const char *fmt, ...);
+extern void *malloc(unsigned long n);
+extern void *platform_heap_base(void);
+
+int hb_data[4] = {1, 2, 3, 4};
+char hb_bss[64];
+
+static int below(const void *p, const char *heap) { return (const char *)p < heap; }
+
+int main(void) {
+    static int counter = 7;
+    const char *heap = (const char *)platform_heap_base();
+    const char *s = "a string literal emitted after __heap_base";
+    char *m = (char *)malloc(64);
+    int n = 0;
+    for (int i = 0; i < 64; i++) m[i] = 'x';
+    n += below(s, heap);
+    n += below("another literal", heap);
+    n += below(hb_data, heap);
+    n += below(hb_bss, heap);
+    n += below(&counter, heap);
+    n += !below(m, heap);
+    printf("%d %s\n", n, s);
+    return 0;
+}

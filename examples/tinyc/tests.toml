@@ -604,6 +604,14 @@ name = "libc_malloc_free"
 targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "110\n"
 
+[[test]]
+name = "heap_base_above_data"
+targets = ["wasm"]
+# String literals, globals and static locals lie below platform_heap_base()
+# and malloc'd memory above it; the in-tree wasm linker used to place the
+# literals of the object defining __heap_base above it.
+expected_stdout = "6 a string literal emitted after __heap_base\n"
+
 # stdout-using tests: stdout is a real linker symbol only on glibc/Linux.
 # macOS exposes only `__stdoutp` (with `stdout` as a macro), and Windows
 # MSVC uses `__acrt_iob_func(1)`. Gated to linux to keep the ergonomic
