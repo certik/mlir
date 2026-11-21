@@ -594,6 +594,24 @@ Program *tinyc_parse(Arena *arena, VecTcTok toks);
 // Returns the number of parse errors encountered (0 on success).
 int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_wasm32);
 
+// ---------------- Constant folding ----------------
+
+// A folded integer constant: its value, held sign- or zero-extended from
+// its width by its signedness, and its C type (int / unsigned / 64-bit
+// variants).
+typedef struct {
+    int64_t v;
+    bool is_i64;
+    bool is_unsigned;
+} FoldVal;
+
+// Folds the leaves tinyc_fold does not know itself (`sizeof` in the
+// emitter, enumerators in the parser); returns false to refuse.
+typedef bool (*FoldLeafFn)(void *ctx, Expr *ex, FoldVal *out);
+
+// Fold a constant integer expression with C's typing rules (emit.c).
+bool tinyc_fold(Expr *ex, FoldLeafFn leaf, void *ctx, FoldVal *out);
+
 // ---------------- Emitter ----------------
 
 // Build a top-level MLIR module from `program`. The returned op handle

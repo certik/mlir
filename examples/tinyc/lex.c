@@ -246,6 +246,9 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
             if (j < src.size && src.str[j] == '\'') j++;
             else println(str_lit("tinyc lex error at line {}: unterminated char literal"),
                          (int64_t)line);
+            // A char literal is an `int` holding the value of the byte
+            // converted to (signed) char: '\xff' is -1.
+            if (v > 127) v -= 256;
             TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
             VecTcTok_push_back(arena, &toks, t);
             i = j; continue;
