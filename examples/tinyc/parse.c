@@ -61,69 +61,25 @@ static Enumerator *enum_lookup(P *p, string name) {
     return NULL;
 }
 
-// Best-effort constant-folder used by enum-body parsing. Returns true iff
-// `ex` is a constant integer expression whose value can be computed using
-// only int literals and previously-declared enumerators. Recognizes the
-// common arithmetic, bitwise, shift, comparison and ternary forms; runs
-// before the emitter's `ast_fold_int`, so it intentionally only handles
-// the subset that doesn't need scope/type information.
+// The parser's leaves for tinyc_fold: previously-declared enumerators,
+// which have type `int` (or a 64-bit type when the value needs one).
+static bool parse_fold_leaf(void *ctx, Expr *ex, FoldVal *out) {
+    if (ex->kind != EX_VAR) return false;
+    Enumerator *en = enum_lookup((P *)ctx, ex->name);
+    if (!en) return false;
+    out->v = en->value;
+    out->is_i64 = en->value != (int64_t)(int32_t)en->value;
+    out->is_unsigned = false;
+    return true;
+}
+
+// Fold an enumerator's constant expression of int literals and
+// previously-declared enumerators, with the emitter's typed folder.
 static bool parse_const_eval(P *p, Expr *ex, int64_t *out) {
-    if (!ex) return false;
-    switch (ex->kind) {
-        case EX_INT:
-            *out = ex->int_value;
-            return true;
-        case EX_VAR: {
-            Enumerator *en = enum_lookup(p, ex->name);
-            if (!en) return false;
-            *out = en->value;
-            return true;
-        }
-        case EX_UN: {
-            int64_t a;
-            if (!parse_const_eval(p, ex->lhs, &a)) return false;
-            switch (ex->op) {
-                case OP_NEG:  *out = -a;        return true;
-                case OP_BNOT: *out = ~a;        return true;
-                case OP_NOT:  *out = (a == 0);  return true;
-                default: return false;
-            }
-        }
-        case EX_BIN: {
-            int64_t a, b;
-            if (!parse_const_eval(p, ex->lhs, &a)) return false;
-            if (!parse_const_eval(p, ex->rhs, &b)) return false;
-            switch (ex->op) {
-                case OP_ADD:  *out = a + b; return true;
-                case OP_SUB:  *out = a - b; return true;
-                case OP_MUL:  *out = a * b; return true;
-                case OP_DIV:  if (b == 0) return false; *out = a / b; return true;
-                case OP_MOD:  if (b == 0) return false; *out = a % b; return true;
-                case OP_BAND: *out = a & b; return true;
-                case OP_BOR:  *out = a | b; return true;
-                case OP_BXOR: *out = a ^ b; return true;
-                case OP_SHL:  *out = a << b; return true;
-                case OP_SHR:  *out = a >> b; return true;
-                case OP_LT:   *out = a <  b; return true;
-                case OP_LE:   *out = a <= b; return true;
-                case OP_GT:   *out = a >  b; return true;
-                case OP_GE:   *out = a >= b; return true;
-                case OP_EQ:   *out = a == b; return true;
-                case OP_NE:   *out = a != b; return true;
-                case OP_AND:  *out = (a != 0 && b != 0); return true;
-                case OP_OR:   *out = (a != 0 || b != 0); return true;
-                default: return false;
-            }
-        }
-        case EX_TERNARY: {
-            int64_t c;
-            if (!parse_const_eval(p, ex->lhs, &c)) return false;
-            Expr *pick = c ? ex->rhs : ex->lvalue;
-            return parse_const_eval(p, pick, out);
-        }
-        default:
-            return false;
-    }
+    FoldVal v;
+    if (!tinyc_fold(ex, parse_fold_leaf, p, &v)) return false;
+    *out = v.v;
+    return true;
 }
 
 int64_t tinyc_narrow_const(int64_t v, Type t) {
@@ -2641,7 +2597,7 @@ static void parse_enum_body(P *p) {
         e->value = value;
         e->next = p->enums;
         p->enums = e;
-        next_value = value + 1;
+        next_value = (int64_t)((uint64_t)value + 1);
         if (!accept(p, TC_TK_COMMA)) break;
     }
     expect(p, TC_TK_RBRACE, str_lit("expected '}'"));
@@ -3118,6 +3074,10 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                             }
                             int64_t alen = g.type.array_len;
                             bool unsized = (alen == 0 && !g.type.array_len_expr);
+                            // With a constant-expression length (`[N * 2]`),
+                            // folded by the emitter, pack every value; the
+                            // emitter cuts or pads the bytes to the length.
+                            bool grow = unsized || g.type.array_len_expr;
                             uint8_t *bytes = NULL;
                             size_t   bcap  = 0;
                             if (g.type.kind == TY_ARRAY_I32) {
@@ -3125,7 +3085,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                     bcap  = (size_t)alen * elem_size;
                                     bytes = (uint8_t *)arena_alloc(p.arena, bcap);
                                     for (size_t bi = 0; bi < bcap; bi++) bytes[bi] = 0;
-                                } else if (unsized) {
+                                } else if (grow) {
                                     bcap  = 16 * elem_size;
                                     bytes = (uint8_t *)arena_alloc(p.arena, bcap);
                                     for (size_t bi = 0; bi < bcap; bi++) bytes[bi] = 0;
@@ -3182,9 +3142,9 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                         p.i++;
                                     }
                                     if (have_int_val && bytes &&
-                                        (unsized || ei < (size_t)alen)) {
+                                        (grow || ei < (size_t)alen)) {
                                         size_t need = (ei + 1) * elem_size;
-                                        if (unsized && need > bcap) {
+                                        if (grow && need > bcap) {
                                             size_t ncap = bcap ? bcap * 2
                                                                : 16 * elem_size;
                                             while (ncap < need) ncap *= 2;
@@ -3215,10 +3175,8 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                             }
                             expect(&p, TC_TK_RBRACE,
                                    str_lit("expected '}' in global array initializer"));
-                            if (unsized && ei > 0) {
-                                g.type.array_len = (int64_t)ei;
-                                bcap = (size_t)ei * elem_size;
-                            }
+                            if (unsized && ei > 0) g.type.array_len = (int64_t)ei;
+                            if (grow) bcap = (size_t)ei * elem_size;
                             if (any_nonzero && bytes && bcap > 0) {
                                 g.init_array_data.str  = (char *)bytes;
                                 g.init_array_data.size = bcap;

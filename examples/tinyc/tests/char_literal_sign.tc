@@ -1,0 +1,31 @@
+extern int printf(const char *fmt, ...);
+// A character literal is an `int` holding the value of its byte converted
+// to `char`, which is signed in tinyC (as on x86-64, wasm32 and Apple
+// arm64): '\xff' is -1, not 255 (#294). The lexer used to keep the raw byte.
+
+static int g = '\xff';
+static int ga[3] = {'\x80', '\x7f', 'a'};
+
+static int classify(int c) {
+    switch (c) {
+        case '\xff': return 1;
+        case '\x80': return 2;
+        case 'a': return 3;
+        default: return 0;
+    }
+}
+
+int main(void) {
+    int x = '\xff';
+    unsigned u = '\xff';
+    long long ll = '\x80';
+    char c = '\xff';
+    unsigned char uc = 0xff;
+    printf("%d %u %lld %d\n", x, u, ll, '\x7f');
+    printf("%d %d %d\n", c == '\xff', uc == '\xff', '\xff' < 0);
+    printf("%d %d %d\n", '\xff' >> 1, '\x80' * 2, (int)sizeof('\xff'));
+    printf("%d %d %d %d\n", classify(c), classify(-128), classify('a'), classify(255));
+    printf("%d %d %d %d\n", g, ga[0], ga[1], ga[2]);
+    printf("%d %d\n", (unsigned char)'\xff', '\0' - '\xfe');
+    return 0;
+}
