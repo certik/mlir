@@ -25,6 +25,10 @@ int main() {
     // A char / short cast result is promoted to (signed) int.
     printf("%d %d %d\n", ((unsigned char)x - 300) < 0, ((unsigned char)x - 300) / 2,
            ((unsigned short)x - 70000) / 2);
+    // Float -> narrow: an out-of-range value (UB in C) stays in range.
+    double fbig = 300.5, fmid = 200.5;
+    float fneg = -1.0f;
+    printf("%d %d %d\n", (unsigned char)fbig, (signed char)fmid, (unsigned short)fneg >= 0);
     printf("%d %d %d %d\n", (bool)256, (bool)0, (bool)-1, (_Bool)0x100000000LL);
     return 0;
 }

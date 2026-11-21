@@ -1559,4 +1559,4 @@ targets = ["native", "wasm", "macho", "elf"]
 # Casts to char / short types truncate to 8 / 16 bits and re-extend by the
 # target's signedness, and the result is promoted to int; a cast to bool
 # yields 0 or 1 (#248).
-expected_stdout = "44 -56\n-128 128 22144 22144\n-1 255 -32513 33023\n-25536 65535 255\n240 -16\n260 1 0\n1 -128 -34850\n1 0 1 1\n"
+expected_stdout = "44 -56\n-128 128 22144 22144\n-1 255 -32513 33023\n-25536 65535 255\n240 -16\n260 1 0\n1 -128 -34850\n44 -56 1\n1 0 1 1\n"

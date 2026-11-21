@@ -2701,6 +2701,10 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     } else {
                         v.val = coerce_eval(e, v, e->i32);
                         v.is_i64 = false;
+                        // Keep an out-of-range value inside the narrow type.
+                        int fnb = ex->cast_type.int_bits;
+                        if (fnb == 8 || fnb == 16)
+                            v.val = emit_narrow_i32(e, v.val, fnb, ex->cast_type.int_unsigned);
                     }
                     v.is_float = false; v.is_f64 = false;
                     return v;
