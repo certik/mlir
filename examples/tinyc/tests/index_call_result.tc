@@ -2,7 +2,9 @@ extern int printf(const char *fmt, ...);
 
 // `a[i]` is `*(a + i)` for any pointer-valued `a`, not just a variable or
 // field: a call result (#281), a cast, `(*pp++)`, `(p + 1)` or `(c ? p : q)`.
-// The base is evaluated once, also in `f()[i] += 1` and `f()[i]++`.
+// The base is evaluated once, also in `f()[i] += 1` and `f()[i]++`, and in
+// `f()->pp[i][j]` / `a[k++].pp[i][j]` on a `T **` field. `(*u)[i]` and
+// `u[i][j]` on an `unsigned char **u` read the byte zero-extended.
 
 static int arr[4];
 static int calls;
@@ -19,6 +21,10 @@ signed char *scget(void) { return sc; }
 long long *lget(void) { return ll; }
 const char **nget(void) { return names; }
 int **ppget(void) { return g_pp; }
+struct H { int **pp; char **cp; };
+static struct H hs[2];
+static int hcalls;
+struct H *hget(void) { hcalls++; return hs; }
 
 int main() {
     arr[1] = 41; arr[2] = 42; ub[3] = 222; sc[1] = -5; ll[2] = 7000000000LL;
@@ -42,5 +48,22 @@ int main() {
     printf("%d %d %d\n", ((unsigned char *)ub)[3], (arr + 1)[1], (k ? arr : get())[2]);
     long idx = 2;
     printf("%d\n", get()[idx] + get()[k]);
+    hs[0].pp = g_pp; hs[1].pp = g_pp;
+    hs[0].cp = (char **)names; hs[1].cp = (char **)names;
+    int x = hget()->pp[1][1];
+    printf("%d %d\n", x, hcalls);
+    k = 0;
+    x = hs[k++].pp[1][1];
+    printf("%d %d\n", x, k);
+    hget()->pp[0][3] += 10;
+    printf("%d %d\n", arr[3], hcalls);
+    char c = hget()->cp[1][3];
+    printf("%c %d\n", c, hcalls);
+    k = 0;
+    c = hs[k++].cp[2][1];
+    printf("%c %d\n", c, k);
+    unsigned char **u = (unsigned char **)malloc(sizeof(unsigned char *));
+    u[0] = ub;
+    printf("%d %d\n", (*u)[3], u[0][3]);
     return 0;
 }
