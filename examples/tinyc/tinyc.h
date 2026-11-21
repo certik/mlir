@@ -604,8 +604,10 @@ typedef struct {
 } FoldVal;
 
 // Folds the leaves tinyc_fold does not know itself (`sizeof` in the
-// emitter, enumerators in the parser); returns false to refuse.
-typedef bool (*FoldLeafFn)(void *ctx, Expr *ex, FoldVal *out);
+// emitter, enumerators in the parser); returns false to refuse. `lenient`:
+// the leaf is in an operand that is not evaluated, so only its type
+// matters (an unevaluated `sizeof` folds to a 0 of type size_t).
+typedef bool (*FoldLeafFn)(void *ctx, Expr *ex, bool lenient, FoldVal *out);
 
 // Fold a constant integer expression with C's typing rules (emit.c).
 bool tinyc_fold(Expr *ex, FoldLeafFn leaf, void *ctx, FoldVal *out);

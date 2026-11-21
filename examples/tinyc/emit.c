@@ -2551,8 +2551,8 @@ static void fold_convert(FoldVal *a, FoldVal *b) {
 //     the branch not taken, like the right operand of && / || that is
 //     not evaluated, only needs an integer constant type, not a value
 //     (`1 ? 7 : 1 / 0`)
-//   anything else `leaf` folds (sizeof in the emitter, enumerators in
-//     the parser); `leaf` may be NULL.
+//   anything else `leaf` folds (sizeof in the emitter, enumerators and
+//     an unevaluated sizeof in the parser); `leaf` may be NULL.
 //
 // Refused (returns false; the emitter falls back to normal emission):
 //   - variables, calls, assignments, floats, casts, ... (unless `leaf`
@@ -2683,25 +2683,18 @@ static bool fold_expr(Expr *ex, FoldLeafFn leaf, void *ctx, bool lenient,
             return true;
         }
         default:
-            if (leaf && leaf(ctx, ex, out)) return true;
-            // An unevaluated `sizeof` only needs its type, an `int` here
-            // as in the emitter (the parser cannot size types).
-            if (lenient && ex->kind == EX_SIZEOF) {
-                *out = fold_int(0);
-                return true;
-            }
-            return false;
+            return leaf && leaf(ctx, ex, lenient, out);
     }
 }
 
-// The emitter's leaves for tinyc_fold: enumerators and `sizeof` (both an
-// `int`, as the emitter types them).
+// The emitter's leaves for tinyc_fold: enumerators (an `int`) and `sizeof`
+// (a size_t), as the emitter types them.
 typedef struct {
     E *e;
     Scope *sc;
 } EmitFoldCtx;
 
-static bool emit_fold_leaf(void *ctx, Expr *ex, FoldVal *out) {
+static bool emit_fold_leaf(void *ctx, Expr *ex, bool lenient, FoldVal *out) {
     EmitFoldCtx *fc = (EmitFoldCtx *)ctx;
     if (ex->kind == EX_VAR) {
         // An enumerator (an `int`) unless a variable shadows it, as in
@@ -2713,6 +2706,12 @@ static bool emit_fold_leaf(void *ctx, Expr *ex, FoldVal *out) {
         return true;
     }
     if (ex->kind != EX_SIZEOF) return false;
+    // An unevaluated `sizeof` only needs its type, a size_t; its operand
+    // may not be sizable here (`sizeof g` in a global array bound).
+    if (lenient) {
+        *out = fold_size(fc->e, 0);
+        return true;
+    }
     Type ty = (Type){0};
     if (ex->sizeof_is_expr) {
         if (!fc->sc) return false;
@@ -6113,6 +6112,13 @@ static void decay_array_type(E *e, Type *t) {
     t->array_elem_is_i64 = false;
 }
 
+// `NULL` or `(void *)0`: a pointer-typed null pointer constant.
+static bool expr_is_null_ptr_const(Expr *x) {
+    if (x->kind == EX_NULL) return true;
+    return x->kind == EX_CAST && x->cast_type.kind == TY_PTR_VOID && x->lhs &&
+           x->lhs->kind == EX_INT && x->lhs->int_value == 0;
+}
+
 static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
     Type t = (Type){0};
     switch (ex->kind) {
@@ -6283,9 +6289,10 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
             // then/else branches (`a` / `b`), NOT the condition `c`.
             // tinyc's AST stores: lhs=cond, rhs=then, lvalue=else.
             // Arithmetic branches get the usual arithmetic conversions
-            // (`1 ? 1 : 2LL` is a long long); an integer next to a pointer
-            // is a null pointer constant, so the result has the pointer's
-            // type; otherwise the then-branch (rhs) decides, falling back
+            // (`1 ? 1 : 2LL` is a long long); an integer, `NULL` or
+            // `(void *)0` next to a pointer is a null pointer constant, so
+            // the result has the pointer's type; otherwise the then-branch
+            // (rhs) decides, falling back
             // to lvalue or lhs only if rhs is missing (defensive).
             Expr *val = ex->rhs ? ex->rhs : (ex->lvalue ? ex->lvalue : ex->lhs);
             Type a = infer_expr_type(e, sc, val);
@@ -6293,7 +6300,8 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
                 Type b = infer_expr_type(e, sc, ex->lvalue);
                 bool an = type_is_arith(&a), bn = type_is_arith(&b);
                 if (an && bn) arith_conv_type(&a, &b);
-                else if (an && b.kind != TY_VOID) a = b;
+                else if ((an || expr_is_null_ptr_const(ex->rhs)) && !bn &&
+                         b.kind != TY_VOID) a = b;
             }
             // An array branch decays (`sizeof(z ? arr : p)` is a pointer's).
             decay_array_type(e, &a);
