@@ -4,7 +4,9 @@ extern int printf(const char *fmt, ...);
 // to zero the whole sub-aggregate and shift the rest). A designator
 // re-initializes its member, zeroing what was set before. A zero-length
 // array tail (`int t[0];`) has size 0: such structs failed on wasm and
-// aarch64 and printed 0 natively.
+// aarch64 and printed 0 natively. A member re-initialized without braces
+// keeps the scalars it does not set (C11 6.7.9p19), and an empty struct
+// global gets its own (one-byte) object.
 struct V2 { int n; int tail[0]; };
 struct V2 v = { 6 };
 struct V2 v0;
@@ -51,8 +53,30 @@ static void part2(void) {
     printf("%c%c %d %c%c %d %c%c %d\n", cs[0].s[0], cs[0].s[1], cs[0].n, cs[1].s[0], cs[1].s[1], cs[1].n, cs[2].s[0], cs[2].s[1], cs[2].n);
     printf("%d %d %d\n", w.x, w.u.a, w.y);
 }
+struct RI { int a, b; };
+struct RO { struct RI in; int c; };
+struct RO ro = { .in = {1, 2}, .in = 9 };
+struct RA { int v[3]; int x; };
+struct RA ra = { .v = {1, 2, 3}, .x = 4, .v = 7 };
+struct RO2 { struct RI in; int c; struct RI in2; };
+struct RO2 ro2 = { .in2 = 7, 8, .in = {1, 2}, 3, 4 };
+struct RO ro3 = { .in = {1, 2}, .in = {5}, .c = 6 };
+struct RO ro4 = { .c = 1, .in = 3, 4, .in = 0 };
+struct E0 {};
+struct E0 e0;
+struct T0 { int t[0]; };
+struct T0 tz;
+int rafter = 5;
+static void part3(void) {
+    printf("%d %d %d\n", ro.in.a, ro.in.b, ro.c);
+    printf("%d %d %d %d\n", ra.v[0], ra.v[1], ra.v[2], ra.x);
+    printf("%d %d %d %d %d %d\n", ro2.in.a, ro2.in.b, ro2.c, ro2.in2.a, ro2.in2.b, rafter);
+    printf("%d %d %d | %d %d %d\n", ro3.in.a, ro3.in.b, ro3.c, ro4.in.a, ro4.in.b, ro4.c);
+    printf("%d %d\n", (int)sizeof(e0), (int)sizeof(tz));
+}
 int main(void) {
     part1();
     part2();
+    part3();
     return 0;
 }

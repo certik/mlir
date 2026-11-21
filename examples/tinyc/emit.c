@@ -6424,6 +6424,8 @@ typedef struct {
     size_t depth;
     GInitSlot *slots;                 // the values set so far
     size_t n, cap;
+    size_t scan_from;                 // first slot of the current braced list
+    bool overriding;                  // a scalar may already be set: replace it
     int64_t top_count;                // elements of an unsized array
 } GInit;
 
@@ -6529,9 +6531,10 @@ static void ginit_set(GInit *gi, MLIR_TypeHandle ty, MLIR_AttributeHandle val) {
 }
 
 // Forget every value recorded at or below the current path: a designator
-// re-initializes a member that was already set (`{.a = 1, .a = 0}`).
+// re-initializes a member that was already set (`{.a = 1, .a = 0}`). Only
+// the current braced list's slots can be there.
 static void ginit_clear(GInit *gi) {
-    for (size_t i = 0; i < gi->n; i++) {
+    for (size_t i = gi->scan_from; i < gi->n; i++) {
         GInitSlot *sl = &gi->slots[i];
         if (sl->val == MLIR_INVALID_HANDLE || sl->depth < gi->depth) continue;
         bool under = true;
@@ -6588,6 +6591,9 @@ static void ginit_scalar(GInit *gi, Type t, MLIR_TypeHandle ty, Expr *ex) {
     E *e = gi->e;
     GConst c;
     bool ok = gconst_eval(e, ex, &c);
+    // A scalar set again after a designator replaces the earlier value,
+    // also when the new one is 0.
+    if (gi->overriding) ginit_clear(gi);
     if (ty == e->ptr) {
         if (!ok || c.is_float || c.i.v != 0)
             EMIT_ERR(e, "only a null pointer can initialize a pointer in a global aggregate");
@@ -6674,7 +6680,23 @@ static void ginit_value(GInit *gi, Type t, MLIR_TypeHandle ty, Expr *ex);
 // enclosing list (brace elision: `{1, 2, 3}` for `struct {struct {int a,
 // b;} in; int c;}`) and stops at a designator, which belongs to the
 // enclosing list.
+static void ginit_members_in(GInit *gi, Type t, Expr *list, size_t *pos, bool braced);
+
 static void ginit_members(GInit *gi, Type t, Expr *list, size_t *pos, bool braced) {
+    // A braced list starts a fresh subobject: the enclosing list cleared
+    // it if it was set before.
+    size_t scan_from = gi->scan_from;
+    bool overriding = gi->overriding;
+    if (braced) {
+        gi->scan_from = gi->n;
+        gi->overriding = false;
+    }
+    ginit_members_in(gi, t, list, pos, braced);
+    gi->scan_from = scan_from;
+    gi->overriding = overriding;
+}
+
+static void ginit_members_in(GInit *gi, Type t, Expr *list, size_t *pos, bool braced) {
     E *e = gi->e;
     GMembers m;
     m.sd = NULL;
@@ -6720,20 +6742,33 @@ static void ginit_members(GInit *gi, Type t, Expr *list, size_t *pos, bool brace
                 return;
             }
             revisit = true;
+            gi->overriding = true;
         }
         if (m.count >= 0 && k >= m.count) {
             if (braced) EMIT_ERR(e, "too many initializers in a global aggregate");
             return;
         }
         if (!ginit_push(gi, k)) return;
-        if (revisit) ginit_clear(gi);
         MLIR_TypeHandle mty;
         Type mt = ginit_member_type(gi, t, &m, k, &mty);
         bool char_array = mt.kind == TY_ARRAY_I32 && mt.array_len2 == 0 &&
                           (mt.array_elem_is_i8 || mt.int_bits == 8);
-        if (ginit_is_aggregate(mt) && a->kind != EX_COMPOUND &&
-            !(char_array && a->kind == EX_STR)) {
+        bool elided = ginit_is_aggregate(mt) && a->kind != EX_COMPOUND &&
+                      !(char_array && a->kind == EX_STR);
+        // A braced list or a string re-initializes the whole member (C11
+        // 6.7.9p19); elided initializers only replace the scalars they set.
+        if (revisit && !elided) ginit_clear(gi);
+        if (elided) {
+            size_t before = *pos;
+            int errs = e->err_count;
             ginit_members(gi, mt, list, pos, false);
+            if (*pos == before) {
+                // It has no scalars; report that once, innermost.
+                if (e->err_count == errs)
+                    EMIT_ERR(e, "initializer for an aggregate with no elements needs braces");
+                gi->depth--;
+                return;
+            }
         } else {
             ginit_value(gi, mt, mty, a);
             (*pos)++;

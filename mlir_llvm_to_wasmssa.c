@@ -2558,6 +2558,10 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
     }
 
     // No initializer found (e.g. uninitialized scalar global). Zero-init.
+    // An empty struct (GNU C) still gets one byte, as an object of its own.
+    if (size == 0 && ga != MLIR_INVALID_HANDLE &&
+        llvm_type_is_empty(ctx, MLIR_GetAttributeTypeValue(ga), 4))
+        size = 1;
     if (size == 0) return false;
     data = (uint8_t *)arena_alloc(arena, size);
     memset(data, 0, size);

@@ -2298,6 +2298,8 @@ static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
         }
         string name = MLIR_GetAttributeString(na);
         unsigned sz = a64_type_size(ctx, MLIR_GetAttributeTypeValue(ta));
+        // An empty struct (GNU C) still gets one byte, as an object of its own.
+        if (sz == 0 && llvm_type_is_empty(ctx, MLIR_GetAttributeTypeValue(ta), 8)) sz = 1;
         if (sz == 0) { free(blob); free(pend); return false; }
 
         uint32_t off = (blen + 7u) & ~7u;

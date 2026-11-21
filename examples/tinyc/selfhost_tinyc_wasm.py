@@ -59,6 +59,7 @@ NATIVE_C_FILES = [
     "mlir_wasm_to_wat.c",
     "mlir_wasm_to_macho.c",
     "mlir_llvm_to_wasmssa.c",
+    "mlir_llvm_global_init.c",
     "mlir_wasmssa_to_wasmstack.c",
     "mlir_wasmstack_to_bin.c",
     "mlir_wasm_link.c",

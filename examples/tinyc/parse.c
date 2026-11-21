@@ -3054,6 +3054,18 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                     if (accept(&p, TC_TK_ASSIGN)) {
                         g.has_init = true;
                         TcTok lit = cur(&p);
+                        // An aggregate takes `{...}` (a char array also a
+                        // string); `struct S s = 5;` is not C.
+                        bool aggregate = g.type.kind == TY_STRUCT ||
+                                         g.type.kind == TY_ARRAY_STRUCT ||
+                                         g.type.kind == TY_ARRAY_I32 ||
+                                         g.type.kind == TY_ARRAY_PTR_CHAR ||
+                                         g.type.kind == TY_ARRAY_PTR_STRUCT;
+                        if (aggregate && lit.kind != TC_TK_LBRACE &&
+                            !(lit.kind == TC_TK_STRING_LIT && g.type.kind == TY_ARRAY_I32)) {
+                            perror_at(&p, lit.line,
+                                str_lit("an aggregate initializer needs braces"));
+                        }
                         if (lit.kind == TC_TK_LBRACE &&
                             (g.type.kind == TY_STRUCT ||
                              g.type.kind == TY_ARRAY_STRUCT)) {

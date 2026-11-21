@@ -22,7 +22,7 @@ ALL_SRC=(
   examples/tinyc/emit.c examples/tinyc/driver.c
   mlir_api_impl.c mlir_op_names.c mlir_lower_to_llvm.c
   mlir_translate_to_llvm_ir.c mlir_translate_to_wasm.c mlir_wasm_to_wat.c
-  mlir_wasm_to_macho.c mlir_llvm_to_wasmssa.c mlir_wasmssa_to_wasmstack.c
+  mlir_wasm_to_macho.c mlir_llvm_to_wasmssa.c mlir_llvm_global_init.c mlir_wasmssa_to_wasmstack.c
   mlir_wasmstack_to_bin.c mlir_wasm_link.c tokenizer.c mlir_parser.c
   op_parsers.c mlir_classic_printer.c mlir_generic_printer.c
   mlir_lift_cf_to_scf.c corec/platform/platform_wasm.c
