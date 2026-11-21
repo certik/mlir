@@ -70,5 +70,8 @@ int main(void) {
     printf("%d %d %d %d %d %d\n", nsa_host_neg(-32768), nsa_host_neg(5), nsa_host_inc(255),
            nsa_host_not(0), nsa_host_half(-101), nsa_host_sum(65535, -1, 1, 3));
     printf("callback %d global %d\n", nsa_host_callback(), nsa_host_g);
+    unsigned char (*finc)(unsigned char) = nsa_host_inc;
+    signed char (*fhalf)(signed char) = nsa_host_half;
+    printf("indirect %d %d\n", finc(255), fhalf(-101));
     return 0;
 }
