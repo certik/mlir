@@ -126,6 +126,13 @@ static bool parse_const_eval(P *p, Expr *ex, int64_t *out) {
     }
 }
 
+int64_t tinyc_narrow_const(int64_t v, Type t) {
+    if (t.is_bool) return v != 0;
+    if (t.int_bits == 8)  return t.int_unsigned ? (int64_t)(uint8_t)v  : (int64_t)(int8_t)v;
+    if (t.int_bits == 16) return t.int_unsigned ? (int64_t)(uint16_t)v : (int64_t)(int16_t)v;
+    return v;
+}
+
 static void perror_at(P *p, int line, string msg) {
     println(str_lit("tinyc parse error at line {}: {}"), (int64_t)line, msg);
     p->err_count++;
@@ -3168,7 +3175,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                             bytes = nb;
                                             bcap = ncap;
                                         }
-                                        uint64_t uv = (uint64_t)val;
+                                        uint64_t uv = (uint64_t)tinyc_narrow_const(val, g.type);
                                         for (size_t b = 0; b < elem_size; b++) {
                                             bytes[ei * elem_size + b] =
                                                 (uint8_t)(uv >> (8 * b));

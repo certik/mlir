@@ -1575,4 +1575,4 @@ targets = ["native", "wasm", "macho", "elf"]
 # Conversions into char / short / bool truncate and re-extend (bool: != 0) on
 # initialization, assignment, op=, ++/--, argument passing and return; the
 # value then promotes to signed int (#262). Expected output from clang.
-expected_stdout = "44 -25536 -56 1 65535 195 -56\n2 1 1 1\n1 1\n255 1 1 246 1 144 -128\n44 4464\n1 195 1 4464\n195 1 -25536 1 44 25536 4464 1 239\n200 1 200\n1 1 195\n"
+expected_stdout = "44 -25536 -56 1 65535 195 -56\n2 1 1 1\n1 1\n255 1 1 246 1 144 -128\n44 4464\n1 195 1 4464\n195 1 -25536 1 44 25536 4464 1 239\n200 1 200\n1 1 195\n1 255 1 4464 1 441\n40000 40000 240 129 240 1\n144 1 1\n1 255\n"

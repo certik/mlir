@@ -8,6 +8,15 @@ typedef unsigned short nis_u16;
 typedef signed char nis_i8;
 
 struct nis_s { unsigned char f; short h; bool b; };
+union nis_u { unsigned char c; unsigned i; };
+
+// global and static-local initializers convert to the declared type
+unsigned char nis_g = -1;
+unsigned short nis_h[2] = { -1, 70000 };
+bool nis_gb = 2;
+static int nis_static(void) { static unsigned char a = 300; static bool b = 2; return a * 10 + b; }
+static unsigned char *nis_id(unsigned char *p) { return p; }
+typedef unsigned char *(*nis_idfn)(unsigned char *);
 
 static int high_bit(unsigned char c) { return c >= 0x80; }
 static unsigned char low_byte(int x) { return x; }
@@ -79,5 +88,26 @@ int main() {
     void *bp = bytes;
     printf("%d %d %d\n", *(nis_u16 *)vp - 70000 < 0, *(unsigned char *)bp - 300 < 0,
            *(unsigned char *)bp);
+    // globals / static locals
+    printf("%d %d %d %d %d %d\n", nis_g > 0, nis_g, nis_h[0] > 0, nis_h[1], nis_gb,
+           nis_static());
+    // stores and loads through pointer arithmetic keep the pointee's signedness
+    unsigned short ua[2];
+    unsigned short *up = ua;
+    *(up + 1) = 40000;
+    unsigned char raw[3];
+    raw[0] = 0x90; raw[1] = 0xF0; raw[2] = 0x81;
+    unsigned char *rp = raw, *rq = raw + 2;
+    unsigned char **rpp = &rp;
+    int pick = 0;
+    printf("%d %d %d %d %d %d\n", ua[1], *(up + 1), *(rp + 1), *(pick ? rp : rq),
+           *(*rpp + 1), *(rp + 1) > 0x80);
+    // a call returning `unsigned char *` (directly and through a pointer)
+    nis_idfn idf = nis_id;
+    printf("%d %d %d\n", *nis_id(raw), *nis_id(raw) >= 0x80, *idf(raw) >= 0x80);
+    // a union member written through a wider member
+    union nis_u un;
+    un.i = 0xFFFFFFFF;
+    printf("%d %d\n", un.c > 0, un.c);
     return 0;
 }
