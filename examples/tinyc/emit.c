@@ -2022,7 +2022,13 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
             return r;
         }
         case EX_DEREF: {
-            if (ex->lhs->kind == EX_VAR) {
+            // `*arr` of an array of pointers / ints decays to `arr[0]`:
+            // the general path below loads it with the element type.
+            Sym *as = ex->lhs->kind == EX_VAR ? lookup(e, sc, ex->lhs->name) : NULL;
+            bool lhs_is_array = as && (as->type.kind == TY_ARRAY_PTR_CHAR ||
+                                       as->type.kind == TY_ARRAY_PTR_STRUCT ||
+                                       as->type.kind == TY_ARRAY_I32);
+            if (ex->lhs->kind == EX_VAR && !lhs_is_array) {
                 Sym *s = lookup(e, sc, ex->lhs->name);
                 if (!s || (s->type.kind != TY_PTR_I32 &&
                            s->type.kind != TY_PTR_CHAR &&
@@ -3578,7 +3584,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                             }
                         }
                         if (have_ft) {
-                            if (ft.kind == TY_ARRAY_PTR_CHAR) {
+                            if ((ft.kind == TY_ARRAY_PTR_CHAR ||
+                                 ft.kind == TY_ARRAY_PTR_STRUCT) && ft.pointee) {
+                                // An element of a field `T *f[N]`: a T *.
+                                v = ptr_eval_of_type(e, v.val, ft.pointee);
+                            } else if (ft.kind == TY_ARRAY_PTR_CHAR) {
                                 v.is_str = true;
                                 v.ptr_elem = e->i8;
                             } else if (ft.kind == TY_ARRAY_PTR_STRUCT) {
@@ -6322,6 +6332,21 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
                 if (inner.array_elem_is_i64) { t.kind = TY_I64; return t; }
                 return int_elem_ctype(&inner);
             }
+            // `*arr` / `*(arr + k)` on an array of pointers: its element.
+            if ((inner.kind == TY_ARRAY_PTR_CHAR || inner.kind == TY_ARRAY_PTR_STRUCT) &&
+                inner.pointee)
+                return *inner.pointee;
+            if (inner.kind == TY_ARRAY_PTR_CHAR) {
+                t.kind = TY_PTR_CHAR;
+                t.int_bits = inner.int_bits; t.int_unsigned = inner.int_unsigned;
+                return t;
+            }
+            if (inner.kind == TY_ARRAY_PTR_STRUCT) {
+                t.kind = TY_PTR_STRUCT; t.struct_name = inner.struct_name; return t;
+            }
+            if (inner.kind == TY_ARRAY_STRUCT) {
+                t.kind = TY_STRUCT; t.struct_name = inner.struct_name; return t;
+            }
             if (inner.kind == TY_PTR_PTR && inner.pointee) return *inner.pointee;
             if (inner.kind == TY_PTR_STRUCT) {
                 t.kind = TY_STRUCT; t.struct_name = inner.struct_name; return t;
@@ -6360,6 +6385,13 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
         }
         case EX_INDEX: {
             Type base = infer_expr_type(e, sc, ex->lhs);
+            if ((base.kind == TY_ARRAY_I32 || base.kind == TY_ARRAY_F32) && base.array_len2) {
+                // A row `m[i]` of a 2D array is a 1D array.
+                base.array_len = base.array_len2;
+                base.array_len2 = 0;
+                base.array_len_expr = NULL;
+                return base;
+            }
             if (base.kind == TY_ARRAY_I32 || base.kind == TY_PTR_I32) {
                 if (base.kind == TY_PTR_I32 && base.ptr_is_f32) { t.kind = TY_F32; return t; }
                 if (base.kind == TY_PTR_I32 && base.ptr_is_f64) { t.kind = TY_F64; return t; }
