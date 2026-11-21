@@ -7,6 +7,7 @@
 // worklist erases zero-use pure ops and decrements their operands, re-queueing
 // the operand-defining ops (which may themselves become dead).
 #include "mlir_llvm_dce.h"
+#include "mlir_llvm_op_traits.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -54,38 +55,6 @@ static bool dcemap_get(DceMap *m, uintptr_t k, int64_t *out) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Removable iff side-effect-free with a single result. Conservative: matches
-// exactly the pure ops the lifter/backend can drop without observable effect.
-// Loads, stores, calls, terminators and anything unrecognized are NEVER
-// removed. Mirrors arith_gvn's ag_is_dce_pure, kept independent so each pass is
-// self-contained.
-// ---------------------------------------------------------------------------
-static bool dce_is_pure(MLIR_OpHandle op) {
-    switch (MLIR_GetOpType(op)) {
-    case OP_TYPE_LLVM_ADD: case OP_TYPE_LLVM_SUB: case OP_TYPE_LLVM_MUL:
-    case OP_TYPE_LLVM_UDIV: case OP_TYPE_LLVM_SDIV:
-    case OP_TYPE_LLVM_UREM: case OP_TYPE_LLVM_SREM:
-    case OP_TYPE_LLVM_AND: case OP_TYPE_LLVM_OR: case OP_TYPE_LLVM_XOR:
-    case OP_TYPE_LLVM_SHL: case OP_TYPE_LLVM_LSHR: case OP_TYPE_LLVM_ASHR:
-    case OP_TYPE_LLVM_ICMP:
-    case OP_TYPE_LLVM_ZEXT: case OP_TYPE_LLVM_SEXT: case OP_TYPE_LLVM_TRUNC:
-    case OP_TYPE_LLVM_PTRTOINT: case OP_TYPE_LLVM_MLIR_CONSTANT:
-    case OP_TYPE_LLVM_MLIR_ADDRESSOF:
-    case OP_TYPE_LLVM_INTTOPTR: case OP_TYPE_LLVM_BITCAST:
-    case OP_TYPE_LLVM_GEP: case OP_TYPE_LLVM_SELECT:
-    case OP_TYPE_LLVM_FADD: case OP_TYPE_LLVM_FSUB:
-    case OP_TYPE_LLVM_FMUL: case OP_TYPE_LLVM_FDIV:
-    case OP_TYPE_LLVM_FNEG: case OP_TYPE_LLVM_FCMP:
-    case OP_TYPE_LLVM_FPEXT: case OP_TYPE_LLVM_FPTRUNC:
-    case OP_TYPE_LLVM_SITOFP: case OP_TYPE_LLVM_UITOFP:
-    case OP_TYPE_LLVM_FPTOSI: case OP_TYPE_LLVM_FPTOUI:
-        return true;
-    default:
-        return false;
-    }
-}
-
 // Worklist DCE driver: erase zero-use pure single-result ops, decrement their
 // operands in `uses`, and re-queue operand-defining ops. `seeds` is the initial
 // worklist (any op handle; non-pure / live ops are filtered inside).
@@ -101,7 +70,7 @@ static void dce_worklist(MLIR_Context *ctx, DceMap *uses,
         MLIR_OpHandle op = wl[--nwl];
         if (op == MLIR_INVALID_HANDLE) continue;
         if (MLIR_GetOpParentBlock(op) == MLIR_INVALID_HANDLE) continue;  // already erased
-        if (MLIR_GetOpNumResults(op) != 1 || !dce_is_pure(op)) continue;
+        if (MLIR_GetOpNumResults(op) != 1 || !llvm_op_is_pure(MLIR_GetOpType(op))) continue;
         int64_t cnt = 0; dcemap_get(uses, (uintptr_t)MLIR_GetOpResult(op, 0), &cnt);
         if (cnt != 0) continue;
         size_t non = MLIR_GetOpNumOperands(op);

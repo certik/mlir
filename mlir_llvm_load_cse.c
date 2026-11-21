@@ -8,6 +8,7 @@
 // computes its own use counts for the dead-code elimination of detached
 // address chains.
 #include "mlir_llvm_load_cse.h"
+#include "mlir_llvm_op_traits.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -135,25 +136,21 @@ static void kb_str(KB *k, string s)   { kb_bytes(k, s.str, s.size); kb_bytes(k, 
 // No memory / control side effect: never clobbers an available load. Not
 // value-numbered itself (CSE-ing the linmem address chain would break the
 // addressing-mode fusion the backend performs); only recognised so it does
-// not bump the memory generation.
+// not bump the memory generation. The float arithmetic and conversions are
+// pure (llvm_op_is_pure) but still count as clobbers here, as they always
+// have: forwarding loads across them changes the generated code (fewer
+// loads, but more spills), so that is left to a separate change.
 static bool lc_is_pure(MLIR_OpHandle op) {
-    switch (MLIR_GetOpType(op)) {
-    case OP_TYPE_LLVM_ADD: case OP_TYPE_LLVM_SUB: case OP_TYPE_LLVM_MUL:
-    case OP_TYPE_LLVM_AND: case OP_TYPE_LLVM_OR:  case OP_TYPE_LLVM_XOR:
-    case OP_TYPE_LLVM_SHL: case OP_TYPE_LLVM_LSHR: case OP_TYPE_LLVM_ASHR:
-    case OP_TYPE_LLVM_SDIV: case OP_TYPE_LLVM_UDIV:
-    case OP_TYPE_LLVM_SREM: case OP_TYPE_LLVM_UREM:
-    case OP_TYPE_LLVM_ICMP:
-    case OP_TYPE_LLVM_ZEXT: case OP_TYPE_LLVM_SEXT: case OP_TYPE_LLVM_TRUNC:
-    case OP_TYPE_LLVM_PTRTOINT:
-    case OP_TYPE_LLVM_MLIR_CONSTANT:
-    case OP_TYPE_LLVM_MLIR_ADDRESSOF:
-    case OP_TYPE_LLVM_INTTOPTR: case OP_TYPE_LLVM_SELECT:
-    case OP_TYPE_LLVM_FCMP: case OP_TYPE_LLVM_GEP:
-    case OP_TYPE_LLVM_BITCAST:
-        return true;
-    default:
+    MLIR_OpType ty = MLIR_GetOpType(op);
+    switch (ty) {
+    case OP_TYPE_LLVM_FADD: case OP_TYPE_LLVM_FSUB:
+    case OP_TYPE_LLVM_FMUL: case OP_TYPE_LLVM_FDIV: case OP_TYPE_LLVM_FNEG:
+    case OP_TYPE_LLVM_FPEXT: case OP_TYPE_LLVM_FPTRUNC:
+    case OP_TYPE_LLVM_SITOFP: case OP_TYPE_LLVM_UITOFP:
+    case OP_TYPE_LLVM_FPTOSI: case OP_TYPE_LLVM_FPTOUI:
         return false;
+    default:
+        return llvm_op_is_pure(ty);
     }
 }
 

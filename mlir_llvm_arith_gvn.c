@@ -7,6 +7,7 @@
 // pass rewrites operands itself (an explicit value->value replacement map + a
 // final sweep) and computes its own use counts for dead-code elimination.
 #include "mlir_llvm_arith_gvn.h"
+#include "mlir_llvm_op_traits.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -147,21 +148,6 @@ static bool ag_is_commutative(MLIR_OpHandle op) {
     case OP_TYPE_LLVM_AND: case OP_TYPE_LLVM_OR: case OP_TYPE_LLVM_XOR:
         return true;
     default: return false;
-    }
-}
-
-// Side-effect-free ops removable by DCE once detached.
-static bool ag_is_dce_pure(MLIR_OpHandle op) {
-    if (ag_is_arith(op)) return true;
-    switch (MLIR_GetOpType(op)) {
-    case OP_TYPE_LLVM_ZEXT: case OP_TYPE_LLVM_SEXT: case OP_TYPE_LLVM_TRUNC:
-    case OP_TYPE_LLVM_PTRTOINT: case OP_TYPE_LLVM_MLIR_CONSTANT:
-    case OP_TYPE_LLVM_MLIR_ADDRESSOF:
-    case OP_TYPE_LLVM_INTTOPTR: case OP_TYPE_LLVM_BITCAST:
-    case OP_TYPE_LLVM_GEP:
-        return true;
-    default:
-        return false;
     }
 }
 
@@ -328,7 +314,7 @@ static void ag_dce(MLIR_Context *ctx, MLIR_RegionHandle region,
         MLIR_OpHandle op = wl[--nwl];
         if (op == MLIR_INVALID_HANDLE) continue;
         if (MLIR_GetOpParentBlock(op) == MLIR_INVALID_HANDLE) continue;   // erased
-        if (MLIR_GetOpNumResults(op) != 1 || !ag_is_dce_pure(op)) continue;
+        if (MLIR_GetOpNumResults(op) != 1 || !llvm_op_is_pure(MLIR_GetOpType(op))) continue;
         int64_t cnt = 0; agmap_get(&uses, (uintptr_t)MLIR_GetOpResult(op, 0), &cnt);
         if (cnt != 0) continue;
         size_t non = MLIR_GetOpNumOperands(op);
