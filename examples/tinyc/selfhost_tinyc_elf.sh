@@ -18,10 +18,10 @@
 
 set -euo pipefail
 
-# Lifted wasm code uses large shadow-stack frames; default 8 MiB stack can
-# overflow when compiling bigger sources (e.g. mlir_op_names.c) after many
-# prior compiles in this loop.
-ulimit -s unlimited 2>/dev/null || true
+# Run every stage with the usual 8 MiB default stack, even from a shell that
+# raised it, so the self-host check catches native frames growing back to the
+# point where the self-hosted compiler needs more stack.
+ulimit -S -s 8192 2>/dev/null || true
 
 if [ "$#" -ne 3 ]; then
     echo "usage: $0 INPUT_TINYC OUTPUT_TINYC_ELF STAGE_DIR" >&2
