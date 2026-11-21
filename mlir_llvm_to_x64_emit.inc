@@ -1165,7 +1165,6 @@ static void x64_register_global_op(MLIR_Context *ctx, MLIR_OpHandle op, GMap *gm
     MLIR_AttributeHandle gt = MLIR_GetOpAttributeByName(op, "global_type");
     MLIR_TypeHandle t = gt ? MLIR_GetAttributeTypeValue(gt) : MLIR_INVALID_HANDLE;
     size_t sz = t != MLIR_INVALID_HANDLE ? x64_type_size(ctx, t) : 0;
-    if (sz == 0) sz = 8;
     uint32_t off = x64_data_begin_global(data, sz);
 
     MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(op, "value");

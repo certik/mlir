@@ -56,6 +56,17 @@ static inline unsigned llvm_struct_field_offset(MLIR_Context *ctx, MLIR_TypeHand
     return off;
 }
 
+// True for `[0 x T]` (or `[N x [0 x T]]`) with a sized T: a valid type of
+// size 0, unlike a type with no size.
+static inline bool llvm_type_is_empty_array(MLIR_Context *ctx, MLIR_TypeHandle ty,
+                                            unsigned ptr_bytes) {
+    if (!MLIR_IsTypeLLVMArray(ty)) return false;
+    MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(ty);
+    if (llvm_type_size(ctx, et, ptr_bytes) != 0)
+        return MLIR_GetTypeLLVMArrayNumElements(ty) == 0;
+    return llvm_type_is_empty_array(ctx, et, ptr_bytes);
+}
+
 // Size in bytes, or 0 for a type that has no size (e.g. void, or an
 // aggregate containing one).
 static inline unsigned llvm_type_size(MLIR_Context *ctx, MLIR_TypeHandle ty,
@@ -75,7 +86,9 @@ static inline unsigned llvm_type_size(MLIR_Context *ctx, MLIR_TypeHandle ty,
             MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(ty, i);
             unsigned fsz = llvm_type_size(ctx, ft, ptr_bytes);
             unsigned fal = llvm_type_align(ctx, ft, ptr_bytes);
-            if (fsz == 0 || fal == 0) return 0;
+            // A zero-length array (`int tail[0];`) is a valid size of 0.
+            if ((fsz == 0 && !llvm_type_is_empty_array(ctx, ft, ptr_bytes)) || fal == 0)
+                return 0;
             off = llvm_align_up(off, fal) + fsz;
             if (fal > max_align) max_align = fal;
         }

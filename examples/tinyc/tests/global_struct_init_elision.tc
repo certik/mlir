@@ -1,0 +1,58 @@
+extern int printf(const char *fmt, ...);
+// Global initializers follow C's brace elision: a scalar where a nested
+// aggregate starts fills its members from the enclosing list (a lone 0 used
+// to zero the whole sub-aggregate and shift the rest). A designator
+// re-initializes its member, zeroing what was set before. A zero-length
+// array tail (`int t[0];`) has size 0: such structs failed on wasm and
+// aarch64 and printed 0 natively.
+struct V2 { int n; int tail[0]; };
+struct V2 v = { 6 };
+struct V2 v0;
+struct Z2 { long long a, b, c; int t[0]; };
+struct Z2 z = { 1, 2, 3 };
+int after_z = 77;
+struct In3 { int a, b; };
+struct Out3 { struct In3 in; int x; };
+struct Out3 o2 = { 0, 7 };
+struct Out3 o3 = { 1, 2, 3 };
+struct Out3 o4 = { { 1 }, 9 };
+struct A3 { int a[2]; int x; };
+struct A3 a2 = { 0, 5 };
+struct A3 a3 = { 1, 2, 3 };
+struct P2 { int x, y; };
+struct P2 pts[] = { 0, 0 };
+struct P2 pts2[] = { 1, 2, 3, 4, 5 };
+struct P2 pts3[] = { {1, 2}, 3, 4, {5} };
+struct D2 { int a, b; };
+struct D2 d1 = { .a = 1, .a = 0, .b = 2 };
+struct D2 d2 = { .b = 2, .a = 1, 5 };
+struct E2 { struct D2 in; int z; };
+struct E2 e1 = { .in = {1, 2}, .in = {3}, .z = 4 };
+struct E2 e2 = { .in = 1, 2, 3 };
+static void part1(void) {
+    printf("%d %d %lld %lld %lld %d\n", v.n, v0.n, z.a, z.b, z.c, after_z);
+    printf("%d %d %d | %d %d %d | %d %d %d\n", o2.in.a, o2.in.b, o2.x, o3.in.a, o3.in.b, o3.x, o4.in.a, o4.in.b, o4.x);
+    printf("%d %d %d | %d %d %d\n", a2.a[0], a2.a[1], a2.x, a3.a[0], a3.a[1], a3.x);
+    printf("%d %d %d %d %d\n", (int)(sizeof(pts) / sizeof(pts[0])), (int)(sizeof(pts2) / sizeof(pts2[0])), pts2[2].x, pts2[2].y, (int)(sizeof(pts3) / sizeof(pts3[0])));
+    printf("%d %d %d %d %d\n", pts3[1].x, pts3[1].y, pts3[2].x, pts3[2].y, pts2[1].y);
+    printf("%d %d | %d %d | %d %d %d | %d %d %d\n", d1.a, d1.b, d2.a, d2.b, e1.in.a, e1.in.b, e1.z, e2.in.a, e2.in.b, e2.z);
+}
+struct M { int m[2][3]; int t; };
+struct M mm = { { {1}, 2, 3 }, 4 };
+struct M mf = { 1, 2, 3, 4, 5, 6, 7 };
+struct C { char s[4]; int n; };
+struct C cs[] = { "ab", 1, { "cd", 2 }, 'x', 'y', 0, 0, 3 };
+union U { int a; float f; };
+struct W { int x; union U u; int y; };
+struct W w = { 1, 0, 2 };
+static void part2(void) {
+    printf("%d %d %d %d %d %d %d\n", mm.m[0][0], mm.m[0][1], mm.m[1][0], mm.m[1][1], mm.m[1][2], mm.t, mf.t);
+    printf("%d %d %d %d\n", mf.m[0][2], mf.m[1][0], mf.m[1][2], (int)(sizeof(cs) / sizeof(cs[0])));
+    printf("%c%c %d %c%c %d %c%c %d\n", cs[0].s[0], cs[0].s[1], cs[0].n, cs[1].s[0], cs[1].s[1], cs[1].n, cs[2].s[0], cs[2].s[1], cs[2].n);
+    printf("%d %d %d\n", w.x, w.u.a, w.y);
+}
+int main(void) {
+    part1();
+    part2();
+    return 0;
+}
