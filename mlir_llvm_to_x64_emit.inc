@@ -765,6 +765,29 @@ static void lower_term(FnCtx *F, MLIR_OpHandle op) {
 // ---------------------------------------------------------------------------
 // Function emission: frame pre-pass, prologue, blocks, branch patch.
 // ---------------------------------------------------------------------------
+// Ops whose result load_val() rematerializes at every use (lower_op emits no
+// code for them), so the result is never stored and needs no frame slot.
+static bool x64_op_rematerialized(MLIR_OpHandle op) {
+    switch (MLIR_GetOpType(op)) {
+    case OP_TYPE_LLVM_MLIR_CONSTANT: case OP_TYPE_LLVM_MLIR_ADDRESSOF:
+    case OP_TYPE_LLVM_MLIR_UNDEF: case OP_TYPE_LLVM_MLIR_ZERO:
+    case OP_TYPE_LLVM_MLIR_NULL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Frame slot of `v` for the pre-pass below: none when it lives in a register,
+// its shared spill slot when the allocator spilled it, else a fresh slot.
+static void x64_assign_slot(FnCtx *F, SlotMap *spill, MLIR_ValueHandle v, int32_t *cur) {
+    int32_t idx;
+    if (sm_get(&F->rm, v, &idx)) return;
+    if (sm_get(spill, v, &idx)) { vmap_put(&F->slots, v, (idx + 1) * 8); return; }
+    *cur += 8;
+    vmap_put(&F->slots, v, *cur);
+}
+
 static unsigned alloca_bytes(MLIR_Context *ctx, MLIR_OpHandle op) {
     // element type size * count; default 8. Uses the shared LP64 layout
     // (x64_type_size), so nested arrays / structs / unions are sized correctly.
@@ -804,15 +827,22 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     //     (value -> physical register). Values it leaves out stay in frame
     //     slots. TINYC_X64_NOREGALLOC forces the pure slot model (A/B aid). ---
     F.rm.arena = MLIR_GetArenaAllocator(ctx);
+    // The global allocator also packs the values it spills into `nslots`
+    // shared frame slots (`sm_spill`: value -> slot index; values whose live
+    // intervals don't overlap share a slot, by the same interval reasoning
+    // that lets them share a register).
+    SlotMap sm_spill; memset(&sm_spill, 0, sizeof(sm_spill));
+    sm_spill.arena = MLIR_GetArenaAllocator(ctx);
+    int32_t nslots = 0;
     if (!getenv("TINYC_X64_NOREGALLOC")) {
-        SlotMap sm_spill; memset(&sm_spill, 0, sizeof(sm_spill));
-        sm_spill.arena = MLIR_GetArenaAllocator(ctx);
-        int32_t nslots = 0;
         RegTarget T = x64_regtarget();
         uint32_t um = mlir_regalloc_global(ctx, reg, nb, &F.rm, &sm_spill, &nslots, &T);
         if (um == RA_BAIL) {
             memset(&F.rm, 0, sizeof(F.rm));
             F.rm.arena = MLIR_GetArenaAllocator(ctx);
+            memset(&sm_spill, 0, sizeof(sm_spill));
+            sm_spill.arena = MLIR_GetArenaAllocator(ctx);
+            nslots = 0;
             um = mlir_regalloc_cfg(ctx, reg, nb, &F.rm, &T);
         }
         F.used_mask = um;
@@ -820,20 +850,27 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
             if (um & (1u << k)) F.cs_reg[F.n_cs++] = T.pool[T.ncaller + k];
     }
 
-    // --- frame pre-pass: assign slots to every block arg + op result; reserve
-    //     alloca regions; size the parallel-move temp area. ---
+    // --- frame pre-pass: give a frame slot to every block arg + op result that
+    //     has no register home; reserve alloca regions; size the parallel-move
+    //     temp area. Spilled values use the allocator's shared slots
+    //     (rbp-8 .. rbp-8*nslots); values the allocator did not place (all of
+    //     them under TINYC_X64_NOREGALLOC or the block-local fallback) get a
+    //     slot of their own after those; rematerialized constants get none.
+    //     A slot per SSA value made the frame of a large function tens of KiB,
+    //     which overflowed the 8 MiB stack in recursive code (the wasm lifter's
+    //     lower_op <-> lower_region) of the self-hosted ELF compiler. ---
     size_t want = 0;
     for (size_t b = 0; b < nb; b++) {
         MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
         want += MLIR_GetBlockNumArgs(bk) + MLIR_GetBlockNumOps(bk) + 4;
     }
     vmap_init(&F.slots, want ? want : 8);
-    int32_t cur = 0;
+    int32_t cur = nslots * 8;
     uint32_t max_edge = 0;
     for (size_t b = 0; b < nb; b++) {
         MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
         size_t na = MLIR_GetBlockNumArgs(bk);
-        for (size_t a = 0; a < na; a++) { cur += 8; vmap_put(&F.slots, MLIR_GetBlockArg(bk, a), cur); }
+        for (size_t a = 0; a < na; a++) x64_assign_slot(&F, &sm_spill, MLIR_GetBlockArg(bk, a), &cur);
         size_t no = MLIR_GetBlockNumOps(bk);
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
@@ -843,7 +880,8 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
                 cur += (int32_t)rb;
                 vmap_put(&F.slots, (MLIR_ValueHandle)((uintptr_t)op | 1), cur);  // region
             }
-            if (MLIR_GetOpNumResults(op) == 1) { cur += 8; vmap_put(&F.slots, MLIR_GetOpResult(op, 0), cur); }
+            if (MLIR_GetOpNumResults(op) == 1 && !x64_op_rematerialized(op))
+                x64_assign_slot(&F, &sm_spill, MLIR_GetOpResult(op, 0), &cur);
             MLIR_OpHandle t = op;
             size_t ns = MLIR_GetOpNumSuccessors(t);
             for (size_t s = 0; s < ns; s++) {
