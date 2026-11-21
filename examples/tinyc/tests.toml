@@ -1492,6 +1492,14 @@ targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "15 14 4\n100 101 2\nf5 e4 4\n2005 2004 4\nF5 E4 4\n15 14 4\n11 c2 3003 3\n"
 
 [[test]]
+name = "compound_assign_side_effect"
+targets = ["native", "wasm", "macho", "elf"]
+# `lhs op= rhs` and prefix `++lhs` / `--lhs` evaluate `lhs` once: `a[i++] += 1`
+# used to increment `i` twice, `np[i++]->val += 10` (np: array of struct
+# pointers) three times. Expected output from clang.
+expected_stdout = "1 11 20\n2 100 101 107 51 416 106 107 2 3 36 220 110\n2 11 20 3\n2 7 8 0\n2 2\n3 4 5000000000 250\n3 100 1.5 210\n1 1 1 0 1 0 0\n2 51 7\n2 1 0 2 -1\n9 1 2 9 2 3 8\n1 llo world\n1 10 1\n1 bcdef abcdef\n1 10\n2 2 1\n"
+
+[[test]]
 name = "lift_opt_passes_fire"
 targets = ["wasm"]
 wasm_upstream_skip = true
