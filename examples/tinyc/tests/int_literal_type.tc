@@ -1,0 +1,35 @@
+extern int printf(const char *fmt, ...);
+// An integer literal takes the first of int / long / long long that can
+// hold its value; a hex/octal literal may also take the unsigned variants,
+// and a `u`-suffixed one only those (#247).
+int main() {
+    // Too big for 32 bits: 64-bit even without an L suffix.
+    long long c = 4294967296;
+    long long d = 4294967296LL;
+    unsigned long long e = 4294967296ULL;
+    unsigned long long f = 4294967296u;
+    unsigned long long g = 0x100000000u;
+    unsigned long long a = 922337203685477579u;
+    printf("%lld %lld %llu %llu %llu %llu\n", c, d, e, f, g, a);
+    printf("%lld %lld %lld\n", 2147483648, -2147483648, 0x100000000);
+    printf("%lld %lld %llu\n", -5000000000, 0 - 5000000000LL, 18446744073709551615u);
+    printf("%d %d %d %d %d\n", (int)sizeof(2147483647), (int)sizeof(2147483648),
+           (int)sizeof(0x80000000), (int)sizeof(4294967295u), (int)sizeof(4294967296u));
+    // A value in (INT_MAX, UINT_MAX] is unsigned int when written in hex/octal
+    // or with a u suffix, so it zero-extends.
+    unsigned long long m = 0xFFFFFFFF;
+    unsigned long long n = 4000000000u;
+    unsigned long long o = 037777777777;
+    unsigned long long x = 0x123456789ABCDEF0ULL;
+    printf("%llu %llu %llu %llx\n", m, n, o, x & 0xFFFFFFFF);
+    printf("%d %d %d %d\n", 0xFFFFFFFF > 0, -1 < 0u, 1u - 2 > 0, 3000000000u / 2 > 0);
+    // Mixed widths: a 64-bit signed operand keeps the operation signed (#136).
+    long long neg = -10;
+    unsigned three = 3;
+    printf("%d %lld %lld\n", -1LL < 1u, neg / 3u, neg % 3u);
+    printf("%d %lld %lld\n", neg < three, neg / three, neg % three);
+    // The shift result has the left operand's type.
+    int sh = -16;
+    printf("%d %u\n", sh >> 2u, ~0u >> 28);
+    return 0;
+}

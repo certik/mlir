@@ -519,9 +519,15 @@ static Expr *parse_primary(P *p) {
         e->int_value = t.int_value;
         e->is_i64 = t.is_i64;
         e->is_long_long = t.is_long_long;
+        e->is_unsigned = t.is_unsigned;
         // On wasm32, a single-L suffix (`long`) is 32-bit, not 64-bit. Only
-        // `LL` (or having no L at all) is target-independent.
-        if (e->is_i64 && !e->is_long_long && p->target_wasm32) e->is_i64 = false;
+        // `LL` (or having no L at all) is target-independent. The lexer
+        // promotes a value that does not fit 32 bits to `long long`, so a
+        // value above INT_MAX here is hex/octal or u-suffixed: `unsigned long`.
+        if (e->is_i64 && !e->is_long_long && p->target_wasm32) {
+            e->is_i64 = false;
+            if ((uint64_t)e->int_value > 0x7FFFFFFFull) e->is_unsigned = true;
+        }
         return e;
     }
     if (t.kind == TC_TK_FLOAT_LIT) {

@@ -1576,3 +1576,11 @@ targets = ["native", "wasm", "macho", "elf"]
 # initialization, assignment, op=, ++/--, argument passing and return; the
 # value then promotes to signed int (#262). Expected output from clang.
 expected_stdout = "44 -25536 -56 1 65535 195 -56\n2 1 1 1\n1 1\n255 1 1 246 1 144 -128\n44 4464\n1 195 1 4464\n195 1 -25536 1 44 25536 4464 1 239\n200 1 200\n1 1 195\n1 255 1 4464 1 441\n40000 40000 240 129 240 1\n144 1 1\n1 255\n9029 9029 -1 4660\n1000 70000\n1000\n-16 -16 -127 -112\n1\n"
+
+[[test]]
+name = "int_literal_type"
+targets = ["native", "wasm", "macho", "elf"]
+# An integer literal takes the first of int / long / long long (plus the
+# unsigned variants for hex/octal or a u suffix) that holds its value (#247);
+# mixed-width operations keep the 64-bit operand's signedness (#136).
+expected_stdout = "4294967296 4294967296 4294967296 4294967296 4294967296 922337203685477579\n2147483648 -2147483648 4294967296\n-5000000000 -5000000000 18446744073709551615\n4 8 4 4 8\n4294967295 4000000000 4294967295 9abcdef0\n1 0 1 1\n1 -3 -1\n1 -3 -1\n-4 15\n"

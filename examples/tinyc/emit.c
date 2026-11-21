@@ -1971,6 +1971,10 @@ static void unify_numeric(E *e, EVal *a, EVal *b) {
         a->is_unsigned = u; b->is_unsigned = u;
         return;
     }
+    // Mixed widths: the 64-bit type can represent every value of the
+    // 32-bit one, so the 64-bit operand's signedness wins (C's usual
+    // arithmetic conversions): `-1LL < 1U` stays a signed compare.
+    bool u = a->is_i64 ? a->is_unsigned : b->is_unsigned;
     if (!a->is_i64) {
         a->val = a->is_unsigned ? emit_extui_i32_to_i64(e, a->val)
                                 : emit_extsi_i32_to_i64(e, a->val);
@@ -1981,7 +1985,6 @@ static void unify_numeric(E *e, EVal *a, EVal *b) {
                                 : emit_extsi_i32_to_i64(e, b->val);
         b->is_i64 = true;
     }
-    bool u = a->is_unsigned || b->is_unsigned;
     a->is_unsigned = u; b->is_unsigned = u;
 }
 
@@ -2433,6 +2436,9 @@ static bool ast_fold_int(E *e, Scope *sc, Expr *ex, int64_t *out) {
     if (!ex) return false;
     switch (ex->kind) {
         case EX_INT:
+            // A 64-bit or unsigned literal does not fold with int32
+            // semantics; leave it to normal emission.
+            if (ex->is_i64 || ex->is_unsigned) return false;
             *out = (int64_t)(int32_t)ex->int_value;
             return true;
         case EX_SIZEOF: {
@@ -2629,6 +2635,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             } else {
                 r.val = emit_const_i32(e, ex->int_value);
             }
+            r.is_unsigned = ex->is_unsigned;
             return r;
         case EX_FLOAT:
             if (ex->is_f64) {
@@ -3558,6 +3565,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     MLIR_TypeHandle ity = a.is_i64 ? e->i64 : e->i32;
                     r.val = emit_binop(e, OP_TYPE_ARITH_SUBI, str_lit("arith.subi"), ity, z, a.val);
                     r.is_i64 = a.is_i64;
+                    r.is_unsigned = a.is_unsigned;
                 }
                 return r;
             }
@@ -3572,11 +3580,13 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     r.val = emit_binop(e, OP_TYPE_ARITH_XORI, str_lit("arith.xori"),
                                        e->i64, a.val, ones);
                     r.is_i64 = true;
+                    r.is_unsigned = a.is_unsigned;
                     return r;
                 }
                 MLIR_ValueHandle ones = emit_const_i32(e, -1);
                 r.val = emit_binop(e, OP_TYPE_ARITH_XORI, str_lit("arith.xori"),
                                    e->i32, a.val, ones);
+                r.is_unsigned = a.is_unsigned;
                 return r;
             }
             MLIR_ValueHandle b = emit_to_bool_i1(e, a);
@@ -3740,11 +3750,15 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 r.val = res;
                 return r;
             }
+            // A shift has the (promoted) left operand's type: the right
+            // operand's signedness must not make `x >> 2u` logical.
+            bool lhs_unsigned = a.is_unsigned;
             unify_numeric(e, &a, &b);
             bool flt = a.is_float;
             bool flt64 = a.is_f64;
             bool i64m = a.is_i64;
-            bool unsgn = a.is_unsigned;
+            bool unsgn = (ex->op == OP_SHL || ex->op == OP_SHR) ? lhs_unsigned
+                                                               : a.is_unsigned;
             MLIR_TypeHandle ity = i64m ? e->i64 : e->i32;
             MLIR_TypeHandle fty = flt64 ? e->f64 : e->f32;
             switch (ex->op) {
@@ -5827,6 +5841,7 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
         case EX_INT:
             if (ex->is_i64) { t.kind = TY_I64; t.int_bits = 64; }
             else            { t.kind = TY_I32; t.int_bits = 32; }
+            t.int_unsigned = ex->is_unsigned;
             return t;
         case EX_FLOAT: t.kind = ex->is_f64 ? TY_F64 : TY_F32; return t;
         case EX_STR:   t.kind = TY_PTR_CHAR; return t;

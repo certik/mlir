@@ -230,6 +230,9 @@ struct Expr {
                              // `int`).
     bool    is_long_long;    // true iff the integer literal had an LL suffix.
                              // LL always means TY_I64 regardless of target.
+    bool    is_unsigned;     // the integer literal has an unsigned type
+                             // (u suffix, or a hex/octal value that only
+                             // fits the unsigned type).
     bool    is_f64;          // true iff the float literal has TY_F64 type
                              // (i.e. no `f` suffix; C's default for `1.0`).
     // For EX_FLOAT
@@ -532,7 +535,9 @@ typedef struct {
                              // (always 64-bit). When `is_i64 && !is_long_long`
                              // the literal had a single L: it is 64-bit on
                              // native targets but 32-bit on wasm32 (where
-                             // `long` is `int`).
+                             // `long` is `int`). Also set for an unsuffixed
+                             // literal whose value needs 64 bits.
+    bool    is_unsigned;     // TC_TK_INT_LIT has an unsigned C type
     bool    is_f64;          // TC_TK_FLOAT_LIT without `f` suffix (i.e. double)
     double  float_value;
     string text;             // interned identifier text (for IDENT)
