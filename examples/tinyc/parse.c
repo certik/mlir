@@ -1470,7 +1470,8 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     if (cur(p).kind == TC_TK_LPAREN && peek(p, 1).kind == TC_TK_STAR) {
         Stmt *s = new_stmt(p, ST_DECL, line);
         s->decl_type.kind = base;
-        if (is_long) s->decl_type.int_bits = 64;
+        s->decl_type.int_bits = int_bits;       // the return type's width
+        s->decl_type.is_bool = is_bool;
         s->decl_type.int_unsigned = is_unsigned;
         string nm = (string){0};
         try_parse_fnptr_suffix(p, &s->decl_type, &nm);
