@@ -641,6 +641,19 @@ static MLIR_ValueHandle emit_cast(FLower *L, MLIR_OpType ot,
     return r[0];
 }
 
+// `a` truncated to the narrow integer type `nt` (i8 / i16). When `a` is the
+// zero extension of an `nt` value (a sub-word load: i32.load8_u /
+// load16_u), that value itself, so `load8_u; extend8_s` lifts to a load and
+// a sext without a zext / trunc round trip (the zext is then dead).
+static MLIR_ValueHandle narrow_of(FLower *L, MLIR_ValueHandle a, MLIR_TypeHandle nt) {
+    MLIR_OpHandle d = MLIR_GetValueDefiningOp(a);
+    if (d != MLIR_INVALID_HANDLE && MLIR_GetOpType(d) == OP_TYPE_LLVM_ZEXT) {
+        MLIR_ValueHandle src = MLIR_GetOpOperand(d, 0);
+        if (MLIR_GetValueType(src) == nt) return src;
+    }
+    return emit_cast(L, OP_TYPE_LLVM_TRUNC, a, nt);
+}
+
 // Emit a two-operand integer op (add / and) producing `ity`.
 static MLIR_ValueHandle emit_binop2(FLower *L, MLIR_OpType ot,
                                     MLIR_ValueHandle a, MLIR_ValueHandle b,
@@ -1321,24 +1334,21 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         bool is64 = (vt == WT_I64);
         MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
         MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
-        // Choose a backend-supported load width (1/4/8 bytes); sub-word loads
-        // are zero-extended into the i32/i64 result.
-        MLIR_TypeHandle lty = (sz == 8) ? i64 : (sz == 1) ? MLIR_CreateTypeInteger(ctx, 8, true) : i32;
+        // Load exactly `sz` bytes; sub-word loads are zero-extended into the
+        // i32/i64 result.
+        MLIR_TypeHandle lty = (sz == 8) ? i64
+                            : (sz == 1) ? MLIR_CreateTypeInteger(ctx, 8, true)
+                            : (sz == 2) ? MLIR_CreateTypeInteger(ctx, 16, true) : i32;
         MLIR_TypeHandle lrt[1] = { lty };
         MLIR_ValueHandle lr[1] = { mk_res(ctx, lty) };
         MLIR_ValueHandle lops[1] = { p };
         MLIR_OpHandle lop = build_op(ctx, OP_TYPE_LLVM_LOAD, NULL, 0, lrt, 1, lr, lops, 1);
         emit(L, lop);
         MLIR_ValueHandle v = lr[0];
-        if (sz == 2) {
-            // 4-byte load then mask to the low 16 bits.
-            MLIR_ValueHandle m = emit_const(L, i32, 0xffff);
-            v = emit_binop2(L, OP_TYPE_LLVM_AND, v, m, i32);
-        }
         // Widen to the result type.
         MLIR_TypeHandle want = is64 ? i64 : i32;
         if (sz < 8 && is64) v = emit_cast(L, OP_TYPE_LLVM_ZEXT, v, i64);
-        else if (sz == 1 && !is64) v = emit_cast(L, OP_TYPE_LLVM_ZEXT, v, i32);
+        else if (sz < 4 && !is64) v = emit_cast(L, OP_TYPE_LLVM_ZEXT, v, i32);
         (void)want;
         vmap_set(L->vmap, MLIR_GetOpResult(op, 0), v);
         return true;
@@ -1389,12 +1399,12 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         }
         MLIR_ValueHandle p = linmem_ptr(L, addr, off);
         MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
-        // Truncate the value to a backend-supported store width (1/4/8). A
-        // 2-byte store uses a 4-byte store.
-        if (sz == 1) {
-            MLIR_TypeHandle i8 = MLIR_CreateTypeInteger(ctx, 8, true);
-            val = emit_cast(L, OP_TYPE_LLVM_TRUNC, val, i8);
-        } else if (sz == 2 || sz == 4) {
+        // Truncate the value to the store width: exactly `sz` bytes are
+        // written (a wider store would clobber the bytes after a short).
+        if (sz == 1 || sz == 2) {
+            MLIR_TypeHandle nt = MLIR_CreateTypeInteger(ctx, (unsigned)(8 * sz), true);
+            val = emit_cast(L, OP_TYPE_LLVM_TRUNC, val, nt);
+        } else if (sz == 4) {
             if (vt == WT_I64) val = emit_cast(L, OP_TYPE_LLVM_TRUNC, val, i32);
         }
         MLIR_ValueHandle ops[2] = { val, p };
@@ -1468,11 +1478,9 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         case 0xad: // i64.extend_i32_u
             res = emit_cast(L, OP_TYPE_LLVM_ZEXT, a, i64); break;
         case 0xc0: // i32.extend8_s
-            res = emit_cast(L, OP_TYPE_LLVM_SEXT,
-                emit_cast(L, OP_TYPE_LLVM_TRUNC, a, i8), i32); break;
+            res = emit_cast(L, OP_TYPE_LLVM_SEXT, narrow_of(L, a, i8), i32); break;
         case 0xc1: // i32.extend16_s
-            res = emit_cast(L, OP_TYPE_LLVM_SEXT,
-                emit_cast(L, OP_TYPE_LLVM_TRUNC, a, i16), i32); break;
+            res = emit_cast(L, OP_TYPE_LLVM_SEXT, narrow_of(L, a, i16), i32); break;
         case 0xc2: // i64.extend8_s
             res = emit_cast(L, OP_TYPE_LLVM_SEXT,
                 emit_cast(L, OP_TYPE_LLVM_TRUNC, a, i8), i64); break;

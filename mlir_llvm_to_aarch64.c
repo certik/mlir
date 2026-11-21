@@ -340,20 +340,22 @@ static void emit_gep_const_off(MLIR_Context *ctx, MLIR_BlockHandle blk,
 static bool emit_mem_load(MLIR_Context *ctx, MLIR_BlockHandle blk,
                           uint8_t rt, uint8_t base, unsigned sz) {
     MLIR_OpType t = sz == 1 ? OP_TYPE_AARCH64_LDRB_IMM
+                  : sz == 2 ? OP_TYPE_AARCH64_LDRH_IMM
                   : sz == 4 ? OP_TYPE_AARCH64_LDR_W
                   : sz == 8 ? OP_TYPE_AARCH64_LDR_X
                             : OP_TYPE_AARCH64_LDR_X;
-    if (sz != 1 && sz != 4 && sz != 8) return false;
+    if (sz != 1 && sz != 2 && sz != 4 && sz != 8) return false;
     emit_ldst_x(ctx, blk, t, rt, base, 0);
     return true;
 }
 static bool emit_mem_store(MLIR_Context *ctx, MLIR_BlockHandle blk,
                            uint8_t rt, uint8_t base, unsigned sz) {
     MLIR_OpType t = sz == 1 ? OP_TYPE_AARCH64_STRB_IMM
+                  : sz == 2 ? OP_TYPE_AARCH64_STRH_IMM
                   : sz == 4 ? OP_TYPE_AARCH64_STR_W
                   : sz == 8 ? OP_TYPE_AARCH64_STR_X
                             : OP_TYPE_AARCH64_STR_X;
-    if (sz != 1 && sz != 4 && sz != 8) return false;
+    if (sz != 1 && sz != 2 && sz != 4 && sz != 8) return false;
     emit_ldst_x(ctx, blk, t, rt, base, 0);
     return true;
 }
@@ -1784,7 +1786,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         MLIR_ValueHandle val = MLIR_GetOpOperand(op, 0);
         MLIR_ValueHandle ptr = MLIR_GetOpOperand(op, 1);
         unsigned sz = a64_type_size(ctx, MLIR_GetValueType(val));
-        if (sz != 1 && sz != 4 && sz != 8)
+        if (sz != 1 && sz != 2 && sz != 4 && sz != 8)
             LFAIL("llvm->aarch64: unsupported store size %u\n", sz);
         int32_t mtag;
         if (L->memfuse && sm_get(L->memfuse, ptr, &mtag)) {
@@ -1831,7 +1833,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
         MLIR_ValueHandle ptr = MLIR_GetOpOperand(op, 0);
         unsigned sz = a64_type_size(ctx, MLIR_GetValueType(res));
-        if (sz != 1 && sz != 4 && sz != 8)
+        if (sz != 1 && sz != 2 && sz != 4 && sz != 8)
             LFAIL("llvm->aarch64: unsupported load size %u\n", sz);
         int32_t mtag;
         if (L->memfuse && sm_get(L->memfuse, ptr, &mtag)) {
