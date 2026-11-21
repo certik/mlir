@@ -62,8 +62,16 @@ static Enumerator *enum_lookup(P *p, string name) {
 }
 
 // The parser's leaves for tinyc_fold: previously-declared enumerators,
-// which have type `int` (or a 64-bit type when the value needs one).
-static bool parse_fold_leaf(void *ctx, Expr *ex, FoldVal *out) {
+// which have type `int` (or a 64-bit type when the value needs one), and an
+// unevaluated `sizeof`, which only needs its type: size_t (`unsigned
+// long`). The parser cannot size types, so an evaluated one is refused.
+static bool parse_fold_leaf(void *ctx, Expr *ex, bool lenient, FoldVal *out) {
+    if (ex->kind == EX_SIZEOF && lenient) {
+        out->v = 0;
+        out->is_i64 = !((P *)ctx)->target_wasm32;
+        out->is_unsigned = true;
+        return true;
+    }
     if (ex->kind != EX_VAR) return false;
     Enumerator *en = enum_lookup((P *)ctx, ex->name);
     if (!en) return false;
@@ -2836,7 +2844,10 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
             td->name.size = len;
             bool is_64 = always_64[k] || !target_wasm32;
             td->ty.kind = is_64 ? TY_I64 : TY_I32;
-            td->ty.int_bits = is_64 ? 64 : 32;
+            // The pointer-sized ones are `long` / `unsigned long` (as
+            // corec/base/types.h defines them): 64 bits as `long` is tagged
+            // also on wasm32, where the storage is i32.
+            td->ty.int_bits = 64;
             td->ty.int_unsigned = unsigneds[k];
             td->next = p.typedefs;
             p.typedefs = td;
