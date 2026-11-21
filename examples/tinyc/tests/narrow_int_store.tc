@@ -1,0 +1,83 @@
+extern int printf(const char *fmt, ...);
+// Every conversion into a char / short / bool type truncates to its width and
+// re-extends by its signedness (bool: != 0): initializers, assignments,
+// compound assignments, ++/--, parameters, returns, struct fields and array
+// elements. The value then promotes to (signed) int (#262).
+typedef unsigned char nis_u8;
+typedef unsigned short nis_u16;
+typedef signed char nis_i8;
+
+struct nis_s { unsigned char f; short h; bool b; };
+
+static int high_bit(unsigned char c) { return c >= 0x80; }
+static unsigned char low_byte(int x) { return x; }
+static short as_short(int x) { return x; }
+static int count_non_ascii(const char *s) {
+    int n = 0;
+    for (int i = 0; s[i]; i++) {
+        unsigned char c = s[i];
+        if (c >= 0x80) n++;
+    }
+    return n;
+}
+
+int main() {
+    const char *s = "h\xc3\xa9llo";
+    // initializers
+    unsigned char c = 300;
+    short sh = 40000;
+    char ch = 200;
+    bool b = 256;
+    unsigned short us = -1;
+    nis_u8 tu = s[1];
+    nis_i8 ti = 200;
+    printf("%d %d %d %d %d %d %d\n", c, sh, ch, b, us, tu, ti);
+    // comparisons of promoted values
+    printf("%d %d %d %d\n", count_non_ascii(s), tu > 127, us > 0, ch < 0);
+    unsigned char a = -1;
+    printf("%d %d\n", a > 0, a >= 128);
+    // assignments, compound assignments, ++ / --
+    unsigned char d;
+    d = 511;
+    unsigned char e = 0;
+    e--;
+    unsigned char v = 10;
+    v -= 20;
+    unsigned char w = 255;
+    w++;
+    ++w;
+    c += 100;
+    signed char sc = 127;
+    sc++;
+    printf("%d %d %d %d %d %d %d\n", d, e > 0, v > 100, v, w, c, sc);
+    // the value of an assignment has the lvalue's type
+    unsigned char z;
+    printf("%d %d\n", (z = 300), (sh = 70000));
+    // parameters and returns
+    printf("%d %d %d %d\n", high_bit(s[1]), low_byte(s[1]), low_byte(s[1]) > 127,
+           as_short(70000));
+    // struct fields and array elements
+    struct nis_s st;
+    st.f = s[1];
+    st.h = 40000;
+    st.b = 2;
+    struct nis_s st2 = {300, -40000, 0};
+    nis_u16 arr[2] = {70000, -1};
+    unsigned char bytes[2];
+    bytes[0] = s[1];
+    bytes[1] = 300;
+    printf("%d %d %d %d %d %d %d %d %d\n", st.f, st.f > 127, st.h, st.b, st2.f, st2.h,
+           arr[0], arr[1] > 0, bytes[0] + bytes[1]);
+    // char -> unsigned char -> wider
+    unsigned char uc = ch;
+    unsigned long long wide = uc;
+    printf("%d %d %llu\n", uc, uc > 127, wide);
+    // a load through a cast pointer to a narrow type promotes too
+    nis_u16 halves[1];
+    halves[0] = 1000;
+    void *vp = halves;
+    void *bp = bytes;
+    printf("%d %d %d\n", *(nis_u16 *)vp - 70000 < 0, *(unsigned char *)bp - 300 < 0,
+           *(unsigned char *)bp);
+    return 0;
+}

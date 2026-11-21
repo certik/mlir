@@ -175,9 +175,6 @@ struct Type {
     int      int_bits;
     bool     int_unsigned;
     bool     is_bool;        // `bool` / `_Bool` (int_bits is 8 like char)
-    // char / short / bool declared with keywords (int_bits stays 0 on that
-    // path): the value (or pointee) promotes to `int` in arithmetic.
-    bool     int_narrow;
     bool     is_const;       // type was declared with the `const` qualifier
 };
 
