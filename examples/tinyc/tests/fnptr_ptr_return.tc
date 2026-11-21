@@ -3,7 +3,8 @@ extern int printf(const char *fmt, ...);
 // type: a pointer (`const char *(*fp)(int)`), a struct pointer, a typedef
 // name or a struct. parse_decl only recognised `T (*fp)(...)` right after a
 // base type, so these failed with "expected identifier". `(void)` as the
-// parameter list declares no parameters.
+// parameter list declares no parameters, and `int unsigned` works like
+// `unsigned int`.
 
 struct S { int x; int y; };
 typedef const char *cstr;
@@ -16,6 +17,7 @@ struct S *set(int v) { s0[0].x = v; s0[0].y = v * 2; return &s0[0]; }
 struct S make(int v) { struct S s; s.x = v; s.y = -v; return s; }
 unsigned char *bytes(void) { return ub; }
 char bump(int x) { return (char)(x + 1); }
+unsigned twice(int x) { return (unsigned)x * 2u; }
 
 int main(void) {
     const char *(*fp)(int) = name;
@@ -35,6 +37,12 @@ int main(void) {
     cstr (*tp)(int) = name;
     char (*cp)(int) = bump;
     printf("%s %d\n", tp(1), cp(127));
+
+    // Type specifiers in any order.
+    int unsigned (*up)(int) = twice;
+    char unsigned *(*ubp)(void) = bytes;
+    unsigned char *ub2 = ubp();
+    printf("%u %d\n", up(-1), ub2[0] == 200);
 
     int i;
     for (const char *(*q)(int) = name; q; q = 0)

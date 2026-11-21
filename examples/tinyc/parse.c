@@ -2009,9 +2009,15 @@ static bool parse_sig_type(P *p, Type *out) {
     // among the consumed modifiers and a single trailing '*' follows, the
     // result is TY_PTR_CHAR rather than TY_PTR_I32 (matches existing tinyC
     // behaviour for `char*`).
+    // `int` or `char` followed by another modifier (`int unsigned`,
+    // `char signed`) takes the same any-order path.
+    TcTokKind nk = peek(p, 1).kind;
+    bool int_then_mod = (cur(p).kind == TC_TK_KW_INT || cur(p).kind == TC_TK_KW_CHAR) &&
+                        (nk == TC_TK_KW_SIGNED || nk == TC_TK_KW_UNSIGNED ||
+                         nk == TC_TK_KW_LONG || nk == TC_TK_KW_SHORT);
     if (cur(p).kind == TC_TK_KW_SIGNED || cur(p).kind == TC_TK_KW_UNSIGNED ||
         cur(p).kind == TC_TK_KW_LONG   || cur(p).kind == TC_TK_KW_SHORT  ||
-        cur(p).kind == TC_TK_KW_BOOL) {
+        cur(p).kind == TC_TK_KW_BOOL   || int_then_mod) {
         int  n_long = 0;
         bool saw_short = false;
         bool saw_char = false;

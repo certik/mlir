@@ -284,7 +284,7 @@ expected_stdout = "42\n42\n"
 [[test]]
 name = "fnptr_ptr_return"
 targets = ["native", "wasm", "macho", "elf"]
-expected_stdout = "zero one many\n5 12\n3 -3\n200 7\none -128\nzero;one;many;\n"
+expected_stdout = "zero one many\n5 12\n3 -3\n200 7\none -128\n4294967294 1\nzero;one;many;\n"
 
 [[test]]
 name = "struct_array_field"
