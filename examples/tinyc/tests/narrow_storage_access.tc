@@ -1,6 +1,7 @@
 // Loads and stores of char / short / bool storage (#251): arrays and pointer
-// arithmetic over them, struct fields and copies, globals with initializers,
-// narrow arguments / returns, and conversions on every store.
+// arithmetic over them (also through arrays of pointers and arrays of
+// structs), struct fields and copies, globals with initializers, narrow
+// arguments / returns, and conversions on every store.
 extern int printf(const char *fmt, ...);
 extern void *malloc(unsigned long);
 
@@ -105,6 +106,58 @@ static int part_ptrptr(void) {
     signed char sc[2] = {-5, 100}; signed char *scp = sc; signed char **scpp = &scp;
     printf("%d %d\n", scpp[0][0], (*scpp)[1]);
     pp[1][1] = 3; printf("%d\n", r1[1]);
+    return 0;
+}
+typedef int *IP;
+typedef long long pa_ll_t;
+int ga[3] = {11, 12, 13};
+int *gp[2];
+static int part_ptrarr(void) {
+    int iv[2] = {7, 8}; int *ip[1]; ip[0] = iv;
+    printf("%d %d\n", ip[0][1], *ip[0]);
+    ip[0][0] = 0x10203; printf("%d\n", iv[0]);
+    short v[2] = {0x1234, 0x5678}; short x, *arr[2]; arr[0] = v; x = 1;
+    printf("%x %x %d\n", arr[0][1], arr[0][0], x);
+    unsigned short uv[2] = {65535, 2}; unsigned short *uarr[1]; uarr[0] = uv;
+    printf("%d %d\n", uarr[0][0], *(uarr[0] + 1));
+    IP ta[2]; ta[1] = iv; printf("%d %d\n", ta[1][1], *(ta[1] + 1));
+    pa_ll_t ll[2] = {1, 1LL << 40}; long long *lp[1]; lp[0] = ll;
+    printf("%lld\n", lp[0][1]);
+    unsigned char uc[2] = {200, 1}; unsigned char *ucp[1]; ucp[0] = uc;
+    printf("%d %d\n", ucp[0][0], *ucp[0]);
+    char *names[2]; names[0] = "ab"; names[1] = "cd";
+    printf("%s %c\n", names[1], names[0][1]);
+    gp[1] = ga; printf("%d %d\n", gp[1][2], *(gp[1] + 1));
+    return 0;
+}
+static int *keep(int *p) { static int *slots[3]; static int n; slots[n] = p; n++; return slots[0]; }
+static int part_ptrarr2(void) {
+    int a[3] = {1, 2, 3}, b[2] = {40, 50};
+    int *ia[2]; ia[0] = a; ia[1] = b;
+    printf("%d %d %d\n", ia[0][2], *ia[1], *(ia[1] + 1));
+    ia[1][0] += 5; printf("%d\n", b[0]);
+    int *r = keep(a); keep(b);
+    int *r2 = keep(b);
+    printf("%d %d\n", r[1], r2[2]);
+    short s1[2] = {-3, 9}; short *sp[1]; sp[0] = s1; sp[0]++;
+    printf("%d\n", *sp[0]);
+    return 0;
+}
+struct C1 { char c; };
+struct S6 { short a, b, c; };
+struct S12 { int x; char k; short y; int z; };
+struct SH { struct C1 *items; };
+static int part_structarr(void) {
+    struct C1 a[5]; for (int i = 0; i < 5; i++) a[i].c = 10 + i;
+    struct C1 *p = &a[4]; printf("%d\n", (int)(p - a));
+    struct C1 *r = a + 2; printf("%d %d\n", r->c, (a + 3)->c);
+    struct S6 b[4]; for (int i = 0; i < 4; i++) { b[i].a = i; b[i].b = -i; b[i].c = 100 * i; }
+    struct S6 *q = b + 3; printf("%d %d %d %d\n", (int)(q - b), q->c, (b + 1)->b, (int)sizeof(b));
+    struct S6 *q2 = q - 2; printf("%d %d\n", q2->c, (int)(q - q2));
+    struct S12 c[3]; for (int i = 0; i < 3; i++) { c[i].z = i * 7; c[i].k = 'a' + i; }
+    struct S12 *s = c + 2; printf("%d %c %d %d\n", s->z, (c + 1)->k, (int)(s - c), (int)sizeof(struct S12));
+    struct S12 *s0 = &c[0]; s0++; printf("%c\n", s0->k);
+    struct SH h; h.items = a; printf("%d\n", (h.items + 1)->c);
     return 0;
 }
 struct P { char c; short s; bool b; unsigned char uc; unsigned short us; int i; };
@@ -286,6 +339,9 @@ int main(void) {
     part_arrays();
     part_ptrs();
     part_ptrptr();
+    part_ptrarr();
+    part_ptrarr2();
+    part_structarr();
     part_structs();
     part_fields();
     part_globals();
