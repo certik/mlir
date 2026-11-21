@@ -1,0 +1,47 @@
+extern int printf(const char *fmt, ...);
+
+// A pointer cast takes its element type from the target type alone, so
+// pointer arithmetic and dereferences step by / load the target element:
+// `(long long *)vp + 1` used to step 4 bytes and load an i32, and
+// `(struct P2 *)charp + 1` stepped 1 byte. A direct call returning T**
+// is a pointer (it used to be rejected: "dereference of non-pointer").
+
+typedef struct P2 {
+    int a;
+    int b;
+} P2;
+
+static int **g_pp;
+static int **get(void) { return g_pp; }
+
+int main() {
+    long long *ll = (long long *)malloc(3 * sizeof(long long));
+    ll[0] = 1; ll[1] = 5000000000LL; ll[2] = 7;
+    double *d = (double *)malloc(3 * sizeof(double));
+    d[0] = 0.5; d[1] = 1.5; d[2] = 2.5;
+    float *f = (float *)malloc(3 * sizeof(float));
+    f[0] = 0.25f; f[1] = 0.75f; f[2] = 1.25f;
+    void *vll = ll;
+    void *vd = d;
+    void *vf = f;
+    printf("%lld %lld %g %g\n", *((long long *)vll + 1), *((long long *)vll + 2),
+           *((double *)vd + 2), (double)*((float *)vf + 1));
+
+    P2 p2[2];
+    p2[0].a = 1; p2[0].b = 2; p2[1].a = 3; p2[1].b = 4;
+    char *cp = (char *)p2;
+    printf("%d %d\n", ((P2 *)cp + 1)->a, ((P2 *)cp + 1)->b);
+
+    int iv[3];
+    iv[0] = 11; iv[1] = 22; iv[2] = 33;
+    g_pp = (int **)malloc(3 * sizeof(int *));
+    g_pp[0] = &iv[2]; g_pp[1] = &iv[0]; g_pp[2] = &iv[1];
+    int **pp = get() + 2;
+    printf("%d %d %d %d\n", **get(), **(get() + 1), *(*(get() + 1) + 1), **pp);
+
+    free(g_pp);
+    free(f);
+    free(d);
+    free(ll);
+    return 0;
+}
