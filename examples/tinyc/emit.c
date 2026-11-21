@@ -5630,6 +5630,9 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
             }
             if (base.kind == TY_PTR_CHAR) { t.kind = TY_I32; return t; }
             if (base.kind == TY_ARRAY_PTR_CHAR) { t.kind = TY_PTR_CHAR; return t; }
+            if (base.kind == TY_ARRAY_PTR_STRUCT) {
+                t.kind = TY_PTR_STRUCT; t.struct_name = base.struct_name; return t;
+            }
             if (base.kind == TY_ARRAY_F32) { t.kind = TY_F32; return t; }
             if (base.kind == TY_ARRAY_STRUCT) {
                 t.kind = TY_STRUCT; t.struct_name = base.struct_name; return t;

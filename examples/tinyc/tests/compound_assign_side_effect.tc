@@ -12,6 +12,13 @@ typedef struct {
     double d;
 } S;
 
+typedef struct Node {
+    int val;
+    char *name;
+} Node;
+
+static Node g_nodes[4];
+static Node *g_np[4];
 static int g_calls;
 static int g_arr[8];
 static S g_s[4];
@@ -124,5 +131,24 @@ int main() {
     int s = 0;
     strs[s++] += 2;
     printf("%d %s %s\n", s, strs[0], strs[1]);
+
+    // A field reached through an element of an array of struct pointers.
+    for (int k = 0; k < 4; k++) {
+        g_nodes[k].val = k;
+        g_nodes[k].name = "abcdef";
+        g_np[k] = &g_nodes[k];
+    }
+    int ni = 0;
+    g_np[ni++]->val += 10;
+    printf("%d %d %d\n", ni, g_nodes[0].val, g_nodes[1].val);
+    ni = 0;
+    g_np[ni++]->name += 1;
+    printf("%d %s %s\n", ni, g_nodes[0].name, g_nodes[1].name);
+    ni = 0;
+    int nv = g_np[ni++]->val;
+    printf("%d %d\n", ni, nv);
+    ni = 1;
+    ++g_np[ni++]->val;
+    printf("%d %d %d\n", ni, g_nodes[1].val, (int)(sizeof(g_np[0]) == sizeof(Node *)));
     return 0;
 }
