@@ -4495,6 +4495,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     return r;
                 }
                 r.val = rs[0];
+                // The callee may be compiled elsewhere (see the direct call).
+                if (!e->target_wasm32 && type_promotes_to_int(*fnty->fnptr_ret))
+                    r.val = emit_narrow_i32(e, r.val, fnty->fnptr_ret->int_bits,
+                                            fnty->fnptr_ret->is_bool ||
+                                            fnty->fnptr_ret->int_unsigned);
                 r.is_float = (fnty->fnptr_ret->kind == TY_F32 || fnty->fnptr_ret->kind == TY_F64);
                 r.is_f64 = (fnty->fnptr_ret->kind == TY_F64);
                 r.is_i64 = (fnty->fnptr_ret->kind == TY_I64);
