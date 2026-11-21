@@ -24,6 +24,7 @@
 #include "mlir_api.h"
 #include "mlir_obj.h"
 #include "mlir_elf.h"
+#include "mlir_llvm_type_layout.h"
 #include "mlir_regalloc.h"
 
 // ---------------------------------------------------------------------------

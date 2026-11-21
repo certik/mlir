@@ -33,6 +33,7 @@
 #include <stdint.h>
 
 #include "mlir_llvm_to_aarch64.h"
+#include "mlir_llvm_type_layout.h"
 #include "mlir_op_names.h"
 #include "mlir_regalloc.h"
 
@@ -609,81 +610,16 @@ static int fcmp_pred_to_cond(int64_t pred) {
     }
 }
 
-static unsigned a64_type_size(MLIR_Context *ctx, MLIR_TypeHandle ty);
-
-static unsigned a64_align_up(unsigned x, unsigned a) {
-    return (x + a - 1) & ~(a - 1);
+// Type layout (mlir_llvm_type_layout.h) on aarch64: pointers are 8 bytes.
+static unsigned a64_type_size(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    return llvm_type_size(ctx, ty, 8);
 }
-static unsigned a64_struct_size(MLIR_Context *ctx, MLIR_TypeHandle ty);
 static unsigned a64_type_align(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    if (MLIR_IsTypeLLVMArray(ty))
-        return a64_type_align(ctx, MLIR_GetTypeLLVMArrayElement(ty));
-    if (MLIR_IsTypeLLVMStruct(ty)) {
-        size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
-        unsigned ma = 1;
-        for (size_t i = 0; i < nf; i++) {
-            unsigned fa = a64_type_align(ctx, MLIR_GetTypeLLVMStructField(ty, i));
-            if (fa > ma) ma = fa;
-        }
-        return ma;
-    }
-    unsigned sz = a64_type_size(ctx, ty);
-    return sz ? sz : 1;
+    return llvm_type_align(ctx, ty, 8);
 }
-static unsigned a64_struct_size(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
-    unsigned off = 0, max_align = 1;
-    for (size_t i = 0; i < nf; i++) {
-        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(ty, i);
-        unsigned fsz = a64_type_size(ctx, ft);
-        unsigned fal = a64_type_align(ctx, ft);
-        if (fsz == 0 || fal == 0) return 0;
-        off = a64_align_up(off, fal);
-        off += fsz;
-        if (fal > max_align) max_align = fal;
-    }
-    return a64_align_up(off, max_align);
-}
-// Byte offset of the i-th field within an LLVM struct (native 64-bit layout).
 static unsigned a64_struct_field_offset(MLIR_Context *ctx, MLIR_TypeHandle sty,
                                         size_t fld) {
-    unsigned off = 0;
-    for (size_t i = 0; i <= fld; i++) {
-        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(sty, i);
-        off = a64_align_up(off, a64_type_align(ctx, ft));
-        if (i == fld) return off;
-        off += a64_type_size(ctx, ft);
-    }
-    return off;
-}
-// Size in bytes of an LLVM-dialect type on aarch64 (pointers are 8 bytes).
-static unsigned a64_type_size(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    // Aggregates first: their size comes from the element / field types, and
-    // MLIR_GetTypeString() formats (and allocates) the whole nested type on
-    // every call, which was a measurable share of compile time and memory.
-    if (MLIR_IsTypeLLVMArray(ty)) {
-        unsigned esz = a64_type_size(ctx, MLIR_GetTypeLLVMArrayElement(ty));
-        if (esz == 0) return 0;
-        return esz * (unsigned)MLIR_GetTypeLLVMArrayNumElements(ty);
-    }
-    if (MLIR_IsTypeLLVMStruct(ty)) return a64_struct_size(ctx, ty);
-    string s = MLIR_GetTypeString(ctx, ty);
-    if (s.size >= 9 && memcmp(s.str, "!llvm.ptr", 9) == 0) return 8;
-    if (s.size == 3 && memcmp(s.str, "ptr", 3) == 0) return 8;
-    if (s.size == 3 && memcmp(s.str, "f32", 3) == 0) return 4;
-    if (s.size == 3 && memcmp(s.str, "f64", 3) == 0) return 8;
-    if (s.size > 1 && s.str[0] == 'i') {
-        int w = 0;
-        for (size_t i = 1; i < s.size; i++) {
-            if (s.str[i] >= '0' && s.str[i] <= '9') w = w * 10 + (s.str[i] - '0');
-            else { w = -1; break; }
-        }
-        if (w == 1 || w == 8) return 1;
-        if (w == 16) return 2;
-        if (w == 32) return 4;
-        if (w == 64) return 8;
-    }
-    return 0;
+    return llvm_struct_field_offset(ctx, sty, fld, 8);
 }
 
 static bool func_has_body(MLIR_OpHandle fn) {
@@ -2255,7 +2191,7 @@ static bool collect_allocas(MLIR_Context *ctx, SlotMap *am,
             }
             unsigned al = a64_type_align(ctx, et);
             if (al < 8) al = 8;
-            *bytes = a64_align_up(*bytes, al);
+            *bytes = llvm_align_up(*bytes, al);
             sm_put(am, MLIR_GetOpResult(op, 0), (int32_t)*bytes);
             *bytes += (uint32_t)(esz * cnt);
         }
