@@ -7029,9 +7029,9 @@ static void ginit_scalar(GInit *gi, Type t, MLIR_TypeHandle ty, Expr *ex) {
         return;
     }
     // Convert to the C type, then hold the value sign-extended from the
-    // storage width (a char field is stored in an i32).
+    // storage width (i8 for char / bool, i16 for short).
     int64_t v = wrap_bits(gconst_to_int(c, t),
-                          ty == e->i8 ? 8 : ty == e->i64 ? 64 : 32, false);
+                          ty == e->i8 ? 8 : ty == e->i16 ? 16 : ty == e->i64 ? 64 : 32, false);
     if (v != 0)
         ginit_set(gi, ty, MLIR_CreateAttributeInteger(e->ctx, str_lit("value"), v, ty));
     else if (gi->overriding)
@@ -7052,8 +7052,7 @@ static bool ginit_is_aggregate(Type t) {
 }
 
 // The C type of member `k` of the aggregate `t`, and its MLIR storage type
-// when it is a scalar (a char field is stored as an i32; a char array
-// element as an i8 unless the array is a struct field).
+// when it is a scalar (i8 / i16 for char, bool and short).
 static Type ginit_member_type(GInit *gi, Type t, GMembers *m, int64_t k,
                               MLIR_TypeHandle *ty) {
     E *e = gi->e;
@@ -7065,7 +7064,9 @@ static Type ginit_member_type(GInit *gi, Type t, GMembers *m, int64_t k,
             bool p = mt.kind == TY_PTR_I32 || mt.kind == TY_PTR_CHAR ||
                      mt.kind == TY_PTR_STRUCT || mt.kind == TY_PTR_VOID ||
                      mt.kind == TY_PTR_PTR || mt.kind == TY_FNPTR;
-            *ty = p ? e->ptr : scalar_mlir_type(e, mt.kind);
+            *ty = p ? e->ptr
+                : mt.kind == TY_I32 ? int_mem_type(e, &mt)
+                : scalar_mlir_type(e, mt.kind);
         }
         return mt;
     }
