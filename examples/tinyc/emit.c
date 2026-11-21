@@ -988,10 +988,6 @@ static MLIR_ValueHandle coerce_eval_to(E *e, EVal v, MLIR_TypeHandle want,
     return v.val;
 }
 
-static MLIR_ValueHandle coerce_eval(E *e, EVal v, MLIR_TypeHandle want) {
-    return coerce_eval_to(e, v, want, false);
-}
-
 static MLIR_ValueHandle emit_to_bool_i1(E *e, EVal v) {
     if (v.is_float) {
         MLIR_ValueHandle z = v.is_f64 ? emit_const_f64(e, 0.0) : emit_const_f32(e, 0.0);
@@ -1032,7 +1028,15 @@ typedef struct LValS {
     MLIR_ValueHandle dyn_index;       // INVALID for purely-static GEP
     MLIR_TypeHandle  elem_ty;         // i32 or f32
     bool             is_unsigned;     // backing C type was `unsigned`
+    bool             is_narrow;       // backing C type is char / short / bool
 } LVal;
+
+// A char / short / bool value (int_bits 8 / 16, or declared with those
+// keywords) is promoted to (signed) int in expressions (C integer
+// promotion). For a pointer type this describes the pointee.
+static bool type_is_narrow_int(Type t) {
+    return t.int_narrow || t.int_bits == 8 || t.int_bits == 16;
+}
 
 static MLIR_ValueHandle lval_address(E *e, LVal lv) {
     if (lv.n_const_path == 0 && lv.dyn_index == MLIR_INVALID_HANDLE) {
@@ -1063,7 +1067,10 @@ static EVal load_lvalue(E *e, LVal lv) {
     r.is_f64 = (lv.elem_ty == e->f64);
     r.is_i64 = (lv.elem_ty == e->i64);
     r.is_ptr = (lv.elem_ty == e->ptr);
-    r.is_unsigned = lv.is_unsigned;
+    // A narrow unsigned integer promotes to (signed) int. (For a loaded
+    // pointer, is_unsigned describes the pointee and is kept.)
+    bool promoted = lv.elem_ty == e->i8 || (lv.elem_ty == e->i32 && lv.is_narrow);
+    r.is_unsigned = lv.is_unsigned && !promoted;
     r.ptr_elem = MLIR_INVALID_HANDLE;
     return r;
 }
@@ -1304,6 +1311,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 r.elem_ty = e->ptr;
             else r.elem_ty = e->i32;
             r.is_unsigned = s->type.int_unsigned;
+            r.is_narrow = type_is_narrow_int(s->type);
             return r;
         }
         case EX_INDEX: {
@@ -1380,6 +1388,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                         r.base_ptr = gep;
                         r.elem_ty = elem;
                         r.is_unsigned = ft.int_unsigned;
+                        r.is_narrow = type_is_narrow_int(ft);
                         return r;
                     }
                     // Pointer field indexed: `s.f[i]` / `p->f[i]` where
@@ -1417,6 +1426,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                         r.base_ptr = emit_gep(e, base, elem, gpath, 1, gdyn, 1);
                         r.elem_ty = elem;
                         r.is_unsigned = ft.int_unsigned;
+                        r.is_narrow = type_is_narrow_int(ft);
                         return r;
                     }
                 }
@@ -1683,6 +1693,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 r.base_ptr = emit_gep(e, base, elem, path, 1, dyn, 1);
                 r.elem_ty = elem;
                 r.is_unsigned = s->type.int_unsigned;
+                r.is_narrow = type_is_narrow_int(s->type);
                 return r;
             }
             // Pointer-to-pointer indexing: pp[i] for T** (e.g. char **argv).
@@ -1731,6 +1742,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
             r.dyn_index = idx_i32;
             r.elem_ty = aelem;
             r.is_unsigned = s->type.int_unsigned;
+            r.is_narrow = type_is_narrow_int(s->type);
             return r;
         }
         case EX_DEREF: {
@@ -1751,6 +1763,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 else if (s->type.ptr_is_f64) r.elem_ty = e->f64;
                 else r.elem_ty = e->i32;
                 r.is_unsigned = s->type.int_unsigned;
+                r.is_narrow = type_is_narrow_int(s->type);
                 return r;
             }
             // General `*<expr>` form (e.g. *(p+i)). Evaluate the operand
@@ -1796,6 +1809,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                      ft.kind == TY_FNPTR || ft.kind == TY_PTR_PTR) r.elem_ty = e->ptr;
             else r.elem_ty = e->i32;
             r.is_unsigned = ft.int_unsigned;
+            r.is_narrow = type_is_narrow_int(ft);
             return r;
         }
         default:
@@ -2614,14 +2628,14 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             e->cur_block = then_tail; e->terminated = false;
             MLIR_ValueHandle ta = any_ptr
                 ? (av.is_ptr ? av.val : emit_null_ptr(e))
-                : coerce_eval(e, av, rty);
+                : coerce_eval_to(e, av, rty, false);
             emit_store_v(e, ta, slot);
             emit_branch(e, merge_blk);
 
             e->cur_block = else_tail; e->terminated = false;
             MLIR_ValueHandle tb = any_ptr
                 ? (bv.is_ptr ? bv.val : emit_null_ptr(e))
-                : coerce_eval(e, bv, rty);
+                : coerce_eval_to(e, bv, rty, false);
             emit_store_v(e, tb, slot);
             emit_branch(e, merge_blk);
 
@@ -2689,12 +2703,12 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             if (!ck_is_ptr && !v.is_ptr) {
                 // float-target casts (from int or float).
                 if (ck == TY_F64) {
-                    v.val = coerce_eval(e, v, e->f64);
+                    v.val = coerce_eval_to(e, v, e->f64, false);
                     v.is_float = true; v.is_f64 = true; v.is_i64 = false;
                     return v;
                 }
                 if (ck == TY_F32) {
-                    v.val = coerce_eval(e, v, e->f32);
+                    v.val = coerce_eval_to(e, v, e->f32, false);
                     v.is_float = true; v.is_f64 = false; v.is_i64 = false;
                     return v;
                 }
@@ -2703,13 +2717,15 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     // float -> int: fptosi / fptoui straight to the
                     // target width, by the target's signedness.
                     v.is_i64 = (ck == TY_I64);
-                    v.is_unsigned = ex->cast_type.int_unsigned;
                     v.val = emit_fptoi(e, v.val, v.is_i64 ? e->i64 : e->i32,
-                                       v.is_unsigned);
+                                       ex->cast_type.int_unsigned);
                     // Keep an out-of-range value inside the narrow type.
                     int fnb = ex->cast_type.int_bits;
                     if (fnb == 8 || fnb == 16)
                         v.val = emit_narrow_i32(e, v.val, fnb, ex->cast_type.int_unsigned);
+                    // A char / short result is promoted to (signed) int.
+                    v.is_unsigned = ex->cast_type.int_unsigned &&
+                                    !type_is_narrow_int(ex->cast_type);
                     v.is_float = false; v.is_f64 = false;
                     return v;
                 }
@@ -2739,7 +2755,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 // value: subsequent comparisons / div / shr must use the
                 // unsigned form (e.g. `(unsigned long)x >= CONST`). A char /
                 // short result is promoted to (signed) int.
-                v.is_unsigned = ex->cast_type.int_unsigned && nb != 8 && nb != 16;
+                v.is_unsigned = ex->cast_type.int_unsigned &&
+                                !type_is_narrow_int(ex->cast_type);
                 return v;
             }
             // Pointer-to-integer cast: emit llvm.ptrtoint, then optionally
@@ -3353,8 +3370,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 string opname = sub ? str_lit("arith.subi") : str_lit("arith.addi");
                 MLIR_ValueHandle stepped = emit_binop(e, opty, opname, ity,
                                                        old.val, one_v);
-                MLIR_ValueHandle stored = coerce_eval(e,
-                    (EVal){.val = stepped, .is_i64 = old.is_i64}, lv.elem_ty);
+                MLIR_ValueHandle stored = coerce_eval_to(e,
+                    (EVal){.val = stepped, .is_i64 = old.is_i64}, lv.elem_ty,
+                    lv.is_unsigned);
                 store_lvalue(e, lv, stored);
                 return old;
             }
@@ -3795,7 +3813,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 for (size_t k = 0; k < 7; k++) {
                     EVal av = emit_expr(e, sc, ex->args.data[k]);
                     ops[k] = av.is_ptr ? emit_ptrtoint_i64(e, av.val)
-                                       : coerce_eval(e, av, e->i64);
+                                       : coerce_eval_to(e, av, e->i64, false);
                 }
                 MLIR_ValueHandle res = MLIR_CreateValueOpResult(
                     e->ctx, MLIR_INVALID_HANDLE, 0, e->i64, ssa_name(e), eloc(e, 0));
@@ -3839,7 +3857,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = res;
                 if (is_grow) {
                     EVal pages = emit_expr(e, sc, ex->args.data[1]);
-                    MLIR_ValueHandle p32 = coerce_eval(e, pages, e->i32);
+                    MLIR_ValueHandle p32 = coerce_eval_to(e, pages, e->i32, true);
                     MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = p32;
                     emit_op(e, OP_TYPE_UNREGISTERED, str_lit("llvm.intr.wasm.memory.grow"),
                             rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
@@ -3870,7 +3888,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     r.val = emit_null_ptr(e); r.is_ptr = true; return r;
                 }
                 EVal sz_v = emit_expr(e, sc, ex->args.data[0]);
-                MLIR_ValueHandle sz_coerced = coerce_eval(e, sz_v, e->size_t_ty);
+                MLIR_ValueHandle sz_coerced = coerce_eval_to(e, sz_v, e->size_t_ty, true);
                 MLIR_ValueHandle res = MLIR_CreateValueOpResult(
                     e->ctx, MLIR_INVALID_HANDLE, 0, e->ptr, ssa_name(e), eloc(e, 0));
                 MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->ptr;
@@ -4012,7 +4030,10 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         EVal av = emit_expr(e, sc, ex->args.data[i]);
                         TypeKind want = (i < (size_t)fnty->fnptr_nparams)
                             ? fnty->fnptr_params[i].kind : TY_I32;
-                        ops[op_off++] = coerce_eval(e, av, scalar_mlir_type(e, want));
+                        bool want_u = i < (size_t)fnty->fnptr_nparams &&
+                                      fnty->fnptr_params[i].int_unsigned;
+                        ops[op_off++] = coerce_eval_to(e, av, scalar_mlir_type(e, want),
+                                                       want_u);
                     }
                 }
                 size_t n_rts = (ret_is_struct || ret_is_void) ? 0 : 1;
@@ -4039,7 +4060,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 r.is_float = (fnty->fnptr_ret->kind == TY_F32 || fnty->fnptr_ret->kind == TY_F64);
                 r.is_f64 = (fnty->fnptr_ret->kind == TY_F64);
                 r.is_i64 = (fnty->fnptr_ret->kind == TY_I64);
-                r.is_unsigned = fnty->fnptr_ret->int_unsigned;
+                r.is_unsigned = fnty->fnptr_ret->int_unsigned &&
+                                !type_is_narrow_int(*fnty->fnptr_ret);
                 r.is_ptr = (rty == e->ptr);
                 r.ptr_elem = ptr_elem_of_type(e, *fnty->fnptr_ret);
                 return r;
@@ -4065,7 +4087,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             r.is_float = (sig->ret.type.kind == TY_F32 || sig->ret.type.kind == TY_F64);
             r.is_f64 = (sig->ret.type.kind == TY_F64);
             r.is_i64 = (sig->ret.type.kind == TY_I64);
-            r.is_unsigned = sig->ret.type.int_unsigned;
+            r.is_unsigned = sig->ret.type.int_unsigned &&
+                            !type_is_narrow_int(sig->ret.type);
             if (sig->ret.type.kind == TY_PTR_STRUCT) {
                 r.is_ptr = true;
                 r.sdef = sig->ret.sdef;
@@ -4124,7 +4147,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                                 ft.kind == TY_FNPTR || ft.kind == TY_PTR_PTR) {
                                 sv = vv.val;
                             } else {
-                                sv = coerce_eval(e, vv, want);
+                                sv = coerce_eval_to(e, vv, want, ft.int_unsigned);
                             }
                             emit_store_v(e, sv, fp);
                         }
@@ -4221,7 +4244,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         ft.kind == TY_FNPTR || ft.kind == TY_PTR_PTR) {
                         sv = v.val;
                     } else {
-                        sv = coerce_eval(e, v, want);
+                        sv = coerce_eval_to(e, v, want, ft.int_unsigned);
                     }
                     emit_store_v(e, sv, p);
                 }
@@ -4236,16 +4259,16 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             }
             EVal v = emit_expr(e, sc, ex->args.data[0]);
             if (t.kind == TY_I32) {
-                r.val = coerce_eval(e, v, e->i32);
+                r.val = coerce_eval_to(e, v, e->i32, t.int_unsigned);
                 return r;
             }
             if (t.kind == TY_I64) {
-                r.val = coerce_eval(e, v, e->i64);
+                r.val = coerce_eval_to(e, v, e->i64, t.int_unsigned);
                 r.is_i64 = true;
                 return r;
             }
             if (t.kind == TY_F32) {
-                r.val = coerce_eval(e, v, e->f32);
+                r.val = coerce_eval_to(e, v, e->f32, false);
                 r.is_float = true;
                 return r;
             }
@@ -4607,15 +4630,14 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                         bool elem_i8  = st->decl_type.array_elem_is_i8;
                         bool elem_i64 = st->decl_type.array_elem_is_i64;
                         for (int64_t a = 0; a < lim; a++) {
-                            MLIR_ValueHandle iv = emit_expr_i32(e, sc, st->decl_init->args.data[a]);
-                            // The element load/store width must match the
-                            // declared element type. emit_expr_i32 yields i32;
-                            // truncate to i8 (or extend to i64) so the store
-                            // doesn't overflow the slot and clobber adjacent
-                            // memory (which on wasm32 can corrupt the
-                            // immediately-following rodata page).
-                            if (elem_i8)       iv = emit_trunci_to_i8(e, iv);
-                            else if (elem_i64) iv = emit_extsi_i32_to_i64(e, iv);
+                            // The element store width must match the declared
+                            // element type, so the store doesn't overflow the
+                            // slot and clobber adjacent memory (which on wasm32
+                            // can corrupt the immediately-following rodata page).
+                            MLIR_ValueHandle iv = coerce_eval_to(e,
+                                emit_expr(e, sc, st->decl_init->args.data[a]),
+                                elem_i8 ? e->i8 : elem_i64 ? e->i64 : e->i32,
+                                st->decl_type.int_unsigned);
                             int32_t path[2] = {0, (int32_t)a};
                             MLIR_ValueHandle p = emit_gep(e, sy->addr, arr_ty, path, 2, NULL, 0);
                             emit_store_v(e, iv, p);
@@ -4797,12 +4819,13 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                         ft.kind == TY_PTR_PTR) {
                                         sv = v.is_ptr ? v.val : emit_null_ptr(e);
                                     } else if (ft.kind == TY_I64) {
-                                        sv = coerce_eval(e, v, e->i64);
+                                        sv = coerce_eval_to(e, v, e->i64, ft.int_unsigned);
                                     } else if (ft.kind == TY_F64) {
-                                        sv = coerce_eval(e, v, e->f64);
+                                        sv = coerce_eval_to(e, v, e->f64, false);
                                     } else {
-                                        sv = coerce_eval(
-                                            e, v, scalar_mlir_type(e, ft.kind));
+                                        sv = coerce_eval_to(
+                                            e, v, scalar_mlir_type(e, ft.kind),
+                                            ft.int_unsigned);
                                     }
                                     emit_store_v(e, sv, pf);
                                 }
@@ -4950,12 +4973,13 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                     sv = emit_null_ptr(e);
                                 }
                             } else if (ft.kind == TY_I64) {
-                                sv = coerce_eval(e, v, e->i64);
+                                sv = coerce_eval_to(e, v, e->i64, ft.int_unsigned);
                             } else if (ft.kind == TY_F64) {
-                                sv = coerce_eval(e, v, e->f64);
+                                sv = coerce_eval_to(e, v, e->f64, false);
                             } else {
-                                sv = coerce_eval(
-                                    e, v, scalar_mlir_type(e, ft.kind));
+                                sv = coerce_eval_to(
+                                    e, v, scalar_mlir_type(e, ft.kind),
+                                    ft.int_unsigned);
                             }
                             emit_store_v(e, sv, p);
                         }
@@ -4975,7 +4999,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 sy->addr = emit_alloca(e, e->f32);
                 if (st->decl_init) {
                     EVal v = emit_expr(e, sc, st->decl_init);
-                    MLIR_ValueHandle iv = coerce_eval(e, v, e->f32);
+                    MLIR_ValueHandle iv = coerce_eval_to(e, v, e->f32, false);
                     emit_store_v(e, iv, sy->addr);
                 } else {
                     emit_store_v(e, emit_const_f32(e, 0.0), sy->addr);
@@ -4984,7 +5008,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 sy->addr = emit_alloca(e, e->f64);
                 if (st->decl_init) {
                     EVal v = emit_expr(e, sc, st->decl_init);
-                    MLIR_ValueHandle iv = coerce_eval(e, v, e->f64);
+                    MLIR_ValueHandle iv = coerce_eval_to(e, v, e->f64, false);
                     emit_store_v(e, iv, sy->addr);
                 } else {
                     emit_store_v(e, emit_const_f64(e, 0.0), sy->addr);

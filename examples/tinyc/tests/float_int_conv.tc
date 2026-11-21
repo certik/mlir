@@ -14,6 +14,9 @@ static long long arg_ll(long long x) { return x; }
 static unsigned long long arg_ull(unsigned long long x) { return x; }
 static double arg_d(double d) { return d; }
 
+struct fic_uf { unsigned u; unsigned long long ull; };
+struct fic_nf { unsigned char b; unsigned short h; };
+
 int main() {
     double d = 5000000000.0;
     double dn = -5000000000.5;
@@ -81,5 +84,29 @@ int main() {
     // mixed arithmetic: the integer side converts at its full width
     printf("%.1f %.1f %d %.1f\n", ll + 0.5, u + 0.5, 0.5 + ull == dull, lln * 1.0f);
     printf("%d %d %d\n", ll > 4000000000.0, u > 3000000000.0, ull > 1e19);
+
+    // unsigned char / unsigned short promote to (signed) int, so these
+    // differences are negative.
+    unsigned char uc8 = 200, hi = 250, lo = 10;
+    unsigned short us16 = 100;
+    double n1 = uc8 - 300;
+    double n2 = us16 - 300;
+    struct fic_nf nf = {200, 100};
+    unsigned char bytes[1];
+    bytes[0] = 200;
+    unsigned char *pb = bytes;
+    printf("%.1f %.1f %.1f %.1f %d\n", n1, n2, (double)(lo - hi),
+           ((unsigned char)200.0 - 300) * 1.0, ((unsigned char)200.0 - 300) < 0);
+    printf("%.1f %.1f %.1f %d\n", (nf.b - 300) * 1.0, (nf.h - 300) * 1.0,
+           (*pb - 300) * 1.0, (pb[0] - 300) / 2);
+
+    // Unsigned targets of every implicit conversion use fptoui.
+    unsigned arr[2] = {3e9, 4e9};
+    struct fic_uf uf = {3e9, dbig};
+    struct fic_uf uf2 = (struct fic_uf){du, dbig};
+    unsigned long long (*fp)(unsigned long long) = arg_ull;
+    unsigned long long md1 = d, md2 = dbig;
+    printf("%u %u %u %llu %u %llu\n", arr[0], arr[1], uf.u, uf.ull, uf2.u, uf2.ull);
+    printf("%llu %llu %llu\n", fp(dbig), md1, md2);
     return 0;
 }
