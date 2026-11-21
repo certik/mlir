@@ -1,0 +1,61 @@
+extern int printf(const char *fmt, ...);
+// File-scope struct and struct-array initializers (#292): partial, empty,
+// designated, nested, unsized, enumerators. The emitter used to ignore them,
+// and gave a global struct the type i32, so writing its fields clobbered the
+// next global on wasm and elf. Each backend folds the initializer region
+// (an llvm.insertvalue chain) back into the global's data.
+struct S { int a, b; };
+struct S g = {1, 2};
+static struct S h = {3};
+struct S z = {0};
+struct S em = {};
+struct S des = {.b = 7};
+int after = 99;
+static void part1(void) {
+    static struct S l = {3, 4};
+    printf("%d %d %d %d\n", g.a, g.b, l.a, l.b);
+    printf("%d %d %d %d %d %d %d %d\n", h.a, h.b, z.a, z.b, em.a, em.b, des.a, des.b);
+    g.b = 20; h.a = 30;
+    printf("%d %d %d %d\n", g.a, g.b, h.a, after);
+    struct S c = g;
+    printf("%d %d %d\n", c.a, c.b, (int)sizeof(g));
+}
+typedef struct { int x; int y; } P;
+struct Seg { P a; P b; const char *tag; };
+static P pts[4] = { {1, 2}, {3, 4}, {5} };
+P pts2[] = { {7, 8}, {9, 10}, {11, 12} };
+static struct Seg segs[2] = { { {1, 1}, {2, 2}, 0 }, { {3, 3} } };
+const P origin = { -1, -2 };
+static int tail[2] = { 42, 43 };
+static void part2(void) {
+    int i;
+    for (i = 0; i < 4; i++) printf("(%d,%d) ", pts[i].x, pts[i].y);
+    printf("\n%d ", (int)(sizeof(pts2) / sizeof(pts2[0])));
+    for (i = 0; i < 3; i++) printf("(%d,%d) ", pts2[i].x, pts2[i].y);
+    printf("\n%d %d %d %d %d %d\n", segs[0].a.x, segs[0].b.y, segs[1].a.y, segs[1].b.x, segs[0].tag == 0, segs[1].tag == 0);
+    printf("%d %d %d %d\n", origin.x, origin.y, tail[0], tail[1]);
+    pts[3].x = 70; pts2[0].y = 80;
+    printf("%d %d %d\n", pts[3].x, pts2[0].y, tail[0]);
+}
+enum Kind { K_A = 3, K_B, K_C = K_B * 10 };
+struct Ent { enum Kind k; int v; };
+static struct Ent tbl[] = { { K_A, 1 }, { K_B, K_C + 1 }, { K_C, -K_A } };
+static void part3(void) {
+    int i;
+    for (i = 0; i < 3; i++) printf("%d:%d ", tbl[i].k, tbl[i].v);
+    printf("%d\n", (int)(sizeof(tbl) / sizeof(tbl[0])));
+}
+struct T {int a,b; double d;};
+struct T gt;
+int ht = 7;
+static void part4(void) {
+    gt.a = 1; gt.b = 2; gt.d = 3.5;
+    printf("%d %d %.1f %d %d\n", gt.a, gt.b, gt.d, ht, (int)sizeof(gt));
+}
+int main(void) {
+    part1();
+    part2();
+    part3();
+    part4();
+    return 0;
+}

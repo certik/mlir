@@ -416,6 +416,9 @@ DEFINE_VECTOR_FOR_TYPE(StructDef*, VecStructDefPtr)
 //   float f = 1.5;  (init_float)
 //   char *s = "hi"; (init_str carries the decoded bytes incl. NUL)
 //   int *p = null;  (TY_PTR_I32 + has_init=true, init_int=0 means null)
+//   char s[8] = "hi"; (init_str; the emitter pads it to the array)
+//   struct S g = {1, 2}; (init_expr: the EX_COMPOUND, folded by the
+//                       emitter into the global's constant data)
 //   int a[3] = {1,2,3}; (init_array_data carries the packed
 //                       little-endian element bytes; size equals
 //                       array_len * elem_size. Empty if every
@@ -434,6 +437,7 @@ typedef struct {
     double  init_float;
     string  init_str;       // for TY_PTR_CHAR initialized from string literal
     string  init_array_data;
+    struct Expr *init_expr; // `{...}` initializer of a struct / struct array
     int     line;
 } Global;
 

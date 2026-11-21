@@ -18,6 +18,7 @@
 #include <base/string.h>
 
 #include "mlir_api.h"
+#include "mlir_llvm_type_layout.h"
 
 // -----------------------------------------------------------------------------
 // Growable byte buffer (heap-backed; result is copied into the arena at the
@@ -385,153 +386,6 @@ static char *inline_literal_for(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_TypeHa
     }
     return NULL;
 }
-
-// Parse an integer at `*p` (up to `end`), advancing `*p` past it. Skips
-// leading whitespace. Returns false if no integer is present.
-static bool parse_int64(const char **p, const char *end, int64_t *out) {
-    const char *q = *p;
-    while (q < end && (*q == ' ' || *q == '\t')) q++;
-    bool neg = false;
-    if (q < end && (*q == '-' || *q == '+')) { neg = (*q == '-'); q++; }
-    if (q >= end || *q < '0' || *q > '9') return false;
-    int64_t v = 0;
-    while (q < end && *q >= '0' && *q <= '9') { v = v * 10 + (*q - '0'); q++; }
-    *out = neg ? -v : v;
-    *p = q;
-    return true;
-}
-
-// Extract the first integer from a `position` attribute printed as
-// "array<i64: N, ...>" (DenseI64ArrayAttr) or "[N, ...]" (ArrayAttr of
-// IntegerAttr). For nested aggregate insertions the chain inserts at
-// successive single-level positions, so we only look at the first index.
-static bool parse_position_first(string s, int64_t *out) {
-    const char *p = s.str;
-    const char *end = s.str + s.size;
-    // The printed form is either "array<iN: V, ...>" or "[V, ...]".
-    // For the former we must skip past the ":" so we don't mistake the
-    // element-width (e.g. "i64") for the position.
-    const char *colon = NULL;
-    for (const char *q = p; q < end; q++) {
-        if (*q == ':') { colon = q; break; }
-    }
-    if (colon) p = colon + 1;
-    else if (p < end && *p == '[') p++;
-    return parse_int64(&p, end, out);
-}
-
-// Per-slot state used by fold_aggregate_init_chain. Declared at file
-// scope so tinyc (which lacks function-local struct decls) accepts it.
-typedef struct FoldSlot {
-    int64_t pos;
-    MLIR_ValueHandle scalar;
-    bool set;
-} FoldSlot;
-
-// Fold an `llvm.mlir.undef` + chain of `llvm.insertvalue` into a typed
-// LLVM IR aggregate constant literal. Returns a malloc'd string on
-// success (e.g. "[i32 10, i32 20, i32 30, i32 40]") or NULL if the
-// pattern doesn't fit. Only handles single-level !llvm.array<N x iX>
-// aggregates today — what MLIR_CreateLLVMGlobalArrayInit produces.
-static char *fold_aggregate_init_chain(MLIR_Context *ctx, MLIR_OpHandle root,
-                                       MLIR_TypeHandle agg_ty) {
-    if (agg_ty == MLIR_INVALID_HANDLE || !MLIR_IsTypeLLVMArray(agg_ty))
-        return NULL;
-    uint64_t n = MLIR_GetTypeLLVMArrayNumElements(agg_ty);
-    if (n == 0 || n > (1u << 20)) return NULL;
-    MLIR_TypeHandle elem_ty = MLIR_GetTypeLLVMArrayElement(agg_ty);
-    string ets = MLIR_GetTypeString(ctx, elem_ty);
-    // Only handle integer element types iX (X in {8,16,32,64}).
-    unsigned elem_w = 0;
-    if (ets.size >= 2 && ets.str[0] == 'i') {
-        int w = 0;
-        for (size_t i = 1; i < ets.size; i++) {
-            if (ets.str[i] >= '0' && ets.str[i] <= '9') w = w * 10 + (ets.str[i] - '0');
-            else { w = 0; break; }
-        }
-        if (w == 8 || w == 16 || w == 32 || w == 64) elem_w = (unsigned)w;
-    }
-    if (elem_w == 0) return NULL;
-
-    // Collect insertvalues by walking back operand[0] from `root`.
-    // Each insertvalue contributes (position, scalar-value-handle).
-    FoldSlot *slots = (FoldSlot *)calloc(n, sizeof(FoldSlot));
-    if (!slots) return NULL;
-    MLIR_OpHandle cur = root;
-    for (;;) {
-        MLIR_OpType cty = MLIR_GetOpType(cur);
-        if (cty == OP_TYPE_LLVM_INSERTVALUE) {
-            if (MLIR_GetOpNumOperands(cur) < 2) { free(slots); return NULL; }
-            // Find position attribute.
-            int64_t pos = -1;
-            size_t na = MLIR_GetOpNumAttributes(cur);
-            for (size_t i = 0; i < na; i++) {
-                MLIR_AttributeHandle a = MLIR_GetOpAttribute(cur, i);
-                if (name_eq(MLIR_GetAttributeName(a), "position")) {
-                    string ps = MLIR_GetAttributeAsString(ctx, a);
-                    if (!parse_position_first(ps, &pos)) pos = -1;
-                    break;
-                }
-            }
-            if (pos < 0 || (uint64_t)pos >= n) { free(slots); return NULL; }
-            MLIR_ValueHandle scalar = MLIR_GetOpOperand(cur, 1);
-            if (!slots[pos].set) {
-                slots[pos].pos = pos;
-                slots[pos].scalar = scalar;
-                slots[pos].set = true;
-            }
-            MLIR_ValueHandle prev = MLIR_GetOpOperand(cur, 0);
-            cur = MLIR_GetValueDefiningOp(prev);
-            if (cur == MLIR_INVALID_HANDLE) { free(slots); return NULL; }
-            continue;
-        }
-        if (cty == OP_TYPE_LLVM_MLIR_UNDEF || cty == OP_TYPE_LLVM_MLIR_ZERO ||
-            cty == OP_TYPE_LLVM_MLIR_POISON) {
-            break;
-        }
-        // Unknown base op — bail.
-        free(slots); return NULL;
-    }
-    MLIR_OpType base_ty = MLIR_GetOpType(cur);
-    const char *default_lit =
-        base_ty == OP_TYPE_LLVM_MLIR_UNDEF  ? "undef" :
-        base_ty == OP_TYPE_LLVM_MLIR_POISON ? "poison" : "0";
-
-    // Resolve each slot's scalar to a literal by inspecting its
-    // defining op. Only accept constant-like ops.
-    char **lits = (char **)calloc(n, sizeof(char *));
-    if (!lits) { free(slots); return NULL; }
-    bool ok = true;
-    for (uint64_t i = 0; i < n; i++) {
-        if (!slots[i].set) {
-            lits[i] = xstrdup(default_lit);
-            continue;
-        }
-        MLIR_OpHandle sd = MLIR_GetValueDefiningOp(slots[i].scalar);
-        if (sd == MLIR_INVALID_HANDLE) { ok = false; break; }
-        char *l = inline_literal_for(ctx, sd, MLIR_GetValueType(slots[i].scalar));
-        if (!l) { ok = false; break; }
-        lits[i] = l;
-    }
-    char *result = NULL;
-    if (ok) {
-        Buf tmp = {0};
-        buf_putc(&tmp, '[');
-        for (uint64_t i = 0; i < n; i++) {
-            if (i) buf_cstr(&tmp, ", ");
-            buf_printf(&tmp, "i%u %s", elem_w, lits[i]);
-        }
-        buf_putc(&tmp, ']');
-        result = (char *)malloc(tmp.len + 1);
-        memcpy(result, tmp.data, tmp.len); result[tmp.len] = 0;
-        free(tmp.data);
-    }
-    for (uint64_t i = 0; i < n; i++) free(lits[i]);
-    free(lits);
-    free(slots);
-    return result;
-}
-
 
 // Pre-pass: assign names to all values & blocks in the function body.
 static void assign_names(FnCtx *F, MLIR_RegionHandle body) {
@@ -1215,6 +1069,71 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
 // Globals.
 // -----------------------------------------------------------------------------
 
+// Print the constant of type `ty` whose memory image (laid out with 8-byte
+// pointers, see mlir_llvm_type_layout.h) is `b`, as LLVM IR: e.g.
+// `{ i32 1, [2 x i8] [i8 104, i8 0] }`. An all-zero value prints as
+// `zeroinitializer`; a pointer can only be null.
+static void print_const_bytes(Buf *out, MLIR_Context *ctx, MLIR_TypeHandle ty,
+                              const uint8_t *b) {
+    unsigned sz = llvm_type_size(ctx, ty, 8);
+    bool zero = true;
+    for (unsigned i = 0; i < sz; i++) {
+        if (b[i]) { zero = false; break; }
+    }
+    if (MLIR_IsTypeLLVMArray(ty) || MLIR_IsTypeLLVMStruct(ty)) {
+        if (zero) { buf_cstr(out, "zeroinitializer"); return; }
+        bool arr = MLIR_IsTypeLLVMArray(ty);
+        size_t n = arr ? (size_t)MLIR_GetTypeLLVMArrayNumElements(ty)
+                       : MLIR_GetTypeLLVMStructNumFields(ty);
+        buf_cstr(out, arr ? "[" : "{ ");
+        unsigned off = 0;  // the field's offset, kept running for a struct
+        for (size_t i = 0; i < n; i++) {
+            MLIR_TypeHandle et;
+            if (arr) {
+                et = MLIR_GetTypeLLVMArrayElement(ty);
+                off = (unsigned)i * llvm_type_size(ctx, et, 8);
+            } else {
+                et = MLIR_GetTypeLLVMStructField(ty, i);
+                if (i > 0) {
+                    MLIR_TypeHandle pt = MLIR_GetTypeLLVMStructField(ty, i - 1);
+                    off = llvm_align_up(off + llvm_type_size(ctx, pt, 8),
+                                        llvm_type_align(ctx, et, 8));
+                }
+            }
+            if (i) buf_cstr(out, ", ");
+            print_type(out, ctx, et);
+            buf_putc(out, ' ');
+            print_const_bytes(out, ctx, et, b + off);
+        }
+        buf_cstr(out, arr ? "]" : " }");
+        return;
+    }
+    uint64_t bits = 0;
+    for (unsigned i = 0; i < sz && i < 8; i++) bits |= (uint64_t)b[i] << (8 * i);
+    string ts = MLIR_GetTypeString(ctx, ty);
+    if ((ts.size >= 9 && memcmp(ts.str, "!llvm.ptr", 9) == 0) ||
+        (ts.size == 3 && memcmp(ts.str, "ptr", 3) == 0)) {
+        buf_cstr(out, "null");
+    } else if (ts.size == 3 && memcmp(ts.str, "f32", 3) == 0) {
+        uint32_t b32 = (uint32_t)bits;
+        float f;
+        memcpy(&f, &b32, 4);
+        char *l = fmt_fp_literal(ctx, ty, (double)f);
+        buf_cstr(out, l);
+        free(l);
+    } else if (ts.size == 3 && memcmp(ts.str, "f64", 3) == 0) {
+        double d;
+        memcpy(&d, &bits, 8);
+        char *l = fmt_fp_literal(ctx, ty, d);
+        buf_cstr(out, l);
+        free(l);
+    } else {
+        // An integer, sign-extended from its width.
+        if (sz < 8 && (bits >> (8 * sz - 1)) & 1) bits |= ~(uint64_t)0 << (8 * sz);
+        buf_printf(out, "%lld", (long long)(int64_t)bits);
+    }
+}
+
 static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
     MLIR_AttributeHandle syma = find_attr(gop, "sym_name");
     string sym = syma != MLIR_INVALID_HANDLE ? MLIR_GetAttributeString(syma) : (string){0,0};
@@ -1329,14 +1248,18 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
                     MLIR_OpHandle def = MLIR_GetValueDefiningOp(v);
                     char *lit = inline_literal_for(ctx, def, MLIR_GetValueType(v));
                     if (lit) { init = lit; break; }
-                    // Try to fold an `llvm.mlir.undef` + chain of
-                    // `llvm.insertvalue` (which is how
-                    // MLIR_CreateLLVMGlobalArrayInit's upstream impl
-                    // builds an aggregate-array initializer). Walk back
-                    // through operand[0] of each insertvalue; collect
-                    // (position, scalar-literal) pairs from operand[1].
-                    char *folded = fold_aggregate_init_chain(ctx, def, gty);
-                    if (folded) init = folded;
+                    // A constant aggregate built by an llvm.insertvalue
+                    // chain (a struct initializer, or an array from
+                    // MLIR_CreateLLVMGlobalArrayInit's upstream impl).
+                    unsigned sz = gty != MLIR_INVALID_HANDLE ? llvm_type_size(ctx, gty, 8) : 0;
+                    uint8_t *img = sz ? (uint8_t *)calloc(sz, 1) : NULL;
+                    if (img && llvm_global_init_bytes(ctx, gop, gty, 8, img, sz)) {
+                        Buf tmp = {0};
+                        print_const_bytes(&tmp, ctx, gty, img);
+                        buf_putc(&tmp, '\0');
+                        init = tmp.data;
+                    }
+                    free(img);
                     break;
                 }
             }
@@ -1374,7 +1297,15 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
 // `%Name = type { ... }` line at the top.
 
 typedef struct { const char *name; size_t name_n; const char *body; size_t body_n; } StructDecl;
-typedef struct { StructDecl *e; size_t n, cap; } StructList;
+// `recent` are the types scanned last: an insertvalue chain repeats one
+// aggregate type (and its scalar types) thousands of times, and formatting
+// it each time is quadratic for a wide struct.
+typedef struct {
+    StructDecl *e;
+    size_t n, cap;
+    MLIR_TypeHandle recent[4];
+    size_t next_recent;
+} StructList;
 
 static bool struct_seen(StructList *L, const char *name, size_t name_n) {
     for (size_t i = 0; i < L->n; i++) {
@@ -1428,6 +1359,11 @@ static void scan_type_text(MLIR_Context *ctx, const char *s, size_t n, StructLis
 }
 static void scan_type_for_structs(MLIR_Context *ctx, MLIR_TypeHandle ty, StructList *L) {
     if (ty == MLIR_INVALID_HANDLE) return;
+    for (size_t i = 0; i < 4; i++) {
+        if (L->recent[i] == ty) return;
+    }
+    L->recent[L->next_recent] = ty;
+    L->next_recent = (L->next_recent + 1) % 4;
     string s = MLIR_GetTypeString(ctx, ty);
     scan_type_text(ctx, s.str, s.size, L);
 }
