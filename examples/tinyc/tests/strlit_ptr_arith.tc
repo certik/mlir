@@ -1,0 +1,51 @@
+extern int printf(const char *fmt, ...);
+
+// Pointer arithmetic on a string literal (an array of char that decays to a
+// char*) steps by 1 byte. tinyc used to step by 4 for `"abc" + n`, because
+// the literal's value carried no element type and pointer arithmetic fell
+// back to int. The same held for char* values produced by calls, `?:` and
+// va_arg.
+
+typedef const char *(*PickFn)(int);
+
+static const char *pick(int c) { return c ? "xyz" : "uvw"; }
+
+static long long g_ll[3];
+static long long *ll_arr(void) { return g_ll; }
+
+static const char *nth_vararg(int n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    const char *s = va_arg(ap, const char *) + n;
+    va_end(ap);
+    return s;
+}
+
+int main() {
+    int i = 2;
+    const char *p = "abcdefgh" + i;
+    printf("%c %c %c %c\n", *p, *("abcdefgh" + 3), *(3 + "abcdefgh"),
+           *("abcdefgh" + 7 - 2));
+    printf("%s %s\n", "hello" + 1, "hello" + i + 1);
+    const char *e = "abcdefgh";
+    printf("%d %d\n", (int)(e + 5 - e), (int)("abcdefgh" + 6 - p));
+    printf("%d %d %d\n", (int)sizeof("abc"), (int)sizeof(""), (int)sizeof("a\0b"));
+
+    // A local char array decays to char* too.
+    char a[8];
+    a[0] = 'q'; a[1] = 'r'; a[2] = 's'; a[3] = 0;
+    char *q = a + 1;
+    printf("%c %c %d %s %d\n", *q, *(a + 2), (int)(q - a), a + 1, (int)sizeof(a));
+
+    // char* from a call, a function pointer call, ?: and va_arg.
+    PickFn fp = pick;
+    printf("%s %c %s %c\n", pick(1) + 2, *(pick(0) + 1), fp(1) + 1, *(fp(0) + 2));
+    printf("%s %s %c\n", (i ? "hello" : "world") + 1, (i ? p : "xx") + 2,
+           *((i > 5 ? "abc" : "def") + 1));
+    printf("%s\n", nth_vararg(3, "vararg"));
+
+    // long long* from a call steps by 8.
+    g_ll[0] = 10; g_ll[1] = 20; g_ll[2] = 30;
+    printf("%lld %lld\n", *(ll_arr() + 1), *(ll_arr() + 2));
+    return 0;
+}
