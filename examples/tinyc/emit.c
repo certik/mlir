@@ -6785,11 +6785,12 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         } else if (g->type.kind == TY_ARRAY_STRUCT ||
                    g->type.kind == TY_ARRAY_I32 ||
                    g->type.kind == TY_ARRAY_PTR_CHAR ||
-                   g->type.kind == TY_ARRAY_PTR_STRUCT) {
+                   g->type.kind == TY_ARRAY_PTR_STRUCT ||
+                   g->type.kind == TY_STRUCT) {
             // Aggregate global (its deferred array length is resolved
             // above).
             MLIR_TypeHandle elem;
-            if (g->type.kind == TY_ARRAY_STRUCT) {
+            if (g->type.kind == TY_ARRAY_STRUCT || g->type.kind == TY_STRUCT) {
                 StructDef *sd = find_struct(&e, g->type.struct_name);
                 if (!sd) { EMIT_ERR(&e, "unknown struct in global array"); continue; }
                 elem = find_struct_type(&e, sd);
@@ -6799,8 +6800,9 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             } else {
                 elem = array_elem_type(&e, &g->type);
             }
-            MLIR_TypeHandle arr_ty = MLIR_CreateTypeLLVMArray(
-                ctx, elem, (uint64_t)g->type.array_len);
+            // A struct global (zero-initialized) is its struct type itself.
+            MLIR_TypeHandle arr_ty = g->type.kind == TY_STRUCT ? elem
+                : MLIR_CreateTypeLLVMArray(ctx, elem, (uint64_t)g->type.array_len);
             MLIR_OpHandle gop;
             if (g->init_array_data.size > 0 &&
                 g->type.kind == TY_ARRAY_I32) {
