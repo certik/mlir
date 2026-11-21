@@ -4530,6 +4530,12 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 fact_put(e, r.val, FACT_RANGE,
                          sig->ret.type.is_bool ? 1 : sig->ret.type.int_bits,
                          sig->ret.type.is_bool || sig->ret.type.int_unsigned, 0);
+            else if (!e->target_wasm32 && type_promotes_to_int(sig->ret.type))
+                // A function compiled elsewhere, e.g. by a C compiler: the
+                // x86-64 / AArch64 ABIs leave the bits above a char / short /
+                // bool result unspecified (on wasm the callee extends).
+                r.val = emit_narrow_i32(e, r.val, sig->ret.type.int_bits,
+                                        sig->ret.type.is_bool || sig->ret.type.int_unsigned);
             if (sig->ret.type.kind == TY_PTR_STRUCT) {
                 r.is_ptr = true;
                 r.sdef = sig->ret.sdef;
