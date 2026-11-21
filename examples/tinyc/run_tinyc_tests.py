@@ -386,6 +386,34 @@ def link_wasm(obj_paths, wasm_path: Path):
     ])
 
 
+# Every output mode tinyC's driver accepts via --emit=.
+EMIT_MODES = ["mlir", "lowered", "llvm", "wasm", "wasmssa", "wasmstack",
+              "wat", "aarch64", "macho", "elf"]
+
+
+def check_driver_cli() -> list[str]:
+    """Check tinyC's --emit= handling; return a list of problems."""
+    problems = []
+    usage = run([str(TINYC)])
+    text = usage.stdout + usage.stderr
+    m = re.search(r"--emit=([a-z0-9|]+)", text)
+    listed = m.group(1).split("|") if m else []
+    if listed != EMIT_MODES:
+        problems.append(f"usage lists --emit={'|'.join(listed)}, "
+                        f"expected --emit={'|'.join(EMIT_MODES)}")
+    # The last --emit= wins, whichever modes came before it.
+    simple = HERE / "tests" / "simple.tc"
+    for first in EMIT_MODES:
+        r = run([str(TINYC), f"--emit={first}", "--emit=mlir", str(simple)])
+        if r.returncode != 0 or not r.stdout.startswith("module"):
+            problems.append(f"--emit={first} --emit=mlir did not print MLIR "
+                            f"(exit {r.returncode})")
+    r = run([str(TINYC), "--emit=nonsense", str(simple)])
+    if r.returncode <= 0:
+        problems.append(f"--emit=nonsense was accepted (exit {r.returncode})")
+    return problems
+
+
 def main():
     if not TINYC.exists():
         print(f"error: {TINYC} not found; run build_tinyc_upstream first", file=sys.stderr)
@@ -445,6 +473,14 @@ def main():
 
     failures = 0
     skipped = 0
+    if not test_filter or "driver_cli" in test_filter:
+        problems = check_driver_cli()
+        for p in problems:
+            print(f"FAIL driver_cli: {p}")
+        if problems:
+            failures += 1
+        else:
+            print("PASS driver_cli")
     for t in tests:
         name = t["name"]
         # `expected_stdout` is optional (default ""): macho-only tests that
