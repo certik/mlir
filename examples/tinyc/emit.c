@@ -4409,6 +4409,25 @@ static void emit_expr_for_side_effect(E *e, Scope *sc, Expr *ex) {
     (void)emit_expr(e, sc, ex);
 }
 
+static void emit_stmt(E *e, Scope *sc, Stmt *st);
+
+// Bring the variables a declaration statement declares into scope `sc`
+// with their storage, but without running their initializers. Any other
+// statement is ignored. Used for the unreachable statements before a
+// switch's first case label.
+static void declare_without_init(E *e, Scope *sc, Stmt *st) {
+    if (st->kind == ST_BLOCK && st->block_no_scope) {
+        for (size_t i = 0; i < st->block_body.size; i++)
+            declare_without_init(e, sc, st->block_body.data[i]);
+        return;
+    }
+    if (st->kind != ST_DECL) return;
+    Expr *init = st->decl_init;
+    st->decl_init = NULL;
+    emit_stmt(e, sc, st);
+    st->decl_init = init;
+}
+
 static void emit_stmt(E *e, Scope *sc, Stmt *st) {
     if (e->terminated && st->kind != ST_LABEL) return;
     e->cur_line = st->line;
@@ -5199,6 +5218,10 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             return;
         }
         case ST_FOR: {
+            // The init declaration gets its own scope (`inner`), which the
+            // condition and the step see. The body is a nested block scope,
+            // so a body declaration that reuses the loop variable's name
+            // shadows it only inside the body.
             Scope inner = (Scope){.head = NULL, .parent = sc};
             if (st->for_init) emit_stmt(e, &inner, st->for_init);
             if (e->terminated) return;
@@ -5223,8 +5246,9 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             e->cur_block = body_b; e->terminated = false;
             LoopCtx lc = (LoopCtx){.continue_block = step_b, .break_block = exit_b, .parent = e->loops};
             e->loops = &lc;
-            for (size_t i = 0; i < st->for_body.size && !e->terminated; i++)
-                emit_stmt(e, &inner, st->for_body.data[i]);
+            { Scope body = (Scope){.head = NULL, .parent = &inner};
+              for (size_t i = 0; i < st->for_body.size && !e->terminated; i++)
+                  emit_stmt(e, &body, st->for_body.data[i]); }
             e->loops = lc.parent;
             emit_branch(e, step_b);
 
@@ -5246,6 +5270,16 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             MLIR_ValueHandle cond_v = cv.val;
 
             size_t nc = st->switch_cases.size;
+            // Statements before the first case label never run, but a
+            // declaration among them is in scope for the rest of the body
+            // (`switch (x) { int t; case 1: t = ...; }`). Declare those
+            // names without running their initializers; skip the rest.
+            Scope inner = (Scope){.head = NULL, .parent = sc};
+            int64_t first_case = nc ? st->switch_cases.data[0].body_start
+                                    : (int64_t)st->block_body.size;
+            for (int64_t k = 0; k < first_case; k++)
+                declare_without_init(e, &inner, st->block_body.data[k]);
+
             MLIR_BlockHandle exit_b = new_cfg_block(e);
 
             // Per-case body block, one per unique body_start.
@@ -5282,7 +5316,6 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             MLIR_BlockHandle cont_target = e->loops ? e->loops->continue_block : MLIR_INVALID_HANDLE;
             LoopCtx lc = (LoopCtx){.continue_block = cont_target, .break_block = exit_b, .parent = e->loops};
             e->loops = &lc;
-            Scope inner = (Scope){.head = NULL, .parent = sc};
             for (size_t i = 0; i < nc; i++) {
                 // Skip duplicate entries pointing at a body_start already emitted.
                 bool dup = false;
