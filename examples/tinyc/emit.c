@@ -7078,11 +7078,11 @@ static Type ginit_member_type(GInit *gi, Type t, GMembers *m, int64_t k,
         mt.array_len2 = 0;
     } else if (t.kind == TY_ARRAY_I32) {
         mt.kind = t.array_elem_is_i64 ? TY_I64 : TY_I32;
-        mt.int_bits = t.array_elem_is_i8 ? 8 : t.array_elem_is_i64 ? 64
+        mt.int_bits = t.array_elem_is_i64 ? 64
                     : type_is_narrow_int(t) ? t.int_bits : 32;
         mt.int_unsigned = t.int_unsigned;
         mt.is_bool = t.is_bool;
-        *ty = t.array_elem_is_i64 ? e->i64 : t.array_elem_is_i8 ? e->i8 : e->i32;
+        *ty = array_elem_type(e, &t);
     } else if (t.kind == TY_ARRAY_F32) {
         mt.kind = TY_F32;
         *ty = e->f32;
@@ -7167,7 +7167,7 @@ static void ginit_members_in(GInit *gi, Type t, Expr *list, size_t *pos, bool br
         MLIR_TypeHandle mty;
         Type mt = ginit_member_type(gi, t, &m, k, &mty);
         bool char_array = mt.kind == TY_ARRAY_I32 && mt.array_len2 == 0 &&
-                          (mt.array_elem_is_i8 || mt.int_bits == 8);
+                          mt.int_bits == 8 && !mt.is_bool;
         bool elided = ginit_is_aggregate(mt) && a->kind != EX_COMPOUND &&
                       !(char_array && a->kind == EX_STR);
         // A braced list or a string re-initializes the whole member (C11
@@ -7450,7 +7450,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             if (g->init_str.size > 0) {
                 // `char s[N] = "..."`: the string's bytes, cut or
                 // zero-padded to N.
-                if (g->type.kind != TY_ARRAY_I32 || !g->type.array_elem_is_i8 ||
+                if (g->type.kind != TY_ARRAY_I32 || g->type.int_bits != 8 || g->type.is_bool ||
                     g->type.array_len2 != 0) {
                     EMIT_ERR(&e, "a string can only initialize a char array");
                 }
