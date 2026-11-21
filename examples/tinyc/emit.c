@@ -2583,7 +2583,14 @@ static bool fold_expr(Expr *ex, FoldLeafFn leaf, void *ctx, bool lenient,
             return true;
         }
         default:
-            return leaf && leaf(ctx, ex, out);
+            if (leaf && leaf(ctx, ex, out)) return true;
+            // An unevaluated `sizeof` only needs its type, an `int` here
+            // as in the emitter (the parser cannot size types).
+            if (lenient && ex->kind == EX_SIZEOF) {
+                *out = fold_int(0);
+                return true;
+            }
+            return false;
     }
 }
 
@@ -6430,6 +6437,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
     // pointer global with an initializer region that takes the address.
     for (size_t i = 0; i < program->globals.size; i++) {
         Global *g = &program->globals.data[i];
+        e.cur_line = g->line;
         // Resolve a deferred array length (e.g. `[20 + 1]` or `[N]` with an
         // enumerator N) with no scope (file-scope constant expressions
         // only) before the symbol copies the type, so `sizeof` sees it.
@@ -6437,8 +6445,21 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             int64_t v = 0;
             if (!ast_fold_int(&e, NULL, g->type.array_len_expr, &v)) {
                 EMIT_ERR(&e, "non-constant global array length");
+            } else if (v <= 0) {
+                EMIT_ERR(&e, "array length must be positive (got {})", v);
+                v = 0;
             }
             g->type.array_len = v;
+            // The parser packed the initializer without knowing the
+            // length: cut or zero-pad its bytes to it.
+            if (g->init_array_data.size > 0 && g->type.kind == TY_ARRAY_I32) {
+                size_t es = g->type.array_elem_is_i64 ? 8 : g->type.array_elem_is_i8 ? 1 : 4;
+                size_t n = (size_t)v * es;
+                char *buf = arena_alloc(arena, n ? n : 1);
+                for (size_t k = 0; k < n; k++)
+                    buf[k] = k < g->init_array_data.size ? g->init_array_data.str[k] : 0;
+                g->init_array_data = (string){.str = buf, .size = n};
+            }
         }
         Sym *sy = arena_new(arena, Sym);
         *sy = (Sym){0};

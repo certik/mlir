@@ -1,0 +1,33 @@
+extern int printf(const char *fmt, ...);
+
+// A global array whose length is a constant expression (`int h[2 + 3]`)
+// has that length in `sizeof` too (#286: it was 0, because the symbol
+// copied the type before the length was folded), also in a local array
+// bound that uses it.
+
+#define LEN (3 * 2 - 1)
+int h[2 + 3];
+int g[5];
+static char sbuf[LEN + 1];
+unsigned char ub[0x10 >> 2];
+long long lg[2 * 2];
+// The initializer of such an array is kept (it was dropped: the parser
+// packed it only for a literal length).
+static int ai[LEN * 2] = {1, 2, 3};
+unsigned char ac[1 + 3] = {200, 1, 2, 3};
+long long al[LEN - 3] = {-5};
+// The branch of ?: that is not taken only needs a type.
+enum { SZ = 1 ? 2 : sizeof(int) };
+
+int main() {
+    int i;
+    for (i = 0; i < 5; i++) h[i] = i;
+    int k[sizeof(sbuf)];
+    printf("%d %d %d\n", (int)sizeof(h), (int)sizeof(g), h[4]);
+    printf("%d %d %d %d\n", (int)sizeof(sbuf), (int)sizeof(ub), (int)sizeof(lg),
+           (int)sizeof(k));
+    printf("%d %d\n", (int)(sizeof(h) / sizeof(h[0])), (int)(sizeof lg / sizeof lg[0]));
+    printf("%d %d %d %d %d %d %lld %d %d\n", (int)sizeof(ai), ai[1], ai[2], ai[9], ac[0], ac[3],
+           al[0], (int)sizeof(al), SZ);
+    return 0;
+}

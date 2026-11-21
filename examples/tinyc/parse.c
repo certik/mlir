@@ -3074,6 +3074,10 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                             }
                             int64_t alen = g.type.array_len;
                             bool unsized = (alen == 0 && !g.type.array_len_expr);
+                            // With a constant-expression length (`[N * 2]`),
+                            // folded by the emitter, pack every value; the
+                            // emitter cuts or pads the bytes to the length.
+                            bool grow = unsized || g.type.array_len_expr;
                             uint8_t *bytes = NULL;
                             size_t   bcap  = 0;
                             if (g.type.kind == TY_ARRAY_I32) {
@@ -3081,7 +3085,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                     bcap  = (size_t)alen * elem_size;
                                     bytes = (uint8_t *)arena_alloc(p.arena, bcap);
                                     for (size_t bi = 0; bi < bcap; bi++) bytes[bi] = 0;
-                                } else if (unsized) {
+                                } else if (grow) {
                                     bcap  = 16 * elem_size;
                                     bytes = (uint8_t *)arena_alloc(p.arena, bcap);
                                     for (size_t bi = 0; bi < bcap; bi++) bytes[bi] = 0;
@@ -3138,9 +3142,9 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                         p.i++;
                                     }
                                     if (have_int_val && bytes &&
-                                        (unsized || ei < (size_t)alen)) {
+                                        (grow || ei < (size_t)alen)) {
                                         size_t need = (ei + 1) * elem_size;
-                                        if (unsized && need > bcap) {
+                                        if (grow && need > bcap) {
                                             size_t ncap = bcap ? bcap * 2
                                                                : 16 * elem_size;
                                             while (ncap < need) ncap *= 2;
@@ -3171,10 +3175,8 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                             }
                             expect(&p, TC_TK_RBRACE,
                                    str_lit("expected '}' in global array initializer"));
-                            if (unsized && ei > 0) {
-                                g.type.array_len = (int64_t)ei;
-                                bcap = (size_t)ei * elem_size;
-                            }
+                            if (unsized && ei > 0) g.type.array_len = (int64_t)ei;
+                            if (grow) bcap = (size_t)ei * elem_size;
                             if (any_nonzero && bytes && bcap > 0) {
                                 g.init_array_data.str  = (char *)bytes;
                                 g.init_array_data.size = bcap;
