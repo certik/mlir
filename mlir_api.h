@@ -476,6 +476,44 @@ typedef enum {
     //   attrs: sym_name (string, debug), offset (i32), init_data (string).
     OP_TYPE_AARCH64_DATA_INIT,
 
+    // More LLVM dialect ops. Appended here (rather than next to the other
+    // OP_TYPE_LLVM_* entries) so existing enumerator values stay unchanged.
+    OP_TYPE_LLVM_BR,
+    OP_TYPE_LLVM_COND_BR,
+    OP_TYPE_LLVM_INTTOPTR,
+    OP_TYPE_LLVM_BITCAST,
+    OP_TYPE_LLVM_SELECT,
+    OP_TYPE_LLVM_FCMP,
+    OP_TYPE_LLVM_FADD,
+    OP_TYPE_LLVM_FSUB,
+    OP_TYPE_LLVM_FMUL,
+    OP_TYPE_LLVM_FDIV,
+    OP_TYPE_LLVM_FREM,
+    OP_TYPE_LLVM_FNEG,
+    OP_TYPE_LLVM_FPEXT,
+    OP_TYPE_LLVM_FPTRUNC,
+    OP_TYPE_LLVM_SITOFP,
+    OP_TYPE_LLVM_UITOFP,
+    OP_TYPE_LLVM_FPTOSI,
+    OP_TYPE_LLVM_FPTOUI,
+    OP_TYPE_LLVM_MLIR_NULL,
+    OP_TYPE_ARITH_INDEX_CASTUI,
+    OP_TYPE_ARITH_UITOFP,
+    OP_TYPE_ARITH_FPTOUI,
+    OP_TYPE_LLVM_SWITCH,
+    OP_TYPE_LLVM_UNREACHABLE,
+    OP_TYPE_LLVM_MLIR_POISON,
+    OP_TYPE_LLVM_ADDRSPACECAST,
+    OP_TYPE_LLVM_INSERTVALUE,
+    OP_TYPE_LLVM_INTR_SQRT,
+    OP_TYPE_LLVM_INTR_VASTART,
+    OP_TYPE_LLVM_INTR_VAEND,
+    OP_TYPE_LLVM_INTR_VACOPY,
+    OP_TYPE_LLVM_INTR_STACKSAVE,
+    OP_TYPE_LLVM_INTR_STACKRESTORE,
+    OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE,
+    OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW,
+
     OP_TYPE_COUNT
 } MLIR_OpType;
 
@@ -498,6 +536,13 @@ void MLIR_ResetInternRegistry(void);
 // -----------------------------------------------------------------------------
 
 // Creation & structural mutation
+//
+// `type` and `opname` name the op. A non-empty `opname` decides its type:
+// a registered name gives that name's type, any other name gives
+// OP_TYPE_UNREGISTERED, so MLIR_GetOpType() is always a function of
+// MLIR_GetOpName(). `type` may then be OP_TYPE_UNREGISTERED or the same
+// type; passing a different registered type is a caller bug (asserted).
+// With an empty `opname` the op gets `type` and its registered name.
 MLIR_OpHandle MLIR_CreateOp(
     MLIR_Context *ctx,
     MLIR_OpType type,
@@ -606,6 +651,9 @@ string MLIR_TranslateModuleToLLVMIRUpstream(MLIR_Context *ctx, MLIR_OpHandle mod
 string MLIR_TranslateModuleToWasmUpstream(MLIR_Context *ctx, MLIR_OpHandle module);
 
 // Accessors
+// The op's registered type, derived from its name (see MLIR_CreateOp): an
+// op named `llvm.load` is OP_TYPE_LLVM_LOAD, and an op whose name is not
+// registered is OP_TYPE_UNREGISTERED.
 MLIR_OpType MLIR_GetOpType(MLIR_OpHandle op);
 string MLIR_GetOpName(MLIR_OpHandle op);
 string MLIR_GetOpName_string(MLIR_OpHandle op);

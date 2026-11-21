@@ -337,26 +337,19 @@ static int val_w(MLIR_Context *ctx, MLIR_ValueHandle v) {
 }
 static bool is_const(MLIR_OpHandle def, int64_t *val) {
     if (def == MLIR_INVALID_HANDLE) return false;
-    string nm = MLIR_GetOpName(def);
-    if (nm.size == sizeof("llvm.mlir.constant")-1 &&
-        memcmp(nm.str, "llvm.mlir.constant", nm.size) == 0) {
+    switch (MLIR_GetOpType(def)) {
+    case OP_TYPE_LLVM_MLIR_CONSTANT: {
         MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(def, "value");
         if (a == MLIR_INVALID_HANDLE) return false;
         *val = MLIR_GetAttributeInteger(a);
         return true;
     }
-    if ((nm.size == sizeof("llvm.mlir.zero")-1 &&
-         memcmp(nm.str, "llvm.mlir.zero", nm.size) == 0) ||
-        (nm.size == sizeof("llvm.mlir.null")-1 &&
-         memcmp(nm.str, "llvm.mlir.null", nm.size) == 0)) {
+    case OP_TYPE_LLVM_MLIR_ZERO:
+    case OP_TYPE_LLVM_MLIR_NULL:
         *val = 0; return true;
+    default:
+        return false;
     }
-    return false;
-}
-static bool op_is(MLIR_OpHandle op, const char *n) {
-    string nm = MLIR_GetOpName(op);
-    size_t l = strlen(n);
-    return nm.size == l && memcmp(nm.str, n, l) == 0;
 }
 
 // Float width (in bytes) of a value's type: 4 for f32, 8 for f64, else 0.
@@ -373,7 +366,7 @@ static int fp_bytes(MLIR_Context *ctx, MLIR_ValueHandle v) {
 // so FP constants are materialized here as their exact IEEE-754 bits.
 static bool fp_const_val(MLIR_Context *ctx, MLIR_ValueHandle v, uint64_t *bits) {
     MLIR_OpHandle def = MLIR_GetValueDefiningOp(v);
-    if (def == MLIR_INVALID_HANDLE || !op_is(def, "llvm.mlir.constant")) return false;
+    if (def == MLIR_INVALID_HANDLE || MLIR_GetOpType(def) != OP_TYPE_LLVM_MLIR_CONSTANT) return false;
     int fb = fp_bytes(ctx, v);
     if (fb == 0) return false;
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(def, "value");
@@ -400,8 +393,7 @@ static bool x64_is_wasm_data_sym(string gn) {
 
 static bool op_is_addressof(MLIR_OpHandle op) {
     if (op == MLIR_INVALID_HANDLE) return false;
-    if (MLIR_GetOpType(op) == OP_TYPE_LLVM_MLIR_ADDRESSOF) return true;
-    return op_is(op, "llvm.mlir.addressof");
+    return MLIR_GetOpType(op) == OP_TYPE_LLVM_MLIR_ADDRESSOF;
 }
 
 // Load an operand value into `reg`. Handles constants, globals, slots.
@@ -411,7 +403,7 @@ static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
     if (fp_const_val(F->ctx, v, &fbits)) { mov_ri(F, reg, (int64_t)fbits, 1); return; }
     int64_t c;
     if (is_const(def, &c)) { mov_ri(F, reg, c, val_w(F->ctx, v)); return; }
-    if (def != MLIR_INVALID_HANDLE && op_is(def, "llvm.mlir.undef")) {
+    if (def != MLIR_INVALID_HANDLE && MLIR_GetOpType(def) == OP_TYPE_LLVM_MLIR_UNDEF) {
         mov_ri(F, reg, 0, val_w(F->ctx, v)); return;
     }
     if (def != MLIR_INVALID_HANDLE && op_is_addressof(def)) {

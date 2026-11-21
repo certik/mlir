@@ -5,6 +5,7 @@
 #include <base/format.h>
 #include <base/hashtable.h>
 #include <base/vector.h>
+#include <base/assert.h>
 #include "tokenizer.h"
 #include "mlir_api.h"
 #include "mlir_op_names.h"
@@ -196,9 +197,9 @@ typedef struct IR_Value {
 typedef struct IR_OpAux {
     MLIR_LocationHandle unnumbered_loc_def;
     string trailing_comment;
-    // Non-canonical op name (only for OP_TYPE_UNREGISTERED / custom ops whose
-    // textual name differs from op_type_to_string(op_type)). NULL str means
-    // the name is derivable from op_type and is not stored.
+    // The op's name when op_type_to_string(op_type) cannot reproduce it,
+    // i.e. for OP_TYPE_UNREGISTERED ops. NULL str means the name is
+    // derivable from op_type and is not stored.
     string opname;
     int32_t source_line_start;
     // Def-use bookkeeping, populated only when the context tracks uses (the
@@ -594,6 +595,19 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     string trailing_comment,
     int64_t source_line_start) {
 
+    // See MLIR_CreateOp in mlir_api.h: a non-empty name decides the type,
+    // exactly as on the upstream backend. Most creators pass the type
+    // together with its own name, which needs no lookup.
+    if (opname.size > 0 && (type == OP_TYPE_UNREGISTERED ||
+                            !str_eq(opname, op_type_to_string(type)))) {
+        MLIR_OpType named = op_type_from_string(opname);
+        assert(type == OP_TYPE_UNREGISTERED || type == named);
+        type = named;
+    }
+    // Only an unregistered op's name is stored; a registered one is
+    // op_type_to_string(type).
+    bool store_name = opname.size > 0 && type == OP_TYPE_UNREGISTERED;
+
     IR_Op op = {0};
     op.op_type = type;
     Arena *arena = ctx ? ctx->arena : NULL;
@@ -622,7 +636,6 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     // def-use arrays) or when any printer/parser metadata diverges from the
     // getter defaults. The wasm->macho lift passes defaults and opts out of
     // tracking, so aux stays NULL on the hot path.
-    bool store_name = !str_eq(opname, op_type_to_string(type));
     if (arena && (track_uses || store_name ||
                   unnumbered_loc_def != MLIR_INVALID_HANDLE ||
                   trailing_comment.size != 0 || source_line_start != -1)) {

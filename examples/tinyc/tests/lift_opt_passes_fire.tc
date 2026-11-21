@@ -1,0 +1,24 @@
+// Regression probe for the optimisation passes that run on the lifted `llvm`
+// dialect (`--from-wasm`): load-CSE, arith-GVN and DCE. The wasm -> llvm lift
+// creates llvm.inttoptr, llvm.select and the floating-point ops by name only,
+// so the passes must recognise ops however they were created:
+//   * the two loads of p[i] share one address chain that ends in an
+//     llvm.inttoptr; load-CSE must fold them into one load;
+//   * `dead` is an unused llvm.fmul; DCE must remove it.
+#include <stdio.h>
+
+int lift_probe(int *p, int i, double s) {
+    int a = p[i] + p[i];
+    double dead = s * 2.0;
+    return a + 24301;   // the constant marks this function in the lifted module
+}
+
+int g_idx = 1;
+double g_scale = 3.0;
+
+int main(void) {
+    int arr[4];
+    arr[0] = 5; arr[1] = 21; arr[2] = 7; arr[3] = 9;
+    printf("%d\n", lift_probe(arr, g_idx, g_scale));
+    return 0;
+}

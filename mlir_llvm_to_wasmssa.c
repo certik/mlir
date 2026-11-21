@@ -209,6 +209,17 @@ static unsigned struct_field_offset(MLIR_Context *ctx, MLIR_TypeHandle sty,
 }
 
 static unsigned type_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    // Aggregates first: their size comes from the element / field types, and
+    // MLIR_GetTypeString() formats (and allocates) the whole nested type on
+    // every call, which was a measurable share of compile time and memory.
+    if (MLIR_IsTypeLLVMArray(ty)) {
+        unsigned esz = type_size_bytes(ctx, MLIR_GetTypeLLVMArrayElement(ty));
+        if (esz == 0) return 0;
+        return esz * (unsigned)MLIR_GetTypeLLVMArrayNumElements(ty);
+    }
+    if (MLIR_IsTypeLLVMStruct(ty)) {
+        return struct_size_bytes(ctx, ty);
+    }
     string s = MLIR_GetTypeString(ctx, ty);
     if (s.size >= 9 && memcmp(s.str, "!llvm.ptr", 9) == 0) return 4;
     if (s.size == 3 && memcmp(s.str, "ptr", 3) == 0) return 4;
@@ -224,14 +235,6 @@ static unsigned type_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
         if (w == 16) return 2;
         if (w == 32) return 4;
         if (w == 64) return 8;
-    }
-    if (MLIR_IsTypeLLVMArray(ty)) {
-        unsigned esz = type_size_bytes(ctx, MLIR_GetTypeLLVMArrayElement(ty));
-        if (esz == 0) return 0;
-        return esz * (unsigned)MLIR_GetTypeLLVMArrayNumElements(ty);
-    }
-    if (MLIR_IsTypeLLVMStruct(ty)) {
-        return struct_size_bytes(ctx, ty);
     }
     return 0;
 }
@@ -860,8 +863,7 @@ static bool lower_scf_while(FnCtx *F, MLIR_OpHandle op) {
     bool saw_cond = false;
     for (size_t i = 0; i < nb; i++) {
         MLIR_OpHandle bop = MLIR_GetBlockOp(before_b, i);
-        string n = MLIR_GetOpName(bop);
-        if (name_eq(n, "scf.condition")) {
+        if (MLIR_GetOpType(bop) == OP_TYPE_SCF_CONDITION) {
             saw_cond = true;
             if (MLIR_GetOpNumOperands(bop) < 1) { F->body_block = saved; return false; }
             if (MLIR_GetOpNumOperands(bop) - 1 != n_res) { F->body_block = saved; return false; }
@@ -905,8 +907,7 @@ static bool lower_scf_while(FnCtx *F, MLIR_OpHandle op) {
             bool saw_yield = false;
             for (size_t j = 0; j < na; j++) {
                 MLIR_OpHandle aop = MLIR_GetBlockOp(after_b, j);
-                string an = MLIR_GetOpName(aop);
-                if (name_eq(an, "scf.yield")) {
+                if (MLIR_GetOpType(aop) == OP_TYPE_SCF_YIELD) {
                     saw_yield = true;
                     if (MLIR_GetOpNumOperands(aop) != n_iter) { F->body_block = saved; return false; }
                     MLIR_ValueHandle y_vals_inline[16];
@@ -1138,17 +1139,21 @@ static bool lower_op(FnCtx *F, MLIR_OpHandle op) {
     return ok;
 }
 static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
-    string name = MLIR_GetOpName(op);
+    // The op type is derived from the op name by MLIR_CreateOp, so one switch
+    // selects the lowering. Every arm returns. Ops without an enumerator (the
+    // llvm.intr.* intrinsics) are matched by name after it.
+    MLIR_OpType ty = MLIR_GetOpType(op);
+    switch (ty) {
 
     // ---- scf.if / scf.while / scf.index_switch ---------------------------
-    if (name_eq(name, "scf.if"))    return lower_scf_if(F, op);
-    if (name_eq(name, "scf.while")) return lower_scf_while(F, op);
-    if (name_eq(name, "scf.index_switch")) return lower_scf_index_switch(F, op);
+    case OP_TYPE_SCF_IF: return lower_scf_if(F, op);
+    case OP_TYPE_SCF_WHILE: return lower_scf_while(F, op);
+    case OP_TYPE_SCF_INDEX_SWITCH: return lower_scf_index_switch(F, op);
 
     // ---- scf.yield: emit wasmssa.block_return into the enclosing region's
     //                 block. The enclosing scf.if / scf.index_switch / scf.while
     //                 lowering has already set F->body_block to the right block.
-    if (name_eq(name, "scf.yield")) {
+    case OP_TYPE_SCF_YIELD: {
         size_t no = MLIR_GetOpNumOperands(op);
         MLIR_ValueHandle vs_inline[16];
         MLIR_ValueHandle *vs = no <= 16 ? vs_inline
@@ -1161,7 +1166,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     // ---- llvm.select -----------------------------------------------------
-    if (name_eq(name, "llvm.select")) {
+    case OP_TYPE_LLVM_SELECT: {
         if (MLIR_GetOpNumOperands(op) != 3 || MLIR_GetOpNumResults(op) != 1)
             return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
@@ -1185,7 +1190,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     // ---- llvm.mlir.constant ------------------------------------------------
-    if (name_eq(name, "llvm.mlir.constant")) {
+    case OP_TYPE_LLVM_MLIR_CONSTANT: {
         if (MLIR_GetOpNumResults(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
@@ -1229,7 +1234,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     // ---- llvm.mlir.undef ----------------------------------------------------
     // Inserted by the structurization step for "doesn't-matter" yield values
     // on unreachable / pre-break paths. Lower it to a typed zero constant.
-    if (name_eq(name, "llvm.mlir.undef")) {
+    case OP_TYPE_LLVM_MLIR_UNDEF: {
         if (MLIR_GetOpNumResults(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
@@ -1245,7 +1250,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     // ---- llvm.alloca: result = sp_def + frame_offset -----------------------
-    if (name_eq(name, "llvm.alloca")) {
+    case OP_TYPE_LLVM_ALLOCA: {
         if (MLIR_GetOpNumResults(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         uint32_t off;
@@ -1258,7 +1263,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     // ---- llvm.store --------------------------------------------------------
-    if (name_eq(name, "llvm.store")) {
+    case OP_TYPE_LLVM_STORE: {
         if (MLIR_GetOpNumOperands(op) != 2) return false;
         MLIR_ValueHandle val = MLIR_GetOpOperand(op, 0);
         MLIR_ValueHandle ptr = MLIR_GetOpOperand(op, 1);
@@ -1292,7 +1297,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     // ---- llvm.load ---------------------------------------------------------
-    if (name_eq(name, "llvm.load")) {
+    case OP_TYPE_LLVM_LOAD: {
         if (MLIR_GetOpNumResults(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         MLIR_ValueHandle ptr = MLIR_GetOpOperand(op, 0);
@@ -1327,7 +1332,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     // ---- llvm.sext (i8/i16/i32 -> i32; i32 -> i64; i8/i16 -> i64) ----------
-    if (name_eq(name, "llvm.sext")) {
+    case OP_TYPE_LLVM_SEXT: {
         if (MLIR_GetOpNumResults(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         MLIR_ValueHandle s = MLIR_GetOpOperand(op, 0);
@@ -1370,7 +1375,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     // ---- llvm.ptrtoint / llvm.inttoptr -------------------------------------
-    if (name_eq(name, "llvm.ptrtoint") || name_eq(name, "llvm.inttoptr")) {
+    case OP_TYPE_LLVM_PTRTOINT: case OP_TYPE_LLVM_INTTOPTR: {
         if (MLIR_GetOpNumResults(op) != 1 ||
             MLIR_GetOpNumOperands(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
@@ -1408,90 +1413,8 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         return false;
     }
 
-
-    // ---- llvm binary integer ops -------------------------------------------
-    // Mapped to a generic wasmssa.binop carrying the actual wasm bytecode
-    // byte. Op kind picks the row; valtype picks the column of the table.
-    {
-        // (op-name, i32-opcode, i64-opcode); 0 = unsupported
-        struct { const char *nm; uint8_t i32op, i64op; } btab[] = {
-            { "llvm.add",  0x6a, 0x7c },
-            { "llvm.sub",  0x6b, 0x7d },
-            { "llvm.mul",  0x6c, 0x7e },
-            { "llvm.sdiv", 0x6d, 0x7f },
-            { "llvm.udiv", 0x6e, 0x80 },
-            { "llvm.srem", 0x6f, 0x81 },
-            { "llvm.urem", 0x70, 0x82 },
-            { "llvm.and",  0x71, 0x83 },
-            { "llvm.or",   0x72, 0x84 },
-            { "llvm.xor",  0x73, 0x85 },
-            { "llvm.shl",  0x74, 0x86 },
-            { "llvm.ashr", 0x75, 0x87 },
-            { "llvm.lshr", 0x76, 0x88 },
-        };
-        for (size_t k = 0; k < sizeof(btab)/sizeof(btab[0]); k++) {
-            if (!name_eq(name, btab[k].nm)) continue;
-            if (MLIR_GetOpNumResults(op) != 1 ||
-                MLIR_GetOpNumOperands(op) != 2) return false;
-            MLIR_ValueHandle r  = MLIR_GetOpResult(op, 0);
-            MLIR_ValueHandle a  = MLIR_GetOpOperand(op, 0);
-            MLIR_ValueHandle b  = MLIR_GetOpOperand(op, 1);
-            uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
-            uint8_t opc = (vt == WT_I32) ? btab[k].i32op
-                        : (vt == WT_I64) ? btab[k].i64op : 0;
-            if (opc == 0) return false;
-            MLIR_ValueHandle ai, bi;
-            if (!vmap_get(F, a, &ai) || !vmap_get(F, b, &bi)) return false;
-            MLIR_ValueHandle ops[2] = { ai, bi };
-            wasmssa_op_t o = {0};
-            o.type = OP_TYPE_WASMSSA_BINOP;
-            o.valtype = vt;
-            o.wasm_opcode = opc;
-            o.n_operands = 2;
-            o.operands = ops;
-            o.has_result = true;
-            MLIR_ValueHandle idx = commit_op(F, &o);
-            vmap_set(F, r, idx);
-            return true;
-        }
-    }
-
-    // ---- llvm binary float ops ---------------------------------------------
-    {
-        struct { const char *nm; uint8_t f32op, f64op; } ftab[] = {
-            { "llvm.fadd",  0x92, 0xa0 },
-            { "llvm.fsub",  0x93, 0xa1 },
-            { "llvm.fmul",  0x94, 0xa2 },
-            { "llvm.fdiv",  0x95, 0xa3 },
-        };
-        for (size_t k = 0; k < sizeof(ftab)/sizeof(ftab[0]); k++) {
-            if (!name_eq(name, ftab[k].nm)) continue;
-            if (MLIR_GetOpNumResults(op) != 1 ||
-                MLIR_GetOpNumOperands(op) != 2) return false;
-            MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
-            uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
-            uint8_t opc = (vt == WT_F32) ? ftab[k].f32op
-                        : (vt == WT_F64) ? ftab[k].f64op : 0;
-            if (opc == 0) return false;
-            MLIR_ValueHandle ai, bi;
-            if (!vmap_get(F, MLIR_GetOpOperand(op, 0), &ai)) return false;
-            if (!vmap_get(F, MLIR_GetOpOperand(op, 1), &bi)) return false;
-            MLIR_ValueHandle ops[2] = { ai, bi };
-            wasmssa_op_t o = {0};
-            o.type = OP_TYPE_WASMSSA_BINOP;
-            o.valtype = vt;
-            o.wasm_opcode = opc;
-            o.n_operands = 2;
-            o.operands = ops;
-            o.has_result = true;
-            MLIR_ValueHandle idx = commit_op(F, &o);
-            vmap_set(F, r, idx);
-            return true;
-        }
-    }
-
     // ---- llvm float compares -----------------------------------------------
-    if (name_eq(name, "llvm.fcmp")) {
+    case OP_TYPE_LLVM_FCMP: {
         if (MLIR_GetOpNumResults(op) != 1 ||
             MLIR_GetOpNumOperands(op) != 2) return false;
         MLIR_ValueHandle a = MLIR_GetOpOperand(op, 0);
@@ -1533,8 +1456,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     // ---- llvm.fpext / llvm.fptrunc / llvm.fneg ----------------------------
-    if (name_eq(name, "llvm.fpext") || name_eq(name, "llvm.fptrunc") ||
-        name_eq(name, "llvm.fneg")) {
+    case OP_TYPE_LLVM_FPEXT: case OP_TYPE_LLVM_FPTRUNC: case OP_TYPE_LLVM_FNEG: {
         if (MLIR_GetOpNumResults(op) != 1 ||
             MLIR_GetOpNumOperands(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
@@ -1542,10 +1464,10 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         uint8_t in_vt  = wasm_vt(F->ctx, MLIR_GetValueType(s));
         uint8_t out_vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
         uint8_t opc = 0;
-        if (name_eq(name, "llvm.fpext") && in_vt == WT_F32 && out_vt == WT_F64) opc = 0xbb;
-        else if (name_eq(name, "llvm.fptrunc") && in_vt == WT_F64 && out_vt == WT_F32) opc = 0xb6;
-        else if (name_eq(name, "llvm.fneg") && in_vt == WT_F32 && out_vt == WT_F32) opc = 0x8c;
-        else if (name_eq(name, "llvm.fneg") && in_vt == WT_F64 && out_vt == WT_F64) opc = 0x9a;
+        if (ty == OP_TYPE_LLVM_FPEXT && in_vt == WT_F32 && out_vt == WT_F64) opc = 0xbb;
+        else if (ty == OP_TYPE_LLVM_FPTRUNC && in_vt == WT_F64 && out_vt == WT_F32) opc = 0xb6;
+        else if (ty == OP_TYPE_LLVM_FNEG && in_vt == WT_F32 && out_vt == WT_F32) opc = 0x8c;
+        else if (ty == OP_TYPE_LLVM_FNEG && in_vt == WT_F64 && out_vt == WT_F64) opc = 0x9a;
         else return false;
         MLIR_ValueHandle sa;
         if (!vmap_get(F, s, &sa)) return false;
@@ -1563,17 +1485,16 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     // ---- llvm.sitofp / llvm.uitofp / llvm.fptosi / llvm.fptoui ------------
-    if (name_eq(name, "llvm.sitofp") || name_eq(name, "llvm.uitofp") ||
-        name_eq(name, "llvm.fptosi") || name_eq(name, "llvm.fptoui")) {
+    case OP_TYPE_LLVM_SITOFP: case OP_TYPE_LLVM_UITOFP: case OP_TYPE_LLVM_FPTOSI: case OP_TYPE_LLVM_FPTOUI: {
         if (MLIR_GetOpNumResults(op) != 1 ||
             MLIR_GetOpNumOperands(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         MLIR_ValueHandle s = MLIR_GetOpOperand(op, 0);
         uint8_t in_vt  = wasm_vt(F->ctx, MLIR_GetValueType(s));
         uint8_t out_vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
-        bool is_signed = name_eq(name, "llvm.sitofp") || name_eq(name, "llvm.fptosi");
+        bool is_signed = ty == OP_TYPE_LLVM_SITOFP || ty == OP_TYPE_LLVM_FPTOSI;
         uint8_t opc = 0;
-        if (name_eq(name, "llvm.sitofp") || name_eq(name, "llvm.uitofp")) {
+        if (ty == OP_TYPE_LLVM_SITOFP || ty == OP_TYPE_LLVM_UITOFP) {
             // f{32,64}.convert_i{32,64}_{s,u}
             if (out_vt == WT_F32 && in_vt == WT_I32) opc = is_signed ? 0xb2 : 0xb3;
             else if (out_vt == WT_F32 && in_vt == WT_I64) opc = is_signed ? 0xb4 : 0xb5;
@@ -1605,7 +1526,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     // ---- llvm.icmp ---------------------------------------------------------
     // Result is i1 (encoded as i32 in wasm). Operand valtype determines
     // the i32.* vs i64.* opcode family.
-    if (name_eq(name, "llvm.icmp")) {
+    case OP_TYPE_LLVM_ICMP: {
         if (MLIR_GetOpNumResults(op) != 1 ||
             MLIR_GetOpNumOperands(op) != 2) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
@@ -1649,8 +1570,8 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     // i8  -> i32 zext:     i32.and %v, 255 (wasm has no unsigned extend8)
     // i32 -> i8 trunc:     no-op on the i32 register (low byte preserved)
     // smaller-int trunc/zext within i32: no-op (wasm has no sub-i32 reg).
-    if (name_eq(name, "llvm.trunc") || name_eq(name, "llvm.zext")) {
-        bool is_zext = name_eq(name, "llvm.zext");
+    case OP_TYPE_LLVM_TRUNC: case OP_TYPE_LLVM_ZEXT: {
+        bool is_zext = ty == OP_TYPE_LLVM_ZEXT;
         if (MLIR_GetOpNumResults(op) != 1 ||
             MLIR_GetOpNumOperands(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
@@ -1695,7 +1616,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     // ---- llvm.return -------------------------------------------------------
-    if (name_eq(name, "llvm.return")) {
+    case OP_TYPE_LLVM_RETURN: {
         size_t no = MLIR_GetOpNumOperands(op);
         MLIR_ValueHandle retv = MLIR_INVALID_HANDLE;
         if (no == 1) {
@@ -1724,7 +1645,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     // ---- llvm.call (direct or indirect) ------------------------------------
-    if (name_eq(name, "llvm.call")) {
+    case OP_TYPE_LLVM_CALL: {
         MLIR_AttributeHandle callee = MLIR_GetOpAttributeByName(op, "callee");
         MLIR_AttributeHandle var_callee_type = MLIR_GetOpAttributeByName(op, "var_callee_type");
 
@@ -1924,7 +1845,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     // ---- llvm.getelementptr -----------------------------------------------
-    if (name_eq(name, "llvm.getelementptr")) {
+    case OP_TYPE_LLVM_GEP: {
         if (MLIR_GetOpNumResults(op) != 1) return false;
         if (MLIR_GetOpNumOperands(op) < 1) return false;
         MLIR_ValueHandle r    = MLIR_GetOpResult(op, 0);
@@ -2005,7 +1926,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     // Result is a pointer (i32) to a data global. We emit an ADDRESSOF op
     // that stage 3 will lower as `i32.const <padded sleb>` plus a
     // R_WASM_MEMORY_ADDR_SLEB reloc to the named global symbol.
-    if (name_eq(name, "llvm.mlir.addressof")) {
+    case OP_TYPE_LLVM_MLIR_ADDRESSOF: {
         if (MLIR_GetOpNumResults(op) != 1) return false;
         MLIR_AttributeHandle ta = find_attr(op, "global_name");
         if (ta == MLIR_INVALID_HANDLE)
@@ -2056,7 +1977,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     // Pointer / integer zero. f32/f64 zero would also fall through here but
     // currently only ptr/int paths are exercised (the float test uses a
     // typed llvm.mlir.constant for 0.0).
-    if (name_eq(name, "llvm.mlir.zero")) {
+    case OP_TYPE_LLVM_MLIR_ZERO: {
         if (MLIR_GetOpNumResults(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
@@ -2072,7 +1993,94 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     // ---- llvm.intr.vastart / llvm.intr.vaend -------------------------------
-    if (name_eq(name, "llvm.intr.vastart")) {
+    default: break;
+    }
+
+    // ---- llvm binary integer ops -------------------------------------------
+    // Mapped to a generic wasmssa.binop carrying the actual wasm bytecode
+    // byte. Op kind picks the row; valtype picks the column of the table.
+    {
+        // (op-type, i32-opcode, i64-opcode); 0 = unsupported
+        struct { MLIR_OpType ty; uint8_t i32op, i64op; } btab[] = {
+            { OP_TYPE_LLVM_ADD,  0x6a, 0x7c },
+            { OP_TYPE_LLVM_SUB,  0x6b, 0x7d },
+            { OP_TYPE_LLVM_MUL,  0x6c, 0x7e },
+            { OP_TYPE_LLVM_SDIV, 0x6d, 0x7f },
+            { OP_TYPE_LLVM_UDIV, 0x6e, 0x80 },
+            { OP_TYPE_LLVM_SREM, 0x6f, 0x81 },
+            { OP_TYPE_LLVM_UREM, 0x70, 0x82 },
+            { OP_TYPE_LLVM_AND,  0x71, 0x83 },
+            { OP_TYPE_LLVM_OR,   0x72, 0x84 },
+            { OP_TYPE_LLVM_XOR,  0x73, 0x85 },
+            { OP_TYPE_LLVM_SHL,  0x74, 0x86 },
+            { OP_TYPE_LLVM_ASHR, 0x75, 0x87 },
+            { OP_TYPE_LLVM_LSHR, 0x76, 0x88 },
+        };
+        for (size_t k = 0; k < sizeof(btab)/sizeof(btab[0]); k++) {
+            if (ty != btab[k].ty) continue;
+            if (MLIR_GetOpNumResults(op) != 1 ||
+                MLIR_GetOpNumOperands(op) != 2) return false;
+            MLIR_ValueHandle r  = MLIR_GetOpResult(op, 0);
+            MLIR_ValueHandle a  = MLIR_GetOpOperand(op, 0);
+            MLIR_ValueHandle b  = MLIR_GetOpOperand(op, 1);
+            uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
+            uint8_t opc = (vt == WT_I32) ? btab[k].i32op
+                        : (vt == WT_I64) ? btab[k].i64op : 0;
+            if (opc == 0) return false;
+            MLIR_ValueHandle ai, bi;
+            if (!vmap_get(F, a, &ai) || !vmap_get(F, b, &bi)) return false;
+            MLIR_ValueHandle ops[2] = { ai, bi };
+            wasmssa_op_t o = {0};
+            o.type = OP_TYPE_WASMSSA_BINOP;
+            o.valtype = vt;
+            o.wasm_opcode = opc;
+            o.n_operands = 2;
+            o.operands = ops;
+            o.has_result = true;
+            MLIR_ValueHandle idx = commit_op(F, &o);
+            vmap_set(F, r, idx);
+            return true;
+        }
+    }
+
+    // ---- llvm binary float ops ---------------------------------------------
+    {
+        struct { MLIR_OpType ty; uint8_t f32op, f64op; } ftab[] = {
+            { OP_TYPE_LLVM_FADD,  0x92, 0xa0 },
+            { OP_TYPE_LLVM_FSUB,  0x93, 0xa1 },
+            { OP_TYPE_LLVM_FMUL,  0x94, 0xa2 },
+            { OP_TYPE_LLVM_FDIV,  0x95, 0xa3 },
+        };
+        for (size_t k = 0; k < sizeof(ftab)/sizeof(ftab[0]); k++) {
+            if (ty != ftab[k].ty) continue;
+            if (MLIR_GetOpNumResults(op) != 1 ||
+                MLIR_GetOpNumOperands(op) != 2) return false;
+            MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
+            uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
+            uint8_t opc = (vt == WT_F32) ? ftab[k].f32op
+                        : (vt == WT_F64) ? ftab[k].f64op : 0;
+            if (opc == 0) return false;
+            MLIR_ValueHandle ai, bi;
+            if (!vmap_get(F, MLIR_GetOpOperand(op, 0), &ai)) return false;
+            if (!vmap_get(F, MLIR_GetOpOperand(op, 1), &bi)) return false;
+            MLIR_ValueHandle ops[2] = { ai, bi };
+            wasmssa_op_t o = {0};
+            o.type = OP_TYPE_WASMSSA_BINOP;
+            o.valtype = vt;
+            o.wasm_opcode = opc;
+            o.n_operands = 2;
+            o.operands = ops;
+            o.has_result = true;
+            MLIR_ValueHandle idx = commit_op(F, &o);
+            vmap_set(F, r, idx);
+            return true;
+        }
+    }
+
+    string name = MLIR_GetOpName(op);
+    MLIR_OpType nty = MLIR_GetOpType(op);
+
+    if (nty == OP_TYPE_LLVM_INTR_VASTART) {
         // Store the function's hidden va_list i32 param into *%ap.
         if (F->va_list_value == MLIR_INVALID_HANDLE) return false;
         if (MLIR_GetOpNumOperands(op) != 1) return false;
@@ -2090,11 +2098,11 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         (void)commit_op(F, &o);
         return true;
     }
-    if (name_eq(name, "llvm.intr.vaend")) {
+    if (nty == OP_TYPE_LLVM_INTR_VAEND) {
         // No-op under the wasm32 ABI.
         return true;
     }
-    if (name_eq(name, "llvm.intr.vacopy")) {
+    if (nty == OP_TYPE_LLVM_INTR_VACOPY) {
         // Copy 4 bytes (a char*) from src to dst.
         if (MLIR_GetOpNumOperands(op) != 2) return false;
         MLIR_ValueHandle da, sa;
@@ -2125,7 +2133,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     // ---- llvm.intr.sqrt ---------------------------------------------------
-    if (name_eq(name, "llvm.intr.sqrt")) {
+    if (nty == OP_TYPE_LLVM_INTR_SQRT) {
         if (MLIR_GetOpNumResults(op) != 1 ||
             MLIR_GetOpNumOperands(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
@@ -2151,7 +2159,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     // `__builtin_wasm_memory_size(0)` lowers to this. No operands (the
     // memory index byte is hard-coded to 0 in the binary encoder); the
     // single i32 result is the current memory size in 64KiB pages.
-    if (name_eq(name, "llvm.intr.wasm.memory.size")) {
+    if (nty == OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE) {
         if (MLIR_GetOpNumResults(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
@@ -2169,7 +2177,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     // ---- llvm.intr.wasm.memory.grow ---------------------------------------
     // `__builtin_wasm_memory_grow(0, n)` lowers to this. One i32 operand
     // (pages to grow by) and one i32 result (previous size in pages or -1).
-    if (name_eq(name, "llvm.intr.wasm.memory.grow")) {
+    if (nty == OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW) {
         if (MLIR_GetOpNumResults(op) != 1 ||
             MLIR_GetOpNumOperands(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
@@ -2247,9 +2255,10 @@ static bool va_call_layout(FnCtx *F, MLIR_OpHandle op, uint32_t *total_size,
 }
 
 static bool prewalk_op(FnCtx *F, MLIR_OpHandle op) {
-    string n = MLIR_GetOpName(op);
-    if (name_eq(n, "llvm.br") || name_eq(n, "llvm.cond_br") ||
-        name_eq(n, "llvm.switch")) {
+    MLIR_OpType ty = MLIR_GetOpType(op);
+    if (ty == OP_TYPE_LLVM_BR || ty == OP_TYPE_LLVM_COND_BR ||
+        ty == OP_TYPE_LLVM_SWITCH) {
+        string n = MLIR_GetOpName(op);
         // The structurization step could not lift this branch (see the
         // limitations listed in mlir_lift_cf_to_scf.h).
         fprintf(stderr,
@@ -2258,13 +2267,13 @@ static bool prewalk_op(FnCtx *F, MLIR_OpHandle op) {
                 (int)n.size, n.str);
         return false;
     }
-    if (name_eq(n, "llvm.call")) {
+    if (ty == OP_TYPE_LLVM_CALL) {
         uint32_t sz = 0; size_t nfixed = 0;
         if (va_call_layout(F, op, &sz, &nfixed, NULL)) {
             if (sz > F->va_buf_size) F->va_buf_size = sz;
         }
     }
-    if (name_eq(n, "llvm.alloca")) {
+    if (ty == OP_TYPE_LLVM_ALLOCA) {
         MLIR_TypeHandle et = MLIR_INVALID_HANDLE;
         MLIR_AttributeHandle ea = find_attr(op, "elem_type");
         if (ea != MLIR_INVALID_HANDLE) et = MLIR_GetAttributeTypeValue(ea);
@@ -2280,7 +2289,7 @@ static bool prewalk_op(FnCtx *F, MLIR_OpHandle op) {
             MLIR_ValueHandle co = MLIR_GetOpOperand(op, 0);
             MLIR_OpHandle    cd = MLIR_GetValueDefiningOp(co);
             if (cd == MLIR_INVALID_HANDLE) return false;
-            if (!name_eq(MLIR_GetOpName(cd), "llvm.mlir.constant")) {
+            if (MLIR_GetOpType(cd) != OP_TYPE_LLVM_MLIR_CONSTANT) {
                 fprintf(stderr,
                         "wasmssa-lower: dynamic alloca size not supported\n");
                 return false;
@@ -2601,8 +2610,8 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
             string pending_target = (string){0};
             for (size_t bi = 0; bi < nb; bi++) {
                 MLIR_OpHandle bop = MLIR_GetBlockOp(blk, bi);
-                string bn = MLIR_GetOpName(bop);
-                if (name_eq(bn, "llvm.mlir.addressof")) {
+                MLIR_OpType bty = MLIR_GetOpType(bop);
+                if (bty == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
                     MLIR_AttributeHandle ta = find_attr(bop, "global_name");
                     if (ta == MLIR_INVALID_HANDLE)
                         ta = find_attr(bop, "value");  // upstream attr name
@@ -2620,7 +2629,7 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
                     string ts = MLIR_GetAttributeString(ta);
                     if (ts.size && ts.str[0] == '@') { ts.str++; ts.size--; }
                     pending_target = ts;
-                } else if (name_eq(bn, "llvm.return")) {
+                } else if (bty == OP_TYPE_LLVM_RETURN) {
                     if (!pending_target.str) break;
                     size = 4;
                     if (align_pow == 0) align_pow = 2;
@@ -2672,12 +2681,12 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
                     bool saw_return = false;
                     for (size_t bi = 0; bi < nb && ok; bi++) {
                         MLIR_OpHandle bop = MLIR_GetBlockOp(blk, bi);
-                        string bn = MLIR_GetOpName(bop);
-                        if (name_eq(bn, "llvm.mlir.undef") ||
-                            name_eq(bn, "llvm.mlir.zero") ||
-                            name_eq(bn, "llvm.mlir.poison")) {
+                        MLIR_OpType bty = MLIR_GetOpType(bop);
+                        if (bty == OP_TYPE_LLVM_MLIR_UNDEF ||
+                            bty == OP_TYPE_LLVM_MLIR_ZERO ||
+                            bty == OP_TYPE_LLVM_MLIR_POISON) {
                             saw_undef_or_zero = true;
-                        } else if (name_eq(bn, "llvm.mlir.constant")) {
+                        } else if (bty == OP_TYPE_LLVM_MLIR_CONSTANT) {
                             MLIR_AttributeHandle ca = find_attr(bop, "value");
                             if (ca == MLIR_INVALID_HANDLE) { ok = false; break; }
                             MLIR_AttrKind ck = MLIR_GetAttributeKind(ca);
@@ -2698,7 +2707,7 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
                                 cs[ncs].bits = bits;
                                 ncs++;
                             }
-                        } else if (name_eq(bn, "llvm.insertvalue")) {
+                        } else if (bty == OP_TYPE_LLVM_INSERTVALUE) {
                             if (MLIR_GetOpNumOperands(bop) < 2) { ok = false; break; }
                             // Position attr — printed as "array<i64: N, ...>".
                             MLIR_AttributeHandle pa = find_attr(bop, "position");
@@ -2739,7 +2748,7 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
                                 cs[ncs].bits = 0;  // not a scalar
                                 ncs++;
                             }
-                        } else if (name_eq(bn, "llvm.return")) {
+                        } else if (bty == OP_TYPE_LLVM_RETURN) {
                             saw_return = true;
                             break;
                         }
@@ -2966,7 +2975,7 @@ MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module) {
     // low function-index space in wasm.
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        if (!name_eq(MLIR_GetOpName(op), "llvm.func")) continue;
+        if (MLIR_GetOpType(op) != OP_TYPE_LLVM_FUNC) continue;
         bool has_body = MLIR_GetOpNumRegions(op) > 0 &&
                         MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(op, 0)) > 0;
         if (has_body) continue;
@@ -2996,7 +3005,7 @@ MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module) {
     // in `body`; refs between earlier defs therefore work naturally.
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        if (!name_eq(MLIR_GetOpName(op), "llvm.func")) continue;
+        if (MLIR_GetOpType(op) != OP_TYPE_LLVM_FUNC) continue;
         bool has_body = MLIR_GetOpNumRegions(op) > 0 &&
                         MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(op, 0)) > 0;
         if (!has_body) continue;
@@ -3019,7 +3028,7 @@ MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module) {
     // funcs-before-globals in the previously buffered module).
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        if (!name_eq(MLIR_GetOpName(op), "llvm.mlir.global")) continue;
+        if (MLIR_GetOpType(op) != OP_TYPE_LLVM_MLIR_GLOBAL) continue;
         if (!lower_global(ctx, arena, body, op)) {
             fprintf(stderr, "wasmssa-lower: failed to lower global\n");
             return MLIR_INVALID_HANDLE;
