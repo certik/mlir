@@ -1,0 +1,30 @@
+extern int printf(const char *fmt, ...);
+typedef signed char nic_i8;
+typedef unsigned char nic_u8;
+typedef short nic_i16;
+typedef unsigned short nic_u16;
+// Casts to char / short types keep the low 8 / 16 bits and re-extend them
+// by the target type's signedness; a cast to bool yields 0 or 1 (#248).
+int main() {
+    int x = 300;
+    int y = (unsigned char)x;
+    int z = (signed char)200;
+    printf("%d %d\n", y, z);
+    int big = 0x12345680;
+    long long wide = 0x7FFFFFFFFFFF80FFLL;
+    printf("%d %d %d %d\n", (char)big, (unsigned char)big, (short)big, (unsigned short)big);
+    printf("%d %d %d %d\n", (nic_i8)wide, (nic_u8)wide, (nic_i16)wide, (nic_u16)wide);
+    printf("%d %d %d\n", (short)40000, (unsigned short)-1, (unsigned char)-1);
+    // The narrowed value widens by the cast type, not the source.
+    unsigned long long u = (unsigned long long)(unsigned char)-16;
+    long long s = (long long)(signed char)240;
+    printf("%llu %lld\n", u, s);
+    // A narrowed value in arithmetic and comparisons.
+    int sum = (unsigned char)250 + (unsigned char)10;
+    printf("%d %d %d\n", sum, (unsigned char)x == 44, (signed char)x < 0);
+    // A char / short cast result is promoted to (signed) int.
+    printf("%d %d %d\n", ((unsigned char)x - 300) < 0, ((unsigned char)x - 300) / 2,
+           ((unsigned short)x - 70000) / 2);
+    printf("%d %d %d %d\n", (bool)256, (bool)0, (bool)-1, (_Bool)0x100000000LL);
+    return 0;
+}

@@ -1552,3 +1552,11 @@ expected_compile_error = "cannot find include file <tinyc_no_such_header.h>"
 name = "pp_error_directive"
 targets = ["native", "wasm", "macho", "elf"]
 expected_compile_error = "tinyc_pp_error_directive_fired"
+
+[[test]]
+name = "narrow_int_cast"
+targets = ["native", "wasm", "macho", "elf"]
+# Casts to char / short types truncate to 8 / 16 bits and re-extend by the
+# target's signedness, and the result is promoted to int; a cast to bool
+# yields 0 or 1 (#248).
+expected_stdout = "44 -56\n-128 128 22144 22144\n-1 255 -32513 33023\n-25536 65535 255\n240 -16\n260 1 0\n1 -128 -34850\n1 0 1 1\n"

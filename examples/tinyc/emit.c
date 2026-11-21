@@ -452,6 +452,21 @@ static MLIR_ValueHandle emit_binop(E *e, MLIR_OpType type, string name,
     return r;
 }
 
+// Truncate the i32 value `v` to its low `bits` (8 or 16) bits and extend it
+// back to i32: zero-extend (andi) for an unsigned type, sign-extend
+// (shli + shrsi) otherwise. Narrow integer types are i32 values in tinyc.
+static MLIR_ValueHandle emit_narrow_i32(E *e, MLIR_ValueHandle v, int bits,
+                                        bool is_unsigned) {
+    if (is_unsigned) {
+        return emit_binop(e, OP_TYPE_ARITH_ANDI, str_lit("arith.andi"), e->i32,
+                          v, emit_const_i32(e, (1 << bits) - 1));
+    }
+    MLIR_ValueHandle sh = emit_const_i32(e, 32 - bits);
+    MLIR_ValueHandle hi = emit_binop(e, OP_TYPE_ARITH_SHLI, str_lit("arith.shli"),
+                                     e->i32, v, sh);
+    return emit_binop(e, OP_TYPE_ARITH_SHRSI, str_lit("arith.shrsi"), e->i32, hi, sh);
+}
+
 static MLIR_ValueHandle emit_cmpi(E *e, int64_t predicate,
                                   MLIR_ValueHandle a, MLIR_ValueHandle b) {
     MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
@@ -2656,8 +2671,15 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             bool ck_is_ptr = (ck == TY_PTR_VOID || ck == TY_PTR_I32 ||
                               ck == TY_PTR_CHAR || ck == TY_PTR_STRUCT ||
                               ck == TY_FNPTR || ck == TY_PTR_PTR);
+            // A cast to bool yields 0 or 1 (from an integer, float or
+            // pointer operand).
+            if (!ck_is_ptr && ex->cast_type.is_bool) {
+                r.val = bool_to_i32(e, emit_to_bool_i1(e, v));
+                return r;
+            }
             // Integer-to-integer cast: convert between i32 and i64; everything
-            // else is treated as i32 (TY_I8/TY_I16 etc. fold to i32 here).
+            // else is treated as i32 (narrow types are i32 values, truncated
+            // and re-extended to their width below).
             if (!ck_is_ptr && !v.is_ptr) {
                 // float-target casts (from int or float).
                 if (ck == TY_F64) {
@@ -2699,10 +2721,17 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     v.val = emit_trunci_i64_to_i32(e, v.val);
                     v.is_i64 = false;
                 }
+                // char / short: keep the low 8 / 16 bits, zero- or
+                // sign-extended by the target's signedness.
+                int nb = ex->cast_type.int_bits;
+                if (!want_i64 && (nb == 8 || nb == 16)) {
+                    v.val = emit_narrow_i32(e, v.val, nb, ex->cast_type.int_unsigned);
+                }
                 // A cast to an unsigned integer type yields an unsigned
                 // value: subsequent comparisons / div / shr must use the
-                // unsigned form (e.g. `(unsigned long)x >= CONST`).
-                v.is_unsigned = ex->cast_type.int_unsigned;
+                // unsigned form (e.g. `(unsigned long)x >= CONST`). A char /
+                // short result is promoted to (signed) int.
+                v.is_unsigned = ex->cast_type.int_unsigned && nb != 8 && nb != 16;
                 return v;
             }
             // Pointer-to-integer cast: emit llvm.ptrtoint, then optionally
