@@ -441,7 +441,7 @@ targets = ["native", "wasm", "macho", "elf"]
 # sizeof is a size_t (#293), `?:` and binary operators apply the usual
 # arithmetic conversions (#295), and _Generic matches a plain int local and
 # `x + 1` as int (#288). Expected output from clang.
-expected_stdout = "1 0 1\n0 0 1\n-8 -4\n8 8 4 4\n1\n1 1 4\n2 2 2 5 2\n5 3 6 2 1 7 8 5\n5 6 7 8 5 5\n6 7 5 5 5\n4 7 5000000000\n1 1 1 6\n1 1 1 254\n254\n"
+expected_stdout = "1 0 1\n0 0 1\n-8 -4\n8 8 4 4\n1\n1 1 4\n2 2 2 5 2\n5 3 6 2 1 7 8 5\n5 6 7 8 5 5\n6 7 5 5 5\n4 7 5000000000\n1 1 1 6\n1 1 1 254\n254\n0 1 2 0 0\n254 254 1 1\n"
 
 [[test]]
 name = "compound_literal"

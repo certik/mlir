@@ -9,8 +9,11 @@ extern int printf(const char *fmt, ...);
 // - _Generic matches integer types by width and signedness, and a plain
 //   `int` local (whose type carries no explicit width) is an int, not the
 //   first integer association (#288); `*s` has the pointee's type;
-// - `z ? 0 : p` and `z ? arr : p` are pointers, and `ip + 1` on an array
-//   of pointers is a pointer to the element pointer type.
+// - `z ? 0 : p`, `z ? NULL : p`, `z ? (void *)0 : p` and `z ? arr : p`
+//   are pointers, and `ip + 1` on an array of pointers is a pointer to the
+//   element pointer type;
+// - a `sizeof` in an unevaluated `?:` arm still makes the result a size_t
+//   when folded (enumerator, global array bound) as when emitted.
 
 typedef signed char i8;
 #define T(e) _Generic((e), int8_t: 1, uint8_t: 2, int16_t: 3, uint16_t: 4, \
@@ -21,6 +24,8 @@ int ga[3] = {7, 8, 9};
 int *ip[2];
 long long *lp[2];
 long long lls[4];
+enum { EU = (1 ? -1 : sizeof(int)) < 0, EV = (0 ? sizeof(int) : -1) > 0 };
+char gsz[(1 ? -1 : sizeof ga) < 0 ? 1 : 2];
 int f(int p) { return _Generic(p, i8: 1, int: 2, default: 3); }
 
 int main() {
@@ -59,5 +64,12 @@ int main() {
     printf("%d %d %d %d\n", sizeof(z ? ga : &ga[1]) == sizeof(int *), sizeof(z ? 0 : ubp) == sizeof(int *),
            sizeof(z ? uvp : 0) == sizeof(int *), *((z ? 0 : ubp) + 1));
     printf("%d\n", (z ? 0 : ubp)[1]);
+    int one = 1;
+    printf("%d %d %d %d %d\n", EU, EV, (int)sizeof gsz, (1 ? -1 : sizeof(int)) < 0,
+           (one ? -1 : sizeof(int)) < 0);
+    long *lptr = (long *)malloc(2 * sizeof(long)); char *cp = str;
+    printf("%d %d %d %d\n", *(z ? NULL : ubp + 1), (z ? (void *)0 : ubp)[1],
+           sizeof(*(z ? NULL : lptr)) == sizeof(long),
+           _Generic(one ? (void *)0 : cp, char *: 1, void *: 2, default: 0));
     return 0;
 }
