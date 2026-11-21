@@ -447,6 +447,8 @@ typedef enum {
     OP_TYPE_AARCH64_STR_X_REG,  // str  Xt, [Xn, Xm, LSL #0]
     OP_TYPE_AARCH64_LDRB_REG,   // ldrb Wt, [Xn, Xm, LSL #0]
     OP_TYPE_AARCH64_STRB_REG,   // strb Wt, [Xn, Xm, LSL #0]
+    OP_TYPE_AARCH64_STRH_IMM,   // strh Wt, [Xn, #imm] (2-byte, imm scaled by 2)
+    OP_TYPE_AARCH64_LDRH_IMM,   // ldrh Wt, [Xn, #imm] (2-byte zero-extend)
     // Pseudo: ADRP+ADD pair that resolves to the runtime base address
     // of one of the predeclared __DATA regions (vmctx, globals, linmem).
     // The macho backend patches the encoded PC-relative immediates

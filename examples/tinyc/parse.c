@@ -97,6 +97,13 @@ int64_t tinyc_narrow_const(int64_t v, Type t) {
     return v;
 }
 
+int tinyc_int_size(const Type *t) {
+    if (t->kind == TY_I64 || (t->kind == TY_ARRAY_I32 && t->array_elem_is_i64)) return 8;
+    if (t->int_bits == 8)  return 1;
+    if (t->int_bits == 16) return 2;
+    return 4;
+}
+
 // Negate an integer-literal token in its own C type: a 32-bit unsigned
 // literal wraps modulo 2^32, so `-1u` is 4294967295 and `-0xFFFFFFFF` is 1.
 static int64_t neg_int_lit(P *p, TcTok t) {
@@ -515,9 +522,10 @@ static Expr *parse_primary(P *p) {
         Expr *e = new_expr(p, EX_NULL, t.line);
         return e;
     }
-    if (t.kind == TC_TK_KW_SIZEOF) {
+    if (t.kind == TC_TK_KW_SIZEOF || t.kind == TC_TK_KW_ALIGNOF) {
         p->i++;
         Expr *e = new_expr(p, EX_SIZEOF, t.line);
+        e->is_alignof = t.kind == TC_TK_KW_ALIGNOF;
         // C also accepts `sizeof <unary-expression>` (no parens). In that
         // form the operand is always an expression, never a type-name.
         if (cur(p).kind != TC_TK_LPAREN) {
@@ -1088,6 +1096,33 @@ static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char,
     return false;
 }
 
+// True for the pointer type kinds (an element of an array of pointers).
+static bool kind_is_ptr(TypeKind k) {
+    return k == TY_PTR_I32 || k == TY_PTR_CHAR || k == TY_PTR_STRUCT ||
+           k == TY_PTR_VOID || k == TY_PTR_PTR || k == TY_FNPTR;
+}
+
+// Turn the pointer type `*t` (T *) into an array of N such pointers. Every
+// array of pointers is built here: TY_ARRAY_PTR_STRUCT for struct pointers
+// (with struct_name), else TY_ARRAY_PTR_CHAR; every element is an 8-byte
+// !llvm.ptr, and `pointee` keeps T * so that `arr[i][j]`, `*arr[i]`,
+// `**(arr + k)` and `arr[i] + k` step over and load T. A `char *` element
+// also keeps its char width / signedness in the array type itself.
+static void make_ptr_array(P *p, Type *t, int64_t alen, Expr *aexpr) {
+    Type *elem = arena_new(p->arena, Type);
+    *elem = *t;
+    *t = (Type){0};
+    t->kind = elem->kind == TY_PTR_STRUCT ? TY_ARRAY_PTR_STRUCT : TY_ARRAY_PTR_CHAR;
+    if (elem->kind == TY_PTR_STRUCT) t->struct_name = elem->struct_name;
+    if (elem->kind == TY_PTR_CHAR) {
+        t->int_bits = elem->int_bits;
+        t->int_unsigned = elem->int_unsigned;
+    }
+    t->pointee = elem;
+    t->array_len = alen;
+    t->array_len_expr = aexpr;
+}
+
 static bool parse_base_type(P *p, TypeKind *out) {
     bool dummy = false;
     bool dummy_is_long = false;
@@ -1240,37 +1275,16 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 s->decl_type.kind = TY_ARRAY_STRUCT;
                 s->decl_type.array_len = alen;
                 s->decl_type.array_len_expr = aexpr;
-            } else if (s->decl_type.kind == TY_PTR_I32 ||
-                       s->decl_type.kind == TY_PTR_CHAR ||
-                       s->decl_type.kind == TY_PTR_VOID ||
-                       s->decl_type.kind == TY_PTR_STRUCT) {
-                // T *arr[N] (typedef'd): collapse to TY_ARRAY_PTR_CHAR
-                // since every pointer type stores as the same 8-byte
-                // !llvm.ptr regardless of element kind. The element
-                // type info is intentionally erased here; downstream
-                // uses (loads, stores, passing the array name as a
-                // function argument) all operate on the raw pointer.
-                // A `char *` element keeps its char width / signedness
-                // (for `*arr[i]` through `unsigned char *`).
-                Type elem = s->decl_type;
-                s->decl_type = (Type){0};
-                s->decl_type.kind = TY_ARRAY_PTR_CHAR;
-                if (elem.kind == TY_PTR_CHAR) {
-                    s->decl_type.int_bits = elem.int_bits;
-                    s->decl_type.int_unsigned = elem.int_unsigned;
-                }
-                s->decl_type.array_len = alen;
-                s->decl_type.array_len_expr = aexpr;
+            } else if (kind_is_ptr(s->decl_type.kind)) {
+                // T *arr[N] (typedef'd): an array of pointers.
+                make_ptr_array(p, &s->decl_type, alen, aexpr);
             } else {
                 bool is_i64 = (s->decl_type.kind == TY_I64);
-                bool is_i8  = (s->decl_type.kind == TY_I32 &&
-                               s->decl_type.int_bits == 8);
                 if (s->decl_type.kind != TY_I32 && s->decl_type.kind != TY_I64) {
                     perror_at(p, line, str_lit("only int[N] / long long[N] arrays are supported"));
                 }
                 s->decl_type.kind = TY_ARRAY_I32;
                 s->decl_type.array_elem_is_i64 = is_i64;
-                s->decl_type.array_elem_is_i8  = is_i8;
                 s->decl_type.array_len = alen;
                 s->decl_type.array_len_expr = aexpr;
                 if (accept(p, TC_TK_LBRACK)) {
@@ -1312,24 +1326,15 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                         ds->decl_type.kind = TY_ARRAY_STRUCT;
                         ds->decl_type.array_len = alen;
                         ds->decl_type.array_len_expr = aexpr;
-                    } else if (ds->decl_type.kind == TY_PTR_I32 ||
-                               ds->decl_type.kind == TY_PTR_CHAR ||
-                               ds->decl_type.kind == TY_PTR_VOID ||
-                               ds->decl_type.kind == TY_PTR_STRUCT) {
-                        ds->decl_type = (Type){0};
-                        ds->decl_type.kind = TY_ARRAY_PTR_CHAR;
-                        ds->decl_type.array_len = alen;
-                        ds->decl_type.array_len_expr = aexpr;
+                    } else if (kind_is_ptr(ds->decl_type.kind)) {
+                        make_ptr_array(p, &ds->decl_type, alen, aexpr);
                     } else {
                         bool is_i64 = (ds->decl_type.kind == TY_I64);
-                        bool is_i8  = (ds->decl_type.kind == TY_I32 &&
-                                       ds->decl_type.int_bits == 8);
                         if (ds->decl_type.kind != TY_I32 && ds->decl_type.kind != TY_I64) {
                             perror_at(p, line, str_lit("only int[N] / long long[N] arrays are supported"));
                         }
                         ds->decl_type.kind = TY_ARRAY_I32;
                         ds->decl_type.array_elem_is_i64 = is_i64;
-                        ds->decl_type.array_elem_is_i8  = is_i8;
                         ds->decl_type.array_len = alen;
                         ds->decl_type.array_len_expr = aexpr;
                         if (accept(p, TC_TK_LBRACK)) {
@@ -1410,14 +1415,20 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         s->decl_name = name.text;
         s->decl_type.struct_name = sn.text;
         if (accept(p, TC_TK_LBRACK)) {
-            if (is_ptr) {
-                perror_at(p, line, str_lit("array of struct pointer is not supported"));
+            if (is_ptr_ptr) {
+                perror_at(p, line, str_lit("array of struct ** is not supported"));
             }
             int64_t alen = 0; Expr *aexpr = NULL;
             parse_array_len_bracket(p, &alen, &aexpr);
-            s->decl_type.kind = TY_ARRAY_STRUCT;
-            s->decl_type.array_len = alen;
-            s->decl_type.array_len_expr = aexpr;
+            if (is_ptr) {
+                // `struct S *name[N]`: an array of struct pointers.
+                s->decl_type.kind = TY_PTR_STRUCT;
+                make_ptr_array(p, &s->decl_type, alen, aexpr);
+            } else {
+                s->decl_type.kind = TY_ARRAY_STRUCT;
+                s->decl_type.array_len = alen;
+                s->decl_type.array_len_expr = aexpr;
+            }
         } else if (is_ptr_ptr) {
             // struct Foo **var: TY_PTR_PTR(pointee=TY_PTR_STRUCT).
             Type *inner = arena_new(p->arena, Type);
@@ -1434,7 +1445,8 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             if (s->decl_type.kind != TY_PTR_STRUCT &&
                 s->decl_type.kind != TY_PTR_PTR &&
                 s->decl_type.kind != TY_STRUCT &&
-                s->decl_type.kind != TY_ARRAY_STRUCT) {
+                s->decl_type.kind != TY_ARRAY_STRUCT &&
+                s->decl_type.kind != TY_ARRAY_PTR_STRUCT) {
                 perror_at(p, line, str_lit("struct/array initializers are not supported"));
             }
             { Expr *agg = parse_aggregate_init(p, s->decl_type); s->decl_init = agg ? agg : parse_expr(p); }
@@ -1468,7 +1480,8 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     if (cur(p).kind == TC_TK_LPAREN && peek(p, 1).kind == TC_TK_STAR) {
         Stmt *s = new_stmt(p, ST_DECL, line);
         s->decl_type.kind = base;
-        if (is_long) s->decl_type.int_bits = 64;
+        s->decl_type.int_bits = int_bits;       // the return type's width
+        s->decl_type.is_bool = is_bool;
         s->decl_type.int_unsigned = is_unsigned;
         string nm = (string){0};
         try_parse_fnptr_suffix(p, &s->decl_type, &nm);
@@ -1500,7 +1513,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     // `unsigned char *` — see load_lvalue in emit.c). Setting it on
     // pointer decls preserves the `unsigned char *p;` distinction.
     s->decl_type.int_unsigned = is_unsigned;
-    // char / short / bool width (array storage is still decided by was_char).
+    // char / short / bool width; it also selects the 1- / 2-byte storage.
     s->decl_type.int_bits = int_bits;
     s->decl_type.is_bool = is_bool;
     if (is_ptr) {
@@ -1532,23 +1545,23 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         perror_at(p, line, str_lit("'void' is not a valid variable type (did you mean 'void*'?)"));
     }
     if (accept(p, TC_TK_LBRACK)) {
-        if ((base != TY_I32 && !was_char) || is_ptr_ptr) perror_at(p, line, str_lit("only int[N]/char[N]/char*[N] arrays are supported"));
-        bool is_char_ptr_arr = (was_char && is_ptr);
+        if ((base != TY_I32 && !was_char && !is_ptr) || is_ptr_ptr) perror_at(p, line, str_lit("only int[N]/char[N]/T*[N] arrays are supported"));
         int64_t alen = 0; Expr *aexpr = NULL;
         parse_array_len_bracket(p, &alen, &aexpr);
-        if (is_char_ptr_arr) {
-            s->decl_type.kind = TY_ARRAY_PTR_CHAR;
+        if (is_ptr) {
+            // `T *name[N]`: an array of pointers.
+            make_ptr_array(p, &s->decl_type, alen, aexpr);
         } else {
             s->decl_type.kind = TY_ARRAY_I32;
-            if (was_char) s->decl_type.array_elem_is_i8 = true;
+            s->decl_type.array_len = alen;
+            s->decl_type.array_len_expr = aexpr;
         }
-        s->decl_type.array_len = alen;
-        s->decl_type.array_len_expr = aexpr;
         if (accept(p, TC_TK_LBRACK)) {
             int64_t alen2 = 0; Expr *aexpr2 = NULL;
             parse_array_len_bracket(p, &alen2, &aexpr2);
             s->decl_type.array_len2 = alen2;
             if (aexpr2) perror_at(p, line, str_lit("2D array second dim must be a literal"));
+            if (is_ptr) perror_at(p, line, str_lit("2D arrays of pointers are not supported"));
         }
     }
     if (accept(p, TC_TK_ASSIGN)) {
@@ -1557,7 +1570,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         // literal (size includes the trailing NUL set by the lexer).
         if (s->decl_init && s->decl_init->kind == EX_STR &&
             s->decl_type.kind == TY_ARRAY_I32 &&
-            s->decl_type.array_elem_is_i8 &&
+            s->decl_type.int_bits == 8 &&
             s->decl_type.array_len == 0) {
             s->decl_type.array_len = (int64_t)s->decl_init->name.size;
         }
@@ -1600,20 +1613,23 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 }
             }
             if (accept(p, TC_TK_LBRACK)) {
-                if ((base != TY_I32 && !was_char) || dis_pp) perror_at(p, dname.line, str_lit("only int[N]/char[N]/char*[N] arrays are supported"));
-                bool dis_char_ptr_arr = (was_char && dis_ptr);
+                if ((base != TY_I32 && !was_char && !dis_ptr) || dis_pp) perror_at(p, dname.line, str_lit("only int[N]/char[N]/T*[N] arrays are supported"));
                 int64_t alen = 0; Expr *aexpr = NULL;
                 parse_array_len_bracket(p, &alen, &aexpr);
-                ds->decl_type.kind = dis_char_ptr_arr ? TY_ARRAY_PTR_CHAR : TY_ARRAY_I32;
-                ds->decl_type.array_len = alen;
-                ds->decl_type.array_len_expr = aexpr;
+                if (dis_ptr) {
+                    make_ptr_array(p, &ds->decl_type, alen, aexpr);
+                } else {
+                    ds->decl_type.kind = TY_ARRAY_I32;
+                    ds->decl_type.array_len = alen;
+                    ds->decl_type.array_len_expr = aexpr;
+                }
             }
             if (accept(p, TC_TK_ASSIGN)) {
                 Expr *agg = parse_aggregate_init(p, ds->decl_type);
                 ds->decl_init = agg ? agg : parse_expr(p);
                 if (ds->decl_init && ds->decl_init->kind == EX_STR &&
                     ds->decl_type.kind == TY_ARRAY_I32 &&
-                    ds->decl_type.array_elem_is_i8 &&
+                    ds->decl_type.int_bits == 8 &&
                     ds->decl_type.array_len == 0) {
                     ds->decl_type.array_len = (int64_t)ds->decl_init->name.size;
                 }
@@ -2156,16 +2172,14 @@ static bool parse_abstract_type(P *p, Type *out) {
         p->i++;  // '['
         int64_t alen = 0; Expr *aexpr = NULL;
         parse_array_len_bracket(p, &alen, &aexpr);
-        if (out->kind == TY_STRUCT) {
+        if (kind_is_ptr(out->kind)) {
+            make_ptr_array(p, out, alen, aexpr);    // `T *[N]`
+        } else if (out->kind == TY_STRUCT) {
             out->kind = TY_ARRAY_STRUCT;
-        } else if (out->kind == TY_PTR_CHAR) {
-            out->kind = TY_ARRAY_PTR_CHAR;
         } else {
             bool is_i64 = (out->kind == TY_I64);
-            bool is_i8  = (out->kind == TY_I32 && out->int_bits == 8);
             out->kind = TY_ARRAY_I32;
             out->array_elem_is_i64 = is_i64;
-            out->array_elem_is_i8  = is_i8;
         }
         out->array_len = alen;
         out->array_len_expr = aexpr;
@@ -2243,6 +2257,7 @@ static Func *parse_func(P *p) {
                 // promote the base type to the corresponding pointer kind.
                 // Multi-dimensional `T name[N1][N2]` is treated as a flat
                 // pointer (we don't carry the inner array shape).
+                bool decayed = false;
                 while (accept(p, TC_TK_LBRACK)) {
                     while (cur(p).kind != TC_TK_RBRACK &&
                            cur(p).kind != TC_TK_EOF) {
@@ -2250,7 +2265,13 @@ static Func *parse_func(P *p) {
                     }
                     expect(p, TC_TK_RBRACK,
                            str_lit("expected ']' in parameter array suffix"));
-                    if (pty.kind == TY_I32 && pty.int_bits == 8) {
+                    bool first = !decayed;
+                    decayed = true;
+                    if (first && kind_is_ptr(pty.kind) && pty.kind != TY_PTR_PTR) {
+                        // `T *name[N]` / `T *name[]`: a T ** whose pointee
+                        // keeps T * (for `name[i][j]`).
+                        wrap_ptr_to_ptr(p, &pty);
+                    } else if (pty.kind == TY_I32 && pty.int_bits == 8) {
                         pty.kind = TY_PTR_CHAR;
                         pty.int_bits = 0;
                     } else if (pty.kind == TY_I32) {
@@ -2267,10 +2288,9 @@ static Func *parse_func(P *p) {
                     } else if (pty.kind == TY_STRUCT) {
                         pty.kind = TY_PTR_STRUCT;
                     }
-                    // For pointer / array / fnptr base types: leave the type
-                    // as-is (we'd need TY_PTR_PTR or a richer model to
-                    // represent `char *argv[]`); but consuming the suffix
-                    // at least lets the parser keep going.
+                    // A T ** base (`T **name[N]`, a T ***) is left as-is: not
+                    // supported, but consuming the suffix lets the parser
+                    // keep going.
                 }
             }
             VecParam_push_back(p->arena, &f->params,
@@ -2328,10 +2348,6 @@ static StructDef *parse_struct_def(P *p) {
         bool is_ptr = false;
         bool was_char = false;
         bool was_float = false;
-        // Keyword-declared char/short field: int_bits is set for the value's
-        // width, but must not switch an array field to i8 storage (that
-        // layout change belongs to #251).
-        bool kw_int_bits = false;
         if ((cur(p).kind == TC_TK_KW_STRUCT || cur(p).kind == TC_TK_KW_UNION) &&
             (peek(p, 1).kind == TC_TK_LBRACE ||
              (peek(p, 1).kind == TC_TK_IDENT && peek(p, 2).kind == TC_TK_LBRACE))) {
@@ -2447,7 +2463,7 @@ static StructDef *parse_struct_def(P *p) {
             }
             ft.kind = k;
             if (field_is_long) ft.int_bits = 64;
-            else { ft.int_bits = field_int_bits; kw_int_bits = true; }
+            else ft.int_bits = field_int_bits;
             ft.int_unsigned = field_is_unsigned;
             ft.is_bool = field_is_bool;
             // Optional pointer suffix on base types: `T *` (single) or
@@ -2525,35 +2541,24 @@ static StructDef *parse_struct_def(P *p) {
                     n2 = lit2.int_value;
                 }
                 // Map (element-type, dim) -> array TypeKind.
-                if (is_struct_kind) {
-                    if (!is_ptr) {
-                        perror_at(p, cur(p).line, str_lit("array of nested struct value is not supported as a field"));
-                    } else if (n2 != 0) {
-                        perror_at(p, cur(p).line, str_lit("only 1D arrays of struct pointers are supported"));
-                    } else {
-                        ft.kind = TY_ARRAY_PTR_STRUCT;
-                        ft.array_len = n1;
-                    }
-                } else if (was_char && is_ptr) {
+                if (is_struct_kind && !is_ptr) {
+                    perror_at(p, cur(p).line, str_lit("array of nested struct value is not supported as a field"));
+                } else if (kind_is_ptr(ft.kind)) {
+                    // `T *f[N]`, also with a typedef'd pointer type T *.
                     if (n2 != 0) {
-                        perror_at(p, cur(p).line, str_lit("only 1D arrays of char* are supported"));
+                        perror_at(p, cur(p).line, str_lit("only 1D arrays of pointers are supported as a field"));
                     }
-                    ft.kind = TY_ARRAY_PTR_CHAR;
-                    ft.array_len = n1;
-                } else if (is_ptr) {
-                    perror_at(p, cur(p).line, str_lit("array of int* is not supported as a field"));
+                    make_ptr_array(p, &ft, n1, NULL);
                 } else if (was_float) {
                     ft.kind = TY_ARRAY_F32;
                     ft.array_len = n1;
                     ft.array_len2 = n2;
                 } else {
                     bool is_i64 = (ft.kind == TY_I64);
-                    bool is_i8  = (ft.kind == TY_I32 && ft.int_bits == 8 && !kw_int_bits);
                     ft.kind = TY_ARRAY_I32;
                     ft.array_len = n1;
                     ft.array_len2 = n2;
                     ft.array_elem_is_i64 = is_i64;
-                    ft.array_elem_is_i8  = is_i8;
                 }
             }
             VecStructField_push_back(p->arena, &sd->fields,
@@ -2803,9 +2808,7 @@ static void parse_typedef_decl(P *p) {
         expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
         expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
         if (ty.kind == TY_I32) {
-            bool is_i8 = (ty.int_bits == 8);
             ty.kind = TY_ARRAY_I32;
-            ty.array_elem_is_i8 = is_i8;
             ty.array_len = lit.int_value;
         } else {
             perror_at(p, line, str_lit("typedef array only supported for int"));
@@ -3043,20 +3046,12 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                         parse_array_len_bracket(&p, &alen, &aexpr);
                         if (g.type.kind == TY_STRUCT) {
                             g.type.kind = TY_ARRAY_STRUCT;
-                        } else if (g.type.kind == TY_PTR_CHAR) {
-                            g.type.kind = TY_ARRAY_PTR_CHAR;
-                        } else if (g.type.kind == TY_PTR_STRUCT ||
-                                   g.type.kind == TY_PTR_VOID ||
-                                   g.type.kind == TY_FNPTR ||
-                                   g.type.kind == TY_PTR_PTR ||
-                                   g.type.kind == TY_PTR_I32) {
-                            g.type.kind = TY_ARRAY_PTR_STRUCT;
+                        } else if (kind_is_ptr(g.type.kind)) {
+                            make_ptr_array(&p, &g.type, alen, aexpr);
                         } else if (g.type.kind == TY_I32 || g.type.kind == TY_I64) {
                             bool is_i64 = (g.type.kind == TY_I64);
-                            bool is_i8  = (g.type.kind == TY_I32 && g.type.int_bits == 8);
                             g.type.kind = TY_ARRAY_I32;
                             g.type.array_elem_is_i64 = is_i64;
-                            g.type.array_elem_is_i8  = is_i8;
                         } else {
                             perror_at(&p, nm.line,
                                 str_lit("unsupported global array element type"));
@@ -3078,11 +3073,8 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                             // through to the existing zero-init path.
                             p.i++;
                             size_t elem_size = 4;
-                            if (g.type.kind == TY_ARRAY_I32) {
-                                elem_size = g.type.array_elem_is_i64 ? 8
-                                          : g.type.array_elem_is_i8  ? 1
-                                          : 4;
-                            }
+                            if (g.type.kind == TY_ARRAY_I32)
+                                elem_size = (size_t)tinyc_int_size(&g.type);
                             int64_t alen = g.type.array_len;
                             bool unsized = (alen == 0 && !g.type.array_len_expr);
                             // With a constant-expression length (`[N * 2]`),

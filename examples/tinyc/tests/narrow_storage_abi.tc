@@ -1,0 +1,77 @@
+// char / short / bool storage and values cross the boundary to C code compiled
+// by the host C compiler (narrow_storage_abi_host.c): the struct layout of
+// narrow fields and narrow arrays, and narrow arguments / returns (#251, #263,
+// #264).
+extern int printf(const char *fmt, ...);
+
+struct nsa_rec {
+    char c;
+    bool b;
+    short s;
+    unsigned char uc;
+    unsigned short us;
+    int i;
+    char name[5];
+    bool flags[3];
+    short arr[3];
+    signed char sc;
+};
+
+extern short nsa_host_g;
+extern int nsa_host_layout(int *out);
+extern void nsa_host_fill(struct nsa_rec *r);
+extern int nsa_host_check(struct nsa_rec *r);
+extern short nsa_host_neg(short x);
+extern unsigned char nsa_host_inc(unsigned char x);
+extern bool nsa_host_not(bool x);
+extern signed char nsa_host_half(signed char x);
+extern unsigned short nsa_host_sum(unsigned short a, char b, bool c, short d);
+extern int nsa_host_callback(void);
+
+short nsa_tc_twice(short x) { return x * 2; }
+bool nsa_tc_is_neg(signed char c) { return c < 0; }
+unsigned char nsa_tc_low(int x) { return x; }
+
+int main(void) {
+    struct nsa_rec r;
+    char *base = (char *)&r;
+    int mine[12];
+    mine[0] = (int)sizeof(struct nsa_rec);
+    mine[1] = (int)_Alignof(struct nsa_rec);
+    mine[2] = (int)(&r.c - base);
+    mine[3] = (int)((char *)&r.b - base);
+    mine[4] = (int)((char *)&r.s - base);
+    mine[5] = (int)((char *)&r.uc - base);
+    mine[6] = (int)((char *)&r.us - base);
+    mine[7] = (int)((char *)&r.i - base);
+    mine[8] = (int)(r.name - base);
+    mine[9] = (int)((char *)r.flags - base);
+    mine[10] = (int)((char *)r.arr - base);
+    mine[11] = (int)((char *)&r.sc - base);
+    int host[12];
+    int n = nsa_host_layout(host);
+    int same = n == 12;
+    for (int k = 0; k < 12; k++) {
+        if (mine[k] != host[k]) same = 0;
+    }
+    printf("layout %s %d %d\n", same ? "same" : "differs", mine[0], mine[10]);
+
+    nsa_host_fill(&r);
+    printf("%d %d %d %d %d %d %s %c %d %d %d %d %d %d %d\n", r.c, r.b, r.s, r.uc, r.us,
+           r.i, r.name, r.name[4], r.flags[0], r.flags[1], r.flags[2], r.arr[0], r.arr[1],
+           r.arr[2], r.sc);
+
+    r.c = 'x'; r.b = 0; r.s = -2; r.uc = -1; r.us = -1; r.i = -9;
+    r.name[0] = 'q'; r.name[4] = 'r';
+    r.flags[0] = 5; r.flags[1] = 0; r.flags[2] = 1;
+    r.arr[0] = -1; r.arr[1] = 2; r.arr[2] = 32768; r.sc = 127;
+    printf("check %d\n", nsa_host_check(&r));
+
+    printf("%d %d %d %d %d %d\n", nsa_host_neg(-32768), nsa_host_neg(5), nsa_host_inc(255),
+           nsa_host_not(0), nsa_host_half(-101), nsa_host_sum(65535, -1, 1, 3));
+    printf("callback %d global %d\n", nsa_host_callback(), nsa_host_g);
+    unsigned char (*finc)(unsigned char) = nsa_host_inc;
+    signed char (*fhalf)(signed char) = nsa_host_half;
+    printf("indirect %d %d\n", finc(255), fhalf(-101));
+    return 0;
+}

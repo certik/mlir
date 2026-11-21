@@ -161,6 +161,84 @@ static int int_bits(MLIR_Context *ctx, MLIR_TypeHandle ty) {
     return 0;
 }
 
+// The value of the integer constant `v` as it is materialized (an i8 / i16
+// constant zero-extended, see OP_TYPE_LLVM_MLIR_CONSTANT), if `v` is one.
+static bool known_const(MLIR_Context *ctx, MLIR_ValueHandle v, int64_t *out) {
+    MLIR_OpHandle d = MLIR_GetValueDefiningOp(v);
+    if (d == MLIR_INVALID_HANDLE || MLIR_GetOpType(d) != OP_TYPE_LLVM_MLIR_CONSTANT)
+        return false;
+    MLIR_AttributeHandle va = find_attr(d, "value");
+    if (va == MLIR_INVALID_HANDLE || MLIR_GetAttributeKind(va) != MLIR_ATTR_KIND_INTEGER)
+        return false;
+    int64_t c = MLIR_GetAttributeInteger(va);
+    int w = int_bits(ctx, MLIR_GetValueType(v));
+    if (w == 8 || w == 16) c &= ((int64_t)1 << w) - 1;
+    *out = c;
+    return true;
+}
+
+// Whether the i32 that holds the integer `v` (of 32 bits or fewer) is known
+// to be in [0, 2^w): a narrow load (i32.load8_u / load16_u), a zero
+// extension, an `and` with a small mask, a comparison, ... Lets a zext /
+// sext of a narrow value that is already in range skip its mask / extend.
+static bool known_zext(MLIR_Context *ctx, MLIR_ValueHandle v, int w, int depth) {
+    int64_t c;
+    if (known_const(ctx, v, &c)) return c >= 0 && c < ((int64_t)1 << w);
+    MLIR_OpHandle d = MLIR_GetValueDefiningOp(v);
+    if (d == MLIR_INVALID_HANDLE || depth > 4) return false;
+    switch (MLIR_GetOpType(d)) {
+    case OP_TYPE_LLVM_LOAD: case OP_TYPE_LLVM_ZEXT: {
+        MLIR_ValueHandle src = MLIR_GetOpType(d) == OP_TYPE_LLVM_LOAD
+                             ? v : MLIR_GetOpOperand(d, 0);
+        int sw = int_bits(ctx, MLIR_GetValueType(src));
+        return sw > 0 && sw <= w && sw < 32;
+    }
+    case OP_TYPE_LLVM_ICMP:
+        return true;
+    case OP_TYPE_LLVM_TRUNC:
+        return known_zext(ctx, MLIR_GetOpOperand(d, 0), w, depth + 1);
+    case OP_TYPE_LLVM_AND:
+        return (known_const(ctx, MLIR_GetOpOperand(d, 1), &c) &&
+                c >= 0 && c < ((int64_t)1 << w)) ||
+               (known_const(ctx, MLIR_GetOpOperand(d, 0), &c) &&
+                c >= 0 && c < ((int64_t)1 << w));
+    case OP_TYPE_LLVM_SELECT:
+        return known_zext(ctx, MLIR_GetOpOperand(d, 1), w, depth + 1) &&
+               known_zext(ctx, MLIR_GetOpOperand(d, 2), w, depth + 1);
+    default:
+        return false;
+    }
+}
+
+// Whether the i32 that holds the integer `v` is known to be a w-bit value
+// sign-extended to 32 bits.
+static bool known_sext(MLIR_Context *ctx, MLIR_ValueHandle v, int w, int depth) {
+    int64_t c;
+    if (known_const(ctx, v, &c))
+        return c >= -((int64_t)1 << (w - 1)) && c < ((int64_t)1 << (w - 1));
+    if (known_zext(ctx, v, w - 1, depth)) return true;
+    MLIR_OpHandle d = MLIR_GetValueDefiningOp(v);
+    if (d == MLIR_INVALID_HANDLE || depth > 4) return false;
+    switch (MLIR_GetOpType(d)) {
+    case OP_TYPE_LLVM_SEXT: {
+        int sw = int_bits(ctx, MLIR_GetValueType(MLIR_GetOpOperand(d, 0)));
+        return sw > 0 && sw <= w;
+    }
+    case OP_TYPE_LLVM_ASHR:
+        // `ashr (x, k)` of an i32 with k >= 32 - w (the shl / ashr pair that
+        // sign-extends from w bits).
+        return int_bits(ctx, MLIR_GetValueType(v)) == 32 &&
+               known_const(ctx, MLIR_GetOpOperand(d, 1), &c) && c >= 32 - w && c < 32;
+    case OP_TYPE_LLVM_TRUNC:
+        return known_sext(ctx, MLIR_GetOpOperand(d, 0), w, depth + 1);
+    case OP_TYPE_LLVM_SELECT:
+        return known_sext(ctx, MLIR_GetOpOperand(d, 1), w, depth + 1) &&
+               known_sext(ctx, MLIR_GetOpOperand(d, 2), w, depth + 1);
+    default:
+        return false;
+    }
+}
+
 // Type layout (mlir_llvm_type_layout.h) on wasm32: pointers are 4 bytes.
 static unsigned type_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
     return llvm_type_size(ctx, ty, 4);
@@ -1157,6 +1235,10 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         o.valtype = vt;
         if (ak == MLIR_ATTR_KIND_INTEGER) {
             o.i_const = MLIR_GetAttributeInteger(va);
+            // An i8 / i16 constant is materialized zero-extended, whether the
+            // API returns it sign- or zero-extended (upstream: sign).
+            int cw = int_bits(F->ctx, MLIR_GetValueType(r));
+            if (cw == 8 || cw == 16) o.i_const &= ((int64_t)1 << cw) - 1;
         } else if (ak == MLIR_ATTR_KIND_BOOL) {
             o.i_const = MLIR_GetAttributeBool(va) ? 1 : 0;
         } else if (ak == MLIR_ATTR_KIND_FLOAT) {
@@ -1299,7 +1381,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         // within i32 first (extend8_s=0xc0, extend16_s=0xc1).
         MLIR_ValueHandle cur_idx = sa;
         uint8_t cur_vt = wasm_vt(F->ctx, MLIR_GetValueType(s));
-        if (in_w == 8 || in_w == 16) {
+        if ((in_w == 8 || in_w == 16) && !known_sext(F->ctx, s, in_w, 0)) {
             MLIR_ValueHandle ops[1] = { cur_idx };
             wasmssa_op_t o = {0};
             o.type = OP_TYPE_WASMSSA_UNOP;
@@ -1536,9 +1618,26 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         if (in_vt == 0 || out_vt == 0) return false;
         MLIR_ValueHandle sa;
         if (!vmap_get(F, s, &sa)) return false;
-        if (is_zext && in_w == 8 && out_w == 32) {
-            MLIR_ValueHandle mask = emit_const_i32(F, 255);
-            MLIR_ValueHandle idx = emit_and_i32(F, sa, mask);
+        // An i8 / i16 value is held in an i32 whose upper bits are
+        // unspecified (a trunc is a no-op): zext masks them off, unless they
+        // are known to be clear (e.g. i32.load8_u / load16_u).
+        if (is_zext && (in_w == 8 || in_w == 16)) {
+            MLIR_ValueHandle idx = sa;
+            if (!known_zext(F->ctx, s, in_w, 0)) {
+                MLIR_ValueHandle mask = emit_const_i32(F, in_w == 8 ? 0xff : 0xffff);
+                idx = emit_and_i32(F, sa, mask);
+            }
+            if (out_w == 64) {
+                wasmssa_op_t o = {0};
+                o.type = OP_TYPE_WASMSSA_UNOP;
+                o.valtype = WT_I64;
+                o.wasm_opcode = 0xad;              // i64.extend_i32_u
+                o.n_operands = 1;
+                MLIR_ValueHandle o_ops[1] = { idx };
+                o.operands = o_ops;
+                o.has_result = true;
+                idx = commit_op(F, &o);
+            }
             vmap_set(F, r, idx);
             return true;
         }
