@@ -1,0 +1,179 @@
+extern int printf(const char *fmt, ...);
+// Regression test for block scoping around control-flow statements. A
+// `for` init declaration has its own scope and the loop body is a nested
+// block, so the condition and the step must see the init's variable even
+// when the body declares one with the same name. The same holds for the
+// bodies of `while`, `do`, `if` / `else` and `switch`: a declaration in
+// the body never leaks into the controlling expression or past the
+// statement.
+
+struct P { int x; int y; };
+
+static int set_via(int *p, int v) {
+    *p = v;
+    return *p;
+}
+
+int main(void) {
+    // for: body redeclares the loop variable.
+    int iters = 0;
+    for (int r = 0; r < 3; r++) {
+        int r = 100;
+        iters++;
+        if (iters > 10) break;
+        (void)r;
+    }
+    printf("%d\n", iters);                           // 3
+
+    // for: the body's variable is used in the body, the init's in the step;
+    // `continue` must also step the init's variable.
+    int sum = 0;
+    for (int i = 0; i < 4; i++) {
+        int i = 10;
+        sum += i;
+        if (sum > 1000) break;
+        continue;
+    }
+    printf("%d\n", sum);                             // 40
+
+    // for: no init declaration, the body shadows an outer variable that
+    // the condition and step use.
+    int k = 0;
+    int ksum = 0;
+    for (; k < 3; k++) {
+        int k = 7;
+        ksum += k;
+        if (ksum > 100) break;
+    }
+    printf("%d %d\n", k, ksum);                      // 3 21
+
+    // while: the body shadows the variable used in the condition, which
+    // the body can only reach through a pointer.
+    int n = 3;
+    int *pn = &n;
+    int wl = 0;
+    while (n > 0) {
+        int n = 50;
+        wl += n;
+        if (wl > 1000) break;
+        n = 0;
+        (*pn)--;
+    }
+    printf("%d %d\n", n, wl);                        // 0 150
+
+    // do: `do { int x; } while (x)` tests the outer x.
+    int x = 2;
+    int dl = 0;
+    do {
+        int x = 0;
+        dl++;
+        if (dl > 10) break;
+        (void)x;
+    } while (--x > 0);
+    printf("%d %d\n", x, dl);                        // 0 2
+
+    // nested blocks, each restoring the outer binding on exit.
+    int y = 1;
+    {
+        int y = 2;
+        {
+            int y = 3;
+            printf("%d\n", y);                       // 3
+        }
+        printf("%d\n", y);                           // 2
+    }
+    printf("%d\n", y);                               // 1
+
+    // if / else blocks.
+    int z = 5;
+    if (z == 5) {
+        int z = 6;
+        printf("%d\n", z);                           // 6
+    } else {
+        int z = 7;
+        printf("%d\n", z);
+    }
+    if (z != 5) {
+        int z = 8;
+        printf("%d\n", z);
+    } else {
+        int z = 9;
+        printf("%d\n", z);                           // 9
+    }
+    printf("%d\n", z);                               // 5
+
+    // switch body declares a variable that shadows the selector.
+    int s = 2;
+    switch (s) {
+        int s;
+    case 1:
+        s = 10;
+        printf("one %d\n", s);
+        break;
+    case 2:
+        s = 20;
+        printf("two %d\n", s);                       // two 20
+        break;
+    default:
+        break;
+    }
+    printf("%d\n", s);                               // 2
+    // The same with no outer variable of that name.
+    switch (s) {
+        int u, v;
+    default:
+        u = 3;
+        v = 4;
+        printf("%d\n", u + v);                       // 7
+        break;
+    }
+    // Unsized arrays declared before the first case label take their
+    // length from the initializer, even though it never runs.
+    switch (s) {
+        int ua[] = {1, 2, 3};
+        struct P ps[] = {{1, 2}, {3, 4}};
+        char *names[] = {"a", "b", "c", "d"};
+        int guard;
+    case 2:
+        guard = 77;
+        ua[0] = 10; ua[1] = 20; ua[2] = 30;
+        ps[1].y = 40;
+        names[3] = "z";
+        printf("%d %d %d %d %d\n", (int)sizeof(ua), ua[0], ua[1], ua[2], guard);
+        printf("%d %d %d %s\n", (int)sizeof(ps), ps[1].y,
+               (int)(sizeof(names) / sizeof(names[0])), names[3]);
+        break;
+    }
+    // A static declared before the first case label is initialized.
+    for (int i = 0; i < 3; i++) {
+        switch (i) {
+            static int sarr[3] = {1, 2, 3};
+        default:
+            printf("%d\n", sarr[i]);                 // 1, 2, 3
+        }
+    }
+
+    // A shadowing variable whose address is taken: writes through the
+    // pointer change only the inner variable, and the loop still steps
+    // the outer one.
+    int a = 1;
+    int asum = 0;
+    for (int t = 0; t < 3; t++) {
+        int a = 100;
+        int *pa = &a;
+        *pa = *pa + t;
+        asum += set_via(&a, a + 1);
+        int t = 40;
+        if (asum > 10000) break;
+        (void)t;
+    }
+    printf("%d %d\n", a, asum);                      // 1 306
+    {
+        int a = 2;
+        int *pa = &a;
+        *pa = 30;
+        printf("%d\n", a);                           // 30
+    }
+    printf("%d\n", a);                               // 1
+    return 0;
+}

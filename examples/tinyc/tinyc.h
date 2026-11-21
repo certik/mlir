@@ -325,6 +325,8 @@ struct Stmt {
     // The emitter treats the local as an alias for that global instead
     // of allocating an `alloca` slot.
     string decl_static_global_sym;
+    // ST_DECL: declared with a leading `static` (scalar or not).
+    bool decl_is_static;
     // ST_IF / ST_WHILE / ST_FOR / ST_SWITCH
     Expr *cond;
     VecStmtPtr then_body;
