@@ -2432,13 +2432,27 @@ static void emit_flat_call(E *e, Scope *sc, FuncSig *sig, VecExprPtr args,
 //     EX_FIELD, EX_FLOAT, EX_NULL, EX_STR, EX_CAST
 //   - division / modulo by zero (let runtime / LLVM handle it)
 //   - shifts by negative or >=32 (let LLVM handle it)
+// True if a constant subtree has a 64-bit or unsigned literal. Its value
+// then has a type other than `int`, so the expression pre-pass must not
+// replace it with ast_fold_int's int32 result (array bounds still fold).
+static bool ast_has_non_int_lit(Expr *ex) {
+    if (!ex) return false;
+    switch (ex->kind) {
+        case EX_INT:     return ex->is_i64 || ex->is_unsigned;
+        case EX_UN:      return ast_has_non_int_lit(ex->lhs);
+        case EX_BIN:     return ast_has_non_int_lit(ex->lhs) ||
+                                ast_has_non_int_lit(ex->rhs);
+        case EX_TERNARY: return ast_has_non_int_lit(ex->lhs) ||
+                                ast_has_non_int_lit(ex->rhs) ||
+                                ast_has_non_int_lit(ex->lvalue);
+        default:         return false;
+    }
+}
+
 static bool ast_fold_int(E *e, Scope *sc, Expr *ex, int64_t *out) {
     if (!ex) return false;
     switch (ex->kind) {
         case EX_INT:
-            // A 64-bit or unsigned literal does not fold with int32
-            // semantics; leave it to normal emission.
-            if (ex->is_i64 || ex->is_unsigned) return false;
             *out = (int64_t)(int32_t)ex->int_value;
             return true;
         case EX_SIZEOF: {
@@ -2619,7 +2633,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
     // with a side effect or a non-int operand falls through unchanged.
     if (ex->kind == EX_BIN || ex->kind == EX_UN || ex->kind == EX_TERNARY) {
         int64_t fv;
-        if (ast_fold_int(e, sc, ex, &fv)) {
+        if (!ast_has_non_int_lit(ex) && ast_fold_int(e, sc, ex, &fv)) {
             r.val = emit_const_i32(e, fv);
             return r;
         }

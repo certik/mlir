@@ -31,5 +31,9 @@ int main() {
     // The shift result has the left operand's type.
     int sh = -16;
     printf("%d %u\n", sh >> 2u, ~0u >> 28);
+    // Array bounds with suffixed literals still fold.
+    int bound_u[1u + 2];
+    int bound_ll[1LL + 1];
+    printf("%d %d\n", (int)sizeof(bound_u), (int)sizeof(bound_ll));
     return 0;
 }
