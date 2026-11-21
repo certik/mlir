@@ -2516,6 +2516,16 @@ static FoldVal fold_int(int64_t v) {
     return r;
 }
 
+// A `sizeof` result: a size_t (`unsigned long`), unsigned and 64-bit
+// except on wasm32.
+static FoldVal fold_size(E *e, int64_t v) {
+    FoldVal r = {0};
+    r.is_i64 = !e->target_wasm32;
+    r.is_unsigned = true;
+    r.v = fold_norm(v, r.is_i64, true);
+    return r;
+}
+
 static bool fold_expr(Expr *ex, FoldLeafFn leaf, void *ctx, bool lenient,
                       FoldVal *out);
 
@@ -2709,16 +2719,16 @@ static bool emit_fold_leaf(void *ctx, Expr *ex, FoldVal *out) {
         if (ex->lhs && ex->lhs->kind == EX_STR) {
             // sizeof("string literal") yields the array size
             // including the trailing NUL, matching standard C.
-            *out = fold_int((int64_t)ex->lhs->name.size);
+            *out = fold_size(fc->e, (int64_t)ex->lhs->name.size);
             return true;
         }
         ty = infer_expr_type(fc->e, fc->sc, ex->lhs);
         if (ty.kind == TY_VOID) return false;
-        *out = fold_int(c_sizeof_expr(fc->e, fc->sc, ex->lhs));
+        *out = fold_size(fc->e, c_sizeof_expr(fc->e, fc->sc, ex->lhs));
         return true;
     }
     if (ex->cast_type.kind == TY_VOID) return false;
-    *out = fold_int(type_size(fc->e, ex->cast_type));
+    *out = fold_size(fc->e, type_size(fc->e, ex->cast_type));
     return true;
 }
 
@@ -2756,19 +2766,71 @@ static void resolve_array_len(E *e, Scope *sc, Type *t) {
     t->array_len = v;
 }
 
+// The width rank of an integer type: its int_bits, where a plain `int`
+// may carry 0 (keyword-declared locals). `long` is 64 also on wasm32.
+static int int_type_bits(const Type *t) {
+    if (t->int_bits) return t->int_bits;
+    return t->kind == TY_I64 ? 64 : 32;
+}
+
+static bool type_is_arith(const Type *t) {
+    return t->kind == TY_I32 || t->kind == TY_I64 || t->kind == TY_F32 || t->kind == TY_F64;
+}
+
+// C's integer promotions: a char / short / bool becomes `int`.
+// (The helpers below update Types in place, field by field: copying a whole
+// Type is expensive in the self-hosted build.)
+static void promote_int_type(Type *t) {
+    if (t->kind == TY_I32 && (t->int_bits == 8 || t->int_bits == 16 || t->is_bool)) {
+        t->int_bits = 0;
+        t->int_unsigned = false;
+        t->is_bool = false;
+    }
+}
+
+// The type of `a op b` (and of `c ? a : b`) under C's usual arithmetic
+// conversions, stored into *a. Matches what unify_numeric emits: a double /
+// float operand wins; integers are promoted; a 64-bit operand's type wins
+// over a 32-bit one; at equal width the higher rank (`long` over `int` on
+// wasm32) is taken, unsigned if either operand is.
+static void arith_conv_type(Type *a, const Type *b) {
+    if (a->kind == TY_F64 || b->kind == TY_F64 || a->kind == TY_F32 || b->kind == TY_F32) {
+        a->kind = (a->kind == TY_F64 || b->kind == TY_F64) ? TY_F64 : TY_F32;
+        a->int_bits = 0;
+        a->int_unsigned = false;
+        a->is_bool = false;
+        return;
+    }
+    bool b_promotes = b->kind == TY_I32 &&
+                      (b->int_bits == 8 || b->int_bits == 16 || b->is_bool);
+    int b_bits = b_promotes ? 32 : int_type_bits(b);
+    bool b_unsigned = !b_promotes && b->int_unsigned;
+    promote_int_type(a);
+    if (a->kind != b->kind) {
+        if (b->kind == TY_I64) {
+            a->kind = TY_I64;
+            a->int_bits = b_bits;
+            a->int_unsigned = b_unsigned;
+        }
+        return;
+    }
+    if (b_bits > int_type_bits(a)) a->int_bits = b_bits;
+    a->int_unsigned = a->int_unsigned || b_unsigned;
+}
+
 // True if the i-th `_Generic` association's type matches the controlling
 // expression type. struct types match by struct_name; integer types
-// match by kind plus, when both have explicit int_bits, equal width and
-// sign. Pointer kinds match by exact kind.
+// match by kind, width and signedness. Pointer kinds match by exact kind.
 static bool generic_type_matches(Type a, Type b) {
     if (a.kind != b.kind) return false;
     if (a.kind == TY_STRUCT || a.kind == TY_PTR_STRUCT) {
         return str_eq(a.struct_name, b.struct_name);
     }
     if (a.kind == TY_I32 || a.kind == TY_I64) {
-        if (a.int_bits != 0 && b.int_bits != 0 && a.int_bits != b.int_bits)
-            return false;
-        return true;
+        // A plain `int` may carry int_bits 0 (keyword-declared locals,
+        // arithmetic results): it is 32 bits wide, not "any width".
+        return int_type_bits(&a) == int_type_bits(&b) &&
+               a.int_unsigned == b.int_unsigned;
     }
     return true;
 }
@@ -3022,26 +3084,26 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             return r;
         }
         case EX_SIZEOF: {
-            Type ty = (Type){0};
+            int64_t n = 1;
             if (ex->sizeof_is_expr) {
                 if (ex->lhs && ex->lhs->kind == EX_STR) {
-                    r.val = emit_const_i32(e, (int32_t)ex->lhs->name.size);
-                    return r;
-                }
-                ty = infer_expr_type(e, sc, ex->lhs);
-                if (ty.kind == TY_VOID) {
+                    n = (int64_t)ex->lhs->name.size;
+                } else if (infer_expr_type(e, sc, ex->lhs).kind == TY_VOID) {
                     EMIT_ERR(e, "sizeof of unsupported expression");
-                    r.val = emit_const_i32(e, 1); return r;
+                } else {
+                    n = c_sizeof_expr(e, sc, ex->lhs);
                 }
-                r.val = emit_const_i32(e, c_sizeof_expr(e, sc, ex->lhs)); return r;
+            } else if (ex->cast_type.kind == TY_VOID) {
+                EMIT_ERR(e, "sizeof(void) is not allowed");
             } else {
-                ty = ex->cast_type;
-                if (ty.kind == TY_VOID) {
-                    EMIT_ERR(e, "sizeof(void) is not allowed");
-                    r.val = emit_const_i32(e, 1); return r;
-                }
+                n = type_size(e, ex->cast_type);
             }
-            r.val = emit_const_i32(e, type_size(e, ty)); return r;
+            // The result is a size_t (`unsigned long`): unsigned, and 64-bit
+            // except on wasm32 (as in ast_fold and infer_expr_type).
+            r.is_unsigned = true;
+            r.is_i64 = !e->target_wasm32;
+            r.val = r.is_i64 ? emit_const_i64(e, n) : emit_const_i32(e, n);
+            return r;
         }
         case EX_CAST: {
             EVal v = emit_expr(e, sc, ex->lhs);
@@ -6010,6 +6072,39 @@ static bool type_is_pointerish(Type t) {
     }
 }
 
+// Decay an array type to the pointer type it converts to; other types are
+// unchanged.
+static void decay_array_type(E *e, Type *t) {
+    TypeKind k = t->kind;
+    if (k == TY_ARRAY_PTR_CHAR || k == TY_ARRAY_PTR_STRUCT) {
+        Type *pe = arena_new(e->arena, Type);
+        *pe = (Type){0};
+        pe->kind = k == TY_ARRAY_PTR_CHAR ? TY_PTR_CHAR : TY_PTR_STRUCT;
+        pe->struct_name = t->struct_name;
+        pe->int_unsigned = t->int_unsigned;
+        *t = (Type){0};
+        t->kind = TY_PTR_PTR;
+        t->pointee = pe;
+        return;
+    }
+    if (k == TY_ARRAY_I32) {
+        t->kind = t->array_elem_is_i8 ? TY_PTR_CHAR : TY_PTR_I32;
+        t->ptr_is_i64 = t->array_elem_is_i64;
+    } else if (k == TY_ARRAY_F32) {
+        t->kind = TY_PTR_I32;
+        t->ptr_is_f32 = true;
+    } else if (k == TY_ARRAY_STRUCT) {
+        t->kind = TY_PTR_STRUCT;
+    } else {
+        return;
+    }
+    t->array_len = 0;
+    t->array_len2 = 0;
+    t->array_len_expr = NULL;
+    t->array_elem_is_i8 = false;
+    t->array_elem_is_i64 = false;
+}
+
 static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
     Type t = (Type){0};
     switch (ex->kind) {
@@ -6125,14 +6220,24 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
         }
         case EX_CAST: return ex->cast_type;
         case EX_COMPOUND: return ex->cast_type;
-        case EX_SIZEOF: t.kind = TY_I32; return t;
+        case EX_SIZEOF:
+            // size_t is `unsigned long` (corec/base/types.h, and clang):
+            // typed as the parser types `unsigned long`, with 32-bit storage
+            // on wasm32.
+            t.kind = e->target_wasm32 ? TY_I32 : TY_I64;
+            t.int_bits = 64;
+            t.int_unsigned = true;
+            return t;
         case EX_BIN: {
+            // A comparison or logical operator gives an `int`.
+            if (ex->op == OP_LT || ex->op == OP_LE || ex->op == OP_GT || ex->op == OP_GE ||
+                ex->op == OP_EQ || ex->op == OP_NE || ex->op == OP_AND || ex->op == OP_OR)
+                return t;
             Type a = infer_expr_type(e, sc, ex->lhs);
             Type b = infer_expr_type(e, sc, ex->rhs);
-            // Usual arithmetic conversions (simplified): if either side
-            // is i64 the result is i64; if either is f32, result is f32.
-            // Pointer arithmetic (`p + i`, `i + p`, `p - i`) has the
-            // pointer's type; `p - q` is a ptrdiff_t (`long`), which tinyC
+            // Pointer arithmetic (`p + i`, `i + p`, `p - i`) has the pointer's
+            // type, with an array operand decayed (`sizeof(arr + 1)` is a
+            // pointer's size); `p - q` is a ptrdiff_t (`long`), which tinyC
             // emits as an i64, or an i32 on wasm32.
             bool ap = type_is_pointerish(a), bp = type_is_pointerish(b);
             if (ap && bp) {
@@ -6140,49 +6245,44 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
                 t.int_bits = 64;
                 return t;
             }
-            if (ap) return a;
-            if (bp) return b;
-            if (a.kind == TY_F64 || b.kind == TY_F64) { t.kind = TY_F64; return t; }
-            if (a.kind == TY_F32 || b.kind == TY_F32) { t.kind = TY_F32; return t; }
-            if (a.kind == TY_I64 || b.kind == TY_I64) { t.kind = TY_I64; return t; }
+            if (ap || bp) {
+                Type *pt = ap ? &a : &b;
+                decay_array_type(e, pt);
+                return *pt;
+            }
+            // A shift has the promoted left operand's type; other operators
+            // apply the usual arithmetic conversions.
+            if (ex->op == OP_SHL || ex->op == OP_SHR) promote_int_type(&a);
+            else if (type_is_arith(&a) && type_is_arith(&b)) arith_conv_type(&a, &b);
             return a;
         }
         case EX_UN:
         case EX_ASSIGN: {
-            // Use the LHS type as the result type.
-            return infer_expr_type(e, sc, ex->lhs ? ex->lhs : ex->lvalue);
+            // `!x` is an `int`; `-x` / `~x` have x's promoted type; an
+            // assignment has the lvalue's type.
+            if (ex->kind == EX_UN && ex->op == OP_NOT) return t;
+            Type a = infer_expr_type(e, sc, ex->lhs ? ex->lhs : ex->lvalue);
+            if (ex->kind == EX_UN) promote_int_type(&a);
+            return a;
         }
         case EX_TERNARY: {
             // For `c ? a : b` the result type is the common type of the
             // then/else branches (`a` / `b`), NOT the condition `c`.
             // tinyc's AST stores: lhs=cond, rhs=then, lvalue=else.
-            if (!ex->rhs || !ex->lvalue) {
-                Expr *val = ex->rhs ? ex->rhs : (ex->lvalue ? ex->lvalue : ex->lhs);
-                return infer_expr_type(e, sc, val);
+            // Arithmetic branches get the usual arithmetic conversions
+            // (`1 ? 1 : 2LL` is a long long); an integer next to a pointer
+            // is a null pointer constant, so the result has the pointer's
+            // type; otherwise the then-branch (rhs) decides, falling back
+            // to lvalue or lhs only if rhs is missing (defensive).
+            Expr *val = ex->rhs ? ex->rhs : (ex->lvalue ? ex->lvalue : ex->lhs);
+            Type a = infer_expr_type(e, sc, val);
+            if (ex->rhs && ex->lvalue) {
+                Type b = infer_expr_type(e, sc, ex->lvalue);
+                bool an = type_is_arith(&a), bn = type_is_arith(&b);
+                if (an && bn) arith_conv_type(&a, &b);
+                else if (an && b.kind != TY_VOID) a = b;
             }
-            Type a = infer_expr_type(e, sc, ex->rhs);
-            Type b = infer_expr_type(e, sc, ex->lvalue);
-            bool a_num = a.kind == TY_I32 || a.kind == TY_I64 ||
-                         a.kind == TY_F32 || a.kind == TY_F64;
-            bool b_num = b.kind == TY_I32 || b.kind == TY_I64 ||
-                         b.kind == TY_F32 || b.kind == TY_F64;
-            // An integer next to a pointer is a null pointer constant.
-            if (!a_num || !b_num) return (a_num && b.kind != TY_VOID) ? b : a;
-            // Two arithmetic branches convert like a binary operator's
-            // operands: `sizeof(c ? 1 : 2.0)` is 8.
-            if (a.kind == TY_F64 || b.kind == TY_F64) { t.kind = TY_F64; return t; }
-            if (a.kind == TY_F32 || b.kind == TY_F32) { t.kind = TY_F32; return t; }
-            // char / short / bool promote to int.
-            if (type_is_narrow_int(a)) a.int_unsigned = false;
-            if (type_is_narrow_int(b)) b.int_unsigned = false;
-            t.kind = (a.kind == TY_I64 || b.kind == TY_I64) ? TY_I64 : TY_I32;
-            t.int_bits = (t.kind == TY_I64 || a.int_bits == 64 || b.int_bits == 64) ? 64 : 32;
-            if (a.kind != b.kind) {
-                t.int_unsigned = a.kind == TY_I64 ? a.int_unsigned : b.int_unsigned;
-            } else {
-                t.int_unsigned = a.int_unsigned || b.int_unsigned;
-            }
-            return t;
+            return a;
         }
         default: return t;
     }

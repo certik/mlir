@@ -421,6 +421,14 @@ expected_stdout = "4\n4\n8\n8\n8\n4\n4\n8\n"
 expected_stdout_wasm = "4\n4\n8\n4\n8\n4\n4\n8\n"
 
 [[test]]
+name = "expr_types"
+targets = ["native", "wasm", "macho", "elf"]
+# sizeof is a size_t (#293), `?:` and binary operators apply the usual
+# arithmetic conversions (#295), and _Generic matches a plain int local and
+# `x + 1` as int (#288). Expected output from clang.
+expected_stdout = "1 0 1\n-8 -4\n8 8 4 4\n1\n1 1 4\n2 2 2 5 2\n5 3 6 2 1 7 8 5\n5 6 7 8 5 5\n6 7 5 5 5\n"
+
+[[test]]
 name = "compound_literal"
 targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "42\n7\n3\n4\n7\n"

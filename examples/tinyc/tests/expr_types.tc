@@ -1,0 +1,43 @@
+#include <stdint.h>
+extern int printf(const char *fmt, ...);
+
+// The static type of an expression (used by sizeof and _Generic):
+// - `sizeof` is a size_t (`unsigned long`), not an int (#293);
+// - `c ? a : b` and `a op b` apply the usual arithmetic conversions, and
+//   char / short operands are promoted to int (#295); `arr + 1` is a
+//   pointer and `p == q` an int;
+// - _Generic matches integer types by width and signedness, and a plain
+//   `int` local (whose type carries no explicit width) is an int, not the
+//   first integer association (#288).
+
+typedef signed char i8;
+#define T(e) _Generic((e), int8_t: 1, uint8_t: 2, int16_t: 3, uint16_t: 4, \
+                      int32_t: 5, uint32_t: 6, int64_t: 7, uint64_t: 8, \
+                      double: 9, float: 10, default: 0)
+int gx;
+int f(int p) { return _Generic(p, i8: 1, int: 2, default: 3); }
+
+int main() {
+    int x = 3; short s = 0; unsigned u = 2; unsigned char uc = 4;
+    signed char sc = 0; int64_t ll = 5; uint64_t ull = 6; char c = 1;
+    printf("%d %d %d\n", sizeof(int) - 5 > 0, -1 < sizeof(int),
+           _Generic(sizeof(x), unsigned long: 1, default: 0));
+    int n = -2;
+    printf("%d %d\n", (int)(n * sizeof(int)), (int)(sizeof(x) - sizeof(ll)));
+    printf("%d %d %d %d\n", (int)sizeof(1 ? 1 : 2LL), (int)sizeof(x ? c : 2.0),
+           (int)sizeof(0 ? 1.0f : 2), (int)sizeof(x < 1.0));
+    printf("%d\n", (x ? -1 : 0u) > 0);
+    int arr[10]; char cs[7];
+    printf("%d %d %d\n", sizeof(arr + 1) == sizeof(int *), sizeof(1 + cs) == sizeof(char *),
+           (int)sizeof(arr == arr + 1));
+    printf("%d %d %d %d %d\n",
+           _Generic(x, i8: 1, int: 2, default: 3),
+           _Generic(gx, i8: 1, int: 2, default: 3),
+           f(0),
+           _Generic(s, i8: 1, int: 2, short: 5, default: 3),
+           _Generic(x + 1, i8: 1, int: 2, default: 3));
+    printf("%d %d %d %d %d %d %d %d\n", T(x), T(s), T(u), T(uc), T(sc), T(ll), T(ull), T(c + c));
+    printf("%d %d %d %d %d %d\n", T(uc + 1), T(x * u), T(x + ll), T(ull + x), T(x < u), T(!x));
+    printf("%d %d %d %d %d\n", T(1 ? x : u), T(0 ? x : ll), T(1 ? uc : sc), T(-uc), T(uc << 1));
+    return 0;
+}
