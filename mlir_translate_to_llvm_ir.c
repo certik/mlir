@@ -776,6 +776,19 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         buf_putc(out, '\n');
         return;
     }
+    if (ty == OP_TYPE_LLVM_FNEG) {
+        // %r = fneg T a
+        buf_cstr(out, "  ");
+        emit_use(F, MLIR_GetOpResult(op, 0));
+        buf_cstr(out, " = fneg ");
+        MLIR_ValueHandle a = MLIR_GetOpOperand(op, 0);
+        print_type(out, F->ctx, MLIR_GetValueType(a));
+        buf_putc(out, ' ');
+        emit_use(F, a);
+        buf_putc(out, '\n');
+        return;
+    }
+
     const char *cop;
     if ((cop = llvm_cast_opcode(op, ty)) != NULL) {
         buf_cstr(out, "  ");

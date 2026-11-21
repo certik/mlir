@@ -1,0 +1,43 @@
+extern int printf(const char *fmt, ...);
+// Regression test for #324: unary minus on a float or double must flip the
+// sign bit (fneg), not compute `0 - x`, which maps +0.0 to +0.0. Each line
+// prints `1.0 / v < 0`, which is 1 exactly when v is -0.0 (or negative).
+
+static double gd_neg = -0.0;
+static float gf_neg = -0.0f;
+static double gd_zero = 0.0;
+static float gf_zero = 0.0f;
+
+static double neg_d(double x) { return -x; }
+static float neg_f(float x) { return -x; }
+
+int main(void) {
+    // Negating a +0.0 local.
+    double zd = 0.0;
+    float zf = 0.0f;
+    double nd = -zd;
+    float nf = -zf;
+    printf("%d\n", 1.0 / nd < 0);                     // 1
+    printf("%d\n", 1.0f / nf < 0);                    // 1
+    // Through a call, so the operand is not a constant.
+    printf("%d\n", 1.0 / neg_d(zd) < 0);              // 1
+    printf("%d\n", 1.0f / neg_f(zf) < 0);             // 1
+    // Negating twice gives +0.0 back.
+    printf("%d\n", 1.0 / -nd < 0);                    // 0
+    printf("%d\n", 1.0f / -nf < 0);                   // 0
+    // -0.0 literals.
+    double ld = -0.0;
+    float lf = -0.0f;
+    printf("%d\n", 1.0 / ld < 0);                     // 1
+    printf("%d\n", 1.0f / lf < 0);                    // 1
+    // Globals: a -0.0 initializer, and negating a +0.0 global.
+    printf("%d\n", 1.0 / gd_neg < 0);                 // 1
+    printf("%d\n", 1.0f / gf_neg < 0);                // 1
+    printf("%d\n", 1.0 / -gd_zero < 0);               // 1
+    printf("%d\n", 1.0f / -gf_zero < 0);              // 1
+    // Ordinary values still negate.
+    double two = 2.5;
+    float three = 3.5f;
+    printf("%d %d\n", (int)(-two * 2), (int)(-three * 2)); // -5 -7
+    return 0;
+}
