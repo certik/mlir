@@ -1,0 +1,81 @@
+// Union members and pointers of char / short / bool type read and write
+// exactly their own bytes (#251): a short member reads the low half of an int
+// member, a byte store through a char pointer changes one byte of a short.
+extern int printf(const char *fmt, ...);
+extern void *memcpy(void *d, const void *s, unsigned long n);
+
+union A { int i[2]; short s[2]; };
+union B { int i; short s; unsigned short us; unsigned char uc; };
+union C { long long l; short s[4]; bool b[8]; };
+struct D { char c; union C u; };
+static int part_unions(void) {
+    union A a; a.i[0] = 0x12345; a.i[1] = -1;
+    printf("%d %d %d %d\n", a.s[0], a.s[1], (int)sizeof(a), (int)_Alignof(union A));
+    a.s[1] = 7; printf("%d\n", a.i[0]);
+    union B b; b.i = 0x12345;
+    printf("%d %d\n", b.s, *(&b.s));
+    b.us += 0x10000; printf("%d\n", b.i);
+    b.i = 0xABCD; b.uc++; printf("%d\n", b.i);
+    union C c; c.l = 0x0001000200030004LL;
+    printf("%d %d %d %d %d\n", c.s[0], c.s[3], c.b[0], c.b[1], (int)sizeof(c));
+    struct D d; d.u.l = -1; d.c = 3; d.u.s[2] = 0;
+    printf("%d %d %d %d\n", (int)sizeof(d), (int)_Alignof(struct D), d.u.s[1], d.u.s[2]);
+    struct D e = d; printf("%d %d\n", e.u.s[2], e.u.s[3]);
+    return 0;
+}
+union FU { int i; short s; unsigned short us; signed char sc; unsigned char uc; };
+union FN { int i; struct { short s; unsigned char c; } st; };
+static int part_fa(void) {
+    union FU u; u.i = 0x12345;
+    short *ps = &u.s;           short t1 = *ps;        printf("ptr-member s %d\n", t1);
+    unsigned short *pus = &u.us; unsigned short t2 = *pus; printf("ptr-member us %d\n", t2);
+    union FU *pu = &u;           short t3 = pu->s;      printf("arrow s %d\n", t3);
+    union FU arr[2]; arr[1].i = 0x12345; short t4 = arr[1].s; printf("array elem s %d\n", t4);
+    union FN n; n.i = 0x1FFFF;   short t5 = n.st.s;     printf("nested s %d\n", t5);
+    short s7 = -1; unsigned char *cp = (unsigned char *)&s7; cp[0] = 0x34; cp[1] = 0x12;
+    short t7 = s7; printf("char alias %d\n", t7);
+    short s8 = -1; short src = 0x1234; memcpy(&s8, &src, sizeof s8);
+    short t8 = s8; printf("memcpy %d\n", t8);
+    printf("sizeof short %d\n", (int)sizeof(short));
+    return 0;
+}
+static _Bool gb[4] = {1, 0, 1, 1};
+_Bool gs = 5;
+static int part_b1(void) {
+    _Bool lb[4]; lb[0] = 1; lb[1] = 0; lb[2] = 9; lb[3] = 1;
+    _Bool *p = gb; _Bool *q = lb;
+    printf("%d %d %d %d\n", gb[0], gb[1], gb[2], (int)sizeof gb);
+    printf("%d %d\n", *p, *(p + 1));
+    printf("%d %d %d\n", *q, *(q + 1), q[2]);
+    _Bool *r = &gs; printf("%d %d\n", *r, gs);
+    struct { _Bool a; _Bool b; } s; s.a = 3; s.b = 0; _Bool *sp = &s.a; printf("%d %d\n", *sp, s.a);
+    return 0;
+}
+union IU { unsigned int i; unsigned char uc; signed char sc; unsigned short us; short s; _Bool b; };
+union IU igu;
+struct IW { int tag; union IU u; };
+static int part_i4(void) {
+    union IU u; u.i = 0xFFFFFFFF;
+    printf("%d %d %d %d %d\n", u.uc, u.sc, u.us, u.s, u.uc > 0);
+    u.i = 0x12380; printf("%d %d %d %d\n", u.uc, u.sc, u.us, u.s);
+    u.i = 0x100; printf("%d\n", u.b);
+    u.uc = 0xFF; printf("%d %d %u\n", u.sc, u.s, u.i & 0xFF);
+    igu.i = 0x8081; printf("%d %d %d %d\n", igu.uc, igu.sc, igu.us, igu.s);
+    struct IW w; w.u.i = 0x18000; printf("%d %d\n", w.u.s, w.u.us);
+    struct IW *pw = &w; printf("%d %d\n", pw->u.sc, pw->u.uc);
+    union IU *pu = &u; pu->i = 0x1FF80; printf("%d %d %d\n", pu->sc, pu->uc, pu->s);
+    unsigned char c = u.uc; signed char d = u.uc; short e = u.us; printf("%d %d %d\n", c, d, e);
+    u.i = 0x12345; unsigned char t = u.uc + 1; printf("%d\n", t);
+    u.us += 0x10000; printf("%u\n", u.i);
+    u.i = 0xABCD; u.uc++; printf("%u %d\n", u.i, u.uc);
+    union IU arr[2]; arr[0].i = 0xFFFF; printf("%d %d\n", arr[0].s, arr[0].sc);
+    return 0;
+}
+
+int main(void) {
+    part_unions();
+    part_fa();
+    part_b1();
+    part_i4();
+    return 0;
+}
