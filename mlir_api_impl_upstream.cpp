@@ -16,6 +16,7 @@
 // Coverage is the surface needed by tests/cross/driver.c. APIs outside
 // that surface are stubbed with UNIMPLEMENTED().
 
+#include <cassert>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -402,6 +403,8 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     if (type == OP_TYPE_MODULE && nm == "module") {
         nm = "builtin.module";
     }
+    // See MLIR_CreateOp in mlir_api.h: a non-empty name decides the type.
+    assert(type == OP_TYPE_UNREGISTERED || opTypeFromName(nm) == type);
 
     mlir::Location loc = (location == MLIR_INVALID_HANDLE)
                              ? mlir::Location(mlir::UnknownLoc::get(&ctx))
@@ -578,11 +581,6 @@ extern "C" string MLIR_GetOpName(MLIR_OpHandle h) {
     return mkRefString(sr);
 }
 extern "C" string MLIR_GetOpName_string(MLIR_OpHandle h) { return MLIR_GetOpName(h); }
-// Upstream operations do not record the MLIR_OpType their creator passed,
-// so "created unregistered" is "has no registered type".
-extern "C" bool MLIR_IsOpCreatedUnregistered(MLIR_OpHandle h) {
-    return MLIR_GetOpType(h) == OP_TYPE_UNREGISTERED;
-}
 extern "C" MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle) { return MLIR_INVALID_HANDLE; }
 extern "C" string MLIR_GetOpTrailingComment(MLIR_OpHandle) {
     string s; s.str = nullptr; s.size = 0; return s;

@@ -520,6 +520,13 @@ void MLIR_ResetInternRegistry(void);
 // -----------------------------------------------------------------------------
 
 // Creation & structural mutation
+//
+// `type` and `opname` name the op. A non-empty `opname` decides its type:
+// a registered name gives that name's type, any other name gives
+// OP_TYPE_UNREGISTERED, so MLIR_GetOpType() is always a function of
+// MLIR_GetOpName(). `type` may then be OP_TYPE_UNREGISTERED or the same
+// type; passing a different registered type is a caller bug (asserted).
+// With an empty `opname` the op gets `type` and its registered name.
 MLIR_OpHandle MLIR_CreateOp(
     MLIR_Context *ctx,
     MLIR_OpType type,
@@ -628,16 +635,11 @@ string MLIR_TranslateModuleToLLVMIRUpstream(MLIR_Context *ctx, MLIR_OpHandle mod
 string MLIR_TranslateModuleToWasmUpstream(MLIR_Context *ctx, MLIR_OpHandle module);
 
 // Accessors
-// The op's registered type, derived from its name: an op named `llvm.load`
-// is OP_TYPE_LLVM_LOAD whichever MLIR_OpType its creator passed. Ops whose
-// name is not registered are OP_TYPE_UNREGISTERED (unless created with an
-// explicit registered type, e.g. a parser alias).
+// The op's registered type, derived from its name (see MLIR_CreateOp): an
+// op named `llvm.load` is OP_TYPE_LLVM_LOAD, and an op whose name is not
+// registered is OP_TYPE_UNREGISTERED.
 MLIR_OpType MLIR_GetOpType(MLIR_OpHandle op);
 string MLIR_GetOpName(MLIR_OpHandle op);
-// True if the op was created with OP_TYPE_UNREGISTERED, i.e. identified by
-// its name only, even when that name turned out to be a registered one. The
-// printers quote the names of such ops; nothing else should need this.
-bool MLIR_IsOpCreatedUnregistered(MLIR_OpHandle op);
 string MLIR_GetOpName_string(MLIR_OpHandle op);
 MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle op);
 string MLIR_GetOpTrailingComment(MLIR_OpHandle op);

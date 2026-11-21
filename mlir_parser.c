@@ -274,58 +274,6 @@ MLIR_TypeHandle parse_type_from_string(MLIR_Context *ctx, string type_str) {
     return mlir_type_create_from_string(ctx, type_str);
 }
 
-
-// The op types the parser assigns to a parsed op. This is deliberately a
-// subset of the registered names (mlir_op_names.c): an op of any other name
-// is created as OP_TYPE_UNREGISTERED, so it round-trips through the printers
-// in the quoted generic form. (MLIR_CreateOp still derives the registered
-// type from the name, so MLIR_GetOpType() is the same either way.)
-static const MLIR_OpType g_parser_op_types[] = {
-    OP_TYPE_MODULE, OP_TYPE_ARITH_ADDI, OP_TYPE_ARITH_ADDF,
-    OP_TYPE_ARITH_SUBI, OP_TYPE_ARITH_MULI, OP_TYPE_ARITH_DIVI,
-    OP_TYPE_ARITH_SUBF, OP_TYPE_ARITH_MULF, OP_TYPE_ARITH_DIVF,
-    OP_TYPE_ARITH_CONSTANT, OP_TYPE_ARITH_CMPI, OP_TYPE_ARITH_CMPF,
-    OP_TYPE_ARITH_BITCAST, OP_TYPE_ARITH_SITOFP, OP_TYPE_ARITH_FPTOSI,
-    OP_TYPE_ARITH_INDEX_CAST, OP_TYPE_ARITH_EXTSI, OP_TYPE_ARITH_TRUNCI,
-    OP_TYPE_ARITH_EXTF, OP_TYPE_ARITH_TRUNCF, OP_TYPE_ARITH_EXTUI,
-    OP_TYPE_ARITH_MAXF, OP_TYPE_ARITH_DIVSI, OP_TYPE_ARITH_REMSI,
-    OP_TYPE_ARITH_DIVUI, OP_TYPE_ARITH_REMUI, OP_TYPE_ARITH_SHRUI,
-    OP_TYPE_ARITH_ORI, OP_TYPE_ARITH_MINSI, OP_TYPE_ARITH_ANDI,
-    OP_TYPE_MATH_EXP, OP_TYPE_MATH_LOG, OP_TYPE_MEMREF_LOAD,
-    OP_TYPE_MEMREF_STORE, OP_TYPE_MEMREF_ALLOC, OP_TYPE_MEMREF_DEALLOC,
-    OP_TYPE_CF_BR, OP_TYPE_CF_COND_BR, OP_TYPE_CF_SWITCH, OP_TYPE_FUNC_FUNC,
-    OP_TYPE_FUNC_RETURN, OP_TYPE_FUNC_CALL, OP_TYPE_SCF_FOR,
-    OP_TYPE_SCF_WHILE, OP_TYPE_SCF_IF, OP_TYPE_SCF_YIELD,
-    OP_TYPE_SCF_CONDITION, OP_TYPE_SCF_INDEX_SWITCH,
-    OP_TYPE_TT_GET_PROGRAM_ID, OP_TYPE_TT_LOAD, OP_TYPE_TT_STORE,
-    OP_TYPE_TT_MAKE_RANGE, OP_TYPE_TT_SPLAT, OP_TYPE_TT_ADDPTR,
-    OP_TYPE_TT_RETURN, OP_TYPE_ARITH_SELECT, OP_TYPE_TT_FUNC, OP_TYPE_TT_CALL,
-    OP_TYPE_TT_REDUCE, OP_TYPE_TT_BROADCAST, OP_TYPE_TT_EXPAND_DIMS,
-    OP_TYPE_TT_DOT, OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE, OP_TYPE_GPU_LAUNCH,
-    OP_TYPE_AFFINE_FOR, OP_TYPE_AFFINE_LOAD, OP_TYPE_VECTOR_PRINT,
-    OP_TYPE_STD_CONSTANT, OP_TYPE_STD_RETURN, OP_TYPE_TENSOR_EXTRACT,
-    OP_TYPE_TENSOR_SPLAT, OP_TYPE_TENSOR_COLLAPSE_SHAPE, OP_TYPE_LINALG_FILL,
-    OP_TYPE_LINALG_COPY, OP_TYPE_INDEX_CONSTANT, OP_TYPE_LLVM_MLIR_UNDEF,
-    OP_TYPE_RETURN, OP_TYPE_TT_REDUCE_RETURN,
-};
-static bool g_parser_knows_op_type[OP_TYPE_TABLE_CAPACITY];
-static bool g_parser_op_types_built = false;
-
-MLIR_OpType op_string_to_type(string opname) {
-    if (!g_parser_op_types_built) {
-        size_t n = sizeof(g_parser_op_types) / sizeof(g_parser_op_types[0]);
-        for (size_t i = 0; i < n; i++) g_parser_knows_op_type[g_parser_op_types[i]] = true;
-        g_parser_op_types_built = true;
-    }
-    MLIR_OpType type = op_type_from_string(opname);
-    if (type != OP_TYPE_UNREGISTERED) {
-        return g_parser_knows_op_type[type] ? type : OP_TYPE_UNREGISTERED;
-    }
-    // Short alias accepted by the classic syntax; the op keeps this name.
-    if (str_eq(opname, str_lit("call"))) return OP_TYPE_FUNC_CALL;
-    return OP_TYPE_UNREGISTERED;
-}
-
 void get_newlines(Arena *arena, const string s, vector_i64 *newlines) {
     for (int64_t pos=0; pos < s.size; pos++) {
         if (s.str[pos] == '\n') vector_i64_push_back(arena, newlines, pos);
@@ -1419,8 +1367,10 @@ MLIR_OpHandle parse_operation(Parser *parser) {
     }
 
 
-    // Set op_type based on operation name
-    MLIR_OpType op_type = op_string_to_type(opname);
+    // Set op_type based on operation name. The classic syntax's `call` is
+    // the op `func.call`; use that name so the op's type follows from it.
+    if (str_eq(opname, str_lit("call"))) opname = op_type_to_string(OP_TYPE_FUNC_CALL);
+    MLIR_OpType op_type = op_type_from_string(opname);
 
     // Capture trailing comment from the current line
     string trailing_comment = str_lit("");

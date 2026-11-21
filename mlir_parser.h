@@ -125,7 +125,6 @@ MLIR_BlockHandle parse_block(Parser *parser);
 bool parse_type_string(Parser *parser, string *out);
 void consume_optional_hash_selector(Parser *parser);
 
-
 const char *string_data_or_null(string s);
 
 bool parse_register_operand(Parser *parser, VecValue *operands, bool allow_hash_selector);
@@ -158,7 +157,6 @@ void parse_generic_attrs_and_result_type(Parser *parser,
 
 void consume_optional_hash_selector(Parser *parser);
 
-MLIR_OpType op_string_to_type(string name);
 
 // TODO: use Type by value
 MLIR_TypeHandle parse_type_from_string(MLIR_Context *ctx, string type_str);

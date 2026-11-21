@@ -5,6 +5,7 @@
 #include <base/format.h>
 #include <base/hashtable.h>
 #include <base/vector.h>
+#include <base/assert.h>
 #include "tokenizer.h"
 #include "mlir_api.h"
 #include "mlir_op_names.h"
@@ -196,15 +197,11 @@ typedef struct IR_Value {
 typedef struct IR_OpAux {
     MLIR_LocationHandle unnumbered_loc_def;
     string trailing_comment;
-    // Non-canonical op name (only for OP_TYPE_UNREGISTERED / custom ops whose
-    // textual name differs from op_type_to_string(op_type)). NULL str means
-    // the name is derivable from op_type and is not stored.
+    // The op's name when op_type_to_string(op_type) cannot reproduce it,
+    // i.e. for OP_TYPE_UNREGISTERED ops. NULL str means the name is
+    // derivable from op_type and is not stored.
     string opname;
     int32_t source_line_start;
-    // The creator passed OP_TYPE_UNREGISTERED and the op was identified by
-    // its name alone (see MLIR_IsOpCreatedUnregistered). `opname` is then
-    // always stored, even when op_type was derived from it.
-    bool created_unregistered;
     // Def-use bookkeeping, populated only when the context tracks uses (the
     // wasm->macho pipeline opts out, so these stay NULL there).
     // operand_uses[i] is the UseNode linking operands[i] into its value's use
@@ -598,23 +595,18 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     string trailing_comment,
     int64_t source_line_start) {
 
-    // An op's type is a function of its name: a creator that names a
-    // registered op but passes OP_TYPE_UNREGISTERED (or the type of another
-    // op) still gets the registered type, exactly as the upstream backend
-    // derives it. Passes can therefore dispatch on MLIR_GetOpType() alone.
-    // A name that is not registered leaves `type` as passed (e.g. the
-    // parser's `call` alias of OP_TYPE_FUNC_CALL keeps both).
-    bool created_unregistered = (type == OP_TYPE_UNREGISTERED);
-    bool store_name = !str_eq(opname, op_type_to_string(type));
-    if (store_name) {
+    // See MLIR_CreateOp in mlir_api.h: a non-empty name decides the type,
+    // exactly as on the upstream backend. Most creators pass the type
+    // together with its own name, which needs no lookup.
+    if (opname.size > 0 && (type == OP_TYPE_UNREGISTERED ||
+                            !str_eq(opname, op_type_to_string(type)))) {
         MLIR_OpType named = op_type_from_string(opname);
-        if (named != OP_TYPE_UNREGISTERED) {
-            type = named;
-            // The name is now derivable from the type. Keep the stored copy
-            // only as the marker of an op that was created unregistered.
-            store_name = created_unregistered;
-        }
+        assert(type == OP_TYPE_UNREGISTERED || type == named);
+        type = named;
     }
+    // Only an unregistered op's name is stored; a registered one is
+    // op_type_to_string(type).
+    bool store_name = opname.size > 0 && type == OP_TYPE_UNREGISTERED;
 
     IR_Op op = {0};
     op.op_type = type;
@@ -651,7 +643,6 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
         aux->unnumbered_loc_def = unnumbered_loc_def;
         aux->trailing_comment = trailing_comment;
         aux->opname = store_name ? opname : (string){0};
-        aux->created_unregistered = created_unregistered;
         aux->source_line_start = (int32_t)source_line_start;
         op.aux = aux;
     }
@@ -924,13 +915,6 @@ string MLIR_GetOpName(MLIR_OpHandle oh) {
     if (!op) return str_lit("");
     if (op->aux && op->aux->opname.str) return op->aux->opname;
     return op_type_to_string(op->op_type);
-}
-
-bool MLIR_IsOpCreatedUnregistered(MLIR_OpHandle oh) {
-    IR_Op *op = resolve_op(oh);
-    if (!op) return true;
-    if (op->op_type == OP_TYPE_UNREGISTERED) return true;
-    return op->aux && op->aux->created_unregistered;
 }
 
 string MLIR_GetOpName_string(MLIR_OpHandle oh) {

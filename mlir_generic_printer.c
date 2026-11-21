@@ -6,14 +6,6 @@
 #include <stdio.h>
 
 // SSA numbering keyed by value handles (uint32_t)
-// The op type as far as printing is concerned. An op created with
-// OP_TYPE_UNREGISTERED prints in the quoted generic form even when its name
-// is registered (MLIR_GetOpType() then reports the registered type, which
-// is what passes dispatch on). Printed IR must not depend on that.
-static inline MLIR_OpType printed_op_type(MLIR_OpHandle op) {
-    return MLIR_IsOpCreatedUnregistered(op) ? OP_TYPE_UNREGISTERED : MLIR_GetOpType(op);
-}
-
 static inline size_t handle_hash(MLIR_ValueHandle h) { return (size_t)h; }
 static inline bool handle_equal(MLIR_ValueHandle a, MLIR_ValueHandle b) { return a == b; }
 #define SsaMap_HASH handle_hash
@@ -184,7 +176,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
         }
         strbuf_append(arena, &result, str_lit(" = "));
     }
-    MLIR_OpType op_type = printed_op_type(op);
+    MLIR_OpType op_type = MLIR_GetOpType(op);
     string opname = MLIR_GetOpName_string(op);
     if (op_type == OP_TYPE_UNREGISTERED) {
         strbuf_append(arena, &result, str_lit("\""));
@@ -247,7 +239,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
         size_t n_attrs = MLIR_GetOpNumAttributes(op);
         if (n_attrs > 0) {
             bool opened = false; bool first = true;
-            MLIR_OpType opty = printed_op_type(op);
+            MLIR_OpType opty = MLIR_GetOpType(op);
             for (size_t i = 0; i < n_attrs; i++) {
                 MLIR_AttributeHandle attr = MLIR_GetOpAttribute(op, i);
                 string name = MLIR_GetAttributeName(attr);
