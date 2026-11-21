@@ -947,6 +947,56 @@ static MLIR_TypeHandle ptr_elem_of_type(E *e, Type t) {
     return MLIR_INVALID_HANDLE;
 }
 
+static bool type_kind_is_ptr(TypeKind k) {
+    return k == TY_PTR_I32 || k == TY_PTR_CHAR || k == TY_PTR_STRUCT ||
+           k == TY_PTR_VOID || k == TY_PTR_PTR || k == TY_FNPTR;
+}
+
+// The EVal of a value `val` of pointer type `*t`, tagged with what the type
+// says about the pointee: the element type, the struct, the void / char /
+// function-pointer kind, and the pointee's signedness (EVal.is_unsigned
+// describes the pointee of a pointer). For pointer values whose producer
+// does not tag them itself. (Takes the type by pointer and keeps the EVal
+// out of the callers' address: in the self-hosted build both are cheaper.)
+static EVal ptr_eval_of_type(E *e, MLIR_ValueHandle val, const Type *t) {
+    EVal v = (EVal){0};
+    v.val = val;
+    v.is_ptr = true;
+    v.ptr_elem = t->kind == TY_PTR_CHAR ? e->i8
+               : t->kind == TY_PTR_PTR ? e->ptr
+               : t->kind != TY_PTR_I32 ? MLIR_INVALID_HANDLE
+               : t->ptr_is_i64 ? e->i64
+               : t->ptr_is_f32 ? e->f32
+               : t->ptr_is_f64 ? e->f64
+               : e->i32;
+    v.is_str = t->kind == TY_PTR_CHAR;
+    v.is_void_ptr = t->kind == TY_PTR_VOID;
+    v.is_unsigned = t->int_unsigned;
+    if (t->kind == TY_PTR_STRUCT) v.sdef = find_struct(e, t->struct_name);
+    if (t->kind == TY_FNPTR) {
+        Type *fnty = arena_new(e->arena, Type);
+        *fnty = *t;
+        v.fnptr_ty = fnty;
+    }
+    return v;
+}
+
+// The size of the element a pointer value (EVal.ptr_elem `t`, EVal.sdef
+// `sd`) steps over: the stride of its pointer arithmetic (the element type,
+// else the struct, else i32).
+static int64_t ptr_elem_size(E *e, MLIR_TypeHandle t, StructDef *sd) {
+    if (sd && (t == MLIR_INVALID_HANDLE || t == find_struct_type(e, sd))) {
+        Type st = (Type){0};
+        st.kind = TY_STRUCT;
+        st.struct_name = sd->name;
+        return type_size(e, st);
+    }
+    if (t == e->i8) return 1;
+    if (t == e->i64 || t == e->f64) return 8;
+    if (t == e->ptr) return e->target_wasm32 ? 4 : 8;
+    return 4;
+}
+
 // Compute the single-blob representation tinyc uses to lay a `union` out
 // with all members overlapping at offset 0: an array of `*count` elements
 // of `*elem` (an integer type whose width equals the union's alignment),
@@ -3194,8 +3244,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                              s->type.kind == TY_ARRAY_PTR_CHAR) r.ptr_elem = e->ptr;
                     else if (s->type.kind == TY_ARRAY_I32 && s->type.array_elem_is_i64) r.ptr_elem = e->i64;
                     else if (s->type.kind == TY_ARRAY_I32 && s->type.array_elem_is_i8) r.ptr_elem = e->i8;
+                    // A struct array steps by the struct (sdef set, ptr_elem unset).
+                    else if (s->type.kind == TY_ARRAY_STRUCT && s->sdef) r.sdef = s->sdef;
                     else r.ptr_elem = e->i32;
-                    if (s->type.kind == TY_ARRAY_STRUCT) r.sdef = s->sdef;
                     return r;
                 }
                 // va_list value is the buffer pointer itself (the alloca
@@ -3262,6 +3313,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                             } else if (ft.kind == TY_ARRAY_I32 &&
                                        ft.array_elem_is_i8) {
                                 r.ptr_elem = e->i8;
+                            } else if (ft.kind == TY_ARRAY_STRUCT &&
+                                       find_struct(e, ft.struct_name)) {
+                                // A struct array steps by the struct
+                                // (sdef set, ptr_elem unset).
+                                r.sdef = find_struct(e, ft.struct_name);
                             } else {
                                 r.ptr_elem = e->i32;
                             }
@@ -3316,19 +3372,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     // *pp where pp is T**: the loaded value is a T*. Tag
                     // it from the pointee so further reads / calls work.
                     Sym *s = lookup(e, sc, ex->lhs->name);
-                    if (s && s->type.kind == TY_PTR_PTR && s->type.pointee) {
-                        Type *pe = s->type.pointee;
-                        if (pe->kind == TY_PTR_I32) v.ptr_elem = e->i32;
-                        else if (pe->kind == TY_PTR_CHAR) { v.is_str = true; v.ptr_elem = e->i8; }
-                        else if (pe->kind == TY_PTR_VOID) v.is_void_ptr = true;
-                        else if (pe->kind == TY_PTR_STRUCT) {
-                            v.sdef = find_struct(e, pe->struct_name);
-                        } else if (pe->kind == TY_FNPTR) {
-                            Type *fnty = arena_new(e->arena, Type);
-                            *fnty = *pe;
-                            v.fnptr_ty = fnty;
-                        }
-                    }
+                    if (s && s->type.kind == TY_PTR_PTR && s->type.pointee)
+                        v = ptr_eval_of_type(e, v.val, s->type.pointee);
                 } else if (ex->kind == EX_FIELD) {
                     // Prefer the no-code lookup: walking the struct base again here
                     // would evaluate it (and its side effects) a second time.
@@ -3345,20 +3390,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         }
                     }
                     if (have_ft) {
-                        if (ft.kind == TY_PTR_STRUCT) {
-                            v.sdef = find_struct(e, ft.struct_name);
-                        } else if (ft.kind == TY_PTR_CHAR) {
-                            v.is_str = true;
-                            v.ptr_elem = e->i8;
-                        } else if (ft.kind == TY_PTR_I32) {
-                            v.ptr_elem = ft.ptr_is_i64 ? e->i64 : e->i32;
-                        } else if (ft.kind == TY_PTR_VOID) {
-                            v.is_void_ptr = true;
-                        } else if (ft.kind == TY_FNPTR) {
-                            Type *fnty = arena_new(e->arena, Type);
-                            *fnty = ft;
-                            v.fnptr_ty = fnty;
-                        } else if (ft.kind == TY_PTR_PTR) {
+                        if (ft.kind == TY_PTR_PTR) {
                             v.ptr_elem = e->ptr;
                             if (ft.pointee) {
                                 Type *pe = ft.pointee;
@@ -3370,6 +3402,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                                     v.fnptr_ty = fnty;
                                 }
                             }
+                        } else if (type_kind_is_ptr(ft.kind)) {
+                            v = ptr_eval_of_type(e, v.val, &ft);
                         }
                     }
                 } else if (ex->kind == EX_INDEX) {
@@ -3408,24 +3442,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                                 // the loaded element is a single T*.
                                 // Tag with the inner type so '->'
                                 // chains and string ops work.
-                                Type *pe = ft.pointee;
-                                if (pe->kind == TY_PTR_CHAR) {
-                                    v.is_str = true;
-                                    v.ptr_elem = e->i8;
-                                } else if (pe->kind == TY_PTR_STRUCT) {
-                                    v.sdef = find_struct(e, pe->struct_name);
-                                } else if (pe->kind == TY_PTR_I32) {
-                                    v.ptr_elem = pe->ptr_is_i64 ? e->i64
-                                               : pe->ptr_is_f32 ? e->f32
-                                               : pe->ptr_is_f64 ? e->f64
-                                               : e->i32;
-                                } else if (pe->kind == TY_PTR_VOID) {
-                                    v.is_void_ptr = true;
-                                } else if (pe->kind == TY_FNPTR) {
-                                    Type *fnty = arena_new(e->arena, Type);
-                                    *fnty = *pe;
-                                    v.fnptr_ty = fnty;
-                                }
+                                v = ptr_eval_of_type(e, v.val, ft.pointee);
                             }
                         }
                     }
@@ -3443,24 +3460,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         Sym *vs = lookup(e, sc, ex->lhs->name);
                         if (vs) {
                             if (vs->type.kind == TY_PTR_PTR && vs->type.pointee) {
-                                Type *pe = vs->type.pointee;
-                                if (pe->kind == TY_PTR_CHAR) {
-                                    v.is_str = true;
-                                    v.ptr_elem = e->i8;
-                                } else if (pe->kind == TY_PTR_STRUCT) {
-                                    v.sdef = find_struct(e, pe->struct_name);
-                                } else if (pe->kind == TY_PTR_I32) {
-                                    v.ptr_elem = pe->ptr_is_i64 ? e->i64
-                                               : pe->ptr_is_f32 ? e->f32
-                                               : pe->ptr_is_f64 ? e->f64
-                                               : e->i32;
-                                } else if (pe->kind == TY_PTR_VOID) {
-                                    v.is_void_ptr = true;
-                                } else if (pe->kind == TY_FNPTR) {
-                                    Type *fnty = arena_new(e->arena, Type);
-                                    *fnty = *pe;
-                                    v.fnptr_ty = fnty;
-                                }
+                                v = ptr_eval_of_type(e, v.val, vs->type.pointee);
                             } else if (vs->type.kind == TY_ARRAY_PTR_CHAR) {
                                 v.is_str = true;
                                 v.ptr_elem = e->i8;
@@ -3469,6 +3469,14 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                             }
                         }
                     }
+                }
+                // Any other loaded pointer (e.g. `*pp++` or `*(pp + 1)` with
+                // a `char **pp`): the expression's static type gives the
+                // pointee.
+                if (v.ptr_elem == MLIR_INVALID_HANDLE && !v.sdef && !v.fnptr_ty &&
+                    !v.is_void_ptr) {
+                    Type t = infer_expr_type(e, sc, ex);
+                    if (type_kind_is_ptr(t.kind)) v = ptr_eval_of_type(e, v.val, &t);
                 }
             }
             return v;
@@ -3613,15 +3621,10 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     // Pointer postfix `p++` / `p--`: step by sizeof(*p)
                     // via GEP, store new pointer, return the OLD pointer.
                     Type lt = infer_expr_type(e, sc, ex->lvalue);
-                    MLIR_TypeHandle pe = e->i32;
-                    if (lt.kind == TY_PTR_CHAR) pe = e->i8;
-                    else if (lt.kind == TY_PTR_I32) {
-                        if (lt.ptr_is_i64)      pe = e->i64;
-                        else if (lt.ptr_is_f64) pe = e->f64;
-                        else if (lt.ptr_is_f32) pe = e->f32;
-                        else                    pe = e->i32;
-                    }
-                    else if (lt.kind == TY_PTR_PTR) pe = e->ptr;
+                    old = ptr_eval_of_type(e, old.val, &lt);
+                    MLIR_TypeHandle pe = old.ptr_elem;
+                    if (pe == MLIR_INVALID_HANDLE)
+                        pe = old.sdef ? find_struct_type(e, old.sdef) : e->i32;
                     int32_t step = sub ? -1 : 1;
                     MLIR_ValueHandle idx = emit_const_i32(e, step);
                     int32_t *path = arena_new_array(e->arena, int32_t, 1);
@@ -3631,7 +3634,6 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     MLIR_ValueHandle stepped = emit_gep(e, old.val, pe, path, 1, dyn, 1);
                     store_lvalue(e, lv, stepped);
                     old.is_ptr = true;
-                    old.ptr_elem = pe;
                     return old;
                 }
                 MLIR_TypeHandle ity = old.is_i64 ? e->i64 : e->i32;
@@ -3832,9 +3834,10 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 MLIR_TypeHandle elem = (a.ptr_elem != MLIR_INVALID_HANDLE) ? a.ptr_elem
                     : (a.sdef ? find_struct_type(e, a.sdef) : e->i32);
                 if (elem == MLIR_INVALID_HANDLE) elem = e->i32;
-                MLIR_ValueHandle zero = emit_const_i32(e, 0);
-                MLIR_ValueHandle neg = emit_binop(e, OP_TYPE_ARITH_SUBI,
-                                                  str_lit("arith.subi"), e->i32, zero, b.val);
+                // Negate the index at its own width (`p - n` with a 64-bit n).
+                MLIR_ValueHandle zero = b.is_i64 ? emit_const_i64(e, 0) : emit_const_i32(e, 0);
+                MLIR_ValueHandle neg = emit_binop(e, OP_TYPE_ARITH_SUBI, str_lit("arith.subi"),
+                                                  b.is_i64 ? e->i64 : e->i32, zero, b.val);
                 int32_t *path = arena_new_array(e->arena, int32_t, 1); path[0] = LLVM_GEP_DYN;
                 MLIR_ValueHandle *dyn = arena_new_array(e->arena, MLIR_ValueHandle, 1); dyn[0] = neg;
                 r.val = emit_gep(e, a.val, elem, path, 1, dyn, 1);
@@ -3844,15 +3847,12 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 r.is_str = a.is_str;
                 return r;
             }
-            // Pointer minus pointer (T* - T*) -> i32 element count.
+            // Pointer minus pointer (T* - T*) -> ptrdiff_t element count.
             if (ex->op == OP_SUB && a.is_ptr && b.is_ptr) {
                 if (a.is_void_ptr || b.is_void_ptr) {
                     EMIT_ERR(e, "pointer arithmetic on 'void*' is not allowed");
                 }
-                MLIR_TypeHandle elem = (a.ptr_elem != MLIR_INVALID_HANDLE) ? a.ptr_elem
-                                       : (b.ptr_elem != MLIR_INVALID_HANDLE) ? b.ptr_elem
-                                       : e->i32;
-                // ptrtoint both, then (ai - bi) / sizeof(elem), trunc to i32.
+                // ptrtoint both, then (ai - bi) / sizeof(elem).
                 MLIR_ValueHandle ai = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
                                                                e->i64, ssa_name(e), eloc(e, 0));
                 MLIR_TypeHandle *rts1 = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts1[0] = e->i64;
@@ -3869,21 +3869,17 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         rts2, 1, rs2, 1, ops2, 1, NULL, 0, NULL, 0);
                 MLIR_ValueHandle diff = emit_binop(e, OP_TYPE_ARITH_SUBI,
                                                    str_lit("arith.subi"), e->i64, ai, bi);
-                int64_t es = 4;
-                if (elem == e->i8) es = 1; else if (elem == e->f32) es = 4;
-                else if (elem == e->ptr) es = e->target_wasm32 ? 4 : 8;
+                // One side may carry no element type (an untagged pointer
+                // value); the other side then decides.
+                bool a_known = a.ptr_elem != MLIR_INVALID_HANDLE || a.sdef;
+                int64_t es = a_known ? ptr_elem_size(e, a.ptr_elem, a.sdef)
+                                     : ptr_elem_size(e, b.ptr_elem, b.sdef);
                 MLIR_ValueHandle szc = emit_const_i64(e, es);
                 MLIR_ValueHandle q = emit_binop(e, OP_TYPE_ARITH_DIVSI,
                                                  str_lit("arith.divsi"), e->i64, diff, szc);
-                // Truncate to i32 for tinyc's `int` result type.
-                MLIR_ValueHandle res = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
-                                                                e->i32, ssa_name(e), eloc(e, 0));
-                MLIR_TypeHandle *rts3 = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts3[0] = e->i32;
-                MLIR_ValueHandle *rs3 = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs3[0] = res;
-                MLIR_ValueHandle *ops3 = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops3[0] = q;
-                emit_op(e, OP_TYPE_ARITH_TRUNCI, str_lit("arith.trunci"),
-                        rts3, 1, rs3, 1, ops3, 1, NULL, 0, NULL, 0);
-                r.val = res;
+                // The result is a ptrdiff_t (`long`): i64, or i32 on wasm32.
+                r.is_i64 = !e->target_wasm32;
+                r.val = r.is_i64 ? q : emit_trunci_i64_to_i32(e, q);
                 return r;
             }
             // A shift has the (promoted) left operand's type: the right
@@ -4360,8 +4356,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 r.is_i64 = (fnty->fnptr_ret->kind == TY_I64);
                 r.is_unsigned = fnty->fnptr_ret->int_unsigned &&
                                 !type_promotes_to_int(*fnty->fnptr_ret);
-                r.is_ptr = (rty == e->ptr);
-                r.ptr_elem = ptr_elem_of_type(e, *fnty->fnptr_ret);
+                if (rty == e->ptr) return ptr_eval_of_type(e, rs[0], fnty->fnptr_ret);
                 return r;
             }
             if (sig->ret.type.kind == TY_STRUCT) {
@@ -4400,8 +4395,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 sig->ret.type.kind == TY_PTR_VOID ||
                 sig->ret.type.kind == TY_PTR_PTR ||
                 sig->ret.type.kind == TY_FNPTR) {
-                r.is_ptr = true;
-                r.ptr_elem = ptr_elem_of_type(e, sig->ret.type);
+                return ptr_eval_of_type(e, results[0], &sig->ret.type);
             }
             return r;
         }
@@ -6098,10 +6092,14 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
             // Usual arithmetic conversions (simplified): if either side
             // is i64 the result is i64; if either is f32, result is f32.
             // Pointer arithmetic (`p + i`, `i + p`, `p - i`) has the
-            // pointer's type; `p - q` is a ptrdiff_t, which tinyC emits as
-            // an i64.
+            // pointer's type; `p - q` is a ptrdiff_t (`long`), which tinyC
+            // emits as an i64, or an i32 on wasm32.
             bool ap = type_is_pointerish(a), bp = type_is_pointerish(b);
-            if (ap && bp) { t.kind = TY_I64; return t; }
+            if (ap && bp) {
+                t.kind = e->target_wasm32 ? TY_I32 : TY_I64;
+                t.int_bits = 64;
+                return t;
+            }
             if (ap) return a;
             if (bp) return b;
             if (a.kind == TY_F64 || b.kind == TY_F64) { t.kind = TY_F64; return t; }
