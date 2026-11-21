@@ -1624,12 +1624,26 @@ MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *ctx, string name, bo
     return alloc_attr_obj(ctx, a);
 }
 
+// Copy an array/dict attribute's element handles into the context's arena.
+// Callers routinely build `elements` on the stack (e.g. lower_func_func's
+// `passthrough`), so storing their pointer would leave the attribute
+// dangling once that frame returns. The upstream backend copies the
+// elements into its ArrayAttr / DictionaryAttr, so this matches it.
+static MLIR_AttributeHandle *dup_attr_elements(MLIR_Context *ctx,
+                                               const MLIR_AttributeHandle *elements,
+                                               size_t count) {
+    if (count == 0 || !elements || !ctx || !ctx->arena) return NULL;
+    MLIR_AttributeHandle *buf = arena_new_array(ctx->arena, MLIR_AttributeHandle, count);
+    memcpy(buf, elements, count * sizeof(MLIR_AttributeHandle));
+    return buf;
+}
+
 MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_ARRAY;
     a.name = name;
-    a.data.array.elements = elements;
-    a.data.array.count = count;
+    a.data.array.elements = dup_attr_elements(ctx, elements, count);
+    a.data.array.count = a.data.array.elements ? count : 0;
     return alloc_attr_obj(ctx, a);
 }
 
@@ -1637,8 +1651,8 @@ MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *ctx, string name, ML
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_DICT;
     a.name = name;
-    a.data.array.elements = elements;
-    a.data.array.count = count;
+    a.data.array.elements = dup_attr_elements(ctx, elements, count);
+    a.data.array.count = a.data.array.elements ? count : 0;
     return alloc_attr_obj(ctx, a);
 }
 

@@ -570,26 +570,29 @@ def main():
                       f"{r.returncode}\nstderr:\n{r.stderr}")
                 failures += 1
                 continue
-            if native_wasm_emit == "wasmssa":
+            # Textual stages (wasmssa, lowered) can be checked for needles /
+            # patterns; a binary stage (aarch64) only has to compile.
+            if native_wasm_emit in ("wasmssa", "lowered"):
+                label = {"wasmssa": "WasmSSA", "lowered": "lowered MLIR"}[native_wasm_emit]
                 ir = probe_out.read_bytes().decode("latin1")
                 probe_failed = False
                 for needle in t.get("wasm_native_emit_contains", []):
                     if needle not in ir:
-                        print(f"FAIL {name}: WasmSSA is missing {needle!r}")
+                        print(f"FAIL {name}: {label} is missing {needle!r}")
                         failures += 1
                         probe_failed = True
                         break
                 if not probe_failed:
                     for pattern in t.get("wasm_native_emit_regex", []):
                         if re.search(pattern, ir) is None:
-                            print(f"FAIL {name}: WasmSSA does not match {pattern!r}")
+                            print(f"FAIL {name}: {label} does not match {pattern!r}")
                             failures += 1
                             probe_failed = True
                             break
                 if not probe_failed:
                     for needle in t.get("wasm_native_emit_not_contains", []):
                         if needle in ir:
-                            print(f"FAIL {name}: WasmSSA unexpectedly contains {needle!r}")
+                            print(f"FAIL {name}: {label} unexpectedly contains {needle!r}")
                             failures += 1
                             probe_failed = True
                             break
