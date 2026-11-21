@@ -1,0 +1,81 @@
+// char / short / bool have 1- / 2-byte storage, as in C: sizeof / _Alignof of
+// the types, of structs, unions and arrays mixing them, field offsets, and the
+// char-array cases of #263 / #264 / #289 (#251).
+extern int printf(const char *fmt, ...);
+
+struct B { char buf[8]; int n; };
+struct A { char c; char a[3]; };
+struct L { int i; long long a[1]; };
+struct M { char c; bool b; short s; int i; };
+static int part_issues(void) {
+    bool bb[4];
+    printf("%d %d\n", (int)sizeof(bool), (int)sizeof(bb));
+    struct B b; char *p = b.buf;
+    printf("%d %d %d\n", (int)sizeof(struct B), (int)((b.buf + 1) - p), (int)((char*)(b.buf + 1) - (char*)b.buf));
+    printf("%d %d\n", (int)sizeof(struct A), (int)sizeof(struct L));
+    char a[3], c[5];
+    char *q = c;
+    int i;
+    for (i = 0; i < 5; i++) c[i] = 'a' + i;
+    printf("%d %d %d %d\n", (int)sizeof(a), (int)sizeof(c), (int)((char*)(c + 1) - q), *(q + 1));
+    printf("%d %d %d %d\n", (int)sizeof(char), (int)sizeof(short), (int)sizeof(struct M), (int)_Alignof(struct M));
+    return 0;
+}
+struct S1 { char c; bool b; short s; int i; };
+struct S2 { char c; short s; char d; };
+struct S3 { bool a; bool b; bool c; };
+struct S4 { short s; long long x; char c; };
+struct S5 { char c; struct S3 in; short t; };
+struct S6 { unsigned char u[3]; unsigned short v[3]; bool w[5]; };
+struct S7 { int i; char c; };
+union U1 { char c; short s; };
+union U2 { char c[3]; bool b; };
+union U3 { short s[3]; char c; };
+struct S8 { char c; union U3 u; char d; };
+static int part_sizes(void) {
+    printf("%d %d %d %d %d %d\n", (int)sizeof(char), (int)sizeof(signed char), (int)sizeof(unsigned char),
+           (int)sizeof(short), (int)sizeof(unsigned short), (int)sizeof(bool));
+    printf("%d %d %d %d %d %d\n", (int)_Alignof(char), (int)_Alignof(signed char), (int)_Alignof(unsigned char),
+           (int)_Alignof(short), (int)_Alignof(unsigned short), (int)_Alignof(bool));
+    printf("%d %d %d %d\n", (int)sizeof(short int), (int)sizeof(unsigned short int), (int)sizeof(signed short), (int)_Alignof(_Bool));
+    printf("S1 %d %d\n", (int)sizeof(struct S1), (int)_Alignof(struct S1));
+    printf("S2 %d %d\n", (int)sizeof(struct S2), (int)_Alignof(struct S2));
+    printf("S3 %d %d\n", (int)sizeof(struct S3), (int)_Alignof(struct S3));
+    printf("S4 %d %d\n", (int)sizeof(struct S4), (int)_Alignof(struct S4));
+    printf("S5 %d %d\n", (int)sizeof(struct S5), (int)_Alignof(struct S5));
+    printf("S6 %d %d\n", (int)sizeof(struct S6), (int)_Alignof(struct S6));
+    printf("S7 %d %d\n", (int)sizeof(struct S7), (int)_Alignof(struct S7));
+    printf("U1 %d %d U2 %d %d U3 %d %d S8 %d %d\n", (int)sizeof(union U1), (int)_Alignof(union U1),
+           (int)sizeof(union U2), (int)_Alignof(union U2), (int)sizeof(union U3), (int)_Alignof(union U3),
+           (int)sizeof(struct S8), (int)_Alignof(struct S8));
+    struct S1 s1; struct S2 s2; struct S4 s4; struct S5 s5; struct S6 s6; struct S8 s8;
+    char *b1 = (char *)&s1;
+    printf("off S1 %d %d %d %d\n", (int)((char *)&s1.c - b1), (int)((char *)&s1.b - b1),
+           (int)((char *)&s1.s - b1), (int)((char *)&s1.i - b1));
+    char *b2 = (char *)&s2;
+    printf("off S2 %d %d %d\n", (int)((char *)&s2.c - b2), (int)((char *)&s2.s - b2), (int)((char *)&s2.d - b2));
+    char *b4 = (char *)&s4;
+    printf("off S4 %d %d %d\n", (int)((char *)&s4.s - b4), (int)((char *)&s4.x - b4), (int)((char *)&s4.c - b4));
+    char *b5 = (char *)&s5;
+    printf("off S5 %d %d %d\n", (int)((char *)&s5.c - b5), (int)((char *)&s5.in - b5), (int)((char *)&s5.t - b5));
+    char *b6 = (char *)&s6;
+    printf("off S6 %d %d %d\n", (int)((char *)s6.u - b6), (int)((char *)s6.v - b6), (int)((char *)s6.w - b6));
+    char *b8 = (char *)&s8;
+    printf("off S8 %d %d %d\n", (int)((char *)&s8.c - b8), (int)((char *)&s8.u - b8), (int)((char *)&s8.d - b8));
+    char c = 1; short s = 2; bool bb = 1; unsigned short us = 3;
+    short sa[7]; bool ba[3]; unsigned short ua[2][3];
+    printf("%d %d %d %d %d %d %d %d\n", (int)sizeof(c), (int)sizeof(s), (int)sizeof(bb), (int)sizeof(us),
+           (int)sizeof(sa), (int)sizeof(ba), (int)sizeof(ua), (int)sizeof(sa[1]));
+    printf("%d %d %d %d %d %d\n", (int)sizeof(c + 1), (int)sizeof(-s), (int)sizeof(!bb), (int)sizeof(c = 5),
+           (int)sizeof(bb ? c : c), (int)sizeof(s1.s));
+    printf("%d %d %d %d\n", (int)sizeof(*sa), (int)sizeof(s6.v[1]), (int)sizeof(ba[0]), (int)_Alignof(s1));
+    short *ps = sa; bool *pb = ba; char *pc = &c;
+    printf("%d %d %d\n", (int)sizeof(*ps), (int)sizeof(*pb), (int)sizeof(*pc));
+    return 0;
+}
+
+int main(void) {
+    part_issues();
+    part_sizes();
+    return 0;
+}

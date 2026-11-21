@@ -1,0 +1,295 @@
+// Loads and stores of char / short / bool storage (#251): arrays and pointer
+// arithmetic over them, struct fields and copies, globals with initializers,
+// narrow arguments / returns, and conversions on every store.
+extern int printf(const char *fmt, ...);
+extern void *malloc(unsigned long);
+
+struct R { short h[4]; bool f[3]; unsigned short u[2][3]; char tag; };
+int sum_s(short *p, int n) { int t = 0; for (int i = 0; i < n; i++) t += p[i]; return t; }
+int count_b(bool *p, int n) { int t = 0; for (int i = 0; i < n; i++) t += p[i]; return t; }
+static int part_arrays(void) {
+    short a[5]; unsigned short ua[4]; bool ba[6];
+    for (int i = 0; i < 5; i++) a[i] = (short)(i * 20000 - 30000);
+    for (int i = 0; i < 4; i++) ua[i] = (unsigned short)(i * 30000 + 1);
+    for (int i = 0; i < 6; i++) ba[i] = i % 3;
+    printf("%d %d %d %d %d\n", a[0], a[1], a[2], a[3], a[4]);
+    printf("%d %d %d %d\n", ua[0], ua[1], ua[2], ua[3]);
+    printf("%d %d %d %d %d %d\n", ba[0], ba[1], ba[2], ba[3], ba[4], ba[5]);
+    short *p = a; unsigned short *q = ua; bool *r = ba;
+    printf("%d %d %d\n", (int)((char *)(p + 3) - (char *)p), (int)((char *)(q + 3) - (char *)q), (int)((char *)(r + 3) - (char *)r));
+    printf("%d %d %d %d\n", *(p + 2), p[4], *(q + 3), (int)(&a[4] - &a[1]));
+    p++; p += 2; printf("%d %d\n", *p, p[-1]);
+    q = &ua[3]; q--; printf("%d\n", *q);
+    printf("%d %d\n", sum_s(a, 5), count_b(ba, 6));
+    unsigned char *bytes = (unsigned char *)a;
+    printf("%d %d %d\n", bytes[0], bytes[1], bytes[2]);
+    short m[2][3];
+    for (int i = 0; i < 2; i++) for (int j = 0; j < 3; j++) m[i][j] = (short)(i * 1000 - j * 40000);
+    printf("%d %d %d %d\n", m[0][1], m[1][2], (int)sizeof(m), (int)((char *)&m[1][0] - (char *)&m[0][0]));
+    struct R rr;
+    for (int i = 0; i < 4; i++) rr.h[i] = (short)(70000 + i);
+    for (int i = 0; i < 3; i++) rr.f[i] = i - 1;
+    for (int i = 0; i < 2; i++) for (int j = 0; j < 3; j++) rr.u[i][j] = (unsigned short)(-(i + j));
+    rr.tag = 'z';
+    printf("%d %d %d %d %d %d %d %c\n", rr.h[0], rr.h[3], rr.f[0], rr.f[1], rr.f[2], rr.u[0][0], rr.u[1][2], rr.tag);
+    struct R *pr = &rr;
+    pr->h[1] += 5; pr->f[1] = 7; pr->u[1][1]--;
+    printf("%d %d %d %d\n", pr->h[1], pr->f[1], pr->u[1][1], (int)sizeof(rr));
+    short *ph = rr.h; ph[2] = -1;
+    printf("%d %d\n", rr.h[2], (int)((char *)(rr.h + 1) - (char *)rr.h));
+    char x[3], y[5];
+    short sx[2], sy[3];
+    bool bx[2], by[4];
+    char z[] = "hi", w[4] = "ab";
+    printf("%d %d %d %d %d %d %d %d\n", (int)sizeof(x), (int)sizeof(y), (int)sizeof(sx), (int)sizeof(sy),
+           (int)sizeof(bx), (int)sizeof(by), (int)sizeof(z), (int)sizeof(w));
+    for (int i = 0; i < 3; i++) sy[i] = (short)(-i - 1);
+    for (int i = 0; i < 5; i++) y[i] = 'a' + i;
+    char *py = y;
+    printf("%d %d %d %s %s\n", sy[2], *(py + 1), (int)((char *)(y + 1) - py), z, w);
+    short init[4] = {1, -2, 70000, -40000};
+    bool binit[3] = {0, 5, -1};
+    unsigned short uinit[3] = {-1, 65536, 3};
+    printf("%d %d %d %d %d %d %d %d %d %d\n", init[0], init[1], init[2], init[3], binit[0], binit[1], binit[2], uinit[0], uinit[1], uinit[2]);
+    short zi[3] = {0};
+    printf("%d %d %d\n", zi[0], zi[1], zi[2]);
+    return 0;
+}
+struct PS { char c; short s; };
+typedef long long ll_t;
+static int part_ptrs(void) {
+    short buf[6] = {10, -20, 30, -40, 50, -60};
+    void *vp = buf;
+    printf("%d %d %d\n", *(short *)vp, *((short *)vp + 3), *((unsigned short *)vp + 1));
+    unsigned char raw[8] = {1, 2, 255, 255, 0, 128, 7, 0};
+    unsigned short *up = (unsigned short *)raw;
+    short *sp = (short *)raw;
+    printf("%d %d %d %d %d\n", up[0], up[1], sp[1], up[2], sp[2]);
+    bool *bp = (bool *)raw;
+    printf("%d %d\n", bp[0] != 0, bp[4]);
+    short *h = (short *)malloc(10 * sizeof(short));
+    for (int i = 0; i < 10; i++) h[i] = (short)(i * 7000);
+    short *e = h + 10; int n = 0; int t = 0;
+    while (h < e) { t += *h++; n++; }
+    printf("%d %d %d\n", n, t, (int)(e - (h - 10)));
+    unsigned short us = 65535; unsigned short *pus = &us;
+    (*pus)++;
+    printf("%d\n", us);
+    char c = 'A'; char *pc = &c; *pc += 1;
+    short s = 100; short *ps = &s; *ps *= -400;
+    bool b = 0; bool *pbb = &b; *pbb = 42;
+    printf("%c %d %d\n", c, s, b);
+    short **pps = &ps; **pps = 3;
+    printf("%d\n", s);
+    short arr2[3]; short *q = &arr2[0];
+    q[0] = 1; q[1] = 2; q[2] = q[0] + q[1];
+    printf("%d %d\n", arr2[2], (int)((char *)&arr2[2] - (char *)q));
+    ll_t ll[4]; long long *l0 = &ll[0]; long long *l3 = &ll[3];
+    struct PS psa[5]; struct PS *p0 = &psa[0]; struct PS *p4 = &psa[4];
+    printf("%d %d %d\n", (int)(l3 - l0), (int)(p4 - p0), (int)sizeof(psa));
+    return 0;
+}
+struct H { unsigned short **rows; };
+static int part_ptrptr(void) {
+    unsigned short r0[3] = {65535, 2, 40000};
+    unsigned short r1[3] = {7, 65000, 9};
+    unsigned short *rows[2];
+    rows[0] = r0; rows[1] = r1;
+    unsigned short **pp = rows;
+    printf("%d %d %d\n", pp[0][0], pp[1][1], pp[0][2]);
+    printf("%d\n", (*pp)[2]);
+    struct H h; h.rows = rows;
+    printf("%d %d\n", h.rows[0][0], h.rows[1][1]);
+    bool b0[2] = {1, 0}; bool *bp[1]; bp[0] = b0; bool **bpp = bp;
+    printf("%d %d\n", bpp[0][0], bpp[0][1]);
+    signed char sc[2] = {-5, 100}; signed char *scp = sc; signed char **scpp = &scp;
+    printf("%d %d\n", scpp[0][0], (*scpp)[1]);
+    pp[1][1] = 3; printf("%d\n", r1[1]);
+    return 0;
+}
+struct P { char c; short s; bool b; unsigned char uc; unsigned short us; int i; };
+union U { unsigned int w; unsigned short h[2]; unsigned char b[4]; bool f; signed char sc; };
+struct Q { struct P p; char tail; };
+struct P make(int k) {
+    struct P r;
+    r.c = (char)(k + 100); r.s = (short)(k * 1000); r.b = k & 1; r.uc = (unsigned char)(k + 250);
+    r.us = (unsigned short)(k - 10); r.i = k;
+    return r;
+}
+int show(struct P p) { return printf("%d %d %d %d %d %d\n", p.c, p.s, p.b, p.uc, p.us, p.i); }
+char pass_c(char c) { return c + 1; }
+short pass_s(short s) { return s * 2; }
+bool pass_b(bool b) { return !b; }
+unsigned short pass_us(unsigned short u) { return u + 1; }
+unsigned char pass_uc(unsigned char u) { return u + 1; }
+int sum_q(struct Q *q) { return q->p.c + q->p.s + q->p.b + q->tail; }
+static int part_structs(void) {
+    struct P a = make(7);
+    show(a);
+    struct P b = a;
+    b.s += 30000; b.c++; b.b = !b.b; b.us -= 100; b.uc *= 3;
+    show(b); show(a);
+    struct P c = {-1, -2, 3, 300, 70000, 5};
+    show(c);
+    struct P d = {.us = 9, .b = 1, .c = 'x'};
+    show(d);
+    struct P arr[3] = {{1, 2, 0, 3, 4, 5}, {6, 7, 1, 8, 9, 10}};
+    show(arr[0]); show(arr[1]);
+    arr[2] = arr[1]; arr[2].s = -9;
+    show(arr[2]);
+    struct Q q; q.p = make(3); q.tail = -5;
+    printf("%d\n", sum_q(&q));
+    struct Q q2 = q; q2.p.us = 65535;
+    printf("%d %d %d\n", q2.p.us, q2.tail, (int)sizeof(struct Q));
+    union U u; u.w = 0x80FF7F01u;
+    printf("%d %d %d %d %d %d\n", u.h[0], u.h[1], u.b[0], u.b[1], u.b[3], u.sc);
+    u.h[1] = 0x1234; u.b[0] = 0xFE;
+    printf("%u %d\n", u.w, (int)sizeof(u));
+    u.w = 0; u.f = 1;
+    printf("%u %d\n", u.w, u.f);
+    union U u2 = u; u2.b[2] = 9;
+    printf("%u %u\n", u2.w, u.w);
+    printf("%d %d %d %d %d\n", pass_c(127), pass_s(20000), pass_b(0), pass_us(65535), pass_uc(255));
+    printf("%d %d\n", pass_c(-129), pass_s(-17000));
+    struct P *pp = &a;
+    pp->s = pp->s + pp->c; pp->b = pp->s; ++pp->uc;
+    printf("%d %d %d %d\n", a.s, a.b, a.uc, (int)sizeof(*pp));
+    struct P big = (struct P){1, 2, 1, 4, 5, 6};
+    show(big);
+    return 0;
+}
+struct F { bool on; unsigned char lvl; short delta; bool flags[4]; };
+struct W { char tag; struct F f; union { short s; unsigned char b[2]; } u; };
+static void bump(short *p, unsigned char *q, bool *r) { *p += 1000; *q -= 1; *r = !*r; }
+static int sum_flags(struct F f) { int n = 0; for (int i = 0; i < 4; i++) n += f.flags[i]; return n + f.on + f.lvl + f.delta; }
+static struct F mk(int k) { struct F f; f.on = k & 1; f.lvl = (unsigned char)(k * 50); f.delta = (short)(k * -9000); f.flags[0] = 1; f.flags[1] = 0; f.flags[2] = k > 2; f.flags[3] = 1; return f; }
+static int part_fields(void) {
+    short s = 32000; unsigned char uc = 0; bool b = 0;
+    bump(&s, &uc, &b);
+    printf("%d %d %d\n", s, uc, b);
+    struct F f = mk(3);
+    printf("%d %d %d %d %d\n", f.on, f.lvl, f.delta, f.flags[2], sum_flags(f));
+    struct W w; w.tag = 'w'; w.f = mk(5); w.u.s = -2;
+    printf("%c %d %d %d %d %d\n", w.tag, w.f.lvl, w.f.delta, w.u.b[0], w.u.b[1], (int)sizeof(w));
+    struct W w2 = w; w2.u.b[1] = 0x7f; w2.f.flags[0] = 0;
+    printf("%d %d %d %d\n", w2.u.s, w.u.s, w2.f.flags[0], w.f.flags[0]);
+    int hist[4] = {0};
+    unsigned char data[6] = {0, 255, 128, 3, 64, 200};
+    for (int i = 0; i < 6; i++) hist[data[i] >> 6]++;
+    printf("%d %d %d %d\n", hist[0], hist[1], hist[2], hist[3]);
+    signed char sc = -1; unsigned short us = sc;
+    printf("%d %d %d\n", us, sc < us, (unsigned char)sc == 255);
+    short sw = -2;
+    switch (sw) { case -2: printf("neg2\n"); break; default: printf("other\n"); }
+    bool bb = f.lvl > 100 && f.delta < 0;
+    printf("%d %d\n", bb, bb ? f.lvl : f.delta);
+    short arr[4] = {-1, -2, -3, -4}; short *p = &arr[3];
+    printf("%d %d %d\n", p[-1], *(p - 3), (int)(p - arr));
+    unsigned char u8 = 200; u8 += u8; printf("%d\n", u8);
+    short m = -32768; m--; printf("%d\n", m);
+    for (unsigned char c = 250; c != 2; c++) { if (c == 255) printf("wrap\n"); }
+    struct F fs[2]; fs[0] = mk(1); fs[1] = fs[0]; fs[1].lvl++;
+    printf("%d %d %d\n", fs[0].lvl, fs[1].lvl, (int)((char *)&fs[1] - (char *)&fs[0]));
+    return 0;
+}
+char gc = -3;
+unsigned char guc = 250;
+short gs = -12345;
+unsigned short gus = 60000;
+bool gb = 7;
+bool gb0;
+short gzs;
+short gsa[4] = {1, -1, 32767, -32768};
+unsigned short gusa[3] = {65535, 1, 2};
+bool gba[5] = {1, 0, 1, 1};
+char gca[6] = {104, 105, 0};
+struct G { char c; short s; bool b; int i; };
+struct G gstr;
+struct G garr[2];
+static short counter(void) { static short n = 32766; n++; return n; }
+static bool flip(void) { static bool f; f = !f; return f; }
+static int part_globals(void) {
+    printf("%d %d %d %d %d %d %d %d\n", gc, guc, gs, gus, gb, gb0, gzs, (int)sizeof(gs));
+    printf("%d %d %d %d %d %d %d\n", gsa[0], gsa[1], gsa[2], gsa[3], gusa[0], gusa[1], gusa[2]);
+    printf("%d %d %d %d %d %s %d %d\n", gba[0], gba[1], gba[2], gba[3], gba[4], gca, (int)sizeof(gsa), (int)sizeof(gba));
+    gc += 200; guc += 10; gs -= 30000; gus += 6000; gb = 0;
+    printf("%d %d %d %d %d\n", gc, guc, gs, gus, gb);
+    gstr.c = 'q'; gstr.s = -2; gstr.b = 3; gstr.i = 77;
+    garr[1] = gstr; garr[1].s = 1000;
+    printf("%d %d %d %d %d %d %d\n", gstr.c, gstr.s, gstr.b, gstr.i, garr[1].s, garr[0].s, (int)sizeof(garr));
+    int c1 = counter(); int c2 = counter(); int c3 = counter();
+    printf("%d %d %d\n", c1, c2, c3);
+    int f1 = flip(); int f2 = flip(); int f3 = flip();
+    printf("%d %d %d\n", f1, f2, f3);
+    short *p = gsa; p[1] = 7; bool *pb = &gba[4]; *pb = 9;
+    printf("%d %d\n", gsa[1], gba[4]);
+    return 0;
+}
+static unsigned char gtab[5] = {250, 251, 252, 253, 254};
+static short gneg[3] = {-1, -32768, 32767};
+static bool gflags[6] = {0, 1, 0, 1};
+signed char gsc = -100;
+unsigned short gus2;
+struct Cfg { char name[6]; bool on; short lim; };
+struct Cfg gcfg;
+static int touch(void) { static unsigned short calls; return ++calls; }
+static int part_globals2(void) {
+    int t = 0; for (int i = 0; i < 5; i++) t += gtab[i];
+    printf("%d %d %d %d\n", t, gneg[0] + gneg[1] + gneg[2], gflags[3] + gflags[4], gsc);
+    gus2 = 65535; gus2++; gsc -= 100;
+    printf("%d %d\n", gus2, gsc);
+    gcfg.name[0] = 'o'; gcfg.name[1] = 'k'; gcfg.name[2] = 0; gcfg.on = 9; gcfg.lim = 70000;
+    printf("%s %d %d %d\n", gcfg.name, gcfg.on, gcfg.lim, (int)sizeof(gcfg));
+    unsigned char *pt = gtab; pt[4] = 1; short *pn = &gneg[1]; *pn = 5;
+    printf("%d %d\n", gtab[4], gneg[1]);
+    touch(); touch(); printf("%d\n", touch());
+    return 0;
+}
+struct T { signed char sc; unsigned char uc; short s; unsigned short us; bool b; };
+static int part_ops(void) {
+    struct T t = {0};
+    t.sc = 127; t.sc++; t.uc = 0; t.uc--; t.s = 32767; t.s += 1; t.us = 0; t.us -= 1; t.b = 2;
+    printf("%d %d %d %d %d\n", t.sc, t.uc, t.s, t.us, t.b);
+    int x = (t.sc = 300);
+    int y = (t.us = -2);
+    int z = (t.b = 0.5);
+    printf("%d %d %d %d %d %d\n", x, y, z, t.sc, t.us, t.b);
+    short arr[3] = {0};
+    int w = arr[1] = 40000;
+    printf("%d %d\n", w, arr[1]);
+    unsigned short ua[2]; ua[0] = 65535; ua[1] = ua[0] + 1;
+    printf("%d %d %d\n", ua[0], ua[1], ua[0] * 2);
+    bool bs[3]; bs[0] = &x; bs[1] = 0.0; bs[2] = -7;
+    printf("%d %d %d\n", bs[0], bs[1], bs[2]);
+    short s = -1; unsigned short u = s;
+    printf("%d %d %d\n", u, s == u, (short)u == s);
+    char c = 'a'; c = c << 2;
+    printf("%d\n", c);
+    int k = 0;
+    for (short i = 32760; i > 0 && k < 20; i++) k++;
+    printf("%d\n", k);
+    unsigned char cnt = 250; int loops = 0;
+    while (cnt != 4) { cnt++; loops++; }
+    printf("%d\n", loops);
+    short sh = 0x7fff; sh <<= 1; sh >>= 1;
+    printf("%d\n", sh);
+    unsigned short ush = 0x8000; ush >>= 15;
+    printf("%d\n", ush);
+    bool f = 1; f += 1; printf("%d\n", f);
+    f = 0; f--; printf("%d\n", f);
+    signed char m = -128; m = -m; printf("%d\n", m);
+    t.s = 1000; t.s *= t.s; printf("%d\n", t.s);
+    return 0;
+}
+
+int main(void) {
+    part_arrays();
+    part_ptrs();
+    part_ptrptr();
+    part_structs();
+    part_fields();
+    part_globals();
+    part_globals2();
+    part_ops();
+    return 0;
+}
