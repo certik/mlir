@@ -2861,7 +2861,10 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
             td->name.size = len;
             bool is_64 = always_64[k] || !target_wasm32;
             td->ty.kind = is_64 ? TY_I64 : TY_I32;
-            td->ty.int_bits = is_64 ? 64 : 32;
+            // The pointer-sized ones are `long` / `unsigned long` (as
+            // corec/base/types.h defines them): 64 bits as `long` is tagged
+            // also on wasm32, where the storage is i32.
+            td->ty.int_bits = 64;
             td->ty.int_unsigned = unsigneds[k];
             td->next = p.typedefs;
             p.typedefs = td;
