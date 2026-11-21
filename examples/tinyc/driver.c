@@ -727,6 +727,17 @@ int app_main(void) {
     char *wasi_adapter_path = NULL;
 
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--version") == 0) {
+            // Names the MLIR API implementation this binary is linked
+            // against; the test runner asks for it (run_tinyc_tests.py).
+#ifdef TINYC_HAS_UPSTREAM
+            println(str_lit("tinyc (MLIR API: upstream)"));
+#else
+            println(str_lit("tinyc (MLIR API: native)"));
+#endif
+            arena_destroy(boot_arena);
+            return 0;
+        }
         if (strcmp(argv[i], "--link") == 0) {
             // Linker mode: collect remaining positional arguments as
             // input .wasm.o files, expect -o <out.wasm>. All other

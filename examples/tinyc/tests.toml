@@ -1503,7 +1503,9 @@ expected_stdout = "1 11 20\n2 100 101 107 51 416 106 107 2 3 36 220 110\n2 11 20
 name = "lift_opt_passes_fire"
 targets = ["wasm"]
 wasm_upstream_skip = true
-wasm_native_lift_marker = "imm16 = 24301"
+# The marker is a regex that picks the probed function; each key of
+# wasm_native_lift_max is a whole op name.
+wasm_native_lift_marker = 'imm16\s*=\s*24301\b'
 wasm_native_lift_max = { "aarch64.ldr_w" = 1, "aarch64.fp_binop" = 0 }
 
 [[test]]
