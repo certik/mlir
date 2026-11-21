@@ -588,6 +588,24 @@ def main():
         srcs = [HERE / "tests" / s for s in sources]
         unity_src = write_unity_source(name, srcs) if use_unity_source() else None
 
+        # Compile-error regressions: the source must be rejected with a clean
+        # non-zero exit (not a crash) and a diagnostic containing the given
+        # text. Only the front end runs, so every target checks the same.
+        compile_error = t.get("expected_compile_error")
+        if compile_error is not None:
+            r = run([str(TINYC), "--emit=mlir", *unity_include_flags(), str(srcs[0])])
+            output = r.stdout + r.stderr
+            if r.returncode <= 0:
+                print(f"FAIL {name}: expected a compile error, tinyc returned "
+                      f"{r.returncode}\noutput:\n{output}")
+                failures += 1
+            elif compile_error not in output:
+                print(f"FAIL {name}: diagnostic {compile_error!r} not found in:\n{output}")
+                failures += 1
+            else:
+                print(f"PASS {name}")
+            continue
+
         # Compiler-probe regressions inspect a native pipeline stage directly.
         # They validate generated WasmSSA or the WasmSSA -> LLVM -> AArch64
         # conversion rather than executing a linked module.

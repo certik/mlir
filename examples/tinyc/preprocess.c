@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include <base/arena.h>
+#include <base/format.h>
 #include <base/io.h>
 #include <base/string.h>
 
@@ -106,7 +107,7 @@ typedef struct {
     string    cur_file;
     int       cur_line;
     bool      cur_loc_valid;
-    bool      had_error;
+    int       n_errors;
 } PP;
 
 // ----------------------------------------------------------------------
@@ -114,7 +115,7 @@ typedef struct {
 // ----------------------------------------------------------------------
 
 static void pp_error(PP *pp, string file, int line, string msg) {
-    pp->had_error = true;
+    pp->n_errors++;
     println(str_lit("tinyc preprocess error at {}:{}: {}"),
             file, (int64_t)line, msg);
 }
@@ -1483,7 +1484,10 @@ static void process_tokens(PP *pp, PPTok *toks, size_t n, string file) {
                 }
                 string resolved;
                 if (!resolve_include(pp, file, name, angle, &resolved)) {
-                    pp_error(pp, file, t.line, s_lit("cannot find include file"));
+                    pp_error(pp, file, t.line,
+                             format(pp->arena, str_lit("cannot find include file {}{}{}"),
+                                    angle ? str_lit("<") : str_lit("\""), name,
+                                    angle ? str_lit(">") : str_lit("\"")));
                     i = end + 1; continue;
                 }
                 if (pragma_once_seen(pp, resolved)) { i = end + 1; continue; }
@@ -1546,6 +1550,10 @@ static void process_file(PP *pp, string path) {
 // Public entry
 // ----------------------------------------------------------------------
 
+static int g_last_preprocess_errors = 0;
+
+int tinyc_last_preprocess_errors(void) { return g_last_preprocess_errors; }
+
 string tinyc_preprocess(Arena *arena, string path,
                         string *include_dirs, size_t n_include_dirs,
                         string *defines, size_t n_defines) {
@@ -1597,5 +1605,6 @@ string tinyc_preprocess(Arena *arena, string path,
 
     process_file(&pp, path);
     out_char(&pp, '\n');
+    g_last_preprocess_errors = pp.n_errors;
     return (string){pp.out, pp.out_size};
 }

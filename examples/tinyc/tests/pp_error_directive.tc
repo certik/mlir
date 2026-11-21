@@ -1,0 +1,12 @@
+// An active #error directive fails the build (#258). An inactive one is
+// skipped.
+#if 0
+#error "not reached"
+#endif
+#ifndef TINYC_PP_ERROR_DIRECTIVE_OFF
+#error "tinyc_pp_error_directive_fired"
+#endif
+
+int main(void) {
+    return 0;
+}
