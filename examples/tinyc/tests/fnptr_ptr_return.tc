@@ -1,0 +1,44 @@
+extern int printf(const char *fmt, ...);
+// Local function-pointer declarators whose return type is not a plain base
+// type: a pointer (`const char *(*fp)(int)`), a struct pointer, a typedef
+// name or a struct. parse_decl only recognised `T (*fp)(...)` right after a
+// base type, so these failed with "expected identifier". `(void)` as the
+// parameter list declares no parameters.
+
+struct S { int x; int y; };
+typedef const char *cstr;
+
+static struct S s0[1];
+static unsigned char ub[2] = {200, 7};
+
+const char *name(int i) { return i == 0 ? "zero" : i == 1 ? "one" : "many"; }
+struct S *set(int v) { s0[0].x = v; s0[0].y = v * 2; return &s0[0]; }
+struct S make(int v) { struct S s; s.x = v; s.y = -v; return s; }
+unsigned char *bytes(void) { return ub; }
+char bump(int x) { return (char)(x + 1); }
+
+int main(void) {
+    const char *(*fp)(int) = name;
+    printf("%s %s %s\n", fp(0), fp(1), fp(2));
+
+    struct S *(*sp)(int) = set;
+    printf("%d %d\n", sp(5)->x, sp(6)->y);
+
+    struct S (*mp)(int) = make;
+    struct S m = mp(3);
+    printf("%d %d\n", m.x, m.y);
+
+    unsigned char *(*bp)(void) = bytes;
+    unsigned char *b = bp();
+    printf("%d %d\n", b[0], b[1]);
+
+    cstr (*tp)(int) = name;
+    char (*cp)(int) = bump;
+    printf("%s %d\n", tp(1), cp(127));
+
+    int i;
+    for (const char *(*q)(int) = name; q; q = 0)
+        for (i = 0; i < 3; i++) printf("%s;", q(i));
+    printf("\n");
+    return 0;
+}

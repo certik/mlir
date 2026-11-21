@@ -4327,6 +4327,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                                 !type_promotes_to_int(*fnty->fnptr_ret);
                 r.is_ptr = (rty == e->ptr);
                 r.ptr_elem = ptr_elem_of_type(e, *fnty->fnptr_ret);
+                if (fnty->fnptr_ret->kind == TY_PTR_STRUCT)
+                    r.sdef = find_struct(e, fnty->fnptr_ret->struct_name);
                 return r;
             }
             if (sig->ret.type.kind == TY_STRUCT) {
