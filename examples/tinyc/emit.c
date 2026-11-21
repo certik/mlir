@@ -2432,29 +2432,66 @@ static void emit_flat_call(E *e, Scope *sc, FuncSig *sig, VecExprPtr args,
 //     EX_FIELD, EX_FLOAT, EX_NULL, EX_STR, EX_CAST
 //   - division / modulo by zero (let runtime / LLVM handle it)
 //   - shifts by negative or >=32 (let LLVM handle it)
-// True if a constant subtree has a 64-bit or unsigned literal. Its value
-// then has a type other than `int`, so the expression pre-pass must not
-// replace it with ast_fold_int's int32 result (array bounds still fold).
-static bool ast_has_non_int_lit(Expr *ex) {
-    if (!ex) return false;
-    switch (ex->kind) {
-        case EX_INT:     return ex->is_i64 || ex->is_unsigned;
-        case EX_UN:      return ast_has_non_int_lit(ex->lhs);
-        case EX_BIN:     return ast_has_non_int_lit(ex->lhs) ||
-                                ast_has_non_int_lit(ex->rhs);
-        case EX_TERNARY: return ast_has_non_int_lit(ex->lhs) ||
-                                ast_has_non_int_lit(ex->rhs) ||
-                                ast_has_non_int_lit(ex->lvalue);
-        default:         return false;
-    }
+// A folded constant: its value, held sign- or zero-extended from its width
+// by its signedness, and its C type (int / unsigned / 64-bit variants).
+typedef struct {
+    int64_t v;
+    bool is_i64;
+    bool is_unsigned;
+} FoldVal;
+
+// Bring `v` into the range of the type (is_i64, is_unsigned).
+static int64_t fold_norm(int64_t v, bool is_i64, bool is_unsigned) {
+    if (is_i64) return v;
+    return is_unsigned ? (int64_t)(uint32_t)v : (int64_t)(int32_t)v;
 }
 
-static bool ast_fold_int(E *e, Scope *sc, Expr *ex, int64_t *out) {
+static FoldVal fold_int(int64_t v) {
+    FoldVal r = {0};
+    r.v = (int64_t)(int32_t)v;
+    return r;
+}
+
+static bool ast_fold(E *e, Scope *sc, Expr *ex, FoldVal *out);
+
+// Fold both operands of a binary expression and convert them to their
+// common type (C's usual arithmetic conversions).
+static bool fold_common(E *e, Scope *sc, Expr *l, Expr *r, FoldVal *a, FoldVal *b) {
+    if (!ast_fold(e, sc, l, a) || !ast_fold(e, sc, r, b)) return false;
+    bool i64 = a->is_i64 || b->is_i64;
+    bool u;
+    if (a->is_i64 == b->is_i64) u = a->is_unsigned || b->is_unsigned;
+    else u = a->is_i64 ? a->is_unsigned : b->is_unsigned;
+    a->v = fold_norm(a->v, i64, u); a->is_i64 = i64; a->is_unsigned = u;
+    b->v = fold_norm(b->v, i64, u); b->is_i64 = i64; b->is_unsigned = u;
+    return true;
+}
+
+// Constant-fold a literal-only integer expression with C semantics: each
+// literal has its own width and signedness, and operations follow the
+// usual arithmetic conversions. Folded:
+//   EX_INT, EX_SIZEOF (an `int`, as the emitter types it)
+//   EX_UN: OP_NEG, OP_BNOT, OP_NOT
+//   EX_BIN: + - * / % & | ^ << >> < <= > >= == != && ||
+//   EX_TERNARY when the condition itself folds.
+//
+// Refused (returns false; caller falls back to normal emission):
+//   - EX_VAR, EX_CALL, EX_ASSIGN, EX_INDEX, EX_ADDR, EX_DEREF,
+//     EX_FIELD, EX_FLOAT, EX_NULL, EX_STR, EX_CAST
+//   - division / modulo by zero and signed MIN / -1 (let runtime / LLVM
+//     handle it)
+//   - shifts by a negative count or by the left operand's width or more
+static bool ast_fold(E *e, Scope *sc, Expr *ex, FoldVal *out) {
     if (!ex) return false;
     switch (ex->kind) {
-        case EX_INT:
-            *out = (int64_t)(int32_t)ex->int_value;
+        case EX_INT: {
+            FoldVal r = {0};
+            r.is_i64 = ex->is_i64;
+            r.is_unsigned = ex->is_unsigned;
+            r.v = fold_norm(ex->int_value, r.is_i64, r.is_unsigned);
+            *out = r;
             return true;
+        }
         case EX_SIZEOF: {
             Type ty = (Type){0};
             if (ex->sizeof_is_expr) {
@@ -2462,75 +2499,116 @@ static bool ast_fold_int(E *e, Scope *sc, Expr *ex, int64_t *out) {
                 if (ex->lhs && ex->lhs->kind == EX_STR) {
                     // sizeof("string literal") yields the array size
                     // including the trailing NUL, matching standard C.
-                    *out = (int64_t)ex->lhs->name.size;
+                    *out = fold_int((int64_t)ex->lhs->name.size);
                     return true;
                 }
                 ty = infer_expr_type(e, sc, ex->lhs);
                 if (ty.kind == TY_VOID) return false;
-                *out = (int64_t)(int32_t)c_sizeof_expr(e, sc, ex->lhs);
+                *out = fold_int(c_sizeof_expr(e, sc, ex->lhs));
                 return true;
             } else {
                 if (ex->cast_type.kind == TY_VOID) return false;
                 ty = ex->cast_type;
             }
-            *out = (int64_t)(int32_t)type_size(e, ty);
+            *out = fold_int(type_size(e, ty));
             return true;
         }
         case EX_UN: {
-            int64_t a;
-            if (!ast_fold_int(e, sc, ex->lhs, &a)) return false;
-            int32_t a32 = (int32_t)a;
+            FoldVal a;
+            if (!ast_fold(e, sc, ex->lhs, &a)) return false;
             switch (ex->op) {
-                case OP_NEG:  *out = (int64_t)(int32_t)(-a32);   return true;
-                case OP_BNOT: *out = (int64_t)(int32_t)(~a32);   return true;
-                case OP_NOT:  *out = (a32 == 0) ? 1 : 0;         return true;
+                case OP_NEG:
+                    a.v = fold_norm((int64_t)(0 - (uint64_t)a.v), a.is_i64, a.is_unsigned);
+                    *out = a; return true;
+                case OP_BNOT:
+                    a.v = fold_norm(~a.v, a.is_i64, a.is_unsigned);
+                    *out = a; return true;
+                case OP_NOT:
+                    *out = fold_int(a.v == 0 ? 1 : 0); return true;
                 default: return false;
             }
         }
         case EX_BIN: {
-            int64_t a, b;
-            if (!ast_fold_int(e, sc, ex->lhs, &a)) return false;
-            if (!ast_fold_int(e, sc, ex->rhs, &b)) return false;
-            int32_t a32 = (int32_t)a, b32 = (int32_t)b;
+            FoldVal a, b;
+            if (ex->op == OP_SHL || ex->op == OP_SHR) {
+                // The result has the left operand's type.
+                if (!ast_fold(e, sc, ex->lhs, &a) || !ast_fold(e, sc, ex->rhs, &b))
+                    return false;
+                int width = a.is_i64 ? 64 : 32;
+                if (b.v < 0 || b.v >= width) return false;
+                if (ex->op == OP_SHL) {
+                    a.v = fold_norm((int64_t)((uint64_t)a.v << b.v), a.is_i64, a.is_unsigned);
+                } else if (a.is_unsigned) {
+                    a.v = (int64_t)((uint64_t)a.v >> b.v);  // zero-extended when 32-bit
+                } else {
+                    a.v = a.v >> b.v;
+                }
+                *out = a;
+                return true;
+            }
+            if (ex->op == OP_AND || ex->op == OP_OR) {
+                if (!ast_fold(e, sc, ex->lhs, &a) || !ast_fold(e, sc, ex->rhs, &b))
+                    return false;
+                bool t = ex->op == OP_AND ? (a.v != 0 && b.v != 0) : (a.v != 0 || b.v != 0);
+                *out = fold_int(t ? 1 : 0);
+                return true;
+            }
+            if (!fold_common(e, sc, ex->lhs, ex->rhs, &a, &b)) return false;
+            bool u = a.is_unsigned;
+            uint64_t ua = (uint64_t)a.v, ub = (uint64_t)b.v;
+            FoldVal r = a;
             switch (ex->op) {
-                case OP_ADD: *out = (int64_t)(int32_t)(a32 + b32); return true;
-                case OP_SUB: *out = (int64_t)(int32_t)(a32 - b32); return true;
-                case OP_MUL: *out = (int64_t)(int32_t)(a32 * b32); return true;
-                case OP_DIV:
-                    if (b32 == 0) return false;
-                    *out = (int64_t)(int32_t)(a32 / b32); return true;
-                case OP_MOD:
-                    if (b32 == 0) return false;
-                    *out = (int64_t)(int32_t)(a32 % b32); return true;
-                case OP_BAND: *out = (int64_t)(int32_t)(a32 & b32); return true;
-                case OP_BOR:  *out = (int64_t)(int32_t)(a32 | b32); return true;
-                case OP_BXOR: *out = (int64_t)(int32_t)(a32 ^ b32); return true;
-                case OP_SHL:
-                    if (b32 < 0 || b32 >= 32) return false;
-                    *out = (int64_t)(int32_t)((uint32_t)a32 << b32); return true;
-                case OP_SHR:
-                    if (b32 < 0 || b32 >= 32) return false;
-                    *out = (int64_t)(int32_t)(a32 >> b32); return true;
-                case OP_LT: *out = a32 <  b32 ? 1 : 0; return true;
-                case OP_LE: *out = a32 <= b32 ? 1 : 0; return true;
-                case OP_GT: *out = a32 >  b32 ? 1 : 0; return true;
-                case OP_GE: *out = a32 >= b32 ? 1 : 0; return true;
-                case OP_EQ: *out = a32 == b32 ? 1 : 0; return true;
-                case OP_NE: *out = a32 != b32 ? 1 : 0; return true;
-                case OP_AND: *out = (a32 != 0 && b32 != 0) ? 1 : 0; return true;
-                case OP_OR:  *out = (a32 != 0 || b32 != 0) ? 1 : 0; return true;
+                case OP_ADD: r.v = (int64_t)(ua + ub); break;
+                case OP_SUB: r.v = (int64_t)(ua - ub); break;
+                case OP_MUL: r.v = (int64_t)(ua * ub); break;
+                case OP_DIV: case OP_MOD: {
+                    if (b.v == 0) return false;
+                    if (u) {
+                        r.v = (int64_t)(ex->op == OP_DIV ? ua / ub : ua % ub);
+                    } else {
+                        int64_t min = a.is_i64 ? (int64_t)0x8000000000000000ull
+                                               : -(int64_t)0x80000000ll;
+                        if (a.v == min && b.v == -1) return false;
+                        r.v = ex->op == OP_DIV ? a.v / b.v : a.v % b.v;
+                    }
+                    break;
+                }
+                case OP_BAND: r.v = a.v & b.v; break;
+                case OP_BOR:  r.v = a.v | b.v; break;
+                case OP_BXOR: r.v = a.v ^ b.v; break;
+                case OP_LT: *out = fold_int(u ? ua <  ub : a.v <  b.v); return true;
+                case OP_LE: *out = fold_int(u ? ua <= ub : a.v <= b.v); return true;
+                case OP_GT: *out = fold_int(u ? ua >  ub : a.v >  b.v); return true;
+                case OP_GE: *out = fold_int(u ? ua >= ub : a.v >= b.v); return true;
+                case OP_EQ: *out = fold_int(a.v == b.v); return true;
+                case OP_NE: *out = fold_int(a.v != b.v); return true;
                 default: return false;
             }
+            r.v = fold_norm(r.v, r.is_i64, r.is_unsigned);
+            *out = r;
+            return true;
         }
         case EX_TERNARY: {
-            int64_t c;
-            if (!ast_fold_int(e, sc, ex->lhs, &c)) return false;
-            Expr *pick = ((int32_t)c != 0) ? ex->rhs : ex->lvalue;
-            return ast_fold_int(e, sc, pick, out);
+            FoldVal c;
+            if (!ast_fold(e, sc, ex->lhs, &c)) return false;
+            // The result has the branches' common type when both fold.
+            FoldVal a, b;
+            if (fold_common(e, sc, ex->rhs, ex->lvalue, &a, &b)) {
+                *out = c.v != 0 ? a : b;
+                return true;
+            }
+            return ast_fold(e, sc, c.v != 0 ? ex->rhs : ex->lvalue, out);
         }
         default:
             return false;
     }
+}
+
+static bool ast_fold_int(E *e, Scope *sc, Expr *ex, int64_t *out) {
+    FoldVal r;
+    if (!ast_fold(e, sc, ex, &r)) return false;
+    *out = r.v;
+    return true;
 }
 
 // Resolve a deferred array-length expression on `t` (set when the
@@ -2632,9 +2710,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
     // Only kicks in for nodes that ast_fold_int actually folds; anything
     // with a side effect or a non-int operand falls through unchanged.
     if (ex->kind == EX_BIN || ex->kind == EX_UN || ex->kind == EX_TERNARY) {
-        int64_t fv;
-        if (!ast_has_non_int_lit(ex) && ast_fold_int(e, sc, ex, &fv)) {
-            r.val = emit_const_i32(e, fv);
+        FoldVal fv;
+        if (ast_fold(e, sc, ex, &fv)) {
+            r.val = fv.is_i64 ? emit_const_i64(e, fv.v) : emit_const_i32(e, fv.v);
+            r.is_i64 = fv.is_i64;
+            r.is_unsigned = fv.is_unsigned;
             return r;
         }
     }
@@ -2795,6 +2875,13 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             r.is_f64   = any_f64;
             r.is_ptr   = any_ptr;
             r.is_i64   = any_i64;
+            // Integer branches: C's usual arithmetic conversions decide the
+            // signedness (the 64-bit operand's when the widths differ).
+            if (!any_ptr && !any_float) {
+                r.is_unsigned = (av.is_i64 == bv.is_i64)
+                    ? (av.is_unsigned || bv.is_unsigned)
+                    : (av.is_i64 ? av.is_unsigned : bv.is_unsigned);
+            }
             r.is_str   = av.is_str && bv.is_str;
             r.sdef     = av.sdef ? av.sdef : bv.sdef;
             // Keep the pointee type of `c ? "ab" : s` so pointer arithmetic
@@ -3767,6 +3854,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // A shift has the (promoted) left operand's type: the right
             // operand's signedness must not make `x >> 2u` logical.
             bool lhs_unsigned = a.is_unsigned;
+            if ((ex->op == OP_SHL || ex->op == OP_SHR) && !a.is_float && !b.is_float &&
+                !a.is_i64 && b.is_i64) {
+                b.val = emit_trunci_i64_to_i32(e, b.val);
+                b.is_i64 = false;
+            }
             unify_numeric(e, &a, &b);
             bool flt = a.is_float;
             bool flt64 = a.is_f64;

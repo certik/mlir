@@ -1,4 +1,6 @@
 extern int printf(const char *fmt, ...);
+long long ilt_g1 = -0xFFFFFFFF;
+unsigned long long ilt_g2 = -1u;
 // An integer literal takes the first of int / long / long long that can
 // hold its value; a hex/octal literal may also take the unsigned variants,
 // and a `u`-suffixed one only those (#247).
@@ -35,5 +37,18 @@ int main() {
     int bound_u[1u + 2];
     int bound_ll[1LL + 1];
     printf("%d %d\n", (int)sizeof(bound_u), (int)sizeof(bound_ll));
+    // Constant folding uses the literals' own types.
+    int bound_shr[0xFFFFFFFFu >> 28];
+    int bound_cmp[(-1u > 0) + 1];
+    printf("%d %d %d %d\n", (int)sizeof(bound_shr), (int)sizeof(bound_cmp),
+           (int)(0xFFFFFFFFu / 0x10000000u), -1u > 0);
+    // Global initializers negate a literal in its own type.
+    printf("%lld %llu\n", ilt_g1, ilt_g2);
+    // An assignment has the lvalue's type; ?: gets the usual conversions.
+    int asg;
+    printf("%d %d %d\n", (asg = 4000000000u) < 0, (0 ? 1u : -1) > 0, (1 ? -1 : 0u) < 0);
+    // A 64-bit shift count does not widen the left operand.
+    unsigned top = 0x80000000;
+    printf("%d\n", (top << 1LL) == 0);
     return 0;
 }
