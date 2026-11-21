@@ -2336,6 +2336,9 @@ static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
             } else {
                 free(blob); free(pend); return false;
             }
+        } else if (llvm_global_init_bytes(ctx, op, MLIR_GetAttributeTypeValue(ta), 8,
+                                          blob + off, sz)) {
+            // Constant aggregate initializer (llvm.insertvalue chain).
         } else if (MLIR_GetOpNumRegions(op) > 0 &&
                    MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(op, 0)) > 0) {
             // Region-init pointer global: scan for addressof @target + return.

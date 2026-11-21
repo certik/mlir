@@ -6391,6 +6391,362 @@ static void init_struct_types(E *e) {
     }
 }
 
+// ----- File-scope aggregate initializers -----
+//
+// A global struct, or array of structs, gets an initializer region that
+// builds its constant value from `llvm.mlir.zero` with one `llvm.insertvalue`
+// of an `llvm.mlir.constant` per non-zero scalar. For `struct S g = {1, 2.5};`
+//   %0 = llvm.mlir.zero : !llvm.struct<"S", (i32, f64)>
+//   %1 = llvm.mlir.constant(1 : i32) : i32
+//   %2 = llvm.insertvalue %1, %0[0] : !llvm.struct<"S", (i32, f64)>
+//   %3 = llvm.mlir.constant(2.5 : f64) : f64
+//   %4 = llvm.insertvalue %3, %2[1] : !llvm.struct<"S", (i32, f64)>
+//   llvm.return %4 : !llvm.struct<"S", (i32, f64)>
+// Each backend folds the chain back into the global's data (see
+// llvm_global_init_bytes). Every scalar must be a constant: an integer
+// constant expression, a floating literal, or a cast of one; a pointer only
+// a null pointer constant. Nested braces are required for nested aggregates
+// (no brace elision), except across the rows of a 2-D array.
+
+#define GINIT_MAX_DEPTH 16
+
+typedef struct {
+    E *e;
+    MLIR_TypeHandle agg_ty;           // the global's type
+    MLIR_ValueHandle agg;             // the aggregate built so far
+    int64_t path[GINIT_MAX_DEPTH];    // position of the element being set
+    size_t depth;
+} GInit;
+
+// A constant scalar initializer: an integer of a C type, or a float.
+typedef struct {
+    bool is_float;
+    double f;
+    FoldVal i;
+} GConst;
+
+static double gconst_to_float(GConst c, bool to_f32) {
+    double f = c.f;
+    if (!c.is_float) {
+        f = (c.i.is_unsigned && c.i.is_i64) ? (double)(uint64_t)c.i.v : (double)c.i.v;
+    }
+    return to_f32 ? (double)(float)f : f;
+}
+
+// `v` wrapped into `bits` bits, held sign- or zero-extended.
+static int64_t wrap_bits(int64_t v, int bits, bool is_unsigned) {
+    if (bits >= 64) return v;
+    uint64_t mask = ((uint64_t)1 << bits) - 1;
+    uint64_t u = (uint64_t)v & mask;
+    if (!is_unsigned && (u >> (bits - 1)) != 0) u |= ~mask;
+    return (int64_t)u;
+}
+
+// Convert `c` to the integer C type `t` as C does: a float truncates toward
+// zero, a bool becomes 0 / 1, and the value wraps into the type's width.
+static int64_t gconst_to_int(GConst c, Type t) {
+    if (t.is_bool) return c.is_float ? (c.f != 0.0) : (c.i.v != 0);
+    int64_t v = c.i.v;
+    if (c.is_float) {
+        v = (t.int_unsigned && c.f >= 9223372036854775808.0)
+            ? (int64_t)(uint64_t)c.f : (int64_t)c.f;
+    }
+    if (type_is_narrow_int(t)) return tinyc_narrow_const(v, t);
+    return wrap_bits(v, t.kind == TY_I64 ? 64 : 32, t.int_unsigned);
+}
+
+// Evaluate a constant scalar initializer.
+static bool gconst_eval(E *e, Expr *ex, GConst *out) {
+    *out = (GConst){0};
+    if (!ex) return false;
+    if (ex->kind == EX_FLOAT) {
+        out->is_float = true;
+        out->f = ex->float_value;
+        return true;
+    }
+    if (ex->kind == EX_NULL) return true;
+    if (ex->kind == EX_UN && ex->op == OP_NEG) {
+        GConst a;
+        if (gconst_eval(e, ex->lhs, &a) && a.is_float) {
+            out->is_float = true;
+            out->f = -a.f;
+            return true;
+        }
+    }
+    if (ex->kind == EX_CAST) {
+        GConst a;
+        if (!gconst_eval(e, ex->lhs, &a)) return false;
+        Type t = ex->cast_type;
+        if (t.kind == TY_F32 || t.kind == TY_F64) {
+            out->is_float = true;
+            out->f = gconst_to_float(a, t.kind == TY_F32);
+            return true;
+        }
+        if (t.kind == TY_I32 || t.kind == TY_I64) {
+            out->i.v = gconst_to_int(a, t);
+            out->i.is_i64 = t.kind == TY_I64;
+            out->i.is_unsigned = t.int_unsigned && !type_is_narrow_int(t);
+            return true;
+        }
+        // A pointer cast keeps the integer (only 0 is accepted).
+        if (a.is_float) return false;
+        *out = a;
+        return true;
+    }
+    return ast_fold(e, NULL, ex, &out->i);
+}
+
+// True when `ex` is a constant zero (`0`, `NULL`, `0.0`).
+static bool gconst_is_zero(E *e, Expr *ex) {
+    GConst c;
+    if (!gconst_eval(e, ex, &c)) return false;
+    return c.is_float ? c.f == 0.0 : c.i.v == 0;
+}
+
+// Insert the constant `val` of scalar type `ty` at the current path.
+static void ginit_insert(GInit *gi, MLIR_TypeHandle ty, MLIR_AttributeHandle val) {
+    E *e = gi->e;
+    MLIR_ValueHandle c = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
+                                                  ty, ssa_name(e), eloc(e, 0));
+    MLIR_TypeHandle *crts = arena_new_array(e->arena, MLIR_TypeHandle, 1); crts[0] = ty;
+    MLIR_ValueHandle *crs = arena_new_array(e->arena, MLIR_ValueHandle, 1); crs[0] = c;
+    MLIR_AttributeHandle *cas = arena_new_array(e->arena, MLIR_AttributeHandle, 1); cas[0] = val;
+    emit_op(e, OP_TYPE_LLVM_MLIR_CONSTANT, str_lit("llvm.mlir.constant"),
+            crts, 1, crs, 1, NULL, 0, cas, 1, NULL, 0);
+    MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
+                                                  gi->agg_ty, ssa_name(e), eloc(e, 0));
+    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = gi->agg_ty;
+    MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
+    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 2);
+    ops[0] = gi->agg;
+    ops[1] = c;
+    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1);
+    as[0] = MLIR_CreateAttributeDenseI64Array(e->ctx, str_lit("position"),
+                                              gi->path, gi->depth);
+    emit_op(e, OP_TYPE_LLVM_INSERTVALUE, str_lit("llvm.insertvalue"),
+            rts, 1, rs, 1, ops, 2, as, 1, NULL, 0);
+    gi->agg = r;
+}
+
+static bool ginit_push(GInit *gi, int64_t idx) {
+    if (gi->depth == GINIT_MAX_DEPTH) {
+        EMIT_ERR(gi->e, "global initializer nests too deeply");
+        return false;
+    }
+    gi->path[gi->depth++] = idx;
+    return true;
+}
+
+// Set the scalar of C type `t`, stored as `ty`, at the current path.
+static void ginit_scalar(GInit *gi, Type t, MLIR_TypeHandle ty, Expr *ex) {
+    E *e = gi->e;
+    GConst c;
+    bool ok = gconst_eval(e, ex, &c);
+    if (ty == e->ptr) {
+        if (!ok || c.is_float || c.i.v != 0)
+            EMIT_ERR(e, "only a null pointer can initialize a pointer in a global aggregate");
+        return;
+    }
+    if (!ok) {
+        EMIT_ERR(e, "global initializer element is not a constant");
+        return;
+    }
+    if (ty == e->f32 || ty == e->f64) {
+        ginit_insert(gi, ty, MLIR_CreateAttributeFloat(e->ctx, str_lit("value"),
+                                                       gconst_to_float(c, ty == e->f32), ty));
+        return;
+    }
+    // Convert to the C type, then hold the value sign-extended from the
+    // storage width (a char field is stored in an i32).
+    int64_t v = wrap_bits(gconst_to_int(c, t),
+                          ty == e->i8 ? 8 : ty == e->i64 ? 64 : 32, false);
+    if (v != 0)
+        ginit_insert(gi, ty, MLIR_CreateAttributeInteger(e->ctx, str_lit("value"), v, ty));
+}
+
+static void ginit_value(GInit *gi, Type t, Expr *ex);
+
+// Set the struct `sd` at the current path from `ex`.
+static void ginit_struct(GInit *gi, StructDef *sd, Expr *ex) {
+    E *e = gi->e;
+    if (ex->kind != EX_COMPOUND) {
+        if (!gconst_is_zero(e, ex))
+            EMIT_ERR(e, "a struct in a global initializer needs braces");
+        return;
+    }
+    if (sd->is_union) {
+        for (size_t i = 0; i < ex->args.size; i++) {
+            if (!gconst_is_zero(e, ex->args.data[i])) {
+                EMIT_ERR(e, "initializing a union in a global is not supported");
+                return;
+            }
+        }
+        return;
+    }
+    size_t fi = 0;
+    for (size_t i = 0; i < ex->args.size; i++) {
+        if (ex->compound_field_names && ex->compound_field_names[i].size > 0) {
+            bool found = false;
+            for (size_t k = 0; k < sd->fields.size; k++) {
+                if (str_eq(sd->fields.data[k].name, ex->compound_field_names[i])) {
+                    fi = k; found = true; break;
+                }
+            }
+            if (!found) {
+                EMIT_ERR(e, "unknown field '{}' in designated initializer",
+                         ex->compound_field_names[i]);
+                return;
+            }
+        }
+        if (fi >= sd->fields.size) {
+            EMIT_ERR(e, "too many initializers for struct {}", sd->name);
+            return;
+        }
+        if (!ginit_push(gi, (int64_t)fi)) return;
+        ginit_value(gi, sd->fields.data[fi].type, ex->args.data[i]);
+        gi->depth--;
+        fi++;
+    }
+}
+
+// Set the array of type `t` at the current path from `ex`.
+static void ginit_array(GInit *gi, Type t, Expr *ex) {
+    E *e = gi->e;
+    // Element C type and storage type.
+    Type et = (Type){0};
+    MLIR_TypeHandle ety = e->ptr;
+    StructDef *esd = NULL;
+    if (t.kind == TY_ARRAY_I32) {
+        // A `char` array in a struct keeps 4-byte elements; its C element
+        // type is still char.
+        et.kind = t.array_elem_is_i64 ? TY_I64 : TY_I32;
+        et.int_bits = t.array_elem_is_i8 ? 8 : t.array_elem_is_i64 ? 64
+                    : type_is_narrow_int(t) ? t.int_bits : 32;
+        et.int_unsigned = t.int_unsigned;
+        et.is_bool = t.is_bool;
+        ety = t.array_elem_is_i64 ? e->i64 : t.array_elem_is_i8 ? e->i8 : e->i32;
+    } else if (t.kind == TY_ARRAY_F32) {
+        et.kind = TY_F32;
+        ety = e->f32;
+    } else if (t.kind == TY_ARRAY_STRUCT) {
+        esd = find_struct(e, t.struct_name);
+        if (!esd) { EMIT_ERR(e, "unknown struct in global array"); return; }
+    } else {
+        et.kind = TY_PTR_VOID;  // TY_ARRAY_PTR_CHAR / TY_ARRAY_PTR_STRUCT
+    }
+    int64_t rows = t.array_len, cols = t.array_len2;
+    // `char s[N] = "..."`: the string's bytes, cut or zero-padded to N.
+    if (ex->kind == EX_STR && et.int_bits == 8 && cols == 0) {
+        for (int64_t k = 0; k < rows && k < (int64_t)ex->name.size; k++) {
+            int64_t b = tinyc_narrow_const((int64_t)(uint8_t)ex->name.str[k], et);
+            if (b == 0) continue;
+            if (!ginit_push(gi, k)) return;
+            ginit_insert(gi, ety, MLIR_CreateAttributeInteger(e->ctx, str_lit("value"), b, ety));
+            gi->depth--;
+        }
+        return;
+    }
+    if (ex->kind != EX_COMPOUND) {
+        if (!gconst_is_zero(e, ex))
+            EMIT_ERR(e, "an array in a global initializer needs braces");
+        return;
+    }
+    if (ex->compound_field_names) {
+        EMIT_ERR(e, "designated initializer for an array element");
+        return;
+    }
+    // A 2-D array takes either one braced row per element or the flat
+    // list of its scalars.
+    Type row = t;
+    row.array_len = cols;
+    row.array_len2 = 0;
+    int64_t n = cols ? rows * cols : rows;
+    int64_t k = 0;  // flat index of the next element
+    for (size_t i = 0; i < ex->args.size; i++) {
+        Expr *a = ex->args.data[i];
+        bool whole_row = cols && (a->kind == EX_COMPOUND || a->kind == EX_STR);
+        if (whole_row && k % cols) k += cols - k % cols;
+        if (k >= n) {
+            EMIT_ERR(e, "too many initializers for a global array");
+            return;
+        }
+        if (!ginit_push(gi, cols ? k / cols : k)) return;
+        if (whole_row) {
+            ginit_array(gi, row, a);
+            k += cols;
+        } else {
+            if (cols && !ginit_push(gi, k % cols)) return;
+            if (esd) ginit_struct(gi, esd, a);
+            else ginit_scalar(gi, et, ety, a);
+            if (cols) gi->depth--;
+            k++;
+        }
+        gi->depth--;
+    }
+}
+
+// Set the value of C type `t` at the current path from `ex`.
+static void ginit_value(GInit *gi, Type t, Expr *ex) {
+    E *e = gi->e;
+    switch (t.kind) {
+        case TY_STRUCT: {
+            StructDef *sd = find_struct(e, t.struct_name);
+            if (!sd) { EMIT_ERR(e, "unknown struct {} in global initializer", t.struct_name); return; }
+            ginit_struct(gi, sd, ex);
+            return;
+        }
+        case TY_ARRAY_I32: case TY_ARRAY_F32: case TY_ARRAY_STRUCT:
+        case TY_ARRAY_PTR_CHAR: case TY_ARRAY_PTR_STRUCT:
+            ginit_array(gi, t, ex);
+            return;
+        case TY_I32: case TY_I64: case TY_F32: case TY_F64:
+            ginit_scalar(gi, t, scalar_mlir_type(e, t.kind), ex);
+            return;
+        case TY_PTR_I32: case TY_PTR_CHAR: case TY_PTR_STRUCT: case TY_PTR_VOID:
+        case TY_PTR_PTR: case TY_FNPTR:
+            ginit_scalar(gi, t, e->ptr, ex);
+            return;
+        default:
+            EMIT_ERR(e, "unsupported type in a global initializer");
+            return;
+    }
+}
+
+// Emit the global `g` of the aggregate type `gty`: zero, or built from
+// g->init_expr.
+static MLIR_OpHandle emit_global_aggregate(E *e, Global *g, MLIR_TypeHandle gty) {
+    MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
+    MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(e->ctx, g->name, gty,
+        /*is_constant=*/g->is_const, /*init_kind=*/2, 0, 0.0, &init_blk, e->loc);
+    MLIR_BlockHandle save_blk = e->cur_block;
+    bool save_term = e->terminated;
+    e->cur_block = init_blk;
+    e->terminated = false;
+    MLIR_ValueHandle zv = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
+                                                  gty, ssa_name(e), eloc(e, 0));
+    MLIR_TypeHandle *zrts = arena_new_array(e->arena, MLIR_TypeHandle, 1); zrts[0] = gty;
+    MLIR_ValueHandle *zrs = arena_new_array(e->arena, MLIR_ValueHandle, 1); zrs[0] = zv;
+    emit_op(e, OP_TYPE_LLVM_MLIR_ZERO, str_lit("llvm.mlir.zero"),
+            zrts, 1, zrs, 1, NULL, 0, NULL, 0, NULL, 0);
+    MLIR_ValueHandle v = zv;
+    if (g->init_expr) {
+        GInit gi;
+        gi.e = e;
+        gi.agg_ty = gty;
+        gi.agg = zv;
+        gi.depth = 0;
+        ginit_value(&gi, g->type, g->init_expr);
+        v = gi.agg;
+    }
+    MLIR_ValueHandle *rops = arena_new_array(e->arena, MLIR_ValueHandle, 1);
+    rops[0] = v;
+    emit_op(e, OP_TYPE_LLVM_RETURN, str_lit("llvm.return"),
+            NULL, 0, NULL, 0, rops, 1, NULL, 0, NULL, 0);
+    e->cur_block = save_blk;
+    e->terminated = save_term;
+    return gop;
+}
+
 static int g_last_emit_errors = 0;
 
 MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
@@ -6438,6 +6794,11 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
     for (size_t i = 0; i < program->globals.size; i++) {
         Global *g = &program->globals.data[i];
         e.cur_line = g->line;
+        // `struct S a[] = {...}`: one element per initializer.
+        if (g->init_expr && g->type.kind == TY_ARRAY_STRUCT &&
+            g->type.array_len == 0 && !g->type.array_len_expr) {
+            g->type.array_len = (int64_t)g->init_expr->args.size;
+        }
         // Resolve a deferred array length (e.g. `[20 + 1]` or `[N]` with an
         // enumerator N) with no scope (file-scope constant expressions
         // only) before the symbol copies the type, so `sizeof` sees it.
@@ -6496,7 +6857,9 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                 /*is_constant=*/g->is_const,
                 /*init_kind=*/4, 0, 0.0, NULL, e.loc);
             MLIR_AppendBlockOp(ctx, mb, gop);
-        } else if (g->type.kind == TY_PTR_CHAR) {
+        } else if (g->type.kind == TY_PTR_CHAR || g->type.kind == TY_PTR_I32 ||
+                   g->type.kind == TY_PTR_STRUCT || g->type.kind == TY_PTR_VOID ||
+                   g->type.kind == TY_FNPTR || g->type.kind == TY_PTR_PTR) {
             string str_sym = (string){0};
             if (g->has_init && g->init_str.size > 0) {
                 str_sym = intern_string(&e, g->init_str);
@@ -6537,26 +6900,11 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                 /*init_kind=*/1, 0, g->has_init ? g->init_float : 0.0,
                 NULL, e.loc);
             MLIR_AppendBlockOp(ctx, mb, gop);
-        } else if (g->type.kind == TY_PTR_I32 || g->type.kind == TY_PTR_STRUCT ||
-                   g->type.kind == TY_PTR_VOID || g->type.kind == TY_FNPTR ||
-                   g->type.kind == TY_PTR_PTR) {
-            // Emit a zero-initialized pointer global.
-            MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
-            MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.ptr,
-                /*is_constant=*/g->is_const,
-                /*init_kind=*/2, 0, 0.0, &init_blk, e.loc);
-            MLIR_BlockHandle save_blk = e.cur_block;
-            bool save_term = e.terminated;
-            e.cur_block = init_blk;
-            e.terminated = false;
-            MLIR_ValueHandle init_v = emit_null_ptr(&e);
-            MLIR_ValueHandle *rops = arena_new_array(arena, MLIR_ValueHandle, 1);
-            rops[0] = init_v;
-            emit_op(&e, OP_TYPE_LLVM_RETURN, str_lit("llvm.return"),
-                    NULL, 0, NULL, 0, rops, 1, NULL, 0, NULL, 0);
-            e.cur_block = save_blk;
-            e.terminated = save_term;
-            MLIR_AppendBlockOp(ctx, mb, gop);
+        } else if (g->type.kind == TY_STRUCT) {
+            StructDef *sd = find_struct(&e, g->type.struct_name);
+            if (!sd) { EMIT_ERR(&e, "unknown struct in global"); continue; }
+            MLIR_AppendBlockOp(ctx, mb,
+                emit_global_aggregate(&e, g, find_struct_type(&e, sd)));
         } else if (g->type.kind == TY_ARRAY_STRUCT ||
                    g->type.kind == TY_ARRAY_I32 ||
                    g->type.kind == TY_ARRAY_PTR_CHAR ||
@@ -6579,37 +6927,32 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             MLIR_TypeHandle arr_ty = MLIR_CreateTypeLLVMArray(
                 ctx, elem, (uint64_t)g->type.array_len);
             MLIR_OpHandle gop;
-            if (g->init_array_data.size > 0 &&
-                g->type.kind == TY_ARRAY_I32) {
+            string bytes = g->init_array_data;
+            if (g->init_str.size > 0) {
+                // `char s[N] = "..."`: the string's bytes, cut or
+                // zero-padded to N.
+                if (g->type.kind != TY_ARRAY_I32 || !g->type.array_elem_is_i8 ||
+                    g->type.array_len2 != 0) {
+                    EMIT_ERR(&e, "a string can only initialize a char array");
+                }
+                size_t n = (size_t)g->type.array_len;
+                char *buf = arena_alloc(arena, n ? n : 1);
+                bool any = false;
+                for (size_t k = 0; k < n; k++) {
+                    buf[k] = k < g->init_str.size ? g->init_str.str[k] : 0;
+                    if (buf[k]) any = true;
+                }
+                bytes = any ? (string){.str = buf, .size = n} : (string){0};
+            }
+            if (bytes.size > 0 && g->type.kind == TY_ARRAY_I32) {
                 // Non-zero aggregate initializer: emit the raw bytes
                 // as the global's `value` STRING attribute. lower_global
                 // (wasm) and emit_global (native) both interpret it as
                 // packed little-endian element bytes.
                 gop = MLIR_CreateLLVMGlobalArrayInit(ctx, g->name, arr_ty,
-                    /*is_constant=*/g->is_const,
-                    g->init_array_data, e.loc);
+                    /*is_constant=*/g->is_const, bytes, e.loc);
             } else {
-                MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
-                gop = MLIR_CreateLLVMGlobal(ctx, g->name, arr_ty,
-                    /*is_constant=*/g->is_const,
-                    /*init_kind=*/2, 0, 0.0, &init_blk, e.loc);
-                MLIR_BlockHandle save_blk = e.cur_block;
-                bool save_term = e.terminated;
-                e.cur_block = init_blk;
-                e.terminated = false;
-                // Materialize a zero of the array type.
-                MLIR_ValueHandle zv = MLIR_CreateValueOpResult(e.ctx, MLIR_INVALID_HANDLE, 0,
-                                                              arr_ty, ssa_name(&e), eloc(&e, 0));
-                MLIR_TypeHandle *zrts = arena_new_array(e.arena, MLIR_TypeHandle, 1); zrts[0] = arr_ty;
-                MLIR_ValueHandle *zrs = arena_new_array(e.arena, MLIR_ValueHandle, 1); zrs[0] = zv;
-                emit_op(&e, OP_TYPE_LLVM_MLIR_ZERO, str_lit("llvm.mlir.zero"),
-                        zrts, 1, zrs, 1, NULL, 0, NULL, 0, NULL, 0);
-                MLIR_ValueHandle *rops = arena_new_array(arena, MLIR_ValueHandle, 1);
-                rops[0] = zv;
-                emit_op(&e, OP_TYPE_LLVM_RETURN, str_lit("llvm.return"),
-                        NULL, 0, NULL, 0, rops, 1, NULL, 0, NULL, 0);
-                e.cur_block = save_blk;
-                e.terminated = save_term;
+                gop = emit_global_aggregate(&e, g, arr_ty);
             }
             // Record the struct sdef on the symbol for indexed access.
             if (g->type.kind == TY_ARRAY_STRUCT) {
@@ -6625,6 +6968,8 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         } else {
             // i32 (default for plain int); a char / short / bool initializer
             // is converted to the declared type.
+            if (g->init_str.size > 0)
+                EMIT_ERR(&e, "a string can only initialize a char array or a pointer");
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.i32,
                 /*is_constant=*/g->is_const,
                 /*init_kind=*/0,

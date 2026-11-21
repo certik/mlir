@@ -1163,17 +1163,16 @@ static void x64_register_global_op(MLIR_Context *ctx, MLIR_OpHandle op, GMap *gm
     if (gmap_get(gm, name, &dummy)) return;
 
     MLIR_AttributeHandle gt = MLIR_GetOpAttributeByName(op, "global_type");
-    size_t sz = 0;
-    if (gt) {
-        MLIR_TypeHandle t = MLIR_GetAttributeTypeValue(gt);
-        if (t != MLIR_INVALID_HANDLE) sz = x64_type_size(ctx, t);
-    }
+    MLIR_TypeHandle t = gt ? MLIR_GetAttributeTypeValue(gt) : MLIR_INVALID_HANDLE;
+    size_t sz = t != MLIR_INVALID_HANDLE ? x64_type_size(ctx, t) : 0;
     if (sz == 0) sz = 8;
     uint32_t off = x64_data_begin_global(data, sz);
 
     MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(op, "value");
     if (va) serialize_global_value_attr(va, name, data, off, sz);
-    else parse_trivial_ptr_global_init(op, name, off, sz, pend, pend_cap, n_pend);
+    else if (t == MLIR_INVALID_HANDLE ||
+             !llvm_global_init_bytes(ctx, op, t, 8, data->data + off, (unsigned)sz))
+        parse_trivial_ptr_global_init(op, name, off, sz, pend, pend_cap, n_pend);
 
     x64_data_finish_global(gm, data, name, off, sz);
 }

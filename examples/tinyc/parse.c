@@ -3025,8 +3025,6 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                     if (gattrs.has_address_space) g.address_space = gattrs.address_space;
                     g.line = nm.line;
                     // Optional array suffix `[N]` (or `[const-expr]`).
-                    // Only zero-initialized arrays are supported at file
-                    // scope; no aggregate initializer.
                     if (accept(&p, TC_TK_LBRACK)) {
                         int64_t alen = 0; Expr *aexpr = NULL;
                         parse_array_len_bracket(&p, &alen, &aexpr);
@@ -3056,7 +3054,13 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                     if (accept(&p, TC_TK_ASSIGN)) {
                         g.has_init = true;
                         TcTok lit = cur(&p);
-                        if (lit.kind == TC_TK_LBRACE) {
+                        if (lit.kind == TC_TK_LBRACE &&
+                            (g.type.kind == TY_STRUCT ||
+                             g.type.kind == TY_ARRAY_STRUCT)) {
+                            // Struct (array) initializer: the emitter
+                            // folds it into the global's constant data.
+                            g.init_expr = parse_aggregate_init(&p, g.type);
+                        } else if (lit.kind == TC_TK_LBRACE) {
                             // Aggregate initializer for a global array.
                             // Each element must be an int/long literal
                             // (optionally negated), NULL, or a `(cast)0`
@@ -3199,6 +3203,10 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                             p.i++;
                         } else if (lit.kind == TC_TK_STRING_LIT) {
                             g.init_str = lit.text;
+                            // `char s[] = "..."`: the NUL counts.
+                            if (g.type.kind == TY_ARRAY_I32 &&
+                                g.type.array_len == 0 && !g.type.array_len_expr)
+                                g.type.array_len = (int64_t)lit.text.size;
                             p.i++;
                         } else if (lit.kind == TC_TK_MINUS &&
                                    peek(&p, 1).kind == TC_TK_INT_LIT) {
