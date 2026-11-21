@@ -1,0 +1,15 @@
+extern int printf(const char *fmt, ...);
+// A `long long` array field is 8-aligned, as its LLVM type is: tinyc's
+// type_align said 4, so sizeof(struct A) was 20, not 24 (#264). A
+// self-hosted tinyc on wasm32 then under-allocated such structs.
+
+struct A { long long a[2]; int b; };
+struct B { long long a; int b; };
+struct C { int x; long long a[1]; };
+struct A arr[2];
+
+int main(void) {
+    printf("%d %d %d %d\n", (int)sizeof(struct A), (int)sizeof(struct B),
+           (int)((char *)&arr[1] - (char *)&arr[0]), (int)sizeof(struct C));
+    return 0;
+}

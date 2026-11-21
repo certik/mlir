@@ -1,0 +1,24 @@
+extern int printf(const char *fmt, ...);
+// A string literal initializes a file-scope char array (#265): cut to the
+// array, or zero-padded, and `char s[] = "..."` takes its length from it.
+// The emitter used to ignore the string and zero the array.
+static char a[8] = "global";
+char b[6] = "global";
+static char c[7] = "global";
+static char d[3] = "global";
+char e[] = "hi";
+static char f[4] = "";
+static unsigned char u[4] = "\xff\x01";
+const char k[] = "const";
+static char after = 'Z';
+static void part1(void) {
+    printf("[%s] [%.6s] [%s] [%.3s] [%s] [%d %d %d %d]\n", a, b, c, d, e, f[0], f[1], f[2], f[3]);
+    printf("%d %d %d %d %d\n", (int)sizeof(a), (int)sizeof(b), (int)sizeof(d), (int)sizeof(e), (int)sizeof(k));
+    printf("%d %d %d %s %c\n", u[0], u[1], u[2], k, after);
+    a[0] = 'G'; e[1] = 'o';
+    printf("%s %s %d %d\n", a, e, a[6], a[7]);
+}
+int main(void) {
+    part1();
+    return 0;
+}
