@@ -81,14 +81,6 @@ MACHO_BACKEND = os.environ.get("TINYC_MACHO_BACKEND", "wasm")
 # this configuration.
 LIFT_USE_NATIVE = os.environ.get("TINYC_LIFT_USE_NATIVE") == "1"
 
-# Which MLIR API implementation $TINYC is linked against. The lifted
-# `--from-wasm ... --emit=aarch64` path only works with the native one
-# (mlir_api_impl.c). The build scripts name those binaries tinyc_native*;
-# set TINYC_API=native or =upstream to override the guess.
-NATIVE_API = (os.environ.get("TINYC_API") == "native"
-              if os.environ.get("TINYC_API")
-              else TINYC.name.startswith("tinyc_native"))
-
 
 def run(cmd, **kw):
     kw.setdefault("timeout", 60)
@@ -102,6 +94,13 @@ def run(cmd, **kw):
         r.stdout = e.stdout or ""
         r.stderr = (e.stderr or "") + "\n[timeout]"
         return r
+
+
+def tinyc_api() -> str:
+    """The MLIR API implementation $TINYC is linked against, as reported by
+    `tinyc --version`: "native" (mlir_api_impl.c) or "upstream"."""
+    m = re.search(r"MLIR API: (\w+)", run([str(TINYC), "--version"]).stdout)
+    return m.group(1) if m else "unknown"
 
 
 def _inc(path: Path) -> str:
@@ -393,6 +392,7 @@ def main():
         return 2
     cfg = tomllib.loads(TESTS_TOML.read_text())
     tests = cfg.get("test", [])
+    api = tinyc_api()
     test_filter = {name for name in os.environ.get("TINYC_TEST_FILTER", "").split(",") if name}
     if test_filter:
         tests = [t for t in tests if t["name"] in test_filter]
@@ -604,12 +604,13 @@ def main():
         # bound how often an op may occur in one function of the result. The
         # lifter creates part of its ops by name only, so this catches a pass
         # that stops recognising those. A linked module has no function
-        # names, so the function is the one whose body contains the marker
-        # (e.g. a constant that occurs nowhere else in the program).
+        # names, so the function is the one whose body matches the marker
+        # regex (e.g. a constant that occurs nowhere else in the program).
         lift_marker = t.get("wasm_native_lift_marker")
         if lift_marker is not None:
-            if TARGET != "wasm" or LOWERING != "native" or not NATIVE_API:
-                print(f"SKIP {name} (wasm_native_lift_marker)")
+            # The lifted path only works with the native MLIR API.
+            if TARGET != "wasm" or LOWERING != "native" or api != "native":
+                print(f"SKIP {name} (wasm_native_lift_marker; MLIR API: {api})")
                 skipped += 1
                 continue
             lift_obj = HERE / "tests" / f"{name}.lift.o"
@@ -626,8 +627,12 @@ def main():
                       f"stderr:\n{r.stderr}")
                 failures += 1
                 continue
-            funcs = [f for f in r.stdout.split("    aarch64.func(")[1:]
-                     if lift_marker in f]
+            # Regexes, so the probe does not depend on the printer's spacing,
+            # and an op name only counts whole (aarch64.ldr_w is not
+            # aarch64.ldr_w_reg).
+            funcs = [f for f in re.split(r'^\s*"?aarch64\.func"?\(', r.stdout,
+                                         flags=re.M)[1:]
+                     if re.search(lift_marker, f)]
             if len(funcs) != 1:
                 print(f"FAIL {name}: {len(funcs)} lifted functions contain "
                       f"{lift_marker!r} (expected exactly 1)")
@@ -635,7 +640,8 @@ def main():
                 continue
             lift_failed = False
             for needle, limit in t.get("wasm_native_lift_max", {}).items():
-                got = funcs[0].count(needle)
+                got = len(re.findall(rf"(?<![\w.]){re.escape(needle)}(?![\w.])",
+                                     funcs[0]))
                 if got > limit:
                     print(f"FAIL {name}: the probed function has {got} x {needle!r} "
                           f"(expected at most {limit})")
