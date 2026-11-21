@@ -1497,3 +1497,11 @@ targets = ["wasm"]
 wasm_upstream_skip = true
 wasm_native_lift_marker = "imm16 = 24301"
 wasm_native_lift_max = { "aarch64.ldr_w" = 1, "aarch64.fp_binop" = 0 }
+
+[[test]]
+name = "strlit_ptr_arith"
+targets = ["native", "wasm", "macho", "elf"]
+# Pointer arithmetic on a string literal, and on char* values from calls,
+# `?:` and va_arg, steps by 1 byte (it used to step by 4). Expected output
+# from clang.
+expected_stdout = "c d d f\nello lo\n5 4\n4 1 4\nr s 1 rs 8\nz v yz w\nello efgh e\narg\n20 30\n"

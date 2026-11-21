@@ -850,6 +850,23 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex);
 static int64_t type_size(E *e, Type t);
 static int64_t type_align(E *e, Type t);
 static int64_t c_sizeof_expr(E *e, Scope *sc, Expr *ex);
+
+// EVal.ptr_elem for a value of pointer type `t`: the element type that
+// pointer arithmetic steps over and that a dereference loads. INVALID for
+// struct / void / function pointers and for non-pointers (pointer arithmetic
+// then falls back to the struct type, or to i32).
+static MLIR_TypeHandle ptr_elem_of_type(E *e, Type t) {
+    if (t.kind == TY_PTR_CHAR) return e->i8;
+    if (t.kind == TY_PTR_PTR) return e->ptr;
+    if (t.kind == TY_PTR_I32) {
+        return t.ptr_is_i64 ? e->i64
+             : t.ptr_is_f32 ? e->f32
+             : t.ptr_is_f64 ? e->f64
+             : e->i32;
+    }
+    return MLIR_INVALID_HANDLE;
+}
+
 // Compute the single-blob representation tinyc uses to lay a `union` out
 // with all members overlapping at offset 0: an array of `*count` elements
 // of `*elem` (an integer type whose width equals the union's alignment),
@@ -2421,6 +2438,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
         r.val = emit_addressof(e, sym, e->ptr);
         r.is_ptr = true;
         r.is_str = true;
+        r.ptr_elem = e->i8;
         return r;
     }
     // Pre-pass: literal-only integer subtree -> a single arith.constant.
@@ -2522,15 +2540,19 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         || tk == TY_PTR_STRUCT || tk == TY_PTR_PTR);
             r.is_str = (tk == TY_PTR_CHAR);
             r.is_void_ptr = (tk == TY_PTR_VOID);
+            r.ptr_elem = ptr_elem_of_type(e, ex->cast_type);
             return r;
         }
         case EX_STR: {
             // String literal: emit a !llvm.ptr to a deduplicated
-            // module-level llvm.mlir.global string buffer.
+            // module-level llvm.mlir.global string buffer. The literal is an
+            // array of char that decays to a char*, so `"abc" + 1` and
+            // `*("abc" + 1)` step over / load single bytes.
             string sym = intern_string(e, ex->name);
             r.val = emit_addressof(e, sym, e->ptr);
             r.is_ptr = true;
             r.is_str = true;
+            r.ptr_elem = e->i8;
             return r;
         }
         case EX_TERNARY: {
@@ -2587,6 +2609,16 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             r.is_i64   = any_i64;
             r.is_str   = av.is_str && bv.is_str;
             r.sdef     = av.sdef ? av.sdef : bv.sdef;
+            // Keep the pointee type of `c ? "ab" : s` so pointer arithmetic
+            // on the result steps by the element size. One side may be a
+            // null pointer constant (no element type); two different element
+            // types leave it unknown.
+            if (any_ptr) {
+                MLIR_TypeHandle ae = av.is_ptr ? av.ptr_elem : MLIR_INVALID_HANDLE;
+                MLIR_TypeHandle be = bv.is_ptr ? bv.ptr_elem : MLIR_INVALID_HANDLE;
+                if (ae == MLIR_INVALID_HANDLE) r.ptr_elem = be;
+                else if (be == MLIR_INVALID_HANDLE || be == ae) r.ptr_elem = ae;
+            }
             return r;
         }
         case EX_SIZEOF: {
@@ -3943,6 +3975,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 r.is_i64 = (fnty->fnptr_ret->kind == TY_I64);
                 r.is_unsigned = fnty->fnptr_ret->int_unsigned;
                 r.is_ptr = (rty == e->ptr);
+                r.is_str = (fnty->fnptr_ret->kind == TY_PTR_CHAR);
+                r.ptr_elem = ptr_elem_of_type(e, *fnty->fnptr_ret);
                 return r;
             }
             if (sig->ret.type.kind == TY_STRUCT) {
@@ -3976,6 +4010,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 sig->ret.type.kind == TY_PTR_VOID ||
                 sig->ret.type.kind == TY_FNPTR) {
                 r.is_ptr = true;
+                r.is_str = (sig->ret.type.kind == TY_PTR_CHAR);
+                r.ptr_elem = ptr_elem_of_type(e, sig->ret.type);
             }
             return r;
         }
