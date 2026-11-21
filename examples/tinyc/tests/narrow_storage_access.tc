@@ -195,6 +195,89 @@ static int part_ptrarr6(void) {
     short **pp = a; printf("%d\n", pp[1][1]);
     return 0;
 }
+struct S7 { int a; };
+typedef struct S7 *S7P;
+static int part_sptrs1(void) {
+    struct S7 x = {1};
+    struct S7 y = {2};
+    S7P t[4];
+    t[0] = &x; t[1] = &y; t[2] = &x; t[3] = &y;
+    printf("%d %d %d %d\n", t[0]->a, t[1]->a, t[2]->a, t[3]->a);
+    return 0;
+}
+struct S8 { int a; };
+typedef struct S8 *S8P;
+static int part_sptrs2(void) {
+    struct S8 x = {1};
+    struct S8 y = {2};
+    S8P t[2] = {&x, &y};
+    S8P u[] = {&y, &x, &y};
+    printf("%d %d %d %d %d %d\n", t[0]->a, t[1]->a, u[0]->a, u[2]->a, (int)(sizeof(t) / sizeof(void *)), (int)(sizeof(u) / sizeof(void *)));
+    return 0;
+}
+struct S9 { int a; };
+typedef struct S9 *S9P;
+
+static int part_sptrs3(void) {
+    struct S9 x = {1};
+    struct S9 y = {2};
+    static S9P t[2];
+    t[0] = &x; t[1] = &y;
+    printf("%d %d %d\n", t[0]->a, t[1]->a, (int)(sizeof(t) / sizeof(void *)));
+    return 0;
+}
+struct S10 { int a; };
+typedef struct S10 *S10P;
+static int p10_cnt(char *argv[], int n) { int t = 0; for (int i = 0; i < n; i++) t += argv[i][0]; return t; }
+static int p10_sum(struct S10 *ps[], int n) { int t = 0; for (int i = 0; i < n; i++) t += ps[i]->a; return t; }
+static int p10_row(short *a[], int i, int j) { return a[i][j]; }
+static void p10_clr(unsigned short *a[2]) { a[1][0] = 65535; a[0] = 0; }
+static int part_sptrs4(void) {
+    struct S10 x = {3}; struct S10 y = {4};
+    struct S10 *t[3]; t[0] = &x; t[1] = &y; t[2] = &x;
+    S10P u[2] = {&y, &x};
+    char *names[2]; names[0] = "a"; names[1] = "b";
+    short s0[2] = {-5, 6}, s1[2] = {7, -8}; short *rows[2]; rows[0] = s0; rows[1] = s1;
+    unsigned short q0 = 1, q1 = 2; unsigned short *qs[2]; qs[0] = &q0; qs[1] = &q1;
+    p10_clr(qs);
+    printf("%d %d %d %d %d %d %d\n", p10_sum(t, 3), p10_sum(u, 2), p10_cnt(names, 2), p10_row(rows, 1, 1), q1, qs[0] == 0, (int)sizeof(t) / (int)sizeof(void *));
+    return 0;
+}
+void p11_z(short *a[2]) { a[1] = 0; }
+int p11_n(short *a[2]) { return a[0] != 0; }
+static int part_ptrparm(void) {
+    short x = -3;
+    short *sp[2]; sp[0] = &x; sp[1] = &x;
+    p11_z(sp);
+    printf("%d %d\n", sp[1] == 0, p11_n(sp));
+    return 0;
+}
+static int part_rows(void) {
+    short m[3][4];
+    int im[2][3];
+    unsigned char um[2][5];
+    int fm[2][3];
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 4; j++) m[i][j] = (short)(i * 10 + j - 15);
+    for (int i = 0; i < 2; i++) for (int j = 0; j < 3; j++) im[i][j] = i * 7 + j;
+    printf("sz %d %d %d %d %d\n", (int)sizeof(m[1]), (int)sizeof(im[1]), (int)sizeof(um[1]), (int)sizeof(fm[1]), (int)sizeof(m[1][2]));
+    printf("sz2 %d %d %d %d\n", (int)sizeof(*m), (int)sizeof(*im), (int)sizeof(**m), (int)sizeof(m));
+    printf("sz3 %d %d\n", (int)(sizeof(m) / sizeof(m[0])), (int)(sizeof(m[0]) / sizeof(m[0][0])));
+    printf("sz4 %d %d %d\n", (int)(sizeof(&m[1]) / sizeof(void *)), (int)(sizeof(m[1] + 1) / sizeof(void *)), (int)sizeof(*m[1]));
+    printf("al %d %d\n", (int)_Alignof(m[1]), (int)sizeof(m[1][0] + 1));
+    int k = 2;
+    printf("sz5 %d\n", (int)sizeof(m[k]));
+    printf("r6 %d %d\n", (int)((char *)&m[1][0] - (char *)m), (int)((char *)&m[2][0] - (char *)&m[1][0]));
+    return 0;
+}
+struct M12 { short f[2][3]; int g[3][5]; float h[2][2]; };
+static int part_rows2(void) {
+    struct M12 s; struct M12 *p = &s;
+    s.f[1][2] = -7;
+    printf("%d %d %d %d\n", (int)sizeof(s.f[1]), (int)sizeof(p->g[0]), (int)sizeof(s.h[1]), (int)sizeof(s.f[1][2]));
+    printf("%d %d %d\n", (int)sizeof(*s.f), (int)sizeof(s.f), (int)(sizeof(p->g) / sizeof(p->g[0])));
+    printf("%d\n", s.f[1][2]);
+    return 0;
+}
 struct C1 { char c; };
 struct S6 { short a, b, c; };
 struct S12 { int x; char k; short y; int z; };
@@ -397,6 +480,13 @@ int main(void) {
     part_ptrarr4();
     part_ptrarr5();
     part_ptrarr6();
+    part_sptrs1();
+    part_sptrs2();
+    part_sptrs3();
+    part_sptrs4();
+    part_ptrparm();
+    part_rows();
+    part_rows2();
     part_structarr();
     part_structs();
     part_fields();
