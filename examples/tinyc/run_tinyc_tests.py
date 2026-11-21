@@ -393,6 +393,11 @@ def main():
     cfg = tomllib.loads(TESTS_TOML.read_text())
     tests = cfg.get("test", [])
     api = tinyc_api()
+    if api not in ("native", "upstream"):
+        # Never guess: an unknown API would silently skip the lift probes.
+        print(f"error: `{TINYC} --version` does not name its MLIR API "
+              f"(native or upstream)", file=sys.stderr)
+        return 2
     test_filter = {name for name in os.environ.get("TINYC_TEST_FILTER", "").split(",") if name}
     if test_filter:
         tests = [t for t in tests if t["name"] in test_filter]
@@ -627,9 +632,10 @@ def main():
                       f"stderr:\n{r.stderr}")
                 failures += 1
                 continue
-            # Regexes, so the probe does not depend on the printer's spacing,
-            # and an op name only counts whole (aarch64.ldr_w is not
-            # aarch64.ldr_w_reg).
+            # Regexes, so the probe does not depend on the printer's spacing.
+            # Each wasm_native_lift_{min,max} key is a regex that must match a
+            # whole op name (so `aarch64\.ldr_w` alone does not count
+            # aarch64.ldr_w_reg; write `aarch64\.ldr_w(_reg)?` for both).
             funcs = [f for f in re.split(r'^\s*"?aarch64\.func"?\(', r.stdout,
                                          flags=re.M)[1:]
                      if re.search(lift_marker, f)]
@@ -638,17 +644,17 @@ def main():
                       f"{lift_marker!r} (expected exactly 1)")
                 failures += 1
                 continue
-            lift_failed = False
-            for needle, limit in t.get("wasm_native_lift_max", {}).items():
-                got = len(re.findall(rf"(?<![\w.]){re.escape(needle)}(?![\w.])",
-                                     funcs[0]))
-                if got > limit:
-                    print(f"FAIL {name}: the probed function has {got} x {needle!r} "
-                          f"(expected at most {limit})")
-                    failures += 1
-                    lift_failed = True
-                    break
-            if lift_failed:
+            bad = None
+            for kind in ("max", "min"):
+                for op_re, n in t.get(f"wasm_native_lift_{kind}", {}).items():
+                    got = len(re.findall(rf"(?<![\w.])(?:{op_re})(?![\w.])",
+                                         funcs[0]))
+                    if (got > n) if kind == "max" else (got < n):
+                        bad = bad or (f"{got} x {op_re!r} (expected at "
+                                      f"{'most' if kind == 'max' else 'least'} {n})")
+            if bad:
+                print(f"FAIL {name}: the probed function has {bad}")
+                failures += 1
                 continue
             print(f"PASS {name}")
             continue
