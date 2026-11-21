@@ -174,6 +174,7 @@ struct Type {
     // `_Generic` must keep them distinct from `int`).
     int      int_bits;
     bool     int_unsigned;
+    bool     is_bool;        // `bool` / `_Bool` (int_bits is 8 like char)
     bool     is_const;       // type was declared with the `const` qualifier
 };
 

@@ -1975,6 +1975,7 @@ static bool parse_sig_type(P *p, Type *out) {
         else if (saw_bool) out->int_bits = 8;
         else out->int_bits = 32;
         out->int_unsigned = saw_unsigned;
+        out->is_bool = saw_bool && n_long == 0 && !saw_char && !saw_short;
         skip_const(p);
         if (accept(p, TC_TK_STAR)) {
             // `long *` → pointer to long. Storage element width matches
