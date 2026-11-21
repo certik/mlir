@@ -6379,6 +6379,16 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
     // pointer global with an initializer region that takes the address.
     for (size_t i = 0; i < program->globals.size; i++) {
         Global *g = &program->globals.data[i];
+        // Resolve a deferred array length expression (e.g. `[20 + 1]`)
+        // before the symbol copies the type, so `sizeof(g)` sees it. It is
+        // folded with no scope: file-scope constant expressions only.
+        if (g->type.array_len_expr) {
+            int64_t v = 0;
+            if (!ast_fold_int(&e, NULL, g->type.array_len_expr, &v)) {
+                EMIT_ERR(&e, "non-constant global array length");
+            }
+            g->type.array_len = v;
+        }
         Sym *sy = arena_new(arena, Sym);
         *sy = (Sym){0};
         sy->name = g->name;
@@ -6479,17 +6489,8 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                    g->type.kind == TY_ARRAY_I32 ||
                    g->type.kind == TY_ARRAY_PTR_CHAR ||
                    g->type.kind == TY_ARRAY_PTR_STRUCT) {
-            // Zero-initialized aggregate global. Resolve a deferred array
-            // length expression (e.g. `[20 + 1]`) at emit time using
-            // ast_fold_int with no scope (file-scope const expressions
-            // only).
-            if (g->type.array_len_expr) {
-                int64_t v = 0;
-                if (!ast_fold_int(&e, NULL, g->type.array_len_expr, &v)) {
-                    EMIT_ERR(&e, "non-constant global array length");
-                }
-                g->type.array_len = v;
-            }
+            // Zero-initialized aggregate global (a deferred array length
+            // was resolved above).
             MLIR_TypeHandle elem;
             if (g->type.kind == TY_ARRAY_STRUCT) {
                 StructDef *sd = find_struct(&e, g->type.struct_name);

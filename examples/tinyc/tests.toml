@@ -789,6 +789,13 @@ targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "8\n5\n16\n"
 
 [[test]]
+name = "global_array_expr_len"
+targets = ["native", "wasm", "macho", "elf"]
+# sizeof of a global array with a constant-expression length (#286).
+# Expected output from clang.
+expected_stdout = "20 20 4\n6 4 32 24\n5 4\n"
+
+[[test]]
 name = "func_macro"
 targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "greet\nsquare=16\napp_main\n"
