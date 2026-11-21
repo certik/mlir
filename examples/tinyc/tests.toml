@@ -1170,6 +1170,23 @@ wasm_upstream_skip = true
 expected_stdout = "ok\n"
 
 [[test]]
+name = "wasm_import_attr_lowered"
+sources = ["wasm_import_attr.tc"]
+targets = ["wasm"]
+wasm_upstream_skip = true
+# `--emit=lowered` prints the `passthrough` attribute that lower_func_func
+# builds for the wasm import attributes from stack arrays. The native
+# MLIR_CreateAttributeArray used to keep the caller's pointer instead of
+# copying the elements, so printing it read a dead stack frame and
+# tinyc_native segfaulted (#245).
+wasm_native_emit = "lowered"
+wasm_native_direct_source = true
+wasm_native_emit_contains = [
+  "wasm.import_module = \"wasi_snapshot_preview1\"",
+  "passthrough = [",
+]
+
+[[test]]
 name = "generic_ternary_str"
 targets = ["native", "wasm", "macho", "elf"]
 # _Generic dispatch on a ternary controlling expression whose

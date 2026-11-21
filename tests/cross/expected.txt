@@ -1,3 +1,5 @@
+array attr from stack buffer: 11 22 33
+dict attr from stack buffer: a=44 b=55
 intern i32: yes
 intern i64: yes
 intern index: yes

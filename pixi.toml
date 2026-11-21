@@ -150,6 +150,42 @@ clang \
 
 test_linux = { cmd = "./parser --construct && python run_tests.py -s --native", depends-on = ["build_linux"], description = "Run mlir test suite (Linux)" }
 
+build_cross_native_linux = { cmd = """
+clang \
+    -g \
+    -nostdlib \
+    -nostdinc \
+    -fno-builtin \
+    -I corec \
+    -I corec-stdlib/stdlib \
+    -I . \
+    -o cross_native \
+    tests/cross/driver.c \
+    mlir_generic_printer.c \
+    mlir_api_impl.c \
+    mlir_op_names.c \
+    mlir_lift_cf_to_scf.c \
+    corec-stdlib/stdlib/stdio.c \
+    corec-stdlib/stdlib/stdlib.c \
+    corec-stdlib/stdlib/printf.c \
+    corec-stdlib/stdlib/string_impl.c \
+    corec/base/io.c \
+    corec/base/buddy.c \
+    corec/base/arena.c \
+    corec/base/scratch.c \
+    corec/base/format.c \
+    corec/base/math.c \
+    corec/base/string.c \
+    corec/base/strbuf.c \
+    corec/base/mem.c \
+    corec/base/numconv.c \
+    corec/base/assert.c \
+    corec/base/exit.c \
+    corec/platform/platform_linux.c
+""", description = "Build cross-impl test driver (native, Linux)" }
+
+test_cross_native_linux = { cmd = "./cross_native > tests/cross/out_native.txt && diff tests/cross/expected.txt tests/cross/out_native.txt", depends-on = ["build_cross_native_linux"], description = "Run native cross-impl test driver and diff against reference (Linux)" }
+
 build_linux_tinyc = { cmd = "bash scripts/build_linux_tinyc.sh", depends-on = ["tokenizer", { task = "build_tinyc_upstream", environment = "upstream" }], description = "Build mlir native binary using tinyC instead of clang's C frontend (Linux only)" }
 test_linux_tinyc = { cmd = "MLIR_PARSER_NATIVE=$PWD/parser_tinyc python run_tests.py -s --native", depends-on = ["build_linux_tinyc"], description = "Run mlir test suite using the tinyC-built parser (Linux)" }
 

@@ -14,6 +14,7 @@
 #include <base/arena.h>
 #include <base/string.h>
 #include <base/io.h>
+#include <base/format.h>
 #include <platform/platform.h>
 #include "mlir_api.h"
 #include "mlir_generic_printer.h"
@@ -25,12 +26,73 @@ static void print_string(string s) {
     write_all(PLATFORM_STDOUT_FD, &iov, 1);
 }
 
+// Keep the helpers below out of line so their stack frames really are gone
+// (and reused) by the time the attributes are read back.
+#ifdef _MSC_VER
+#define NOINLINE __declspec(noinline)
+#else
+#define NOINLINE __attribute__((noinline))
+#endif
+
+// Build an array attribute and a dictionary attribute from element arrays
+// that live in this function's stack frame. The attributes must stay valid
+// after the frame is gone: the API copies the elements, as upstream's
+// ArrayAttr / DictionaryAttr do. The native backend used to keep the
+// caller's pointer, which made `tinyc_native --emit=lowered` crash on the
+// `passthrough` attribute built by lower_func_func.
+NOINLINE
+static void make_stack_array_attrs(MLIR_Context *ctx, MLIR_TypeHandle i32_ty,
+                                   MLIR_AttributeHandle *out_array,
+                                   MLIR_AttributeHandle *out_dict) {
+    MLIR_AttributeHandle elems[3] = {
+        MLIR_CreateAttributeInteger(ctx, str_lit(""), 11, i32_ty),
+        MLIR_CreateAttributeInteger(ctx, str_lit(""), 22, i32_ty),
+        MLIR_CreateAttributeInteger(ctx, str_lit(""), 33, i32_ty),
+    };
+    *out_array = MLIR_CreateAttributeArray(ctx, str_lit("arr"), elems, 3);
+    // Keys in sorted order: upstream's DictionaryAttr sorts its entries.
+    // The key text also lives in this frame: attribute names are copied too.
+    char keys[2] = { 'a', 'b' };
+    MLIR_AttributeHandle entries[2] = {
+        MLIR_CreateAttributeInteger(ctx, (string){ &keys[0], 1 }, 44, i32_ty),
+        MLIR_CreateAttributeInteger(ctx, (string){ &keys[1], 1 }, 55, i32_ty),
+    };
+    *out_dict = MLIR_CreateAttributeDict(ctx, str_lit("dict"), entries, 2);
+}
+
+// Overwrite the stack area the previous call used.
+NOINLINE
+static void clobber_stack(void) {
+    volatile uintptr_t junk[256];
+    for (size_t i = 0; i < 256; i++) junk[i] = (uintptr_t)0xdeadbeefu;
+    (void)junk[0];
+}
+
 int app_main(void) {
     Arena *arena = arena_create(1 * 1024 * 1024);
-    MLIR_Context ctx;
+    MLIR_Context ctx = {0};
     MLIR_SetArenaAllocator(&ctx, arena);
 
     MLIR_TypeHandle i32_ty = MLIR_CreateTypeInteger(&ctx, 32, true);
+
+    {
+        MLIR_AttributeHandle arr = MLIR_INVALID_HANDLE;
+        MLIR_AttributeHandle dict = MLIR_INVALID_HANDLE;
+        make_stack_array_attrs(&ctx, i32_ty, &arr, &dict);
+        clobber_stack();
+        print_string(str_lit("array attr from stack buffer:"));
+        for (size_t i = 0; i < MLIR_GetAttributeArraySize(arr); i++) {
+            int64_t v = MLIR_GetAttributeInteger(MLIR_GetAttributeArrayElement(arr, i));
+            print_string(format(arena, str_lit(" {}"), v));
+        }
+        print_string(str_lit("\ndict attr from stack buffer:"));
+        for (size_t i = 0; i < MLIR_GetAttributeDictSize(dict); i++) {
+            MLIR_AttributeHandle e = MLIR_GetAttributeDictElement(dict, i);
+            print_string(format(arena, str_lit(" {}={}"), MLIR_GetAttributeName(e),
+                                MLIR_GetAttributeInteger(e)));
+        }
+        print_string(str_lit("\n"));
+    }
 
     // Verify that semantically-equivalent simple types share a single
     // MLIR_TypeHandle. The upstream backend has always done this (MLIR
