@@ -1486,9 +1486,11 @@ static SCtx walk_struct_lhs(E *e, Scope *sc, Expr *ex) {
             // would otherwise descend into the wrong union member's
             // LLVM type.
             sctx_push(e, &r, 0);
+            // The path so far may hold a dynamic index (`gu[k].s.x`).
+            MLIR_ValueHandle udyn[1] = {r.dyn_index};
             MLIR_ValueHandle base = emit_gep(e, r.base_ptr, r.source_elem,
                                               r.const_path, r.n_const_path,
-                                              NULL, 0);
+                                              udyn, r.dyn_index != MLIR_INVALID_HANDLE ? 1 : 0);
             r.base_ptr = base;
             r.source_elem = find_struct_type(e, find_struct(e, ft.struct_name));
             r.const_path = NULL;
