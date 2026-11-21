@@ -133,6 +133,15 @@ int64_t tinyc_narrow_const(int64_t v, Type t) {
     return v;
 }
 
+// Negate an integer-literal token in its own C type: a 32-bit unsigned
+// literal wraps modulo 2^32, so `-1u` is 4294967295 and `-0xFFFFFFFF` is 1.
+static int64_t neg_int_lit(P *p, TcTok t) {
+    int64_t v = (int64_t)(0 - (uint64_t)t.int_value);
+    bool is32 = !t.is_i64 || (!t.is_long_long && p->target_wasm32);
+    if (t.is_unsigned && is32) v = (int64_t)(uint32_t)v;
+    return v;
+}
+
 static void perror_at(P *p, int line, string msg) {
     println(str_lit("tinyc parse error at line {}: {}"), (int64_t)line, msg);
     p->err_count++;
@@ -519,9 +528,15 @@ static Expr *parse_primary(P *p) {
         e->int_value = t.int_value;
         e->is_i64 = t.is_i64;
         e->is_long_long = t.is_long_long;
+        e->is_unsigned = t.is_unsigned;
         // On wasm32, a single-L suffix (`long`) is 32-bit, not 64-bit. Only
-        // `LL` (or having no L at all) is target-independent.
-        if (e->is_i64 && !e->is_long_long && p->target_wasm32) e->is_i64 = false;
+        // `LL` (or having no L at all) is target-independent. The lexer
+        // promotes a value that does not fit 32 bits to `long long`, so a
+        // value above INT_MAX here is hex/octal or u-suffixed: `unsigned long`.
+        if (e->is_i64 && !e->is_long_long && p->target_wasm32) {
+            e->is_i64 = false;
+            if ((uint64_t)e->int_value > 0x7FFFFFFFull) e->is_unsigned = true;
+        }
         return e;
     }
     if (t.kind == TC_TK_FLOAT_LIT) {
@@ -3231,7 +3246,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                    peek(&p, 1).kind == TC_TK_INT_LIT) {
                             p.i++;
                             TcTok n = cur(&p);
-                            g.init_int = -n.int_value;
+                            g.init_int = neg_int_lit(&p, n);
                             p.i++;
                         } else if (lit.kind == TC_TK_MINUS &&
                                    peek(&p, 1).kind == TC_TK_FLOAT_LIT) {
@@ -3257,7 +3272,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                             bool neg = accept(&p, TC_TK_MINUS);
                             if (cur(&p).kind == TC_TK_INT_LIT) {
                                 int64_t iv = cur(&p).int_value;
-                                g.init_int = neg ? -iv : iv;
+                                g.init_int = neg ? neg_int_lit(&p, cur(&p)) : iv;
                                 p.i++;
                             } else if (cur(&p).kind == TC_TK_FLOAT_LIT) {
                                 double fv = cur(&p).float_value;

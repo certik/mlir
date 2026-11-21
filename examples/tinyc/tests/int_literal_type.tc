@@ -1,0 +1,54 @@
+extern int printf(const char *fmt, ...);
+long long ilt_g1 = -0xFFFFFFFF;
+unsigned long long ilt_g2 = -1u;
+// An integer literal takes the first of int / long / long long that can
+// hold its value; a hex/octal literal may also take the unsigned variants,
+// and a `u`-suffixed one only those (#247).
+int main() {
+    // Too big for 32 bits: 64-bit even without an L suffix.
+    long long c = 4294967296;
+    long long d = 4294967296LL;
+    unsigned long long e = 4294967296ULL;
+    unsigned long long f = 4294967296u;
+    unsigned long long g = 0x100000000u;
+    unsigned long long a = 922337203685477579u;
+    printf("%lld %lld %llu %llu %llu %llu\n", c, d, e, f, g, a);
+    printf("%lld %lld %lld\n", 2147483648, -2147483648, 0x100000000);
+    printf("%lld %lld %llu\n", -5000000000, 0 - 5000000000LL, 18446744073709551615u);
+    printf("%d %d %d %d %d\n", (int)sizeof(2147483647), (int)sizeof(2147483648),
+           (int)sizeof(0x80000000), (int)sizeof(4294967295u), (int)sizeof(4294967296u));
+    // A value in (INT_MAX, UINT_MAX] is unsigned int when written in hex/octal
+    // or with a u suffix, so it zero-extends.
+    unsigned long long m = 0xFFFFFFFF;
+    unsigned long long n = 4000000000u;
+    unsigned long long o = 037777777777;
+    unsigned long long x = 0x123456789ABCDEF0ULL;
+    printf("%llu %llu %llu %llx\n", m, n, o, x & 0xFFFFFFFF);
+    printf("%d %d %d %d\n", 0xFFFFFFFF > 0, -1 < 0u, 1u - 2 > 0, 3000000000u / 2 > 0);
+    // Mixed widths: a 64-bit signed operand keeps the operation signed (#136).
+    long long neg = -10;
+    unsigned three = 3;
+    printf("%d %lld %lld\n", -1LL < 1u, neg / 3u, neg % 3u);
+    printf("%d %lld %lld\n", neg < three, neg / three, neg % three);
+    // The shift result has the left operand's type.
+    int sh = -16;
+    printf("%d %u\n", sh >> 2u, ~0u >> 28);
+    // Array bounds with suffixed literals still fold.
+    int bound_u[1u + 2];
+    int bound_ll[1LL + 1];
+    printf("%d %d\n", (int)sizeof(bound_u), (int)sizeof(bound_ll));
+    // Constant folding uses the literals' own types.
+    int bound_shr[0xFFFFFFFFu >> 28];
+    int bound_cmp[(-1u > 0) + 1];
+    printf("%d %d %d %d\n", (int)sizeof(bound_shr), (int)sizeof(bound_cmp),
+           (int)(0xFFFFFFFFu / 0x10000000u), -1u > 0);
+    // Global initializers negate a literal in its own type.
+    printf("%lld %llu\n", ilt_g1, ilt_g2);
+    // An assignment has the lvalue's type; ?: gets the usual conversions.
+    int asg;
+    printf("%d %d %d\n", (asg = 4000000000u) < 0, (0 ? 1u : -1) > 0, (1 ? -1 : 0u) < 0);
+    // A 64-bit shift count does not widen the left operand.
+    unsigned top = 0x80000000;
+    printf("%d\n", (top << 1LL) == 0);
+    return 0;
+}

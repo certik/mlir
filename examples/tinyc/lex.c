@@ -54,6 +54,27 @@ static TcTokKind keyword_or_ident(string s) {
     return TC_TK_IDENT;
 }
 
+// Give an integer-literal token its C type (C11 6.4.4.1): the first type
+// that can represent the value out of int, long, long long for a decimal
+// literal; a hex/octal literal may also take the unsigned variants, a
+// `u`-suffixed one only those, and an `l`/`ll` suffix skips the narrower
+// types. tinyc models the type as a width (`is_i64`: at least `long`;
+// `is_long_long`: 64-bit on every target) and a signedness. Signedness is
+// decided for a 64-bit `long`; the parser adjusts a single-L literal that
+// stays 32-bit on wasm32.
+static void int_lit_type(TcTok *t, int n_l, bool has_u, bool decimal) {
+    uint64_t v = (uint64_t)t->int_value;
+    bool fits_i32 = v <= 0x7FFFFFFFull;
+    bool fits_u32 = v <= 0xFFFFFFFFull;
+    bool fits_i64 = v <= 0x7FFFFFFFFFFFFFFFull;
+    // Can a 32-bit type (int / unsigned int, or a 32-bit long) hold it?
+    bool fits32 = (has_u || !decimal) ? fits_u32 : fits_i32;
+    t->is_i64 = n_l >= 1 || !fits32;
+    t->is_long_long = n_l >= 2 || !fits32;
+    if (t->is_i64) t->is_unsigned = has_u || !fits_i64;
+    else           t->is_unsigned = has_u || !fits_i32;
+}
+
 VecTcTok tinyc_lex(Arena *arena, string src) {
     VecTcTok toks; VecTcTok_reserve(arena, &toks, 64);
     size_t i = 0;
@@ -232,6 +253,8 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
         if (is_digit(c)) {
             size_t j = i;
             int64_t v = 0;
+            int n_l = 0;
+            bool has_u = false;
             // Hex literal: 0x... / 0X...
             if (c == '0' && j + 1 < src.size &&
                 (src.str[j + 1] == 'x' || src.str[j + 1] == 'X')) {
@@ -249,15 +272,13 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                 TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
                 // Optional integer-literal suffix: any mix of 'l'/'L' /
                 // 'u'/'U' in any order (see below for the decimal path).
-                int n_l = 0;
                 for (int k = 0; k < 3 && j < src.size; k++) {
                     char c2 = src.str[j];
                     if (c2 == 'l' || c2 == 'L') { n_l++; j++; }
-                    else if (c2 == 'u' || c2 == 'U') { j++; }
+                    else if (c2 == 'u' || c2 == 'U') { has_u = true; j++; }
                     else break;
                 }
-                if (n_l >= 1) t.is_i64 = true;
-                if (n_l >= 2) t.is_long_long = true;
+                int_lit_type(&t, n_l, has_u, /*decimal=*/false);
                 VecTcTok_push_back(arena, &toks, t);
                 i = j; continue;
             }
@@ -391,6 +412,7 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
             // (decimal) rather than rejected, matching the lexer's lenient
             // style. `i` still points at the first digit; `j` is one past
             // the last (suffix parsing has not run yet).
+            bool decimal = true;
             if (src.str[i] == '0' && j - i > 1) {
                 int64_t ov = 0;
                 bool octal_ok = true;
@@ -399,25 +421,22 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                     if (d < '0' || d > '7') { octal_ok = false; break; }
                     ov = ov * 8 + (d - '0');
                 }
-                if (octal_ok) v = ov;
+                if (octal_ok) { v = ov; decimal = false; }
             }
             TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
             // Optional integer-literal suffix: any combination of 'l'/'L'
             // and 'u'/'U' in either order. So 'L', 'LL', 'UL', 'LU', 'ULL',
-            // 'LLU', 'U' are all accepted. We do not distinguish signedness.
-            // A single L denotes `long` (target-dependent: 32-bit on wasm32,
-            // 64-bit on native); LL always denotes `long long` (64-bit). The
-            // emitter consults `target_wasm32` to decide the size for a
-            // single-L literal.
-            int n_l_dec = 0;
+            // 'LLU', 'U' are all accepted. A single L denotes `long`
+            // (target-dependent: 32-bit on wasm32, 64-bit on native); LL
+            // always denotes `long long` (64-bit). The parser consults
+            // `target_wasm32` to decide the size for a single-L literal.
             for (int k = 0; k < 3 && j < src.size; k++) {
                 char c2 = src.str[j];
-                if (c2 == 'l' || c2 == 'L') { n_l_dec++; j++; }
-                else if (c2 == 'u' || c2 == 'U') { j++; }
+                if (c2 == 'l' || c2 == 'L') { n_l++; j++; }
+                else if (c2 == 'u' || c2 == 'U') { has_u = true; j++; }
                 else break;
             }
-            if (n_l_dec >= 1) t.is_i64 = true;
-            if (n_l_dec >= 2) t.is_long_long = true;
+            int_lit_type(&t, n_l, has_u, decimal);
             VecTcTok_push_back(arena, &toks, t);
             i = j; continue;
         }
