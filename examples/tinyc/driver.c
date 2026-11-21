@@ -139,7 +139,8 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
     string src = tinyc_preprocess(pmod_arena, str_from_cstr_view((char *)path),
                                   include_dirs, n_include_dirs, defs, nd);
     if (tinyc_last_preprocess_errors() > 0) {
-        fprintf(stderr, "tinyc: preprocessing failed for host platform '%s'\n", path);
+        fprintf(stderr, "tinyc: preprocessing failed for %s '%s'\n",
+                is_wasi_adapter ? "WASI adapter" : "host platform", path);
         MLIR_SetArenaAllocator(ctx, saved_arena);
         ctx->no_def_use_tracking = saved_no_def_use;
         return false;
@@ -411,7 +412,10 @@ static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
     string src = tinyc_preprocess(pmod_arena, str_from_cstr_view((char *)path),
                                   include_dirs, n_include_dirs, defs, nd);
     if (tinyc_last_preprocess_errors() > 0) {
-        fprintf(stderr, "tinyc: preprocessing failed for host platform '%s'\n", path);
+        fprintf(stderr, "tinyc: preprocessing failed for %s '%s'\n",
+                kind == TINYC_ELF_HELPER_WASI ? "WASI adapter" :
+                kind == TINYC_ELF_HELPER_BUDDY ? "allocator source" : "host platform",
+                path);
         MLIR_SetArenaAllocator(ctx, saved_arena);
         ctx->no_def_use_tracking = saved_no_def_use;
         return false;

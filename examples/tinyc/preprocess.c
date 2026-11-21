@@ -114,10 +114,16 @@ typedef struct {
 // Diagnostics
 // ----------------------------------------------------------------------
 
+// Diagnostics go to stderr, so `tinyc x.c > x.ll` never writes them into the
+// output.
 static void pp_error(PP *pp, string file, int line, string msg) {
     pp->n_errors++;
-    println(str_lit("tinyc preprocess error at {}:{}: {}"),
-            file, (int64_t)line, msg);
+    string text = format(pp->arena, str_lit("tinyc preprocess error at {}:{}: {}\n"),
+                         file, (int64_t)line, msg);
+    ciovec_t iov;
+    iov.buf = text.str;
+    iov.buf_len = text.size;
+    write_all(PLATFORM_STDERR_FD, &iov, 1);
 }
 
 // ----------------------------------------------------------------------

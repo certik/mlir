@@ -595,7 +595,9 @@ def main():
         if compile_error is not None:
             r = run([str(TINYC), "--emit=mlir", *unity_include_flags(), str(srcs[0])])
             output = r.stdout + r.stderr
-            if r.returncode <= 0:
+            # tinyC reports errors with exit code 1; anything else (a signal,
+            # or a Windows exception code such as 0xC0000005) is a crash.
+            if r.returncode != 1:
                 print(f"FAIL {name}: expected a compile error, tinyc returned "
                       f"{r.returncode}\noutput:\n{output}")
                 failures += 1
