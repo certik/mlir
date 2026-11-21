@@ -1548,12 +1548,26 @@ bool MLIR_WasmLink(const MLIR_WasmLinkInput *inputs, size_t n_inputs,
     uint32_t cur_addr = STACK_SIZE + GLOBAL_BASE_OFFSET;
     // Round up to 16-byte alignment for each segment, since some
     // platforms expect at least 16B aligned heap blocks.
-    for (size_t oi = 0; oi < n_inputs; oi++) {
-        Obj *o = &objs[oi];
-        for (uint32_t i = 0; i < o->n_datasegs; i++) {
-            cur_addr = (cur_addr + 15u) & ~15u;
-            o->datasegs[i].final_addr = cur_addr;
-            cur_addr += o->datasegs[i].size;
+    // A segment that defines `__heap_base` (the native pipeline emits it as
+    // a hidden data symbol in the platform object) goes after every other
+    // segment: the heap starts there, so no data may follow it (string
+    // literals emitted after it used to be handed out by malloc).
+    for (int pass = 0; pass < 2; pass++) {
+        for (size_t oi = 0; oi < n_inputs; oi++) {
+            Obj *o = &objs[oi];
+            int64_t heap_seg = -1;
+            for (uint32_t si = 0; si < o->n_syms; si++) {
+                ObjSymbol *s = &o->syms[si];
+                if (s->kind == SYM_DATA && !(s->flags & SYMF_UNDEFINED) &&
+                    s->name && strcmp(s->name, "__heap_base") == 0)
+                    heap_seg = (int64_t)s->data_seg;
+            }
+            for (uint32_t i = 0; i < o->n_datasegs; i++) {
+                if (((int64_t)i == heap_seg) != (pass == 1)) continue;
+                cur_addr = (cur_addr + 15u) & ~15u;
+                o->datasegs[i].final_addr = cur_addr;
+                cur_addr += o->datasegs[i].size;
+            }
         }
     }
     // Resolve K_DATA symbols to their final_addr = seg.final_addr + data_off
