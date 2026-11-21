@@ -1448,6 +1448,21 @@ static bool field_type_noemit(E *e, Scope *sc, Expr *fe, Type *out) {
     return true;
 }
 
+// False when emit_lvalue's struct-field indexing block does not handle
+// `<base>.f[i]` (`twice`: `<base>.f[i][j]`), judged from the field's type
+// without emitting the base: only an array field, or a pointer field
+// indexed once, is handled there. (A separate function keeps the Type
+// local out of emit_lvalue.)
+static bool field_index_handled(E *e, Scope *sc, Expr *fe, bool twice) {
+    Type ft = (Type){0};
+    if (!field_type_noemit(e, sc, fe, &ft)) return true;
+    TypeKind k = ft.kind;
+    if (k == TY_ARRAY_I32 || k == TY_ARRAY_F32 || k == TY_ARRAY_PTR_STRUCT ||
+        k == TY_ARRAY_PTR_CHAR) return true;
+    return !twice && (k == TY_PTR_I32 || k == TY_PTR_CHAR || k == TY_PTR_VOID ||
+                      k == TY_PTR_PTR);
+}
+
 // A new expression node `kind` with operands `lhs` / `rhs`, for lowering
 // one form to another (e.g. `a[i]` to `*(a + i)`).
 static Expr *synth_expr(E *e, ExprKind kind, Expr *lhs, Expr *rhs, int line) {
@@ -1505,6 +1520,13 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 idx_a = ex->lhs->rhs;
                 idx_b = ex->rhs;
             }
+            // Walking the struct base emits it, so first check (without
+            // emitting) that this block handles the field: an array field,
+            // or a pointer field indexed once. `p->pp[i][j]` on a `T **`
+            // field is left to the paths below, which must not see the base
+            // evaluated already.
+            if (field_expr && !field_index_handled(e, sc, field_expr, idx_b != NULL))
+                field_expr = NULL;
             if (field_expr) {
                 SCtx parent = walk_struct_lhs(e, sc, field_expr->lhs);
                 if (parent.ok) {
@@ -1677,6 +1699,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                     dyn2[0] = j_v;
                     r.base_ptr = emit_gep(e, inner, elem, path2, 1, dyn2, 1);
                     r.elem_ty = elem;
+                    r.is_unsigned = s->type.pointee && s->type.pointee->int_unsigned;
                     return r;
                 }
             }
@@ -1767,6 +1790,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                                 d2[0] = iv;
                                 r.base_ptr = emit_gep(e, inner, elem, p2, 1, d2, 1);
                                 r.elem_ty = elem;
+                                r.is_unsigned = fldt.pointee && fldt.pointee->int_unsigned;
                                 return r;
                             }
                         }
@@ -1801,6 +1825,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                         gdyn[0] = iv;
                         r.base_ptr = emit_gep(e, inner, elem, gpath, 1, gdyn, 1);
                         r.elem_ty = elem;
+                        r.is_unsigned = s->type.pointee && s->type.pointee->int_unsigned;
                         return r;
                     }
                 }
