@@ -7,6 +7,8 @@ extern int printf(const char *fmt, ...);
 // the body never leaks into the controlling expression or past the
 // statement.
 
+struct P { int x; int y; };
+
 static int set_via(int *p, int v) {
     *p = v;
     return *p;
@@ -124,6 +126,31 @@ int main(void) {
         v = 4;
         printf("%d\n", u + v);                       // 7
         break;
+    }
+    // Unsized arrays declared before the first case label take their
+    // length from the initializer, even though it never runs.
+    switch (s) {
+        int ua[] = {1, 2, 3};
+        struct P ps[] = {{1, 2}, {3, 4}};
+        char *names[] = {"a", "b", "c", "d"};
+        int guard;
+    case 2:
+        guard = 77;
+        ua[0] = 10; ua[1] = 20; ua[2] = 30;
+        ps[1].y = 40;
+        names[3] = "z";
+        printf("%d %d %d %d %d\n", (int)sizeof(ua), ua[0], ua[1], ua[2], guard);
+        printf("%d %d %d %s\n", (int)sizeof(ps), ps[1].y,
+               (int)(sizeof(names) / sizeof(names[0])), names[3]);
+        break;
+    }
+    // A static declared before the first case label is initialized.
+    for (int i = 0; i < 3; i++) {
+        switch (i) {
+            static int sarr[3] = {1, 2, 3};
+        default:
+            printf("%d\n", sarr[i]);                 // 1, 2, 3
+        }
     }
 
     // A shadowing variable whose address is taken: writes through the

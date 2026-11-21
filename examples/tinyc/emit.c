@@ -4411,6 +4411,24 @@ static void emit_expr_for_side_effect(E *e, Scope *sc, Expr *ex) {
 
 static void emit_stmt(E *e, Scope *sc, Stmt *st);
 
+// Unsized `T arr[] = {a, b, ...}`: infer the length from the aggregate
+// initializer's argument count.
+static void infer_unsized_array_len(E *e, Stmt *st) {
+    if ((st->decl_type.kind == TY_ARRAY_I32 ||
+         st->decl_type.kind == TY_ARRAY_PTR_CHAR ||
+         st->decl_type.kind == TY_ARRAY_STRUCT) &&
+        st->decl_type.array_len == 0 &&
+        !st->decl_type.array_len_expr &&
+        st->decl_init && st->decl_init->kind == EX_COMPOUND) {
+        int64_t n = (int64_t)st->decl_init->args.size;
+        if (n <= 0) {
+            EMIT_ERR(e, "unsized array '{}[]' requires a non-empty initializer", st->decl_name);
+            n = 1;
+        }
+        st->decl_type.array_len = n;
+    }
+}
+
 // Bring the variables a declaration statement declares into scope `sc`
 // with their storage, but without running their initializers. Any other
 // statement is ignored. Used for the unreachable statements before a
@@ -4422,6 +4440,15 @@ static void declare_without_init(E *e, Scope *sc, Stmt *st) {
         return;
     }
     if (st->kind != ST_DECL) return;
+    // A `static` is initialized before the program starts, so its
+    // initializer still applies here. (A scalar static was promoted to a
+    // global by the parser and has no initializer left on the Stmt.)
+    if (st->decl_is_static) {
+        emit_stmt(e, sc, st);
+        return;
+    }
+    // The initializer of an unsized array also gives its length.
+    infer_unsized_array_len(e, st);
     Expr *init = st->decl_init;
     st->decl_init = NULL;
     emit_stmt(e, sc, st);
@@ -4454,22 +4481,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 return;
             }
 
-            // Unsized `T arr[] = {a, b, ...}`: infer length from the
-            // aggregate initializer's argument count.
-            if ((st->decl_type.kind == TY_ARRAY_I32 ||
-                 st->decl_type.kind == TY_ARRAY_PTR_CHAR ||
-                 st->decl_type.kind == TY_ARRAY_STRUCT) &&
-                st->decl_type.array_len == 0 &&
-                !st->decl_type.array_len_expr &&
-                st->decl_init && st->decl_init->kind == EX_COMPOUND) {
-                int64_t n = (int64_t)st->decl_init->args.size;
-                if (n <= 0) {
-                    EMIT_ERR(e, "unsized array '{}[]' requires a non-empty initializer", st->decl_name);
-                    n = 1;
-                }
-                st->decl_type.array_len = n;
-                sy->type.array_len = n;
-            }
+            infer_unsized_array_len(e, st);
             // Constant-expression array length, e.g. `T arr[sizeof(x)/sizeof(x[0])]`.
             // Fold against the current scope so sizeof of in-scope locals works.
             resolve_array_len(e, sc, &st->decl_type);

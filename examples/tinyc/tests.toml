@@ -336,7 +336,7 @@ expected_stdout = "1\n2\n3\n1\n"
 [[test]]
 name = "block_scope_shadow"
 targets = ["native", "wasm", "macho", "elf"]
-expected_stdout = "3\n40\n3 21\n0 150\n0 2\n3\n2\n1\n6\n9\n5\ntwo 20\n2\n7\n1 306\n30\n1\n"
+expected_stdout = "3\n40\n3 21\n0 150\n0 2\n3\n2\n1\n6\n9\n5\ntwo 20\n2\n7\n12 10 20 30 77\n16 40 4 z\n1\n2\n3\n1 306\n30\n1\n"
 
 [[test]]
 name = "pp_define"

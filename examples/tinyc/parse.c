@@ -1135,6 +1135,7 @@ static void parse_block(P *p, VecStmtPtr *out) {
 // across calls (none in tinyc's own source).
 static void promote_static_local(P *p, Stmt *ds, int line) {
     if (ds->kind != ST_DECL) return;
+    ds->decl_is_static = true;
     if (p->cur_func_name.size == 0) return;  // file-scope: handled elsewhere
     Type ty = ds->decl_type;
     bool is_scalar = (ty.kind == TY_I32 || ty.kind == TY_I64 ||
