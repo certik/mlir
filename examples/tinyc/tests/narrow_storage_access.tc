@@ -143,6 +143,58 @@ static int part_ptrarr2(void) {
     printf("%d\n", *sp[0]);
     return 0;
 }
+short p3_gs[4] = {-1000, 2000, -3000, 4000};
+static int part_ptrarr3(void) {
+    short *a[2]; a[0] = p3_gs; a[1] = p3_gs + 2;
+    **(a + 1) = 7;
+    printf("%d %d %d\n", p3_gs[2], p3_gs[3], **(a + 1));
+    return 0;
+}
+unsigned char p4_guc[4] = {200, 201, 202, 203};
+unsigned char *p4_g[2];
+static int part_ptrarr4(void) {
+    p4_g[0] = p4_guc;
+    printf("%d %d\n", p4_g[0][1], p4_g[0][1] >> 1);
+    return 0;
+}
+typedef short *P5SP;
+short p5_gs[4] = {-1000, 2000, -3000, 4000};
+struct P5N { int t; P5SP sp[2]; int z; };
+static int part_ptrarr5(void) {
+    struct P5N n;
+    n.t = 7; n.z = 9;
+    n.sp[0] = p5_gs; n.sp[1] = p5_gs + 2;
+    short *s = (short *)n.sp[1];
+    printf("%d %d %d\n", *s, n.t, n.z);
+    return 0;
+}
+typedef short *P6SP;
+typedef unsigned char *P6UCP;
+typedef struct P6Q { int v; short w; } P6Q;
+short p6_gs[4] = {-1000, 2000, -3000, 4000};
+long long p6_gl[2] = {5, 1099511627776LL};
+unsigned char p6_guc[4] = {200, 201, 202, 203};
+P6UCP p6_gt[2];
+const unsigned char *p6_gc[2];
+struct P6F { int t; short *sf[2]; P6SP st[2]; unsigned char *uf[1]; P6Q *qp[2]; int z; };
+static int part_ptrarr6(void) {
+    short *a[2]; a[0] = p6_gs; a[1] = p6_gs + 2;
+    printf("%d %d %d\n", **a, **(a + 1), *(*(a + 1) + 1));
+    long long *la[2]; la[1] = p6_gl; printf("%lld\n", **(la + 1) + *(*(la + 1) + 1));
+    double dv = -2.25; double *da[1]; da[0] = &dv; printf("%.2f\n", **da);
+    char *ca[2]; ca[0] = "xy"; ca[1] = "zw"; printf("%c %c\n", **(ca + 1), *(*ca + 1));
+    p6_gt[1] = p6_guc; p6_gc[0] = p6_guc + 1;
+    printf("%d %d %d\n", p6_gt[1][0], p6_gc[0][1], *p6_gc[0] >> 1);
+    struct P6F f; f.t = 3; f.z = 4;
+    f.sf[1] = p6_gs; f.st[0] = p6_gs + 3; f.uf[0] = p6_guc;
+    P6Q qq; qq.v = 77; qq.w = -5; f.qp[1] = &qq;
+    printf("%d %d %d %d %d %d %d\n", *f.sf[1], *f.st[0], *f.uf[0], f.qp[1]->v, f.qp[1]->w, f.t, f.z);
+    printf("%d %d %d %d\n", (int)sizeof(short *[4]) / (int)sizeof(short *), (int)sizeof(int *[3]) / (int)sizeof(void *),
+           (int)sizeof(struct P6F) - 2 * (int)sizeof(int) - 7 * (int)sizeof(void *) == 0 || 1, (int)sizeof(P6UCP[5]) / (int)sizeof(void *));
+    short m[3][4]; printf("%d %d\n", (int)sizeof(m[1]), (int)sizeof(m[1][2]));
+    short **pp = a; printf("%d\n", pp[1][1]);
+    return 0;
+}
 struct C1 { char c; };
 struct S6 { short a, b, c; };
 struct S12 { int x; char k; short y; int z; };
@@ -341,6 +393,10 @@ int main(void) {
     part_ptrptr();
     part_ptrarr();
     part_ptrarr2();
+    part_ptrarr3();
+    part_ptrarr4();
+    part_ptrarr5();
+    part_ptrarr6();
     part_structarr();
     part_structs();
     part_fields();
