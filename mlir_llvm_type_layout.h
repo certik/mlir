@@ -7,8 +7,9 @@
 // its own alignment, with trailing padding to the struct's largest alignment.
 // The targets differ only in the pointer size, which the caller passes.
 //
-// Header-only `static inline` so no extra translation unit has to be wired
-// into every build script (see mlir_codegen_buf.h).
+// The layout functions are small `static inline` ones; the initializer
+// helpers are not inline, because tinyC emits every static inline body into
+// each translation unit that includes the header.
 
 #pragma once
 
@@ -70,6 +71,14 @@ static inline bool llvm_type_is_empty(MLIR_Context *ctx, MLIR_TypeHandle ty,
     }
     if (MLIR_IsTypeLLVMStruct(ty)) {
         size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
+        if (nf == 0) {
+            // An opaque struct (no body, `!llvm.struct<"S", opaque>`) has
+            // no size at all.
+            string s = MLIR_GetTypeString(ctx, ty);
+            for (size_t i = 0; i + 6 <= s.size; i++) {
+                if (memcmp(s.str + i, "opaque", 6) == 0) return false;
+            }
+        }
         for (size_t i = 0; i < nf; i++) {
             if (!llvm_type_is_empty(ctx, MLIR_GetTypeLLVMStructField(ty, i), ptr_bytes))
                 return false;

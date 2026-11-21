@@ -2557,6 +2557,23 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
         }
     }
 
+    // Any other initializer region (one llvm_global_init_bytes rejected) is
+    // an error, not zero.
+    if (MLIR_GetOpNumRegions(op) > 0 &&
+        MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(op, 0)) > 0) {
+        MLIR_BlockHandle blk = MLIR_GetRegionBlock(MLIR_GetOpRegion(op, 0), 0);
+        size_t nb = MLIR_GetBlockNumOps(blk);
+        for (size_t bi = 0; bi < nb; bi++) {
+            MLIR_OpType bty = MLIR_GetOpType(MLIR_GetBlockOp(blk, bi));
+            if (bty != OP_TYPE_LLVM_MLIR_ZERO && bty != OP_TYPE_LLVM_MLIR_UNDEF &&
+                bty != OP_TYPE_LLVM_MLIR_POISON && bty != OP_TYPE_LLVM_RETURN) {
+                fprintf(stderr, "wasmssa-lower: unsupported initializer for global '%.*s'\n",
+                        (int)sym.size, sym.str);
+                return false;
+            }
+        }
+    }
+
     // No initializer found (e.g. uninitialized scalar global). Zero-init.
     // An empty struct (GNU C) still gets one byte, as an object of its own.
     if (size == 0 && ga != MLIR_INVALID_HANDLE &&

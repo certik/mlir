@@ -6236,6 +6236,8 @@ static int64_t type_align(E *e, Type t) {
     if (t.kind == TY_PTR_I32 || t.kind == TY_PTR_STRUCT) return ptr_a;
     if (t.kind == TY_PTR_CHAR || t.kind == TY_PTR_VOID || t.kind == TY_FNPTR) return ptr_a;
     if (t.kind == TY_PTR_PTR) return ptr_a;
+    // An i64 array is 8-aligned, as its LLVM type `[N x i64]` is.
+    if (t.kind == TY_ARRAY_I32 && t.array_elem_is_i64) return 8;
     if (t.kind == TY_ARRAY_I32 || t.kind == TY_ARRAY_F32) return 4;
     if (t.kind == TY_ARRAY_PTR_STRUCT || t.kind == TY_ARRAY_PTR_CHAR) return ptr_a;
     if (t.kind == TY_STRUCT) {
@@ -6410,22 +6412,25 @@ static void init_struct_types(E *e) {
 
 #define GINIT_MAX_DEPTH 16
 
-// One non-zero scalar of an initializer, at position `path`.
+// One write of an initializer at position `path`, in source order: a
+// scalar (`val`, or INVALID for a 0 that replaces an earlier value), or
+// the clearing of a whole member that a designator re-initializes. The
+// last write to a position wins (see ginit_emit).
 typedef struct {
     int64_t path[GINIT_MAX_DEPTH];
     size_t depth;
     MLIR_TypeHandle ty;
-    MLIR_AttributeHandle val;         // INVALID: overridden by a designator
+    MLIR_AttributeHandle val;
+    bool clear;
 } GInitSlot;
 
 typedef struct {
     E *e;
     int64_t path[GINIT_MAX_DEPTH];    // position of the member being set
     size_t depth;
-    GInitSlot *slots;                 // the values set so far
+    GInitSlot *slots;                 // the writes so far
     size_t n, cap;
-    size_t scan_from;                 // first slot of the current braced list
-    bool overriding;                  // a scalar may already be set: replace it
+    bool overriding;                  // after a designator: writes may repeat
     int64_t top_count;                // elements of an unsized array
 } GInit;
 
@@ -6514,8 +6519,10 @@ static bool gconst_is_zero(E *e, Expr *ex) {
     return c.is_float ? c.f == 0.0 : c.i.v == 0;
 }
 
-// Record the constant `val` of scalar type `ty` at the current path.
-static void ginit_set(GInit *gi, MLIR_TypeHandle ty, MLIR_AttributeHandle val) {
+// Record a write at the current path: the constant `val` of scalar type
+// `ty` (INVALID: 0), or with `clear` the zeroing of the whole member.
+static void ginit_write(GInit *gi, MLIR_TypeHandle ty, MLIR_AttributeHandle val,
+                        bool clear) {
     if (gi->n == gi->cap) {
         size_t cap = gi->cap ? gi->cap * 2 : 16;
         GInitSlot *ns = arena_new_array(gi->e->arena, GInitSlot, cap);
@@ -6528,30 +6535,96 @@ static void ginit_set(GInit *gi, MLIR_TypeHandle ty, MLIR_AttributeHandle val) {
     sl->depth = gi->depth;
     sl->ty = ty;
     sl->val = val;
+    sl->clear = clear;
 }
 
-// Forget every value recorded at or below the current path: a designator
-// re-initializes a member that was already set (`{.a = 1, .a = 0}`). Only
-// the current braced list's slots can be there.
+static void ginit_set(GInit *gi, MLIR_TypeHandle ty, MLIR_AttributeHandle val) {
+    ginit_write(gi, ty, val, false);
+}
+
+// A designator re-initializes a member that may already be set
+// (`{.in = {1, 2}, .in = {3}}`): zero all of it.
 static void ginit_clear(GInit *gi) {
-    for (size_t i = gi->scan_from; i < gi->n; i++) {
-        GInitSlot *sl = &gi->slots[i];
-        if (sl->val == MLIR_INVALID_HANDLE || sl->depth < gi->depth) continue;
-        bool under = true;
-        for (size_t k = 0; k < gi->depth; k++) {
-            if (sl->path[k] != gi->path[k]) { under = false; break; }
-        }
-        if (under) sl->val = MLIR_INVALID_HANDLE;
-    }
+    ginit_write(gi, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, true);
 }
 
-// Emit the recorded values into the initializer region: one
-// llvm.mlir.constant + llvm.insertvalue each, starting from `agg`.
+// Order writes by path (a member before what is inside it), then by
+// source order.
+static bool ginit_before(GInitSlot *a, size_t ia, GInitSlot *b, size_t ib) {
+    size_t n = a->depth < b->depth ? a->depth : b->depth;
+    for (size_t k = 0; k < n; k++) {
+        if (a->path[k] != b->path[k]) return a->path[k] < b->path[k];
+    }
+    if (a->depth != b->depth) return a->depth < b->depth;
+    return ia < ib;
+}
+
+static bool ginit_same_path(GInitSlot *a, GInitSlot *b) {
+    if (a->depth != b->depth) return false;
+    for (size_t k = 0; k < a->depth; k++) {
+        if (a->path[k] != b->path[k]) return false;
+    }
+    return true;
+}
+
+// Emit the values that survive into the initializer region: one
+// llvm.mlir.constant + llvm.insertvalue each, starting from `agg`. A
+// scalar survives unless a later write has its path, or a later clear
+// covers it. Sorting the writes by path makes that one pass.
 static MLIR_ValueHandle ginit_emit(GInit *gi, MLIR_TypeHandle agg_ty, MLIR_ValueHandle agg) {
     E *e = gi->e;
-    for (size_t i = 0; i < gi->n; i++) {
+    size_t n = gi->n;
+    if (n == 0) return agg;
+    // Bottom-up merge sort of the write indices.
+    size_t *ord = arena_new_array(e->arena, size_t, n);
+    size_t *tmp = arena_new_array(e->arena, size_t, n);
+    for (size_t i = 0; i < n; i++) ord[i] = i;
+    for (size_t w = 1; w < n; w *= 2) {
+        for (size_t lo = 0; lo < n; lo += 2 * w) {
+            size_t mid = lo + w < n ? lo + w : n;
+            size_t hi = lo + 2 * w < n ? lo + 2 * w : n;
+            size_t i = lo, j = mid, k = lo;
+            while (i < mid && j < hi) {
+                if (ginit_before(&gi->slots[ord[j]], ord[j], &gi->slots[ord[i]], ord[i]))
+                    tmp[k++] = ord[j++];
+                else
+                    tmp[k++] = ord[i++];
+            }
+            while (i < mid) tmp[k++] = ord[i++];
+            while (j < hi) tmp[k++] = ord[j++];
+        }
+        size_t *t = ord; ord = tmp; tmp = t;
+    }
+    // The clears whose member contains the current write (the slot of
+    // each), with the latest source position among them and the ones
+    // outside them.
+    size_t cidx[GINIT_MAX_DEPTH + 1];
+    size_t cseq[GINIT_MAX_DEPTH + 1];
+    size_t nc = 0;
+    for (size_t r = 0; r < n; r++) {
+        size_t i = ord[r];
         GInitSlot *sl = &gi->slots[i];
+        while (nc > 0) {
+            GInitSlot *cl = &gi->slots[cidx[nc - 1]];
+            bool prefix = cl->depth <= sl->depth;
+            for (size_t q = 0; prefix && q < cl->depth; q++) {
+                if (cl->path[q] != sl->path[q]) prefix = false;
+            }
+            if (prefix) break;
+            nc--;
+        }
+        if (sl->clear) {
+            size_t seq = nc > 0 && cseq[nc - 1] > i ? cseq[nc - 1] : i;
+            // A clear of the same member replaces the previous one.
+            if (nc > 0 && gi->slots[cidx[nc - 1]].depth == sl->depth) nc--;
+            cidx[nc] = i;
+            cseq[nc] = seq;
+            nc++;
+            continue;
+        }
         if (sl->val == MLIR_INVALID_HANDLE) continue;
+        if (nc > 0 && cseq[nc - 1] > i) continue;
+        if (r + 1 < n && ginit_same_path(sl, &gi->slots[ord[r + 1]])) continue;
         MLIR_ValueHandle c = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
                                                       sl->ty, ssa_name(e), eloc(e, 0));
         MLIR_TypeHandle *crts = arena_new_array(e->arena, MLIR_TypeHandle, 1); crts[0] = sl->ty;
@@ -6591,12 +6664,12 @@ static void ginit_scalar(GInit *gi, Type t, MLIR_TypeHandle ty, Expr *ex) {
     E *e = gi->e;
     GConst c;
     bool ok = gconst_eval(e, ex, &c);
-    // A scalar set again after a designator replaces the earlier value,
-    // also when the new one is 0.
-    if (gi->overriding) ginit_clear(gi);
     if (ty == e->ptr) {
         if (!ok || c.is_float || c.i.v != 0)
             EMIT_ERR(e, "only a null pointer can initialize a pointer in a global aggregate");
+        // After a designator, a null pointer may replace an earlier value.
+        else if (gi->overriding)
+            ginit_set(gi, ty, MLIR_INVALID_HANDLE);
         return;
     }
     if (!ok) {
@@ -6614,6 +6687,8 @@ static void ginit_scalar(GInit *gi, Type t, MLIR_TypeHandle ty, Expr *ex) {
                           ty == e->i8 ? 8 : ty == e->i64 ? 64 : 32, false);
     if (v != 0)
         ginit_set(gi, ty, MLIR_CreateAttributeInteger(e->ctx, str_lit("value"), v, ty));
+    else if (gi->overriding)
+        ginit_set(gi, ty, MLIR_INVALID_HANDLE);  // may replace an earlier value
 }
 
 // The members of an aggregate initialized from a list: the fields of a
@@ -6685,14 +6760,9 @@ static void ginit_members_in(GInit *gi, Type t, Expr *list, size_t *pos, bool br
 static void ginit_members(GInit *gi, Type t, Expr *list, size_t *pos, bool braced) {
     // A braced list starts a fresh subobject: the enclosing list cleared
     // it if it was set before.
-    size_t scan_from = gi->scan_from;
     bool overriding = gi->overriding;
-    if (braced) {
-        gi->scan_from = gi->n;
-        gi->overriding = false;
-    }
+    if (braced) gi->overriding = false;
     ginit_members_in(gi, t, list, pos, braced);
-    gi->scan_from = scan_from;
     gi->overriding = overriding;
 }
 
@@ -6719,7 +6789,6 @@ static void ginit_members_in(GInit *gi, Type t, Expr *list, size_t *pos, bool br
         m.count = -1;  // `T a[] = {...}`: sized by its initializers
     }
     size_t start = *pos;
-    bool revisit = false;  // a designator was seen: members may be set twice
     int64_t k = 0;
     while (*pos < list->args.size) {
         Expr *a = list->args.data[*pos];
@@ -6741,8 +6810,7 @@ static void ginit_members_in(GInit *gi, Type t, Expr *list, size_t *pos, bool br
                 EMIT_ERR(e, "unknown field '{}' in designated initializer", dn);
                 return;
             }
-            revisit = true;
-            gi->overriding = true;
+            gi->overriding = true;  // members may be set twice from here
         }
         if (m.count >= 0 && k >= m.count) {
             if (braced) EMIT_ERR(e, "too many initializers in a global aggregate");
@@ -6757,7 +6825,7 @@ static void ginit_members_in(GInit *gi, Type t, Expr *list, size_t *pos, bool br
                       !(char_array && a->kind == EX_STR);
         // A braced list or a string re-initializes the whole member (C11
         // 6.7.9p19); elided initializers only replace the scalars they set.
-        if (revisit && !elided) ginit_clear(gi);
+        if (gi->overriding && !elided) ginit_clear(gi);
         if (elided) {
             size_t before = *pos;
             int errs = e->err_count;

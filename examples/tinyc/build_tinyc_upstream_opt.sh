@@ -54,7 +54,7 @@ $CXX $OPT_FLAGS -o tinyc_upstream_opt \
     "$OBJ_DIR"/mlir_api_impl_upstream.o "$OBJ_DIR"/mlir_op_names.o "$OBJ_DIR"/mlir_lower_to_llvm.o \
     "$OBJ_DIR"/mlir_translate_to_llvm_ir.o "$OBJ_DIR"/mlir_translate_to_wasm.o "$OBJ_DIR"/mlir_wasm_to_wat.o \
     "$OBJ_DIR"/mlir_wasm_to_macho.o \
-    "$OBJ_DIR"/mlir_llvm_to_wasmssa.o mlir_llvm_global_init.o "$OBJ_DIR"/mlir_wasmssa_to_wasmstack.o "$OBJ_DIR"/mlir_wasmstack_to_bin.o \
+    "$OBJ_DIR"/mlir_llvm_to_wasmssa.o "$OBJ_DIR"/mlir_llvm_global_init.o "$OBJ_DIR"/mlir_wasmssa_to_wasmstack.o "$OBJ_DIR"/mlir_wasmstack_to_bin.o \
     "$OBJ_DIR"/mlir_wasm_link.o "$OBJ_DIR"/mlir_wasm_to_wasmstack.o "$OBJ_DIR"/mlir_wasmstack_to_wasmssa.o "$OBJ_DIR"/mlir_wasmssa_to_llvm.o "$OBJ_DIR"/mlir_llvm_mem2reg.o mlir_llvm_load_cse.o mlir_llvm_arith_gvn.o mlir_llvm_dce.o mlir_regalloc.o mlir_llvm_to_aarch64.o \
     "$OBJ_DIR"/mlir_aarch64_asm.o mlir_aarch64_to_macho.o "$OBJ_DIR"/mlir_llvm_to_x64.o "$OBJ_DIR"/mlir_elf.o \
     "$OBJ_DIR"/mlir_generic_printer.o "$OBJ_DIR"/mlir_lift_cf_to_scf.o \

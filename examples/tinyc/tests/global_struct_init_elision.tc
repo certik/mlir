@@ -6,7 +6,8 @@ extern int printf(const char *fmt, ...);
 // array tail (`int t[0];`) has size 0: such structs failed on wasm and
 // aarch64 and printed 0 natively. A member re-initialized without braces
 // keeps the scalars it does not set (C11 6.7.9p19), and an empty struct
-// global gets its own (one-byte) object.
+// global gets its own (one-byte) object. A braced list or a string inside
+// such an elided re-initialization still clears its own member.
 struct V2 { int n; int tail[0]; };
 struct V2 v = { 6 };
 struct V2 v0;
@@ -74,9 +75,37 @@ static void part3(void) {
     printf("%d %d %d | %d %d %d\n", ro3.in.a, ro3.in.b, ro3.c, ro4.in.a, ro4.in.b, ro4.c);
     printf("%d %d\n", (int)sizeof(e0), (int)sizeof(tz));
 }
+struct XIn { int x; int a[2]; };
+struct XOut { struct XIn in; int c; };
+struct XOut xo = { .in = {1, {2, 3}}, .in = 4, {5} };
+struct XOut xo0 = { .in = {1, {2, 3}}, .in = 4, {0} };
+static void part4(void) {
+    printf("%d %d %d %d\n", xo.in.x, xo.in.a[0], xo.in.a[1], xo.c);
+    printf("%d %d %d %d\n", xo0.in.x, xo0.in.a[0], xo0.in.a[1], xo0.c);
+}
+struct SIn { int x; char s[4]; };
+struct SOut { struct SIn in; int c; };
+struct SOut so = { .in = {1, "abc"}, .in = 2, "x" };
+static void part5(void) {
+    printf("%d %d %d %d %d %d\n", so.in.x, so.in.s[0], so.in.s[1], so.in.s[2], so.in.s[3], so.c);
+}
+struct CM { char m[2][4]; int n; };
+struct CM cm1 = { "ab", "cd", 3 };
+struct CM cm2 = { .m = { "abc", "def" }, .m = "x" };
+struct CM cm3 = { .m = { "abc", "def" }, .n = 1, .m = { "y" } };
+struct CM cm4 = { { "abcd", "efgh" }, 5 };
+struct CM cm5 = { .m = { "abc", "def" }, .m = 'q', 'r' };
+static void prcm(struct CM *p) {
+    for (int i = 0; i < 2; i++) for (int j = 0; j < 4; j++) printf("%d ", p->m[i][j]);
+    printf("| %d\n", p->n);
+}
+static void part6(void) { prcm(&cm1); prcm(&cm2); prcm(&cm3); prcm(&cm4); prcm(&cm5); }
 int main(void) {
     part1();
     part2();
     part3();
+    part4();
+    part5();
+    part6();
     return 0;
 }
