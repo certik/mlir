@@ -317,10 +317,8 @@ static void emit_use(FnCtx *F, MLIR_ValueHandle v) {
 // SSA name.
 static char *inline_literal_for(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_TypeHandle vty) {
     MLIR_OpType ty = MLIR_GetOpType(op);
-    // llvm.mlir.poison has no enumerator; it is matched by name.
     bool is_undef = (ty == OP_TYPE_LLVM_MLIR_UNDEF);
-    bool is_poison = (ty == OP_TYPE_UNREGISTERED &&
-                      name_eq(MLIR_GetOpName(op), "llvm.mlir.poison"));
+    bool is_poison = (ty == OP_TYPE_LLVM_MLIR_POISON);
     if (ty == OP_TYPE_LLVM_MLIR_CONSTANT) {
         // Value is the "value" attribute. It's printed as e.g. "3 : i32" or
         // "1.5e+00 : f32".
@@ -461,8 +459,8 @@ static char *fold_aggregate_init_chain(MLIR_Context *ctx, MLIR_OpHandle root,
     if (!slots) return NULL;
     MLIR_OpHandle cur = root;
     for (;;) {
-        string opn = MLIR_GetOpName(cur);
-        if (name_eq(opn, "llvm.insertvalue")) {
+        MLIR_OpType cty = MLIR_GetOpType(cur);
+        if (cty == OP_TYPE_LLVM_INSERTVALUE) {
             if (MLIR_GetOpNumOperands(cur) < 2) { free(slots); return NULL; }
             // Find position attribute.
             int64_t pos = -1;
@@ -487,17 +485,17 @@ static char *fold_aggregate_init_chain(MLIR_Context *ctx, MLIR_OpHandle root,
             if (cur == MLIR_INVALID_HANDLE) { free(slots); return NULL; }
             continue;
         }
-        if (name_eq(opn, "llvm.mlir.undef") || name_eq(opn, "llvm.mlir.zero") ||
-            name_eq(opn, "llvm.mlir.poison")) {
+        if (cty == OP_TYPE_LLVM_MLIR_UNDEF || cty == OP_TYPE_LLVM_MLIR_ZERO ||
+            cty == OP_TYPE_LLVM_MLIR_POISON) {
             break;
         }
         // Unknown base op — bail.
         free(slots); return NULL;
     }
-    string base_opn = MLIR_GetOpName(cur);
+    MLIR_OpType base_ty = MLIR_GetOpType(cur);
     const char *default_lit =
-        name_eq(base_opn, "llvm.mlir.undef")   ? "undef" :
-        name_eq(base_opn, "llvm.mlir.poison")  ? "poison" : "0";
+        base_ty == OP_TYPE_LLVM_MLIR_UNDEF  ? "undef" :
+        base_ty == OP_TYPE_LLVM_MLIR_POISON ? "poison" : "0";
 
     // Resolve each slot's scalar to a literal by inspecting its
     // defining op. Only accept constant-like ops.
@@ -699,9 +697,8 @@ static bool is_inline_constant(MLIR_OpHandle op, MLIR_OpType ty) {
     case OP_TYPE_LLVM_MLIR_UNDEF:
     case OP_TYPE_LLVM_MLIR_NULL:
     case OP_TYPE_LLVM_MLIR_ADDRESSOF:
+    case OP_TYPE_LLVM_MLIR_POISON:
         return true;
-    case OP_TYPE_UNREGISTERED:  // no enumerator for llvm.mlir.poison
-        return name_eq(MLIR_GetOpName(op), "llvm.mlir.poison");
     default:
         return false;
     }
@@ -747,8 +744,7 @@ static const char *llvm_cast_opcode(MLIR_OpHandle op, MLIR_OpType ty) {
     case OP_TYPE_LLVM_BITCAST:   return "bitcast";
     case OP_TYPE_LLVM_PTRTOINT:  return "ptrtoint";
     case OP_TYPE_LLVM_INTTOPTR:  return "inttoptr";
-    case OP_TYPE_UNREGISTERED:  // no enumerator for llvm.addrspacecast
-        return name_eq(MLIR_GetOpName(op), "llvm.addrspacecast") ? "addrspacecast" : NULL;
+    case OP_TYPE_LLVM_ADDRSPACECAST: return "addrspacecast";
     default: return NULL;
     }
 }
@@ -986,32 +982,27 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         buf_printf(out, ", label %%%s, label %%%s\n", bname(F, t), bname(F, f));
         return;
     }
-    default: break;
-    }
-
-    string opn = MLIR_GetOpName(op);
-    if (name_eq(opn, "llvm.unreachable")) {
+    case OP_TYPE_LLVM_UNREACHABLE: {
         buf_cstr(out, "  unreachable\n");
         return;
     }
-    if (name_eq(opn, "llvm.intr.stacksave") || name_eq(opn, "llvm.intr.stackrestore")) {
+    case OP_TYPE_LLVM_INTR_STACKSAVE: case OP_TYPE_LLVM_INTR_STACKRESTORE: {
         // Skip for now — tinyc doesn't rely on these.
         return;
     }
-
-    if (name_eq(opn, "llvm.intr.vastart") || name_eq(opn, "llvm.intr.va_start")) {
+    case OP_TYPE_LLVM_INTR_VASTART: {
         buf_cstr(out, "  call void @llvm.va_start.p0(ptr ");
         emit_use(F, MLIR_GetOpOperand(op, 0));
         buf_cstr(out, ")\n");
         return;
     }
-    if (name_eq(opn, "llvm.intr.vaend") || name_eq(opn, "llvm.intr.va_end")) {
+    case OP_TYPE_LLVM_INTR_VAEND: {
         buf_cstr(out, "  call void @llvm.va_end.p0(ptr ");
         emit_use(F, MLIR_GetOpOperand(op, 0));
         buf_cstr(out, ")\n");
         return;
     }
-    if (name_eq(opn, "llvm.intr.vacopy") || name_eq(opn, "llvm.intr.va_copy")) {
+    case OP_TYPE_LLVM_INTR_VACOPY: {
         buf_cstr(out, "  call void @llvm.va_copy.p0(ptr ");
         emit_use(F, MLIR_GetOpOperand(op, 0));
         buf_cstr(out, ", ptr ");
@@ -1019,7 +1010,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         buf_cstr(out, ")\n");
         return;
     }
-    if (name_eq(opn, "llvm.intr.wasm.memory.size")) {
+    case OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE: {
         if (MLIR_GetOpNumResults(op) == 1) {
             buf_cstr(out, "  ");
             emit_use(F, MLIR_GetOpResult(op, 0));
@@ -1027,7 +1018,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         }
         return;
     }
-    if (name_eq(opn, "llvm.intr.wasm.memory.grow")) {
+    case OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW: {
         if (MLIR_GetOpNumResults(op) != 1) return;
         char *old = fmt_alloc("%%v%d", F->next_v++);
         char *newv = fmt_alloc("%%v%d", F->next_v++);
@@ -1049,6 +1040,10 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         buf_printf(out, " = select i1 %s, i32 %s, i32 -1\n", ok, old);
         return;
     }
+    default: break;
+    }
+
+    string opn = MLIR_GetOpName(op);
     // Float math intrinsics: llvm.intr.sqrt / sin / cos / fabs / ...
     if (name_starts_with(opn, "llvm.intr.")) {
         // Generic shape: %r = call T @llvm.NAME.f32/f64(T %x[, T %y, ...])
@@ -1469,9 +1464,9 @@ static bool module_has_global(MLIR_BlockHandle mb, const char *gn) {
 }
 
 static bool op_uses_wasm_memory(MLIR_OpHandle op) {
-    string nm = MLIR_GetOpName(op);
-    if (name_eq(nm, "llvm.intr.wasm.memory.size") ||
-        name_eq(nm, "llvm.intr.wasm.memory.grow"))
+    MLIR_OpType ty = MLIR_GetOpType(op);
+    if (ty == OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE ||
+        ty == OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW)
         return true;
     size_t nr = MLIR_GetOpNumRegions(op);
     for (size_t r = 0; r < nr; r++) {

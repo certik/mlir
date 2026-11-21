@@ -419,7 +419,7 @@ static MLIR_OpHandle create_cf_br_in_block(MLIR_Context *ctx, Arena *arena,
     size_t *snums = arena_new_array(arena, size_t, 1);
     snums[0] = n_args;
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
-        ctx, llvm_cfg ? OP_TYPE_UNREGISTERED : OP_TYPE_CF_BR,
+        ctx, llvm_cfg ? OP_TYPE_LLVM_BR : OP_TYPE_CF_BR,
         llvm_cfg ? str_lit("llvm.br") : str_lit("cf.br"),
         NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         succs, 1, sops, snums,
@@ -613,10 +613,9 @@ static void create_single_exit_blocks_for_return_like_into(MLIR_Context *ctx,
         // zero-successor terminators (e.g. cf.assert, unreachable) alone.
         // We also funnel scf.yield for sub-regions (else of scf.if etc.)
         // so the inner cf.cond_br chain has a single continuation block.
-        string n = MLIR_GetOpName(term);
-        if (!string_eq_string(n, str_lit("func.return")) &&
-            !string_eq_string(n, str_lit("llvm.return")) &&
-            !string_eq_string(n, str_lit("scf.yield"))) continue;
+        MLIR_OpType tt = MLIR_GetOpType(term);
+        if (tt != OP_TYPE_FUNC_RETURN && tt != OP_TYPE_LLVM_RETURN &&
+            tt != OP_TYPE_SCF_YIELD) continue;
         combiner_combine_exit(ctx, c, term);
     }
 }
@@ -678,8 +677,7 @@ static EdgeMultiplexer create_single_entry_block(LiftState *st,
 static MLIR_OpHandle create_unreachable_terminator(LiftState *st,
                                                    MLIR_BlockHandle block,
                                                    MLIR_LocationHandle loc) {
-    string fn_name = MLIR_GetOpName(st->fn_op);
-    bool is_llvm = string_eq_string(fn_name, str_lit("llvm.func"));
+    bool is_llvm = MLIR_GetOpType(st->fn_op) == OP_TYPE_LLVM_FUNC;
 
     MLIR_AttributeHandle ty_attr =
         MLIR_GetOpAttributeByName(st->fn_op, "function_type");
@@ -2549,13 +2547,8 @@ static BranchXformResult transform_to_structured_cf_branches(
                 ? arena_new_array(arena, MLIR_ValueHandle, canon_n_ops) : NULL;
             for (size_t a = 0; a < canon_n_ops; ++a)
                 cargs[a] = MLIR_GetBlockArg(cont, a);
-            MLIR_OpType cot;
-            if (string_eq_string(canon_name, str_lit("scf.yield")))
-                cot = OP_TYPE_SCF_YIELD;
-            else if (string_eq_string(canon_name, str_lit("llvm.return")))
-                cot = OP_TYPE_LLVM_RETURN;
-            else
-                cot = OP_TYPE_FUNC_RETURN;
+            // Same op as the exit terminators (all named canon_name).
+            MLIR_OpType cot = MLIR_GetOpType(exit_terms[0].term);
             MLIR_OpHandle cterm = MLIR_CreateOp(
                 st->ctx, cot, canon_name,
                 NULL, 0, NULL, 0, NULL, 0,
@@ -3249,7 +3242,7 @@ static MLIR_OpHandle create_cf_cond_br_in_block(MLIR_Context *ctx, Arena *arena,
     size_t *snums = arena_new_array(arena, size_t, 2);
     snums[0] = n_t_args; snums[1] = n_f_args;
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
-        ctx, llvm_cfg ? OP_TYPE_UNREGISTERED : OP_TYPE_CF_COND_BR,
+        ctx, llvm_cfg ? OP_TYPE_LLVM_COND_BR : OP_TYPE_CF_COND_BR,
         llvm_cfg ? str_lit("llvm.cond_br") : str_lit("cf.cond_br"),
         NULL, 0,          // attributes
         NULL, 0,          // result_types
@@ -3308,7 +3301,7 @@ static MLIR_OpHandle create_cf_switch_in_block(MLIR_Context *ctx, Arena *arena,
     MLIR_AttributeHandle *as = arena_new_array(arena, MLIR_AttributeHandle, 1);
     as[0] = ca;
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
-        ctx, llvm_cfg ? OP_TYPE_UNREGISTERED : OP_TYPE_CF_SWITCH,
+        ctx, llvm_cfg ? OP_TYPE_LLVM_SWITCH : OP_TYPE_CF_SWITCH,
         llvm_cfg ? str_lit("llvm.switch") : str_lit("cf.switch"),
         as, 1,            // attributes
         NULL, 0,          // result_types

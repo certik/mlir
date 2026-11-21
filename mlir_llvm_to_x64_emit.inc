@@ -349,10 +349,8 @@ static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, MLIR_OpType ty, string nm) {
         store_val(F, r, RAX);
         return true;
     }
-    default: break;
-    }
     // llvm.intr.sqrt: hardware sqrt (mirrors llvm->aarch64 fsqrt lowering).
-    if (str_eqz(nm, "llvm.intr.sqrt")) {
+    case OP_TYPE_LLVM_INTR_SQRT: {
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         int fb = fp_bytes(ctx, r);
         if (fb != 4 && fb != 8) {
@@ -366,6 +364,8 @@ static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, MLIR_OpType ty, string nm) {
         movq_gpr_xmm(F, RAX, 0);
         store_val(F, r, RAX);
         return true;
+    }
+    default: break;
     }
     return false;
 }
@@ -692,16 +692,11 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
             store_val(F, MLIR_GetOpResult(op, 0), RAX);
         return;
     }
-    default: break;
-    }
-
-    string nm = MLIR_GetOpName(op);
-
     // variadics: va_list is a single `char*` cursor over the on-stack variadic
     // args (matching the tinyc_va_arg_* runtime helpers). va_start writes the
     // address of the first variadic arg; va_arg is lowered to helper calls by
     // the front end, so nothing is needed here for it.
-    if (str_eqz(nm, "llvm.intr.vastart")) {
+    case OP_TYPE_LLVM_INTR_VASTART: {
         // First variadic arg sits just past the saved rbp + return address and
         // any fixed params that spilled to the stack: [rbp + 16 + max(0,
         // n_fixed-6)*8]. Store that address into the va_list slot (operand 0).
@@ -711,8 +706,8 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         store_mem(F, RCX, RAX, 8);                               // *va_list = cursor
         return;
     }
-    if (str_eqz(nm, "llvm.intr.vaend")) return;                  // stack cursor: no teardown
-    if (str_eqz(nm, "llvm.intr.vacopy")) {
+    case OP_TYPE_LLVM_INTR_VAEND: return;                  // stack cursor: no teardown
+    case OP_TYPE_LLVM_INTR_VACOPY: {
         load_val(F, MLIR_GetOpOperand(op, 1), RCX);              // src va_list address
         load_mem(F, RAX, RCX, 8, false);                        // rax = *src
         load_val(F, MLIR_GetOpOperand(op, 0), RCX);              // dst va_list address
@@ -720,7 +715,7 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         return;
     }
 
-    if (str_eqz(nm, "llvm.intr.wasm.memory.size")) {
+    case OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE: {
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         uint32_t off;
         if (!gmap_get(F->gm, str_lit("__wasm_mem_pages"), &off)) {
@@ -733,7 +728,7 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         store_val(F, r, RAX);
         return;
     }
-    if (str_eqz(nm, "llvm.intr.wasm.memory.grow")) {
+    case OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW: {
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         uint32_t off;
         if (!gmap_get(F->gm, str_lit("__wasm_mem_pages"), &off)) {
@@ -756,6 +751,10 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         store_val(F, r, RAX);
         return;
     }
+    default: break;
+    }
+
+    string nm = MLIR_GetOpName(op);
 
     // floating-point arithmetic / conversion / comparison (issue #212 Option A)
     if (lower_fp_op(F, op, ty, nm)) return;
@@ -821,11 +820,10 @@ static void lower_term(FnCtx *F, MLIR_OpHandle op) {
         }
         return;
     }
+    case OP_TYPE_LLVM_UNREACHABLE: eb(F, 0x0F); eb(F, 0x0B); return;  // ud2
     default: break;
     }
-    string nm = MLIR_GetOpName(op);   // llvm.unreachable has no enumerator
-    if (str_eqz(nm, "llvm.unreachable")) { eb(F, 0x0F); eb(F, 0x0B); return; }  // ud2
-    fail(F, "unsupported terminator", nm);
+    fail(F, "unsupported terminator", MLIR_GetOpName(op));
 }
 
 // ---------------------------------------------------------------------------

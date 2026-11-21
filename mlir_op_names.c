@@ -291,6 +291,22 @@ static string op_type_to_string_half2(MLIR_OpType type) {
         case OP_TYPE_AARCH64_FCMP:         return str_lit("aarch64.fcmp");
         case OP_TYPE_AARCH64_FP_CVT:       return str_lit("aarch64.fp_cvt");
         case OP_TYPE_AARCH64_DATA_INIT:    return str_lit("aarch64.data_init");
+        case OP_TYPE_ARITH_INDEX_CASTUI: return str_lit("arith.index_castui");
+        case OP_TYPE_ARITH_UITOFP: return str_lit("arith.uitofp");
+        case OP_TYPE_ARITH_FPTOUI: return str_lit("arith.fptoui");
+        case OP_TYPE_LLVM_SWITCH: return str_lit("llvm.switch");
+        case OP_TYPE_LLVM_UNREACHABLE: return str_lit("llvm.unreachable");
+        case OP_TYPE_LLVM_MLIR_POISON: return str_lit("llvm.mlir.poison");
+        case OP_TYPE_LLVM_ADDRSPACECAST: return str_lit("llvm.addrspacecast");
+        case OP_TYPE_LLVM_INSERTVALUE: return str_lit("llvm.insertvalue");
+        case OP_TYPE_LLVM_INTR_SQRT: return str_lit("llvm.intr.sqrt");
+        case OP_TYPE_LLVM_INTR_VASTART: return str_lit("llvm.intr.vastart");
+        case OP_TYPE_LLVM_INTR_VAEND: return str_lit("llvm.intr.vaend");
+        case OP_TYPE_LLVM_INTR_VACOPY: return str_lit("llvm.intr.vacopy");
+        case OP_TYPE_LLVM_INTR_STACKSAVE: return str_lit("llvm.intr.stacksave");
+        case OP_TYPE_LLVM_INTR_STACKRESTORE: return str_lit("llvm.intr.stackrestore");
+        case OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE: return str_lit("llvm.intr.wasm.memory.size");
+        case OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW: return str_lit("llvm.intr.wasm.memory.grow");
         default: return OP_NAME_NOT_IN_THIS_HALF;
     }
 }

@@ -1714,7 +1714,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         if (MLIR_GetOpNumResults(op) == 1)
             fin_val(L, MLIR_GetOpResult(op, 0), 0);
 
-    } else if (name_eq(on, "llvm.intr.vastart")) {
+    } else if (on_ty == OP_TYPE_LLVM_INTR_VASTART) {
         // Darwin arm64: all variadic args are passed on the stack and va_list is
         // just a pointer to the first one. Incoming stack args of this function
         // sit at [x29, #16 + max(0, n_fixed-8)*8] (after the saved {fp,lr} pair
@@ -1726,7 +1726,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         emit_add_imm(ctx, blk, 9, 29, (uint16_t)base_off, true);
         emit_str_x(ctx, blk, 9, rp, 0);
 
-    } else if (name_eq(on, "llvm.intr.vaend")) {
+    } else if (on_ty == OP_TYPE_LLVM_INTR_VAEND) {
         // No teardown needed for the stack-based va_list.
 
     } else if (on_ty == OP_TYPE_LLVM_MLIR_UNDEF ||
@@ -2028,7 +2028,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         emit_fmov_gp_v(ctx, blk, /*to_v=*/false, true, rd, 0);
         fin_val(L, res, rd);
 
-    } else if (on_ty == OP_TYPE_LLVM_FNEG || name_eq(on, "llvm.intr.sqrt")) {
+    } else if (on_ty == OP_TYPE_LLVM_FNEG || on_ty == OP_TYPE_LLVM_INTR_SQRT) {
         MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
         int fw = fp_width(ctx, res);
         const char *kind = on_ty == OP_TYPE_LLVM_FNEG ? "fneg" : "fsqrt";
@@ -2119,7 +2119,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         fin_val(L, res, rd);
 
 
-    } else if (name_eq(on, "llvm.intr.wasm.memory.size")) {
+    } else if (on_ty == OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE) {
         // `__builtin_wasm_memory_size(0)` from tinyc. When the module
         // carries a `__wasm_mem_pages` scalar (wasmssa->llvm path), read
         // it via the x27 globals-cluster pin; otherwise the current memory
@@ -2133,7 +2133,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         emit_load_imm(ctx, blk, rd, 0, false);
         fin_val(L, res, rd);
 
-    } else if (name_eq(on, "llvm.intr.wasm.memory.grow")) {
+    } else if (on_ty == OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW) {
         // `__builtin_wasm_memory_grow(0, delta)`: bump `__wasm_mem_pages` by
         // `delta`, capped at 65536 pages; return the old count or -1 on failure.
         // Mirrors mlir_wasmssa_to_llvm.c OP_TYPE_WASMSSA_MEMORY_GROW.

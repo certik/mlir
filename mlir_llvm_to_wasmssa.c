@@ -2078,8 +2078,9 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     string name = MLIR_GetOpName(op);
+    MLIR_OpType nty = MLIR_GetOpType(op);
 
-    if (name_eq(name, "llvm.intr.vastart")) {
+    if (nty == OP_TYPE_LLVM_INTR_VASTART) {
         // Store the function's hidden va_list i32 param into *%ap.
         if (F->va_list_value == MLIR_INVALID_HANDLE) return false;
         if (MLIR_GetOpNumOperands(op) != 1) return false;
@@ -2097,11 +2098,11 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         (void)commit_op(F, &o);
         return true;
     }
-    if (name_eq(name, "llvm.intr.vaend")) {
+    if (nty == OP_TYPE_LLVM_INTR_VAEND) {
         // No-op under the wasm32 ABI.
         return true;
     }
-    if (name_eq(name, "llvm.intr.vacopy")) {
+    if (nty == OP_TYPE_LLVM_INTR_VACOPY) {
         // Copy 4 bytes (a char*) from src to dst.
         if (MLIR_GetOpNumOperands(op) != 2) return false;
         MLIR_ValueHandle da, sa;
@@ -2132,7 +2133,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     }
 
     // ---- llvm.intr.sqrt ---------------------------------------------------
-    if (name_eq(name, "llvm.intr.sqrt")) {
+    if (nty == OP_TYPE_LLVM_INTR_SQRT) {
         if (MLIR_GetOpNumResults(op) != 1 ||
             MLIR_GetOpNumOperands(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
@@ -2158,7 +2159,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     // `__builtin_wasm_memory_size(0)` lowers to this. No operands (the
     // memory index byte is hard-coded to 0 in the binary encoder); the
     // single i32 result is the current memory size in 64KiB pages.
-    if (name_eq(name, "llvm.intr.wasm.memory.size")) {
+    if (nty == OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE) {
         if (MLIR_GetOpNumResults(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         uint8_t vt = wasm_vt(F->ctx, MLIR_GetValueType(r));
@@ -2176,7 +2177,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     // ---- llvm.intr.wasm.memory.grow ---------------------------------------
     // `__builtin_wasm_memory_grow(0, n)` lowers to this. One i32 operand
     // (pages to grow by) and one i32 result (previous size in pages or -1).
-    if (name_eq(name, "llvm.intr.wasm.memory.grow")) {
+    if (nty == OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW) {
         if (MLIR_GetOpNumResults(op) != 1 ||
             MLIR_GetOpNumOperands(op) != 1) return false;
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
@@ -2255,10 +2256,8 @@ static bool va_call_layout(FnCtx *F, MLIR_OpHandle op, uint32_t *total_size,
 
 static bool prewalk_op(FnCtx *F, MLIR_OpHandle op) {
     MLIR_OpType ty = MLIR_GetOpType(op);
-    // llvm.switch has no enumerator; it is matched by name.
     if (ty == OP_TYPE_LLVM_BR || ty == OP_TYPE_LLVM_COND_BR ||
-        (ty == OP_TYPE_UNREGISTERED &&
-         name_eq(MLIR_GetOpName(op), "llvm.switch"))) {
+        ty == OP_TYPE_LLVM_SWITCH) {
         string n = MLIR_GetOpName(op);
         // The structurization step could not lift this branch (see the
         // limitations listed in mlir_lift_cf_to_scf.h).
@@ -2611,8 +2610,8 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
             string pending_target = (string){0};
             for (size_t bi = 0; bi < nb; bi++) {
                 MLIR_OpHandle bop = MLIR_GetBlockOp(blk, bi);
-                string bn = MLIR_GetOpName(bop);
-                if (name_eq(bn, "llvm.mlir.addressof")) {
+                MLIR_OpType bty = MLIR_GetOpType(bop);
+                if (bty == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
                     MLIR_AttributeHandle ta = find_attr(bop, "global_name");
                     if (ta == MLIR_INVALID_HANDLE)
                         ta = find_attr(bop, "value");  // upstream attr name
@@ -2630,7 +2629,7 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
                     string ts = MLIR_GetAttributeString(ta);
                     if (ts.size && ts.str[0] == '@') { ts.str++; ts.size--; }
                     pending_target = ts;
-                } else if (name_eq(bn, "llvm.return")) {
+                } else if (bty == OP_TYPE_LLVM_RETURN) {
                     if (!pending_target.str) break;
                     size = 4;
                     if (align_pow == 0) align_pow = 2;
@@ -2682,12 +2681,12 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
                     bool saw_return = false;
                     for (size_t bi = 0; bi < nb && ok; bi++) {
                         MLIR_OpHandle bop = MLIR_GetBlockOp(blk, bi);
-                        string bn = MLIR_GetOpName(bop);
-                        if (name_eq(bn, "llvm.mlir.undef") ||
-                            name_eq(bn, "llvm.mlir.zero") ||
-                            name_eq(bn, "llvm.mlir.poison")) {
+                        MLIR_OpType bty = MLIR_GetOpType(bop);
+                        if (bty == OP_TYPE_LLVM_MLIR_UNDEF ||
+                            bty == OP_TYPE_LLVM_MLIR_ZERO ||
+                            bty == OP_TYPE_LLVM_MLIR_POISON) {
                             saw_undef_or_zero = true;
-                        } else if (name_eq(bn, "llvm.mlir.constant")) {
+                        } else if (bty == OP_TYPE_LLVM_MLIR_CONSTANT) {
                             MLIR_AttributeHandle ca = find_attr(bop, "value");
                             if (ca == MLIR_INVALID_HANDLE) { ok = false; break; }
                             MLIR_AttrKind ck = MLIR_GetAttributeKind(ca);
@@ -2708,7 +2707,7 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
                                 cs[ncs].bits = bits;
                                 ncs++;
                             }
-                        } else if (name_eq(bn, "llvm.insertvalue")) {
+                        } else if (bty == OP_TYPE_LLVM_INSERTVALUE) {
                             if (MLIR_GetOpNumOperands(bop) < 2) { ok = false; break; }
                             // Position attr — printed as "array<i64: N, ...>".
                             MLIR_AttributeHandle pa = find_attr(bop, "position");
@@ -2749,7 +2748,7 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
                                 cs[ncs].bits = 0;  // not a scalar
                                 ncs++;
                             }
-                        } else if (name_eq(bn, "llvm.return")) {
+                        } else if (bty == OP_TYPE_LLVM_RETURN) {
                             saw_return = true;
                             break;
                         }

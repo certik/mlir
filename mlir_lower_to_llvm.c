@@ -568,7 +568,7 @@ static void rewrite_yield_to_br(LowerState *st, MLIR_BlockHandle blk,
     size_t n = MLIR_GetBlockNumOps(blk);
     if (n == 0) return;
     MLIR_OpHandle term = MLIR_GetBlockOp(blk, n - 1);
-    if (!name_eq(MLIR_GetOpName(term), "scf.yield")) return;
+    if (MLIR_GetOpType(term) != OP_TYPE_SCF_YIELD) return;
     Arena *alloc = MLIR_GetArenaAllocator(st->ctx);
     size_t no = MLIR_GetOpNumOperands(term);
     MLIR_ValueHandle *operands = no ? (MLIR_ValueHandle *)arena_alloc(
@@ -733,13 +733,10 @@ static int try_lower_op(LowerState *st, MLIR_OpHandle op,
     case OP_TYPE_UNREALIZED_CONVERSION_CAST:
                                      ok = lower_unrealized_cast(st, op, parent, pos); break;
     case OP_TYPE_ARITH_CONSTANT:     ok = lower_arith_constant(st, op, parent, pos); break;
-    case OP_TYPE_ARITH_INDEX_CAST:
-        // `arith.index_castui` has no enumerator of its own. A creator may
-        // pass it with this type (the native backend then keeps the name),
-        // so the name decides the signedness.
-        ok = lower_arith_index_cast(st, op, parent, pos,
-                                    name_eq(MLIR_GetOpName(op), "arith.index_castui"));
-        break;
+    case OP_TYPE_ARITH_INDEX_CAST:   ok = lower_arith_index_cast(st, op, parent, pos, false); break;
+    case OP_TYPE_ARITH_INDEX_CASTUI: ok = lower_arith_index_cast(st, op, parent, pos, true); break;
+    case OP_TYPE_ARITH_UITOFP:      ok = lower_rename(st, op, parent, pos, str_lit("llvm.uitofp"),  OP_TYPE_UNREGISTERED); break;
+    case OP_TYPE_ARITH_FPTOUI:      ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptoui"),  OP_TYPE_UNREGISTERED); break;
     case OP_TYPE_ARITH_ADDI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.add"),     OP_TYPE_UNREGISTERED); break;
     case OP_TYPE_ARITH_SUBI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.sub"),     OP_TYPE_UNREGISTERED); break;
     case OP_TYPE_ARITH_MULI:        ok = lower_rename(st, op, parent, pos, str_lit("llvm.mul"),     OP_TYPE_UNREGISTERED); break;
@@ -770,14 +767,11 @@ static int try_lower_op(LowerState *st, MLIR_OpHandle op,
     case OP_TYPE_ARITH_BITCAST:     ok = lower_rename(st, op, parent, pos, str_lit("llvm.bitcast"), OP_TYPE_UNREGISTERED); break;
     case OP_TYPE_CF_BR:      ok = lower_cf_branch(st, op, parent, pos, str_lit("llvm.br")); break;
     case OP_TYPE_CF_COND_BR: ok = lower_cf_branch(st, op, parent, pos, str_lit("llvm.cond_br")); break;
-    case OP_TYPE_UNREGISTERED: {
-        string name = MLIR_GetOpName(op);
-        if (name_eq(name, "unrealized_conversion_cast")) ok = lower_unrealized_cast(st, op, parent, pos);
-        else if (name_eq(name, "arith.index_castui")) ok = lower_arith_index_cast(st, op, parent, pos, true);
-        else if (name_eq(name, "arith.uitofp")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.uitofp"), OP_TYPE_UNREGISTERED);
-        else if (name_eq(name, "arith.fptoui")) ok = lower_rename(st, op, parent, pos, str_lit("llvm.fptoui"), OP_TYPE_UNREGISTERED);
+    case OP_TYPE_UNREGISTERED:
+        // Not an op of any dialect, so it has no enumerator.
+        if (name_eq(MLIR_GetOpName(op), "unrealized_conversion_cast"))
+            ok = lower_unrealized_cast(st, op, parent, pos);
         break;
-    }
     default: break;
     }
 
