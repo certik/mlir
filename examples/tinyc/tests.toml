@@ -1505,3 +1505,11 @@ targets = ["native", "wasm", "macho", "elf"]
 # `?:` and va_arg, steps by 1 byte (it used to step by 4). Expected output
 # from clang.
 expected_stdout = "c d d f\nello lo\n5 4\n4 1 4\nr s 1 rs 8\nz v yz w\nello efgh e\narg\n20 30\n"
+
+[[test]]
+name = "ptr_cast_elem"
+targets = ["native", "wasm", "macho", "elf"]
+# A pointer cast takes its element type from the target type: `(long long *)vp
+# + 1` used to step 4 bytes. A call returning T** is a pointer (#266).
+# Expected output from clang.
+expected_stdout = "5000000000 7 2.5 0.75\n3 4\n33 11 22 22\n"

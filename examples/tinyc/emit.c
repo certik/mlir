@@ -2763,10 +2763,12 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             } else {
                 v.sdef = NULL;
             }
-            // Reset element-type hints for non-void typed pointers.
-            if (ck == TY_PTR_I32) { v.ptr_elem = e->i32; v.is_str = false; }
-            else if (ck == TY_PTR_CHAR) { v.ptr_elem = e->i8; v.is_str = true; }
-            else if (ck == TY_PTR_VOID) { v.ptr_elem = MLIR_INVALID_HANDLE; v.is_str = false; }
+            // The element type comes from the target type alone: a
+            // `(long long *)vp` steps by 8, a `(struct S *)charp` by the
+            // struct size (ptr_elem unset, sdef set), not by the
+            // operand's element size.
+            v.ptr_elem = ptr_elem_of_type(e, ex->cast_type);
+            v.is_str = (ck == TY_PTR_CHAR);
             v.is_unsigned = ex->cast_type.int_unsigned;
             return v;
         }
@@ -3975,7 +3977,6 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 r.is_i64 = (fnty->fnptr_ret->kind == TY_I64);
                 r.is_unsigned = fnty->fnptr_ret->int_unsigned;
                 r.is_ptr = (rty == e->ptr);
-                r.is_str = (fnty->fnptr_ret->kind == TY_PTR_CHAR);
                 r.ptr_elem = ptr_elem_of_type(e, *fnty->fnptr_ret);
                 return r;
             }
@@ -4008,9 +4009,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             if (sig->ret.type.kind == TY_PTR_I32 ||
                 sig->ret.type.kind == TY_PTR_CHAR ||
                 sig->ret.type.kind == TY_PTR_VOID ||
+                sig->ret.type.kind == TY_PTR_PTR ||
                 sig->ret.type.kind == TY_FNPTR) {
                 r.is_ptr = true;
-                r.is_str = (sig->ret.type.kind == TY_PTR_CHAR);
                 r.ptr_elem = ptr_elem_of_type(e, sig->ret.type);
             }
             return r;
