@@ -1236,9 +1236,27 @@ static void promote_static_locals(P *p, Stmt *s, int line) {
     }
 }
 
+// True when the declaration at the cursor declares a function pointer:
+// its first `(` follows the type tokens and opens `(*name)`. The return
+// type in front of it can be any type parse_sig_type accepts, e.g.
+// `const char *(*fp)(int)`, `struct S *(*fp)(void)` or `Td (*fp)(int)`.
+static bool decl_is_fnptr(P *p) {
+    size_t k = 0;
+    for (;;) {
+        TcTokKind kd = peek(p, k).kind;
+        if (kd == TC_TK_LPAREN) break;
+        if (kd == TC_TK_EOF || kd == TC_TK_SEMI || kd == TC_TK_LBRACE ||
+            kd == TC_TK_ASSIGN || kd == TC_TK_COMMA || kd == TC_TK_LBRACK ||
+            kd == TC_TK_RPAREN) return false;
+        k++;
+    }
+    return k > 0 && peek(p, k + 1).kind == TC_TK_STAR;
+}
+
 // Parse a decl statement: <type> [*] name [ '[' N ']' [ '[' M ']' ] ] [ '=' expr ] ';'
 //   or                  : struct Name [*] name [ '[' N ']' ] [ '=' &<var> ] ';'
 //   or                  : <typedef-name> name [ ... ] [ '=' expr ] ';'
+//   or                  : <type> (*name)(params) [ '=' expr ] ';'
 // Caller has already verified that current token starts a decl.
 static Stmt *parse_decl(P *p, bool require_semi) {
     int line = cur(p).line;
@@ -1260,6 +1278,22 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         p->i = save;
     }
     skip_const(p);
+    // Function-pointer local: `T (*name)(params)`, where T is any return
+    // type (a pointer, a struct, a typedef name, ...).
+    if (decl_is_fnptr(p)) {
+        Stmt *s = new_stmt(p, ST_DECL, line);
+        parse_sig_type(p, &s->decl_type);
+        string nm = (string){0};
+        try_parse_fnptr_suffix(p, &s->decl_type, &nm);
+        if (nm.size == 0) {
+            perror_at(p, line, str_lit("function-pointer declaration requires a name"));
+        }
+        s->decl_name = nm;
+        if (accept(p, TC_TK_ASSIGN)) s->decl_init = parse_expr(p);
+        if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+        if (saw_static) promote_static_locals(p, s, line);
+        return s;
+    }
     // Typedef'd type-name takes precedence over manual parsing.
     if (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, cur(p).text)) {
         Type ty = {0};
@@ -1500,25 +1534,6 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     bool is_bool = false;
     parse_base_type2(p, &base, &was_char, &is_long, &is_unsigned, &int_bits, &is_bool);
     if (is_long) int_bits = 64;
-    // Function-pointer local: `int (*name)(types)`.
-    if (cur(p).kind == TC_TK_LPAREN && peek(p, 1).kind == TC_TK_STAR) {
-        Stmt *s = new_stmt(p, ST_DECL, line);
-        s->decl_type.kind = base;
-        if (is_long) s->decl_type.int_bits = 64;
-        s->decl_type.int_unsigned = is_unsigned;
-        string nm = (string){0};
-        try_parse_fnptr_suffix(p, &s->decl_type, &nm);
-        if (nm.size == 0) {
-            perror_at(p, line, str_lit("function-pointer declaration requires a name"));
-        }
-        s->decl_name = nm;
-        if (accept(p, TC_TK_ASSIGN)) {
-            { Expr *agg = parse_aggregate_init(p, s->decl_type); s->decl_init = agg ? agg : parse_expr(p); }
-        }
-        if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
-        if (saw_static) promote_static_locals(p, s, line);
-        return s;
-    }
     bool is_ptr = false;
     bool is_ptr_ptr = false;
     if (accept(p, TC_TK_STAR)) {
@@ -1857,7 +1872,8 @@ static Stmt *parse_stmt(P *p) {
         t.kind == TC_TK_KW_SHORT || t.kind == TC_TK_KW_BOOL ||
         t.kind == TC_TK_KW_VA_LIST ||
         (t.kind == TC_TK_IDENT && typedef_lookup(p, t.text) &&
-         (peek(p, 1).kind == TC_TK_IDENT || peek(p, 1).kind == TC_TK_STAR))) {
+         (peek(p, 1).kind == TC_TK_IDENT || peek(p, 1).kind == TC_TK_STAR ||
+          (peek(p, 1).kind == TC_TK_LPAREN && peek(p, 2).kind == TC_TK_STAR)))) {
         // `enum [Tag] { ... };` is a module-scope-only registration form;
         // a body inside a function or block scope would leak enumerators
         // out of their lexical scope (we have no scope-pop machinery for
@@ -1924,6 +1940,8 @@ static bool try_parse_fnptr_suffix(P *p, Type *ty, string *out_name) {
     Type *params = NULL;
     int nparams = 0;
     int cap = 0;
+    // `(void)` declares no parameters.
+    if (cur(p).kind == TC_TK_KW_VOID && peek(p, 1).kind == TC_TK_RPAREN) p->i++;
     if (cur(p).kind != TC_TK_RPAREN) {
         for (;;) {
             Type pty = {0};
@@ -1991,9 +2009,15 @@ static bool parse_sig_type(P *p, Type *out) {
     // among the consumed modifiers and a single trailing '*' follows, the
     // result is TY_PTR_CHAR rather than TY_PTR_I32 (matches existing tinyC
     // behaviour for `char*`).
+    // `int` or `char` followed by another modifier (`int unsigned`,
+    // `char signed`) takes the same any-order path.
+    TcTokKind nk = peek(p, 1).kind;
+    bool int_then_mod = (cur(p).kind == TC_TK_KW_INT || cur(p).kind == TC_TK_KW_CHAR) &&
+                        (nk == TC_TK_KW_SIGNED || nk == TC_TK_KW_UNSIGNED ||
+                         nk == TC_TK_KW_LONG || nk == TC_TK_KW_SHORT);
     if (cur(p).kind == TC_TK_KW_SIGNED || cur(p).kind == TC_TK_KW_UNSIGNED ||
         cur(p).kind == TC_TK_KW_LONG   || cur(p).kind == TC_TK_KW_SHORT  ||
-        cur(p).kind == TC_TK_KW_BOOL) {
+        cur(p).kind == TC_TK_KW_BOOL   || int_then_mod) {
         int  n_long = 0;
         bool saw_short = false;
         bool saw_char = false;
