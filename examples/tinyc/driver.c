@@ -634,6 +634,65 @@ static string inject_syscall6_definition(Arena *arena, string ir) {
 #endif
 }
 
+// Output mode selected by `--emit=`; the last one on the command line wins.
+// emit_mode_name() drives both the option parser and the usage text, so the
+// two cannot disagree.
+typedef enum {
+    EMIT_MLIR,
+    EMIT_LOWERED,
+    EMIT_LLVM,
+    EMIT_WASM,
+    EMIT_WASMSSA,
+    EMIT_WASMSTACK,
+    EMIT_WAT,
+    // `--emit=aarch64` stops the unified llvm -> aarch64 -> macho backend
+    // at the physical-register `aarch64` dialect and prints it (the
+    // "MachO MLIR"), instead of encoding the final Mach-O bytes. It is a
+    // debugging view of the same pipeline `--emit=macho --macho-backend=llvm`
+    // drives, so `--emit=mlir`, `--emit=llvm`, `--emit=aarch64` give the
+    // three successive IRs for the native llvm backend.
+    EMIT_AARCH64,
+    EMIT_MACHO,
+    // `--emit=elf` lowers the (native, LP64) `llvm` dialect through the flat
+    // (scf->cf) standard lowering and the in-tree x86_64 code generator to a
+    // statically-linked Linux ELF executable (direct syscalls, no libc).
+    EMIT_ELF,
+    EMIT_N_MODES
+} EmitMode;
+
+// The `--emit=` spelling of each mode. (A switch rather than a table of
+// string literals: tinyC, which compiles this file when self-hosting, does
+// not support pointer initializers in global arrays.)
+static const char *emit_mode_name(EmitMode m) {
+    switch (m) {
+        case EMIT_MLIR:      return "mlir";
+        case EMIT_LOWERED:   return "lowered";
+        case EMIT_LLVM:      return "llvm";
+        case EMIT_WASM:      return "wasm";
+        case EMIT_WASMSSA:   return "wasmssa";
+        case EMIT_WASMSTACK: return "wasmstack";
+        case EMIT_WAT:       return "wat";
+        case EMIT_AARCH64:   return "aarch64";
+        case EMIT_MACHO:     return "macho";
+        case EMIT_ELF:       return "elf";
+        default:             return "";
+    }
+}
+
+static void print_usage(Arena *arena) {
+    strbuf sb = strbuf_make_cap(arena, 256);
+    strbuf_append_cstr(arena, &sb, "usage: tinyc [--emit=");
+    for (int m = 0; m < EMIT_N_MODES; m++) {
+        if (m > 0) strbuf_append_cstr(arena, &sb, "|");
+        strbuf_append_cstr(arena, &sb, emit_mode_name((EmitMode)m));
+    }
+    strbuf_append_cstr(arena, &sb,
+        "] [--lowering=upstream|native] [--from-wasm PATH] "
+        "[--wasm-runtime-obj=PATH ...] [-I dir ...] [-D name[=value] ...] "
+        "[-o OUT] FILE.tc [FILE2.tc ...]");
+    println(str_lit("{}"), strbuf_to_string(sb));
+}
+
 int app_main(void) {
     size_t pargc = 0, argv_buf_size = 0;
     int rc = platform_args_sizes_get(&pargc, &argv_buf_size);
@@ -650,30 +709,13 @@ int app_main(void) {
     // and against any op, so `--emit=mlir` and `--emit=lowered` produce
     // identical output regardless of which tinyc binary was built.
     PrintFn print_fn = MLIR_PrintOperationGeneric;
-    bool emit_llvm = false;
-    bool emit_lowered = false;
-    bool emit_wasm = false;
-    bool emit_wasmssa = false;
-    bool emit_wasmstack = false;
-    bool emit_wat = false;
-    bool emit_macho = false;
-    // `--emit=aarch64` stops the unified llvm -> aarch64 -> macho backend
-    // at the physical-register `aarch64` dialect and prints it (the
-    // "MachO MLIR"), instead of encoding the final Mach-O bytes. It is a
-    // debugging view of the same pipeline `--emit=macho --macho-backend=llvm`
-    // drives, so `--emit=mlir`, `--emit=llvm`, `--emit=aarch64` give the
-    // three successive IRs for the native llvm backend.
-    bool emit_aarch64 = false;
+    EmitMode emit_mode = EMIT_MLIR;
     // --macho-backend selects which pipeline produces the final Mach-O
     // binary. "wasm" (default) keeps the established wasm-link +
     // wasm->macho path. "llvm" routes the `llvm` dialect directly through
     // the unified llvm -> aarch64 -> macho backend.
     bool macho_backend_llvm = false;
     bool host_varargs = false;
-    // `--emit=elf` lowers the (native, LP64) `llvm` dialect through the flat
-    // (scf->cf) standard lowering and the in-tree x86_64 code generator to a
-    // statically-linked Linux ELF executable (direct syscalls, no libc).
-    bool emit_elf = false;
     // `--lowering=upstream` switches the four lowering / translation calls
     // below to the *Upstream variants (which run upstream MLIR's pass
     // pipeline / translator / LLVM target machine). Only available in the
@@ -810,16 +852,17 @@ int app_main(void) {
             arena_destroy(boot_arena);
             return wrc;
         }
-        if      (strcmp(argv[i], "--emit=mlir")    == 0) { emit_llvm = false; emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; emit_elf = false; }
-        else if (strcmp(argv[i], "--emit=lowered") == 0) { emit_lowered = true;  emit_llvm = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; emit_elf = false; }
-        else if (strcmp(argv[i], "--emit=llvm")    == 0) { emit_llvm = true;     emit_lowered = false; emit_wasm = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; emit_elf = false; }
-        else if (strcmp(argv[i], "--emit=wasm")    == 0) { emit_wasm = true;     emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; emit_elf = false; }
-        else if (strcmp(argv[i], "--emit=wasmssa") == 0) { emit_wasmssa = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmstack = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; emit_elf = false; }
-        else if (strcmp(argv[i], "--emit=wasmstack") == 0) { emit_wasmstack = true; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wat = false; emit_macho = false; emit_aarch64 = false; emit_elf = false; }
-        else if (strcmp(argv[i], "--emit=wat")     == 0) { emit_wat = true;     emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_macho = false; emit_aarch64 = false; emit_elf = false; }
-        else if (strcmp(argv[i], "--emit=macho")   == 0) { emit_macho = true;   emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_aarch64 = false; emit_elf = false; }
-        else if (strcmp(argv[i], "--emit=aarch64") == 0) { emit_aarch64 = true; emit_macho = false; emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; emit_elf = false; }
-        else if (strcmp(argv[i], "--emit=elf")     == 0) { emit_elf = true; emit_aarch64 = false; emit_macho = false; emit_wat = false; emit_wasm = false; emit_llvm = false; emit_lowered = false; emit_wasmssa = false; emit_wasmstack = false; }
+        if (strncmp(argv[i], "--emit=", 7) == 0) {
+            int m = 0;
+            while (m < EMIT_N_MODES && strcmp(argv[i] + 7, emit_mode_name((EmitMode)m)) != 0) m++;
+            if (m == EMIT_N_MODES) {
+                fprintf(stderr, "tinyc: unknown output mode '%s'\n", argv[i]);
+                print_usage(boot_arena);
+                arena_destroy(boot_arena);
+                return 1;
+            }
+            emit_mode = (EmitMode)m;
+        }
         else if (strcmp(argv[i], "--macho-backend=wasm") == 0) { macho_backend_llvm = false; }
         else if (strcmp(argv[i], "--macho-backend=llvm") == 0) { macho_backend_llvm = true; }
         else if (strncmp(argv[i], "--wasm-runtime-obj=", 19) == 0) {
@@ -882,10 +925,20 @@ int app_main(void) {
     }
 
     if (n_input_files == 0 && from_wasm_path == NULL) {
-        println(str_lit("usage: tinyc [--emit=mlir|lowered|llvm|wasm|wasmssa|wasmstack|wat|aarch64|macho] [--lowering=upstream|native] [--from-wasm PATH] [--wasm-runtime-obj=PATH ...] [-I dir ...] [-D name[=value] ...] [-o OUT] FILE.tc [FILE2.tc ...]"));
+        print_usage(boot_arena);
         arena_destroy(boot_arena);
         return 1;
     }
+
+    bool emit_lowered   = emit_mode == EMIT_LOWERED;
+    bool emit_llvm      = emit_mode == EMIT_LLVM;
+    bool emit_wasm      = emit_mode == EMIT_WASM;
+    bool emit_wasmssa   = emit_mode == EMIT_WASMSSA;
+    bool emit_wasmstack = emit_mode == EMIT_WASMSTACK;
+    bool emit_wat       = emit_mode == EMIT_WAT;
+    bool emit_aarch64   = emit_mode == EMIT_AARCH64;
+    bool emit_macho     = emit_mode == EMIT_MACHO;
+    bool emit_elf       = emit_mode == EMIT_ELF;
 
     if ((emit_wasmssa || emit_wasmstack) &&
 #ifdef TINYC_HAS_UPSTREAM
