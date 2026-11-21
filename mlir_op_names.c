@@ -9,6 +9,7 @@
 // chained: if the first returns a sentinel, the second runs.
 
 #include <base/string.h>
+#include <base/assert.h>
 #include "mlir_api.h"
 #include "mlir_op_names.h"
 
@@ -312,12 +313,21 @@ string op_type_to_string(MLIR_OpType type) {
 // however the op was created, and passes can dispatch on the enum instead of
 // comparing name strings.
 
-// Power of two, twice OP_TYPE_TABLE_CAPACITY so probe sequences stay short.
+// Power of two, at least twice OP_TYPE_TABLE_CAPACITY so the table is at
+// most half full and probe sequences stay short.
 #define OP_NAME_TABLE_SIZE 1024
+#ifndef __TINYC__
+typedef char op_name_table_size_ok[
+    (OP_NAME_TABLE_SIZE >= 2 * OP_TYPE_TABLE_CAPACITY &&
+     (OP_NAME_TABLE_SIZE & (OP_NAME_TABLE_SIZE - 1)) == 0) ? 1 : -1];
+#endif
 
 static string g_op_names[OP_TYPE_TABLE_CAPACITY];
 // Slot value is an MLIR_OpType; 0 (OP_TYPE_UNREGISTERED) marks an empty slot.
 static uint16_t g_op_name_slots[OP_NAME_TABLE_SIZE];
+// Built on the first lookup. Like the rest of the native API's process-wide
+// state (e.g. the op and type registries in mlir_api_impl.c), this is not
+// thread-safe: IR must be built from one thread.
 static bool g_op_name_table_built = false;
 
 static uint32_t op_name_hash(string name) {
@@ -337,13 +347,13 @@ static void op_name_table_build(void) {
         if (str_eq(s, str_lit("unknown"))) continue;  // enumerator without a name
         g_op_names[t] = s;
         uint32_t i = op_name_hash(s) & (OP_NAME_TABLE_SIZE - 1);
-        bool duplicate = false;
         while (g_op_name_slots[i] != 0) {
-            // Two enumerators with one name: the first one wins.
-            if (str_eq(g_op_names[g_op_name_slots[i]], s)) { duplicate = true; break; }
+            // Two enumerators with one name would make an op's type depend
+            // on more than its name.
+            assert(!str_eq(g_op_names[g_op_name_slots[i]], s));
             i = (i + 1) & (OP_NAME_TABLE_SIZE - 1);
         }
-        if (!duplicate) g_op_name_slots[i] = (uint16_t)t;
+        g_op_name_slots[i] = (uint16_t)t;
     }
     g_op_name_table_built = true;
 }

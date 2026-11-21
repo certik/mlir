@@ -10,7 +10,7 @@ extern "C" {
 string op_type_to_string(MLIR_OpType type);
 
 // The op type registered under `name`, or OP_TYPE_UNREGISTERED if there is
-// none. A hash lookup; the table is built on first use.
+// none. A hash lookup; the table is built on first use (not thread-safe).
 MLIR_OpType op_type_from_string(string name);
 
 // Size for global tables indexed by MLIR_OpType. A literal rather than
