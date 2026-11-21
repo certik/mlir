@@ -1,0 +1,25 @@
+extern int printf(const char *fmt, ...);
+// A conditional expression has the common type of its two branches, also
+// when its condition is a constant (#296): the folder used to fold just the
+// picked branch, so `(0 ? 1.5 : 3) / 2` became the int division 3 / 2, and
+// `sizeof(c ? 1 : 2.0)` took the then-branch's type.
+
+int main(void) {
+    double d = (0 ? 1.5 : 3) / 2;
+    double d2 = (1 ? 3 : 1.5) / 2;
+    float f = (1 ? 7 : 2.0f) / 2;
+    int i = (0 ? 2.5 : 9) / 2;
+    printf("%.2f %.2f %.2f %d\n", d, d2, f, i);
+    printf("%.3f %.2f\n", (1 ? (0 ? 1 : 2.25) : 7) * 2, 1 ? 1 : 0.5);
+    printf("%d %d\n", (0 ? 1u : -1) > 0, (1 ? -1 : 0u) < 0);
+    printf("%d %d %d\n", (int)sizeof(1 ? 1 : 2LL), (int)sizeof(0 ? 1 : 2.0),
+           (int)sizeof(1 ? (char)1 : (char)2));
+    int v = 5;
+    unsigned w = 3;
+    char c = -3;
+    unsigned char uc = 250;
+    printf("%.2f %d\n", (v ? 1.5 : 3) / 2, (v ? 3 : 4) / 2);
+    printf("%d %d %d\n", (v ? -1 : w) > 0, (v ? c : uc) < 0, (int)sizeof(v ? w : 1LL));
+    printf("%d\n", _Generic(v ? 1 : 2.0, double: 1, int: 2, default: 3));
+    return 0;
+}

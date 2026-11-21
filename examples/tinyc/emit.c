@@ -2414,32 +2414,6 @@ static void emit_flat_call(E *e, Scope *sc, FuncSig *sig, VecExprPtr args,
     }
 }
 
-// Compile-time folder for literal-only integer expressions. Returns
-// true and writes the folded i32 value (sign-extended in int64_t) when
-// `ex` and all its sub-expressions are pure integer-only computations
-// reducible at emit time. Used to produce a single `arith.constant`
-// instead of a chain of arith ops for things like `1 + 2 * 3`,
-// `(1 << 4) | 3`, `sizeof(int) * 4`, or ternary with a literal cond.
-//
-// Folded operations (i32 semantics, wrap-around on overflow):
-//   EX_INT, EX_SIZEOF
-//   EX_UN: OP_NEG, OP_BNOT, OP_NOT
-//   EX_BIN: + - * / % & | ^ << >> < <= > >= == != && ||
-//   EX_TERNARY when the condition itself folds.
-//
-// Refused (returns false; caller falls back to normal emission):
-//   - EX_VAR, EX_CALL, EX_ASSIGN, EX_INDEX, EX_ADDR, EX_DEREF,
-//     EX_FIELD, EX_FLOAT, EX_NULL, EX_STR, EX_CAST
-//   - division / modulo by zero (let runtime / LLVM handle it)
-//   - shifts by negative or >=32 (let LLVM handle it)
-// A folded constant: its value, held sign- or zero-extended from its width
-// by its signedness, and its C type (int / unsigned / 64-bit variants).
-typedef struct {
-    int64_t v;
-    bool is_i64;
-    bool is_unsigned;
-} FoldVal;
-
 // Bring `v` into the range of the type (is_i64, is_unsigned).
 static int64_t fold_norm(int64_t v, bool is_i64, bool is_unsigned) {
     if (is_i64) return v;
@@ -2452,12 +2426,11 @@ static FoldVal fold_int(int64_t v) {
     return r;
 }
 
-static bool ast_fold(E *e, Scope *sc, Expr *ex, FoldVal *out);
-
 // Fold both operands of a binary expression and convert them to their
 // common type (C's usual arithmetic conversions).
-static bool fold_common(E *e, Scope *sc, Expr *l, Expr *r, FoldVal *a, FoldVal *b) {
-    if (!ast_fold(e, sc, l, a) || !ast_fold(e, sc, r, b)) return false;
+static bool fold_common(Expr *l, Expr *r, FoldLeafFn leaf, void *ctx,
+                        FoldVal *a, FoldVal *b) {
+    if (!tinyc_fold(l, leaf, ctx, a) || !tinyc_fold(r, leaf, ctx, b)) return false;
     bool i64 = a->is_i64 || b->is_i64;
     bool u;
     if (a->is_i64 == b->is_i64) u = a->is_unsigned || b->is_unsigned;
@@ -2470,18 +2443,20 @@ static bool fold_common(E *e, Scope *sc, Expr *l, Expr *r, FoldVal *a, FoldVal *
 // Constant-fold a literal-only integer expression with C semantics: each
 // literal has its own width and signedness, and operations follow the
 // usual arithmetic conversions. Folded:
-//   EX_INT, EX_SIZEOF (an `int`, as the emitter types it)
+//   EX_INT
 //   EX_UN: OP_NEG, OP_BNOT, OP_NOT
 //   EX_BIN: + - * / % & | ^ << >> < <= > >= == != && ||
-//   EX_TERNARY when the condition itself folds.
+//   EX_TERNARY when the condition and both branches fold (the result
+//     has the branches' common type, so a float branch blocks folding)
+//   anything else `leaf` folds (sizeof in the emitter, enumerators in
+//     the parser); `leaf` may be NULL.
 //
-// Refused (returns false; caller falls back to normal emission):
-//   - EX_VAR, EX_CALL, EX_ASSIGN, EX_INDEX, EX_ADDR, EX_DEREF,
-//     EX_FIELD, EX_FLOAT, EX_NULL, EX_STR, EX_CAST
-//   - division / modulo by zero and signed MIN / -1 (let runtime / LLVM
-//     handle it)
+// Refused (returns false; the emitter falls back to normal emission):
+//   - variables, calls, assignments, floats, casts, ... (unless `leaf`
+//     folds them)
+//   - division / modulo by zero and signed MIN / -1
 //   - shifts by a negative count or by the left operand's width or more
-static bool ast_fold(E *e, Scope *sc, Expr *ex, FoldVal *out) {
+bool tinyc_fold(Expr *ex, FoldLeafFn leaf, void *ctx, FoldVal *out) {
     if (!ex) return false;
     switch (ex->kind) {
         case EX_INT: {
@@ -2492,30 +2467,9 @@ static bool ast_fold(E *e, Scope *sc, Expr *ex, FoldVal *out) {
             *out = r;
             return true;
         }
-        case EX_SIZEOF: {
-            Type ty = (Type){0};
-            if (ex->sizeof_is_expr) {
-                if (!sc) return false;
-                if (ex->lhs && ex->lhs->kind == EX_STR) {
-                    // sizeof("string literal") yields the array size
-                    // including the trailing NUL, matching standard C.
-                    *out = fold_int((int64_t)ex->lhs->name.size);
-                    return true;
-                }
-                ty = infer_expr_type(e, sc, ex->lhs);
-                if (ty.kind == TY_VOID) return false;
-                *out = fold_int(c_sizeof_expr(e, sc, ex->lhs));
-                return true;
-            } else {
-                if (ex->cast_type.kind == TY_VOID) return false;
-                ty = ex->cast_type;
-            }
-            *out = fold_int(type_size(e, ty));
-            return true;
-        }
         case EX_UN: {
             FoldVal a;
-            if (!ast_fold(e, sc, ex->lhs, &a)) return false;
+            if (!tinyc_fold(ex->lhs, leaf, ctx, &a)) return false;
             switch (ex->op) {
                 case OP_NEG:
                     a.v = fold_norm((int64_t)(0 - (uint64_t)a.v), a.is_i64, a.is_unsigned);
@@ -2532,7 +2486,8 @@ static bool ast_fold(E *e, Scope *sc, Expr *ex, FoldVal *out) {
             FoldVal a, b;
             if (ex->op == OP_SHL || ex->op == OP_SHR) {
                 // The result has the left operand's type.
-                if (!ast_fold(e, sc, ex->lhs, &a) || !ast_fold(e, sc, ex->rhs, &b))
+                if (!tinyc_fold(ex->lhs, leaf, ctx, &a) ||
+                    !tinyc_fold(ex->rhs, leaf, ctx, &b))
                     return false;
                 int width = a.is_i64 ? 64 : 32;
                 if (b.v < 0 || b.v >= width) return false;
@@ -2547,13 +2502,14 @@ static bool ast_fold(E *e, Scope *sc, Expr *ex, FoldVal *out) {
                 return true;
             }
             if (ex->op == OP_AND || ex->op == OP_OR) {
-                if (!ast_fold(e, sc, ex->lhs, &a) || !ast_fold(e, sc, ex->rhs, &b))
+                if (!tinyc_fold(ex->lhs, leaf, ctx, &a) ||
+                    !tinyc_fold(ex->rhs, leaf, ctx, &b))
                     return false;
                 bool t = ex->op == OP_AND ? (a.v != 0 && b.v != 0) : (a.v != 0 || b.v != 0);
                 *out = fold_int(t ? 1 : 0);
                 return true;
             }
-            if (!fold_common(e, sc, ex->lhs, ex->rhs, &a, &b)) return false;
+            if (!fold_common(ex->lhs, ex->rhs, leaf, ctx, &a, &b)) return false;
             bool u = a.is_unsigned;
             uint64_t ua = (uint64_t)a.v, ub = (uint64_t)b.v;
             FoldVal r = a;
@@ -2589,19 +2545,62 @@ static bool ast_fold(E *e, Scope *sc, Expr *ex, FoldVal *out) {
             return true;
         }
         case EX_TERNARY: {
-            FoldVal c;
-            if (!ast_fold(e, sc, ex->lhs, &c)) return false;
-            // The result has the branches' common type when both fold.
-            FoldVal a, b;
-            if (fold_common(e, sc, ex->rhs, ex->lvalue, &a, &b)) {
-                *out = c.v != 0 ? a : b;
-                return true;
-            }
-            return ast_fold(e, sc, c.v != 0 ? ex->rhs : ex->lvalue, out);
+            // The result has the branches' common type, so both must fold:
+            // `0 ? 1.5 : 3` is a double, not the int 3.
+            FoldVal c, a, b;
+            if (!tinyc_fold(ex->lhs, leaf, ctx, &c)) return false;
+            if (!fold_common(ex->rhs, ex->lvalue, leaf, ctx, &a, &b)) return false;
+            *out = c.v != 0 ? a : b;
+            return true;
         }
         default:
-            return false;
+            return leaf && leaf(ctx, ex, out);
     }
+}
+
+// The emitter's leaves for tinyc_fold: enumerators and `sizeof` (both an
+// `int`, as the emitter types them).
+typedef struct {
+    E *e;
+    Scope *sc;
+} EmitFoldCtx;
+
+static bool emit_fold_leaf(void *ctx, Expr *ex, FoldVal *out) {
+    EmitFoldCtx *fc = (EmitFoldCtx *)ctx;
+    if (ex->kind == EX_VAR) {
+        // An enumerator (an `int`) unless a variable shadows it, as in
+        // emit_expr's EX_VAR.
+        int64_t en_v;
+        if (lookup(fc->e, fc->sc, ex->name) || !find_enum(fc->e, ex->name, &en_v))
+            return false;
+        *out = fold_int(en_v);
+        return true;
+    }
+    if (ex->kind != EX_SIZEOF) return false;
+    Type ty = (Type){0};
+    if (ex->sizeof_is_expr) {
+        if (!fc->sc) return false;
+        if (ex->lhs && ex->lhs->kind == EX_STR) {
+            // sizeof("string literal") yields the array size
+            // including the trailing NUL, matching standard C.
+            *out = fold_int((int64_t)ex->lhs->name.size);
+            return true;
+        }
+        ty = infer_expr_type(fc->e, fc->sc, ex->lhs);
+        if (ty.kind == TY_VOID) return false;
+        *out = fold_int(c_sizeof_expr(fc->e, fc->sc, ex->lhs));
+        return true;
+    }
+    if (ex->cast_type.kind == TY_VOID) return false;
+    *out = fold_int(type_size(fc->e, ex->cast_type));
+    return true;
+}
+
+static bool ast_fold(E *e, Scope *sc, Expr *ex, FoldVal *out) {
+    EmitFoldCtx fc;
+    fc.e = e;
+    fc.sc = sc;
+    return tinyc_fold(ex, emit_fold_leaf, &fc, out);
 }
 
 static bool ast_fold_int(E *e, Scope *sc, Expr *ex, int64_t *out) {
@@ -6080,13 +6079,36 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
             return infer_expr_type(e, sc, ex->lhs ? ex->lhs : ex->lvalue);
         }
         case EX_TERNARY: {
-            // For `c ? a : b` the result type is the type of the
+            // For `c ? a : b` the result type is the common type of the
             // then/else branches (`a` / `b`), NOT the condition `c`.
             // tinyc's AST stores: lhs=cond, rhs=then, lvalue=else.
-            // Pick the then-branch (rhs) first; fall back to lvalue or
-            // lhs only if rhs is missing (defensive).
-            Expr *val = ex->rhs ? ex->rhs : (ex->lvalue ? ex->lvalue : ex->lhs);
-            return infer_expr_type(e, sc, val);
+            if (!ex->rhs || !ex->lvalue) {
+                Expr *val = ex->rhs ? ex->rhs : (ex->lvalue ? ex->lvalue : ex->lhs);
+                return infer_expr_type(e, sc, val);
+            }
+            Type a = infer_expr_type(e, sc, ex->rhs);
+            Type b = infer_expr_type(e, sc, ex->lvalue);
+            bool a_num = a.kind == TY_I32 || a.kind == TY_I64 ||
+                         a.kind == TY_F32 || a.kind == TY_F64;
+            bool b_num = b.kind == TY_I32 || b.kind == TY_I64 ||
+                         b.kind == TY_F32 || b.kind == TY_F64;
+            // An integer next to a pointer is a null pointer constant.
+            if (!a_num || !b_num) return (a_num && b.kind != TY_VOID) ? b : a;
+            // Two arithmetic branches convert like a binary operator's
+            // operands: `sizeof(c ? 1 : 2.0)` is 8.
+            if (a.kind == TY_F64 || b.kind == TY_F64) { t.kind = TY_F64; return t; }
+            if (a.kind == TY_F32 || b.kind == TY_F32) { t.kind = TY_F32; return t; }
+            // char / short / bool promote to int.
+            if (type_is_narrow_int(a)) a.int_unsigned = false;
+            if (type_is_narrow_int(b)) b.int_unsigned = false;
+            t.kind = (a.kind == TY_I64 || b.kind == TY_I64) ? TY_I64 : TY_I32;
+            t.int_bits = (t.kind == TY_I64 || a.int_bits == 64 || b.int_bits == 64) ? 64 : 32;
+            if (a.kind != b.kind) {
+                t.int_unsigned = a.kind == TY_I64 ? a.int_unsigned : b.int_unsigned;
+            } else {
+                t.int_unsigned = a.int_unsigned || b.int_unsigned;
+            }
+            return t;
         }
         default: return t;
     }
@@ -6379,6 +6401,16 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
     // pointer global with an initializer region that takes the address.
     for (size_t i = 0; i < program->globals.size; i++) {
         Global *g = &program->globals.data[i];
+        // Resolve a deferred array length (e.g. `[20 + 1]` or `[N]` with an
+        // enumerator N) with no scope (file-scope constant expressions
+        // only) before the symbol copies the type, so `sizeof` sees it.
+        if (g->type.array_len_expr) {
+            int64_t v = 0;
+            if (!ast_fold_int(&e, NULL, g->type.array_len_expr, &v)) {
+                EMIT_ERR(&e, "non-constant global array length");
+            }
+            g->type.array_len = v;
+        }
         Sym *sy = arena_new(arena, Sym);
         *sy = (Sym){0};
         sy->name = g->name;
@@ -6479,17 +6511,8 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                    g->type.kind == TY_ARRAY_I32 ||
                    g->type.kind == TY_ARRAY_PTR_CHAR ||
                    g->type.kind == TY_ARRAY_PTR_STRUCT) {
-            // Zero-initialized aggregate global. Resolve a deferred array
-            // length expression (e.g. `[20 + 1]`) at emit time using
-            // ast_fold_int with no scope (file-scope const expressions
-            // only).
-            if (g->type.array_len_expr) {
-                int64_t v = 0;
-                if (!ast_fold_int(&e, NULL, g->type.array_len_expr, &v)) {
-                    EMIT_ERR(&e, "non-constant global array length");
-                }
-                g->type.array_len = v;
-            }
+            // Aggregate global (its deferred array length is resolved
+            // above).
             MLIR_TypeHandle elem;
             if (g->type.kind == TY_ARRAY_STRUCT) {
                 StructDef *sd = find_struct(&e, g->type.struct_name);

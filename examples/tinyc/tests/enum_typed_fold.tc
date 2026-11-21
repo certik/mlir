@@ -1,0 +1,27 @@
+extern int printf(const char *fmt, ...);
+// Enumerator initializers fold with the literals' C types, through the same
+// folder the emitter uses (#297): `-1u > 0` compares unsigned. The parser's
+// own int64 evaluator ignored the types, and trapped (SIGFPE) on
+// INT64_MIN / -1, which is now a diagnostic. An enumerator also works as an
+// array length.
+
+enum { B = -1u > 0, C = 0xffffffffu, D = 1 << 31, E = 10 / 3, F = -7 % 3 };
+enum { J = ~0u >> 28, K = (1 ? 5 : 6), L = K + 1, M = 'a', N = '\xff', O = -1 < 0u };
+enum { P = 2147483647, Q, R = -2147483647 - 1, S = 0x7fffffff + 1, T = 1 ? -1 : 0u };
+
+static int g[L * 2];
+
+int main(void) {
+    printf("%d %d %d %d %d\n", B, C, D, E, F);
+    printf("%d %d %d %d %d %d\n", J, K, L, M, N, O);
+    printf("%d %d %d %d %d\n", P, Q, R, S, T);
+    int a[K];
+    int i;
+    for (i = 0; i < K; i++) a[i] = i * L;
+    printf("%d %d %d\n", (int)sizeof(a), (int)sizeof(g), a[K - 1]);
+    {
+        int K = 2;
+        printf("%d %d\n", K + 1, L + 1);
+    }
+    return 0;
+}
