@@ -1801,13 +1801,50 @@ extern "C" void MLIR_ReplaceAllUsesOfValue(MLIR_Context *cctx,
     oldBox->v.replaceAllUsesWith(newBox->v);
 }
 
+namespace {
+#ifdef MLIR_API_CHECKS
+// Erasing requires that nothing outside the erased subtree uses a value or a
+// block defined inside it (mlir_api.h): such a use would point into freed
+// memory, and MLIR_DestroyContext would write through it when it drops the
+// references of the parentless IR. `inside(owner)` says whether a using op is
+// in the subtree. O(size of the subtree), checked builds only.
+template <class Inside>
+bool blockUsedOutside(mlir::Block &b, Inside inside);
+template <class Inside>
+bool opUsedOutside(mlir::Operation *o, Inside inside) {
+    for (mlir::Value r : o->getResults())
+        for (mlir::OpOperand &u : r.getUses())
+            if (!inside(u.getOwner())) return true;
+    for (mlir::Region &region : o->getRegions())
+        for (mlir::Block &b : region)
+            if (blockUsedOutside(b, inside)) return true;
+    return false;
+}
+template <class Inside>
+bool blockUsedOutside(mlir::Block &b, Inside inside) {
+    for (mlir::BlockArgument a : b.getArguments())
+        for (mlir::OpOperand &u : a.getUses())
+            if (!inside(u.getOwner())) return true;
+    for (mlir::BlockOperand &u : b.getUses())
+        if (!inside(u.getOwner())) return true;
+    for (mlir::Operation &o : b)
+        if (opUsedOutside(&o, inside)) return true;
+    return false;
+}
+#endif
+
+} // namespace
+
 // Destroys the op (and the ops nested in it), as mlir::Operation::erase does.
 // The handle is dead afterwards, as on the native backend (mlir_api.h).
 extern "C" void MLIR_EraseOp(MLIR_Context *cctx, MLIR_OpHandle op_h) {
     API_CHECK(op_h != MLIR_INVALID_HANDLE, "MLIR_EraseOp", "op handle is NULL");
     if (op_h == MLIR_INVALID_HANDLE) return;
     auto *op = F<mlir::Operation>(op_h);
-    API_CHECK(op->use_empty(), "MLIR_EraseOp", "a result still has uses");
+#ifdef MLIR_API_CHECKS
+    API_CHECK(!opUsedOutside(op, [op](mlir::Operation *owner) { return op->isAncestor(owner); }),
+              "MLIR_EraseOp", "a value or block defined in the op or nested in it is used outside it");
+#endif
     if (auto *blk = op->getBlock()) cctx->blockOps.invalidateBlock(blk);
     // Drop every per-op entry (attribute snapshots, cached block positions,
     // value boxes) of the op and of the ops nested in it: once they are
@@ -1935,6 +1972,12 @@ extern "C" void MLIR_SetOpSuccessorOperands(MLIR_Context *cctx, MLIR_OpHandle op
 extern "C" void MLIR_EraseBlock(MLIR_Context *cctx, MLIR_BlockHandle blk_h) {
     if (blk_h == MLIR_INVALID_HANDLE) return;
     auto *blk = F<mlir::Block>(blk_h);
+#ifdef MLIR_API_CHECKS
+    // No branch outside the block may still target it (mlir_api.h).
+    for (mlir::BlockOperand &u : blk->getUses())
+        API_CHECK(blk->findAncestorOpInBlock(*u.getOwner()) != nullptr, "MLIR_EraseBlock",
+                  "the block is still a successor of a block outside it");
+#endif
     cctx->blockOps.invalidateBlock(blk);
     if (blk->getParent() != nullptr) {
         // Detach without freeing contained ops/args; the context owns it now.

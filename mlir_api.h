@@ -868,9 +868,14 @@ void MLIR_ReplaceAllUsesOfValue(MLIR_Context *ctx,
                                 MLIR_ValueHandle new_value);
 
 // Erases `op`: removes it from its parent block (if any), drops its operand
-// uses and destroys it together with the ops nested in its regions. Its
-// results must have no uses left (replace them first, e.g. with
-// MLIR_ReplaceAllUsesOfValue). Afterwards the handles of `op`, its results
+// uses and destroys it together with the ops nested in its regions. Nothing
+// outside the erased subtree may still use a value or a block defined inside
+// it: not its results, and not the results, block arguments or blocks nested
+// in its regions. That includes uses held by detached or never-inserted ops
+// and by blocks removed with MLIR_EraseBlock. Replace or erase those uses
+// first (e.g. with MLIR_ReplaceAllUsesOfValue). On upstream such a use would
+// point into freed memory; MLIR_API_CHECKS checks it (natively for values
+// with def-use tracking). Afterwards the handles of `op`, its results
 // and its regions are dead on both backends; using them is a contract
 // violation (checked with MLIR_API_CHECKS), including asking
 // MLIR_GetOpParentBlock whether the op was erased. The native backend leaves
@@ -932,9 +937,12 @@ void MLIR_SetOpSuccessorOperands(MLIR_Context *ctx, MLIR_OpHandle op,
                                  size_t succ_idx,
                                  const MLIR_ValueHandle *values, size_t n);
 
-// Detach `block` from its parent region (if any) and forget about it.
-// Ops contained in `block` are NOT erased; callers should detach or
-// erase them first to avoid dangling references.
+// Detach `block` from its parent region (if any). The block and its ops are
+// not destroyed: they stay until the context is destroyed. No branch outside
+// the block may still target it (checked with MLIR_API_CHECKS). Its values
+// may still be used elsewhere, e.g. by other unreachable blocks that are
+// erased in a later round; but before an op whose values the block's ops use
+// is erased, those uses must be gone (MLIR_EraseOp).
 void MLIR_EraseBlock(MLIR_Context *ctx, MLIR_BlockHandle block);
 
 // Insert `block` into `region` immediately after `after`. If `after`

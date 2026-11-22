@@ -975,6 +975,8 @@ void MLIR_AppendBlockArg(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_ValueHandl
 
 void MLIR_AppendRegionBlock(MLIR_Context *ctx, MLIR_RegionHandle rh, MLIR_BlockHandle block) {
     API_CHECK(rh != MLIR_INVALID_HANDLE && block != MLIR_INVALID_HANDLE, "MLIR_AppendRegionBlock", "region or block handle is NULL");
+    API_CHECK(((IR_Block *)block)->parent_region == MLIR_INVALID_HANDLE, "MLIR_AppendRegionBlock",
+              "block is already in a region (use MLIR_MoveBlockToRegionEnd)");
     IR_Region *region = resolve_region(rh);
     if (!region || !ctx || !ctx->arena) return;
     Arena *arena = ctx->arena;
@@ -2278,12 +2280,49 @@ static void drop_op_uses(IR_Op *o) {
 }
 
 #ifdef MLIR_API_CHECKS
-// True if a result of `o` still has a use. Only answerable when the results
-// track uses (they have an aux); without tracking the check is skipped.
-static bool op_results_have_uses(IR_Op *o) {
-    for (uint32_t i = 0; i < o->n_results; i++) {
-        IR_Value *v = resolve_value(o->results[i]);
-        if (v && v->aux && v->aux->n_uses > 0) return true;
+// Erasing requires that nothing outside the erased subtree uses a value
+// defined inside it (mlir_api.h). These walks check it for the values that
+// track uses (have an aux); without def-use tracking there is nothing to
+// check. O(size of the subtree), checked builds only.
+
+// True if `owner` is `root` or nested in it.
+static bool op_is_inside(MLIR_OpHandle owner, MLIR_OpHandle root) {
+    MLIR_OpHandle cur = owner;
+    while (cur != MLIR_INVALID_HANDLE) {
+        if (cur == root) return true;
+        IR_Op *o = (IR_Op *)cur;
+        if (o->parent_block == MLIR_INVALID_HANDLE) return false;
+        IR_Region *r = resolve_region(((IR_Block *)o->parent_block)->parent_region);
+        cur = r ? r->parent_op : MLIR_INVALID_HANDLE;
+    }
+    return false;
+}
+
+static bool value_used_outside(MLIR_ValueHandle vh, MLIR_OpHandle root) {
+    IR_Value *v = resolve_value(vh);
+    if (!v || !v->aux) return false;
+    for (UseNode *u = v->aux->use_head; u; u = u->next)
+        if (!op_is_inside(u->owner, root)) return true;
+    return false;
+}
+
+// True if a value defined in `o` or nested in it is used outside `root`.
+static bool op_used_outside(IR_Op *o, MLIR_OpHandle root) {
+    for (uint32_t i = 0; i < o->n_results; i++)
+        if (value_used_outside(o->results[i], root)) return true;
+    for (uint32_t r = 0; r < o->n_regions; r++) {
+        IR_Region *region = resolve_region(o->regions[r]);
+        if (!region) continue;
+        for (uint64_t bi = 0; bi < region->n_blocks; bi++) {
+            IR_Block *b = resolve_block(region->blocks[bi]);
+            if (!b) continue;
+            for (uint32_t i = 0; i < b->n_arguments; i++)
+                if (value_used_outside(b->arguments[i], root)) return true;
+            for (uint32_t k = 0; k < b->n_operations; k++) {
+                IR_Op *nested = resolve_op(b->operations[k]);
+                if (nested && op_used_outside(nested, root)) return true;
+            }
+        }
     }
     return false;
 }
@@ -2297,7 +2336,8 @@ void MLIR_EraseOp(MLIR_Context *ctx, MLIR_OpHandle op) {
     IR_Op *o = resolve_op(op);
     if (!o) return;
 #ifdef MLIR_API_CHECKS
-    API_CHECK(!op_results_have_uses(o), "MLIR_EraseOp", "a result still has uses");
+    API_CHECK(!op_used_outside(o, op), "MLIR_EraseOp",
+              "a value defined in the op or nested in it is used outside it");
 #endif
     detach_from_block(o, op);
 #ifdef MLIR_API_CHECKS
@@ -2485,6 +2525,21 @@ void MLIR_EraseBlock(MLIR_Context *ctx, MLIR_BlockHandle block) {
     (void)ctx;
     IR_Block *b = resolve_block(block);
     if (!b) return;
+#ifdef MLIR_API_CHECKS
+    // No branch outside the block may still target it (mlir_api.h). The
+    // native backend has no predecessor lists, so scan the region.
+    {
+        IR_Region *pr = resolve_region(b->parent_region);
+        for (uint64_t bi = 0; pr && bi < pr->n_blocks; bi++) {
+            IR_Block *pb = resolve_block(pr->blocks[bi]);
+            if (!pb || pb == b || pb->n_operations == 0) continue;
+            IR_Op *term = resolve_op(pb->operations[pb->n_operations - 1]);
+            for (uint32_t k = 0; term && k < term->n_successors; k++)
+                API_CHECK(term->successors[k] != block, "MLIR_EraseBlock",
+                          "the block is still a successor of a block outside it");
+        }
+    }
+#endif
     IR_Region *r = resolve_region(b->parent_region);
     if (r) {
         size_t w = 0;
