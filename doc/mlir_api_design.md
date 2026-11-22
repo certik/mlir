@@ -658,7 +658,9 @@ differs from the sketches in §1.2 and here:
   literals in a global initializer). At creation each context walks it once
   into one `string names[]` (static types first, then the dynamic ones) and
   builds the name → type hash (`mlir_op_names.c`). There is no switch and no
-  lazily built global table, so the backends keep no process-wide state. As
+  lazily built global table: op names and types are per context. (The
+  wasmstack lifter still has two diagnostic-only globals,
+  `g_current_ctx`/`g_current_op_type`, for its stack-underflow message.) As
   a consequence `MLIR_GetOpTypeName` takes the context for every type, and
   `MLIR_GetOpName(op)` is `MLIR_GetOpTypeName(ctx, MLIR_GetOpType(op))`.
 - **`mlir_ops.def` has two columns**, `MLIR_OP(enumerator, name)`; step 6
@@ -680,7 +682,10 @@ differs from the sketches in §1.2 and here:
   `gpu.terminator`) are `MLIR_PRINTER_OP` lines of the same kind.
 - **Upstream.** The context binds `mlir::OperationName` for every static
   type at creation (`builtin.module` for `OP_TYPE_MODULE`, whose C name is
-  `module`) and for each dynamic type when it is registered. `GetOpType`
+  `module`; `MLIR_OP_ALIAS` makes `builtin.module` a second name of the
+  type, so registering it cannot create a dynamic type that would take over
+  the module's `OperationName`) and for each dynamic type when it is
+  registered. A name already bound to a type is never rebound. `GetOpType`
   registers names it has not seen, such as ops the upstream parser or a
   pass created.
 
