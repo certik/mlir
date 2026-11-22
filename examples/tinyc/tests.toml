@@ -287,6 +287,11 @@ targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "42\n42\n"
 
 [[test]]
+name = "fnptr_field_struct_arg"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "default 1\n1 2 12345 6 119\n"
+
+[[test]]
 name = "fnptr_ptr_return"
 targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "zero one many\n5 12\n3 -3\n200 7\none -128\n4294967294 1\nzero;one;many;\n"

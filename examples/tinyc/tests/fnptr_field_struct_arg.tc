@@ -1,0 +1,43 @@
+// A handler stored as a struct field and called with a struct argument
+// passed by value, the shape of mlir_api.h's MLIR_DiagnosticHandler:
+// void (*)(void *user, MLIR_DiagSeverity, MLIR_LocationHandle, string).
+extern int printf(const char *fmt, ...);
+
+typedef struct { const char *str; unsigned long size; } Str;
+typedef void (*Handler)(void *user, int severity, unsigned long loc, Str message);
+typedef struct { int n; Handler fn; void *user; } Ctx;
+typedef struct { int count; int severity; unsigned long loc; unsigned long len; int first; } Capture;
+
+static void capture(void *user, int severity, unsigned long loc, Str message) {
+    Capture *c = (Capture *)user;
+    c->count++;
+    c->severity = severity;
+    c->loc = loc;
+    c->len = message.size;
+    c->first = message.str[0];
+}
+
+static void emit(Ctx *ctx, int severity, unsigned long loc, const char *text, unsigned long n) {
+    Str m;
+    m.str = text;
+    m.size = n;
+    if (ctx->fn)
+        ctx->fn(ctx->user, severity, loc, m);
+    else
+        printf("default %lld\n", (long long)severity);
+}
+
+int main() {
+    Capture cap = {0};
+    Ctx ctx;
+    ctx.n = 0;
+    ctx.fn = 0;
+    ctx.user = 0;
+    emit(&ctx, 1, 7, "hello", 5);
+    ctx.fn = capture;
+    ctx.user = &cap;
+    emit(&ctx, 2, 12345, "world!", 6);
+    printf("%lld %lld %lld %lld %lld\n", (long long)cap.count, (long long)cap.severity,
+           (long long)cap.loc, (long long)cap.len, (long long)cap.first);
+    return 0;
+}
