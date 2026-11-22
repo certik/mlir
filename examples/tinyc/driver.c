@@ -623,17 +623,18 @@ static int driver_emit_native_elf(MLIR_Context *ctx, MLIR_OpHandle module,
 // Linux/x86_64 then still targets that host (for the definitions below); every
 // other build, including a self-hosted tinyc (__TINYC__), cannot know where its
 // output will run, so its target is unknown and gets no target-specific code.
+// (The enumerators are TINYC_-prefixed: Apple clang predefines TARGET_OS_*.)
 typedef enum {
-    TARGET_ARCH_UNKNOWN,
-    TARGET_ARCH_X86_64,
-    TARGET_ARCH_AARCH64
+    TINYC_ARCH_UNKNOWN,
+    TINYC_ARCH_X86_64,
+    TINYC_ARCH_AARCH64
 } TargetArch;
 
 typedef enum {
-    TARGET_OS_UNKNOWN,
-    TARGET_OS_LINUX,
-    TARGET_OS_DARWIN,
-    TARGET_OS_WINDOWS
+    TINYC_OS_UNKNOWN,
+    TINYC_OS_LINUX,
+    TINYC_OS_DARWIN,
+    TINYC_OS_WINDOWS
 } TargetOS;
 
 typedef struct {
@@ -643,12 +644,12 @@ typedef struct {
 } Target;
 
 static void target_set_default(Target *t) {
-    t->arch = TARGET_ARCH_UNKNOWN;
-    t->os = TARGET_OS_UNKNOWN;
+    t->arch = TINYC_ARCH_UNKNOWN;
+    t->os = TINYC_OS_UNKNOWN;
     t->triple = NULL;
 #if defined(__linux__) && defined(__x86_64__) && !defined(__TINYC__)
-    t->arch = TARGET_ARCH_X86_64;
-    t->os = TARGET_OS_LINUX;
+    t->arch = TINYC_ARCH_X86_64;
+    t->os = TINYC_OS_LINUX;
 #endif
 }
 
@@ -667,8 +668,8 @@ static bool target_component_is(const char *s, size_t n, const char *name,
 // Parse an LLVM triple into `t`. Returns false (with `t` untouched) when it
 // has fewer than three components or its arch or OS is not one tinyC knows.
 static bool target_parse(const char *triple, Target *t) {
-    TargetArch arch = TARGET_ARCH_UNKNOWN;
-    TargetOS os = TARGET_OS_UNKNOWN;
+    TargetArch arch = TINYC_ARCH_UNKNOWN;
+    TargetOS os = TINYC_OS_UNKNOWN;
     size_t i = 0;
     int k = 0;
     while (k < 3) {
@@ -679,26 +680,26 @@ static bool target_parse(const char *triple, Target *t) {
         if (k == 0) {
             if (target_component_is(c, n, "x86_64", false) ||
                 target_component_is(c, n, "amd64", false))
-                arch = TARGET_ARCH_X86_64;
+                arch = TINYC_ARCH_X86_64;
             else if (target_component_is(c, n, "aarch64", false) ||
                      target_component_is(c, n, "arm64", false))
-                arch = TARGET_ARCH_AARCH64;
+                arch = TINYC_ARCH_AARCH64;
         } else if (k == 2) {
             if (target_component_is(c, n, "linux", false))
-                os = TARGET_OS_LINUX;
+                os = TINYC_OS_LINUX;
             else if (target_component_is(c, n, "darwin", true) ||
                      target_component_is(c, n, "macos", true) ||
                      target_component_is(c, n, "macosx", true))
-                os = TARGET_OS_DARWIN;
+                os = TINYC_OS_DARWIN;
             else if (target_component_is(c, n, "windows", false) ||
                      target_component_is(c, n, "win32", false))
-                os = TARGET_OS_WINDOWS;
+                os = TINYC_OS_WINDOWS;
         }
         k++;
         if (!triple[i]) break;
         i++;
     }
-    if (k < 3 || arch == TARGET_ARCH_UNKNOWN || os == TARGET_OS_UNKNOWN)
+    if (k < 3 || arch == TINYC_ARCH_UNKNOWN || os == TINYC_OS_UNKNOWN)
         return false;
     t->arch = arch;
     t->os = os;
@@ -1628,7 +1629,7 @@ int app_main(void) {
         }
         if (target.triple)
             out = inject_target_triple(arena, out, target.triple);
-        if (target.arch == TARGET_ARCH_X86_64 && target.os == TARGET_OS_LINUX)
+        if (target.arch == TINYC_ARCH_X86_64 && target.os == TINYC_OS_LINUX)
             out = inject_syscall6_definition(arena, out);
     } else {
         out = print_fn(&ctx, module);
