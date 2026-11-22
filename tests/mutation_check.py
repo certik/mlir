@@ -99,8 +99,8 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         name="validate-refs:affine.load-typed-form",
         file="mlir_classic_printer.c",
-        old='case OP_TYPE_AFFINE_LOAD: {\n            // Typed form: %r = affine.load %memref[%i, ...] : memref<...>',
-        new='case OP_TYPE_AFFINE_LOAD: {\n            result = str_concat(arena, result, str_lit("@@invalid@@ "));\n            // Typed form: %r = affine.load %memref[%i, ...] : memref<...>',
+        old='case PARSER_OP_AFFINE_LOAD: {\n            // Typed form: %r = affine.load %memref[%i, ...] : memref<...>',
+        new='case PARSER_OP_AFFINE_LOAD: {\n            result = str_concat(arena, result, str_lit("@@invalid@@ "));\n            // Typed form: %r = affine.load %memref[%i, ...] : memref<...>',
         suite="validate-refs",
         rebuild=("build_macos", "build_parser_upstream"),
         regen_refs=True,

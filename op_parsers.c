@@ -3606,7 +3606,7 @@ OperationParserResult parse_return_op(Parser *parser, const OperationParserParam
     MLIR_LocationHandle op_location = parse_optional_location(parser);
     if (!op_location) op_location = params->unnumbered_loc_def;
 
-    bool keep_operands = params->op_type != OP_TYPE_STD_RETURN;
+    bool keep_operands = params->op_kind != PARSER_OP_STD_RETURN;
 
     MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
         

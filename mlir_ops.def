@@ -6,7 +6,9 @@
 // the file #undefs all of them at the end, so it can be included any number
 // of times (it has no include guard on purpose). It generates
 //   - the MLIR_OpType enum and its dialect ranges (mlir_api.h),
-//   - the name of each type (mlir_op_names.c).
+//   - the name of each type (mlir_op_names.c),
+//   - the op kinds of the parser and the printers (MLIR_PARSER_OP and
+//     MLIR_PRINTER_OP, mlir_printer.h).
 //
 // The ops of a dialect sit between MLIR_DIALECT_BEGIN(D) and
 // MLIR_DIALECT_END(D), so their values are consecutive and
@@ -28,6 +30,12 @@
 #endif
 #ifndef MLIR_DIALECT_END
 #define MLIR_DIALECT_END(dialect)
+#endif
+#ifndef MLIR_PARSER_OP
+#define MLIR_PARSER_OP(kind, name)
+#endif
+#ifndef MLIR_PRINTER_OP
+#define MLIR_PRINTER_OP(kind, name)
 #endif
 
 MLIR_DIALECT_BEGIN(BUILTIN)
@@ -436,42 +444,57 @@ MLIR_OP(OP_TYPE_AARCH64_DATA_INIT, "aarch64.data_init")
 MLIR_DIALECT_END(AARCH64)
 
 // -----------------------------------------------------------------------------
-// Dialects that only the text parser and the classic printer know.
+// Ops of the dialects that only the text parser and the classic printer know
+// (tt, gpu, affine, vector, std, tensor, linalg, index, math, memref). They
+// are not MLIR_OpTypes (design decision D9): the parser and the printers
+// register these names as dynamic op types of their context
+// (MLIR_RegisterOpType) and dispatch on the PARSER_OP_* kinds of
+// mlir_printer.h, which map to those per-context types.
 // -----------------------------------------------------------------------------
-MLIR_OP(OP_TYPE_MATH_EXP, "math.exp")
-MLIR_OP(OP_TYPE_MATH_LOG, "math.log")
-MLIR_OP(OP_TYPE_MEMREF_LOAD, "memref.load")
-MLIR_OP(OP_TYPE_MEMREF_STORE, "memref.store")
-MLIR_OP(OP_TYPE_MEMREF_ALLOC, "memref.alloc")
-MLIR_OP(OP_TYPE_MEMREF_DEALLOC, "memref.dealloc")
-MLIR_OP(OP_TYPE_TT_GET_PROGRAM_ID, "tt.get_program_id")
-MLIR_OP(OP_TYPE_TT_LOAD, "tt.load")
-MLIR_OP(OP_TYPE_TT_STORE, "tt.store")
-MLIR_OP(OP_TYPE_TT_MAKE_RANGE, "tt.make_range")
-MLIR_OP(OP_TYPE_TT_SPLAT, "tt.splat")
-MLIR_OP(OP_TYPE_TT_ADDPTR, "tt.addptr")
-MLIR_OP(OP_TYPE_TT_RETURN, "tt.return")
-MLIR_OP(OP_TYPE_TT_FUNC, "tt.func")
-MLIR_OP(OP_TYPE_TT_CALL, "tt.call")
-MLIR_OP(OP_TYPE_TT_REDUCE, "tt.reduce")
-MLIR_OP(OP_TYPE_TT_BROADCAST, "tt.broadcast")
-MLIR_OP(OP_TYPE_TT_EXPAND_DIMS, "tt.expand_dims")
-MLIR_OP(OP_TYPE_TT_DOT, "tt.dot")
-MLIR_OP(OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE, "tt.pure_extern_elementwise")
-MLIR_OP(OP_TYPE_GPU_LAUNCH, "gpu.launch")
-MLIR_OP(OP_TYPE_AFFINE_FOR, "affine.for")
-MLIR_OP(OP_TYPE_AFFINE_LOAD, "affine.load")
-MLIR_OP(OP_TYPE_VECTOR_PRINT, "vector.print")
-MLIR_OP(OP_TYPE_STD_CONSTANT, "std.constant")
-MLIR_OP(OP_TYPE_STD_RETURN, "std.return")
-MLIR_OP(OP_TYPE_TENSOR_EXTRACT, "tensor.extract")
-MLIR_OP(OP_TYPE_TENSOR_SPLAT, "tensor.splat")
-MLIR_OP(OP_TYPE_TENSOR_COLLAPSE_SHAPE, "tensor.collapse_shape")
-MLIR_OP(OP_TYPE_LINALG_FILL, "linalg.fill")
-MLIR_OP(OP_TYPE_LINALG_COPY, "linalg.copy")
-MLIR_OP(OP_TYPE_INDEX_CONSTANT, "index.constant")
-MLIR_OP(OP_TYPE_TT_REDUCE_RETURN, "tt.reduce.return")
+MLIR_PARSER_OP(PARSER_OP_MATH_EXP, "math.exp")
+MLIR_PARSER_OP(PARSER_OP_MATH_LOG, "math.log")
+MLIR_PARSER_OP(PARSER_OP_MEMREF_LOAD, "memref.load")
+MLIR_PARSER_OP(PARSER_OP_MEMREF_STORE, "memref.store")
+MLIR_PARSER_OP(PARSER_OP_MEMREF_ALLOC, "memref.alloc")
+MLIR_PARSER_OP(PARSER_OP_MEMREF_DEALLOC, "memref.dealloc")
+MLIR_PARSER_OP(PARSER_OP_TT_GET_PROGRAM_ID, "tt.get_program_id")
+MLIR_PARSER_OP(PARSER_OP_TT_LOAD, "tt.load")
+MLIR_PARSER_OP(PARSER_OP_TT_STORE, "tt.store")
+MLIR_PARSER_OP(PARSER_OP_TT_MAKE_RANGE, "tt.make_range")
+MLIR_PARSER_OP(PARSER_OP_TT_SPLAT, "tt.splat")
+MLIR_PARSER_OP(PARSER_OP_TT_ADDPTR, "tt.addptr")
+MLIR_PARSER_OP(PARSER_OP_TT_RETURN, "tt.return")
+MLIR_PARSER_OP(PARSER_OP_TT_FUNC, "tt.func")
+MLIR_PARSER_OP(PARSER_OP_TT_CALL, "tt.call")
+MLIR_PARSER_OP(PARSER_OP_TT_REDUCE, "tt.reduce")
+MLIR_PARSER_OP(PARSER_OP_TT_BROADCAST, "tt.broadcast")
+MLIR_PARSER_OP(PARSER_OP_TT_EXPAND_DIMS, "tt.expand_dims")
+MLIR_PARSER_OP(PARSER_OP_TT_DOT, "tt.dot")
+MLIR_PARSER_OP(PARSER_OP_TT_PURE_EXTERN_ELEMENTWISE, "tt.pure_extern_elementwise")
+MLIR_PARSER_OP(PARSER_OP_GPU_LAUNCH, "gpu.launch")
+MLIR_PARSER_OP(PARSER_OP_AFFINE_FOR, "affine.for")
+MLIR_PARSER_OP(PARSER_OP_AFFINE_LOAD, "affine.load")
+MLIR_PARSER_OP(PARSER_OP_VECTOR_PRINT, "vector.print")
+MLIR_PARSER_OP(PARSER_OP_STD_CONSTANT, "std.constant")
+MLIR_PARSER_OP(PARSER_OP_STD_RETURN, "std.return")
+MLIR_PARSER_OP(PARSER_OP_TENSOR_EXTRACT, "tensor.extract")
+MLIR_PARSER_OP(PARSER_OP_TENSOR_SPLAT, "tensor.splat")
+MLIR_PARSER_OP(PARSER_OP_TENSOR_COLLAPSE_SHAPE, "tensor.collapse_shape")
+MLIR_PARSER_OP(PARSER_OP_LINALG_FILL, "linalg.fill")
+MLIR_PARSER_OP(PARSER_OP_LINALG_COPY, "linalg.copy")
+MLIR_PARSER_OP(PARSER_OP_INDEX_CONSTANT, "index.constant")
+MLIR_PARSER_OP(PARSER_OP_TT_REDUCE_RETURN, "tt.reduce.return")
+
+// Ops the classic printer recognizes although the parser has no form for
+// them; the generic printer quotes their names, as for any op it does not
+// know.
+MLIR_PRINTER_OP(PARSER_OP_AFFINE_YIELD, "affine.yield")
+MLIR_PRINTER_OP(PARSER_OP_LINALG_YIELD, "linalg.yield")
+MLIR_PRINTER_OP(PARSER_OP_TENSOR_FROM_ELEMENTS, "tensor.from_elements")
+MLIR_PRINTER_OP(PARSER_OP_GPU_TERMINATOR, "gpu.terminator")
 
 #undef MLIR_OP
 #undef MLIR_DIALECT_BEGIN
 #undef MLIR_DIALECT_END
+#undef MLIR_PARSER_OP
+#undef MLIR_PRINTER_OP

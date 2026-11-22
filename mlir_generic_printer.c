@@ -22,6 +22,8 @@ typedef struct {
     // (a function's entry block, a nested loop body, ...) never share a name.
     uint32_t next_arg;
     SsaMap arg_map;
+    // The dynamic op types of the parser-only ops (mlir_printer.h).
+    ParserOpTypes op_types;
 } PrintCtx;
 
 static inline void ssa_map_init(PrintCtx *ctx, MLIR_Context *mlir_ctx) {
@@ -33,6 +35,7 @@ static inline void ssa_map_init(PrintCtx *ctx, MLIR_Context *mlir_ctx) {
         SsaMap_init(ctx->arena, &ctx->ssa_map, 128);
         SsaMap_init(ctx->arena, &ctx->arg_map, 32);
     }
+    if (mlir_ctx) parser_op_types_init(mlir_ctx, &ctx->op_types);
 }
 
 static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, MLIR_ValueHandle v) {
@@ -177,9 +180,10 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
         strbuf_append(arena, &result, str_lit(" = "));
     }
     MLIR_OpType op_type = MLIR_GetOpType(op);
+    int op_kind = parser_op_kind(&ctx->op_types, op_type);
     string opname = MLIR_GetOpTypeName(ctx->mlir_ctx, op_type);
-    // Ops of dynamic types print with a quoted name.
-    if ((unsigned)op_type >= (unsigned)OP_TYPE_COUNT) {
+    // Ops the in-tree parser has no form for print with a quoted name.
+    if (op_kind == OP_TYPE_UNREGISTERED || op_kind >= (int)PARSER_OP_PRINTER_ONLY_) {
         strbuf_append(arena, &result, str_lit("\""));
         if (opname.size > 0) strbuf_append(arena, &result, opname);
         else strbuf_append(arena, &result, str_lit("unknown"));
@@ -239,7 +243,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
         size_t n_attrs = MLIR_GetOpNumAttributes(op);
         if (n_attrs > 0) {
             bool opened = false; bool first = true;
-            MLIR_OpType opty = MLIR_GetOpType(op);
+            int opty = parser_op_kind(&ctx->op_types, MLIR_GetOpType(op));
             for (size_t i = 0; i < n_attrs; i++) {
                 MLIR_AttributeHandle attr = MLIR_GetOpAttribute(op, i);
                 string name = MLIR_GetAttributeName(attr);
@@ -250,7 +254,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
                 switch (MLIR_GetAttributeKind(attr)) {
                     case MLIR_ATTR_KIND_INTEGER: {
                         int64_t v = MLIR_GetAttributeInteger(attr);
-                        if (opty == OP_TYPE_TT_MAKE_RANGE) strbuf_append(arena, &result, format(arena, str_lit("{} : i32"), v));
+                        if (opty == PARSER_OP_TT_MAKE_RANGE) strbuf_append(arena, &result, format(arena, str_lit("{} : i32"), v));
                         else strbuf_append(arena, &result, format(arena, str_lit("{}"), v));
                         break;
                     }

@@ -400,6 +400,7 @@ void parser_init(MLIR_Context *ctx, Parser *parser, string text) {
     string text_null = str_concat(arena, text, str_lit("\0"));
     parser->ctx = ctx;
     parser->arena = arena;
+    parser_op_types_init(ctx, &parser->op_types);
     parser->input = (unsigned char*) text_null.str;
     parser->cur = 0;
     symbol_table_init(arena, &parser->symbol_table);
@@ -1374,6 +1375,7 @@ MLIR_OpHandle parse_operation(Parser *parser) {
     else if (str_eq(opname, str_lit("unrealized_conversion_cast")))
         op_type = OP_TYPE_UNREALIZED_CONVERSION_CAST;
     else op_type = MLIR_RegisterOpType(parser->ctx, opname);
+    int op_kind = parser_op_kind(&parser->op_types, op_type);
 
     // Capture trailing comment from the current line
     string trailing_comment = str_lit("");
@@ -1406,6 +1408,7 @@ MLIR_OpHandle parse_operation(Parser *parser) {
         .ctx = parser->ctx,
         .arena = parser->arena,
         .op_type = op_type,
+        .op_kind = op_kind,
         .lhs_results = lhs_results,
         .n_lhs_results = n_lhs_results,
         .unnumbered_loc_def = parser->unnumbered_loc_def,
@@ -1418,11 +1421,11 @@ MLIR_OpHandle parse_operation(Parser *parser) {
 
 
     // First we handle specific ops with special parsing rules
-    switch (op_type) {
-        case OP_TYPE_TT_FUNC:
+    switch (op_kind) {
+        case PARSER_OP_TT_FUNC:
             parsed = parse_tt_func_op(parser, &params);
             break;
-        case OP_TYPE_GPU_LAUNCH:
+        case PARSER_OP_GPU_LAUNCH:
             parsed = parse_gpu_launch_op(parser, &params);
             break;
         case OP_TYPE_SCF_IF:
@@ -1453,25 +1456,25 @@ MLIR_OpHandle parse_operation(Parser *parser) {
         case OP_TYPE_ARITH_SELECT:
             parsed = parse_arith_select_op(parser, &params);
             break;
-        case OP_TYPE_TT_GET_PROGRAM_ID:
+        case PARSER_OP_TT_GET_PROGRAM_ID:
             parsed = parse_tt_get_program_id_op(parser, &params);
             break;
-        case OP_TYPE_TT_SPLAT:
+        case PARSER_OP_TT_SPLAT:
             parsed = parse_tt_splat_op(parser, &params);
             break;
-        case OP_TYPE_TT_MAKE_RANGE:
+        case PARSER_OP_TT_MAKE_RANGE:
             parsed = parse_tt_make_range_op(parser, &params);
             break;
-        case OP_TYPE_TT_ADDPTR:
+        case PARSER_OP_TT_ADDPTR:
             parsed = parse_tt_addptr_op(parser, &params);
             break;
-        case OP_TYPE_TT_LOAD:
+        case PARSER_OP_TT_LOAD:
             parsed = parse_tt_load_op(parser, &params);
             break;
-        case OP_TYPE_TT_STORE:
+        case PARSER_OP_TT_STORE:
             parsed = parse_tt_store_op(parser, &params);
             break;
-        case OP_TYPE_TT_CALL:
+        case PARSER_OP_TT_CALL:
             parsed = parse_tt_call_op(parser, &params);
             break;
         case OP_TYPE_FUNC_FUNC:
@@ -1480,32 +1483,32 @@ MLIR_OpHandle parse_operation(Parser *parser) {
         case OP_TYPE_FUNC_CALL:
             parsed = parse_func_call_op(parser, &params);
             break;
-        case OP_TYPE_AFFINE_FOR:
+        case PARSER_OP_AFFINE_FOR:
             parsed = parse_affine_for_op(parser, &params);
             break;
-        case OP_TYPE_MEMREF_LOAD:
+        case PARSER_OP_MEMREF_LOAD:
             parsed = parse_memref_load_op(parser, &params);
             break;
-        case OP_TYPE_MEMREF_STORE:
+        case PARSER_OP_MEMREF_STORE:
             parsed = parse_memref_store_op(parser, &params);
             break;
-        case OP_TYPE_VECTOR_PRINT:
+        case PARSER_OP_VECTOR_PRINT:
             parsed = parse_vector_print_op(parser, &params);
             break;
-        case OP_TYPE_STD_CONSTANT:
+        case PARSER_OP_STD_CONSTANT:
             parsed = parse_std_constant_op(parser, &params);
             break;
-        case OP_TYPE_TT_REDUCE:
+        case PARSER_OP_TT_REDUCE:
             parsed = parse_tt_reduce_op(parser, &params);
             break;
-        case OP_TYPE_TT_REDUCE_RETURN:
-        case OP_TYPE_TT_RETURN:
-        case OP_TYPE_STD_RETURN:
+        case PARSER_OP_TT_REDUCE_RETURN:
+        case PARSER_OP_TT_RETURN:
+        case PARSER_OP_STD_RETURN:
         case OP_TYPE_FUNC_RETURN:
         case OP_TYPE_RETURN:
             parsed = parse_return_op(parser, &params);
             break;
-        case OP_TYPE_TENSOR_EXTRACT:
+        case PARSER_OP_TENSOR_EXTRACT:
             parsed = parse_tensor_extract_op(parser, &params);
             break;
         case OP_TYPE_CF_BR:
@@ -1514,20 +1517,20 @@ MLIR_OpHandle parse_operation(Parser *parser) {
         case OP_TYPE_CF_COND_BR:
             parsed = parse_cf_cond_br_op(parser, &params);
             break;
-        case OP_TYPE_LINALG_FILL:
-        case OP_TYPE_LINALG_COPY:
+        case PARSER_OP_LINALG_FILL:
+        case PARSER_OP_LINALG_COPY:
             parsed = parse_linalg_fill_op(parser, &params);
             break;
-        case OP_TYPE_AFFINE_LOAD:
+        case PARSER_OP_AFFINE_LOAD:
             parsed = parse_affine_load_op(parser, &params);
             break;
-        case OP_TYPE_INDEX_CONSTANT:
+        case PARSER_OP_INDEX_CONSTANT:
             parsed = parse_index_constant_op(parser, &params);
             break;
-        case OP_TYPE_TENSOR_SPLAT:
+        case PARSER_OP_TENSOR_SPLAT:
             parsed = parse_tensor_splat_op(parser, &params);
             break;
-        case OP_TYPE_TENSOR_COLLAPSE_SHAPE:
+        case PARSER_OP_TENSOR_COLLAPSE_SHAPE:
             parsed = parse_tensor_collapse_shape_op(parser, &params);
             break;
         case OP_TYPE_SCF_YIELD:

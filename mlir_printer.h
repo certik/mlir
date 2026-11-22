@@ -46,6 +46,56 @@ string MLIR_GetLocationOriginalText(MLIR_LocationHandle loc);
 // Returns SIZE_MAX if the block has no parent or the backend doesn't track it.
 size_t MLIR_GetBlockIndex(MLIR_BlockHandle block);
 
+// -----------------------------------------------------------------------------
+// Parser-only ops
+// -----------------------------------------------------------------------------
+//
+// The ops of the dialects that only the text parser and the classic printer
+// know (tt, gpu, affine, vector, std, tensor, linalg, index, math, memref:
+// MLIR_PARSER_OP and MLIR_PRINTER_OP in mlir_ops.def) have no static MLIR_OpType
+// (doc/mlir_api_design.md, decision D9). The parser and the printers
+// register their names as dynamic op types of the context
+// (parser_op_types_init) and dispatch on an op kind (parser_op_kind): the
+// MLIR_OpType for a static type, a PARSER_OP_* value for a parser-only op,
+// and OP_TYPE_UNREGISTERED for any other dynamic type. The PARSER_OP_*
+// values start at OP_TYPE_COUNT, so one switch can mix them with OP_TYPE_*
+// cases.
+
+typedef enum {
+    PARSER_OP_BEGIN_ = OP_TYPE_COUNT - 1,
+#define MLIR_PARSER_OP(kind, name) kind,
+#include "mlir_ops.def"
+    // From here on, the ops that only the classic printer recognizes.
+    PARSER_OP_PRINTER_ONLY_,
+    PARSER_OP_PRINTER_ONLY_BEGIN_ = PARSER_OP_PRINTER_ONLY_ - 1,
+#define MLIR_PRINTER_OP(kind, name) kind,
+#include "mlir_ops.def"
+    PARSER_OP_END_
+} ParserOpKind;
+
+// The capacity of ParserOpTypes.type: a literal because tinyC accepts no
+// enumerator as an array length.
+#define PARSER_OP_CAPACITY 48
+#ifndef __TINYC__
+typedef char parser_op_capacity_ok[
+    ((int)PARSER_OP_END_ - (int)OP_TYPE_COUNT <= PARSER_OP_CAPACITY) ? 1 : -1];
+#endif
+
+typedef struct ParserOpTypes {
+    // type[k - OP_TYPE_COUNT] is the dynamic type of kind k.
+    MLIR_OpType type[PARSER_OP_CAPACITY];
+    // True if type[i] == type[0] + i for every kind, which is the case
+    // unless one of the names was registered on its own before; then
+    // parser_op_kind is a subtraction rather than a search.
+    bool consecutive;
+} ParserOpTypes;
+
+// Registers the parser-only op names in `ctx` and records their types
+// (mlir_op_names.c, which every build that links a printer links too).
+void parser_op_types_init(MLIR_Context *ctx, ParserOpTypes *p);
+// The op kind of type `t` (see above).
+int parser_op_kind(const ParserOpTypes *p, MLIR_OpType t);
+
 #ifdef __cplusplus
 }
 #endif

@@ -8,6 +8,7 @@
 #include <base/string.h>
 #include "mlir_api.h"
 #include "mlir_op_names.h"
+#include "mlir_printer.h"
 
 static uint32_t op_name_hash(string name) {
     uint32_t h = 2166136261u;  // FNV-1a
@@ -97,3 +98,32 @@ MLIR_OpType op_type_table_register(OpTypeTable *t, string name) {
     return (MLIR_OpType)type;
 }
 
+// -----------------------------------------------------------------------------
+// Parser-only op kinds (mlir_printer.h). Here rather than inline in the
+// header because tinyC emits every static inline function of a header into
+// each file that includes it.
+// -----------------------------------------------------------------------------
+
+void parser_op_types_init(MLIR_Context *ctx, ParserOpTypes *p) {
+#define MLIR_PARSER_OP(kind, name) \
+    p->type[(int)kind - (int)OP_TYPE_COUNT] = MLIR_RegisterOpType(ctx, str_lit(name));
+#define MLIR_PRINTER_OP(kind, name) \
+    p->type[(int)kind - (int)OP_TYPE_COUNT] = MLIR_RegisterOpType(ctx, str_lit(name));
+#include "mlir_ops.def"
+    int n = (int)PARSER_OP_END_ - (int)OP_TYPE_COUNT;
+    p->consecutive = true;
+    for (int i = 0; i < n; i++)
+        if ((int)p->type[i] != (int)p->type[0] + i) p->consecutive = false;
+}
+
+int parser_op_kind(const ParserOpTypes *p, MLIR_OpType t) {
+    if ((unsigned)t < (unsigned)OP_TYPE_COUNT) return (int)t;
+    int n = (int)PARSER_OP_END_ - (int)OP_TYPE_COUNT;
+    if (p->consecutive) {
+        unsigned i = (unsigned)t - (unsigned)p->type[0];
+        return i < (unsigned)n ? (int)OP_TYPE_COUNT + (int)i : (int)OP_TYPE_UNREGISTERED;
+    }
+    for (int i = 0; i < n; i++)
+        if (p->type[i] == t) return (int)OP_TYPE_COUNT + i;
+    return (int)OP_TYPE_UNREGISTERED;
+}

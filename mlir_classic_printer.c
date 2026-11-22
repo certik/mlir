@@ -19,6 +19,8 @@ typedef struct {
     uint32_t next_ssa;
     SsaMap ssa_map;
     MLIR_OpHandle current_scf_for;
+    // The dynamic op types of the parser-only ops (mlir_printer.h).
+    ParserOpTypes op_types;
 } PrintCtx;
 
 // Optional predecessor comments per block for a region
@@ -188,8 +190,13 @@ static inline void ssa_map_init(PrintCtx *ctx, MLIR_Context *mlir_ctx) {
         SsaMap_init(ctx->arena, &ctx->ssa_map, 128);
     }
     ctx->current_scf_for = MLIR_INVALID_HANDLE;
+    if (mlir_ctx) parser_op_types_init(mlir_ctx, &ctx->op_types);
 }
 
+// The op kind the printer dispatches on (parser_op_kind, mlir_printer.h).
+static inline int op_kind(PrintCtx *ctx, MLIR_OpHandle op) {
+    return parser_op_kind(&ctx->op_types, MLIR_GetOpType(op));
+}
 // The op's name.
 static inline string op_name(PrintCtx *ctx, MLIR_OpHandle op) {
     return MLIR_GetOpTypeName(ctx->mlir_ctx, MLIR_GetOpType(op));
@@ -426,7 +433,7 @@ static string print_function_region_classic(PrintCtx *ctx, int indent_level, MLI
             // upstream printer omits; mirror that for round-trip parity.
             if (no > 0) {
                 MLIR_OpHandle last = MLIR_GetBlockOp(block, no - 1);
-                if (str_eq(op_name(ctx, last), str_lit("affine.yield")) &&
+                if (op_kind(ctx, last) == PARSER_OP_AFFINE_YIELD &&
                     MLIR_GetOpNumOperands(last) == 0) {
                     no--;
                 }
@@ -651,23 +658,17 @@ static string print_op_generic_form_classic(PrintCtx *ctx, int indent_level, MLI
 // classic printer. Used as a fallback for ops the classic printer doesn't
 // know how to format and that the buggy default path would mangle.
 static bool op_force_generic_form(PrintCtx *ctx, MLIR_OpHandle op) {
-    string nm = op_name(ctx, op);
-    if (nm.size == 0) return false;
-    static const char *names[] = {
-        "linalg.yield",
-        "tensor.from_elements", "tensor.splat",
-        "tensor.extract",
-        "vector.print",
-        "gpu.terminator",
-    };
-    for (size_t i = 0; i < sizeof(names)/sizeof(names[0]); i++) {
-        string s = (string){(char*)names[i], 0};
-        const char *p = names[i];
-        size_t L = 0; while (p[L]) L++;
-        s.size = L;
-        if (str_eq(nm, s)) return true;
+    switch (op_kind(ctx, op)) {
+    case PARSER_OP_LINALG_YIELD:
+    case PARSER_OP_TENSOR_FROM_ELEMENTS:
+    case PARSER_OP_TENSOR_SPLAT:
+    case PARSER_OP_TENSOR_EXTRACT:
+    case PARSER_OP_VECTOR_PRINT:
+    case PARSER_OP_GPU_TERMINATOR:
+        return true;
+    default:
+        return false;
     }
-    return false;
 }
 
 static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, MLIR_OpHandle op) {
@@ -687,7 +688,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
     strbuf_append(arena, &result, indent_classic(arena, indent_level));
 
     // Robust early handling for func.func
-    if (MLIR_GetOpType(op) == OP_TYPE_FUNC_FUNC) {
+    if (op_kind(ctx, op) == OP_TYPE_FUNC_FUNC) {
         // Build header "func.func [vis] @name(params)[ -> ret]"
         strbuf header = strbuf_make();
     strbuf_append(arena, &header, str_lit("func.func "));
@@ -772,7 +773,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
     }
 
     // Operation-specific printing with switch statement
-    switch (MLIR_GetOpType(op)) {
+    switch (op_kind(ctx, op)) {
         case OP_TYPE_ARITH_SELECT: {
             // Classic format: arith.select %cond, %t, %f : cond_ty, val_ty
             strbuf_append(arena, &result, str_lit("arith.select "));
@@ -1090,7 +1091,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
         /* duplicate OP_TYPE_FUNC_CALL removed */
 
-        case OP_TYPE_TT_FUNC: {
+        case PARSER_OP_TT_FUNC: {
             // Classic format header with visibility and symbol name
             strbuf_append(arena, &result, str_lit("tt.func "));
 
@@ -1180,7 +1181,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     MLIR_BlockHandle b = MLIR_GetRegionBlock(region, MLIR_GetRegionNumBlocks(region) - 1);
                     if (b && MLIR_GetBlockNumOps(b) > 0) {
                         MLIR_OpHandle last = MLIR_GetBlockOp(b, MLIR_GetBlockNumOps(b) - 1);
-                        if (last && MLIR_GetOpType(last) == OP_TYPE_TT_RETURN && MLIR_GetOpNumOperands(last) > 0) {
+                        if (last && op_kind(ctx, last) == PARSER_OP_TT_RETURN && MLIR_GetOpNumOperands(last) > 0) {
                             MLIR_ValueHandle return_val = MLIR_GetOpOperand(last, 0);
                             if (return_val) {
                                 MLIR_TypeHandle return_type = MLIR_GetValueType(return_val);
@@ -1198,7 +1199,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
 
-        case OP_TYPE_TT_GET_PROGRAM_ID: {
+        case PARSER_OP_TT_GET_PROGRAM_ID: {
             // Classic format: tt.get_program_id <axis> : i32
             strbuf_append(arena, &result, str_lit("tt.get_program_id "));
             string axis = str_lit("x");
@@ -1211,7 +1212,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             strbuf_append(arena, &result, str_lit(" : i32"));
             break;
         }
-        case OP_TYPE_TT_CALL: {
+        case PARSER_OP_TT_CALL: {
             // Classic tt.call @callee(%args) : (tys) -> ret
             strbuf_append(arena, &result, str_lit("tt.call"));
             string callee = str_lit("@unknown");
@@ -1228,7 +1229,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             if (MLIR_GetOpNumResultTypes(op)>0) { strbuf_append(arena, &result, str_lit(" -> ")); strbuf_append(arena, &result, MLIR_GetTypeString(ctx->mlir_ctx, MLIR_GetOpResultType(op, 0))); }
             break;
         }
-        case OP_TYPE_TT_REDUCE: {
+        case PARSER_OP_TT_REDUCE: {
             // Print generic quoted form to match tests
             strbuf_append(arena, &result, str_lit("\"tt.reduce\""));
             // operands
@@ -1302,7 +1303,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
 
-        case OP_TYPE_AFFINE_FOR: {
+        case PARSER_OP_AFFINE_FOR: {
             // Classic format: affine.for %iv = LB to UB [step S]
             strbuf_append(arena, &result, str_lit("affine.for "));
 
@@ -1501,7 +1502,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
 
-        case OP_TYPE_TENSOR_COLLAPSE_SHAPE: {
+        case PARSER_OP_TENSOR_COLLAPSE_SHAPE: {
             // Typed form: %r = tensor.collapse_shape %t [[reassoc...]] : T into RT
             strbuf_append(arena, &result, str_lit("tensor.collapse_shape"));
             size_t no = MLIR_GetOpNumOperands(op);
@@ -1553,7 +1554,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
 
-        case OP_TYPE_AFFINE_LOAD: {
+        case PARSER_OP_AFFINE_LOAD: {
             // Typed form: %r = affine.load %memref[%i, ...] : memref<...>
             strbuf_append(arena, &result, str_lit("affine.load"));
             size_t no = MLIR_GetOpNumOperands(op);
@@ -1579,12 +1580,12 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
 
-        case OP_TYPE_LINALG_FILL:
-        case OP_TYPE_LINALG_COPY: {
+        case PARSER_OP_LINALG_FILL:
+        case PARSER_OP_LINALG_COPY: {
             // Typed form: linalg.fill|copy ins(%a : T, ...) outs(%b : T, ...) [-> rt, ...]
             // We treat the first half of operands as ins, second half as outs.
             // For the typical fill/copy this means 1 ins + 1 outs.
-            strbuf_append(arena, &result, MLIR_GetOpType(op) == OP_TYPE_LINALG_FILL ? str_lit("linalg.fill") : str_lit("linalg.copy"));
+            strbuf_append(arena, &result, op_kind(ctx, op) == PARSER_OP_LINALG_FILL ? str_lit("linalg.fill") : str_lit("linalg.copy"));
             size_t n_op = MLIR_GetOpNumOperands(op);
             size_t n_ins = n_op / 2;
             if (n_op > 0 && n_ins == 0) n_ins = 1;
@@ -1632,7 +1633,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
 
-        case OP_TYPE_GPU_LAUNCH: {
+        case PARSER_OP_GPU_LAUNCH: {
             // Typed form:
             //   gpu.launch blocks(%a0, %a1, %a2) in (%a6 = %op0, %a7 = %op1, %a8 = %op2)
             //              threads(%a3, %a4, %a5) in (%a9 = %op3, %a10 = %op4, %a11 = %op5) {
@@ -1694,7 +1695,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
 
-        case OP_TYPE_TT_SPLAT: {
+        case PARSER_OP_TT_SPLAT: {
             // Classic format: tt.splat %v : T -> tensor<NxT>
             strbuf_append(arena, &result, str_lit("tt.splat "));
             size_t n_operands = MLIR_GetOpNumOperands(op);
@@ -1737,7 +1738,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
 
-        case OP_TYPE_TT_ADDPTR: {
+        case PARSER_OP_TT_ADDPTR: {
             // Classic format: tt.addptr %a, %b : TyA, TyB
             strbuf_append(arena, &result, str_lit("tt.addptr "));
             for (int i = 0; i < MLIR_GetOpNumOperands(op); i++) {
@@ -1756,7 +1757,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
 
-        case OP_TYPE_TT_LOAD: {
+        case PARSER_OP_TT_LOAD: {
             // Classic format: tt.load %ptr {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : f32
             strbuf_append(arena, &result, str_lit("tt.load "));
             for (int i = 0; i < MLIR_GetOpNumOperands(op); i++) {
@@ -1771,7 +1772,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     MLIR_AttributeHandle attr = MLIR_GetOpAttribute(op, i);
                     // Skip internal attributes
                     if (str_eq(MLIR_GetAttributeName(attr), str_lit("sym_name")) ||
-                        (str_eq(MLIR_GetAttributeName(attr), str_lit("value")) && MLIR_GetOpType(op) == OP_TYPE_ARITH_CONSTANT) ||
+                        (str_eq(MLIR_GetAttributeName(attr), str_lit("value")) && op_kind(ctx, op) == OP_TYPE_ARITH_CONSTANT) ||
                         str_eq(MLIR_GetAttributeName(attr), str_lit("axis")) ||
                         str_eq(MLIR_GetAttributeName(attr), str_lit("start")) ||
                         str_eq(MLIR_GetAttributeName(attr), str_lit("end"))) {
@@ -1826,7 +1827,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
 
-        case OP_TYPE_TT_STORE: {
+        case PARSER_OP_TT_STORE: {
             // Classic format: tt.store %ptr, %value {cache = 1 : i32, evict = 1 : i32} : f32
             strbuf_append(arena, &result, str_lit("tt.store "));
             for (int i = 0; i < MLIR_GetOpNumOperands(op); i++) {
@@ -1841,7 +1842,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     MLIR_AttributeHandle attr = MLIR_GetOpAttribute(op, i);
                     // Skip internal attributes
                     if (str_eq(MLIR_GetAttributeName(attr), str_lit("sym_name")) ||
-                        (str_eq(MLIR_GetAttributeName(attr), str_lit("value")) && MLIR_GetOpType(op) == OP_TYPE_ARITH_CONSTANT) ||
+                        (str_eq(MLIR_GetAttributeName(attr), str_lit("value")) && op_kind(ctx, op) == OP_TYPE_ARITH_CONSTANT) ||
                         str_eq(MLIR_GetAttributeName(attr), str_lit("axis")) ||
                         str_eq(MLIR_GetAttributeName(attr), str_lit("start")) ||
                         str_eq(MLIR_GetAttributeName(attr), str_lit("end"))) {
@@ -1884,7 +1885,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
 
-        case OP_TYPE_TT_RETURN: {
+        case PARSER_OP_TT_RETURN: {
             // Classic format: tt.return [%operands] [: type]
             strbuf_append(arena, &result, str_lit("tt.return"));
             if (MLIR_GetOpNumOperands(op) > 0) {
@@ -1901,7 +1902,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             break;
         }
 
-        case OP_TYPE_TT_MAKE_RANGE: {
+        case PARSER_OP_TT_MAKE_RANGE: {
             // Classic format: tt.make_range {end = N : i32, start = M : i32} : tensor<Nxi32>
             strbuf_append(arena, &result, str_lit("tt.make_range"));
             if (MLIR_GetOpNumAttributes(op) > 0) {
@@ -1922,7 +1923,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
         default: {
             // Handle func.func robustly even if op_type mapping was missed
-            if (MLIR_GetOpType(op) == OP_TYPE_FUNC_FUNC) {
+            if (op_kind(ctx, op) == OP_TYPE_FUNC_FUNC) {
                 strbuf header = strbuf_make();
     strbuf_append(arena, &header, str_lit("func.func "));
                 string vis = str_lit(""); string name = str_lit(""); string ret = str_lit(""); strbuf params = strbuf_make();
@@ -1943,10 +1944,10 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 break;
             }
             // Before generic/default printing, handle a few named ops specially:
-            if (MLIR_GetOpType(op) == OP_TYPE_ARITH_BITCAST || MLIR_GetOpType(op) == OP_TYPE_ARITH_SITOFP ||
-                MLIR_GetOpType(op) == OP_TYPE_ARITH_FPTOSI || MLIR_GetOpType(op) == OP_TYPE_ARITH_INDEX_CAST ||
-                MLIR_GetOpType(op) == OP_TYPE_ARITH_EXTSI || MLIR_GetOpType(op) == OP_TYPE_ARITH_TRUNCI ||
-                MLIR_GetOpType(op) == OP_TYPE_ARITH_EXTF || MLIR_GetOpType(op) == OP_TYPE_ARITH_TRUNCF) {
+            if (op_kind(ctx, op) == OP_TYPE_ARITH_BITCAST || op_kind(ctx, op) == OP_TYPE_ARITH_SITOFP ||
+                op_kind(ctx, op) == OP_TYPE_ARITH_FPTOSI || op_kind(ctx, op) == OP_TYPE_ARITH_INDEX_CAST ||
+                op_kind(ctx, op) == OP_TYPE_ARITH_EXTSI || op_kind(ctx, op) == OP_TYPE_ARITH_TRUNCI ||
+                op_kind(ctx, op) == OP_TYPE_ARITH_EXTF || op_kind(ctx, op) == OP_TYPE_ARITH_TRUNCF) {
                 // op name
                 strbuf_append(arena, &result, op_name(ctx, op));
                 // operand
@@ -1976,9 +1977,11 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
 
             // Print operation name
-            bool is_tt_func = (MLIR_GetOpType(op) == OP_TYPE_TT_FUNC);
-            if ((unsigned)MLIR_GetOpType(op) >= (unsigned)OP_TYPE_COUNT && !is_tt_func) {
-                // Quote the names of ops of dynamic types
+            bool is_tt_func = (op_kind(ctx, op) == PARSER_OP_TT_FUNC);
+            int kind = op_kind(ctx, op);
+            if ((kind == OP_TYPE_UNREGISTERED || kind >= (int)PARSER_OP_PRINTER_ONLY_) &&
+                !is_tt_func) {
+                // Quote the names of ops the parser has no form for
                 strbuf_append(arena, &result, str_lit("\""));
                 string s = op_name(ctx, op);
                 if (s.size > 0) strbuf_append(arena, &result, s);
@@ -1989,7 +1992,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
 
             // Special classic formatting for select ops
-            if (MLIR_GetOpType(op) == OP_TYPE_INDEX_CONSTANT) {
+            if (op_kind(ctx, op) == PARSER_OP_INDEX_CONSTANT) {
                 // index.constant N
                 for (size_t i = 0, n = MLIR_GetOpNumAttributes(op); i < n; i++) {
                     MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
@@ -2000,7 +2003,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     }
                 }
             }
-            if (MLIR_GetOpType(op) == OP_TYPE_ARITH_EXTUI) {
+            if (op_kind(ctx, op) == OP_TYPE_ARITH_EXTUI) {
                 // arith.extui %v : src -> dst
                 strbuf_append(arena, &result, str_lit(" "));
                 if (MLIR_GetOpNumOperands(op)>0 && MLIR_GetOpOperand(op, 0)) strbuf_append(arena, &result, print_ssa_operand_classic(ctx, MLIR_GetOpOperand(op, 0)));
@@ -2015,7 +2018,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
 
             // Special classic formatting for select tt.* ops
-            if (MLIR_GetOpType(op) == OP_TYPE_TT_BROADCAST) {
+            if (op_kind(ctx, op) == PARSER_OP_TT_BROADCAST) {
                 // tt.broadcast %x : (src) -> dst
                 strbuf_append(arena, &result, str_lit(" "));
                 size_t n_operands = MLIR_GetOpNumOperands(op);
@@ -2066,7 +2069,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
                 break;
             }
-            if (MLIR_GetOpType(op) == OP_TYPE_TT_EXPAND_DIMS) {
+            if (op_kind(ctx, op) == PARSER_OP_TT_EXPAND_DIMS) {
                 // tt.expand_dims %x {axis = i : i32} : (src) -> dst
                 strbuf_append(arena, &result, str_lit(" "));
                 size_t n_operands = MLIR_GetOpNumOperands(op);
@@ -2129,7 +2132,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
                 break;
             }
-            if (MLIR_GetOpType(op) == OP_TYPE_TT_DOT) {
+            if (op_kind(ctx, op) == PARSER_OP_TT_DOT) {
                 // tt.dot %a, %b, %acc {attrs} : lhs * rhs -> res
                 strbuf_append(arena, &result, str_lit(" "));
                 for (int i = 0; i < MLIR_GetOpNumOperands(op); i++) {
@@ -2184,7 +2187,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
 
             // Special case: tt.pure_extern_elementwise
-            if (MLIR_GetOpType(op) == OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE) {
+            if (op_kind(ctx, op) == PARSER_OP_TT_PURE_EXTERN_ELEMENTWISE) {
                 // Name already printed
                 if (MLIR_GetOpNumOperands(op) > 0) {
                     strbuf_append(arena, &result, str_lit(" "));
@@ -2222,10 +2225,10 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             // memref.store use subscript syntax: `memref.load %m[%i, %j]`
             // and `memref.store %v, %m[%i, %j]`. Other ops use a bare
             // space-separated list.
-            MLIR_OpType _ot = MLIR_GetOpType(op);
-            bool _wants_parens = (_ot == OP_TYPE_MEMREF_ALLOC);
-            bool _is_load = (_ot == OP_TYPE_MEMREF_LOAD);
-            bool _is_store = (_ot == OP_TYPE_MEMREF_STORE);
+            int _ot = op_kind(ctx, op);
+            bool _wants_parens = (_ot == PARSER_OP_MEMREF_ALLOC);
+            bool _is_load = (_ot == PARSER_OP_MEMREF_LOAD);
+            bool _is_store = (_ot == PARSER_OP_MEMREF_STORE);
             if (MLIR_GetOpNumOperands(op) > 0 || _wants_parens) {
                 strbuf_append(arena, &result, _wants_parens ? str_lit("(") : str_lit(" "));
                 int subscript_after = -1;
@@ -2284,8 +2287,8 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 }
             }
             // Print type suffix in classic format
-            if (MLIR_GetOpType(op) == OP_TYPE_MEMREF_LOAD ||
-                MLIR_GetOpType(op) == OP_TYPE_MEMREF_STORE) {
+            if (op_kind(ctx, op) == PARSER_OP_MEMREF_LOAD ||
+                op_kind(ctx, op) == PARSER_OP_MEMREF_STORE) {
                 // memref.load/store print only the source memref type (the
                 // canonical MLIR form), not all operand types. Look up the
                 // `_source_type` hidden attr stashed by the parser; fall back
@@ -2304,14 +2307,14 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                     strbuf_append(arena, &result, str_lit(" : "));
                     strbuf_append(arena, &result, src_type_str);
                 } else {
-                    size_t memref_idx = (MLIR_GetOpType(op) == OP_TYPE_MEMREF_STORE) ? 1 : 0;
+                    size_t memref_idx = (op_kind(ctx, op) == PARSER_OP_MEMREF_STORE) ? 1 : 0;
                     if (MLIR_GetOpNumOperands(op) > memref_idx && MLIR_GetOpOperand(op, memref_idx) &&
                         MLIR_GetValueType(MLIR_GetOpOperand(op, memref_idx))) {
                         strbuf_append(arena, &result, str_lit(" : "));
                         strbuf_append(arena, &result, MLIR_GetTypeString(ctx->mlir_ctx, MLIR_GetValueType(MLIR_GetOpOperand(op, memref_idx))));
                     }
                 }
-            } else if (MLIR_GetOpType(op) == OP_TYPE_INDEX_CONSTANT) {
+            } else if (op_kind(ctx, op) == PARSER_OP_INDEX_CONSTANT) {
                 // index.constant N — no type annotation
             } else if (MLIR_GetOpNumResultTypes(op) > 0 && MLIR_GetOpResultType(op, 0)) {
                 strbuf_append(arena, &result, str_lit(" : "));
@@ -2340,19 +2343,19 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
     // Print attributes for operations that should show them in classic format
     // Skip internal attributes that shouldn't be visible
-    if (MLIR_GetOpNumAttributes(op) > 0 && MLIR_GetOpType(op) != OP_TYPE_TT_FUNC && MLIR_GetOpType(op) != OP_TYPE_TT_REDUCE &&
-        MLIR_GetOpType(op) != OP_TYPE_TT_LOAD && MLIR_GetOpType(op) != OP_TYPE_TT_STORE &&
-        MLIR_GetOpType(op) != OP_TYPE_ARITH_CMPI && MLIR_GetOpType(op) != OP_TYPE_TT_MAKE_RANGE &&
-        MLIR_GetOpType(op) != OP_TYPE_FUNC_FUNC) {
+    if (MLIR_GetOpNumAttributes(op) > 0 && op_kind(ctx, op) != PARSER_OP_TT_FUNC && op_kind(ctx, op) != PARSER_OP_TT_REDUCE &&
+        op_kind(ctx, op) != PARSER_OP_TT_LOAD && op_kind(ctx, op) != PARSER_OP_TT_STORE &&
+        op_kind(ctx, op) != OP_TYPE_ARITH_CMPI && op_kind(ctx, op) != PARSER_OP_TT_MAKE_RANGE &&
+        op_kind(ctx, op) != OP_TYPE_FUNC_FUNC) {
         // Skip printing here for cases handled inline above
-        if (MLIR_GetOpType(op) == OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE) {
+        if (op_kind(ctx, op) == PARSER_OP_TT_PURE_EXTERN_ELEMENTWISE) {
             // already printed
         } else {
         // If there are tt.* attributes, we printed them inline already for default ops
         bool any_tt = false; for (size_t i=0, n=MLIR_GetOpNumAttributes(op); i<n; i++){ string an = MLIR_GetAttributeName(MLIR_GetOpAttribute(op,i)); if (an.size>=3 && an.str[0]=='t' && an.str[1]=='t' && an.str[2]=='.') { any_tt=true; break; } }
         if (!any_tt) {
         // Skip printing for ops where we printed inline already by name
-        if (MLIR_GetOpType(op) == OP_TYPE_TT_EXPAND_DIMS || MLIR_GetOpType(op) == OP_TYPE_TT_DOT) {
+        if (op_kind(ctx, op) == PARSER_OP_TT_EXPAND_DIMS || op_kind(ctx, op) == PARSER_OP_TT_DOT) {
             // do nothing
         } else {
         bool has_visible_attrs = false;
@@ -2378,17 +2381,17 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
             // For ops with typed forms that absorb structural attributes,
             // suppress those attributes from the trailing `{...}` block.
-            if (MLIR_GetOpType(op) == OP_TYPE_AFFINE_LOAD &&
+            if (op_kind(ctx, op) == PARSER_OP_AFFINE_LOAD &&
                 str_eq(attr_name, str_lit("map"))) {
                 continue;
             }
-            if (MLIR_GetOpType(op) == OP_TYPE_TENSOR_COLLAPSE_SHAPE &&
+            if (op_kind(ctx, op) == PARSER_OP_TENSOR_COLLAPSE_SHAPE &&
                 str_eq(attr_name, str_lit("reassociation"))) {
                 continue;
             }
             // affine.for absorbs lowerBoundMap/upperBoundMap/step into its
             // header (`= LB to UB step S`), so don't repeat them here.
-            if (MLIR_GetOpType(op) == OP_TYPE_AFFINE_FOR &&
+            if (op_kind(ctx, op) == PARSER_OP_AFFINE_FOR &&
                 (str_eq(attr_name, str_lit("lowerBoundMap")) ||
                  str_eq(attr_name, str_lit("upperBoundMap")) ||
                  str_eq(attr_name, str_lit("step")))) {
@@ -2399,13 +2402,13 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 continue;
             }
             // Skip 'function_type' on func.func (printed as part of header)
-            if (str_eq(attr_name, str_lit("function_type")) && MLIR_GetOpType(op) == OP_TYPE_FUNC_FUNC) {
+            if (str_eq(attr_name, str_lit("function_type")) && op_kind(ctx, op) == OP_TYPE_FUNC_FUNC) {
                 continue;
             }
             // Skip 'value' attribute only for arith.constant and index.constant operations
             if (str_eq(attr_name, str_lit("value")) &&
-                (MLIR_GetOpType(op) == OP_TYPE_ARITH_CONSTANT ||
-                 MLIR_GetOpType(op) == OP_TYPE_INDEX_CONSTANT)) {
+                (op_kind(ctx, op) == OP_TYPE_ARITH_CONSTANT ||
+                 op_kind(ctx, op) == PARSER_OP_INDEX_CONSTANT)) {
                 continue;
             }
             // Skip tt.* attributes here; they are printed inline before type for default ops
@@ -2413,7 +2416,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 continue;
             }
             // Skip axis attribute for tt.get_program_id
-            if (MLIR_GetOpType(op) == OP_TYPE_TT_GET_PROGRAM_ID && str_eq(attr_name, str_lit("axis"))) {
+            if (op_kind(ctx, op) == PARSER_OP_TT_GET_PROGRAM_ID && str_eq(attr_name, str_lit("axis"))) {
                 continue;
             }
             // No skipping of axis/start/end in classic mode
@@ -2460,19 +2463,19 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
     // For classic formatting: place regions (when present).
     // Skip here for func.func since its region was already printed in its case above.
-    if (MLIR_GetOpNumRegions(op) > 0 && MLIR_GetOpType(op) != OP_TYPE_FUNC_FUNC && MLIR_GetOpType(op) != OP_TYPE_TT_REDUCE
-        && MLIR_GetOpType(op) != OP_TYPE_LINALG_FILL && MLIR_GetOpType(op) != OP_TYPE_LINALG_COPY) {
+    if (MLIR_GetOpNumRegions(op) > 0 && op_kind(ctx, op) != OP_TYPE_FUNC_FUNC && op_kind(ctx, op) != PARSER_OP_TT_REDUCE
+        && op_kind(ctx, op) != PARSER_OP_LINALG_FILL && op_kind(ctx, op) != PARSER_OP_LINALG_COPY) {
         strbuf_append(arena, &result, str_lit(" "));
         for (size_t i = 0, nr = MLIR_GetOpNumRegions(op); i < nr; i++) {
             // Special handling for SCF if else
-            if (MLIR_GetOpType(op) == OP_TYPE_SCF_IF && i == 1 && nr == 2) {
+            if (op_kind(ctx, op) == OP_TYPE_SCF_IF && i == 1 && nr == 2) {
                 strbuf_append(arena, &result, str_lit(" else "));
             }
 
-            if (MLIR_GetOpType(op) == OP_TYPE_TT_FUNC || MLIR_GetOpType(op) == OP_TYPE_MODULE ||
-                MLIR_GetOpType(op) == OP_TYPE_SCF_FOR || MLIR_GetOpType(op) == OP_TYPE_SCF_IF || MLIR_GetOpType(op) == OP_TYPE_SCF_WHILE ||
-                MLIR_GetOpType(op) == OP_TYPE_AFFINE_FOR ||
-                MLIR_GetOpType(op) == OP_TYPE_GPU_LAUNCH) {
+            if (op_kind(ctx, op) == PARSER_OP_TT_FUNC || op_kind(ctx, op) == OP_TYPE_MODULE ||
+                op_kind(ctx, op) == OP_TYPE_SCF_FOR || op_kind(ctx, op) == OP_TYPE_SCF_IF || op_kind(ctx, op) == OP_TYPE_SCF_WHILE ||
+                op_kind(ctx, op) == PARSER_OP_AFFINE_FOR ||
+                op_kind(ctx, op) == PARSER_OP_GPU_LAUNCH) {
                 strbuf_append(arena, &result, print_function_region_classic(ctx, indent_level, MLIR_GetOpRegion(op, i))
                 );
             } else {
@@ -2481,7 +2484,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
             }
         }
         // After regions of scf.for, restore parent pointer
-        if (MLIR_GetOpType(op) == OP_TYPE_SCF_FOR) {
+        if (op_kind(ctx, op) == OP_TYPE_SCF_FOR) {
             ctx->current_scf_for = MLIR_INVALID_HANDLE;
         }
     }

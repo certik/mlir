@@ -60,6 +60,7 @@ typedef struct OperationParserParams {
     MLIR_Context *ctx;
     Arena  *arena;
     MLIR_OpType  op_type;
+    int          op_kind;  /* parser_op_kind(op_type), mlir_printer.h */
 
     MLIR_ValueHandle *lhs_results;
     size_t     n_lhs_results;
@@ -126,6 +127,8 @@ typedef struct {
     // Parsing mode flag to enable robust trailing comment capture in special contexts
     bool capture_trailing_comments;
     // Stack of per-region block-by-label maps for forward-reference handling.
+    // The dynamic op types of the parser-only ops (mlir_printer.h).
+    ParserOpTypes op_types;
     BlockLabelMap *block_label_stack;
     size_t block_label_depth;
     size_t block_label_capacity;
