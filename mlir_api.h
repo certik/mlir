@@ -29,7 +29,8 @@ extern "C" {
 // kind where another is expected is a compile error (the gcc/clang builds use
 // -Werror=incompatible-pointer-types; GCC >= 14 rejects it by default; MSVC
 // warns, C4133). A handle is pointer-sized and passed in a register on every
-// ABI. `==`, `!h` and NULL work as for any pointer; hash a handle as
+// ABI. Compare handles with `==` and test them with `!h` or against
+// MLIR_INVALID_HANDLE, never against NULL (see below); hash a handle as
 // `(uintptr_t)h`. The structs are never defined: backends cast handles to
 // their own types.
 //
@@ -40,9 +41,14 @@ extern "C" {
 // and the gcc/clang builds of the same sources do the type checking. Code
 // must compile in both modes: convert a handle to an integer with
 // `(uintptr_t)h` and to a backend pointer with a cast such as `(IR_Op *)h`.
-// Never pass a handle where a `void *` is expected without a cast: tinyC
-// passes 0 for an integer argument to a pointer parameter.
-// build_tinyc_native.sh checks the sources in the integer mode with gcc.
+// In this mode a handle is an integer, so two pointer idioms break, and
+// tinyC miscompiles both without a diagnostic (#365):
+//   - `h == NULL` compares an integer with `(void *)0`; tinyC folds it to
+//     always true. Compare with MLIR_INVALID_HANDLE instead.
+//   - passing a handle to a `void *` parameter without a cast; tinyC passes 0.
+// build_tinyc_native.sh compiles the sources in this mode with gcc -Werror,
+// which rejects both. The mode goes away once tinyC handles typedef'd struct
+// pointers (#366) and these conversions (#365).
 
 #if defined(__TINYC__) || defined(MLIR_INTEGER_HANDLES)
 typedef uintptr_t MLIR_OpHandle;
