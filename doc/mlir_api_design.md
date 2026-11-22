@@ -483,7 +483,7 @@ where an op is expected compiles silently. Three options:
 |---|---|---|---|
 | A. `uintptr_t` (today) | none | zero | `==`, `0`, hashing as integers |
 | B. `typedef struct { uintptr_t p; } MLIR_OpHandle;` (roadmap A4 text) | compile error on mixing | zero on SysV x86-64, AAPCS64 and clang's wasm32 ABI (single-scalar structs travel in registers); **unknown for tinyC's own ABI**, which matters for the self-hosted compiler's speed (#225) | no `==` in C: needs `MLIR_OpEq(a, b)` or `.p` everywhere; `MLIR_INVALID_HANDLE` becomes a compound literal; every hash map in the passes changes |
-| C. `typedef struct MLIR_OpImpl *MLIR_OpHandle;` (pointer to a distinct incomplete struct) | a diagnostic on mixing (`-Wincompatible-pointer-types`; an error by default in GCC ≥ 14; build with `-Werror=incompatible-pointer-types`) | zero everywhere, including tinyC: it is a pointer | `==`, `NULL`, `!h` keep working; hash with `(uintptr_t)h` |
+| C. `typedef struct MLIR_OpImpl *MLIR_OpHandle;` (pointer to a distinct incomplete struct) | a diagnostic on mixing (`-Wincompatible-pointer-types`; an error by default in GCC ≥ 14; build with `-Werror=incompatible-pointer-types`) | zero: it is a pointer (tinyC compiles the handles as integers for now, see below) | `==`, `!h` and `MLIR_INVALID_HANDLE` keep working; hash with `(uintptr_t)h` |
 
 **Recommendation: C.** `#define MLIR_INVALID_HANDLE NULL` keeps every
 existing `h == MLIR_INVALID_HANDLE` comparison compiling; the migration is
@@ -495,6 +495,30 @@ prefer C because our hot loops compare and hash handles constantly. Add two
 handle kinds that §3.2 needs: `MLIR_UseHandle` (an operand slot; upstream
 `mlir::OpOperand *`) and `MLIR_PredHandle` (a predecessor edge; upstream
 `mlir::BlockOperand *`).
+
+**Integer mode for tinyC (step 3, #364).** tinyC compiles these sources when
+it self-hosts, and its type system can't represent option C yet (#366):
+- it rejects struct fields of type `Handle *`;
+- `Handle **` is a depth-3 pointer (`struct X ***`), and tinyC's `TY_PTR_PTR`
+  stops at depth 2;
+- it rejects `&` of a pointer-typed local.
+
+Where it does parse pointer handles, its code for `p == NULL` is slightly worse
+than for `i == 0`. So under `__TINYC__` (or `-DMLIR_INTEGER_HANDLES`),
+`mlir_api.h` keeps every handle a `uintptr_t` and `MLIR_INVALID_HANDLE` `0`.
+tinyC's output stays byte-identical, and the gcc/clang builds of the same
+sources do the type checking.
+
+The shared code must be valid in both modes. It converts a handle to an
+integer with `(uintptr_t)h` and to a backend pointer with a cast, and it
+compares handles against `MLIR_INVALID_HANDLE`, never `NULL`. tinyC silently
+miscompiles the two pointer idioms that are wrong for an integer (#365):
+`h == NULL` folds to always true, and a handle passed to a `void *` parameter
+becomes 0. `build_tinyc_native.sh` therefore also compiles the sources with
+`gcc -Werror -DMLIR_INTEGER_HANDLES`, which rejects both.
+
+**Remove the integer mode once #365 and #366 are fixed**, and check that
+tinyC's code for the pointer handles is then no worse than today's.
 
 ### 2.3 Ownership and lifetimes
 
