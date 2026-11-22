@@ -190,8 +190,8 @@ static bool lc_op_bumps_gen(MLIR_OpHandle op, MLIR_OpHandle term) {
 // are leaders that are never themselves replaced, but loop defensively).
 static MLIR_ValueHandle lc_canon(PMap *repl, MLIR_ValueHandle v) {
     int64_t r; int guard = 0;
-    while (pmap_get(repl, (uintptr_t)v, &r) && (MLIR_ValueHandle)r != v && guard++ < 64)
-        v = (MLIR_ValueHandle)r;
+    while (pmap_get(repl, (uintptr_t)v, &r) && (MLIR_ValueHandle)(uintptr_t)r != v && guard++ < 64)
+        v = (MLIR_ValueHandle)(uintptr_t)r;
     return v;
 }
 
@@ -215,11 +215,11 @@ static void lc_emit_value(KB *k, MLIR_Context *ctx, PMap *repl, MLIR_ValueHandle
     v = lc_canon(repl, v);
     MLIR_OpHandle d = (v == MLIR_INVALID_HANDLE) ? MLIR_INVALID_HANDLE : MLIR_GetValueDefiningOp(v);
     if (depth <= 0 || d == MLIR_INVALID_HANDLE || !lc_is_transparent(d)) {
-        kb_bytes(k, "#", 1); kb_u64(k, (uint64_t)v); return;
+        kb_bytes(k, "#", 1); kb_u64(k, (uint64_t)(uintptr_t)v); return;
     }
     kb_bytes(k, "(", 1);
     lc_emit_op_ident(k, ctx, d);
-    kb_u64(k, (uint64_t)MLIR_GetOpResultType(d, 0));
+    kb_u64(k, (uint64_t)(uintptr_t)MLIR_GetOpResultType(d, 0));
     size_t no = MLIR_GetOpNumOperands(d);
     kb_u64(k, no);
     for (size_t i = 0; i < no; i++)
@@ -229,7 +229,7 @@ static void lc_emit_value(KB *k, MLIR_Context *ctx, PMap *repl, MLIR_ValueHandle
 static void lc_build_load_key(KB *k, MLIR_Context *ctx, PMap *repl, MLIR_OpHandle op) {
     kb_reset(k);
     kb_bytes(k, "L", 1);
-    kb_u64(k, (uint64_t)MLIR_GetOpResultType(op, 0));
+    kb_u64(k, (uint64_t)(uintptr_t)MLIR_GetOpResultType(op, 0));
     size_t no = MLIR_GetOpNumOperands(op);
     kb_u64(k, no);
     for (size_t i = 0; i < no; i++)
@@ -243,7 +243,7 @@ static void lc_build_load_key(KB *k, MLIR_Context *ctx, PMap *repl, MLIR_OpHandl
 static void lc_build_store_key(KB *k, MLIR_Context *ctx, PMap *repl, MLIR_OpHandle op) {
     kb_reset(k);
     kb_bytes(k, "L", 1);
-    kb_u64(k, (uint64_t)MLIR_GetValueType(MLIR_GetOpOperand(op, 0)));
+    kb_u64(k, (uint64_t)(uintptr_t)MLIR_GetValueType(MLIR_GetOpOperand(op, 0)));
     kb_u64(k, 1);
     lc_emit_value(k, ctx, repl, MLIR_GetOpOperand(op, 1), 24);
 }
@@ -432,7 +432,7 @@ static void lc_process_block(Walk *w, size_t bi) {
             int e = lcse_lookup(&w->map, w->kb.p, w->kb.n);
             if (e != -1 && w->map.ents[e].gen == w->gen) {
                 pmap_put(&w->repl, (uintptr_t)MLIR_GetOpResult(op, 0),
-                         (int64_t)w->map.ents[e].val);
+                         (int64_t)(uintptr_t)w->map.ents[e].val);
                 walk_mark_erase(w, op);
             } else {
                 lcse_insert(&w->map, w->kb.p, w->kb.n, MLIR_GetOpResult(op, 0), w->gen);

@@ -1638,7 +1638,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
 typedef struct { MLIR_ValueHandle key, val; } BoolFwd;
 
 static size_t bf_hash(MLIR_ValueHandle k, size_t mask) {
-    return (size_t)(((uint64_t)k * 0x9E3779B97F4A7C15ull) >> 24) & mask;
+    return (size_t)(((uint64_t)(uintptr_t)k * 0x9E3779B97F4A7C15ull) >> 24) & mask;
 }
 static void bf_put(BoolFwd *m, size_t mask, MLIR_ValueHandle k, MLIR_ValueHandle v) {
     size_t h = bf_hash(k, mask);
@@ -2200,7 +2200,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
             if (p < e && *p == '-') { neg = 1; p++; }
             while (p < e && *p >= '0' && *p <= '9') { addend = addend*10 + (*p-'0'); p++; }
             if (neg) addend = -addend;
-            string tn = { tname, tlen };
+            string tn = { (char *)tname, tlen };
             int32_t toff = 0;
             if (!omap_get(&globals, tn, &toff)) {
                 fprintf(stderr,

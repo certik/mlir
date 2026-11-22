@@ -24,12 +24,12 @@ OBJ_DIR="build_opt_native"
 rm -rf "$OBJ_DIR"
 mkdir -p "$OBJ_DIR"
 
-$CC $OPT_FLAGS -c -I corec -I . -o "$OBJ_DIR/upstream_main.o" tests/upstream_main.c
+$CC $OPT_FLAGS -c -Werror=incompatible-pointer-types -I corec -I . -o "$OBJ_DIR/upstream_main.o" tests/upstream_main.c
 for f in $COREC_C_FILES $TINYC_C_FILES $NATIVE_C_FILES; do
     base="$(basename "$f" .c).o"
     $CC $OPT_FLAGS -c -I corec -I . -o "$OBJ_DIR/$base" "$f"
 done
-$CC $OPT_FLAGS -c -I corec -I . -DPLATFORM_SKIP_ENTRY -o "$OBJ_DIR/$PLATFORM_OBJ" $PLATFORM_C
+$CC $OPT_FLAGS -c -Werror=incompatible-pointer-types -I corec -I . -DPLATFORM_SKIP_ENTRY -o "$OBJ_DIR/$PLATFORM_OBJ" $PLATFORM_C
 
 $CC $OPT_FLAGS -o tinyc_native_opt \
     "$OBJ_DIR"/upstream_main.o \

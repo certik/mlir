@@ -178,17 +178,30 @@ ValueBox *boxFor(mlir::Value v) {
     return box;
 }
 
-template <class T> uintptr_t H(T *p) { return reinterpret_cast<uintptr_t>(p); }
-template <class T> T *F(uintptr_t h) { return reinterpret_cast<T *>(h); }
+// Handle <-> backend object. Each handle kind stands for exactly one C++
+// type, and HandleOf<T> names it, so `H(p)` returns the handle kind of `p`
+// and `F<T>(h)` compiles only when `h` is the handle kind of T.
+template <class T> struct HandleOf;
+template <> struct HandleOf<mlir::Operation>      { using type = MLIR_OpHandle; };
+template <> struct HandleOf<mlir::Region>         { using type = MLIR_RegionHandle; };
+template <> struct HandleOf<mlir::Block>          { using type = MLIR_BlockHandle; };
+template <> struct HandleOf<ValueBox>             { using type = MLIR_ValueHandle; };
+template <> struct HandleOf<mlir::NamedAttribute> { using type = MLIR_AttributeHandle; };
 
-uintptr_t typeH(mlir::Type t) { return reinterpret_cast<uintptr_t>(t.getAsOpaquePointer()); }
-mlir::Type typeF(uintptr_t h) {
-    return mlir::Type::getFromOpaquePointer(reinterpret_cast<const void *>(h));
+template <class T> typename HandleOf<T>::type H(T *p) {
+    return reinterpret_cast<typename HandleOf<T>::type>(p);
 }
-uintptr_t locH(mlir::Location loc) { return reinterpret_cast<uintptr_t>(loc.getAsOpaquePointer()); }
-mlir::Location locF(uintptr_t h) {
-    return mlir::Location::getFromOpaquePointer(reinterpret_cast<const void *>(h));
+template <class T> T *F(typename HandleOf<T>::type h) { return reinterpret_cast<T *>(h); }
+
+// Types and locations are uniqued storage pointers (getAsOpaquePointer).
+MLIR_TypeHandle typeH(mlir::Type t) {
+    return reinterpret_cast<MLIR_TypeHandle>(const_cast<void *>(t.getAsOpaquePointer()));
 }
+mlir::Type typeF(MLIR_TypeHandle h) { return mlir::Type::getFromOpaquePointer(h); }
+MLIR_LocationHandle locH(mlir::Location loc) {
+    return reinterpret_cast<MLIR_LocationHandle>(const_cast<void *>(loc.getAsOpaquePointer()));
+}
+mlir::Location locF(MLIR_LocationHandle h) { return mlir::Location::getFromOpaquePointer(h); }
 
 MLIR_OpType opTypeFromName(llvm::StringRef name) {
     // Same name -> type table as the native backend (mlir_op_names.c), so
@@ -634,7 +647,7 @@ extern "C" size_t MLIR_GetOpNumAttributes(MLIR_OpHandle h) {
 }
 extern "C" MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle h, size_t i) {
     auto *op = F<mlir::Operation>(h);
-    return reinterpret_cast<uintptr_t>(&ensureCachedAttrs(op)[i]);
+    return H(&ensureCachedAttrs(op)[i]);
 }
 extern "C" MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle h,
                                                           const char *name) {
@@ -644,7 +657,7 @@ extern "C" MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle h,
     auto stash = [&](mlir::Attribute a) -> MLIR_AttributeHandle {
         keep.emplace_back(std::make_unique<mlir::NamedAttribute>(
             mlir::StringAttr::get(op->getContext(), name), a));
-        return reinterpret_cast<uintptr_t>(keep.back().get());
+        return H(keep.back().get());
     };
     if (auto call = mlir::dyn_cast<mlir::LLVM::CallOp>(op)) {
         llvm::StringRef nm(name);
@@ -705,7 +718,7 @@ extern "C" MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle h,
     auto dict = op->getAttrDictionary();
     if (auto na = dict.getNamed(name)) {
         keep.emplace_back(std::make_unique<mlir::NamedAttribute>(*na));
-        return reinterpret_cast<uintptr_t>(keep.back().get());
+        return H(keep.back().get());
     }
     return MLIR_INVALID_HANDLE;
 }
@@ -1153,7 +1166,7 @@ extern "C" MLIR_OpHandle MLIR_ParseTextUpstream(MLIR_Context *ctx, string text) 
     if (!mod) return MLIR_INVALID_HANDLE;
     // Release ownership; the operation lives in the MLIRContext arena.
     mlir::Operation *op = mod.release().getOperation();
-    return reinterpret_cast<uintptr_t>(op);
+    return H(op);
 }
 
 // -----------------------------------------------------------------------------
@@ -1163,7 +1176,7 @@ extern "C" MLIR_OpHandle MLIR_ParseTextUpstream(MLIR_Context *ctx, string text) 
 static MLIR_AttributeHandle makeNamedAttr(llvm::StringRef name, mlir::Attribute value) {
     auto &ctx = globalCtx().mctx;
     auto *na = new mlir::NamedAttribute(mlir::StringAttr::get(&ctx, name), value);
-    return reinterpret_cast<uintptr_t>(na);
+    return H(na);
 }
 
 extern "C" MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *, string name, int64_t value, MLIR_TypeHandle type) {
@@ -1507,7 +1520,7 @@ extern "C" MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_AttributeHand
     auto arr = llvm::cast<mlir::ArrayAttr>(F<mlir::NamedAttribute>(h)->getValue());
     auto &ctx = globalCtx().mctx;
     auto *na = new mlir::NamedAttribute(mlir::StringAttr::get(&ctx, ""), arr[i]);
-    return reinterpret_cast<uintptr_t>(na);
+    return H(na);
 }
 extern "C" size_t MLIR_GetAttributeDictSize(MLIR_AttributeHandle h) {
     return llvm::cast<mlir::DictionaryAttr>(F<mlir::NamedAttribute>(h)->getValue()).size();
@@ -1515,7 +1528,8 @@ extern "C" size_t MLIR_GetAttributeDictSize(MLIR_AttributeHandle h) {
 extern "C" MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_AttributeHandle h, size_t i) {
     auto dict = llvm::cast<mlir::DictionaryAttr>(F<mlir::NamedAttribute>(h)->getValue());
     auto entries = dict.getValue();
-    return reinterpret_cast<uintptr_t>(&entries[i]);
+    // DictionaryAttr storage is immutable; handles are non-const pointers.
+    return H(const_cast<mlir::NamedAttribute *>(&entries[i]));
 }
 
 // -----------------------------------------------------------------------------

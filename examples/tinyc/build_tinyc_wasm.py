@@ -90,6 +90,7 @@ def main():
         ["clang",
          "--target=wasm32-wasi",
          "-Os",
+         "-Werror=incompatible-pointer-types",
          "-Wl,-z,stack-size=4194304",
          "-nostdlib",
          "-nostdinc",

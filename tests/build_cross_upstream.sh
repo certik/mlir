@@ -23,8 +23,8 @@ PROJ_C_FILES="tests/cross/driver.c mlir_generic_printer.c mlir_op_names.c mlir_l
 
 # corec base sources can be compiled normally; only platform_*.c needs
 # PLATFORM_SKIP_ENTRY so libc supplies _start / main wrapper instead.
-$CC -c -g -I corec -I . $COREC_C_FILES $PROJ_C_FILES tests/upstream_main.c
-$CC -c -g -I corec -I . -DPLATFORM_SKIP_ENTRY $PLATFORM_C
+$CC -c -Werror=incompatible-pointer-types -g -I corec -I . $COREC_C_FILES $PROJ_C_FILES tests/upstream_main.c
+$CC -c -Werror=incompatible-pointer-types -g -I corec -I . -DPLATFORM_SKIP_ENTRY $PLATFORM_C
 $CXX -c -std=c++17 -fno-rtti -g -I corec -I . -I "$CONDA_PREFIX/include" mlir_api_impl_upstream.cpp
 $CXX -g -o cross_upstream \
     upstream_main.o driver.o mlir_generic_printer.o mlir_op_names.o mlir_lower_to_llvm.o mlir_translate_to_llvm_ir.o mlir_wasm_to_wat.o mlir_llvm_to_wasmssa.o mlir_llvm_global_init.o mlir_wasmssa_to_wasmstack.o mlir_wasmstack_to_bin.o mlir_lift_cf_to_scf.o mlir_api_impl_upstream.o \

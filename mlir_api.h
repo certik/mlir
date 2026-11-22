@@ -22,9 +22,29 @@ extern "C" {
 #endif
 
 // -----------------------------------------------------------------------------
-// Handle types - opaque integer handles replacing raw pointers
+// Handle types
 // -----------------------------------------------------------------------------
+//
+// Each handle kind is a pointer to its own incomplete struct, so passing one
+// kind where another is expected is a compile error (the gcc/clang builds use
+// -Werror=incompatible-pointer-types; GCC >= 14 rejects it by default; MSVC
+// warns, C4133). A handle is pointer-sized and passed in a register on every
+// ABI. `==`, `!h` and NULL work as for any pointer; hash a handle as
+// `(uintptr_t)h`. The structs are never defined: backends cast handles to
+// their own types.
+//
+// tinyC compiles these sources too (self-hosting), but its type system has no
+// struct field of type `Handle *` and no `Handle **` (a pointer of depth 3).
+// So under tinyC (or with -DMLIR_INTEGER_HANDLES) every handle is a
+// `uintptr_t`, as before handles were typed; the generated code is the same,
+// and the gcc/clang builds of the same sources do the type checking. Code
+// must compile in both modes: convert a handle to an integer with
+// `(uintptr_t)h` and to a backend pointer with a cast such as `(IR_Op *)h`.
+// Never pass a handle where a `void *` is expected without a cast: tinyC
+// passes 0 for an integer argument to a pointer parameter.
+// build_tinyc_native.sh checks the sources in the integer mode with gcc.
 
+#if defined(__TINYC__) || defined(MLIR_INTEGER_HANDLES)
 typedef uintptr_t MLIR_OpHandle;
 typedef uintptr_t MLIR_RegionHandle;
 typedef uintptr_t MLIR_BlockHandle;
@@ -32,8 +52,27 @@ typedef uintptr_t MLIR_ValueHandle;
 typedef uintptr_t MLIR_TypeHandle;
 typedef uintptr_t MLIR_AttributeHandle;
 typedef uintptr_t MLIR_LocationHandle;
-
+typedef uintptr_t MLIR_UseHandle;
+typedef uintptr_t MLIR_PredHandle;
 #define MLIR_INVALID_HANDLE 0
+#else
+typedef struct MLIR_OpImpl        *MLIR_OpHandle;
+typedef struct MLIR_RegionImpl    *MLIR_RegionHandle;
+typedef struct MLIR_BlockImpl     *MLIR_BlockHandle;
+typedef struct MLIR_ValueImpl     *MLIR_ValueHandle;
+typedef struct MLIR_TypeImpl      *MLIR_TypeHandle;
+typedef struct MLIR_AttributeImpl *MLIR_AttributeHandle;
+typedef struct MLIR_LocationImpl  *MLIR_LocationHandle;
+// An operand slot: one use of a value by an op (upstream `mlir::OpOperand *`).
+// Reserved for the traversal API (doc/mlir_api_design.md section 3.2); no
+// function takes or returns one yet.
+typedef struct MLIR_UseImpl       *MLIR_UseHandle;
+// A predecessor edge: one successor slot of a terminator that targets a block
+// (upstream `mlir::BlockOperand *`). Reserved like MLIR_UseHandle.
+typedef struct MLIR_PredImpl      *MLIR_PredHandle;
+// The null handle of every kind.
+#define MLIR_INVALID_HANDLE NULL
+#endif
 
 typedef struct MLIR_Context {
     Arena *arena;

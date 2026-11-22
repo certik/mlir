@@ -153,8 +153,8 @@ static bool ag_is_commutative(MLIR_OpHandle op) {
 
 static MLIR_ValueHandle ag_canon(AgMap *repl, MLIR_ValueHandle v) {
     int64_t r; int guard = 0;
-    while (agmap_get(repl, (uintptr_t)v, &r) && (MLIR_ValueHandle)r != v && guard++ < 64)
-        v = (MLIR_ValueHandle)r;
+    while (agmap_get(repl, (uintptr_t)v, &r) && (MLIR_ValueHandle)(uintptr_t)r != v && guard++ < 64)
+        v = (MLIR_ValueHandle)(uintptr_t)r;
     return v;
 }
 
@@ -173,7 +173,7 @@ static bool ag_const_operand(MLIR_Context *ctx, MLIR_ValueHandle v,
     if (va == MLIR_INVALID_HANDLE) return false;
     if (MLIR_GetAttributeKind(va) != MLIR_ATTR_KIND_INTEGER) return false;
     *val = MLIR_GetAttributeInteger(va);
-    *tykey = (uint64_t)MLIR_GetValueType(MLIR_GetOpResult(d, 0));
+    *tykey = (uint64_t)(uintptr_t)MLIR_GetValueType(MLIR_GetOpResult(d, 0));
     return true;
 }
 
@@ -185,7 +185,7 @@ static void ag_emit_operand(AgKB *k, MLIR_Context *ctx, AgMap *repl, MLIR_ValueH
     if (ag_const_operand(ctx, c, &cv, &ck)) {
         agkb_bytes(k, "K", 1); agkb_u64(k, ck); agkb_i64(k, cv);
     } else {
-        agkb_bytes(k, "#", 1); agkb_u64(k, (uint64_t)c);
+        agkb_bytes(k, "#", 1); agkb_u64(k, (uint64_t)(uintptr_t)c);
     }
 }
 
@@ -208,7 +208,7 @@ static void ag_build_key(AgKB *k, MLIR_Context *ctx, AgMap *repl, MLIR_OpHandle 
     agkb_reset(k);
     agkb_bytes(k, "A", 1);
     ag_emit_op_ident(k, ctx, op);
-    agkb_u64(k, (uint64_t)MLIR_GetOpResultType(op, 0));
+    agkb_u64(k, (uint64_t)(uintptr_t)MLIR_GetOpResultType(op, 0));
     size_t no = MLIR_GetOpNumOperands(op);
     agkb_u64(k, no);
     if (no == 2 && ag_is_commutative(op)) {
@@ -377,7 +377,7 @@ static void ag_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
             if (agmap_get(&spine, (uintptr_t)res, &dummy)) continue;   // spine add
             ag_build_key(&kb, ctx, &repl, op);
             int64_t leader;
-            if (aghash_get_or_put(&tbl, kb.p, kb.n, (int64_t)res, &leader)) {
+            if (aghash_get_or_put(&tbl, kb.p, kb.n, (int64_t)(uintptr_t)res, &leader)) {
                 // Redundant: forward this result to the earlier identical value.
                 agmap_put(&repl, (uintptr_t)res, leader);
                 aglist_push(&redundant, op);

@@ -827,7 +827,7 @@ static void block_map_init(Arena *arena, BlockMap *m, size_t n_expected) {
 }
 
 static size_t block_map_slot(const BlockMap *m, MLIR_BlockHandle b) {
-    size_t h = (size_t)(b >> 3);
+    size_t h = (size_t)((uintptr_t)b >> 3);
     h ^= h >> 15;
     h *= (size_t)0x9E3779B1u;
     h ^= h >> 13;
@@ -1589,7 +1589,7 @@ static DomInfo dom_compute(Arena *arena, MLIR_RegionHandle region,
     for (size_t t = 0; t < hcap; ++t) hk[t] = MLIR_INVALID_HANDLE;
     for (size_t i = 0; i < d.n_real; ++i) {
         MLIR_BlockHandle h = d.po_blocks[i];
-        size_t slot = (size_t)((uint64_t)h * 0x9E3779B97F4A7C15ull >> 32) & hmask;
+        size_t slot = (size_t)((uint64_t)(uintptr_t)h * 0x9E3779B97F4A7C15ull >> 32) & hmask;
         while (hk[slot] != MLIR_INVALID_HANDLE) slot = (slot + 1u) & hmask;
         hk[slot] = h; hv[slot] = i;
     }
@@ -1597,7 +1597,7 @@ static DomInfo dom_compute(Arena *arena, MLIR_RegionHandle region,
         (OUT) = SIZE_MAX;                                                     \
         MLIR_BlockHandle _h = (H);                                           \
         if (_h != MLIR_INVALID_HANDLE) {                                     \
-            size_t _s = (size_t)((uint64_t)_h * 0x9E3779B97F4A7C15ull >> 32) \
+            size_t _s = (size_t)((uint64_t)(uintptr_t)_h * 0x9E3779B97F4A7C15ull >> 32) \
                         & hmask;                                             \
             while (hk[_s] != MLIR_INVALID_HANDLE) {                          \
                 if (hk[_s] == _h) { (OUT) = hv[_s]; break; }                 \

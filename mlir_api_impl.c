@@ -47,7 +47,7 @@ typedef enum {
     LOC_KIND_REF
 } LocationKind;
 
-// Internal struct definitions using handle fields
+// Internal struct definitions using handle fields (a handle is its IR object's address)
 
 typedef struct IR_Type {
     TypeKind kind;
@@ -179,7 +179,7 @@ typedef struct IR_ValueAux {
 typedef struct IR_Value {
     MLIR_ValueKind kind;
     uint32_t result_index;
-    uintptr_t def_handle;  // MLIR_OpHandle for an op result, MLIR_BlockHandle for a block arg
+    uintptr_t def_handle;  // (uintptr_t) MLIR_OpHandle for an op result, MLIR_BlockHandle for a block arg
     MLIR_TypeHandle type;
     MLIR_LocationHandle location;
     // Rarely-needed-on-the-hot-path value metadata: the SSA register name
@@ -254,31 +254,31 @@ typedef struct IR_Region {
 } IR_Region;
 
 static inline IR_Op *resolve_op(MLIR_OpHandle h) {
-    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Op *)(uintptr_t)h;
+    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Op *)h;
 }
 
 static inline IR_Region *resolve_region(MLIR_RegionHandle h) {
-    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Region *)(uintptr_t)h;
+    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Region *)h;
 }
 
 static inline IR_Block *resolve_block(MLIR_BlockHandle h) {
-    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Block *)(uintptr_t)h;
+    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Block *)h;
 }
 
 static inline IR_Value *resolve_value(MLIR_ValueHandle h) {
-    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Value *)(uintptr_t)h;
+    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Value *)h;
 }
 
 static inline IR_Type *resolve_type(MLIR_TypeHandle h) {
-    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Type *)(uintptr_t)h;
+    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Type *)h;
 }
 
 static inline IR_Attribute *resolve_attr(MLIR_AttributeHandle h) {
-    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Attribute *)(uintptr_t)h;
+    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Attribute *)h;
 }
 
 static inline IR_Location *resolve_loc(MLIR_LocationHandle h) {
-    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Location *)(uintptr_t)h;
+    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Location *)h;
 }
 
 // Process-wide registry of all created ops. Native MLIR has no per-context
@@ -389,7 +389,7 @@ static inline MLIR_OpHandle alloc_op(MLIR_Context *ctx, IR_Op op) {
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
     IR_Op *slot = arena_new(ctx->arena, IR_Op);
     *slot = op;
-    MLIR_OpHandle h = (MLIR_OpHandle)(uintptr_t)slot;
+    MLIR_OpHandle h = (MLIR_OpHandle)slot;
     // g_all_ops is only consulted by MLIR_ReplaceAllUsesOfValue (def-use).
     // When tracking is disabled (e.g. the wasm->macho pipeline) skip it: it
     // saves memory and, crucially, avoids dangling g_all_ops entries when the
@@ -403,21 +403,21 @@ static inline MLIR_RegionHandle alloc_region(MLIR_Context *ctx, IR_Region r) {
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
     IR_Region *slot = arena_new(ctx->arena, IR_Region);
     *slot = r;
-    return (MLIR_RegionHandle)(uintptr_t)slot;
+    return (MLIR_RegionHandle)slot;
 }
 
 static inline MLIR_BlockHandle alloc_block(MLIR_Context *ctx, IR_Block b) {
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
     IR_Block *slot = arena_new(ctx->arena, IR_Block);
     *slot = b;
-    return (MLIR_BlockHandle)(uintptr_t)slot;
+    return (MLIR_BlockHandle)slot;
 }
 
 static inline MLIR_ValueHandle alloc_value(MLIR_Context *ctx, IR_Value v) {
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
     IR_Value *slot = arena_new(ctx->arena, IR_Value);
     *slot = v;
-    return (MLIR_ValueHandle)(uintptr_t)slot;
+    return (MLIR_ValueHandle)slot;
 }
 
 // Allocate an IR_ValueAux for a freshly-created value, or return NULL when
@@ -439,7 +439,7 @@ static inline MLIR_TypeHandle alloc_type(MLIR_Context *ctx, IR_Type t) {
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
     IR_Type *slot = arena_new(ctx->arena, IR_Type);
     *slot = t;
-    return (MLIR_TypeHandle)(uintptr_t)slot;
+    return (MLIR_TypeHandle)slot;
 }
 
 // Compare two IR_Type structures for value-equality. Used to intern
@@ -543,7 +543,7 @@ static inline MLIR_AttributeHandle alloc_attr_obj(MLIR_Context *ctx, IR_Attribut
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
     IR_Attribute *slot = arena_new(ctx->arena, IR_Attribute);
     *slot = a;
-    return (MLIR_AttributeHandle)(uintptr_t)slot;
+    return (MLIR_AttributeHandle)slot;
 }
 
 // Copy `s` into ctx->arena so the returned string is owned by the context's
@@ -563,7 +563,7 @@ static inline MLIR_LocationHandle alloc_loc(MLIR_Context *ctx, IR_Location l) {
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
     IR_Location *slot = arena_new(ctx->arena, IR_Location);
     *slot = l;
-    return (MLIR_LocationHandle)(uintptr_t)slot;
+    return (MLIR_LocationHandle)slot;
 }
 
 // API lifecycle
@@ -702,7 +702,7 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     for (size_t i = 0; i < n_results; i++) {
         IR_Value *v = resolve_value(results[i]);
         if (v) {
-            v->def_handle = handle;
+            v->def_handle = (uintptr_t)handle;
             if (i < n_result_types && result_types[i] != MLIR_INVALID_HANDLE && v->type == MLIR_INVALID_HANDLE) {
                 v->type = result_types[i];
             }
@@ -796,7 +796,7 @@ void MLIR_AppendBlockArg(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_ValueHandl
 
     // Set def_handle to block for block arguments
     IR_Value *v = resolve_value(arg);
-    if (v) v->def_handle = bh;
+    if (v) v->def_handle = (uintptr_t)bh;
 }
 
 void MLIR_AppendRegionBlock(MLIR_Context *ctx, MLIR_RegionHandle rh, MLIR_BlockHandle block) {
@@ -1708,14 +1708,14 @@ MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_nam
     v.result_index = result_index;
     v.type = type;
     v.location = location;
-    v.def_handle = MLIR_INVALID_HANDLE;
+    v.def_handle = 0;
     return alloc_value(ctx, v);
 }
 
 MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_Context *ctx, MLIR_OpHandle def, uint32_t result_index, MLIR_TypeHandle type, string register_name, MLIR_LocationHandle location) {
     IR_Value v = {0};
     v.kind = MLIR_VALUE_OP_RESULT;
-    v.def_handle = def;
+    v.def_handle = (uintptr_t)def;
     v.result_index = result_index;
     v.type = type;
     v.aux = value_aux_create(ctx, register_name);
@@ -2423,7 +2423,7 @@ MLIR_ValueHandle MLIR_AddBlockArgument(MLIR_Context *ctx, MLIR_BlockHandle block
     v->type = type;
     v->aux = value_aux_create(ctx, (string){0});
     v->location = loc;
-    MLIR_ValueHandle vh = (MLIR_ValueHandle)(uintptr_t)v;
+    MLIR_ValueHandle vh = (MLIR_ValueHandle)v;
     // Append to block->arguments, growing geometrically so repeated
     // AddBlockArgument calls (e.g. when lift-cf-to-scf builds an
     // EdgeMultiplexer with many entry blocks each contributing their

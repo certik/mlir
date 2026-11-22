@@ -1105,7 +1105,7 @@ bool patch_branches(MachineFunc *e) {
         byhandle = (uint32_t *)malloc(nbp * sizeof(uint32_t));
         uint64_t *hkey = (uint64_t *)malloc(nbp * sizeof(uint64_t));
         for (size_t k = 0; k < nbp; k++) {
-            byhandle[k] = (uint32_t)k; hkey[k] = (uint64_t)e->bp[k].blk;
+            byhandle[k] = (uint32_t)k; hkey[k] = (uint64_t)(uintptr_t)e->bp[k].blk;
         }
         a64_sort_idx_u64(byhandle, nbp, hkey);
         free(hkey);

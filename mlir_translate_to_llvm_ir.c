@@ -67,6 +67,8 @@ static void buf_printf(Buf *b, const char *fmt, ...) {
 // Handle → name maps (linear, function-scoped).
 // -----------------------------------------------------------------------------
 
+// Keys are handles as integers, `(uintptr_t)h`, of one kind per map (values
+// in `vmap`, blocks in `bmap`).
 typedef struct { uintptr_t key; char *val; } Entry;
 typedef struct { Entry *e; size_t n, cap; } Map;
 
@@ -298,18 +300,18 @@ typedef struct {
 } FnCtx;
 
 static const char *vname(FnCtx *F, MLIR_ValueHandle v) {
-    const char *s = map_get(&F->vmap, v);
+    const char *s = map_get(&F->vmap, (uintptr_t)v);
     return s ? s : "<unbound>";
 }
 static const char *bname(FnCtx *F, MLIR_BlockHandle b) {
-    const char *s = map_get(&F->bmap, b);
+    const char *s = map_get(&F->bmap, (uintptr_t)b);
     return s ? s : "<unbound>";
 }
 
 // Emit a use of `v`: either a constant inlined as a literal, or a reference
 // to its SSA name.
 static void emit_use(FnCtx *F, MLIR_ValueHandle v) {
-    const char *n = map_get(&F->vmap, v);
+    const char *n = map_get(&F->vmap, (uintptr_t)v);
     buf_cstr(F->out, n ? n : "<unbound>");
 }
 
@@ -395,14 +397,14 @@ static void assign_names(FnCtx *F, MLIR_RegionHandle body) {
         MLIR_BlockHandle blk = MLIR_GetRegionBlock(body, bi);
         // Block name: "entry" for block 0, "bbN" for the rest.
         char *bn = bi == 0 ? xstrdup("entry") : fmt_alloc("bb%d", F->next_b++);
-        map_put(&F->bmap, blk, bn);
+        map_put(&F->bmap, (uintptr_t)blk, bn);
         // Block arg names: "%aN" — for entry, these are also the function
         // parameters and are referred to as %0, %1, ...
         size_t na = MLIR_GetBlockNumArgs(blk);
         for (size_t ai = 0; ai < na; ai++) {
             MLIR_ValueHandle a = MLIR_GetBlockArg(blk, ai);
             char *vn = bi == 0 ? fmt_alloc("%%a%zu", ai) : fmt_alloc("%%v%d", F->next_v++);
-            map_put(&F->vmap, a, vn);
+            map_put(&F->vmap, (uintptr_t)a, vn);
         }
         // Op results.
         size_t nops = MLIR_GetBlockNumOps(blk);
@@ -413,8 +415,8 @@ static void assign_names(FnCtx *F, MLIR_RegionHandle body) {
                 MLIR_ValueHandle r = MLIR_GetOpResult(op, ri);
                 MLIR_TypeHandle rty = MLIR_GetValueType(r);
                 char *lit = inline_literal_for(F->ctx, op, rty);
-                if (lit) map_put(&F->vmap, r, lit);
-                else     map_put(&F->vmap, r, fmt_alloc("%%v%d", F->next_v++));
+                if (lit) map_put(&F->vmap, (uintptr_t)r, lit);
+                else     map_put(&F->vmap, (uintptr_t)r, fmt_alloc("%%v%d", F->next_v++));
             }
         }
     }
