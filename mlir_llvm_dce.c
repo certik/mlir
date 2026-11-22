@@ -55,24 +55,40 @@ static bool dcemap_get(DceMap *m, uintptr_t k, int64_t *out) {
     return true;
 }
 
+// A worklist entry: a pure single-result op and its result, captured while
+// the op was live. An op can be queued more than once (e.g. `add %x, %x`), and
+// an erased op's handle is dead (MLIR_EraseOp), so erasing an op sets its
+// result's count in `uses` to -1: the count lookup every entry needs anyway
+// then skips the stale entries without touching the op.
+typedef struct { MLIR_OpHandle op; MLIR_ValueHandle res; } DceItem;
+
+typedef struct { DceItem *v; size_t n, cap; } DceList;
+
+// Queue `op` if it can be erased at all (one result, pure).
+static void dce_push(DceList *wl, MLIR_OpHandle op) {
+    if (op == MLIR_INVALID_HANDLE) return;
+    if (MLIR_GetOpNumResults(op) != 1 || !llvm_op_is_pure(MLIR_GetOpType(op))) return;
+    if (wl->n == wl->cap) {
+        wl->cap = wl->cap ? wl->cap * 2 : 256;
+        wl->v = (DceItem *)realloc(wl->v, wl->cap * sizeof(DceItem));
+    }
+    wl->v[wl->n].op = op;
+    wl->v[wl->n].res = MLIR_GetOpResult(op, 0);
+    wl->n++;
+}
+
 // Worklist DCE driver: erase zero-use pure single-result ops, decrement their
 // operands in `uses`, and re-queue operand-defining ops. `seeds` is the initial
-// worklist (any op handle; non-pure / live ops are filtered inside).
+// worklist (any op handle; non-pure / live ops are filtered).
 static void dce_worklist(MLIR_Context *ctx, DceMap *uses,
                          MLIR_OpHandle *seeds, size_t nseed) {
-    MLIR_OpHandle *wl = NULL; size_t nwl = 0, cwl = 0;
-    for (size_t i = 0; i < nseed; i++) {
-        if (seeds[i] == MLIR_INVALID_HANDLE) continue;
-        if (nwl == cwl) { cwl = cwl ? cwl * 2 : 256; wl = (MLIR_OpHandle *)realloc(wl, cwl * sizeof(MLIR_OpHandle)); }
-        wl[nwl++] = seeds[i];
-    }
-    while (nwl > 0) {
-        MLIR_OpHandle op = wl[--nwl];
-        if (op == MLIR_INVALID_HANDLE) continue;
-        if (MLIR_GetOpParentBlock(op) == MLIR_INVALID_HANDLE) continue;  // already erased
-        if (MLIR_GetOpNumResults(op) != 1 || !llvm_op_is_pure(MLIR_GetOpType(op))) continue;
-        int64_t cnt = 0; dcemap_get(uses, (uintptr_t)MLIR_GetOpResult(op, 0), &cnt);
-        if (cnt != 0) continue;
+    DceList wl = {0};
+    for (size_t i = 0; i < nseed; i++) dce_push(&wl, seeds[i]);
+    while (wl.n > 0) {
+        DceItem it = wl.v[--wl.n];
+        int64_t cnt = 0; dcemap_get(uses, (uintptr_t)it.res, &cnt);
+        if (cnt != 0) continue;  // used, or already erased (-1)
+        MLIR_OpHandle op = it.op;
         size_t non = MLIR_GetOpNumOperands(op);
         MLIR_OpHandle *defs = (MLIR_OpHandle *)malloc((non ? non : 1) * sizeof(MLIR_OpHandle));
         for (size_t kk = 0; kk < non; kk++) {
@@ -82,13 +98,11 @@ static void dce_worklist(MLIR_Context *ctx, DceMap *uses,
             if (c0 > 0) dcemap_put(uses, (uintptr_t)v, c0 - 1);
         }
         MLIR_EraseOp(ctx, op);
-        for (size_t kk = 0; kk < non; kk++) if (defs[kk] != MLIR_INVALID_HANDLE) {
-            if (nwl == cwl) { cwl = cwl ? cwl * 2 : 256; wl = (MLIR_OpHandle *)realloc(wl, cwl * sizeof(MLIR_OpHandle)); }
-            wl[nwl++] = defs[kk];
-        }
+        dcemap_put(uses, (uintptr_t)it.res, -1);
+        for (size_t kk = 0; kk < non; kk++) dce_push(&wl, defs[kk]);
         free(defs);
     }
-    free(wl);
+    free(wl.v);
 }
 
 // uintptr -> index map for block-handle -> region-block-index lookups.

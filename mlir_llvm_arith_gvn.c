@@ -189,6 +189,35 @@ static void ag_emit_operand(AgKB *k, MLIR_Context *ctx, AgMap *repl, MLIR_ValueH
     }
 }
 
+// The value of attribute `a` for hashing, read with the getter that matches
+// its kind (a typed getter applied to another kind is a contract violation).
+// Strings are covered by MLIR_GetAttributeAsString; arrays and dictionaries,
+// whose contents are not hashed, by identity, which never merges two
+// different ones.
+static int64_t ag_attr_payload(MLIR_AttributeHandle a, MLIR_AttrKind kind) {
+    switch (kind) {
+        case MLIR_ATTR_KIND_INTEGER:
+        case MLIR_ATTR_KIND_BOOL:
+            return MLIR_GetAttributeInteger(a);
+        case MLIR_ATTR_KIND_FLOAT: {
+            double d = MLIR_GetAttributeFloat(a);
+            int64_t bits;
+            memcpy(&bits, &d, sizeof(bits));
+            return bits;
+        }
+        case MLIR_ATTR_KIND_TYPE:
+            return (int64_t)(uintptr_t)MLIR_GetAttributeTypeValue(a);
+        case MLIR_ATTR_KIND_STRING:
+            return 0;
+        case MLIR_ATTR_KIND_ARRAY:
+            return MLIR_GetAttributeArraySize(a) == 0 ? 0 : (int64_t)(uintptr_t)a;
+        case MLIR_ATTR_KIND_DICT:
+            return MLIR_GetAttributeDictSize(a) == 0 ? 0 : (int64_t)(uintptr_t)a;
+        default:
+            return (int64_t)(uintptr_t)a;
+    }
+}
+
 static void ag_emit_op_ident(AgKB *k, MLIR_Context *ctx, MLIR_OpHandle op) {
     agkb_str(k, MLIR_GetOpName(op));
     size_t na = MLIR_GetOpNumAttributes(op);
@@ -196,8 +225,9 @@ static void ag_emit_op_ident(AgKB *k, MLIR_Context *ctx, MLIR_OpHandle op) {
     for (size_t i = 0; i < na; i++) {
         MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
         agkb_str(k, MLIR_GetAttributeName(a));
-        agkb_u64(k, (uint64_t)MLIR_GetAttributeKind(a));
-        agkb_i64(k, MLIR_GetAttributeInteger(a));
+        MLIR_AttrKind kind = MLIR_GetAttributeKind(a);
+        agkb_u64(k, (uint64_t)kind);
+        agkb_i64(k, ag_attr_payload(a, kind));
         agkb_str(k, MLIR_GetAttributeAsString(ctx, a));
     }
 }
@@ -273,9 +303,14 @@ static void ag_sweep_operands(MLIR_Context *ctx, MLIR_RegionHandle region, AgMap
 }
 
 // Manual use-count DCE: count uses across the region, then erase zero-use pure
-// ops transitively, seeded at the operands of the erased redundant ops.
+// ops transitively, seeded at the operands of the erased redundant ops. The
+// `n_erased` ops in `erased` are already erased; their handles are dead
+// (MLIR_EraseOp), so the worklist skips them, and the ops it erases itself.
 static void ag_dce(MLIR_Context *ctx, MLIR_RegionHandle region,
-                   MLIR_OpHandle *seeds, size_t nseed) {
+                   MLIR_OpHandle *seeds, size_t nseed,
+                   MLIR_OpHandle *erased, size_t n_erased) {
+    AgMap dead; agmap_init(&dead, n_erased + 64);
+    for (size_t i = 0; i < n_erased; i++) agmap_put(&dead, (uintptr_t)erased[i], 1);
     AgMap uses; agmap_init(&uses, 1024);
     size_t nb = MLIR_GetRegionNumBlocks(region);
     for (size_t b = 0; b < nb; b++) {
@@ -313,7 +348,7 @@ static void ag_dce(MLIR_Context *ctx, MLIR_RegionHandle region,
     while (nwl > 0) {
         MLIR_OpHandle op = wl[--nwl];
         if (op == MLIR_INVALID_HANDLE) continue;
-        if (MLIR_GetOpParentBlock(op) == MLIR_INVALID_HANDLE) continue;   // erased
+        if (agmap_get(&dead, (uintptr_t)op, NULL)) continue;   // erased
         if (MLIR_GetOpNumResults(op) != 1 || !llvm_op_is_pure(MLIR_GetOpType(op))) continue;
         int64_t cnt = 0; agmap_get(&uses, (uintptr_t)MLIR_GetOpResult(op, 0), &cnt);
         if (cnt != 0) continue;
@@ -328,13 +363,14 @@ static void ag_dce(MLIR_Context *ctx, MLIR_RegionHandle region,
             }
         }
         MLIR_EraseOp(ctx, op);
+        agmap_put(&dead, (uintptr_t)op, 1);
         for (size_t kk = 0; kk < non; kk++) if (defs[kk] != MLIR_INVALID_HANDLE) {
             if (nwl == cwl) { cwl = cwl ? cwl * 2 : 64; wl = (MLIR_OpHandle *)realloc(wl, cwl * sizeof(MLIR_OpHandle)); }
             wl[nwl++] = defs[kk];
         }
         free(defs);
     }
-    free(wl); agmap_free(&uses);
+    free(wl); agmap_free(&uses); agmap_free(&dead);
 }
 
 static void ag_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
@@ -400,7 +436,7 @@ static void ag_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
         }
         ag_sweep_operands(ctx, region, &repl);
         for (size_t i = 0; i < redundant.n; i++) MLIR_EraseOp(ctx, redundant.v[i]);
-        ag_dce(ctx, region, seedlist.v, seedlist.n);
+        ag_dce(ctx, region, seedlist.v, seedlist.n, redundant.v, redundant.n);
         free(seedlist.v);
     }
 
