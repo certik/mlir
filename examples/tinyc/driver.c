@@ -608,6 +608,131 @@ static int driver_emit_native_elf(MLIR_Context *ctx, MLIR_OpHandle module,
 }
 #endif  // TINYC_HAS_ELF
 
+// The target the native `--emit=llvm` output is for, from `--target TRIPLE`.
+// The IR goes to the host's llc, so nothing in the IR itself says which
+// machine it is for; the driver must be told (or know) the target to make
+// target-dependent choices such as defining @__tinyc_syscall6 below.
+//
+// TRIPLE is an LLVM triple, ARCH-VENDOR-OS[-ENV], read by position the way
+// llc reads it, e.g. x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu,
+// aarch64-apple-darwin, arm64-apple-macosx14.0 or x86_64-pc-windows-msvc. The
+// vendor and the environment are not interpreted. An explicit triple is also
+// written to the IR as `target triple`, so llc compiles for the same target.
+//
+// Without --target there is no triple line. A gcc/clang-built tinyc on
+// Linux/x86_64 then still targets that host (for the definitions below); every
+// other build, including a self-hosted tinyc (__TINYC__), cannot know where its
+// output will run, so its target is unknown and gets no target-specific code.
+// (The enumerators are TINYC_-prefixed: Apple clang predefines TARGET_OS_*.)
+typedef enum {
+    TINYC_ARCH_UNKNOWN,
+    TINYC_ARCH_X86_64,
+    TINYC_ARCH_AARCH64
+} TargetArch;
+
+typedef enum {
+    TINYC_OS_UNKNOWN,
+    TINYC_OS_LINUX,
+    TINYC_OS_DARWIN,
+    TINYC_OS_WINDOWS
+} TargetOS;
+
+typedef struct {
+    TargetArch arch;
+    TargetOS os;
+    const char *triple;  // written to the IR; NULL without --target
+} Target;
+
+static void target_set_default(Target *t) {
+    t->arch = TINYC_ARCH_UNKNOWN;
+    t->os = TINYC_OS_UNKNOWN;
+    t->triple = NULL;
+#if defined(__linux__) && defined(__x86_64__) && !defined(__TINYC__)
+    t->arch = TINYC_ARCH_X86_64;
+    t->os = TINYC_OS_LINUX;
+#endif
+}
+
+// Is the triple component s[0..n) `name`, optionally followed by a version
+// (digits and dots) when `versioned` (darwin23.1.0, macosx14.0)?
+static bool target_component_is(const char *s, size_t n, const char *name,
+                                bool versioned) {
+    size_t len = strlen(name);
+    if (n < len || memcmp(s, name, len) != 0) return false;
+    if (n > len && !versioned) return false;
+    for (size_t i = len; i < n; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || s[i] == '.')) return false;
+    return true;
+}
+
+// Parse an LLVM triple into `t`. Returns false (with `t` untouched) when it
+// has fewer than three components or its arch or OS is not one tinyC knows.
+static bool target_parse(const char *triple, Target *t) {
+    TargetArch arch = TINYC_ARCH_UNKNOWN;
+    TargetOS os = TINYC_OS_UNKNOWN;
+    size_t i = 0;
+    int k = 0;
+    while (k < 3) {
+        size_t start = i;
+        while (triple[i] && triple[i] != '-') i++;
+        const char *c = triple + start;
+        size_t n = i - start;
+        if (k == 0) {
+            if (target_component_is(c, n, "x86_64", false) ||
+                target_component_is(c, n, "amd64", false))
+                arch = TINYC_ARCH_X86_64;
+            else if (target_component_is(c, n, "aarch64", false) ||
+                     target_component_is(c, n, "arm64", false))
+                arch = TINYC_ARCH_AARCH64;
+        } else if (k == 2) {
+            if (target_component_is(c, n, "linux", false))
+                os = TINYC_OS_LINUX;
+            else if (target_component_is(c, n, "darwin", true) ||
+                     target_component_is(c, n, "macos", true) ||
+                     target_component_is(c, n, "macosx", true))
+                os = TINYC_OS_DARWIN;
+            else if (target_component_is(c, n, "windows", false) ||
+                     target_component_is(c, n, "win32", false))
+                os = TINYC_OS_WINDOWS;
+        }
+        k++;
+        if (!triple[i]) break;
+        i++;
+    }
+    if (k < 3 || arch == TINYC_ARCH_UNKNOWN || os == TINYC_OS_UNKNOWN)
+        return false;
+    t->arch = arch;
+    t->os = os;
+    t->triple = triple;
+    return true;
+}
+
+// Write `target triple = "..."` into the LLVM IR, after the
+// `source_filename` line where LLVM's own printer puts it (or at the top if
+// there is none). Both LLVM-IR translators start their output the same way, so
+// they stay byte-identical.
+static string inject_target_triple(Arena *arena, string ir, const char *triple) {
+    const char *key = "source_filename";
+    uint64_t kl = strlen(key);
+    uint64_t pos = 0;
+    for (uint64_t i = 0; i + kl <= ir.size; i++) {
+        if ((i == 0 || ir.str[i - 1] == '\n') &&
+            memcmp(ir.str + i, key, kl) == 0) {
+            pos = i;
+            while (pos < ir.size && ir.str[pos] != '\n') pos++;
+            if (pos < ir.size) pos++;
+            break;
+        }
+    }
+    strbuf sb = strbuf_make_cap(arena, ir.size + 64);
+    strbuf_append_bytes(arena, &sb, ir.str, pos);
+    strbuf_append_cstr(arena, &sb, "target triple = \"");
+    strbuf_append_cstr(arena, &sb, triple);
+    strbuf_append_cstr(arena, &sb, "\"\n");
+    strbuf_append_bytes(arena, &sb, ir.str + pos, ir.size - pos);
+    return strbuf_to_string(sb);
+}
+
 // On the native `--emit=llvm` -> llc -> host-link path, the raw-syscall
 // intrinsic __builtin_syscall6 lowers to a call to @__tinyc_syscall6. The
 // in-tree x86_64 ELF backend synthesises that symbol as a `syscall` trap, but
@@ -618,11 +743,9 @@ static int driver_emit_native_elf(MLIR_Context *ctx, MLIR_OpHandle module,
 // corec/platform/syscall6.h uses, preserving the raw (negative-errno) return
 // convention platform_linux.c relies on. Both LLVM-IR translators (in-tree and
 // upstream) emit the identical declaration line, so one textual rewrite covers
-// both. Only the x86_64-Linux native build reaches this (macOS/Windows use the
-// libc/WinAPI platforms; the ELF backend keeps its own thunk), so it is a no-op
-// everywhere else.
+// both. Only an x86_64-Linux target gets it (macOS/Windows use the libc/WinAPI
+// platforms; the ELF backend keeps its own thunk).
 static string inject_syscall6_definition(Arena *arena, string ir) {
-#if defined(__linux__) && defined(__x86_64__) && !defined(__TINYC__)
     const char *decl =
         "declare i64 @__tinyc_syscall6(i64, i64, i64, i64, i64, i64, i64)";
     uint64_t dl = strlen(decl);
@@ -644,10 +767,6 @@ static string inject_syscall6_definition(Arena *arena, string ir) {
     strbuf_append_cstr(arena, &sb, def);
     strbuf_append_bytes(arena, &sb, ir.str + pos + dl, ir.size - pos - dl);
     return strbuf_to_string(sb);
-#else
-    (void)arena;
-    return ir;
-#endif
 }
 
 // Output mode selected by `--emit=`; the last one on the command line wins.
@@ -703,7 +822,7 @@ static void print_usage(Arena *arena) {
         strbuf_append_cstr(arena, &sb, emit_mode_name((EmitMode)m));
     }
     strbuf_append_cstr(arena, &sb,
-        "] [--lowering=upstream|native] [--from-wasm PATH] "
+        "] [--lowering=upstream|native] [--target=TRIPLE] [--from-wasm PATH] "
         "[--wasm-runtime-obj=PATH ...] [-I dir ...] [-D name[=value] ...] "
         "[-o OUT] FILE.tc [FILE2.tc ...]");
     println(str_lit("{}"), strbuf_to_string(sb));
@@ -747,6 +866,9 @@ int app_main(void) {
     bool lowering_explicit = false; // tracks whether user passed --lowering=
 #endif
     char *output_file = NULL;
+    // --target TRIPLE (see Target above); only `--emit=llvm` consults it.
+    Target target;
+    target_set_default(&target);
 
     // Multiple positional input files (multi-file compilation merges them
     // into a single Program / single MLIR module).
@@ -912,6 +1034,26 @@ int app_main(void) {
         }
         else if (strcmp(argv[i], "--wasi-adapter") == 0 && i + 1 < argc) {
             wasi_adapter_path = argv[++i];
+        }
+        else if (strncmp(argv[i], "--target", 8) == 0 &&
+                 (argv[i][8] == '=' || argv[i][8] == '\0')) {
+            const char *triple = argv[i][8] == '=' ? argv[i] + 9
+                               : (i + 1 < argc ? argv[++i] : NULL);
+            if (!triple) {
+                fprintf(stderr, "tinyc: --target needs a triple, e.g. "
+                        "--target=x86_64-unknown-linux-gnu\n");
+                arena_destroy(boot_arena);
+                return 1;
+            }
+            if (!target_parse(triple, &target)) {
+                fprintf(stderr,
+                        "tinyc: unsupported target '%s' (expected "
+                        "ARCH-VENDOR-OS[-ENV] with ARCH x86_64|aarch64 and OS "
+                        "linux|darwin|macosx|windows, e.g. "
+                        "x86_64-unknown-linux-gnu)\n", triple);
+                arena_destroy(boot_arena);
+                return 1;
+            }
         }
         else if (strcmp(argv[i], "--lowering=upstream") == 0) {
 #ifdef TINYC_HAS_UPSTREAM
@@ -1485,7 +1627,10 @@ int app_main(void) {
             arena_destroy(boot_arena);
             return 1;
         }
-        out = inject_syscall6_definition(arena, out);
+        if (target.triple)
+            out = inject_target_triple(arena, out, target.triple);
+        if (target.arch == TINYC_ARCH_X86_64 && target.os == TINYC_OS_LINUX)
+            out = inject_syscall6_definition(arena, out);
     } else {
         out = print_fn(&ctx, module);
     }
