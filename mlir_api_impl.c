@@ -312,6 +312,11 @@ static void check_live_op(MLIR_OpHandle h, const char *fn) {
 #else
 #define CHECK_OP(h, fn) ((void)0)
 #endif
+// For functions that accept MLIR_INVALID_HANDLE (as upstream does) but not an
+// erased op.
+#define CHECK_NOT_ERASED(h, fn) \
+    API_CHECK((h) == MLIR_INVALID_HANDLE || \
+              ((IR_Op *)(h))->op_type != OP_TYPE_ERASED_SENTINEL, fn, "op was erased")
 #define CHECK_INDEX(i, n, fn) API_CHECK((size_t)(i) < (size_t)(n), fn, "index out of range")
 // A typed attribute getter applied to the wrong kind.
 #define CHECK_ATTR_KIND(ah, ok, fn, what) do { \
@@ -689,6 +694,12 @@ static void default_diagnostic_handler(void *user, MLIR_DiagSeverity severity,
         fprintf(stderr, "%.*s:%d:%d: %s: %.*s\n", (int)file.size, file.str,
                 MLIR_GetLocationFileLine(loc), MLIR_GetLocationFileColumn(loc),
                 sev, (int)message.size, message.str);
+    } else if (loc != MLIR_INVALID_HANDLE && MLIR_GetLocationKind(loc) != MLIR_LOC_UNKNOWN &&
+               ((IR_Location *)loc)->original_text.size > 0) {
+        // Other locations print in their `loc(...)` form, as upstream's do.
+        string text = ((IR_Location *)loc)->original_text;
+        fprintf(stderr, "%.*s: %s: %.*s\n", (int)text.size, text.str, sev,
+                (int)message.size, message.str);
     } else {
         fprintf(stderr, "%s: %.*s\n", sev, (int)message.size, message.str);
     }
@@ -1143,7 +1154,8 @@ size_t MLIR_GetOpNumSuccessorOperands(MLIR_OpHandle oh, size_t s) {
 MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_OpHandle oh, size_t s, size_t i) {
     CHECK_OP(oh, "MLIR_GetOpSuccessorOperand");
     CHECK_INDEX(s, ((IR_Op *)oh)->n_successors, "MLIR_GetOpSuccessorOperand");
-    CHECK_INDEX(i, ((IR_Op *)oh)->n_successor_operands[s], "MLIR_GetOpSuccessorOperand");
+    CHECK_INDEX(i, ((IR_Op *)oh)->n_successor_operands ? ((IR_Op *)oh)->n_successor_operands[s] : 0,
+                "MLIR_GetOpSuccessorOperand");
     IR_Op *op = resolve_op(oh);
     if (!op || s >= op->n_successors || !op->successor_operands) return MLIR_INVALID_HANDLE;
     if (i >= (size_t)op->n_successor_operands[s]) return MLIR_INVALID_HANDLE;
@@ -1889,6 +1901,7 @@ MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_nam
 }
 
 MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_Context *ctx, MLIR_OpHandle def, uint32_t result_index, MLIR_TypeHandle type, string register_name, MLIR_LocationHandle location) {
+    CHECK_NOT_ERASED(def, "MLIR_CreateValueOpResult");
     IR_Value v = {0};
     v.kind = MLIR_VALUE_OP_RESULT;
     v.def_handle = def;
@@ -2306,6 +2319,7 @@ void MLIR_DetachOp(MLIR_Context *ctx, MLIR_OpHandle op) {
 
 MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *ctx, MLIR_OpHandle op,
                                     size_t idx) {
+    CHECK_NOT_ERASED(op, "MLIR_TakeOpRegion");
     IR_Op *o = resolve_op(op);
     if (!o || idx >= o->n_regions) return MLIR_INVALID_HANDLE;
     MLIR_RegionHandle taken = o->regions[idx];
@@ -2320,6 +2334,7 @@ MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *ctx, MLIR_OpHandle op,
 }
 
 MLIR_BlockHandle MLIR_GetOpParentBlock(MLIR_OpHandle op) {
+    CHECK_NOT_ERASED(op, "MLIR_GetOpParentBlock");
     IR_Op *o = resolve_op(op);
     return o ? o->parent_block : MLIR_INVALID_HANDLE;
 }
@@ -2331,6 +2346,7 @@ MLIR_RegionHandle MLIR_GetBlockParentRegion(MLIR_BlockHandle block) {
 
 void MLIR_MoveOpToBlockEnd(MLIR_Context *ctx, MLIR_OpHandle op,
                            MLIR_BlockHandle dest) {
+    CHECK_NOT_ERASED(op, "MLIR_MoveOpToBlockEnd");
     if (op == MLIR_INVALID_HANDLE || dest == MLIR_INVALID_HANDLE) return;
     IR_Op *o = resolve_op(op);
     if (!o) return;
@@ -2358,6 +2374,7 @@ void MLIR_MoveBlockToRegionEnd(MLIR_Context *ctx, MLIR_BlockHandle block,
 void MLIR_SetOpOperand(MLIR_Context *ctx, MLIR_OpHandle op,
                        size_t idx, MLIR_ValueHandle value) {
     (void)ctx;
+    CHECK_NOT_ERASED(op, "MLIR_SetOpOperand");
     IR_Op *o = resolve_op(op);
     if (!o) return;
     // The contract (matching upstream's MLIR_SetOpOperand on MLIR core,
@@ -2413,6 +2430,7 @@ void MLIR_SetOpOperand(MLIR_Context *ctx, MLIR_OpHandle op,
 void MLIR_SetOpSuccessor(MLIR_Context *ctx, MLIR_OpHandle op,
                          size_t succ_idx, MLIR_BlockHandle block) {
     (void)ctx;
+    CHECK_NOT_ERASED(op, "MLIR_SetOpSuccessor");
     IR_Op *o = resolve_op(op);
     if (!o || succ_idx >= o->n_successors) return;
     o->successors[succ_idx] = block;
@@ -2421,6 +2439,7 @@ void MLIR_SetOpSuccessor(MLIR_Context *ctx, MLIR_OpHandle op,
 void MLIR_SetOpSuccessorOperands(MLIR_Context *ctx, MLIR_OpHandle op,
                                  size_t succ_idx,
                                  const MLIR_ValueHandle *values, size_t n) {
+    CHECK_NOT_ERASED(op, "MLIR_SetOpSuccessorOperands");
     IR_Op *o = resolve_op(op);
     if (!o || succ_idx >= o->n_successors) return;
     Arena *arena = MLIR_GetArenaAllocator(ctx);
@@ -2752,6 +2771,7 @@ MLIR_OpHandle MLIR_GetValueUseOwner(MLIR_Context *ctx, MLIR_ValueHandle value,
 
 void MLIR_AppendOpSuccessorOperand(MLIR_Context *ctx, MLIR_OpHandle op,
                                    size_t succ_idx, MLIR_ValueHandle value) {
+    CHECK_NOT_ERASED(op, "MLIR_AppendOpSuccessorOperand");
     IR_Op *o = resolve_op(op);
     if (!o || succ_idx >= o->n_successors) return;
     Arena *arena = MLIR_GetArenaAllocator(ctx);
