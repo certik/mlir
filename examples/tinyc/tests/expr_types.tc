@@ -1,0 +1,75 @@
+#include <stdint.h>
+extern int printf(const char *fmt, ...);
+
+// The static type of an expression (used by sizeof and _Generic):
+// - `sizeof` is a size_t (`unsigned long`), not an int (#293);
+// - `c ? a : b` and `a op b` apply the usual arithmetic conversions, and
+//   char / short operands are promoted to int (#295); `arr + 1` is a
+//   pointer and `p == q` an int;
+// - _Generic matches integer types by width and signedness, and a plain
+//   `int` local (whose type carries no explicit width) is an int, not the
+//   first integer association (#288); `*s` has the pointee's type;
+// - `z ? 0 : p`, `z ? NULL : p`, `z ? (void *)0 : p` and `z ? arr : p`
+//   are pointers, and `ip + 1` on an array of pointers is a pointer to the
+//   element pointer type;
+// - a `sizeof` in an unevaluated `?:` arm still makes the result a size_t
+//   when folded (enumerator, global array bound) as when emitted.
+
+typedef signed char i8;
+#define T(e) _Generic((e), int8_t: 1, uint8_t: 2, int16_t: 3, uint16_t: 4, \
+                      int32_t: 5, uint32_t: 6, int64_t: 7, uint64_t: 8, \
+                      double: 9, float: 10, default: 0)
+int gx;
+int ga[3] = {7, 8, 9};
+int *ip[2];
+long long *lp[2];
+long long lls[4];
+enum { EU = (1 ? -1 : sizeof(int)) < 0, EV = (0 ? sizeof(int) : -1) > 0 };
+char gsz[(1 ? -1 : sizeof ga) < 0 ? 1 : 2];
+int f(int p) { return _Generic(p, i8: 1, int: 2, default: 3); }
+
+int main() {
+    int x = 3; short s = 0; unsigned u = 2; unsigned char uc = 4;
+    signed char sc = 0; int64_t ll = 5; uint64_t ull = 6; char c = 1;
+    printf("%d %d %d\n", sizeof(int) - 5 > 0, -1 < sizeof(int),
+           _Generic(sizeof(x), unsigned long: 1, default: 0));
+    // Folded (literal operands) and emitted: the same unsigned compare.
+    int m1 = -1;
+    printf("%d %d %d\n", -1 < sizeof(int), m1 < sizeof(int), (int)(sizeof(int) - 5 > 0));
+    int n = -2;
+    printf("%d %d\n", (int)(n * sizeof(int)), (int)(sizeof(x) - sizeof(ll)));
+    printf("%d %d %d %d\n", (int)sizeof(1 ? 1 : 2LL), (int)sizeof(x ? c : 2.0),
+           (int)sizeof(0 ? 1.0f : 2), (int)sizeof(x < 1.0));
+    printf("%d\n", (x ? -1 : 0u) > 0);
+    int arr[10]; char cs[7];
+    printf("%d %d %d\n", sizeof(arr + 1) == sizeof(int *), sizeof(1 + cs) == sizeof(char *),
+           (int)sizeof(arr == arr + 1));
+    printf("%d %d %d %d %d\n",
+           _Generic(x, i8: 1, int: 2, default: 3),
+           _Generic(gx, i8: 1, int: 2, default: 3),
+           f(0),
+           _Generic(s, i8: 1, int: 2, short: 5, default: 3),
+           _Generic(x + 1, i8: 1, int: 2, default: 3));
+    printf("%d %d %d %d %d %d %d %d\n", T(x), T(s), T(u), T(uc), T(sc), T(ll), T(ull), T(c + c));
+    printf("%d %d %d %d %d %d\n", T(uc + 1), T(x * u), T(x + ll), T(ull + x), T(x < u), T(!x));
+    printf("%d %d %d %d %d\n", T(1 ? x : u), T(0 ? x : ll), T(1 ? uc : sc), T(-uc), T(uc << 1));
+    ip[1] = ga; lp[1] = lls; lls[2] = 5000000000LL;
+    printf("%d %d %lld\n", (int)sizeof(**(ip + 1)), **(ip + 1), *(*(lp + 1) + 2));
+    char *str = "A"; unsigned char ub[3]; unsigned uv = 3000000000u;
+    unsigned char *ubp = ub; unsigned *uvp = &uv; int z = 0;
+    ub[1] = 254;
+    printf("%d %d %d %d\n", _Generic(*str, char: 1, default: 0),
+           _Generic(*(str + 0), char: 1, int: 2), _Generic(*ubp, unsigned char: 1, default: 0),
+           T(*uvp));
+    printf("%d %d %d %d\n", sizeof(z ? ga : &ga[1]) == sizeof(int *), sizeof(z ? 0 : ubp) == sizeof(int *),
+           sizeof(z ? uvp : 0) == sizeof(int *), *((z ? 0 : ubp) + 1));
+    printf("%d\n", (z ? 0 : ubp)[1]);
+    int one = 1;
+    printf("%d %d %d %d %d\n", EU, EV, (int)sizeof gsz, (1 ? -1 : sizeof(int)) < 0,
+           (one ? -1 : sizeof(int)) < 0);
+    long *lptr = (long *)malloc(2 * sizeof(long)); char *cp = str;
+    printf("%d %d %d %d\n", *(z ? NULL : ubp + 1), (z ? (void *)0 : ubp)[1],
+           sizeof(*(z ? NULL : lptr)) == sizeof(long),
+           _Generic(one ? (void *)0 : cp, char *: 1, void *: 2, default: 0));
+    return 0;
+}
