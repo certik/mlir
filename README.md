@@ -174,11 +174,17 @@ shrink.
   syntax (e.g. `linalg.fill`, `gpu.launch`, `affine.load`,
   `tensor.collapse_shape`).
 * `mlir_classic_printer.c` — pretty (typed) form printer. Big switch on
-  `MLIR_GetOpType(op)`; ops without a typed-form case fall through to the
-  generic-form path.
+  the op kind (the op type, or a `PARSER_OP_*` kind for the parser-only
+  dialects, `mlir_printer.h`); ops without a typed-form case fall through
+  to the generic-form path.
 * `mlir_generic_printer.c` — `"op.name"(operands) : (intypes) -> outtypes`
   printer.
-* `mlir_op_names.c` — op enum ↔ string mapping.
+* `mlir_ops.def` — the op list: one `MLIR_OP(enumerator, name)` line per
+  op, grouped by dialect. It generates the `MLIR_OpType` enum and its
+  dialect ranges (`mlir_api.h`), the op names, and the parser-only op kinds.
+* `mlir_op_names.c` — a context's op-type table: the names of the static
+  types and of the dynamic types it registers (`MLIR_RegisterOpType`), and
+  the name → type hash.
 * `mlir_lift_cf_to_scf.c` — agnostic in-tree port of upstream's
   CFGToSCF (Bahmann/Reissmann 2015). Lifts a CFG (`cf.br` / `cf.cond_br` /
   `cf.switch`, or the LLVM-dialect `llvm.br` / `llvm.cond_br` /
@@ -353,17 +359,21 @@ arrives as a `const char *`, copy it into a `char[]` first or convert via
 
 ## Adding a new op
 
-1. Add an enum value to `MLIR_OpType` in `mlir_api.h` (and to the upstream
-   side if classification differs).
-2. Add the `(string → enum)` row to `mlir_op_names.c`.
-3. If the op needs special syntax, write `parse_<op>_op` in `op_parsers.c`
+1. Add an `MLIR_OP(OP_TYPE_<DIALECT>_<NAME>, "dialect.name")` line to its
+   dialect's block in `mlir_ops.def`; that gives the enumerator and the
+   name. (An op of a dialect only the text parser knows goes in the
+   `MLIR_PARSER_OP` section instead, and gets a dynamic type at run time.)
+   A new dialect gets its own `MLIR_DIALECT_BEGIN`/`END` block, and if it
+   exists upstream, a line in `contextRegistry()` in
+   `mlir_api_impl_upstream.cpp`.
+2. If the op needs special syntax, write `parse_<op>_op` in `op_parsers.c`
    and route to it from `mlir_parser.c`.
-4. If the op has a typed (classic) form, add a case in
+3. If the op has a typed (classic) form, add a case in
    `mlir_classic_printer.c`'s big switch. Skip any attributes the typed
    form absorbs from the trailing `{...}` attr-list block (see the
-   `OP_TYPE_AFFINE_LOAD`, `OP_TYPE_TENSOR_COLLAPSE_SHAPE` cases for
+   `PARSER_OP_AFFINE_LOAD`, `PARSER_OP_TENSOR_COLLAPSE_SHAPE` cases for
    examples).
-5. Drop a test input under `tests/`, add it to `tests.toml`, and
+4. Drop a test input under `tests/`, add it to `tests.toml`, and
    `pixi run -e upstream python run_tests.py -u` to materialise the
    references. Then run without `-u` and `--validate-refs` to confirm.
 

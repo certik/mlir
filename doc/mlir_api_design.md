@@ -648,6 +648,42 @@ Rules:
    `GetOpType` keeps the `OperationName`-impl → enum `DenseMap` (`u:560-575`)
    but per context.
 
+**As implemented (step 5, #347).** The rules above hold; where the code
+differs from the sketches in §1.2 and here:
+
+- **The static names are one string.** tinyC accepts no pointer in a global
+  initializer, so `static const string g_op_names[]` would not self-host.
+  `mlir_ops.def` instead generates `static const char g_static_op_names[]`,
+  the names in enum order separated by NULs (tinyC now concatenates adjacent
+  literals in a global initializer). At creation each context walks it once
+  into one `string names[]` (static types first, then the dynamic ones) and
+  builds the name → type hash (`mlir_op_names.c`). There is no switch and no
+  lazily built global table, so the backends keep no process-wide state. As
+  a consequence `MLIR_GetOpTypeName` takes the context for every type, and
+  `MLIR_GetOpName(op)` is `MLIR_GetOpTypeName(ctx, MLIR_GetOpType(op))`.
+- **`mlir_ops.def` has two columns**, `MLIR_OP(enumerator, name)`; step 6
+  adds the traits. A dialect's ops sit between `MLIR_DIALECT_BEGIN(D)` and
+  `MLIR_DIALECT_END(D)`, which produce `MLIR_DIALECT_<D>_FIRST` and `_LAST`
+  enumerators without shifting the values;
+  `MLIR_OP_TYPE_IN_DIALECT(t, D)` is one unsigned comparison.
+- **Parser-only ops (D9).** They are `MLIR_PARSER_OP(kind, name)` lines.
+  The parser and both printers register these names in their context
+  (`parser_op_types_init`, `mlir_printer.h`) and dispatch on an *op kind*:
+  the `MLIR_OpType` of a static op, a `PARSER_OP_*` value (from
+  `OP_TYPE_COUNT` up) for a parser-only op, and `OP_TYPE_UNREGISTERED` for
+  any other dynamic type. One switch handles all three, and the kind of a
+  dynamic type is a subtraction because the parser registers its names
+  consecutively. The two helpers are out of line in `mlir_op_names.c`:
+  tinyC emits a header's `static inline` functions into every file that
+  includes it. Four names that only the classic printer tests
+  (`affine.yield`, `linalg.yield`, `tensor.from_elements`,
+  `gpu.terminator`) are `MLIR_PRINTER_OP` lines of the same kind.
+- **Upstream.** The context binds `mlir::OperationName` for every static
+  type at creation (`builtin.module` for `OP_TYPE_MODULE`, whose C name is
+  `module`) and for each dynamic type when it is registered. `GetOpType`
+  registers names it has not seen, such as ops the upstream parser or a
+  pass created.
+
 ### 2.6 Attribute access without strings (A3)
 
 Today an attribute handle is a *named* attribute: natively an
