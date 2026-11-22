@@ -346,9 +346,15 @@ void bindOpName(MLIR_Context *c, MLIR_OpType type) {
     llvm::StringRef name = type == OP_TYPE_MODULE ? llvm::StringRef("builtin.module")
                                                   : llvm::StringRef(s.str, s.size);
     const void *key = mlir::OperationName(name, c).getAsOpaquePointer();
+    // Never rebind a name that already stands for a type: the op type of
+    // every op of that name would change. (Aliases such as `builtin.module`
+    // resolve to their static type before they get here.)
+    auto ins = c->opTypes.try_emplace(key, type);
+    API_CHECK(ins.second || ins.first->second == type, "MLIR_RegisterOpType",
+              "op name already bound to another op type");
+    if (!ins.second && ins.first->second != type) return;
     if ((size_t)type >= c->opNames.size()) c->opNames.resize((size_t)type + 1, nullptr);
     c->opNames[type] = key;
-    c->opTypes[key] = type;
 }
 
 // The type of `name`, registering a dynamic type for a name `c` has not seen

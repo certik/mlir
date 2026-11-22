@@ -74,6 +74,9 @@ typedef enum {
 
 // Returns the type of `name`: its static type, the dynamic type `ctx` gave
 // it before, or a new dynamic type. `name` is copied; it must not be empty.
+// A few static types have a second name, an alias (`builtin.module` for
+// OP_TYPE_MODULE, the upstream name of the op); an alias gives its static
+// type, and MLIR_GetOpTypeName still returns the first name.
 MLIR_OpType MLIR_RegisterOpType(MLIR_Context *ctx, string name);
 // Like MLIR_RegisterOpType, but returns OP_TYPE_UNREGISTERED instead of
 // registering a name `ctx` does not know.

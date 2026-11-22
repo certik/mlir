@@ -13,8 +13,10 @@
 // The ops of a dialect sit between MLIR_DIALECT_BEGIN(D) and
 // MLIR_DIALECT_END(D), so their values are consecutive and
 // MLIR_DIALECT_<D>_FIRST..MLIR_DIALECT_<D>_LAST is a range check
-// (MLIR_OP_TYPE_IN_DIALECT in mlir_api.h). Names are unique (checked when a
-// context is created). Values are not ABI-stable: everything is rebuilt
+// (MLIR_OP_TYPE_IN_DIALECT in mlir_api.h). MLIR_OP_ALIAS(enumerator, name)
+// gives a static type a second name that lookup and registration accept;
+// the type's name stays the MLIR_OP one. Names, aliases included, are unique
+// (checked when a context is created). Values are not ABI-stable: everything is rebuilt
 // together.
 //
 // To add an op, add a line to its dialect's block. To add a dialect, add a
@@ -24,6 +26,9 @@
 
 #ifndef MLIR_OP
 #define MLIR_OP(enumerator, name)
+#endif
+#ifndef MLIR_OP_ALIAS
+#define MLIR_OP_ALIAS(enumerator, name)
 #endif
 #ifndef MLIR_DIALECT_BEGIN
 #define MLIR_DIALECT_BEGIN(dialect)
@@ -39,8 +44,10 @@
 #endif
 
 MLIR_DIALECT_BEGIN(BUILTIN)
-// The C side names the module op `module`; upstream calls it `builtin.module`.
+// The C side names the module op `module`; upstream calls it `builtin.module`,
+// which is an alias: looking it up or registering it gives OP_TYPE_MODULE.
 MLIR_OP(OP_TYPE_MODULE, "module")
+MLIR_OP_ALIAS(OP_TYPE_MODULE, "builtin.module")
 MLIR_OP(OP_TYPE_UNREALIZED_CONVERSION_CAST, "builtin.unrealized_conversion_cast")
 MLIR_DIALECT_END(BUILTIN)
 
@@ -494,6 +501,7 @@ MLIR_PRINTER_OP(PARSER_OP_TENSOR_FROM_ELEMENTS, "tensor.from_elements")
 MLIR_PRINTER_OP(PARSER_OP_GPU_TERMINATOR, "gpu.terminator")
 
 #undef MLIR_OP
+#undef MLIR_OP_ALIAS
 #undef MLIR_DIALECT_BEGIN
 #undef MLIR_DIALECT_END
 #undef MLIR_PARSER_OP

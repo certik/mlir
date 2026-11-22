@@ -389,6 +389,20 @@ int app_main(void) {
                      !MLIR_OP_TYPE_IN_DIALECT(OP_TYPE_UNREGISTERED, LLVM)
                          ? str_lit("dynamic op and dialect ranges: yes\n")
                          : str_lit("dynamic op and dialect ranges: no\n"));
+        // `builtin.module` (the upstream name) is an alias of OP_TYPE_MODULE:
+        // registering it must not give modules another type.
+        MLIR_OpType bm_lookup = MLIR_LookupOpType(ctx, str_lit("builtin.module"));
+        MLIR_OpType bm_reg = MLIR_RegisterOpType(ctx, str_lit("builtin.module"));
+        MLIR_OpHandle mod2 = MLIR_CreateOp(ctx, OP_TYPE_MODULE, NULL, 0, NULL, 0, NULL, 0,
+                                           NULL, 0, NULL, 0, MLIR_INVALID_HANDLE,
+                                           MLIR_INVALID_HANDLE, str_lit(""), -1);
+        print_string(format(arena,
+            str_lit("builtin.module alias: lookup={} register={} module op={} name={}\n"),
+            bm_lookup == OP_TYPE_MODULE ? str_lit("yes") : str_lit("no"),
+            bm_reg == OP_TYPE_MODULE ? str_lit("yes") : str_lit("no"),
+            MLIR_GetOpType(mod2) == OP_TYPE_MODULE && MLIR_GetOpType(module_op) == OP_TYPE_MODULE
+                ? str_lit("yes") : str_lit("no"),
+            MLIR_GetOpTypeName(ctx, bm_reg)));
         MLIR_Context *ctx3 = MLIR_CreateContext(NULL);
         print_string(MLIR_LookupOpType(ctx3, str_lit("test.op")) == OP_TYPE_UNREGISTERED &&
                      MLIR_LookupOpType(ctx3, str_lit("llvm.add")) == OP_TYPE_LLVM_ADD

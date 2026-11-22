@@ -19,17 +19,23 @@ static uint32_t op_name_hash(string name) {
     return h;
 }
 
-// Adds `type`, whose name is already in t->names, to the hash.
-static void op_type_table_insert(OpTypeTable *t, uint32_t type) {
-    string name = t->names[type];
+// The name a hash slot stands for: a type's name or an alias.
+static string op_type_table_slot_name(const OpTypeTable *t, uint32_t slot) {
+    if (slot & OP_TYPE_ALIAS_SLOT) return t->alias_names[slot & ~OP_TYPE_ALIAS_SLOT];
+    return t->names[slot];
+}
+
+// Adds `slot` (a type, or an alias) under its name to the hash.
+static void op_type_table_insert(OpTypeTable *t, uint32_t slot) {
+    string name = op_type_table_slot_name(t, slot);
     uint32_t mask = t->n_slots - 1;
     uint32_t i = op_name_hash(name) & mask;
     while (t->slots[i] != 0) {
-        // Two types with one name would make the name ambiguous.
-        assert(!str_eq(t->names[t->slots[i]], name));
+        // Two entries with one name would make the name ambiguous.
+        assert(!str_eq(op_type_table_slot_name(t, t->slots[i]), name));
         i = (i + 1) & mask;
     }
-    t->slots[i] = type;
+    t->slots[i] = slot;
 }
 
 static void op_type_table_rehash(OpTypeTable *t, uint32_t n_slots) {
@@ -37,6 +43,14 @@ static void op_type_table_rehash(OpTypeTable *t, uint32_t n_slots) {
     memset(t->slots, 0, sizeof(uint32_t) * (size_t)n_slots);
     t->n_slots = n_slots;
     for (uint32_t type = 1; type < t->n_types; type++) op_type_table_insert(t, type);
+    for (uint32_t a = 0; a < t->n_aliases; a++) op_type_table_insert(t, OP_TYPE_ALIAS_SLOT | a);
+}
+
+static void op_type_table_add_alias(OpTypeTable *t, MLIR_OpType type, string name) {
+    assert(t->n_aliases < OP_TYPE_ALIAS_CAPACITY);
+    t->alias_names[t->n_aliases] = name;
+    t->alias_types[t->n_aliases] = type;
+    t->n_aliases++;
 }
 
 // The names of the static types, in enum order, each followed by a NUL. A
@@ -63,6 +77,11 @@ void op_type_table_init(OpTypeTable *t, Arena *arena) {
     }
     // One name per enumerator: the walk ends at the string's final NUL.
     assert(p == g_static_op_names + sizeof(g_static_op_names) - 1);
+    t->alias_names = arena_new_array(arena, string, OP_TYPE_ALIAS_CAPACITY);
+    t->alias_types = arena_new_array(arena, MLIR_OpType, OP_TYPE_ALIAS_CAPACITY);
+    t->n_aliases = 0;
+#define MLIR_OP_ALIAS(enumerator, name) op_type_table_add_alias(t, enumerator, str_lit(name));
+#include "mlir_ops.def"
     op_type_table_rehash(t, 1024);
 }
 
@@ -70,9 +89,11 @@ MLIR_OpType op_type_table_lookup(const OpTypeTable *t, string name) {
     if (name.size == 0) return OP_TYPE_UNREGISTERED;
     uint32_t mask = t->n_slots - 1;
     uint32_t i = op_name_hash(name) & mask;
-    uint32_t type;
-    while ((type = t->slots[i]) != 0) {
-        if (str_eq(t->names[type], name)) return (MLIR_OpType)type;
+    uint32_t slot;
+    while ((slot = t->slots[i]) != 0) {
+        if (str_eq(op_type_table_slot_name(t, slot), name))
+            return (slot & OP_TYPE_ALIAS_SLOT)
+                ? t->alias_types[slot & ~OP_TYPE_ALIAS_SLOT] : (MLIR_OpType)slot;
         i = (i + 1) & mask;
     }
     return OP_TYPE_UNREGISTERED;
@@ -93,7 +114,7 @@ MLIR_OpType op_type_table_register(OpTypeTable *t, string name) {
     uint32_t type = t->n_types++;
     t->names[type].str = copy;
     t->names[type].size = name.size;
-    if (2 * t->n_types > t->n_slots) op_type_table_rehash(t, 2 * t->n_slots);
+    if (2 * (t->n_types + t->n_aliases) > t->n_slots) op_type_table_rehash(t, 2 * t->n_slots);
     else op_type_table_insert(t, type);
     return (MLIR_OpType)type;
 }
