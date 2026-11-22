@@ -41,6 +41,7 @@
 #define MLIR_LIFT_CF_TO_SCF_H
 
 #include "mlir_api.h"
+#include "mlir_passes.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -50,7 +51,7 @@ extern "C" {
 // `module` op into scf.* structured control flow. `options` (may be NULL)
 // selects the branch-op family: cf.br / cf.cond_br / cf.switch by default,
 // or llvm.br / llvm.cond_br / llvm.switch with `llvm_cfg` set (see
-// MLIR_LiftCfToScfOptions in mlir_api.h). The two families have the same
+// MLIR_LiftCfToScfOptions in mlir_passes.h). The two families have the same
 // shape through mlir_api.h, so the algorithm is identical for both; the
 // lift's own intermediate branches (loop latches, edge multiplexers) are
 // created in the selected family, so an LLVM-dialect-only module never

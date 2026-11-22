@@ -1,5 +1,12 @@
 // Public MLIR C API declarations without exposing internal data structures.
 // Implementations can back these APIs with different MLIR representations.
+//
+// This is the core IR API, which both backends (mlir_api_impl.c and
+// mlir_api_impl_upstream.cpp) implement. Related headers:
+//   mlir_passes.h        passes and translations built on this API
+//   mlir_parser.h        the in-tree text parser
+//   mlir_printer.h       the in-tree text printers
+//   mlir_api_upstream.h  entry points only the upstream backend implements
 
 #pragma once
 
@@ -47,19 +54,6 @@ typedef struct MLIR_Context {
     // released. Defaults to NULL (= use `arena`, no behaviour change).
     Arena *type_arena;
 } MLIR_Context;
-
-typedef struct MLIR_LocationMap {
-    void *impl;
-} MLIR_LocationMap;
-
-size_t MLIR_GetLocationMapSize(const MLIR_LocationMap *location_map);
-size_t MLIR_CollectLocationMap(const MLIR_LocationMap *location_map, string *out_keys, MLIR_LocationHandle *out_locs, size_t max);
-
-// Vector helpers used by the parser implementation
-DEFINE_VECTOR_FOR_TYPE(MLIR_OpHandle, VecOp)
-DEFINE_VECTOR_FOR_TYPE(MLIR_ValueHandle, VecValue)
-DEFINE_VECTOR_FOR_TYPE(MLIR_BlockHandle, VecBlock)
-DEFINE_VECTOR_FOR_TYPE(MLIR_AttributeHandle, VecAttribute)
 
 // -----------------------------------------------------------------------------
 // Operation kinds
@@ -516,7 +510,7 @@ typedef enum {
     OP_TYPE_COUNT
 } MLIR_OpType;
 
-string MLIR_MLIR_OpTypeToString(MLIR_OpType type);
+string MLIR_GetOpTypeName(MLIR_OpType type);
 
 // -----------------------------------------------------------------------------
 // API lifecycle
@@ -577,95 +571,19 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     int64_t source_line_start);
 void MLIR_AppendOpAttribute(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttributeHandle attr);
 
-// Print an operation. Three named entry points instead of an enum-dispatched
-// MLIR_PrintOperation: each lives in its own translation unit so the linker
-// pulls in only what each binary actually calls. The Upstream variant
-// requires the upstream backend (the native backend's stub returns an
-// "error: ..." string).
-string MLIR_PrintOperationUpstream(MLIR_Context *ctx, MLIR_OpHandle op);
-string MLIR_PrintOperationClassic(MLIR_Context *ctx, MLIR_OpHandle op);
-string MLIR_PrintOperationGeneric(MLIR_Context *ctx, MLIR_OpHandle op);
-
-// Parse a top-level MLIR module from text. Returns MLIR_INVALID_HANDLE on
-// failure (or, for Upstream on the native backend, always).
-MLIR_OpHandle MLIR_ParseTextUpstream(MLIR_Context *ctx, string text);
-MLIR_OpHandle MLIR_ParseTextClassic(MLIR_Context *ctx, string text);
-
-// Lowering / translation entry points.
-//
-// Two parallel families:
-//
-//   - Backend-agnostic functions (MLIR_LowerToLLVMDialect,
-//     MLIR_TranslateModuleTo{LLVMIR,Wasm}) are implemented in dedicated
-//     translation units (mlir_lower_to_llvm.c,
-//     mlir_translate_to_llvm_ir.c, mlir_translate_to_wasm.c) that use
-//     only this very header — no upstream MLIR types. The same .o files
-//     link into both the native and upstream tinyc builds, so these
-//     functions are always available and produce identical output
-//     regardless of which core API implementation is linked in.
-//
-//   - *Upstream siblings (MLIR_LowerToLLVMDialectUpstream,
-//     MLIR_TranslateModuleTo{LLVMIR,Wasm}Upstream, plus
-//     MLIR_PrintOperationUpstream and MLIR_ParseTextUpstream above) are
-//     implemented only by mlir_api_impl_upstream.cpp. They run upstream
-//     MLIR's pass pipeline / translator / LLVM target machine and are
-//     therefore unavailable in the native-only build (calls fail at
-//     link time). They exist so callers can run upstream side-by-side
-//     with the in-tree implementation for reference, performance, or
-//     correctness comparisons.
-//
-// All entry points print diagnostics to stderr on failure.
-
-// Lower a `builtin.module` op to the LLVM dialect by running the
-// in-tree conversion (scf->cf, then arith/memref/cf/func/vector ->
-// llvm). Mutates `module` in place. Returns true on success.
-//
-// This is the one lowering every in-tree backend takes its input from:
-// the result is LLVM dialect only, with control flow as a flat
-// llvm.br / llvm.cond_br CFG. Backends that need structured control
-// flow (wasm) rebuild it themselves from that CFG.
-bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module);
-
-// Translate a `builtin.module` op already lowered to the LLVM dialect
-// into LLVM IR text (`.ll`). Returns the IR text on success or an
-// empty string on failure.
-string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module);
-
-// Translate a `builtin.module` op already lowered to the LLVM dialect
-// (the output of MLIR_LowerToLLVMDialect; `module` is consumed: the
-// wasm backend structurizes its CFG in place)
-// into a WebAssembly relocatable object file (wasm32-wasi). Returns
-// the raw object bytes on success or an empty string on failure. The
-// returned bytes are NOT a runnable wasm module — they still need to
-// be linked (typically with `wasm-ld`) against any runtime/imports the
-// program uses, producing a final `.wasm` module that can be run by
-// wasmtime. This implementation chains the in-tree native pipeline
-// (mlir_llvm_to_wasmssa -> mlir_wasmssa_to_wasmstack ->
-// mlir_wasmstack_to_bin).
-string MLIR_TranslateModuleToWasm(MLIR_Context *ctx, MLIR_OpHandle module);
-
-// Upstream-only siblings. See the family description above.
-bool MLIR_LowerToLLVMDialectUpstream(MLIR_Context *ctx, MLIR_OpHandle module);
-string MLIR_TranslateModuleToLLVMIRUpstream(MLIR_Context *ctx, MLIR_OpHandle module);
-string MLIR_TranslateModuleToWasmUpstream(MLIR_Context *ctx, MLIR_OpHandle module);
-
 // Accessors
 // The op's registered type, derived from its name (see MLIR_CreateOp): an
 // op named `llvm.load` is OP_TYPE_LLVM_LOAD, and an op whose name is not
 // registered is OP_TYPE_UNREGISTERED.
 MLIR_OpType MLIR_GetOpType(MLIR_OpHandle op);
 string MLIR_GetOpName(MLIR_OpHandle op);
-string MLIR_GetOpName_string(MLIR_OpHandle op);
 MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle op);
-string MLIR_GetOpTrailingComment(MLIR_OpHandle op);
-int64_t MLIR_GetOpSourceLineStart(MLIR_OpHandle op);
-MLIR_LocationHandle MLIR_GetOpUnnumberedLocationDef(MLIR_OpHandle op);
 size_t MLIR_GetOpNumOperands(MLIR_OpHandle op);
 MLIR_ValueHandle MLIR_GetOpOperand(MLIR_OpHandle op, size_t idx);
 size_t MLIR_GetOpNumResults(MLIR_OpHandle op);
 MLIR_ValueHandle MLIR_GetOpResult(MLIR_OpHandle op, size_t idx);
 size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle op);
-MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle op, size_t idx);
+MLIR_TypeHandle MLIR_GetOpResultType(MLIR_OpHandle op, size_t idx);
 size_t MLIR_GetOpNumAttributes(MLIR_OpHandle op);
 MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle op, size_t idx);
 // Like MLIR_GetOpAttribute, but looks up by name including inherent
@@ -694,7 +612,6 @@ MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_RegionHandle region, size_t idx);
 
 MLIR_BlockHandle MLIR_CreateBlock(MLIR_Context *ctx);
 void MLIR_AppendBlockOp(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_OpHandle op);
-void MLIR_InsertBlockOpBeforeTerminator(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_OpHandle op);
 // Insert `op` at position `idx` in `block`'s op list, shifting later ops
 // down by one. `idx` is clamped to [0, n_ops].
 void MLIR_InsertBlockOpAtIndex(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_OpHandle op, size_t idx);
@@ -703,9 +620,6 @@ size_t MLIR_GetBlockNumOps(MLIR_BlockHandle block);
 MLIR_OpHandle MLIR_GetBlockOp(MLIR_BlockHandle block, size_t idx);
 size_t MLIR_GetBlockNumArgs(MLIR_BlockHandle block);
 MLIR_ValueHandle MLIR_GetBlockArg(MLIR_BlockHandle block, size_t idx);
-// Returns the 0-indexed position of `block` within its parent region.
-// Returns SIZE_MAX if the block has no parent or the backend doesn't track it.
-size_t MLIR_GetBlockIndex(MLIR_BlockHandle block);
 
 // -----------------------------------------------------------------------------
 // Value API
@@ -713,8 +627,8 @@ size_t MLIR_GetBlockIndex(MLIR_BlockHandle block);
 
 // Value kind used for SSA values
 typedef enum MLIR_ValueKind {
-    BLOCK_ARG,
-    OP_RESULT
+    MLIR_VALUE_BLOCK_ARG,
+    MLIR_VALUE_OP_RESULT
 } MLIR_ValueKind;
 
 // Creation
@@ -724,7 +638,6 @@ MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_Context *ctx, MLIR_OpHandle def, 
 // Accessors
 MLIR_ValueKind MLIR_GetValueKind(MLIR_ValueHandle value);
 MLIR_TypeHandle MLIR_GetValueType(MLIR_ValueHandle value);
-string MLIR_GetValueRegisterName(MLIR_ValueHandle value);
 uint32_t MLIR_GetValueResultIndex(MLIR_ValueHandle value);
 MLIR_OpHandle MLIR_GetValueDefiningOp(MLIR_ValueHandle value);
 MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle value);
@@ -737,10 +650,8 @@ MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle value);
 MLIR_TypeHandle MLIR_CreateTypeInteger(MLIR_Context *ctx, uint32_t width, bool is_signed);
 MLIR_TypeHandle MLIR_CreateTypeFloat(MLIR_Context *ctx, uint32_t width, bool is_bfloat);
 MLIR_TypeHandle MLIR_CreateTypeIndex(MLIR_Context *ctx);
-MLIR_TypeHandle MLIR_CreateTypeUnknown(MLIR_Context *ctx);
 MLIR_TypeHandle MLIR_CreateTypeTensor(MLIR_Context *ctx, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type);
 MLIR_TypeHandle MLIR_CreateTypeMemref(MLIR_Context *ctx, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type);
-MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *ctx, MLIR_TypeHandle element_type, bool has_address_space, uint32_t address_space);
 
 // LLVM dialect types — used by frontends that emit `!llvm.ptr`,
 // `!llvm.struct`, and `!llvm.array`. Identified structs are mutable: create
@@ -796,7 +707,6 @@ MLIR_OpHandle MLIR_CreateLLVMGlobalArrayInit(MLIR_Context *ctx,
                                               string bytes,
                                               MLIR_LocationHandle loc);
 
-MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *ctx, string name);
 // Function type: (input_types) -> (result_types). Both arrays are
 // copied; passing 0 inputs/results is allowed.
 MLIR_TypeHandle MLIR_CreateTypeFunction(MLIR_Context *ctx,
@@ -817,23 +727,9 @@ MLIR_TypeHandle MLIR_CreateTypeLLVMFunction(MLIR_Context *ctx,
 // LLVM `void` type — only valid as the result of an LLVMFunctionType.
 MLIR_TypeHandle MLIR_CreateTypeLLVMVoid(MLIR_Context *ctx);
 
-// Mutation
-void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle type, uint32_t width, bool is_signed);
-void MLIR_SetTypeFloatProperties(MLIR_TypeHandle type, uint32_t width, bool is_bfloat);
-void MLIR_SetTypeTensorProperties(MLIR_TypeHandle type, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type);
-void MLIR_SetTypeMemrefProperties(MLIR_TypeHandle type, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type);
-void MLIR_SetTypePointerProperties(MLIR_TypeHandle type, MLIR_TypeHandle element_type, bool has_address_space, uint32_t address_space);
-
 // Introspection & formatting
 bool MLIR_IsTypeInteger(MLIR_TypeHandle type);
 bool MLIR_IsTypeFloat(MLIR_TypeHandle type);
-bool MLIR_IsTypeTensor(MLIR_TypeHandle type);
-bool MLIR_IsTypeMemref(MLIR_TypeHandle type);
-bool MLIR_IsTypePointer(MLIR_TypeHandle type);
-bool MLIR_IsTypeIndex(MLIR_TypeHandle type);
-bool MLIR_IsTypeUnknown(MLIR_TypeHandle type);
-bool MLIR_IsTypeOpaque(MLIR_TypeHandle type);
-bool MLIR_IsTypeFunction(MLIR_TypeHandle type);
 size_t MLIR_GetTypeFunctionNumInputs(MLIR_TypeHandle type);
 MLIR_TypeHandle MLIR_GetTypeFunctionInput(MLIR_TypeHandle type, size_t idx);
 size_t MLIR_GetTypeFunctionNumResults(MLIR_TypeHandle type);
@@ -915,26 +811,16 @@ void MLIR_ReplaceAllUsesOfValue(MLIR_Context *ctx,
 // have already called MLIR_ReplaceAllUsesOfValue on each result.
 void MLIR_EraseOp(MLIR_Context *ctx, MLIR_OpHandle op);
 
-// Replace one of `op`'s regions with `region`. The previously attached
-// region (if any) is detached and abandoned. Used when a lowering
-// rebuilds a function body wholesale rather than mutating it in place.
-void MLIR_SetOpRegion(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx,
-                      MLIR_RegionHandle region);
-
 // Detach `op`'s region at `idx` and return it as a fresh handle. After
 // this call, `op` has an empty region at `idx`. The returned handle can
-// be passed as part of a new MLIR_CreateOp call (or to MLIR_SetOpRegion)
-// to graft the body onto a replacement op without copying.
+// be passed as part of a new MLIR_CreateOp call to graft the body onto a
+// replacement op without copying.
 MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *ctx, MLIR_OpHandle op,
                                     size_t idx);
 
 // Returns the block that contains `op`, or MLIR_INVALID_HANDLE if the
 // op is not currently attached to a block.
 MLIR_BlockHandle MLIR_GetOpParentBlock(MLIR_OpHandle op);
-
-// Returns the 0-indexed position of `op` within `block`'s operations
-// list, or SIZE_MAX if `op` is not in `block`.
-size_t MLIR_GetBlockOpIndex(MLIR_BlockHandle block, MLIR_OpHandle op);
 
 // Returns the region that contains `block`, or MLIR_INVALID_HANDLE if
 // the block is not currently attached to a region.
@@ -1002,7 +888,7 @@ MLIR_OpHandle MLIR_GetBlockTerminator(MLIR_BlockHandle block);
 MLIR_OpHandle MLIR_GetBlockParentOp(MLIR_BlockHandle block);
 
 // Returns true if `block` is the first block of its parent region.
-bool MLIR_BlockIsEntry(MLIR_BlockHandle block);
+bool MLIR_IsBlockEntry(MLIR_BlockHandle block);
 
 // Returns the number of incoming edges to `block` from terminators in
 // other blocks of the same parent region. Each (predecessor block,
@@ -1047,10 +933,6 @@ size_t MLIR_GetValueNumUses(MLIR_Context *ctx, MLIR_ValueHandle value);
 MLIR_OpHandle MLIR_GetValueUseOwner(MLIR_Context *ctx, MLIR_ValueHandle value,
                                     size_t idx, size_t *out_operand_idx);
 
-// Replaces all of `op`'s operands with the `n` values in `values`.
-void MLIR_SetOpOperands(MLIR_Context *ctx, MLIR_OpHandle op,
-                        const MLIR_ValueHandle *values, size_t n);
-
 // Appends `value` to the successor-operand list at `succ_idx` of `op`.
 // On the upstream backend this resizes the segment via
 // `BranchOpInterface::SuccessorOperands::append`; on the native backend
@@ -1062,35 +944,6 @@ void MLIR_AppendOpSuccessorOperand(MLIR_Context *ctx, MLIR_OpHandle op,
 // remains attached to its parent region.
 void MLIR_SpliceBlockOps(MLIR_Context *ctx, MLIR_BlockHandle dst,
                          MLIR_BlockHandle src);
-
-// Options for MLIR_LiftCfToScf. Zero-initialise for the defaults.
-typedef struct MLIR_LiftCfToScfOptions {
-    // Which dialect's branch ops form the CFG to structurize, and which
-    // dialect the lift's own intermediate branches are created in:
-    //   false: cf.br / cf.cond_br / cf.switch
-    //   true:  llvm.br / llvm.cond_br / llvm.switch (a module that is
-    //          already LLVM dialect only, e.g. MLIR_LowerToLLVMDialect
-    //          output). Branch ops of the other family are rejected.
-    bool llvm_cfg;
-} MLIR_LiftCfToScfOptions;
-
-// Lift the control-flow graph of every `func.func` / `llvm.func` body in
-// `module` into structured control flow (scf.if / scf.while /
-// scf.index_switch). `options` may be NULL (all defaults).
-//
-// Its one in-tree user is the wasm backend (mlir_llvm_to_wasmssa.c), which
-// runs it with `llvm_cfg = true` as its internal structurization step:
-// WebAssembly has no arbitrary branches, so the backend rebuilds
-// structured control flow from the LLVM-dialect CFG it is handed.
-//
-// Returns true on success, false on failure (e.g. a CFG that the lift
-// could not transform into SCF). Both API implementations run the
-// in-tree agnostic C port of upstream MLIR's `transformCFGToSCF`
-// (Bahmann/Reissmann 2015) in `mlir_lift_cf_to_scf.c` (see that file's
-// header for the documented limitations); the upstream-backed
-// implementation additionally drops unreachable blocks first.
-bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module,
-                      const MLIR_LiftCfToScfOptions *options);
 
 // Introspection
 typedef enum {
@@ -1141,16 +994,13 @@ typedef enum {
 MLIR_LocationHandle MLIR_CreateLocationUnknown(MLIR_Context *ctx, string original_text);
 MLIR_LocationHandle MLIR_CreateLocationFile(MLIR_Context *ctx, string filename, int line, int column);
 MLIR_LocationHandle MLIR_CreateLocationName(MLIR_Context *ctx, string name);
-MLIR_LocationHandle MLIR_CreateLocationRef(MLIR_Context *ctx, int ref_id);
 
 // Accessors
 MLIR_LocationKind MLIR_GetLocationKind(MLIR_LocationHandle loc);
-string MLIR_GetLocationOriginalText(MLIR_LocationHandle loc);
 string MLIR_GetLocationFileFilename(MLIR_LocationHandle loc);
 int MLIR_GetLocationFileLine(MLIR_LocationHandle loc);
 int MLIR_GetLocationFileColumn(MLIR_LocationHandle loc);
 string MLIR_GetLocationName(MLIR_LocationHandle loc);
-int MLIR_GetLocationRefId(MLIR_LocationHandle loc);
 
 #ifdef __cplusplus
 }

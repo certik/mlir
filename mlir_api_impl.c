@@ -10,6 +10,9 @@
 #include "mlir_api.h"
 #include "mlir_op_names.h"
 #include "mlir_parser.h"
+#include "mlir_printer.h"
+#include "mlir_passes.h"
+#include "mlir_api_upstream.h"
 #include <string.h>
 
 #ifdef __cplusplus
@@ -176,7 +179,7 @@ typedef struct IR_ValueAux {
 typedef struct IR_Value {
     MLIR_ValueKind kind;
     uint32_t result_index;
-    uintptr_t def_handle;  // MLIR_OpHandle if OP_RESULT, MLIR_BlockHandle if BLOCK_ARG
+    uintptr_t def_handle;  // MLIR_OpHandle for an op result, MLIR_BlockHandle for a block arg
     MLIR_TypeHandle type;
     MLIR_LocationHandle location;
     // Rarely-needed-on-the-hot-path value metadata: the SSA register name
@@ -750,11 +753,6 @@ void MLIR_AppendBlockOp(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHandle op
     if (o) o->parent_block = bh;
 }
 
-void MLIR_InsertBlockOpBeforeTerminator(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHandle op) {
-    // Legacy text backend has no terminator concept; fall back to append.
-    MLIR_AppendBlockOp(ctx, bh, op);
-}
-
 void MLIR_InsertBlockOpAtIndex(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHandle op, size_t idx) {
     IR_Block *block = resolve_block(bh);
     if (!block || !ctx || !ctx->arena) return;
@@ -918,19 +916,12 @@ string MLIR_GetOpName(MLIR_OpHandle oh) {
     return op_type_to_string(op->op_type);
 }
 
-string MLIR_GetOpName_string(MLIR_OpHandle oh) {
-    IR_Op *op = resolve_op(oh);
-    if (!op) return str_lit("");
-    if (op->aux && op->aux->opname.str) return op->aux->opname;
-    return op_type_to_string(op->op_type);
-}
-
 size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle oh) {
     IR_Op *op = resolve_op(oh);
     return op ? op->n_result_types : 0;
 }
 
-MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle oh, size_t idx) {
+MLIR_TypeHandle MLIR_GetOpResultType(MLIR_OpHandle oh, size_t idx) {
     IR_Op *op = resolve_op(oh);
     if (!op || idx >= op->n_result_types) return MLIR_INVALID_HANDLE;
     return op->result_types[idx];
@@ -987,7 +978,8 @@ MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle vh) {
     return v ? v->location : MLIR_INVALID_HANDLE;
 }
 
-// Type to string
+// Stubs for two mlir_api_upstream.h entry points, so that the `parser` test
+// driver, which can select them at run time, links with this backend too.
 string MLIR_PrintOperationUpstream(MLIR_Context *ctx, MLIR_OpHandle op) {
     (void)ctx; (void)op;
     return str_lit("error: MLIR_PrintOperationUpstream requires the upstream backend\n");
@@ -998,6 +990,7 @@ MLIR_OpHandle MLIR_ParseTextUpstream(MLIR_Context *ctx, string text) {
     return MLIR_INVALID_HANDLE;
 }
 
+// Type to string
 string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle th) {
     IR_Type *type = resolve_type(th);
     if (!type) return str_lit("null");
@@ -1462,11 +1455,6 @@ MLIR_TypeHandle MLIR_CreateTypeFunction(MLIR_Context *ctx,
     return intern_type(ctx, t);
 }
 
-bool MLIR_IsTypeFunction(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    return t && (t->kind == TYPE_KIND_FUNCTION || t->kind == TYPE_KIND_LLVM_FUNCTION);
-}
-
 size_t MLIR_GetTypeFunctionNumInputs(MLIR_TypeHandle th) {
     IR_Type *t = resolve_type(th);
     if (!t) return 0;
@@ -1570,24 +1558,6 @@ uint32_t MLIR_GetTypeLLVMPointerAddressSpace(MLIR_TypeHandle th) {
     IR_Type *t = resolve_type(th);
     return (t && t->kind == TYPE_KIND_LLVM_PTR)
         ? t->data.llvm_pointer.address_space : 0;
-}
-
-void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle th, uint32_t width, bool is_signed) {
-    // `is_signed` is intentionally ignored — see MLIR_CreateTypeInteger.
-    (void)is_signed;
-    IR_Type *t = resolve_type(th);
-    if (!t) return;
-    t->kind = TYPE_KIND_INTEGER;
-    t->data.integer.width = width;
-    t->data.integer.is_signed = false;
-}
-
-void MLIR_SetTypeFloatProperties(MLIR_TypeHandle th, uint32_t width, bool is_bfloat) {
-    IR_Type *t = resolve_type(th);
-    if (!t) return;
-    t->kind = TYPE_KIND_FLOAT;
-    t->data.floating.width = width;
-    t->data.floating.is_bfloat = is_bfloat;
 }
 
 // Attribute creation
@@ -1733,7 +1703,7 @@ MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *ctx, 
 // Value creation
 MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_name, uint32_t result_index, MLIR_TypeHandle type, MLIR_LocationHandle location) {
     IR_Value v = {0};
-    v.kind = BLOCK_ARG;
+    v.kind = MLIR_VALUE_BLOCK_ARG;
     v.aux = value_aux_create(ctx, register_name);
     v.result_index = result_index;
     v.type = type;
@@ -1744,7 +1714,7 @@ MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_nam
 
 MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_Context *ctx, MLIR_OpHandle def, uint32_t result_index, MLIR_TypeHandle type, string register_name, MLIR_LocationHandle location) {
     IR_Value v = {0};
-    v.kind = OP_RESULT;
+    v.kind = MLIR_VALUE_OP_RESULT;
     v.def_handle = def;
     v.result_index = result_index;
     v.type = type;
@@ -1776,16 +1746,6 @@ void MLIR_AppendOpAttribute(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_AttributeH
     new_attrs[new_count - 1] = attr;
     op->attributes = new_attrs;
     op->n_attributes = new_count;
-}
-
-int64_t MLIR_GetOpSourceLineStart(MLIR_OpHandle oh) {
-    IR_Op *op = resolve_op(oh);
-    return (op && op->aux) ? op->aux->source_line_start : -1;
-}
-
-MLIR_LocationHandle MLIR_GetOpUnnumberedLocationDef(MLIR_OpHandle oh) {
-    IR_Op *op = resolve_op(oh);
-    return (op && op->aux) ? op->aux->unnumbered_loc_def : MLIR_INVALID_HANDLE;
 }
 
 // Attribute accessors
@@ -1881,7 +1841,7 @@ MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_AttributeHandle ah) {
 // Value accessors
 MLIR_ValueKind MLIR_GetValueKind(MLIR_ValueHandle vh) {
     IR_Value *v = resolve_value(vh);
-    return v ? v->kind : BLOCK_ARG;
+    return v ? v->kind : MLIR_VALUE_BLOCK_ARG;
 }
 
 MLIR_TypeHandle MLIR_GetValueType(MLIR_ValueHandle vh) {
@@ -1901,11 +1861,11 @@ uint32_t MLIR_GetValueResultIndex(MLIR_ValueHandle vh) {
 
 MLIR_OpHandle MLIR_GetValueDefiningOp(MLIR_ValueHandle vh) {
     IR_Value *v = resolve_value(vh);
-    if (!v || v->kind != OP_RESULT) return MLIR_INVALID_HANDLE;
+    if (!v || v->kind != MLIR_VALUE_OP_RESULT) return MLIR_INVALID_HANDLE;
     return (MLIR_OpHandle)v->def_handle;
 }
 
-string MLIR_MLIR_OpTypeToString(MLIR_OpType type) {
+string MLIR_GetOpTypeName(MLIR_OpType type) {
     return op_type_to_string(type);
 }
 
@@ -1946,11 +1906,6 @@ int MLIR_GetLocationFileColumn(MLIR_LocationHandle lh) {
 string MLIR_GetLocationName(MLIR_LocationHandle lh) {
     IR_Location *loc = resolve_loc(lh);
     return loc ? loc->data.name.name : str_lit("");
-}
-
-int MLIR_GetLocationRefId(MLIR_LocationHandle lh) {
-    IR_Location *loc = resolve_loc(lh);
-    return loc ? loc->data.ref.ref_id : 0;
 }
 
 MLIR_LocationHandle MLIR_CreateLocationUnknown(MLIR_Context *ctx, string original_text) {
@@ -1999,33 +1954,6 @@ MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *ctx, string name) {
     return intern_type(ctx, t);
 }
 
-void MLIR_SetTypeTensorProperties(MLIR_TypeHandle th, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type) {
-    IR_Type *t = resolve_type(th);
-    if (!t) return;
-    t->kind = TYPE_KIND_TENSOR;
-    t->data.shaped.element_type = element_type;
-    t->data.shaped.shape = (int64_t*)shape;
-    t->data.shaped.rank = (uint32_t)rank;
-}
-
-void MLIR_SetTypeMemrefProperties(MLIR_TypeHandle th, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type) {
-    IR_Type *t = resolve_type(th);
-    if (!t) return;
-    t->kind = TYPE_KIND_MEMREF;
-    t->data.shaped.element_type = element_type;
-    t->data.shaped.shape = (int64_t*)shape;
-    t->data.shaped.rank = (uint32_t)rank;
-}
-
-void MLIR_SetTypePointerProperties(MLIR_TypeHandle th, MLIR_TypeHandle element_type, bool has_address_space, uint32_t address_space) {
-    IR_Type *t = resolve_type(th);
-    if (!t) return;
-    t->kind = TYPE_KIND_POINTER;
-    t->data.pointer.element_type = element_type;
-    t->data.pointer.has_address_space = has_address_space;
-    t->data.pointer.address_space = address_space;
-}
-
 // Type introspection
 bool MLIR_IsTypeInteger(MLIR_TypeHandle th) {
     IR_Type *t = resolve_type(th);
@@ -2035,36 +1963,6 @@ bool MLIR_IsTypeInteger(MLIR_TypeHandle th) {
 bool MLIR_IsTypeFloat(MLIR_TypeHandle th) {
     IR_Type *t = resolve_type(th);
     return t && t->kind == TYPE_KIND_FLOAT;
-}
-
-bool MLIR_IsTypeTensor(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    return t && t->kind == TYPE_KIND_TENSOR;
-}
-
-bool MLIR_IsTypeMemref(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    return t && t->kind == TYPE_KIND_MEMREF;
-}
-
-bool MLIR_IsTypePointer(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    return t && t->kind == TYPE_KIND_POINTER;
-}
-
-bool MLIR_IsTypeIndex(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    return t && t->kind == TYPE_KIND_INDEX;
-}
-
-bool MLIR_IsTypeUnknown(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    return t && t->kind == TYPE_KIND_UNKNOWN;
-}
-
-bool MLIR_IsTypeOpaque(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    return t && t->kind == TYPE_KIND_OPAQUE;
 }
 
 // IR mutation primitives — native implementations used by the Stage B/C
@@ -2154,14 +2052,6 @@ void MLIR_EraseOp(MLIR_Context *ctx, MLIR_OpHandle op) {
     o->parent_block = MLIR_INVALID_HANDLE;
 }
 
-void MLIR_SetOpRegion(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx,
-                      MLIR_RegionHandle region) {
-    (void)ctx;
-    IR_Op *o = resolve_op(op);
-    if (!o || idx >= o->n_regions) return;
-    o->regions[idx] = region;
-}
-
 MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *ctx, MLIR_OpHandle op,
                                     size_t idx) {
     IR_Op *o = resolve_op(op);
@@ -2177,15 +2067,6 @@ MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *ctx, MLIR_OpHandle op,
 MLIR_BlockHandle MLIR_GetOpParentBlock(MLIR_OpHandle op) {
     IR_Op *o = resolve_op(op);
     return o ? o->parent_block : MLIR_INVALID_HANDLE;
-}
-
-size_t MLIR_GetBlockOpIndex(MLIR_BlockHandle block, MLIR_OpHandle op) {
-    IR_Block *b = resolve_block(block);
-    if (!b) return (size_t)-1;
-    for (size_t i = 0; i < b->n_operations; i++) {
-        if (b->operations[i] == op) return i;
-    }
-    return (size_t)-1;
 }
 
 MLIR_RegionHandle MLIR_GetBlockParentRegion(MLIR_BlockHandle block) {
@@ -2461,7 +2342,7 @@ MLIR_OpHandle MLIR_GetBlockParentOp(MLIR_BlockHandle block) {
     return MLIR_INVALID_HANDLE;
 }
 
-bool MLIR_BlockIsEntry(MLIR_BlockHandle block) {
+bool MLIR_IsBlockEntry(MLIR_BlockHandle block) {
     IR_Block *b = resolve_block(block);
     if (!b) return false;
     IR_Region *r = resolve_region(b->parent_region);
@@ -2536,7 +2417,7 @@ MLIR_ValueHandle MLIR_AddBlockArgument(MLIR_Context *ctx, MLIR_BlockHandle block
     // Create the BlockArg value.
     IR_Value *v = arena_new(arena, IR_Value);
     *v = (IR_Value){0};
-    v->kind = BLOCK_ARG;
+    v->kind = MLIR_VALUE_BLOCK_ARG;
     v->def_handle = (uintptr_t)block;
     v->result_index = (uint32_t)b->n_arguments;
     v->type = type;
@@ -2581,9 +2462,9 @@ void MLIR_EraseBlockArguments(MLIR_Context *ctx, MLIR_BlockHandle block,
 MLIR_BlockHandle MLIR_GetValueParentBlock(MLIR_ValueHandle value) {
     IR_Value *v = resolve_value(value);
     if (!v) return MLIR_INVALID_HANDLE;
-    if (v->kind == BLOCK_ARG)
+    if (v->kind == MLIR_VALUE_BLOCK_ARG)
         return (MLIR_BlockHandle)v->def_handle;
-    if (v->kind == OP_RESULT) {
+    if (v->kind == MLIR_VALUE_OP_RESULT) {
         IR_Op *op = resolve_op((MLIR_OpHandle)v->def_handle);
         if (!op) return MLIR_INVALID_HANDLE;
         return op->parent_block;
@@ -2630,28 +2511,6 @@ MLIR_OpHandle MLIR_GetValueUseOwner(MLIR_Context *ctx, MLIR_ValueHandle value,
         }
     }
     return u->owner;
-}
-
-void MLIR_SetOpOperands(MLIR_Context *ctx, MLIR_OpHandle op,
-                        const MLIR_ValueHandle *values, size_t n) {
-    IR_Op *o = resolve_op(op);
-    if (!o) return;
-    Arena *arena = MLIR_GetArenaAllocator(ctx);
-    // Unregister all existing operand uses.
-    if (o->aux && o->aux->operand_uses) {
-        for (uint64_t i = 0; i < o->n_operands; i++) {
-            use_unregister(o->operands[i], o->aux->operand_uses[i]);
-        }
-    }
-    MLIR_ValueHandle *nv = n ? arena_new_array(arena, MLIR_ValueHandle, n) : NULL;
-    for (size_t i = 0; i < n; i++) nv[i] = values ? values[i] : MLIR_INVALID_HANDLE;
-    o->operands = nv;
-    o->n_operands = n;
-    if (!o->aux) o->aux = op_aux_default(arena);
-    o->aux->operand_uses = n ? arena_new_array(arena, UseNode *, n) : NULL;
-    for (size_t i = 0; i < n; i++) {
-        o->aux->operand_uses[i] = use_register_operand(ctx, op, nv[i], (uint32_t)i);
-    }
 }
 
 void MLIR_AppendOpSuccessorOperand(MLIR_Context *ctx, MLIR_OpHandle op,
@@ -2725,7 +2584,7 @@ bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module,
 }
 
 // The lowering / LLVM-IR-translation / wasm-translation entry points
-// declared in mlir_api.h are implemented in dedicated agnostic
+// declared in mlir_passes.h are implemented in dedicated agnostic
 // translation units (mlir_lower_to_llvm.c, mlir_translate_to_llvm_ir.c,
 // mlir_translate_to_wasm.c). They are linked into hosted builds
 // alongside this file. There is no parser-only "native" build, so we

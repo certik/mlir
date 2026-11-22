@@ -7,11 +7,53 @@
 
 #include "tokenizer.h"
 #include "mlir_api.h"
+#include "mlir_printer.h"
 
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// -----------------------------------------------------------------------------
+// Public parser API
+// -----------------------------------------------------------------------------
+
+// Parse a top-level MLIR module from text with the in-tree parser
+// (mlir_parser.c). Returns MLIR_INVALID_HANDLE on failure. The upstream
+// parser, MLIR_ParseTextUpstream, is in mlir_api_upstream.h.
+MLIR_OpHandle MLIR_ParseTextClassic(MLIR_Context *ctx, string text);
+
+// The named-location map that the parser fills (MLIR_LocationMap) is
+// declared in mlir_printer.h, which this header includes.
+
+// -----------------------------------------------------------------------------
+// Parser support
+// -----------------------------------------------------------------------------
+//
+// Constructors and accessors that only the parser uses. Each backend
+// implements them; they are not part of the core API.
+
+// Placeholder type for a value whose type is not known yet.
+MLIR_TypeHandle MLIR_CreateTypeUnknown(MLIR_Context *ctx);
+// Triton `!tt.ptr<element_type>` (optionally with an address space).
+MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *ctx, MLIR_TypeHandle element_type, bool has_address_space, uint32_t address_space);
+// Opaque dialect type.
+MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *ctx, string name);
+// Reference to a named location `#loc<ref_id>`.
+MLIR_LocationHandle MLIR_CreateLocationRef(MLIR_Context *ctx, int ref_id);
+// Comment that followed the op in the source text (MLIR_CreateOp's
+// `trailing_comment`), or an empty string.
+string MLIR_GetOpTrailingComment(MLIR_OpHandle op);
+
+// Vector helpers used by the parser implementation
+DEFINE_VECTOR_FOR_TYPE(MLIR_OpHandle, VecOp)
+DEFINE_VECTOR_FOR_TYPE(MLIR_ValueHandle, VecValue)
+DEFINE_VECTOR_FOR_TYPE(MLIR_BlockHandle, VecBlock)
+DEFINE_VECTOR_FOR_TYPE(MLIR_AttributeHandle, VecAttribute)
+
+// -----------------------------------------------------------------------------
+// Parser internals
+// -----------------------------------------------------------------------------
 
 
 typedef struct OperationParserParams {
@@ -165,9 +207,6 @@ string type_to_string(MLIR_Context *ctx, MLIR_TypeHandle type);
 // Public parser facade
 MLIR_OpHandle mlir_parse_module(MLIR_Context *ctx, const char *input, size_t input_len, MLIR_LocationMap **out_location_map);
 const char *mlir_tokentype_to_string(int token_type);
-size_t MLIR_GetLocationMapSize(const MLIR_LocationMap *location_map);
-size_t MLIR_CollectLocationMap(const MLIR_LocationMap *location_map, string *out_keys, MLIR_LocationHandle *out_locs, size_t max);
-
 MLIR_TypeHandle mlir_type_create_from_string(MLIR_Context *ctx, string type_str);
 
 #ifdef __cplusplus

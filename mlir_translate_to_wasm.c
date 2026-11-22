@@ -14,6 +14,7 @@
 #include <stddef.h>
 
 #include "mlir_api.h"
+#include "mlir_passes.h"
 #include "mlir_llvm_to_wasmssa.h"
 #include "mlir_wasmssa_to_wasmstack.h"
 #include "mlir_wasmstack_to_bin.h"

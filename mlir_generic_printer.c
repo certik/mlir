@@ -47,7 +47,7 @@ static string format_value_name(PrintCtx *ctx, MLIR_ValueHandle v) {
     Arena *arena = ctx->arena;
     string name = MLIR_GetValueRegisterName(v);
     if (name.size > 0) return name;
-    if (MLIR_GetValueKind(v) == BLOCK_ARG) {
+    if (MLIR_GetValueKind(v) == MLIR_VALUE_BLOCK_ARG) {
         uint32_t *found = SsaMap_get(&ctx->arg_map, v);
         uint32_t n;
         if (found) {
@@ -177,7 +177,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
         strbuf_append(arena, &result, str_lit(" = "));
     }
     MLIR_OpType op_type = MLIR_GetOpType(op);
-    string opname = MLIR_GetOpName_string(op);
+    string opname = MLIR_GetOpName(op);
     if (op_type == OP_TYPE_UNREGISTERED) {
         strbuf_append(arena, &result, str_lit("\""));
         if (opname.size > 0) strbuf_append(arena, &result, opname);
@@ -185,7 +185,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
         strbuf_append(arena, &result, str_lit("\""));
     } else {
         if (opname.size > 0) strbuf_append(arena, &result, opname);
-        else strbuf_append(arena, &result, MLIR_MLIR_OpTypeToString(op_type));
+        else strbuf_append(arena, &result, MLIR_GetOpTypeName(op_type));
     }
     strbuf_append(arena, &result, str_lit("("));
     bool first_op = true;
@@ -265,7 +265,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
                         // printed type (covers arith.constant which is the
                         // common case for FloatAttr-as-value).
                         size_t nrt = MLIR_GetOpNumResultTypes(op);
-                        MLIR_TypeHandle ft = (nrt > 0) ? MLIR_GetOpResult_type(op, 0) : MLIR_INVALID_HANDLE;
+                        MLIR_TypeHandle ft = (nrt > 0) ? MLIR_GetOpResultType(op, 0) : MLIR_INVALID_HANDLE;
                         string ts = ft ? MLIR_GetTypeString(ctx->mlir_ctx, ft) : str_lit("f64");
                         strbuf_append(arena, &result, format(arena, str_lit("{} : {}"), str_from_cstr_view(buf), ts));
                         break;
@@ -355,7 +355,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
         strbuf_append(arena, &result, str_lit(" -> "));
         for (size_t i = 0; i < api_num_result_types; i++) {
             if (i > 0) strbuf_append(arena, &result, str_lit(", "));
-            MLIR_TypeHandle rt = MLIR_GetOpResult_type(op, i);
+            MLIR_TypeHandle rt = MLIR_GetOpResultType(op, i);
             if (rt) strbuf_append(arena, &result, MLIR_GetTypeString(ctx->mlir_ctx, rt)); else strbuf_append(arena, &result, str_lit("?"));
         }
     }

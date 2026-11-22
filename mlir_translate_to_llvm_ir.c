@@ -18,6 +18,7 @@
 #include <base/string.h>
 
 #include "mlir_api.h"
+#include "mlir_passes.h"
 #include "mlir_llvm_type_layout.h"
 
 // -----------------------------------------------------------------------------
@@ -436,7 +437,7 @@ static MLIR_AttributeHandle find_attr(MLIR_OpHandle op, const char *name) {
 static void emit_call(FnCtx *F, MLIR_OpHandle op) {
     Buf *out = F->out;
     size_t nres = MLIR_GetOpNumResults(op);
-    MLIR_TypeHandle rty = nres ? MLIR_GetOpResult_type(op, 0) : MLIR_INVALID_HANDLE;
+    MLIR_TypeHandle rty = nres ? MLIR_GetOpResultType(op, 0) : MLIR_INVALID_HANDLE;
     bool is_void = (nres == 0);
 
     // Find callee (symbol) attr — "callee" for direct, none for indirect (the
@@ -655,7 +656,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         buf_putc(out, ' ');
         emit_use(F, a);
         buf_cstr(out, " to ");
-        print_type(out, F->ctx, MLIR_GetOpResult_type(op, 0));
+        print_type(out, F->ctx, MLIR_GetOpResultType(op, 0));
         buf_putc(out, '\n');
         return;
     }
@@ -747,7 +748,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
     case OP_TYPE_LLVM_LOAD: {
         // %r = load T, ptr p, align A
         MLIR_ValueHandle ptr = MLIR_GetOpOperand(op, 0);
-        MLIR_TypeHandle rty = MLIR_GetOpResult_type(op, 0);
+        MLIR_TypeHandle rty = MLIR_GetOpResultType(op, 0);
         buf_cstr(out, "  ");
         emit_use(F, MLIR_GetOpResult(op, 0));
         buf_cstr(out, " = load ");
@@ -917,7 +918,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         const char *iname = opn.str + 10;
         size_t in = opn.size - 10;
         bool has_res = MLIR_GetOpNumResults(op) > 0;
-        MLIR_TypeHandle rty = has_res ? MLIR_GetOpResult_type(op, 0) :
+        MLIR_TypeHandle rty = has_res ? MLIR_GetOpResultType(op, 0) :
                               (MLIR_GetOpNumOperands(op) > 0 ? MLIR_GetValueType(MLIR_GetOpOperand(op, 0)) : MLIR_INVALID_HANDLE);
         // Pick suffix from the first operand/result type (f32/f64/etc.)
         const char *suffix = "f64";
@@ -1370,7 +1371,7 @@ static void scan_type_for_structs(MLIR_Context *ctx, MLIR_TypeHandle ty, StructL
 
 static void scan_op_for_structs(MLIR_Context *ctx, MLIR_OpHandle op, StructList *L) {
     size_t nr = MLIR_GetOpNumResults(op);
-    for (size_t i = 0; i < nr; i++) scan_type_for_structs(ctx, MLIR_GetOpResult_type(op, i), L);
+    for (size_t i = 0; i < nr; i++) scan_type_for_structs(ctx, MLIR_GetOpResultType(op, i), L);
     size_t no = MLIR_GetOpNumOperands(op);
     for (size_t i = 0; i < no; i++) scan_type_for_structs(ctx, MLIR_GetValueType(MLIR_GetOpOperand(op, i)), L);
     size_t na = MLIR_GetOpNumAttributes(op);

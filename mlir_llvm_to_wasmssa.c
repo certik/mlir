@@ -46,6 +46,7 @@
 #include <string.h>
 
 #include "mlir_api.h"
+#include "mlir_passes.h"
 #include "mlir_op_names.h"
 #include "mlir_llvm_to_wasmssa.h"
 #include "mlir_llvm_type_layout.h"
