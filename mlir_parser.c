@@ -881,7 +881,7 @@ MLIR_ValueHandle *finalize_results(const OperationParserParams *params,
         if (!types_array && op) {
             types_array = arena_new_array(params->arena, MLIR_TypeHandle, n_result_types);
             for (size_t i = 0; i < n_result_types; i++) {
-                types_array[i] = MLIR_GetOpResult_type(op, i);
+                types_array[i] = MLIR_GetOpResultType(op, i);
             }
         }
         for (size_t i = 0; i < n_result_types; i++) {

@@ -179,7 +179,7 @@ typedef struct IR_ValueAux {
 typedef struct IR_Value {
     MLIR_ValueKind kind;
     uint32_t result_index;
-    uintptr_t def_handle;  // MLIR_OpHandle if OP_RESULT, MLIR_BlockHandle if BLOCK_ARG
+    uintptr_t def_handle;  // MLIR_OpHandle for an op result, MLIR_BlockHandle for a block arg
     MLIR_TypeHandle type;
     MLIR_LocationHandle location;
     // Rarely-needed-on-the-hot-path value metadata: the SSA register name
@@ -916,19 +916,12 @@ string MLIR_GetOpName(MLIR_OpHandle oh) {
     return op_type_to_string(op->op_type);
 }
 
-string MLIR_GetOpName_string(MLIR_OpHandle oh) {
-    IR_Op *op = resolve_op(oh);
-    if (!op) return str_lit("");
-    if (op->aux && op->aux->opname.str) return op->aux->opname;
-    return op_type_to_string(op->op_type);
-}
-
 size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle oh) {
     IR_Op *op = resolve_op(oh);
     return op ? op->n_result_types : 0;
 }
 
-MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle oh, size_t idx) {
+MLIR_TypeHandle MLIR_GetOpResultType(MLIR_OpHandle oh, size_t idx) {
     IR_Op *op = resolve_op(oh);
     if (!op || idx >= op->n_result_types) return MLIR_INVALID_HANDLE;
     return op->result_types[idx];
@@ -1710,7 +1703,7 @@ MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *ctx, 
 // Value creation
 MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_name, uint32_t result_index, MLIR_TypeHandle type, MLIR_LocationHandle location) {
     IR_Value v = {0};
-    v.kind = BLOCK_ARG;
+    v.kind = MLIR_VALUE_BLOCK_ARG;
     v.aux = value_aux_create(ctx, register_name);
     v.result_index = result_index;
     v.type = type;
@@ -1721,7 +1714,7 @@ MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_nam
 
 MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_Context *ctx, MLIR_OpHandle def, uint32_t result_index, MLIR_TypeHandle type, string register_name, MLIR_LocationHandle location) {
     IR_Value v = {0};
-    v.kind = OP_RESULT;
+    v.kind = MLIR_VALUE_OP_RESULT;
     v.def_handle = def;
     v.result_index = result_index;
     v.type = type;
@@ -1848,7 +1841,7 @@ MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_AttributeHandle ah) {
 // Value accessors
 MLIR_ValueKind MLIR_GetValueKind(MLIR_ValueHandle vh) {
     IR_Value *v = resolve_value(vh);
-    return v ? v->kind : BLOCK_ARG;
+    return v ? v->kind : MLIR_VALUE_BLOCK_ARG;
 }
 
 MLIR_TypeHandle MLIR_GetValueType(MLIR_ValueHandle vh) {
@@ -1868,11 +1861,11 @@ uint32_t MLIR_GetValueResultIndex(MLIR_ValueHandle vh) {
 
 MLIR_OpHandle MLIR_GetValueDefiningOp(MLIR_ValueHandle vh) {
     IR_Value *v = resolve_value(vh);
-    if (!v || v->kind != OP_RESULT) return MLIR_INVALID_HANDLE;
+    if (!v || v->kind != MLIR_VALUE_OP_RESULT) return MLIR_INVALID_HANDLE;
     return (MLIR_OpHandle)v->def_handle;
 }
 
-string MLIR_MLIR_OpTypeToString(MLIR_OpType type) {
+string MLIR_GetOpTypeName(MLIR_OpType type) {
     return op_type_to_string(type);
 }
 
@@ -2349,7 +2342,7 @@ MLIR_OpHandle MLIR_GetBlockParentOp(MLIR_BlockHandle block) {
     return MLIR_INVALID_HANDLE;
 }
 
-bool MLIR_BlockIsEntry(MLIR_BlockHandle block) {
+bool MLIR_IsBlockEntry(MLIR_BlockHandle block) {
     IR_Block *b = resolve_block(block);
     if (!b) return false;
     IR_Region *r = resolve_region(b->parent_region);
@@ -2424,7 +2417,7 @@ MLIR_ValueHandle MLIR_AddBlockArgument(MLIR_Context *ctx, MLIR_BlockHandle block
     // Create the BlockArg value.
     IR_Value *v = arena_new(arena, IR_Value);
     *v = (IR_Value){0};
-    v->kind = BLOCK_ARG;
+    v->kind = MLIR_VALUE_BLOCK_ARG;
     v->def_handle = (uintptr_t)block;
     v->result_index = (uint32_t)b->n_arguments;
     v->type = type;
@@ -2469,9 +2462,9 @@ void MLIR_EraseBlockArguments(MLIR_Context *ctx, MLIR_BlockHandle block,
 MLIR_BlockHandle MLIR_GetValueParentBlock(MLIR_ValueHandle value) {
     IR_Value *v = resolve_value(value);
     if (!v) return MLIR_INVALID_HANDLE;
-    if (v->kind == BLOCK_ARG)
+    if (v->kind == MLIR_VALUE_BLOCK_ARG)
         return (MLIR_BlockHandle)v->def_handle;
-    if (v->kind == OP_RESULT) {
+    if (v->kind == MLIR_VALUE_OP_RESULT) {
         IR_Op *op = resolve_op((MLIR_OpHandle)v->def_handle);
         if (!op) return MLIR_INVALID_HANDLE;
         return op->parent_block;

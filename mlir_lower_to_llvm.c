@@ -143,7 +143,7 @@ static bool lower_arith_index_cast(LowerState *st, MLIR_OpHandle op,
         return false;
     MLIR_ValueHandle src = MLIR_GetOpOperand(op, 0);
     MLIR_TypeHandle src_ty = MLIR_GetValueType(src);
-    MLIR_TypeHandle dst_ty = MLIR_GetOpResult_type(op, 0);
+    MLIR_TypeHandle dst_ty = MLIR_GetOpResultType(op, 0);
     MLIR_LocationHandle loc = MLIR_GetOpLocation(op);
     MLIR_ValueHandle old_res = MLIR_GetOpResult(op, 0);
     MLIR_TypeHandle i64ty = ty_i64(st->ctx);

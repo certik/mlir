@@ -164,7 +164,7 @@ static MLIR_ValueHandle ag_canon(AgMap *repl, MLIR_ValueHandle v) {
 // `mul x, 8` against another `mul x, 8`).
 static bool ag_const_operand(MLIR_Context *ctx, MLIR_ValueHandle v,
                              int64_t *val, uint64_t *tykey) {
-    MLIR_OpHandle d = (MLIR_GetValueKind(v) == OP_RESULT) ? MLIR_GetValueDefiningOp(v)
+    MLIR_OpHandle d = (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) ? MLIR_GetValueDefiningOp(v)
                                                           : MLIR_INVALID_HANDLE;
     if (d == MLIR_INVALID_HANDLE) return false;
     if (MLIR_GetOpType(d) != OP_TYPE_LLVM_MLIR_CONSTANT) return false;
@@ -208,7 +208,7 @@ static void ag_build_key(AgKB *k, MLIR_Context *ctx, AgMap *repl, MLIR_OpHandle 
     agkb_reset(k);
     agkb_bytes(k, "A", 1);
     ag_emit_op_ident(k, ctx, op);
-    agkb_u64(k, (uint64_t)MLIR_GetOpResult_type(op, 0));
+    agkb_u64(k, (uint64_t)MLIR_GetOpResultType(op, 0));
     size_t no = MLIR_GetOpNumOperands(op);
     agkb_u64(k, no);
     if (no == 2 && ag_is_commutative(op)) {
@@ -286,7 +286,7 @@ static void ag_dce(MLIR_Context *ctx, MLIR_RegionHandle region,
             size_t non = MLIR_GetOpNumOperands(op);
             for (size_t kk = 0; kk < non; kk++) {
                 MLIR_ValueHandle v = MLIR_GetOpOperand(op, kk);
-                if (MLIR_GetValueKind(v) == OP_RESULT) {
+                if (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) {
                     int64_t c0 = 0; agmap_get(&uses, (uintptr_t)v, &c0);
                     agmap_put(&uses, (uintptr_t)v, c0 + 1);
                 }
@@ -296,7 +296,7 @@ static void ag_dce(MLIR_Context *ctx, MLIR_RegionHandle region,
                 size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
                 for (size_t kk = 0; kk < nso; kk++) {
                     MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(op, s, kk);
-                    if (MLIR_GetValueKind(v) == OP_RESULT) {
+                    if (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) {
                         int64_t c0 = 0; agmap_get(&uses, (uintptr_t)v, &c0);
                         agmap_put(&uses, (uintptr_t)v, c0 + 1);
                     }
@@ -321,8 +321,8 @@ static void ag_dce(MLIR_Context *ctx, MLIR_RegionHandle region,
         MLIR_OpHandle *defs = (MLIR_OpHandle *)malloc((non ? non : 1) * sizeof(MLIR_OpHandle));
         for (size_t kk = 0; kk < non; kk++) {
             MLIR_ValueHandle v = MLIR_GetOpOperand(op, kk);
-            defs[kk] = (MLIR_GetValueKind(v) == OP_RESULT) ? MLIR_GetValueDefiningOp(v) : MLIR_INVALID_HANDLE;
-            if (MLIR_GetValueKind(v) == OP_RESULT) {
+            defs[kk] = (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) ? MLIR_GetValueDefiningOp(v) : MLIR_INVALID_HANDLE;
+            if (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) {
                 int64_t c0 = 0; agmap_get(&uses, (uintptr_t)v, &c0);
                 if (c0 > 0) agmap_put(&uses, (uintptr_t)v, c0 - 1);
             }
@@ -394,7 +394,7 @@ static void ag_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
             size_t non = MLIR_GetOpNumOperands(op);
             for (size_t kk = 0; kk < non; kk++) {
                 MLIR_ValueHandle v = MLIR_GetOpOperand(op, kk);
-                if (MLIR_GetValueKind(v) == OP_RESULT)
+                if (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT)
                     aglist_push(&seedlist, MLIR_GetValueDefiningOp(v));
             }
         }

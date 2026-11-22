@@ -77,7 +77,7 @@ static void dce_worklist(MLIR_Context *ctx, DceMap *uses,
         MLIR_OpHandle *defs = (MLIR_OpHandle *)malloc((non ? non : 1) * sizeof(MLIR_OpHandle));
         for (size_t kk = 0; kk < non; kk++) {
             MLIR_ValueHandle v = MLIR_GetOpOperand(op, kk);
-            defs[kk] = (MLIR_GetValueKind(v) == OP_RESULT) ? MLIR_GetValueDefiningOp(v) : MLIR_INVALID_HANDLE;
+            defs[kk] = (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) ? MLIR_GetValueDefiningOp(v) : MLIR_INVALID_HANDLE;
             int64_t c0 = 0; dcemap_get(uses, (uintptr_t)v, &c0);
             if (c0 > 0) dcemap_put(uses, (uintptr_t)v, c0 - 1);
         }
@@ -160,7 +160,7 @@ static void dce_dead_block_args(MLIR_Context *ctx, MLIR_RegionHandle region,
                     if (j == ai) {
                         int64_t c0 = 0; dcemap_get(uses, (uintptr_t)v, &c0);
                         if (c0 > 0) dcemap_put(uses, (uintptr_t)v, c0 - 1);
-                        if (MLIR_GetValueKind(v) == OP_RESULT) {
+                        if (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) {
                             if (*nseed == cseed) { cseed = cseed ? cseed * 2 : 64; *seeds = (MLIR_OpHandle *)realloc(*seeds, cseed * sizeof(MLIR_OpHandle)); }
                             (*seeds)[(*nseed)++] = MLIR_GetValueDefiningOp(v);
                         }

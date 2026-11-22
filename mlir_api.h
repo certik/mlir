@@ -510,7 +510,7 @@ typedef enum {
     OP_TYPE_COUNT
 } MLIR_OpType;
 
-string MLIR_MLIR_OpTypeToString(MLIR_OpType type);
+string MLIR_GetOpTypeName(MLIR_OpType type);
 
 // -----------------------------------------------------------------------------
 // API lifecycle
@@ -577,14 +577,13 @@ void MLIR_AppendOpAttribute(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttributeH
 // registered is OP_TYPE_UNREGISTERED.
 MLIR_OpType MLIR_GetOpType(MLIR_OpHandle op);
 string MLIR_GetOpName(MLIR_OpHandle op);
-string MLIR_GetOpName_string(MLIR_OpHandle op);
 MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle op);
 size_t MLIR_GetOpNumOperands(MLIR_OpHandle op);
 MLIR_ValueHandle MLIR_GetOpOperand(MLIR_OpHandle op, size_t idx);
 size_t MLIR_GetOpNumResults(MLIR_OpHandle op);
 MLIR_ValueHandle MLIR_GetOpResult(MLIR_OpHandle op, size_t idx);
 size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle op);
-MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle op, size_t idx);
+MLIR_TypeHandle MLIR_GetOpResultType(MLIR_OpHandle op, size_t idx);
 size_t MLIR_GetOpNumAttributes(MLIR_OpHandle op);
 MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle op, size_t idx);
 // Like MLIR_GetOpAttribute, but looks up by name including inherent
@@ -628,8 +627,8 @@ MLIR_ValueHandle MLIR_GetBlockArg(MLIR_BlockHandle block, size_t idx);
 
 // Value kind used for SSA values
 typedef enum MLIR_ValueKind {
-    BLOCK_ARG,
-    OP_RESULT
+    MLIR_VALUE_BLOCK_ARG,
+    MLIR_VALUE_OP_RESULT
 } MLIR_ValueKind;
 
 // Creation
@@ -889,7 +888,7 @@ MLIR_OpHandle MLIR_GetBlockTerminator(MLIR_BlockHandle block);
 MLIR_OpHandle MLIR_GetBlockParentOp(MLIR_BlockHandle block);
 
 // Returns true if `block` is the first block of its parent region.
-bool MLIR_BlockIsEntry(MLIR_BlockHandle block);
+bool MLIR_IsBlockEntry(MLIR_BlockHandle block);
 
 // Returns the number of incoming edges to `block` from terminators in
 // other blocks of the same parent region. Each (predecessor block,

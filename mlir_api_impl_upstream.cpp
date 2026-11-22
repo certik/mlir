@@ -569,7 +569,6 @@ extern "C" string MLIR_GetOpName(MLIR_OpHandle h) {
     if (sr == "builtin.module") return mkRefString("module");
     return mkRefString(sr);
 }
-extern "C" string MLIR_GetOpName_string(MLIR_OpHandle h) { return MLIR_GetOpName(h); }
 extern "C" MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle) { return MLIR_INVALID_HANDLE; }
 extern "C" string MLIR_GetOpTrailingComment(MLIR_OpHandle) {
     string s; s.str = nullptr; s.size = 0; return s;
@@ -600,7 +599,7 @@ extern "C" MLIR_ValueHandle MLIR_GetOpResult(MLIR_OpHandle h, size_t i) {
 extern "C" size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle h) {
     return F<mlir::Operation>(h)->getNumResults();
 }
-extern "C" MLIR_TypeHandle MLIR_GetOpResult_type(MLIR_OpHandle h, size_t i) {
+extern "C" MLIR_TypeHandle MLIR_GetOpResultType(MLIR_OpHandle h, size_t i) {
     return typeH(F<mlir::Operation>(h)->getResult(i).getType());
 }
 // op->getAttrs() may return an ArrayRef whose elements are not stable across
@@ -883,7 +882,7 @@ extern "C" MLIR_ValueHandle MLIR_CreateValueOpResult(
 
 extern "C" MLIR_ValueKind MLIR_GetValueKind(MLIR_ValueHandle h) {
     auto v = F<ValueBox>(h)->v;
-    return llvm::isa<mlir::BlockArgument>(v) ? BLOCK_ARG : OP_RESULT;
+    return llvm::isa<mlir::BlockArgument>(v) ? MLIR_VALUE_BLOCK_ARG : MLIR_VALUE_OP_RESULT;
 }
 extern "C" MLIR_TypeHandle MLIR_GetValueType(MLIR_ValueHandle h) {
     return typeH(F<ValueBox>(h)->v.getType());
@@ -1594,7 +1593,7 @@ extern "C" MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle h) {
 // Misc
 // -----------------------------------------------------------------------------
 
-extern "C" string MLIR_MLIR_OpTypeToString(MLIR_OpType type) {
+extern "C" string MLIR_GetOpTypeName(MLIR_OpType type) {
     return op_type_to_string(type);
 }
 
@@ -1782,7 +1781,7 @@ extern "C" MLIR_OpHandle MLIR_GetBlockParentOp(MLIR_BlockHandle blk_h) {
     return op ? H(op) : MLIR_INVALID_HANDLE;
 }
 
-extern "C" bool MLIR_BlockIsEntry(MLIR_BlockHandle blk_h) {
+extern "C" bool MLIR_IsBlockEntry(MLIR_BlockHandle blk_h) {
     if (blk_h == MLIR_INVALID_HANDLE) return false;
     auto *blk = F<mlir::Block>(blk_h);
     return blk->isEntryBlock();
