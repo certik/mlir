@@ -209,7 +209,8 @@ shrink.
   `run_tests.py` (test runner), `tests/mutation_check.py` (test-infra
   mutation sanity check).
 * `examples/tinyc/` — an end-to-end compiler example: a tiny C subset
-  compiled to a native binary using only `mlir_api.h`. See
+  compiled to a native binary using only `mlir_api.h`, `mlir_passes.h`
+  and `mlir_printer.h`. See
   `examples/tinyc/README.md`.
 
 ## Tokenizer design

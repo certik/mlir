@@ -978,7 +978,6 @@ MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle vh) {
     return v ? v->location : MLIR_INVALID_HANDLE;
 }
 
-// Type to string
 // Stubs for two mlir_api_upstream.h entry points, so that the `parser` test
 // driver, which can select them at run time, links with this backend too.
 string MLIR_PrintOperationUpstream(MLIR_Context *ctx, MLIR_OpHandle op) {
@@ -991,6 +990,7 @@ MLIR_OpHandle MLIR_ParseTextUpstream(MLIR_Context *ctx, string text) {
     return MLIR_INVALID_HANDLE;
 }
 
+// Type to string
 string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle th) {
     IR_Type *type = resolve_type(th);
     if (!type) return str_lit("null");

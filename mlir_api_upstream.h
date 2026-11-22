@@ -1,12 +1,13 @@
 // Upstream-only entry points (#151).
 //
 // These functions run upstream MLIR/LLVM (its printer, parser, pass
-// pipeline, LLVM-IR translator and LLVM target machine) and are
-// implemented only by mlir_api_impl_upstream.cpp. Include this header
-// only in code that links the upstream backend; with the native backend,
-// MLIR_LowerToLLVMDialectUpstream and MLIR_TranslateModuleTo*Upstream
-// fail at link time. The native backend keeps two stubs so that the
-// shared `parser` test driver links against either backend:
+// pipeline, LLVM-IR translator and LLVM target machine). Only
+// mlir_api_impl_upstream.cpp implements them for real. With the native
+// backend, MLIR_LowerToLLVMDialectUpstream and
+// MLIR_TranslateModuleTo*Upstream fail at link time, so call them only
+// from code that links the upstream backend. The native backend
+// (mlir_api_impl.c) keeps two stubs so that the shared `parser` test
+// driver (parser.c) links against either backend:
 // MLIR_PrintOperationUpstream returns an "error: ..." string and
 // MLIR_ParseTextUpstream returns MLIR_INVALID_HANDLE.
 //

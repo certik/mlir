@@ -84,6 +84,7 @@ extern "C" {
 #include "mlir_api.h"
 #include "mlir_api_upstream.h"
 #include "mlir_op_names.h"
+#include "mlir_parser.h"
 #include "mlir_passes.h"
 #include "mlir_printer.h"
 }
