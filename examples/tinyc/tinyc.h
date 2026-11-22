@@ -162,16 +162,15 @@ struct Type {
     // Used to support `size_t arr[N]` / `long arr[N]` / `int64_t arr[N]`
     // without introducing a separate TY_ARRAY_I64 kind.
     bool     array_elem_is_i64;
-    // For TY_ARRAY_I32: when true, the elements are 8-bit wide (i8/char).
-    // Used to support `char arr[N]` without introducing a separate
-    // TY_ARRAY_CHAR kind.
-    bool     array_elem_is_i8;
     // For TY_I32/TY_I64: optional explicit bit width hint (0 = unspecified,
     // 8/16/32/64 = explicit width). Used by `_Generic` for typedef
     // matching on narrow-int aliases (`int8_t`, `int16_t`, ...). For
     // wasm32 we also use int_bits == 64 with kind == TY_I32 to tag
     // `long`-semantic types (storage is i32 because of the ABI, but
     // `_Generic` must keep them distinct from `int`).
+    // 8 / 16 (char / bool / short) also selects 1- / 2-byte storage: for a
+    // TY_I32 scalar, a TY_ARRAY_I32 element and a TY_PTR_I32 pointee (see
+    // tinyc_int_size). Values of these types are still i32 in registers.
     int      int_bits;
     bool     int_unsigned;
     bool     is_bool;        // `bool` / `_Bool` (int_bits is 8 like char)
@@ -183,7 +182,7 @@ typedef enum {
     EX_FLOAT,          // float literal
     EX_STR,            // string literal (name = decoded bytes incl. NUL)
     EX_NULL,           // null pointer literal
-    EX_SIZEOF,         // sizeof(<type>) — uses cast_type
+    EX_SIZEOF,         // sizeof(<type>) / _Alignof(<type>) — uses cast_type
     EX_CAST,           // (T*)expr  — uses cast_type and lhs
     EX_VAR,            // variable reference (lvalue when used as such)
     EX_BIN,            // binary op (kind in `op`)
@@ -265,6 +264,7 @@ struct Expr {
     // case the emitter infers the type from the expression.
     Type cast_type;
     bool sizeof_is_expr;
+    bool is_alignof;       // EX_SIZEOF from `_Alignof`: the alignment, not the size
     // For EX_COMPOUND with designated initializers: parallel to `args`.
     // compound_field_names[i].size == 0 indicates a positional entry; a
     // non-empty name selects the named field. NULL when there are no
@@ -493,6 +493,7 @@ typedef enum {
     TC_TK_KW_UNION,
     TC_TK_KW_NULL,
     TC_TK_KW_SIZEOF,
+    TC_TK_KW_ALIGNOF,             // _Alignof: parsed like sizeof (EX_SIZEOF)
     TC_TK_KW_CHAR,
     TC_TK_KW_TYPEDEF,
     TC_TK_KW_EXTERN,
@@ -558,6 +559,11 @@ VecTcTok tinyc_lex(Arena *arena, string src);
 // integer: char / short are truncated and re-extended by signedness, bool
 // becomes 0 / 1. Other types return `v` unchanged.
 int64_t tinyc_narrow_const(int64_t v, Type t);
+
+// Storage size in bytes of an integer of type `t`, or of one element of the
+// integer array type `t` (TY_ARRAY_I32): 1 for char / bool, 2 for short, 8
+// for a 64-bit array element, else 4.
+int tinyc_int_size(const Type *t);
 
 // ---------------- Preprocessor ----------------
 
