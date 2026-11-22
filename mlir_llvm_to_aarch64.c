@@ -3694,12 +3694,24 @@ static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name,
 
 // ---------------------------------------------------------------------------
 // Input guard. The aarch64 backend takes LLVM-dialect input only (see the file
-// header). Reject, naming the offending op, anything that is not an op of
-// the LLVM dialect of mlir_ops.def -- at module level or anywhere inside a function / global-initializer
+// header). Reject, naming the offending op, anything that is not an `llvm.*`
+// op -- at module level or anywhere inside a function / global-initializer
 // body -- instead of letting some later code path quietly cope with a
 // higher-level dialect (cf.*, scf.*, arith.*, func.*, ...). This is what
 // keeps a pre-backend lowering regression from going unnoticed.
 // ---------------------------------------------------------------------------
+// True if the guard accepts an op of type `t`: an op of the LLVM dialect of
+// mlir_ops.def, or an op of a dynamic type named `llvm.*`. The latter are
+// module-level ops the module walk skips (llvm.module_flags, llvm.comdat,
+// llvm.mlir.global_ctors, ...); inside a function the lowering reports them
+// as unsupported, naming the op. Only dynamic types reach the name compare.
+static bool op_type_is_llvm(MLIR_Context *ctx, MLIR_OpType t) {
+    if (MLIR_OP_TYPE_IN_DIALECT(t, LLVM)) return true;
+    if ((unsigned)t < (unsigned)OP_TYPE_COUNT) return false;
+    string n = MLIR_GetOpTypeName(ctx, t);
+    return n.size > 5 && memcmp(n.str, "llvm.", 5) == 0;
+}
+
 // `owner` is the enclosing module-level op (for the diagnostic), or
 // MLIR_INVALID_HANDLE while walking the module body itself.
 static bool check_llvm_only_block(MLIR_Context *ctx, MLIR_BlockHandle block,
@@ -3708,7 +3720,7 @@ static bool check_llvm_only_block(MLIR_Context *ctx, MLIR_BlockHandle block,
     for (size_t i = 0; i < no; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(block, i);
         MLIR_OpType t = MLIR_GetOpType(op);
-        if (!MLIR_OP_TYPE_IN_DIALECT(t, LLVM)) {
+        if (!op_type_is_llvm(ctx, t)) {
             string n = MLIR_GetOpTypeName(ctx, t);
             string where = str_lit("<module>");
             if (owner != MLIR_INVALID_HANDLE) {
