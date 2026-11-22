@@ -55,10 +55,14 @@ Three sub-flavors:
   `mprotect`, …) resolve to libSystem stubs in the Mach-O import table.
   Output: a complete Mach-O executable.
 - **LLVM-IR / llc — `--emit=llvm` → `llc` → host link** (the harness's
-  `native` target). Unity `#include`s the real `platform_<os>.c`. On Linux the
-  driver rewrites the emitted IR to define `@__tinyc_syscall6` as an x86_64
-  `syscall` inline-asm (`driver.c`, `inject_syscall6_definition`), so
-  `platform_linux.c`'s raw syscalls link through the host toolchain.
+  `native` target). Unity `#include`s the real `platform_<os>.c`. The harness
+  passes `--target=<host triple>`, which the driver writes into the IR as
+  `target triple`. For an x86_64 Linux target the driver also rewrites the
+  emitted IR to define `@__tinyc_syscall6` as an x86_64 `syscall` inline-asm
+  (`driver.c`, `inject_syscall6_definition`), so `platform_linux.c`'s raw
+  syscalls link through the host toolchain. Without `--target`, a gcc/clang-built
+  tinyc on Linux/x86_64 targets that host; any other build, including a
+  self-hosted tinyc, has no target (no triple line, no definition).
 
 All three go **via corec**, except the Windows `native` case — see
 [Exceptions](#does-it-always-go-via-corec).

@@ -608,6 +608,132 @@ static int driver_emit_native_elf(MLIR_Context *ctx, MLIR_OpHandle module,
 }
 #endif  // TINYC_HAS_ELF
 
+// The target the native `--emit=llvm` output is for, from `--target=TRIPLE`.
+// The IR goes to the host's llc, so nothing in the IR itself says which
+// machine it is for; the driver must be told (or know) the target to make
+// target-dependent choices such as defining @__tinyc_syscall6 below.
+//
+// TRIPLE is an LLVM-style triple, `ARCH[-VENDOR]-OS[-ENV]`, e.g. x86_64-linux,
+// x86_64-unknown-linux-gnu, aarch64-apple-darwin, x86_64-pc-windows-msvc or
+// wasm32-wasi. Only the arch and the OS are interpreted; the vendor and the
+// environment are ignored, and the triple is written to the IR as given.
+//
+// Without --target, a gcc/clang-built tinyc on Linux/x86_64 defaults to that
+// host (x86_64-unknown-linux-gnu). Every other build, including a self-hosted
+// tinyc (__TINYC__), cannot know where its output will run, so its default is
+// "unknown": no `target triple` line and no target-specific definitions.
+typedef enum {
+    TARGET_ARCH_UNKNOWN,
+    TARGET_ARCH_X86_64,
+    TARGET_ARCH_AARCH64,
+    TARGET_ARCH_WASM32
+} TargetArch;
+
+typedef enum {
+    TARGET_OS_UNKNOWN,
+    TARGET_OS_LINUX,
+    TARGET_OS_DARWIN,
+    TARGET_OS_WINDOWS,
+    TARGET_OS_WASI
+} TargetOS;
+
+typedef struct {
+    TargetArch arch;
+    TargetOS os;
+    const char *triple;  // as written to the IR; NULL when unknown
+} Target;
+
+static void target_set_default(Target *t) {
+    t->arch = TARGET_ARCH_UNKNOWN;
+    t->os = TARGET_OS_UNKNOWN;
+    t->triple = NULL;
+#if defined(__linux__) && defined(__x86_64__) && !defined(__TINYC__)
+    t->arch = TARGET_ARCH_X86_64;
+    t->os = TARGET_OS_LINUX;
+    t->triple = "x86_64-unknown-linux-gnu";
+#endif
+}
+
+// Is the triple component s[0..n) equal to `name` (exact) or, when `prefix`,
+// does it start with `name` (OS components may carry a version, e.g.
+// darwin23.1.0, macosx14.0, wasip1)?
+static bool target_component_is(const char *s, size_t n, const char *name,
+                                bool prefix) {
+    size_t len = strlen(name);
+    if (n < len || (!prefix && n != len)) return false;
+    return memcmp(s, name, len) == 0;
+}
+
+// Parse an LLVM-style triple into `t`. Returns false (with `t` untouched) when
+// the arch or the OS is not one tinyC knows.
+static bool target_parse(const char *triple, Target *t) {
+    TargetArch arch = TARGET_ARCH_UNKNOWN;
+    TargetOS os = TARGET_OS_UNKNOWN;
+    size_t i = 0;
+    bool first = true;
+    while (true) {
+        size_t start = i;
+        while (triple[i] && triple[i] != '-') i++;
+        const char *c = triple + start;
+        size_t n = i - start;
+        if (first) {
+            if (target_component_is(c, n, "x86_64", false) ||
+                target_component_is(c, n, "amd64", false))
+                arch = TARGET_ARCH_X86_64;
+            else if (target_component_is(c, n, "aarch64", false) ||
+                     target_component_is(c, n, "arm64", false))
+                arch = TARGET_ARCH_AARCH64;
+            else if (target_component_is(c, n, "wasm32", false))
+                arch = TARGET_ARCH_WASM32;
+            first = false;
+        } else if (os == TARGET_OS_UNKNOWN) {
+            if (target_component_is(c, n, "linux", false))
+                os = TARGET_OS_LINUX;
+            else if (target_component_is(c, n, "darwin", true) ||
+                     target_component_is(c, n, "macos", true))
+                os = TARGET_OS_DARWIN;
+            else if (target_component_is(c, n, "windows", false) ||
+                     target_component_is(c, n, "win32", false))
+                os = TARGET_OS_WINDOWS;
+            else if (target_component_is(c, n, "wasi", true))
+                os = TARGET_OS_WASI;
+        }
+        if (!triple[i]) break;
+        i++;
+    }
+    if (arch == TARGET_ARCH_UNKNOWN || os == TARGET_OS_UNKNOWN) return false;
+    t->arch = arch;
+    t->os = os;
+    t->triple = triple;
+    return true;
+}
+
+// Write `target triple = "..."` into the LLVM IR, after the
+// `source_filename` line where LLVM's own printer puts it (or at the top if
+// there is none). Both LLVM-IR translators start their output the same way, so
+// they stay byte-identical.
+static string inject_target_triple(Arena *arena, string ir, const char *triple) {
+    const char *key = "source_filename";
+    uint64_t kl = strlen(key);
+    uint64_t pos = 0;
+    for (uint64_t i = 0; i + kl <= ir.size; i++) {
+        if ((i == 0 || ir.str[i - 1] == '\n') &&
+            memcmp(ir.str + i, key, kl) == 0) {
+            pos = i;
+            while (pos < ir.size && ir.str[pos] != '\n') pos++;
+            if (pos < ir.size) pos++;
+            break;
+        }
+    }
+    strbuf sb = strbuf_make_cap(arena, ir.size + 64);
+    strbuf_append_bytes(arena, &sb, ir.str, pos);
+    strbuf_append_cstr(arena, &sb, "target triple = \"");
+    strbuf_append_cstr(arena, &sb, triple);
+    strbuf_append_cstr(arena, &sb, "\"\n");
+    strbuf_append_bytes(arena, &sb, ir.str + pos, ir.size - pos);
+    return strbuf_to_string(sb);
+}
+
 // On the native `--emit=llvm` -> llc -> host-link path, the raw-syscall
 // intrinsic __builtin_syscall6 lowers to a call to @__tinyc_syscall6. The
 // in-tree x86_64 ELF backend synthesises that symbol as a `syscall` trap, but
@@ -618,11 +744,9 @@ static int driver_emit_native_elf(MLIR_Context *ctx, MLIR_OpHandle module,
 // corec/platform/syscall6.h uses, preserving the raw (negative-errno) return
 // convention platform_linux.c relies on. Both LLVM-IR translators (in-tree and
 // upstream) emit the identical declaration line, so one textual rewrite covers
-// both. Only the x86_64-Linux native build reaches this (macOS/Windows use the
-// libc/WinAPI platforms; the ELF backend keeps its own thunk), so it is a no-op
-// everywhere else.
+// both. Only an x86_64-Linux target gets it (macOS/Windows use the libc/WinAPI
+// platforms; the ELF backend keeps its own thunk).
 static string inject_syscall6_definition(Arena *arena, string ir) {
-#if defined(__linux__) && defined(__x86_64__) && !defined(__TINYC__)
     const char *decl =
         "declare i64 @__tinyc_syscall6(i64, i64, i64, i64, i64, i64, i64)";
     uint64_t dl = strlen(decl);
@@ -644,10 +768,6 @@ static string inject_syscall6_definition(Arena *arena, string ir) {
     strbuf_append_cstr(arena, &sb, def);
     strbuf_append_bytes(arena, &sb, ir.str + pos + dl, ir.size - pos - dl);
     return strbuf_to_string(sb);
-#else
-    (void)arena;
-    return ir;
-#endif
 }
 
 // Output mode selected by `--emit=`; the last one on the command line wins.
@@ -703,7 +823,7 @@ static void print_usage(Arena *arena) {
         strbuf_append_cstr(arena, &sb, emit_mode_name((EmitMode)m));
     }
     strbuf_append_cstr(arena, &sb,
-        "] [--lowering=upstream|native] [--from-wasm PATH] "
+        "] [--lowering=upstream|native] [--target=TRIPLE] [--from-wasm PATH] "
         "[--wasm-runtime-obj=PATH ...] [-I dir ...] [-D name[=value] ...] "
         "[-o OUT] FILE.tc [FILE2.tc ...]");
     println(str_lit("{}"), strbuf_to_string(sb));
@@ -747,6 +867,9 @@ int app_main(void) {
     bool lowering_explicit = false; // tracks whether user passed --lowering=
 #endif
     char *output_file = NULL;
+    // --target=TRIPLE (see Target above); only `--emit=llvm` consults it.
+    Target target;
+    target_set_default(&target);
 
     // Multiple positional input files (multi-file compilation merges them
     // into a single Program / single MLIR module).
@@ -913,6 +1036,17 @@ int app_main(void) {
         else if (strcmp(argv[i], "--wasi-adapter") == 0 && i + 1 < argc) {
             wasi_adapter_path = argv[++i];
         }
+        else if (strncmp(argv[i], "--target=", 9) == 0) {
+            if (!target_parse(argv[i] + 9, &target)) {
+                fprintf(stderr,
+                        "tinyc: unsupported target '%s' (expected ARCH-...-OS "
+                        "with ARCH x86_64|aarch64|wasm32 and OS "
+                        "linux|darwin|windows|wasi, e.g. x86_64-linux)\n",
+                        argv[i] + 9);
+                arena_destroy(boot_arena);
+                return 1;
+            }
+        }
         else if (strcmp(argv[i], "--lowering=upstream") == 0) {
 #ifdef TINYC_HAS_UPSTREAM
             use_upstream = true; lowering_explicit = true;
@@ -966,6 +1100,16 @@ int app_main(void) {
     bool emit_aarch64   = emit_mode == EMIT_AARCH64;
     bool emit_macho     = emit_mode == EMIT_MACHO;
     bool emit_elf       = emit_mode == EMIT_ELF;
+
+    // The `--emit=llvm` IR is LP64 (native sizing); a wasm32 target goes
+    // through --emit=wasm instead.
+    if (emit_llvm && target.arch == TARGET_ARCH_WASM32) {
+        fprintf(stderr,
+                "tinyc: --emit=llvm does not support --target=%s "
+                "(use --emit=wasm for wasm32)\n", target.triple);
+        arena_destroy(boot_arena);
+        return 1;
+    }
 
     if ((emit_wasmssa || emit_wasmstack) &&
 #ifdef TINYC_HAS_UPSTREAM
@@ -1485,7 +1629,10 @@ int app_main(void) {
             arena_destroy(boot_arena);
             return 1;
         }
-        out = inject_syscall6_definition(arena, out);
+        if (target.triple)
+            out = inject_target_triple(arena, out, target.triple);
+        if (target.arch == TARGET_ARCH_X86_64 && target.os == TARGET_OS_LINUX)
+            out = inject_syscall6_definition(arena, out);
     } else {
         out = print_fn(&ctx, module);
     }

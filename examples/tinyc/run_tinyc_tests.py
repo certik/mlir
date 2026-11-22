@@ -62,6 +62,27 @@ HOST_VARARGS_FLAG = (["--host-varargs"]
                      if os.environ.get("TINYC_TARGET", "native") in ("native", "elf")
                      else [])
 
+
+def host_triple() -> str:
+    """LLVM-style triple of this machine, passed to `tinyc --target=` for
+    `--emit=llvm`: the native target's IR goes to the host llc and runs here.
+    A self-hosted tinyc cannot know this itself (#326)."""
+    import platform
+    machine = platform.machine().lower()
+    arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
+    system = platform.system()
+    if system == "Linux":
+        return f"{arch}-unknown-linux-gnu"
+    if system == "Darwin":
+        # Versioned like clang's default, so the object carries a build
+        # version load command.
+        ver = platform.mac_ver()[0]
+        return f"{arch}-apple-macosx{ver}" if ver else f"{arch}-apple-darwin"
+    if system == "Windows":
+        return f"{arch}-pc-windows-msvc"
+    return f"{arch}-unknown-{system.lower()}"
+
+
 # Code-generation/runtime target for the suite. "native" (default) emits
 # LLVM IR via tinyc, then llc + host CC. "wasm" emits a
 # wasm32 object via tinyc, then wasm-ld + generated support objects, and runs the
@@ -80,6 +101,9 @@ MACHO_BACKEND = os.environ.get("TINYC_MACHO_BACKEND", "wasm")
 # return, switch cascades, etc), so wasm_native_skip should NOT skip in
 # this configuration.
 LIFT_USE_NATIVE = os.environ.get("TINYC_LIFT_USE_NATIVE") == "1"
+
+# The native target's `--emit=llvm` is for this machine (see host_triple()).
+TARGET_FLAG = [f"--target={host_triple()}"] if TARGET == "native" else []
 
 
 def run(cmd, **kw):
@@ -411,6 +435,31 @@ def check_driver_cli() -> list[str]:
     r = run([str(TINYC), "--emit=nonsense", str(simple)])
     if r.returncode <= 0:
         problems.append(f"--emit=nonsense was accepted (exit {r.returncode})")
+    # --target= decides target-specific output of --emit=llvm: the triple
+    # line, and the __tinyc_syscall6 definition only for x86_64 Linux (#326).
+    syscall = HERE / "tests" / "builtin_syscall.tc"
+    defn = "define internal i64 @__tinyc_syscall6("
+    for triple, want in (("x86_64-unknown-linux-gnu", True),
+                         ("x86_64-linux", True),
+                         ("aarch64-unknown-linux-gnu", False),
+                         ("arm64-apple-macosx14.0", False),
+                         ("x86_64-pc-windows-msvc", False)):
+        r = run([str(TINYC), "--emit=llvm", f"--target={triple}", str(syscall)])
+        if r.returncode != 0:
+            problems.append(f"--emit=llvm --target={triple} failed (exit {r.returncode})")
+            continue
+        if f'\ntarget triple = "{triple}"\n' not in r.stdout:
+            problems.append(f"--target={triple}: no target triple line in the IR")
+        if (defn in r.stdout) != want:
+            problems.append(f"--target={triple}: __tinyc_syscall6 "
+                            f"{'not ' if want else ''}defined")
+    for bad in ("riscv64-linux", "x86_64", "x86_64-unknown-none"):
+        r = run([str(TINYC), "--emit=llvm", f"--target={bad}", str(simple)])
+        if r.returncode <= 0:
+            problems.append(f"--target={bad} was accepted (exit {r.returncode})")
+    r = run([str(TINYC), "--emit=llvm", "--target=wasm32-wasi", str(simple)])
+    if r.returncode <= 0:
+        problems.append(f"--emit=llvm --target=wasm32-wasi was accepted (exit {r.returncode})")
     return problems
 
 
@@ -902,11 +951,11 @@ def main():
         # Stage 1: emit LLVM IR from the generated single-TU root.
         if unity_src is not None:
             tinyc_llvm_cmd = [str(TINYC), "--emit=llvm", *LOWERING_FLAG,
-                              *HOST_VARARGS_FLAG,
+                              *HOST_VARARGS_FLAG, *TARGET_FLAG,
                               *unity_include_flags(), str(unity_src)]
         else:
             tinyc_llvm_cmd = [str(TINYC), "--emit=llvm", *LOWERING_FLAG,
-                              *HOST_VARARGS_FLAG,
+                              *HOST_VARARGS_FLAG, *TARGET_FLAG,
                               *unity_include_flags(),
                               *[str(s) for s in srcs]]
         r = run(tinyc_llvm_cmd)

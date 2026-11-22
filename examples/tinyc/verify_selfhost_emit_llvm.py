@@ -23,6 +23,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from run_tinyc_tests import host_triple
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 
@@ -34,16 +36,15 @@ INCLUDES = [
     "-I", str(HERE / "tests"),
 ]
 
-# builtin_syscall.tc: driver.c's inject_syscall6_definition() only defines
-# __tinyc_syscall6 when tinyc itself is compiled with
-# `defined(__linux__) && defined(__x86_64__) && !defined(__TINYC__)`, which
-# a self-hosted tinyc is not (#326).
-SKIP = {"builtin_syscall": "#326: no __tinyc_syscall6 definition when self-hosted"}
+# Both compilers get the same explicit target (a self-hosted tinyc has no
+# default target, #326), so target-specific output such as the
+# __tinyc_syscall6 definition is compared too.
+TARGET = [f"--target={host_triple()}"]
 
 
 def emit(tinyc: str, src: Path, out: Path) -> bool:
     out.unlink(missing_ok=True)
-    proc = subprocess.run([tinyc, "--emit=llvm", *INCLUDES, str(src), "-o", str(out)],
+    proc = subprocess.run([tinyc, "--emit=llvm", *TARGET, *INCLUDES, str(src), "-o", str(out)],
                           capture_output=True)
     return proc.returncode == 0 and out.exists()
 
@@ -60,9 +61,6 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         a, b = Path(tmp) / "ref.ll", Path(tmp) / "selfhost.ll"
         for src in sorted((HERE / "tests").glob("*.tc")):
-            if src.stem in SKIP:
-                skipped.append(f"{src.name} ({SKIP[src.stem]})")
-                continue
             if not emit(ref, src, a):
                 # e.g. one TU of a multi-file test that needs the others
                 skipped.append(f"{src.name} (reference compiler fails on it alone)")
