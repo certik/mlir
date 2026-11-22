@@ -177,15 +177,15 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
         strbuf_append(arena, &result, str_lit(" = "));
     }
     MLIR_OpType op_type = MLIR_GetOpType(op);
-    string opname = MLIR_GetOpName(op);
-    if (op_type == OP_TYPE_UNREGISTERED) {
+    string opname = MLIR_GetOpTypeName(ctx->mlir_ctx, op_type);
+    // Ops of dynamic types print with a quoted name.
+    if ((unsigned)op_type >= (unsigned)OP_TYPE_COUNT) {
         strbuf_append(arena, &result, str_lit("\""));
         if (opname.size > 0) strbuf_append(arena, &result, opname);
         else strbuf_append(arena, &result, str_lit("unknown"));
         strbuf_append(arena, &result, str_lit("\""));
     } else {
-        if (opname.size > 0) strbuf_append(arena, &result, opname);
-        else strbuf_append(arena, &result, MLIR_GetOpTypeName(op_type));
+        strbuf_append(arena, &result, opname);
     }
     strbuf_append(arena, &result, str_lit("("));
     bool first_op = true;

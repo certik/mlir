@@ -207,7 +207,7 @@ static MLIR_ValueHandle l2r_make_zero(M *m, size_t bi, size_t ai) {
     MLIR_ValueHandle rv[1] = { res };
     MLIR_AttributeHandle attrs[1] = { a };
     MLIR_OpHandle op = MLIR_CreateOp(
-        ctx, OP_TYPE_LLVM_MLIR_CONSTANT, str_lit("llvm.mlir.constant"),
+        ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
         attrs, 1, rty, 1, rv, 1, NULL, 0, NULL, 0,
         loc, MLIR_INVALID_HANDLE, (string){0}, -1);
     MLIR_InsertBlockOpAtIndex(ctx, m->blocks[bi], op, 0);
@@ -865,7 +865,7 @@ static MLIR_ValueHandle sroa_field_alloca(S *s, size_t ai, const int32_t *path,
     MLIR_ValueHandle rv[1] = { res };
     MLIR_ValueHandle ops[1] = { s->a_size[ai] };
     MLIR_AttributeHandle attrs[1] = { ea };
-    MLIR_OpHandle op = MLIR_CreateOp(ctx, OP_TYPE_LLVM_ALLOCA, str_lit("llvm.alloca"),
+    MLIR_OpHandle op = MLIR_CreateOp(ctx, OP_TYPE_LLVM_ALLOCA,
                                      attrs, 1, rty, 1, rv, 1, ops, 1, NULL, 0,
                                      loc, MLIR_INVALID_HANDLE, (string){0}, -1);
     size_t at = sroa_block_op_index(s->a_blk[ai], s->a_op[ai]);

@@ -399,9 +399,6 @@ static void edge_multiplexer_create_switch(EdgeMultiplexer *m,
 static MLIR_ValueHandle get_switch_value(LiftState *st, unsigned v);
 static MLIR_ValueHandle get_undef_value(LiftState *st, MLIR_TypeHandle ty);
 
-static bool string_eq(string a, const char *b);
-static bool string_eq_string(string a, string b);
-
 // ============================================================================
 // Helper: append a fresh cf.br op to the end of `in_block` jumping to
 // `dst` with `args` as branch operands.
@@ -420,7 +417,6 @@ static MLIR_OpHandle create_cf_br_in_block(MLIR_Context *ctx, Arena *arena,
     snums[0] = n_args;
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
         ctx, llvm_cfg ? OP_TYPE_LLVM_BR : OP_TYPE_CF_BR,
-        llvm_cfg ? str_lit("llvm.br") : str_lit("cf.br"),
         NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         succs, 1, sops, snums,
         loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
@@ -430,13 +426,13 @@ static MLIR_OpHandle create_cf_br_in_block(MLIR_Context *ctx, Arena *arena,
 
 // ============================================================================
 // ReturnLikeExitCombiner port (CFGToSCF.cpp:417-466). Two return-like
-// terminators are "equivalent" if they have the same op name and the same
+// terminators are "equivalent" if they have the same op type and the same
 // operand-type signature. (tinyc's universe: func.return / llvm.return,
 // where every return inside a function shares one operand-type
 // signature, so each function collapses to one shared exit block.)
 // ============================================================================
 typedef struct {
-    string            op_name;        // owned by the existing op
+    MLIR_OpType       op_type;
     MLIR_TypeHandle  *operand_types;  // arena-owned
     size_t            n_operand_types;
     MLIR_BlockHandle  exit_block;
@@ -452,13 +448,9 @@ typedef struct {
     bool           llvm_cfg;      // branch-op dialect (see LiftState)
 } Combiner;
 
-static bool string_eq_string(string a, string b) {
-    return a.size == b.size && (a.size == 0 || memcmp(a.str, b.str, a.size) == 0);
-}
-
 static bool combiner_signature_matches(const CombinerEntry *e,
                                        MLIR_OpHandle op) {
-    if (!string_eq_string(e->op_name, MLIR_GetOpName(op))) return false;
+    if (e->op_type != MLIR_GetOpType(op)) return false;
     size_t no = MLIR_GetOpNumOperands(op);
     if (no != e->n_operand_types) return false;
     for (size_t i = 0; i < no; ++i) {
@@ -487,7 +479,7 @@ static CombinerEntry *combiner_add_new(MLIR_Context *ctx, Combiner *c,
         c->cap = new_cap;
     }
     CombinerEntry *e = &c->entries[c->n_entries++];
-    e->op_name = MLIR_GetOpName(return_op);
+    e->op_type = MLIR_GetOpType(return_op);
     e->n_operand_types = MLIR_GetOpNumOperands(return_op);
     e->operand_types = e->n_operand_types
         ? arena_new_array(c->arena, MLIR_TypeHandle, e->n_operand_types)
@@ -551,22 +543,17 @@ static void combiner_combine_exit(MLIR_Context *ctx, Combiner *c,
         // First occurrence: install a fresh return op in the new exit
         // block whose operands are the exit block's arguments. We don't
         // need to "move" the original — we already erased it; just
-        // synthesize a new one with identical attributes and operand
-        // count using the same op type. For tinyc the universe is
-        // {func.return, llvm.return}, both of which take only operands
-        // and no attributes/results.
+        // synthesize a new one of the same op type with the same operand
+        // count. For tinyc the universe is {func.return, llvm.return}, both
+        // of which take only operands and no attributes/results.
         MLIR_ValueHandle *args = e->n_operand_types
             ? arena_new_array(c->arena, MLIR_ValueHandle, e->n_operand_types)
             : NULL;
         for (size_t i = 0; i < e->n_operand_types; ++i) {
             args[i] = MLIR_GetBlockArg(e->exit_block, i);
         }
-        MLIR_OpType ot;
-        if (string_eq(e->op_name, "llvm.return")) ot = OP_TYPE_LLVM_RETURN;
-        else if (string_eq(e->op_name, "scf.yield")) ot = OP_TYPE_SCF_YIELD;
-        else ot = OP_TYPE_FUNC_RETURN;
         MLIR_OpHandle new_ret = MLIR_CreateOp(
-            ctx, ot, e->op_name,
+            ctx, e->op_type,
             NULL, 0, NULL, 0, NULL, 0,
             args, e->n_operand_types, NULL, 0,
             loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
@@ -694,9 +681,8 @@ static MLIR_OpHandle create_unreachable_terminator(LiftState *st,
     }
 
     MLIR_OpType ot = is_llvm ? OP_TYPE_LLVM_RETURN : OP_TYPE_FUNC_RETURN;
-    string op_name = is_llvm ? str_lit("llvm.return") : str_lit("func.return");
     MLIR_OpHandle ret = MLIR_CreateOp(
-        st->ctx, ot, op_name,
+        st->ctx, ot,
         NULL, 0, NULL, 0, NULL, 0,
         args, n_res, NULL, 0,
         loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
@@ -788,12 +774,6 @@ static StructuredLoopProps create_single_exiting_latch(
 // ============================================================================
 // or llvm.func body. The lift algorithm runs once per such region.
 // ============================================================================
-static bool string_eq(string a, const char *b) {
-    if (!a.str || !b) return false;
-    size_t bn = strlen(b);
-    return a.size == bn && memcmp(a.str, b, bn) == 0;
-}
-
 // ============================================================================
 // BlockMap: block handle -> dense index, open addressing. The analyses below
 // ask "which index does this block have?" / "have I seen this block?" once
@@ -890,8 +870,8 @@ static void collect_blocks_with_preds(Arena *arena, MLIR_RegionHandle region,
 }
 
 static bool op_is_func_like(MLIR_OpHandle op) {
-    string n = MLIR_GetOpName(op);
-    return string_eq(n, "func.func") || string_eq(n, "llvm.func");
+    MLIR_OpType t = MLIR_GetOpType(op);
+    return t == OP_TYPE_FUNC_FUNC || t == OP_TYPE_LLVM_FUNC;
 }
 
 // Returns true iff `op` is one of the branch ops the algorithm cares about:
@@ -902,12 +882,11 @@ static bool op_is_func_like(MLIR_OpHandle op) {
 // rest of the algorithm is dialect-agnostic. Exactly one family is accepted
 // per run: a branch op of the other family fails check_preconditions.
 static bool op_is_cf_branch(MLIR_OpHandle op, bool llvm_cfg) {
-    string n = MLIR_GetOpName(op);
+    MLIR_OpType t = MLIR_GetOpType(op);
     if (llvm_cfg)
-        return string_eq(n, "llvm.br") || string_eq(n, "llvm.cond_br") ||
-               string_eq(n, "llvm.switch");
-    return string_eq(n, "cf.br") || string_eq(n, "cf.cond_br") ||
-           string_eq(n, "cf.switch");
+        return t == OP_TYPE_LLVM_BR || t == OP_TYPE_LLVM_COND_BR ||
+               t == OP_TYPE_LLVM_SWITCH;
+    return t == OP_TYPE_CF_BR || t == OP_TYPE_CF_COND_BR || t == OP_TYPE_CF_SWITCH;
 }
 
 // Returns true iff the given region contains any cf.* branch op that we
@@ -1311,7 +1290,7 @@ static MLIR_OpHandle create_scf_yield(MLIR_Context *ctx, Arena *arena,
         ? arena_new_array(arena, MLIR_ValueHandle, n_args) : NULL;
     for (size_t i = 0; i < n_args; ++i) operand_arr[i] = args[i];
     MLIR_OpHandle y = MLIR_CreateOp(
-        ctx, OP_TYPE_SCF_YIELD, str_lit("scf.yield"),
+        ctx, OP_TYPE_SCF_YIELD,
         NULL, 0, NULL, 0, NULL, 0,
         operand_arr, n_args, NULL, 0,
         loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
@@ -2030,7 +2009,7 @@ static MLIR_ValueHandle create_llvm_trunc(LiftState *st, MLIR_BlockHandle in_blo
                                           dst_ty, fresh_ssa_name(st),
                                           loc);
     MLIR_OpHandle op = MLIR_CreateOp(
-        st->ctx, OP_TYPE_LLVM_TRUNC, str_lit("llvm.trunc"),
+        st->ctx, OP_TYPE_LLVM_TRUNC,
         NULL, 0, res_types, 1, results, 1,
         operands, 1, NULL, 0,
         loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
@@ -2227,7 +2206,7 @@ static MLIR_BlockHandle *transform_cycles_to_scf_loops(
         regions[0] = body_region;
         regions[1] = after_region;
         MLIR_OpHandle scf_while = MLIR_CreateOp(
-            st->ctx, OP_TYPE_SCF_WHILE, str_lit("scf.while"),
+            st->ctx, OP_TYPE_SCF_WHILE,
             NULL, 0, iter_arg_types, n_lh_args, results, n_lh_args,
             lpb_args, n_lh_args, regions, 2,
             hdr_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
@@ -2378,11 +2357,9 @@ static BranchXformResult transform_to_structured_cf_branches(
     // Multi-successor. cf.cond_br -> scf.if; cf.switch -> scf.index_switch.
     // Any other multi-successor terminator is left in place and we recurse
     // into the children.
-    string term_name = MLIR_GetOpName(term);
-    bool is_cond_br = string_eq_string(
-        term_name, st->llvm_cfg ? str_lit("llvm.cond_br") : str_lit("cf.cond_br"));
-    bool is_switch  = string_eq_string(
-        term_name, st->llvm_cfg ? str_lit("llvm.switch") : str_lit("cf.switch"));
+    MLIR_OpType term_type = MLIR_GetOpType(term);
+    bool is_cond_br = term_type == (st->llvm_cfg ? OP_TYPE_LLVM_COND_BR : OP_TYPE_CF_COND_BR);
+    bool is_switch  = term_type == (st->llvm_cfg ? OP_TYPE_LLVM_SWITCH : OP_TYPE_CF_SWITCH);
     if (!is_cond_br && !is_switch) {
         // Not lifted; caller's worklist should still try children.
         res.made_progress = false;
@@ -2492,7 +2469,7 @@ static BranchXformResult transform_to_structured_cf_branches(
         // declared at file scope (tinyC parser limitation).
         size_t cap_et = 0, n_et = 0;
         ExitTermRec *exit_terms = NULL;
-        string canon_name = {0};
+        MLIR_OpType canon_type = OP_TYPE_UNREGISTERED;
         size_t canon_n_ops = 0;
         MLIR_TypeHandle *canon_types = NULL;
         bool all_match = true;
@@ -2503,17 +2480,17 @@ static BranchXformResult transform_to_structured_cf_branches(
                 if (!is_region_exit_block(b)) continue;
                 MLIR_OpHandle t = MLIR_GetBlockTerminator(b);
                 if (t == MLIR_INVALID_HANDLE) { all_match = false; break; }
-                string nm = MLIR_GetOpName(t);
+                MLIR_OpType tt = MLIR_GetOpType(t);
                 size_t no = MLIR_GetOpNumOperands(t);
                 if (!any_exit) {
-                    canon_name = nm;
+                    canon_type = tt;
                     canon_n_ops = no;
                     canon_types = no ? arena_new_array(arena, MLIR_TypeHandle, no) : NULL;
                     for (size_t a = 0; a < no; ++a)
                         canon_types[a] = MLIR_GetValueType(MLIR_GetOpOperand(t, a));
                     any_exit = true;
                 } else {
-                    if (!string_eq_string(canon_name, nm) || canon_n_ops != no) {
+                    if (canon_type != tt || canon_n_ops != no) {
                         all_match = false; break;
                     }
                     for (size_t a = 0; a < no; ++a) {
@@ -2547,10 +2524,9 @@ static BranchXformResult transform_to_structured_cf_branches(
                 ? arena_new_array(arena, MLIR_ValueHandle, canon_n_ops) : NULL;
             for (size_t a = 0; a < canon_n_ops; ++a)
                 cargs[a] = MLIR_GetBlockArg(cont, a);
-            // Same op as the exit terminators (all named canon_name).
-            MLIR_OpType cot = MLIR_GetOpType(exit_terms[0].term);
+            // Same op as the exit terminators (all of type canon_type).
             MLIR_OpHandle cterm = MLIR_CreateOp(
-                st->ctx, cot, canon_name,
+                st->ctx, canon_type,
                 NULL, 0, NULL, 0, NULL, 0,
                 cargs, canon_n_ops, NULL, 0,
                 loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
@@ -2788,7 +2764,7 @@ static BranchXformResult transform_to_structured_cf_branches(
         // cf.cond_br operand 0 is the i1 condition; succs are [then, else].
         MLIR_ValueHandle cond_v = MLIR_GetOpOperand(term, 0);
         if_op = MLIR_CreateOp(
-            st->ctx, OP_TYPE_SCF_IF, str_lit("scf.if"),
+            st->ctx, OP_TYPE_SCF_IF,
             NULL, 0, result_types, n_cont_args, if_results, n_cont_args,
             &cond_v, 1, regions, 2,
             term_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
@@ -2845,7 +2821,7 @@ static BranchXformResult transform_to_structured_cf_branches(
         attrs[0] = cases_attr;
 
         if_op = MLIR_CreateOp(
-            st->ctx, OP_TYPE_SCF_INDEX_SWITCH, str_lit("scf.index_switch"),
+            st->ctx, OP_TYPE_SCF_INDEX_SWITCH,
             attrs, 1, result_types, n_cont_args, if_results, n_cont_args,
             &flag, 1, regions, num_succ,
             term_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
@@ -2928,7 +2904,7 @@ static MLIR_OpHandle create_scf_condition(MLIR_Context *ctx, Arena *arena,
     operands[0] = cond;
     for (size_t i = 0; i < n_payload; ++i) operands[1 + i] = payload[i];
     MLIR_OpHandle c = MLIR_CreateOp(
-        ctx, OP_TYPE_SCF_CONDITION, str_lit("scf.condition"),
+        ctx, OP_TYPE_SCF_CONDITION,
         NULL, 0, NULL, 0, NULL, 0,
         operands, n_ops, NULL, 0,
         loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
@@ -3007,7 +2983,7 @@ static bool transform_cfg_to_scf_region(LiftState *st, Combiner *combiner,
         // cause here so the user can attribute it correctly. We use
         // the corec io primitives rather than libc <stdio.h> because
         // the native parser binary is built with `-nostdlib -nostdinc`.
-        string fn_op_name = MLIR_GetOpName(st->fn_op);
+        string fn_op_name = MLIR_GetOpTypeName(st->ctx, MLIR_GetOpType(st->fn_op));
         string fn_sym_name = str_lit("?");
         MLIR_AttributeHandle sa =
             MLIR_GetOpAttributeByName(st->fn_op, "sym_name");
@@ -3169,7 +3145,7 @@ static MLIR_ValueHandle get_switch_value(LiftState *st, unsigned v) {
     MLIR_AttributeHandle *as = arena_new_array(st->arena, MLIR_AttributeHandle, 1);
     as[0] = val;
     MLIR_OpHandle op = MLIR_CreateOp(
-        st->ctx, OP_TYPE_LLVM_MLIR_CONSTANT, str_lit("llvm.mlir.constant"),
+        st->ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
         as, 1,        // attributes
         rt, 1,        // result_types
         rs, 1,        // results
@@ -3205,7 +3181,7 @@ static MLIR_ValueHandle get_undef_value(LiftState *st, MLIR_TypeHandle ty) {
     MLIR_ValueHandle *rs = arena_new_array(st->arena, MLIR_ValueHandle, 1);
     rs[0] = r;
     MLIR_OpHandle op = MLIR_CreateOp(
-        st->ctx, OP_TYPE_LLVM_MLIR_UNDEF, str_lit("llvm.mlir.undef"),
+        st->ctx, OP_TYPE_LLVM_MLIR_UNDEF,
         NULL, 0,      // attributes
         rt, 1,        // result_types
         rs, 1,        // results
@@ -3243,7 +3219,6 @@ static MLIR_OpHandle create_cf_cond_br_in_block(MLIR_Context *ctx, Arena *arena,
     snums[0] = n_t_args; snums[1] = n_f_args;
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
         ctx, llvm_cfg ? OP_TYPE_LLVM_COND_BR : OP_TYPE_CF_COND_BR,
-        llvm_cfg ? str_lit("llvm.cond_br") : str_lit("cf.cond_br"),
         NULL, 0,          // attributes
         NULL, 0,          // result_types
         NULL, 0,          // results
@@ -3302,7 +3277,6 @@ static MLIR_OpHandle create_cf_switch_in_block(MLIR_Context *ctx, Arena *arena,
     as[0] = ca;
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
         ctx, llvm_cfg ? OP_TYPE_LLVM_SWITCH : OP_TYPE_CF_SWITCH,
-        llvm_cfg ? str_lit("llvm.switch") : str_lit("cf.switch"),
         as, 1,            // attributes
         NULL, 0,          // result_types
         NULL, 0,          // results

@@ -911,9 +911,12 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
     default: break;
     }
 
-    string opn = MLIR_GetOpName(op);
-    // Float math intrinsics: llvm.intr.sqrt / sin / cos / fabs / ...
-    if (name_starts_with(opn, "llvm.intr.")) {
+    string opn = MLIR_GetOpTypeName(F->ctx, ty);
+    // Float math intrinsics: llvm.intr.sqrt, and llvm.intr.sin / cos / fabs /
+    // ... from parsed or upstream-lowered IR, which are dynamic op types. The
+    // call is named after the op, so only those compare the name.
+    if (ty == OP_TYPE_LLVM_INTR_SQRT ||
+        ((unsigned)ty >= (unsigned)OP_TYPE_COUNT && name_starts_with(opn, "llvm.intr."))) {
         // Generic shape: %r = call T @llvm.NAME.f32/f64(T %x[, T %y, ...])
         const char *iname = opn.str + 10;
         size_t in = opn.size - 10;

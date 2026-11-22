@@ -60,7 +60,6 @@ typedef struct OperationParserParams {
     MLIR_Context *ctx;
     Arena  *arena;
     MLIR_OpType  op_type;
-    string  opname; /* only non-empty for unregistered ops */
 
     MLIR_ValueHandle *lhs_results;
     size_t     n_lhs_results;

@@ -197,9 +197,9 @@ static void emit_fcmp(FnCtx *F, int64_t pred, int is_f32) {
     eb(F, 0x0F); eb(F, 0xB6); modrm(F, 3, RAX, RAX);               // movzx eax, al
 }
 
-// Lower an FP op (arith / convert / compare). Returns false if `nm` is not an
+// Lower an FP op (arith / convert / compare). Returns false if `ty` is not an
 // FP op handled here. Floating bits travel in GP regs/slots; xmm0/xmm1 scratch.
-static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, MLIR_OpType ty, string nm) {
+static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, MLIR_OpType ty) {
     MLIR_Context *ctx = F->ctx;
     switch (ty) {
     // arithmetic: dst = op0 OP op1
@@ -324,7 +324,7 @@ static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, MLIR_OpType ty, string nm) {
         MLIR_ValueHandle r = MLIR_GetOpResult(op, 0);
         int fb = fp_bytes(ctx, r);
         if (fb != 4 && fb != 8) {
-            fail(F, "sqrt on non-float result", nm);
+            fail(F, "sqrt on non-float result", MLIR_GetOpTypeName(ctx, ty));
             return true;
         }
         load_val(F, MLIR_GetOpOperand(op, 0), RAX);
@@ -724,12 +724,10 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
     default: break;
     }
 
-    string nm = MLIR_GetOpName(op);
-
     // floating-point arithmetic / conversion / comparison (issue #212 Option A)
-    if (lower_fp_op(F, op, ty, nm)) return;
+    if (lower_fp_op(F, op, ty)) return;
 
-    fail(F, "unsupported op", nm);
+    fail(F, "unsupported op", MLIR_GetOpTypeName(F->ctx, ty));
 }
 
 // emit a terminator (also collects callee refs via lower_op for calls? no -
@@ -793,7 +791,7 @@ static void lower_term(FnCtx *F, MLIR_OpHandle op) {
     case OP_TYPE_LLVM_UNREACHABLE: eb(F, 0x0F); eb(F, 0x0B); return;  // ud2
     default: break;
     }
-    fail(F, "unsupported terminator", MLIR_GetOpName(op));
+    fail(F, "unsupported terminator", MLIR_GetOpTypeName(F->ctx, MLIR_GetOpType(op)));
 }
 
 // ---------------------------------------------------------------------------
@@ -908,7 +906,7 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
         size_t no = MLIR_GetBlockNumOps(bk);
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-            if (MLIR_GetOpNumRegions(op) > 0) { fail(&F, "nested region (expected flat cf)", MLIR_GetOpName(op)); }
+            if (MLIR_GetOpNumRegions(op) > 0) { fail(&F, "nested region (expected flat cf)", MLIR_GetOpTypeName(ctx, MLIR_GetOpType(op))); }
             if (MLIR_GetOpType(op) == OP_TYPE_LLVM_ALLOCA) {
                 unsigned rb = alloca_bytes(ctx, op);
                 cur += (int32_t)rb;

@@ -23,7 +23,6 @@
 #include <base/string.h>
 
 #include "mlir_api.h"
-#include "mlir_op_names.h"
 #include "mlir_llvm_to_wasmssa.h"
 #include "mlir_wasmstack_to_bin.h"
 
@@ -308,7 +307,7 @@ static int find_global_by_name(const EmGlobal *gs, size_t n, string nm) {
 // =============================================================================
 // Per-op encoding. Reads attrs from the MLIR op and writes bytecode.
 // =============================================================================
-static bool encode_op(EmFunc *F, MLIR_OpHandle op, uint32_t sp_sym_idx,
+static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t sp_sym_idx,
                       EmFunc *all_funcs, size_t all_funcs_n,
                       const EmGlobal *globals, size_t n_globals,
                       uint32_t global_sym_base, SigTab *sigs) {
@@ -526,7 +525,7 @@ static bool encode_op(EmFunc *F, MLIR_OpHandle op, uint32_t sp_sym_idx,
         buf_putc(b, 0x40); buf_putc(b, 0x00); return true;
 
     default: {
-        string nm = MLIR_GetOpName(op);
+        string nm = MLIR_GetOpTypeName(ctx, t);
         fprintf(stderr, "wasm-emit: unsupported wasmstack op '%.*s' (enum=%d)\n",
                 (int)nm.size, nm.str, (int)t);
         return false;
@@ -537,7 +536,7 @@ static bool encode_op(EmFunc *F, MLIR_OpHandle op, uint32_t sp_sym_idx,
 // =============================================================================
 // Function body builder: locals prelude + ops + 0x0b end.
 // =============================================================================
-static bool build_body(EmFunc *F, uint32_t sp_sym_idx,
+static bool build_body(MLIR_Context *ctx, EmFunc *F, uint32_t sp_sym_idx,
                        EmFunc *all_funcs, size_t all_funcs_n,
                        const EmGlobal *globals, size_t n_globals,
                        uint32_t global_sym_base, SigTab *sigs) {
@@ -553,7 +552,7 @@ static bool build_body(EmFunc *F, uint32_t sp_sym_idx,
     F->body = insns;
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(blk, i);
-        if (!encode_op(F, op, sp_sym_idx, all_funcs, all_funcs_n,
+        if (!encode_op(ctx, F, op, sp_sym_idx, all_funcs, all_funcs_n,
                        globals, n_globals, global_sym_base, sigs)) {
             buf_free(&F->body);
             F->body = saved;
@@ -870,7 +869,7 @@ string mlir_wasmstack_to_bin(MLIR_Context *ctx,
     // ---- Emit each defined function's body ---------------------------------
     for (size_t i = 0; i < n_funcs; i++) {
         if (funcs[i].imported) continue;
-        if (!build_body(&funcs[i], sp_sym, funcs, n_funcs,
+        if (!build_body(ctx, &funcs[i], sp_sym, funcs, n_funcs,
                         globals, n_globals, global_sym_base, &sigs)) {
             goto fail_after_funcs;
         }

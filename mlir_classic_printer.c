@@ -190,6 +190,11 @@ static inline void ssa_map_init(PrintCtx *ctx, MLIR_Context *mlir_ctx) {
     ctx->current_scf_for = MLIR_INVALID_HANDLE;
 }
 
+// The op's name.
+static inline string op_name(PrintCtx *ctx, MLIR_OpHandle op) {
+    return MLIR_GetOpTypeName(ctx->mlir_ctx, MLIR_GetOpType(op));
+}
+
 static inline uint32_t get_or_assign_ssa(PrintCtx *ctx, MLIR_ValueHandle v) {
     uint32_t *found = SsaMap_get(&ctx->ssa_map, v);
     if (found) return *found;
@@ -208,7 +213,7 @@ static void preassign_region_ssa(PrintCtx *ctx, MLIR_RegionHandle region, int in
 
 // Forward decl: emit an op in MLIR's generic round-trippable form
 static string print_op_generic_form_classic(PrintCtx *ctx, int indent_level, MLIR_OpHandle op);
-static bool op_force_generic_form(MLIR_OpHandle op);
+static bool op_force_generic_form(PrintCtx *ctx, MLIR_OpHandle op);
 
 static void preassign_op_ssa(PrintCtx *ctx, MLIR_OpHandle op, int indent_level) {
     // First preassign nested regions so nested results get earlier numbers
@@ -421,9 +426,7 @@ static string print_function_region_classic(PrintCtx *ctx, int indent_level, MLI
             // upstream printer omits; mirror that for round-trip parity.
             if (no > 0) {
                 MLIR_OpHandle last = MLIR_GetBlockOp(block, no - 1);
-                string lname = MLIR_GetOpName(last);
-                if (lname.size == 0) lname = MLIR_GetOpTypeName(MLIR_GetOpType(last));
-                if (str_eq(lname, str_lit("affine.yield")) &&
+                if (str_eq(op_name(ctx, last), str_lit("affine.yield")) &&
                     MLIR_GetOpNumOperands(last) == 0) {
                     no--;
                 }
@@ -528,9 +531,7 @@ static string print_op_generic_form_classic(PrintCtx *ctx, int indent_level, MLI
     }
 
     // Quoted op name
-    string opname = MLIR_GetOpName(op);
-    if (opname.size == 0) opname = MLIR_GetOpTypeName(MLIR_GetOpType(op));
-    strbuf_append(arena, &result, format(arena, str_lit("\"{}\"("), opname));
+    strbuf_append(arena, &result, format(arena, str_lit("\"{}\"("), op_name(ctx, op)));
 
     // Operands
     size_t n_operands = MLIR_GetOpNumOperands(op);
@@ -649,9 +650,8 @@ static string print_op_generic_form_classic(PrintCtx *ctx, int indent_level, MLI
 // Decide whether an op should be emitted in MLIR generic form by the
 // classic printer. Used as a fallback for ops the classic printer doesn't
 // know how to format and that the buggy default path would mangle.
-static bool op_force_generic_form(MLIR_OpHandle op) {
-    string nm = MLIR_GetOpName(op);
-    if (nm.size == 0) nm = MLIR_GetOpTypeName(MLIR_GetOpType(op));
+static bool op_force_generic_form(PrintCtx *ctx, MLIR_OpHandle op) {
+    string nm = op_name(ctx, op);
     if (nm.size == 0) return false;
     static const char *names[] = {
         "linalg.yield",
@@ -679,16 +679,15 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
     // tensor.* / affine.load with custom syntaxes the classic printer doesn't
     // implement), fall back to MLIR's standard generic form. This guarantees
     // round-trippability through the upstream parser.
-    if (op_force_generic_form(op)) {
+    if (op_force_generic_form(ctx, op)) {
         return print_op_generic_form_classic(ctx, indent_level, op);
     }
     (void)result;
     result = strbuf_make();
     strbuf_append(arena, &result, indent_classic(arena, indent_level));
 
-    // Robust early handling for func.func, regardless of op_type mapping
-    string opname = MLIR_GetOpName(op);
-    if (opname.size > 0 && str_eq(opname, str_lit("func.func"))) {
+    // Robust early handling for func.func
+    if (MLIR_GetOpType(op) == OP_TYPE_FUNC_FUNC) {
         // Build header "func.func [vis] @name(params)[ -> ret]"
         strbuf header = strbuf_make();
     strbuf_append(arena, &header, str_lit("func.func "));
@@ -1949,7 +1948,7 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
                 MLIR_GetOpType(op) == OP_TYPE_ARITH_EXTSI || MLIR_GetOpType(op) == OP_TYPE_ARITH_TRUNCI ||
                 MLIR_GetOpType(op) == OP_TYPE_ARITH_EXTF || MLIR_GetOpType(op) == OP_TYPE_ARITH_TRUNCF) {
                 // op name
-                strbuf_append(arena, &result, MLIR_GetOpTypeName(MLIR_GetOpType(op)));
+                strbuf_append(arena, &result, op_name(ctx, op));
                 // operand
                 if (MLIR_GetOpNumOperands(op) > 0 && MLIR_GetOpOperand(op, 0)) {
                     strbuf_append(arena, &result, str_lit(" "));
@@ -1978,17 +1977,15 @@ static string print_operation_internal_classic(PrintCtx *ctx, int indent_level, 
 
             // Print operation name
             bool is_tt_func = (MLIR_GetOpType(op) == OP_TYPE_TT_FUNC);
-            if (MLIR_GetOpType(op) == OP_TYPE_UNREGISTERED && !is_tt_func) {
-                // Quote unregistered op names in classic format
+            if ((unsigned)MLIR_GetOpType(op) >= (unsigned)OP_TYPE_COUNT && !is_tt_func) {
+                // Quote the names of ops of dynamic types
                 strbuf_append(arena, &result, str_lit("\""));
-                string s = MLIR_GetOpName(op);
+                string s = op_name(ctx, op);
                 if (s.size > 0) strbuf_append(arena, &result, s);
                 else strbuf_append(arena, &result, str_lit("unknown"));
                 strbuf_append(arena, &result, str_lit("\""));
             } else {
-                string s = MLIR_GetOpName(op);
-                if (s.size > 0) strbuf_append(arena, &result, s);
-                else strbuf_append(arena, &result, MLIR_GetOpTypeName(MLIR_GetOpType(op)));
+                strbuf_append(arena, &result, op_name(ctx, op));
             }
 
             // Special classic formatting for select ops

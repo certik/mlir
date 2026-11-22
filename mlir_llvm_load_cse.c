@@ -226,7 +226,7 @@ static int64_t lc_attr_payload(MLIR_AttributeHandle a, MLIR_AttrKind kind) {
 }
 
 static void lc_emit_op_ident(KB *k, MLIR_Context *ctx, MLIR_OpHandle op) {
-    kb_str(k, MLIR_GetOpName(op));
+    kb_u64(k, (uint64_t)MLIR_GetOpType(op));
     size_t na = MLIR_GetOpNumAttributes(op);
     kb_u64(k, na);
     for (size_t i = 0; i < na; i++) {

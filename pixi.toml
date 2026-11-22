@@ -77,7 +77,7 @@ clang \
     "mlir_classic_printer.c", "mlir_classic_printer.h",
     "mlir_generic_printer.c", "mlir_generic_printer.h",
     "op_parsers.c", "op_parsers.h",
-    "mlir_api_impl.c", "mlir_op_names.c", "mlir_op_names.h", "mlir_api.h",
+    "mlir_api_impl.c", "mlir_op_names.c", "mlir_op_names.h", "mlir_api.h", "mlir_ops.def",
     "mlir_api_upstream.h", "mlir_passes.h", "mlir_printer.h",
     "corec-stdlib/stdlib/**/*.c", "corec-stdlib/stdlib/**/*.h",
     "corec/base/**/*.c", "corec/base/**/*.h",

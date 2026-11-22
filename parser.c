@@ -57,7 +57,7 @@ MLIR_OpHandle construct_test_module_full(MLIR_Context *ctx) {
     MLIR_RegionHandle *module_regions = arena_new_array(arena, MLIR_RegionHandle, 1);
     module_regions[0] = module_region;
 
-    MLIR_OpHandle module = MLIR_CreateOp(ctx, OP_TYPE_MODULE, str_lit("module"), NULL, 0, NULL, 0, NULL, 0, NULL, 0, module_regions, 1, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_OpHandle module = MLIR_CreateOp(ctx, OP_TYPE_MODULE, NULL, 0, NULL, 0, NULL, 0, NULL, 0, module_regions, 1, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
 
     // Function attributes (sym_name)
     MLIR_AttributeHandle sym_name_attr = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("example_func"));
@@ -88,7 +88,7 @@ MLIR_OpHandle construct_test_module_full(MLIR_Context *ctx) {
     MLIR_ValueHandle *const_results = arena_new_array(arena, MLIR_ValueHandle, 1);
     const_results[0] = const_result;
 
-    MLIR_OpHandle const_op = MLIR_CreateOp(ctx, OP_TYPE_ARITH_CONSTANT, str_lit("arith.constant"), const_attrs, 1, const_result_types, 1, const_results, 1, NULL, 0, NULL, 0, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_OpHandle const_op = MLIR_CreateOp(ctx, OP_TYPE_ARITH_CONSTANT, const_attrs, 1, const_result_types, 1, const_results, 1, NULL, 0, NULL, 0, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
 
     // %1 = arith.addi %arg0, %arg1 : i32
     MLIR_ValueHandle add_result = MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 1, i32_type, str_lit("%1"), MLIR_INVALID_HANDLE);
@@ -103,7 +103,7 @@ MLIR_OpHandle construct_test_module_full(MLIR_Context *ctx) {
     MLIR_ValueHandle *add_results = arena_new_array(arena, MLIR_ValueHandle, 1);
     add_results[0] = add_result;
 
-    MLIR_OpHandle add_op = MLIR_CreateOp(ctx, OP_TYPE_ARITH_ADDI, str_lit(""), NULL, 0, add_result_types, 1, add_results, 1, add_operands, 2, NULL, 0, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_OpHandle add_op = MLIR_CreateOp(ctx, OP_TYPE_ARITH_ADDI, NULL, 0, add_result_types, 1, add_results, 1, add_operands, 2, NULL, 0, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
 
     // %2 = arith.muli %1, %0 : i32
     MLIR_ValueHandle mul_result = MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 2, i32_type, str_lit("%2"), MLIR_INVALID_HANDLE);
@@ -118,12 +118,12 @@ MLIR_OpHandle construct_test_module_full(MLIR_Context *ctx) {
     MLIR_ValueHandle *mul_results = arena_new_array(arena, MLIR_ValueHandle, 1);
     mul_results[0] = mul_result;
 
-    MLIR_OpHandle mul_op = MLIR_CreateOp(ctx, OP_TYPE_ARITH_MULI, str_lit(""), NULL, 0, mul_result_types, 1, mul_results, 1, mul_operands, 2, NULL, 0, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_OpHandle mul_op = MLIR_CreateOp(ctx, OP_TYPE_ARITH_MULI, NULL, 0, mul_result_types, 1, mul_results, 1, mul_operands, 2, NULL, 0, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
 
     // func.return %2 : i32
     MLIR_ValueHandle *ret_operands = arena_new_array(arena, MLIR_ValueHandle, 1);
     ret_operands[0] = mul_result;
-    MLIR_OpHandle ret_op = MLIR_CreateOp(ctx, OP_TYPE_FUNC_RETURN, str_lit(""), NULL, 0, NULL, 0, NULL, 0, ret_operands, 1, NULL, 0, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_OpHandle ret_op = MLIR_CreateOp(ctx, OP_TYPE_FUNC_RETURN, NULL, 0, NULL, 0, NULL, 0, ret_operands, 1, NULL, 0, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
 
     MLIR_AppendBlockOp(ctx, func_block, const_op);
     MLIR_AppendBlockOp(ctx, func_block, add_op);
@@ -135,7 +135,7 @@ MLIR_OpHandle construct_test_module_full(MLIR_Context *ctx) {
     MLIR_RegionHandle *func_regions = arena_new_array(arena, MLIR_RegionHandle, 1);
     func_regions[0] = func_region;
 
-    MLIR_OpHandle func_op = MLIR_CreateOp(ctx, OP_TYPE_FUNC_FUNC, str_lit("func.func"), func_attrs, 1, NULL, 0, NULL, 0, NULL, 0, func_regions, 1, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_OpHandle func_op = MLIR_CreateOp(ctx, OP_TYPE_FUNC_FUNC, func_attrs, 1, NULL, 0, NULL, 0, NULL, 0, func_regions, 1, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
 
     MLIR_AppendBlockOp(ctx, module_block, func_op);
 

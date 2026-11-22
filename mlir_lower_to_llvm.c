@@ -24,7 +24,6 @@
 
 #include "mlir_api.h"
 #include "mlir_passes.h"
-#include "mlir_op_names.h"
 
 // -----------------------------------------------------------------------------
 // Small helpers
@@ -55,14 +54,14 @@ static MLIR_ValueHandle make_result_value(MLIR_Context *ctx,
 // Convenience for ops that take no successors and no special blocks. Use
 // for everything except branch-like ops.
 static MLIR_OpHandle create_simple_op(
-        MLIR_Context *ctx, MLIR_OpType type, string opname,
+        MLIR_Context *ctx, MLIR_OpType type,
         MLIR_AttributeHandle *attrs, size_t n_attrs,
         MLIR_TypeHandle *result_types, size_t n_result_types,
         MLIR_ValueHandle *results, size_t n_results,
         MLIR_ValueHandle *operands, size_t n_operands,
         MLIR_RegionHandle *regions, size_t n_regions,
         MLIR_LocationHandle loc) {
-    return MLIR_CreateOp(ctx, type, opname,
+    return MLIR_CreateOp(ctx, type,
                          attrs, n_attrs,
                          result_types, n_result_types,
                          results, n_results,
@@ -112,7 +111,7 @@ static bool lower_arith_constant(LowerState *st, MLIR_OpHandle op,
     MLIR_TypeHandle rts[1] = { ty };
     MLIR_ValueHandle results[1] = { new_res };
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_LLVM_MLIR_CONSTANT, str_lit("llvm.mlir.constant"),
+        st->ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
         attrs, 1, rts, 1, results, 1, NULL, 0, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
     MLIR_ReplaceAllUsesOfValue(st->ctx, old_res, new_res);
@@ -182,7 +181,7 @@ static bool lower_arith_index_cast(LowerState *st, MLIR_OpHandle op,
     MLIR_ValueHandle results[1] = { new_res };
     MLIR_ValueHandle ops[1] = { src };
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, llvm_op, str_lit(""),
+        st->ctx, llvm_op,
         NULL, 0, rts, 1, results, 1, ops, 1, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
     MLIR_ReplaceAllUsesOfValue(st->ctx, old_res, new_res);
@@ -201,7 +200,7 @@ static bool lower_func_return(LowerState *st, MLIR_OpHandle op,
         MLIR_GetArenaAllocator(st->ctx), no * sizeof(MLIR_ValueHandle));
     for (size_t i = 0; i < no; i++) operands[i] = MLIR_GetOpOperand(op, i);
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_LLVM_RETURN, str_lit("llvm.return"),
+        st->ctx, OP_TYPE_LLVM_RETURN,
         NULL, 0, NULL, 0, NULL, 0, operands, no, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
     return true;
@@ -307,7 +306,7 @@ static bool lower_func_func(LowerState *st, MLIR_OpHandle op,
     }
 
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_LLVM_FUNC, str_lit("llvm.func"),
+        st->ctx, OP_TYPE_LLVM_FUNC,
         attrs_buf, n_attrs, NULL, 0, NULL, 0, NULL, 0,
         &body, 1, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
@@ -353,7 +352,7 @@ static bool lower_func_call(LowerState *st, MLIR_OpHandle op,
     }
 
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_LLVM_CALL, str_lit("llvm.call"),
+        st->ctx, OP_TYPE_LLVM_CALL,
         attrs_buf, n_attrs, rts, nr, results, nr,
         operands, no, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
@@ -397,7 +396,7 @@ static bool lower_rename(LowerState *st, MLIR_OpHandle op,
     for (size_t i = 0; i < na; i++) attrs[i] = MLIR_GetOpAttribute(op, i);
 
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, new_type, str_lit(""),
+        st->ctx, new_type,
         attrs, na, rts, nr, results, nr,
         operands, no, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
@@ -446,7 +445,7 @@ static bool lower_cf_branch(LowerState *st, MLIR_OpHandle op,
     }
 
     MLIR_OpHandle nop = MLIR_CreateOpWithSuccessors(
-        st->ctx, new_type, str_lit(""),
+        st->ctx, new_type,
         attrs, na, NULL, 0, NULL, 0,
         operands, no, NULL, 0,
         succs, ns, succ_ops, n_succ_ops,
@@ -489,7 +488,7 @@ static bool lower_func_constant(LowerState *st, MLIR_OpHandle op,
     attrs[0] = MLIR_CreateAttributeSymbolRef(
         st->ctx, str_lit("global_name"), sym_name);
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_LLVM_MLIR_ADDRESSOF, str_lit("llvm.mlir.addressof"),
+        st->ctx, OP_TYPE_LLVM_MLIR_ADDRESSOF,
         attrs, 1, rts, 1, results, 1, NULL, 0, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
     MLIR_ReplaceAllUsesOfValue(st->ctx, MLIR_GetOpResult(op, 0), new_res);
@@ -554,7 +553,7 @@ static bool lower_func_call_indirect(LowerState *st, MLIR_OpHandle op,
         st->ctx, str_lit("var_callee_type"), llvmft);
 
     MLIR_OpHandle nop = create_simple_op(
-        st->ctx, OP_TYPE_LLVM_CALL, str_lit("llvm.call"),
+        st->ctx, OP_TYPE_LLVM_CALL,
         attrs, 1, rts, nr, results, nr,
         operands, no, NULL, 0, loc);
     MLIR_InsertBlockOpAtIndex(st->ctx, parent, nop, pos);
@@ -581,7 +580,7 @@ static void rewrite_yield_to_br(LowerState *st, MLIR_BlockHandle blk,
     size_t n_succ_ops_arr[1] = { no };
     MLIR_LocationHandle term_loc = MLIR_GetOpLocation(term);
     MLIR_OpHandle br = MLIR_CreateOpWithSuccessors(
-        st->ctx, OP_TYPE_LLVM_BR, str_lit("llvm.br"),
+        st->ctx, OP_TYPE_LLVM_BR,
         NULL, 0, NULL, 0, NULL, 0,
         NULL, 0, NULL, 0,
         succs, 1, succ_ops_arr, n_succ_ops_arr,
@@ -681,7 +680,7 @@ static bool lower_scf_if(LowerState *st, MLIR_OpHandle op,
     size_t n_empty_ops[2] = { 0, 0 };
     MLIR_ValueHandle cond_arr[1] = { cond };
     MLIR_OpHandle cbr = MLIR_CreateOpWithSuccessors(
-        st->ctx, OP_TYPE_LLVM_COND_BR, str_lit("llvm.cond_br"),
+        st->ctx, OP_TYPE_LLVM_COND_BR,
         NULL, 0, NULL, 0, NULL, 0,
         cond_arr, 1, NULL, 0,
         succs, 2, empty_ops, n_empty_ops,
@@ -709,10 +708,7 @@ typedef enum {
 // Returns one of LowerResult values. See enum docs above.
 static int try_lower_op(LowerState *st, MLIR_OpHandle op,
                         MLIR_BlockHandle parent, size_t pos) {
-    // Dispatch on the op type: MLIR_CreateOp derives it from the op name on
-    // both API backends, so this is equivalent to comparing names, at the
-    // cost of one switch instead of ~45 string comparisons per op. Source
-    // ops without an enumerator are matched by name in the unregistered arm.
+    // Dispatch on the op type; ops of other types are left alone.
     bool ok = false;
     switch (MLIR_GetOpType(op)) {
     case OP_TYPE_SCF_IF:
@@ -769,11 +765,6 @@ static int try_lower_op(LowerState *st, MLIR_OpHandle op,
     case OP_TYPE_ARITH_BITCAST:     ok = lower_rename(st, op, parent, pos, OP_TYPE_LLVM_BITCAST); break;
     case OP_TYPE_CF_BR:      ok = lower_cf_branch(st, op, parent, pos, OP_TYPE_LLVM_BR); break;
     case OP_TYPE_CF_COND_BR: ok = lower_cf_branch(st, op, parent, pos, OP_TYPE_LLVM_COND_BR); break;
-    case OP_TYPE_UNREGISTERED:
-        // Not an op of any dialect, so it has no enumerator.
-        if (name_eq(MLIR_GetOpName(op), "unrealized_conversion_cast"))
-            ok = lower_unrealized_cast(st, op, parent, pos);
-        break;
     default: break;
     }
 

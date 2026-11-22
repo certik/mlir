@@ -11,7 +11,6 @@
 
 #include "mlir_parser.h"
 #include "mlir_api.h"
-#include "mlir_op_names.h"
 #include "op_parsers.h"
 
 // Forward decls for helper scanners (moved to op_parsers.h)
@@ -1367,10 +1366,14 @@ MLIR_OpHandle parse_operation(Parser *parser) {
     }
 
 
-    // Set op_type based on operation name. The classic syntax's `call` is
-    // the op `func.call`; use that name so the op's type follows from it.
-    if (str_eq(opname, str_lit("call"))) opname = op_type_to_string(OP_TYPE_FUNC_CALL);
-    MLIR_OpType op_type = op_type_from_string(opname);
+    // The op's type: its static type, or a dynamic type of the context for
+    // other names. The classic syntax's `call` is the op `func.call`, and a
+    // builtin op may omit its dialect (builtin is the default dialect).
+    MLIR_OpType op_type;
+    if (str_eq(opname, str_lit("call"))) op_type = OP_TYPE_FUNC_CALL;
+    else if (str_eq(opname, str_lit("unrealized_conversion_cast")))
+        op_type = OP_TYPE_UNREALIZED_CONVERSION_CAST;
+    else op_type = MLIR_RegisterOpType(parser->ctx, opname);
 
     // Capture trailing comment from the current line
     string trailing_comment = str_lit("");
@@ -1403,7 +1406,6 @@ MLIR_OpHandle parse_operation(Parser *parser) {
         .ctx = parser->ctx,
         .arena = parser->arena,
         .op_type = op_type,
-        .opname = opname,
         .lhs_results = lhs_results,
         .n_lhs_results = n_lhs_results,
         .unnumbered_loc_def = parser->unnumbered_loc_def,
@@ -1415,7 +1417,7 @@ MLIR_OpHandle parse_operation(Parser *parser) {
     // Debug: Print all operation names
 
 
-    // First we handle specific opnames with special parsing rules
+    // First we handle specific ops with special parsing rules
     switch (op_type) {
         case OP_TYPE_TT_FUNC:
             parsed = parse_tt_func_op(parser, &params);

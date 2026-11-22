@@ -760,7 +760,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             MLIR_OpHandle dop = MLIR_GetValueDefiningOp(handle[vi]);
             const char *nm = "(blockarg)";
             int nl = 10;
-            if (dop) { string s = MLIR_GetOpName(dop); nm = s.str; nl = (int)s.size; }
+            if (dop) { string s = MLIR_GetOpTypeName(ctx, MLIR_GetOpType(dop)); nm = s.str; nl = (int)s.size; }
             const char *dead = (last_use[vi] <= first_pos[vi]) ? "deaddef" : "live";
             char ops[128]; int op_off = 0; ops[0] = '\0';
             if (dop) {
@@ -771,7 +771,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                     const char *on; int onl;
                     if (!odef) { on = "barg"; onl = 4; }
                     else if (ra_is_const(T, ctx, odef)) { on = "const"; onl = 5; }
-                    else { string os = MLIR_GetOpName(odef); on = os.str; onl = (int)os.size; }
+                    else { string os = MLIR_GetOpTypeName(ctx, MLIR_GetOpType(odef)); on = os.str; onl = (int)os.size; }
                     op_off += snprintf(ops + op_off, sizeof(ops) - op_off,
                                        "%s%.*s", k ? "," : "", onl, on);
                 }

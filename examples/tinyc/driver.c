@@ -86,8 +86,7 @@ static int write_bytes_to_file(string out, const char *path) {
 // True if `op` is an `llvm.func` carrying a non-empty body (a definition, not
 // a declaration).
 static bool driver_llvm_func_has_body(MLIR_OpHandle op) {
-    string nm = MLIR_GetOpName(op);
-    if (!(nm.size == 9 && memcmp(nm.str, "llvm.func", 9) == 0)) return false;
+    if (MLIR_GetOpType(op) != OP_TYPE_LLVM_FUNC) return false;
     if (MLIR_GetOpNumRegions(op) < 1) return false;
     return MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(op, 0)) > 0;
 }
@@ -229,9 +228,7 @@ static bool driver_elf_is_host_platform_support_symbol(string s) {
 }
 
 static bool driver_elf_is_llvm_global_op(MLIR_OpHandle op) {
-    if (MLIR_GetOpType(op) == OP_TYPE_LLVM_MLIR_GLOBAL) return true;
-    string nm = MLIR_GetOpName(op);
-    return nm.size == 16 && memcmp(nm.str, "llvm.mlir.global", 16) == 0;
+    return MLIR_GetOpType(op) == OP_TYPE_LLVM_MLIR_GLOBAL;
 }
 
 static bool driver_elf_llvm_op_is_internal(MLIR_OpHandle op) {

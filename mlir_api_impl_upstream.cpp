@@ -252,7 +252,13 @@ struct MLIR_Context : public mlir::MLIRContext {
     std::unordered_map<const mlir::Operation *,
                        std::vector<std::unique_ptr<mlir::NamedAttribute>>> opByNameAttrs;
     BlockOpIterCache blockOps;
-    // OperationName impl -> MLIR_OpType (MLIR_GetOpType).
+    // Op types (doc/mlir_api_design.md section 2.5). opTypeTable holds the
+    // names of the static and dynamic types (in `persistent`); opNames[t] is
+    // the mlir::OperationName of type t (as an opaque pointer), so creation
+    // does no string work; opTypes maps it back (MLIR_GetOpType).
+    Arena *persistent = nullptr;
+    OpTypeTable opTypeTable;
+    std::vector<const void *> opNames;
     llvm::DenseMap<const void *, MLIR_OpType> opTypes;
     // Printed form of each type (MLIR_GetTypeString).
     llvm::DenseMap<const void *, std::string> typeStrings;
@@ -272,7 +278,10 @@ struct MLIR_Context : public mlir::MLIRContext {
     llvm::DenseSet<mlir::Block *> rootBlocks;
     llvm::DenseSet<mlir::Region *> rootRegions;
 
-    ~MLIR_Context() { delete holderBlock; }
+    ~MLIR_Context() {
+        delete holderBlock;
+        if (persistent) arena_destroy(persistent);
+    }
 };
 
 namespace {
@@ -330,14 +339,27 @@ mlir::Location locF(uintptr_t h) {
     return mlir::Location::getFromOpaquePointer(reinterpret_cast<const void *>(h));
 }
 
-MLIR_OpType opTypeFromName(llvm::StringRef name) {
-    // Same name -> type table as the native backend (mlir_op_names.c), so
-    // both backends report the same MLIR_GetOpType for the same op. It
-    // covers every enumerator up to OP_TYPE_COUNT.
-    // The C side prints OP_TYPE_MODULE as "module"; upstream names the op
-    // "builtin.module".
-    if (name == "builtin.module") return OP_TYPE_MODULE;
-    return op_type_from_string(string{(char *)name.data(), name.size()});
+// Records `type`'s mlir::OperationName in both directions. The C side
+// names OP_TYPE_MODULE `module`; upstream calls the op `builtin.module`.
+void bindOpName(MLIR_Context *c, MLIR_OpType type) {
+    string s = op_type_table_name(&c->opTypeTable, type);
+    llvm::StringRef name = type == OP_TYPE_MODULE ? llvm::StringRef("builtin.module")
+                                                  : llvm::StringRef(s.str, s.size);
+    const void *key = mlir::OperationName(name, c).getAsOpaquePointer();
+    if ((size_t)type >= c->opNames.size()) c->opNames.resize((size_t)type + 1, nullptr);
+    c->opNames[type] = key;
+    c->opTypes[key] = type;
+}
+
+// The type of `name`, registering a dynamic type for a name `c` has not seen
+// (MLIR_RegisterOpType).
+MLIR_OpType registerOpType(MLIR_Context *c, llvm::StringRef name) {
+    string s{const_cast<char *>(name.data()), name.size()};
+    MLIR_OpType t = op_type_table_register(&c->opTypeTable, s);
+    if (t != OP_TYPE_UNREGISTERED &&
+        ((size_t)t >= c->opNames.size() || !c->opNames[t]))
+        bindOpName(c, t);
+    return t;
 }
 
 // Copy a std::string into the C-API arena so the returned `string` is
@@ -429,6 +451,10 @@ extern "C" MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) 
         return mlir::success();
     });
     if (options) c->arena = options->arena;
+    c->persistent = arena_create(16 * 1024);
+    op_type_table_init(&c->opTypeTable, c->persistent);
+    c->opNames.assign((size_t)OP_TYPE_COUNT, nullptr);
+    for (int t = 1; t < (int)OP_TYPE_COUNT; t++) bindOpName(c, (MLIR_OpType)t);
     return c;
 }
 // Frees all IR of the context: the parentless ops, blocks and regions own the
@@ -544,7 +570,7 @@ extern "C" void MLIR_AppendBlockArg(MLIR_Context *cctx, MLIR_BlockHandle bh,
 // -----------------------------------------------------------------------------
 
 extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
-    MLIR_Context *cctx, MLIR_OpType type, string opname,
+    MLIR_Context *cctx, MLIR_OpType type,
     MLIR_AttributeHandle *attrs, size_t n_attrs,
     MLIR_TypeHandle *result_types, size_t n_result_types,
     MLIR_ValueHandle *results, size_t n_results,
@@ -555,23 +581,15 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     size_t *n_successor_operands,
     MLIR_LocationHandle location, MLIR_LocationHandle, string, int64_t) {
     MLIR_Context &ctx = *cctx;
-
-    std::string nm(opname.str, opname.size);
-    if (nm.empty()) {
-        string s = op_type_to_string(type);
-        if (s.size > 0) nm.assign(s.str, s.size);
-        else nm = "unknown";
-    }
-    if (type == OP_TYPE_MODULE && nm == "module") {
-        nm = "builtin.module";
-    }
-    // See MLIR_CreateOp in mlir_api.h: a non-empty name decides the type.
-    assert(type == OP_TYPE_UNREGISTERED || opTypeFromName(nm) == type);
+    API_CHECK(type != OP_TYPE_UNREGISTERED && (size_t)type < ctx.opNames.size() &&
+                  ctx.opNames[type],
+              "MLIR_CreateOp", "not an op type of this context");
 
     mlir::Location loc = (location == MLIR_INVALID_HANDLE)
                              ? mlir::Location(mlir::UnknownLoc::get(&ctx))
                              : locF(location);
-    mlir::OperationState state(loc, llvm::StringRef(nm));
+    mlir::OperationState state(loc, mlir::OperationName::getFromOpaquePointer(ctx.opNames[type]));
+    bool is_switch = type == OP_TYPE_CF_SWITCH || type == OP_TYPE_LLVM_SWITCH;
 
     for (size_t i = 0; i < n_operands; i++) {
         state.addOperands(F<ValueBox>(operands[i])->v);
@@ -598,8 +616,7 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
         // intermediate cf.switch fail to lift to scf.index_switch.
         // Convert here so the typed property storage accepts it.
         // llvm.switch declares `case_values` the same way.
-        if ((nm == "cf.switch" || nm == "llvm.switch") &&
-            na->getName().strref() == "case_values") {
+        if (is_switch && na->getName().strref() == "case_values") {
             if (auto arr = mlir::dyn_cast<mlir::DenseI32ArrayAttr>(val)) {
                 auto i32Ty = mlir::IntegerType::get(&ctx, 32);
                 auto shaped = mlir::RankedTensorType::get(
@@ -628,7 +645,7 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
                                                 state.attributes.end());
 
     if (n_successors > 0 && n_successor_operands) {
-        if (nm == "cf.cond_br" || nm == "llvm.cond_br") {
+        if (type == OP_TYPE_CF_COND_BR || type == OP_TYPE_LLVM_COND_BR) {
             // Both ops use AttrSizedOperandSegments with the layout
             // [condition, trueDestOperands, falseDestOperands]; without the
             // synthesized operandSegmentSizes the BranchOpInterface slices
@@ -642,7 +659,7 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
             }
             state.addAttribute("operandSegmentSizes",
                 mlir::DenseI32ArrayAttr::get(&ctx, seg));
-        } else if (nm == "cf.switch" || nm == "llvm.switch") {
+        } else if (is_switch) {
             // cf.switch (and llvm.switch, which has the same operand
             // layout) has 3 operand segments: flag (always 1), default
             // operands (successor 0), and case operands (sum across
@@ -683,7 +700,7 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
 }
 
 extern "C" MLIR_OpHandle MLIR_CreateOp(
-    MLIR_Context *ctx, MLIR_OpType type, string opname,
+    MLIR_Context *ctx, MLIR_OpType type,
     MLIR_AttributeHandle *attrs, size_t n_attrs,
     MLIR_TypeHandle *result_types, size_t n_result_types,
     MLIR_ValueHandle *results, size_t n_results,
@@ -691,7 +708,7 @@ extern "C" MLIR_OpHandle MLIR_CreateOp(
     MLIR_RegionHandle *regions, size_t n_regions,
     MLIR_LocationHandle location, MLIR_LocationHandle u, string tc, int64_t sl) {
     return MLIR_CreateOpWithSuccessors(
-        ctx, type, opname, attrs, n_attrs,
+        ctx, type, attrs, n_attrs,
         result_types, n_result_types,
         results, n_results,
         operands, n_operands,
@@ -730,20 +747,12 @@ extern "C" MLIR_OpType MLIR_GetOpType(MLIR_OpHandle h) {
     // (name pointer -> MLIR_OpType) mapping so the common case is a
     // single DenseMap lookup instead of a 256-entry string scan.
     auto name = op->getName();
-    const void *key = name.getAsOpaquePointer();
-    auto &opTypes = ctxOf(op)->opTypes;
-    auto it = opTypes.find(key);
-    if (it != opTypes.end()) return it->second;
-    MLIR_OpType t = opTypeFromName(name.getStringRef());
-    opTypes[key] = t;
-    return t;
-}
-extern "C" string MLIR_GetOpName(MLIR_OpHandle h) {
-    auto sr = F<mlir::Operation>(h)->getName().getStringRef();
-    // The C side prints OP_TYPE_MODULE as "module"; strip "builtin." prefix
-    // for the canonical builtin module op so output matches.
-    if (sr == "builtin.module") return mkRefString("module");
-    return mkRefString(sr);
+    MLIR_Context *c = ctxOf(op);
+    auto it = c->opTypes.find(name.getAsOpaquePointer());
+    if (it != c->opTypes.end()) return it->second;
+    // An op of a name the context has not seen, created by the upstream
+    // parser or a pass: give the name a dynamic type.
+    return registerOpType(c, name.getStringRef());
 }
 extern "C" MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle) { return MLIR_INVALID_HANDLE; }
 extern "C" string MLIR_GetOpTrailingComment(MLIR_OpHandle) {
@@ -1783,8 +1792,18 @@ extern "C" MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle h) {
 // Misc
 // -----------------------------------------------------------------------------
 
-extern "C" string MLIR_GetOpTypeName(MLIR_OpType type) {
-    return op_type_to_string(type);
+extern "C" MLIR_OpType MLIR_RegisterOpType(MLIR_Context *ctx, string name) {
+    API_CHECK(ctx != nullptr, "MLIR_RegisterOpType", "context is NULL");
+    API_CHECK(name.size > 0, "MLIR_RegisterOpType", "empty op name");
+    return registerOpType(ctx, llvm::StringRef(name.str, name.size));
+}
+extern "C" MLIR_OpType MLIR_LookupOpType(MLIR_Context *ctx, string name) {
+    API_CHECK(ctx != nullptr, "MLIR_LookupOpType", "context is NULL");
+    return op_type_table_lookup(&ctx->opTypeTable, name);
+}
+extern "C" string MLIR_GetOpTypeName(MLIR_Context *ctx, MLIR_OpType type) {
+    API_CHECK(ctx != nullptr, "MLIR_GetOpTypeName", "context is NULL");
+    return op_type_table_name(&ctx->opTypeTable, type);
 }
 
 // -----------------------------------------------------------------------------
@@ -2175,9 +2194,9 @@ extern "C" void MLIR_SpliceBlockOps(MLIR_Context *cctx, MLIR_BlockHandle dst_h,
 // further down in this file.
 static void liftLLVMFuncCFGToSCF(mlir::ModuleOp module);
 
-// Rewrite tinyc's unregistered `llvm.intr.wasm.memory.size` /
-// `llvm.intr.wasm.memory.grow` ops into upstream LLVM dialect's
-// `llvm.call_intrinsic` form. tinyc emits these as unregistered ops (and
+// Rewrite tinyc's `llvm.intr.wasm.memory.size` / `llvm.intr.wasm.memory.grow`
+// ops into upstream LLVM dialect's `llvm.call_intrinsic` form. Upstream has
+// no such ops, so they are unregistered there; tinyc emits them (and
 // drops the memory-index argument, since only the default linear memory is
 // modeled); the native llvm->wasmssa pipeline recognizes the unregistered
 // names directly, but upstream's LLVM-IR translator only knows the
@@ -2187,10 +2206,13 @@ static void liftLLVMFuncCFGToSCF(mlir::ModuleOp module);
 static void rewriteWasmMemoryIntrinsicsForUpstream(mlir::ModuleOp module) {
     using namespace mlir;
     llvm::SmallVector<Operation *> to_erase;
+    MLIR_Context *c = ctxOf(module.getOperation());
+    const void *size_name = c->opNames[OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE];
+    const void *grow_name = c->opNames[OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW];
     module.walk([&](Operation *op) {
-        llvm::StringRef name = op->getName().getStringRef();
-        bool is_size = (name == "llvm.intr.wasm.memory.size");
-        bool is_grow = (name == "llvm.intr.wasm.memory.grow");
+        const void *name = op->getName().getAsOpaquePointer();
+        bool is_size = (name == size_name);
+        bool is_grow = (name == grow_name);
         if (!is_size && !is_grow) return;
         if (op->getNumResults() != 1) return;
         OpBuilder b(op);
@@ -2213,7 +2235,6 @@ static void rewriteWasmMemoryIntrinsicsForUpstream(mlir::ModuleOp module) {
         op->getResult(0).replaceAllUsesWith(call.getResult(0));
         to_erase.push_back(op);
     });
-    MLIR_Context *c = ctxOf(module.getContext());
     for (Operation *op : to_erase) {
         forgetErasedOp(c, op);
         op->erase();

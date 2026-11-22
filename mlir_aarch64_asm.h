@@ -22,7 +22,7 @@
 
 // Emit one aarch64.func to a byte buffer + relocation lists. Returns false on
 // an unsupported op (diagnostics to stderr).
-bool emit_aarch64_func(MLIR_OpHandle fn, MachineFunc *out);
+bool emit_aarch64_func(MLIR_Context *ctx, MLIR_OpHandle fn, MachineFunc *out);
 
 // Resolve the function-internal branch placeholders (b/b.cond/cbz/cbnz) once
 // every block's offset within the function is known.
