@@ -55,6 +55,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringSet.h"
 #include "mlir/IR/Diagnostics.h"
 
@@ -262,6 +263,14 @@ struct MLIR_Context : public mlir::MLIRContext {
     // Hidden block that owns block arguments created before their block
     // (MLIR_CreateValueBlockArg).
     mlir::Block *holderBlock = nullptr;
+    // The IR nobody else owns: ops, blocks and regions created through the
+    // API (or detached by it) that are not inside a parent. An object leaves
+    // its set when it is inserted into a parent or erased, and joins it when
+    // the API detaches it, so the sets only ever hold live objects that no
+    // pass can see. MLIR_DestroyContext frees them, and with them all IR.
+    llvm::DenseSet<mlir::Operation *> rootOps;
+    llvm::DenseSet<mlir::Block *> rootBlocks;
+    llvm::DenseSet<mlir::Region *> rootRegions;
 
     ~MLIR_Context() { delete holderBlock; }
 };
@@ -363,10 +372,22 @@ void defaultDiagnosticHandler(MLIR_DiagSeverity severity, MLIR_LocationHandle lo
     else if (severity == MLIR_DIAG_NOTE) sev = "note";
     else if (severity == MLIR_DIAG_REMARK) sev = "remark";
     if (loc != MLIR_INVALID_HANDLE) {
-        if (auto fl = llvm::dyn_cast<mlir::FileLineColLoc>(locF(loc))) {
+        mlir::Location l = locF(loc);
+        if (auto fl = llvm::dyn_cast<mlir::FileLineColLoc>(l)) {
             llvm::StringRef file = fl.getFilename().getValue();
             std::fprintf(stderr, "%.*s:%u:%u: %s: %.*s\n", (int)file.size(), file.data(),
                          fl.getLine(), fl.getColumn(), sev,
+                         (int)message.size, message.str);
+            return;
+        }
+        if (!llvm::isa<mlir::UnknownLoc>(l)) {
+            // Other locations (names, call sites, fused) print as MLIR's own
+            // default handler prints them, e.g. `loc("name")`.
+            std::string text;
+            llvm::raw_string_ostream os(text);
+            l.print(os);
+            os.flush();
+            std::fprintf(stderr, "%s: %s: %.*s\n", text.c_str(), sev,
                          (int)message.size, message.str);
             return;
         }
@@ -410,7 +431,19 @@ extern "C" MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) 
     if (options) c->arena = options->arena;
     return c;
 }
-extern "C" void MLIR_DestroyContext(MLIR_Context *cctx) { delete cctx; }
+// Frees all IR of the context: the parentless ops, blocks and regions own the
+// rest. References between them (operands, successors, the holder block's
+// arguments) are dropped first, so they can be destroyed in any order.
+extern "C" void MLIR_DestroyContext(MLIR_Context *cctx) {
+    if (!cctx) return;
+    for (mlir::Operation *op : cctx->rootOps) op->dropAllReferences();
+    for (mlir::Block *b : cctx->rootBlocks) b->dropAllReferences();
+    for (mlir::Region *r : cctx->rootRegions) r->dropAllReferences();
+    for (mlir::Operation *op : cctx->rootOps) op->destroy();
+    for (mlir::Block *b : cctx->rootBlocks) delete b;
+    for (mlir::Region *r : cctx->rootRegions) delete r;
+    delete cctx;
+}
 extern "C" void MLIR_SetArenaAllocator(MLIR_Context *ctx, Arena *arena) { ctx->arena = arena; }
 extern "C" Arena *MLIR_GetArenaAllocator(MLIR_Context *ctx) { return ctx->arena; }
 // Upstream always tracks uses; the setting is accepted and ignored.
@@ -441,14 +474,21 @@ extern "C" void MLIR_EmitDiagnostic(MLIR_Context *cctx, MLIR_DiagSeverity severi
 // -----------------------------------------------------------------------------
 
 extern "C" MLIR_RegionHandle MLIR_CreateRegion(MLIR_Context *cctx) {
-    return H(new mlir::Region());
+    auto *r = new mlir::Region();
+    cctx->rootRegions.insert(r);
+    return H(r);
 }
 extern "C" MLIR_BlockHandle MLIR_CreateBlock(MLIR_Context *cctx) {
-    return H(new mlir::Block());
+    auto *b = new mlir::Block();
+    cctx->rootBlocks.insert(b);
+    return H(b);
 }
 extern "C" void MLIR_AppendRegionBlock(MLIR_Context *cctx, MLIR_RegionHandle r,
                                         MLIR_BlockHandle b) {
-    F<mlir::Region>(r)->push_back(F<mlir::Block>(b));
+    auto *blk = F<mlir::Block>(b);
+    API_CHECK(!blk->getParent(), "MLIR_AppendRegionBlock", "block is already in a region");
+    cctx->rootBlocks.erase(blk);
+    F<mlir::Region>(r)->push_back(blk);
 }
 extern "C" void MLIR_AppendBlockOp(MLIR_Context *cctx, MLIR_BlockHandle b,
                                     MLIR_OpHandle op) {
@@ -459,6 +499,7 @@ extern "C" void MLIR_AppendBlockOp(MLIR_Context *cctx, MLIR_BlockHandle b,
     // op may be migrating from another block — invalidate its old slot.
     if (auto *src = o->getBlock()) cache.invalidateBlock(src);
     cache.invalidateBlock(target);
+    cctx->rootOps.erase(o);
     target->push_back(o);
 }
 extern "C" void MLIR_InsertBlockOpAtIndex(MLIR_Context *cctx,
@@ -466,9 +507,11 @@ extern "C" void MLIR_InsertBlockOpAtIndex(MLIR_Context *cctx,
                                           MLIR_OpHandle op, size_t idx) {
     auto *block = F<mlir::Block>(b);
     auto *o = F<mlir::Operation>(op);
+    API_CHECK(!o->getBlock(), "MLIR_InsertBlockOpAtIndex", "op is already in a block (detach it first)");
     auto &cache = cctx->blockOps;
     if (auto *src = o->getBlock()) cache.invalidateBlock(src);
     cache.invalidateBlock(block);
+    cctx->rootOps.erase(o);
     auto &ops = block->getOperations();
     size_t n = 0;
     for (auto it = ops.begin(); it != ops.end(); ++it, ++n) {
@@ -569,6 +612,9 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
         state.addAttribute(na->getName(), val);
     }
     for (size_t i = 0; i < n_regions; i++) {
+        // The op takes the region's body and the OperationState frees the
+        // Region object, so the handle is consumed.
+        cctx->rootRegions.erase(F<mlir::Region>(regions[i]));
         state.addRegion(std::unique_ptr<mlir::Region>(F<mlir::Region>(regions[i])));
     }
     for (size_t i = 0; i < n_successors; i++) {
@@ -623,6 +669,7 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     }
 
     mlir::Operation *op = mlir::Operation::create(state);
+    cctx->rootOps.insert(op);
     cctx->opUserAttrs[op] = std::move(userAttrs);
 
     for (size_t i = 0; i < n_results; i++) {
@@ -885,10 +932,15 @@ extern "C" size_t MLIR_GetRegionNumBlocks(MLIR_RegionHandle h) {
     return std::distance(r->begin(), r->end());
 }
 extern "C" MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_RegionHandle h, size_t i) {
-    API_CHECK(i < MLIR_GetRegionNumBlocks(h), "MLIR_GetRegionBlock", "index out of range");
     auto *r = F<mlir::Region>(h);
+    // The range check rides along the O(i) walk instead of counting the
+    // blocks first, which would make an index loop O(n^2) in checked builds.
     auto it = r->begin();
-    std::advance(it, i);
+    for (size_t k = 0; k < i; k++) {
+        API_CHECK(it != r->end(), "MLIR_GetRegionBlock", "index out of range");
+        ++it;
+    }
+    API_CHECK(it != r->end(), "MLIR_GetRegionBlock", "index out of range");
     return H(&*it);
 }
 
@@ -1283,7 +1335,6 @@ extern "C" string MLIR_PrintOperationUpstream(MLIR_Context *ctx, MLIR_OpHandle h
 }
 
 extern "C" MLIR_OpHandle MLIR_ParseTextUpstream(MLIR_Context *ctx, string text) {
-    (void)ctx;
     MLIR_Context &mctx = *ctx;
     llvm::StringRef src(text.str, text.size);
     mlir::ParserConfig config(&mctx);
@@ -1292,7 +1343,8 @@ extern "C" MLIR_OpHandle MLIR_ParseTextUpstream(MLIR_Context *ctx, string text) 
     if (!mod) return MLIR_INVALID_HANDLE;
     // Release ownership; the operation lives in the MLIRContext arena.
     mlir::Operation *op = mod.release().getOperation();
-    return reinterpret_cast<uintptr_t>(op);
+    ctx->rootOps.insert(op);
+    return H(op);
 }
 
 // -----------------------------------------------------------------------------
@@ -1452,6 +1504,7 @@ extern "C" MLIR_OpHandle MLIR_CreateLLVMGlobalString(MLIR_Context *cctx,
         mlir::LLVM::Linkage::Private,
         llvm::StringRef(sym_name.str, sym_name.size),
         strAttr, /*alignment=*/0);
+    cctx->rootOps.insert(op.getOperation());
     return H(op.getOperation());
 }
 
@@ -1493,6 +1546,7 @@ extern "C" MLIR_OpHandle MLIR_CreateLLVMGlobal(MLIR_Context *cctx,
     } else if (out_init_block) {
         *out_init_block = MLIR_INVALID_HANDLE;
     }
+    cctx->rootOps.insert(op.getOperation());
     return H(op.getOperation());
 }
 
@@ -1527,6 +1581,7 @@ extern "C" MLIR_OpHandle MLIR_CreateLLVMGlobalArrayInit(MLIR_Context *cctx,
         // Fallback to zero-init.
         auto zero = b.create<mlir::LLVM::ZeroOp>(loc, arrTy);
         b.create<mlir::LLVM::ReturnOp>(loc, zero.getRes());
+        cctx->rootOps.insert(op.getOperation());
         return H(op.getOperation());
     }
     mlir::Type elemTy = arr.getElementType();
@@ -1538,6 +1593,7 @@ extern "C" MLIR_OpHandle MLIR_CreateLLVMGlobalArrayInit(MLIR_Context *cctx,
     if (elem_size == 0 || bytes.size != n * elem_size) {
         auto zero = b.create<mlir::LLVM::ZeroOp>(loc, arrTy);
         b.create<mlir::LLVM::ReturnOp>(loc, zero.getRes());
+        cctx->rootOps.insert(op.getOperation());
         return H(op.getOperation());
     }
     mlir::Value cur = b.create<mlir::LLVM::UndefOp>(loc, arrTy).getRes();
@@ -1560,6 +1616,7 @@ extern "C" MLIR_OpHandle MLIR_CreateLLVMGlobalArrayInit(MLIR_Context *cctx,
             loc, cur, cst.getRes(), llvm::ArrayRef<int64_t>{(int64_t)i});
     }
     b.create<mlir::LLVM::ReturnOp>(loc, cur);
+    cctx->rootOps.insert(op.getOperation());
     return H(op.getOperation());
 }
 
@@ -1757,6 +1814,7 @@ extern "C" void MLIR_EraseOp(MLIR_Context *cctx, MLIR_OpHandle op_h) {
     // erased the allocator may reuse their addresses for new ops, and a
     // stale snapshot would shadow the new op's real attributes.
     forgetErasedOp(cctx, op);
+    cctx->rootOps.erase(op);
     op->erase();
 }
 
@@ -1769,6 +1827,7 @@ extern "C" void MLIR_DetachOp(MLIR_Context *cctx, MLIR_OpHandle op_h) {
     cctx->blockOps.invalidateBlock(blk);
     cctx->blockOps.invalidateOp(op);
     op->remove();
+    cctx->rootOps.insert(op);
 }
 
 extern "C" MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *cctx,
@@ -1781,6 +1840,7 @@ extern "C" MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *cctx,
     for (auto &b : op->getRegion(idx)) cache.invalidateBlock(&b);
     auto *out = new mlir::Region();
     out->takeBody(op->getRegion(idx));
+    cctx->rootRegions.insert(out);
     return H(out);
 }
 
@@ -1804,9 +1864,15 @@ extern "C" void MLIR_MoveOpToBlockEnd(MLIR_Context *cctx, MLIR_OpHandle op_h,
     auto *op = F<mlir::Operation>(op_h);
     auto *dest = F<mlir::Block>(dest_h);
     auto &cache = cctx->blockOps;
-    if (auto *src = op->getBlock()) cache.invalidateBlock(src);
     cache.invalidateBlock(dest);
-    op->moveBefore(dest, dest->end());
+    if (auto *src = op->getBlock()) {
+        cache.invalidateBlock(src);
+        op->moveBefore(dest, dest->end());
+    } else {
+        // Operation::moveBefore needs a current block.
+        cctx->rootOps.erase(op);
+        dest->push_back(op);
+    }
 }
 
 extern "C" void MLIR_MoveBlockToRegionEnd(MLIR_Context *cctx, MLIR_BlockHandle blk_h,
@@ -1817,6 +1883,7 @@ extern "C" void MLIR_MoveBlockToRegionEnd(MLIR_Context *cctx, MLIR_BlockHandle b
     // Block::moveBefore requires the block to already have a parent region;
     // for blocks that don't, just splice into dest directly.
     if (blk->getParent() == nullptr) {
+        cctx->rootBlocks.erase(blk);
         dest->push_back(blk);
     } else {
         blk->moveBefore(dest, dest->end());
@@ -1870,8 +1937,9 @@ extern "C" void MLIR_EraseBlock(MLIR_Context *cctx, MLIR_BlockHandle blk_h) {
     auto *blk = F<mlir::Block>(blk_h);
     cctx->blockOps.invalidateBlock(blk);
     if (blk->getParent() != nullptr) {
-        // Detach without freeing contained ops/args.
+        // Detach without freeing contained ops/args; the context owns it now.
         blk->getParent()->getBlocks().remove(blk);
+        cctx->rootBlocks.insert(blk);
     }
 }
 
@@ -1884,6 +1952,7 @@ extern "C" void MLIR_InsertRegionBlockAfter(MLIR_Context *cctx, MLIR_RegionHandl
     // Detach block from any current region first.
     if (blk->getParent() != nullptr)
         blk->getParent()->getBlocks().remove(blk);
+    cctx->rootBlocks.erase(blk);
     if (after_h == MLIR_INVALID_HANDLE) {
         region->getBlocks().push_front(blk);
         return;
@@ -1902,6 +1971,7 @@ extern "C" void MLIR_InsertRegionBlockBefore(MLIR_Context *cctx, MLIR_RegionHand
     auto *blk = F<mlir::Block>(blk_h);
     if (blk->getParent() != nullptr)
         blk->getParent()->getBlocks().remove(blk);
+    cctx->rootBlocks.erase(blk);
     if (before_h == MLIR_INVALID_HANDLE) {
         region->push_back(blk);
         return;

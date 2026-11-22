@@ -532,11 +532,14 @@ typedef struct MLIR_ContextOptions {
 } MLIR_ContextOptions;
 
 // Creates a context. `options` may be NULL, which means all defaults (no IR
-// arena yet, def-use tracking on). Returns NULL if memory runs out.
+// arena yet, def-use tracking on). Like every allocation in the API, it
+// aborts if memory runs out.
 MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options);
 // Destroys `ctx` and everything it owns (types, caches, the upstream
-// MLIRContext). IR arenas belong to the caller and are not freed, but no IR
-// created through `ctx` may be used afterwards.
+// MLIRContext). All IR created through `ctx` is dead afterwards: the upstream
+// backend frees it (the context owns every op, block and region that has no
+// parent, such as a module), while on the native backend it stays in the IR
+// arenas, which belong to the caller.
 void MLIR_DestroyContext(MLIR_Context *ctx);
 void MLIR_SetArenaAllocator(MLIR_Context *ctx, Arena *arena);
 Arena *MLIR_GetArenaAllocator(MLIR_Context *ctx);
@@ -576,8 +579,8 @@ typedef enum {
 typedef void (*MLIR_DiagnosticHandler)(void *user, MLIR_DiagSeverity severity,
                                        MLIR_LocationHandle loc, string message);
 // Installs `fn` (called with `user`) as the handler of `ctx`. NULL restores
-// the default handler, which prints `file:line:col: error: message` (or
-// `error: message` without a file location) to stderr.
+// the default handler, which prints `file:line:col: error: message` to stderr
+// (other locations in their `loc(...)` form; `error: message` without one).
 void MLIR_SetDiagnosticHandler(MLIR_Context *ctx, MLIR_DiagnosticHandler fn, void *user);
 // Formats a message with printf-style `fmt` and passes it to the handler.
 void MLIR_EmitDiagnostic(MLIR_Context *ctx, MLIR_DiagSeverity severity,
