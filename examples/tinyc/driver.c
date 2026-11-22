@@ -608,39 +608,38 @@ static int driver_emit_native_elf(MLIR_Context *ctx, MLIR_OpHandle module,
 }
 #endif  // TINYC_HAS_ELF
 
-// The target the native `--emit=llvm` output is for, from `--target=TRIPLE`.
+// The target the native `--emit=llvm` output is for, from `--target TRIPLE`.
 // The IR goes to the host's llc, so nothing in the IR itself says which
 // machine it is for; the driver must be told (or know) the target to make
 // target-dependent choices such as defining @__tinyc_syscall6 below.
 //
-// TRIPLE is an LLVM-style triple, `ARCH[-VENDOR]-OS[-ENV]`, e.g. x86_64-linux,
-// x86_64-unknown-linux-gnu, aarch64-apple-darwin, x86_64-pc-windows-msvc or
-// wasm32-wasi. Only the arch and the OS are interpreted; the vendor and the
-// environment are ignored, and the triple is written to the IR as given.
+// TRIPLE is an LLVM triple, ARCH-VENDOR-OS[-ENV], read by position the way
+// llc reads it, e.g. x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu,
+// aarch64-apple-darwin, arm64-apple-macosx14.0 or x86_64-pc-windows-msvc. The
+// vendor and the environment are not interpreted. An explicit triple is also
+// written to the IR as `target triple`, so llc compiles for the same target.
 //
-// Without --target, a gcc/clang-built tinyc on Linux/x86_64 defaults to that
-// host (x86_64-unknown-linux-gnu). Every other build, including a self-hosted
-// tinyc (__TINYC__), cannot know where its output will run, so its default is
-// "unknown": no `target triple` line and no target-specific definitions.
+// Without --target there is no triple line. A gcc/clang-built tinyc on
+// Linux/x86_64 then still targets that host (for the definitions below); every
+// other build, including a self-hosted tinyc (__TINYC__), cannot know where its
+// output will run, so its target is unknown and gets no target-specific code.
 typedef enum {
     TARGET_ARCH_UNKNOWN,
     TARGET_ARCH_X86_64,
-    TARGET_ARCH_AARCH64,
-    TARGET_ARCH_WASM32
+    TARGET_ARCH_AARCH64
 } TargetArch;
 
 typedef enum {
     TARGET_OS_UNKNOWN,
     TARGET_OS_LINUX,
     TARGET_OS_DARWIN,
-    TARGET_OS_WINDOWS,
-    TARGET_OS_WASI
+    TARGET_OS_WINDOWS
 } TargetOS;
 
 typedef struct {
     TargetArch arch;
     TargetOS os;
-    const char *triple;  // as written to the IR; NULL when unknown
+    const char *triple;  // written to the IR; NULL without --target
 } Target;
 
 static void target_set_default(Target *t) {
@@ -650,58 +649,57 @@ static void target_set_default(Target *t) {
 #if defined(__linux__) && defined(__x86_64__) && !defined(__TINYC__)
     t->arch = TARGET_ARCH_X86_64;
     t->os = TARGET_OS_LINUX;
-    t->triple = "x86_64-unknown-linux-gnu";
 #endif
 }
 
-// Is the triple component s[0..n) equal to `name` (exact) or, when `prefix`,
-// does it start with `name` (OS components may carry a version, e.g.
-// darwin23.1.0, macosx14.0, wasip1)?
+// Is the triple component s[0..n) `name`, optionally followed by a version
+// (digits and dots) when `versioned` (darwin23.1.0, macosx14.0)?
 static bool target_component_is(const char *s, size_t n, const char *name,
-                                bool prefix) {
+                                bool versioned) {
     size_t len = strlen(name);
-    if (n < len || (!prefix && n != len)) return false;
-    return memcmp(s, name, len) == 0;
+    if (n < len || memcmp(s, name, len) != 0) return false;
+    if (n > len && !versioned) return false;
+    for (size_t i = len; i < n; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || s[i] == '.')) return false;
+    return true;
 }
 
-// Parse an LLVM-style triple into `t`. Returns false (with `t` untouched) when
-// the arch or the OS is not one tinyC knows.
+// Parse an LLVM triple into `t`. Returns false (with `t` untouched) when it
+// has fewer than three components or its arch or OS is not one tinyC knows.
 static bool target_parse(const char *triple, Target *t) {
     TargetArch arch = TARGET_ARCH_UNKNOWN;
     TargetOS os = TARGET_OS_UNKNOWN;
     size_t i = 0;
-    bool first = true;
-    while (true) {
+    int k = 0;
+    while (k < 3) {
         size_t start = i;
         while (triple[i] && triple[i] != '-') i++;
         const char *c = triple + start;
         size_t n = i - start;
-        if (first) {
+        if (k == 0) {
             if (target_component_is(c, n, "x86_64", false) ||
                 target_component_is(c, n, "amd64", false))
                 arch = TARGET_ARCH_X86_64;
             else if (target_component_is(c, n, "aarch64", false) ||
                      target_component_is(c, n, "arm64", false))
                 arch = TARGET_ARCH_AARCH64;
-            else if (target_component_is(c, n, "wasm32", false))
-                arch = TARGET_ARCH_WASM32;
-            first = false;
-        } else if (os == TARGET_OS_UNKNOWN) {
+        } else if (k == 2) {
             if (target_component_is(c, n, "linux", false))
                 os = TARGET_OS_LINUX;
             else if (target_component_is(c, n, "darwin", true) ||
-                     target_component_is(c, n, "macos", true))
+                     target_component_is(c, n, "macos", true) ||
+                     target_component_is(c, n, "macosx", true))
                 os = TARGET_OS_DARWIN;
             else if (target_component_is(c, n, "windows", false) ||
                      target_component_is(c, n, "win32", false))
                 os = TARGET_OS_WINDOWS;
-            else if (target_component_is(c, n, "wasi", true))
-                os = TARGET_OS_WASI;
         }
+        k++;
         if (!triple[i]) break;
         i++;
     }
-    if (arch == TARGET_ARCH_UNKNOWN || os == TARGET_OS_UNKNOWN) return false;
+    if (k < 3 || arch == TARGET_ARCH_UNKNOWN || os == TARGET_OS_UNKNOWN)
+        return false;
     t->arch = arch;
     t->os = os;
     t->triple = triple;
@@ -867,7 +865,7 @@ int app_main(void) {
     bool lowering_explicit = false; // tracks whether user passed --lowering=
 #endif
     char *output_file = NULL;
-    // --target=TRIPLE (see Target above); only `--emit=llvm` consults it.
+    // --target TRIPLE (see Target above); only `--emit=llvm` consults it.
     Target target;
     target_set_default(&target);
 
@@ -1036,13 +1034,22 @@ int app_main(void) {
         else if (strcmp(argv[i], "--wasi-adapter") == 0 && i + 1 < argc) {
             wasi_adapter_path = argv[++i];
         }
-        else if (strncmp(argv[i], "--target=", 9) == 0) {
-            if (!target_parse(argv[i] + 9, &target)) {
+        else if (strncmp(argv[i], "--target", 8) == 0 &&
+                 (argv[i][8] == '=' || argv[i][8] == '\0')) {
+            const char *triple = argv[i][8] == '=' ? argv[i] + 9
+                               : (i + 1 < argc ? argv[++i] : NULL);
+            if (!triple) {
+                fprintf(stderr, "tinyc: --target needs a triple, e.g. "
+                        "--target=x86_64-unknown-linux-gnu\n");
+                arena_destroy(boot_arena);
+                return 1;
+            }
+            if (!target_parse(triple, &target)) {
                 fprintf(stderr,
-                        "tinyc: unsupported target '%s' (expected ARCH-...-OS "
-                        "with ARCH x86_64|aarch64|wasm32 and OS "
-                        "linux|darwin|windows|wasi, e.g. x86_64-linux)\n",
-                        argv[i] + 9);
+                        "tinyc: unsupported target '%s' (expected "
+                        "ARCH-VENDOR-OS[-ENV] with ARCH x86_64|aarch64 and OS "
+                        "linux|darwin|macosx|windows, e.g. "
+                        "x86_64-unknown-linux-gnu)\n", triple);
                 arena_destroy(boot_arena);
                 return 1;
             }
@@ -1100,16 +1107,6 @@ int app_main(void) {
     bool emit_aarch64   = emit_mode == EMIT_AARCH64;
     bool emit_macho     = emit_mode == EMIT_MACHO;
     bool emit_elf       = emit_mode == EMIT_ELF;
-
-    // The `--emit=llvm` IR is LP64 (native sizing); a wasm32 target goes
-    // through --emit=wasm instead.
-    if (emit_llvm && target.arch == TARGET_ARCH_WASM32) {
-        fprintf(stderr,
-                "tinyc: --emit=llvm does not support --target=%s "
-                "(use --emit=wasm for wasm32)\n", target.triple);
-        arena_destroy(boot_arena);
-        return 1;
-    }
 
     if ((emit_wasmssa || emit_wasmstack) &&
 #ifdef TINYC_HAS_UPSTREAM

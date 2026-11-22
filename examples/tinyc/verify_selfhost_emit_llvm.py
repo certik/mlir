@@ -36,10 +36,10 @@ INCLUDES = [
     "-I", str(HERE / "tests"),
 ]
 
-# Both compilers get the same explicit target (a self-hosted tinyc has no
-# default target, #326), so target-specific output such as the
+# On Linux both compilers get the same explicit target (a self-hosted tinyc
+# has no default target, #326), so target-specific output such as the
 # __tinyc_syscall6 definition is compared too.
-TARGET = [f"--target={host_triple()}"]
+TARGET = [f"--target={host_triple()}"] if host_triple() else []
 
 
 def emit(tinyc: str, src: Path, out: Path) -> bool:

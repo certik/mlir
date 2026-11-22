@@ -7,6 +7,7 @@ that one wrapper with tinyC.
 """
 
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -63,24 +64,17 @@ HOST_VARARGS_FLAG = (["--host-varargs"]
                      else [])
 
 
-def host_triple() -> str:
-    """LLVM-style triple of this machine, passed to `tinyc --target=` for
-    `--emit=llvm`: the native target's IR goes to the host llc and runs here.
-    A self-hosted tinyc cannot know this itself (#326)."""
-    import platform
+def host_triple() -> str | None:
+    """LLVM triple of this machine for `tinyc --emit=llvm --target=`, on Linux
+    only: there the IR needs the __tinyc_syscall6 definition, which a
+    self-hosted tinyc only emits for an explicit x86_64 Linux target (#326).
+    Elsewhere return None and pass no --target, leaving the host llc's own
+    default (e.g. the macOS deployment target) in charge."""
+    if platform.system() != "Linux":
+        return None
     machine = platform.machine().lower()
     arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
-    system = platform.system()
-    if system == "Linux":
-        return f"{arch}-unknown-linux-gnu"
-    if system == "Darwin":
-        # Versioned like clang's default, so the object carries a build
-        # version load command.
-        ver = platform.mac_ver()[0]
-        return f"{arch}-apple-macosx{ver}" if ver else f"{arch}-apple-darwin"
-    if system == "Windows":
-        return f"{arch}-pc-windows-msvc"
-    return f"{arch}-unknown-{system.lower()}"
+    return f"{arch}-unknown-linux-gnu"
 
 
 # Code-generation/runtime target for the suite. "native" (default) emits
@@ -103,7 +97,8 @@ MACHO_BACKEND = os.environ.get("TINYC_MACHO_BACKEND", "wasm")
 LIFT_USE_NATIVE = os.environ.get("TINYC_LIFT_USE_NATIVE") == "1"
 
 # The native target's `--emit=llvm` is for this machine (see host_triple()).
-TARGET_FLAG = [f"--target={host_triple()}"] if TARGET == "native" else []
+TARGET_FLAG = ([f"--target={host_triple()}"]
+               if TARGET == "native" and host_triple() else [])
 
 
 def run(cmd, **kw):
@@ -435,31 +430,44 @@ def check_driver_cli() -> list[str]:
     r = run([str(TINYC), "--emit=nonsense", str(simple)])
     if r.returncode <= 0:
         problems.append(f"--emit=nonsense was accepted (exit {r.returncode})")
-    # --target= decides target-specific output of --emit=llvm: the triple
+    # --target decides target-specific output of --emit=llvm: the triple
     # line, and the __tinyc_syscall6 definition only for x86_64 Linux (#326).
+    # The triple is read by position, ARCH-VENDOR-OS[-ENV], like llc does.
     syscall = HERE / "tests" / "builtin_syscall.tc"
     defn = "define internal i64 @__tinyc_syscall6("
     for triple, want in (("x86_64-unknown-linux-gnu", True),
-                         ("x86_64-linux", True),
+                         ("x86_64-pc-linux", True),
+                         ("x86_64-macosx-linux", True),
                          ("aarch64-unknown-linux-gnu", False),
                          ("arm64-apple-macosx14.0", False),
+                         ("x86_64-apple-darwin23.1.0", False),
                          ("x86_64-pc-windows-msvc", False)):
-        r = run([str(TINYC), "--emit=llvm", f"--target={triple}", str(syscall)])
-        if r.returncode != 0:
-            problems.append(f"--emit=llvm --target={triple} failed (exit {r.returncode})")
-            continue
-        if f'\ntarget triple = "{triple}"\n' not in r.stdout:
-            problems.append(f"--target={triple}: no target triple line in the IR")
-        if (defn in r.stdout) != want:
-            problems.append(f"--target={triple}: __tinyc_syscall6 "
-                            f"{'not ' if want else ''}defined")
-    for bad in ("riscv64-linux", "x86_64", "x86_64-unknown-none"):
+        for args in ([f"--target={triple}"], ["--target", triple]):
+            r = run([str(TINYC), "--emit=llvm", *args, str(syscall)])
+            if r.returncode != 0:
+                problems.append(f"--emit=llvm {' '.join(args)} failed (exit {r.returncode})")
+                continue
+            if f'\ntarget triple = "{triple}"\n' not in r.stdout:
+                problems.append(f"{' '.join(args)}: no target triple line in the IR")
+            if (defn in r.stdout) != want:
+                problems.append(f"{' '.join(args)}: __tinyc_syscall6 "
+                                f"{'not ' if want else ''}defined")
+    for bad in ("x86_64-linux", "x86_64-linux-gnu", "x86_64-linux-unknown",
+                "x86_64-unknown-darwinfoo",
+                "x86_64-unknown-linuxfoo", "riscv64-unknown-linux-gnu",
+                "wasm32-unknown-wasi", "x86_64", ""):
         r = run([str(TINYC), "--emit=llvm", f"--target={bad}", str(simple)])
         if r.returncode <= 0:
             problems.append(f"--target={bad} was accepted (exit {r.returncode})")
-    r = run([str(TINYC), "--emit=llvm", "--target=wasm32-wasi", str(simple)])
+        elif "x86_64-unknown-linux-gnu" not in r.stderr:
+            problems.append(f"--target={bad}: the error does not suggest a full triple")
+    r = run([str(TINYC), "--emit=llvm", str(simple), "--target"])
     if r.returncode <= 0:
-        problems.append(f"--emit=llvm --target=wasm32-wasi was accepted (exit {r.returncode})")
+        problems.append(f"--target without a value was accepted (exit {r.returncode})")
+    # Without --target the IR keeps its old form: no triple line.
+    r = run([str(TINYC), "--emit=llvm", str(simple)])
+    if r.returncode != 0 or "target triple" in r.stdout:
+        problems.append("--emit=llvm without --target wrote a target triple line")
     return problems
 
 
