@@ -328,20 +328,6 @@ extern "C" void MLIR_AppendBlockOp(MLIR_Context *, MLIR_BlockHandle b,
     cache.invalidateBlock(target);
     target->push_back(o);
 }
-extern "C" void MLIR_InsertBlockOpBeforeTerminator(MLIR_Context *,
-                                                   MLIR_BlockHandle b,
-                                                   MLIR_OpHandle op) {
-    auto *block = F<mlir::Block>(b);
-    auto *o = F<mlir::Operation>(op);
-    auto &cache = blockOpCache();
-    if (auto *src = o->getBlock()) cache.invalidateBlock(src);
-    cache.invalidateBlock(block);
-    if (!block->empty() && block->back().hasTrait<mlir::OpTrait::IsTerminator>()) {
-        block->getOperations().insert(mlir::Block::iterator(&block->back()), o);
-    } else {
-        block->push_back(o);
-    }
-}
 extern "C" void MLIR_InsertBlockOpAtIndex(MLIR_Context *,
                                           MLIR_BlockHandle b,
                                           MLIR_OpHandle op, size_t idx) {
@@ -584,10 +570,6 @@ extern "C" string MLIR_GetOpName_string(MLIR_OpHandle h) { return MLIR_GetOpName
 extern "C" MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle) { return MLIR_INVALID_HANDLE; }
 extern "C" string MLIR_GetOpTrailingComment(MLIR_OpHandle) {
     string s; s.str = nullptr; s.size = 0; return s;
-}
-extern "C" int64_t MLIR_GetOpSourceLineStart(MLIR_OpHandle) { return -1; }
-extern "C" MLIR_LocationHandle MLIR_GetOpUnnumberedLocationDef(MLIR_OpHandle) {
-    return MLIR_INVALID_HANDLE;
 }
 
 extern "C" size_t MLIR_GetOpNumOperands(MLIR_OpHandle h) {
@@ -1018,27 +1000,9 @@ extern "C" MLIR_TypeHandle MLIR_CreateTypeFunction(MLIR_Context *,
     for (size_t i = 0; i < n_results; i++) out.push_back(typeF(results[i]));
     return typeH(mlir::FunctionType::get(&ctx, in, out));
 }
-extern "C" void MLIR_SetTypeIntegerProperties(MLIR_TypeHandle, uint32_t, bool) {}
-extern "C" void MLIR_SetTypeFloatProperties(MLIR_TypeHandle, uint32_t, bool) {}
-extern "C" void MLIR_SetTypeTensorProperties(MLIR_TypeHandle, const int64_t *, size_t, MLIR_TypeHandle) {}
-extern "C" void MLIR_SetTypeMemrefProperties(MLIR_TypeHandle, const int64_t *, size_t, MLIR_TypeHandle) {}
-extern "C" void MLIR_SetTypePointerProperties(MLIR_TypeHandle, MLIR_TypeHandle, bool, uint32_t) {}
 
 extern "C" bool MLIR_IsTypeInteger(MLIR_TypeHandle h) { return llvm::isa<mlir::IntegerType>(typeF(h)); }
 extern "C" bool MLIR_IsTypeFloat(MLIR_TypeHandle h)   { return llvm::isa<mlir::FloatType>(typeF(h)); }
-extern "C" bool MLIR_IsTypeTensor(MLIR_TypeHandle h)  { return llvm::isa<mlir::TensorType>(typeF(h)); }
-extern "C" bool MLIR_IsTypeMemref(MLIR_TypeHandle h)  { return llvm::isa<mlir::BaseMemRefType>(typeF(h)); }
-extern "C" bool MLIR_IsTypePointer(MLIR_TypeHandle h) {
-    auto opaq = llvm::dyn_cast<mlir::OpaqueType>(typeF(h));
-    return opaq && opaq.getDialectNamespace() == "tt";
-}
-extern "C" bool MLIR_IsTypeIndex(MLIR_TypeHandle h)   { return llvm::isa<mlir::IndexType>(typeF(h)); }
-extern "C" bool MLIR_IsTypeUnknown(MLIR_TypeHandle h) { return llvm::isa<mlir::NoneType>(typeF(h)); }
-extern "C" bool MLIR_IsTypeOpaque(MLIR_TypeHandle h)  {
-    auto opaq = llvm::dyn_cast<mlir::OpaqueType>(typeF(h));
-    return opaq && opaq.getDialectNamespace() != "tt";
-}
-extern "C" bool MLIR_IsTypeFunction(MLIR_TypeHandle h) { return llvm::isa<mlir::FunctionType>(typeF(h)); }
 extern "C" size_t MLIR_GetTypeFunctionNumInputs(MLIR_TypeHandle h) {
     auto t = typeF(h);
     if (auto ft = llvm::dyn_cast<mlir::FunctionType>(t)) return ft.getNumInputs();
@@ -1615,7 +1579,6 @@ extern "C" string MLIR_GetLocationName(MLIR_LocationHandle h) {
         return mkRefString(nl.getName().getValue());
     return mkRefString(llvm::StringRef());
 }
-extern "C" int MLIR_GetLocationRefId(MLIR_LocationHandle) { return 0; }
 
 extern "C" MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle h) {
     if (h == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
@@ -1661,24 +1624,6 @@ extern "C" void MLIR_EraseOp(MLIR_Context *, MLIR_OpHandle op_h) {
     op->erase();
 }
 
-extern "C" void MLIR_SetOpRegion(MLIR_Context *, MLIR_OpHandle op_h,
-                                 size_t idx, MLIR_RegionHandle region_h) {
-    if (op_h == MLIR_INVALID_HANDLE) return;
-    auto *op = F<mlir::Operation>(op_h);
-    if (idx >= op->getNumRegions()) return;
-    auto *newRegion = F<mlir::Region>(region_h);
-    auto &dst = op->getRegion(idx);
-    // Blocks (and their op lists) are moved between regions. The blocks
-    // themselves are unchanged, so their cached op pointers stay valid —
-    // but to be safe against any block whose identity changes, clear
-    // cache entries for all blocks in either region.
-    auto &cache = blockOpCache();
-    for (auto &b : dst) cache.invalidateBlock(&b);
-    for (auto &b : *newRegion) cache.invalidateBlock(&b);
-    dst.takeBody(*newRegion);
-    delete newRegion;
-}
-
 extern "C" MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *,
                                                 MLIR_OpHandle op_h,
                                                 size_t idx) {
@@ -1697,20 +1642,6 @@ extern "C" MLIR_BlockHandle MLIR_GetOpParentBlock(MLIR_OpHandle op_h) {
     auto *op = F<mlir::Operation>(op_h);
     auto *blk = op->getBlock();
     return blk ? H(blk) : MLIR_INVALID_HANDLE;
-}
-
-extern "C" size_t MLIR_GetBlockOpIndex(MLIR_BlockHandle blk_h,
-                                       MLIR_OpHandle op_h) {
-    if (blk_h == MLIR_INVALID_HANDLE || op_h == MLIR_INVALID_HANDLE)
-        return SIZE_MAX;
-    auto *blk = F<mlir::Block>(blk_h);
-    auto *op  = F<mlir::Operation>(op_h);
-    size_t i = 0;
-    for (auto &o : blk->getOperations()) {
-        if (&o == op) return i;
-        i++;
-    }
-    return SIZE_MAX;
 }
 
 extern "C" MLIR_RegionHandle MLIR_GetBlockParentRegion(MLIR_BlockHandle blk_h) {
@@ -1943,23 +1874,6 @@ extern "C" MLIR_OpHandle MLIR_GetValueUseOwner(MLIR_Context *,
     }
     if (out_operand_idx) *out_operand_idx = SIZE_MAX;
     return MLIR_INVALID_HANDLE;
-}
-
-extern "C" void MLIR_SetOpOperands(MLIR_Context *, MLIR_OpHandle op_h,
-                                    const MLIR_ValueHandle *values, size_t n) {
-    if (op_h == MLIR_INVALID_HANDLE) return;
-    auto *op = F<mlir::Operation>(op_h);
-    llvm::SmallVector<mlir::Value, 8> vs;
-    vs.reserve(n);
-    for (size_t i = 0; i < n; i++) {
-        if (values && values[i] != MLIR_INVALID_HANDLE) {
-            auto *box = F<ValueBox>(values[i]);
-            vs.push_back(box ? box->v : mlir::Value());
-        } else {
-            vs.push_back(mlir::Value());
-        }
-    }
-    op->setOperands(vs);
 }
 
 extern "C" void MLIR_AppendOpSuccessorOperand(MLIR_Context *, MLIR_OpHandle op_h,
