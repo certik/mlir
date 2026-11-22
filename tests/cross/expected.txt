@@ -18,3 +18,12 @@ module() {
         func.return(%0: i32)
     }
 }
+block parent op is func.func: yes
+block parent op is module: yes
+detached op keeps its operands: yes
+detached op reinserted: yes
+erase drops the op and its uses: yes
+function type outlives its IR arena: yes
+diagnostic: count=1 warning=1 loc=t.c:3:7 text=value 42 is odd
+second context has its own types: yes
+first context unaffected: yes

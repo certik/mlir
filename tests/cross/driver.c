@@ -68,17 +68,37 @@ static void clobber_stack(void) {
     (void)junk[0];
 }
 
+// Diagnostic handler that records the last diagnostic (see app_main).
+typedef struct {
+    int count;
+    MLIR_DiagSeverity severity;
+    MLIR_LocationHandle loc;
+    char text[128];
+    size_t len;
+} DiagCapture;
+
+static void capture_diag(void *user, MLIR_DiagSeverity severity,
+                         MLIR_LocationHandle loc, string message) {
+    DiagCapture *c = (DiagCapture *)user;
+    c->count++;
+    c->severity = severity;
+    c->loc = loc;
+    c->len = message.size < sizeof(c->text) ? message.size : sizeof(c->text);
+    for (size_t i = 0; i < c->len; i++) c->text[i] = message.str[i];
+}
+
 int app_main(void) {
     Arena *arena = arena_create(1 * 1024 * 1024);
-    MLIR_Context ctx = {0};
-    MLIR_SetArenaAllocator(&ctx, arena);
+    MLIR_ContextOptions options = {0};
+    options.arena = arena;
+    MLIR_Context *ctx = MLIR_CreateContext(&options);
 
-    MLIR_TypeHandle i32_ty = MLIR_CreateTypeInteger(&ctx, 32, true);
+    MLIR_TypeHandle i32_ty = MLIR_CreateTypeInteger(ctx, 32, true);
 
     {
         MLIR_AttributeHandle arr = MLIR_INVALID_HANDLE;
         MLIR_AttributeHandle dict = MLIR_INVALID_HANDLE;
-        make_stack_array_attrs(&ctx, i32_ty, &arr, &dict);
+        make_stack_array_attrs(ctx, i32_ty, &arr, &dict);
         clobber_stack();
         print_string(str_lit("array attr from stack buffer:"));
         for (size_t i = 0; i < MLIR_GetAttributeArraySize(arr); i++) {
@@ -103,14 +123,14 @@ int app_main(void) {
     // llvm.mlir.undef ops when the same i32 was looked up by handle.
     // See mlir_api_impl.c's intern_type for the native fix.
     {
-        MLIR_TypeHandle i32_a = MLIR_CreateTypeInteger(&ctx, 32, true);
-        MLIR_TypeHandle i32_b = MLIR_CreateTypeInteger(&ctx, 32, true);
-        MLIR_TypeHandle i64_a = MLIR_CreateTypeInteger(&ctx, 64, false);
-        MLIR_TypeHandle i64_b = MLIR_CreateTypeInteger(&ctx, 64, false);
-        MLIR_TypeHandle idx_a = MLIR_CreateTypeIndex(&ctx);
-        MLIR_TypeHandle idx_b = MLIR_CreateTypeIndex(&ctx);
-        MLIR_TypeHandle ptr_a = MLIR_CreateTypeLLVMPointer(&ctx);
-        MLIR_TypeHandle ptr_b = MLIR_CreateTypeLLVMPointer(&ctx);
+        MLIR_TypeHandle i32_a = MLIR_CreateTypeInteger(ctx, 32, true);
+        MLIR_TypeHandle i32_b = MLIR_CreateTypeInteger(ctx, 32, true);
+        MLIR_TypeHandle i64_a = MLIR_CreateTypeInteger(ctx, 64, false);
+        MLIR_TypeHandle i64_b = MLIR_CreateTypeInteger(ctx, 64, false);
+        MLIR_TypeHandle idx_a = MLIR_CreateTypeIndex(ctx);
+        MLIR_TypeHandle idx_b = MLIR_CreateTypeIndex(ctx);
+        MLIR_TypeHandle ptr_a = MLIR_CreateTypeLLVMPointer(ctx);
+        MLIR_TypeHandle ptr_b = MLIR_CreateTypeLLVMPointer(ctx);
         print_string(i32_a == i32_b ? str_lit("intern i32: yes\n") : str_lit("intern i32: no\n"));
         print_string(i64_a == i64_b ? str_lit("intern i64: yes\n") : str_lit("intern i64: no\n"));
         print_string(idx_a == idx_b ? str_lit("intern index: yes\n") : str_lit("intern index: no\n"));
@@ -130,18 +150,18 @@ int app_main(void) {
     // semantically-equivalent but byte-different wasm. See
     // mlir_api_impl.c's MLIR_SetOpOperand for the fix.
     {
-        MLIR_RegionHandle r = MLIR_CreateRegion(&ctx);
-        MLIR_BlockHandle entry = MLIR_CreateBlock(&ctx);
-        MLIR_BlockHandle tgt = MLIR_CreateBlock(&ctx);
-        MLIR_AppendRegionBlock(&ctx, r, entry);
-        MLIR_AppendRegionBlock(&ctx, r, tgt);
+        MLIR_RegionHandle r = MLIR_CreateRegion(ctx);
+        MLIR_BlockHandle entry = MLIR_CreateBlock(ctx);
+        MLIR_BlockHandle tgt = MLIR_CreateBlock(ctx);
+        MLIR_AppendRegionBlock(ctx, r, entry);
+        MLIR_AppendRegionBlock(ctx, r, tgt);
 
         MLIR_ValueHandle defv = MLIR_CreateValueBlockArg(
-            &ctx, str_lit("%d"), 0, i32_ty, MLIR_INVALID_HANDLE);
-        MLIR_AppendBlockArg(&ctx, entry, defv);
+            ctx, str_lit("%d"), 0, i32_ty, MLIR_INVALID_HANDLE);
+        MLIR_AppendBlockArg(ctx, entry, defv);
         MLIR_ValueHandle replv = MLIR_CreateValueBlockArg(
-            &ctx, str_lit("%r"), 1, i32_ty, MLIR_INVALID_HANDLE);
-        MLIR_AppendBlockArg(&ctx, entry, replv);
+            ctx, str_lit("%r"), 1, i32_ty, MLIR_INVALID_HANDLE);
+        MLIR_AppendBlockArg(ctx, entry, replv);
 
         // Build cf.br tgt(defv : i32) — zero regular operands, one successor
         // with one successor-operand.
@@ -153,55 +173,55 @@ int app_main(void) {
         size_t *snums = arena_new_array(arena, size_t, 1);
         snums[0] = 1;
         MLIR_OpHandle br = MLIR_CreateOpWithSuccessors(
-            &ctx, OP_TYPE_CF_BR, str_lit("cf.br"),
+            ctx, OP_TYPE_CF_BR, str_lit("cf.br"),
             NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
             succs, 1, sops, snums,
             MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
-        MLIR_AppendBlockOp(&ctx, entry, br);
+        MLIR_AppendBlockOp(ctx, entry, br);
 
-        size_t n_uses = MLIR_GetValueNumUses(&ctx, defv);
+        size_t n_uses = MLIR_GetValueNumUses(ctx, defv);
         print_string(n_uses == 1 ? str_lit("cf.br succ_op use registered: yes\n")
                                  : str_lit("cf.br succ_op use registered: no\n"));
 
         size_t op_idx = (size_t)-1;
-        MLIR_OpHandle owner = MLIR_GetValueUseOwner(&ctx, defv, 0, &op_idx);
+        MLIR_OpHandle owner = MLIR_GetValueUseOwner(ctx, defv, 0, &op_idx);
         print_string(owner == br ? str_lit("use owner is cf.br: yes\n")
                                  : str_lit("use owner is cf.br: no\n"));
 
         // Round-trip the synthetic flat index through SetOpOperand. After
         // the call, cf.br's successor operand at slot 0 must point to
         // `replv` instead of `defv`.
-        MLIR_SetOpOperand(&ctx, br, op_idx, replv);
+        MLIR_SetOpOperand(ctx, br, op_idx, replv);
         MLIR_ValueHandle after = MLIR_GetOpSuccessorOperand(br, 0, 0);
         print_string(after == replv ? str_lit("SetOpOperand updates succ_op: yes\n")
                                     : str_lit("SetOpOperand updates succ_op: no\n"));
-        print_string(MLIR_GetValueNumUses(&ctx, defv) == 0
+        print_string(MLIR_GetValueNumUses(ctx, defv) == 0
                          ? str_lit("old value uses cleared: yes\n")
                          : str_lit("old value uses cleared: no\n"));
-        print_string(MLIR_GetValueNumUses(&ctx, replv) == 1
+        print_string(MLIR_GetValueNumUses(ctx, replv) == 1
                          ? str_lit("new value uses registered: yes\n")
                          : str_lit("new value uses registered: no\n"));
     }
 
     // ---- module region/block ------------------------------------------------
-    MLIR_RegionHandle module_region = MLIR_CreateRegion(&ctx);
-    MLIR_BlockHandle  module_block  = MLIR_CreateBlock(&ctx);
-    MLIR_AppendRegionBlock(&ctx, module_region, module_block);
+    MLIR_RegionHandle module_region = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle  module_block  = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, module_region, module_block);
 
     // ---- func.func body -----------------------------------------------------
-    MLIR_RegionHandle func_region = MLIR_CreateRegion(&ctx);
-    MLIR_BlockHandle  func_block  = MLIR_CreateBlock(&ctx);
+    MLIR_RegionHandle func_region = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle  func_block  = MLIR_CreateBlock(ctx);
 
     MLIR_ValueHandle arg0 = MLIR_CreateValueBlockArg(
-        &ctx, str_lit("%arg0"), 0, i32_ty, MLIR_INVALID_HANDLE);
-    MLIR_AppendBlockArg(&ctx, func_block, arg0);
+        ctx, str_lit("%arg0"), 0, i32_ty, MLIR_INVALID_HANDLE);
+    MLIR_AppendBlockArg(ctx, func_block, arg0);
     MLIR_ValueHandle arg1 = MLIR_CreateValueBlockArg(
-        &ctx, str_lit("%arg1"), 1, i32_ty, MLIR_INVALID_HANDLE);
-    MLIR_AppendBlockArg(&ctx, func_block, arg1);
+        ctx, str_lit("%arg1"), 1, i32_ty, MLIR_INVALID_HANDLE);
+    MLIR_AppendBlockArg(ctx, func_block, arg1);
 
     // %0 = arith.addi(%arg0, %arg1) -> i32
     MLIR_ValueHandle add_result = MLIR_CreateValueOpResult(
-        &ctx, MLIR_INVALID_HANDLE, 0, i32_ty,
+        ctx, MLIR_INVALID_HANDLE, 0, i32_ty,
         str_lit(""), MLIR_INVALID_HANDLE);
 
     MLIR_ValueHandle *add_operands = arena_new_array(arena, MLIR_ValueHandle, 2);
@@ -213,7 +233,7 @@ int app_main(void) {
     add_results[0] = add_result;
 
     MLIR_OpHandle add_op = MLIR_CreateOp(
-        &ctx, OP_TYPE_ARITH_ADDI, str_lit("arith.addi"),
+        ctx, OP_TYPE_ARITH_ADDI, str_lit("arith.addi"),
         NULL, 0,
         add_result_types, 1,
         add_results, 1,
@@ -226,47 +246,126 @@ int app_main(void) {
     MLIR_ValueHandle *ret_operands = arena_new_array(arena, MLIR_ValueHandle, 1);
     ret_operands[0] = add_result;
     MLIR_OpHandle ret_op = MLIR_CreateOp(
-        &ctx, OP_TYPE_FUNC_RETURN, str_lit("func.return"),
+        ctx, OP_TYPE_FUNC_RETURN, str_lit("func.return"),
         NULL, 0, NULL, 0, NULL, 0,
         ret_operands, 1,
         NULL, 0,
         MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE,
         str_lit(""), -1);
 
-    MLIR_AppendBlockOp(&ctx, func_block, add_op);
-    MLIR_AppendBlockOp(&ctx, func_block, ret_op);
-    MLIR_AppendRegionBlock(&ctx, func_region, func_block);
+    MLIR_AppendBlockOp(ctx, func_block, add_op);
+    MLIR_AppendBlockOp(ctx, func_block, ret_op);
+    MLIR_AppendRegionBlock(ctx, func_region, func_block);
 
     // ---- func.func op --------------------------------------------------------
     MLIR_AttributeHandle sym_name_attr =
-        MLIR_CreateAttributeString(&ctx, str_lit("sym_name"), str_lit("add"));
+        MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("add"));
     MLIR_AttributeHandle *func_attrs = arena_new_array(arena, MLIR_AttributeHandle, 1);
     func_attrs[0] = sym_name_attr;
     MLIR_RegionHandle *func_regions = arena_new_array(arena, MLIR_RegionHandle, 1);
     func_regions[0] = func_region;
 
     MLIR_OpHandle func_op = MLIR_CreateOp(
-        &ctx, OP_TYPE_FUNC_FUNC, str_lit("func.func"),
+        ctx, OP_TYPE_FUNC_FUNC, str_lit("func.func"),
         func_attrs, 1,
         NULL, 0, NULL, 0, NULL, 0,
         func_regions, 1,
         MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE,
         str_lit(""), -1);
-    MLIR_AppendBlockOp(&ctx, module_block, func_op);
+    MLIR_AppendBlockOp(ctx, module_block, func_op);
 
     // ---- module op ----------------------------------------------------------
     MLIR_RegionHandle *module_regions = arena_new_array(arena, MLIR_RegionHandle, 1);
     module_regions[0] = module_region;
     MLIR_OpHandle module_op = MLIR_CreateOp(
-        &ctx, OP_TYPE_MODULE, str_lit("module"),
+        ctx, OP_TYPE_MODULE, str_lit("module"),
         NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         module_regions, 1,
         MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE,
         str_lit(""), -1);
 
-    MLIR_InitApi(&ctx, module_op);
-    print_string(print_operation_generic(&ctx, 0, module_op));
+    print_string(print_operation_generic(ctx, 0, module_op));
 
+    // ---- context ownership, erase and diagnostics (#346) ---------------------
+    {
+        // A block's parent op comes from its region (there is no global op
+        // registry any more, #140).
+        print_string(MLIR_GetBlockParentOp(func_block) == func_op
+                         ? str_lit("block parent op is func.func: yes\n")
+                         : str_lit("block parent op is func.func: no\n"));
+        print_string(MLIR_GetBlockParentOp(module_block) == module_op
+                         ? str_lit("block parent op is module: yes\n")
+                         : str_lit("block parent op is module: no\n"));
+
+        // MLIR_DetachOp keeps the op, which can then be inserted again.
+        MLIR_DetachOp(ctx, ret_op);
+        print_string(MLIR_GetOpParentBlock(ret_op) == MLIR_INVALID_HANDLE &&
+                     MLIR_GetBlockNumOps(func_block) == 1 &&
+                     MLIR_GetValueNumUses(ctx, add_result) == 1
+                         ? str_lit("detached op keeps its operands: yes\n")
+                         : str_lit("detached op keeps its operands: no\n"));
+        MLIR_AppendBlockOp(ctx, func_block, ret_op);
+        print_string(MLIR_GetBlockNumOps(func_block) == 2 &&
+                     MLIR_GetBlockOp(func_block, 1) == ret_op
+                         ? str_lit("detached op reinserted: yes\n")
+                         : str_lit("detached op reinserted: no\n"));
+
+        // MLIR_EraseOp drops the erased op's uses; its handle is dead.
+        MLIR_EraseOp(ctx, ret_op);
+        print_string(MLIR_GetBlockNumOps(func_block) == 1 &&
+                     MLIR_GetValueNumUses(ctx, add_result) == 0
+                         ? str_lit("erase drops the op and its uses: yes\n")
+                         : str_lit("erase drops the op and its uses: no\n"));
+
+        // Types live in the context: a type created while a temporary IR
+        // arena is current (from a stack array) outlives that arena.
+        Arena *tmp = arena_create(64 * 1024);
+        MLIR_SetArenaAllocator(ctx, tmp);
+        MLIR_TypeHandle sig[2] = { i32_ty, i32_ty };
+        MLIR_TypeHandle fty = MLIR_CreateTypeFunction(ctx, sig, 2, sig, 1);
+        MLIR_SetArenaAllocator(ctx, arena);
+        arena_destroy(tmp);
+        clobber_stack();
+        MLIR_TypeHandle sig2[2] = { i32_ty, i32_ty };
+        print_string(MLIR_GetTypeFunctionNumInputs(fty) == 2 &&
+                     MLIR_GetTypeFunctionInput(fty, 1) == i32_ty &&
+                     MLIR_GetTypeFunctionResult(fty, 0) == i32_ty &&
+                     MLIR_CreateTypeFunction(ctx, sig2, 2, sig2, 1) == fty
+                         ? str_lit("function type outlives its IR arena: yes\n")
+                         : str_lit("function type outlives its IR arena: no\n"));
+
+        // Diagnostics reach the context's handler.
+        DiagCapture cap = {0};
+        MLIR_SetDiagnosticHandler(ctx, capture_diag, &cap);
+        MLIR_LocationHandle loc = MLIR_CreateLocationFile(ctx, str_lit("t.c"), 3, 7);
+        MLIR_EmitDiagnostic(ctx, MLIR_DIAG_WARNING, loc, "value %d is %s", 42, "odd");
+        MLIR_SetDiagnosticHandler(ctx, NULL, NULL);
+        string text = { cap.text, cap.len };
+        print_string(format(arena, str_lit("diagnostic: count={} warning={} loc={}:{}:{} text={}\n"),
+                            (int64_t)cap.count,
+                            (int64_t)(cap.severity == MLIR_DIAG_WARNING),
+                            MLIR_GetLocationFileFilename(cap.loc),
+                            (int64_t)MLIR_GetLocationFileLine(cap.loc),
+                            (int64_t)MLIR_GetLocationFileColumn(cap.loc),
+                            text));
+
+        // Contexts are independent: each uniques its own types.
+        MLIR_Context *ctx2 = MLIR_CreateContext(NULL);
+        Arena *arena2 = arena_create(64 * 1024);
+        MLIR_SetArenaAllocator(ctx2, arena2);
+        MLIR_TypeHandle i32_2 = MLIR_CreateTypeInteger(ctx2, 32, true);
+        print_string(i32_2 != i32_ty &&
+                     MLIR_CreateTypeInteger(ctx2, 32, true) == i32_2
+                         ? str_lit("second context has its own types: yes\n")
+                         : str_lit("second context has its own types: no\n"));
+        MLIR_DestroyContext(ctx2);
+        arena_destroy(arena2);
+        print_string(MLIR_CreateTypeInteger(ctx, 32, true) == i32_ty
+                         ? str_lit("first context unaffected: yes\n")
+                         : str_lit("first context unaffected: no\n"));
+    }
+
+    MLIR_DestroyContext(ctx);
     arena_destroy(arena);
     return 0;
 }

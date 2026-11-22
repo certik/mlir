@@ -343,9 +343,9 @@ typedef char op_name_table_size_ok[
 static string g_op_names[OP_TYPE_TABLE_CAPACITY];
 // Slot value is an MLIR_OpType; 0 (OP_TYPE_UNREGISTERED) marks an empty slot.
 static uint16_t g_op_name_slots[OP_NAME_TABLE_SIZE];
-// Built on the first lookup. Like the rest of the native API's process-wide
-// state (e.g. the op and type registries in mlir_api_impl.c), this is not
-// thread-safe: IR must be built from one thread.
+// Built on the first lookup. The table is a function of the constant name
+// table above, so every context shares it (it holds no per-context state);
+// the lazy build is not thread-safe.
 static bool g_op_name_table_built = false;
 
 static uint32_t op_name_hash(string name) {

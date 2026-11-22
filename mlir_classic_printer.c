@@ -78,7 +78,7 @@ static void func_signature_from_op(PrintCtx *pctx, MLIR_OpHandle op,
     MLIR_Context *ctx = pctx->mlir_ctx;
     *params = strbuf_make();
     *ret = str_lit("");
-    Arena *arena = ctx->arena;
+    Arena *arena = MLIR_GetArenaAllocator(ctx);
 
     MLIR_TypeHandle ft = MLIR_INVALID_HANDLE;
     size_t nattrs = MLIR_GetOpNumAttributes(op);
