@@ -71,12 +71,23 @@ typedef enum {
 #define MLIR_OP_TYPE_IN_DIALECT(t, D) \
     ((unsigned)(t) - (unsigned)MLIR_DIALECT_##D##_FIRST <= \
      (unsigned)(MLIR_DIALECT_##D##_LAST - MLIR_DIALECT_##D##_FIRST))
+#ifndef __TINYC__
+// An empty dialect block would make the range test above always true (LAST
+// is FIRST - 1), so each block must hold an op: a negative array size
+// otherwise.
+#define MLIR_DIALECT_END(D) \
+    typedef char mlir_dialect_##D##_is_not_empty[ \
+        (MLIR_DIALECT_##D##_LAST >= MLIR_DIALECT_##D##_FIRST) ? 1 : -1];
+#include "mlir_ops.def"
+#endif
 
 // Returns the type of `name`: its static type, the dynamic type `ctx` gave
 // it before, or a new dynamic type. `name` is copied; it must not be empty.
 // A few static types have a second name, an alias (`builtin.module` for
 // OP_TYPE_MODULE, the upstream name of the op); an alias gives its static
 // type, and MLIR_GetOpTypeName still returns the first name.
+// Dynamic types are numbered per context from OP_TYPE_COUNT up, so the same
+// value can be another type in another context.
 MLIR_OpType MLIR_RegisterOpType(MLIR_Context *ctx, string name);
 // Like MLIR_RegisterOpType, but returns OP_TYPE_UNREGISTERED instead of
 // registering a name `ctx` does not know.
@@ -183,7 +194,10 @@ void MLIR_EmitDiagnostic(MLIR_Context *ctx, MLIR_DiagSeverity severity,
 //
 // `type` is the op's identity: a static type, or a dynamic type of `ctx`
 // (MLIR_RegisterOpType) for any other op name. It must not be
-// OP_TYPE_UNREGISTERED.
+// OP_TYPE_UNREGISTERED. MLIR_API_CHECKS catches a value that is not a type
+// of `ctx`; a dynamic type of another context is caught only when its value
+// is beyond the types `ctx` has, because the values are per-context
+// counters.
 MLIR_OpHandle MLIR_CreateOp(
     MLIR_Context *ctx,
     MLIR_OpType type,
