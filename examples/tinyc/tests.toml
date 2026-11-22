@@ -1735,3 +1735,8 @@ targets = ["native", "wasm", "macho", "elf"]
 # printf/snprintf length modifiers, flags, width, precision, %g and the
 # snprintf return value through the target runtime (#310, #318, #322).
 expected_stdout = "-56 255 34 4464 65535\n[\\0A][  -42][-42  ][-0042][+5][ 5]\n[007][0xff][010][   9][ab  ][xy]\n[-9223372036854775808][18446744073709551615][-0001.50]\n-0 1e+300 1e-10 3.14 1E+06 2.\n6 123 6\n"
+
+[[test]]
+name = "global_string_concat"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "9 13\n[abc] 3\n[de] 2\n[f] 1\nhello, world\n"

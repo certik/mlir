@@ -491,6 +491,36 @@ static Expr *parse_postfix(P *p, Expr *base) {
 }
 
 // primary := INT_LIT | FLOAT_LIT | IDENT | IDENT '(' args ')' | '(' expr ')' | unary
+// Consumes one or more adjacent string literals (the current token is one)
+// and returns their concatenation: "abc" "def" -> "abcdef". The lexer stores
+// each literal's text with its trailing NUL counted in size, and so does the
+// result, so the NUL of all but the last segment is dropped.
+static string parse_string_lits(P *p) {
+    TcTok t = cur(p);
+    p->i++;
+    if (cur(p).kind != TC_TK_STRING_LIT) return t.text;
+    size_t total = (t.text.size > 0 ? t.text.size - 1 : 0);
+    size_t k = p->i;
+    while (k < p->n && p->toks[k].kind == TC_TK_STRING_LIT) {
+        size_t sz = p->toks[k].text.size;
+        total += (sz > 0 ? sz - 1 : 0);
+        k++;
+    }
+    total += 1;  // single trailing NUL
+    char *buf = arena_new_array(p->arena, char, total);
+    size_t off = 0;
+    size_t body0 = (t.text.size > 0 ? t.text.size - 1 : 0);
+    for (size_t j = 0; j < body0; j++) buf[off++] = t.text.str[j];
+    while (cur(p).kind == TC_TK_STRING_LIT) {
+        TcTok nx = cur(p);
+        size_t body = (nx.text.size > 0 ? nx.text.size - 1 : 0);
+        for (size_t j = 0; j < body; j++) buf[off++] = nx.text.str[j];
+        p->i++;
+    }
+    buf[off++] = '\0';
+    return (string){.str = buf, .size = off};
+}
+
 static Expr *parse_primary(P *p) {
     TcTok t = cur(p);
     if (t.kind == TC_TK_INT_LIT) {
@@ -560,35 +590,8 @@ static Expr *parse_primary(P *p) {
         return e;
     }
     if (t.kind == TC_TK_STRING_LIT) {
-        p->i++;
-        // Adjacent string-literal concatenation: "abc" "def" "ghi" -> "abcdefghi".
-        // Note: lexer stores each literal's text with a trailing NUL counted
-        // in size, so we strip the NUL from all but the last segment.
-        if (cur(p).kind == TC_TK_STRING_LIT) {
-            size_t total = (t.text.size > 0 ? t.text.size - 1 : 0);
-            size_t k = p->i;
-            size_t last_size = 0;
-            while (k < p->n && p->toks[k].kind == TC_TK_STRING_LIT) {
-                last_size = p->toks[k].text.size;
-                total += (last_size > 0 ? last_size - 1 : 0);
-                k++;
-            }
-            total += 1;  // single trailing NUL
-            char *buf = arena_new_array(p->arena, char, total);
-            size_t off = 0;
-            size_t body0 = (t.text.size > 0 ? t.text.size - 1 : 0);
-            for (size_t j = 0; j < body0; j++) buf[off++] = t.text.str[j];
-            while (cur(p).kind == TC_TK_STRING_LIT) {
-                TcTok nx = cur(p);
-                size_t body = (nx.text.size > 0 ? nx.text.size - 1 : 0);
-                for (size_t j = 0; j < body; j++) buf[off++] = nx.text.str[j];
-                p->i++;
-            }
-            buf[off++] = '\0';
-            t.text = (string){.str = buf, .size = off};
-        }
         Expr *e = new_expr(p, EX_STR, t.line);
-        e->name = t.text;
+        e->name = parse_string_lits(p);
         return e;
     }
     if (t.kind == TC_TK_LPAREN) {
@@ -3241,12 +3244,13 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                             // a null-initialized pointer; init_int=0 means null.
                             p.i++;
                         } else if (lit.kind == TC_TK_STRING_LIT) {
-                            g.init_str = lit.text;
+                            // Adjacent literals concatenate, as in an
+                            // expression.
+                            g.init_str = parse_string_lits(&p);
                             // `char s[] = "..."`: the NUL counts.
                             if (g.type.kind == TY_ARRAY_I32 &&
                                 g.type.array_len == 0 && !g.type.array_len_expr)
-                                g.type.array_len = (int64_t)lit.text.size;
-                            p.i++;
+                                g.type.array_len = (int64_t)g.init_str.size;
                         } else if (lit.kind == TC_TK_MINUS &&
                                    peek(&p, 1).kind == TC_TK_INT_LIT) {
                             p.i++;
