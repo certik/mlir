@@ -150,8 +150,18 @@ shrink.
 
 ## Layout
 
-* `mlir_api.h` — the C API surface (handles, op/type/attribute getters,
+* `mlir_api.h` — the core C API (handles, op/type/attribute getters,
   builders). Both backends implement this header.
+* `mlir_passes.h` — passes and translations built on the core API
+  (`MLIR_LowerToLLVMDialect`, `MLIR_TranslateModuleTo{LLVMIR,Wasm}`,
+  `MLIR_LiftCfToScf`).
+* `mlir_parser.h` / `mlir_printer.h` — the in-tree text parser
+  (`MLIR_ParseTextClassic`) and printers (`MLIR_PrintOperationClassic`,
+  `MLIR_PrintOperationGeneric`), plus the few backend functions that only
+  they use.
+* `mlir_api_upstream.h` — entry points that only the upstream backend
+  implements (`MLIR_*Upstream`: upstream printer, parser, lowering and
+  translations).
 * `mlir_api_impl.c` — native implementation. Self-contained, builds with
   `-nostdlib`, no LLVM dependency.
 * `mlir_api_impl_upstream.cpp` — upstream implementation. Wraps

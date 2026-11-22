@@ -19,7 +19,7 @@ AST
    │  examples/tinyc/emit.c   (uses mlir_api.h ONLY)
    ▼
 builtin.module IR  (func + arith + memref + scf + vector dialects)
-   │  MLIR_LowerToLLVMDialect    (new in mlir_api.h)
+   │  MLIR_LowerToLLVMDialect    (mlir_passes.h)
    ▼
 LLVM dialect IR
    │  MLIR_TranslateModuleToLLVMIR
@@ -222,7 +222,8 @@ tinyc binaries.
 This example is the working proof that the C MLIR API in `mlir_api.h`
 is rich enough to serve as a full replacement for upstream MLIR's C++
 API for compiler authors. Writing a real frontend exposed several gaps
-that were filled in `mlir_api.h` along the way:
+that were filled in `mlir_api.h` (and, for the passes and translations,
+`mlir_passes.h`) along the way:
 
 - `MLIR_CreateAttributeSymbolRef` — needed by `func.call` (a `StringAttr`
   is rejected by the verifier; you need a real `FlatSymbolRefAttr`).

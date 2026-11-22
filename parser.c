@@ -8,6 +8,8 @@
 #include <base/arena.h>
 #include <base/io.h>
 #include "mlir_api.h"
+#include "mlir_api_upstream.h"
+#include "mlir_printer.h"
 #include "mlir_generic_printer.h"
 #include "mlir_classic_printer.h"
 #include "mlir_parser.h"

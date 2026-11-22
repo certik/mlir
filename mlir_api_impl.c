@@ -10,6 +10,9 @@
 #include "mlir_api.h"
 #include "mlir_op_names.h"
 #include "mlir_parser.h"
+#include "mlir_printer.h"
+#include "mlir_passes.h"
+#include "mlir_api_upstream.h"
 #include <string.h>
 
 #ifdef __cplusplus
@@ -983,6 +986,8 @@ MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle vh) {
 }
 
 // Type to string
+// Stubs for two mlir_api_upstream.h entry points, so that the `parser` test
+// driver, which can select them at run time, links with this backend too.
 string MLIR_PrintOperationUpstream(MLIR_Context *ctx, MLIR_OpHandle op) {
     (void)ctx; (void)op;
     return str_lit("error: MLIR_PrintOperationUpstream requires the upstream backend\n");
@@ -2586,7 +2591,7 @@ bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module,
 }
 
 // The lowering / LLVM-IR-translation / wasm-translation entry points
-// declared in mlir_api.h are implemented in dedicated agnostic
+// declared in mlir_passes.h are implemented in dedicated agnostic
 // translation units (mlir_lower_to_llvm.c, mlir_translate_to_llvm_ir.c,
 // mlir_translate_to_wasm.c). They are linked into hosted builds
 // alongside this file. There is no parser-only "native" build, so we

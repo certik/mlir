@@ -18,6 +18,7 @@
 #include <base/string.h>
 
 #include "mlir_api.h"
+#include "mlir_passes.h"
 #include "mlir_llvm_type_layout.h"
 
 // -----------------------------------------------------------------------------

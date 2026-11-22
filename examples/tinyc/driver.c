@@ -12,6 +12,11 @@
 #include <platform/platform.h>
 
 #include "mlir_api.h"
+#include "mlir_passes.h"
+#include "mlir_printer.h"
+#ifdef TINYC_HAS_UPSTREAM
+#include "mlir_api_upstream.h"
+#endif
 #include "mlir_llvm_mem2reg.h"
 #include "mlir_llvm_load_cse.h"
 #include "mlir_llvm_arith_gvn.h"

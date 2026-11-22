@@ -3,6 +3,7 @@
 #include <base/arena.h>
 #include <base/string.h>
 #include "mlir_api.h"
+#include "mlir_printer.h"
 
 #ifdef __cplusplus
 extern "C" {
