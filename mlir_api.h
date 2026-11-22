@@ -76,8 +76,13 @@ typedef struct MLIR_UseImpl       *MLIR_UseHandle;
 // A predecessor edge: one successor slot of a terminator that targets a block
 // (upstream `mlir::BlockOperand *`). Reserved like MLIR_UseHandle.
 typedef struct MLIR_PredImpl      *MLIR_PredHandle;
-// The null handle of every kind.
+// The null handle of every kind. In C++ it is `nullptr`, so that assigning it
+// to an integer is an error rather than a warning.
+#ifdef __cplusplus
+#define MLIR_INVALID_HANDLE nullptr
+#else
 #define MLIR_INVALID_HANDLE NULL
+#endif
 #endif
 
 typedef struct MLIR_Context {
