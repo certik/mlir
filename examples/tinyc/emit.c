@@ -1030,10 +1030,10 @@ static bool value_is_zero_const(E *e, MLIR_ValueHandle v) {
         if (op == MLIR_INVALID_HANDLE) return false;
         MLIR_OpType ty = MLIR_GetOpType(e->ctx, op);
         if (ty == OP_TYPE_ARITH_CONSTANT) {
-            MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(e->ctx, op, "value");
+            MLIR_AttributeHandle a = MLIR_GetOpAttr(e->ctx, op, MLIR_KEY_VALUE);
             return a != MLIR_INVALID_HANDLE &&
-                   MLIR_GetAttributeKind(a) == MLIR_ATTR_KIND_INTEGER &&
-                   MLIR_GetAttributeInteger(a) == 0;
+                   MLIR_GetAttributeKind(e->ctx, a) == MLIR_ATTR_KIND_INTEGER &&
+                   MLIR_GetAttributeInteger(e->ctx, a) == 0;
         }
         if (ty != OP_TYPE_ARITH_EXTSI && ty != OP_TYPE_ARITH_EXTUI &&
             ty != OP_TYPE_ARITH_TRUNCI)
