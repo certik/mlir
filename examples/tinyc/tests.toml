@@ -1619,6 +1619,17 @@ wasm_native_lift_max = { 'aarch64\.ldr_w(_reg)?' = 1, 'aarch64\.fp_binop' = 0 }
 wasm_native_lift_min = { 'aarch64\.ldr_w(_reg)?' = 1 }
 
 [[test]]
+name = "lift_call_indirect_no_target"
+targets = ["wasm"]
+wasm_upstream_skip = true
+# A call through a pointer type that no function has still gets a dispatcher
+# in the lifted module. The marker picks the dispatcher by its own sym_name
+# (the caller only names it as a callee), so it matches exactly one function
+# only if the dispatcher was synthesised.
+wasm_native_lift_marker = 'sym_name\s*=\s*"__dispatch_7f7f7f7f7f7f_7e"'
+expected_stdout = "1\n"
+
+[[test]]
 name = "strlit_ptr_arith"
 targets = ["native", "wasm", "macho", "elf"]
 # Pointer arithmetic on a string literal, and on char* values from calls,
