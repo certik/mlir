@@ -882,39 +882,126 @@ bool parse_register_operand(Parser *parser, VecValue *operands, bool allow_hash_
     return true;
 }
 
+MLIR_OpHandle parser_create_op_with_successors(
+    Parser *parser, const OperationParserParams *params,
+    MLIR_OpType type,
+    const MLIR_NamedAttr *attributes, size_t n_attributes,
+    const MLIR_TypeHandle *result_types, size_t n_result_types,
+    MLIR_ValueHandle *out_results, size_t n_results,
+    const MLIR_ValueHandle *operands, size_t n_operands,
+    const MLIR_RegionHandle *regions, size_t n_regions,
+    const MLIR_BlockHandle *successors, size_t n_successors,
+    MLIR_ValueHandle **successor_operands,
+    const size_t *n_successor_operands,
+    MLIR_LocationHandle location) {
+    MLIR_Context *ctx = parser->ctx;
+    uint32_t nr = (uint32_t)(n_result_types > n_results ? n_result_types : n_results);
+    const MLIR_TypeHandle *rtypes = result_types;
+    if (nr > n_result_types) {
+        MLIR_TypeHandle *padded = arena_new_array(parser->arena, MLIR_TypeHandle, nr);
+        for (uint32_t i = 0; i < nr; i++) {
+            padded[i] = (i < n_result_types && result_types) ? result_types[i] : MLIR_INVALID_HANDLE;
+        }
+        rtypes = padded;
+    }
+
+    size_t n_succ_ops = 0;
+    if (n_successor_operands) {
+        for (size_t s = 0; s < n_successors; s++) n_succ_ops += n_successor_operands[s];
+    }
+    const MLIR_ValueHandle *flat_ops = operands;
+    uint32_t total_ops = (uint32_t)(n_operands + n_succ_ops);
+    uint32_t *succ_counts = NULL;
+    if (n_successors > 0) {
+        succ_counts = arena_new_array(parser->arena, uint32_t, n_successors);
+        for (size_t s = 0; s < n_successors; s++) {
+            succ_counts[s] = n_successor_operands ? (uint32_t)n_successor_operands[s] : 0;
+        }
+        if (n_succ_ops > 0) {
+            MLIR_ValueHandle *buf = arena_new_array(parser->arena, MLIR_ValueHandle, total_ops);
+            size_t idx = 0;
+            for (size_t i = 0; i < n_operands; i++) buf[idx++] = operands[i];
+            for (size_t s = 0; s < n_successors; s++) {
+                size_t k = n_successor_operands ? n_successor_operands[s] : 0;
+                for (size_t j = 0; j < k; j++) buf[idx++] = successor_operands[s][j];
+            }
+            flat_ops = buf;
+        }
+    }
+
+    MLIR_OpSpec spec = {0};
+    spec.type = type;
+    spec.operands = flat_ops;
+    spec.n_operands = total_ops;
+    spec.result_types = rtypes;
+    spec.n_results = nr;
+    spec.attrs = attributes;
+    spec.n_attrs = (uint32_t)n_attributes;
+    spec.regions = regions;
+    spec.n_regions = (uint32_t)n_regions;
+    spec.successors = successors;
+    spec.n_successors = (uint32_t)n_successors;
+    spec.successor_operand_counts = succ_counts;
+    spec.loc = location;
+    MLIR_OpHandle op = MLIR_CreateOpFromSpec(ctx, &spec);
+
+    if (params && params->trailing_comment.size > 0) {
+        MLIR_SetOpTrailingComment(ctx, op, params->trailing_comment);
+    }
+    for (uint32_t i = 0; i < nr; i++) {
+        MLIR_ValueHandle rv = MLIR_GetOpResult(ctx, op, i);
+        if (params && params->lhs_result_names && i < params->n_lhs_results &&
+            params->lhs_result_names[i].size > 0) {
+            MLIR_SetValueRegisterName(ctx, rv, params->lhs_result_names[i]);
+        }
+        if (out_results && i < n_results) out_results[i] = rv;
+    }
+    return op;
+}
+
+MLIR_OpHandle parser_create_op(
+    Parser *parser, const OperationParserParams *params,
+    MLIR_OpType type,
+    const MLIR_NamedAttr *attributes, size_t n_attributes,
+    const MLIR_TypeHandle *result_types, size_t n_result_types,
+    MLIR_ValueHandle *out_results, size_t n_results,
+    const MLIR_ValueHandle *operands, size_t n_operands,
+    const MLIR_RegionHandle *regions, size_t n_regions,
+    MLIR_LocationHandle location) {
+    return parser_create_op_with_successors(
+        parser, params, type,
+        attributes, n_attributes,
+        result_types, n_result_types,
+        out_results, n_results,
+        operands, n_operands,
+        regions, n_regions,
+        NULL, 0, NULL, NULL,
+        location);
+}
+
 MLIR_ValueHandle *finalize_results(const OperationParserParams *params,
                                      MLIR_OpHandle op,
                                      MLIR_TypeHandle *result_types,
                                      size_t n_result_types,
                                      size_t *out_n_results) {
+    (void)result_types;
     MLIR_ValueHandle *results = MLIR_INVALID_HANDLE;
     size_t n_results = 0;
-
-    if (result_types == MLIR_INVALID_HANDLE && op) {
-        n_result_types = MLIR_GetOpNumResultTypes(params->ctx, op);
-    }
-
-    if (n_result_types > 0) {
-        results = arena_new_array(params->arena, MLIR_ValueHandle, n_result_types);
-        MLIR_TypeHandle *types_array = result_types;
-        if (!types_array && op) {
-            types_array = arena_new_array(params->arena, MLIR_TypeHandle, n_result_types);
-            for (size_t i = 0; i < n_result_types; i++) {
-                types_array[i] = MLIR_GetOpResultType(params->ctx, op, i);
+    if (op != MLIR_INVALID_HANDLE) {
+        size_t op_nr = MLIR_GetOpNumResults(params->ctx, op);
+        n_results = (n_result_types > 0 && n_result_types <= op_nr) ? n_result_types : op_nr;
+        if (n_results > 0) {
+            results = arena_new_array(params->arena, MLIR_ValueHandle, n_results);
+            for (size_t i = 0; i < n_results; i++) {
+                MLIR_ValueHandle rv = MLIR_GetOpResult(params->ctx, op, i);
+                if (params->lhs_result_names && i < params->n_lhs_results &&
+                    params->lhs_result_names[i].size > 0) {
+                    MLIR_SetValueRegisterName(params->ctx, rv, params->lhs_result_names[i]);
+                }
+                results[i] = rv;
             }
         }
-        for (size_t i = 0; i < n_result_types; i++) {
-            MLIR_TypeHandle ty = types_array[i];
-            string reg_name = (string){MLIR_INVALID_HANDLE, 0};
-            if (params->lhs_results && i < params->n_lhs_results) {
-                reg_name = MLIR_GetValueRegisterName(params->ctx, params->lhs_results[i]);
-            }
-            MLIR_ValueHandle res = MLIR_CreateValueOpResult(params->ctx, op, (uint32_t)i, ty, reg_name, MLIR_INVALID_HANDLE);
-            results[i] = res;
-        }
-        n_results = n_result_types;
     }
-
     if (out_n_results) *out_n_results = n_results;
     return results;
 }
@@ -1329,6 +1416,7 @@ MLIR_OpHandle parse_operation(Parser *parser) {
 
     int64_t recorded_source_line = -1;
     MLIR_ValueHandle *lhs_results = MLIR_INVALID_HANDLE;
+    string *lhs_result_names = NULL;
     size_t n_lhs_results = 0;
     size_t n_new_results_from_parser = 0;
 
@@ -1393,15 +1481,16 @@ MLIR_OpHandle parse_operation(Parser *parser) {
         }
         parser_expect(parser, TK_EQUAL);
 
-        // Create result_count MLIR_Value objects
-        // Only the first gets the register name; others remain unnamed
+        // Reserve result_count slots and record the LHS register name(s);
+        // the real value handles are populated when the op is created.
         lhs_results = arena_new_array(parser->arena, MLIR_ValueHandle, result_count);
+        lhs_result_names = arena_new_array(parser->arena, string, result_count);
         for (size_t i = 0; i < result_count; i++) {
-            string name = (i == 0) ? reg_name : (string){MLIR_INVALID_HANDLE, 0};
-            lhs_results[i] = MLIR_CreateValueOpResult(parser->ctx, MLIR_INVALID_HANDLE, (uint32_t)i, MLIR_INVALID_HANDLE, name, MLIR_INVALID_HANDLE);
+            lhs_results[i] = MLIR_INVALID_HANDLE;
+            lhs_result_names[i] = (i == 0) ? reg_name : (string){0};
         }
         n_lhs_results = result_count;
-        result_value = lhs_results[0]; // Keep first for backward compatibility
+        result_value = MLIR_INVALID_HANDLE;
     }
 
     // Parse operation name
@@ -1478,6 +1567,7 @@ MLIR_OpHandle parse_operation(Parser *parser) {
         .op_type = op_type,
         .op_kind = op_kind,
         .lhs_results = lhs_results,
+        .lhs_result_names = lhs_result_names,
         .n_lhs_results = n_lhs_results,
         .unnumbered_loc_def = parser->unnumbered_loc_def,
         .source_line_start = recorded_source_line,
@@ -1617,28 +1707,32 @@ MLIR_OpHandle parse_operation(Parser *parser) {
     // Handle return value(s) for all operations
     assert(parsed.operation != MLIR_INVALID_HANDLE);
 
-    if (result_value && parsed.results && n_new_results_from_parser > 0) {
-        result_value = parsed.results[0];
+    bool has_lhs = n_lhs_results > 0;
+    if (has_lhs) {
+        if (parsed.results && n_new_results_from_parser > 0) {
+            result_value = parsed.results[0];
+        } else if (lhs_results && lhs_results[0] != MLIR_INVALID_HANDLE) {
+            result_value = lhs_results[0];
+        } else if (MLIR_GetOpNumResults(parser->ctx, op) > 0) {
+            result_value = MLIR_GetOpResult(parser->ctx, op, 0);
+        }
     }
 
-    if (result_value && n_new_results_from_parser > 0) {
-        // Parser returned results - for named results, ensure type/def are set and add to symbol table
+    if (has_lhs && n_new_results_from_parser > 0) {
+        // Parser returned results - for named results, add to symbol table
         for (size_t i = 0; i < parsed.n_results; i++) {
             if (parsed.results[i] != MLIR_INVALID_HANDLE) {
                 string reg_name = MLIR_GetValueRegisterName(parser->ctx, parsed.results[i]);
                 if (reg_name.size > 0) {
-                    // Only process results with names
-                    // (Type is auto-synced by MLIR_CreateOp)
                     symbol_table_add_value(parser->arena, &parser->symbol_table, reg_name, parsed.results[i]);
                 }
             }
         }
-    } else if (!result_value && n_new_results_from_parser > 0) {
+    } else if (!has_lhs && n_new_results_from_parser > 0) {
         // Operation produces results but no SSA name was provided - this is invalid MLIR
         parser_error(parser, str_lit("Operation produces results but no SSA name provided on left-hand side"), parser->first, parser->last);
-    } else if (result_value) {
-        if (MLIR_GetOpNumResultTypes(parser->ctx, op) > 0) {
-            // Type is auto-synced by MLIR_CreateOp
+    } else if (has_lhs) {
+        if (MLIR_GetOpNumResultTypes(parser->ctx, op) > 0 && result_value != MLIR_INVALID_HANDLE) {
             symbol_table_add_value(parser->arena, &parser->symbol_table, MLIR_GetValueRegisterName(parser->ctx, result_value), result_value);
         } else {
             parser_error(parser, str_lit("Result Value parsed on LHS but no Type present on RHS"), parser->first, parser->last);

@@ -41,9 +41,11 @@ MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *ctx, MLIR_TypeHandle elemen
 MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *ctx, string name);
 // Reference to a named location `#loc<ref_id>`.
 MLIR_LocationHandle MLIR_CreateLocationRef(MLIR_Context *ctx, int ref_id);
-// Comment that followed the op in the source text (MLIR_CreateOp's
-// `trailing_comment`), or an empty string.
+// Comment that followed the op in the source text, or an empty string.
 string MLIR_GetOpTrailingComment(MLIR_Context *ctx, MLIR_OpHandle op);
+void MLIR_SetOpTrailingComment(MLIR_Context *ctx, MLIR_OpHandle op, string comment);
+// Sets the printed register name of an op result value (used by the in-tree parser).
+void MLIR_SetValueRegisterName(MLIR_Context *ctx, MLIR_ValueHandle value, string name);
 
 // Vector helpers used by the parser implementation
 DEFINE_VECTOR_FOR_TYPE(MLIR_OpHandle, VecOp)
@@ -63,7 +65,8 @@ typedef struct OperationParserParams {
     int          op_kind;  /* parser_op_kind(op_type), mlir_printer.h */
 
     MLIR_ValueHandle *lhs_results;
-    size_t     n_lhs_results;
+    string           *lhs_result_names;
+    size_t            n_lhs_results;
 
     MLIR_LocationHandle unnumbered_loc_def;
     int64_t       source_line_start;
@@ -211,6 +214,29 @@ string type_to_string(MLIR_Context *ctx, MLIR_TypeHandle type);
 MLIR_OpHandle mlir_parse_module(MLIR_Context *ctx, const char *input, size_t input_len, MLIR_LocationMap **out_location_map);
 const char *mlir_tokentype_to_string(int token_type);
 MLIR_TypeHandle mlir_type_create_from_string(MLIR_Context *ctx, string type_str);
+
+MLIR_OpHandle parser_create_op(
+    Parser *parser, const OperationParserParams *params,
+    MLIR_OpType type,
+    const MLIR_NamedAttr *attributes, size_t n_attributes,
+    const MLIR_TypeHandle *result_types, size_t n_result_types,
+    MLIR_ValueHandle *out_results, size_t n_results,
+    const MLIR_ValueHandle *operands, size_t n_operands,
+    const MLIR_RegionHandle *regions, size_t n_regions,
+    MLIR_LocationHandle location);
+
+MLIR_OpHandle parser_create_op_with_successors(
+    Parser *parser, const OperationParserParams *params,
+    MLIR_OpType type,
+    const MLIR_NamedAttr *attributes, size_t n_attributes,
+    const MLIR_TypeHandle *result_types, size_t n_result_types,
+    MLIR_ValueHandle *out_results, size_t n_results,
+    const MLIR_ValueHandle *operands, size_t n_operands,
+    const MLIR_RegionHandle *regions, size_t n_regions,
+    const MLIR_BlockHandle *successors, size_t n_successors,
+    MLIR_ValueHandle **successor_operands,
+    const size_t *n_successor_operands,
+    MLIR_LocationHandle location);
 
 #ifdef __cplusplus
 }

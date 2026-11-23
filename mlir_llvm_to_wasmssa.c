@@ -581,25 +581,26 @@ static MLIR_OpHandle make_op_n(MLIR_Context *ctx, MLIR_OpType type,
                                MLIR_ValueHandle *out_results /* size n_results, or NULL */) {
     MLIR_TypeHandle   res_tys_inline[16];
     MLIR_ValueHandle  res_vals_inline[16];
-    MLIR_TypeHandle  *res_tys  = res_tys_inline;
-    MLIR_ValueHandle *res_vals = res_vals_inline;
+    MLIR_TypeHandle *res_tys = res_tys_inline;
     if (n_results > 16) {
-        res_tys  = (MLIR_TypeHandle  *)arena_alloc(MLIR_GetArenaAllocator(ctx), n_results * sizeof(MLIR_TypeHandle));
-        res_vals = (MLIR_ValueHandle *)arena_alloc(MLIR_GetArenaAllocator(ctx), n_results * sizeof(MLIR_ValueHandle));
+        res_tys = (MLIR_TypeHandle *)arena_alloc(MLIR_GetArenaAllocator(ctx), n_results * sizeof(MLIR_TypeHandle));
     }
     for (size_t i = 0; i < n_results; i++) {
         res_tys[i] = vt_to_type(ctx, result_vts[i]);
-        res_vals[i] = MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, (uint32_t)i,
-                                               res_tys[i], (string){0},
-                                               MLIR_CreateLocationUnknown(ctx, (string){0}));
     }
-    MLIR_OpHandle op = MLIR_CreateOp(ctx, type,
-        attrs, n_attrs, res_tys, n_results, res_vals, n_results,
-        operands, n_operands, regions, n_regions,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec spec = {0};
+    spec.type = type;
+    spec.operands = operands;
+    spec.n_operands = (uint32_t)n_operands;
+    spec.result_types = res_tys;
+    spec.n_results = (uint32_t)n_results;
+    spec.attrs = attrs;
+    spec.n_attrs = (uint32_t)n_attrs;
+    spec.regions = regions;
+    spec.n_regions = (uint32_t)n_regions;
+    MLIR_OpHandle op = MLIR_CreateOpFromSpec(ctx, &spec);
     if (out_results) {
-        for (size_t i = 0; i < n_results; i++) out_results[i] = res_vals[i];
+        for (size_t i = 0; i < n_results; i++) out_results[i] = MLIR_GetOpResult(ctx, op, i);
     }
     return op;
 }
@@ -2394,10 +2395,13 @@ static bool lower_function(MLIR_Context *ctx, Arena *arena, ModCtx *mod,
         MLIR_RegionHandle region = MLIR_CreateRegion(ctx);
         MLIR_AppendRegionBlock(ctx, region, F.body_block);
         MLIR_RegionHandle regs[1] = { region };
-        MLIR_OpHandle op = MLIR_CreateOp(ctx, OP_TYPE_WASMSSA_FUNC,
-            attrs, na, NULL, 0, NULL, 0, NULL, 0, regs, 1,
-            MLIR_CreateLocationUnknown(ctx, (string){0}),
-            MLIR_INVALID_HANDLE, (string){0}, -1);
+        MLIR_OpSpec spec = {0};
+        spec.type = OP_TYPE_WASMSSA_FUNC;
+        spec.attrs = attrs;
+        spec.n_attrs = (uint32_t)na;
+        spec.regions = regs;
+        spec.n_regions = 1;
+        MLIR_OpHandle op = MLIR_CreateOpFromSpec(ctx, &spec);
         MLIR_AppendBlockOp(ctx, mod_body, op);
     }
 
@@ -2683,21 +2687,23 @@ static MLIR_OpHandle make_op(MLIR_Context *ctx, MLIR_OpType type,
                              uint8_t result_vt,
                              MLIR_ValueHandle *out_result) {
     MLIR_TypeHandle res_tys[1];
-    MLIR_ValueHandle res_vals[1];
-    size_t n_res = 0;
+    uint32_t n_res = 0;
     if (result_vt) {
         res_tys[0] = vt_to_type(ctx, result_vt);
-        res_vals[0] = MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0,
-                                               res_tys[0], (string){0},
-                                               MLIR_CreateLocationUnknown(ctx, (string){0}));
         n_res = 1;
     }
-    MLIR_OpHandle op = MLIR_CreateOp(ctx, type,
-        attrs, n_attrs, res_tys, n_res, res_vals, n_res,
-        operands, n_operands, regions, n_regions,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
-    if (out_result) *out_result = n_res ? res_vals[0] : MLIR_INVALID_HANDLE;
+    MLIR_OpSpec spec = {0};
+    spec.type = type;
+    spec.operands = operands;
+    spec.n_operands = (uint32_t)n_operands;
+    spec.result_types = res_tys;
+    spec.n_results = n_res;
+    spec.attrs = attrs;
+    spec.n_attrs = (uint32_t)n_attrs;
+    spec.regions = regions;
+    spec.n_regions = (uint32_t)n_regions;
+    MLIR_OpHandle op = MLIR_CreateOpFromSpec(ctx, &spec);
+    if (out_result) *out_result = n_res ? MLIR_GetOpResult(ctx, op, 0) : MLIR_INVALID_HANDLE;
     return op;
 }
 
@@ -2826,10 +2832,11 @@ MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module) {
     MLIR_RegionHandle region = MLIR_CreateRegion(ctx);
     MLIR_AppendRegionBlock(ctx, region, body);
     MLIR_RegionHandle regs[1] = { region };
-    MLIR_OpHandle out_module = MLIR_CreateOp(ctx, OP_TYPE_MODULE,
-        NULL, 0, NULL, 0, NULL, 0, NULL, 0, regs, 1,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec mod_spec = {0};
+    mod_spec.type = OP_TYPE_MODULE;
+    mod_spec.regions = regs;
+    mod_spec.n_regions = 1;
+    MLIR_OpHandle out_module = MLIR_CreateOpFromSpec(ctx, &mod_spec);
 
     ModCtx mod = {0};
     mod.ctx = ctx;

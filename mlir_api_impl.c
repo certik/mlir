@@ -1063,56 +1063,35 @@ void MLIR_EmitDiagnostic(MLIR_Context *ctx, MLIR_DiagSeverity severity,
     if (buf != local) free(buf);
 }
 
-// Operation creation
-//
-// The results must be consecutive values (created one after another by
-// MLIR_CreateValueOpResult, or the results of an op this one replaces):
-// result i is then first_result + i. Checked with MLIR_API_CHECKS.
-MLIR_OpHandle MLIR_CreateOpWithSuccessors(
-    MLIR_Context *ctx,
-    MLIR_OpType type,
-    const MLIR_NamedAttr *attributes, size_t n_attributes,
-    MLIR_TypeHandle *result_types, size_t n_result_types,
-    MLIR_ValueHandle *results, size_t n_results,
-    MLIR_ValueHandle *operands, size_t n_operands,
-    MLIR_RegionHandle *regions, size_t n_regions,
-    MLIR_BlockHandle *successors, size_t n_successors,
-    MLIR_ValueHandle **successor_operands,
-    size_t *n_successor_operands,
-    MLIR_LocationHandle location,
-    MLIR_LocationHandle unnumbered_loc_def,
-    string trailing_comment,
-    int64_t source_line_start) {
-
-    API_CHECK(ctx != NULL, "MLIR_CreateOp", "context is NULL");
+MLIR_OpHandle MLIR_CreateOpFromSpec(MLIR_Context *ctx, const MLIR_OpSpec *spec) {
+    API_CHECK(ctx != NULL, "MLIR_CreateOpFromSpec", "context is NULL");
+    API_CHECK(spec != NULL, "MLIR_CreateOpFromSpec", "spec is NULL");
+    MLIR_OpType type = spec->type;
     API_CHECK(type != OP_TYPE_UNREGISTERED && (uint32_t)type < ctx->op_types.n_types,
-              "MLIR_CreateOp", "not an op type of this context");
-    API_CHECK(n_attributes <= 0xffff && n_regions <= 0xffff && n_successors <= 0xffff,
-              "MLIR_CreateOp", "too many attributes, regions or successors");
+              "MLIR_CreateOpFromSpec", "not an op type of this context");
+    API_CHECK(spec->n_attrs <= 0xffff && spec->n_regions <= 0xffff && spec->n_successors <= 0xffff,
+              "MLIR_CreateOpFromSpec", "too many attributes, regions or successors");
 
-    size_t n_succ_ops = 0;
-    if (n_successor_operands)
-        for (size_t s = 0; s < n_successors; s++) n_succ_ops += n_successor_operands[s];
-    size_t n_all = n_operands + n_succ_ops;
-    size_t n_extra = n_regions + 2 * n_successors;
-
-    uint32_t first_result = 0;
-    if (n_results > 0) {
-        first_result = VAL_IDX(ctx, results[0], "MLIR_CreateOp");
-#ifdef MLIR_API_CHECKS
-        for (size_t i = 0; i < n_results; i++)
-            API_CHECK(first_result != 0 &&
-                      VAL_IDX(ctx, results[i], "MLIR_CreateOp") == first_result + i,
-                      "MLIR_CreateOp", "the results are not consecutive values");
-#endif
+    uint32_t n_succ_ops = 0;
+    if (spec->successor_operand_counts) {
+        for (uint32_t s = 0; s < spec->n_successors; s++)
+            n_succ_ops += spec->successor_operand_counts[s];
     }
+    API_CHECK(n_succ_ops <= spec->n_operands, "MLIR_CreateOpFromSpec",
+              "successor operand counts exceed n_operands");
+    uint32_t n_regular = spec->n_operands - n_succ_ops;
+    size_t n_extra = (size_t)spec->n_regions + 2 * (size_t)spec->n_successors;
 
-    // Allocate everything first: growing a vector moves it.
+    // Allocate all vector slots first: growing a vector moves it.
     uint32_t op = vec_push(&ctx->ops, 1);
-    uint32_t first_operand = vec_push(&ctx->opnds, (uint32_t)n_all);
-    uint32_t first_extra = vec_push(&ctx->extra, (uint32_t)(n_extra + 2 * n_attributes));
+    uint32_t first_result = spec->n_results ? vec_push(&ctx->vals, spec->n_results) : 0;
+    uint32_t first_operand = spec->n_operands ? vec_push(&ctx->opnds, spec->n_operands) : 0;
+    uint32_t first_extra = (n_extra + 2 * (size_t)spec->n_attrs)
+        ? vec_push(&ctx->extra, (uint32_t)(n_extra + 2 * (size_t)spec->n_attrs)) : 0;
     uint32_t first_attr = first_extra + (uint32_t)n_extra;
-    // From here to the aux record, pointers into these vectors are held.
+    uint32_t fresh_regions = (!spec->regions && spec->n_regions > 0)
+        ? vec_push(&ctx->regions, spec->n_regions) : 0;
+
     GEN_SAVE(ctx, ops);
     GEN_SAVE(ctx, opnds);
     GEN_SAVE(ctx, extra);
@@ -1123,114 +1102,162 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     o->op_type = type;
     o->parent_block = 0;
     o->first_operand = first_operand;
-    o->n_operands = (uint32_t)n_operands;
-    o->n_succ_operands = (uint32_t)n_succ_ops;
+    o->n_operands = n_regular;
+    o->n_succ_operands = n_succ_ops;
     o->first_result = first_result;
-    o->n_results = (uint32_t)n_results;
+    o->n_results = spec->n_results;
     o->first_extra = first_extra;
-    o->n_regions = (uint16_t)n_regions;
-    o->n_successors = (uint16_t)n_successors;
+    o->n_regions = (uint16_t)spec->n_regions;
+    o->n_successors = (uint16_t)spec->n_successors;
     o->first_attr = first_attr;
-    o->n_attributes = (uint16_t)n_attributes;
+    o->n_attributes = (uint16_t)spec->n_attrs;
     o->flags = track ? OPF_TRACKED : 0;
     o->aux = 0;
-    o->location = LOC_IDX(ctx, location, "MLIR_CreateOp");
+    o->location = LOC_IDX(ctx, spec->loc, "MLIR_CreateOpFromSpec");
 
-    // Operands: the regular ones, then each successor's, linked in that
-    // order (each at the front of its value's use list).
+    // Results: created consecutively for this op.
+    if (spec->n_results > 0) {
+        IR_Value *res = VALS(ctx) + first_result;
+        uint32_t loc_idx = o->location;
+        for (uint32_t i = 0; i < spec->n_results; i++) {
+            res[i].location = loc_idx;
+            res[i].def = op;
+            res[i].index = (i & VAL_INDEX_MASK) | (track ? VAL_TRACKED : 0);
+            res[i].type = spec->result_types
+                ? TYPE_IDX(ctx, spec->result_types[i], "MLIR_CreateOpFromSpec") : 0;
+            res[i].n_uses = 0;
+            res[i].first_use = 0;
+            res[i].name = 0;
+        }
+    }
+
+    // Flat operands: regular operands followed by each successor's operands.
     IR_Operand *rec = OPNDS(ctx);
-    uint32_t u = first_operand;
-    for (size_t i = 0; i < n_operands; i++, u++) {
-        rec[u].value = VAL_IDX(ctx, operands[i], "MLIR_CreateOp");
+    for (uint32_t i = 0; i < spec->n_operands; i++) {
+        uint32_t u = first_operand + i;
+        rec[u].value = VAL_IDX(ctx, spec->operands[i], "MLIR_CreateOpFromSpec");
         rec[u].owner = op;
         rec[u].next = rec[u].prev = 0;
         if (operand_linked(ctx, op, rec[u].value)) use_push(ctx, u);
     }
+
     uint32_t *ex = EXTRA(ctx) + first_extra;
-    for (size_t i = 0; i < n_regions; i++) {
-        uint32_t r = REGION_IDX(ctx, regions[i], "MLIR_CreateOp");
-        ex[i] = r;
-        // The regions now belong to this op (MLIR_GetBlockParentOp).
-        if (r) REGIONS(ctx)[r].parent_op = op;
-    }
-    ex += n_regions;
-    for (size_t s = 0; s < n_successors; s++) {
-        size_t cnt = n_successor_operands ? n_successor_operands[s] : 0;
-        ex[2 * s] = BLOCK_IDX(ctx, successors[s], "MLIR_CreateOp");
-        ex[2 * s + 1] = (uint32_t)cnt;
-        MLIR_ValueHandle *vs = successor_operands ? successor_operands[s] : NULL;
-        for (size_t k = 0; k < cnt; k++, u++) {
-            rec[u].value = vs ? VAL_IDX(ctx, vs[k], "MLIR_CreateOp") : 0;
-            rec[u].owner = op;
-            rec[u].next = rec[u].prev = 0;
-            if (operand_linked(ctx, op, rec[u].value)) use_push(ctx, u);
+    if (spec->regions) {
+        for (uint32_t i = 0; i < spec->n_regions; i++) {
+            uint32_t r = REGION_IDX(ctx, spec->regions[i], "MLIR_CreateOpFromSpec");
+            ex[i] = r;
+            if (r) REGIONS(ctx)[r].parent_op = op;
+        }
+    } else if (spec->n_regions > 0) {
+        for (uint32_t i = 0; i < spec->n_regions; i++) {
+            uint32_t r = fresh_regions + i;
+            IR_Region *reg = &REGIONS(ctx)[r];
+            reg->blocks = NULL;
+            reg->n_blocks = 0;
+            reg->cap_blocks = 0;
+            reg->parent_op = op;
+            ex[i] = r;
         }
     }
+    ex += spec->n_regions;
+    for (uint32_t s = 0; s < spec->n_successors; s++) {
+        uint32_t cnt = spec->successor_operand_counts ? spec->successor_operand_counts[s] : 0;
+        ex[2 * s] = BLOCK_IDX(ctx, spec->successors[s], "MLIR_CreateOpFromSpec");
+        ex[2 * s + 1] = cnt;
+    }
+
     uint32_t *pa = EXTRA(ctx) + first_attr;
-    for (size_t i = 0; i < n_attributes; i++) {
-        API_CHECK(attributes[i].key != MLIR_KEY_INVALID && attributes[i].key < ctx->keys.n_keys &&
-                  attributes[i].value != MLIR_INVALID_HANDLE, "MLIR_CreateOp", "bad attribute key or value");
-        pa[2 * i] = attributes[i].key;
-        pa[2 * i + 1] = ATTR_IDX(ctx, attributes[i].value, "MLIR_CreateOp");
+    for (uint32_t i = 0; i < spec->n_attrs; i++) {
+        API_CHECK(spec->attrs[i].key != MLIR_KEY_INVALID && spec->attrs[i].key < ctx->keys.n_keys &&
+                  spec->attrs[i].value != MLIR_INVALID_HANDLE,
+                  "MLIR_CreateOpFromSpec", "bad attribute key or value");
+        pa[2 * i] = spec->attrs[i].key;
+        pa[2 * i + 1] = ATTR_IDX(ctx, spec->attrs[i].value, "MLIR_CreateOpFromSpec");
     }
 
-    // The results get this op as their definition, and a type from
-    // result_types if they have none. The op's result types are its results'
-    // types unless the two disagree; then they are stored (rare).
-    bool explicit_types = n_result_types != n_results;
-    IR_Value *res = VALS(ctx) + first_result;
-    for (size_t i = 0; i < n_results; i++) {
-        res[i].def = op;
-        if (i < n_result_types) {
-            uint32_t rt = TYPE_IDX(ctx, result_types[i], "MLIR_CreateOp");
-            if (res[i].type == 0) res[i].type = rt;
-            else if (res[i].type != rt) explicit_types = true;
-        }
-    }
-    GEN_CHECK(ctx, ops, "MLIR_CreateOp");
-    GEN_CHECK(ctx, opnds, "MLIR_CreateOp");
-    GEN_CHECK(ctx, extra, "MLIR_CreateOp");
-    GEN_CHECK(ctx, vals, "MLIR_CreateOp");
-
-    if (unnumbered_loc_def != MLIR_INVALID_HANDLE || trailing_comment.size != 0 ||
-        source_line_start != -1 || explicit_types) {
-        uint32_t a = op_aux_get(ctx, op);
-        OPAUX(ctx)[a].unnumbered_loc_def = LOC_IDX(ctx, unnumbered_loc_def, "MLIR_CreateOp");
-        OPAUX(ctx)[a].trailing_comment = trailing_comment;
-        OPAUX(ctx)[a].source_line_start = (int32_t)source_line_start;
-        if (explicit_types) {
-            uint32_t ft = vec_push(&ctx->extra, (uint32_t)n_result_types);
-            for (size_t i = 0; i < n_result_types; i++)
-                EXTRA(ctx)[ft + i] = TYPE_IDX(ctx, result_types[i], "MLIR_CreateOp");
-            OPAUX(ctx)[a].first_result_type = ft;
-            OPAUX(ctx)[a].n_result_types = (uint32_t)n_result_types;
-            OPAUX(ctx)[a].explicit_result_types = true;
-        }
-    }
+    GEN_CHECK(ctx, ops, "MLIR_CreateOpFromSpec");
+    GEN_CHECK(ctx, opnds, "MLIR_CreateOpFromSpec");
+    GEN_CHECK(ctx, extra, "MLIR_CreateOpFromSpec");
+    GEN_CHECK(ctx, vals, "MLIR_CreateOpFromSpec");
     return OP_H(ctx, op);
 }
 
-MLIR_OpHandle MLIR_CreateOp(
-    MLIR_Context *ctx,
-    MLIR_OpType type,
-    const MLIR_NamedAttr *attributes, size_t n_attributes,
-    MLIR_TypeHandle *result_types, size_t n_result_types,
-    MLIR_ValueHandle *results, size_t n_results,
-    MLIR_ValueHandle *operands, size_t n_operands,
-    MLIR_RegionHandle *regions, size_t n_regions,
-    MLIR_LocationHandle location,
-    MLIR_LocationHandle unnumbered_loc_def,
-    string trailing_comment,
-    int64_t source_line_start) {
-    return MLIR_CreateOpWithSuccessors(
-        ctx, type,
-        attributes, n_attributes,
-        result_types, n_result_types,
-        results, n_results,
-        operands, n_operands,
-        regions, n_regions,
-        NULL, 0, NULL, NULL,
-        location, unnumbered_loc_def, trailing_comment, source_line_start);
+static void block_insert_op(MLIR_Context *ctx, uint32_t b, uint32_t o, size_t idx);
+
+void MLIR_InsertOpBefore(MLIR_Context *ctx, MLIR_BlockHandle bh,
+                         MLIR_OpHandle oh, MLIR_OpHandle before_h) {
+    uint32_t b = BLOCK_IDX(ctx, bh, "MLIR_InsertOpBefore");
+    uint32_t o = OP_IDX(ctx, oh, "MLIR_InsertOpBefore");
+    API_CHECK(b != 0, "MLIR_InsertOpBefore", "block handle is NULL");
+    CHECK_OP(ctx, o, "MLIR_InsertOpBefore");
+    if (OPS(ctx)[o].parent_block != 0) MLIR_DetachOp(ctx, oh);
+    IR_Block *blk = &BLOCKS(ctx)[b];
+    size_t idx = blk->n_ops;
+    if (before_h != MLIR_INVALID_HANDLE) {
+        uint32_t bef = OP_IDX(ctx, before_h, "MLIR_InsertOpBefore");
+        CHECK_OP(ctx, bef, "MLIR_InsertOpBefore");
+        API_CHECK(OPS(ctx)[bef].parent_block == b, "MLIR_InsertOpBefore",
+                  "before op is not in target block");
+        for (size_t i = 0; i < blk->n_ops; i++) {
+            if (blk->ops[i] == bef) { idx = i; break; }
+        }
+    }
+    block_insert_op(ctx, b, o, idx);
+}
+
+MLIR_Builder MLIR_BuilderAfter(MLIR_Context *ctx, MLIR_OpHandle oh) {
+    uint32_t o = OP_IDX(ctx, oh, "MLIR_BuilderAfter");
+    CHECK_OP(ctx, o, "MLIR_BuilderAfter");
+    uint32_t b = OPS(ctx)[o].parent_block;
+    API_CHECK(b != 0, "MLIR_BuilderAfter", "op has no parent block");
+    IR_Block *blk = &BLOCKS(ctx)[b];
+    MLIR_Builder res;
+    res.ctx = ctx;
+    res.block = BLOCK_H(ctx, b);
+    res.before = MLIR_INVALID_HANDLE;
+    res.loc = MLIR_INVALID_HANDLE;
+    for (size_t i = 0; i + 1 < blk->n_ops; i++) {
+        if (blk->ops[i] == o) {
+            res.before = OP_H(ctx, blk->ops[i + 1]);
+            break;
+        }
+    }
+    return res;
+}
+
+MLIR_OpHandle MLIR_BuildOp(MLIR_Builder *b, const MLIR_OpSpec *spec) {
+    API_CHECK(b != NULL && b->ctx != NULL && spec != NULL, "MLIR_BuildOp", "NULL argument");
+    MLIR_OpHandle op;
+    if (spec->loc == MLIR_INVALID_HANDLE && b->loc != MLIR_INVALID_HANDLE) {
+        MLIR_OpSpec s = *spec;
+        s.loc = b->loc;
+        op = MLIR_CreateOpFromSpec(b->ctx, &s);
+    } else {
+        op = MLIR_CreateOpFromSpec(b->ctx, spec);
+    }
+    if (b->block != MLIR_INVALID_HANDLE)
+        MLIR_InsertOpBefore(b->ctx, b->block, op, b->before);
+    return op;
+}
+
+void MLIR_SetOpTrailingComment(MLIR_Context *ctx, MLIR_OpHandle oh, string comment) {
+    uint32_t o = OP_IDX(ctx, oh, "MLIR_SetOpTrailingComment");
+    CHECK_OP(ctx, o, "MLIR_SetOpTrailingComment");
+    if (comment.size == 0 && !OPS(ctx)[o].aux) return;
+    uint32_t a = op_aux_get(ctx, o);
+    OPAUX(ctx)[a].trailing_comment = comment;
+}
+
+void MLIR_SetValueRegisterName(MLIR_Context *ctx, MLIR_ValueHandle vh, string name) {
+    uint32_t v = VAL_IDX(ctx, vh, "MLIR_SetValueRegisterName");
+    API_CHECK(v != 0, "MLIR_SetValueRegisterName", "value handle is NULL");
+    if (name.size == 0) return;
+    uint32_t n = VALS(ctx)[v].name;
+    if (!n) {
+        n = vec_push(&ctx->names, 1);
+        VALS(ctx)[v].name = n;
+    }
+    NAMES(ctx)[n] = name;
 }
 
 // Inserts op `o` at position `idx` (clamped) of block `b`.
@@ -1479,6 +1506,15 @@ MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_Context *ctx, MLIR_OpHandle oh,
     CHECK_INDEX(i, op_succ_pair(ctx, o, s)[1], "MLIR_GetOpSuccessorOperand");
     uint32_t u = OPS(ctx)[o].first_operand + op_succ_operand_base(ctx, o, s) + (uint32_t)i;
     return VAL_H(ctx, OPNDS(ctx)[u].value);
+}
+
+void MLIR_GetOpSuccessorOperandRange(MLIR_Context *ctx, MLIR_OpHandle oh,
+                                     size_t succ, size_t *first, size_t *count) {
+    uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpSuccessorOperandRange");
+    CHECK_OP(ctx, o, "MLIR_GetOpSuccessorOperandRange");
+    CHECK_INDEX(succ, OPS(ctx)[o].n_successors, "MLIR_GetOpSuccessorOperandRange");
+    if (first) *first = op_succ_operand_base(ctx, o, succ);
+    if (count) *count = op_succ_pair(ctx, o, succ)[1];
 }
 
 size_t MLIR_GetBlockNumArgs(MLIR_Context *ctx, MLIR_BlockHandle bh) {
@@ -1946,10 +1982,12 @@ MLIR_OpHandle MLIR_CreateLLVMGlobalString(MLIR_Context *ctx, string sym_name,
     attrs[2] = MLIR_Named(MLIR_KEY_LINKAGE, make_llvm_linkage_attr(ctx, str_lit("private")));
     attrs[3] = MLIR_Named(MLIR_KEY_CONSTANT, MLIR_CreateAttributeBool(ctx, true));
     attrs[4] = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeString(ctx, bytes));
-    return MLIR_CreateOp(ctx, OP_TYPE_LLVM_MLIR_GLOBAL,
-                         attrs, 5, NULL, 0, NULL, 0, NULL, 0,
-                         NULL, 0, loc, MLIR_INVALID_HANDLE,
-                         str_lit(""), -1);
+    MLIR_OpSpec spec = {0};
+    spec.type = OP_TYPE_LLVM_MLIR_GLOBAL;
+    spec.attrs = attrs;
+    spec.n_attrs = 5;
+    spec.loc = loc;
+    return MLIR_CreateOpFromSpec(ctx, &spec);
 }
 
 // Aggregate-array global with a raw-bytes initializer:
@@ -1974,10 +2012,12 @@ MLIR_OpHandle MLIR_CreateLLVMGlobalArrayInit(MLIR_Context *ctx, string sym_name,
         attrs[na++] = MLIR_Named(MLIR_KEY_CONSTANT, MLIR_CreateAttributeBool(ctx, true));
     }
     attrs[na++] = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeString(ctx, bytes));
-    return MLIR_CreateOp(ctx, OP_TYPE_LLVM_MLIR_GLOBAL,
-                         attrs, na, NULL, 0, NULL, 0, NULL, 0,
-                         NULL, 0, loc, MLIR_INVALID_HANDLE,
-                         str_lit(""), -1);
+    MLIR_OpSpec spec = {0};
+    spec.type = OP_TYPE_LLVM_MLIR_GLOBAL;
+    spec.attrs = attrs;
+    spec.n_attrs = (uint32_t)na;
+    spec.loc = loc;
+    return MLIR_CreateOpFromSpec(ctx, &spec);
 }
 
 MLIR_OpHandle MLIR_CreateLLVMGlobal(MLIR_Context *ctx, string sym_name,
@@ -2012,10 +2052,14 @@ MLIR_OpHandle MLIR_CreateLLVMGlobal(MLIR_Context *ctx, string sym_name,
     } else if (out_init_block) {
         *out_init_block = MLIR_INVALID_HANDLE;
     }
-    return MLIR_CreateOp(ctx, OP_TYPE_LLVM_MLIR_GLOBAL,
-                         attrs, na, NULL, 0, NULL, 0, NULL, 0,
-                         nr ? regs : NULL, nr, loc, MLIR_INVALID_HANDLE,
-                         str_lit(""), -1);
+    MLIR_OpSpec spec = {0};
+    spec.type = OP_TYPE_LLVM_MLIR_GLOBAL;
+    spec.attrs = attrs;
+    spec.n_attrs = (uint32_t)na;
+    spec.regions = nr ? regs : NULL;
+    spec.n_regions = (uint32_t)nr;
+    spec.loc = loc;
+    return MLIR_CreateOpFromSpec(ctx, &spec);
 }
 
 // Attribute creation: build the candidate record and intern it.
@@ -2138,14 +2182,6 @@ MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_nam
                               location, register_name);
     VALS(ctx)[v].index |= VAL_BLOCK_ARG;
     return VAL_H(ctx, v);
-}
-
-MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_Context *ctx, MLIR_OpHandle def, uint32_t result_index, MLIR_TypeHandle type, string register_name, MLIR_LocationHandle location) {
-    API_CHECK(ctx != NULL, "MLIR_CreateValueOpResult", "context is NULL");
-    uint32_t d = OP_IDX(ctx, def, "MLIR_CreateValueOpResult");
-    CHECK_NOT_ERASED(ctx, d, "MLIR_CreateValueOpResult");
-    return VAL_H(ctx, value_create(ctx, d, result_index, TYPE_IDX(ctx, type, "MLIR_CreateValueOpResult"),
-                                   location, register_name));
 }
 
 // Block and Region creation

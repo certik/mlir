@@ -203,18 +203,17 @@ static MLIR_ValueHandle l2r_make_zero(M *m, size_t bi, size_t ai) {
     MLIR_NamedAttr a = (tk == MLIR_TYPE_KIND_FLOAT || tk == MLIR_TYPE_KIND_BF16)
         ? MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeFloat(ctx, 0.0, ty))
         : MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(ctx, 0, ty));
-    MLIR_ValueHandle res =
-        MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0, ty,
-                                 (string){0}, loc);
-    MLIR_TypeHandle rty[1] = { ty };
-    MLIR_ValueHandle rv[1] = { res };
     MLIR_NamedAttr attrs[1] = { a };
-    MLIR_OpHandle op = MLIR_CreateOp(
-        ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
-        attrs, 1, rty, 1, rv, 1, NULL, 0, NULL, 0,
-        loc, MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec spec = {0};
+    spec.type = OP_TYPE_LLVM_MLIR_CONSTANT;
+    spec.result_types = &ty;
+    spec.n_results = 1;
+    spec.attrs = attrs;
+    spec.n_attrs = 1;
+    spec.loc = loc;
+    MLIR_OpHandle op = MLIR_CreateOpFromSpec(ctx, &spec);
     MLIR_InsertBlockOpAtIndex(ctx, m->blocks[bi], op, 0);
-    return res;
+    return MLIR_GetOpResult(ctx, op, 0);
 }
 
 static uintptr_t l2r_live_in(M *m, size_t ai, size_t bi);
@@ -847,18 +846,23 @@ static MLIR_ValueHandle sroa_field_alloca(S *s, size_t ai, const int32_t *path,
     }
     MLIR_Context *ctx = s->ctx;
     MLIR_LocationHandle loc = l2r_unkloc(ctx);
-    MLIR_ValueHandle res = MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0,
-                                                    s->a_ptrty[ai], (string){0}, loc);
     MLIR_NamedAttr ea = MLIR_Named(MLIR_KEY_ELEM_TYPE, MLIR_CreateAttributeType(ctx, leaf));
     MLIR_TypeHandle rty[1] = { s->a_ptrty[ai] };
-    MLIR_ValueHandle rv[1] = { res };
     MLIR_ValueHandle ops[1] = { s->a_size[ai] };
     MLIR_NamedAttr attrs[1] = { ea };
-    MLIR_OpHandle op = MLIR_CreateOp(ctx, OP_TYPE_LLVM_ALLOCA,
-                                     attrs, 1, rty, 1, rv, 1, ops, 1, NULL, 0,
-                                     loc, MLIR_INVALID_HANDLE, (string){0}, -1);
-    size_t at = sroa_block_op_index(ctx, s->a_blk[ai], s->a_op[ai]);
-    MLIR_InsertBlockOpAtIndex(ctx, s->a_blk[ai], op, at + 1);
+    MLIR_OpSpec spec = {0};
+    spec.type = OP_TYPE_LLVM_ALLOCA;
+    spec.operands = ops;
+    spec.n_operands = 1;
+    spec.result_types = rty;
+    spec.n_results = 1;
+    spec.attrs = attrs;
+    spec.n_attrs = 1;
+    spec.loc = loc;
+    MLIR_OpHandle op = MLIR_CreateOpFromSpec(ctx, &spec);
+    MLIR_ValueHandle res = MLIR_GetOpResult(ctx, op, 0);
+    MLIR_Builder b = MLIR_BuilderAfter(ctx, s->a_op[ai]);
+    MLIR_InsertOpBefore(ctx, b.block, op, b.before);
     int e = base + s->a_nfield[ai];
     s->a_fplen[e] = plen;
     for (int k = 0; k < plen; k++) s->a_fpath[e*SROA_MAX_PATH + k] = path[k];

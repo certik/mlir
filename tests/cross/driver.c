@@ -261,19 +261,8 @@ int app_main(void) {
 
         // Build cf.br tgt(defv : i32) — zero regular operands, one successor
         // with one successor-operand.
-        MLIR_BlockHandle *succs = arena_new_array(arena, MLIR_BlockHandle, 1);
-        succs[0] = tgt;
-        MLIR_ValueHandle **sops = arena_new_array(arena, MLIR_ValueHandle *, 1);
-        sops[0] = arena_new_array(arena, MLIR_ValueHandle, 1);
-        sops[0][0] = defv;
-        size_t *snums = arena_new_array(arena, size_t, 1);
-        snums[0] = 1;
-        MLIR_OpHandle br = MLIR_CreateOpWithSuccessors(
-            ctx, OP_TYPE_CF_BR,
-            NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
-            succs, 1, sops, snums,
-            MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
-        MLIR_AppendBlockOp(ctx, entry, br);
+        MLIR_Builder eb = MLIR_BuilderAtEnd(ctx, entry);
+        MLIR_OpHandle br = MLIR_BuildBr(&eb, OP_TYPE_CF_BR, tgt, &defv, 1);
 
         size_t n_uses = MLIR_GetValueNumUses(ctx, defv);
         print_string(n_uses == 1 ? str_lit("cf.br succ_op use registered: yes\n")
@@ -316,69 +305,38 @@ int app_main(void) {
     MLIR_AppendBlockArg(ctx, func_block, arg1);
 
     // %0 = arith.addi(%arg0, %arg1) -> i32
-    MLIR_ValueHandle add_result = MLIR_CreateValueOpResult(
-        ctx, MLIR_INVALID_HANDLE, 0, i32_ty,
-        str_lit(""), MLIR_INVALID_HANDLE);
-
-    MLIR_ValueHandle *add_operands = arena_new_array(arena, MLIR_ValueHandle, 2);
-    add_operands[0] = arg0;
-    add_operands[1] = arg1;
-    MLIR_TypeHandle  *add_result_types = arena_new_array(arena, MLIR_TypeHandle, 1);
-    add_result_types[0] = i32_ty;
-    MLIR_ValueHandle *add_results = arena_new_array(arena, MLIR_ValueHandle, 1);
-    add_results[0] = add_result;
-
-    MLIR_OpHandle add_op = MLIR_CreateOp(
-        ctx, OP_TYPE_ARITH_ADDI,
-        NULL, 0,
-        add_result_types, 1,
-        add_results, 1,
-        add_operands, 2,
-        NULL, 0,
-        MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE,
-        str_lit(""), -1);
-
     // func.return(%0)
-    MLIR_ValueHandle *ret_operands = arena_new_array(arena, MLIR_ValueHandle, 1);
-    ret_operands[0] = add_result;
-    MLIR_OpHandle ret_op = MLIR_CreateOp(
-        ctx, OP_TYPE_FUNC_RETURN,
-        NULL, 0, NULL, 0, NULL, 0,
-        ret_operands, 1,
-        NULL, 0,
-        MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE,
-        str_lit(""), -1);
+    MLIR_Builder fb = MLIR_BuilderAtEnd(ctx, func_block);
+    MLIR_ValueHandle add_result = MLIR_BuildBinary(&fb, OP_TYPE_ARITH_ADDI, i32_ty, arg0, arg1);
+    MLIR_OpHandle add_op = MLIR_GetValueDefiningOp(ctx, add_result);
 
-    MLIR_AppendBlockOp(ctx, func_block, add_op);
-    MLIR_AppendBlockOp(ctx, func_block, ret_op);
+    MLIR_OpSpec ret_spec = {0};
+    ret_spec.type = OP_TYPE_FUNC_RETURN;
+    ret_spec.operands = &add_result;
+    ret_spec.n_operands = 1;
+    MLIR_OpHandle ret_op = MLIR_BuildOp(&fb, &ret_spec);
+    (void)ret_op;
+
     MLIR_AppendRegionBlock(ctx, func_region, func_block);
 
     // ---- func.func op --------------------------------------------------------
     MLIR_NamedAttr sym_name_attr =
         MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("add")));
-    MLIR_NamedAttr *func_attrs = arena_new_array(arena, MLIR_NamedAttr, 1);
-    func_attrs[0] = sym_name_attr;
-    MLIR_RegionHandle *func_regions = arena_new_array(arena, MLIR_RegionHandle, 1);
-    func_regions[0] = func_region;
-
-    MLIR_OpHandle func_op = MLIR_CreateOp(
-        ctx, OP_TYPE_FUNC_FUNC,
-        func_attrs, 1,
-        NULL, 0, NULL, 0, NULL, 0,
-        func_regions, 1,
-        MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE,
-        str_lit(""), -1);
+    MLIR_OpSpec func_spec = {0};
+    func_spec.type = OP_TYPE_FUNC_FUNC;
+    func_spec.attrs = &sym_name_attr;
+    func_spec.n_attrs = 1;
+    func_spec.regions = &func_region;
+    func_spec.n_regions = 1;
+    MLIR_OpHandle func_op = MLIR_CreateOpFromSpec(ctx, &func_spec);
     MLIR_AppendBlockOp(ctx, module_block, func_op);
 
     // ---- module op ----------------------------------------------------------
-    MLIR_RegionHandle *module_regions = arena_new_array(arena, MLIR_RegionHandle, 1);
-    module_regions[0] = module_region;
-    MLIR_OpHandle module_op = MLIR_CreateOp(
-        ctx, OP_TYPE_MODULE,
-        NULL, 0, NULL, 0, NULL, 0, NULL, 0,
-        module_regions, 1,
-        MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE,
-        str_lit(""), -1);
+    MLIR_OpSpec mod_spec = {0};
+    mod_spec.type = OP_TYPE_MODULE;
+    mod_spec.regions = &module_region;
+    mod_spec.n_regions = 1;
+    MLIR_OpHandle module_op = MLIR_CreateOpFromSpec(ctx, &mod_spec);
 
     print_string(print_operation_generic(ctx, 0, module_op));
 
@@ -473,9 +431,9 @@ int app_main(void) {
             MLIR_LookupOpType(ctx, str_lit("test.op")) == dyn ? str_lit("yes") : str_lit("no"),
             MLIR_GetOpTypeName(ctx, dyn),
             MLIR_GetOpTypeName(ctx, OP_TYPE_MODULE)));
-        MLIR_OpHandle dyn_op = MLIR_CreateOp(ctx, dyn, NULL, 0, NULL, 0, NULL, 0,
-                                             NULL, 0, NULL, 0, MLIR_INVALID_HANDLE,
-                                             MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_OpSpec dyn_spec = {0};
+        dyn_spec.type = dyn;
+        MLIR_OpHandle dyn_op = MLIR_CreateOpFromSpec(ctx, &dyn_spec);
         print_string(MLIR_GetOpType(ctx, dyn_op) == dyn &&
                      MLIR_OP_TYPE_IN_DIALECT(OP_TYPE_LLVM_ADD, LLVM) &&
                      MLIR_OP_TYPE_IN_DIALECT(MLIR_DIALECT_LLVM_FIRST, LLVM) &&
@@ -489,9 +447,9 @@ int app_main(void) {
         // registering it must not give modules another type.
         MLIR_OpType bm_lookup = MLIR_LookupOpType(ctx, str_lit("builtin.module"));
         MLIR_OpType bm_reg = MLIR_RegisterOpType(ctx, str_lit("builtin.module"));
-        MLIR_OpHandle mod2 = MLIR_CreateOp(ctx, OP_TYPE_MODULE, NULL, 0, NULL, 0, NULL, 0,
-                                           NULL, 0, NULL, 0, MLIR_INVALID_HANDLE,
-                                           MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_OpSpec mod2_spec = {0};
+        mod2_spec.type = OP_TYPE_MODULE;
+        MLIR_OpHandle mod2 = MLIR_CreateOpFromSpec(ctx, &mod2_spec);
         print_string(format(arena,
             str_lit("builtin.module alias: lookup={} register={} module op={} name={}\n"),
             bm_lookup == OP_TYPE_MODULE ? str_lit("yes") : str_lit("no"),
@@ -516,9 +474,11 @@ int app_main(void) {
             MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("f"))),
             MLIR_Named(mykey, MLIR_CreateAttributeInteger(ctx, 7, i32_ty)),
         };
-        MLIR_OpHandle kop = MLIR_CreateOp(ctx, dyn, kattrs, 2, NULL, 0, NULL, 0,
-                                          NULL, 0, NULL, 0, MLIR_INVALID_HANDLE,
-                                          MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_OpSpec kop_spec = {0};
+        kop_spec.type = dyn;
+        kop_spec.attrs = kattrs;
+        kop_spec.n_attrs = 2;
+        MLIR_OpHandle kop = MLIR_CreateOpFromSpec(ctx, &kop_spec);
         int64_t before = MLIR_GetAttributeInteger(ctx, MLIR_GetOpAttr(ctx, kop, mykey));
         MLIR_SetOpAttr(ctx, kop, mykey, MLIR_CreateAttributeInteger(ctx, 8, i32_ty));
         size_t n_replaced = MLIR_GetOpNumAttributes(ctx, kop);
@@ -596,27 +556,15 @@ int app_main(void) {
         enum { N = 3000 };
         MLIR_ValueHandle last = arg;
         bool chain_ok = true;
+        MLIR_Builder sb = MLIR_BuilderAtEnd(ctx, src);
         for (size_t i = 0; i < N; i++) {
-            MLIR_ValueHandle res = MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0, i32_ty,
-                                                            str_lit(""), MLIR_INVALID_HANDLE);
-            MLIR_ValueHandle ops2[2] = { last, arg };
-            MLIR_TypeHandle rt[1] = { i32_ty };
-            MLIR_OpHandle add = MLIR_CreateOp(ctx, OP_TYPE_LLVM_ADD, NULL, 0, rt, 1, &res, 1,
-                                              ops2, 2, NULL, 0, MLIR_INVALID_HANDLE,
-                                              MLIR_INVALID_HANDLE, str_lit(""), -1);
-            MLIR_AppendBlockOp(ctx, src, add);
+            MLIR_ValueHandle res = MLIR_BuildBinary(&sb, OP_TYPE_LLVM_ADD, i32_ty, last, arg);
+            MLIR_OpHandle add = MLIR_GetValueDefiningOp(ctx, res);
             if (MLIR_GetOpResult(ctx, add, 0) != res || MLIR_GetValueDefiningOp(ctx, res) != add)
                 chain_ok = false;
             last = res;
         }
-        MLIR_ValueHandle *succ_ops[1] = { &last };
-        size_t n_succ_ops[1] = { 1 };
-        MLIR_BlockHandle succs[1] = { dst };
-        MLIR_OpHandle br = MLIR_CreateOpWithSuccessors(ctx, OP_TYPE_LLVM_BR, NULL, 0, NULL, 0,
-                                                       NULL, 0, NULL, 0, NULL, 0, succs, 1,
-                                                       succ_ops, n_succ_ops, MLIR_INVALID_HANDLE,
-                                                       MLIR_INVALID_HANDLE, str_lit(""), -1);
-        MLIR_AppendBlockOp(ctx, src, br);
+        MLIR_OpHandle br = MLIR_BuildBr(&sb, OP_TYPE_LLVM_BR, dst, &last, 1);
         print_string(chain_ok && MLIR_GetBlockNumOps(ctx, src) == N + 1 &&
                      MLIR_GetValueNumUses(ctx, arg) == N + 1 &&
                      MLIR_GetValueNumUses(ctx, last) == 1
@@ -676,19 +624,17 @@ int app_main(void) {
         vcap.saw_error = false;
         MLIR_SetDiagnosticHandler(ctx, capture_diag, &vcap);
 
-        MLIR_RegionHandle mreg = MLIR_CreateRegion(ctx);
+        MLIR_OpSpec vmod_spec = {0};
+        vmod_spec.type = OP_TYPE_MODULE;
+        vmod_spec.n_regions = 1;
+        MLIR_OpHandle vmod = MLIR_CreateOpFromSpec(ctx, &vmod_spec);
         MLIR_BlockHandle mblk = MLIR_CreateBlock(ctx);
-        MLIR_AppendRegionBlock(ctx, mreg, mblk);
-        MLIR_OpHandle vmod = MLIR_CreateOp(ctx, OP_TYPE_MODULE, NULL, 0, NULL, 0,
-                                           NULL, 0, NULL, 0, &mreg, 1,
-                                           MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE,
-                                           str_lit(""), -1);
+        MLIR_AppendRegionBlock(ctx, MLIR_GetOpRegion(ctx, vmod, 0), mblk);
         bool valid_ok = MLIR_VerifyOp(ctx, vmod) && vcap.count == 0;
 
-        MLIR_OpHandle bad = MLIR_CreateOp(ctx, OP_TYPE_ARITH_ADDI, NULL, 0, NULL, 0,
-                                          NULL, 0, NULL, 0, NULL, 0,
-                                          MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE,
-                                          str_lit(""), -1);
+        MLIR_OpSpec bad_spec = {0};
+        bad_spec.type = OP_TYPE_ARITH_ADDI;
+        MLIR_OpHandle bad = MLIR_CreateOpFromSpec(ctx, &bad_spec);
         MLIR_AppendBlockOp(ctx, mblk, bad);
         bool invalid_caught = !MLIR_VerifyOp(ctx, vmod) && vcap.saw_error;
         MLIR_SetDiagnosticHandler(ctx, NULL, NULL);
@@ -696,6 +642,71 @@ int app_main(void) {
         print_string(traits_ok && valid_ok && invalid_caught
                          ? str_lit("op traits and verify: yes\n")
                          : str_lit("op traits and verify: no\n"));
+    }
+
+    // ---- op builder API (#351) ----------------------------------------------
+    {
+        MLIR_OpSpec fresh_mod_spec = {0};
+        fresh_mod_spec.type = OP_TYPE_MODULE;
+        fresh_mod_spec.n_regions = 1; // fresh empty region
+        MLIR_OpHandle fresh_mod = MLIR_CreateOpFromSpec(ctx, &fresh_mod_spec);
+        MLIR_RegionHandle r = MLIR_GetOpRegion(ctx, fresh_mod, 0);
+        MLIR_BlockHandle b0 = MLIR_CreateBlock(ctx);
+        MLIR_BlockHandle b1 = MLIR_CreateBlock(ctx);
+        MLIR_BlockHandle b2 = MLIR_CreateBlock(ctx);
+        MLIR_AppendRegionBlock(ctx, r, b0);
+        MLIR_AppendRegionBlock(ctx, r, b1);
+        MLIR_AppendRegionBlock(ctx, r, b2);
+        MLIR_AddBlockArgument(ctx, b1, i32_ty, MLIR_INVALID_HANDLE);
+        MLIR_AddBlockArgument(ctx, b2, i32_ty, MLIR_INVALID_HANDLE);
+        MLIR_AddBlockArgument(ctx, b2, i32_ty, MLIR_INVALID_HANDLE);
+
+        MLIR_TypeHandle i1_ty = MLIR_CreateTypeInteger(ctx, 1, false);
+        MLIR_TypeHandle i64_ty = MLIR_CreateTypeInteger(ctx, 64, true);
+        MLIR_TypeHandle f64_ty = MLIR_CreateTypeFloat(ctx, 64, false);
+        MLIR_LocationHandle bloc = MLIR_CreateLocationFile(ctx, str_lit("b.c"), 7, 1);
+
+        MLIR_Builder b = MLIR_BuilderAtEnd(ctx, b0);
+        b.loc = bloc;
+        MLIR_ValueHandle c1 = MLIR_BuildConstantInt(&b, OP_TYPE_LLVM_MLIR_CONSTANT, i32_ty, 10);
+        MLIR_ValueHandle c2 = MLIR_BuildConstantInt(&b, OP_TYPE_LLVM_MLIR_CONSTANT, i32_ty, 20);
+        MLIR_ValueHandle cf = MLIR_BuildConstantFloat(&b, OP_TYPE_LLVM_MLIR_CONSTANT, f64_ty, 1.5);
+        MLIR_ValueHandle cond = MLIR_BuildConstantInt(&b, OP_TYPE_LLVM_MLIR_CONSTANT, i1_ty, 1);
+
+        MLIR_OpHandle c2_op = MLIR_GetValueDefiningOp(ctx, c2);
+        MLIR_Builder before_c2 = MLIR_BuilderBefore(ctx, c2_op);
+        MLIR_ValueHandle ext = MLIR_BuildUnary(&before_c2, OP_TYPE_LLVM_SEXT, i64_ty, c1);
+        MLIR_Builder after_c2 = MLIR_BuilderAfter(ctx, c2_op);
+        MLIR_ValueHandle sum = MLIR_BuildBinary(&after_c2, OP_TYPE_LLVM_ADD, i32_ty, c1, c2);
+
+        MLIR_ValueHandle t_args[1] = { sum };
+        MLIR_ValueHandle f_args[2] = { c1, c2 };
+        MLIR_OpHandle cbr = MLIR_BuildCondBr(&b, OP_TYPE_LLVM_COND_BR, cond,
+                                             b1, t_args, 1, b2, f_args, 2);
+
+        size_t f0 = 99, n0 = 99, f1 = 99, n1 = 99;
+        MLIR_GetOpSuccessorOperandRange(ctx, cbr, 0, &f0, &n0);
+        MLIR_GetOpSuccessorOperandRange(ctx, cbr, 1, &f1, &n1);
+
+        bool ok =
+            MLIR_GetOpNumRegions(ctx, fresh_mod) == 1 &&
+            MLIR_GetBlockNumOps(ctx, b0) == 7 &&
+            MLIR_GetBlockOp(ctx, b0, 1) == MLIR_GetValueDefiningOp(ctx, ext) &&
+            MLIR_GetBlockOp(ctx, b0, 2) == c2_op &&
+            MLIR_GetBlockOp(ctx, b0, 3) == MLIR_GetValueDefiningOp(ctx, sum) &&
+            MLIR_GetOpLocation(ctx, c2_op) == bloc &&
+            MLIR_GetAttributeFloat(ctx, MLIR_GetOpAttr(ctx, MLIR_GetValueDefiningOp(ctx, cf), MLIR_KEY_VALUE)) == 1.5 &&
+            f0 == 1 && n0 == 1 && f1 == 2 && n1 == 2 &&
+            MLIR_GetOpSuccessorOperand(ctx, cbr, 0, 0) == sum &&
+            MLIR_GetOpSuccessorOperand(ctx, cbr, 1, 0) == c1 &&
+            MLIR_GetOpSuccessorOperand(ctx, cbr, 1, 1) == c2;
+
+        // Move c2_op to the front of b0 using MLIR_InsertOpBefore.
+        MLIR_InsertOpBefore(ctx, b0, c2_op, MLIR_GetBlockOp(ctx, b0, 0));
+        ok = ok && MLIR_GetBlockOp(ctx, b0, 0) == c2_op;
+
+        print_string(ok ? str_lit("op builder API: yes\n")
+                        : str_lit("op builder API: no\n"));
     }
 
     MLIR_DestroyContext(ctx);

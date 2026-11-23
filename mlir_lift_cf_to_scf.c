@@ -409,18 +409,11 @@ static MLIR_OpHandle create_cf_br_in_block(MLIR_Context *ctx, Arena *arena,
                                            MLIR_BlockHandle dst,
                                            MLIR_ValueHandle *args, size_t n_args,
                                            MLIR_LocationHandle loc) {
-    MLIR_BlockHandle *succs = arena_new_array(arena, MLIR_BlockHandle, 1);
-    succs[0] = dst;
-    MLIR_ValueHandle **sops = arena_new_array(arena, MLIR_ValueHandle *, 1);
-    sops[0] = args;
-    size_t *snums = arena_new_array(arena, size_t, 1);
-    snums[0] = n_args;
-    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
-        ctx, llvm_cfg ? OP_TYPE_LLVM_BR : OP_TYPE_CF_BR,
-        NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
-        succs, 1, sops, snums,
-        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
-    MLIR_AppendBlockOp(ctx, in_block, op);
+    (void)arena;
+    MLIR_Builder b = MLIR_BuilderAtEnd(ctx, in_block);
+    b.loc = loc;
+    MLIR_OpHandle op = MLIR_BuildBr(&b, llvm_cfg ? OP_TYPE_LLVM_BR : OP_TYPE_CF_BR,
+                                    dst, args, (uint32_t)n_args);
     return op;
 }
 
@@ -552,11 +545,12 @@ static void combiner_combine_exit(MLIR_Context *ctx, Combiner *c,
         for (size_t i = 0; i < e->n_operand_types; ++i) {
             args[i] = MLIR_GetBlockArg(ctx, e->exit_block, i);
         }
-        MLIR_OpHandle new_ret = MLIR_CreateOp(
-            ctx, e->op_type,
-            NULL, 0, NULL, 0, NULL, 0,
-            args, e->n_operand_types, NULL, 0,
-            loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_OpSpec ret_spec = {0};
+        ret_spec.type = e->op_type;
+        ret_spec.operands = args;
+        ret_spec.n_operands = (uint32_t)e->n_operand_types;
+        ret_spec.loc = loc;
+        MLIR_OpHandle new_ret = MLIR_CreateOpFromSpec(ctx, &ret_spec);
         MLIR_AppendBlockOp(ctx, e->exit_block, new_ret);
         e->exit_terminator = new_ret;
     }
@@ -681,11 +675,12 @@ static MLIR_OpHandle create_unreachable_terminator(MLIR_Context *ctx, LiftState 
     }
 
     MLIR_OpType ot = is_llvm ? OP_TYPE_LLVM_RETURN : OP_TYPE_FUNC_RETURN;
-    MLIR_OpHandle ret = MLIR_CreateOp(
-        st->ctx, ot,
-        NULL, 0, NULL, 0, NULL, 0,
-        args, n_res, NULL, 0,
-        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_OpSpec ret_spec = {0};
+    ret_spec.type = ot;
+    ret_spec.operands = args;
+    ret_spec.n_operands = (uint32_t)n_res;
+    ret_spec.loc = loc;
+    MLIR_OpHandle ret = MLIR_CreateOpFromSpec(st->ctx, &ret_spec);
     MLIR_AppendBlockOp(st->ctx, block, ret);
     return ret;
 }
@@ -1289,11 +1284,12 @@ static MLIR_OpHandle create_scf_yield(MLIR_Context *ctx, Arena *arena,
     MLIR_ValueHandle *operand_arr = n_args
         ? arena_new_array(arena, MLIR_ValueHandle, n_args) : NULL;
     for (size_t i = 0; i < n_args; ++i) operand_arr[i] = args[i];
-    MLIR_OpHandle y = MLIR_CreateOp(
-        ctx, OP_TYPE_SCF_YIELD,
-        NULL, 0, NULL, 0, NULL, 0,
-        operand_arr, n_args, NULL, 0,
-        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_OpSpec y_spec = {0};
+    y_spec.type = OP_TYPE_SCF_YIELD;
+    y_spec.operands = operand_arr;
+    y_spec.n_operands = (uint32_t)n_args;
+    y_spec.loc = loc;
+    MLIR_OpHandle y = MLIR_CreateOpFromSpec(ctx, &y_spec);
     MLIR_AppendBlockOp(ctx, in_block, y);
     return y;
 }
@@ -2000,20 +1996,16 @@ static MLIR_ValueHandle create_llvm_trunc(LiftState *st, MLIR_BlockHandle in_blo
                                           MLIR_ValueHandle src,
                                           MLIR_TypeHandle dst_ty,
                                           MLIR_LocationHandle loc) {
-    MLIR_TypeHandle *res_types = arena_new_array(st->arena, MLIR_TypeHandle, 1);
-    res_types[0] = dst_ty;
-    MLIR_ValueHandle *operands = arena_new_array(st->arena, MLIR_ValueHandle, 1);
-    operands[0] = src;
-    MLIR_ValueHandle *results = arena_new_array(st->arena, MLIR_ValueHandle, 1);
-    results[0] = MLIR_CreateValueOpResult(st->ctx, MLIR_INVALID_HANDLE, 0,
-                                          dst_ty, fresh_ssa_name(st),
-                                          loc);
-    MLIR_OpHandle op = MLIR_CreateOp(
-        st->ctx, OP_TYPE_LLVM_TRUNC,
-        NULL, 0, res_types, 1, results, 1,
-        operands, 1, NULL, 0,
-        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_OpSpec trunc_spec = {0};
+    trunc_spec.type = OP_TYPE_LLVM_TRUNC;
+    trunc_spec.operands = &src;
+    trunc_spec.n_operands = 1;
+    trunc_spec.result_types = &dst_ty;
+    trunc_spec.n_results = 1;
+    trunc_spec.loc = loc;
+    MLIR_OpHandle op = MLIR_CreateOpFromSpec(st->ctx, &trunc_spec);
     MLIR_AppendBlockOp(st->ctx, in_block, op);
+    MLIR_ValueHandle results[1] = { MLIR_GetOpResult(st->ctx, op, 0) };
     return results[0];
 }
 
@@ -2195,22 +2187,23 @@ static MLIR_BlockHandle *transform_cycles_to_scf_loops(MLIR_Context *ctx,
                          hdr_loc);
 
         // (7) Build scf.while in newLPB. Results match iter args types.
+        MLIR_RegionHandle regions[2] = { body_region, after_region };
+        MLIR_OpSpec while_spec = {0};
+        while_spec.type = OP_TYPE_SCF_WHILE;
+        while_spec.operands = lpb_args;
+        while_spec.n_operands = (uint32_t)n_lh_args;
+        while_spec.result_types = iter_arg_types;
+        while_spec.n_results = (uint32_t)n_lh_args;
+        while_spec.regions = regions;
+        while_spec.n_regions = 2;
+        while_spec.loc = hdr_loc;
+        MLIR_OpHandle scf_while = MLIR_CreateOpFromSpec(st->ctx, &while_spec);
+        MLIR_AppendBlockOp(st->ctx, newLPB, scf_while);
         MLIR_ValueHandle *results = n_lh_args
             ? arena_new_array(arena, MLIR_ValueHandle, n_lh_args) : NULL;
         for (size_t i = 0; i < n_lh_args; ++i) {
-            results[i] = MLIR_CreateValueOpResult(
-                st->ctx, MLIR_INVALID_HANDLE, (uint32_t)i, iter_arg_types[i],
-                fresh_ssa_name(st), hdr_loc);
+            results[i] = MLIR_GetOpResult(st->ctx, scf_while, i);
         }
-        MLIR_RegionHandle *regions = arena_new_array(arena, MLIR_RegionHandle, 2);
-        regions[0] = body_region;
-        regions[1] = after_region;
-        MLIR_OpHandle scf_while = MLIR_CreateOp(
-            st->ctx, OP_TYPE_SCF_WHILE,
-            NULL, 0, iter_arg_types, n_lh_args, results, n_lh_args,
-            lpb_args, n_lh_args, regions, 2,
-            hdr_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
-        MLIR_AppendBlockOp(st->ctx, newLPB, scf_while);
 
         // (8) RAUW exit_block's args with scf.while results.
         size_t n_exit_args = MLIR_GetBlockNumArgs(ctx, exit_block);
@@ -2525,11 +2518,12 @@ static BranchXformResult transform_to_structured_cf_branches(MLIR_Context *ctx,
             for (size_t a = 0; a < canon_n_ops; ++a)
                 cargs[a] = MLIR_GetBlockArg(ctx, cont, a);
             // Same op as the exit terminators (all of type canon_type).
-            MLIR_OpHandle cterm = MLIR_CreateOp(
-                st->ctx, canon_type,
-                NULL, 0, NULL, 0, NULL, 0,
-                cargs, canon_n_ops, NULL, 0,
-                loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+            MLIR_OpSpec cspec = {0};
+            cspec.type = canon_type;
+            cspec.operands = cargs;
+            cspec.n_operands = (uint32_t)canon_n_ops;
+            cspec.loc = loc;
+            MLIR_OpHandle cterm = MLIR_CreateOpFromSpec(st->ctx, &cspec);
             MLIR_AppendBlockOp(st->ctx, cont, cterm);
 
             // Replace each exit terminator with cf.br(operands) -> cont.
@@ -2751,23 +2745,20 @@ static BranchXformResult transform_to_structured_cf_branches(MLIR_Context *ctx,
 
     MLIR_LocationHandle term_loc = MLIR_GetOpLocation(ctx, term);
 
-    MLIR_ValueHandle *if_results = n_cont_args
-        ? arena_new_array(arena, MLIR_ValueHandle, n_cont_args) : NULL;
-    for (size_t i = 0; i < n_cont_args; ++i) {
-        if_results[i] = MLIR_CreateValueOpResult(
-            st->ctx, MLIR_INVALID_HANDLE, (uint32_t)i, result_types[i],
-            fresh_ssa_name(st), term_loc);
-    }
-
     MLIR_OpHandle if_op;
     if (is_cond_br) {
         // cf.cond_br operand 0 is the i1 condition; succs are [then, else].
         MLIR_ValueHandle cond_v = MLIR_GetOpOperand(ctx, term, 0);
-        if_op = MLIR_CreateOp(
-            st->ctx, OP_TYPE_SCF_IF,
-            NULL, 0, result_types, n_cont_args, if_results, n_cont_args,
-            &cond_v, 1, regions, 2,
-            term_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_OpSpec if_spec = {0};
+        if_spec.type = OP_TYPE_SCF_IF;
+        if_spec.operands = &cond_v;
+        if_spec.n_operands = 1;
+        if_spec.result_types = result_types;
+        if_spec.n_results = (uint32_t)n_cont_args;
+        if_spec.regions = regions;
+        if_spec.n_regions = 2;
+        if_spec.loc = term_loc;
+        if_op = MLIR_CreateOpFromSpec(st->ctx, &if_spec);
         MLIR_AppendBlockOp(st->ctx, region_entry, if_op);
     } else {
         // cf.switch: operand 0 is the i32 flag; succs are [default, case0..caseN-1].
@@ -2804,15 +2795,25 @@ static BranchXformResult transform_to_structured_cf_branches(MLIR_Context *ctx,
         // order, where succs[0] = default, succs[1..N] = cases).
         MLIR_NamedAttr cases_attr = MLIR_Named(MLIR_KEY_CASES, MLIR_CreateAttributeDenseI64Array(
             st->ctx, cases_i64, n_cases));
-        MLIR_NamedAttr *attrs = arena_new_array(arena, MLIR_NamedAttr, 1);
-        attrs[0] = cases_attr;
-
-        if_op = MLIR_CreateOp(
-            st->ctx, OP_TYPE_SCF_INDEX_SWITCH,
-            attrs, 1, result_types, n_cont_args, if_results, n_cont_args,
-            &flag, 1, regions, num_succ,
-            term_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_OpSpec sw_spec = {0};
+        sw_spec.type = OP_TYPE_SCF_INDEX_SWITCH;
+        sw_spec.operands = &flag;
+        sw_spec.n_operands = 1;
+        sw_spec.result_types = result_types;
+        sw_spec.n_results = (uint32_t)n_cont_args;
+        sw_spec.attrs = &cases_attr;
+        sw_spec.n_attrs = 1;
+        sw_spec.regions = regions;
+        sw_spec.n_regions = (uint32_t)num_succ;
+        sw_spec.loc = term_loc;
+        if_op = MLIR_CreateOpFromSpec(st->ctx, &sw_spec);
         MLIR_AppendBlockOp(st->ctx, region_entry, if_op);
+    }
+
+    MLIR_ValueHandle *if_results = n_cont_args
+        ? arena_new_array(arena, MLIR_ValueHandle, n_cont_args) : NULL;
+    for (size_t i = 0; i < n_cont_args; ++i) {
+        if_results[i] = MLIR_GetOpResult(st->ctx, if_op, i);
     }
 
     // Erase the original cf.cond_br / cf.switch.
@@ -2890,11 +2891,12 @@ static MLIR_OpHandle create_scf_condition(MLIR_Context *ctx, Arena *arena,
     MLIR_ValueHandle *operands = arena_new_array(arena, MLIR_ValueHandle, n_ops);
     operands[0] = cond;
     for (size_t i = 0; i < n_payload; ++i) operands[1 + i] = payload[i];
-    MLIR_OpHandle c = MLIR_CreateOp(
-        ctx, OP_TYPE_SCF_CONDITION,
-        NULL, 0, NULL, 0, NULL, 0,
-        operands, n_ops, NULL, 0,
-        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_OpSpec c_spec = {0};
+    c_spec.type = OP_TYPE_SCF_CONDITION;
+    c_spec.operands = operands;
+    c_spec.n_operands = (uint32_t)n_ops;
+    c_spec.loc = loc;
+    MLIR_OpHandle c = MLIR_CreateOpFromSpec(ctx, &c_spec);
     MLIR_AppendBlockOp(ctx, in_block, c);
     return c;
 }
@@ -3120,25 +3122,17 @@ static MLIR_ValueHandle get_switch_value(LiftState *st, unsigned v) {
     if (v >= st->switch_value_cache_n) st->switch_value_cache_n = v + 1;
 
     // Build `llvm.mlir.constant <v> : i32` and insert at start of entry.
-    MLIR_TypeHandle  *rt = arena_new_array(st->arena, MLIR_TypeHandle, 1);
-    rt[0] = st->i32_ty;
-    MLIR_ValueHandle r = MLIR_CreateValueOpResult(
-        st->ctx, MLIR_INVALID_HANDLE, 0, st->i32_ty,
-        fresh_ssa_name(st), st->unk_loc);
-    MLIR_ValueHandle *rs = arena_new_array(st->arena, MLIR_ValueHandle, 1);
-    rs[0] = r;
-    MLIR_NamedAttr  val = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(
+    MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(
         st->ctx, (int64_t)(int32_t)v, st->i32_ty));
-    MLIR_NamedAttr *as = arena_new_array(st->arena, MLIR_NamedAttr, 1);
-    as[0] = val;
-    MLIR_OpHandle op = MLIR_CreateOp(
-        st->ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
-        as, 1,        // attributes
-        rt, 1,        // result_types
-        rs, 1,        // results
-        NULL, 0,      // operands
-        NULL, 0,      // regions
-        st->unk_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_OpSpec cspec = {0};
+    cspec.type = OP_TYPE_LLVM_MLIR_CONSTANT;
+    cspec.result_types = &st->i32_ty;
+    cspec.n_results = 1;
+    cspec.attrs = &val;
+    cspec.n_attrs = 1;
+    cspec.loc = st->unk_loc;
+    MLIR_OpHandle op = MLIR_CreateOpFromSpec(st->ctx, &cspec);
+    MLIR_ValueHandle r = MLIR_GetOpResult(st->ctx, op, 0);
     MLIR_InsertBlockOpAtIndex(st->ctx, st->entry_block, op, 0);
     st->switch_value_cache[v] = r;
     return r;
@@ -3160,21 +3154,13 @@ static MLIR_ValueHandle get_undef_value(LiftState *st, MLIR_TypeHandle ty) {
         st->undef_cache = na;
         st->undef_cache_cap = new_cap;
     }
-    MLIR_TypeHandle  *rt = arena_new_array(st->arena, MLIR_TypeHandle, 1);
-    rt[0] = ty;
-    MLIR_ValueHandle r = MLIR_CreateValueOpResult(
-        st->ctx, MLIR_INVALID_HANDLE, 0, ty,
-        fresh_ssa_name(st), st->unk_loc);
-    MLIR_ValueHandle *rs = arena_new_array(st->arena, MLIR_ValueHandle, 1);
-    rs[0] = r;
-    MLIR_OpHandle op = MLIR_CreateOp(
-        st->ctx, OP_TYPE_LLVM_MLIR_UNDEF,
-        NULL, 0,      // attributes
-        rt, 1,        // result_types
-        rs, 1,        // results
-        NULL, 0,      // operands
-        NULL, 0,      // regions
-        st->unk_loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_OpSpec uspec = {0};
+    uspec.type = OP_TYPE_LLVM_MLIR_UNDEF;
+    uspec.result_types = &ty;
+    uspec.n_results = 1;
+    uspec.loc = st->unk_loc;
+    MLIR_OpHandle op = MLIR_CreateOpFromSpec(st->ctx, &uspec);
+    MLIR_ValueHandle r = MLIR_GetOpResult(st->ctx, op, 0);
     MLIR_InsertBlockOpAtIndex(st->ctx, st->entry_block, op, 0);
     TypedValueEntry e = { ty, r };
     st->undef_cache[st->undef_cache_n++] = e;
@@ -3196,25 +3182,12 @@ static MLIR_OpHandle create_cf_cond_br_in_block(MLIR_Context *ctx, Arena *arena,
                                                 MLIR_BlockHandle f_dst,
                                                 MLIR_ValueHandle *f_args, size_t n_f_args,
                                                 MLIR_LocationHandle loc) {
-    MLIR_ValueHandle *ops = arena_new_array(arena, MLIR_ValueHandle, 1);
-    ops[0] = cond;
-    MLIR_BlockHandle *succs = arena_new_array(arena, MLIR_BlockHandle, 2);
-    succs[0] = t_dst; succs[1] = f_dst;
-    MLIR_ValueHandle **sops = arena_new_array(arena, MLIR_ValueHandle *, 2);
-    sops[0] = t_args; sops[1] = f_args;
-    size_t *snums = arena_new_array(arena, size_t, 2);
-    snums[0] = n_t_args; snums[1] = n_f_args;
-    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
-        ctx, llvm_cfg ? OP_TYPE_LLVM_COND_BR : OP_TYPE_CF_COND_BR,
-        NULL, 0,          // attributes
-        NULL, 0,          // result_types
-        NULL, 0,          // results
-        ops, 1,           // operands (the condition)
-        NULL, 0,          // regions
-        succs, 2, sops, snums,
-        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
-    MLIR_AppendBlockOp(ctx, in_block, op);
-    return op;
+    (void)arena;
+    MLIR_Builder b = MLIR_BuilderAtEnd(ctx, in_block);
+    b.loc = loc;
+    return MLIR_BuildCondBr(&b, llvm_cfg ? OP_TYPE_LLVM_COND_BR : OP_TYPE_CF_COND_BR,
+                            cond, t_dst, t_args, (uint32_t)n_t_args,
+                            f_dst, f_args, (uint32_t)n_f_args);
 }
 
 // Emit `cf.switch %flag : i32, [ default: ^dflt(args), Vi: ^Bi(args), ... ]`
@@ -3240,37 +3213,38 @@ static MLIR_OpHandle create_cf_switch_in_block(MLIR_Context *ctx, Arena *arena,
                                                size_t *n_case_args,
                                                size_t n_cases,
                                                MLIR_LocationHandle loc) {
-    // Build successor + per-successor operand arrays:
-    //   succs[0]   = default
-    //   succs[1..] = cases
     size_t n_succ = 1 + n_cases;
     MLIR_BlockHandle *succs = arena_new_array(arena, MLIR_BlockHandle, n_succ);
-    MLIR_ValueHandle **sops = arena_new_array(arena, MLIR_ValueHandle *, n_succ);
-    size_t *snums = arena_new_array(arena, size_t, n_succ);
-    succs[0] = dflt_dst; sops[0] = dflt_args; snums[0] = n_dflt_args;
+    uint32_t *snums = arena_new_array(arena, uint32_t, n_succ);
+    succs[0] = dflt_dst;
+    snums[0] = (uint32_t)n_dflt_args;
+    size_t total_ops = 1 + n_dflt_args;
     for (size_t i = 0; i < n_cases; ++i) {
         succs[1 + i] = case_dsts[i];
-        sops[1 + i] = case_args[i];
-        snums[1 + i] = n_case_args[i];
+        snums[1 + i] = (uint32_t)n_case_args[i];
+        total_ops += n_case_args[i];
     }
-    // Operands: just the flag (the successor-operands live on
-    // succession metadata, not in the operand list).
-    MLIR_ValueHandle *ops = arena_new_array(arena, MLIR_ValueHandle, 1);
-    ops[0] = flag;
+    MLIR_ValueHandle *ops = arena_new_array(arena, MLIR_ValueHandle, total_ops);
+    size_t idx = 0;
+    ops[idx++] = flag;
+    for (size_t j = 0; j < n_dflt_args; ++j) ops[idx++] = dflt_args[j];
+    for (size_t i = 0; i < n_cases; ++i) {
+        for (size_t j = 0; j < n_case_args[i]; ++j) ops[idx++] = case_args[i][j];
+    }
     // Attribute: case_values: array<i32: V0, V1, ...>.
     MLIR_NamedAttr ca = MLIR_Named(MLIR_KEY_CASE_VALUES, MLIR_CreateAttributeDenseI32Array(
         ctx, case_values, n_cases));
-    MLIR_NamedAttr *as = arena_new_array(arena, MLIR_NamedAttr, 1);
-    as[0] = ca;
-    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
-        ctx, llvm_cfg ? OP_TYPE_LLVM_SWITCH : OP_TYPE_CF_SWITCH,
-        as, 1,            // attributes
-        NULL, 0,          // result_types
-        NULL, 0,          // results
-        ops, 1,           // operands (the flag)
-        NULL, 0,          // regions
-        succs, n_succ, sops, snums,
-        loc, MLIR_INVALID_HANDLE, str_lit(""), -1);
+    MLIR_OpSpec sw_spec = {0};
+    sw_spec.type = llvm_cfg ? OP_TYPE_LLVM_SWITCH : OP_TYPE_CF_SWITCH;
+    sw_spec.operands = ops;
+    sw_spec.n_operands = (uint32_t)total_ops;
+    sw_spec.attrs = &ca;
+    sw_spec.n_attrs = 1;
+    sw_spec.successors = succs;
+    sw_spec.n_successors = (uint32_t)n_succ;
+    sw_spec.successor_operand_counts = snums;
+    sw_spec.loc = loc;
+    MLIR_OpHandle op = MLIR_CreateOpFromSpec(ctx, &sw_spec);
     MLIR_AppendBlockOp(ctx, in_block, op);
     return op;
 }

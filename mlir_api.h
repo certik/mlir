@@ -302,48 +302,173 @@ static inline MLIR_NamedAttr MLIR_Named(MLIR_AttrKey key, MLIR_AttributeHandle v
 }
 
 // -----------------------------------------------------------------------------
+// Op specification & Builder API (doc/mlir_api_design.md section 2.7)
+// -----------------------------------------------------------------------------
+
+typedef struct MLIR_OpSpec {
+    MLIR_OpType              type;
+    const MLIR_ValueHandle  *operands;                  // regular operands, then successor 0, 1, ... (flat, D5)
+    uint32_t                 n_operands;
+    const MLIR_TypeHandle   *result_types;              // results are created by the op
+    uint32_t                 n_results;
+    const MLIR_NamedAttr    *attrs;
+    uint32_t                 n_attrs;
+    uint32_t                 n_regions;                 // fresh empty regions...
+    const MLIR_RegionHandle *regions;                   // ...or, if non-NULL, adopt these n_regions
+    const MLIR_BlockHandle  *successors;
+    uint32_t                 n_successors;
+    const uint32_t          *successor_operand_counts;  // n_successors entries; NULL = all 0
+    MLIR_LocationHandle      loc;                       // MLIR_INVALID_HANDLE = unknown / builder default
+} MLIR_OpSpec;
+
+// Create a detached op from `spec`. Results are created from `spec->result_types`
+// (retrieved with MLIR_GetOpResult). If `spec->regions` is NULL and
+// `spec->n_regions > 0`, fresh empty regions are created (retrieved with
+// MLIR_GetOpRegion).
+MLIR_OpHandle MLIR_CreateOpFromSpec(MLIR_Context *ctx, const MLIR_OpSpec *spec);
+
+// Structural insertion: detaches `op` from its current block (if any) and
+// inserts it into `block` immediately before `before`, or at the end of
+// `block` if `before == MLIR_INVALID_HANDLE`.
+void MLIR_InsertOpBefore(MLIR_Context *ctx, MLIR_BlockHandle block,
+                         MLIR_OpHandle op, MLIR_OpHandle before);
+
+// Returns the [first, first + count) slice of `op`'s flat operand list that
+// belongs to successor `succ`.
+void MLIR_GetOpSuccessorOperandRange(MLIR_Context *ctx, MLIR_OpHandle op,
+                                     size_t succ, size_t *first, size_t *count);
+
+// Insertion point: before `before`, or at the end of `block` if `before` is
+// MLIR_INVALID_HANDLE.
+typedef struct MLIR_Builder {
+    MLIR_Context       *ctx;
+    MLIR_BlockHandle    block;
+    MLIR_OpHandle       before;
+    MLIR_LocationHandle loc;     // default location when spec->loc is MLIR_INVALID_HANDLE
+} MLIR_Builder;
+
+MLIR_BlockHandle MLIR_GetOpParentBlock(MLIR_Context *ctx, MLIR_OpHandle op);
+MLIR_ValueHandle MLIR_GetOpResult(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx);
+MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *ctx, int64_t value, MLIR_TypeHandle type);
+MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, double value, MLIR_TypeHandle type);
+
+static inline MLIR_Builder MLIR_BuilderAtEnd(MLIR_Context *ctx, MLIR_BlockHandle block) {
+    MLIR_Builder b;
+    b.ctx = ctx;
+    b.block = block;
+    b.before = MLIR_INVALID_HANDLE;
+    b.loc = MLIR_INVALID_HANDLE;
+    return b;
+}
+
+static inline MLIR_Builder MLIR_BuilderBefore(MLIR_Context *ctx, MLIR_OpHandle op) {
+    MLIR_Builder b;
+    b.ctx = ctx;
+    b.block = MLIR_GetOpParentBlock(ctx, op);
+    b.before = op;
+    b.loc = MLIR_INVALID_HANDLE;
+    return b;
+}
+
+MLIR_Builder MLIR_BuilderAfter(MLIR_Context *ctx, MLIR_OpHandle op);
+
+// Create an op from `spec` (using `b->loc` if `spec->loc == MLIR_INVALID_HANDLE`)
+// and insert it at `b`'s insertion point.
+MLIR_OpHandle MLIR_BuildOp(MLIR_Builder *b, const MLIR_OpSpec *spec);
+
+static inline MLIR_ValueHandle MLIR_BuildBinary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y) {
+    MLIR_ValueHandle ops[2];
+    ops[0] = x;
+    ops[1] = y;
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = ops;
+    s.n_operands = 2;
+    s.result_types = &rt;
+    s.n_results = 1;
+    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
+}
+
+static inline MLIR_ValueHandle MLIR_BuildUnary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x) {
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = &x;
+    s.n_operands = 1;
+    s.result_types = &rt;
+    s.n_results = 1;
+    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
+}
+
+static inline MLIR_ValueHandle MLIR_BuildConstantInt(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, int64_t v) {
+    MLIR_NamedAttr attr = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(b->ctx, v, rt));
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.result_types = &rt;
+    s.n_results = 1;
+    s.attrs = &attr;
+    s.n_attrs = 1;
+    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
+}
+
+static inline MLIR_ValueHandle MLIR_BuildConstantFloat(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, double v) {
+    MLIR_NamedAttr attr = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeFloat(b->ctx, v, rt));
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.result_types = &rt;
+    s.n_results = 1;
+    s.attrs = &attr;
+    s.n_attrs = 1;
+    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
+}
+
+static inline MLIR_OpHandle MLIR_BuildBr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_BlockHandle dest, const MLIR_ValueHandle *args, uint32_t n) {
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = args;
+    s.n_operands = n;
+    s.successors = &dest;
+    s.n_successors = 1;
+    s.successor_operand_counts = &n;
+    return MLIR_BuildOp(b, &s);
+}
+
+static inline MLIR_OpHandle MLIR_BuildCondBr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_ValueHandle cond,
+        MLIR_BlockHandle t_dest, const MLIR_ValueHandle *t_args, uint32_t n_t,
+        MLIR_BlockHandle f_dest, const MLIR_ValueHandle *f_args, uint32_t n_f) {
+    MLIR_BlockHandle succs[2];
+    succs[0] = t_dest;
+    succs[1] = f_dest;
+    uint32_t counts[2];
+    counts[0] = n_t;
+    counts[1] = n_f;
+    MLIR_ValueHandle stack_ops[16];
+    uint32_t total = 1 + n_t + n_f;
+    MLIR_ValueHandle *ops = (total <= 16)
+        ? stack_ops
+        : (MLIR_ValueHandle *)arena_alloc(MLIR_GetArenaAllocator(b->ctx), total * sizeof(MLIR_ValueHandle));
+    ops[0] = cond;
+    for (uint32_t i = 0; i < n_t; i++) ops[1 + i] = t_args[i];
+    for (uint32_t i = 0; i < n_f; i++) ops[1 + n_t + i] = f_args[i];
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = ops;
+    s.n_operands = total;
+    s.successors = succs;
+    s.n_successors = 2;
+    s.successor_operand_counts = counts;
+    return MLIR_BuildOp(b, &s);
+}
+
+// -----------------------------------------------------------------------------
 // Operation API
 // -----------------------------------------------------------------------------
 
-// Creation & structural mutation
-//
-// `type` is the op's identity: a static type, or a dynamic type of `ctx`
-// (MLIR_RegisterOpType) for any other op name. It must not be
-// OP_TYPE_UNREGISTERED. MLIR_API_CHECKS catches a value that is not a type
-// of `ctx`; a dynamic type of another context is caught only when its value
-// is beyond the types `ctx` has, because the values are per-context
-// counters.
-MLIR_OpHandle MLIR_CreateOp(
-    MLIR_Context *ctx,
-    MLIR_OpType type,
-    const MLIR_NamedAttr *attributes, size_t n_attributes,
-    MLIR_TypeHandle *result_types, size_t n_result_types,
-    MLIR_ValueHandle *results, size_t n_results,
-    MLIR_ValueHandle *operands, size_t n_operands,
-    MLIR_RegionHandle *regions, size_t n_regions,
-    MLIR_LocationHandle location,
-    MLIR_LocationHandle unnumbered_loc_def,
-    string trailing_comment,
-    int64_t source_line_start);
-// Like MLIR_CreateOp, but with explicit successor blocks and per-successor
-// operand arrays. Used by branch ops (cf.br, cf.cond_br, ...). The successor
-// blocks must be valid block handles (forward-referenced blocks are fine as
-// long as MLIR_CreateBlock has been called for them).
-MLIR_OpHandle MLIR_CreateOpWithSuccessors(
-    MLIR_Context *ctx,
-    MLIR_OpType type,
-    const MLIR_NamedAttr *attributes, size_t n_attributes,
-    MLIR_TypeHandle *result_types, size_t n_result_types,
-    MLIR_ValueHandle *results, size_t n_results,
-    MLIR_ValueHandle *operands, size_t n_operands,
-    MLIR_RegionHandle *regions, size_t n_regions,
-    MLIR_BlockHandle *successors, size_t n_successors,
-    MLIR_ValueHandle **successor_operands,
-    size_t *n_successor_operands,
-    MLIR_LocationHandle location,
-    MLIR_LocationHandle unnumbered_loc_def,
-    string trailing_comment,
-    int64_t source_line_start);
 // Sets the attribute `key` of `op` to `value`: replaces the value if the op
 // has the key, else appends it.
 void MLIR_SetOpAttr(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key, MLIR_AttributeHandle value);
@@ -410,13 +535,7 @@ typedef enum MLIR_ValueKind {
 } MLIR_ValueKind;
 
 // Creation
-//
-// The `results` of an op must be consecutive values: created one after
-// another by MLIR_CreateValueOpResult (no other value created in between),
-// or the results of one earlier op, in order. The native backend stores
-// result i at first_result + i. Checked with MLIR_API_CHECKS.
 MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_name, uint32_t result_index, MLIR_TypeHandle type, MLIR_LocationHandle location);
-MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_Context *ctx, MLIR_OpHandle def, uint32_t result_index, MLIR_TypeHandle type, string register_name, MLIR_LocationHandle location);
 
 // Accessors
 MLIR_ValueKind MLIR_GetValueKind(MLIR_Context *ctx, MLIR_ValueHandle value);

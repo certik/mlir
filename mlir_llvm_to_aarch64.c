@@ -55,10 +55,11 @@ static MLIR_NamedAttr attr_b(MLIR_Context *ctx, MLIR_AttrKey key, bool v) {
 
 static MLIR_OpHandle build_op(MLIR_Context *ctx, MLIR_OpType t,
                               MLIR_NamedAttr *attrs, size_t na) {
-    return MLIR_CreateOp(ctx, t,
-        attrs, na, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec spec = {0};
+    spec.type = t;
+    spec.attrs = attrs;
+    spec.n_attrs = (uint32_t)na;
+    return MLIR_CreateOpFromSpec(ctx, &spec);
 }
 
 static void emit_movz(MLIR_Context *ctx, MLIR_BlockHandle blk,
@@ -405,14 +406,13 @@ static void emit_epilogue(MLIR_Context *ctx, MLIR_BlockHandle blk, uint32_t fs) 
 static MLIR_OpHandle build_branch_op(MLIR_Context *ctx, MLIR_OpType t,
                                      MLIR_NamedAttr *attrs, size_t na,
                                      MLIR_BlockHandle target) {
-    MLIR_BlockHandle succs[1] = { target };
-    MLIR_ValueHandle *succ_ops[1] = { NULL };
-    size_t           n_succ_ops[1] = { 0 };
-    return MLIR_CreateOpWithSuccessors(ctx, t,
-        attrs, na, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
-        succs, 1, succ_ops, n_succ_ops,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec spec = {0};
+    spec.type = t;
+    spec.attrs = attrs;
+    spec.n_attrs = (uint32_t)na;
+    spec.successors = &target;
+    spec.n_successors = 1;
+    return MLIR_CreateOpFromSpec(ctx, &spec);
 }
 static void emit_b(MLIR_Context *ctx, MLIR_BlockHandle blk,
                    MLIR_BlockHandle target) {
@@ -3455,10 +3455,13 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
     MLIR_NamedAttr attrs[1];
     attrs[0] = attr_s(ctx, MLIR_KEY_SYM_NAME, sym.str, sym.size);
     MLIR_RegionHandle regs[1] = { out_reg };
-    return MLIR_CreateOp(ctx, OP_TYPE_AARCH64_FUNC,
-        attrs, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec spec = {0};
+    spec.type = OP_TYPE_AARCH64_FUNC;
+    spec.attrs = attrs;
+    spec.n_attrs = 1;
+    spec.regions = regs;
+    spec.n_regions = 1;
+    return MLIR_CreateOpFromSpec(ctx, &spec);
 }
 
 // line code in a single block (no control flow). Uses the trivial
@@ -3551,10 +3554,13 @@ static MLIR_OpHandle select_func(MLIR_Context *ctx, MLIR_OpHandle fn,
     MLIR_NamedAttr attrs[1];
     attrs[0] = attr_s(ctx, MLIR_KEY_SYM_NAME, sym.str, sym.size);
     MLIR_RegionHandle regs[1] = { out_reg };
-    return MLIR_CreateOp(ctx, OP_TYPE_AARCH64_FUNC,
-        attrs, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec spec = {0};
+    spec.type = OP_TYPE_AARCH64_FUNC;
+    spec.attrs = attrs;
+    spec.n_attrs = 1;
+    spec.regions = regs;
+    spec.n_regions = 1;
+    return MLIR_CreateOpFromSpec(ctx, &spec);
 }
 
 // Synthesise `_start`: initialise pointer globals (PC-relative, so they work
@@ -3669,10 +3675,13 @@ static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name,
     attrs[0] = attr_s(ctx, MLIR_KEY_SYM_NAME, "_start", 6);
     attrs[1] = attr_b(ctx, MLIR_KEY_EXPORTED, true);
     MLIR_RegionHandle regs[1] = { reg };
-    return MLIR_CreateOp(ctx, OP_TYPE_AARCH64_FUNC,
-        attrs, 2, NULL, 0, NULL, 0, NULL, 0, regs, 1,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec spec = {0};
+    spec.type = OP_TYPE_AARCH64_FUNC;
+    spec.attrs = attrs;
+    spec.n_attrs = 2;
+    spec.regions = regs;
+    spec.n_regions = 1;
+    return MLIR_CreateOpFromSpec(ctx, &spec);
 }
 
 // ---------------------------------------------------------------------------
@@ -3816,10 +3825,11 @@ MLIR_OpHandle mlir_llvm_to_aarch64(MLIR_Context *ctx,
     }
 
     MLIR_RegionHandle regs[1] = { out_region };
-    return MLIR_CreateOp(ctx, OP_TYPE_MODULE,
-        NULL, 0, NULL, 0, NULL, 0, NULL, 0, regs, 1,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec mod_spec = {0};
+    mod_spec.type = OP_TYPE_MODULE;
+    mod_spec.regions = regs;
+    mod_spec.n_regions = 1;
+    return MLIR_CreateOpFromSpec(ctx, &mod_spec);
 }
 
 // ===========================================================================

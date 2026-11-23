@@ -203,10 +203,13 @@ static void st_free(Stack *s) { free(s->data); s->data = NULL; s->n = s->cap = 0
 static MLIR_OpHandle build_op_no_res(MLIR_Context *ctx, MLIR_OpType t,
                                      MLIR_NamedAttr *attrs, size_t na,
                                      MLIR_ValueHandle *operands, size_t no) {
-    return MLIR_CreateOp(ctx, t,
-        attrs, na, NULL, 0, NULL, 0, operands, no, NULL, 0,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec spec = {0};
+    spec.type = t;
+    spec.operands = operands;
+    spec.n_operands = (uint32_t)no;
+    spec.attrs = attrs;
+    spec.n_attrs = (uint32_t)na;
+    return MLIR_CreateOpFromSpec(ctx, &spec);
 }
 
 static MLIR_OpHandle build_op_1res(MLIR_Context *ctx, MLIR_OpType t,
@@ -215,15 +218,16 @@ static MLIR_OpHandle build_op_1res(MLIR_Context *ctx, MLIR_OpType t,
                                    MLIR_TypeHandle result_ty,
                                    MLIR_ValueHandle *out_result) {
     MLIR_TypeHandle rts[1] = { result_ty };
-    MLIR_ValueHandle rvs[1];
-    rvs[0] = MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0,
-        result_ty, (string){0},
-        MLIR_CreateLocationUnknown(ctx, (string){0}));
-    MLIR_OpHandle op = MLIR_CreateOp(ctx, t,
-        attrs, na, rts, 1, rvs, 1, operands, no, NULL, 0,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
-    *out_result = rvs[0];
+    MLIR_OpSpec spec = {0};
+    spec.type = t;
+    spec.operands = operands;
+    spec.n_operands = (uint32_t)no;
+    spec.result_types = rts;
+    spec.n_results = 1;
+    spec.attrs = attrs;
+    spec.n_attrs = (uint32_t)na;
+    MLIR_OpHandle op = MLIR_CreateOpFromSpec(ctx, &spec);
+    *out_result = MLIR_GetOpResult(ctx, op, 0);
     return op;
 }
 
@@ -233,11 +237,21 @@ static MLIR_OpHandle build_op_region(MLIR_Context *ctx, MLIR_OpType t,
                                      MLIR_RegionHandle *regions, size_t nr,
                                      MLIR_TypeHandle *res_tys,
                                      MLIR_ValueHandle *res_vals, size_t nres) {
-    return MLIR_CreateOp(ctx, t,
-        attrs, na, res_tys, nres, res_vals, nres,
-        operands, no, regions, nr,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec spec = {0};
+    spec.type = t;
+    spec.operands = operands;
+    spec.n_operands = (uint32_t)no;
+    spec.result_types = res_tys;
+    spec.n_results = (uint32_t)nres;
+    spec.attrs = attrs;
+    spec.n_attrs = (uint32_t)na;
+    spec.regions = regions;
+    spec.n_regions = (uint32_t)nr;
+    MLIR_OpHandle op = MLIR_CreateOpFromSpec(ctx, &spec);
+    if (res_vals) {
+        for (size_t i = 0; i < nres; i++) res_vals[i] = MLIR_GetOpResult(ctx, op, i);
+    }
+    return op;
 }
 
 
@@ -417,9 +431,6 @@ static MLIR_OpHandle finalize_frame(FnCtx *F, Frame *f,
     MLIR_ValueHandle res_vals[1];
     if (n_res) {
         res_ty[0] = vt_to_type(F->ctx, f->rtype_byte);
-        res_vals[0] = MLIR_CreateValueOpResult(F->ctx, MLIR_INVALID_HANDLE, 0,
-            res_ty[0], (string){0},
-            MLIR_CreateLocationUnknown(F->ctx, (string){0}));
     }
 
     // Build result_types attr (hex-encoded) if non-empty.
@@ -1401,10 +1412,13 @@ static MLIR_OpHandle lift_func(MLIR_Context *ctx, Arena *arena,
     MLIR_RegionHandle region = MLIR_CreateRegion(ctx);
     MLIR_AppendRegionBlock(ctx, region, entry);
     MLIR_RegionHandle regs[1] = { region };
-    return MLIR_CreateOp(ctx, OP_TYPE_WASMSSA_FUNC,
-        attrs, na, NULL, 0, NULL, 0, NULL, 0, regs, 1,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec fn_spec = {0};
+    fn_spec.type = OP_TYPE_WASMSSA_FUNC;
+    fn_spec.attrs = attrs;
+    fn_spec.n_attrs = (uint32_t)na;
+    fn_spec.regions = regs;
+    fn_spec.n_regions = 1;
+    return MLIR_CreateOpFromSpec(ctx, &fn_spec);
 }
 
 // =============================================================================
@@ -1421,10 +1435,7 @@ static MLIR_OpHandle lift_import_func(MLIR_Context *ctx, MLIR_OpHandle src) {
     attrs[na++] = attr_s(ctx, MLIR_KEY_PARAM_TYPES, pt_s.str, pt_s.size);
     attrs[na++] = attr_s(ctx, MLIR_KEY_RESULT_TYPES, rt_s.str, rt_s.size);
     attrs[na++] = attr_b(ctx, MLIR_KEY_EXPORTED, exported);
-    return MLIR_CreateOp(ctx, OP_TYPE_WASMSSA_IMPORT_FUNC,
-        attrs, na, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    return build_op_no_res(ctx, OP_TYPE_WASMSSA_IMPORT_FUNC, attrs, na, NULL, 0);
 }
 
 // =============================================================================
@@ -1440,10 +1451,7 @@ static MLIR_OpHandle synth_to_import(MLIR_Context *ctx, MLIR_OpHandle src) {
     attrs[na++] = attr_s(ctx, MLIR_KEY_PARAM_TYPES, pt_s.str, pt_s.size);
     attrs[na++] = attr_s(ctx, MLIR_KEY_RESULT_TYPES, rt_s.str, rt_s.size);
     attrs[na++] = attr_b(ctx, MLIR_KEY_EXPORTED, false);
-    return MLIR_CreateOp(ctx, OP_TYPE_WASMSSA_IMPORT_FUNC,
-        attrs, na, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    return build_op_no_res(ctx, OP_TYPE_WASMSSA_IMPORT_FUNC, attrs, na, NULL, 0);
 }
 
 // =============================================================================
@@ -1472,10 +1480,7 @@ static MLIR_OpHandle lift_data_segment(MLIR_Context *ctx, MLIR_OpHandle src,
     attrs[na++] = attr_s(ctx, MLIR_KEY_INIT_DATA, id.str, id.size);
     attrs[na++] = attr_s(ctx, MLIR_KEY_RELOCS, "", 0);
     attrs[na++] = attr_i32(ctx, MLIR_KEY_FIXED_OFFSET, off);
-    return MLIR_CreateOp(ctx, OP_TYPE_WASMSSA_IMPORT_GLOBAL,
-        attrs, na, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    return build_op_no_res(ctx, OP_TYPE_WASMSSA_IMPORT_GLOBAL, attrs, na, NULL, 0);
 }
 
 // =============================================================================
@@ -1523,10 +1528,13 @@ MLIR_OpHandle mlir_wasmstack_to_wasmssa(MLIR_Context *ctx,
         break;
     }
 
-    MLIR_OpHandle out_module = MLIR_CreateOp(ctx, OP_TYPE_MODULE,
-        mod_attrs, n_mod_attrs, NULL, 0, NULL, 0, NULL, 0, out_regs, 1,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec mod_spec = {0};
+    mod_spec.type = OP_TYPE_MODULE;
+    mod_spec.attrs = mod_attrs;
+    mod_spec.n_attrs = (uint32_t)n_mod_attrs;
+    mod_spec.regions = out_regs;
+    mod_spec.n_regions = 1;
+    MLIR_OpHandle out_module = MLIR_CreateOpFromSpec(ctx, &mod_spec);
 
     // First pass: rewrite the sibling block so that synth-helper bodies
     // get replaced with import_funcs IN-PLACE before we lift. That way
@@ -1631,10 +1639,13 @@ MLIR_OpHandle mlir_wasmstack_to_wasmssa(MLIR_Context *ctx,
         fas[3] = attr_b(ctx, MLIR_KEY_EXPORTED, false);
         fas[4] = attr_b(ctx, MLIR_KEY_INTERNAL, true);
 
-        MLIR_OpHandle fop = MLIR_CreateOp(ctx, OP_TYPE_WASMSSA_FUNC,
-            fas, 5, NULL, 0, NULL, 0, NULL, 0, regs, 1,
-            MLIR_CreateLocationUnknown(ctx, (string){0}),
-            MLIR_INVALID_HANDLE, (string){0}, -1);
+        MLIR_OpSpec fspec = {0};
+        fspec.type = OP_TYPE_WASMSSA_FUNC;
+        fspec.attrs = fas;
+        fspec.n_attrs = 5;
+        fspec.regions = regs;
+        fspec.n_regions = 1;
+        MLIR_OpHandle fop = MLIR_CreateOpFromSpec(ctx, &fspec);
         MLIR_AppendBlockOp(ctx, out_body, fop);
     }
     free(elems);
