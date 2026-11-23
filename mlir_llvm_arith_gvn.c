@@ -69,7 +69,6 @@ static void agkb_bytes(AgKB *k, const char *b, size_t n) {
 }
 static void agkb_u64(AgKB *k, uint64_t v) { agkb_bytes(k, (char *)&v, sizeof(v)); }
 static void agkb_i64(AgKB *k, int64_t v)  { agkb_bytes(k, (char *)&v, sizeof(v)); }
-static void agkb_str(AgKB *k, string s)   { agkb_bytes(k, s.str, s.size); agkb_bytes(k, "\0", 1); }
 
 typedef struct { uint64_t hash; size_t koff, klen; int64_t leader; } AgEnt;
 typedef struct {
@@ -189,35 +188,6 @@ static void ag_emit_operand(AgKB *k, MLIR_Context *ctx, AgMap *repl, MLIR_ValueH
     }
 }
 
-// The value of attribute `a` for hashing, read with the getter that matches
-// its kind (a typed getter applied to another kind is a contract violation).
-// Strings are covered by MLIR_GetAttributeAsString; arrays and dictionaries,
-// whose contents are not hashed, by identity, which never merges two
-// different ones.
-static int64_t ag_attr_payload(MLIR_Context *ctx, MLIR_AttributeHandle a, MLIR_AttrKind kind) {
-    switch (kind) {
-        case MLIR_ATTR_KIND_INTEGER:
-        case MLIR_ATTR_KIND_BOOL:
-            return MLIR_GetAttributeInteger(ctx, a);
-        case MLIR_ATTR_KIND_FLOAT: {
-            double d = MLIR_GetAttributeFloat(ctx, a);
-            int64_t bits;
-            memcpy(&bits, &d, sizeof(bits));
-            return bits;
-        }
-        case MLIR_ATTR_KIND_TYPE:
-            return (int64_t)(uintptr_t)MLIR_GetAttributeTypeValue(ctx, a);
-        case MLIR_ATTR_KIND_STRING:
-            return 0;
-        case MLIR_ATTR_KIND_ARRAY:
-            return MLIR_GetAttributeArraySize(ctx, a) == 0 ? 0 : (int64_t)(uintptr_t)a;
-        case MLIR_ATTR_KIND_DICT:
-            return MLIR_GetAttributeDictSize(ctx, a) == 0 ? 0 : (int64_t)(uintptr_t)a;
-        default:
-            return (int64_t)(uintptr_t)a;
-    }
-}
-
 static void ag_emit_op_ident(AgKB *k, MLIR_Context *ctx, MLIR_OpHandle op) {
     agkb_u64(k, (uint64_t)MLIR_GetOpType(ctx, op));
     size_t na = MLIR_GetOpNumAttributes(ctx, op);
@@ -225,10 +195,8 @@ static void ag_emit_op_ident(AgKB *k, MLIR_Context *ctx, MLIR_OpHandle op) {
     for (size_t i = 0; i < na; i++) {
         MLIR_AttributeHandle a = MLIR_GetOpAttribute(ctx, op, i);
         agkb_u64(k, MLIR_GetOpAttributeKey(ctx, op, i));
-        MLIR_AttrKind kind = MLIR_GetAttributeKind(ctx, a);
-        agkb_u64(k, (uint64_t)kind);
-        agkb_i64(k, ag_attr_payload(ctx, a, kind));
-        agkb_str(k, MLIR_GetAttributeAsString(ctx, a));
+        // Attributes are uniqued: equal values are equal handles.
+        agkb_u64(k, (uint64_t)a);
     }
 }
 
