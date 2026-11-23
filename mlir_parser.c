@@ -101,14 +101,20 @@ static uint32_t parse_uint32_from_string(string s) {
     return value;
 }
 
-static MLIR_TypeHandle parse_tensor_like_type(MLIR_Context *ctx, string content, bool is_tensor) {
+// tensor<...>, memref<...> or (is_vector) vector<...>.
+static MLIR_TypeHandle parse_tensor_like_type(MLIR_Context *ctx, string content, bool is_tensor,
+                                              bool is_vector) {
     int last_x_pos = -1;
     int bracket_depth = 0;
     for (int i = (int)content.size - 1; i >= 0; i--) {
         char c = content.str[i];
         if (c == '>') bracket_depth++;
         else if (c == '<') bracket_depth--;
-        else if (c == 'x' && bracket_depth == 0) {
+        else if (c == 'x' && bracket_depth == 0 && i > 0 &&
+                 ((content.str[i - 1] >= '0' && content.str[i - 1] <= '9') ||
+                  content.str[i - 1] == '?')) {
+            // A dimension separator follows a size or `?` (the `x` of an
+            // element type such as `index` does not).
             last_x_pos = i;
             break;
         }
@@ -147,6 +153,9 @@ static MLIR_TypeHandle parse_tensor_like_type(MLIR_Context *ctx, string content,
                 pos = next + 1;
             }
 
+            if (is_vector) {
+                return MLIR_CreateTypeVector(ctx, dims, rank, element_type);
+            }
             if (is_tensor) {
                 return MLIR_CreateTypeTensor(ctx, dims, rank, element_type);
             }
@@ -155,6 +164,10 @@ static MLIR_TypeHandle parse_tensor_like_type(MLIR_Context *ctx, string content,
     }
 
     MLIR_TypeHandle elem_fallback = mlir_type_create_from_string(ctx, string_trim_whitespace(content));
+    if (is_vector) {
+        // A vector has at least one dimension.
+        return MLIR_CreateTypeOpaque(ctx, content);
+    }
     if (is_tensor) {
         return MLIR_CreateTypeTensor(ctx, MLIR_INVALID_HANDLE, 0, elem_fallback);
     }
@@ -251,17 +264,23 @@ MLIR_TypeHandle mlir_type_create_from_string(MLIR_Context *ctx, string type_str)
     if (type.size >= 6 && str_eq(str_substr(type, 0, 6), str_lit("tensor"))) {
         if (type.size > 7 && type.str[6] == '<' && type.str[type.size - 1] == '>') {
             string content = str_substr(type, 7, type.size - 8);
-            return parse_tensor_like_type(ctx, content, true);
+            return parse_tensor_like_type(ctx, content, true, false);
         }
 
         MLIR_TypeHandle default_elem = mlir_type_create_from_string(ctx, str_lit("f32"));
         return MLIR_CreateTypeTensor(ctx, MLIR_INVALID_HANDLE, 0, default_elem);
     }
 
+    if (type.size > 8 && str_eq(str_substr(type, 0, 7), str_lit("vector<")) &&
+        type.str[type.size - 1] == '>') {
+        string content = str_substr(type, 7, type.size - 8);
+        return parse_tensor_like_type(ctx, content, false, true);
+    }
+
     if (type.size >= 6 && str_eq(str_substr(type, 0, 6), str_lit("memref"))) {
         if (type.size > 7 && type.str[6] == '<' && type.str[type.size - 1] == '>') {
             string content = str_substr(type, 7, type.size - 8);
-            return parse_tensor_like_type(ctx, content, false);
+            return parse_tensor_like_type(ctx, content, false, false);
         }
         return MLIR_CreateTypeMemref(ctx, MLIR_INVALID_HANDLE, 0, MLIR_INVALID_HANDLE);
     }
