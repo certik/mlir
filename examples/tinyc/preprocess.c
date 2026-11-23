@@ -66,7 +66,7 @@ typedef struct {
 DEFINE_VECTOR_FOR_TYPE(PPTok, VecPPTok)
 
 // ----------------------------------------------------------------------
-// Macro table (linked list)
+// Macro table (open-addressing hash table of identifier names)
 // ----------------------------------------------------------------------
 
 typedef struct Macro Macro;
@@ -78,11 +78,22 @@ struct Macro {
     size_t   n_params;
     PPTok   *body;       // arena-allocated; n_body entries
     size_t   n_body;
-    bool     is_predefined_file; // __FILE__: dynamic
-    bool     is_predefined_line; // __LINE__: dynamic
     bool     expanding;          // currently-expanding flag (no self-recursion)
-    Macro   *next;
 };
+
+// One slot per identifier name ever defined (or predefined). A slot is never
+// removed: `#undef` just clears `macro`, so probing needs no tombstones.
+// `special` marks the names expand_tokens() replaces before any macro lookup.
+#define PP_SPECIAL_NONE 0
+#define PP_SPECIAL_FILE 1
+#define PP_SPECIAL_LINE 2
+
+typedef struct {
+    string   name;      // name.str == NULL: empty slot
+    uint32_t hash;
+    int      special;   // PP_SPECIAL_*
+    Macro   *macro;     // NULL: not currently defined
+} MacroSlot;
 
 // ----------------------------------------------------------------------
 // State
@@ -95,10 +106,15 @@ typedef struct PathNode {
 
 typedef struct {
     Arena    *arena;
-    Macro    *macros;
+    MacroSlot *mtab;             // macro_cap slots, a power of two
+    size_t    macro_cap;
+    size_t    macro_used;        // occupied slots
     string   *include_dirs;
     size_t    n_include_dirs;
     PathNode *pragma_once;       // files that emitted `#pragma once`
+    // collect_args() gathers argument tokens here (reused, only grows).
+    PPTok    *arg_buf;
+    size_t    arg_buf_cap;
     // Output text buffer (grown geometrically).
     char     *out;
     size_t    out_size;
@@ -142,7 +158,9 @@ static void out_grow(PP *pp, size_t need) {
 
 static void out_append(PP *pp, string s) {
     out_grow(pp, s.size);
-    if (s.size) memcpy(pp->out + pp->out_size, s.str, s.size);
+    // Tokens are a few bytes: a plain loop beats a memcpy call.
+    char *d = pp->out + pp->out_size;
+    for (size_t k = 0; k < s.size; k++) d[k] = s.str[k];
     pp->out_size += s.size;
 }
 
@@ -212,7 +230,8 @@ static bool pp_is_alnum(char c) { return pp_is_alpha(c) || pp_is_digit(c); }
 // Tokenize `src` into PP tokens. Comments are dropped. Newlines become
 // PP_NEWLINE tokens (one per source newline, even adjacent ones — needed
 // to keep #line tracking accurate). `has_space` is set when whitespace
-// (excluding newlines) preceded the token.
+// (excluding newlines) preceded the token. Token text points into `src`,
+// which must outlive the tokens (it is never modified).
 static void pp_tokenize(Arena *arena, string src, string file, VecPPTok *out) {
     int line = 1;
     size_t i = 0;
@@ -281,7 +300,7 @@ static void pp_tokenize(Arena *arena, string src, string file, VecPPTok *out) {
             }
             if (j < src.size) j++;
             t.kind = PP_STRING;
-            t.text = s_dup_cstr(arena, src.str + i, j - i);
+            t.text = (string){src.str + i, j - i};
             VecPPTok_push_back(arena, out, t);
             i = j;
             sol = false;
@@ -296,7 +315,7 @@ static void pp_tokenize(Arena *arena, string src, string file, VecPPTok *out) {
             }
             if (j < src.size) j++;
             t.kind = PP_CHAR;
-            t.text = s_dup_cstr(arena, src.str + i, j - i);
+            t.text = (string){src.str + i, j - i};
             VecPPTok_push_back(arena, out, t);
             i = j;
             sol = false;
@@ -318,7 +337,7 @@ static void pp_tokenize(Arena *arena, string src, string file, VecPPTok *out) {
                 break;
             }
             t.kind = PP_NUMBER;
-            t.text = s_dup_cstr(arena, src.str + i, j - i);
+            t.text = (string){src.str + i, j - i};
             VecPPTok_push_back(arena, out, t);
             i = j;
             sol = false;
@@ -329,7 +348,7 @@ static void pp_tokenize(Arena *arena, string src, string file, VecPPTok *out) {
             size_t j = i + 1;
             while (j < src.size && pp_is_alnum(src.str[j])) j++;
             t.kind = PP_IDENT;
-            t.text = s_dup_cstr(arena, src.str + i, j - i);
+            t.text = (string){src.str + i, j - i};
             VecPPTok_push_back(arena, out, t);
             i = j;
             sol = false;
@@ -382,8 +401,7 @@ static void pp_tokenize(Arena *arena, string src, string file, VecPPTok *out) {
             }
         }
         t.kind = PP_PUNCT;
-        if (match) t.text = s_dup_cstr(arena, src.str + i, mlen);
-        else       t.text = s_dup_cstr(arena, src.str + i, 1);
+        t.text = (string){src.str + i, mlen};
         VecPPTok_push_back(arena, out, t);
         i += mlen;
         sol = false;
@@ -407,28 +425,84 @@ static void pp_tokenize(Arena *arena, string src, string file, VecPPTok *out) {
 // Macro table operations
 // ----------------------------------------------------------------------
 
-static Macro *macro_lookup(PP *pp, string name) {
-    for (Macro *m = pp->macros; m; m = m->next) {
-        if (str_eq(m->name, name)) return m;
+// FNV-1a.
+static uint32_t pp_hash(string s) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < s.size; i++) {
+        h ^= (uint32_t)(unsigned char)s.str[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static bool pp_str_eq(string a, string b) {
+    return a.size == b.size && (a.str == b.str || memcmp(a.str, b.str, a.size) == 0);
+}
+
+// The slot holding `name`, or NULL.
+static MacroSlot *macro_find_slot(PP *pp, string name) {
+    if (pp->macro_cap == 0) return NULL;
+    uint32_t h = pp_hash(name);
+    size_t mask = pp->macro_cap - 1;
+    size_t k = (size_t)h & mask;
+    while (pp->mtab[k].name.str) {
+        MacroSlot *e = &pp->mtab[k];
+        if (e->hash == h && pp_str_eq(e->name, name)) return e;
+        k = (k + 1) & mask;
     }
     return NULL;
 }
 
-static void macro_undef(PP *pp, string name) {
-    Macro **p = &pp->macros;
-    while (*p) {
-        if (str_eq((*p)->name, name)) { *p = (*p)->next; return; }
-        p = &(*p)->next;
+static void macro_table_grow(PP *pp) {
+    size_t old_cap = pp->macro_cap;
+    MacroSlot *old = pp->mtab;
+    size_t cap = old_cap ? old_cap * 2 : 64;
+    MacroSlot *tab = arena_new_array(pp->arena, MacroSlot, cap);
+    memset(tab, 0, cap * sizeof(MacroSlot));
+    for (size_t i = 0; i < old_cap; i++) {
+        if (!old[i].name.str) continue;
+        size_t k = (size_t)old[i].hash & (cap - 1);
+        while (tab[k].name.str) k = (k + 1) & (cap - 1);
+        tab[k] = old[i];
     }
+    pp->mtab = tab;
+    pp->macro_cap = cap;
+}
+
+// The slot holding `name`, inserted (undefined) if missing.
+static MacroSlot *macro_get_slot(PP *pp, string name) {
+    MacroSlot *e = macro_find_slot(pp, name);
+    if (e) return e;
+    if ((pp->macro_used + 1) * 2 > pp->macro_cap) macro_table_grow(pp);
+    uint32_t h = pp_hash(name);
+    size_t mask = pp->macro_cap - 1;
+    size_t k = (size_t)h & mask;
+    while (pp->mtab[k].name.str) k = (k + 1) & mask;
+    e = &pp->mtab[k];
+    e->name = s_dup(pp->arena, name);
+    e->hash = h;
+    e->special = PP_SPECIAL_NONE;
+    e->macro = NULL;
+    pp->macro_used++;
+    return e;
+}
+
+static Macro *macro_lookup(PP *pp, string name) {
+    MacroSlot *e = macro_find_slot(pp, name);
+    return e ? e->macro : NULL;
+}
+
+static void macro_undef(PP *pp, string name) {
+    MacroSlot *e = macro_find_slot(pp, name);
+    if (e) e->macro = NULL;
 }
 
 static Macro *macro_define(PP *pp, string name) {
-    macro_undef(pp, name);
+    MacroSlot *e = macro_get_slot(pp, name);
     Macro *m = arena_new(pp->arena, Macro);
     *m = (Macro){0};
-    m->name = s_dup(pp->arena, name);
-    m->next = pp->macros;
-    pp->macros = m;
+    m->name = e->name;
+    e->macro = m;
     return m;
 }
 
@@ -440,6 +514,10 @@ static bool is_eol_or_end(PPTok *t) {
     return t->kind == PP_NEWLINE || t->kind == PP_END;
 }
 
+static bool is_punct1(PPTok *t, char c) {
+    return t->kind == PP_PUNCT && t->text.size == 1 && t->text.str[0] == c;
+}
+
 // (No unused-helper section here — utilities live inline.)
 
 // ----------------------------------------------------------------------
@@ -448,7 +526,7 @@ static bool is_eol_or_end(PPTok *t) {
 
 static void emit_line_directive_if_needed(PP *pp, string file, int line) {
     if (pp->cur_loc_valid &&
-        str_eq(pp->cur_file, file) && pp->cur_line == line) return;
+        pp_str_eq(pp->cur_file, file) && pp->cur_line == line) return;
     if (pp->out_size > 0 && pp->out[pp->out_size - 1] != '\n')
         out_char(pp, '\n');
     out_append(pp, s_lit("#line "));
@@ -473,7 +551,7 @@ static bool g_need_space_sep = false;
 static void emit_pp_token(PP *pp, PPTok *t) {
     if (t->kind == PP_PLACEMARKER) return;
     if (t->kind == PP_NEWLINE || t->kind == PP_END) return;
-    if (!pp->cur_loc_valid || !str_eq(pp->cur_file, t->file)) {
+    if (!pp->cur_loc_valid || !pp_str_eq(pp->cur_file, t->file)) {
         emit_line_directive_if_needed(pp, t->file, t->line);
         g_need_space_sep = false;
     } else if (pp->cur_line != t->line) {
@@ -577,24 +655,40 @@ static PPTok paste_tokens(PP *pp, PPTok a, PPTok b) {
 // Forward decl.
 static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out);
 
+static void arg_buf_push(PP *pp, size_t *n, PPTok *t) {
+    if (*n == pp->arg_buf_cap) {
+        size_t cap = pp->arg_buf_cap ? pp->arg_buf_cap * 2 : 256;
+        PPTok *nb = arena_new_array(pp->arena, PPTok, cap);
+        if (*n) memcpy(nb, pp->arg_buf, *n * sizeof(PPTok));
+        pp->arg_buf = nb;
+        pp->arg_buf_cap = cap;
+    }
+    pp->arg_buf[*n] = *t;
+    *n = *n + 1;
+}
+
 // Find arguments for a function-like macro at `*pi` (which points just
 // after the macro name). The opening '(' may be preceded by whitespace
 // but not by a newline that we've already emitted — for simplicity we
 // allow any number of newlines too. Sets `*pi` past the closing ')'.
 // Returns true if the call form was consumed; otherwise false (and *pi
-// is unchanged).
+// is unchanged). On success `args[k]` (k < n_params, plus the variadic
+// slot) holds the tokens of argument k, in one exact-size arena block.
 static bool collect_args(PP *pp, PPTok *toks, size_t n, size_t *pi,
                          Macro *m, VecPPTok *args /* array length n_params(+1 for var) */ ) {
     size_t i = *pi;
     while (i < n && (toks[i].kind == PP_NEWLINE)) i++;
-    if (i >= n || toks[i].kind != PP_PUNCT || !str_eq(toks[i].text, s_lit("(")))
+    if (i >= n || !is_punct1(&toks[i], '('))
         return false;
     i++; // consume '('
-    // Initialize argument vectors (already reserved by caller).
     int depth = 0;
     size_t arg_idx = 0;
     size_t expected = m->n_params + (m->is_variadic ? 1 : 0);
-    bool any_token_in_arg = false;
+    // Tokens of all arguments go to pp->arg_buf back to back; arg_end[k]
+    // is where argument k ends. (A zero-parameter macro has one slot too:
+    // the tokens of `M(x)` are collected there and dropped.)
+    size_t arg_end[72];
+    size_t nbuf = 0;
     while (i < n) {
         PPTok t = toks[i];
         if (t.kind == PP_END) {
@@ -602,45 +696,40 @@ static bool collect_args(PP *pp, PPTok *toks, size_t n, size_t *pi,
             return false;
         }
         if (t.kind == PP_NEWLINE) { i++; continue; }
-        if (t.kind == PP_PUNCT && str_eq(t.text, s_lit("("))) depth++;
-        else if (t.kind == PP_PUNCT && str_eq(t.text, s_lit(")"))) {
+        if (is_punct1(&t, '(')) depth++;
+        else if (is_punct1(&t, ')')) {
             if (depth == 0) { i++; break; }
             depth--;
-        } else if (t.kind == PP_PUNCT && str_eq(t.text, s_lit(",")) && depth == 0) {
+        } else if (is_punct1(&t, ',') && depth == 0) {
             // Variadic: stop splitting once we've reached the variadic slot.
             if (m->is_variadic && arg_idx >= m->n_params) {
-                VecPPTok_push_back(pp->arena, &args[arg_idx], t);
+                arg_buf_push(pp, &nbuf, &t);
                 i++;
-                any_token_in_arg = true;
                 continue;
             }
+            arg_end[arg_idx] = nbuf;
             arg_idx++;
             if (arg_idx >= expected) {
                 pp_error(pp, t.file, t.line, s_lit("too many arguments to macro"));
                 return false;
             }
             i++;
-            any_token_in_arg = false;
             continue;
         }
-        VecPPTok_push_back(pp->arena, &args[arg_idx], t);
-        any_token_in_arg = true;
+        arg_buf_push(pp, &nbuf, &t);
         i++;
     }
-    // If we collected nothing for the last slot AND total slots == 1 AND
-    // expected == 0 (zero-param macro), that's fine — caller saw `()`.
-    if (expected == 0) {
-        // Accept M() with no args.
-        *pi = i;
-        return true;
-    }
-    // Variadic with no extra args: __VA_ARGS__ becomes empty.
-    if (m->is_variadic && arg_idx < expected - 1) {
-        // Last slot stays empty (already so).
-        arg_idx = expected - 1;
-    }
-    if (!any_token_in_arg && arg_idx == 0 && m->n_params == 1 && !m->is_variadic) {
-        // M() called on M(x) — treat as one empty arg.
+    arg_end[arg_idx] = nbuf;
+    // Missing trailing arguments (e.g. an empty __VA_ARGS__) are empty.
+    PPTok *block = arena_new_array(pp->arena, PPTok, nbuf ? nbuf : 1);
+    if (nbuf) memcpy(block, pp->arg_buf, nbuf * sizeof(PPTok));
+    size_t start = 0;
+    for (size_t k = 0; k < expected; k++) {
+        size_t end = k <= arg_idx ? arg_end[k] : nbuf;
+        args[k].data = block + start;
+        args[k].size = end - start;
+        args[k].max = end - start;
+        start = end;
     }
     *pi = i;
     return true;
@@ -656,7 +745,7 @@ static void substitute(PP *pp, Macro *m, VecPPTok *args, VecPPTok *out) {
     size_t n_args = m->n_params + (m->is_variadic ? 1 : 0);
     VecPPTok *expanded = arena_new_array(pp->arena, VecPPTok, n_args ? n_args : 1);
     for (size_t k = 0; k < n_args; k++) {
-        VecPPTok_reserve(pp->arena, &expanded[k], 4);
+        VecPPTok_reserve(pp->arena, &expanded[k], args[k].size + 4);
         expand_tokens(pp, args[k].data, args[k].size, &expanded[k]);
     }
 
@@ -801,53 +890,64 @@ static void substitute(PP *pp, Macro *m, VecPPTok *args, VecPPTok *out) {
     }
 }
 
-// Expand tokens in `toks` and append the result to `out`.
-// Replace work->data[pos .. pos+del) with the `ins_n` tokens at `ins`.
-// Grows the vector as needed; preserves all other entries.
-static void vec_pptok_splice(Arena *a, VecPPTok *v, size_t pos, size_t del,
-                             const PPTok *ins, size_t ins_n) {
-    size_t old_size = v->size;
-    size_t tail_n = old_size - (pos + del);
-    if (ins_n > del) {
-        size_t need = ins_n - del;
-        // Use push_back with dummy values to grow capacity.
-        PPTok zero = {0};
-        for (size_t k = 0; k < need; k++) VecPPTok_push_back(a, v, zero);
-        // Move tail right (in reverse, since regions overlap).
-        for (size_t k = tail_n; k > 0; k--) {
-            v->data[pos + ins_n + k - 1] = v->data[pos + del + k - 1];
-        }
-    } else if (ins_n < del) {
-        size_t shrink = del - ins_n;
-        // Move tail left.
-        for (size_t k = 0; k < tail_n; k++) {
-            v->data[pos + ins_n + k] = v->data[pos + del + k];
-        }
-        v->size -= shrink;
+// The pending (not yet rescanned) tokens of expand_tokens() live at the end
+// of an array: w[pos .. *wsize). Everything before `pos` has already been
+// emitted, so a replacement is written into that dead prefix and the tail
+// never moves. Replaces w[pos .. pos+del) with the `ins_n` tokens at `ins`
+// and returns the new start of the pending tokens. Only when the dead prefix
+// is too small is the array reallocated, with a front gap as large as the
+// tail, so the copies stay amortized O(1) per token.
+static size_t work_splice(Arena *a, PPTok **pw, size_t *wsize, size_t pos,
+                          size_t del, const PPTok *ins, size_t ins_n) {
+    PPTok *w = *pw;
+    size_t end = pos + del;
+    if (ins_n <= end) {
+        size_t start = end - ins_n;
+        for (size_t k = 0; k < ins_n; k++) w[start + k] = ins[k];
+        return start;
     }
-    for (size_t k = 0; k < ins_n; k++) v->data[pos + k] = ins[k];
+    size_t tail_n = *wsize - end;
+    size_t gap = ins_n + tail_n + 64;
+    PPTok *nw = arena_new_array(a, PPTok, gap + tail_n);
+    size_t start = gap - ins_n;
+    for (size_t k = 0; k < ins_n; k++) nw[start + k] = ins[k];
+    if (tail_n) memcpy(nw + gap, w + end, tail_n * sizeof(PPTok));
+    *pw = nw;
+    *wsize = gap + tail_n;
+    return start;
 }
 
+// Append a fully expanded token to `out`, or emit it straight to the output
+// text when `out` is NULL (top level: no need to buffer a whole line group).
+static void expand_put(PP *pp, VecPPTok *out, PPTok *t) {
+    if (out) VecPPTok_push_back(pp->arena, out, *t);
+    else emit_pp_token(pp, t);
+}
+
+// Expand tokens in `toks` and append the result to `out` (NULL: emit them).
 static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out) {
     // Copy input into a working buffer so substitutions can be spliced
     // back in for proper rescanning across the original input boundary.
     // This is required by C: after a macro is replaced, the result is
     // reinserted into the source stream so that nested function-like
     // macros can pick up arguments that follow in the original input.
-    VecPPTok work; VecPPTok_reserve(pp->arena, &work, n + 4);
-    for (size_t k = 0; k < n; k++) VecPPTok_push_back(pp->arena, &work, toks[k]);
-    size_t i = 0;
-    while (i < work.size) {
-        PPTok t = work.data[i];
+    size_t gap0 = 64;
+    size_t wsize = gap0 + n;
+    PPTok *w = arena_new_array(pp->arena, PPTok, wsize);
+    if (n) memcpy(w + gap0, toks, n * sizeof(PPTok));
+    size_t i = gap0;
+    while (i < wsize) {
+        PPTok t = w[i];
         if (t.kind == PP_END) break;
         if (t.kind == PP_NEWLINE) { i++; continue; }
         if (t.kind == PP_IDENT) {
+            MacroSlot *slot = macro_find_slot(pp, t.text);
             // __FILE__ / __LINE__: expand to dynamic literal.
-            if (str_eq(t.text, s_lit("__FILE__"))) {
+            if (slot && slot->special == PP_SPECIAL_FILE) {
                 PPTok s = {0};
                 // File name as string literal.
                 size_t fsz = t.file.size;
-                char *buf = arena_new_array(pp->arena, char, fsz + 4);
+                char *buf = arena_new_array(pp->arena, char, 2 * fsz + 3);
                 size_t k = 0;
                 buf[k++] = '"';
                 for (size_t j = 0; j < fsz; j++) {
@@ -860,32 +960,32 @@ static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out) {
                 s.kind = PP_STRING;
                 s.text = (string){buf, k};
                 s.line = t.line; s.file = t.file; s.has_space = t.has_space;
-                VecPPTok_push_back(pp->arena, out, s);
+                expand_put(pp, out, &s);
                 i++;
                 continue;
             }
-            if (str_eq(t.text, s_lit("__LINE__"))) {
+            if (slot && slot->special == PP_SPECIAL_LINE) {
                 PPTok s = {0};
                 s.kind = PP_NUMBER;
                 s.text = i64_to_str(pp->arena, (int64_t)t.line);
                 s.line = t.line; s.file = t.file; s.has_space = t.has_space;
-                VecPPTok_push_back(pp->arena, out, s);
+                expand_put(pp, out, &s);
                 i++;
                 continue;
             }
-            if (hide_contains(t.hide, t.text)) {
-                VecPPTok_push_back(pp->arena, out, t);
+            Macro *m = slot ? slot->macro : NULL;
+            if (m && hide_contains(t.hide, t.text)) {
+                expand_put(pp, out, &t);
                 i++;
                 continue;
             }
-            Macro *m = macro_lookup(pp, t.text);
             if (m && !m->expanding) {
                 if (!m->is_func) {
                     // Object-like: substitute, then splice the result back
                     // into the work buffer at position `i` so rescanning
                     // happens against the rest of the original input too.
                     m->expanding = true;
-                    VecPPTok inner; VecPPTok_reserve(pp->arena, &inner, 4);
+                    VecPPTok inner; VecPPTok_reserve(pp->arena, &inner, m->n_body + 4);
                     substitute(pp, m, NULL, &inner);
                     m->expanding = false;
                     for (size_t k = 0; k < inner.size; k++) {
@@ -894,30 +994,30 @@ static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out) {
                         inner.data[k].hide = hide_add(pp->arena, inner.data[k].hide, m->name);
                     }
                     if (inner.size > 0) inner.data[0].has_space = t.has_space;
-                    vec_pptok_splice(pp->arena, &work, i, 1, inner.data, inner.size);
+                    i = work_splice(pp->arena, &w, &wsize, i, 1, inner.data, inner.size);
                     continue;
                 } else {
                     // Function-like: peek for '(' across the work buffer.
                     size_t j = i + 1;
-                    while (j < work.size && work.data[j].kind == PP_NEWLINE) j++;
-                    if (j >= work.size || work.data[j].kind != PP_PUNCT
-                            || !str_eq(work.data[j].text, s_lit("("))) {
-                        VecPPTok_push_back(pp->arena, out, t);
+                    while (j < wsize && w[j].kind == PP_NEWLINE) j++;
+                    if (j >= wsize || !is_punct1(&w[j], '(')) {
+                        expand_put(pp, out, &t);
                         i++;
                         continue;
                     }
                     size_t expected = m->n_params + (m->is_variadic ? 1 : 0);
                     VecPPTok *args = arena_new_array(pp->arena, VecPPTok,
                                                      expected ? expected : 1);
-                    for (size_t k = 0; k < expected; k++)
-                        VecPPTok_reserve(pp->arena, &args[k], 2);
                     size_t cur = j;
-                    if (!collect_args(pp, work.data, work.size, &cur, m, args)) {
+                    if (!collect_args(pp, w, wsize, &cur, m, args)) {
                         i++;
                         continue;
                     }
+                    // Room for the body plus every argument once.
+                    size_t est = m->n_body + 4;
+                    for (size_t k = 0; k < expected; k++) est += args[k].size;
                     m->expanding = true;
-                    VecPPTok inner; VecPPTok_reserve(pp->arena, &inner, 4);
+                    VecPPTok inner; VecPPTok_reserve(pp->arena, &inner, est);
                     substitute(pp, m, args, &inner);
                     m->expanding = false;
                     for (size_t k = 0; k < inner.size; k++) {
@@ -926,15 +1026,15 @@ static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out) {
                         inner.data[k].hide = hide_add(pp->arena, inner.data[k].hide, m->name);
                     }
                     if (inner.size > 0) inner.data[0].has_space = t.has_space;
-                    // Splice inner tokens into `work` in place of the call
-                    // (identifier + arg list); rescan from position `i`.
-                    vec_pptok_splice(pp->arena, &work, i, cur - i,
-                                     inner.data, inner.size);
+                    // Splice inner tokens into the work buffer in place of
+                    // the call (identifier + arg list); rescan from there.
+                    i = work_splice(pp->arena, &w, &wsize, i, cur - i,
+                                    inner.data, inner.size);
                     continue;
                 }
             }
         }
-        VecPPTok_push_back(pp->arena, out, t);
+        expand_put(pp, out, &t);
         i++;
     }
 }
@@ -1203,27 +1303,21 @@ static string parent_dir(Arena *arena, string path) {
     return s_dup_cstr(arena, path.str, i - 1);
 }
 
-static bool file_exists(Arena *arena, string path) {
-    string txt;
-    Arena *probe = arena_create(4 * 1024);
-    bool ok = read_file(probe, path, &txt);
-    arena_destroy(probe);
-    (void)arena;
-    return ok;
-}
-
-static bool resolve_include(PP *pp, string from_file, string name, bool angle, string *out) {
+// Find the include file and read it (once: the contents are what
+// process_file() then tokenizes).
+static bool resolve_include(PP *pp, string from_file, string name, bool angle,
+                            string *out, string *out_src) {
     if (!angle) {
         // First: relative to the directory of `from_file`.
         string dir = parent_dir(pp->arena, from_file);
         string cand;
         path_join(pp->arena, dir, name, &cand);
-        if (file_exists(pp->arena, cand)) { *out = cand; return true; }
+        if (read_file(pp->arena, cand, out_src)) { *out = cand; return true; }
     }
     for (size_t i = 0; i < pp->n_include_dirs; i++) {
         string cand;
         path_join(pp->arena, pp->include_dirs[i], name, &cand);
-        if (file_exists(pp->arena, cand)) { *out = cand; return true; }
+        if (read_file(pp->arena, cand, out_src)) { *out = cand; return true; }
     }
     return false;
 }
@@ -1242,7 +1336,7 @@ static void pragma_once_add(PP *pp, string path) {
 
 // Forward decl.
 static void process_tokens(PP *pp, PPTok *toks, size_t n, string file);
-static void process_file(PP *pp, string path);
+static void process_file(PP *pp, string path, string src);
 
 typedef struct {
     bool was_active;     // active before entering this group
@@ -1489,7 +1583,8 @@ static void process_tokens(PP *pp, PPTok *toks, size_t n, string file) {
                     }
                 }
                 string resolved;
-                if (!resolve_include(pp, file, name, angle, &resolved)) {
+                string inc_src;
+                if (!resolve_include(pp, file, name, angle, &resolved, &inc_src)) {
                     pp_error(pp, file, t.line,
                              format(pp->arena, str_lit("cannot find include file {}{}{}"),
                                     angle ? str_lit("<") : str_lit("\""), name,
@@ -1497,7 +1592,7 @@ static void process_tokens(PP *pp, PPTok *toks, size_t n, string file) {
                     i = end + 1; continue;
                 }
                 if (pragma_once_seen(pp, resolved)) { i = end + 1; continue; }
-                process_file(pp, resolved);
+                process_file(pp, resolved, inc_src);
                 // Restore #line tracking back to enclosing file.
                 emit_line_directive_if_needed(pp, file, toks[end].line);
                 i = end + 1;
@@ -1532,9 +1627,7 @@ static void process_tokens(PP *pp, PPTok *toks, size_t n, string file) {
             }
             end++;
         }
-        VecPPTok ex; VecPPTok_reserve(pp->arena, &ex, 4);
-        expand_tokens(pp, toks + i, end - i, &ex);
-        for (size_t k = 0; k < ex.size; k++) emit_pp_token(pp, &ex.data[k]);
+        expand_tokens(pp, toks + i, end - i, NULL);
         i = end;
         // Don't consume the newline; loop will see it next iteration.
     }
@@ -1543,11 +1636,13 @@ static void process_tokens(PP *pp, PPTok *toks, size_t n, string file) {
     }
 }
 
-static void process_file(PP *pp, string path) {
+// `src` is the file's contents as read_file() returns them.
+static void process_file(PP *pp, string path, string src) {
     string canonical = s_dup(pp->arena, path);
-    string src = read_file_ok(pp->arena, canonical);
     if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
-    VecPPTok toks; VecPPTok_reserve(pp->arena, &toks, 256);
+    // C source averages about 5 bytes per token: reserve enough that the
+    // token vector of a .c file is not regrown (and recopied) while lexing.
+    VecPPTok toks; VecPPTok_reserve(pp->arena, &toks, src.size / 4 + 256);
     pp_tokenize(pp->arena, src, canonical, &toks);
     process_tokens(pp, toks.data, toks.size, canonical);
 }
@@ -1568,6 +1663,11 @@ string tinyc_preprocess(Arena *arena, string path,
     pp.include_dirs = include_dirs;
     pp.n_include_dirs = n_include_dirs;
 
+    // __FILE__ and __LINE__ are intercepted at expansion time (before any
+    // macro of that name); their slots carry the marker.
+    macro_get_slot(&pp, s_lit("__FILE__"))->special = PP_SPECIAL_FILE;
+    macro_get_slot(&pp, s_lit("__LINE__"))->special = PP_SPECIAL_LINE;
+
     // Predefined macros: __TINYC__ = 1.
     Macro *tcm = macro_define(&pp, s_lit("__TINYC__"));
     PPTok one = {0};
@@ -1576,7 +1676,6 @@ string tinyc_preprocess(Arena *arena, string path,
     tcm->body = arena_new_array(arena, PPTok, 1);
     tcm->body[0] = one;
     tcm->n_body = 1;
-    // __FILE__ and __LINE__ are intercepted at expansion time.
 
     // Command-line -D defines. Each entry is either "NAME" or "NAME=BODY".
     // The body is tokenized via the same pp_tokenize() the source uses.
@@ -1609,7 +1708,7 @@ string tinyc_preprocess(Arena *arena, string path,
         }
     }
 
-    process_file(&pp, path);
+    process_file(&pp, path, read_file_ok(arena, path));
     out_char(&pp, '\n');
     g_last_preprocess_errors = pp.n_errors;
     return (string){pp.out, pp.out_size};

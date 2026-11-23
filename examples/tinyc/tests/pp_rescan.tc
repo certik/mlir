@@ -1,0 +1,36 @@
+extern int printf(const char *fmt, ...);
+// Macro rescanning against the rest of the source: an expansion that ends
+// in a function-like macro name takes its arguments from the text that
+// follows (even on later lines), a long expansion at the very start of a
+// line group, #undef / redefinition, and many expansions in one group.
+
+#define TWICE(x) ((x) * 2)
+#define CALL TWICE
+#define APPLY(f, x) f(x)
+#define SUM16(a) (a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a)
+#define BIG SUM16(1) + SUM16(2) + SUM16(3) + SUM16(4) + SUM16(5)
+#define INC(v) v = v + 1;
+#define V 1
+#undef V
+#define V 7
+#define W V
+#undef V
+#define V 9
+
+int main() {
+    int big = BIG;
+    int a = CALL(5);
+    int b = CALL
+        (6);
+    int c = APPLY(CALL, 7);
+    int n = 0;
+    INC(n) INC(n) INC(n) INC(n) INC(n) INC(n) INC(n) INC(n)
+    INC(n) INC(n) INC(n) INC(n) INC(n) INC(n) INC(n) INC(n)
+    printf("%d\n", big);   // 16 * (1 + 2 + 3 + 4 + 5) = 240
+    printf("%d\n", a);     // 10
+    printf("%d\n", b);     // 12
+    printf("%d\n", c);     // 14
+    printf("%d\n", n);     // 16
+    printf("%d\n", W);     // W -> V -> 9 (the current definition)
+    return 0;
+}
