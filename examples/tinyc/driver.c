@@ -1483,9 +1483,11 @@ int app_main(void) {
     }
 
     // Size the native backend's IR storage from the input. The module,
-    // its lowering and the backends' IR come to about 1.5 ops per token
-    // (after preprocessing; most header tokens make no IR, which leaves
-    // slack); the wasm pipeline's wasmssa and wasmstack IR to about 6.
+    // its lowering and the backends' IR come to at most about 1.5 ops per
+    // token (after preprocessing; most header tokens make no IR), and with
+    // the wasm pipeline's wasmssa and wasmstack IR to 3-6.4 (tinyc's own
+    // sources). Too low costs doublings, too high wastes heap; the backend
+    // caps the reservation, so a large input cannot exhaust its heap.
     MLIR_SetContextExpectedOps(ctx, target_wasm32 ? total_toks * 6 : total_toks * 3 / 2);
     MLIR_OpHandle module = tinyc_emit_module(ctx, prog);
     if (tinyc_last_emit_errors() > 0) {

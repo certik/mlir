@@ -306,14 +306,15 @@ struct MLIR_Context {
 #define NAMES(c)   ((string *)(c)->names.data)
 
 // The one growth hook: makes room for `need` elements. The capacity at least
-// doubles and uses all of the buddy block it gets; the elements in use are
-// copied and the old array is freed, so every pointer into the vector dies.
+// doubles (or becomes `need`, if that is more) and uses all of the buddy
+// block it gets; the elements in use are copied and the old array is freed,
+// so every pointer into the vector dies.
 // (A later change can reserve address space here instead, so that the
 // arrays never move on hosts that have it.)
 static void vec_reserve(IR_Vec *v, size_t need) {
     if (need <= v->cap) return;
     size_t want = v->cap ? (size_t)v->cap * 2 : 16;
-    while (want < need) want *= 2;
+    if (want < need) want = need;
     size_t actual = 0;
     void *p = buddy_alloc(want * v->elem, &actual);
     if (!p) {
@@ -770,22 +771,45 @@ MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) {
     return ctx;
 }
 
-// Reserves the IR vectors for `n` more ops, in proportions that cover
-// tinyc's pipelines (per op, the C pipeline makes about 0.8 values, 1.1
-// operands, 0.2 region/successor words, 0.75 attributes, 0.05 blocks and
-// 0.02 regions; the wasm lift 0.5, 0.7, 0.03, 1.4, 0.02 and 0.01).
-// Reserving more than is used costs address space, not memory: the pages
-// are not touched.
+// The most MLIR_SetContextExpectedOps reserves, in buddy blocks. The IR
+// vectors come from corec's buddy heap, which is a 4 GiB reservation on
+// Linux and Windows hosts (and wasm32 linear memory is capped at 4 GiB too):
+// a reserved block uses up that heap even where its pages are never touched,
+// so an estimate that is too high could exhaust it. A quarter of the heap
+// holds a self-host lift's ops, values, operands and attribute handles
+// (7.5M ops: 420, 140, 86 and 81 MB); beyond it the vectors double as they
+// fill.
+#define IR_RESERVE_BUDGET ((size_t)1 << 30)
+
+// The buddy block a request for `bytes` takes (a power of two, with room for
+// the allocator's header).
+static size_t buddy_block_bytes(size_t bytes) {
+    size_t b = 4096;
+    while (b < bytes + 64) b <<= 1;
+    return b;
+}
+
+// Reserves the vectors that grow with the op count for `n` more ops: per
+// op, tinyc's C pipeline makes about 0.8 values, 1.1 operands and 0.75
+// attributes, and the wasm pipelines 0.4-0.5, 0.5-0.7 and 1.4-1.7. The
+// region/successor words (0.05-0.2 per op), blocks, regions and the
+// printer-only vectors are small and just double. The estimate shrinks by
+// a quarter at a time until the blocks fit IR_RESERVE_BUDGET.
 void MLIR_SetContextExpectedOps(MLIR_Context *ctx, size_t n) {
     API_CHECK(ctx != NULL, "MLIR_SetContextExpectedOps", "context is NULL");
-    if (n > 0x0fffffff) n = 0x0fffffff;
+    while (n > 0) {
+        size_t total = buddy_block_bytes((ctx->ops.n + n) * sizeof(IR_Op)) +
+                       buddy_block_bytes((ctx->vals.n + n - n / 4) * sizeof(IR_Value)) +
+                       buddy_block_bytes((ctx->opnds.n + n) * sizeof(IR_Operand)) +
+                       buddy_block_bytes((ctx->ptrs.n + n + n / 2) * sizeof(uintptr_t));
+        if (total <= IR_RESERVE_BUDGET) break;
+        n -= n / 4 ? n / 4 : n;
+    }
+    if (n == 0) return;
     vec_reserve(&ctx->ops, ctx->ops.n + n);
-    vec_reserve(&ctx->vals, ctx->vals.n + n);
-    vec_reserve(&ctx->opnds, ctx->opnds.n + n + n / 4);
-    vec_reserve(&ctx->extra, ctx->extra.n + n / 4);
+    vec_reserve(&ctx->vals, ctx->vals.n + n - n / 4);
+    vec_reserve(&ctx->opnds, ctx->opnds.n + n);
     vec_reserve(&ctx->ptrs, ctx->ptrs.n + n + n / 2);
-    vec_reserve(&ctx->blocks, ctx->blocks.n + n / 16);
-    vec_reserve(&ctx->regions, ctx->regions.n + n / 32);
 }
 
 void MLIR_DestroyContext(MLIR_Context *ctx) {

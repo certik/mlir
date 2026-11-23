@@ -167,9 +167,12 @@ void MLIR_SetContextDefUseTracking(MLIR_Context *ctx, bool enabled);
 bool MLIR_HasContextDefUseTracking(MLIR_Context *ctx);
 // Tells the context to expect `n` more ops, for instance once a frontend
 // knows its input size. The native backend stores ops, values, operands,
-// blocks and regions in context-owned vectors and reserves them for that
-// many, so that a good estimate means they never grow; a vector that fills
-// up anyway doubles and copies. Never shrinks anything. The upstream backend
+// blocks and regions in context-owned vectors and reserves the ones that
+// grow with the op count for that many, so that a good estimate means they
+// never grow; a vector that fills up anyway doubles and copies. The reservation is
+// capped (1 GiB of the native backend's 4 GiB heap, which reserved blocks use
+// up even where they are never touched), so an estimate that is too high
+// costs no more than that. Never shrinks anything. The upstream backend
 // ignores it.
 void MLIR_SetContextExpectedOps(MLIR_Context *ctx, size_t n);
 

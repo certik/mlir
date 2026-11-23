@@ -549,9 +549,12 @@ As implemented (#354):
   and argument lists and region block lists are u32 arrays in the IR arena.
   Erased ops stay as empty slots.
 - **Growth.** One flat array per vector. `MLIR_ContextOptions.expected_ops`
-  and `MLIR_SetContextExpectedOps` reserve all of them from a hint (tinyc
-  passes 1.5 ops per token, 6 when compiling to wasm, and 1.7 ops per byte of
-  wasm for `--from-wasm`). A full vector doubles and copies, through the one
+  and `MLIR_SetContextExpectedOps` reserve the vectors that grow with the
+  op count (ops, values, operands, attribute entries) from a hint (tinyc passes 1.5 ops per token, 6 when compiling to wasm, and
+  1.7 ops per byte of wasm for `--from-wasm`). The reservation is capped at
+  1 GiB of buddy blocks: corec's heap is a 4 GiB reservation (and wasm32
+  memory is capped at 4 GiB), and a reserved block uses it up even where it
+  is never touched. A full vector doubles and copies, through the one
   hook `vec_reserve`, which a later change can make reserve address space
   instead. Inside the backend no pointer into a vector is held across a call
   that can grow it; `MLIR_API_CHECKS` builds check that with a per-vector
