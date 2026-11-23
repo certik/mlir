@@ -526,6 +526,54 @@ int app_main(void) {
             before, MLIR_GetAttributeInteger(ctx, MLIR_GetOpAttr(ctx, kop, mykey)),
             (int64_t)n_replaced, (int64_t)MLIR_GetOpNumAttributes(ctx, kop),
             MLIR_GetAttrKeyName(ctx, MLIR_GetOpAttributeKey(ctx, kop, 2))));
+
+        // Attributes are uniqued (#350): equal values are equal handles;
+        // floats by bit pattern, integers with their type; distinct
+        // attributes never are.
+        MLIR_TypeHandle i64t = MLIR_CreateTypeInteger(ctx, 64, true);
+        MLIR_TypeHandle f64t = MLIR_CreateTypeFloat(ctx, 64, false);
+        // Quiet NaN by bits. MSVC rejects the constant expression 0.0 / 0.0
+        // (error C2124) while compiling this driver.
+        union { uint64_t u; double d; } nan_bits = { 0x7ff8000000000000ULL };
+        double nan = nan_bits.d;
+        MLIR_AttributeHandle e1[2] = { MLIR_CreateAttributeInteger(ctx, 1, i32_ty),
+                                       MLIR_CreateAttributeString(ctx, str_lit("s")) };
+        MLIR_AttributeHandle e2[2] = { MLIR_CreateAttributeInteger(ctx, 1, i32_ty),
+                                       MLIR_CreateAttributeString(ctx, str_lit("s")) };
+        MLIR_AttributeHandle dref = MLIR_CreateAttributeBool(ctx, true);
+        print_string(format(arena, str_lit("attr uniquing: int={} int type={} float zero sign={} nan={}"),
+            MLIR_CreateAttributeInteger(ctx, 5, i32_ty) == MLIR_CreateAttributeInteger(ctx, 5, i32_ty)
+                ? str_lit("same") : str_lit("different"),
+            MLIR_CreateAttributeInteger(ctx, 5, i32_ty) == MLIR_CreateAttributeInteger(ctx, 5, i64t)
+                ? str_lit("same") : str_lit("different"),
+            MLIR_CreateAttributeFloat(ctx, 0.0, f64t) == MLIR_CreateAttributeFloat(ctx, -0.0, f64t)
+                ? str_lit("same") : str_lit("different"),
+            MLIR_CreateAttributeFloat(ctx, nan, f64t) == MLIR_CreateAttributeFloat(ctx, nan, f64t)
+                ? str_lit("same") : str_lit("different")));
+        print_string(format(arena, str_lit(" array={} distinct={}\n"),
+            MLIR_CreateAttributeArray(ctx, e1, 2) == MLIR_CreateAttributeArray(ctx, e2, 2)
+                ? str_lit("same") : str_lit("different"),
+            MLIR_CreateAttributeDistinct(ctx, dref) == MLIR_CreateAttributeDistinct(ctx, dref)
+                ? str_lit("same") : str_lit("different")));
+        int32_t dv[3] = { 1, -2, 3 };
+        int64_t dv64[2] = { 5000000000, -7 };
+        MLIR_AttributeHandle d32 = MLIR_CreateAttributeDenseI32Array(ctx, dv, 3);
+        MLIR_AttributeHandle d64 = MLIR_CreateAttributeDenseI64Array(ctx, dv64, 2);
+        print_string(format(arena, str_lit("dense arrays: i32 n={} [1]={} text={}; i64 n={} [0]={} [1]={}\n"),
+            (int64_t)MLIR_GetAttributeDenseSize(ctx, d32), MLIR_GetAttributeDenseElement(ctx, d32, 1),
+            MLIR_GetAttributeAsString(ctx, d32),
+            (int64_t)MLIR_GetAttributeDenseSize(ctx, d64), MLIR_GetAttributeDenseElement(ctx, d64, 0),
+            MLIR_GetAttributeDenseElement(ctx, d64, 1)));
+
+        // Locations (#350).
+        MLIR_LocationHandle fl = MLIR_CreateLocationFile(ctx, str_lit("a.c"), 12, 3);
+        MLIR_LocationHandle nl = MLIR_CreateLocationName(ctx, str_lit("here"));
+        print_string(format(arena, str_lit("locations: file={}:{}:{} kind={} name={} kind={} unknown shared={}\n"),
+            MLIR_GetLocationFileFilename(ctx, fl), (int64_t)MLIR_GetLocationFileLine(ctx, fl),
+            (int64_t)MLIR_GetLocationFileColumn(ctx, fl), (int64_t)MLIR_GetLocationKind(ctx, fl),
+            MLIR_GetLocationName(ctx, nl), (int64_t)MLIR_GetLocationKind(ctx, nl),
+            MLIR_CreateLocationUnknown(ctx, (string){0}) == MLIR_CreateLocationUnknown(ctx, (string){0})
+                ? str_lit("yes") : str_lit("no")));
         MLIR_Context *ctx3 = MLIR_CreateContext(NULL);
         print_string(MLIR_LookupOpType(ctx3, str_lit("test.op")) == OP_TYPE_UNREGISTERED &&
                      MLIR_LookupOpType(ctx3, str_lit("llvm.add")) == OP_TYPE_LLVM_ADD

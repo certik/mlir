@@ -774,23 +774,10 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         emit_use(F, base);
 
         if (ria != MLIR_INVALID_HANDLE) {
-            // Parse the printed array form: "array<i32: 0, 1>" or "[0, 1]".
-            string s = MLIR_GetAttributeAsString(F->ctx, ria);
-            // Find first '[' or ':' then walk numbers separated by commas.
-            size_t i = 0;
-            while (i < s.size && s.str[i] != '[' && s.str[i] != ':') i++;
-            if (i < s.size && s.str[i] == ':') i++;     // "array<i32: ..."
-            else if (i < s.size && s.str[i] == '[') i++; // "[..."
-            while (i < s.size) {
-                while (i < s.size && (s.str[i] == ' ' || s.str[i] == ',')) i++;
-                if (i >= s.size || s.str[i] == ']' || s.str[i] == '>') break;
-                // Read signed integer.
-                long long v = 0; int sign = 1;
-                if (s.str[i] == '-') { sign = -1; i++; }
-                while (i < s.size && s.str[i] >= '0' && s.str[i] <= '9') {
-                    v = v*10 + (s.str[i]-'0'); i++;
-                }
-                v *= sign;
+            // A dense i32 array; 0x80000000 marks a dynamic index.
+            size_t n_ria = MLIR_GetAttributeDenseSize(F->ctx, ria);
+            for (size_t i = 0; i < n_ria; i++) {
+                long long v = (long long)MLIR_GetAttributeDenseElement(F->ctx, ria, i);
                 if (v == (long long)(int32_t)0x80000000) {
                     // Dynamic — pull from operands.
                     MLIR_ValueHandle dv = MLIR_GetOpOperand(F->ctx, op, next_op++);

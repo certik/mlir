@@ -13,27 +13,22 @@
 #include "mlir_api.h"
 #include "mlir_llvm_type_layout.h"
 
-// The indices of an `llvm.insertvalue` `position` attribute, printed as
-// "array<i64: 1, 2>" (DenseI64ArrayAttr) or "[1, 2]". Returns how many there
-// are, or 0 when there are none or more than `max`.
+// The indices of an `llvm.insertvalue` `position` attribute (a dense i64
+// array, or an array of integers). Returns how many there are, or 0 when
+// there are none or more than `max`.
 size_t llvm_position_indices(MLIR_Context *ctx, MLIR_AttributeHandle a,
                              int64_t *idx, size_t max) {
-    string s = MLIR_GetAttributeAsString(ctx, a);
-    const char *p = s.str;
-    const char *end = s.str + s.size;
-    // Skip "array<i64:" so the element width is not read as an index.
-    for (const char *q = p; q < end; q++) {
-        if (*q == ':') { p = q + 1; break; }
+    if (MLIR_GetAttributeKind(ctx, a) == MLIR_ATTR_KIND_ARRAY) {
+        size_t n = MLIR_GetAttributeArraySize(ctx, a);
+        if (n > max) return 0;
+        for (size_t i = 0; i < n; i++)
+            idx[i] = MLIR_GetAttributeInteger(ctx, MLIR_GetAttributeArrayElement(ctx, a, i));
+        return n;
     }
-    size_t n = 0;
-    for (;;) {
-        while (p < end && (*p < '0' || *p > '9')) p++;
-        if (p >= end) return n;
-        if (n == max) return 0;
-        int64_t v = 0;
-        while (p < end && *p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
-        idx[n++] = v;
-    }
+    size_t n = MLIR_GetAttributeDenseSize(ctx, a);
+    if (n > max) return 0;
+    for (size_t i = 0; i < n; i++) idx[i] = MLIR_GetAttributeDenseElement(ctx, a, i);
+    return n;
 }
 
 // The byte offset and type of the element at position idx[0..n) inside the

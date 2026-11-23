@@ -513,40 +513,15 @@ static MLIR_ValueHandle emit_wrap_i64_to_i32(FnCtx *F, MLIR_ValueHandle v) {
     return commit_op(F, &o);
 }
 
-// Parse a "array<i32: v0, v1, ...>" string into an arena-allocated int32_t
-// vector; returns NULL on parse failure. Sets *n_out.
-static int32_t *parse_dense_i32_array(Arena *arena, string s, size_t *n_out) {
-    *n_out = 0;
-    const char *p = s.str;
-    const char *end = s.str + s.size;
-    const char *pref = "array<i32";
-    size_t plen = strlen(pref);
-    if (s.size < plen || memcmp(p, pref, plen) != 0) return NULL;
-    p += plen;
-    // Allow "array<i32>" (empty) or "array<i32: ...>".
-    while (p < end && *p == ' ') p++;
-    if (p < end && *p == '>') {
-        return (int32_t *)arena_alloc(arena, sizeof(int32_t));
-    }
-    if (p >= end || *p != ':') return NULL;
-    p++;
-    // Upper bound the element count by counting commas + 1.
-    size_t cap = 1;
-    for (const char *q = p; q < end && *q != '>'; q++) if (*q == ',') cap++;
-    int32_t *vs = (int32_t *)arena_alloc(arena, cap * sizeof(int32_t));
-    size_t n = 0;
-    while (p < end && *p != '>') {
-        while (p < end && (*p == ' ' || *p == ',')) p++;
-        if (p >= end || *p == '>') break;
-        bool neg = false;
-        if (*p == '-') { neg = true; p++; }
-        if (p >= end || *p < '0' || *p > '9') return NULL;
-        int64_t v = 0;
-        while (p < end && *p >= '0' && *p <= '9') { v = v*10 + (*p - '0'); p++; }
-        if (neg) v = -v;
-        vs[n++] = (int32_t)v;
-    }
+// The elements of a dense i32 array attribute, arena-allocated; NULL for an
+// empty array or another kind. Sets *n_out.
+static int32_t *parse_dense_i32_array(MLIR_Context *ctx, Arena *arena, MLIR_AttributeHandle a,
+                                      size_t *n_out) {
+    size_t n = MLIR_GetAttributeDenseSize(ctx, a);
     *n_out = n;
+    if (n == 0) return NULL;
+    int32_t *vs = (int32_t *)arena_alloc(arena, n * sizeof(int32_t));
+    for (size_t i = 0; i < n; i++) vs[i] = (int32_t)MLIR_GetAttributeDenseElement(ctx, a, i);
     return vs;
 }
 
@@ -1037,29 +1012,16 @@ static bool lower_scf_index_switch(FnCtx *F, MLIR_OpHandle op) {
     if (n_regions < 1) return false;
     size_t n_cases = n_regions - 1;  // region 0 = default
 
-    // Parse "cases" attribute: prints as "array<i64: 1, 2, 3>".
+    // The "cases" attribute: a dense i64 array.
     int64_t *case_vals = NULL;
     if (n_cases > 0) {
         MLIR_AttributeHandle ca = find_attr(F->ctx, op, MLIR_KEY_CASES);
         if (ca == MLIR_INVALID_HANDLE) return false;
-        string cs = MLIR_GetAttributeAsString(F->ctx, ca);
         case_vals = (int64_t *)arena_alloc(F->arena, n_cases * sizeof(int64_t));
-        size_t p = 0;
-        while (p < cs.size && cs.str[p] != ':') p++;
-        if (p < cs.size) p++;
-        size_t n_parsed = 0;
-        while (p < cs.size && n_parsed < n_cases) {
-            while (p < cs.size && (cs.str[p] == ' ' || cs.str[p] == ',')) p++;
-            if (p >= cs.size || cs.str[p] == '>') break;
-            int64_t sign = 1;
-            if (cs.str[p] == '-') { sign = -1; p++; }
-            int64_t v = 0;
-            while (p < cs.size && cs.str[p] >= '0' && cs.str[p] <= '9') {
-                v = v * 10 + (cs.str[p] - '0');
-                p++;
-            }
-            case_vals[n_parsed++] = sign * v;
-        }
+        size_t n_parsed = MLIR_GetAttributeDenseSize(F->ctx, ca);
+        if (n_parsed > n_cases) n_parsed = n_cases;
+        for (size_t k = 0; k < n_parsed; k++)
+            case_vals[k] = MLIR_GetAttributeDenseElement(F->ctx, ca, k);
         if (n_parsed != n_cases) return false;
     }
 
@@ -1892,8 +1854,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         MLIR_AttributeHandle ria = find_attr(F->ctx, op, MLIR_KEY_RAW_CONSTANT_INDICES);
         if (ria == MLIR_INVALID_HANDLE) return false;
         size_t n_idx = 0;
-        int32_t *cidx = parse_dense_i32_array(F->arena,
-            MLIR_GetAttributeAsString(F->ctx, ria), &n_idx);
+        int32_t *cidx = parse_dense_i32_array(F->ctx, F->arena, ria, &n_idx);
         if (!cidx || n_idx == 0) return false;
 
         size_t op_idx = 1;

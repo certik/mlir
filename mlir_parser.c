@@ -935,6 +935,71 @@ MLIR_NamedAttr create_bool_attr(Parser *parser, string name, bool value) {
     return MLIR_Named(MLIR_InternAttrKey(parser->ctx, name), MLIR_CreateAttributeBool(parser->ctx, value));
 }
 
+// The text of an attribute value up to the `,` or `}` that ends it, outside
+// `<...>`. An unmatched `<` is an error (it would otherwise read to the end
+// of the input).
+static string parse_attr_payload(Parser *parser) {
+    string payload = str_lit("");
+    int angle = 0;
+    uint64_t first = parser->first;
+    while (!parser_peek(parser, TK_EOF) &&
+           !(angle == 0 && (parser_peek(parser, TK_COMMA) || parser_peek(parser, TK_RBRACE)))) {
+        string tok = parser_token_str(parser);
+        if (parser_peek(parser, TK_LANGLE)) angle++;
+        else if (parser_peek(parser, TK_RANGLE) && angle > 0) angle--;
+        payload = payload.size ? str_concat(parser->arena, payload, tok) : tok;
+        parser_next_token(parser);
+    }
+    if (angle > 0)
+        parser_error(parser, str_lit("Unmatched '<' in an attribute value"), first, first);
+    return payload;
+}
+
+// An attribute the parser keeps as its text, except a dense integer array
+// (`array<i32: 1, 2>`, `array<i64>`), which becomes a typed one so that
+// passes can read it (MLIR_GetAttributeDenseElement).
+MLIR_NamedAttr create_payload_attr(Parser *parser, string name, string payload) {
+    string p32 = str_lit("array<i32");
+    string p64 = str_lit("array<i64");
+    bool is32 = payload.size >= p32.size && memcmp(payload.str, p32.str, p32.size) == 0;
+    bool is64 = payload.size >= p64.size && memcmp(payload.str, p64.str, p64.size) == 0;
+    if ((!is32 && !is64) || payload.str[payload.size - 1] != '>')
+        return create_string_attr(parser, name, payload);
+    size_t cap = 1;
+    for (size_t i = 0; i < payload.size; i++) if (payload.str[i] == ',') cap++;
+    int64_t *vals = arena_new_array(parser->arena, int64_t, cap);
+    size_t n = 0;
+    size_t i = p32.size;
+    while (i < payload.size && (payload.str[i] == ' ' || payload.str[i] == ':')) i++;
+    while (i < payload.size && payload.str[i] != '>') {
+        bool neg = false;
+        if (payload.str[i] == '-') { neg = true; i++; }
+        if (i >= payload.size || payload.str[i] < '0' || payload.str[i] > '9')
+            return create_string_attr(parser, name, payload);
+        // Accumulate the magnitude unsigned; a value out of the element
+        // type's range keeps the attribute as text, exactly as written.
+        uint64_t mag = 0;
+        uint64_t limit = is64 ? (neg ? (uint64_t)1 << 63 : ((uint64_t)1 << 63) - 1)
+                              : (neg ? (uint64_t)1 << 31 : ((uint64_t)1 << 31) - 1);
+        while (i < payload.size && payload.str[i] >= '0' && payload.str[i] <= '9') {
+            uint64_t d = (uint64_t)(payload.str[i++] - '0');
+            if (mag > (limit - d) / 10) return create_string_attr(parser, name, payload);
+            mag = mag * 10 + d;
+        }
+        vals[n++] = neg ? (int64_t)(0 - mag) : (int64_t)mag;
+        while (i < payload.size && (payload.str[i] == ' ' || payload.str[i] == ',')) i++;
+    }
+    MLIR_AttributeHandle a;
+    if (is64) {
+        a = MLIR_CreateAttributeDenseI64Array(parser->ctx, vals, n);
+    } else {
+        int32_t *v32 = arena_new_array(parser->arena, int32_t, cap);
+        for (size_t k = 0; k < n; k++) v32[k] = (int32_t)vals[k];
+        a = MLIR_CreateAttributeDenseI32Array(parser->ctx, v32, n);
+    }
+    return MLIR_Named(MLIR_InternAttrKey(parser->ctx, name), a);
+}
+
 void operation_append_attribute(Parser *parser, MLIR_OpHandle op, MLIR_NamedAttr attr) {
     if (attr.value == MLIR_INVALID_HANDLE) return;
     MLIR_SetOpAttr(parser->ctx, op, attr.key, attr.value);
@@ -1007,17 +1072,8 @@ void parse_angle_brace_attributes(Parser *parser, MLIR_NamedAttr **attributes, s
                         for (size_t i = 0; i < *n_attributes; i++) new_attrs[i] = (*attributes)[i];
                         *attributes = new_attrs;
                     }
-                    string payload = str_lit("");
-                    int angle = 0;
-                    while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_COMMA) && !parser_peek(parser, TK_RBRACE)) {
-                        string tok = parser_token_str(parser);
-                        if (parser_peek(parser, TK_LANGLE)) angle++;
-                        else if (parser_peek(parser, TK_RANGLE) && angle > 0) angle--;
-                        payload = payload.size ? str_concat(parser->arena, payload, tok) : tok;
-                        parser_next_token(parser);
-                        if (angle == 0 && (parser_peek(parser, TK_COMMA) || parser_peek(parser, TK_RBRACE))) break;
-                    }
-                    (*attributes)[(*n_attributes)++] = create_string_attr(parser, attr_name, payload);
+                    string payload = parse_attr_payload(parser);
+                    (*attributes)[(*n_attributes)++] = create_payload_attr(parser, attr_name, payload);
                 }
                 if (parser_peek(parser, TK_COMMA)) parser_expect(parser, TK_COMMA);
             } else {
@@ -1063,18 +1119,9 @@ void parse_brace_attributes(Parser *parser, MLIR_NamedAttr **attributes, size_t 
                 }
 
                 // Parse attribute value
-                string payload = str_lit("");
-                int angle = 0;
-                while (!parser_peek(parser, TK_EOF) && !parser_peek(parser, TK_COMMA) && !parser_peek(parser, TK_RBRACE)) {
-                    string tok = parser_token_str(parser);
-                    if (parser_peek(parser, TK_LANGLE)) angle++;
-                    else if (parser_peek(parser, TK_RANGLE) && angle > 0) angle--;
-                    payload = payload.size ? str_concat(parser->arena, payload, tok) : tok;
-                    parser_next_token(parser);
-                    if (angle == 0 && (parser_peek(parser, TK_COMMA) || parser_peek(parser, TK_RBRACE))) break;
-                }
+                string payload = parse_attr_payload(parser);
 
-                (*attributes)[(*n_attributes)++] = create_string_attr(parser, attr_name, payload);
+                (*attributes)[(*n_attributes)++] = create_payload_attr(parser, attr_name, payload);
             }
 
             if (parser_peek(parser, TK_COMMA)) {

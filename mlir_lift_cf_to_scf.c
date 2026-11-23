@@ -2780,30 +2780,17 @@ static BranchXformResult transform_to_structured_cf_branches(MLIR_Context *ctx,
         // regions = [case0..caseN-1, default], and a `cases` DenseI64Array attr.
         MLIR_ValueHandle flag = MLIR_GetOpOperand(ctx, term, 0);
 
-        // Parse case_values attribute: "array<i32: V0, V1, ...>".
+        // The case_values attribute: a dense i32 array.
         size_t n_cases = num_succ - 1;
         int64_t *cases_i64 = n_cases
             ? arena_new_array(arena, int64_t, n_cases) : NULL;
         bool parsed = false;
         MLIR_AttributeHandle cva = MLIR_GetOpAttr(ctx, term, MLIR_KEY_CASE_VALUES);
         if (cva != MLIR_INVALID_HANDLE) {
-            string s = MLIR_GetAttributeAsString(st->ctx, cva);
-            size_t p = 0;
-            while (p < s.size && s.str[p] != ':') p++;
-            if (p < s.size) p++;
-            size_t n_parsed = 0;
-            while (p < s.size && n_parsed < n_cases) {
-                while (p < s.size && (s.str[p] == ' ' || s.str[p] == ',')) p++;
-                if (p >= s.size || s.str[p] == '>') break;
-                int64_t sign = 1;
-                if (s.str[p] == '-') { sign = -1; p++; }
-                int64_t v = 0;
-                while (p < s.size && s.str[p] >= '0' && s.str[p] <= '9') {
-                    v = v * 10 + (s.str[p] - '0');
-                    p++;
-                }
-                cases_i64[n_parsed++] = sign * v;
-            }
+            size_t n_parsed = MLIR_GetAttributeDenseSize(st->ctx, cva);
+            if (n_parsed > n_cases) n_parsed = n_cases;
+            for (size_t k = 0; k < n_parsed; k++)
+                cases_i64[k] = MLIR_GetAttributeDenseElement(st->ctx, cva, k);
             parsed = (n_parsed == n_cases);
         }
         if (!parsed) {

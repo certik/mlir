@@ -37,59 +37,6 @@ static void api_check_failed(const char *fn, const char *what) {
 
 // Internal concrete IR definitions
 
-typedef enum {
-    LOC_KIND_UNKNOWN,
-    LOC_KIND_FILE,
-    LOC_KIND_NAME,
-    LOC_KIND_CALLSITE,
-    LOC_KIND_FUSED,
-    LOC_KIND_REF
-} LocationKind;
-
-// Internal struct definitions using handle fields
-
-typedef struct IR_Attribute {
-    enum {
-        ATTR_KIND_INTEGER,
-        ATTR_KIND_FLOAT,
-        ATTR_KIND_STRING,
-        ATTR_KIND_BOOL,
-        ATTR_KIND_ARRAY,
-        ATTR_KIND_DICT,
-        ATTR_KIND_TYPE
-    } kind;
-    union {
-        int64_t integer_value;
-        double float_value;
-        string string_value;
-        bool bool_value;
-        struct {
-            MLIR_AttributeHandle *elements;
-            size_t count;
-        } array;
-        struct {
-            MLIR_NamedAttr *entries;
-            size_t count;
-        } dict;
-        MLIR_TypeHandle type_value;
-    } data;
-    // MLIR type of the attribute's value. Required for ATTR_KIND_INTEGER
-    // and ATTR_KIND_FLOAT (and will apply to ATTR_KIND_DENSE_ELEMENTS
-    // when added). For other kinds it is unused and must be
-    // MLIR_INVALID_HANDLE (the zero value, set by `IR_Attribute a = {0}`).
-    MLIR_TypeHandle type;
-} IR_Attribute;
-
-typedef struct IR_Location {
-    LocationKind kind;
-    union {
-        struct { string filename; int line; int column; } file;
-        struct { string name; } name;
-        struct { int ref_id; } ref;
-    } data;
-    string original_text;
-} IR_Location;
-
 // --- IR storage (doc/mlir_api_design.md section 2.2, option D; #354) --------
 //
 // Ops, values, blocks and regions live in context-owned vectors, one per
@@ -102,12 +49,9 @@ typedef struct IR_Location {
 //     threaded through these records, so a use is an operand index.
 //   - vals: an op's results are consecutive, so result i is first_result + i.
 //   - extra: 32-bit words; an op's region indices, then a (block, operand
-//     count) pair per successor.
-//   - ptrs: pointer-sized words; an op's attributes as (key, value) pairs
-//     (attribute values are arena pointers until they are interned as
-//     indices).
-// The explicit result types of the rare op whose results do not carry them
-// are type indices in `extra` too.
+//     count) pair per successor; separately, an op's attributes as (key,
+//     attribute index) pairs, and the explicit result types (type indices)
+//     of the rare op whose results do not carry them.
 // A block's op and argument lists and a region's block list are arrays of
 // 32-bit indices in the IR arena. Erased ops stay as empty slots: there is no
 // free list and no compaction.
@@ -141,7 +85,7 @@ typedef struct IR_Operand {
 #define VAL_INDEX_MASK 0x3fffffffu
 
 typedef struct IR_Value {
-    MLIR_LocationHandle location;
+    uint32_t location;   // location index, 0 = none
     uint32_t type;       // type index, 0 = none
     uint32_t def;        // op index (result) or block index (block argument)
     uint32_t index;      // result/argument index | VAL_* flags
@@ -164,11 +108,11 @@ typedef struct IR_Op {
     uint32_t first_extra;     // extra index: regions, then (block, count) pairs
     uint16_t n_regions;
     uint16_t n_successors;
-    uint32_t first_attr;      // ptrs index: (key, value) word pairs
+    uint32_t first_attr;      // extra index: (key, attribute index) pairs
     uint16_t n_attributes;
     uint16_t flags;
     uint32_t aux;             // op_aux index, 0 = none
-    MLIR_LocationHandle location;
+    uint32_t location;        // location index, 0 = none
 } IR_Op;
 
 // Rarely-used op metadata consulted only by the classic printer and the
@@ -176,7 +120,7 @@ typedef struct IR_Op {
 // recorded source line), plus the result types of an op whose results do not
 // carry them (MLIR_CreateOp with n_result_types != n_results).
 typedef struct IR_OpAux {
-    MLIR_LocationHandle unnumbered_loc_def;
+    uint32_t unnumbered_loc_def;  // location index
     string trailing_comment;
     int32_t source_line_start;
     uint32_t first_result_type;  // extra index (type indices)
@@ -235,6 +179,59 @@ typedef struct IR_Type {
     uint64_t count;   // LLVM array or vector: number of elements
 } IR_Type;
 
+// --- Attributes (#350) ----------------------------------------------------------
+//
+// Attribute values are hash-consed into the context's `attrs` vector, like
+// types: an attribute handle is the record's index, so equal values have
+// equal handles. A record holds the scalar payload; arrays, dictionaries
+// and dense arrays keep their elements as words of `ax` (attribute indices,
+// (key, attribute index) pairs, or the dense values, 32 bits per i32 and 64
+// per i64 element), and a string's bytes are in the persistent arena. Floats
+// hash and compare by bit pattern. Distinct attributes are never looked up:
+// each gets a new record.
+
+typedef enum {
+    AK_NONE = 0,
+    AK_INTEGER,     // bits: the value, type: its type
+    AK_FLOAT,       // bits: the IEEE double's bit pattern, type: its type
+    AK_STRING,      // bits: pointer to the bytes, n: the length (symbol
+                    // refs `@name` and LLVM linkages `#llvm.linkage<...>` too)
+    AK_BOOL,        // bits: 0 or 1
+    AK_ARRAY,       // n attribute indices from ax[first]
+    AK_DICT,        // n (key, attribute index) pairs from ax[first]
+    AK_TYPE,        // type: the payload
+    AK_DENSE_I32,   // n values, one word each, from ax[first]
+    AK_DENSE_I64,   // n values, two words each (low, high), from ax[first]
+    AK_DISTINCT     // type: the referenced attribute's index; bits: number
+} AttrKindInternal;
+
+typedef struct IR_Attr {
+    uint8_t kind;     // AttrKindInternal
+    uint8_t pad8;
+    uint16_t pad16;
+    uint32_t type;
+    uint32_t first;
+    uint32_t n;
+    uint64_t bits;
+    uint32_t text;    // atext index of the printed form (dense), 0 = none yet
+    uint32_t pad;
+} IR_Attr;
+
+// --- Locations (#350) ----------------------------------------------------------
+//
+// A location is an index into the context's `locs` vector; locations are
+// not uniqued. `str` is a loc_strings index: the file name (FILE), the name
+// (NAME) or the parser's original text (UNKNOWN), 0 = none. Element 1 is the
+// shared unknown location without text.
+
+typedef struct IR_Loc {
+    uint32_t kind;    // MLIR_LocationKind
+    uint32_t str;
+    int32_t line;     // FILE: line; REF: the reference id
+    int32_t col;
+    uint32_t text;    // loc_strings index of the `loc(...)` text, 0 = not made yet
+} IR_Loc;
+
 // The context. Everything that is not IR lives here; there is no
 // process-wide state. The context owns `persistent` (this struct, the names
 // of op types and identified structs) and the type vectors, so types outlive
@@ -245,7 +242,7 @@ struct MLIR_Context {
     bool no_def_use_tracking;
     uint32_t salt;         // MLIR_API_CHECKS handle salt (see h_make)
     // The IR vectors (see above), owned by the context.
-    IR_Vec ops, vals, opnds, extra, ptrs, blocks, regions, op_aux, names;
+    IR_Vec ops, vals, opnds, extra, blocks, regions, op_aux, names;
     // The uniqued types (see "Types" below): the type records, their child
     // words, the names of identified structs and the hash table that
     // uniques them.
@@ -255,6 +252,16 @@ struct MLIR_Context {
     uint32_t tmap_n;
     uint32_t int_types[65];  // iN for N <= 64, 0 = not created yet
     uint32_t ptr_type;       // !llvm.ptr, 0 = not created yet
+    // The uniqued attributes (see "Attributes" below): the records, their
+    // child words, the cached printed forms and the hash table.
+    IR_Vec attrs, ax, atext;
+    uint32_t *amap;
+    uint32_t amap_cap;
+    uint32_t amap_n;
+    // Locations: the records, and the interned file names, names and
+    // parser texts they refer to.
+    IR_Vec locs;
+    AttrKeyTable loc_strings;
     // Diagnostic handler; NULL means the default (print to stderr).
     MLIR_DiagnosticHandler diag_fn;
     void *diag_user;
@@ -269,7 +276,6 @@ struct MLIR_Context {
 #define VALS(c)    ((IR_Value *)(c)->vals.data)
 #define OPNDS(c)   ((IR_Operand *)(c)->opnds.data)
 #define EXTRA(c)   ((uint32_t *)(c)->extra.data)
-#define PTRS(c)    ((uintptr_t *)(c)->ptrs.data)
 #define BLOCKS(c)  ((IR_Block *)(c)->blocks.data)
 #define REGIONS(c) ((IR_Region *)(c)->regions.data)
 #define OPAUX(c)   ((IR_OpAux *)(c)->op_aux.data)
@@ -277,6 +283,10 @@ struct MLIR_Context {
 #define TYPES(c)   ((IR_Type *)(c)->types.data)
 #define TYX(c)     ((uint32_t *)(c)->tyx.data)
 #define TNAMES(c)  ((string *)(c)->tnames.data)
+#define ATTRS(c)   ((IR_Attr *)(c)->attrs.data)
+#define AX(c)      ((uint32_t *)(c)->ax.data)
+#define ATEXT(c)   ((string *)(c)->atext.data)
+#define LOCS(c)    ((IR_Loc *)(c)->locs.data)
 
 // The one growth hook: makes room for `need` elements. The capacity at least
 // doubles (or becomes `need`, if that is more) and uses all of the buddy
@@ -351,6 +361,8 @@ static inline uint32_t vec_push(IR_Vec *v, uint32_t k) {
 #define HK_BLOCK 3u
 #define HK_REGION 4u
 #define HK_TYPE 5u
+#define HK_ATTR 6u
+#define HK_LOC 7u
 #define H_SHIFT 28
 #define H_MASK 0x0fffffffu
 static uint32_t h_index(MLIR_Context *c, uintptr_t h, uint32_t kind, uint32_t n, const char *fn) {
@@ -370,22 +382,30 @@ static inline uintptr_t h_make(MLIR_Context *c, uint32_t i, uint32_t kind) {
 #define BLOCK_IDX(c, h, fn)  h_index((c), (h), HK_BLOCK, (c)->blocks.n, (fn))
 #define REGION_IDX(c, h, fn) h_index((c), (h), HK_REGION, (c)->regions.n, (fn))
 #define TYPE_IDX(c, h, fn)   h_index((c), (h), HK_TYPE, (c)->types.n, (fn))
+#define ATTR_IDX(c, h, fn)   h_index((c), (h), HK_ATTR, (c)->attrs.n, (fn))
+#define LOC_IDX(c, h, fn)    h_index((c), (h), HK_LOC, (c)->locs.n, (fn))
 #define OP_H(c, i)     ((MLIR_OpHandle)h_make((c), (i), HK_OP))
 #define VAL_H(c, i)    ((MLIR_ValueHandle)h_make((c), (i), HK_VALUE))
 #define BLOCK_H(c, i)  ((MLIR_BlockHandle)h_make((c), (i), HK_BLOCK))
 #define REGION_H(c, i) ((MLIR_RegionHandle)h_make((c), (i), HK_REGION))
 #define TYPE_H(c, i)   ((MLIR_TypeHandle)h_make((c), (i), HK_TYPE))
+#define ATTR_H(c, i)   ((MLIR_AttributeHandle)h_make((c), (i), HK_ATTR))
+#define LOC_H(c, i)    ((MLIR_LocationHandle)h_make((c), (i), HK_LOC))
 #else
 #define OP_IDX(c, h, fn)     ((uint32_t)(h))
 #define VAL_IDX(c, h, fn)    ((uint32_t)(h))
 #define BLOCK_IDX(c, h, fn)  ((uint32_t)(h))
 #define REGION_IDX(c, h, fn) ((uint32_t)(h))
 #define TYPE_IDX(c, h, fn)   ((uint32_t)(h))
+#define ATTR_IDX(c, h, fn)   ((uint32_t)(h))
+#define LOC_IDX(c, h, fn)    ((uint32_t)(h))
 #define OP_H(c, i)     ((MLIR_OpHandle)(i))
 #define VAL_H(c, i)    ((MLIR_ValueHandle)(i))
 #define BLOCK_H(c, i)  ((MLIR_BlockHandle)(i))
 #define REGION_H(c, i) ((MLIR_RegionHandle)(i))
 #define TYPE_H(c, i)   ((MLIR_TypeHandle)(i))
+#define ATTR_H(c, i)   ((MLIR_AttributeHandle)(i))
+#define LOC_H(c, i)    ((MLIR_LocationHandle)(i))
 #endif
 
 // Under MLIR_API_CHECKS an erased op keeps this type, so every later use of
@@ -410,19 +430,11 @@ static void check_live_op(MLIR_Context *c, uint32_t o, const char *fn) {
 #define CHECK_NOT_ERASED(c, o, fn) \
     API_CHECK((o) == 0 || OPS(c)[o].op_type != OP_TYPE_ERASED_SENTINEL, fn, "op was erased")
 #define CHECK_INDEX(i, n, fn) API_CHECK((size_t)(i) < (size_t)(n), fn, "index out of range")
-// A typed attribute getter applied to the wrong kind.
+// A typed attribute getter applied to the wrong kind (`a` is the record).
 #define CHECK_ATTR_KIND(ah, ok, fn, what) do { \
         API_CHECK((ah) != MLIR_INVALID_HANDLE, fn, "attribute handle is NULL"); \
         API_CHECK(ok, fn, what); \
     } while (0)
-
-static inline IR_Attribute *resolve_attr(MLIR_AttributeHandle h) {
-    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Attribute *)(uintptr_t)h;
-}
-
-static inline IR_Location *resolve_loc(MLIR_LocationHandle h) {
-    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Location *)(uintptr_t)h;
-}
 
 // --- Def-use lists -----------------------------------------------------------
 //
@@ -488,7 +500,7 @@ static uint32_t value_create(MLIR_Context *c, uint32_t def, uint32_t index,
                              string register_name) {
     uint32_t v = vec_push(&c->vals, 1);
     IR_Value *p = &VALS(c)[v];
-    p->location = loc;
+    p->location = LOC_IDX(c, loc, "MLIR_CreateValue");
     p->type = type;
     p->def = def;
     p->index = index & VAL_INDEX_MASK;
@@ -510,7 +522,7 @@ static uint32_t op_aux_get(MLIR_Context *c, uint32_t o) {
     if (a) return a;
     a = vec_push(&c->op_aux, 1);
     IR_OpAux *p = &OPAUX(c)[a];
-    p->unnumbered_loc_def = MLIR_INVALID_HANDLE;
+    p->unnumbered_loc_def = 0;
     p->trailing_comment = (string){0};
     p->source_line_start = -1;
     p->first_result_type = 0;
@@ -683,32 +695,177 @@ static IR_Type type_make(MLIR_TypeKind k) {
     return t;
 }
 
-static inline MLIR_AttributeHandle alloc_attr_obj(MLIR_Context *ctx, IR_Attribute a) {
-    if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
-    IR_Attribute *slot = arena_new(ctx->arena, IR_Attribute);
-    *slot = a;
-    return (MLIR_AttributeHandle)(uintptr_t)slot;
+// --- Attribute interning ------------------------------------------------------
+//
+// Attributes are created for most ops, so this path is written for tinyC,
+// which compiles it when self-hosting: no struct is passed by value or
+// cleared with memset, and the mixing is spelled out instead of calling a
+// helper per word.
+
+#define ATTR_MIX(h, w) do { (h) ^= (uint32_t)(w); (h) *= 0x9E3779B1u; (h) ^= (h) >> 15; } while (0)
+
+// The number of `ax` words of an attribute record.
+static uint32_t attr_words(const IR_Attr *a) {
+    switch (a->kind) {
+        case AK_ARRAY: case AK_DENSE_I32: return a->n;
+        case AK_DICT: case AK_DENSE_I64: return 2 * a->n;
+        default: return 0;
+    }
 }
 
-// Copy `s` into ctx->arena so the returned string is owned by the context's
-// arena rather than aliasing caller-provided memory. Every attribute
-// constructor copies its name (and string payload) this way, as upstream does. Multi-pass pipelines
-// (wasm->macho) free intermediate arenas between passes, so any string stored
-// in an IR object that must outlive its producing pass has to live in the
-// destination arena. Empty/NULL strings are returned unchanged.
-static inline string arena_dup_str(MLIR_Context *ctx, string s) {
-    if (!ctx || !ctx->arena || s.size == 0 || !s.str) return s;
-    char *p = arena_new_array(ctx->arena, char, s.size);
-    memcpy(p, s.str, s.size);
-    return (string){ p, s.size };
+// Hashes all `n` bytes, four at a time: once per created string, and a
+// sample would make same-length strings that share it (data segments)
+// collide.
+static uint32_t attr_hash_bytes(uint32_t h, const uint8_t *p, uint32_t n) {
+    uint32_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        uint32_t w = (uint32_t)p[i] | ((uint32_t)p[i + 1] << 8) |
+                     ((uint32_t)p[i + 2] << 16) | ((uint32_t)p[i + 3] << 24);
+        ATTR_MIX(h, w);
+    }
+    for (; i < n; i++) ATTR_MIX(h, p[i]);
+    return h;
 }
 
-static inline MLIR_LocationHandle alloc_loc(MLIR_Context *ctx, IR_Location l) {
-    if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
-    IR_Location *slot = arena_new(ctx->arena, IR_Location);
-    *slot = l;
-    return (MLIR_LocationHandle)(uintptr_t)slot;
+static uint32_t attr_hash(const IR_Attr *a, const uint32_t *kids) {
+    uint32_t h = 0x811C9DC5u ^ ((uint32_t)a->kind << 24);
+    ATTR_MIX(h, a->type);
+    ATTR_MIX(h, a->n);
+    if (a->kind == AK_STRING) return attr_hash_bytes(h, (const uint8_t *)(uintptr_t)a->bits, a->n);
+    ATTR_MIX(h, (uint32_t)a->bits);
+    ATTR_MIX(h, (uint32_t)(a->bits >> 32));
+    uint32_t nw = attr_words(a);
+    for (uint32_t i = 0; i < nw; i++) ATTR_MIX(h, kids[i]);
+    return h;
 }
+
+// The rest of the comparison of two attributes whose kind, type and length
+// are equal (see attr_intern).
+static bool attr_same_payload(const IR_Attr *a, const uint32_t *ak, const IR_Attr *b, const uint32_t *bk) {
+    if (a->kind == AK_STRING) {
+        const uint8_t *p = (const uint8_t *)(uintptr_t)a->bits;
+        const uint8_t *q = (const uint8_t *)(uintptr_t)b->bits;
+        for (uint32_t i = 0; i < a->n; i++)
+            if (p[i] != q[i]) return false;
+        return true;
+    }
+    if (a->bits != b->bits) return false;
+    uint32_t nw = attr_words(a);
+    for (uint32_t i = 0; i < nw; i++)
+        if (ak[i] != bk[i]) return false;
+    return true;
+}
+
+static void amap_alloc(MLIR_Context *c, uint32_t cap) {
+    size_t actual = 0;
+    c->amap = (uint32_t *)buddy_alloc((size_t)cap * sizeof(uint32_t), &actual);
+    if (!c->amap) {
+        fprintf(stderr, "MLIR: out of memory growing the attribute table\n");
+        abort();
+    }
+    memset(c->amap, 0, (size_t)cap * sizeof(uint32_t));
+    c->amap_cap = cap;
+    c->amap_n = 0;
+}
+
+static void amap_insert(MLIR_Context *c, uint32_t a, uint32_t h) {
+    uint32_t mask = c->amap_cap - 1;
+    uint32_t i = h & mask;
+    while (c->amap[i] != 0) i = (i + 1) & mask;
+    c->amap[i] = a;
+    c->amap_n++;
+}
+
+static void amap_grow(MLIR_Context *c) {
+    uint32_t *old = c->amap;
+    amap_alloc(c, c->amap_cap * 2);
+    for (uint32_t a = 1; a < c->attrs.n; a++) {
+        IR_Attr *r = &ATTRS(c)[a];
+        if (r->kind == AK_DISTINCT) continue;
+        amap_insert(c, a, attr_hash(r, AX(c) + r->first));
+    }
+    buddy_free(old);
+}
+
+// Interns the candidate `*a`, whose child words (if any) are the last words
+// of `ax` from `a->first` on (popped again on a hit) and whose string bytes
+// (AK_STRING) are the caller's (copied to the persistent arena on a miss).
+static uint32_t attr_intern(MLIR_Context *c, IR_Attr *a) {
+    uint32_t h = attr_hash(a, AX(c) + a->first);
+    uint32_t mask = c->amap_cap - 1;
+    for (uint32_t i = h & mask; c->amap[i] != 0; i = (i + 1) & mask) {
+        uint32_t e = c->amap[i];
+        const IR_Attr *r = &ATTRS(c)[e];
+        if (r->kind == a->kind && r->type == a->type && r->n == a->n &&
+            attr_same_payload(r, AX(c) + r->first, a, AX(c) + a->first)) {
+            if (attr_words(a)) c->ax.n = a->first;
+            return e;
+        }
+    }
+    if (a->kind == AK_STRING) {
+        // Own the bytes (an empty string: point at a constant, not at the
+        // caller's buffer).
+        const char *p = "";
+        if (a->n > 0) {
+            char *q = arena_new_array(c->persistent, char, a->n);
+            memcpy(q, (const void *)(uintptr_t)a->bits, a->n);
+            p = q;
+        }
+        a->bits = (uint64_t)(uintptr_t)p;
+    }
+    // Grow first: the rehash inserts every attribute already in `attrs`.
+    if ((c->amap_n + 1) * 2 > c->amap_cap) amap_grow(c);
+    uint32_t idx = vec_push(&c->attrs, 1);
+    ATTRS(c)[idx] = *a;
+    amap_insert(c, idx, h);
+    return idx;
+}
+
+// The fast path of attr_intern for a scalar (integer, float, bool, type):
+// the same hash and comparison, without building a candidate record.
+static uint32_t attr_intern_scalar(MLIR_Context *c, uint32_t kind, uint32_t type, uint64_t bits) {
+    uint32_t h = 0x811C9DC5u ^ (kind << 24);
+    ATTR_MIX(h, type);
+    ATTR_MIX(h, 0);
+    ATTR_MIX(h, (uint32_t)bits);
+    ATTR_MIX(h, (uint32_t)(bits >> 32));
+    uint32_t mask = c->amap_cap - 1;
+    for (uint32_t i = h & mask; c->amap[i] != 0; i = (i + 1) & mask) {
+        const IR_Attr *r = &ATTRS(c)[c->amap[i]];
+        if (r->bits == bits && r->kind == kind && r->type == type && r->n == 0) return c->amap[i];
+    }
+    if ((c->amap_n + 1) * 2 > c->amap_cap) amap_grow(c);
+    uint32_t idx = vec_push(&c->attrs, 1);
+    IR_Attr *r = &ATTRS(c)[idx];
+    r->kind = (uint8_t)kind;
+    r->pad8 = 0;
+    r->pad16 = 0;
+    r->type = type;
+    r->first = 0;
+    r->n = 0;
+    r->bits = bits;
+    r->text = 0;
+    r->pad = 0;
+    amap_insert(c, idx, h);
+    return idx;
+}
+
+// An empty candidate of kind `k`.
+static void attr_init(IR_Attr *a, AttrKindInternal k) {
+    a->kind = (uint8_t)k;
+    a->pad8 = 0;
+    a->pad16 = 0;
+    a->type = 0;
+    a->first = 0;
+    a->n = 0;
+    a->bits = 0;
+    a->text = 0;
+    a->pad = 0;
+}
+
+// The record of attribute handle `h` (element 0, all zero, for the invalid
+// handle).
+#define ATTR_REC(ctx, h, fn) (&ATTRS(ctx)[ATTR_IDX((ctx), (h), (fn))])
 
 // Context
 //
@@ -731,7 +888,6 @@ MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) {
     vec_init(&ctx->vals, (uint32_t)sizeof(IR_Value));
     vec_init(&ctx->opnds, (uint32_t)sizeof(IR_Operand));
     vec_init(&ctx->extra, (uint32_t)sizeof(uint32_t));
-    vec_init(&ctx->ptrs, (uint32_t)sizeof(uintptr_t));
     vec_init(&ctx->blocks, (uint32_t)sizeof(IR_Block));
     vec_init(&ctx->regions, (uint32_t)sizeof(IR_Region));
     vec_init(&ctx->op_aux, (uint32_t)sizeof(IR_OpAux));
@@ -740,6 +896,18 @@ MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) {
     vec_init(&ctx->tyx, (uint32_t)sizeof(uint32_t));
     vec_init(&ctx->tnames, (uint32_t)sizeof(string));
     tmap_alloc(ctx, 256);
+    vec_init(&ctx->attrs, (uint32_t)sizeof(IR_Attr));
+    vec_init(&ctx->ax, (uint32_t)sizeof(uint32_t));
+    vec_init(&ctx->atext, (uint32_t)sizeof(string));
+    amap_alloc(ctx, 1024);
+    vec_init(&ctx->locs, (uint32_t)sizeof(IR_Loc));
+    attr_key_table_init_strings(&ctx->loc_strings, persistent);
+    // Element 1: the shared unknown location.
+    {
+        uint32_t u = vec_push(&ctx->locs, 1);
+        memset(&LOCS(ctx)[u], 0, sizeof(IR_Loc));
+        LOCS(ctx)[u].kind = MLIR_LOC_UNKNOWN;
+    }
     if (options) {
         ctx->arena = options->arena;
         ctx->no_def_use_tracking = options->no_def_use_tracking;
@@ -753,9 +921,8 @@ MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) {
 // Linux and Windows hosts (and wasm32 linear memory is capped at 4 GiB too):
 // a reserved block uses up that heap even where its pages are never touched,
 // so an estimate that is too high could exhaust it. A quarter of the heap
-// holds a self-host lift's ops, values, operands and attribute handles
-// (7.5M ops: 420, 140, 86 and 81 MB); beyond it the vectors double as they
-// fill.
+// holds a self-host lift's ops, values, operands and attribute words;
+// beyond it the vectors double as they fill.
 #define IR_RESERVE_BUDGET ((size_t)1 << 30)
 
 // The buddy block a request for `bytes` takes (a power of two, with room for
@@ -768,9 +935,10 @@ static size_t buddy_block_bytes(size_t bytes) {
 
 // Reserves the vectors that grow with the op count for `n` more ops: per
 // op, tinyc's C pipeline makes about 0.8 values, 1.1 operands and 0.75
-// attributes, and the wasm pipelines 0.4-0.5, 0.5-0.7 and 1.4-1.7. The
-// region/successor words (0.05-0.2 per op), blocks, regions and the
-// printer-only vectors are small and just double. The estimate shrinks by
+// attributes (two `extra` words each), and the wasm pipelines 0.4-0.5,
+// 0.5-0.7 and 1.4-1.7. The region/successor words (0.05-0.2 per op, also in
+// `extra`), blocks, regions and the printer-only vectors are small and just
+// double. The estimate shrinks by
 // a quarter at a time until the blocks fit IR_RESERVE_BUDGET.
 void MLIR_SetContextExpectedOps(MLIR_Context *ctx, size_t n) {
     API_CHECK(ctx != NULL, "MLIR_SetContextExpectedOps", "context is NULL");
@@ -778,7 +946,7 @@ void MLIR_SetContextExpectedOps(MLIR_Context *ctx, size_t n) {
         size_t total = buddy_block_bytes((ctx->ops.n + n) * sizeof(IR_Op)) +
                        buddy_block_bytes((ctx->vals.n + n - n / 4) * sizeof(IR_Value)) +
                        buddy_block_bytes((ctx->opnds.n + n) * sizeof(IR_Operand)) +
-                       buddy_block_bytes((ctx->ptrs.n + 3 * n) * sizeof(uintptr_t));
+                       buddy_block_bytes((ctx->extra.n + 3 * n) * sizeof(uint32_t));
         if (total <= IR_RESERVE_BUDGET) break;
         n -= n / 4 ? n / 4 : n;
     }
@@ -786,7 +954,8 @@ void MLIR_SetContextExpectedOps(MLIR_Context *ctx, size_t n) {
     vec_reserve(&ctx->ops, ctx->ops.n + n);
     vec_reserve(&ctx->vals, ctx->vals.n + n - n / 4);
     vec_reserve(&ctx->opnds, ctx->opnds.n + n);
-    vec_reserve(&ctx->ptrs, ctx->ptrs.n + 3 * n);  // (key, value) per attribute
+    // Two words per attribute, (key, attribute index).
+    vec_reserve(&ctx->extra, ctx->extra.n + 3 * n);
 }
 
 void MLIR_DestroyContext(MLIR_Context *ctx) {
@@ -795,7 +964,6 @@ void MLIR_DestroyContext(MLIR_Context *ctx) {
     vec_free(&ctx->vals);
     vec_free(&ctx->opnds);
     vec_free(&ctx->extra);
-    vec_free(&ctx->ptrs);
     vec_free(&ctx->blocks);
     vec_free(&ctx->regions);
     vec_free(&ctx->op_aux);
@@ -804,6 +972,11 @@ void MLIR_DestroyContext(MLIR_Context *ctx) {
     vec_free(&ctx->tyx);
     vec_free(&ctx->tnames);
     buddy_free(ctx->tmap);
+    vec_free(&ctx->attrs);
+    vec_free(&ctx->ax);
+    vec_free(&ctx->atext);
+    buddy_free(ctx->amap);
+    vec_free(&ctx->locs);
     arena_destroy(ctx->persistent);
 }
 
@@ -844,9 +1017,9 @@ static void default_diagnostic_handler(void *user, MLIR_DiagSeverity severity,
                 MLIR_GetLocationFileLine(ctx, loc), MLIR_GetLocationFileColumn(ctx, loc),
                 sev, (int)message.size, message.str);
     } else if (loc != MLIR_INVALID_HANDLE && MLIR_GetLocationKind(ctx, loc) != MLIR_LOC_UNKNOWN &&
-               ((IR_Location *)loc)->original_text.size > 0) {
+               MLIR_GetLocationOriginalText(ctx, loc).size > 0) {
         // Other locations print in their `loc(...)` form, as upstream's do.
-        string text = ((IR_Location *)loc)->original_text;
+        string text = MLIR_GetLocationOriginalText(ctx, loc);
         fprintf(stderr, "%.*s: %s: %.*s\n", (int)text.size, text.str, sev,
                 (int)message.size, message.str);
     } else {
@@ -937,13 +1110,12 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     // Allocate everything first: growing a vector moves it.
     uint32_t op = vec_push(&ctx->ops, 1);
     uint32_t first_operand = vec_push(&ctx->opnds, (uint32_t)n_all);
-    uint32_t first_extra = vec_push(&ctx->extra, (uint32_t)n_extra);
-    uint32_t first_attr = vec_push(&ctx->ptrs, (uint32_t)(2 * n_attributes));
+    uint32_t first_extra = vec_push(&ctx->extra, (uint32_t)(n_extra + 2 * n_attributes));
+    uint32_t first_attr = first_extra + (uint32_t)n_extra;
     // From here to the aux record, pointers into these vectors are held.
     GEN_SAVE(ctx, ops);
     GEN_SAVE(ctx, opnds);
     GEN_SAVE(ctx, extra);
-    GEN_SAVE(ctx, ptrs);
     GEN_SAVE(ctx, vals);
 
     bool track = !ctx->no_def_use_tracking;
@@ -962,7 +1134,7 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     o->n_attributes = (uint16_t)n_attributes;
     o->flags = track ? OPF_TRACKED : 0;
     o->aux = 0;
-    o->location = location;
+    o->location = LOC_IDX(ctx, location, "MLIR_CreateOp");
 
     // Operands: the regular ones, then each successor's, linked in that
     // order (each at the front of its value's use list).
@@ -994,12 +1166,12 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
             if (operand_linked(ctx, op, rec[u].value)) use_push(ctx, u);
         }
     }
-    uintptr_t *pa = PTRS(ctx) + first_attr;
+    uint32_t *pa = EXTRA(ctx) + first_attr;
     for (size_t i = 0; i < n_attributes; i++) {
         API_CHECK(attributes[i].key != MLIR_KEY_INVALID && attributes[i].key < ctx->keys.n_keys &&
                   attributes[i].value != MLIR_INVALID_HANDLE, "MLIR_CreateOp", "bad attribute key or value");
         pa[2 * i] = attributes[i].key;
-        pa[2 * i + 1] = (uintptr_t)attributes[i].value;
+        pa[2 * i + 1] = ATTR_IDX(ctx, attributes[i].value, "MLIR_CreateOp");
     }
 
     // The results get this op as their definition, and a type from
@@ -1018,13 +1190,12 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     GEN_CHECK(ctx, ops, "MLIR_CreateOp");
     GEN_CHECK(ctx, opnds, "MLIR_CreateOp");
     GEN_CHECK(ctx, extra, "MLIR_CreateOp");
-    GEN_CHECK(ctx, ptrs, "MLIR_CreateOp");
     GEN_CHECK(ctx, vals, "MLIR_CreateOp");
 
     if (unnumbered_loc_def != MLIR_INVALID_HANDLE || trailing_comment.size != 0 ||
         source_line_start != -1 || explicit_types) {
         uint32_t a = op_aux_get(ctx, op);
-        OPAUX(ctx)[a].unnumbered_loc_def = unnumbered_loc_def;
+        OPAUX(ctx)[a].unnumbered_loc_def = LOC_IDX(ctx, unnumbered_loc_def, "MLIR_CreateOp");
         OPAUX(ctx)[a].trailing_comment = trailing_comment;
         OPAUX(ctx)[a].source_line_start = (int32_t)source_line_start;
         if (explicit_types) {
@@ -1177,14 +1348,14 @@ MLIR_AttrKey MLIR_GetOpAttributeKey(MLIR_Context *ctx, MLIR_OpHandle oh, size_t 
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpAttributeKey");
     CHECK_OP(ctx, o, "MLIR_GetOpAttributeKey");
     CHECK_INDEX(idx, OPS(ctx)[o].n_attributes, "MLIR_GetOpAttributeKey");
-    return (MLIR_AttrKey)PTRS(ctx)[OPS(ctx)[o].first_attr + 2 * idx];
+    return EXTRA(ctx)[OPS(ctx)[o].first_attr + 2 * idx];
 }
 
 MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_Context *ctx, MLIR_OpHandle oh, size_t idx) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpAttribute");
     CHECK_OP(ctx, o, "MLIR_GetOpAttribute");
     CHECK_INDEX(idx, OPS(ctx)[o].n_attributes, "MLIR_GetOpAttribute");
-    return (MLIR_AttributeHandle)PTRS(ctx)[OPS(ctx)[o].first_attr + 2 * idx + 1];
+    return ATTR_H(ctx, EXTRA(ctx)[OPS(ctx)[o].first_attr + 2 * idx + 1]);
 }
 
 // A scan of the op's (key, value) pairs comparing keys.
@@ -1192,10 +1363,10 @@ MLIR_AttributeHandle MLIR_GetOpAttr(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_At
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpAttr");
     CHECK_OP(ctx, o, "MLIR_GetOpAttr");
     const IR_Op *op = &OPS(ctx)[o];
-    const uintptr_t *p = PTRS(ctx) + op->first_attr;
-    const uintptr_t *end = p + 2 * (size_t)op->n_attributes;
+    const uint32_t *p = EXTRA(ctx) + op->first_attr;
+    const uint32_t *end = p + 2 * (size_t)op->n_attributes;
     for (; p < end; p += 2)
-        if (p[0] == key) return (MLIR_AttributeHandle)p[1];
+        if (p[0] == key) return ATTR_H(ctx, p[1]);
     return MLIR_INVALID_HANDLE;
 }
 
@@ -1244,7 +1415,7 @@ MLIR_ValueHandle MLIR_GetOpResult(MLIR_Context *ctx, MLIR_OpHandle oh, size_t id
 MLIR_LocationHandle MLIR_GetOpLocation(MLIR_Context *ctx, MLIR_OpHandle oh) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpLocation");
     CHECK_OP(ctx, o, "MLIR_GetOpLocation");
-    return OPS(ctx)[o].location;
+    return LOC_H(ctx, OPS(ctx)[o].location);
 }
 
 size_t MLIR_GetOpNumResultTypes(MLIR_Context *ctx, MLIR_OpHandle oh) {
@@ -1336,7 +1507,7 @@ size_t MLIR_GetBlockIndex(MLIR_Context *ctx, MLIR_BlockHandle bh) {
 
 MLIR_LocationHandle MLIR_GetValueLocation(MLIR_Context *ctx, MLIR_ValueHandle vh) {
     uint32_t v = VAL_IDX(ctx, vh, "MLIR_GetValueLocation");
-    return VALS(ctx)[v].location;
+    return LOC_H(ctx, VALS(ctx)[v].location);
 }
 
 // Stubs for two mlir_api_upstream.h entry points, so that the `parser` test
@@ -1755,14 +1926,14 @@ uint32_t MLIR_GetTypeLLVMPointerAddressSpace(MLIR_Context *ctx, MLIR_TypeHandle 
 // globals.
 static MLIR_AttributeHandle make_llvm_linkage_attr(MLIR_Context *ctx, string linkage_kind) {
     // Mirror the upstream printer: "#llvm.linkage<<kind>>".
-    IR_Attribute a = {0};
-    a.kind = ATTR_KIND_STRING;
-    strbuf body = strbuf_make();
-    strbuf_append(ctx->arena, &body, str_lit("#llvm.linkage<"));
-    strbuf_append(ctx->arena, &body, linkage_kind);
-    strbuf_append(ctx->arena, &body, str_lit(">"));
-    a.data.string_value = strbuf_to_string(body);
-    return alloc_attr_obj(ctx, a);
+    char buf[64];
+    size_t n = 0;
+    const char *pre = "#llvm.linkage<";
+    for (const char *p = pre; *p; p++) buf[n++] = *p;
+    for (size_t i = 0; i < linkage_kind.size && n < sizeof buf - 1; i++) buf[n++] = linkage_kind.str[i];
+    buf[n++] = '>';
+    string text = { buf, n };
+    return MLIR_CreateAttributeString(ctx, text);
 }
 
 MLIR_OpHandle MLIR_CreateLLVMGlobalString(MLIR_Context *ctx, string sym_name,
@@ -1847,130 +2018,98 @@ MLIR_OpHandle MLIR_CreateLLVMGlobal(MLIR_Context *ctx, string sym_name,
                          str_lit(""), -1);
 }
 
-// Attribute creation
+// Attribute creation: build the candidate record and intern it.
 MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *ctx, int64_t value, MLIR_TypeHandle type) {
-    IR_Attribute a = {0};
-    a.kind = ATTR_KIND_INTEGER;
-    a.data.integer_value = value;
-    a.type = type;
-    return alloc_attr_obj(ctx, a);
+    return ATTR_H(ctx, attr_intern_scalar(ctx, AK_INTEGER, TYPE_IDX(ctx, type, "MLIR_CreateAttributeInteger"),
+                                          (uint64_t)value));
 }
 
 MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *ctx, string value) {
-    IR_Attribute a = {0};
-    a.kind = ATTR_KIND_STRING;
-    a.data.string_value = arena_dup_str(ctx, value);
-    return alloc_attr_obj(ctx, a);
+    IR_Attr a;
+    attr_init(&a, AK_STRING);
+    a.n = (uint32_t)value.size;
+    a.bits = (uint64_t)(uintptr_t)value.str;
+    return ATTR_H(ctx, attr_intern(ctx, &a));
 }
 
+// By bit pattern: 0.0 and -0.0 differ, a NaN equals itself.
 MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, double value, MLIR_TypeHandle type) {
-    IR_Attribute a = {0};
-    a.kind = ATTR_KIND_FLOAT;
-    a.data.float_value = value;
-    a.type = type;
-    return alloc_attr_obj(ctx, a);
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    return ATTR_H(ctx, attr_intern_scalar(ctx, AK_FLOAT, TYPE_IDX(ctx, type, "MLIR_CreateAttributeFloat"), bits));
 }
 
 MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *ctx, bool value) {
-    IR_Attribute a = {0};
-    a.kind = ATTR_KIND_BOOL;
-    a.data.bool_value = value;
-    return alloc_attr_obj(ctx, a);
-}
-
-// Copy an array/dict attribute's element handles into the context's arena.
-// Callers routinely build `elements` on the stack (e.g. lower_func_func's
-// `passthrough`), so storing their pointer would leave the attribute
-// dangling once that frame returns. The upstream backend copies the
-// elements into its ArrayAttr / DictionaryAttr, so this matches it.
-static MLIR_AttributeHandle *dup_attr_elements(MLIR_Context *ctx,
-                                               const MLIR_AttributeHandle *elements,
-                                               size_t count) {
-    if (count == 0 || !elements || !ctx || !ctx->arena) return NULL;
-    MLIR_AttributeHandle *buf = arena_new_array(ctx->arena, MLIR_AttributeHandle, count);
-    memcpy(buf, elements, count * sizeof(MLIR_AttributeHandle));
-    return buf;
+    return ATTR_H(ctx, attr_intern_scalar(ctx, AK_BOOL, 0, value ? 1 : 0));
 }
 
 MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *ctx, const MLIR_AttributeHandle *elements, size_t count) {
-    IR_Attribute a = {0};
-    a.kind = ATTR_KIND_ARRAY;
-    a.data.array.elements = dup_attr_elements(ctx, elements, count);
-    a.data.array.count = a.data.array.elements ? count : 0;
-    return alloc_attr_obj(ctx, a);
+    IR_Attr a;
+    attr_init(&a, AK_ARRAY);
+    if (!elements) count = 0;
+    a.n = (uint32_t)count;
+    a.first = vec_push(&ctx->ax, a.n);
+    for (size_t i = 0; i < count; i++)
+        AX(ctx)[a.first + i] = ATTR_IDX(ctx, elements[i], "MLIR_CreateAttributeArray");
+    return ATTR_H(ctx, attr_intern(ctx, &a));
 }
 
 MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *ctx, const MLIR_NamedAttr *entries, size_t count) {
-    IR_Attribute a = {0};
-    a.kind = ATTR_KIND_DICT;
-#ifdef MLIR_API_CHECKS
-    for (size_t i = 0; entries && i < count; i++)
+    IR_Attr a;
+    attr_init(&a, AK_DICT);
+    if (!entries) count = 0;
+    a.n = (uint32_t)count;
+    a.first = vec_push(&ctx->ax, 2 * a.n);
+    for (size_t i = 0; i < count; i++) {
         API_CHECK(entries[i].key != MLIR_KEY_INVALID && entries[i].key < ctx->keys.n_keys &&
                   entries[i].value != MLIR_INVALID_HANDLE, "MLIR_CreateAttributeDict", "bad entry key or value");
-#endif
-    if (count > 0 && entries && ctx && ctx->arena) {
-        a.data.dict.entries = arena_new_array(ctx->arena, MLIR_NamedAttr, count);
-        memcpy(a.data.dict.entries, entries, count * sizeof(MLIR_NamedAttr));
-        a.data.dict.count = count;
+        AX(ctx)[a.first + 2 * i] = entries[i].key;
+        AX(ctx)[a.first + 2 * i + 1] = ATTR_IDX(ctx, entries[i].value, "MLIR_CreateAttributeDict");
     }
-    return alloc_attr_obj(ctx, a);
+    return ATTR_H(ctx, attr_intern(ctx, &a));
 }
 
 MLIR_AttributeHandle MLIR_CreateAttributeType(MLIR_Context *ctx, MLIR_TypeHandle type) {
-    IR_Attribute a = {0};
-    a.kind = ATTR_KIND_TYPE;
-    a.data.type_value = type;
-    return alloc_attr_obj(ctx, a);
+    return ATTR_H(ctx, attr_intern_scalar(ctx, AK_TYPE, TYPE_IDX(ctx, type, "MLIR_CreateAttributeType"), 0));
 }
 
-// Native backend stores SymbolRef as a plain string attribute. The
-// upstream printer renders symbol references as `@name`, so we store
-// the same form here — keeps MLIR_GetAttributeAsString consistent
-// across backends (the LLVM-IR translator depends on this for callee
-// emission).
+// A symbol reference is stored as the string `@name`, which is what
+// MLIR_GetAttributeString returns for it on both backends.
 MLIR_AttributeHandle MLIR_CreateAttributeSymbolRef(MLIR_Context *ctx, string value) {
-    IR_Attribute a = {0};
-    a.kind = ATTR_KIND_STRING;
-    string with_at = format(ctx->arena, str_lit("@{}"), value);
-    a.data.string_value = with_at;
-    return alloc_attr_obj(ctx, a);
+    char local[128];
+    char *buf = value.size + 1 <= sizeof local ? local : (char *)malloc(value.size + 1);
+    buf[0] = '@';
+    if (value.size) memcpy(buf + 1, value.str, value.size);
+    string s = { buf, value.size + 1 };
+    MLIR_AttributeHandle h = MLIR_CreateAttributeString(ctx, s);
+    if (buf != local) free(buf);
+    return h;
 }
 
-// DenseI32 array attribute. The native LLVM-IR translator reads this
-// via MLIR_GetAttributeAsString and parses the printed form, so we
-// stash a string matching upstream's printer ("array<i32: v0, v1, ...>").
+// Dense arrays are typed arrays: one word per i32, two per i64.
 MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *ctx,
                                                        const int32_t *values, size_t count) {
-    IR_Attribute a = {0};
-    a.kind = ATTR_KIND_STRING;
-    Arena *arena = ctx->arena;
-    strbuf s = strbuf_make();
-    strbuf_append(arena, &s, str_lit("array<i32"));
-    for (size_t i = 0; i < count; i++) {
-        strbuf_append(arena, &s, i == 0 ? str_lit(": ") : str_lit(", "));
-        strbuf_append(arena, &s, format(arena, str_lit("{}"), (int64_t)values[i]));
-    }
-    strbuf_append(arena, &s, str_lit(">"));
-    a.data.string_value = strbuf_to_string(s);
-    return alloc_attr_obj(ctx, a);
+    IR_Attr a;
+    attr_init(&a, AK_DENSE_I32);
+    if (!values) count = 0;
+    a.n = (uint32_t)count;
+    a.first = vec_push(&ctx->ax, a.n);
+    for (size_t i = 0; i < count; i++) AX(ctx)[a.first + i] = (uint32_t)values[i];
+    return ATTR_H(ctx, attr_intern(ctx, &a));
 }
 
-// DenseI64 array attribute. Same string-encoded shape as DenseI32 but
-// with `i64` element type. Used by `scf.index_switch`'s `cases` attr.
 MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *ctx,
                                                        const int64_t *values, size_t count) {
-    IR_Attribute a = {0};
-    a.kind = ATTR_KIND_STRING;
-    Arena *arena = ctx->arena;
-    strbuf s = strbuf_make();
-    strbuf_append(arena, &s, str_lit("array<i64"));
+    IR_Attr a;
+    attr_init(&a, AK_DENSE_I64);
+    if (!values) count = 0;
+    a.n = (uint32_t)count;
+    a.first = vec_push(&ctx->ax, 2 * a.n);
     for (size_t i = 0; i < count; i++) {
-        strbuf_append(arena, &s, i == 0 ? str_lit(": ") : str_lit(", "));
-        strbuf_append(arena, &s, format(arena, str_lit("{}"), values[i]));
+        AX(ctx)[a.first + 2 * i] = (uint32_t)(uint64_t)values[i];
+        AX(ctx)[a.first + 2 * i + 1] = (uint32_t)((uint64_t)values[i] >> 32);
     }
-    strbuf_append(arena, &s, str_lit(">"));
-    a.data.string_value = strbuf_to_string(s);
-    return alloc_attr_obj(ctx, a);
+    return ATTR_H(ctx, attr_intern(ctx, &a));
 }
 
 // LLVM linkage attribute. Native backend stores the printable form
@@ -1978,10 +2117,18 @@ MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *ctx,
 // upstream backend's MLIR_GetAttributeAsString result, so the native
 // LLVM-IR translator can recognize it the same way for both backends.
 MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *ctx) {
-    IR_Attribute a = {0};
-    a.kind = ATTR_KIND_STRING;
-    a.data.string_value = str_lit("#llvm.linkage<internal>");
-    return alloc_attr_obj(ctx, a);
+    return MLIR_CreateAttributeString(ctx, str_lit("#llvm.linkage<internal>"));
+}
+
+// Never interned: a new record each time (`bits` numbers them).
+MLIR_AttributeHandle MLIR_CreateAttributeDistinct(MLIR_Context *ctx, MLIR_AttributeHandle referenced) {
+    IR_Attr a;
+    attr_init(&a, AK_DISTINCT);
+    a.type = ATTR_IDX(ctx, referenced, "MLIR_CreateAttributeDistinct");
+    uint32_t idx = vec_push(&ctx->attrs, 1);
+    a.bits = idx;
+    ATTRS(ctx)[idx] = a;
+    return ATTR_H(ctx, idx);
 }
 
 // Value creation
@@ -2017,7 +2164,7 @@ MLIR_RegionHandle MLIR_CreateRegion(MLIR_Context *ctx) {
 }
 
 // Replaces the value if the op has `key`; otherwise appends the pair, in
-// place when the op's attributes are already the last words of `ptrs` (the
+// place when the op's attributes are already the last words of `extra` (the
 // common case: attributes set right after creation), else moving them to
 // the end of the vector (the old words are left unused).
 void MLIR_SetOpAttr(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_AttrKey key, MLIR_AttributeHandle value) {
@@ -2025,134 +2172,175 @@ void MLIR_SetOpAttr(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_AttrKey key, MLIR_
     CHECK_OP(ctx, o, "MLIR_SetOpAttr");
     API_CHECK(key != MLIR_KEY_INVALID && key < ctx->keys.n_keys && value != MLIR_INVALID_HANDLE,
               "MLIR_SetOpAttr", "bad attribute key or value");
+    uint32_t v = ATTR_IDX(ctx, value, "MLIR_SetOpAttr");
     uint32_t n = OPS(ctx)[o].n_attributes;
     uint32_t old = OPS(ctx)[o].first_attr;
     for (uint32_t i = 0; i < n; i++) {
-        if (PTRS(ctx)[old + 2 * i] == key) {
-            PTRS(ctx)[old + 2 * i + 1] = (uintptr_t)value;
+        if (EXTRA(ctx)[old + 2 * i] == key) {
+            EXTRA(ctx)[old + 2 * i + 1] = v;
             return;
         }
     }
     API_CHECK(n < 0xffff, "MLIR_SetOpAttr", "too many attributes");
-    if (old + 2 * n == ctx->ptrs.n) {
-        vec_push(&ctx->ptrs, 2);
+    if (old + 2 * n == ctx->extra.n) {
+        vec_push(&ctx->extra, 2);
     } else {
-        uint32_t first = vec_push(&ctx->ptrs, 2 * (n + 1));
-        uintptr_t *p = PTRS(ctx);
+        uint32_t first = vec_push(&ctx->extra, 2 * (n + 1));
+        uint32_t *p = EXTRA(ctx);
         for (uint32_t i = 0; i < 2 * n; i++) p[first + i] = p[old + i];
         OPS(ctx)[o].first_attr = old = first;
     }
-    PTRS(ctx)[old + 2 * n] = key;
-    PTRS(ctx)[old + 2 * n + 1] = (uintptr_t)value;
+    EXTRA(ctx)[old + 2 * n] = key;
+    EXTRA(ctx)[old + 2 * n + 1] = v;
     OPS(ctx)[o].n_attributes = (uint16_t)(n + 1);
 }
 
-// Attribute accessors
+// Attribute accessors: one read of the attribute's record each (dense
+// arrays and dictionaries also read their words).
+
+// Dense arrays report MLIR_ATTR_KIND_STRING, as before they were typed
+// arrays: their printed form is their string.
 MLIR_AttrKind MLIR_GetAttributeKind(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
     API_CHECK(ah != MLIR_INVALID_HANDLE, "MLIR_GetAttributeKind", "attribute handle is NULL");
-    IR_Attribute *attr = resolve_attr(ah);
-    if (!attr) return MLIR_ATTR_KIND_INTEGER;
-    switch (attr->kind) {
-        case ATTR_KIND_INTEGER: return MLIR_ATTR_KIND_INTEGER;
-        case ATTR_KIND_FLOAT:   return MLIR_ATTR_KIND_FLOAT;
-        case ATTR_KIND_STRING:  return MLIR_ATTR_KIND_STRING;
-        case ATTR_KIND_BOOL:    return MLIR_ATTR_KIND_BOOL;
-        case ATTR_KIND_ARRAY:   return MLIR_ATTR_KIND_ARRAY;
-        case ATTR_KIND_DICT:    return MLIR_ATTR_KIND_DICT;
-        case ATTR_KIND_TYPE:    return MLIR_ATTR_KIND_TYPE;
-        default:                return MLIR_ATTR_KIND_DICT;
+    switch (ATTR_REC(ctx, ah, "MLIR_GetAttributeKind")->kind) {
+        case AK_INTEGER: return MLIR_ATTR_KIND_INTEGER;
+        case AK_FLOAT:   return MLIR_ATTR_KIND_FLOAT;
+        case AK_STRING:  return MLIR_ATTR_KIND_STRING;
+        case AK_BOOL:    return MLIR_ATTR_KIND_BOOL;
+        case AK_ARRAY:   return MLIR_ATTR_KIND_ARRAY;
+        case AK_DICT:    return MLIR_ATTR_KIND_DICT;
+        case AK_TYPE:    return MLIR_ATTR_KIND_TYPE;
+        case AK_DENSE_I32:
+        case AK_DENSE_I64: return MLIR_ATTR_KIND_STRING;
+        default:         return MLIR_ATTR_KIND_OTHER;
     }
 }
 
-// Native parser never produces "other" attrs; this is just for API parity.
+// The printed form of a dense array (`array<i32: 1, 2>`), made on first use
+// and kept in the persistent arena.
+static string dense_text(MLIR_Context *ctx, uint32_t ai) {
+    if (ATTRS(ctx)[ai].text) return ATEXT(ctx)[ATTRS(ctx)[ai].text];
+    IR_Attr r = ATTRS(ctx)[ai];
+    Arena *arena = ctx->persistent;
+    strbuf s = strbuf_make();
+    strbuf_append(arena, &s, r.kind == AK_DENSE_I32 ? str_lit("array<i32") : str_lit("array<i64"));
+    for (uint32_t i = 0; i < r.n; i++) {
+        strbuf_append(arena, &s, i == 0 ? str_lit(": ") : str_lit(", "));
+        int64_t v = r.kind == AK_DENSE_I32
+            ? (int64_t)(int32_t)AX(ctx)[r.first + i]
+            : (int64_t)(((uint64_t)AX(ctx)[r.first + 2 * i + 1] << 32) | AX(ctx)[r.first + 2 * i]);
+        strbuf_append(arena, &s, format(arena, str_lit("{}"), v));
+    }
+    strbuf_append(arena, &s, str_lit(">"));
+    uint32_t t = vec_push(&ctx->atext, 1);
+    ATEXT(ctx)[t] = strbuf_to_string(s);
+    ATTRS(ctx)[ai].text = t;
+    return ATEXT(ctx)[t];
+}
+
+// The text of a string attribute (symbol refs `@name`), or the printed form
+// of a dense array; "" for every other kind.
 string MLIR_GetAttributeAsString(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
-    (void)ctx;
-    IR_Attribute *attr = resolve_attr(ah);
-    if (!attr) return str_lit("");
-    // The native lowering/translation passes only consult this for a few
-    // attributes whose printed form is well-defined (LLVM linkage, plain
-    // strings). For everything else we return empty — callers must use
-    // the typed accessors.
-    if (attr->kind == ATTR_KIND_STRING) return attr->data.string_value;
+    if (ah == MLIR_INVALID_HANDLE) return str_lit("");
+    uint32_t ai = ATTR_IDX(ctx, ah, "MLIR_GetAttributeAsString");
+    const IR_Attr *r = &ATTRS(ctx)[ai];
+    if (r->kind == AK_STRING) {
+        string s = { (char *)(uintptr_t)r->bits, r->n };
+        return s;
+    }
+    if (r->kind == AK_DENSE_I32 || r->kind == AK_DENSE_I64) return dense_text(ctx, ai);
     return str_lit("");
 }
 
 int64_t MLIR_GetAttributeInteger(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
-    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_INTEGER || ((IR_Attribute *)ah)->kind == ATTR_KIND_BOOL, "MLIR_GetAttributeInteger", "not an integer or bool attribute");
-    IR_Attribute *attr = resolve_attr(ah);
-    return attr ? attr->data.integer_value : 0;
+    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeInteger");
+    CHECK_ATTR_KIND(ah, r->kind == AK_INTEGER || r->kind == AK_BOOL, "MLIR_GetAttributeInteger", "not an integer or bool attribute");
+    return (int64_t)r->bits;
 }
 
 string MLIR_GetAttributeString(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
-    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_STRING, "MLIR_GetAttributeString", "not a string attribute");
-    IR_Attribute *attr = resolve_attr(ah);
-    return attr ? attr->data.string_value : str_lit("");
+    uint32_t ai = ATTR_IDX(ctx, ah, "MLIR_GetAttributeString");
+    const IR_Attr *r = &ATTRS(ctx)[ai];
+    CHECK_ATTR_KIND(ah, r->kind == AK_STRING || r->kind == AK_DENSE_I32 || r->kind == AK_DENSE_I64,
+                    "MLIR_GetAttributeString", "not a string attribute");
+    if (r->kind != AK_STRING) return dense_text(ctx, ai);
+    string s = { (char *)(uintptr_t)r->bits, r->n };
+    return s;
 }
 
 double MLIR_GetAttributeFloat(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
-    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_FLOAT, "MLIR_GetAttributeFloat", "not a float attribute");
-    IR_Attribute *attr = resolve_attr(ah);
-    return attr ? attr->data.float_value : 0.0;
+    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeFloat");
+    CHECK_ATTR_KIND(ah, r->kind == AK_FLOAT, "MLIR_GetAttributeFloat", "not a float attribute");
+    double d;
+    memcpy(&d, &r->bits, sizeof d);
+    return d;
 }
 
 MLIR_TypeHandle MLIR_GetAttributeType(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
     API_CHECK(ah != MLIR_INVALID_HANDLE, "MLIR_GetAttributeType", "attribute handle is NULL");
-    IR_Attribute *attr = resolve_attr(ah);
-    if (!attr) return MLIR_INVALID_HANDLE;
-    if (attr->kind != ATTR_KIND_INTEGER && attr->kind != ATTR_KIND_FLOAT)
-        return MLIR_INVALID_HANDLE;
-    return attr->type;
+    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeType");
+    if (r->kind != AK_INTEGER && r->kind != AK_FLOAT) return MLIR_INVALID_HANDLE;
+    return TYPE_H(ctx, r->type);
 }
 
 bool MLIR_GetAttributeBool(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
-    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_BOOL, "MLIR_GetAttributeBool", "not a bool attribute");
-    IR_Attribute *attr = resolve_attr(ah);
-    return attr ? attr->data.bool_value : false;
+    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeBool");
+    CHECK_ATTR_KIND(ah, r->kind == AK_BOOL, "MLIR_GetAttributeBool", "not a bool attribute");
+    return r->bits != 0;
 }
 
 size_t MLIR_GetAttributeArraySize(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
-    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_ARRAY, "MLIR_GetAttributeArraySize", "not an array attribute");
-    IR_Attribute *attr = resolve_attr(ah);
-    return attr ? attr->data.array.count : 0;
+    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeArraySize");
+    CHECK_ATTR_KIND(ah, r->kind == AK_ARRAY, "MLIR_GetAttributeArraySize", "not an array attribute");
+    return r->n;
 }
 
 MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_Context *ctx, MLIR_AttributeHandle ah, size_t idx) {
-    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_ARRAY, "MLIR_GetAttributeArrayElement", "not an array attribute");
-    CHECK_INDEX(idx, ((IR_Attribute *)ah)->data.array.count, "MLIR_GetAttributeArrayElement");
-    IR_Attribute *attr = resolve_attr(ah);
-    if (!attr || idx >= attr->data.array.count) return MLIR_INVALID_HANDLE;
-    return attr->data.array.elements[idx];
+    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeArrayElement");
+    CHECK_ATTR_KIND(ah, r->kind == AK_ARRAY, "MLIR_GetAttributeArrayElement", "not an array attribute");
+    CHECK_INDEX(idx, r->n, "MLIR_GetAttributeArrayElement");
+    return ATTR_H(ctx, AX(ctx)[r->first + idx]);
 }
 
 size_t MLIR_GetAttributeDictSize(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
-    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_DICT, "MLIR_GetAttributeDictSize", "not a dictionary attribute");
-    IR_Attribute *attr = resolve_attr(ah);
-    return attr ? attr->data.dict.count : 0;
+    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeDictSize");
+    CHECK_ATTR_KIND(ah, r->kind == AK_DICT, "MLIR_GetAttributeDictSize", "not a dictionary attribute");
+    return r->n;
 }
 
 MLIR_AttrKey MLIR_GetAttributeDictKey(MLIR_Context *ctx, MLIR_AttributeHandle ah, size_t idx) {
-    (void)ctx;
-    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_DICT, "MLIR_GetAttributeDictKey", "not a dictionary attribute");
-    CHECK_INDEX(idx, ((IR_Attribute *)ah)->data.dict.count, "MLIR_GetAttributeDictKey");
-    IR_Attribute *attr = resolve_attr(ah);
-    if (!attr || idx >= attr->data.dict.count) return MLIR_KEY_INVALID;
-    return attr->data.dict.entries[idx].key;
+    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeDictKey");
+    CHECK_ATTR_KIND(ah, r->kind == AK_DICT, "MLIR_GetAttributeDictKey", "not a dictionary attribute");
+    CHECK_INDEX(idx, r->n, "MLIR_GetAttributeDictKey");
+    if (r->kind != AK_DICT || idx >= r->n) return MLIR_KEY_INVALID;
+    return AX(ctx)[r->first + 2 * idx];
 }
 
 MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_Context *ctx, MLIR_AttributeHandle ah, size_t idx) {
-    (void)ctx;
-    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_DICT, "MLIR_GetAttributeDictElement", "not a dictionary attribute");
-    CHECK_INDEX(idx, ((IR_Attribute *)ah)->data.dict.count, "MLIR_GetAttributeDictElement");
-    IR_Attribute *attr = resolve_attr(ah);
-    if (!attr || idx >= attr->data.dict.count) return MLIR_INVALID_HANDLE;
-    return attr->data.dict.entries[idx].value;
+    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeDictElement");
+    CHECK_ATTR_KIND(ah, r->kind == AK_DICT, "MLIR_GetAttributeDictElement", "not a dictionary attribute");
+    CHECK_INDEX(idx, r->n, "MLIR_GetAttributeDictElement");
+    if (r->kind != AK_DICT || idx >= r->n) return MLIR_INVALID_HANDLE;
+    return ATTR_H(ctx, AX(ctx)[r->first + 2 * idx + 1]);
 }
 
 MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
     API_CHECK(ah != MLIR_INVALID_HANDLE, "MLIR_GetAttributeTypeValue", "attribute handle is NULL");
-    IR_Attribute *attr = resolve_attr(ah);
-    if (!attr || attr->kind != ATTR_KIND_TYPE) return MLIR_INVALID_HANDLE;
-    return attr->data.type_value;
+    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeTypeValue");
+    return r->kind == AK_TYPE ? TYPE_H(ctx, r->type) : MLIR_INVALID_HANDLE;
+}
+
+size_t MLIR_GetAttributeDenseSize(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
+    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeDenseSize");
+    return (r->kind == AK_DENSE_I32 || r->kind == AK_DENSE_I64) ? r->n : 0;
+}
+
+int64_t MLIR_GetAttributeDenseElement(MLIR_Context *ctx, MLIR_AttributeHandle ah, size_t idx) {
+    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeDenseElement");
+    CHECK_INDEX(idx, (r->kind == AK_DENSE_I32 || r->kind == AK_DENSE_I64) ? r->n : 0,
+                "MLIR_GetAttributeDenseElement");
+    if (r->kind == AK_DENSE_I32) return (int64_t)(int32_t)AX(ctx)[r->first + idx];
+    return (int64_t)(((uint64_t)AX(ctx)[r->first + 2 * idx + 1] << 32) | AX(ctx)[r->first + 2 * idx]);
 }
 
 // Value accessors
@@ -2203,82 +2391,89 @@ string MLIR_GetOpTypeName(MLIR_Context *ctx, MLIR_OpType type) {
     return op_type_table_name(&ctx->op_types, type);
 }
 
-// Location accessors
-MLIR_LocationKind MLIR_GetLocationKind(MLIR_Context *ctx, MLIR_LocationHandle lh) {
-    IR_Location *loc = resolve_loc(lh);
-    if (!loc) return MLIR_LOC_UNKNOWN;
-    switch (loc->kind) {
-        case LOC_KIND_FILE: return MLIR_LOC_FILE;
-        case LOC_KIND_NAME: return MLIR_LOC_NAME;
-        case LOC_KIND_CALLSITE: return MLIR_LOC_CALLSITE;
-        case LOC_KIND_FUSED: return MLIR_LOC_FUSED;
-        case LOC_KIND_REF: return MLIR_LOC_REF;
-        case LOC_KIND_UNKNOWN: default: return MLIR_LOC_UNKNOWN;
-    }
+// Locations: records in the `locs` vector (see "Locations" above).
+
+static MLIR_LocationHandle loc_create(MLIR_Context *ctx, uint32_t kind, string str, int line, int col) {
+    API_CHECK(ctx != NULL, "MLIR_CreateLocation", "context is NULL");
+    uint32_t si = str.size ? attr_key_table_intern(&ctx->loc_strings, str) : 0;
+    uint32_t l = vec_push(&ctx->locs, 1);
+    IR_Loc *p = &LOCS(ctx)[l];
+    p->kind = kind;
+    p->str = si;
+    p->line = line;
+    p->col = col;
+    p->text = 0;
+    return LOC_H(ctx, l);
 }
 
+static string loc_str(MLIR_Context *ctx, const IR_Loc *l) {
+    return attr_key_table_name(&ctx->loc_strings, l->str);
+}
+
+#define LOC_REC(ctx, h, fn) (&LOCS(ctx)[LOC_IDX((ctx), (h), (fn))])
+
+MLIR_LocationKind MLIR_GetLocationKind(MLIR_Context *ctx, MLIR_LocationHandle lh) {
+    return (MLIR_LocationKind)LOC_REC(ctx, lh, "MLIR_GetLocationKind")->kind;
+}
+
+// The parser's text of an unknown location; the `loc(...)` form of the
+// others, made on the first call and kept in the context.
 string MLIR_GetLocationOriginalText(MLIR_Context *ctx, MLIR_LocationHandle lh) {
-    IR_Location *loc = resolve_loc(lh);
-    return loc ? loc->original_text : str_lit("");
+    uint32_t li = LOC_IDX(ctx, lh, "MLIR_GetLocationOriginalText");
+    IR_Loc l = LOCS(ctx)[li];
+    if (l.kind != MLIR_LOC_FILE && l.kind != MLIR_LOC_NAME && l.kind != MLIR_LOC_REF)
+        return loc_str(ctx, &l);
+    if (l.text) return attr_key_table_name(&ctx->loc_strings, l.text);
+    string text;
+    if (l.kind == MLIR_LOC_FILE)
+        text = format(ctx->persistent, str_lit("loc({}:{}:{})"), loc_str(ctx, &l),
+                      (int64_t)l.line, (int64_t)l.col);
+    else if (l.kind == MLIR_LOC_NAME)
+        text = format(ctx->persistent, str_lit("loc(\"{}\")"), loc_str(ctx, &l));
+    else
+        text = format(ctx->persistent, str_lit("loc(#loc{})"), (int64_t)l.line);
+    uint32_t t = attr_key_table_intern(&ctx->loc_strings, text);
+    LOCS(ctx)[li].text = t;
+    return attr_key_table_name(&ctx->loc_strings, t);
 }
 
 string MLIR_GetLocationFileFilename(MLIR_Context *ctx, MLIR_LocationHandle lh) {
-    IR_Location *loc = resolve_loc(lh);
-    return loc ? loc->data.file.filename : str_lit("");
+    const IR_Loc *l = LOC_REC(ctx, lh, "MLIR_GetLocationFileFilename");
+    return (l->kind == MLIR_LOC_FILE || l->kind == MLIR_LOC_NAME) ? loc_str(ctx, l) : str_lit("");
 }
 
 int MLIR_GetLocationFileLine(MLIR_Context *ctx, MLIR_LocationHandle lh) {
-    IR_Location *loc = resolve_loc(lh);
-    return loc ? loc->data.file.line : 0;
+    const IR_Loc *l = LOC_REC(ctx, lh, "MLIR_GetLocationFileLine");
+    return l->kind == MLIR_LOC_FILE ? l->line : 0;
 }
 
 int MLIR_GetLocationFileColumn(MLIR_Context *ctx, MLIR_LocationHandle lh) {
-    IR_Location *loc = resolve_loc(lh);
-    return loc ? loc->data.file.column : 0;
+    const IR_Loc *l = LOC_REC(ctx, lh, "MLIR_GetLocationFileColumn");
+    return l->kind == MLIR_LOC_FILE ? l->col : 0;
 }
 
 string MLIR_GetLocationName(MLIR_Context *ctx, MLIR_LocationHandle lh) {
-    IR_Location *loc = resolve_loc(lh);
-    return loc ? loc->data.name.name : str_lit("");
+    const IR_Loc *l = LOC_REC(ctx, lh, "MLIR_GetLocationName");
+    return (l->kind == MLIR_LOC_FILE || l->kind == MLIR_LOC_NAME) ? loc_str(ctx, l) : str_lit("");
 }
 
+// Without text, the shared unknown location (element 1): creating one per op
+// costs nothing.
 MLIR_LocationHandle MLIR_CreateLocationUnknown(MLIR_Context *ctx, string original_text) {
-    IR_Location l = {0};
-    l.kind = LOC_KIND_UNKNOWN;
-    l.original_text = original_text;
-    return alloc_loc(ctx, l);
+    if (original_text.size == 0) return LOC_H(ctx, 1);
+    return loc_create(ctx, MLIR_LOC_UNKNOWN, original_text, 0, 0);
 }
 
 MLIR_LocationHandle MLIR_CreateLocationFile(MLIR_Context *ctx, string filename, int line, int column) {
-    IR_Location l = {0};
-    l.kind = LOC_KIND_FILE;
-    l.data.file.filename = filename;
-    l.data.file.line = line;
-    l.data.file.column = column;
-    if (ctx && ctx->arena) {
-        l.original_text = format(ctx->arena, str_lit("loc({}:{}:{})"), filename, (int64_t)line, (int64_t)column);
-    }
-    return alloc_loc(ctx, l);
+    return loc_create(ctx, MLIR_LOC_FILE, filename, line, column);
 }
 
 MLIR_LocationHandle MLIR_CreateLocationName(MLIR_Context *ctx, string name) {
-    IR_Location l = {0};
-    l.kind = LOC_KIND_NAME;
-    l.data.name.name = name;
-    if (ctx && ctx->arena) {
-        l.original_text = format(ctx->arena, str_lit("loc(\"{}\")"), name);
-    }
-    return alloc_loc(ctx, l);
+    return loc_create(ctx, MLIR_LOC_NAME, name, 0, 0);
 }
 
 MLIR_LocationHandle MLIR_CreateLocationRef(MLIR_Context *ctx, int ref_id) {
-    IR_Location l = {0};
-    l.kind = LOC_KIND_REF;
-    l.data.ref.ref_id = ref_id;
-    if (ctx && ctx->arena) {
-        l.original_text = format(ctx->arena, str_lit("loc(#loc{})"), (int64_t)ref_id);
-    }
-    return alloc_loc(ctx, l);
+    return loc_create(ctx, MLIR_LOC_REF, (string){0}, ref_id, 0);
 }
 
 // IR mutation primitives.

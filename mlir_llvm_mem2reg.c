@@ -669,28 +669,14 @@ typedef struct {
     HMap gidx;                   // gep result -> gi
 } S;
 
-// Parse "array<i32: 0, 1, ...>" into out[]; returns false on overflow/garbage.
-static bool sroa_parse_indices(string s, int32_t *out, int cap, int *n) {
-    const char *p = s.str;
-    const char *e = s.str + s.size;
-    while (p < e && *p != ':') p++;
-    if (p >= e) return false;
-    p++; // skip ':'
-    int cnt = 0;
-    while (p < e) {
-        while (p < e && (*p == ' ' || *p == ',')) p++;
-        if (p >= e || *p == '>') break;
-        bool neg = false;
-        if (*p == '-') { neg = true; p++; }
-        if (p >= e || *p < '0' || *p > '9') return false;
-        long v = 0;
-        while (p < e && *p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
-        if (neg) v = -v;
-        if (cnt >= cap) return false;
-        out[cnt++] = (int32_t)v;
-    }
-    *n = cnt;
-    return cnt > 0;
+// The elements of a dense i32 array into out[]; false if it is empty or has
+// more than `cap`.
+static bool sroa_parse_indices(MLIR_Context *ctx, MLIR_AttributeHandle a, int32_t *out, int cap, int *n) {
+    size_t cnt = MLIR_GetAttributeDenseSize(ctx, a);
+    if (cnt == 0 || cnt > (size_t)cap) return false;
+    for (size_t i = 0; i < cnt; i++) out[i] = (int32_t)MLIR_GetAttributeDenseElement(ctx, a, i);
+    *n = (int)cnt;
+    return true;
 }
 
 // Walk an aggregate type along a constant index path (path[0] must be 0, the
@@ -750,7 +736,7 @@ static void sroa_scan_uses(S *s, MLIR_BlockHandle blk, bool nested) {
                 MLIR_AttributeHandle ria = MLIR_GetOpAttr(s->ctx, op, MLIR_KEY_RAW_CONSTANT_INDICES);
                 int32_t idx[SROA_MAX_PATH]; int nidx = 0;
                 bool okpath = ria != MLIR_INVALID_HANDLE &&
-                    sroa_parse_indices(MLIR_GetAttributeAsString(s->ctx, ria),
+                    sroa_parse_indices(s->ctx, ria,
                                        idx, SROA_MAX_PATH, &nidx);
                 MLIR_TypeHandle leaf = MLIR_INVALID_HANDLE;
                 // A constant-only GEP has exactly one operand (the base); every
