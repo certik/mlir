@@ -351,21 +351,12 @@ static void copy_imms(MLIR_Context *ctx, Arena *arena, MLIR_OpHandle bo,
 // Determine the wasm valtype of an MLIR Value (i32/i64/f32/f64).
 static uint8_t value_to_vt(MLIR_Context *ctx, MLIR_ValueHandle v) {
     MLIR_TypeHandle ty = MLIR_GetValueType(ctx, v);
-    string s = MLIR_GetTypeString(ctx, ty);
-    if (s.size >= 9 && memcmp(s.str, "!llvm.ptr", 9) == 0) return WT_I32;
-    if (s.size == 3 && memcmp(s.str, "ptr", 3) == 0) return WT_I32;
-    if (s.size == 5 && memcmp(s.str, "index", 5) == 0) return WT_I32;
-    if (s.size == 3 && memcmp(s.str, "f32", 3) == 0) return WT_F32;
-    if (s.size == 3 && memcmp(s.str, "f64", 3) == 0) return WT_F64;
-    if (s.size > 1 && s.str[0] == 'i') {
-        int w = 0;
-        for (size_t i = 1; i < s.size; i++) {
-            if (s.str[i] >= '0' && s.str[i] <= '9') w = w * 10 + (s.str[i] - '0');
-            else { w = -1; break; }
-        }
-        if (w == 1 || w == 8 || w == 16 || w == 32) return WT_I32;
-        if (w == 64) return WT_I64;
-    }
+    MLIR_TypeKind k = MLIR_GetTypeKind(ctx, ty);
+    uint32_t w = MLIR_GetTypeWidth(ctx, ty);
+    if (k == MLIR_TYPE_KIND_FLOAT && w == 32) return WT_F32;
+    if (k == MLIR_TYPE_KIND_FLOAT && w == 64) return WT_F64;
+    if (k == MLIR_TYPE_KIND_INTEGER && w == 64) return WT_I64;
+    // Pointers, index and the narrower integers (and anything else).
     return WT_I32;
 }
 

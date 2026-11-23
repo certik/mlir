@@ -127,38 +127,23 @@ static MLIR_AttributeHandle find_attr(MLIR_Context *ctx, MLIR_OpHandle op, const
 // MLIR LLVM-dialect type -> WT_* value-type byte. Returns 0 if the type
 // is not a primitive scalar.
 static uint8_t wasm_vt(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    string s = MLIR_GetTypeString(ctx, ty);
-    if (s.size >= 9 && memcmp(s.str, "!llvm.ptr", 9) == 0) return WT_I32;
-    if (s.size == 3 && memcmp(s.str, "ptr", 3) == 0) return WT_I32;
-    if (s.size == 5 && memcmp(s.str, "index", 5) == 0) return WT_I32;
-    if (s.size == 3 && memcmp(s.str, "f32", 3) == 0) return WT_F32;
-    if (s.size == 3 && memcmp(s.str, "f64", 3) == 0) return WT_F64;
-    if (s.size > 1 && s.str[0] == 'i') {
-        int w = 0;
-        for (size_t i = 1; i < s.size; i++) {
-            if (s.str[i] >= '0' && s.str[i] <= '9') w = w * 10 + (s.str[i] - '0');
-            else { w = -1; break; }
-        }
+    MLIR_TypeKind k = MLIR_GetTypeKind(ctx, ty);
+    uint32_t w = MLIR_GetTypeWidth(ctx, ty);
+    if (k == MLIR_TYPE_KIND_LLVM_POINTER || k == MLIR_TYPE_KIND_INDEX) return WT_I32;
+    if (k == MLIR_TYPE_KIND_FLOAT) return w == 32 ? WT_F32 : w == 64 ? WT_F64 : 0;
+    if (k == MLIR_TYPE_KIND_INTEGER) {
         if (w == 1 || w == 8 || w == 16 || w == 32) return WT_I32;
         if (w == 64) return WT_I64;
     }
     return 0;
 }
 
-// Returns the integer bit width of `ty` (1/8/16/32/64) or 0 if `ty`
-// is not an `iN` integer type.
+// Returns the integer bit width of `ty` (1/8/16/32/64; 32 for `index`) or 0
+// if `ty` is not an integer type.
 static int int_bits(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    string s = MLIR_GetTypeString(ctx, ty);
-    if (s.size == 5 && memcmp(s.str, "index", 5) == 0) return 32;
-    if (s.size > 1 && s.str[0] == 'i') {
-        int w = 0;
-        for (size_t i = 1; i < s.size; i++) {
-            if (s.str[i] >= '0' && s.str[i] <= '9') w = w * 10 + (s.str[i] - '0');
-            else return 0;
-        }
-        return w;
-    }
-    return 0;
+    MLIR_TypeKind k = MLIR_GetTypeKind(ctx, ty);
+    if (k == MLIR_TYPE_KIND_INDEX) return 32;
+    return k == MLIR_TYPE_KIND_INTEGER ? (int)MLIR_GetTypeWidth(ctx, ty) : 0;
 }
 
 // The value of the integer constant `v` as it is materialized (an i8 / i16

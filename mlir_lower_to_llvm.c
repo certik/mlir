@@ -119,18 +119,19 @@ static bool lower_arith_constant(LowerState *st, MLIR_OpHandle op,
 }
 
 static bool type_is_index(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    string s = MLIR_GetTypeString(ctx, ty);
-    return s.size == 5 && memcmp(s.str, "index", 5) == 0;
+    return MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_INDEX;
+}
+
+static bool type_is_int(MLIR_Context *ctx, MLIR_TypeHandle ty, uint32_t width) {
+    return MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_INTEGER && MLIR_GetTypeWidth(ctx, ty) == width;
 }
 
 static bool type_is_i32(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    string s = MLIR_GetTypeString(ctx, ty);
-    return s.size == 3 && s.str[0] == 'i' && s.str[1] == '3' && s.str[2] == '2';
+    return type_is_int(ctx, ty, 32);
 }
 
 static bool type_is_i64(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    string s = MLIR_GetTypeString(ctx, ty);
-    return s.size == 3 && s.str[0] == 'i' && s.str[1] == '6' && s.str[2] == '4';
+    return type_is_int(ctx, ty, 64);
 }
 
 // Lower `arith.index_cast` / `arith.index_castui` between `index` and integer

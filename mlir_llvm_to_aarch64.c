@@ -465,14 +465,8 @@ static bool type_is_gp64(MLIR_Context *ctx, MLIR_ValueHandle v) {
 // Bit width of an integer-typed value ("i1"/"i8"/"i16"/"i32"/"i64"). 0 if not
 // a recognised integer type.
 static int int_type_bits(MLIR_Context *ctx, MLIR_ValueHandle v) {
-    string s = MLIR_GetTypeString(ctx, MLIR_GetValueType(ctx, v));
-    if (s.size < 2 || s.str[0] != 'i') return 0;
-    int w = 0;
-    for (size_t i = 1; i < s.size; i++) {
-        if (s.str[i] < '0' || s.str[i] > '9') return 0;
-        w = w * 10 + (s.str[i] - '0');
-    }
-    return w;
+    MLIR_TypeHandle t = MLIR_GetValueType(ctx, v);
+    return MLIR_GetTypeKind(ctx, t) == MLIR_TYPE_KIND_INTEGER ? (int)MLIR_GetTypeWidth(ctx, t) : 0;
 }
 
 // Forward decl: extract an integer llvm.mlir.constant's value (defined below).
@@ -590,10 +584,10 @@ static bool is_linmem_base_load(MLIR_Context *ctx, MLIR_OpHandle op,
 
 // FP width of an f32/f64-typed value: 32, 64, or 0 if not a float type.
 static int fp_width(MLIR_Context *ctx, MLIR_ValueHandle v) {
-    string s = MLIR_GetTypeString(ctx, MLIR_GetValueType(ctx, v));
-    if (s.size == 3 && memcmp(s.str, "f32", 3) == 0) return 32;
-    if (s.size == 3 && memcmp(s.str, "f64", 3) == 0) return 64;
-    return 0;
+    MLIR_TypeHandle t = MLIR_GetValueType(ctx, v);
+    if (MLIR_GetTypeKind(ctx, t) != MLIR_TYPE_KIND_FLOAT) return 0;
+    uint32_t w = MLIR_GetTypeWidth(ctx, t);
+    return (w == 32 || w == 64) ? (int)w : 0;
 }
 
 // LLVM FCmpPredicate (oeq=1,ogt=2,oge=3,olt=4,ole=5,one=6) -> ARM cond code
