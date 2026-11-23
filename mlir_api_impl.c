@@ -558,12 +558,20 @@ static uint32_t *u32_reserve(Arena *arena, uint32_t *old, uint32_t n, uint32_t *
     return p;
 }
 
-// Removes every occurrence of `x` from `arr[0..*n)`, keeping the order.
+// Removes `x`, which occurs at most once, from `arr[0..*n)`, keeping the
+// order: a scan to it, then the tail moves down by one. (Erasing k ops of a
+// block is still O(k * n), N7 in doc/mlir_api_design.md.)
 static void u32_remove(uint32_t *arr, uint32_t *n, uint32_t x) {
-    uint32_t w = 0;
-    for (uint32_t i = 0; i < *n; i++)
-        if (arr[i] != x) arr[w++] = arr[i];
-    *n = w;
+    // Pointer loops, not memmove: corec's memmove, which the self-hosted
+    // compiler uses, copies a byte at a time, and these are the fastest
+    // form under both gcc and tinyC.
+    uint32_t *p = arr;
+    uint32_t *end = arr + *n;
+    while (p < end && *p != x) p++;
+    if (p == end) return;
+    uint32_t *q = p + 1;
+    while (q < end) { *p = *q; p++; q++; }
+    *n = *n - 1;
 }
 
 // Compare two IR_Type structures for value-equality. Used to intern
