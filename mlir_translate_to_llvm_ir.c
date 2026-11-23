@@ -318,15 +318,15 @@ static void emit_use(FnCtx *F, MLIR_ValueHandle v) {
 // llvm.mlir.poison), assign it an inline literal in `F->vmap` instead of an
 // SSA name.
 static char *inline_literal_for(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_TypeHandle vty) {
-    MLIR_OpType ty = MLIR_GetOpType(op);
+    MLIR_OpType ty = MLIR_GetOpType(ctx, op);
     bool is_undef = (ty == OP_TYPE_LLVM_MLIR_UNDEF);
     bool is_poison = (ty == OP_TYPE_LLVM_MLIR_POISON);
     if (ty == OP_TYPE_LLVM_MLIR_CONSTANT) {
         // Value is the "value" attribute. It's printed as e.g. "3 : i32" or
         // "1.5e+00 : f32".
-        size_t na = MLIR_GetOpNumAttributes(op);
+        size_t na = MLIR_GetOpNumAttributes(ctx, op);
         for (size_t i = 0; i < na; i++) {
-            MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
+            MLIR_AttributeHandle a = MLIR_GetOpAttribute(ctx, op, i);
             string an = MLIR_GetAttributeName(a);
             if (name_eq(an, "value")) {
                 MLIR_AttrKind k = MLIR_GetAttributeKind(a);
@@ -373,9 +373,9 @@ static char *inline_literal_for(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_TypeHa
     }
     if (ty == OP_TYPE_LLVM_MLIR_NULL) return xstrdup("null");
     if (ty == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
-        size_t na = MLIR_GetOpNumAttributes(op);
+        size_t na = MLIR_GetOpNumAttributes(ctx, op);
         for (size_t i = 0; i < na; i++) {
-            MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
+            MLIR_AttributeHandle a = MLIR_GetOpAttribute(ctx, op, i);
             string an = MLIR_GetAttributeName(a);
             if (name_eq(an, "global_name") || name_eq(an, "function_name") ||
                 name_eq(an, "symbol")) {
@@ -390,28 +390,28 @@ static char *inline_literal_for(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_TypeHa
 
 // Pre-pass: assign names to all values & blocks in the function body.
 static void assign_names(FnCtx *F, MLIR_RegionHandle body) {
-    size_t nb = MLIR_GetRegionNumBlocks(body);
+    size_t nb = MLIR_GetRegionNumBlocks(F->ctx, body);
     for (size_t bi = 0; bi < nb; bi++) {
-        MLIR_BlockHandle blk = MLIR_GetRegionBlock(body, bi);
+        MLIR_BlockHandle blk = MLIR_GetRegionBlock(F->ctx, body, bi);
         // Block name: "entry" for block 0, "bbN" for the rest.
         char *bn = bi == 0 ? xstrdup("entry") : fmt_alloc("bb%d", F->next_b++);
         map_put(&F->bmap, blk, bn);
         // Block arg names: "%aN" — for entry, these are also the function
         // parameters and are referred to as %0, %1, ...
-        size_t na = MLIR_GetBlockNumArgs(blk);
+        size_t na = MLIR_GetBlockNumArgs(F->ctx, blk);
         for (size_t ai = 0; ai < na; ai++) {
-            MLIR_ValueHandle a = MLIR_GetBlockArg(blk, ai);
+            MLIR_ValueHandle a = MLIR_GetBlockArg(F->ctx, blk, ai);
             char *vn = bi == 0 ? fmt_alloc("%%a%zu", ai) : fmt_alloc("%%v%d", F->next_v++);
             map_put(&F->vmap, a, vn);
         }
         // Op results.
-        size_t nops = MLIR_GetBlockNumOps(blk);
+        size_t nops = MLIR_GetBlockNumOps(F->ctx, blk);
         for (size_t oi = 0; oi < nops; oi++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(blk, oi);
-            size_t nres = MLIR_GetOpNumResults(op);
+            MLIR_OpHandle op = MLIR_GetBlockOp(F->ctx, blk, oi);
+            size_t nres = MLIR_GetOpNumResults(F->ctx, op);
             for (size_t ri = 0; ri < nres; ri++) {
-                MLIR_ValueHandle r = MLIR_GetOpResult(op, ri);
-                MLIR_TypeHandle rty = MLIR_GetValueType(r);
+                MLIR_ValueHandle r = MLIR_GetOpResult(F->ctx, op, ri);
+                MLIR_TypeHandle rty = MLIR_GetValueType(F->ctx, r);
                 char *lit = inline_literal_for(F->ctx, op, rty);
                 if (lit) map_put(&F->vmap, r, lit);
                 else     map_put(&F->vmap, r, fmt_alloc("%%v%d", F->next_v++));
@@ -424,10 +424,10 @@ static void assign_names(FnCtx *F, MLIR_RegionHandle body) {
 // Op emission.
 // -----------------------------------------------------------------------------
 
-static MLIR_AttributeHandle find_attr(MLIR_OpHandle op, const char *name) {
-    size_t na = MLIR_GetOpNumAttributes(op);
+static MLIR_AttributeHandle find_attr(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
+    size_t na = MLIR_GetOpNumAttributes(ctx, op);
     for (size_t i = 0; i < na; i++) {
-        MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
+        MLIR_AttributeHandle a = MLIR_GetOpAttribute(ctx, op, i);
         string an = MLIR_GetAttributeName(a);
         if (name_eq(an, name)) return a;
     }
@@ -436,22 +436,22 @@ static MLIR_AttributeHandle find_attr(MLIR_OpHandle op, const char *name) {
 
 static void emit_call(FnCtx *F, MLIR_OpHandle op) {
     Buf *out = F->out;
-    size_t nres = MLIR_GetOpNumResults(op);
-    MLIR_TypeHandle rty = nres ? MLIR_GetOpResultType(op, 0) : MLIR_INVALID_HANDLE;
+    size_t nres = MLIR_GetOpNumResults(F->ctx, op);
+    MLIR_TypeHandle rty = nres ? MLIR_GetOpResultType(F->ctx, op, 0) : MLIR_INVALID_HANDLE;
     bool is_void = (nres == 0);
 
     // Find callee (symbol) attr — "callee" for direct, none for indirect (the
     // callee value is then the first operand).
-    MLIR_AttributeHandle callee = find_attr(op, "callee");
-    MLIR_AttributeHandle var_callee_type = find_attr(op, "var_callee_type");
+    MLIR_AttributeHandle callee = find_attr(F->ctx, op, "callee");
+    MLIR_AttributeHandle var_callee_type = find_attr(F->ctx, op, "var_callee_type");
     bool indirect = (callee == MLIR_INVALID_HANDLE);
 
     // Operands.
-    size_t nops = MLIR_GetOpNumOperands(op);
+    size_t nops = MLIR_GetOpNumOperands(F->ctx, op);
     size_t arg_start = indirect ? 1 : 0;
 
     buf_cstr(out, "  ");
-    if (!is_void) { emit_use(F, MLIR_GetOpResult(op, 0)); buf_cstr(out, " = "); }
+    if (!is_void) { emit_use(F, MLIR_GetOpResult(F->ctx, op, 0)); buf_cstr(out, " = "); }
     buf_cstr(out, "call ");
 
     // Vararg form: emit the full function signature `<ret> (<arg-types>, ...)`.
@@ -484,7 +484,7 @@ static void emit_call(FnCtx *F, MLIR_OpHandle op) {
     }
     buf_putc(out, ' ');
 
-    if (indirect) emit_use(F, MLIR_GetOpOperand(op, 0));
+    if (indirect) emit_use(F, MLIR_GetOpOperand(F->ctx, op, 0));
     else {
         string s = MLIR_GetAttributeAsString(F->ctx, callee);
         buf_str(out, s);
@@ -492,8 +492,8 @@ static void emit_call(FnCtx *F, MLIR_OpHandle op) {
     buf_putc(out, '(');
     for (size_t i = arg_start; i < nops; i++) {
         if (i > arg_start) buf_cstr(out, ", ");
-        MLIR_ValueHandle a = MLIR_GetOpOperand(op, i);
-        print_type(out, F->ctx, MLIR_GetValueType(a));
+        MLIR_ValueHandle a = MLIR_GetOpOperand(F->ctx, op, i);
+        print_type(out, F->ctx, MLIR_GetValueType(F->ctx, a));
         buf_putc(out, ' ');
         emit_use(F, a);
     }
@@ -507,11 +507,11 @@ static void emit_phis(FnCtx *F, MLIR_BlockHandle blk,
 // values from all predecessor terminators.
 static void emit_phis(FnCtx *F, MLIR_BlockHandle blk,
                       MLIR_OpHandle *all_ops, size_t all_n) {
-    size_t na = MLIR_GetBlockNumArgs(blk);
+    size_t na = MLIR_GetBlockNumArgs(F->ctx, blk);
     if (na == 0) return;
     for (size_t ai = 0; ai < na; ai++) {
-        MLIR_ValueHandle arg = MLIR_GetBlockArg(blk, ai);
-        MLIR_TypeHandle ty = MLIR_GetValueType(arg);
+        MLIR_ValueHandle arg = MLIR_GetBlockArg(F->ctx, blk, ai);
+        MLIR_TypeHandle ty = MLIR_GetValueType(F->ctx, arg);
         buf_cstr(F->out, "  ");
         emit_use(F, arg);
         buf_cstr(F->out, " = phi ");
@@ -520,12 +520,12 @@ static void emit_phis(FnCtx *F, MLIR_BlockHandle blk,
         bool first = true;
         for (size_t i = 0; i < all_n; i++) {
             MLIR_OpHandle term = all_ops[i];
-            size_t nsucc = MLIR_GetOpNumSuccessors(term);
+            size_t nsucc = MLIR_GetOpNumSuccessors(F->ctx, term);
             for (size_t s = 0; s < nsucc; s++) {
-                MLIR_BlockHandle dst = MLIR_GetOpSuccessor(term, s);
+                MLIR_BlockHandle dst = MLIR_GetOpSuccessor(F->ctx, term, s);
                 if (dst != blk) continue;
-                MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(term, s, ai);
-                MLIR_BlockHandle src = MLIR_GetOpParentBlock(term);
+                MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(F->ctx, term, s, ai);
+                MLIR_BlockHandle src = MLIR_GetOpParentBlock(F->ctx, term);
                 if (!first) buf_cstr(F->out, ", ");
                 first = false;
                 buf_cstr(F->out, "[ ");
@@ -609,7 +609,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
     // The op type is derived from the op name by MLIR_CreateOp, so the ops
     // with an enumerator are selected by one switch; the rest (intrinsics,
     // llvm.unreachable) are matched by name after it.
-    MLIR_OpType ty = MLIR_GetOpType(op);
+    MLIR_OpType ty = MLIR_GetOpType(F->ctx, op);
 
     if (is_inline_constant(op, ty)) return; // inlined at uses
 
@@ -617,13 +617,13 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
     if ((bop = llvm_binop_opcode(ty)) != NULL) {
         // %r = OP T a, b
         buf_cstr(out, "  ");
-        emit_use(F, MLIR_GetOpResult(op, 0));
+        emit_use(F, MLIR_GetOpResult(F->ctx, op, 0));
         buf_cstr(out, " = ");
         buf_cstr(out, bop);
         buf_putc(out, ' ');
-        MLIR_ValueHandle a = MLIR_GetOpOperand(op, 0);
-        MLIR_ValueHandle b = MLIR_GetOpOperand(op, 1);
-        print_type(out, F->ctx, MLIR_GetValueType(a));
+        MLIR_ValueHandle a = MLIR_GetOpOperand(F->ctx, op, 0);
+        MLIR_ValueHandle b = MLIR_GetOpOperand(F->ctx, op, 1);
+        print_type(out, F->ctx, MLIR_GetValueType(F->ctx, a));
         buf_putc(out, ' ');
         emit_use(F, a);
         buf_cstr(out, ", ");
@@ -634,10 +634,10 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
     if (ty == OP_TYPE_LLVM_FNEG) {
         // %r = fneg T a
         buf_cstr(out, "  ");
-        emit_use(F, MLIR_GetOpResult(op, 0));
+        emit_use(F, MLIR_GetOpResult(F->ctx, op, 0));
         buf_cstr(out, " = fneg ");
-        MLIR_ValueHandle a = MLIR_GetOpOperand(op, 0);
-        print_type(out, F->ctx, MLIR_GetValueType(a));
+        MLIR_ValueHandle a = MLIR_GetOpOperand(F->ctx, op, 0);
+        print_type(out, F->ctx, MLIR_GetValueType(F->ctx, a));
         buf_putc(out, ' ');
         emit_use(F, a);
         buf_putc(out, '\n');
@@ -647,16 +647,16 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
     const char *cop;
     if ((cop = llvm_cast_opcode(op, ty)) != NULL) {
         buf_cstr(out, "  ");
-        emit_use(F, MLIR_GetOpResult(op, 0));
+        emit_use(F, MLIR_GetOpResult(F->ctx, op, 0));
         buf_cstr(out, " = ");
         buf_cstr(out, cop);
         buf_putc(out, ' ');
-        MLIR_ValueHandle a = MLIR_GetOpOperand(op, 0);
-        print_type(out, F->ctx, MLIR_GetValueType(a));
+        MLIR_ValueHandle a = MLIR_GetOpOperand(F->ctx, op, 0);
+        print_type(out, F->ctx, MLIR_GetValueType(F->ctx, a));
         buf_putc(out, ' ');
         emit_use(F, a);
         buf_cstr(out, " to ");
-        print_type(out, F->ctx, MLIR_GetOpResultType(op, 0));
+        print_type(out, F->ctx, MLIR_GetOpResultType(F->ctx, op, 0));
         buf_putc(out, '\n');
         return;
     }
@@ -665,10 +665,10 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
     case OP_TYPE_LLVM_ICMP: case OP_TYPE_LLVM_FCMP: {
         // %r = icmp pred T a, b
         buf_cstr(out, "  ");
-        emit_use(F, MLIR_GetOpResult(op, 0));
+        emit_use(F, MLIR_GetOpResult(F->ctx, op, 0));
         buf_cstr(out, " = ");
         buf_cstr(out, ty == OP_TYPE_LLVM_ICMP ? "icmp " : "fcmp ");
-        MLIR_AttributeHandle pa = find_attr(op, "predicate");
+        MLIR_AttributeHandle pa = find_attr(F->ctx, op, "predicate");
         const char *predtbl_i[] = {"eq","ne","slt","sle","sgt","sge","ult","ule","ugt","uge"};
         const char *predtbl_f[] = {
             "false","oeq","ogt","oge","olt","ole","one","ord",
@@ -682,9 +682,9 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
             if (pi >= 0 && pi < 16) buf_cstr(out, predtbl_f[pi]); else buf_cstr(out, "oeq");
         }
         buf_putc(out, ' ');
-        MLIR_ValueHandle a = MLIR_GetOpOperand(op, 0);
-        MLIR_ValueHandle b = MLIR_GetOpOperand(op, 1);
-        print_type(out, F->ctx, MLIR_GetValueType(a));
+        MLIR_ValueHandle a = MLIR_GetOpOperand(F->ctx, op, 0);
+        MLIR_ValueHandle b = MLIR_GetOpOperand(F->ctx, op, 1);
+        print_type(out, F->ctx, MLIR_GetValueType(F->ctx, a));
         buf_putc(out, ' ');
         emit_use(F, a);
         buf_cstr(out, ", ");
@@ -696,17 +696,17 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
     case OP_TYPE_LLVM_SELECT: {
         // %r = select i1 c, T a, T b
         buf_cstr(out, "  ");
-        emit_use(F, MLIR_GetOpResult(op, 0));
+        emit_use(F, MLIR_GetOpResult(F->ctx, op, 0));
         buf_cstr(out, " = select i1 ");
-        emit_use(F, MLIR_GetOpOperand(op, 0));
+        emit_use(F, MLIR_GetOpOperand(F->ctx, op, 0));
         buf_cstr(out, ", ");
-        MLIR_ValueHandle a = MLIR_GetOpOperand(op, 1);
-        MLIR_ValueHandle b = MLIR_GetOpOperand(op, 2);
-        print_type(out, F->ctx, MLIR_GetValueType(a));
+        MLIR_ValueHandle a = MLIR_GetOpOperand(F->ctx, op, 1);
+        MLIR_ValueHandle b = MLIR_GetOpOperand(F->ctx, op, 2);
+        print_type(out, F->ctx, MLIR_GetValueType(F->ctx, a));
         buf_putc(out, ' ');
         emit_use(F, a);
         buf_cstr(out, ", ");
-        print_type(out, F->ctx, MLIR_GetValueType(b));
+        print_type(out, F->ctx, MLIR_GetValueType(F->ctx, b));
         buf_putc(out, ' ');
         emit_use(F, b);
         buf_putc(out, '\n');
@@ -717,15 +717,15 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         // %r = alloca T, i64 N, align A
         // The alloca element type is in the "elem_type" attribute; the
         // operand is the count (i64 typically).
-        MLIR_AttributeHandle ea = find_attr(op, "elem_type");
+        MLIR_AttributeHandle ea = find_attr(F->ctx, op, "elem_type");
         MLIR_TypeHandle et = MLIR_GetAttributeTypeValue(ea);
-        MLIR_ValueHandle cnt = MLIR_GetOpOperand(op, 0);
+        MLIR_ValueHandle cnt = MLIR_GetOpOperand(F->ctx, op, 0);
         buf_cstr(out, "  ");
-        emit_use(F, MLIR_GetOpResult(op, 0));
+        emit_use(F, MLIR_GetOpResult(F->ctx, op, 0));
         buf_cstr(out, " = alloca ");
         print_type(out, F->ctx, et);
         buf_cstr(out, ", ");
-        print_type(out, F->ctx, MLIR_GetValueType(cnt));
+        print_type(out, F->ctx, MLIR_GetValueType(F->ctx, cnt));
         buf_putc(out, ' ');
         emit_use(F, cnt);
         buf_printf(out, ", align %u\n", type_align(F->ctx, et));
@@ -734,23 +734,23 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
 
     case OP_TYPE_LLVM_STORE: {
         // store T val, ptr p, align A
-        MLIR_ValueHandle val = MLIR_GetOpOperand(op, 0);
-        MLIR_ValueHandle ptr = MLIR_GetOpOperand(op, 1);
+        MLIR_ValueHandle val = MLIR_GetOpOperand(F->ctx, op, 0);
+        MLIR_ValueHandle ptr = MLIR_GetOpOperand(F->ctx, op, 1);
         buf_cstr(out, "  store ");
-        print_type(out, F->ctx, MLIR_GetValueType(val));
+        print_type(out, F->ctx, MLIR_GetValueType(F->ctx, val));
         buf_putc(out, ' ');
         emit_use(F, val);
         buf_cstr(out, ", ptr ");
         emit_use(F, ptr);
-        buf_printf(out, ", align %u\n", type_align(F->ctx, MLIR_GetValueType(val)));
+        buf_printf(out, ", align %u\n", type_align(F->ctx, MLIR_GetValueType(F->ctx, val)));
         return;
     }
     case OP_TYPE_LLVM_LOAD: {
         // %r = load T, ptr p, align A
-        MLIR_ValueHandle ptr = MLIR_GetOpOperand(op, 0);
-        MLIR_TypeHandle rty = MLIR_GetOpResultType(op, 0);
+        MLIR_ValueHandle ptr = MLIR_GetOpOperand(F->ctx, op, 0);
+        MLIR_TypeHandle rty = MLIR_GetOpResultType(F->ctx, op, 0);
         buf_cstr(out, "  ");
-        emit_use(F, MLIR_GetOpResult(op, 0));
+        emit_use(F, MLIR_GetOpResult(F->ctx, op, 0));
         buf_cstr(out, " = load ");
         print_type(out, F->ctx, rty);
         buf_cstr(out, ", ptr ");
@@ -764,15 +764,15 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         // MLIR form: llvm.getelementptr %p[0, 1, %v] : ... -> !llvm.ptr, ELEM_TY
         // The constant indices come from the "rawConstantIndices" attribute
         // (DenseI32ArrayAttr); -2147483648 means "use next operand".
-        MLIR_AttributeHandle eta = find_attr(op, "elem_type");
+        MLIR_AttributeHandle eta = find_attr(F->ctx, op, "elem_type");
         MLIR_TypeHandle elem = MLIR_GetAttributeTypeValue(eta);
-        MLIR_AttributeHandle ria = find_attr(op, "rawConstantIndices");
-        MLIR_ValueHandle base = MLIR_GetOpOperand(op, 0);
-        size_t nops = MLIR_GetOpNumOperands(op);
+        MLIR_AttributeHandle ria = find_attr(F->ctx, op, "rawConstantIndices");
+        MLIR_ValueHandle base = MLIR_GetOpOperand(F->ctx, op, 0);
+        size_t nops = MLIR_GetOpNumOperands(F->ctx, op);
         size_t next_op = 1;
 
         buf_cstr(out, "  ");
-        emit_use(F, MLIR_GetOpResult(op, 0));
+        emit_use(F, MLIR_GetOpResult(F->ctx, op, 0));
         buf_cstr(out, " = getelementptr ");
         print_type(out, F->ctx, elem);
         buf_cstr(out, ", ptr ");
@@ -798,9 +798,9 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
                 v *= sign;
                 if (v == (long long)(int32_t)0x80000000) {
                     // Dynamic — pull from operands.
-                    MLIR_ValueHandle dv = MLIR_GetOpOperand(op, next_op++);
+                    MLIR_ValueHandle dv = MLIR_GetOpOperand(F->ctx, op, next_op++);
                     buf_cstr(out, ", ");
-                    print_type(out, F->ctx, MLIR_GetValueType(dv));
+                    print_type(out, F->ctx, MLIR_GetValueType(F->ctx, dv));
                     buf_putc(out, ' ');
                     emit_use(F, dv);
                 } else {
@@ -811,9 +811,9 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         // Any remaining operands are dynamic indices that weren't covered by
         // the constant-indices attr.
         for (size_t j = next_op; j < nops; j++) {
-            MLIR_ValueHandle dv = MLIR_GetOpOperand(op, j);
+            MLIR_ValueHandle dv = MLIR_GetOpOperand(F->ctx, op, j);
             buf_cstr(out, ", ");
-            print_type(out, F->ctx, MLIR_GetValueType(dv));
+            print_type(out, F->ctx, MLIR_GetValueType(F->ctx, dv));
             buf_putc(out, ' ');
             emit_use(F, dv);
         }
@@ -824,11 +824,11 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
     case OP_TYPE_LLVM_CALL: emit_call(F, op); return;
 
     case OP_TYPE_LLVM_RETURN: {
-        if (MLIR_GetOpNumOperands(op) == 0) buf_cstr(out, "  ret void\n");
+        if (MLIR_GetOpNumOperands(F->ctx, op) == 0) buf_cstr(out, "  ret void\n");
         else {
-            MLIR_ValueHandle v = MLIR_GetOpOperand(op, 0);
+            MLIR_ValueHandle v = MLIR_GetOpOperand(F->ctx, op, 0);
             buf_cstr(out, "  ret ");
-            print_type(out, F->ctx, MLIR_GetValueType(v));
+            print_type(out, F->ctx, MLIR_GetValueType(F->ctx, v));
             buf_putc(out, ' ');
             emit_use(F, v);
             buf_putc(out, '\n');
@@ -837,14 +837,14 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
     }
 
     case OP_TYPE_LLVM_BR: {
-        MLIR_BlockHandle dst = MLIR_GetOpSuccessor(op, 0);
+        MLIR_BlockHandle dst = MLIR_GetOpSuccessor(F->ctx, op, 0);
         buf_printf(out, "  br label %%%s\n", bname(F, dst));
         return;
     }
     case OP_TYPE_LLVM_COND_BR: {
-        MLIR_ValueHandle c = MLIR_GetOpOperand(op, 0);
-        MLIR_BlockHandle t = MLIR_GetOpSuccessor(op, 0);
-        MLIR_BlockHandle f = MLIR_GetOpSuccessor(op, 1);
+        MLIR_ValueHandle c = MLIR_GetOpOperand(F->ctx, op, 0);
+        MLIR_BlockHandle t = MLIR_GetOpSuccessor(F->ctx, op, 0);
+        MLIR_BlockHandle f = MLIR_GetOpSuccessor(F->ctx, op, 1);
         buf_cstr(out, "  br i1 ");
         emit_use(F, c);
         buf_printf(out, ", label %%%s, label %%%s\n", bname(F, t), bname(F, f));
@@ -860,34 +860,34 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
     }
     case OP_TYPE_LLVM_INTR_VASTART: {
         buf_cstr(out, "  call void @llvm.va_start.p0(ptr ");
-        emit_use(F, MLIR_GetOpOperand(op, 0));
+        emit_use(F, MLIR_GetOpOperand(F->ctx, op, 0));
         buf_cstr(out, ")\n");
         return;
     }
     case OP_TYPE_LLVM_INTR_VAEND: {
         buf_cstr(out, "  call void @llvm.va_end.p0(ptr ");
-        emit_use(F, MLIR_GetOpOperand(op, 0));
+        emit_use(F, MLIR_GetOpOperand(F->ctx, op, 0));
         buf_cstr(out, ")\n");
         return;
     }
     case OP_TYPE_LLVM_INTR_VACOPY: {
         buf_cstr(out, "  call void @llvm.va_copy.p0(ptr ");
-        emit_use(F, MLIR_GetOpOperand(op, 0));
+        emit_use(F, MLIR_GetOpOperand(F->ctx, op, 0));
         buf_cstr(out, ", ptr ");
-        emit_use(F, MLIR_GetOpOperand(op, 1));
+        emit_use(F, MLIR_GetOpOperand(F->ctx, op, 1));
         buf_cstr(out, ")\n");
         return;
     }
     case OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE: {
-        if (MLIR_GetOpNumResults(op) == 1) {
+        if (MLIR_GetOpNumResults(F->ctx, op) == 1) {
             buf_cstr(out, "  ");
-            emit_use(F, MLIR_GetOpResult(op, 0));
+            emit_use(F, MLIR_GetOpResult(F->ctx, op, 0));
             buf_cstr(out, " = load i32, ptr @__wasm_mem_pages, align 4\n");
         }
         return;
     }
     case OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW: {
-        if (MLIR_GetOpNumResults(op) != 1) return;
+        if (MLIR_GetOpNumResults(F->ctx, op) != 1) return;
         char *old = fmt_alloc("%%v%d", F->next_v++);
         char *newv = fmt_alloc("%%v%d", F->next_v++);
         char *new64 = fmt_alloc("%%v%d", F->next_v++);
@@ -895,7 +895,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         char *stored = fmt_alloc("%%v%d", F->next_v++);
         buf_printf(out, "  %s = load i32, ptr @__wasm_mem_pages, align 4\n", old);
         buf_printf(out, "  %s = add i32 %s, ", newv, old);
-        emit_use(F, MLIR_GetOpOperand(op, 0));
+        emit_use(F, MLIR_GetOpOperand(F->ctx, op, 0));
         buf_putc(out, '\n');
         buf_printf(out, "  %s = zext i32 %s to i64\n", new64, newv);
         buf_printf(out, "  %s = icmp ule i64 %s, 65536\n", ok, new64);
@@ -904,7 +904,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         buf_cstr(out, stored);
         buf_cstr(out, ", ptr @__wasm_mem_pages, align 4\n");
         buf_cstr(out, "  ");
-        emit_use(F, MLIR_GetOpResult(op, 0));
+        emit_use(F, MLIR_GetOpResult(F->ctx, op, 0));
         buf_printf(out, " = select i1 %s, i32 %s, i32 -1\n", ok, old);
         return;
     }
@@ -920,9 +920,9 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         // Generic shape: %r = call T @llvm.NAME.f32/f64(T %x[, T %y, ...])
         const char *iname = opn.str + 10;
         size_t in = opn.size - 10;
-        bool has_res = MLIR_GetOpNumResults(op) > 0;
-        MLIR_TypeHandle rty = has_res ? MLIR_GetOpResultType(op, 0) :
-                              (MLIR_GetOpNumOperands(op) > 0 ? MLIR_GetValueType(MLIR_GetOpOperand(op, 0)) : MLIR_INVALID_HANDLE);
+        bool has_res = MLIR_GetOpNumResults(F->ctx, op) > 0;
+        MLIR_TypeHandle rty = has_res ? MLIR_GetOpResultType(F->ctx, op, 0) :
+                              (MLIR_GetOpNumOperands(F->ctx, op) > 0 ? MLIR_GetValueType(F->ctx, MLIR_GetOpOperand(F->ctx, op, 0)) : MLIR_INVALID_HANDLE);
         // Pick suffix from the first operand/result type (f32/f64/etc.)
         const char *suffix = "f64";
         if (rty != MLIR_INVALID_HANDLE) {
@@ -932,7 +932,7 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
             else if (ts.size == 3 && memcmp(ts.str, "f16", 3) == 0) suffix = "f16";
         }
         buf_cstr(out, "  ");
-        if (has_res) { emit_use(F, MLIR_GetOpResult(op, 0)); buf_cstr(out, " = "); }
+        if (has_res) { emit_use(F, MLIR_GetOpResult(F->ctx, op, 0)); buf_cstr(out, " = "); }
         buf_cstr(out, "call ");
         if (has_res) print_type(out, F->ctx, rty); else buf_cstr(out, "void");
         buf_cstr(out, " @llvm.");
@@ -940,11 +940,11 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
         buf_putc(out, '.');
         buf_cstr(out, suffix);
         buf_putc(out, '(');
-        size_t no = MLIR_GetOpNumOperands(op);
+        size_t no = MLIR_GetOpNumOperands(F->ctx, op);
         for (size_t i = 0; i < no; i++) {
             if (i) buf_cstr(out, ", ");
-            MLIR_ValueHandle v = MLIR_GetOpOperand(op, i);
-            print_type(out, F->ctx, MLIR_GetValueType(v));
+            MLIR_ValueHandle v = MLIR_GetOpOperand(F->ctx, op, i);
+            print_type(out, F->ctx, MLIR_GetValueType(F->ctx, v));
             buf_putc(out, ' ');
             emit_use(F, v);
         }
@@ -962,17 +962,17 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
 // Function emission.
 // -----------------------------------------------------------------------------
 
-static void collect_all_ops(MLIR_RegionHandle body, MLIR_OpHandle **out, size_t *n, size_t *cap) {
-    size_t nb = MLIR_GetRegionNumBlocks(body);
+static void collect_all_ops(MLIR_Context *ctx, MLIR_RegionHandle body, MLIR_OpHandle **out, size_t *n, size_t *cap) {
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, body);
     for (size_t bi = 0; bi < nb; bi++) {
-        MLIR_BlockHandle blk = MLIR_GetRegionBlock(body, bi);
-        size_t nops = MLIR_GetBlockNumOps(blk);
+        MLIR_BlockHandle blk = MLIR_GetRegionBlock(ctx, body, bi);
+        size_t nops = MLIR_GetBlockNumOps(ctx, blk);
         for (size_t oi = 0; oi < nops; oi++) {
             if (*n == *cap) {
                 *cap = *cap ? *cap * 2 : 64;
                 *out = (MLIR_OpHandle *)realloc(*out, *cap * sizeof(MLIR_OpHandle));
             }
-            (*out)[(*n)++] = MLIR_GetBlockOp(blk, oi);
+            (*out)[(*n)++] = MLIR_GetBlockOp(ctx, blk, oi);
         }
     }
 }
@@ -980,15 +980,15 @@ static void collect_all_ops(MLIR_RegionHandle body, MLIR_OpHandle **out, size_t 
 static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
     string sym = {0};
     MLIR_TypeHandle fty = MLIR_INVALID_HANDLE;
-    MLIR_AttributeHandle visa = find_attr(fn, "sym_visibility");
+    MLIR_AttributeHandle visa = find_attr(ctx, fn, "sym_visibility");
     bool is_private = false;
     if (visa != MLIR_INVALID_HANDLE) {
         string v = MLIR_GetAttributeString(visa);
         if (name_eq(v, "private")) is_private = true;
     }
-    MLIR_AttributeHandle syma = find_attr(fn, "sym_name");
+    MLIR_AttributeHandle syma = find_attr(ctx, fn, "sym_name");
     if (syma != MLIR_INVALID_HANDLE) sym = MLIR_GetAttributeString(syma);
-    MLIR_AttributeHandle ftya = find_attr(fn, "function_type");
+    MLIR_AttributeHandle ftya = find_attr(ctx, fn, "function_type");
     if (ftya != MLIR_INVALID_HANDLE) fty = MLIR_GetAttributeTypeValue(ftya);
 
     size_t ni = fty != MLIR_INVALID_HANDLE ? MLIR_GetTypeFunctionNumInputs(fty) : 0;
@@ -1004,8 +1004,8 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
         }
     }
 
-    bool has_body = MLIR_GetOpNumRegions(fn) > 0 &&
-                    MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(fn, 0)) > 0;
+    bool has_body = MLIR_GetOpNumRegions(ctx, fn) > 0 &&
+                    MLIR_GetRegionNumBlocks(ctx, MLIR_GetOpRegion(ctx, fn, 0)) > 0;
 
     if (!has_body) {
         buf_cstr(out, "declare ");
@@ -1029,14 +1029,14 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
     // Parameters use the names assigned by assign_names ("%a0" etc.).
     FnCtx F; memset(&F, 0, sizeof F);
     F.ctx = ctx; F.out = out;
-    MLIR_RegionHandle body = MLIR_GetOpRegion(fn, 0);
+    MLIR_RegionHandle body = MLIR_GetOpRegion(ctx, fn, 0);
     assign_names(&F, body);
     for (size_t i = 0; i < ni; i++) {
         if (i) buf_cstr(out, ", ");
         print_type(out, ctx, MLIR_GetTypeFunctionInput(fty, i));
         buf_putc(out, ' ');
-        MLIR_BlockHandle entry = MLIR_GetRegionBlock(body, 0);
-        MLIR_ValueHandle a = MLIR_GetBlockArg(entry, i);
+        MLIR_BlockHandle entry = MLIR_GetRegionBlock(ctx, body, 0);
+        MLIR_ValueHandle a = MLIR_GetBlockArg(ctx, entry, i);
         emit_use(&F, a);
     }
     if (varargs) { if (ni) buf_cstr(out, ", "); buf_cstr(out, "..."); }
@@ -1044,11 +1044,11 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
 
     // Collect all ops (for predecessor scans).
     MLIR_OpHandle *all = NULL; size_t an = 0, ac = 0;
-    collect_all_ops(body, &all, &an, &ac);
+    collect_all_ops(ctx, body, &all, &an, &ac);
 
-    size_t nb = MLIR_GetRegionNumBlocks(body);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, body);
     for (size_t bi = 0; bi < nb; bi++) {
-        MLIR_BlockHandle blk = MLIR_GetRegionBlock(body, bi);
+        MLIR_BlockHandle blk = MLIR_GetRegionBlock(ctx, body, bi);
         // Always emit the block label, including for the entry block: after
         // mem2reg a phi in a successor block may name the entry block as an
         // incoming predecessor (e.g. "[ 1, %entry ]"), which requires the
@@ -1056,9 +1056,9 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
         // entry block simply may not be used as a branch *target*.
         buf_printf(out, "%s:\n", bname(&F, blk));
         if (bi != 0) emit_phis(&F, blk, all, an);
-        size_t nops = MLIR_GetBlockNumOps(blk);
+        size_t nops = MLIR_GetBlockNumOps(ctx, blk);
         for (size_t oi = 0; oi < nops; oi++) {
-            emit_op(&F, MLIR_GetBlockOp(blk, oi));
+            emit_op(&F, MLIR_GetBlockOp(ctx, blk, oi));
         }
     }
 
@@ -1139,9 +1139,9 @@ static void print_const_bytes(Buf *out, MLIR_Context *ctx, MLIR_TypeHandle ty,
 }
 
 static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
-    MLIR_AttributeHandle syma = find_attr(gop, "sym_name");
+    MLIR_AttributeHandle syma = find_attr(ctx, gop, "sym_name");
     string sym = syma != MLIR_INVALID_HANDLE ? MLIR_GetAttributeString(syma) : (string){0,0};
-    MLIR_AttributeHandle gtya = find_attr(gop, "global_type");
+    MLIR_AttributeHandle gtya = find_attr(ctx, gop, "global_type");
     MLIR_TypeHandle gty = MLIR_INVALID_HANDLE;
     if (gtya != MLIR_INVALID_HANDLE) gty = MLIR_GetAttributeTypeValue(gtya);
 
@@ -1151,7 +1151,7 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
     // initializer is permitted/expected) rather than a linkage prefix.
     const char *linkage = "";
     bool is_external = false;
-    MLIR_AttributeHandle linka = find_attr(gop, "linkage");
+    MLIR_AttributeHandle linka = find_attr(ctx, gop, "linkage");
     if (linka != MLIR_INVALID_HANDLE) {
         string s = MLIR_GetAttributeAsString(ctx, linka);
         if      (name_starts_with(s, "#llvm.linkage<internal>")) linkage = "internal ";
@@ -1161,13 +1161,13 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
         else if (name_starts_with(s, "#llvm.linkage<weak>"))     linkage = "weak ";
     }
     bool is_constant = false;
-    MLIR_AttributeHandle ca = find_attr(gop, "constant");
+    MLIR_AttributeHandle ca = find_attr(ctx, gop, "constant");
     if (ca != MLIR_INVALID_HANDLE) is_constant = true;
 
     // Initial value: either the "value" attribute (string/numeric), or a
     // body region whose llvm.return yields the constant.
     char *init = NULL;
-    MLIR_AttributeHandle va = find_attr(gop, "value");
+    MLIR_AttributeHandle va = find_attr(ctx, gop, "value");
     if (va != MLIR_INVALID_HANDLE) {
         MLIR_AttrKind k = MLIR_GetAttributeKind(va);
         if (k == MLIR_ATTR_KIND_STRING) {
@@ -1237,20 +1237,20 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
             init = fmt_fp_literal(ctx, gty, MLIR_GetAttributeFloat(va));
         }
     }
-    if (init == NULL && MLIR_GetOpNumRegions(gop) > 0) {
-        MLIR_RegionHandle r = MLIR_GetOpRegion(gop, 0);
-        if (MLIR_GetRegionNumBlocks(r) > 0) {
-            MLIR_BlockHandle blk = MLIR_GetRegionBlock(r, 0);
-            size_t nops = MLIR_GetBlockNumOps(blk);
+    if (init == NULL && MLIR_GetOpNumRegions(ctx, gop) > 0) {
+        MLIR_RegionHandle r = MLIR_GetOpRegion(ctx, gop, 0);
+        if (MLIR_GetRegionNumBlocks(ctx, r) > 0) {
+            MLIR_BlockHandle blk = MLIR_GetRegionBlock(ctx, r, 0);
+            size_t nops = MLIR_GetBlockNumOps(ctx, blk);
             // Find the llvm.return; its operand's defining op is the
             // initializer expression.
             for (size_t i = 0; i < nops; i++) {
-                MLIR_OpHandle op = MLIR_GetBlockOp(blk, i);
-                if (MLIR_GetOpType(op) == OP_TYPE_LLVM_RETURN &&
-                    MLIR_GetOpNumOperands(op) > 0) {
-                    MLIR_ValueHandle v = MLIR_GetOpOperand(op, 0);
-                    MLIR_OpHandle def = MLIR_GetValueDefiningOp(v);
-                    char *lit = inline_literal_for(ctx, def, MLIR_GetValueType(v));
+                MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, i);
+                if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_RETURN &&
+                    MLIR_GetOpNumOperands(ctx, op) > 0) {
+                    MLIR_ValueHandle v = MLIR_GetOpOperand(ctx, op, 0);
+                    MLIR_OpHandle def = MLIR_GetValueDefiningOp(ctx, v);
+                    char *lit = inline_literal_for(ctx, def, MLIR_GetValueType(ctx, v));
                     if (lit) { init = lit; break; }
                     // A constant aggregate built by an llvm.insertvalue
                     // chain (a struct initializer, or an array from
@@ -1373,13 +1373,13 @@ static void scan_type_for_structs(MLIR_Context *ctx, MLIR_TypeHandle ty, StructL
 }
 
 static void scan_op_for_structs(MLIR_Context *ctx, MLIR_OpHandle op, StructList *L) {
-    size_t nr = MLIR_GetOpNumResults(op);
-    for (size_t i = 0; i < nr; i++) scan_type_for_structs(ctx, MLIR_GetOpResultType(op, i), L);
-    size_t no = MLIR_GetOpNumOperands(op);
-    for (size_t i = 0; i < no; i++) scan_type_for_structs(ctx, MLIR_GetValueType(MLIR_GetOpOperand(op, i)), L);
-    size_t na = MLIR_GetOpNumAttributes(op);
+    size_t nr = MLIR_GetOpNumResults(ctx, op);
+    for (size_t i = 0; i < nr; i++) scan_type_for_structs(ctx, MLIR_GetOpResultType(ctx, op, i), L);
+    size_t no = MLIR_GetOpNumOperands(ctx, op);
+    for (size_t i = 0; i < no; i++) scan_type_for_structs(ctx, MLIR_GetValueType(ctx, MLIR_GetOpOperand(ctx, op, i)), L);
+    size_t na = MLIR_GetOpNumAttributes(ctx, op);
     for (size_t i = 0; i < na; i++) {
-        MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
+        MLIR_AttributeHandle a = MLIR_GetOpAttribute(ctx, op, i);
         if (MLIR_GetAttributeKind(a) == MLIR_ATTR_KIND_TYPE) {
             scan_type_for_structs(ctx, MLIR_GetAttributeTypeValue(a), L);
         } else {
@@ -1388,26 +1388,26 @@ static void scan_op_for_structs(MLIR_Context *ctx, MLIR_OpHandle op, StructList 
             scan_type_text(ctx, s.str, s.size, L);
         }
     }
-    size_t nrg = MLIR_GetOpNumRegions(op);
+    size_t nrg = MLIR_GetOpNumRegions(ctx, op);
     for (size_t ri = 0; ri < nrg; ri++) {
-        MLIR_RegionHandle r = MLIR_GetOpRegion(op, ri);
-        size_t nb = MLIR_GetRegionNumBlocks(r);
+        MLIR_RegionHandle r = MLIR_GetOpRegion(ctx, op, ri);
+        size_t nb = MLIR_GetRegionNumBlocks(ctx, r);
         for (size_t bi = 0; bi < nb; bi++) {
-            MLIR_BlockHandle blk = MLIR_GetRegionBlock(r, bi);
-            size_t nops = MLIR_GetBlockNumOps(blk);
+            MLIR_BlockHandle blk = MLIR_GetRegionBlock(ctx, r, bi);
+            size_t nops = MLIR_GetBlockNumOps(ctx, blk);
             for (size_t oi = 0; oi < nops; oi++) {
-                scan_op_for_structs(ctx, MLIR_GetBlockOp(blk, oi), L);
+                scan_op_for_structs(ctx, MLIR_GetBlockOp(ctx, blk, oi), L);
             }
         }
     }
 }
 
-static bool module_has_global(MLIR_BlockHandle mb, const char *gn) {
-    size_t n = MLIR_GetBlockNumOps(mb);
+static bool module_has_global(MLIR_Context *ctx, MLIR_BlockHandle mb, const char *gn) {
+    size_t n = MLIR_GetBlockNumOps(ctx, mb);
     for (size_t i = 0; i < n; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        if (MLIR_GetOpType(op) != OP_TYPE_LLVM_MLIR_GLOBAL) continue;
-        MLIR_AttributeHandle syma = find_attr(op, "sym_name");
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
+        if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_MLIR_GLOBAL) continue;
+        MLIR_AttributeHandle syma = find_attr(ctx, op, "sym_name");
         if (syma == MLIR_INVALID_HANDLE) continue;
         string sym = MLIR_GetAttributeString(syma);
         if (sym.size == strlen(gn) && memcmp(sym.str, gn, sym.size) == 0)
@@ -1416,20 +1416,20 @@ static bool module_has_global(MLIR_BlockHandle mb, const char *gn) {
     return false;
 }
 
-static bool op_uses_wasm_memory(MLIR_OpHandle op) {
-    MLIR_OpType ty = MLIR_GetOpType(op);
+static bool op_uses_wasm_memory(MLIR_Context *ctx, MLIR_OpHandle op) {
+    MLIR_OpType ty = MLIR_GetOpType(ctx, op);
     if (ty == OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE ||
         ty == OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW)
         return true;
-    size_t nr = MLIR_GetOpNumRegions(op);
+    size_t nr = MLIR_GetOpNumRegions(ctx, op);
     for (size_t r = 0; r < nr; r++) {
-        MLIR_RegionHandle reg = MLIR_GetOpRegion(op, r);
-        size_t nb = MLIR_GetRegionNumBlocks(reg);
+        MLIR_RegionHandle reg = MLIR_GetOpRegion(ctx, op, r);
+        size_t nb = MLIR_GetRegionNumBlocks(ctx, reg);
         for (size_t b = 0; b < nb; b++) {
-            MLIR_BlockHandle blk = MLIR_GetRegionBlock(reg, b);
-            size_t no = MLIR_GetBlockNumOps(blk);
+            MLIR_BlockHandle blk = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t no = MLIR_GetBlockNumOps(ctx, blk);
             for (size_t i = 0; i < no; i++)
-                if (op_uses_wasm_memory(MLIR_GetBlockOp(blk, i))) return true;
+                if (op_uses_wasm_memory(ctx, MLIR_GetBlockOp(ctx, blk, i))) return true;
         }
     }
     return false;
@@ -1445,14 +1445,14 @@ string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module) {
     buf_cstr(&out, "source_filename = \"LLVMDialectModule\"\n\n");
 
     // Module body region 0 contains a single block with all top-level ops.
-    MLIR_RegionHandle mr = MLIR_GetOpRegion(module, 0);
-    MLIR_BlockHandle mb = MLIR_GetRegionBlock(mr, 0);
-    size_t nops = MLIR_GetBlockNumOps(mb);
+    MLIR_RegionHandle mr = MLIR_GetOpRegion(ctx, module, 0);
+    MLIR_BlockHandle mb = MLIR_GetRegionBlock(ctx, mr, 0);
+    size_t nops = MLIR_GetBlockNumOps(ctx, mb);
 
     // Gather struct decls.
     StructList sl = {0};
     for (size_t i = 0; i < nops; i++) {
-        scan_op_for_structs(ctx, MLIR_GetBlockOp(mb, i), &sl);
+        scan_op_for_structs(ctx, MLIR_GetBlockOp(ctx, mb, i), &sl);
     }
     for (size_t i = 0; i < sl.n; i++) {
         // Translate the body text (a tuple "(T1, T2)") to LLVM "{ T1, T2 }".
@@ -1492,21 +1492,21 @@ string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module) {
 
     bool need_wasm_pages = false;
     for (size_t i = 0; i < nops; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        if (MLIR_GetOpType(op) == OP_TYPE_LLVM_FUNC && op_uses_wasm_memory(op))
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
+        if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_FUNC && op_uses_wasm_memory(ctx, op))
             need_wasm_pages = true;
     }
-    if (need_wasm_pages && !module_has_global(mb, "__wasm_mem_pages"))
+    if (need_wasm_pages && !module_has_global(ctx, mb, "__wasm_mem_pages"))
         buf_cstr(&out, "@__wasm_mem_pages = global i32 0, align 4\n\n");
 
     // Emit globals first, then functions (order doesn't really matter to llc).
     for (size_t i = 0; i < nops; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        if (MLIR_GetOpType(op) == OP_TYPE_LLVM_MLIR_GLOBAL) emit_global(ctx, &out, op);
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
+        if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_MLIR_GLOBAL) emit_global(ctx, &out, op);
     }
     for (size_t i = 0; i < nops; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        if (MLIR_GetOpType(op) == OP_TYPE_LLVM_FUNC) emit_function(ctx, &out, op);
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
+        if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_FUNC) emit_function(ctx, &out, op);
     }
 
     // Copy result into the arena.

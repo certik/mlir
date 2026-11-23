@@ -141,8 +141,8 @@ static void kb_str(KB *k, string s)   { kb_bytes(k, s.str, s.size); kb_bytes(k, 
 // pure (llvm_op_is_pure) but still count as clobbers here, as they always
 // have: forwarding loads across them changes the generated code (fewer
 // loads, but more spills), so that is left to a separate change.
-static bool lc_is_pure(MLIR_OpHandle op) {
-    MLIR_OpType ty = MLIR_GetOpType(op);
+static bool lc_is_pure(MLIR_Context *ctx, MLIR_OpHandle op) {
+    MLIR_OpType ty = MLIR_GetOpType(ctx, op);
     switch (ty) {
     case OP_TYPE_LLVM_FADD: case OP_TYPE_LLVM_FSUB:
     case OP_TYPE_LLVM_FMUL: case OP_TYPE_LLVM_FDIV: case OP_TYPE_LLVM_FNEG:
@@ -157,8 +157,8 @@ static bool lc_is_pure(MLIR_OpHandle op) {
 
 // Pure, deterministic value op recursed through when structurally keying a
 // load address, and removable by DCE once its address chain is detached.
-static bool lc_is_transparent(MLIR_OpHandle op) {
-    switch (MLIR_GetOpType(op)) {
+static bool lc_is_transparent(MLIR_Context *ctx, MLIR_OpHandle op) {
+    switch (MLIR_GetOpType(ctx, op)) {
     case OP_TYPE_LLVM_ADD: case OP_TYPE_LLVM_SUB: case OP_TYPE_LLVM_MUL:
     case OP_TYPE_LLVM_AND: case OP_TYPE_LLVM_OR:  case OP_TYPE_LLVM_XOR:
     case OP_TYPE_LLVM_SHL: case OP_TYPE_LLVM_LSHR: case OP_TYPE_LLVM_ASHR:
@@ -171,8 +171,8 @@ static bool lc_is_transparent(MLIR_OpHandle op) {
         return false;
     }
 }
-static bool lc_is_load(MLIR_OpHandle op) { return MLIR_GetOpType(op) == OP_TYPE_LLVM_LOAD; }
-static bool lc_is_store(MLIR_OpHandle op) { return MLIR_GetOpType(op) == OP_TYPE_LLVM_STORE; }
+static bool lc_is_load(MLIR_Context *ctx, MLIR_OpHandle op) { return MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_LOAD; }
+static bool lc_is_store(MLIR_Context *ctx, MLIR_OpHandle op) { return MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_STORE; }
 
 // True iff `op` bumps the memory generation (clobbers all available values)
 // when encountered during the walk. MUST match lc_process_block exactly: a
@@ -180,11 +180,11 @@ static bool lc_is_store(MLIR_OpHandle op) { return MLIR_GetOpType(op) == OP_TYPE
 // (non-pure) op clobbers; the block terminator and pure / normal-load ops do
 // not. Shared by lc_process_block and the join-clobber precompute so the two
 // can never disagree (a weaker precompute would forward stale values).
-static bool lc_op_bumps_gen(MLIR_OpHandle op, MLIR_OpHandle term) {
+static bool lc_op_bumps_gen(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_OpHandle term) {
     if (op == term) return false;
-    if (lc_is_load(op)) return MLIR_GetOpNumResults(op) != 1;
-    if (lc_is_store(op)) return true;
-    return !lc_is_pure(op);
+    if (lc_is_load(ctx, op)) return MLIR_GetOpNumResults(ctx, op) != 1;
+    if (lc_is_store(ctx, op)) return true;
+    return !lc_is_pure(ctx, op);
 }
 
 // Follow the replacement map to the canonical value (flat: replacement targets
@@ -226,11 +226,11 @@ static int64_t lc_attr_payload(MLIR_AttributeHandle a, MLIR_AttrKind kind) {
 }
 
 static void lc_emit_op_ident(KB *k, MLIR_Context *ctx, MLIR_OpHandle op) {
-    kb_u64(k, (uint64_t)MLIR_GetOpType(op));
-    size_t na = MLIR_GetOpNumAttributes(op);
+    kb_u64(k, (uint64_t)MLIR_GetOpType(ctx, op));
+    size_t na = MLIR_GetOpNumAttributes(ctx, op);
     kb_u64(k, na);
     for (size_t i = 0; i < na; i++) {
-        MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
+        MLIR_AttributeHandle a = MLIR_GetOpAttribute(ctx, op, i);
         kb_str(k, MLIR_GetAttributeName(a));
         MLIR_AttrKind kind = MLIR_GetAttributeKind(a);
         kb_u64(k, (uint64_t)kind);
@@ -244,27 +244,27 @@ static void lc_emit_op_ident(KB *k, MLIR_Context *ctx, MLIR_OpHandle op) {
 // encoded as opaque SSA-handle leaves.
 static void lc_emit_value(KB *k, MLIR_Context *ctx, PMap *repl, MLIR_ValueHandle v, int depth) {
     v = lc_canon(repl, v);
-    MLIR_OpHandle d = (v == MLIR_INVALID_HANDLE) ? MLIR_INVALID_HANDLE : MLIR_GetValueDefiningOp(v);
-    if (depth <= 0 || d == MLIR_INVALID_HANDLE || !lc_is_transparent(d)) {
+    MLIR_OpHandle d = (v == MLIR_INVALID_HANDLE) ? MLIR_INVALID_HANDLE : MLIR_GetValueDefiningOp(ctx, v);
+    if (depth <= 0 || d == MLIR_INVALID_HANDLE || !lc_is_transparent(ctx, d)) {
         kb_bytes(k, "#", 1); kb_u64(k, (uint64_t)v); return;
     }
     kb_bytes(k, "(", 1);
     lc_emit_op_ident(k, ctx, d);
-    kb_u64(k, (uint64_t)MLIR_GetOpResultType(d, 0));
-    size_t no = MLIR_GetOpNumOperands(d);
+    kb_u64(k, (uint64_t)MLIR_GetOpResultType(ctx, d, 0));
+    size_t no = MLIR_GetOpNumOperands(ctx, d);
     kb_u64(k, no);
     for (size_t i = 0; i < no; i++)
-        lc_emit_value(k, ctx, repl, MLIR_GetOpOperand(d, i), depth - 1);
+        lc_emit_value(k, ctx, repl, MLIR_GetOpOperand(ctx, d, i), depth - 1);
     kb_bytes(k, ")", 1);
 }
 static void lc_build_load_key(KB *k, MLIR_Context *ctx, PMap *repl, MLIR_OpHandle op) {
     kb_reset(k);
     kb_bytes(k, "L", 1);
-    kb_u64(k, (uint64_t)MLIR_GetOpResultType(op, 0));
-    size_t no = MLIR_GetOpNumOperands(op);
+    kb_u64(k, (uint64_t)MLIR_GetOpResultType(ctx, op, 0));
+    size_t no = MLIR_GetOpNumOperands(ctx, op);
     kb_u64(k, no);
     for (size_t i = 0; i < no; i++)
-        lc_emit_value(k, ctx, repl, MLIR_GetOpOperand(op, i), 24);
+        lc_emit_value(k, ctx, repl, MLIR_GetOpOperand(ctx, op, i), 24);
 }
 
 // Build the key a single-operand `llvm.load` from this store's address (operand
@@ -274,9 +274,9 @@ static void lc_build_load_key(KB *k, MLIR_Context *ctx, PMap *repl, MLIR_OpHandl
 static void lc_build_store_key(KB *k, MLIR_Context *ctx, PMap *repl, MLIR_OpHandle op) {
     kb_reset(k);
     kb_bytes(k, "L", 1);
-    kb_u64(k, (uint64_t)MLIR_GetValueType(MLIR_GetOpOperand(op, 0)));
+    kb_u64(k, (uint64_t)MLIR_GetValueType(ctx, MLIR_GetOpOperand(ctx, op, 0)));
     kb_u64(k, 1);
-    lc_emit_value(k, ctx, repl, MLIR_GetOpOperand(op, 1), 24);
+    lc_emit_value(k, ctx, repl, MLIR_GetOpOperand(ctx, op, 1), 24);
 }
 
 // ===========================================================================
@@ -384,9 +384,9 @@ static void cfg_join_clob(Cfg *c) {
     c->join_clob = (char *)calloc(c->nb ? c->nb : 1, 1);
     for (size_t b = 0; b < c->nb; b++) {
         MLIR_OpHandle term = c->terms[b];
-        size_t no = MLIR_GetBlockNumOps(c->blocks[b]);
+        size_t no = MLIR_GetBlockNumOps(c->ctx, c->blocks[b]);
         for (size_t i = 0; i < no; i++)
-            if (lc_op_bumps_gen(MLIR_GetBlockOp(c->blocks[b], i), term)) {
+            if (lc_op_bumps_gen(c->ctx, MLIR_GetBlockOp(c->ctx, c->blocks[b], i), term)) {
                 c->blk_write[b] = 1; break;
             }
     }
@@ -453,39 +453,39 @@ static void lc_process_block(Walk *w, size_t bi) {
         (!w->join_refine || c->join_clob[bi]))
         w->gen++;
     MLIR_BlockHandle blk = c->blocks[bi];
-    size_t nops = MLIR_GetBlockNumOps(blk);
+    size_t nops = MLIR_GetBlockNumOps(c->ctx, blk);
     for (size_t i = 0; i < nops; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(blk, i);
+        MLIR_OpHandle op = MLIR_GetBlockOp(c->ctx, blk, i);
         if (op == c->terms[bi]) continue;               // terminator: no value, no clobber
-        if (lc_is_load(op)) {
-            if (MLIR_GetOpNumResults(op) != 1) { w->gen++; continue; }
+        if (lc_is_load(c->ctx, op)) {
+            if (MLIR_GetOpNumResults(c->ctx, op) != 1) { w->gen++; continue; }
             lc_build_load_key(&w->kb, c->ctx, &w->repl, op);
             int e = lcse_lookup(&w->map, w->kb.p, w->kb.n);
             if (e != -1 && w->map.ents[e].gen == w->gen) {
-                pmap_put(&w->repl, (uintptr_t)MLIR_GetOpResult(op, 0),
+                pmap_put(&w->repl, (uintptr_t)MLIR_GetOpResult(c->ctx, op, 0),
                          (int64_t)w->map.ents[e].val);
                 walk_mark_erase(w, op);
             } else {
-                lcse_insert(&w->map, w->kb.p, w->kb.n, MLIR_GetOpResult(op, 0), w->gen);
+                lcse_insert(&w->map, w->kb.p, w->kb.n, MLIR_GetOpResult(c->ctx, op, 0), w->gen);
             }
             continue;
         }
-        if (lc_is_store(op)) {
+        if (lc_is_store(c->ctx, op)) {
             w->gen++;                                   // store clobbers all available values
             // Store-to-load forwarding: republish addr -> stored value at the
             // new generation so a later must-alias load reuses the value
             // instead of reloading. The gen bump above invalidates every prior
             // entry, so only this store's (addr,value) is forwardable until the
             // next clobber -- exactly must-alias semantics, no alias analysis.
-            if (w->store_fwd && MLIR_GetOpNumOperands(op) == 2) {
+            if (w->store_fwd && MLIR_GetOpNumOperands(c->ctx, op) == 2) {
                 // The stored value may itself be a load we CSE'd away; forward
                 // to its canonical leader, never the soon-to-be-erased value.
-                MLIR_ValueHandle sv = lc_canon(&w->repl, MLIR_GetOpOperand(op, 0));
+                MLIR_ValueHandle sv = lc_canon(&w->repl, MLIR_GetOpOperand(c->ctx, op, 0));
                 // Only forward scalar int/float values. The memfuse addressing
                 // spine carries slotless `!llvm.ptr` values; never republish one
                 // as a load result (it has no register slot). In the wasm-lifted
                 // IR stored values are always i32/i64/f32/f64, but enforce it.
-                MLIR_TypeHandle st = MLIR_GetValueType(sv);
+                MLIR_TypeHandle st = MLIR_GetValueType(c->ctx, sv);
                 if (MLIR_IsTypeInteger(st) || MLIR_IsTypeFloat(st)) {
                     lc_build_store_key(&w->kb, c->ctx, &w->repl, op);
                     lcse_insert(&w->map, w->kb.p, w->kb.n, sv, w->gen);
@@ -493,7 +493,7 @@ static void lc_process_block(Walk *w, size_t bi) {
             }
             continue;
         }
-        if (!lc_is_pure(op)) w->gen++;                  // call / unknown: clobber
+        if (!lc_is_pure(c->ctx, op)) w->gen++;                  // call / unknown: clobber
     }
 }
 
@@ -526,26 +526,26 @@ static void lc_walk(Walk *w, size_t root) {
 static void lc_sweep_operands(Cfg *c, PMap *repl) {
     for (size_t b = 0; b < c->nb; b++) {
         MLIR_BlockHandle bk = c->blocks[b];
-        size_t no = MLIR_GetBlockNumOps(bk);
+        size_t no = MLIR_GetBlockNumOps(c->ctx, bk);
         for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-            size_t non = MLIR_GetOpNumOperands(op);
+            MLIR_OpHandle op = MLIR_GetBlockOp(c->ctx, bk, i);
+            size_t non = MLIR_GetOpNumOperands(c->ctx, op);
             for (size_t k = 0; k < non; k++) {
-                MLIR_ValueHandle v = MLIR_GetOpOperand(op, k);
+                MLIR_ValueHandle v = MLIR_GetOpOperand(c->ctx, op, k);
                 MLIR_ValueHandle r = lc_canon(repl, v);
                 if (r != v) MLIR_SetOpOperand(c->ctx, op, k, r);
             }
-            size_t ns = MLIR_GetOpNumSuccessors(op);
+            size_t ns = MLIR_GetOpNumSuccessors(c->ctx, op);
             for (size_t s = 0; s < ns; s++) {
-                size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                size_t nso = MLIR_GetOpNumSuccessorOperands(c->ctx, op, s);
                 bool any = false;
                 for (size_t k = 0; k < nso; k++)
-                    if (lc_canon(repl, MLIR_GetOpSuccessorOperand(op, s, k)) !=
-                        MLIR_GetOpSuccessorOperand(op, s, k)) { any = true; break; }
+                    if (lc_canon(repl, MLIR_GetOpSuccessorOperand(c->ctx, op, s, k)) !=
+                        MLIR_GetOpSuccessorOperand(c->ctx, op, s, k)) { any = true; break; }
                 if (!any) continue;
                 MLIR_ValueHandle *vals = (MLIR_ValueHandle *)malloc((nso ? nso : 1) * sizeof(MLIR_ValueHandle));
                 for (size_t k = 0; k < nso; k++)
-                    vals[k] = lc_canon(repl, MLIR_GetOpSuccessorOperand(op, s, k));
+                    vals[k] = lc_canon(repl, MLIR_GetOpSuccessorOperand(c->ctx, op, s, k));
                 MLIR_SetOpSuccessorOperands(c->ctx, op, s, vals, nso);
                 free(vals);
             }
@@ -565,23 +565,23 @@ static void lc_dce(Cfg *c, MLIR_OpHandle *seed_defs, size_t n_seed,
     PMap uses; pmap_init(&uses, 1024);
     for (size_t b = 0; b < c->nb; b++) {
         MLIR_BlockHandle bk = c->blocks[b];
-        size_t no = MLIR_GetBlockNumOps(bk);
+        size_t no = MLIR_GetBlockNumOps(c->ctx, bk);
         for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-            size_t non = MLIR_GetOpNumOperands(op);
+            MLIR_OpHandle op = MLIR_GetBlockOp(c->ctx, bk, i);
+            size_t non = MLIR_GetOpNumOperands(c->ctx, op);
             for (size_t k = 0; k < non; k++) {
-                MLIR_ValueHandle v = MLIR_GetOpOperand(op, k);
-                if (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) {
+                MLIR_ValueHandle v = MLIR_GetOpOperand(c->ctx, op, k);
+                if (MLIR_GetValueKind(c->ctx, v) == MLIR_VALUE_OP_RESULT) {
                     int64_t c0 = 0; pmap_get(&uses, (uintptr_t)v, &c0);
                     pmap_put(&uses, (uintptr_t)v, c0 + 1);
                 }
             }
-            size_t ns = MLIR_GetOpNumSuccessors(op);
+            size_t ns = MLIR_GetOpNumSuccessors(c->ctx, op);
             for (size_t s = 0; s < ns; s++) {
-                size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                size_t nso = MLIR_GetOpNumSuccessorOperands(c->ctx, op, s);
                 for (size_t k = 0; k < nso; k++) {
-                    MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(op, s, k);
-                    if (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) {
+                    MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(c->ctx, op, s, k);
+                    if (MLIR_GetValueKind(c->ctx, v) == MLIR_VALUE_OP_RESULT) {
                         int64_t c0 = 0; pmap_get(&uses, (uintptr_t)v, &c0);
                         pmap_put(&uses, (uintptr_t)v, c0 + 1);
                     }
@@ -599,15 +599,15 @@ static void lc_dce(Cfg *c, MLIR_OpHandle *seed_defs, size_t n_seed,
         MLIR_OpHandle op = wl[--nwl];
         if (op == MLIR_INVALID_HANDLE) continue;
         if (pmap_get(&dead, (uintptr_t)op, NULL)) continue;   // already erased
-        if (MLIR_GetOpNumResults(op) != 1 || !lc_is_transparent(op)) continue;
-        int64_t cnt = 0; pmap_get(&uses, (uintptr_t)MLIR_GetOpResult(op, 0), &cnt);
+        if (MLIR_GetOpNumResults(c->ctx, op) != 1 || !lc_is_transparent(c->ctx, op)) continue;
+        int64_t cnt = 0; pmap_get(&uses, (uintptr_t)MLIR_GetOpResult(c->ctx, op, 0), &cnt);
         if (cnt != 0) continue;
-        size_t non = MLIR_GetOpNumOperands(op);
+        size_t non = MLIR_GetOpNumOperands(c->ctx, op);
         MLIR_OpHandle *defs = (MLIR_OpHandle *)malloc((non ? non : 1) * sizeof(MLIR_OpHandle));
         for (size_t k = 0; k < non; k++) {
-            MLIR_ValueHandle v = MLIR_GetOpOperand(op, k);
-            defs[k] = (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) ? MLIR_GetValueDefiningOp(v) : MLIR_INVALID_HANDLE;
-            if (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) {
+            MLIR_ValueHandle v = MLIR_GetOpOperand(c->ctx, op, k);
+            defs[k] = (MLIR_GetValueKind(c->ctx, v) == MLIR_VALUE_OP_RESULT) ? MLIR_GetValueDefiningOp(c->ctx, v) : MLIR_INVALID_HANDLE;
+            if (MLIR_GetValueKind(c->ctx, v) == MLIR_VALUE_OP_RESULT) {
                 int64_t c0 = 0; pmap_get(&uses, (uintptr_t)v, &c0);
                 if (c0 > 0) pmap_put(&uses, (uintptr_t)v, c0 - 1);
             }
@@ -624,7 +624,7 @@ static void lc_dce(Cfg *c, MLIR_OpHandle *seed_defs, size_t n_seed,
 }
 
 static void lc_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
-    size_t nb = MLIR_GetRegionNumBlocks(region);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
     if (nb == 0) return;
 
     Cfg c; memset(&c, 0, sizeof(c));
@@ -632,19 +632,19 @@ static void lc_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     c.blocks = (MLIR_BlockHandle *)malloc(nb * sizeof(MLIR_BlockHandle));
     c.terms  = (MLIR_OpHandle *)malloc(nb * sizeof(MLIR_OpHandle));
     for (size_t i = 0; i < nb; i++) {
-        c.blocks[i] = MLIR_GetRegionBlock(region, i);
-        c.terms[i]  = MLIR_GetBlockTerminator(c.blocks[i]);
+        c.blocks[i] = MLIR_GetRegionBlock(ctx, region, i);
+        c.terms[i]  = MLIR_GetBlockTerminator(ctx, c.blocks[i]);
     }
     // Resolve successors -> indices.
     size_t total_ops = 0;
     size_t *rscnt = (size_t *)calloc(nb, sizeof(size_t));
     size_t **rsucc = (size_t **)malloc(nb * sizeof(size_t *));
     for (size_t i = 0; i < nb; i++) {
-        total_ops += MLIR_GetBlockNumOps(c.blocks[i]);
-        size_t ns = (c.terms[i] != MLIR_INVALID_HANDLE) ? MLIR_GetOpNumSuccessors(c.terms[i]) : 0;
+        total_ops += MLIR_GetBlockNumOps(ctx, c.blocks[i]);
+        size_t ns = (c.terms[i] != MLIR_INVALID_HANDLE) ? MLIR_GetOpNumSuccessors(ctx, c.terms[i]) : 0;
         rsucc[i] = (size_t *)malloc((ns ? ns : 1) * sizeof(size_t));
         for (size_t s = 0; s < ns; s++) {
-            size_t si = cfg_bidx(&c, MLIR_GetOpSuccessor(c.terms[i], s));
+            size_t si = cfg_bidx(&c, MLIR_GetOpSuccessor(ctx, c.terms[i], s));
             if (si != SIZE_MAX) rsucc[i][rscnt[i]++] = si;
         }
     }
@@ -688,8 +688,8 @@ static void lc_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
         // then rewrite all uses, erase the loads, and DCE the dead chains.
         MLIR_OpHandle *roots = (MLIR_OpHandle *)malloc(w.n_erase * sizeof(MLIR_OpHandle));
         for (size_t i = 0; i < w.n_erase; i++) {
-            MLIR_ValueHandle p = MLIR_GetOpOperand(w.erase[i], 0);
-            roots[i] = (MLIR_GetValueKind(p) == MLIR_VALUE_OP_RESULT) ? MLIR_GetValueDefiningOp(p) : MLIR_INVALID_HANDLE;
+            MLIR_ValueHandle p = MLIR_GetOpOperand(ctx, w.erase[i], 0);
+            roots[i] = (MLIR_GetValueKind(ctx, p) == MLIR_VALUE_OP_RESULT) ? MLIR_GetValueDefiningOp(ctx, p) : MLIR_INVALID_HANDLE;
         }
         lc_sweep_operands(&c, &w.repl);
         for (size_t i = 0; i < w.n_erase; i++) MLIR_EraseOp(ctx, w.erase[i]);
@@ -711,16 +711,16 @@ static void lc_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
 }
 
 void mlir_llvm_load_cse(MLIR_Context *ctx, MLIR_OpHandle module) {
-    if (MLIR_GetOpNumRegions(module) == 0) return;
-    MLIR_RegionHandle mr = MLIR_GetOpRegion(module, 0);
-    if (MLIR_GetRegionNumBlocks(mr) == 0) return;
-    MLIR_BlockHandle mb = MLIR_GetRegionBlock(mr, 0);
-    size_t nops = MLIR_GetBlockNumOps(mb);
+    if (MLIR_GetOpNumRegions(ctx, module) == 0) return;
+    MLIR_RegionHandle mr = MLIR_GetOpRegion(ctx, module, 0);
+    if (MLIR_GetRegionNumBlocks(ctx, mr) == 0) return;
+    MLIR_BlockHandle mb = MLIR_GetRegionBlock(ctx, mr, 0);
+    size_t nops = MLIR_GetBlockNumOps(ctx, mb);
     for (size_t i = 0; i < nops; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        MLIR_OpType ft = MLIR_GetOpType(op);
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
+        MLIR_OpType ft = MLIR_GetOpType(ctx, op);
         if (ft != OP_TYPE_FUNC_FUNC && ft != OP_TYPE_LLVM_FUNC) continue;
-        if (MLIR_GetOpNumRegions(op) == 0) continue;
-        lc_run_region(ctx, MLIR_GetOpRegion(op, 0));
+        if (MLIR_GetOpNumRegions(ctx, op) == 0) continue;
+        lc_run_region(ctx, MLIR_GetOpRegion(ctx, op, 0));
     }
 }

@@ -467,30 +467,30 @@ static void ef_add_bp(MachineFunc *e, MLIR_BlockHandle blk, uint32_t off) {
     e->n_bp++;
 }
 
-int64_t attr_i(MLIR_OpHandle op, const char *name) {
-    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(op, name);
+int64_t attr_i(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
     return a ? MLIR_GetAttributeInteger(a) : 0;
 }
-static bool attr_b(MLIR_OpHandle op, const char *name) {
-    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(op, name);
+static bool attr_b(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
     return a ? MLIR_GetAttributeBool(a) : false;
 }
-string attr_s(MLIR_OpHandle op, const char *name) {
-    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(op, name);
+string attr_s(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
     return a ? MLIR_GetAttributeString(a) : (string){0};
 }
 
 
 bool emit_aarch64_func(MLIR_Context *ctx, MLIR_OpHandle fn, MachineFunc *out) {
-    out->name     = attr_s(fn, "sym_name");
-    out->exported = attr_b(fn, "exported");
+    out->name     = attr_s(ctx, fn, "sym_name");
+    out->exported = attr_b(ctx, fn, "exported");
 
-    if (MLIR_GetOpNumRegions(fn) < 1) {
+    if (MLIR_GetOpNumRegions(ctx, fn) < 1) {
         fprintf(stderr, "aarch64->macho: aarch64.func has no region\n");
         return false;
     }
-    MLIR_RegionHandle reg = MLIR_GetOpRegion(fn, 0);
-    size_t nb = MLIR_GetRegionNumBlocks(reg);
+    MLIR_RegionHandle reg = MLIR_GetOpRegion(ctx, fn, 0);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, reg);
     // Fallthrough elision: a terminator `aarch64.b` whose target is the very
     // next block in layout is a no-op jump to PC+4. Dropping it lets control
     // fall through. The lifted `cf` CFG (and its cond_br trampoline blocks)
@@ -498,52 +498,52 @@ bool emit_aarch64_func(MLIR_Context *ctx, MLIR_OpHandle fn, MachineFunc *out) {
     // instructions, concentrated in hot loops. Skippable for A/B measurement.
     bool elide_fallthrough = (getenv("TINYC_NO_FALLTHROUGH") == NULL);
     for (size_t bi = 0; bi < nb; bi++) {
-        MLIR_BlockHandle blk = MLIR_GetRegionBlock(reg, bi);
+        MLIR_BlockHandle blk = MLIR_GetRegionBlock(ctx, reg, bi);
         MLIR_BlockHandle next_blk = (bi + 1 < nb)
-            ? MLIR_GetRegionBlock(reg, bi + 1) : MLIR_INVALID_HANDLE;
+            ? MLIR_GetRegionBlock(ctx, reg, bi + 1) : MLIR_INVALID_HANDLE;
         // Record the position of this block's first instruction.
         ef_add_bp(out, blk, (uint32_t)out->code.len);
-        size_t n = MLIR_GetBlockNumOps(blk);
+        size_t n = MLIR_GetBlockNumOps(ctx, blk);
         for (size_t i = 0; i < n; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(blk, i);
-            MLIR_OpType  t  = MLIR_GetOpType(op);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, i);
+            MLIR_OpType  t  = MLIR_GetOpType(ctx, op);
             switch (t) {
             case OP_TYPE_AARCH64_MOVZ: {
-                uint8_t rd  = (uint8_t)attr_i(op, "rd");
-                uint16_t im = (uint16_t)attr_i(op, "imm16");
-                uint8_t hw  = (uint8_t)attr_i(op, "hw");
-                bool   sf   = attr_b(op, "sf");
+                uint8_t rd  = (uint8_t)attr_i(ctx, op, "rd");
+                uint16_t im = (uint16_t)attr_i(ctx, op, "imm16");
+                uint8_t hw  = (uint8_t)attr_i(ctx, op, "hw");
+                bool   sf   = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_movz(rd, im, hw, sf));
                 break;
             }
             case OP_TYPE_AARCH64_MOVK: {
-                uint8_t rd  = (uint8_t)attr_i(op, "rd");
-                uint16_t im = (uint16_t)attr_i(op, "imm16");
-                uint8_t hw  = (uint8_t)attr_i(op, "hw");
-                bool   sf   = attr_b(op, "sf");
+                uint8_t rd  = (uint8_t)attr_i(ctx, op, "rd");
+                uint16_t im = (uint16_t)attr_i(ctx, op, "imm16");
+                uint8_t hw  = (uint8_t)attr_i(ctx, op, "hw");
+                bool   sf   = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_movk(rd, im, hw, sf));
                 break;
             }
             case OP_TYPE_AARCH64_MOV_X: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
                 emit_word(&out->code, arm64_mov_x(rd, rn));
                 break;
             }
             case OP_TYPE_AARCH64_BL: {
-                string callee = attr_s(op, "callee");
+                string callee = attr_s(ctx, op, "callee");
                 uint32_t off = (uint32_t)out->code.len;
                 emit_word(&out->code, arm64_bl(0));
                 ef_add_reloc(out, callee, off);
                 break;
             }
             case OP_TYPE_AARCH64_BLR: {
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
                 emit_word(&out->code, arm64_blr(rn));
                 break;
             }
             case OP_TYPE_AARCH64_SVC: {
-                uint16_t im = (uint16_t)attr_i(op, "imm16");
+                uint16_t im = (uint16_t)attr_i(ctx, op, "imm16");
                 emit_word(&out->code, arm64_svc(im));
                 break;
             }
@@ -551,12 +551,12 @@ bool emit_aarch64_func(MLIR_Context *ctx, MLIR_OpHandle fn, MachineFunc *out) {
                 emit_word(&out->code, arm64_ret());
                 break;
             case OP_TYPE_AARCH64_BRK: {
-                uint16_t im = (uint16_t)attr_i(op, "imm16");
+                uint16_t im = (uint16_t)attr_i(ctx, op, "imm16");
                 emit_word(&out->code, arm64_brk(im));
                 break;
             }
             case OP_TYPE_AARCH64_PROLOGUE: {
-                uint32_t fs = (uint32_t)attr_i(op, "frame_size");
+                uint32_t fs = (uint32_t)attr_i(ctx, op, "frame_size");
                 emit_word(&out->code, arm64_stp_fp_lr_pre());
                 emit_word(&out->code, arm64_mov_fp_sp());
                 uint32_t lo = fs & 0xfffu;
@@ -569,7 +569,7 @@ bool emit_aarch64_func(MLIR_Context *ctx, MLIR_OpHandle fn, MachineFunc *out) {
                 break;
             }
             case OP_TYPE_AARCH64_EPILOGUE: {
-                uint32_t fs = (uint32_t)attr_i(op, "frame_size");
+                uint32_t fs = (uint32_t)attr_i(ctx, op, "frame_size");
                 uint32_t lo = fs & 0xfffu;
                 uint32_t hi = (fs >> 12) & 0xfffu;
                 if (lo) emit_word(&out->code, arm64_add_sp_imm_sh((uint16_t)lo, /*lsl12=*/false));
@@ -578,231 +578,231 @@ bool emit_aarch64_func(MLIR_Context *ctx, MLIR_OpHandle fn, MachineFunc *out) {
                 break;
             }
             case OP_TYPE_AARCH64_ADD_IMM: {
-                uint8_t  rd = (uint8_t)attr_i(op, "rd");
-                uint8_t  rn = (uint8_t)attr_i(op, "rn");
-                uint16_t im = (uint16_t)attr_i(op, "imm12");
-                bool     sf = attr_b(op, "sf");
+                uint8_t  rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t  rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint16_t im = (uint16_t)attr_i(ctx, op, "imm12");
+                bool     sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_add_imm(rd, rn, im, sf));
                 break;
             }
             case OP_TYPE_AARCH64_SUB_IMM: {
-                uint8_t  rd = (uint8_t)attr_i(op, "rd");
-                uint8_t  rn = (uint8_t)attr_i(op, "rn");
-                uint16_t im = (uint16_t)attr_i(op, "imm12");
-                bool     sf = attr_b(op, "sf");
+                uint8_t  rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t  rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint16_t im = (uint16_t)attr_i(ctx, op, "imm12");
+                bool     sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_sub_imm(rd, rn, im, sf));
                 break;
             }
             case OP_TYPE_AARCH64_ADD_REG: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
-                uint8_t lsl = (uint8_t)attr_i(op, "lsl");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
+                uint8_t lsl = (uint8_t)attr_i(ctx, op, "lsl");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code,
                           arm64_add_reg(rd, rn, rm, sf) | ((uint32_t)(lsl & 0x3f) << 10));
                 break;
             }
             case OP_TYPE_AARCH64_SUB_REG: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_sub_reg(rd, rn, rm, sf));
                 break;
             }
             case OP_TYPE_AARCH64_LDR_W: {
-                uint8_t  rt = (uint8_t)attr_i(op, "rt");
-                uint8_t  rn = (uint8_t)attr_i(op, "rn");
-                uint16_t of = (uint16_t)attr_i(op, "off_bytes");
+                uint8_t  rt = (uint8_t)attr_i(ctx, op, "rt");
+                uint8_t  rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint16_t of = (uint16_t)attr_i(ctx, op, "off_bytes");
                 emit_word(&out->code, arm64_ldr_w_uoff(rt, rn, of));
                 break;
             }
             case OP_TYPE_AARCH64_STR_W: {
-                uint8_t  rt = (uint8_t)attr_i(op, "rt");
-                uint8_t  rn = (uint8_t)attr_i(op, "rn");
-                uint16_t of = (uint16_t)attr_i(op, "off_bytes");
+                uint8_t  rt = (uint8_t)attr_i(ctx, op, "rt");
+                uint8_t  rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint16_t of = (uint16_t)attr_i(ctx, op, "off_bytes");
                 emit_word(&out->code, arm64_str_w_uoff(rt, rn, of));
                 break;
             }
             case OP_TYPE_AARCH64_LDR_X: {
-                uint8_t  rt = (uint8_t)attr_i(op, "rt");
-                uint8_t  rn = (uint8_t)attr_i(op, "rn");
-                uint16_t of = (uint16_t)attr_i(op, "off_bytes");
+                uint8_t  rt = (uint8_t)attr_i(ctx, op, "rt");
+                uint8_t  rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint16_t of = (uint16_t)attr_i(ctx, op, "off_bytes");
                 emit_word(&out->code, arm64_ldr_x_uoff(rt, rn, of));
                 break;
             }
             case OP_TYPE_AARCH64_STR_X: {
-                uint8_t  rt = (uint8_t)attr_i(op, "rt");
-                uint8_t  rn = (uint8_t)attr_i(op, "rn");
-                uint16_t of = (uint16_t)attr_i(op, "off_bytes");
+                uint8_t  rt = (uint8_t)attr_i(ctx, op, "rt");
+                uint8_t  rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint16_t of = (uint16_t)attr_i(ctx, op, "off_bytes");
                 emit_word(&out->code, arm64_str_x_uoff(rt, rn, of));
                 break;
             }
             case OP_TYPE_AARCH64_STRB_IMM: {
-                uint8_t  rt = (uint8_t)attr_i(op, "rt");
-                uint8_t  rn = (uint8_t)attr_i(op, "rn");
-                uint16_t of = (uint16_t)attr_i(op, "off_bytes");
+                uint8_t  rt = (uint8_t)attr_i(ctx, op, "rt");
+                uint8_t  rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint16_t of = (uint16_t)attr_i(ctx, op, "off_bytes");
                 emit_word(&out->code, arm64_strb_imm(rt, rn, of));
                 break;
             }
             case OP_TYPE_AARCH64_LDRB_IMM: {
-                uint8_t  rt = (uint8_t)attr_i(op, "rt");
-                uint8_t  rn = (uint8_t)attr_i(op, "rn");
-                uint16_t of = (uint16_t)attr_i(op, "off_bytes");
+                uint8_t  rt = (uint8_t)attr_i(ctx, op, "rt");
+                uint8_t  rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint16_t of = (uint16_t)attr_i(ctx, op, "off_bytes");
                 emit_word(&out->code, arm64_ldrb_imm(rt, rn, of));
                 break;
             }
             case OP_TYPE_AARCH64_STRH_IMM: {
-                uint8_t  rt = (uint8_t)attr_i(op, "rt");
-                uint8_t  rn = (uint8_t)attr_i(op, "rn");
-                uint16_t of = (uint16_t)attr_i(op, "off_bytes");
+                uint8_t  rt = (uint8_t)attr_i(ctx, op, "rt");
+                uint8_t  rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint16_t of = (uint16_t)attr_i(ctx, op, "off_bytes");
                 emit_word(&out->code, arm64_strh_imm(rt, rn, of));
                 break;
             }
             case OP_TYPE_AARCH64_LDRH_IMM: {
-                uint8_t  rt = (uint8_t)attr_i(op, "rt");
-                uint8_t  rn = (uint8_t)attr_i(op, "rn");
-                uint16_t of = (uint16_t)attr_i(op, "off_bytes");
+                uint8_t  rt = (uint8_t)attr_i(ctx, op, "rt");
+                uint8_t  rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint16_t of = (uint16_t)attr_i(ctx, op, "off_bytes");
                 emit_word(&out->code, arm64_ldrh_imm(rt, rn, of));
                 break;
             }
             case OP_TYPE_AARCH64_LDR_W_REG: {
-                uint8_t rt = (uint8_t)attr_i(op, "rt");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                uint8_t rt = (uint8_t)attr_i(ctx, op, "rt");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
                 emit_word(&out->code, arm64_ldr_w_reg(rt, rn, rm));
                 break;
             }
             case OP_TYPE_AARCH64_STR_W_REG: {
-                uint8_t rt = (uint8_t)attr_i(op, "rt");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                uint8_t rt = (uint8_t)attr_i(ctx, op, "rt");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
                 emit_word(&out->code, arm64_str_w_reg(rt, rn, rm));
                 break;
             }
             case OP_TYPE_AARCH64_LDR_X_REG: {
-                uint8_t rt = (uint8_t)attr_i(op, "rt");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                uint8_t rt = (uint8_t)attr_i(ctx, op, "rt");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
                 emit_word(&out->code, arm64_ldr_x_reg(rt, rn, rm));
                 break;
             }
             case OP_TYPE_AARCH64_STR_X_REG: {
-                uint8_t rt = (uint8_t)attr_i(op, "rt");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                uint8_t rt = (uint8_t)attr_i(ctx, op, "rt");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
                 emit_word(&out->code, arm64_str_x_reg(rt, rn, rm));
                 break;
             }
             case OP_TYPE_AARCH64_LDRB_REG: {
-                uint8_t rt = (uint8_t)attr_i(op, "rt");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                uint8_t rt = (uint8_t)attr_i(ctx, op, "rt");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
                 emit_word(&out->code, arm64_ldrb_reg(rt, rn, rm));
                 break;
             }
             case OP_TYPE_AARCH64_STRB_REG: {
-                uint8_t rt = (uint8_t)attr_i(op, "rt");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                uint8_t rt = (uint8_t)attr_i(ctx, op, "rt");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
                 emit_word(&out->code, arm64_strb_reg(rt, rn, rm));
                 break;
             }
             case OP_TYPE_AARCH64_MUL: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_mul(rd, rn, rm, sf));
                 break;
             }
             case OP_TYPE_AARCH64_SDIV: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_sdiv(rd, rn, rm, sf));
                 break;
             }
             case OP_TYPE_AARCH64_UDIV: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_udiv(rd, rn, rm, sf));
                 break;
             }
             case OP_TYPE_AARCH64_MSUB: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
-                uint8_t ra = (uint8_t)attr_i(op, "ra");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
+                uint8_t ra = (uint8_t)attr_i(ctx, op, "ra");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_msub(rd, rn, rm, ra, sf));
                 break;
             }
             case OP_TYPE_AARCH64_AND_REG: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_and_reg(rd, rn, rm, sf));
                 break;
             }
             case OP_TYPE_AARCH64_AND_IMM: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t w  = (uint8_t)attr_i(op, "w");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t w  = (uint8_t)attr_i(ctx, op, "w");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_and_imm_lowbits(rd, rn, w, sf));
                 break;
             }
             case OP_TYPE_AARCH64_ORR_REG: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_orr_reg(rd, rn, rm, sf));
                 break;
             }
             case OP_TYPE_AARCH64_EOR_REG: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_eor_reg(rd, rn, rm, sf));
                 break;
             }
             case OP_TYPE_AARCH64_LSL_REG: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_lslv(rd, rn, rm, sf));
                 break;
             }
             case OP_TYPE_AARCH64_LSR_REG: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_lsrv(rd, rn, rm, sf));
                 break;
             }
             case OP_TYPE_AARCH64_ASR_REG: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_asrv(rd, rn, rm, sf));
                 break;
             }
             case OP_TYPE_AARCH64_LSL_IMM: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t sh = (uint8_t)attr_i(op, "shift");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t sh = (uint8_t)attr_i(ctx, op, "shift");
+                bool    sf = attr_b(ctx, op, "sf");
                 uint8_t ds = sf ? 64 : 32;
                 uint8_t immr = (uint8_t)((ds - sh) & (ds - 1));
                 uint8_t imms = (uint8_t)(ds - 1 - sh);
@@ -810,100 +810,100 @@ bool emit_aarch64_func(MLIR_Context *ctx, MLIR_OpHandle fn, MachineFunc *out) {
                 break;
             }
             case OP_TYPE_AARCH64_LSR_IMM: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t sh = (uint8_t)attr_i(op, "shift");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t sh = (uint8_t)attr_i(ctx, op, "shift");
+                bool    sf = attr_b(ctx, op, "sf");
                 uint8_t ds = sf ? 64 : 32;
                 emit_word(&out->code, arm64_ubfm(rd, rn, sh, (uint8_t)(ds - 1), sf));
                 break;
             }
             case OP_TYPE_AARCH64_ASR_IMM: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t sh = (uint8_t)attr_i(op, "shift");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t sh = (uint8_t)attr_i(ctx, op, "shift");
+                bool    sf = attr_b(ctx, op, "sf");
                 uint8_t ds = sf ? 64 : 32;
                 emit_word(&out->code, arm64_sbfm(rd, rn, sh, (uint8_t)(ds - 1), sf));
                 break;
             }
             case OP_TYPE_AARCH64_SXTW: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
                 emit_word(&out->code, arm64_sxtw(rd, rn));
                 break;
             }
             case OP_TYPE_AARCH64_SXTB: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_sxtb(rd, rn, sf));
                 break;
             }
             case OP_TYPE_AARCH64_SXTH: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_sxth(rd, rn, sf));
                 break;
             }
             case OP_TYPE_AARCH64_UXTW: {
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
                 emit_word(&out->code, arm64_uxtw(rd, rn));
                 break;
             }
             case OP_TYPE_AARCH64_ADRP_DATA: {
-                uint8_t rd      = (uint8_t)attr_i(op, "rd");
-                string  target  = attr_s(op, "target");
-                uint32_t addend = (uint32_t)attr_i(op, "addend");
+                uint8_t rd      = (uint8_t)attr_i(ctx, op, "rd");
+                string  target  = attr_s(ctx, op, "target");
+                uint32_t addend = (uint32_t)attr_i(ctx, op, "addend");
                 uint32_t off    = (uint32_t)out->code.len;
                 emit_word(&out->code, arm64_adrp(rd, 0));
                 ef_add_dr(out, target, /*is_add_lo=*/false, rd, /*rn=*/0, off, addend);
                 break;
             }
             case OP_TYPE_AARCH64_ADD_DATA_LO: {
-                uint8_t rd     = (uint8_t)attr_i(op, "rd");
-                uint8_t rn     = (uint8_t)attr_i(op, "rn");
-                string  target = attr_s(op, "target");
-                uint32_t addend = (uint32_t)attr_i(op, "addend");
+                uint8_t rd     = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn     = (uint8_t)attr_i(ctx, op, "rn");
+                string  target = attr_s(ctx, op, "target");
+                uint32_t addend = (uint32_t)attr_i(ctx, op, "addend");
                 uint32_t off   = (uint32_t)out->code.len;
                 emit_word(&out->code, arm64_add_imm(rd, rn, 0, /*sf=*/true));
                 ef_add_dr(out, target, /*is_add_lo=*/true, rd, rn, off, addend);
                 break;
             }
             case OP_TYPE_AARCH64_CMP_REG: {
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
-                bool    sf = attr_b(op, "sf");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_cmp_reg(rn, rm, sf));
                 break;
             }
             case OP_TYPE_AARCH64_CMP_IMM: {
-                uint8_t  rn = (uint8_t)attr_i(op, "rn");
-                uint16_t im = (uint16_t)attr_i(op, "imm12");
-                bool     sf = attr_b(op, "sf");
+                uint8_t  rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint16_t im = (uint16_t)attr_i(ctx, op, "imm12");
+                bool     sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_cmp_imm(rn, im, sf));
                 break;
             }
             case OP_TYPE_AARCH64_CSET: {
-                uint8_t rd   = (uint8_t)attr_i(op, "rd");
-                uint8_t cond = (uint8_t)attr_i(op, "cond");
-                bool    sf   = attr_b(op, "sf");
+                uint8_t rd   = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t cond = (uint8_t)attr_i(ctx, op, "cond");
+                bool    sf   = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_cset(rd, cond, sf));
                 break;
             }
             case OP_TYPE_AARCH64_CSEL: {
-                uint8_t rd   = (uint8_t)attr_i(op, "rd");
-                uint8_t rn   = (uint8_t)attr_i(op, "rn");
-                uint8_t rm   = (uint8_t)attr_i(op, "rm");
-                uint8_t cond = (uint8_t)attr_i(op, "cond");
-                bool    sf   = attr_b(op, "sf");
+                uint8_t rd   = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn   = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm   = (uint8_t)attr_i(ctx, op, "rm");
+                uint8_t cond = (uint8_t)attr_i(ctx, op, "cond");
+                bool    sf   = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_csel(rd, rn, rm, cond, sf));
                 break;
             }
             case OP_TYPE_AARCH64_B: {
-                MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(op, 0);
+                MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(ctx, op, 0);
                 // Elide a terminator branch that just falls through to the
                 // next block in layout.
                 if (elide_fallthrough && i + 1 == n && tgt == next_blk)
@@ -920,8 +920,8 @@ bool emit_aarch64_func(MLIR_Context *ctx, MLIR_OpHandle fn, MachineFunc *out) {
             // i.e. PC+8) over an unconditional B, whose imm26 reaches ±128 MiB
             // and is enough for any function we emit.
             case OP_TYPE_AARCH64_B_COND: {
-                MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(op, 0);
-                uint8_t cond = (uint8_t)attr_i(op, "cond");
+                MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(ctx, op, 0);
+                uint8_t cond = (uint8_t)attr_i(ctx, op, "cond");
                 emit_word(&out->code, arm64_b_cond(2, (uint8_t)(cond ^ 1u)));
                 uint32_t off = (uint32_t)out->code.len;
                 emit_word(&out->code, arm64_b(0));
@@ -929,9 +929,9 @@ bool emit_aarch64_func(MLIR_Context *ctx, MLIR_OpHandle fn, MachineFunc *out) {
                 break;
             }
             case OP_TYPE_AARCH64_CBZ: {
-                MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(op, 0);
-                uint8_t rt = (uint8_t)attr_i(op, "rt");
-                bool    sf = attr_b(op, "sf");
+                MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(ctx, op, 0);
+                uint8_t rt = (uint8_t)attr_i(ctx, op, "rt");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_cbnz(rt, 2, sf));
                 uint32_t off = (uint32_t)out->code.len;
                 emit_word(&out->code, arm64_b(0));
@@ -939,9 +939,9 @@ bool emit_aarch64_func(MLIR_Context *ctx, MLIR_OpHandle fn, MachineFunc *out) {
                 break;
             }
             case OP_TYPE_AARCH64_CBNZ: {
-                MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(op, 0);
-                uint8_t rt = (uint8_t)attr_i(op, "rt");
-                bool    sf = attr_b(op, "sf");
+                MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(ctx, op, 0);
+                uint8_t rt = (uint8_t)attr_i(ctx, op, "rt");
+                bool    sf = attr_b(ctx, op, "sf");
                 emit_word(&out->code, arm64_cbz(rt, 2, sf));
                 uint32_t off = (uint32_t)out->code.len;
                 emit_word(&out->code, arm64_b(0));
@@ -953,21 +953,21 @@ bool emit_aarch64_func(MLIR_Context *ctx, MLIR_OpHandle fn, MachineFunc *out) {
                 // tracking already happened above.
                 break;
             case OP_TYPE_AARCH64_FMOV_GP_V: {
-                bool dir_to_v = attr_b(op, "dir_to_v");
-                bool sf       = attr_b(op, "sf");
-                uint8_t rd    = (uint8_t)attr_i(op, "rd");
-                uint8_t rn    = (uint8_t)attr_i(op, "rn");
+                bool dir_to_v = attr_b(ctx, op, "dir_to_v");
+                bool sf       = attr_b(ctx, op, "sf");
+                uint8_t rd    = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn    = (uint8_t)attr_i(ctx, op, "rn");
                 emit_word(&out->code, dir_to_v
                     ? arm64_fmov_gp_to_v(rd, rn, sf)
                     : arm64_fmov_v_to_gp(rd, rn, sf));
                 break;
             }
             case OP_TYPE_AARCH64_FP_BINOP: {
-                string k = attr_s(op, "kind");
-                int fwidth = (int)attr_i(op, "fwidth");
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                string k = attr_s(ctx, op, "kind");
+                int fwidth = (int)attr_i(ctx, op, "fwidth");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
                 uint8_t kind = 0;
                 if      (k.size == 4 && memcmp(k.str, "fmul", 4) == 0) kind = 0;
                 else if (k.size == 4 && memcmp(k.str, "fdiv", 4) == 0) kind = 1;
@@ -983,10 +983,10 @@ bool emit_aarch64_func(MLIR_Context *ctx, MLIR_OpHandle fn, MachineFunc *out) {
                 break;
             }
             case OP_TYPE_AARCH64_FP_UNOP: {
-                string k = attr_s(op, "kind");
-                int fwidth = (int)attr_i(op, "fwidth");
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                string k = attr_s(ctx, op, "kind");
+                int fwidth = (int)attr_i(ctx, op, "fwidth");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
                 uint8_t kind = 0;
                 if      (k.size == 4 && memcmp(k.str, "fabs", 4) == 0)  kind = 1;
                 else if (k.size == 4 && memcmp(k.str, "fneg", 4) == 0)  kind = 2;
@@ -1001,19 +1001,19 @@ bool emit_aarch64_func(MLIR_Context *ctx, MLIR_OpHandle fn, MachineFunc *out) {
                 break;
             }
             case OP_TYPE_AARCH64_FCMP: {
-                int fwidth = (int)attr_i(op, "fwidth");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
-                uint8_t rm = (uint8_t)attr_i(op, "rm");
+                int fwidth = (int)attr_i(ctx, op, "fwidth");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
+                uint8_t rm = (uint8_t)attr_i(ctx, op, "rm");
                 emit_word(&out->code, arm64_fcmp(fwidth, rn, rm));
                 break;
             }
             case OP_TYPE_AARCH64_FP_CVT: {
-                string k = attr_s(op, "kind");
-                int src_w = (int)attr_i(op, "src_w");
-                int dst_w = (int)attr_i(op, "dst_w");
-                bool sign = attr_b(op, "sign");
-                uint8_t rd = (uint8_t)attr_i(op, "rd");
-                uint8_t rn = (uint8_t)attr_i(op, "rn");
+                string k = attr_s(ctx, op, "kind");
+                int src_w = (int)attr_i(ctx, op, "src_w");
+                int dst_w = (int)attr_i(ctx, op, "dst_w");
+                bool sign = attr_b(ctx, op, "sign");
+                uint8_t rd = (uint8_t)attr_i(ctx, op, "rd");
+                uint8_t rn = (uint8_t)attr_i(ctx, op, "rn");
                 uint32_t insn;
                 if      (k.size == 3 && memcmp(k.str, "f2f", 3) == 0)
                     insn = arm64_fcvt_f2f(src_w, dst_w, rd, rn);

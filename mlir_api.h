@@ -116,6 +116,13 @@ string MLIR_GetOpTypeName(MLIR_Context *ctx, MLIR_OpType type);
 // and regions) is valid until the op is erased (MLIR_EraseOp), its arena is
 // freed or the context is destroyed; the same holds on both backends.
 // Strings returned by getters are borrowed from the object they describe.
+//
+// Every function that reads an op, region, block or value takes the context
+// that created it as its first parameter, even when it only reads: a backend
+// may store these handles as indices into context-owned storage, and
+// resolving an index needs the context (doc/mlir_api_design.md section 2.2).
+// The upstream backend ignores it. The getters of types, attributes and
+// locations do not take it.
 
 typedef struct MLIR_ContextOptions {
     // The initial IR arena, owned by the caller. May be NULL; set one with
@@ -233,27 +240,27 @@ void MLIR_AppendOpAttribute(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttributeH
 
 // Accessors
 // The op's type, as created. For its name use
-// MLIR_GetOpTypeName(ctx, MLIR_GetOpType(op)).
-MLIR_OpType MLIR_GetOpType(MLIR_OpHandle op);
-MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle op);
-size_t MLIR_GetOpNumOperands(MLIR_OpHandle op);
-MLIR_ValueHandle MLIR_GetOpOperand(MLIR_OpHandle op, size_t idx);
-size_t MLIR_GetOpNumResults(MLIR_OpHandle op);
-MLIR_ValueHandle MLIR_GetOpResult(MLIR_OpHandle op, size_t idx);
-size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle op);
-MLIR_TypeHandle MLIR_GetOpResultType(MLIR_OpHandle op, size_t idx);
-size_t MLIR_GetOpNumAttributes(MLIR_OpHandle op);
-MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle op, size_t idx);
+// MLIR_GetOpTypeName(ctx, MLIR_GetOpType(ctx, op)).
+MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle op);
+MLIR_LocationHandle MLIR_GetOpLocation(MLIR_Context *ctx, MLIR_OpHandle op);
+size_t MLIR_GetOpNumOperands(MLIR_Context *ctx, MLIR_OpHandle op);
+MLIR_ValueHandle MLIR_GetOpOperand(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx);
+size_t MLIR_GetOpNumResults(MLIR_Context *ctx, MLIR_OpHandle op);
+MLIR_ValueHandle MLIR_GetOpResult(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx);
+size_t MLIR_GetOpNumResultTypes(MLIR_Context *ctx, MLIR_OpHandle op);
+MLIR_TypeHandle MLIR_GetOpResultType(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx);
+size_t MLIR_GetOpNumAttributes(MLIR_Context *ctx, MLIR_OpHandle op);
+MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx);
 // Like MLIR_GetOpAttribute, but looks up by name including inherent
 // attributes that are stored in the op's Properties (e.g. LLVM::CallOp
 // `callee` and `var_callee_type`). Returns MLIR_INVALID_HANDLE on miss.
-MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle op, const char *name);
-size_t MLIR_GetOpNumRegions(MLIR_OpHandle op);
-MLIR_RegionHandle MLIR_GetOpRegion(MLIR_OpHandle op, size_t idx);
-size_t MLIR_GetOpNumSuccessors(MLIR_OpHandle op);
-MLIR_BlockHandle MLIR_GetOpSuccessor(MLIR_OpHandle op, size_t idx);
-size_t MLIR_GetOpNumSuccessorOperands(MLIR_OpHandle op, size_t succ_idx);
-MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_OpHandle op, size_t succ_idx, size_t op_idx);
+MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_Context *ctx, MLIR_OpHandle op, const char *name);
+size_t MLIR_GetOpNumRegions(MLIR_Context *ctx, MLIR_OpHandle op);
+MLIR_RegionHandle MLIR_GetOpRegion(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx);
+size_t MLIR_GetOpNumSuccessors(MLIR_Context *ctx, MLIR_OpHandle op);
+MLIR_BlockHandle MLIR_GetOpSuccessor(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx);
+size_t MLIR_GetOpNumSuccessorOperands(MLIR_Context *ctx, MLIR_OpHandle op, size_t succ_idx);
+MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_Context *ctx, MLIR_OpHandle op, size_t succ_idx, size_t op_idx);
 
 // -----------------------------------------------------------------------------
 // Region API
@@ -261,8 +268,8 @@ MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_OpHandle op, size_t succ_idx, s
 
 MLIR_RegionHandle MLIR_CreateRegion(MLIR_Context *ctx);
 void MLIR_AppendRegionBlock(MLIR_Context *ctx, MLIR_RegionHandle region, MLIR_BlockHandle block);
-size_t MLIR_GetRegionNumBlocks(MLIR_RegionHandle region);
-MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_RegionHandle region, size_t idx);
+size_t MLIR_GetRegionNumBlocks(MLIR_Context *ctx, MLIR_RegionHandle region);
+MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_Context *ctx, MLIR_RegionHandle region, size_t idx);
 
 // -----------------------------------------------------------------------------
 // Block API
@@ -274,10 +281,10 @@ void MLIR_AppendBlockOp(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_OpHandle
 // down by one. `idx` is clamped to [0, n_ops].
 void MLIR_InsertBlockOpAtIndex(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_OpHandle op, size_t idx);
 void MLIR_AppendBlockArg(MLIR_Context *ctx, MLIR_BlockHandle block, MLIR_ValueHandle arg);
-size_t MLIR_GetBlockNumOps(MLIR_BlockHandle block);
-MLIR_OpHandle MLIR_GetBlockOp(MLIR_BlockHandle block, size_t idx);
-size_t MLIR_GetBlockNumArgs(MLIR_BlockHandle block);
-MLIR_ValueHandle MLIR_GetBlockArg(MLIR_BlockHandle block, size_t idx);
+size_t MLIR_GetBlockNumOps(MLIR_Context *ctx, MLIR_BlockHandle block);
+MLIR_OpHandle MLIR_GetBlockOp(MLIR_Context *ctx, MLIR_BlockHandle block, size_t idx);
+size_t MLIR_GetBlockNumArgs(MLIR_Context *ctx, MLIR_BlockHandle block);
+MLIR_ValueHandle MLIR_GetBlockArg(MLIR_Context *ctx, MLIR_BlockHandle block, size_t idx);
 
 // -----------------------------------------------------------------------------
 // Value API
@@ -294,11 +301,11 @@ MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_nam
 MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_Context *ctx, MLIR_OpHandle def, uint32_t result_index, MLIR_TypeHandle type, string register_name, MLIR_LocationHandle location);
 
 // Accessors
-MLIR_ValueKind MLIR_GetValueKind(MLIR_ValueHandle value);
-MLIR_TypeHandle MLIR_GetValueType(MLIR_ValueHandle value);
-uint32_t MLIR_GetValueResultIndex(MLIR_ValueHandle value);
-MLIR_OpHandle MLIR_GetValueDefiningOp(MLIR_ValueHandle value);
-MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle value);
+MLIR_ValueKind MLIR_GetValueKind(MLIR_Context *ctx, MLIR_ValueHandle value);
+MLIR_TypeHandle MLIR_GetValueType(MLIR_Context *ctx, MLIR_ValueHandle value);
+uint32_t MLIR_GetValueResultIndex(MLIR_Context *ctx, MLIR_ValueHandle value);
+MLIR_OpHandle MLIR_GetValueDefiningOp(MLIR_Context *ctx, MLIR_ValueHandle value);
+MLIR_LocationHandle MLIR_GetValueLocation(MLIR_Context *ctx, MLIR_ValueHandle value);
 
 // -----------------------------------------------------------------------------
 // Type API
@@ -493,11 +500,11 @@ MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *ctx, MLIR_OpHandle op,
 
 // Returns the block that contains `op`, or MLIR_INVALID_HANDLE if the
 // op is not currently attached to a block.
-MLIR_BlockHandle MLIR_GetOpParentBlock(MLIR_OpHandle op);
+MLIR_BlockHandle MLIR_GetOpParentBlock(MLIR_Context *ctx, MLIR_OpHandle op);
 
 // Returns the region that contains `block`, or MLIR_INVALID_HANDLE if
 // the block is not currently attached to a region.
-MLIR_RegionHandle MLIR_GetBlockParentRegion(MLIR_BlockHandle block);
+MLIR_RegionHandle MLIR_GetBlockParentRegion(MLIR_Context *ctx, MLIR_BlockHandle block);
 
 // Detaches `op` from its current parent block (if any) and appends it
 // to the end of `dest`. Operand/result handles, attributes, and regions
@@ -557,26 +564,26 @@ void MLIR_InsertRegionBlockBefore(MLIR_Context *ctx, MLIR_RegionHandle region,
 
 // Returns the last operation in `block` (its terminator), or
 // MLIR_INVALID_HANDLE if the block is empty.
-MLIR_OpHandle MLIR_GetBlockTerminator(MLIR_BlockHandle block);
+MLIR_OpHandle MLIR_GetBlockTerminator(MLIR_Context *ctx, MLIR_BlockHandle block);
 
 // Returns the op that contains the parent region of `block`. If the
 // region is a top-level (orphan) region, returns MLIR_INVALID_HANDLE.
-MLIR_OpHandle MLIR_GetBlockParentOp(MLIR_BlockHandle block);
+MLIR_OpHandle MLIR_GetBlockParentOp(MLIR_Context *ctx, MLIR_BlockHandle block);
 
 // Returns true if `block` is the first block of its parent region.
-bool MLIR_IsBlockEntry(MLIR_BlockHandle block);
+bool MLIR_IsBlockEntry(MLIR_Context *ctx, MLIR_BlockHandle block);
 
 // Returns the number of incoming edges to `block` from terminators in
 // other blocks of the same parent region. Each (predecessor block,
 // successor slot) pair is counted once even if a predecessor branches
 // to `block` from multiple slots.
-size_t MLIR_GetBlockNumPredecessors(MLIR_BlockHandle block);
+size_t MLIR_GetBlockNumPredecessors(MLIR_Context *ctx, MLIR_BlockHandle block);
 
 // Returns the predecessor at index `idx` of `block`. The 0-indexed
 // successor slot in the predecessor's terminator that points at
 // `block` is written to *out_succ_idx (if non-null). Returns
 // MLIR_INVALID_HANDLE if `idx` is out of range.
-MLIR_BlockHandle MLIR_GetBlockPredecessor(MLIR_BlockHandle block, size_t idx,
+MLIR_BlockHandle MLIR_GetBlockPredecessor(MLIR_Context *ctx, MLIR_BlockHandle block, size_t idx,
                                           size_t *out_succ_idx);
 
 // Adds a new block argument of type `type` to the end of `block`'s
@@ -595,7 +602,7 @@ void MLIR_EraseBlockArguments(MLIR_Context *ctx, MLIR_BlockHandle block,
 // arguments this is the block carrying the argument; for op results it
 // is the parent block of the defining op. Returns MLIR_INVALID_HANDLE
 // if the value is detached.
-MLIR_BlockHandle MLIR_GetValueParentBlock(MLIR_ValueHandle value);
+MLIR_BlockHandle MLIR_GetValueParentBlock(MLIR_Context *ctx, MLIR_ValueHandle value);
 
 // Returns the number of uses of `value`. A use is a single operand
 // reference (operand, successor-operand of a terminator, etc.).

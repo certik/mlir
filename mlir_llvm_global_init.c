@@ -122,28 +122,28 @@ static bool elem_from_cursor(MLIR_Context *ctx, MLIR_TypeHandle gty, const int64
 bool llvm_global_init_bytes(MLIR_Context *ctx, MLIR_OpHandle gop,
                             MLIR_TypeHandle gty, unsigned ptr_bytes,
                             uint8_t *buf, unsigned size) {
-    if (MLIR_GetOpNumRegions(gop) == 0) return false;
-    MLIR_RegionHandle rgn = MLIR_GetOpRegion(gop, 0);
-    if (MLIR_GetRegionNumBlocks(rgn) == 0) return false;
-    MLIR_BlockHandle blk = MLIR_GetRegionBlock(rgn, 0);
-    size_t nb = MLIR_GetBlockNumOps(blk);
+    if (MLIR_GetOpNumRegions(ctx, gop) == 0) return false;
+    MLIR_RegionHandle rgn = MLIR_GetOpRegion(ctx, gop, 0);
+    if (MLIR_GetRegionNumBlocks(ctx, rgn) == 0) return false;
+    MLIR_BlockHandle blk = MLIR_GetRegionBlock(ctx, rgn, 0);
+    size_t nb = MLIR_GetBlockNumOps(ctx, blk);
     MLIR_ValueHandle cur = MLIR_INVALID_HANDLE;  // the aggregate built so far
     FieldCursor fc;
     fc.valid = false;
     for (size_t i = 0; i < nb; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(blk, i);
-        MLIR_OpType t = MLIR_GetOpType(op);
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, i);
+        MLIR_OpType t = MLIR_GetOpType(ctx, op);
         if (t == OP_TYPE_LLVM_MLIR_ZERO || t == OP_TYPE_LLVM_MLIR_UNDEF ||
             t == OP_TYPE_LLVM_MLIR_POISON) {
-            if (cur != MLIR_INVALID_HANDLE || MLIR_GetOpNumResults(op) != 1) return false;
-            cur = MLIR_GetOpResult(op, 0);
+            if (cur != MLIR_INVALID_HANDLE || MLIR_GetOpNumResults(ctx, op) != 1) return false;
+            cur = MLIR_GetOpResult(ctx, op, 0);
         } else if (t == OP_TYPE_LLVM_MLIR_CONSTANT) {
             // Read through the llvm.insertvalue that uses it.
         } else if (t == OP_TYPE_LLVM_INSERTVALUE) {
-            if (cur == MLIR_INVALID_HANDLE || MLIR_GetOpNumOperands(op) != 2 ||
-                MLIR_GetOpOperand(op, 0) != cur || MLIR_GetOpNumResults(op) != 1)
+            if (cur == MLIR_INVALID_HANDLE || MLIR_GetOpNumOperands(ctx, op) != 2 ||
+                MLIR_GetOpOperand(ctx, op, 0) != cur || MLIR_GetOpNumResults(ctx, op) != 1)
                 return false;
-            MLIR_AttributeHandle pa = MLIR_GetOpAttributeByName(op, "position");
+            MLIR_AttributeHandle pa = MLIR_GetOpAttributeByName(ctx, op, "position");
             if (pa == MLIR_INVALID_HANDLE) return false;
             int64_t idx[16];
             size_t n = llvm_position_indices(ctx, pa, idx, 16);
@@ -153,10 +153,10 @@ bool llvm_global_init_bytes(MLIR_Context *ctx, MLIR_OpHandle gop,
                 return false;
             unsigned esz = llvm_type_size(ctx, et, ptr_bytes);
             if (esz == 0 || esz > 8 || off + esz > size) return false;
-            MLIR_OpHandle c = MLIR_GetValueDefiningOp(MLIR_GetOpOperand(op, 1));
-            if (c == MLIR_INVALID_HANDLE || MLIR_GetOpType(c) != OP_TYPE_LLVM_MLIR_CONSTANT)
+            MLIR_OpHandle c = MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, op, 1));
+            if (c == MLIR_INVALID_HANDLE || MLIR_GetOpType(ctx, c) != OP_TYPE_LLVM_MLIR_CONSTANT)
                 return false;
-            MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(c, "value");
+            MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(ctx, c, "value");
             if (va == MLIR_INVALID_HANDLE) return false;
             MLIR_AttrKind k = MLIR_GetAttributeKind(va);
             uint64_t bits = 0;
@@ -174,10 +174,10 @@ bool llvm_global_init_bytes(MLIR_Context *ctx, MLIR_OpHandle gop,
                 return false;
             }
             for (unsigned b = 0; b < esz; b++) buf[off + b] = (uint8_t)(bits >> (8 * b));
-            cur = MLIR_GetOpResult(op, 0);
+            cur = MLIR_GetOpResult(ctx, op, 0);
         } else if (t == OP_TYPE_LLVM_RETURN) {
-            return cur != MLIR_INVALID_HANDLE && MLIR_GetOpNumOperands(op) == 1 &&
-                   MLIR_GetOpOperand(op, 0) == cur;
+            return cur != MLIR_INVALID_HANDLE && MLIR_GetOpNumOperands(ctx, op) == 1 &&
+                   MLIR_GetOpOperand(ctx, op, 0) == cur;
         } else {
             return false;
         }

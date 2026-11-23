@@ -451,7 +451,7 @@ OperationParserResult parse_tt_splat_op(Parser *parser, const OperationParserPar
 
     // Infer result type if not already parsed from trailing type
     if (n_result_types == 0) {
-        MLIR_TypeHandle operand_type = operand ? MLIR_GetValueType(operand) : MLIR_INVALID_HANDLE;
+        MLIR_TypeHandle operand_type = operand ? MLIR_GetValueType(params->ctx, operand) : MLIR_INVALID_HANDLE;
         MLIR_TypeHandle result_type = MLIR_INVALID_HANDLE;
         if (operand_type) {
             string operand_type_str = MLIR_GetTypeString(parser->ctx, operand_type);
@@ -647,7 +647,7 @@ OperationParserResult parse_tt_addptr_op(Parser *parser, const OperationParserPa
         }
     } else if (operands.size > 0) {
         MLIR_ValueHandle first = operands.data[0];
-        MLIR_TypeHandle first_type = first ? MLIR_GetValueType(first) : MLIR_INVALID_HANDLE;
+        MLIR_TypeHandle first_type = first ? MLIR_GetValueType(params->ctx, first) : MLIR_INVALID_HANDLE;
         if (first_type) {
             result_types = arena_new_array(params->arena, MLIR_TypeHandle, 1);
             result_types[0] = first_type;
@@ -2687,7 +2687,7 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
         for (size_t i = 0; i < func_args.size; i++) {
             MLIR_ValueHandle operand = func_args.data[i];
             if (!operand) continue;
-            string name = MLIR_GetValueRegisterName(operand);
+            string name = MLIR_GetValueRegisterName(params->ctx, operand);
             if (name.size > 0) {
                 symbol_table_add_value(parser->arena, &parser->symbol_table, name, operand);
             }
@@ -3034,12 +3034,12 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
 
     MLIR_BlockHandle block = MLIR_CreateBlock(parser->ctx);
     if (loop_var) {
-        string loop_name = MLIR_GetValueRegisterName(loop_var);
+        string loop_name = MLIR_GetValueRegisterName(params->ctx, loop_var);
         MLIR_TypeHandle arg_type;
         if (iv_type) {
             arg_type = iv_type;
-        } else if (operands.size > 0 && operands.data[0] && MLIR_GetValueType(operands.data[0])) {
-            arg_type = MLIR_GetValueType(operands.data[0]);
+        } else if (operands.size > 0 && operands.data[0] && MLIR_GetValueType(params->ctx, operands.data[0])) {
+            arg_type = MLIR_GetValueType(params->ctx, operands.data[0]);
         } else {
             arg_type = mlir_type_create_from_string(parser->ctx, str_lit("index"));
         }
@@ -3050,13 +3050,13 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
 
     for (size_t i = 0; i < iter_vars.size; i++) {
         MLIR_ValueHandle iter_var = iter_vars.data[i];
-        string iter_name = MLIR_GetValueRegisterName(iter_var);
+        string iter_name = MLIR_GetValueRegisterName(params->ctx, iter_var);
         size_t init_index = 3 + i;
         MLIR_TypeHandle arg_type;
         if (operands.size > init_index) {
             MLIR_ValueHandle init_operand = operands.data[init_index];
-            if (init_operand && MLIR_GetValueType(init_operand)) {
-                arg_type = MLIR_GetValueType(init_operand);
+            if (init_operand && MLIR_GetValueType(params->ctx, init_operand)) {
+                arg_type = MLIR_GetValueType(params->ctx, init_operand);
             } else {
                 arg_type = mlir_type_create_from_string(parser->ctx, str_lit("unknown"));
             }
@@ -3372,7 +3372,7 @@ OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserP
 
     symbol_table_push_scope(parser->arena, &parser->symbol_table);
     for (size_t i = 0; i < launch_args.size; i++) {
-        string name = MLIR_GetValueRegisterName(launch_args.data[i]);
+        string name = MLIR_GetValueRegisterName(params->ctx, launch_args.data[i]);
         if (name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, name, launch_args.data[i]);
     }
 
@@ -3999,7 +3999,7 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
         // a scope that encloses the body region's own scope.
         symbol_table_push_scope(parser->arena, &parser->symbol_table);
         for (size_t i = 0; i < args.size; i++) {
-            string name = MLIR_GetValueRegisterName(args.data[i]);
+            string name = MLIR_GetValueRegisterName(params->ctx, args.data[i]);
             if (name.size > 0) {
                 symbol_table_add_value(parser->arena, &parser->symbol_table, name, args.data[i]);
             }
@@ -4011,9 +4011,9 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
         n_regions = 1;
         // Attach the function header's arguments to the entry block, unless
         // the body already declared its own (^bb0(...) form).
-        if (region && MLIR_GetRegionNumBlocks(region) > 0 && args.size > 0) {
-            MLIR_BlockHandle entry = MLIR_GetRegionBlock(region, 0);
-            if (entry && MLIR_GetBlockNumArgs(entry) == 0) {
+        if (region && MLIR_GetRegionNumBlocks(params->ctx, region) > 0 && args.size > 0) {
+            MLIR_BlockHandle entry = MLIR_GetRegionBlock(params->ctx, region, 0);
+            if (entry && MLIR_GetBlockNumArgs(params->ctx, entry) == 0) {
                 for (size_t i = 0; i < args.size; i++) {
                     MLIR_AppendBlockArg(parser->ctx, entry, args.data[i]);
                 }
@@ -4139,7 +4139,7 @@ OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserP
 
     MLIR_BlockHandle block = MLIR_CreateBlock(parser->ctx);
     if (iv_name.size > 0) {
-        MLIR_ValueHandle iv_block_arg = MLIR_CreateValueBlockArg(parser->ctx, iv_name, (uint32_t)MLIR_GetBlockNumArgs(block), mlir_type_create_from_string(parser->ctx, str_lit("index")), MLIR_INVALID_HANDLE);
+        MLIR_ValueHandle iv_block_arg = MLIR_CreateValueBlockArg(parser->ctx, iv_name, (uint32_t)MLIR_GetBlockNumArgs(params->ctx, block), mlir_type_create_from_string(parser->ctx, str_lit("index")), MLIR_INVALID_HANDLE);
         MLIR_AppendBlockArg(parser->ctx, block, iv_block_arg);
         symbol_table_add_value(parser->arena, &parser->symbol_table, iv_name, iv_block_arg);
     }

@@ -43,7 +43,7 @@ MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *ctx, string name);
 MLIR_LocationHandle MLIR_CreateLocationRef(MLIR_Context *ctx, int ref_id);
 // Comment that followed the op in the source text (MLIR_CreateOp's
 // `trailing_comment`), or an empty string.
-string MLIR_GetOpTrailingComment(MLIR_OpHandle op);
+string MLIR_GetOpTrailingComment(MLIR_Context *ctx, MLIR_OpHandle op);
 
 // Vector helpers used by the parser implementation
 DEFINE_VECTOR_FOR_TYPE(MLIR_OpHandle, VecOp)
