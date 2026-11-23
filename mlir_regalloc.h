@@ -36,6 +36,17 @@ void sm_put(SlotMap *m, MLIR_ValueHandle k, int32_t slot);
 bool sm_get(SlotMap *m, MLIR_ValueHandle k, int32_t *out);
 void uc_inc(SlotMap *m, MLIR_ValueHandle k);
 
+// Fold/const/cast hooks the allocators call, defined by the aarch64 backend
+// (mlir_llvm_to_aarch64.c). x64 reuses const_int_val / cast_src (generic) and
+// passes NULL fusion maps.
+bool const_int_val(MLIR_Context *ctx, MLIR_OpHandle op, int64_t *val, uint8_t *is64);
+bool cast_src(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_ValueHandle *src);
+bool a64_is_spine(MLIR_Context *ctx, MLIR_OpHandle op, SlotMap *memspine);
+bool a64_memfuse_uses(MLIR_Context *ctx, MLIR_OpHandle op, SlotMap *memfuse,
+                      MLIR_ValueHandle *base, MLIR_ValueHandle *idx);
+bool a64_shiftfuse_uses(MLIR_Context *ctx, MLIR_OpHandle op, SlotMap *shiftfuse,
+                        MLIR_ValueHandle *xv);
+
 // Register-pool + fold/fusion description for one target. Data only.
 //   pool[0..ncaller)        caller-saved physical registers
 //   pool[ncaller..npool)    callee-saved physical registers

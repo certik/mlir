@@ -20,16 +20,6 @@
 #include <base/string.h>
 #include "mlir_api.h"
 
-// Fold/const/cast hooks supplied by the active backend (mlir_llvm_to_aarch64.c).
-// x64 reuses const_int_val / cast_src (generic) and passes NULL fusion maps.
-extern bool const_int_val(MLIR_Context *ctx, MLIR_OpHandle op, int64_t *val, uint8_t *is64);
-extern bool cast_src(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_ValueHandle *src);
-extern bool a64_is_spine(MLIR_Context *ctx, MLIR_OpHandle op, SlotMap *memspine);
-extern bool a64_memfuse_uses(MLIR_Context *ctx, MLIR_OpHandle op, SlotMap *memfuse,
-                             MLIR_ValueHandle *base, MLIR_ValueHandle *idx);
-extern bool a64_shiftfuse_uses(MLIR_Context *ctx, MLIR_OpHandle op, SlotMap *shiftfuse,
-                               MLIR_ValueHandle *xv);
-
 // ---------------------------------------------------------------------------
 // SlotMap (value handle -> int32 slot/register/count).
 // ---------------------------------------------------------------------------
