@@ -29,7 +29,8 @@ static void pmap_init(PMap *m, size_t hint) {
 }
 static void pmap_free(PMap *m) { free(m->keys); free(m->vals); }
 static size_t pmap_slot(uintptr_t *keys, size_t cap, uintptr_t k) {
-    size_t i = (size_t)((k >> 4) * 11400714819323198485ull) & (cap - 1);
+    // Native handles are dense indices, upstream ones aligned pointers.
+    size_t i = (size_t)(((k ^ (k >> 4)) * 11400714819323198485ull) >> 20) & (cap - 1);
     while (keys[i] && keys[i] != k) i = (i + 1) & (cap - 1);
     return i;
 }

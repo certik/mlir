@@ -7,7 +7,9 @@
 #include <string.h>
 
 // SSA numbering map for printer (key by API values during migration)
-static inline size_t ptr_hash(MLIR_ValueHandle p) { return ((size_t)p) >> 3; }
+// Handles are indices natively and aligned pointers upstream: fold the low
+// bits in instead of shifting them out.
+static inline size_t ptr_hash(MLIR_ValueHandle p) { return (size_t)p ^ ((size_t)p >> 4); }
 static inline bool ptr_equal(MLIR_ValueHandle a, MLIR_ValueHandle b) { return a == b; }
 #define SsaMap_HASH ptr_hash
 #define SsaMap_EQUAL ptr_equal

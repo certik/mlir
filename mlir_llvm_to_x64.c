@@ -74,6 +74,12 @@ static bool vmap_get(VMap *m, MLIR_ValueHandle key, int32_t *out) {
     return false;
 }
 static void vmap_free(VMap *m) { free(m->k); free(m->v); m->k = NULL; m->v = NULL; }
+// The slot map also holds each alloca's region, keyed by its op handle with
+// the top bit set: op and value handles can be equal natively (both are
+// indices), and neither kind of handle has the top bit.
+static inline MLIR_ValueHandle x64_region_key(MLIR_OpHandle op) {
+    return (MLIR_ValueHandle)((uintptr_t)op | ((uintptr_t)1 << (sizeof(uintptr_t) * 8 - 1)));
+}
 
 // Global symbol -> byte offset (and size) in the module data blob.
 typedef struct { char **name; uint32_t *off; uint32_t *sz; size_t n, cap; } GMap;

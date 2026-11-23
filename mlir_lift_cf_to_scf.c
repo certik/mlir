@@ -807,7 +807,7 @@ static void block_map_init(Arena *arena, BlockMap *m, size_t n_expected) {
 }
 
 static size_t block_map_slot(const BlockMap *m, MLIR_BlockHandle b) {
-    size_t h = (size_t)(b >> 3);
+    size_t h = (size_t)(b ^ (b >> 4));
     h ^= h >> 15;
     h *= (size_t)0x9E3779B1u;
     h ^= h >> 13;
