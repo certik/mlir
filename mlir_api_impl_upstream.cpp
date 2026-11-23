@@ -58,6 +58,8 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringSet.h"
 #include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/Verifier.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/Pass.h"
@@ -533,6 +535,63 @@ extern "C" MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) 
     attr_key_table_init(&c->keyTable, c->persistent);
     c->opNames.assign((size_t)OP_TYPE_COUNT, nullptr);
     for (int t = 1; t < (int)OP_TYPE_COUNT; t++) bindOpName(c, (MLIR_OpType)t);
+#ifdef MLIR_API_CHECKS
+    static bool traits_checked = false;
+    if (!traits_checked) {
+        traits_checked = true;
+        bool all_ok = true;
+        for (int t = 1; t < (int)OP_TYPE_COUNT; t++) {
+            mlir::OperationName opName = mlir::OperationName::getFromOpaquePointer(c->opNames[t]);
+            auto reg = opName.getRegisteredInfo();
+            if (!reg) continue;
+            MLIR_OpTraits tr = MLIR_GetOpTypeTraits((MLIR_OpType)t);
+            bool upTerm = reg->hasTrait<mlir::OpTrait::IsTerminator>();
+            bool ourTerm = (tr & MLIR_T_TERMINATOR) != 0;
+            if (upTerm != ourTerm) {
+                fprintf(stderr, "trait mismatch for %s: terminator ours=%d upstream=%d\n",
+                        opName.getStringRef().str().c_str(), (int)ourTerm, (int)upTerm);
+                all_ok = false;
+            }
+            bool upComm = reg->hasTrait<mlir::OpTrait::IsCommutative>();
+            bool ourComm = (tr & MLIR_T_COMMUTATIVE) != 0;
+            if (upComm && !ourComm) {
+                fprintf(stderr, "trait mismatch for %s: upstream commutative but not MLIR_T_COMMUTATIVE\n",
+                        opName.getStringRef().str().c_str());
+                all_ok = false;
+            }
+            bool upConst = reg->hasTrait<mlir::OpTrait::ConstantLike>();
+            bool ourConst = (tr & MLIR_T_CONSTANT) != 0;
+            if (upConst != ourConst) {
+                fprintf(stderr, "trait mismatch for %s: constant ours=%d upstream=%d\n",
+                        opName.getStringRef().str().c_str(), (int)ourConst, (int)upConst);
+                all_ok = false;
+            }
+            bool upRet = reg->hasTrait<mlir::OpTrait::ReturnLike>();
+            bool ourRet = (tr & MLIR_T_RETURN_LIKE) != 0;
+            if (upRet != ourRet) {
+                fprintf(stderr, "trait mismatch for %s: return_like ours=%d upstream=%d\n",
+                        opName.getStringRef().str().c_str(), (int)ourRet, (int)upRet);
+                all_ok = false;
+            }
+            if (!upTerm && !reg->hasTrait<mlir::OpTrait::IsIsolatedFromAbove>() &&
+                !(tr & MLIR_T_SINGLE_BLOCK)) {
+                bool upSpec = reg->hasTrait<mlir::OpTrait::AlwaysSpeculatableImplTrait>();
+                bool ourPure = (tr & MLIR_T_PURE) != 0;
+                if (upSpec && !ourPure) {
+                    fprintf(stderr, "trait mismatch for %s: upstream speculatable but not MLIR_T_PURE\n",
+                            opName.getStringRef().str().c_str());
+                    all_ok = false;
+                }
+                if (ourPure && !reg->hasInterface<mlir::MemoryEffectOpInterface>() && !upConst) {
+                    fprintf(stderr, "trait mismatch for %s: MLIR_T_PURE but no MemoryEffectOpInterface upstream\n",
+                            opName.getStringRef().str().c_str());
+                    all_ok = false;
+                }
+            }
+        }
+        assert(all_ok);
+    }
+#endif
     return c;
 }
 // Frees all IR of the context: the parentless ops, blocks and regions own the
@@ -554,6 +613,12 @@ extern "C" Arena *MLIR_GetArenaAllocator(MLIR_Context *ctx) { return ctx->arena;
 extern "C" void MLIR_SetContextDefUseTracking(MLIR_Context *, bool) {}
 extern "C" bool MLIR_HasContextDefUseTracking(MLIR_Context *) { return true; }
 extern "C" void MLIR_SetContextExpectedOps(MLIR_Context *, size_t) {}
+
+extern "C" bool MLIR_VerifyOp(MLIR_Context *cctx, MLIR_OpHandle op) {
+    API_CHECK(cctx != nullptr, "MLIR_VerifyOp", "context is NULL");
+    API_CHECK(op != MLIR_INVALID_HANDLE, "MLIR_VerifyOp", "op handle is invalid");
+    return mlir::succeeded(mlir::verify(reinterpret_cast<mlir::Operation *>(op)));
+}
 
 extern "C" void MLIR_SetDiagnosticHandler(MLIR_Context *cctx, MLIR_DiagnosticHandler fn,
                                           void *user) {

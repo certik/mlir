@@ -75,6 +75,7 @@ static void clobber_stack(void) {
 // Diagnostic handler that records the last diagnostic (see app_main).
 typedef struct {
     int count;
+    bool saw_error;
     MLIR_DiagSeverity severity;
     MLIR_LocationHandle loc;
     char text[128];
@@ -85,6 +86,7 @@ static void capture_diag(void *user, MLIR_DiagSeverity severity,
                          MLIR_LocationHandle loc, string message) {
     DiagCapture *c = (DiagCapture *)user;
     c->count++;
+    if (severity == MLIR_DIAG_ERROR) c->saw_error = true;
     c->severity = severity;
     c->loc = loc;
     c->len = message.size < sizeof(c->text) ? message.size : sizeof(c->text);
@@ -644,6 +646,56 @@ int app_main(void) {
                      MLIR_GetOpOperand(ctx, MLIR_GetBlockOp(ctx, src, N - 1), 1) == x
                          ? str_lit("successor operands replaced, uses moved: yes\n")
                          : str_lit("successor operands replaced, uses moved: no\n"));
+    }
+
+    // ---- op traits and MLIR_VerifyOp (#348) ---------------------------------
+    {
+        MLIR_OpType dyn = MLIR_RegisterOpType(ctx, str_lit("test.trait_dyn"));
+        bool traits_ok =
+            (MLIR_GetOpTypeTraits(OP_TYPE_LLVM_ADD) &
+             (MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ONE_RESULT)) ==
+                (MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ONE_RESULT) &&
+            (MLIR_GetOpTypeTraits(OP_TYPE_LLVM_SUB) & MLIR_T_COMMUTATIVE) == 0 &&
+            (MLIR_GetOpTypeTraits(OP_TYPE_LLVM_LOAD) & (MLIR_T_MEM_READ | MLIR_T_ONE_RESULT)) ==
+                (MLIR_T_MEM_READ | MLIR_T_ONE_RESULT) &&
+            (MLIR_GetOpTypeTraits(OP_TYPE_LLVM_LOAD) & MLIR_T_PURE) == 0 &&
+            (MLIR_GetOpTypeTraits(OP_TYPE_LLVM_STORE) & (MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)) ==
+                (MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT) &&
+            (MLIR_GetOpTypeTraits(OP_TYPE_LLVM_BR) &
+             (MLIR_T_TERMINATOR | MLIR_T_BRANCH | MLIR_T_ZERO_RESULT)) ==
+                (MLIR_T_TERMINATOR | MLIR_T_BRANCH | MLIR_T_ZERO_RESULT) &&
+            (MLIR_GetOpTypeTraits(OP_TYPE_FUNC_FUNC) &
+             (MLIR_T_FUNCTION | MLIR_T_SYMBOL | MLIR_T_ISOLATED)) ==
+                (MLIR_T_FUNCTION | MLIR_T_SYMBOL | MLIR_T_ISOLATED) &&
+            MLIR_GetOpTypeTraits(OP_TYPE_UNREGISTERED) == MLIR_T_NONE &&
+            MLIR_GetOpTypeTraits(dyn) == MLIR_T_NONE;
+
+        // Verify a valid module and a malformed op (arith.addi with 0 results).
+        DiagCapture vcap;
+        vcap.count = 0;
+        vcap.saw_error = false;
+        MLIR_SetDiagnosticHandler(ctx, capture_diag, &vcap);
+
+        MLIR_RegionHandle mreg = MLIR_CreateRegion(ctx);
+        MLIR_BlockHandle mblk = MLIR_CreateBlock(ctx);
+        MLIR_AppendRegionBlock(ctx, mreg, mblk);
+        MLIR_OpHandle vmod = MLIR_CreateOp(ctx, OP_TYPE_MODULE, NULL, 0, NULL, 0,
+                                           NULL, 0, NULL, 0, &mreg, 1,
+                                           MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE,
+                                           str_lit(""), -1);
+        bool valid_ok = MLIR_VerifyOp(ctx, vmod) && vcap.count == 0;
+
+        MLIR_OpHandle bad = MLIR_CreateOp(ctx, OP_TYPE_ARITH_ADDI, NULL, 0, NULL, 0,
+                                          NULL, 0, NULL, 0, NULL, 0,
+                                          MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE,
+                                          str_lit(""), -1);
+        MLIR_AppendBlockOp(ctx, mblk, bad);
+        bool invalid_caught = !MLIR_VerifyOp(ctx, vmod) && vcap.saw_error;
+        MLIR_SetDiagnosticHandler(ctx, NULL, NULL);
+
+        print_string(traits_ok && valid_ok && invalid_caught
+                         ? str_lit("op traits and verify: yes\n")
+                         : str_lit("op traits and verify: no\n"));
     }
 
     MLIR_DestroyContext(ctx);

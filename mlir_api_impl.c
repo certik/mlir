@@ -2964,6 +2964,95 @@ void MLIR_SpliceBlockOps(MLIR_Context *ctx, MLIR_BlockHandle dst, MLIR_BlockHand
     sb->cap_ops = 0;
 }
 
+// Trait-driven verification of `op` and all ops nested in its regions.
+static bool verify_op_recursive(MLIR_Context *ctx, MLIR_OpHandle op) {
+    MLIR_OpType ty = MLIR_GetOpType(ctx, op);
+    MLIR_OpTraits tr = MLIR_GetOpTypeTraits(ty);
+    MLIR_LocationHandle loc = MLIR_GetOpLocation(ctx, op);
+    string name = MLIR_GetOpTypeName(ctx, ty);
+    size_t n_res = MLIR_GetOpNumResults(ctx, op);
+    size_t n_succ = MLIR_GetOpNumSuccessors(ctx, op);
+    bool ok = true;
+
+    if ((tr & MLIR_T_ZERO_RESULT) && n_res != 0) {
+        MLIR_EmitDiagnostic(ctx, MLIR_DIAG_ERROR, loc,
+                            "'%.*s' op expects 0 results, got %zu",
+                            (int)name.size, name.str, n_res);
+        ok = false;
+    }
+    if ((tr & MLIR_T_ONE_RESULT) && n_res != 1) {
+        MLIR_EmitDiagnostic(ctx, MLIR_DIAG_ERROR, loc,
+                            "'%.*s' op expects 1 result, got %zu",
+                            (int)name.size, name.str, n_res);
+        ok = false;
+    }
+    if ((tr & MLIR_T_BRANCH) && n_succ == 0) {
+        MLIR_EmitDiagnostic(ctx, MLIR_DIAG_ERROR, loc,
+                            "'%.*s' op expects at least 1 successor",
+                            (int)name.size, name.str);
+        ok = false;
+    }
+    if (ty < OP_TYPE_COUNT && !(tr & MLIR_T_BRANCH) && n_succ > 0) {
+        MLIR_EmitDiagnostic(ctx, MLIR_DIAG_ERROR, loc,
+                            "'%.*s' op expects 0 successors, got %zu",
+                            (int)name.size, name.str, n_succ);
+        ok = false;
+    }
+    if ((tr & MLIR_T_SYMBOL) && MLIR_GetOpAttr(ctx, op, MLIR_KEY_SYM_NAME) == MLIR_INVALID_HANDLE) {
+        MLIR_EmitDiagnostic(ctx, MLIR_DIAG_ERROR, loc,
+                            "'%.*s' op missing required 'sym_name' attribute",
+                            (int)name.size, name.str);
+        ok = false;
+    }
+
+    size_t n_reg = MLIR_GetOpNumRegions(ctx, op);
+    for (size_t r = 0; r < n_reg; r++) {
+        MLIR_RegionHandle reg = MLIR_GetOpRegion(ctx, op, r);
+        size_t n_blk = MLIR_GetRegionNumBlocks(ctx, reg);
+        if ((tr & MLIR_T_SINGLE_BLOCK) && n_blk > 1) {
+            MLIR_EmitDiagnostic(ctx, MLIR_DIAG_ERROR, loc,
+                                "'%.*s' op region %zu expects at most 1 block, got %zu",
+                                (int)name.size, name.str, r, n_blk);
+            ok = false;
+        }
+        for (size_t b = 0; b < n_blk; b++) {
+            MLIR_BlockHandle blk = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t n_ops = MLIR_GetBlockNumOps(ctx, blk);
+            for (size_t i = 0; i < n_ops; i++) {
+                MLIR_OpHandle child = MLIR_GetBlockOp(ctx, blk, i);
+                MLIR_OpType cty = MLIR_GetOpType(ctx, child);
+                MLIR_OpTraits ctr = MLIR_GetOpTypeTraits(cty);
+                if (i + 1 < n_ops && (ctr & MLIR_T_TERMINATOR)) {
+                    string cname = MLIR_GetOpTypeName(ctx, cty);
+                    MLIR_EmitDiagnostic(ctx, MLIR_DIAG_ERROR, MLIR_GetOpLocation(ctx, child),
+                                        "terminator '%.*s' must be the last op in its block",
+                                        (int)cname.size, cname.str);
+                    ok = false;
+                }
+                if (!verify_op_recursive(ctx, child)) ok = false;
+            }
+            if (n_ops > 0 && ty < OP_TYPE_COUNT && !(tr & MLIR_T_NO_TERMINATOR)) {
+                MLIR_OpHandle last = MLIR_GetBlockOp(ctx, blk, n_ops - 1);
+                MLIR_OpType lty = MLIR_GetOpType(ctx, last);
+                if (lty < OP_TYPE_COUNT && !(MLIR_GetOpTypeTraits(lty) & MLIR_T_TERMINATOR)) {
+                    string lname = MLIR_GetOpTypeName(ctx, lty);
+                    MLIR_EmitDiagnostic(ctx, MLIR_DIAG_ERROR, MLIR_GetOpLocation(ctx, last),
+                                        "block with no terminator; last op is '%.*s'",
+                                        (int)lname.size, lname.str);
+                    ok = false;
+                }
+            }
+        }
+    }
+    return ok;
+}
+
+bool MLIR_VerifyOp(MLIR_Context *ctx, MLIR_OpHandle op) {
+    API_CHECK(ctx != NULL, "MLIR_VerifyOp", "context is NULL");
+    OP_IDX(ctx, op, "MLIR_VerifyOp");
+    return verify_op_recursive(ctx, op);
+}
+
 // Native cf->scf lift: dispatch to the agnostic C port. The port handles
 // the patterns it understands and returns false otherwise; for native we
 // do not have an upstream fallback so callers (wasm lowering) will reject
