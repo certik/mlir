@@ -51,6 +51,109 @@
 #include <sys/stat.h>
 #endif
 
+// ---------------------------------------------------------------------------
+// --time-stages: wall time per compiler stage (platform_clock_ns, a monotonic
+// clock on every platform build), printed to stderr when the driver exits.
+// Off by default; then every stage boundary costs one flag test and nothing
+// else. Stages that run several times (e.g. preprocess per input file) add up.
+// The ids are plain macros: tinyC does not accept enum constants in constant
+// expressions such as array sizes.
+// ---------------------------------------------------------------------------
+#define TS_PREPROCESS      0
+#define TS_LEX             1
+#define TS_PARSE           2
+#define TS_EMIT            3
+#define TS_WASM_READ       4
+#define TS_WASM_TO_STACK   5
+#define TS_STACK_TO_SSA    6
+#define TS_HOST_HELPERS    7
+#define TS_SSA_TO_LLVM     8
+#define TS_MEM2REG         9
+#define TS_LOAD_CSE        10
+#define TS_ARITH_GVN       11
+#define TS_DCE             12
+#define TS_LOWER           13
+#define TS_X64_SETUP       14
+#define TS_X64_REGALLOC    15
+#define TS_X64_ISEL_ENCODE 16
+#define TS_X64_LINK        17
+#define TS_CODEGEN         18
+#define TS_LINK_WASM       19
+#define TS_WRITE           20
+#define TS_COUNT           21
+
+static bool g_ts_on = false;
+static uint64_t g_ts_ns[TS_COUNT];
+static uint64_t g_ts_start;
+#ifdef TINYC_HAS_ELF
+static MLIR_X64StageTimes g_ts_x64;
+#endif
+
+static uint64_t ts_now(void) { return g_ts_on ? platform_clock_ns() : 0; }
+
+static void ts_add(int stage, uint64_t t0) {
+    if (g_ts_on) g_ts_ns[stage] += platform_clock_ns() - t0;
+}
+
+// Stage names, one word each so scripts can split the report on whitespace.
+// (A switch, not a string table: tinyC has no pointer initializers in global
+// arrays.)
+static const char *ts_name(int stage) {
+    switch (stage) {
+        case TS_PREPROCESS:      return "preprocess";
+        case TS_LEX:             return "lex";
+        case TS_PARSE:           return "parse";
+        case TS_EMIT:            return "emit";
+        case TS_WASM_READ:       return "wasm-read";
+        case TS_WASM_TO_STACK:   return "wasm->wasmstack";
+        case TS_STACK_TO_SSA:    return "wasmstack->wasmssa";
+        case TS_HOST_HELPERS:    return "host-helpers";
+        case TS_SSA_TO_LLVM:     return "wasmssa->llvm";
+        case TS_MEM2REG:         return "mem2reg";
+        case TS_LOAD_CSE:        return "load-cse";
+        case TS_ARITH_GVN:       return "arith-gvn";
+        case TS_DCE:             return "dce";
+        case TS_LOWER:           return "lower-to-llvm";
+        case TS_X64_SETUP:       return "x64-setup";
+        case TS_X64_REGALLOC:    return "x64-regalloc";
+        case TS_X64_ISEL_ENCODE: return "x64-isel+encode";
+        case TS_X64_LINK:        return "x64-elf-link";
+        case TS_CODEGEN:         return "codegen";
+        case TS_LINK_WASM:       return "wasm-link";
+        case TS_WRITE:           return "write";
+        default:                 return "?";
+    }
+}
+
+static void ts_print_row(const char *name, uint64_t ns, uint64_t total) {
+    unsigned long long us = (unsigned long long)(ns / 1000);
+    unsigned long long pm = total ? (unsigned long long)(ns * 1000 / total) : 0;
+    fprintf(stderr, "  %-20s %8llu.%03llu %4llu.%llu%%\n", name,
+            us / 1000, us % 1000, pm / 10, pm % 10);
+}
+
+// The report: every stage that ran, then `other` (driver work between the
+// timed stages: argument parsing, arena setup/teardown, ...) and `total`
+// (whole driver run). Times in milliseconds.
+static void ts_report(void) {
+#ifdef TINYC_HAS_ELF
+    g_ts_ns[TS_X64_SETUP]       += g_ts_x64.setup_ns;
+    g_ts_ns[TS_X64_REGALLOC]    += g_ts_x64.regalloc_ns;
+    g_ts_ns[TS_X64_ISEL_ENCODE] += g_ts_x64.isel_encode_ns;
+    g_ts_ns[TS_X64_LINK]        += g_ts_x64.link_ns;
+#endif
+    uint64_t total = platform_clock_ns() - g_ts_start;
+    uint64_t sum = 0;
+    fprintf(stderr, "tinyc --time-stages (wall ms):\n");
+    for (int s = 0; s < TS_COUNT; s++) {
+        if (g_ts_ns[s] == 0) continue;
+        sum += g_ts_ns[s];
+        ts_print_row(ts_name(s), g_ts_ns[s], total);
+    }
+    ts_print_row("other", total > sum ? total - sum : 0, total);
+    ts_print_row("total", total, total);
+}
+
 extern string read_file_ok(Arena *arena, string path);
 
 static int write_string_to_file(string out, const char *path) {
@@ -75,6 +178,12 @@ static int write_bytes_to_file(string out, const char *path) {
     platform_fd_t fd = platform_path_open(path, plen,
         PLATFORM_RIGHTS_WRITE, PLATFORM_O_CREAT | PLATFORM_O_TRUNC);
     if (fd < 0) return 1;
+    // An empty output (e.g. --emit=x64 of a file with no function bodies) is
+    // just the truncated file: there is nothing to write.
+    if (out.size == 0) {
+        platform_fd_close(fd);
+        return 0;
+    }
     ciovec_t iovs[1];
     iovs[0].buf = out.str;
     iovs[0].buf_len = out.size;
@@ -179,7 +288,7 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
     MLIR_BlockHandle pbody = MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, pmod, 0), 0);
     size_t pn = MLIR_GetBlockNumOps(ctx, pbody);
     size_t np = 0;
-    for (size_t i = 0; i < pn && np < max_picks; i++) {
+    for (size_t i = 0; i < pn; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, pbody, i);
         if (!driver_llvm_func_has_body(ctx, op)) continue;
         MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
@@ -195,6 +304,16 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
             if (s.size < 16 || memcmp(s.str, "__host_platform_", 16) != 0) continue;
             if (s.size == 20 && memcmp(s.str, "__host_platform_init", 20) == 0)
                 continue;
+        }
+        if (np == max_picks) {
+            // Never drop a definition silently: the lifted module would call
+            // it and fail to link (or bind it to the wasm-side copy).
+            fprintf(stderr, "tinyc: '%s' has more than %zu spliceable "
+                    "definitions; raise the pick array size in driver.c\n",
+                    path, max_picks);
+            MLIR_SetArenaAllocator(ctx, saved_arena);
+            MLIR_SetContextDefUseTracking(ctx, saved_def_use);
+            return false;
         }
         picks[np++] = op;
     }
@@ -500,6 +619,7 @@ static int driver_emit_from_wasm_elf(
     // Compile the host platform file FIRST, before the lift:
     // its funcs are spliced into the lifted module after the opt passes.
     MLIR_OpHandle hp_mod = MLIR_INVALID_HANDLE;
+    uint64_t t_hh = ts_now();
     if (!driver_elf_compile_helper(ctx, host_platform_path,
                                    include_dirs, n_include_dirs,
                                    lower_fn, TINYC_ELF_HELPER_PLATFORM,
@@ -527,28 +647,43 @@ static int driver_emit_from_wasm_elf(
     // Lift wasmssa to the in-house `llvm` dialect, then stream it straight to
     // ELF one function at a time (low peak memory). Move the IR into a fresh
     // arena, then free the wasmstack/wasmssa arena.
+    ts_add(TS_HOST_HELPERS, t_hh);
     Arena *late_arena = arena_create(64 * 1024 * 1024 - 64 * 1024);
     MLIR_SetArenaAllocator(ctx, late_arena);
     uint8_t *elf_data = NULL; size_t elf_size = 0;
+    uint64_t t_p = ts_now();
     MLIR_OpHandle llvm_mod = mlir_wasmssa_to_llvm(ctx, ssa);
+    ts_add(TS_SSA_TO_LLVM, t_p);
     if (llvm_mod == MLIR_INVALID_HANDLE) {
         arena_destroy(late_arena);
         return 1;
     }
+    t_p = ts_now();
     if (!getenv("TINYC_NO_MEM2REG"))
         mlir_llvm_mem2reg(ctx, llvm_mod);
+    ts_add(TS_MEM2REG, t_p);
+    t_p = ts_now();
     if (!getenv("TINYC_NO_LOAD_CSE"))
         mlir_llvm_load_cse(ctx, llvm_mod);
+    ts_add(TS_LOAD_CSE, t_p);
+    t_p = ts_now();
     mlir_llvm_arith_gvn(ctx, llvm_mod);
+    ts_add(TS_ARITH_GVN, t_p);
+    t_p = ts_now();
     mlir_llvm_dce(ctx, llvm_mod);
+    ts_add(TS_DCE, t_p);
     // Splice pre-compiled host helpers (globals + funcs).
+    t_p = ts_now();
     driver_elf_splice_helper_mod(ctx, llvm_mod, hp_mod, TINYC_ELF_HELPER_PLATFORM);
     driver_elf_splice_helper_mod(ctx, llvm_mod, buddy_mod, TINYC_ELF_HELPER_BUDDY);
     driver_elf_splice_helper_mod(ctx, llvm_mod, ad_mod, TINYC_ELF_HELPER_WASI);
+    ts_add(TS_HOST_HELPERS, t_p);
+    t_p = ts_now();
     if (!driver_elf_lower_for_native_codegen(ctx, llvm_mod, lower_fn)) {
         arena_destroy(late_arena);
         return 1;
     }
+    ts_add(TS_LOWER, t_p);
     arena_destroy(arena);
     *io_arena = late_arena;
     if (!mlir_llvm_to_elf(ctx, llvm_mod, true, &elf_data, &elf_size)) {
@@ -566,6 +701,16 @@ static int driver_emit_native_elf(MLIR_Context *ctx, MLIR_OpHandle module,
         return 1;
     out->str = (char *)elf_data;
     out->size = elf_size;
+    return 0;
+}
+
+static int driver_emit_native_x64(MLIR_Context *ctx, MLIR_OpHandle module,
+                                  string *out) {
+    uint8_t *code = NULL; size_t code_size = 0;
+    if (!mlir_llvm_to_x64_code(ctx, module, &code, &code_size))
+        return 1;
+    out->str = (char *)code;
+    out->size = code_size;
     return 0;
 }
 #else
@@ -601,6 +746,17 @@ static int driver_emit_native_elf(MLIR_Context *ctx, MLIR_OpHandle module,
     (void)out;
     fprintf(stderr,
             "tinyc: --emit=elf is not supported in this build "
+            "(rebuild with TINYC_ENABLE_ELF=1 or on Linux/x86_64)\n");
+    return 1;
+}
+
+static int driver_emit_native_x64(MLIR_Context *ctx, MLIR_OpHandle module,
+                                  string *out) {
+    (void)ctx;
+    (void)module;
+    (void)out;
+    fprintf(stderr,
+            "tinyc: --emit=x64 is not supported in this build "
             "(rebuild with TINYC_ENABLE_ELF=1 or on Linux/x86_64)\n");
     return 1;
 }
@@ -790,6 +946,11 @@ typedef enum {
     // (scf->cf) standard lowering and the in-tree x86_64 code generator to a
     // statically-linked Linux ELF executable (direct syscalls, no libc).
     EMIT_ELF,
+    // `--emit=x64` runs the same x86_64 code generator as `--emit=elf` on
+    // every defined function of the input (no `main` needed, no linking) and
+    // writes the raw concatenated machine code: a per-translation-unit
+    // compile for benchmarking until the backend can write object files.
+    EMIT_X64,
     EMIT_N_MODES
 } EmitMode;
 
@@ -808,6 +969,7 @@ static const char *emit_mode_name(EmitMode m) {
         case EMIT_AARCH64:   return "aarch64";
         case EMIT_MACHO:     return "macho";
         case EMIT_ELF:       return "elf";
+        case EMIT_X64:       return "x64";
         default:             return "";
     }
 }
@@ -822,11 +984,11 @@ static void print_usage(Arena *arena) {
     strbuf_append_cstr(arena, &sb,
         "] [--lowering=upstream|native] [--target=TRIPLE] [--from-wasm PATH] "
         "[--wasm-runtime-obj=PATH ...] [-I dir ...] [-D name[=value] ...] "
-        "[-o OUT] FILE.tc [FILE2.tc ...]");
+        "[--time-stages] [-o OUT] FILE.tc [FILE2.tc ...]");
     println(str_lit("{}"), strbuf_to_string(sb));
 }
 
-int app_main(void) {
+static int tinyc_main(void) {
     size_t pargc = 0, argv_buf_size = 0;
     int rc = platform_args_sizes_get(&pargc, &argv_buf_size);
     if (rc != 0) pargc = 0;
@@ -905,6 +1067,15 @@ int app_main(void) {
     char *wasi_adapter_path = NULL;
 
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--time-stages") == 0) {
+            g_ts_on = true;
+#ifdef TINYC_HAS_ELF
+            mlir_llvm_to_x64_set_stage_times(&g_ts_x64);
+#endif
+        }
+    }
+
+    for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--version") == 0) {
             // Names the MLIR API implementation this binary is linked
             // against; the test runner asks for it (run_tinyc_tests.py).
@@ -956,6 +1127,7 @@ int app_main(void) {
             // Read each input.
             MLIR_WasmLinkInput *ins = (MLIR_WasmLinkInput *)arena_new_array(
                 boot_arena, MLIR_WasmLinkInput, n_link_inputs);
+            uint64_t t_rd = ts_now();
             for (size_t k = 0; k < n_link_inputs; k++) {
                 string buf = read_file_ok(boot_arena, str_from_cstr_view((char *)link_inputs[k]));
                 ins[k].data = (const uint8_t *)buf.str;
@@ -964,16 +1136,21 @@ int app_main(void) {
                 ins[k].size = buf.size > 0 ? buf.size - 1 : 0;
                 ins[k].name = link_inputs[k];
             }
+            ts_add(TS_WASM_READ, t_rd);
             uint8_t *out_data = NULL; size_t out_size = 0;
+            uint64_t t_ln = ts_now();
             if (!MLIR_WasmLink(ins, n_link_inputs, link_entry, &out_data, &out_size)) {
                 fprintf(stderr, "tinyc --link: link failed\n");
                 arena_destroy(boot_arena);
                 return 1;
             }
+            ts_add(TS_LINK_WASM, t_ln);
             if (link_emit_macho) {
                 uint8_t *macho_data = NULL; size_t macho_size = 0;
+                uint64_t t_cg = ts_now();
                 bool macho_ok = MLIR_WasmToMachoArm64(out_data, out_size,
                                                      &macho_data, &macho_size);
+                ts_add(TS_CODEGEN, t_cg);
                 free(out_data);
                 if (!macho_ok) {
                     fprintf(stderr, "tinyc --link --emit=macho: wasm->macho translation failed\n");
@@ -981,7 +1158,9 @@ int app_main(void) {
                     return 1;
                 }
                 string macho_buf = { .str = (char *)macho_data, .size = macho_size };
+                uint64_t t_wr = ts_now();
                 int wrc = write_bytes_to_file(macho_buf, link_out);
+                ts_add(TS_WRITE, t_wr);
                 free(macho_data);
 #if !defined(_WIN32) && !defined(__wasm__) && !defined(__TINYC__)
                 if (wrc == 0) {
@@ -994,7 +1173,9 @@ int app_main(void) {
                 return wrc;
             }
             string out_buf = { .str = (char *)out_data, .size = out_size };
+            uint64_t t_wr = ts_now();
             int wrc = write_bytes_to_file(out_buf, link_out);
+            ts_add(TS_WRITE, t_wr);
             free(out_data);
             arena_destroy(boot_arena);
             return wrc;
@@ -1074,6 +1255,9 @@ int app_main(void) {
         else if (strcmp(argv[i], "--host-varargs") == 0) {
             host_varargs = true;
         }
+        else if (strcmp(argv[i], "--time-stages") == 0) {
+            // Handled by the pre-scan above.
+        }
         else if (strncmp(argv[i], "-I", 2) == 0 && argv[i][2] != '\0') {
             include_dirs[n_include_dirs++] = str_from_cstr_view(argv[i] + 2);
         } else if (strcmp(argv[i], "-I") == 0 && i + 1 < argc) {
@@ -1106,6 +1290,7 @@ int app_main(void) {
     bool emit_aarch64   = emit_mode == EMIT_AARCH64;
     bool emit_macho     = emit_mode == EMIT_MACHO;
     bool emit_elf       = emit_mode == EMIT_ELF;
+    bool emit_x64       = emit_mode == EMIT_X64;
 
     if ((emit_wasmssa || emit_wasmstack) &&
 #ifdef TINYC_HAS_UPSTREAM
@@ -1169,15 +1354,19 @@ int app_main(void) {
         // This removes the dominant per-op memory overhead and is required
         // to fit the stage1 self-lift under the 4 GiB wasm32 linmem cap.
         MLIR_SetContextDefUseTracking(ctx, false);
+        uint64_t t_rd = ts_now();
         string wasm_buf = read_file_ok(arena, str_from_cstr_view(from_wasm_path));
+        ts_add(TS_WASM_READ, t_rd);
         // read_file_ok appends a trailing NUL — strip it for the lifter,
         // which expects the exact wasm file size.
         size_t wasm_size = wasm_buf.size > 0 ? wasm_buf.size - 1 : 0;
         // The lift's wasmstack, wasmssa and llvm IR come to about 1.7 ops
         // per byte of wasm: reserve the native IR storage for that.
         MLIR_SetContextExpectedOps(ctx, wasm_size + wasm_size * 7 / 10);
+        uint64_t t_ws = ts_now();
         MLIR_OpHandle stack_mod = mlir_wasm_to_wasmstack(
             ctx, (const uint8_t *)wasm_buf.str, wasm_size);
+        ts_add(TS_WASM_TO_STACK, t_ws);
         if (stack_mod == MLIR_INVALID_HANDLE) {
             arena_destroy(arena);
             MLIR_DestroyContext(ctx);
@@ -1186,9 +1375,13 @@ int app_main(void) {
         }
         string out_fw;
         if (emit_wasmstack) {
+            uint64_t t_pr = ts_now();
             out_fw = MLIR_PrintOperationGeneric(ctx, stack_mod);
+            ts_add(TS_CODEGEN, t_pr);
         } else {
+            uint64_t t_ss = ts_now();
             MLIR_OpHandle ssa = mlir_wasmstack_to_wasmssa(ctx, stack_mod);
+            ts_add(TS_STACK_TO_SSA, t_ss);
             if (ssa == MLIR_INVALID_HANDLE) {
                 arena_destroy(arena);
                 MLIR_DestroyContext(ctx);
@@ -1196,7 +1389,9 @@ int app_main(void) {
                 return 1;
             }
             if (emit_wasmssa) {
+                uint64_t t_pr = ts_now();
                 out_fw = MLIR_PrintOperationGeneric(ctx, ssa);
+                ts_add(TS_CODEGEN, t_pr);
             } else if (emit_macho) {
                 // The via-wasm Mach-O backend's WASI adapters call corec's
                 // platform_<os>.c (as __host_platform_*), so the path to it is
@@ -1213,11 +1408,12 @@ int app_main(void) {
                 // Compile the host platform file FIRST, before the lift:
                 // its funcs are spliced into the lifted module
                 // after the opt passes (see tinyc_compile_host_platform).
-                MLIR_OpHandle hp_picks[8]; size_t hp_n = 0;
+                MLIR_OpHandle hp_picks[16]; size_t hp_n = 0;
+                uint64_t t_hh = ts_now();
                 if (!tinyc_compile_host_platform(ctx, host_platform_path,
                                                  include_dirs, n_include_dirs,
                                                  lower_fn, false,
-                                                 hp_picks, &hp_n, 8)) {
+                                                 hp_picks, &hp_n, 16)) {
                     arena_destroy(arena);
                     MLIR_DestroyContext(ctx);
                     arena_destroy(boot_arena);
@@ -1237,6 +1433,7 @@ int app_main(void) {
                     arena_destroy(boot_arena);
                     return 1;
                 }
+                ts_add(TS_HOST_HELPERS, t_hh);
                 // Lift wasmssa to the in-house `llvm` dialect, then stream it
                 // straight to Mach-O one function at a time (low peak memory).
                 // Move the IR into a fresh arena, then free the
@@ -1250,7 +1447,9 @@ int app_main(void) {
                 Arena *late_arena = arena_create(64 * 1024 * 1024 - 64 * 1024);
                 MLIR_SetArenaAllocator(ctx, late_arena);
                 uint8_t *macho_data = NULL; size_t macho_size = 0;
+                uint64_t t_sl = ts_now();
                 MLIR_OpHandle llvm_mod = mlir_wasmssa_to_llvm(ctx, ssa);
+                ts_add(TS_SSA_TO_LLVM, t_sl);
                 if (llvm_mod == MLIR_INVALID_HANDLE) {
                     arena_destroy(late_arena);
                     arena_destroy(arena);
@@ -1261,8 +1460,10 @@ int app_main(void) {
                 // Promote non-escaping local allocas to SSA so the backend
                 // can keep them in registers instead of a load/store per
                 // access. Skippable via TINYC_NO_MEM2REG for A/B debugging.
+                uint64_t t_p = ts_now();
                 if (!getenv("TINYC_NO_MEM2REG"))
                     mlir_llvm_mem2reg(ctx, llvm_mod);
+                ts_add(TS_MEM2REG, t_p);
                 // Load CSE on the lifted llvm CFG: within single-entry
                 // regions, removes redundant llvm.loads of a structurally
                 // identical address (no memory clobber in between) and DCEs the
@@ -1270,14 +1471,18 @@ int app_main(void) {
                 // Targets the repeated mem[i] reloads that the short-circuit
                 // `||` comparison chains emit, which dominate the runtime of the
                 // code we generate. Skippable via TINYC_NO_LOAD_CSE for A/B.
+                t_p = ts_now();
                 if (!getenv("TINYC_NO_LOAD_CSE"))
                     mlir_llvm_load_cse(ctx, llvm_mod);
+                ts_add(TS_LOAD_CSE, t_p);
                 // Intra-block value numbering of pure integer arithmetic: dedups
                 // the repeated index/address arithmetic (base+index*stride) the
                 // wasm frontend emits, cutting op count and register pressure.
                 // The memfuse address spine is excluded so [x28,Widx,UXTW]
                 // fusion is preserved. Skippable via TINYC_NO_ARITH_GVN.
+                t_p = ts_now();
                 mlir_llvm_arith_gvn(ctx, llvm_mod);
+                ts_add(TS_ARITH_GVN, t_p);
                 // Whole-function dead-code elimination: the tinyC front end
                 // emits the value of every expression even in statement context
                 // (e.g. the (char)v result of `d[i] = v;`), which survives as a
@@ -1285,7 +1490,9 @@ int app_main(void) {
                 // DCE and would slot+spill each one (a wasted store per loop
                 // iteration in hot mem/str helpers). Remove them at the source.
                 // Skippable via TINYC_NO_DCE.
+                t_p = ts_now();
                 mlir_llvm_dce(ctx, llvm_mod);
+                ts_add(TS_DCE, t_p);
                 // Splice the pre-compiled host platform funcs into the lifted
                 // module now (after the wasm-oriented opt passes, which assume
                 // linmem shapes and must not see the LP64 platform funcs). The
@@ -1301,6 +1508,7 @@ int app_main(void) {
                 }
                 arena_destroy(arena);
                 arena = late_arena;
+                uint64_t t_cg = ts_now();
                 if (!mlir_llvm_to_macho(ctx, llvm_mod,
                                         &macho_data, &macho_size)) {
                     arena_destroy(arena);
@@ -1308,6 +1516,7 @@ int app_main(void) {
                     arena_destroy(boot_arena);
                     return 1;
                 }
+                ts_add(TS_CODEGEN, t_cg);
                 out_fw.str = (char *)macho_data;
                 out_fw.size = macho_size;
             } else if (emit_elf) {
@@ -1326,12 +1535,12 @@ int app_main(void) {
                 // `aarch64` dialect and print it (the "MachO MLIR"). No
                 // late-arena swap: this is a debug view, not the memory-
                 // constrained self-host emit.
-                MLIR_OpHandle hp_picks2[8]; size_t hp_n2 = 0;
+                MLIR_OpHandle hp_picks2[16]; size_t hp_n2 = 0;
                 if (host_platform_path &&
                     !tinyc_compile_host_platform(ctx, host_platform_path,
                                                  include_dirs, n_include_dirs,
                                                  lower_fn, false,
-                                                 hp_picks2, &hp_n2, 8)) {
+                                                 hp_picks2, &hp_n2, 16)) {
                     arena_destroy(arena);
                     MLIR_DestroyContext(ctx);
                     arena_destroy(boot_arena);
@@ -1356,6 +1565,7 @@ int app_main(void) {
                     for (size_t hi = 0; hi < hp_n2; hi++)
                         MLIR_MoveOpToBlockEnd(ctx, hp_picks2[hi], dbody);
                 }
+                uint64_t t_cg = ts_now();
                 MLIR_OpHandle aarch64 = mlir_llvm_to_aarch64(ctx, llvm_mod);
                 if (aarch64 == MLIR_INVALID_HANDLE) {
                     arena_destroy(arena);
@@ -1364,6 +1574,7 @@ int app_main(void) {
                     return 1;
                 }
                 out_fw = MLIR_PrintOperationGeneric(ctx, aarch64);
+                ts_add(TS_CODEGEN, t_cg);
             } else {
                 fprintf(stderr,
                     "tinyc --from-wasm: requires --emit=wasmstack|wasmssa|aarch64|macho|elf\n");
@@ -1384,15 +1595,19 @@ int app_main(void) {
                 arena_destroy(boot_arena);
                 return 1;
             }
+            uint64_t t_wr = ts_now();
             wr = write_bytes_to_file(out_fw, output_file);
 #if !defined(_WIN32) && !defined(__wasm__) && !defined(__TINYC__)
             if (wr == 0) {
                 chmod(output_file, 0755);
             }
 #endif
+            ts_add(TS_WRITE, t_wr);
             if (emit_elf) free(out_fw.str);
         } else if (output_file) {
+            uint64_t t_wr = ts_now();
             wr = write_string_to_file(out_fw, output_file);
+            ts_add(TS_WRITE, t_wr);
         } else {
             println(str_lit("{}"), out_fw);
             wr = 0;
@@ -1427,9 +1642,11 @@ int app_main(void) {
     int total_errs = 0;
     size_t total_toks = 0;
     for (size_t k = 0; k < n_input_files; k++) {
+        uint64_t t_pp = ts_now();
         string src = tinyc_preprocess(arena, str_from_cstr_view(input_files[k]),
                                       include_dirs, n_include_dirs,
                                       defines, n_defines);
+        ts_add(TS_PREPROCESS, t_pp);
         // A preprocessing error (e.g. a missing #include) is fatal: the
         // text is incomplete, and compiling it only adds follow-on errors.
         // Keep going to report the other inputs' errors too.
@@ -1439,9 +1656,13 @@ int app_main(void) {
             continue;
         }
         if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
+        uint64_t t_lx = ts_now();
         VecTcTok toks = tinyc_lex(arena, src);
+        ts_add(TS_LEX, t_lx);
         total_toks += toks.size;
+        uint64_t t_pa = ts_now();
         total_errs += tinyc_parse_into(arena, prog, toks, target_wasm32);
+        ts_add(TS_PARSE, t_pa);
     }
     if (total_errs > 0) {
         arena_destroy(arena);
@@ -1459,8 +1680,10 @@ int app_main(void) {
         string *pdefs = arena_new_array(arena, string, n_defines + 1);
         for (size_t k = 0; k < n_defines; k++) pdefs[k] = defines[k];
         pdefs[n_defines] = str_from_cstr_view((char *)"PLATFORM_SKIP_ENTRY=1");
+        uint64_t t_pp = ts_now();
         string psrc = tinyc_preprocess(arena, str_from_cstr_view(host_platform_path),
                                        include_dirs, n_include_dirs, pdefs, n_defines + 1);
+        ts_add(TS_PREPROCESS, t_pp);
         if (tinyc_last_preprocess_errors() > 0) {
             fprintf(stderr, "tinyc: preprocessing failed for host platform '%s'\n",
                     host_platform_path);
@@ -1470,9 +1693,14 @@ int app_main(void) {
             return 1;
         }
         if (psrc.size > 0 && psrc.str[psrc.size - 1] == '\0') psrc.size -= 1;
+        uint64_t t_lx = ts_now();
         VecTcTok ptoks = tinyc_lex(arena, psrc);
+        ts_add(TS_LEX, t_lx);
         total_toks += ptoks.size;
-        if (tinyc_parse_into(arena, prog, ptoks, target_wasm32) > 0) {
+        uint64_t t_pa = ts_now();
+        int perrs = tinyc_parse_into(arena, prog, ptoks, target_wasm32);
+        ts_add(TS_PARSE, t_pa);
+        if (perrs > 0) {
             fprintf(stderr, "tinyc: parse failed for host platform '%s'\n",
                     host_platform_path);
             arena_destroy(arena);
@@ -1489,7 +1717,9 @@ int app_main(void) {
     // sources). Too low costs doublings, too high wastes heap; the backend
     // caps the reservation, so a large input cannot exhaust its heap.
     MLIR_SetContextExpectedOps(ctx, target_wasm32 ? total_toks * 6 : total_toks * 3 / 2);
+    uint64_t t_em = ts_now();
     MLIR_OpHandle module = tinyc_emit_module(ctx, prog);
+    ts_add(TS_EMIT, t_em);
     if (tinyc_last_emit_errors() > 0) {
         arena_destroy(arena);
         MLIR_DestroyContext(ctx);
@@ -1502,25 +1732,32 @@ int app_main(void) {
     // the linear-memory shadow stack so the downstream register allocator can
     // hold them in registers instead of spilling every access. Skippable via
     // TINYC_NO_MEM2REG for A/B debugging.
+    uint64_t t_m2r = ts_now();
     if (!getenv("TINYC_NO_MEM2REG"))
         mlir_llvm_mem2reg(ctx, module);
+    ts_add(TS_MEM2REG, t_m2r);
 
-    if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64 || emit_elf) {
+    if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64 || emit_elf || emit_x64) {
         // One lowering for every backend: the result is LLVM dialect only,
         // with control flow as a flat llvm.br / llvm.cond_br CFG. The wasm
         // backend rebuilds structured control flow from it internally.
+        uint64_t t_lo = ts_now();
         if (!lower_fn(ctx, module)) {
             arena_destroy(arena);
             MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
             return 1;
         }
+        ts_add(TS_LOWER, t_lo);
         if (getenv("TINYC_DUMP_LOWERED")) {
             string s = MLIR_PrintOperationGeneric(ctx, module);
             println(str_lit("{}"), s);
         }
     }
     string out;
+    // Every output mode except elf / x64 (whose backend times its own phases)
+    // counts as one `codegen` stage.
+    uint64_t t_cg = ts_now();
     if (emit_wasmssa) {
         MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(ctx, module);
         if (ssa == MLIR_INVALID_HANDLE) {
@@ -1662,6 +1899,15 @@ int app_main(void) {
             arena_destroy(boot_arena);
             return 1;
         }
+        t_cg = 0;
+    } else if (emit_x64) {
+        if (driver_emit_native_x64(ctx, module, &out) != 0) {
+            arena_destroy(arena);
+            MLIR_DestroyContext(ctx);
+            arena_destroy(boot_arena);
+            return 1;
+        }
+        t_cg = 0;
     } else if (emit_llvm) {
         out = translate_to_llvm_fn(ctx, module);
         if (out.size == 0) {
@@ -1677,18 +1923,20 @@ int app_main(void) {
     } else {
         out = print_fn(ctx, module);
     }
+    if (t_cg) ts_add(TS_CODEGEN, t_cg);
     int wrc = 0;
-    if ((emit_macho || emit_elf) && !output_file) {
+    if ((emit_macho || emit_elf || emit_x64) && !output_file) {
         fprintf(stderr, "tinyc --emit=%s: -o PATH is required\n",
-                emit_elf ? "elf" : "macho");
-        if (emit_macho || emit_elf) free(out.str);
+                emit_mode_name(emit_mode));
+        free(out.str);
         arena_destroy(arena);
         MLIR_DestroyContext(ctx);
         arena_destroy(boot_arena);
         return 1;
     }
+    uint64_t t_wr = ts_now();
     if (output_file) {
-        if (emit_wasm || emit_macho || emit_elf) {
+        if (emit_wasm || emit_macho || emit_elf || emit_x64) {
             wrc = write_bytes_to_file(out, output_file);
 #if !defined(_WIN32) && !defined(__wasm__) && !defined(__TINYC__)
             if (wrc == 0 && (emit_macho || emit_elf)) {
@@ -1699,11 +1947,13 @@ int app_main(void) {
         } else {
             wrc = write_string_to_file(out, output_file);
         }
+        ts_add(TS_WRITE, t_wr);
     } else {
         println(str_lit("{}"), out);
+        ts_add(TS_WRITE, t_wr);
     }
 
-    if (emit_macho || emit_elf) {
+    if (emit_macho || emit_elf || emit_x64) {
         // out.str was malloc'd by the backend. Free it.
         free(out.str);
     }
@@ -1712,4 +1962,16 @@ int app_main(void) {
     MLIR_DestroyContext(ctx);
     arena_destroy(boot_arena);
     return wrc;
+}
+
+int app_main(void) {
+    g_ts_start = platform_clock_ns();
+    int rc = tinyc_main();
+    if (g_ts_on) {
+#ifdef TINYC_HAS_ELF
+        mlir_llvm_to_x64_set_stage_times(NULL);
+#endif
+        ts_report();
+    }
+    return rc;
 }

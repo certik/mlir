@@ -79,6 +79,14 @@ To inspect the IR at any pipeline stage:
 ./tinyc --emit=wasm -o /tmp/p.wasm.o examples/tinyc/tests/sum_to_10.tc  # wasm32 object
 ```
 
+`--time-stages` (any mode) prints the wall time of every compiler stage
+(preprocess, lex, parse, emit, the LLVM-level passes, lowering, the backend
+phases, write) to stderr when tinyc exits; it does not change the output.
+On Linux/x86_64, `--emit=x64 -o OUT` runs the x86-64 code generator on every
+function of one translation unit and writes the raw machine code (no ELF, no
+link step). `pixi run -e upstream bench` (see `bench/run.py`) uses both to
+benchmark tinyc against gcc/clang; `bench/results/` holds the baselines.
+
 To produce a binary by hand (the test runner does this for you):
 
 ```sh

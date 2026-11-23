@@ -161,9 +161,10 @@ typedef enum {
     LS_READV,
     LS_FCNTL,
     LS_MPROTECT,
-    LS_MUNMAP
+    LS_MUNMAP,
+    LS_CLOCK_NSEC
 } LibSysSym;
-#define LS_COUNT 15
+#define LS_COUNT 16
 
 static const char *libsys_name(int sym) {
     if (sym == LS_EXIT)   return "_exit";
@@ -181,6 +182,7 @@ static const char *libsys_name(int sym) {
     if (sym == LS_FCNTL)  return "_fcntl";
     if (sym == LS_MPROTECT) return "_mprotect";
     if (sym == LS_MUNMAP) return "_munmap";
+    if (sym == LS_CLOCK_NSEC) return "_clock_gettime_nsec_np";
     return "";
 }
 

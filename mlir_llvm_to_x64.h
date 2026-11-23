@@ -30,6 +30,31 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
                       bool wasm_lifted,
                       uint8_t **out_data, size_t *out_size);
 
+// Code generation only, for one translation unit: run the x86_64 code
+// generator on EVERY defined function (no entry point needed, no reachability
+// trimming, references to undefined symbols allowed) and return the
+// concatenated raw machine code of all functions (malloc'd; no ELF container,
+// no crt0/thunks, cross-function call and data relocations left unpatched).
+// This is the per-TU cost an object-file (`-c`) compile would pay minus the
+// object writer, which this backend does not have yet; it is used to benchmark
+// codegen file by file and to inspect code with
+// `objdump -D -b binary -m i386:x86-64`.
+bool mlir_llvm_to_x64_code(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
+                           uint8_t **out_data, size_t *out_size);
+
+// Optional phase timing (`tinyc --time-stages`). While `t` is non-NULL, every
+// mlir_llvm_to_elf / mlir_llvm_to_x64_code call ADDS the wall time (ns) of its
+// phases into *t. NULL (the default) disables timing; the only cost is then a
+// pointer test per function.
+typedef struct MLIR_X64StageTimes {
+    uint64_t setup_ns;        // data section, entry, reachability, crt0
+    uint64_t regalloc_ns;     // liveness + linear-scan register allocation
+    uint64_t isel_encode_ns;  // frame layout + instruction selection, which
+                              // encodes the bytes directly (one fused phase)
+    uint64_t link_ns;         // thunks + ELF layout / relocation (container)
+} MLIR_X64StageTimes;
+void mlir_llvm_to_x64_set_stage_times(MLIR_X64StageTimes *t);
+
 #ifdef __cplusplus
 }
 #endif

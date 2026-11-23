@@ -371,6 +371,12 @@ static bool  g_x64_wasm_lifted = false;      // module came from --from-wasm (ca
 static MLIR_BlockHandle g_x64_mb = MLIR_INVALID_HANDLE;  // module IR block (funcs/globals)
 static Buf *g_x64_data_buf = NULL;           // -> stack Buf in mlir_llvm_to_elf (.data blob)
 static bool  g_x64_ok = true;
+// --time-stages sink (mlir_llvm_to_x64_set_stage_times); NULL = no timing.
+static MLIR_X64StageTimes *g_x64_times = NULL;
+
+void mlir_llvm_to_x64_set_stage_times(MLIR_X64StageTimes *t) { g_x64_times = t; }
+
+static uint64_t x64_clock(void) { return g_x64_times ? platform_clock_ns() : 0; }
 
 // SysV AMD64 argument marshaling for llvm.call. `arg_base` skips the fn-pointer
 // operand on indirect calls. Returns stack-arg count and alignment pad for cleanup.
@@ -866,6 +872,7 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     SlotMap sm_spill; memset(&sm_spill, 0, sizeof(sm_spill));
     sm_spill.arena = MLIR_GetArenaAllocator(ctx);
     int32_t nslots = 0;
+    uint64_t t_ra = x64_clock();
     if (!getenv("TINYC_X64_NOREGALLOC")) {
         RegTarget T = x64_regtarget();
         uint32_t um = mlir_regalloc_global(ctx, reg, nb, &F.rm, &sm_spill, &nslots, &T);
@@ -881,6 +888,8 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
         for (int k = 0; k < T.npool - T.ncaller; k++)
             if (um & (1u << k)) F.cs_reg[F.n_cs++] = T.pool[T.ncaller + k];
     }
+    uint64_t t_isel = x64_clock();
+    if (g_x64_times) g_x64_times->regalloc_ns += t_isel - t_ra;
 
     // --- frame pre-pass: give a frame slot to every block arg + op result that
     //     has no register home; reserve alloca regions; size the parallel-move
@@ -980,6 +989,7 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     vmap_free(&F.slots);
     free(F.block_off);
     free(F.fix);
+    if (g_x64_times) g_x64_times->isel_encode_ns += x64_clock() - t_isel;
 }
 
 // ---------------------------------------------------------------------------
@@ -1482,6 +1492,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     SymSet reach; memset(&reach, 0, sizeof(reach));
     bool ok = false;
 
+    uint64_t t_setup = x64_clock();
     x64_init_data_section(ctx, mb, &gm, &data, wasm_lifted,
                           &ptr_relocs, &n_ptr_relocs);
     g_x64_gmap = &gm;
@@ -1554,6 +1565,8 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
         }
     }
 
+    if (g_x64_times) g_x64_times->setup_ns += x64_clock() - t_setup;
+
     // emit reachable defined functions
     bool saw_entry = false;
     for (size_t i = 0; i < no; i++) {
@@ -1572,6 +1585,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
         fprintf(stderr, "x64: no defined entry '%s'\n", entry_cstr);
         g_x64_ok = false;
     }
+    uint64_t t_link = x64_clock();
 
     // synth thunks for referenced-but-undefined symbols
     for (size_t i = 0; i < refs.c && g_x64_ok; i++) {
@@ -1601,6 +1615,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
         ok = mlir_obj_to_elf(&m, out_data, out_size);
         m.data = NULL;  // owned by `data`
     }
+    if (g_x64_times) g_x64_times->link_ns += x64_clock() - t_link;
 
     // Free module state only after ELF link (relocs may still reference gm/data).
 x64_done:
@@ -1616,5 +1631,65 @@ x64_done:
     g_x64_mb = MLIR_INVALID_HANDLE;
     g_x64_data_buf = NULL;
     g_x64_wasm_lifted = false;
+    return ok;
+}
+
+bool mlir_llvm_to_x64_code(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
+                           uint8_t **out_data, size_t *out_size) {
+    *out_data = NULL; *out_size = 0;
+    g_x64_ok = true;
+    g_x64_wasm_lifted = false;
+
+    MLIR_RegionHandle mreg = MLIR_GetOpRegion(ctx, llvm_module, 0);
+    MLIR_BlockHandle  mb   = MLIR_GetRegionBlock(ctx, mreg, 0);
+    g_x64_mb = mb;
+
+    GMap gm; memset(&gm, 0, sizeof(gm));
+    Buf data = {0};
+    g_x64_data_buf = &data;
+    X64PtrReloc *ptr_relocs = NULL;
+    size_t n_ptr_relocs = 0;
+    ObjModule m; memset(&m, 0, sizeof(m));
+    SymSet refs; memset(&refs, 0, sizeof(refs));
+
+    uint64_t t_setup = x64_clock();
+    x64_init_data_section(ctx, mb, &gm, &data, false, &ptr_relocs, &n_ptr_relocs);
+    g_x64_gmap = &gm;
+    if (g_x64_times) g_x64_times->setup_ns += x64_clock() - t_setup;
+
+    // Every defined function: a translation unit has no entry to trim from.
+    size_t no = MLIR_GetBlockNumOps(ctx, mb);
+    for (size_t i = 0; i < no && g_x64_ok; i++) {
+        MLIR_OpHandle fn = MLIR_GetBlockOp(ctx, mb, i);
+        if (MLIR_GetOpType(ctx, fn) != OP_TYPE_LLVM_FUNC) continue;
+        if (MLIR_GetOpNumRegions(ctx, fn) == 0 ||
+            MLIR_GetRegionNumBlocks(ctx, MLIR_GetOpRegion(ctx, fn, 0)) == 0) continue;
+        emit_func(ctx, fn, &m, &refs);
+    }
+
+    bool ok = g_x64_ok;
+    if (ok) {
+        size_t total = 0;
+        for (size_t i = 0; i < m.n_funcs; i++) total += m.funcs[i].code.len;
+        uint8_t *out = (uint8_t *)malloc(total ? total : 1);
+        size_t pos = 0;
+        for (size_t i = 0; i < m.n_funcs; i++) {
+            if (m.funcs[i].code.len)
+                memcpy(out + pos, m.funcs[i].code.data, m.funcs[i].code.len);
+            pos += m.funcs[i].code.len;
+        }
+        *out_data = out;
+        *out_size = total;
+    }
+
+    obj_module_free(&m);
+    free(data.data);
+    for (size_t i = 0; i < gm.n; i++) free(gm.name[i]);
+    free(gm.name); free(gm.off); free(gm.sz);
+    free(refs.n);
+    free(ptr_relocs);
+    g_x64_gmap = NULL;
+    g_x64_mb = MLIR_INVALID_HANDLE;
+    g_x64_data_buf = NULL;
     return ok;
 }

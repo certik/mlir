@@ -13,7 +13,8 @@
 // parameterized allocator in a follow-up). System access is via direct Linux
 // syscalls emitted as tiny local thunks (no libc / PLT / GOT / dynamic linker).
 //
-// Native-only; not part of the tinyC self-host source set.
+// Built into native Linux/x86_64 tinyC binaries and into the self-hosted ELF
+// stages (driver.c TINYC_HAS_ELF).
 
 #include "mlir_llvm_to_x64.h"
 
@@ -26,6 +27,7 @@
 #include "mlir_elf.h"
 #include "mlir_llvm_type_layout.h"
 #include "mlir_regalloc.h"
+#include <platform/platform.h>
 
 // ---------------------------------------------------------------------------
 // x86-64 register numbers.
