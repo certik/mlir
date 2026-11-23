@@ -64,6 +64,9 @@ typedef struct AttrKeyTable {
 } AttrKeyTable;
 
 void attr_key_table_init(AttrKeyTable *t, Arena *arena);
+// An empty table, without the static keys: interns any strings to small
+// integers from 1 (the native backend's location file names and names).
+void attr_key_table_init_strings(AttrKeyTable *t, Arena *arena);
 // The key of `name`, or MLIR_KEY_INVALID.
 MLIR_AttrKey attr_key_table_lookup(const AttrKeyTable *t, string name);
 // The key of `name`; adds a dynamic key, with a copy of the name, if there

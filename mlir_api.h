@@ -552,6 +552,17 @@ string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle type);
 // dictionary is created (MLIR_CreateOp, MLIR_SetOpAttr,
 // MLIR_CreateAttributeDict). Arrays are copied.
 //
+// Attributes are uniqued per context on both backends (except distinct
+// ones): two handles of one context are equal exactly when the values are,
+// so comparing attributes is comparing handles. Floats compare by their bit
+// pattern (0.0 and -0.0 differ, a NaN equals itself), and an integer or float
+// attribute includes its type (1 : i32 differs from 1 : i64). Natively an
+// integer compares by its int64_t value, a symbol ref is the string `@name`,
+// and a bool is not an i1 integer, so a few values that upstream treats as
+// one (255 : i8 and -1 : i8) or as two (@f and "@f") differ. Natively an
+// attribute handle is a 32-bit index into the context's attribute table, and
+// attributes live until the context is destroyed (not in the IR arena).
+//
 // Integer and Float attributes carry an MLIR Type indicating their numeric
 // type (e.g. i32, i64, index, f32, f64). The caller must construct that
 // type first via the Type API. There is no untyped form: typing every
@@ -581,6 +592,10 @@ MLIR_AttributeHandle MLIR_CreateAttributeType(MLIR_Context *ctx, MLIR_TypeHandle
 // SymbolRef attribute (e.g. `callee = @foo` on func.call). The `value`
 // must be the bare symbol name (no leading `@`).
 MLIR_AttributeHandle MLIR_CreateAttributeSymbolRef(MLIR_Context *ctx, string value);
+// A distinct attribute (`distinct[N]<referenced>`), as used for access
+// groups and debug info: every call makes a new attribute, unequal to any
+// other, even with the same `referenced` value.
+MLIR_AttributeHandle MLIR_CreateAttributeDistinct(MLIR_Context *ctx, MLIR_AttributeHandle referenced);
 
 // -----------------------------------------------------------------------------
 // IR mutation primitives (used by lowering passes).
@@ -791,6 +806,13 @@ MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_Context *ctx, MLIR_Attrib
 // For TypeAttr, returns the wrapped Type. For other kinds returns
 // MLIR_INVALID_HANDLE.
 MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_Context *ctx, MLIR_AttributeHandle attr);
+// Dense integer arrays (DenseI32Array, DenseI64Array; upstream also a dense
+// integer elements attribute, e.g. cf.switch's `case_values`): the number
+// of elements and element `idx`. 0 elements for any other kind. The native
+// backend stores them as typed arrays; their printed form
+// (MLIR_GetAttributeAsString) is made on demand.
+size_t MLIR_GetAttributeDenseSize(MLIR_Context *ctx, MLIR_AttributeHandle attr);
+int64_t MLIR_GetAttributeDenseElement(MLIR_Context *ctx, MLIR_AttributeHandle attr, size_t idx);
 
 // -----------------------------------------------------------------------------
 // Location API
@@ -805,6 +827,13 @@ typedef enum {
     MLIR_LOC_REF
 } MLIR_LocationKind;
 
+// Locations are not uniqued (code rarely compares them; they exist for
+// diagnostics). Natively a location handle is a 32-bit index into the
+// context's location table, whose records hold the kind, an interned string
+// (file name, name or parser text) and the line and column; every unknown
+// location without text is one shared record. Locations live until the
+// context is destroyed.
+//
 // Creation
 MLIR_LocationHandle MLIR_CreateLocationUnknown(MLIR_Context *ctx, string original_text);
 MLIR_LocationHandle MLIR_CreateLocationFile(MLIR_Context *ctx, string filename, int line, int column);

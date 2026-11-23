@@ -166,6 +166,16 @@ void attr_key_table_init(AttrKeyTable *t, Arena *arena) {
     attr_key_table_rehash(t, 512);
 }
 
+void attr_key_table_init_strings(AttrKeyTable *t, Arena *arena) {
+    t->arena = arena;
+    t->cap_keys = 64;
+    t->names = arena_new_array(arena, string, t->cap_keys);
+    t->n_keys = 1;
+    t->names[0].str = (char *)g_static_key_names + sizeof(g_static_key_names) - 1;
+    t->names[0].size = 0;
+    attr_key_table_rehash(t, 128);
+}
+
 MLIR_AttrKey attr_key_table_lookup(const AttrKeyTable *t, string name) {
     if (name.size == 0) return MLIR_KEY_INVALID;
     uint32_t mask = t->n_slots - 1;

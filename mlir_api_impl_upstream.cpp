@@ -1576,6 +1576,29 @@ extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *
     return attrH(mlir::DenseI64ArrayAttr::get(cctx, v));
 }
 
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDistinct(MLIR_Context *cctx,
+                                                              MLIR_AttributeHandle referenced) {
+    (void)cctx;
+    return attrH(mlir::DistinctAttr::create(attrF(referenced)));
+}
+
+extern "C" size_t MLIR_GetAttributeDenseSize(MLIR_Context *ctx, MLIR_AttributeHandle h) {
+    (void)ctx;
+    mlir::Attribute a = attrF(h);
+    if (auto d = llvm::dyn_cast_or_null<mlir::DenseI32ArrayAttr>(a)) return d.size();
+    if (auto d = llvm::dyn_cast_or_null<mlir::DenseI64ArrayAttr>(a)) return d.size();
+    if (auto d = llvm::dyn_cast_or_null<mlir::DenseIntElementsAttr>(a)) return d.getNumElements();
+    return 0;
+}
+extern "C" int64_t MLIR_GetAttributeDenseElement(MLIR_Context *ctx, MLIR_AttributeHandle h, size_t i) {
+    API_CHECK(i < MLIR_GetAttributeDenseSize(ctx, h), "MLIR_GetAttributeDenseElement", "index out of range");
+    mlir::Attribute a = attrF(h);
+    if (auto d = llvm::dyn_cast<mlir::DenseI32ArrayAttr>(a)) return d[i];
+    if (auto d = llvm::dyn_cast<mlir::DenseI64ArrayAttr>(a)) return d[i];
+    auto d = llvm::cast<mlir::DenseIntElementsAttr>(a);
+    return (*(d.getValues<llvm::APInt>().begin() + i)).getSExtValue();
+}
+
 extern "C" MLIR_AttrKey MLIR_InternAttrKey(MLIR_Context *ctx, string name) {
     API_CHECK(name.size > 0, "MLIR_InternAttrKey", "empty attribute name");
     return attr_key_table_intern(&ctx->keyTable, name);
