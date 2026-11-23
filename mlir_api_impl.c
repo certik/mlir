@@ -229,6 +229,7 @@ typedef struct IR_Loc {
     uint32_t str;
     int32_t line;     // FILE: line; REF: the reference id
     int32_t col;
+    uint32_t text;    // loc_strings index of the `loc(...)` text, 0 = not made yet
 } IR_Loc;
 
 // The context. Everything that is not IR lives here; there is no
@@ -712,13 +713,10 @@ static uint32_t attr_words(const IR_Attr *a) {
     }
 }
 
-// Hashes `n` bytes four at a time; a long string hashes its first and last
-// 128 bytes and its length (equal hashes are compared in full anyway).
+// Hashes all `n` bytes, four at a time: once per created string, and a
+// sample would make same-length strings that share it (data segments)
+// collide.
 static uint32_t attr_hash_bytes(uint32_t h, const uint8_t *p, uint32_t n) {
-    if (n > 256) {
-        h = attr_hash_bytes(h, p, 128);
-        return attr_hash_bytes(h, p + n - 128, 128);
-    }
     uint32_t i = 0;
     for (; i + 4 <= n; i += 4) {
         uint32_t w = (uint32_t)p[i] | ((uint32_t)p[i + 1] << 8) |
@@ -2404,6 +2402,7 @@ static MLIR_LocationHandle loc_create(MLIR_Context *ctx, uint32_t kind, string s
     p->str = si;
     p->line = line;
     p->col = col;
+    p->text = 0;
     return LOC_H(ctx, l);
 }
 
@@ -2418,23 +2417,24 @@ MLIR_LocationKind MLIR_GetLocationKind(MLIR_Context *ctx, MLIR_LocationHandle lh
 }
 
 // The parser's text of an unknown location; the `loc(...)` form of the
-// others, made in the current IR arena.
+// others, made on the first call and kept in the context.
 string MLIR_GetLocationOriginalText(MLIR_Context *ctx, MLIR_LocationHandle lh) {
-    const IR_Loc *l = LOC_REC(ctx, lh, "MLIR_GetLocationOriginalText");
-    switch (l->kind) {
-        case MLIR_LOC_FILE:
-            if (!ctx->arena) return str_lit("");
-            return format(ctx->arena, str_lit("loc({}:{}:{})"), loc_str(ctx, l),
-                          (int64_t)l->line, (int64_t)l->col);
-        case MLIR_LOC_NAME:
-            if (!ctx->arena) return str_lit("");
-            return format(ctx->arena, str_lit("loc(\"{}\")"), loc_str(ctx, l));
-        case MLIR_LOC_REF:
-            if (!ctx->arena) return str_lit("");
-            return format(ctx->arena, str_lit("loc(#loc{})"), (int64_t)l->line);
-        default:
-            return loc_str(ctx, l);
-    }
+    uint32_t li = LOC_IDX(ctx, lh, "MLIR_GetLocationOriginalText");
+    IR_Loc l = LOCS(ctx)[li];
+    if (l.kind != MLIR_LOC_FILE && l.kind != MLIR_LOC_NAME && l.kind != MLIR_LOC_REF)
+        return loc_str(ctx, &l);
+    if (l.text) return attr_key_table_name(&ctx->loc_strings, l.text);
+    string text;
+    if (l.kind == MLIR_LOC_FILE)
+        text = format(ctx->persistent, str_lit("loc({}:{}:{})"), loc_str(ctx, &l),
+                      (int64_t)l.line, (int64_t)l.col);
+    else if (l.kind == MLIR_LOC_NAME)
+        text = format(ctx->persistent, str_lit("loc(\"{}\")"), loc_str(ctx, &l));
+    else
+        text = format(ctx->persistent, str_lit("loc(#loc{})"), (int64_t)l.line);
+    uint32_t t = attr_key_table_intern(&ctx->loc_strings, text);
+    LOCS(ctx)[li].text = t;
+    return attr_key_table_name(&ctx->loc_strings, t);
 }
 
 string MLIR_GetLocationFileFilename(MLIR_Context *ctx, MLIR_LocationHandle lh) {

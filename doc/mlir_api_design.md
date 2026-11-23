@@ -867,12 +867,12 @@ As implemented (#350, part 2):
   data: the data lives in a vector that can grow. Symbols stay strings
   `@name` and linkages `#llvm.linkage<…>` (no caller needed the typed
   forms); fast-math flags and dense elements are still to come (§4).
-- **Locations** are indices into a `locs` vector of 16-byte
-  `{kind, string, line, column}` records with an interned string table for
+- **Locations** are indices into a `locs` vector of 20-byte
+  `{kind, string, line, column, text}` records with an interned string table for
   file names, names and parser texts; they are not uniqued, except that the
   unknown location without text is one shared record (N14: the wasm
   lifter's per-op unknown location no longer allocates). The `loc(...)`
-  text the printer wants is made on demand.
+  text the printer wants is made on first use and kept.
 - Attributes and locations live in the context, not the IR arena. An op
   keeps its attributes as (key, attribute index) pairs in `extra` (the
   pointer-sized `ptrs` vector is gone) and its location as an index: 52

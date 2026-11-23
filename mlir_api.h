@@ -556,10 +556,18 @@ string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle type);
 // ones): two handles of one context are equal exactly when the values are,
 // so comparing attributes is comparing handles. Floats compare by their bit
 // pattern (0.0 and -0.0 differ, a NaN equals itself), and an integer or float
-// attribute includes its type (1 : i32 differs from 1 : i64). Natively an
-// integer compares by its int64_t value, a symbol ref is the string `@name`,
-// and a bool is not an i1 integer, so a few values that upstream treats as
-// one (255 : i8 and -1 : i8) or as two (@f and "@f") differ. Natively an
+// attribute includes its type (1 : i32 differs from 1 : i64). The backends
+// differ on a few values, which upstream treats as one but the native
+// backend as two, or the other way round:
+//   - natively an integer compares by its int64_t value (255 : i8 and
+//     -1 : i8 differ), and a bool is not an i1 integer;
+//   - natively a symbol ref is the string `@name` (@f and "@f" are one);
+//   - natively a float compares by the bits of the double it was created
+//     from, while upstream stores it at its type's precision: two doubles
+//     that round to the same f16/f32/bf16 value, and NaNs with different
+//     payloads, are one attribute upstream;
+//   - upstream sorts a dictionary's entries, so {a, b} and {b, a} are one
+//     attribute there and two natively. Natively an
 // attribute handle is a 32-bit index into the context's attribute table, and
 // attributes live until the context is destroyed (not in the IR arena).
 //
@@ -832,7 +840,8 @@ typedef enum {
 // context's location table, whose records hold the kind, an interned string
 // (file name, name or parser text) and the line and column; every unknown
 // location without text is one shared record. Locations live until the
-// context is destroyed.
+// context is destroyed. (The `loc(...)` text of a location, for the printer,
+// is made on first use and kept with it.)
 //
 // Creation
 MLIR_LocationHandle MLIR_CreateLocationUnknown(MLIR_Context *ctx, string original_text);
