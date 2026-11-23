@@ -14,9 +14,24 @@
 #include "mlir_passes.h"
 #include "mlir_api_upstream.h"
 #include <string.h>
+#include <stdarg.h>
+#include <stdlib.h>
 
 #ifdef __cplusplus
 extern "C" {
+#endif
+
+// Contract checks (mlir_api.h, "Diagnostics"). With -DMLIR_API_CHECKS a
+// violated precondition aborts with the API function's name; without it the
+// checks compile to nothing and the hot paths are unchanged.
+#ifdef MLIR_API_CHECKS
+static void api_check_failed(const char *fn, const char *what) {
+    fprintf(stderr, "MLIR API contract violation in %s: %s\n", fn, what);
+    abort();
+}
+#define API_CHECK(cond, fn, what) do { if (!(cond)) api_check_failed(fn, what); } while (0)
+#else
+#define API_CHECK(cond, fn, what) ((void)0)
 #endif
 
 // Internal concrete IR definitions
@@ -251,11 +266,63 @@ typedef struct IR_Region {
     MLIR_BlockHandle *blocks;
     uint64_t n_blocks;
     uint64_t cap_blocks;
+    // The op whose region this is, or MLIR_INVALID_HANDLE while the region is
+    // detached (MLIR_CreateRegion, MLIR_TakeOpRegion). Set by op creation.
+    MLIR_OpHandle parent_op;
 } IR_Region;
+
+// The context. Everything that is not IR lives here; there is no
+// process-wide state. Types (and the arrays they point to) are allocated in
+// `persistent`, which the context owns, so they outlive every IR arena.
+struct MLIR_Context {
+    Arena *arena;          // current IR arena (owned by the caller)
+    Arena *persistent;     // owned: this struct, types, the interning tables
+    bool no_def_use_tracking;
+    // Uniqued types, compared structurally by intern_type.
+    MLIR_TypeHandle *type_handles;
+    size_t n_types;
+    size_t cap_types;
+    // Identified LLVM structs, uniqued by name.
+    MLIR_TypeHandle *struct_handles;
+    string *struct_names;
+    size_t n_structs;
+    size_t cap_structs;
+    // Diagnostic handler; NULL means the default (print to stderr).
+    MLIR_DiagnosticHandler diag_fn;
+    void *diag_user;
+};
+
+// Under MLIR_API_CHECKS an erased op keeps this type, so every later use of
+// its handle is caught. Without checks MLIR_EraseOp leaves the op unchanged.
+#define OP_TYPE_ERASED_SENTINEL ((MLIR_OpType)0x7fffffff)
 
 static inline IR_Op *resolve_op(MLIR_OpHandle h) {
     return h == MLIR_INVALID_HANDLE ? NULL : (IR_Op *)(uintptr_t)h;
 }
+
+// Checks that `h` is a live op (not NULL, not erased). Release builds keep
+// the defensive NULL handling of the accessors below; the API does not
+// promise it (mlir_api.h, "Diagnostics").
+#ifdef MLIR_API_CHECKS
+static void check_live_op(MLIR_OpHandle h, const char *fn) {
+    API_CHECK(h != MLIR_INVALID_HANDLE, fn, "op handle is NULL");
+    API_CHECK(((IR_Op *)h)->op_type != OP_TYPE_ERASED_SENTINEL, fn, "op was erased");
+}
+#define CHECK_OP(h, fn) check_live_op((h), (fn))
+#else
+#define CHECK_OP(h, fn) ((void)0)
+#endif
+// For functions that accept MLIR_INVALID_HANDLE (as upstream does) but not an
+// erased op.
+#define CHECK_NOT_ERASED(h, fn) \
+    API_CHECK((h) == MLIR_INVALID_HANDLE || \
+              ((IR_Op *)(h))->op_type != OP_TYPE_ERASED_SENTINEL, fn, "op was erased")
+#define CHECK_INDEX(i, n, fn) API_CHECK((size_t)(i) < (size_t)(n), fn, "index out of range")
+// A typed attribute getter applied to the wrong kind.
+#define CHECK_ATTR_KIND(ah, ok, fn, what) do { \
+        API_CHECK((ah) != MLIR_INVALID_HANDLE, fn, "attribute handle is NULL"); \
+        API_CHECK(ok, fn, what); \
+    } while (0)
 
 static inline IR_Region *resolve_region(MLIR_RegionHandle h) {
     return h == MLIR_INVALID_HANDLE ? NULL : (IR_Region *)(uintptr_t)h;
@@ -280,15 +347,6 @@ static inline IR_Attribute *resolve_attr(MLIR_AttributeHandle h) {
 static inline IR_Location *resolve_loc(MLIR_LocationHandle h) {
     return h == MLIR_INVALID_HANDLE ? NULL : (IR_Location *)(uintptr_t)h;
 }
-
-// Process-wide registry of all created ops. Native MLIR has no per-context
-// op list, but the lowering pass needs one for MLIR_ReplaceAllUsesOfValue
-// (which has to scan every op's operand/successor-operand arrays). The
-// tinyc/parser binaries each create exactly one MLIR_Context per process,
-// so a single static list is enough. Memory comes from the context arena.
-static MLIR_OpHandle *g_all_ops = NULL;
-static size_t         g_n_all_ops = 0;
-static size_t         g_cap_all_ops = 0;
 
 // --- Def-use chain machinery -----------------------------------------------
 //
@@ -372,31 +430,11 @@ static inline IR_OpAux *op_aux_default(Arena *arena) {
     return a;
 }
 
-static void register_op(MLIR_Context *ctx, MLIR_OpHandle h) {
-    if (!ctx || !ctx->arena) return;
-    if (g_n_all_ops == g_cap_all_ops) {
-        size_t nc = g_cap_all_ops ? g_cap_all_ops * 2 : 256;
-        MLIR_OpHandle *p = arena_new_array(ctx->arena, MLIR_OpHandle, nc);
-        if (g_all_ops && g_n_all_ops)
-            memcpy(p, g_all_ops, g_n_all_ops * sizeof(MLIR_OpHandle));
-        g_all_ops = p;
-        g_cap_all_ops = nc;
-    }
-    g_all_ops[g_n_all_ops++] = h;
-}
-
 static inline MLIR_OpHandle alloc_op(MLIR_Context *ctx, IR_Op op) {
     if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
     IR_Op *slot = arena_new(ctx->arena, IR_Op);
     *slot = op;
-    MLIR_OpHandle h = (MLIR_OpHandle)(uintptr_t)slot;
-    // g_all_ops is only consulted by MLIR_ReplaceAllUsesOfValue (def-use).
-    // When tracking is disabled (e.g. the wasm->macho pipeline) skip it: it
-    // saves memory and, crucially, avoids dangling g_all_ops entries when the
-    // pipeline frees an intermediate module's arena between passes.
-    if (!ctx->no_def_use_tracking)
-        register_op(ctx, h);
-    return h;
+    return (MLIR_OpHandle)(uintptr_t)slot;
 }
 
 static inline MLIR_RegionHandle alloc_region(MLIR_Context *ctx, IR_Region r) {
@@ -435,13 +473,6 @@ static inline IR_ValueAux *value_aux_create(MLIR_Context *ctx, string register_n
     return a;
 }
 
-static inline MLIR_TypeHandle alloc_type(MLIR_Context *ctx, IR_Type t) {
-    if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
-    IR_Type *slot = arena_new(ctx->arena, IR_Type);
-    *slot = t;
-    return (MLIR_TypeHandle)(uintptr_t)slot;
-}
-
 // Compare two IR_Type structures for value-equality. Used to intern
 // types so that two semantically-equivalent types share the same
 // MLIR_TypeHandle (matching upstream MLIR's IntegerType::get etc.).
@@ -467,6 +498,8 @@ static bool type_eq(const IR_Type *a, const IR_Type *b) {
             if (a->data.shaped.element_type != b->data.shaped.element_type) return false;
             if (a->data.shaped.rank != b->data.shaped.rank) return false;
             if (a->data.shaped.rank == 0) return true;
+            if (!a->data.shaped.shape || !b->data.shaped.shape)
+                return a->data.shaped.shape == b->data.shaped.shape;
             return memcmp(a->data.shaped.shape, b->data.shaped.shape,
                           (size_t)a->data.shaped.rank * sizeof(int64_t)) == 0;
         case TYPE_KIND_POINTER:
@@ -505,37 +538,74 @@ static bool type_eq(const IR_Type *a, const IR_Type *b) {
     return false;
 }
 
-// Process-wide type-interning cache. Matches the pattern of
-// intern_llvm_struct (g_struct_handles): stored handles point into a
-// context's arena; we assume effectively single-context-per-process
-// (true for both the tinyc driver and the parser).
-static MLIR_TypeHandle *g_type_handles = NULL;
-static size_t          g_n_types = 0;
-static size_t          g_cap_types = 0;
+// Copy the arrays a type points to into the context's persistent arena.
+// Type constructors build the candidate IR_Type with pointers to the
+// caller's (possibly stack) arrays, and only a miss in intern_type copies
+// them, so creating an existing type allocates nothing.
+static void type_copy_payload(Arena *a, IR_Type *t) {
+    switch (t->kind) {
+        case TYPE_KIND_TENSOR:
+        case TYPE_KIND_MEMREF:
+            if (t->data.shaped.rank > 0 && t->data.shaped.shape) {
+                int64_t *shape = arena_new_array(a, int64_t, t->data.shaped.rank);
+                memcpy(shape, t->data.shaped.shape,
+                       (size_t)t->data.shaped.rank * sizeof(int64_t));
+                t->data.shaped.shape = shape;
+            }
+            break;
+        case TYPE_KIND_FUNCTION:
+            if (t->data.function.n_inputs > 0) {
+                MLIR_TypeHandle *in = arena_new_array(a, MLIR_TypeHandle, t->data.function.n_inputs);
+                memcpy(in, t->data.function.inputs,
+                       t->data.function.n_inputs * sizeof(MLIR_TypeHandle));
+                t->data.function.inputs = in;
+            }
+            if (t->data.function.n_results > 0) {
+                MLIR_TypeHandle *out = arena_new_array(a, MLIR_TypeHandle, t->data.function.n_results);
+                memcpy(out, t->data.function.results,
+                       t->data.function.n_results * sizeof(MLIR_TypeHandle));
+                t->data.function.results = out;
+            }
+            break;
+        case TYPE_KIND_LLVM_FUNCTION:
+            if (t->data.llvm_function.n_inputs > 0) {
+                MLIR_TypeHandle *in = arena_new_array(a, MLIR_TypeHandle, t->data.llvm_function.n_inputs);
+                memcpy(in, t->data.llvm_function.inputs,
+                       t->data.llvm_function.n_inputs * sizeof(MLIR_TypeHandle));
+                t->data.llvm_function.inputs = in;
+            }
+            break;
+        default:
+            break;
+    }
+}
 
+// Types are uniqued per context, so two structurally equal types share one
+// handle (as upstream's IntegerType::get etc.): `t1 == t2` is a valid
+// type-identity check across the API, e.g. for the get_undef_value /
+// get_switch_value caches in the cf->scf lifter. The type, its arrays and
+// the table live in the persistent arena, so they survive the IR arena.
 static MLIR_TypeHandle intern_type(MLIR_Context *ctx, IR_Type t) {
-    if (!ctx || !ctx->arena) return MLIR_INVALID_HANDLE;
-    for (size_t i = 0; i < g_n_types; i++) {
-        IR_Type *cur = resolve_type(g_type_handles[i]);
-        if (cur && type_eq(cur, &t)) return g_type_handles[i];
+    if (!ctx) return MLIR_INVALID_HANDLE;
+    for (size_t i = 0; i < ctx->n_types; i++) {
+        IR_Type *cur = resolve_type(ctx->type_handles[i]);
+        if (cur && type_eq(cur, &t)) return ctx->type_handles[i];
     }
-    // Pin the interned object and the registry array to a persistent arena
-    // when requested, so cached handles survive temp-arena churn in the
-    // streaming backend (see MLIR_Context.type_arena).
-    Arena *save = ctx->arena;
-    if (ctx->type_arena) ctx->arena = ctx->type_arena;
-    MLIR_TypeHandle h = alloc_type(ctx, t);
-    if (g_n_types == g_cap_types) {
-        size_t nc = g_cap_types ? g_cap_types * 2 : 64;
-        MLIR_TypeHandle *nh = arena_new_array(ctx->arena, MLIR_TypeHandle, nc);
-        if (g_n_types) {
-            memcpy(nh, g_type_handles, g_n_types * sizeof(MLIR_TypeHandle));
+    Arena *a = ctx->persistent;
+    type_copy_payload(a, &t);
+    IR_Type *slot = arena_new(a, IR_Type);
+    *slot = t;
+    MLIR_TypeHandle h = (MLIR_TypeHandle)slot;
+    if (ctx->n_types == ctx->cap_types) {
+        size_t nc = ctx->cap_types ? ctx->cap_types * 2 : 64;
+        MLIR_TypeHandle *nh = arena_new_array(a, MLIR_TypeHandle, nc);
+        if (ctx->n_types) {
+            memcpy(nh, ctx->type_handles, ctx->n_types * sizeof(MLIR_TypeHandle));
         }
-        g_type_handles = nh;
-        g_cap_types = nc;
+        ctx->type_handles = nh;
+        ctx->cap_types = nc;
     }
-    ctx->arena = save;
-    g_type_handles[g_n_types++] = h;
+    ctx->type_handles[ctx->n_types++] = h;
     return h;
 }
 
@@ -566,19 +636,109 @@ static inline MLIR_LocationHandle alloc_loc(MLIR_Context *ctx, IR_Location l) {
     return (MLIR_LocationHandle)(uintptr_t)slot;
 }
 
-// API lifecycle
-void MLIR_InitApi(MLIR_Context *ctx, MLIR_OpHandle root) {
-    (void)ctx;
-    (void)root;
+// Context
+//
+// The context lives in its own persistent arena, together with the types and
+// the interning tables, so destroying it is one arena_destroy. 64 KiB minus
+// the chunk header keeps the first chunk within one 64 KiB buddy block.
+MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) {
+    Arena *persistent = arena_create(64 * 1024 - 256);
+    if (!persistent) return NULL;
+    MLIR_Context *ctx = arena_new(persistent, MLIR_Context);
+    *ctx = (MLIR_Context){0};
+    ctx->persistent = persistent;
+    if (options) {
+        ctx->arena = options->arena;
+        ctx->no_def_use_tracking = options->no_def_use_tracking;
+    }
+    return ctx;
+}
+
+void MLIR_DestroyContext(MLIR_Context *ctx) {
+    if (!ctx) return;
+    arena_destroy(ctx->persistent);
 }
 
 void MLIR_SetArenaAllocator(MLIR_Context *ctx, Arena *arena) {
+    API_CHECK(ctx != NULL, "MLIR_SetArenaAllocator", "context is NULL");
     if (!ctx) return;
     ctx->arena = arena;
 }
 
 Arena *MLIR_GetArenaAllocator(MLIR_Context *ctx) {
+    API_CHECK(ctx != NULL, "MLIR_GetArenaAllocator", "context is NULL");
     return ctx ? ctx->arena : NULL;
+}
+
+void MLIR_SetContextDefUseTracking(MLIR_Context *ctx, bool enabled) {
+    API_CHECK(ctx != NULL, "MLIR_SetContextDefUseTracking", "context is NULL");
+    ctx->no_def_use_tracking = !enabled;
+}
+
+bool MLIR_HasContextDefUseTracking(MLIR_Context *ctx) {
+    API_CHECK(ctx != NULL, "MLIR_HasContextDefUseTracking", "context is NULL");
+    return !ctx->no_def_use_tracking;
+}
+
+// Diagnostics
+
+static void default_diagnostic_handler(void *user, MLIR_DiagSeverity severity,
+                                       MLIR_LocationHandle loc, string message) {
+    (void)user;
+    const char *sev = "error";
+    if (severity == MLIR_DIAG_WARNING) sev = "warning";
+    else if (severity == MLIR_DIAG_NOTE) sev = "note";
+    else if (severity == MLIR_DIAG_REMARK) sev = "remark";
+    if (loc != MLIR_INVALID_HANDLE && MLIR_GetLocationKind(loc) == MLIR_LOC_FILE) {
+        string file = MLIR_GetLocationFileFilename(loc);
+        fprintf(stderr, "%.*s:%d:%d: %s: %.*s\n", (int)file.size, file.str,
+                MLIR_GetLocationFileLine(loc), MLIR_GetLocationFileColumn(loc),
+                sev, (int)message.size, message.str);
+    } else if (loc != MLIR_INVALID_HANDLE && MLIR_GetLocationKind(loc) != MLIR_LOC_UNKNOWN &&
+               ((IR_Location *)loc)->original_text.size > 0) {
+        // Other locations print in their `loc(...)` form, as upstream's do.
+        string text = ((IR_Location *)loc)->original_text;
+        fprintf(stderr, "%.*s: %s: %.*s\n", (int)text.size, text.str, sev,
+                (int)message.size, message.str);
+    } else {
+        fprintf(stderr, "%s: %.*s\n", sev, (int)message.size, message.str);
+    }
+}
+
+void MLIR_SetDiagnosticHandler(MLIR_Context *ctx, MLIR_DiagnosticHandler fn, void *user) {
+    API_CHECK(ctx != NULL, "MLIR_SetDiagnosticHandler", "context is NULL");
+    ctx->diag_fn = fn;
+    ctx->diag_user = fn ? user : NULL;
+}
+
+// Short messages are formatted on the stack, longer ones in a heap buffer
+// that is freed after the handler returns (the message is borrowed).
+void MLIR_EmitDiagnostic(MLIR_Context *ctx, MLIR_DiagSeverity severity,
+                         MLIR_LocationHandle loc, const char *fmt, ...) {
+    API_CHECK(ctx != NULL, "MLIR_EmitDiagnostic", "context is NULL");
+    char local[256];
+    va_list ap;
+    va_list ap2;
+    va_start(ap, fmt);
+    va_copy(ap2, ap);
+    int n = vsnprintf(local, sizeof(local), fmt, ap);
+    va_end(ap);
+    if (n < 0) n = 0;
+    char *buf = local;
+    if ((size_t)n >= sizeof(local)) {
+        buf = (char *)malloc((size_t)n + 1);
+        if (buf) vsnprintf(buf, (size_t)n + 1, fmt, ap2);
+        else { buf = local; n = (int)sizeof(local) - 1; }
+    }
+    va_end(ap2);
+    string message;
+    message.str = buf;
+    message.size = (size_t)n;
+    if (ctx->diag_fn)
+        ctx->diag_fn(ctx->diag_user, severity, loc, message);
+    else
+        default_diagnostic_handler(NULL, severity, loc, message);
+    if (buf != local) free(buf);
 }
 
 // Operation creation
@@ -698,6 +858,14 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
         }
     }
 
+    // The regions now belong to this op (MLIR_GetBlockParentOp).
+    if (stored) {
+        for (size_t i = 0; i < stored->n_regions; i++) {
+            IR_Region *r = resolve_region(stored->regions[i]);
+            if (r) r->parent_op = handle;
+        }
+    }
+
     // Set def_handle on result values
     for (size_t i = 0; i < n_results; i++) {
         IR_Value *v = resolve_value(results[i]);
@@ -737,6 +905,9 @@ MLIR_OpHandle MLIR_CreateOp(
 }
 
 void MLIR_AppendBlockOp(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHandle op) {
+    API_CHECK(bh != MLIR_INVALID_HANDLE, "MLIR_AppendBlockOp", "block handle is NULL");
+    CHECK_OP(op, "MLIR_AppendBlockOp");
+    API_CHECK(((IR_Op *)op)->parent_block == MLIR_INVALID_HANDLE, "MLIR_AppendBlockOp", "op is already in a block (use MLIR_MoveOpToBlockEnd)");
     IR_Block *block = resolve_block(bh);
     if (!block || !ctx || !ctx->arena) return;
     Arena *arena = ctx->arena;
@@ -754,6 +925,9 @@ void MLIR_AppendBlockOp(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHandle op
 }
 
 void MLIR_InsertBlockOpAtIndex(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHandle op, size_t idx) {
+    API_CHECK(bh != MLIR_INVALID_HANDLE, "MLIR_InsertBlockOpAtIndex", "block handle is NULL");
+    CHECK_OP(op, "MLIR_InsertBlockOpAtIndex");
+    API_CHECK(((IR_Op *)op)->parent_block == MLIR_INVALID_HANDLE, "MLIR_InsertBlockOpAtIndex", "op is already in a block (detach it first)");
     IR_Block *block = resolve_block(bh);
     if (!block || !ctx || !ctx->arena) return;
     if (idx > block->n_operations) idx = block->n_operations;
@@ -800,6 +974,9 @@ void MLIR_AppendBlockArg(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_ValueHandl
 }
 
 void MLIR_AppendRegionBlock(MLIR_Context *ctx, MLIR_RegionHandle rh, MLIR_BlockHandle block) {
+    API_CHECK(rh != MLIR_INVALID_HANDLE && block != MLIR_INVALID_HANDLE, "MLIR_AppendRegionBlock", "region or block handle is NULL");
+    API_CHECK(((IR_Block *)block)->parent_region == MLIR_INVALID_HANDLE, "MLIR_AppendRegionBlock",
+              "block is already in a region (use MLIR_MoveBlockToRegionEnd)");
     IR_Region *region = resolve_region(rh);
     if (!region || !ctx || !ctx->arena) return;
     Arena *arena = ctx->arena;
@@ -817,60 +994,76 @@ void MLIR_AppendRegionBlock(MLIR_Context *ctx, MLIR_RegionHandle rh, MLIR_BlockH
 }
 
 size_t MLIR_GetRegionNumBlocks(MLIR_RegionHandle rh) {
+    API_CHECK(rh != MLIR_INVALID_HANDLE, "MLIR_GetRegionNumBlocks", "region handle is NULL");
     IR_Region *r = resolve_region(rh);
     return r ? r->n_blocks : 0;
 }
 
 MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_RegionHandle rh, size_t idx) {
+    API_CHECK(rh != MLIR_INVALID_HANDLE, "MLIR_GetRegionBlock", "region handle is NULL");
+    CHECK_INDEX(idx, ((IR_Region *)rh)->n_blocks, "MLIR_GetRegionBlock");
     IR_Region *r = resolve_region(rh);
     if (!r || idx >= r->n_blocks) return MLIR_INVALID_HANDLE;
     return r->blocks[idx];
 }
 
 size_t MLIR_GetBlockNumOps(MLIR_BlockHandle bh) {
+    API_CHECK(bh != MLIR_INVALID_HANDLE, "MLIR_GetBlockNumOps", "block handle is NULL");
     IR_Block *b = resolve_block(bh);
     return b ? b->n_operations : 0;
 }
 
 MLIR_OpHandle MLIR_GetBlockOp(MLIR_BlockHandle bh, size_t idx) {
+    API_CHECK(bh != MLIR_INVALID_HANDLE, "MLIR_GetBlockOp", "block handle is NULL");
+    CHECK_INDEX(idx, ((IR_Block *)bh)->n_operations, "MLIR_GetBlockOp");
     IR_Block *b = resolve_block(bh);
     if (!b || idx >= b->n_operations) return MLIR_INVALID_HANDLE;
     return b->operations[idx];
 }
 
 MLIR_OpType MLIR_GetOpType(MLIR_OpHandle oh) {
+    CHECK_OP(oh, "MLIR_GetOpType");
     IR_Op *op = resolve_op(oh);
     return op ? op->op_type : OP_TYPE_UNREGISTERED;
 }
 
 size_t MLIR_GetOpNumRegions(MLIR_OpHandle oh) {
+    CHECK_OP(oh, "MLIR_GetOpNumRegions");
     IR_Op *op = resolve_op(oh);
     return op ? op->n_regions : 0;
 }
 
 MLIR_RegionHandle MLIR_GetOpRegion(MLIR_OpHandle oh, size_t idx) {
+    CHECK_OP(oh, "MLIR_GetOpRegion");
+    CHECK_INDEX(idx, ((IR_Op *)oh)->n_regions, "MLIR_GetOpRegion");
     IR_Op *op = resolve_op(oh);
     if (!op || idx >= op->n_regions) return MLIR_INVALID_HANDLE;
     return op->regions[idx];
 }
 
 string MLIR_GetOpTrailingComment(MLIR_OpHandle oh) {
+    CHECK_OP(oh, "MLIR_GetOpTrailingComment");
     IR_Op *op = resolve_op(oh);
     return (op && op->aux) ? op->aux->trailing_comment : str_lit("");
 }
 
 size_t MLIR_GetOpNumAttributes(MLIR_OpHandle oh) {
+    CHECK_OP(oh, "MLIR_GetOpNumAttributes");
     IR_Op *op = resolve_op(oh);
     return op ? op->n_attributes : 0;
 }
 
 MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle oh, size_t idx) {
+    CHECK_OP(oh, "MLIR_GetOpAttribute");
+    CHECK_INDEX(idx, ((IR_Op *)oh)->n_attributes, "MLIR_GetOpAttribute");
     IR_Op *op = resolve_op(oh);
     if (!op || idx >= op->n_attributes) return MLIR_INVALID_HANDLE;
     return op->attributes[idx];
 }
 
 MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle oh, const char *name) {
+    CHECK_OP(oh, "MLIR_GetOpAttributeByName");
+    API_CHECK(name != NULL, "MLIR_GetOpAttributeByName", "name is NULL");
     IR_Op *op = resolve_op(oh);
     if (!op) return MLIR_INVALID_HANDLE;
     size_t nlen = strlen(name);
@@ -883,33 +1076,41 @@ MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle oh, const char *nam
 }
 
 size_t MLIR_GetOpNumOperands(MLIR_OpHandle oh) {
+    CHECK_OP(oh, "MLIR_GetOpNumOperands");
     IR_Op *op = resolve_op(oh);
     return op ? op->n_operands : 0;
 }
 
 MLIR_ValueHandle MLIR_GetOpOperand(MLIR_OpHandle oh, size_t idx) {
+    CHECK_OP(oh, "MLIR_GetOpOperand");
+    CHECK_INDEX(idx, ((IR_Op *)oh)->n_operands, "MLIR_GetOpOperand");
     IR_Op *op = resolve_op(oh);
     if (!op || idx >= op->n_operands) return MLIR_INVALID_HANDLE;
     return op->operands[idx];
 }
 
 size_t MLIR_GetOpNumResults(MLIR_OpHandle oh) {
+    CHECK_OP(oh, "MLIR_GetOpNumResults");
     IR_Op *op = resolve_op(oh);
     return op ? op->n_results : 0;
 }
 
 MLIR_ValueHandle MLIR_GetOpResult(MLIR_OpHandle oh, size_t idx) {
+    CHECK_OP(oh, "MLIR_GetOpResult");
+    CHECK_INDEX(idx, ((IR_Op *)oh)->n_results, "MLIR_GetOpResult");
     IR_Op *op = resolve_op(oh);
     if (!op || idx >= op->n_results) return MLIR_INVALID_HANDLE;
     return op->results[idx];
 }
 
 MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle oh) {
+    CHECK_OP(oh, "MLIR_GetOpLocation");
     IR_Op *op = resolve_op(oh);
     return op ? op->location : MLIR_INVALID_HANDLE;
 }
 
 string MLIR_GetOpName(MLIR_OpHandle oh) {
+    CHECK_OP(oh, "MLIR_GetOpName");
     IR_Op *op = resolve_op(oh);
     if (!op) return str_lit("");
     if (op->aux && op->aux->opname.str) return op->aux->opname;
@@ -917,11 +1118,14 @@ string MLIR_GetOpName(MLIR_OpHandle oh) {
 }
 
 size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle oh) {
+    CHECK_OP(oh, "MLIR_GetOpNumResultTypes");
     IR_Op *op = resolve_op(oh);
     return op ? op->n_result_types : 0;
 }
 
 MLIR_TypeHandle MLIR_GetOpResultType(MLIR_OpHandle oh, size_t idx) {
+    CHECK_OP(oh, "MLIR_GetOpResultType");
+    CHECK_INDEX(idx, ((IR_Op *)oh)->n_result_types, "MLIR_GetOpResultType");
     IR_Op *op = resolve_op(oh);
     if (!op || idx >= op->n_result_types) return MLIR_INVALID_HANDLE;
     return op->result_types[idx];
@@ -931,20 +1135,29 @@ MLIR_TypeHandle MLIR_GetOpResultType(MLIR_OpHandle oh, size_t idx) {
 // the classic parser stores _target/_ntrue/_nfalse + interleaves operands.
 // Return 0/invalid so the printer falls back to its attribute-based path.
 size_t MLIR_GetOpNumSuccessors(MLIR_OpHandle oh) {
+    CHECK_OP(oh, "MLIR_GetOpNumSuccessors");
     IR_Op *op = resolve_op(oh);
     return op ? op->n_successors : 0;
 }
 MLIR_BlockHandle MLIR_GetOpSuccessor(MLIR_OpHandle oh, size_t idx) {
+    CHECK_OP(oh, "MLIR_GetOpSuccessor");
+    CHECK_INDEX(idx, ((IR_Op *)oh)->n_successors, "MLIR_GetOpSuccessor");
     IR_Op *op = resolve_op(oh);
     if (!op || idx >= op->n_successors) return MLIR_INVALID_HANDLE;
     return op->successors[idx];
 }
 size_t MLIR_GetOpNumSuccessorOperands(MLIR_OpHandle oh, size_t s) {
+    CHECK_OP(oh, "MLIR_GetOpNumSuccessorOperands");
+    CHECK_INDEX(s, ((IR_Op *)oh)->n_successors, "MLIR_GetOpNumSuccessorOperands");
     IR_Op *op = resolve_op(oh);
     if (!op || s >= op->n_successors || !op->n_successor_operands) return 0;
     return (size_t)op->n_successor_operands[s];
 }
 MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_OpHandle oh, size_t s, size_t i) {
+    CHECK_OP(oh, "MLIR_GetOpSuccessorOperand");
+    CHECK_INDEX(s, ((IR_Op *)oh)->n_successors, "MLIR_GetOpSuccessorOperand");
+    CHECK_INDEX(i, ((IR_Op *)oh)->n_successor_operands ? ((IR_Op *)oh)->n_successor_operands[s] : 0,
+                "MLIR_GetOpSuccessorOperand");
     IR_Op *op = resolve_op(oh);
     if (!op || s >= op->n_successors || !op->successor_operands) return MLIR_INVALID_HANDLE;
     if (i >= (size_t)op->n_successor_operands[s]) return MLIR_INVALID_HANDLE;
@@ -952,11 +1165,14 @@ MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_OpHandle oh, size_t s, size_t i
 }
 
 size_t MLIR_GetBlockNumArgs(MLIR_BlockHandle bh) {
+    API_CHECK(bh != MLIR_INVALID_HANDLE, "MLIR_GetBlockNumArgs", "block handle is NULL");
     IR_Block *b = resolve_block(bh);
     return b ? b->n_arguments : 0;
 }
 
 MLIR_ValueHandle MLIR_GetBlockArg(MLIR_BlockHandle bh, size_t idx) {
+    API_CHECK(bh != MLIR_INVALID_HANDLE, "MLIR_GetBlockArg", "block handle is NULL");
+    CHECK_INDEX(idx, ((IR_Block *)bh)->n_arguments, "MLIR_GetBlockArg");
     IR_Block *b = resolve_block(bh);
     if (!b || idx >= b->n_arguments) return MLIR_INVALID_HANDLE;
     return b->arguments[idx];
@@ -1176,28 +1392,17 @@ MLIR_TypeHandle MLIR_CreateTypeUnknown(MLIR_Context *ctx) {
     return intern_type(ctx, t);
 }
 
-static void copy_shape_to_arena(MLIR_Context *ctx, IR_Type *type, const int64_t *shape, size_t rank) {
+// Point a candidate shaped type at the caller's shape; intern_type copies it.
+static void set_shape(IR_Type *type, const int64_t *shape, size_t rank) {
     type->data.shaped.rank = (uint32_t)rank;
-    if (rank > 0 && shape) {
-        if (!ctx || !ctx->arena) {
-            type->data.shaped.shape = NULL;
-            type->data.shaped.rank = 0;
-            return;
-        }
-        type->data.shaped.shape = arena_new_array(ctx->arena, int64_t, rank);
-        for (size_t i = 0; i < rank; i++) {
-            type->data.shaped.shape[i] = shape[i];
-        }
-    } else {
-        type->data.shaped.shape = NULL;
-    }
+    type->data.shaped.shape = (rank > 0 && shape) ? (int64_t *)shape : NULL;
 }
 
 MLIR_TypeHandle MLIR_CreateTypeTensor(MLIR_Context *ctx, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type) {
     IR_Type t = {0};
     t.kind = TYPE_KIND_TENSOR;
     t.data.shaped.element_type = element_type;
-    copy_shape_to_arena(ctx, &t, shape, rank);
+    set_shape(&t, shape, rank);
     return intern_type(ctx, t);
 }
 
@@ -1205,7 +1410,7 @@ MLIR_TypeHandle MLIR_CreateTypeMemref(MLIR_Context *ctx, const int64_t *shape, s
     IR_Type t = {0};
     t.kind = TYPE_KIND_MEMREF;
     t.data.shaped.element_type = element_type;
-    copy_shape_to_arena(ctx, &t, shape, rank);
+    set_shape(&t, shape, rank);
     return intern_type(ctx, t);
 }
 
@@ -1232,56 +1437,44 @@ MLIR_TypeHandle MLIR_CreateTypeLLVMPointerInAddressSpace(
 
 // Identified LLVM structs are interned by name within a context: the same
 // printed reference (`!llvm.struct<"foo", ...>`) must resolve to the same
-// type handle across all uses. We use a process-wide static table keyed
-// by the string contents (cheap given the small N in tinyc programs).
-static MLIR_TypeHandle *g_struct_handles = NULL;
-static string         *g_struct_names   = NULL;
-static size_t          g_n_structs = 0;
-static size_t          g_cap_structs = 0;
-
+// type handle across all uses. A linear scan of the context's table by name
+// (cheap given the small N in tinyc programs). The name is copied into the
+// persistent arena with the type.
 static MLIR_TypeHandle intern_llvm_struct(MLIR_Context *ctx, string name) {
-    for (size_t i = 0; i < g_n_structs; i++) {
-        if (g_struct_names[i].size == name.size &&
-            memcmp(g_struct_names[i].str, name.str, name.size) == 0) {
-            return g_struct_handles[i];
+    for (size_t i = 0; i < ctx->n_structs; i++) {
+        if (ctx->struct_names[i].size == name.size &&
+            memcmp(ctx->struct_names[i].str, name.str, name.size) == 0) {
+            return ctx->struct_handles[i];
         }
     }
-    // Pin to the persistent type arena when requested (see intern_type).
-    Arena *save = ctx->arena;
-    if (ctx->type_arena) ctx->arena = ctx->type_arena;
-    if (g_n_structs == g_cap_structs) {
-        size_t nc = g_cap_structs ? g_cap_structs * 2 : 32;
-        MLIR_TypeHandle *nh = arena_new_array(ctx->arena, MLIR_TypeHandle, nc);
-        string *nn = arena_new_array(ctx->arena, string, nc);
-        if (g_n_structs) {
-            memcpy(nh, g_struct_handles, g_n_structs * sizeof(MLIR_TypeHandle));
-            memcpy(nn, g_struct_names, g_n_structs * sizeof(string));
+    Arena *a = ctx->persistent;
+    if (ctx->n_structs == ctx->cap_structs) {
+        size_t nc = ctx->cap_structs ? ctx->cap_structs * 2 : 32;
+        MLIR_TypeHandle *nh = arena_new_array(a, MLIR_TypeHandle, nc);
+        string *nn = arena_new_array(a, string, nc);
+        if (ctx->n_structs) {
+            memcpy(nh, ctx->struct_handles, ctx->n_structs * sizeof(MLIR_TypeHandle));
+            memcpy(nn, ctx->struct_names, ctx->n_structs * sizeof(string));
         }
-        g_struct_handles = nh; g_struct_names = nn; g_cap_structs = nc;
+        ctx->struct_handles = nh;
+        ctx->struct_names = nn;
+        ctx->cap_structs = nc;
     }
-    IR_Type t = {0};
-    t.kind = TYPE_KIND_LLVM_STRUCT;
-    t.data.llvm_struct.name = name;
-    MLIR_TypeHandle h = alloc_type(ctx, t);
-    ctx->arena = save;
-    g_struct_handles[g_n_structs] = h;
-    g_struct_names[g_n_structs] = name;
-    g_n_structs++;
+    string owned = name;
+    if (name.size > 0) {
+        char *p = arena_new_array(a, char, name.size);
+        memcpy(p, name.str, name.size);
+        owned.str = p;
+    }
+    IR_Type *t = arena_new(a, IR_Type);
+    *t = (IR_Type){0};
+    t->kind = TYPE_KIND_LLVM_STRUCT;
+    t->data.llvm_struct.name = owned;
+    MLIR_TypeHandle h = (MLIR_TypeHandle)t;
+    ctx->struct_handles[ctx->n_structs] = h;
+    ctx->struct_names[ctx->n_structs] = owned;
+    ctx->n_structs++;
     return h;
-}
-
-// Drop all process-wide intern/registry state so it no longer references any
-// arena. Used by multi-pass pipelines (e.g. wasm->macho) right before they
-// switch ctx->arena to a fresh arena and free the previous one: any cached
-// handles pointed into the about-to-be-freed arena, and the dedup caches must
-// start empty so the next pass re-interns its types/structs into the new
-// arena (making that pass's module self-contained). Safe to call only when no
-// live consumer still depends on the old def-use registry.
-void MLIR_ResetInternRegistry(void) {
-    g_all_ops = NULL;      g_n_all_ops = 0;   g_cap_all_ops = 0;
-    g_type_handles = NULL; g_n_types = 0;     g_cap_types = 0;
-    g_struct_handles = NULL; g_struct_names = NULL;
-    g_n_structs = 0;       g_cap_structs = 0;
 }
 
 MLIR_TypeHandle MLIR_CreateTypeLLVMStructIdentified(MLIR_Context *ctx, string name) {
@@ -1294,7 +1487,7 @@ void MLIR_SetTypeLLVMStructBody(MLIR_Context *ctx, MLIR_TypeHandle struct_ty,
     if (!t || t->kind != TYPE_KIND_LLVM_STRUCT) return;
     if (t->data.llvm_struct.body_set) return; // upstream silently ignores re-set
     if (n_fields > 0) {
-        MLIR_TypeHandle *buf = arena_new_array(ctx->arena, MLIR_TypeHandle, n_fields);
+        MLIR_TypeHandle *buf = arena_new_array(ctx->persistent, MLIR_TypeHandle, n_fields);
         memcpy(buf, fields, n_fields * sizeof(MLIR_TypeHandle));
         t->data.llvm_struct.fields = buf;
     }
@@ -1320,9 +1513,7 @@ MLIR_TypeHandle MLIR_CreateTypeLLVMFunction(MLIR_Context *ctx,
     t.data.llvm_function.result = result;
     t.data.llvm_function.is_var_arg = is_var_arg;
     if (n_inputs > 0) {
-        MLIR_TypeHandle *buf = arena_new_array(ctx->arena, MLIR_TypeHandle, n_inputs);
-        memcpy(buf, inputs, n_inputs * sizeof(MLIR_TypeHandle));
-        t.data.llvm_function.inputs = buf;
+        t.data.llvm_function.inputs = (MLIR_TypeHandle *)inputs;
         t.data.llvm_function.n_inputs = n_inputs;
     }
     return intern_type(ctx, t);
@@ -1440,17 +1631,13 @@ MLIR_TypeHandle MLIR_CreateTypeFunction(MLIR_Context *ctx,
                                          const MLIR_TypeHandle *results, size_t n_results) {
     IR_Type t = {0};
     t.kind = TYPE_KIND_FUNCTION;
-    if (ctx && ctx->arena) {
-        if (n_inputs > 0 && inputs) {
-            t.data.function.inputs = arena_new_array(ctx->arena, MLIR_TypeHandle, n_inputs);
-            for (size_t i = 0; i < n_inputs; i++) t.data.function.inputs[i] = inputs[i];
-            t.data.function.n_inputs = n_inputs;
-        }
-        if (n_results > 0 && results) {
-            t.data.function.results = arena_new_array(ctx->arena, MLIR_TypeHandle, n_results);
-            for (size_t i = 0; i < n_results; i++) t.data.function.results[i] = results[i];
-            t.data.function.n_results = n_results;
-        }
+    if (n_inputs > 0 && inputs) {
+        t.data.function.inputs = (MLIR_TypeHandle *)inputs;
+        t.data.function.n_inputs = n_inputs;
+    }
+    if (n_results > 0 && results) {
+        t.data.function.results = (MLIR_TypeHandle *)results;
+        t.data.function.n_results = n_results;
     }
     return intern_type(ctx, t);
 }
@@ -1464,6 +1651,7 @@ size_t MLIR_GetTypeFunctionNumInputs(MLIR_TypeHandle th) {
 }
 
 MLIR_TypeHandle MLIR_GetTypeFunctionInput(MLIR_TypeHandle th, size_t idx) {
+    API_CHECK(idx < MLIR_GetTypeFunctionNumInputs(th), "MLIR_GetTypeFunctionInput", "index out of range");
     IR_Type *t = resolve_type(th);
     if (!t) return MLIR_INVALID_HANDLE;
     if (t->kind == TYPE_KIND_FUNCTION) {
@@ -1493,6 +1681,7 @@ size_t MLIR_GetTypeFunctionNumResults(MLIR_TypeHandle th) {
 }
 
 MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_TypeHandle th, size_t idx) {
+    API_CHECK(idx < MLIR_GetTypeFunctionNumResults(th), "MLIR_GetTypeFunctionResult", "index out of range");
     IR_Type *t = resolve_type(th);
     if (!t) return MLIR_INVALID_HANDLE;
     if (t->kind == TYPE_KIND_FUNCTION) {
@@ -1534,6 +1723,7 @@ size_t MLIR_GetTypeLLVMStructNumFields(MLIR_TypeHandle th) {
     return t->data.llvm_struct.n_fields;
 }
 MLIR_TypeHandle MLIR_GetTypeLLVMStructField(MLIR_TypeHandle th, size_t idx) {
+    API_CHECK(idx < MLIR_GetTypeLLVMStructNumFields(th), "MLIR_GetTypeLLVMStructField", "index out of range");
     IR_Type *t = resolve_type(th);
     if (!t || t->kind != TYPE_KIND_LLVM_STRUCT) return MLIR_INVALID_HANDLE;
     if (idx >= t->data.llvm_struct.n_fields) return MLIR_INVALID_HANDLE;
@@ -1713,6 +1903,7 @@ MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_nam
 }
 
 MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_Context *ctx, MLIR_OpHandle def, uint32_t result_index, MLIR_TypeHandle type, string register_name, MLIR_LocationHandle location) {
+    CHECK_NOT_ERASED(def, "MLIR_CreateValueOpResult");
     IR_Value v = {0};
     v.kind = MLIR_VALUE_OP_RESULT;
     v.def_handle = def;
@@ -1735,6 +1926,8 @@ MLIR_RegionHandle MLIR_CreateRegion(MLIR_Context *ctx) {
 }
 
 void MLIR_AppendOpAttribute(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_AttributeHandle attr) {
+    CHECK_OP(oh, "MLIR_AppendOpAttribute");
+    API_CHECK(attr != MLIR_INVALID_HANDLE, "MLIR_AppendOpAttribute", "attribute handle is NULL");
     IR_Op *op = resolve_op(oh);
     if (!op || !ctx || !ctx->arena) return;
     size_t new_count = op->n_attributes + 1;
@@ -1750,6 +1943,7 @@ void MLIR_AppendOpAttribute(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_AttributeH
 
 // Attribute accessors
 MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle ah) {
+    API_CHECK(ah != MLIR_INVALID_HANDLE, "MLIR_GetAttributeKind", "attribute handle is NULL");
     IR_Attribute *attr = resolve_attr(ah);
     if (!attr) return MLIR_ATTR_KIND_INTEGER;
     switch (attr->kind) {
@@ -1765,6 +1959,7 @@ MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle ah) {
 }
 
 string MLIR_GetAttributeName(MLIR_AttributeHandle ah) {
+    API_CHECK(ah != MLIR_INVALID_HANDLE, "MLIR_GetAttributeName", "attribute handle is NULL");
     IR_Attribute *attr = resolve_attr(ah);
     return attr ? attr->name : str_lit("");
 }
@@ -1783,21 +1978,25 @@ string MLIR_GetAttributeAsString(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
 }
 
 int64_t MLIR_GetAttributeInteger(MLIR_AttributeHandle ah) {
+    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_INTEGER || ((IR_Attribute *)ah)->kind == ATTR_KIND_BOOL, "MLIR_GetAttributeInteger", "not an integer or bool attribute");
     IR_Attribute *attr = resolve_attr(ah);
     return attr ? attr->data.integer_value : 0;
 }
 
 string MLIR_GetAttributeString(MLIR_AttributeHandle ah) {
+    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_STRING, "MLIR_GetAttributeString", "not a string attribute");
     IR_Attribute *attr = resolve_attr(ah);
     return attr ? attr->data.string_value : str_lit("");
 }
 
 double MLIR_GetAttributeFloat(MLIR_AttributeHandle ah) {
+    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_FLOAT, "MLIR_GetAttributeFloat", "not a float attribute");
     IR_Attribute *attr = resolve_attr(ah);
     return attr ? attr->data.float_value : 0.0;
 }
 
 MLIR_TypeHandle MLIR_GetAttributeType(MLIR_AttributeHandle ah) {
+    API_CHECK(ah != MLIR_INVALID_HANDLE, "MLIR_GetAttributeType", "attribute handle is NULL");
     IR_Attribute *attr = resolve_attr(ah);
     if (!attr) return MLIR_INVALID_HANDLE;
     if (attr->kind != ATTR_KIND_INTEGER && attr->kind != ATTR_KIND_FLOAT)
@@ -1806,33 +2005,41 @@ MLIR_TypeHandle MLIR_GetAttributeType(MLIR_AttributeHandle ah) {
 }
 
 bool MLIR_GetAttributeBool(MLIR_AttributeHandle ah) {
+    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_BOOL, "MLIR_GetAttributeBool", "not a bool attribute");
     IR_Attribute *attr = resolve_attr(ah);
     return attr ? attr->data.bool_value : false;
 }
 
 size_t MLIR_GetAttributeArraySize(MLIR_AttributeHandle ah) {
+    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_ARRAY, "MLIR_GetAttributeArraySize", "not an array attribute");
     IR_Attribute *attr = resolve_attr(ah);
     return attr ? attr->data.array.count : 0;
 }
 
 MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_AttributeHandle ah, size_t idx) {
+    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_ARRAY, "MLIR_GetAttributeArrayElement", "not an array attribute");
+    CHECK_INDEX(idx, ((IR_Attribute *)ah)->data.array.count, "MLIR_GetAttributeArrayElement");
     IR_Attribute *attr = resolve_attr(ah);
     if (!attr || idx >= attr->data.array.count) return MLIR_INVALID_HANDLE;
     return attr->data.array.elements[idx];
 }
 
 size_t MLIR_GetAttributeDictSize(MLIR_AttributeHandle ah) {
+    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_DICT, "MLIR_GetAttributeDictSize", "not a dictionary attribute");
     IR_Attribute *attr = resolve_attr(ah);
     return attr ? attr->data.array.count : 0;
 }
 
 MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_AttributeHandle ah, size_t idx) {
+    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_DICT, "MLIR_GetAttributeDictElement", "not a dictionary attribute");
+    CHECK_INDEX(idx, ((IR_Attribute *)ah)->data.array.count, "MLIR_GetAttributeDictElement");
     IR_Attribute *attr = resolve_attr(ah);
     if (!attr || idx >= attr->data.array.count) return MLIR_INVALID_HANDLE;
     return attr->data.array.elements[idx];
 }
 
 MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_AttributeHandle ah) {
+    API_CHECK(ah != MLIR_INVALID_HANDLE, "MLIR_GetAttributeTypeValue", "attribute handle is NULL");
     IR_Attribute *attr = resolve_attr(ah);
     if (!attr || attr->kind != ATTR_KIND_TYPE) return MLIR_INVALID_HANDLE;
     return attr->data.type_value;
@@ -1840,11 +2047,13 @@ MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_AttributeHandle ah) {
 
 // Value accessors
 MLIR_ValueKind MLIR_GetValueKind(MLIR_ValueHandle vh) {
+    API_CHECK(vh != MLIR_INVALID_HANDLE, "MLIR_GetValueKind", "value handle is NULL");
     IR_Value *v = resolve_value(vh);
     return v ? v->kind : MLIR_VALUE_BLOCK_ARG;
 }
 
 MLIR_TypeHandle MLIR_GetValueType(MLIR_ValueHandle vh) {
+    API_CHECK(vh != MLIR_INVALID_HANDLE, "MLIR_GetValueType", "value handle is NULL");
     IR_Value *v = resolve_value(vh);
     return v ? v->type : MLIR_INVALID_HANDLE;
 }
@@ -1855,11 +2064,13 @@ string MLIR_GetValueRegisterName(MLIR_ValueHandle vh) {
 }
 
 uint32_t MLIR_GetValueResultIndex(MLIR_ValueHandle vh) {
+    API_CHECK(vh != MLIR_INVALID_HANDLE, "MLIR_GetValueResultIndex", "value handle is NULL");
     IR_Value *v = resolve_value(vh);
     return v ? v->result_index : 0;
 }
 
 MLIR_OpHandle MLIR_GetValueDefiningOp(MLIR_ValueHandle vh) {
+    API_CHECK(vh != MLIR_INVALID_HANDLE, "MLIR_GetValueDefiningOp", "value handle is NULL");
     IR_Value *v = resolve_value(vh);
     if (!v || v->kind != MLIR_VALUE_OP_RESULT) return MLIR_INVALID_HANDLE;
     return (MLIR_OpHandle)v->def_handle;
@@ -2016,13 +2227,23 @@ void MLIR_ReplaceAllUsesOfValue(MLIR_Context *ctx,
     ov->aux->n_uses = 0;
 }
 
-void MLIR_EraseOp(MLIR_Context *ctx, MLIR_OpHandle op) {
-    (void)ctx;
-    IR_Op *o = resolve_op(op);
-    if (!o) return;
-    // Tear down def-use entries so callers no longer see this op in any
-    // value's use list. Leave the IR_Op shell in place — other code may
-    // still hold the handle and call MLIR_GetOpParentBlock on it.
+// Remove `op` from its parent block's op array (O(n) compaction).
+static void detach_from_block(IR_Op *o, MLIR_OpHandle op) {
+    IR_Block *b = resolve_block(o->parent_block);
+    if (b) {
+        size_t w = 0;
+        for (size_t i = 0; i < b->n_operations; i++) {
+            if (b->operations[i] != op) b->operations[w++] = b->operations[i];
+        }
+        b->n_operations = w;
+    }
+    o->parent_block = MLIR_INVALID_HANDLE;
+}
+
+// Unlink every operand use of `o` and of the ops nested in its regions, as
+// upstream's Operation::erase does when it destroys them. Under
+// MLIR_API_CHECKS the ops are also marked erased.
+static void drop_op_uses(IR_Op *o) {
     if (o->aux && o->aux->operand_uses) {
         for (uint64_t i = 0; i < o->n_operands; i++) {
             use_unregister(o->operands[i], o->aux->operand_uses[i]);
@@ -2041,30 +2262,119 @@ void MLIR_EraseOp(MLIR_Context *ctx, MLIR_OpHandle op) {
             }
         }
     }
-    IR_Block *b = resolve_block(o->parent_block);
-    if (b) {
-        size_t w = 0;
-        for (size_t i = 0; i < b->n_operations; i++) {
-            if (b->operations[i] != op) b->operations[w++] = b->operations[i];
+    for (uint32_t r = 0; r < o->n_regions; r++) {
+        IR_Region *region = resolve_region(o->regions[r]);
+        if (!region) continue;
+        for (uint64_t bi = 0; bi < region->n_blocks; bi++) {
+            IR_Block *blk = resolve_block(region->blocks[bi]);
+            if (!blk) continue;
+            for (uint32_t k = 0; k < blk->n_operations; k++) {
+                IR_Op *nested = resolve_op(blk->operations[k]);
+                if (nested) drop_op_uses(nested);
+            }
         }
-        b->n_operations = w;
     }
-    o->parent_block = MLIR_INVALID_HANDLE;
+#ifdef MLIR_API_CHECKS
+    o->op_type = OP_TYPE_ERASED_SENTINEL;
+#endif
+}
+
+#ifdef MLIR_API_CHECKS
+// Erasing requires that nothing outside the erased subtree uses a value
+// defined inside it (mlir_api.h). These walks check it for the values that
+// track uses (have an aux); without def-use tracking there is nothing to
+// check. O(size of the subtree), checked builds only.
+
+// True if `owner` is `root` or nested in it.
+static bool op_is_inside(MLIR_OpHandle owner, MLIR_OpHandle root) {
+    MLIR_OpHandle cur = owner;
+    while (cur != MLIR_INVALID_HANDLE) {
+        if (cur == root) return true;
+        IR_Op *o = (IR_Op *)cur;
+        if (o->parent_block == MLIR_INVALID_HANDLE) return false;
+        IR_Region *r = resolve_region(((IR_Block *)o->parent_block)->parent_region);
+        cur = r ? r->parent_op : MLIR_INVALID_HANDLE;
+    }
+    return false;
+}
+
+static bool value_used_outside(MLIR_ValueHandle vh, MLIR_OpHandle root) {
+    IR_Value *v = resolve_value(vh);
+    if (!v || !v->aux) return false;
+    for (UseNode *u = v->aux->use_head; u; u = u->next)
+        if (!op_is_inside(u->owner, root)) return true;
+    return false;
+}
+
+// True if a value defined in `o` or nested in it is used outside `root`.
+static bool op_used_outside(IR_Op *o, MLIR_OpHandle root) {
+    for (uint32_t i = 0; i < o->n_results; i++)
+        if (value_used_outside(o->results[i], root)) return true;
+    for (uint32_t r = 0; r < o->n_regions; r++) {
+        IR_Region *region = resolve_region(o->regions[r]);
+        if (!region) continue;
+        for (uint64_t bi = 0; bi < region->n_blocks; bi++) {
+            IR_Block *b = resolve_block(region->blocks[bi]);
+            if (!b) continue;
+            for (uint32_t i = 0; i < b->n_arguments; i++)
+                if (value_used_outside(b->arguments[i], root)) return true;
+            for (uint32_t k = 0; k < b->n_operations; k++) {
+                IR_Op *nested = resolve_op(b->operations[k]);
+                if (nested && op_used_outside(nested, root)) return true;
+            }
+        }
+    }
+    return false;
+}
+#endif
+
+// The op shell stays in the arena (the arena owns the storage), but the
+// handle is dead: see mlir_api.h.
+void MLIR_EraseOp(MLIR_Context *ctx, MLIR_OpHandle op) {
+    (void)ctx;
+    CHECK_OP(op, "MLIR_EraseOp");
+    IR_Op *o = resolve_op(op);
+    if (!o) return;
+#ifdef MLIR_API_CHECKS
+    API_CHECK(!op_used_outside(o, op), "MLIR_EraseOp",
+              "a value defined in the op or nested in it is used outside it");
+#endif
+    detach_from_block(o, op);
+#ifdef MLIR_API_CHECKS
+    drop_op_uses(o);  // also marks the op erased
+#else
+    // Without def-use tracking and regions there is nothing to drop (the
+    // common case in the --from-wasm pipeline's DCE).
+    if (o->aux || o->n_regions) drop_op_uses(o);
+#endif
+}
+
+void MLIR_DetachOp(MLIR_Context *ctx, MLIR_OpHandle op) {
+    (void)ctx;
+    CHECK_OP(op, "MLIR_DetachOp");
+    IR_Op *o = resolve_op(op);
+    if (!o) return;
+    detach_from_block(o, op);
 }
 
 MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *ctx, MLIR_OpHandle op,
                                     size_t idx) {
+    CHECK_NOT_ERASED(op, "MLIR_TakeOpRegion");
     IR_Op *o = resolve_op(op);
     if (!o || idx >= o->n_regions) return MLIR_INVALID_HANDLE;
     MLIR_RegionHandle taken = o->regions[idx];
-    // Replace with a fresh empty region and reparent any blocks that
-    // referenced the old region.
+    // Replace it with a fresh empty region; the taken one is detached until
+    // it is passed to MLIR_CreateOp.
     IR_Region empty = {0};
+    empty.parent_op = op;
     o->regions[idx] = alloc_region(ctx, empty);
+    IR_Region *t = resolve_region(taken);
+    if (t) t->parent_op = MLIR_INVALID_HANDLE;
     return taken;
 }
 
 MLIR_BlockHandle MLIR_GetOpParentBlock(MLIR_OpHandle op) {
+    CHECK_NOT_ERASED(op, "MLIR_GetOpParentBlock");
     IR_Op *o = resolve_op(op);
     return o ? o->parent_block : MLIR_INVALID_HANDLE;
 }
@@ -2076,19 +2386,11 @@ MLIR_RegionHandle MLIR_GetBlockParentRegion(MLIR_BlockHandle block) {
 
 void MLIR_MoveOpToBlockEnd(MLIR_Context *ctx, MLIR_OpHandle op,
                            MLIR_BlockHandle dest) {
+    CHECK_NOT_ERASED(op, "MLIR_MoveOpToBlockEnd");
     if (op == MLIR_INVALID_HANDLE || dest == MLIR_INVALID_HANDLE) return;
     IR_Op *o = resolve_op(op);
     if (!o) return;
-    // Detach from current parent.
-    IR_Block *cur = resolve_block(o->parent_block);
-    if (cur) {
-        size_t w = 0;
-        for (size_t i = 0; i < cur->n_operations; i++) {
-            if (cur->operations[i] != op) cur->operations[w++] = cur->operations[i];
-        }
-        cur->n_operations = w;
-    }
-    o->parent_block = MLIR_INVALID_HANDLE;
+    detach_from_block(o, op);
     MLIR_AppendBlockOp(ctx, dest, op);
 }
 
@@ -2112,6 +2414,7 @@ void MLIR_MoveBlockToRegionEnd(MLIR_Context *ctx, MLIR_BlockHandle block,
 void MLIR_SetOpOperand(MLIR_Context *ctx, MLIR_OpHandle op,
                        size_t idx, MLIR_ValueHandle value) {
     (void)ctx;
+    CHECK_NOT_ERASED(op, "MLIR_SetOpOperand");
     IR_Op *o = resolve_op(op);
     if (!o) return;
     // The contract (matching upstream's MLIR_SetOpOperand on MLIR core,
@@ -2167,6 +2470,7 @@ void MLIR_SetOpOperand(MLIR_Context *ctx, MLIR_OpHandle op,
 void MLIR_SetOpSuccessor(MLIR_Context *ctx, MLIR_OpHandle op,
                          size_t succ_idx, MLIR_BlockHandle block) {
     (void)ctx;
+    CHECK_NOT_ERASED(op, "MLIR_SetOpSuccessor");
     IR_Op *o = resolve_op(op);
     if (!o || succ_idx >= o->n_successors) return;
     o->successors[succ_idx] = block;
@@ -2175,6 +2479,7 @@ void MLIR_SetOpSuccessor(MLIR_Context *ctx, MLIR_OpHandle op,
 void MLIR_SetOpSuccessorOperands(MLIR_Context *ctx, MLIR_OpHandle op,
                                  size_t succ_idx,
                                  const MLIR_ValueHandle *values, size_t n) {
+    CHECK_NOT_ERASED(op, "MLIR_SetOpSuccessorOperands");
     IR_Op *o = resolve_op(op);
     if (!o || succ_idx >= o->n_successors) return;
     Arena *arena = MLIR_GetArenaAllocator(ctx);
@@ -2220,6 +2525,21 @@ void MLIR_EraseBlock(MLIR_Context *ctx, MLIR_BlockHandle block) {
     (void)ctx;
     IR_Block *b = resolve_block(block);
     if (!b) return;
+#ifdef MLIR_API_CHECKS
+    // No branch outside the block may still target it (mlir_api.h). The
+    // native backend has no predecessor lists, so scan the region.
+    {
+        IR_Region *pr = resolve_region(b->parent_region);
+        for (uint64_t bi = 0; pr && bi < pr->n_blocks; bi++) {
+            IR_Block *pb = resolve_block(pr->blocks[bi]);
+            if (!pb || pb == b || pb->n_operations == 0) continue;
+            IR_Op *term = resolve_op(pb->operations[pb->n_operations - 1]);
+            for (uint32_t k = 0; term && k < term->n_successors; k++)
+                API_CHECK(term->successors[k] != block, "MLIR_EraseBlock",
+                          "the block is still a successor of a block outside it");
+        }
+    }
+#endif
     IR_Region *r = resolve_region(b->parent_region);
     if (r) {
         size_t w = 0;
@@ -2329,17 +2649,8 @@ MLIR_OpHandle MLIR_GetBlockTerminator(MLIR_BlockHandle block) {
 MLIR_OpHandle MLIR_GetBlockParentOp(MLIR_BlockHandle block) {
     IR_Block *b = resolve_block(block);
     if (!b) return MLIR_INVALID_HANDLE;
-    MLIR_RegionHandle r = b->parent_region;
-    if (r == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
-    // Scan global op list to find which op owns this region.
-    for (size_t i = 0; i < g_n_all_ops; i++) {
-        IR_Op *op = resolve_op(g_all_ops[i]);
-        if (!op) continue;
-        for (size_t j = 0; j < op->n_regions; j++) {
-            if (op->regions[j] == r) return g_all_ops[i];
-        }
-    }
-    return MLIR_INVALID_HANDLE;
+    IR_Region *r = resolve_region(b->parent_region);
+    return r ? r->parent_op : MLIR_INVALID_HANDLE;
 }
 
 bool MLIR_IsBlockEntry(MLIR_BlockHandle block) {
@@ -2515,6 +2826,7 @@ MLIR_OpHandle MLIR_GetValueUseOwner(MLIR_Context *ctx, MLIR_ValueHandle value,
 
 void MLIR_AppendOpSuccessorOperand(MLIR_Context *ctx, MLIR_OpHandle op,
                                    size_t succ_idx, MLIR_ValueHandle value) {
+    CHECK_NOT_ERASED(op, "MLIR_AppendOpSuccessorOperand");
     IR_Op *o = resolve_op(op);
     if (!o || succ_idx >= o->n_successors) return;
     Arena *arena = MLIR_GetArenaAllocator(ctx);

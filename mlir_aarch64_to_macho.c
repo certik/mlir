@@ -1373,8 +1373,8 @@ bool mlir_llvm_to_macho(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     size_t start_idx = (size_t)-1;
     OwnedStrs owned = {0};
 
+    // Types live in the context, so they survive the per-function temp arena.
     Arena *persist = MLIR_GetArenaAllocator(ctx);
-    ctx->type_arena = persist;   // pin type interning to the persistent arena
 
     Arena *tmp = arena_create(1 * 1024 * 1024);
     arena_pos_t tmp0 = arena_get_pos(tmp);
@@ -1408,7 +1408,6 @@ bool mlir_llvm_to_macho(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     }
 
     arena_destroy(tmp);
-    ctx->type_arena = NULL;       // unpin
     mlir_llvm_sel_end(sel);
 
     if (!ok || start_idx == (size_t)-1) {

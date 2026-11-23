@@ -35,25 +35,9 @@ typedef uintptr_t MLIR_LocationHandle;
 
 #define MLIR_INVALID_HANDLE 0
 
-typedef struct MLIR_Context {
-    Arena *arena;
-    // When true, MLIR_CreateOp* skips building the per-operand def-use
-    // chains (UseNode allocations + the parallel operand_uses /
-    // successor_operand_uses arrays). The def-use machinery is only needed
-    // by the cf->scf and lower-to-LLVM passes; the wasm -> wasmstack ->
-    // wasmssa -> llvm -> aarch64 -> macho pipeline never queries uses, so
-    // disabling it there removes a large per-op memory overhead. Defaults
-    // to false (tracking on) so all existing callers are unaffected.
-    bool no_def_use_tracking;
-    // When non-NULL, the process-wide type/struct intern registry allocates
-    // its IR_Type objects AND its handle arrays into this arena instead of
-    // `arena`. The streaming llvm->aarch64->macho backend lowers each function
-    // into a throwaway temp arena (swapping `arena`) but must keep interned
-    // types — which are cached in the global registry across functions — in a
-    // persistent arena so cached handles never dangle after a temp arena is
-    // released. Defaults to NULL (= use `arena`, no behaviour change).
-    Arena *type_arena;
-} MLIR_Context;
+// The context (see "Context" below). Opaque: create it with
+// MLIR_CreateContext.
+typedef struct MLIR_Context MLIR_Context;
 
 // -----------------------------------------------------------------------------
 // Operation kinds
@@ -513,16 +497,94 @@ typedef enum {
 string MLIR_GetOpTypeName(MLIR_OpType type);
 
 // -----------------------------------------------------------------------------
-// API lifecycle
+// Context
 // -----------------------------------------------------------------------------
+//
+// The context owns everything that is not IR: the uniqued types (in a
+// persistent arena of its own), the diagnostic handler and, on the upstream
+// backend, the mlir::MLIRContext and every cache the backend keeps. Neither
+// backend has process-wide mutable state, so contexts are independent of each
+// other.
+//
+// IR (ops, regions, blocks, values, attributes and locations) is created in
+// the context's current IR arena, which the caller owns and can change at any
+// time with MLIR_SetArenaAllocator. Freeing an IR arena invalidates the IR
+// created in it and nothing else: types stay valid until the context is
+// destroyed, so a type handle can be used in IR built in any arena.
+//
+// Handles are borrowed pointers. An op handle (and the handles of its results
+// and regions) is valid until the op is erased (MLIR_EraseOp), its arena is
+// freed or the context is destroyed; the same holds on both backends.
+// Strings returned by getters are borrowed from the object they describe.
 
-void MLIR_InitApi(MLIR_Context *ctx, MLIR_OpHandle root);
+typedef struct MLIR_ContextOptions {
+    // The initial IR arena, owned by the caller. May be NULL; set one with
+    // MLIR_SetArenaAllocator before creating IR.
+    Arena *arena;
+    // When true, op creation skips building the per-operand def-use chains
+    // (native backend: UseNode allocations and the parallel operand_uses /
+    // successor_operand_uses arrays). The def-use machinery is needed by
+    // RAUW, use queries and MLIR_EraseOp's use check; the wasm -> wasmstack ->
+    // wasmssa -> llvm -> aarch64 -> macho pipeline never queries uses, so
+    // disabling it there removes a large per-op memory overhead. The upstream
+    // backend always tracks uses and ignores this option.
+    bool no_def_use_tracking;
+} MLIR_ContextOptions;
+
+// Creates a context. `options` may be NULL, which means all defaults (no IR
+// arena yet, def-use tracking on). Like every allocation in the API, it
+// aborts if memory runs out.
+MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options);
+// Destroys `ctx` and everything it owns (types, caches, the upstream
+// MLIRContext). All IR created through `ctx` is dead afterwards: the upstream
+// backend frees it (the context owns every op, block and region that has no
+// parent, such as a module), while on the native backend it stays in the IR
+// arenas, which belong to the caller.
+void MLIR_DestroyContext(MLIR_Context *ctx);
 void MLIR_SetArenaAllocator(MLIR_Context *ctx, Arena *arena);
 Arena *MLIR_GetArenaAllocator(MLIR_Context *ctx);
-// Drops process-wide intern/registry state (type & struct dedup caches and the
-// def-use op registry). Multi-pass pipelines call this right before switching
-// to a fresh arena and freeing the previous one. See implementation comment.
-void MLIR_ResetInternRegistry(void);
+// Turns def-use tracking (MLIR_ContextOptions.no_def_use_tracking) on or off
+// for the ops created from now on. Ops created while it was off have no use
+// lists, so use queries and RAUW must not be applied to their values.
+void MLIR_SetContextDefUseTracking(MLIR_Context *ctx, bool enabled);
+bool MLIR_HasContextDefUseTracking(MLIR_Context *ctx);
+
+// -----------------------------------------------------------------------------
+// Diagnostics
+// -----------------------------------------------------------------------------
+//
+// Two kinds of errors (doc/mlir_api_design.md section 2.4):
+//
+// - Contract violations (a NULL handle where one is required, an index out of
+//   range, a typed attribute getter applied to another kind, erasing an op
+//   whose results still have uses, using an erased op) are bugs in the
+//   caller. When the implementation is compiled with -DMLIR_API_CHECKS (debug
+//   builds and CI) they abort with a message; otherwise they are not checked
+//   and the result is undefined.
+// - Recoverable failures (parse and verifier errors, failed passes,
+//   constructs a backend does not support) return false or
+//   MLIR_INVALID_HANDLE and report through the context's diagnostic handler.
+//   On the upstream backend every mlir::Diagnostic of the context (from the
+//   parser, the verifier and passes) reaches the same handler.
+
+typedef enum {
+    MLIR_DIAG_ERROR,
+    MLIR_DIAG_WARNING,
+    MLIR_DIAG_NOTE,
+    MLIR_DIAG_REMARK
+} MLIR_DiagSeverity;
+
+// `message` is borrowed for the duration of the call. `loc` may be
+// MLIR_INVALID_HANDLE.
+typedef void (*MLIR_DiagnosticHandler)(void *user, MLIR_DiagSeverity severity,
+                                       MLIR_LocationHandle loc, string message);
+// Installs `fn` (called with `user`) as the handler of `ctx`. NULL restores
+// the default handler, which prints `file:line:col: error: message` to stderr
+// (other locations in their `loc(...)` form; `error: message` without one).
+void MLIR_SetDiagnosticHandler(MLIR_Context *ctx, MLIR_DiagnosticHandler fn, void *user);
+// Formats a message with printf-style `fmt` and passes it to the handler.
+void MLIR_EmitDiagnostic(MLIR_Context *ctx, MLIR_DiagSeverity severity,
+                         MLIR_LocationHandle loc, const char *fmt, ...);
 
 // -----------------------------------------------------------------------------
 // Operation API
@@ -805,11 +867,26 @@ void MLIR_ReplaceAllUsesOfValue(MLIR_Context *ctx,
                                 MLIR_ValueHandle old_value,
                                 MLIR_ValueHandle new_value);
 
-// Remove `op` from its parent block (if any) and detach it. The op is
-// not freed (the API leaves storage to the arena/allocator). Operands
-// to and results from `op` are not touched; callers should typically
-// have already called MLIR_ReplaceAllUsesOfValue on each result.
+// Erases `op`: removes it from its parent block (if any), drops its operand
+// uses and destroys it together with the ops nested in its regions. Nothing
+// outside the erased subtree may still use a value or a block defined inside
+// it: not its results, and not the results, block arguments or blocks nested
+// in its regions. That includes uses held by detached or never-inserted ops
+// and by blocks removed with MLIR_EraseBlock. Replace or erase those uses
+// first (e.g. with MLIR_ReplaceAllUsesOfValue). On upstream such a use would
+// point into freed memory; MLIR_API_CHECKS checks it (natively for values
+// with def-use tracking). Afterwards the handles of `op`, its results
+// and its regions are dead on both backends; using them is a contract
+// violation (checked with MLIR_API_CHECKS), including asking
+// MLIR_GetOpParentBlock whether the op was erased. The native backend leaves
+// the storage to the arena.
 void MLIR_EraseOp(MLIR_Context *ctx, MLIR_OpHandle op);
+
+// Removes `op` from its parent block (if any) and keeps it: the handle stays
+// valid, and its operands, results, attributes and regions are unchanged.
+// Insert it again with MLIR_AppendBlockOp / MLIR_InsertBlockOpAtIndex, or
+// erase it with MLIR_EraseOp. Does nothing for an op without a parent block.
+void MLIR_DetachOp(MLIR_Context *ctx, MLIR_OpHandle op);
 
 // Detach `op`'s region at `idx` and return it as a fresh handle. After
 // this call, `op` has an empty region at `idx`. The returned handle can
@@ -860,9 +937,12 @@ void MLIR_SetOpSuccessorOperands(MLIR_Context *ctx, MLIR_OpHandle op,
                                  size_t succ_idx,
                                  const MLIR_ValueHandle *values, size_t n);
 
-// Detach `block` from its parent region (if any) and forget about it.
-// Ops contained in `block` are NOT erased; callers should detach or
-// erase them first to avoid dangling references.
+// Detach `block` from its parent region (if any). The block and its ops are
+// not destroyed: they stay until the context is destroyed. No branch outside
+// the block may still target it (checked with MLIR_API_CHECKS). Its values
+// may still be used elsewhere, e.g. by other unreachable blocks that are
+// erased in a later round; but before an op whose values the block's ops use
+// is erased, those uses must be gone (MLIR_EraseOp).
 void MLIR_EraseBlock(MLIR_Context *ctx, MLIR_BlockHandle block);
 
 // Insert `block` into `region` immediately after `after`. If `after`

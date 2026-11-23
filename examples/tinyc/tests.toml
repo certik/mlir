@@ -287,6 +287,11 @@ targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "42\n42\n"
 
 [[test]]
+name = "fnptr_field_struct_arg"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "default 1\n1 2 12345 6 119\n"
+
+[[test]]
 name = "fnptr_ptr_return"
 targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "zero one many\n5 12\n3 -3\n200 7\none -128\n4294967294 1\nzero;one;many;\n"
@@ -1612,6 +1617,17 @@ wasm_upstream_skip = true
 wasm_native_lift_marker = 'imm16\s*=\s*24301\b'
 wasm_native_lift_max = { 'aarch64\.ldr_w(_reg)?' = 1, 'aarch64\.fp_binop' = 0 }
 wasm_native_lift_min = { 'aarch64\.ldr_w(_reg)?' = 1 }
+
+[[test]]
+name = "lift_call_indirect_no_target"
+targets = ["wasm"]
+wasm_upstream_skip = true
+# A call through a pointer type that no function has still gets a dispatcher
+# in the lifted module. The marker picks the dispatcher by its own sym_name
+# (the caller only names it as a callee), so it matches exactly one function
+# only if the dispatcher was synthesised.
+wasm_native_lift_marker = 'sym_name\s*=\s*"__dispatch_7f7f7f7f7f7f_7e"'
+expected_stdout = "1\n"
 
 [[test]]
 name = "strlit_ptr_arith"

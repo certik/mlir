@@ -114,6 +114,7 @@ wasmtime = ">=38.0.3,<39"
 [feature.linux.tasks]
 build_linux = { cmd = """
 clang \
+    -DMLIR_API_CHECKS \
     -nostdlib \
     -nostdinc \
     -fno-builtin \
@@ -153,6 +154,7 @@ test_linux = { cmd = "./parser --construct && python run_tests.py -s --native", 
 
 build_cross_native_linux = { cmd = """
 clang \
+    -DMLIR_API_CHECKS \
     -g \
     -nostdlib \
     -nostdinc \

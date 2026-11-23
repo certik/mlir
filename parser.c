@@ -174,8 +174,9 @@ int app_main(void) {
     if (verbose) printf("Starting main...\n");
     Arena *arena = arena_create(50*1024*1024);
     if (verbose) printf("Arena created...\n");
-    MLIR_Context ctx = {0};
-    MLIR_SetArenaAllocator(&ctx, arena);
+    MLIR_ContextOptions ctx_options = {0};
+    ctx_options.arena = arena;
+    MLIR_Context *ctx = MLIR_CreateContext(&ctx_options);
     if (verbose) printf("Arena allocator set on context...\n");
 
     if (verbose) printf("Parsing args...\n");
@@ -211,12 +212,12 @@ int app_main(void) {
     int exit_code;
     if (use_construction) {
         if (verbose) printf("Creating module...\n");
-        op = construct_test_module_full(&ctx);
+        op = construct_test_module_full(ctx);
         if (verbose) printf("Module created successfully.\n");
 
         if (verbose) printf("=== Generic Printer Test ===\n");
         if (verbose) printf("About to print operation...\n");
-        string result = print_fn(&ctx, op);
+        string result = print_fn(ctx, op);
         if (verbose) printf("Printing result...\n");
         println(str_lit("{}"), result);
 
@@ -254,17 +255,19 @@ int app_main(void) {
 
         if (verbose) tokenizer_print_all_tokens(arena, mlir_code);
 
-        op = parse_fn(&ctx, mlir_code);
+        op = parse_fn(ctx, mlir_code);
         if (op == MLIR_INVALID_HANDLE) {
             println(str_lit("error: parse failed"));
+            MLIR_DestroyContext(ctx);
             arena_destroy(arena);
             return 1;
         }
         if (verbose) println(str_lit("MLIR:"));
-        println(str_lit("{}"), print_fn(&ctx, op));
+        println(str_lit("{}"), print_fn(ctx, op));
         exit_code = 0;
     }
 
+    MLIR_DestroyContext(ctx);
     arena_destroy(arena);
     return exit_code;
 }

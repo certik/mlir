@@ -627,8 +627,8 @@ static MLIR_OpHandle make_op_n(MLIR_Context *ctx, MLIR_OpType type,
     MLIR_TypeHandle  *res_tys  = res_tys_inline;
     MLIR_ValueHandle *res_vals = res_vals_inline;
     if (n_results > 16) {
-        res_tys  = (MLIR_TypeHandle  *)arena_alloc(ctx->arena, n_results * sizeof(MLIR_TypeHandle));
-        res_vals = (MLIR_ValueHandle *)arena_alloc(ctx->arena, n_results * sizeof(MLIR_ValueHandle));
+        res_tys  = (MLIR_TypeHandle  *)arena_alloc(MLIR_GetArenaAllocator(ctx), n_results * sizeof(MLIR_TypeHandle));
+        res_vals = (MLIR_ValueHandle *)arena_alloc(MLIR_GetArenaAllocator(ctx), n_results * sizeof(MLIR_ValueHandle));
     }
     for (size_t i = 0; i < n_results; i++) {
         res_tys[i] = vt_to_type(ctx, result_vts[i]);

@@ -18,7 +18,7 @@ COREC_C_FILES="corec/base/io.c corec/base/buddy.c corec/base/arena.c corec/base/
 TINYC_C_FILES="examples/tinyc/lex.c examples/tinyc/preprocess.c examples/tinyc/parse.c examples/tinyc/emit.c examples/tinyc/driver.c"
 NATIVE_C_FILES="mlir_api_impl.c mlir_op_names.c mlir_lower_to_llvm.c mlir_translate_to_llvm_ir.c mlir_translate_to_wasm.c mlir_wasm_to_wat.c mlir_wasm_to_macho.c mlir_llvm_to_wasmssa.c mlir_llvm_global_init.c mlir_wasmssa_to_wasmstack.c mlir_wasmstack_to_bin.c mlir_wasm_link.c mlir_wasm_to_wasmstack.c mlir_wasmstack_to_wasmssa.c mlir_wasmssa_to_llvm.c mlir_llvm_mem2reg.c mlir_llvm_load_cse.c mlir_llvm_arith_gvn.c mlir_llvm_dce.c mlir_regalloc.c mlir_llvm_to_aarch64.c mlir_aarch64_asm.c mlir_aarch64_to_macho.c mlir_llvm_to_x64.c mlir_elf.c tokenizer.c mlir_parser.c op_parsers.c mlir_classic_printer.c mlir_generic_printer.c mlir_lift_cf_to_scf.c"
 
-$CC -c -g -I corec -I . $COREC_C_FILES $TINYC_C_FILES $NATIVE_C_FILES tests/upstream_main.c
+$CC -c -g -DMLIR_API_CHECKS -I corec -I . $COREC_C_FILES $TINYC_C_FILES $NATIVE_C_FILES tests/upstream_main.c
 $CC -c -g -I corec -I . -DPLATFORM_SKIP_ENTRY $PLATFORM_C
 
 $CC -g -o tinyc_native \

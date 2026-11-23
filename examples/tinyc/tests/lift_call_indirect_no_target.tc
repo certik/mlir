@@ -1,0 +1,22 @@
+// Regression probe for the wasm -> llvm lift (`--from-wasm`): a call_indirect
+// calls through the dispatcher __dispatch_<params>_<results> of its
+// signature. The lift used to synthesise a dispatcher only for the
+// signatures of address-taken functions, so a call through a pointer type
+// that no function in the module has (here (i32 x6) -> i64; the call is never
+// executed) referenced an undefined dispatcher, and the Mach-O backend failed
+// with "bl to unknown symbol". tinyC's own MLIR_EmitDiagnostic has this shape.
+#include <stdio.h>
+
+typedef long long (*six_ints_fn)(int, int, int, int, int, int);
+
+long long call_if(six_ints_fn fn, int n) {
+    if (n > 100) return fn(n, 2, 3, 4, 5, 6);
+    return n;
+}
+
+int g_n = 1;
+
+int main(void) {
+    printf("%lld\n", call_if((six_ints_fn)0, g_n));
+    return 0;
+}

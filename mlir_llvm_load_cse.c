@@ -55,7 +55,8 @@ static bool pmap_get(PMap *m, uintptr_t k, int64_t *out) {
     if (!k || m->cap == 0) return false;
     size_t s = pmap_slot(m->keys, m->cap, k);
     if (!m->keys[s]) return false;
-    *out = m->vals[s]; return true;
+    if (out) *out = m->vals[s];
+    return true;
 }
 
 // ===========================================================================
@@ -195,6 +196,35 @@ static MLIR_ValueHandle lc_canon(PMap *repl, MLIR_ValueHandle v) {
     return v;
 }
 
+// The value of attribute `a` for hashing, read with the getter that matches
+// its kind (a typed getter applied to another kind is a contract violation).
+// Strings are covered by MLIR_GetAttributeAsString; arrays and dictionaries,
+// whose contents are not hashed, by identity, which never merges two
+// different ones.
+static int64_t lc_attr_payload(MLIR_AttributeHandle a, MLIR_AttrKind kind) {
+    switch (kind) {
+        case MLIR_ATTR_KIND_INTEGER:
+        case MLIR_ATTR_KIND_BOOL:
+            return MLIR_GetAttributeInteger(a);
+        case MLIR_ATTR_KIND_FLOAT: {
+            double d = MLIR_GetAttributeFloat(a);
+            int64_t bits;
+            memcpy(&bits, &d, sizeof(bits));
+            return bits;
+        }
+        case MLIR_ATTR_KIND_TYPE:
+            return (int64_t)(uintptr_t)MLIR_GetAttributeTypeValue(a);
+        case MLIR_ATTR_KIND_STRING:
+            return 0;
+        case MLIR_ATTR_KIND_ARRAY:
+            return MLIR_GetAttributeArraySize(a) == 0 ? 0 : (int64_t)(uintptr_t)a;
+        case MLIR_ATTR_KIND_DICT:
+            return MLIR_GetAttributeDictSize(a) == 0 ? 0 : (int64_t)(uintptr_t)a;
+        default:
+            return (int64_t)(uintptr_t)a;
+    }
+}
+
 static void lc_emit_op_ident(KB *k, MLIR_Context *ctx, MLIR_OpHandle op) {
     kb_str(k, MLIR_GetOpName(op));
     size_t na = MLIR_GetOpNumAttributes(op);
@@ -202,8 +232,9 @@ static void lc_emit_op_ident(KB *k, MLIR_Context *ctx, MLIR_OpHandle op) {
     for (size_t i = 0; i < na; i++) {
         MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
         kb_str(k, MLIR_GetAttributeName(a));
-        kb_u64(k, (uint64_t)MLIR_GetAttributeKind(a));
-        kb_i64(k, MLIR_GetAttributeInteger(a));
+        MLIR_AttrKind kind = MLIR_GetAttributeKind(a);
+        kb_u64(k, (uint64_t)kind);
+        kb_i64(k, lc_attr_payload(a, kind));
         kb_str(k, MLIR_GetAttributeAsString(ctx, a));
     }
 }
@@ -524,8 +555,13 @@ static void lc_sweep_operands(Cfg *c, PMap *repl) {
 
 // Manual reference counts (op-result value -> number of operand / succ-operand
 // uses across the region), then worklist DCE of unused transparent ops seeded
-// at the detached address-chain roots.
-static void lc_dce(Cfg *c, MLIR_OpHandle *seed_defs, size_t n_seed) {
+// at the detached address-chain roots. The `n_erased` ops in `erased` are
+// already erased; their handles are dead (MLIR_EraseOp), so the worklist skips
+// them, and the ops it erases itself.
+static void lc_dce(Cfg *c, MLIR_OpHandle *seed_defs, size_t n_seed,
+                   MLIR_OpHandle *erased, size_t n_erased) {
+    PMap dead; pmap_init(&dead, n_erased + 64);
+    for (size_t i = 0; i < n_erased; i++) pmap_put(&dead, (uintptr_t)erased[i], 1);
     PMap uses; pmap_init(&uses, 1024);
     for (size_t b = 0; b < c->nb; b++) {
         MLIR_BlockHandle bk = c->blocks[b];
@@ -562,7 +598,7 @@ static void lc_dce(Cfg *c, MLIR_OpHandle *seed_defs, size_t n_seed) {
     while (nwl > 0) {
         MLIR_OpHandle op = wl[--nwl];
         if (op == MLIR_INVALID_HANDLE) continue;
-        if (MLIR_GetOpParentBlock(op) == MLIR_INVALID_HANDLE) continue;   // already erased
+        if (pmap_get(&dead, (uintptr_t)op, NULL)) continue;   // already erased
         if (MLIR_GetOpNumResults(op) != 1 || !lc_is_transparent(op)) continue;
         int64_t cnt = 0; pmap_get(&uses, (uintptr_t)MLIR_GetOpResult(op, 0), &cnt);
         if (cnt != 0) continue;
@@ -577,13 +613,14 @@ static void lc_dce(Cfg *c, MLIR_OpHandle *seed_defs, size_t n_seed) {
             }
         }
         MLIR_EraseOp(c->ctx, op);
+        pmap_put(&dead, (uintptr_t)op, 1);
         for (size_t k = 0; k < non; k++) if (defs[k] != MLIR_INVALID_HANDLE) {
             if (nwl == cwl) { cwl = cwl ? cwl * 2 : 64; wl = (MLIR_OpHandle *)realloc(wl, cwl * sizeof(MLIR_OpHandle)); }
             wl[nwl++] = defs[k];
         }
         free(defs);
     }
-    free(wl); pmap_free(&uses);
+    free(wl); pmap_free(&uses); pmap_free(&dead);
 }
 
 static void lc_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
@@ -656,7 +693,7 @@ static void lc_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
         }
         lc_sweep_operands(&c, &w.repl);
         for (size_t i = 0; i < w.n_erase; i++) MLIR_EraseOp(ctx, w.erase[i]);
-        if (!getenv("TINYC_NO_LOAD_CSE_DCE")) lc_dce(&c, roots, w.n_erase);
+        if (!getenv("TINYC_NO_LOAD_CSE_DCE")) lc_dce(&c, roots, w.n_erase, w.erase, w.n_erase);
         free(roots);
     }
 

@@ -2016,6 +2016,46 @@ static void scan_func_addrs(MLIR_OpHandle op, FuncPtrMap *fnptrs) {
     }
 }
 
+// The (sig_params, sig_results) of every call_indirect, each once. A
+// call_indirect needs its dispatcher even when no addressed function has its
+// signature (the call can only trap then, but the call is still emitted).
+typedef struct {
+    string *pt, *rt;
+    size_t  n, cap;
+} SigList;
+
+static void scan_call_indirect_sigs(MLIR_OpHandle op, SigList *l) {
+    if (MLIR_GetOpType(op) == OP_TYPE_WASMSSA_CALL_INDIRECT) {
+        string pt = at_s(op, "sig_params"), rt = at_s(op, "sig_results");
+        bool seen = false;
+        for (size_t i = 0; i < l->n && !seen; i++)
+            seen = l->pt[i].size == pt.size && l->rt[i].size == rt.size &&
+                   memcmp(l->pt[i].str, pt.str, pt.size) == 0 &&
+                   memcmp(l->rt[i].str, rt.str, rt.size) == 0;
+        if (!seen) {
+            if (l->n == l->cap) {
+                l->cap = l->cap ? l->cap * 2 : 8;
+                l->pt = (string *)realloc(l->pt, l->cap * sizeof(string));
+                l->rt = (string *)realloc(l->rt, l->cap * sizeof(string));
+            }
+            l->pt[l->n] = pt;
+            l->rt[l->n] = rt;
+            l->n++;
+        }
+    }
+    size_t nr = MLIR_GetOpNumRegions(op);
+    for (size_t r = 0; r < nr; r++) {
+        MLIR_RegionHandle reg = MLIR_GetOpRegion(op, r);
+        size_t nb = MLIR_GetRegionNumBlocks(reg);
+        for (size_t b = 0; b < nb; b++) {
+            MLIR_BlockHandle blk = MLIR_GetRegionBlock(reg, b);
+            size_t no = MLIR_GetBlockNumOps(blk);
+            for (size_t i = 0; i < no; i++)
+                scan_call_indirect_sigs(MLIR_GetBlockOp(blk, i), l);
+        }
+    }
+}
+
 // Map a wasm valtype byte to its llvm carrier integer type (i64 for i64/f64,
 // i32 otherwise).
 static MLIR_TypeHandle carrier_for_byte(MLIR_Context *ctx, unsigned b) {
@@ -2025,18 +2065,25 @@ static MLIR_TypeHandle carrier_for_byte(MLIR_Context *ctx, unsigned b) {
 }
 
 // Synthesise one __dispatch_<pt>_<rt> llvm.func per signature referenced by a
-// func_addr target. The dispatcher takes (slot:i32, args...) and switches on
+// func_addr target, then one per call_indirect signature not yet covered (in
+// `indirect` order). The dispatcher takes (slot:i32, args...) and switches on
 // slot to directly call the matching addressed function.
 static bool synth_dispatchers(MLIR_Context *ctx, MLIR_BlockHandle out_body,
-                              FuncPtrMap *fnptrs, FuncSigMap *sigs) {
-    for (size_t pi = 0; pi < fnptrs->n; pi++) {
-        string pname = fnptrs->names[pi];
+                              FuncPtrMap *fnptrs, FuncSigMap *sigs,
+                              const SigList *indirect) {
+    for (size_t pi = 0; pi < fnptrs->n + indirect->n; pi++) {
         string ppt, prt;
-        if (!fsm_get(sigs, pname, &ppt, &prt)) continue;
+        if (pi < fnptrs->n) {
+            if (!fsm_get(sigs, fnptrs->names[pi], &ppt, &prt)) continue;
+        } else {
+            ppt = indirect->pt[pi - fnptrs->n];
+            prt = indirect->rt[pi - fnptrs->n];
+        }
 
-        // Skip if an earlier target already produced this signature's dispatcher.
+        // Skip if an earlier target already produced this signature's
+        // dispatcher (`indirect` itself has no duplicates).
         bool dup = false;
-        for (size_t qi = 0; qi < pi; qi++) {
+        for (size_t qi = 0; qi < pi && qi < fnptrs->n; qi++) {
             string qpt, qrt;
             if (!fsm_get(sigs, fnptrs->names[qi], &qpt, &qrt)) continue;
             if (qpt.size == ppt.size && qrt.size == prt.size &&
@@ -2115,6 +2162,13 @@ static bool synth_dispatchers(MLIR_Context *ctx, MLIR_BlockHandle out_body,
             emit(&L, ret);
 
             L.cur = next_blk; L.terminated = false;
+        }
+        // No addressed function has this signature: leave the entry block
+        // (it has arguments, so it cannot branch to itself).
+        if (L.cur == entry) {
+            MLIR_BlockHandle dead = new_block(&L);
+            term_br(&L, dead);
+            L.cur = dead; L.terminated = false;
         }
         // Fall-through (no slot matched): dead self-branch terminator.
         term_br(&L, L.cur);
@@ -2310,6 +2364,9 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     }
     for (size_t i = 0; i < nops; i++)
         scan_func_addrs(MLIR_GetBlockOp(mb, i), &fnptrs);
+    SigList indirect = {0};
+    for (size_t i = 0; i < nops; i++)
+        scan_call_indirect_sigs(MLIR_GetBlockOp(mb, i), &indirect);
 
     // -- Lower functions. --
     for (size_t i = 0; i < nops; i++) {
@@ -2321,13 +2378,16 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
             free(globals.names); free(globals.offsets);
             free(fnptrs.names); free(fnptrs.slots);
             free(sigs.names); free(sigs.param_types); free(sigs.result_types);
+            free(indirect.pt); free(indirect.rt);
             return MLIR_INVALID_HANDLE;
         }
         MLIR_AppendBlockOp(ctx, out_body, fn);
     }
 
     // -- Synthesise call_indirect dispatchers. --
-    if (!synth_dispatchers(ctx, out_body, &fnptrs, &sigs)) {
+    bool synth_ok = synth_dispatchers(ctx, out_body, &fnptrs, &sigs, &indirect);
+    free(indirect.pt); free(indirect.rt);
+    if (!synth_ok) {
         free(image);
         free(globals.names); free(globals.offsets);
         free(fnptrs.names); free(fnptrs.slots);

@@ -97,8 +97,8 @@ static bool driver_llvm_func_has_body(MLIR_OpHandle op) {
 // them into a lifted wasm->llvm module. MUST be called BEFORE the wasm module
 // is lifted: the optimization passes (mem2reg / lowering) mutate per-value
 // def-use chains, and compiling this second module after the lifted one is
-// already built corrupts its operands. Compiling first — when the interning
-// epoch is clean — keeps it correct, exactly like a standalone compile.
+// already built corrupts its operands. Compiling first keeps it correct,
+// exactly like a standalone compile.
 //
 // The public platform_* entry points are renamed to __host_platform_* (the
 // lifted module already contains the wasm-side platform_* from platform_wasm.c)
@@ -115,14 +115,13 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
     Arena *saved_arena = MLIR_GetArenaAllocator(ctx);
     Arena *pmod_arena = arena_create(16 * 1024 * 1024);
     MLIR_SetArenaAllocator(ctx, pmod_arena);
-    MLIR_ResetInternRegistry();
-    // The --from-wasm pipeline disables def-use tracking (ctx.no_def_use_
-    // tracking) to save memory, but mem2reg / lowering rewrite operands through
+    // The --from-wasm pipeline disables def-use tracking
+    // (MLIR_SetContextDefUseTracking) to save memory, but mem2reg / lowering rewrite operands through
     // ReplaceAllUsesOfValue, which needs the per-value use lists. Re-enable
     // tracking just for this compile (only the platform funcs pay the cost),
     // then restore the caller's setting.
-    bool saved_no_def_use = ctx->no_def_use_tracking;
-    ctx->no_def_use_tracking = false;
+    bool saved_def_use = MLIR_HasContextDefUseTracking(ctx);
+    MLIR_SetContextDefUseTracking(ctx, true);
 
     string defs[16]; size_t nd = 0;
     if (is_wasi_adapter) {
@@ -147,7 +146,7 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
         fprintf(stderr, "tinyc: preprocessing failed for %s '%s'\n",
                 is_wasi_adapter ? "WASI adapter" : "host platform", path);
         MLIR_SetArenaAllocator(ctx, saved_arena);
-        ctx->no_def_use_tracking = saved_no_def_use;
+        MLIR_SetContextDefUseTracking(ctx, saved_def_use);
         return false;
     }
     if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
@@ -160,14 +159,14 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
     if (tinyc_parse_into(pmod_arena, prog, toks, false) > 0) {
         fprintf(stderr, "tinyc: parse failed for host platform '%s'\n", path);
         MLIR_SetArenaAllocator(ctx, saved_arena);
-        ctx->no_def_use_tracking = saved_no_def_use;
+        MLIR_SetContextDefUseTracking(ctx, saved_def_use);
         return false;
     }
     MLIR_OpHandle pmod = tinyc_emit_module(ctx, prog);
     if (tinyc_last_emit_errors() > 0 || pmod == MLIR_INVALID_HANDLE) {
         fprintf(stderr, "tinyc: emit failed for host platform '%s'\n", path);
         MLIR_SetArenaAllocator(ctx, saved_arena);
-        ctx->no_def_use_tracking = saved_no_def_use;
+        MLIR_SetContextDefUseTracking(ctx, saved_def_use);
         return false;
     }
     if (!getenv("TINYC_NO_MEM2REG"))
@@ -175,7 +174,7 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
     if (!lower_fn(ctx, pmod)) {
         fprintf(stderr, "tinyc: lowering failed for host platform '%s'\n", path);
         MLIR_SetArenaAllocator(ctx, saved_arena);
-        ctx->no_def_use_tracking = saved_no_def_use;
+        MLIR_SetContextDefUseTracking(ctx, saved_def_use);
         return false;
     }
     MLIR_BlockHandle pbody = MLIR_GetRegionBlock(MLIR_GetOpRegion(pmod, 0), 0);
@@ -201,7 +200,7 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
         picks[np++] = op;
     }
     MLIR_SetArenaAllocator(ctx, saved_arena);
-        ctx->no_def_use_tracking = saved_no_def_use;
+        MLIR_SetContextDefUseTracking(ctx, saved_def_use);
     if (np == 0) {
         fprintf(stderr, "tinyc: no spliceable definitions in '%s'\n", path);
         return false;
@@ -353,10 +352,10 @@ static void driver_elf_splice_helper_mod(MLIR_Context *ctx, MLIR_OpHandle llvm_m
 static bool driver_elf_lower_for_native_codegen(
         MLIR_Context *ctx, MLIR_OpHandle module,
         bool (*lower_fn)(MLIR_Context *, MLIR_OpHandle)) {
-    bool saved_no_def_use = ctx->no_def_use_tracking;
-    ctx->no_def_use_tracking = false;
+    bool saved_def_use = MLIR_HasContextDefUseTracking(ctx);
+    MLIR_SetContextDefUseTracking(ctx, true);
     bool ok = lower_fn(ctx, module);
-    ctx->no_def_use_tracking = saved_no_def_use;
+    MLIR_SetContextDefUseTracking(ctx, saved_def_use);
     return ok;
 }
 
@@ -384,8 +383,7 @@ static const char *driver_elf_buddy_source_path(Arena *arena,
 // MUST be called BEFORE the wasm module is lifted: the optimization passes
 // (mem2reg / lowering) mutate per-value def-use chains, and compiling this
 // second module after the lifted one is already built corrupts its operands.
-// Compiling first — when the interning epoch is clean — keeps it correct,
-// exactly like a standalone compile.
+// Compiling first keeps it correct, exactly like a standalone compile.
 static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
                                       string *include_dirs, size_t n_include_dirs,
                                       bool (*lower_fn)(MLIR_Context *, MLIR_OpHandle),
@@ -395,14 +393,13 @@ static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
     Arena *saved_arena = MLIR_GetArenaAllocator(ctx);
     Arena *pmod_arena = arena_create(16 * 1024 * 1024);
     MLIR_SetArenaAllocator(ctx, pmod_arena);
-    MLIR_ResetInternRegistry();
-    // The --from-wasm pipeline disables def-use tracking (ctx.no_def_use_
-    // tracking) to save memory, but mem2reg / lowering rewrite operands through
+    // The --from-wasm pipeline disables def-use tracking
+    // (MLIR_SetContextDefUseTracking) to save memory, but mem2reg / lowering rewrite operands through
     // ReplaceAllUsesOfValue, which needs the per-value use lists. Re-enable
     // tracking just for this compile (only the platform funcs pay the cost),
     // then restore the caller's setting.
-    bool saved_no_def_use = ctx->no_def_use_tracking;
-    ctx->no_def_use_tracking = false;
+    bool saved_def_use = MLIR_HasContextDefUseTracking(ctx);
+    MLIR_SetContextDefUseTracking(ctx, true);
 
     string defs[16]; size_t nd = 0;
     if (kind == TINYC_ELF_HELPER_WASI)
@@ -422,7 +419,7 @@ static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
                 kind == TINYC_ELF_HELPER_BUDDY ? "allocator source" : "host platform",
                 path);
         MLIR_SetArenaAllocator(ctx, saved_arena);
-        ctx->no_def_use_tracking = saved_no_def_use;
+        MLIR_SetContextDefUseTracking(ctx, saved_def_use);
         return false;
     }
     if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
@@ -432,14 +429,14 @@ static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
     if (tinyc_parse_into(pmod_arena, prog, toks, false) > 0) {
         fprintf(stderr, "tinyc: parse failed for host platform '%s'\n", path);
         MLIR_SetArenaAllocator(ctx, saved_arena);
-        ctx->no_def_use_tracking = saved_no_def_use;
+        MLIR_SetContextDefUseTracking(ctx, saved_def_use);
         return false;
     }
     MLIR_OpHandle pmod = tinyc_emit_module(ctx, prog);
     if (tinyc_last_emit_errors() > 0 || pmod == MLIR_INVALID_HANDLE) {
         fprintf(stderr, "tinyc: emit failed for host platform '%s'\n", path);
         MLIR_SetArenaAllocator(ctx, saved_arena);
-        ctx->no_def_use_tracking = saved_no_def_use;
+        MLIR_SetContextDefUseTracking(ctx, saved_def_use);
         return false;
     }
     if (!getenv("TINYC_NO_MEM2REG"))
@@ -447,7 +444,7 @@ static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
     if (!lower_fn(ctx, pmod)) {
         fprintf(stderr, "tinyc: lowering failed for host platform '%s'\n", path);
         MLIR_SetArenaAllocator(ctx, saved_arena);
-        ctx->no_def_use_tracking = saved_no_def_use;
+        MLIR_SetContextDefUseTracking(ctx, saved_def_use);
         return false;
     }
     *out_mod = pmod;
@@ -466,7 +463,7 @@ static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
             n_funcs++;
     }
     MLIR_SetArenaAllocator(ctx, saved_arena);
-    ctx->no_def_use_tracking = saved_no_def_use;
+    MLIR_SetContextDefUseTracking(ctx, saved_def_use);
     // Every helper must contribute functions; only the platform file may get
     // by on globals alone.
     bool globals_suffice = kind == TINYC_ELF_HELPER_PLATFORM && has_globals;
@@ -503,7 +500,7 @@ static int driver_emit_from_wasm_elf(
             "is required (e.g. corec/platform/platform_linux.c)\n");
         return 1;
     }
-    // Compile the host platform file FIRST, while the interning epoch is clean:
+    // Compile the host platform file FIRST, before the lift:
     // its funcs are spliced into the lifted module after the opt passes.
     MLIR_OpHandle hp_mod = MLIR_INVALID_HANDLE;
     if (!driver_elf_compile_helper(ctx, host_platform_path,
@@ -535,7 +532,6 @@ static int driver_emit_from_wasm_elf(
     // arena, then free the wasmstack/wasmssa arena.
     Arena *late_arena = arena_create(64 * 1024 * 1024 - 64 * 1024);
     MLIR_SetArenaAllocator(ctx, late_arena);
-    MLIR_ResetInternRegistry();
     uint8_t *elf_data = NULL; size_t elf_size = 0;
     MLIR_OpHandle llvm_mod = mlir_wasmssa_to_llvm(ctx, ssa);
     if (llvm_mod == MLIR_INVALID_HANDLE) {
@@ -1161,8 +1157,9 @@ int app_main(void) {
     // doubled block reservations push the linear-memory high-water past the
     // hard 4 GiB cap, so this halves linmem use on the self-host lift.
     Arena *arena = arena_create(64 * 1024 * 1024 - 64 * 1024);
-    MLIR_Context ctx = {0};
-    MLIR_SetArenaAllocator(&ctx, arena);
+    MLIR_ContextOptions ctx_options = {0};
+    ctx_options.arena = arena;
+    MLIR_Context *ctx = MLIR_CreateContext(&ctx_options);
 
     // --from-wasm short-circuits the C/MLIR front end entirely. We
     // read the linked wasm bytes, lift to wasmstack, then to wasmssa,
@@ -1174,30 +1171,32 @@ int app_main(void) {
         // pipeline never queries def-use chains, so skip building them.
         // This removes the dominant per-op memory overhead and is required
         // to fit the stage1 self-lift under the 4 GiB wasm32 linmem cap.
-        ctx.no_def_use_tracking = true;
+        MLIR_SetContextDefUseTracking(ctx, false);
         string wasm_buf = read_file_ok(arena, str_from_cstr_view(from_wasm_path));
         // read_file_ok appends a trailing NUL — strip it for the lifter,
         // which expects the exact wasm file size.
         size_t wasm_size = wasm_buf.size > 0 ? wasm_buf.size - 1 : 0;
         MLIR_OpHandle stack_mod = mlir_wasm_to_wasmstack(
-            &ctx, (const uint8_t *)wasm_buf.str, wasm_size);
+            ctx, (const uint8_t *)wasm_buf.str, wasm_size);
         if (stack_mod == MLIR_INVALID_HANDLE) {
             arena_destroy(arena);
+            MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
             return 1;
         }
         string out_fw;
         if (emit_wasmstack) {
-            out_fw = MLIR_PrintOperationGeneric(&ctx, stack_mod);
+            out_fw = MLIR_PrintOperationGeneric(ctx, stack_mod);
         } else {
-            MLIR_OpHandle ssa = mlir_wasmstack_to_wasmssa(&ctx, stack_mod);
+            MLIR_OpHandle ssa = mlir_wasmstack_to_wasmssa(ctx, stack_mod);
             if (ssa == MLIR_INVALID_HANDLE) {
                 arena_destroy(arena);
+                MLIR_DestroyContext(ctx);
                 arena_destroy(boot_arena);
                 return 1;
             }
             if (emit_wasmssa) {
-                out_fw = MLIR_PrintOperationGeneric(&ctx, ssa);
+                out_fw = MLIR_PrintOperationGeneric(ctx, ssa);
             } else if (emit_macho) {
                 // The via-wasm Mach-O backend's WASI adapters call corec's
                 // platform_<os>.c (as __host_platform_*), so the path to it is
@@ -1207,31 +1206,34 @@ int app_main(void) {
                         "tinyc --from-wasm --emit=macho: --host-platform=PATH "
                         "is required (e.g. corec/platform/platform_macos.c)\n");
                     arena_destroy(arena);
+                    MLIR_DestroyContext(ctx);
                     arena_destroy(boot_arena);
                     return 1;
                 }
-                // Compile the host platform file FIRST, while the interning
-                // epoch is clean: its funcs are spliced into the lifted module
+                // Compile the host platform file FIRST, before the lift:
+                // its funcs are spliced into the lifted module
                 // after the opt passes (see tinyc_compile_host_platform).
                 MLIR_OpHandle hp_picks[8]; size_t hp_n = 0;
-                if (!tinyc_compile_host_platform(&ctx, host_platform_path,
+                if (!tinyc_compile_host_platform(ctx, host_platform_path,
                                                  include_dirs, n_include_dirs,
                                                  lower_fn, false,
                                                  hp_picks, &hp_n, 8)) {
                     arena_destroy(arena);
+                    MLIR_DestroyContext(ctx);
                     arena_destroy(boot_arena);
                     return 1;
                 }
                 // Compile + splice the C WASI adapter (fd_write/path_open/...)
                 // the same way, when provided; otherwise the lifter's
-                // synthesised shims are used. Baked while the epoch is clean.
+                // synthesised shims are used. Also compiled before the lift.
                 MLIR_OpHandle ad_picks[16]; size_t ad_n = 0;
                 if (wasi_adapter_path &&
-                    !tinyc_compile_host_platform(&ctx, wasi_adapter_path,
+                    !tinyc_compile_host_platform(ctx, wasi_adapter_path,
                                                  include_dirs, n_include_dirs,
                                                  lower_fn, true,
                                                  ad_picks, &ad_n, 16)) {
                     arena_destroy(arena);
+                    MLIR_DestroyContext(ctx);
                     arena_destroy(boot_arena);
                     return 1;
                 }
@@ -1239,20 +1241,20 @@ int app_main(void) {
                 // straight to Mach-O one function at a time (low peak memory).
                 // Move the IR into a fresh arena, then free the
                 // wasmstack/wasmssa arena. The lifter rebuilds every
-                // type/attribute/location/value fresh (see normalise_carrier),
-                // so once the intern registry is reset the produced module
+                // attribute/location/value fresh (see normalise_carrier),
+                // and types live in the context, so the produced module
                 // references nothing in the old arena and it can be released.
                 // This keeps the early modules from coexisting with the
                 // (larger) llvm module, cutting peak RSS by roughly the size
                 // of wasmstack + wasmssa.
                 Arena *late_arena = arena_create(64 * 1024 * 1024 - 64 * 1024);
-                MLIR_SetArenaAllocator(&ctx, late_arena);
-                MLIR_ResetInternRegistry();
+                MLIR_SetArenaAllocator(ctx, late_arena);
                 uint8_t *macho_data = NULL; size_t macho_size = 0;
-                MLIR_OpHandle llvm_mod = mlir_wasmssa_to_llvm(&ctx, ssa);
+                MLIR_OpHandle llvm_mod = mlir_wasmssa_to_llvm(ctx, ssa);
                 if (llvm_mod == MLIR_INVALID_HANDLE) {
                     arena_destroy(late_arena);
                     arena_destroy(arena);
+                    MLIR_DestroyContext(ctx);
                     arena_destroy(boot_arena);
                     return 1;
                 }
@@ -1260,7 +1262,7 @@ int app_main(void) {
                 // can keep them in registers instead of a load/store per
                 // access. Skippable via TINYC_NO_MEM2REG for A/B debugging.
                 if (!getenv("TINYC_NO_MEM2REG"))
-                    mlir_llvm_mem2reg(&ctx, llvm_mod);
+                    mlir_llvm_mem2reg(ctx, llvm_mod);
                 // Load CSE on the lifted llvm CFG: within single-entry
                 // regions, removes redundant llvm.loads of a structurally
                 // identical address (no memory clobber in between) and DCEs the
@@ -1269,13 +1271,13 @@ int app_main(void) {
                 // `||` comparison chains emit, which dominate the runtime of the
                 // code we generate. Skippable via TINYC_NO_LOAD_CSE for A/B.
                 if (!getenv("TINYC_NO_LOAD_CSE"))
-                    mlir_llvm_load_cse(&ctx, llvm_mod);
+                    mlir_llvm_load_cse(ctx, llvm_mod);
                 // Intra-block value numbering of pure integer arithmetic: dedups
                 // the repeated index/address arithmetic (base+index*stride) the
                 // wasm frontend emits, cutting op count and register pressure.
                 // The memfuse address spine is excluded so [x28,Widx,UXTW]
                 // fusion is preserved. Skippable via TINYC_NO_ARITH_GVN.
-                mlir_llvm_arith_gvn(&ctx, llvm_mod);
+                mlir_llvm_arith_gvn(ctx, llvm_mod);
                 // Whole-function dead-code elimination: the tinyC front end
                 // emits the value of every expression even in statement context
                 // (e.g. the (char)v result of `d[i] = v;`), which survives as a
@@ -1283,36 +1285,38 @@ int app_main(void) {
                 // DCE and would slot+spill each one (a wasted store per loop
                 // iteration in hot mem/str helpers). Remove them at the source.
                 // Skippable via TINYC_NO_DCE.
-                mlir_llvm_dce(&ctx, llvm_mod);
+                mlir_llvm_dce(ctx, llvm_mod);
                 // Splice the pre-compiled host platform funcs into the lifted
                 // module now (after the wasm-oriented opt passes, which assume
                 // linmem shapes and must not see the LP64 platform funcs). The
-                // funcs were baked while the epoch was clean; moving them is a
+                // funcs were compiled before the lift; moving them is a
                 // pure re-parent that preserves their operands.
                 if (hp_n > 0 || ad_n > 0) {
                     MLIR_BlockHandle dbody =
                         MLIR_GetRegionBlock(MLIR_GetOpRegion(llvm_mod, 0), 0);
                     for (size_t hi = 0; hi < hp_n; hi++)
-                        MLIR_MoveOpToBlockEnd(&ctx, hp_picks[hi], dbody);
+                        MLIR_MoveOpToBlockEnd(ctx, hp_picks[hi], dbody);
                     for (size_t hi = 0; hi < ad_n; hi++)
-                        MLIR_MoveOpToBlockEnd(&ctx, ad_picks[hi], dbody);
+                        MLIR_MoveOpToBlockEnd(ctx, ad_picks[hi], dbody);
                 }
                 arena_destroy(arena);
                 arena = late_arena;
-                if (!mlir_llvm_to_macho(&ctx, llvm_mod,
+                if (!mlir_llvm_to_macho(ctx, llvm_mod,
                                         &macho_data, &macho_size)) {
                     arena_destroy(arena);
+                    MLIR_DestroyContext(ctx);
                     arena_destroy(boot_arena);
                     return 1;
                 }
                 out_fw.str = (char *)macho_data;
                 out_fw.size = macho_size;
             } else if (emit_elf) {
-                if (driver_emit_from_wasm_elf(&ctx, &arena, ssa,
+                if (driver_emit_from_wasm_elf(ctx, &arena, ssa,
                                               host_platform_path, wasi_adapter_path,
                                               include_dirs, n_include_dirs,
                                               lower_fn, &out_fw) != 0) {
                     arena_destroy(arena);
+                    MLIR_DestroyContext(ctx);
                     arena_destroy(boot_arena);
                     return 1;
                 }
@@ -1324,43 +1328,47 @@ int app_main(void) {
                 // constrained self-host emit.
                 MLIR_OpHandle hp_picks2[8]; size_t hp_n2 = 0;
                 if (host_platform_path &&
-                    !tinyc_compile_host_platform(&ctx, host_platform_path,
+                    !tinyc_compile_host_platform(ctx, host_platform_path,
                                                  include_dirs, n_include_dirs,
                                                  lower_fn, false,
                                                  hp_picks2, &hp_n2, 8)) {
                     arena_destroy(arena);
+                    MLIR_DestroyContext(ctx);
                     arena_destroy(boot_arena);
                     return 1;
                 }
-                MLIR_OpHandle llvm_mod = mlir_wasmssa_to_llvm(&ctx, ssa);
+                MLIR_OpHandle llvm_mod = mlir_wasmssa_to_llvm(ctx, ssa);
                 if (llvm_mod == MLIR_INVALID_HANDLE) {
                     arena_destroy(arena);
+                    MLIR_DestroyContext(ctx);
                     arena_destroy(boot_arena);
                     return 1;
                 }
                 if (!getenv("TINYC_NO_MEM2REG"))
-                    mlir_llvm_mem2reg(&ctx, llvm_mod);
+                    mlir_llvm_mem2reg(ctx, llvm_mod);
                 if (!getenv("TINYC_NO_LOAD_CSE"))
-                    mlir_llvm_load_cse(&ctx, llvm_mod);
-                mlir_llvm_arith_gvn(&ctx, llvm_mod);
-                mlir_llvm_dce(&ctx, llvm_mod);
+                    mlir_llvm_load_cse(ctx, llvm_mod);
+                mlir_llvm_arith_gvn(ctx, llvm_mod);
+                mlir_llvm_dce(ctx, llvm_mod);
                 if (hp_n2 > 0) {
                     MLIR_BlockHandle dbody =
                         MLIR_GetRegionBlock(MLIR_GetOpRegion(llvm_mod, 0), 0);
                     for (size_t hi = 0; hi < hp_n2; hi++)
-                        MLIR_MoveOpToBlockEnd(&ctx, hp_picks2[hi], dbody);
+                        MLIR_MoveOpToBlockEnd(ctx, hp_picks2[hi], dbody);
                 }
-                MLIR_OpHandle aarch64 = mlir_llvm_to_aarch64(&ctx, llvm_mod);
+                MLIR_OpHandle aarch64 = mlir_llvm_to_aarch64(ctx, llvm_mod);
                 if (aarch64 == MLIR_INVALID_HANDLE) {
                     arena_destroy(arena);
+                    MLIR_DestroyContext(ctx);
                     arena_destroy(boot_arena);
                     return 1;
                 }
-                out_fw = MLIR_PrintOperationGeneric(&ctx, aarch64);
+                out_fw = MLIR_PrintOperationGeneric(ctx, aarch64);
             } else {
                 fprintf(stderr,
                     "tinyc --from-wasm: requires --emit=wasmstack|wasmssa|aarch64|macho|elf\n");
                 arena_destroy(arena);
+                MLIR_DestroyContext(ctx);
                 arena_destroy(boot_arena);
                 return 1;
             }
@@ -1372,6 +1380,7 @@ int app_main(void) {
                         emit_elf ? "elf" : "macho");
                 if (emit_elf) free(out_fw.str);
                 arena_destroy(arena);
+                MLIR_DestroyContext(ctx);
                 arena_destroy(boot_arena);
                 return 1;
             }
@@ -1389,6 +1398,7 @@ int app_main(void) {
             wr = 0;
         }
         arena_destroy(arena);
+        MLIR_DestroyContext(ctx);
         arena_destroy(boot_arena);
         return wr;
     }
@@ -1433,6 +1443,7 @@ int app_main(void) {
     }
     if (total_errs > 0) {
         arena_destroy(arena);
+        MLIR_DestroyContext(ctx);
         arena_destroy(boot_arena);
         return 1;
     }
@@ -1452,6 +1463,7 @@ int app_main(void) {
             fprintf(stderr, "tinyc: preprocessing failed for host platform '%s'\n",
                     host_platform_path);
             arena_destroy(arena);
+            MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
             return 1;
         }
@@ -1461,14 +1473,16 @@ int app_main(void) {
             fprintf(stderr, "tinyc: parse failed for host platform '%s'\n",
                     host_platform_path);
             arena_destroy(arena);
+            MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
             return 1;
         }
     }
 
-    MLIR_OpHandle module = tinyc_emit_module(&ctx, prog);
+    MLIR_OpHandle module = tinyc_emit_module(ctx, prog);
     if (tinyc_last_emit_errors() > 0) {
         arena_destroy(arena);
+        MLIR_DestroyContext(ctx);
         arena_destroy(boot_arena);
         return 1;
     }
@@ -1479,57 +1493,63 @@ int app_main(void) {
     // hold them in registers instead of spilling every access. Skippable via
     // TINYC_NO_MEM2REG for A/B debugging.
     if (!getenv("TINYC_NO_MEM2REG"))
-        mlir_llvm_mem2reg(&ctx, module);
+        mlir_llvm_mem2reg(ctx, module);
 
     if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64 || emit_elf) {
         // One lowering for every backend: the result is LLVM dialect only,
         // with control flow as a flat llvm.br / llvm.cond_br CFG. The wasm
         // backend rebuilds structured control flow from it internally.
-        if (!lower_fn(&ctx, module)) {
+        if (!lower_fn(ctx, module)) {
             arena_destroy(arena);
+            MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
             return 1;
         }
         if (getenv("TINYC_DUMP_LOWERED")) {
-            string s = MLIR_PrintOperationGeneric(&ctx, module);
+            string s = MLIR_PrintOperationGeneric(ctx, module);
             println(str_lit("{}"), s);
         }
     }
     string out;
     if (emit_wasmssa) {
-        MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(&ctx, module);
+        MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(ctx, module);
         if (ssa == MLIR_INVALID_HANDLE) {
             arena_destroy(arena);
+            MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
             return 1;
         }
-        out = MLIR_PrintOperationGeneric(&ctx, ssa);
+        out = MLIR_PrintOperationGeneric(ctx, ssa);
     } else if (emit_wasmstack) {
-        MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(&ctx, module);
+        MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(ctx, module);
         if (ssa == MLIR_INVALID_HANDLE) {
             arena_destroy(arena);
+            MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
             return 1;
         }
-        MLIR_OpHandle stk = mlir_wasmssa_to_wasmstack(&ctx, ssa);
+        MLIR_OpHandle stk = mlir_wasmssa_to_wasmstack(ctx, ssa);
         if (stk == MLIR_INVALID_HANDLE) {
             arena_destroy(arena);
+            MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
             return 1;
         }
-        out = MLIR_PrintOperationGeneric(&ctx, stk);
+        out = MLIR_PrintOperationGeneric(ctx, stk);
     } else if (emit_wat) {
-        string bin = translate_to_wasm_fn(&ctx, module);
+        string bin = translate_to_wasm_fn(ctx, module);
         if (bin.size == 0) {
             arena_destroy(arena);
+            MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
             return 1;
         }
-        out = mlir_wasm_binary_to_wat(&ctx, bin);
+        out = mlir_wasm_binary_to_wat(ctx, bin);
     } else if (emit_wasm) {
-        out = translate_to_wasm_fn(&ctx, module);
+        out = translate_to_wasm_fn(ctx, module);
         if (out.size == 0) {
             arena_destroy(arena);
+            MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
             return 1;
         }
@@ -1541,15 +1561,17 @@ int app_main(void) {
         //   macho pipeline.
         if (macho_backend_llvm) {
             // Unified llvm -> aarch64 -> macho backend.
-            MLIR_OpHandle aarch64 = mlir_llvm_to_aarch64(&ctx, module);
+            MLIR_OpHandle aarch64 = mlir_llvm_to_aarch64(ctx, module);
             if (aarch64 == MLIR_INVALID_HANDLE) {
                 arena_destroy(arena);
+                MLIR_DestroyContext(ctx);
                 arena_destroy(boot_arena);
                 return 1;
             }
             uint8_t *macho_data = NULL; size_t macho_size = 0;
-            if (!mlir_aarch64_to_macho(&ctx, aarch64, &macho_data, &macho_size)) {
+            if (!mlir_aarch64_to_macho(ctx, aarch64, &macho_data, &macho_size)) {
                 arena_destroy(arena);
+                MLIR_DestroyContext(ctx);
                 arena_destroy(boot_arena);
                 return 1;
             }
@@ -1559,9 +1581,10 @@ int app_main(void) {
             // Pipeline: lower to wasm32 object, link with the provided
             // --wasm-runtime-obj inputs, then translate the linked wasm
             // module to a signed Mach-O ARM64 binary.
-            string obj = translate_to_wasm_fn(&ctx, module);
+            string obj = translate_to_wasm_fn(ctx, module);
             if (obj.size == 0) {
                 arena_destroy(arena);
+                MLIR_DestroyContext(ctx);
                 arena_destroy(boot_arena);
                 return 1;
             }
@@ -1584,6 +1607,7 @@ int app_main(void) {
             if (!MLIR_WasmLink(ins, n_link_inputs, "_start", &linked_data, &linked_size)) {
                 fprintf(stderr, "tinyc --emit=macho: wasm link failed\n");
                 arena_destroy(arena);
+                MLIR_DestroyContext(ctx);
                 arena_destroy(boot_arena);
                 return 1;
             }
@@ -1603,6 +1627,7 @@ int app_main(void) {
             if (!macho_ok) {
                 fprintf(stderr, "tinyc --emit=macho: wasm->macho translation failed\n");
                 arena_destroy(arena);
+                MLIR_DestroyContext(ctx);
                 arena_destroy(boot_arena);
                 return 1;
             }
@@ -1612,23 +1637,26 @@ int app_main(void) {
     } else if (emit_aarch64) {
         // Stop the unified llvm -> aarch64 -> macho backend at the
         // physical-register `aarch64` dialect and print it (the "MachO MLIR").
-        MLIR_OpHandle aarch64 = mlir_llvm_to_aarch64(&ctx, module);
+        MLIR_OpHandle aarch64 = mlir_llvm_to_aarch64(ctx, module);
         if (aarch64 == MLIR_INVALID_HANDLE) {
             arena_destroy(arena);
+            MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
             return 1;
         }
-        out = MLIR_PrintOperationGeneric(&ctx, aarch64);
+        out = MLIR_PrintOperationGeneric(ctx, aarch64);
     } else if (emit_elf) {
-        if (driver_emit_native_elf(&ctx, module, &out) != 0) {
+        if (driver_emit_native_elf(ctx, module, &out) != 0) {
             arena_destroy(arena);
+            MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
             return 1;
         }
     } else if (emit_llvm) {
-        out = translate_to_llvm_fn(&ctx, module);
+        out = translate_to_llvm_fn(ctx, module);
         if (out.size == 0) {
             arena_destroy(arena);
+            MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
             return 1;
         }
@@ -1637,7 +1665,7 @@ int app_main(void) {
         if (target.arch == TINYC_ARCH_X86_64 && target.os == TINYC_OS_LINUX)
             out = inject_syscall6_definition(arena, out);
     } else {
-        out = print_fn(&ctx, module);
+        out = print_fn(ctx, module);
     }
     int wrc = 0;
     if ((emit_macho || emit_elf) && !output_file) {
@@ -1645,6 +1673,7 @@ int app_main(void) {
                 emit_elf ? "elf" : "macho");
         if (emit_macho || emit_elf) free(out.str);
         arena_destroy(arena);
+        MLIR_DestroyContext(ctx);
         arena_destroy(boot_arena);
         return 1;
     }
@@ -1670,6 +1699,7 @@ int app_main(void) {
     }
 
     arena_destroy(arena);
+    MLIR_DestroyContext(ctx);
     arena_destroy(boot_arena);
     return wrc;
 }
