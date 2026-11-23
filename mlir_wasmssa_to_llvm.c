@@ -47,15 +47,15 @@ static MLIR_AttributeHandle attr_ty(MLIR_Context *ctx, const char *name,
 
 static int64_t at_i(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeInteger(a) : 0;
+    return a ? MLIR_GetAttributeInteger(ctx, a) : 0;
 }
 static bool at_b(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeBool(a) : false;
+    return a ? MLIR_GetAttributeBool(ctx, a) : false;
 }
 static string at_s(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeString(a) : (string){0};
+    return a ? MLIR_GetAttributeString(ctx, a) : (string){0};
 }
 
 // Map a wasm valtype to its `llvm`-dialect type. Integers map to iN; f32/f64
@@ -212,7 +212,7 @@ static int fsm_get(const FuncSigMap *m, string name, string *pt, string *rt) {
 // Read an integer attribute with a default if absent.
 static int64_t at_i_or(MLIR_Context *ctx, MLIR_OpHandle op, const char *name, int64_t dflt) {
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeInteger(a) : dflt;
+    return a ? MLIR_GetAttributeInteger(ctx, a) : dflt;
 }
 
 // =============================================================================
@@ -2153,7 +2153,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     // -- Linear-memory size (initial pages). --
     int64_t min_pages = 2;
     MLIR_AttributeHandle mpa = MLIR_GetOpAttributeByName(ctx, ssa_module, "memory_min_pages");
-    if (mpa) min_pages = MLIR_GetAttributeInteger(mpa);
+    if (mpa) min_pages = MLIR_GetAttributeInteger(ctx, mpa);
     if (min_pages < 1) min_pages = 1;
 
     // -- Pass 1: assign each import_global a fixed linmem offset. --
@@ -2170,7 +2170,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
         MLIR_AttributeHandle fa = MLIR_GetOpAttributeByName(ctx, top, "fixed_offset");
         if (sz <= 0) sz = (int64_t)id.size;
         int32_t align = (ap > 0) ? (int32_t)(1 << ap) : 1;
-        if (fa) cursor = (int32_t)MLIR_GetAttributeInteger(fa);
+        if (fa) cursor = (int32_t)MLIR_GetAttributeInteger(ctx, fa);
         else    cursor = (cursor + align - 1) & ~(align - 1);
         omap_add(&globals, sn, cursor);
         cursor += (int32_t)sz;
@@ -2263,7 +2263,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     // heap and clobber early heap allocations.
     int64_t g0_init = linmem_total;
     MLIR_AttributeHandle a_g0 = MLIR_GetOpAttributeByName(ctx, ssa_module, "global0_init");
-    if (a_g0) g0_init = MLIR_GetAttributeInteger(a_g0);
+    if (a_g0) g0_init = MLIR_GetAttributeInteger(ctx, a_g0);
     MLIR_TypeHandle i32t = MLIR_CreateTypeInteger(ctx, 32, true);
     for (int64_t g = 0; g <= max_global; g++) {
         char gname[32];

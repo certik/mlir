@@ -184,7 +184,7 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
         if (!driver_llvm_func_has_body(ctx, op)) continue;
         MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
         if (sa == MLIR_INVALID_HANDLE) continue;
-        string s = MLIR_GetAttributeString(sa);
+        string s = MLIR_GetAttributeString(ctx, sa);
         // The platform file also defines non-renamed platform_* that collide
         // with the wasm-side copies, so pick only the __host_platform_* entry
         // points. Skip init only: it calls ensure_heap_initialized helpers the
@@ -236,7 +236,7 @@ static bool driver_elf_llvm_op_is_internal(MLIR_Context *ctx, MLIR_OpHandle op) 
     if (linka == MLIR_INVALID_HANDLE)
         linka = MLIR_GetOpAttributeByName(ctx, op, "linkage");
     if (linka != MLIR_INVALID_HANDLE) {
-        string ls = MLIR_GetAttributeString(linka);
+        string ls = MLIR_GetAttributeString(ctx, linka);
         const char *want = "#llvm.linkage<internal>";
         size_t wantn = strlen(want);
         if (ls.size == wantn && memcmp(ls.str, want, wantn) == 0)
@@ -244,7 +244,7 @@ static bool driver_elf_llvm_op_is_internal(MLIR_Context *ctx, MLIR_OpHandle op) 
     }
     MLIR_AttributeHandle visa = MLIR_GetOpAttributeByName(ctx, op, "sym_visibility");
     if (visa != MLIR_INVALID_HANDLE) {
-        string vs = MLIR_GetAttributeString(visa);
+        string vs = MLIR_GetAttributeString(ctx, visa);
         if (vs.size == 7 && memcmp(vs.str, "private", 7) == 0)
             return true;
     }
@@ -260,7 +260,7 @@ static void driver_elf_erase_module_func_by_name(MLIR_Context *ctx, MLIR_OpHandl
         if (!driver_llvm_func_has_body(ctx, op)) continue;
         MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
         if (sa == MLIR_INVALID_HANDLE) continue;
-        string s = MLIR_GetAttributeString(sa);
+        string s = MLIR_GetAttributeString(ctx, sa);
         if (s.size == name.size && memcmp(s.str, name.str, name.size) == 0)
             MLIR_EraseOp(ctx, op);
     }
@@ -275,7 +275,7 @@ static void driver_elf_erase_module_global_by_name(MLIR_Context *ctx, MLIR_OpHan
         if (!driver_elf_is_llvm_global_op(ctx, op)) continue;
         MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
         if (sa == MLIR_INVALID_HANDLE) continue;
-        string s = MLIR_GetAttributeString(sa);
+        string s = MLIR_GetAttributeString(ctx, sa);
         if (s.size == name.size && memcmp(s.str, name.str, name.size) == 0)
             MLIR_EraseOp(ctx, op);
     }
@@ -295,7 +295,7 @@ static void driver_elf_splice_module_globals(MLIR_Context *ctx, MLIR_OpHandle ll
         MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
         if (sa != MLIR_INVALID_HANDLE)
             driver_elf_erase_module_global_by_name(ctx, llvm_mod,
-                                                   MLIR_GetAttributeString(sa));
+                                                   MLIR_GetAttributeString(ctx, sa));
         MLIR_MoveOpToBlockEnd(ctx, op, dbody);
     }
 }
@@ -305,7 +305,7 @@ static bool driver_elf_helper_func_should_splice(MLIR_Context *ctx, MLIR_OpHandl
     if (!driver_llvm_func_has_body(ctx, op)) return false;
     MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
     if (sa == MLIR_INVALID_HANDLE) return false;
-    string s = MLIR_GetAttributeString(sa);
+    string s = MLIR_GetAttributeString(ctx, sa);
     if (kind == TINYC_ELF_HELPER_BUDDY || kind == TINYC_ELF_HELPER_WASI)
         return true;
     bool is_host = s.size >= 16 && memcmp(s.str, "__host_platform_", 16) == 0;
@@ -330,7 +330,7 @@ static void driver_elf_splice_module_funcs(MLIR_Context *ctx, MLIR_OpHandle llvm
         if (!driver_elf_helper_func_should_splice(ctx, op, kind)) continue;
         MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
         if (sa != MLIR_INVALID_HANDLE) {
-            string sym = MLIR_GetAttributeString(sa);
+            string sym = MLIR_GetAttributeString(ctx, sa);
             driver_elf_erase_module_func_by_name(ctx, llvm_mod, sym);
             driver_elf_erase_module_global_by_name(ctx, llvm_mod, sym);
         }

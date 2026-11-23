@@ -734,7 +734,7 @@ bool const_int_val(MLIR_Context *ctx, MLIR_OpHandle op,
     if (fp_width(ctx, res) != 0) return false;
     MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(ctx, op, "value");
     if (va == MLIR_INVALID_HANDLE) return false;
-    *val = MLIR_GetAttributeInteger(va);
+    *val = MLIR_GetAttributeInteger(ctx, va);
     *is64 = type_is_gp64(ctx, res) ? 1 : 0;
     return true;
 }
@@ -1302,7 +1302,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         if (!fw) return;
         uint8_t rd = def_val(L, res, 9);
         // Float constant: materialise the IEEE bit pattern into a GP slot.
-        double d = MLIR_GetAttributeFloat(va);
+        double d = MLIR_GetAttributeFloat(ctx, va);
         uint64_t bits = 0;
         if (fw == 32) { float f = (float)d; uint32_t b32;
                         memcpy(&b32, &f, 4); bits = b32; }
@@ -1497,10 +1497,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         MLIR_AttributeHandle pa = MLIR_GetOpAttributeByName(ctx, op, "predicate");
         if (pa == MLIR_INVALID_HANDLE)
             LFAIL("llvm->aarch64: llvm.icmp without predicate\n");
-        int cond = icmp_pred_to_cond(MLIR_GetAttributeInteger(pa));
+        int cond = icmp_pred_to_cond(MLIR_GetAttributeInteger(ctx, pa));
         if (cond < 0)
             LFAIL("llvm->aarch64: unsupported icmp predicate %lld\n",
-                  (long long)MLIR_GetAttributeInteger(pa));
+                  (long long)MLIR_GetAttributeInteger(ctx, pa));
         bool sf = type_is_gp64(ctx, MLIR_GetOpOperand(ctx, op, 0));
         uint8_t r0 = use_val(L, MLIR_GetOpOperand(ctx, op, 0), 9);
         if (!L->ok) return;
@@ -1552,7 +1552,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         bool is_variadic = false;
         size_t n_fixed = 0;
         if (vct != MLIR_INVALID_HANDLE) {
-            MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(vct);
+            MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(ctx, vct);
             if (MLIR_GetTypeFunctionIsVarArg(ctx, ft)) {
                 is_variadic = true;
                 n_fixed = MLIR_GetTypeFunctionNumInputs(ctx, ft);
@@ -1713,7 +1713,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         MLIR_AttributeHandle ria = MLIR_GetOpAttributeByName(ctx, op, "rawConstantIndices");
         if (eta == MLIR_INVALID_HANDLE || ria == MLIR_INVALID_HANDLE)
             LFAIL("llvm->aarch64: getelementptr missing elem_type/indices\n");
-        MLIR_TypeHandle elem_ty = MLIR_GetAttributeTypeValue(eta);
+        MLIR_TypeHandle elem_ty = MLIR_GetAttributeTypeValue(ctx, eta);
         int32_t cidx[64];
         size_t n_idx = parse_i32_array(MLIR_GetAttributeAsString(ctx, ria),
                                        cidx, 64);
@@ -2012,7 +2012,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         MLIR_AttributeHandle pa = MLIR_GetOpAttributeByName(ctx, op, "predicate");
         if (pa == MLIR_INVALID_HANDLE)
             LFAIL("llvm->aarch64: fcmp missing predicate\n");
-        int cond = fcmp_pred_to_cond(MLIR_GetAttributeInteger(pa));
+        int cond = fcmp_pred_to_cond(MLIR_GetAttributeInteger(ctx, pa));
         if (cond < 0)
             LFAIL("llvm->aarch64: unsupported fcmp predicate\n");
         int fw = fp_width(ctx, MLIR_GetOpOperand(ctx, op, 0));
@@ -2219,7 +2219,7 @@ static bool collect_allocas(MLIR_Context *ctx, SlotMap *am,
             MLIR_GetOpNumResults(ctx, op) == 1) {
             MLIR_AttributeHandle eta = MLIR_GetOpAttributeByName(ctx, op, "elem_type");
             if (eta == MLIR_INVALID_HANDLE) return false;
-            MLIR_TypeHandle et = MLIR_GetAttributeTypeValue(eta);
+            MLIR_TypeHandle et = MLIR_GetAttributeTypeValue(ctx, eta);
             unsigned esz = a64_type_size(ctx, et);
             if (esz == 0) return false;
             int64_t cnt = 1;
@@ -2228,7 +2228,7 @@ static bool collect_allocas(MLIR_Context *ctx, SlotMap *am,
                 if (cd == MLIR_INVALID_HANDLE ||
                     MLIR_GetOpType(ctx, cd) != OP_TYPE_LLVM_MLIR_CONSTANT)
                     return false;
-                cnt = MLIR_GetAttributeInteger(
+                cnt = MLIR_GetAttributeInteger(ctx, 
                           MLIR_GetOpAttributeByName(ctx, cd, "value"));
             }
             unsigned al = a64_type_align(ctx, et);
@@ -2293,10 +2293,10 @@ static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
         if (na == MLIR_INVALID_HANDLE || ta == MLIR_INVALID_HANDLE) {
             free(blob); free(pend); return false;
         }
-        string name = MLIR_GetAttributeString(na);
-        unsigned sz = a64_type_size(ctx, MLIR_GetAttributeTypeValue(ta));
+        string name = MLIR_GetAttributeString(ctx, na);
+        unsigned sz = a64_type_size(ctx, MLIR_GetAttributeTypeValue(ctx, ta));
         // An empty struct (GNU C) still gets one byte, as an object of its own.
-        if (sz == 0 && llvm_type_is_empty(ctx, MLIR_GetAttributeTypeValue(ta), 8)) sz = 1;
+        if (sz == 0 && llvm_type_is_empty(ctx, MLIR_GetAttributeTypeValue(ctx, ta), 8)) sz = 1;
         if (sz == 0) { free(blob); free(pend); return false; }
 
         uint32_t off = (blen + 7u) & ~7u;
@@ -2313,18 +2313,18 @@ static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
 
         MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(ctx, op, "value");
         if (va != MLIR_INVALID_HANDLE) {
-            MLIR_AttrKind vk = MLIR_GetAttributeKind(va);
+            MLIR_AttrKind vk = MLIR_GetAttributeKind(ctx, va);
             if (vk == MLIR_ATTR_KIND_STRING) {
                 string s = MLIR_GetAttributeAsString(ctx, va);
                 size_t n = s.size < sz ? s.size : sz;
                 memcpy(blob + off, s.str, n);
             } else if (vk == MLIR_ATTR_KIND_INTEGER ||
                        vk == MLIR_ATTR_KIND_BOOL) {
-                uint64_t v = (uint64_t)MLIR_GetAttributeInteger(va);
+                uint64_t v = (uint64_t)MLIR_GetAttributeInteger(ctx, va);
                 for (unsigned b = 0; b < sz && b < 8; b++)
                     blob[off + b] = (uint8_t)(v >> (8 * b));
             } else if (vk == MLIR_ATTR_KIND_FLOAT) {
-                double d = MLIR_GetAttributeFloat(va);
+                double d = MLIR_GetAttributeFloat(ctx, va);
                 uint64_t bits = 0;
                 if (sz == 4) { float f = (float)d; uint32_t b32;
                                memcpy(&b32, &f, 4); bits = b32; }
@@ -2335,7 +2335,7 @@ static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
             } else {
                 free(blob); free(pend); return false;
             }
-        } else if (llvm_global_init_bytes(ctx, op, MLIR_GetAttributeTypeValue(ta), 8,
+        } else if (llvm_global_init_bytes(ctx, op, MLIR_GetAttributeTypeValue(ctx, ta), 8,
                                           blob + off, sz)) {
             // Constant aggregate initializer (llvm.insertvalue chain).
         } else if (MLIR_GetOpNumRegions(ctx, op) > 0 &&
@@ -2634,7 +2634,7 @@ typedef struct { int32_t off; uint8_t reg; uint8_t width; } A64SlotReg;
 static int a64_attr_i(MLIR_Context *ctx, MLIR_OpHandle op, const char *name, int32_t *out) {
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
     if (a == MLIR_INVALID_HANDLE) return 0;
-    *out = (int32_t)MLIR_GetAttributeInteger(a);
+    *out = (int32_t)MLIR_GetAttributeInteger(ctx, a);
     return 1;
 }
 
@@ -2916,7 +2916,7 @@ static FusePlan analyze_cond_fusion(LowerCtx *L, MLIR_OpHandle term,
         if (dn_ty == OP_TYPE_LLVM_ICMP) {
             MLIR_AttributeHandle pa = MLIR_GetOpAttributeByName(L->ctx, D, "predicate");
             if (pa == MLIR_INVALID_HANDLE) break;
-            int64_t pred = MLIR_GetAttributeInteger(pa);
+            int64_t pred = MLIR_GetAttributeInteger(L->ctx, pa);
             bool z1 = operand_is_const_val(L, MLIR_GetOpOperand(L->ctx, D, 1), 0);
             bool z0 = operand_is_const_val(L, MLIR_GetOpOperand(L->ctx, D, 0), 0);
             if ((pred == 0 || pred == 1) && (z0 || z1)) {
@@ -3721,7 +3721,7 @@ static bool check_llvm_only_block(MLIR_Context *ctx, MLIR_BlockHandle block,
                 MLIR_AttributeHandle sa =
                     MLIR_GetOpAttributeByName(ctx, owner, "sym_name");
                 if (sa != MLIR_INVALID_HANDLE)
-                    where = MLIR_GetAttributeString(sa);
+                    where = MLIR_GetAttributeString(ctx, sa);
             }
             fprintf(stderr,
                     "llvm->aarch64: op '%.*s' in '%.*s' is not in the LLVM "
@@ -3781,7 +3781,7 @@ MLIR_OpHandle mlir_llvm_to_aarch64(MLIR_Context *ctx,
         if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_FUNC) continue;
         MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
         string sym = (sa != MLIR_INVALID_HANDLE)
-            ? MLIR_GetAttributeString(sa) : (string){0};
+            ? MLIR_GetAttributeString(ctx, sa) : (string){0};
         if (!func_has_body(ctx, op)) {
             // Most declarations (malloc/free, libSystem imports) are skipped —
             // they resolve to imports. macOS has no stable raw-syscall ABI:
@@ -3889,7 +3889,7 @@ LlvmSelState *mlir_llvm_sel_begin(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
             free(st->gm.e); free(st->gblob); free(st->grelocs); free(st);
             return NULL;
         }
-        string sym = MLIR_GetAttributeString(sa);
+        string sym = MLIR_GetAttributeString(ctx, sa);
         if (sym.size == 4 && memcmp(sym.str, "main", 4) == 0) st->saw_main = true;
         st->funcs[st->n_funcs] = op;
         st->syms[st->n_funcs]  = sym;

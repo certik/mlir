@@ -669,7 +669,7 @@ static MLIR_OpHandle create_unreachable_terminator(MLIR_Context *ctx, LiftState 
     MLIR_AttributeHandle ty_attr =
         MLIR_GetOpAttributeByName(ctx, st->fn_op, "function_type");
     MLIR_TypeHandle fn_ty = (ty_attr == MLIR_INVALID_HANDLE)
-        ? MLIR_INVALID_HANDLE : MLIR_GetAttributeType(ty_attr);
+        ? MLIR_INVALID_HANDLE : MLIR_GetAttributeType(ctx, ty_attr);
     size_t n_res = (fn_ty == MLIR_INVALID_HANDLE)
         ? 0 : MLIR_GetTypeFunctionNumResults(ctx, fn_ty);
 
@@ -2988,8 +2988,8 @@ static bool transform_cfg_to_scf_region(MLIR_Context *ctx, LiftState *st, Combin
         MLIR_AttributeHandle sa =
             MLIR_GetOpAttributeByName(ctx, st->fn_op, "sym_name");
         if (sa != MLIR_INVALID_HANDLE &&
-            MLIR_GetAttributeKind(sa) == MLIR_ATTR_KIND_STRING) {
-            string s = MLIR_GetAttributeString(sa);
+            MLIR_GetAttributeKind(ctx, sa) == MLIR_ATTR_KIND_STRING) {
+            string s = MLIR_GetAttributeString(ctx, sa);
             if (s.size > 0) fn_sym_name = s;
         }
         Scratch scratch = scratch_begin_avoid_conflict(st->arena);

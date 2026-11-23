@@ -248,17 +248,17 @@ static bool lower_func_func(LowerState *st, MLIR_OpHandle op,
             attrs_buf[n_attrs++] = a;
         } else if (name_eq(an, "wasm.import_module")) {
             attrs_buf[n_attrs++] = a;
-            imp_module = MLIR_GetAttributeString(a);
+            imp_module = MLIR_GetAttributeString(st->ctx, a);
         } else if (name_eq(an, "wasm.import_name")) {
             attrs_buf[n_attrs++] = a;
-            imp_name = MLIR_GetAttributeString(a);
+            imp_name = MLIR_GetAttributeString(st->ctx, a);
         } else if (name_eq(an, "wasm.export_name")) {
             attrs_buf[n_attrs++] = a;
-            exp_name = MLIR_GetAttributeString(a);
+            exp_name = MLIR_GetAttributeString(st->ctx, a);
         } else if (name_eq(an, "function_type")) {
             // Convert FunctionType -> LLVMFunctionType (which carries
             // is_var_arg and uses LLVM void instead of zero-results).
-            MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(a);
+            MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(st->ctx, a);
             size_t ni = MLIR_GetTypeFunctionNumInputs(st->ctx, ft);
             size_t nr_ = MLIR_GetTypeFunctionNumResults(st->ctx, ft);
             MLIR_TypeHandle ins_stk[16];

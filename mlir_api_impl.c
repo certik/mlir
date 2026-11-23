@@ -823,19 +823,20 @@ bool MLIR_HasContextDefUseTracking(MLIR_Context *ctx) {
 
 // Diagnostics
 
+// `user` is the context.
 static void default_diagnostic_handler(void *user, MLIR_DiagSeverity severity,
                                        MLIR_LocationHandle loc, string message) {
-    (void)user;
+    MLIR_Context *ctx = (MLIR_Context *)user;
     const char *sev = "error";
     if (severity == MLIR_DIAG_WARNING) sev = "warning";
     else if (severity == MLIR_DIAG_NOTE) sev = "note";
     else if (severity == MLIR_DIAG_REMARK) sev = "remark";
-    if (loc != MLIR_INVALID_HANDLE && MLIR_GetLocationKind(loc) == MLIR_LOC_FILE) {
-        string file = MLIR_GetLocationFileFilename(loc);
+    if (loc != MLIR_INVALID_HANDLE && MLIR_GetLocationKind(ctx, loc) == MLIR_LOC_FILE) {
+        string file = MLIR_GetLocationFileFilename(ctx, loc);
         fprintf(stderr, "%.*s:%d:%d: %s: %.*s\n", (int)file.size, file.str,
-                MLIR_GetLocationFileLine(loc), MLIR_GetLocationFileColumn(loc),
+                MLIR_GetLocationFileLine(ctx, loc), MLIR_GetLocationFileColumn(ctx, loc),
                 sev, (int)message.size, message.str);
-    } else if (loc != MLIR_INVALID_HANDLE && MLIR_GetLocationKind(loc) != MLIR_LOC_UNKNOWN &&
+    } else if (loc != MLIR_INVALID_HANDLE && MLIR_GetLocationKind(ctx, loc) != MLIR_LOC_UNKNOWN &&
                ((IR_Location *)loc)->original_text.size > 0) {
         // Other locations print in their `loc(...)` form, as upstream's do.
         string text = ((IR_Location *)loc)->original_text;
@@ -878,7 +879,7 @@ void MLIR_EmitDiagnostic(MLIR_Context *ctx, MLIR_DiagSeverity severity,
     if (ctx->diag_fn)
         ctx->diag_fn(ctx->diag_user, severity, loc, message);
     else
-        default_diagnostic_handler(NULL, severity, loc, message);
+        default_diagnostic_handler(ctx, severity, loc, message);
     if (buf != local) free(buf);
 }
 
@@ -2013,7 +2014,7 @@ void MLIR_AppendOpAttribute(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_AttributeH
 }
 
 // Attribute accessors
-MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle ah) {
+MLIR_AttrKind MLIR_GetAttributeKind(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
     API_CHECK(ah != MLIR_INVALID_HANDLE, "MLIR_GetAttributeKind", "attribute handle is NULL");
     IR_Attribute *attr = resolve_attr(ah);
     if (!attr) return MLIR_ATTR_KIND_INTEGER;
@@ -2048,25 +2049,25 @@ string MLIR_GetAttributeAsString(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
     return str_lit("");
 }
 
-int64_t MLIR_GetAttributeInteger(MLIR_AttributeHandle ah) {
+int64_t MLIR_GetAttributeInteger(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
     CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_INTEGER || ((IR_Attribute *)ah)->kind == ATTR_KIND_BOOL, "MLIR_GetAttributeInteger", "not an integer or bool attribute");
     IR_Attribute *attr = resolve_attr(ah);
     return attr ? attr->data.integer_value : 0;
 }
 
-string MLIR_GetAttributeString(MLIR_AttributeHandle ah) {
+string MLIR_GetAttributeString(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
     CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_STRING, "MLIR_GetAttributeString", "not a string attribute");
     IR_Attribute *attr = resolve_attr(ah);
     return attr ? attr->data.string_value : str_lit("");
 }
 
-double MLIR_GetAttributeFloat(MLIR_AttributeHandle ah) {
+double MLIR_GetAttributeFloat(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
     CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_FLOAT, "MLIR_GetAttributeFloat", "not a float attribute");
     IR_Attribute *attr = resolve_attr(ah);
     return attr ? attr->data.float_value : 0.0;
 }
 
-MLIR_TypeHandle MLIR_GetAttributeType(MLIR_AttributeHandle ah) {
+MLIR_TypeHandle MLIR_GetAttributeType(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
     API_CHECK(ah != MLIR_INVALID_HANDLE, "MLIR_GetAttributeType", "attribute handle is NULL");
     IR_Attribute *attr = resolve_attr(ah);
     if (!attr) return MLIR_INVALID_HANDLE;
@@ -2075,19 +2076,19 @@ MLIR_TypeHandle MLIR_GetAttributeType(MLIR_AttributeHandle ah) {
     return attr->type;
 }
 
-bool MLIR_GetAttributeBool(MLIR_AttributeHandle ah) {
+bool MLIR_GetAttributeBool(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
     CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_BOOL, "MLIR_GetAttributeBool", "not a bool attribute");
     IR_Attribute *attr = resolve_attr(ah);
     return attr ? attr->data.bool_value : false;
 }
 
-size_t MLIR_GetAttributeArraySize(MLIR_AttributeHandle ah) {
+size_t MLIR_GetAttributeArraySize(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
     CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_ARRAY, "MLIR_GetAttributeArraySize", "not an array attribute");
     IR_Attribute *attr = resolve_attr(ah);
     return attr ? attr->data.array.count : 0;
 }
 
-MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_AttributeHandle ah, size_t idx) {
+MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_Context *ctx, MLIR_AttributeHandle ah, size_t idx) {
     CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_ARRAY, "MLIR_GetAttributeArrayElement", "not an array attribute");
     CHECK_INDEX(idx, ((IR_Attribute *)ah)->data.array.count, "MLIR_GetAttributeArrayElement");
     IR_Attribute *attr = resolve_attr(ah);
@@ -2095,13 +2096,13 @@ MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_AttributeHandle ah, size
     return attr->data.array.elements[idx];
 }
 
-size_t MLIR_GetAttributeDictSize(MLIR_AttributeHandle ah) {
+size_t MLIR_GetAttributeDictSize(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
     CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_DICT, "MLIR_GetAttributeDictSize", "not a dictionary attribute");
     IR_Attribute *attr = resolve_attr(ah);
     return attr ? attr->data.array.count : 0;
 }
 
-MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_AttributeHandle ah, size_t idx) {
+MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_Context *ctx, MLIR_AttributeHandle ah, size_t idx) {
     CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_DICT, "MLIR_GetAttributeDictElement", "not a dictionary attribute");
     CHECK_INDEX(idx, ((IR_Attribute *)ah)->data.array.count, "MLIR_GetAttributeDictElement");
     IR_Attribute *attr = resolve_attr(ah);
@@ -2109,7 +2110,7 @@ MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_AttributeHandle ah, size_
     return attr->data.array.elements[idx];
 }
 
-MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_AttributeHandle ah) {
+MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
     API_CHECK(ah != MLIR_INVALID_HANDLE, "MLIR_GetAttributeTypeValue", "attribute handle is NULL");
     IR_Attribute *attr = resolve_attr(ah);
     if (!attr || attr->kind != ATTR_KIND_TYPE) return MLIR_INVALID_HANDLE;
@@ -2165,7 +2166,7 @@ string MLIR_GetOpTypeName(MLIR_Context *ctx, MLIR_OpType type) {
 }
 
 // Location accessors
-MLIR_LocationKind MLIR_GetLocationKind(MLIR_LocationHandle lh) {
+MLIR_LocationKind MLIR_GetLocationKind(MLIR_Context *ctx, MLIR_LocationHandle lh) {
     IR_Location *loc = resolve_loc(lh);
     if (!loc) return MLIR_LOC_UNKNOWN;
     switch (loc->kind) {
@@ -2178,27 +2179,27 @@ MLIR_LocationKind MLIR_GetLocationKind(MLIR_LocationHandle lh) {
     }
 }
 
-string MLIR_GetLocationOriginalText(MLIR_LocationHandle lh) {
+string MLIR_GetLocationOriginalText(MLIR_Context *ctx, MLIR_LocationHandle lh) {
     IR_Location *loc = resolve_loc(lh);
     return loc ? loc->original_text : str_lit("");
 }
 
-string MLIR_GetLocationFileFilename(MLIR_LocationHandle lh) {
+string MLIR_GetLocationFileFilename(MLIR_Context *ctx, MLIR_LocationHandle lh) {
     IR_Location *loc = resolve_loc(lh);
     return loc ? loc->data.file.filename : str_lit("");
 }
 
-int MLIR_GetLocationFileLine(MLIR_LocationHandle lh) {
+int MLIR_GetLocationFileLine(MLIR_Context *ctx, MLIR_LocationHandle lh) {
     IR_Location *loc = resolve_loc(lh);
     return loc ? loc->data.file.line : 0;
 }
 
-int MLIR_GetLocationFileColumn(MLIR_LocationHandle lh) {
+int MLIR_GetLocationFileColumn(MLIR_Context *ctx, MLIR_LocationHandle lh) {
     IR_Location *loc = resolve_loc(lh);
     return loc ? loc->data.file.column : 0;
 }
 
-string MLIR_GetLocationName(MLIR_LocationHandle lh) {
+string MLIR_GetLocationName(MLIR_Context *ctx, MLIR_LocationHandle lh) {
     IR_Location *loc = resolve_loc(lh);
     return loc ? loc->data.name.name : str_lit("");
 }

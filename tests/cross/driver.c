@@ -105,15 +105,15 @@ int app_main(void) {
         make_stack_array_attrs(ctx, i32_ty, &arr, &dict);
         clobber_stack();
         print_string(str_lit("array attr from stack buffer:"));
-        for (size_t i = 0; i < MLIR_GetAttributeArraySize(arr); i++) {
-            int64_t v = MLIR_GetAttributeInteger(MLIR_GetAttributeArrayElement(arr, i));
+        for (size_t i = 0; i < MLIR_GetAttributeArraySize(ctx, arr); i++) {
+            int64_t v = MLIR_GetAttributeInteger(ctx, MLIR_GetAttributeArrayElement(ctx, arr, i));
             print_string(format(arena, str_lit(" {}"), v));
         }
         print_string(str_lit("\ndict attr from stack buffer:"));
-        for (size_t i = 0; i < MLIR_GetAttributeDictSize(dict); i++) {
-            MLIR_AttributeHandle e = MLIR_GetAttributeDictElement(dict, i);
+        for (size_t i = 0; i < MLIR_GetAttributeDictSize(ctx, dict); i++) {
+            MLIR_AttributeHandle e = MLIR_GetAttributeDictElement(ctx, dict, i);
             print_string(format(arena, str_lit(" {}={}"), MLIR_GetAttributeName(e),
-                                MLIR_GetAttributeInteger(e)));
+                                MLIR_GetAttributeInteger(ctx, e)));
         }
         print_string(str_lit("\n"));
     }
@@ -438,9 +438,9 @@ int app_main(void) {
         print_string(format(arena, str_lit("diagnostic: count={} warning={} loc={}:{}:{} text={}\n"),
                             (int64_t)cap.count,
                             (int64_t)(cap.severity == MLIR_DIAG_WARNING),
-                            MLIR_GetLocationFileFilename(cap.loc),
-                            (int64_t)MLIR_GetLocationFileLine(cap.loc),
-                            (int64_t)MLIR_GetLocationFileColumn(cap.loc),
+                            MLIR_GetLocationFileFilename(ctx, cap.loc),
+                            (int64_t)MLIR_GetLocationFileLine(ctx, cap.loc),
+                            (int64_t)MLIR_GetLocationFileColumn(ctx, cap.loc),
                             text));
 
         // Contexts are independent: each uniques its own types.

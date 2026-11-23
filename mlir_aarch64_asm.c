@@ -469,15 +469,15 @@ static void ef_add_bp(MachineFunc *e, MLIR_BlockHandle blk, uint32_t off) {
 
 int64_t attr_i(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeInteger(a) : 0;
+    return a ? MLIR_GetAttributeInteger(ctx, a) : 0;
 }
 static bool attr_b(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeBool(a) : false;
+    return a ? MLIR_GetAttributeBool(ctx, a) : false;
 }
 string attr_s(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeString(a) : (string){0};
+    return a ? MLIR_GetAttributeString(ctx, a) : (string){0};
 }
 
 

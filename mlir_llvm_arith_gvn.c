@@ -171,8 +171,8 @@ static bool ag_const_operand(MLIR_Context *ctx, MLIR_ValueHandle v,
     if (MLIR_GetOpNumResults(ctx, d) != 1) return false;
     MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(ctx, d, "value");
     if (va == MLIR_INVALID_HANDLE) return false;
-    if (MLIR_GetAttributeKind(va) != MLIR_ATTR_KIND_INTEGER) return false;
-    *val = MLIR_GetAttributeInteger(va);
+    if (MLIR_GetAttributeKind(ctx, va) != MLIR_ATTR_KIND_INTEGER) return false;
+    *val = MLIR_GetAttributeInteger(ctx, va);
     *tykey = (uint64_t)MLIR_GetValueType(ctx, MLIR_GetOpResult(ctx, d, 0));
     return true;
 }
@@ -194,25 +194,25 @@ static void ag_emit_operand(AgKB *k, MLIR_Context *ctx, AgMap *repl, MLIR_ValueH
 // Strings are covered by MLIR_GetAttributeAsString; arrays and dictionaries,
 // whose contents are not hashed, by identity, which never merges two
 // different ones.
-static int64_t ag_attr_payload(MLIR_AttributeHandle a, MLIR_AttrKind kind) {
+static int64_t ag_attr_payload(MLIR_Context *ctx, MLIR_AttributeHandle a, MLIR_AttrKind kind) {
     switch (kind) {
         case MLIR_ATTR_KIND_INTEGER:
         case MLIR_ATTR_KIND_BOOL:
-            return MLIR_GetAttributeInteger(a);
+            return MLIR_GetAttributeInteger(ctx, a);
         case MLIR_ATTR_KIND_FLOAT: {
-            double d = MLIR_GetAttributeFloat(a);
+            double d = MLIR_GetAttributeFloat(ctx, a);
             int64_t bits;
             memcpy(&bits, &d, sizeof(bits));
             return bits;
         }
         case MLIR_ATTR_KIND_TYPE:
-            return (int64_t)(uintptr_t)MLIR_GetAttributeTypeValue(a);
+            return (int64_t)(uintptr_t)MLIR_GetAttributeTypeValue(ctx, a);
         case MLIR_ATTR_KIND_STRING:
             return 0;
         case MLIR_ATTR_KIND_ARRAY:
-            return MLIR_GetAttributeArraySize(a) == 0 ? 0 : (int64_t)(uintptr_t)a;
+            return MLIR_GetAttributeArraySize(ctx, a) == 0 ? 0 : (int64_t)(uintptr_t)a;
         case MLIR_ATTR_KIND_DICT:
-            return MLIR_GetAttributeDictSize(a) == 0 ? 0 : (int64_t)(uintptr_t)a;
+            return MLIR_GetAttributeDictSize(ctx, a) == 0 ? 0 : (int64_t)(uintptr_t)a;
         default:
             return (int64_t)(uintptr_t)a;
     }
@@ -225,9 +225,9 @@ static void ag_emit_op_ident(AgKB *k, MLIR_Context *ctx, MLIR_OpHandle op) {
     for (size_t i = 0; i < na; i++) {
         MLIR_AttributeHandle a = MLIR_GetOpAttribute(ctx, op, i);
         agkb_str(k, MLIR_GetAttributeName(a));
-        MLIR_AttrKind kind = MLIR_GetAttributeKind(a);
+        MLIR_AttrKind kind = MLIR_GetAttributeKind(ctx, a);
         agkb_u64(k, (uint64_t)kind);
-        agkb_i64(k, ag_attr_payload(a, kind));
+        agkb_i64(k, ag_attr_payload(ctx, a, kind));
         agkb_str(k, MLIR_GetAttributeAsString(ctx, a));
     }
 }

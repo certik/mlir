@@ -109,15 +109,15 @@ static MLIR_OpHandle build_op(MLIR_Context *ctx, MLIR_OpType t,
 
 static int64_t at_i(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeInteger(a) : 0;
+    return a ? MLIR_GetAttributeInteger(ctx, a) : 0;
 }
 static bool at_b(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeBool(a) : false;
+    return a ? MLIR_GetAttributeBool(ctx, a) : false;
 }
 static string at_s(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeString(a) : (string){0};
+    return a ? MLIR_GetAttributeString(ctx, a) : (string){0};
 }
 
 // wasmssa -> wasmstack op type. Returns 0 on unknown.

@@ -153,9 +153,9 @@ static bool known_const(MLIR_Context *ctx, MLIR_ValueHandle v, int64_t *out) {
     if (d == MLIR_INVALID_HANDLE || MLIR_GetOpType(ctx, d) != OP_TYPE_LLVM_MLIR_CONSTANT)
         return false;
     MLIR_AttributeHandle va = find_attr(ctx, d, "value");
-    if (va == MLIR_INVALID_HANDLE || MLIR_GetAttributeKind(va) != MLIR_ATTR_KIND_INTEGER)
+    if (va == MLIR_INVALID_HANDLE || MLIR_GetAttributeKind(ctx, va) != MLIR_ATTR_KIND_INTEGER)
         return false;
-    int64_t c = MLIR_GetAttributeInteger(va);
+    int64_t c = MLIR_GetAttributeInteger(ctx, va);
     int w = int_bits(ctx, MLIR_GetValueType(ctx, v));
     if (w == 8 || w == 16) c &= ((int64_t)1 << w) - 1;
     *out = c;
@@ -568,7 +568,7 @@ static bool is_function_symbol(const ModCtx *m, const char *nm, size_t nlen) {
         if (ot != OP_TYPE_WASMSSA_FUNC && ot != OP_TYPE_WASMSSA_IMPORT_FUNC) continue;
         MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(m->ctx, op, "sym_name");
         if (sa == MLIR_INVALID_HANDLE) continue;
-        string s = MLIR_GetAttributeString(sa);
+        string s = MLIR_GetAttributeString(m->ctx, sa);
         if (s.size == nlen && memcmp(s.str, nm, nlen) == 0) return true;
     }
     return false;
@@ -1212,21 +1212,21 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         if (vt == 0) return false;
         MLIR_AttributeHandle va = find_attr(F->ctx, op, "value");
         if (va == MLIR_INVALID_HANDLE) return false;
-        MLIR_AttrKind ak = MLIR_GetAttributeKind(va);
+        MLIR_AttrKind ak = MLIR_GetAttributeKind(F->ctx, va);
 
         wasmssa_op_t o = {0};
         o.type = OP_TYPE_WASMSSA_CONST;
         o.valtype = vt;
         if (ak == MLIR_ATTR_KIND_INTEGER) {
-            o.i_const = MLIR_GetAttributeInteger(va);
+            o.i_const = MLIR_GetAttributeInteger(F->ctx, va);
             // An i8 / i16 constant is materialized zero-extended, whether the
             // API returns it sign- or zero-extended (upstream: sign).
             int cw = int_bits(F->ctx, MLIR_GetValueType(F->ctx, r));
             if (cw == 8 || cw == 16) o.i_const &= ((int64_t)1 << cw) - 1;
         } else if (ak == MLIR_ATTR_KIND_BOOL) {
-            o.i_const = MLIR_GetAttributeBool(va) ? 1 : 0;
+            o.i_const = MLIR_GetAttributeBool(F->ctx, va) ? 1 : 0;
         } else if (ak == MLIR_ATTR_KIND_FLOAT) {
-            double dv = MLIR_GetAttributeFloat(va);
+            double dv = MLIR_GetAttributeFloat(F->ctx, va);
             // Pack the bit pattern through an integer of matching width;
             // stage 3 emits f32.const / f64.const using the same bytes.
             if (vt == WT_F32) {
@@ -1443,7 +1443,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         // wasm has eq, ne, lt, gt, le, ge (ordered). Map oeq->eq, etc.
         MLIR_AttributeHandle pa = find_attr(F->ctx, op, "predicate");
         if (pa == MLIR_INVALID_HANDLE) return false;
-        int64_t pred = MLIR_GetAttributeInteger(pa);
+        int64_t pred = MLIR_GetAttributeInteger(F->ctx, pa);
         // Map LLVM fcmp predicate -> wasm op offset (eq=0,ne=1,lt=2,gt=3,le=4,ge=5).
         int8_t off;
         switch (pred) {
@@ -1556,7 +1556,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         // ult=6, ule=7, ugt=8, uge=9.
         MLIR_AttributeHandle pa = find_attr(F->ctx, op, "predicate");
         if (pa == MLIR_INVALID_HANDLE) return false;
-        int64_t pred = MLIR_GetAttributeInteger(pa);
+        int64_t pred = MLIR_GetAttributeInteger(F->ctx, pa);
         // i32: 0x46..0x4f ; i64: 0x51..0x5a (skip eqz at 0x45/0x50).
         // Map predicate -> bytecode offset within (eq, ne, lt_s, lt_u,
         // gt_s, gt_u, le_s, le_u, ge_s, ge_u).
@@ -1740,7 +1740,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         }
 
         if (var_callee_type != MLIR_INVALID_HANDLE) {
-            MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(var_callee_type);
+            MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(F->ctx, var_callee_type);
             if (MLIR_GetTypeFunctionIsVarArg(F->ctx, fty)) {
                 // Variadic direct call: pack variadic args into the
                 // function's variadic buffer (allocated in the shadow
@@ -1890,7 +1890,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
         if (!vmap_get(F, base, &addr)) return false;
         MLIR_AttributeHandle eta = find_attr(F->ctx, op, "elem_type");
         if (eta == MLIR_INVALID_HANDLE) return false;
-        MLIR_TypeHandle elem_ty = MLIR_GetAttributeTypeValue(eta);
+        MLIR_TypeHandle elem_ty = MLIR_GetAttributeTypeValue(F->ctx, eta);
         MLIR_AttributeHandle ria = find_attr(F->ctx, op, "rawConstantIndices");
         if (ria == MLIR_INVALID_HANDLE) return false;
         size_t n_idx = 0;
@@ -1972,13 +1972,13 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
             size_t na = MLIR_GetOpNumAttributes(F->ctx, op);
             for (size_t i = 0; i < na; i++) {
                 MLIR_AttributeHandle a = MLIR_GetOpAttribute(F->ctx, op, i);
-                if (MLIR_GetAttributeKind(a) == MLIR_ATTR_KIND_STRING) {
+                if (MLIR_GetAttributeKind(F->ctx, a) == MLIR_ATTR_KIND_STRING) {
                     ta = a; break;
                 }
             }
         }
         if (ta == MLIR_INVALID_HANDLE) return false;
-        string ts = MLIR_GetAttributeString(ta);
+        string ts = MLIR_GetAttributeString(F->ctx, ta);
         // Strip leading '@' if present (FlatSymbolRefAttr prints with '@').
         if (ts.size && ts.str[0] == '@') {
             ts.str++;
@@ -2204,7 +2204,7 @@ static bool va_call_layout(FnCtx *F, MLIR_OpHandle op, uint32_t *total_size,
                            size_t *n_fixed, uint32_t *out_offsets) {
     MLIR_AttributeHandle vct = MLIR_GetOpAttributeByName(F->ctx, op, "var_callee_type");
     if (vct == MLIR_INVALID_HANDLE) return false;
-    MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(vct);
+    MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(F->ctx, vct);
     if (!MLIR_GetTypeFunctionIsVarArg(F->ctx, fty)) return false;
     size_t nf = MLIR_GetTypeFunctionNumInputs(F->ctx, fty);
     size_t no = MLIR_GetOpNumOperands(F->ctx, op);
@@ -2261,7 +2261,7 @@ static bool prewalk_op(FnCtx *F, MLIR_OpHandle op) {
     if (ty == OP_TYPE_LLVM_ALLOCA) {
         MLIR_TypeHandle et = MLIR_INVALID_HANDLE;
         MLIR_AttributeHandle ea = find_attr(F->ctx, op, "elem_type");
-        if (ea != MLIR_INVALID_HANDLE) et = MLIR_GetAttributeTypeValue(ea);
+        if (ea != MLIR_INVALID_HANDLE) et = MLIR_GetAttributeTypeValue(F->ctx, ea);
         unsigned esz = et != MLIR_INVALID_HANDLE
                            ? type_size_bytes(F->ctx, et) : 0;
         if (esz == 0) {
@@ -2280,7 +2280,7 @@ static bool prewalk_op(FnCtx *F, MLIR_OpHandle op) {
                 return false;
             }
             MLIR_AttributeHandle va = find_attr(F->ctx, cd, "value");
-            cnt = MLIR_GetAttributeInteger(va);
+            cnt = MLIR_GetAttributeInteger(F->ctx, va);
         }
         unsigned ealign = type_align_bytes(F->ctx, et);
         if (ealign < 4) ealign = 4;
@@ -2353,7 +2353,7 @@ static bool lower_function(MLIR_Context *ctx, Arena *arena, ModCtx *mod,
     MLIR_AttributeHandle ftya = find_attr(ctx, fn, "function_type");
     bool is_vararg = false;
     if (ftya != MLIR_INVALID_HANDLE) {
-        MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(ftya);
+        MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(ctx, ftya);
         is_vararg = MLIR_GetTypeFunctionIsVarArg(ctx, fty);
     }
     size_t orig_np = is_vararg ? n_params - 1 : n_params;
@@ -2415,7 +2415,7 @@ static bool lower_function(MLIR_Context *ctx, Arena *arena, ModCtx *mod,
         bool internal = false;
         MLIR_AttributeHandle linka = find_attr(ctx, fn, "llvm.linkage");
         if (linka != MLIR_INVALID_HANDLE) {
-            string ls = MLIR_GetAttributeString(linka);
+            string ls = MLIR_GetAttributeString(ctx, linka);
             const char *want = "#llvm.linkage<internal>";
             size_t wantn = strlen(want);
             if (ls.size == wantn && memcmp(ls.str, want, wantn) == 0) {
@@ -2428,7 +2428,7 @@ static bool lower_function(MLIR_Context *ctx, Arena *arena, ModCtx *mod,
         // user-requested export name.
         MLIR_AttributeHandle exa = find_attr(ctx, fn, "wasm.export_name");
         if (exa != MLIR_INVALID_HANDLE) {
-            string es = MLIR_GetAttributeString(exa);
+            string es = MLIR_GetAttributeString(ctx, exa);
             attrs[na++] = attr_s(ctx, "export_name", es.str, es.size);
         }
 
@@ -2455,7 +2455,7 @@ static bool sig_for_func(MLIR_Context *ctx, Arena *arena, MLIR_OpHandle fn,
                          uint8_t **out_r, size_t *out_nr) {
     MLIR_AttributeHandle ftya = find_attr(ctx, fn, "function_type");
     if (ftya == MLIR_INVALID_HANDLE) return false;
-    MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(ftya);
+    MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(ctx, ftya);
     size_t ni = MLIR_GetTypeFunctionNumInputs(ctx, fty);
     size_t no = MLIR_GetTypeFunctionNumResults(ctx, fty);
     bool is_vararg = MLIR_GetTypeFunctionIsVarArg(ctx, fty);
@@ -2523,13 +2523,13 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
                          MLIR_BlockHandle body, MLIR_OpHandle op) {
     MLIR_AttributeHandle sa = find_attr(ctx, op, "sym_name");
     if (sa == MLIR_INVALID_HANDLE) return false;
-    string sym = MLIR_GetAttributeString(sa);
+    string sym = MLIR_GetAttributeString(ctx, sa);
 
     uint32_t size = 0;
     uint32_t align_pow = 0;
     MLIR_AttributeHandle ga = find_attr(ctx, op, "global_type");
     if (ga != MLIR_INVALID_HANDLE) {
-        MLIR_TypeHandle gty = MLIR_GetAttributeTypeValue(ga);
+        MLIR_TypeHandle gty = MLIR_GetAttributeTypeValue(ctx, ga);
         size = type_size_bytes(ctx, gty);
         align_pow = align_pow_for_type(ctx, gty);
     }
@@ -2540,9 +2540,9 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
 
     MLIR_AttributeHandle va = find_attr(ctx, op, "value");
     if (va != MLIR_INVALID_HANDLE) {
-        MLIR_AttrKind ak = MLIR_GetAttributeKind(va);
+        MLIR_AttrKind ak = MLIR_GetAttributeKind(ctx, va);
         if (ak == MLIR_ATTR_KIND_STRING) {
-            string s = MLIR_GetAttributeString(va);
+            string s = MLIR_GetAttributeString(ctx, va);
             size = (uint32_t)s.size;
             emit_import_global(ctx, arena, body, sym, size, align_pow,
                                is_const, (const uint8_t *)s.str, NULL, 0);
@@ -2554,9 +2554,9 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
             memset(data, 0, size);
             uint64_t bits = 0;
             if (ak == MLIR_ATTR_KIND_INTEGER) {
-                bits = (uint64_t)MLIR_GetAttributeInteger(va);
+                bits = (uint64_t)MLIR_GetAttributeInteger(ctx, va);
             } else {
-                double d = MLIR_GetAttributeFloat(va);
+                double d = MLIR_GetAttributeFloat(ctx, va);
                 if (size == 4) {
                     float f = (float)d; uint32_t b32;
                     memcpy(&b32, &f, 4); bits = b32;
@@ -2578,7 +2578,7 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
     if (MLIR_GetOpNumRegions(ctx, op) > 0 && ga != MLIR_INVALID_HANDLE && size > 0) {
         data = (uint8_t *)arena_alloc(arena, size);
         memset(data, 0, size);
-        if (llvm_global_init_bytes(ctx, op, MLIR_GetAttributeTypeValue(ga), 4,
+        if (llvm_global_init_bytes(ctx, op, MLIR_GetAttributeTypeValue(ctx, ga), 4,
                                    data, size)) {
             emit_import_global(ctx, arena, body, sym, size, align_pow,
                                is_const, data, NULL, 0);
@@ -2609,13 +2609,13 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
                         size_t na = MLIR_GetOpNumAttributes(ctx, bop);
                         for (size_t i = 0; i < na; i++) {
                             MLIR_AttributeHandle a = MLIR_GetOpAttribute(ctx, bop, i);
-                            if (MLIR_GetAttributeKind(a) == MLIR_ATTR_KIND_STRING) {
+                            if (MLIR_GetAttributeKind(ctx, a) == MLIR_ATTR_KIND_STRING) {
                                 ta = a; break;
                             }
                         }
                     }
                     if (ta == MLIR_INVALID_HANDLE) return false;
-                    string ts = MLIR_GetAttributeString(ta);
+                    string ts = MLIR_GetAttributeString(ctx, ta);
                     if (ts.size && ts.str[0] == '@') { ts.str++; ts.size--; }
                     pending_target = ts;
                 } else if (bty == OP_TYPE_LLVM_RETURN) {
@@ -2659,7 +2659,7 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
     // No initializer found (e.g. uninitialized scalar global). Zero-init.
     // An empty struct (GNU C) still gets one byte, as an object of its own.
     if (size == 0 && ga != MLIR_INVALID_HANDLE &&
-        llvm_type_is_empty(ctx, MLIR_GetAttributeTypeValue(ga), 4))
+        llvm_type_is_empty(ctx, MLIR_GetAttributeTypeValue(ctx, ga), 4))
         size = 1;
     if (size == 0) return false;
     data = (uint8_t *)arena_alloc(arena, size);
@@ -2810,7 +2810,7 @@ static bool check_llvm_only_block(MLIR_Context *ctx, MLIR_BlockHandle block,
                 MLIR_AttributeHandle sa =
                     MLIR_GetOpAttributeByName(ctx, owner, "sym_name");
                 if (sa != MLIR_INVALID_HANDLE)
-                    where = MLIR_GetAttributeString(sa);
+                    where = MLIR_GetAttributeString(ctx, sa);
             }
             fprintf(stderr,
                     "wasmssa-lower: op '%.*s' in '%.*s' is not in the LLVM "
@@ -2890,7 +2890,7 @@ MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module) {
             return MLIR_INVALID_HANDLE;
         }
         MLIR_AttributeHandle sa = find_attr(ctx, op, "sym_name");
-        string nm = MLIR_GetAttributeString(sa);
+        string nm = MLIR_GetAttributeString(ctx, sa);
 
         // Forward `wasm.import_module` / `wasm.import_name` annotations
         // (from `__attribute__((__import_module__("...")))`) so the
@@ -2899,9 +2899,9 @@ MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module) {
         // `env`.
         string imod = {0}, iname = {0};
         MLIR_AttributeHandle iam = find_attr(ctx, op, "wasm.import_module");
-        if (iam != MLIR_INVALID_HANDLE) imod = MLIR_GetAttributeString(iam);
+        if (iam != MLIR_INVALID_HANDLE) imod = MLIR_GetAttributeString(ctx, iam);
         MLIR_AttributeHandle ian = find_attr(ctx, op, "wasm.import_name");
-        if (ian != MLIR_INVALID_HANDLE) iname = MLIR_GetAttributeString(ian);
+        if (ian != MLIR_INVALID_HANDLE) iname = MLIR_GetAttributeString(ctx, ian);
 
         emit_import_func(ctx, arena, body, nm, imod, iname, p, np, r, nr);
     }
@@ -2920,7 +2920,7 @@ MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module) {
             return MLIR_INVALID_HANDLE;
         }
         MLIR_AttributeHandle sa = find_attr(ctx, op, "sym_name");
-        string sym = MLIR_GetAttributeString(sa);
+        string sym = MLIR_GetAttributeString(ctx, sa);
         bool is_main = (sym.size == 4 && memcmp(sym.str, "main", 4) == 0);
         string nm = is_main ? str_lit("__original_main") : sym;
 

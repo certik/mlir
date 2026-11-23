@@ -127,8 +127,9 @@ string MLIR_GetOpTypeName(MLIR_Context *ctx, MLIR_OpType type);
 // that created it as its first parameter, even when it only reads: a backend
 // may store these handles as indices into context-owned storage, and
 // resolving an index needs the context (doc/mlir_api_design.md section 2.2).
-// The upstream backend ignores it. The type getters take it too (see "Type
-// API"); the getters of attributes and locations do not yet.
+// The upstream backend ignores it. The getters of types, attributes and
+// locations take it too: natively their handles are indices into the
+// context as well.
 
 typedef struct MLIR_ContextOptions {
     // The initial IR arena, owned by the caller. May be NULL; set one with
@@ -715,25 +716,25 @@ typedef enum {
     MLIR_ATTR_KIND_OTHER
 } MLIR_AttrKind;
 
-MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle attr);
+MLIR_AttrKind MLIR_GetAttributeKind(MLIR_Context *ctx, MLIR_AttributeHandle attr);
 string MLIR_GetAttributeName(MLIR_AttributeHandle attr);
 // Print any attribute as a string (e.g. "0 : i64", "@callee", "[1, 2]").
 // Used as a fallback when the kind is MLIR_ATTR_KIND_OTHER.
 string MLIR_GetAttributeAsString(MLIR_Context *ctx, MLIR_AttributeHandle attr);
-int64_t MLIR_GetAttributeInteger(MLIR_AttributeHandle attr);
-double MLIR_GetAttributeFloat(MLIR_AttributeHandle attr);
+int64_t MLIR_GetAttributeInteger(MLIR_Context *ctx, MLIR_AttributeHandle attr);
+double MLIR_GetAttributeFloat(MLIR_Context *ctx, MLIR_AttributeHandle attr);
 // For Integer and Float attributes, returns the numeric type. For other
 // attribute kinds, returns MLIR_INVALID_HANDLE.
-MLIR_TypeHandle MLIR_GetAttributeType(MLIR_AttributeHandle attr);
-bool MLIR_GetAttributeBool(MLIR_AttributeHandle attr);
-string MLIR_GetAttributeString(MLIR_AttributeHandle attr);
-size_t MLIR_GetAttributeArraySize(MLIR_AttributeHandle attr);
-MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_AttributeHandle attr, size_t idx);
-size_t MLIR_GetAttributeDictSize(MLIR_AttributeHandle attr);
-MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_AttributeHandle attr, size_t idx);
+MLIR_TypeHandle MLIR_GetAttributeType(MLIR_Context *ctx, MLIR_AttributeHandle attr);
+bool MLIR_GetAttributeBool(MLIR_Context *ctx, MLIR_AttributeHandle attr);
+string MLIR_GetAttributeString(MLIR_Context *ctx, MLIR_AttributeHandle attr);
+size_t MLIR_GetAttributeArraySize(MLIR_Context *ctx, MLIR_AttributeHandle attr);
+MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_Context *ctx, MLIR_AttributeHandle attr, size_t idx);
+size_t MLIR_GetAttributeDictSize(MLIR_Context *ctx, MLIR_AttributeHandle attr);
+MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_Context *ctx, MLIR_AttributeHandle attr, size_t idx);
 // For TypeAttr, returns the wrapped Type. For other kinds returns
 // MLIR_INVALID_HANDLE.
-MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_AttributeHandle attr);
+MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_Context *ctx, MLIR_AttributeHandle attr);
 
 // -----------------------------------------------------------------------------
 // Location API
@@ -754,11 +755,11 @@ MLIR_LocationHandle MLIR_CreateLocationFile(MLIR_Context *ctx, string filename, 
 MLIR_LocationHandle MLIR_CreateLocationName(MLIR_Context *ctx, string name);
 
 // Accessors
-MLIR_LocationKind MLIR_GetLocationKind(MLIR_LocationHandle loc);
-string MLIR_GetLocationFileFilename(MLIR_LocationHandle loc);
-int MLIR_GetLocationFileLine(MLIR_LocationHandle loc);
-int MLIR_GetLocationFileColumn(MLIR_LocationHandle loc);
-string MLIR_GetLocationName(MLIR_LocationHandle loc);
+MLIR_LocationKind MLIR_GetLocationKind(MLIR_Context *ctx, MLIR_LocationHandle loc);
+string MLIR_GetLocationFileFilename(MLIR_Context *ctx, MLIR_LocationHandle loc);
+int MLIR_GetLocationFileLine(MLIR_Context *ctx, MLIR_LocationHandle loc);
+int MLIR_GetLocationFileColumn(MLIR_Context *ctx, MLIR_LocationHandle loc);
+string MLIR_GetLocationName(MLIR_Context *ctx, MLIR_LocationHandle loc);
 
 #ifdef __cplusplus
 }

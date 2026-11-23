@@ -377,7 +377,7 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
                 alloca_res   = (MLIR_ValueHandle *)realloc(alloca_res, cap * sizeof(MLIR_ValueHandle));
                 alloca_op    = (MLIR_OpHandle *)realloc(alloca_op, cap * sizeof(MLIR_OpHandle));
             }
-            m.elemty[na]     = MLIR_GetAttributeTypeValue(ea);
+            m.elemty[na]     = MLIR_GetAttributeTypeValue(ctx, ea);
             m.promotable[na] = true;
             alloca_res[na]   = MLIR_GetOpResult(ctx, op, 0);
             alloca_op[na]    = op;
@@ -934,7 +934,7 @@ static void sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
             if (MLIR_GetOpNumOperands(ctx, op) < 1) continue;
             MLIR_AttributeHandle ea = MLIR_GetOpAttributeByName(ctx, op, "elem_type");
             if (ea == MLIR_INVALID_HANDLE) continue;
-            MLIR_TypeHandle et = MLIR_GetAttributeTypeValue(ea);
+            MLIR_TypeHandle et = MLIR_GetAttributeTypeValue(ctx, ea);
             if (MLIR_GetTypeKind(ctx, et) != MLIR_TYPE_KIND_LLVM_STRUCT && MLIR_GetTypeKind(ctx, et) != MLIR_TYPE_KIND_LLVM_ARRAY) continue;
             if (s.na == s.acap) {
                 s.acap <<= 1;

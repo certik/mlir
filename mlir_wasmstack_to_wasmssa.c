@@ -106,15 +106,15 @@ static MLIR_AttributeHandle attr_s(MLIR_Context *ctx, const char *name,
 }
 static int64_t at_i(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeInteger(a) : 0;
+    return a ? MLIR_GetAttributeInteger(ctx, a) : 0;
 }
 static bool at_b(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeBool(a) : false;
+    return a ? MLIR_GetAttributeBool(ctx, a) : false;
 }
 static string at_s(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeString(a) : (string){0};
+    return a ? MLIR_GetAttributeString(ctx, a) : (string){0};
 }
 
 // =============================================================================
@@ -1505,7 +1505,7 @@ MLIR_OpHandle mlir_wasmstack_to_wasmssa(MLIR_Context *ctx,
         stack_module, "memory_min_pages");
     if (a_min_pages) {
         mod_attrs[n_mod_attrs++] = attr_i32(ctx, "memory_min_pages",
-            MLIR_GetAttributeInteger(a_min_pages));
+            MLIR_GetAttributeInteger(ctx, a_min_pages));
     }
 
     // Propagate global 0's init value (the wasm shadow stack pointer =

@@ -341,7 +341,7 @@ static bool is_const(MLIR_Context *ctx, MLIR_OpHandle def, int64_t *val) {
     case OP_TYPE_LLVM_MLIR_CONSTANT: {
         MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, def, "value");
         if (a == MLIR_INVALID_HANDLE) return false;
-        *val = MLIR_GetAttributeInteger(a);
+        *val = MLIR_GetAttributeInteger(ctx, a);
         return true;
     }
     case OP_TYPE_LLVM_MLIR_ZERO:
@@ -371,7 +371,7 @@ static bool fp_const_val(MLIR_Context *ctx, MLIR_ValueHandle v, uint64_t *bits) 
     if (fb == 0) return false;
     MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, def, "value");
     if (a == MLIR_INVALID_HANDLE) return false;
-    double d = MLIR_GetAttributeFloat(a);
+    double d = MLIR_GetAttributeFloat(ctx, a);
     if (fb == 4) { float f = (float)d; uint32_t b32; memcpy(&b32, &f, 4); *bits = b32; }
     else         { memcpy(bits, &d, 8); }
     return true;
@@ -409,7 +409,7 @@ static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
     if (def != MLIR_INVALID_HANDLE && op_is_addressof(F->ctx, def)) {
         MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(F->ctx, def, "global_name");
         if (a == MLIR_INVALID_HANDLE) a = MLIR_GetOpAttributeByName(F->ctx, def, "value");
-        string gn = strip_at(a ? MLIR_GetAttributeString(a) : (string){0});
+        string gn = strip_at(a ? MLIR_GetAttributeString(F->ctx, a) : (string){0});
         if (!gn.size) { fail(F, "addressof missing symbol", (string){0}); return; }
         uint32_t off;
         if (gmap_get(F->gm, gn, &off) || x64_ensure_global_in_gmap(F, gn, &off))
