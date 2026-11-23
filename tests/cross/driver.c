@@ -497,6 +497,35 @@ int app_main(void) {
             MLIR_GetOpType(ctx, mod2) == OP_TYPE_MODULE && MLIR_GetOpType(ctx, module_op) == OP_TYPE_MODULE
                 ? str_lit("yes") : str_lit("no"),
             MLIR_GetOpTypeName(ctx, bm_reg)));
+
+        // Attribute keys (#350): static and dynamic keys, and the op's
+        // attributes by key.
+        MLIR_AttrKey mykey = MLIR_InternAttrKey(ctx, str_lit("test.my_attr"));
+        print_string(format(arena, str_lit("attr keys: static={} dynamic={} again={} name={} miss={}\n"),
+            MLIR_LookupAttrKey(ctx, str_lit("sym_name")) == MLIR_KEY_SYM_NAME &&
+            str_eq(MLIR_GetAttrKeyName(ctx, MLIR_KEY_VALUE), str_lit("value"))
+                ? str_lit("yes") : str_lit("no"),
+            mykey >= MLIR_KEY_COUNT ? str_lit("yes") : str_lit("no"),
+            MLIR_InternAttrKey(ctx, str_lit("test.my_attr")) == mykey ? str_lit("yes") : str_lit("no"),
+            MLIR_GetAttrKeyName(ctx, mykey),
+            MLIR_LookupAttrKey(ctx, str_lit("test.no_such_attr")) == MLIR_KEY_INVALID
+                ? str_lit("yes") : str_lit("no")));
+        MLIR_NamedAttr kattrs[2] = {
+            MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("f"))),
+            MLIR_Named(mykey, MLIR_CreateAttributeInteger(ctx, 7, i32_ty)),
+        };
+        MLIR_OpHandle kop = MLIR_CreateOp(ctx, dyn, kattrs, 2, NULL, 0, NULL, 0,
+                                          NULL, 0, NULL, 0, MLIR_INVALID_HANDLE,
+                                          MLIR_INVALID_HANDLE, str_lit(""), -1);
+        int64_t before = MLIR_GetAttributeInteger(ctx, MLIR_GetOpAttr(ctx, kop, mykey));
+        MLIR_SetOpAttr(ctx, kop, mykey, MLIR_CreateAttributeInteger(ctx, 8, i32_ty));
+        size_t n_replaced = MLIR_GetOpNumAttributes(ctx, kop);
+        MLIR_SetOpAttr(ctx, kop, MLIR_KEY_VALUE, MLIR_CreateAttributeBool(ctx, true));
+        print_string(format(arena, str_lit("op attrs by key: sym_name={} mine={}->{} after set={} after add={} last={}\n"),
+            MLIR_GetAttributeString(ctx, MLIR_GetOpAttr(ctx, kop, MLIR_KEY_SYM_NAME)),
+            before, MLIR_GetAttributeInteger(ctx, MLIR_GetOpAttr(ctx, kop, mykey)),
+            (int64_t)n_replaced, (int64_t)MLIR_GetOpNumAttributes(ctx, kop),
+            MLIR_GetAttrKeyName(ctx, MLIR_GetOpAttributeKey(ctx, kop, 2))));
         MLIR_Context *ctx3 = MLIR_CreateContext(NULL);
         print_string(MLIR_LookupOpType(ctx3, str_lit("test.op")) == OP_TYPE_UNREGISTERED &&
                      MLIR_LookupOpType(ctx3, str_lit("llvm.add")) == OP_TYPE_LLVM_ADD
