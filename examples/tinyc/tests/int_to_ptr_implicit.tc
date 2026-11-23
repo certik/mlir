@@ -88,5 +88,22 @@ int main(void) {
     printf("%d %d %d %d\n", p100 >= h, p100 <= h - 1, h < p100, h + 1 > p100);
     while (h != NULL) h--;
     printf("%lu\n", h);
+    // Pointer ordering is unsigned.
+    char *hi = (char *)-16;
+    int m1 = -1;
+    printf("%d %d %d %d\n", p100 < m1, p100 < -1, hi > p100, hi > 100);
+    // An assignment's value has the type of its left side: `[]`, `+` and
+    // `-` step by that pointer's element.
+    char cb[8] = {'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'};
+    int ib[4] = {10, 20, 30, 40};
+    uintptr_t kc = (uintptr_t)cb, ki = (uintptr_t)ib;
+    char *pc; int *pi; short *ps; double *pd;
+    printf("%c %c %d %d %c %d\n", *(pc = kc), (pc = kc)[1], (pi = ki)[1],
+           *((pi = ki) + 2), *((pc = kc) + 2), (int)(((pc = kc) + 3) - cb));
+    printf("%lu %lu %lu %lu\n", (unsigned long)((pc = 1000) + 1),
+           (unsigned long)((ps = 1000) + 1), (unsigned long)((pd = 1000) + 1),
+           (unsigned long)((pc = 0) + 1));
+    pi = ib;
+    printf("%d %c\n", (int)((pc = pi) + 1 - (char *)ib), *((pc = cb) + 1) = 'x');
     return 0;
 }

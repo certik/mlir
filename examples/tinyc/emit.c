@@ -3897,9 +3897,14 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 v = emit_expr(e, sc, ex->rhs_assign);
             }
             v.val = coerce_eval_to(e, v, lv.elem_ty, lval_ctype(lv));
-            // `p = i` has p's type: `q = p = i` and `if ((p = i))` must not
-            // convert the result again.
-            if (lv.elem_ty == e->ptr) v.is_ptr = true;
+            // `p = x` has p's type, not x's: `q = p = i` and `if ((p = i))`
+            // must not convert the result again, and `(p = x)[1]` / `+ 1`
+            // step by p's element.
+            if (lv.elem_ty == e->ptr) {
+                Type lt = infer_expr_type(e, sc, ex->lvalue);
+                if (type_kind_is_ptr(lt.kind)) v = ptr_eval_of_type(e, v.val, &lt);
+                else v.is_ptr = true;
+            }
             bool narrow = lv.elem_ty == e->i8 || lv.elem_ty == e->i16;
             // The assignment's value has the lvalue's (promoted) type.
             if (lv.elem_ty == e->i32 || lv.elem_ty == e->i64 || narrow)
@@ -4028,14 +4033,15 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 return r;
             }
             // Pointer ordering comparisons (<, <=, >, >=) use llvm.icmp with
-            // signed-less-than predicates. An integer operand converts to a
-            // pointer, as for `==`.
+            // unsigned predicates (addresses are unsigned: on wasm32 a heap
+            // above 2 GiB would compare wrongly as signed). An integer
+            // operand converts to a pointer, as for `==`.
             if ((a.is_ptr || b.is_ptr) &&
                 (ex->op == OP_LT || ex->op == OP_LE ||
                  ex->op == OP_GT || ex->op == OP_GE)) {
                 MLIR_ValueHandle av = int_to_ptr(e, a);
                 MLIR_ValueHandle bv = int_to_ptr(e, b);
-                MLIR_ValueHandle cmp = emit_icmp_ptr(e, cmpi_pred_for(ex->op, false), av, bv);
+                MLIR_ValueHandle cmp = emit_icmp_ptr(e, cmpi_pred_for(ex->op, true), av, bv);
                 r.val = bool_to_i32(e, cmp);
                 return r;
             }
