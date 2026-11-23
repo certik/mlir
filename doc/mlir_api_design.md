@@ -81,7 +81,7 @@ Decisions needed from the owner (each is discussed where it appears):
 
 | # | Decision | Recommendation |
 |---|---|---|
-| D1 | Handle representation: pointer-to-incomplete-struct vs `struct { uintptr_t }` wrappers (roadmap A4 text) | pointer typedefs (§2.2) |
+| D1 | Handle representation: pointer-to-incomplete-struct vs `struct { uintptr_t }` wrappers (roadmap A4 text); natively, arena pointers vs 32-bit indices into context-owned vectors (option D) | pointer typedefs (§2.2); pointer vs index decided by `bench/ir_storage` (§2.2) |
 | D2 | Unregistered ops: dynamic op-type ids in the context vs `OP_TYPE_UNREGISTERED` + name on the op (#145) | dynamic ids (§2.5) |
 | D3 | Def-use tracking: always on with intrusive operand lists vs keep the `no_def_use_tracking` toggle | always on, if A9 measures it within a budget (proposed: ≤ 5% compile time, ≤ 15% IR memory on the wasm-lift pipeline) (§2.3, N6) |
 | D4 | Native block storage: op arrays vs intrusive lists | decide on A9 numbers; the public API (iterators) is the same either way (§6 N7) |
@@ -495,6 +495,45 @@ prefer C because our hot loops compare and hash handles constantly. Add two
 handle kinds that §3.2 needs: `MLIR_UseHandle` (an operand slot; upstream
 `mlir::OpOperand *`) and `MLIR_PredHandle` (a predecessor edge; upstream
 `mlir::BlockOperand *`).
+
+A–C choose how a handle is typed. What a handle *holds* on the native
+backend is a separate choice:
+
+| Option | What the native handle holds | Reads | Storage |
+|---|---|---|---|
+| Pointer (today) | the address of an object allocated individually in the IR arena (`arena_new` per op, value, block, region, interleaved with operand arrays) | `GetOpNumOperands(op)`: one load | the arena never moves or reallocates, so addresses stay valid |
+| D. Index | a 32-bit index into a context-owned vector per kind (ops, values, blocks, regions); 0 is invalid | `GetOpNumOperands(ctx, op)`: every read takes the context, because resolving an index needs the vector's base | vectors may grow by reallocation (the index survives, a pointer would not); erased ops stay as empty slots; every stored reference is 4 bytes instead of 8; dense ids let passes use arrays instead of hash maps for per-op/per-value data |
+
+D applies to the native backend only; the upstream backend stays pointers
+(its handles wrap `mlir::Operation *` etc.). D composes with the typing
+options: with B the struct holds the index, with C the native backend stores
+the index in the pointer-typed handle and never dereferences it.
+
+History. D is the original plan. Until #69 the top of `mlir_api_impl.c`
+carried a TODO to replace the vector of pointers with "a vector of indices,
+store all operations in one vector", because "you can't double and copy the
+vector allocation" while pointers into it exist ("using indices is probably
+the best way"), with per-object arrays of indices still in an arena and easy
+serializing as a bonus. Commit a56e8e3 (#69, "Use handles instead of
+pointers") removed that TODO and introduced the `uintptr_t` handles, but
+implemented them as arena pointers: `resolve_op(h)` is a cast. That is the
+native backend today.
+
+The pointer-versus-index choice is decided by measurement, not by this
+document: `bench/ir_storage` (`pixi run bench_ir_storage`) implements a
+minimal IR core once per storage design behind one API and times
+construction, an op walk, a use-list walk and a fold+DCE rewrite at 10k, 100k
+and 1M ops, built with gcc, clang and tinyC. The faster design wins.
+
+First results (gcc -O2, total of the four phases; the PR that adds the
+benchmark has every table). Today's layout (A-today) is 2–2.5× slower than
+either compact layout, so most of the gain is the layout cleanup of §6 N5/N6,
+available to both. Between compact layouts, indices into one operand pool
+with 32-bit use links (B-pool) take 0.95–1.06× the time of arena pointers
+(A-lean) up to 100k ops and win at 1M (0.66–0.74×, 108 vs 164 MB peak RSS), because
+every stored reference halves. Growing the vectors by doubling and copying
+costs 2× in construction (1.25× overall at 100k); growing them by fixed-size
+arena segments, or reserving them from a size hint, removes that cost.
 
 ### 2.3 Ownership and lifetimes
 
