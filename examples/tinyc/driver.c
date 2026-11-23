@@ -1173,6 +1173,9 @@ int app_main(void) {
         // read_file_ok appends a trailing NUL — strip it for the lifter,
         // which expects the exact wasm file size.
         size_t wasm_size = wasm_buf.size > 0 ? wasm_buf.size - 1 : 0;
+        // The lift's wasmstack, wasmssa and llvm IR come to about 1.7 ops
+        // per byte of wasm: reserve the native IR storage for that.
+        MLIR_SetContextExpectedOps(ctx, wasm_size + wasm_size * 7 / 10);
         MLIR_OpHandle stack_mod = mlir_wasm_to_wasmstack(
             ctx, (const uint8_t *)wasm_buf.str, wasm_size);
         if (stack_mod == MLIR_INVALID_HANDLE) {
@@ -1422,6 +1425,7 @@ int app_main(void) {
     *prog = (Program){0};
     prog->host_varargs = host_varargs;
     int total_errs = 0;
+    size_t total_toks = 0;
     for (size_t k = 0; k < n_input_files; k++) {
         string src = tinyc_preprocess(arena, str_from_cstr_view(input_files[k]),
                                       include_dirs, n_include_dirs,
@@ -1436,6 +1440,7 @@ int app_main(void) {
         }
         if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
         VecTcTok toks = tinyc_lex(arena, src);
+        total_toks += toks.size;
         total_errs += tinyc_parse_into(arena, prog, toks, target_wasm32);
     }
     if (total_errs > 0) {
@@ -1466,6 +1471,7 @@ int app_main(void) {
         }
         if (psrc.size > 0 && psrc.str[psrc.size - 1] == '\0') psrc.size -= 1;
         VecTcTok ptoks = tinyc_lex(arena, psrc);
+        total_toks += ptoks.size;
         if (tinyc_parse_into(arena, prog, ptoks, target_wasm32) > 0) {
             fprintf(stderr, "tinyc: parse failed for host platform '%s'\n",
                     host_platform_path);
@@ -1476,6 +1482,13 @@ int app_main(void) {
         }
     }
 
+    // Size the native backend's IR storage from the input. The module,
+    // its lowering and the backends' IR come to at most about 1.5 ops per
+    // token (after preprocessing; most header tokens make no IR), and with
+    // the wasm pipeline's wasmssa and wasmstack IR to 3-6.4 (tinyc's own
+    // sources). Too low costs doublings, too high wastes heap; the backend
+    // caps the reservation, so a large input cannot exhaust its heap.
+    MLIR_SetContextExpectedOps(ctx, target_wasm32 ? total_toks * 6 : total_toks * 3 / 2);
     MLIR_OpHandle module = tinyc_emit_module(ctx, prog);
     if (tinyc_last_emit_errors() > 0) {
         arena_destroy(arena);

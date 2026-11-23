@@ -611,7 +611,7 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         // the slot map (negative sentinel keyed by the op result is the region).
         MLIR_ValueHandle r = MLIR_GetOpResult(ctx, op, 0);
         int32_t region;
-        if (!vmap_get(&F->slots, (MLIR_ValueHandle)((uintptr_t)op | 1), &region)) {
+        if (!vmap_get(&F->slots, x64_region_key(op), &region)) {
             fail(F, "alloca region missing", (string){0}); return;
         }
         lea_rbp(F, RAX, region);
@@ -910,7 +910,7 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
             if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_ALLOCA) {
                 unsigned rb = alloca_bytes(ctx, op);
                 cur += (int32_t)rb;
-                vmap_put(&F.slots, (MLIR_ValueHandle)((uintptr_t)op | 1), cur);  // region
+                vmap_put(&F.slots, x64_region_key(op), cur);  // region
             }
             if (MLIR_GetOpNumResults(ctx, op) == 1 && !x64_op_rematerialized(ctx, op))
                 x64_assign_slot(&F, &sm_spill, MLIR_GetOpResult(ctx, op, 0), &cur);

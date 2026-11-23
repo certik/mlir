@@ -31,3 +31,6 @@ op types: static=yes miss=yes dynamic=yes again=yes lookup=yes name=test.op modu
 dynamic op and dialect ranges: yes
 builtin.module alias: lookup=yes register=yes module op=yes name=module
 dynamic types are per context: yes
+3000 ops, results and uses: yes
+successor operands appended: yes
+successor operands replaced, uses moved: yes

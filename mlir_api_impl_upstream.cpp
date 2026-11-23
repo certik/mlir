@@ -517,6 +517,7 @@ extern "C" Arena *MLIR_GetArenaAllocator(MLIR_Context *ctx) { return ctx->arena;
 // Upstream always tracks uses; the setting is accepted and ignored.
 extern "C" void MLIR_SetContextDefUseTracking(MLIR_Context *, bool) {}
 extern "C" bool MLIR_HasContextDefUseTracking(MLIR_Context *) { return true; }
+extern "C" void MLIR_SetContextExpectedOps(MLIR_Context *, size_t) {}
 
 extern "C" void MLIR_SetDiagnosticHandler(MLIR_Context *cctx, MLIR_DiagnosticHandler fn,
                                           void *user) {

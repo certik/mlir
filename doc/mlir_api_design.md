@@ -81,7 +81,7 @@ Decisions needed from the owner (each is discussed where it appears):
 
 | # | Decision | Recommendation |
 |---|---|---|
-| D1 | Handle representation: pointer-to-incomplete-struct vs `struct { uintptr_t }` wrappers (roadmap A4 text) | pointer typedefs (§2.2) |
+| D1 | Handle representation: pointer-to-incomplete-struct vs `struct { uintptr_t }` wrappers (roadmap A4 text); natively, arena pointers vs 32-bit indices into context-owned vectors (option D) | pointer typedefs (§2.2); natively indices, option D (decided after `bench/ir_storage`, #370; implemented in #354) |
 | D2 | Unregistered ops: dynamic op-type ids in the context vs `OP_TYPE_UNREGISTERED` + name on the op (#145) | dynamic ids (§2.5) |
 | D3 | Def-use tracking: always on with intrusive operand lists vs keep the `no_def_use_tracking` toggle | always on, if A9 measures it within a budget (proposed: ≤ 5% compile time, ≤ 15% IR memory on the wasm-lift pipeline) (§2.3, N6) |
 | D4 | Native block storage: op arrays vs intrusive lists | decide on A9 numbers; the public API (iterators) is the same either way (§6 N7) |
@@ -496,12 +496,86 @@ handle kinds that §3.2 needs: `MLIR_UseHandle` (an operand slot; upstream
 `mlir::OpOperand *`) and `MLIR_PredHandle` (a predecessor edge; upstream
 `mlir::BlockOperand *`).
 
-As implemented (#354): every getter of an op, region, block or value takes
-the context as its first parameter (`MLIR_GetOpOperand(ctx, op, i)`), so the
-native backend can store those handles as indices into context-owned vectors
-(the storage of #354). The upstream backend ignores the parameter. Getters of
-types, attributes and locations are unchanged. The sketches in §3 and §4
-omit the context for brevity.
+A–C choose how a handle is typed. What a handle *holds* on the native
+backend is a separate choice:
+
+| Option | What the native handle holds | Reads | Storage |
+|---|---|---|---|
+| Pointer (before #354) | the address of an object allocated individually in the IR arena (`arena_new` per op, value, block, region, interleaved with operand arrays) | `GetOpNumOperands(op)`: one load | the arena never moves or reallocates, so addresses stay valid |
+| D. Index | a 32-bit index into a context-owned vector per kind (ops, values, blocks, regions); 0 is invalid | `GetOpNumOperands(ctx, op)`: every read takes the context, because resolving an index needs the vector's base | vectors may grow by reallocation (the index survives, a pointer would not); erased ops stay as empty slots; every stored reference is 4 bytes instead of 8; dense ids let passes use arrays instead of hash maps for per-op/per-value data |
+
+D applies to the native backend only; the upstream backend stays pointers
+(its handles wrap `mlir::Operation *` etc.). D composes with the typing
+options: with B the struct holds the index, with C the native backend stores
+the index in the pointer-typed handle and never dereferences it.
+
+History. D is the original plan. Until #69 the top of `mlir_api_impl.c`
+carried a TODO to replace the vector of pointers with "a vector of indices,
+store all operations in one vector", because "you can't double and copy the
+vector allocation" while pointers into it exist ("using indices is probably
+the best way"), with per-object arrays of indices still in an arena and easy
+serializing as a bonus. Commit a56e8e3 (#69, "Use handles instead of
+pointers") removed that TODO and introduced the `uintptr_t` handles, but
+implemented them as arena pointers: `resolve_op(h)` was a cast.
+
+Decision. `bench/ir_storage` (#370, not merged) implemented a minimal IR
+core once per storage design behind one API and timed construction, an op
+walk, a use-list walk and a fold+DCE rewrite at 10k, 100k and 1M ops, built
+with gcc, clang and tinyC. The pre-#354 layout was 1.6–2.5× slower than
+either compact layout. Between compact layouts, indices into one operand pool
+(B-pool) took 0.95–1.06× the time of arena pointers up to 100k ops and won
+at 1M (0.66–0.74×, 108 vs 164 MB peak RSS). Growing the vectors by doubling
+alone cost 2× in construction; reserving them from a size hint removed that
+cost and was the fastest variant at every size. The owner chose D with the
+B-pool layout, flat vectors reserved from a hint and grown by doubling.
+
+As implemented (#354):
+- **API.** Every getter of an op, region, block or value takes the context as
+  its first parameter (`MLIR_GetOpOperand(ctx, op, i)`). The upstream backend
+  uses it only for an ownership check under `MLIR_API_CHECKS`. Getters of
+  types, attributes and locations are unchanged: types stay uniqued pointers
+  and attributes and locations arena pointers until their interning (#349,
+  #350) makes them indices too. Most sketches in §3 and §4 omit the context
+  for brevity.
+- **Layout** (`mlir_api_impl.c`, "IR storage"). Vectors per kind: ops (56 B),
+  values (40 B), operands (16 B: `{value, owner, next, prev}`, all indices),
+  blocks and regions. An op's regular and successor operands are consecutive
+  in the operand vector (D5); the def-use lists are threaded through the
+  operand records, so a use is an operand index. An op's results are
+  consecutive values, so `GetOpResult(ctx, op, i)` is `first_result + i`
+  (`MLIR_CreateOp` requires its result values to be consecutive). Region and
+  successor `(block, operand count)` entries share a u32 vector; attribute
+  handles, which are still pointers, share a pointer-sized vector. Block op
+  and argument lists and region block lists are u32 arrays in the IR arena.
+  Erased ops stay as empty slots.
+- **Growth.** One flat array per vector. `MLIR_ContextOptions.expected_ops`
+  and `MLIR_SetContextExpectedOps` reserve the vectors that grow with the
+  op count (ops, values, operands, attribute entries) from a hint (tinyc passes 1.5 ops per token, 6 when compiling to wasm, and
+  1.7 ops per byte of wasm for `--from-wasm`). The reservation is capped at
+  1 GiB of buddy blocks: corec's heap is a 4 GiB reservation (and wasm32
+  memory is capped at 4 GiB), and a reserved block uses it up even where it
+  is never touched. A full vector doubles and copies, through the one
+  hook `vec_reserve`, which a later change can make reserve address space
+  instead. Inside the backend no pointer into a vector is held across a call
+  that can grow it; `MLIR_API_CHECKS` builds check that with a per-vector
+  generation counter, and tag handles with their kind and a per-context salt
+  so a handle of another kind or context is caught.
+- **Lifetimes.** Freeing an IR arena still invalidates the IR created in it,
+  but no longer returns the op, value and operand records, which live in the
+  context until it is destroyed. Measured on the pipelines that free arenas
+  per phase or per function, peak RSS still went down (`--from-wasm
+  --emit=elf` 2.70 → 2.02 GB, the `--emit=macho --macho-backend=llvm` lift
+  2.77 → 2.05 GB, the wasm32 self-host lift under wasmtime 2.91 →
+  2.61 GB), so there is no mark/release yet.
+- **Results.** Against the pointer storage, with the gcc `-O3 -flto` build of
+  tinyc (medians of 7, `--time-stages`): compiling `emit.c` with
+  `--emit=x64` takes 0.86× the time (emit 0.68×, mem2reg 0.72×,
+  lower-to-llvm 0.40×) and 0.86× the peak RSS; the self-host lift
+  (`--from-wasm --emit=elf`, 7.5M ops) 0.74× the time (8.7 → 6.5 s) and
+  0.75× the peak RSS. The self-hosted, tinyC-built compiler gets 0.92× and
+  0.84×. The IR-heavy stages gain 1.3–2.5×; the rest of the compile time is
+  preprocessing, register allocation and encoding, which barely touch IR
+  storage. The PR that implemented it has every table.
 
 ### 2.3 Ownership and lifetimes
 
@@ -1165,6 +1239,15 @@ Sizes are for LP64.
 reads IR; for it, N1, N12 and the traversal costs are what matter. The
 wasm-lift pipeline, which builds IR for whole programs, pays N5/N6 most;
 `emit.c` pays N3, N5, N13, N14.
+
+As implemented (#354): N5 and N6 are replaced by the index storage of §2.2
+(an op is one 56-byte record plus its 16-byte operand records, which carry
+the use links; results are consecutive values; no aux record unless the
+printer needs one), and N15 by appending in place when the op's attributes
+are the last ones in their vector. N7 remains: erasing an op still costs
+O(block size), now a scan to the op and a shift of the tail instead of a
+filter over the whole list (on the self-host lift that change alone made
+mem2reg 1.9× and dce 1.3× faster). N8 and N9 are unchanged.
 
 ## 7. Ordered follow-up issues
 

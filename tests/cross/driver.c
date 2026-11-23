@@ -411,6 +411,70 @@ int app_main(void) {
         MLIR_DestroyContext(ctx3);
     }
 
+    // ---- index storage (#354): growth and operand relocation ----------------
+    {
+        // Enough values and ops that every native IR vector grows several
+        // times: a chain of adds that all use the block argument `arg` too.
+        MLIR_BlockHandle src = MLIR_CreateBlock(ctx);
+        MLIR_BlockHandle dst = MLIR_CreateBlock(ctx);
+        MLIR_ValueHandle arg = MLIR_AddBlockArgument(ctx, src, i32_ty, MLIR_INVALID_HANDLE);
+        MLIR_ValueHandle x = MLIR_AddBlockArgument(ctx, src, i32_ty, MLIR_INVALID_HANDLE);
+        MLIR_AddBlockArgument(ctx, dst, i32_ty, MLIR_INVALID_HANDLE);
+        enum { N = 3000 };
+        MLIR_ValueHandle last = arg;
+        bool chain_ok = true;
+        for (size_t i = 0; i < N; i++) {
+            MLIR_ValueHandle res = MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0, i32_ty,
+                                                            str_lit(""), MLIR_INVALID_HANDLE);
+            MLIR_ValueHandle ops2[2] = { last, arg };
+            MLIR_TypeHandle rt[1] = { i32_ty };
+            MLIR_OpHandle add = MLIR_CreateOp(ctx, OP_TYPE_LLVM_ADD, NULL, 0, rt, 1, &res, 1,
+                                              ops2, 2, NULL, 0, MLIR_INVALID_HANDLE,
+                                              MLIR_INVALID_HANDLE, str_lit(""), -1);
+            MLIR_AppendBlockOp(ctx, src, add);
+            if (MLIR_GetOpResult(ctx, add, 0) != res || MLIR_GetValueDefiningOp(ctx, res) != add)
+                chain_ok = false;
+            last = res;
+        }
+        MLIR_ValueHandle *succ_ops[1] = { &last };
+        size_t n_succ_ops[1] = { 1 };
+        MLIR_BlockHandle succs[1] = { dst };
+        MLIR_OpHandle br = MLIR_CreateOpWithSuccessors(ctx, OP_TYPE_LLVM_BR, NULL, 0, NULL, 0,
+                                                       NULL, 0, NULL, 0, NULL, 0, succs, 1,
+                                                       succ_ops, n_succ_ops, MLIR_INVALID_HANDLE,
+                                                       MLIR_INVALID_HANDLE, str_lit(""), -1);
+        MLIR_AppendBlockOp(ctx, src, br);
+        print_string(chain_ok && MLIR_GetBlockNumOps(ctx, src) == N + 1 &&
+                     MLIR_GetValueNumUses(ctx, arg) == N + 1 &&
+                     MLIR_GetValueNumUses(ctx, last) == 1
+                         ? str_lit("3000 ops, results and uses: yes\n")
+                         : str_lit("3000 ops, results and uses: no\n"));
+
+        // Appending successor operands moves the op's operands natively; the
+        // use lists must follow, and the flat operand index stays upstream's.
+        MLIR_AppendOpSuccessorOperand(ctx, br, 0, arg);
+        MLIR_AppendOpSuccessorOperand(ctx, br, 0, last);
+        size_t flat = SIZE_MAX;
+        MLIR_OpHandle owner = MLIR_GetValueUseOwner(ctx, arg, 0, &flat);
+        print_string(MLIR_GetOpNumSuccessorOperands(ctx, br, 0) == 3 &&
+                     MLIR_GetOpSuccessorOperand(ctx, br, 0, 1) == arg &&
+                     MLIR_GetValueNumUses(ctx, arg) == N + 2 &&
+                     MLIR_GetValueNumUses(ctx, last) == 2 &&
+                     owner == br && flat == 1
+                         ? str_lit("successor operands appended: yes\n")
+                         : str_lit("successor operands appended: no\n"));
+        MLIR_ValueHandle repl[2] = { x, x };
+        MLIR_SetOpSuccessorOperands(ctx, br, 0, repl, 2);
+        MLIR_ReplaceAllUsesOfValue(ctx, arg, x);
+        print_string(MLIR_GetOpNumSuccessorOperands(ctx, br, 0) == 2 &&
+                     MLIR_GetValueNumUses(ctx, last) == 0 &&
+                     MLIR_GetValueNumUses(ctx, arg) == 0 &&
+                     MLIR_GetValueNumUses(ctx, x) == N + 3 &&
+                     MLIR_GetOpOperand(ctx, MLIR_GetBlockOp(ctx, src, N - 1), 1) == x
+                         ? str_lit("successor operands replaced, uses moved: yes\n")
+                         : str_lit("successor operands replaced, uses moved: no\n"));
+    }
+
     MLIR_DestroyContext(ctx);
     arena_destroy(arena);
     return 0;

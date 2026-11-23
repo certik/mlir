@@ -99,10 +99,12 @@ static bool hmap_get(HMap *m, uintptr_t key, uintptr_t *out) {
 // during construction; only the survivors of triviality elimination become
 // real block arguments. Bit 0 (set) tags a phi id; IR handles are >=2-byte
 // aligned so bit 0 is free for the tag, valid for 32-bit uintptr_t too.
-#define L2R_PHI_TAG ((uintptr_t)1)
+// The tag is the top bit: native value handles are indices below 2^31 and
+// upstream ones are user-space pointers, so neither has it set.
+#define L2R_PHI_TAG ((uintptr_t)1 << (sizeof(uintptr_t) * 8 - 1))
 #define L2R_IS_PHI(r) (((uintptr_t)(r) & L2R_PHI_TAG) != 0)
-#define L2R_PHI_ID(r) ((size_t)((uintptr_t)(r) >> 1))
-#define L2R_MK_PHI(id) ((((uintptr_t)(id)) << 1) | L2R_PHI_TAG)
+#define L2R_PHI_ID(r) ((size_t)((uintptr_t)(r) & ~L2R_PHI_TAG))
+#define L2R_MK_PHI(id) (((uintptr_t)(id)) | L2R_PHI_TAG)
 
 typedef struct {
     MLIR_Context *ctx;
