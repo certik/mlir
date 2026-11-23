@@ -2409,6 +2409,7 @@ static StructDef *parse_struct_def(P *p) {
             if (accept(p, TC_TK_STAR)) {
                 is_ptr = true;
                 ft.kind = TY_PTR_STRUCT;
+                if (accept(p, TC_TK_STAR)) wrap_ptr_to_ptr(p, &ft);
             }
         } else if (cur(p).kind == TC_TK_KW_STRUCT || cur(p).kind == TC_TK_KW_UNION) {
             // Nested struct field: `struct Inner name;` (by-value),
@@ -2421,6 +2422,10 @@ static StructDef *parse_struct_def(P *p) {
             ft.kind = is_ptr ? TY_PTR_STRUCT : TY_STRUCT;
             ft.struct_name = sn.text;
             is_struct_kind = true;
+            // `struct Inner **name`: a pointer to a struct pointer. The
+            // second `*` used to be skipped below, typing the field
+            // `struct Inner *` (#371).
+            if (is_ptr && accept(p, TC_TK_STAR)) wrap_ptr_to_ptr(p, &ft);
         } else if (cur(p).kind == TC_TK_KW_ENUM &&
                    (peek(p, 1).kind == TC_TK_LBRACE ||
                     (peek(p, 1).kind == TC_TK_IDENT && peek(p, 2).kind == TC_TK_LBRACE))) {
@@ -2524,24 +2529,28 @@ static StructDef *parse_struct_def(P *p) {
         }
         // One or more comma-separated declarators sharing the base type
         // `ft` parsed above. Each may add its own `[N]`/`[N][M]` suffix.
-        // We also accept (and tolerate) per-declarator pointer suffixes
-        // matching the one already applied to the base, e.g.
+        // The base-type code above applied the first declarator's `*`s to
+        // every declarator, so a later one must repeat them exactly, e.g.
         //   const uint8_t *p, *end;
-        // which is equivalent to two pointer fields. The first `*` was
-        // already consumed when the base type was parsed; the second
-        // `*` is redundant given how the base-type code already applies
-        // the pointer to all declarators in the list. We don't yet
-        // model the `int *a, b;` case where `b` is non-pointer.
+        // We don't model declarators with different pointer levels
+        // (`int *a, b;`, `struct S *a, **b;`), nor a pointer level the
+        // base-type code does not (`int ***p;`): they are rejected rather
+        // than given the wrong type.
         Type base_ft = ft;
+        size_t base_stars = 0;
+        while (base_stars < p->i && p->toks[p->i - 1 - base_stars].kind == TC_TK_STAR)
+            base_stars++;
         bool more_decls = true;
+        bool first_decl = true;
         while (more_decls) {
             Type ft = base_ft;
-            // Consume optional `*` (or `**`) leader on this declarator.
-            // The pointer kind was already applied to base_ft, so we
-            // just skip the tokens.
-            if (accept(p, TC_TK_STAR)) {
-                (void)accept(p, TC_TK_STAR);
+            size_t stars = 0;
+            while (accept(p, TC_TK_STAR)) stars++;
+            if (stars != (first_decl ? 0 : base_stars)) {
+                perror_at(p, cur(p).line,
+                    str_lit("unsupported pointer level in a struct field declarator"));
             }
+            first_decl = false;
             TcTok fn;
             if (fnptr_field_name.size > 0) {
                 fn = (TcTok){.kind = TC_TK_IDENT, .text = fnptr_field_name,

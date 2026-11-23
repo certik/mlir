@@ -1,0 +1,2 @@
+struct S { int *a, b; };
+int main(void) { struct S s; s.b = 1; return s.b; }

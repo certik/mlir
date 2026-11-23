@@ -1,0 +1,72 @@
+// Stores and loads through a `struct T **` struct field (#371). The field's
+// second `*` was dropped, so `*up->prev_next = &b` copied the struct b
+// into *head instead of storing &b into head.
+extern int printf(const char *fmt, ...);
+struct Node { int v; struct Node *next; };
+struct Use { struct Node **prev_next; int tag; };
+struct Two { struct Node **p1, **p2; struct Node *n1, *n2; };
+struct Vec { struct Node **data; int size; };
+struct Holder { struct Inner { int w; } **inner; };
+static struct Use g_use;
+static struct Use *get_use(void) { return &g_use; }
+int main(void) {
+    struct Node a; a.v = 1; a.next = 0;
+    struct Node b; b.v = 2; b.next = 0;
+    struct Node c; c.v = 3; c.next = 0;
+    struct Node *head = &a;
+    struct Use u; u.prev_next = &head; u.tag = 7;
+    struct Use *up = &u;
+    // The issue's repro: a pointer store through the field.
+    *up->prev_next = &b;
+    printf("%d %d %d\n", head->v, a.v, u.tag);
+    // A load through the field, and `->` on the loaded pointer.
+    struct Node *n = *up->prev_next;
+    printf("%d %d\n", n->v, (*up->prev_next)->v);
+    // `*s.field` on a struct value.
+    *u.prev_next = &c;
+    printf("%d\n", head->v);
+    // Through a call result: `*f()->g = x`.
+    g_use.prev_next = &head;
+    *get_use()->prev_next = &a;
+    printf("%d\n", head->v);
+    // Through an array of struct pointers: `*ua[i]->g = x`.
+    struct Use *ua[2]; ua[0] = &u; ua[1] = up;
+    *ua[1]->prev_next = &b;
+    printf("%d\n", head->v);
+    // `**pp = x` copies a struct; `*pp = x` stores a pointer.
+    struct Node d; d.v = 4; d.next = 0;
+    struct Node **pp = up->prev_next;
+    **pp = d;
+    printf("%d %d\n", head->v, b.v);
+    *pp = &c;
+    printf("%d\n", head->v);
+    // `*a[i] = x` on a `struct T **` field indexed: a struct copy.
+    struct Node *slots[2]; slots[0] = &a; slots[1] = &c;
+    struct Vec vec; vec.data = slots; vec.size = 2;
+    struct Vec *vp = &vec;
+    *vp->data[1] = d;
+    vp->data[0] = &b;
+    printf("%d %d %d %d\n", c.v, slots[0]->v, vp->data[0]->v, vp->data[1]->v);
+    // Several `**` declarators in one field declaration.
+    struct Two t; t.p1 = &head; t.p2 = &t.n1; t.n1 = &a; t.n2 = &b;
+    *t.p2 = &c;
+    *t.p1 = t.n2;
+    printf("%d %d\n", t.n1->v, head->v);
+    // The intrusive-list unlink: remove the node with v == 2.
+    a.v = 1; b.v = 2; c.v = 3;
+    a.next = &b; b.next = &c; c.next = 0; head = &a;
+    struct Use w; w.prev_next = &head;
+    while (*w.prev_next) {
+        if ((*w.prev_next)->v == 2) *w.prev_next = (*w.prev_next)->next;
+        else w.prev_next = &(*w.prev_next)->next;
+    }
+    struct Node *q = head;
+    while (q) { printf("%d ", q->v); q = q->next; }
+    printf("\n");
+    // A `**` field of an inline struct type.
+    struct Inner in; in.w = 5;
+    struct Inner *inp = &in;
+    struct Holder h; h.inner = &inp;
+    printf("%d\n", (*h.inner)->w);
+    return 0;
+}

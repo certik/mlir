@@ -43,6 +43,20 @@ targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "666\n11\n200\n33\n100\n300\n"
 
 [[test]]
+name = "ptr_ptr_field_store"
+targets = ["native", "wasm", "macho", "elf"]
+# `*p->field = x` through a `struct T **` field stored a struct copy instead
+# of a pointer (#371). Expected output from gcc.
+expected_stdout = "2 1 7\n2 2\n3\n1\n2\n4 4\n3\n4 4 4 4\n4 4\n1 3 \n5\n"
+
+[[test]]
+name = "struct_field_mixed_ptr_decl"
+targets = ["native", "wasm", "macho", "elf"]
+# A struct field declarator with a different pointer level than the first one
+# (`int *a, b;`) used to get the first one's type; tinyc rejects it (#371).
+expected_compile_error = "unsupported pointer level in a struct field declarator"
+
+[[test]]
 name = "compound_literal_struct_field"
 targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "12\n7\n99\n33\n50\n7\n99\n77\n99\n4\n5\n1\n"
