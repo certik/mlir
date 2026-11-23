@@ -2023,8 +2023,8 @@ MLIR_RegionHandle MLIR_CreateRegion(MLIR_Context *ctx) {
 void MLIR_SetOpAttr(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_AttrKey key, MLIR_AttributeHandle value) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_SetOpAttr");
     CHECK_OP(ctx, o, "MLIR_SetOpAttr");
-    API_CHECK(key != MLIR_KEY_INVALID && value != MLIR_INVALID_HANDLE, "MLIR_SetOpAttr",
-              "key or attribute handle is NULL");
+    API_CHECK(key != MLIR_KEY_INVALID && key < ctx->keys.n_keys && value != MLIR_INVALID_HANDLE,
+              "MLIR_SetOpAttr", "bad attribute key or value");
     uint32_t n = OPS(ctx)[o].n_attributes;
     uint32_t old = OPS(ctx)[o].first_attr;
     for (uint32_t i = 0; i < n; i++) {
@@ -2134,14 +2134,18 @@ MLIR_AttrKey MLIR_GetAttributeDictKey(MLIR_Context *ctx, MLIR_AttributeHandle ah
     (void)ctx;
     CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_DICT, "MLIR_GetAttributeDictKey", "not a dictionary attribute");
     CHECK_INDEX(idx, ((IR_Attribute *)ah)->data.dict.count, "MLIR_GetAttributeDictKey");
-    return ((IR_Attribute *)ah)->data.dict.entries[idx].key;
+    IR_Attribute *attr = resolve_attr(ah);
+    if (!attr || idx >= attr->data.dict.count) return MLIR_KEY_INVALID;
+    return attr->data.dict.entries[idx].key;
 }
 
 MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_Context *ctx, MLIR_AttributeHandle ah, size_t idx) {
     (void)ctx;
     CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_DICT, "MLIR_GetAttributeDictElement", "not a dictionary attribute");
     CHECK_INDEX(idx, ((IR_Attribute *)ah)->data.dict.count, "MLIR_GetAttributeDictElement");
-    return ((IR_Attribute *)ah)->data.dict.entries[idx].value;
+    IR_Attribute *attr = resolve_attr(ah);
+    if (!attr || idx >= attr->data.dict.count) return MLIR_INVALID_HANDLE;
+    return attr->data.dict.entries[idx].value;
 }
 
 MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_Context *ctx, MLIR_AttributeHandle ah) {

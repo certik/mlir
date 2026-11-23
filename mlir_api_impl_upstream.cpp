@@ -246,6 +246,8 @@ struct MLIR_Context : public mlir::MLIRContext {
     AttrKeyTable keyTable;
     std::vector<const void *> keyNames;
     llvm::DenseMap<const void *, MLIR_AttrKey> keyOfName;
+    // MLIR_GetOpAttr's i32 `case_values` conversions (caseValuesAsI32).
+    llvm::DenseMap<const void *, const void *> caseValuesI32;
     BlockOpIterCache blockOps;
     // Op types (doc/mlir_api_design.md section 2.5). opTypeTable holds the
     // names of the static and dynamic types (in `persistent`); opNames[t] is
@@ -923,6 +925,20 @@ extern "C" MLIR_AttrKey MLIR_GetOpAttributeKey(MLIR_Context *ctx, MLIR_OpHandle 
     API_CHECK(i < MLIR_GetOpNumAttributes(ctx, h), "MLIR_GetOpAttributeKey", "index out of range");
     return keyOf(ctx, ensureCachedAttrs(F<mlir::Operation>(h))[i].getName());
 }
+// A switch's i32 `case_values` (a DenseIntElementsAttr) as the
+// DenseI32ArrayAttr the API creates, converted once per distinct value.
+static mlir::Attribute caseValuesAsI32(MLIR_Context &mctx, mlir::DenseIntElementsAttr cv) {
+    auto it = mctx.caseValuesI32.find(cv.getAsOpaquePointer());
+    if (it != mctx.caseValuesI32.end()) return mlir::Attribute::getFromOpaquePointer(it->second);
+    llvm::SmallVector<int32_t, 8> vals;
+    vals.reserve(cv.getNumElements());
+    for (auto apv : cv.getValues<llvm::APInt>())
+        vals.push_back((int32_t)apv.getSExtValue());
+    mlir::Attribute a = mlir::DenseI32ArrayAttr::get(&mctx, vals);
+    mctx.caseValuesI32[cv.getAsOpaquePointer()] = a.getAsOpaquePointer();
+    return a;
+}
+
 // Inherent attributes (properties) included: Operation::getAttr reads them.
 extern "C" MLIR_AttributeHandle MLIR_GetOpAttr(MLIR_Context *ctx, MLIR_OpHandle h,
                                                MLIR_AttrKey key) {
@@ -957,13 +973,7 @@ extern "C" MLIR_AttributeHandle MLIR_GetOpAttr(MLIR_Context *ctx, MLIR_OpHandle 
         if (auto sw = mlir::dyn_cast<mlir::cf::SwitchOp>(op)) {
             if (auto cv = sw.getCaseValuesAttr()) {
                 auto elemTy = cv.getElementType();
-                if (elemTy.isInteger(32)) {
-                    llvm::SmallVector<int32_t, 8> vals;
-                    vals.reserve(cv.getNumElements());
-                    for (auto apv : cv.getValues<llvm::APInt>())
-                        vals.push_back((int32_t)apv.getSExtValue());
-                    return stash(mlir::DenseI32ArrayAttr::get(&mctx, vals));
-                }
+                if (elemTy.isInteger(32)) return stash(caseValuesAsI32(mctx, cv));
                 return stash(cv);
             }
         }
@@ -975,13 +985,7 @@ extern "C" MLIR_AttributeHandle MLIR_GetOpAttr(MLIR_Context *ctx, MLIR_OpHandle 
         if (auto sw = mlir::dyn_cast<mlir::LLVM::SwitchOp>(op)) {
             if (auto cv = sw.getCaseValuesAttr()) {
                 auto elemTy = cv.getElementType();
-                if (elemTy.isInteger(32)) {
-                    llvm::SmallVector<int32_t, 8> vals;
-                    vals.reserve(cv.getNumElements());
-                    for (auto apv : cv.getValues<llvm::APInt>())
-                        vals.push_back((int32_t)apv.getSExtValue());
-                    return stash(mlir::DenseI32ArrayAttr::get(&mctx, vals));
-                }
+                if (elemTy.isInteger(32)) return stash(caseValuesAsI32(mctx, cv));
                 return stash(cv);
             }
         }
