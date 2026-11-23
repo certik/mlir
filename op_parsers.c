@@ -15,7 +15,7 @@
 
 
 OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserParams *params) {
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -66,8 +66,8 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
             parser_expect(parser, TK_NAME);
             MLIR_TypeHandle bool_type = mlir_type_create_from_string(parser->ctx, str_lit("i1"));
             append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
-                        MLIR_CreateAttributeBool(parser->ctx, str_lit("value"),
-                                                 str_eq(name_str, str_lit("true"))));
+                        MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeBool(parser->ctx,
+                                                 str_eq(name_str, str_lit("true")))));
 
             if (!result_value) {
                 result_value = MLIR_CreateValueOpResult(parser->ctx, MLIR_INVALID_HANDLE, 0, bool_type, (string){MLIR_INVALID_HANDLE, 0}, MLIR_INVALID_HANDLE);
@@ -202,7 +202,7 @@ OperationParserResult parse_arith_binary_op(Parser *parser, const OperationParse
     }
 
     // Parse any attributes and result types using helper functions
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0; // tracks attribute list growth for arith binary ops
 
@@ -252,7 +252,7 @@ OperationParserResult parse_arith_binary_op(Parser *parser, const OperationParse
 OperationParserResult parse_func_call_op(Parser *parser, const OperationParserParams *params) {
     // Parse call @function(%args) : (arg_types) -> result_type
     // Function name (@name is tokenized as TK_FUNCTION_NAME)
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -365,7 +365,7 @@ OperationParserResult parse_func_call_op(Parser *parser, const OperationParserPa
 }
 
 OperationParserResult parse_tt_get_program_id_op(Parser *parser, const OperationParserParams *params) {
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -438,7 +438,7 @@ OperationParserResult parse_tt_splat_op(Parser *parser, const OperationParserPar
     }
 
     // Parse any attributes and result types using helper functions
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -498,7 +498,7 @@ OperationParserResult parse_tt_splat_op(Parser *parser, const OperationParserPar
 }
 
 OperationParserResult parse_tt_make_range_op(Parser *parser, const OperationParserParams *params) {
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -615,7 +615,7 @@ OperationParserResult parse_tt_addptr_op(Parser *parser, const OperationParserPa
         else break;
     }
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -739,7 +739,7 @@ OperationParserResult parse_tensor_extract_op(Parser *parser, const OperationPar
         parser_expect(parser, TK_RBRACKET);
     }
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -822,7 +822,7 @@ OperationParserResult parse_memref_load_op(Parser *parser, const OperationParser
         parser_expect(parser, TK_RBRACKET);
     }
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
     MLIR_TypeHandle *result_types = MLIR_INVALID_HANDLE;
@@ -939,7 +939,7 @@ OperationParserResult parse_memref_store_op(Parser *parser, const OperationParse
         parser_expect(parser, TK_RBRACKET);
     }
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
     MLIR_TypeHandle *result_types = MLIR_INVALID_HANDLE;
@@ -1046,7 +1046,7 @@ OperationParserResult parse_vector_print_op(Parser *parser, const OperationParse
     MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
         
         params->op_type,
-        MLIR_INVALID_HANDLE,
+        NULL,
         0,
         MLIR_INVALID_HANDLE,
         0,
@@ -1088,7 +1088,7 @@ OperationParserResult parse_std_constant_op(Parser *parser, const OperationParse
         }
     }
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -1159,7 +1159,7 @@ OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserPa
         parser_expect(parser, TK_RPAREN);
     }
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -1347,7 +1347,7 @@ OperationParserResult parse_cf_br_op(Parser *parser, const OperationParserParams
 
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(parser->ctx,
         params->op_type,
-        MLIR_INVALID_HANDLE, 0,
+        NULL, 0,
         MLIR_INVALID_HANDLE, 0,
         params->lhs_results, params->n_lhs_results,
         MLIR_INVALID_HANDLE, 0,
@@ -1464,7 +1464,7 @@ OperationParserResult parse_cf_cond_br_op(Parser *parser, const OperationParserP
 
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(parser->ctx,
         params->op_type,
-        MLIR_INVALID_HANDLE, 0,
+        NULL, 0,
         MLIR_INVALID_HANDLE, 0,
         params->lhs_results, params->n_lhs_results,
         operands.data, operands.size,
@@ -1519,7 +1519,7 @@ OperationParserResult parse_linalg_fill_op(Parser *parser, const OperationParser
     }
 
     // Optional result type after `->` (linalg.fill on tensor returns).
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
     MLIR_TypeHandle *result_types = MLIR_INVALID_HANDLE;
@@ -1599,7 +1599,7 @@ OperationParserResult parse_affine_load_op(Parser *parser, const OperationParser
         parser_expect(parser, TK_RBRACKET);
     }
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -1686,7 +1686,7 @@ OperationParserResult parse_affine_load_op(Parser *parser, const OperationParser
 }
 
 OperationParserResult parse_index_constant_op(Parser *parser, const OperationParserParams *params) {
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -1804,7 +1804,7 @@ OperationParserResult parse_tensor_splat_op(Parser *parser, const OperationParse
         parser_expect(parser, TK_RBRACKET);
     }
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
 
     MLIR_TypeHandle *result_types = MLIR_INVALID_HANDLE;
@@ -1895,7 +1895,7 @@ OperationParserResult parse_arith_select_op(Parser *parser, const OperationParse
     }
 
     // Parse any additional attributes
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -1971,7 +1971,7 @@ OperationParserResult parse_arith_select_op(Parser *parser, const OperationParse
 OperationParserResult parse_tt_call_op(Parser *parser, const OperationParserParams *params) {
     // Parse tt.call @function(%args) : (arg_types) -> result_type
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -2102,11 +2102,11 @@ OperationParserResult parse_tensor_collapse_shape_op(Parser *parser, const Opera
         } while (depth > 0 && !parser_peek(parser, TK_EOF));
     }
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 4;
     if (reassoc.size > 0) {
-        attributes = arena_new_array(parser->arena, MLIR_AttributeHandle, attributes_capacity);
+        attributes = arena_new_array(parser->arena, MLIR_NamedAttr, attributes_capacity);
         attributes[n_attributes++] = create_string_attr(parser, str_lit("_reassoc"), reassoc);
     }
 
@@ -2252,7 +2252,7 @@ OperationParserResult parse_generic_op(Parser *parser, const OperationParserPara
     }
 
     // Collect attributes, result types, and location
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
     MLIR_TypeHandle *result_types = MLIR_INVALID_HANDLE;
@@ -2375,7 +2375,7 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
         parser_expect(parser, TK_NAME);
     }
 
-    MLIR_AttributeHandle *attrs = MLIR_INVALID_HANDLE; size_t n_attrs = 0, cap_attrs = 0;
+    MLIR_NamedAttr *attrs = MLIR_INVALID_HANDLE; size_t n_attrs = 0, cap_attrs = 0;
     append_attr(parser, &attrs, &n_attrs, &cap_attrs, create_string_attr(parser, str_lit("visibility"), visibility));
 
     // Parse @function_name
@@ -2595,21 +2595,21 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
                     MLIR_ValueHandle arg = MLIR_CreateValueBlockArg(parser->ctx, reg_str, (uint32_t)func_args.size, arg_type, arg_location);
 
                     // Build structured dictionary attribute for this argument
-                    VecAttribute dict_elems;
-                    VecAttribute_reserve(parser->arena, &dict_elems, 2);
+                    MLIR_NamedAttr dict_elems[2];
+                    size_t n_dict_elems = 0;
 
                     MLIR_TypeHandle i32_ty = mlir_type_create_from_string(parser->ctx, str_lit("i32"));
                     if (has_div) {
-                        MLIR_AttributeHandle div_attr = MLIR_CreateAttributeInteger(parser->ctx, str_lit("tt.divisibility"), div_value, i32_ty);
-                        VecAttribute_push_back(parser->arena, &dict_elems, div_attr);
+                        MLIR_NamedAttr div_attr = MLIR_Named(MLIR_KEY_TT_DIVISIBILITY, MLIR_CreateAttributeInteger(parser->ctx, div_value, i32_ty));
+                        dict_elems[n_dict_elems++] = div_attr;
                     }
                     if (has_max_div) {
-                        MLIR_AttributeHandle max_div_attr = MLIR_CreateAttributeInteger(parser->ctx, str_lit("tt.max_divisibility"), max_div_value, i32_ty);
-                        VecAttribute_push_back(parser->arena, &dict_elems, max_div_attr);
+                        MLIR_NamedAttr max_div_attr = MLIR_Named(MLIR_KEY_TT_MAX_DIVISIBILITY, MLIR_CreateAttributeInteger(parser->ctx, max_div_value, i32_ty));
+                        dict_elems[n_dict_elems++] = max_div_attr;
                     }
 
                     // Create dictionary attribute (empty if no attributes)
-                    MLIR_AttributeHandle arg_dict = MLIR_CreateAttributeDict(parser->ctx, str_lit(""), dict_elems.data, dict_elems.size);
+                    MLIR_AttributeHandle arg_dict = MLIR_CreateAttributeDict(parser->ctx, dict_elems, n_dict_elems);
 
                     VecValue_push_back(parser->arena, &func_args, arg);
                     VecAttribute_push_back(parser->arena, &arg_attr_dicts, arg_dict);
@@ -2764,9 +2764,8 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
     // Add arg_attrs array attribute to the operation if there are any argument attributes
     if (arg_attr_dicts.size > 0) {
         // Create ArrayAttr containing all DictionaryAttrs
-        MLIR_AttributeHandle arg_attrs = MLIR_CreateAttributeArray(parser->ctx, 
-            str_lit("arg_attrs"), arg_attr_dicts.data, arg_attr_dicts.size);
-        MLIR_AppendOpAttribute(parser->ctx, op, arg_attrs);
+        MLIR_SetOpAttr(parser->ctx, op, MLIR_KEY_ARG_ATTRS,
+                       MLIR_CreateAttributeArray(parser->ctx, arg_attr_dicts.data, arg_attr_dicts.size));
     }
 
     size_t n_results = 0;
@@ -2800,7 +2799,7 @@ OperationParserResult parse_scf_if_op(Parser *parser, const OperationParserParam
         return empty;
     }
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -3095,7 +3094,7 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
     MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
         
         params->op_type,
-        MLIR_INVALID_HANDLE,
+        NULL,
         0,
         iter_result_types,
         n_iter_results,
@@ -3209,7 +3208,7 @@ OperationParserResult parse_scf_while_op(Parser *parser, const OperationParserPa
         }
     }
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
     parse_angle_brace_attributes(parser, &attributes, &n_attributes, &attributes_capacity);
@@ -3339,7 +3338,7 @@ OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserP
     }
 
     // Parse any attributes and result types using helper functions
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -3429,7 +3428,7 @@ OperationParserResult parse_arith_cmpi_op(Parser *parser, const OperationParserP
         parser_expect(parser, TK_NAME);
     }
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0, attributes_capacity = 0;
     append_attr(parser, &attributes, &n_attributes, &attributes_capacity, create_string_attr(parser, str_lit("predicate"), predicate));
 
@@ -3545,7 +3544,7 @@ OperationParserResult parse_scf_yield_op(Parser *parser, const OperationParserPa
     MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
         
         params->op_type,
-        MLIR_INVALID_HANDLE, 0,
+        NULL, 0,
         MLIR_INVALID_HANDLE, 0,
         params->lhs_results,
         params->n_lhs_results,
@@ -3611,7 +3610,7 @@ OperationParserResult parse_return_op(Parser *parser, const OperationParserParam
     MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
         
         params->op_type,
-        MLIR_INVALID_HANDLE, 0,
+        NULL, 0,
         MLIR_INVALID_HANDLE, 0,
         params->lhs_results,
         params->n_lhs_results,
@@ -3645,7 +3644,7 @@ OperationParserResult parse_tt_load_op(Parser *parser, const OperationParserPara
         else break;
     }
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -3776,7 +3775,7 @@ OperationParserResult parse_tt_store_op(Parser *parser, const OperationParserPar
         else break;
     }
 
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 
@@ -3877,7 +3876,7 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
     // Capture optional visibility and function name
     string visibility = str_lit("");
     string fname = str_lit("");
-    MLIR_AttributeHandle *attrs = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attrs = MLIR_INVALID_HANDLE;
     size_t n_attrs = 0;
     size_t cap_attrs = 0;
 
@@ -4029,7 +4028,7 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
                                                               arg_types, n_arg_types,
                                                               ret_types, n_ret_types);
         append_attr(parser, &attrs, &n_attrs, &cap_attrs,
-                    MLIR_CreateAttributeType(parser->ctx, str_lit("function_type"), func_type));
+                    MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(parser->ctx, func_type)));
     }
 
     // Parse additional attributes, result types, and location
@@ -4068,7 +4067,7 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
 }
 
 OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserParams *params) {
-    MLIR_AttributeHandle *attributes = MLIR_INVALID_HANDLE;
+    MLIR_NamedAttr *attributes = MLIR_INVALID_HANDLE;
     size_t n_attributes = 0;
     size_t attributes_capacity = 0;
 

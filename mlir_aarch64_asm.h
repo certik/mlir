@@ -35,5 +35,5 @@ uint32_t arm64_adrp(uint8_t rd, int64_t rel_pages);
 uint32_t arm64_add_imm(uint8_t rd, uint8_t rn, uint16_t imm12, bool sf);
 
 // aarch64.func op-attribute readers (shared by the emitter + container).
-int64_t attr_i(MLIR_Context *ctx, MLIR_OpHandle op, const char *name);
-string  attr_s(MLIR_Context *ctx, MLIR_OpHandle op, const char *name);
+int64_t attr_i(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key);
+string  attr_s(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key);

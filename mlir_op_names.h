@@ -50,6 +50,28 @@ static inline string op_type_table_name(const OpTypeTable *t, MLIR_OpType type) 
     return t->names[OP_TYPE_UNREGISTERED];
 }
 
+// The attribute-key table of a context (mlir_api.h, "Attribute keys"): the
+// names of the static keys of mlir_attr_keys.def and of the dynamic keys the
+// context interns, numbered from MLIR_KEY_COUNT up, and the hash that maps a
+// name back to its key. Shared by both backends.
+typedef struct AttrKeyTable {
+    Arena *arena;      // owned by the context; holds the arrays and names
+    string *names;     // names[k] for every key k < n_keys; names[0] is ""
+    uint32_t n_keys;
+    uint32_t cap_keys;
+    uint32_t *slots;   // open addressing, keys, 0 = empty; a power of two
+    uint32_t n_slots;
+} AttrKeyTable;
+
+void attr_key_table_init(AttrKeyTable *t, Arena *arena);
+// The key of `name`, or MLIR_KEY_INVALID.
+MLIR_AttrKey attr_key_table_lookup(const AttrKeyTable *t, string name);
+// The key of `name`; adds a dynamic key, with a copy of the name, if there
+// is none.
+MLIR_AttrKey attr_key_table_intern(AttrKeyTable *t, string name);
+// The name of `key`, or "" for MLIR_KEY_INVALID and unknown values.
+string attr_key_table_name(const AttrKeyTable *t, MLIR_AttrKey key);
+
 #ifdef __cplusplus
 }
 #endif

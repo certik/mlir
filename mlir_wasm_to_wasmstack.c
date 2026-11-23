@@ -547,21 +547,21 @@ static bool wasm_parse(Arena *a, const uint8_t *bytes, size_t size,
 // =============================================================================
 // MLIR builder helpers.
 // =============================================================================
-static MLIR_AttributeHandle attr_i32(MLIR_Context *ctx, const char *name, int64_t v) {
-    return MLIR_CreateAttributeInteger(ctx, str_from_cstr_view((char *)name), v,
-                                       MLIR_CreateTypeInteger(ctx, 32, true));
+static MLIR_NamedAttr attr_i32(MLIR_Context *ctx, MLIR_AttrKey key, int64_t v) {
+    return MLIR_Named(key, MLIR_CreateAttributeInteger(ctx, v,
+                                       MLIR_CreateTypeInteger(ctx, 32, true)));
 }
-static MLIR_AttributeHandle attr_i64(MLIR_Context *ctx, const char *name, int64_t v) {
-    return MLIR_CreateAttributeInteger(ctx, str_from_cstr_view((char *)name), v,
-                                       MLIR_CreateTypeInteger(ctx, 64, true));
+static MLIR_NamedAttr attr_i64(MLIR_Context *ctx, MLIR_AttrKey key, int64_t v) {
+    return MLIR_Named(key, MLIR_CreateAttributeInteger(ctx, v,
+                                       MLIR_CreateTypeInteger(ctx, 64, true)));
 }
-static MLIR_AttributeHandle attr_b(MLIR_Context *ctx, const char *name, bool v) {
-    return MLIR_CreateAttributeBool(ctx, str_from_cstr_view((char *)name), v);
+static MLIR_NamedAttr attr_b(MLIR_Context *ctx, MLIR_AttrKey key, bool v) {
+    return MLIR_Named(key, MLIR_CreateAttributeBool(ctx, v));
 }
-static MLIR_AttributeHandle attr_s(MLIR_Context *ctx, const char *name,
+static MLIR_NamedAttr attr_s(MLIR_Context *ctx, MLIR_AttrKey key,
                                    const char *v, size_t vlen) {
     string sv = { (char *)v, vlen };
-    return MLIR_CreateAttributeString(ctx, str_from_cstr_view((char *)name), sv);
+    return MLIR_Named(key, MLIR_CreateAttributeString(ctx, sv));
 }
 static char *hex_encode_arena(Arena *arena, const uint8_t *p, size_t n) {
     char *out = (char *)arena_alloc(arena, n ? n * 2 : 1);
@@ -572,15 +572,15 @@ static char *hex_encode_arena(Arena *arena, const uint8_t *p, size_t n) {
     }
     return out;
 }
-static MLIR_AttributeHandle attr_s_hex(MLIR_Context *ctx, Arena *arena,
-                                       const char *name,
+static MLIR_NamedAttr attr_s_hex(MLIR_Context *ctx, Arena *arena,
+                                       MLIR_AttrKey key,
                                        const uint8_t *p, size_t n) {
     char *h = hex_encode_arena(arena, p, n);
-    return attr_s(ctx, name, h, n * 2);
+    return attr_s(ctx, key, h, n * 2);
 }
 
 static MLIR_OpHandle build_op(MLIR_Context *ctx, MLIR_OpType t,
-                              MLIR_AttributeHandle *attrs, size_t na) {
+                              MLIR_NamedAttr *attrs, size_t na) {
     return MLIR_CreateOp(ctx, t,
         attrs, na, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
@@ -602,8 +602,8 @@ typedef struct {
 
 static MLIR_OpHandle emit_op_simple(MLIR_Context *ctx, MLIR_OpType t,
                                     uint8_t valtype) {
-    MLIR_AttributeHandle as[1];
-    as[0] = attr_i32(ctx, "valtype", valtype);
+    MLIR_NamedAttr as[1];
+    as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, valtype);
     return build_op(ctx, t, as, 1);
 }
 
@@ -641,9 +641,9 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
 
     // Helper: emit local.get / local.set / local.tee.
     #define EMIT_LOCAL_OP(T, IDX) do { \
-        MLIR_AttributeHandle as[2]; \
-        as[0] = attr_i32(ctx, "valtype", 0); \
-        as[1] = attr_i32(ctx, "local_idx", (int64_t)(IDX)); \
+        MLIR_NamedAttr as[2]; \
+        as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, 0); \
+        as[1] = attr_i32(ctx, MLIR_KEY_LOCAL_IDX, (int64_t)(IDX)); \
         MLIR_AppendBlockOp(ctx, dst_blk, build_op(ctx, (T), as, 2)); \
     } while (0)
 
@@ -652,16 +652,16 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
         uint8_t op = rd_u8(&r);
         switch (op) {
         case 0x00: { // unreachable
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", 0);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, 0);
             MLIR_AppendBlockOp(ctx, dst_blk, build_op(ctx, OP_TYPE_WASMSTACK_UNREACHABLE, as, 1));
             break;
         }
         case 0x0b: { // end (terminator)
             if (r.p != r.end) {
                 // Inner end (for block/loop/if). Emit ENDand keep going.
-                MLIR_AttributeHandle as[1];
-                as[0] = attr_i32(ctx, "valtype", 0);
+                MLIR_NamedAttr as[1];
+                as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, 0);
                 MLIR_AppendBlockOp(ctx, dst_blk, build_op(ctx, OP_TYPE_WASMSTACK_END, as, 1));
             } else {
                 // Function-terminator end — implied return. We don't
@@ -669,15 +669,15 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
                 // body simply ends. The wasmstack -> wasmssa lifter
                 // will materialize an SSA return using the function's
                 // type result.
-                MLIR_AttributeHandle as[1];
-                as[0] = attr_i32(ctx, "valtype", 0);
+                MLIR_NamedAttr as[1];
+                as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, 0);
                 MLIR_AppendBlockOp(ctx, dst_blk, build_op(ctx, OP_TYPE_WASMSTACK_END, as, 1));
             }
             break;
         }
         case 0x0f: { // return
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", 0);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, 0);
             MLIR_AppendBlockOp(ctx, dst_blk, build_op(ctx, OP_TYPE_WASMSTACK_RETURN, as, 1));
             break;
         }
@@ -698,36 +698,36 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
         }
         case 0x41: { // i32.const
             int64_t v = rd_sleb(&r);
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", WT_I32);
-            as[1] = attr_i64(ctx, "value", v);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_I32);
+            as[1] = attr_i64(ctx, MLIR_KEY_VALUE, v);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_CONST, as, 2));
             break;
         }
         case 0x42: { // i64.const
             int64_t v = rd_sleb(&r);
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", WT_I64);
-            as[1] = attr_i64(ctx, "value", v);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_I64);
+            as[1] = attr_i64(ctx, MLIR_KEY_VALUE, v);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_CONST, as, 2));
             break;
         }
         case 0x43: { // f32.const
             uint32_t bits = rd_f32_bits(&r);
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", WT_F32);
-            as[1] = attr_i64(ctx, "value", (int64_t)(int32_t)bits);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_F32);
+            as[1] = attr_i64(ctx, MLIR_KEY_VALUE, (int64_t)(int32_t)bits);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_CONST, as, 2));
             break;
         }
         case 0x44: { // f64.const
             uint64_t bits = rd_f64_bits(&r);
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", WT_F64);
-            as[1] = attr_i64(ctx, "value", (int64_t)bits);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_F64);
+            as[1] = attr_i64(ctx, MLIR_KEY_VALUE, (int64_t)bits);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_CONST, as, 2));
             break;
@@ -739,9 +739,9 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
                 return false;
             }
             const char *nm = m->funcs[fi].name;
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", 0);
-            as[1] = attr_s(ctx, "target", nm, strlen(nm));
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, 0);
+            as[1] = attr_s(ctx, MLIR_KEY_TARGET, nm, strlen(nm));
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_CALL, as, 2));
             break;
@@ -756,17 +756,17 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
             const WasmType *ft = &m->types[tidx];
             char *sp = hex_encode_arena(arena, ft->params, ft->n_params);
             char *sr = hex_encode_arena(arena, ft->results, ft->n_results);
-            MLIR_AttributeHandle as[3];
-            as[0] = attr_i32(ctx, "valtype", 0);
-            as[1] = attr_s(ctx, "sig_params", sp, ft->n_params * 2);
-            as[2] = attr_s(ctx, "sig_results", sr, ft->n_results * 2);
+            MLIR_NamedAttr as[3];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, 0);
+            as[1] = attr_s(ctx, MLIR_KEY_SIG_PARAMS, sp, ft->n_params * 2);
+            as[2] = attr_s(ctx, MLIR_KEY_SIG_RESULTS, sr, ft->n_results * 2);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_CALL_INDIRECT, as, 3));
             break;
         }
         case 0x1b: { // select
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", 0);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, 0);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_SELECT, as, 1));
             break;
@@ -774,9 +774,9 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
         case 0x23: { // global.get
             uint32_t gi = (uint32_t)rd_uleb(&r);
             uint8_t vt = (gi < m->n_globals) ? m->globals[gi].valtype : WT_I32;
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", vt);
-            as[1] = attr_i32(ctx, "global_idx", (int64_t)gi);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, vt);
+            as[1] = attr_i32(ctx, MLIR_KEY_GLOBAL_IDX, (int64_t)gi);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_GLOBAL_GET, as, 2));
             break;
@@ -784,9 +784,9 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
         case 0x24: { // global.set
             uint32_t gi = (uint32_t)rd_uleb(&r);
             uint8_t vt = (gi < m->n_globals) ? m->globals[gi].valtype : WT_I32;
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", vt);
-            as[1] = attr_i32(ctx, "global_idx", (int64_t)gi);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, vt);
+            as[1] = attr_i32(ctx, MLIR_KEY_GLOBAL_IDX, (int64_t)gi);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_GLOBAL_SET, as, 2));
             break;
@@ -815,11 +815,11 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
             case 0x35: vt = WT_I64; sz = 4; break;
             default:   vt = WT_I32; sz = 4; break;
             }
-            MLIR_AttributeHandle as[4];
-            as[0] = attr_i32(ctx, "valtype", vt);
-            as[1] = attr_i32(ctx, "memory_offset", (int64_t)off);
-            as[2] = attr_i32(ctx, "memory_align_log2", (int64_t)al);
-            as[3] = attr_i32(ctx, "mem_size_bytes", (int64_t)sz);
+            MLIR_NamedAttr as[4];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, vt);
+            as[1] = attr_i32(ctx, MLIR_KEY_MEMORY_OFFSET, (int64_t)off);
+            as[2] = attr_i32(ctx, MLIR_KEY_MEMORY_ALIGN_LOG2, (int64_t)al);
+            as[3] = attr_i32(ctx, MLIR_KEY_MEM_SIZE_BYTES, (int64_t)sz);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_LOAD, as, 4));
             // For signed sub-word loads, emit an explicit sign-extension
@@ -831,9 +831,9 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
                 uint8_t uop_byte = 0;
                 if (vt == WT_I32) uop_byte = (sz == 1) ? 0xc0 : 0xc1;
                 else              uop_byte = (sz == 1) ? 0xc2 : (sz == 2 ? 0xc3 : 0xc4);
-                MLIR_AttributeHandle bs[2];
-                bs[0] = attr_i32(ctx, "valtype", vt);
-                bs[1] = attr_i32(ctx, "wasm_opcode", (int64_t)uop_byte);
+                MLIR_NamedAttr bs[2];
+                bs[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, vt);
+                bs[1] = attr_i32(ctx, MLIR_KEY_WASM_OPCODE, (int64_t)uop_byte);
                 MLIR_AppendBlockOp(ctx, dst_blk,
                     build_op(ctx, OP_TYPE_WASMSTACK_UNOP, bs, 2));
             }
@@ -857,125 +857,125 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
             case 0x3e: vt = WT_I64; sz = 4; break;
             default:   vt = WT_I32; sz = 4; break;
             }
-            MLIR_AttributeHandle as[4];
-            as[0] = attr_i32(ctx, "valtype", vt);
-            as[1] = attr_i32(ctx, "memory_offset", (int64_t)off);
-            as[2] = attr_i32(ctx, "memory_align_log2", (int64_t)al);
-            as[3] = attr_i32(ctx, "mem_size_bytes", (int64_t)sz);
+            MLIR_NamedAttr as[4];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, vt);
+            as[1] = attr_i32(ctx, MLIR_KEY_MEMORY_OFFSET, (int64_t)off);
+            as[2] = attr_i32(ctx, MLIR_KEY_MEMORY_ALIGN_LOG2, (int64_t)al);
+            as[3] = attr_i32(ctx, MLIR_KEY_MEM_SIZE_BYTES, (int64_t)sz);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_STORE, as, 4));
             break;
         }
         case 0x3f: { // memory.size 0x00
             (void)rd_u8(&r);
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", 0);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, 0);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_MEMORY_SIZE, as, 1));
             break;
         }
         case 0x40: { // memory.grow 0x00
             (void)rd_u8(&r);
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", 0);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, 0);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_MEMORY_GROW, as, 1));
             break;
         }
         case 0x45: { // i32.eqz
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", WT_I32);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_I32);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_EQZ, as, 1));
             break;
         }
         case 0x50: { // i64.eqz
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", WT_I64);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_I64);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_EQZ, as, 1));
             break;
         }
         case 0x6a: { // i32.add — special-case
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", WT_I32);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_I32);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_ADD, as, 1));
             break;
         }
         case 0x6b: { // i32.sub
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", WT_I32);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_I32);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_SUB, as, 1));
             break;
         }
         case 0x7c: { // i64.add
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", WT_I64);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_I64);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_ADD, as, 1));
             break;
         }
         case 0x7d: { // i64.sub
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", WT_I64);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_I64);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_SUB, as, 1));
             break;
         }
         case 0xac: { // i64.extend_i32_s
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", WT_I64);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_I64);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_EXTEND_I32_S, as, 1));
             break;
         }
         case 0x02: { // block btype
             uint8_t bt = rd_u8(&r);
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", bt == 0x40 ? 0 : bt);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, bt == 0x40 ? 0 : bt);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_BLOCK, as, 1));
             break;
         }
         case 0x03: { // loop btype
             uint8_t bt = rd_u8(&r);
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", bt == 0x40 ? 0 : bt);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, bt == 0x40 ? 0 : bt);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_LOOP, as, 1));
             break;
         }
         case 0x04: { // if btype
             uint8_t bt = rd_u8(&r);
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", bt == 0x40 ? 0 : bt);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, bt == 0x40 ? 0 : bt);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_IF, as, 1));
             break;
         }
         case 0x05: { // else
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", 0);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, 0);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_ELSE, as, 1));
             break;
         }
         case 0x0c: { // br depth
             uint32_t d = (uint32_t)rd_uleb(&r);
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", 0);
-            as[1] = attr_i32(ctx, "depth", (int64_t)d);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, 0);
+            as[1] = attr_i32(ctx, MLIR_KEY_DEPTH, (int64_t)d);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_BR, as, 2));
             break;
         }
         case 0x0d: { // br_if depth
             uint32_t d = (uint32_t)rd_uleb(&r);
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", 0);
-            as[1] = attr_i32(ctx, "depth", (int64_t)d);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, 0);
+            as[1] = attr_i32(ctx, MLIR_KEY_DEPTH, (int64_t)d);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_BR_IF, as, 2));
             break;
@@ -992,34 +992,34 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
         case 0x71: case 0x72: case 0x73:
         case 0x74: case 0x75: case 0x76:
         case 0x77: case 0x78: { // i32 binops (mul/div/rem/and/or/xor/shl/shr/rotl/rotr) + i32 cmps
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", WT_I32);
-            as[1] = attr_i32(ctx, "wasm_opcode", (int64_t)op);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_I32);
+            as[1] = attr_i32(ctx, MLIR_KEY_WASM_OPCODE, (int64_t)op);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_BINOP, as, 2));
             break;
         }
         case 0x67: case 0x68: case 0x69: { // i32 unops clz/ctz/popcnt
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", WT_I32);
-            as[1] = attr_i32(ctx, "wasm_opcode", (int64_t)op);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_I32);
+            as[1] = attr_i32(ctx, MLIR_KEY_WASM_OPCODE, (int64_t)op);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_UNOP, as, 2));
             break;
         }
         case 0x79: case 0x7a: case 0x7b: { // i64 clz/ctz/popcnt
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", WT_I64);
-            as[1] = attr_i32(ctx, "wasm_opcode", (int64_t)op);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_I64);
+            as[1] = attr_i32(ctx, MLIR_KEY_WASM_OPCODE, (int64_t)op);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_UNOP, as, 2));
             break;
         }
         case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56:
         case 0x57: case 0x58: case 0x59: case 0x5a: { // i64 cmps
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", WT_I64);
-            as[1] = attr_i32(ctx, "wasm_opcode", (int64_t)op);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_I64);
+            as[1] = attr_i32(ctx, MLIR_KEY_WASM_OPCODE, (int64_t)op);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_BINOP, as, 2));
             break;
@@ -1027,27 +1027,27 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
         case 0x7e: case 0x7f: case 0x80: case 0x81: case 0x82:
         case 0x83: case 0x84: case 0x85: case 0x86: case 0x87:
         case 0x88: case 0x89: case 0x8a: { // i64 binops (mul/div/rem/and/or/xor/shl/shr/rotl/rotr)
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", WT_I64);
-            as[1] = attr_i32(ctx, "wasm_opcode", (int64_t)op);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_I64);
+            as[1] = attr_i32(ctx, MLIR_KEY_WASM_OPCODE, (int64_t)op);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_BINOP, as, 2));
             break;
         }
         // f32 cmps (0x5b..0x60):
         case 0x5b: case 0x5c: case 0x5d: case 0x5e: case 0x5f: case 0x60: {
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", WT_F32);
-            as[1] = attr_i32(ctx, "wasm_opcode", (int64_t)op);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_F32);
+            as[1] = attr_i32(ctx, MLIR_KEY_WASM_OPCODE, (int64_t)op);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_BINOP, as, 2));
             break;
         }
         // f64 cmps (0x61..0x66):
         case 0x61: case 0x62: case 0x63: case 0x64: case 0x65: case 0x66: {
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", WT_F64);
-            as[1] = attr_i32(ctx, "wasm_opcode", (int64_t)op);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_F64);
+            as[1] = attr_i32(ctx, MLIR_KEY_WASM_OPCODE, (int64_t)op);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_BINOP, as, 2));
             break;
@@ -1055,9 +1055,9 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
         // f32 unops (abs/neg/ceil/floor/trunc/nearest/sqrt: 0x8b..0x91):
         case 0x8b: case 0x8c: case 0x8d: case 0x8e: case 0x8f:
         case 0x90: case 0x91: {
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", WT_F32);
-            as[1] = attr_i32(ctx, "wasm_opcode", (int64_t)op);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_F32);
+            as[1] = attr_i32(ctx, MLIR_KEY_WASM_OPCODE, (int64_t)op);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_UNOP, as, 2));
             break;
@@ -1065,9 +1065,9 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
         // f32 binops (add/sub/mul/div/min/max/copysign: 0x92..0x98):
         case 0x92: case 0x93: case 0x94: case 0x95: case 0x96:
         case 0x97: case 0x98: {
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", WT_F32);
-            as[1] = attr_i32(ctx, "wasm_opcode", (int64_t)op);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_F32);
+            as[1] = attr_i32(ctx, MLIR_KEY_WASM_OPCODE, (int64_t)op);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_BINOP, as, 2));
             break;
@@ -1075,9 +1075,9 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
         // f64 unops (0x99..0x9f):
         case 0x99: case 0x9a: case 0x9b: case 0x9c: case 0x9d:
         case 0x9e: case 0x9f: {
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", WT_F64);
-            as[1] = attr_i32(ctx, "wasm_opcode", (int64_t)op);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_F64);
+            as[1] = attr_i32(ctx, MLIR_KEY_WASM_OPCODE, (int64_t)op);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_UNOP, as, 2));
             break;
@@ -1085,9 +1085,9 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
         // f64 binops (0xa0..0xa6):
         case 0xa0: case 0xa1: case 0xa2: case 0xa3: case 0xa4:
         case 0xa5: case 0xa6: {
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", WT_F64);
-            as[1] = attr_i32(ctx, "wasm_opcode", (int64_t)op);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, WT_F64);
+            as[1] = attr_i32(ctx, MLIR_KEY_WASM_OPCODE, (int64_t)op);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_BINOP, as, 2));
             break;
@@ -1125,16 +1125,16 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
             case 0xc2: case 0xc3: case 0xc4: res_vt = WT_I64; break;
             default:   res_vt = WT_I32;
             }
-            MLIR_AttributeHandle as[2];
-            as[0] = attr_i32(ctx, "valtype", res_vt);
-            as[1] = attr_i32(ctx, "wasm_opcode", (int64_t)op);
+            MLIR_NamedAttr as[2];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, res_vt);
+            as[1] = attr_i32(ctx, MLIR_KEY_WASM_OPCODE, (int64_t)op);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_UNOP, as, 2));
             break;
         }
         case 0x1a: { // drop — pop one value, no result.
-            MLIR_AttributeHandle as[1];
-            as[0] = attr_i32(ctx, "valtype", 0);
+            MLIR_NamedAttr as[1];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, 0);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_DROP, as, 1));
             break;
@@ -1156,10 +1156,10 @@ static bool decode_body(MLIR_Context *ctx, Arena *arena,
             }
             uint32_t dflt = (uint32_t)rd_uleb(&r);
             char *targets = arena_strndup(arena, tbuf, tlen);
-            MLIR_AttributeHandle as[3];
-            as[0] = attr_i32(ctx, "valtype", 0);
-            as[1] = attr_s(ctx, "targets", targets, tlen);
-            as[2] = attr_i32(ctx, "default", (int64_t)dflt);
+            MLIR_NamedAttr as[3];
+            as[0] = attr_i32(ctx, MLIR_KEY_VALTYPE, 0);
+            as[1] = attr_s(ctx, MLIR_KEY_TARGETS, targets, tlen);
+            as[2] = attr_i32(ctx, MLIR_KEY_DEFAULT, (int64_t)dflt);
             MLIR_AppendBlockOp(ctx, dst_blk,
                 build_op(ctx, OP_TYPE_WASMSTACK_BR_TABLE, as, 3));
             break;
@@ -1196,13 +1196,13 @@ static MLIR_OpHandle convert_func(MLIR_Context *ctx, Arena *arena,
 
     bool is_import = (fi < m->n_imported_funcs);
 
-    MLIR_AttributeHandle attrs[10];
+    MLIR_NamedAttr attrs[10];
     size_t na = 0;
-    attrs[na++] = attr_s(ctx, "sym_name", fn->name, strlen(fn->name));
-    attrs[na++] = attr_s(ctx, "param_types", pt_hex, fty->n_params * 2);
-    attrs[na++] = attr_s(ctx, "result_types", rt_hex, fty->n_results * 2);
-    attrs[na++] = attr_b(ctx, "exported", fn->exported);
-    attrs[na++] = attr_b(ctx, "internal", false);
+    attrs[na++] = attr_s(ctx, MLIR_KEY_SYM_NAME, fn->name, strlen(fn->name));
+    attrs[na++] = attr_s(ctx, MLIR_KEY_PARAM_TYPES, pt_hex, fty->n_params * 2);
+    attrs[na++] = attr_s(ctx, MLIR_KEY_RESULT_TYPES, rt_hex, fty->n_results * 2);
+    attrs[na++] = attr_b(ctx, MLIR_KEY_EXPORTED, fn->exported);
+    attrs[na++] = attr_b(ctx, MLIR_KEY_INTERNAL, false);
 
     if (is_import) {
         return build_op(ctx, OP_TYPE_WASMSTACK_IMPORT_FUNC, attrs, na);
@@ -1215,7 +1215,7 @@ static MLIR_OpHandle convert_func(MLIR_Context *ctx, Arena *arena,
         return MLIR_INVALID_HANDLE;
     }
 
-    attrs[na++] = attr_s_hex(ctx, arena, "local_types", local_types, n_locals);
+    attrs[na++] = attr_s_hex(ctx, arena, MLIR_KEY_LOCAL_TYPES, local_types, n_locals);
 
     MLIR_RegionHandle region = MLIR_CreateRegion(ctx);
     MLIR_AppendRegionBlock(ctx, region, dst_blk);
@@ -1248,10 +1248,10 @@ MLIR_OpHandle mlir_wasm_to_wasmstack(MLIR_Context *ctx,
     // data would silently overflow __heap_base past the end of
     // linmem, causing platform_heap_size() to wrap to a huge value
     // and the buddy allocator to scribble all over the binary.
-    MLIR_AttributeHandle mod_attrs[1];
+    MLIR_NamedAttr mod_attrs[1];
     size_t n_mod_attrs = 0;
     if (m.has_memory) {
-        mod_attrs[n_mod_attrs++] = attr_i32(ctx, "memory_min_pages",
+        mod_attrs[n_mod_attrs++] = attr_i32(ctx, MLIR_KEY_MEMORY_MIN_PAGES,
                                             (int64_t)m.memory_min_pages);
     }
     MLIR_OpHandle out_module = MLIR_CreateOp(ctx, OP_TYPE_MODULE,
@@ -1261,22 +1261,22 @@ MLIR_OpHandle mlir_wasm_to_wasmstack(MLIR_Context *ctx,
 
     // Emit module-level globals (the wasm GLOBAL section).
     for (uint32_t i = 0; i < m.n_globals; i++) {
-        MLIR_AttributeHandle as[4];
-        as[0] = attr_i32(ctx, "global_idx", (int64_t)i);
-        as[1] = attr_i32(ctx, "valtype", (int64_t)m.globals[i].valtype);
-        as[2] = attr_b(ctx, "mut", m.globals[i].mut != 0);
-        as[3] = attr_i64(ctx, "init_value", m.globals[i].init_value);
+        MLIR_NamedAttr as[4];
+        as[0] = attr_i32(ctx, MLIR_KEY_GLOBAL_IDX, (int64_t)i);
+        as[1] = attr_i32(ctx, MLIR_KEY_VALTYPE, (int64_t)m.globals[i].valtype);
+        as[2] = attr_b(ctx, MLIR_KEY_MUT, m.globals[i].mut != 0);
+        as[3] = attr_i64(ctx, MLIR_KEY_INIT_VALUE, m.globals[i].init_value);
         MLIR_AppendBlockOp(ctx, out_body,
             build_op(ctx, OP_TYPE_WASMSTACK_GLOBAL_DECL, as, 4));
     }
 
     // Emit module-level data segments (the wasm DATA section).
     for (uint32_t i = 0; i < m.n_data_segs; i++) {
-        MLIR_AttributeHandle as[3];
-        as[0] = attr_i32(ctx, "offset", (int64_t)m.data_segs[i].offset);
-        as[1] = attr_s(ctx, "init_data",
+        MLIR_NamedAttr as[3];
+        as[0] = attr_i32(ctx, MLIR_KEY_OFFSET, (int64_t)m.data_segs[i].offset);
+        as[1] = attr_s(ctx, MLIR_KEY_INIT_DATA,
             (const char *)m.data_segs[i].data, m.data_segs[i].size);
-        as[2] = attr_i32(ctx, "size", (int64_t)m.data_segs[i].size);
+        as[2] = attr_i32(ctx, MLIR_KEY_SIZE, (int64_t)m.data_segs[i].size);
         MLIR_AppendBlockOp(ctx, out_body,
             build_op(ctx, OP_TYPE_WASMSTACK_DATA_SEGMENT, as, 3));
     }
@@ -1292,9 +1292,9 @@ MLIR_OpHandle mlir_wasm_to_wasmstack(MLIR_Context *ctx,
         uint32_t fi = m.elem_funcs[k];
         if (fi == UINT32_MAX) continue;
         if (fi >= m.n_funcs || !m.funcs[fi].name) continue;
-        MLIR_AttributeHandle as[2];
-        as[0] = attr_i32(ctx, "slot", (int64_t)k);
-        as[1] = attr_s(ctx, "target", m.funcs[fi].name,
+        MLIR_NamedAttr as[2];
+        as[0] = attr_i32(ctx, MLIR_KEY_SLOT, (int64_t)k);
+        as[1] = attr_s(ctx, MLIR_KEY_TARGET, m.funcs[fi].name,
             strlen(m.funcs[fi].name));
         MLIR_AppendBlockOp(ctx, out_body,
             build_op(ctx, OP_TYPE_WASMSTACK_FUNC_ADDR_DECL, as, 2));

@@ -274,9 +274,9 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     // -----------------------------------------------------------------
     // Read module-level layout attributes set by mlir_llvm_to_aarch64.c.
     // -----------------------------------------------------------------
-    uint32_t n_globals    = (uint32_t)attr_i(ctx, module, "n_globals");
-    uint64_t global0_init = (uint64_t)attr_i(ctx, module, "global0_init");
-    uint64_t linmem_size  = (uint64_t)attr_i(ctx, module, "linmem_size");
+    uint32_t n_globals    = (uint32_t)attr_i(ctx, module, MLIR_KEY_N_GLOBALS);
+    uint64_t global0_init = (uint64_t)attr_i(ctx, module, MLIR_KEY_GLOBAL0_INIT);
+    uint64_t linmem_size  = (uint64_t)attr_i(ctx, module, MLIR_KEY_LINMEM_SIZE);
 
     // -----------------------------------------------------------------
     // Collect functions, find `_start`. `_start` must be placed first
@@ -294,8 +294,8 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     for (size_t i = 0; i < n_top; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
         if (MLIR_GetOpType(ctx, op) != OP_TYPE_AARCH64_DATA_INIT) continue;
-        int64_t off = attr_i(ctx, op, "offset");
-        string  bs  = attr_s(ctx, op, "init_data");
+        int64_t off = attr_i(ctx, op, MLIR_KEY_OFFSET);
+        string  bs  = attr_s(ctx, op, MLIR_KEY_INIT_DATA);
         inits = (MachineDataInit *)realloc(inits, (n_inits + 1) * sizeof(MachineDataInit));
         inits[n_inits].offset = (uint32_t)off;
         inits[n_inits].bytes  = bs;

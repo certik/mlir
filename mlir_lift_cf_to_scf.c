@@ -667,7 +667,7 @@ static MLIR_OpHandle create_unreachable_terminator(MLIR_Context *ctx, LiftState 
     bool is_llvm = MLIR_GetOpType(ctx, st->fn_op) == OP_TYPE_LLVM_FUNC;
 
     MLIR_AttributeHandle ty_attr =
-        MLIR_GetOpAttributeByName(ctx, st->fn_op, "function_type");
+        MLIR_GetOpAttr(ctx, st->fn_op, MLIR_KEY_FUNCTION_TYPE);
     MLIR_TypeHandle fn_ty = (ty_attr == MLIR_INVALID_HANDLE)
         ? MLIR_INVALID_HANDLE : MLIR_GetAttributeType(ctx, ty_attr);
     size_t n_res = (fn_ty == MLIR_INVALID_HANDLE)
@@ -2785,7 +2785,7 @@ static BranchXformResult transform_to_structured_cf_branches(MLIR_Context *ctx,
         int64_t *cases_i64 = n_cases
             ? arena_new_array(arena, int64_t, n_cases) : NULL;
         bool parsed = false;
-        MLIR_AttributeHandle cva = MLIR_GetOpAttributeByName(ctx, term, "case_values");
+        MLIR_AttributeHandle cva = MLIR_GetOpAttr(ctx, term, MLIR_KEY_CASE_VALUES);
         if (cva != MLIR_INVALID_HANDLE) {
             string s = MLIR_GetAttributeAsString(st->ctx, cva);
             size_t p = 0;
@@ -2815,9 +2815,9 @@ static BranchXformResult transform_to_structured_cf_branches(MLIR_Context *ctx,
         // scf.index_switch region order: regions[0] = default,
         // regions[1..N] = case 0..N-1 (matches cf.switch's successor
         // order, where succs[0] = default, succs[1..N] = cases).
-        MLIR_AttributeHandle cases_attr = MLIR_CreateAttributeDenseI64Array(
-            st->ctx, str_lit("cases"), cases_i64, n_cases);
-        MLIR_AttributeHandle *attrs = arena_new_array(arena, MLIR_AttributeHandle, 1);
+        MLIR_NamedAttr cases_attr = MLIR_Named(MLIR_KEY_CASES, MLIR_CreateAttributeDenseI64Array(
+            st->ctx, cases_i64, n_cases));
+        MLIR_NamedAttr *attrs = arena_new_array(arena, MLIR_NamedAttr, 1);
         attrs[0] = cases_attr;
 
         if_op = MLIR_CreateOp(
@@ -2986,7 +2986,7 @@ static bool transform_cfg_to_scf_region(MLIR_Context *ctx, LiftState *st, Combin
         string fn_op_name = MLIR_GetOpTypeName(st->ctx, MLIR_GetOpType(ctx, st->fn_op));
         string fn_sym_name = str_lit("?");
         MLIR_AttributeHandle sa =
-            MLIR_GetOpAttributeByName(ctx, st->fn_op, "sym_name");
+            MLIR_GetOpAttr(ctx, st->fn_op, MLIR_KEY_SYM_NAME);
         if (sa != MLIR_INVALID_HANDLE &&
             MLIR_GetAttributeKind(ctx, sa) == MLIR_ATTR_KIND_STRING) {
             string s = MLIR_GetAttributeString(ctx, sa);
@@ -3140,9 +3140,9 @@ static MLIR_ValueHandle get_switch_value(LiftState *st, unsigned v) {
         fresh_ssa_name(st), st->unk_loc);
     MLIR_ValueHandle *rs = arena_new_array(st->arena, MLIR_ValueHandle, 1);
     rs[0] = r;
-    MLIR_AttributeHandle  val = MLIR_CreateAttributeInteger(
-        st->ctx, str_lit("value"), (int64_t)(int32_t)v, st->i32_ty);
-    MLIR_AttributeHandle *as = arena_new_array(st->arena, MLIR_AttributeHandle, 1);
+    MLIR_NamedAttr  val = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(
+        st->ctx, (int64_t)(int32_t)v, st->i32_ty));
+    MLIR_NamedAttr *as = arena_new_array(st->arena, MLIR_NamedAttr, 1);
     as[0] = val;
     MLIR_OpHandle op = MLIR_CreateOp(
         st->ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
@@ -3271,9 +3271,9 @@ static MLIR_OpHandle create_cf_switch_in_block(MLIR_Context *ctx, Arena *arena,
     MLIR_ValueHandle *ops = arena_new_array(arena, MLIR_ValueHandle, 1);
     ops[0] = flag;
     // Attribute: case_values: array<i32: V0, V1, ...>.
-    MLIR_AttributeHandle ca = MLIR_CreateAttributeDenseI32Array(
-        ctx, str_lit("case_values"), case_values, n_cases);
-    MLIR_AttributeHandle *as = arena_new_array(arena, MLIR_AttributeHandle, 1);
+    MLIR_NamedAttr ca = MLIR_Named(MLIR_KEY_CASE_VALUES, MLIR_CreateAttributeDenseI32Array(
+        ctx, case_values, n_cases));
+    MLIR_NamedAttr *as = arena_new_array(arena, MLIR_NamedAttr, 1);
     as[0] = ca;
     MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(
         ctx, llvm_cfg ? OP_TYPE_LLVM_SWITCH : OP_TYPE_CF_SWITCH,

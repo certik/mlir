@@ -169,7 +169,7 @@ static bool ag_const_operand(MLIR_Context *ctx, MLIR_ValueHandle v,
     if (d == MLIR_INVALID_HANDLE) return false;
     if (MLIR_GetOpType(ctx, d) != OP_TYPE_LLVM_MLIR_CONSTANT) return false;
     if (MLIR_GetOpNumResults(ctx, d) != 1) return false;
-    MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(ctx, d, "value");
+    MLIR_AttributeHandle va = MLIR_GetOpAttr(ctx, d, MLIR_KEY_VALUE);
     if (va == MLIR_INVALID_HANDLE) return false;
     if (MLIR_GetAttributeKind(ctx, va) != MLIR_ATTR_KIND_INTEGER) return false;
     *val = MLIR_GetAttributeInteger(ctx, va);
@@ -224,7 +224,7 @@ static void ag_emit_op_ident(AgKB *k, MLIR_Context *ctx, MLIR_OpHandle op) {
     agkb_u64(k, na);
     for (size_t i = 0; i < na; i++) {
         MLIR_AttributeHandle a = MLIR_GetOpAttribute(ctx, op, i);
-        agkb_str(k, MLIR_GetAttributeName(a));
+        agkb_u64(k, MLIR_GetOpAttributeKey(ctx, op, i));
         MLIR_AttrKind kind = MLIR_GetAttributeKind(ctx, a);
         agkb_u64(k, (uint64_t)kind);
         agkb_i64(k, ag_attr_payload(ctx, a, kind));

@@ -215,6 +215,50 @@ void MLIR_EmitDiagnostic(MLIR_Context *ctx, MLIR_DiagSeverity severity,
                          MLIR_LocationHandle loc, const char *fmt, ...);
 
 // -----------------------------------------------------------------------------
+// Attribute keys
+// -----------------------------------------------------------------------------
+//
+// An attribute handle is a value (`42 : i32`, `"main"`, `@callee`); the name
+// under which an op (or a dictionary) holds it is a key, a small integer
+// (doc/mlir_api_design.md section 2.6). The keys of the names the in-tree
+// code uses are static, generated from mlir_attr_keys.def (MLIR_KEY_VALUE,
+// MLIR_KEY_SYM_NAME, ...); a context gives every other name a dynamic key,
+// >= MLIR_KEY_COUNT and stable for the life of the context, so a dynamic key
+// of one context means nothing in another. MLIR_KEY_INVALID (0) is no key.
+
+typedef uint32_t MLIR_AttrKey;
+
+enum {
+    MLIR_KEY_INVALID = 0,
+#define MLIR_ATTR_KEY(enumerator, name) enumerator,
+#include "mlir_attr_keys.def"
+    MLIR_KEY_COUNT
+};
+
+// The key of `name`: its static key, the dynamic key `ctx` gave it before,
+// or a new dynamic key. `name` is copied; it must not be empty.
+MLIR_AttrKey MLIR_InternAttrKey(MLIR_Context *ctx, string name);
+// Like MLIR_InternAttrKey, but returns MLIR_KEY_INVALID for a name `ctx`
+// has no key for.
+MLIR_AttrKey MLIR_LookupAttrKey(MLIR_Context *ctx, string name);
+// The name of `key`, borrowed from `ctx`; "" for MLIR_KEY_INVALID and values
+// that are not keys of `ctx`.
+string MLIR_GetAttrKeyName(MLIR_Context *ctx, MLIR_AttrKey key);
+
+// An attribute value under a key, as ops and dictionaries hold them.
+typedef struct MLIR_NamedAttr {
+    MLIR_AttrKey key;
+    MLIR_AttributeHandle value;
+} MLIR_NamedAttr;
+
+static inline MLIR_NamedAttr MLIR_Named(MLIR_AttrKey key, MLIR_AttributeHandle value) {
+    MLIR_NamedAttr a;
+    a.key = key;
+    a.value = value;
+    return a;
+}
+
+// -----------------------------------------------------------------------------
 // Operation API
 // -----------------------------------------------------------------------------
 
@@ -229,7 +273,7 @@ void MLIR_EmitDiagnostic(MLIR_Context *ctx, MLIR_DiagSeverity severity,
 MLIR_OpHandle MLIR_CreateOp(
     MLIR_Context *ctx,
     MLIR_OpType type,
-    MLIR_AttributeHandle *attributes, size_t n_attributes,
+    const MLIR_NamedAttr *attributes, size_t n_attributes,
     MLIR_TypeHandle *result_types, size_t n_result_types,
     MLIR_ValueHandle *results, size_t n_results,
     MLIR_ValueHandle *operands, size_t n_operands,
@@ -245,7 +289,7 @@ MLIR_OpHandle MLIR_CreateOp(
 MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     MLIR_Context *ctx,
     MLIR_OpType type,
-    MLIR_AttributeHandle *attributes, size_t n_attributes,
+    const MLIR_NamedAttr *attributes, size_t n_attributes,
     MLIR_TypeHandle *result_types, size_t n_result_types,
     MLIR_ValueHandle *results, size_t n_results,
     MLIR_ValueHandle *operands, size_t n_operands,
@@ -257,7 +301,9 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     MLIR_LocationHandle unnumbered_loc_def,
     string trailing_comment,
     int64_t source_line_start);
-void MLIR_AppendOpAttribute(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttributeHandle attr);
+// Sets the attribute `key` of `op` to `value`: replaces the value if the op
+// has the key, else appends it.
+void MLIR_SetOpAttr(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key, MLIR_AttributeHandle value);
 
 // Accessors
 // The op's type, as created. For its name use
@@ -270,12 +316,15 @@ size_t MLIR_GetOpNumResults(MLIR_Context *ctx, MLIR_OpHandle op);
 MLIR_ValueHandle MLIR_GetOpResult(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx);
 size_t MLIR_GetOpNumResultTypes(MLIR_Context *ctx, MLIR_OpHandle op);
 MLIR_TypeHandle MLIR_GetOpResultType(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx);
+// The attributes of an op, in order: the key and the value of attribute
+// `idx`.
 size_t MLIR_GetOpNumAttributes(MLIR_Context *ctx, MLIR_OpHandle op);
+MLIR_AttrKey MLIR_GetOpAttributeKey(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx);
 MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx);
-// Like MLIR_GetOpAttribute, but looks up by name including inherent
-// attributes that are stored in the op's Properties (e.g. LLVM::CallOp
-// `callee` and `var_callee_type`). Returns MLIR_INVALID_HANDLE on miss.
-MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_Context *ctx, MLIR_OpHandle op, const char *name);
+// The value of the op's attribute `key`, including inherent attributes that
+// upstream stores in the op's properties (e.g. LLVM::CallOp `callee`), or
+// MLIR_INVALID_HANDLE if it has none. Natively a scan comparing keys.
+MLIR_AttributeHandle MLIR_GetOpAttr(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key);
 size_t MLIR_GetOpNumRegions(MLIR_Context *ctx, MLIR_OpHandle op);
 MLIR_RegionHandle MLIR_GetOpRegion(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx);
 size_t MLIR_GetOpNumSuccessors(MLIR_Context *ctx, MLIR_OpHandle op);
@@ -496,7 +545,12 @@ string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle type);
 // Attribute API
 // -----------------------------------------------------------------------------
 
-// Creation & mutation
+// Creation
+//
+// An attribute handle is a value: the name it has on an op or in a
+// dictionary is a key (see "Attribute keys"), given where the op or the
+// dictionary is created (MLIR_CreateOp, MLIR_SetOpAttr,
+// MLIR_CreateAttributeDict). Arrays are copied.
 //
 // Integer and Float attributes carry an MLIR Type indicating their numeric
 // type (e.g. i32, i64, index, f32, f64). The caller must construct that
@@ -504,28 +558,29 @@ string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle type);
 // numeric attribute eagerly is what allows ops like arith.constant to
 // build proper IR (where `value`'s attribute type must equal the result
 // type) without later fixups.
-MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *ctx, string name, int64_t value, MLIR_TypeHandle type);
-MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, string name, double value, MLIR_TypeHandle type);
-MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *ctx, string name, bool value);
-MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *ctx, string name, string value);
-MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *ctx, string name);
-MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count);
+MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *ctx, int64_t value, MLIR_TypeHandle type);
+MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, double value, MLIR_TypeHandle type);
+MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *ctx, bool value);
+MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *ctx, string value);
+MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *ctx);
+MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *ctx, const MLIR_AttributeHandle *elements, size_t count);
 // Dense i32 array attribute (DenseI32ArrayAttr) — used e.g. for
 // `llvm.getelementptr`'s `rawConstantIndices`.
-MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *ctx, string name,
+MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *ctx,
                                                         const int32_t *values, size_t count);
 // Dense i64 array attribute (DenseI64ArrayAttr) — used e.g. for
 // `scf.index_switch`'s `cases` attribute.
-MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *ctx, string name,
+MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *ctx,
                                                         const int64_t *values, size_t count);
-MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count);
+// A dictionary of `count` named entries (upstream sorts them by name).
+MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *ctx, const MLIR_NamedAttr *entries, size_t count);
 // TypeAttr: an attribute that wraps a Type (e.g. func.func's
 // `function_type` attribute, which wraps a FunctionType).
-MLIR_AttributeHandle MLIR_CreateAttributeType(MLIR_Context *ctx, string name, MLIR_TypeHandle type);
+MLIR_AttributeHandle MLIR_CreateAttributeType(MLIR_Context *ctx, MLIR_TypeHandle type);
 
 // SymbolRef attribute (e.g. `callee = @foo` on func.call). The `value`
 // must be the bare symbol name (no leading `@`).
-MLIR_AttributeHandle MLIR_CreateAttributeSymbolRef(MLIR_Context *ctx, string name, string value);
+MLIR_AttributeHandle MLIR_CreateAttributeSymbolRef(MLIR_Context *ctx, string value);
 
 // -----------------------------------------------------------------------------
 // IR mutation primitives (used by lowering passes).
@@ -717,7 +772,6 @@ typedef enum {
 } MLIR_AttrKind;
 
 MLIR_AttrKind MLIR_GetAttributeKind(MLIR_Context *ctx, MLIR_AttributeHandle attr);
-string MLIR_GetAttributeName(MLIR_AttributeHandle attr);
 // Print any attribute as a string (e.g. "0 : i64", "@callee", "[1, 2]").
 // Used as a fallback when the kind is MLIR_ATTR_KIND_OTHER.
 string MLIR_GetAttributeAsString(MLIR_Context *ctx, MLIR_AttributeHandle attr);
@@ -731,6 +785,8 @@ string MLIR_GetAttributeString(MLIR_Context *ctx, MLIR_AttributeHandle attr);
 size_t MLIR_GetAttributeArraySize(MLIR_Context *ctx, MLIR_AttributeHandle attr);
 MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_Context *ctx, MLIR_AttributeHandle attr, size_t idx);
 size_t MLIR_GetAttributeDictSize(MLIR_Context *ctx, MLIR_AttributeHandle attr);
+// The key and the value of entry `idx` of a dictionary.
+MLIR_AttrKey MLIR_GetAttributeDictKey(MLIR_Context *ctx, MLIR_AttributeHandle attr, size_t idx);
 MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_Context *ctx, MLIR_AttributeHandle attr, size_t idx);
 // For TypeAttr, returns the wrapped Type. For other kinds returns
 // MLIR_INVALID_HANDLE.

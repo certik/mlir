@@ -49,19 +49,19 @@ static void make_stack_array_attrs(MLIR_Context *ctx, MLIR_TypeHandle i32_ty,
                                    MLIR_AttributeHandle *out_array,
                                    MLIR_AttributeHandle *out_dict) {
     MLIR_AttributeHandle elems[3] = {
-        MLIR_CreateAttributeInteger(ctx, str_lit(""), 11, i32_ty),
-        MLIR_CreateAttributeInteger(ctx, str_lit(""), 22, i32_ty),
-        MLIR_CreateAttributeInteger(ctx, str_lit(""), 33, i32_ty),
+        MLIR_CreateAttributeInteger(ctx, 11, i32_ty),
+        MLIR_CreateAttributeInteger(ctx, 22, i32_ty),
+        MLIR_CreateAttributeInteger(ctx, 33, i32_ty),
     };
-    *out_array = MLIR_CreateAttributeArray(ctx, str_lit("arr"), elems, 3);
+    *out_array = MLIR_CreateAttributeArray(ctx, elems, 3);
     // Keys in sorted order: upstream's DictionaryAttr sorts its entries.
     // The key text also lives in this frame: attribute names are copied too.
     char keys[2] = { 'a', 'b' };
-    MLIR_AttributeHandle entries[2] = {
-        MLIR_CreateAttributeInteger(ctx, (string){ &keys[0], 1 }, 44, i32_ty),
-        MLIR_CreateAttributeInteger(ctx, (string){ &keys[1], 1 }, 55, i32_ty),
+    MLIR_NamedAttr entries[2] = {
+        MLIR_Named(MLIR_InternAttrKey(ctx, (string){ &keys[0], 1 }), MLIR_CreateAttributeInteger(ctx, 44, i32_ty)),
+        MLIR_Named(MLIR_InternAttrKey(ctx, (string){ &keys[1], 1 }), MLIR_CreateAttributeInteger(ctx, 55, i32_ty)),
     };
-    *out_dict = MLIR_CreateAttributeDict(ctx, str_lit("dict"), entries, 2);
+    *out_dict = MLIR_CreateAttributeDict(ctx, entries, 2);
 }
 
 // Overwrite the stack area the previous call used.
@@ -112,7 +112,7 @@ int app_main(void) {
         print_string(str_lit("\ndict attr from stack buffer:"));
         for (size_t i = 0; i < MLIR_GetAttributeDictSize(ctx, dict); i++) {
             MLIR_AttributeHandle e = MLIR_GetAttributeDictElement(ctx, dict, i);
-            print_string(format(arena, str_lit(" {}={}"), MLIR_GetAttributeName(e),
+            print_string(format(arena, str_lit(" {}={}"), MLIR_GetAttrKeyName(ctx, MLIR_GetAttributeDictKey(ctx, dict, i)),
                                 MLIR_GetAttributeInteger(ctx, e)));
         }
         print_string(str_lit("\n"));
@@ -352,9 +352,9 @@ int app_main(void) {
     MLIR_AppendRegionBlock(ctx, func_region, func_block);
 
     // ---- func.func op --------------------------------------------------------
-    MLIR_AttributeHandle sym_name_attr =
-        MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("add"));
-    MLIR_AttributeHandle *func_attrs = arena_new_array(arena, MLIR_AttributeHandle, 1);
+    MLIR_NamedAttr sym_name_attr =
+        MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("add")));
+    MLIR_NamedAttr *func_attrs = arena_new_array(arena, MLIR_NamedAttr, 1);
     func_attrs[0] = sym_name_attr;
     MLIR_RegionHandle *func_regions = arena_new_array(arena, MLIR_RegionHandle, 1);
     func_regions[0] = func_region;

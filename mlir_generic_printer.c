@@ -246,7 +246,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
             int opty = parser_op_kind(&ctx->op_types, MLIR_GetOpType(ctx->mlir_ctx, op));
             for (size_t i = 0; i < n_attrs; i++) {
                 MLIR_AttributeHandle attr = MLIR_GetOpAttribute(ctx->mlir_ctx, op, i);
-                string name = MLIR_GetAttributeName(attr);
+                string name = MLIR_GetAttrKeyName(ctx->mlir_ctx, MLIR_GetOpAttributeKey(ctx->mlir_ctx, op, i));
                 if (name.size > 0 && name.str[0] == '_') { continue; }
                 if (!opened) { strbuf_append(arena, &result, str_lit(" {")); opened = true; }
                 if (!first) strbuf_append(arena, &result, str_lit(", ")); first = false;
@@ -299,7 +299,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
                                         if (k > 0) strbuf_append(arena, &result, str_lit(", "));
                                         MLIR_AttributeHandle dict_elem = MLIR_GetAttributeDictElement(ctx->mlir_ctx, elem, k);
                                         if (dict_elem) {
-                                            string elem_name = MLIR_GetAttributeName(dict_elem);
+                                            string elem_name = MLIR_GetAttrKeyName(ctx->mlir_ctx, MLIR_GetAttributeDictKey(ctx->mlir_ctx, elem, k));
                                             strbuf_append(arena, &result, elem_name);
                                             strbuf_append(arena, &result, str_lit(" = "));
                                             int64_t val = MLIR_GetAttributeInteger(ctx->mlir_ctx, dict_elem);
@@ -322,7 +322,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
                             if (j > 0) strbuf_append(arena, &result, str_lit(", "));
                             MLIR_AttributeHandle elem = MLIR_GetAttributeDictElement(ctx->mlir_ctx, attr, j);
                             if (elem) {
-                                string elem_name = MLIR_GetAttributeName(elem);
+                                string elem_name = MLIR_GetAttrKeyName(ctx->mlir_ctx, MLIR_GetAttributeDictKey(ctx->mlir_ctx, attr, j));
                                 strbuf_append(arena, &result, elem_name);
                                 strbuf_append(arena, &result, str_lit(" = "));
                                 int64_t val = MLIR_GetAttributeInteger(ctx->mlir_ctx, elem);

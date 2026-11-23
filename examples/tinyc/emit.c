@@ -373,7 +373,7 @@ static MLIR_OpHandle emit_op(E *e,
                              MLIR_TypeHandle *result_types, size_t n_result_types,
                              MLIR_ValueHandle *results, size_t n_results,
                              MLIR_ValueHandle *operands, size_t n_operands,
-                             MLIR_AttributeHandle *attrs, size_t n_attrs,
+                             MLIR_NamedAttr *attrs, size_t n_attrs,
                              MLIR_RegionHandle *regions, size_t n_regions) {
     MLIR_OpHandle op = MLIR_CreateOp(e->ctx, type,
                                      attrs, n_attrs,
@@ -445,8 +445,8 @@ static MLIR_ValueHandle emit_const_i32(E *e, int64_t v) {
                                                   e->i32, ssa_name(e), eloc(e, 0));
     MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i32;
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
-    MLIR_AttributeHandle val = MLIR_CreateAttributeInteger(e->ctx, str_lit("value"), v, e->i32);
-    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = val;
+    MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(e->ctx, v, e->i32));
+    MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1); as[0] = val;
     emit_op(e, OP_TYPE_ARITH_CONSTANT,
             rts, 1, rs, 1, NULL, 0, as, 1, NULL, 0);
     fact_put(e, r, FACT_CONST, 0, false, (int64_t)(int32_t)v);
@@ -458,8 +458,8 @@ static MLIR_ValueHandle emit_const_f32(E *e, double v) {
                                                   e->f32, ssa_name(e), eloc(e, 0));
     MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->f32;
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
-    MLIR_AttributeHandle val = MLIR_CreateAttributeFloat(e->ctx, str_lit("value"), v, e->f32);
-    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = val;
+    MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeFloat(e->ctx, v, e->f32));
+    MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1); as[0] = val;
     emit_op(e, OP_TYPE_ARITH_CONSTANT,
             rts, 1, rs, 1, NULL, 0, as, 1, NULL, 0);
     return r;
@@ -470,8 +470,8 @@ static MLIR_ValueHandle emit_const_f64(E *e, double v) {
                                                   e->f64, ssa_name(e), eloc(e, 0));
     MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->f64;
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
-    MLIR_AttributeHandle val = MLIR_CreateAttributeFloat(e->ctx, str_lit("value"), v, e->f64);
-    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = val;
+    MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeFloat(e->ctx, v, e->f64));
+    MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1); as[0] = val;
     emit_op(e, OP_TYPE_ARITH_CONSTANT,
             rts, 1, rs, 1, NULL, 0, as, 1, NULL, 0);
     return r;
@@ -506,8 +506,8 @@ static MLIR_ValueHandle emit_const_i64(E *e, int64_t v) {
                                                   e->i64, ssa_name(e), eloc(e, 0));
     MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i64;
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
-    MLIR_AttributeHandle val = MLIR_CreateAttributeInteger(e->ctx, str_lit("value"), v, e->i64);
-    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = val;
+    MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(e->ctx, v, e->i64));
+    MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1); as[0] = val;
     emit_op(e, OP_TYPE_ARITH_CONSTANT,
             rts, 1, rs, 1, NULL, 0, as, 1, NULL, 0);
     return r;
@@ -565,10 +565,10 @@ static MLIR_ValueHandle emit_cmpi(E *e, int64_t predicate,
     MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i1;
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
     MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 2); ops[0] = a; ops[1] = b;
-    MLIR_AttributeHandle pred = MLIR_CreateAttributeInteger(e->ctx, str_lit("predicate"),
+    MLIR_NamedAttr pred = MLIR_Named(MLIR_KEY_PREDICATE, MLIR_CreateAttributeInteger(e->ctx,
                                                             predicate,
-                                                            MLIR_CreateTypeInteger(e->ctx, 64, true));
-    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = pred;
+                                                            MLIR_CreateTypeInteger(e->ctx, 64, true)));
+    MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1); as[0] = pred;
     emit_op(e, OP_TYPE_ARITH_CMPI,
             rts, 1, rs, 1, ops, 2, as, 1, NULL, 0);
     return r;
@@ -581,10 +581,10 @@ static MLIR_ValueHandle emit_cmpf(E *e, int64_t predicate,
     MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i1;
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
     MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 2); ops[0] = a; ops[1] = b;
-    MLIR_AttributeHandle pred = MLIR_CreateAttributeInteger(e->ctx, str_lit("predicate"),
+    MLIR_NamedAttr pred = MLIR_Named(MLIR_KEY_PREDICATE, MLIR_CreateAttributeInteger(e->ctx,
                                                             predicate,
-                                                            MLIR_CreateTypeInteger(e->ctx, 64, true));
-    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = pred;
+                                                            MLIR_CreateTypeInteger(e->ctx, 64, true)));
+    MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1); as[0] = pred;
     emit_op(e, OP_TYPE_ARITH_CMPF,
             rts, 1, rs, 1, ops, 2, as, 1, NULL, 0);
     return r;
@@ -597,10 +597,10 @@ static MLIR_ValueHandle emit_icmp_ptr(E *e, int64_t predicate,
     MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i1;
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
     MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 2); ops[0] = a; ops[1] = b;
-    MLIR_AttributeHandle pred = MLIR_CreateAttributeInteger(e->ctx, str_lit("predicate"),
+    MLIR_NamedAttr pred = MLIR_Named(MLIR_KEY_PREDICATE, MLIR_CreateAttributeInteger(e->ctx,
                                                             predicate,
-                                                            MLIR_CreateTypeInteger(e->ctx, 64, true));
-    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = pred;
+                                                            MLIR_CreateTypeInteger(e->ctx, 64, true)));
+    MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1); as[0] = pred;
     emit_op(e, OP_TYPE_LLVM_ICMP,
             rts, 1, rs, 1, ops, 2, as, 1, NULL, 0);
     return r;
@@ -722,8 +722,8 @@ static MLIR_ValueHandle emit_const_narrow(E *e, int64_t v, MLIR_TypeHandle ty) {
                                                   ty, ssa_name(e), eloc(e, 0));
     MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = ty;
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
-    MLIR_AttributeHandle val = MLIR_CreateAttributeInteger(e->ctx, str_lit("value"), v, ty);
-    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = val;
+    MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(e->ctx, v, ty));
+    MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1); as[0] = val;
     emit_op(e, OP_TYPE_ARITH_CONSTANT,
             rts, 1, rs, 1, NULL, 0, as, 1, NULL, 0);
     return r;
@@ -763,9 +763,9 @@ static MLIR_ValueHandle emit_addressof(E *e, string sym, MLIR_TypeHandle ptr_ty)
                                                   ptr_ty, ssa_name(e), eloc(e, 0));
     MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = ptr_ty;
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
-    MLIR_AttributeHandle a = MLIR_CreateAttributeSymbolRef(
-        e->ctx, str_lit("global_name"), sym);
-    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = a;
+    MLIR_NamedAttr a = MLIR_Named(MLIR_KEY_GLOBAL_NAME, MLIR_CreateAttributeSymbolRef(
+        e->ctx, sym));
+    MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1); as[0] = a;
     emit_op(e, OP_TYPE_LLVM_MLIR_ADDRESSOF,
             rts, 1, rs, 1, NULL, 0, as, 1, NULL, 0);
     return r;
@@ -835,8 +835,8 @@ static MLIR_ValueHandle emit_alloca(E *e, MLIR_TypeHandle elem_ty) {
     MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
     MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1);
     ops[0] = e->entry_const_one;
-    MLIR_AttributeHandle elem_attr = MLIR_CreateAttributeType(e->ctx, str_lit("elem_type"), elem_ty);
-    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = elem_attr;
+    MLIR_NamedAttr elem_attr = MLIR_Named(MLIR_KEY_ELEM_TYPE, MLIR_CreateAttributeType(e->ctx, elem_ty));
+    MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1); as[0] = elem_attr;
 
     bool hoist = e->entry_block && e->entry_block != e->cur_block;
     MLIR_BlockHandle saved = e->cur_block;
@@ -897,10 +897,10 @@ static MLIR_ValueHandle emit_gep(E *e,
     MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, n_ops);
     ops[0] = base;
     for (size_t i = 0; i < n_dyn; i++) ops[1 + i] = dyn_idx[i];
-    MLIR_AttributeHandle elem_attr = MLIR_CreateAttributeType(e->ctx, str_lit("elem_type"), source_elem_ty);
-    MLIR_AttributeHandle raw_attr = MLIR_CreateAttributeDenseI32Array(
-        e->ctx, str_lit("rawConstantIndices"), raw_idx, n_raw);
-    MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 2);
+    MLIR_NamedAttr elem_attr = MLIR_Named(MLIR_KEY_ELEM_TYPE, MLIR_CreateAttributeType(e->ctx, source_elem_ty));
+    MLIR_NamedAttr raw_attr = MLIR_Named(MLIR_KEY_RAW_CONSTANT_INDICES, MLIR_CreateAttributeDenseI32Array(
+        e->ctx, raw_idx, n_raw));
+    MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 2);
     as[0] = raw_attr; as[1] = elem_attr;
     emit_op(e, OP_TYPE_LLVM_GEP,
             rts, 1, rs, 1, ops, n_ops, as, 2, NULL, 0);
@@ -2544,17 +2544,17 @@ static void emit_flat_call(E *e, Scope *sc, FuncSig *sig, VecExprPtr args,
         rs[i]  = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, (uint32_t)i,
                                           rts[i], ssa_name(e), eloc(e, 0));
     }
-    MLIR_AttributeHandle callee_attr = MLIR_CreateAttributeSymbolRef(
-        e->ctx, str_lit("callee"), sig->name);
+    MLIR_NamedAttr callee_attr = MLIR_Named(MLIR_KEY_CALLEE, MLIR_CreateAttributeSymbolRef(
+        e->ctx, sig->name));
     if (real_variadic) {
-        MLIR_AttributeHandle var_ty = MLIR_CreateAttributeType(
-            e->ctx, str_lit("var_callee_type"), sig->llvm_fn_ty);
-        MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 2);
+        MLIR_NamedAttr var_ty = MLIR_Named(MLIR_KEY_VAR_CALLEE_TYPE, MLIR_CreateAttributeType(
+            e->ctx, sig->llvm_fn_ty));
+        MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 2);
         as[0] = callee_attr; as[1] = var_ty;
         emit_op(e, OP_TYPE_LLVM_CALL,
                 rts, n_out, rs, n_out, ops, op_off, as, 2, NULL, 0);
     } else {
-        MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1);
+        MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1);
         as[0] = callee_attr;
         emit_op(e, OP_TYPE_FUNC_CALL,
                 rts, n_out, rs, n_out, ops, op_off, as, 1, NULL, 0);
@@ -3347,10 +3347,10 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                             MLIR_TypeHandle, 1); frts[0] = f_ty;
                         MLIR_ValueHandle *frs = arena_new_array(e->arena,
                             MLIR_ValueHandle, 1); frs[0] = fn_v;
-                        MLIR_AttributeHandle va = MLIR_CreateAttributeSymbolRef(
-                            e->ctx, str_lit("value"), fsig->name);
-                        MLIR_AttributeHandle *fas = arena_new_array(e->arena,
-                            MLIR_AttributeHandle, 1); fas[0] = va;
+                        MLIR_NamedAttr va = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeSymbolRef(
+                            e->ctx, fsig->name));
+                        MLIR_NamedAttr *fas = arena_new_array(e->arena,
+                            MLIR_NamedAttr, 1); fas[0] = va;
                         emit_op(e, OP_TYPE_FUNC_CONSTANT,
                                 frts, 1, frs, 1, NULL, 0, fas, 1, NULL, 0);
                         // Cast (T...) -> R into !llvm.ptr for uniform storage.
@@ -4273,9 +4273,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     e->ctx, MLIR_INVALID_HANDLE, 0, e->i64, ssa_name(e), eloc(e, 0));
                 MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i64;
                 MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = res;
-                MLIR_AttributeHandle ca = MLIR_CreateAttributeSymbolRef(
-                    e->ctx, str_lit("callee"), str_lit("__tinyc_syscall6"));
-                MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = ca;
+                MLIR_NamedAttr ca = MLIR_Named(MLIR_KEY_CALLEE, MLIR_CreateAttributeSymbolRef(
+                    e->ctx, str_lit("__tinyc_syscall6")));
+                MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1); as[0] = ca;
                 emit_op(e, OP_TYPE_FUNC_CALL,
                         rts, 1, rs, 1, ops, 7, as, 1, NULL, 0);
                 r.val = res; r.is_i64 = true; return r;
@@ -4348,9 +4348,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->ptr;
                 MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = res;
                 MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = sz_coerced;
-                MLIR_AttributeHandle ca = MLIR_CreateAttributeSymbolRef(
-                    e->ctx, str_lit("callee"), str_lit("malloc"));
-                MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = ca;
+                MLIR_NamedAttr ca = MLIR_Named(MLIR_KEY_CALLEE, MLIR_CreateAttributeSymbolRef(
+                    e->ctx, str_lit("malloc")));
+                MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1); as[0] = ca;
                 emit_op(e, OP_TYPE_FUNC_CALL,
                         rts, 1, rs, 1, ops, 1, as, 1, NULL, 0);
                 r.val = res; r.is_ptr = true; return r;
@@ -4364,9 +4364,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 EVal pv = emit_expr(e, sc, ex->args.data[0]);
                 MLIR_ValueHandle p = pv.is_ptr ? pv.val : emit_null_ptr(e);
                 MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = p;
-                MLIR_AttributeHandle ca = MLIR_CreateAttributeSymbolRef(
-                    e->ctx, str_lit("callee"), str_lit("free"));
-                MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1); as[0] = ca;
+                MLIR_NamedAttr ca = MLIR_Named(MLIR_KEY_CALLEE, MLIR_CreateAttributeSymbolRef(
+                    e->ctx, str_lit("free")));
+                MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1); as[0] = ca;
                 emit_op(e, OP_TYPE_FUNC_CALL,
                         NULL, 0, NULL, 0, ops, 1, as, 1, NULL, 0);
                 r.val = emit_const_i32(e, 0);
@@ -6162,7 +6162,7 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
     e->cur_sret_ptr = saved_sret;
     e->cur_va_args = saved_va_args;
 
-    MLIR_AttributeHandle sym_name = MLIR_CreateAttributeString(e->ctx, str_lit("sym_name"), f->name);
+    MLIR_NamedAttr sym_name = MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(e->ctx, f->name));
     // Variadic functions are emitted as `llvm.func` with an LLVMFunctionType
     // attribute (which carries the var_arg flag); non-variadic ones stay as
     // `func.func` with a regular FunctionType. cursor_va functions are a
@@ -6172,20 +6172,20 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
     // LLVM IR through convert-func-to-llvm.
     bool real_variadic = sig->is_variadic && !sig->cursor_va;
     MLIR_TypeHandle ft = real_variadic ? sig->llvm_fn_ty : sig->fn_ty;
-    MLIR_AttributeHandle fn_ty_attr = MLIR_CreateAttributeType(e->ctx, str_lit("function_type"), ft);
+    MLIR_NamedAttr fn_ty_attr = MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(e->ctx, ft));
     // Up to 4 attrs: sym_name, function_type, llvm.linkage, wasm.export_name.
-    MLIR_AttributeHandle *attrs = arena_new_array(e->arena, MLIR_AttributeHandle, 4);
+    MLIR_NamedAttr *attrs = arena_new_array(e->arena, MLIR_NamedAttr, 4);
     attrs[0] = sym_name; attrs[1] = fn_ty_attr;
     int n_attrs = 2;
     if (f->is_static) {
-        attrs[n_attrs++] = MLIR_CreateAttributeLLVMLinkageInternal(e->ctx, str_lit("llvm.linkage"));
+        attrs[n_attrs++] = MLIR_Named(MLIR_KEY_LLVM_LINKAGE, MLIR_CreateAttributeLLVMLinkageInternal(e->ctx));
     }
     // `__attribute__((__export_name__("foo")))` on a function definition
     // re-exports the function under a different wasm export name (used
     // e.g. by corec's wasm_buddy_alloc / wasm_buddy_free helpers).
     if (f->wasm_export_name.size > 0) {
-        attrs[n_attrs++] = MLIR_CreateAttributeString(e->ctx, str_lit("wasm.export_name"),
-                                                      f->wasm_export_name);
+        attrs[n_attrs++] = MLIR_Named(MLIR_KEY_WASM_EXPORT_NAME, MLIR_CreateAttributeString(e->ctx,
+                                                      f->wasm_export_name));
     }
     MLIR_RegionHandle *regs = arena_new_array(e->arena, MLIR_RegionHandle, 1); regs[0] = body_r;
     MLIR_OpHandle fn;
@@ -6970,8 +6970,8 @@ static MLIR_ValueHandle ginit_emit(GInit *gi, MLIR_TypeHandle agg_ty, MLIR_Value
                                                       sl->ty, ssa_name(e), eloc(e, 0));
         MLIR_TypeHandle *crts = arena_new_array(e->arena, MLIR_TypeHandle, 1); crts[0] = sl->ty;
         MLIR_ValueHandle *crs = arena_new_array(e->arena, MLIR_ValueHandle, 1); crs[0] = c;
-        MLIR_AttributeHandle *cas = arena_new_array(e->arena, MLIR_AttributeHandle, 1);
-        cas[0] = sl->val;
+        MLIR_NamedAttr *cas = arena_new_array(e->arena, MLIR_NamedAttr, 1);
+        cas[0] = MLIR_Named(MLIR_KEY_VALUE, sl->val);
         emit_op(e, OP_TYPE_LLVM_MLIR_CONSTANT,
                 crts, 1, crs, 1, NULL, 0, cas, 1, NULL, 0);
         MLIR_ValueHandle rv = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
@@ -6981,9 +6981,9 @@ static MLIR_ValueHandle ginit_emit(GInit *gi, MLIR_TypeHandle agg_ty, MLIR_Value
         MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 2);
         ops[0] = agg;
         ops[1] = c;
-        MLIR_AttributeHandle *as = arena_new_array(e->arena, MLIR_AttributeHandle, 1);
-        as[0] = MLIR_CreateAttributeDenseI64Array(e->ctx, str_lit("position"),
-                                                  sl->path, sl->depth);
+        MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1);
+        as[0] = MLIR_Named(MLIR_KEY_POSITION, MLIR_CreateAttributeDenseI64Array(e->ctx,
+                                                  sl->path, sl->depth));
         emit_op(e, OP_TYPE_LLVM_INSERTVALUE,
                 rts, 1, rs, 1, ops, 2, as, 1, NULL, 0);
         agg = rv;
@@ -7018,7 +7018,7 @@ static void ginit_scalar(GInit *gi, Type t, MLIR_TypeHandle ty, Expr *ex) {
         return;
     }
     if (ty == e->f32 || ty == e->f64) {
-        ginit_set(gi, ty, MLIR_CreateAttributeFloat(e->ctx, str_lit("value"),
+        ginit_set(gi, ty, MLIR_CreateAttributeFloat(e->ctx,
                                                     gconst_to_float(c, ty == e->f32), ty));
         return;
     }
@@ -7027,7 +7027,7 @@ static void ginit_scalar(GInit *gi, Type t, MLIR_TypeHandle ty, Expr *ex) {
     int64_t v = wrap_bits(gconst_to_int(c, t),
                           ty == e->i8 ? 8 : ty == e->i16 ? 16 : ty == e->i64 ? 64 : 32, false);
     if (v != 0)
-        ginit_set(gi, ty, MLIR_CreateAttributeInteger(e->ctx, str_lit("value"), v, ty));
+        ginit_set(gi, ty, MLIR_CreateAttributeInteger(e->ctx, v, ty));
     else if (gi->overriding)
         ginit_set(gi, ty, MLIR_INVALID_HANDLE);  // may replace an earlier value
 }
@@ -7214,7 +7214,7 @@ static void ginit_value(GInit *gi, Type t, MLIR_TypeHandle ty, Expr *ex) {
             int64_t b = tinyc_narrow_const((int64_t)(uint8_t)ex->name.str[k], et);
             if (b == 0) continue;
             if (!ginit_push(gi, k)) return;
-            ginit_set(gi, ety, MLIR_CreateAttributeInteger(e->ctx, str_lit("value"), b, ety));
+            ginit_set(gi, ety, MLIR_CreateAttributeInteger(e->ctx, b, ety));
             gi->depth--;
         }
         return;
@@ -7518,11 +7518,11 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         // through an `#include` becomes a wasm import that the link
         // step can't resolve.
         if (!sig->is_used) continue;
-        MLIR_AttributeHandle a0 = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), fwd->name);
+        MLIR_NamedAttr a0 = MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, fwd->name));
         bool decl_real_variadic = sig->is_variadic && !sig->cursor_va;
         MLIR_TypeHandle ft = decl_real_variadic ? sig->llvm_fn_ty : sig->fn_ty;
-        MLIR_AttributeHandle a1 = MLIR_CreateAttributeType(ctx, str_lit("function_type"), ft);
-        MLIR_AttributeHandle a2 = MLIR_CreateAttributeString(ctx, str_lit("sym_visibility"), str_lit("private"));
+        MLIR_NamedAttr a1 = MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(ctx, ft));
+        MLIR_NamedAttr a2 = MLIR_Named(MLIR_KEY_SYM_VISIBILITY, MLIR_CreateAttributeString(ctx, str_lit("private")));
         // Forward the `__attribute__((__import_module__("...")))` /
         // `__import_name__("...")` annotations onto the MLIR func op
         // so the wasm binary emitter can place this import into the
@@ -7530,16 +7530,16 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         size_t n_xtra = 0;
         if (fwd->wasm_import_module.size > 0) n_xtra++;
         if (fwd->wasm_import_name.size > 0) n_xtra++;
-        MLIR_AttributeHandle *attrs = arena_new_array(arena, MLIR_AttributeHandle, 3 + n_xtra);
+        MLIR_NamedAttr *attrs = arena_new_array(arena, MLIR_NamedAttr, 3 + n_xtra);
         attrs[0] = a0; attrs[1] = a1; attrs[2] = a2;
         size_t na = 3;
         if (fwd->wasm_import_module.size > 0) {
-            attrs[na++] = MLIR_CreateAttributeString(ctx, str_lit("wasm.import_module"),
-                                                    fwd->wasm_import_module);
+            attrs[na++] = MLIR_Named(MLIR_KEY_WASM_IMPORT_MODULE, MLIR_CreateAttributeString(ctx,
+                                                    fwd->wasm_import_module));
         }
         if (fwd->wasm_import_name.size > 0) {
-            attrs[na++] = MLIR_CreateAttributeString(ctx, str_lit("wasm.import_name"),
-                                                    fwd->wasm_import_name);
+            attrs[na++] = MLIR_Named(MLIR_KEY_WASM_IMPORT_NAME, MLIR_CreateAttributeString(ctx,
+                                                    fwd->wasm_import_name));
         }
         MLIR_RegionHandle body = MLIR_CreateRegion(ctx);
         MLIR_RegionHandle *regs = arena_new_array(arena, MLIR_RegionHandle, 1); regs[0] = body;
@@ -7572,10 +7572,10 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         MLIR_TypeHandle *ins = arena_new_array(arena, MLIR_TypeHandle, 1); ins[0] = e.size_t_ty;
         MLIR_TypeHandle *outs = arena_new_array(arena, MLIR_TypeHandle, 1); outs[0] = e.ptr;
         MLIR_TypeHandle fty = MLIR_CreateTypeFunction(ctx, ins, 1, outs, 1);
-        MLIR_AttributeHandle a0 = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("malloc"));
-        MLIR_AttributeHandle a1 = MLIR_CreateAttributeType(ctx, str_lit("function_type"), fty);
-        MLIR_AttributeHandle a2 = MLIR_CreateAttributeString(ctx, str_lit("sym_visibility"), str_lit("private"));
-        MLIR_AttributeHandle *attrs = arena_new_array(arena, MLIR_AttributeHandle, 3);
+        MLIR_NamedAttr a0 = MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("malloc")));
+        MLIR_NamedAttr a1 = MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(ctx, fty));
+        MLIR_NamedAttr a2 = MLIR_Named(MLIR_KEY_SYM_VISIBILITY, MLIR_CreateAttributeString(ctx, str_lit("private")));
+        MLIR_NamedAttr *attrs = arena_new_array(arena, MLIR_NamedAttr, 3);
         attrs[0] = a0; attrs[1] = a1; attrs[2] = a2;
         MLIR_RegionHandle body = MLIR_CreateRegion(ctx);
         MLIR_RegionHandle *regs = arena_new_array(arena, MLIR_RegionHandle, 1); regs[0] = body;
@@ -7587,10 +7587,10 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
     if (!have_user_free) {
         MLIR_TypeHandle *ins = arena_new_array(arena, MLIR_TypeHandle, 1); ins[0] = e.ptr;
         MLIR_TypeHandle fty = MLIR_CreateTypeFunction(ctx, ins, 1, NULL, 0);
-        MLIR_AttributeHandle a0 = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("free"));
-        MLIR_AttributeHandle a1 = MLIR_CreateAttributeType(ctx, str_lit("function_type"), fty);
-        MLIR_AttributeHandle a2 = MLIR_CreateAttributeString(ctx, str_lit("sym_visibility"), str_lit("private"));
-        MLIR_AttributeHandle *attrs = arena_new_array(arena, MLIR_AttributeHandle, 3);
+        MLIR_NamedAttr a0 = MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("free")));
+        MLIR_NamedAttr a1 = MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(ctx, fty));
+        MLIR_NamedAttr a2 = MLIR_Named(MLIR_KEY_SYM_VISIBILITY, MLIR_CreateAttributeString(ctx, str_lit("private")));
+        MLIR_NamedAttr *attrs = arena_new_array(arena, MLIR_NamedAttr, 3);
         attrs[0] = a0; attrs[1] = a1; attrs[2] = a2;
         MLIR_RegionHandle body = MLIR_CreateRegion(ctx);
         MLIR_RegionHandle *regs = arena_new_array(arena, MLIR_RegionHandle, 1); regs[0] = body;
@@ -7608,10 +7608,10 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         for (size_t k = 0; k < 7; k++) ins[k] = e.i64;
         MLIR_TypeHandle *outs = arena_new_array(arena, MLIR_TypeHandle, 1); outs[0] = e.i64;
         MLIR_TypeHandle fty = MLIR_CreateTypeFunction(ctx, ins, 7, outs, 1);
-        MLIR_AttributeHandle a0 = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("__tinyc_syscall6"));
-        MLIR_AttributeHandle a1 = MLIR_CreateAttributeType(ctx, str_lit("function_type"), fty);
-        MLIR_AttributeHandle a2 = MLIR_CreateAttributeString(ctx, str_lit("sym_visibility"), str_lit("private"));
-        MLIR_AttributeHandle *attrs = arena_new_array(arena, MLIR_AttributeHandle, 3);
+        MLIR_NamedAttr a0 = MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("__tinyc_syscall6")));
+        MLIR_NamedAttr a1 = MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(ctx, fty));
+        MLIR_NamedAttr a2 = MLIR_Named(MLIR_KEY_SYM_VISIBILITY, MLIR_CreateAttributeString(ctx, str_lit("private")));
+        MLIR_NamedAttr *attrs = arena_new_array(arena, MLIR_NamedAttr, 3);
         attrs[0] = a0; attrs[1] = a1; attrs[2] = a2;
         MLIR_RegionHandle body = MLIR_CreateRegion(ctx);
         MLIR_RegionHandle *regs = arena_new_array(arena, MLIR_RegionHandle, 1); regs[0] = body;

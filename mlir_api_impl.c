@@ -67,9 +67,12 @@ typedef struct IR_Attribute {
             MLIR_AttributeHandle *elements;
             size_t count;
         } array;
+        struct {
+            MLIR_NamedAttr *entries;
+            size_t count;
+        } dict;
         MLIR_TypeHandle type_value;
     } data;
-    string name;
     // MLIR type of the attribute's value. Required for ATTR_KIND_INTEGER
     // and ATTR_KIND_FLOAT (and will apply to ATTR_KIND_DENSE_ELEMENTS
     // when added). For other kinds it is unused and must be
@@ -100,8 +103,9 @@ typedef struct IR_Location {
 //   - vals: an op's results are consecutive, so result i is first_result + i.
 //   - extra: 32-bit words; an op's region indices, then a (block, operand
 //     count) pair per successor.
-//   - ptrs: pointer-sized words; an op's attribute handles (attributes are
-//     arena pointers until they are interned as indices, #350).
+//   - ptrs: pointer-sized words; an op's attributes as (key, value) pairs
+//     (attribute values are arena pointers until they are interned as
+//     indices).
 // The explicit result types of the rare op whose results do not carry them
 // are type indices in `extra` too.
 // A block's op and argument lists and a region's block list are arrays of
@@ -160,7 +164,7 @@ typedef struct IR_Op {
     uint32_t first_extra;     // extra index: regions, then (block, count) pairs
     uint16_t n_regions;
     uint16_t n_successors;
-    uint32_t first_attr;      // ptrs index
+    uint32_t first_attr;      // ptrs index: (key, value) word pairs
     uint16_t n_attributes;
     uint16_t flags;
     uint32_t aux;             // op_aux index, 0 = none
@@ -257,6 +261,8 @@ struct MLIR_Context {
     // Op types: the names of the static and dynamic types and the reverse
     // map (MLIR_RegisterOpType).
     OpTypeTable op_types;
+    // Attribute keys (MLIR_InternAttrKey).
+    AttrKeyTable keys;
 };
 
 #define OPS(c)     ((IR_Op *)(c)->ops.data)
@@ -717,6 +723,7 @@ MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) {
     *ctx = (MLIR_Context){0};
     ctx->persistent = persistent;
     op_type_table_init(&ctx->op_types, persistent);
+    attr_key_table_init(&ctx->keys, persistent);
 #ifdef MLIR_API_CHECKS
     ctx->salt = (uint32_t)((((uintptr_t)ctx >> 12) ^ ((uintptr_t)ctx >> 20)) & 0xff) << 20;
 #endif
@@ -771,7 +778,7 @@ void MLIR_SetContextExpectedOps(MLIR_Context *ctx, size_t n) {
         size_t total = buddy_block_bytes((ctx->ops.n + n) * sizeof(IR_Op)) +
                        buddy_block_bytes((ctx->vals.n + n - n / 4) * sizeof(IR_Value)) +
                        buddy_block_bytes((ctx->opnds.n + n) * sizeof(IR_Operand)) +
-                       buddy_block_bytes((ctx->ptrs.n + n + n / 2) * sizeof(uintptr_t));
+                       buddy_block_bytes((ctx->ptrs.n + 3 * n) * sizeof(uintptr_t));
         if (total <= IR_RESERVE_BUDGET) break;
         n -= n / 4 ? n / 4 : n;
     }
@@ -779,7 +786,7 @@ void MLIR_SetContextExpectedOps(MLIR_Context *ctx, size_t n) {
     vec_reserve(&ctx->ops, ctx->ops.n + n);
     vec_reserve(&ctx->vals, ctx->vals.n + n - n / 4);
     vec_reserve(&ctx->opnds, ctx->opnds.n + n);
-    vec_reserve(&ctx->ptrs, ctx->ptrs.n + n + n / 2);
+    vec_reserve(&ctx->ptrs, ctx->ptrs.n + 3 * n);  // (key, value) per attribute
 }
 
 void MLIR_DestroyContext(MLIR_Context *ctx) {
@@ -891,7 +898,7 @@ void MLIR_EmitDiagnostic(MLIR_Context *ctx, MLIR_DiagSeverity severity,
 MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     MLIR_Context *ctx,
     MLIR_OpType type,
-    MLIR_AttributeHandle *attributes, size_t n_attributes,
+    const MLIR_NamedAttr *attributes, size_t n_attributes,
     MLIR_TypeHandle *result_types, size_t n_result_types,
     MLIR_ValueHandle *results, size_t n_results,
     MLIR_ValueHandle *operands, size_t n_operands,
@@ -931,7 +938,7 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     uint32_t op = vec_push(&ctx->ops, 1);
     uint32_t first_operand = vec_push(&ctx->opnds, (uint32_t)n_all);
     uint32_t first_extra = vec_push(&ctx->extra, (uint32_t)n_extra);
-    uint32_t first_attr = vec_push(&ctx->ptrs, (uint32_t)n_attributes);
+    uint32_t first_attr = vec_push(&ctx->ptrs, (uint32_t)(2 * n_attributes));
     // From here to the aux record, pointers into these vectors are held.
     GEN_SAVE(ctx, ops);
     GEN_SAVE(ctx, opnds);
@@ -988,7 +995,12 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
         }
     }
     uintptr_t *pa = PTRS(ctx) + first_attr;
-    for (size_t i = 0; i < n_attributes; i++) pa[i] = (uintptr_t)attributes[i];
+    for (size_t i = 0; i < n_attributes; i++) {
+        API_CHECK(attributes[i].key != MLIR_KEY_INVALID && attributes[i].key < ctx->keys.n_keys &&
+                  attributes[i].value != MLIR_INVALID_HANDLE, "MLIR_CreateOp", "bad attribute key or value");
+        pa[2 * i] = attributes[i].key;
+        pa[2 * i + 1] = (uintptr_t)attributes[i].value;
+    }
 
     // The results get this op as their definition, and a type from
     // result_types if they have none. The op's result types are its results'
@@ -1030,7 +1042,7 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
 MLIR_OpHandle MLIR_CreateOp(
     MLIR_Context *ctx,
     MLIR_OpType type,
-    MLIR_AttributeHandle *attributes, size_t n_attributes,
+    const MLIR_NamedAttr *attributes, size_t n_attributes,
     MLIR_TypeHandle *result_types, size_t n_result_types,
     MLIR_ValueHandle *results, size_t n_results,
     MLIR_ValueHandle *operands, size_t n_operands,
@@ -1161,26 +1173,46 @@ size_t MLIR_GetOpNumAttributes(MLIR_Context *ctx, MLIR_OpHandle oh) {
     return OPS(ctx)[o].n_attributes;
 }
 
+MLIR_AttrKey MLIR_GetOpAttributeKey(MLIR_Context *ctx, MLIR_OpHandle oh, size_t idx) {
+    uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpAttributeKey");
+    CHECK_OP(ctx, o, "MLIR_GetOpAttributeKey");
+    CHECK_INDEX(idx, OPS(ctx)[o].n_attributes, "MLIR_GetOpAttributeKey");
+    return (MLIR_AttrKey)PTRS(ctx)[OPS(ctx)[o].first_attr + 2 * idx];
+}
+
 MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_Context *ctx, MLIR_OpHandle oh, size_t idx) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpAttribute");
     CHECK_OP(ctx, o, "MLIR_GetOpAttribute");
     CHECK_INDEX(idx, OPS(ctx)[o].n_attributes, "MLIR_GetOpAttribute");
-    return (MLIR_AttributeHandle)PTRS(ctx)[OPS(ctx)[o].first_attr + idx];
+    return (MLIR_AttributeHandle)PTRS(ctx)[OPS(ctx)[o].first_attr + 2 * idx + 1];
 }
 
-MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_Context *ctx, MLIR_OpHandle oh, const char *name) {
-    uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpAttributeByName");
-    CHECK_OP(ctx, o, "MLIR_GetOpAttributeByName");
-    API_CHECK(name != NULL, "MLIR_GetOpAttributeByName", "name is NULL");
-    IR_Op *op = &OPS(ctx)[o];
-    const uintptr_t *attrs = PTRS(ctx) + op->first_attr;
-    size_t nlen = strlen(name);
-    for (size_t i = 0; i < op->n_attributes; i++) {
-        string an = MLIR_GetAttributeName((MLIR_AttributeHandle)attrs[i]);
-        if (an.size == nlen && memcmp(an.str, name, nlen) == 0)
-            return (MLIR_AttributeHandle)attrs[i];
-    }
+// A scan of the op's (key, value) pairs comparing keys.
+MLIR_AttributeHandle MLIR_GetOpAttr(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_AttrKey key) {
+    uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpAttr");
+    CHECK_OP(ctx, o, "MLIR_GetOpAttr");
+    const IR_Op *op = &OPS(ctx)[o];
+    const uintptr_t *p = PTRS(ctx) + op->first_attr;
+    const uintptr_t *end = p + 2 * (size_t)op->n_attributes;
+    for (; p < end; p += 2)
+        if (p[0] == key) return (MLIR_AttributeHandle)p[1];
     return MLIR_INVALID_HANDLE;
+}
+
+MLIR_AttrKey MLIR_InternAttrKey(MLIR_Context *ctx, string name) {
+    API_CHECK(ctx != NULL, "MLIR_InternAttrKey", "context is NULL");
+    API_CHECK(name.size > 0, "MLIR_InternAttrKey", "empty attribute name");
+    return attr_key_table_intern(&ctx->keys, name);
+}
+
+MLIR_AttrKey MLIR_LookupAttrKey(MLIR_Context *ctx, string name) {
+    API_CHECK(ctx != NULL, "MLIR_LookupAttrKey", "context is NULL");
+    return attr_key_table_lookup(&ctx->keys, name);
+}
+
+string MLIR_GetAttrKeyName(MLIR_Context *ctx, MLIR_AttrKey key) {
+    API_CHECK(ctx != NULL, "MLIR_GetAttrKeyName", "context is NULL");
+    return attr_key_table_name(&ctx->keys, key);
 }
 
 size_t MLIR_GetOpNumOperands(MLIR_Context *ctx, MLIR_OpHandle oh) {
@@ -1725,7 +1757,6 @@ static MLIR_AttributeHandle make_llvm_linkage_attr(MLIR_Context *ctx, string lin
     // Mirror the upstream printer: "#llvm.linkage<<kind>>".
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_STRING;
-    a.name = str_lit("linkage");
     strbuf body = strbuf_make();
     strbuf_append(ctx->arena, &body, str_lit("#llvm.linkage<"));
     strbuf_append(ctx->arena, &body, linkage_kind);
@@ -1738,12 +1769,12 @@ MLIR_OpHandle MLIR_CreateLLVMGlobalString(MLIR_Context *ctx, string sym_name,
                                           string bytes, MLIR_LocationHandle loc) {
     MLIR_TypeHandle i8 = MLIR_CreateTypeInteger(ctx, 8, false);
     MLIR_TypeHandle arr = MLIR_CreateTypeLLVMArray(ctx, i8, bytes.size);
-    MLIR_AttributeHandle attrs[5];
-    attrs[0] = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), sym_name);
-    attrs[1] = MLIR_CreateAttributeType(ctx, str_lit("global_type"), arr);
-    attrs[2] = make_llvm_linkage_attr(ctx, str_lit("private"));
-    attrs[3] = MLIR_CreateAttributeBool(ctx, str_lit("constant"), true);
-    attrs[4] = MLIR_CreateAttributeString(ctx, str_lit("value"), bytes);
+    MLIR_NamedAttr attrs[5];
+    attrs[0] = MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, sym_name));
+    attrs[1] = MLIR_Named(MLIR_KEY_GLOBAL_TYPE, MLIR_CreateAttributeType(ctx, arr));
+    attrs[2] = MLIR_Named(MLIR_KEY_LINKAGE, make_llvm_linkage_attr(ctx, str_lit("private")));
+    attrs[3] = MLIR_Named(MLIR_KEY_CONSTANT, MLIR_CreateAttributeBool(ctx, true));
+    attrs[4] = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeString(ctx, bytes));
     return MLIR_CreateOp(ctx, OP_TYPE_LLVM_MLIR_GLOBAL,
                          attrs, 5, NULL, 0, NULL, 0, NULL, 0,
                          NULL, 0, loc, MLIR_INVALID_HANDLE,
@@ -1763,15 +1794,15 @@ MLIR_OpHandle MLIR_CreateLLVMGlobalArrayInit(MLIR_Context *ctx, string sym_name,
                                               bool is_constant,
                                               string bytes,
                                               MLIR_LocationHandle loc) {
-    MLIR_AttributeHandle attrs[5];
+    MLIR_NamedAttr attrs[5];
     size_t na = 0;
-    attrs[na++] = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), sym_name);
-    attrs[na++] = MLIR_CreateAttributeType(ctx, str_lit("global_type"), array_ty);
-    attrs[na++] = make_llvm_linkage_attr(ctx, str_lit("internal"));
+    attrs[na++] = MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, sym_name));
+    attrs[na++] = MLIR_Named(MLIR_KEY_GLOBAL_TYPE, MLIR_CreateAttributeType(ctx, array_ty));
+    attrs[na++] = MLIR_Named(MLIR_KEY_LINKAGE, make_llvm_linkage_attr(ctx, str_lit("internal")));
     if (is_constant) {
-        attrs[na++] = MLIR_CreateAttributeBool(ctx, str_lit("constant"), true);
+        attrs[na++] = MLIR_Named(MLIR_KEY_CONSTANT, MLIR_CreateAttributeBool(ctx, true));
     }
-    attrs[na++] = MLIR_CreateAttributeString(ctx, str_lit("value"), bytes);
+    attrs[na++] = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeString(ctx, bytes));
     return MLIR_CreateOp(ctx, OP_TYPE_LLVM_MLIR_GLOBAL,
                          attrs, na, NULL, 0, NULL, 0, NULL, 0,
                          NULL, 0, loc, MLIR_INVALID_HANDLE,
@@ -1784,17 +1815,17 @@ MLIR_OpHandle MLIR_CreateLLVMGlobal(MLIR_Context *ctx, string sym_name,
                                     MLIR_BlockHandle *out_init_block,
                                     MLIR_LocationHandle loc) {
     // init_kind: 0=integer, 1=float, 2=region, 3=zero-init/no-init, 4=external
-    MLIR_AttributeHandle attrs[6];
+    MLIR_NamedAttr attrs[6];
     size_t na = 0;
-    attrs[na++] = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), sym_name);
-    attrs[na++] = MLIR_CreateAttributeType(ctx, str_lit("global_type"), elem_ty);
+    attrs[na++] = MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, sym_name));
+    attrs[na++] = MLIR_Named(MLIR_KEY_GLOBAL_TYPE, MLIR_CreateAttributeType(ctx, elem_ty));
     string lk = (init_kind == 4) ? str_lit("external") : str_lit("internal");
-    attrs[na++] = make_llvm_linkage_attr(ctx, lk);
-    if (is_constant) attrs[na++] = MLIR_CreateAttributeBool(ctx, str_lit("constant"), true);
+    attrs[na++] = MLIR_Named(MLIR_KEY_LINKAGE, make_llvm_linkage_attr(ctx, lk));
+    if (is_constant) attrs[na++] = MLIR_Named(MLIR_KEY_CONSTANT, MLIR_CreateAttributeBool(ctx, true));
     if (init_kind == 0) {
-        attrs[na++] = MLIR_CreateAttributeInteger(ctx, str_lit("value"), init_int, elem_ty);
+        attrs[na++] = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(ctx, init_int, elem_ty));
     } else if (init_kind == 1) {
-        attrs[na++] = MLIR_CreateAttributeFloat(ctx, str_lit("value"), init_float, elem_ty);
+        attrs[na++] = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeFloat(ctx, init_float, elem_ty));
     }
 
     // Region for region-initialized globals (init_kind == 2): create one
@@ -1817,36 +1848,32 @@ MLIR_OpHandle MLIR_CreateLLVMGlobal(MLIR_Context *ctx, string sym_name,
 }
 
 // Attribute creation
-MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *ctx, string name, int64_t value, MLIR_TypeHandle type) {
+MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *ctx, int64_t value, MLIR_TypeHandle type) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_INTEGER;
-    a.name = arena_dup_str(ctx, name);
     a.data.integer_value = value;
     a.type = type;
     return alloc_attr_obj(ctx, a);
 }
 
-MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *ctx, string name, string value) {
+MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *ctx, string value) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_STRING;
-    a.name = arena_dup_str(ctx, name);
     a.data.string_value = arena_dup_str(ctx, value);
     return alloc_attr_obj(ctx, a);
 }
 
-MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, string name, double value, MLIR_TypeHandle type) {
+MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *ctx, double value, MLIR_TypeHandle type) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_FLOAT;
-    a.name = arena_dup_str(ctx, name);
     a.data.float_value = value;
     a.type = type;
     return alloc_attr_obj(ctx, a);
 }
 
-MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *ctx, string name, bool value) {
+MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *ctx, bool value) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_BOOL;
-    a.name = arena_dup_str(ctx, name);
     a.data.bool_value = value;
     return alloc_attr_obj(ctx, a);
 }
@@ -1865,28 +1892,33 @@ static MLIR_AttributeHandle *dup_attr_elements(MLIR_Context *ctx,
     return buf;
 }
 
-MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count) {
+MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *ctx, const MLIR_AttributeHandle *elements, size_t count) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_ARRAY;
-    a.name = arena_dup_str(ctx, name);
     a.data.array.elements = dup_attr_elements(ctx, elements, count);
     a.data.array.count = a.data.array.elements ? count : 0;
     return alloc_attr_obj(ctx, a);
 }
 
-MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *ctx, string name, MLIR_AttributeHandle *elements, size_t count) {
+MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *ctx, const MLIR_NamedAttr *entries, size_t count) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_DICT;
-    a.name = arena_dup_str(ctx, name);
-    a.data.array.elements = dup_attr_elements(ctx, elements, count);
-    a.data.array.count = a.data.array.elements ? count : 0;
+#ifdef MLIR_API_CHECKS
+    for (size_t i = 0; entries && i < count; i++)
+        API_CHECK(entries[i].key != MLIR_KEY_INVALID && entries[i].key < ctx->keys.n_keys &&
+                  entries[i].value != MLIR_INVALID_HANDLE, "MLIR_CreateAttributeDict", "bad entry key or value");
+#endif
+    if (count > 0 && entries && ctx && ctx->arena) {
+        a.data.dict.entries = arena_new_array(ctx->arena, MLIR_NamedAttr, count);
+        memcpy(a.data.dict.entries, entries, count * sizeof(MLIR_NamedAttr));
+        a.data.dict.count = count;
+    }
     return alloc_attr_obj(ctx, a);
 }
 
-MLIR_AttributeHandle MLIR_CreateAttributeType(MLIR_Context *ctx, string name, MLIR_TypeHandle type) {
+MLIR_AttributeHandle MLIR_CreateAttributeType(MLIR_Context *ctx, MLIR_TypeHandle type) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_TYPE;
-    a.name = arena_dup_str(ctx, name);
     a.data.type_value = type;
     return alloc_attr_obj(ctx, a);
 }
@@ -1896,10 +1928,9 @@ MLIR_AttributeHandle MLIR_CreateAttributeType(MLIR_Context *ctx, string name, ML
 // the same form here — keeps MLIR_GetAttributeAsString consistent
 // across backends (the LLVM-IR translator depends on this for callee
 // emission).
-MLIR_AttributeHandle MLIR_CreateAttributeSymbolRef(MLIR_Context *ctx, string name, string value) {
+MLIR_AttributeHandle MLIR_CreateAttributeSymbolRef(MLIR_Context *ctx, string value) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_STRING;
-    a.name = arena_dup_str(ctx, name);
     string with_at = format(ctx->arena, str_lit("@{}"), value);
     a.data.string_value = with_at;
     return alloc_attr_obj(ctx, a);
@@ -1908,11 +1939,10 @@ MLIR_AttributeHandle MLIR_CreateAttributeSymbolRef(MLIR_Context *ctx, string nam
 // DenseI32 array attribute. The native LLVM-IR translator reads this
 // via MLIR_GetAttributeAsString and parses the printed form, so we
 // stash a string matching upstream's printer ("array<i32: v0, v1, ...>").
-MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *ctx, string name,
+MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *ctx,
                                                        const int32_t *values, size_t count) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_STRING;
-    a.name = arena_dup_str(ctx, name);
     Arena *arena = ctx->arena;
     strbuf s = strbuf_make();
     strbuf_append(arena, &s, str_lit("array<i32"));
@@ -1927,11 +1957,10 @@ MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *ctx, string
 
 // DenseI64 array attribute. Same string-encoded shape as DenseI32 but
 // with `i64` element type. Used by `scf.index_switch`'s `cases` attr.
-MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *ctx, string name,
+MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *ctx,
                                                        const int64_t *values, size_t count) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_STRING;
-    a.name = arena_dup_str(ctx, name);
     Arena *arena = ctx->arena;
     strbuf s = strbuf_make();
     strbuf_append(arena, &s, str_lit("array<i64"));
@@ -1948,10 +1977,9 @@ MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *ctx, string
 // (e.g. "#llvm.linkage<internal>") in a string attr — this matches the
 // upstream backend's MLIR_GetAttributeAsString result, so the native
 // LLVM-IR translator can recognize it the same way for both backends.
-MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *ctx, string name) {
+MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *ctx) {
     IR_Attribute a = {0};
     a.kind = ATTR_KIND_STRING;
-    a.name = arena_dup_str(ctx, name);
     a.data.string_value = str_lit("#llvm.linkage<internal>");
     return alloc_attr_obj(ctx, a);
 }
@@ -1988,28 +2016,34 @@ MLIR_RegionHandle MLIR_CreateRegion(MLIR_Context *ctx) {
     return REGION_H(ctx, r);
 }
 
-// Unless they are already last, the op's attributes move to the end of the
-// ptrs vector, one longer; the old entries are left unused.
-void MLIR_AppendOpAttribute(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_AttributeHandle attr) {
-    uint32_t o = OP_IDX(ctx, oh, "MLIR_AppendOpAttribute");
-    CHECK_OP(ctx, o, "MLIR_AppendOpAttribute");
-    API_CHECK(attr != MLIR_INVALID_HANDLE, "MLIR_AppendOpAttribute", "attribute handle is NULL");
+// Replaces the value if the op has `key`; otherwise appends the pair, in
+// place when the op's attributes are already the last words of `ptrs` (the
+// common case: attributes set right after creation), else moving them to
+// the end of the vector (the old words are left unused).
+void MLIR_SetOpAttr(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_AttrKey key, MLIR_AttributeHandle value) {
+    uint32_t o = OP_IDX(ctx, oh, "MLIR_SetOpAttr");
+    CHECK_OP(ctx, o, "MLIR_SetOpAttr");
+    API_CHECK(key != MLIR_KEY_INVALID && value != MLIR_INVALID_HANDLE, "MLIR_SetOpAttr",
+              "key or attribute handle is NULL");
     uint32_t n = OPS(ctx)[o].n_attributes;
-    API_CHECK(n < 0xffff, "MLIR_AppendOpAttribute", "too many attributes");
     uint32_t old = OPS(ctx)[o].first_attr;
-    if (old + n == ctx->ptrs.n) {
-        // Already last (the common case: attributes appended right after
-        // creation): grow in place.
-        vec_push(&ctx->ptrs, 1);
-        PTRS(ctx)[old + n] = (uintptr_t)attr;
-        OPS(ctx)[o].n_attributes = (uint16_t)(n + 1);
-        return;
+    for (uint32_t i = 0; i < n; i++) {
+        if (PTRS(ctx)[old + 2 * i] == key) {
+            PTRS(ctx)[old + 2 * i + 1] = (uintptr_t)value;
+            return;
+        }
     }
-    uint32_t first = vec_push(&ctx->ptrs, n + 1);
-    uintptr_t *p = PTRS(ctx);
-    for (uint32_t i = 0; i < n; i++) p[first + i] = p[old + i];
-    p[first + n] = (uintptr_t)attr;
-    OPS(ctx)[o].first_attr = first;
+    API_CHECK(n < 0xffff, "MLIR_SetOpAttr", "too many attributes");
+    if (old + 2 * n == ctx->ptrs.n) {
+        vec_push(&ctx->ptrs, 2);
+    } else {
+        uint32_t first = vec_push(&ctx->ptrs, 2 * (n + 1));
+        uintptr_t *p = PTRS(ctx);
+        for (uint32_t i = 0; i < 2 * n; i++) p[first + i] = p[old + i];
+        OPS(ctx)[o].first_attr = old = first;
+    }
+    PTRS(ctx)[old + 2 * n] = key;
+    PTRS(ctx)[old + 2 * n + 1] = (uintptr_t)value;
     OPS(ctx)[o].n_attributes = (uint16_t)(n + 1);
 }
 
@@ -2028,12 +2062,6 @@ MLIR_AttrKind MLIR_GetAttributeKind(MLIR_Context *ctx, MLIR_AttributeHandle ah) 
         case ATTR_KIND_TYPE:    return MLIR_ATTR_KIND_TYPE;
         default:                return MLIR_ATTR_KIND_DICT;
     }
-}
-
-string MLIR_GetAttributeName(MLIR_AttributeHandle ah) {
-    API_CHECK(ah != MLIR_INVALID_HANDLE, "MLIR_GetAttributeName", "attribute handle is NULL");
-    IR_Attribute *attr = resolve_attr(ah);
-    return attr ? attr->name : str_lit("");
 }
 
 // Native parser never produces "other" attrs; this is just for API parity.
@@ -2099,15 +2127,21 @@ MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_Context *ctx, MLIR_Attri
 size_t MLIR_GetAttributeDictSize(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
     CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_DICT, "MLIR_GetAttributeDictSize", "not a dictionary attribute");
     IR_Attribute *attr = resolve_attr(ah);
-    return attr ? attr->data.array.count : 0;
+    return attr ? attr->data.dict.count : 0;
+}
+
+MLIR_AttrKey MLIR_GetAttributeDictKey(MLIR_Context *ctx, MLIR_AttributeHandle ah, size_t idx) {
+    (void)ctx;
+    CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_DICT, "MLIR_GetAttributeDictKey", "not a dictionary attribute");
+    CHECK_INDEX(idx, ((IR_Attribute *)ah)->data.dict.count, "MLIR_GetAttributeDictKey");
+    return ((IR_Attribute *)ah)->data.dict.entries[idx].key;
 }
 
 MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_Context *ctx, MLIR_AttributeHandle ah, size_t idx) {
+    (void)ctx;
     CHECK_ATTR_KIND(ah, ((IR_Attribute *)ah)->kind == ATTR_KIND_DICT, "MLIR_GetAttributeDictElement", "not a dictionary attribute");
-    CHECK_INDEX(idx, ((IR_Attribute *)ah)->data.array.count, "MLIR_GetAttributeDictElement");
-    IR_Attribute *attr = resolve_attr(ah);
-    if (!attr || idx >= attr->data.array.count) return MLIR_INVALID_HANDLE;
-    return attr->data.array.elements[idx];
+    CHECK_INDEX(idx, ((IR_Attribute *)ah)->data.dict.count, "MLIR_GetAttributeDictElement");
+    return ((IR_Attribute *)ah)->data.dict.entries[idx].value;
 }
 
 MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_Context *ctx, MLIR_AttributeHandle ah) {

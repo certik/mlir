@@ -177,22 +177,22 @@ MLIR_ValueHandle *finalize_results(const OperationParserParams *params,
                                     MLIR_TypeHandle *result_types,
                                     size_t n_result_types,
                                     size_t *out_n_results);
-MLIR_AttributeHandle create_string_attr(Parser *parser, string name, string value);
-MLIR_AttributeHandle create_integer_attr(Parser *parser, string name, int64_t value, MLIR_TypeHandle type);
-MLIR_AttributeHandle create_float_attr(Parser *parser, string name, double value, MLIR_TypeHandle type);
-MLIR_AttributeHandle create_bool_attr(Parser *parser, string name, bool value);
-void operation_append_attribute(Parser *parser, MLIR_OpHandle op, MLIR_AttributeHandle attr);
+MLIR_NamedAttr create_string_attr(Parser *parser, string name, string value);
+MLIR_NamedAttr create_integer_attr(Parser *parser, string name, int64_t value, MLIR_TypeHandle type);
+MLIR_NamedAttr create_float_attr(Parser *parser, string name, double value, MLIR_TypeHandle type);
+MLIR_NamedAttr create_bool_attr(Parser *parser, string name, bool value);
+void operation_append_attribute(Parser *parser, MLIR_OpHandle op, MLIR_NamedAttr attr);
 MLIR_ValueHandle lookup_or_create_value(Parser *parser, string reg, string default_type);
-void append_attr(Parser *parser, MLIR_AttributeHandle **attrs, size_t *n, size_t *cap, MLIR_AttributeHandle attr);
-void attr_list_init_from_op(Parser *parser, MLIR_OpHandle op, MLIR_AttributeHandle **attrs, size_t *n, size_t *cap);
-void parse_angle_brace_attributes(Parser *parser, MLIR_AttributeHandle **attributes, size_t *n_attributes, size_t *attributes_capacity);
-void parse_brace_attributes(Parser *parser, MLIR_AttributeHandle **attributes, size_t *n_attributes, size_t *attributes_capacity);
+void append_attr(Parser *parser, MLIR_NamedAttr **attrs, size_t *n, size_t *cap, MLIR_NamedAttr attr);
+void attr_list_init_from_op(Parser *parser, MLIR_OpHandle op, MLIR_NamedAttr **attrs, size_t *n, size_t *cap);
+void parse_angle_brace_attributes(Parser *parser, MLIR_NamedAttr **attributes, size_t *n_attributes, size_t *attributes_capacity);
+void parse_brace_attributes(Parser *parser, MLIR_NamedAttr **attributes, size_t *n_attributes, size_t *attributes_capacity);
 void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *n_result_types,
-                              MLIR_AttributeHandle **attributes, size_t *n_attributes, size_t *attributes_capacity,
+                              MLIR_NamedAttr **attributes, size_t *n_attributes, size_t *attributes_capacity,
                               MLIR_OpType op_type, MLIR_OpHandle op_for_attributes);
 MLIR_LocationHandle parse_optional_location(Parser *parser);
 void parse_generic_attrs_and_result_type(Parser *parser,
-                                          MLIR_AttributeHandle **attributes,
+                                          MLIR_NamedAttr **attributes,
                                           size_t *n_attributes,
                                           size_t *attributes_capacity,
                                           MLIR_TypeHandle **result_types,

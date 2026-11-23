@@ -143,7 +143,7 @@ bool llvm_global_init_bytes(MLIR_Context *ctx, MLIR_OpHandle gop,
             if (cur == MLIR_INVALID_HANDLE || MLIR_GetOpNumOperands(ctx, op) != 2 ||
                 MLIR_GetOpOperand(ctx, op, 0) != cur || MLIR_GetOpNumResults(ctx, op) != 1)
                 return false;
-            MLIR_AttributeHandle pa = MLIR_GetOpAttributeByName(ctx, op, "position");
+            MLIR_AttributeHandle pa = MLIR_GetOpAttr(ctx, op, MLIR_KEY_POSITION);
             if (pa == MLIR_INVALID_HANDLE) return false;
             int64_t idx[16];
             size_t n = llvm_position_indices(ctx, pa, idx, 16);
@@ -156,7 +156,7 @@ bool llvm_global_init_bytes(MLIR_Context *ctx, MLIR_OpHandle gop,
             MLIR_OpHandle c = MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, op, 1));
             if (c == MLIR_INVALID_HANDLE || MLIR_GetOpType(ctx, c) != OP_TYPE_LLVM_MLIR_CONSTANT)
                 return false;
-            MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(ctx, c, "value");
+            MLIR_AttributeHandle va = MLIR_GetOpAttr(ctx, c, MLIR_KEY_VALUE);
             if (va == MLIR_INVALID_HANDLE) return false;
             MLIR_AttrKind k = MLIR_GetAttributeKind(ctx, va);
             uint64_t bits = 0;

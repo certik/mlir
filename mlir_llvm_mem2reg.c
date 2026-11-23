@@ -200,15 +200,15 @@ static MLIR_ValueHandle l2r_make_zero(M *m, size_t bi, size_t ai) {
     MLIR_TypeHandle ty = m->elemty[ai];
     MLIR_LocationHandle loc = l2r_unkloc(ctx);
     MLIR_TypeKind tk = MLIR_GetTypeKind(ctx, ty);
-    MLIR_AttributeHandle a = (tk == MLIR_TYPE_KIND_FLOAT || tk == MLIR_TYPE_KIND_BF16)
-        ? MLIR_CreateAttributeFloat(ctx, str_lit("value"), 0.0, ty)
-        : MLIR_CreateAttributeInteger(ctx, str_lit("value"), 0, ty);
+    MLIR_NamedAttr a = (tk == MLIR_TYPE_KIND_FLOAT || tk == MLIR_TYPE_KIND_BF16)
+        ? MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeFloat(ctx, 0.0, ty))
+        : MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(ctx, 0, ty));
     MLIR_ValueHandle res =
         MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0, ty,
                                  (string){0}, loc);
     MLIR_TypeHandle rty[1] = { ty };
     MLIR_ValueHandle rv[1] = { res };
-    MLIR_AttributeHandle attrs[1] = { a };
+    MLIR_NamedAttr attrs[1] = { a };
     MLIR_OpHandle op = MLIR_CreateOp(
         ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
         attrs, 1, rty, 1, rv, 1, NULL, 0, NULL, 0,
@@ -368,7 +368,7 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
         for (size_t j = 0; j < nops; j++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, j);
             if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_ALLOCA) continue;
-            MLIR_AttributeHandle ea = MLIR_GetOpAttributeByName(ctx, op, "elem_type");
+            MLIR_AttributeHandle ea = MLIR_GetOpAttr(ctx, op, MLIR_KEY_ELEM_TYPE);
             if (ea == MLIR_INVALID_HANDLE) continue;
             if (na == cap) {
                 cap <<= 1;
@@ -747,7 +747,7 @@ static void sroa_scan_uses(S *s, MLIR_BlockHandle blk, bool nested) {
                 for (size_t k = 1; k < no; k++)
                     if (sroa_aidx(s, MLIR_GetOpOperand(s->ctx, op, k)) != (size_t)-1)
                         s->a_split[sroa_aidx(s, MLIR_GetOpOperand(s->ctx, op, k))] = false;
-                MLIR_AttributeHandle ria = MLIR_GetOpAttributeByName(s->ctx, op, "rawConstantIndices");
+                MLIR_AttributeHandle ria = MLIR_GetOpAttr(s->ctx, op, MLIR_KEY_RAW_CONSTANT_INDICES);
                 int32_t idx[SROA_MAX_PATH]; int nidx = 0;
                 bool okpath = ria != MLIR_INVALID_HANDLE &&
                     sroa_parse_indices(MLIR_GetAttributeAsString(s->ctx, ria),
@@ -863,11 +863,11 @@ static MLIR_ValueHandle sroa_field_alloca(S *s, size_t ai, const int32_t *path,
     MLIR_LocationHandle loc = l2r_unkloc(ctx);
     MLIR_ValueHandle res = MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0,
                                                     s->a_ptrty[ai], (string){0}, loc);
-    MLIR_AttributeHandle ea = MLIR_CreateAttributeType(ctx, str_lit("elem_type"), leaf);
+    MLIR_NamedAttr ea = MLIR_Named(MLIR_KEY_ELEM_TYPE, MLIR_CreateAttributeType(ctx, leaf));
     MLIR_TypeHandle rty[1] = { s->a_ptrty[ai] };
     MLIR_ValueHandle rv[1] = { res };
     MLIR_ValueHandle ops[1] = { s->a_size[ai] };
-    MLIR_AttributeHandle attrs[1] = { ea };
+    MLIR_NamedAttr attrs[1] = { ea };
     MLIR_OpHandle op = MLIR_CreateOp(ctx, OP_TYPE_LLVM_ALLOCA,
                                      attrs, 1, rty, 1, rv, 1, ops, 1, NULL, 0,
                                      loc, MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -932,7 +932,7 @@ static void sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, j);
             if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_ALLOCA) continue;
             if (MLIR_GetOpNumOperands(ctx, op) < 1) continue;
-            MLIR_AttributeHandle ea = MLIR_GetOpAttributeByName(ctx, op, "elem_type");
+            MLIR_AttributeHandle ea = MLIR_GetOpAttr(ctx, op, MLIR_KEY_ELEM_TYPE);
             if (ea == MLIR_INVALID_HANDLE) continue;
             MLIR_TypeHandle et = MLIR_GetAttributeTypeValue(ctx, ea);
             if (MLIR_GetTypeKind(ctx, et) != MLIR_TYPE_KIND_LLVM_STRUCT && MLIR_GetTypeKind(ctx, et) != MLIR_TYPE_KIND_LLVM_ARRAY) continue;
