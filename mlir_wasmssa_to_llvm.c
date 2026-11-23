@@ -70,20 +70,24 @@ static MLIR_TypeHandle vt_to_llvm(MLIR_Context *ctx, uint8_t vt) {
 static bool vt_is_int(uint8_t vt) { return vt == WT_I32 || vt == WT_I64; }
 static bool vt_is_float(uint8_t vt) { return vt == WT_F32 || vt == WT_F64; }
 
-// Re-materialise a FRESH type in `ctx` matching the (possibly foreign-arena)
-// tracked type `t`. Under --from-wasm the wasmssa module's arena is freed
-// between passes, so a type handle that points into it dangles and later reads
-// back as '?'. Decoding via the type string (valid while the source arena is
-// alive) and recreating in `ctx` yields a stable handle. Defaults to i32.
+// The canonical scalar type of `t`: i64, f32 or f64 as `t` is, else i32.
 static MLIR_TypeHandle fresh_type_like(MLIR_Context *ctx, MLIR_TypeHandle t) {
-    string s = MLIR_GetTypeString(ctx, t);
-    if (s.size == 3 && memcmp(s.str, "i64", 3) == 0)
+    MLIR_TypeKind k = MLIR_GetTypeKind(ctx, t);
+    uint32_t w = MLIR_GetTypeWidth(ctx, t);
+    if (k == MLIR_TYPE_KIND_INTEGER && w == 64)
         return MLIR_CreateTypeInteger(ctx, 64, true);
-    if (s.size == 3 && memcmp(s.str, "f32", 3) == 0)
+    if (k == MLIR_TYPE_KIND_FLOAT && w == 32)
         return MLIR_CreateTypeFloat(ctx, 32, false);
-    if (s.size == 3 && memcmp(s.str, "f64", 3) == 0)
+    if (k == MLIR_TYPE_KIND_FLOAT && w == 64)
         return MLIR_CreateTypeFloat(ctx, 64, false);
     return MLIR_CreateTypeInteger(ctx, 32, true);
+}
+
+// The placeholder (`?`) and opaque (`unknown`) types stand for a type not
+// known yet.
+static bool type_is_placeholder(MLIR_Context *ctx, MLIR_TypeHandle t) {
+    MLIR_TypeKind k = MLIR_GetTypeKind(ctx, t);
+    return k == MLIR_TYPE_KIND_NONE || k == MLIR_TYPE_KIND_OPAQUE;
 }
 
 static int hexval(char c) {
@@ -1006,13 +1010,9 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         // Result type follows the value operands; the result value itself is
         // untyped under no_def_use_tracking, so take it from operand `a`.
         MLIR_TypeHandle ity = MLIR_GetValueType(ctx, a);
-        string itys = MLIR_GetTypeString(ctx, ity);
-        if (itys.size == 0 || itys.str == NULL || itys.str[0] == '?' ||
-            (itys.size == 7 && memcmp(itys.str, "unknown", 7) == 0)) {
+        if (type_is_placeholder(ctx, ity)) {
             ity = MLIR_GetValueType(ctx, b);
-            itys = MLIR_GetTypeString(ctx, ity);
-            if (itys.size == 0 || itys.str == NULL || itys.str[0] == '?' ||
-                (itys.size == 7 && memcmp(itys.str, "unknown", 7) == 0))
+            if (type_is_placeholder(ctx, ity))
                 ity = MLIR_CreateTypeInteger(ctx, 32, true);
         }
         MLIR_TypeHandle rt[1] = { ity };

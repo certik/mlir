@@ -382,8 +382,8 @@ static void emit_sysv_call_args(FnCtx *F, MLIR_OpHandle op, size_t arg_base,
     MLIR_AttributeHandle vct = MLIR_GetOpAttributeByName(F->ctx, op, "var_callee_type");
     if (vct != MLIR_INVALID_HANDLE) {
         MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(vct);
-        if (ft != MLIR_INVALID_HANDLE && MLIR_GetTypeFunctionIsVarArg(ft)) {
-            size_t nf = MLIR_GetTypeFunctionNumInputs(ft);
+        if (ft != MLIR_INVALID_HANDLE && MLIR_GetTypeFunctionIsVarArg(F->ctx, ft)) {
+            size_t nf = MLIR_GetTypeFunctionNumInputs(F->ctx, ft);
             reg_cutoff = nf < 6 ? nf : 6;
             is_vararg_call = true;
         }
@@ -571,14 +571,14 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
             unsigned stride;
             if (i == 0) {                                  // index over `elem_type`
                 stride = x64_type_size(ctx, elem_ty);
-            } else if (MLIR_IsTypeLLVMStruct(cur_ty)) {    // struct field: constant offset
+            } else if (MLIR_GetTypeKind(ctx, cur_ty) == MLIR_TYPE_KIND_LLVM_STRUCT) {    // struct field: constant offset
                 if (is_dyn) { fail(F, "dynamic struct index in gep", (string){0}); return; }
                 unsigned foff = x64_struct_field_offset(ctx, cur_ty, (size_t)cidx[i]);
-                cur_ty = MLIR_GetTypeLLVMStructField(cur_ty, (size_t)cidx[i]);
+                cur_ty = MLIR_GetTypeLLVMStructField(ctx, cur_ty, (size_t)cidx[i]);
                 add_const_off(F, RAX, (int64_t)foff);
                 continue;
-            } else if (MLIR_IsTypeLLVMArray(cur_ty)) {     // array element stride
-                MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(cur_ty);
+            } else if (MLIR_GetTypeKind(ctx, cur_ty) == MLIR_TYPE_KIND_LLVM_ARRAY) {     // array element stride
+                MLIR_TypeHandle et = MLIR_GetTypeElement(ctx, cur_ty);
                 stride = x64_type_size(ctx, et);
                 cur_ty = et;
             } else {

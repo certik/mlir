@@ -106,6 +106,18 @@ static char *fmt_alloc(const char *fmt, ...) {
     return out;
 }
 
+// Scalar type tests by kind and width (no type strings).
+static bool is_float_w(MLIR_Context *ctx, MLIR_TypeHandle ty, uint32_t width) {
+    return MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_FLOAT && MLIR_GetTypeWidth(ctx, ty) == width;
+}
+static bool is_llvm_ptr(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    return MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_POINTER;
+}
+// The width of an integer type, 0 for any other type.
+static uint32_t int_width(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    return MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_INTEGER ? MLIR_GetTypeWidth(ctx, ty) : 0;
+}
+
 // Format a floating-point constant as LLVM's hexadecimal form
 // (`0x<16 hex digits of the IEEE-754 double>`), which round-trips every bit.
 // A decimal `%e` keeps only 7 significant digits, which silently truncated
@@ -113,10 +125,7 @@ static char *fmt_alloc(const char *fmt, ...) {
 // constant LLVM still spells the value as a double, but it must be exactly
 // representable as a float, so round it first.
 static char *fmt_fp_literal(MLIR_Context *ctx, MLIR_TypeHandle ty, double v) {
-    if (ty != MLIR_INVALID_HANDLE) {
-        string ts = MLIR_GetTypeString(ctx, ty);
-        if (ts.size == 3 && memcmp(ts.str, "f32", 3) == 0) v = (double)(float)v;
-    }
+    if (is_float_w(ctx, ty, 32)) v = (double)(float)v;
     uint64_t bits;
     memcpy(&bits, &v, sizeof bits);
     return fmt_alloc("0x%016llX", (unsigned long long)bits);
@@ -264,23 +273,11 @@ static void print_llvm_type_text(Buf *out, const char *s, size_t n) {
 // Best-effort alignment for store/load. Matches what the upstream printer
 // emits for the tinyc surface.
 static unsigned type_align(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    string s = MLIR_GetTypeString(ctx, ty);
-    if (s.size >= 1 && s.str[0] == 'i') {
-        int w = 0;
-        for (size_t i = 1; i < s.size; i++) {
-            if (s.str[i] >= '0' && s.str[i] <= '9') w = w*10 + (s.str[i]-'0');
-            else { w = 0; break; }
-        }
-        if (w == 1) return 1;
-        if (w == 8) return 1;
-        if (w == 16) return 2;
-        if (w == 32) return 4;
-        if (w == 64) return 8;
-    }
-    if (s.size == 3 && memcmp(s.str, "f16", 3) == 0) return 2;
-    if (s.size == 3 && memcmp(s.str, "f32", 3) == 0) return 4;
-    if (s.size == 3 && memcmp(s.str, "f64", 3) == 0) return 8;
-    if (s.size >= 9 && memcmp(s.str, "!llvm.ptr", 9) == 0) return 8;
+    uint32_t w = int_width(ctx, ty);
+    if (w == 1 || w == 8) return 1;
+    if (w == 16 || w == 32 || w == 64) return w / 8;
+    if (is_float_w(ctx, ty, 16)) return 2;
+    if (is_float_w(ctx, ty, 32)) return 4;
     return 8;
 }
 
@@ -359,15 +356,15 @@ static char *inline_literal_for(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_TypeHa
     if (ty == OP_TYPE_LLVM_MLIR_ZERO || is_undef || is_poison) {
         // Type-driven: ptr -> null, anything aggregate -> zeroinitializer,
         // scalar -> 0 / 0.0.
-        string tys = MLIR_GetTypeString(ctx, vty);
-        if (tys.size >= 9 && memcmp(tys.str, "!llvm.ptr", 9) == 0) {
+        MLIR_TypeKind vk = MLIR_GetTypeKind(ctx, vty);
+        if (vk == MLIR_TYPE_KIND_LLVM_POINTER) {
             return xstrdup(is_undef ? "undef" : is_poison ? "poison" : "null");
         }
         if (is_undef) return xstrdup("undef");
         if (is_poison) return xstrdup("poison");
         // zero
-        if (tys.size >= 1 && tys.str[0] == 'i') return xstrdup("0");
-        if (tys.size == 3 && (memcmp(tys.str, "f32", 3) == 0 || memcmp(tys.str, "f64", 3) == 0))
+        if (vk == MLIR_TYPE_KIND_INTEGER || vk == MLIR_TYPE_KIND_INDEX) return xstrdup("0");
+        if (is_float_w(ctx, vty, 32) || is_float_w(ctx, vty, 64))
             return xstrdup("0.000000e+00");
         return xstrdup("zeroinitializer");
     }
@@ -462,16 +459,16 @@ static void emit_call(FnCtx *F, MLIR_OpHandle op) {
     // where variadic and fixed-arity ABIs differ.
     if (var_callee_type != MLIR_INVALID_HANDLE) {
         MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(var_callee_type);
-        bool is_vararg = MLIR_GetTypeFunctionIsVarArg(fty);
+        bool is_vararg = MLIR_GetTypeFunctionIsVarArg(F->ctx, fty);
         if (is_vararg) {
-            size_t ni = MLIR_GetTypeFunctionNumInputs(fty);
-            size_t no = MLIR_GetTypeFunctionNumResults(fty);
+            size_t ni = MLIR_GetTypeFunctionNumInputs(F->ctx, fty);
+            size_t no = MLIR_GetTypeFunctionNumResults(F->ctx, fty);
             if (no == 0) buf_cstr(out, "void");
-            else         print_type(out, F->ctx, MLIR_GetTypeFunctionResult(fty, 0));
+            else         print_type(out, F->ctx, MLIR_GetTypeFunctionResult(F->ctx, fty, 0));
             buf_cstr(out, " (");
             for (size_t i = 0; i < ni; i++) {
                 if (i) buf_cstr(out, ", ");
-                print_type(out, F->ctx, MLIR_GetTypeFunctionInput(fty, i));
+                print_type(out, F->ctx, MLIR_GetTypeFunctionInput(F->ctx, fty, i));
             }
             buf_cstr(out, ", ...)");
         } else {
@@ -925,12 +922,8 @@ static void emit_op(FnCtx *F, MLIR_OpHandle op) {
                               (MLIR_GetOpNumOperands(F->ctx, op) > 0 ? MLIR_GetValueType(F->ctx, MLIR_GetOpOperand(F->ctx, op, 0)) : MLIR_INVALID_HANDLE);
         // Pick suffix from the first operand/result type (f32/f64/etc.)
         const char *suffix = "f64";
-        if (rty != MLIR_INVALID_HANDLE) {
-            string ts = MLIR_GetTypeString(F->ctx, rty);
-            if (ts.size == 3 && memcmp(ts.str, "f32", 3) == 0) suffix = "f32";
-            else if (ts.size == 3 && memcmp(ts.str, "f64", 3) == 0) suffix = "f64";
-            else if (ts.size == 3 && memcmp(ts.str, "f16", 3) == 0) suffix = "f16";
-        }
+        if (is_float_w(F->ctx, rty, 32)) suffix = "f32";
+        else if (is_float_w(F->ctx, rty, 16)) suffix = "f16";
         buf_cstr(out, "  ");
         if (has_res) { emit_use(F, MLIR_GetOpResult(F->ctx, op, 0)); buf_cstr(out, " = "); }
         buf_cstr(out, "call ");
@@ -991,18 +984,10 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
     MLIR_AttributeHandle ftya = find_attr(ctx, fn, "function_type");
     if (ftya != MLIR_INVALID_HANDLE) fty = MLIR_GetAttributeTypeValue(ftya);
 
-    size_t ni = fty != MLIR_INVALID_HANDLE ? MLIR_GetTypeFunctionNumInputs(fty) : 0;
-    size_t no = fty != MLIR_INVALID_HANDLE ? MLIR_GetTypeFunctionNumResults(fty) : 0;
+    size_t ni = fty != MLIR_INVALID_HANDLE ? MLIR_GetTypeFunctionNumInputs(ctx, fty) : 0;
+    size_t no = fty != MLIR_INVALID_HANDLE ? MLIR_GetTypeFunctionNumResults(ctx, fty) : 0;
 
-    // Detect varargs by scanning the printed type (the function type
-    // attribute records "..." when present).
-    bool varargs = false;
-    if (fty != MLIR_INVALID_HANDLE) {
-        string ts = MLIR_GetTypeString(ctx, fty);
-        for (size_t i = 0; i + 2 < ts.size; i++) {
-            if (ts.str[i] == '.' && ts.str[i+1] == '.' && ts.str[i+2] == '.') { varargs = true; break; }
-        }
-    }
+    bool varargs = MLIR_GetTypeFunctionIsVarArg(ctx, fty);
 
     bool has_body = MLIR_GetOpNumRegions(ctx, fn) > 0 &&
                     MLIR_GetRegionNumBlocks(ctx, MLIR_GetOpRegion(ctx, fn, 0)) > 0;
@@ -1010,11 +995,11 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
     if (!has_body) {
         buf_cstr(out, "declare ");
         if (no == 0) buf_cstr(out, "void");
-        else         print_type(out, ctx, MLIR_GetTypeFunctionResult(fty, 0));
+        else         print_type(out, ctx, MLIR_GetTypeFunctionResult(ctx, fty, 0));
         buf_printf(out, " @%.*s(", (int)sym.size, sym.str);
         for (size_t i = 0; i < ni; i++) {
             if (i) buf_cstr(out, ", ");
-            print_type(out, ctx, MLIR_GetTypeFunctionInput(fty, i));
+            print_type(out, ctx, MLIR_GetTypeFunctionInput(ctx, fty, i));
         }
         if (varargs) { if (ni) buf_cstr(out, ", "); buf_cstr(out, "..."); }
         buf_cstr(out, ")\n");
@@ -1024,7 +1009,7 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
     buf_cstr(out, "define ");
     if (is_private) buf_cstr(out, "internal ");
     if (no == 0) buf_cstr(out, "void");
-    else         print_type(out, ctx, MLIR_GetTypeFunctionResult(fty, 0));
+    else         print_type(out, ctx, MLIR_GetTypeFunctionResult(ctx, fty, 0));
     buf_printf(out, " @%.*s(", (int)sym.size, sym.str);
     // Parameters use the names assigned by assign_names ("%a0" etc.).
     FnCtx F; memset(&F, 0, sizeof F);
@@ -1033,7 +1018,7 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
     assign_names(&F, body);
     for (size_t i = 0; i < ni; i++) {
         if (i) buf_cstr(out, ", ");
-        print_type(out, ctx, MLIR_GetTypeFunctionInput(fty, i));
+        print_type(out, ctx, MLIR_GetTypeFunctionInput(ctx, fty, i));
         buf_putc(out, ' ');
         MLIR_BlockHandle entry = MLIR_GetRegionBlock(ctx, body, 0);
         MLIR_ValueHandle a = MLIR_GetBlockArg(ctx, entry, i);
@@ -1084,22 +1069,22 @@ static void print_const_bytes(Buf *out, MLIR_Context *ctx, MLIR_TypeHandle ty,
     for (unsigned i = 0; i < sz; i++) {
         if (b[i]) { zero = false; break; }
     }
-    if (MLIR_IsTypeLLVMArray(ty) || MLIR_IsTypeLLVMStruct(ty)) {
+    if ((MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_ARRAY) || (MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_STRUCT)) {
         if (zero) { buf_cstr(out, "zeroinitializer"); return; }
-        bool arr = MLIR_IsTypeLLVMArray(ty);
-        size_t n = arr ? (size_t)MLIR_GetTypeLLVMArrayNumElements(ty)
-                       : MLIR_GetTypeLLVMStructNumFields(ty);
+        bool arr = (MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_ARRAY);
+        size_t n = arr ? (size_t)MLIR_GetTypeNumElements(ctx, ty)
+                       : MLIR_GetTypeLLVMStructNumFields(ctx, ty);
         buf_cstr(out, arr ? "[" : "{ ");
         unsigned off = 0;  // the field's offset, kept running for a struct
         for (size_t i = 0; i < n; i++) {
             MLIR_TypeHandle et;
             if (arr) {
-                et = MLIR_GetTypeLLVMArrayElement(ty);
+                et = MLIR_GetTypeElement(ctx, ty);
                 off = (unsigned)i * llvm_type_size(ctx, et, 8);
             } else {
-                et = MLIR_GetTypeLLVMStructField(ty, i);
+                et = MLIR_GetTypeLLVMStructField(ctx, ty, i);
                 if (i > 0) {
-                    MLIR_TypeHandle pt = MLIR_GetTypeLLVMStructField(ty, i - 1);
+                    MLIR_TypeHandle pt = MLIR_GetTypeLLVMStructField(ctx, ty, i - 1);
                     off = llvm_align_up(off + llvm_type_size(ctx, pt, 8),
                                         llvm_type_align(ctx, et, 8));
                 }
@@ -1114,18 +1099,16 @@ static void print_const_bytes(Buf *out, MLIR_Context *ctx, MLIR_TypeHandle ty,
     }
     uint64_t bits = 0;
     for (unsigned i = 0; i < sz && i < 8; i++) bits |= (uint64_t)b[i] << (8 * i);
-    string ts = MLIR_GetTypeString(ctx, ty);
-    if ((ts.size >= 9 && memcmp(ts.str, "!llvm.ptr", 9) == 0) ||
-        (ts.size == 3 && memcmp(ts.str, "ptr", 3) == 0)) {
+    if (is_llvm_ptr(ctx, ty)) {
         buf_cstr(out, "null");
-    } else if (ts.size == 3 && memcmp(ts.str, "f32", 3) == 0) {
+    } else if (is_float_w(ctx, ty, 32)) {
         uint32_t b32 = (uint32_t)bits;
         float f;
         memcpy(&f, &b32, 4);
         char *l = fmt_fp_literal(ctx, ty, (double)f);
         buf_cstr(out, l);
         free(l);
-    } else if (ts.size == 3 && memcmp(ts.str, "f64", 3) == 0) {
+    } else if (is_float_w(ctx, ty, 64)) {
         double d;
         memcpy(&d, &bits, 8);
         char *l = fmt_fp_literal(ctx, ty, d);
@@ -1178,19 +1161,11 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
             // typed array constant.
             unsigned elem_w = 0;
             uint64_t arr_n = 0;
-            if (gty != MLIR_INVALID_HANDLE && MLIR_IsTypeLLVMArray(gty)) {
-                arr_n = MLIR_GetTypeLLVMArrayNumElements(gty);
-                MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(gty);
-                string ets = MLIR_GetTypeString(ctx, et);
-                if (ets.size >= 2 && ets.str[0] == 'i') {
-                    int w = 0;
-                    for (size_t i = 1; i < ets.size; i++) {
-                        if (ets.str[i] >= '0' && ets.str[i] <= '9') {
-                            w = w * 10 + (ets.str[i] - '0');
-                        } else { w = 0; break; }
-                    }
-                    if (w == 8 || w == 16 || w == 32 || w == 64) elem_w = (unsigned)w;
-                }
+            if (gty != MLIR_INVALID_HANDLE && (MLIR_GetTypeKind(ctx, gty) == MLIR_TYPE_KIND_LLVM_ARRAY)) {
+                arr_n = MLIR_GetTypeNumElements(ctx, gty);
+                MLIR_TypeHandle et = MLIR_GetTypeElement(ctx, gty);
+                uint32_t w = int_width(ctx, et);
+                if (w == 8 || w == 16 || w == 32 || w == 64) elem_w = w;
             }
             if (elem_w > 8 && arr_n > 0 &&
                 s.size == arr_n * (elem_w / 8)) {

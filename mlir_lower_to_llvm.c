@@ -119,18 +119,19 @@ static bool lower_arith_constant(LowerState *st, MLIR_OpHandle op,
 }
 
 static bool type_is_index(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    string s = MLIR_GetTypeString(ctx, ty);
-    return s.size == 5 && memcmp(s.str, "index", 5) == 0;
+    return MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_INDEX;
+}
+
+static bool type_is_int(MLIR_Context *ctx, MLIR_TypeHandle ty, uint32_t width) {
+    return MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_INTEGER && MLIR_GetTypeWidth(ctx, ty) == width;
 }
 
 static bool type_is_i32(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    string s = MLIR_GetTypeString(ctx, ty);
-    return s.size == 3 && s.str[0] == 'i' && s.str[1] == '3' && s.str[2] == '2';
+    return type_is_int(ctx, ty, 32);
 }
 
 static bool type_is_i64(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    string s = MLIR_GetTypeString(ctx, ty);
-    return s.size == 3 && s.str[0] == 'i' && s.str[1] == '6' && s.str[2] == '4';
+    return type_is_int(ctx, ty, 64);
 }
 
 // Lower `arith.index_cast` / `arith.index_castui` between `index` and integer
@@ -170,7 +171,7 @@ static bool lower_arith_index_cast(LowerState *st, MLIR_OpHandle op,
         llvm_op = OP_TYPE_LLVM_TRUNC;
     } else if (src_i32 && dst_i64) {
         llvm_op = is_unsigned ? OP_TYPE_LLVM_ZEXT : OP_TYPE_LLVM_SEXT;
-    } else if (!src_index && dst_index && MLIR_IsTypeInteger(src_ty)) {
+    } else if (!src_index && dst_index && (MLIR_GetTypeKind(st->ctx, src_ty) == MLIR_TYPE_KIND_INTEGER)) {
         llvm_op = is_unsigned ? OP_TYPE_LLVM_ZEXT : OP_TYPE_LLVM_SEXT;
     } else {
         return false;
@@ -258,17 +259,17 @@ static bool lower_func_func(LowerState *st, MLIR_OpHandle op,
             // Convert FunctionType -> LLVMFunctionType (which carries
             // is_var_arg and uses LLVM void instead of zero-results).
             MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(a);
-            size_t ni = MLIR_GetTypeFunctionNumInputs(ft);
-            size_t nr_ = MLIR_GetTypeFunctionNumResults(ft);
+            size_t ni = MLIR_GetTypeFunctionNumInputs(st->ctx, ft);
+            size_t nr_ = MLIR_GetTypeFunctionNumResults(st->ctx, ft);
             MLIR_TypeHandle ins_stk[16];
             MLIR_TypeHandle *ins = ins_stk;
             if (ni > 16) ins = (MLIR_TypeHandle *)arena_alloc(
                 MLIR_GetArenaAllocator(st->ctx),
                 ni * sizeof(MLIR_TypeHandle));
-            for (size_t k = 0; k < ni; k++) ins[k] = MLIR_GetTypeFunctionInput(ft, k);
+            for (size_t k = 0; k < ni; k++) ins[k] = MLIR_GetTypeFunctionInput(st->ctx, ft, k);
             MLIR_TypeHandle ret_ty = (nr_ == 0)
                 ? ty_llvm_void(st->ctx)
-                : MLIR_GetTypeFunctionResult(ft, 0);
+                : MLIR_GetTypeFunctionResult(st->ctx, ft, 0);
             MLIR_TypeHandle llvmft = MLIR_CreateTypeLLVMFunction(
                 st->ctx, ret_ty, ins, ni, false);
             attrs_buf[n_attrs++] = MLIR_CreateAttributeType(

@@ -370,6 +370,16 @@ uintptr_t typeH(mlir::Type t) { return reinterpret_cast<uintptr_t>(t.getAsOpaque
 mlir::Type typeF(uintptr_t h) {
     return mlir::Type::getFromOpaquePointer(reinterpret_cast<const void *>(h));
 }
+// A type handle of `ctx` (the type getters' context check).
+mlir::Type typeOf(MLIR_Context *ctx, uintptr_t h, const char *fn) {
+    mlir::Type t = typeF(h);
+#ifdef MLIR_API_CHECKS
+    if (t) API_CHECK(t.getContext() == ctx, fn, "the type belongs to another context");
+#else
+    (void)ctx; (void)fn;
+#endif
+    return t;
+}
 uintptr_t locH(mlir::Location loc) { return reinterpret_cast<uintptr_t>(loc.getAsOpaquePointer()); }
 mlir::Location locF(uintptr_t h) {
     return mlir::Location::getFromOpaquePointer(reinterpret_cast<const void *>(h));
@@ -1281,30 +1291,86 @@ extern "C" MLIR_TypeHandle MLIR_CreateTypeFunction(MLIR_Context *cctx,
     return typeH(mlir::FunctionType::get(&ctx, in, out));
 }
 
-extern "C" bool MLIR_IsTypeInteger(MLIR_TypeHandle h) { return llvm::isa<mlir::IntegerType>(typeF(h)); }
-extern "C" bool MLIR_IsTypeFloat(MLIR_TypeHandle h)   { return llvm::isa<mlir::FloatType>(typeF(h)); }
-extern "C" size_t MLIR_GetTypeFunctionNumInputs(MLIR_TypeHandle h) {
-    auto t = typeF(h);
-    if (auto ft = llvm::dyn_cast<mlir::FunctionType>(t)) return ft.getNumInputs();
-    if (auto ft = llvm::dyn_cast<mlir::LLVM::LLVMFunctionType>(t)) return ft.getNumParams();
+extern "C" MLIR_TypeHandle MLIR_CreateTypeVector(MLIR_Context *cctx, const int64_t *shape,
+                                                  size_t rank, MLIR_TypeHandle element_type) {
+    API_CHECK(shape != nullptr && rank > 0, "MLIR_CreateTypeVector", "a vector needs a shape");
+    API_CHECK(element_type != MLIR_INVALID_HANDLE, "MLIR_CreateTypeVector", "element type is NULL");
+    llvm::SmallVector<int64_t, 4> dims(shape, shape + rank);
+    return typeH(mlir::VectorType::get(dims, typeOf(cctx, element_type, "MLIR_CreateTypeVector")));
+}
+
+extern "C" MLIR_TypeKind MLIR_GetTypeKind(MLIR_Context *ctx, MLIR_TypeHandle h) {
+    mlir::Type t = typeOf(ctx, h, "MLIR_GetTypeKind");
+    if (!t) return MLIR_TYPE_KIND_INVALID;
+    if (llvm::isa<mlir::IntegerType>(t)) return MLIR_TYPE_KIND_INTEGER;
+    if (llvm::isa<mlir::LLVM::LLVMPointerType>(t)) return MLIR_TYPE_KIND_LLVM_POINTER;
+    if (llvm::isa<mlir::BFloat16Type>(t)) return MLIR_TYPE_KIND_BF16;
+    if (llvm::isa<mlir::FloatType>(t)) return MLIR_TYPE_KIND_FLOAT;
+    if (llvm::isa<mlir::IndexType>(t)) return MLIR_TYPE_KIND_INDEX;
+    if (llvm::isa<mlir::LLVM::LLVMStructType>(t)) return MLIR_TYPE_KIND_LLVM_STRUCT;
+    if (llvm::isa<mlir::LLVM::LLVMArrayType>(t)) return MLIR_TYPE_KIND_LLVM_ARRAY;
+    if (llvm::isa<mlir::LLVM::LLVMFunctionType>(t)) return MLIR_TYPE_KIND_LLVM_FUNCTION;
+    if (llvm::isa<mlir::LLVM::LLVMVoidType>(t)) return MLIR_TYPE_KIND_LLVM_VOID;
+    if (llvm::isa<mlir::FunctionType>(t)) return MLIR_TYPE_KIND_FUNCTION;
+    if (llvm::isa<mlir::VectorType>(t)) return MLIR_TYPE_KIND_VECTOR;
+    if (llvm::isa<mlir::RankedTensorType>(t)) return MLIR_TYPE_KIND_TENSOR;
+    if (llvm::isa<mlir::MemRefType>(t)) return MLIR_TYPE_KIND_MEMREF;
+    if (llvm::isa<mlir::NoneType>(t)) return MLIR_TYPE_KIND_NONE;
+    return MLIR_TYPE_KIND_OPAQUE;
+}
+extern "C" uint32_t MLIR_GetTypeWidth(MLIR_Context *ctx, MLIR_TypeHandle h) {
+    mlir::Type t = typeOf(ctx, h, "MLIR_GetTypeWidth");
+    if (auto it = llvm::dyn_cast_or_null<mlir::IntegerType>(t)) return it.getWidth();
+    if (auto ft = llvm::dyn_cast_or_null<mlir::FloatType>(t)) return ft.getWidth();
     return 0;
 }
-extern "C" MLIR_TypeHandle MLIR_GetTypeFunctionInput(MLIR_TypeHandle h, size_t idx) {
-    auto t = typeF(h);
-    if (auto ft = llvm::dyn_cast<mlir::FunctionType>(t)) {
+extern "C" MLIR_TypeHandle MLIR_GetTypeElement(MLIR_Context *ctx, MLIR_TypeHandle h) {
+    mlir::Type t = typeOf(ctx, h, "MLIR_GetTypeElement");
+    if (auto at = llvm::dyn_cast_or_null<mlir::LLVM::LLVMArrayType>(t)) return typeH(at.getElementType());
+    if (llvm::isa_and_nonnull<mlir::VectorType, mlir::RankedTensorType, mlir::MemRefType>(t))
+        return typeH(llvm::cast<mlir::ShapedType>(t).getElementType());
+    return MLIR_INVALID_HANDLE;
+}
+extern "C" uint64_t MLIR_GetTypeNumElements(MLIR_Context *ctx, MLIR_TypeHandle h) {
+    mlir::Type t = typeOf(ctx, h, "MLIR_GetTypeNumElements");
+    if (auto at = llvm::dyn_cast_or_null<mlir::LLVM::LLVMArrayType>(t)) return at.getNumElements();
+    if (auto vt = llvm::dyn_cast_or_null<mlir::VectorType>(t)) return vt.getNumElements();
+    return 0;
+}
+extern "C" size_t MLIR_GetTypeShapeRank(MLIR_Context *ctx, MLIR_TypeHandle h) {
+    mlir::Type t = typeOf(ctx, h, "MLIR_GetTypeShapeRank");
+    if (llvm::isa_and_nonnull<mlir::VectorType, mlir::RankedTensorType, mlir::MemRefType>(t))
+        return llvm::cast<mlir::ShapedType>(t).getRank();
+    return 0;
+}
+extern "C" int64_t MLIR_GetTypeShapeDim(MLIR_Context *ctx, MLIR_TypeHandle h, size_t idx) {
+    API_CHECK(idx < MLIR_GetTypeShapeRank(ctx, h), "MLIR_GetTypeShapeDim", "index out of range");
+    int64_t d = llvm::cast<mlir::ShapedType>(typeOf(ctx, h, "MLIR_GetTypeShapeDim")).getDimSize(idx);
+    return mlir::ShapedType::isDynamic(d) ? -1 : d;
+}
+extern "C" size_t MLIR_GetTypeFunctionNumInputs(MLIR_Context *ctx, MLIR_TypeHandle h) {
+    auto t = typeOf(ctx, h, "MLIR_GetTypeFunctionNumInputs");
+    if (auto ft = llvm::dyn_cast_or_null<mlir::FunctionType>(t)) return ft.getNumInputs();
+    if (auto ft = llvm::dyn_cast_or_null<mlir::LLVM::LLVMFunctionType>(t)) return ft.getNumParams();
+    return 0;
+}
+extern "C" MLIR_TypeHandle MLIR_GetTypeFunctionInput(MLIR_Context *ctx, MLIR_TypeHandle h, size_t idx) {
+    API_CHECK(idx < MLIR_GetTypeFunctionNumInputs(ctx, h), "MLIR_GetTypeFunctionInput", "index out of range");
+    auto t = typeOf(ctx, h, "MLIR_GetTypeFunctionInput");
+    if (auto ft = llvm::dyn_cast_or_null<mlir::FunctionType>(t)) {
         if (idx >= ft.getNumInputs()) return MLIR_INVALID_HANDLE;
         return typeH(ft.getInput(idx));
     }
-    if (auto ft = llvm::dyn_cast<mlir::LLVM::LLVMFunctionType>(t)) {
+    if (auto ft = llvm::dyn_cast_or_null<mlir::LLVM::LLVMFunctionType>(t)) {
         if (idx >= ft.getNumParams()) return MLIR_INVALID_HANDLE;
         return typeH(ft.getParamType(idx));
     }
     return MLIR_INVALID_HANDLE;
 }
-extern "C" size_t MLIR_GetTypeFunctionNumResults(MLIR_TypeHandle h) {
-    auto t = typeF(h);
-    if (auto ft = llvm::dyn_cast<mlir::FunctionType>(t)) return ft.getNumResults();
-    if (auto ft = llvm::dyn_cast<mlir::LLVM::LLVMFunctionType>(t)) {
+extern "C" size_t MLIR_GetTypeFunctionNumResults(MLIR_Context *ctx, MLIR_TypeHandle h) {
+    auto t = typeOf(ctx, h, "MLIR_GetTypeFunctionNumResults");
+    if (auto ft = llvm::dyn_cast_or_null<mlir::FunctionType>(t)) return ft.getNumResults();
+    if (auto ft = llvm::dyn_cast_or_null<mlir::LLVM::LLVMFunctionType>(t)) {
         // LLVMFunctionType has exactly one return type; "void" counts as 0
         // results to mirror mlir::FunctionType semantics for callers that
         // want to spell `declare void` etc.
@@ -1312,13 +1378,14 @@ extern "C" size_t MLIR_GetTypeFunctionNumResults(MLIR_TypeHandle h) {
     }
     return 0;
 }
-extern "C" MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_TypeHandle h, size_t idx) {
-    auto t = typeF(h);
-    if (auto ft = llvm::dyn_cast<mlir::FunctionType>(t)) {
+extern "C" MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_Context *ctx, MLIR_TypeHandle h, size_t idx) {
+    API_CHECK(idx < MLIR_GetTypeFunctionNumResults(ctx, h), "MLIR_GetTypeFunctionResult", "index out of range");
+    auto t = typeOf(ctx, h, "MLIR_GetTypeFunctionResult");
+    if (auto ft = llvm::dyn_cast_or_null<mlir::FunctionType>(t)) {
         if (idx >= ft.getNumResults()) return MLIR_INVALID_HANDLE;
         return typeH(ft.getResult(idx));
     }
-    if (auto ft = llvm::dyn_cast<mlir::LLVM::LLVMFunctionType>(t)) {
+    if (auto ft = llvm::dyn_cast_or_null<mlir::LLVM::LLVMFunctionType>(t)) {
         if (idx != 0) return MLIR_INVALID_HANDLE;
         if (llvm::isa<mlir::LLVM::LLVMVoidType>(ft.getReturnType())) return MLIR_INVALID_HANDLE;
         return typeH(ft.getReturnType());
@@ -1326,51 +1393,43 @@ extern "C" MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_TypeHandle h, size_t 
     return MLIR_INVALID_HANDLE;
 }
 
-extern "C" bool MLIR_GetTypeFunctionIsVarArg(MLIR_TypeHandle h) {
-    auto t = typeF(h);
-    if (auto ft = llvm::dyn_cast<mlir::LLVM::LLVMFunctionType>(t)) {
+extern "C" bool MLIR_GetTypeFunctionIsVarArg(MLIR_Context *ctx, MLIR_TypeHandle h) {
+    auto t = typeOf(ctx, h, "MLIR_GetTypeFunctionIsVarArg");
+    if (auto ft = llvm::dyn_cast_or_null<mlir::LLVM::LLVMFunctionType>(t)) {
         return ft.isVarArg();
     }
     return false;
 }
 
-extern "C" MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle h) {
-    auto t = typeF(h);
-    if (auto st = llvm::dyn_cast<mlir::ShapedType>(t)) {
-        return typeH(st.getElementType());
-    }
-    return MLIR_INVALID_HANDLE;
-}
-
-extern "C" bool MLIR_IsTypeLLVMStruct(MLIR_TypeHandle h) {
-    return llvm::isa<mlir::LLVM::LLVMStructType>(typeF(h));
-}
-extern "C" size_t MLIR_GetTypeLLVMStructNumFields(MLIR_TypeHandle h) {
-    auto st = llvm::dyn_cast<mlir::LLVM::LLVMStructType>(typeF(h));
+extern "C" size_t MLIR_GetTypeLLVMStructNumFields(MLIR_Context *ctx, MLIR_TypeHandle h) {
+    auto st = llvm::dyn_cast_or_null<mlir::LLVM::LLVMStructType>(typeOf(ctx, h, "MLIR_GetTypeLLVMStructNumFields"));
     if (!st) return 0;
     return st.getBody().size();
 }
-extern "C" MLIR_TypeHandle MLIR_GetTypeLLVMStructField(MLIR_TypeHandle h, size_t idx) {
-    auto st = llvm::dyn_cast<mlir::LLVM::LLVMStructType>(typeF(h));
+extern "C" MLIR_TypeHandle MLIR_GetTypeLLVMStructField(MLIR_Context *ctx, MLIR_TypeHandle h, size_t idx) {
+    API_CHECK(idx < MLIR_GetTypeLLVMStructNumFields(ctx, h), "MLIR_GetTypeLLVMStructField", "index out of range");
+    auto st = llvm::dyn_cast_or_null<mlir::LLVM::LLVMStructType>(typeOf(ctx, h, "MLIR_GetTypeLLVMStructField"));
     if (!st || idx >= st.getBody().size()) return MLIR_INVALID_HANDLE;
     return typeH(st.getBody()[idx]);
 }
-extern "C" bool MLIR_IsTypeLLVMArray(MLIR_TypeHandle h) {
-    return llvm::isa<mlir::LLVM::LLVMArrayType>(typeF(h));
+extern "C" string MLIR_GetTypeLLVMStructName(MLIR_Context *ctx, MLIR_TypeHandle h) {
+    auto st = llvm::dyn_cast_or_null<mlir::LLVM::LLVMStructType>(typeOf(ctx, h, "MLIR_GetTypeLLVMStructName"));
+    if (!st || !st.isIdentified()) return str_lit("");
+    // The name is owned by the MLIRContext's uniquer, so it outlives every
+    // IR arena.
+    llvm::StringRef n = st.getName();
+    string r;
+    r.str = const_cast<char *>(n.data());
+    r.size = n.size();
+    return r;
 }
-extern "C" MLIR_TypeHandle MLIR_GetTypeLLVMArrayElement(MLIR_TypeHandle h) {
-    auto at = llvm::dyn_cast<mlir::LLVM::LLVMArrayType>(typeF(h));
-    if (!at) return MLIR_INVALID_HANDLE;
-    return typeH(at.getElementType());
-}
-extern "C" uint64_t MLIR_GetTypeLLVMArrayNumElements(MLIR_TypeHandle h) {
-    auto at = llvm::dyn_cast<mlir::LLVM::LLVMArrayType>(typeF(h));
-    if (!at) return 0;
-    return at.getNumElements();
+extern "C" bool MLIR_IsTypeLLVMStructOpaque(MLIR_Context *ctx, MLIR_TypeHandle h) {
+    auto st = llvm::dyn_cast_or_null<mlir::LLVM::LLVMStructType>(typeOf(ctx, h, "MLIR_IsTypeLLVMStructOpaque"));
+    return st && st.isOpaque();
 }
 
-extern "C" uint32_t MLIR_GetTypeLLVMPointerAddressSpace(MLIR_TypeHandle h) {
-    auto p = llvm::dyn_cast<mlir::LLVM::LLVMPointerType>(typeF(h));
+extern "C" uint32_t MLIR_GetTypeLLVMPointerAddressSpace(MLIR_Context *ctx, MLIR_TypeHandle h) {
+    auto p = llvm::dyn_cast_or_null<mlir::LLVM::LLVMPointerType>(typeOf(ctx, h, "MLIR_GetTypeLLVMPointerAddressSpace"));
     return p ? p.getAddressSpace() : 0;
 }
 

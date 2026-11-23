@@ -487,7 +487,9 @@ static void lc_process_block(Walk *w, size_t bi) {
                 // as a load result (it has no register slot). In the wasm-lifted
                 // IR stored values are always i32/i64/f32/f64, but enforce it.
                 MLIR_TypeHandle st = MLIR_GetValueType(c->ctx, sv);
-                if (MLIR_IsTypeInteger(st) || MLIR_IsTypeFloat(st)) {
+                MLIR_TypeKind sk = MLIR_GetTypeKind(c->ctx, st);
+                if (sk == MLIR_TYPE_KIND_INTEGER || sk == MLIR_TYPE_KIND_FLOAT ||
+                    sk == MLIR_TYPE_KIND_BF16) {
                     lc_build_store_key(&w->kb, c->ctx, &w->repl, op);
                     lcse_insert(&w->map, w->kb.p, w->kb.n, sv, w->gen);
                 }

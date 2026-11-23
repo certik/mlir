@@ -326,17 +326,10 @@ static void store_mem(FnCtx *F, uint8_t addr, uint8_t src, int bytes) {
 // ---------------------------------------------------------------------------
 // type / constant helpers
 // ---------------------------------------------------------------------------
+// Bit width of an integer-typed value; 0 for pointers and other types.
 static int int_bits(MLIR_Context *ctx, MLIR_ValueHandle v) {
-    string s = MLIR_GetTypeString(ctx, MLIR_GetValueType(ctx, v));
-    if (s.size >= 1 && s.str[0] == 'i') {
-        int w = 0; bool any = false;
-        for (size_t i = 1; i < s.size; i++) {
-            if (s.str[i] < '0' || s.str[i] > '9') return 0;
-            w = w * 10 + (s.str[i] - '0'); any = true;
-        }
-        return any ? w : 0;
-    }
-    return 0;  // ptr / other
+    MLIR_TypeHandle t = MLIR_GetValueType(ctx, v);
+    return MLIR_GetTypeKind(ctx, t) == MLIR_TYPE_KIND_INTEGER ? (int)MLIR_GetTypeWidth(ctx, t) : 0;
 }
 static int val_w(MLIR_Context *ctx, MLIR_ValueHandle v) {
     int b = int_bits(ctx, v);
@@ -361,10 +354,10 @@ static bool is_const(MLIR_Context *ctx, MLIR_OpHandle def, int64_t *val) {
 
 // Float width (in bytes) of a value's type: 4 for f32, 8 for f64, else 0.
 static int fp_bytes(MLIR_Context *ctx, MLIR_ValueHandle v) {
-    string s = MLIR_GetTypeString(ctx, MLIR_GetValueType(ctx, v));
-    if (s.size == 3 && memcmp(s.str, "f64", 3) == 0) return 8;
-    if (s.size == 3 && memcmp(s.str, "f32", 3) == 0) return 4;
-    return 0;
+    MLIR_TypeHandle t = MLIR_GetValueType(ctx, v);
+    if (MLIR_GetTypeKind(ctx, t) != MLIR_TYPE_KIND_FLOAT) return 0;
+    uint32_t w = MLIR_GetTypeWidth(ctx, t);
+    return (w == 32 || w == 64) ? (int)(w / 8) : 0;
 }
 
 // A floating-point `llvm.mlir.constant`: read its value as a raw bit pattern

@@ -753,7 +753,7 @@ OperationParserResult parse_tensor_extract_op(Parser *parser, const OperationPar
     // The classic syntax `tensor.extract %t[%i...] : tensor<...xT>` types the
     // SOURCE tensor after `:`; the result is the element type. Peel it out.
     if (n_result_types == 1 && result_types) {
-        MLIR_TypeHandle elem = MLIR_GetTypeShapedElement(result_types[0]);
+        MLIR_TypeHandle elem = MLIR_GetTypeElement(params->ctx, result_types[0]);
         if (elem != MLIR_INVALID_HANDLE) {
             result_types[0] = elem;
         }

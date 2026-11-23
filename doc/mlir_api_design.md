@@ -532,11 +532,11 @@ B-pool layout, flat vectors reserved from a hint and grown by doubling.
 As implemented (#354):
 - **API.** Every getter of an op, region, block or value takes the context as
   its first parameter (`MLIR_GetOpOperand(ctx, op, i)`). The upstream backend
-  uses it only for an ownership check under `MLIR_API_CHECKS`. Getters of
-  types, attributes and locations are unchanged: types stay uniqued pointers
-  and attributes and locations arena pointers until their interning (#349,
-  #350) makes them indices too. Most sketches in §3 and §4 omit the context
-  for brevity.
+  uses it only for an ownership check under `MLIR_API_CHECKS`. Since #349
+  the type getters take it too, and type handles are indices (§6, "As
+  implemented (#349)"); attributes and locations stay arena pointers until
+  their interning (#350) makes them indices as well. Most sketches in §3 and
+  §4 omit the context for brevity.
 - **Layout** (`mlir_api_impl.c`, "IR storage"). Vectors per kind: ops (56 B),
   values (40 B), operands (16 B: `{value, owner, next, prev}`, all indices),
   blocks and regions. An op's regular and successor operands are consecutive
@@ -1248,6 +1248,35 @@ are the last ones in their vector. N7 remains: erasing an op still costs
 O(block size), now a scan to the op and a shift of the tail instead of a
 filter over the whole list (on the self-host lift that change alone made
 mem2reg 1.9× and dce 1.3× faster). N8 and N9 are unchanged.
+
+As implemented (#349): N3, N4 and N12 (and U10 upstream).
+- **Interning.** Types are hash-consed into the context's `types` vector,
+  and a type handle is the record's 32-bit index (tagged and salted like the
+  IR handles under `MLIR_API_CHECKS`). Every child type is interned first, so
+  a type hashes over its kind, its scalar fields and its children's indices,
+  with no deep traversal; equal types get equal indices, and creating an
+  existing type allocates nothing (the child words are pushed, looked up and
+  popped again). `iN` up to 64 and `!llvm.ptr` are also cached by width.
+  Identified LLVM structs hash by name, and their body is set once, later;
+  two structs with the same body and different names stay different types.
+- **Info table.** A type's 32-byte record holds its kind, width, element
+  type and element count, so `MLIR_GetTypeKind`, `MLIR_GetTypeWidth`,
+  `MLIR_GetTypeElement` and `MLIR_GetTypeNumElements` are one array read
+  each; function inputs and results, struct fields and shape dimensions are
+  words of a second vector. `MLIR_TypeKind` has one enumerator per builtin
+  and LLVM kind (#230), plus `OPAQUE` for the rest (e.g. `!tt.ptr`).
+  A value stores its type as an index, so a value record is 32 bytes
+  instead of 40.
+- **API.** Every type getter takes the context. The kind tests
+  (`IsTypeInteger`, `IsTypeFloat`, `IsTypeLLVMStruct`, `IsTypeLLVMArray`) and
+  the element getters (`GetTypeShapedElement`, `GetTypeLLVMArrayElement`,
+  `GetTypeLLVMArrayNumElements`) merged into the four above. New: vector
+  types, `GetTypeShapeRank`/`GetTypeShapeDim`, `GetTypeLLVMStructName`,
+  `IsTypeLLVMStructOpaque`. Upstream answers them with `isa`/`dyn_cast`.
+- **Backends.** x86-64, AArch64, LLVM → wasmssa, wasmssa → wasmstack, the
+  type layout, the lowering, the wasm lifter and the LLVM-IR translator
+  classify types by kind and width; `GetTypeString` is left to the printers
+  (and the LLVM-IR translator's type printer).
 
 ## 7. Ordered follow-up issues
 

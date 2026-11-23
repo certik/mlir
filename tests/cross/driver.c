@@ -19,6 +19,10 @@
 #include "mlir_api.h"
 #include "mlir_generic_printer.h"
 
+// Parser-only type constructors (mlir_parser.h), for the uniquing checks.
+MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *ctx, MLIR_TypeHandle element_type, bool has_address_space, uint32_t address_space);
+MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *ctx, string name);
+
 static void print_string(string s) {
     ciovec_t iov;
     iov.buf = s.str;
@@ -136,6 +140,96 @@ int app_main(void) {
         print_string(idx_a == idx_b ? str_lit("intern index: yes\n") : str_lit("intern index: no\n"));
         print_string(ptr_a == ptr_b ? str_lit("intern !llvm.ptr: yes\n") : str_lit("intern !llvm.ptr: no\n"));
         print_string(i32_a == i64_a ? str_lit("intern i32==i64: yes\n") : str_lit("intern i32==i64: no\n"));
+    }
+
+    // Type introspection (#349): kinds, widths, elements and element counts
+    // are the same on both backends, and equal types are equal handles
+    // (identified structs: equal names).
+    {
+        MLIR_TypeHandle i8 = MLIR_CreateTypeInteger(ctx, 8, true);
+        MLIR_TypeHandle f32 = MLIR_CreateTypeFloat(ctx, 32, false);
+        MLIR_TypeHandle bf16 = MLIR_CreateTypeFloat(ctx, 16, true);
+        MLIR_TypeHandle ptr = MLIR_CreateTypeLLVMPointer(ctx);
+        MLIR_TypeHandle arr = MLIR_CreateTypeLLVMArray(ctx, i8, 12);
+        int64_t vshape[2] = { 2, 4 };
+        MLIR_TypeHandle vec = MLIR_CreateTypeVector(ctx, vshape, 2, f32);
+        int64_t tshape[2] = { 3, -1 };
+        MLIR_TypeHandle ten = MLIR_CreateTypeTensor(ctx, tshape, 2, i8);
+        print_string(format(arena, str_lit("type kinds: i8={}/{} f32={}/{} bf16={}/{}"),
+            (int64_t)MLIR_GetTypeKind(ctx, i8), (int64_t)MLIR_GetTypeWidth(ctx, i8),
+            (int64_t)MLIR_GetTypeKind(ctx, f32), (int64_t)MLIR_GetTypeWidth(ctx, f32),
+            (int64_t)MLIR_GetTypeKind(ctx, bf16), (int64_t)MLIR_GetTypeWidth(ctx, bf16)));
+        print_string(format(arena, str_lit(" ptr={}/{} index={} invalid={}\n"),
+            (int64_t)MLIR_GetTypeKind(ctx, ptr), (int64_t)MLIR_GetTypeWidth(ctx, ptr),
+            (int64_t)MLIR_GetTypeKind(ctx, MLIR_CreateTypeIndex(ctx)),
+            (int64_t)MLIR_GetTypeKind(ctx, MLIR_INVALID_HANDLE)));
+        print_string(format(arena, str_lit("array: kind={} elem={} n={} rank={}"),
+            (int64_t)MLIR_GetTypeKind(ctx, arr),
+            MLIR_GetTypeElement(ctx, arr) == i8 ? str_lit("i8") : str_lit("?"),
+            (int64_t)MLIR_GetTypeNumElements(ctx, arr), (int64_t)MLIR_GetTypeShapeRank(ctx, arr)));
+        print_string(format(arena, str_lit("; vector {}: kind={} elem={} n={} dims={}x{}"),
+            MLIR_GetTypeString(ctx, vec), (int64_t)MLIR_GetTypeKind(ctx, vec),
+            MLIR_GetTypeElement(ctx, vec) == f32 ? str_lit("f32") : str_lit("?"),
+            (int64_t)MLIR_GetTypeNumElements(ctx, vec),
+            MLIR_GetTypeShapeDim(ctx, vec, 0), MLIR_GetTypeShapeDim(ctx, vec, 1)));
+        print_string(format(arena, str_lit("; {}: rank={} dims={},{} n={}\n"),
+            MLIR_GetTypeString(ctx, ten), (int64_t)MLIR_GetTypeShapeRank(ctx, ten),
+            MLIR_GetTypeShapeDim(ctx, ten, 0), MLIR_GetTypeShapeDim(ctx, ten, 1),
+            (int64_t)MLIR_GetTypeNumElements(ctx, ten)));
+        int64_t vshape2[2] = { 2, 4 };
+        print_string(MLIR_CreateTypeVector(ctx, vshape2, 2, f32) == vec &&
+                     MLIR_CreateTypeLLVMArray(ctx, i8, 12) == arr &&
+                     MLIR_CreateTypeLLVMArray(ctx, i8, 13) != arr &&
+                     MLIR_CreateTypeFloat(ctx, 16, false) != bf16
+                         ? str_lit("structural types interned: yes\n")
+                         : str_lit("structural types interned: no\n"));
+        MLIR_TypeHandle st = MLIR_CreateTypeLLVMStructIdentified(ctx, str_lit("S"));
+        bool was_opaque = MLIR_IsTypeLLVMStructOpaque(ctx, st);
+        MLIR_TypeHandle fields[2] = { ptr, arr };
+        MLIR_SetTypeLLVMStructBody(ctx, st, fields, 2);
+        MLIR_TypeHandle st2 = MLIR_CreateTypeLLVMStructIdentified(ctx, str_lit("T"));
+        MLIR_SetTypeLLVMStructBody(ctx, st2, fields, 2);
+        print_string(format(arena, str_lit("struct {}: kind={} opaque={}/{} fields={}"),
+            MLIR_GetTypeLLVMStructName(ctx, st), (int64_t)MLIR_GetTypeKind(ctx, st),
+            was_opaque ? str_lit("yes") : str_lit("no"),
+            MLIR_IsTypeLLVMStructOpaque(ctx, st) ? str_lit("yes") : str_lit("no"),
+            (int64_t)MLIR_GetTypeLLVMStructNumFields(ctx, st)));
+        print_string(format(arena, str_lit(" field1={} same name={} other name={}\n"),
+            MLIR_GetTypeLLVMStructField(ctx, st, 1) == arr ? str_lit("arr") : str_lit("?"),
+            MLIR_CreateTypeLLVMStructIdentified(ctx, str_lit("S")) == st ? str_lit("yes") : str_lit("no"),
+            st2 == st ? str_lit("same") : str_lit("different")));
+        // Equal types are equal handles on both backends: any negative
+        // tensor size is the dynamic size, a !tt.ptr without an address
+        // space ignores the one passed, opaque types are keyed by name,
+        // unsupported float widths are f32, and a struct without a body
+        // prints as opaque.
+        int64_t dyn1[1] = { -1 }, dyn2[1] = { -2 };
+        MLIR_TypeHandle f80 = MLIR_CreateTypeFloat(ctx, 80, false);
+        MLIR_TypeHandle st_o = MLIR_CreateTypeLLVMStructIdentified(ctx, str_lit("Opq"));
+        print_string(format(arena, str_lit("equal types: dyn={} ttptr={} opaque same={} other={} f80={}/{}"),
+            MLIR_CreateTypeTensor(ctx, dyn1, 1, f32) == MLIR_CreateTypeTensor(ctx, dyn2, 1, f32)
+                ? str_lit("same") : str_lit("different"),
+            MLIR_CreateTypePointer(ctx, f32, false, 1) == MLIR_CreateTypePointer(ctx, f32, false, 7)
+                ? str_lit("same") : str_lit("different"),
+            MLIR_CreateTypeOpaque(ctx, str_lit("a")) == MLIR_CreateTypeOpaque(ctx, str_lit("a"))
+                ? str_lit("yes") : str_lit("no"),
+            MLIR_CreateTypeOpaque(ctx, str_lit("a")) == MLIR_CreateTypeOpaque(ctx, str_lit("b"))
+                ? str_lit("same") : str_lit("different"),
+            f80 == f32 ? str_lit("f32") : str_lit("other"), (int64_t)MLIR_GetTypeWidth(ctx, f80)));
+        print_string(format(arena, str_lit(" opaque struct={}\n"), MLIR_GetTypeString(ctx, st_o)));
+        MLIR_TypeHandle in[2] = { i8, ptr };
+        MLIR_TypeHandle vfn = MLIR_CreateTypeLLVMFunction(ctx, MLIR_CreateTypeLLVMVoid(ctx), in, 2, true);
+        MLIR_TypeHandle in2[2] = { i8, ptr };
+        print_string(format(arena, str_lit("llvm function: kind={} inputs={} input1={} results={} vararg={}"),
+            (int64_t)MLIR_GetTypeKind(ctx, vfn),
+            (int64_t)MLIR_GetTypeFunctionNumInputs(ctx, vfn),
+            MLIR_GetTypeFunctionInput(ctx, vfn, 1) == ptr ? str_lit("ptr") : str_lit("?"),
+            (int64_t)MLIR_GetTypeFunctionNumResults(ctx, vfn),
+            MLIR_GetTypeFunctionIsVarArg(ctx, vfn) ? str_lit("yes") : str_lit("no")));
+        print_string(format(arena, str_lit(" interned={}\n"),
+            MLIR_CreateTypeLLVMFunction(ctx, MLIR_CreateTypeLLVMVoid(ctx), in2, 2, true) == vfn &&
+            MLIR_CreateTypeLLVMFunction(ctx, MLIR_CreateTypeLLVMVoid(ctx), in2, 2, false) != vfn
+                ? str_lit("yes") : str_lit("no")));
     }
 
     // Verify that the flat-operand contract of MLIR_GetValueUseOwner /
@@ -327,9 +421,9 @@ int app_main(void) {
         arena_destroy(tmp);
         clobber_stack();
         MLIR_TypeHandle sig2[2] = { i32_ty, i32_ty };
-        print_string(MLIR_GetTypeFunctionNumInputs(fty) == 2 &&
-                     MLIR_GetTypeFunctionInput(fty, 1) == i32_ty &&
-                     MLIR_GetTypeFunctionResult(fty, 0) == i32_ty &&
+        print_string(MLIR_GetTypeFunctionNumInputs(ctx, fty) == 2 &&
+                     MLIR_GetTypeFunctionInput(ctx, fty, 1) == i32_ty &&
+                     MLIR_GetTypeFunctionResult(ctx, fty, 0) == i32_ty &&
                      MLIR_CreateTypeFunction(ctx, sig2, 2, sig2, 1) == fty
                          ? str_lit("function type outlives its IR arena: yes\n")
                          : str_lit("function type outlives its IR arena: no\n"));

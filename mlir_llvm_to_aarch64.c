@@ -465,14 +465,8 @@ static bool type_is_gp64(MLIR_Context *ctx, MLIR_ValueHandle v) {
 // Bit width of an integer-typed value ("i1"/"i8"/"i16"/"i32"/"i64"). 0 if not
 // a recognised integer type.
 static int int_type_bits(MLIR_Context *ctx, MLIR_ValueHandle v) {
-    string s = MLIR_GetTypeString(ctx, MLIR_GetValueType(ctx, v));
-    if (s.size < 2 || s.str[0] != 'i') return 0;
-    int w = 0;
-    for (size_t i = 1; i < s.size; i++) {
-        if (s.str[i] < '0' || s.str[i] > '9') return 0;
-        w = w * 10 + (s.str[i] - '0');
-    }
-    return w;
+    MLIR_TypeHandle t = MLIR_GetValueType(ctx, v);
+    return MLIR_GetTypeKind(ctx, t) == MLIR_TYPE_KIND_INTEGER ? (int)MLIR_GetTypeWidth(ctx, t) : 0;
 }
 
 // Forward decl: extract an integer llvm.mlir.constant's value (defined below).
@@ -590,10 +584,10 @@ static bool is_linmem_base_load(MLIR_Context *ctx, MLIR_OpHandle op,
 
 // FP width of an f32/f64-typed value: 32, 64, or 0 if not a float type.
 static int fp_width(MLIR_Context *ctx, MLIR_ValueHandle v) {
-    string s = MLIR_GetTypeString(ctx, MLIR_GetValueType(ctx, v));
-    if (s.size == 3 && memcmp(s.str, "f32", 3) == 0) return 32;
-    if (s.size == 3 && memcmp(s.str, "f64", 3) == 0) return 64;
-    return 0;
+    MLIR_TypeHandle t = MLIR_GetValueType(ctx, v);
+    if (MLIR_GetTypeKind(ctx, t) != MLIR_TYPE_KIND_FLOAT) return 0;
+    uint32_t w = MLIR_GetTypeWidth(ctx, t);
+    return (w == 32 || w == 64) ? (int)w : 0;
 }
 
 // LLVM FCmpPredicate (oeq=1,ogt=2,oge=3,olt=4,ole=5,one=6) -> ARM cond code
@@ -1559,9 +1553,9 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         size_t n_fixed = 0;
         if (vct != MLIR_INVALID_HANDLE) {
             MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(vct);
-            if (MLIR_GetTypeFunctionIsVarArg(ft)) {
+            if (MLIR_GetTypeFunctionIsVarArg(ctx, ft)) {
                 is_variadic = true;
-                n_fixed = MLIR_GetTypeFunctionNumInputs(ft);
+                n_fixed = MLIR_GetTypeFunctionNumInputs(ctx, ft);
             }
         }
         // For an indirect call operand 0 is the function-pointer value; the
@@ -1735,15 +1729,15 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             int64_t  cst = 0;
             if (i == 0) {
                 stride = a64_type_size(ctx, elem_ty);
-            } else if (MLIR_IsTypeLLVMStruct(cur_ty)) {
+            } else if (MLIR_GetTypeKind(ctx, cur_ty) == MLIR_TYPE_KIND_LLVM_STRUCT) {
                 if (is_dyn)
                     LFAIL("llvm->aarch64: dynamic struct index in gep\n");
                 unsigned foff = a64_struct_field_offset(ctx, cur_ty, (size_t)cidx[i]);
-                cur_ty = MLIR_GetTypeLLVMStructField(cur_ty, (size_t)cidx[i]);
+                cur_ty = MLIR_GetTypeLLVMStructField(ctx, cur_ty, (size_t)cidx[i]);
                 emit_gep_const_off(ctx, blk, (int64_t)foff);
                 continue;
-            } else if (MLIR_IsTypeLLVMArray(cur_ty)) {
-                MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(cur_ty);
+            } else if (MLIR_GetTypeKind(ctx, cur_ty) == MLIR_TYPE_KIND_LLVM_ARRAY) {
+                MLIR_TypeHandle et = MLIR_GetTypeElement(ctx, cur_ty);
                 stride = a64_type_size(ctx, et);
                 cur_ty = et;
             } else {

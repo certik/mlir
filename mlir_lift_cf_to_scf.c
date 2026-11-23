@@ -671,12 +671,12 @@ static MLIR_OpHandle create_unreachable_terminator(MLIR_Context *ctx, LiftState 
     MLIR_TypeHandle fn_ty = (ty_attr == MLIR_INVALID_HANDLE)
         ? MLIR_INVALID_HANDLE : MLIR_GetAttributeType(ty_attr);
     size_t n_res = (fn_ty == MLIR_INVALID_HANDLE)
-        ? 0 : MLIR_GetTypeFunctionNumResults(fn_ty);
+        ? 0 : MLIR_GetTypeFunctionNumResults(ctx, fn_ty);
 
     MLIR_ValueHandle *args = n_res
         ? arena_new_array(st->arena, MLIR_ValueHandle, n_res) : NULL;
     for (size_t i = 0; i < n_res; ++i) {
-        MLIR_TypeHandle rt = MLIR_GetTypeFunctionResult(fn_ty, i);
+        MLIR_TypeHandle rt = MLIR_GetTypeFunctionResult(ctx, fn_ty, i);
         args[i] = get_undef_value(st, rt);
     }
 
