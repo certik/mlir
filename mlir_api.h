@@ -110,10 +110,16 @@ string MLIR_GetOpTypeName(MLIR_Context *ctx, MLIR_OpType type);
 // the context's current IR arena, which the caller owns and can change at any
 // time with MLIR_SetArenaAllocator. Freeing an IR arena invalidates the IR
 // created in it and nothing else: types stay valid until the context is
-// destroyed, so a type handle can be used in IR built in any arena.
+// destroyed, so a type handle can be used in IR built in any arena. (The
+// native backend keeps the ops, values, operands, blocks and regions
+// themselves in context-owned vectors, which live until the context is
+// destroyed; their lists, the attributes and the locations are in the arena.)
 //
-// Handles are borrowed pointers. An op handle (and the handles of its results
-// and regions) is valid until the op is erased (MLIR_EraseOp), its arena is
+// Handles are opaque: natively an op, region, block or value handle is a
+// 32-bit index into the context's storage (0 is MLIR_INVALID_HANDLE), and
+// upstream it is a pointer. Do not order them or assume alignment; compare
+// them only for equality. An op handle (and the handles of its results and
+// regions) is valid until the op is erased (MLIR_EraseOp), its arena is
 // freed or the context is destroyed; the same holds on both backends.
 // Strings returned by getters are borrowed from the object they describe.
 //
@@ -129,13 +135,17 @@ typedef struct MLIR_ContextOptions {
     // MLIR_SetArenaAllocator before creating IR.
     Arena *arena;
     // When true, op creation skips building the per-operand def-use chains
-    // (native backend: UseNode allocations and the parallel operand_uses /
-    // successor_operand_uses arrays). The def-use machinery is needed by
+    // (native backend: linking the operand records into their values' use
+    // lists). The def-use machinery is needed by
     // RAUW, use queries and MLIR_EraseOp's use check; the wasm -> wasmstack ->
     // wasmssa -> llvm -> aarch64 -> macho pipeline never queries uses, so
     // disabling it there removes a large per-op memory overhead. The upstream
     // backend always tracks uses and ignores this option.
     bool no_def_use_tracking;
+    // The number of ops the caller expects to create, or 0 if unknown. The
+    // native backend reserves its IR storage for that many up front (see
+    // MLIR_SetContextExpectedOps); the upstream backend ignores it.
+    size_t expected_ops;
 } MLIR_ContextOptions;
 
 // Creates a context. `options` may be NULL, which means all defaults (no IR
@@ -155,6 +165,13 @@ Arena *MLIR_GetArenaAllocator(MLIR_Context *ctx);
 // lists, so use queries and RAUW must not be applied to their values.
 void MLIR_SetContextDefUseTracking(MLIR_Context *ctx, bool enabled);
 bool MLIR_HasContextDefUseTracking(MLIR_Context *ctx);
+// Tells the context to expect `n` more ops, for instance once a frontend
+// knows its input size. The native backend stores ops, values, operands,
+// blocks and regions in context-owned vectors and reserves them for that
+// many, so that a good estimate means they never grow; a vector that fills
+// up anyway doubles and copies. Never shrinks anything. The upstream backend
+// ignores it.
+void MLIR_SetContextExpectedOps(MLIR_Context *ctx, size_t n);
 
 // -----------------------------------------------------------------------------
 // Diagnostics
@@ -297,6 +314,11 @@ typedef enum MLIR_ValueKind {
 } MLIR_ValueKind;
 
 // Creation
+//
+// The `results` of an op must be consecutive values: created one after
+// another by MLIR_CreateValueOpResult (no other value created in between),
+// or the results of one earlier op, in order. The native backend stores
+// result i at first_result + i. Checked with MLIR_API_CHECKS.
 MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_name, uint32_t result_index, MLIR_TypeHandle type, MLIR_LocationHandle location);
 MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_Context *ctx, MLIR_OpHandle def, uint32_t result_index, MLIR_TypeHandle type, string register_name, MLIR_LocationHandle location);
 
