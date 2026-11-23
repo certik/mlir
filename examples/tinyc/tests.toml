@@ -369,6 +369,11 @@ targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "42\n7\n25\n9\n42\n0\n30\n6\n0\n101\nhello\n"
 
 [[test]]
+name = "pp_rescan"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "240\n10\n12\n14\n16\n9\n"
+
+[[test]]
 name = "pp_ifdef"
 targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "1\n2\n3\n4\n5\n6\n"
