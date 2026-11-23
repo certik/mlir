@@ -2297,6 +2297,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
         if (nm.size == 14 && memcmp(nm.str, "args_sizes_get", 14) == 0) continue;
         if (nm.size == 11 && memcmp(nm.str, "environ_get", 11) == 0) continue;
         if (nm.size == 17 && memcmp(nm.str, "environ_sizes_get", 17) == 0) continue;
+        if (nm.size == 14 && memcmp(nm.str, "clock_time_get", 14) == 0) continue;
         fprintf(stderr,
             "wasmssa->llvm: import '%.*s' not yet supported\n",
             (int)nm.size, nm.str);

@@ -62,3 +62,4 @@ examples/tinyc/__pycache__/
 /selfhost_elf_stage1/
 /selfhost_elf_stage2/
 /selfhost_elf_stage3/
+/bench/_work/

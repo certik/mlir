@@ -267,6 +267,7 @@ typedef struct {
     uint32_t       import_idx_args_get;
     uint32_t       import_idx_environ_sizes_get;
     uint32_t       import_idx_environ_get;
+    uint32_t       import_idx_clock_time_get;
 
     WasmFunc      *funcs;
     uint32_t       n_funcs;
@@ -334,6 +335,7 @@ static bool wasm_parse(const uint8_t *bytes, size_t size, WasmModule *out) {
     out->import_idx_args_get          = UINT32_MAX;
     out->import_idx_environ_sizes_get = UINT32_MAX;
     out->import_idx_environ_get       = UINT32_MAX;
+    out->import_idx_clock_time_get    = UINT32_MAX;
     out->start_export_idx             = UINT32_MAX;
 
     if (size < 8 || memcmp(bytes, "\x00" "asm" "\x01\x00\x00\x00", 8) != 0) {
@@ -392,6 +394,7 @@ static bool wasm_parse(const uint8_t *bytes, size_t size, WasmModule *out) {
                             else WASI_MATCH(8,  "args_get",          import_idx_args_get)
                             else WASI_MATCH(17, "environ_sizes_get", import_idx_environ_sizes_get)
                             else WASI_MATCH(11, "environ_get",       import_idx_environ_get)
+                            else WASI_MATCH(14, "clock_time_get",    import_idx_clock_time_get)
                             #undef WASI_MATCH
                         }
                         out->n_imported_funcs++;
@@ -1342,12 +1345,13 @@ typedef enum {
     LS_READ,
     LS_CLOSE,
     LS_LSEEK,
-    LS_OPEN
+    LS_OPEN,
+    LS_CLOCK_NSEC
 } LibSysSym;
 // Compile-time count of LibSysSym values. Kept as a plain macro so it
 // can be used as an array length under tinyC, which doesn't allow
 // enum constants in constant expressions today.
-#define LS_COUNT 6
+#define LS_COUNT 7
 
 static const char *libsys_name(int sym) {
     if (sym == LS_EXIT)  return "_exit";
@@ -1356,6 +1360,7 @@ static const char *libsys_name(int sym) {
     if (sym == LS_CLOSE) return "_close";
     if (sym == LS_LSEEK) return "_lseek";
     if (sym == LS_OPEN)  return "_open";
+    if (sym == LS_CLOCK_NSEC) return "_clock_gettime_nsec_np";
     return "";
 }
 
@@ -4350,6 +4355,35 @@ static void emit_fd_tell_shim(EmittedFunc *e, LibSysRegistry *ls) {
     emit_word(&e->code, arm64_ret());
 }
 
+// Emit the clock_time_get shim. WASI:
+//   i32 clock_time_get(i32 clock_id, i64 precision, i64 *time_ptr).
+// Every clock id reads libSystem `clock_gettime_nsec_np(CLOCK_UPTIME_RAW)`
+// (monotonic ns, the same clock corec's platform_macos.c uses); callers only
+// time intervals. Stores the result to *time_ptr and returns 0.
+static void emit_clock_time_get_shim(EmittedFunc *e, LibSysRegistry *ls) {
+    libsys_mark(ls, LS_CLOCK_NSEC);
+    emit_word(&e->code, arm64_stp_fp_lr_pre());
+    emit_word(&e->code, arm64_mov_fp_sp());
+    emit_word(&e->code, arm64_sub_sp_imm(16));
+    emit_word(&e->code, arm64_str_x_sp(19, 0));   // save x19
+    emit_word(&e->code, arm64_mov_w_reg(19, 2));  // x19 = time_ptr (wasm32)
+    emit_word(&e->code, arm64_movz_w(0, 8));      // CLOCK_UPTIME_RAW
+    CallReloc rel = {
+        .site_off = (uint32_t)e->code.len,
+        .target = STUB_TARGET(LS_CLOCK_NSEC),
+        .is_b = 0,
+    };
+    ef_push_reloc(e, rel);
+    emit_word(&e->code, arm64_bl(0));
+    emit_word(&e->code, arm64_add_x_xn_wm_uxtw(10, 28, 19));
+    emit_word(&e->code, arm64_str_x_xn(0, 10, 0)); // *time_ptr = x0
+    emit_word(&e->code, arm64_movz_w(0, 0));
+    emit_word(&e->code, arm64_ldr_x_sp(19, 0));
+    emit_word(&e->code, arm64_add_sp_imm(16));
+    emit_word(&e->code, arm64_ldp_fp_lr_post());
+    emit_word(&e->code, arm64_ret());
+}
+
 // Emit the path_open shim. WASI signature (9 i32/i64 args):
 //
 //   i32 path_open(
@@ -5026,6 +5060,7 @@ bool MLIR_WasmToMachoArm64(const uint8_t *wasm_bytes, size_t wasm_size,
     EMIT_SHIM(import_idx_args_get,          emit_args_get_shim)
     EMIT_SHIM(import_idx_environ_sizes_get, emit_environ_sizes_get_shim)
     EMIT_SHIM(import_idx_environ_get,       emit_environ_get_shim)
+    EMIT_SHIM(import_idx_clock_time_get,    emit_clock_time_get_shim,    &libsys)
     #undef EMIT_SHIM
 
     // Assign dense stub indices to the libSystem symbols we actually

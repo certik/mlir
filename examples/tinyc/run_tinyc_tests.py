@@ -407,7 +407,7 @@ def link_wasm(obj_paths, wasm_path: Path):
 
 # Every output mode tinyC's driver accepts via --emit=.
 EMIT_MODES = ["mlir", "lowered", "llvm", "wasm", "wasmssa", "wasmstack",
-              "wat", "aarch64", "macho", "elf"]
+              "wat", "aarch64", "macho", "elf", "x64"]
 
 
 def check_driver_cli() -> list[str]:
@@ -468,6 +468,32 @@ def check_driver_cli() -> list[str]:
     r = run([str(TINYC), "--emit=llvm", str(simple)])
     if r.returncode != 0 or "target triple" in r.stdout:
         problems.append("--emit=llvm without --target wrote a target triple line")
+    # --time-stages reports on stderr and must not change the output.
+    for mode in ("mlir", "llvm"):
+        plain = run([str(TINYC), f"--emit={mode}", str(simple)])
+        timed = run([str(TINYC), f"--emit={mode}", "--time-stages", str(simple)])
+        if timed.returncode != 0 or timed.stdout != plain.stdout:
+            problems.append(f"--emit={mode} --time-stages changed the output "
+                            f"(exit {timed.returncode})")
+        if "tinyc --time-stages" not in timed.stderr or " total " not in timed.stderr:
+            problems.append(f"--emit={mode} --time-stages printed no report")
+    # --emit=x64 of a TU with no function bodies writes an empty file. (It used
+    # to hang: write_all spun on the 0-byte write.) Builds without the x86-64
+    # backend reject the mode, which is fine here.
+    out_dir = HERE / "tests"
+    for name, text in (("empty", ""), ("decls", "int g;\nint f(int x);\n")):
+        src = out_dir / f"driver_cli_x64_{name}.c"
+        out = out_dir / f"driver_cli_x64_{name}.bin"
+        src.write_text(text)
+        out.unlink(missing_ok=True)
+        r = run([str(TINYC), "--emit=x64", "-o", str(out), str(src)], timeout=30)
+        if "not supported in this build" in r.stderr:
+            continue
+        if r.returncode != 0 or not out.exists() or out.stat().st_size != 0:
+            problems.append(f"--emit=x64 of a TU without functions ({name}) did not "
+                            f"write an empty file (exit {r.returncode}{r.stderr[-40:]!r})")
+        src.unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
     return problems
 
 
