@@ -29,23 +29,13 @@ static unsigned x64_struct_field_offset(MLIR_Context *ctx, MLIR_TypeHandle sty, 
     return llvm_struct_field_offset(ctx, sty, fld, 8);
 }
 
-// Parse a decimal i32 list "...: a, b, c>" (GEP rawConstantIndices). The
-// sentinel 0x80000000 marks a dynamic index supplied as an SSA operand.
-static size_t parse_i32_array(string cs, int32_t *out, size_t cap) {
-    size_t p = 0, got = 0;
-    while (p < cs.size && cs.str[p] != ':') p++;
-    if (p < cs.size) p++;
-    while (p < cs.size && got < cap) {
-        while (p < cs.size && (cs.str[p] == ' ' || cs.str[p] == ',')) p++;
-        if (p >= cs.size || cs.str[p] == '>') break;
-        int64_t sign = 1;
-        if (cs.str[p] == '-') { sign = -1; p++; }
-        int64_t v = 0;
-        while (p < cs.size && cs.str[p] >= '0' && cs.str[p] <= '9')
-            v = v * 10 + (cs.str[p++] - '0');
-        out[got++] = (int32_t)(sign * v);
-    }
-    return got;
+// The elements of a dense i32 array (GEP rawConstantIndices), at most `cap`.
+// The sentinel 0x80000000 marks a dynamic index supplied as an SSA operand.
+static size_t parse_i32_array(MLIR_Context *ctx, MLIR_AttributeHandle a, int32_t *out, size_t cap) {
+    size_t n = MLIR_GetAttributeDenseSize(ctx, a);
+    if (n > cap) n = cap;
+    for (size_t i = 0; i < n; i++) out[i] = (int32_t)MLIR_GetAttributeDenseElement(ctx, a, i);
+    return n;
 }
 
 // imul dst, src, imm32   (REX.W 69 /r id)
@@ -567,7 +557,7 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         if (!eta || !ria) { fail(F, "getelementptr missing elem_type/indices", (string){0}); return; }
         MLIR_TypeHandle elem_ty = MLIR_GetAttributeTypeValue(ctx, eta);
         int32_t cidx[64];
-        size_t n_idx = parse_i32_array(MLIR_GetAttributeAsString(ctx, ria), cidx, 64);
+        size_t n_idx = parse_i32_array(ctx, ria, cidx, 64);
         if (n_idx == 0) { fail(F, "getelementptr with no indices", (string){0}); return; }
         load_val(F, MLIR_GetOpOperand(ctx, op, 0), RAX);       // running address
         size_t op_idx = 1;                                 // next dynamic operand

@@ -1222,22 +1222,12 @@ static MLIR_OpHandle lower_block_ops(LowerCtx *L, MLIR_BlockHandle block) {
     return MLIR_GetBlockOp(L->ctx, block, n - 1);
 }
 
-// Parse "array<i32: v0, v1, ...>" into `out` (capacity `cap`); returns count.
-static size_t parse_i32_array(string cs, int32_t *out, size_t cap) {
-    size_t p = 0, got = 0;
-    while (p < cs.size && cs.str[p] != ':') p++;
-    if (p < cs.size) p++;
-    while (p < cs.size && got < cap) {
-        while (p < cs.size && (cs.str[p] == ' ' || cs.str[p] == ',')) p++;
-        if (p >= cs.size || cs.str[p] == '>') break;
-        int64_t sign = 1;
-        if (cs.str[p] == '-') { sign = -1; p++; }
-        int64_t v = 0;
-        while (p < cs.size && cs.str[p] >= '0' && cs.str[p] <= '9')
-            v = v * 10 + (cs.str[p++] - '0');
-        out[got++] = (int32_t)(sign * v);
-    }
-    return got;
+// The elements of a dense i32 array into `out` (capacity `cap`); returns count.
+static size_t parse_i32_array(MLIR_Context *ctx, MLIR_AttributeHandle a, int32_t *out, size_t cap) {
+    size_t n = MLIR_GetAttributeDenseSize(ctx, a);
+    if (n > cap) n = cap;
+    for (size_t i = 0; i < n; i++) out[i] = (int32_t)MLIR_GetAttributeDenseElement(ctx, a, i);
+    return n;
 }
 
 // Load / store the wasmssa->llvm `__wasm_mem_pages` counter (when present).
@@ -1715,8 +1705,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             LFAIL("llvm->aarch64: getelementptr missing elem_type/indices\n");
         MLIR_TypeHandle elem_ty = MLIR_GetAttributeTypeValue(ctx, eta);
         int32_t cidx[64];
-        size_t n_idx = parse_i32_array(MLIR_GetAttributeAsString(ctx, ria),
-                                       cidx, 64);
+        size_t n_idx = parse_i32_array(ctx, ria, cidx, 64);
         if (n_idx == 0)
             LFAIL("llvm->aarch64: getelementptr with no indices\n");
         load_into(L, base, 9);   // running address in x9
