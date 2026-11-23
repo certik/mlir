@@ -22,13 +22,13 @@
 //   - Tarjan SCC analysis + cycle edge classification.
 //   - Cooper-Harvey-Kennedy iterative dominance.
 //   - create_single_exit_blocks_for_return_like_into  (M5).
-//   - transform_to_reduce_loop  (LCSSA-like SSA escape fixup, M6).
-//   - transform_cycles_to_scf_loops  (M7: SCC -> scf.while).
-//   - transform_to_structured_cf_branches  (M8: cf.cond_br -> scf.if,
+//   - transform_to_reduce_loop  (ctx, LCSSA-like SSA escape fixup, M6).
+//   - transform_cycles_to_scf_loops  (ctx, M7: SCC -> scf.while).
+//   - transform_to_structured_cf_branches  (ctx, M8: cf.cond_br -> scf.if,
 //     cf.switch -> scf.index_switch, + inline continuation synthesis
 //     for nested arms that all terminate cleanly).
-//   - transform_cfg_to_scf_region (M9 worklist driver).
-//   - walk_and_transform_regions (post-order walk over every op-region).
+//   - transform_cfg_to_scf_region (ctx, M9 worklist driver).
+//   - walk_and_transform_regions (ctx, post-order walk over every op-region).
 //   - erase_unreachable_blocks.
 //
 // See `mlir_lift_cf_to_scf.h` for the documented limitations.
@@ -66,10 +66,10 @@ typedef struct {
 } EmptyBlockRec;
 typedef struct { MLIR_OpHandle op; size_t succ_idx; } PredRec;
 
-static MLIR_BlockHandle edge_successor(Edge e) {
-    MLIR_OpHandle term = MLIR_GetBlockTerminator(e.from_block);
+static MLIR_BlockHandle edge_successor(MLIR_Context *ctx, Edge e) {
+    MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, e.from_block);
     if (term == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
-    return MLIR_GetOpSuccessor(term, e.succ_idx);
+    return MLIR_GetOpSuccessor(ctx, term, e.succ_idx);
 }
 
 // Forward declarations for cross-references between EdgeMultiplexer and
@@ -169,11 +169,11 @@ static MLIR_OpHandle create_scf_condition(MLIR_Context *ctx, Arena *arena,
 //   - optionally `n_extra_args` extra args at the end (for the latch case
 //     where we add a `shouldRepeat` flag).
 //
-// edge_multiplexer_redirect_edge() retargets an existing edge to the
+// edge_multiplexer_redirect_edge(ctx) retargets an existing edge to the
 // multiplexer, passing the original successor operands into THIS edge's
 // slot of the union and undef into all other slots.
 //
-// edge_multiplexer_create_switch() emits a cf.switch in the SUPPLIED
+// edge_multiplexer_create_switch(ctx) emits a cf.switch in the SUPPLIED
 // destination block (typically the multiplexer block itself, or a
 // downstream exit-dispatch block) that dispatches to the original
 // successors based on the discriminator.
@@ -208,10 +208,10 @@ static size_t edge_multiplexer_entry_index(const EdgeMultiplexer *m,
 static void mux_copy_block_args(MLIR_Context *ctx,
                                 MLIR_BlockHandle dst, MLIR_BlockHandle src,
                                 MLIR_LocationHandle loc) {
-    size_t n = MLIR_GetBlockNumArgs(src);
+    size_t n = MLIR_GetBlockNumArgs(ctx, src);
     for (size_t i = 0; i < n; ++i) {
-        MLIR_ValueHandle a = MLIR_GetBlockArg(src, i);
-        MLIR_AddBlockArgument(ctx, dst, MLIR_GetValueType(a), loc);
+        MLIR_ValueHandle a = MLIR_GetBlockArg(ctx, src, i);
+        MLIR_AddBlockArgument(ctx, dst, MLIR_GetValueType(ctx, a), loc);
     }
 }
 
@@ -229,7 +229,7 @@ static void mux_copy_block_args(MLIR_Context *ctx,
 // `edge_multiplexer_redirect_edge` to actually route an existing edge
 // to it, and `edge_multiplexer_create_switch` to install the dispatch
 // in a downstream block.
-static EdgeMultiplexer edge_multiplexer_create(LiftState *st,
+static EdgeMultiplexer edge_multiplexer_create(MLIR_Context *ctx, LiftState *st,
                                                MLIR_LocationHandle loc,
                                                const MLIR_BlockHandle *entry_blocks,
                                                size_t n_entries_in,
@@ -242,7 +242,7 @@ static EdgeMultiplexer edge_multiplexer_create(LiftState *st,
 
     // Insert the mux block right after the first entry block in its
     // parent region. (The parent is shared by all entry blocks.)
-    MLIR_RegionHandle parent_region = MLIR_GetBlockParentRegion(entry_blocks[0]);
+    MLIR_RegionHandle parent_region = MLIR_GetBlockParentRegion(ctx, entry_blocks[0]);
     MLIR_InsertRegionBlockAfter(st->ctx, parent_region, m.mux_block, entry_blocks[0]);
 
     // Deduplicate entry blocks while preserving insertion order, and
@@ -258,7 +258,7 @@ static EdgeMultiplexer edge_multiplexer_create(LiftState *st,
         m.block_arg_off[m.n_entries] = current_offset;
         m.n_entries++;
         mux_copy_block_args(st->ctx, m.mux_block, b, loc);
-        current_offset += MLIR_GetBlockNumArgs(b);
+        current_offset += MLIR_GetBlockNumArgs(ctx, b);
     }
 
     // Add a discriminator if there is more than one distinct entry.
@@ -280,27 +280,27 @@ static EdgeMultiplexer edge_multiplexer_create(LiftState *st,
 // successor MUST be one of the entries passed to
 // edge_multiplexer_create. `extra_args` provides values for the extra
 // slots (must have exactly m.n_extra_args entries).
-static void edge_multiplexer_redirect_edge(EdgeMultiplexer *m, Edge edge,
+static void edge_multiplexer_redirect_edge(MLIR_Context *ctx, EdgeMultiplexer *m, Edge edge,
                                            MLIR_ValueHandle *extra_args,
                                            size_t n_extra_args_in) {
     if (n_extra_args_in != m->n_extra_args) return;
-    MLIR_OpHandle term = MLIR_GetBlockTerminator(edge.from_block);
+    MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, edge.from_block);
     if (term == MLIR_INVALID_HANDLE) return;
-    MLIR_BlockHandle orig_succ = MLIR_GetOpSuccessor(term, edge.succ_idx);
+    MLIR_BlockHandle orig_succ = MLIR_GetOpSuccessor(ctx, term, edge.succ_idx);
     size_t entry_idx = edge_multiplexer_entry_index(m, orig_succ);
     if (entry_idx == SIZE_MAX) return;
 
-    size_t n_mux_args = MLIR_GetBlockNumArgs(m->mux_block);
+    size_t n_mux_args = MLIR_GetBlockNumArgs(ctx, m->mux_block);
     size_t my_off     = m->block_arg_off[entry_idx];
-    size_t my_n_args  = MLIR_GetBlockNumArgs(m->entries[entry_idx]);
+    size_t my_n_args  = MLIR_GetBlockNumArgs(ctx, m->entries[entry_idx]);
     size_t extra_off  = n_mux_args - m->n_extra_args;
 
     // Capture original successor operands before mutation.
-    size_t n_orig = MLIR_GetOpNumSuccessorOperands(term, edge.succ_idx);
+    size_t n_orig = MLIR_GetOpNumSuccessorOperands(ctx, term, edge.succ_idx);
     MLIR_ValueHandle *orig = n_orig
         ? arena_new_array(m->st->arena, MLIR_ValueHandle, n_orig) : NULL;
     for (size_t i = 0; i < n_orig; ++i) {
-        orig[i] = MLIR_GetOpSuccessorOperand(term, edge.succ_idx, i);
+        orig[i] = MLIR_GetOpSuccessorOperand(ctx, term, edge.succ_idx, i);
     }
 
     // Build new operand list of length n_mux_args.
@@ -311,7 +311,7 @@ static void edge_multiplexer_redirect_edge(EdgeMultiplexer *m, Edge edge,
             // Original arg slot.
             size_t local = i - my_off;
             new_ops[i] = (local < n_orig) ? orig[local]
-                                          : get_undef_value(m->st, MLIR_GetValueType(MLIR_GetBlockArg(m->mux_block, i)));
+                                          : get_undef_value(m->st, MLIR_GetValueType(ctx, MLIR_GetBlockArg(ctx, m->mux_block, i)));
             continue;
         }
         if (m->discriminator_idx != SIZE_MAX && i == m->discriminator_idx) {
@@ -323,7 +323,7 @@ static void edge_multiplexer_redirect_edge(EdgeMultiplexer *m, Edge edge,
             continue;
         }
         // Other entry's slot or padding: undef.
-        new_ops[i] = get_undef_value(m->st, MLIR_GetValueType(MLIR_GetBlockArg(m->mux_block, i)));
+        new_ops[i] = get_undef_value(m->st, MLIR_GetValueType(ctx, MLIR_GetBlockArg(ctx, m->mux_block, i)));
     }
 
     // Apply.
@@ -338,7 +338,7 @@ static void edge_multiplexer_redirect_edge(EdgeMultiplexer *m, Edge edge,
 // the default arm). `in_block` MUST be dominated by the multiplexer
 // block — typically it IS the multiplexer block, or the latch's exit
 // block in createSingleExitingLatch.
-static void edge_multiplexer_create_switch(EdgeMultiplexer *m,
+static void edge_multiplexer_create_switch(MLIR_Context *ctx, EdgeMultiplexer *m,
                                            MLIR_BlockHandle in_block,
                                            MLIR_LocationHandle loc,
                                            const MLIR_BlockHandle *excluded,
@@ -356,10 +356,10 @@ static void edge_multiplexer_create_switch(EdgeMultiplexer *m,
         }
         if (skip) continue;
         size_t off = m->block_arg_off[i];
-        size_t na  = MLIR_GetBlockNumArgs(m->entries[i]);
+        size_t na  = MLIR_GetBlockNumArgs(ctx, m->entries[i]);
         MLIR_ValueHandle *args = na ? arena_new_array(m->st->arena, MLIR_ValueHandle, na) : NULL;
         for (size_t k = 0; k < na; ++k) {
-            args[k] = MLIR_GetBlockArg(m->mux_block, off + k);
+            args[k] = MLIR_GetBlockArg(ctx, m->mux_block, off + k);
         }
         case_dsts[n_pick] = m->entries[i];
         case_args[n_pick] = args;
@@ -374,7 +374,7 @@ static void edge_multiplexer_create_switch(EdgeMultiplexer *m,
     // Decide discriminator value.
     MLIR_ValueHandle disc_v;
     if (m->discriminator_idx != SIZE_MAX) {
-        disc_v = MLIR_GetBlockArg(m->mux_block, m->discriminator_idx);
+        disc_v = MLIR_GetBlockArg(ctx, m->mux_block, m->discriminator_idx);
     } else {
         disc_v = get_switch_value(m->st, 0);
     }
@@ -448,21 +448,21 @@ typedef struct {
     bool           llvm_cfg;      // branch-op dialect (see LiftState)
 } Combiner;
 
-static bool combiner_signature_matches(const CombinerEntry *e,
+static bool combiner_signature_matches(MLIR_Context *ctx, const CombinerEntry *e,
                                        MLIR_OpHandle op) {
-    if (e->op_type != MLIR_GetOpType(op)) return false;
-    size_t no = MLIR_GetOpNumOperands(op);
+    if (e->op_type != MLIR_GetOpType(ctx, op)) return false;
+    size_t no = MLIR_GetOpNumOperands(ctx, op);
     if (no != e->n_operand_types) return false;
     for (size_t i = 0; i < no; ++i) {
-        MLIR_ValueHandle v = MLIR_GetOpOperand(op, i);
-        if (MLIR_GetValueType(v) != e->operand_types[i]) return false;
+        MLIR_ValueHandle v = MLIR_GetOpOperand(ctx, op, i);
+        if (MLIR_GetValueType(ctx, v) != e->operand_types[i]) return false;
     }
     return true;
 }
 
-static CombinerEntry *combiner_find(Combiner *c, MLIR_OpHandle op) {
+static CombinerEntry *combiner_find(MLIR_Context *ctx, Combiner *c, MLIR_OpHandle op) {
     for (size_t i = 0; i < c->n_entries; ++i) {
-        if (combiner_signature_matches(&c->entries[i], op))
+        if (combiner_signature_matches(ctx, &c->entries[i], op))
             return &c->entries[i];
     }
     return NULL;
@@ -479,17 +479,17 @@ static CombinerEntry *combiner_add_new(MLIR_Context *ctx, Combiner *c,
         c->cap = new_cap;
     }
     CombinerEntry *e = &c->entries[c->n_entries++];
-    e->op_type = MLIR_GetOpType(return_op);
-    e->n_operand_types = MLIR_GetOpNumOperands(return_op);
+    e->op_type = MLIR_GetOpType(ctx, return_op);
+    e->n_operand_types = MLIR_GetOpNumOperands(ctx, return_op);
     e->operand_types = e->n_operand_types
         ? arena_new_array(c->arena, MLIR_TypeHandle, e->n_operand_types)
         : NULL;
     for (size_t i = 0; i < e->n_operand_types; ++i) {
-        e->operand_types[i] = MLIR_GetValueType(MLIR_GetOpOperand(return_op, i));
+        e->operand_types[i] = MLIR_GetValueType(ctx, MLIR_GetOpOperand(ctx, return_op, i));
     }
     e->exit_block = MLIR_CreateBlock(ctx);
     e->exit_terminator = MLIR_INVALID_HANDLE;
-    MLIR_LocationHandle loc = MLIR_GetOpLocation(return_op);
+    MLIR_LocationHandle loc = MLIR_GetOpLocation(ctx, return_op);
     // Add a block argument for each operand type.
     for (size_t i = 0; i < e->n_operand_types; ++i) {
         MLIR_AddBlockArgument(ctx, e->exit_block, e->operand_types[i], loc);
@@ -506,12 +506,12 @@ static CombinerEntry *combiner_add_new(MLIR_Context *ctx, Combiner *c,
 static void combiner_combine_exit(MLIR_Context *ctx, Combiner *c,
                                   MLIR_OpHandle return_op) {
     MLIR_BlockHandle from_block = MLIR_INVALID_HANDLE;
-    size_t nb = MLIR_GetRegionNumBlocks(c->region);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, c->region);
     for (size_t bi = 0; bi < nb && from_block == MLIR_INVALID_HANDLE; ++bi) {
-        MLIR_BlockHandle b = MLIR_GetRegionBlock(c->region, bi);
-        size_t no = MLIR_GetBlockNumOps(b);
+        MLIR_BlockHandle b = MLIR_GetRegionBlock(ctx, c->region, bi);
+        size_t no = MLIR_GetBlockNumOps(ctx, b);
         for (size_t oi = 0; oi < no; ++oi) {
-            if (MLIR_GetBlockOp(b, oi) == return_op) {
+            if (MLIR_GetBlockOp(ctx, b, oi) == return_op) {
                 from_block = b;
                 break;
             }
@@ -519,15 +519,15 @@ static void combiner_combine_exit(MLIR_Context *ctx, Combiner *c,
     }
     if (from_block == MLIR_INVALID_HANDLE) return;
 
-    MLIR_LocationHandle loc = MLIR_GetOpLocation(return_op);
-    size_t n_ops = MLIR_GetOpNumOperands(return_op);
+    MLIR_LocationHandle loc = MLIR_GetOpLocation(ctx, return_op);
+    size_t n_ops = MLIR_GetOpNumOperands(ctx, return_op);
     MLIR_ValueHandle *operands = n_ops
         ? arena_new_array(c->arena, MLIR_ValueHandle, n_ops) : NULL;
     for (size_t i = 0; i < n_ops; ++i) {
-        operands[i] = MLIR_GetOpOperand(return_op, i);
+        operands[i] = MLIR_GetOpOperand(ctx, return_op, i);
     }
 
-    CombinerEntry *e = combiner_find(c, return_op);
+    CombinerEntry *e = combiner_find(ctx, c, return_op);
     bool inserted = (e == NULL);
     if (inserted) {
         e = combiner_add_new(ctx, c, return_op);
@@ -550,7 +550,7 @@ static void combiner_combine_exit(MLIR_Context *ctx, Combiner *c,
             ? arena_new_array(c->arena, MLIR_ValueHandle, e->n_operand_types)
             : NULL;
         for (size_t i = 0; i < e->n_operand_types; ++i) {
-            args[i] = MLIR_GetBlockArg(e->exit_block, i);
+            args[i] = MLIR_GetBlockArg(ctx, e->exit_block, i);
         }
         MLIR_OpHandle new_ret = MLIR_CreateOp(
             ctx, e->op_type,
@@ -584,23 +584,23 @@ static void create_single_exit_blocks_for_return_like_into(MLIR_Context *ctx,
 
     // Snapshot blocks first (the loop mutates the region by appending
     // new exit blocks at the end).
-    size_t snapshot_n = MLIR_GetRegionNumBlocks(region);
+    size_t snapshot_n = MLIR_GetRegionNumBlocks(ctx, region);
     MLIR_BlockHandle *snapshot = arena_new_array(arena, MLIR_BlockHandle,
                                                  snapshot_n ? snapshot_n : 1);
     for (size_t i = 0; i < snapshot_n; ++i) {
-        snapshot[i] = MLIR_GetRegionBlock(region, i);
+        snapshot[i] = MLIR_GetRegionBlock(ctx, region, i);
     }
 
     for (size_t i = 0; i < snapshot_n; ++i) {
         MLIR_BlockHandle b = snapshot[i];
-        MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
+        MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
         if (term == MLIR_INVALID_HANDLE) continue;
-        if (MLIR_GetOpNumSuccessors(term) != 0) continue;
+        if (MLIR_GetOpNumSuccessors(ctx, term) != 0) continue;
         // Only act on the recognized return-like ops; leave other
         // zero-successor terminators (e.g. cf.assert, unreachable) alone.
         // We also funnel scf.yield for sub-regions (else of scf.if etc.)
         // so the inner cf.cond_br chain has a single continuation block.
-        MLIR_OpType tt = MLIR_GetOpType(term);
+        MLIR_OpType tt = MLIR_GetOpType(ctx, term);
         if (tt != OP_TYPE_FUNC_RETURN && tt != OP_TYPE_LLVM_RETURN &&
             tt != OP_TYPE_SCF_YIELD) continue;
         combiner_combine_exit(ctx, c, term);
@@ -635,24 +635,24 @@ typedef struct {
     bool             ok;
 } StructuredLoopProps;
 
-static EdgeMultiplexer create_single_entry_block(LiftState *st,
+static EdgeMultiplexer create_single_entry_block(MLIR_Context *ctx, LiftState *st,
                                                  const Edge *entry_edges,
                                                  size_t n_entry_edges,
                                                  MLIR_LocationHandle loc) {
     MLIR_BlockHandle *succs = arena_new_array(st->arena, MLIR_BlockHandle,
                                               n_entry_edges ? n_entry_edges : 1);
     for (size_t i = 0; i < n_entry_edges; ++i) {
-        succs[i] = edge_successor(entry_edges[i]);
+        succs[i] = edge_successor(ctx, entry_edges[i]);
     }
 
-    EdgeMultiplexer m = edge_multiplexer_create(st, loc, succs, n_entry_edges,
+    EdgeMultiplexer m = edge_multiplexer_create(ctx, st, loc, succs, n_entry_edges,
                                                 /*n_extra_args=*/0);
 
     for (size_t i = 0; i < n_entry_edges; ++i) {
-        edge_multiplexer_redirect_edge(&m, entry_edges[i], NULL, 0);
+        edge_multiplexer_redirect_edge(ctx, &m, entry_edges[i], NULL, 0);
     }
 
-    edge_multiplexer_create_switch(&m, m.mux_block, loc,
+    edge_multiplexer_create_switch(ctx, &m, m.mux_block, loc,
                                    /*excluded=*/NULL, /*n_excluded=*/0);
     return m;
 }
@@ -661,13 +661,13 @@ static EdgeMultiplexer create_single_entry_block(LiftState *st,
 // the surrounding function. Used as the fallback terminator for the
 // statically-infinite-loop case in create_single_exiting_latch. Mirrors
 // CFGToSCFForWasm::createUnreachableTerminator in mlir_api_impl_upstream.cpp.
-static MLIR_OpHandle create_unreachable_terminator(LiftState *st,
+static MLIR_OpHandle create_unreachable_terminator(MLIR_Context *ctx, LiftState *st,
                                                    MLIR_BlockHandle block,
                                                    MLIR_LocationHandle loc) {
-    bool is_llvm = MLIR_GetOpType(st->fn_op) == OP_TYPE_LLVM_FUNC;
+    bool is_llvm = MLIR_GetOpType(ctx, st->fn_op) == OP_TYPE_LLVM_FUNC;
 
     MLIR_AttributeHandle ty_attr =
-        MLIR_GetOpAttributeByName(st->fn_op, "function_type");
+        MLIR_GetOpAttributeByName(ctx, st->fn_op, "function_type");
     MLIR_TypeHandle fn_ty = (ty_attr == MLIR_INVALID_HANDLE)
         ? MLIR_INVALID_HANDLE : MLIR_GetAttributeType(ty_attr);
     size_t n_res = (fn_ty == MLIR_INVALID_HANDLE)
@@ -690,7 +690,7 @@ static MLIR_OpHandle create_unreachable_terminator(LiftState *st,
     return ret;
 }
 
-static StructuredLoopProps create_single_exiting_latch(
+static StructuredLoopProps create_single_exiting_latch(MLIR_Context *ctx, 
     LiftState *st, Combiner *exit_combiner,
     const Edge *back_edges, size_t n_back,
     const Edge *exit_edges, size_t n_exit,
@@ -700,7 +700,7 @@ static StructuredLoopProps create_single_exiting_latch(
     if (n_back == 0) return res;
 
     // All back edges point to the same loop header (precondition).
-    MLIR_BlockHandle loop_header = edge_successor(back_edges[0]);
+    MLIR_BlockHandle loop_header = edge_successor(ctx, back_edges[0]);
 
     // Multiplexer: successors = [back-edge dests..., exit-edge dests...],
     // with one trailing extra i32 arg (shouldRepeat).
@@ -708,18 +708,18 @@ static StructuredLoopProps create_single_exiting_latch(
     MLIR_BlockHandle *succs = arena_new_array(st->arena, MLIR_BlockHandle,
                                               n_all ? n_all : 1);
     for (size_t i = 0; i < n_back; ++i) {
-        succs[i] = edge_successor(back_edges[i]);
+        succs[i] = edge_successor(ctx, back_edges[i]);
     }
     for (size_t i = 0; i < n_exit; ++i) {
-        succs[n_back + i] = edge_successor(exit_edges[i]);
+        succs[n_back + i] = edge_successor(ctx, exit_edges[i]);
     }
-    EdgeMultiplexer mux = edge_multiplexer_create(st, loc, succs, n_all,
+    EdgeMultiplexer mux = edge_multiplexer_create(ctx, st, loc, succs, n_all,
                                                   /*n_extra_args=*/1);
     MLIR_BlockHandle latch = mux.mux_block;
 
     // Fresh exit block placed immediately after the latch.
     MLIR_BlockHandle exit_block = MLIR_CreateBlock(st->ctx);
-    MLIR_InsertRegionBlockAfter(st->ctx, MLIR_GetBlockParentRegion(latch),
+    MLIR_InsertRegionBlockAfter(st->ctx, MLIR_GetBlockParentRegion(ctx, latch),
                                 exit_block, latch);
 
     // Redirect back edges with shouldRepeat=1, exit edges with shouldRepeat=0.
@@ -727,23 +727,23 @@ static StructuredLoopProps create_single_exiting_latch(
         MLIR_ValueHandle one = get_switch_value(st, 1);
         MLIR_ValueHandle zero = get_switch_value(st, 0);
         for (size_t i = 0; i < n_back; ++i) {
-            edge_multiplexer_redirect_edge(&mux, back_edges[i], &one, 1);
+            edge_multiplexer_redirect_edge(ctx, &mux, back_edges[i], &one, 1);
         }
         for (size_t i = 0; i < n_exit; ++i) {
-            edge_multiplexer_redirect_edge(&mux, exit_edges[i], &zero, 1);
+            edge_multiplexer_redirect_edge(ctx, &mux, exit_edges[i], &zero, 1);
         }
     }
 
     // shouldRepeat is the *last* block-arg of the latch.
-    size_t n_latch_args = MLIR_GetBlockNumArgs(latch);
-    MLIR_ValueHandle should_repeat = MLIR_GetBlockArg(latch, n_latch_args - 1);
+    size_t n_latch_args = MLIR_GetBlockNumArgs(ctx, latch);
+    MLIR_ValueHandle should_repeat = MLIR_GetBlockArg(ctx, latch, n_latch_args - 1);
 
     // cf.cond_br shouldRepeat, loop_header(first N args), exit_block()
-    size_t n_hdr_args = MLIR_GetBlockNumArgs(loop_header);
+    size_t n_hdr_args = MLIR_GetBlockNumArgs(ctx, loop_header);
     MLIR_ValueHandle *hdr_args = n_hdr_args
         ? arena_new_array(st->arena, MLIR_ValueHandle, n_hdr_args) : NULL;
     for (size_t i = 0; i < n_hdr_args; ++i) {
-        hdr_args[i] = MLIR_GetBlockArg(latch, i);
+        hdr_args[i] = MLIR_GetBlockArg(ctx, latch, i);
     }
     create_cf_cond_br_in_block(st->ctx, st->arena, st->llvm_cfg, latch,
                                should_repeat,
@@ -753,14 +753,14 @@ static StructuredLoopProps create_single_exiting_latch(
     if (n_exit > 0) {
         // Dispatch from exit_block to the original exit destinations.
         // Exclude loop_header (it must already be reachable via back edge).
-        edge_multiplexer_create_switch(&mux, exit_block, loc,
+        edge_multiplexer_create_switch(ctx, &mux, exit_block, loc,
                                        /*excluded=*/&loop_header,
                                        /*n_excluded=*/1);
     } else {
         // Statically infinite loop: terminate exit_block with a fresh
         // return op carrying undef args, then fold it via the combiner so
         // it shares the function's single exit block.
-        MLIR_OpHandle term = create_unreachable_terminator(st, exit_block, loc);
+        MLIR_OpHandle term = create_unreachable_terminator(ctx, st, exit_block, loc);
         combiner_combine_exit(st->ctx, exit_combiner, term);
     }
 
@@ -849,28 +849,28 @@ static bool block_map_insert(BlockMap *m, MLIR_BlockHandle b, size_t v) {
 
 // Fills `m` with every block of `region` that is the target of some block's
 // terminator, i.e. every block with at least one predecessor. One pass over
-// the region's edges, equivalent to asking MLIR_GetBlockNumPredecessors(b) != 0
+// the region's edges, equivalent to asking MLIR_GetBlockNumPredecessors(ctx, b) != 0
 // for each block (which costs a region scan per block).
-static void collect_blocks_with_preds(Arena *arena, MLIR_RegionHandle region,
+static void collect_blocks_with_preds(MLIR_Context *ctx, Arena *arena, MLIR_RegionHandle region,
                                       BlockMap *m) {
-    size_t nb = MLIR_GetRegionNumBlocks(region);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
     block_map_init(arena, m, nb);
     for (size_t bi = 0; bi < nb; ++bi) {
-        MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
-        MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
+        MLIR_BlockHandle b = MLIR_GetRegionBlock(ctx, region, bi);
+        MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
         if (term == MLIR_INVALID_HANDLE) continue;
-        size_t ns = MLIR_GetOpNumSuccessors(term);
+        size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
         for (size_t i = 0; i < ns; ++i) {
-            MLIR_BlockHandle succ = MLIR_GetOpSuccessor(term, i);
+            MLIR_BlockHandle succ = MLIR_GetOpSuccessor(ctx, term, i);
             if (succ == MLIR_INVALID_HANDLE) continue;
-            if (MLIR_GetBlockParentRegion(succ) != region) continue;
+            if (MLIR_GetBlockParentRegion(ctx, succ) != region) continue;
             block_map_insert(m, succ, 0);
         }
     }
 }
 
-static bool op_is_func_like(MLIR_OpHandle op) {
-    MLIR_OpType t = MLIR_GetOpType(op);
+static bool op_is_func_like(MLIR_Context *ctx, MLIR_OpHandle op) {
+    MLIR_OpType t = MLIR_GetOpType(ctx, op);
     return t == OP_TYPE_FUNC_FUNC || t == OP_TYPE_LLVM_FUNC;
 }
 
@@ -881,8 +881,8 @@ static bool op_is_func_like(MLIR_OpHandle op) {
 // the condition / flag as operand 0, `case_values` on the switch), so the
 // rest of the algorithm is dialect-agnostic. Exactly one family is accepted
 // per run: a branch op of the other family fails check_preconditions.
-static bool op_is_cf_branch(MLIR_OpHandle op, bool llvm_cfg) {
-    MLIR_OpType t = MLIR_GetOpType(op);
+static bool op_is_cf_branch(MLIR_Context *ctx, MLIR_OpHandle op, bool llvm_cfg) {
+    MLIR_OpType t = MLIR_GetOpType(ctx, op);
     if (llvm_cfg)
         return t == OP_TYPE_LLVM_BR || t == OP_TYPE_LLVM_COND_BR ||
                t == OP_TYPE_LLVM_SWITCH;
@@ -891,19 +891,19 @@ static bool op_is_cf_branch(MLIR_OpHandle op, bool llvm_cfg) {
 
 // Returns true iff the given region contains any cf.* branch op that we
 // would have to lift. Used by the fast path.
-static bool region_has_cf_branch(MLIR_RegionHandle region, bool llvm_cfg) {
-    size_t nb = MLIR_GetRegionNumBlocks(region);
+static bool region_has_cf_branch(MLIR_Context *ctx, MLIR_RegionHandle region, bool llvm_cfg) {
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
     for (size_t bi = 0; bi < nb; ++bi) {
-        MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
-        size_t no = MLIR_GetBlockNumOps(b);
+        MLIR_BlockHandle b = MLIR_GetRegionBlock(ctx, region, bi);
+        size_t no = MLIR_GetBlockNumOps(ctx, b);
         for (size_t oi = 0; oi < no; ++oi) {
-            MLIR_OpHandle o = MLIR_GetBlockOp(b, oi);
-            if (op_is_cf_branch(o, llvm_cfg)) return true;
+            MLIR_OpHandle o = MLIR_GetBlockOp(ctx, b, oi);
+            if (op_is_cf_branch(ctx, o, llvm_cfg)) return true;
             // Recurse into nested regions (e.g. scf.if/scf.while produced
             // by an earlier iteration of the algorithm).
-            size_t nr = MLIR_GetOpNumRegions(o);
+            size_t nr = MLIR_GetOpNumRegions(ctx, o);
             for (size_t ri = 0; ri < nr; ++ri) {
-                if (region_has_cf_branch(MLIR_GetOpRegion(o, ri), llvm_cfg))
+                if (region_has_cf_branch(ctx, MLIR_GetOpRegion(ctx, o, ri), llvm_cfg))
                     return true;
             }
         }
@@ -915,29 +915,29 @@ static bool region_has_cf_branch(MLIR_RegionHandle region, bool llvm_cfg) {
 // Port of checkTransformationPreconditions (CFGToSCF.cpp:1237-1297).
 // Returns true on success, false on a violated precondition.
 // ============================================================================
-static bool check_preconditions(Arena *arena, MLIR_RegionHandle region,
+static bool check_preconditions(MLIR_Context *ctx, Arena *arena, MLIR_RegionHandle region,
                                 bool llvm_cfg) {
-    size_t nb = MLIR_GetRegionNumBlocks(region);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
     Scratch scratch = scratch_begin_avoid_conflict(arena);
     BlockMap has_pred;
-    collect_blocks_with_preds(scratch.arena, region, &has_pred);
+    collect_blocks_with_preds(ctx, scratch.arena, region, &has_pred);
     bool all_reachable = true;
     for (size_t bi = 1; bi < nb && all_reachable; ++bi) {
-        if (block_map_get(&has_pred, MLIR_GetRegionBlock(region, bi)) == SIZE_MAX)
+        if (block_map_get(&has_pred, MLIR_GetRegionBlock(ctx, region, bi)) == SIZE_MAX)
             all_reachable = false;   // non-entry block without predecessors
     }
     scratch_end(scratch);
     if (!all_reachable) return false;
     for (size_t bi = 0; bi < nb; ++bi) {
-        MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
-        size_t no = MLIR_GetBlockNumOps(b);
+        MLIR_BlockHandle b = MLIR_GetRegionBlock(ctx, region, bi);
+        size_t no = MLIR_GetBlockNumOps(ctx, b);
         for (size_t oi = 0; oi < no; ++oi) {
-            MLIR_OpHandle o = MLIR_GetBlockOp(b, oi);
-            if (MLIR_GetOpNumSuccessors(o) == 0) continue;
+            MLIR_OpHandle o = MLIR_GetBlockOp(ctx, b, oi);
+            if (MLIR_GetOpNumSuccessors(ctx, o) == 0) continue;
             // We accept only the selected family of branch ops as
             // branch-op-interface carriers. Anything else with successors
             // is unsupported.
-            if (!op_is_cf_branch(o, llvm_cfg)) {
+            if (!op_is_cf_branch(ctx, o, llvm_cfg)) {
                 return false;
             }
             // cf.* ops have no operation-produced successor operands.
@@ -977,9 +977,9 @@ static size_t scc_block_index(MLIR_BlockHandle *blocks, size_t n, MLIR_BlockHand
 
 // Walks the cf graph from the region's entry, collecting all reachable
 // blocks in `out_blocks` and returning their count.
-static size_t scc_collect_reachable(Arena *arena, MLIR_RegionHandle region,
+static size_t scc_collect_reachable(MLIR_Context *ctx, Arena *arena, MLIR_RegionHandle region,
                                     MLIR_BlockHandle **out_blocks) {
-    size_t cap = MLIR_GetRegionNumBlocks(region);
+    size_t cap = MLIR_GetRegionNumBlocks(ctx, region);
     if (cap == 0) { *out_blocks = NULL; return 0; }
     MLIR_BlockHandle *list = arena_new_array(arena, MLIR_BlockHandle, cap);
     size_t n = 0;
@@ -987,21 +987,21 @@ static size_t scc_collect_reachable(Arena *arena, MLIR_RegionHandle region,
     BlockMap seen;
     block_map_init(tmp.arena, &seen, cap);
     // BFS from entry.
-    MLIR_BlockHandle entry = MLIR_GetRegionBlock(region, 0);
+    MLIR_BlockHandle entry = MLIR_GetRegionBlock(ctx, region, 0);
     list[n++] = entry;
     block_map_insert(&seen, entry, 0);
     for (size_t head = 0; head < n; ++head) {
         MLIR_BlockHandle b = list[head];
-        MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
+        MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
         if (term == MLIR_INVALID_HANDLE) continue;
-        size_t ns = MLIR_GetOpNumSuccessors(term);
+        size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
         for (size_t i = 0; i < ns; ++i) {
-            MLIR_BlockHandle s = MLIR_GetOpSuccessor(term, i);
+            MLIR_BlockHandle s = MLIR_GetOpSuccessor(ctx, term, i);
             if (s == MLIR_INVALID_HANDLE) continue;
             // Only follow successors that live in this region; cross-region
             // successors (e.g., exit edges left dangling after a partial M7
             // transform) are handled by the caller, not us.
-            if (MLIR_GetBlockParentRegion(s) != region) continue;
+            if (MLIR_GetBlockParentRegion(ctx, s) != region) continue;
             if (block_map_get(&seen, s) != SIZE_MAX) continue;
             if (n >= cap) break; // shouldn't happen for a well-formed region
             block_map_insert(&seen, s, n);
@@ -1015,10 +1015,10 @@ static size_t scc_collect_reachable(Arena *arena, MLIR_RegionHandle region,
 
 // Iterative Tarjan SCC. Returns the reverse-topological order of SCCs
 // (i.e. SCC[0] is a "leaf" with no out-edges to other SCCs).
-static SccResult scc_compute(Arena *arena, MLIR_RegionHandle region) {
+static SccResult scc_compute(MLIR_Context *ctx, Arena *arena, MLIR_RegionHandle region) {
     SccResult r = {0};
     MLIR_BlockHandle *blocks = NULL;
-    size_t n = scc_collect_reachable(arena, region, &blocks);
+    size_t n = scc_collect_reachable(ctx, arena, region, &blocks);
     r.n_blocks = n;
     r.blocks = blocks;
     if (n == 0) return r;
@@ -1060,8 +1060,8 @@ static SccResult scc_compute(Arena *arena, MLIR_RegionHandle region) {
         tarjan_stk[tarjan_top++] = root;
         on_stack[root] = true;
         {
-            MLIR_OpHandle term = MLIR_GetBlockTerminator(blocks[root]);
-            size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(term);
+            MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, blocks[root]);
+            size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(ctx, term);
             frames[fp].v = root;
             frames[fp].next_succ = 0;
             frames[fp].n_succ = ns;
@@ -1070,8 +1070,8 @@ static SccResult scc_compute(Arena *arena, MLIR_RegionHandle region) {
         while (fp > 0) {
             SccFrame *cur = &frames[fp - 1];
             if (cur->next_succ < cur->n_succ) {
-                MLIR_OpHandle term = MLIR_GetBlockTerminator(blocks[cur->v]);
-                MLIR_BlockHandle succ = MLIR_GetOpSuccessor(term, cur->next_succ);
+                MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, blocks[cur->v]);
+                MLIR_BlockHandle succ = MLIR_GetOpSuccessor(ctx, term, cur->next_succ);
                 cur->next_succ++;
                 size_t w = block_map_get(&dense, succ);
                 if (w == SIZE_MAX) continue; // unreachable from entry — skip
@@ -1082,8 +1082,8 @@ static SccResult scc_compute(Arena *arena, MLIR_RegionHandle region) {
                     next_index++;
                     tarjan_stk[tarjan_top++] = w;
                     on_stack[w] = true;
-                    MLIR_OpHandle wterm = MLIR_GetBlockTerminator(blocks[w]);
-                    size_t wns = (wterm == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(wterm);
+                    MLIR_OpHandle wterm = MLIR_GetBlockTerminator(ctx, blocks[w]);
+                    size_t wns = (wterm == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(ctx, wterm);
                     frames[fp].v = w;
                     frames[fp].next_succ = 0;
                     frames[fp].n_succ = wns;
@@ -1114,10 +1114,10 @@ static SccResult scc_compute(Arena *arena, MLIR_RegionHandle region) {
                 // Mark cyclic if size >= 2 OR contains a self-edge.
                 bool cyclic = (scc_size >= 2);
                 if (!cyclic) {
-                    MLIR_OpHandle term = MLIR_GetBlockTerminator(blocks[v]);
-                    size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(term);
+                    MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, blocks[v]);
+                    size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(ctx, term);
                     for (size_t i = 0; i < ns; ++i) {
-                        if (MLIR_GetOpSuccessor(term, i) == blocks[v]) {
+                        if (MLIR_GetOpSuccessor(ctx, term, i) == blocks[v]) {
                             cyclic = true; break;
                         }
                     }
@@ -1180,15 +1180,15 @@ static bool ce_contains_block(MLIR_BlockHandle *list, size_t n, MLIR_BlockHandle
     return false;
 }
 
-static CycleEdges calculate_cycle_edges(Arena *arena, const SccResult *r,
+static CycleEdges calculate_cycle_edges(MLIR_Context *ctx, Arena *arena, const SccResult *r,
                                         size_t scc_id) {
     CycleEdges out = {0};
     size_t cap = 0;
     for (size_t i = r->scc_starts[scc_id]; i < r->scc_starts[scc_id + 1]; ++i) {
         MLIR_BlockHandle b = r->blocks[r->blocks_in_sccs[i]];
-        cap += MLIR_GetBlockNumPredecessors(b);
-        MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
-        if (term != MLIR_INVALID_HANDLE) cap += MLIR_GetOpNumSuccessors(term);
+        cap += MLIR_GetBlockNumPredecessors(ctx, b);
+        MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
+        if (term != MLIR_INVALID_HANDLE) cap += MLIR_GetOpNumSuccessors(ctx, term);
     }
     if (cap == 0) cap = 1;
     out.entry = arena_new_array(arena, Edge, cap);
@@ -1200,10 +1200,10 @@ static CycleEdges calculate_cycle_edges(Arena *arena, const SccResult *r,
     for (size_t i = r->scc_starts[scc_id]; i < r->scc_starts[scc_id + 1]; ++i) {
         MLIR_BlockHandle b = r->blocks[r->blocks_in_sccs[i]];
         // Entry: predecessors of b not in this SCC.
-        size_t np = MLIR_GetBlockNumPredecessors(b);
+        size_t np = MLIR_GetBlockNumPredecessors(ctx, b);
         for (size_t pi = 0; pi < np; ++pi) {
             size_t succ_idx = 0;
-            MLIR_BlockHandle p = MLIR_GetBlockPredecessor(b, pi, &succ_idx);
+            MLIR_BlockHandle p = MLIR_GetBlockPredecessor(ctx, b, pi, &succ_idx);
             if (p == MLIR_INVALID_HANDLE) continue;
             if (scc_contains(r, scc_id, p)) continue;
             out.entry[out.n_entry++] = (Edge){p, succ_idx};
@@ -1212,11 +1212,11 @@ static CycleEdges calculate_cycle_edges(Arena *arena, const SccResult *r,
             }
         }
         // Exit: successors of b not in this SCC.
-        MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
+        MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
         if (term == MLIR_INVALID_HANDLE) continue;
-        size_t ns = MLIR_GetOpNumSuccessors(term);
+        size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
         for (size_t si = 0; si < ns; ++si) {
-            MLIR_BlockHandle s = MLIR_GetOpSuccessor(term, si);
+            MLIR_BlockHandle s = MLIR_GetOpSuccessor(ctx, term, si);
             if (s == MLIR_INVALID_HANDLE) continue;
             if (scc_contains(r, scc_id, s)) continue;
             out.exit[out.n_exit++] = (Edge){b, si};
@@ -1227,11 +1227,11 @@ static CycleEdges calculate_cycle_edges(Arena *arena, const SccResult *r,
     // back-edge iff dst is one of the entry-targets (header set).
     for (size_t i = r->scc_starts[scc_id]; i < r->scc_starts[scc_id + 1]; ++i) {
         MLIR_BlockHandle b = r->blocks[r->blocks_in_sccs[i]];
-        MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
+        MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
         if (term == MLIR_INVALID_HANDLE) continue;
-        size_t ns = MLIR_GetOpNumSuccessors(term);
+        size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
         for (size_t si = 0; si < ns; ++si) {
-            MLIR_BlockHandle s = MLIR_GetOpSuccessor(term, si);
+            MLIR_BlockHandle s = MLIR_GetOpSuccessor(ctx, term, si);
             if (s == MLIR_INVALID_HANDLE) continue;
             if (!ce_contains_block(out.entry_dsts, out.n_entry_dsts, s)) continue;
             out.back[out.n_back++] = (Edge){b, si};
@@ -1249,11 +1249,11 @@ static CycleEdges calculate_cycle_edges(Arena *arena, const SccResult *r,
         out.entry_dsts[out.n_entry_dsts++] = hdr;
         for (size_t i = r->scc_starts[scc_id]; i < r->scc_starts[scc_id + 1]; ++i) {
             MLIR_BlockHandle b = r->blocks[r->blocks_in_sccs[i]];
-            MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
+            MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
             if (term == MLIR_INVALID_HANDLE) continue;
-            size_t ns = MLIR_GetOpNumSuccessors(term);
+            size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
             for (size_t si = 0; si < ns; ++si) {
-                MLIR_BlockHandle s = MLIR_GetOpSuccessor(term, si);
+                MLIR_BlockHandle s = MLIR_GetOpSuccessor(ctx, term, si);
                 if (s == hdr) out.back[out.n_back++] = (Edge){b, si};
             }
         }
@@ -1375,7 +1375,7 @@ typedef struct {
 //   - forward dom: walk from entry following SUCCESSORS.
 //   - postdom:     walk from virt/leaf following PREDECESSORS-in-original
 //                  (which are SUCCESSORS in the reverse graph).
-static void dom_dfs_postorder(MLIR_BlockHandle root,
+static void dom_dfs_postorder(MLIR_Context *ctx, MLIR_BlockHandle root,
                               const MLIR_BlockHandle *leaf_blocks,
                               size_t n_leaves,
                               bool is_post,
@@ -1446,19 +1446,19 @@ static void dom_dfs_postorder(MLIR_BlockHandle root,
         // postdom uses predecessors.
         size_t nn;
         if (!is_post) {
-            MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
-            nn = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(term);
+            MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
+            nn = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(ctx, term);
         } else {
-            nn = MLIR_GetBlockNumPredecessors(b);
+            nn = MLIR_GetBlockNumPredecessors(ctx, b);
         }
 
         if (fr->next_child < nn) {
             MLIR_BlockHandle child;
             if (!is_post) {
-                MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
-                child = MLIR_GetOpSuccessor(term, fr->next_child);
+                MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
+                child = MLIR_GetOpSuccessor(ctx, term, fr->next_child);
             } else {
-                child = MLIR_GetBlockPredecessor(b, fr->next_child, NULL);
+                child = MLIR_GetBlockPredecessor(ctx, b, fr->next_child, NULL);
             }
             fr->next_child++;
             if (child == MLIR_INVALID_HANDLE) continue;
@@ -1499,13 +1499,13 @@ static void dom_dfs_postorder(MLIR_BlockHandle root,
     if (visited_n) *visited_n = v_n;
 }
 
-static DomInfo dom_compute(Arena *arena, MLIR_RegionHandle region,
+static DomInfo dom_compute(MLIR_Context *ctx, Arena *arena, MLIR_RegionHandle region,
                            bool is_post) {
     DomInfo d = {0};
     d.arena = arena;
     d.is_post = is_post;
 
-    size_t nb = MLIR_GetRegionNumBlocks(region);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
     if (nb == 0) {
         return d;
     }
@@ -1514,14 +1514,14 @@ static DomInfo dom_compute(Arena *arena, MLIR_RegionHandle region,
     //   forward dom: region's entry block (block 0).
     //   postdom:     the unique block with no successors, or a virtual
     //                exit if there are zero or multiple such blocks.
-    MLIR_BlockHandle entry = MLIR_GetRegionBlock(region, 0);
+    MLIR_BlockHandle entry = MLIR_GetRegionBlock(ctx, region, 0);
     MLIR_BlockHandle *leaves = arena_new_array(arena, MLIR_BlockHandle, nb);
     size_t n_leaves = 0;
     if (is_post) {
         for (size_t i = 0; i < nb; ++i) {
-            MLIR_BlockHandle b = MLIR_GetRegionBlock(region, i);
-            MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
-            size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(term);
+            MLIR_BlockHandle b = MLIR_GetRegionBlock(ctx, region, i);
+            MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
+            size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(ctx, term);
             if (ns == 0) leaves[n_leaves++] = b;
         }
     }
@@ -1531,7 +1531,7 @@ static DomInfo dom_compute(Arena *arena, MLIR_RegionHandle region,
     MLIR_BlockHandle *po = arena_new_array(arena, MLIR_BlockHandle, nb + 1);
     size_t po_n = 0;
     MLIR_BlockHandle root_for_dfs = is_post ? (need_virt ? MLIR_INVALID_HANDLE : leaves[0]) : entry;
-    dom_dfs_postorder(root_for_dfs, leaves, n_leaves, is_post, need_virt,
+    dom_dfs_postorder(ctx, root_for_dfs, leaves, n_leaves, is_post, need_virt,
                       po, &po_n, NULL, NULL, arena);
 
     d.n_real = po_n;
@@ -1591,10 +1591,10 @@ static DomInfo dom_compute(Arena *arena, MLIR_RegionHandle region,
         // successors s in postorder, append i to neighbors[po_index(s)].
         for (size_t i = 0; i < d.n_real; ++i) d.n_neighbors[i] = 0;
         for (size_t i = 0; i < d.n_real; ++i) {
-            MLIR_OpHandle term = MLIR_GetBlockTerminator(d.po_blocks[i]);
-            size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(term);
+            MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, d.po_blocks[i]);
+            size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(ctx, term);
             for (size_t k = 0; k < ns; ++k) {
-                size_t si; PO_INDEX_OF(MLIR_GetOpSuccessor(term, k), si);
+                size_t si; PO_INDEX_OF(MLIR_GetOpSuccessor(ctx, term, k), si);
                 if (si != SIZE_MAX) d.n_neighbors[si]++;
             }
         }
@@ -1604,10 +1604,10 @@ static DomInfo dom_compute(Arena *arena, MLIR_RegionHandle region,
             d.n_neighbors[i] = 0;  // reused below as a fill cursor
         }
         for (size_t i = 0; i < d.n_real; ++i) {
-            MLIR_OpHandle term = MLIR_GetBlockTerminator(d.po_blocks[i]);
-            size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(term);
+            MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, d.po_blocks[i]);
+            size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(ctx, term);
             for (size_t k = 0; k < ns; ++k) {
-                size_t si; PO_INDEX_OF(MLIR_GetOpSuccessor(term, k), si);
+                size_t si; PO_INDEX_OF(MLIR_GetOpSuccessor(ctx, term, k), si);
                 if (si != SIZE_MAX) d.neighbors[si][d.n_neighbors[si]++] = i;
             }
         }
@@ -1620,10 +1620,10 @@ static DomInfo dom_compute(Arena *arena, MLIR_RegionHandle region,
             size_t cap = 8;
             size_t *buf = arena_new_array(arena, size_t, cap);
             size_t cnt = 0;
-            MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
-            size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(term);
+            MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
+            size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(ctx, term);
             for (size_t k = 0; k < ns; ++k) {
-                size_t si; PO_INDEX_OF(MLIR_GetOpSuccessor(term, k), si);
+                size_t si; PO_INDEX_OF(MLIR_GetOpSuccessor(ctx, term, k), si);
                 if (si == SIZE_MAX) continue;
                 if (cnt == cap) {
                     size_t nc = cap * 2;
@@ -1720,10 +1720,10 @@ static bool block_set_contains(const MLIR_BlockHandle *list, size_t n,
 // cycles we lift bottom-up (innermost first), so by the time the outer
 // cycle is processed, an inner cycle's body is encapsulated in scf.while
 // — its values can no longer escape directly.
-static MLIR_BlockHandle find_block_at_region_level(MLIR_BlockHandle start_block,
+static MLIR_BlockHandle find_block_at_region_level(MLIR_Context *ctx, MLIR_BlockHandle start_block,
                                                    MLIR_RegionHandle target_region) {
     if (start_block == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
-    MLIR_RegionHandle r = MLIR_GetBlockParentRegion(start_block);
+    MLIR_RegionHandle r = MLIR_GetBlockParentRegion(ctx, start_block);
     if (r == target_region) return start_block;
     return MLIR_INVALID_HANDLE;
 }
@@ -1787,9 +1787,9 @@ static void replace_use(LiftState *st, UseRecord u, MLIR_ValueHandle replacement
 // with a fresh exit_block argument (lazily created). Also extends latch
 // + loop_header with the same argument so the value is forwarded along
 // the back edge (requirement 1 of reduce form).
-static void check_value(ReduceCtx *r, MLIR_ValueHandle value) {
+static void check_value(MLIR_Context *ctx, ReduceCtx *r, MLIR_ValueHandle value) {
     if (value == MLIR_INVALID_HANDLE) return;
-    MLIR_TypeHandle ty = MLIR_GetValueType(value);
+    MLIR_TypeHandle ty = MLIR_GetValueType(ctx, value);
 
     MLIR_ValueHandle block_arg = MLIR_INVALID_HANDLE;
     size_t n_uses = 0;
@@ -1798,8 +1798,8 @@ static void check_value(ReduceCtx *r, MLIR_ValueHandle value) {
     for (size_t i = 0; i < n_uses; ++i) {
         MLIR_OpHandle owner = uses[i].op;
         if (owner == MLIR_INVALID_HANDLE) continue;
-        MLIR_BlockHandle owner_block = MLIR_GetOpParentBlock(owner);
-        MLIR_BlockHandle curr = find_block_at_region_level(owner_block, r->loop_region);
+        MLIR_BlockHandle owner_block = MLIR_GetOpParentBlock(ctx, owner);
+        MLIR_BlockHandle curr = find_block_at_region_level(ctx, owner_block, r->loop_region);
         if (curr == MLIR_INVALID_HANDLE) {
             // Detached or in a region we don't recognize; conservative
             // skip rather than mis-replace.
@@ -1818,20 +1818,20 @@ static void check_value(ReduceCtx *r, MLIR_ValueHandle value) {
             // latch is not dominated by value's defining block, we need
             // a fresh latch arg + per-pred forwarding.
             MLIR_ValueHandle argument = value;
-            MLIR_BlockHandle def_block = MLIR_GetValueParentBlock(value);
+            MLIR_BlockHandle def_block = MLIR_GetValueParentBlock(ctx, value);
             if (def_block != r->latch) {
                 bool need_latch_arg = false;
-                size_t np = MLIR_GetBlockNumPredecessors(r->latch);
+                size_t np = MLIR_GetBlockNumPredecessors(ctx, r->latch);
                 for (size_t k = 0; k < np && !need_latch_arg; ++k) {
-                    MLIR_BlockHandle p = MLIR_GetBlockPredecessor(r->latch, k, NULL);
+                    MLIR_BlockHandle p = MLIR_GetBlockPredecessor(ctx, r->latch, k, NULL);
                     if (!dom_dominates(r->dom, def_block, p)) need_latch_arg = true;
                 }
                 if (need_latch_arg) {
                     argument = MLIR_AddBlockArgument(r->st->ctx, r->latch, ty, r->loc);
                     for (size_t k = 0; k < np; ++k) {
                         size_t pred_succ_idx = 0;
-                        MLIR_BlockHandle p = MLIR_GetBlockPredecessor(r->latch, k, &pred_succ_idx);
-                        MLIR_OpHandle pterm = MLIR_GetBlockTerminator(p);
+                        MLIR_BlockHandle p = MLIR_GetBlockPredecessor(ctx, r->latch, k, &pred_succ_idx);
+                        MLIR_OpHandle pterm = MLIR_GetBlockTerminator(ctx, p);
                         MLIR_ValueHandle forwarded =
                             dom_dominates(r->dom, def_block, p)
                                 ? value : get_undef_value(r->st, ty);
@@ -1845,8 +1845,8 @@ static void check_value(ReduceCtx *r, MLIR_ValueHandle value) {
             // Append `argument` to EVERY successor operand list of latch:
             // both the back edge (so the new loop_header arg is fed) and
             // the exit edge (so the new exit_block arg is fed).
-            MLIR_OpHandle latch_term = MLIR_GetBlockTerminator(r->latch);
-            size_t n_succ = MLIR_GetOpNumSuccessors(latch_term);
+            MLIR_OpHandle latch_term = MLIR_GetBlockTerminator(ctx, r->latch);
+            size_t n_succ = MLIR_GetOpNumSuccessors(ctx, latch_term);
             for (size_t s = 0; s < n_succ; ++s) {
                 MLIR_AppendOpSuccessorOperand(r->st->ctx, latch_term, s, argument);
             }
@@ -1856,7 +1856,7 @@ static void check_value(ReduceCtx *r, MLIR_ValueHandle value) {
     }
 }
 
-static MLIR_ValueHandle *transform_to_reduce_loop(
+static MLIR_ValueHandle *transform_to_reduce_loop(MLIR_Context *ctx, 
     LiftState *st, const DomInfo *dom,
     MLIR_BlockHandle loop_header,
     MLIR_BlockHandle exit_block,
@@ -1865,35 +1865,35 @@ static MLIR_ValueHandle *transform_to_reduce_loop(
     MLIR_LocationHandle loc)
 {
     *out_n_lhso = 0;
-    if (MLIR_GetBlockNumPredecessors(exit_block) != 1) return NULL;
-    MLIR_BlockHandle latch = MLIR_GetBlockPredecessor(exit_block, 0, NULL);
-    MLIR_OpHandle latch_term = MLIR_GetBlockTerminator(latch);
+    if (MLIR_GetBlockNumPredecessors(ctx, exit_block) != 1) return NULL;
+    MLIR_BlockHandle latch = MLIR_GetBlockPredecessor(ctx, exit_block, 0, NULL);
+    MLIR_OpHandle latch_term = MLIR_GetBlockTerminator(ctx, latch);
     if (latch_term == MLIR_INVALID_HANDLE) return NULL;
-    if (MLIR_GetOpNumSuccessors(latch_term) != 2) return NULL;
+    if (MLIR_GetOpNumSuccessors(ctx, latch_term) != 2) return NULL;
 
     size_t lh_idx = 0, ex_idx = 1;
-    if (MLIR_GetOpSuccessor(latch_term, lh_idx) != loop_header) {
+    if (MLIR_GetOpSuccessor(ctx, latch_term, lh_idx) != loop_header) {
         lh_idx = 1; ex_idx = 0;
     }
-    if (MLIR_GetOpSuccessor(latch_term, lh_idx) != loop_header) return NULL;
-    if (MLIR_GetOpSuccessor(latch_term, ex_idx) != exit_block) return NULL;
+    if (MLIR_GetOpSuccessor(ctx, latch_term, lh_idx) != loop_header) return NULL;
+    if (MLIR_GetOpSuccessor(ctx, latch_term, ex_idx) != exit_block) return NULL;
 
     // Snapshot the existing loop_header successor operands of latch.
-    size_t n_init = MLIR_GetOpNumSuccessorOperands(latch_term, lh_idx);
+    size_t n_init = MLIR_GetOpNumSuccessorOperands(ctx, latch_term, lh_idx);
     ReduceCtx r = {0};
     r.st = st;
     r.dom = dom;
     r.loop_header = loop_header;
     r.exit_block = exit_block;
     r.latch = latch;
-    r.loop_region = MLIR_GetBlockParentRegion(loop_header);
+    r.loop_region = MLIR_GetBlockParentRegion(ctx, loop_header);
     r.loop_blocks = loop_blocks;
     r.n_loop_blocks = n_loop_blocks;
     r.loc = loc;
     r.cap_lhso = n_init + 16;
     r.lhso = arena_new_array(st->arena, MLIR_ValueHandle, r.cap_lhso);
     for (size_t i = 0; i < n_init; ++i) {
-        r.lhso[i] = MLIR_GetOpSuccessorOperand(latch_term, lh_idx, i);
+        r.lhso[i] = MLIR_GetOpSuccessorOperand(ctx, latch_term, lh_idx, i);
     }
     r.n_lhso = n_init;
 
@@ -1902,7 +1902,7 @@ static MLIR_ValueHandle *transform_to_reduce_loop(
     // uses can be routed through.
     for (size_t i = 0; i < n_init; ++i) {
         MLIR_ValueHandle v = r.lhso[i];
-        MLIR_TypeHandle ty = MLIR_GetValueType(v);
+        MLIR_TypeHandle ty = MLIR_GetValueType(ctx, v);
         MLIR_ValueHandle exit_arg = MLIR_AddBlockArgument(st->ctx, exit_block, ty, loc);
         MLIR_AppendOpSuccessorOperand(st->ctx, latch_term, ex_idx, v);
 
@@ -1912,8 +1912,8 @@ static MLIR_ValueHandle *transform_to_reduce_loop(
         for (size_t u = 0; u < n_uses; ++u) {
             MLIR_OpHandle owner = uses[u].op;
             if (owner == MLIR_INVALID_HANDLE) continue;
-            MLIR_BlockHandle ob = MLIR_GetOpParentBlock(owner);
-            MLIR_BlockHandle curr = find_block_at_region_level(ob, r.loop_region);
+            MLIR_BlockHandle ob = MLIR_GetOpParentBlock(ctx, owner);
+            MLIR_BlockHandle curr = find_block_at_region_level(ctx, ob, r.loop_region);
             if (curr == MLIR_INVALID_HANDLE) continue;
             if (block_set_contains(loop_blocks, n_loop_blocks, curr)) continue;
             // Don't replace the use that IS the back-edge successor operand
@@ -1928,22 +1928,22 @@ static MLIR_ValueHandle *transform_to_reduce_loop(
     // (5)-(6) Snapshot loop-header/latch args BEFORE mutation, then for
     // each value defined inside the loop, route external uses through
     // exit_block.
-    size_t n_latch_args_prior = MLIR_GetBlockNumArgs(latch);
+    size_t n_latch_args_prior = MLIR_GetBlockNumArgs(ctx, latch);
     MLIR_ValueHandle *latch_args_prior =
         n_latch_args_prior
             ? arena_new_array(st->arena, MLIR_ValueHandle, n_latch_args_prior)
             : NULL;
     for (size_t i = 0; i < n_latch_args_prior; ++i) {
-        latch_args_prior[i] = MLIR_GetBlockArg(latch, i);
+        latch_args_prior[i] = MLIR_GetBlockArg(ctx, latch, i);
     }
 
-    size_t n_lh_args_prior = MLIR_GetBlockNumArgs(loop_header);
+    size_t n_lh_args_prior = MLIR_GetBlockNumArgs(ctx, loop_header);
     MLIR_ValueHandle *lh_args_prior =
         n_lh_args_prior
             ? arena_new_array(st->arena, MLIR_ValueHandle, n_lh_args_prior)
             : NULL;
     for (size_t i = 0; i < n_lh_args_prior; ++i) {
-        lh_args_prior[i] = MLIR_GetBlockArg(loop_header, i);
+        lh_args_prior[i] = MLIR_GetBlockArg(ctx, loop_header, i);
     }
 
     for (size_t i = 0; i < n_loop_blocks; ++i) {
@@ -1951,39 +1951,39 @@ static MLIR_ValueHandle *transform_to_reduce_loop(
 
         if (B == latch) {
             for (size_t j = 0; j < n_latch_args_prior; ++j)
-                check_value(&r, latch_args_prior[j]);
+                check_value(ctx, &r, latch_args_prior[j]);
         } else if (B == loop_header) {
             for (size_t j = 0; j < n_lh_args_prior; ++j)
-                check_value(&r, lh_args_prior[j]);
+                check_value(ctx, &r, lh_args_prior[j]);
         } else {
-            size_t na = MLIR_GetBlockNumArgs(B);
+            size_t na = MLIR_GetBlockNumArgs(ctx, B);
             for (size_t j = 0; j < na; ++j)
-                check_value(&r, MLIR_GetBlockArg(B, j));
+                check_value(ctx, &r, MLIR_GetBlockArg(ctx, B, j));
         }
 
-        size_t no = MLIR_GetBlockNumOps(B);
+        size_t no = MLIR_GetBlockNumOps(ctx, B);
         for (size_t j = 0; j < no; ++j) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(B, j);
-            size_t nr = MLIR_GetOpNumResults(op);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, B, j);
+            size_t nr = MLIR_GetOpNumResults(ctx, op);
             for (size_t k = 0; k < nr; ++k) {
-                check_value(&r, MLIR_GetOpResult(op, k));
+                check_value(ctx, &r, MLIR_GetOpResult(ctx, op, k));
             }
         }
     }
 
     // (7) For each pred of loop_header other than latch: pad with undef
     // for the args that were appended above.
-    size_t n_lh_args_now = MLIR_GetBlockNumArgs(loop_header);
-    size_t n_lh_preds = MLIR_GetBlockNumPredecessors(loop_header);
+    size_t n_lh_args_now = MLIR_GetBlockNumArgs(ctx, loop_header);
+    size_t n_lh_preds = MLIR_GetBlockNumPredecessors(ctx, loop_header);
     for (size_t i = 0; i < n_lh_preds; ++i) {
         size_t pred_succ_idx = 0;
-        MLIR_BlockHandle pred = MLIR_GetBlockPredecessor(loop_header, i,
+        MLIR_BlockHandle pred = MLIR_GetBlockPredecessor(ctx, loop_header, i,
                                                          &pred_succ_idx);
         if (pred == latch) continue;
-        MLIR_OpHandle pterm = MLIR_GetBlockTerminator(pred);
-        size_t cur_n = MLIR_GetOpNumSuccessorOperands(pterm, pred_succ_idx);
+        MLIR_OpHandle pterm = MLIR_GetBlockTerminator(ctx, pred);
+        size_t cur_n = MLIR_GetOpNumSuccessorOperands(ctx, pterm, pred_succ_idx);
         for (size_t k = cur_n; k < n_lh_args_now; ++k) {
-            MLIR_TypeHandle ty = MLIR_GetValueType(MLIR_GetBlockArg(loop_header, k));
+            MLIR_TypeHandle ty = MLIR_GetValueType(ctx, MLIR_GetBlockArg(ctx, loop_header, k));
             MLIR_AppendOpSuccessorOperand(st->ctx, pterm, pred_succ_idx,
                                           get_undef_value(st, ty));
         }
@@ -2025,14 +2025,14 @@ static void replace_block_successor_uses(MLIR_Context *ctx,
                                          MLIR_RegionHandle region,
                                          MLIR_BlockHandle old_block,
                                          MLIR_BlockHandle new_block) {
-    size_t nb = MLIR_GetRegionNumBlocks(region);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
     for (size_t i = 0; i < nb; ++i) {
-        MLIR_BlockHandle b = MLIR_GetRegionBlock(region, i);
-        MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
+        MLIR_BlockHandle b = MLIR_GetRegionBlock(ctx, region, i);
+        MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
         if (term == MLIR_INVALID_HANDLE) continue;
-        size_t ns = MLIR_GetOpNumSuccessors(term);
+        size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
         for (size_t s = 0; s < ns; ++s) {
-            if (MLIR_GetOpSuccessor(term, s) == old_block)
+            if (MLIR_GetOpSuccessor(ctx, term, s) == old_block)
                 MLIR_SetOpSuccessor(ctx, term, s, new_block);
         }
     }
@@ -2065,15 +2065,15 @@ static void replace_block_successor_uses(MLIR_Context *ctx,
 //   6. Redirect outside-the-loop branches that targeted loop_header to
 //      target newLoopParentBlock instead.
 // ============================================================================
-static MLIR_BlockHandle *transform_cycles_to_scf_loops(
+static MLIR_BlockHandle *transform_cycles_to_scf_loops(MLIR_Context *ctx, 
     LiftState *st, Combiner *combiner, MLIR_BlockHandle region_entry,
     size_t *out_n_new)
 {
     *out_n_new = 0;
-    MLIR_RegionHandle region = MLIR_GetBlockParentRegion(region_entry);
+    MLIR_RegionHandle region = MLIR_GetBlockParentRegion(ctx, region_entry);
     Arena *arena = st->arena;
 
-    SccResult scc = scc_compute(arena, region);
+    SccResult scc = scc_compute(ctx, arena, region);
 
     MLIR_BlockHandle *new_sub_regions = NULL;
     size_t n_new = 0, cap_new = 0;
@@ -2106,12 +2106,12 @@ static MLIR_BlockHandle *transform_cycles_to_scf_loops(
             } \
         } while (0)
 
-        CycleEdges edges = calculate_cycle_edges(arena, &scc, scc_id);
+        CycleEdges edges = calculate_cycle_edges(ctx, arena, &scc, scc_id);
         if (edges.n_entry == 0 || edges.n_back == 0) continue;
 
-        MLIR_BlockHandle loop_header = edge_successor(edges.entry[0]);
+        MLIR_BlockHandle loop_header = edge_successor(ctx, edges.entry[0]);
         MLIR_LocationHandle hdr_loc =
-            MLIR_GetOpLocation(MLIR_GetBlockTerminator(loop_header));
+            MLIR_GetOpLocation(ctx, MLIR_GetBlockTerminator(ctx, loop_header));
 
         // (1) Single entry block via multiplexer if needed.
         if (edges.n_entry > 1) {
@@ -2119,15 +2119,15 @@ static MLIR_BlockHandle *transform_cycles_to_scf_loops(
             Edge *combined = arena_new_array(arena, Edge, n_edges);
             memcpy(combined, edges.entry, sizeof(Edge) * edges.n_entry);
             memcpy(combined + edges.n_entry, edges.back, sizeof(Edge) * edges.n_back);
-            EdgeMultiplexer mux = create_single_entry_block(st, combined, n_edges, hdr_loc);
+            EdgeMultiplexer mux = create_single_entry_block(ctx, st, combined, n_edges, hdr_loc);
             loop_header = mux.mux_block;
         }
         SCC_INSERT(loop_header);
 
         // (2) Single exiting latch.
         MLIR_LocationHandle back_loc =
-            MLIR_GetOpLocation(MLIR_GetBlockTerminator(edges.back[0].from_block));
-        StructuredLoopProps props = create_single_exiting_latch(
+            MLIR_GetOpLocation(ctx, MLIR_GetBlockTerminator(ctx, edges.back[0].from_block));
+        StructuredLoopProps props = create_single_exiting_latch(ctx, 
             st, combiner, edges.back, edges.n_back, edges.exit, edges.n_exit, back_loc);
         if (!props.ok) return NULL;
         MLIR_BlockHandle latch = props.latch_block;
@@ -2136,16 +2136,16 @@ static MLIR_BlockHandle *transform_cycles_to_scf_loops(
         SCC_INSERT(loop_header);
 
         // (3) Forward dominance + transformToReduceLoop.
-        DomInfo dom = dom_compute(arena, region, /*is_post=*/false);
+        DomInfo dom = dom_compute(ctx, arena, region, /*is_post=*/false);
         size_t n_iter = 0;
-        MLIR_ValueHandle *iter_vals = transform_to_reduce_loop(
+        MLIR_ValueHandle *iter_vals = transform_to_reduce_loop(ctx, 
             st, &dom, loop_header, exit_block, scc_blocks, s_n,
             &n_iter, hdr_loc);
         if (iter_vals == NULL && n_iter > 0) return NULL;
 
         // (4) newLoopParentBlock with copies of loop_header's args; insert
         //     before loop_header (still in region at this point).
-        size_t n_lh_args = MLIR_GetBlockNumArgs(loop_header);
+        size_t n_lh_args = MLIR_GetBlockNumArgs(ctx, loop_header);
         MLIR_BlockHandle newLPB = MLIR_CreateBlock(st->ctx);
         MLIR_InsertRegionBlockBefore(st->ctx, region, newLPB, loop_header);
         MLIR_ValueHandle *lpb_args = n_lh_args
@@ -2153,7 +2153,7 @@ static MLIR_BlockHandle *transform_cycles_to_scf_loops(
         MLIR_TypeHandle *iter_arg_types = n_lh_args
             ? arena_new_array(arena, MLIR_TypeHandle, n_lh_args) : NULL;
         for (size_t i = 0; i < n_lh_args; ++i) {
-            iter_arg_types[i] = MLIR_GetValueType(MLIR_GetBlockArg(loop_header, i));
+            iter_arg_types[i] = MLIR_GetValueType(ctx, MLIR_GetBlockArg(ctx, loop_header, i));
             lpb_args[i] = MLIR_AddBlockArgument(st->ctx, newLPB,
                                                 iter_arg_types[i], hdr_loc);
         }
@@ -2171,8 +2171,8 @@ static MLIR_BlockHandle *transform_cycles_to_scf_loops(
         }
 
         // (5) Replace latch's terminator with scf.condition.
-        MLIR_OpHandle old_latch_term = MLIR_GetBlockTerminator(latch);
-        MLIR_LocationHandle latch_loc = MLIR_GetOpLocation(old_latch_term);
+        MLIR_OpHandle old_latch_term = MLIR_GetBlockTerminator(ctx, latch);
+        MLIR_LocationHandle latch_loc = MLIR_GetOpLocation(ctx, old_latch_term);
         MLIR_EraseOp(st->ctx, old_latch_term);
 
         MLIR_ValueHandle should_repeat_i1 =
@@ -2213,10 +2213,10 @@ static MLIR_BlockHandle *transform_cycles_to_scf_loops(
         MLIR_AppendBlockOp(st->ctx, newLPB, scf_while);
 
         // (8) RAUW exit_block's args with scf.while results.
-        size_t n_exit_args = MLIR_GetBlockNumArgs(exit_block);
+        size_t n_exit_args = MLIR_GetBlockNumArgs(ctx, exit_block);
         size_t n_share = n_exit_args < n_lh_args ? n_exit_args : n_lh_args;
         for (size_t i = 0; i < n_share; ++i) {
-            MLIR_ReplaceAllUsesOfValue(st->ctx, MLIR_GetBlockArg(exit_block, i),
+            MLIR_ReplaceAllUsesOfValue(st->ctx, MLIR_GetBlockArg(ctx, exit_block, i),
                                        results[i]);
         }
 
@@ -2254,10 +2254,10 @@ static MLIR_BlockHandle *transform_cycles_to_scf_loops(
 // the caller should treat that as "no progress / not lifted" (we did not
 // recognize this branch op shape — switch).
 // ============================================================================
-static bool is_region_exit_block(MLIR_BlockHandle b) {
-    MLIR_OpHandle term = MLIR_GetBlockTerminator(b);
+static bool is_region_exit_block(MLIR_Context *ctx, MLIR_BlockHandle b) {
+    MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
     if (term == MLIR_INVALID_HANDLE) return true;
-    return MLIR_GetOpNumSuccessors(term) == 0;
+    return MLIR_GetOpNumSuccessors(ctx, term) == 0;
 }
 
 // `parent_block` and `to_redirect_idx` together describe an edge in the
@@ -2315,7 +2315,7 @@ typedef struct {
     bool              made_progress;   // false: branch shape unhandled, no IR change
 } BranchXformResult;
 
-static BranchXformResult transform_to_structured_cf_branches(
+static BranchXformResult transform_to_structured_cf_branches(MLIR_Context *ctx, 
     LiftState *st, MLIR_BlockHandle region_entry, const DomInfo *dom)
 {
     BranchXformResult res = {0};
@@ -2323,29 +2323,29 @@ static BranchXformResult transform_to_structured_cf_branches(
     res.made_progress = true;
 
     Arena *arena = st->arena;
-    MLIR_OpHandle term = MLIR_GetBlockTerminator(region_entry);
+    MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, region_entry);
     if (term == MLIR_INVALID_HANDLE) { res.ok = false; return res; }
-    size_t num_succ = MLIR_GetOpNumSuccessors(term);
+    size_t num_succ = MLIR_GetOpNumSuccessors(ctx, term);
 
     // Trivial: 0 successors (return-like).
     if (num_succ == 0) return res;
 
     // Single successor: splice and replace successor args with operands.
     if (num_succ == 1) {
-        MLIR_BlockHandle succ = MLIR_GetOpSuccessor(term, 0);
+        MLIR_BlockHandle succ = MLIR_GetOpSuccessor(ctx, term, 0);
         if (succ == region_entry) { res.ok = false; return res; }  // self-loop
-        size_t n_args = MLIR_GetBlockNumArgs(succ);
-        size_t n_so   = MLIR_GetOpNumSuccessorOperands(term, 0);
+        size_t n_args = MLIR_GetBlockNumArgs(ctx, succ);
+        size_t n_so   = MLIR_GetOpNumSuccessorOperands(ctx, term, 0);
         size_t n_share = n_args < n_so ? n_args : n_so;
         for (size_t i = 0; i < n_share; ++i) {
-            MLIR_ValueHandle old_v = MLIR_GetBlockArg(succ, i);
-            MLIR_ValueHandle new_v = MLIR_GetOpSuccessorOperand(term, 0, i);
+            MLIR_ValueHandle old_v = MLIR_GetBlockArg(ctx, succ, i);
+            MLIR_ValueHandle new_v = MLIR_GetOpSuccessorOperand(ctx, term, 0, i);
             MLIR_ReplaceAllUsesOfValue(st->ctx, old_v, new_v);
         }
         MLIR_EraseOp(st->ctx, term);
         MLIR_SpliceBlockOps(st->ctx, region_entry, succ);
         // succ must have no remaining preds now (was uniquely entered).
-        if (MLIR_GetBlockNumPredecessors(succ) == 0) {
+        if (MLIR_GetBlockNumPredecessors(ctx, succ) == 0) {
             MLIR_EraseBlock(st->ctx, succ);
         }
         res.new_sub_regions = arena_new_array(arena, MLIR_BlockHandle, 1);
@@ -2357,14 +2357,14 @@ static BranchXformResult transform_to_structured_cf_branches(
     // Multi-successor. cf.cond_br -> scf.if; cf.switch -> scf.index_switch.
     // Any other multi-successor terminator is left in place and we recurse
     // into the children.
-    MLIR_OpType term_type = MLIR_GetOpType(term);
+    MLIR_OpType term_type = MLIR_GetOpType(ctx, term);
     bool is_cond_br = term_type == (st->llvm_cfg ? OP_TYPE_LLVM_COND_BR : OP_TYPE_CF_COND_BR);
     bool is_switch  = term_type == (st->llvm_cfg ? OP_TYPE_LLVM_SWITCH : OP_TYPE_CF_SWITCH);
     if (!is_cond_br && !is_switch) {
         // Not lifted; caller's worklist should still try children.
         res.made_progress = false;
         MLIR_BlockHandle *succs = arena_new_array(arena, MLIR_BlockHandle, num_succ);
-        for (size_t i = 0; i < num_succ; ++i) succs[i] = MLIR_GetOpSuccessor(term, i);
+        for (size_t i = 0; i < num_succ; ++i) succs[i] = MLIR_GetOpSuccessor(ctx, term, i);
         res.new_sub_regions = succs;
         res.n_new_sub_regions = num_succ;
         return res;
@@ -2384,8 +2384,8 @@ static BranchXformResult transform_to_structured_cf_branches(
     memset(cap_br, 0, sizeof(size_t) * num_succ);
 
     for (size_t i = 0; i < num_succ; ++i) {
-        MLIR_BlockHandle succ = MLIR_GetOpSuccessor(term, i);
-        if (MLIR_GetBlockNumPredecessors(succ) != 1) continue;
+        MLIR_BlockHandle succ = MLIR_GetOpSuccessor(ctx, term, i);
+        if (MLIR_GetBlockNumPredecessors(ctx, succ) != 1) continue;
         // succ is solely dominated by region_entry; collect dom-subtree.
         n_br[i] = collect_dominated_blocks(arena, dom, succ,
                                            &branch_regions[i], n_br[i], &cap_br[i]);
@@ -2416,14 +2416,14 @@ static BranchXformResult transform_to_structured_cf_branches(
         }
         for (size_t k = 0; k < n_br[i]; ++k) {
             MLIR_BlockHandle b = branch_regions[i][k];
-            if (is_region_exit_block(b)) {
+            if (is_region_exit_block(ctx, b)) {
                 cont_post_dom_all = false;
                 // Add all incoming edges from outside the branch region
                 // as continuation edges (we'll join return-likes through mux).
-                size_t np = MLIR_GetBlockNumPredecessors(b);
+                size_t np = MLIR_GetBlockNumPredecessors(ctx, b);
                 for (size_t p = 0; p < np; ++p) {
                     size_t pred_succ_idx = 0;
-                    MLIR_BlockHandle pred = MLIR_GetBlockPredecessor(b, p, &pred_succ_idx);
+                    MLIR_BlockHandle pred = MLIR_GetBlockPredecessor(ctx, b, p, &pred_succ_idx);
                     if (n_ce == cap_ce) {
                         size_t nc = cap_ce ? cap_ce * 2 : 4;
                         Edge *na = arena_new_array(arena, Edge, nc);
@@ -2434,11 +2434,11 @@ static BranchXformResult transform_to_structured_cf_branches(
                 }
                 continue;
             }
-            MLIR_OpHandle bterm = MLIR_GetBlockTerminator(b);
+            MLIR_OpHandle bterm = MLIR_GetBlockTerminator(ctx, b);
             if (bterm == MLIR_INVALID_HANDLE) continue;
-            size_t bns = MLIR_GetOpNumSuccessors(bterm);
+            size_t bns = MLIR_GetOpNumSuccessors(ctx, bterm);
             for (size_t s = 0; s < bns; ++s) {
-                MLIR_BlockHandle bs = MLIR_GetOpSuccessor(bterm, s);
+                MLIR_BlockHandle bs = MLIR_GetOpSuccessor(ctx, bterm, s);
                 if (block_set_contains(not_continuation, n_nc, bs)) continue;
                 if (n_ce == cap_ce) {
                     size_t nc = cap_ce ? cap_ce * 2 : 4;
@@ -2477,24 +2477,24 @@ static BranchXformResult transform_to_structured_cf_branches(
         for (size_t i = 0; i < num_succ && all_match; ++i) {
             for (size_t k = 0; k < n_br[i] && all_match; ++k) {
                 MLIR_BlockHandle b = branch_regions[i][k];
-                if (!is_region_exit_block(b)) continue;
-                MLIR_OpHandle t = MLIR_GetBlockTerminator(b);
+                if (!is_region_exit_block(ctx, b)) continue;
+                MLIR_OpHandle t = MLIR_GetBlockTerminator(ctx, b);
                 if (t == MLIR_INVALID_HANDLE) { all_match = false; break; }
-                MLIR_OpType tt = MLIR_GetOpType(t);
-                size_t no = MLIR_GetOpNumOperands(t);
+                MLIR_OpType tt = MLIR_GetOpType(ctx, t);
+                size_t no = MLIR_GetOpNumOperands(ctx, t);
                 if (!any_exit) {
                     canon_type = tt;
                     canon_n_ops = no;
                     canon_types = no ? arena_new_array(arena, MLIR_TypeHandle, no) : NULL;
                     for (size_t a = 0; a < no; ++a)
-                        canon_types[a] = MLIR_GetValueType(MLIR_GetOpOperand(t, a));
+                        canon_types[a] = MLIR_GetValueType(ctx, MLIR_GetOpOperand(ctx, t, a));
                     any_exit = true;
                 } else {
                     if (canon_type != tt || canon_n_ops != no) {
                         all_match = false; break;
                     }
                     for (size_t a = 0; a < no; ++a) {
-                        if (canon_types[a] != MLIR_GetValueType(MLIR_GetOpOperand(t, a))) {
+                        if (canon_types[a] != MLIR_GetValueType(ctx, MLIR_GetOpOperand(ctx, t, a))) {
                             all_match = false; break;
                         }
                     }
@@ -2513,17 +2513,17 @@ static BranchXformResult transform_to_structured_cf_branches(
 
         if (all_match && any_exit) {
             // Synthesize the continuation.
-            MLIR_LocationHandle loc = MLIR_GetOpLocation(exit_terms[0].term);
+            MLIR_LocationHandle loc = MLIR_GetOpLocation(ctx, exit_terms[0].term);
             MLIR_BlockHandle cont = MLIR_CreateBlock(st->ctx);
             for (size_t a = 0; a < canon_n_ops; ++a)
                 MLIR_AddBlockArgument(st->ctx, cont, canon_types[a], loc);
-            MLIR_RegionHandle parent_region = MLIR_GetBlockParentRegion(region_entry);
+            MLIR_RegionHandle parent_region = MLIR_GetBlockParentRegion(ctx, region_entry);
             MLIR_InsertRegionBlockBefore(st->ctx, parent_region, cont,
                                          MLIR_INVALID_HANDLE);
             MLIR_ValueHandle *cargs = canon_n_ops
                 ? arena_new_array(arena, MLIR_ValueHandle, canon_n_ops) : NULL;
             for (size_t a = 0; a < canon_n_ops; ++a)
-                cargs[a] = MLIR_GetBlockArg(cont, a);
+                cargs[a] = MLIR_GetBlockArg(ctx, cont, a);
             // Same op as the exit terminators (all of type canon_type).
             MLIR_OpHandle cterm = MLIR_CreateOp(
                 st->ctx, canon_type,
@@ -2535,12 +2535,12 @@ static BranchXformResult transform_to_structured_cf_branches(
             // Replace each exit terminator with cf.br(operands) -> cont.
             for (size_t i = 0; i < n_et; ++i) {
                 MLIR_OpHandle t = exit_terms[i].term;
-                size_t no = MLIR_GetOpNumOperands(t);
+                size_t no = MLIR_GetOpNumOperands(ctx, t);
                 MLIR_ValueHandle *ops = no
                     ? arena_new_array(arena, MLIR_ValueHandle, no) : NULL;
                 for (size_t a = 0; a < no; ++a)
-                    ops[a] = MLIR_GetOpOperand(t, a);
-                MLIR_LocationHandle tloc = MLIR_GetOpLocation(t);
+                    ops[a] = MLIR_GetOpOperand(ctx, t, a);
+                MLIR_LocationHandle tloc = MLIR_GetOpLocation(ctx, t);
                 MLIR_BlockHandle bb = exit_terms[i].block;
                 MLIR_EraseOp(st->ctx, t);
                 create_cf_br_in_block(st->ctx, arena, st->llvm_cfg, bb, cont,
@@ -2557,7 +2557,7 @@ static BranchXformResult transform_to_structured_cf_branches(
         // Fallback: recurse into each successor as a single-entry
         // single-exit subregion (unchanged from before).
         MLIR_BlockHandle *out = arena_new_array(arena, MLIR_BlockHandle, num_succ);
-        for (size_t i = 0; i < num_succ; ++i) out[i] = MLIR_GetOpSuccessor(term, i);
+        for (size_t i = 0; i < num_succ; ++i) out[i] = MLIR_GetOpSuccessor(ctx, term, i);
         res.new_sub_regions = out;
         res.n_new_sub_regions = num_succ;
         return res;
@@ -2567,16 +2567,16 @@ static BranchXformResult transform_to_structured_cf_branches(
     MLIR_BlockHandle continuation = MLIR_INVALID_HANDLE;
     bool single = true;
     for (size_t i = 0; i < n_ce; ++i) {
-        MLIR_BlockHandle s = MLIR_GetOpSuccessor(
-            MLIR_GetBlockTerminator(cont_edges[i].from_block), cont_edges[i].succ_idx);
+        MLIR_BlockHandle s = MLIR_GetOpSuccessor(ctx, 
+            MLIR_GetBlockTerminator(ctx, cont_edges[i].from_block), cont_edges[i].succ_idx);
         if (continuation == MLIR_INVALID_HANDLE) continuation = s;
         else if (continuation != s) { single = false; break; }
     }
 
     if (!single || !cont_post_dom_all) {
-        MLIR_LocationHandle loc = MLIR_GetOpLocation(
-            MLIR_GetBlockTerminator(cont_edges[0].from_block));
-        EdgeMultiplexer mux = create_single_entry_block(st, cont_edges, n_ce, loc);
+        MLIR_LocationHandle loc = MLIR_GetOpLocation(ctx, 
+            MLIR_GetBlockTerminator(ctx, cont_edges[0].from_block));
+        EdgeMultiplexer mux = create_single_entry_block(ctx, st, cont_edges, n_ce, loc);
         continuation = mux.mux_block;
     }
 
@@ -2611,7 +2611,7 @@ static BranchXformResult transform_to_structured_cf_branches(
     // `continuation`. These need their cf.br → scf.yield rewrite once the
     // scf.if op exists. We collect them here, *before* MoveBlockToRegionEnd
     // takes the blocks out of `continuation`'s region — afterwards
-    // MLIR_GetBlockNumPredecessors(continuation) can no longer see them
+    // MLIR_GetBlockNumPredecessors(ctx, continuation) can no longer see them
     // (predecessor lookup is region-scoped). PredRec is at file scope.
     // The upper bound on entries is the total number of terminator
     // successor slots (a cf.switch terminator can contribute multiple
@@ -2619,9 +2619,9 @@ static BranchXformResult transform_to_structured_cf_branches(
     size_t max_preds = 0;
     for (size_t i = 0; i < num_succ; ++i) {
         for (size_t k = 0; k < n_br[i]; ++k) {
-            MLIR_OpHandle bterm = MLIR_GetBlockTerminator(branch_regions[i][k]);
+            MLIR_OpHandle bterm = MLIR_GetBlockTerminator(ctx, branch_regions[i][k]);
             if (bterm == MLIR_INVALID_HANDLE) continue;
-            max_preds += MLIR_GetOpNumSuccessors(bterm);
+            max_preds += MLIR_GetOpNumSuccessors(ctx, bterm);
         }
     }
     PredRec *preds = max_preds
@@ -2630,11 +2630,11 @@ static BranchXformResult transform_to_structured_cf_branches(
     for (size_t i = 0; i < num_succ; ++i) {
         for (size_t k = 0; k < n_br[i]; ++k) {
             MLIR_BlockHandle b = branch_regions[i][k];
-            MLIR_OpHandle bterm = MLIR_GetBlockTerminator(b);
+            MLIR_OpHandle bterm = MLIR_GetBlockTerminator(ctx, b);
             if (bterm == MLIR_INVALID_HANDLE) continue;
-            size_t bns = MLIR_GetOpNumSuccessors(bterm);
+            size_t bns = MLIR_GetOpNumSuccessors(ctx, bterm);
             for (size_t s = 0; s < bns; ++s) {
-                if (MLIR_GetOpSuccessor(bterm, s) == continuation) {
+                if (MLIR_GetOpSuccessor(ctx, bterm, s) == continuation) {
                     preds[n_preds].op = bterm;
                     preds[n_preds].succ_idx = s;
                     n_preds++;
@@ -2647,11 +2647,11 @@ static BranchXformResult transform_to_structured_cf_branches(
         regions[i] = MLIR_CreateRegion(st->ctx);
         if (n_br[i] == 0) {
             // Dummy block carrying entry-edge operands.
-            size_t n_eop = MLIR_GetOpNumSuccessorOperands(term, i);
+            size_t n_eop = MLIR_GetOpNumSuccessorOperands(ctx, term, i);
             MLIR_ValueHandle *vals = n_eop
                 ? arena_new_array(arena, MLIR_ValueHandle, n_eop) : NULL;
             for (size_t k = 0; k < n_eop; ++k)
-                vals[k] = MLIR_GetOpSuccessorOperand(term, i, k);
+                vals[k] = MLIR_GetOpSuccessorOperand(ctx, term, i, k);
             MLIR_BlockHandle eb = MLIR_CreateBlock(st->ctx);
             MLIR_AppendRegionBlock(st->ctx, regions[i], eb);
             if (n_eb == cap_eb) {
@@ -2675,11 +2675,11 @@ static BranchXformResult transform_to_structured_cf_branches(
         size_t prev_blk_idx = 0; size_t prev_succ_idx = 0;
         for (size_t k = 0; k < n_br[i]; ++k) {
             MLIR_BlockHandle b = branch_regions[i][k];
-            MLIR_OpHandle bterm = MLIR_GetBlockTerminator(b);
+            MLIR_OpHandle bterm = MLIR_GetBlockTerminator(ctx, b);
             if (bterm == MLIR_INVALID_HANDLE) continue;
-            size_t bns = MLIR_GetOpNumSuccessors(bterm);
+            size_t bns = MLIR_GetOpNumSuccessors(ctx, bterm);
             for (size_t s = 0; s < bns; ++s) {
-                if (MLIR_GetOpSuccessor(bterm, s) != continuation) continue;
+                if (MLIR_GetOpSuccessor(ctx, bterm, s) != continuation) continue;
                 if (!have_prev) {
                     have_prev = true;
                     prev_blk_idx = k; prev_succ_idx = s;
@@ -2687,17 +2687,17 @@ static BranchXformResult transform_to_structured_cf_branches(
                 }
                 if (single_exit == MLIR_INVALID_HANDLE) {
                     single_exit = MLIR_CreateBlock(st->ctx);
-                    size_t n_cont_args = MLIR_GetBlockNumArgs(continuation);
+                    size_t n_cont_args = MLIR_GetBlockNumArgs(ctx, continuation);
                     MLIR_ValueHandle *seb_args = n_cont_args
                         ? arena_new_array(arena, MLIR_ValueHandle, n_cont_args) : NULL;
                     for (size_t a = 0; a < n_cont_args; ++a) {
-                        MLIR_TypeHandle ty = MLIR_GetValueType(MLIR_GetBlockArg(continuation, a));
+                        MLIR_TypeHandle ty = MLIR_GetValueType(ctx, MLIR_GetBlockArg(ctx, continuation, a));
                         seb_args[a] = MLIR_AddBlockArgument(st->ctx, single_exit, ty,
-                                                            MLIR_GetOpLocation(bterm));
+                                                            MLIR_GetOpLocation(ctx, bterm));
                     }
                     // Redirect the first matching edge to single_exit.
                     MLIR_BlockHandle prev_b = branch_regions[i][prev_blk_idx];
-                    edge_set_succ(st->ctx, MLIR_GetBlockTerminator(prev_b),
+                    edge_set_succ(st->ctx, MLIR_GetBlockTerminator(ctx, prev_b),
                                   prev_succ_idx, single_exit);
                     if (n_eb == cap_eb) {
                         size_t nc = cap_eb ? cap_eb * 2 : 4;
@@ -2724,13 +2724,13 @@ static BranchXformResult transform_to_structured_cf_branches(
 
         // The first block in regions[i] is the entry. Replace its args
         // with the entry-edge operands and erase them.
-        MLIR_BlockHandle entry_b = MLIR_GetRegionBlock(regions[i], 0);
-        size_t n_eargs = MLIR_GetBlockNumArgs(entry_b);
-        size_t n_eop   = MLIR_GetOpNumSuccessorOperands(term, i);
+        MLIR_BlockHandle entry_b = MLIR_GetRegionBlock(ctx, regions[i], 0);
+        size_t n_eargs = MLIR_GetBlockNumArgs(ctx, entry_b);
+        size_t n_eop   = MLIR_GetOpNumSuccessorOperands(ctx, term, i);
         size_t n_share = n_eargs < n_eop ? n_eargs : n_eop;
         for (size_t a = 0; a < n_share; ++a) {
-            MLIR_ValueHandle nv = MLIR_GetOpSuccessorOperand(term, i, a);
-            MLIR_ReplaceAllUsesOfValue(st->ctx, MLIR_GetBlockArg(entry_b, a), nv);
+            MLIR_ValueHandle nv = MLIR_GetOpSuccessorOperand(ctx, term, i, a);
+            MLIR_ReplaceAllUsesOfValue(st->ctx, MLIR_GetBlockArg(ctx, entry_b, a), nv);
         }
         if (n_eargs) MLIR_EraseBlockArguments(st->ctx, entry_b, 0, n_eargs);
 
@@ -2743,13 +2743,13 @@ static BranchXformResult transform_to_structured_cf_branches(
     //                                     CFGToSCF reorders so the default
     //                                     (= our regions[0]) goes LAST and
     //                                     case_values map onto cases attr).
-    size_t n_cont_args = MLIR_GetBlockNumArgs(continuation);
+    size_t n_cont_args = MLIR_GetBlockNumArgs(ctx, continuation);
     MLIR_TypeHandle *result_types = n_cont_args
         ? arena_new_array(arena, MLIR_TypeHandle, n_cont_args) : NULL;
     for (size_t i = 0; i < n_cont_args; ++i)
-        result_types[i] = MLIR_GetValueType(MLIR_GetBlockArg(continuation, i));
+        result_types[i] = MLIR_GetValueType(ctx, MLIR_GetBlockArg(ctx, continuation, i));
 
-    MLIR_LocationHandle term_loc = MLIR_GetOpLocation(term);
+    MLIR_LocationHandle term_loc = MLIR_GetOpLocation(ctx, term);
 
     MLIR_ValueHandle *if_results = n_cont_args
         ? arena_new_array(arena, MLIR_ValueHandle, n_cont_args) : NULL;
@@ -2762,7 +2762,7 @@ static BranchXformResult transform_to_structured_cf_branches(
     MLIR_OpHandle if_op;
     if (is_cond_br) {
         // cf.cond_br operand 0 is the i1 condition; succs are [then, else].
-        MLIR_ValueHandle cond_v = MLIR_GetOpOperand(term, 0);
+        MLIR_ValueHandle cond_v = MLIR_GetOpOperand(ctx, term, 0);
         if_op = MLIR_CreateOp(
             st->ctx, OP_TYPE_SCF_IF,
             NULL, 0, result_types, n_cont_args, if_results, n_cont_args,
@@ -2778,14 +2778,14 @@ static BranchXformResult transform_to_structured_cf_branches(
         // a 32-bit value, so hand them the i32 flag directly: no cast op, and
         // no extend/wrap pair in the generated code for every switch.
         // regions = [case0..caseN-1, default], and a `cases` DenseI64Array attr.
-        MLIR_ValueHandle flag = MLIR_GetOpOperand(term, 0);
+        MLIR_ValueHandle flag = MLIR_GetOpOperand(ctx, term, 0);
 
         // Parse case_values attribute: "array<i32: V0, V1, ...>".
         size_t n_cases = num_succ - 1;
         int64_t *cases_i64 = n_cases
             ? arena_new_array(arena, int64_t, n_cases) : NULL;
         bool parsed = false;
-        MLIR_AttributeHandle cva = MLIR_GetOpAttributeByName(term, "case_values");
+        MLIR_AttributeHandle cva = MLIR_GetOpAttributeByName(ctx, term, "case_values");
         if (cva != MLIR_INVALID_HANDLE) {
             string s = MLIR_GetAttributeAsString(st->ctx, cva);
             size_t p = 0;
@@ -2852,7 +2852,7 @@ static BranchXformResult transform_to_structured_cf_branches(
     // them — the scf.yield is already emitted in single_exit.
     for (size_t i = 0; i < n_preds; ++i) {
         MLIR_OpHandle u = preds[i].op;
-        if (MLIR_GetOpSuccessor(u, preds[i].succ_idx) != continuation)
+        if (MLIR_GetOpSuccessor(ctx, u, preds[i].succ_idx) != continuation)
             continue;
         // The terminator must be unconditional (cf.br) at this point —
         // any conditional cf.cond_br with an edge to continuation got
@@ -2861,13 +2861,13 @@ static BranchXformResult transform_to_structured_cf_branches(
         // still be inside the branch region, which violates
         // single-entry single-exit; createSingleExitBranchRegion only
         // permits one direct cf.br to continuation per branch region).
-        size_t n_so = MLIR_GetOpNumSuccessorOperands(u, preds[i].succ_idx);
+        size_t n_so = MLIR_GetOpNumSuccessorOperands(ctx, u, preds[i].succ_idx);
         MLIR_ValueHandle *vals = n_so
             ? arena_new_array(arena, MLIR_ValueHandle, n_so) : NULL;
         for (size_t k = 0; k < n_so; ++k)
-            vals[k] = MLIR_GetOpSuccessorOperand(u, preds[i].succ_idx, k);
-        MLIR_BlockHandle ub = MLIR_GetOpParentBlock(u);
-        MLIR_LocationHandle uloc = MLIR_GetOpLocation(u);
+            vals[k] = MLIR_GetOpSuccessorOperand(ctx, u, preds[i].succ_idx, k);
+        MLIR_BlockHandle ub = MLIR_GetOpParentBlock(ctx, u);
+        MLIR_LocationHandle uloc = MLIR_GetOpLocation(ctx, u);
         MLIR_EraseOp(st->ctx, u);
         create_scf_yield(st->ctx, arena, ub, vals, n_so, uloc);
     }
@@ -2875,7 +2875,7 @@ static BranchXformResult transform_to_structured_cf_branches(
     // RAUW continuation's block args with scf.if's results, then splice
     // continuation into region_entry and erase it.
     for (size_t i = 0; i < n_cont_args; ++i) {
-        MLIR_ReplaceAllUsesOfValue(st->ctx, MLIR_GetBlockArg(continuation, i),
+        MLIR_ReplaceAllUsesOfValue(st->ctx, MLIR_GetBlockArg(ctx, continuation, i),
                                    if_results[i]);
     }
     MLIR_SpliceBlockOps(st->ctx, region_entry, continuation);
@@ -2913,7 +2913,7 @@ static MLIR_OpHandle create_scf_condition(MLIR_Context *ctx, Arena *arena,
 }
 
 // ============================================================================
-// transform_cfg_to_scf_region  (CFGToSCF.cpp:1300-1376).
+// transform_cfg_to_scf_region  (ctx, CFGToSCF.cpp:1300-1376).
 //
 // Drives the worklist that turns the cf graph of a single region into
 // ============================================================================
@@ -2923,32 +2923,32 @@ static MLIR_OpHandle create_scf_condition(MLIR_Context *ctx, Arena *arena,
 // cf.switch -> scf.index_switch). Newly-created sub-regions get pushed
 // onto the worklist so the algorithm reaches a fixed point.
 // ============================================================================
-static bool transform_cfg_to_scf_region(LiftState *st, Combiner *combiner,
+static bool transform_cfg_to_scf_region(MLIR_Context *ctx, LiftState *st, Combiner *combiner,
                                         MLIR_RegionHandle region) {
-    if (MLIR_GetRegionNumBlocks(region) == 0) return false;
-    if (MLIR_GetRegionNumBlocks(region) == 1) return false;
+    if (MLIR_GetRegionNumBlocks(ctx, region) == 0) return false;
+    if (MLIR_GetRegionNumBlocks(ctx, region) == 1) return false;
 
-    if (!check_preconditions(st->arena, region, st->llvm_cfg)) return false;
+    if (!check_preconditions(ctx, st->arena, region, st->llvm_cfg)) return false;
     create_single_exit_blocks_for_return_like_into(st->ctx, st->arena, region,
                                                    combiner);
 
     Arena *arena = st->arena;
     MLIR_BlockHandle *worklist = arena_new_array(arena, MLIR_BlockHandle, 32);
     size_t wl_n = 0, wl_cap = 32;
-    worklist[wl_n++] = MLIR_GetRegionBlock(region, 0);
+    worklist[wl_n++] = MLIR_GetRegionBlock(ctx, region, 0);
 
     bool changed_any = false;
     size_t safety_iter = 0;
     size_t safety_limit = 4096;
     while (wl_n > 0 && safety_iter++ < safety_limit) {
         MLIR_BlockHandle cur = worklist[--wl_n];
-        MLIR_RegionHandle cur_region = MLIR_GetBlockParentRegion(cur);
-        if (MLIR_GetRegionNumBlocks(cur_region) <= 1) continue;
+        MLIR_RegionHandle cur_region = MLIR_GetBlockParentRegion(ctx, cur);
+        if (MLIR_GetRegionNumBlocks(ctx, cur_region) <= 1) continue;
 
         // M7: cycles -> scf.while.
         size_t n_new7 = 0;
         MLIR_BlockHandle *new7 = NULL;
-        new7 = transform_cycles_to_scf_loops(st, combiner, cur, &n_new7);
+        new7 = transform_cycles_to_scf_loops(ctx, st, combiner, cur, &n_new7);
         for (size_t i = 0; i < n_new7; ++i) {
             if (wl_n == wl_cap) {
                 size_t nc = wl_cap * 2;
@@ -2961,8 +2961,8 @@ static bool transform_cfg_to_scf_region(LiftState *st, Combiner *combiner,
         if (n_new7) changed_any = true;
 
         // M8: cond_br -> scf.if; cf.switch -> scf.index_switch.
-        DomInfo dom = dom_compute(arena, cur_region, /*is_post=*/false);
-        BranchXformResult r = transform_to_structured_cf_branches(st, cur, &dom);
+        DomInfo dom = dom_compute(ctx, arena, cur_region, /*is_post=*/false);
+        BranchXformResult r = transform_to_structured_cf_branches(ctx, st, cur, &dom);
         if (!r.ok) continue;
         if (r.made_progress) changed_any = true;
         for (size_t i = 0; i < r.n_new_sub_regions; ++i) {
@@ -2983,10 +2983,10 @@ static bool transform_cfg_to_scf_region(LiftState *st, Combiner *combiner,
         // cause here so the user can attribute it correctly. We use
         // the corec io primitives rather than libc <stdio.h> because
         // the native parser binary is built with `-nostdlib -nostdinc`.
-        string fn_op_name = MLIR_GetOpTypeName(st->ctx, MLIR_GetOpType(st->fn_op));
+        string fn_op_name = MLIR_GetOpTypeName(st->ctx, MLIR_GetOpType(ctx, st->fn_op));
         string fn_sym_name = str_lit("?");
         MLIR_AttributeHandle sa =
-            MLIR_GetOpAttributeByName(st->fn_op, "sym_name");
+            MLIR_GetOpAttributeByName(ctx, st->fn_op, "sym_name");
         if (sa != MLIR_INVALID_HANDLE &&
             MLIR_GetAttributeKind(sa) == MLIR_ATTR_KIND_STRING) {
             string s = MLIR_GetAttributeString(sa);
@@ -3010,22 +3010,22 @@ static bool transform_cfg_to_scf_region(LiftState *st, Combiner *combiner,
 // Walk every region of every op in `region` recursively (post-order),
 // calling `transform_cfg_to_scf_region` on each. Matches upstream's
 // `funcOp->walk<PostOrder>` over all op-regions inside the function.
-static void walk_and_transform_regions(LiftState *st, Combiner *combiner,
+static void walk_and_transform_regions(MLIR_Context *ctx, LiftState *st, Combiner *combiner,
                                        MLIR_RegionHandle region) {
-    size_t nb = MLIR_GetRegionNumBlocks(region);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
     for (size_t bi = 0; bi < nb; ++bi) {
-        MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
-        size_t no = MLIR_GetBlockNumOps(b);
+        MLIR_BlockHandle b = MLIR_GetRegionBlock(ctx, region, bi);
+        size_t no = MLIR_GetBlockNumOps(ctx, b);
         for (size_t oi = 0; oi < no; ++oi) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(b, oi);
-            size_t nr = MLIR_GetOpNumRegions(op);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, b, oi);
+            size_t nr = MLIR_GetOpNumRegions(ctx, op);
             for (size_t ri = 0; ri < nr; ++ri) {
-                MLIR_RegionHandle sub = MLIR_GetOpRegion(op, ri);
-                walk_and_transform_regions(st, combiner, sub);
+                MLIR_RegionHandle sub = MLIR_GetOpRegion(ctx, op, ri);
+                walk_and_transform_regions(ctx, st, combiner, sub);
             }
         }
     }
-    transform_cfg_to_scf_region(st, combiner, region);
+    transform_cfg_to_scf_region(ctx, st, combiner, region);
 }
 
 // Erase non-entry blocks with no predecessors, iterating to fixed point
@@ -3036,19 +3036,19 @@ static void erase_unreachable_blocks(MLIR_Context *ctx, Arena *arena,
     bool changed = true;
     while (changed) {
         changed = false;
-        size_t nb = MLIR_GetRegionNumBlocks(region);
+        size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
         if (nb < 2) break;
         // One pass finds every block that currently has no predecessor;
         // erase them all, then look again (their out-edges are gone, which
         // may have orphaned further blocks).
         Scratch scratch = scratch_begin_avoid_conflict(arena);
         BlockMap has_pred;
-        collect_blocks_with_preds(scratch.arena, region, &has_pred);
+        collect_blocks_with_preds(ctx, scratch.arena, region, &has_pred);
         MLIR_BlockHandle *dead =
             arena_new_array(scratch.arena, MLIR_BlockHandle, nb);
         size_t n_dead = 0;
         for (size_t bi = 1; bi < nb; ++bi) {   // block 0 is the entry
-            MLIR_BlockHandle b = MLIR_GetRegionBlock(region, bi);
+            MLIR_BlockHandle b = MLIR_GetRegionBlock(ctx, region, bi);
             if (block_map_get(&has_pred, b) == SIZE_MAX) dead[n_dead++] = b;
         }
         for (size_t i = 0; i < n_dead; ++i) MLIR_EraseBlock(ctx, dead[i]);
@@ -3061,33 +3061,33 @@ bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module,
                             const MLIR_LiftCfToScfOptions *options) {
     if (module == MLIR_INVALID_HANDLE) return false;
     bool llvm_cfg = options && options->llvm_cfg;
-    if (MLIR_GetOpNumRegions(module) == 0) return true;
+    if (MLIR_GetOpNumRegions(ctx, module) == 0) return true;
 
     Arena *scratch = arena_create(4096);
-    MLIR_RegionHandle mod_body = MLIR_GetOpRegion(module, 0);
-    size_t nb = MLIR_GetRegionNumBlocks(mod_body);
+    MLIR_RegionHandle mod_body = MLIR_GetOpRegion(ctx, module, 0);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, mod_body);
     for (size_t bi = 0; bi < nb; ++bi) {
-        MLIR_BlockHandle b = MLIR_GetRegionBlock(mod_body, bi);
-        size_t no = MLIR_GetBlockNumOps(b);
+        MLIR_BlockHandle b = MLIR_GetRegionBlock(ctx, mod_body, bi);
+        size_t no = MLIR_GetBlockNumOps(ctx, b);
         for (size_t oi = 0; oi < no; ++oi) {
-            MLIR_OpHandle o = MLIR_GetBlockOp(b, oi);
-            if (!op_is_func_like(o)) continue;
-            if (MLIR_GetOpNumRegions(o) == 0) continue;
-            MLIR_RegionHandle body = MLIR_GetOpRegion(o, 0);
-            if (MLIR_GetRegionNumBlocks(body) == 0) continue;
+            MLIR_OpHandle o = MLIR_GetBlockOp(ctx, b, oi);
+            if (!op_is_func_like(ctx, o)) continue;
+            if (MLIR_GetOpNumRegions(ctx, o) == 0) continue;
+            MLIR_RegionHandle body = MLIR_GetOpRegion(ctx, o, 0);
+            if (MLIR_GetRegionNumBlocks(ctx, body) == 0) continue;
             erase_unreachable_blocks(ctx, scratch, body);
-            if (!check_preconditions(scratch, body, llvm_cfg)) {
+            if (!check_preconditions(ctx, scratch, body, llvm_cfg)) {
                 arena_destroy(scratch);
                 return false;
             }
-            if (!region_has_cf_branch(body, llvm_cfg)) continue;
+            if (!region_has_cf_branch(ctx, body, llvm_cfg)) continue;
             LiftState st = {0};
-            MLIR_BlockHandle entry = MLIR_GetRegionBlock(body, 0);
+            MLIR_BlockHandle entry = MLIR_GetRegionBlock(ctx, body, 0);
             lift_state_init(&st, ctx, scratch, o, entry);
             st.llvm_cfg = llvm_cfg;
             Combiner combiner = {0};
             combiner.llvm_cfg = llvm_cfg;
-            walk_and_transform_regions(&st, &combiner, body);
+            walk_and_transform_regions(ctx, &st, &combiner, body);
         }
     }
     arena_destroy(scratch);
@@ -3106,8 +3106,8 @@ static void lift_state_init(LiftState *st, MLIR_Context *ctx, Arena *arena,
     st->entry_block = entry_block;
     st->i32_ty = MLIR_CreateTypeInteger(ctx, 32, true);
     st->unk_loc = MLIR_INVALID_HANDLE;
-    if (MLIR_GetBlockNumOps(entry_block) > 0) {
-        st->unk_loc = MLIR_GetOpLocation(MLIR_GetBlockOp(entry_block, 0));
+    if (MLIR_GetBlockNumOps(ctx, entry_block) > 0) {
+        st->unk_loc = MLIR_GetOpLocation(ctx, MLIR_GetBlockOp(ctx, entry_block, 0));
     }
 }
 

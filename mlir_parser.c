@@ -660,7 +660,7 @@ MLIR_OpHandle parse_module(Parser *parser) {
     }
 
     MLIR_OpHandle op = parse_operation(parser);
-    if (MLIR_GetOpType(op) != OP_TYPE_MODULE) {
+    if (MLIR_GetOpType(parser->ctx, op) != OP_TYPE_MODULE) {
         parser_error(parser, str_lit("The top level operation should be a module"), 0, 0);
     }
 
@@ -872,7 +872,7 @@ MLIR_ValueHandle *finalize_results(const OperationParserParams *params,
     size_t n_results = 0;
 
     if (result_types == MLIR_INVALID_HANDLE && op) {
-        n_result_types = MLIR_GetOpNumResultTypes(op);
+        n_result_types = MLIR_GetOpNumResultTypes(params->ctx, op);
     }
 
     if (n_result_types > 0) {
@@ -881,14 +881,14 @@ MLIR_ValueHandle *finalize_results(const OperationParserParams *params,
         if (!types_array && op) {
             types_array = arena_new_array(params->arena, MLIR_TypeHandle, n_result_types);
             for (size_t i = 0; i < n_result_types; i++) {
-                types_array[i] = MLIR_GetOpResultType(op, i);
+                types_array[i] = MLIR_GetOpResultType(params->ctx, op, i);
             }
         }
         for (size_t i = 0; i < n_result_types; i++) {
             MLIR_TypeHandle ty = types_array[i];
             string reg_name = (string){MLIR_INVALID_HANDLE, 0};
             if (params->lhs_results && i < params->n_lhs_results) {
-                reg_name = MLIR_GetValueRegisterName(params->lhs_results[i]);
+                reg_name = MLIR_GetValueRegisterName(params->ctx, params->lhs_results[i]);
             }
             MLIR_ValueHandle res = MLIR_CreateValueOpResult(params->ctx, op, (uint32_t)i, ty, reg_name, MLIR_INVALID_HANDLE);
             results[i] = res;
@@ -950,11 +950,11 @@ void append_attr(Parser *parser, MLIR_AttributeHandle **attrs, size_t *n, size_t
 }
 
 void attr_list_init_from_op(Parser *parser, MLIR_OpHandle op, MLIR_AttributeHandle **attrs, size_t *n, size_t *cap) {
-    size_t count = MLIR_GetOpNumAttributes(op);
+    size_t count = MLIR_GetOpNumAttributes(parser->ctx, op);
     if (count > 0) {
         *cap = count + 4;
         *attrs = arena_new_array(parser->arena, MLIR_AttributeHandle, *cap);
-        for (size_t i = 0; i < count; i++) (*attrs)[i] = MLIR_GetOpAttribute(op, i);
+        for (size_t i = 0; i < count; i++) (*attrs)[i] = MLIR_GetOpAttribute(parser->ctx, op, i);
         *n = count;
     }
 }
@@ -1557,7 +1557,7 @@ MLIR_OpHandle parse_operation(Parser *parser) {
         // Parser returned results - for named results, ensure type/def are set and add to symbol table
         for (size_t i = 0; i < parsed.n_results; i++) {
             if (parsed.results[i] != MLIR_INVALID_HANDLE) {
-                string reg_name = MLIR_GetValueRegisterName(parsed.results[i]);
+                string reg_name = MLIR_GetValueRegisterName(parser->ctx, parsed.results[i]);
                 if (reg_name.size > 0) {
                     // Only process results with names
                     // (Type is auto-synced by MLIR_CreateOp)
@@ -1569,9 +1569,9 @@ MLIR_OpHandle parse_operation(Parser *parser) {
         // Operation produces results but no SSA name was provided - this is invalid MLIR
         parser_error(parser, str_lit("Operation produces results but no SSA name provided on left-hand side"), parser->first, parser->last);
     } else if (result_value) {
-        if (MLIR_GetOpNumResultTypes(op) > 0) {
+        if (MLIR_GetOpNumResultTypes(parser->ctx, op) > 0) {
             // Type is auto-synced by MLIR_CreateOp
-            symbol_table_add_value(parser->arena, &parser->symbol_table, MLIR_GetValueRegisterName(result_value), result_value);
+            symbol_table_add_value(parser->arena, &parser->symbol_table, MLIR_GetValueRegisterName(parser->ctx, result_value), result_value);
         } else {
             parser_error(parser, str_lit("Result Value parsed on LHS but no Type present on RHS"), parser->first, parser->last);
         }
@@ -1581,7 +1581,7 @@ MLIR_OpHandle parse_operation(Parser *parser) {
     // This conservative approach avoids the comment duplication issue
     bool should_capture = false;
 
-    if (should_capture && MLIR_GetOpTrailingComment(op).size == 0) {
+    if (should_capture && MLIR_GetOpTrailingComment(parser->ctx, op).size == 0) {
         // Only capture comments if we can find "//" in the rest of the current line
         // after some whitespace (to ensure it belongs to this operation)
         string text = str_from_cstr_view((char*)parser->input);

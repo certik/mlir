@@ -361,7 +361,7 @@ static MLIR_BlockHandle new_cfg_block(E *e) {
     // passes (cf->scf lift, wasmssa lower, ...) reject it.
     MLIR_RegionHandle target = e->func_region;
     if (e->cur_block != MLIR_INVALID_HANDLE) {
-        MLIR_RegionHandle r = MLIR_GetBlockParentRegion(e->cur_block);
+        MLIR_RegionHandle r = MLIR_GetBlockParentRegion(e->ctx, e->cur_block);
         if (r != MLIR_INVALID_HANDLE) target = r;
     }
     MLIR_AppendRegionBlock(e->ctx, target, b);

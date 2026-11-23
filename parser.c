@@ -94,8 +94,8 @@ MLIR_OpHandle construct_test_module_full(MLIR_Context *ctx) {
     MLIR_ValueHandle add_result = MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 1, i32_type, str_lit("%1"), MLIR_INVALID_HANDLE);
 
     MLIR_ValueHandle *add_operands = arena_new_array(arena, MLIR_ValueHandle, 2);
-    add_operands[0] = MLIR_GetBlockArg(func_block, 0);
-    add_operands[1] = MLIR_GetBlockArg(func_block, 1);
+    add_operands[0] = MLIR_GetBlockArg(ctx, func_block, 0);
+    add_operands[1] = MLIR_GetBlockArg(ctx, func_block, 1);
 
     MLIR_TypeHandle *add_result_types = arena_new_array(arena, MLIR_TypeHandle, 1);
     add_result_types[0] = i32_type;

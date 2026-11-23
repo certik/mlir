@@ -85,10 +85,10 @@ static int write_bytes_to_file(string out, const char *path) {
 
 // True if `op` is an `llvm.func` carrying a non-empty body (a definition, not
 // a declaration).
-static bool driver_llvm_func_has_body(MLIR_OpHandle op) {
-    if (MLIR_GetOpType(op) != OP_TYPE_LLVM_FUNC) return false;
-    if (MLIR_GetOpNumRegions(op) < 1) return false;
-    return MLIR_GetRegionNumBlocks(MLIR_GetOpRegion(op, 0)) > 0;
+static bool driver_llvm_func_has_body(MLIR_Context *ctx, MLIR_OpHandle op) {
+    if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_FUNC) return false;
+    if (MLIR_GetOpNumRegions(ctx, op) < 1) return false;
+    return MLIR_GetRegionNumBlocks(ctx, MLIR_GetOpRegion(ctx, op, 0)) > 0;
 }
 
 // Compile corec's platform_<os>.c as LP64 and return its file-I/O + exit
@@ -176,13 +176,13 @@ static bool tinyc_compile_host_platform(MLIR_Context *ctx, const char *path,
         MLIR_SetContextDefUseTracking(ctx, saved_def_use);
         return false;
     }
-    MLIR_BlockHandle pbody = MLIR_GetRegionBlock(MLIR_GetOpRegion(pmod, 0), 0);
-    size_t pn = MLIR_GetBlockNumOps(pbody);
+    MLIR_BlockHandle pbody = MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, pmod, 0), 0);
+    size_t pn = MLIR_GetBlockNumOps(ctx, pbody);
     size_t np = 0;
     for (size_t i = 0; i < pn && np < max_picks; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(pbody, i);
-        if (!driver_llvm_func_has_body(op)) continue;
-        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, pbody, i);
+        if (!driver_llvm_func_has_body(ctx, op)) continue;
+        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
         if (sa == MLIR_INVALID_HANDLE) continue;
         string s = MLIR_GetAttributeString(sa);
         // The platform file also defines non-renamed platform_* that collide
@@ -227,14 +227,14 @@ static bool driver_elf_is_host_platform_support_symbol(string s) {
            (s.size == 18 && memcmp(s.str, "platform_heap_grow", 18) == 0);
 }
 
-static bool driver_elf_is_llvm_global_op(MLIR_OpHandle op) {
-    return MLIR_GetOpType(op) == OP_TYPE_LLVM_MLIR_GLOBAL;
+static bool driver_elf_is_llvm_global_op(MLIR_Context *ctx, MLIR_OpHandle op) {
+    return MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_MLIR_GLOBAL;
 }
 
-static bool driver_elf_llvm_op_is_internal(MLIR_OpHandle op) {
-    MLIR_AttributeHandle linka = MLIR_GetOpAttributeByName(op, "llvm.linkage");
+static bool driver_elf_llvm_op_is_internal(MLIR_Context *ctx, MLIR_OpHandle op) {
+    MLIR_AttributeHandle linka = MLIR_GetOpAttributeByName(ctx, op, "llvm.linkage");
     if (linka == MLIR_INVALID_HANDLE)
-        linka = MLIR_GetOpAttributeByName(op, "linkage");
+        linka = MLIR_GetOpAttributeByName(ctx, op, "linkage");
     if (linka != MLIR_INVALID_HANDLE) {
         string ls = MLIR_GetAttributeString(linka);
         const char *want = "#llvm.linkage<internal>";
@@ -242,7 +242,7 @@ static bool driver_elf_llvm_op_is_internal(MLIR_OpHandle op) {
         if (ls.size == wantn && memcmp(ls.str, want, wantn) == 0)
             return true;
     }
-    MLIR_AttributeHandle visa = MLIR_GetOpAttributeByName(op, "sym_visibility");
+    MLIR_AttributeHandle visa = MLIR_GetOpAttributeByName(ctx, op, "sym_visibility");
     if (visa != MLIR_INVALID_HANDLE) {
         string vs = MLIR_GetAttributeString(visa);
         if (vs.size == 7 && memcmp(vs.str, "private", 7) == 0)
@@ -253,12 +253,12 @@ static bool driver_elf_llvm_op_is_internal(MLIR_OpHandle op) {
 
 static void driver_elf_erase_module_func_by_name(MLIR_Context *ctx, MLIR_OpHandle mod,
                                                  string name) {
-    MLIR_BlockHandle mb = MLIR_GetRegionBlock(MLIR_GetOpRegion(mod, 0), 0);
-    size_t no = MLIR_GetBlockNumOps(mb);
+    MLIR_BlockHandle mb = MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, mod, 0), 0);
+    size_t no = MLIR_GetBlockNumOps(ctx, mb);
     for (size_t i = no; i > 0; i--) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i - 1);
-        if (!driver_llvm_func_has_body(op)) continue;
-        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i - 1);
+        if (!driver_llvm_func_has_body(ctx, op)) continue;
+        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
         if (sa == MLIR_INVALID_HANDLE) continue;
         string s = MLIR_GetAttributeString(sa);
         if (s.size == name.size && memcmp(s.str, name.str, name.size) == 0)
@@ -268,12 +268,12 @@ static void driver_elf_erase_module_func_by_name(MLIR_Context *ctx, MLIR_OpHandl
 
 static void driver_elf_erase_module_global_by_name(MLIR_Context *ctx, MLIR_OpHandle mod,
                                                    string name) {
-    MLIR_BlockHandle mb = MLIR_GetRegionBlock(MLIR_GetOpRegion(mod, 0), 0);
-    size_t no = MLIR_GetBlockNumOps(mb);
+    MLIR_BlockHandle mb = MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, mod, 0), 0);
+    size_t no = MLIR_GetBlockNumOps(ctx, mb);
     for (size_t i = no; i > 0; i--) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i - 1);
-        if (!driver_elf_is_llvm_global_op(op)) continue;
-        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i - 1);
+        if (!driver_elf_is_llvm_global_op(ctx, op)) continue;
+        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
         if (sa == MLIR_INVALID_HANDLE) continue;
         string s = MLIR_GetAttributeString(sa);
         if (s.size == name.size && memcmp(s.str, name.str, name.size) == 0)
@@ -285,14 +285,14 @@ static void driver_elf_splice_module_globals(MLIR_Context *ctx, MLIR_OpHandle ll
                                            MLIR_OpHandle src_mod) {
     if (src_mod == MLIR_INVALID_HANDLE) return;
     MLIR_BlockHandle sbody =
-        MLIR_GetRegionBlock(MLIR_GetOpRegion(src_mod, 0), 0);
+        MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, src_mod, 0), 0);
     MLIR_BlockHandle dbody =
-        MLIR_GetRegionBlock(MLIR_GetOpRegion(llvm_mod, 0), 0);
-    size_t no = MLIR_GetBlockNumOps(sbody);
+        MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, llvm_mod, 0), 0);
+    size_t no = MLIR_GetBlockNumOps(ctx, sbody);
     for (size_t i = no; i > 0; i--) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(sbody, i - 1);
-        if (!driver_elf_is_llvm_global_op(op)) continue;
-        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, sbody, i - 1);
+        if (!driver_elf_is_llvm_global_op(ctx, op)) continue;
+        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
         if (sa != MLIR_INVALID_HANDLE)
             driver_elf_erase_module_global_by_name(ctx, llvm_mod,
                                                    MLIR_GetAttributeString(sa));
@@ -300,17 +300,17 @@ static void driver_elf_splice_module_globals(MLIR_Context *ctx, MLIR_OpHandle ll
     }
 }
 
-static bool driver_elf_helper_func_should_splice(MLIR_OpHandle op,
+static bool driver_elf_helper_func_should_splice(MLIR_Context *ctx, MLIR_OpHandle op,
                                                  TinycElfHelperKind kind) {
-    if (!driver_llvm_func_has_body(op)) return false;
-    MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
+    if (!driver_llvm_func_has_body(ctx, op)) return false;
+    MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
     if (sa == MLIR_INVALID_HANDLE) return false;
     string s = MLIR_GetAttributeString(sa);
     if (kind == TINYC_ELF_HELPER_BUDDY || kind == TINYC_ELF_HELPER_WASI)
         return true;
     bool is_host = s.size >= 16 && memcmp(s.str, "__host_platform_", 16) == 0;
     if (is_host) return true;
-    if (driver_elf_llvm_op_is_internal(op)) return true;
+    if (driver_elf_llvm_op_is_internal(ctx, op)) return true;
     if (driver_elf_is_host_platform_support_symbol(s)) return true;
     return false;
 }
@@ -320,15 +320,15 @@ static void driver_elf_splice_module_funcs(MLIR_Context *ctx, MLIR_OpHandle llvm
                                            TinycElfHelperKind kind) {
     if (src_mod == MLIR_INVALID_HANDLE) return;
     MLIR_BlockHandle sbody =
-        MLIR_GetRegionBlock(MLIR_GetOpRegion(src_mod, 0), 0);
+        MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, src_mod, 0), 0);
     MLIR_BlockHandle dbody =
-        MLIR_GetRegionBlock(MLIR_GetOpRegion(llvm_mod, 0), 0);
-    size_t no = MLIR_GetBlockNumOps(sbody);
+        MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, llvm_mod, 0), 0);
+    size_t no = MLIR_GetBlockNumOps(ctx, sbody);
     for (size_t i = no; i > 0; i--) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(sbody, i - 1);
-        if (driver_elf_is_llvm_global_op(op)) continue;
-        if (!driver_elf_helper_func_should_splice(op, kind)) continue;
-        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(op, "sym_name");
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, sbody, i - 1);
+        if (driver_elf_is_llvm_global_op(ctx, op)) continue;
+        if (!driver_elf_helper_func_should_splice(ctx, op, kind)) continue;
+        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
         if (sa != MLIR_INVALID_HANDLE) {
             string sym = MLIR_GetAttributeString(sa);
             driver_elf_erase_module_func_by_name(ctx, llvm_mod, sym);
@@ -446,17 +446,17 @@ static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
     }
     *out_mod = pmod;
 
-    MLIR_BlockHandle pbody = MLIR_GetRegionBlock(MLIR_GetOpRegion(pmod, 0), 0);
-    size_t pn = MLIR_GetBlockNumOps(pbody);
+    MLIR_BlockHandle pbody = MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, pmod, 0), 0);
+    size_t pn = MLIR_GetBlockNumOps(ctx, pbody);
     size_t n_funcs = 0;
     bool has_globals = false;
     for (size_t i = 0; i < pn; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(pbody, i);
-        if (driver_elf_is_llvm_global_op(op)) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, pbody, i);
+        if (driver_elf_is_llvm_global_op(ctx, op)) {
             has_globals = true;
             continue;
         }
-        if (driver_elf_helper_func_should_splice(op, kind))
+        if (driver_elf_helper_func_should_splice(ctx, op, kind))
             n_funcs++;
     }
     MLIR_SetArenaAllocator(ctx, saved_arena);
@@ -1290,7 +1290,7 @@ int app_main(void) {
                 // pure re-parent that preserves their operands.
                 if (hp_n > 0 || ad_n > 0) {
                     MLIR_BlockHandle dbody =
-                        MLIR_GetRegionBlock(MLIR_GetOpRegion(llvm_mod, 0), 0);
+                        MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, llvm_mod, 0), 0);
                     for (size_t hi = 0; hi < hp_n; hi++)
                         MLIR_MoveOpToBlockEnd(ctx, hp_picks[hi], dbody);
                     for (size_t hi = 0; hi < ad_n; hi++)
@@ -1349,7 +1349,7 @@ int app_main(void) {
                 mlir_llvm_dce(ctx, llvm_mod);
                 if (hp_n2 > 0) {
                     MLIR_BlockHandle dbody =
-                        MLIR_GetRegionBlock(MLIR_GetOpRegion(llvm_mod, 0), 0);
+                        MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, llvm_mod, 0), 0);
                     for (size_t hi = 0; hi < hp_n2; hi++)
                         MLIR_MoveOpToBlockEnd(ctx, hp_picks2[hi], dbody);
                 }

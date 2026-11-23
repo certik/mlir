@@ -267,16 +267,16 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     (void)ctx;
     *out_data = NULL; *out_size = 0;
     if (!module) return false;
-    if (MLIR_GetOpNumRegions(module) < 1) return false;
-    MLIR_BlockHandle mb = MLIR_GetRegionBlock(MLIR_GetOpRegion(module, 0), 0);
-    size_t n_top = MLIR_GetBlockNumOps(mb);
+    if (MLIR_GetOpNumRegions(ctx, module) < 1) return false;
+    MLIR_BlockHandle mb = MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, module, 0), 0);
+    size_t n_top = MLIR_GetBlockNumOps(ctx, mb);
 
     // -----------------------------------------------------------------
     // Read module-level layout attributes set by mlir_llvm_to_aarch64.c.
     // -----------------------------------------------------------------
-    uint32_t n_globals    = (uint32_t)attr_i(module, "n_globals");
-    uint64_t global0_init = (uint64_t)attr_i(module, "global0_init");
-    uint64_t linmem_size  = (uint64_t)attr_i(module, "linmem_size");
+    uint32_t n_globals    = (uint32_t)attr_i(ctx, module, "n_globals");
+    uint64_t global0_init = (uint64_t)attr_i(ctx, module, "global0_init");
+    uint64_t linmem_size  = (uint64_t)attr_i(ctx, module, "linmem_size");
 
     // -----------------------------------------------------------------
     // Collect functions, find `_start`. `_start` must be placed first
@@ -292,10 +292,10 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     MachineDataInit  *inits = NULL;
     size_t    n_inits = 0;
     for (size_t i = 0; i < n_top; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        if (MLIR_GetOpType(op) != OP_TYPE_AARCH64_DATA_INIT) continue;
-        int64_t off = attr_i(op, "offset");
-        string  bs  = attr_s(op, "init_data");
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
+        if (MLIR_GetOpType(ctx, op) != OP_TYPE_AARCH64_DATA_INIT) continue;
+        int64_t off = attr_i(ctx, op, "offset");
+        string  bs  = attr_s(ctx, op, "init_data");
         inits = (MachineDataInit *)realloc(inits, (n_inits + 1) * sizeof(MachineDataInit));
         inits[n_inits].offset = (uint32_t)off;
         inits[n_inits].bytes  = bs;
@@ -303,8 +303,8 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
     }
 
     for (size_t i = 0; i < n_top; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        MLIR_OpType ot = MLIR_GetOpType(op);
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
+        MLIR_OpType ot = MLIR_GetOpType(ctx, op);
         if (ot == OP_TYPE_AARCH64_DATA_INIT) continue;
         if (ot != OP_TYPE_AARCH64_FUNC) {
             string nm = MLIR_GetOpTypeName(ctx, ot);

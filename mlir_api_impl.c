@@ -981,13 +981,13 @@ void MLIR_AppendRegionBlock(MLIR_Context *ctx, MLIR_RegionHandle rh, MLIR_BlockH
     if (b) b->parent_region = rh;
 }
 
-size_t MLIR_GetRegionNumBlocks(MLIR_RegionHandle rh) {
+size_t MLIR_GetRegionNumBlocks(MLIR_Context *ctx, MLIR_RegionHandle rh) {
     API_CHECK(rh != MLIR_INVALID_HANDLE, "MLIR_GetRegionNumBlocks", "region handle is NULL");
     IR_Region *r = resolve_region(rh);
     return r ? r->n_blocks : 0;
 }
 
-MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_RegionHandle rh, size_t idx) {
+MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_Context *ctx, MLIR_RegionHandle rh, size_t idx) {
     API_CHECK(rh != MLIR_INVALID_HANDLE, "MLIR_GetRegionBlock", "region handle is NULL");
     CHECK_INDEX(idx, ((IR_Region *)rh)->n_blocks, "MLIR_GetRegionBlock");
     IR_Region *r = resolve_region(rh);
@@ -995,13 +995,13 @@ MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_RegionHandle rh, size_t idx) {
     return r->blocks[idx];
 }
 
-size_t MLIR_GetBlockNumOps(MLIR_BlockHandle bh) {
+size_t MLIR_GetBlockNumOps(MLIR_Context *ctx, MLIR_BlockHandle bh) {
     API_CHECK(bh != MLIR_INVALID_HANDLE, "MLIR_GetBlockNumOps", "block handle is NULL");
     IR_Block *b = resolve_block(bh);
     return b ? b->n_operations : 0;
 }
 
-MLIR_OpHandle MLIR_GetBlockOp(MLIR_BlockHandle bh, size_t idx) {
+MLIR_OpHandle MLIR_GetBlockOp(MLIR_Context *ctx, MLIR_BlockHandle bh, size_t idx) {
     API_CHECK(bh != MLIR_INVALID_HANDLE, "MLIR_GetBlockOp", "block handle is NULL");
     CHECK_INDEX(idx, ((IR_Block *)bh)->n_operations, "MLIR_GetBlockOp");
     IR_Block *b = resolve_block(bh);
@@ -1009,19 +1009,19 @@ MLIR_OpHandle MLIR_GetBlockOp(MLIR_BlockHandle bh, size_t idx) {
     return b->operations[idx];
 }
 
-MLIR_OpType MLIR_GetOpType(MLIR_OpHandle oh) {
+MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle oh) {
     CHECK_OP(oh, "MLIR_GetOpType");
     IR_Op *op = resolve_op(oh);
     return op ? op->op_type : OP_TYPE_UNREGISTERED;
 }
 
-size_t MLIR_GetOpNumRegions(MLIR_OpHandle oh) {
+size_t MLIR_GetOpNumRegions(MLIR_Context *ctx, MLIR_OpHandle oh) {
     CHECK_OP(oh, "MLIR_GetOpNumRegions");
     IR_Op *op = resolve_op(oh);
     return op ? op->n_regions : 0;
 }
 
-MLIR_RegionHandle MLIR_GetOpRegion(MLIR_OpHandle oh, size_t idx) {
+MLIR_RegionHandle MLIR_GetOpRegion(MLIR_Context *ctx, MLIR_OpHandle oh, size_t idx) {
     CHECK_OP(oh, "MLIR_GetOpRegion");
     CHECK_INDEX(idx, ((IR_Op *)oh)->n_regions, "MLIR_GetOpRegion");
     IR_Op *op = resolve_op(oh);
@@ -1029,19 +1029,19 @@ MLIR_RegionHandle MLIR_GetOpRegion(MLIR_OpHandle oh, size_t idx) {
     return op->regions[idx];
 }
 
-string MLIR_GetOpTrailingComment(MLIR_OpHandle oh) {
+string MLIR_GetOpTrailingComment(MLIR_Context *ctx, MLIR_OpHandle oh) {
     CHECK_OP(oh, "MLIR_GetOpTrailingComment");
     IR_Op *op = resolve_op(oh);
     return (op && op->aux) ? op->aux->trailing_comment : str_lit("");
 }
 
-size_t MLIR_GetOpNumAttributes(MLIR_OpHandle oh) {
+size_t MLIR_GetOpNumAttributes(MLIR_Context *ctx, MLIR_OpHandle oh) {
     CHECK_OP(oh, "MLIR_GetOpNumAttributes");
     IR_Op *op = resolve_op(oh);
     return op ? op->n_attributes : 0;
 }
 
-MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle oh, size_t idx) {
+MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_Context *ctx, MLIR_OpHandle oh, size_t idx) {
     CHECK_OP(oh, "MLIR_GetOpAttribute");
     CHECK_INDEX(idx, ((IR_Op *)oh)->n_attributes, "MLIR_GetOpAttribute");
     IR_Op *op = resolve_op(oh);
@@ -1049,7 +1049,7 @@ MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_OpHandle oh, size_t idx) {
     return op->attributes[idx];
 }
 
-MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle oh, const char *name) {
+MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_Context *ctx, MLIR_OpHandle oh, const char *name) {
     CHECK_OP(oh, "MLIR_GetOpAttributeByName");
     API_CHECK(name != NULL, "MLIR_GetOpAttributeByName", "name is NULL");
     IR_Op *op = resolve_op(oh);
@@ -1063,13 +1063,13 @@ MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_OpHandle oh, const char *nam
     return MLIR_INVALID_HANDLE;
 }
 
-size_t MLIR_GetOpNumOperands(MLIR_OpHandle oh) {
+size_t MLIR_GetOpNumOperands(MLIR_Context *ctx, MLIR_OpHandle oh) {
     CHECK_OP(oh, "MLIR_GetOpNumOperands");
     IR_Op *op = resolve_op(oh);
     return op ? op->n_operands : 0;
 }
 
-MLIR_ValueHandle MLIR_GetOpOperand(MLIR_OpHandle oh, size_t idx) {
+MLIR_ValueHandle MLIR_GetOpOperand(MLIR_Context *ctx, MLIR_OpHandle oh, size_t idx) {
     CHECK_OP(oh, "MLIR_GetOpOperand");
     CHECK_INDEX(idx, ((IR_Op *)oh)->n_operands, "MLIR_GetOpOperand");
     IR_Op *op = resolve_op(oh);
@@ -1077,13 +1077,13 @@ MLIR_ValueHandle MLIR_GetOpOperand(MLIR_OpHandle oh, size_t idx) {
     return op->operands[idx];
 }
 
-size_t MLIR_GetOpNumResults(MLIR_OpHandle oh) {
+size_t MLIR_GetOpNumResults(MLIR_Context *ctx, MLIR_OpHandle oh) {
     CHECK_OP(oh, "MLIR_GetOpNumResults");
     IR_Op *op = resolve_op(oh);
     return op ? op->n_results : 0;
 }
 
-MLIR_ValueHandle MLIR_GetOpResult(MLIR_OpHandle oh, size_t idx) {
+MLIR_ValueHandle MLIR_GetOpResult(MLIR_Context *ctx, MLIR_OpHandle oh, size_t idx) {
     CHECK_OP(oh, "MLIR_GetOpResult");
     CHECK_INDEX(idx, ((IR_Op *)oh)->n_results, "MLIR_GetOpResult");
     IR_Op *op = resolve_op(oh);
@@ -1091,20 +1091,20 @@ MLIR_ValueHandle MLIR_GetOpResult(MLIR_OpHandle oh, size_t idx) {
     return op->results[idx];
 }
 
-MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle oh) {
+MLIR_LocationHandle MLIR_GetOpLocation(MLIR_Context *ctx, MLIR_OpHandle oh) {
     CHECK_OP(oh, "MLIR_GetOpLocation");
     IR_Op *op = resolve_op(oh);
     return op ? op->location : MLIR_INVALID_HANDLE;
 }
 
 
-size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle oh) {
+size_t MLIR_GetOpNumResultTypes(MLIR_Context *ctx, MLIR_OpHandle oh) {
     CHECK_OP(oh, "MLIR_GetOpNumResultTypes");
     IR_Op *op = resolve_op(oh);
     return op ? op->n_result_types : 0;
 }
 
-MLIR_TypeHandle MLIR_GetOpResultType(MLIR_OpHandle oh, size_t idx) {
+MLIR_TypeHandle MLIR_GetOpResultType(MLIR_Context *ctx, MLIR_OpHandle oh, size_t idx) {
     CHECK_OP(oh, "MLIR_GetOpResultType");
     CHECK_INDEX(idx, ((IR_Op *)oh)->n_result_types, "MLIR_GetOpResultType");
     IR_Op *op = resolve_op(oh);
@@ -1115,26 +1115,26 @@ MLIR_TypeHandle MLIR_GetOpResultType(MLIR_OpHandle oh, size_t idx) {
 // Native backend doesn't track successors/successor-operands separately;
 // the classic parser stores _target/_ntrue/_nfalse + interleaves operands.
 // Return 0/invalid so the printer falls back to its attribute-based path.
-size_t MLIR_GetOpNumSuccessors(MLIR_OpHandle oh) {
+size_t MLIR_GetOpNumSuccessors(MLIR_Context *ctx, MLIR_OpHandle oh) {
     CHECK_OP(oh, "MLIR_GetOpNumSuccessors");
     IR_Op *op = resolve_op(oh);
     return op ? op->n_successors : 0;
 }
-MLIR_BlockHandle MLIR_GetOpSuccessor(MLIR_OpHandle oh, size_t idx) {
+MLIR_BlockHandle MLIR_GetOpSuccessor(MLIR_Context *ctx, MLIR_OpHandle oh, size_t idx) {
     CHECK_OP(oh, "MLIR_GetOpSuccessor");
     CHECK_INDEX(idx, ((IR_Op *)oh)->n_successors, "MLIR_GetOpSuccessor");
     IR_Op *op = resolve_op(oh);
     if (!op || idx >= op->n_successors) return MLIR_INVALID_HANDLE;
     return op->successors[idx];
 }
-size_t MLIR_GetOpNumSuccessorOperands(MLIR_OpHandle oh, size_t s) {
+size_t MLIR_GetOpNumSuccessorOperands(MLIR_Context *ctx, MLIR_OpHandle oh, size_t s) {
     CHECK_OP(oh, "MLIR_GetOpNumSuccessorOperands");
     CHECK_INDEX(s, ((IR_Op *)oh)->n_successors, "MLIR_GetOpNumSuccessorOperands");
     IR_Op *op = resolve_op(oh);
     if (!op || s >= op->n_successors || !op->n_successor_operands) return 0;
     return (size_t)op->n_successor_operands[s];
 }
-MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_OpHandle oh, size_t s, size_t i) {
+MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_Context *ctx, MLIR_OpHandle oh, size_t s, size_t i) {
     CHECK_OP(oh, "MLIR_GetOpSuccessorOperand");
     CHECK_INDEX(s, ((IR_Op *)oh)->n_successors, "MLIR_GetOpSuccessorOperand");
     CHECK_INDEX(i, ((IR_Op *)oh)->n_successor_operands ? ((IR_Op *)oh)->n_successor_operands[s] : 0,
@@ -1145,13 +1145,13 @@ MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_OpHandle oh, size_t s, size_t i
     return op->successor_operands[s][i];
 }
 
-size_t MLIR_GetBlockNumArgs(MLIR_BlockHandle bh) {
+size_t MLIR_GetBlockNumArgs(MLIR_Context *ctx, MLIR_BlockHandle bh) {
     API_CHECK(bh != MLIR_INVALID_HANDLE, "MLIR_GetBlockNumArgs", "block handle is NULL");
     IR_Block *b = resolve_block(bh);
     return b ? b->n_arguments : 0;
 }
 
-MLIR_ValueHandle MLIR_GetBlockArg(MLIR_BlockHandle bh, size_t idx) {
+MLIR_ValueHandle MLIR_GetBlockArg(MLIR_Context *ctx, MLIR_BlockHandle bh, size_t idx) {
     API_CHECK(bh != MLIR_INVALID_HANDLE, "MLIR_GetBlockArg", "block handle is NULL");
     CHECK_INDEX(idx, ((IR_Block *)bh)->n_arguments, "MLIR_GetBlockArg");
     IR_Block *b = resolve_block(bh);
@@ -1159,7 +1159,7 @@ MLIR_ValueHandle MLIR_GetBlockArg(MLIR_BlockHandle bh, size_t idx) {
     return b->arguments[idx];
 }
 
-size_t MLIR_GetBlockIndex(MLIR_BlockHandle bh) {
+size_t MLIR_GetBlockIndex(MLIR_Context *ctx, MLIR_BlockHandle bh) {
     IR_Block *b = resolve_block(bh);
     if (!b) return (size_t)-1;
     IR_Region *r = resolve_region(b->parent_region);
@@ -1170,7 +1170,7 @@ size_t MLIR_GetBlockIndex(MLIR_BlockHandle bh) {
     return (size_t)-1;
 }
 
-MLIR_LocationHandle MLIR_GetValueLocation(MLIR_ValueHandle vh) {
+MLIR_LocationHandle MLIR_GetValueLocation(MLIR_Context *ctx, MLIR_ValueHandle vh) {
     IR_Value *v = resolve_value(vh);
     return v ? v->location : MLIR_INVALID_HANDLE;
 }
@@ -2027,30 +2027,30 @@ MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_AttributeHandle ah) {
 }
 
 // Value accessors
-MLIR_ValueKind MLIR_GetValueKind(MLIR_ValueHandle vh) {
+MLIR_ValueKind MLIR_GetValueKind(MLIR_Context *ctx, MLIR_ValueHandle vh) {
     API_CHECK(vh != MLIR_INVALID_HANDLE, "MLIR_GetValueKind", "value handle is NULL");
     IR_Value *v = resolve_value(vh);
     return v ? v->kind : MLIR_VALUE_BLOCK_ARG;
 }
 
-MLIR_TypeHandle MLIR_GetValueType(MLIR_ValueHandle vh) {
+MLIR_TypeHandle MLIR_GetValueType(MLIR_Context *ctx, MLIR_ValueHandle vh) {
     API_CHECK(vh != MLIR_INVALID_HANDLE, "MLIR_GetValueType", "value handle is NULL");
     IR_Value *v = resolve_value(vh);
     return v ? v->type : MLIR_INVALID_HANDLE;
 }
 
-string MLIR_GetValueRegisterName(MLIR_ValueHandle vh) {
+string MLIR_GetValueRegisterName(MLIR_Context *ctx, MLIR_ValueHandle vh) {
     IR_Value *v = resolve_value(vh);
     return (v && v->aux) ? v->aux->register_name : str_lit("");
 }
 
-uint32_t MLIR_GetValueResultIndex(MLIR_ValueHandle vh) {
+uint32_t MLIR_GetValueResultIndex(MLIR_Context *ctx, MLIR_ValueHandle vh) {
     API_CHECK(vh != MLIR_INVALID_HANDLE, "MLIR_GetValueResultIndex", "value handle is NULL");
     IR_Value *v = resolve_value(vh);
     return v ? v->result_index : 0;
 }
 
-MLIR_OpHandle MLIR_GetValueDefiningOp(MLIR_ValueHandle vh) {
+MLIR_OpHandle MLIR_GetValueDefiningOp(MLIR_Context *ctx, MLIR_ValueHandle vh) {
     API_CHECK(vh != MLIR_INVALID_HANDLE, "MLIR_GetValueDefiningOp", "value handle is NULL");
     IR_Value *v = resolve_value(vh);
     if (!v || v->kind != MLIR_VALUE_OP_RESULT) return MLIR_INVALID_HANDLE;
@@ -2366,13 +2366,13 @@ MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *ctx, MLIR_OpHandle op,
     return taken;
 }
 
-MLIR_BlockHandle MLIR_GetOpParentBlock(MLIR_OpHandle op) {
+MLIR_BlockHandle MLIR_GetOpParentBlock(MLIR_Context *ctx, MLIR_OpHandle op) {
     CHECK_NOT_ERASED(op, "MLIR_GetOpParentBlock");
     IR_Op *o = resolve_op(op);
     return o ? o->parent_block : MLIR_INVALID_HANDLE;
 }
 
-MLIR_RegionHandle MLIR_GetBlockParentRegion(MLIR_BlockHandle block) {
+MLIR_RegionHandle MLIR_GetBlockParentRegion(MLIR_Context *ctx, MLIR_BlockHandle block) {
     IR_Block *b = resolve_block(block);
     return b ? b->parent_region : MLIR_INVALID_HANDLE;
 }
@@ -2633,20 +2633,20 @@ void MLIR_InsertRegionBlockBefore(MLIR_Context *ctx, MLIR_RegionHandle region,
     b->parent_region = region;
 }
 
-MLIR_OpHandle MLIR_GetBlockTerminator(MLIR_BlockHandle block) {
+MLIR_OpHandle MLIR_GetBlockTerminator(MLIR_Context *ctx, MLIR_BlockHandle block) {
     IR_Block *b = resolve_block(block);
     if (!b || b->n_operations == 0) return MLIR_INVALID_HANDLE;
     return b->operations[b->n_operations - 1];
 }
 
-MLIR_OpHandle MLIR_GetBlockParentOp(MLIR_BlockHandle block) {
+MLIR_OpHandle MLIR_GetBlockParentOp(MLIR_Context *ctx, MLIR_BlockHandle block) {
     IR_Block *b = resolve_block(block);
     if (!b) return MLIR_INVALID_HANDLE;
     IR_Region *r = resolve_region(b->parent_region);
     return r ? r->parent_op : MLIR_INVALID_HANDLE;
 }
 
-bool MLIR_IsBlockEntry(MLIR_BlockHandle block) {
+bool MLIR_IsBlockEntry(MLIR_Context *ctx, MLIR_BlockHandle block) {
     IR_Block *b = resolve_block(block);
     if (!b) return false;
     IR_Region *r = resolve_region(b->parent_region);
@@ -2682,11 +2682,11 @@ static size_t native_collect_preds(MLIR_BlockHandle block,
     return n;
 }
 
-size_t MLIR_GetBlockNumPredecessors(MLIR_BlockHandle block) {
+size_t MLIR_GetBlockNumPredecessors(MLIR_Context *ctx, MLIR_BlockHandle block) {
     return native_collect_preds(block, NULL, NULL, 0);
 }
 
-MLIR_BlockHandle MLIR_GetBlockPredecessor(MLIR_BlockHandle block, size_t idx,
+MLIR_BlockHandle MLIR_GetBlockPredecessor(MLIR_Context *ctx, MLIR_BlockHandle block, size_t idx,
                                           size_t *out_succ_idx) {
     IR_Block *b = resolve_block(block);
     if (!b) return MLIR_INVALID_HANDLE;
@@ -2763,7 +2763,7 @@ void MLIR_EraseBlockArguments(MLIR_Context *ctx, MLIR_BlockHandle block,
     }
 }
 
-MLIR_BlockHandle MLIR_GetValueParentBlock(MLIR_ValueHandle value) {
+MLIR_BlockHandle MLIR_GetValueParentBlock(MLIR_Context *ctx, MLIR_ValueHandle value) {
     IR_Value *v = resolve_value(value);
     if (!v) return MLIR_INVALID_HANDLE;
     if (v->kind == MLIR_VALUE_BLOCK_ARG)

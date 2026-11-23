@@ -38,13 +38,13 @@ size_t MLIR_GetLocationMapSize(const MLIR_LocationMap *location_map);
 size_t MLIR_CollectLocationMap(const MLIR_LocationMap *location_map, string *out_keys, MLIR_LocationHandle *out_locs, size_t max);
 
 // SSA name the value was created with (e.g. "%0"), or an empty string.
-string MLIR_GetValueRegisterName(MLIR_ValueHandle value);
+string MLIR_GetValueRegisterName(MLIR_Context *ctx, MLIR_ValueHandle value);
 // Source text a location was parsed from, or an empty string (always
 // empty on the upstream backend).
 string MLIR_GetLocationOriginalText(MLIR_LocationHandle loc);
 // Returns the 0-indexed position of `block` within its parent region.
 // Returns SIZE_MAX if the block has no parent or the backend doesn't track it.
-size_t MLIR_GetBlockIndex(MLIR_BlockHandle block);
+size_t MLIR_GetBlockIndex(MLIR_Context *ctx, MLIR_BlockHandle block);
 
 // -----------------------------------------------------------------------------
 // Parser-only ops

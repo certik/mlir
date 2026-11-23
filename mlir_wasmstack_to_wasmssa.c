@@ -104,16 +104,16 @@ static MLIR_AttributeHandle attr_s(MLIR_Context *ctx, const char *name,
     string sv = { (char *)v, vlen };
     return MLIR_CreateAttributeString(ctx, str_from_cstr_view((char *)name), sv);
 }
-static int64_t at_i(MLIR_OpHandle op, const char *name) {
-    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(op, name);
+static int64_t at_i(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
     return a ? MLIR_GetAttributeInteger(a) : 0;
 }
-static bool at_b(MLIR_OpHandle op, const char *name) {
-    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(op, name);
+static bool at_b(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
     return a ? MLIR_GetAttributeBool(a) : false;
 }
-static string at_s(MLIR_OpHandle op, const char *name) {
-    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(op, name);
+static string at_s(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
     return a ? MLIR_GetAttributeString(a) : (string){0};
 }
 
@@ -246,19 +246,19 @@ static MLIR_OpHandle build_op_region(MLIR_Context *ctx, MLIR_OpType t,
 // Sibling-scope lookup (callee signatures). We do a linear scan because
 // modules are small and this only runs at lift time.
 // =============================================================================
-static bool lookup_callee_sig(MLIR_BlockHandle siblings, string name,
+static bool lookup_callee_sig(MLIR_Context *ctx, MLIR_BlockHandle siblings, string name,
                               string *out_pt, string *out_rt) {
-    size_t n = MLIR_GetBlockNumOps(siblings);
+    size_t n = MLIR_GetBlockNumOps(ctx, siblings);
     for (size_t k = 0; k < n; k++) {
-        MLIR_OpHandle cand = MLIR_GetBlockOp(siblings, k);
-        MLIR_OpType t = MLIR_GetOpType(cand);
+        MLIR_OpHandle cand = MLIR_GetBlockOp(ctx, siblings, k);
+        MLIR_OpType t = MLIR_GetOpType(ctx, cand);
         if (t != OP_TYPE_WASMSTACK_FUNC && t != OP_TYPE_WASMSTACK_IMPORT_FUNC) {
             continue;
         }
-        string nm_s = at_s(cand, "sym_name");
+        string nm_s = at_s(ctx, cand, "sym_name");
         if (nm_s.size == name.size && memcmp(nm_s.str, name.str, name.size) == 0) {
-            *out_pt = at_s(cand, "param_types");
-            *out_rt = at_s(cand, "result_types");
+            *out_pt = at_s(ctx, cand, "param_types");
+            *out_rt = at_s(ctx, cand, "result_types");
             return true;
         }
     }
@@ -546,12 +546,12 @@ static size_t frame_br_arity(Frame *f) {
 // the operand stack and rebuilding structured CF.
 // =============================================================================
 static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
-    size_t n_ops = MLIR_GetBlockNumOps(src_blk);
+    size_t n_ops = MLIR_GetBlockNumOps(F->ctx, src_blk);
 
     for (size_t i = 0; i < n_ops; i++) {
-        MLIR_OpHandle bo = MLIR_GetBlockOp(src_blk, i);
-        MLIR_OpType t = MLIR_GetOpType(bo);
-        uint8_t valtype = (uint8_t)at_i(bo, "valtype");
+        MLIR_OpHandle bo = MLIR_GetBlockOp(F->ctx, src_blk, i);
+        MLIR_OpType t = MLIR_GetOpType(F->ctx, bo);
+        uint8_t valtype = (uint8_t)at_i(F->ctx, bo, "valtype");
         g_current_ctx = F->ctx;
         g_current_op_type = t;
 
@@ -612,11 +612,11 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
                         top.has_else ? top.else_block : MLIR_INVALID_HANDLE };
                     for (int b = 0; b < 2; b++) {
                         if (!bodies[b]) continue;
-                        size_t nn = MLIR_GetBlockNumOps(bodies[b]);
+                        size_t nn = MLIR_GetBlockNumOps(F->ctx, bodies[b]);
                         bool has_term = false;
                         if (nn > 0) {
-                            MLIR_OpType lt = MLIR_GetOpType(
-                                MLIR_GetBlockOp(bodies[b], nn - 1));
+                            MLIR_OpType lt = MLIR_GetOpType(F->ctx, 
+                                MLIR_GetBlockOp(F->ctx, bodies[b], nn - 1));
                             has_term = (lt == OP_TYPE_WASMSSA_RETURN ||
                                         lt == OP_TYPE_WASMSSA_UNREACHABLE ||
                                         lt == OP_TYPE_WASMSSA_BR ||
@@ -629,11 +629,11 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
                         }
                     }
                 } else {
-                    size_t nn = MLIR_GetBlockNumOps(top.body_block);
+                    size_t nn = MLIR_GetBlockNumOps(F->ctx, top.body_block);
                     bool has_term = false;
                     if (nn > 0) {
-                        MLIR_OpType lt = MLIR_GetOpType(
-                            MLIR_GetBlockOp(top.body_block, nn - 1));
+                        MLIR_OpType lt = MLIR_GetOpType(F->ctx, 
+                            MLIR_GetBlockOp(F->ctx, top.body_block, nn - 1));
                         has_term = (lt == OP_TYPE_WASMSSA_RETURN ||
                                     lt == OP_TYPE_WASMSSA_UNREACHABLE ||
                                     lt == OP_TYPE_WASMSSA_BR ||
@@ -666,7 +666,7 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
 
         switch (t) {
         case OP_TYPE_WASMSTACK_LOCAL_GET: {
-            uint32_t li = (uint32_t)at_i(bo, "local_idx");
+            uint32_t li = (uint32_t)at_i(F->ctx, bo, "local_idx");
             if (li >= F->nl_total) {
                 fprintf(stderr, "ws->ssa: local.get %u out of range (%u)\n",
                     li, F->nl_total);
@@ -676,7 +676,7 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         case OP_TYPE_WASMSTACK_LOCAL_SET: {
-            uint32_t li = (uint32_t)at_i(bo, "local_idx");
+            uint32_t li = (uint32_t)at_i(F->ctx, bo, "local_idx");
             MLIR_ValueHandle v = st_pop(&F->stack);
             if (li >= F->nl_total) {
                 fprintf(stderr, "ws->ssa: local.set %u out of range\n", li);
@@ -686,7 +686,7 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         case OP_TYPE_WASMSTACK_LOCAL_TEE: {
-            uint32_t li = (uint32_t)at_i(bo, "local_idx");
+            uint32_t li = (uint32_t)at_i(F->ctx, bo, "local_idx");
             MLIR_ValueHandle v = st_peek(&F->stack);
             if (li >= F->nl_total) {
                 fprintf(stderr, "ws->ssa: local.tee %u out of range\n", li);
@@ -696,7 +696,7 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         case OP_TYPE_WASMSTACK_GLOBAL_GET: {
-            int64_t gi = at_i(bo, "global_idx");
+            int64_t gi = at_i(F->ctx, bo, "global_idx");
             MLIR_AttributeHandle as[2];
             as[0] = attr_i32(F->ctx, "valtype", valtype);
             as[1] = attr_i32(F->ctx, "global_idx", gi);
@@ -708,7 +708,7 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         case OP_TYPE_WASMSTACK_GLOBAL_SET: {
-            int64_t gi = at_i(bo, "global_idx");
+            int64_t gi = at_i(F->ctx, bo, "global_idx");
             MLIR_ValueHandle v = st_pop(&F->stack);
             MLIR_AttributeHandle as[2];
             as[0] = attr_i32(F->ctx, "valtype", valtype);
@@ -719,7 +719,7 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         case OP_TYPE_WASMSTACK_CONST: {
-            int64_t v = at_i(bo, "value");
+            int64_t v = at_i(F->ctx, bo, "value");
             MLIR_AttributeHandle as[2];
             as[0] = attr_i32(F->ctx, "valtype", valtype);
             as[1] = attr_i64(F->ctx, "value", v);
@@ -745,7 +745,7 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         case OP_TYPE_WASMSTACK_BINOP: {
-            int64_t opc = at_i(bo, "wasm_opcode");
+            int64_t opc = at_i(F->ctx, bo, "wasm_opcode");
             MLIR_ValueHandle a[2];
             pop_n(F, 2, a);
             MLIR_AttributeHandle as[2];
@@ -764,7 +764,7 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         case OP_TYPE_WASMSTACK_UNOP: {
-            int64_t opc = at_i(bo, "wasm_opcode");
+            int64_t opc = at_i(F->ctx, bo, "wasm_opcode");
             MLIR_ValueHandle a[1];
             pop_n(F, 1, a);
             MLIR_AttributeHandle as[2];
@@ -836,7 +836,7 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             MLIR_ValueHandle ops[3] = { a, b, cond };
             // Result type matches a / b. We use the i32 default if we
             // can't infer.
-            MLIR_TypeHandle ty = MLIR_GetValueType(a);
+            MLIR_TypeHandle ty = MLIR_GetValueType(F->ctx, a);
             MLIR_AttributeHandle as[1];
             as[0] = attr_i32(F->ctx, "valtype", 0);
             MLIR_ValueHandle rv;
@@ -850,9 +850,9 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         case OP_TYPE_WASMSTACK_LOAD: {
-            int64_t moff = at_i(bo, "memory_offset");
-            int64_t malign = at_i(bo, "memory_align_log2");
-            int64_t msize = at_i(bo, "mem_size_bytes");
+            int64_t moff = at_i(F->ctx, bo, "memory_offset");
+            int64_t malign = at_i(F->ctx, bo, "memory_align_log2");
+            int64_t msize = at_i(F->ctx, bo, "mem_size_bytes");
             MLIR_ValueHandle a[1];
             pop_n(F, 1, a);
             MLIR_AttributeHandle as[4];
@@ -868,9 +868,9 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         case OP_TYPE_WASMSTACK_STORE: {
-            int64_t moff = at_i(bo, "memory_offset");
-            int64_t malign = at_i(bo, "memory_align_log2");
-            int64_t msize = at_i(bo, "mem_size_bytes");
+            int64_t moff = at_i(F->ctx, bo, "memory_offset");
+            int64_t malign = at_i(F->ctx, bo, "memory_align_log2");
+            int64_t msize = at_i(F->ctx, bo, "mem_size_bytes");
             MLIR_ValueHandle val = st_pop(&F->stack);
             MLIR_ValueHandle addr = st_pop(&F->stack);
             MLIR_ValueHandle ops[2] = { addr, val };
@@ -906,9 +906,9 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         case OP_TYPE_WASMSTACK_CALL: {
-            string tgt = at_s(bo, "target");
+            string tgt = at_s(F->ctx, bo, "target");
             string cpt = (string){0}, crt = (string){0};
-            if (!lookup_callee_sig(F->siblings, tgt, &cpt, &crt)) {
+            if (!lookup_callee_sig(F->ctx, F->siblings, tgt, &cpt, &crt)) {
                 fprintf(stderr, "ws->ssa: call target '%.*s' not found\n",
                     (int)tgt.size, tgt.str);
                 return false;
@@ -939,9 +939,9 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         case OP_TYPE_WASMSTACK_CALL_INDIRECT: {
-            int64_t tidx = at_i(bo, "type_idx");
-            string ipt = at_s(bo, "sig_params");
-            string irt = at_s(bo, "sig_results");
+            int64_t tidx = at_i(F->ctx, bo, "type_idx");
+            string ipt = at_s(F->ctx, bo, "sig_params");
+            string irt = at_s(F->ctx, bo, "sig_results");
             size_t cnp = 0, cnr = 0;
             uint8_t *cp = hex_decode_arena(F->arena, ipt, &cnp);
             uint8_t *cr = hex_decode_arena(F->arena, irt, &cnr);
@@ -1096,7 +1096,7 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         case OP_TYPE_WASMSTACK_BR: {
-            int64_t depth = at_i(bo, "depth");
+            int64_t depth = at_i(F->ctx, bo, "depth");
             if ((size_t)depth >= F->frames.n) {
                 fprintf(stderr, "ws->ssa: br depth %lld out of range\n",
                     (long long)depth);
@@ -1113,7 +1113,7 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         case OP_TYPE_WASMSTACK_BR_IF: {
-            int64_t depth = at_i(bo, "depth");
+            int64_t depth = at_i(F->ctx, bo, "depth");
             if ((size_t)depth >= F->frames.n) {
                 fprintf(stderr, "ws->ssa: br_if depth %lld out of range\n",
                     (long long)depth);
@@ -1160,8 +1160,8 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         case OP_TYPE_WASMSTACK_BR_TABLE: {
-            string targets = at_s(bo, "targets");
-            int64_t dflt = at_i(bo, "default");
+            string targets = at_s(F->ctx, bo, "targets");
+            int64_t dflt = at_i(F->ctx, bo, "default");
             MLIR_ValueHandle idx = st_pop(&F->stack);
             // Parse target list.
             uint32_t tlist[256];
@@ -1230,7 +1230,7 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             // Should not appear in wasm-lifted modules (it's a wasmssa
             // synth op that the wasmstack stage normally inlines). If
             // we see one, pass it through.
-            string target = at_s(bo, "target");
+            string target = at_s(F->ctx, bo, "target");
             MLIR_AttributeHandle as[2];
             as[0] = attr_i32(F->ctx, "valtype", 0);
             as[1] = attr_s(F->ctx, "target", target.str, target.size);
@@ -1242,7 +1242,7 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         case OP_TYPE_WASMSTACK_FUNC_ADDR: {
-            string target = at_s(bo, "target");
+            string target = at_s(F->ctx, bo, "target");
             MLIR_AttributeHandle as[2];
             as[0] = attr_i32(F->ctx, "valtype", 0);
             as[1] = attr_s(F->ctx, "target", target.str, target.size);
@@ -1297,11 +1297,11 @@ static MLIR_OpHandle lift_func(MLIR_Context *ctx, Arena *arena,
     Arena *tmp = arena_create(64 * 1024);
     (void)arena;  // arena parameter retained for ABI; tmp is used.
 
-    string sym_name      = at_s(src, "sym_name");
-    string pt_s          = at_s(src, "param_types");
-    string rt_s          = at_s(src, "result_types");
-    bool   exported      = at_b(src, "exported");
-    string local_types_s = at_s(src, "local_types");
+    string sym_name      = at_s(ctx, src, "sym_name");
+    string pt_s          = at_s(ctx, src, "param_types");
+    string rt_s          = at_s(ctx, src, "result_types");
+    bool   exported      = at_b(ctx, src, "exported");
+    string local_types_s = at_s(ctx, src, "local_types");
 
     size_t np = 0, nr = 0, nl_total = 0;
     uint8_t *params  = hex_decode_arena(tmp, pt_s, &np);
@@ -1364,8 +1364,8 @@ static MLIR_OpHandle lift_func(MLIR_Context *ctx, Arena *arena,
         emit_local_store(&F, (uint32_t)i, z);
     }
 
-    MLIR_BlockHandle src_blk = MLIR_GetRegionBlock(MLIR_GetOpRegion(src, 0), 0);
-    size_t body_ops = MLIR_GetBlockNumOps(src_blk);
+    MLIR_BlockHandle src_blk = MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, src, 0), 0);
+    size_t body_ops = MLIR_GetBlockNumOps(ctx, src_blk);
     F.stack.cap = body_ops ? body_ops : 64;   // one slot per wasmstack body op
     F.stack.data = (MLIR_ValueHandle *)malloc(F.stack.cap * sizeof(MLIR_ValueHandle));
     F.frames.cap = 32;
@@ -1411,10 +1411,10 @@ static MLIR_OpHandle lift_func(MLIR_Context *ctx, Arena *arena,
 // Lift one wasmstack.import_func to a wasmssa.import_func.
 // =============================================================================
 static MLIR_OpHandle lift_import_func(MLIR_Context *ctx, MLIR_OpHandle src) {
-    string sym_name = at_s(src, "sym_name");
-    string pt_s = at_s(src, "param_types");
-    string rt_s = at_s(src, "result_types");
-    bool exported = at_b(src, "exported");
+    string sym_name = at_s(ctx, src, "sym_name");
+    string pt_s = at_s(ctx, src, "param_types");
+    string rt_s = at_s(ctx, src, "result_types");
+    bool exported = at_b(ctx, src, "exported");
     MLIR_AttributeHandle attrs[4];
     size_t na = 0;
     attrs[na++] = attr_s(ctx, "sym_name", sym_name.str, sym_name.size);
@@ -1431,9 +1431,9 @@ static MLIR_OpHandle lift_import_func(MLIR_Context *ctx, MLIR_OpHandle src) {
 // Lift wasmstack.func that maps to a synth helper -> import_func decl.
 // =============================================================================
 static MLIR_OpHandle synth_to_import(MLIR_Context *ctx, MLIR_OpHandle src) {
-    string sym_name = at_s(src, "sym_name");
-    string pt_s = at_s(src, "param_types");
-    string rt_s = at_s(src, "result_types");
+    string sym_name = at_s(ctx, src, "sym_name");
+    string pt_s = at_s(ctx, src, "param_types");
+    string rt_s = at_s(ctx, src, "result_types");
     MLIR_AttributeHandle attrs[4];
     size_t na = 0;
     attrs[na++] = attr_s(ctx, "sym_name", sym_name.str, sym_name.size);
@@ -1452,9 +1452,9 @@ static MLIR_OpHandle synth_to_import(MLIR_Context *ctx, MLIR_OpHandle src) {
 // =============================================================================
 static MLIR_OpHandle lift_data_segment(MLIR_Context *ctx, MLIR_OpHandle src,
                                        uint32_t seg_idx) {
-    int64_t off = at_i(src, "offset");
-    int64_t sz  = at_i(src, "size");
-    string  id  = at_s(src, "init_data");
+    int64_t off = at_i(ctx, src, "offset");
+    int64_t sz  = at_i(ctx, src, "size");
+    string  id  = at_s(ctx, src, "init_data");
 
     // The sym_name pointer is stored in the IR attribute table without
     // being copied, so it must outlive this function. Allocate from
@@ -1484,10 +1484,10 @@ static MLIR_OpHandle lift_data_segment(MLIR_Context *ctx, MLIR_OpHandle src,
 MLIR_OpHandle mlir_wasmstack_to_wasmssa(MLIR_Context *ctx,
                                         MLIR_OpHandle stack_module) {
     if (!stack_module) return MLIR_INVALID_HANDLE;
-    if (MLIR_GetOpNumRegions(stack_module) < 1) return MLIR_INVALID_HANDLE;
-    MLIR_RegionHandle mr = MLIR_GetOpRegion(stack_module, 0);
-    if (MLIR_GetRegionNumBlocks(mr) < 1) return MLIR_INVALID_HANDLE;
-    MLIR_BlockHandle mb = MLIR_GetRegionBlock(mr, 0);
+    if (MLIR_GetOpNumRegions(ctx, stack_module) < 1) return MLIR_INVALID_HANDLE;
+    MLIR_RegionHandle mr = MLIR_GetOpRegion(ctx, stack_module, 0);
+    if (MLIR_GetRegionNumBlocks(ctx, mr) < 1) return MLIR_INVALID_HANDLE;
+    MLIR_BlockHandle mb = MLIR_GetRegionBlock(ctx, mr, 0);
 
     Arena *arena = MLIR_GetArenaAllocator(ctx);
 
@@ -1501,7 +1501,7 @@ MLIR_OpHandle mlir_wasmstack_to_wasmssa(MLIR_Context *ctx,
     // correctly (see mlir_wasm_to_wasmstack.c for the rationale).
     MLIR_AttributeHandle mod_attrs[2];
     size_t n_mod_attrs = 0;
-    MLIR_AttributeHandle a_min_pages = MLIR_GetOpAttributeByName(
+    MLIR_AttributeHandle a_min_pages = MLIR_GetOpAttributeByName(ctx, 
         stack_module, "memory_min_pages");
     if (a_min_pages) {
         mod_attrs[n_mod_attrs++] = attr_i32(ctx, "memory_min_pages",
@@ -1514,12 +1514,12 @@ MLIR_OpHandle mlir_wasmstack_to_wasmssa(MLIR_Context *ctx,
     // is the top of the stack region and MUST match what wasm-ld chose:
     // the stack grows down from it and the heap (__heap_base) starts at
     // it, so picking the wrong value collides the stack with the heap.
-    for (size_t i = 0; i < MLIR_GetBlockNumOps(mb); i++) {
-        MLIR_OpHandle top = MLIR_GetBlockOp(mb, i);
-        if (MLIR_GetOpType(top) != OP_TYPE_WASMSTACK_GLOBAL_DECL) continue;
-        if (at_i(top, "global_idx") != 0) continue;
+    for (size_t i = 0; i < MLIR_GetBlockNumOps(ctx, mb); i++) {
+        MLIR_OpHandle top = MLIR_GetBlockOp(ctx, mb, i);
+        if (MLIR_GetOpType(ctx, top) != OP_TYPE_WASMSTACK_GLOBAL_DECL) continue;
+        if (at_i(ctx, top, "global_idx") != 0) continue;
         mod_attrs[n_mod_attrs++] = attr_i64(ctx, "global0_init",
-            at_i(top, "init_value"));
+            at_i(ctx, top, "init_value"));
         break;
     }
 
@@ -1543,7 +1543,7 @@ MLIR_OpHandle mlir_wasmstack_to_wasmssa(MLIR_Context *ctx,
     // input mb as the siblings source — lookup_callee_sig only inspects
     // sym_name + param_types + result_types which are present on BOTH
     // wasmstack.func and wasmstack.import_func.
-    size_t n_top = MLIR_GetBlockNumOps(mb);
+    size_t n_top = MLIR_GetBlockNumOps(ctx, mb);
     uint32_t data_idx = 0;
 
     // Collect ELEM entries (slot, target) so we can emit a synthetic
@@ -1556,13 +1556,13 @@ MLIR_OpHandle mlir_wasmstack_to_wasmssa(MLIR_Context *ctx,
     size_t n_elems = 0, elems_cap = 0;
 
     for (size_t i = 0; i < n_top; i++) {
-        MLIR_OpHandle top = MLIR_GetBlockOp(mb, i);
-        MLIR_OpType tt = MLIR_GetOpType(top);
+        MLIR_OpHandle top = MLIR_GetBlockOp(ctx, mb, i);
+        MLIR_OpType tt = MLIR_GetOpType(ctx, top);
         MLIR_OpHandle out_op = MLIR_INVALID_HANDLE;
         if (tt == OP_TYPE_WASMSTACK_IMPORT_FUNC) {
             out_op = lift_import_func(ctx, top);
         } else if (tt == OP_TYPE_WASMSTACK_FUNC) {
-            string nm = at_s(top, "sym_name");
+            string nm = at_s(ctx, top, "sym_name");
             if (is_synth_helper(nm)) {
                 out_op = synth_to_import(ctx, top);
             } else {
@@ -1582,12 +1582,12 @@ MLIR_OpHandle mlir_wasmstack_to_wasmssa(MLIR_Context *ctx,
                 elems = (ElemEntry *)realloc(elems,
                     elems_cap * sizeof(ElemEntry));
             }
-            elems[n_elems].slot = at_i(top, "slot");
-            elems[n_elems].target = at_s(top, "target");
+            elems[n_elems].slot = at_i(ctx, top, "slot");
+            elems[n_elems].target = at_s(ctx, top, "target");
             n_elems++;
             continue;
         } else {
-            string nm = MLIR_GetOpTypeName(ctx, MLIR_GetOpType(top));
+            string nm = MLIR_GetOpTypeName(ctx, MLIR_GetOpType(ctx, top));
             fprintf(stderr, "ws->ssa: unexpected top-level op '%.*s'\n",
                 (int)nm.size, nm.str);
             free(elems);

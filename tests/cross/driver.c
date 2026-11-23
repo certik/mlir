@@ -192,7 +192,7 @@ int app_main(void) {
         // the call, cf.br's successor operand at slot 0 must point to
         // `replv` instead of `defv`.
         MLIR_SetOpOperand(ctx, br, op_idx, replv);
-        MLIR_ValueHandle after = MLIR_GetOpSuccessorOperand(br, 0, 0);
+        MLIR_ValueHandle after = MLIR_GetOpSuccessorOperand(ctx, br, 0, 0);
         print_string(after == replv ? str_lit("SetOpOperand updates succ_op: yes\n")
                                     : str_lit("SetOpOperand updates succ_op: no\n"));
         print_string(MLIR_GetValueNumUses(ctx, defv) == 0
@@ -290,29 +290,29 @@ int app_main(void) {
     {
         // A block's parent op comes from its region (there is no global op
         // registry any more, #140).
-        print_string(MLIR_GetBlockParentOp(func_block) == func_op
+        print_string(MLIR_GetBlockParentOp(ctx, func_block) == func_op
                          ? str_lit("block parent op is func.func: yes\n")
                          : str_lit("block parent op is func.func: no\n"));
-        print_string(MLIR_GetBlockParentOp(module_block) == module_op
+        print_string(MLIR_GetBlockParentOp(ctx, module_block) == module_op
                          ? str_lit("block parent op is module: yes\n")
                          : str_lit("block parent op is module: no\n"));
 
         // MLIR_DetachOp keeps the op, which can then be inserted again.
         MLIR_DetachOp(ctx, ret_op);
-        print_string(MLIR_GetOpParentBlock(ret_op) == MLIR_INVALID_HANDLE &&
-                     MLIR_GetBlockNumOps(func_block) == 1 &&
+        print_string(MLIR_GetOpParentBlock(ctx, ret_op) == MLIR_INVALID_HANDLE &&
+                     MLIR_GetBlockNumOps(ctx, func_block) == 1 &&
                      MLIR_GetValueNumUses(ctx, add_result) == 1
                          ? str_lit("detached op keeps its operands: yes\n")
                          : str_lit("detached op keeps its operands: no\n"));
         MLIR_AppendBlockOp(ctx, func_block, ret_op);
-        print_string(MLIR_GetBlockNumOps(func_block) == 2 &&
-                     MLIR_GetBlockOp(func_block, 1) == ret_op
+        print_string(MLIR_GetBlockNumOps(ctx, func_block) == 2 &&
+                     MLIR_GetBlockOp(ctx, func_block, 1) == ret_op
                          ? str_lit("detached op reinserted: yes\n")
                          : str_lit("detached op reinserted: no\n"));
 
         // MLIR_EraseOp drops the erased op's uses; its handle is dead.
         MLIR_EraseOp(ctx, ret_op);
-        print_string(MLIR_GetBlockNumOps(func_block) == 1 &&
+        print_string(MLIR_GetBlockNumOps(ctx, func_block) == 1 &&
                      MLIR_GetValueNumUses(ctx, add_result) == 0
                          ? str_lit("erase drops the op and its uses: yes\n")
                          : str_lit("erase drops the op and its uses: no\n"));
@@ -380,7 +380,7 @@ int app_main(void) {
         MLIR_OpHandle dyn_op = MLIR_CreateOp(ctx, dyn, NULL, 0, NULL, 0, NULL, 0,
                                              NULL, 0, NULL, 0, MLIR_INVALID_HANDLE,
                                              MLIR_INVALID_HANDLE, str_lit(""), -1);
-        print_string(MLIR_GetOpType(dyn_op) == dyn &&
+        print_string(MLIR_GetOpType(ctx, dyn_op) == dyn &&
                      MLIR_OP_TYPE_IN_DIALECT(OP_TYPE_LLVM_ADD, LLVM) &&
                      MLIR_OP_TYPE_IN_DIALECT(MLIR_DIALECT_LLVM_FIRST, LLVM) &&
                      MLIR_OP_TYPE_IN_DIALECT(MLIR_DIALECT_LLVM_LAST, LLVM) &&
@@ -400,7 +400,7 @@ int app_main(void) {
             str_lit("builtin.module alias: lookup={} register={} module op={} name={}\n"),
             bm_lookup == OP_TYPE_MODULE ? str_lit("yes") : str_lit("no"),
             bm_reg == OP_TYPE_MODULE ? str_lit("yes") : str_lit("no"),
-            MLIR_GetOpType(mod2) == OP_TYPE_MODULE && MLIR_GetOpType(module_op) == OP_TYPE_MODULE
+            MLIR_GetOpType(ctx, mod2) == OP_TYPE_MODULE && MLIR_GetOpType(ctx, module_op) == OP_TYPE_MODULE
                 ? str_lit("yes") : str_lit("no"),
             MLIR_GetOpTypeName(ctx, bm_reg)));
         MLIR_Context *ctx3 = MLIR_CreateContext(NULL);

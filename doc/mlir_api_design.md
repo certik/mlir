@@ -496,6 +496,13 @@ handle kinds that §3.2 needs: `MLIR_UseHandle` (an operand slot; upstream
 `mlir::OpOperand *`) and `MLIR_PredHandle` (a predecessor edge; upstream
 `mlir::BlockOperand *`).
 
+As implemented (#354): every getter of an op, region, block or value takes
+the context as its first parameter (`MLIR_GetOpOperand(ctx, op, i)`), so the
+native backend can store those handles as indices into context-owned vectors
+(the storage of #354). The upstream backend ignores the parameter. Getters of
+types, attributes and locations are unchanged. The sketches in §3 and §4
+omit the context for brevity.
+
 ### 2.3 Ownership and lifetimes
 
 Today:
@@ -632,7 +639,7 @@ Rules:
    ```
 
    Ops store only the integer. `MLIR_GetOpName(op)` becomes
-   `MLIR_GetOpTypeName(ctx, MLIR_GetOpType(op))`; `GetOpName_string` is
+   `MLIR_GetOpTypeName(ctx, MLIR_GetOpType(ctx, op))`; `GetOpName_string` is
    removed (#145). Dynamic types have no traits (conservative: not pure, may
    read and write memory), so passes treat them like an unknown call.
    `OP_TYPE_UNREGISTERED` survives only as the lookup-miss value. This
@@ -662,7 +669,7 @@ differs from the sketches in §1.2 and here:
   wasmstack lifter still has two diagnostic-only globals,
   `g_current_ctx`/`g_current_op_type`, for its stack-underflow message.) As
   a consequence `MLIR_GetOpTypeName` takes the context for every type, and
-  `MLIR_GetOpName(op)` is `MLIR_GetOpTypeName(ctx, MLIR_GetOpType(op))`.
+  `MLIR_GetOpName(op)` is `MLIR_GetOpTypeName(ctx, MLIR_GetOpType(ctx, op))`.
 - **`mlir_ops.def` has two columns**, `MLIR_OP(enumerator, name)`; step 6
   adds the traits. A dialect's ops sit between `MLIR_DIALECT_BEGIN(D)` and
   `MLIR_DIALECT_END(D)`, which produce `MLIR_DIALECT_<D>_FIRST` and `_LAST`
@@ -872,8 +879,8 @@ enum {
     MLIR_T_ZERO_RESULT  = 1u << 16, MLIR_T_ONE_RESULT  = 1u << 17,
 };
 MLIR_OpTraits MLIR_GetOpTypeTraits(MLIR_OpType t);   // 0 for dynamic types
-static inline bool MLIR_OpHasTrait(MLIR_OpHandle op, MLIR_OpTraits t) {
-    return (MLIR_GetOpTypeTraits(MLIR_GetOpType(op)) & t) == t;
+static inline bool MLIR_OpHasTrait(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_OpTraits t) {
+    return (MLIR_GetOpTypeTraits(MLIR_GetOpType(ctx, op)) & t) == t;
 }
 ```
 
@@ -1092,7 +1099,7 @@ bool expand_reciprocal_sqrt(MLIR_PassContext *pc, MLIR_OpHandle fn, void *state)
             || MLIR_GetFunctionPassthrough(fn, K_RECIP_EST).size) return false;
     ...                                         // square_roots(), then over the RPO:
     size_t n; MLIR_BlockHandle *rpo;
-    n = MLIR_GetBlockOrder(pc->ctx, MLIR_GetOpRegion(fn, 0), MLIR_ORDER_RPO, pc->scratch, &rpo);
+    n = MLIR_GetBlockOrder(pc->ctx, MLIR_GetOpRegion(pc->ctx, fn, 0), MLIR_ORDER_RPO, pc->scratch, &rpo);
     ...
     MLIR_SetFunctionPassthrough(pc->ctx, fn, K_RECIP_EST, str_lit("sqrtf:0,vec-sqrtf:0"));
     return true;

@@ -65,15 +65,15 @@ typedef struct { MLIR_OpHandle op; MLIR_ValueHandle res; } DceItem;
 typedef struct { DceItem *v; size_t n, cap; } DceList;
 
 // Queue `op` if it can be erased at all (one result, pure).
-static void dce_push(DceList *wl, MLIR_OpHandle op) {
+static void dce_push(MLIR_Context *ctx, DceList *wl, MLIR_OpHandle op) {
     if (op == MLIR_INVALID_HANDLE) return;
-    if (MLIR_GetOpNumResults(op) != 1 || !llvm_op_is_pure(MLIR_GetOpType(op))) return;
+    if (MLIR_GetOpNumResults(ctx, op) != 1 || !llvm_op_is_pure(MLIR_GetOpType(ctx, op))) return;
     if (wl->n == wl->cap) {
         wl->cap = wl->cap ? wl->cap * 2 : 256;
         wl->v = (DceItem *)realloc(wl->v, wl->cap * sizeof(DceItem));
     }
     wl->v[wl->n].op = op;
-    wl->v[wl->n].res = MLIR_GetOpResult(op, 0);
+    wl->v[wl->n].res = MLIR_GetOpResult(ctx, op, 0);
     wl->n++;
 }
 
@@ -83,33 +83,33 @@ static void dce_push(DceList *wl, MLIR_OpHandle op) {
 static void dce_worklist(MLIR_Context *ctx, DceMap *uses,
                          MLIR_OpHandle *seeds, size_t nseed) {
     DceList wl = {0};
-    for (size_t i = 0; i < nseed; i++) dce_push(&wl, seeds[i]);
+    for (size_t i = 0; i < nseed; i++) dce_push(ctx, &wl, seeds[i]);
     while (wl.n > 0) {
         DceItem it = wl.v[--wl.n];
         int64_t cnt = 0; dcemap_get(uses, (uintptr_t)it.res, &cnt);
         if (cnt != 0) continue;  // used, or already erased (-1)
         MLIR_OpHandle op = it.op;
-        size_t non = MLIR_GetOpNumOperands(op);
+        size_t non = MLIR_GetOpNumOperands(ctx, op);
         MLIR_OpHandle *defs = (MLIR_OpHandle *)malloc((non ? non : 1) * sizeof(MLIR_OpHandle));
         for (size_t kk = 0; kk < non; kk++) {
-            MLIR_ValueHandle v = MLIR_GetOpOperand(op, kk);
-            defs[kk] = (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) ? MLIR_GetValueDefiningOp(v) : MLIR_INVALID_HANDLE;
+            MLIR_ValueHandle v = MLIR_GetOpOperand(ctx, op, kk);
+            defs[kk] = (MLIR_GetValueKind(ctx, v) == MLIR_VALUE_OP_RESULT) ? MLIR_GetValueDefiningOp(ctx, v) : MLIR_INVALID_HANDLE;
             int64_t c0 = 0; dcemap_get(uses, (uintptr_t)v, &c0);
             if (c0 > 0) dcemap_put(uses, (uintptr_t)v, c0 - 1);
         }
         MLIR_EraseOp(ctx, op);
         dcemap_put(uses, (uintptr_t)it.res, -1);
-        for (size_t kk = 0; kk < non; kk++) dce_push(&wl, defs[kk]);
+        for (size_t kk = 0; kk < non; kk++) dce_push(ctx, &wl, defs[kk]);
         free(defs);
     }
     free(wl.v);
 }
 
 // uintptr -> index map for block-handle -> region-block-index lookups.
-static bool dce_blkidx(MLIR_RegionHandle region, size_t nb,
+static bool dce_blkidx(MLIR_Context *ctx, MLIR_RegionHandle region, size_t nb,
                        MLIR_BlockHandle b, size_t *out) {
     for (size_t i = 0; i < nb; i++)
-        if (MLIR_GetRegionBlock(region, i) == b) { *out = i; return true; }
+        if (MLIR_GetRegionBlock(ctx, region, i) == b) { *out = i; return true; }
     return false;
 }
 
@@ -126,21 +126,21 @@ static void dce_dead_block_args(MLIR_Context *ctx, MLIR_RegionHandle region,
     // Block-handle -> region-block-index, built once (O(nb)).
     DceMap b2i; dcemap_init(&b2i, nb);
     for (size_t bi = 0; bi < nb; bi++)
-        dcemap_put(&b2i, (uintptr_t)MLIR_GetRegionBlock(region, bi), (int64_t)bi);
+        dcemap_put(&b2i, (uintptr_t)MLIR_GetRegionBlock(ctx, region, bi), (int64_t)bi);
     // Predecessor list per block: parallel arrays of (op, succ_idx). Edges are
     // stable across this pass (only operands are removed, never successors), so
     // build once. Indexed by region-block index.
     typedef struct { MLIR_OpHandle *ops; size_t *succ; size_t n, cap; } PredList;
     PredList *preds = (PredList *)calloc(nb, sizeof(PredList));
     for (size_t bi = 0; bi < nb; bi++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(region, bi);
-        size_t no = MLIR_GetBlockNumOps(bk);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, region, bi);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-            size_t ns = MLIR_GetOpNumSuccessors(op);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+            size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
             for (size_t s = 0; s < ns; s++) {
                 int64_t ti;
-                if (!dcemap_get(&b2i, (uintptr_t)MLIR_GetOpSuccessor(op, s), &ti)) continue;
+                if (!dcemap_get(&b2i, (uintptr_t)MLIR_GetOpSuccessor(ctx, op, s), &ti)) continue;
                 PredList *p = &preds[ti];
                 if (p->n == p->cap) {
                     p->cap = p->cap ? p->cap * 2 : 4;
@@ -154,29 +154,29 @@ static void dce_dead_block_args(MLIR_Context *ctx, MLIR_RegionHandle region,
 
     // Skip block 0 (function entry: its args are the ABI parameters).
     for (size_t bi = 1; bi < nb; bi++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(region, bi);
-        size_t na = MLIR_GetBlockNumArgs(bk);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, region, bi);
+        size_t na = MLIR_GetBlockNumArgs(ctx, bk);
         // High -> low so erasing an arg never shifts a not-yet-processed index.
         for (size_t ai = na; ai-- > 0; ) {
-            MLIR_ValueHandle arg = MLIR_GetBlockArg(bk, ai);
+            MLIR_ValueHandle arg = MLIR_GetBlockArg(ctx, bk, ai);
             int64_t cnt = 0; dcemap_get(uses, (uintptr_t)arg, &cnt);
             if (cnt != 0) continue;                       // live block-arg
             // Rewrite each predecessor edge: drop the operand at index `ai`.
             PredList *p = &preds[bi];
             for (size_t k = 0; k < p->n; k++) {
                 MLIR_OpHandle op = p->ops[k]; size_t s = p->succ[k];
-                size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, s);
                 if (ai >= nso) continue;                  // defensive
                 MLIR_ValueHandle *nv = (MLIR_ValueHandle *)malloc((nso ? nso : 1) * sizeof(MLIR_ValueHandle));
                 size_t m = 0;
                 for (size_t j = 0; j < nso; j++) {
-                    MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(op, s, j);
+                    MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(ctx, op, s, j);
                     if (j == ai) {
                         int64_t c0 = 0; dcemap_get(uses, (uintptr_t)v, &c0);
                         if (c0 > 0) dcemap_put(uses, (uintptr_t)v, c0 - 1);
-                        if (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) {
+                        if (MLIR_GetValueKind(ctx, v) == MLIR_VALUE_OP_RESULT) {
                             if (*nseed == cseed) { cseed = cseed ? cseed * 2 : 64; *seeds = (MLIR_OpHandle *)realloc(*seeds, cseed * sizeof(MLIR_OpHandle)); }
-                            (*seeds)[(*nseed)++] = MLIR_GetValueDefiningOp(v);
+                            (*seeds)[(*nseed)++] = MLIR_GetValueDefiningOp(ctx, v);
                         }
                         continue;
                     }
@@ -195,28 +195,28 @@ static void dce_dead_block_args(MLIR_Context *ctx, MLIR_RegionHandle region,
 }
 
 static void dce_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
-    size_t nb = MLIR_GetRegionNumBlocks(region);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
     if (nb == 0) return;
 
     // 1. Count uses of every value across regular operands AND terminator
     //    successor-operands (block-arg edge values).
     DceMap uses; dcemap_init(&uses, 1024);
     for (size_t b = 0; b < nb; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(region, b);
-        size_t no = MLIR_GetBlockNumOps(bk);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, region, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-            size_t non = MLIR_GetOpNumOperands(op);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+            size_t non = MLIR_GetOpNumOperands(ctx, op);
             for (size_t kk = 0; kk < non; kk++) {
-                MLIR_ValueHandle v = MLIR_GetOpOperand(op, kk);
+                MLIR_ValueHandle v = MLIR_GetOpOperand(ctx, op, kk);
                 int64_t c0 = 0; dcemap_get(&uses, (uintptr_t)v, &c0);
                 dcemap_put(&uses, (uintptr_t)v, c0 + 1);
             }
-            size_t ns = MLIR_GetOpNumSuccessors(op);
+            size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
             for (size_t s = 0; s < ns; s++) {
-                size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, s);
                 for (size_t kk = 0; kk < nso; kk++) {
-                    MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(op, s, kk);
+                    MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(ctx, op, s, kk);
                     int64_t c0 = 0; dcemap_get(&uses, (uintptr_t)v, &c0);
                     dcemap_put(&uses, (uintptr_t)v, c0 + 1);
                 }
@@ -227,11 +227,11 @@ static void dce_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     // 2. Seed a worklist with every op and erase zero-use pure ops transitively.
     MLIR_OpHandle *all = NULL; size_t nall = 0, call = 0;
     for (size_t b = 0; b < nb; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(region, b);
-        size_t no = MLIR_GetBlockNumOps(bk);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, region, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
             if (nall == call) { call = call ? call * 2 : 256; all = (MLIR_OpHandle *)realloc(all, call * sizeof(MLIR_OpHandle)); }
-            all[nall++] = MLIR_GetBlockOp(bk, i);
+            all[nall++] = MLIR_GetBlockOp(ctx, bk, i);
         }
     }
     dce_worklist(ctx, &uses, all, nall);
@@ -252,16 +252,16 @@ static void dce_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
 
 void mlir_llvm_dce(MLIR_Context *ctx, MLIR_OpHandle module) {
     if (getenv("TINYC_NO_DCE")) return;
-    if (MLIR_GetOpNumRegions(module) == 0) return;
-    MLIR_RegionHandle mr = MLIR_GetOpRegion(module, 0);
-    if (MLIR_GetRegionNumBlocks(mr) == 0) return;
-    MLIR_BlockHandle mb = MLIR_GetRegionBlock(mr, 0);
-    size_t nops = MLIR_GetBlockNumOps(mb);
+    if (MLIR_GetOpNumRegions(ctx, module) == 0) return;
+    MLIR_RegionHandle mr = MLIR_GetOpRegion(ctx, module, 0);
+    if (MLIR_GetRegionNumBlocks(ctx, mr) == 0) return;
+    MLIR_BlockHandle mb = MLIR_GetRegionBlock(ctx, mr, 0);
+    size_t nops = MLIR_GetBlockNumOps(ctx, mb);
     for (size_t i = 0; i < nops; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        MLIR_OpType ft = MLIR_GetOpType(op);
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
+        MLIR_OpType ft = MLIR_GetOpType(ctx, op);
         if (ft != OP_TYPE_FUNC_FUNC && ft != OP_TYPE_LLVM_FUNC) continue;
-        if (MLIR_GetOpNumRegions(op) == 0) continue;
-        dce_run_region(ctx, MLIR_GetOpRegion(op, 0));
+        if (MLIR_GetOpNumRegions(ctx, op) == 0) continue;
+        dce_run_region(ctx, MLIR_GetOpRegion(ctx, op, 0));
     }
 }

@@ -128,8 +128,8 @@ static bool aghash_get_or_put(AgHash *m, const char *key, size_t klen,
 // ===========================================================================
 // Pure integer arithmetic that is value-numbered. Conversions and the address
 // spine are intentionally excluded (see header).
-static bool ag_is_arith(MLIR_OpHandle op) {
-    switch (MLIR_GetOpType(op)) {
+static bool ag_is_arith(MLIR_Context *ctx, MLIR_OpHandle op) {
+    switch (MLIR_GetOpType(ctx, op)) {
     case OP_TYPE_LLVM_ADD: case OP_TYPE_LLVM_SUB: case OP_TYPE_LLVM_MUL:
     case OP_TYPE_LLVM_AND: case OP_TYPE_LLVM_OR:  case OP_TYPE_LLVM_XOR:
     case OP_TYPE_LLVM_SHL: case OP_TYPE_LLVM_LSHR: case OP_TYPE_LLVM_ASHR:
@@ -142,8 +142,8 @@ static bool ag_is_arith(MLIR_OpHandle op) {
 }
 
 // Commutative ops whose operand order is canonicalized in the key.
-static bool ag_is_commutative(MLIR_OpHandle op) {
-    switch (MLIR_GetOpType(op)) {
+static bool ag_is_commutative(MLIR_Context *ctx, MLIR_OpHandle op) {
+    switch (MLIR_GetOpType(ctx, op)) {
     case OP_TYPE_LLVM_ADD: case OP_TYPE_LLVM_MUL:
     case OP_TYPE_LLVM_AND: case OP_TYPE_LLVM_OR: case OP_TYPE_LLVM_XOR:
         return true;
@@ -164,16 +164,16 @@ static MLIR_ValueHandle ag_canon(AgMap *repl, MLIR_ValueHandle v) {
 // `mul x, 8` against another `mul x, 8`).
 static bool ag_const_operand(MLIR_Context *ctx, MLIR_ValueHandle v,
                              int64_t *val, uint64_t *tykey) {
-    MLIR_OpHandle d = (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) ? MLIR_GetValueDefiningOp(v)
+    MLIR_OpHandle d = (MLIR_GetValueKind(ctx, v) == MLIR_VALUE_OP_RESULT) ? MLIR_GetValueDefiningOp(ctx, v)
                                                           : MLIR_INVALID_HANDLE;
     if (d == MLIR_INVALID_HANDLE) return false;
-    if (MLIR_GetOpType(d) != OP_TYPE_LLVM_MLIR_CONSTANT) return false;
-    if (MLIR_GetOpNumResults(d) != 1) return false;
-    MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(d, "value");
+    if (MLIR_GetOpType(ctx, d) != OP_TYPE_LLVM_MLIR_CONSTANT) return false;
+    if (MLIR_GetOpNumResults(ctx, d) != 1) return false;
+    MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(ctx, d, "value");
     if (va == MLIR_INVALID_HANDLE) return false;
     if (MLIR_GetAttributeKind(va) != MLIR_ATTR_KIND_INTEGER) return false;
     *val = MLIR_GetAttributeInteger(va);
-    *tykey = (uint64_t)MLIR_GetValueType(MLIR_GetOpResult(d, 0));
+    *tykey = (uint64_t)MLIR_GetValueType(ctx, MLIR_GetOpResult(ctx, d, 0));
     return true;
 }
 
@@ -219,11 +219,11 @@ static int64_t ag_attr_payload(MLIR_AttributeHandle a, MLIR_AttrKind kind) {
 }
 
 static void ag_emit_op_ident(AgKB *k, MLIR_Context *ctx, MLIR_OpHandle op) {
-    agkb_u64(k, (uint64_t)MLIR_GetOpType(op));
-    size_t na = MLIR_GetOpNumAttributes(op);
+    agkb_u64(k, (uint64_t)MLIR_GetOpType(ctx, op));
+    size_t na = MLIR_GetOpNumAttributes(ctx, op);
     agkb_u64(k, na);
     for (size_t i = 0; i < na; i++) {
-        MLIR_AttributeHandle a = MLIR_GetOpAttribute(op, i);
+        MLIR_AttributeHandle a = MLIR_GetOpAttribute(ctx, op, i);
         agkb_str(k, MLIR_GetAttributeName(a));
         MLIR_AttrKind kind = MLIR_GetAttributeKind(a);
         agkb_u64(k, (uint64_t)kind);
@@ -238,15 +238,15 @@ static void ag_build_key(AgKB *k, MLIR_Context *ctx, AgMap *repl, MLIR_OpHandle 
     agkb_reset(k);
     agkb_bytes(k, "A", 1);
     ag_emit_op_ident(k, ctx, op);
-    agkb_u64(k, (uint64_t)MLIR_GetOpResultType(op, 0));
-    size_t no = MLIR_GetOpNumOperands(op);
+    agkb_u64(k, (uint64_t)MLIR_GetOpResultType(ctx, op, 0));
+    size_t no = MLIR_GetOpNumOperands(ctx, op);
     agkb_u64(k, no);
-    if (no == 2 && ag_is_commutative(op)) {
+    if (no == 2 && ag_is_commutative(ctx, op)) {
         // Encode each operand to a scratch buffer, emit in sorted byte order so
         // `a op b` and `b op a` hash identically.
         AgKB t0, t1; agkb_init(&t0); agkb_init(&t1);
-        ag_emit_operand(&t0, ctx, repl, MLIR_GetOpOperand(op, 0));
-        ag_emit_operand(&t1, ctx, repl, MLIR_GetOpOperand(op, 1));
+        ag_emit_operand(&t0, ctx, repl, MLIR_GetOpOperand(ctx, op, 0));
+        ag_emit_operand(&t1, ctx, repl, MLIR_GetOpOperand(ctx, op, 1));
         AgKB *lo = &t0, *hi = &t1;
         size_t mn = t0.n < t1.n ? t0.n : t1.n;
         int cmp = memcmp(t0.p, t1.p, mn);
@@ -256,7 +256,7 @@ static void ag_build_key(AgKB *k, MLIR_Context *ctx, AgMap *repl, MLIR_OpHandle 
         agkb_free(&t0); agkb_free(&t1);
     } else {
         for (size_t i = 0; i < no; i++)
-            ag_emit_operand(k, ctx, repl, MLIR_GetOpOperand(op, i));
+            ag_emit_operand(k, ctx, repl, MLIR_GetOpOperand(ctx, op, i));
     }
 }
 
@@ -272,29 +272,29 @@ static void aglist_push(AgList *l, MLIR_OpHandle op) {
 // Manual RAUW: rewrite every op operand and terminator successor-operand
 // through the replacement map.
 static void ag_sweep_operands(MLIR_Context *ctx, MLIR_RegionHandle region, AgMap *repl) {
-    size_t nb = MLIR_GetRegionNumBlocks(region);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
     for (size_t b = 0; b < nb; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(region, b);
-        size_t no = MLIR_GetBlockNumOps(bk);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, region, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-            size_t non = MLIR_GetOpNumOperands(op);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+            size_t non = MLIR_GetOpNumOperands(ctx, op);
             for (size_t kk = 0; kk < non; kk++) {
-                MLIR_ValueHandle v = MLIR_GetOpOperand(op, kk);
+                MLIR_ValueHandle v = MLIR_GetOpOperand(ctx, op, kk);
                 MLIR_ValueHandle r = ag_canon(repl, v);
                 if (r != v) MLIR_SetOpOperand(ctx, op, kk, r);
             }
-            size_t ns = MLIR_GetOpNumSuccessors(op);
+            size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
             for (size_t s = 0; s < ns; s++) {
-                size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, s);
                 bool any = false;
                 for (size_t kk = 0; kk < nso; kk++)
-                    if (ag_canon(repl, MLIR_GetOpSuccessorOperand(op, s, kk)) !=
-                        MLIR_GetOpSuccessorOperand(op, s, kk)) { any = true; break; }
+                    if (ag_canon(repl, MLIR_GetOpSuccessorOperand(ctx, op, s, kk)) !=
+                        MLIR_GetOpSuccessorOperand(ctx, op, s, kk)) { any = true; break; }
                 if (!any) continue;
                 MLIR_ValueHandle *vals = (MLIR_ValueHandle *)malloc((nso ? nso : 1) * sizeof(MLIR_ValueHandle));
                 for (size_t kk = 0; kk < nso; kk++)
-                    vals[kk] = ag_canon(repl, MLIR_GetOpSuccessorOperand(op, s, kk));
+                    vals[kk] = ag_canon(repl, MLIR_GetOpSuccessorOperand(ctx, op, s, kk));
                 MLIR_SetOpSuccessorOperands(ctx, op, s, vals, nso);
                 free(vals);
             }
@@ -312,26 +312,26 @@ static void ag_dce(MLIR_Context *ctx, MLIR_RegionHandle region,
     AgMap dead; agmap_init(&dead, n_erased + 64);
     for (size_t i = 0; i < n_erased; i++) agmap_put(&dead, (uintptr_t)erased[i], 1);
     AgMap uses; agmap_init(&uses, 1024);
-    size_t nb = MLIR_GetRegionNumBlocks(region);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
     for (size_t b = 0; b < nb; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(region, b);
-        size_t no = MLIR_GetBlockNumOps(bk);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, region, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-            size_t non = MLIR_GetOpNumOperands(op);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+            size_t non = MLIR_GetOpNumOperands(ctx, op);
             for (size_t kk = 0; kk < non; kk++) {
-                MLIR_ValueHandle v = MLIR_GetOpOperand(op, kk);
-                if (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) {
+                MLIR_ValueHandle v = MLIR_GetOpOperand(ctx, op, kk);
+                if (MLIR_GetValueKind(ctx, v) == MLIR_VALUE_OP_RESULT) {
                     int64_t c0 = 0; agmap_get(&uses, (uintptr_t)v, &c0);
                     agmap_put(&uses, (uintptr_t)v, c0 + 1);
                 }
             }
-            size_t ns = MLIR_GetOpNumSuccessors(op);
+            size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
             for (size_t s = 0; s < ns; s++) {
-                size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, s);
                 for (size_t kk = 0; kk < nso; kk++) {
-                    MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(op, s, kk);
-                    if (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) {
+                    MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(ctx, op, s, kk);
+                    if (MLIR_GetValueKind(ctx, v) == MLIR_VALUE_OP_RESULT) {
                         int64_t c0 = 0; agmap_get(&uses, (uintptr_t)v, &c0);
                         agmap_put(&uses, (uintptr_t)v, c0 + 1);
                     }
@@ -349,15 +349,15 @@ static void ag_dce(MLIR_Context *ctx, MLIR_RegionHandle region,
         MLIR_OpHandle op = wl[--nwl];
         if (op == MLIR_INVALID_HANDLE) continue;
         if (agmap_get(&dead, (uintptr_t)op, NULL)) continue;   // erased
-        if (MLIR_GetOpNumResults(op) != 1 || !llvm_op_is_pure(MLIR_GetOpType(op))) continue;
-        int64_t cnt = 0; agmap_get(&uses, (uintptr_t)MLIR_GetOpResult(op, 0), &cnt);
+        if (MLIR_GetOpNumResults(ctx, op) != 1 || !llvm_op_is_pure(MLIR_GetOpType(ctx, op))) continue;
+        int64_t cnt = 0; agmap_get(&uses, (uintptr_t)MLIR_GetOpResult(ctx, op, 0), &cnt);
         if (cnt != 0) continue;
-        size_t non = MLIR_GetOpNumOperands(op);
+        size_t non = MLIR_GetOpNumOperands(ctx, op);
         MLIR_OpHandle *defs = (MLIR_OpHandle *)malloc((non ? non : 1) * sizeof(MLIR_OpHandle));
         for (size_t kk = 0; kk < non; kk++) {
-            MLIR_ValueHandle v = MLIR_GetOpOperand(op, kk);
-            defs[kk] = (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) ? MLIR_GetValueDefiningOp(v) : MLIR_INVALID_HANDLE;
-            if (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT) {
+            MLIR_ValueHandle v = MLIR_GetOpOperand(ctx, op, kk);
+            defs[kk] = (MLIR_GetValueKind(ctx, v) == MLIR_VALUE_OP_RESULT) ? MLIR_GetValueDefiningOp(ctx, v) : MLIR_INVALID_HANDLE;
+            if (MLIR_GetValueKind(ctx, v) == MLIR_VALUE_OP_RESULT) {
                 int64_t c0 = 0; agmap_get(&uses, (uintptr_t)v, &c0);
                 if (c0 > 0) agmap_put(&uses, (uintptr_t)v, c0 - 1);
             }
@@ -374,10 +374,10 @@ static void ag_dce(MLIR_Context *ctx, MLIR_RegionHandle region,
 }
 
 static void ag_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
-    size_t nb = MLIR_GetRegionNumBlocks(region);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
     if (nb == 0) return;
     size_t total_ops = 0;
-    for (size_t b = 0; b < nb; b++) total_ops += MLIR_GetBlockNumOps(MLIR_GetRegionBlock(region, b));
+    for (size_t b = 0; b < nb; b++) total_ops += MLIR_GetBlockNumOps(ctx, MLIR_GetRegionBlock(ctx, region, b));
     if (total_ops == 0) return;
 
     // Spine-exclusion set: every value that is the operand of an `llvm.inttoptr`
@@ -385,14 +385,14 @@ static void ag_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     // the spine multi-use and disable the `[x28, Widx, UXTW]` fusion.
     AgMap spine; agmap_init(&spine, 64);
     for (size_t b = 0; b < nb; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(region, b);
-        size_t no = MLIR_GetBlockNumOps(bk);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, region, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-            if (MLIR_GetOpType(op) != OP_TYPE_LLVM_INTTOPTR) continue;
-            size_t non = MLIR_GetOpNumOperands(op);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+            if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_INTTOPTR) continue;
+            size_t non = MLIR_GetOpNumOperands(ctx, op);
             for (size_t kk = 0; kk < non; kk++)
-                agmap_put(&spine, (uintptr_t)MLIR_GetOpOperand(op, kk), 1);
+                agmap_put(&spine, (uintptr_t)MLIR_GetOpOperand(ctx, op, kk), 1);
         }
     }
 
@@ -403,12 +403,12 @@ static void ag_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
 
     for (size_t b = 0; b < nb; b++) {
         aghash_reset(&tbl);                       // intra-block: reset per block
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(region, b);
-        size_t no = MLIR_GetBlockNumOps(bk);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, region, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-            if (!ag_is_arith(op) || MLIR_GetOpNumResults(op) != 1) continue;
-            MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+            if (!ag_is_arith(ctx, op) || MLIR_GetOpNumResults(ctx, op) != 1) continue;
+            MLIR_ValueHandle res = MLIR_GetOpResult(ctx, op, 0);
             int64_t dummy;
             if (agmap_get(&spine, (uintptr_t)res, &dummy)) continue;   // spine add
             ag_build_key(&kb, ctx, &repl, op);
@@ -427,11 +427,11 @@ static void ag_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
         AgList seedlist; memset(&seedlist, 0, sizeof(seedlist));
         for (size_t i = 0; i < redundant.n; i++) {
             MLIR_OpHandle op = redundant.v[i];
-            size_t non = MLIR_GetOpNumOperands(op);
+            size_t non = MLIR_GetOpNumOperands(ctx, op);
             for (size_t kk = 0; kk < non; kk++) {
-                MLIR_ValueHandle v = MLIR_GetOpOperand(op, kk);
-                if (MLIR_GetValueKind(v) == MLIR_VALUE_OP_RESULT)
-                    aglist_push(&seedlist, MLIR_GetValueDefiningOp(v));
+                MLIR_ValueHandle v = MLIR_GetOpOperand(ctx, op, kk);
+                if (MLIR_GetValueKind(ctx, v) == MLIR_VALUE_OP_RESULT)
+                    aglist_push(&seedlist, MLIR_GetValueDefiningOp(ctx, v));
             }
         }
         ag_sweep_operands(ctx, region, &repl);
@@ -449,16 +449,16 @@ static void ag_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
 
 void mlir_llvm_arith_gvn(MLIR_Context *ctx, MLIR_OpHandle module) {
     if (getenv("TINYC_NO_ARITH_GVN")) return;
-    if (MLIR_GetOpNumRegions(module) == 0) return;
-    MLIR_RegionHandle mr = MLIR_GetOpRegion(module, 0);
-    if (MLIR_GetRegionNumBlocks(mr) == 0) return;
-    MLIR_BlockHandle mb = MLIR_GetRegionBlock(mr, 0);
-    size_t nops = MLIR_GetBlockNumOps(mb);
+    if (MLIR_GetOpNumRegions(ctx, module) == 0) return;
+    MLIR_RegionHandle mr = MLIR_GetOpRegion(ctx, module, 0);
+    if (MLIR_GetRegionNumBlocks(ctx, mr) == 0) return;
+    MLIR_BlockHandle mb = MLIR_GetRegionBlock(ctx, mr, 0);
+    size_t nops = MLIR_GetBlockNumOps(ctx, mb);
     for (size_t i = 0; i < nops; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        MLIR_OpType ft = MLIR_GetOpType(op);
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
+        MLIR_OpType ft = MLIR_GetOpType(ctx, op);
         if (ft != OP_TYPE_FUNC_FUNC && ft != OP_TYPE_LLVM_FUNC) continue;
-        if (MLIR_GetOpNumRegions(op) == 0) continue;
-        ag_run_region(ctx, MLIR_GetOpRegion(op, 0));
+        if (MLIR_GetOpNumRegions(ctx, op) == 0) continue;
+        ag_run_region(ctx, MLIR_GetOpRegion(ctx, op, 0));
     }
 }

@@ -20,16 +20,6 @@
 #include <base/string.h>
 #include "mlir_api.h"
 
-// Fold/const/cast hooks supplied by the active backend (mlir_llvm_to_aarch64.c).
-// x64 reuses const_int_val / cast_src (generic) and passes NULL fusion maps.
-extern bool const_int_val(MLIR_Context *ctx, MLIR_OpHandle op, int64_t *val, uint8_t *is64);
-extern bool cast_src(MLIR_OpHandle op, MLIR_ValueHandle *src);
-extern bool a64_is_spine(MLIR_OpHandle op, SlotMap *memspine);
-extern bool a64_memfuse_uses(MLIR_Context *ctx, MLIR_OpHandle op, SlotMap *memfuse,
-                             MLIR_ValueHandle *base, MLIR_ValueHandle *idx);
-extern bool a64_shiftfuse_uses(MLIR_Context *ctx, MLIR_OpHandle op, SlotMap *shiftfuse,
-                               MLIR_ValueHandle *xv);
-
 // ---------------------------------------------------------------------------
 // SlotMap (value handle -> int32 slot/register/count).
 // ---------------------------------------------------------------------------
@@ -142,7 +132,7 @@ static inline bool ra_is_const(const RegTarget *T, MLIR_Context *c, MLIR_OpHandl
     (void)T; int64_t v; uint8_t b; return const_int_val(c, o, &v, &b);
 }
 static inline bool ra_is_folded(const RegTarget *T, MLIR_Context *c, MLIR_OpHandle o) {
-    (void)c; return a64_is_spine(o, T->memspine);
+    return a64_is_spine(c, o, T->memspine);
 }
 static inline bool ra_memfuse(const RegTarget *T, MLIR_Context *c, MLIR_OpHandle o,
                               MLIR_ValueHandle *b, MLIR_ValueHandle *i) {
@@ -177,13 +167,13 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     bool home_params = !getenv("TINYC_NO_PARAM_HOME");
     size_t nv_max = 0;
     for (size_t b = 0; b < n_blocks; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
-        if (b > 0 || home_params) nv_max += MLIR_GetBlockNumArgs(bk);
-        size_t no = MLIR_GetBlockNumOps(bk);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+        if (b > 0 || home_params) nv_max += MLIR_GetBlockNumArgs(ctx, bk);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-            if (MLIR_GetOpNumRegions(op) > 0) return RA_BAIL;
-            nv_max += MLIR_GetOpNumResults(op);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+            if (MLIR_GetOpNumRegions(ctx, op) > 0) return RA_BAIL;
+            nv_max += MLIR_GetOpNumResults(ctx, op);
         }
     }
     if (nv_max == 0) return 0;
@@ -235,29 +225,29 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     A64HHash bmap; a64_hh_init(&bmap, n_blocks);
 
     for (size_t b = 0; b < n_blocks; b++)
-        a64_hh_put(&bmap, (MLIR_ValueHandle)MLIR_GetRegionBlock(reg, b), (uint32_t)b);
+        a64_hh_put(&bmap, (MLIR_ValueHandle)MLIR_GetRegionBlock(ctx, reg, b), (uint32_t)b);
 
     uint32_t pos = 0, nv = 0;
     for (size_t b = 0; b < n_blocks; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
         block_first[b] = pos;
         if (b > 0 || home_params) {
-            size_t na = MLIR_GetBlockNumArgs(bk);
+            size_t na = MLIR_GetBlockNumArgs(ctx, bk);
             for (size_t a = 0; a < na; a++) {
-                MLIR_ValueHandle arg = MLIR_GetBlockArg(bk, a);
+                MLIR_ValueHandle arg = MLIR_GetBlockArg(ctx, bk, a);
                 handle[nv] = arg; def_pos[nv] = A64_BARGP(pos); first_pos[nv] = A64_BARGP(pos);
                 last_use[nv] = 0; weight[nv] = 0; crosses[nv] = 0; home_pk[nv] = -1;
                 a64_hh_put(&vmap, arg, nv); nv++;
             }
         }
-        size_t no = MLIR_GetBlockNumOps(bk);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
             bool skip = ra_is_const(T, ctx, op) || ra_is_folded(T, ctx, op);
             if (!skip) {
-                size_t nr = MLIR_GetOpNumResults(op);
+                size_t nr = MLIR_GetOpNumResults(ctx, op);
                 for (size_t r = 0; r < nr; r++) {
-                    MLIR_ValueHandle rv = MLIR_GetOpResult(op, r);
+                    MLIR_ValueHandle rv = MLIR_GetOpResult(ctx, op, r);
                     handle[nv] = rv; def_pos[nv] = A64_DEFP(pos); first_pos[nv] = A64_DEFP(pos);
                     last_use[nv] = 0; weight[nv] = 0; crosses[nv] = 0; home_pk[nv] = -1;
                     a64_hh_put(&vmap, rv, nv); nv++;
@@ -273,14 +263,14 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     {
         int64_t *delta = (int64_t *)calloc(n_blocks + 1, sizeof(int64_t));
         for (size_t b = 0; b < n_blocks; b++) {
-            MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
-            size_t no = MLIR_GetBlockNumOps(bk);
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t no = MLIR_GetBlockNumOps(ctx, bk);
             for (size_t i = 0; i < no; i++) {
-                MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-                size_t ns = MLIR_GetOpNumSuccessors(op);
+                MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+                size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
                 for (size_t s = 0; s < ns; s++) {
                     uint32_t ti;
-                    if (a64_hh_get(&bmap, (MLIR_ValueHandle)MLIR_GetOpSuccessor(op, s), &ti) &&
+                    if (a64_hh_get(&bmap, (MLIR_ValueHandle)MLIR_GetOpSuccessor(ctx, op, s), &ti) &&
                         ti <= (uint32_t)b) { delta[ti] += 1; delta[b + 1] -= 1; }
                 }
             }
@@ -302,31 +292,31 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     uint64_t *scratch  = (uint64_t *)calloc(bw, sizeof(uint64_t));
 
     for (size_t b = 0; b < n_blocks; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
         uint64_t *G = gen + b * bw, *K = kill + b * bw;
         if (b > 0) {
-            size_t na = MLIR_GetBlockNumArgs(bk);
+            size_t na = MLIR_GetBlockNumArgs(ctx, bk);
             for (size_t a = 0; a < na; a++) {
                 uint32_t vi;
-                if (a64_hh_get(&vmap, MLIR_GetBlockArg(bk, a), &vi)) a64_bs_set(K, vi);
+                if (a64_hh_get(&vmap, MLIR_GetBlockArg(ctx, bk, a), &vi)) a64_bs_set(K, vi);
             }
         }
-        size_t no = MLIR_GetBlockNumOps(bk);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
             if (ra_is_folded(T, ctx, op)) continue;
-            size_t nop = MLIR_GetOpNumOperands(op);
+            size_t nop = MLIR_GetOpNumOperands(ctx, op);
             for (size_t k = 0; k < nop; k++) {
                 uint32_t vi;
-                if (a64_hh_get(&vmap, MLIR_GetOpOperand(op, k), &vi) && !a64_bs_test(K, vi))
+                if (a64_hh_get(&vmap, MLIR_GetOpOperand(ctx, op, k), &vi) && !a64_bs_test(K, vi))
                     a64_bs_set(G, vi);
             }
-            size_t ns = MLIR_GetOpNumSuccessors(op);
+            size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
             for (size_t s = 0; s < ns; s++) {
-                size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, s);
                 for (size_t k = 0; k < nso; k++) {
                     uint32_t vi;
-                    if (a64_hh_get(&vmap, MLIR_GetOpSuccessorOperand(op, s, k), &vi) &&
+                    if (a64_hh_get(&vmap, MLIR_GetOpSuccessorOperand(ctx, op, s, k), &vi) &&
                         !a64_bs_test(K, vi)) a64_bs_set(G, vi);
                 }
             }
@@ -343,10 +333,10 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 uint32_t vi;
                 if (a64_hh_get(&vmap, sfx, &vi) && !a64_bs_test(K, vi)) a64_bs_set(G, vi);
             }
-            size_t nr = MLIR_GetOpNumResults(op);
+            size_t nr = MLIR_GetOpNumResults(ctx, op);
             for (size_t r = 0; r < nr; r++) {
                 uint32_t vi;
-                if (a64_hh_get(&vmap, MLIR_GetOpResult(op, r), &vi)) a64_bs_set(K, vi);
+                if (a64_hh_get(&vmap, MLIR_GetOpResult(ctx, op, r), &vi)) a64_bs_set(K, vi);
             }
         }
     }
@@ -356,16 +346,16 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         changed = false;
         for (size_t br = 0; br < n_blocks; br++) {
             size_t b = n_blocks - 1 - br;
-            MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
             uint64_t *LO = live_out + b * bw;
             a64_bs_zero(LO, nv);
-            size_t no = MLIR_GetBlockNumOps(bk);
+            size_t no = MLIR_GetBlockNumOps(ctx, bk);
             for (size_t i = 0; i < no; i++) {
-                MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-                size_t ns = MLIR_GetOpNumSuccessors(op);
+                MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+                size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
                 for (size_t s = 0; s < ns; s++) {
                     uint32_t si;
-                    if (a64_hh_get(&bmap, (MLIR_ValueHandle)MLIR_GetOpSuccessor(op, s), &si))
+                    if (a64_hh_get(&bmap, (MLIR_ValueHandle)MLIR_GetOpSuccessor(ctx, op, s), &si))
                         a64_bs_or(LO, LO, live_in + si * bw, nv);
                 }
             }
@@ -380,7 +370,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
 
     // --- 3. Per-value first_pos / last_use_pos / use_weight. ---
     for (size_t b = 0; b < n_blocks; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
         uint64_t *LO = live_out + b * bw, *LI = live_in + b * bw;
         for (uint32_t vi = 0; vi < nv; vi++) {
             if (a64_bs_test(LO, vi) && A64_COVL(block_last[b]) > last_use[vi])  last_use[vi]  = A64_COVL(block_last[b]);
@@ -388,27 +378,27 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         }
         uint32_t op_pos = block_first[b];
         uint64_t w = A64_USE_WEIGHT_AT(loop_depth[b]);
-        size_t no = MLIR_GetBlockNumOps(bk);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
             if (ra_is_folded(T, ctx, op)) { op_pos++; continue; }
             uint32_t up = A64_USEP(op_pos);
-            size_t nop = MLIR_GetOpNumOperands(op);
+            size_t nop = MLIR_GetOpNumOperands(ctx, op);
             for (size_t k = 0; k < nop; k++) {
                 uint32_t vi;
-                if (a64_hh_get(&vmap, MLIR_GetOpOperand(op, k), &vi)) {
+                if (a64_hh_get(&vmap, MLIR_GetOpOperand(ctx, op, k), &vi)) {
                     if (up > last_use[vi]) last_use[vi] = up;
                     if (up < first_pos[vi]) first_pos[vi] = up;
                     weight[vi] += w;
                 }
             }
-            size_t ns = MLIR_GetOpNumSuccessors(op);
+            size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
             for (size_t s = 0; s < ns; s++) {
-                MLIR_BlockHandle succ = MLIR_GetOpSuccessor(op, s);
-                size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                MLIR_BlockHandle succ = MLIR_GetOpSuccessor(ctx, op, s);
+                size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, s);
                 for (size_t k = 0; k < nso; k++) {
                     uint32_t vi;
-                    if (a64_hh_get(&vmap, MLIR_GetOpSuccessorOperand(op, s, k), &vi)) {
+                    if (a64_hh_get(&vmap, MLIR_GetOpSuccessorOperand(ctx, op, s, k), &vi)) {
                         if (up > last_use[vi]) last_use[vi] = up;
                         if (up < first_pos[vi]) first_pos[vi] = up;
                         weight[vi] += w;
@@ -418,7 +408,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                     // the write (forward edges define the arg before its own
                     // block-entry position).
                     uint32_t avi;
-                    if (a64_hh_get(&vmap, MLIR_GetBlockArg(succ, k), &avi) &&
+                    if (a64_hh_get(&vmap, MLIR_GetBlockArg(ctx, succ, k), &avi) &&
                         up < first_pos[avi]) first_pos[avi] = up;
                 }
             }
@@ -461,10 +451,10 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         uint8_t *is_call = (uint8_t *)calloc(pos ? pos : 1, sizeof(uint8_t));
         uint32_t op_pos = 0;
         for (size_t b = 0; b < n_blocks; b++) {
-            MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
-            size_t no = MLIR_GetBlockNumOps(bk);
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t no = MLIR_GetBlockNumOps(ctx, bk);
             for (size_t i = 0; i < no; i++) {
-                if (MLIR_GetOpType(MLIR_GetBlockOp(bk, i)) == OP_TYPE_LLVM_CALL)
+                if (MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, bk, i)) == OP_TYPE_LLVM_CALL)
                     is_call[op_pos] = 1;
                 op_pos++;
             }
@@ -483,38 +473,38 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     } else {
         uint64_t *live = (uint64_t *)calloc(bw, sizeof(uint64_t));
         for (size_t b = 0; b < n_blocks; b++) {
-            MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
             memcpy(live, live_out + b * bw, bw * sizeof(uint64_t));
-            size_t no = MLIR_GetBlockNumOps(bk);
+            size_t no = MLIR_GetBlockNumOps(ctx, bk);
             for (size_t ii = no; ii-- > 0; ) {
-                MLIR_OpHandle op = MLIR_GetBlockOp(bk, ii);
+                MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, ii);
                 if (ra_is_folded(T, ctx, op)) continue;
                 // `live` holds the live set immediately AFTER op.
-                if (MLIR_GetOpType(op) == OP_TYPE_LLVM_CALL) {
+                if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_CALL) {
                     uint32_t rvi = 0; bool has_r = false;
-                    if (MLIR_GetOpNumResults(op) &&
-                        a64_hh_get(&vmap, MLIR_GetOpResult(op, 0), &rvi)) has_r = true;
+                    if (MLIR_GetOpNumResults(ctx, op) &&
+                        a64_hh_get(&vmap, MLIR_GetOpResult(ctx, op, 0), &rvi)) has_r = true;
                     for (uint32_t vi = 0; vi < nv; vi++)
                         if (a64_bs_test(live, vi) && !(has_r && vi == rvi))
                             crosses[vi] = 1;
                 }
                 // Transform to live-in(op): live = (live \ defs) U uses.
-                size_t nr = MLIR_GetOpNumResults(op);
+                size_t nr = MLIR_GetOpNumResults(ctx, op);
                 for (size_t r = 0; r < nr; r++) {
                     uint32_t vi;
-                    if (a64_hh_get(&vmap, MLIR_GetOpResult(op, r), &vi)) a64_bs_clear(live, vi);
+                    if (a64_hh_get(&vmap, MLIR_GetOpResult(ctx, op, r), &vi)) a64_bs_clear(live, vi);
                 }
-                size_t nop = MLIR_GetOpNumOperands(op);
+                size_t nop = MLIR_GetOpNumOperands(ctx, op);
                 for (size_t k = 0; k < nop; k++) {
                     uint32_t vi;
-                    if (a64_hh_get(&vmap, MLIR_GetOpOperand(op, k), &vi)) a64_bs_set(live, vi);
+                    if (a64_hh_get(&vmap, MLIR_GetOpOperand(ctx, op, k), &vi)) a64_bs_set(live, vi);
                 }
-                size_t ns = MLIR_GetOpNumSuccessors(op);
+                size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
                 for (size_t s = 0; s < ns; s++) {
-                    size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                    size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, s);
                     for (size_t k = 0; k < nso; k++) {
                         uint32_t vi;
-                        if (a64_hh_get(&vmap, MLIR_GetOpSuccessorOperand(op, s, k), &vi))
+                        if (a64_hh_get(&vmap, MLIR_GetOpSuccessorOperand(ctx, op, s, k), &vi))
                             a64_bs_set(live, vi);
                     }
                 }
@@ -552,22 +542,22 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         // Pass A: count every use of every value (regular operands, successor
         // operands, and re-injected memfuse/shiftfuse operands).
         for (size_t b = 0; b < n_blocks; b++) {
-            MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
-            size_t no = MLIR_GetBlockNumOps(bk);
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t no = MLIR_GetBlockNumOps(ctx, bk);
             for (size_t i = 0; i < no; i++) {
-                MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
+                MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
                 if (ra_is_folded(T, ctx, op)) continue;
-                size_t nop = MLIR_GetOpNumOperands(op);
+                size_t nop = MLIR_GetOpNumOperands(ctx, op);
                 for (size_t k = 0; k < nop; k++) {
                     uint32_t vi;
-                    if (a64_hh_get(&vmap, MLIR_GetOpOperand(op, k), &vi)) nuse[vi]++;
+                    if (a64_hh_get(&vmap, MLIR_GetOpOperand(ctx, op, k), &vi)) nuse[vi]++;
                 }
-                size_t ns = MLIR_GetOpNumSuccessors(op);
+                size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
                 for (size_t s = 0; s < ns; s++) {
-                    size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                    size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, s);
                     for (size_t k = 0; k < nso; k++) {
                         uint32_t vi;
-                        if (a64_hh_get(&vmap, MLIR_GetOpSuccessorOperand(op, s, k), &vi))
+                        if (a64_hh_get(&vmap, MLIR_GetOpSuccessorOperand(ctx, op, s, k), &vi))
                             nuse[vi]++;
                     }
                 }
@@ -586,19 +576,19 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         }
         // Pass B: build hints from sole-use edge sources.
         for (size_t b = 0; b < n_blocks; b++) {
-            MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
-            size_t no = MLIR_GetBlockNumOps(bk);
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t no = MLIR_GetBlockNumOps(ctx, bk);
             for (size_t i = 0; i < no; i++) {
-                MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-                size_t ns = MLIR_GetOpNumSuccessors(op);
+                MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+                size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
                 if (ns == 0) continue;
                 for (size_t s = 0; s < ns; s++) {
-                    MLIR_BlockHandle succ = MLIR_GetOpSuccessor(op, s);
-                    size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                    MLIR_BlockHandle succ = MLIR_GetOpSuccessor(ctx, op, s);
+                    size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, s);
                     for (size_t k = 0; k < nso; k++) {
                         uint32_t vV, vB;
-                        MLIR_ValueHandle Vh = MLIR_GetOpSuccessorOperand(op, s, k);
-                        MLIR_ValueHandle Bh = MLIR_GetBlockArg(succ, k);
+                        MLIR_ValueHandle Vh = MLIR_GetOpSuccessorOperand(ctx, op, s, k);
+                        MLIR_ValueHandle Bh = MLIR_GetBlockArg(ctx, succ, k);
                         if (!a64_hh_get(&vmap, Vh, &vV)) continue;
                         if (!a64_hh_get(&vmap, Bh, &vB)) continue;
                         if (nuse[vV] != 1) continue;            // sole use = this edge
@@ -608,9 +598,9 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                         // terminator to another arg (would be clobbered by V's def).
                         bool through = false;
                         for (size_t s2 = 0; s2 < ns && !through; s2++) {
-                            size_t n2 = MLIR_GetOpNumSuccessorOperands(op, s2);
+                            size_t n2 = MLIR_GetOpNumSuccessorOperands(ctx, op, s2);
                             for (size_t k2 = 0; k2 < n2; k2++)
-                                if (MLIR_GetOpSuccessorOperand(op, s2, k2) == Bh) {
+                                if (MLIR_GetOpSuccessorOperand(ctx, op, s2, k2) == Bh) {
                                     through = true; break;
                                 }
                         }
@@ -757,21 +747,21 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     if (getenv("TINYC_SPILL_STATS")) {
         for (uint32_t vi = 0; vi < nv; vi++) {
             if (home_pk[vi] >= 0) continue;
-            MLIR_OpHandle dop = MLIR_GetValueDefiningOp(handle[vi]);
+            MLIR_OpHandle dop = MLIR_GetValueDefiningOp(ctx, handle[vi]);
             const char *nm = "(blockarg)";
             int nl = 10;
-            if (dop) { string s = MLIR_GetOpTypeName(ctx, MLIR_GetOpType(dop)); nm = s.str; nl = (int)s.size; }
+            if (dop) { string s = MLIR_GetOpTypeName(ctx, MLIR_GetOpType(ctx, dop)); nm = s.str; nl = (int)s.size; }
             const char *dead = (last_use[vi] <= first_pos[vi]) ? "deaddef" : "live";
             char ops[128]; int op_off = 0; ops[0] = '\0';
             if (dop) {
-                size_t non = MLIR_GetOpNumOperands(dop);
+                size_t non = MLIR_GetOpNumOperands(ctx, dop);
                 for (size_t k = 0; k < non && op_off < 100; k++) {
-                    MLIR_ValueHandle ov = MLIR_GetOpOperand(dop, k);
-                    MLIR_OpHandle odef = MLIR_GetValueDefiningOp(ov);
+                    MLIR_ValueHandle ov = MLIR_GetOpOperand(ctx, dop, k);
+                    MLIR_OpHandle odef = MLIR_GetValueDefiningOp(ctx, ov);
                     const char *on; int onl;
                     if (!odef) { on = "barg"; onl = 4; }
                     else if (ra_is_const(T, ctx, odef)) { on = "const"; onl = 5; }
-                    else { string os = MLIR_GetOpTypeName(ctx, MLIR_GetOpType(odef)); on = os.str; onl = (int)os.size; }
+                    else { string os = MLIR_GetOpTypeName(ctx, MLIR_GetOpType(ctx, odef)); on = os.str; onl = (int)os.size; }
                     op_off += snprintf(ops + op_off, sizeof(ops) - op_off,
                                        "%s%.*s", k ? "," : "", onl, on);
                 }
@@ -826,13 +816,13 @@ uint32_t mlir_regalloc_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
     size_t cap = 0;
     size_t maxops = 0;
     for (size_t b = 0; b < n_blocks; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
-        size_t no = MLIR_GetBlockNumOps(bk);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
         if (no > maxops) maxops = no;
         for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-            if (MLIR_GetOpNumRegions(op) > 0) return 0;   // bail: nested regions
-            cap += MLIR_GetOpNumResults(op);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+            if (MLIR_GetOpNumRegions(ctx, op) > 0) return 0;   // bail: nested regions
+            cap += MLIR_GetOpNumResults(ctx, op);
         }
     }
     if (cap == 0) return 0;
@@ -859,17 +849,17 @@ uint32_t mlir_regalloc_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
 
     // Pass 1: record every op-result definition with its block and position.
     for (size_t b = 0; b < n_blocks; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
-        size_t no = MLIR_GetBlockNumOps(bk);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
             if (ra_is_const(T, ctx, op)) continue; // remat'd, no home
             // Folded linmem spine ops (zext/add/inttoptr) emit no code and get
             // no home register; their result is consumed by the fused load/store.
             if (ra_is_folded(T, ctx, op)) continue;
-            size_t nr = MLIR_GetOpNumResults(op);
+            size_t nr = MLIR_GetOpNumResults(ctx, op);
             for (size_t r = 0; r < nr; r++) {
-                vals[nv] = MLIR_GetOpResult(op, r);
+                vals[nv] = MLIR_GetOpResult(ctx, op, r);
                 def_block[nv] = (int32_t)b; def_pos[nv] = (int32_t)i;
                 last_use[nv] = -1; disq[nv] = 0; usedv[nv] = 0; crosses[nv] = 0;
                 home_pk[nv] = -1;
@@ -885,20 +875,20 @@ uint32_t mlir_regalloc_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
     // terminator (incl. successor/edge operands) or an llvm.call (those paths
     // read frame slots, not home registers). Track the last in-block use.
     for (size_t b = 0; b < n_blocks; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
-        size_t no = MLIR_GetBlockNumOps(bk);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
             bool is_term = (i + 1 == no);
-            bool is_call = MLIR_GetOpType(op) == OP_TYPE_LLVM_CALL;
+            bool is_call = MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_CALL;
             // A folded spine op (zext/add/inttoptr) emits no code: its operand
             // reads must NOT extend liveness. The fused load/store re-registers
             // base+idx as live uses at its own position (below).
             if (ra_is_folded(T, ctx, op)) continue;
-            size_t nop = MLIR_GetOpNumOperands(op);
+            size_t nop = MLIR_GetOpNumOperands(ctx, op);
             for (size_t k = 0; k < nop; k++) {
                 int32_t vi;
-                if (!sm_get(&idx, MLIR_GetOpOperand(op, k), &vi)) continue;
+                if (!sm_get(&idx, MLIR_GetOpOperand(ctx, op, k), &vi)) continue;
                 usedv[vi] = 1; use_cnt[vi]++;
                 if ((int32_t)b != def_block[vi] || is_term || is_call)
                     disq[vi] = 1;
@@ -908,18 +898,18 @@ uint32_t mlir_regalloc_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
             // Branch successor (block-arg) operands are a separate operand list
             // resolved via slot-to-slot edge copies (copy_slot reads the frame
             // slot), so any value passed across an edge must stay in memory.
-            size_t nsucc = MLIR_GetOpNumSuccessors(op);
+            size_t nsucc = MLIR_GetOpNumSuccessors(ctx, op);
             for (size_t s = 0; s < nsucc; s++) {
-                size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+                size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, s);
                 for (size_t k = 0; k < nso; k++) {
                     int32_t vi;
-                    if (!sm_get(&idx, MLIR_GetOpSuccessorOperand(op, s, k), &vi))
+                    if (!sm_get(&idx, MLIR_GetOpSuccessorOperand(ctx, op, s, k), &vi))
                         continue;
                     usedv[vi] = 1; disq[vi] = 1; use_cnt[vi]++;
                     // Record the destination block-arg + terminator so a sole-use
                     // edge operand can later be coalesced into the block-arg's
                     // home register (the mov vanishes in emit_edge_copies).
-                    edge_arg[vi]  = MLIR_GetBlockArg(MLIR_GetOpSuccessor(op, s), k);
+                    edge_arg[vi]  = MLIR_GetBlockArg(ctx, MLIR_GetOpSuccessor(ctx, op, s), k);
                     edge_term[vi] = op;
                 }
             }
@@ -970,11 +960,11 @@ uint32_t mlir_regalloc_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
     int32_t *callpos = (int32_t *)arena_alloc(ar, (maxops ? maxops : 1) *
                                               sizeof(int32_t));
     for (size_t b = 0; b < n_blocks; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
-        size_t no = MLIR_GetBlockNumOps(bk);
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
         size_t ncall = 0;
         for (size_t i = 0; i < no; i++)
-            if (MLIR_GetOpType(MLIR_GetBlockOp(bk, i)) == OP_TYPE_LLVM_CALL)
+            if (MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, bk, i)) == OP_TYPE_LLVM_CALL)
                 callpos[ncall++] = (int32_t)i;
         if (ncall == 0) continue;
         for (size_t vi = 0; vi < nv; vi++) {
@@ -1017,7 +1007,7 @@ uint32_t mlir_regalloc_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
     if (!getenv("TINYC_NO_HOMING")) {
         size_t nba = 0;
         for (size_t b = 1; b < n_blocks; b++)
-            nba += MLIR_GetBlockNumArgs(MLIR_GetRegionBlock(reg, b));
+            nba += MLIR_GetBlockNumArgs(ctx, MLIR_GetRegionBlock(ctx, reg, b));
         if (nba) {
             MLIR_ValueHandle *bv =
                 (MLIR_ValueHandle *)arena_alloc(ar, nba * sizeof(MLIR_ValueHandle));
@@ -1025,29 +1015,29 @@ uint32_t mlir_regalloc_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
             SlotMap bidx = {0}; bidx.arena = ar;
             size_t m = 0;
             for (size_t b = 1; b < n_blocks; b++) {
-                MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
-                size_t na = MLIR_GetBlockNumArgs(bk);
+                MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+                size_t na = MLIR_GetBlockNumArgs(ctx, bk);
                 for (size_t a = 0; a < na; a++) {
-                    bv[m] = MLIR_GetBlockArg(bk, a); bscore[m] = 0;
+                    bv[m] = MLIR_GetBlockArg(ctx, bk, a); bscore[m] = 0;
                     sm_put(&bidx, bv[m], (int32_t)m); m++;
                 }
             }
             for (size_t b = 0; b < n_blocks; b++) {
-                MLIR_BlockHandle bk = MLIR_GetRegionBlock(reg, b);
-                size_t no = MLIR_GetBlockNumOps(bk);
+                MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+                size_t no = MLIR_GetBlockNumOps(ctx, bk);
                 for (size_t i = 0; i < no; i++) {
-                    MLIR_OpHandle op = MLIR_GetBlockOp(bk, i);
-                    size_t nop = MLIR_GetOpNumOperands(op);
+                    MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+                    size_t nop = MLIR_GetOpNumOperands(ctx, op);
                     for (size_t k = 0; k < nop; k++) {
                         int32_t bi;
-                        if (sm_get(&bidx, MLIR_GetOpOperand(op, k), &bi)) bscore[bi]++;
+                        if (sm_get(&bidx, MLIR_GetOpOperand(ctx, op, k), &bi)) bscore[bi]++;
                     }
-                    size_t nsucc = MLIR_GetOpNumSuccessors(op);
+                    size_t nsucc = MLIR_GetOpNumSuccessors(ctx, op);
                     for (size_t sx = 0; sx < nsucc; sx++) {
-                        size_t nso = MLIR_GetOpNumSuccessorOperands(op, sx);
+                        size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, sx);
                         for (size_t k = 0; k < nso; k++) {
                             int32_t bi;
-                            if (sm_get(&bidx, MLIR_GetOpSuccessorOperand(op, sx, k), &bi))
+                            if (sm_get(&bidx, MLIR_GetOpSuccessorOperand(ctx, op, sx, k), &bi))
                                 bscore[bi]++;
                         }
                     }
@@ -1093,21 +1083,21 @@ uint32_t mlir_regalloc_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
             MLIR_ValueHandle ba = edge_arg[vi];
             if (term == MLIR_INVALID_HANDLE || ba == MLIR_INVALID_HANDLE) continue;
             // Single-successor (unconditional) terminator only.
-            if (MLIR_GetOpNumSuccessors(term) != 1) continue;
+            if (MLIR_GetOpNumSuccessors(ctx, term) != 1) continue;
             // Value must be defined immediately before its block's terminator.
-            MLIR_BlockHandle db = MLIR_GetRegionBlock(reg, def_block[vi]);
-            size_t dno = MLIR_GetBlockNumOps(db);
+            MLIR_BlockHandle db = MLIR_GetRegionBlock(ctx, reg, def_block[vi]);
+            size_t dno = MLIR_GetBlockNumOps(ctx, db);
             if (dno < 2 || def_pos[vi] != (int32_t)dno - 2) continue;
-            if (MLIR_GetBlockOp(db, dno - 1) != term) continue;
+            if (MLIR_GetBlockOp(ctx, db, dno - 1) != term) continue;
             // Destination block-arg must be register-homed.
             int32_t R;
             if (!sm_get(rm, ba, &R)) continue;
             // The block-arg's register must not be read by any OTHER operand of
             // this edge (no pass-through of the old phi value into R).
             bool conflict = false;
-            size_t nso = MLIR_GetOpNumSuccessorOperands(term, 0);
+            size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, term, 0);
             for (size_t k = 0; k < nso && !conflict; k++) {
-                MLIR_ValueHandle o = MLIR_GetOpSuccessorOperand(term, 0, k);
+                MLIR_ValueHandle o = MLIR_GetOpSuccessorOperand(ctx, term, 0, k);
                 if (o == ba) { conflict = true; break; }   // old arg passed through
                 if (o == vals[vi]) continue;                // the value itself
                 int32_t or_;
@@ -1143,9 +1133,9 @@ uint32_t mlir_regalloc_cfg(MLIR_Context *ctx, MLIR_RegionHandle reg,
             // rd == r0, so no value is clobbered before its last read.
             if (!getenv("TINYC_NO_COALESCE")) {
                 MLIR_ValueHandle csrc;
-                MLIR_OpHandle dop = MLIR_GetValueDefiningOp(vals[vi]);
+                MLIR_OpHandle dop = MLIR_GetValueDefiningOp(ctx, vals[vi]);
                 int32_t ui;
-                if (dop != MLIR_INVALID_HANDLE && cast_src(dop, &csrc) &&
+                if (dop != MLIR_INVALID_HANDLE && cast_src(ctx, dop, &csrc) &&
                     sm_get(&idx, csrc, &ui) && def_block[ui] == (int32_t)b &&
                     home_pk[ui] >= 0 && last_use[ui] == s &&
                     !(crosses[vi] && home_pk[ui] < T->ncaller)) {

@@ -154,39 +154,39 @@ static size_t l2r_alloca_index(M *m, MLIR_ValueHandle v) {
 // use — including ANY use nested inside an scf/structured region, where the
 // top-level CFG phi machinery cannot reach — disqualifies it.
 static void l2r_mark_escapes_block(M *m, MLIR_BlockHandle blk, bool nested) {
-    size_t nops = MLIR_GetBlockNumOps(blk);
+    size_t nops = MLIR_GetBlockNumOps(m->ctx, blk);
     for (size_t j = 0; j < nops; j++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(blk, j);
-        MLIR_OpType t = MLIR_GetOpType(op);
-        size_t no = MLIR_GetOpNumOperands(op);
+        MLIR_OpHandle op = MLIR_GetBlockOp(m->ctx, blk, j);
+        MLIR_OpType t = MLIR_GetOpType(m->ctx, op);
+        size_t no = MLIR_GetOpNumOperands(m->ctx, op);
         for (size_t k = 0; k < no; k++) {
-            size_t ai = l2r_alloca_index(m, MLIR_GetOpOperand(op, k));
+            size_t ai = l2r_alloca_index(m, MLIR_GetOpOperand(m->ctx, op, k));
             if (ai == (size_t)-1) continue;
             bool ok = false;
             if (!nested && t == OP_TYPE_LLVM_LOAD && k == 0) {
-                ok = (MLIR_GetValueType(MLIR_GetOpResult(op, 0)) == m->elemty[ai]);
+                ok = (MLIR_GetValueType(m->ctx, MLIR_GetOpResult(m->ctx, op, 0)) == m->elemty[ai]);
             } else if (!nested && t == OP_TYPE_LLVM_STORE && k == 1) {
-                ok = (MLIR_GetValueType(MLIR_GetOpOperand(op, 0)) == m->elemty[ai]);
+                ok = (MLIR_GetValueType(m->ctx, MLIR_GetOpOperand(m->ctx, op, 0)) == m->elemty[ai]);
             }
             if (!ok) m->promotable[ai] = false;
         }
         // A terminator could carry the pointer as a successor operand.
-        size_t nsuc = MLIR_GetOpNumSuccessors(op);
+        size_t nsuc = MLIR_GetOpNumSuccessors(m->ctx, op);
         for (size_t s = 0; s < nsuc; s++) {
-            size_t nso = MLIR_GetOpNumSuccessorOperands(op, s);
+            size_t nso = MLIR_GetOpNumSuccessorOperands(m->ctx, op, s);
             for (size_t i = 0; i < nso; i++) {
-                size_t ai = l2r_alloca_index(m, MLIR_GetOpSuccessorOperand(op, s, i));
+                size_t ai = l2r_alloca_index(m, MLIR_GetOpSuccessorOperand(m->ctx, op, s, i));
                 if (ai != (size_t)-1) m->promotable[ai] = false;
             }
         }
         // Recurse into nested regions: any alloca touched there cannot be
         // promoted by the top-level SSA construction.
-        size_t nr = MLIR_GetOpNumRegions(op);
+        size_t nr = MLIR_GetOpNumRegions(m->ctx, op);
         for (size_t r = 0; r < nr; r++) {
-            MLIR_RegionHandle rg = MLIR_GetOpRegion(op, r);
-            size_t rnb = MLIR_GetRegionNumBlocks(rg);
+            MLIR_RegionHandle rg = MLIR_GetOpRegion(m->ctx, op, r);
+            size_t rnb = MLIR_GetRegionNumBlocks(m->ctx, rg);
             for (size_t b = 0; b < rnb; b++)
-                l2r_mark_escapes_block(m, MLIR_GetRegionBlock(rg, b), true);
+                l2r_mark_escapes_block(m, MLIR_GetRegionBlock(m->ctx, rg, b), true);
         }
     }
 }
@@ -313,28 +313,28 @@ static MLIR_ValueHandle l2r_concrete(M *m, uintptr_t v) {
 // Recursively resolve every operand in a block (and its nested regions)
 // through the remap/phi tables to its concrete value.
 static void l2r_sweep_block(M *m, MLIR_BlockHandle blk) {
-    size_t nops = MLIR_GetBlockNumOps(blk);
+    size_t nops = MLIR_GetBlockNumOps(m->ctx, blk);
     for (size_t j = 0; j < nops; j++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(blk, j);
-        size_t no = MLIR_GetOpNumOperands(op);
+        MLIR_OpHandle op = MLIR_GetBlockOp(m->ctx, blk, j);
+        size_t no = MLIR_GetOpNumOperands(m->ctx, op);
         for (size_t k = 0; k < no; k++) {
-            MLIR_ValueHandle v = MLIR_GetOpOperand(op, k);
+            MLIR_ValueHandle v = MLIR_GetOpOperand(m->ctx, op, k);
             MLIR_ValueHandle r = l2r_concrete(m, (uintptr_t)v);
             if (r != v) MLIR_SetOpOperand(m->ctx, op, k, r);
         }
-        size_t nr = MLIR_GetOpNumRegions(op);
+        size_t nr = MLIR_GetOpNumRegions(m->ctx, op);
         for (size_t rr = 0; rr < nr; rr++) {
-            MLIR_RegionHandle rg = MLIR_GetOpRegion(op, rr);
-            size_t rnb = MLIR_GetRegionNumBlocks(rg);
+            MLIR_RegionHandle rg = MLIR_GetOpRegion(m->ctx, op, rr);
+            size_t rnb = MLIR_GetRegionNumBlocks(m->ctx, rg);
             for (size_t b = 0; b < rnb; b++)
-                l2r_sweep_block(m, MLIR_GetRegionBlock(rg, b));
+                l2r_sweep_block(m, MLIR_GetRegionBlock(m->ctx, rg, b));
         }
     }
 }
 
 // Promote one function body region (flat cf CFG) in place.
 static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
-    size_t nb = MLIR_GetRegionNumBlocks(region);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
     if (nb == 0) return;
 
     M m;
@@ -346,8 +346,8 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     m.terms  = (MLIR_OpHandle *)malloc(nb * sizeof(MLIR_OpHandle));
     hmap_init(&m.bidx, nb);
     for (size_t bi = 0; bi < nb; bi++) {
-        m.blocks[bi] = MLIR_GetRegionBlock(region, bi);
-        m.terms[bi]  = MLIR_GetBlockTerminator(m.blocks[bi]);
+        m.blocks[bi] = MLIR_GetRegionBlock(ctx, region, bi);
+        m.terms[bi]  = MLIR_GetBlockTerminator(ctx, m.blocks[bi]);
         hmap_put(&m.bidx, (uintptr_t)m.blocks[bi], (uintptr_t)bi);
     }
 
@@ -361,11 +361,11 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     size_t na = 0;
     for (size_t bi = 0; bi < nb; bi++) {
         MLIR_BlockHandle blk = m.blocks[bi];
-        size_t nops = MLIR_GetBlockNumOps(blk);
+        size_t nops = MLIR_GetBlockNumOps(ctx, blk);
         for (size_t j = 0; j < nops; j++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(blk, j);
-            if (MLIR_GetOpType(op) != OP_TYPE_LLVM_ALLOCA) continue;
-            MLIR_AttributeHandle ea = MLIR_GetOpAttributeByName(op, "elem_type");
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, j);
+            if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_ALLOCA) continue;
+            MLIR_AttributeHandle ea = MLIR_GetOpAttributeByName(ctx, op, "elem_type");
             if (ea == MLIR_INVALID_HANDLE) continue;
             if (na == cap) {
                 cap <<= 1;
@@ -376,7 +376,7 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
             }
             m.elemty[na]     = MLIR_GetAttributeTypeValue(ea);
             m.promotable[na] = true;
-            alloca_res[na]   = MLIR_GetOpResult(op, 0);
+            alloca_res[na]   = MLIR_GetOpResult(ctx, op, 0);
             alloca_op[na]    = op;
             hmap_put(&m.aidx, (uintptr_t)alloca_res[na], (uintptr_t)na);
             na++;
@@ -413,14 +413,14 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     // ---- defOut: last value stored to each promotable alloca per block -----
     for (size_t bi = 0; bi < nb; bi++) {
         MLIR_BlockHandle blk = m.blocks[bi];
-        size_t nops = MLIR_GetBlockNumOps(blk);
+        size_t nops = MLIR_GetBlockNumOps(ctx, blk);
         for (size_t j = 0; j < nops; j++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(blk, j);
-            if (MLIR_GetOpType(op) != OP_TYPE_LLVM_STORE) continue;
-            size_t ai = l2r_alloca_index(&m, MLIR_GetOpOperand(op, 1));
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, j);
+            if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_STORE) continue;
+            size_t ai = l2r_alloca_index(&m, MLIR_GetOpOperand(ctx, op, 1));
             if (ai == (size_t)-1 || !m.promotable[ai]) continue;
             hmap_put(&m.defOut, (uintptr_t)(bi * na + ai + 1),
-                     (uintptr_t)MLIR_GetOpOperand(op, 0));
+                     (uintptr_t)MLIR_GetOpOperand(ctx, op, 0));
         }
     }
 
@@ -429,9 +429,9 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     for (size_t bi = 0; bi < nb; bi++) {
         MLIR_OpHandle t = m.terms[bi];
         if (t == 0) continue;
-        size_t ns = MLIR_GetOpNumSuccessors(t);
+        size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
         for (size_t s = 0; s < ns; s++) {
-            size_t k = l2r_block_index(&m, MLIR_GetOpSuccessor(t, s));
+            size_t k = l2r_block_index(&m, MLIR_GetOpSuccessor(ctx, t, s));
             if (k != (size_t)-1) m.pred_off[k + 1]++;
         }
     }
@@ -444,9 +444,9 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
         for (size_t bi = 0; bi < nb; bi++) {
             MLIR_OpHandle t = m.terms[bi];
             if (t == 0) continue;
-            size_t ns = MLIR_GetOpNumSuccessors(t);
+            size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
             for (size_t s = 0; s < ns; s++) {
-                size_t k = l2r_block_index(&m, MLIR_GetOpSuccessor(t, s));
+                size_t k = l2r_block_index(&m, MLIR_GetOpSuccessor(ctx, t, s));
                 if (k == (size_t)-1) continue;
                 size_t pos = m.pred_off[k] + fill[k]++;
                 m.pred_blk[pos] = bi;
@@ -468,26 +468,26 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     for (size_t bi = 0; bi < nb; bi++) {
         for (size_t ai = 0; ai < na; ai++) cur[ai] = 0;
         MLIR_BlockHandle blk = m.blocks[bi];
-        size_t nops = MLIR_GetBlockNumOps(blk);
+        size_t nops = MLIR_GetBlockNumOps(ctx, blk);
         for (size_t j = 0; j < nops; j++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(blk, j);
-            MLIR_OpType t = MLIR_GetOpType(op);
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, j);
+            MLIR_OpType t = MLIR_GetOpType(ctx, op);
             if (t == OP_TYPE_LLVM_STORE) {
-                size_t ai = l2r_alloca_index(&m, MLIR_GetOpOperand(op, 1));
+                size_t ai = l2r_alloca_index(&m, MLIR_GetOpOperand(ctx, op, 1));
                 if (ai == (size_t)-1 || !m.promotable[ai]) continue;
-                cur[ai] = (uintptr_t)MLIR_GetOpOperand(op, 0);
+                cur[ai] = (uintptr_t)MLIR_GetOpOperand(ctx, op, 0);
             } else if (t == OP_TYPE_LLVM_LOAD) {
-                size_t ai = l2r_alloca_index(&m, MLIR_GetOpOperand(op, 0));
+                size_t ai = l2r_alloca_index(&m, MLIR_GetOpOperand(ctx, op, 0));
                 if (ai == (size_t)-1 || !m.promotable[ai]) continue;
                 uintptr_t val = cur[ai];
                 if (val == 0) { val = l2r_live_in(&m, ai, bi); cur[ai] = val; }
-                hmap_put(&m.remap, (uintptr_t)MLIR_GetOpResult(op, 0), val);
+                hmap_put(&m.remap, (uintptr_t)MLIR_GetOpResult(ctx, op, 0), val);
             } else {
                 continue;
             }
             L2R_ERASE(op);
             // Creating phis may insert zero consts into this block.
-            nops = MLIR_GetBlockNumOps(blk);
+            nops = MLIR_GetBlockNumOps(ctx, blk);
         }
     }
     // The promotable alloca ops are now dead.
@@ -550,7 +550,7 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
         for (size_t e = m.pred_off[k]; e < m.pred_off[k + 1]; e++) {
             MLIR_OpHandle term = m.terms[m.pred_blk[e]];
             size_t slot = m.pred_slot[e];
-            size_t nso = MLIR_GetOpNumSuccessorOperands(term, slot);
+            size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, term, slot);
             size_t total = nso + add;
             if (total == 0) continue;
             if (total > sobuf_cap) {
@@ -560,7 +560,7 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
             }
             bool changed = (add > 0);
             for (size_t i = 0; i < nso; i++) {
-                MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(term, slot, i);
+                MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(ctx, term, slot, i);
                 MLIR_ValueHandle r = l2r_concrete(&m, (uintptr_t)v);
                 sobuf[i] = r;
                 if (r != v) changed = true;
@@ -731,20 +731,20 @@ static size_t sroa_gidx(S *s, MLIR_ValueHandle v) {
 
 // Phase 1: classify direct uses of each aggregate alloca; record candidate GEPs.
 static void sroa_scan_uses(S *s, MLIR_BlockHandle blk, bool nested) {
-    size_t nops = MLIR_GetBlockNumOps(blk);
+    size_t nops = MLIR_GetBlockNumOps(s->ctx, blk);
     for (size_t j = 0; j < nops; j++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(blk, j);
-        MLIR_OpType t = MLIR_GetOpType(op);
-        size_t no = MLIR_GetOpNumOperands(op);
+        MLIR_OpHandle op = MLIR_GetBlockOp(s->ctx, blk, j);
+        MLIR_OpType t = MLIR_GetOpType(s->ctx, op);
+        size_t no = MLIR_GetOpNumOperands(s->ctx, op);
         if (!nested && t == OP_TYPE_LLVM_GEP && no >= 1) {
-            size_t ai = sroa_aidx(s, MLIR_GetOpOperand(op, 0));
+            size_t ai = sroa_aidx(s, MLIR_GetOpOperand(s->ctx, op, 0));
             if (ai != (size_t)-1) {
                 // Any aggregate alloca appearing as a non-base operand (a
                 // dynamic-index value) would be an escape.
                 for (size_t k = 1; k < no; k++)
-                    if (sroa_aidx(s, MLIR_GetOpOperand(op, k)) != (size_t)-1)
-                        s->a_split[sroa_aidx(s, MLIR_GetOpOperand(op, k))] = false;
-                MLIR_AttributeHandle ria = MLIR_GetOpAttributeByName(op, "rawConstantIndices");
+                    if (sroa_aidx(s, MLIR_GetOpOperand(s->ctx, op, k)) != (size_t)-1)
+                        s->a_split[sroa_aidx(s, MLIR_GetOpOperand(s->ctx, op, k))] = false;
+                MLIR_AttributeHandle ria = MLIR_GetOpAttributeByName(s->ctx, op, "rawConstantIndices");
                 int32_t idx[SROA_MAX_PATH]; int nidx = 0;
                 bool okpath = ria != MLIR_INVALID_HANDLE &&
                     sroa_parse_indices(MLIR_GetAttributeAsString(s->ctx, ria),
@@ -763,7 +763,7 @@ static void sroa_scan_uses(S *s, MLIR_BlockHandle blk, bool nested) {
                 SroaGep *g = &s->geps[s->ng];
                 memset(g, 0, sizeof(*g));
                 g->op = op;
-                g->res = MLIR_GetOpResult(op, 0);
+                g->res = MLIR_GetOpResult(s->ctx, op, 0);
                 g->ai = ai;
                 g->leaf = leaf;
                 g->plen = nidx;
@@ -777,23 +777,23 @@ static void sroa_scan_uses(S *s, MLIR_BlockHandle blk, bool nested) {
         // Generic case: any operand that is an aggregate alloca (and is not the
         // base of a recognised constant GEP handled above) escapes.
         for (size_t k = 0; k < no; k++) {
-            size_t ai = sroa_aidx(s, MLIR_GetOpOperand(op, k));
+            size_t ai = sroa_aidx(s, MLIR_GetOpOperand(s->ctx, op, k));
             if (ai != (size_t)-1) s->a_split[ai] = false;
         }
-        size_t nsuc = MLIR_GetOpNumSuccessors(op);
+        size_t nsuc = MLIR_GetOpNumSuccessors(s->ctx, op);
         for (size_t su = 0; su < nsuc; su++) {
-            size_t nso = MLIR_GetOpNumSuccessorOperands(op, su);
+            size_t nso = MLIR_GetOpNumSuccessorOperands(s->ctx, op, su);
             for (size_t i = 0; i < nso; i++) {
-                size_t ai = sroa_aidx(s, MLIR_GetOpSuccessorOperand(op, su, i));
+                size_t ai = sroa_aidx(s, MLIR_GetOpSuccessorOperand(s->ctx, op, su, i));
                 if (ai != (size_t)-1) s->a_split[ai] = false;
             }
         }
-        size_t nr = MLIR_GetOpNumRegions(op);
+        size_t nr = MLIR_GetOpNumRegions(s->ctx, op);
         for (size_t r = 0; r < nr; r++) {
-            MLIR_RegionHandle rg = MLIR_GetOpRegion(op, r);
-            size_t rnb = MLIR_GetRegionNumBlocks(rg);
+            MLIR_RegionHandle rg = MLIR_GetOpRegion(s->ctx, op, r);
+            size_t rnb = MLIR_GetRegionNumBlocks(s->ctx, rg);
             for (size_t b = 0; b < rnb; b++)
-                sroa_scan_uses(s, MLIR_GetRegionBlock(rg, b), true);
+                sroa_scan_uses(s, MLIR_GetRegionBlock(s->ctx, rg, b), true);
         }
     }
 }
@@ -801,44 +801,44 @@ static void sroa_scan_uses(S *s, MLIR_BlockHandle blk, bool nested) {
 // Phase 2: every use of a candidate GEP result must be a matching scalar
 // load/store; anything else disqualifies the owning alloca.
 static void sroa_scan_gep_uses(S *s, MLIR_BlockHandle blk) {
-    size_t nops = MLIR_GetBlockNumOps(blk);
+    size_t nops = MLIR_GetBlockNumOps(s->ctx, blk);
     for (size_t j = 0; j < nops; j++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(blk, j);
-        MLIR_OpType t = MLIR_GetOpType(op);
-        size_t no = MLIR_GetOpNumOperands(op);
+        MLIR_OpHandle op = MLIR_GetBlockOp(s->ctx, blk, j);
+        MLIR_OpType t = MLIR_GetOpType(s->ctx, op);
+        size_t no = MLIR_GetOpNumOperands(s->ctx, op);
         for (size_t k = 0; k < no; k++) {
-            size_t gi = sroa_gidx(s, MLIR_GetOpOperand(op, k));
+            size_t gi = sroa_gidx(s, MLIR_GetOpOperand(s->ctx, op, k));
             if (gi == (size_t)-1) continue;
             SroaGep *g = &s->geps[gi];
             bool ok = false;
             if (t == OP_TYPE_LLVM_LOAD && k == 0)
-                ok = (MLIR_GetValueType(MLIR_GetOpResult(op, 0)) == g->leaf);
+                ok = (MLIR_GetValueType(s->ctx, MLIR_GetOpResult(s->ctx, op, 0)) == g->leaf);
             else if (t == OP_TYPE_LLVM_STORE && k == 1)
-                ok = (MLIR_GetValueType(MLIR_GetOpOperand(op, 0)) == g->leaf);
+                ok = (MLIR_GetValueType(s->ctx, MLIR_GetOpOperand(s->ctx, op, 0)) == g->leaf);
             if (!ok) s->a_split[g->ai] = false;
         }
-        size_t nsuc = MLIR_GetOpNumSuccessors(op);
+        size_t nsuc = MLIR_GetOpNumSuccessors(s->ctx, op);
         for (size_t su = 0; su < nsuc; su++) {
-            size_t nso = MLIR_GetOpNumSuccessorOperands(op, su);
+            size_t nso = MLIR_GetOpNumSuccessorOperands(s->ctx, op, su);
             for (size_t i = 0; i < nso; i++) {
-                size_t gi = sroa_gidx(s, MLIR_GetOpSuccessorOperand(op, su, i));
+                size_t gi = sroa_gidx(s, MLIR_GetOpSuccessorOperand(s->ctx, op, su, i));
                 if (gi != (size_t)-1) s->a_split[s->geps[gi].ai] = false;
             }
         }
-        size_t nr = MLIR_GetOpNumRegions(op);
+        size_t nr = MLIR_GetOpNumRegions(s->ctx, op);
         for (size_t r = 0; r < nr; r++) {
-            MLIR_RegionHandle rg = MLIR_GetOpRegion(op, r);
-            size_t rnb = MLIR_GetRegionNumBlocks(rg);
+            MLIR_RegionHandle rg = MLIR_GetOpRegion(s->ctx, op, r);
+            size_t rnb = MLIR_GetRegionNumBlocks(s->ctx, rg);
             for (size_t b = 0; b < rnb; b++)
-                sroa_scan_gep_uses(s, MLIR_GetRegionBlock(rg, b));
+                sroa_scan_gep_uses(s, MLIR_GetRegionBlock(s->ctx, rg, b));
         }
     }
 }
 
-static size_t sroa_block_op_index(MLIR_BlockHandle blk, MLIR_OpHandle op) {
-    size_t n = MLIR_GetBlockNumOps(blk);
+static size_t sroa_block_op_index(MLIR_Context *ctx, MLIR_BlockHandle blk, MLIR_OpHandle op) {
+    size_t n = MLIR_GetBlockNumOps(ctx, blk);
     for (size_t i = 0; i < n; i++)
-        if (MLIR_GetBlockOp(blk, i) == op) return i;
+        if (MLIR_GetBlockOp(ctx, blk, i) == op) return i;
     return (size_t)-1;
 }
 
@@ -868,7 +868,7 @@ static MLIR_ValueHandle sroa_field_alloca(S *s, size_t ai, const int32_t *path,
     MLIR_OpHandle op = MLIR_CreateOp(ctx, OP_TYPE_LLVM_ALLOCA,
                                      attrs, 1, rty, 1, rv, 1, ops, 1, NULL, 0,
                                      loc, MLIR_INVALID_HANDLE, (string){0}, -1);
-    size_t at = sroa_block_op_index(s->a_blk[ai], s->a_op[ai]);
+    size_t at = sroa_block_op_index(ctx, s->a_blk[ai], s->a_op[ai]);
     MLIR_InsertBlockOpAtIndex(ctx, s->a_blk[ai], op, at + 1);
     int e = base + s->a_nfield[ai];
     s->a_fplen[e] = plen;
@@ -880,31 +880,31 @@ static MLIR_ValueHandle sroa_field_alloca(S *s, size_t ai, const int32_t *path,
 
 // Phase 4: repoint loads/stores from field GEPs to the per-field scalar alloca.
 static void sroa_rewrite(S *s, MLIR_BlockHandle blk) {
-    size_t nops = MLIR_GetBlockNumOps(blk);
+    size_t nops = MLIR_GetBlockNumOps(s->ctx, blk);
     for (size_t j = 0; j < nops; j++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(blk, j);
-        MLIR_OpType t = MLIR_GetOpType(op);
+        MLIR_OpHandle op = MLIR_GetBlockOp(s->ctx, blk, j);
+        MLIR_OpType t = MLIR_GetOpType(s->ctx, op);
         if (t == OP_TYPE_LLVM_LOAD) {
-            size_t gi = sroa_gidx(s, MLIR_GetOpOperand(op, 0));
+            size_t gi = sroa_gidx(s, MLIR_GetOpOperand(s->ctx, op, 0));
             if (gi != (size_t)-1 && s->geps[gi].scalar != MLIR_INVALID_HANDLE)
                 MLIR_SetOpOperand(s->ctx, op, 0, s->geps[gi].scalar);
-        } else if (t == OP_TYPE_LLVM_STORE && MLIR_GetOpNumOperands(op) >= 2) {
-            size_t gi = sroa_gidx(s, MLIR_GetOpOperand(op, 1));
+        } else if (t == OP_TYPE_LLVM_STORE && MLIR_GetOpNumOperands(s->ctx, op) >= 2) {
+            size_t gi = sroa_gidx(s, MLIR_GetOpOperand(s->ctx, op, 1));
             if (gi != (size_t)-1 && s->geps[gi].scalar != MLIR_INVALID_HANDLE)
                 MLIR_SetOpOperand(s->ctx, op, 1, s->geps[gi].scalar);
         }
-        size_t nr = MLIR_GetOpNumRegions(op);
+        size_t nr = MLIR_GetOpNumRegions(s->ctx, op);
         for (size_t r = 0; r < nr; r++) {
-            MLIR_RegionHandle rg = MLIR_GetOpRegion(op, r);
-            size_t rnb = MLIR_GetRegionNumBlocks(rg);
+            MLIR_RegionHandle rg = MLIR_GetOpRegion(s->ctx, op, r);
+            size_t rnb = MLIR_GetRegionNumBlocks(s->ctx, rg);
             for (size_t b = 0; b < rnb; b++)
-                sroa_rewrite(s, MLIR_GetRegionBlock(rg, b));
+                sroa_rewrite(s, MLIR_GetRegionBlock(s->ctx, rg, b));
         }
     }
 }
 
 static void sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
-    size_t nb = MLIR_GetRegionNumBlocks(region);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
     if (nb == 0) return;
 
     S s;
@@ -923,13 +923,13 @@ static void sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
 
     // Collect aggregate (struct/array) allocas with a constant element count.
     for (size_t bi = 0; bi < nb; bi++) {
-        MLIR_BlockHandle blk = MLIR_GetRegionBlock(region, bi);
-        size_t nops = MLIR_GetBlockNumOps(blk);
+        MLIR_BlockHandle blk = MLIR_GetRegionBlock(ctx, region, bi);
+        size_t nops = MLIR_GetBlockNumOps(ctx, blk);
         for (size_t j = 0; j < nops; j++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(blk, j);
-            if (MLIR_GetOpType(op) != OP_TYPE_LLVM_ALLOCA) continue;
-            if (MLIR_GetOpNumOperands(op) < 1) continue;
-            MLIR_AttributeHandle ea = MLIR_GetOpAttributeByName(op, "elem_type");
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, j);
+            if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_ALLOCA) continue;
+            if (MLIR_GetOpNumOperands(ctx, op) < 1) continue;
+            MLIR_AttributeHandle ea = MLIR_GetOpAttributeByName(ctx, op, "elem_type");
             if (ea == MLIR_INVALID_HANDLE) continue;
             MLIR_TypeHandle et = MLIR_GetAttributeTypeValue(ea);
             if (!MLIR_IsTypeLLVMStruct(et) && !MLIR_IsTypeLLVMArray(et)) continue;
@@ -944,13 +944,13 @@ static void sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
                 s.a_split = realloc(s.a_split, s.acap * sizeof(*s.a_split));
             }
             size_t ai = s.na++;
-            MLIR_ValueHandle res = MLIR_GetOpResult(op, 0);
+            MLIR_ValueHandle res = MLIR_GetOpResult(ctx, op, 0);
             s.a_op[ai]    = op;
             s.a_blk[ai]   = blk;
             s.a_res[ai]   = res;
-            s.a_size[ai]  = MLIR_GetOpOperand(op, 0);
+            s.a_size[ai]  = MLIR_GetOpOperand(ctx, op, 0);
             s.a_elem[ai]  = et;
-            s.a_ptrty[ai] = MLIR_GetValueType(res);
+            s.a_ptrty[ai] = MLIR_GetValueType(ctx, res);
             s.a_split[ai] = true;
             hmap_put(&s.aidx, (uintptr_t)res, (uintptr_t)ai);
         }
@@ -958,9 +958,9 @@ static void sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     if (s.na == 0) goto done;
 
     for (size_t bi = 0; bi < nb; bi++)
-        sroa_scan_uses(&s, MLIR_GetRegionBlock(region, bi), false);
+        sroa_scan_uses(&s, MLIR_GetRegionBlock(ctx, region, bi), false);
     for (size_t bi = 0; bi < nb; bi++)
-        sroa_scan_gep_uses(&s, MLIR_GetRegionBlock(region, bi));
+        sroa_scan_gep_uses(&s, MLIR_GetRegionBlock(ctx, region, bi));
 
     bool any = false;
     for (size_t ai = 0; ai < s.na; ai++)
@@ -993,7 +993,7 @@ static void sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     }
 
     for (size_t bi = 0; bi < nb; bi++)
-        sroa_rewrite(&s, MLIR_GetRegionBlock(region, bi));
+        sroa_rewrite(&s, MLIR_GetRegionBlock(ctx, region, bi));
 
     // Erase now-dead field GEPs, then the split aggregate allocas.
     for (size_t gi = 0; gi < s.ng; gi++) {
@@ -1013,20 +1013,20 @@ done:
 }
 
 void mlir_llvm_mem2reg(MLIR_Context *ctx, MLIR_OpHandle module) {
-    if (MLIR_GetOpNumRegions(module) == 0) return;
-    MLIR_RegionHandle mr = MLIR_GetOpRegion(module, 0);
-    if (MLIR_GetRegionNumBlocks(mr) == 0) return;
-    MLIR_BlockHandle mb = MLIR_GetRegionBlock(mr, 0);
-    size_t nops = MLIR_GetBlockNumOps(mb);
+    if (MLIR_GetOpNumRegions(ctx, module) == 0) return;
+    MLIR_RegionHandle mr = MLIR_GetOpRegion(ctx, module, 0);
+    if (MLIR_GetRegionNumBlocks(ctx, mr) == 0) return;
+    MLIR_BlockHandle mb = MLIR_GetRegionBlock(ctx, mr, 0);
+    size_t nops = MLIR_GetBlockNumOps(ctx, mb);
     for (size_t i = 0; i < nops; i++) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(mb, i);
-        MLIR_OpType ft = MLIR_GetOpType(op);
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
+        MLIR_OpType ft = MLIR_GetOpType(ctx, op);
         // Variadic functions are emitted as `llvm.func`, often by name with
         // OP_TYPE_UNREGISTERED; both API impls derive the type from the name.
         bool is_func = (ft == OP_TYPE_FUNC_FUNC || ft == OP_TYPE_LLVM_FUNC);
         if (!is_func) continue;
-        if (MLIR_GetOpNumRegions(op) == 0) continue;
-        MLIR_RegionHandle body = MLIR_GetOpRegion(op, 0);
+        if (MLIR_GetOpNumRegions(ctx, op) == 0) continue;
+        MLIR_RegionHandle body = MLIR_GetOpRegion(ctx, op, 0);
         sroa_region(ctx, body);
         l2r_promote_region(ctx, body);
     }
