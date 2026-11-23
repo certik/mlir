@@ -532,7 +532,10 @@ int app_main(void) {
         // attributes never are.
         MLIR_TypeHandle i64t = MLIR_CreateTypeInteger(ctx, 64, true);
         MLIR_TypeHandle f64t = MLIR_CreateTypeFloat(ctx, 64, false);
-        double nan = 0.0 / 0.0;
+        // Quiet NaN by bits. MSVC rejects the constant expression 0.0 / 0.0
+        // (error C2124) while compiling this driver.
+        union { uint64_t u; double d; } nan_bits = { 0x7ff8000000000000ULL };
+        double nan = nan_bits.d;
         MLIR_AttributeHandle e1[2] = { MLIR_CreateAttributeInteger(ctx, 1, i32_ty),
                                        MLIR_CreateAttributeString(ctx, str_lit("s")) };
         MLIR_AttributeHandle e2[2] = { MLIR_CreateAttributeInteger(ctx, 1, i32_ty),
