@@ -819,6 +819,36 @@ upstream a heap `mlir::NamedAttribute` (`u:1196-1200`). Lookup is by C string
    (splats, §4). `GetAttributeAsString` moves to the printer API; no pass
    should depend on printed attribute text.
 
+As implemented (#350, part 1):
+- **Keys.** `mlir_attr_keys.def` lists 108 static keys, every attribute
+  name the in-tree code uses (`MLIR_KEY_VALUE`, `MLIR_KEY_SYM_NAME`,
+  `MLIR_KEY_RAW_CONSTANT_INDICES`, `MLIR_KEY_RD`, …); a name that would
+  collide with another after upper-casing (`_step`) stays dynamic.
+  `MLIR_InternAttrKey`, `MLIR_LookupAttrKey` and `MLIR_GetAttrKeyName` work
+  on a per-context table that both backends share (`mlir_op_names.c`).
+- **API.** `MLIR_CreateOp` takes `const MLIR_NamedAttr *`; `MLIR_SetOpAttr`
+  replaces `MLIR_AppendOpAttribute` (it replaces an existing key);
+  `MLIR_GetOpAttr(ctx, op, key)` replaces `MLIR_GetOpAttributeByName`;
+  `MLIR_GetOpAttribute(ctx, op, i)` returns the value and
+  `MLIR_GetOpAttributeKey(ctx, op, i)` the key; dictionaries take and give
+  (key, value) entries (`MLIR_GetAttributeDictKey`). `MLIR_GetAttributeName`
+  is gone. `MLIR_Named(key, value)` is a two-line inline constructor.
+  `MLIR_GetOpAttrInt` and `MLIR_RemoveOpAttr` were not needed by any caller
+  and are not added.
+- **Native:** an op stores (key, value) word pairs; `GetOpAttr` is a scan
+  comparing keys. **Upstream:** a handle is the `mlir::Attribute` storage
+  pointer, a key maps to a cached `StringAttr`, and `GetOpAttr` reads
+  `op->getAttr` (properties included), so creating, reading and looking up
+  attributes allocates nothing in the API layer (U3, U4). The per-op
+  snapshot of the attributes the op was created with (U2) stays: it keeps
+  their order and hides the default-valued inherent properties MLIR adds
+  (e.g. `arith.addi`'s `overflowFlags`), which the printers rely on to match
+  the native backend.
+- **Callers.** The ~90 `GetOpAttributeByName` calls and the per-file
+  helpers (`attr_i`, `at_s`, `find_attr`, `attr_str`, `a64_attr_i`, …) take
+  keys; the printers, the lowering and CSE/GVN compare or hash keys instead
+  of names.
+
 ### 2.7 Builder API (A5)
 
 Today one op costs, in `emit.c`'s `emit_binop` (`emit.c:517-527`): a
@@ -1277,6 +1307,9 @@ As implemented (#349): N3, N4 and N12 (and U10 upstream).
   type layout, the lowering, the wasm lifter and the LLVM-IR translator
   classify types by kind and width; `GetTypeString` is left to the printers
   (and the LLVM-IR translator's type printer).
+
+As implemented (#350, part 1): N1 and N2. Attribute lookup compares 32-bit
+keys (§2.6, "As implemented"); attribute constructors no longer copy a name.
 
 ## 7. Ordered follow-up issues
 
