@@ -44,7 +44,9 @@ for f in $COREC_C_FILES $TINYC_C_FILES; do
     base="$(basename "$f" .c).o"
     $CC $OPT_FLAGS -c -DTINYC_HAS_UPSTREAM -I corec -I . -o "$OBJ_DIR/$base" "$f"
 done
-$CC $OPT_FLAGS -c -I corec -I . -DPLATFORM_SKIP_ENTRY -o "$OBJ_DIR/$PLATFORM_OBJ" $PLATFORM_C
+# Hosted build linked against libc: COREC_STDLIB_PROVIDES_MEM drops the
+# platform file's weak byte-loop memcpy/memset so libc's are used.
+$CC $OPT_FLAGS -c -I corec -I . -DPLATFORM_SKIP_ENTRY -DCOREC_STDLIB_PROVIDES_MEM -o "$OBJ_DIR/$PLATFORM_OBJ" $PLATFORM_C
 $CXX $OPT_FLAGS -c -std=c++17 -fno-rtti -I corec -I . -I "$CONDA_PREFIX/include" \
     -o "$OBJ_DIR/mlir_api_impl_upstream.o" mlir_api_impl_upstream.cpp
 

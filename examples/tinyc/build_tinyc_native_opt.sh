@@ -29,7 +29,9 @@ for f in $COREC_C_FILES $TINYC_C_FILES $NATIVE_C_FILES; do
     base="$(basename "$f" .c).o"
     $CC $OPT_FLAGS -c -I corec -I . -o "$OBJ_DIR/$base" "$f"
 done
-$CC $OPT_FLAGS -c -I corec -I . -DPLATFORM_SKIP_ENTRY -o "$OBJ_DIR/$PLATFORM_OBJ" $PLATFORM_C
+# Hosted build linked against libc: COREC_STDLIB_PROVIDES_MEM drops the
+# platform file's weak byte-loop memcpy/memset so libc's are used.
+$CC $OPT_FLAGS -c -I corec -I . -DPLATFORM_SKIP_ENTRY -DCOREC_STDLIB_PROVIDES_MEM -o "$OBJ_DIR/$PLATFORM_OBJ" $PLATFORM_C
 
 $CC $OPT_FLAGS -o tinyc_native_opt \
     "$OBJ_DIR"/upstream_main.o \

@@ -23,7 +23,9 @@ COREC_C_FILES="corec/base/io.c corec/base/buddy.c corec/base/arena.c corec/base/
 PROJ_C_FILES="parser.c tokenizer.c mlir_parser.c mlir_classic_printer.c mlir_generic_printer.c op_parsers.c mlir_op_names.c mlir_lower_to_llvm.c mlir_translate_to_llvm_ir.c mlir_wasm_to_wat.c mlir_llvm_to_wasmssa.c mlir_llvm_global_init.c mlir_wasmssa_to_wasmstack.c mlir_wasmstack_to_bin.c mlir_lift_cf_to_scf.c"
 
 $CC -c -g -I corec -I . $COREC_C_FILES $PROJ_C_FILES tests/upstream_main.c
-$CC -c -g -I corec -I . -DPLATFORM_SKIP_ENTRY $PLATFORM_C
+# Hosted build linked against libc: COREC_STDLIB_PROVIDES_MEM drops the
+# platform file's weak byte-loop memcpy/memset so libc's are used.
+$CC -c -g -I corec -I . -DPLATFORM_SKIP_ENTRY -DCOREC_STDLIB_PROVIDES_MEM $PLATFORM_C
 $CXX -c -std=c++17 -fno-rtti -g -DMLIR_API_CHECKS -I corec -I . -I "$CONDA_PREFIX/include" mlir_api_impl_upstream.cpp
 $CXX -g -o parser_upstream \
     upstream_main.o parser.o tokenizer.o mlir_parser.o mlir_classic_printer.o mlir_generic_printer.o \
