@@ -436,7 +436,8 @@ MLIR_TypeHandle MLIR_CreateTypeVector(MLIR_Context *ctx, const int64_t *shape, s
 typedef enum {
     MLIR_TYPE_KIND_INVALID = 0,   // MLIR_INVALID_HANDLE
     MLIR_TYPE_KIND_INTEGER,       // iN (signless); width N
-    MLIR_TYPE_KIND_FLOAT,         // f16, f32, f64 (IEEE); width 16, 32, 64
+    MLIR_TYPE_KIND_FLOAT,         // f16, f32, f64 (IEEE); width 16, 32, 64 (other
+                                  // widths are created as f32)
     MLIR_TYPE_KIND_BF16,          // bf16; width 16
     MLIR_TYPE_KIND_INDEX,
     MLIR_TYPE_KIND_NONE,          // the placeholder type (MLIR_CreateTypeUnknown)

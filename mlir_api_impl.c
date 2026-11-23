@@ -211,7 +211,7 @@ typedef struct IR_Region {
 // fields) is set once, after creation. Types are never removed.
 
 #define TYF_VAR_ARG    1u  // LLVM function type: variadic
-#define TYF_IDENTIFIED 2u  // LLVM struct: identified (interned by name)
+#define TYF_IDENTIFIED 2u  // interned by name: identified LLVM struct, opaque type
 #define TYF_BODY_SET   4u  // identified LLVM struct: the body has been set
 #define TYF_TT_PTR     8u  // OPAQUE: a !tt.ptr<pointee[, address space]>
 #define TYF_HAS_AS     16u // !tt.ptr: the address space is printed
@@ -556,7 +556,7 @@ static uint32_t type_hash(MLIR_Context *c, const IR_Type *t, const uint32_t *kid
     uint32_t h = 0x811C9DC5u;
     if (t->flags & TYF_IDENTIFIED) {
         string name = TNAMES(c)[t->aux];
-        h = type_mix(h, MLIR_TYPE_KIND_LLVM_STRUCT);
+        h = type_mix(h, t->kind);
         for (size_t i = 0; i < name.size; i++) h = type_mix(h, (uint8_t)name.str[i]);
         return h;
     }
@@ -629,7 +629,7 @@ static uint32_t type_intern(MLIR_Context *c, IR_Type t, string name) {
     uint32_t h;
     if (t.flags & TYF_IDENTIFIED) {
         // Hash the candidate's name, which is not in tnames yet.
-        h = type_mix(0x811C9DC5u, MLIR_TYPE_KIND_LLVM_STRUCT);
+        h = type_mix(0x811C9DC5u, t.kind);
         for (size_t i = 0; i < name.size; i++) h = type_mix(h, (uint8_t)name.str[i]);
     } else {
         h = type_hash(c, &t, TYX(c) + t.first);
@@ -1407,7 +1407,11 @@ string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle th) {
             // Literal: !llvm.struct<(T1, T2)>; identified: !llvm.struct<"name", (T1, T2)>.
             // Nested struct fields keep the "!llvm." prefix (upstream drops it);
             // the LLVM-IR translator accepts both.
-            string body = format(arena, str_lit("({})"), type_list_string(ctx, t.first, 0, t.n));
+            // An identified struct whose body was never set is opaque, as
+            // upstream prints it.
+            string body = (t.flags & TYF_IDENTIFIED) && !(t.flags & TYF_BODY_SET)
+                ? str_lit("opaque")
+                : format(arena, str_lit("({})"), type_list_string(ctx, t.first, 0, t.n));
             if ((t.flags & TYF_IDENTIFIED) && TNAMES(ctx)[t.aux].size > 0)
                 return format(arena, str_lit("!llvm.struct<\"{}\", {}>"), TNAMES(ctx)[t.aux], body);
             return format(arena, str_lit("!llvm.struct<{}>"), body);
@@ -1441,11 +1445,12 @@ MLIR_TypeHandle MLIR_CreateTypeInteger(MLIR_Context *ctx, uint32_t width, bool i
     return TYPE_H(ctx, i);
 }
 
-// bf16 for `is_bfloat` (as upstream, whatever the width), else f<width>.
+// bf16 for `is_bfloat` (whatever the width), else f16, f32 or f64; any other
+// width is f32, as upstream.
 MLIR_TypeHandle MLIR_CreateTypeFloat(MLIR_Context *ctx, uint32_t width, bool is_bfloat) {
     if (!ctx) return MLIR_INVALID_HANDLE;
     IR_Type t = type_make(is_bfloat ? MLIR_TYPE_KIND_BF16 : MLIR_TYPE_KIND_FLOAT);
-    t.width = is_bfloat ? 16 : width;
+    t.width = is_bfloat ? 16 : (width == 16 || width == 64) ? width : 32;
     return TYPE_H(ctx, type_intern(ctx, t, (string){0}));
 }
 
@@ -1462,9 +1467,13 @@ MLIR_TypeHandle MLIR_CreateTypeUnknown(MLIR_Context *ctx) {
     return create_simple_type(ctx, MLIR_TYPE_KIND_NONE);
 }
 
+// Interned by name, as upstream keys opaque types by their data. (It prints
+// as `unknown`, the only opaque type the parser makes.)
 MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *ctx, string name) {
-    (void)name;
-    return create_simple_type(ctx, MLIR_TYPE_KIND_OPAQUE);
+    if (!ctx) return MLIR_INVALID_HANDLE;
+    IR_Type t = type_make(MLIR_TYPE_KIND_OPAQUE);
+    t.flags = TYF_IDENTIFIED;
+    return TYPE_H(ctx, type_intern(ctx, t, name));
 }
 
 MLIR_TypeHandle MLIR_CreateTypeLLVMVoid(MLIR_Context *ctx) {
@@ -1484,7 +1493,8 @@ static MLIR_TypeHandle create_shaped_type(MLIR_Context *ctx, MLIR_TypeKind k, co
     t.first = vec_push(&ctx->tyx, t.n);
     uint64_t count = 1;
     for (size_t i = 0; i < rank; i++) {
-        uint64_t d = (uint64_t)shape[i];
+        // Every negative size is the one dynamic size, as upstream.
+        uint64_t d = (uint64_t)(shape[i] < 0 ? -1 : shape[i]);
         TYX(ctx)[t.first + 2 * i] = (uint32_t)d;
         TYX(ctx)[t.first + 2 * i + 1] = (uint32_t)(d >> 32);
         count *= d;
@@ -1517,7 +1527,7 @@ MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *ctx, MLIR_TypeHandle elemen
     if (!ctx) return MLIR_INVALID_HANDLE;
     IR_Type t = type_make(MLIR_TYPE_KIND_OPAQUE);
     t.flags = (uint8_t)(TYF_TT_PTR | (has_address_space ? TYF_HAS_AS : 0));
-    t.aux = address_space;
+    t.aux = has_address_space ? address_space : 0;
     t.n = 1;
     t.first = tyx_push_types(ctx, &element_type, 1, "MLIR_CreateTypePointer");
     return TYPE_H(ctx, type_intern(ctx, t, (string){0}));

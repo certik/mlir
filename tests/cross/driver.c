@@ -19,6 +19,10 @@
 #include "mlir_api.h"
 #include "mlir_generic_printer.h"
 
+// Parser-only type constructors (mlir_parser.h), for the uniquing checks.
+MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *ctx, MLIR_TypeHandle element_type, bool has_address_space, uint32_t address_space);
+MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *ctx, string name);
+
 static void print_string(string s) {
     ciovec_t iov;
     iov.buf = s.str;
@@ -194,6 +198,25 @@ int app_main(void) {
             MLIR_GetTypeLLVMStructField(ctx, st, 1) == arr ? str_lit("arr") : str_lit("?"),
             MLIR_CreateTypeLLVMStructIdentified(ctx, str_lit("S")) == st ? str_lit("yes") : str_lit("no"),
             st2 == st ? str_lit("same") : str_lit("different")));
+        // Equal types are equal handles on both backends: any negative
+        // tensor size is the dynamic size, a !tt.ptr without an address
+        // space ignores the one passed, opaque types are keyed by name,
+        // unsupported float widths are f32, and a struct without a body
+        // prints as opaque.
+        int64_t dyn1[1] = { -1 }, dyn2[1] = { -2 };
+        MLIR_TypeHandle f80 = MLIR_CreateTypeFloat(ctx, 80, false);
+        MLIR_TypeHandle st_o = MLIR_CreateTypeLLVMStructIdentified(ctx, str_lit("Opq"));
+        print_string(format(arena, str_lit("equal types: dyn={} ttptr={} opaque same={} other={} f80={}/{}"),
+            MLIR_CreateTypeTensor(ctx, dyn1, 1, f32) == MLIR_CreateTypeTensor(ctx, dyn2, 1, f32)
+                ? str_lit("same") : str_lit("different"),
+            MLIR_CreateTypePointer(ctx, f32, false, 1) == MLIR_CreateTypePointer(ctx, f32, false, 7)
+                ? str_lit("same") : str_lit("different"),
+            MLIR_CreateTypeOpaque(ctx, str_lit("a")) == MLIR_CreateTypeOpaque(ctx, str_lit("a"))
+                ? str_lit("yes") : str_lit("no"),
+            MLIR_CreateTypeOpaque(ctx, str_lit("a")) == MLIR_CreateTypeOpaque(ctx, str_lit("b"))
+                ? str_lit("same") : str_lit("different"),
+            f80 == f32 ? str_lit("f32") : str_lit("other"), (int64_t)MLIR_GetTypeWidth(ctx, f80)));
+        print_string(format(arena, str_lit(" opaque struct={}\n"), MLIR_GetTypeString(ctx, st_o)));
         MLIR_TypeHandle in[2] = { i8, ptr };
         MLIR_TypeHandle vfn = MLIR_CreateTypeLLVMFunction(ctx, MLIR_CreateTypeLLVMVoid(ctx), in, 2, true);
         MLIR_TypeHandle in2[2] = { i8, ptr };
