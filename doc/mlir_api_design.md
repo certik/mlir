@@ -534,9 +534,9 @@ As implemented (#354):
   its first parameter (`MLIR_GetOpOperand(ctx, op, i)`). The upstream backend
   uses it only for an ownership check under `MLIR_API_CHECKS`. Since #349
   the type getters take it too, and type handles are indices (§6, "As
-  implemented (#349)"); attributes and locations stay arena pointers until
-  their interning (#350) makes them indices as well. Most sketches in §3 and
-  §4 omit the context for brevity.
+  implemented (#349)"); since #350 so do the getters of attributes and
+  locations, whose handles are indices as well (§2.6). Most sketches in §3
+  and §4 omit the context for brevity.
 - **Layout** (`mlir_api_impl.c`, "IR storage"). Vectors per kind: ops (56 B),
   values (40 B), operands (16 B: `{value, owner, next, prev}`, all indices),
   blocks and regions. An op's regular and successor operands are consecutive
@@ -848,6 +848,35 @@ As implemented (#350, part 1):
   helpers (`attr_i`, `at_s`, `find_attr`, `attr_str`, `a64_attr_i`, …) take
   keys; the printers, the lowering and CSE/GVN compare or hash keys instead
   of names.
+
+As implemented (#350, part 2):
+- **Interned values.** Natively, attribute values are hash-consed into the
+  context's `attrs` vector, like types, and a handle is a 32-bit index:
+  equal values have equal handles on both backends, so GVN and CSE key ops
+  by attribute handles (U5: upstream no longer prints every attribute of
+  every candidate op). A 32-byte record holds the scalar payload (an
+  integer with its type, a float's bit pattern, a bool, a type); arrays,
+  dictionaries and dense arrays keep their elements as words of a second
+  vector; string bytes are in the persistent arena. Floats hash and compare
+  by bit pattern. `MLIR_CreateAttributeDistinct` makes a `distinct[...]`
+  attribute, which is never looked up.
+- **Dense arrays** are typed (one word per i32, two per i64), read with
+  `MLIR_GetAttributeDenseSize`/`MLIR_GetAttributeDenseElement` instead of
+  the seven text parsers (N16); their `array<i32: …>` text is made on
+  demand for the printers. Element getters rather than a pointer to the
+  data: the data lives in a vector that can grow. Symbols stay strings
+  `@name` and linkages `#llvm.linkage<…>` (no caller needed the typed
+  forms); fast-math flags and dense elements are still to come (§4).
+- **Locations** are indices into a `locs` vector of 16-byte
+  `{kind, string, line, column}` records with an interned string table for
+  file names, names and parser texts; they are not uniqued, except that the
+  unknown location without text is one shared record (N14: the wasm
+  lifter's per-op unknown location no longer allocates). The `loc(...)`
+  text the printer wants is made on demand.
+- Attributes and locations live in the context, not the IR arena. An op
+  keeps its attributes as (key, attribute index) pairs in `extra` (the
+  pointer-sized `ptrs` vector is gone) and its location as an index: 52
+  bytes per op, 28 per value.
 
 ### 2.7 Builder API (A5)
 
@@ -1310,6 +1339,8 @@ As implemented (#349): N3, N4 and N12 (and U10 upstream).
 
 As implemented (#350, part 1): N1 and N2. Attribute lookup compares 32-bit
 keys (§2.6, "As implemented"); attribute constructors no longer copy a name.
+Part 2: N16 (typed dense arrays) and the location half of N14 (one shared
+unknown location); attributes are uniqued.
 
 ## 7. Ordered follow-up issues
 
