@@ -2,11 +2,12 @@
 
 This section is written by hand and is not computed by the script. `bench/run.py --notes` inserts it into the report.
 
-### Why the hotspots are slow (from reading the code)
+### Where the time goes (from reading the code)
 
-- **preprocess.** `macro_lookup` in `examples/tinyc/preprocess.c` scans a linked list for every identifier, and the token vectors are copied with corec's byte-loop `memcpy` (see the last section).
+- **x64-regalloc.** It is the largest per-file stage. Its cost is concentrated in the files with the largest functions (see the slowest-files table in (b1)).
 - **x64-setup in the lift (b2).** The reachability fixpoint in `mlir_llvm_to_elf` (`mlir_llvm_to_x64_emit.inc`) tests `SymSet` membership with a linear scan, inside loops over every call of every function. `gmap_get` is also a linear scan and calls `strlen` on every entry.
 - **mem2reg and arith-gvn in the lift (b2).** These two passes take most of the lift time, which matches the picture in #225.
+- **preprocess.** It was the second-largest per-file stage before #376, which replaced the linked-list macro lookup with a hash table and removed the quadratic rescan splice.
 
 ### How to read the tables
 
@@ -15,9 +16,8 @@ This section is written by hand and is not computed by the script. `bench/run.py
 - **CoreMark timing.** CoreMark uses a fixed fake timer (`bench/corpus/coremark/core_portme.c`) and is timed from outside the process. That keeps its output identical across compilers, so the harness can compare outputs byte for byte. With a real timer the reported times would differ, and runs under 10 s would also print CoreMark's "must execute for at least 10 secs" error.
 - **Lua and SQLite.** Both are blocked by the issues listed in (d). Their gcc -O0 builds against the same libc work, and `run.py` tries tinyc on every run.
 
-### The clang -O0 build of tinyc is slow because of `memcpy`
+### Hosted tinyc builds use corec's byte-loop `memcpy`
 
-Hosted (glibc-linked) tinyc builds get corec's weak `memcpy`/`memset` from `corec/platform/platform_linux.c`: a byte loop with an asm barrier. Inside the executable it takes precedence over glibc's. `clang -O0` lowers struct copies to `memcpy` calls, and gcc -O0 does not. As a result:
+Hosted (glibc-linked) tinyc builds get corec's weak `memcpy`/`memset` from `corec/platform/platform_linux.c`: a byte loop with an asm barrier. Inside the executable it takes precedence over glibc's. `clang -O0` lowers struct copies to `memcpy` calls, and gcc -O0 does not.
 
-- In the clang -O0 build, gprof puts 80% of the time in that loop, and the preprocess stage is 16x slower than in the gcc -O0 build. This explains the gap between the two builds in (c2).
-- In a development measurement, the gcc -O2 tinyc used for (a) was about 8% faster when glibc's `memcpy` was linked instead.
+Before #376 this made the clang -O0 build of tinyc 2.9x slower than the gcc -O0 build. gprof put 80% of its time in that loop, and its preprocess stage was 16x slower. The new preprocessor copies much less, so on `emit.c` the clang -O0 build is now only about 1.3x slower than the gcc -O0 build (preprocess 1.9x). The (c2) table shows the current gap for the whole workload.
