@@ -879,8 +879,8 @@ enum {
     MLIR_T_ZERO_RESULT  = 1u << 16, MLIR_T_ONE_RESULT  = 1u << 17,
 };
 MLIR_OpTraits MLIR_GetOpTypeTraits(MLIR_OpType t);   // 0 for dynamic types
-static inline bool MLIR_OpHasTrait(MLIR_OpHandle op, MLIR_OpTraits t) {
-    return (MLIR_GetOpTypeTraits(MLIR_GetOpType(op)) & t) == t;
+static inline bool MLIR_OpHasTrait(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_OpTraits t) {
+    return (MLIR_GetOpTypeTraits(MLIR_GetOpType(ctx, op)) & t) == t;
 }
 ```
 
@@ -1099,7 +1099,7 @@ bool expand_reciprocal_sqrt(MLIR_PassContext *pc, MLIR_OpHandle fn, void *state)
             || MLIR_GetFunctionPassthrough(fn, K_RECIP_EST).size) return false;
     ...                                         // square_roots(), then over the RPO:
     size_t n; MLIR_BlockHandle *rpo;
-    n = MLIR_GetBlockOrder(pc->ctx, MLIR_GetOpRegion(fn, 0), MLIR_ORDER_RPO, pc->scratch, &rpo);
+    n = MLIR_GetBlockOrder(pc->ctx, MLIR_GetOpRegion(pc->ctx, fn, 0), MLIR_ORDER_RPO, pc->scratch, &rpo);
     ...
     MLIR_SetFunctionPassthrough(pc->ctx, fn, K_RECIP_EST, str_lit("sqrtf:0,vec-sqrtf:0"));
     return true;
