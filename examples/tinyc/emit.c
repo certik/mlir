@@ -242,6 +242,17 @@ static int fact_get(E *e, MLIR_ValueHandle v) {
         (e)->err_count++; \
     } while (0)
 
+// An emit-time warning. Like preprocess.c's diagnostics it goes to stderr,
+// since stdout can carry the --emit output.
+static void emit_warn(E *e, string msg) {
+    string text = format(e->arena, str_lit("tinyc emit warning at line {}: {}\n"),
+                         (int64_t)e->cur_line, msg);
+    ciovec_t iov;
+    iov.buf = text.str;
+    iov.buf_len = text.size;
+    write_all(PLATFORM_STDERR_FD, &iov, 1);
+}
+
 static StructDef *find_struct(E *e, string name) {
     if (!e->program) return NULL;
     for (size_t i = 0; i < e->program->structs.size; i++) {
@@ -652,6 +663,18 @@ static MLIR_ValueHandle emit_ptrtoint_i64(E *e, MLIR_ValueHandle v) {
     return r;
 }
 
+// Reinterpret the i64 `v` as a pointer (llvm.inttoptr).
+static MLIR_ValueHandle emit_inttoptr_i64(E *e, MLIR_ValueHandle v) {
+    MLIR_ValueHandle r = MLIR_CreateValueOpResult(e->ctx, MLIR_INVALID_HANDLE, 0,
+                                                  e->ptr, ssa_name(e), eloc(e, 0));
+    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->ptr;
+    MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = r;
+    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = v;
+    emit_op(e, OP_TYPE_LLVM_INTTOPTR,
+            rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
+    return r;
+}
+
 // Floating-point negation (llvm.fneg): flips the sign bit, so -(+0.0) is
 // -0.0. `0.0 - x` would give +0.0 there.
 static MLIR_ValueHandle emit_fneg(E *e, MLIR_TypeHandle ft, MLIR_ValueHandle v) {
@@ -998,6 +1021,34 @@ typedef struct {
                        // unsigned div/mod/shr (and comparisons) at use sites.
 } EVal;
 
+// Whether `v` is the constant 0. emit_const_i32 records each constant as the
+// current fact, so callers ask right after emitting `v`. A missed 0 still
+// converts to the null pointer in int_to_ptr, only with a warning.
+static bool eval_is_zero_const(E *e, EVal v) {
+    return !v.is_ptr && !v.is_float && fact_get(e, v.val) == FACT_CONST && e->fact_c == 0;
+}
+
+// The integer `v` used where a pointer is expected without a cast: a call
+// argument, an assignment, an initializer, a `?:` operand, an `==` / `!=`
+// operand or free's argument. A constant 0 (`is_zero`, from
+// eval_is_zero_const) is a null pointer constant. C requires a diagnostic for
+// any other integer; like older C compilers (and gcc -fpermissive), tinyc
+// warns and converts the value: widened to i64 by its signedness, then
+// llvm.inttoptr.
+static MLIR_ValueHandle int_to_ptr(E *e, EVal v, bool is_zero) {
+    if (v.is_ptr) return v.val;
+    if (is_zero) return emit_null_ptr(e);
+    if (v.is_float) {
+        EMIT_ERR(e, "a floating-point value cannot be converted to a pointer");
+        return emit_null_ptr(e);
+    }
+    emit_warn(e, str_lit("integer converted to a pointer without a cast"));
+    MLIR_ValueHandle iv = v.val;
+    if (!v.is_i64)
+        iv = v.is_unsigned ? emit_extui_i32_to_i64(e, iv) : emit_extsi_i32_to_i64(e, iv);
+    return emit_inttoptr_i64(e, iv);
+}
+
 static EVal emit_expr(E *e, Scope *sc, Expr *ex);
 static int64_t type_size(E *e, Type t);
 static int64_t type_align(E *e, Type t);
@@ -1186,10 +1237,7 @@ static MLIR_ValueHandle coerce_scalar(E *e, EVal v, MLIR_TypeHandle want,
         MLIR_ValueHandle iv = v.is_i64 ? emit_trunci_i64_to_i32(e, v.val) : v.val;
         return emit_trunci_to(e, iv, want);
     }
-    if (want == e->ptr) {
-        if (v.is_ptr) return v.val;
-        return emit_null_ptr(e);
-    }
+    if (want == e->ptr) return int_to_ptr(e, v, eval_is_zero_const(e, v));
     return v.val;
 }
 
@@ -3083,10 +3131,12 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             MLIR_BlockHandle save = e->cur_block;
             e->cur_block = then_blk; e->terminated = false;
             EVal av = emit_expr(e, sc, ex->rhs);
+            bool av_zero = eval_is_zero_const(e, av);
             MLIR_BlockHandle then_tail = e->cur_block;
 
             e->cur_block = else_blk; e->terminated = false;
             EVal bv = emit_expr(e, sc, ex->lvalue);
+            bool bv_zero = eval_is_zero_const(e, bv);
             MLIR_BlockHandle else_tail = e->cur_block;
 
             bool any_float = av.is_float || bv.is_float;
@@ -3102,14 +3152,14 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // Coerce + store in then-tail.
             e->cur_block = then_tail; e->terminated = false;
             MLIR_ValueHandle ta = any_ptr
-                ? (av.is_ptr ? av.val : emit_null_ptr(e))
+                ? int_to_ptr(e, av, av_zero)
                 : coerce_eval_to(e, av, rty, (Type){0});
             emit_store_v(e, ta, slot);
             emit_branch(e, merge_blk);
 
             e->cur_block = else_tail; e->terminated = false;
             MLIR_ValueHandle tb = any_ptr
-                ? (bv.is_ptr ? bv.val : emit_null_ptr(e))
+                ? int_to_ptr(e, bv, bv_zero)
                 : coerce_eval_to(e, bv, rty, (Type){0});
             emit_store_v(e, tb, slot);
             emit_branch(e, merge_blk);
@@ -3289,15 +3339,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     if (!v.is_i64) {
                         iv = emit_extsi_i32_to_i64(e, iv);
                     }
-                    MLIR_ValueHandle pv = MLIR_CreateValueOpResult(
-                        e->ctx, MLIR_INVALID_HANDLE, 0, e->ptr,
-                        ssa_name(e), eloc(e, 0));
-                    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->ptr;
-                    MLIR_ValueHandle *rs = arena_new_array(e->arena, MLIR_ValueHandle, 1); rs[0] = pv;
-                    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = iv;
-                    emit_op(e, OP_TYPE_LLVM_INTTOPTR,
-                            rts, 1, rs, 1, ops, 1, NULL, 0, NULL, 0);
-                    v.val = pv;
+                    v.val = emit_inttoptr_i64(e, iv);
                     v.is_i64 = false;
                 } else {
                     EMIT_ERR(e, "cast operand is not a pointer");
@@ -3947,13 +3989,15 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 return r;
             }
             EVal a = emit_expr(e, sc, ex->lhs);
+            bool a_zero = eval_is_zero_const(e, a);
             EVal b = emit_expr(e, sc, ex->rhs);
-            // Pointer comparisons (eq/ne) use llvm.icmp on !llvm.ptr.
+            // Pointer comparisons (eq/ne) use llvm.icmp on !llvm.ptr. An
+            // integer operand converts to a pointer, as in gcc: `p == 0` is
+            // a null check, `p == k` compares p with (T *)k.
             if ((a.is_ptr || b.is_ptr) &&
                 (ex->op == OP_EQ || ex->op == OP_NE)) {
-                MLIR_ValueHandle av = a.val, bv = b.val;
-                if (!a.is_ptr) av = emit_null_ptr(e);  // can only be EX_NULL
-                if (!b.is_ptr) bv = emit_null_ptr(e);
+                MLIR_ValueHandle av = int_to_ptr(e, a, a_zero);
+                MLIR_ValueHandle bv = int_to_ptr(e, b, eval_is_zero_const(e, b));
                 int64_t pred = (ex->op == OP_EQ) ? 0 : 1;
                 MLIR_ValueHandle cmp = emit_icmp_ptr(e, pred, av, bv);
                 r.val = bool_to_i32(e, cmp);
@@ -4362,7 +4406,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     return r;
                 }
                 EVal pv = emit_expr(e, sc, ex->args.data[0]);
-                MLIR_ValueHandle p = pv.is_ptr ? pv.val : emit_null_ptr(e);
+                MLIR_ValueHandle p = int_to_ptr(e, pv, eval_is_zero_const(e, pv));
                 MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = p;
                 MLIR_AttributeHandle ca = MLIR_CreateAttributeSymbolRef(
                     e->ctx, str_lit("callee"), str_lit("free"));
@@ -5008,7 +5052,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 sy->addr = emit_alloca(e, e->ptr);
                 if (st->decl_init) {
                     EVal iv = emit_expr(e, sc, st->decl_init);
-                    MLIR_ValueHandle p = iv.is_ptr ? iv.val : emit_null_ptr(e);
+                    MLIR_ValueHandle p = int_to_ptr(e, iv, eval_is_zero_const(e, iv));
                     emit_store_v(e, p, sy->addr);
                 } else {
                     emit_store_v(e, emit_null_ptr(e), sy->addr);
@@ -5017,7 +5061,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 sy->addr = emit_alloca(e, e->ptr);
                 if (st->decl_init) {
                     EVal iv = emit_expr(e, sc, st->decl_init);
-                    MLIR_ValueHandle p = iv.is_ptr ? iv.val : emit_null_ptr(e);
+                    MLIR_ValueHandle p = int_to_ptr(e, iv, eval_is_zero_const(e, iv));
                     emit_store_v(e, p, sy->addr);
                 } else {
                     emit_store_v(e, emit_null_ptr(e), sy->addr);
@@ -5043,7 +5087,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                         // Allow any expression yielding a pointer (e.g., a
                         // function call returning struct*, or a cast).
                         EVal iv = emit_expr(e, sc, st->decl_init);
-                        MLIR_ValueHandle p = iv.is_ptr ? iv.val : emit_null_ptr(e);
+                        MLIR_ValueHandle p = int_to_ptr(e, iv, eval_is_zero_const(e, iv));
                         emit_store_v(e, p, sy->addr);
                     }
                 }
@@ -5171,7 +5215,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                             int64_t lim = (int64_t)n < st->decl_type.array_len ? (int64_t)n : st->decl_type.array_len;
                             for (int64_t a = 0; a < lim; a++) {
                                 EVal iv = emit_expr(e, sc, st->decl_init->args.data[a]);
-                                MLIR_ValueHandle p_val = iv.is_ptr ? iv.val : emit_null_ptr(e);
+                                MLIR_ValueHandle p_val = int_to_ptr(e, iv, eval_is_zero_const(e, iv));
                                 int32_t path[2] = {0, (int32_t)a};
                                 MLIR_ValueHandle p = emit_gep(e, sy->addr, arr_ty, path, 2, NULL, 0);
                                 emit_store_v(e, p_val, p);
@@ -5291,7 +5335,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                         ft.kind == TY_PTR_STRUCT ||
                                         ft.kind == TY_FNPTR ||
                                         ft.kind == TY_PTR_PTR) {
-                                        sv = v.is_ptr ? v.val : emit_null_ptr(e);
+                                        sv = int_to_ptr(e, v, eval_is_zero_const(e, v));
                                     } else if (ft.kind == TY_I64) {
                                         sv = coerce_eval_to(e, v, e->i64, ft);
                                     } else if (ft.kind == TY_F64) {
@@ -5438,14 +5482,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                 ft.kind == TY_PTR_STRUCT ||
                                 ft.kind == TY_FNPTR ||
                                 ft.kind == TY_PTR_PTR) {
-                                if (v.is_ptr) {
-                                    sv = v.val;
-                                } else {
-                                    // Literal 0 (or any non-ptr) for a
-                                    // pointer field: emit a real null ptr
-                                    // so the store is 8 bytes wide.
-                                    sv = emit_null_ptr(e);
-                                }
+                                sv = int_to_ptr(e, v, eval_is_zero_const(e, v));
                             } else if (ft.kind == TY_I64) {
                                 sv = coerce_eval_to(e, v, e->i64, ft);
                             } else if (ft.kind == TY_F64) {
@@ -7379,6 +7416,10 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             string str_sym = (string){0};
             if (g->has_init && g->init_str.size > 0) {
                 str_sym = intern_string(&e, g->init_str);
+            } else if (g->has_init && (g->init_int != 0 || g->init_float != 0.0)) {
+                // `T *g = 5;` / `(T *)5`: not supported (it used to become
+                // the null pointer, #365).
+                EMIT_ERR(&e, "only a null pointer or a string can initialize a global pointer");
             }
             // Emit the !llvm.ptr global with an initializer region that
             // either returns the string addr or a null pointer.

@@ -1,0 +1,2 @@
+void *g = (void *)12345;
+int main(void) { return g != 0; }

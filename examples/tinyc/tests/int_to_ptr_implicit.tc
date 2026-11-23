@@ -1,0 +1,65 @@
+// An integer used as a pointer without a cast converts to that pointer
+// (with a warning), as in gcc -fpermissive (#365). It used to become the
+// null pointer. A constant 0 is still a null pointer constant.
+extern int printf(const char *fmt, ...);
+typedef unsigned long uintptr_t;
+#define NULL ((void *)0)
+struct S { int v; };
+struct P { int tag; char *name; void *data; };
+static unsigned long show(const void *p) { return (unsigned long)p; }
+static unsigned long show_c(char *p) { return (unsigned long)p; }
+static unsigned long show_i(int *p) { return (unsigned long)p; }
+static unsigned long show_pp(void **p) { return (unsigned long)p; }
+// `b == NULL` compared the null pointer with itself.
+static int is_null(uintptr_t b) { return b == NULL; }
+static int not_null(uintptr_t b) { return NULL != b; }
+static int same(char *p, uintptr_t b) { return p == b; }
+static int differ(uintptr_t b, char *p) { return b != p; }
+int main(void) {
+    uintptr_t k = 12345;
+    int i = 777;
+    int neg = -2;
+    unsigned int u = 4000000000u;
+    // Call arguments, direct and through a function pointer.
+    printf("%lu %lu\n", show(k), show((const void *)k));
+    printf("%lu %lu %lu\n", show_c(k), show_i(i), show_pp(i));
+    printf("%lu %lu\n", show(0), show_c(0));
+    printf("%lu %lu\n", show(u), show_i(u));
+    // A signed int sign-extends, an unsigned one zero-extends.
+    printf("%d %d\n", show(neg) == (unsigned long)(long)neg,
+           (unsigned long)(void *)neg == (unsigned long)(long)neg);
+    unsigned long (*fp)(const void *) = show;
+    printf("%lu\n", fp(k));
+    // Initializers and assignments.
+    char *cp = i;
+    struct S *sp = (struct S *)0;
+    void *vp = (void *)0;
+    int *ip = (int *)0;
+    printf("%lu %lu\n", (unsigned long)cp, (unsigned long)sp);
+    vp = i; cp = k; ip = i; sp = k;
+    printf("%lu %lu %lu %lu\n", (unsigned long)vp, (unsigned long)cp,
+           (unsigned long)ip, (unsigned long)sp);
+    struct P pr = {1, k, i};
+    printf("%lu %lu\n", (unsigned long)pr.name, (unsigned long)pr.data);
+    char *arr[2] = {k, 0};
+    printf("%lu %lu\n", (unsigned long)arr[0], (unsigned long)arr[1]);
+    struct P q = (struct P){2, i, 0};
+    struct P *qp = &q;
+    void *va[2];
+    qp->data = k; va[1] = i;
+    printf("%lu %lu %lu\n", (unsigned long)q.name, (unsigned long)q.data,
+           (unsigned long)va[1]);
+    // Comparisons with a pointer.
+    printf("%d %d %d %d\n", is_null(0), is_null(k), not_null(0), not_null(k));
+    printf("%d %d %d %d\n", same((char *)k, k), same((char *)k, 1),
+           differ(k, (char *)k), differ(2, (char *)k));
+    // Conditional operands.
+    int c = i > 0;
+    char *t1 = c ? (char *)0 + 1 : k;
+    char *t2 = c ? i : (char *)0;
+    char *t3 = c ? 0 : (char *)0 + 3;
+    printf("%lu %lu %lu\n", (unsigned long)t1, (unsigned long)t2, (unsigned long)t3);
+    char *z = 0;
+    printf("%d %d\n", z == 0, 0 != z);
+    return 0;
+}
