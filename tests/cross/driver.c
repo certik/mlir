@@ -173,7 +173,7 @@ int app_main(void) {
         size_t *snums = arena_new_array(arena, size_t, 1);
         snums[0] = 1;
         MLIR_OpHandle br = MLIR_CreateOpWithSuccessors(
-            ctx, OP_TYPE_CF_BR, str_lit("cf.br"),
+            ctx, OP_TYPE_CF_BR,
             NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
             succs, 1, sops, snums,
             MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
@@ -233,7 +233,7 @@ int app_main(void) {
     add_results[0] = add_result;
 
     MLIR_OpHandle add_op = MLIR_CreateOp(
-        ctx, OP_TYPE_ARITH_ADDI, str_lit("arith.addi"),
+        ctx, OP_TYPE_ARITH_ADDI,
         NULL, 0,
         add_result_types, 1,
         add_results, 1,
@@ -246,7 +246,7 @@ int app_main(void) {
     MLIR_ValueHandle *ret_operands = arena_new_array(arena, MLIR_ValueHandle, 1);
     ret_operands[0] = add_result;
     MLIR_OpHandle ret_op = MLIR_CreateOp(
-        ctx, OP_TYPE_FUNC_RETURN, str_lit("func.return"),
+        ctx, OP_TYPE_FUNC_RETURN,
         NULL, 0, NULL, 0, NULL, 0,
         ret_operands, 1,
         NULL, 0,
@@ -266,7 +266,7 @@ int app_main(void) {
     func_regions[0] = func_region;
 
     MLIR_OpHandle func_op = MLIR_CreateOp(
-        ctx, OP_TYPE_FUNC_FUNC, str_lit("func.func"),
+        ctx, OP_TYPE_FUNC_FUNC,
         func_attrs, 1,
         NULL, 0, NULL, 0, NULL, 0,
         func_regions, 1,
@@ -278,7 +278,7 @@ int app_main(void) {
     MLIR_RegionHandle *module_regions = arena_new_array(arena, MLIR_RegionHandle, 1);
     module_regions[0] = module_region;
     MLIR_OpHandle module_op = MLIR_CreateOp(
-        ctx, OP_TYPE_MODULE, str_lit("module"),
+        ctx, OP_TYPE_MODULE,
         NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         module_regions, 1,
         MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE,
@@ -363,6 +363,52 @@ int app_main(void) {
         print_string(MLIR_CreateTypeInteger(ctx, 32, true) == i32_ty
                          ? str_lit("first context unaffected: yes\n")
                          : str_lit("first context unaffected: no\n"));
+
+        // Op types: static names, dynamic types, dialect ranges.
+        MLIR_OpType add_t = MLIR_LookupOpType(ctx, str_lit("llvm.add"));
+        MLIR_OpType miss = MLIR_LookupOpType(ctx, str_lit("test.op"));
+        MLIR_OpType dyn = MLIR_RegisterOpType(ctx, str_lit("test.op"));
+        print_string(format(arena,
+            str_lit("op types: static={} miss={} dynamic={} again={} lookup={} name={} module={}\n"),
+            add_t == OP_TYPE_LLVM_ADD ? str_lit("yes") : str_lit("no"),
+            miss == OP_TYPE_UNREGISTERED ? str_lit("yes") : str_lit("no"),
+            (unsigned)dyn >= (unsigned)OP_TYPE_COUNT ? str_lit("yes") : str_lit("no"),
+            MLIR_RegisterOpType(ctx, str_lit("test.op")) == dyn ? str_lit("yes") : str_lit("no"),
+            MLIR_LookupOpType(ctx, str_lit("test.op")) == dyn ? str_lit("yes") : str_lit("no"),
+            MLIR_GetOpTypeName(ctx, dyn),
+            MLIR_GetOpTypeName(ctx, OP_TYPE_MODULE)));
+        MLIR_OpHandle dyn_op = MLIR_CreateOp(ctx, dyn, NULL, 0, NULL, 0, NULL, 0,
+                                             NULL, 0, NULL, 0, MLIR_INVALID_HANDLE,
+                                             MLIR_INVALID_HANDLE, str_lit(""), -1);
+        print_string(MLIR_GetOpType(dyn_op) == dyn &&
+                     MLIR_OP_TYPE_IN_DIALECT(OP_TYPE_LLVM_ADD, LLVM) &&
+                     MLIR_OP_TYPE_IN_DIALECT(MLIR_DIALECT_LLVM_FIRST, LLVM) &&
+                     MLIR_OP_TYPE_IN_DIALECT(MLIR_DIALECT_LLVM_LAST, LLVM) &&
+                     !MLIR_OP_TYPE_IN_DIALECT(OP_TYPE_ARITH_ADDI, LLVM) &&
+                     !MLIR_OP_TYPE_IN_DIALECT(dyn, LLVM) &&
+                     !MLIR_OP_TYPE_IN_DIALECT(OP_TYPE_UNREGISTERED, LLVM)
+                         ? str_lit("dynamic op and dialect ranges: yes\n")
+                         : str_lit("dynamic op and dialect ranges: no\n"));
+        // `builtin.module` (the upstream name) is an alias of OP_TYPE_MODULE:
+        // registering it must not give modules another type.
+        MLIR_OpType bm_lookup = MLIR_LookupOpType(ctx, str_lit("builtin.module"));
+        MLIR_OpType bm_reg = MLIR_RegisterOpType(ctx, str_lit("builtin.module"));
+        MLIR_OpHandle mod2 = MLIR_CreateOp(ctx, OP_TYPE_MODULE, NULL, 0, NULL, 0, NULL, 0,
+                                           NULL, 0, NULL, 0, MLIR_INVALID_HANDLE,
+                                           MLIR_INVALID_HANDLE, str_lit(""), -1);
+        print_string(format(arena,
+            str_lit("builtin.module alias: lookup={} register={} module op={} name={}\n"),
+            bm_lookup == OP_TYPE_MODULE ? str_lit("yes") : str_lit("no"),
+            bm_reg == OP_TYPE_MODULE ? str_lit("yes") : str_lit("no"),
+            MLIR_GetOpType(mod2) == OP_TYPE_MODULE && MLIR_GetOpType(module_op) == OP_TYPE_MODULE
+                ? str_lit("yes") : str_lit("no"),
+            MLIR_GetOpTypeName(ctx, bm_reg)));
+        MLIR_Context *ctx3 = MLIR_CreateContext(NULL);
+        print_string(MLIR_LookupOpType(ctx3, str_lit("test.op")) == OP_TYPE_UNREGISTERED &&
+                     MLIR_LookupOpType(ctx3, str_lit("llvm.add")) == OP_TYPE_LLVM_ADD
+                         ? str_lit("dynamic types are per context: yes\n")
+                         : str_lit("dynamic types are per context: no\n"));
+        MLIR_DestroyContext(ctx3);
     }
 
     MLIR_DestroyContext(ctx);

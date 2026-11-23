@@ -25,7 +25,6 @@
 #include <base/string.h>
 
 #include "mlir_api.h"
-#include "mlir_op_names.h"
 
 // wasm valtype bytes.
 #define WT_I32 0x7f
@@ -324,20 +323,7 @@ static MLIR_OpHandle build_op(MLIR_Context *ctx, MLIR_OpType t,
                               MLIR_TypeHandle *rtys, size_t nr,
                               MLIR_ValueHandle *res,
                               MLIR_ValueHandle *ops, size_t no) {
-    return MLIR_CreateOp(ctx, t, op_type_to_string(t),
-        attrs, na, rtys, nr, res, nr, ops, no, NULL, 0,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
-}
-
-// Build an op with an explicit name string (for unregistered ops like
-// llvm.select that have no MLIR_OpType enum).
-static MLIR_OpHandle build_op_named(MLIR_Context *ctx, const char *nm,
-                                    MLIR_AttributeHandle *attrs, size_t na,
-                                    MLIR_TypeHandle *rtys, size_t nr,
-                                    MLIR_ValueHandle *res,
-                                    MLIR_ValueHandle *ops, size_t no) {
-    return MLIR_CreateOp(ctx, OP_TYPE_UNREGISTERED, str_from_cstr_view((char *)nm),
+    return MLIR_CreateOp(ctx, t,
         attrs, na, rtys, nr, res, nr, ops, no, NULL, 0,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -403,8 +389,7 @@ static MLIR_BlockHandle new_block(FLower *L) {
 static void term_br(FLower *L, MLIR_BlockHandle target) {
     MLIR_BlockHandle succs[1] = { target };
     MLIR_ValueHandle *sops[1] = { NULL };
-    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(L->ctx, OP_TYPE_UNREGISTERED,
-        str_lit("llvm.br"),
+    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(L->ctx, OP_TYPE_LLVM_BR,
         NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         succs, 1, sops, 0,
         MLIR_CreateLocationUnknown(L->ctx, (string){0}),
@@ -418,8 +403,7 @@ static void term_cond_br(FLower *L, MLIR_ValueHandle cond,
                          MLIR_BlockHandle t_blk, MLIR_BlockHandle f_blk) {
     MLIR_BlockHandle succs[2] = { t_blk, f_blk };
     MLIR_ValueHandle cond_arr[1] = { cond };
-    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(L->ctx, OP_TYPE_UNREGISTERED,
-        str_lit("llvm.cond_br"),
+    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(L->ctx, OP_TYPE_LLVM_COND_BR,
         NULL, 0, NULL, 0, NULL, 0, cond_arr, 1, NULL, 0,
         succs, 2, NULL, 0,
         MLIR_CreateLocationUnknown(L->ctx, (string){0}),
@@ -522,15 +506,15 @@ static MLIR_ValueHandle build_icmp(FLower *L, int64_t pred,
     return r[0];
 }
 
-// Map a wasm float arithmetic opcode to its `llvm`-dialect op name (matched by
-// name by the unified backend). f32: 0x92-0x95, f64: 0xa0-0xa3.
-static const char *fbinop_name(int64_t opc) {
+// Map a wasm float arithmetic opcode to its `llvm`-dialect op type, or
+// OP_TYPE_UNREGISTERED. f32: 0x92-0x95, f64: 0xa0-0xa3.
+static MLIR_OpType fbinop_type(int64_t opc) {
     switch (opc) {
-        case 0x92: case 0xa0: return "llvm.fadd";
-        case 0x93: case 0xa1: return "llvm.fsub";
-        case 0x94: case 0xa2: return "llvm.fmul";
-        case 0x95: case 0xa3: return "llvm.fdiv";
-        default: return NULL;
+        case 0x92: case 0xa0: return OP_TYPE_LLVM_FADD;
+        case 0x93: case 0xa1: return OP_TYPE_LLVM_FSUB;
+        case 0x94: case 0xa2: return OP_TYPE_LLVM_FMUL;
+        case 0x95: case 0xa3: return OP_TYPE_LLVM_FDIV;
+        default: return OP_TYPE_UNREGISTERED;
     }
 }
 
@@ -562,30 +546,7 @@ static MLIR_ValueHandle build_fcmp(FLower *L, int64_t pred,
     MLIR_TypeHandle rt[1] = { i32 };
     MLIR_ValueHandle r[1] = { mk_res(ctx, i32) };
     MLIR_ValueHandle ops[2] = { a, b };
-    MLIR_OpHandle out = build_op_named(ctx, "llvm.fcmp", &pa, 1, rt, 1, r, ops, 2);
-    emit(L, out);
-    return r[0];
-}
-
-// Emit a single-operand cast op matched by name (fpext/fptrunc/sitofp/...).
-static MLIR_ValueHandle emit_cast_named(FLower *L, const char *nm,
-                                        MLIR_ValueHandle v, MLIR_TypeHandle toty) {
-    MLIR_TypeHandle rt[1] = { toty };
-    MLIR_ValueHandle r[1] = { mk_res(L->ctx, toty) };
-    MLIR_ValueHandle ops[1] = { v };
-    MLIR_OpHandle out = build_op_named(L->ctx, nm, NULL, 0, rt, 1, r, ops, 1);
-    emit(L, out);
-    return r[0];
-}
-
-// Emit a two-operand op matched by name (llvm.fadd/...) producing `ty`.
-static MLIR_ValueHandle emit_binop_named(FLower *L, const char *nm,
-                                         MLIR_ValueHandle a, MLIR_ValueHandle b,
-                                         MLIR_TypeHandle ty) {
-    MLIR_TypeHandle rt[1] = { ty };
-    MLIR_ValueHandle r[1] = { mk_res(L->ctx, ty) };
-    MLIR_ValueHandle ops[2] = { a, b };
-    MLIR_OpHandle out = build_op_named(L->ctx, nm, NULL, 0, rt, 1, r, ops, 2);
+    MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_FCMP, &pa, 1, rt, 1, r, ops, 2);
     emit(L, out);
     return r[0];
 }
@@ -673,7 +634,7 @@ static MLIR_ValueHandle emit_select(FLower *L, MLIR_ValueHandle cond,
     MLIR_TypeHandle rt[1] = { ty };
     MLIR_ValueHandle r[1] = { mk_res(L->ctx, ty) };
     MLIR_ValueHandle ops[3] = { cond, tval, fval };
-    MLIR_OpHandle out = build_op_named(L->ctx, "llvm.select", NULL, 0, rt, 1, r, ops, 3);
+    MLIR_OpHandle out = build_op(L->ctx, OP_TYPE_LLVM_SELECT, NULL, 0, rt, 1, r, ops, 3);
     emit(L, out);
     return r[0];
 }
@@ -710,7 +671,7 @@ static MLIR_ValueHandle linmem_ptr(FLower *L, MLIR_ValueHandle addr_i32,
     MLIR_TypeHandle rt[1] = { ptr };
     MLIR_ValueHandle r[1] = { mk_res(ctx, ptr) };
     MLIR_ValueHandle ops[1] = { ea };
-    MLIR_OpHandle out = build_op_named(ctx, "llvm.inttoptr", NULL, 0, rt, 1, r, ops, 1);
+    MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_INTTOPTR, NULL, 0, rt, 1, r, ops, 1);
     emit(L, out);
     return r[0];
 }
@@ -839,9 +800,9 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         }
         MLIR_TypeHandle ity = vt_to_llvm(ctx, vt);
         if (vt_is_float(vt)) {
-            const char *nm = (t == OP_TYPE_WASMSSA_ADD) ? "llvm.fadd"
-                                                        : "llvm.fsub";
-            MLIR_ValueHandle res = emit_binop_named(L, nm, a, b, ity);
+            MLIR_OpType fot = (t == OP_TYPE_WASMSSA_ADD) ? OP_TYPE_LLVM_FADD
+                                                         : OP_TYPE_LLVM_FSUB;
+            MLIR_ValueHandle res = emit_binop2(L, fot, a, b, ity);
             vmap_set(L->vmap, MLIR_GetOpResult(op, 0), res);
             return true;
         }
@@ -881,8 +842,8 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
             vmap_set(L->vmap, MLIR_GetOpResult(op, 0), r);
             return true;
         }
-        const char *fnm = fbinop_name(opc);
-        if (fnm) {
+        MLIR_OpType fot = fbinop_type(opc);
+        if (fot != OP_TYPE_UNREGISTERED) {
             uint8_t vt = (uint8_t)at_i(op, "valtype");
             MLIR_ValueHandle a, b;
             if (!vmap_get(L->vmap, MLIR_GetOpOperand(op, 0), &a) ||
@@ -891,7 +852,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
                 return false;
             }
             MLIR_TypeHandle fty = vt_to_llvm(ctx, vt);
-            MLIR_ValueHandle res = emit_binop_named(L, fnm, a, b, fty);
+            MLIR_ValueHandle res = emit_binop2(L, fot, a, b, fty);
             vmap_set(L->vmap, MLIR_GetOpResult(op, 0), res);
             return true;
         }
@@ -1057,7 +1018,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         MLIR_TypeHandle rt[1] = { ity };
         MLIR_ValueHandle r[1] = { mk_res(ctx, ity) };
         MLIR_ValueHandle ops[3] = { c, a, b };
-        MLIR_OpHandle out = build_op_named(ctx, "llvm.select",
+        MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_SELECT,
             NULL, 0, rt, 1, r, ops, 3);
         emit(L, out);
         vmap_set(L->vmap, MLIR_GetOpResult(op, 0), r[0]);
@@ -1492,33 +1453,33 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
                 emit_cast(L, OP_TYPE_LLVM_TRUNC, a, i32), i64); break;
         // ---- float <-> int conversions ----
         // f -> i (signed): trunc_f{32,64}_s
-        case 0xa8: res = emit_cast_named(L, "llvm.fptosi", a, i32); break;
-        case 0xaa: res = emit_cast_named(L, "llvm.fptosi", a, i32); break;
-        case 0xae: res = emit_cast_named(L, "llvm.fptosi", a, i64); break;
-        case 0xb0: res = emit_cast_named(L, "llvm.fptosi", a, i64); break;
+        case 0xa8: res = emit_cast(L, OP_TYPE_LLVM_FPTOSI, a, i32); break;
+        case 0xaa: res = emit_cast(L, OP_TYPE_LLVM_FPTOSI, a, i32); break;
+        case 0xae: res = emit_cast(L, OP_TYPE_LLVM_FPTOSI, a, i64); break;
+        case 0xb0: res = emit_cast(L, OP_TYPE_LLVM_FPTOSI, a, i64); break;
         // f -> i (unsigned): trunc_f{32,64}_u
-        case 0xa9: res = emit_cast_named(L, "llvm.fptoui", a, i32); break;
-        case 0xab: res = emit_cast_named(L, "llvm.fptoui", a, i32); break;
-        case 0xaf: res = emit_cast_named(L, "llvm.fptoui", a, i64); break;
-        case 0xb1: res = emit_cast_named(L, "llvm.fptoui", a, i64); break;
+        case 0xa9: res = emit_cast(L, OP_TYPE_LLVM_FPTOUI, a, i32); break;
+        case 0xab: res = emit_cast(L, OP_TYPE_LLVM_FPTOUI, a, i32); break;
+        case 0xaf: res = emit_cast(L, OP_TYPE_LLVM_FPTOUI, a, i64); break;
+        case 0xb1: res = emit_cast(L, OP_TYPE_LLVM_FPTOUI, a, i64); break;
         // i -> f (signed): convert_i{32,64}_s
-        case 0xb2: res = emit_cast_named(L, "llvm.sitofp", a, f32); break;
-        case 0xb4: res = emit_cast_named(L, "llvm.sitofp", a, f32); break;
-        case 0xb7: res = emit_cast_named(L, "llvm.sitofp", a, f64); break;
-        case 0xb9: res = emit_cast_named(L, "llvm.sitofp", a, f64); break;
+        case 0xb2: res = emit_cast(L, OP_TYPE_LLVM_SITOFP, a, f32); break;
+        case 0xb4: res = emit_cast(L, OP_TYPE_LLVM_SITOFP, a, f32); break;
+        case 0xb7: res = emit_cast(L, OP_TYPE_LLVM_SITOFP, a, f64); break;
+        case 0xb9: res = emit_cast(L, OP_TYPE_LLVM_SITOFP, a, f64); break;
         // i -> f (unsigned): convert_i{32,64}_u
-        case 0xb3: res = emit_cast_named(L, "llvm.uitofp", a, f32); break;
-        case 0xb5: res = emit_cast_named(L, "llvm.uitofp", a, f32); break;
-        case 0xb8: res = emit_cast_named(L, "llvm.uitofp", a, f64); break;
-        case 0xba: res = emit_cast_named(L, "llvm.uitofp", a, f64); break;
+        case 0xb3: res = emit_cast(L, OP_TYPE_LLVM_UITOFP, a, f32); break;
+        case 0xb5: res = emit_cast(L, OP_TYPE_LLVM_UITOFP, a, f32); break;
+        case 0xb8: res = emit_cast(L, OP_TYPE_LLVM_UITOFP, a, f64); break;
+        case 0xba: res = emit_cast(L, OP_TYPE_LLVM_UITOFP, a, f64); break;
         // f <-> f
-        case 0xb6: res = emit_cast_named(L, "llvm.fptrunc", a, f32); break; // demote
-        case 0xbb: res = emit_cast_named(L, "llvm.fpext",   a, f64); break; // promote
+        case 0xb6: res = emit_cast(L, OP_TYPE_LLVM_FPTRUNC, a, f32); break; // demote
+        case 0xbb: res = emit_cast(L, OP_TYPE_LLVM_FPEXT,   a, f64); break; // promote
         // ---- float unary ops ----
-        case 0x8c: res = emit_cast_named(L, "llvm.fneg",      a, f32); break; // f32.neg
-        case 0x91: res = emit_cast_named(L, "llvm.intr.sqrt", a, f32); break; // f32.sqrt
-        case 0x9a: res = emit_cast_named(L, "llvm.fneg",      a, f64); break; // f64.neg
-        case 0x9f: res = emit_cast_named(L, "llvm.intr.sqrt", a, f64); break; // f64.sqrt
+        case 0x8c: res = emit_cast(L, OP_TYPE_LLVM_FNEG,      a, f32); break; // f32.neg
+        case 0x91: res = emit_cast(L, OP_TYPE_LLVM_INTR_SQRT, a, f32); break; // f32.sqrt
+        case 0x9a: res = emit_cast(L, OP_TYPE_LLVM_FNEG,      a, f64); break; // f64.neg
+        case 0x9f: res = emit_cast(L, OP_TYPE_LLVM_INTR_SQRT, a, f64); break; // f64.sqrt
         default:
             fprintf(stderr,
                 "wasmssa->llvm: unop opcode 0x%llx not yet supported\n",
@@ -1607,11 +1568,12 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         return true;
     }
 
-    default:
-        fprintf(stderr,
-            "wasmssa->llvm: op '%.*s' not yet supported\n",
-            (int)MLIR_GetOpName(op).size, MLIR_GetOpName(op).str);
+    default: {
+        string on = MLIR_GetOpTypeName(ctx, t);
+        fprintf(stderr, "wasmssa->llvm: op '%.*s' not yet supported\n",
+                (int)on.size, on.str);
         return false;
+    }
     }
 }
 
@@ -1658,15 +1620,11 @@ static MLIR_ValueHandle bf_resolve(BoolFwd *m, size_t mask, MLIR_ValueHandle v) 
     for (int g = 0; g < 64 && bf_get(m, mask, v, &n); g++) v = n;
     return v;
 }
-static bool sb_op_name_is(MLIR_OpHandle op, const char *nm) {
-    string s = MLIR_GetOpName(op);
-    size_t l = strlen(nm);
-    return s.size == l && s.str != NULL && memcmp(s.str, nm, l) == 0;
-}
 static bool sb_is_cmp_def(MLIR_ValueHandle v) {
     MLIR_OpHandle d = MLIR_GetValueDefiningOp(v);
     if (!d) return false;
-    return sb_op_name_is(d, "llvm.icmp") || sb_op_name_is(d, "llvm.fcmp");
+    MLIR_OpType t = MLIR_GetOpType(d);
+    return t == OP_TYPE_LLVM_ICMP || t == OP_TYPE_LLVM_FCMP;
 }
 static bool sb_is_const(MLIR_ValueHandle v, int64_t want) {
     MLIR_OpHandle d = MLIR_GetValueDefiningOp(v);
@@ -1697,7 +1655,7 @@ static MLIR_ValueHandle sb_flat_get(MLIR_OpHandle op, size_t i) {
 // the in-progress map for the bool test so chains collapse), else INVALID.
 static MLIR_ValueHandle sb_fold_inner(BoolFwd *m, size_t mask, MLIR_OpHandle op) {
     MLIR_ValueHandle dummy;
-    if (sb_op_name_is(op, "llvm.select") && MLIR_GetOpNumOperands(op) == 3) {
+    if (MLIR_GetOpType(op) == OP_TYPE_LLVM_SELECT && MLIR_GetOpNumOperands(op) == 3) {
         MLIR_ValueHandle c = MLIR_GetOpOperand(op, 0);
         MLIR_ValueHandle t = MLIR_GetOpOperand(op, 1);
         MLIR_ValueHandle f = MLIR_GetOpOperand(op, 2);
@@ -1727,7 +1685,7 @@ static void simplify_bools(MLIR_Context *ctx, MLIR_RegionHandle region) {
         size_t no = MLIR_GetBlockNumOps(blk);
         for (size_t oi = 0; oi < no; oi++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(blk, oi);
-            if (sb_op_name_is(op, "llvm.select") ||
+            if (MLIR_GetOpType(op) == OP_TYPE_LLVM_SELECT ||
                 (MLIR_GetOpType(op) == OP_TYPE_LLVM_ICMP && at_i(op, "predicate") == 1))
                 ncand++;
         }
@@ -1928,7 +1886,6 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
     };
     MLIR_RegionHandle regs[1] = { dreg };
     return MLIR_CreateOp(ctx, OP_TYPE_LLVM_FUNC,
-        op_type_to_string(OP_TYPE_LLVM_FUNC),
         attrs, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -1957,7 +1914,7 @@ static MLIR_ValueHandle emit_byte_ptr(FLower *L, MLIR_ValueHandle base, MLIR_Val
     MLIR_TypeHandle rt[1] = { ptr };
     MLIR_ValueHandle r[1] = { mk_res(L->ctx, ptr) };
     MLIR_ValueHandle ops[1] = { ea };
-    MLIR_OpHandle out = build_op_named(L->ctx, "llvm.inttoptr", NULL, 0, rt, 1, r, ops, 1);
+    MLIR_OpHandle out = build_op(L->ctx, OP_TYPE_LLVM_INTTOPTR, NULL, 0, rt, 1, r, ops, 1);
     emit(L, out);
     return r[0];
 }
@@ -2175,8 +2132,7 @@ static bool synth_dispatchers(MLIR_Context *ctx, MLIR_BlockHandle out_body,
 
         MLIR_AttributeHandle fa[1] = { attr_s(ctx, "sym_name", dname, (size_t)dlen) };
         MLIR_RegionHandle regs[1] = { dreg };
-        MLIR_OpHandle fn = MLIR_CreateOp(ctx, OP_TYPE_LLVM_FUNC,
-            op_type_to_string(OP_TYPE_LLVM_FUNC), fa, 1, NULL, 0, NULL, 0, NULL, 0,
+        MLIR_OpHandle fn = MLIR_CreateOp(ctx, OP_TYPE_LLVM_FUNC, fa, 1, NULL, 0, NULL, 0, NULL, 0,
             regs, 1, MLIR_CreateLocationUnknown(ctx, (string){0}),
             MLIR_INVALID_HANDLE, (string){0}, -1);
         MLIR_AppendBlockOp(ctx, out_body, fn);
@@ -2408,7 +2364,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     free(image);
 
     MLIR_RegionHandle regs[1] = { out_region };
-    return MLIR_CreateOp(ctx, OP_TYPE_MODULE, str_lit("module"),
+    return MLIR_CreateOp(ctx, OP_TYPE_MODULE,
         NULL, 0, NULL, 0, NULL, 0, NULL, 0, regs, 1,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);

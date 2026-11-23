@@ -17,7 +17,6 @@
 #include <base/string.h>
 
 #include "mlir_api.h"
-#include "mlir_op_names.h"
 
 // =============================================================================
 // AArch64 instruction encoders. Each helper returns the 32-bit little-
@@ -482,7 +481,7 @@ string attr_s(MLIR_OpHandle op, const char *name) {
 }
 
 
-bool emit_aarch64_func(MLIR_OpHandle fn, MachineFunc *out) {
+bool emit_aarch64_func(MLIR_Context *ctx, MLIR_OpHandle fn, MachineFunc *out) {
     out->name     = attr_s(fn, "sym_name");
     out->exported = attr_b(fn, "exported");
 
@@ -1032,7 +1031,7 @@ bool emit_aarch64_func(MLIR_OpHandle fn, MachineFunc *out) {
                 break;
             }
             default: {
-                string nm = MLIR_GetOpName(op);
+                string nm = MLIR_GetOpTypeName(ctx, t);
                 fprintf(stderr,
                     "aarch64->macho: unsupported aarch64 op '%.*s' "
                     "(kind=%d)\n", (int)nm.size, nm.str, (int)t);

@@ -15,7 +15,6 @@
 #include <base/string.h>
 
 #include "mlir_api.h"
-#include "mlir_op_names.h"
 
 // =============================================================================
 // Wasm value-type constants.
@@ -582,7 +581,7 @@ static MLIR_AttributeHandle attr_s_hex(MLIR_Context *ctx, Arena *arena,
 
 static MLIR_OpHandle build_op(MLIR_Context *ctx, MLIR_OpType t,
                               MLIR_AttributeHandle *attrs, size_t na) {
-    return MLIR_CreateOp(ctx, t, op_type_to_string(t),
+    return MLIR_CreateOp(ctx, t,
         attrs, na, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -1222,7 +1221,6 @@ static MLIR_OpHandle convert_func(MLIR_Context *ctx, Arena *arena,
     MLIR_AppendRegionBlock(ctx, region, dst_blk);
     MLIR_RegionHandle regs[1] = { region };
     return MLIR_CreateOp(ctx, OP_TYPE_WASMSTACK_FUNC,
-        op_type_to_string(OP_TYPE_WASMSTACK_FUNC),
         attrs, na, NULL, 0, NULL, 0, NULL, 0, regs, 1,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -1257,7 +1255,6 @@ MLIR_OpHandle mlir_wasm_to_wasmstack(MLIR_Context *ctx,
                                             (int64_t)m.memory_min_pages);
     }
     MLIR_OpHandle out_module = MLIR_CreateOp(ctx, OP_TYPE_MODULE,
-        str_lit("module"),
         mod_attrs, n_mod_attrs, NULL, 0, NULL, 0, NULL, 0, out_regs, 1,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);

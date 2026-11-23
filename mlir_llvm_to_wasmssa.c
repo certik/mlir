@@ -47,7 +47,6 @@
 
 #include "mlir_api.h"
 #include "mlir_passes.h"
-#include "mlir_op_names.h"
 #include "mlir_llvm_to_wasmssa.h"
 #include "mlir_llvm_type_layout.h"
 #include <base/vector.h>
@@ -636,7 +635,7 @@ static MLIR_OpHandle make_op_n(MLIR_Context *ctx, MLIR_OpType type,
                                                res_tys[i], (string){0},
                                                MLIR_CreateLocationUnknown(ctx, (string){0}));
     }
-    MLIR_OpHandle op = MLIR_CreateOp(ctx, type, op_type_to_string(type),
+    MLIR_OpHandle op = MLIR_CreateOp(ctx, type,
         attrs, n_attrs, res_tys, n_results, res_vals, n_results,
         operands, n_operands, regions, n_regions,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
@@ -1165,15 +1164,14 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op);
 static bool lower_op(FnCtx *F, MLIR_OpHandle op) {
     bool ok = lower_op_inner(F, op);
     if (!ok) {
-        string n = MLIR_GetOpName(op);
+        string n = MLIR_GetOpTypeName(F->ctx, MLIR_GetOpType(op));
         fprintf(stderr, "wasmssa-lower: lower_op failed at '%.*s'\n",
                 (int)n.size, n.str);
     }
     return ok;
 }
 static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
-    // The op type is derived from the op name by MLIR_CreateOp, so one switch
-    // selects the lowering. Every arm returns.
+    // One switch on the op type selects the lowering. Every arm returns.
     MLIR_OpType ty = MLIR_GetOpType(op);
     switch (ty) {
 
@@ -2198,7 +2196,7 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
     default: break;
     }
 
-    string name = MLIR_GetOpName(op);
+    string name = MLIR_GetOpTypeName(F->ctx, ty);
     fprintf(stderr, "wasmssa-lower: unsupported op '%.*s'\n",
             (int)name.size, name.str);
     return false;
@@ -2260,7 +2258,7 @@ static bool prewalk_op(FnCtx *F, MLIR_OpHandle op) {
     MLIR_OpType ty = MLIR_GetOpType(op);
     if (ty == OP_TYPE_LLVM_BR || ty == OP_TYPE_LLVM_COND_BR ||
         ty == OP_TYPE_LLVM_SWITCH) {
-        string n = MLIR_GetOpName(op);
+        string n = MLIR_GetOpTypeName(F->ctx, ty);
         // The structurization step could not lift this branch (see the
         // limitations listed in mlir_lift_cf_to_scf.h).
         fprintf(stderr,
@@ -2453,7 +2451,6 @@ static bool lower_function(MLIR_Context *ctx, Arena *arena, ModCtx *mod,
         MLIR_AppendRegionBlock(ctx, region, F.body_block);
         MLIR_RegionHandle regs[1] = { region };
         MLIR_OpHandle op = MLIR_CreateOp(ctx, OP_TYPE_WASMSSA_FUNC,
-            op_type_to_string(OP_TYPE_WASMSSA_FUNC),
             attrs, na, NULL, 0, NULL, 0, NULL, 0, regs, 1,
             MLIR_CreateLocationUnknown(ctx, (string){0}),
             MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -2751,7 +2748,7 @@ static MLIR_OpHandle make_op(MLIR_Context *ctx, MLIR_OpType type,
                                                MLIR_CreateLocationUnknown(ctx, (string){0}));
         n_res = 1;
     }
-    MLIR_OpHandle op = MLIR_CreateOp(ctx, type, op_type_to_string(type),
+    MLIR_OpHandle op = MLIR_CreateOp(ctx, type,
         attrs, n_attrs, res_tys, n_res, res_vals, n_res,
         operands, n_operands, regions, n_regions,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
@@ -2800,19 +2797,29 @@ static void emit_import_func(MLIR_Context *ctx, Arena *arena,
 // higher-level dialect (cf.*, scf.*, arith.*, func.*, ...). This is what
 // keeps a pre-backend lowering regression from going unnoticed.
 // ---------------------------------------------------------------------------
-static bool op_is_llvm_dialect(MLIR_OpHandle op) {
-    string n = MLIR_GetOpName(op);
+
+// True if the guard accepts an op of type `t`: an op of the LLVM dialect of
+// mlir_ops.def, or an op of a dynamic type named `llvm.*`. The latter are
+// module-level ops the module walk skips (llvm.module_flags, llvm.comdat,
+// llvm.mlir.global_ctors, ...); inside a function the lowering reports them
+// as unsupported, naming the op. Only dynamic types reach the name compare.
+static bool op_type_is_llvm(MLIR_Context *ctx, MLIR_OpType t) {
+    if (MLIR_OP_TYPE_IN_DIALECT(t, LLVM)) return true;
+    if ((unsigned)t < (unsigned)OP_TYPE_COUNT) return false;
+    string n = MLIR_GetOpTypeName(ctx, t);
     return n.size > 5 && memcmp(n.str, "llvm.", 5) == 0;
 }
 
 // `owner` is the enclosing module-level op (for the diagnostic), or
 // MLIR_INVALID_HANDLE while walking the module body itself.
-static bool check_llvm_only_block(MLIR_BlockHandle block, MLIR_OpHandle owner) {
+static bool check_llvm_only_block(MLIR_Context *ctx, MLIR_BlockHandle block,
+                                  MLIR_OpHandle owner) {
     size_t no = MLIR_GetBlockNumOps(block);
     for (size_t i = 0; i < no; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(block, i);
-        if (!op_is_llvm_dialect(op)) {
-            string n = MLIR_GetOpName(op);
+        MLIR_OpType t = MLIR_GetOpType(op);
+        if (!op_type_is_llvm(ctx, t)) {
+            string n = MLIR_GetOpTypeName(ctx, t);
             string where = str_lit("<module>");
             if (owner != MLIR_INVALID_HANDLE) {
                 MLIR_AttributeHandle sa =
@@ -2833,7 +2840,7 @@ static bool check_llvm_only_block(MLIR_BlockHandle block, MLIR_OpHandle owner) {
             MLIR_RegionHandle rg = MLIR_GetOpRegion(op, r);
             size_t nb = MLIR_GetRegionNumBlocks(rg);
             for (size_t b = 0; b < nb; b++) {
-                if (!check_llvm_only_block(MLIR_GetRegionBlock(rg, b),
+                if (!check_llvm_only_block(ctx, MLIR_GetRegionBlock(rg, b),
                                            inner_owner))
                     return false;
             }
@@ -2852,7 +2859,7 @@ MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module) {
         return MLIR_INVALID_HANDLE;
     }
     if (!check_llvm_only_block(
-            MLIR_GetRegionBlock(MLIR_GetOpRegion(module, 0), 0),
+            ctx, MLIR_GetRegionBlock(MLIR_GetOpRegion(module, 0), 0),
             MLIR_INVALID_HANDLE))
         return MLIR_INVALID_HANDLE;
 
@@ -2876,7 +2883,6 @@ MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module) {
     MLIR_AppendRegionBlock(ctx, region, body);
     MLIR_RegionHandle regs[1] = { region };
     MLIR_OpHandle out_module = MLIR_CreateOp(ctx, OP_TYPE_MODULE,
-        str_lit("module"),
         NULL, 0, NULL, 0, NULL, 0, NULL, 0, regs, 1,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);

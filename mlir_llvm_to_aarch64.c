@@ -34,7 +34,6 @@
 
 #include "mlir_llvm_to_aarch64.h"
 #include "mlir_llvm_type_layout.h"
-#include "mlir_op_names.h"
 #include "mlir_regalloc.h"
 
 // ---------------------------------------------------------------------------
@@ -56,7 +55,7 @@ static MLIR_AttributeHandle attr_b(MLIR_Context *ctx, const char *name, bool v) 
 
 static MLIR_OpHandle build_op(MLIR_Context *ctx, MLIR_OpType t,
                               MLIR_AttributeHandle *attrs, size_t na) {
-    return MLIR_CreateOp(ctx, t, op_type_to_string(t),
+    return MLIR_CreateOp(ctx, t,
         attrs, na, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -409,7 +408,7 @@ static MLIR_OpHandle build_branch_op(MLIR_Context *ctx, MLIR_OpType t,
     MLIR_BlockHandle succs[1] = { target };
     MLIR_ValueHandle *succ_ops[1] = { NULL };
     size_t           n_succ_ops[1] = { 0 };
-    return MLIR_CreateOpWithSuccessors(ctx, t, op_type_to_string(t),
+    return MLIR_CreateOpWithSuccessors(ctx, t,
         attrs, na, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         succs, 1, succ_ops, n_succ_ops,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
@@ -1293,8 +1292,9 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
     MLIR_Context     *ctx = L->ctx;
     MLIR_BlockHandle  blk = L->cur;
     SlotMap          *sm  = L->sm;
-    string            on  = MLIR_GetOpName(op);
     MLIR_OpType       ty  = MLIR_GetOpType(op);
+    // The op's name, for diagnostics.
+    #define ON_ARGS (int)MLIR_GetOpTypeName(ctx, ty).size, MLIR_GetOpTypeName(ctx, ty).str
 
     switch (ty) {
     case OP_TYPE_LLVM_MLIR_CONSTANT: {
@@ -1985,7 +1985,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
                          : ty == OP_TYPE_LLVM_FSUB ? "fsub"
                          : ty == OP_TYPE_LLVM_FMUL ? "fmul" : "fdiv";
         if (fw == 0) LFAIL("llvm->aarch64: %.*s non-float result\n",
-                           (int)on.size, on.str);
+                           ON_ARGS);
         uint8_t r0 = use_val(L, MLIR_GetOpOperand(op, 0), 9);
         uint8_t r1 = use_val(L, MLIR_GetOpOperand(op, 1), 10);
         if (!L->ok) return;
@@ -2003,7 +2003,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         int fw = fp_width(ctx, res);
         const char *kind = ty == OP_TYPE_LLVM_FNEG ? "fneg" : "fsqrt";
         if (fw == 0) LFAIL("llvm->aarch64: %.*s non-float result\n",
-                           (int)on.size, on.str);
+                           ON_ARGS);
         uint8_t r0 = use_val(L, MLIR_GetOpOperand(op, 0), 9);
         if (!L->ok) return;
         emit_fmov_gp_v(ctx, blk, true, true, 0, r0);
@@ -2149,8 +2149,9 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
 
     default:
         LFAIL("llvm->aarch64: unsupported op '%.*s' in '%.*s'\n",
-              (int)on.size, on.str, (int)L->sym.size, L->sym.str);
+              ON_ARGS, (int)L->sym.size, L->sym.str);
     }
+    #undef ON_ARGS
 }
 
 // Recursively assign an 8-byte frame slot to every block arg and op result
@@ -3367,7 +3368,6 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
             if (!L.ok) { free(src_blks); free(out_blks); return MLIR_INVALID_HANDLE; }
         }
         MLIR_OpHandle term = term0;
-        string tn = MLIR_GetOpName(term);
         MLIR_OpType tn_ty = MLIR_GetOpType(term);
         if (tn_ty == OP_TYPE_LLVM_RETURN) {
             size_t nr = MLIR_GetOpNumOperands(term);
@@ -3456,6 +3456,7 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
                 emit_b(ctx, br_f, real_f);
             }
         } else {
+            string tn = MLIR_GetOpTypeName(ctx, tn_ty);
             fprintf(stderr, "llvm->aarch64: block in '%.*s' ends in "
                     "unsupported terminator '%.*s'\n",
                     (int)sym.size, sym.str, (int)tn.size, tn.str);
@@ -3472,7 +3473,6 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
     attrs[0] = attr_s(ctx, "sym_name", sym.str, sym.size);
     MLIR_RegionHandle regs[1] = { out_reg };
     return MLIR_CreateOp(ctx, OP_TYPE_AARCH64_FUNC,
-        op_type_to_string(OP_TYPE_AARCH64_FUNC),
         attrs, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -3569,7 +3569,6 @@ static MLIR_OpHandle select_func(MLIR_Context *ctx, MLIR_OpHandle fn,
     attrs[0] = attr_s(ctx, "sym_name", sym.str, sym.size);
     MLIR_RegionHandle regs[1] = { out_reg };
     return MLIR_CreateOp(ctx, OP_TYPE_AARCH64_FUNC,
-        op_type_to_string(OP_TYPE_AARCH64_FUNC),
         attrs, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -3688,7 +3687,6 @@ static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name,
     attrs[1] = attr_b(ctx, "exported", true);
     MLIR_RegionHandle regs[1] = { reg };
     return MLIR_CreateOp(ctx, OP_TYPE_AARCH64_FUNC,
-        op_type_to_string(OP_TYPE_AARCH64_FUNC),
         attrs, 2, NULL, 0, NULL, 0, NULL, 0, regs, 1,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -3702,19 +3700,28 @@ static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name,
 // higher-level dialect (cf.*, scf.*, arith.*, func.*, ...). This is what
 // keeps a pre-backend lowering regression from going unnoticed.
 // ---------------------------------------------------------------------------
-static bool op_is_llvm_dialect(MLIR_OpHandle op) {
-    string n = MLIR_GetOpName(op);
+// True if the guard accepts an op of type `t`: an op of the LLVM dialect of
+// mlir_ops.def, or an op of a dynamic type named `llvm.*`. The latter are
+// module-level ops the module walk skips (llvm.module_flags, llvm.comdat,
+// llvm.mlir.global_ctors, ...); inside a function the lowering reports them
+// as unsupported, naming the op. Only dynamic types reach the name compare.
+static bool op_type_is_llvm(MLIR_Context *ctx, MLIR_OpType t) {
+    if (MLIR_OP_TYPE_IN_DIALECT(t, LLVM)) return true;
+    if ((unsigned)t < (unsigned)OP_TYPE_COUNT) return false;
+    string n = MLIR_GetOpTypeName(ctx, t);
     return n.size > 5 && memcmp(n.str, "llvm.", 5) == 0;
 }
 
 // `owner` is the enclosing module-level op (for the diagnostic), or
 // MLIR_INVALID_HANDLE while walking the module body itself.
-static bool check_llvm_only_block(MLIR_BlockHandle block, MLIR_OpHandle owner) {
+static bool check_llvm_only_block(MLIR_Context *ctx, MLIR_BlockHandle block,
+                                  MLIR_OpHandle owner) {
     size_t no = MLIR_GetBlockNumOps(block);
     for (size_t i = 0; i < no; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(block, i);
-        if (!op_is_llvm_dialect(op)) {
-            string n = MLIR_GetOpName(op);
+        MLIR_OpType t = MLIR_GetOpType(op);
+        if (!op_type_is_llvm(ctx, t)) {
+            string n = MLIR_GetOpTypeName(ctx, t);
             string where = str_lit("<module>");
             if (owner != MLIR_INVALID_HANDLE) {
                 MLIR_AttributeHandle sa =
@@ -3735,7 +3742,7 @@ static bool check_llvm_only_block(MLIR_BlockHandle block, MLIR_OpHandle owner) {
             MLIR_RegionHandle rg = MLIR_GetOpRegion(op, r);
             size_t nb = MLIR_GetRegionNumBlocks(rg);
             for (size_t b = 0; b < nb; b++) {
-                if (!check_llvm_only_block(MLIR_GetRegionBlock(rg, b),
+                if (!check_llvm_only_block(ctx, MLIR_GetRegionBlock(rg, b),
                                            inner_owner))
                     return false;
             }
@@ -3749,7 +3756,7 @@ MLIR_OpHandle mlir_llvm_to_aarch64(MLIR_Context *ctx,
     MLIR_RegionHandle mr = MLIR_GetOpRegion(llvm_module, 0);
     MLIR_BlockHandle  mb = MLIR_GetRegionBlock(mr, 0);
     size_t nops = MLIR_GetBlockNumOps(mb);
-    if (!check_llvm_only_block(mb, MLIR_INVALID_HANDLE))
+    if (!check_llvm_only_block(ctx, mb, MLIR_INVALID_HANDLE))
         return MLIR_INVALID_HANDLE;
 
     MLIR_BlockHandle  out_body = MLIR_CreateBlock(ctx);
@@ -3826,7 +3833,7 @@ MLIR_OpHandle mlir_llvm_to_aarch64(MLIR_Context *ctx,
     }
 
     MLIR_RegionHandle regs[1] = { out_region };
-    return MLIR_CreateOp(ctx, OP_TYPE_MODULE, str_lit("module"),
+    return MLIR_CreateOp(ctx, OP_TYPE_MODULE,
         NULL, 0, NULL, 0, NULL, 0, NULL, 0, regs, 1,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -3857,7 +3864,7 @@ LlvmSelState *mlir_llvm_sel_begin(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     MLIR_RegionHandle mr = MLIR_GetOpRegion(llvm_module, 0);
     MLIR_BlockHandle  mb = MLIR_GetRegionBlock(mr, 0);
     size_t nops = MLIR_GetBlockNumOps(mb);
-    if (!check_llvm_only_block(mb, MLIR_INVALID_HANDLE)) return NULL;
+    if (!check_llvm_only_block(ctx, mb, MLIR_INVALID_HANDLE)) return NULL;
 
     LlvmSelState *st = (LlvmSelState *)calloc(1, sizeof(LlvmSelState));
     if (!st) return NULL;

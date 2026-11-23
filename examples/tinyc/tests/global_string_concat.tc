@@ -1,0 +1,22 @@
+// A global char array initialized from adjacent string literals: they
+// concatenate, as in an expression, and an embedded "\0" separates names
+// (the shape of the op-name table that mlir_op_names.c builds from
+// mlir_ops.def).
+
+extern int printf(const char *fmt, ...);
+
+static const char names[] = "abc" "\0" "de" "\0" "f";
+char greeting[] = "hello, " "world";
+
+int main(void) {
+    printf("%d %d\n", (int)sizeof(names), (int)sizeof(greeting));
+    const char *p = names;
+    for (int i = 0; i < 3; i++) {
+        int n = 0;
+        while (p[n]) n++;
+        printf("[%s] %d\n", p, n);
+        p += n + 1;
+    }
+    printf("%s\n", greeting);
+    return 0;
+}

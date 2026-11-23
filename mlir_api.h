@@ -42,459 +42,59 @@ typedef struct MLIR_Context MLIR_Context;
 // -----------------------------------------------------------------------------
 // Operation kinds
 // -----------------------------------------------------------------------------
+//
+// An op's identity is its MLIR_OpType (doc/mlir_api_design.md section 2.5).
+// Names exist for printing, parsing and diagnostics only: no op stores one,
+// and no function but the three below takes one.
+//
+// The static types are generated from mlir_ops.def. A context gives every
+// other name a dynamic type, a value >= OP_TYPE_COUNT that is stable for the
+// life of the context (MLIR_RegisterOpType). OP_TYPE_UNREGISTERED is only
+// the lookup-miss value: no op has it.
+//
+// The ops of a dialect D have consecutive values, MLIR_DIALECT_<D>_FIRST to
+// MLIR_DIALECT_<D>_LAST, so MLIR_OP_TYPE_IN_DIALECT(t, D) is one comparison.
+// Dynamic types belong to no dialect range. (The MLIR_DIALECT_<D>_BEGIN_
+// and _END_ enumerators only produce the ranges; do not use them.)
 
 typedef enum {
-    // Core ops
     OP_TYPE_UNREGISTERED = 0,
-    OP_TYPE_MODULE,
-
-    // Arithmetic dialect
-    OP_TYPE_ARITH_ADDI,
-    OP_TYPE_ARITH_SUBI,
-    OP_TYPE_ARITH_MULI,
-    OP_TYPE_ARITH_DIVI,
-    OP_TYPE_ARITH_ADDF,
-    OP_TYPE_ARITH_SUBF,
-    OP_TYPE_ARITH_MULF,
-    OP_TYPE_ARITH_DIVF,
-    OP_TYPE_ARITH_CONSTANT,
-    OP_TYPE_ARITH_CMPI,
-    OP_TYPE_ARITH_CMPF,
-    OP_TYPE_ARITH_SELECT,
-    OP_TYPE_ARITH_BITCAST,
-    OP_TYPE_ARITH_SITOFP,
-    OP_TYPE_ARITH_FPTOSI,
-    OP_TYPE_ARITH_INDEX_CAST,
-    OP_TYPE_ARITH_EXTSI,
-    OP_TYPE_ARITH_TRUNCI,
-    OP_TYPE_ARITH_EXTF,
-    OP_TYPE_ARITH_TRUNCF,
-    OP_TYPE_ARITH_EXTUI,
-    OP_TYPE_ARITH_MAXF,
-    OP_TYPE_ARITH_DIVSI,
-    OP_TYPE_ARITH_REMSI,
-    OP_TYPE_ARITH_DIVUI,
-    OP_TYPE_ARITH_REMUI,
-    OP_TYPE_ARITH_SHRUI,
-    OP_TYPE_ARITH_ORI,
-    OP_TYPE_ARITH_MINSI,
-    OP_TYPE_ARITH_ANDI,
-    OP_TYPE_ARITH_INDEX_CASTUI,
-    OP_TYPE_ARITH_UITOFP,
-    OP_TYPE_ARITH_FPTOUI,
-
-    // Math dialect
-    OP_TYPE_MATH_EXP,
-    OP_TYPE_MATH_LOG,
-
-    // Memory dialect
-    OP_TYPE_MEMREF_LOAD,
-    OP_TYPE_MEMREF_STORE,
-    OP_TYPE_MEMREF_ALLOC,
-    OP_TYPE_MEMREF_DEALLOC,
-
-    // Control flow
-    OP_TYPE_CF_BR,
-    OP_TYPE_CF_COND_BR,
-    OP_TYPE_CF_SWITCH,
-
-    // Function dialect
-    OP_TYPE_FUNC_FUNC,
-    OP_TYPE_FUNC_RETURN,
-    OP_TYPE_FUNC_CALL,
-    OP_TYPE_FUNC_CALL_INDIRECT,
-    OP_TYPE_FUNC_CONSTANT,
-    OP_TYPE_UNREALIZED_CONVERSION_CAST,
-
-    // SCF dialect
-    OP_TYPE_SCF_FOR,
-    OP_TYPE_SCF_WHILE,
-    OP_TYPE_SCF_IF,
-    OP_TYPE_SCF_YIELD,
-    OP_TYPE_SCF_CONDITION,
-    OP_TYPE_SCF_INDEX_SWITCH,
-
-    // Triton dialect
-    OP_TYPE_TT_GET_PROGRAM_ID,
-    OP_TYPE_TT_LOAD,
-    OP_TYPE_TT_STORE,
-    OP_TYPE_TT_MAKE_RANGE,
-    OP_TYPE_TT_SPLAT,
-    OP_TYPE_TT_ADDPTR,
-    OP_TYPE_TT_RETURN,
-    OP_TYPE_TT_FUNC,
-    OP_TYPE_TT_CALL,
-    OP_TYPE_TT_REDUCE,
-    OP_TYPE_TT_BROADCAST,
-    OP_TYPE_TT_EXPAND_DIMS,
-    OP_TYPE_TT_DOT,
-    OP_TYPE_TT_PURE_EXTERN_ELEMENTWISE,
-
-    // GPU dialect
-    OP_TYPE_GPU_LAUNCH,
-
-    // Affine dialect
-    OP_TYPE_AFFINE_FOR,
-    OP_TYPE_AFFINE_LOAD,
-
-    // Vector dialect
-    OP_TYPE_VECTOR_PRINT,
-
-    // Standard dialect
-    OP_TYPE_STD_CONSTANT,
-    OP_TYPE_STD_RETURN,
-
-    // Tensor dialect
-    OP_TYPE_TENSOR_EXTRACT,
-    OP_TYPE_TENSOR_SPLAT,
-    OP_TYPE_TENSOR_COLLAPSE_SHAPE,
-
-    // Linalg dialect
-    OP_TYPE_LINALG_FILL,
-    OP_TYPE_LINALG_COPY,
-
-    // Index dialect
-    OP_TYPE_INDEX_CONSTANT,
-
-    // LLVM dialect
-    OP_TYPE_LLVM_MLIR_UNDEF,
-    OP_TYPE_LLVM_ALLOCA,
-    OP_TYPE_LLVM_LOAD,
-    OP_TYPE_LLVM_STORE,
-    OP_TYPE_LLVM_GEP,
-    OP_TYPE_LLVM_MLIR_ZERO,
-    OP_TYPE_LLVM_MLIR_CONSTANT,
-    OP_TYPE_LLVM_ICMP,
-    OP_TYPE_LLVM_MLIR_ADDRESSOF,
-    OP_TYPE_LLVM_MLIR_GLOBAL,
-    OP_TYPE_LLVM_RETURN,
-    OP_TYPE_LLVM_PTRTOINT,
-    OP_TYPE_LLVM_FUNC,
-    OP_TYPE_LLVM_CALL,
-    OP_TYPE_LLVM_SEXT,
-    OP_TYPE_LLVM_ADD,
-    OP_TYPE_LLVM_SUB,
-    OP_TYPE_LLVM_MUL,
-    OP_TYPE_LLVM_SDIV,
-    OP_TYPE_LLVM_UDIV,
-    OP_TYPE_LLVM_SREM,
-    OP_TYPE_LLVM_UREM,
-    OP_TYPE_LLVM_AND,
-    OP_TYPE_LLVM_OR,
-    OP_TYPE_LLVM_XOR,
-    OP_TYPE_LLVM_SHL,
-    OP_TYPE_LLVM_LSHR,
-    OP_TYPE_LLVM_ASHR,
-    OP_TYPE_LLVM_TRUNC,
-    OP_TYPE_LLVM_ZEXT,
-    OP_TYPE_LLVM_BR,
-    OP_TYPE_LLVM_COND_BR,
-    OP_TYPE_LLVM_INTTOPTR,
-    OP_TYPE_LLVM_BITCAST,
-    OP_TYPE_LLVM_SELECT,
-    OP_TYPE_LLVM_FCMP,
-    OP_TYPE_LLVM_FADD,
-    OP_TYPE_LLVM_FSUB,
-    OP_TYPE_LLVM_FMUL,
-    OP_TYPE_LLVM_FDIV,
-    OP_TYPE_LLVM_FREM,
-    OP_TYPE_LLVM_FNEG,
-    OP_TYPE_LLVM_FPEXT,
-    OP_TYPE_LLVM_FPTRUNC,
-    OP_TYPE_LLVM_SITOFP,
-    OP_TYPE_LLVM_UITOFP,
-    OP_TYPE_LLVM_FPTOSI,
-    OP_TYPE_LLVM_FPTOUI,
-    OP_TYPE_LLVM_MLIR_NULL,
-    OP_TYPE_LLVM_SWITCH,
-    OP_TYPE_LLVM_UNREACHABLE,
-    OP_TYPE_LLVM_MLIR_POISON,
-    OP_TYPE_LLVM_ADDRSPACECAST,
-    OP_TYPE_LLVM_INSERTVALUE,
-    OP_TYPE_LLVM_INTR_SQRT,
-    OP_TYPE_LLVM_INTR_VASTART,
-    OP_TYPE_LLVM_INTR_VAEND,
-    OP_TYPE_LLVM_INTR_VACOPY,
-    OP_TYPE_LLVM_INTR_STACKSAVE,
-    OP_TYPE_LLVM_INTR_STACKRESTORE,
-    OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE,
-    OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW,
-    OP_TYPE_ARITH_XORI,
-    OP_TYPE_ARITH_SHLI,
-    OP_TYPE_ARITH_SHRSI,
-
-    // Return operations
-    OP_TYPE_RETURN,
-    OP_TYPE_TT_REDUCE_RETURN,
-
-    // -------------------------------------------------------------------------
-    // wasmssa dialect — high-level SSA-form WebAssembly ops. Produced by
-    // the LLVM-dialect -> wasmssa lowering pass and consumed by the
-    // wasmssa -> wasmstack stackification pass. All values are SSA;
-    // there are no explicit local.get / local.set / local.tee here.
-    //
-    // Op operand-order convention (non-commutative ops):
-    //   sub:   %r = wasmssa.sub %lhs, %rhs   ; emits "lhs rhs i32.sub"
-    //   load:  %r = wasmssa.load %addr       ; offset/align as attrs
-    //   store: wasmssa.store %addr, %val
-    // -------------------------------------------------------------------------
-    OP_TYPE_WASMSSA_FUNC,
-    OP_TYPE_WASMSSA_IMPORT_FUNC,
-    OP_TYPE_WASMSSA_IMPORT_GLOBAL,
-    OP_TYPE_WASMSSA_CONST,
-    OP_TYPE_WASMSSA_ADD,
-    OP_TYPE_WASMSSA_SUB,
-    OP_TYPE_WASMSSA_BINOP,
-    OP_TYPE_WASMSSA_UNOP,
-    OP_TYPE_WASMSSA_LOAD,
-    OP_TYPE_WASMSSA_STORE,
-    OP_TYPE_WASMSSA_GLOBAL_GET,
-    OP_TYPE_WASMSSA_GLOBAL_SET,
-    OP_TYPE_WASMSSA_EXTEND_I32_S,
-    OP_TYPE_WASMSSA_RETURN,
-    OP_TYPE_WASMSSA_CALL,
-    // Region-bearing structured control flow. Cross-CF value passing is
-    // modelled via MLIR block arguments on the region's entry block (for
-    // loops) and via the variadic operands of block_return / br (for all
-    // three op kinds). Results of the region-bearing op carry the values
-    // that flow out via fall-through or `br` to its label.
-    //
-    //   %r:R* = wasmssa.block ()           : (R*)  { ... }
-    //   %r:R* = wasmssa.loop  (init:T*)    : (R*)  { ^entry(a:T*): ... }
-    //   %r:R* = wasmssa.if    (%cond:i32)  : (R*)  { then } else { else }
-    //
-    // Region terminators: block_return | br | br_if (non-terminator) |
-    //                     unreachable | return.
-    OP_TYPE_WASMSSA_BLOCK,
-    OP_TYPE_WASMSSA_LOOP,
-    OP_TYPE_WASMSSA_IF,
-    // Region terminator carrying the values that flow out of the enclosing
-    // wasmssa.block / wasmssa.loop / wasmssa.if via fall-through.
-    OP_TYPE_WASMSSA_BLOCK_RETURN,
-    // Terminator emitting wasm `unreachable` (0x00). Used after wasmssa.loop
-    // when the loop never falls through (every back-edge `br 0` or outward
-    // `br N` exits the loop's own end).
-    OP_TYPE_WASMSSA_UNREACHABLE,
-    // Branch carrying variadic values matching the target label's signature
-    // (depth-relative). Terminator.
-    OP_TYPE_WASMSSA_BR,
-    // Conditional branch carrying only the condition; no value operands.
-    // For value-carrying conditional branches we use `wasmssa.if %cond { br N (vals) }`.
-    OP_TYPE_WASMSSA_BR_IF,
-    OP_TYPE_WASMSSA_SELECT,
-    OP_TYPE_WASMSSA_EQZ,
-    OP_TYPE_WASMSSA_ADDRESSOF,
-    // Function-pointer support: FUNC_ADDR pushes the table-index of a
-    // named function (lowered via R_WASM_TABLE_INDEX_SLEB); CALL_INDIRECT
-    // pops args + table-index and dispatches via wasm `call_indirect`.
-    OP_TYPE_WASMSSA_FUNC_ADDR,
-    OP_TYPE_WASMSSA_CALL_INDIRECT,
-    // Wasm function-locals access. Each function has a fixed set of
-    // typed locals (params + declared locals). LOCAL_GET reads slot
-    // `local_idx`, LOCAL_SET writes it. Locals are NEVER address-taken
-    // in wasm semantics, so they live in a native (non-linmem) stack
-    // frame that the llvm->aarch64 backend allocates. The lifter used
-    // to spill them into linmem cells (8 bytes each), which inflated
-    // the wasm stack by ~20x and forced unrealistic stack-size grows.
-    //   attrs: valtype (i32 byte: i32|i64|f32|f64), local_idx (i32).
-    OP_TYPE_WASMSSA_LOCAL_GET,
-    OP_TYPE_WASMSSA_LOCAL_SET,
-    // WebAssembly memory instructions: `memory.size` (0x3F 0x00) and
-    // `memory.grow` (0x40 0x00). MEMORY_SIZE has no operands and an i32
-    // result (size in pages). MEMORY_GROW takes one i32 operand (pages
-    // to grow by) and returns the previous size in pages (or -1 on
-    // failure) as i32. Both carry a trailing single-byte immediate
-    // identifying the memory index (always 0 for the default memory).
-    OP_TYPE_WASMSSA_MEMORY_SIZE,
-    OP_TYPE_WASMSSA_MEMORY_GROW,
-
-    // -------------------------------------------------------------------------
-    // wasmstack dialect — low-level stack-machine WebAssembly ops. 1:1
-    // with the wasm bytecode opcodes. Produced by the wasmssa -> wasmstack
-    // stackification pass and consumed by the binary emitter.
-    // -------------------------------------------------------------------------
-    OP_TYPE_WASMSTACK_FUNC,
-    OP_TYPE_WASMSTACK_IMPORT_FUNC,
-    OP_TYPE_WASMSTACK_IMPORT_GLOBAL,
-    OP_TYPE_WASMSTACK_LOCAL_GET,
-    OP_TYPE_WASMSTACK_LOCAL_SET,
-    OP_TYPE_WASMSTACK_LOCAL_TEE,
-    OP_TYPE_WASMSTACK_CONST,
-    OP_TYPE_WASMSTACK_ADD,
-    OP_TYPE_WASMSTACK_SUB,
-    OP_TYPE_WASMSTACK_BINOP,
-    OP_TYPE_WASMSTACK_UNOP,
-    OP_TYPE_WASMSTACK_LOAD,
-    OP_TYPE_WASMSTACK_STORE,
-    OP_TYPE_WASMSTACK_GLOBAL_GET,
-    OP_TYPE_WASMSTACK_GLOBAL_SET,
-    OP_TYPE_WASMSTACK_EXTEND_I32_S,
-    OP_TYPE_WASMSTACK_RETURN,
-    OP_TYPE_WASMSTACK_CALL,
-    // Structured-CF + select.
-    OP_TYPE_WASMSTACK_BLOCK,
-    OP_TYPE_WASMSTACK_LOOP,
-    OP_TYPE_WASMSTACK_IF,
-    OP_TYPE_WASMSTACK_ELSE,
-    OP_TYPE_WASMSTACK_END,
-    OP_TYPE_WASMSTACK_BR,
-    OP_TYPE_WASMSTACK_BR_IF,
-    // Terminator emitting wasm `unreachable` (0x00).
-    OP_TYPE_WASMSTACK_UNREACHABLE,
-    OP_TYPE_WASMSTACK_SELECT,
-    OP_TYPE_WASMSTACK_EQZ,
-    OP_TYPE_WASMSTACK_ADDRESSOF,
-    OP_TYPE_WASMSTACK_FUNC_ADDR,
-    OP_TYPE_WASMSTACK_CALL_INDIRECT,
-    // 1:1 wasmstack mirrors of OP_TYPE_WASMSSA_MEMORY_{SIZE,GROW}.
-    OP_TYPE_WASMSTACK_MEMORY_SIZE,
-    OP_TYPE_WASMSTACK_MEMORY_GROW,
-    // `drop` (wasm 0x1a): pop one stack value, no result. Only used by
-    // the wasm -> wasmstack lifter; the C-frontend wasmssa pipeline
-    // never emits this op.
-    OP_TYPE_WASMSTACK_DROP,
-    // `br_table`: emitted by clang for switch dispatch in linked
-    // runtime objects. Carries a comma-separated list of target depths
-    // plus a default depth.
-    OP_TYPE_WASMSTACK_BR_TABLE,
-    // Module-level data segment lifted from a wasm DATA section. The
-    // wasmstack -> wasmssa pass converts this into a wasmssa.import_global
-    // sized appropriately.
-    OP_TYPE_WASMSTACK_DATA_SEGMENT,
-    // Module-level global declaration with an initial value. Lifted
-    // from the wasm GLOBAL section. The backend allocates a static
-    // i64 slot per global; only the initial value matters.
-    OP_TYPE_WASMSTACK_GLOBAL_DECL,
-
-    // Module-level table entry lifted from a wasm ELEM section. Carries
-    // (slot, target) — i.e. table_slot_index N now contains a reference
-    // to function `target`. The wasmstack -> wasmssa pass collects these
-    // and emits a synthetic wasmssa.func "_tinyc_fnptr_init" containing
-    // one wasmssa.func_addr per entry, so the lifter pre-pass sees them.
-    OP_TYPE_WASMSTACK_FUNC_ADDR_DECL,
-
-    // -------------------------------------------------------------------------
-    // aarch64 dialect — 1:1 with the AArch64 instruction encoding. The
-    // `aarch64 → Mach-O` backend is a "dumb" byte emitter; all isel /
-    // register-allocation knowledge lives in the `llvm → aarch64` lowering.
-    // First-light slice: just enough to run `int main() { return 42; }`
-    // and have its return value become the process exit code via a
-    // direct `svc #0x80` Mach syscall (no `proc_exit` shim required).
-    // -------------------------------------------------------------------------
-    OP_TYPE_AARCH64_FUNC,
-    OP_TYPE_AARCH64_MOVZ,   // movz Wd|Xd, #imm16, LSL #(hw*16)
-    OP_TYPE_AARCH64_MOVK,   // movk Wd|Xd, #imm16, LSL #(hw*16)
-    OP_TYPE_AARCH64_MOV_X,  // mov Xd, Xn  (register move; X-form)
-    OP_TYPE_AARCH64_BL,     // bl <symbol>  (branch-and-link, PC-relative)
-    OP_TYPE_AARCH64_BLR,    // blr Xn  (indirect branch-and-link via register)
-    OP_TYPE_AARCH64_SVC,    // svc #imm16
-    OP_TYPE_AARCH64_RET,    // ret (== ret x30)
-
-    // Arithmetic + memory + stack-frame ops added in the arith slice.
-    OP_TYPE_AARCH64_ADD_IMM,  // add Wd|Xd, Wn|Xn, #imm12 (LSL 0)
-    OP_TYPE_AARCH64_SUB_IMM,  // sub Wd|Xd, Wn|Xn, #imm12 (LSL 0)
-    OP_TYPE_AARCH64_ADD_REG,  // add Wd|Xd, Wn|Xn, Wm|Xm
-    OP_TYPE_AARCH64_SUB_REG,  // sub Wd|Xd, Wn|Xn, Wm|Xm
-    OP_TYPE_AARCH64_MUL,      // mul Wd|Xd, Wn|Xn, Wm|Xm  (== madd ..., xzr)
-    OP_TYPE_AARCH64_SDIV,     // sdiv Wd|Xd, Wn|Xn, Wm|Xm
-    OP_TYPE_AARCH64_UDIV,     // udiv Wd|Xd, Wn|Xn, Wm|Xm
-    OP_TYPE_AARCH64_MSUB,     // msub Wd, Wn, Wm, Wa  (used for srem/urem)
-    OP_TYPE_AARCH64_AND_REG,  // and  Wd|Xd, Wn|Xn, Wm|Xm
-    OP_TYPE_AARCH64_AND_IMM,  // and  Wd|Xd, Wn|Xn, #(1<<w)-1  (low-w-bits mask)
-    OP_TYPE_AARCH64_ORR_REG,  // orr  Wd|Xd, Wn|Xn, Wm|Xm
-    OP_TYPE_AARCH64_EOR_REG,  // eor  Wd|Xd, Wn|Xn, Wm|Xm
-    OP_TYPE_AARCH64_LSL_REG,  // lslv Wd|Xd, Wn|Xn, Wm|Xm
-    OP_TYPE_AARCH64_LSR_REG,  // lsrv Wd|Xd, Wn|Xn, Wm|Xm
-    OP_TYPE_AARCH64_ASR_REG,  // asrv Wd|Xd, Wn|Xn, Wm|Xm
-    OP_TYPE_AARCH64_LSL_IMM,  // lsl Wd|Xd, Wn|Xn, #shift  (UBFM alias)
-    OP_TYPE_AARCH64_LSR_IMM,  // lsr Wd|Xd, Wn|Xn, #shift  (UBFM alias)
-    OP_TYPE_AARCH64_ASR_IMM,  // asr Wd|Xd, Wn|Xn, #shift  (SBFM alias)
-    OP_TYPE_AARCH64_SXTW,     // sxtw Xd, Wn  (alias for SBFM)
-    OP_TYPE_AARCH64_SXTB,     // sxtb Wd|Xd, Wn  (sign-extend low byte)
-    OP_TYPE_AARCH64_SXTH,     // sxth Wd|Xd, Wn  (sign-extend low half)
-    OP_TYPE_AARCH64_UXTW,     // mov  Wd, Wn  (== orr Wd, WZR, Wn ; zero-extends)
-    OP_TYPE_AARCH64_LDR_W,    // ldr Wd, [Xn, #imm] (i32 unsigned-offset)
-    OP_TYPE_AARCH64_STR_W,    // str Wd, [Xn, #imm] (i32 unsigned-offset)
-    OP_TYPE_AARCH64_LDR_X,    // ldr Xd, [Xn, #imm] (i64 unsigned-offset)
-    OP_TYPE_AARCH64_STR_X,    // str Xd, [Xn, #imm] (i64 unsigned-offset)
-    OP_TYPE_AARCH64_STRB_IMM, // strb Wt, [Xn, #imm12] (1-byte unscaled)
-    OP_TYPE_AARCH64_LDRB_IMM, // ldrb Wt, [Xn, #imm12] (1-byte zero-extend)
-    OP_TYPE_AARCH64_LDR_W_REG,  // ldr  Wt, [Xn, Xm, LSL #0]
-    OP_TYPE_AARCH64_STR_W_REG,  // str  Wt, [Xn, Xm, LSL #0]
-    OP_TYPE_AARCH64_LDR_X_REG,  // ldr  Xt, [Xn, Xm, LSL #0]
-    OP_TYPE_AARCH64_STR_X_REG,  // str  Xt, [Xn, Xm, LSL #0]
-    OP_TYPE_AARCH64_LDRB_REG,   // ldrb Wt, [Xn, Xm, LSL #0]
-    OP_TYPE_AARCH64_STRB_REG,   // strb Wt, [Xn, Xm, LSL #0]
-    OP_TYPE_AARCH64_STRH_IMM,   // strh Wt, [Xn, #imm] (2-byte, imm scaled by 2)
-    OP_TYPE_AARCH64_LDRH_IMM,   // ldrh Wt, [Xn, #imm] (2-byte zero-extend)
-    // Pseudo: ADRP+ADD pair that resolves to the runtime base address
-    // of one of the predeclared __DATA regions (vmctx, globals, linmem).
-    // The macho backend patches the encoded PC-relative immediates
-    // after layout. Body of the macho-backend tracks this list of
-    // bases as part of the data-segment layout.
-    OP_TYPE_AARCH64_ADRP_DATA,    // adrp Xd, page_of(<region>)
-    OP_TYPE_AARCH64_ADD_DATA_LO,  // add  Xd, Xn, #lo12(<region>)
-    // Function prologue/epilogue (modeled as an op pair so the dumb
-    // backend can emit the exact instruction sequence; details of
-    // sp/fp/lr handling baked into the encoder).
-    OP_TYPE_AARCH64_PROLOGUE,
-    OP_TYPE_AARCH64_EPILOGUE,
-    // Comparison + condition-set. Used to materialise i32 booleans for
-    // `llvm.icmp` and eqz results.
-    OP_TYPE_AARCH64_CMP_REG,    // cmp Wn, Wm  (== subs Wzr, Wn, Wm)
-    OP_TYPE_AARCH64_CMP_IMM,    // cmp Wn, #imm12  (== subs Wzr, Wn, #imm12)
-    OP_TYPE_AARCH64_CSET,       // cset Wd, COND (== csinc Wd, Wzr, Wzr, invert(COND))
-    // Conditional select. `csel Wd, Wn, Wm, COND`. Used for llvm.select.
-    OP_TYPE_AARCH64_CSEL,
-    // Control-flow ops. `target` attribute is the symbolic label name.
-    // The macho backend tracks all `aarch64.label` positions inside a
-    // function and patches the branch immediates after layout.
-    OP_TYPE_AARCH64_B,          // b <label>     (PC-relative imm26)
-    OP_TYPE_AARCH64_B_COND,     // b.<cond> <label> (PC-relative imm19)
-    OP_TYPE_AARCH64_CBZ,        // cbz Wn, <label>
-    OP_TYPE_AARCH64_CBNZ,       // cbnz Wn, <label>
-    OP_TYPE_AARCH64_LABEL,      // pseudo: marks a position; emits 0 bytes
-    OP_TYPE_AARCH64_BRK,        // brk #imm16 (trap)
-    // Floating-point ops. Operand and result registers in attributes are
-    // *V register* numbers (0..31) for the FP slots and GP register
-    // numbers for the GP slots; the two register files are disjoint, so
-    // a number like `0` means V0 in an FP slot and W0/X0 in a GP slot.
-    //
-    // FMOV between a GP and an FP register; `dir_to_v` chooses direction
-    // (true: GP→V, false: V→GP). `sf` selects W↔S (false) or X↔D (true).
-    //   attrs: dir_to_v (bool), sf (bool), rd (i32), rn (i32).
-    OP_TYPE_AARCH64_FMOV_GP_V,
-    // FADD/FSUB/FMUL/FDIV between two V regs into a V reg.
-    //   attrs: kind (string: fadd|fsub|fmul|fdiv), fwidth (32|64),
-    //          rd (i32), rn (i32), rm (i32).
-    OP_TYPE_AARCH64_FP_BINOP,
-    // FNEG/FABS/FSQRT on a V reg → V reg.
-    //   attrs: kind (string), fwidth, rd, rn.
-    OP_TYPE_AARCH64_FP_UNOP,
-    // FCMP Sn/Dn, Sm/Dm — sets NZCV (no rd).
-    //   attrs: fwidth (32|64), rn (i32), rm (i32).
-    OP_TYPE_AARCH64_FCMP,
-    // FP conversion family. `kind` is one of:
-    //   "f2f"   — FP-to-FP precision change (FCVT Dd,Sn / FCVT Sd,Dn).
-    //             rd and rn are both V registers.
-    //   "f2i"   — FP-to-integer (FCVTZS / FCVTZU). `sign` true => FCVTZS,
-    //             false => FCVTZU. rd is a GP register, rn is V.
-    //   "i2f"   — Integer-to-FP (SCVTF / UCVTF). rd is V, rn is GP.
-    // src_w / dst_w in {32, 64} pick S/W vs D/X.
-    //   attrs: kind (string), src_w (i32), dst_w (i32), sign (bool),
-    //          rd (i32), rn (i32).
-    OP_TYPE_AARCH64_FP_CVT,
-    // Module-level: a slice of bytes to overlay onto the linmem __DATA
-    // section at the given offset. The macho backend gathers all of
-    // these into a single file-backed section that precedes the
-    // zero-fill portion of linmem.
-    //   attrs: sym_name (string, debug), offset (i32), init_data (string).
-    OP_TYPE_AARCH64_DATA_INIT,
-
+#define MLIR_OP(enumerator, name) enumerator,
+#define MLIR_DIALECT_BEGIN(D) MLIR_DIALECT_##D##_FIRST, MLIR_DIALECT_##D##_BEGIN_ = MLIR_DIALECT_##D##_FIRST - 1,
+#define MLIR_DIALECT_END(D) MLIR_DIALECT_##D##_END_, MLIR_DIALECT_##D##_LAST = MLIR_DIALECT_##D##_END_ - 1,
+#include "mlir_ops.def"
     OP_TYPE_COUNT
 } MLIR_OpType;
 
-string MLIR_GetOpTypeName(MLIR_OpType type);
+// True if `t` is an op type of dialect `D`, a dialect name of mlir_ops.def
+// (BUILTIN, ARITH, CF, FUNC, SCF, LLVM, WASMSSA, WASMSTACK, AARCH64).
+#define MLIR_OP_TYPE_IN_DIALECT(t, D) \
+    ((unsigned)(t) - (unsigned)MLIR_DIALECT_##D##_FIRST <= \
+     (unsigned)(MLIR_DIALECT_##D##_LAST - MLIR_DIALECT_##D##_FIRST))
+#ifndef __TINYC__
+// An empty dialect block would make the range test above always true (LAST
+// is FIRST - 1), so each block must hold an op: a negative array size
+// otherwise.
+#define MLIR_DIALECT_END(D) \
+    typedef char mlir_dialect_##D##_is_not_empty[ \
+        (MLIR_DIALECT_##D##_LAST >= MLIR_DIALECT_##D##_FIRST) ? 1 : -1];
+#include "mlir_ops.def"
+#endif
+
+// Returns the type of `name`: its static type, the dynamic type `ctx` gave
+// it before, or a new dynamic type. `name` is copied; it must not be empty.
+// A few static types have a second name, an alias (`builtin.module` for
+// OP_TYPE_MODULE, the upstream name of the op); an alias gives its static
+// type, and MLIR_GetOpTypeName still returns the first name.
+// Dynamic types are numbered per context from OP_TYPE_COUNT up, so the same
+// value can be another type in another context.
+MLIR_OpType MLIR_RegisterOpType(MLIR_Context *ctx, string name);
+// Like MLIR_RegisterOpType, but returns OP_TYPE_UNREGISTERED instead of
+// registering a name `ctx` does not know.
+MLIR_OpType MLIR_LookupOpType(MLIR_Context *ctx, string name);
+// The name of `type`, borrowed from `ctx`; "" for OP_TYPE_UNREGISTERED and
+// values that are not types of `ctx`.
+string MLIR_GetOpTypeName(MLIR_Context *ctx, MLIR_OpType type);
 
 // -----------------------------------------------------------------------------
 // Context
@@ -592,16 +192,15 @@ void MLIR_EmitDiagnostic(MLIR_Context *ctx, MLIR_DiagSeverity severity,
 
 // Creation & structural mutation
 //
-// `type` and `opname` name the op. A non-empty `opname` decides its type:
-// a registered name gives that name's type, any other name gives
-// OP_TYPE_UNREGISTERED, so MLIR_GetOpType() is always a function of
-// MLIR_GetOpName(). `type` may then be OP_TYPE_UNREGISTERED or the same
-// type; passing a different registered type is a caller bug (asserted).
-// With an empty `opname` the op gets `type` and its registered name.
+// `type` is the op's identity: a static type, or a dynamic type of `ctx`
+// (MLIR_RegisterOpType) for any other op name. It must not be
+// OP_TYPE_UNREGISTERED. MLIR_API_CHECKS catches a value that is not a type
+// of `ctx`; a dynamic type of another context is caught only when its value
+// is beyond the types `ctx` has, because the values are per-context
+// counters.
 MLIR_OpHandle MLIR_CreateOp(
     MLIR_Context *ctx,
     MLIR_OpType type,
-    string opname,
     MLIR_AttributeHandle *attributes, size_t n_attributes,
     MLIR_TypeHandle *result_types, size_t n_result_types,
     MLIR_ValueHandle *results, size_t n_results,
@@ -618,7 +217,6 @@ MLIR_OpHandle MLIR_CreateOp(
 MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     MLIR_Context *ctx,
     MLIR_OpType type,
-    string opname,
     MLIR_AttributeHandle *attributes, size_t n_attributes,
     MLIR_TypeHandle *result_types, size_t n_result_types,
     MLIR_ValueHandle *results, size_t n_results,
@@ -634,11 +232,9 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
 void MLIR_AppendOpAttribute(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttributeHandle attr);
 
 // Accessors
-// The op's registered type, derived from its name (see MLIR_CreateOp): an
-// op named `llvm.load` is OP_TYPE_LLVM_LOAD, and an op whose name is not
-// registered is OP_TYPE_UNREGISTERED.
+// The op's type, as created. For its name use
+// MLIR_GetOpTypeName(ctx, MLIR_GetOpType(op)).
 MLIR_OpType MLIR_GetOpType(MLIR_OpHandle op);
-string MLIR_GetOpName(MLIR_OpHandle op);
 MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle op);
 size_t MLIR_GetOpNumOperands(MLIR_OpHandle op);
 MLIR_ValueHandle MLIR_GetOpOperand(MLIR_OpHandle op, size_t idx);

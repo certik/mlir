@@ -215,10 +215,6 @@ typedef struct IR_Value {
 typedef struct IR_OpAux {
     MLIR_LocationHandle unnumbered_loc_def;
     string trailing_comment;
-    // The op's name when op_type_to_string(op_type) cannot reproduce it,
-    // i.e. for OP_TYPE_UNREGISTERED ops. NULL str means the name is
-    // derivable from op_type and is not stored.
-    string opname;
     int32_t source_line_start;
     // Def-use bookkeeping, populated only when the context tracks uses (the
     // wasm->macho pipeline opts out, so these stay NULL there).
@@ -290,6 +286,9 @@ struct MLIR_Context {
     // Diagnostic handler; NULL means the default (print to stderr).
     MLIR_DiagnosticHandler diag_fn;
     void *diag_user;
+    // Op types: the names of the static and dynamic types and the reverse
+    // map (MLIR_RegisterOpType).
+    OpTypeTable op_types;
 };
 
 // Under MLIR_API_CHECKS an erased op keeps this type, so every later use of
@@ -647,6 +646,7 @@ MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) {
     MLIR_Context *ctx = arena_new(persistent, MLIR_Context);
     *ctx = (MLIR_Context){0};
     ctx->persistent = persistent;
+    op_type_table_init(&ctx->op_types, persistent);
     if (options) {
         ctx->arena = options->arena;
         ctx->no_def_use_tracking = options->no_def_use_tracking;
@@ -745,7 +745,6 @@ void MLIR_EmitDiagnostic(MLIR_Context *ctx, MLIR_DiagSeverity severity,
 MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     MLIR_Context *ctx,
     MLIR_OpType type,
-    string opname,
     MLIR_AttributeHandle *attributes, size_t n_attributes,
     MLIR_TypeHandle *result_types, size_t n_result_types,
     MLIR_ValueHandle *results, size_t n_results,
@@ -759,18 +758,9 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     string trailing_comment,
     int64_t source_line_start) {
 
-    // See MLIR_CreateOp in mlir_api.h: a non-empty name decides the type,
-    // exactly as on the upstream backend. Most creators pass the type
-    // together with its own name, which needs no lookup.
-    if (opname.size > 0 && (type == OP_TYPE_UNREGISTERED ||
-                            !str_eq(opname, op_type_to_string(type)))) {
-        MLIR_OpType named = op_type_from_string(opname);
-        assert(type == OP_TYPE_UNREGISTERED || type == named);
-        type = named;
-    }
-    // Only an unregistered op's name is stored; a registered one is
-    // op_type_to_string(type).
-    bool store_name = opname.size > 0 && type == OP_TYPE_UNREGISTERED;
+    API_CHECK(ctx != NULL, "MLIR_CreateOp", "context is NULL");
+    API_CHECK(type != OP_TYPE_UNREGISTERED && (uint32_t)type < ctx->op_types.n_types,
+              "MLIR_CreateOp", "not an op type of this context");
 
     IR_Op op = {0};
     op.op_type = type;
@@ -800,13 +790,12 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     // def-use arrays) or when any printer/parser metadata diverges from the
     // getter defaults. The wasm->macho lift passes defaults and opts out of
     // tracking, so aux stays NULL on the hot path.
-    if (arena && (track_uses || store_name ||
+    if (arena && (track_uses ||
                   unnumbered_loc_def != MLIR_INVALID_HANDLE ||
                   trailing_comment.size != 0 || source_line_start != -1)) {
         IR_OpAux *aux = op_aux_default(arena);
         aux->unnumbered_loc_def = unnumbered_loc_def;
         aux->trailing_comment = trailing_comment;
-        aux->opname = store_name ? opname : (string){0};
         aux->source_line_start = (int32_t)source_line_start;
         op.aux = aux;
     }
@@ -883,7 +872,6 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
 MLIR_OpHandle MLIR_CreateOp(
     MLIR_Context *ctx,
     MLIR_OpType type,
-    string opname,
     MLIR_AttributeHandle *attributes, size_t n_attributes,
     MLIR_TypeHandle *result_types, size_t n_result_types,
     MLIR_ValueHandle *results, size_t n_results,
@@ -894,7 +882,7 @@ MLIR_OpHandle MLIR_CreateOp(
     string trailing_comment,
     int64_t source_line_start) {
     return MLIR_CreateOpWithSuccessors(
-        ctx, type, opname,
+        ctx, type,
         attributes, n_attributes,
         result_types, n_result_types,
         results, n_results,
@@ -1109,13 +1097,6 @@ MLIR_LocationHandle MLIR_GetOpLocation(MLIR_OpHandle oh) {
     return op ? op->location : MLIR_INVALID_HANDLE;
 }
 
-string MLIR_GetOpName(MLIR_OpHandle oh) {
-    CHECK_OP(oh, "MLIR_GetOpName");
-    IR_Op *op = resolve_op(oh);
-    if (!op) return str_lit("");
-    if (op->aux && op->aux->opname.str) return op->aux->opname;
-    return op_type_to_string(op->op_type);
-}
 
 size_t MLIR_GetOpNumResultTypes(MLIR_OpHandle oh) {
     CHECK_OP(oh, "MLIR_GetOpNumResultTypes");
@@ -1554,7 +1535,7 @@ MLIR_OpHandle MLIR_CreateLLVMGlobalString(MLIR_Context *ctx, string sym_name,
     attrs[2] = make_llvm_linkage_attr(ctx, str_lit("private"));
     attrs[3] = MLIR_CreateAttributeBool(ctx, str_lit("constant"), true);
     attrs[4] = MLIR_CreateAttributeString(ctx, str_lit("value"), bytes);
-    return MLIR_CreateOp(ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.mlir.global"),
+    return MLIR_CreateOp(ctx, OP_TYPE_LLVM_MLIR_GLOBAL,
                          attrs, 5, NULL, 0, NULL, 0, NULL, 0,
                          NULL, 0, loc, MLIR_INVALID_HANDLE,
                          str_lit(""), -1);
@@ -1582,7 +1563,7 @@ MLIR_OpHandle MLIR_CreateLLVMGlobalArrayInit(MLIR_Context *ctx, string sym_name,
         attrs[na++] = MLIR_CreateAttributeBool(ctx, str_lit("constant"), true);
     }
     attrs[na++] = MLIR_CreateAttributeString(ctx, str_lit("value"), bytes);
-    return MLIR_CreateOp(ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.mlir.global"),
+    return MLIR_CreateOp(ctx, OP_TYPE_LLVM_MLIR_GLOBAL,
                          attrs, na, NULL, 0, NULL, 0, NULL, 0,
                          NULL, 0, loc, MLIR_INVALID_HANDLE,
                          str_lit(""), -1);
@@ -1620,7 +1601,7 @@ MLIR_OpHandle MLIR_CreateLLVMGlobal(MLIR_Context *ctx, string sym_name,
     } else if (out_init_block) {
         *out_init_block = MLIR_INVALID_HANDLE;
     }
-    return MLIR_CreateOp(ctx, OP_TYPE_UNREGISTERED, str_lit("llvm.mlir.global"),
+    return MLIR_CreateOp(ctx, OP_TYPE_LLVM_MLIR_GLOBAL,
                          attrs, na, NULL, 0, NULL, 0, NULL, 0,
                          nr ? regs : NULL, nr, loc, MLIR_INVALID_HANDLE,
                          str_lit(""), -1);
@@ -2076,8 +2057,20 @@ MLIR_OpHandle MLIR_GetValueDefiningOp(MLIR_ValueHandle vh) {
     return (MLIR_OpHandle)v->def_handle;
 }
 
-string MLIR_GetOpTypeName(MLIR_OpType type) {
-    return op_type_to_string(type);
+MLIR_OpType MLIR_RegisterOpType(MLIR_Context *ctx, string name) {
+    API_CHECK(ctx != NULL, "MLIR_RegisterOpType", "context is NULL");
+    API_CHECK(name.size > 0, "MLIR_RegisterOpType", "empty op name");
+    return op_type_table_register(&ctx->op_types, name);
+}
+
+MLIR_OpType MLIR_LookupOpType(MLIR_Context *ctx, string name) {
+    API_CHECK(ctx != NULL, "MLIR_LookupOpType", "context is NULL");
+    return op_type_table_lookup(&ctx->op_types, name);
+}
+
+string MLIR_GetOpTypeName(MLIR_Context *ctx, MLIR_OpType type) {
+    API_CHECK(ctx != NULL, "MLIR_GetOpTypeName", "context is NULL");
+    return op_type_table_name(&ctx->op_types, type);
 }
 
 // Location accessors

@@ -33,7 +33,6 @@
 #include <base/string.h>
 
 #include "mlir_api.h"
-#include "mlir_op_names.h"
 
 #define WT_I32 0x7f
 #define WT_I64 0x7e
@@ -170,15 +169,20 @@ static void st_push(Stack *s, MLIR_ValueHandle v) {
 // the function and op that triggered them. These are written by
 // lift_func / lift_body and read in st_pop. Defined at file scope so
 // tinyC (which rejects function-local `extern` declarations) can
-// compile this file.
+// compile this file. The op is recorded as its type (the name is looked up
+// only for the message), with the context that names it.
 const char *g_current_fn_name = NULL;
-const char *g_current_op_name = NULL;
+MLIR_Context *g_current_ctx = NULL;
+MLIR_OpType g_current_op_type = OP_TYPE_UNREGISTERED;
 
 static MLIR_ValueHandle st_pop(Stack *s) {
     if (s->n == 0) {
-        fprintf(stderr, "ws->ssa: stack underflow in st_pop (fn='%s' op='%s')\n",
+        string op_name = str_lit("?");
+        if (g_current_ctx && g_current_op_type != OP_TYPE_UNREGISTERED)
+            op_name = MLIR_GetOpTypeName(g_current_ctx, g_current_op_type);
+        fprintf(stderr, "ws->ssa: stack underflow in st_pop (fn='%s' op='%.*s')\n",
             g_current_fn_name ? g_current_fn_name : "?",
-            g_current_op_name ? g_current_op_name : "?");
+            (int)op_name.size, op_name.str);
         return MLIR_INVALID_HANDLE;
     }
     return s->data[--s->n];
@@ -199,7 +203,7 @@ static void st_free(Stack *s) { free(s->data); s->data = NULL; s->n = s->cap = 0
 static MLIR_OpHandle build_op_no_res(MLIR_Context *ctx, MLIR_OpType t,
                                      MLIR_AttributeHandle *attrs, size_t na,
                                      MLIR_ValueHandle *operands, size_t no) {
-    return MLIR_CreateOp(ctx, t, op_type_to_string(t),
+    return MLIR_CreateOp(ctx, t,
         attrs, na, NULL, 0, NULL, 0, operands, no, NULL, 0,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -215,7 +219,7 @@ static MLIR_OpHandle build_op_1res(MLIR_Context *ctx, MLIR_OpType t,
     rvs[0] = MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0,
         result_ty, (string){0},
         MLIR_CreateLocationUnknown(ctx, (string){0}));
-    MLIR_OpHandle op = MLIR_CreateOp(ctx, t, op_type_to_string(t),
+    MLIR_OpHandle op = MLIR_CreateOp(ctx, t,
         attrs, na, rts, 1, rvs, 1, operands, no, NULL, 0,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -229,7 +233,7 @@ static MLIR_OpHandle build_op_region(MLIR_Context *ctx, MLIR_OpType t,
                                      MLIR_RegionHandle *regions, size_t nr,
                                      MLIR_TypeHandle *res_tys,
                                      MLIR_ValueHandle *res_vals, size_t nres) {
-    return MLIR_CreateOp(ctx, t, op_type_to_string(t),
+    return MLIR_CreateOp(ctx, t,
         attrs, na, res_tys, nres, res_vals, nres,
         operands, no, regions, nr,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
@@ -548,13 +552,8 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
         MLIR_OpHandle bo = MLIR_GetBlockOp(src_blk, i);
         MLIR_OpType t = MLIR_GetOpType(bo);
         uint8_t valtype = (uint8_t)at_i(bo, "valtype");
-        {
-            string opnm = MLIR_GetOpName(bo);
-            static char buf[64];
-            size_t sz = opnm.size < sizeof(buf) - 1 ? opnm.size : sizeof(buf) - 1;
-            memcpy(buf, opnm.str, sz); buf[sz] = 0;
-            g_current_op_name = buf;
-        }
+        g_current_ctx = F->ctx;
+        g_current_op_type = t;
 
         // Honour `cur_terminated`: skip ops in dead code until we hit
         // an END or ELSE that resets the state.
@@ -1255,7 +1254,7 @@ static bool lift_body(FnCtx *F, MLIR_BlockHandle src_blk) {
             break;
         }
         default: {
-            string nm = MLIR_GetOpName(bo);
+            string nm = MLIR_GetOpTypeName(F->ctx, t);
             fprintf(stderr,
                 "ws->ssa: unsupported wasmstack op '%.*s' (kind=%d)\n",
                 (int)nm.size, nm.str, (int)t);
@@ -1379,7 +1378,8 @@ static MLIR_OpHandle lift_func(MLIR_Context *ctx, Arena *arena,
 
     // Diagnostic globals point into `tmp`; null them out before destroy.
     g_current_fn_name = NULL;
-    g_current_op_name = NULL;
+    g_current_ctx = NULL;
+    g_current_op_type = OP_TYPE_UNREGISTERED;
     arena_destroy(tmp);
 
     if (!ok) return MLIR_INVALID_HANDLE;
@@ -1402,7 +1402,6 @@ static MLIR_OpHandle lift_func(MLIR_Context *ctx, Arena *arena,
     MLIR_AppendRegionBlock(ctx, region, entry);
     MLIR_RegionHandle regs[1] = { region };
     return MLIR_CreateOp(ctx, OP_TYPE_WASMSSA_FUNC,
-        op_type_to_string(OP_TYPE_WASMSSA_FUNC),
         attrs, na, NULL, 0, NULL, 0, NULL, 0, regs, 1,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -1423,7 +1422,6 @@ static MLIR_OpHandle lift_import_func(MLIR_Context *ctx, MLIR_OpHandle src) {
     attrs[na++] = attr_s(ctx, "result_types", rt_s.str, rt_s.size);
     attrs[na++] = attr_b(ctx, "exported", exported);
     return MLIR_CreateOp(ctx, OP_TYPE_WASMSSA_IMPORT_FUNC,
-        op_type_to_string(OP_TYPE_WASMSSA_IMPORT_FUNC),
         attrs, na, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -1443,7 +1441,6 @@ static MLIR_OpHandle synth_to_import(MLIR_Context *ctx, MLIR_OpHandle src) {
     attrs[na++] = attr_s(ctx, "result_types", rt_s.str, rt_s.size);
     attrs[na++] = attr_b(ctx, "exported", false);
     return MLIR_CreateOp(ctx, OP_TYPE_WASMSSA_IMPORT_FUNC,
-        op_type_to_string(OP_TYPE_WASMSSA_IMPORT_FUNC),
         attrs, na, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -1476,7 +1473,6 @@ static MLIR_OpHandle lift_data_segment(MLIR_Context *ctx, MLIR_OpHandle src,
     attrs[na++] = attr_s(ctx, "relocs", "", 0);
     attrs[na++] = attr_i32(ctx, "fixed_offset", off);
     return MLIR_CreateOp(ctx, OP_TYPE_WASMSSA_IMPORT_GLOBAL,
-        op_type_to_string(OP_TYPE_WASMSSA_IMPORT_GLOBAL),
         attrs, na, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -1528,7 +1524,6 @@ MLIR_OpHandle mlir_wasmstack_to_wasmssa(MLIR_Context *ctx,
     }
 
     MLIR_OpHandle out_module = MLIR_CreateOp(ctx, OP_TYPE_MODULE,
-        str_lit("module"),
         mod_attrs, n_mod_attrs, NULL, 0, NULL, 0, NULL, 0, out_regs, 1,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
         MLIR_INVALID_HANDLE, (string){0}, -1);
@@ -1592,7 +1587,7 @@ MLIR_OpHandle mlir_wasmstack_to_wasmssa(MLIR_Context *ctx,
             n_elems++;
             continue;
         } else {
-            string nm = MLIR_GetOpName(top);
+            string nm = MLIR_GetOpTypeName(ctx, MLIR_GetOpType(top));
             fprintf(stderr, "ws->ssa: unexpected top-level op '%.*s'\n",
                 (int)nm.size, nm.str);
             free(elems);
@@ -1637,7 +1632,6 @@ MLIR_OpHandle mlir_wasmstack_to_wasmssa(MLIR_Context *ctx,
         fas[4] = attr_b(ctx, "internal", true);
 
         MLIR_OpHandle fop = MLIR_CreateOp(ctx, OP_TYPE_WASMSSA_FUNC,
-            op_type_to_string(OP_TYPE_WASMSSA_FUNC),
             fas, 5, NULL, 0, NULL, 0, NULL, 0, regs, 1,
             MLIR_CreateLocationUnknown(ctx, (string){0}),
             MLIR_INVALID_HANDLE, (string){0}, -1);

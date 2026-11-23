@@ -33,7 +33,6 @@
 #include <base/string.h>
 
 #include "mlir_api.h"
-#include "mlir_op_names.h"
 
 // =============================================================================
 // Growable byte buffer + endian helpers (shared) + SHA-256 (Mach-O code
@@ -308,13 +307,13 @@ bool mlir_aarch64_to_macho(MLIR_Context *ctx, MLIR_OpHandle module,
         MLIR_OpType ot = MLIR_GetOpType(op);
         if (ot == OP_TYPE_AARCH64_DATA_INIT) continue;
         if (ot != OP_TYPE_AARCH64_FUNC) {
-            string nm = MLIR_GetOpName(op);
+            string nm = MLIR_GetOpTypeName(ctx, ot);
             fprintf(stderr,
                 "aarch64->macho: unexpected top-level op '%.*s'\n",
                 (int)nm.size, nm.str);
             free(efs); free(inits); return false;
         }
-        if (!emit_aarch64_func(op, &efs[n_funcs])) {
+        if (!emit_aarch64_func(ctx, op, &efs[n_funcs])) {
             for (size_t k = 0; k <= n_funcs; k++) {
                 free(efs[k].code.data); free(efs[k].relocs); free(efs[k].dr);
                 free(efs[k].br); free(efs[k].bp);
@@ -1389,7 +1388,7 @@ bool mlir_llvm_to_macho(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
         MachineFunc *e = &efs[n_funcs];
         if (fn == MLIR_INVALID_HANDLE) {
             ok = false;
-        } else if (!emit_aarch64_func(fn, e) || !patch_branches(e)) {
+        } else if (!emit_aarch64_func(ctx, fn, e) || !patch_branches(e)) {
             ef_free_one(e);
             *e = (MachineFunc){0};
             ok = false;

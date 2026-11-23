@@ -219,7 +219,7 @@ static int64_t ag_attr_payload(MLIR_AttributeHandle a, MLIR_AttrKind kind) {
 }
 
 static void ag_emit_op_ident(AgKB *k, MLIR_Context *ctx, MLIR_OpHandle op) {
-    agkb_str(k, MLIR_GetOpName(op));
+    agkb_u64(k, (uint64_t)MLIR_GetOpType(op));
     size_t na = MLIR_GetOpNumAttributes(op);
     agkb_u64(k, na);
     for (size_t i = 0; i < na; i++) {

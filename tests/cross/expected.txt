@@ -27,3 +27,7 @@ function type outlives its IR arena: yes
 diagnostic: count=1 warning=1 loc=t.c:3:7 text=value 42 is odd
 second context has its own types: yes
 first context unaffected: yes
+op types: static=yes miss=yes dynamic=yes again=yes lookup=yes name=test.op module=module
+dynamic op and dialect ranges: yes
+builtin.module alias: lookup=yes register=yes module op=yes name=module
+dynamic types are per context: yes
