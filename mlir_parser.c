@@ -919,25 +919,25 @@ MLIR_ValueHandle *finalize_results(const OperationParserParams *params,
     return results;
 }
 
-MLIR_AttributeHandle create_string_attr(Parser *parser, string name, string value) {
-    return MLIR_CreateAttributeString(parser->ctx, name, value);
+MLIR_NamedAttr create_string_attr(Parser *parser, string name, string value) {
+    return MLIR_Named(MLIR_InternAttrKey(parser->ctx, name), MLIR_CreateAttributeString(parser->ctx, value));
 }
 
-MLIR_AttributeHandle create_integer_attr(Parser *parser, string name, int64_t value, MLIR_TypeHandle type) {
-    return MLIR_CreateAttributeInteger(parser->ctx, name, value, type);
+MLIR_NamedAttr create_integer_attr(Parser *parser, string name, int64_t value, MLIR_TypeHandle type) {
+    return MLIR_Named(MLIR_InternAttrKey(parser->ctx, name), MLIR_CreateAttributeInteger(parser->ctx, value, type));
 }
 
-MLIR_AttributeHandle create_float_attr(Parser *parser, string name, double value, MLIR_TypeHandle type) {
-    return MLIR_CreateAttributeFloat(parser->ctx, name, value, type);
+MLIR_NamedAttr create_float_attr(Parser *parser, string name, double value, MLIR_TypeHandle type) {
+    return MLIR_Named(MLIR_InternAttrKey(parser->ctx, name), MLIR_CreateAttributeFloat(parser->ctx, value, type));
 }
 
-MLIR_AttributeHandle create_bool_attr(Parser *parser, string name, bool value) {
-    return MLIR_CreateAttributeBool(parser->ctx, name, value);
+MLIR_NamedAttr create_bool_attr(Parser *parser, string name, bool value) {
+    return MLIR_Named(MLIR_InternAttrKey(parser->ctx, name), MLIR_CreateAttributeBool(parser->ctx, value));
 }
 
-void operation_append_attribute(Parser *parser, MLIR_OpHandle op, MLIR_AttributeHandle attr) {
-    if (!attr) return;
-    MLIR_AppendOpAttribute(parser->ctx, op, attr);
+void operation_append_attribute(Parser *parser, MLIR_OpHandle op, MLIR_NamedAttr attr) {
+    if (attr.value == MLIR_INVALID_HANDLE) return;
+    MLIR_SetOpAttr(parser->ctx, op, attr.key, attr.value);
 }
 
 MLIR_ValueHandle lookup_or_create_value(Parser *parser, string reg, string default_type) {
@@ -952,15 +952,15 @@ MLIR_ValueHandle lookup_or_create_value(Parser *parser, string reg, string defau
     return val;
 }
 
-void append_attr(Parser *parser, MLIR_AttributeHandle **attrs, size_t *n, size_t *cap, MLIR_AttributeHandle attr) {
-    if (!attr) return;
+void append_attr(Parser *parser, MLIR_NamedAttr **attrs, size_t *n, size_t *cap, MLIR_NamedAttr attr) {
+    if (attr.value == MLIR_INVALID_HANDLE) return;
     size_t new_cap = (*cap == 0) ? 4 : *cap;
     if (*attrs == MLIR_INVALID_HANDLE) {
-        *attrs = arena_new_array(parser->arena, MLIR_AttributeHandle, new_cap);
+        *attrs = arena_new_array(parser->arena, MLIR_NamedAttr, new_cap);
         *cap = new_cap;
     } else if (*n >= *cap) {
         new_cap = (*cap) * 2;
-        MLIR_AttributeHandle *new_attrs = arena_new_array(parser->arena, MLIR_AttributeHandle, new_cap);
+        MLIR_NamedAttr *new_attrs = arena_new_array(parser->arena, MLIR_NamedAttr, new_cap);
         for (size_t i = 0; i < *n; i++) new_attrs[i] = (*attrs)[i];
         *attrs = new_attrs;
         *cap = new_cap;
@@ -968,12 +968,14 @@ void append_attr(Parser *parser, MLIR_AttributeHandle **attrs, size_t *n, size_t
     (*attrs)[(*n)++] = attr;
 }
 
-void attr_list_init_from_op(Parser *parser, MLIR_OpHandle op, MLIR_AttributeHandle **attrs, size_t *n, size_t *cap) {
+void attr_list_init_from_op(Parser *parser, MLIR_OpHandle op, MLIR_NamedAttr **attrs, size_t *n, size_t *cap) {
     size_t count = MLIR_GetOpNumAttributes(parser->ctx, op);
     if (count > 0) {
         *cap = count + 4;
-        *attrs = arena_new_array(parser->arena, MLIR_AttributeHandle, *cap);
-        for (size_t i = 0; i < count; i++) (*attrs)[i] = MLIR_GetOpAttribute(parser->ctx, op, i);
+        *attrs = arena_new_array(parser->arena, MLIR_NamedAttr, *cap);
+        for (size_t i = 0; i < count; i++)
+            (*attrs)[i] = MLIR_Named(MLIR_GetOpAttributeKey(parser->ctx, op, i),
+                                     MLIR_GetOpAttribute(parser->ctx, op, i));
         *n = count;
     }
 }
@@ -981,7 +983,7 @@ void attr_list_init_from_op(Parser *parser, MLIR_OpHandle op, MLIR_AttributeHand
 // Include the extracted functions
 
 // Helper function to parse attributes from <{...}> blocks
-void parse_angle_brace_attributes(Parser *parser, MLIR_AttributeHandle **attributes, size_t *n_attributes, size_t *attributes_capacity) {
+void parse_angle_brace_attributes(Parser *parser, MLIR_NamedAttr **attributes, size_t *n_attributes, size_t *attributes_capacity) {
     if (!parser_peek(parser, TK_LANGLE)) return;
 
     // Lookahead for '<{' sequence
@@ -991,7 +993,7 @@ void parse_angle_brace_attributes(Parser *parser, MLIR_AttributeHandle **attribu
         parser_expect(parser, TK_LBRACE);
         if (!*attributes) {
             *attributes_capacity = 4;
-            *attributes = arena_new_array(parser->arena, MLIR_AttributeHandle, *attributes_capacity);
+            *attributes = arena_new_array(parser->arena, MLIR_NamedAttr, *attributes_capacity);
         }
         while (!parser_peek(parser, TK_RBRACE) && !parser_peek(parser, TK_EOF)) {
             if (parser_peek(parser, TK_NAME) || parser_peek(parser, TK_NAME_DOT_NAME)) {
@@ -1001,7 +1003,7 @@ void parse_angle_brace_attributes(Parser *parser, MLIR_AttributeHandle **attribu
                     parser_expect(parser, TK_EQUAL);
                     if (*n_attributes >= *attributes_capacity) {
                         *attributes_capacity *= 2;
-                        MLIR_AttributeHandle *new_attrs = arena_new_array(parser->arena, MLIR_AttributeHandle, *attributes_capacity);
+                        MLIR_NamedAttr *new_attrs = arena_new_array(parser->arena, MLIR_NamedAttr, *attributes_capacity);
                         for (size_t i = 0; i < *n_attributes; i++) new_attrs[i] = (*attributes)[i];
                         *attributes = new_attrs;
                     }
@@ -1034,14 +1036,14 @@ void parse_angle_brace_attributes(Parser *parser, MLIR_AttributeHandle **attribu
 }
 
 // Helper function to parse attributes from {...} blocks
-void parse_brace_attributes(Parser *parser, MLIR_AttributeHandle **attributes, size_t *n_attributes, size_t *attributes_capacity) {
+void parse_brace_attributes(Parser *parser, MLIR_NamedAttr **attributes, size_t *n_attributes, size_t *attributes_capacity) {
     if (!parser_peek(parser, TK_LBRACE)) return;
 
     parser_expect(parser, TK_LBRACE);
 
     if (!*attributes) {
         *attributes_capacity = 4;
-        *attributes = arena_new_array(parser->arena, MLIR_AttributeHandle, *attributes_capacity);
+        *attributes = arena_new_array(parser->arena, MLIR_NamedAttr, *attributes_capacity);
     }
 
     while (!parser_peek(parser, TK_RBRACE) && !parser_peek(parser, TK_EOF)) {
@@ -1055,7 +1057,7 @@ void parse_brace_attributes(Parser *parser, MLIR_AttributeHandle **attributes, s
                 // Grow array if needed
                 if (*n_attributes >= *attributes_capacity) {
                     *attributes_capacity *= 2;
-                    MLIR_AttributeHandle *new_attrs = arena_new_array(parser->arena, MLIR_AttributeHandle, *attributes_capacity);
+                    MLIR_NamedAttr *new_attrs = arena_new_array(parser->arena, MLIR_NamedAttr, *attributes_capacity);
                     for (size_t i = 0; i < *n_attributes; i++) new_attrs[i] = (*attributes)[i];
                     *attributes = new_attrs;
                 }
@@ -1090,7 +1092,7 @@ void parse_brace_attributes(Parser *parser, MLIR_AttributeHandle **attributes, s
 
 // Helper function to parse result types from : and -> syntax
 void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *n_result_types,
-                              MLIR_AttributeHandle **attributes, size_t *n_attributes, size_t *attributes_capacity,
+                              MLIR_NamedAttr **attributes, size_t *n_attributes, size_t *attributes_capacity,
                               MLIR_OpType op_type, MLIR_OpHandle op_for_attributes) {
     // Parse result type after ':'
     if (parser_peek(parser, TK_COLON)) {
@@ -1130,18 +1132,18 @@ void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *
                 // Building arrays for later use
                 if (!*attributes) {
                     *attributes_capacity = 4;
-                    *attributes = arena_new_array(parser->arena, MLIR_AttributeHandle, *attributes_capacity);
+                    *attributes = arena_new_array(parser->arena, MLIR_NamedAttr, *attributes_capacity);
                 }
                 if (*n_attributes >= *attributes_capacity) {
                     *attributes_capacity *= 2;
-                    MLIR_AttributeHandle *new_attrs = arena_new_array(parser->arena, MLIR_AttributeHandle, *attributes_capacity);
+                    MLIR_NamedAttr *new_attrs = arena_new_array(parser->arena, MLIR_NamedAttr, *attributes_capacity);
                     for (size_t i = 0; i < *n_attributes; i++) new_attrs[i] = (*attributes)[i];
                     *attributes = new_attrs;
                 }
                 (*attributes)[(*n_attributes)++] = create_bool_attr(parser, str_lit("_sig_parens"), true);
                 if (*n_attributes >= *attributes_capacity) {
                     *attributes_capacity *= 2;
-                    MLIR_AttributeHandle *new_attrs = arena_new_array(parser->arena, MLIR_AttributeHandle, *attributes_capacity);
+                    MLIR_NamedAttr *new_attrs = arena_new_array(parser->arena, MLIR_NamedAttr, *attributes_capacity);
                     for (size_t i = 0; i < *n_attributes; i++) new_attrs[i] = (*attributes)[i];
                     *attributes = new_attrs;
                 }
@@ -1189,11 +1191,11 @@ void parse_result_types(Parser *parser, MLIR_TypeHandle **result_types, size_t *
                     // Building arrays for later use
                     if (!*attributes) {
                         *attributes_capacity = 4;
-                        *attributes = arena_new_array(parser->arena, MLIR_AttributeHandle, *attributes_capacity);
+                        *attributes = arena_new_array(parser->arena, MLIR_NamedAttr, *attributes_capacity);
                     }
                     if (*n_attributes >= *attributes_capacity) {
                         *attributes_capacity *= 2;
-                        MLIR_AttributeHandle *new_attrs = arena_new_array(parser->arena, MLIR_AttributeHandle, *attributes_capacity);
+                        MLIR_NamedAttr *new_attrs = arena_new_array(parser->arena, MLIR_NamedAttr, *attributes_capacity);
                         for (size_t i = 0; i < *n_attributes; i++) new_attrs[i] = (*attributes)[i];
                         *attributes = new_attrs;
                     }
@@ -1260,7 +1262,7 @@ MLIR_LocationHandle parse_optional_location(Parser *parser) {
 }
 
 void parse_generic_attrs_and_result_type(Parser *parser,
-                                          MLIR_AttributeHandle **attributes,
+                                          MLIR_NamedAttr **attributes,
                                           size_t *n_attributes,
                                           size_t *attributes_capacity,
                                           MLIR_TypeHandle **result_types,

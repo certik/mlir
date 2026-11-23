@@ -246,25 +246,25 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
             int opty = parser_op_kind(&ctx->op_types, MLIR_GetOpType(ctx->mlir_ctx, op));
             for (size_t i = 0; i < n_attrs; i++) {
                 MLIR_AttributeHandle attr = MLIR_GetOpAttribute(ctx->mlir_ctx, op, i);
-                string name = MLIR_GetAttributeName(attr);
+                string name = MLIR_GetAttrKeyName(ctx->mlir_ctx, MLIR_GetOpAttributeKey(ctx->mlir_ctx, op, i));
                 if (name.size > 0 && name.str[0] == '_') { continue; }
                 if (!opened) { strbuf_append(arena, &result, str_lit(" {")); opened = true; }
                 if (!first) strbuf_append(arena, &result, str_lit(", ")); first = false;
                 strbuf_append(arena, &result, format(arena, str_lit("{} = "), name));
-                switch (MLIR_GetAttributeKind(attr)) {
+                switch (MLIR_GetAttributeKind(ctx->mlir_ctx, attr)) {
                     case MLIR_ATTR_KIND_INTEGER: {
-                        int64_t v = MLIR_GetAttributeInteger(attr);
+                        int64_t v = MLIR_GetAttributeInteger(ctx->mlir_ctx, attr);
                         if (opty == PARSER_OP_TT_MAKE_RANGE) strbuf_append(arena, &result, format(arena, str_lit("{} : i32"), v));
                         else strbuf_append(arena, &result, format(arena, str_lit("{}"), v));
                         break;
                     }
                     case MLIR_ATTR_KIND_BOOL: {
-                        strbuf_append(arena, &result, MLIR_GetAttributeBool(attr) ? str_lit("true") : str_lit("false"));
+                        strbuf_append(arena, &result, MLIR_GetAttributeBool(ctx->mlir_ctx, attr) ? str_lit("true") : str_lit("false"));
                         break;
                     }
                     case MLIR_ATTR_KIND_FLOAT: {
                         char buf[32];
-                        snprintf(buf, sizeof(buf), "%.6e", MLIR_GetAttributeFloat(attr));
+                        snprintf(buf, sizeof(buf), "%.6e", MLIR_GetAttributeFloat(ctx->mlir_ctx, attr));
                         // Prefer the op's first result type as the attribute's
                         // printed type (covers arith.constant which is the
                         // common case for FloatAttr-as-value).
@@ -275,7 +275,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
                         break;
                     }
                     case MLIR_ATTR_KIND_STRING: {
-                        string s = MLIR_GetAttributeString(attr);
+                        string s = MLIR_GetAttributeString(ctx->mlir_ctx, attr);
                         // Symbol references are stored as `@name` and must be
                         // emitted unquoted in generic form.
                         if (s.size > 0 && s.str[0] == '@') {
@@ -287,22 +287,22 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
                     }
                     case MLIR_ATTR_KIND_ARRAY: {
                         strbuf_append(arena, &result, str_lit("["));
-                        size_t arr_size = MLIR_GetAttributeArraySize(attr);
+                        size_t arr_size = MLIR_GetAttributeArraySize(ctx->mlir_ctx, attr);
                         for (size_t j = 0; j < arr_size; j++) {
                             if (j > 0) strbuf_append(arena, &result, str_lit(", "));
-                            MLIR_AttributeHandle elem = MLIR_GetAttributeArrayElement(attr, j);
+                            MLIR_AttributeHandle elem = MLIR_GetAttributeArrayElement(ctx->mlir_ctx, attr, j);
                             if (elem) {
-                                if (MLIR_GetAttributeKind(elem) == MLIR_ATTR_KIND_DICT) {
+                                if (MLIR_GetAttributeKind(ctx->mlir_ctx, elem) == MLIR_ATTR_KIND_DICT) {
                                     strbuf_append(arena, &result, str_lit("{"));
-                                    size_t dict_size = MLIR_GetAttributeDictSize(elem);
+                                    size_t dict_size = MLIR_GetAttributeDictSize(ctx->mlir_ctx, elem);
                                     for (size_t k = 0; k < dict_size; k++) {
                                         if (k > 0) strbuf_append(arena, &result, str_lit(", "));
-                                        MLIR_AttributeHandle dict_elem = MLIR_GetAttributeDictElement(elem, k);
+                                        MLIR_AttributeHandle dict_elem = MLIR_GetAttributeDictElement(ctx->mlir_ctx, elem, k);
                                         if (dict_elem) {
-                                            string elem_name = MLIR_GetAttributeName(dict_elem);
+                                            string elem_name = MLIR_GetAttrKeyName(ctx->mlir_ctx, MLIR_GetAttributeDictKey(ctx->mlir_ctx, elem, k));
                                             strbuf_append(arena, &result, elem_name);
                                             strbuf_append(arena, &result, str_lit(" = "));
-                                            int64_t val = MLIR_GetAttributeInteger(dict_elem);
+                                            int64_t val = MLIR_GetAttributeInteger(ctx->mlir_ctx, dict_elem);
                                             strbuf_append(arena, &result, format(arena, str_lit("{} : i32"), val));
                                         }
                                     }
@@ -317,15 +317,15 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
                     }
                     case MLIR_ATTR_KIND_DICT: {
                         strbuf_append(arena, &result, str_lit("{"));
-                        size_t dict_size = MLIR_GetAttributeDictSize(attr);
+                        size_t dict_size = MLIR_GetAttributeDictSize(ctx->mlir_ctx, attr);
                         for (size_t j = 0; j < dict_size; j++) {
                             if (j > 0) strbuf_append(arena, &result, str_lit(", "));
-                            MLIR_AttributeHandle elem = MLIR_GetAttributeDictElement(attr, j);
+                            MLIR_AttributeHandle elem = MLIR_GetAttributeDictElement(ctx->mlir_ctx, attr, j);
                             if (elem) {
-                                string elem_name = MLIR_GetAttributeName(elem);
+                                string elem_name = MLIR_GetAttrKeyName(ctx->mlir_ctx, MLIR_GetAttributeDictKey(ctx->mlir_ctx, attr, j));
                                 strbuf_append(arena, &result, elem_name);
                                 strbuf_append(arena, &result, str_lit(" = "));
-                                int64_t val = MLIR_GetAttributeInteger(elem);
+                                int64_t val = MLIR_GetAttributeInteger(ctx->mlir_ctx, elem);
                                 strbuf_append(arena, &result, format(arena, str_lit("{} : i32"), val));
                             }
                         }
@@ -333,7 +333,7 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
                         break;
                     }
                     case MLIR_ATTR_KIND_TYPE: {
-                        MLIR_TypeHandle wrapped = MLIR_GetAttributeTypeValue(attr);
+                        MLIR_TypeHandle wrapped = MLIR_GetAttributeTypeValue(ctx->mlir_ctx, attr);
                         if (wrapped) {
                             strbuf_append(arena, &result, MLIR_GetTypeString(ctx->mlir_ctx, wrapped));
                         } else {

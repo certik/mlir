@@ -55,7 +55,7 @@ static MLIR_ValueHandle make_result_value(MLIR_Context *ctx,
 // for everything except branch-like ops.
 static MLIR_OpHandle create_simple_op(
         MLIR_Context *ctx, MLIR_OpType type,
-        MLIR_AttributeHandle *attrs, size_t n_attrs,
+        MLIR_NamedAttr *attrs, size_t n_attrs,
         MLIR_TypeHandle *result_types, size_t n_result_types,
         MLIR_ValueHandle *results, size_t n_results,
         MLIR_ValueHandle *operands, size_t n_operands,
@@ -102,12 +102,12 @@ static bool lower_arith_constant(LowerState *st, MLIR_OpHandle op,
     MLIR_AttributeHandle val_attr = MLIR_INVALID_HANDLE;
     for (size_t i = 0; i < na; i++) {
         MLIR_AttributeHandle a = MLIR_GetOpAttribute(st->ctx, op, i);
-        if (name_eq(MLIR_GetAttributeName(a), "value")) { val_attr = a; break; }
+        if (MLIR_GetOpAttributeKey(st->ctx, op, i) == MLIR_KEY_VALUE) { val_attr = a; break; }
     }
     if (val_attr == MLIR_INVALID_HANDLE) return false;
 
     MLIR_ValueHandle new_res = make_result_value(st->ctx, ty, loc);
-    MLIR_AttributeHandle attrs[1] = { val_attr };
+    MLIR_NamedAttr attrs[1] = { MLIR_Named(MLIR_KEY_VALUE, val_attr) };
     MLIR_TypeHandle rts[1] = { ty };
     MLIR_ValueHandle results[1] = { new_res };
     MLIR_OpHandle nop = create_simple_op(
@@ -234,31 +234,31 @@ static bool lower_func_func(LowerState *st, MLIR_OpHandle op,
     // upstream WebAssembly backend. Clang attaches these same string
     // attributes when compiling `__attribute__((import_module(...)))`.
     size_t na = MLIR_GetOpNumAttributes(st->ctx, op);
-    MLIR_AttributeHandle attrs_buf[18];
+    MLIR_NamedAttr attrs_buf[18];
     size_t n_attrs = 0;
     string imp_module = {0}, imp_name = {0}, exp_name = {0};
     for (size_t i = 0; i < na && n_attrs < 16; i++) {
         MLIR_AttributeHandle a = MLIR_GetOpAttribute(st->ctx, op, i);
-        string an = MLIR_GetAttributeName(a);
-        if (name_eq(an, "sym_name") ||
-            name_eq(an, "sym_visibility") ||
-            name_eq(an, "arg_attrs") ||
-            name_eq(an, "res_attrs") ||
-            name_eq(an, "llvm.linkage")) {
-            attrs_buf[n_attrs++] = a;
-        } else if (name_eq(an, "wasm.import_module")) {
-            attrs_buf[n_attrs++] = a;
-            imp_module = MLIR_GetAttributeString(a);
-        } else if (name_eq(an, "wasm.import_name")) {
-            attrs_buf[n_attrs++] = a;
-            imp_name = MLIR_GetAttributeString(a);
-        } else if (name_eq(an, "wasm.export_name")) {
-            attrs_buf[n_attrs++] = a;
-            exp_name = MLIR_GetAttributeString(a);
-        } else if (name_eq(an, "function_type")) {
+        MLIR_AttrKey ak = MLIR_GetOpAttributeKey(st->ctx, op, i);
+        if (ak == MLIR_KEY_SYM_NAME ||
+            ak == MLIR_KEY_SYM_VISIBILITY ||
+            ak == MLIR_KEY_ARG_ATTRS ||
+            ak == MLIR_KEY_RES_ATTRS ||
+            ak == MLIR_KEY_LLVM_LINKAGE) {
+            attrs_buf[n_attrs++] = MLIR_Named(ak, a);
+        } else if (ak == MLIR_KEY_WASM_IMPORT_MODULE) {
+            attrs_buf[n_attrs++] = MLIR_Named(ak, a);
+            imp_module = MLIR_GetAttributeString(st->ctx, a);
+        } else if (ak == MLIR_KEY_WASM_IMPORT_NAME) {
+            attrs_buf[n_attrs++] = MLIR_Named(ak, a);
+            imp_name = MLIR_GetAttributeString(st->ctx, a);
+        } else if (ak == MLIR_KEY_WASM_EXPORT_NAME) {
+            attrs_buf[n_attrs++] = MLIR_Named(ak, a);
+            exp_name = MLIR_GetAttributeString(st->ctx, a);
+        } else if (ak == MLIR_KEY_FUNCTION_TYPE) {
             // Convert FunctionType -> LLVMFunctionType (which carries
             // is_var_arg and uses LLVM void instead of zero-results).
-            MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(a);
+            MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(st->ctx, a);
             size_t ni = MLIR_GetTypeFunctionNumInputs(st->ctx, ft);
             size_t nr_ = MLIR_GetTypeFunctionNumResults(st->ctx, ft);
             MLIR_TypeHandle ins_stk[16];
@@ -272,8 +272,8 @@ static bool lower_func_func(LowerState *st, MLIR_OpHandle op,
                 : MLIR_GetTypeFunctionResult(st->ctx, ft, 0);
             MLIR_TypeHandle llvmft = MLIR_CreateTypeLLVMFunction(
                 st->ctx, ret_ty, ins, ni, false);
-            attrs_buf[n_attrs++] = MLIR_CreateAttributeType(
-                st->ctx, str_lit("function_type"), llvmft);
+            attrs_buf[n_attrs++] = MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(
+                st->ctx, llvmft));
         }
     }
 
@@ -294,15 +294,15 @@ static bool lower_func_func(LowerState *st, MLIR_OpHandle op,
         for (size_t i = 0; i < 3; i++) {
             if (vals[i].size == 0) continue;
             MLIR_AttributeHandle pair[2] = {
-                MLIR_CreateAttributeString(st->ctx, str_lit(""), keys[i]),
-                MLIR_CreateAttributeString(st->ctx, str_lit(""), vals[i]),
+                MLIR_CreateAttributeString(st->ctx, keys[i]),
+                MLIR_CreateAttributeString(st->ctx, vals[i]),
             };
             pt_elems[n_pt++] = MLIR_CreateAttributeArray(
-                st->ctx, str_lit(""), pair, 2);
+                st->ctx, pair, 2);
         }
         if (n_pt > 0 && n_attrs < 18) {
-            attrs_buf[n_attrs++] = MLIR_CreateAttributeArray(
-                st->ctx, str_lit("passthrough"), pt_elems, n_pt);
+            attrs_buf[n_attrs++] = MLIR_Named(MLIR_KEY_PASSTHROUGH, MLIR_CreateAttributeArray(
+                st->ctx, pt_elems, n_pt));
         }
     }
 
@@ -343,12 +343,12 @@ static bool lower_func_call(LowerState *st, MLIR_OpHandle op,
 
     // Copy `callee` attribute through.
     size_t na = MLIR_GetOpNumAttributes(st->ctx, op);
-    MLIR_AttributeHandle attrs_buf[2];
+    MLIR_NamedAttr attrs_buf[2];
     size_t n_attrs = 0;
     for (size_t i = 0; i < na && n_attrs < 2; i++) {
         MLIR_AttributeHandle a = MLIR_GetOpAttribute(st->ctx, op, i);
-        if (name_eq(MLIR_GetAttributeName(a), "callee")) {
-            attrs_buf[n_attrs++] = a;
+        if (MLIR_GetOpAttributeKey(st->ctx, op, i) == MLIR_KEY_CALLEE) {
+            attrs_buf[n_attrs++] = MLIR_Named(MLIR_GetOpAttributeKey(st->ctx, op, i), a);
         }
     }
 
@@ -392,9 +392,9 @@ static bool lower_rename(LowerState *st, MLIR_OpHandle op,
         results[i] = make_result_value(st->ctx, rts[i], loc);
     }
 
-    MLIR_AttributeHandle *attrs = na ? (MLIR_AttributeHandle *)arena_alloc(
-        alloc, na * sizeof(MLIR_AttributeHandle)) : NULL;
-    for (size_t i = 0; i < na; i++) attrs[i] = MLIR_GetOpAttribute(st->ctx, op, i);
+    MLIR_NamedAttr *attrs = na ? (MLIR_NamedAttr *)arena_alloc(
+        alloc, na * sizeof(MLIR_NamedAttr)) : NULL;
+    for (size_t i = 0; i < na; i++) attrs[i] = MLIR_Named(MLIR_GetOpAttributeKey(st->ctx, op, i), MLIR_GetOpAttribute(st->ctx, op, i));
 
     MLIR_OpHandle nop = create_simple_op(
         st->ctx, new_type,
@@ -424,9 +424,9 @@ static bool lower_cf_branch(LowerState *st, MLIR_OpHandle op,
         alloc, no * sizeof(MLIR_ValueHandle)) : NULL;
     for (size_t i = 0; i < no; i++) operands[i] = MLIR_GetOpOperand(st->ctx, op, i);
 
-    MLIR_AttributeHandle *attrs = na ? (MLIR_AttributeHandle *)arena_alloc(
-        alloc, na * sizeof(MLIR_AttributeHandle)) : NULL;
-    for (size_t i = 0; i < na; i++) attrs[i] = MLIR_GetOpAttribute(st->ctx, op, i);
+    MLIR_NamedAttr *attrs = na ? (MLIR_NamedAttr *)arena_alloc(
+        alloc, na * sizeof(MLIR_NamedAttr)) : NULL;
+    for (size_t i = 0; i < na; i++) attrs[i] = MLIR_Named(MLIR_GetOpAttributeKey(st->ctx, op, i), MLIR_GetOpAttribute(st->ctx, op, i));
 
     MLIR_BlockHandle *succs = ns ? (MLIR_BlockHandle *)arena_alloc(
         alloc, ns * sizeof(MLIR_BlockHandle)) : NULL;
@@ -467,7 +467,7 @@ static bool lower_func_constant(LowerState *st, MLIR_OpHandle op,
     string sym_name = {0};
     for (size_t i = 0; i < na; i++) {
         MLIR_AttributeHandle a = MLIR_GetOpAttribute(st->ctx, op, i);
-        if (name_eq(MLIR_GetAttributeName(a), "value")) {
+        if (MLIR_GetOpAttributeKey(st->ctx, op, i) == MLIR_KEY_VALUE) {
             string s = MLIR_GetAttributeAsString(st->ctx, a);
             // Format is "@name" (FlatSymbolRefAttr) — strip leading '@'.
             if (s.size > 0 && s.str[0] == '@') {
@@ -485,9 +485,9 @@ static bool lower_func_constant(LowerState *st, MLIR_OpHandle op,
     MLIR_ValueHandle new_res = make_result_value(st->ctx, ptr_ty, loc);
     MLIR_TypeHandle rts[1] = { ptr_ty };
     MLIR_ValueHandle results[1] = { new_res };
-    MLIR_AttributeHandle attrs[1];
-    attrs[0] = MLIR_CreateAttributeSymbolRef(
-        st->ctx, str_lit("global_name"), sym_name);
+    MLIR_NamedAttr attrs[1];
+    attrs[0] = MLIR_Named(MLIR_KEY_GLOBAL_NAME, MLIR_CreateAttributeSymbolRef(
+        st->ctx, sym_name));
     MLIR_OpHandle nop = create_simple_op(
         st->ctx, OP_TYPE_LLVM_MLIR_ADDRESSOF,
         attrs, 1, rts, 1, results, 1, NULL, 0, NULL, 0, loc);
@@ -549,9 +549,9 @@ static bool lower_func_call_indirect(LowerState *st, MLIR_OpHandle op,
     }
     MLIR_TypeHandle llvmft = MLIR_CreateTypeLLVMFunction(
         st->ctx, ret_ty, arg_tys, n_args, false);
-    MLIR_AttributeHandle attrs[1];
-    attrs[0] = MLIR_CreateAttributeType(
-        st->ctx, str_lit("var_callee_type"), llvmft);
+    MLIR_NamedAttr attrs[1];
+    attrs[0] = MLIR_Named(MLIR_KEY_VAR_CALLEE_TYPE, MLIR_CreateAttributeType(
+        st->ctx, llvmft));
 
     MLIR_OpHandle nop = create_simple_op(
         st->ctx, OP_TYPE_LLVM_CALL,

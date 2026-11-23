@@ -36,6 +36,8 @@ first context unaffected: yes
 op types: static=yes miss=yes dynamic=yes again=yes lookup=yes name=test.op module=module
 dynamic op and dialect ranges: yes
 builtin.module alias: lookup=yes register=yes module op=yes name=module
+attr keys: static=yes dynamic=yes again=yes name=test.my_attr miss=yes
+op attrs by key: sym_name=f mine=7->8 after set=2 after add=3 last=value
 dynamic types are per context: yes
 3000 ops, results and uses: yes
 successor operands appended: yes

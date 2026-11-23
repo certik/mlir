@@ -125,17 +125,17 @@ enum {
 // =============================================================================
 // MLIR attribute readers.
 // =============================================================================
-static int64_t at_i(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
-    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeInteger(a) : 0;
+static int64_t at_i(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, op, key);
+    return a ? MLIR_GetAttributeInteger(ctx, a) : 0;
 }
-static bool at_b(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
-    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeBool(a) : false;
+static bool at_b(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, op, key);
+    return a ? MLIR_GetAttributeBool(ctx, a) : false;
 }
-static string at_s(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
-    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeString(a) : (string){0};
+static string at_s(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, op, key);
+    return a ? MLIR_GetAttributeString(ctx, a) : (string){0};
 }
 
 // Hex-string -> byte vector decoder (caller owns the malloc'd result).
@@ -313,18 +313,18 @@ static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t s
                       uint32_t global_sym_base, SigTab *sigs) {
     Buf *b = &F->body;
     MLIR_OpType t = MLIR_GetOpType(ctx, op);
-    uint8_t valtype = (uint8_t)at_i(ctx, op, "valtype");
+    uint8_t valtype = (uint8_t)at_i(ctx, op, MLIR_KEY_VALTYPE);
 
     switch (t) {
     case OP_TYPE_WASMSTACK_LOCAL_GET:
-        buf_putc(b, 0x20); leb_u(b, (uint64_t)at_i(ctx, op, "local_idx")); return true;
+        buf_putc(b, 0x20); leb_u(b, (uint64_t)at_i(ctx, op, MLIR_KEY_LOCAL_IDX)); return true;
     case OP_TYPE_WASMSTACK_LOCAL_SET:
-        buf_putc(b, 0x21); leb_u(b, (uint64_t)at_i(ctx, op, "local_idx")); return true;
+        buf_putc(b, 0x21); leb_u(b, (uint64_t)at_i(ctx, op, MLIR_KEY_LOCAL_IDX)); return true;
     case OP_TYPE_WASMSTACK_LOCAL_TEE:
-        buf_putc(b, 0x22); leb_u(b, (uint64_t)at_i(ctx, op, "local_idx")); return true;
+        buf_putc(b, 0x22); leb_u(b, (uint64_t)at_i(ctx, op, MLIR_KEY_LOCAL_IDX)); return true;
 
     case OP_TYPE_WASMSTACK_GLOBAL_GET: {
-        uint32_t gidx = (uint32_t)at_i(ctx, op, "global_idx");
+        uint32_t gidx = (uint32_t)at_i(ctx, op, MLIR_KEY_GLOBAL_IDX);
         buf_putc(b, 0x23);
         uint32_t off = (uint32_t)b->len;
         leb_u_pad5(b, gidx);
@@ -332,7 +332,7 @@ static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t s
         return true;
     }
     case OP_TYPE_WASMSTACK_GLOBAL_SET: {
-        uint32_t gidx = (uint32_t)at_i(ctx, op, "global_idx");
+        uint32_t gidx = (uint32_t)at_i(ctx, op, MLIR_KEY_GLOBAL_IDX);
         buf_putc(b, 0x24);
         uint32_t off = (uint32_t)b->len;
         leb_u_pad5(b, gidx);
@@ -341,7 +341,7 @@ static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t s
     }
 
     case OP_TYPE_WASMSTACK_CONST: {
-        int64_t iv = at_i(ctx, op, "value");
+        int64_t iv = at_i(ctx, op, MLIR_KEY_VALUE);
         if (valtype == WT_I32)      { buf_putc(b, 0x41); leb_s(b, (int32_t)iv); }
         else if (valtype == WT_I64) { buf_putc(b, 0x42); leb_s(b, iv); }
         else if (valtype == WT_F32) {
@@ -371,9 +371,9 @@ static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t s
         return true;
 
     case OP_TYPE_WASMSTACK_LOAD: {
-        uint32_t mem_size = (uint32_t)at_i(ctx, op, "mem_size_bytes");
-        uint32_t mem_align = (uint32_t)at_i(ctx, op, "memory_align_log2");
-        uint32_t mem_off = (uint32_t)at_i(ctx, op, "memory_offset");
+        uint32_t mem_size = (uint32_t)at_i(ctx, op, MLIR_KEY_MEM_SIZE_BYTES);
+        uint32_t mem_align = (uint32_t)at_i(ctx, op, MLIR_KEY_MEMORY_ALIGN_LOG2);
+        uint32_t mem_off = (uint32_t)at_i(ctx, op, MLIR_KEY_MEMORY_OFFSET);
         uint8_t opc;
         if (valtype == WT_I32) {
             // For sub-i32 loads we always use the zero-extending opcode
@@ -400,9 +400,9 @@ static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t s
         return true;
     }
     case OP_TYPE_WASMSTACK_STORE: {
-        uint32_t mem_size = (uint32_t)at_i(ctx, op, "mem_size_bytes");
-        uint32_t mem_align = (uint32_t)at_i(ctx, op, "memory_align_log2");
-        uint32_t mem_off = (uint32_t)at_i(ctx, op, "memory_offset");
+        uint32_t mem_size = (uint32_t)at_i(ctx, op, MLIR_KEY_MEM_SIZE_BYTES);
+        uint32_t mem_align = (uint32_t)at_i(ctx, op, MLIR_KEY_MEMORY_ALIGN_LOG2);
+        uint32_t mem_off = (uint32_t)at_i(ctx, op, MLIR_KEY_MEMORY_OFFSET);
         uint8_t opc;
         if (valtype == WT_I32) {
             if (mem_size == 4)      opc = 0x36;
@@ -428,7 +428,7 @@ static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t s
 
     case OP_TYPE_WASMSTACK_BINOP:
     case OP_TYPE_WASMSTACK_UNOP:
-        buf_putc(b, (uint8_t)at_i(ctx, op, "wasm_opcode")); return true;
+        buf_putc(b, (uint8_t)at_i(ctx, op, MLIR_KEY_WASM_OPCODE)); return true;
 
     case OP_TYPE_WASMSTACK_BLOCK:
         buf_putc(b, 0x02); buf_putc(b, valtype ? valtype : 0x40); return true;
@@ -441,9 +441,9 @@ static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t s
     case OP_TYPE_WASMSTACK_END:
         buf_putc(b, 0x0b); return true;
     case OP_TYPE_WASMSTACK_BR:
-        buf_putc(b, 0x0c); leb_u(b, (uint64_t)at_i(ctx, op, "depth")); return true;
+        buf_putc(b, 0x0c); leb_u(b, (uint64_t)at_i(ctx, op, MLIR_KEY_DEPTH)); return true;
     case OP_TYPE_WASMSTACK_BR_IF:
-        buf_putc(b, 0x0d); leb_u(b, (uint64_t)at_i(ctx, op, "depth")); return true;
+        buf_putc(b, 0x0d); leb_u(b, (uint64_t)at_i(ctx, op, MLIR_KEY_DEPTH)); return true;
     case OP_TYPE_WASMSTACK_UNREACHABLE:
         buf_putc(b, 0x00); return true;
     case OP_TYPE_WASMSTACK_SELECT:
@@ -452,7 +452,7 @@ static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t s
         buf_putc(b, valtype == WT_I64 ? 0x50 : 0x45); return true;
 
     case OP_TYPE_WASMSTACK_CALL: {
-        string tgt = at_s(ctx, op, "target");
+        string tgt = at_s(ctx, op, MLIR_KEY_TARGET);
         int idx = find_func_by_name(all_funcs, all_funcs_n, tgt);
         if (idx < 0) {
             fprintf(stderr, "wasm-emit: call to unknown function '%.*s'\n",
@@ -468,7 +468,7 @@ static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t s
     }
 
     case OP_TYPE_WASMSTACK_ADDRESSOF: {
-        string tgt = at_s(ctx, op, "target");
+        string tgt = at_s(ctx, op, MLIR_KEY_TARGET);
         int idx = find_global_by_name(globals, n_globals, tgt);
         if (idx < 0) {
             fprintf(stderr, "wasm-emit: addressof unknown global '%.*s'\n",
@@ -484,7 +484,7 @@ static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t s
     }
 
     case OP_TYPE_WASMSTACK_FUNC_ADDR: {
-        string tgt = at_s(ctx, op, "target");
+        string tgt = at_s(ctx, op, MLIR_KEY_TARGET);
         int idx = find_func_by_name(all_funcs, all_funcs_n, tgt);
         if (idx < 0) {
             fprintf(stderr, "wasm-emit: func_addr unknown function '%.*s'\n",
@@ -501,8 +501,8 @@ static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t s
 
     case OP_TYPE_WASMSTACK_CALL_INDIRECT: {
         size_t snp, snr;
-        uint8_t *sp = hex_decode(at_s(ctx, op, "sig_params"), &snp);
-        uint8_t *sr = hex_decode(at_s(ctx, op, "sig_results"), &snr);
+        uint8_t *sp = hex_decode(at_s(ctx, op, MLIR_KEY_SIG_PARAMS), &snp);
+        uint8_t *sr = hex_decode(at_s(ctx, op, MLIR_KEY_SIG_RESULTS), &snr);
         uint32_t tidx = sig_intern(sigs, sp, snp, sr, snr);
         free(sp); free(sr);
         buf_putc(b, 0x11);
@@ -768,17 +768,17 @@ string mlir_wasmstack_to_bin(MLIR_Context *ctx,
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, ti);
         if (MLIR_GetOpType(ctx, op) != OP_TYPE_WASMSTACK_IMPORT_FUNC) continue;
         size_t np, nr;
-        uint8_t *p = hex_decode(at_s(ctx, op, "param_types"), &np);
-        uint8_t *r = hex_decode(at_s(ctx, op, "result_types"), &nr);
+        uint8_t *p = hex_decode(at_s(ctx, op, MLIR_KEY_PARAM_TYPES), &np);
+        uint8_t *r = hex_decode(at_s(ctx, op, MLIR_KEY_RESULT_TYPES), &nr);
         funcs = (EmFunc *)realloc(funcs, (n_funcs + 1) * sizeof(EmFunc));
         memset(&funcs[n_funcs], 0, sizeof(EmFunc));
-        funcs[n_funcs].name = strdup_str(at_s(ctx, op, "sym_name"));
+        funcs[n_funcs].name = strdup_str(at_s(ctx, op, MLIR_KEY_SYM_NAME));
         funcs[n_funcs].sig = sig_intern(&sigs, p, np, r, nr);
         funcs[n_funcs].imported = true;
         funcs[n_funcs].func_index = (uint32_t)n_funcs;
-        string imod = at_s(ctx, op, "import_module");
+        string imod = at_s(ctx, op, MLIR_KEY_IMPORT_MODULE);
         if (imod.size) funcs[n_funcs].import_module = strdup_str(imod);
-        string inm = at_s(ctx, op, "import_name");
+        string inm = at_s(ctx, op, MLIR_KEY_IMPORT_NAME);
         if (inm.size) funcs[n_funcs].import_name = strdup_str(inm);
         free(p); free(r);
         n_funcs++;
@@ -788,22 +788,22 @@ string mlir_wasmstack_to_bin(MLIR_Context *ctx,
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, ti);
         if (MLIR_GetOpType(ctx, op) != OP_TYPE_WASMSTACK_FUNC) continue;
         size_t np, nr;
-        uint8_t *p = hex_decode(at_s(ctx, op, "param_types"), &np);
-        uint8_t *r = hex_decode(at_s(ctx, op, "result_types"), &nr);
+        uint8_t *p = hex_decode(at_s(ctx, op, MLIR_KEY_PARAM_TYPES), &np);
+        uint8_t *r = hex_decode(at_s(ctx, op, MLIR_KEY_RESULT_TYPES), &nr);
         size_t nl;
-        uint8_t *ll = hex_decode(at_s(ctx, op, "local_types"), &nl);
+        uint8_t *ll = hex_decode(at_s(ctx, op, MLIR_KEY_LOCAL_TYPES), &nl);
         funcs = (EmFunc *)realloc(funcs, (n_funcs + 1) * sizeof(EmFunc));
         memset(&funcs[n_funcs], 0, sizeof(EmFunc));
-        funcs[n_funcs].name = strdup_str(at_s(ctx, op, "sym_name"));
+        funcs[n_funcs].name = strdup_str(at_s(ctx, op, MLIR_KEY_SYM_NAME));
         funcs[n_funcs].sig = sig_intern(&sigs, p, np, r, nr);
         funcs[n_funcs].imported = false;
-        funcs[n_funcs].exported = at_b(ctx, op, "exported");
-        funcs[n_funcs].internal = at_b(ctx, op, "internal");
+        funcs[n_funcs].exported = at_b(ctx, op, MLIR_KEY_EXPORTED);
+        funcs[n_funcs].internal = at_b(ctx, op, MLIR_KEY_INTERNAL);
         funcs[n_funcs].func_index = (uint32_t)n_funcs;
         funcs[n_funcs].src_op = op;
         funcs[n_funcs].local_types = ll;
         funcs[n_funcs].n_locals = nl;
-        string en = at_s(ctx, op, "export_name");
+        string en = at_s(ctx, op, MLIR_KEY_EXPORT_NAME);
         if (en.size) funcs[n_funcs].export_name = strdup_str(en);
         free(p); free(r);
         n_funcs++;
@@ -817,16 +817,16 @@ string mlir_wasmstack_to_bin(MLIR_Context *ctx,
         if (MLIR_GetOpType(ctx, op) != OP_TYPE_WASMSTACK_IMPORT_GLOBAL) continue;
         globals = (EmGlobal *)realloc(globals, (n_globals + 1) * sizeof(EmGlobal));
         memset(&globals[n_globals], 0, sizeof(EmGlobal));
-        globals[n_globals].name = strdup_str(at_s(ctx, op, "sym_name"));
-        globals[n_globals].size = (uint32_t)at_i(ctx, op, "size");
-        globals[n_globals].align_pow = (uint32_t)at_i(ctx, op, "align_pow");
-        globals[n_globals].is_const = at_b(ctx, op, "is_const");
-        string id = at_s(ctx, op, "init_data");
+        globals[n_globals].name = strdup_str(at_s(ctx, op, MLIR_KEY_SYM_NAME));
+        globals[n_globals].size = (uint32_t)at_i(ctx, op, MLIR_KEY_SIZE);
+        globals[n_globals].align_pow = (uint32_t)at_i(ctx, op, MLIR_KEY_ALIGN_POW);
+        globals[n_globals].is_const = at_b(ctx, op, MLIR_KEY_IS_CONST);
+        string id = at_s(ctx, op, MLIR_KEY_INIT_DATA);
         if (id.size) {
             globals[n_globals].data = (uint8_t *)malloc(id.size);
             memcpy(globals[n_globals].data, id.str, id.size);
         }
-        globals[n_globals].relocs = parse_relocs(at_s(ctx, op, "relocs"),
+        globals[n_globals].relocs = parse_relocs(at_s(ctx, op, MLIR_KEY_RELOCS),
                                                  &globals[n_globals].n_relocs);
         n_globals++;
     }
@@ -851,7 +851,7 @@ string mlir_wasmstack_to_bin(MLIR_Context *ctx,
                 need_indirect_table = true;
             } else if (t == OP_TYPE_WASMSTACK_FUNC_ADDR) {
                 need_indirect_table = true;
-                string tgt = at_s(ctx, op, "target");
+                string tgt = at_s(ctx, op, MLIR_KEY_TARGET);
                 int idx = find_func_by_name(funcs, n_funcs, tgt);
                 if (idx < 0) continue;
                 bool dup = false;

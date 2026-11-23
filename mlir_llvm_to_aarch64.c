@@ -39,22 +39,22 @@
 // ---------------------------------------------------------------------------
 // Small attribute / op builders (mirrors of the former wmir backend's helpers).
 // ---------------------------------------------------------------------------
-static MLIR_AttributeHandle attr_i32(MLIR_Context *ctx, const char *name,
+static MLIR_NamedAttr attr_i32(MLIR_Context *ctx, MLIR_AttrKey key,
                                      int64_t v) {
-    return MLIR_CreateAttributeInteger(ctx, str_from_cstr_view((char *)name), v,
-                                       MLIR_CreateTypeInteger(ctx, 32, true));
+    return MLIR_Named(key, MLIR_CreateAttributeInteger(ctx, v,
+                                       MLIR_CreateTypeInteger(ctx, 32, true)));
 }
-static MLIR_AttributeHandle attr_s(MLIR_Context *ctx, const char *name,
+static MLIR_NamedAttr attr_s(MLIR_Context *ctx, MLIR_AttrKey key,
                                    const char *v, size_t vlen) {
     string sv = { (char *)v, vlen };
-    return MLIR_CreateAttributeString(ctx, str_from_cstr_view((char *)name), sv);
+    return MLIR_Named(key, MLIR_CreateAttributeString(ctx, sv));
 }
-static MLIR_AttributeHandle attr_b(MLIR_Context *ctx, const char *name, bool v) {
-    return MLIR_CreateAttributeBool(ctx, str_from_cstr_view((char *)name), v);
+static MLIR_NamedAttr attr_b(MLIR_Context *ctx, MLIR_AttrKey key, bool v) {
+    return MLIR_Named(key, MLIR_CreateAttributeBool(ctx, v));
 }
 
 static MLIR_OpHandle build_op(MLIR_Context *ctx, MLIR_OpType t,
-                              MLIR_AttributeHandle *attrs, size_t na) {
+                              MLIR_NamedAttr *attrs, size_t na) {
     return MLIR_CreateOp(ctx, t,
         attrs, na, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
         MLIR_CreateLocationUnknown(ctx, (string){0}),
@@ -63,25 +63,25 @@ static MLIR_OpHandle build_op(MLIR_Context *ctx, MLIR_OpType t,
 
 static void emit_movz(MLIR_Context *ctx, MLIR_BlockHandle blk,
                       uint8_t rd, uint16_t imm16, uint8_t hw, bool sf) {
-    MLIR_AttributeHandle a[4];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "imm16", imm16);
-    a[2] = attr_i32(ctx, "hw", hw);
-    a[3] = attr_b(ctx, "sf", sf);
+    MLIR_NamedAttr a[4];
+    a[0] = attr_i32(ctx, MLIR_KEY_RD, rd);
+    a[1] = attr_i32(ctx, MLIR_KEY_IMM16, imm16);
+    a[2] = attr_i32(ctx, MLIR_KEY_HW, hw);
+    a[3] = attr_b(ctx, MLIR_KEY_SF, sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_MOVZ, a, 4));
 }
 static void emit_movk(MLIR_Context *ctx, MLIR_BlockHandle blk,
                       uint8_t rd, uint16_t imm16, uint8_t hw, bool sf) {
-    MLIR_AttributeHandle a[4];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "imm16", imm16);
-    a[2] = attr_i32(ctx, "hw", hw);
-    a[3] = attr_b(ctx, "sf", sf);
+    MLIR_NamedAttr a[4];
+    a[0] = attr_i32(ctx, MLIR_KEY_RD, rd);
+    a[1] = attr_i32(ctx, MLIR_KEY_IMM16, imm16);
+    a[2] = attr_i32(ctx, MLIR_KEY_HW, hw);
+    a[3] = attr_b(ctx, MLIR_KEY_SF, sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_MOVK, a, 4));
 }
 static void emit_bl(MLIR_Context *ctx, MLIR_BlockHandle blk, string callee) {
-    MLIR_AttributeHandle a[1];
-    a[0] = attr_s(ctx, "callee", callee.str, callee.size);
+    MLIR_NamedAttr a[1];
+    a[0] = attr_s(ctx, MLIR_KEY_CALLEE, callee.str, callee.size);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_BL, a, 1));
 }
 static void emit_ret(MLIR_Context *ctx, MLIR_BlockHandle blk) {
@@ -89,8 +89,8 @@ static void emit_ret(MLIR_Context *ctx, MLIR_BlockHandle blk) {
 }
 // blr Xn — indirect branch-and-link via register (for indirect calls).
 static void emit_blr(MLIR_Context *ctx, MLIR_BlockHandle blk, uint8_t rn) {
-    MLIR_AttributeHandle a[1];
-    a[0] = attr_i32(ctx, "rn", rn);
+    MLIR_NamedAttr a[1];
+    a[0] = attr_i32(ctx, MLIR_KEY_RN, rn);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_BLR, a, 1));
 }
 // ADRP rd, <section page>  /  ADD rd, rn, #<section lo12 + addend>. The
@@ -98,20 +98,20 @@ static void emit_blr(MLIR_Context *ctx, MLIR_BlockHandle blk, uint8_t rn) {
 // "linmem_template" data section) and adds `addend` to the base address.
 static void emit_adrp_data(MLIR_Context *ctx, MLIR_BlockHandle blk,
                            uint8_t rd, string target, uint32_t addend) {
-    MLIR_AttributeHandle a[3];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_s(ctx, "target", target.str, target.size);
-    a[2] = attr_i32(ctx, "addend", (int32_t)addend);
+    MLIR_NamedAttr a[3];
+    a[0] = attr_i32(ctx, MLIR_KEY_RD, rd);
+    a[1] = attr_s(ctx, MLIR_KEY_TARGET, target.str, target.size);
+    a[2] = attr_i32(ctx, MLIR_KEY_ADDEND, (int32_t)addend);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_ADRP_DATA, a, 3));
 }
 static void emit_add_data_lo(MLIR_Context *ctx, MLIR_BlockHandle blk,
                              uint8_t rd, uint8_t rn, string target,
                              uint32_t addend) {
-    MLIR_AttributeHandle a[4];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_s(ctx, "target", target.str, target.size);
-    a[3] = attr_i32(ctx, "addend", (int32_t)addend);
+    MLIR_NamedAttr a[4];
+    a[0] = attr_i32(ctx, MLIR_KEY_RD, rd);
+    a[1] = attr_i32(ctx, MLIR_KEY_RN, rn);
+    a[2] = attr_s(ctx, MLIR_KEY_TARGET, target.str, target.size);
+    a[3] = attr_i32(ctx, MLIR_KEY_ADDEND, (int32_t)addend);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_ADD_DATA_LO, a, 4));
 }
 
@@ -120,56 +120,56 @@ static void emit_add_data_lo(MLIR_Context *ctx, MLIR_BlockHandle blk,
 // sf=true picks X<->D (moves all 64 bits); sf=false picks W<->S.
 static void emit_fmov_gp_v(MLIR_Context *ctx, MLIR_BlockHandle blk,
                            bool dir_to_v, bool sf, uint8_t rd, uint8_t rn) {
-    MLIR_AttributeHandle a[4];
-    a[0] = attr_b  (ctx, "dir_to_v", dir_to_v);
-    a[1] = attr_b  (ctx, "sf",       sf);
-    a[2] = attr_i32(ctx, "rd",       rd);
-    a[3] = attr_i32(ctx, "rn",       rn);
+    MLIR_NamedAttr a[4];
+    a[0] = attr_b  (ctx, MLIR_KEY_DIR_TO_V, dir_to_v);
+    a[1] = attr_b  (ctx, MLIR_KEY_SF,       sf);
+    a[2] = attr_i32(ctx, MLIR_KEY_RD,       rd);
+    a[3] = attr_i32(ctx, MLIR_KEY_RN,       rn);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_FMOV_GP_V, a, 4));
 }
 // FADD/FSUB/FMUL/FDIV on V registers. kind = "fadd"|"fsub"|"fmul"|"fdiv".
 static void emit_fp_binop(MLIR_Context *ctx, MLIR_BlockHandle blk,
                           const char *kind, int fwidth,
                           uint8_t rd, uint8_t rn, uint8_t rm) {
-    MLIR_AttributeHandle a[5];
-    a[0] = attr_s  (ctx, "kind",   kind, strlen(kind));
-    a[1] = attr_i32(ctx, "fwidth", fwidth);
-    a[2] = attr_i32(ctx, "rd",     rd);
-    a[3] = attr_i32(ctx, "rn",     rn);
-    a[4] = attr_i32(ctx, "rm",     rm);
+    MLIR_NamedAttr a[5];
+    a[0] = attr_s  (ctx, MLIR_KEY_KIND,   kind, strlen(kind));
+    a[1] = attr_i32(ctx, MLIR_KEY_FWIDTH, fwidth);
+    a[2] = attr_i32(ctx, MLIR_KEY_RD,     rd);
+    a[3] = attr_i32(ctx, MLIR_KEY_RN,     rn);
+    a[4] = attr_i32(ctx, MLIR_KEY_RM,     rm);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_FP_BINOP, a, 5));
 }
 // FNEG/FABS/FSQRT on V registers.
 static void emit_fp_unop(MLIR_Context *ctx, MLIR_BlockHandle blk,
                          const char *kind, int fwidth,
                          uint8_t rd, uint8_t rn) {
-    MLIR_AttributeHandle a[4];
-    a[0] = attr_s  (ctx, "kind",   kind, strlen(kind));
-    a[1] = attr_i32(ctx, "fwidth", fwidth);
-    a[2] = attr_i32(ctx, "rd",     rd);
-    a[3] = attr_i32(ctx, "rn",     rn);
+    MLIR_NamedAttr a[4];
+    a[0] = attr_s  (ctx, MLIR_KEY_KIND,   kind, strlen(kind));
+    a[1] = attr_i32(ctx, MLIR_KEY_FWIDTH, fwidth);
+    a[2] = attr_i32(ctx, MLIR_KEY_RD,     rd);
+    a[3] = attr_i32(ctx, MLIR_KEY_RN,     rn);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_FP_UNOP, a, 4));
 }
 // FCMP Sn/Dn, Sm/Dm (sets NZCV, no result reg).
 static void emit_fcmp(MLIR_Context *ctx, MLIR_BlockHandle blk,
                       int fwidth, uint8_t rn, uint8_t rm) {
-    MLIR_AttributeHandle a[3];
-    a[0] = attr_i32(ctx, "fwidth", fwidth);
-    a[1] = attr_i32(ctx, "rn",     rn);
-    a[2] = attr_i32(ctx, "rm",     rm);
+    MLIR_NamedAttr a[3];
+    a[0] = attr_i32(ctx, MLIR_KEY_FWIDTH, fwidth);
+    a[1] = attr_i32(ctx, MLIR_KEY_RN,     rn);
+    a[2] = attr_i32(ctx, MLIR_KEY_RM,     rm);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_FCMP, a, 3));
 }
 // FP conversion. kind ∈ {"f2f","f2i","i2f"}; sign matters for f2i/i2f only.
 static void emit_fp_cvt(MLIR_Context *ctx, MLIR_BlockHandle blk,
                         const char *kind, int src_w, int dst_w,
                         bool sign, uint8_t rd, uint8_t rn) {
-    MLIR_AttributeHandle a[6];
-    a[0] = attr_s  (ctx, "kind",  kind, strlen(kind));
-    a[1] = attr_i32(ctx, "src_w", src_w);
-    a[2] = attr_i32(ctx, "dst_w", dst_w);
-    a[3] = attr_b  (ctx, "sign",  sign);
-    a[4] = attr_i32(ctx, "rd",    rd);
-    a[5] = attr_i32(ctx, "rn",    rn);
+    MLIR_NamedAttr a[6];
+    a[0] = attr_s  (ctx, MLIR_KEY_KIND,  kind, strlen(kind));
+    a[1] = attr_i32(ctx, MLIR_KEY_SRC_W, src_w);
+    a[2] = attr_i32(ctx, MLIR_KEY_DST_W, dst_w);
+    a[3] = attr_b  (ctx, MLIR_KEY_SIGN,  sign);
+    a[4] = attr_i32(ctx, MLIR_KEY_RD,    rd);
+    a[5] = attr_i32(ctx, MLIR_KEY_RN,    rn);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_FP_CVT, a, 6));
 }
 
@@ -188,29 +188,29 @@ static void emit_load_imm(MLIR_Context *ctx, MLIR_BlockHandle blk,
 
 static void emit_mov_x(MLIR_Context *ctx, MLIR_BlockHandle blk,
                        uint8_t rd, uint8_t rn) {
-    MLIR_AttributeHandle a[2];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "rn", rn);
+    MLIR_NamedAttr a[2];
+    a[0] = attr_i32(ctx, MLIR_KEY_RD, rd);
+    a[1] = attr_i32(ctx, MLIR_KEY_RN, rn);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_MOV_X, a, 2));
 }
 static void emit_3reg(MLIR_Context *ctx, MLIR_BlockHandle blk, MLIR_OpType t,
                       uint8_t rd, uint8_t rn, uint8_t rm, bool sf) {
-    MLIR_AttributeHandle a[4];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "rm", rm);
-    a[3] = attr_b(ctx, "sf", sf);
+    MLIR_NamedAttr a[4];
+    a[0] = attr_i32(ctx, MLIR_KEY_RD, rd);
+    a[1] = attr_i32(ctx, MLIR_KEY_RN, rn);
+    a[2] = attr_i32(ctx, MLIR_KEY_RM, rm);
+    a[3] = attr_b(ctx, MLIR_KEY_SF, sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, t, a, 4));
 }
 // Immediate shift (lsl/lsr/asr #shift), used for mul-by-2^k strength reduction
 // and constant-amount shifts.
 static void emit_shift_imm(MLIR_Context *ctx, MLIR_BlockHandle blk, MLIR_OpType t,
                            uint8_t rd, uint8_t rn, uint8_t shift, bool sf) {
-    MLIR_AttributeHandle a[4];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "shift", shift);
-    a[3] = attr_b(ctx, "sf", sf);
+    MLIR_NamedAttr a[4];
+    a[0] = attr_i32(ctx, MLIR_KEY_RD, rd);
+    a[1] = attr_i32(ctx, MLIR_KEY_RN, rn);
+    a[2] = attr_i32(ctx, MLIR_KEY_SHIFT, shift);
+    a[3] = attr_b(ctx, MLIR_KEY_SF, sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, t, a, 4));
 }
 // add rd, rn, rm, LSL #lsl  (the encoder reads the optional "lsl" attribute,
@@ -220,30 +220,30 @@ static void emit_shift_imm(MLIR_Context *ctx, MLIR_BlockHandle blk, MLIR_OpType 
 static void emit_add_reg_lsl(MLIR_Context *ctx, MLIR_BlockHandle blk,
                              uint8_t rd, uint8_t rn, uint8_t rm, uint8_t lsl,
                              bool sf) {
-    MLIR_AttributeHandle a[5];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "rm", rm);
-    a[3] = attr_b(ctx, "sf", sf);
-    a[4] = attr_i32(ctx, "lsl", lsl);
+    MLIR_NamedAttr a[5];
+    a[0] = attr_i32(ctx, MLIR_KEY_RD, rd);
+    a[1] = attr_i32(ctx, MLIR_KEY_RN, rn);
+    a[2] = attr_i32(ctx, MLIR_KEY_RM, rm);
+    a[3] = attr_b(ctx, MLIR_KEY_SF, sf);
+    a[4] = attr_i32(ctx, MLIR_KEY_LSL, lsl);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_ADD_REG, a, 5));
 }
 static void emit_msub(MLIR_Context *ctx, MLIR_BlockHandle blk,
                       uint8_t rd, uint8_t rn, uint8_t rm, uint8_t ra, bool sf) {
-    MLIR_AttributeHandle a[5];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "rm", rm);
-    a[3] = attr_i32(ctx, "ra", ra);
-    a[4] = attr_b(ctx, "sf", sf);
+    MLIR_NamedAttr a[5];
+    a[0] = attr_i32(ctx, MLIR_KEY_RD, rd);
+    a[1] = attr_i32(ctx, MLIR_KEY_RN, rn);
+    a[2] = attr_i32(ctx, MLIR_KEY_RM, rm);
+    a[3] = attr_i32(ctx, MLIR_KEY_RA, ra);
+    a[4] = attr_b(ctx, MLIR_KEY_SF, sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_MSUB, a, 5));
 }
 static void emit_ldst_x(MLIR_Context *ctx, MLIR_BlockHandle blk, MLIR_OpType t,
                         uint8_t rt, uint8_t rn, uint32_t off_bytes) {
-    MLIR_AttributeHandle a[3];
-    a[0] = attr_i32(ctx, "rt", rt);
-    a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "off_bytes", (int64_t)off_bytes);
+    MLIR_NamedAttr a[3];
+    a[0] = attr_i32(ctx, MLIR_KEY_RT, rt);
+    a[1] = attr_i32(ctx, MLIR_KEY_RN, rn);
+    a[2] = attr_i32(ctx, MLIR_KEY_OFF_BYTES, (int64_t)off_bytes);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, t, a, 3));
 }
 static void emit_ldr_x(MLIR_Context *ctx, MLIR_BlockHandle blk,
@@ -257,10 +257,10 @@ static void emit_str_x(MLIR_Context *ctx, MLIR_BlockHandle blk,
 // Register-offset 64-bit load/store: ldr/str Xt, [Xn, Xm, LSL #0].
 static void emit_ldst_x_reg(MLIR_Context *ctx, MLIR_BlockHandle blk,
                             MLIR_OpType t, uint8_t rt, uint8_t rn, uint8_t rm) {
-    MLIR_AttributeHandle a[3];
-    a[0] = attr_i32(ctx, "rt", rt);
-    a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "rm", rm);
+    MLIR_NamedAttr a[3];
+    a[0] = attr_i32(ctx, MLIR_KEY_RT, rt);
+    a[1] = attr_i32(ctx, MLIR_KEY_RN, rn);
+    a[2] = attr_i32(ctx, MLIR_KEY_RM, rm);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, t, a, 3));
 }
 // Materialise an unsigned byte offset into register `rd`.
@@ -293,20 +293,20 @@ static void emit_str_x_off(MLIR_Context *ctx, MLIR_BlockHandle blk,
 }
 static void emit_add_imm(MLIR_Context *ctx, MLIR_BlockHandle blk,
                          uint8_t rd, uint8_t rn, uint16_t imm12, bool sf) {
-    MLIR_AttributeHandle a[4];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "imm12", imm12);
-    a[3] = attr_b(ctx, "sf", sf);
+    MLIR_NamedAttr a[4];
+    a[0] = attr_i32(ctx, MLIR_KEY_RD, rd);
+    a[1] = attr_i32(ctx, MLIR_KEY_RN, rn);
+    a[2] = attr_i32(ctx, MLIR_KEY_IMM12, imm12);
+    a[3] = attr_b(ctx, MLIR_KEY_SF, sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_ADD_IMM, a, 4));
 }
 static void emit_sub_imm(MLIR_Context *ctx, MLIR_BlockHandle blk,
                          uint8_t rd, uint8_t rn, uint16_t imm12, bool sf) {
-    MLIR_AttributeHandle a[4];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "imm12", imm12);
-    a[3] = attr_b(ctx, "sf", sf);
+    MLIR_NamedAttr a[4];
+    a[0] = attr_i32(ctx, MLIR_KEY_RD, rd);
+    a[1] = attr_i32(ctx, MLIR_KEY_RN, rn);
+    a[2] = attr_i32(ctx, MLIR_KEY_IMM12, imm12);
+    a[3] = attr_b(ctx, MLIR_KEY_SF, sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_SUB_IMM, a, 4));
 }
 // Mask the low `w` bits: `and rd, rn, #((1<<w)-1)` in a SINGLE instruction
@@ -315,11 +315,11 @@ static void emit_sub_imm(MLIR_Context *ctx, MLIR_BlockHandle blk,
 // must ensure 1 <= w <= (sf?63:31); w==0/>=64 has no single-AND form.
 static void emit_and_imm_lowbits(MLIR_Context *ctx, MLIR_BlockHandle blk,
                                  uint8_t rd, uint8_t rn, uint8_t w, bool sf) {
-    MLIR_AttributeHandle a[4];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "w", w);
-    a[3] = attr_b(ctx, "sf", sf);
+    MLIR_NamedAttr a[4];
+    a[0] = attr_i32(ctx, MLIR_KEY_RD, rd);
+    a[1] = attr_i32(ctx, MLIR_KEY_RN, rn);
+    a[2] = attr_i32(ctx, MLIR_KEY_W, w);
+    a[3] = attr_b(ctx, MLIR_KEY_SF, sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_AND_IMM, a, 4));
 }
 // Add a signed constant byte offset to the running gep address in x9, using a
@@ -360,50 +360,50 @@ static bool emit_mem_store(MLIR_Context *ctx, MLIR_BlockHandle blk,
 }
 static void emit_cmp_reg(MLIR_Context *ctx, MLIR_BlockHandle blk,
                          uint8_t rn, uint8_t rm, bool sf) {
-    MLIR_AttributeHandle a[3];
-    a[0] = attr_i32(ctx, "rn", rn);
-    a[1] = attr_i32(ctx, "rm", rm);
-    a[2] = attr_b(ctx, "sf", sf);
+    MLIR_NamedAttr a[3];
+    a[0] = attr_i32(ctx, MLIR_KEY_RN, rn);
+    a[1] = attr_i32(ctx, MLIR_KEY_RM, rm);
+    a[2] = attr_b(ctx, MLIR_KEY_SF, sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_CMP_REG, a, 3));
 }
 static void emit_cmp_imm(MLIR_Context *ctx, MLIR_BlockHandle blk,
                          uint8_t rn, uint16_t imm12, bool sf) {
-    MLIR_AttributeHandle a[3];
-    a[0] = attr_i32(ctx, "rn", rn);
-    a[1] = attr_i32(ctx, "imm12", imm12);
-    a[2] = attr_b(ctx, "sf", sf);
+    MLIR_NamedAttr a[3];
+    a[0] = attr_i32(ctx, MLIR_KEY_RN, rn);
+    a[1] = attr_i32(ctx, MLIR_KEY_IMM12, imm12);
+    a[2] = attr_b(ctx, MLIR_KEY_SF, sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_CMP_IMM, a, 3));
 }
 static void emit_cset(MLIR_Context *ctx, MLIR_BlockHandle blk,
                       uint8_t rd, uint8_t cond, bool sf) {
-    MLIR_AttributeHandle a[3];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "cond", cond);
-    a[2] = attr_b(ctx, "sf", sf);
+    MLIR_NamedAttr a[3];
+    a[0] = attr_i32(ctx, MLIR_KEY_RD, rd);
+    a[1] = attr_i32(ctx, MLIR_KEY_COND, cond);
+    a[2] = attr_b(ctx, MLIR_KEY_SF, sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_CSET, a, 3));
 }
 static void emit_csel(MLIR_Context *ctx, MLIR_BlockHandle blk,
                       uint8_t rd, uint8_t rn, uint8_t rm, uint8_t cond, bool sf) {
-    MLIR_AttributeHandle a[5];
-    a[0] = attr_i32(ctx, "rd", rd);
-    a[1] = attr_i32(ctx, "rn", rn);
-    a[2] = attr_i32(ctx, "rm", rm);
-    a[3] = attr_i32(ctx, "cond", cond);
-    a[4] = attr_b(ctx, "sf", sf);
+    MLIR_NamedAttr a[5];
+    a[0] = attr_i32(ctx, MLIR_KEY_RD, rd);
+    a[1] = attr_i32(ctx, MLIR_KEY_RN, rn);
+    a[2] = attr_i32(ctx, MLIR_KEY_RM, rm);
+    a[3] = attr_i32(ctx, MLIR_KEY_COND, cond);
+    a[4] = attr_b(ctx, MLIR_KEY_SF, sf);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_CSEL, a, 5));
 }
 static void emit_prologue(MLIR_Context *ctx, MLIR_BlockHandle blk, uint32_t fs) {
-    MLIR_AttributeHandle a[1];
-    a[0] = attr_i32(ctx, "frame_size", (int32_t)fs);
+    MLIR_NamedAttr a[1];
+    a[0] = attr_i32(ctx, MLIR_KEY_FRAME_SIZE, (int32_t)fs);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_PROLOGUE, a, 1));
 }
 static void emit_epilogue(MLIR_Context *ctx, MLIR_BlockHandle blk, uint32_t fs) {
-    MLIR_AttributeHandle a[1];
-    a[0] = attr_i32(ctx, "frame_size", (int32_t)fs);
+    MLIR_NamedAttr a[1];
+    a[0] = attr_i32(ctx, MLIR_KEY_FRAME_SIZE, (int32_t)fs);
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_EPILOGUE, a, 1));
 }
 static MLIR_OpHandle build_branch_op(MLIR_Context *ctx, MLIR_OpType t,
-                                     MLIR_AttributeHandle *attrs, size_t na,
+                                     MLIR_NamedAttr *attrs, size_t na,
                                      MLIR_BlockHandle target) {
     MLIR_BlockHandle succs[1] = { target };
     MLIR_ValueHandle *succ_ops[1] = { NULL };
@@ -421,24 +421,24 @@ static void emit_b(MLIR_Context *ctx, MLIR_BlockHandle blk,
 }
 static void emit_bcond(MLIR_Context *ctx, MLIR_BlockHandle blk,
                        uint8_t cond, MLIR_BlockHandle target) {
-    MLIR_AttributeHandle a[1];
-    a[0] = attr_i32(ctx, "cond", cond);
+    MLIR_NamedAttr a[1];
+    a[0] = attr_i32(ctx, MLIR_KEY_COND, cond);
     MLIR_AppendBlockOp(ctx, blk,
         build_branch_op(ctx, OP_TYPE_AARCH64_B_COND, a, 1, target));
 }
 static void emit_cbnz(MLIR_Context *ctx, MLIR_BlockHandle blk,
                       uint8_t rt, bool sf, MLIR_BlockHandle target) {
-    MLIR_AttributeHandle a[2];
-    a[0] = attr_i32(ctx, "rt", rt);
-    a[1] = attr_b(ctx, "sf", sf);
+    MLIR_NamedAttr a[2];
+    a[0] = attr_i32(ctx, MLIR_KEY_RT, rt);
+    a[1] = attr_b(ctx, MLIR_KEY_SF, sf);
     MLIR_AppendBlockOp(ctx, blk,
         build_branch_op(ctx, OP_TYPE_AARCH64_CBNZ, a, 2, target));
 }
 static void emit_cbz(MLIR_Context *ctx, MLIR_BlockHandle blk,
                      uint8_t rt, bool sf, MLIR_BlockHandle target) {
-    MLIR_AttributeHandle a[2];
-    a[0] = attr_i32(ctx, "rt", rt);
-    a[1] = attr_b(ctx, "sf", sf);
+    MLIR_NamedAttr a[2];
+    a[0] = attr_i32(ctx, MLIR_KEY_RT, rt);
+    a[1] = attr_b(ctx, MLIR_KEY_SF, sf);
     MLIR_AppendBlockOp(ctx, blk,
         build_branch_op(ctx, OP_TYPE_AARCH64_CBZ, a, 2, target));
 }
@@ -559,7 +559,7 @@ static bool memfuse_match(MLIR_Context *ctx, MLIR_ValueHandle P,
 static bool is_linmem_base_addressof(MLIR_Context *ctx, MLIR_OpHandle op) {
     if (op == MLIR_INVALID_HANDLE) return false;
     if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_MLIR_ADDRESSOF) return false;
-    MLIR_AttributeHandle ga = MLIR_GetOpAttributeByName(ctx, op, "global_name");
+    MLIR_AttributeHandle ga = MLIR_GetOpAttr(ctx, op, MLIR_KEY_GLOBAL_NAME);
     if (ga == MLIR_INVALID_HANDLE) return false;
     string g = MLIR_GetAttributeAsString(ctx, ga);
     if (g.size > 0 && g.str[0] == '@') { g.str++; g.size--; }
@@ -732,9 +732,9 @@ bool const_int_val(MLIR_Context *ctx, MLIR_OpHandle op,
     if (MLIR_GetOpNumResults(ctx, op) != 1) return false;
     MLIR_ValueHandle res = MLIR_GetOpResult(ctx, op, 0);
     if (fp_width(ctx, res) != 0) return false;
-    MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(ctx, op, "value");
+    MLIR_AttributeHandle va = MLIR_GetOpAttr(ctx, op, MLIR_KEY_VALUE);
     if (va == MLIR_INVALID_HANDLE) return false;
-    *val = MLIR_GetAttributeInteger(va);
+    *val = MLIR_GetAttributeInteger(ctx, va);
     *is64 = type_is_gp64(ctx, res) ? 1 : 0;
     return true;
 }
@@ -823,7 +823,7 @@ static bool gfuse_match(MLIR_Context *ctx, GlobalMap *gm, SlotMap *uc,
     MLIR_OpHandle d = MLIR_GetValueDefiningOp(ctx, ptr);
     if (d == MLIR_INVALID_HANDLE) return false;
     if (MLIR_GetOpType(ctx, d) != OP_TYPE_LLVM_MLIR_ADDRESSOF) return false;
-    MLIR_AttributeHandle ga = MLIR_GetOpAttributeByName(ctx, d, "global_name");
+    MLIR_AttributeHandle ga = MLIR_GetOpAttr(ctx, d, MLIR_KEY_GLOBAL_NAME);
     if (ga == MLIR_INVALID_HANDLE) return false;
     string gnm = MLIR_GetAttributeAsString(ctx, ga);
     if (gnm.size > 0 && gnm.str[0] == '@') { gnm.str++; gnm.size--; }
@@ -886,24 +886,24 @@ static void emit_mov_reg(MLIR_Context *ctx, MLIR_BlockHandle blk,
 // UXTW/SXTW are 2-register (rd,rn); SXTB/SXTH take sf to pick Wd/Xd.
 static void emit_uxtw(MLIR_Context *ctx, MLIR_BlockHandle blk,
                       uint8_t rd, uint8_t rn) {
-    MLIR_AttributeHandle a[2] = { attr_i32(ctx, "rd", rd), attr_i32(ctx, "rn", rn) };
+    MLIR_NamedAttr a[2] = { attr_i32(ctx, MLIR_KEY_RD, rd), attr_i32(ctx, MLIR_KEY_RN, rn) };
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_UXTW, a, 2));
 }
 static void emit_sxtw(MLIR_Context *ctx, MLIR_BlockHandle blk,
                       uint8_t rd, uint8_t rn) {
-    MLIR_AttributeHandle a[2] = { attr_i32(ctx, "rd", rd), attr_i32(ctx, "rn", rn) };
+    MLIR_NamedAttr a[2] = { attr_i32(ctx, MLIR_KEY_RD, rd), attr_i32(ctx, MLIR_KEY_RN, rn) };
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_SXTW, a, 2));
 }
 static void emit_sxtb(MLIR_Context *ctx, MLIR_BlockHandle blk,
                       uint8_t rd, uint8_t rn, bool sf) {
-    MLIR_AttributeHandle a[3] = { attr_i32(ctx, "rd", rd), attr_i32(ctx, "rn", rn),
-                                  attr_b(ctx, "sf", sf) };
+    MLIR_NamedAttr a[3] = { attr_i32(ctx, MLIR_KEY_RD, rd), attr_i32(ctx, MLIR_KEY_RN, rn),
+                                  attr_b(ctx, MLIR_KEY_SF, sf) };
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_SXTB, a, 3));
 }
 static void emit_sxth(MLIR_Context *ctx, MLIR_BlockHandle blk,
                       uint8_t rd, uint8_t rn, bool sf) {
-    MLIR_AttributeHandle a[3] = { attr_i32(ctx, "rd", rd), attr_i32(ctx, "rn", rn),
-                                  attr_b(ctx, "sf", sf) };
+    MLIR_NamedAttr a[3] = { attr_i32(ctx, MLIR_KEY_RD, rd), attr_i32(ctx, MLIR_KEY_RN, rn),
+                                  attr_b(ctx, MLIR_KEY_SF, sf) };
     MLIR_AppendBlockOp(ctx, blk, build_op(ctx, OP_TYPE_AARCH64_SXTH, a, 3));
 }
 
@@ -1292,7 +1292,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
 
     switch (ty) {
     case OP_TYPE_LLVM_MLIR_CONSTANT: {
-        MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(ctx, op, "value");
+        MLIR_AttributeHandle va = MLIR_GetOpAttr(ctx, op, MLIR_KEY_VALUE);
         if (va == MLIR_INVALID_HANDLE || MLIR_GetOpNumResults(ctx, op) != 1)
             LFAIL("llvm->aarch64: malformed llvm.mlir.constant\n");
         MLIR_ValueHandle res = MLIR_GetOpResult(ctx, op, 0);
@@ -1302,7 +1302,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         if (!fw) return;
         uint8_t rd = def_val(L, res, 9);
         // Float constant: materialise the IEEE bit pattern into a GP slot.
-        double d = MLIR_GetAttributeFloat(va);
+        double d = MLIR_GetAttributeFloat(ctx, va);
         uint64_t bits = 0;
         if (fw == 32) { float f = (float)d; uint32_t b32;
                         memcpy(&b32, &f, 4); bits = b32; }
@@ -1494,13 +1494,13 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
 
     case OP_TYPE_LLVM_ICMP: {
         MLIR_ValueHandle res = MLIR_GetOpResult(ctx, op, 0);
-        MLIR_AttributeHandle pa = MLIR_GetOpAttributeByName(ctx, op, "predicate");
+        MLIR_AttributeHandle pa = MLIR_GetOpAttr(ctx, op, MLIR_KEY_PREDICATE);
         if (pa == MLIR_INVALID_HANDLE)
             LFAIL("llvm->aarch64: llvm.icmp without predicate\n");
-        int cond = icmp_pred_to_cond(MLIR_GetAttributeInteger(pa));
+        int cond = icmp_pred_to_cond(MLIR_GetAttributeInteger(ctx, pa));
         if (cond < 0)
             LFAIL("llvm->aarch64: unsupported icmp predicate %lld\n",
-                  (long long)MLIR_GetAttributeInteger(pa));
+                  (long long)MLIR_GetAttributeInteger(ctx, pa));
         bool sf = type_is_gp64(ctx, MLIR_GetOpOperand(ctx, op, 0));
         uint8_t r0 = use_val(L, MLIR_GetOpOperand(ctx, op, 0), 9);
         if (!L->ok) return;
@@ -1546,13 +1546,13 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
     }
 
     case OP_TYPE_LLVM_CALL: {
-        MLIR_AttributeHandle callee = MLIR_GetOpAttributeByName(ctx, op, "callee");
+        MLIR_AttributeHandle callee = MLIR_GetOpAttr(ctx, op, MLIR_KEY_CALLEE);
         bool is_indirect = (callee == MLIR_INVALID_HANDLE);
-        MLIR_AttributeHandle vct = MLIR_GetOpAttributeByName(ctx, op, "var_callee_type");
+        MLIR_AttributeHandle vct = MLIR_GetOpAttr(ctx, op, MLIR_KEY_VAR_CALLEE_TYPE);
         bool is_variadic = false;
         size_t n_fixed = 0;
         if (vct != MLIR_INVALID_HANDLE) {
-            MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(vct);
+            MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(ctx, vct);
             if (MLIR_GetTypeFunctionIsVarArg(ctx, ft)) {
                 is_variadic = true;
                 n_fixed = MLIR_GetTypeFunctionNumInputs(ctx, ft);
@@ -1709,11 +1709,11 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
     case OP_TYPE_LLVM_GEP: {
         MLIR_ValueHandle res  = MLIR_GetOpResult(ctx, op, 0);
         MLIR_ValueHandle base = MLIR_GetOpOperand(ctx, op, 0);
-        MLIR_AttributeHandle eta = MLIR_GetOpAttributeByName(ctx, op, "elem_type");
-        MLIR_AttributeHandle ria = MLIR_GetOpAttributeByName(ctx, op, "rawConstantIndices");
+        MLIR_AttributeHandle eta = MLIR_GetOpAttr(ctx, op, MLIR_KEY_ELEM_TYPE);
+        MLIR_AttributeHandle ria = MLIR_GetOpAttr(ctx, op, MLIR_KEY_RAW_CONSTANT_INDICES);
         if (eta == MLIR_INVALID_HANDLE || ria == MLIR_INVALID_HANDLE)
             LFAIL("llvm->aarch64: getelementptr missing elem_type/indices\n");
-        MLIR_TypeHandle elem_ty = MLIR_GetAttributeTypeValue(eta);
+        MLIR_TypeHandle elem_ty = MLIR_GetAttributeTypeValue(ctx, eta);
         int32_t cidx[64];
         size_t n_idx = parse_i32_array(MLIR_GetAttributeAsString(ctx, ria),
                                        cidx, 64);
@@ -1948,7 +1948,7 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
     case OP_TYPE_LLVM_MLIR_ADDRESSOF: {
         // Materialise the address of a module-level global: ADRP+ADD against
         // the native data section, offset by the global's slot.
-        MLIR_AttributeHandle ga = MLIR_GetOpAttributeByName(ctx, op, "global_name");
+        MLIR_AttributeHandle ga = MLIR_GetOpAttr(ctx, op, MLIR_KEY_GLOBAL_NAME);
         if (ga == MLIR_INVALID_HANDLE)
             LFAIL("llvm->aarch64: addressof missing global_name\n");
         string gnm = MLIR_GetAttributeAsString(ctx, ga);
@@ -2009,10 +2009,10 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
     }
 
     case OP_TYPE_LLVM_FCMP: {
-        MLIR_AttributeHandle pa = MLIR_GetOpAttributeByName(ctx, op, "predicate");
+        MLIR_AttributeHandle pa = MLIR_GetOpAttr(ctx, op, MLIR_KEY_PREDICATE);
         if (pa == MLIR_INVALID_HANDLE)
             LFAIL("llvm->aarch64: fcmp missing predicate\n");
-        int cond = fcmp_pred_to_cond(MLIR_GetAttributeInteger(pa));
+        int cond = fcmp_pred_to_cond(MLIR_GetAttributeInteger(ctx, pa));
         if (cond < 0)
             LFAIL("llvm->aarch64: unsupported fcmp predicate\n");
         int fw = fp_width(ctx, MLIR_GetOpOperand(ctx, op, 0));
@@ -2217,9 +2217,9 @@ static bool collect_allocas(MLIR_Context *ctx, SlotMap *am,
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, block, i);
         if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_ALLOCA &&
             MLIR_GetOpNumResults(ctx, op) == 1) {
-            MLIR_AttributeHandle eta = MLIR_GetOpAttributeByName(ctx, op, "elem_type");
+            MLIR_AttributeHandle eta = MLIR_GetOpAttr(ctx, op, MLIR_KEY_ELEM_TYPE);
             if (eta == MLIR_INVALID_HANDLE) return false;
-            MLIR_TypeHandle et = MLIR_GetAttributeTypeValue(eta);
+            MLIR_TypeHandle et = MLIR_GetAttributeTypeValue(ctx, eta);
             unsigned esz = a64_type_size(ctx, et);
             if (esz == 0) return false;
             int64_t cnt = 1;
@@ -2228,8 +2228,8 @@ static bool collect_allocas(MLIR_Context *ctx, SlotMap *am,
                 if (cd == MLIR_INVALID_HANDLE ||
                     MLIR_GetOpType(ctx, cd) != OP_TYPE_LLVM_MLIR_CONSTANT)
                     return false;
-                cnt = MLIR_GetAttributeInteger(
-                          MLIR_GetOpAttributeByName(ctx, cd, "value"));
+                cnt = MLIR_GetAttributeInteger(ctx, 
+                          MLIR_GetOpAttr(ctx, cd, MLIR_KEY_VALUE));
             }
             unsigned al = a64_type_align(ctx, et);
             if (al < 8) al = 8;
@@ -2288,15 +2288,15 @@ static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
         if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_MLIR_GLOBAL) continue;
 
-        MLIR_AttributeHandle na = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
-        MLIR_AttributeHandle ta = MLIR_GetOpAttributeByName(ctx, op, "global_type");
+        MLIR_AttributeHandle na = MLIR_GetOpAttr(ctx, op, MLIR_KEY_SYM_NAME);
+        MLIR_AttributeHandle ta = MLIR_GetOpAttr(ctx, op, MLIR_KEY_GLOBAL_TYPE);
         if (na == MLIR_INVALID_HANDLE || ta == MLIR_INVALID_HANDLE) {
             free(blob); free(pend); return false;
         }
-        string name = MLIR_GetAttributeString(na);
-        unsigned sz = a64_type_size(ctx, MLIR_GetAttributeTypeValue(ta));
+        string name = MLIR_GetAttributeString(ctx, na);
+        unsigned sz = a64_type_size(ctx, MLIR_GetAttributeTypeValue(ctx, ta));
         // An empty struct (GNU C) still gets one byte, as an object of its own.
-        if (sz == 0 && llvm_type_is_empty(ctx, MLIR_GetAttributeTypeValue(ta), 8)) sz = 1;
+        if (sz == 0 && llvm_type_is_empty(ctx, MLIR_GetAttributeTypeValue(ctx, ta), 8)) sz = 1;
         if (sz == 0) { free(blob); free(pend); return false; }
 
         uint32_t off = (blen + 7u) & ~7u;
@@ -2311,20 +2311,20 @@ static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
         memset(blob + blen, 0, off - blen);   // alignment padding
         memset(blob + off, 0, sz);
 
-        MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(ctx, op, "value");
+        MLIR_AttributeHandle va = MLIR_GetOpAttr(ctx, op, MLIR_KEY_VALUE);
         if (va != MLIR_INVALID_HANDLE) {
-            MLIR_AttrKind vk = MLIR_GetAttributeKind(va);
+            MLIR_AttrKind vk = MLIR_GetAttributeKind(ctx, va);
             if (vk == MLIR_ATTR_KIND_STRING) {
                 string s = MLIR_GetAttributeAsString(ctx, va);
                 size_t n = s.size < sz ? s.size : sz;
                 memcpy(blob + off, s.str, n);
             } else if (vk == MLIR_ATTR_KIND_INTEGER ||
                        vk == MLIR_ATTR_KIND_BOOL) {
-                uint64_t v = (uint64_t)MLIR_GetAttributeInteger(va);
+                uint64_t v = (uint64_t)MLIR_GetAttributeInteger(ctx, va);
                 for (unsigned b = 0; b < sz && b < 8; b++)
                     blob[off + b] = (uint8_t)(v >> (8 * b));
             } else if (vk == MLIR_ATTR_KIND_FLOAT) {
-                double d = MLIR_GetAttributeFloat(va);
+                double d = MLIR_GetAttributeFloat(ctx, va);
                 uint64_t bits = 0;
                 if (sz == 4) { float f = (float)d; uint32_t b32;
                                memcpy(&b32, &f, 4); bits = b32; }
@@ -2335,7 +2335,7 @@ static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
             } else {
                 free(blob); free(pend); return false;
             }
-        } else if (llvm_global_init_bytes(ctx, op, MLIR_GetAttributeTypeValue(ta), 8,
+        } else if (llvm_global_init_bytes(ctx, op, MLIR_GetAttributeTypeValue(ctx, ta), 8,
                                           blob + off, sz)) {
             // Constant aggregate initializer (llvm.insertvalue chain).
         } else if (MLIR_GetOpNumRegions(ctx, op) > 0 &&
@@ -2350,7 +2350,7 @@ static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
                 MLIR_OpType opn_ty = MLIR_GetOpType(ctx, bop);
                 if (opn_ty == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
                     MLIR_AttributeHandle ga =
-                        MLIR_GetOpAttributeByName(ctx, bop, "global_name");
+                        MLIR_GetOpAttr(ctx, bop, MLIR_KEY_GLOBAL_NAME);
                     if (ga == MLIR_INVALID_HANDLE) { free(blob); free(pend); return false; }
                     string ts = MLIR_GetAttributeAsString(ctx, ga);
                     if (ts.size && ts.str[0] == '@') { ts.str++; ts.size--; }
@@ -2631,10 +2631,10 @@ static RegTarget a64_regtarget(SlotMap *memfuse, SlotMap *memspine, SlotMap *shi
 #define A64_SLOTCACHE_CAP 32
 typedef struct { int32_t off; uint8_t reg; uint8_t width; } A64SlotReg;
 
-static int a64_attr_i(MLIR_Context *ctx, MLIR_OpHandle op, const char *name, int32_t *out) {
-    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
+static int a64_attr_i(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key, int32_t *out) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, op, key);
     if (a == MLIR_INVALID_HANDLE) return 0;
-    *out = (int32_t)MLIR_GetAttributeInteger(a);
+    *out = (int32_t)MLIR_GetAttributeInteger(ctx, a);
     return 1;
 }
 
@@ -2709,8 +2709,8 @@ static void peephole_block(MLIR_Context *ctx, MLIR_BlockHandle blk,
         case OP_TYPE_AARCH64_LDRB_IMM: {
             int32_t rn, rt, off;
             uint8_t w = a64_ldst_width(t);
-            if (a64_attr_i(ctx, op, "rn", &rn) && rn == 31 &&
-                a64_attr_i(ctx, op, "rt", &rt) && a64_attr_i(ctx, op, "off_bytes", &off)) {
+            if (a64_attr_i(ctx, op, MLIR_KEY_RN, &rn) && rn == 31 &&
+                a64_attr_i(ctx, op, MLIR_KEY_RT, &rt) && a64_attr_i(ctx, op, MLIR_KEY_OFF_BYTES, &off)) {
                 int idx = a64sc_find(cache, nc, off);
                 if (idx >= 0 && cache[idx].width == w &&
                     cache[idx].reg == (uint8_t)rt) {
@@ -2730,7 +2730,7 @@ static void peephole_block(MLIR_Context *ctx, MLIR_BlockHandle blk,
                 }
                 a64sc_kill_reg(cache, &nc, (uint8_t)rt);
                 a64sc_set(cache, &nc, off, (uint8_t)rt, w);
-            } else if (a64_attr_i(ctx, op, "rt", &rt)) {
+            } else if (a64_attr_i(ctx, op, MLIR_KEY_RT, &rt)) {
                 a64sc_kill_reg(cache, &nc, (uint8_t)rt);
             } else {
                 nc = 0;
@@ -2741,8 +2741,8 @@ static void peephole_block(MLIR_Context *ctx, MLIR_BlockHandle blk,
         case OP_TYPE_AARCH64_STR_W:
         case OP_TYPE_AARCH64_STRB_IMM: {
             int32_t rn, rt, off;
-            if (a64_attr_i(ctx, op, "rn", &rn) && rn == 31 &&
-                a64_attr_i(ctx, op, "rt", &rt) && a64_attr_i(ctx, op, "off_bytes", &off)) {
+            if (a64_attr_i(ctx, op, MLIR_KEY_RN, &rn) && rn == 31 &&
+                a64_attr_i(ctx, op, MLIR_KEY_RT, &rt) && a64_attr_i(ctx, op, MLIR_KEY_OFF_BYTES, &off)) {
                 a64sc_set(cache, &nc, off, (uint8_t)rt, a64_ldst_width(t));
             }
             // non-sp store (pointer store) cannot alias spill slots; no def.
@@ -2752,7 +2752,7 @@ static void peephole_block(MLIR_Context *ctx, MLIR_BlockHandle blk,
         case OP_TYPE_AARCH64_LDR_W_REG:
         case OP_TYPE_AARCH64_LDRB_REG: {
             int32_t rt;                          // register-offset load: defs rt,
-            if (a64_attr_i(ctx, op, "rt", &rt))       // unknown slot => just kill rt
+            if (a64_attr_i(ctx, op, MLIR_KEY_RT, &rt))       // unknown slot => just kill rt
                 a64sc_kill_reg(cache, &nc, (uint8_t)rt);
             else nc = 0;
             break;
@@ -2766,20 +2766,20 @@ static void peephole_block(MLIR_Context *ctx, MLIR_BlockHandle blk,
             // This `and` sits on the hot lexer load->compare dependency chain.
             int32_t rd, rn, w;
             if (!getenv("TINYC_NO_MASK_ELIDE") && i > 0 &&
-                a64_attr_i(ctx, op, "rd", &rd) && a64_attr_i(ctx, op, "rn", &rn) &&
-                rd == rn && a64_attr_i(ctx, op, "w", &w) && w >= 8) {
+                a64_attr_i(ctx, op, MLIR_KEY_RD, &rd) && a64_attr_i(ctx, op, MLIR_KEY_RN, &rn) &&
+                rd == rn && a64_attr_i(ctx, op, MLIR_KEY_W, &w) && w >= 8) {
                 MLIR_OpHandle prev = MLIR_GetBlockOp(ctx, blk, i - 1);
                 MLIR_OpType pt = MLIR_GetOpType(ctx, prev);
                 int32_t prt;
                 if ((pt == OP_TYPE_AARCH64_LDRB_IMM ||
                      pt == OP_TYPE_AARCH64_LDRB_REG) &&
-                    a64_attr_i(ctx, prev, "rt", &prt) && prt == rd) {
+                    a64_attr_i(ctx, prev, MLIR_KEY_RT, &prt) && prt == rd) {
                     erase[nerase++] = op;   // value already byte-zero-extended
                     break;                  // Rd unchanged; cache stays valid
                 }
             }
             int32_t krd;
-            if (a64_attr_i(ctx, op, "rd", &krd)) {
+            if (a64_attr_i(ctx, op, MLIR_KEY_RD, &krd)) {
                 // Writing sp (rd==31) moves the [sp,#off] frame base: every
                 // sp-relative cache entry is invalidated (e.g. the >8-arg call
                 // path does `sub sp,#area; str r,[sp,#k]; bl; add sp,#area`,
@@ -2805,7 +2805,7 @@ static void peephole_block(MLIR_Context *ctx, MLIR_BlockHandle blk,
         case OP_TYPE_AARCH64_SXTB: case OP_TYPE_AARCH64_SXTH:
         case OP_TYPE_AARCH64_SXTW: case OP_TYPE_AARCH64_UXTW: {
             int32_t rd;
-            if (a64_attr_i(ctx, op, "rd", &rd)) a64sc_kill_reg(cache, &nc, (uint8_t)rd);
+            if (a64_attr_i(ctx, op, MLIR_KEY_RD, &rd)) a64sc_kill_reg(cache, &nc, (uint8_t)rd);
             else nc = 0;
             break;
         }
@@ -2914,9 +2914,9 @@ static FusePlan analyze_cond_fusion(LowerCtx *L, MLIR_OpHandle term,
         if (D == MLIR_INVALID_HANDLE) break;          // block arg / cross-block
         MLIR_OpType dn_ty = MLIR_GetOpType(L->ctx, D);
         if (dn_ty == OP_TYPE_LLVM_ICMP) {
-            MLIR_AttributeHandle pa = MLIR_GetOpAttributeByName(L->ctx, D, "predicate");
+            MLIR_AttributeHandle pa = MLIR_GetOpAttr(L->ctx, D, MLIR_KEY_PREDICATE);
             if (pa == MLIR_INVALID_HANDLE) break;
-            int64_t pred = MLIR_GetAttributeInteger(pa);
+            int64_t pred = MLIR_GetAttributeInteger(L->ctx, pa);
             bool z1 = operand_is_const_val(L, MLIR_GetOpOperand(L->ctx, D, 1), 0);
             bool z0 = operand_is_const_val(L, MLIR_GetOpOperand(L->ctx, D, 0), 0);
             if ((pred == 0 || pred == 1) && (z0 || z1)) {
@@ -3463,8 +3463,8 @@ static MLIR_OpHandle select_func_cfg(MLIR_Context *ctx, MLIR_OpHandle fn,
 
     peephole_region(ctx, out_reg, slot_bytes);
 
-    MLIR_AttributeHandle attrs[1];
-    attrs[0] = attr_s(ctx, "sym_name", sym.str, sym.size);
+    MLIR_NamedAttr attrs[1];
+    attrs[0] = attr_s(ctx, MLIR_KEY_SYM_NAME, sym.str, sym.size);
     MLIR_RegionHandle regs[1] = { out_reg };
     return MLIR_CreateOp(ctx, OP_TYPE_AARCH64_FUNC,
         attrs, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
@@ -3559,8 +3559,8 @@ static MLIR_OpHandle select_func(MLIR_Context *ctx, MLIR_OpHandle fn,
 
     peephole_region(ctx, out_reg, slot_bytes);
 
-    MLIR_AttributeHandle attrs[1];
-    attrs[0] = attr_s(ctx, "sym_name", sym.str, sym.size);
+    MLIR_NamedAttr attrs[1];
+    attrs[0] = attr_s(ctx, MLIR_KEY_SYM_NAME, sym.str, sym.size);
     MLIR_RegionHandle regs[1] = { out_reg };
     return MLIR_CreateOp(ctx, OP_TYPE_AARCH64_FUNC,
         attrs, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
@@ -3676,9 +3676,9 @@ static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name,
     emit_bl(ctx, blk, main_name);
     emit_bl(ctx, blk, str_lit("_exit"));
 
-    MLIR_AttributeHandle attrs[2];
-    attrs[0] = attr_s(ctx, "sym_name", "_start", 6);
-    attrs[1] = attr_b(ctx, "exported", true);
+    MLIR_NamedAttr attrs[2];
+    attrs[0] = attr_s(ctx, MLIR_KEY_SYM_NAME, "_start", 6);
+    attrs[1] = attr_b(ctx, MLIR_KEY_EXPORTED, true);
     MLIR_RegionHandle regs[1] = { reg };
     return MLIR_CreateOp(ctx, OP_TYPE_AARCH64_FUNC,
         attrs, 2, NULL, 0, NULL, 0, NULL, 0, regs, 1,
@@ -3719,9 +3719,9 @@ static bool check_llvm_only_block(MLIR_Context *ctx, MLIR_BlockHandle block,
             string where = str_lit("<module>");
             if (owner != MLIR_INVALID_HANDLE) {
                 MLIR_AttributeHandle sa =
-                    MLIR_GetOpAttributeByName(ctx, owner, "sym_name");
+                    MLIR_GetOpAttr(ctx, owner, MLIR_KEY_SYM_NAME);
                 if (sa != MLIR_INVALID_HANDLE)
-                    where = MLIR_GetAttributeString(sa);
+                    where = MLIR_GetAttributeString(ctx, sa);
             }
             fprintf(stderr,
                     "llvm->aarch64: op '%.*s' in '%.*s' is not in the LLVM "
@@ -3779,9 +3779,9 @@ MLIR_OpHandle mlir_llvm_to_aarch64(MLIR_Context *ctx,
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
         if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_FUNC) continue;
-        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
+        MLIR_AttributeHandle sa = MLIR_GetOpAttr(ctx, op, MLIR_KEY_SYM_NAME);
         string sym = (sa != MLIR_INVALID_HANDLE)
-            ? MLIR_GetAttributeString(sa) : (string){0};
+            ? MLIR_GetAttributeString(ctx, sa) : (string){0};
         if (!func_has_body(ctx, op)) {
             // Most declarations (malloc/free, libSystem imports) are skipped —
             // they resolve to imports. macOS has no stable raw-syscall ABI:
@@ -3813,9 +3813,9 @@ MLIR_OpHandle mlir_llvm_to_aarch64(MLIR_Context *ctx,
     // Emit the global data blob as one data_init record (the encoder copies
     // these bytes into the __linmem_template data section).
     if (gblob_len > 0) {
-        MLIR_AttributeHandle a[2];
-        a[0] = attr_i32(ctx, "offset", 0);
-        a[1] = attr_s(ctx, "init_data", (const char *)gblob, gblob_len);
+        MLIR_NamedAttr a[2];
+        a[0] = attr_i32(ctx, MLIR_KEY_OFFSET, 0);
+        a[1] = attr_s(ctx, MLIR_KEY_INIT_DATA, (const char *)gblob, gblob_len);
         MLIR_AppendBlockOp(ctx, out_body,
             build_op(ctx, OP_TYPE_AARCH64_DATA_INIT, a, 2));
     }
@@ -3882,14 +3882,14 @@ LlvmSelState *mlir_llvm_sel_begin(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
         if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_FUNC) continue;
         if (!func_has_body(ctx, op)) continue;  // skip declarations (malloc/free).
-        MLIR_AttributeHandle sa = MLIR_GetOpAttributeByName(ctx, op, "sym_name");
+        MLIR_AttributeHandle sa = MLIR_GetOpAttr(ctx, op, MLIR_KEY_SYM_NAME);
         if (sa == MLIR_INVALID_HANDLE) {
             fprintf(stderr, "llvm->aarch64: llvm.func without sym_name\n");
             free(st->funcs); free(st->syms);
             free(st->gm.e); free(st->gblob); free(st->grelocs); free(st);
             return NULL;
         }
-        string sym = MLIR_GetAttributeString(sa);
+        string sym = MLIR_GetAttributeString(ctx, sa);
         if (sym.size == 4 && memcmp(sym.str, "main", 4) == 0) st->saw_main = true;
         st->funcs[st->n_funcs] = op;
         st->syms[st->n_funcs]  = sym;

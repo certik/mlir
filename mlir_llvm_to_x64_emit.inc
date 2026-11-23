@@ -2,9 +2,9 @@
 // backend. Included at the end of mlir_llvm_to_x64.c (shares its statics).
 
 // --- small attribute helpers ----------------------------------------------
-static string attr_str(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
-    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeString(a) : (string){0};
+static string attr_str(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, op, key);
+    return a ? MLIR_GetAttributeString(ctx, a) : (string){0};
 }
 static bool str_eqz(string s, const char *c) {
     size_t l = strlen(c);
@@ -309,8 +309,8 @@ static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, MLIR_OpType ty) {
         MLIR_ValueHandle a0 = MLIR_GetOpOperand(ctx, op, 0);
         int is_f32 = (fp_bytes(ctx, a0) == 4);
         int64_t pred = 0;
-        MLIR_AttributeHandle pa = MLIR_GetOpAttributeByName(ctx, op, "predicate");
-        if (pa) pred = MLIR_GetAttributeInteger(pa);
+        MLIR_AttributeHandle pa = MLIR_GetOpAttr(ctx, op, MLIR_KEY_PREDICATE);
+        if (pa) pred = MLIR_GetAttributeInteger(ctx, pa);
         load_val(F, a0, RAX);
         load_val(F, MLIR_GetOpOperand(ctx, op, 1), RCX);
         movq_xmm_gpr(F, 0, RAX);
@@ -385,9 +385,9 @@ static void emit_sysv_call_args(FnCtx *F, MLIR_OpHandle op, size_t arg_base,
     size_t no = MLIR_GetOpNumOperands(F->ctx, op) - arg_base;
     size_t reg_cutoff = 6;
     bool is_vararg_call = false;
-    MLIR_AttributeHandle vct = MLIR_GetOpAttributeByName(F->ctx, op, "var_callee_type");
+    MLIR_AttributeHandle vct = MLIR_GetOpAttr(F->ctx, op, MLIR_KEY_VAR_CALLEE_TYPE);
     if (vct != MLIR_INVALID_HANDLE) {
-        MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(vct);
+        MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(F->ctx, vct);
         if (ft != MLIR_INVALID_HANDLE && MLIR_GetTypeFunctionIsVarArg(F->ctx, ft)) {
             size_t nf = MLIR_GetTypeFunctionNumInputs(F->ctx, ft);
             reg_cutoff = nf < 6 ? nf : 6;
@@ -490,8 +490,8 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         MLIR_ValueHandle a0 = MLIR_GetOpOperand(ctx, op, 0);
         int w = val_w(ctx, a0);
         int64_t pred = 0;
-        MLIR_AttributeHandle pa = MLIR_GetOpAttributeByName(ctx, op, "predicate");
-        if (pa) pred = MLIR_GetAttributeInteger(pa);
+        MLIR_AttributeHandle pa = MLIR_GetOpAttr(ctx, op, MLIR_KEY_PREDICATE);
+        if (pa) pred = MLIR_GetAttributeInteger(ctx, pa);
         load_val(F, a0, RAX);
         load_val(F, MLIR_GetOpOperand(ctx, op, 1), RCX);
         alu_rr(F, 0x39, RAX, RCX, w);             // cmp rax, rcx
@@ -562,10 +562,10 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
     }
     case OP_TYPE_LLVM_GEP: {
         MLIR_ValueHandle r = MLIR_GetOpResult(ctx, op, 0);
-        MLIR_AttributeHandle eta = MLIR_GetOpAttributeByName(ctx, op, "elem_type");
-        MLIR_AttributeHandle ria = MLIR_GetOpAttributeByName(ctx, op, "rawConstantIndices");
+        MLIR_AttributeHandle eta = MLIR_GetOpAttr(ctx, op, MLIR_KEY_ELEM_TYPE);
+        MLIR_AttributeHandle ria = MLIR_GetOpAttr(ctx, op, MLIR_KEY_RAW_CONSTANT_INDICES);
         if (!eta || !ria) { fail(F, "getelementptr missing elem_type/indices", (string){0}); return; }
-        MLIR_TypeHandle elem_ty = MLIR_GetAttributeTypeValue(eta);
+        MLIR_TypeHandle elem_ty = MLIR_GetAttributeTypeValue(ctx, eta);
         int32_t cidx[64];
         size_t n_idx = parse_i32_array(MLIR_GetAttributeAsString(ctx, ria), cidx, 64);
         if (n_idx == 0) { fail(F, "getelementptr with no indices", (string){0}); return; }
@@ -626,8 +626,8 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
     }
     // calls
     case OP_TYPE_LLVM_CALL: case OP_TYPE_FUNC_CALL: {
-        string callee = strip_at(attr_str(ctx, op, "callee"));
-        if (!callee.size) callee = strip_at(attr_str(ctx, op, "callee_name"));
+        string callee = strip_at(attr_str(ctx, op, MLIR_KEY_CALLEE));
+        if (!callee.size) callee = strip_at(attr_str(ctx, op, MLIR_KEY_CALLEE_NAME));
         bool is_indirect = (callee.size == 0);
         if (!is_indirect) {
             size_t no = MLIR_GetOpNumOperands(ctx, op);
@@ -829,10 +829,10 @@ static void x64_assign_slot(FnCtx *F, SlotMap *spill, MLIR_ValueHandle v, int32_
 static unsigned alloca_bytes(MLIR_Context *ctx, MLIR_OpHandle op) {
     // element type size * count; default 8. Uses the shared LP64 layout
     // (x64_type_size), so nested arrays / structs / unions are sized correctly.
-    MLIR_AttributeHandle et = MLIR_GetOpAttributeByName(ctx, op, "elem_type");
+    MLIR_AttributeHandle et = MLIR_GetOpAttr(ctx, op, MLIR_KEY_ELEM_TYPE);
     unsigned esz = 8;
     if (et) {
-        MLIR_TypeHandle t = MLIR_GetAttributeTypeValue(et);
+        MLIR_TypeHandle t = MLIR_GetAttributeTypeValue(ctx, et);
         if (t != MLIR_INVALID_HANDLE) {
             unsigned s = x64_type_size(ctx, t);
             if (s) esz = s;
@@ -843,7 +843,7 @@ static unsigned alloca_bytes(MLIR_Context *ctx, MLIR_OpHandle op) {
 }
 
 static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet *refs) {
-    string name = attr_str(ctx, fn, "sym_name");
+    string name = attr_str(ctx, fn, MLIR_KEY_SYM_NAME);
     char *nm = (char *)malloc(name.size + 1);
     memcpy(nm, name.str, name.size); nm[name.size] = 0;
     bool exported = str_eqz(name, "main");
@@ -1005,19 +1005,19 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
 typedef struct { uint32_t slot_off; uint32_t target_off; } X64PtrReloc;
 typedef struct { uint32_t slot_off; string target; } PendingPtrReloc;
 
-static bool serialize_global_value_attr(MLIR_AttributeHandle va, string name,
+static bool serialize_global_value_attr(MLIR_Context *ctx, MLIR_AttributeHandle va, string name,
                                         Buf *data, uint32_t off, size_t sz) {
-    MLIR_AttrKind vk = MLIR_GetAttributeKind(va);
+    MLIR_AttrKind vk = MLIR_GetAttributeKind(ctx, va);
     if (vk == MLIR_ATTR_KIND_STRING) {
-        string s = MLIR_GetAttributeString(va);
+        string s = MLIR_GetAttributeString(ctx, va);
         if (s.size > sz) s.size = sz;
         memcpy(data->data + off, s.str, s.size);
     } else if (vk == MLIR_ATTR_KIND_INTEGER || vk == MLIR_ATTR_KIND_BOOL) {
-        uint64_t v = (uint64_t)MLIR_GetAttributeInteger(va);
+        uint64_t v = (uint64_t)MLIR_GetAttributeInteger(ctx, va);
         for (size_t b = 0; b < sz; b++)
             data->data[off + b] = (uint8_t)(b < 8 ? (v >> (8 * b)) : 0);
     } else if (vk == MLIR_ATTR_KIND_FLOAT) {
-        double d = MLIR_GetAttributeFloat(va);
+        double d = MLIR_GetAttributeFloat(ctx, va);
         uint64_t bits = 0;
         if (sz == 4) { float f = (float)d; uint32_t b32; memcpy(&b32, &f, 4); bits = b32; }
         else         { memcpy(&bits, &d, 8); }
@@ -1049,16 +1049,16 @@ static bool parse_trivial_ptr_global_init(MLIR_Context *ctx, MLIR_OpHandle op, s
         MLIR_OpType bty = MLIR_GetOpType(ctx, bop);
         if (bty == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
             MLIR_AttributeHandle ga =
-                MLIR_GetOpAttributeByName(ctx, bop, "global_name");
+                MLIR_GetOpAttr(ctx, bop, MLIR_KEY_GLOBAL_NAME);
             if (ga == MLIR_INVALID_HANDLE)
-                ga = MLIR_GetOpAttributeByName(ctx, bop, "value");
+                ga = MLIR_GetOpAttr(ctx, bop, MLIR_KEY_VALUE);
             if (ga == MLIR_INVALID_HANDLE) {
                 fprintf(stderr, "x64: addressof global missing name in '%.*s'\n",
                         (int)name.size, name.str);
                 g_x64_ok = false;
                 return false;
             }
-            target = strip_at(MLIR_GetAttributeString(ga));
+            target = strip_at(MLIR_GetAttributeString(ctx, ga));
         } else if (bty != OP_TYPE_LLVM_MLIR_ZERO &&
                    bty != OP_TYPE_LLVM_MLIR_UNDEF &&
                    bty != OP_TYPE_LLVM_RETURN) {
@@ -1123,7 +1123,7 @@ static bool x64_is_global_op(MLIR_Context *ctx, MLIR_OpHandle op) {
 
 // Bare global name from sym_name (upstream stores `@foo`; strip the `@`).
 static string x64_global_sym_name(MLIR_Context *ctx, MLIR_OpHandle op) {
-    return strip_at(attr_str(ctx, op, "sym_name"));
+    return strip_at(attr_str(ctx, op, MLIR_KEY_SYM_NAME));
 }
 
 // True if `op` is llvm.func (in-tree or upstream FuncOp form).
@@ -1138,7 +1138,7 @@ static bool x64_module_has_func(MLIR_Context *ctx, MLIR_BlockHandle mb, const ch
     for (size_t i = 0; i < no; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
         if (!x64_is_func_op(ctx, op)) continue;
-        if (!str_eqz(attr_str(ctx, op, "sym_name"), name)) continue;
+        if (!str_eqz(attr_str(ctx, op, MLIR_KEY_SYM_NAME), name)) continue;
         if (!require_body) return true;
         if (MLIR_GetOpNumRegions(ctx, op) == 0) return false;
         return MLIR_GetRegionNumBlocks(ctx, MLIR_GetOpRegion(ctx, op, 0)) > 0;
@@ -1170,15 +1170,15 @@ static void x64_register_global_op(MLIR_Context *ctx, MLIR_OpHandle op, GMap *gm
     uint32_t dummy;
     if (gmap_get(gm, name, &dummy)) return;
 
-    MLIR_AttributeHandle gt = MLIR_GetOpAttributeByName(ctx, op, "global_type");
-    MLIR_TypeHandle t = gt ? MLIR_GetAttributeTypeValue(gt) : MLIR_INVALID_HANDLE;
+    MLIR_AttributeHandle gt = MLIR_GetOpAttr(ctx, op, MLIR_KEY_GLOBAL_TYPE);
+    MLIR_TypeHandle t = gt ? MLIR_GetAttributeTypeValue(ctx, gt) : MLIR_INVALID_HANDLE;
     size_t sz = t != MLIR_INVALID_HANDLE ? x64_type_size(ctx, t) : 0;
     // An empty struct (GNU C) still gets one byte, as an object of its own.
     if (sz == 0 && t != MLIR_INVALID_HANDLE && llvm_type_is_empty(ctx, t, 8)) sz = 1;
     uint32_t off = x64_data_begin_global(data, sz);
 
-    MLIR_AttributeHandle va = MLIR_GetOpAttributeByName(ctx, op, "value");
-    if (va) serialize_global_value_attr(va, name, data, off, sz);
+    MLIR_AttributeHandle va = MLIR_GetOpAttr(ctx, op, MLIR_KEY_VALUE);
+    if (va) serialize_global_value_attr(ctx, va, name, data, off, sz);
     else if (t == MLIR_INVALID_HANDLE ||
              !llvm_global_init_bytes(ctx, op, t, 8, data->data + off, (unsigned)sz))
         parse_trivial_ptr_global_init(ctx, op, name, off, sz, pend, pend_cap, n_pend);
@@ -1526,7 +1526,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
             MLIR_OpHandle fn = MLIR_GetBlockOp(ctx, mb, i);
             if (MLIR_GetOpType(ctx, fn) != OP_TYPE_LLVM_FUNC) continue;
             if (MLIR_GetOpNumRegions(ctx, fn) == 0 || MLIR_GetRegionNumBlocks(ctx, MLIR_GetOpRegion(ctx, fn,0)) == 0) continue;
-            string fname = attr_str(ctx, fn, "sym_name");
+            string fname = attr_str(ctx, fn, MLIR_KEY_SYM_NAME);
             bool wanted = false;
             for (size_t k = 0; k < reach.c; k++) if (str_eq(fname, reach.n[k])) { wanted = true; break; }
             if (!wanted) continue;
@@ -1539,8 +1539,8 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
                 for (size_t o = 0; o < nop; o++) {
                     MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, o);
                     if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_CALL || MLIR_GetOpType(ctx, op) == OP_TYPE_FUNC_CALL) {
-                        string cal = strip_at(attr_str(ctx, op, "callee"));
-                        if (!cal.size) cal = strip_at(attr_str(ctx, op, "callee_name"));
+                        string cal = strip_at(attr_str(ctx, op, MLIR_KEY_CALLEE));
+                        if (!cal.size) cal = strip_at(attr_str(ctx, op, MLIR_KEY_CALLEE_NAME));
                         if (cal.size) {
                             if (wasm_lifted && x64_is_wasm_data_sym(cal)) continue;
                             bool known = false;
@@ -1548,9 +1548,9 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
                             if (!known) { sym_add(&reach, cal); grew = true; }
                         }
                     } else if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
-                        MLIR_AttributeHandle ga = MLIR_GetOpAttributeByName(ctx, op, "global_name");
-                        if (ga == MLIR_INVALID_HANDLE) ga = MLIR_GetOpAttributeByName(ctx, op, "value");
-                        string gn = strip_at(ga ? MLIR_GetAttributeString(ga) : (string){0});
+                        MLIR_AttributeHandle ga = MLIR_GetOpAttr(ctx, op, MLIR_KEY_GLOBAL_NAME);
+                        if (ga == MLIR_INVALID_HANDLE) ga = MLIR_GetOpAttr(ctx, op, MLIR_KEY_VALUE);
+                        string gn = strip_at(ga ? MLIR_GetAttributeString(ctx, ga) : (string){0});
                         if (!gn.size) continue;
                         uint32_t dummy;
                         if (wasm_lifted && x64_is_wasm_data_sym(gn)) continue;
@@ -1573,7 +1573,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
         MLIR_OpHandle fn = MLIR_GetBlockOp(ctx, mb, i);
         if (MLIR_GetOpType(ctx, fn) != OP_TYPE_LLVM_FUNC) continue;
         if (MLIR_GetOpNumRegions(ctx, fn) == 0 || MLIR_GetRegionNumBlocks(ctx, MLIR_GetOpRegion(ctx, fn,0)) == 0) continue;
-        string fname = attr_str(ctx, fn, "sym_name");
+        string fname = attr_str(ctx, fn, MLIR_KEY_SYM_NAME);
         bool wanted = false;
         for (size_t k = 0; k < reach.c; k++) if (str_eq(fname, reach.n[k])) { wanted = true; break; }
         if (!wanted) continue;

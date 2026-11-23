@@ -60,8 +60,8 @@ MLIR_OpHandle construct_test_module_full(MLIR_Context *ctx) {
     MLIR_OpHandle module = MLIR_CreateOp(ctx, OP_TYPE_MODULE, NULL, 0, NULL, 0, NULL, 0, NULL, 0, module_regions, 1, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, str_lit(""), -1);
 
     // Function attributes (sym_name)
-    MLIR_AttributeHandle sym_name_attr = MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("example_func"));
-    MLIR_AttributeHandle *func_attrs = arena_new_array(arena, MLIR_AttributeHandle, 1);
+    MLIR_NamedAttr sym_name_attr = MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("example_func")));
+    MLIR_NamedAttr *func_attrs = arena_new_array(arena, MLIR_NamedAttr, 1);
     func_attrs[0] = sym_name_attr;
 
     // Create function region and block
@@ -81,8 +81,8 @@ MLIR_OpHandle construct_test_module_full(MLIR_Context *ctx) {
     MLIR_TypeHandle *const_result_types = arena_new_array(arena, MLIR_TypeHandle, 1);
     const_result_types[0] = i32_type;
 
-    MLIR_AttributeHandle value_attr = MLIR_CreateAttributeInteger(ctx, str_lit("value"), 5, i32_type);
-    MLIR_AttributeHandle *const_attrs = arena_new_array(arena, MLIR_AttributeHandle, 1);
+    MLIR_NamedAttr value_attr = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(ctx, 5, i32_type));
+    MLIR_NamedAttr *const_attrs = arena_new_array(arena, MLIR_NamedAttr, 1);
     const_attrs[0] = value_attr;
 
     MLIR_ValueHandle *const_results = arena_new_array(arena, MLIR_ValueHandle, 1);

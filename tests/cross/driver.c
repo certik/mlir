@@ -49,19 +49,19 @@ static void make_stack_array_attrs(MLIR_Context *ctx, MLIR_TypeHandle i32_ty,
                                    MLIR_AttributeHandle *out_array,
                                    MLIR_AttributeHandle *out_dict) {
     MLIR_AttributeHandle elems[3] = {
-        MLIR_CreateAttributeInteger(ctx, str_lit(""), 11, i32_ty),
-        MLIR_CreateAttributeInteger(ctx, str_lit(""), 22, i32_ty),
-        MLIR_CreateAttributeInteger(ctx, str_lit(""), 33, i32_ty),
+        MLIR_CreateAttributeInteger(ctx, 11, i32_ty),
+        MLIR_CreateAttributeInteger(ctx, 22, i32_ty),
+        MLIR_CreateAttributeInteger(ctx, 33, i32_ty),
     };
-    *out_array = MLIR_CreateAttributeArray(ctx, str_lit("arr"), elems, 3);
+    *out_array = MLIR_CreateAttributeArray(ctx, elems, 3);
     // Keys in sorted order: upstream's DictionaryAttr sorts its entries.
     // The key text also lives in this frame: attribute names are copied too.
     char keys[2] = { 'a', 'b' };
-    MLIR_AttributeHandle entries[2] = {
-        MLIR_CreateAttributeInteger(ctx, (string){ &keys[0], 1 }, 44, i32_ty),
-        MLIR_CreateAttributeInteger(ctx, (string){ &keys[1], 1 }, 55, i32_ty),
+    MLIR_NamedAttr entries[2] = {
+        MLIR_Named(MLIR_InternAttrKey(ctx, (string){ &keys[0], 1 }), MLIR_CreateAttributeInteger(ctx, 44, i32_ty)),
+        MLIR_Named(MLIR_InternAttrKey(ctx, (string){ &keys[1], 1 }), MLIR_CreateAttributeInteger(ctx, 55, i32_ty)),
     };
-    *out_dict = MLIR_CreateAttributeDict(ctx, str_lit("dict"), entries, 2);
+    *out_dict = MLIR_CreateAttributeDict(ctx, entries, 2);
 }
 
 // Overwrite the stack area the previous call used.
@@ -105,15 +105,15 @@ int app_main(void) {
         make_stack_array_attrs(ctx, i32_ty, &arr, &dict);
         clobber_stack();
         print_string(str_lit("array attr from stack buffer:"));
-        for (size_t i = 0; i < MLIR_GetAttributeArraySize(arr); i++) {
-            int64_t v = MLIR_GetAttributeInteger(MLIR_GetAttributeArrayElement(arr, i));
+        for (size_t i = 0; i < MLIR_GetAttributeArraySize(ctx, arr); i++) {
+            int64_t v = MLIR_GetAttributeInteger(ctx, MLIR_GetAttributeArrayElement(ctx, arr, i));
             print_string(format(arena, str_lit(" {}"), v));
         }
         print_string(str_lit("\ndict attr from stack buffer:"));
-        for (size_t i = 0; i < MLIR_GetAttributeDictSize(dict); i++) {
-            MLIR_AttributeHandle e = MLIR_GetAttributeDictElement(dict, i);
-            print_string(format(arena, str_lit(" {}={}"), MLIR_GetAttributeName(e),
-                                MLIR_GetAttributeInteger(e)));
+        for (size_t i = 0; i < MLIR_GetAttributeDictSize(ctx, dict); i++) {
+            MLIR_AttributeHandle e = MLIR_GetAttributeDictElement(ctx, dict, i);
+            print_string(format(arena, str_lit(" {}={}"), MLIR_GetAttrKeyName(ctx, MLIR_GetAttributeDictKey(ctx, dict, i)),
+                                MLIR_GetAttributeInteger(ctx, e)));
         }
         print_string(str_lit("\n"));
     }
@@ -352,9 +352,9 @@ int app_main(void) {
     MLIR_AppendRegionBlock(ctx, func_region, func_block);
 
     // ---- func.func op --------------------------------------------------------
-    MLIR_AttributeHandle sym_name_attr =
-        MLIR_CreateAttributeString(ctx, str_lit("sym_name"), str_lit("add"));
-    MLIR_AttributeHandle *func_attrs = arena_new_array(arena, MLIR_AttributeHandle, 1);
+    MLIR_NamedAttr sym_name_attr =
+        MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("add")));
+    MLIR_NamedAttr *func_attrs = arena_new_array(arena, MLIR_NamedAttr, 1);
     func_attrs[0] = sym_name_attr;
     MLIR_RegionHandle *func_regions = arena_new_array(arena, MLIR_RegionHandle, 1);
     func_regions[0] = func_region;
@@ -438,9 +438,9 @@ int app_main(void) {
         print_string(format(arena, str_lit("diagnostic: count={} warning={} loc={}:{}:{} text={}\n"),
                             (int64_t)cap.count,
                             (int64_t)(cap.severity == MLIR_DIAG_WARNING),
-                            MLIR_GetLocationFileFilename(cap.loc),
-                            (int64_t)MLIR_GetLocationFileLine(cap.loc),
-                            (int64_t)MLIR_GetLocationFileColumn(cap.loc),
+                            MLIR_GetLocationFileFilename(ctx, cap.loc),
+                            (int64_t)MLIR_GetLocationFileLine(ctx, cap.loc),
+                            (int64_t)MLIR_GetLocationFileColumn(ctx, cap.loc),
                             text));
 
         // Contexts are independent: each uniques its own types.
@@ -497,6 +497,35 @@ int app_main(void) {
             MLIR_GetOpType(ctx, mod2) == OP_TYPE_MODULE && MLIR_GetOpType(ctx, module_op) == OP_TYPE_MODULE
                 ? str_lit("yes") : str_lit("no"),
             MLIR_GetOpTypeName(ctx, bm_reg)));
+
+        // Attribute keys (#350): static and dynamic keys, and the op's
+        // attributes by key.
+        MLIR_AttrKey mykey = MLIR_InternAttrKey(ctx, str_lit("test.my_attr"));
+        print_string(format(arena, str_lit("attr keys: static={} dynamic={} again={} name={} miss={}\n"),
+            MLIR_LookupAttrKey(ctx, str_lit("sym_name")) == MLIR_KEY_SYM_NAME &&
+            str_eq(MLIR_GetAttrKeyName(ctx, MLIR_KEY_VALUE), str_lit("value"))
+                ? str_lit("yes") : str_lit("no"),
+            mykey >= MLIR_KEY_COUNT ? str_lit("yes") : str_lit("no"),
+            MLIR_InternAttrKey(ctx, str_lit("test.my_attr")) == mykey ? str_lit("yes") : str_lit("no"),
+            MLIR_GetAttrKeyName(ctx, mykey),
+            MLIR_LookupAttrKey(ctx, str_lit("test.no_such_attr")) == MLIR_KEY_INVALID
+                ? str_lit("yes") : str_lit("no")));
+        MLIR_NamedAttr kattrs[2] = {
+            MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("f"))),
+            MLIR_Named(mykey, MLIR_CreateAttributeInteger(ctx, 7, i32_ty)),
+        };
+        MLIR_OpHandle kop = MLIR_CreateOp(ctx, dyn, kattrs, 2, NULL, 0, NULL, 0,
+                                          NULL, 0, NULL, 0, MLIR_INVALID_HANDLE,
+                                          MLIR_INVALID_HANDLE, str_lit(""), -1);
+        int64_t before = MLIR_GetAttributeInteger(ctx, MLIR_GetOpAttr(ctx, kop, mykey));
+        MLIR_SetOpAttr(ctx, kop, mykey, MLIR_CreateAttributeInteger(ctx, 8, i32_ty));
+        size_t n_replaced = MLIR_GetOpNumAttributes(ctx, kop);
+        MLIR_SetOpAttr(ctx, kop, MLIR_KEY_VALUE, MLIR_CreateAttributeBool(ctx, true));
+        print_string(format(arena, str_lit("op attrs by key: sym_name={} mine={}->{} after set={} after add={} last={}\n"),
+            MLIR_GetAttributeString(ctx, MLIR_GetOpAttr(ctx, kop, MLIR_KEY_SYM_NAME)),
+            before, MLIR_GetAttributeInteger(ctx, MLIR_GetOpAttr(ctx, kop, mykey)),
+            (int64_t)n_replaced, (int64_t)MLIR_GetOpNumAttributes(ctx, kop),
+            MLIR_GetAttrKeyName(ctx, MLIR_GetOpAttributeKey(ctx, kop, 2))));
         MLIR_Context *ctx3 = MLIR_CreateContext(NULL);
         print_string(MLIR_LookupOpType(ctx3, str_lit("test.op")) == OP_TYPE_UNREGISTERED &&
                      MLIR_LookupOpType(ctx3, str_lit("llvm.add")) == OP_TYPE_LLVM_ADD

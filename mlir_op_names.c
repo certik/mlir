@@ -120,6 +120,90 @@ MLIR_OpType op_type_table_register(OpTypeTable *t, string name) {
 }
 
 // -----------------------------------------------------------------------------
+// Attribute keys (mlir_op_names.h).
+// -----------------------------------------------------------------------------
+
+static void attr_key_table_insert(AttrKeyTable *t, uint32_t key) {
+    string name = t->names[key];
+    uint32_t mask = t->n_slots - 1;
+    uint32_t i = op_name_hash(name) & mask;
+    while (t->slots[i] != 0) {
+        assert(!str_eq(t->names[t->slots[i]], name));
+        i = (i + 1) & mask;
+    }
+    t->slots[i] = key;
+}
+
+static void attr_key_table_rehash(AttrKeyTable *t, uint32_t n_slots) {
+    t->slots = arena_new_array(t->arena, uint32_t, n_slots);
+    memset(t->slots, 0, sizeof(uint32_t) * (size_t)n_slots);
+    t->n_slots = n_slots;
+    for (uint32_t k = 1; k < t->n_keys; k++) attr_key_table_insert(t, k);
+}
+
+// The names of the static keys, in enum order, each followed by a NUL (no
+// pointers in a global initializer, for tinyC).
+static const char g_static_key_names[] =
+#define MLIR_ATTR_KEY(enumerator, name) name "\0"
+#include "mlir_attr_keys.def"
+    ;
+
+void attr_key_table_init(AttrKeyTable *t, Arena *arena) {
+    t->arena = arena;
+    t->cap_keys = (uint32_t)MLIR_KEY_COUNT + 64;
+    t->names = arena_new_array(arena, string, t->cap_keys);
+    t->n_keys = (uint32_t)MLIR_KEY_COUNT;
+    t->names[MLIR_KEY_INVALID].str = (char *)g_static_key_names + sizeof(g_static_key_names) - 1;
+    t->names[MLIR_KEY_INVALID].size = 0;
+    const char *p = g_static_key_names;
+    for (uint32_t k = 1; k < t->n_keys; k++) {
+        size_t n = strlen(p);
+        t->names[k].str = (char *)p;
+        t->names[k].size = n;
+        p += n + 1;
+    }
+    assert(p == g_static_key_names + sizeof(g_static_key_names) - 1);
+    attr_key_table_rehash(t, 512);
+}
+
+MLIR_AttrKey attr_key_table_lookup(const AttrKeyTable *t, string name) {
+    if (name.size == 0) return MLIR_KEY_INVALID;
+    uint32_t mask = t->n_slots - 1;
+    uint32_t i = op_name_hash(name) & mask;
+    uint32_t k;
+    while ((k = t->slots[i]) != 0) {
+        if (str_eq(t->names[k], name)) return k;
+        i = (i + 1) & mask;
+    }
+    return MLIR_KEY_INVALID;
+}
+
+MLIR_AttrKey attr_key_table_intern(AttrKeyTable *t, string name) {
+    MLIR_AttrKey found = attr_key_table_lookup(t, name);
+    if (found != MLIR_KEY_INVALID || name.size == 0) return found;
+    if (t->n_keys == t->cap_keys) {
+        uint32_t cap = 2 * t->cap_keys;
+        string *names = arena_new_array(t->arena, string, cap);
+        memcpy(names, t->names, sizeof(string) * (size_t)t->n_keys);
+        t->names = names;
+        t->cap_keys = cap;
+    }
+    char *copy = (char *)arena_alloc(t->arena, name.size);
+    memcpy(copy, name.str, name.size);
+    uint32_t k = t->n_keys++;
+    t->names[k].str = copy;
+    t->names[k].size = name.size;
+    if (2 * t->n_keys > t->n_slots) attr_key_table_rehash(t, 2 * t->n_slots);
+    else attr_key_table_insert(t, k);
+    return k;
+}
+
+string attr_key_table_name(const AttrKeyTable *t, MLIR_AttrKey key) {
+    if (key < t->n_keys) return t->names[key];
+    return t->names[MLIR_KEY_INVALID];
+}
+
+// -----------------------------------------------------------------------------
 // Parser-only op kinds (mlir_printer.h). Here rather than inline in the
 // header because tinyC emits every static inline function of a header into
 // each file that includes it.

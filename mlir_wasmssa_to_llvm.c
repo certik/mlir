@@ -35,27 +35,27 @@
 // =============================================================================
 // Attribute helpers.
 // =============================================================================
-static MLIR_AttributeHandle attr_s(MLIR_Context *ctx, const char *name,
+static MLIR_NamedAttr attr_s(MLIR_Context *ctx, MLIR_AttrKey key,
                                    const char *v, size_t vlen) {
     string sv = { (char *)v, vlen };
-    return MLIR_CreateAttributeString(ctx, str_from_cstr_view((char *)name), sv);
+    return MLIR_Named(key, MLIR_CreateAttributeString(ctx, sv));
 }
-static MLIR_AttributeHandle attr_ty(MLIR_Context *ctx, const char *name,
+static MLIR_NamedAttr attr_ty(MLIR_Context *ctx, MLIR_AttrKey key,
                                     MLIR_TypeHandle ty) {
-    return MLIR_CreateAttributeType(ctx, str_from_cstr_view((char *)name), ty);
+    return MLIR_Named(key, MLIR_CreateAttributeType(ctx, ty));
 }
 
-static int64_t at_i(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
-    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeInteger(a) : 0;
+static int64_t at_i(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, op, key);
+    return a ? MLIR_GetAttributeInteger(ctx, a) : 0;
 }
-static bool at_b(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
-    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeBool(a) : false;
+static bool at_b(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, op, key);
+    return a ? MLIR_GetAttributeBool(ctx, a) : false;
 }
-static string at_s(MLIR_Context *ctx, MLIR_OpHandle op, const char *name) {
-    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeString(a) : (string){0};
+static string at_s(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, op, key);
+    return a ? MLIR_GetAttributeString(ctx, a) : (string){0};
 }
 
 // Map a wasm valtype to its `llvm`-dialect type. Integers map to iN; f32/f64
@@ -210,9 +210,9 @@ static int fsm_get(const FuncSigMap *m, string name, string *pt, string *rt) {
 }
 
 // Read an integer attribute with a default if absent.
-static int64_t at_i_or(MLIR_Context *ctx, MLIR_OpHandle op, const char *name, int64_t dflt) {
-    MLIR_AttributeHandle a = MLIR_GetOpAttributeByName(ctx, op, name);
-    return a ? MLIR_GetAttributeInteger(a) : dflt;
+static int64_t at_i_or(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key, int64_t dflt) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, op, key);
+    return a ? MLIR_GetAttributeInteger(ctx, a) : dflt;
 }
 
 // =============================================================================
@@ -323,7 +323,7 @@ static MLIR_ValueHandle mk_res(MLIR_Context *ctx, MLIR_TypeHandle ty) {
         (string){0}, MLIR_CreateLocationUnknown(ctx, (string){0}));
 }
 static MLIR_OpHandle build_op(MLIR_Context *ctx, MLIR_OpType t,
-                              MLIR_AttributeHandle *attrs, size_t na,
+                              MLIR_NamedAttr *attrs, size_t na,
                               MLIR_TypeHandle *rtys, size_t nr,
                               MLIR_ValueHandle *res,
                               MLIR_ValueHandle *ops, size_t no) {
@@ -500,8 +500,8 @@ static MLIR_ValueHandle build_icmp(FLower *L, int64_t pred,
     MLIR_Context *ctx = L->ctx;
     MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
     MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
-    MLIR_AttributeHandle pa = MLIR_CreateAttributeInteger(
-        ctx, str_from_cstr_view((char *)"predicate"), pred, i64);
+    MLIR_NamedAttr pa = MLIR_Named(MLIR_KEY_PREDICATE, MLIR_CreateAttributeInteger(
+        ctx, pred, i64));
     MLIR_TypeHandle rt[1] = { i32 };
     MLIR_ValueHandle r[1] = { mk_res(ctx, i32) };
     MLIR_ValueHandle ops[2] = { a, b };
@@ -545,8 +545,8 @@ static MLIR_ValueHandle build_fcmp(FLower *L, int64_t pred,
     MLIR_Context *ctx = L->ctx;
     MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
     MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(ctx, 64, true);
-    MLIR_AttributeHandle pa = MLIR_CreateAttributeInteger(
-        ctx, str_from_cstr_view((char *)"predicate"), pred, i64);
+    MLIR_NamedAttr pa = MLIR_Named(MLIR_KEY_PREDICATE, MLIR_CreateAttributeInteger(
+        ctx, pred, i64));
     MLIR_TypeHandle rt[1] = { i32 };
     MLIR_ValueHandle r[1] = { mk_res(ctx, i32) };
     MLIR_ValueHandle ops[2] = { a, b };
@@ -571,8 +571,8 @@ static bool lower_op(FLower *L, MLIR_OpHandle op);
 
 // Emit an integer constant of type `ity`; returns its value.
 static MLIR_ValueHandle emit_const(FLower *L, MLIR_TypeHandle ity, int64_t v) {
-    MLIR_AttributeHandle va = MLIR_CreateAttributeInteger(
-        L->ctx, str_from_cstr_view((char *)"value"), v, ity);
+    MLIR_NamedAttr va = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(
+        L->ctx, v, ity));
     MLIR_TypeHandle rt[1] = { ity };
     MLIR_ValueHandle r[1] = { mk_res(L->ctx, ity) };
     MLIR_OpHandle out = build_op(L->ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
@@ -584,9 +584,9 @@ static MLIR_ValueHandle emit_const(FLower *L, MLIR_TypeHandle ity, int64_t v) {
 // Emit `llvm.mlir.addressof @sym` -> !llvm.ptr.
 static MLIR_ValueHandle emit_addressof(FLower *L, const char *sym) {
     MLIR_TypeHandle ptr = MLIR_CreateTypeLLVMPointer(L->ctx);
-    MLIR_AttributeHandle a = MLIR_CreateAttributeSymbolRef(
-        L->ctx, str_from_cstr_view((char *)"global_name"),
-        str_from_cstr_view((char *)sym));
+    MLIR_NamedAttr a = MLIR_Named(MLIR_KEY_GLOBAL_NAME, MLIR_CreateAttributeSymbolRef(
+        L->ctx,
+        str_from_cstr_view((char *)sym)));
     MLIR_TypeHandle rt[1] = { ptr };
     MLIR_ValueHandle r[1] = { mk_res(L->ctx, ptr) };
     MLIR_OpHandle out = build_op(L->ctx, OP_TYPE_LLVM_MLIR_ADDRESSOF,
@@ -696,12 +696,12 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
 
     switch (t) {
     case OP_TYPE_WASMSSA_CONST: {
-        uint8_t vt = (uint8_t)at_i(ctx, op, "valtype");
+        uint8_t vt = (uint8_t)at_i(ctx, op, MLIR_KEY_VALTYPE);
         if (vt_is_float(vt)) {
             // The `value` attr holds the raw IEEE-754 bit pattern as an integer
             // (f32 in the low 32 bits). Decode to a double and build a
             // float-typed llvm.mlir.constant.
-            int64_t raw = at_i(ctx, op, "value");
+            int64_t raw = at_i(ctx, op, MLIR_KEY_VALUE);
             double d;
             if (vt == WT_F32) {
                 uint32_t b32 = (uint32_t)raw;
@@ -713,8 +713,8 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
                 memcpy(&d, &b64, 8);
             }
             MLIR_TypeHandle fty = vt_to_llvm(ctx, vt);
-            MLIR_AttributeHandle va = MLIR_CreateAttributeFloat(
-                ctx, str_from_cstr_view((char *)"value"), d, fty);
+            MLIR_NamedAttr va = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeFloat(
+                ctx, d, fty));
             MLIR_TypeHandle rt[1] = { fty };
             MLIR_ValueHandle r[1] = { mk_res(ctx, fty) };
             MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
@@ -728,10 +728,10 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
                     (unsigned)vt);
             return false;
         }
-        int64_t v = at_i(ctx, op, "value");
+        int64_t v = at_i(ctx, op, MLIR_KEY_VALUE);
         MLIR_TypeHandle ity = vt_to_llvm(ctx, vt);
-        MLIR_AttributeHandle va = MLIR_CreateAttributeInteger(
-            ctx, str_from_cstr_view((char *)"value"), v, ity);
+        MLIR_NamedAttr va = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(
+            ctx, v, ity));
         MLIR_TypeHandle rt[1] = { ity };
         MLIR_ValueHandle r[1] = { mk_res(ctx, ity) };
         MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
@@ -742,7 +742,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
     }
 
     case OP_TYPE_WASMSSA_LOCAL_GET: {
-        int64_t idx = at_i(ctx, op, "local_idx");
+        int64_t idx = at_i(ctx, op, MLIR_KEY_LOCAL_IDX);
         if (idx < 0 || (size_t)idx >= L->n_locals) {
             fprintf(stderr, "wasmssa->llvm: local_get idx %lld out of range\n",
                     (long long)idx);
@@ -771,7 +771,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
     }
 
     case OP_TYPE_WASMSSA_LOCAL_SET: {
-        int64_t idx = at_i(ctx, op, "local_idx");
+        int64_t idx = at_i(ctx, op, MLIR_KEY_LOCAL_IDX);
         if (idx < 0 || (size_t)idx >= L->n_locals) {
             fprintf(stderr, "wasmssa->llvm: local_set idx %lld out of range\n",
                     (long long)idx);
@@ -795,7 +795,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
 
     case OP_TYPE_WASMSSA_ADD:
     case OP_TYPE_WASMSSA_SUB: {
-        uint8_t vt = (uint8_t)at_i(ctx, op, "valtype");
+        uint8_t vt = (uint8_t)at_i(ctx, op, MLIR_KEY_VALTYPE);
         MLIR_ValueHandle a, b;
         if (!vmap_get(L->vmap, MLIR_GetOpOperand(ctx, op, 0), &a) ||
             !vmap_get(L->vmap, MLIR_GetOpOperand(ctx, op, 1), &b)) {
@@ -822,7 +822,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
     }
 
     case OP_TYPE_WASMSSA_BINOP: {
-        int64_t opc = at_i(ctx, op, "wasm_opcode");
+        int64_t opc = at_i(ctx, op, MLIR_KEY_WASM_OPCODE);
         int64_t pred;
         if (cmp_to_icmp_pred(opc, &pred)) {
             MLIR_ValueHandle a, b;
@@ -848,7 +848,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         }
         MLIR_OpType fot = fbinop_type(opc);
         if (fot != OP_TYPE_UNREGISTERED) {
-            uint8_t vt = (uint8_t)at_i(ctx, op, "valtype");
+            uint8_t vt = (uint8_t)at_i(ctx, op, MLIR_KEY_VALTYPE);
             MLIR_ValueHandle a, b;
             if (!vmap_get(L->vmap, MLIR_GetOpOperand(ctx, op, 0), &a) ||
                 !vmap_get(L->vmap, MLIR_GetOpOperand(ctx, op, 1), &b)) {
@@ -867,7 +867,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
                 (unsigned long long)opc);
             return false;
         }
-        uint8_t vt = (uint8_t)at_i(ctx, op, "valtype");
+        uint8_t vt = (uint8_t)at_i(ctx, op, MLIR_KEY_VALTYPE);
         MLIR_ValueHandle a, b;
         if (!vmap_get(L->vmap, MLIR_GetOpOperand(ctx, op, 0), &a) ||
             !vmap_get(L->vmap, MLIR_GetOpOperand(ctx, op, 1), &b)) {
@@ -902,7 +902,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
     }
 
     case OP_TYPE_WASMSSA_CALL: {
-        string callee = at_s(ctx, op, "target");
+        string callee = at_s(ctx, op, MLIR_KEY_TARGET);
         if (callee.size == 0) {
             fprintf(stderr, "wasmssa->llvm: call without target\n");
             return false;
@@ -928,8 +928,8 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
             free(ops);
             return false;
         }
-        MLIR_AttributeHandle attrs[1] = {
-            attr_s(ctx, "callee", callee.str, callee.size)
+        MLIR_NamedAttr attrs[1] = {
+            attr_s(ctx, MLIR_KEY_CALLEE, callee.str, callee.size)
         };
         MLIR_TypeHandle rt[1];
         MLIR_ValueHandle r[1];
@@ -983,8 +983,8 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         }
         // result = icmp eq (a, 0) : i32
         MLIR_TypeHandle aty = MLIR_GetValueType(ctx, a);
-        MLIR_AttributeHandle za = MLIR_CreateAttributeInteger(
-            ctx, str_from_cstr_view((char *)"value"), 0, aty);
+        MLIR_NamedAttr za = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(
+            ctx, 0, aty));
         MLIR_TypeHandle zrt[1] = { aty };
         MLIR_ValueHandle zr[1] = { mk_res(ctx, aty) };
         MLIR_OpHandle zc = build_op(ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
@@ -1005,7 +1005,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
             fprintf(stderr, "wasmssa->llvm: unbound operand on select\n");
             return false;
         }
-        uint8_t vt = (uint8_t)at_i(ctx, op, "valtype");
+        uint8_t vt = (uint8_t)at_i(ctx, op, MLIR_KEY_VALTYPE);
         (void)vt;
         // Result type follows the value operands; the result value itself is
         // untyped under no_def_use_tracking, so take it from operand `a`.
@@ -1037,7 +1037,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
                 "wasmssa->llvm: value-carrying br not yet supported\n");
             return false;
         }
-        int64_t depth = at_i(ctx, op, "depth");
+        int64_t depth = at_i(ctx, op, MLIR_KEY_DEPTH);
         if (depth < 0 || (size_t)depth >= L->n_frames) {
             fprintf(stderr, "wasmssa->llvm: br depth %lld out of range\n",
                     (long long)depth);
@@ -1048,7 +1048,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
     }
 
     case OP_TYPE_WASMSSA_BR_IF: {
-        int64_t depth = at_i(ctx, op, "depth");
+        int64_t depth = at_i(ctx, op, MLIR_KEY_DEPTH);
         if (depth < 0 || (size_t)depth >= L->n_frames) {
             fprintf(stderr, "wasmssa->llvm: br_if depth %lld out of range\n",
                     (long long)depth);
@@ -1196,7 +1196,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
     }
 
     case OP_TYPE_WASMSSA_ADDRESSOF: {
-        string tgt = at_s(ctx, op, "target");
+        string tgt = at_s(ctx, op, MLIR_KEY_TARGET);
         int32_t off;
         if (!L->globals || !omap_get(L->globals, tgt, &off)) {
             fprintf(stderr,
@@ -1211,8 +1211,8 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
     }
 
     case OP_TYPE_WASMSSA_GLOBAL_GET: {
-        uint8_t vt = (uint8_t)at_i(ctx, op, "valtype");
-        int64_t idx = at_i(ctx, op, "global_idx");
+        uint8_t vt = (uint8_t)at_i(ctx, op, MLIR_KEY_VALTYPE);
+        int64_t idx = at_i(ctx, op, MLIR_KEY_GLOBAL_IDX);
         if (!vt_is_int(vt)) {
             fprintf(stderr, "wasmssa->llvm: non-int global_get not supported\n");
             return false;
@@ -1231,7 +1231,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
     }
 
     case OP_TYPE_WASMSSA_GLOBAL_SET: {
-        int64_t idx = at_i(ctx, op, "global_idx");
+        int64_t idx = at_i(ctx, op, MLIR_KEY_GLOBAL_IDX);
         MLIR_ValueHandle v;
         if (!vmap_get(L->vmap, MLIR_GetOpOperand(ctx, op, 0), &v)) {
             fprintf(stderr, "wasmssa->llvm: unbound operand on global_set\n");
@@ -1247,9 +1247,9 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
     }
 
     case OP_TYPE_WASMSSA_LOAD: {
-        int64_t off = at_i(ctx, op, "memory_offset");
-        int64_t sz  = at_i(ctx, op, "mem_size_bytes");
-        uint8_t vt  = (uint8_t)at_i(ctx, op, "valtype");
+        int64_t off = at_i(ctx, op, MLIR_KEY_MEMORY_OFFSET);
+        int64_t sz  = at_i(ctx, op, MLIR_KEY_MEM_SIZE_BYTES);
+        uint8_t vt  = (uint8_t)at_i(ctx, op, MLIR_KEY_VALTYPE);
         if (vt_is_float(vt)) {
             if (!((vt == WT_F32 && sz == 4) || (vt == WT_F64 && sz == 8))) {
                 fprintf(stderr,
@@ -1316,9 +1316,9 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
     }
 
     case OP_TYPE_WASMSSA_STORE: {
-        int64_t off = at_i(ctx, op, "memory_offset");
-        int64_t sz  = at_i(ctx, op, "mem_size_bytes");
-        uint8_t vt  = (uint8_t)at_i(ctx, op, "valtype");
+        int64_t off = at_i(ctx, op, MLIR_KEY_MEMORY_OFFSET);
+        int64_t sz  = at_i(ctx, op, MLIR_KEY_MEM_SIZE_BYTES);
+        uint8_t vt  = (uint8_t)at_i(ctx, op, MLIR_KEY_VALTYPE);
         if (vt_is_float(vt)) {
             if (!((vt == WT_F32 && sz == 4) || (vt == WT_F64 && sz == 8))) {
                 fprintf(stderr,
@@ -1418,7 +1418,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
     }
 
     case OP_TYPE_WASMSSA_UNOP: {
-        int64_t opc = at_i(ctx, op, "wasm_opcode");
+        int64_t opc = at_i(ctx, op, MLIR_KEY_WASM_OPCODE);
         MLIR_ValueHandle a;
         if (!vmap_get(L->vmap, MLIR_GetOpOperand(ctx, op, 0), &a)) {
             fprintf(stderr, "wasmssa->llvm: unbound operand on unop\n");
@@ -1493,7 +1493,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
     case OP_TYPE_WASMSSA_FUNC_ADDR: {
         // Returns the slot index assigned to the named function in the
         // module fnptr table, lowered to an i32 constant.
-        string target = at_s(ctx, op, "target");
+        string target = at_s(ctx, op, MLIR_KEY_TARGET);
         int32_t slot = -1;
         if (!L->fnptrs || !fpm_lookup(L->fnptrs, target, &slot)) {
             fprintf(stderr,
@@ -1527,8 +1527,8 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         ops_out[0] = ops_in[no - 1];
         for (size_t k = 0; k + 1 < no; k++) ops_out[1 + k] = ops_in[k];
 
-        string sig_p = at_s(ctx, op, "sig_params");
-        string sig_r = at_s(ctx, op, "sig_results");
+        string sig_p = at_s(ctx, op, MLIR_KEY_SIG_PARAMS);
+        string sig_r = at_s(ctx, op, MLIR_KEY_SIG_RESULTS);
         size_t name_cap = sig_p.size + sig_r.size + 32;
         char *name_buf = (char *)malloc(name_cap);
         int nlen = snprintf(name_buf, name_cap, "__dispatch_%.*s_%.*s",
@@ -1544,7 +1544,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
             free(name_buf); free(ops_in); free(ops_out);
             return false;
         }
-        MLIR_AttributeHandle attrs[1] = { attr_s(ctx, "callee", name_buf, (size_t)nlen) };
+        MLIR_NamedAttr attrs[1] = { attr_s(ctx, MLIR_KEY_CALLEE, name_buf, (size_t)nlen) };
         MLIR_TypeHandle rt[1];
         MLIR_ValueHandle r[1];
         if (nr == 1) {
@@ -1629,7 +1629,7 @@ static bool sb_is_cmp_def(MLIR_Context *ctx, MLIR_ValueHandle v) {
 static bool sb_is_const(MLIR_Context *ctx, MLIR_ValueHandle v, int64_t want) {
     MLIR_OpHandle d = MLIR_GetValueDefiningOp(ctx, v);
     if (!d || MLIR_GetOpType(ctx, d) != OP_TYPE_LLVM_MLIR_CONSTANT) return false;
-    return at_i(ctx, d, "value") == want;
+    return at_i(ctx, d, MLIR_KEY_VALUE) == want;
 }
 // Total operand slots (regular + per-successor block-arg operands), addressable
 // by the flat index MLIR_GetOpOperand / MLIR_SetOpOperand use.
@@ -1663,7 +1663,7 @@ static MLIR_ValueHandle sb_fold_inner(MLIR_Context *ctx, BoolFwd *m, size_t mask
             (sb_is_cmp_def(ctx, c) || bf_get(m, mask, c, &dummy)))
             return bf_resolve(m, mask, c);
     } else if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_ICMP &&
-               at_i(ctx, op, "predicate") == 1 /*ne*/ &&
+               at_i(ctx, op, MLIR_KEY_PREDICATE) == 1 /*ne*/ &&
                MLIR_GetOpNumOperands(ctx, op) == 2) {
         MLIR_ValueHandle a = MLIR_GetOpOperand(ctx, op, 0);
         MLIR_ValueHandle b = MLIR_GetOpOperand(ctx, op, 1);
@@ -1686,7 +1686,7 @@ static void simplify_bools(MLIR_Context *ctx, MLIR_RegionHandle region) {
         for (size_t oi = 0; oi < no; oi++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, oi);
             if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_SELECT ||
-                (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_ICMP && at_i(ctx, op, "predicate") == 1))
+                (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_ICMP && at_i(ctx, op, MLIR_KEY_PREDICATE) == 1))
                 ncand++;
         }
     }
@@ -1745,10 +1745,10 @@ static void simplify_bools(MLIR_Context *ctx, MLIR_RegionHandle region) {
 static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
                                 OffsetMap *globals, FuncPtrMap *fnptrs,
                                 const FuncSigMap *sigs) {
-    string name     = at_s(ctx, src, "sym_name");
-    bool   exported = at_b(ctx, src, "exported");
-    string pt       = at_s(ctx, src, "param_types");
-    string lt       = at_s(ctx, src, "local_types");
+    string name     = at_s(ctx, src, MLIR_KEY_SYM_NAME);
+    bool   exported = at_b(ctx, src, MLIR_KEY_EXPORTED);
+    string pt       = at_s(ctx, src, MLIR_KEY_PARAM_TYPES);
+    string lt       = at_s(ctx, src, MLIR_KEY_LOCAL_TYPES);
 
     // The backend synthesises `_start` -> `bl main`, so the exported wasm
     // entry (wasi_start) is renamed to `main`.
@@ -1822,8 +1822,8 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
 
     // One i64 const=1 to serve as the element count for every alloca.
     MLIR_TypeHandle i64ty = MLIR_CreateTypeInteger(ctx, 64, true);
-    MLIR_AttributeHandle cnt_va = MLIR_CreateAttributeInteger(
-        ctx, str_from_cstr_view((char *)"value"), 1, i64ty);
+    MLIR_NamedAttr cnt_va = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(
+        ctx, 1, i64ty));
     MLIR_TypeHandle cnt_rt[1] = { i64ty };
     MLIR_ValueHandle cnt_r[1] = { mk_res(ctx, i64ty) };
     MLIR_OpHandle cnt_op = build_op(ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
@@ -1834,7 +1834,7 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
     MLIR_TypeHandle ptr_ty = MLIR_CreateTypeLLVMPointer(ctx);
     for (size_t i = 0; i < n_locals; i++) {
         MLIR_TypeHandle ety = vt_to_llvm(ctx, local_vt[i]);
-        MLIR_AttributeHandle a[1] = { attr_ty(ctx, "elem_type", ety) };
+        MLIR_NamedAttr a[1] = { attr_ty(ctx, MLIR_KEY_ELEM_TYPE, ety) };
         MLIR_TypeHandle rt[1] = { ptr_ty };
         MLIR_ValueHandle r[1] = { mk_res(ctx, ptr_ty) };
         MLIR_ValueHandle ops[1] = { cnt_r[0] };
@@ -1881,8 +1881,8 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
     if (!getenv("TINYC_NO_SIMPLIFY_BOOLS"))
         simplify_bools(ctx, dreg);
 
-    MLIR_AttributeHandle attrs[1] = {
-        attr_s(ctx, "sym_name", name.str, name.size)
+    MLIR_NamedAttr attrs[1] = {
+        attr_s(ctx, MLIR_KEY_SYM_NAME, name.str, name.size)
     };
     MLIR_RegionHandle regs[1] = { dreg };
     return MLIR_CreateOp(ctx, OP_TYPE_LLVM_FUNC,
@@ -1896,7 +1896,7 @@ static MLIR_ValueHandle emit_alloca(FLower *L, MLIR_TypeHandle elem_ty, int64_t 
     MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(L->ctx, 64, true);
     MLIR_ValueHandle cnt = emit_const(L, i64, count);
     MLIR_TypeHandle ptr = MLIR_CreateTypeLLVMPointer(L->ctx);
-    MLIR_AttributeHandle a[1] = { attr_ty(L->ctx, "elem_type", elem_ty) };
+    MLIR_NamedAttr a[1] = { attr_ty(L->ctx, MLIR_KEY_ELEM_TYPE, elem_ty) };
     MLIR_TypeHandle rt[1] = { ptr };
     MLIR_ValueHandle r[1] = { mk_res(L->ctx, ptr) };
     MLIR_ValueHandle ops[1] = { cnt };
@@ -1936,7 +1936,7 @@ static void emit_store_v(FLower *L, MLIR_ValueHandle v, MLIR_ValueHandle p) {
 static void scan_max_global(MLIR_Context *ctx, MLIR_OpHandle op, int64_t *max_idx) {
     MLIR_OpType t = MLIR_GetOpType(ctx, op);
     if (t == OP_TYPE_WASMSSA_GLOBAL_GET || t == OP_TYPE_WASMSSA_GLOBAL_SET) {
-        int64_t idx = at_i(ctx, op, "global_idx");
+        int64_t idx = at_i(ctx, op, MLIR_KEY_GLOBAL_IDX);
         if (idx > *max_idx) *max_idx = idx;
     }
     size_t nr = MLIR_GetOpNumRegions(ctx, op);
@@ -1956,8 +1956,8 @@ static void scan_max_global(MLIR_Context *ctx, MLIR_OpHandle op, int64_t *max_id
 // honouring an explicit `slot` attr (the wasm table index).
 static void scan_func_addrs(MLIR_Context *ctx, MLIR_OpHandle op, FuncPtrMap *fnptrs) {
     if (MLIR_GetOpType(ctx, op) == OP_TYPE_WASMSSA_FUNC_ADDR) {
-        string tgt = at_s(ctx, op, "target");
-        int32_t es = (int32_t)at_i_or(ctx, op, "slot", -1);
+        string tgt = at_s(ctx, op, MLIR_KEY_TARGET);
+        int32_t es = (int32_t)at_i_or(ctx, op, MLIR_KEY_SLOT, -1);
         fpm_intern_with_slot(fnptrs, tgt, es);
     }
     size_t nr = MLIR_GetOpNumRegions(ctx, op);
@@ -1983,7 +1983,7 @@ typedef struct {
 
 static void scan_call_indirect_sigs(MLIR_Context *ctx, MLIR_OpHandle op, SigList *l) {
     if (MLIR_GetOpType(ctx, op) == OP_TYPE_WASMSSA_CALL_INDIRECT) {
-        string pt = at_s(ctx, op, "sig_params"), rt = at_s(ctx, op, "sig_results");
+        string pt = at_s(ctx, op, MLIR_KEY_SIG_PARAMS), rt = at_s(ctx, op, MLIR_KEY_SIG_RESULTS);
         bool seen = false;
         for (size_t i = 0; i < l->n && !seen; i++)
             seen = l->pt[i].size == pt.size && l->rt[i].size == rt.size &&
@@ -2104,8 +2104,8 @@ static bool synth_dispatchers(MLIR_Context *ctx, MLIR_BlockHandle out_body,
 
             // call_blk: r = call target(args...); return [r]
             L.cur = call_blk; L.terminated = false;
-            MLIR_AttributeHandle ca[1] = {
-                attr_s(ctx, "callee", target_name.str, target_name.size)
+            MLIR_NamedAttr ca[1] = {
+                attr_s(ctx, MLIR_KEY_CALLEE, target_name.str, target_name.size)
             };
             MLIR_TypeHandle crt[1]; MLIR_ValueHandle cr[1];
             if (has_result) { crt[0] = rty; cr[0] = mk_res(ctx, rty); }
@@ -2130,7 +2130,7 @@ static bool synth_dispatchers(MLIR_Context *ctx, MLIR_BlockHandle out_body,
         // Fall-through (no slot matched): dead self-branch terminator.
         term_br(&L, L.cur);
 
-        MLIR_AttributeHandle fa[1] = { attr_s(ctx, "sym_name", dname, (size_t)dlen) };
+        MLIR_NamedAttr fa[1] = { attr_s(ctx, MLIR_KEY_SYM_NAME, dname, (size_t)dlen) };
         MLIR_RegionHandle regs[1] = { dreg };
         MLIR_OpHandle fn = MLIR_CreateOp(ctx, OP_TYPE_LLVM_FUNC, fa, 1, NULL, 0, NULL, 0, NULL, 0,
             regs, 1, MLIR_CreateLocationUnknown(ctx, (string){0}),
@@ -2152,8 +2152,8 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
 
     // -- Linear-memory size (initial pages). --
     int64_t min_pages = 2;
-    MLIR_AttributeHandle mpa = MLIR_GetOpAttributeByName(ctx, ssa_module, "memory_min_pages");
-    if (mpa) min_pages = MLIR_GetAttributeInteger(mpa);
+    MLIR_AttributeHandle mpa = MLIR_GetOpAttr(ctx, ssa_module, MLIR_KEY_MEMORY_MIN_PAGES);
+    if (mpa) min_pages = MLIR_GetAttributeInteger(ctx, mpa);
     if (min_pages < 1) min_pages = 1;
 
     // -- Pass 1: assign each import_global a fixed linmem offset. --
@@ -2163,14 +2163,14 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle top = MLIR_GetBlockOp(ctx, mb, i);
         if (MLIR_GetOpType(ctx, top) != OP_TYPE_WASMSSA_IMPORT_GLOBAL) continue;
-        string sn = at_s(ctx, top, "sym_name");
-        string id = at_s(ctx, top, "init_data");
-        int64_t sz = at_i(ctx, top, "size");
-        int64_t ap = at_i(ctx, top, "align_pow");
-        MLIR_AttributeHandle fa = MLIR_GetOpAttributeByName(ctx, top, "fixed_offset");
+        string sn = at_s(ctx, top, MLIR_KEY_SYM_NAME);
+        string id = at_s(ctx, top, MLIR_KEY_INIT_DATA);
+        int64_t sz = at_i(ctx, top, MLIR_KEY_SIZE);
+        int64_t ap = at_i(ctx, top, MLIR_KEY_ALIGN_POW);
+        MLIR_AttributeHandle fa = MLIR_GetOpAttr(ctx, top, MLIR_KEY_FIXED_OFFSET);
         if (sz <= 0) sz = (int64_t)id.size;
         int32_t align = (ap > 0) ? (int32_t)(1 << ap) : 1;
-        if (fa) cursor = (int32_t)MLIR_GetAttributeInteger(fa);
+        if (fa) cursor = (int32_t)MLIR_GetAttributeInteger(ctx, fa);
         else    cursor = (cursor + align - 1) & ~(align - 1);
         omap_add(&globals, sn, cursor);
         cursor += (int32_t)sz;
@@ -2185,9 +2185,9 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle top = MLIR_GetBlockOp(ctx, mb, i);
         if (MLIR_GetOpType(ctx, top) != OP_TYPE_WASMSSA_IMPORT_GLOBAL) continue;
-        string sn = at_s(ctx, top, "sym_name");
-        string id = at_s(ctx, top, "init_data");
-        string rl = at_s(ctx, top, "relocs");
+        string sn = at_s(ctx, top, MLIR_KEY_SYM_NAME);
+        string id = at_s(ctx, top, MLIR_KEY_INIT_DATA);
+        string rl = at_s(ctx, top, MLIR_KEY_RELOCS);
         int32_t my_off = 0;
         (void)omap_get(&globals, sn, &my_off);
         if (id.size > 0)
@@ -2262,8 +2262,8 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     // top of linear memory instead would make the stack grow down INTO the
     // heap and clobber early heap allocations.
     int64_t g0_init = linmem_total;
-    MLIR_AttributeHandle a_g0 = MLIR_GetOpAttributeByName(ctx, ssa_module, "global0_init");
-    if (a_g0) g0_init = MLIR_GetAttributeInteger(a_g0);
+    MLIR_AttributeHandle a_g0 = MLIR_GetOpAttr(ctx, ssa_module, MLIR_KEY_GLOBAL0_INIT);
+    if (a_g0) g0_init = MLIR_GetAttributeInteger(ctx, a_g0);
     MLIR_TypeHandle i32t = MLIR_CreateTypeInteger(ctx, 32, true);
     for (int64_t g = 0; g <= max_global; g++) {
         char gname[32];
@@ -2284,7 +2284,7 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
         if (MLIR_GetOpType(ctx, op) != OP_TYPE_WASMSSA_IMPORT_FUNC) continue;
-        string nm = at_s(ctx, op, "sym_name");
+        string nm = at_s(ctx, op, MLIR_KEY_SYM_NAME);
         if (nm.size == 9 && memcmp(nm.str, "proc_exit", 9) == 0) continue;
         // WASI host imports — provided by the spliced C adapter, just allow.
         if (nm.size == 8 && memcmp(nm.str, "fd_write", 8) == 0) continue;
@@ -2313,10 +2313,10 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
         MLIR_OpHandle top = MLIR_GetBlockOp(ctx, mb, i);
         MLIR_OpType t = MLIR_GetOpType(ctx, top);
         if (t == OP_TYPE_WASMSSA_FUNC || t == OP_TYPE_WASMSSA_IMPORT_FUNC) {
-            string fnm = at_s(ctx, top, "sym_name");
-            if (t == OP_TYPE_WASMSSA_FUNC && at_b(ctx, top, "exported"))
+            string fnm = at_s(ctx, top, MLIR_KEY_SYM_NAME);
+            if (t == OP_TYPE_WASMSSA_FUNC && at_b(ctx, top, MLIR_KEY_EXPORTED))
                 fnm = str_lit("main");
-            fsm_add(&sigs, fnm, at_s(ctx, top, "param_types"), at_s(ctx, top, "result_types"));
+            fsm_add(&sigs, fnm, at_s(ctx, top, MLIR_KEY_PARAM_TYPES), at_s(ctx, top, MLIR_KEY_RESULT_TYPES));
         }
     }
     for (size_t i = 0; i < nops; i++)

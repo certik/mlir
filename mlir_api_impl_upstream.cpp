@@ -234,23 +234,20 @@ struct MLIR_Context : public mlir::MLIRContext {
     // Value handles: a ValueBox per mlir::Value (stable addresses).
     std::deque<ValueBox> boxes;
     std::unordered_map<const void *, ValueBox *> valueIndex;
-    // Attribute handles created by the API (stable addresses).
-    std::deque<mlir::NamedAttribute> namedAttrs;
     // Per-op snapshot of the named attributes the user supplied via
-    // MLIR_CreateOp / MLIR_AppendOpAttribute. Used by
+    // MLIR_CreateOp / MLIR_SetOpAttr. Used by
     // MLIR_GetOpNumAttributes / MLIR_GetOpAttribute so that
     // dialect-injected inherent attributes (e.g. arith.addi's default
     // `overflowFlags = #arith.overflow<none>` property) don't leak through
     // the API and cause spurious diffs against the native backend.
     std::unordered_map<const mlir::Operation *, std::vector<mlir::NamedAttribute>> opUserAttrs;
-    // Separate stash for MLIR_GetOpAttributeByName, which sometimes needs to
-    // materialise a NamedAttribute that doesn't live in `op->getAttrs()`
-    // (e.g. LLVM::CallOp's inherent `callee` / `var_callee_type`
-    // properties). unique_ptr keeps element addresses stable across
-    // push_backs so previously-returned handles stay valid. Keyed by op so
-    // it is cleared with opUserAttrs when the op is erased.
-    std::unordered_map<const mlir::Operation *,
-                       std::vector<std::unique_ptr<mlir::NamedAttribute>>> opByNameAttrs;
+    // Attribute keys (mlir_api.h): the names, the StringAttr of each key
+    // (as an opaque pointer, created on first use) and the reverse map.
+    AttrKeyTable keyTable;
+    std::vector<const void *> keyNames;
+    llvm::DenseMap<const void *, MLIR_AttrKey> keyOfName;
+    // MLIR_GetOpAttr's i32 `case_values` conversions (caseValuesAsI32).
+    llvm::DenseMap<const void *, const void *> caseValuesI32;
     BlockOpIterCache blockOps;
     // Op types (doc/mlir_api_design.md section 2.5). opTypeTable holds the
     // names of the static and dynamic types (in `persistent`); opNames[t] is
@@ -305,9 +302,38 @@ ValueBox *boxFor(MLIR_Context *c, mlir::Value v) {
 }
 ValueBox *boxFor(mlir::Value v) { return boxFor(ctxOf(v.getContext()), v); }
 
-mlir::NamedAttribute *newNamedAttr(MLIR_Context *c, mlir::StringAttr name, mlir::Attribute value) {
-    c->namedAttrs.emplace_back(name, value);
-    return &c->namedAttrs.back();
+// An attribute handle is the mlir::Attribute's storage pointer: attributes
+// are uniqued in the MLIRContext, so equal values are equal handles.
+uintptr_t attrH(mlir::Attribute a) { return reinterpret_cast<uintptr_t>(a.getAsOpaquePointer()); }
+mlir::Attribute attrF(uintptr_t h) {
+    return mlir::Attribute::getFromOpaquePointer(reinterpret_cast<const void *>(h));
+}
+
+// The StringAttr of `key`.
+mlir::StringAttr keyName(MLIR_Context *c, MLIR_AttrKey key) {
+    API_CHECK(key != MLIR_KEY_INVALID && key < c->keyTable.n_keys, "MLIR attribute key",
+              "not a key of this context");
+    if (key >= c->keyNames.size()) c->keyNames.resize(c->keyTable.n_keys, nullptr);
+    if (!c->keyNames[key]) {
+        string n = attr_key_table_name(&c->keyTable, key);
+        mlir::StringAttr a = mlir::StringAttr::get(c, llvm::StringRef(n.str, n.size));
+        c->keyNames[key] = a.getAsOpaquePointer();
+        c->keyOfName[a.getAsOpaquePointer()] = key;
+    }
+    return mlir::StringAttr::getFromOpaquePointer(c->keyNames[key]);
+}
+
+// The key of the attribute name `name` (interned on first use).
+MLIR_AttrKey keyOf(MLIR_Context *c, mlir::StringAttr name) {
+    auto it = c->keyOfName.find(name.getAsOpaquePointer());
+    if (it != c->keyOfName.end()) return it->second;
+    llvm::StringRef n = name.getValue();
+    string sn;
+    sn.str = const_cast<char *>(n.data());
+    sn.size = n.size();
+    MLIR_AttrKey k = attr_key_table_intern(&c->keyTable, sn);
+    c->keyOfName[name.getAsOpaquePointer()] = k;
+    return k;
 }
 
 // Forget every per-op entry of `op` and of the ops nested in it, before
@@ -316,7 +342,6 @@ mlir::NamedAttribute *newNamedAttr(MLIR_Context *c, mlir::StringAttr name, mlir:
 void forgetErasedOp(MLIR_Context *c, mlir::Operation *op) {
     op->walk([&](mlir::Operation *o) {
         c->opUserAttrs.erase(o);
-        c->opByNameAttrs.erase(o);
         c->blockOps.invalidateOp(o);
         for (mlir::Value r : o->getResults()) c->valueIndex.erase(r.getAsOpaquePointer());
         for (mlir::Region &region : o->getRegions())
@@ -505,6 +530,7 @@ extern "C" MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) 
     if (options) c->arena = options->arena;
     c->persistent = arena_create(16 * 1024);
     op_type_table_init(&c->opTypeTable, c->persistent);
+    attr_key_table_init(&c->keyTable, c->persistent);
     c->opNames.assign((size_t)OP_TYPE_COUNT, nullptr);
     for (int t = 1; t < (int)OP_TYPE_COUNT; t++) bindOpName(c, (MLIR_OpType)t);
     return c;
@@ -624,7 +650,7 @@ extern "C" void MLIR_AppendBlockArg(MLIR_Context *cctx, MLIR_BlockHandle bh,
 
 extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     MLIR_Context *cctx, MLIR_OpType type,
-    MLIR_AttributeHandle *attrs, size_t n_attrs,
+    const MLIR_NamedAttr *attrs, size_t n_attrs,
     MLIR_TypeHandle *result_types, size_t n_result_types,
     MLIR_ValueHandle *results, size_t n_results,
     MLIR_ValueHandle *operands, size_t n_operands,
@@ -659,8 +685,8 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
         state.addTypes(typeF(result_types[i]));
     }
     for (size_t i = 0; i < n_attrs; i++) {
-        const auto *na = F<mlir::NamedAttribute>(attrs[i]);
-        mlir::Attribute val = na->getValue();
+        mlir::StringAttr name = keyName(cctx, attrs[i].key);
+        mlir::Attribute val = attrF(attrs[i].value);
         // cf.switch's `case_values` is declared as `AnyIntElementsAttr`
         // (DenseIntElementsAttr) in upstream MLIR. The agnostic C lifter
         // creates it as DenseI32ArrayAttr (since it has no concept of
@@ -669,7 +695,7 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
         // intermediate cf.switch fail to lift to scf.index_switch.
         // Convert here so the typed property storage accepts it.
         // llvm.switch declares `case_values` the same way.
-        if (is_switch && na->getName().strref() == "case_values") {
+        if (is_switch && attrs[i].key == MLIR_KEY_CASE_VALUES) {
             if (auto arr = mlir::dyn_cast<mlir::DenseI32ArrayAttr>(val)) {
                 auto i32Ty = mlir::IntegerType::get(&ctx, 32);
                 auto shaped = mlir::RankedTensorType::get(
@@ -679,7 +705,7 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
                                                     arr.size()));
             }
         }
-        state.addAttribute(na->getName(), val);
+        state.addAttribute(name, val);
     }
     for (size_t i = 0; i < n_regions; i++) {
         // The op takes the region's body and the OperationState frees the
@@ -754,7 +780,7 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
 
 extern "C" MLIR_OpHandle MLIR_CreateOp(
     MLIR_Context *ctx, MLIR_OpType type,
-    MLIR_AttributeHandle *attrs, size_t n_attrs,
+    const MLIR_NamedAttr *attrs, size_t n_attrs,
     MLIR_TypeHandle *result_types, size_t n_result_types,
     MLIR_ValueHandle *results, size_t n_results,
     MLIR_ValueHandle *operands, size_t n_operands,
@@ -770,22 +796,23 @@ extern "C" MLIR_OpHandle MLIR_CreateOp(
         location, u, tc, sl);
 }
 
-extern "C" void MLIR_AppendOpAttribute(MLIR_Context *cctx, MLIR_OpHandle oh,
-                                        MLIR_AttributeHandle ah) {
+extern "C" void MLIR_SetOpAttr(MLIR_Context *cctx, MLIR_OpHandle oh, MLIR_AttrKey key,
+                               MLIR_AttributeHandle ah) {
+    CHECK_OWN_OP(cctx, oh, "MLIR_SetOpAttr");
     auto *op = F<mlir::Operation>(oh);
-    const auto *na = F<mlir::NamedAttribute>(ah);
-    op->setAttr(na->getName(), na->getValue());
+    mlir::NamedAttribute na(keyName(cctx, key), attrF(ah));
+    op->setAttr(na.getName(), na.getValue());
     auto &m = cctx->opUserAttrs;
     auto it = m.find(op);
     if (it != m.end()) {
         // Replace if name already present, else append.
         for (auto &existing : it->second) {
-            if (existing.getName() == na->getName()) {
-                existing = *na;
+            if (existing.getName() == na.getName()) {
+                existing = na;
                 return;
             }
         }
-        it->second.push_back(*na);
+        it->second.push_back(na);
     }
 }
 
@@ -891,26 +918,42 @@ extern "C" MLIR_AttributeHandle MLIR_GetOpAttribute(MLIR_Context *ctx, MLIR_OpHa
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpAttribute");
     API_CHECK(i < MLIR_GetOpNumAttributes(ctx, h), "MLIR_GetOpAttribute", "index out of range");
     auto *op = F<mlir::Operation>(h);
-    return reinterpret_cast<uintptr_t>(&ensureCachedAttrs(op)[i]);
+    return attrH(ensureCachedAttrs(op)[i].getValue());
 }
-extern "C" MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_Context *ctx, MLIR_OpHandle h,
-                                                          const char *name) {
-    CHECK_OWN_OP(ctx, h, "MLIR_GetOpAttributeByName");
+extern "C" MLIR_AttrKey MLIR_GetOpAttributeKey(MLIR_Context *ctx, MLIR_OpHandle h, size_t i) {
+    CHECK_OWN_OP(ctx, h, "MLIR_GetOpAttributeKey");
+    API_CHECK(i < MLIR_GetOpNumAttributes(ctx, h), "MLIR_GetOpAttributeKey", "index out of range");
+    return keyOf(ctx, ensureCachedAttrs(F<mlir::Operation>(h))[i].getName());
+}
+// A switch's i32 `case_values` (a DenseIntElementsAttr) as the
+// DenseI32ArrayAttr the API creates, converted once per distinct value.
+static mlir::Attribute caseValuesAsI32(MLIR_Context &mctx, mlir::DenseIntElementsAttr cv) {
+    auto it = mctx.caseValuesI32.find(cv.getAsOpaquePointer());
+    if (it != mctx.caseValuesI32.end()) return mlir::Attribute::getFromOpaquePointer(it->second);
+    llvm::SmallVector<int32_t, 8> vals;
+    vals.reserve(cv.getNumElements());
+    for (auto apv : cv.getValues<llvm::APInt>())
+        vals.push_back((int32_t)apv.getSExtValue());
+    mlir::Attribute a = mlir::DenseI32ArrayAttr::get(&mctx, vals);
+    mctx.caseValuesI32[cv.getAsOpaquePointer()] = a.getAsOpaquePointer();
+    return a;
+}
+
+// Inherent attributes (properties) included: Operation::getAttr reads them.
+extern "C" MLIR_AttributeHandle MLIR_GetOpAttr(MLIR_Context *ctx, MLIR_OpHandle h,
+                                               MLIR_AttrKey key) {
+    CHECK_OWN_OP(ctx, h, "MLIR_GetOpAttr");
     auto *op = F<mlir::Operation>(h);
-    MLIR_Context &mctx = *ctxOf(op);
-    auto &keep = mctx.opByNameAttrs[op];
-    auto stash = [&](mlir::Attribute a) -> MLIR_AttributeHandle {
-        keep.emplace_back(std::make_unique<mlir::NamedAttribute>(
-            mlir::StringAttr::get(op->getContext(), name), a));
-        return reinterpret_cast<uintptr_t>(keep.back().get());
-    };
+    MLIR_Context &mctx = *ctx;
+    auto stash = [&](mlir::Attribute a) -> MLIR_AttributeHandle { return attrH(a); };
+    mlir::StringAttr nameAttr = keyName(ctx, key);
+    llvm::StringRef name = nameAttr.getValue();
     if (auto call = mlir::dyn_cast<mlir::LLVM::CallOp>(op)) {
-        llvm::StringRef nm(name);
-        if (nm == "callee") {
+        if (key == MLIR_KEY_CALLEE) {
             if (auto c = call.getCalleeAttr()) return stash(c);
             return MLIR_INVALID_HANDLE;
         }
-        if (nm == "var_callee_type") {
+        if (key == MLIR_KEY_VAR_CALLEE_TYPE) {
             if (auto t = call.getVarCalleeTypeAttr()) return stash(t);
             return MLIR_INVALID_HANDLE;
         }
@@ -926,17 +969,11 @@ extern "C" MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_Context *ctx, MLI
     // return the underlying DenseIntElementsAttr unchanged so callers
     // see the full-width values instead of silently truncated i32s.
     if (mlir::isa<mlir::cf::SwitchOp>(op) &&
-        llvm::StringRef(name) == "case_values") {
+        key == MLIR_KEY_CASE_VALUES) {
         if (auto sw = mlir::dyn_cast<mlir::cf::SwitchOp>(op)) {
             if (auto cv = sw.getCaseValuesAttr()) {
                 auto elemTy = cv.getElementType();
-                if (elemTy.isInteger(32)) {
-                    llvm::SmallVector<int32_t, 8> vals;
-                    vals.reserve(cv.getNumElements());
-                    for (auto apv : cv.getValues<llvm::APInt>())
-                        vals.push_back((int32_t)apv.getSExtValue());
-                    return stash(mlir::DenseI32ArrayAttr::get(&mctx, vals));
-                }
+                if (elemTy.isInteger(32)) return stash(caseValuesAsI32(mctx, cv));
                 return stash(cv);
             }
         }
@@ -944,27 +981,18 @@ extern "C" MLIR_AttributeHandle MLIR_GetOpAttributeByName(MLIR_Context *ctx, MLI
     // Same round-trip for llvm.switch (the lift's switch when it runs on an
     // LLVM-dialect CFG).
     if (mlir::isa<mlir::LLVM::SwitchOp>(op) &&
-        llvm::StringRef(name) == "case_values") {
+        key == MLIR_KEY_CASE_VALUES) {
         if (auto sw = mlir::dyn_cast<mlir::LLVM::SwitchOp>(op)) {
             if (auto cv = sw.getCaseValuesAttr()) {
                 auto elemTy = cv.getElementType();
-                if (elemTy.isInteger(32)) {
-                    llvm::SmallVector<int32_t, 8> vals;
-                    vals.reserve(cv.getNumElements());
-                    for (auto apv : cv.getValues<llvm::APInt>())
-                        vals.push_back((int32_t)apv.getSExtValue());
-                    return stash(mlir::DenseI32ArrayAttr::get(&mctx, vals));
-                }
+                if (elemTy.isInteger(32)) return stash(caseValuesAsI32(mctx, cv));
                 return stash(cv);
             }
         }
     }
-    if (auto a = op->getAttr(name)) return stash(a);
+    if (auto a = op->getAttr(nameAttr)) return stash(a);
     auto dict = op->getAttrDictionary();
-    if (auto na = dict.getNamed(name)) {
-        keep.emplace_back(std::make_unique<mlir::NamedAttribute>(*na));
-        return reinterpret_cast<uintptr_t>(keep.back().get());
-    }
+    if (auto na = dict.getNamed(name)) return attrH(na->getValue());
     return MLIR_INVALID_HANDLE;
 }
 extern "C" size_t MLIR_GetOpNumRegions(MLIR_Context *ctx, MLIR_OpHandle h) {
@@ -1491,87 +1519,72 @@ extern "C" MLIR_OpHandle MLIR_ParseTextUpstream(MLIR_Context *ctx, string text) 
 }
 
 // -----------------------------------------------------------------------------
-// Attribute — handle is a heap mlir::NamedAttribute*
+// Attribute — the handle is the mlir::Attribute (see attrH)
 // -----------------------------------------------------------------------------
 
-// The handle is a NamedAttribute owned by the context.
-static MLIR_AttributeHandle makeNamedAttr(MLIR_Context *c, llvm::StringRef name,
-                                          mlir::Attribute value) {
-    return H(newNamedAttr(c, mlir::StringAttr::get(c, name), value));
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *cctx, int64_t value, MLIR_TypeHandle type) {
+    (void)cctx;
+    return attrH(mlir::IntegerAttr::get(typeF(type), value));
 }
-
-extern "C" MLIR_AttributeHandle MLIR_CreateAttributeInteger(MLIR_Context *cctx, string name, int64_t value, MLIR_TypeHandle type) {
-    return makeNamedAttr(cctx, llvm::StringRef(name.str, name.size),
-                         mlir::IntegerAttr::get(typeF(type), value));
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *cctx, double value, MLIR_TypeHandle type) {
+    (void)cctx;
+    return attrH(mlir::FloatAttr::get(typeF(type), value));
 }
-extern "C" MLIR_AttributeHandle MLIR_CreateAttributeFloat(MLIR_Context *cctx, string name, double value, MLIR_TypeHandle type) {
-    return makeNamedAttr(cctx, llvm::StringRef(name.str, name.size),
-                         mlir::FloatAttr::get(typeF(type), value));
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *cctx, bool value) {
+    return attrH(mlir::BoolAttr::get(cctx, value));
 }
-extern "C" MLIR_AttributeHandle MLIR_CreateAttributeBool(MLIR_Context *cctx, string name, bool value) {
-    MLIR_Context &ctx = *cctx;
-    return makeNamedAttr(cctx, llvm::StringRef(name.str, name.size),
-                         mlir::BoolAttr::get(&ctx, value));
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *cctx, string value) {
+    return attrH(mlir::StringAttr::get(cctx, llvm::StringRef(value.str, value.size)));
 }
-extern "C" MLIR_AttributeHandle MLIR_CreateAttributeString(MLIR_Context *cctx, string name, string value) {
-    MLIR_Context &ctx = *cctx;
-    return makeNamedAttr(cctx, llvm::StringRef(name.str, name.size),
-                         mlir::StringAttr::get(&ctx, llvm::StringRef(value.str, value.size)));
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *cctx) {
+    return attrH(mlir::LLVM::LinkageAttr::get(cctx, mlir::LLVM::Linkage::Internal));
 }
-extern "C" MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *cctx, string name) {
-    MLIR_Context &ctx = *cctx;
-    auto attr = mlir::LLVM::LinkageAttr::get(&ctx, mlir::LLVM::Linkage::Internal);
-    return makeNamedAttr(cctx, llvm::StringRef(name.str, name.size), attr);
-}
-extern "C" MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *cctx, string name,
-                                                           MLIR_AttributeHandle *elements,
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeArray(MLIR_Context *cctx,
+                                                           const MLIR_AttributeHandle *elements,
                                                            size_t count) {
-    MLIR_Context &ctx = *cctx;
     llvm::SmallVector<mlir::Attribute, 8> values;
     values.reserve(count);
-    for (size_t i = 0; i < count; i++) {
-        values.push_back(F<mlir::NamedAttribute>(elements[i])->getValue());
-    }
-    return makeNamedAttr(cctx, llvm::StringRef(name.str, name.size),
-                         mlir::ArrayAttr::get(&ctx, values));
+    for (size_t i = 0; i < count; i++) values.push_back(attrF(elements[i]));
+    return attrH(mlir::ArrayAttr::get(cctx, values));
 }
-extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *cctx, string name,
-                                                          MLIR_AttributeHandle *elements,
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDict(MLIR_Context *cctx,
+                                                          const MLIR_NamedAttr *entries,
                                                           size_t count) {
-    MLIR_Context &ctx = *cctx;
-    llvm::SmallVector<mlir::NamedAttribute, 8> entries;
-    entries.reserve(count);
-    for (size_t i = 0; i < count; i++) {
-        entries.push_back(*F<mlir::NamedAttribute>(elements[i]));
-    }
-    return makeNamedAttr(cctx, llvm::StringRef(name.str, name.size),
-                         mlir::DictionaryAttr::get(&ctx, entries));
+    llvm::SmallVector<mlir::NamedAttribute, 8> v;
+    v.reserve(count);
+    for (size_t i = 0; i < count; i++)
+        v.push_back(mlir::NamedAttribute(keyName(cctx, entries[i].key), attrF(entries[i].value)));
+    return attrH(mlir::DictionaryAttr::get(cctx, v));
 }
-extern "C" MLIR_AttributeHandle MLIR_CreateAttributeType(MLIR_Context *cctx, string name, MLIR_TypeHandle type) {
-    return makeNamedAttr(cctx, llvm::StringRef(name.str, name.size),
-                         mlir::TypeAttr::get(typeF(type)));
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeType(MLIR_Context *cctx, MLIR_TypeHandle type) {
+    (void)cctx;
+    return attrH(mlir::TypeAttr::get(typeF(type)));
 }
-extern "C" MLIR_AttributeHandle MLIR_CreateAttributeSymbolRef(MLIR_Context *cctx, string name, string value) {
-    MLIR_Context &ctx = *cctx;
-    return makeNamedAttr(cctx, llvm::StringRef(name.str, name.size),
-                         mlir::FlatSymbolRefAttr::get(&ctx,
-                             llvm::StringRef(value.str, value.size)));
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeSymbolRef(MLIR_Context *cctx, string value) {
+    return attrH(mlir::FlatSymbolRefAttr::get(cctx, llvm::StringRef(value.str, value.size)));
 }
 
-extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *cctx, string name,
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDenseI32Array(MLIR_Context *cctx,
                                                                     const int32_t *values, size_t count) {
-    MLIR_Context &ctx = *cctx;
     llvm::SmallVector<int32_t, 8> v(values, values + count);
-    return makeNamedAttr(cctx, llvm::StringRef(name.str, name.size),
-                         mlir::DenseI32ArrayAttr::get(&ctx, v));
+    return attrH(mlir::DenseI32ArrayAttr::get(cctx, v));
 }
 
-extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *cctx, string name,
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDenseI64Array(MLIR_Context *cctx,
                                                                     const int64_t *values, size_t count) {
-    MLIR_Context &ctx = *cctx;
     llvm::SmallVector<int64_t, 8> v(values, values + count);
-    return makeNamedAttr(cctx, llvm::StringRef(name.str, name.size),
-                         mlir::DenseI64ArrayAttr::get(&ctx, v));
+    return attrH(mlir::DenseI64ArrayAttr::get(cctx, v));
+}
+
+extern "C" MLIR_AttrKey MLIR_InternAttrKey(MLIR_Context *ctx, string name) {
+    API_CHECK(name.size > 0, "MLIR_InternAttrKey", "empty attribute name");
+    return attr_key_table_intern(&ctx->keyTable, name);
+}
+extern "C" MLIR_AttrKey MLIR_LookupAttrKey(MLIR_Context *ctx, string name) {
+    return attr_key_table_lookup(&ctx->keyTable, name);
+}
+extern "C" string MLIR_GetAttrKeyName(MLIR_Context *ctx, MLIR_AttrKey key) {
+    return attr_key_table_name(&ctx->keyTable, key);
 }
 
 extern "C" MLIR_TypeHandle MLIR_CreateTypeLLVMPointer(MLIR_Context *cctx) {
@@ -1763,9 +1776,9 @@ extern "C" MLIR_OpHandle MLIR_CreateLLVMGlobalArrayInit(MLIR_Context *cctx,
     return H(op.getOperation());
 }
 
-extern "C" MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle h) {
+extern "C" MLIR_AttrKind MLIR_GetAttributeKind(MLIR_Context *ctx, MLIR_AttributeHandle h) {
     API_CHECK(h != MLIR_INVALID_HANDLE, "MLIR_GetAttributeKind", "attribute handle is NULL");
-    auto value = F<mlir::NamedAttribute>(h)->getValue();
+    auto value = attrF(h);
     if (llvm::isa<mlir::StringAttr>(value))  return MLIR_ATTR_KIND_STRING;
     if (llvm::isa<mlir::FlatSymbolRefAttr>(value)) return MLIR_ATTR_KIND_STRING;
     if (llvm::isa<mlir::BoolAttr>(value))    return MLIR_ATTR_KIND_BOOL;
@@ -1776,35 +1789,32 @@ extern "C" MLIR_AttrKind MLIR_GetAttributeKind(MLIR_AttributeHandle h) {
     if (llvm::isa<mlir::TypeAttr>(value))    return MLIR_ATTR_KIND_TYPE;
     return MLIR_ATTR_KIND_OTHER;
 }
-extern "C" string MLIR_GetAttributeName(MLIR_AttributeHandle h) {
-    return mkRefString(F<mlir::NamedAttribute>(h)->getName().getValue());
+extern "C" int64_t MLIR_GetAttributeInteger(MLIR_Context *ctx, MLIR_AttributeHandle h) {
+    API_CHECK(h != MLIR_INVALID_HANDLE && llvm::isa<mlir::IntegerAttr>(attrF(h)), "MLIR_GetAttributeInteger", "not an integer or bool attribute");
+    return llvm::cast<mlir::IntegerAttr>(attrF(h)).getInt();
 }
-extern "C" int64_t MLIR_GetAttributeInteger(MLIR_AttributeHandle h) {
-    API_CHECK(h != MLIR_INVALID_HANDLE && llvm::isa<mlir::IntegerAttr>(F<mlir::NamedAttribute>(h)->getValue()), "MLIR_GetAttributeInteger", "not an integer or bool attribute");
-    return llvm::cast<mlir::IntegerAttr>(F<mlir::NamedAttribute>(h)->getValue()).getInt();
+extern "C" double MLIR_GetAttributeFloat(MLIR_Context *ctx, MLIR_AttributeHandle h) {
+    API_CHECK(h != MLIR_INVALID_HANDLE && llvm::isa<mlir::FloatAttr>(attrF(h)), "MLIR_GetAttributeFloat", "not a float attribute");
+    return llvm::cast<mlir::FloatAttr>(attrF(h)).getValueAsDouble();
 }
-extern "C" double MLIR_GetAttributeFloat(MLIR_AttributeHandle h) {
-    API_CHECK(h != MLIR_INVALID_HANDLE && llvm::isa<mlir::FloatAttr>(F<mlir::NamedAttribute>(h)->getValue()), "MLIR_GetAttributeFloat", "not a float attribute");
-    return llvm::cast<mlir::FloatAttr>(F<mlir::NamedAttribute>(h)->getValue()).getValueAsDouble();
-}
-extern "C" MLIR_TypeHandle MLIR_GetAttributeType(MLIR_AttributeHandle h) {
-    auto attr = F<mlir::NamedAttribute>(h)->getValue();
+extern "C" MLIR_TypeHandle MLIR_GetAttributeType(MLIR_Context *ctx, MLIR_AttributeHandle h) {
+    auto attr = attrF(h);
     if (auto ia = llvm::dyn_cast<mlir::IntegerAttr>(attr)) return typeH(ia.getType());
     if (auto fa = llvm::dyn_cast<mlir::FloatAttr>(attr))   return typeH(fa.getType());
     return MLIR_INVALID_HANDLE;
 }
-extern "C" MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_AttributeHandle h) {
-    auto attr = F<mlir::NamedAttribute>(h)->getValue();
+extern "C" MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_Context *ctx, MLIR_AttributeHandle h) {
+    auto attr = attrF(h);
     if (auto ta = llvm::dyn_cast<mlir::TypeAttr>(attr)) return typeH(ta.getValue());
     return MLIR_INVALID_HANDLE;
 }
-extern "C" bool MLIR_GetAttributeBool(MLIR_AttributeHandle h) {
-    API_CHECK(h != MLIR_INVALID_HANDLE && llvm::isa<mlir::BoolAttr>(F<mlir::NamedAttribute>(h)->getValue()), "MLIR_GetAttributeBool", "not a bool attribute");
-    return llvm::cast<mlir::BoolAttr>(F<mlir::NamedAttribute>(h)->getValue()).getValue();
+extern "C" bool MLIR_GetAttributeBool(MLIR_Context *ctx, MLIR_AttributeHandle h) {
+    API_CHECK(h != MLIR_INVALID_HANDLE && llvm::isa<mlir::BoolAttr>(attrF(h)), "MLIR_GetAttributeBool", "not a bool attribute");
+    return llvm::cast<mlir::BoolAttr>(attrF(h)).getValue();
 }
-extern "C" string MLIR_GetAttributeString(MLIR_AttributeHandle h) {
-    API_CHECK(MLIR_GetAttributeKind(h) == MLIR_ATTR_KIND_STRING || MLIR_GetAttributeKind(h) == MLIR_ATTR_KIND_OTHER, "MLIR_GetAttributeString", "not a string attribute");
-    auto value = F<mlir::NamedAttribute>(h)->getValue();
+extern "C" string MLIR_GetAttributeString(MLIR_Context *ctx, MLIR_AttributeHandle h) {
+    API_CHECK(MLIR_GetAttributeKind(ctx, h) == MLIR_ATTR_KIND_STRING || MLIR_GetAttributeKind(ctx, h) == MLIR_ATTR_KIND_OTHER, "MLIR_GetAttributeString", "not a string attribute");
+    auto value = attrF(h);
     if (auto s = llvm::dyn_cast<mlir::StringAttr>(value)) return mkRefString(s.getValue());
     // Other kinds have no stored text: return `@name` for a symbol
     // reference and the printed form otherwise (e.g. `#llvm.linkage<internal>`
@@ -1825,29 +1835,29 @@ extern "C" string MLIR_GetAttributeString(MLIR_AttributeHandle h) {
 extern "C" string MLIR_GetAttributeAsString(MLIR_Context *ctx, MLIR_AttributeHandle h) {
     std::string buf;
     llvm::raw_string_ostream os(buf);
-    F<mlir::NamedAttribute>(h)->getValue().print(os);
+    attrF(h).print(os);
     os.flush();
     return mkArenaString(ctx, buf);
 }
-extern "C" size_t MLIR_GetAttributeArraySize(MLIR_AttributeHandle h) {
-    API_CHECK(h != MLIR_INVALID_HANDLE && llvm::isa<mlir::ArrayAttr>(F<mlir::NamedAttribute>(h)->getValue()), "MLIR_GetAttributeArraySize", "not an array attribute");
-    return llvm::cast<mlir::ArrayAttr>(F<mlir::NamedAttribute>(h)->getValue()).size();
+extern "C" size_t MLIR_GetAttributeArraySize(MLIR_Context *ctx, MLIR_AttributeHandle h) {
+    API_CHECK(h != MLIR_INVALID_HANDLE && llvm::isa<mlir::ArrayAttr>(attrF(h)), "MLIR_GetAttributeArraySize", "not an array attribute");
+    return llvm::cast<mlir::ArrayAttr>(attrF(h)).size();
 }
-extern "C" MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_AttributeHandle h, size_t i) {
-    API_CHECK(i < MLIR_GetAttributeArraySize(h), "MLIR_GetAttributeArrayElement", "index out of range");
-    auto arr = llvm::cast<mlir::ArrayAttr>(F<mlir::NamedAttribute>(h)->getValue());
-    MLIR_Context *c = ctxOf(arr.getContext());
-    return H(newNamedAttr(c, mlir::StringAttr::get(c, ""), arr[i]));
+extern "C" MLIR_AttributeHandle MLIR_GetAttributeArrayElement(MLIR_Context *ctx, MLIR_AttributeHandle h, size_t i) {
+    API_CHECK(i < MLIR_GetAttributeArraySize(ctx, h), "MLIR_GetAttributeArrayElement", "index out of range");
+    return attrH(llvm::cast<mlir::ArrayAttr>(attrF(h))[i]);
 }
-extern "C" size_t MLIR_GetAttributeDictSize(MLIR_AttributeHandle h) {
-    API_CHECK(h != MLIR_INVALID_HANDLE && llvm::isa<mlir::DictionaryAttr>(F<mlir::NamedAttribute>(h)->getValue()), "MLIR_GetAttributeDictSize", "not a dictionary attribute");
-    return llvm::cast<mlir::DictionaryAttr>(F<mlir::NamedAttribute>(h)->getValue()).size();
+extern "C" size_t MLIR_GetAttributeDictSize(MLIR_Context *ctx, MLIR_AttributeHandle h) {
+    API_CHECK(h != MLIR_INVALID_HANDLE && llvm::isa<mlir::DictionaryAttr>(attrF(h)), "MLIR_GetAttributeDictSize", "not a dictionary attribute");
+    return llvm::cast<mlir::DictionaryAttr>(attrF(h)).size();
 }
-extern "C" MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_AttributeHandle h, size_t i) {
-    API_CHECK(i < MLIR_GetAttributeDictSize(h), "MLIR_GetAttributeDictElement", "index out of range");
-    auto dict = llvm::cast<mlir::DictionaryAttr>(F<mlir::NamedAttribute>(h)->getValue());
-    auto entries = dict.getValue();
-    return reinterpret_cast<uintptr_t>(&entries[i]);
+extern "C" MLIR_AttrKey MLIR_GetAttributeDictKey(MLIR_Context *ctx, MLIR_AttributeHandle h, size_t i) {
+    API_CHECK(i < MLIR_GetAttributeDictSize(ctx, h), "MLIR_GetAttributeDictKey", "index out of range");
+    return keyOf(ctx, llvm::cast<mlir::DictionaryAttr>(attrF(h)).getValue()[i].getName());
+}
+extern "C" MLIR_AttributeHandle MLIR_GetAttributeDictElement(MLIR_Context *ctx, MLIR_AttributeHandle h, size_t i) {
+    API_CHECK(i < MLIR_GetAttributeDictSize(ctx, h), "MLIR_GetAttributeDictElement", "index out of range");
+    return attrH(llvm::cast<mlir::DictionaryAttr>(attrF(h)).getValue()[i].getValue());
 }
 
 // -----------------------------------------------------------------------------
@@ -1882,7 +1892,7 @@ extern "C" MLIR_LocationHandle MLIR_CreateLocationRef(MLIR_Context *cctx, int /*
     return locH(mlir::UnknownLoc::get(cctx));
 }
 
-extern "C" MLIR_LocationKind MLIR_GetLocationKind(MLIR_LocationHandle h) {
+extern "C" MLIR_LocationKind MLIR_GetLocationKind(MLIR_Context *ctx, MLIR_LocationHandle h) {
     if (h == MLIR_INVALID_HANDLE) return MLIR_LOC_UNKNOWN;
     auto loc = locF(h);
     if (llvm::isa<mlir::FileLineColLoc>(loc)) return MLIR_LOC_FILE;
@@ -1891,25 +1901,25 @@ extern "C" MLIR_LocationKind MLIR_GetLocationKind(MLIR_LocationHandle h) {
     if (llvm::isa<mlir::FusedLoc>(loc))       return MLIR_LOC_FUSED;
     return MLIR_LOC_UNKNOWN;
 }
-extern "C" string MLIR_GetLocationOriginalText(MLIR_LocationHandle) {
+extern "C" string MLIR_GetLocationOriginalText(MLIR_Context *, MLIR_LocationHandle) {
     return mkRefString(llvm::StringRef());
 }
-extern "C" string MLIR_GetLocationFileFilename(MLIR_LocationHandle h) {
+extern "C" string MLIR_GetLocationFileFilename(MLIR_Context *ctx, MLIR_LocationHandle h) {
     if (auto fl = llvm::dyn_cast<mlir::FileLineColLoc>(locF(h)))
         return mkRefString(fl.getFilename().getValue());
     return mkRefString(llvm::StringRef());
 }
-extern "C" int MLIR_GetLocationFileLine(MLIR_LocationHandle h) {
+extern "C" int MLIR_GetLocationFileLine(MLIR_Context *ctx, MLIR_LocationHandle h) {
     if (auto fl = llvm::dyn_cast<mlir::FileLineColLoc>(locF(h)))
         return (int)fl.getLine();
     return 0;
 }
-extern "C" int MLIR_GetLocationFileColumn(MLIR_LocationHandle h) {
+extern "C" int MLIR_GetLocationFileColumn(MLIR_Context *ctx, MLIR_LocationHandle h) {
     if (auto fl = llvm::dyn_cast<mlir::FileLineColLoc>(locF(h)))
         return (int)fl.getColumn();
     return 0;
 }
-extern "C" string MLIR_GetLocationName(MLIR_LocationHandle h) {
+extern "C" string MLIR_GetLocationName(MLIR_Context *ctx, MLIR_LocationHandle h) {
     if (auto nl = llvm::dyn_cast<mlir::NameLoc>(locF(h)))
         return mkRefString(nl.getName().getValue());
     return mkRefString(llvm::StringRef());
