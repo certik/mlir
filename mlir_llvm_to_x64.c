@@ -326,6 +326,7 @@ static void store_mem(FnCtx *F, uint8_t addr, uint8_t src, int bytes) {
 // ---------------------------------------------------------------------------
 // type / constant helpers
 // ---------------------------------------------------------------------------
+// Bit width of an integer-typed value; 0 for pointers and other types.
 static int int_bits(MLIR_Context *ctx, MLIR_ValueHandle v) {
     string s = MLIR_GetTypeString(ctx, MLIR_GetValueType(ctx, v));
     if (s.size >= 1 && s.str[0] == 'i') {

@@ -462,16 +462,16 @@ static void emit_call(FnCtx *F, MLIR_OpHandle op) {
     // where variadic and fixed-arity ABIs differ.
     if (var_callee_type != MLIR_INVALID_HANDLE) {
         MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(var_callee_type);
-        bool is_vararg = MLIR_GetTypeFunctionIsVarArg(fty);
+        bool is_vararg = MLIR_GetTypeFunctionIsVarArg(F->ctx, fty);
         if (is_vararg) {
-            size_t ni = MLIR_GetTypeFunctionNumInputs(fty);
-            size_t no = MLIR_GetTypeFunctionNumResults(fty);
+            size_t ni = MLIR_GetTypeFunctionNumInputs(F->ctx, fty);
+            size_t no = MLIR_GetTypeFunctionNumResults(F->ctx, fty);
             if (no == 0) buf_cstr(out, "void");
-            else         print_type(out, F->ctx, MLIR_GetTypeFunctionResult(fty, 0));
+            else         print_type(out, F->ctx, MLIR_GetTypeFunctionResult(F->ctx, fty, 0));
             buf_cstr(out, " (");
             for (size_t i = 0; i < ni; i++) {
                 if (i) buf_cstr(out, ", ");
-                print_type(out, F->ctx, MLIR_GetTypeFunctionInput(fty, i));
+                print_type(out, F->ctx, MLIR_GetTypeFunctionInput(F->ctx, fty, i));
             }
             buf_cstr(out, ", ...)");
         } else {
@@ -991,8 +991,8 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
     MLIR_AttributeHandle ftya = find_attr(ctx, fn, "function_type");
     if (ftya != MLIR_INVALID_HANDLE) fty = MLIR_GetAttributeTypeValue(ftya);
 
-    size_t ni = fty != MLIR_INVALID_HANDLE ? MLIR_GetTypeFunctionNumInputs(fty) : 0;
-    size_t no = fty != MLIR_INVALID_HANDLE ? MLIR_GetTypeFunctionNumResults(fty) : 0;
+    size_t ni = fty != MLIR_INVALID_HANDLE ? MLIR_GetTypeFunctionNumInputs(ctx, fty) : 0;
+    size_t no = fty != MLIR_INVALID_HANDLE ? MLIR_GetTypeFunctionNumResults(ctx, fty) : 0;
 
     // Detect varargs by scanning the printed type (the function type
     // attribute records "..." when present).
@@ -1010,11 +1010,11 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
     if (!has_body) {
         buf_cstr(out, "declare ");
         if (no == 0) buf_cstr(out, "void");
-        else         print_type(out, ctx, MLIR_GetTypeFunctionResult(fty, 0));
+        else         print_type(out, ctx, MLIR_GetTypeFunctionResult(ctx, fty, 0));
         buf_printf(out, " @%.*s(", (int)sym.size, sym.str);
         for (size_t i = 0; i < ni; i++) {
             if (i) buf_cstr(out, ", ");
-            print_type(out, ctx, MLIR_GetTypeFunctionInput(fty, i));
+            print_type(out, ctx, MLIR_GetTypeFunctionInput(ctx, fty, i));
         }
         if (varargs) { if (ni) buf_cstr(out, ", "); buf_cstr(out, "..."); }
         buf_cstr(out, ")\n");
@@ -1024,7 +1024,7 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
     buf_cstr(out, "define ");
     if (is_private) buf_cstr(out, "internal ");
     if (no == 0) buf_cstr(out, "void");
-    else         print_type(out, ctx, MLIR_GetTypeFunctionResult(fty, 0));
+    else         print_type(out, ctx, MLIR_GetTypeFunctionResult(ctx, fty, 0));
     buf_printf(out, " @%.*s(", (int)sym.size, sym.str);
     // Parameters use the names assigned by assign_names ("%a0" etc.).
     FnCtx F; memset(&F, 0, sizeof F);
@@ -1033,7 +1033,7 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
     assign_names(&F, body);
     for (size_t i = 0; i < ni; i++) {
         if (i) buf_cstr(out, ", ");
-        print_type(out, ctx, MLIR_GetTypeFunctionInput(fty, i));
+        print_type(out, ctx, MLIR_GetTypeFunctionInput(ctx, fty, i));
         buf_putc(out, ' ');
         MLIR_BlockHandle entry = MLIR_GetRegionBlock(ctx, body, 0);
         MLIR_ValueHandle a = MLIR_GetBlockArg(ctx, entry, i);
@@ -1084,22 +1084,22 @@ static void print_const_bytes(Buf *out, MLIR_Context *ctx, MLIR_TypeHandle ty,
     for (unsigned i = 0; i < sz; i++) {
         if (b[i]) { zero = false; break; }
     }
-    if (MLIR_IsTypeLLVMArray(ty) || MLIR_IsTypeLLVMStruct(ty)) {
+    if ((MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_ARRAY) || (MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_STRUCT)) {
         if (zero) { buf_cstr(out, "zeroinitializer"); return; }
-        bool arr = MLIR_IsTypeLLVMArray(ty);
-        size_t n = arr ? (size_t)MLIR_GetTypeLLVMArrayNumElements(ty)
-                       : MLIR_GetTypeLLVMStructNumFields(ty);
+        bool arr = (MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_ARRAY);
+        size_t n = arr ? (size_t)MLIR_GetTypeNumElements(ctx, ty)
+                       : MLIR_GetTypeLLVMStructNumFields(ctx, ty);
         buf_cstr(out, arr ? "[" : "{ ");
         unsigned off = 0;  // the field's offset, kept running for a struct
         for (size_t i = 0; i < n; i++) {
             MLIR_TypeHandle et;
             if (arr) {
-                et = MLIR_GetTypeLLVMArrayElement(ty);
+                et = MLIR_GetTypeElement(ctx, ty);
                 off = (unsigned)i * llvm_type_size(ctx, et, 8);
             } else {
-                et = MLIR_GetTypeLLVMStructField(ty, i);
+                et = MLIR_GetTypeLLVMStructField(ctx, ty, i);
                 if (i > 0) {
-                    MLIR_TypeHandle pt = MLIR_GetTypeLLVMStructField(ty, i - 1);
+                    MLIR_TypeHandle pt = MLIR_GetTypeLLVMStructField(ctx, ty, i - 1);
                     off = llvm_align_up(off + llvm_type_size(ctx, pt, 8),
                                         llvm_type_align(ctx, et, 8));
                 }
@@ -1178,9 +1178,9 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
             // typed array constant.
             unsigned elem_w = 0;
             uint64_t arr_n = 0;
-            if (gty != MLIR_INVALID_HANDLE && MLIR_IsTypeLLVMArray(gty)) {
-                arr_n = MLIR_GetTypeLLVMArrayNumElements(gty);
-                MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(gty);
+            if (gty != MLIR_INVALID_HANDLE && (MLIR_GetTypeKind(ctx, gty) == MLIR_TYPE_KIND_LLVM_ARRAY)) {
+                arr_n = MLIR_GetTypeNumElements(ctx, gty);
+                MLIR_TypeHandle et = MLIR_GetTypeElement(ctx, gty);
                 string ets = MLIR_GetTypeString(ctx, et);
                 if (ets.size >= 2 && ets.str[0] == 'i') {
                     int w = 0;

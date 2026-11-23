@@ -5,6 +5,11 @@ intern i64: yes
 intern index: yes
 intern !llvm.ptr: yes
 intern i32==i64: no
+type kinds: i8=1/8 f32=2/32 bf16=3/16 ptr=10/0 index=4 invalid=0
+array: kind=12 elem=i8 n=12 rank=0; vector vector<2x4xf32>: kind=9 elem=f32 n=8 dims=2x4; tensor<3x?xi8>: rank=2 dims=3,-1 n=0
+structural types interned: yes
+struct S: kind=13 opaque=yes/no fields=2 field1=arr same name=yes other name=different
+llvm function: kind=14 inputs=2 input1=ptr results=0 vararg=yes interned=yes
 cf.br succ_op use registered: yes
 use owner is cf.br: yes
 SetOpOperand updates succ_op: yes

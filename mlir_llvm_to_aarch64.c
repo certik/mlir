@@ -1559,9 +1559,9 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
         size_t n_fixed = 0;
         if (vct != MLIR_INVALID_HANDLE) {
             MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(vct);
-            if (MLIR_GetTypeFunctionIsVarArg(ft)) {
+            if (MLIR_GetTypeFunctionIsVarArg(ctx, ft)) {
                 is_variadic = true;
-                n_fixed = MLIR_GetTypeFunctionNumInputs(ft);
+                n_fixed = MLIR_GetTypeFunctionNumInputs(ctx, ft);
             }
         }
         // For an indirect call operand 0 is the function-pointer value; the
@@ -1735,15 +1735,15 @@ static void lower_op(LowerCtx *L, MLIR_OpHandle op) {
             int64_t  cst = 0;
             if (i == 0) {
                 stride = a64_type_size(ctx, elem_ty);
-            } else if (MLIR_IsTypeLLVMStruct(cur_ty)) {
+            } else if (MLIR_GetTypeKind(ctx, cur_ty) == MLIR_TYPE_KIND_LLVM_STRUCT) {
                 if (is_dyn)
                     LFAIL("llvm->aarch64: dynamic struct index in gep\n");
                 unsigned foff = a64_struct_field_offset(ctx, cur_ty, (size_t)cidx[i]);
-                cur_ty = MLIR_GetTypeLLVMStructField(cur_ty, (size_t)cidx[i]);
+                cur_ty = MLIR_GetTypeLLVMStructField(ctx, cur_ty, (size_t)cidx[i]);
                 emit_gep_const_off(ctx, blk, (int64_t)foff);
                 continue;
-            } else if (MLIR_IsTypeLLVMArray(cur_ty)) {
-                MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(cur_ty);
+            } else if (MLIR_GetTypeKind(ctx, cur_ty) == MLIR_TYPE_KIND_LLVM_ARRAY) {
+                MLIR_TypeHandle et = MLIR_GetTypeElement(ctx, cur_ty);
                 stride = a64_type_size(ctx, et);
                 cur_ty = et;
             } else {

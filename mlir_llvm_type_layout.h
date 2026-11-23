@@ -30,13 +30,13 @@ static inline unsigned llvm_align_up(unsigned x, unsigned a) {
 
 static inline unsigned llvm_type_align(MLIR_Context *ctx, MLIR_TypeHandle ty,
                                        unsigned ptr_bytes) {
-    if (MLIR_IsTypeLLVMArray(ty))
-        return llvm_type_align(ctx, MLIR_GetTypeLLVMArrayElement(ty), ptr_bytes);
-    if (MLIR_IsTypeLLVMStruct(ty)) {
-        size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
+    if (MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_ARRAY)
+        return llvm_type_align(ctx, MLIR_GetTypeElement(ctx, ty), ptr_bytes);
+    if (MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_STRUCT) {
+        size_t nf = MLIR_GetTypeLLVMStructNumFields(ctx, ty);
         unsigned ma = 1;
         for (size_t i = 0; i < nf; i++) {
-            unsigned fa = llvm_type_align(ctx, MLIR_GetTypeLLVMStructField(ty, i), ptr_bytes);
+            unsigned fa = llvm_type_align(ctx, MLIR_GetTypeLLVMStructField(ctx, ty, i), ptr_bytes);
             if (fa > ma) ma = fa;
         }
         return ma;
@@ -50,7 +50,7 @@ static inline unsigned llvm_struct_field_offset(MLIR_Context *ctx, MLIR_TypeHand
                                                 size_t fld, unsigned ptr_bytes) {
     unsigned off = 0;
     for (size_t i = 0; i <= fld; i++) {
-        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(sty, i);
+        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(ctx, sty, i);
         off = llvm_align_up(off, llvm_type_align(ctx, ft, ptr_bytes));
         if (i == fld) return off;
         off += llvm_type_size(ctx, ft, ptr_bytes);
@@ -63,14 +63,14 @@ static inline unsigned llvm_struct_field_offset(MLIR_Context *ctx, MLIR_TypeHand
 // none, a GNU C empty struct).
 static inline bool llvm_type_is_empty(MLIR_Context *ctx, MLIR_TypeHandle ty,
                                       unsigned ptr_bytes) {
-    if (MLIR_IsTypeLLVMArray(ty)) {
-        MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(ty);
+    if (MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_ARRAY) {
+        MLIR_TypeHandle et = MLIR_GetTypeElement(ctx, ty);
         if (llvm_type_size(ctx, et, ptr_bytes) != 0)
-            return MLIR_GetTypeLLVMArrayNumElements(ty) == 0;
+            return MLIR_GetTypeNumElements(ctx, ty) == 0;
         return llvm_type_is_empty(ctx, et, ptr_bytes);
     }
-    if (MLIR_IsTypeLLVMStruct(ty)) {
-        size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
+    if (MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_STRUCT) {
+        size_t nf = MLIR_GetTypeLLVMStructNumFields(ctx, ty);
         if (nf == 0) {
             // An opaque struct (no body, `!llvm.struct<"S", opaque>`) has
             // no size at all.
@@ -79,7 +79,7 @@ static inline bool llvm_type_is_empty(MLIR_Context *ctx, MLIR_TypeHandle ty,
                 return false;
         }
         for (size_t i = 0; i < nf; i++) {
-            if (!llvm_type_is_empty(ctx, MLIR_GetTypeLLVMStructField(ty, i), ptr_bytes))
+            if (!llvm_type_is_empty(ctx, MLIR_GetTypeLLVMStructField(ctx, ty, i), ptr_bytes))
                 return false;
         }
         return true;
@@ -94,16 +94,16 @@ static inline unsigned llvm_type_size(MLIR_Context *ctx, MLIR_TypeHandle ty,
     // Aggregates first: their size comes from the element / field types, and
     // MLIR_GetTypeString() formats (and allocates) the whole nested type on
     // every call, which was a measurable share of compile time and memory.
-    if (MLIR_IsTypeLLVMArray(ty)) {
-        unsigned esz = llvm_type_size(ctx, MLIR_GetTypeLLVMArrayElement(ty), ptr_bytes);
+    if (MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_ARRAY) {
+        unsigned esz = llvm_type_size(ctx, MLIR_GetTypeElement(ctx, ty), ptr_bytes);
         if (esz == 0) return 0;
-        return esz * (unsigned)MLIR_GetTypeLLVMArrayNumElements(ty);
+        return esz * (unsigned)MLIR_GetTypeNumElements(ctx, ty);
     }
-    if (MLIR_IsTypeLLVMStruct(ty)) {
-        size_t nf = MLIR_GetTypeLLVMStructNumFields(ty);
+    if (MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_STRUCT) {
+        size_t nf = MLIR_GetTypeLLVMStructNumFields(ctx, ty);
         unsigned off = 0, max_align = 1;
         for (size_t i = 0; i < nf; i++) {
-            MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(ty, i);
+            MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(ctx, ty, i);
             unsigned fsz = llvm_type_size(ctx, ft, ptr_bytes);
             unsigned fal = llvm_type_align(ctx, ft, ptr_bytes);
             // A zero-length array (`int tail[0];`) is a valid size of 0.

@@ -100,8 +100,8 @@ string MLIR_GetOpTypeName(MLIR_Context *ctx, MLIR_OpType type);
 // Context
 // -----------------------------------------------------------------------------
 //
-// The context owns everything that is not IR: the uniqued types (in a
-// persistent arena of its own), the diagnostic handler and, on the upstream
+// The context owns everything that is not IR: the uniqued types (natively
+// in a table of its own), the diagnostic handler and, on the upstream
 // backend, the mlir::MLIRContext and every cache the backend keeps. Neither
 // backend has process-wide mutable state, so contexts are independent of each
 // other.
@@ -115,8 +115,8 @@ string MLIR_GetOpTypeName(MLIR_Context *ctx, MLIR_OpType type);
 // themselves in context-owned vectors, which live until the context is
 // destroyed; their lists, the attributes and the locations are in the arena.)
 //
-// Handles are opaque: natively an op, region, block or value handle is a
-// 32-bit index into the context's storage (0 is MLIR_INVALID_HANDLE), and
+// Handles are opaque: natively an op, region, block, value or type handle is
+// a 32-bit index into the context's storage (0 is MLIR_INVALID_HANDLE), and
 // upstream it is a pointer. Do not order them or assume alignment; compare
 // them only for equality. An op handle (and the handles of its results and
 // regions) is valid until the op is erased (MLIR_EraseOp), its arena is
@@ -127,8 +127,8 @@ string MLIR_GetOpTypeName(MLIR_Context *ctx, MLIR_OpType type);
 // that created it as its first parameter, even when it only reads: a backend
 // may store these handles as indices into context-owned storage, and
 // resolving an index needs the context (doc/mlir_api_design.md section 2.2).
-// The upstream backend ignores it. The getters of types, attributes and
-// locations do not take it.
+// The upstream backend ignores it. The type getters take it too (see "Type
+// API"); the getters of attributes and locations do not yet.
 
 typedef struct MLIR_ContextOptions {
     // The initial IR arena, owned by the caller. May be NULL; set one with
@@ -417,28 +417,77 @@ MLIR_TypeHandle MLIR_CreateTypeLLVMFunction(MLIR_Context *ctx,
 // LLVM `void` type — only valid as the result of an LLVMFunctionType.
 MLIR_TypeHandle MLIR_CreateTypeLLVMVoid(MLIR_Context *ctx);
 
-// Introspection & formatting
-bool MLIR_IsTypeInteger(MLIR_TypeHandle type);
-bool MLIR_IsTypeFloat(MLIR_TypeHandle type);
-size_t MLIR_GetTypeFunctionNumInputs(MLIR_TypeHandle type);
-MLIR_TypeHandle MLIR_GetTypeFunctionInput(MLIR_TypeHandle type, size_t idx);
-size_t MLIR_GetTypeFunctionNumResults(MLIR_TypeHandle type);
-MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_TypeHandle type, size_t idx);
+// Vector type: vector<d0 x d1 x ... x element>, rank >= 1, every dimension
+// static (> 0), a valid element type. `shape` is copied.
+MLIR_TypeHandle MLIR_CreateTypeVector(MLIR_Context *ctx, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type);
+
+// Introspection
+//
+// Every type getter takes the context that created the type, like the IR
+// getters: natively a type handle is a 32-bit index into the context's type
+// table (0 is MLIR_INVALID_HANDLE), and the kind, width, element and element
+// count of every type sit in a table indexed by it, so each of
+// MLIR_GetTypeKind, MLIR_GetTypeWidth, MLIR_GetTypeElement and
+// MLIR_GetTypeNumElements is one array read. Types are uniqued per context on
+// both backends: two handles of one context are equal exactly when the types
+// are (identified LLVM structs: when the names are), so type equality is a
+// handle comparison. Upstream handles are mlir::Type pointers and the context
+// is only checked (MLIR_API_CHECKS).
+typedef enum {
+    MLIR_TYPE_KIND_INVALID = 0,   // MLIR_INVALID_HANDLE
+    MLIR_TYPE_KIND_INTEGER,       // iN (signless); width N
+    MLIR_TYPE_KIND_FLOAT,         // f16, f32, f64 (IEEE); width 16, 32, 64
+    MLIR_TYPE_KIND_BF16,          // bf16; width 16
+    MLIR_TYPE_KIND_INDEX,
+    MLIR_TYPE_KIND_NONE,          // the placeholder type (MLIR_CreateTypeUnknown)
+    MLIR_TYPE_KIND_FUNCTION,      // builtin function type
+    MLIR_TYPE_KIND_TENSOR,        // ranked tensor
+    MLIR_TYPE_KIND_MEMREF,
+    MLIR_TYPE_KIND_VECTOR,
+    MLIR_TYPE_KIND_LLVM_POINTER,  // !llvm.ptr, any address space
+    MLIR_TYPE_KIND_LLVM_VOID,
+    MLIR_TYPE_KIND_LLVM_ARRAY,
+    MLIR_TYPE_KIND_LLVM_STRUCT,
+    MLIR_TYPE_KIND_LLVM_FUNCTION,
+    MLIR_TYPE_KIND_OPAQUE         // any other type (e.g. !tt.ptr, opaque types)
+} MLIR_TypeKind;
+
+MLIR_TypeKind MLIR_GetTypeKind(MLIR_Context *ctx, MLIR_TypeHandle type);
+// Bit width of an integer or float type (iN: N; f16/bf16: 16; ...); 0 for
+// every other kind (including index and pointers, whose width is the
+// target's).
+uint32_t MLIR_GetTypeWidth(MLIR_Context *ctx, MLIR_TypeHandle type);
+// Element type of an LLVM array, vector, tensor or memref type; invalid for
+// every other kind.
+MLIR_TypeHandle MLIR_GetTypeElement(MLIR_Context *ctx, MLIR_TypeHandle type);
+// Number of elements of an LLVM array or vector type (the product of a
+// vector's dimensions); 0 for every other kind.
+uint64_t MLIR_GetTypeNumElements(MLIR_Context *ctx, MLIR_TypeHandle type);
+// Rank and dimensions of a tensor, memref or vector type (a dynamic dimension
+// is -1); rank 0 for every other kind.
+size_t MLIR_GetTypeShapeRank(MLIR_Context *ctx, MLIR_TypeHandle type);
+int64_t MLIR_GetTypeShapeDim(MLIR_Context *ctx, MLIR_TypeHandle type, size_t idx);
+
+// Builtin and LLVM function types. An LLVM function type has one result, or
+// none when it returns void.
+size_t MLIR_GetTypeFunctionNumInputs(MLIR_Context *ctx, MLIR_TypeHandle type);
+MLIR_TypeHandle MLIR_GetTypeFunctionInput(MLIR_Context *ctx, MLIR_TypeHandle type, size_t idx);
+size_t MLIR_GetTypeFunctionNumResults(MLIR_Context *ctx, MLIR_TypeHandle type);
+MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_Context *ctx, MLIR_TypeHandle type, size_t idx);
 // True if the type is an `LLVMFunctionType` whose `isVarArg` flag is set.
 // Returns false for the standard `FunctionType` (which is never variadic).
-bool MLIR_GetTypeFunctionIsVarArg(MLIR_TypeHandle type);
-// Element type of a tensor/memref/vector type, or invalid if the type is
-// not a shaped type.
-MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle type);
-// LLVM struct/array type introspection. Used by lowering passes that
-// need to compute byte offsets and sizes (e.g. native LLVM->WASM).
-bool            MLIR_IsTypeLLVMStruct(MLIR_TypeHandle type);
-size_t          MLIR_GetTypeLLVMStructNumFields(MLIR_TypeHandle type);
-MLIR_TypeHandle MLIR_GetTypeLLVMStructField(MLIR_TypeHandle type, size_t idx);
-bool            MLIR_IsTypeLLVMArray(MLIR_TypeHandle type);
-MLIR_TypeHandle MLIR_GetTypeLLVMArrayElement(MLIR_TypeHandle type);
-uint64_t        MLIR_GetTypeLLVMArrayNumElements(MLIR_TypeHandle type);
-uint32_t        MLIR_GetTypeLLVMPointerAddressSpace(MLIR_TypeHandle type);
+bool MLIR_GetTypeFunctionIsVarArg(MLIR_Context *ctx, MLIR_TypeHandle type);
+// LLVM struct introspection. Used by lowering passes that need to compute
+// byte offsets and sizes (e.g. native LLVM->WASM). The name is "" for a
+// literal struct; an identified struct is opaque until its body is set.
+size_t          MLIR_GetTypeLLVMStructNumFields(MLIR_Context *ctx, MLIR_TypeHandle type);
+MLIR_TypeHandle MLIR_GetTypeLLVMStructField(MLIR_Context *ctx, MLIR_TypeHandle type, size_t idx);
+string          MLIR_GetTypeLLVMStructName(MLIR_Context *ctx, MLIR_TypeHandle type);
+bool            MLIR_IsTypeLLVMStructOpaque(MLIR_Context *ctx, MLIR_TypeHandle type);
+uint32_t        MLIR_GetTypeLLVMPointerAddressSpace(MLIR_Context *ctx, MLIR_TypeHandle type);
+
+// The printed form of a type, for printers and diagnostics; classify types
+// with the getters above instead. Allocated in the current IR arena.
 string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle type);
 
 // -----------------------------------------------------------------------------

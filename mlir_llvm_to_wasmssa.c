@@ -1756,12 +1756,12 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
 
         if (var_callee_type != MLIR_INVALID_HANDLE) {
             MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(var_callee_type);
-            if (MLIR_GetTypeFunctionIsVarArg(fty)) {
+            if (MLIR_GetTypeFunctionIsVarArg(F->ctx, fty)) {
                 // Variadic direct call: pack variadic args into the
                 // function's variadic buffer (allocated in the shadow
                 // stack frame) and pass its address as a hidden trailing
                 // i32 arg in place of the `...` operands.
-                size_t nfixed = MLIR_GetTypeFunctionNumInputs(fty);
+                size_t nfixed = MLIR_GetTypeFunctionNumInputs(F->ctx, fty);
                 size_t no = MLIR_GetOpNumOperands(F->ctx, op);
                 size_t nvar = no - nfixed;
                 uint32_t total = 0; size_t nf2 = 0;
@@ -1944,16 +1944,16 @@ static bool lower_op_inner(FnCtx *F, MLIR_OpHandle op) {
                     MLIR_ValueHandle k = emit_const_i32(F, (int32_t)((int64_t)cidx[i] * (int32_t)esz));
                     addr = emit_add_i32(F, addr, k);
                 }
-            } else if (MLIR_IsTypeLLVMStruct(cur_ty)) {
+            } else if (MLIR_GetTypeKind(F->ctx, cur_ty) == MLIR_TYPE_KIND_LLVM_STRUCT) {
                 if (is_dyn) return false;
                 unsigned off = struct_field_offset(F->ctx, cur_ty, (size_t)cidx[i]);
                 if (off != 0) {
                     MLIR_ValueHandle k = emit_const_i32(F, (int32_t)off);
                     addr = emit_add_i32(F, addr, k);
                 }
-                cur_ty = MLIR_GetTypeLLVMStructField(cur_ty, (size_t)cidx[i]);
-            } else if (MLIR_IsTypeLLVMArray(cur_ty)) {
-                MLIR_TypeHandle et = MLIR_GetTypeLLVMArrayElement(cur_ty);
+                cur_ty = MLIR_GetTypeLLVMStructField(F->ctx, cur_ty, (size_t)cidx[i]);
+            } else if (MLIR_GetTypeKind(F->ctx, cur_ty) == MLIR_TYPE_KIND_LLVM_ARRAY) {
+                MLIR_TypeHandle et = MLIR_GetTypeElement(F->ctx, cur_ty);
                 unsigned esz = type_size_bytes(F->ctx, et);
                 if (esz == 0) return false;
                 if (is_dyn) {
@@ -2220,8 +2220,8 @@ static bool va_call_layout(FnCtx *F, MLIR_OpHandle op, uint32_t *total_size,
     MLIR_AttributeHandle vct = MLIR_GetOpAttributeByName(F->ctx, op, "var_callee_type");
     if (vct == MLIR_INVALID_HANDLE) return false;
     MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(vct);
-    if (!MLIR_GetTypeFunctionIsVarArg(fty)) return false;
-    size_t nf = MLIR_GetTypeFunctionNumInputs(fty);
+    if (!MLIR_GetTypeFunctionIsVarArg(F->ctx, fty)) return false;
+    size_t nf = MLIR_GetTypeFunctionNumInputs(F->ctx, fty);
     size_t no = MLIR_GetOpNumOperands(F->ctx, op);
     if (no < nf) return false;
     uint32_t cur = 0;
@@ -2369,7 +2369,7 @@ static bool lower_function(MLIR_Context *ctx, Arena *arena, ModCtx *mod,
     bool is_vararg = false;
     if (ftya != MLIR_INVALID_HANDLE) {
         MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(ftya);
-        is_vararg = MLIR_GetTypeFunctionIsVarArg(fty);
+        is_vararg = MLIR_GetTypeFunctionIsVarArg(ctx, fty);
     }
     size_t orig_np = is_vararg ? n_params - 1 : n_params;
 
@@ -2471,20 +2471,20 @@ static bool sig_for_func(MLIR_Context *ctx, Arena *arena, MLIR_OpHandle fn,
     MLIR_AttributeHandle ftya = find_attr(ctx, fn, "function_type");
     if (ftya == MLIR_INVALID_HANDLE) return false;
     MLIR_TypeHandle fty = MLIR_GetAttributeTypeValue(ftya);
-    size_t ni = MLIR_GetTypeFunctionNumInputs(fty);
-    size_t no = MLIR_GetTypeFunctionNumResults(fty);
-    bool is_vararg = MLIR_GetTypeFunctionIsVarArg(fty);
+    size_t ni = MLIR_GetTypeFunctionNumInputs(ctx, fty);
+    size_t no = MLIR_GetTypeFunctionNumResults(ctx, fty);
+    bool is_vararg = MLIR_GetTypeFunctionIsVarArg(ctx, fty);
     size_t pn = ni + (is_vararg ? 1 : 0);
     uint8_t *p = (uint8_t *)arena_alloc(arena, pn ? pn : 1);
     for (size_t i = 0; i < ni; i++) {
-        uint8_t v = wasm_vt(ctx, MLIR_GetTypeFunctionInput(fty, i));
+        uint8_t v = wasm_vt(ctx, MLIR_GetTypeFunctionInput(ctx, fty, i));
         if (v == 0) return false;
         p[i] = v;
     }
     if (is_vararg) p[ni] = WT_I32;  // hidden va_list pointer
     uint8_t *r = (uint8_t *)arena_alloc(arena, no ? no : 1);
     for (size_t i = 0; i < no; i++) {
-        uint8_t v = wasm_vt(ctx, MLIR_GetTypeFunctionResult(fty, i));
+        uint8_t v = wasm_vt(ctx, MLIR_GetTypeFunctionResult(ctx, fty, i));
         if (v == 0) return false;
         r[i] = v;
     }

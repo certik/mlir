@@ -38,23 +38,6 @@ static void api_check_failed(const char *fn, const char *what) {
 // Internal concrete IR definitions
 
 typedef enum {
-    TYPE_KIND_UNKNOWN,
-    TYPE_KIND_OPAQUE,
-    TYPE_KIND_INTEGER,
-    TYPE_KIND_FLOAT,
-    TYPE_KIND_MEMREF,
-    TYPE_KIND_TENSOR,
-    TYPE_KIND_FUNCTION,
-    TYPE_KIND_INDEX,
-    TYPE_KIND_POINTER,
-    TYPE_KIND_LLVM_PTR,
-    TYPE_KIND_LLVM_VOID,
-    TYPE_KIND_LLVM_ARRAY,
-    TYPE_KIND_LLVM_STRUCT,
-    TYPE_KIND_LLVM_FUNCTION
-} TypeKind;
-
-typedef enum {
     LOC_KIND_UNKNOWN,
     LOC_KIND_FILE,
     LOC_KIND_NAME,
@@ -64,59 +47,6 @@ typedef enum {
 } LocationKind;
 
 // Internal struct definitions using handle fields
-
-typedef struct IR_Type {
-    TypeKind kind;
-    union {
-        struct {
-            uint32_t width;
-            bool is_signed;
-        } integer;
-        struct {
-            uint32_t width;
-            bool is_bfloat;
-        } floating;
-        struct {
-            MLIR_TypeHandle element_type;
-            int64_t *shape;
-            uint32_t rank;
-        } shaped;
-        struct {
-            MLIR_TypeHandle element_type;
-            uint32_t address_space;
-            bool has_address_space;
-        } pointer;
-        struct {
-            MLIR_TypeHandle *inputs;
-            size_t n_inputs;
-            MLIR_TypeHandle *results;
-            size_t n_results;
-        } function;
-        struct {
-            MLIR_TypeHandle element;
-            uint64_t count;
-        } llvm_array;
-        struct {
-            uint32_t address_space;
-        } llvm_pointer;
-        struct {
-            // Anonymous structs have name.size == 0. Identified structs are
-            // interned by name (see intern_llvm_struct in this file).
-            string name;
-            MLIR_TypeHandle *fields;
-            size_t n_fields;
-            bool body_set;
-        } llvm_struct;
-        struct {
-            // LLVM function type: exactly one return type (LLVM void marker
-            // when the function returns void), N input types, optional varargs.
-            MLIR_TypeHandle result;
-            MLIR_TypeHandle *inputs;
-            size_t n_inputs;
-            bool is_var_arg;
-        } llvm_function;
-    } data;
-} IR_Type;
 
 typedef struct IR_Attribute {
     enum {
@@ -171,8 +101,9 @@ typedef struct IR_Location {
 //   - extra: 32-bit words; an op's region indices, then a (block, operand
 //     count) pair per successor.
 //   - ptrs: pointer-sized words; an op's attribute handles (attributes are
-//     arena pointers until they are interned as indices, #350), and the
-//     explicit result types of the rare op whose results do not carry them.
+//     arena pointers until they are interned as indices, #350).
+// The explicit result types of the rare op whose results do not carry them
+// are type indices in `extra` too.
 // A block's op and argument lists and a region's block list are arrays of
 // 32-bit indices in the IR arena. Erased ops stay as empty slots: there is no
 // free list and no compaction.
@@ -206,14 +137,13 @@ typedef struct IR_Operand {
 #define VAL_INDEX_MASK 0x3fffffffu
 
 typedef struct IR_Value {
-    MLIR_TypeHandle type;
     MLIR_LocationHandle location;
+    uint32_t type;       // type index, 0 = none
     uint32_t def;        // op index (result) or block index (block argument)
     uint32_t index;      // result/argument index | VAL_* flags
     uint32_t first_use;  // operand index, 0 = no uses
     uint32_t n_uses;
     uint32_t name;       // register name: index into ctx->names, 0 = none
-    uint32_t pad;
 } IR_Value;
 
 // IR_Op.flags
@@ -245,7 +175,7 @@ typedef struct IR_OpAux {
     MLIR_LocationHandle unnumbered_loc_def;
     string trailing_comment;
     int32_t source_line_start;
-    uint32_t first_result_type;  // ptrs index
+    uint32_t first_result_type;  // extra index (type indices)
     uint32_t n_result_types;
     bool explicit_result_types;
 } IR_OpAux;
@@ -268,9 +198,43 @@ typedef struct IR_Region {
     uint32_t pad;
 } IR_Region;
 
+// --- Types (#349) -------------------------------------------------------------
+//
+// Types are hash-consed into the context's `types` vector, and a type handle
+// is the index of its record, so equal types have equal handles. A record
+// holds everything the getters return (kind, width, element type, element
+// count), so each of them is one array read; the variable-length parts
+// (function inputs and results, struct fields, shape dimensions) are words
+// of the `tyx` vector. Every child type is interned before its parent, so a
+// type hashes over its kind, its scalar fields and its children's indices.
+// Identified LLVM structs are interned by name instead, and their body (the
+// fields) is set once, after creation. Types are never removed.
+
+#define TYF_VAR_ARG    1u  // LLVM function type: variadic
+#define TYF_IDENTIFIED 2u  // LLVM struct: identified (interned by name)
+#define TYF_BODY_SET   4u  // identified LLVM struct: the body has been set
+#define TYF_TT_PTR     8u  // OPAQUE: a !tt.ptr<pointee[, address space]>
+#define TYF_HAS_AS     16u // !tt.ptr: the address space is printed
+
+typedef struct IR_Type {
+    uint8_t kind;     // MLIR_TypeKind
+    uint8_t flags;    // TYF_*
+    uint16_t pad;
+    uint32_t width;   // integer and float types only (MLIR_GetTypeWidth)
+    uint32_t elem;    // element type of an LLVM array, vector, tensor, memref
+    uint32_t aux;     // pointer address space; function: number of results;
+                      // identified struct: name (tnames index)
+    uint32_t first;   // tyx index of the child words
+    uint32_t n;       // number of child words: function inputs then results;
+                      // LLVM function result then inputs; struct fields;
+                      // shape dimensions (two words each); tt.ptr pointee
+    uint64_t count;   // LLVM array or vector: number of elements
+} IR_Type;
+
 // The context. Everything that is not IR lives here; there is no
-// process-wide state. Types (and the arrays they point to) are allocated in
-// `persistent`, which the context owns, so they outlive every IR arena.
+// process-wide state. The context owns `persistent` (this struct, the names
+// of op types and identified structs) and the type vectors, so types outlive
+// every IR arena.
 struct MLIR_Context {
     Arena *arena;          // current IR arena (owned by the caller)
     Arena *persistent;     // owned: this struct, types, the interning tables
@@ -278,15 +242,15 @@ struct MLIR_Context {
     uint32_t salt;         // MLIR_API_CHECKS handle salt (see h_make)
     // The IR vectors (see above), owned by the context.
     IR_Vec ops, vals, opnds, extra, ptrs, blocks, regions, op_aux, names;
-    // Uniqued types, compared structurally by intern_type.
-    MLIR_TypeHandle *type_handles;
-    size_t n_types;
-    size_t cap_types;
-    // Identified LLVM structs, uniqued by name.
-    MLIR_TypeHandle *struct_handles;
-    string *struct_names;
-    size_t n_structs;
-    size_t cap_structs;
+    // The uniqued types (see "Types" below): the type records, their child
+    // words, the names of identified structs and the hash table that
+    // uniques them.
+    IR_Vec types, tyx, tnames;
+    uint32_t *tmap;        // open addressing, type indices, 0 = empty
+    uint32_t tmap_cap;     // a power of two
+    uint32_t tmap_n;
+    uint32_t int_types[65];  // iN for N <= 64, 0 = not created yet
+    uint32_t ptr_type;       // !llvm.ptr, 0 = not created yet
     // Diagnostic handler; NULL means the default (print to stderr).
     MLIR_DiagnosticHandler diag_fn;
     void *diag_user;
@@ -304,6 +268,9 @@ struct MLIR_Context {
 #define REGIONS(c) ((IR_Region *)(c)->regions.data)
 #define OPAUX(c)   ((IR_OpAux *)(c)->op_aux.data)
 #define NAMES(c)   ((string *)(c)->names.data)
+#define TYPES(c)   ((IR_Type *)(c)->types.data)
+#define TYX(c)     ((uint32_t *)(c)->tyx.data)
+#define TNAMES(c)  ((string *)(c)->tnames.data)
 
 // The one growth hook: makes room for `need` elements. The capacity at least
 // doubles (or becomes `need`, if that is more) and uses all of the buddy
@@ -377,6 +344,7 @@ static inline uint32_t vec_push(IR_Vec *v, uint32_t k) {
 #define HK_VALUE 2u
 #define HK_BLOCK 3u
 #define HK_REGION 4u
+#define HK_TYPE 5u
 #define H_SHIFT 28
 #define H_MASK 0x0fffffffu
 static uint32_t h_index(MLIR_Context *c, uintptr_t h, uint32_t kind, uint32_t n, const char *fn) {
@@ -395,19 +363,23 @@ static inline uintptr_t h_make(MLIR_Context *c, uint32_t i, uint32_t kind) {
 #define VAL_IDX(c, h, fn)    h_index((c), (h), HK_VALUE, (c)->vals.n, (fn))
 #define BLOCK_IDX(c, h, fn)  h_index((c), (h), HK_BLOCK, (c)->blocks.n, (fn))
 #define REGION_IDX(c, h, fn) h_index((c), (h), HK_REGION, (c)->regions.n, (fn))
+#define TYPE_IDX(c, h, fn)   h_index((c), (h), HK_TYPE, (c)->types.n, (fn))
 #define OP_H(c, i)     ((MLIR_OpHandle)h_make((c), (i), HK_OP))
 #define VAL_H(c, i)    ((MLIR_ValueHandle)h_make((c), (i), HK_VALUE))
 #define BLOCK_H(c, i)  ((MLIR_BlockHandle)h_make((c), (i), HK_BLOCK))
 #define REGION_H(c, i) ((MLIR_RegionHandle)h_make((c), (i), HK_REGION))
+#define TYPE_H(c, i)   ((MLIR_TypeHandle)h_make((c), (i), HK_TYPE))
 #else
 #define OP_IDX(c, h, fn)     ((uint32_t)(h))
 #define VAL_IDX(c, h, fn)    ((uint32_t)(h))
 #define BLOCK_IDX(c, h, fn)  ((uint32_t)(h))
 #define REGION_IDX(c, h, fn) ((uint32_t)(h))
+#define TYPE_IDX(c, h, fn)   ((uint32_t)(h))
 #define OP_H(c, i)     ((MLIR_OpHandle)(i))
 #define VAL_H(c, i)    ((MLIR_ValueHandle)(i))
 #define BLOCK_H(c, i)  ((MLIR_BlockHandle)(i))
 #define REGION_H(c, i) ((MLIR_RegionHandle)(i))
+#define TYPE_H(c, i)   ((MLIR_TypeHandle)(i))
 #endif
 
 // Under MLIR_API_CHECKS an erased op keeps this type, so every later use of
@@ -437,10 +409,6 @@ static void check_live_op(MLIR_Context *c, uint32_t o, const char *fn) {
         API_CHECK((ah) != MLIR_INVALID_HANDLE, fn, "attribute handle is NULL"); \
         API_CHECK(ok, fn, what); \
     } while (0)
-
-static inline IR_Type *resolve_type(MLIR_TypeHandle h) {
-    return h == MLIR_INVALID_HANDLE ? NULL : (IR_Type *)(uintptr_t)h;
-}
 
 static inline IR_Attribute *resolve_attr(MLIR_AttributeHandle h) {
     return h == MLIR_INVALID_HANDLE ? NULL : (IR_Attribute *)(uintptr_t)h;
@@ -510,19 +478,18 @@ static void operand_move(MLIR_Context *c, uint32_t from, uint32_t to) {
 // A new value record. A value has a use list if the context tracks uses
 // when it is created, or if it has a register name (as before #354).
 static uint32_t value_create(MLIR_Context *c, uint32_t def, uint32_t index,
-                             MLIR_TypeHandle type, MLIR_LocationHandle loc,
+                             uint32_t type, MLIR_LocationHandle loc,
                              string register_name) {
     uint32_t v = vec_push(&c->vals, 1);
     IR_Value *p = &VALS(c)[v];
-    p->type = type;
     p->location = loc;
+    p->type = type;
     p->def = def;
     p->index = index & VAL_INDEX_MASK;
     if (!c->no_def_use_tracking || register_name.size != 0) p->index |= VAL_TRACKED;
     p->first_use = 0;
     p->n_uses = 0;
     p->name = 0;
-    p->pad = 0;
     if (register_name.size != 0) {
         uint32_t n = vec_push(&c->names, 1);
         NAMES(c)[n] = register_name;
@@ -575,140 +542,139 @@ static void u32_remove(uint32_t *arr, uint32_t *n, uint32_t x) {
     *n = *n - 1;
 }
 
-// Compare two IR_Type structures for value-equality. Used to intern
-// types so that two semantically-equivalent types share the same
-// MLIR_TypeHandle (matching upstream MLIR's IntegerType::get etc.).
-// This makes `t1 == t2` a valid type-identity check across the API —
-// e.g., the get_undef_value / get_switch_value caches in the
-// cf->scf lifter rely on it.
-static bool type_eq(const IR_Type *a, const IR_Type *b) {
-    if (a->kind != b->kind) return false;
-    switch (a->kind) {
-        case TYPE_KIND_UNKNOWN:
-        case TYPE_KIND_OPAQUE:
-        case TYPE_KIND_INDEX:
-        case TYPE_KIND_LLVM_VOID:
-            return true;
-        case TYPE_KIND_INTEGER:
-            return a->data.integer.width == b->data.integer.width &&
-                   a->data.integer.is_signed == b->data.integer.is_signed;
-        case TYPE_KIND_FLOAT:
-            return a->data.floating.width == b->data.floating.width &&
-                   a->data.floating.is_bfloat == b->data.floating.is_bfloat;
-        case TYPE_KIND_TENSOR:
-        case TYPE_KIND_MEMREF:
-            if (a->data.shaped.element_type != b->data.shaped.element_type) return false;
-            if (a->data.shaped.rank != b->data.shaped.rank) return false;
-            if (a->data.shaped.rank == 0) return true;
-            if (!a->data.shaped.shape || !b->data.shaped.shape)
-                return a->data.shaped.shape == b->data.shaped.shape;
-            return memcmp(a->data.shaped.shape, b->data.shaped.shape,
-                          (size_t)a->data.shaped.rank * sizeof(int64_t)) == 0;
-        case TYPE_KIND_POINTER:
-            return a->data.pointer.element_type == b->data.pointer.element_type &&
-                   a->data.pointer.has_address_space == b->data.pointer.has_address_space &&
-                   a->data.pointer.address_space == b->data.pointer.address_space;
-        case TYPE_KIND_LLVM_PTR:
-            return a->data.llvm_pointer.address_space ==
-                   b->data.llvm_pointer.address_space;
-        case TYPE_KIND_LLVM_ARRAY:
-            return a->data.llvm_array.element == b->data.llvm_array.element &&
-                   a->data.llvm_array.count == b->data.llvm_array.count;
-        case TYPE_KIND_LLVM_FUNCTION:
-            if (a->data.llvm_function.result != b->data.llvm_function.result) return false;
-            if (a->data.llvm_function.is_var_arg != b->data.llvm_function.is_var_arg) return false;
-            if (a->data.llvm_function.n_inputs != b->data.llvm_function.n_inputs) return false;
-            if (a->data.llvm_function.n_inputs == 0) return true;
-            return memcmp(a->data.llvm_function.inputs, b->data.llvm_function.inputs,
-                          a->data.llvm_function.n_inputs * sizeof(MLIR_TypeHandle)) == 0;
-        case TYPE_KIND_FUNCTION:
-            if (a->data.function.n_inputs != b->data.function.n_inputs) return false;
-            if (a->data.function.n_results != b->data.function.n_results) return false;
-            if (a->data.function.n_inputs > 0 &&
-                memcmp(a->data.function.inputs, b->data.function.inputs,
-                       a->data.function.n_inputs * sizeof(MLIR_TypeHandle)) != 0) return false;
-            if (a->data.function.n_results > 0 &&
-                memcmp(a->data.function.results, b->data.function.results,
-                       a->data.function.n_results * sizeof(MLIR_TypeHandle)) != 0) return false;
-            return true;
-        case TYPE_KIND_LLVM_STRUCT:
-            // Identified (name.size > 0) handled by intern_llvm_struct.
-            // We don't intern LLVM struct types through this path; the
-            // dedicated intern_llvm_struct keeps name->handle identity.
-            return false;
-    }
-    return false;
+// --- Type interning ------------------------------------------------------------
+
+static inline uint32_t type_mix(uint32_t h, uint32_t w) {
+    h ^= w;
+    h *= 0x9E3779B1u;
+    return h ^ (h >> 15);
 }
 
-// Copy the arrays a type points to into the context's persistent arena.
-// Type constructors build the candidate IR_Type with pointers to the
-// caller's (possibly stack) arrays, and only a miss in intern_type copies
-// them, so creating an existing type allocates nothing.
-static void type_copy_payload(Arena *a, IR_Type *t) {
-    switch (t->kind) {
-        case TYPE_KIND_TENSOR:
-        case TYPE_KIND_MEMREF:
-            if (t->data.shaped.rank > 0 && t->data.shaped.shape) {
-                int64_t *shape = arena_new_array(a, int64_t, t->data.shaped.rank);
-                memcpy(shape, t->data.shaped.shape,
-                       (size_t)t->data.shaped.rank * sizeof(int64_t));
-                t->data.shaped.shape = shape;
-            }
-            break;
-        case TYPE_KIND_FUNCTION:
-            if (t->data.function.n_inputs > 0) {
-                MLIR_TypeHandle *in = arena_new_array(a, MLIR_TypeHandle, t->data.function.n_inputs);
-                memcpy(in, t->data.function.inputs,
-                       t->data.function.n_inputs * sizeof(MLIR_TypeHandle));
-                t->data.function.inputs = in;
-            }
-            if (t->data.function.n_results > 0) {
-                MLIR_TypeHandle *out = arena_new_array(a, MLIR_TypeHandle, t->data.function.n_results);
-                memcpy(out, t->data.function.results,
-                       t->data.function.n_results * sizeof(MLIR_TypeHandle));
-                t->data.function.results = out;
-            }
-            break;
-        case TYPE_KIND_LLVM_FUNCTION:
-            if (t->data.llvm_function.n_inputs > 0) {
-                MLIR_TypeHandle *in = arena_new_array(a, MLIR_TypeHandle, t->data.llvm_function.n_inputs);
-                memcpy(in, t->data.llvm_function.inputs,
-                       t->data.llvm_function.n_inputs * sizeof(MLIR_TypeHandle));
-                t->data.llvm_function.inputs = in;
-            }
-            break;
-        default:
-            break;
+// The interning hash: an identified struct's name, or a type's kind, scalar
+// fields and child words.
+static uint32_t type_hash(MLIR_Context *c, const IR_Type *t, const uint32_t *kids) {
+    uint32_t h = 0x811C9DC5u;
+    if (t->flags & TYF_IDENTIFIED) {
+        string name = TNAMES(c)[t->aux];
+        h = type_mix(h, MLIR_TYPE_KIND_LLVM_STRUCT);
+        for (size_t i = 0; i < name.size; i++) h = type_mix(h, (uint8_t)name.str[i]);
+        return h;
     }
-}
-
-// Types are uniqued per context, so two structurally equal types share one
-// handle (as upstream's IntegerType::get etc.): `t1 == t2` is a valid
-// type-identity check across the API, e.g. for the get_undef_value /
-// get_switch_value caches in the cf->scf lifter. The type, its arrays and
-// the table live in the persistent arena, so they survive the IR arena.
-static MLIR_TypeHandle intern_type(MLIR_Context *ctx, IR_Type t) {
-    if (!ctx) return MLIR_INVALID_HANDLE;
-    for (size_t i = 0; i < ctx->n_types; i++) {
-        IR_Type *cur = resolve_type(ctx->type_handles[i]);
-        if (cur && type_eq(cur, &t)) return ctx->type_handles[i];
-    }
-    Arena *a = ctx->persistent;
-    type_copy_payload(a, &t);
-    IR_Type *slot = arena_new(a, IR_Type);
-    *slot = t;
-    MLIR_TypeHandle h = (MLIR_TypeHandle)slot;
-    if (ctx->n_types == ctx->cap_types) {
-        size_t nc = ctx->cap_types ? ctx->cap_types * 2 : 64;
-        MLIR_TypeHandle *nh = arena_new_array(a, MLIR_TypeHandle, nc);
-        if (ctx->n_types) {
-            memcpy(nh, ctx->type_handles, ctx->n_types * sizeof(MLIR_TypeHandle));
-        }
-        ctx->type_handles = nh;
-        ctx->cap_types = nc;
-    }
-    ctx->type_handles[ctx->n_types++] = h;
+    h = type_mix(h, (uint32_t)t->kind | ((uint32_t)t->flags << 8));
+    h = type_mix(h, t->width);
+    h = type_mix(h, t->elem);
+    h = type_mix(h, t->aux);
+    h = type_mix(h, (uint32_t)t->count);
+    h = type_mix(h, (uint32_t)(t->count >> 32));
+    h = type_mix(h, t->n);
+    for (uint32_t i = 0; i < t->n; i++) h = type_mix(h, kids[i]);
     return h;
+}
+
+// True if record `a` (with child words `ak`) and the candidate `b` (`bk`)
+// are the same type. `b`'s name, for an identified struct, is `bname`.
+static bool type_same(MLIR_Context *c, const IR_Type *a, const uint32_t *ak,
+                      const IR_Type *b, const uint32_t *bk, string bname) {
+    if (a->kind != b->kind) return false;
+    if ((a->flags | b->flags) & TYF_IDENTIFIED) {
+        if (!((a->flags & b->flags) & TYF_IDENTIFIED)) return false;
+        string an = TNAMES(c)[a->aux];
+        return an.size == bname.size && memcmp(an.str, bname.str, an.size) == 0;
+    }
+    if (a->flags != b->flags || a->width != b->width || a->elem != b->elem ||
+        a->aux != b->aux || a->count != b->count || a->n != b->n) return false;
+    for (uint32_t i = 0; i < a->n; i++)
+        if (ak[i] != bk[i]) return false;
+    return true;
+}
+
+// Inserts type `t` (already in `types`) into the hash table.
+static void tmap_insert(MLIR_Context *c, uint32_t t, uint32_t h) {
+    uint32_t mask = c->tmap_cap - 1;
+    uint32_t i = h & mask;
+    while (c->tmap[i] != 0) i = (i + 1) & mask;
+    c->tmap[i] = t;
+    c->tmap_n++;
+}
+
+static void tmap_alloc(MLIR_Context *c, uint32_t cap) {
+    size_t actual = 0;
+    c->tmap = (uint32_t *)buddy_alloc((size_t)cap * sizeof(uint32_t), &actual);
+    if (!c->tmap) {
+        fprintf(stderr, "MLIR: out of memory growing the type table\n");
+        abort();
+    }
+    memset(c->tmap, 0, (size_t)cap * sizeof(uint32_t));
+    c->tmap_cap = cap;
+    c->tmap_n = 0;
+}
+
+// Doubles the hash table and rehashes every type.
+static void tmap_grow(MLIR_Context *c) {
+    uint32_t *old = c->tmap;
+    tmap_alloc(c, c->tmap_cap * 2);
+    for (uint32_t t = 1; t < c->types.n; t++) {
+        IR_Type *r = &TYPES(c)[t];
+        tmap_insert(c, t, type_hash(c, r, TYX(c) + r->first));
+    }
+    buddy_free(old);
+}
+
+// Interns the candidate `t`. Its child words, if any, are the last `t.n`
+// words of `tyx`, pushed by the caller from `t.first` on: on a hit they are
+// popped again and the existing type's index is returned, so looking up an
+// existing type allocates nothing; on a miss `t` becomes a new type. `name`
+// is the name of an identified struct (copied on a miss), else empty.
+static uint32_t type_intern(MLIR_Context *c, IR_Type t, string name) {
+    uint32_t h;
+    if (t.flags & TYF_IDENTIFIED) {
+        // Hash the candidate's name, which is not in tnames yet.
+        h = type_mix(0x811C9DC5u, MLIR_TYPE_KIND_LLVM_STRUCT);
+        for (size_t i = 0; i < name.size; i++) h = type_mix(h, (uint8_t)name.str[i]);
+    } else {
+        h = type_hash(c, &t, TYX(c) + t.first);
+    }
+    uint32_t mask = c->tmap_cap - 1;
+    for (uint32_t i = h & mask; c->tmap[i] != 0; i = (i + 1) & mask) {
+        uint32_t e = c->tmap[i];
+        IR_Type *r = &TYPES(c)[e];
+        if (type_same(c, r, TYX(c) + r->first, &t, TYX(c) + t.first, name)) {
+            if (t.n) c->tyx.n = t.first;
+            return e;
+        }
+    }
+    if (t.flags & TYF_IDENTIFIED) {
+        string owned = name;
+        if (name.size > 0) {
+            char *p = arena_new_array(c->persistent, char, name.size);
+            memcpy(p, name.str, name.size);
+            owned.str = p;
+        }
+        t.aux = vec_push(&c->tnames, 1);
+        TNAMES(c)[t.aux] = owned;
+    }
+    // Grow first: the rehash inserts every type already in `types`.
+    if ((c->tmap_n + 1) * 2 > c->tmap_cap) tmap_grow(c);
+    uint32_t idx = vec_push(&c->types, 1);
+    TYPES(c)[idx] = t;
+    tmap_insert(c, idx, h);
+    return idx;
+}
+
+// Pushes `n` type handles as child words; returns the index of the first.
+static uint32_t tyx_push_types(MLIR_Context *c, const MLIR_TypeHandle *ts, size_t n, const char *fn) {
+    uint32_t first = vec_push(&c->tyx, (uint32_t)n);
+    for (size_t i = 0; i < n; i++) TYX(c)[first + i] = TYPE_IDX(c, ts[i], fn);
+    (void)fn;
+    return first;
+}
+
+// An empty candidate of kind `k`.
+static IR_Type type_make(MLIR_TypeKind k) {
+    IR_Type t;
+    memset(&t, 0, sizeof t);
+    t.kind = (uint8_t)k;
+    return t;
 }
 
 static inline MLIR_AttributeHandle alloc_attr_obj(MLIR_Context *ctx, IR_Attribute a) {
@@ -740,9 +706,9 @@ static inline MLIR_LocationHandle alloc_loc(MLIR_Context *ctx, IR_Location l) {
 
 // Context
 //
-// The context lives in its own persistent arena, together with the types and
-// the interning tables, so destroying it is one arena_destroy plus the IR
-// vectors. 64 KiB minus the chunk header keeps the first chunk within one
+// The context lives in its own persistent arena, together with the names of
+// op types and identified structs, so destroying it is one arena_destroy plus
+// the IR and type vectors. 64 KiB minus the chunk header keeps the first chunk within one
 // 64 KiB buddy block.
 MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) {
     Arena *persistent = arena_create(64 * 1024 - 256);
@@ -763,6 +729,10 @@ MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) {
     vec_init(&ctx->regions, (uint32_t)sizeof(IR_Region));
     vec_init(&ctx->op_aux, (uint32_t)sizeof(IR_OpAux));
     vec_init(&ctx->names, (uint32_t)sizeof(string));
+    vec_init(&ctx->types, (uint32_t)sizeof(IR_Type));
+    vec_init(&ctx->tyx, (uint32_t)sizeof(uint32_t));
+    vec_init(&ctx->tnames, (uint32_t)sizeof(string));
+    tmap_alloc(ctx, 256);
     if (options) {
         ctx->arena = options->arena;
         ctx->no_def_use_tracking = options->no_def_use_tracking;
@@ -823,6 +793,10 @@ void MLIR_DestroyContext(MLIR_Context *ctx) {
     vec_free(&ctx->regions);
     vec_free(&ctx->op_aux);
     vec_free(&ctx->names);
+    vec_free(&ctx->types);
+    vec_free(&ctx->tyx);
+    vec_free(&ctx->tnames);
+    buddy_free(ctx->tmap);
     arena_destroy(ctx->persistent);
 }
 
@@ -1023,8 +997,9 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     for (size_t i = 0; i < n_results; i++) {
         res[i].def = op;
         if (i < n_result_types) {
-            if (res[i].type == MLIR_INVALID_HANDLE) res[i].type = result_types[i];
-            else if (res[i].type != result_types[i]) explicit_types = true;
+            uint32_t rt = TYPE_IDX(ctx, result_types[i], "MLIR_CreateOp");
+            if (res[i].type == 0) res[i].type = rt;
+            else if (res[i].type != rt) explicit_types = true;
         }
     }
     GEN_CHECK(ctx, ops, "MLIR_CreateOp");
@@ -1040,9 +1015,9 @@ MLIR_OpHandle MLIR_CreateOpWithSuccessors(
         OPAUX(ctx)[a].trailing_comment = trailing_comment;
         OPAUX(ctx)[a].source_line_start = (int32_t)source_line_start;
         if (explicit_types) {
-            uint32_t ft = vec_push(&ctx->ptrs, (uint32_t)n_result_types);
+            uint32_t ft = vec_push(&ctx->extra, (uint32_t)n_result_types);
             for (size_t i = 0; i < n_result_types; i++)
-                PTRS(ctx)[ft + i] = (uintptr_t)result_types[i];
+                EXTRA(ctx)[ft + i] = TYPE_IDX(ctx, result_types[i], "MLIR_CreateOp");
             OPAUX(ctx)[a].first_result_type = ft;
             OPAUX(ctx)[a].n_result_types = (uint32_t)n_result_types;
             OPAUX(ctx)[a].explicit_result_types = true;
@@ -1253,8 +1228,8 @@ MLIR_TypeHandle MLIR_GetOpResultType(MLIR_Context *ctx, MLIR_OpHandle oh, size_t
     CHECK_INDEX(idx, MLIR_GetOpNumResultTypes(ctx, oh), "MLIR_GetOpResultType");
     uint32_t a = OPS(ctx)[o].aux;
     if (a && OPAUX(ctx)[a].explicit_result_types)
-        return (MLIR_TypeHandle)PTRS(ctx)[OPAUX(ctx)[a].first_result_type + idx];
-    return VALS(ctx)[OPS(ctx)[o].first_result + idx].type;
+        return TYPE_H(ctx, EXTRA(ctx)[OPAUX(ctx)[a].first_result_type + idx]);
+    return TYPE_H(ctx, VALS(ctx)[OPS(ctx)[o].first_result + idx].type);
 }
 
 size_t MLIR_GetOpNumSuccessors(MLIR_Context *ctx, MLIR_OpHandle oh) {
@@ -1344,150 +1319,106 @@ MLIR_OpHandle MLIR_ParseTextUpstream(MLIR_Context *ctx, string text) {
 }
 
 // Type to string
+
+// Dimension `i` of a shaped type (two child words each; -1 is dynamic).
+static int64_t type_dim(MLIR_Context *c, const IR_Type *t, uint32_t i) {
+    const uint32_t *w = TYX(c) + t->first + 2 * i;
+    return (int64_t)(((uint64_t)w[1] << 32) | w[0]);
+}
+
+// `tensor<2x?x{elem}>` and the like.
+static string shaped_type_string(MLIR_Context *ctx, const IR_Type *t, const char *kw) {
+    Arena *arena = ctx->arena;
+    if (t->elem == 0) return format(arena, str_lit("{}<?>"), str_from_cstr_view((char *)kw));
+    string elem_str = MLIR_GetTypeString(ctx, TYPE_H(ctx, t->elem));
+    strbuf shape_str = strbuf_make();
+    for (uint32_t i = 0; i < t->n / 2; i++) {
+        int64_t dim = type_dim(ctx, t, i);
+        if (dim < 0) strbuf_append(arena, &shape_str, str_lit("?x"));
+        else strbuf_append(arena, &shape_str, format(arena, str_lit("{}x"), dim));
+    }
+    return format(arena, str_lit("{}<{}{}>"), str_from_cstr_view((char *)kw),
+                  strbuf_to_string(shape_str), elem_str);
+}
+
+// `T0, T1, ...` for the child words [from, to) of a type.
+static string type_list_string(MLIR_Context *ctx, uint32_t first, uint32_t from, uint32_t to) {
+    Arena *arena = ctx->arena;
+    strbuf sb = strbuf_make();
+    for (uint32_t i = from; i < to; i++) {
+        if (i > from) strbuf_append(arena, &sb, str_lit(", "));
+        strbuf_append(arena, &sb, MLIR_GetTypeString(ctx, TYPE_H(ctx, TYX(ctx)[first + i])));
+    }
+    return strbuf_to_string(sb);
+}
+
 string MLIR_GetTypeString(MLIR_Context *ctx, MLIR_TypeHandle th) {
-    IR_Type *type = resolve_type(th);
-    if (!type) return str_lit("null");
+    if (th == MLIR_INVALID_HANDLE) return str_lit("null");
     if (!ctx || !ctx->arena) return str_lit("null");
     Arena *arena = ctx->arena;
+    // A copy: printing allocates in the arena only, but the record is small.
+    IR_Type t = TYPES(ctx)[TYPE_IDX(ctx, th, "MLIR_GetTypeString")];
+    const uint32_t *kids = TYX(ctx) + t.first;
 
-    switch (type->kind) {
-        case TYPE_KIND_UNKNOWN:
+    switch ((MLIR_TypeKind)t.kind) {
+        case MLIR_TYPE_KIND_NONE:
             return str_lit("?");
-        case TYPE_KIND_OPAQUE:
+        case MLIR_TYPE_KIND_OPAQUE:
+            if (t.flags & TYF_TT_PTR) {
+                if (kids[0] == 0) return str_lit("!tt.ptr<?>");
+                string elem_str = MLIR_GetTypeString(ctx, TYPE_H(ctx, kids[0]));
+                if (t.flags & TYF_HAS_AS)
+                    return format(arena, str_lit("!tt.ptr<{}, {}>"), elem_str, (int64_t)t.aux);
+                return format(arena, str_lit("!tt.ptr<{}>"), elem_str);
+            }
             return str_lit("unknown");
-        case TYPE_KIND_INTEGER:
-            // Signless `i{w}` regardless of `is_signed` — MLIR integers are
-            // signless by default and the upstream backend always produces
-            // `i{w}` from `MLIR_CreateTypeInteger`, so match it.
-            return format(arena, str_lit("i{}"), (int64_t)type->data.integer.width);
-        case TYPE_KIND_FLOAT:
-            if (type->data.floating.is_bfloat && type->data.floating.width == 16) {
-                return str_lit("bf16");
-            }
-            return format(arena, str_lit("f{}"), (int64_t)type->data.floating.width);
-        case TYPE_KIND_TENSOR: {
-            MLIR_TypeHandle elem_h = type->data.shaped.element_type;
-            if (elem_h != MLIR_INVALID_HANDLE) {
-                string elem_str = MLIR_GetTypeString(ctx, elem_h);
-                if (type->data.shaped.rank > 0 && type->data.shaped.shape) {
-                    strbuf shape_str = strbuf_make();
-                    for (uint32_t i = 0; i < type->data.shaped.rank; i++) {
-                        int64_t dim = type->data.shaped.shape[i];
-                        if (dim < 0) {
-                            strbuf_append(arena, &shape_str, str_lit("?x"));
-                        } else {
-                            strbuf_append(arena, &shape_str, format(arena, str_lit("{}x"), dim));
-                        }
-                    }
-                    return format(arena, str_lit("tensor<{}{}>"), strbuf_to_string(shape_str), elem_str);
-                } else {
-                    return format(arena, str_lit("tensor<{}>"), elem_str);
-                }
-            }
-            return str_lit("tensor<?>");
-        }
-        case TYPE_KIND_MEMREF: {
-            MLIR_TypeHandle elem_h = type->data.shaped.element_type;
-            if (elem_h != MLIR_INVALID_HANDLE) {
-                string elem_str = MLIR_GetTypeString(ctx, elem_h);
-                if (type->data.shaped.rank > 0 && type->data.shaped.shape) {
-                    strbuf shape_str = strbuf_make();
-                    for (uint32_t i = 0; i < type->data.shaped.rank; i++) {
-                        int64_t dim = type->data.shaped.shape[i];
-                        if (dim < 0) {
-                            strbuf_append(arena, &shape_str, str_lit("?x"));
-                        } else {
-                            strbuf_append(arena, &shape_str, format(arena, str_lit("{}x"), dim));
-                        }
-                    }
-                    return format(arena, str_lit("memref<{}{}>"), strbuf_to_string(shape_str), elem_str);
-                } else {
-                    return format(arena, str_lit("memref<{}>"), elem_str);
-                }
-            }
-            return str_lit("memref<?>");
-        }
-        case TYPE_KIND_POINTER: {
-            MLIR_TypeHandle elem_h = type->data.pointer.element_type;
-            if (elem_h != MLIR_INVALID_HANDLE) {
-                string elem_str = MLIR_GetTypeString(ctx, elem_h);
-                if (type->data.pointer.has_address_space) {
-                    return format(arena, str_lit("!tt.ptr<{}, {}>"), elem_str, (int64_t)type->data.pointer.address_space);
-                } else {
-                    return format(arena, str_lit("!tt.ptr<{}>"), elem_str);
-                }
-            }
-            return str_lit("!tt.ptr<?>");
-        }
-        case TYPE_KIND_INDEX:
+        case MLIR_TYPE_KIND_INTEGER:
+            // Signless `i{w}`, as upstream prints MLIR_CreateTypeInteger's types.
+            return format(arena, str_lit("i{}"), (int64_t)t.width);
+        case MLIR_TYPE_KIND_FLOAT:
+            return format(arena, str_lit("f{}"), (int64_t)t.width);
+        case MLIR_TYPE_KIND_BF16:
+            return str_lit("bf16");
+        case MLIR_TYPE_KIND_INDEX:
             return str_lit("index");
-        case TYPE_KIND_FUNCTION: {
-            strbuf in_str = strbuf_make();
-            for (size_t i = 0; i < type->data.function.n_inputs; i++) {
-                if (i > 0) strbuf_append(arena, &in_str, str_lit(", "));
-                strbuf_append(arena, &in_str,
-                              MLIR_GetTypeString(ctx, type->data.function.inputs[i]));
-            }
-            string out_str = str_lit("");
-            size_t nr = type->data.function.n_results;
-            if (nr == 1) {
-                out_str = MLIR_GetTypeString(ctx, type->data.function.results[0]);
-            } else {
-                strbuf body = strbuf_make();
-                for (size_t i = 0; i < nr; i++) {
-                    if (i > 0) strbuf_append(arena, &body, str_lit(", "));
-                    strbuf_append(arena, &body,
-                                  MLIR_GetTypeString(ctx, type->data.function.results[i]));
-                }
-                out_str = format(arena, str_lit("({})"), strbuf_to_string(body));
-            }
-            return format(arena, str_lit("({}) -> {}"), strbuf_to_string(in_str), out_str);
+        case MLIR_TYPE_KIND_TENSOR:
+            return shaped_type_string(ctx, &t, "tensor");
+        case MLIR_TYPE_KIND_MEMREF:
+            return shaped_type_string(ctx, &t, "memref");
+        case MLIR_TYPE_KIND_VECTOR:
+            return shaped_type_string(ctx, &t, "vector");
+        case MLIR_TYPE_KIND_FUNCTION: {
+            uint32_t n_in = t.n - t.aux;
+            string in_str = type_list_string(ctx, t.first, 0, n_in);
+            string out_str = t.aux == 1
+                ? MLIR_GetTypeString(ctx, TYPE_H(ctx, kids[n_in]))
+                : format(arena, str_lit("({})"), type_list_string(ctx, t.first, n_in, t.n));
+            return format(arena, str_lit("({}) -> {}"), in_str, out_str);
         }
-        case TYPE_KIND_LLVM_PTR:
-            if (type->data.llvm_pointer.address_space == 0) return str_lit("!llvm.ptr");
-            return format(arena, str_lit("!llvm.ptr<{}>"),
-                          (int64_t)type->data.llvm_pointer.address_space);
-        case TYPE_KIND_LLVM_VOID:
+        case MLIR_TYPE_KIND_LLVM_POINTER:
+            if (t.aux == 0) return str_lit("!llvm.ptr");
+            return format(arena, str_lit("!llvm.ptr<{}>"), (int64_t)t.aux);
+        case MLIR_TYPE_KIND_LLVM_VOID:
             return str_lit("!llvm.void");
-        case TYPE_KIND_LLVM_ARRAY: {
-            string elem = MLIR_GetTypeString(ctx, type->data.llvm_array.element);
-            return format(arena, str_lit("!llvm.array<{} x {}>"),
-                          (int64_t)type->data.llvm_array.count, elem);
+        case MLIR_TYPE_KIND_LLVM_ARRAY:
+            return format(arena, str_lit("!llvm.array<{} x {}>"), (int64_t)t.count,
+                          MLIR_GetTypeString(ctx, TYPE_H(ctx, t.elem)));
+        case MLIR_TYPE_KIND_LLVM_STRUCT: {
+            // Literal: !llvm.struct<(T1, T2)>; identified: !llvm.struct<"name", (T1, T2)>.
+            // Nested struct fields keep the "!llvm." prefix (upstream drops it);
+            // the LLVM-IR translator accepts both.
+            string body = format(arena, str_lit("({})"), type_list_string(ctx, t.first, 0, t.n));
+            if ((t.flags & TYF_IDENTIFIED) && TNAMES(ctx)[t.aux].size > 0)
+                return format(arena, str_lit("!llvm.struct<\"{}\", {}>"), TNAMES(ctx)[t.aux], body);
+            return format(arena, str_lit("!llvm.struct<{}>"), body);
         }
-        case TYPE_KIND_LLVM_STRUCT: {
-            // Anonymous: !llvm.struct<(T1, T2)>; identified: !llvm.struct<"name", (T1, T2)>.
-            // Within nested struct fields MLIR omits the outer "!llvm." prefix —
-            // but the translator's print_llvm_type_text accepts both, so we
-            // always emit the canonical form here for simplicity.
-            strbuf body = strbuf_make();
-            strbuf_append(arena, &body, str_lit("("));
-            for (size_t i = 0; i < type->data.llvm_struct.n_fields; i++) {
-                if (i > 0) strbuf_append(arena, &body, str_lit(", "));
-                strbuf_append(arena, &body,
-                              MLIR_GetTypeString(ctx, type->data.llvm_struct.fields[i]));
-            }
-            strbuf_append(arena, &body, str_lit(")"));
-            if (type->data.llvm_struct.name.size > 0) {
-                return format(arena, str_lit("!llvm.struct<\"{}\", {}>"),
-                              type->data.llvm_struct.name, strbuf_to_string(body));
-            }
-            return format(arena, str_lit("!llvm.struct<{}>"), strbuf_to_string(body));
-        }
-        case TYPE_KIND_LLVM_FUNCTION: {
-            string ret = MLIR_GetTypeString(ctx, type->data.llvm_function.result);
-            strbuf body = strbuf_make();
-            for (size_t i = 0; i < type->data.llvm_function.n_inputs; i++) {
-                if (i > 0) strbuf_append(arena, &body, str_lit(", "));
-                strbuf_append(arena, &body,
-                              MLIR_GetTypeString(ctx, type->data.llvm_function.inputs[i]));
-            }
-            if (type->data.llvm_function.is_var_arg) {
-                if (type->data.llvm_function.n_inputs) {
-                    strbuf_append(arena, &body, str_lit(", "));
-                }
-                strbuf_append(arena, &body, str_lit("..."));
-            }
-            return format(arena, str_lit("!llvm.func<{} ({})>"), ret, strbuf_to_string(body));
+        case MLIR_TYPE_KIND_LLVM_FUNCTION: {
+            string ret = MLIR_GetTypeString(ctx, TYPE_H(ctx, kids[0]));
+            string params = type_list_string(ctx, t.first, 1, t.n);
+            if (t.flags & TYF_VAR_ARG)
+                params = format(arena, str_lit("{}{}..."), params,
+                                t.n > 1 ? str_lit(", ") : str_lit(""));
+            return format(arena, str_lit("!llvm.func<{} ({})>"), ret, params);
         }
         default:
             return str_lit("unknown");
@@ -1499,65 +1430,97 @@ MLIR_TypeHandle MLIR_CreateTypeInteger(MLIR_Context *ctx, uint32_t width, bool i
     // MLIR integer types are signless by default. The public API takes an
     // `is_signed` flag for forward-compat, but the upstream backend ignores
     // it (always constructs a signless `IntegerType`). Match that so both
-    // backends produce the same canonical type identity for `i{w}` and the
-    // wasm pipeline / lowering passes can compare types via handle equality.
+    // backends produce the same canonical type identity for `i{w}`.
     (void)is_signed;
-    IR_Type t = {0};
-    t.kind = TYPE_KIND_INTEGER;
-    t.data.integer.width = width;
-    t.data.integer.is_signed = false;
-    return intern_type(ctx, t);
+    if (!ctx) return MLIR_INVALID_HANDLE;
+    if (width <= 64 && ctx->int_types[width]) return TYPE_H(ctx, ctx->int_types[width]);
+    IR_Type t = type_make(MLIR_TYPE_KIND_INTEGER);
+    t.width = width;
+    uint32_t i = type_intern(ctx, t, (string){0});
+    if (width <= 64) ctx->int_types[width] = i;
+    return TYPE_H(ctx, i);
 }
 
+// bf16 for `is_bfloat` (as upstream, whatever the width), else f<width>.
 MLIR_TypeHandle MLIR_CreateTypeFloat(MLIR_Context *ctx, uint32_t width, bool is_bfloat) {
-    IR_Type t = {0};
-    t.kind = TYPE_KIND_FLOAT;
-    t.data.floating.width = width;
-    t.data.floating.is_bfloat = is_bfloat;
-    return intern_type(ctx, t);
+    if (!ctx) return MLIR_INVALID_HANDLE;
+    IR_Type t = type_make(is_bfloat ? MLIR_TYPE_KIND_BF16 : MLIR_TYPE_KIND_FLOAT);
+    t.width = is_bfloat ? 16 : width;
+    return TYPE_H(ctx, type_intern(ctx, t, (string){0}));
+}
+
+static MLIR_TypeHandle create_simple_type(MLIR_Context *ctx, MLIR_TypeKind k) {
+    if (!ctx) return MLIR_INVALID_HANDLE;
+    return TYPE_H(ctx, type_intern(ctx, type_make(k), (string){0}));
 }
 
 MLIR_TypeHandle MLIR_CreateTypeIndex(MLIR_Context *ctx) {
-    IR_Type t = {0};
-    t.kind = TYPE_KIND_INDEX;
-    return intern_type(ctx, t);
+    return create_simple_type(ctx, MLIR_TYPE_KIND_INDEX);
 }
 
 MLIR_TypeHandle MLIR_CreateTypeUnknown(MLIR_Context *ctx) {
-    IR_Type t = {0};
-    t.kind = TYPE_KIND_UNKNOWN;
-    return intern_type(ctx, t);
+    return create_simple_type(ctx, MLIR_TYPE_KIND_NONE);
 }
 
-// Point a candidate shaped type at the caller's shape; intern_type copies it.
-static void set_shape(IR_Type *type, const int64_t *shape, size_t rank) {
-    type->data.shaped.rank = (uint32_t)rank;
-    type->data.shaped.shape = (rank > 0 && shape) ? (int64_t *)shape : NULL;
+MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *ctx, string name) {
+    (void)name;
+    return create_simple_type(ctx, MLIR_TYPE_KIND_OPAQUE);
+}
+
+MLIR_TypeHandle MLIR_CreateTypeLLVMVoid(MLIR_Context *ctx) {
+    return create_simple_type(ctx, MLIR_TYPE_KIND_LLVM_VOID);
+}
+
+// Tensor, memref and vector types: the dimensions are two child words each.
+// No shape (NULL) is rank 0, as upstream. A vector's element count is the
+// product of its dimensions.
+static MLIR_TypeHandle create_shaped_type(MLIR_Context *ctx, MLIR_TypeKind k, const int64_t *shape,
+                                          size_t rank, MLIR_TypeHandle element_type, const char *fn) {
+    if (!ctx) return MLIR_INVALID_HANDLE;
+    if (!shape) rank = 0;
+    IR_Type t = type_make(k);
+    t.elem = TYPE_IDX(ctx, element_type, fn);
+    t.n = (uint32_t)(2 * rank);
+    t.first = vec_push(&ctx->tyx, t.n);
+    uint64_t count = 1;
+    for (size_t i = 0; i < rank; i++) {
+        uint64_t d = (uint64_t)shape[i];
+        TYX(ctx)[t.first + 2 * i] = (uint32_t)d;
+        TYX(ctx)[t.first + 2 * i + 1] = (uint32_t)(d >> 32);
+        count *= d;
+    }
+    if (k == MLIR_TYPE_KIND_VECTOR) t.count = count;
+    return TYPE_H(ctx, type_intern(ctx, t, (string){0}));
 }
 
 MLIR_TypeHandle MLIR_CreateTypeTensor(MLIR_Context *ctx, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type) {
-    IR_Type t = {0};
-    t.kind = TYPE_KIND_TENSOR;
-    t.data.shaped.element_type = element_type;
-    set_shape(&t, shape, rank);
-    return intern_type(ctx, t);
+    return create_shaped_type(ctx, MLIR_TYPE_KIND_TENSOR, shape, rank, element_type, "MLIR_CreateTypeTensor");
 }
 
 MLIR_TypeHandle MLIR_CreateTypeMemref(MLIR_Context *ctx, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type) {
-    IR_Type t = {0};
-    t.kind = TYPE_KIND_MEMREF;
-    t.data.shaped.element_type = element_type;
-    set_shape(&t, shape, rank);
-    return intern_type(ctx, t);
+    return create_shaped_type(ctx, MLIR_TYPE_KIND_MEMREF, shape, rank, element_type, "MLIR_CreateTypeMemref");
 }
 
+MLIR_TypeHandle MLIR_CreateTypeVector(MLIR_Context *ctx, const int64_t *shape, size_t rank, MLIR_TypeHandle element_type) {
+    API_CHECK(shape != NULL && rank > 0, "MLIR_CreateTypeVector", "a vector needs a shape");
+    API_CHECK(element_type != MLIR_INVALID_HANDLE, "MLIR_CreateTypeVector", "element type is NULL");
+#ifdef MLIR_API_CHECKS
+    for (size_t i = 0; i < rank; i++)
+        API_CHECK(shape[i] > 0, "MLIR_CreateTypeVector", "a vector dimension must be static and positive");
+#endif
+    return create_shaped_type(ctx, MLIR_TYPE_KIND_VECTOR, shape, rank, element_type, "MLIR_CreateTypeVector");
+}
+
+// The Triton test type !tt.ptr<pointee[, address space]>: an OPAQUE type to
+// the API, as on upstream.
 MLIR_TypeHandle MLIR_CreateTypePointer(MLIR_Context *ctx, MLIR_TypeHandle element_type, bool has_address_space, uint32_t address_space) {
-    IR_Type t = {0};
-    t.kind = TYPE_KIND_POINTER;
-    t.data.pointer.element_type = element_type;
-    t.data.pointer.has_address_space = has_address_space;
-    t.data.pointer.address_space = address_space;
-    return intern_type(ctx, t);
+    if (!ctx) return MLIR_INVALID_HANDLE;
+    IR_Type t = type_make(MLIR_TYPE_KIND_OPAQUE);
+    t.flags = (uint8_t)(TYF_TT_PTR | (has_address_space ? TYF_HAS_AS : 0));
+    t.aux = address_space;
+    t.n = 1;
+    t.first = tyx_push_types(ctx, &element_type, 1, "MLIR_CreateTypePointer");
+    return TYPE_H(ctx, type_intern(ctx, t, (string){0}));
 }
 
 MLIR_TypeHandle MLIR_CreateTypeLLVMPointer(MLIR_Context *ctx) {
@@ -1566,100 +1529,179 @@ MLIR_TypeHandle MLIR_CreateTypeLLVMPointer(MLIR_Context *ctx) {
 
 MLIR_TypeHandle MLIR_CreateTypeLLVMPointerInAddressSpace(
     MLIR_Context *ctx, uint32_t address_space) {
-    IR_Type t = {0};
-    t.kind = TYPE_KIND_LLVM_PTR;
-    t.data.llvm_pointer.address_space = address_space;
-    return intern_type(ctx, t);
+    if (!ctx) return MLIR_INVALID_HANDLE;
+    if (address_space == 0 && ctx->ptr_type) return TYPE_H(ctx, ctx->ptr_type);
+    IR_Type t = type_make(MLIR_TYPE_KIND_LLVM_POINTER);
+    t.aux = address_space;
+    uint32_t i = type_intern(ctx, t, (string){0});
+    if (address_space == 0) ctx->ptr_type = i;
+    return TYPE_H(ctx, i);
 }
 
 // Identified LLVM structs are interned by name within a context: the same
 // printed reference (`!llvm.struct<"foo", ...>`) must resolve to the same
-// type handle across all uses. A linear scan of the context's table by name
-// (cheap given the small N in tinyc programs). The name is copied into the
-// persistent arena with the type.
-static MLIR_TypeHandle intern_llvm_struct(MLIR_Context *ctx, string name) {
-    for (size_t i = 0; i < ctx->n_structs; i++) {
-        if (ctx->struct_names[i].size == name.size &&
-            memcmp(ctx->struct_names[i].str, name.str, name.size) == 0) {
-            return ctx->struct_handles[i];
-        }
-    }
-    Arena *a = ctx->persistent;
-    if (ctx->n_structs == ctx->cap_structs) {
-        size_t nc = ctx->cap_structs ? ctx->cap_structs * 2 : 32;
-        MLIR_TypeHandle *nh = arena_new_array(a, MLIR_TypeHandle, nc);
-        string *nn = arena_new_array(a, string, nc);
-        if (ctx->n_structs) {
-            memcpy(nh, ctx->struct_handles, ctx->n_structs * sizeof(MLIR_TypeHandle));
-            memcpy(nn, ctx->struct_names, ctx->n_structs * sizeof(string));
-        }
-        ctx->struct_handles = nh;
-        ctx->struct_names = nn;
-        ctx->cap_structs = nc;
-    }
-    string owned = name;
-    if (name.size > 0) {
-        char *p = arena_new_array(a, char, name.size);
-        memcpy(p, name.str, name.size);
-        owned.str = p;
-    }
-    IR_Type *t = arena_new(a, IR_Type);
-    *t = (IR_Type){0};
-    t->kind = TYPE_KIND_LLVM_STRUCT;
-    t->data.llvm_struct.name = owned;
-    MLIR_TypeHandle h = (MLIR_TypeHandle)t;
-    ctx->struct_handles[ctx->n_structs] = h;
-    ctx->struct_names[ctx->n_structs] = owned;
-    ctx->n_structs++;
-    return h;
-}
-
+// type handle across all uses, and two structs with the same body but
+// different names are different types. The body is set later, once.
 MLIR_TypeHandle MLIR_CreateTypeLLVMStructIdentified(MLIR_Context *ctx, string name) {
-    return intern_llvm_struct(ctx, name);
+    if (!ctx) return MLIR_INVALID_HANDLE;
+    IR_Type t = type_make(MLIR_TYPE_KIND_LLVM_STRUCT);
+    t.flags = TYF_IDENTIFIED;
+    return TYPE_H(ctx, type_intern(ctx, t, name));
 }
 
 void MLIR_SetTypeLLVMStructBody(MLIR_Context *ctx, MLIR_TypeHandle struct_ty,
                                  const MLIR_TypeHandle *fields, size_t n_fields) {
-    IR_Type *t = resolve_type(struct_ty);
-    if (!t || t->kind != TYPE_KIND_LLVM_STRUCT) return;
-    if (t->data.llvm_struct.body_set) return; // upstream silently ignores re-set
-    if (n_fields > 0) {
-        MLIR_TypeHandle *buf = arena_new_array(ctx->persistent, MLIR_TypeHandle, n_fields);
-        memcpy(buf, fields, n_fields * sizeof(MLIR_TypeHandle));
-        t->data.llvm_struct.fields = buf;
-    }
-    t->data.llvm_struct.n_fields = n_fields;
-    t->data.llvm_struct.body_set = true;
+    uint32_t i = TYPE_IDX(ctx, struct_ty, "MLIR_SetTypeLLVMStructBody");
+    if (i == 0 || TYPES(ctx)[i].kind != MLIR_TYPE_KIND_LLVM_STRUCT) return;
+    if (TYPES(ctx)[i].flags & TYF_BODY_SET) return; // upstream silently ignores re-set
+    // Push the fields first, then resolve the record (the pointer rule).
+    uint32_t first = tyx_push_types(ctx, fields, n_fields, "MLIR_SetTypeLLVMStructBody");
+    IR_Type *t = &TYPES(ctx)[i];
+    t->first = first;
+    t->n = (uint32_t)n_fields;
+    t->flags |= TYF_BODY_SET;
 }
 
 MLIR_TypeHandle MLIR_CreateTypeLLVMArray(MLIR_Context *ctx, MLIR_TypeHandle elem, uint64_t count) {
-    IR_Type t = {0};
-    t.kind = TYPE_KIND_LLVM_ARRAY;
-    t.data.llvm_array.element = elem;
-    t.data.llvm_array.count = count;
-    return intern_type(ctx, t);
+    if (!ctx) return MLIR_INVALID_HANDLE;
+    IR_Type t = type_make(MLIR_TYPE_KIND_LLVM_ARRAY);
+    t.elem = TYPE_IDX(ctx, elem, "MLIR_CreateTypeLLVMArray");
+    t.count = count;
+    return TYPE_H(ctx, type_intern(ctx, t, (string){0}));
 }
 
+// Child words: the result (the LLVM void type for none), then the inputs.
 MLIR_TypeHandle MLIR_CreateTypeLLVMFunction(MLIR_Context *ctx,
                                              MLIR_TypeHandle result,
                                              const MLIR_TypeHandle *inputs,
                                              size_t n_inputs,
                                              bool is_var_arg) {
-    IR_Type t = {0};
-    t.kind = TYPE_KIND_LLVM_FUNCTION;
-    t.data.llvm_function.result = result;
-    t.data.llvm_function.is_var_arg = is_var_arg;
-    if (n_inputs > 0) {
-        t.data.llvm_function.inputs = (MLIR_TypeHandle *)inputs;
-        t.data.llvm_function.n_inputs = n_inputs;
-    }
-    return intern_type(ctx, t);
+    if (!ctx) return MLIR_INVALID_HANDLE;
+    IR_Type t = type_make(MLIR_TYPE_KIND_LLVM_FUNCTION);
+    t.flags = is_var_arg ? TYF_VAR_ARG : 0;
+    if (!inputs) n_inputs = 0;
+    t.n = (uint32_t)(1 + n_inputs);
+    t.first = tyx_push_types(ctx, &result, 1, "MLIR_CreateTypeLLVMFunction");
+    tyx_push_types(ctx, inputs, n_inputs, "MLIR_CreateTypeLLVMFunction");
+    return TYPE_H(ctx, type_intern(ctx, t, (string){0}));
 }
 
-MLIR_TypeHandle MLIR_CreateTypeLLVMVoid(MLIR_Context *ctx) {
-    IR_Type t = {0};
-    t.kind = TYPE_KIND_LLVM_VOID;
-    return intern_type(ctx, t);
+// Child words: the inputs, then the results (`aux` of them).
+MLIR_TypeHandle MLIR_CreateTypeFunction(MLIR_Context *ctx,
+                                         const MLIR_TypeHandle *inputs, size_t n_inputs,
+                                         const MLIR_TypeHandle *results, size_t n_results) {
+    if (!ctx) return MLIR_INVALID_HANDLE;
+    if (!inputs) n_inputs = 0;
+    if (!results) n_results = 0;
+    IR_Type t = type_make(MLIR_TYPE_KIND_FUNCTION);
+    t.aux = (uint32_t)n_results;
+    t.n = (uint32_t)(n_inputs + n_results);
+    t.first = tyx_push_types(ctx, inputs, n_inputs, "MLIR_CreateTypeFunction");
+    tyx_push_types(ctx, results, n_results, "MLIR_CreateTypeFunction");
+    return TYPE_H(ctx, type_intern(ctx, t, (string){0}));
+}
+
+// Type introspection: one read of the type's record each.
+#define TYPE_REC(ctx, th, fn) (&TYPES(ctx)[TYPE_IDX((ctx), (th), (fn))])
+
+MLIR_TypeKind MLIR_GetTypeKind(MLIR_Context *ctx, MLIR_TypeHandle th) {
+    return (MLIR_TypeKind)TYPE_REC(ctx, th, "MLIR_GetTypeKind")->kind;
+}
+
+uint32_t MLIR_GetTypeWidth(MLIR_Context *ctx, MLIR_TypeHandle th) {
+    return TYPE_REC(ctx, th, "MLIR_GetTypeWidth")->width;
+}
+
+MLIR_TypeHandle MLIR_GetTypeElement(MLIR_Context *ctx, MLIR_TypeHandle th) {
+    return TYPE_H(ctx, TYPE_REC(ctx, th, "MLIR_GetTypeElement")->elem);
+}
+
+uint64_t MLIR_GetTypeNumElements(MLIR_Context *ctx, MLIR_TypeHandle th) {
+    return TYPE_REC(ctx, th, "MLIR_GetTypeNumElements")->count;
+}
+
+static bool type_kind_is_shaped(uint32_t k) {
+    return k == MLIR_TYPE_KIND_TENSOR || k == MLIR_TYPE_KIND_MEMREF || k == MLIR_TYPE_KIND_VECTOR;
+}
+
+size_t MLIR_GetTypeShapeRank(MLIR_Context *ctx, MLIR_TypeHandle th) {
+    const IR_Type *t = TYPE_REC(ctx, th, "MLIR_GetTypeShapeRank");
+    return type_kind_is_shaped(t->kind) ? t->n / 2 : 0;
+}
+
+int64_t MLIR_GetTypeShapeDim(MLIR_Context *ctx, MLIR_TypeHandle th, size_t idx) {
+    const IR_Type *t = TYPE_REC(ctx, th, "MLIR_GetTypeShapeDim");
+    CHECK_INDEX(idx, type_kind_is_shaped(t->kind) ? t->n / 2 : 0, "MLIR_GetTypeShapeDim");
+    return type_dim(ctx, t, (uint32_t)idx);
+}
+
+size_t MLIR_GetTypeFunctionNumInputs(MLIR_Context *ctx, MLIR_TypeHandle th) {
+    const IR_Type *t = TYPE_REC(ctx, th, "MLIR_GetTypeFunctionNumInputs");
+    if (t->kind == MLIR_TYPE_KIND_FUNCTION) return t->n - t->aux;
+    if (t->kind == MLIR_TYPE_KIND_LLVM_FUNCTION) return t->n - 1;
+    return 0;
+}
+
+MLIR_TypeHandle MLIR_GetTypeFunctionInput(MLIR_Context *ctx, MLIR_TypeHandle th, size_t idx) {
+    size_t n = MLIR_GetTypeFunctionNumInputs(ctx, th);
+    API_CHECK(idx < n, "MLIR_GetTypeFunctionInput", "index out of range");
+    if (idx >= n) return MLIR_INVALID_HANDLE;
+    const IR_Type *t = TYPE_REC(ctx, th, "MLIR_GetTypeFunctionInput");
+    uint32_t skip = t->kind == MLIR_TYPE_KIND_LLVM_FUNCTION ? 1 : 0;
+    return TYPE_H(ctx, TYX(ctx)[t->first + skip + idx]);
+}
+
+// An LLVM function type returning void has no results, as a builtin
+// function type with none.
+size_t MLIR_GetTypeFunctionNumResults(MLIR_Context *ctx, MLIR_TypeHandle th) {
+    const IR_Type *t = TYPE_REC(ctx, th, "MLIR_GetTypeFunctionNumResults");
+    if (t->kind == MLIR_TYPE_KIND_FUNCTION) return t->aux;
+    if (t->kind == MLIR_TYPE_KIND_LLVM_FUNCTION)
+        return TYPES(ctx)[TYX(ctx)[t->first]].kind == MLIR_TYPE_KIND_LLVM_VOID ? 0 : 1;
+    return 0;
+}
+
+MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_Context *ctx, MLIR_TypeHandle th, size_t idx) {
+    size_t n = MLIR_GetTypeFunctionNumResults(ctx, th);
+    API_CHECK(idx < n, "MLIR_GetTypeFunctionResult", "index out of range");
+    if (idx >= n) return MLIR_INVALID_HANDLE;
+    const IR_Type *t = TYPE_REC(ctx, th, "MLIR_GetTypeFunctionResult");
+    if (t->kind == MLIR_TYPE_KIND_LLVM_FUNCTION) return TYPE_H(ctx, TYX(ctx)[t->first]);
+    return TYPE_H(ctx, TYX(ctx)[t->first + (t->n - t->aux) + idx]);
+}
+
+bool MLIR_GetTypeFunctionIsVarArg(MLIR_Context *ctx, MLIR_TypeHandle th) {
+    const IR_Type *t = TYPE_REC(ctx, th, "MLIR_GetTypeFunctionIsVarArg");
+    return t->kind == MLIR_TYPE_KIND_LLVM_FUNCTION && (t->flags & TYF_VAR_ARG);
+}
+
+size_t MLIR_GetTypeLLVMStructNumFields(MLIR_Context *ctx, MLIR_TypeHandle th) {
+    const IR_Type *t = TYPE_REC(ctx, th, "MLIR_GetTypeLLVMStructNumFields");
+    return t->kind == MLIR_TYPE_KIND_LLVM_STRUCT ? t->n : 0;
+}
+
+MLIR_TypeHandle MLIR_GetTypeLLVMStructField(MLIR_Context *ctx, MLIR_TypeHandle th, size_t idx) {
+    size_t n = MLIR_GetTypeLLVMStructNumFields(ctx, th);
+    API_CHECK(idx < n, "MLIR_GetTypeLLVMStructField", "index out of range");
+    if (idx >= n) return MLIR_INVALID_HANDLE;
+    return TYPE_H(ctx, TYX(ctx)[TYPE_REC(ctx, th, "MLIR_GetTypeLLVMStructField")->first + idx]);
+}
+
+string MLIR_GetTypeLLVMStructName(MLIR_Context *ctx, MLIR_TypeHandle th) {
+    const IR_Type *t = TYPE_REC(ctx, th, "MLIR_GetTypeLLVMStructName");
+    if (t->kind != MLIR_TYPE_KIND_LLVM_STRUCT || !(t->flags & TYF_IDENTIFIED)) return str_lit("");
+    return TNAMES(ctx)[t->aux];
+}
+
+bool MLIR_IsTypeLLVMStructOpaque(MLIR_Context *ctx, MLIR_TypeHandle th) {
+    const IR_Type *t = TYPE_REC(ctx, th, "MLIR_IsTypeLLVMStructOpaque");
+    return t->kind == MLIR_TYPE_KIND_LLVM_STRUCT && (t->flags & TYF_IDENTIFIED) &&
+           !(t->flags & TYF_BODY_SET);
+}
+
+uint32_t MLIR_GetTypeLLVMPointerAddressSpace(MLIR_Context *ctx, MLIR_TypeHandle th) {
+    const IR_Type *t = TYPE_REC(ctx, th, "MLIR_GetTypeLLVMPointerAddressSpace");
+    return t->kind == MLIR_TYPE_KIND_LLVM_POINTER ? t->aux : 0;
 }
 
 // LLVM-dialect global helpers. Construct `llvm.mlir.global` ops with the
@@ -1761,130 +1803,6 @@ MLIR_OpHandle MLIR_CreateLLVMGlobal(MLIR_Context *ctx, string sym_name,
                          attrs, na, NULL, 0, NULL, 0, NULL, 0,
                          nr ? regs : NULL, nr, loc, MLIR_INVALID_HANDLE,
                          str_lit(""), -1);
-}
-
-MLIR_TypeHandle MLIR_CreateTypeFunction(MLIR_Context *ctx,
-                                         const MLIR_TypeHandle *inputs, size_t n_inputs,
-                                         const MLIR_TypeHandle *results, size_t n_results) {
-    IR_Type t = {0};
-    t.kind = TYPE_KIND_FUNCTION;
-    if (n_inputs > 0 && inputs) {
-        t.data.function.inputs = (MLIR_TypeHandle *)inputs;
-        t.data.function.n_inputs = n_inputs;
-    }
-    if (n_results > 0 && results) {
-        t.data.function.results = (MLIR_TypeHandle *)results;
-        t.data.function.n_results = n_results;
-    }
-    return intern_type(ctx, t);
-}
-
-size_t MLIR_GetTypeFunctionNumInputs(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    if (!t) return 0;
-    if (t->kind == TYPE_KIND_FUNCTION) return t->data.function.n_inputs;
-    if (t->kind == TYPE_KIND_LLVM_FUNCTION) return t->data.llvm_function.n_inputs;
-    return 0;
-}
-
-MLIR_TypeHandle MLIR_GetTypeFunctionInput(MLIR_TypeHandle th, size_t idx) {
-    API_CHECK(idx < MLIR_GetTypeFunctionNumInputs(th), "MLIR_GetTypeFunctionInput", "index out of range");
-    IR_Type *t = resolve_type(th);
-    if (!t) return MLIR_INVALID_HANDLE;
-    if (t->kind == TYPE_KIND_FUNCTION) {
-        if (idx >= t->data.function.n_inputs || !t->data.function.inputs) return MLIR_INVALID_HANDLE;
-        return t->data.function.inputs[idx];
-    }
-    if (t->kind == TYPE_KIND_LLVM_FUNCTION) {
-        if (idx >= t->data.llvm_function.n_inputs || !t->data.llvm_function.inputs) return MLIR_INVALID_HANDLE;
-        return t->data.llvm_function.inputs[idx];
-    }
-    return MLIR_INVALID_HANDLE;
-}
-
-size_t MLIR_GetTypeFunctionNumResults(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    if (!t) return 0;
-    if (t->kind == TYPE_KIND_FUNCTION) return t->data.function.n_results;
-    if (t->kind == TYPE_KIND_LLVM_FUNCTION) {
-        // LLVMFunctionType always has exactly one return type; void is
-        // represented as a separate LLVMVoid type. Surface 0 results in
-        // the void case so callers can use the same "0 results means void"
-        // convention as upstream's MLIR_GetTypeFunctionNumResults.
-        IR_Type *r = resolve_type(t->data.llvm_function.result);
-        return (r && r->kind == TYPE_KIND_LLVM_VOID) ? 0 : 1;
-    }
-    return 0;
-}
-
-MLIR_TypeHandle MLIR_GetTypeFunctionResult(MLIR_TypeHandle th, size_t idx) {
-    API_CHECK(idx < MLIR_GetTypeFunctionNumResults(th), "MLIR_GetTypeFunctionResult", "index out of range");
-    IR_Type *t = resolve_type(th);
-    if (!t) return MLIR_INVALID_HANDLE;
-    if (t->kind == TYPE_KIND_FUNCTION) {
-        if (idx >= t->data.function.n_results || !t->data.function.results) return MLIR_INVALID_HANDLE;
-        return t->data.function.results[idx];
-    }
-    if (t->kind == TYPE_KIND_LLVM_FUNCTION) {
-        if (idx != 0) return MLIR_INVALID_HANDLE;
-        IR_Type *r = resolve_type(t->data.llvm_function.result);
-        if (r && r->kind == TYPE_KIND_LLVM_VOID) return MLIR_INVALID_HANDLE;
-        return t->data.llvm_function.result;
-    }
-    return MLIR_INVALID_HANDLE;
-}
-
-bool MLIR_GetTypeFunctionIsVarArg(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    if (!t) return false;
-    if (t->kind == TYPE_KIND_LLVM_FUNCTION) return t->data.llvm_function.is_var_arg;
-    return false;
-}
-
-MLIR_TypeHandle MLIR_GetTypeShapedElement(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    if (!t) return MLIR_INVALID_HANDLE;
-    if (t->kind == TYPE_KIND_TENSOR || t->kind == TYPE_KIND_MEMREF) {
-        return t->data.shaped.element_type;
-    }
-    return MLIR_INVALID_HANDLE;
-}
-
-bool MLIR_IsTypeLLVMStruct(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    return t && t->kind == TYPE_KIND_LLVM_STRUCT;
-}
-size_t MLIR_GetTypeLLVMStructNumFields(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    if (!t || t->kind != TYPE_KIND_LLVM_STRUCT) return 0;
-    return t->data.llvm_struct.n_fields;
-}
-MLIR_TypeHandle MLIR_GetTypeLLVMStructField(MLIR_TypeHandle th, size_t idx) {
-    API_CHECK(idx < MLIR_GetTypeLLVMStructNumFields(th), "MLIR_GetTypeLLVMStructField", "index out of range");
-    IR_Type *t = resolve_type(th);
-    if (!t || t->kind != TYPE_KIND_LLVM_STRUCT) return MLIR_INVALID_HANDLE;
-    if (idx >= t->data.llvm_struct.n_fields) return MLIR_INVALID_HANDLE;
-    return t->data.llvm_struct.fields[idx];
-}
-bool MLIR_IsTypeLLVMArray(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    return t && t->kind == TYPE_KIND_LLVM_ARRAY;
-}
-MLIR_TypeHandle MLIR_GetTypeLLVMArrayElement(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    if (!t || t->kind != TYPE_KIND_LLVM_ARRAY) return MLIR_INVALID_HANDLE;
-    return t->data.llvm_array.element;
-}
-uint64_t MLIR_GetTypeLLVMArrayNumElements(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    if (!t || t->kind != TYPE_KIND_LLVM_ARRAY) return 0;
-    return t->data.llvm_array.count;
-}
-
-uint32_t MLIR_GetTypeLLVMPointerAddressSpace(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    return (t && t->kind == TYPE_KIND_LLVM_PTR)
-        ? t->data.llvm_pointer.address_space : 0;
 }
 
 // Attribute creation
@@ -2030,7 +1948,8 @@ MLIR_AttributeHandle MLIR_CreateAttributeLLVMLinkageInternal(MLIR_Context *ctx, 
 // Value creation
 MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_name, uint32_t result_index, MLIR_TypeHandle type, MLIR_LocationHandle location) {
     API_CHECK(ctx != NULL, "MLIR_CreateValueBlockArg", "context is NULL");
-    uint32_t v = value_create(ctx, 0, result_index, type, location, register_name);
+    uint32_t v = value_create(ctx, 0, result_index, TYPE_IDX(ctx, type, "MLIR_CreateValueBlockArg"),
+                              location, register_name);
     VALS(ctx)[v].index |= VAL_BLOCK_ARG;
     return VAL_H(ctx, v);
 }
@@ -2039,7 +1958,8 @@ MLIR_ValueHandle MLIR_CreateValueOpResult(MLIR_Context *ctx, MLIR_OpHandle def, 
     API_CHECK(ctx != NULL, "MLIR_CreateValueOpResult", "context is NULL");
     uint32_t d = OP_IDX(ctx, def, "MLIR_CreateValueOpResult");
     CHECK_NOT_ERASED(ctx, d, "MLIR_CreateValueOpResult");
-    return VAL_H(ctx, value_create(ctx, d, result_index, type, location, register_name));
+    return VAL_H(ctx, value_create(ctx, d, result_index, TYPE_IDX(ctx, type, "MLIR_CreateValueOpResult"),
+                                   location, register_name));
 }
 
 // Block and Region creation
@@ -2196,7 +2116,7 @@ MLIR_ValueKind MLIR_GetValueKind(MLIR_Context *ctx, MLIR_ValueHandle vh) {
 MLIR_TypeHandle MLIR_GetValueType(MLIR_Context *ctx, MLIR_ValueHandle vh) {
     uint32_t v = VAL_IDX(ctx, vh, "MLIR_GetValueType");
     API_CHECK(v != 0, "MLIR_GetValueType", "value handle is NULL");
-    return VALS(ctx)[v].type;
+    return TYPE_H(ctx, VALS(ctx)[v].type);
 }
 
 string MLIR_GetValueRegisterName(MLIR_Context *ctx, MLIR_ValueHandle vh) {
@@ -2310,24 +2230,6 @@ MLIR_LocationHandle MLIR_CreateLocationRef(MLIR_Context *ctx, int ref_id) {
         l.original_text = format(ctx->arena, str_lit("loc(#loc{})"), (int64_t)ref_id);
     }
     return alloc_loc(ctx, l);
-}
-
-MLIR_TypeHandle MLIR_CreateTypeOpaque(MLIR_Context *ctx, string name) {
-    (void)name;
-    IR_Type t = {0};
-    t.kind = TYPE_KIND_OPAQUE;
-    return intern_type(ctx, t);
-}
-
-// Type introspection
-bool MLIR_IsTypeInteger(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    return t && t->kind == TYPE_KIND_INTEGER;
-}
-
-bool MLIR_IsTypeFloat(MLIR_TypeHandle th) {
-    IR_Type *t = resolve_type(th);
-    return t && t->kind == TYPE_KIND_FLOAT;
 }
 
 // IR mutation primitives.
@@ -2750,7 +2652,8 @@ MLIR_ValueHandle MLIR_AddBlockArgument(MLIR_Context *ctx, MLIR_BlockHandle bh,
                                        MLIR_TypeHandle type, MLIR_LocationHandle loc) {
     uint32_t b = BLOCK_IDX(ctx, bh, "MLIR_AddBlockArgument");
     if (!b) return MLIR_INVALID_HANDLE;
-    uint32_t v = value_create(ctx, b, BLOCKS(ctx)[b].n_args, type, loc, (string){0});
+    uint32_t v = value_create(ctx, b, BLOCKS(ctx)[b].n_args,
+                              TYPE_IDX(ctx, type, "MLIR_AddBlockArgument"), loc, (string){0});
     VALS(ctx)[v].index |= VAL_BLOCK_ARG;
     IR_Block *blk = &BLOCKS(ctx)[b];
     blk->args = u32_reserve(ctx->arena, blk->args, blk->n_args, &blk->cap_args, (size_t)blk->n_args + 1);

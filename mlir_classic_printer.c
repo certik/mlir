@@ -125,21 +125,21 @@ static void func_signature_from_op(PrintCtx *pctx, MLIR_OpHandle op,
         }
     }
     if (!used_block_args) {
-        size_t ni = MLIR_GetTypeFunctionNumInputs(ft);
+        size_t ni = MLIR_GetTypeFunctionNumInputs(ctx, ft);
         for (size_t k = 0; k < ni; k++) {
             if (k > 0) strbuf_append(arena, params, str_lit(", "));
-            strbuf_append(arena, params, MLIR_GetTypeString(ctx, MLIR_GetTypeFunctionInput(ft, k)));
+            strbuf_append(arena, params, MLIR_GetTypeString(ctx, MLIR_GetTypeFunctionInput(ctx, ft, k)));
         }
     }
 
-    size_t nr = MLIR_GetTypeFunctionNumResults(ft);
+    size_t nr = MLIR_GetTypeFunctionNumResults(ctx, ft);
     if (nr == 1) {
-        *ret = MLIR_GetTypeString(ctx, MLIR_GetTypeFunctionResult(ft, 0));
+        *ret = MLIR_GetTypeString(ctx, MLIR_GetTypeFunctionResult(ctx, ft, 0));
     } else if (nr > 1) {
         strbuf body = strbuf_make();
         for (size_t k = 0; k < nr; k++) {
             if (k > 0) strbuf_append(arena, &body, str_lit(", "));
-            strbuf_append(arena, &body, MLIR_GetTypeString(ctx, MLIR_GetTypeFunctionResult(ft, k)));
+            strbuf_append(arena, &body, MLIR_GetTypeString(ctx, MLIR_GetTypeFunctionResult(ctx, ft, k)));
         }
         *ret = format(arena, str_lit("({})"), strbuf_to_string(body));
     }

@@ -43,14 +43,14 @@ bool llvm_aggregate_elem(MLIR_Context *ctx, MLIR_TypeHandle ty,
                          unsigned *off, MLIR_TypeHandle *elem) {
     unsigned o = 0;
     for (size_t k = 0; k < n; k++) {
-        if (MLIR_IsTypeLLVMArray(ty)) {
-            if ((uint64_t)idx[k] >= MLIR_GetTypeLLVMArrayNumElements(ty)) return false;
-            ty = MLIR_GetTypeLLVMArrayElement(ty);
+        if (MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_ARRAY) {
+            if ((uint64_t)idx[k] >= MLIR_GetTypeNumElements(ctx, ty)) return false;
+            ty = MLIR_GetTypeElement(ctx, ty);
             o += (unsigned)idx[k] * llvm_type_size(ctx, ty, ptr_bytes);
-        } else if (MLIR_IsTypeLLVMStruct(ty)) {
-            if ((uint64_t)idx[k] >= MLIR_GetTypeLLVMStructNumFields(ty)) return false;
+        } else if (MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_STRUCT) {
+            if ((uint64_t)idx[k] >= MLIR_GetTypeLLVMStructNumFields(ctx, ty)) return false;
             o += llvm_struct_field_offset(ctx, ty, (size_t)idx[k], ptr_bytes);
-            ty = MLIR_GetTypeLLVMStructField(ty, (size_t)idx[k]);
+            ty = MLIR_GetTypeLLVMStructField(ctx, ty, (size_t)idx[k]);
         } else {
             return false;
         }
@@ -87,7 +87,7 @@ static bool elem_from_cursor(MLIR_Context *ctx, MLIR_TypeHandle gty, const int64
         MLIR_TypeHandle pty;
         unsigned poff;
         if (!llvm_aggregate_elem(ctx, gty, idx, n - 1, ptr_bytes, &poff, &pty)) return false;
-        if (!MLIR_IsTypeLLVMStruct(pty))
+        if (MLIR_GetTypeKind(ctx, pty) != MLIR_TYPE_KIND_LLVM_STRUCT)
             return llvm_aggregate_elem(ctx, gty, idx, n, ptr_bytes, off, elem);
         fc->valid = true;
         for (size_t k = 0; k + 1 < n; k++) fc->prefix[k] = idx[k];
@@ -97,17 +97,17 @@ static bool elem_from_cursor(MLIR_Context *ctx, MLIR_TypeHandle gty, const int64
         fc->fld = 0;
         fc->foff = 0;
     }
-    size_t nf = MLIR_GetTypeLLVMStructNumFields(fc->sty);
+    size_t nf = MLIR_GetTypeLLVMStructNumFields(ctx, fc->sty);
     if ((uint64_t)idx[n - 1] >= nf) return false;
     while (fc->fld < (size_t)idx[n - 1]) {
-        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(fc->sty, fc->fld);
-        MLIR_TypeHandle nt = MLIR_GetTypeLLVMStructField(fc->sty, fc->fld + 1);
+        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(ctx, fc->sty, fc->fld);
+        MLIR_TypeHandle nt = MLIR_GetTypeLLVMStructField(ctx, fc->sty, fc->fld + 1);
         fc->foff = llvm_align_up(fc->foff + llvm_type_size(ctx, ft, ptr_bytes),
                                  llvm_type_align(ctx, nt, ptr_bytes));
         fc->fld++;
     }
     *off = fc->soff + fc->foff;
-    *elem = MLIR_GetTypeLLVMStructField(fc->sty, fc->fld);
+    *elem = MLIR_GetTypeLLVMStructField(ctx, fc->sty, fc->fld);
     return true;
 }
 
