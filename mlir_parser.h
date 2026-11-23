@@ -181,6 +181,7 @@ MLIR_NamedAttr create_string_attr(Parser *parser, string name, string value);
 MLIR_NamedAttr create_integer_attr(Parser *parser, string name, int64_t value, MLIR_TypeHandle type);
 MLIR_NamedAttr create_float_attr(Parser *parser, string name, double value, MLIR_TypeHandle type);
 MLIR_NamedAttr create_bool_attr(Parser *parser, string name, bool value);
+MLIR_NamedAttr create_payload_attr(Parser *parser, string name, string payload);
 void operation_append_attribute(Parser *parser, MLIR_OpHandle op, MLIR_NamedAttr attr);
 MLIR_ValueHandle lookup_or_create_value(Parser *parser, string reg, string default_type);
 void append_attr(Parser *parser, MLIR_NamedAttr **attrs, size_t *n, size_t *cap, MLIR_NamedAttr attr);
