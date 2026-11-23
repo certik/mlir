@@ -15,6 +15,11 @@ static int is_null(uintptr_t b) { return b == NULL; }
 static int not_null(uintptr_t b) { return NULL != b; }
 static int same(char *p, uintptr_t b) { return p == b; }
 static int differ(uintptr_t b, char *p) { return b != p; }
+// Null pointer constants: a return value and a struct-pointer argument.
+static unsigned long show_s(struct S *p) { return (unsigned long)p; }
+static char *ret_zero(void) { return 0; }
+static void *ret_int(uintptr_t k) { return k; }
+struct L { struct L *next, *prev; };
 int main(void) {
     uintptr_t k = 12345;
     int i = 777;
@@ -61,5 +66,27 @@ int main(void) {
     printf("%lu %lu %lu\n", (unsigned long)t1, (unsigned long)t2, (unsigned long)t3);
     char *z = 0;
     printf("%d %d\n", z == 0, 0 != z);
+    // Other null pointer constants.
+    printf("%lu %lu %lu %lu\n", show(0L), show(0UL), show((long)0),
+           show(sizeof(int) - 4));
+    printf("%lu %lu %lu\n", show_s(0), (unsigned long)ret_zero(),
+           (unsigned long)ret_int(k));
+    // An assignment's value has the pointer type: no second conversion.
+    char *a1, *a2;
+    a1 = a2 = 0;
+    struct L n; n.next = n.prev = 0;
+    void *c1, *c2; c1 = c2 = i;
+    char *c3; c3 = (cp = k);
+    unsigned long sv = show(vp = k);
+    printf("%lu %lu %lu %lu %lu %lu\n", (unsigned long)a1, (unsigned long)n.next,
+           (unsigned long)c1, (unsigned long)c3, sv, (unsigned long)vp);
+    if ((vp = i)) printf("set\n");
+    if (!(vp = 0)) printf("null\n");
+    // Ordering comparisons with an integer.
+    char *p100 = (char *)100;
+    uintptr_t h = 100;
+    printf("%d %d %d %d\n", p100 >= h, p100 <= h - 1, h < p100, h + 1 > p100);
+    while (h != NULL) h--;
+    printf("%lu\n", h);
     return 0;
 }

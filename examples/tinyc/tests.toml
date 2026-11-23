@@ -952,10 +952,10 @@ expected_stdout = "42\n"
 [[test]]
 name = "int_to_ptr_implicit"
 targets = ["native", "wasm", "macho", "elf"]
-# An integer passed, assigned or compared as a pointer without a cast
-# converts with a warning; it used to become the null pointer (#365).
+# An integer passed, assigned, returned or compared as a pointer without a
+# cast converts with a warning; it used to become the null pointer (#365).
 # Expected output from gcc 14 -fpermissive.
-expected_stdout = "12345 12345\n12345 777 777\n0 0\n4000000000 4000000000\n1 1\n12345\n777 0\n777 12345 777 12345\n12345 777\n12345 0\n777 12345 777\n1 0 0 1\n1 0 0 1\n1 777 0\n1 0\n"
+expected_stdout = "12345 12345\n12345 777 777\n0 0\n4000000000 4000000000\n1 1\n12345\n777 0\n777 12345 777 12345\n12345 777\n12345 0\n777 12345 777\n1 0 0 1\n1 0 0 1\n1 777 0\n1 0\n0 0 0 0\n0 0 12345\n0 0 777 12345 12345 12345\nset\nnull\n1 0 0 1\n0\n"
 
 [[test]]
 name = "global_ptr_int_init"
@@ -963,6 +963,12 @@ targets = ["native", "wasm", "macho", "elf"]
 # A global pointer initialized with a nonzero integer used to become the null
 # pointer (#365); tinyc rejects it.
 expected_compile_error = "only a null pointer or a string can initialize a global pointer"
+
+[[test]]
+name = "global_ptr_array_int_init"
+targets = ["native", "wasm", "macho", "elf"]
+# Likewise for a nonzero integer in a global pointer array (#365).
+expected_compile_error = "only a null pointer can initialize a pointer in a global aggregate"
 
 [[test]]
 name = "struct_fwd_then_def"

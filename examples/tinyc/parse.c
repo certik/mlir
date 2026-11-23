@@ -3180,6 +3180,14 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                         have_int_val = true;
                                         ok = true;
                                     }
+                                    if (have_int_val && val != 0 &&
+                                        (g.type.kind == TY_ARRAY_PTR_CHAR ||
+                                         g.type.kind == TY_ARRAY_PTR_STRUCT)) {
+                                        // `void *a[2] = {0, 8};` used to
+                                        // give null pointers (#365).
+                                        perror_at(&p, el.line,
+                                            str_lit("only a null pointer can initialize a pointer in a global aggregate"));
+                                    }
                                     if (!ok) {
                                         perror_at(&p, el.line,
                                             str_lit("global array initializer element must be int/long literal or NULL"));
