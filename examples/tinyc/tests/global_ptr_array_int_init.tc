@@ -1,0 +1,2 @@
+void *va[2] = {0, 8};
+int main(void) { return va[0] != 0; }
