@@ -69,9 +69,7 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
                         MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeBool(parser->ctx,
                                                  str_eq(name_str, str_lit("true")))));
 
-            if (!result_value) {
-                result_value = MLIR_CreateValueOpResult(parser->ctx, MLIR_INVALID_HANDLE, 0, bool_type, (string){MLIR_INVALID_HANDLE, 0}, MLIR_INVALID_HANDLE);
-            }
+
             result_types = arena_new_array(parser->arena, MLIR_TypeHandle, 1);
             result_types[0] = bool_type;
             n_result_types = 1;
@@ -108,9 +106,7 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
             }
             result_types[0] = type;
             n_result_types = 1;
-            if (!result_value) {
-                result_value = MLIR_CreateValueOpResult(parser->ctx, MLIR_INVALID_HANDLE, 0, type, (string){MLIR_INVALID_HANDLE, 0}, MLIR_INVALID_HANDLE);
-            }
+
             has_explicit_type = true;
         }
     }
@@ -135,9 +131,7 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
         op_location = parse_loc(parser);
     }
 
-    if (!result_value) {
-        result_value = MLIR_CreateValueOpResult(parser->ctx, MLIR_INVALID_HANDLE, 0, MLIR_INVALID_HANDLE, (string){MLIR_INVALID_HANDLE, 0}, MLIR_INVALID_HANDLE);
-    }
+
 
     if (!results) {
         results = arena_new_array(parser->arena, MLIR_ValueHandle, 1);
@@ -155,17 +149,14 @@ OperationParserResult parse_arith_constant_op(Parser *parser, OperationParserPar
     }
 
     // NOW create operation with all collected data
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         params->op_type,
         attributes, n_attributes,
         result_types, n_result_types,
         results, n_results,
         MLIR_INVALID_HANDLE, 0,
         MLIR_INVALID_HANDLE, 0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     OperationParserResult out = {
         .operation = op,
@@ -226,19 +217,16 @@ OperationParserResult parse_arith_binary_op(Parser *parser, const OperationParse
         op_location = params->unnumbered_loc_def;
     }
 
-    // Create results from the operation's result types
-    size_t n_results = 0;
-    MLIR_ValueHandle *results = finalize_results(params, MLIR_INVALID_HANDLE, result_types, n_result_types, &n_results);
-
     // Create the operation at the end
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, params->op_type,
-                                      attributes, n_attributes,
-                                      result_types, n_result_types,
-                                      results, n_results,
-                                      operands.data, operands.size,
-                                      MLIR_INVALID_HANDLE, 0,
-                                      op_location, params->unnumbered_loc_def,
-                                      params->trailing_comment, params->source_line_start);
+    MLIR_OpHandle op = parser_create_op(parser, params, params->op_type,
+                                        attributes, n_attributes,
+                                        result_types, n_result_types,
+                                        NULL, 0,
+                                        operands.data, operands.size,
+                                        MLIR_INVALID_HANDLE, 0,
+                                        op_location);
+    size_t n_results = 0;
+    MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
 
     // Set result definitions
     OperationParserResult out = {
@@ -344,14 +332,13 @@ OperationParserResult parse_func_call_op(Parser *parser, const OperationParserPa
     }
 
     // Create the operation at the end
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, params->op_type,
+    MLIR_OpHandle op = parser_create_op(parser, params, params->op_type,
                                       attributes, n_attributes,
                                       result_types, n_result_types,
                                       params->lhs_results, params->n_lhs_results,
                                       operands.data, operands.size,
                                       MLIR_INVALID_HANDLE, 0,
-                                      op_location, params->unnumbered_loc_def,
-                                      params->trailing_comment, params->source_line_start);
+                                      op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -389,7 +376,7 @@ OperationParserResult parse_tt_get_program_id_op(Parser *parser, const Operation
         op_location = params->unnumbered_loc_def;
     }
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes,
@@ -402,10 +389,7 @@ OperationParserResult parse_tt_get_program_id_op(Parser *parser, const Operation
         0,
         MLIR_INVALID_HANDLE,
         0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -477,14 +461,13 @@ OperationParserResult parse_tt_splat_op(Parser *parser, const OperationParserPar
     }
 
     // Create the operation at the end
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, params->op_type,
+    MLIR_OpHandle op = parser_create_op(parser, params, params->op_type,
                                       attributes, n_attributes,
                                       result_types, n_result_types,
                                       params->lhs_results, params->n_lhs_results,
                                       operands, n_operands,
                                       MLIR_INVALID_HANDLE, 0,
-                                      op_location, params->unnumbered_loc_def,
-                                      params->trailing_comment, params->source_line_start);
+                                      op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -573,7 +556,7 @@ OperationParserResult parse_tt_make_range_op(Parser *parser, const OperationPars
         op_location = params->unnumbered_loc_def;
     }
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes,
@@ -586,10 +569,7 @@ OperationParserResult parse_tt_make_range_op(Parser *parser, const OperationPars
         0,
         MLIR_INVALID_HANDLE,
         0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -662,7 +642,7 @@ OperationParserResult parse_tt_addptr_op(Parser *parser, const OperationParserPa
     MLIR_LocationHandle op_location = parse_optional_location(parser);
     if (!op_location) op_location = params->unnumbered_loc_def;
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes,
@@ -674,10 +654,7 @@ OperationParserResult parse_tt_addptr_op(Parser *parser, const OperationParserPa
         operands.data,
         operands.size,
         MLIR_INVALID_HANDLE, 0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     MLIR_ValueHandle *results = MLIR_INVALID_HANDLE;
     size_t n_results = 0;
@@ -764,7 +741,7 @@ OperationParserResult parse_tensor_extract_op(Parser *parser, const OperationPar
         op_location = params->unnumbered_loc_def;
     }
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes,
@@ -777,10 +754,7 @@ OperationParserResult parse_tensor_extract_op(Parser *parser, const OperationPar
         operands.size,
         MLIR_INVALID_HANDLE,
         0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -881,7 +855,7 @@ OperationParserResult parse_memref_load_op(Parser *parser, const OperationParser
     // Parse optional location
     MLIR_LocationHandle op_location = parse_optional_location(parser);
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes, n_attributes,
@@ -889,10 +863,7 @@ OperationParserResult parse_memref_load_op(Parser *parser, const OperationParser
         results, n_results,
         operands.data, operands.size,
         MLIR_INVALID_HANDLE, 0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     OperationParserResult out = {
         .operation = op,
@@ -975,7 +946,7 @@ OperationParserResult parse_memref_store_op(Parser *parser, const OperationParse
     // Parse optional location
     MLIR_LocationHandle op_location = parse_optional_location(parser);
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes, n_attributes,
@@ -983,10 +954,7 @@ OperationParserResult parse_memref_store_op(Parser *parser, const OperationParse
         results, n_results,
         operands.data, operands.size,
         MLIR_INVALID_HANDLE, 0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     OperationParserResult out = {
         .operation = op,
@@ -1043,7 +1011,7 @@ OperationParserResult parse_vector_print_op(Parser *parser, const OperationParse
         op_location = params->unnumbered_loc_def;
     }
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         NULL,
@@ -1056,10 +1024,7 @@ OperationParserResult parse_vector_print_op(Parser *parser, const OperationParse
         operands.size,
         MLIR_INVALID_HANDLE,
         0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     OperationParserResult out = {
         .operation = op,
@@ -1105,7 +1070,7 @@ OperationParserResult parse_std_constant_op(Parser *parser, const OperationParse
         op_location = params->unnumbered_loc_def;
     }
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes,
@@ -1118,10 +1083,7 @@ OperationParserResult parse_std_constant_op(Parser *parser, const OperationParse
         0,
         MLIR_INVALID_HANDLE,
         0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -1268,7 +1230,7 @@ OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserPa
         op_location = params->unnumbered_loc_def;
     }
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes,
@@ -1281,10 +1243,7 @@ OperationParserResult parse_tt_reduce_op(Parser *parser, const OperationParserPa
         operands.size,
         regions,
         n_regions,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -1345,7 +1304,7 @@ OperationParserResult parse_cf_br_op(Parser *parser, const OperationParserParams
     size_t *succ_operand_counts = arena_new_array(parser->arena, size_t, 1);
     succ_operand_counts[0] = branch_args.size;
 
-    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(parser->ctx,
+    MLIR_OpHandle op = parser_create_op_with_successors(parser, params,
         params->op_type,
         NULL, 0,
         MLIR_INVALID_HANDLE, 0,
@@ -1354,10 +1313,7 @@ OperationParserResult parse_cf_br_op(Parser *parser, const OperationParserParams
         MLIR_INVALID_HANDLE, 0,
         successors, 1,
         succ_operands_arrs, succ_operand_counts,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     OperationParserResult out = {
         .operation = op,
@@ -1462,7 +1418,7 @@ OperationParserResult parse_cf_cond_br_op(Parser *parser, const OperationParserP
     succ_operand_counts[0] = true_args.size;
     succ_operand_counts[1] = false_args.size;
 
-    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(parser->ctx,
+    MLIR_OpHandle op = parser_create_op_with_successors(parser, params,
         params->op_type,
         NULL, 0,
         MLIR_INVALID_HANDLE, 0,
@@ -1471,10 +1427,7 @@ OperationParserResult parse_cf_cond_br_op(Parser *parser, const OperationParserP
         MLIR_INVALID_HANDLE, 0,
         successors, 2,
         succ_operands_arrs, succ_operand_counts,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     OperationParserResult out = {
         .operation = op,
@@ -1533,7 +1486,7 @@ OperationParserResult parse_linalg_fill_op(Parser *parser, const OperationParser
         op_location = params->unnumbered_loc_def;
     }
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx,
+    MLIR_OpHandle op = parser_create_op(parser, params,
 
         params->op_type,
         attributes,
@@ -1546,10 +1499,7 @@ OperationParserResult parse_linalg_fill_op(Parser *parser, const OperationParser
         operands.size,
         MLIR_INVALID_HANDLE,
         0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -1656,7 +1606,7 @@ OperationParserResult parse_affine_load_op(Parser *parser, const OperationParser
         op_location = params->unnumbered_loc_def;
     }
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes,
@@ -1669,10 +1619,7 @@ OperationParserResult parse_affine_load_op(Parser *parser, const OperationParser
         operands.size,
         MLIR_INVALID_HANDLE,
         0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -1737,7 +1684,7 @@ OperationParserResult parse_index_constant_op(Parser *parser, const OperationPar
         op_location = params->unnumbered_loc_def;
     }
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes,
@@ -1750,10 +1697,7 @@ OperationParserResult parse_index_constant_op(Parser *parser, const OperationPar
         0,
         MLIR_INVALID_HANDLE,
         0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -1840,7 +1784,7 @@ OperationParserResult parse_tensor_splat_op(Parser *parser, const OperationParse
         op_location = params->unnumbered_loc_def;
     }
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes,
@@ -1853,10 +1797,7 @@ OperationParserResult parse_tensor_splat_op(Parser *parser, const OperationParse
         operands.size,
         MLIR_INVALID_HANDLE,
         0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -1948,14 +1889,13 @@ OperationParserResult parse_arith_select_op(Parser *parser, const OperationParse
     }
 
     // Create the operation at the end
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, params->op_type,
+    MLIR_OpHandle op = parser_create_op(parser, params, params->op_type,
                                       attributes, n_attributes,
                                       result_types, n_result_types,
                                       params->lhs_results, params->n_lhs_results,
                                       operands.data, operands.size,
                                       MLIR_INVALID_HANDLE, 0,
-                                      op_location, params->unnumbered_loc_def,
-                                      params->trailing_comment, params->source_line_start);
+                                      op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -2045,7 +1985,7 @@ OperationParserResult parse_tt_call_op(Parser *parser, const OperationParserPara
         op_location = params->unnumbered_loc_def;
     }
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes,
@@ -2058,10 +1998,7 @@ OperationParserResult parse_tt_call_op(Parser *parser, const OperationParserPara
         operands.size,
         MLIR_INVALID_HANDLE,
         0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -2154,7 +2091,7 @@ OperationParserResult parse_tensor_collapse_shape_op(Parser *parser, const Opera
         op_location = params->unnumbered_loc_def;
     }
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes,
@@ -2167,10 +2104,7 @@ OperationParserResult parse_tensor_collapse_shape_op(Parser *parser, const Opera
         operands.size,
         MLIR_INVALID_HANDLE,
         0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -2321,7 +2255,7 @@ OperationParserResult parse_generic_op(Parser *parser, const OperationParserPara
     if (!op_location) op_location = params->unnumbered_loc_def;
 
     // NOW create the operation with all collected data
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes, n_attributes,
@@ -2330,10 +2264,7 @@ OperationParserResult parse_generic_op(Parser *parser, const OperationParserPara
         params->n_lhs_results,
         operands.data, operands.size,
         regions, n_regions,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        source_line_start);
+        op_location);
 
     // Finalize results
     size_t n_results = 0;
@@ -2752,14 +2683,13 @@ OperationParserResult parse_tt_func_op(Parser *parser, const OperationParserPara
     }
 
     // Create the operation at the end
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, params->op_type,
+    MLIR_OpHandle op = parser_create_op(parser, params, params->op_type,
                                       attrs, n_attrs,
                                       result_types, n_result_types,
                                       params->lhs_results, params->n_lhs_results,
                                       func_operands, n_func_operands,
                                       regions, n_regions,
-                                      op_location, params->unnumbered_loc_def,
-                                      params->trailing_comment, params->source_line_start);
+                                      op_location);
 
     // Add arg_attrs array attribute to the operation if there are any argument attributes
     if (arg_attr_dicts.size > 0) {
@@ -2861,7 +2791,7 @@ OperationParserResult parse_scf_if_op(Parser *parser, const OperationParserParam
     regions[0] = then_region;
     if (else_region) regions[1] = else_region;
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes,
@@ -2874,10 +2804,7 @@ OperationParserResult parse_scf_if_op(Parser *parser, const OperationParserParam
         operands.size,
         regions,
         n_regions,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -3091,7 +3018,7 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
     MLIR_RegionHandle *regions = arena_new_array(params->arena, MLIR_RegionHandle, 1);
     regions[0] = region;
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         NULL,
@@ -3104,10 +3031,7 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
         operands.size,
         regions,
         1,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     MLIR_ValueHandle *results = MLIR_INVALID_HANDLE;
     size_t n_results = 0;
@@ -3238,7 +3162,7 @@ OperationParserResult parse_scf_while_op(Parser *parser, const OperationParserPa
     regions[0] = cond_region;
     if (body_region) regions[1] = body_region;
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes,
@@ -3251,10 +3175,7 @@ OperationParserResult parse_scf_while_op(Parser *parser, const OperationParserPa
         operands.size,
         regions,
         n_regions,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -3393,14 +3314,13 @@ OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserP
     size_t n_regions = 1;
 
     // Create the operation at the end
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, params->op_type,
+    MLIR_OpHandle op = parser_create_op(parser, params, params->op_type,
                                       attributes, n_attributes,
                                       result_types, n_result_types,
                                       params->lhs_results, params->n_lhs_results,
                                       operands.data, operands.size,
                                       regions, n_regions,
-                                      op_location, params->unnumbered_loc_def,
-                                      params->trailing_comment, params->source_line_start);
+                                      op_location);
 
     // Create results from the operation's result types
     MLIR_ValueHandle *results = MLIR_INVALID_HANDLE;
@@ -3484,14 +3404,13 @@ OperationParserResult parse_arith_cmpi_op(Parser *parser, const OperationParserP
     }
 
     // Create the operation at the end
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, params->op_type,
+    MLIR_OpHandle op = parser_create_op(parser, params, params->op_type,
                                       attributes, n_attributes,
                                       result_types, n_result_types,
                                       params->lhs_results, params->n_lhs_results,
                                       operands.data, operands.size,
                                       MLIR_INVALID_HANDLE, 0,
-                                      op_location, params->unnumbered_loc_def,
-                                      params->trailing_comment, params->source_line_start);
+                                      op_location);
 
     // Create results from the operation's result types
     MLIR_ValueHandle *results = MLIR_INVALID_HANDLE;
@@ -3541,7 +3460,7 @@ OperationParserResult parse_scf_yield_op(Parser *parser, const OperationParserPa
     MLIR_LocationHandle op_location = parse_optional_location(parser);
     if (!op_location) op_location = params->unnumbered_loc_def;
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         NULL, 0,
@@ -3551,10 +3470,7 @@ OperationParserResult parse_scf_yield_op(Parser *parser, const OperationParserPa
         operands.data,
         operands.size,
         MLIR_INVALID_HANDLE, 0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     OperationParserResult out = {
         .operation = op,
@@ -3607,7 +3523,7 @@ OperationParserResult parse_return_op(Parser *parser, const OperationParserParam
 
     bool keep_operands = params->op_kind != PARSER_OP_STD_RETURN;
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         NULL, 0,
@@ -3617,10 +3533,7 @@ OperationParserResult parse_return_op(Parser *parser, const OperationParserParam
         (keep_operands && operands.size > 0) ? operands.data : MLIR_INVALID_HANDLE,
         keep_operands ? operands.size : 0,
         MLIR_INVALID_HANDLE, 0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     OperationParserResult out = {
         .operation = op,
@@ -3733,7 +3646,7 @@ OperationParserResult parse_tt_load_op(Parser *parser, const OperationParserPara
     MLIR_LocationHandle op_location = parse_optional_location(parser);
     if (!op_location) op_location = params->unnumbered_loc_def;
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes,
@@ -3745,10 +3658,7 @@ OperationParserResult parse_tt_load_op(Parser *parser, const OperationParserPara
         operands.data,
         operands.size,
         MLIR_INVALID_HANDLE, 0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     size_t n_results = 0;
     MLIR_ValueHandle *results = finalize_results(params, op, result_types, n_result_types, &n_results);
@@ -3846,7 +3756,7 @@ OperationParserResult parse_tt_store_op(Parser *parser, const OperationParserPar
     MLIR_LocationHandle op_location = parse_optional_location(parser);
     if (!op_location) op_location = params->unnumbered_loc_def;
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attributes,
@@ -3857,10 +3767,7 @@ OperationParserResult parse_tt_store_op(Parser *parser, const OperationParserPar
         operands.data,
         operands.size,
         MLIR_INVALID_HANDLE, 0,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     OperationParserResult out = {
         .operation = op,
@@ -4044,7 +3951,7 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
     }
 
     // NOW create operation with all collected data
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx, 
+    MLIR_OpHandle op = parser_create_op(parser, params, 
         
         params->op_type,
         attrs, n_attrs,
@@ -4053,10 +3960,7 @@ OperationParserResult parse_func_func_op(Parser *parser, const OperationParserPa
         params->n_lhs_results,
         MLIR_INVALID_HANDLE, 0,
         regions, n_regions,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     OperationParserResult out = {
         .operation = op,
@@ -4184,7 +4088,7 @@ OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserP
     if (have_step) append_attr(parser, &attributes, &n_attributes, &attributes_capacity,
         create_integer_attr(parser, str_lit("_step"), step_val, idx_ty));
 
-    MLIR_OpHandle op = MLIR_CreateOp(parser->ctx,
+    MLIR_OpHandle op = parser_create_op(parser, params,
         params->op_type,
         attributes, n_attributes,
         result_types, n_result_types,
@@ -4192,10 +4096,7 @@ OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserP
         params->n_lhs_results,
         MLIR_INVALID_HANDLE, 0,
         regions, 1,
-        op_location,
-        params->unnumbered_loc_def,
-        params->trailing_comment,
-        params->source_line_start);
+        op_location);
 
     OperationParserResult out = {
         .operation = op,

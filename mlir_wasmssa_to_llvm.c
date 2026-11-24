@@ -317,20 +317,24 @@ typedef struct {
     bool              have_base;   // whether linmem_base is populated
 } FLower;
 
-// Create a fresh op result value of the given type.
-static MLIR_ValueHandle mk_res(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    return MLIR_CreateValueOpResult(ctx, MLIR_INVALID_HANDLE, 0, ty,
-        (string){0}, MLIR_CreateLocationUnknown(ctx, (string){0}));
-}
 static MLIR_OpHandle build_op(MLIR_Context *ctx, MLIR_OpType t,
                               MLIR_NamedAttr *attrs, size_t na,
                               MLIR_TypeHandle *rtys, size_t nr,
-                              MLIR_ValueHandle *res,
+                              MLIR_ValueHandle *out_res,
                               MLIR_ValueHandle *ops, size_t no) {
-    return MLIR_CreateOp(ctx, t,
-        attrs, na, rtys, nr, res, nr, ops, no, NULL, 0,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec spec = {0};
+    spec.type = t;
+    spec.operands = ops;
+    spec.n_operands = (uint32_t)no;
+    spec.result_types = rtys;
+    spec.n_results = (uint32_t)nr;
+    spec.attrs = attrs;
+    spec.n_attrs = (uint32_t)na;
+    MLIR_OpHandle op = MLIR_CreateOpFromSpec(ctx, &spec);
+    if (out_res) {
+        for (size_t i = 0; i < nr; i++) out_res[i] = MLIR_GetOpResult(ctx, op, i);
+    }
+    return op;
 }
 
 // Append `op` to the current block.
@@ -391,28 +395,16 @@ static MLIR_BlockHandle new_block(FLower *L) {
 
 // Emit an unconditional llvm.br to `target` and mark cur terminated.
 static void term_br(FLower *L, MLIR_BlockHandle target) {
-    MLIR_BlockHandle succs[1] = { target };
-    MLIR_ValueHandle *sops[1] = { NULL };
-    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(L->ctx, OP_TYPE_LLVM_BR,
-        NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
-        succs, 1, sops, 0,
-        MLIR_CreateLocationUnknown(L->ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
-    emit(L, op);
+    MLIR_Builder b = MLIR_BuilderAtEnd(L->ctx, L->cur);
+    MLIR_BuildBr(&b, OP_TYPE_LLVM_BR, target, NULL, 0);
     L->terminated = true;
 }
 
 // Emit an llvm.cond_br on `cond` to (t_blk, f_blk) and mark cur terminated.
 static void term_cond_br(FLower *L, MLIR_ValueHandle cond,
                          MLIR_BlockHandle t_blk, MLIR_BlockHandle f_blk) {
-    MLIR_BlockHandle succs[2] = { t_blk, f_blk };
-    MLIR_ValueHandle cond_arr[1] = { cond };
-    MLIR_OpHandle op = MLIR_CreateOpWithSuccessors(L->ctx, OP_TYPE_LLVM_COND_BR,
-        NULL, 0, NULL, 0, NULL, 0, cond_arr, 1, NULL, 0,
-        succs, 2, NULL, 0,
-        MLIR_CreateLocationUnknown(L->ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
-    emit(L, op);
+    MLIR_Builder b = MLIR_BuilderAtEnd(L->ctx, L->cur);
+    MLIR_BuildCondBr(&b, OP_TYPE_LLVM_COND_BR, cond, t_blk, NULL, 0, f_blk, NULL, 0);
     L->terminated = true;
 }
 
@@ -503,7 +495,7 @@ static MLIR_ValueHandle build_icmp(FLower *L, int64_t pred,
     MLIR_NamedAttr pa = MLIR_Named(MLIR_KEY_PREDICATE, MLIR_CreateAttributeInteger(
         ctx, pred, i64));
     MLIR_TypeHandle rt[1] = { i32 };
-    MLIR_ValueHandle r[1] = { mk_res(ctx, i32) };
+    MLIR_ValueHandle r[1];
     MLIR_ValueHandle ops[2] = { a, b };
     MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_ICMP, &pa, 1, rt, 1, r, ops, 2);
     emit(L, out);
@@ -548,7 +540,7 @@ static MLIR_ValueHandle build_fcmp(FLower *L, int64_t pred,
     MLIR_NamedAttr pa = MLIR_Named(MLIR_KEY_PREDICATE, MLIR_CreateAttributeInteger(
         ctx, pred, i64));
     MLIR_TypeHandle rt[1] = { i32 };
-    MLIR_ValueHandle r[1] = { mk_res(ctx, i32) };
+    MLIR_ValueHandle r[1];
     MLIR_ValueHandle ops[2] = { a, b };
     MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_FCMP, &pa, 1, rt, 1, r, ops, 2);
     emit(L, out);
@@ -574,7 +566,7 @@ static MLIR_ValueHandle emit_const(FLower *L, MLIR_TypeHandle ity, int64_t v) {
     MLIR_NamedAttr va = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(
         L->ctx, v, ity));
     MLIR_TypeHandle rt[1] = { ity };
-    MLIR_ValueHandle r[1] = { mk_res(L->ctx, ity) };
+    MLIR_ValueHandle r[1];
     MLIR_OpHandle out = build_op(L->ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
         &va, 1, rt, 1, r, NULL, 0);
     emit(L, out);
@@ -588,7 +580,7 @@ static MLIR_ValueHandle emit_addressof(FLower *L, const char *sym) {
         L->ctx,
         str_from_cstr_view((char *)sym)));
     MLIR_TypeHandle rt[1] = { ptr };
-    MLIR_ValueHandle r[1] = { mk_res(L->ctx, ptr) };
+    MLIR_ValueHandle r[1];
     MLIR_OpHandle out = build_op(L->ctx, OP_TYPE_LLVM_MLIR_ADDRESSOF,
         &a, 1, rt, 1, r, NULL, 0);
     emit(L, out);
@@ -599,7 +591,7 @@ static MLIR_ValueHandle emit_addressof(FLower *L, const char *sym) {
 static MLIR_ValueHandle emit_cast(FLower *L, MLIR_OpType ot,
                                   MLIR_ValueHandle v, MLIR_TypeHandle toty) {
     MLIR_TypeHandle rt[1] = { toty };
-    MLIR_ValueHandle r[1] = { mk_res(L->ctx, toty) };
+    MLIR_ValueHandle r[1];
     MLIR_ValueHandle ops[1] = { v };
     MLIR_OpHandle out = build_op(L->ctx, ot, NULL, 0, rt, 1, r, ops, 1);
     emit(L, out);
@@ -624,7 +616,7 @@ static MLIR_ValueHandle emit_binop2(FLower *L, MLIR_OpType ot,
                                     MLIR_ValueHandle a, MLIR_ValueHandle b,
                                     MLIR_TypeHandle ity) {
     MLIR_TypeHandle rt[1] = { ity };
-    MLIR_ValueHandle r[1] = { mk_res(L->ctx, ity) };
+    MLIR_ValueHandle r[1];
     MLIR_ValueHandle ops[2] = { a, b };
     MLIR_OpHandle out = build_op(L->ctx, ot, NULL, 0, rt, 1, r, ops, 2);
     emit(L, out);
@@ -636,7 +628,7 @@ static MLIR_ValueHandle emit_select(FLower *L, MLIR_ValueHandle cond,
                                     MLIR_ValueHandle tval, MLIR_ValueHandle fval,
                                     MLIR_TypeHandle ty) {
     MLIR_TypeHandle rt[1] = { ty };
-    MLIR_ValueHandle r[1] = { mk_res(L->ctx, ty) };
+    MLIR_ValueHandle r[1];
     MLIR_ValueHandle ops[3] = { cond, tval, fval };
     MLIR_OpHandle out = build_op(L->ctx, OP_TYPE_LLVM_SELECT, NULL, 0, rt, 1, r, ops, 3);
     emit(L, out);
@@ -673,7 +665,7 @@ static MLIR_ValueHandle linmem_ptr(FLower *L, MLIR_ValueHandle addr_i32,
     }
     // inttoptr has no MLIR_OpType enum; build by name (unregistered).
     MLIR_TypeHandle rt[1] = { ptr };
-    MLIR_ValueHandle r[1] = { mk_res(ctx, ptr) };
+    MLIR_ValueHandle r[1];
     MLIR_ValueHandle ops[1] = { ea };
     MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_INTTOPTR, NULL, 0, rt, 1, r, ops, 1);
     emit(L, out);
@@ -716,7 +708,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
             MLIR_NamedAttr va = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeFloat(
                 ctx, d, fty));
             MLIR_TypeHandle rt[1] = { fty };
-            MLIR_ValueHandle r[1] = { mk_res(ctx, fty) };
+            MLIR_ValueHandle r[1];
             MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
                 &va, 1, rt, 1, r, NULL, 0);
             emit(L, out);
@@ -733,7 +725,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         MLIR_NamedAttr va = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(
             ctx, v, ity));
         MLIR_TypeHandle rt[1] = { ity };
-        MLIR_ValueHandle r[1] = { mk_res(ctx, ity) };
+        MLIR_ValueHandle r[1];
         MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
             &va, 1, rt, 1, r, NULL, 0);
         emit(L, out);
@@ -757,7 +749,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         uint8_t vt = L->local_vt[idx];
         MLIR_TypeHandle ety = vt_to_llvm(ctx, vt);
         MLIR_TypeHandle rt[1] = { ety };
-        MLIR_ValueHandle r[1] = { mk_res(ctx, ety) };
+        MLIR_ValueHandle r[1];
         MLIR_ValueHandle ops[1] = { L->local_ptr[idx] };
         MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_LOAD,
             NULL, 0, rt, 1, r, ops, 1);
@@ -813,7 +805,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         MLIR_OpType ot = (t == OP_TYPE_WASMSSA_ADD) ? OP_TYPE_LLVM_ADD
                                                     : OP_TYPE_LLVM_SUB;
         MLIR_TypeHandle rt[1] = { ity };
-        MLIR_ValueHandle r[1] = { mk_res(ctx, ity) };
+        MLIR_ValueHandle r[1];
         MLIR_ValueHandle ops[2] = { a, b };
         MLIR_OpHandle out = build_op(ctx, ot, NULL, 0, rt, 1, r, ops, 2);
         emit(L, out);
@@ -876,7 +868,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         }
         MLIR_TypeHandle ity = vt_to_llvm(ctx, vt);
         MLIR_TypeHandle rt[1] = { ity };
-        MLIR_ValueHandle r[1] = { mk_res(ctx, ity) };
+        MLIR_ValueHandle r[1];
         MLIR_ValueHandle ops[2] = { a, b };
         MLIR_OpHandle out = build_op(ctx, ot, NULL, 0, rt, 1, r, ops, 2);
         emit(L, out);
@@ -892,7 +884,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         }
         MLIR_TypeHandle i64ty = MLIR_CreateTypeInteger(ctx, 64, true);
         MLIR_TypeHandle rt[1] = { i64ty };
-        MLIR_ValueHandle r[1] = { mk_res(ctx, i64ty) };
+        MLIR_ValueHandle r[1];
         MLIR_ValueHandle ops[1] = { a };
         MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_SEXT,
             NULL, 0, rt, 1, r, ops, 1);
@@ -944,9 +936,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
                 MLIR_TypeHandle tracked = MLIR_GetValueType(ctx, MLIR_GetOpResult(ctx, op, 0));
                 ty = fresh_type_like(ctx, tracked);
             }
-            rt[0] = ty;
-            r[0] = mk_res(ctx, ty);
-        }
+            rt[0] = ty;        }
         MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_CALL,
             attrs, 1, rt, nr, r, ops, no);
         emit(L, out);
@@ -986,7 +976,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         MLIR_NamedAttr za = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(
             ctx, 0, aty));
         MLIR_TypeHandle zrt[1] = { aty };
-        MLIR_ValueHandle zr[1] = { mk_res(ctx, aty) };
+        MLIR_ValueHandle zr[1];
         MLIR_OpHandle zc = build_op(ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
             &za, 1, zrt, 1, zr, NULL, 0);
         emit(L, zc);
@@ -1016,7 +1006,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
                 ity = MLIR_CreateTypeInteger(ctx, 32, true);
         }
         MLIR_TypeHandle rt[1] = { ity };
-        MLIR_ValueHandle r[1] = { mk_res(ctx, ity) };
+        MLIR_ValueHandle r[1];
         MLIR_ValueHandle ops[3] = { c, a, b };
         MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_SELECT,
             NULL, 0, rt, 1, r, ops, 3);
@@ -1222,7 +1212,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         MLIR_ValueHandle p = emit_addressof(L, gname);
         MLIR_TypeHandle ety = vt_to_llvm(ctx, vt);
         MLIR_TypeHandle rt[1] = { ety };
-        MLIR_ValueHandle r[1] = { mk_res(ctx, ety) };
+        MLIR_ValueHandle r[1];
         MLIR_ValueHandle ops[1] = { p };
         MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_LOAD, NULL, 0, rt, 1, r, ops, 1);
         emit(L, out);
@@ -1265,7 +1255,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
             MLIR_ValueHandle p = linmem_ptr(L, addr, off);
             MLIR_TypeHandle fty = vt_to_llvm(ctx, vt);
             MLIR_TypeHandle lrt[1] = { fty };
-            MLIR_ValueHandle lr[1] = { mk_res(ctx, fty) };
+            MLIR_ValueHandle lr[1];
             MLIR_ValueHandle lops[1] = { p };
             MLIR_OpHandle lop = build_op(ctx, OP_TYPE_LLVM_LOAD,
                 NULL, 0, lrt, 1, lr, lops, 1);
@@ -1301,7 +1291,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
                             : (sz == 1) ? MLIR_CreateTypeInteger(ctx, 8, true)
                             : (sz == 2) ? MLIR_CreateTypeInteger(ctx, 16, true) : i32;
         MLIR_TypeHandle lrt[1] = { lty };
-        MLIR_ValueHandle lr[1] = { mk_res(ctx, lty) };
+        MLIR_ValueHandle lr[1];
         MLIR_ValueHandle lops[1] = { p };
         MLIR_OpHandle lop = build_op(ctx, OP_TYPE_LLVM_LOAD, NULL, 0, lrt, 1, lr, lops, 1);
         emit(L, lop);
@@ -1378,7 +1368,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
         MLIR_ValueHandle p = emit_addressof(L, "__wasm_mem_pages");
         MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
         MLIR_TypeHandle rt[1] = { i32 };
-        MLIR_ValueHandle r[1] = { mk_res(ctx, i32) };
+        MLIR_ValueHandle r[1];
         MLIR_ValueHandle ops[1] = { p };
         MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_LOAD, NULL, 0, rt, 1, r, ops, 1);
         emit(L, out);
@@ -1555,9 +1545,7 @@ static bool lower_op(FLower *L, MLIR_OpHandle op) {
                 MLIR_TypeHandle tracked = MLIR_GetValueType(ctx, MLIR_GetOpResult(ctx, op, 0));
                 ty = fresh_type_like(ctx, tracked);
             }
-            rt[0] = ty;
-            r[0] = mk_res(ctx, ty);
-        }
+            rt[0] = ty;        }
         MLIR_OpHandle out = build_op(ctx, OP_TYPE_LLVM_CALL,
             attrs, 1, rt, nr, r, ops_out, no);
         emit(L, out);
@@ -1825,7 +1813,7 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
     MLIR_NamedAttr cnt_va = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(
         ctx, 1, i64ty));
     MLIR_TypeHandle cnt_rt[1] = { i64ty };
-    MLIR_ValueHandle cnt_r[1] = { mk_res(ctx, i64ty) };
+    MLIR_ValueHandle cnt_r[1];
     MLIR_OpHandle cnt_op = build_op(ctx, OP_TYPE_LLVM_MLIR_CONSTANT,
         &cnt_va, 1, cnt_rt, 1, cnt_r, NULL, 0);
     MLIR_AppendBlockOp(ctx, entry, cnt_op);
@@ -1836,7 +1824,7 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
         MLIR_TypeHandle ety = vt_to_llvm(ctx, local_vt[i]);
         MLIR_NamedAttr a[1] = { attr_ty(ctx, MLIR_KEY_ELEM_TYPE, ety) };
         MLIR_TypeHandle rt[1] = { ptr_ty };
-        MLIR_ValueHandle r[1] = { mk_res(ctx, ptr_ty) };
+        MLIR_ValueHandle r[1];
         MLIR_ValueHandle ops[1] = { cnt_r[0] };
         MLIR_OpHandle aop = build_op(ctx, OP_TYPE_LLVM_ALLOCA,
             a, 1, rt, 1, r, ops, 1);
@@ -1885,10 +1873,13 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
         attr_s(ctx, MLIR_KEY_SYM_NAME, name.str, name.size)
     };
     MLIR_RegionHandle regs[1] = { dreg };
-    return MLIR_CreateOp(ctx, OP_TYPE_LLVM_FUNC,
-        attrs, 1, NULL, 0, NULL, 0, NULL, 0, regs, 1,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec fn_spec = {0};
+    fn_spec.type = OP_TYPE_LLVM_FUNC;
+    fn_spec.attrs = attrs;
+    fn_spec.n_attrs = 1;
+    fn_spec.regions = regs;
+    fn_spec.n_regions = 1;
+    return MLIR_CreateOpFromSpec(ctx, &fn_spec);
 }
 
 // Emit `llvm.alloca count x elem_ty` -> !llvm.ptr.
@@ -1898,7 +1889,7 @@ static MLIR_ValueHandle emit_alloca(FLower *L, MLIR_TypeHandle elem_ty, int64_t 
     MLIR_TypeHandle ptr = MLIR_CreateTypeLLVMPointer(L->ctx);
     MLIR_NamedAttr a[1] = { attr_ty(L->ctx, MLIR_KEY_ELEM_TYPE, elem_ty) };
     MLIR_TypeHandle rt[1] = { ptr };
-    MLIR_ValueHandle r[1] = { mk_res(L->ctx, ptr) };
+    MLIR_ValueHandle r[1];
     MLIR_ValueHandle ops[1] = { cnt };
     MLIR_OpHandle out = build_op(L->ctx, OP_TYPE_LLVM_ALLOCA, a, 1, rt, 1, r, ops, 1);
     emit(L, out);
@@ -1912,7 +1903,7 @@ static MLIR_ValueHandle emit_byte_ptr(FLower *L, MLIR_ValueHandle base, MLIR_Val
     MLIR_ValueHandle bi = emit_cast(L, OP_TYPE_LLVM_PTRTOINT, base, i64);
     MLIR_ValueHandle ea = emit_binop2(L, OP_TYPE_LLVM_ADD, bi, idx, i64);
     MLIR_TypeHandle rt[1] = { ptr };
-    MLIR_ValueHandle r[1] = { mk_res(L->ctx, ptr) };
+    MLIR_ValueHandle r[1];
     MLIR_ValueHandle ops[1] = { ea };
     MLIR_OpHandle out = build_op(L->ctx, OP_TYPE_LLVM_INTTOPTR, NULL, 0, rt, 1, r, ops, 1);
     emit(L, out);
@@ -1921,7 +1912,7 @@ static MLIR_ValueHandle emit_byte_ptr(FLower *L, MLIR_ValueHandle base, MLIR_Val
 
 static MLIR_ValueHandle emit_load_ty(FLower *L, MLIR_ValueHandle p, MLIR_TypeHandle ty) {
     MLIR_TypeHandle rt[1] = { ty };
-    MLIR_ValueHandle r[1] = { mk_res(L->ctx, ty) };
+    MLIR_ValueHandle r[1];
     MLIR_ValueHandle ops[1] = { p };
     MLIR_OpHandle out = build_op(L->ctx, OP_TYPE_LLVM_LOAD, NULL, 0, rt, 1, r, ops, 1);
     emit(L, out);
@@ -2108,7 +2099,7 @@ static bool synth_dispatchers(MLIR_Context *ctx, MLIR_BlockHandle out_body,
                 attr_s(ctx, MLIR_KEY_CALLEE, target_name.str, target_name.size)
             };
             MLIR_TypeHandle crt[1]; MLIR_ValueHandle cr[1];
-            if (has_result) { crt[0] = rty; cr[0] = mk_res(ctx, rty); }
+            if (has_result) { crt[0] = rty; }
             MLIR_OpHandle call = build_op(ctx, OP_TYPE_LLVM_CALL,
                 ca, 1, crt, has_result ? 1 : 0, cr, &pvals[1], n_dp - 1);
             emit(&L, call);
@@ -2132,9 +2123,13 @@ static bool synth_dispatchers(MLIR_Context *ctx, MLIR_BlockHandle out_body,
 
         MLIR_NamedAttr fa[1] = { attr_s(ctx, MLIR_KEY_SYM_NAME, dname, (size_t)dlen) };
         MLIR_RegionHandle regs[1] = { dreg };
-        MLIR_OpHandle fn = MLIR_CreateOp(ctx, OP_TYPE_LLVM_FUNC, fa, 1, NULL, 0, NULL, 0, NULL, 0,
-            regs, 1, MLIR_CreateLocationUnknown(ctx, (string){0}),
-            MLIR_INVALID_HANDLE, (string){0}, -1);
+        MLIR_OpSpec fn_spec = {0};
+        fn_spec.type = OP_TYPE_LLVM_FUNC;
+        fn_spec.attrs = fa;
+        fn_spec.n_attrs = 1;
+        fn_spec.regions = regs;
+        fn_spec.n_regions = 1;
+        MLIR_OpHandle fn = MLIR_CreateOpFromSpec(ctx, &fn_spec);
         MLIR_AppendBlockOp(ctx, out_body, fn);
         free(L.frames);
         // dname must outlive the attr (attr_s does not copy); leaked.
@@ -2365,8 +2360,9 @@ MLIR_OpHandle mlir_wasmssa_to_llvm(MLIR_Context *ctx, MLIR_OpHandle ssa_module) 
     free(image);
 
     MLIR_RegionHandle regs[1] = { out_region };
-    return MLIR_CreateOp(ctx, OP_TYPE_MODULE,
-        NULL, 0, NULL, 0, NULL, 0, NULL, 0, regs, 1,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec mod_spec = {0};
+    mod_spec.type = OP_TYPE_MODULE;
+    mod_spec.regions = regs;
+    mod_spec.n_regions = 1;
+    return MLIR_CreateOpFromSpec(ctx, &mod_spec);
 }

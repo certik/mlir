@@ -710,57 +710,43 @@ extern "C" void MLIR_AppendBlockArg(MLIR_Context *cctx, MLIR_BlockHandle bh,
 }
 
 // -----------------------------------------------------------------------------
-// Op construction
+// Op specification & Builder API
 // -----------------------------------------------------------------------------
 
-extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
-    MLIR_Context *cctx, MLIR_OpType type,
-    const MLIR_NamedAttr *attrs, size_t n_attrs,
-    MLIR_TypeHandle *result_types, size_t n_result_types,
-    MLIR_ValueHandle *results, size_t n_results,
-    MLIR_ValueHandle *operands, size_t n_operands,
-    MLIR_RegionHandle *regions, size_t n_regions,
-    MLIR_BlockHandle *successors, size_t n_successors,
-    MLIR_ValueHandle **successor_operands,
-    size_t *n_successor_operands,
-    MLIR_LocationHandle location, MLIR_LocationHandle, string, int64_t) {
+extern "C" MLIR_OpHandle MLIR_CreateOpFromSpec(MLIR_Context *cctx, const MLIR_OpSpec *spec) {
+    API_CHECK(cctx != nullptr, "MLIR_CreateOpFromSpec", "context is NULL");
+    API_CHECK(spec != nullptr, "MLIR_CreateOpFromSpec", "spec is NULL");
     MLIR_Context &ctx = *cctx;
+    MLIR_OpType type = spec->type;
     API_CHECK(type != OP_TYPE_UNREGISTERED && (size_t)type < ctx.opNames.size() &&
                   ctx.opNames[type],
-              "MLIR_CreateOp", "not an op type of this context");
+              "MLIR_CreateOpFromSpec", "not an op type of this context");
 
-    mlir::Location loc = (location == MLIR_INVALID_HANDLE)
+    mlir::Location loc = (spec->loc == MLIR_INVALID_HANDLE)
                              ? mlir::Location(mlir::UnknownLoc::get(&ctx))
-                             : locF(location);
+                             : locF(spec->loc);
     mlir::OperationState state(loc, mlir::OperationName::getFromOpaquePointer(ctx.opNames[type]));
     bool is_switch = type == OP_TYPE_CF_SWITCH || type == OP_TYPE_LLVM_SWITCH;
 
-    for (size_t i = 0; i < n_operands; i++) {
-        state.addOperands(F<ValueBox>(operands[i])->v);
+    uint32_t n_succ_ops = 0;
+    if (spec->successor_operand_counts) {
+        for (uint32_t s = 0; s < spec->n_successors; s++)
+            n_succ_ops += spec->successor_operand_counts[s];
     }
-    // For branch-like ops, successor operands are appended after regular
-    // operands; the BranchOpInterface uses operandSegmentSizes to slice them.
-    for (size_t s = 0; s < n_successors; s++) {
-        size_t n = n_successor_operands ? n_successor_operands[s] : 0;
-        for (size_t i = 0; i < n; i++) {
-            state.addOperands(F<ValueBox>(successor_operands[s][i])->v);
-        }
+    API_CHECK(n_succ_ops <= spec->n_operands, "MLIR_CreateOpFromSpec",
+              "successor operand counts exceed n_operands");
+    uint32_t n_regular = spec->n_operands - n_succ_ops;
+
+    for (uint32_t i = 0; i < spec->n_operands; i++) {
+        state.addOperands(F<ValueBox>(spec->operands[i])->v);
     }
-    for (size_t i = 0; i < n_result_types; i++) {
-        state.addTypes(typeF(result_types[i]));
+    for (uint32_t i = 0; i < spec->n_results; i++) {
+        state.addTypes(typeF(spec->result_types[i]));
     }
-    for (size_t i = 0; i < n_attrs; i++) {
-        mlir::StringAttr name = keyName(cctx, attrs[i].key);
-        mlir::Attribute val = attrF(attrs[i].value);
-        // cf.switch's `case_values` is declared as `AnyIntElementsAttr`
-        // (DenseIntElementsAttr) in upstream MLIR. The agnostic C lifter
-        // creates it as DenseI32ArrayAttr (since it has no concept of
-        // shaped types). Upstream silently drops the property when the
-        // attribute type doesn't match, which then makes the
-        // intermediate cf.switch fail to lift to scf.index_switch.
-        // Convert here so the typed property storage accepts it.
-        // llvm.switch declares `case_values` the same way.
-        if (is_switch && attrs[i].key == MLIR_KEY_CASE_VALUES) {
+    for (uint32_t i = 0; i < spec->n_attrs; i++) {
+        mlir::StringAttr name = keyName(cctx, spec->attrs[i].key);
+        mlir::Attribute val = attrF(spec->attrs[i].value);
+        if (is_switch && spec->attrs[i].key == MLIR_KEY_CASE_VALUES) {
             if (auto arr = mlir::dyn_cast<mlir::DenseI32ArrayAttr>(val)) {
                 auto i32Ty = mlir::IntegerType::get(&ctx, 32);
                 auto shaped = mlir::RankedTensorType::get(
@@ -772,54 +758,43 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
         }
         state.addAttribute(name, val);
     }
-    for (size_t i = 0; i < n_regions; i++) {
-        // The op takes the region's body and the OperationState frees the
-        // Region object, so the handle is consumed.
-        cctx->rootRegions.erase(F<mlir::Region>(regions[i]));
-        state.addRegion(std::unique_ptr<mlir::Region>(F<mlir::Region>(regions[i])));
+    if (spec->regions) {
+        for (uint32_t i = 0; i < spec->n_regions; i++) {
+            cctx->rootRegions.erase(F<mlir::Region>(spec->regions[i]));
+            state.addRegion(std::unique_ptr<mlir::Region>(F<mlir::Region>(spec->regions[i])));
+        }
+    } else {
+        for (uint32_t i = 0; i < spec->n_regions; i++) {
+            state.addRegion();
+        }
     }
-    for (size_t i = 0; i < n_successors; i++) {
-        state.addSuccessors(F<mlir::Block>(successors[i]));
+    for (uint32_t i = 0; i < spec->n_successors; i++) {
+        state.addSuccessors(F<mlir::Block>(spec->successors[i]));
     }
 
-    // Snapshot user attrs BEFORE we synthesize operandSegmentSizes — the
-    // generic printer iterates user attrs and we don't want that internal
-    // attribute leaking into output.
     std::vector<mlir::NamedAttribute> userAttrs(state.attributes.begin(),
                                                 state.attributes.end());
 
-    if (n_successors > 0 && n_successor_operands) {
+    if (spec->n_successors > 0) {
         if (type == OP_TYPE_CF_COND_BR || type == OP_TYPE_LLVM_COND_BR) {
-            // Both ops use AttrSizedOperandSegments with the layout
-            // [condition, trueDestOperands, falseDestOperands]; without the
-            // synthesized operandSegmentSizes the BranchOpInterface slices
-            // the forwarded operands wrongly (e.g. returns the condition as
-            // a successor operand), corrupting phi wiring for any block-arg
-            // edge — exactly what mem2reg introduces.
             llvm::SmallVector<int32_t, 4> seg;
-            seg.push_back((int32_t)n_operands);
-            for (size_t s = 0; s < n_successors; s++) {
-                seg.push_back((int32_t)n_successor_operands[s]);
+            seg.push_back((int32_t)n_regular);
+            for (uint32_t s = 0; s < spec->n_successors; s++) {
+                seg.push_back((int32_t)(spec->successor_operand_counts ? spec->successor_operand_counts[s] : 0));
             }
             state.addAttribute("operandSegmentSizes",
                 mlir::DenseI32ArrayAttr::get(&ctx, seg));
         } else if (is_switch) {
-            // cf.switch (and llvm.switch, which has the same operand
-            // layout) has 3 operand segments: flag (always 1), default
-            // operands (successor 0), and case operands (sum across
-            // successors 1..N-1). It also needs case_operand_segments —
-            // one int per case telling BranchOpInterface how to slice
-            // the flat case-operand range per case.
-            size_t n_default = (n_successors >= 1) ? n_successor_operands[0] : 0;
+            uint32_t n_default = spec->successor_operand_counts ? spec->successor_operand_counts[0] : 0;
             int32_t n_case_total = 0;
             llvm::SmallVector<int32_t, 4> case_seg;
-            for (size_t s = 1; s < n_successors; s++) {
-                int32_t c = (int32_t)n_successor_operands[s];
+            for (uint32_t s = 1; s < spec->n_successors; s++) {
+                int32_t c = (int32_t)(spec->successor_operand_counts ? spec->successor_operand_counts[s] : 0);
                 case_seg.push_back(c);
                 n_case_total += c;
             }
             llvm::SmallVector<int32_t, 3> seg;
-            seg.push_back((int32_t)n_operands);
+            seg.push_back((int32_t)n_regular);
             seg.push_back((int32_t)n_default);
             seg.push_back(n_case_total);
             state.addAttribute("operandSegmentSizes",
@@ -832,33 +807,94 @@ extern "C" MLIR_OpHandle MLIR_CreateOpWithSuccessors(
     mlir::Operation *op = mlir::Operation::create(state);
     cctx->rootOps.insert(op);
     cctx->opUserAttrs[op] = std::move(userAttrs);
-
-    for (size_t i = 0; i < n_results; i++) {
-        auto v = op->getResult(i);
-        auto *box = F<ValueBox>(results[i]);
-        box->v = v;
-        cctx->valueIndex[v.getAsOpaquePointer()] = box;
-    }
-
     return H(op);
 }
 
-extern "C" MLIR_OpHandle MLIR_CreateOp(
-    MLIR_Context *ctx, MLIR_OpType type,
-    const MLIR_NamedAttr *attrs, size_t n_attrs,
-    MLIR_TypeHandle *result_types, size_t n_result_types,
-    MLIR_ValueHandle *results, size_t n_results,
-    MLIR_ValueHandle *operands, size_t n_operands,
-    MLIR_RegionHandle *regions, size_t n_regions,
-    MLIR_LocationHandle location, MLIR_LocationHandle u, string tc, int64_t sl) {
-    return MLIR_CreateOpWithSuccessors(
-        ctx, type, attrs, n_attrs,
-        result_types, n_result_types,
-        results, n_results,
-        operands, n_operands,
-        regions, n_regions,
-        nullptr, 0, nullptr, nullptr,
-        location, u, tc, sl);
+extern "C" void MLIR_InsertOpBefore(MLIR_Context *cctx, MLIR_BlockHandle bh,
+                                    MLIR_OpHandle oh, MLIR_OpHandle before_h) {
+    CHECK_OWN_BLOCK(cctx, bh, "MLIR_InsertOpBefore");
+    CHECK_OWN_OP(cctx, oh, "MLIR_InsertOpBefore");
+    auto *block = F<mlir::Block>(bh);
+    auto *op = F<mlir::Operation>(oh);
+    if (op->getBlock()) {
+        cctx->blockOps.invalidateBlock(op->getBlock());
+        op->remove();
+    } else {
+        cctx->rootOps.erase(op);
+    }
+    if (before_h == MLIR_INVALID_HANDLE) {
+        block->push_back(op);
+    } else {
+        CHECK_OWN_OP(cctx, before_h, "MLIR_InsertOpBefore");
+        auto *bef = F<mlir::Operation>(before_h);
+        API_CHECK(bef->getBlock() == block, "MLIR_InsertOpBefore",
+                  "before op is not in target block");
+        block->getOperations().insert(mlir::Block::iterator(bef), op);
+    }
+    cctx->blockOps.invalidateBlock(block);
+}
+
+extern "C" MLIR_Builder MLIR_BuilderAfter(MLIR_Context *cctx, MLIR_OpHandle oh) {
+    CHECK_OWN_OP(cctx, oh, "MLIR_BuilderAfter");
+    auto *op = F<mlir::Operation>(oh);
+    mlir::Block *block = op->getBlock();
+    API_CHECK(block != nullptr, "MLIR_BuilderAfter", "op has no parent block");
+    auto it = std::next(mlir::Block::iterator(op));
+    MLIR_Builder res;
+    res.ctx = cctx;
+    res.block = H(block);
+    res.before = (it == block->end()) ? MLIR_INVALID_HANDLE : H(&*it);
+    res.loc = MLIR_INVALID_HANDLE;
+    return res;
+}
+
+extern "C" MLIR_OpHandle MLIR_BuildOp(MLIR_Builder *b, const MLIR_OpSpec *spec) {
+    API_CHECK(b != nullptr && b->ctx != nullptr && spec != nullptr, "MLIR_BuildOp", "NULL argument");
+    MLIR_OpHandle op;
+    if (spec->loc == MLIR_INVALID_HANDLE && b->loc != MLIR_INVALID_HANDLE) {
+        MLIR_OpSpec s = *spec;
+        s.loc = b->loc;
+        op = MLIR_CreateOpFromSpec(b->ctx, &s);
+    } else {
+        op = MLIR_CreateOpFromSpec(b->ctx, spec);
+    }
+    if (b->block != MLIR_INVALID_HANDLE)
+        MLIR_InsertOpBefore(b->ctx, b->block, op, b->before);
+    return op;
+}
+
+extern "C" void MLIR_GetOpSuccessorOperandRange(MLIR_Context *ctx, MLIR_OpHandle h,
+                                                size_t succ, size_t *first, size_t *count) {
+    CHECK_OWN_OP(ctx, h, "MLIR_GetOpSuccessorOperandRange");
+    auto *op = F<mlir::Operation>(h);
+    API_CHECK(succ < op->getNumSuccessors(), "MLIR_GetOpSuccessorOperandRange", "index out of range");
+    if (auto br = mlir::dyn_cast<mlir::BranchOpInterface>(op)) {
+        size_t total_succ = 0;
+        size_t before_succ = 0;
+        size_t cnt = 0;
+        for (size_t s = 0; s < op->getNumSuccessors(); s++) {
+            size_t n = br.getSuccessorOperands(s).size();
+            if (s < succ) before_succ += n;
+            if (s == succ) cnt = n;
+            total_succ += n;
+        }
+        size_t base = (op->getNumOperands() - total_succ) + before_succ;
+        if (first) *first = base;
+        if (count) *count = cnt;
+        return;
+    }
+    if (first) *first = op->getNumOperands();
+    if (count) *count = 0;
+}
+
+extern "C" void MLIR_SetOpTrailingComment(MLIR_Context *ctx, MLIR_OpHandle h, string) {
+    CHECK_OWN_OP(ctx, h, "MLIR_SetOpTrailingComment");
+}
+
+extern "C" void MLIR_SetValueRegisterName(MLIR_Context *ctx, MLIR_ValueHandle h, string name) {
+    CHECK_OWN_VALUE(ctx, h, "MLIR_SetValueRegisterName");
+    auto *box = F<ValueBox>(h);
+    box->name.assign(name.str, name.size);
 }
 
 extern "C" void MLIR_SetOpAttr(MLIR_Context *cctx, MLIR_OpHandle oh, MLIR_AttrKey key,
@@ -902,7 +938,7 @@ extern "C" MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle h) {
 }
 extern "C" MLIR_LocationHandle MLIR_GetOpLocation(MLIR_Context *ctx, MLIR_OpHandle h) {
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpLocation");
-    return MLIR_INVALID_HANDLE;
+    return locH(F<mlir::Operation>(h)->getLoc());
 }
 extern "C" string MLIR_GetOpTrailingComment(MLIR_Context *ctx, MLIR_OpHandle h) {
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpTrailingComment");
@@ -1240,22 +1276,6 @@ extern "C" MLIR_ValueHandle MLIR_CreateValueBlockArg(
     cctx->valueIndex[arg.getAsOpaquePointer()] = box;
     return H(box);
 }
-extern "C" MLIR_ValueHandle MLIR_CreateValueOpResult(
-    MLIR_Context *cctx, MLIR_OpHandle oh, uint32_t idx, MLIR_TypeHandle,
-    string register_name, MLIR_LocationHandle) {
-    auto *box = newBox(cctx);
-    box->name.assign(register_name.str, register_name.size);
-    if (oh != MLIR_INVALID_HANDLE) {
-        auto *op = F<mlir::Operation>(oh);
-        if (idx < op->getNumResults()) {
-            auto v = op->getResult(idx);
-            box->v = v;
-            cctx->valueIndex[v.getAsOpaquePointer()] = box;
-        }
-    }
-    return H(box);
-}
-
 extern "C" MLIR_ValueKind MLIR_GetValueKind(MLIR_Context *ctx, MLIR_ValueHandle h) {
     CHECK_OWN_VALUE(ctx, h, "MLIR_GetValueKind");
     auto v = F<ValueBox>(h)->v;

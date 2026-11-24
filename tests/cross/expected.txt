@@ -46,3 +46,4 @@ dynamic types are per context: yes
 successor operands appended: yes
 successor operands replaced, uses moved: yes
 op traits and verify: yes
+op builder API: yes

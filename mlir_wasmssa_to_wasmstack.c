@@ -101,10 +101,11 @@ static uint8_t *hex_decode(string s, size_t *out_n) {
 
 static MLIR_OpHandle build_op(MLIR_Context *ctx, MLIR_OpType t,
                               MLIR_NamedAttr *attrs, size_t na) {
-    return MLIR_CreateOp(ctx, t,
-        attrs, na, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec spec = {0};
+    spec.type = t;
+    spec.attrs = attrs;
+    spec.n_attrs = (uint32_t)na;
+    return MLIR_CreateOpFromSpec(ctx, &spec);
 }
 
 static int64_t at_i(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key) {
@@ -635,10 +636,13 @@ static MLIR_OpHandle convert_func(MLIR_Context *ctx, Arena *arena, MLIR_OpHandle
     MLIR_RegionHandle region = MLIR_CreateRegion(ctx);
     MLIR_AppendRegionBlock(ctx, region, dst_blk);
     MLIR_RegionHandle regs[1] = { region };
-    return MLIR_CreateOp(ctx, OP_TYPE_WASMSTACK_FUNC,
-        attrs, na, NULL, 0, NULL, 0, NULL, 0, regs, 1,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec spec = {0};
+    spec.type = OP_TYPE_WASMSTACK_FUNC;
+    spec.attrs = attrs;
+    spec.n_attrs = (uint32_t)na;
+    spec.regions = regs;
+    spec.n_regions = 1;
+    return MLIR_CreateOpFromSpec(ctx, &spec);
 }
 
 static MLIR_OpHandle convert_global(MLIR_Context *ctx, MLIR_OpHandle src) {
@@ -672,10 +676,11 @@ MLIR_OpHandle mlir_wasmssa_to_wasmstack(MLIR_Context *ctx, MLIR_OpHandle ssa_mod
     MLIR_RegionHandle out_region = MLIR_CreateRegion(ctx);
     MLIR_AppendRegionBlock(ctx, out_region, out_body);
     MLIR_RegionHandle out_regs[1] = { out_region };
-    MLIR_OpHandle out_module = MLIR_CreateOp(ctx, OP_TYPE_MODULE,
-        NULL, 0, NULL, 0, NULL, 0, NULL, 0, out_regs, 1,
-        MLIR_CreateLocationUnknown(ctx, (string){0}),
-        MLIR_INVALID_HANDLE, (string){0}, -1);
+    MLIR_OpSpec mod_spec = {0};
+    mod_spec.type = OP_TYPE_MODULE;
+    mod_spec.regions = out_regs;
+    mod_spec.n_regions = 1;
+    MLIR_OpHandle out_module = MLIR_CreateOpFromSpec(ctx, &mod_spec);
 
     size_t n_top = MLIR_GetBlockNumOps(ctx, mb);
     for (size_t i = 0; i < n_top; i++) {
