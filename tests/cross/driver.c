@@ -82,6 +82,25 @@ typedef struct {
     size_t len;
 } DiagCapture;
 
+typedef struct {
+    int count;
+    MLIR_OpHandle erase_target;
+    MLIR_OpHandle skip_target;
+    MLIR_OpHandle stop_target;
+} WalkState;
+
+static MLIR_WalkResult test_walk_cb(MLIR_Context *ctx, MLIR_OpHandle op, void *user) {
+    WalkState *st = (WalkState *)user;
+    st->count++;
+    if (st->skip_target != MLIR_INVALID_HANDLE && op == st->skip_target)
+        return MLIR_WALK_SKIP;
+    if (st->stop_target != MLIR_INVALID_HANDLE && op == st->stop_target)
+        return MLIR_WALK_INTERRUPT;
+    if (st->erase_target != MLIR_INVALID_HANDLE && op == st->erase_target)
+        MLIR_EraseOp(ctx, op);
+    return MLIR_WALK_ADVANCE;
+}
+
 static void capture_diag(void *user, MLIR_DiagSeverity severity,
                          MLIR_LocationHandle loc, string message) {
     DiagCapture *c = (DiagCapture *)user;
@@ -707,6 +726,144 @@ int app_main(void) {
 
         print_string(ok ? str_lit("op builder API: yes\n")
                         : str_lit("op builder API: no\n"));
+    }
+
+    // ---- traversal, iterators, walks and CFG info (#352) --------------------
+    {
+        // Build a CFG with a loop: entry -> header -> body -> header, header -> exit.
+        MLIR_OpSpec mspec = {0};
+        mspec.type = OP_TYPE_MODULE;
+        mspec.n_regions = 1;
+        MLIR_OpHandle tmod = MLIR_CreateOpFromSpec(ctx, &mspec);
+        MLIR_RegionHandle reg = MLIR_GetOpRegion(ctx, tmod, 0);
+
+        MLIR_BlockHandle entry = MLIR_CreateBlock(ctx);
+        MLIR_BlockHandle hdr   = MLIR_CreateBlock(ctx);
+        MLIR_BlockHandle body  = MLIR_CreateBlock(ctx);
+        MLIR_BlockHandle exitb = MLIR_CreateBlock(ctx);
+        MLIR_AppendRegionBlock(ctx, reg, entry);
+        MLIR_AppendRegionBlock(ctx, reg, hdr);
+        MLIR_AppendRegionBlock(ctx, reg, body);
+        MLIR_AppendRegionBlock(ctx, reg, exitb);
+
+        MLIR_TypeHandle i1_ty = MLIR_CreateTypeInteger(ctx, 1, false);
+        MLIR_ValueHandle harg = MLIR_AddBlockArgument(ctx, hdr, i32_ty, MLIR_INVALID_HANDLE);
+
+        MLIR_Builder be = MLIR_BuilderAtEnd(ctx, entry);
+        MLIR_ValueHandle c0 = MLIR_BuildConstantInt(&be, OP_TYPE_LLVM_MLIR_CONSTANT, i32_ty, 0);
+        MLIR_ValueHandle c1 = MLIR_BuildConstantInt(&be, OP_TYPE_LLVM_MLIR_CONSTANT, i32_ty, 1);
+        MLIR_ValueHandle dead_v = MLIR_BuildConstantInt(&be, OP_TYPE_LLVM_MLIR_CONSTANT, i32_ty, 99);
+        MLIR_BuildBr(&be, OP_TYPE_LLVM_BR, hdr, &c0, 1);
+
+        MLIR_Builder bh = MLIR_BuilderAtEnd(ctx, hdr);
+        MLIR_ValueHandle cond = MLIR_BuildConstantInt(&bh, OP_TYPE_LLVM_MLIR_CONSTANT, i1_ty, 1);
+        MLIR_BuildCondBr(&bh, OP_TYPE_LLVM_COND_BR, cond, body, NULL, 0, exitb, NULL, 0);
+
+        MLIR_Builder bb = MLIR_BuilderAtEnd(ctx, body);
+        MLIR_ValueHandle inc = MLIR_BuildBinary(&bb, OP_TYPE_LLVM_ADD, i32_ty, harg, c1);
+        MLIR_BuildBr(&bb, OP_TYPE_LLVM_BR, hdr, &inc, 1);
+
+        MLIR_Builder bx = MLIR_BuilderAtEnd(ctx, exitb);
+        MLIR_OpSpec ret_spec = {0};
+        ret_spec.type = OP_TYPE_LLVM_RETURN;
+        ret_spec.operands = &harg;
+        ret_spec.n_operands = 1;
+        MLIR_BuildOp(&bx, &ret_spec);
+
+        // Region block iterators (forward & backward).
+        int blk_fwd = 0, blk_bwd = 0;
+        for (MLIR_BlockHandle b = MLIR_GetRegionFirstBlock(ctx, reg);
+             b != MLIR_INVALID_HANDLE; b = MLIR_GetBlockNext(ctx, b)) blk_fwd++;
+        for (MLIR_BlockHandle b = MLIR_GetRegionLastBlock(ctx, reg);
+             b != MLIR_INVALID_HANDLE; b = MLIR_GetBlockPrev(ctx, b)) blk_bwd++;
+
+        // Block op iterators (forward & backward) & GetParentOp.
+        int op_fwd = 0, op_bwd = 0;
+        for (MLIR_OpHandle o = MLIR_GetBlockFirstOp(ctx, entry);
+             o != MLIR_INVALID_HANDLE; o = MLIR_GetOpNext(ctx, o)) op_fwd++;
+        for (MLIR_OpHandle o = MLIR_GetBlockLastOp(ctx, entry);
+             o != MLIR_INVALID_HANDLE; o = MLIR_GetOpPrev(ctx, o)) op_bwd++;
+        bool parent_ok = MLIR_GetParentOp(ctx, MLIR_GetBlockFirstOp(ctx, entry)) == tmod;
+
+        // Value use iterators & HasOneUse / IsUnused.
+        int harg_uses = 0;
+        for (MLIR_UseHandle u = MLIR_GetValueFirstUse(ctx, harg);
+             u != MLIR_INVALID_HANDLE; u = MLIR_GetUseNext(ctx, u)) harg_uses++;
+        bool uses_ok = harg_uses == 2 &&
+                       MLIR_ValueHasOneUse(ctx, c0) &&
+                       MLIR_IsValueUnused(ctx, dead_v) &&
+                       !MLIR_ValueHasOneUse(ctx, harg);
+
+        // Pred iterators & GetIncomingValue / SetIncomingValue.
+        int hdr_preds = 0;
+        bool incoming_ok = true;
+        for (MLIR_PredHandle p = MLIR_GetBlockFirstPred(ctx, hdr);
+             p != MLIR_INVALID_HANDLE; p = MLIR_GetPredNext(ctx, p)) {
+            hdr_preds++;
+            MLIR_BlockHandle pb = MLIR_GetPredBlock(ctx, p);
+            MLIR_ValueHandle iv = MLIR_GetIncomingValue(ctx, p, 0);
+            if (pb == entry) {
+                if (iv != c0) incoming_ok = false;
+                MLIR_SetIncomingValue(ctx, p, 0, c1);
+                if (MLIR_GetIncomingValue(ctx, p, 0) != c1) incoming_ok = false;
+                MLIR_SetIncomingValue(ctx, p, 0, c0);
+            } else if (pb == body) {
+                if (iv != inc) incoming_ok = false;
+            } else {
+                incoming_ok = false;
+            }
+        }
+
+        // MLIR_Walk: pre-order, skip, interrupt, post-order with erase.
+        WalkState ws = {0};
+        MLIR_Walk(ctx, tmod, MLIR_WALK_PRE, test_walk_cb, &ws);
+        int total_ops = ws.count; // 1 module + 4 + 2 + 2 + 1 = 10
+
+        ws = (WalkState){0};
+        ws.skip_target = tmod;
+        MLIR_Walk(ctx, tmod, MLIR_WALK_PRE, test_walk_cb, &ws);
+        int skip_count = ws.count; // 1 (skipped children)
+
+        ws = (WalkState){0};
+        ws.erase_target = MLIR_GetValueDefiningOp(ctx, dead_v);
+        MLIR_Walk(ctx, tmod, MLIR_WALK_POST, test_walk_cb, &ws);
+        bool erase_walk_ok = ws.count == total_ops && MLIR_GetBlockNumOps(ctx, entry) == 3;
+
+        // MLIR_GetBlockOrder (RPO/PO) and MLIR_ComputeCFGInfo (doms & loops).
+        MLIR_BlockHandle *rpo = NULL;
+        size_t n_rpo = MLIR_GetBlockOrder(ctx, reg, MLIR_ORDER_RPO, arena, &rpo);
+        MLIR_CFGInfo *cfg = MLIR_ComputeCFGInfo(ctx, reg, arena);
+        int32_t i_entry = MLIR_CFGGetRPOIndex(cfg, entry);
+        int32_t i_hdr   = MLIR_CFGGetRPOIndex(cfg, hdr);
+        int32_t i_body  = MLIR_CFGGetRPOIndex(cfg, body);
+        int32_t i_exit  = MLIR_CFGGetRPOIndex(cfg, exitb);
+
+        bool cfg_ok =
+            n_rpo == 4 && rpo[0] == entry &&
+            cfg->n_blocks == 4 &&
+            i_entry == 0 && i_hdr == 1 &&
+            cfg->idom[i_entry] == -1 &&
+            cfg->idom[i_hdr] == i_entry &&
+            cfg->idom[i_body] == i_hdr &&
+            cfg->idom[i_exit] == i_hdr &&
+            MLIR_CFGDominates(cfg, i_entry, i_exit) &&
+            MLIR_CFGDominates(cfg, i_hdr, i_body) &&
+            !MLIR_CFGDominates(cfg, i_body, i_exit) &&
+            cfg->is_loop_header[i_hdr] &&
+            !cfg->is_loop_header[i_entry] &&
+            cfg->loop_depth[i_entry] == 0 &&
+            cfg->loop_depth[i_hdr] == 1 &&
+            cfg->loop_depth[i_body] == 1 &&
+            cfg->loop_depth[i_exit] == 0;
+
+        bool trav_ok = blk_fwd == 4 && blk_bwd == 4 &&
+                       op_fwd == 4 && op_bwd == 4 &&
+                       parent_ok && uses_ok &&
+                       hdr_preds == 2 && incoming_ok &&
+                       total_ops == 10 && skip_count == 1 && erase_walk_ok &&
+                       cfg_ok;
+        print_string(trav_ok ? str_lit("traversal and CFG info: yes\n")
+                             : str_lit("traversal and CFG info: no\n"));
     }
 
     MLIR_DestroyContext(ctx);

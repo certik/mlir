@@ -1135,6 +1135,136 @@ extern "C" MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_Context *ctx, MLIR_O
 }
 
 // -----------------------------------------------------------------------------
+// O(1) Traversal iterators (#352)
+// -----------------------------------------------------------------------------
+
+extern "C" MLIR_OpHandle MLIR_GetBlockFirstOp(MLIR_Context *ctx, MLIR_BlockHandle bh) {
+    CHECK_OWN_BLOCK(ctx, bh, "MLIR_GetBlockFirstOp");
+    auto *b = F<mlir::Block>(bh);
+    return b->empty() ? MLIR_INVALID_HANDLE : H(&b->front());
+}
+
+extern "C" MLIR_OpHandle MLIR_GetBlockLastOp(MLIR_Context *ctx, MLIR_BlockHandle bh) {
+    CHECK_OWN_BLOCK(ctx, bh, "MLIR_GetBlockLastOp");
+    auto *b = F<mlir::Block>(bh);
+    return b->empty() ? MLIR_INVALID_HANDLE : H(&b->back());
+}
+
+extern "C" MLIR_OpHandle MLIR_GetOpNext(MLIR_Context *ctx, MLIR_OpHandle oh) {
+    CHECK_OWN_OP(ctx, oh, "MLIR_GetOpNext");
+    auto *op = F<mlir::Operation>(oh);
+    if (!op->getBlock()) return MLIR_INVALID_HANDLE;
+    auto *next = op->getNextNode();
+    return next ? H(next) : MLIR_INVALID_HANDLE;
+}
+
+extern "C" MLIR_OpHandle MLIR_GetOpPrev(MLIR_Context *ctx, MLIR_OpHandle oh) {
+    CHECK_OWN_OP(ctx, oh, "MLIR_GetOpPrev");
+    auto *op = F<mlir::Operation>(oh);
+    if (!op->getBlock()) return MLIR_INVALID_HANDLE;
+    auto *prev = op->getPrevNode();
+    return prev ? H(prev) : MLIR_INVALID_HANDLE;
+}
+
+extern "C" MLIR_OpHandle MLIR_GetParentOp(MLIR_Context *ctx, MLIR_OpHandle oh) {
+    CHECK_OWN_OP(ctx, oh, "MLIR_GetParentOp");
+    auto *p = F<mlir::Operation>(oh)->getParentOp();
+    return p ? H(p) : MLIR_INVALID_HANDLE;
+}
+
+extern "C" MLIR_BlockHandle MLIR_GetRegionFirstBlock(MLIR_Context *ctx, MLIR_RegionHandle rh) {
+    CHECK_OWN_REGION(ctx, rh, "MLIR_GetRegionFirstBlock");
+    auto *r = F<mlir::Region>(rh);
+    return r->empty() ? MLIR_INVALID_HANDLE : H(&r->front());
+}
+
+extern "C" MLIR_BlockHandle MLIR_GetRegionLastBlock(MLIR_Context *ctx, MLIR_RegionHandle rh) {
+    CHECK_OWN_REGION(ctx, rh, "MLIR_GetRegionLastBlock");
+    auto *r = F<mlir::Region>(rh);
+    return r->empty() ? MLIR_INVALID_HANDLE : H(&r->back());
+}
+
+extern "C" MLIR_BlockHandle MLIR_GetBlockNext(MLIR_Context *ctx, MLIR_BlockHandle bh) {
+    CHECK_OWN_BLOCK(ctx, bh, "MLIR_GetBlockNext");
+    auto *b = F<mlir::Block>(bh);
+    if (!b->getParent()) return MLIR_INVALID_HANDLE;
+    auto *next = b->getNextNode();
+    return next ? H(next) : MLIR_INVALID_HANDLE;
+}
+
+extern "C" MLIR_BlockHandle MLIR_GetBlockPrev(MLIR_Context *ctx, MLIR_BlockHandle bh) {
+    CHECK_OWN_BLOCK(ctx, bh, "MLIR_GetBlockPrev");
+    auto *b = F<mlir::Block>(bh);
+    if (!b->getParent()) return MLIR_INVALID_HANDLE;
+    auto *prev = b->getPrevNode();
+    return prev ? H(prev) : MLIR_INVALID_HANDLE;
+}
+
+extern "C" MLIR_UseHandle MLIR_GetValueFirstUse(MLIR_Context *ctx, MLIR_ValueHandle vh) {
+    CHECK_OWN_VALUE(ctx, vh, "MLIR_GetValueFirstUse");
+    mlir::Value v = F<ValueBox>(vh)->v;
+    if (!v || v.use_empty()) return MLIR_INVALID_HANDLE;
+    return H(&*v.use_begin());
+}
+
+extern "C" MLIR_UseHandle MLIR_GetUseNext(MLIR_Context *, MLIR_UseHandle use) {
+    if (!use) return MLIR_INVALID_HANDLE;
+    auto *next = F<mlir::OpOperand>(use)->getNextOperandUsingThisValue();
+    return next ? H(next) : MLIR_INVALID_HANDLE;
+}
+
+extern "C" MLIR_OpHandle MLIR_GetUseOwner(MLIR_Context *, MLIR_UseHandle use) {
+    API_CHECK(use != MLIR_INVALID_HANDLE, "MLIR_GetUseOwner", "invalid use handle");
+    return H(F<mlir::OpOperand>(use)->getOwner());
+}
+
+extern "C" size_t MLIR_GetUseOperandIndex(MLIR_Context *, MLIR_UseHandle use) {
+    API_CHECK(use != MLIR_INVALID_HANDLE, "MLIR_GetUseOperandIndex", "invalid use handle");
+    return (size_t)F<mlir::OpOperand>(use)->getOperandNumber();
+}
+
+extern "C" bool MLIR_ValueHasOneUse(MLIR_Context *ctx, MLIR_ValueHandle vh) {
+    CHECK_OWN_VALUE(ctx, vh, "MLIR_ValueHasOneUse");
+    mlir::Value v = F<ValueBox>(vh)->v;
+    return v && v.hasOneUse();
+}
+
+extern "C" bool MLIR_IsValueUnused(MLIR_Context *ctx, MLIR_ValueHandle vh) {
+    CHECK_OWN_VALUE(ctx, vh, "MLIR_IsValueUnused");
+    mlir::Value v = F<ValueBox>(vh)->v;
+    return !v || v.use_empty();
+}
+
+extern "C" MLIR_PredHandle MLIR_GetBlockFirstPred(MLIR_Context *ctx, MLIR_BlockHandle bh) {
+    CHECK_OWN_BLOCK(ctx, bh, "MLIR_GetBlockFirstPred");
+    auto *b = F<mlir::Block>(bh);
+    if (b->use_empty()) return MLIR_INVALID_HANDLE;
+    return H(&*b->use_begin());
+}
+
+extern "C" MLIR_PredHandle MLIR_GetPredNext(MLIR_Context *, MLIR_PredHandle pred) {
+    if (!pred) return MLIR_INVALID_HANDLE;
+    auto *next = F<mlir::BlockOperand>(pred)->getNextOperandUsingThisValue();
+    return next ? H(next) : MLIR_INVALID_HANDLE;
+}
+
+extern "C" MLIR_OpHandle MLIR_GetPredTerminator(MLIR_Context *, MLIR_PredHandle pred) {
+    API_CHECK(pred != MLIR_INVALID_HANDLE, "MLIR_GetPredTerminator", "invalid pred handle");
+    return H(F<mlir::BlockOperand>(pred)->getOwner());
+}
+
+extern "C" MLIR_BlockHandle MLIR_GetPredBlock(MLIR_Context *, MLIR_PredHandle pred) {
+    API_CHECK(pred != MLIR_INVALID_HANDLE, "MLIR_GetPredBlock", "invalid pred handle");
+    auto *b = F<mlir::BlockOperand>(pred)->getOwner()->getBlock();
+    return b ? H(b) : MLIR_INVALID_HANDLE;
+}
+
+extern "C" size_t MLIR_GetPredSuccessorIndex(MLIR_Context *, MLIR_PredHandle pred) {
+    API_CHECK(pred != MLIR_INVALID_HANDLE, "MLIR_GetPredSuccessorIndex", "invalid pred handle");
+    return (size_t)F<mlir::BlockOperand>(pred)->getOperandNumber();
+}
+
+// -----------------------------------------------------------------------------
 // Region / Block accessors
 // -----------------------------------------------------------------------------
 

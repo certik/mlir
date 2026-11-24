@@ -32,6 +32,8 @@ typedef uintptr_t MLIR_ValueHandle;
 typedef uintptr_t MLIR_TypeHandle;
 typedef uintptr_t MLIR_AttributeHandle;
 typedef uintptr_t MLIR_LocationHandle;
+typedef uintptr_t MLIR_UseHandle;
+typedef uintptr_t MLIR_PredHandle;
 
 #define MLIR_INVALID_HANDLE 0
 
@@ -943,6 +945,88 @@ void MLIR_AppendOpSuccessorOperand(MLIR_Context *ctx, MLIR_OpHandle op,
 // remains attached to its parent region.
 void MLIR_SpliceBlockOps(MLIR_Context *ctx, MLIR_BlockHandle dst,
                          MLIR_BlockHandle src);
+
+// -----------------------------------------------------------------------------
+// Traversal, iterators, walks and CFG info (doc/mlir_api_design.md section 3.2)
+// -----------------------------------------------------------------------------
+//
+// All iterator steps are O(1) on both backends.
+
+// Ops of a block, in order (both directions), and enclosing op.
+MLIR_OpHandle MLIR_GetBlockFirstOp(MLIR_Context *ctx, MLIR_BlockHandle block);
+MLIR_OpHandle MLIR_GetBlockLastOp(MLIR_Context *ctx, MLIR_BlockHandle block);
+MLIR_OpHandle MLIR_GetOpNext(MLIR_Context *ctx, MLIR_OpHandle op);
+MLIR_OpHandle MLIR_GetOpPrev(MLIR_Context *ctx, MLIR_OpHandle op);
+// Returns the op whose region contains `op`'s parent block, or MLIR_INVALID_HANDLE.
+MLIR_OpHandle MLIR_GetParentOp(MLIR_Context *ctx, MLIR_OpHandle op);
+
+// Blocks of a region, in order (both directions).
+MLIR_BlockHandle MLIR_GetRegionFirstBlock(MLIR_Context *ctx, MLIR_RegionHandle region);
+MLIR_BlockHandle MLIR_GetRegionLastBlock(MLIR_Context *ctx, MLIR_RegionHandle region);
+MLIR_BlockHandle MLIR_GetBlockNext(MLIR_Context *ctx, MLIR_BlockHandle block);
+MLIR_BlockHandle MLIR_GetBlockPrev(MLIR_Context *ctx, MLIR_BlockHandle block);
+
+// Uses of a value. Fetch MLIR_GetUseNext before mutating the current use.
+MLIR_UseHandle MLIR_GetValueFirstUse(MLIR_Context *ctx, MLIR_ValueHandle value);
+MLIR_UseHandle MLIR_GetUseNext(MLIR_Context *ctx, MLIR_UseHandle use);
+MLIR_OpHandle  MLIR_GetUseOwner(MLIR_Context *ctx, MLIR_UseHandle use);
+size_t         MLIR_GetUseOperandIndex(MLIR_Context *ctx, MLIR_UseHandle use);
+bool           MLIR_ValueHasOneUse(MLIR_Context *ctx, MLIR_ValueHandle value);
+bool           MLIR_IsValueUnused(MLIR_Context *ctx, MLIR_ValueHandle value);
+
+// Predecessors of a block (incoming edges from terminators).
+MLIR_PredHandle  MLIR_GetBlockFirstPred(MLIR_Context *ctx, MLIR_BlockHandle block);
+MLIR_PredHandle  MLIR_GetPredNext(MLIR_Context *ctx, MLIR_PredHandle pred);
+MLIR_BlockHandle MLIR_GetPredBlock(MLIR_Context *ctx, MLIR_PredHandle pred);
+MLIR_OpHandle    MLIR_GetPredTerminator(MLIR_Context *ctx, MLIR_PredHandle pred);
+size_t           MLIR_GetPredSuccessorIndex(MLIR_Context *ctx, MLIR_PredHandle pred);
+// Read/write the incoming value for block argument `arg_idx` along edge `pred`.
+MLIR_ValueHandle MLIR_GetIncomingValue(MLIR_Context *ctx, MLIR_PredHandle pred, size_t arg_idx);
+void             MLIR_SetIncomingValue(MLIR_Context *ctx, MLIR_PredHandle pred,
+                                       size_t arg_idx, MLIR_ValueHandle value);
+
+// Nested op walk. In MLIR_WALK_POST the callback may erase the visited op;
+// in MLIR_WALK_PRE it may return MLIR_WALK_SKIP after replacing/erasing it.
+typedef enum {
+    MLIR_WALK_PRE,
+    MLIR_WALK_POST
+} MLIR_WalkOrder;
+
+typedef enum {
+    MLIR_WALK_ADVANCE,
+    MLIR_WALK_SKIP,
+    MLIR_WALK_INTERRUPT
+} MLIR_WalkResult;
+
+typedef MLIR_WalkResult (*MLIR_WalkFn)(MLIR_Context *ctx, MLIR_OpHandle op, void *user);
+
+MLIR_WalkResult MLIR_Walk(MLIR_Context *ctx, MLIR_OpHandle root,
+                          MLIR_WalkOrder order, MLIR_WalkFn fn, void *user);
+
+// Reachable block order from region's entry block (RPO or PO), allocated in `out`.
+typedef enum {
+    MLIR_ORDER_RPO,
+    MLIR_ORDER_PO
+} MLIR_BlockOrder;
+
+size_t MLIR_GetBlockOrder(MLIR_Context *ctx, MLIR_RegionHandle region,
+                          MLIR_BlockOrder order, Arena *out,
+                          MLIR_BlockHandle **out_blocks);
+
+// CFG dominator tree and natural-loop information for a region, allocated in `out`.
+typedef struct MLIR_CFGInfo {
+    size_t            n_blocks;       // number of reachable blocks in RPO
+    MLIR_BlockHandle *rpo;            // rpo[0..n_blocks-1] (rpo[0] is entry)
+    int32_t          *idom;           // immediate dominator RPO index (-1 for entry)
+    uint32_t         *loop_depth;     // natural loop nesting depth of rpo[i]
+    bool             *is_loop_header; // true if rpo[i] is a natural loop header
+} MLIR_CFGInfo;
+
+MLIR_CFGInfo *MLIR_ComputeCFGInfo(MLIR_Context *ctx, MLIR_RegionHandle region, Arena *out);
+// Returns the RPO index of `block` in `cfg`, or -1 if unreachable.
+int32_t MLIR_CFGGetRPOIndex(const MLIR_CFGInfo *cfg, MLIR_BlockHandle block);
+// True if block at `a_rpo` dominates block at `b_rpo` in `cfg`.
+bool MLIR_CFGDominates(const MLIR_CFGInfo *cfg, int32_t a_rpo, int32_t b_rpo);
 
 // Introspection
 typedef enum {
