@@ -62,16 +62,23 @@ static const char g_static_op_names[] =
     ;
 
 // The trait bitmask of each static op type (dynamic types return MLIR_T_NONE).
-// Uses a switch rather than a global initializer array because tinyC's
-// self-host parser does not accept bitwise expressions in global array inits;
-// optimizing compilers lower this dense switch to a static lookup table.
-MLIR_OpTraits MLIR_GetOpTypeTraits(MLIR_OpType type) {
-    switch (type) {
-#define MLIR_OP(enumerator, name, traits) case enumerator: return (MLIR_OpTraits)(traits);
+// Populated once into a zero-initialized static array rather than a global
+// initializer (tinyC's self-host parser does not accept bitwise expressions in
+// global array inits) or a 260-case switch (which exceeds wasm->macho's 256
+// block nesting limit when compiled by tinyC).
+static MLIR_OpTraits g_static_op_traits[OP_TYPE_COUNT];
+static bool g_static_op_traits_init = false;
+
+static void init_static_op_traits(void) {
+#define MLIR_OP(enumerator, name, traits) g_static_op_traits[enumerator] = (MLIR_OpTraits)(traits);
 #include "mlir_ops.def"
-    default:
-        return MLIR_T_NONE;
-    }
+    g_static_op_traits_init = true;
+}
+
+MLIR_OpTraits MLIR_GetOpTypeTraits(MLIR_OpType type) {
+    if (!g_static_op_traits_init) init_static_op_traits();
+    if ((unsigned)type < (unsigned)OP_TYPE_COUNT) return g_static_op_traits[type];
+    return MLIR_T_NONE;
 }
 
 void op_type_table_init(OpTypeTable *t, Arena *arena) {
@@ -526,4 +533,337 @@ bool MLIR_CFGDominates(const MLIR_CFGInfo *cfg, int32_t a_rpo, int32_t b_rpo) {
     int32_t cur = b_rpo;
     while (cur > a_rpo && cur >= 0) cur = cfg->idom[cur];
     return cur == a_rpo;
+}
+
+// -----------------------------------------------------------------------------
+// Backend-agnostic LLVM-level completeness helpers (doc/mlir_api_design.md §4).
+// -----------------------------------------------------------------------------
+
+MLIR_ValueHandle MLIR_BuildConstantInt(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, int64_t v) {
+    MLIR_AttributeHandle val_attr;
+    if (MLIR_GetTypeKind(b->ctx, rt) == MLIR_TYPE_KIND_VECTOR) {
+        MLIR_TypeHandle elem = MLIR_GetTypeElement(b->ctx, rt);
+        val_attr = MLIR_CreateAttributeSplat(b->ctx, rt,
+            MLIR_CreateAttributeInteger(b->ctx, v, elem));
+    } else {
+        val_attr = MLIR_CreateAttributeInteger(b->ctx, v, rt);
+    }
+    MLIR_NamedAttr attr = MLIR_Named(MLIR_KEY_VALUE, val_attr);
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.result_types = &rt;
+    s.n_results = 1;
+    s.attrs = &attr;
+    s.n_attrs = 1;
+    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
+}
+
+MLIR_ValueHandle MLIR_BuildConstantFloat(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, double v) {
+    MLIR_AttributeHandle val_attr;
+    if (MLIR_GetTypeKind(b->ctx, rt) == MLIR_TYPE_KIND_VECTOR) {
+        MLIR_TypeHandle elem = MLIR_GetTypeElement(b->ctx, rt);
+        val_attr = MLIR_CreateAttributeSplat(b->ctx, rt,
+            MLIR_CreateAttributeFloat(b->ctx, v, elem));
+    } else {
+        val_attr = MLIR_CreateAttributeFloat(b->ctx, v, rt);
+    }
+    MLIR_NamedAttr attr = MLIR_Named(MLIR_KEY_VALUE, val_attr);
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.result_types = &rt;
+    s.n_results = 1;
+    s.attrs = &attr;
+    s.n_attrs = 1;
+    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
+}
+
+MLIR_ValueHandle MLIR_BuildFBinary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y, MLIR_FastMath fmf) {
+    MLIR_ValueHandle ops[2];
+    ops[0] = x;
+    ops[1] = y;
+    MLIR_NamedAttr attr;
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = ops;
+    s.n_operands = 2;
+    s.result_types = &rt;
+    s.n_results = 1;
+    if (fmf != MLIR_FMF_NONE) {
+        attr = MLIR_Named(MLIR_KEY_FASTMATH_FLAGS, MLIR_CreateAttributeFastMath(b->ctx, fmf));
+        s.attrs = &attr;
+        s.n_attrs = 1;
+    }
+    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
+}
+
+MLIR_ValueHandle MLIR_BuildFUnary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_FastMath fmf) {
+    MLIR_NamedAttr attr;
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = &x;
+    s.n_operands = 1;
+    s.result_types = &rt;
+    s.n_results = 1;
+    if (fmf != MLIR_FMF_NONE) {
+        attr = MLIR_Named(MLIR_KEY_FASTMATH_FLAGS, MLIR_CreateAttributeFastMath(b->ctx, fmf));
+        s.attrs = &attr;
+        s.n_attrs = 1;
+    }
+    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
+}
+
+MLIR_ValueHandle MLIR_BuildUndef(MLIR_Builder *b, MLIR_TypeHandle rt) {
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = OP_TYPE_LLVM_MLIR_UNDEF;
+    s.result_types = &rt;
+    s.n_results = 1;
+    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
+}
+
+MLIR_ValueHandle MLIR_BuildPoison(MLIR_Builder *b, MLIR_TypeHandle rt) {
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = OP_TYPE_LLVM_MLIR_POISON;
+    s.result_types = &rt;
+    s.n_results = 1;
+    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
+}
+
+MLIR_ValueHandle MLIR_BuildZero(MLIR_Builder *b, MLIR_TypeHandle rt) {
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = OP_TYPE_LLVM_MLIR_ZERO;
+    s.result_types = &rt;
+    s.n_results = 1;
+    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
+}
+
+MLIR_ValueHandle MLIR_BuildCallIntrinsic(MLIR_Builder *b, string intrin_name,
+        MLIR_TypeHandle rt, const MLIR_ValueHandle *args, uint32_t n_args,
+        MLIR_FastMath fmf) {
+    MLIR_NamedAttr attrs[2];
+    uint32_t n_attrs = 0;
+    attrs[n_attrs++] = MLIR_Named(MLIR_KEY_INTRIN,
+        MLIR_CreateAttributeString(b->ctx, intrin_name));
+    if (fmf != MLIR_FMF_NONE) {
+        attrs[n_attrs++] = MLIR_Named(MLIR_KEY_FASTMATH_FLAGS,
+            MLIR_CreateAttributeFastMath(b->ctx, fmf));
+    }
+    bool has_result = (rt != MLIR_INVALID_HANDLE &&
+                       MLIR_GetTypeKind(b->ctx, rt) != MLIR_TYPE_KIND_LLVM_VOID);
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = OP_TYPE_LLVM_CALL_INTRINSIC;
+    s.operands = args;
+    s.n_operands = n_args;
+    if (has_result) {
+        s.result_types = &rt;
+        s.n_results = 1;
+    }
+    s.attrs = attrs;
+    s.n_attrs = n_attrs;
+    MLIR_OpHandle op = MLIR_BuildOp(b, &s);
+    return has_result ? MLIR_GetOpResult(b->ctx, op, 0) : MLIR_INVALID_HANDLE;
+}
+
+string MLIR_GetCallee(MLIR_Context *ctx, MLIR_OpHandle op) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, op, MLIR_KEY_CALLEE);
+    if (a != MLIR_INVALID_HANDLE) {
+        string s = MLIR_GetAttributeString(ctx, a);
+        if (s.size > 0 && s.str[0] == '@') {
+            string bare;
+            bare.str = s.str + 1;
+            bare.size = s.size - 1;
+            return bare;
+        }
+        return s;
+    }
+    a = MLIR_GetOpAttr(ctx, op, MLIR_KEY_INTRIN);
+    if (a != MLIR_INVALID_HANDLE) {
+        return MLIR_GetAttributeString(ctx, a);
+    }
+    return str_lit("");
+}
+
+bool MLIR_IsFunctionDeclaration(MLIR_Context *ctx, MLIR_OpHandle fn) {
+    if (MLIR_GetOpNumRegions(ctx, fn) == 0) return true;
+    return MLIR_GetRegionNumBlocks(ctx, MLIR_GetOpRegion(ctx, fn, 0)) == 0;
+}
+
+static bool passthrough_entry_matches(MLIR_Context *ctx, MLIR_AttributeHandle elem,
+                                      string key, string *out_value) {
+    MLIR_AttrKind k = MLIR_GetAttributeKind(ctx, elem);
+    if (k == MLIR_ATTR_KIND_STRING) {
+        if (str_eq(MLIR_GetAttributeString(ctx, elem), key)) {
+            if (out_value) *out_value = str_lit("");
+            return true;
+        }
+    } else if (k == MLIR_ATTR_KIND_ARRAY && MLIR_GetAttributeArraySize(ctx, elem) >= 2) {
+        MLIR_AttributeHandle k_attr = MLIR_GetAttributeArrayElement(ctx, elem, 0);
+        if (MLIR_GetAttributeKind(ctx, k_attr) == MLIR_ATTR_KIND_STRING &&
+            str_eq(MLIR_GetAttributeString(ctx, k_attr), key)) {
+            if (out_value) {
+                MLIR_AttributeHandle v_attr = MLIR_GetAttributeArrayElement(ctx, elem, 1);
+                if (MLIR_GetAttributeKind(ctx, v_attr) == MLIR_ATTR_KIND_STRING)
+                    *out_value = MLIR_GetAttributeString(ctx, v_attr);
+                else
+                    *out_value = str_lit("");
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+string MLIR_GetFunctionPassthrough(MLIR_Context *ctx, MLIR_OpHandle fn, string key) {
+    MLIR_AttributeHandle pt = MLIR_GetOpAttr(ctx, fn, MLIR_KEY_PASSTHROUGH);
+    if (pt == MLIR_INVALID_HANDLE || MLIR_GetAttributeKind(ctx, pt) != MLIR_ATTR_KIND_ARRAY)
+        return str_lit("");
+    size_t n = MLIR_GetAttributeArraySize(ctx, pt);
+    for (size_t i = 0; i < n; i++) {
+        string val;
+        if (passthrough_entry_matches(ctx, MLIR_GetAttributeArrayElement(ctx, pt, i), key, &val))
+            return val;
+    }
+    return str_lit("");
+}
+
+bool MLIR_HasFunctionPassthrough(MLIR_Context *ctx, MLIR_OpHandle fn, string key) {
+    MLIR_AttributeHandle pt = MLIR_GetOpAttr(ctx, fn, MLIR_KEY_PASSTHROUGH);
+    if (pt == MLIR_INVALID_HANDLE || MLIR_GetAttributeKind(ctx, pt) != MLIR_ATTR_KIND_ARRAY)
+        return false;
+    size_t n = MLIR_GetAttributeArraySize(ctx, pt);
+    for (size_t i = 0; i < n; i++) {
+        if (passthrough_entry_matches(ctx, MLIR_GetAttributeArrayElement(ctx, pt, i), key, NULL))
+            return true;
+    }
+    return false;
+}
+
+void MLIR_SetFunctionPassthrough(MLIR_Context *ctx, MLIR_OpHandle fn,
+                                 string key, string value) {
+    MLIR_AttributeHandle entry;
+    if (value.size > 0) {
+        MLIR_AttributeHandle pair[2];
+        pair[0] = MLIR_CreateAttributeString(ctx, key);
+        pair[1] = MLIR_CreateAttributeString(ctx, value);
+        entry = MLIR_CreateAttributeArray(ctx, pair, 2);
+    } else {
+        entry = MLIR_CreateAttributeString(ctx, key);
+    }
+    MLIR_AttributeHandle pt = MLIR_GetOpAttr(ctx, fn, MLIR_KEY_PASSTHROUGH);
+    size_t n = 0;
+    if (pt != MLIR_INVALID_HANDLE && MLIR_GetAttributeKind(ctx, pt) == MLIR_ATTR_KIND_ARRAY)
+        n = MLIR_GetAttributeArraySize(ctx, pt);
+    MLIR_AttributeHandle stack_elems[16];
+    MLIR_AttributeHandle *elems = (n + 1 <= 16)
+        ? stack_elems
+        : (MLIR_AttributeHandle *)arena_alloc(MLIR_GetArenaAllocator(ctx),
+                                              (n + 1) * sizeof(MLIR_AttributeHandle));
+    bool replaced = false;
+    for (size_t i = 0; i < n; i++) {
+        MLIR_AttributeHandle e = MLIR_GetAttributeArrayElement(ctx, pt, i);
+        if (!replaced && passthrough_entry_matches(ctx, e, key, NULL)) {
+            elems[i] = entry;
+            replaced = true;
+        } else {
+            elems[i] = e;
+        }
+    }
+    if (!replaced) elems[n++] = entry;
+    MLIR_SetOpAttr(ctx, fn, MLIR_KEY_PASSTHROUGH,
+                   MLIR_CreateAttributeArray(ctx, elems, n));
+}
+
+static bool str_starts_with(string s, const char *prefix) {
+    size_t plen = strlen(prefix);
+    if (s.size < plen) return false;
+    for (size_t i = 0; i < plen; i++)
+        if (s.str[i] != prefix[i]) return false;
+    return true;
+}
+
+MLIR_TargetInfo MLIR_TargetFromTriple(string triple, uint64_t features) {
+    MLIR_TargetInfo t;
+    t.arch = MLIR_ARCH_UNKNOWN;
+    t.features = features;
+    t.triple = triple;
+    if (str_starts_with(triple, "x86_64") || str_starts_with(triple, "amd64"))
+        t.arch = MLIR_ARCH_X86_64;
+    else if (str_starts_with(triple, "aarch64") || str_starts_with(triple, "arm64"))
+        t.arch = MLIR_ARCH_AARCH64;
+    else if (str_starts_with(triple, "wasm32") || str_starts_with(triple, "wasm64"))
+        t.arch = MLIR_ARCH_WASM32;
+    return t;
+}
+
+static uint64_t feature_name_bit(const char *name, size_t len) {
+    string s;
+    s.str = (char *)name;
+    s.size = len;
+    if (str_eq(s, str_lit("sse2"))) return MLIR_FEATURE_SSE2;
+    if (str_eq(s, str_lit("sse4.1"))) return MLIR_FEATURE_SSE4_1;
+    if (str_eq(s, str_lit("avx"))) return MLIR_FEATURE_AVX;
+    if (str_eq(s, str_lit("avx2"))) return MLIR_FEATURE_AVX2;
+    if (str_eq(s, str_lit("fma"))) return MLIR_FEATURE_FMA;
+    if (str_eq(s, str_lit("avx512f"))) return MLIR_FEATURE_AVX512F;
+    if (str_eq(s, str_lit("neon"))) return MLIR_FEATURE_NEON;
+    if (str_eq(s, str_lit("simd128"))) return MLIR_FEATURE_SIMD128;
+    return 0;
+}
+
+static void apply_feature_string(uint64_t *features, string s) {
+    size_t i = 0;
+    while (i < s.size) {
+        while (i < s.size && (s.str[i] == ',' || s.str[i] == ' ' || s.str[i] == '"' ||
+                              s.str[i] == '[' || s.str[i] == ']'))
+            i++;
+        if (i >= s.size) break;
+        char sign = s.str[i];
+        if (sign == '+' || sign == '-') {
+            i++;
+            size_t start = i;
+            while (i < s.size && s.str[i] != ',' && s.str[i] != ' ' &&
+                   s.str[i] != '"' && s.str[i] != ']' && s.str[i] != '>')
+                i++;
+            uint64_t bit = feature_name_bit(s.str + start, i - start);
+            if (bit) {
+                if (sign == '+') *features |= bit;
+                else *features &= ~bit;
+            }
+        } else {
+            while (i < s.size && s.str[i] != ',' && s.str[i] != ' ' &&
+                   s.str[i] != '"' && s.str[i] != ']' && s.str[i] != '>')
+                i++;
+        }
+    }
+}
+
+bool MLIR_TargetHasFeature(MLIR_Context *ctx, const MLIR_TargetInfo *t,
+                           MLIR_OpHandle fn, uint64_t feature) {
+    if (!t || feature == 0) return false;
+    uint64_t eff = t->features;
+    if (ctx && fn != MLIR_INVALID_HANDLE) {
+        string pt = MLIR_GetFunctionPassthrough(ctx, fn, str_lit("target-features"));
+        if (pt.size > 0) apply_feature_string(&eff, pt);
+        MLIR_AttributeHandle tf = MLIR_GetOpAttr(ctx, fn, MLIR_KEY_TARGET_FEATURES);
+        if (tf != MLIR_INVALID_HANDLE) {
+            MLIR_AttrKind k = MLIR_GetAttributeKind(ctx, tf);
+            if (k == MLIR_ATTR_KIND_STRING) {
+                apply_feature_string(&eff, MLIR_GetAttributeString(ctx, tf));
+            } else if (k == MLIR_ATTR_KIND_ARRAY) {
+                size_t n = MLIR_GetAttributeArraySize(ctx, tf);
+                for (size_t i = 0; i < n; i++) {
+                    MLIR_AttributeHandle e = MLIR_GetAttributeArrayElement(ctx, tf, i);
+                    if (MLIR_GetAttributeKind(ctx, e) == MLIR_ATTR_KIND_STRING)
+                        apply_feature_string(&eff, MLIR_GetAttributeString(ctx, e));
+                }
+            } else {
+                string txt = MLIR_GetAttributeAsString(ctx, tf);
+                if (txt.size > 0) apply_feature_string(&eff, txt);
+            }
+        }
+    }
+    return (eff & feature) == feature;
 }

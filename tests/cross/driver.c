@@ -866,6 +866,216 @@ int app_main(void) {
                              : str_lit("traversal and CFG info: no\n"));
     }
 
+    // ---- LLVM-level completeness (#356) ------------------------------------
+    {
+        MLIR_OpSpec mod_spec = {0};
+        mod_spec.type = OP_TYPE_MODULE;
+        mod_spec.n_regions = 1;
+        MLIR_OpHandle mod = MLIR_CreateOpFromSpec(ctx, &mod_spec);
+        MLIR_BlockHandle mb = MLIR_CreateBlock(ctx);
+        MLIR_AppendRegionBlock(ctx, MLIR_GetOpRegion(ctx, mod, 0), mb);
+
+        MLIR_TypeHandle f32_ty = MLIR_CreateTypeFloat(ctx, 32, false);
+        MLIR_TypeHandle void_ty = MLIR_CreateTypeLLVMVoid(ctx);
+        int64_t v4[1] = { 4 };
+        MLIR_TypeHandle v4f32 = MLIR_CreateTypeVector(ctx, v4, 1, f32_ty);
+        MLIR_TypeHandle v4i32 = MLIR_CreateTypeVector(ctx, v4, 1, i32_ty);
+        MLIR_TypeHandle st_ty = MLIR_CreateTypeLLVMStructIdentified(ctx, str_lit("Pair356"));
+        MLIR_TypeHandle st_fields[2] = { f32_ty, i32_ty };
+        MLIR_SetTypeLLVMStructBody(ctx, st_ty, st_fields, 2);
+
+        // Declaration (no blocks in region 0) and definition (1 block).
+        MLIR_TypeHandle decl_fty = MLIR_CreateTypeLLVMFunction(ctx, f32_ty, &f32_ty, 1, false);
+        MLIR_NamedAttr decl_attrs[2] = {
+            MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("sqrtf"))),
+            MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(ctx, decl_fty)),
+        };
+        MLIR_OpSpec decl_spec = {0};
+        decl_spec.type = OP_TYPE_LLVM_FUNC;
+        decl_spec.attrs = decl_attrs;
+        decl_spec.n_attrs = 2;
+        decl_spec.n_regions = 1;
+        MLIR_OpHandle decl_fn = MLIR_CreateOpFromSpec(ctx, &decl_spec);
+        MLIR_AppendBlockOp(ctx, mb, decl_fn);
+
+        MLIR_TypeHandle def_in[2] = { v4f32, st_ty };
+        MLIR_TypeHandle def_fty = MLIR_CreateTypeLLVMFunction(ctx, f32_ty, def_in, 2, false);
+        MLIR_NamedAttr def_attrs[2] = {
+            MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("kernel356"))),
+            MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(ctx, def_fty)),
+        };
+        MLIR_OpSpec def_spec = {0};
+        def_spec.type = OP_TYPE_LLVM_FUNC;
+        def_spec.attrs = def_attrs;
+        def_spec.n_attrs = 2;
+        def_spec.n_regions = 1;
+        MLIR_OpHandle def_fn = MLIR_CreateOpFromSpec(ctx, &def_spec);
+        MLIR_AppendBlockOp(ctx, mb, def_fn);
+        MLIR_BlockHandle fb = MLIR_CreateBlock(ctx);
+        MLIR_AppendRegionBlock(ctx, MLIR_GetOpRegion(ctx, def_fn, 0), fb);
+        MLIR_ValueHandle arg_v = MLIR_AddBlockArgument(ctx, fb, v4f32, MLIR_INVALID_HANDLE);
+        MLIR_ValueHandle arg_s = MLIR_AddBlockArgument(ctx, fb, st_ty, MLIR_INVALID_HANDLE);
+
+        MLIR_Builder b = MLIR_BuilderAtEnd(ctx, fb);
+
+        // Scalar & splat constants + matchers.
+        MLIR_ValueHandle cf = MLIR_BuildConstantFloat(&b, OP_TYPE_LLVM_MLIR_CONSTANT, f32_ty, 2.5);
+        MLIR_ValueHandle vf = MLIR_BuildConstantFloat(&b, OP_TYPE_LLVM_MLIR_CONSTANT, v4f32, -3.0);
+        MLIR_ValueHandle ci = MLIR_BuildConstantInt(&b, OP_TYPE_LLVM_MLIR_CONSTANT, i32_ty, 7);
+        MLIR_ValueHandle vi = MLIR_BuildConstantInt(&b, OP_TYPE_LLVM_MLIR_CONSTANT, v4i32, 0);
+        MLIR_ValueHandle zf = MLIR_BuildZero(&b, f32_ty);
+        MLIR_ValueHandle uf = MLIR_BuildUndef(&b, v4f32);
+        MLIR_ValueHandle pf = MLIR_BuildPoison(&b, f32_ty);
+
+        double df = 0.0, dv = 0.0, dz = 1.0;
+        int64_t ii = 0, iv = 1;
+        bool const_ok =
+            MLIR_MatchConstantFloat(ctx, cf, -1, &df) && df == 2.5 &&
+            MLIR_MatchConstantFloat(ctx, cf, 0, &df) && df == 2.5 &&
+            !MLIR_MatchConstantFloat(ctx, cf, 1, &df) &&
+            MLIR_MatchConstantFloat(ctx, vf, -1, &dv) && dv == -3.0 &&
+            MLIR_MatchConstantFloat(ctx, vf, 3, &dv) && dv == -3.0 &&
+            !MLIR_MatchConstantFloat(ctx, vf, 4, &dv) &&
+            MLIR_MatchConstantFloat(ctx, zf, -1, &dz) && dz == 0.0 &&
+            MLIR_MatchConstantInt(ctx, ci, -1, &ii) && ii == 7 &&
+            MLIR_MatchConstantInt(ctx, vi, 2, &iv) && iv == 0 &&
+            MLIR_IsConstantZero(ctx, zf, -1) &&
+            MLIR_IsConstantZero(ctx, vi, -1) &&
+            !MLIR_IsConstantZero(ctx, cf, -1) &&
+            !MLIR_MatchConstantFloat(ctx, arg_v, -1, &df) &&
+            MLIR_GetOpType(ctx, MLIR_GetValueDefiningOp(ctx, uf)) == OP_TYPE_LLVM_MLIR_UNDEF &&
+            MLIR_GetOpType(ctx, MLIR_GetValueDefiningOp(ctx, pf)) == OP_TYPE_LLVM_MLIR_POISON;
+
+        // Fast-math flags + MLIR_BuildFBinary / MLIR_BuildFUnary / SetOpFastMath.
+        MLIR_ValueHandle fadd = MLIR_BuildFBinary(&b, OP_TYPE_LLVM_FADD, v4f32, arg_v, vf, MLIR_FMF_FAST);
+        MLIR_ValueHandle fneg = MLIR_BuildFUnary(&b, OP_TYPE_LLVM_FNEG, v4f32, fadd,
+                                                 MLIR_FMF_NNAN | MLIR_FMF_NINF);
+        MLIR_OpHandle fadd_op = MLIR_GetValueDefiningOp(ctx, fadd);
+        MLIR_OpHandle fneg_op = MLIR_GetValueDefiningOp(ctx, fneg);
+        bool fmf_ok =
+            MLIR_GetOpFastMath(ctx, fadd_op) == MLIR_FMF_FAST &&
+            MLIR_GetOpFastMath(ctx, fneg_op) == (MLIR_FMF_NNAN | MLIR_FMF_NINF);
+        MLIR_SetOpFastMath(ctx, fneg_op, MLIR_FMF_REASSOC | MLIR_FMF_ARCP);
+        fmf_ok = fmf_ok && MLIR_GetOpFastMath(ctx, fneg_op) == (MLIR_FMF_REASSOC | MLIR_FMF_ARCP);
+
+        // Vector & aggregate ops: shufflevector, insertelement, extractelement, extractvalue.
+        int32_t mask_vals[4] = { 3, 2, 1, 0 };
+        MLIR_NamedAttr shuf_attr = MLIR_Named(MLIR_KEY_MASK,
+            MLIR_CreateAttributeDenseI32Array(ctx, mask_vals, 4));
+        MLIR_ValueHandle shuf_ops[2] = { fneg, uf };
+        MLIR_OpSpec shuf_spec = {0};
+        shuf_spec.type = OP_TYPE_LLVM_SHUFFLEVECTOR;
+        shuf_spec.operands = shuf_ops;
+        shuf_spec.n_operands = 2;
+        shuf_spec.result_types = &v4f32;
+        shuf_spec.n_results = 1;
+        shuf_spec.attrs = &shuf_attr;
+        shuf_spec.n_attrs = 1;
+        MLIR_ValueHandle shuf = MLIR_GetOpResult(ctx, MLIR_BuildOp(&b, &shuf_spec), 0);
+
+        MLIR_ValueHandle idx0 = MLIR_BuildConstantInt(&b, OP_TYPE_LLVM_MLIR_CONSTANT, i32_ty, 0);
+        MLIR_ValueHandle ins_ops[3] = { shuf, cf, idx0 };
+        MLIR_OpSpec ins_spec = {0};
+        ins_spec.type = OP_TYPE_LLVM_INSERTELEMENT;
+        ins_spec.operands = ins_ops;
+        ins_spec.n_operands = 3;
+        ins_spec.result_types = &v4f32;
+        ins_spec.n_results = 1;
+        MLIR_ValueHandle ins = MLIR_GetOpResult(ctx, MLIR_BuildOp(&b, &ins_spec), 0);
+
+        MLIR_ValueHandle ext_ops[2] = { ins, idx0 };
+        MLIR_OpSpec ext_spec = {0};
+        ext_spec.type = OP_TYPE_LLVM_EXTRACTELEMENT;
+        ext_spec.operands = ext_ops;
+        ext_spec.n_operands = 2;
+        ext_spec.result_types = &f32_ty;
+        ext_spec.n_results = 1;
+        MLIR_ValueHandle ext = MLIR_GetOpResult(ctx, MLIR_BuildOp(&b, &ext_spec), 0);
+
+        int64_t pos0[1] = { 0 };
+        MLIR_NamedAttr ev_attr = MLIR_Named(MLIR_KEY_POSITION,
+            MLIR_CreateAttributeDenseI64Array(ctx, pos0, 1));
+        MLIR_OpSpec ev_spec = {0};
+        ev_spec.type = OP_TYPE_LLVM_EXTRACTVALUE;
+        ev_spec.operands = &arg_s;
+        ev_spec.n_operands = 1;
+        ev_spec.result_types = &f32_ty;
+        ev_spec.n_results = 1;
+        ev_spec.attrs = &ev_attr;
+        ev_spec.n_attrs = 1;
+        MLIR_ValueHandle ev = MLIR_GetOpResult(ctx, MLIR_BuildOp(&b, &ev_spec), 0);
+
+        // Common math intrinsics & llvm.call_intrinsic & llvm.call + MLIR_GetCallee.
+        MLIR_ValueHandle pw = MLIR_BuildFBinary(&b, OP_TYPE_LLVM_INTR_POW, f32_ty, ext, ev, MLIR_FMF_FAST);
+        MLIR_ValueHandle fa = MLIR_BuildFUnary(&b, OP_TYPE_LLVM_INTR_FABS, f32_ty, pw, MLIR_FMF_NONE);
+        MLIR_ValueHandle intrin_args[1] = { fa };
+        MLIR_ValueHandle ci_res = MLIR_BuildCallIntrinsic(&b, str_lit("llvm.x86.sse.rsqrt.ss"),
+            f32_ty, intrin_args, 1, MLIR_FMF_FAST);
+        MLIR_ValueHandle void_res = MLIR_BuildCallIntrinsic(&b, str_lit("llvm.donothing"),
+            void_ty, NULL, 0, MLIR_FMF_NONE);
+
+        MLIR_NamedAttr call_attr = MLIR_Named(MLIR_KEY_CALLEE,
+            MLIR_CreateAttributeSymbolRef(ctx, str_lit("sqrtf")));
+        MLIR_OpSpec call_spec = {0};
+        call_spec.type = OP_TYPE_LLVM_CALL;
+        call_spec.operands = &ci_res;
+        call_spec.n_operands = 1;
+        call_spec.result_types = &f32_ty;
+        call_spec.n_results = 1;
+        call_spec.attrs = &call_attr;
+        call_spec.n_attrs = 1;
+        MLIR_OpHandle call_op = MLIR_BuildOp(&b, &call_spec);
+        MLIR_ValueHandle call_res = MLIR_GetOpResult(ctx, call_op, 0);
+
+        MLIR_OpSpec ret_spec = {0};
+        ret_spec.type = OP_TYPE_LLVM_RETURN;
+        ret_spec.operands = &call_res;
+        ret_spec.n_operands = 1;
+        MLIR_BuildOp(&b, &ret_spec);
+
+        bool callee_ok =
+            str_eq(MLIR_GetCallee(ctx, call_op), str_lit("sqrtf")) &&
+            str_eq(MLIR_GetCallee(ctx, MLIR_GetValueDefiningOp(ctx, ci_res)),
+                   str_lit("llvm.x86.sse.rsqrt.ss")) &&
+            MLIR_GetOpFastMath(ctx, MLIR_GetValueDefiningOp(ctx, ci_res)) == MLIR_FMF_FAST &&
+            void_res == MLIR_INVALID_HANDLE &&
+            MLIR_IsFunctionDeclaration(ctx, decl_fn) &&
+            !MLIR_IsFunctionDeclaration(ctx, def_fn);
+
+        // Passthrough attributes + TargetInfo.
+        MLIR_SetFunctionPassthrough(ctx, def_fn, str_lit("noinline"), str_lit(""));
+        MLIR_SetFunctionPassthrough(ctx, def_fn, str_lit("reciprocal-estimates"), str_lit("sqrtf:0"));
+        MLIR_SetFunctionPassthrough(ctx, def_fn, str_lit("reciprocal-estimates"), str_lit("sqrtf:0,vec-sqrtf:0"));
+        MLIR_SetFunctionPassthrough(ctx, def_fn, str_lit("target-features"), str_lit("+avx512f,-fma"));
+        bool pt_ok =
+            MLIR_HasFunctionPassthrough(ctx, def_fn, str_lit("noinline")) &&
+            str_eq(MLIR_GetFunctionPassthrough(ctx, def_fn, str_lit("noinline")), str_lit("")) &&
+            MLIR_HasFunctionPassthrough(ctx, def_fn, str_lit("reciprocal-estimates")) &&
+            str_eq(MLIR_GetFunctionPassthrough(ctx, def_fn, str_lit("reciprocal-estimates")),
+                   str_lit("sqrtf:0,vec-sqrtf:0")) &&
+            !MLIR_HasFunctionPassthrough(ctx, def_fn, str_lit("missing"));
+
+        MLIR_TargetInfo x86 = MLIR_TargetFromTriple(str_lit("x86_64-unknown-linux-gnu"),
+            MLIR_FEATURE_SSE2 | MLIR_FEATURE_AVX | MLIR_FEATURE_FMA);
+        MLIR_TargetInfo arm = MLIR_TargetFromTriple(str_lit("aarch64-apple-darwin"),
+            MLIR_FEATURE_NEON);
+        bool target_ok =
+            MLIR_TargetIsX86(&x86) && !MLIR_TargetIsX86(&arm) &&
+            arm.arch == MLIR_ARCH_AARCH64 &&
+            MLIR_TargetHasFeature(ctx, &x86, MLIR_INVALID_HANDLE, MLIR_FEATURE_AVX) &&
+            MLIR_TargetHasFeature(ctx, &x86, MLIR_INVALID_HANDLE, MLIR_FEATURE_FMA) &&
+            !MLIR_TargetHasFeature(ctx, &x86, MLIR_INVALID_HANDLE, MLIR_FEATURE_AVX512F) &&
+            MLIR_TargetHasFeature(ctx, &x86, def_fn, MLIR_FEATURE_AVX512F) &&
+            !MLIR_TargetHasFeature(ctx, &x86, def_fn, MLIR_FEATURE_FMA) &&
+            MLIR_TargetHasFeature(ctx, &x86, def_fn, MLIR_FEATURE_AVX);
+
+        bool verify_ok = MLIR_VerifyOp(ctx, mod);
+
+        print_string(const_ok && fmf_ok && callee_ok && pt_ok && target_ok && verify_ok
+                         ? str_lit("llvm completeness: yes\n")
+                         : str_lit("llvm completeness: no\n"));
+    }
+
     MLIR_DestroyContext(ctx);
     arena_destroy(arena);
     return 0;

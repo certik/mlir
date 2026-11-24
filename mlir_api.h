@@ -403,29 +403,11 @@ static inline MLIR_ValueHandle MLIR_BuildUnary(MLIR_Builder *b, MLIR_OpType t,
     return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
 }
 
-static inline MLIR_ValueHandle MLIR_BuildConstantInt(MLIR_Builder *b, MLIR_OpType t,
-        MLIR_TypeHandle rt, int64_t v) {
-    MLIR_NamedAttr attr = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(b->ctx, v, rt));
-    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
-    s.type = t;
-    s.result_types = &rt;
-    s.n_results = 1;
-    s.attrs = &attr;
-    s.n_attrs = 1;
-    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
-}
+MLIR_ValueHandle MLIR_BuildConstantInt(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, int64_t v);
 
-static inline MLIR_ValueHandle MLIR_BuildConstantFloat(MLIR_Builder *b, MLIR_OpType t,
-        MLIR_TypeHandle rt, double v) {
-    MLIR_NamedAttr attr = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeFloat(b->ctx, v, rt));
-    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
-    s.type = t;
-    s.result_types = &rt;
-    s.n_results = 1;
-    s.attrs = &attr;
-    s.n_attrs = 1;
-    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
-}
+MLIR_ValueHandle MLIR_BuildConstantFloat(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, double v);
 
 static inline MLIR_OpHandle MLIR_BuildBr(MLIR_Builder *b, MLIR_OpType t,
         MLIR_BlockHandle dest, const MLIR_ValueHandle *args, uint32_t n) {
@@ -1067,6 +1049,117 @@ MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_Context *ctx, MLIR_AttributeHand
 // (MLIR_GetAttributeAsString) is made on demand.
 size_t MLIR_GetAttributeDenseSize(MLIR_Context *ctx, MLIR_AttributeHandle attr);
 int64_t MLIR_GetAttributeDenseElement(MLIR_Context *ctx, MLIR_AttributeHandle attr, size_t idx);
+
+// -----------------------------------------------------------------------------
+// LLVM-level completeness: fast-math flags, splats, constant matchers,
+// function passthrough attributes, intrinsics, target info
+// (doc/mlir_api_design.md section 4)
+// -----------------------------------------------------------------------------
+
+// Fast-math flags bitmask. Values match mlir::LLVM::FastmathFlags.
+typedef uint32_t MLIR_FastMath;
+
+enum {
+    MLIR_FMF_NONE     = 0u,
+    MLIR_FMF_NNAN     = 1u << 0,
+    MLIR_FMF_NINF     = 1u << 1,
+    MLIR_FMF_NSZ      = 1u << 2,
+    MLIR_FMF_ARCP     = 1u << 3,
+    MLIR_FMF_CONTRACT = 1u << 4,
+    MLIR_FMF_AFN      = 1u << 5,
+    MLIR_FMF_REASSOC  = 1u << 6,
+    MLIR_FMF_FAST     = 0x7fu
+};
+
+MLIR_AttributeHandle MLIR_CreateAttributeFastMath(MLIR_Context *ctx, MLIR_FastMath fmf);
+MLIR_FastMath MLIR_GetAttributeFastMath(MLIR_Context *ctx, MLIR_AttributeHandle attr);
+MLIR_FastMath MLIR_GetOpFastMath(MLIR_Context *ctx, MLIR_OpHandle op);
+void MLIR_SetOpFastMath(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_FastMath fmf);
+
+// Splat elements attribute: a constant vector (or ranked tensor) of `vec_type`
+// whose every lane equals `scalar_attr` (an integer or float attribute whose
+// type is the element type of `vec_type`).
+MLIR_AttributeHandle MLIR_CreateAttributeSplat(MLIR_Context *ctx,
+                                               MLIR_TypeHandle vec_type,
+                                               MLIR_AttributeHandle scalar_attr);
+
+// Constant value matchers. Match scalar constants, vector splats, dense
+// element constants (per-lane), and `llvm.mlir.zero`. Pass `lane < 0` to match
+// a scalar or splat constant (returns false for non-splat dense constants);
+// pass `lane >= 0` to read a specific lane (lane 0 for scalars).
+bool MLIR_MatchConstantFloat(MLIR_Context *ctx, MLIR_ValueHandle v, int64_t lane, double *out);
+bool MLIR_MatchConstantInt(MLIR_Context *ctx, MLIR_ValueHandle v, int64_t lane, int64_t *out);
+bool MLIR_IsConstantZero(MLIR_Context *ctx, MLIR_ValueHandle v, int64_t lane);
+
+// Builder helpers for LLVM-level passes.
+MLIR_ValueHandle MLIR_BuildFBinary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y, MLIR_FastMath fmf);
+MLIR_ValueHandle MLIR_BuildFUnary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_FastMath fmf);
+MLIR_ValueHandle MLIR_BuildUndef(MLIR_Builder *b, MLIR_TypeHandle rt);
+MLIR_ValueHandle MLIR_BuildPoison(MLIR_Builder *b, MLIR_TypeHandle rt);
+MLIR_ValueHandle MLIR_BuildZero(MLIR_Builder *b, MLIR_TypeHandle rt);
+// Builds an `llvm.call_intrinsic` op. Returns its result value, or
+// MLIR_INVALID_HANDLE if `rt` is MLIR_INVALID_HANDLE or LLVM void.
+MLIR_ValueHandle MLIR_BuildCallIntrinsic(MLIR_Builder *b, string intrin_name,
+        MLIR_TypeHandle rt, const MLIR_ValueHandle *args, uint32_t n_args,
+        MLIR_FastMath fmf);
+
+// Returns the bare callee symbol name (without leading '@') of a call op
+// (`llvm.call`, `func.call`, `wasmssa.call`, etc.) or the intrinsic name of
+// `llvm.call_intrinsic`, or "" if none.
+string MLIR_GetCallee(MLIR_Context *ctx, MLIR_OpHandle op);
+
+// Returns true if `fn` has no body (0 regions, or region 0 has 0 blocks).
+bool MLIR_IsFunctionDeclaration(MLIR_Context *ctx, MLIR_OpHandle fn);
+
+// Function passthrough attributes (`passthrough` array on `llvm.func` /
+// `func.func`). Entries are either bare strings `"key"` or 2-element string
+// arrays `["key", "value"]`.
+string MLIR_GetFunctionPassthrough(MLIR_Context *ctx, MLIR_OpHandle fn, string key);
+bool MLIR_HasFunctionPassthrough(MLIR_Context *ctx, MLIR_OpHandle fn, string key);
+// Sets `key` to `value` (as `["key", "value"]` if `value.size > 0`, or bare
+// `"key"` if `value.size == 0`), replacing any existing entry for `key`.
+void MLIR_SetFunctionPassthrough(MLIR_Context *ctx, MLIR_OpHandle fn,
+                                 string key, string value);
+
+// Target architecture and feature queries.
+typedef enum {
+    MLIR_ARCH_UNKNOWN = 0,
+    MLIR_ARCH_X86_64,
+    MLIR_ARCH_AARCH64,
+    MLIR_ARCH_WASM32
+} MLIR_Arch;
+
+enum {
+    MLIR_FEATURE_NONE    = 0ull,
+    MLIR_FEATURE_SSE2    = 1ull << 0,
+    MLIR_FEATURE_SSE4_1  = 1ull << 1,
+    MLIR_FEATURE_AVX     = 1ull << 2,
+    MLIR_FEATURE_AVX2    = 1ull << 3,
+    MLIR_FEATURE_FMA     = 1ull << 4,
+    MLIR_FEATURE_AVX512F = 1ull << 5,
+    MLIR_FEATURE_NEON    = 1ull << 6,
+    MLIR_FEATURE_SIMD128 = 1ull << 7,
+};
+
+typedef struct MLIR_TargetInfo {
+    MLIR_Arch arch;
+    uint64_t  features;
+    string    triple;
+} MLIR_TargetInfo;
+
+MLIR_TargetInfo MLIR_TargetFromTriple(string triple, uint64_t features);
+
+static inline bool MLIR_TargetIsX86(const MLIR_TargetInfo *t) {
+    return t != NULL && t->arch == MLIR_ARCH_X86_64;
+}
+
+// Returns true if `feature` (or all bits in `feature`) is enabled for `t`,
+// taking into account per-function overrides in `fn`'s `target_features`
+// attribute or `passthrough` `"target-features"` string (if `fn` is valid).
+bool MLIR_TargetHasFeature(MLIR_Context *ctx, const MLIR_TargetInfo *t,
+                           MLIR_OpHandle fn, uint64_t feature);
 
 // -----------------------------------------------------------------------------
 // Location API

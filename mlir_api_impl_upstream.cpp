@@ -1797,6 +1797,150 @@ extern "C" MLIR_AttributeHandle MLIR_CreateAttributeDistinct(MLIR_Context *cctx,
     return attrH(mlir::DistinctAttr::create(attrF(referenced)));
 }
 
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeFastMath(MLIR_Context *cctx, MLIR_FastMath fmf) {
+    auto flags = static_cast<mlir::LLVM::FastmathFlags>(fmf & MLIR_FMF_FAST);
+    return attrH(mlir::LLVM::FastmathFlagsAttr::get(cctx, flags));
+}
+
+extern "C" MLIR_FastMath MLIR_GetAttributeFastMath(MLIR_Context *ctx, MLIR_AttributeHandle h) {
+    (void)ctx;
+    if (h == MLIR_INVALID_HANDLE) return MLIR_FMF_NONE;
+    mlir::Attribute a = attrF(h);
+    if (auto fmf = llvm::dyn_cast_or_null<mlir::LLVM::FastmathFlagsAttr>(a))
+        return static_cast<MLIR_FastMath>(fmf.getValue()) & MLIR_FMF_FAST;
+    return MLIR_FMF_NONE;
+}
+
+extern "C" MLIR_FastMath MLIR_GetOpFastMath(MLIR_Context *ctx, MLIR_OpHandle h) {
+    CHECK_OWN_OP(ctx, h, "MLIR_GetOpFastMath");
+    auto *op = F<mlir::Operation>(h);
+    if (auto fmi = mlir::dyn_cast<mlir::LLVM::FastmathFlagsInterface>(op)) {
+        auto attr = fmi.getFastmathAttr();
+        if (attr) return static_cast<MLIR_FastMath>(attr.getValue()) & MLIR_FMF_FAST;
+        return MLIR_FMF_NONE;
+    }
+    MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, h, MLIR_KEY_FASTMATH_FLAGS);
+    return MLIR_GetAttributeFastMath(ctx, a);
+}
+
+extern "C" void MLIR_SetOpFastMath(MLIR_Context *ctx, MLIR_OpHandle h, MLIR_FastMath fmf) {
+    MLIR_SetOpAttr(ctx, h, MLIR_KEY_FASTMATH_FLAGS,
+                   MLIR_CreateAttributeFastMath(ctx, fmf));
+}
+
+extern "C" MLIR_AttributeHandle MLIR_CreateAttributeSplat(MLIR_Context *cctx,
+                                                          MLIR_TypeHandle vec_type,
+                                                          MLIR_AttributeHandle scalar_attr) {
+    (void)cctx;
+    auto shaped = llvm::cast<mlir::ShapedType>(typeF(vec_type));
+    return attrH(mlir::SplatElementsAttr::get(shaped, attrF(scalar_attr)));
+}
+
+static bool upstream_lane_in_bounds(mlir::Type ty, int64_t lane) {
+    if (lane < 0) return true;
+    if (auto st = llvm::dyn_cast<mlir::ShapedType>(ty)) {
+        if (!st.hasStaticShape()) return false;
+        return (int64_t)lane < st.getNumElements();
+    }
+    return lane == 0;
+}
+
+extern "C" bool MLIR_MatchConstantFloat(MLIR_Context *ctx, MLIR_ValueHandle v,
+                                        int64_t lane, double *out) {
+    if (v == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetValueKind(ctx, v) != MLIR_VALUE_OP_RESULT) return false;
+    MLIR_OpHandle def = MLIR_GetValueDefiningOp(ctx, v);
+    if (def == MLIR_INVALID_HANDLE) return false;
+    auto *op = F<mlir::Operation>(def);
+    MLIR_OpType t = MLIR_GetOpType(ctx, def);
+    if (t == OP_TYPE_LLVM_MLIR_ZERO) {
+        mlir::Type vty = F<ValueBox>(v)->v.getType();
+        mlir::Type ety = vty;
+        if (auto st = llvm::dyn_cast<mlir::ShapedType>(vty)) ety = st.getElementType();
+        if (llvm::isa<mlir::FloatType>(ety) && upstream_lane_in_bounds(vty, lane)) {
+            if (out) *out = 0.0;
+            return true;
+        }
+        return false;
+    }
+    if (!MLIR_OpHasTrait(ctx, def, MLIR_T_CONSTANT)) return false;
+    mlir::Attribute a = op->getAttr("value");
+    if (!a) return false;
+    if (auto fa = llvm::dyn_cast<mlir::FloatAttr>(a)) {
+        if (lane > 0) return false;
+        if (out) *out = fa.getValueAsDouble();
+        return true;
+    }
+    if (auto da = llvm::dyn_cast<mlir::DenseFPElementsAttr>(a)) {
+        if (da.isSplat()) {
+            if (!upstream_lane_in_bounds(da.getType(), lane)) return false;
+            if (out) *out = da.getSplatValue<llvm::APFloat>().convertToDouble();
+            return true;
+        }
+        if (lane < 0 || lane >= da.getNumElements()) return false;
+        if (out) *out = (*(da.getValues<llvm::APFloat>().begin() + lane)).convertToDouble();
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool MLIR_MatchConstantInt(MLIR_Context *ctx, MLIR_ValueHandle v,
+                                      int64_t lane, int64_t *out) {
+    if (v == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetValueKind(ctx, v) != MLIR_VALUE_OP_RESULT) return false;
+    MLIR_OpHandle def = MLIR_GetValueDefiningOp(ctx, v);
+    if (def == MLIR_INVALID_HANDLE) return false;
+    auto *op = F<mlir::Operation>(def);
+    MLIR_OpType t = MLIR_GetOpType(ctx, def);
+    if (t == OP_TYPE_LLVM_MLIR_ZERO) {
+        mlir::Type vty = F<ValueBox>(v)->v.getType();
+        mlir::Type ety = vty;
+        if (auto st = llvm::dyn_cast<mlir::ShapedType>(vty)) ety = st.getElementType();
+        if ((llvm::isa<mlir::IntegerType>(ety) || llvm::isa<mlir::IndexType>(ety)) &&
+            upstream_lane_in_bounds(vty, lane)) {
+            if (out) *out = 0;
+            return true;
+        }
+        return false;
+    }
+    if (!MLIR_OpHasTrait(ctx, def, MLIR_T_CONSTANT)) return false;
+    mlir::Attribute a = op->getAttr("value");
+    if (!a) return false;
+    if (auto ia = llvm::dyn_cast<mlir::IntegerAttr>(a)) {
+        if (lane > 0) return false;
+        if (out) *out = ia.getValue().getSExtValue();
+        return true;
+    }
+    if (auto da = llvm::dyn_cast<mlir::DenseIntElementsAttr>(a)) {
+        if (da.isSplat()) {
+            if (!upstream_lane_in_bounds(da.getType(), lane)) return false;
+            if (out) *out = da.getSplatValue<llvm::APInt>().getSExtValue();
+            return true;
+        }
+        if (lane < 0 || lane >= da.getNumElements()) return false;
+        if (out) *out = (*(da.getValues<llvm::APInt>().begin() + lane)).getSExtValue();
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool MLIR_IsConstantZero(MLIR_Context *ctx, MLIR_ValueHandle v, int64_t lane) {
+    if (v == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetValueKind(ctx, v) == MLIR_VALUE_OP_RESULT) {
+        MLIR_OpHandle def = MLIR_GetValueDefiningOp(ctx, v);
+        if (def != MLIR_INVALID_HANDLE) {
+            MLIR_OpType t = MLIR_GetOpType(ctx, def);
+            if (t == OP_TYPE_LLVM_MLIR_ZERO || t == OP_TYPE_LLVM_MLIR_NULL)
+                return upstream_lane_in_bounds(F<ValueBox>(v)->v.getType(), lane);
+        }
+    }
+    int64_t iv = 0;
+    if (MLIR_MatchConstantInt(ctx, v, lane, &iv)) return iv == 0;
+    double dv = 0.0;
+    if (MLIR_MatchConstantFloat(ctx, v, lane, &dv)) return dv == 0.0;
+    return false;
+}
+
 extern "C" size_t MLIR_GetAttributeDenseSize(MLIR_Context *ctx, MLIR_AttributeHandle h) {
     (void)ctx;
     mlir::Attribute a = attrF(h);
