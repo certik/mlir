@@ -59,7 +59,7 @@ typedef struct MLIR_Context MLIR_Context;
 
 typedef enum {
     OP_TYPE_UNREGISTERED = 0,
-#define MLIR_OP(enumerator, name) enumerator,
+#define MLIR_OP(enumerator, name, traits) enumerator,
 #define MLIR_DIALECT_BEGIN(D) MLIR_DIALECT_##D##_FIRST, MLIR_DIALECT_##D##_BEGIN_ = MLIR_DIALECT_##D##_FIRST - 1,
 #define MLIR_DIALECT_END(D) MLIR_DIALECT_##D##_END_, MLIR_DIALECT_##D##_LAST = MLIR_DIALECT_##D##_END_ - 1,
 #include "mlir_ops.def"
@@ -95,6 +95,49 @@ MLIR_OpType MLIR_LookupOpType(MLIR_Context *ctx, string name);
 // The name of `type`, borrowed from `ctx`; "" for OP_TYPE_UNREGISTERED and
 // values that are not types of `ctx`.
 string MLIR_GetOpTypeName(MLIR_Context *ctx, MLIR_OpType type);
+
+// -----------------------------------------------------------------------------
+// Op traits and verification (doc/mlir_api_design.md section 3.1)
+// -----------------------------------------------------------------------------
+//
+// Traits are static bitflags defined alongside each op in mlir_ops.def and
+// shared identically by both backends. Dynamic op types (>= OP_TYPE_COUNT)
+// and OP_TYPE_UNREGISTERED have trait mask 0.
+
+typedef uint64_t MLIR_OpTraits;
+
+enum {
+    MLIR_T_NONE          = 0u,
+    MLIR_T_TERMINATOR    = 1u << 0,
+    MLIR_T_BRANCH        = 1u << 1,   // has successor blocks
+    MLIR_T_RETURN_LIKE   = 1u << 2,
+    MLIR_T_PURE          = 1u << 3,   // no memory effects (side-effect free)
+    MLIR_T_MEM_READ      = 1u << 4,
+    MLIR_T_MEM_WRITE     = 1u << 5,
+    MLIR_T_COMMUTATIVE   = 1u << 6,
+    MLIR_T_CONSTANT      = 1u << 7,   // constant-like, value in MLIR_KEY_VALUE
+    MLIR_T_ELEMENTWISE   = 1u << 8,
+    MLIR_T_FASTMATH      = 1u << 9,   // carries MLIR_KEY_FASTMATH_FLAGS
+    MLIR_T_CALL          = 1u << 10,
+    MLIR_T_FUNCTION      = 1u << 11,  // func.func, llvm.func, wasmssa.func, aarch64.func
+    MLIR_T_SYMBOL        = 1u << 12,
+    MLIR_T_ISOLATED      = 1u << 13,
+    MLIR_T_NO_TERMINATOR = 1u << 14,
+    MLIR_T_SINGLE_BLOCK  = 1u << 15,
+    MLIR_T_ZERO_RESULT   = 1u << 16,
+    MLIR_T_ONE_RESULT    = 1u << 17,
+};
+
+MLIR_OpTraits MLIR_GetOpTypeTraits(MLIR_OpType type);
+MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle op);
+
+static inline bool MLIR_OpHasTrait(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_OpTraits traits) {
+    return (MLIR_GetOpTypeTraits(MLIR_GetOpType(ctx, op)) & traits) == traits;
+}
+
+// Verifies `op` and all operations nested in its regions. Reports failures
+// through the context's diagnostic handler and returns false on error.
+bool MLIR_VerifyOp(MLIR_Context *ctx, MLIR_OpHandle op);
 
 // -----------------------------------------------------------------------------
 // Context

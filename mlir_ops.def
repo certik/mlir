@@ -1,4 +1,4 @@
-// The static op types: one MLIR_OP(enumerator, name) line per op
+// The static op types: one MLIR_OP(enumerator, name, traits) line per op
 // (doc/mlir_api_design.md, sections 1.2 and 2.5).
 //
 // This file is an X-macro: define the macros you need, include it, and the
@@ -6,7 +6,7 @@
 // the file #undefs all of them at the end, so it can be included any number
 // of times (it has no include guard on purpose). It generates
 //   - the MLIR_OpType enum and its dialect ranges (mlir_api.h),
-//   - the name of each type (mlir_op_names.c),
+//   - the name and traits of each type (mlir_op_names.c),
 //   - the op kinds of the parser and the printers (MLIR_PARSER_OP and
 //     MLIR_PRINTER_OP, mlir_printer.h).
 //
@@ -25,7 +25,7 @@
 // as an unregistered dialect.
 
 #ifndef MLIR_OP
-#define MLIR_OP(enumerator, name)
+#define MLIR_OP(enumerator, name, traits)
 #endif
 #ifndef MLIR_OP_ALIAS
 #define MLIR_OP_ALIAS(enumerator, name)
@@ -46,140 +46,140 @@
 MLIR_DIALECT_BEGIN(BUILTIN)
 // The C side names the module op `module`; upstream calls it `builtin.module`,
 // which is an alias: looking it up or registering it gives OP_TYPE_MODULE.
-MLIR_OP(OP_TYPE_MODULE, "module")
+MLIR_OP(OP_TYPE_MODULE, "module", MLIR_T_ISOLATED | MLIR_T_NO_TERMINATOR | MLIR_T_SINGLE_BLOCK | MLIR_T_ZERO_RESULT)
 MLIR_OP_ALIAS(OP_TYPE_MODULE, "builtin.module")
-MLIR_OP(OP_TYPE_UNREALIZED_CONVERSION_CAST, "builtin.unrealized_conversion_cast")
+MLIR_OP(OP_TYPE_UNREALIZED_CONVERSION_CAST, "builtin.unrealized_conversion_cast", MLIR_T_PURE)
 MLIR_DIALECT_END(BUILTIN)
 
 // `return` without a dialect prefix, as the in-tree parser reads the custom
 // form of a function's return; it belongs to no dialect.
-MLIR_OP(OP_TYPE_RETURN, "return")
+MLIR_OP(OP_TYPE_RETURN, "return", MLIR_T_TERMINATOR | MLIR_T_RETURN_LIKE | MLIR_T_ZERO_RESULT)
 
 MLIR_DIALECT_BEGIN(ARITH)
-MLIR_OP(OP_TYPE_ARITH_ADDI, "arith.addi")
-MLIR_OP(OP_TYPE_ARITH_SUBI, "arith.subi")
-MLIR_OP(OP_TYPE_ARITH_MULI, "arith.muli")
-MLIR_OP(OP_TYPE_ARITH_DIVI, "arith.divi")
-MLIR_OP(OP_TYPE_ARITH_ADDF, "arith.addf")
-MLIR_OP(OP_TYPE_ARITH_SUBF, "arith.subf")
-MLIR_OP(OP_TYPE_ARITH_MULF, "arith.mulf")
-MLIR_OP(OP_TYPE_ARITH_DIVF, "arith.divf")
-MLIR_OP(OP_TYPE_ARITH_CONSTANT, "arith.constant")
-MLIR_OP(OP_TYPE_ARITH_CMPI, "arith.cmpi")
-MLIR_OP(OP_TYPE_ARITH_CMPF, "arith.cmpf")
-MLIR_OP(OP_TYPE_ARITH_SELECT, "arith.select")
-MLIR_OP(OP_TYPE_ARITH_BITCAST, "arith.bitcast")
-MLIR_OP(OP_TYPE_ARITH_SITOFP, "arith.sitofp")
-MLIR_OP(OP_TYPE_ARITH_FPTOSI, "arith.fptosi")
-MLIR_OP(OP_TYPE_ARITH_INDEX_CAST, "arith.index_cast")
-MLIR_OP(OP_TYPE_ARITH_EXTSI, "arith.extsi")
-MLIR_OP(OP_TYPE_ARITH_TRUNCI, "arith.trunci")
-MLIR_OP(OP_TYPE_ARITH_EXTF, "arith.extf")
-MLIR_OP(OP_TYPE_ARITH_TRUNCF, "arith.truncf")
-MLIR_OP(OP_TYPE_ARITH_EXTUI, "arith.extui")
-MLIR_OP(OP_TYPE_ARITH_MAXF, "arith.maxf")
-MLIR_OP(OP_TYPE_ARITH_DIVSI, "arith.divsi")
-MLIR_OP(OP_TYPE_ARITH_REMSI, "arith.remsi")
-MLIR_OP(OP_TYPE_ARITH_DIVUI, "arith.divui")
-MLIR_OP(OP_TYPE_ARITH_REMUI, "arith.remui")
-MLIR_OP(OP_TYPE_ARITH_SHRUI, "arith.shrui")
-MLIR_OP(OP_TYPE_ARITH_ORI, "arith.ori")
-MLIR_OP(OP_TYPE_ARITH_MINSI, "arith.minsi")
-MLIR_OP(OP_TYPE_ARITH_ANDI, "arith.andi")
-MLIR_OP(OP_TYPE_ARITH_INDEX_CASTUI, "arith.index_castui")
-MLIR_OP(OP_TYPE_ARITH_UITOFP, "arith.uitofp")
-MLIR_OP(OP_TYPE_ARITH_FPTOUI, "arith.fptoui")
-MLIR_OP(OP_TYPE_ARITH_XORI, "arith.xori")
-MLIR_OP(OP_TYPE_ARITH_SHLI, "arith.shli")
-MLIR_OP(OP_TYPE_ARITH_SHRSI, "arith.shrsi")
+MLIR_OP(OP_TYPE_ARITH_ADDI, "arith.addi", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_SUBI, "arith.subi", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_MULI, "arith.muli", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_DIVI, "arith.divi", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_ADDF, "arith.addf", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_FASTMATH | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_SUBF, "arith.subf", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_FASTMATH | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_MULF, "arith.mulf", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_FASTMATH | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_DIVF, "arith.divf", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_FASTMATH | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_CONSTANT, "arith.constant", MLIR_T_PURE | MLIR_T_CONSTANT | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_CMPI, "arith.cmpi", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_CMPF, "arith.cmpf", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_FASTMATH | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_SELECT, "arith.select", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_BITCAST, "arith.bitcast", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_SITOFP, "arith.sitofp", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_FPTOSI, "arith.fptosi", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_INDEX_CAST, "arith.index_cast", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_EXTSI, "arith.extsi", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_TRUNCI, "arith.trunci", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_EXTF, "arith.extf", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_TRUNCF, "arith.truncf", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_EXTUI, "arith.extui", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_MAXF, "arith.maxf", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_FASTMATH | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_DIVSI, "arith.divsi", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_REMSI, "arith.remsi", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_DIVUI, "arith.divui", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_REMUI, "arith.remui", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_SHRUI, "arith.shrui", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_ORI, "arith.ori", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_MINSI, "arith.minsi", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_ANDI, "arith.andi", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_INDEX_CASTUI, "arith.index_castui", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_UITOFP, "arith.uitofp", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_FPTOUI, "arith.fptoui", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_XORI, "arith.xori", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_SHLI, "arith.shli", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_ARITH_SHRSI, "arith.shrsi", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
 MLIR_DIALECT_END(ARITH)
 
 MLIR_DIALECT_BEGIN(CF)
-MLIR_OP(OP_TYPE_CF_BR, "cf.br")
-MLIR_OP(OP_TYPE_CF_COND_BR, "cf.cond_br")
-MLIR_OP(OP_TYPE_CF_SWITCH, "cf.switch")
+MLIR_OP(OP_TYPE_CF_BR, "cf.br", MLIR_T_TERMINATOR | MLIR_T_BRANCH | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_CF_COND_BR, "cf.cond_br", MLIR_T_TERMINATOR | MLIR_T_BRANCH | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_CF_SWITCH, "cf.switch", MLIR_T_TERMINATOR | MLIR_T_BRANCH | MLIR_T_ZERO_RESULT)
 MLIR_DIALECT_END(CF)
 
 MLIR_DIALECT_BEGIN(FUNC)
-MLIR_OP(OP_TYPE_FUNC_FUNC, "func.func")
-MLIR_OP(OP_TYPE_FUNC_RETURN, "func.return")
-MLIR_OP(OP_TYPE_FUNC_CALL, "func.call")
-MLIR_OP(OP_TYPE_FUNC_CALL_INDIRECT, "func.call_indirect")
-MLIR_OP(OP_TYPE_FUNC_CONSTANT, "func.constant")
+MLIR_OP(OP_TYPE_FUNC_FUNC, "func.func", MLIR_T_FUNCTION | MLIR_T_SYMBOL | MLIR_T_ISOLATED | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_FUNC_RETURN, "func.return", MLIR_T_TERMINATOR | MLIR_T_RETURN_LIKE | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_FUNC_CALL, "func.call", MLIR_T_CALL)
+MLIR_OP(OP_TYPE_FUNC_CALL_INDIRECT, "func.call_indirect", MLIR_T_CALL)
+MLIR_OP(OP_TYPE_FUNC_CONSTANT, "func.constant", MLIR_T_PURE | MLIR_T_CONSTANT | MLIR_T_ONE_RESULT)
 MLIR_DIALECT_END(FUNC)
 
 MLIR_DIALECT_BEGIN(SCF)
-MLIR_OP(OP_TYPE_SCF_FOR, "scf.for")
-MLIR_OP(OP_TYPE_SCF_WHILE, "scf.while")
-MLIR_OP(OP_TYPE_SCF_IF, "scf.if")
-MLIR_OP(OP_TYPE_SCF_YIELD, "scf.yield")
-MLIR_OP(OP_TYPE_SCF_CONDITION, "scf.condition")
-MLIR_OP(OP_TYPE_SCF_INDEX_SWITCH, "scf.index_switch")
+MLIR_OP(OP_TYPE_SCF_FOR, "scf.for", MLIR_T_SINGLE_BLOCK)
+MLIR_OP(OP_TYPE_SCF_WHILE, "scf.while", MLIR_T_SINGLE_BLOCK)
+MLIR_OP(OP_TYPE_SCF_IF, "scf.if", MLIR_T_SINGLE_BLOCK)
+MLIR_OP(OP_TYPE_SCF_YIELD, "scf.yield", MLIR_T_TERMINATOR | MLIR_T_RETURN_LIKE | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_SCF_CONDITION, "scf.condition", MLIR_T_TERMINATOR | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_SCF_INDEX_SWITCH, "scf.index_switch", MLIR_T_SINGLE_BLOCK)
 MLIR_DIALECT_END(SCF)
 
 MLIR_DIALECT_BEGIN(LLVM)
-MLIR_OP(OP_TYPE_LLVM_MLIR_UNDEF, "llvm.mlir.undef")
-MLIR_OP(OP_TYPE_LLVM_ALLOCA, "llvm.alloca")
-MLIR_OP(OP_TYPE_LLVM_LOAD, "llvm.load")
-MLIR_OP(OP_TYPE_LLVM_STORE, "llvm.store")
-MLIR_OP(OP_TYPE_LLVM_GEP, "llvm.getelementptr")
-MLIR_OP(OP_TYPE_LLVM_MLIR_ZERO, "llvm.mlir.zero")
-MLIR_OP(OP_TYPE_LLVM_MLIR_CONSTANT, "llvm.mlir.constant")
-MLIR_OP(OP_TYPE_LLVM_ICMP, "llvm.icmp")
-MLIR_OP(OP_TYPE_LLVM_MLIR_ADDRESSOF, "llvm.mlir.addressof")
-MLIR_OP(OP_TYPE_LLVM_MLIR_GLOBAL, "llvm.mlir.global")
-MLIR_OP(OP_TYPE_LLVM_RETURN, "llvm.return")
-MLIR_OP(OP_TYPE_LLVM_PTRTOINT, "llvm.ptrtoint")
-MLIR_OP(OP_TYPE_LLVM_FUNC, "llvm.func")
-MLIR_OP(OP_TYPE_LLVM_CALL, "llvm.call")
-MLIR_OP(OP_TYPE_LLVM_SEXT, "llvm.sext")
-MLIR_OP(OP_TYPE_LLVM_ADD, "llvm.add")
-MLIR_OP(OP_TYPE_LLVM_SUB, "llvm.sub")
-MLIR_OP(OP_TYPE_LLVM_MUL, "llvm.mul")
-MLIR_OP(OP_TYPE_LLVM_SDIV, "llvm.sdiv")
-MLIR_OP(OP_TYPE_LLVM_UDIV, "llvm.udiv")
-MLIR_OP(OP_TYPE_LLVM_SREM, "llvm.srem")
-MLIR_OP(OP_TYPE_LLVM_UREM, "llvm.urem")
-MLIR_OP(OP_TYPE_LLVM_AND, "llvm.and")
-MLIR_OP(OP_TYPE_LLVM_OR, "llvm.or")
-MLIR_OP(OP_TYPE_LLVM_XOR, "llvm.xor")
-MLIR_OP(OP_TYPE_LLVM_SHL, "llvm.shl")
-MLIR_OP(OP_TYPE_LLVM_LSHR, "llvm.lshr")
-MLIR_OP(OP_TYPE_LLVM_ASHR, "llvm.ashr")
-MLIR_OP(OP_TYPE_LLVM_TRUNC, "llvm.trunc")
-MLIR_OP(OP_TYPE_LLVM_ZEXT, "llvm.zext")
-MLIR_OP(OP_TYPE_LLVM_BR, "llvm.br")
-MLIR_OP(OP_TYPE_LLVM_COND_BR, "llvm.cond_br")
-MLIR_OP(OP_TYPE_LLVM_INTTOPTR, "llvm.inttoptr")
-MLIR_OP(OP_TYPE_LLVM_BITCAST, "llvm.bitcast")
-MLIR_OP(OP_TYPE_LLVM_SELECT, "llvm.select")
-MLIR_OP(OP_TYPE_LLVM_FCMP, "llvm.fcmp")
-MLIR_OP(OP_TYPE_LLVM_FADD, "llvm.fadd")
-MLIR_OP(OP_TYPE_LLVM_FSUB, "llvm.fsub")
-MLIR_OP(OP_TYPE_LLVM_FMUL, "llvm.fmul")
-MLIR_OP(OP_TYPE_LLVM_FDIV, "llvm.fdiv")
-MLIR_OP(OP_TYPE_LLVM_FREM, "llvm.frem")
-MLIR_OP(OP_TYPE_LLVM_FNEG, "llvm.fneg")
-MLIR_OP(OP_TYPE_LLVM_FPEXT, "llvm.fpext")
-MLIR_OP(OP_TYPE_LLVM_FPTRUNC, "llvm.fptrunc")
-MLIR_OP(OP_TYPE_LLVM_SITOFP, "llvm.sitofp")
-MLIR_OP(OP_TYPE_LLVM_UITOFP, "llvm.uitofp")
-MLIR_OP(OP_TYPE_LLVM_FPTOSI, "llvm.fptosi")
-MLIR_OP(OP_TYPE_LLVM_FPTOUI, "llvm.fptoui")
-MLIR_OP(OP_TYPE_LLVM_MLIR_NULL, "llvm.mlir.null")
-MLIR_OP(OP_TYPE_LLVM_SWITCH, "llvm.switch")
-MLIR_OP(OP_TYPE_LLVM_UNREACHABLE, "llvm.unreachable")
-MLIR_OP(OP_TYPE_LLVM_MLIR_POISON, "llvm.mlir.poison")
-MLIR_OP(OP_TYPE_LLVM_ADDRSPACECAST, "llvm.addrspacecast")
-MLIR_OP(OP_TYPE_LLVM_INSERTVALUE, "llvm.insertvalue")
-MLIR_OP(OP_TYPE_LLVM_INTR_SQRT, "llvm.intr.sqrt")
-MLIR_OP(OP_TYPE_LLVM_INTR_VASTART, "llvm.intr.vastart")
-MLIR_OP(OP_TYPE_LLVM_INTR_VAEND, "llvm.intr.vaend")
-MLIR_OP(OP_TYPE_LLVM_INTR_VACOPY, "llvm.intr.vacopy")
-MLIR_OP(OP_TYPE_LLVM_INTR_STACKSAVE, "llvm.intr.stacksave")
-MLIR_OP(OP_TYPE_LLVM_INTR_STACKRESTORE, "llvm.intr.stackrestore")
-MLIR_OP(OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE, "llvm.intr.wasm.memory.size")
-MLIR_OP(OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW, "llvm.intr.wasm.memory.grow")
+MLIR_OP(OP_TYPE_LLVM_MLIR_UNDEF, "llvm.mlir.undef", MLIR_T_PURE | MLIR_T_CONSTANT | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_ALLOCA, "llvm.alloca", MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_LOAD, "llvm.load", MLIR_T_MEM_READ | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_STORE, "llvm.store", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_LLVM_GEP, "llvm.getelementptr", MLIR_T_PURE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_MLIR_ZERO, "llvm.mlir.zero", MLIR_T_PURE | MLIR_T_CONSTANT | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_MLIR_CONSTANT, "llvm.mlir.constant", MLIR_T_PURE | MLIR_T_CONSTANT | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_ICMP, "llvm.icmp", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_MLIR_ADDRESSOF, "llvm.mlir.addressof", MLIR_T_PURE | MLIR_T_CONSTANT | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_MLIR_GLOBAL, "llvm.mlir.global", MLIR_T_SYMBOL | MLIR_T_ISOLATED | MLIR_T_SINGLE_BLOCK | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_LLVM_RETURN, "llvm.return", MLIR_T_TERMINATOR | MLIR_T_RETURN_LIKE | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_LLVM_PTRTOINT, "llvm.ptrtoint", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_FUNC, "llvm.func", MLIR_T_FUNCTION | MLIR_T_SYMBOL | MLIR_T_ISOLATED | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_LLVM_CALL, "llvm.call", MLIR_T_CALL)
+MLIR_OP(OP_TYPE_LLVM_SEXT, "llvm.sext", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_ADD, "llvm.add", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_SUB, "llvm.sub", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_MUL, "llvm.mul", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_SDIV, "llvm.sdiv", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_UDIV, "llvm.udiv", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_SREM, "llvm.srem", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_UREM, "llvm.urem", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_AND, "llvm.and", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_OR, "llvm.or", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_XOR, "llvm.xor", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_SHL, "llvm.shl", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_LSHR, "llvm.lshr", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_ASHR, "llvm.ashr", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_TRUNC, "llvm.trunc", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_ZEXT, "llvm.zext", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_BR, "llvm.br", MLIR_T_TERMINATOR | MLIR_T_BRANCH | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_LLVM_COND_BR, "llvm.cond_br", MLIR_T_TERMINATOR | MLIR_T_BRANCH | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_LLVM_INTTOPTR, "llvm.inttoptr", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_BITCAST, "llvm.bitcast", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_SELECT, "llvm.select", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_FCMP, "llvm.fcmp", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_FASTMATH | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_FADD, "llvm.fadd", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_FASTMATH | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_FSUB, "llvm.fsub", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_FASTMATH | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_FMUL, "llvm.fmul", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ELEMENTWISE | MLIR_T_FASTMATH | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_FDIV, "llvm.fdiv", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_FASTMATH | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_FREM, "llvm.frem", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_FASTMATH | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_FNEG, "llvm.fneg", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_FASTMATH | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_FPEXT, "llvm.fpext", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_FPTRUNC, "llvm.fptrunc", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_SITOFP, "llvm.sitofp", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_UITOFP, "llvm.uitofp", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_FPTOSI, "llvm.fptosi", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_FPTOUI, "llvm.fptoui", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_MLIR_NULL, "llvm.mlir.null", MLIR_T_PURE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_SWITCH, "llvm.switch", MLIR_T_TERMINATOR | MLIR_T_BRANCH | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_LLVM_UNREACHABLE, "llvm.unreachable", MLIR_T_TERMINATOR | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_LLVM_MLIR_POISON, "llvm.mlir.poison", MLIR_T_PURE | MLIR_T_CONSTANT | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_ADDRSPACECAST, "llvm.addrspacecast", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_INSERTVALUE, "llvm.insertvalue", MLIR_T_PURE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_INTR_SQRT, "llvm.intr.sqrt", MLIR_T_PURE | MLIR_T_ELEMENTWISE | MLIR_T_FASTMATH | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_INTR_VASTART, "llvm.intr.vastart", MLIR_T_MEM_READ | MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_LLVM_INTR_VAEND, "llvm.intr.vaend", MLIR_T_MEM_READ | MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_LLVM_INTR_VACOPY, "llvm.intr.vacopy", MLIR_T_MEM_READ | MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_LLVM_INTR_STACKSAVE, "llvm.intr.stacksave", MLIR_T_MEM_READ | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_INTR_STACKRESTORE, "llvm.intr.stackrestore", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_LLVM_INTR_WASM_MEMORY_SIZE, "llvm.intr.wasm.memory.size", MLIR_T_MEM_READ | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_LLVM_INTR_WASM_MEMORY_GROW, "llvm.intr.wasm.memory.grow", MLIR_T_MEM_READ | MLIR_T_MEM_WRITE | MLIR_T_ONE_RESULT)
 MLIR_DIALECT_END(LLVM)
 
 MLIR_DIALECT_BEGIN(WASMSSA)
@@ -194,21 +194,21 @@ MLIR_DIALECT_BEGIN(WASMSSA)
 //   load:  %r = wasmssa.load %addr       ; offset/align as attrs
 //   store: wasmssa.store %addr, %val
 // -------------------------------------------------------------------------
-MLIR_OP(OP_TYPE_WASMSSA_FUNC, "wasmssa.func")
-MLIR_OP(OP_TYPE_WASMSSA_IMPORT_FUNC, "wasmssa.import_func")
-MLIR_OP(OP_TYPE_WASMSSA_IMPORT_GLOBAL, "wasmssa.import_global")
-MLIR_OP(OP_TYPE_WASMSSA_CONST, "wasmssa.const")
-MLIR_OP(OP_TYPE_WASMSSA_ADD, "wasmssa.add")
-MLIR_OP(OP_TYPE_WASMSSA_SUB, "wasmssa.sub")
-MLIR_OP(OP_TYPE_WASMSSA_BINOP, "wasmssa.binop")
-MLIR_OP(OP_TYPE_WASMSSA_UNOP, "wasmssa.unop")
-MLIR_OP(OP_TYPE_WASMSSA_LOAD, "wasmssa.load")
-MLIR_OP(OP_TYPE_WASMSSA_STORE, "wasmssa.store")
-MLIR_OP(OP_TYPE_WASMSSA_GLOBAL_GET, "wasmssa.global_get")
-MLIR_OP(OP_TYPE_WASMSSA_GLOBAL_SET, "wasmssa.global_set")
-MLIR_OP(OP_TYPE_WASMSSA_EXTEND_I32_S, "wasmssa.extend_i32_s")
-MLIR_OP(OP_TYPE_WASMSSA_RETURN, "wasmssa.return")
-MLIR_OP(OP_TYPE_WASMSSA_CALL, "wasmssa.call")
+MLIR_OP(OP_TYPE_WASMSSA_FUNC, "wasmssa.func", MLIR_T_FUNCTION | MLIR_T_SYMBOL | MLIR_T_ISOLATED | MLIR_T_SINGLE_BLOCK | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_IMPORT_FUNC, "wasmssa.import_func", MLIR_T_SYMBOL | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_IMPORT_GLOBAL, "wasmssa.import_global", MLIR_T_SYMBOL | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_CONST, "wasmssa.const", MLIR_T_PURE | MLIR_T_CONSTANT | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_ADD, "wasmssa.add", MLIR_T_PURE | MLIR_T_COMMUTATIVE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_SUB, "wasmssa.sub", MLIR_T_PURE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_BINOP, "wasmssa.binop", MLIR_T_PURE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_UNOP, "wasmssa.unop", MLIR_T_PURE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_LOAD, "wasmssa.load", MLIR_T_MEM_READ | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_STORE, "wasmssa.store", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_GLOBAL_GET, "wasmssa.global_get", MLIR_T_MEM_READ | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_GLOBAL_SET, "wasmssa.global_set", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_EXTEND_I32_S, "wasmssa.extend_i32_s", MLIR_T_PURE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_RETURN, "wasmssa.return", MLIR_T_TERMINATOR | MLIR_T_RETURN_LIKE | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_CALL, "wasmssa.call", MLIR_T_CALL)
 // Region-bearing structured control flow. Cross-CF value passing is
 // modelled via MLIR block arguments on the region's entry block (for
 // loops) and via the variadic operands of block_return / br (for all
@@ -221,30 +221,30 @@ MLIR_OP(OP_TYPE_WASMSSA_CALL, "wasmssa.call")
 //
 // Region terminators: block_return | br | br_if (non-terminator) |
 //                     unreachable | return.
-MLIR_OP(OP_TYPE_WASMSSA_BLOCK, "wasmssa.block")
-MLIR_OP(OP_TYPE_WASMSSA_LOOP, "wasmssa.loop")
-MLIR_OP(OP_TYPE_WASMSSA_IF, "wasmssa.if")
+MLIR_OP(OP_TYPE_WASMSSA_BLOCK, "wasmssa.block", MLIR_T_SINGLE_BLOCK)
+MLIR_OP(OP_TYPE_WASMSSA_LOOP, "wasmssa.loop", MLIR_T_SINGLE_BLOCK)
+MLIR_OP(OP_TYPE_WASMSSA_IF, "wasmssa.if", MLIR_T_SINGLE_BLOCK)
 // Region terminator carrying the values that flow out of the enclosing
 // wasmssa.block / wasmssa.loop / wasmssa.if via fall-through.
-MLIR_OP(OP_TYPE_WASMSSA_BLOCK_RETURN, "wasmssa.block_return")
+MLIR_OP(OP_TYPE_WASMSSA_BLOCK_RETURN, "wasmssa.block_return", MLIR_T_TERMINATOR | MLIR_T_RETURN_LIKE | MLIR_T_ZERO_RESULT)
 // Terminator emitting wasm `unreachable` (0x00). Used after wasmssa.loop
 // when the loop never falls through (every back-edge `br 0` or outward
 // `br N` exits the loop's own end).
-MLIR_OP(OP_TYPE_WASMSSA_UNREACHABLE, "wasmssa.unreachable")
+MLIR_OP(OP_TYPE_WASMSSA_UNREACHABLE, "wasmssa.unreachable", MLIR_T_TERMINATOR | MLIR_T_ZERO_RESULT)
 // Branch carrying variadic values matching the target label's signature
 // (depth-relative). Terminator.
-MLIR_OP(OP_TYPE_WASMSSA_BR, "wasmssa.br")
+MLIR_OP(OP_TYPE_WASMSSA_BR, "wasmssa.br", MLIR_T_TERMINATOR | MLIR_T_ZERO_RESULT)
 // Conditional branch carrying only the condition; no value operands.
 // For value-carrying conditional branches we use `wasmssa.if %cond { br N (vals) }`.
-MLIR_OP(OP_TYPE_WASMSSA_BR_IF, "wasmssa.br_if")
-MLIR_OP(OP_TYPE_WASMSSA_SELECT, "wasmssa.select")
-MLIR_OP(OP_TYPE_WASMSSA_EQZ, "wasmssa.eqz")
-MLIR_OP(OP_TYPE_WASMSSA_ADDRESSOF, "wasmssa.addressof")
+MLIR_OP(OP_TYPE_WASMSSA_BR_IF, "wasmssa.br_if", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_SELECT, "wasmssa.select", MLIR_T_PURE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_EQZ, "wasmssa.eqz", MLIR_T_PURE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_ADDRESSOF, "wasmssa.addressof", MLIR_T_PURE | MLIR_T_ONE_RESULT)
 // Function-pointer support: FUNC_ADDR pushes the table-index of a
 // named function (lowered via R_WASM_TABLE_INDEX_SLEB); CALL_INDIRECT
 // pops args + table-index and dispatches via wasm `call_indirect`.
-MLIR_OP(OP_TYPE_WASMSSA_FUNC_ADDR, "wasmssa.func_addr")
-MLIR_OP(OP_TYPE_WASMSSA_CALL_INDIRECT, "wasmssa.call_indirect")
+MLIR_OP(OP_TYPE_WASMSSA_FUNC_ADDR, "wasmssa.func_addr", MLIR_T_PURE | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_CALL_INDIRECT, "wasmssa.call_indirect", MLIR_T_CALL)
 // Wasm function-locals access. Each function has a fixed set of
 // typed locals (params + declared locals). LOCAL_GET reads slot
 // `local_idx`, LOCAL_SET writes it. Locals are NEVER address-taken
@@ -253,16 +253,16 @@ MLIR_OP(OP_TYPE_WASMSSA_CALL_INDIRECT, "wasmssa.call_indirect")
 // to spill them into linmem cells (8 bytes each), which inflated
 // the wasm stack by ~20x and forced unrealistic stack-size grows.
 //   attrs: valtype (i32 byte: i32|i64|f32|f64), local_idx (i32).
-MLIR_OP(OP_TYPE_WASMSSA_LOCAL_GET, "wasmssa.local_get")
-MLIR_OP(OP_TYPE_WASMSSA_LOCAL_SET, "wasmssa.local_set")
+MLIR_OP(OP_TYPE_WASMSSA_LOCAL_GET, "wasmssa.local_get", MLIR_T_MEM_READ | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_LOCAL_SET, "wasmssa.local_set", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)
 // WebAssembly memory instructions: `memory.size` (0x3F 0x00) and
 // `memory.grow` (0x40 0x00). MEMORY_SIZE has no operands and an i32
 // result (size in pages). MEMORY_GROW takes one i32 operand (pages
 // to grow by) and returns the previous size in pages (or -1 on
 // failure) as i32. Both carry a trailing single-byte immediate
 // identifying the memory index (always 0 for the default memory).
-MLIR_OP(OP_TYPE_WASMSSA_MEMORY_SIZE, "wasmssa.memory_size")
-MLIR_OP(OP_TYPE_WASMSSA_MEMORY_GROW, "wasmssa.memory_grow")
+MLIR_OP(OP_TYPE_WASMSSA_MEMORY_SIZE, "wasmssa.memory_size", MLIR_T_MEM_READ | MLIR_T_ONE_RESULT)
+MLIR_OP(OP_TYPE_WASMSSA_MEMORY_GROW, "wasmssa.memory_grow", MLIR_T_MEM_READ | MLIR_T_MEM_WRITE | MLIR_T_ONE_RESULT)
 MLIR_DIALECT_END(WASMSSA)
 
 MLIR_DIALECT_BEGIN(WASMSTACK)
@@ -271,64 +271,64 @@ MLIR_DIALECT_BEGIN(WASMSTACK)
 // with the wasm bytecode opcodes. Produced by the wasmssa -> wasmstack
 // stackification pass and consumed by the binary emitter.
 // -------------------------------------------------------------------------
-MLIR_OP(OP_TYPE_WASMSTACK_FUNC, "wasmstack.func")
-MLIR_OP(OP_TYPE_WASMSTACK_IMPORT_FUNC, "wasmstack.import_func")
-MLIR_OP(OP_TYPE_WASMSTACK_IMPORT_GLOBAL, "wasmstack.import_global")
-MLIR_OP(OP_TYPE_WASMSTACK_LOCAL_GET, "wasmstack.local.get")
-MLIR_OP(OP_TYPE_WASMSTACK_LOCAL_SET, "wasmstack.local.set")
-MLIR_OP(OP_TYPE_WASMSTACK_LOCAL_TEE, "wasmstack.local.tee")
-MLIR_OP(OP_TYPE_WASMSTACK_CONST, "wasmstack.const")
-MLIR_OP(OP_TYPE_WASMSTACK_ADD, "wasmstack.add")
-MLIR_OP(OP_TYPE_WASMSTACK_SUB, "wasmstack.sub")
-MLIR_OP(OP_TYPE_WASMSTACK_BINOP, "wasmstack.binop")
-MLIR_OP(OP_TYPE_WASMSTACK_UNOP, "wasmstack.unop")
-MLIR_OP(OP_TYPE_WASMSTACK_LOAD, "wasmstack.load")
-MLIR_OP(OP_TYPE_WASMSTACK_STORE, "wasmstack.store")
-MLIR_OP(OP_TYPE_WASMSTACK_GLOBAL_GET, "wasmstack.global.get")
-MLIR_OP(OP_TYPE_WASMSTACK_GLOBAL_SET, "wasmstack.global.set")
-MLIR_OP(OP_TYPE_WASMSTACK_EXTEND_I32_S, "wasmstack.extend_i32_s")
-MLIR_OP(OP_TYPE_WASMSTACK_RETURN, "wasmstack.return")
-MLIR_OP(OP_TYPE_WASMSTACK_CALL, "wasmstack.call")
+MLIR_OP(OP_TYPE_WASMSTACK_FUNC, "wasmstack.func", MLIR_T_FUNCTION | MLIR_T_SYMBOL | MLIR_T_ISOLATED | MLIR_T_NO_TERMINATOR | MLIR_T_SINGLE_BLOCK | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_IMPORT_FUNC, "wasmstack.import_func", MLIR_T_SYMBOL | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_IMPORT_GLOBAL, "wasmstack.import_global", MLIR_T_SYMBOL | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_LOCAL_GET, "wasmstack.local.get", MLIR_T_MEM_READ | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_LOCAL_SET, "wasmstack.local.set", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_LOCAL_TEE, "wasmstack.local.tee", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_CONST, "wasmstack.const", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_ADD, "wasmstack.add", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_SUB, "wasmstack.sub", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_BINOP, "wasmstack.binop", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_UNOP, "wasmstack.unop", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_LOAD, "wasmstack.load", MLIR_T_MEM_READ | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_STORE, "wasmstack.store", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_GLOBAL_GET, "wasmstack.global.get", MLIR_T_MEM_READ | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_GLOBAL_SET, "wasmstack.global.set", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_EXTEND_I32_S, "wasmstack.extend_i32_s", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_RETURN, "wasmstack.return", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_CALL, "wasmstack.call", MLIR_T_CALL | MLIR_T_ZERO_RESULT)
 // Structured-CF + select.
-MLIR_OP(OP_TYPE_WASMSTACK_BLOCK, "wasmstack.block")
-MLIR_OP(OP_TYPE_WASMSTACK_LOOP, "wasmstack.loop")
-MLIR_OP(OP_TYPE_WASMSTACK_IF, "wasmstack.if")
-MLIR_OP(OP_TYPE_WASMSTACK_ELSE, "wasmstack.else")
-MLIR_OP(OP_TYPE_WASMSTACK_END, "wasmstack.end")
-MLIR_OP(OP_TYPE_WASMSTACK_BR, "wasmstack.br")
-MLIR_OP(OP_TYPE_WASMSTACK_BR_IF, "wasmstack.br_if")
+MLIR_OP(OP_TYPE_WASMSTACK_BLOCK, "wasmstack.block", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_LOOP, "wasmstack.loop", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_IF, "wasmstack.if", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_ELSE, "wasmstack.else", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_END, "wasmstack.end", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_BR, "wasmstack.br", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_BR_IF, "wasmstack.br_if", MLIR_T_ZERO_RESULT)
 // Terminator emitting wasm `unreachable` (0x00).
-MLIR_OP(OP_TYPE_WASMSTACK_UNREACHABLE, "wasmstack.unreachable")
-MLIR_OP(OP_TYPE_WASMSTACK_SELECT, "wasmstack.select")
-MLIR_OP(OP_TYPE_WASMSTACK_EQZ, "wasmstack.eqz")
-MLIR_OP(OP_TYPE_WASMSTACK_ADDRESSOF, "wasmstack.addressof")
-MLIR_OP(OP_TYPE_WASMSTACK_FUNC_ADDR, "wasmstack.func_addr")
-MLIR_OP(OP_TYPE_WASMSTACK_CALL_INDIRECT, "wasmstack.call_indirect")
+MLIR_OP(OP_TYPE_WASMSTACK_UNREACHABLE, "wasmstack.unreachable", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_SELECT, "wasmstack.select", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_EQZ, "wasmstack.eqz", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_ADDRESSOF, "wasmstack.addressof", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_FUNC_ADDR, "wasmstack.func_addr", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_CALL_INDIRECT, "wasmstack.call_indirect", MLIR_T_CALL | MLIR_T_ZERO_RESULT)
 // 1:1 wasmstack mirrors of OP_TYPE_WASMSSA_MEMORY_{SIZE,GROW}.
-MLIR_OP(OP_TYPE_WASMSTACK_MEMORY_SIZE, "wasmstack.memory_size")
-MLIR_OP(OP_TYPE_WASMSTACK_MEMORY_GROW, "wasmstack.memory_grow")
+MLIR_OP(OP_TYPE_WASMSTACK_MEMORY_SIZE, "wasmstack.memory_size", MLIR_T_MEM_READ | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_WASMSTACK_MEMORY_GROW, "wasmstack.memory_grow", MLIR_T_MEM_READ | MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)
 // `drop` (wasm 0x1a): pop one stack value, no result. Only used by
 // the wasm -> wasmstack lifter; the C-frontend wasmssa pipeline
 // never emits this op.
-MLIR_OP(OP_TYPE_WASMSTACK_DROP, "wasmstack.drop")
+MLIR_OP(OP_TYPE_WASMSTACK_DROP, "wasmstack.drop", MLIR_T_ZERO_RESULT)
 // `br_table`: emitted by clang for switch dispatch in linked
 // runtime objects. Carries a comma-separated list of target depths
 // plus a default depth.
-MLIR_OP(OP_TYPE_WASMSTACK_BR_TABLE, "wasmstack.br_table")
+MLIR_OP(OP_TYPE_WASMSTACK_BR_TABLE, "wasmstack.br_table", MLIR_T_ZERO_RESULT)
 // Module-level data segment lifted from a wasm DATA section. The
 // wasmstack -> wasmssa pass converts this into a wasmssa.import_global
 // sized appropriately.
-MLIR_OP(OP_TYPE_WASMSTACK_DATA_SEGMENT, "wasmstack.data_segment")
+MLIR_OP(OP_TYPE_WASMSTACK_DATA_SEGMENT, "wasmstack.data_segment", MLIR_T_ZERO_RESULT)
 // Module-level global declaration with an initial value. Lifted
 // from the wasm GLOBAL section. The backend allocates a static
 // i64 slot per global; only the initial value matters.
-MLIR_OP(OP_TYPE_WASMSTACK_GLOBAL_DECL, "wasmstack.global_decl")
+MLIR_OP(OP_TYPE_WASMSTACK_GLOBAL_DECL, "wasmstack.global_decl", MLIR_T_ZERO_RESULT)
 // Module-level table entry lifted from a wasm ELEM section. Carries
 // (slot, target) — i.e. table_slot_index N now contains a reference
 // to function `target`. The wasmstack -> wasmssa pass collects these
 // and emits a synthetic wasmssa.func "_tinyc_fnptr_init" containing
 // one wasmssa.func_addr per entry, so the lifter pre-pass sees them.
-MLIR_OP(OP_TYPE_WASMSTACK_FUNC_ADDR_DECL, "wasmstack.func_addr_decl")
+MLIR_OP(OP_TYPE_WASMSTACK_FUNC_ADDR_DECL, "wasmstack.func_addr_decl", MLIR_T_ZERO_RESULT)
 MLIR_DIALECT_END(WASMSTACK)
 
 MLIR_DIALECT_BEGIN(AARCH64)
@@ -340,79 +340,79 @@ MLIR_DIALECT_BEGIN(AARCH64)
 // and have its return value become the process exit code via a
 // direct `svc #0x80` Mach syscall (no `proc_exit` shim required).
 // -------------------------------------------------------------------------
-MLIR_OP(OP_TYPE_AARCH64_FUNC, "aarch64.func")
-MLIR_OP(OP_TYPE_AARCH64_MOVZ, "aarch64.movz")                // movz Wd|Xd, #imm16, LSL #(hw*16)
-MLIR_OP(OP_TYPE_AARCH64_MOVK, "aarch64.movk")                // movk Wd|Xd, #imm16, LSL #(hw*16)
-MLIR_OP(OP_TYPE_AARCH64_MOV_X, "aarch64.mov_x")              // mov Xd, Xn  (register move; X-form)
-MLIR_OP(OP_TYPE_AARCH64_BL, "aarch64.bl")                    // bl <symbol>  (branch-and-link, PC-relative)
-MLIR_OP(OP_TYPE_AARCH64_BLR, "aarch64.blr")                  // blr Xn  (indirect branch-and-link via register)
-MLIR_OP(OP_TYPE_AARCH64_SVC, "aarch64.svc")                  // svc #imm16
-MLIR_OP(OP_TYPE_AARCH64_RET, "aarch64.ret")                  // ret (== ret x30)
+MLIR_OP(OP_TYPE_AARCH64_FUNC, "aarch64.func", MLIR_T_FUNCTION | MLIR_T_SYMBOL | MLIR_T_ISOLATED | MLIR_T_NO_TERMINATOR | MLIR_T_SINGLE_BLOCK | MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_AARCH64_MOVZ, "aarch64.movz", MLIR_T_ZERO_RESULT)                // movz Wd|Xd, #imm16, LSL #(hw*16)
+MLIR_OP(OP_TYPE_AARCH64_MOVK, "aarch64.movk", MLIR_T_ZERO_RESULT)                // movk Wd|Xd, #imm16, LSL #(hw*16)
+MLIR_OP(OP_TYPE_AARCH64_MOV_X, "aarch64.mov_x", MLIR_T_ZERO_RESULT)              // mov Xd, Xn  (register move; X-form)
+MLIR_OP(OP_TYPE_AARCH64_BL, "aarch64.bl", MLIR_T_CALL | MLIR_T_ZERO_RESULT)                    // bl <symbol>  (branch-and-link, PC-relative)
+MLIR_OP(OP_TYPE_AARCH64_BLR, "aarch64.blr", MLIR_T_CALL | MLIR_T_ZERO_RESULT)                  // blr Xn  (indirect branch-and-link via register)
+MLIR_OP(OP_TYPE_AARCH64_SVC, "aarch64.svc", MLIR_T_ZERO_RESULT)                  // svc #imm16
+MLIR_OP(OP_TYPE_AARCH64_RET, "aarch64.ret", MLIR_T_ZERO_RESULT)                  // ret (== ret x30)
 // Arithmetic + memory + stack-frame ops added in the arith slice.
-MLIR_OP(OP_TYPE_AARCH64_ADD_IMM, "aarch64.add_imm")          // add Wd|Xd, Wn|Xn, #imm12 (LSL 0)
-MLIR_OP(OP_TYPE_AARCH64_SUB_IMM, "aarch64.sub_imm")          // sub Wd|Xd, Wn|Xn, #imm12 (LSL 0)
-MLIR_OP(OP_TYPE_AARCH64_ADD_REG, "aarch64.add_reg")          // add Wd|Xd, Wn|Xn, Wm|Xm
-MLIR_OP(OP_TYPE_AARCH64_SUB_REG, "aarch64.sub_reg")          // sub Wd|Xd, Wn|Xn, Wm|Xm
-MLIR_OP(OP_TYPE_AARCH64_MUL, "aarch64.mul")                  // mul Wd|Xd, Wn|Xn, Wm|Xm  (== madd ..., xzr)
-MLIR_OP(OP_TYPE_AARCH64_SDIV, "aarch64.sdiv")                // sdiv Wd|Xd, Wn|Xn, Wm|Xm
-MLIR_OP(OP_TYPE_AARCH64_UDIV, "aarch64.udiv")                // udiv Wd|Xd, Wn|Xn, Wm|Xm
-MLIR_OP(OP_TYPE_AARCH64_MSUB, "aarch64.msub")                // msub Wd, Wn, Wm, Wa  (used for srem/urem)
-MLIR_OP(OP_TYPE_AARCH64_AND_REG, "aarch64.and_reg")          // and  Wd|Xd, Wn|Xn, Wm|Xm
-MLIR_OP(OP_TYPE_AARCH64_AND_IMM, "aarch64.and_imm")          // and  Wd|Xd, Wn|Xn, #(1<<w)-1  (low-w-bits mask)
-MLIR_OP(OP_TYPE_AARCH64_ORR_REG, "aarch64.orr_reg")          // orr  Wd|Xd, Wn|Xn, Wm|Xm
-MLIR_OP(OP_TYPE_AARCH64_EOR_REG, "aarch64.eor_reg")          // eor  Wd|Xd, Wn|Xn, Wm|Xm
-MLIR_OP(OP_TYPE_AARCH64_LSL_REG, "aarch64.lsl_reg")          // lslv Wd|Xd, Wn|Xn, Wm|Xm
-MLIR_OP(OP_TYPE_AARCH64_LSR_REG, "aarch64.lsr_reg")          // lsrv Wd|Xd, Wn|Xn, Wm|Xm
-MLIR_OP(OP_TYPE_AARCH64_ASR_REG, "aarch64.asr_reg")          // asrv Wd|Xd, Wn|Xn, Wm|Xm
-MLIR_OP(OP_TYPE_AARCH64_LSL_IMM, "aarch64.lsl_imm")          // lsl Wd|Xd, Wn|Xn, #shift  (UBFM alias)
-MLIR_OP(OP_TYPE_AARCH64_LSR_IMM, "aarch64.lsr_imm")          // lsr Wd|Xd, Wn|Xn, #shift  (UBFM alias)
-MLIR_OP(OP_TYPE_AARCH64_ASR_IMM, "aarch64.asr_imm")          // asr Wd|Xd, Wn|Xn, #shift  (SBFM alias)
-MLIR_OP(OP_TYPE_AARCH64_SXTW, "aarch64.sxtw")                // sxtw Xd, Wn  (alias for SBFM)
-MLIR_OP(OP_TYPE_AARCH64_SXTB, "aarch64.sxtb")                // sxtb Wd|Xd, Wn  (sign-extend low byte)
-MLIR_OP(OP_TYPE_AARCH64_SXTH, "aarch64.sxth")                // sxth Wd|Xd, Wn  (sign-extend low half)
-MLIR_OP(OP_TYPE_AARCH64_UXTW, "aarch64.uxtw")                // mov  Wd, Wn  (== orr Wd, WZR, Wn ; zero-extends)
-MLIR_OP(OP_TYPE_AARCH64_LDR_W, "aarch64.ldr_w")              // ldr Wd, [Xn, #imm] (i32 unsigned-offset)
-MLIR_OP(OP_TYPE_AARCH64_STR_W, "aarch64.str_w")              // str Wd, [Xn, #imm] (i32 unsigned-offset)
-MLIR_OP(OP_TYPE_AARCH64_LDR_X, "aarch64.ldr_x")              // ldr Xd, [Xn, #imm] (i64 unsigned-offset)
-MLIR_OP(OP_TYPE_AARCH64_STR_X, "aarch64.str_x")              // str Xd, [Xn, #imm] (i64 unsigned-offset)
-MLIR_OP(OP_TYPE_AARCH64_STRB_IMM, "aarch64.strb_imm")        // strb Wt, [Xn, #imm12] (1-byte unscaled)
-MLIR_OP(OP_TYPE_AARCH64_LDRB_IMM, "aarch64.ldrb_imm")        // ldrb Wt, [Xn, #imm12] (1-byte zero-extend)
-MLIR_OP(OP_TYPE_AARCH64_LDR_W_REG, "aarch64.ldr_w_reg")      // ldr  Wt, [Xn, Xm, LSL #0]
-MLIR_OP(OP_TYPE_AARCH64_STR_W_REG, "aarch64.str_w_reg")      // str  Wt, [Xn, Xm, LSL #0]
-MLIR_OP(OP_TYPE_AARCH64_LDR_X_REG, "aarch64.ldr_x_reg")      // ldr  Xt, [Xn, Xm, LSL #0]
-MLIR_OP(OP_TYPE_AARCH64_STR_X_REG, "aarch64.str_x_reg")      // str  Xt, [Xn, Xm, LSL #0]
-MLIR_OP(OP_TYPE_AARCH64_LDRB_REG, "aarch64.ldrb_reg")        // ldrb Wt, [Xn, Xm, LSL #0]
-MLIR_OP(OP_TYPE_AARCH64_STRB_REG, "aarch64.strb_reg")        // strb Wt, [Xn, Xm, LSL #0]
-MLIR_OP(OP_TYPE_AARCH64_STRH_IMM, "aarch64.strh_imm")        // strh Wt, [Xn, #imm] (2-byte, imm scaled by 2)
-MLIR_OP(OP_TYPE_AARCH64_LDRH_IMM, "aarch64.ldrh_imm")        // ldrh Wt, [Xn, #imm] (2-byte zero-extend)
+MLIR_OP(OP_TYPE_AARCH64_ADD_IMM, "aarch64.add_imm", MLIR_T_ZERO_RESULT)          // add Wd|Xd, Wn|Xn, #imm12 (LSL 0)
+MLIR_OP(OP_TYPE_AARCH64_SUB_IMM, "aarch64.sub_imm", MLIR_T_ZERO_RESULT)          // sub Wd|Xd, Wn|Xn, #imm12 (LSL 0)
+MLIR_OP(OP_TYPE_AARCH64_ADD_REG, "aarch64.add_reg", MLIR_T_ZERO_RESULT)          // add Wd|Xd, Wn|Xn, Wm|Xm
+MLIR_OP(OP_TYPE_AARCH64_SUB_REG, "aarch64.sub_reg", MLIR_T_ZERO_RESULT)          // sub Wd|Xd, Wn|Xn, Wm|Xm
+MLIR_OP(OP_TYPE_AARCH64_MUL, "aarch64.mul", MLIR_T_ZERO_RESULT)                  // mul Wd|Xd, Wn|Xn, Wm|Xm  (== madd ..., xzr)
+MLIR_OP(OP_TYPE_AARCH64_SDIV, "aarch64.sdiv", MLIR_T_ZERO_RESULT)                // sdiv Wd|Xd, Wn|Xn, Wm|Xm
+MLIR_OP(OP_TYPE_AARCH64_UDIV, "aarch64.udiv", MLIR_T_ZERO_RESULT)                // udiv Wd|Xd, Wn|Xn, Wm|Xm
+MLIR_OP(OP_TYPE_AARCH64_MSUB, "aarch64.msub", MLIR_T_ZERO_RESULT)                // msub Wd, Wn, Wm, Wa  (used for srem/urem)
+MLIR_OP(OP_TYPE_AARCH64_AND_REG, "aarch64.and_reg", MLIR_T_ZERO_RESULT)          // and  Wd|Xd, Wn|Xn, Wm|Xm
+MLIR_OP(OP_TYPE_AARCH64_AND_IMM, "aarch64.and_imm", MLIR_T_ZERO_RESULT)          // and  Wd|Xd, Wn|Xn, #(1<<w)-1  (low-w-bits mask)
+MLIR_OP(OP_TYPE_AARCH64_ORR_REG, "aarch64.orr_reg", MLIR_T_ZERO_RESULT)          // orr  Wd|Xd, Wn|Xn, Wm|Xm
+MLIR_OP(OP_TYPE_AARCH64_EOR_REG, "aarch64.eor_reg", MLIR_T_ZERO_RESULT)          // eor  Wd|Xd, Wn|Xn, Wm|Xm
+MLIR_OP(OP_TYPE_AARCH64_LSL_REG, "aarch64.lsl_reg", MLIR_T_ZERO_RESULT)          // lslv Wd|Xd, Wn|Xn, Wm|Xm
+MLIR_OP(OP_TYPE_AARCH64_LSR_REG, "aarch64.lsr_reg", MLIR_T_ZERO_RESULT)          // lsrv Wd|Xd, Wn|Xn, Wm|Xm
+MLIR_OP(OP_TYPE_AARCH64_ASR_REG, "aarch64.asr_reg", MLIR_T_ZERO_RESULT)          // asrv Wd|Xd, Wn|Xn, Wm|Xm
+MLIR_OP(OP_TYPE_AARCH64_LSL_IMM, "aarch64.lsl_imm", MLIR_T_ZERO_RESULT)          // lsl Wd|Xd, Wn|Xn, #shift  (UBFM alias)
+MLIR_OP(OP_TYPE_AARCH64_LSR_IMM, "aarch64.lsr_imm", MLIR_T_ZERO_RESULT)          // lsr Wd|Xd, Wn|Xn, #shift  (UBFM alias)
+MLIR_OP(OP_TYPE_AARCH64_ASR_IMM, "aarch64.asr_imm", MLIR_T_ZERO_RESULT)          // asr Wd|Xd, Wn|Xn, #shift  (SBFM alias)
+MLIR_OP(OP_TYPE_AARCH64_SXTW, "aarch64.sxtw", MLIR_T_ZERO_RESULT)                // sxtw Xd, Wn  (alias for SBFM)
+MLIR_OP(OP_TYPE_AARCH64_SXTB, "aarch64.sxtb", MLIR_T_ZERO_RESULT)                // sxtb Wd|Xd, Wn  (sign-extend low byte)
+MLIR_OP(OP_TYPE_AARCH64_SXTH, "aarch64.sxth", MLIR_T_ZERO_RESULT)                // sxth Wd|Xd, Wn  (sign-extend low half)
+MLIR_OP(OP_TYPE_AARCH64_UXTW, "aarch64.uxtw", MLIR_T_ZERO_RESULT)                // mov  Wd, Wn  (== orr Wd, WZR, Wn ; zero-extends)
+MLIR_OP(OP_TYPE_AARCH64_LDR_W, "aarch64.ldr_w", MLIR_T_MEM_READ | MLIR_T_ZERO_RESULT)              // ldr Wd, [Xn, #imm] (i32 unsigned-offset)
+MLIR_OP(OP_TYPE_AARCH64_STR_W, "aarch64.str_w", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)              // str Wd, [Xn, #imm] (i32 unsigned-offset)
+MLIR_OP(OP_TYPE_AARCH64_LDR_X, "aarch64.ldr_x", MLIR_T_MEM_READ | MLIR_T_ZERO_RESULT)              // ldr Xd, [Xn, #imm] (i64 unsigned-offset)
+MLIR_OP(OP_TYPE_AARCH64_STR_X, "aarch64.str_x", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)              // str Xd, [Xn, #imm] (i64 unsigned-offset)
+MLIR_OP(OP_TYPE_AARCH64_STRB_IMM, "aarch64.strb_imm", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)        // strb Wt, [Xn, #imm12] (1-byte unscaled)
+MLIR_OP(OP_TYPE_AARCH64_LDRB_IMM, "aarch64.ldrb_imm", MLIR_T_MEM_READ | MLIR_T_ZERO_RESULT)        // ldrb Wt, [Xn, #imm12] (1-byte zero-extend)
+MLIR_OP(OP_TYPE_AARCH64_LDR_W_REG, "aarch64.ldr_w_reg", MLIR_T_MEM_READ | MLIR_T_ZERO_RESULT)      // ldr  Wt, [Xn, Xm, LSL #0]
+MLIR_OP(OP_TYPE_AARCH64_STR_W_REG, "aarch64.str_w_reg", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)      // str  Wt, [Xn, Xm, LSL #0]
+MLIR_OP(OP_TYPE_AARCH64_LDR_X_REG, "aarch64.ldr_x_reg", MLIR_T_MEM_READ | MLIR_T_ZERO_RESULT)      // ldr  Xt, [Xn, Xm, LSL #0]
+MLIR_OP(OP_TYPE_AARCH64_STR_X_REG, "aarch64.str_x_reg", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)      // str  Xt, [Xn, Xm, LSL #0]
+MLIR_OP(OP_TYPE_AARCH64_LDRB_REG, "aarch64.ldrb_reg", MLIR_T_MEM_READ | MLIR_T_ZERO_RESULT)        // ldrb Wt, [Xn, Xm, LSL #0]
+MLIR_OP(OP_TYPE_AARCH64_STRB_REG, "aarch64.strb_reg", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)        // strb Wt, [Xn, Xm, LSL #0]
+MLIR_OP(OP_TYPE_AARCH64_STRH_IMM, "aarch64.strh_imm", MLIR_T_MEM_WRITE | MLIR_T_ZERO_RESULT)        // strh Wt, [Xn, #imm] (2-byte, imm scaled by 2)
+MLIR_OP(OP_TYPE_AARCH64_LDRH_IMM, "aarch64.ldrh_imm", MLIR_T_MEM_READ | MLIR_T_ZERO_RESULT)        // ldrh Wt, [Xn, #imm] (2-byte zero-extend)
 // Pseudo: ADRP+ADD pair that resolves to the runtime base address
 // of one of the predeclared __DATA regions (vmctx, globals, linmem).
 // The macho backend patches the encoded PC-relative immediates
 // after layout. Body of the macho-backend tracks this list of
 // bases as part of the data-segment layout.
-MLIR_OP(OP_TYPE_AARCH64_ADRP_DATA, "aarch64.adrp_data")      // adrp Xd, page_of(<region>)
-MLIR_OP(OP_TYPE_AARCH64_ADD_DATA_LO, "aarch64.add_data_lo")  // add  Xd, Xn, #lo12(<region>)
+MLIR_OP(OP_TYPE_AARCH64_ADRP_DATA, "aarch64.adrp_data", MLIR_T_ZERO_RESULT)      // adrp Xd, page_of(<region>)
+MLIR_OP(OP_TYPE_AARCH64_ADD_DATA_LO, "aarch64.add_data_lo", MLIR_T_ZERO_RESULT)  // add  Xd, Xn, #lo12(<region>)
 // Function prologue/epilogue (modeled as an op pair so the dumb
 // backend can emit the exact instruction sequence; details of
 // sp/fp/lr handling baked into the encoder).
-MLIR_OP(OP_TYPE_AARCH64_PROLOGUE, "aarch64.prologue")
-MLIR_OP(OP_TYPE_AARCH64_EPILOGUE, "aarch64.epilogue")
+MLIR_OP(OP_TYPE_AARCH64_PROLOGUE, "aarch64.prologue", MLIR_T_ZERO_RESULT)
+MLIR_OP(OP_TYPE_AARCH64_EPILOGUE, "aarch64.epilogue", MLIR_T_ZERO_RESULT)
 // Comparison + condition-set. Used to materialise i32 booleans for
 // `llvm.icmp` and eqz results.
-MLIR_OP(OP_TYPE_AARCH64_CMP_REG, "aarch64.cmp_reg")          // cmp Wn, Wm  (== subs Wzr, Wn, Wm)
-MLIR_OP(OP_TYPE_AARCH64_CMP_IMM, "aarch64.cmp_imm")          // cmp Wn, #imm12  (== subs Wzr, Wn, #imm12)
-MLIR_OP(OP_TYPE_AARCH64_CSET, "aarch64.cset")                // cset Wd, COND (== csinc Wd, Wzr, Wzr, invert(COND))
+MLIR_OP(OP_TYPE_AARCH64_CMP_REG, "aarch64.cmp_reg", MLIR_T_ZERO_RESULT)          // cmp Wn, Wm  (== subs Wzr, Wn, Wm)
+MLIR_OP(OP_TYPE_AARCH64_CMP_IMM, "aarch64.cmp_imm", MLIR_T_ZERO_RESULT)          // cmp Wn, #imm12  (== subs Wzr, Wn, #imm12)
+MLIR_OP(OP_TYPE_AARCH64_CSET, "aarch64.cset", MLIR_T_ZERO_RESULT)                // cset Wd, COND (== csinc Wd, Wzr, Wzr, invert(COND))
 // Conditional select. `csel Wd, Wn, Wm, COND`. Used for llvm.select.
-MLIR_OP(OP_TYPE_AARCH64_CSEL, "aarch64.csel")
+MLIR_OP(OP_TYPE_AARCH64_CSEL, "aarch64.csel", MLIR_T_ZERO_RESULT)
 // Control-flow ops. `target` attribute is the symbolic label name.
 // The macho backend tracks all `aarch64.label` positions inside a
 // function and patches the branch immediates after layout.
-MLIR_OP(OP_TYPE_AARCH64_B, "aarch64.b")                      // b <label>     (PC-relative imm26)
-MLIR_OP(OP_TYPE_AARCH64_B_COND, "aarch64.b_cond")            // b.<cond> <label> (PC-relative imm19)
-MLIR_OP(OP_TYPE_AARCH64_CBZ, "aarch64.cbz")                  // cbz Wn, <label>
-MLIR_OP(OP_TYPE_AARCH64_CBNZ, "aarch64.cbnz")                // cbnz Wn, <label>
-MLIR_OP(OP_TYPE_AARCH64_LABEL, "aarch64.label")              // pseudo: marks a position; emits 0 bytes
-MLIR_OP(OP_TYPE_AARCH64_BRK, "aarch64.brk")                  // brk #imm16 (trap)
+MLIR_OP(OP_TYPE_AARCH64_B, "aarch64.b", MLIR_T_ZERO_RESULT)                      // b <label>     (PC-relative imm26)
+MLIR_OP(OP_TYPE_AARCH64_B_COND, "aarch64.b_cond", MLIR_T_ZERO_RESULT)            // b.<cond> <label> (PC-relative imm19)
+MLIR_OP(OP_TYPE_AARCH64_CBZ, "aarch64.cbz", MLIR_T_ZERO_RESULT)                  // cbz Wn, <label>
+MLIR_OP(OP_TYPE_AARCH64_CBNZ, "aarch64.cbnz", MLIR_T_ZERO_RESULT)                // cbnz Wn, <label>
+MLIR_OP(OP_TYPE_AARCH64_LABEL, "aarch64.label", MLIR_T_ZERO_RESULT)              // pseudo: marks a position; emits 0 bytes
+MLIR_OP(OP_TYPE_AARCH64_BRK, "aarch64.brk", MLIR_T_ZERO_RESULT)                  // brk #imm16 (trap)
 // Floating-point ops. Operand and result registers in attributes are
 // *V register* numbers (0..31) for the FP slots and GP register
 // numbers for the GP slots; the two register files are disjoint, so
@@ -421,17 +421,17 @@ MLIR_OP(OP_TYPE_AARCH64_BRK, "aarch64.brk")                  // brk #imm16 (trap
 // FMOV between a GP and an FP register; `dir_to_v` chooses direction
 // (true: GP→V, false: V→GP). `sf` selects W↔S (false) or X↔D (true).
 //   attrs: dir_to_v (bool), sf (bool), rd (i32), rn (i32).
-MLIR_OP(OP_TYPE_AARCH64_FMOV_GP_V, "aarch64.fmov_gp_v")
+MLIR_OP(OP_TYPE_AARCH64_FMOV_GP_V, "aarch64.fmov_gp_v", MLIR_T_ZERO_RESULT)
 // FADD/FSUB/FMUL/FDIV between two V regs into a V reg.
 //   attrs: kind (string: fadd|fsub|fmul|fdiv), fwidth (32|64),
 //          rd (i32), rn (i32), rm (i32).
-MLIR_OP(OP_TYPE_AARCH64_FP_BINOP, "aarch64.fp_binop")
+MLIR_OP(OP_TYPE_AARCH64_FP_BINOP, "aarch64.fp_binop", MLIR_T_ZERO_RESULT)
 // FNEG/FABS/FSQRT on a V reg → V reg.
 //   attrs: kind (string), fwidth, rd, rn.
-MLIR_OP(OP_TYPE_AARCH64_FP_UNOP, "aarch64.fp_unop")
+MLIR_OP(OP_TYPE_AARCH64_FP_UNOP, "aarch64.fp_unop", MLIR_T_ZERO_RESULT)
 // FCMP Sn/Dn, Sm/Dm — sets NZCV (no rd).
 //   attrs: fwidth (32|64), rn (i32), rm (i32).
-MLIR_OP(OP_TYPE_AARCH64_FCMP, "aarch64.fcmp")
+MLIR_OP(OP_TYPE_AARCH64_FCMP, "aarch64.fcmp", MLIR_T_ZERO_RESULT)
 // FP conversion family. `kind` is one of:
 //   "f2f"   — FP-to-FP precision change (FCVT Dd,Sn / FCVT Sd,Dn).
 //             rd and rn are both V registers.
@@ -441,13 +441,13 @@ MLIR_OP(OP_TYPE_AARCH64_FCMP, "aarch64.fcmp")
 // src_w / dst_w in {32, 64} pick S/W vs D/X.
 //   attrs: kind (string), src_w (i32), dst_w (i32), sign (bool),
 //          rd (i32), rn (i32).
-MLIR_OP(OP_TYPE_AARCH64_FP_CVT, "aarch64.fp_cvt")
+MLIR_OP(OP_TYPE_AARCH64_FP_CVT, "aarch64.fp_cvt", MLIR_T_ZERO_RESULT)
 // Module-level: a slice of bytes to overlay onto the linmem __DATA
 // section at the given offset. The macho backend gathers all of
 // these into a single file-backed section that precedes the
 // zero-fill portion of linmem.
 //   attrs: sym_name (string, debug), offset (i32), init_data (string).
-MLIR_OP(OP_TYPE_AARCH64_DATA_INIT, "aarch64.data_init")
+MLIR_OP(OP_TYPE_AARCH64_DATA_INIT, "aarch64.data_init", MLIR_T_ZERO_RESULT)
 MLIR_DIALECT_END(AARCH64)
 
 // -----------------------------------------------------------------------------

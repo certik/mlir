@@ -7,7 +7,6 @@
 // worklist erases zero-use pure ops and decrements their operands, re-queueing
 // the operand-defining ops (which may themselves become dead).
 #include "mlir_llvm_dce.h"
-#include "mlir_llvm_op_traits.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -67,7 +66,7 @@ typedef struct { DceItem *v; size_t n, cap; } DceList;
 // Queue `op` if it can be erased at all (one result, pure).
 static void dce_push(MLIR_Context *ctx, DceList *wl, MLIR_OpHandle op) {
     if (op == MLIR_INVALID_HANDLE) return;
-    if (MLIR_GetOpNumResults(ctx, op) != 1 || !llvm_op_is_pure(MLIR_GetOpType(ctx, op))) return;
+    if (MLIR_GetOpNumResults(ctx, op) != 1 || !MLIR_OpHasTrait(ctx, op, MLIR_T_PURE)) return;
     if (wl->n == wl->cap) {
         wl->cap = wl->cap ? wl->cap * 2 : 256;
         wl->v = (DceItem *)realloc(wl->v, wl->cap * sizeof(DceItem));

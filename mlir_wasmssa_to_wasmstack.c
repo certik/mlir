@@ -148,29 +148,6 @@ static MLIR_OpType ssa_to_stack(MLIR_OpType t) {
     }
 }
 
-// Whether the wasmssa op produces an SSA result.
-static bool ssa_op_has_result(MLIR_OpType t) {
-    switch (t) {
-    case OP_TYPE_WASMSSA_CONST:
-    case OP_TYPE_WASMSSA_ADD:
-    case OP_TYPE_WASMSSA_SUB:
-    case OP_TYPE_WASMSSA_BINOP:
-    case OP_TYPE_WASMSSA_UNOP:
-    case OP_TYPE_WASMSSA_LOAD:
-    case OP_TYPE_WASMSSA_GLOBAL_GET:
-    case OP_TYPE_WASMSSA_EXTEND_I32_S:
-    case OP_TYPE_WASMSSA_SELECT:
-    case OP_TYPE_WASMSSA_EQZ:
-    case OP_TYPE_WASMSSA_ADDRESSOF:
-    case OP_TYPE_WASMSSA_FUNC_ADDR:
-    case OP_TYPE_WASMSSA_MEMORY_SIZE:
-    case OP_TYPE_WASMSSA_MEMORY_GROW:
-        return true;
-    default:
-        return false;
-    }
-}
-
 // =============================================================================
 // Value->local map. Open-addressing hash table (key 0 == empty sentinel;
 // wasmssa value handles are always non-zero). Replaces an earlier linear scan

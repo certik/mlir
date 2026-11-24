@@ -57,9 +57,22 @@ static void op_type_table_add_alias(OpTypeTable *t, MLIR_OpType type, string nam
 // string rather than an array of strings: tinyC, which compiles this file
 // when self-hosting, accepts no pointer in a global initializer.
 static const char g_static_op_names[] =
-#define MLIR_OP(enumerator, name) name "\0"
+#define MLIR_OP(enumerator, name, traits) name "\0"
 #include "mlir_ops.def"
     ;
+
+// The trait bitmask of each static op type (dynamic types return MLIR_T_NONE).
+// Uses a switch rather than a global initializer array because tinyC's
+// self-host parser does not accept bitwise expressions in global array inits;
+// optimizing compilers lower this dense switch to a static lookup table.
+MLIR_OpTraits MLIR_GetOpTypeTraits(MLIR_OpType type) {
+    switch (type) {
+#define MLIR_OP(enumerator, name, traits) case enumerator: return (MLIR_OpTraits)(traits);
+#include "mlir_ops.def"
+    default:
+        return MLIR_T_NONE;
+    }
+}
 
 void op_type_table_init(OpTypeTable *t, Arena *arena) {
     t->arena = arena;

@@ -7,7 +7,6 @@
 // pass rewrites operands itself (an explicit value->value replacement map + a
 // final sweep) and computes its own use counts for dead-code elimination.
 #include "mlir_llvm_arith_gvn.h"
-#include "mlir_llvm_op_traits.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -140,16 +139,6 @@ static bool ag_is_arith(MLIR_Context *ctx, MLIR_OpHandle op) {
     }
 }
 
-// Commutative ops whose operand order is canonicalized in the key.
-static bool ag_is_commutative(MLIR_Context *ctx, MLIR_OpHandle op) {
-    switch (MLIR_GetOpType(ctx, op)) {
-    case OP_TYPE_LLVM_ADD: case OP_TYPE_LLVM_MUL:
-    case OP_TYPE_LLVM_AND: case OP_TYPE_LLVM_OR: case OP_TYPE_LLVM_XOR:
-        return true;
-    default: return false;
-    }
-}
-
 static MLIR_ValueHandle ag_canon(AgMap *repl, MLIR_ValueHandle v) {
     int64_t r; int guard = 0;
     while (agmap_get(repl, (uintptr_t)v, &r) && (MLIR_ValueHandle)r != v && guard++ < 64)
@@ -209,7 +198,7 @@ static void ag_build_key(AgKB *k, MLIR_Context *ctx, AgMap *repl, MLIR_OpHandle 
     agkb_u64(k, (uint64_t)MLIR_GetOpResultType(ctx, op, 0));
     size_t no = MLIR_GetOpNumOperands(ctx, op);
     agkb_u64(k, no);
-    if (no == 2 && ag_is_commutative(ctx, op)) {
+    if (no == 2 && MLIR_OpHasTrait(ctx, op, MLIR_T_COMMUTATIVE)) {
         // Encode each operand to a scratch buffer, emit in sorted byte order so
         // `a op b` and `b op a` hash identically.
         AgKB t0, t1; agkb_init(&t0); agkb_init(&t1);
@@ -317,7 +306,7 @@ static void ag_dce(MLIR_Context *ctx, MLIR_RegionHandle region,
         MLIR_OpHandle op = wl[--nwl];
         if (op == MLIR_INVALID_HANDLE) continue;
         if (agmap_get(&dead, (uintptr_t)op, NULL)) continue;   // erased
-        if (MLIR_GetOpNumResults(ctx, op) != 1 || !llvm_op_is_pure(MLIR_GetOpType(ctx, op))) continue;
+        if (MLIR_GetOpNumResults(ctx, op) != 1 || !MLIR_OpHasTrait(ctx, op, MLIR_T_PURE)) continue;
         int64_t cnt = 0; agmap_get(&uses, (uintptr_t)MLIR_GetOpResult(ctx, op, 0), &cnt);
         if (cnt != 0) continue;
         size_t non = MLIR_GetOpNumOperands(ctx, op);

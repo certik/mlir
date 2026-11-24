@@ -8,7 +8,6 @@
 // computes its own use counts for the dead-code elimination of detached
 // address chains.
 #include "mlir_llvm_load_cse.h"
-#include "mlir_llvm_op_traits.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -133,27 +132,6 @@ static void kb_u64(KB *k, uint64_t v) { kb_bytes(k, (char *)&v, sizeof(v)); }
 // ===========================================================================
 // Op classification.
 // ===========================================================================
-// No memory / control side effect: never clobbers an available load. Not
-// value-numbered itself (CSE-ing the linmem address chain would break the
-// addressing-mode fusion the backend performs); only recognised so it does
-// not bump the memory generation. The float arithmetic and conversions are
-// pure (llvm_op_is_pure) but still count as clobbers here, as they always
-// have: forwarding loads across them changes the generated code (fewer
-// loads, but more spills), so that is left to a separate change.
-static bool lc_is_pure(MLIR_Context *ctx, MLIR_OpHandle op) {
-    MLIR_OpType ty = MLIR_GetOpType(ctx, op);
-    switch (ty) {
-    case OP_TYPE_LLVM_FADD: case OP_TYPE_LLVM_FSUB:
-    case OP_TYPE_LLVM_FMUL: case OP_TYPE_LLVM_FDIV: case OP_TYPE_LLVM_FNEG:
-    case OP_TYPE_LLVM_FPEXT: case OP_TYPE_LLVM_FPTRUNC:
-    case OP_TYPE_LLVM_SITOFP: case OP_TYPE_LLVM_UITOFP:
-    case OP_TYPE_LLVM_FPTOSI: case OP_TYPE_LLVM_FPTOUI:
-        return false;
-    default:
-        return llvm_op_is_pure(ty);
-    }
-}
-
 // Pure, deterministic value op recursed through when structurally keying a
 // load address, and removable by DCE once its address chain is detached.
 static bool lc_is_transparent(MLIR_Context *ctx, MLIR_OpHandle op) {
@@ -183,7 +161,7 @@ static bool lc_op_bumps_gen(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_OpHandle t
     if (op == term) return false;
     if (lc_is_load(ctx, op)) return MLIR_GetOpNumResults(ctx, op) != 1;
     if (lc_is_store(ctx, op)) return true;
-    return !lc_is_pure(ctx, op);
+    return !MLIR_OpHasTrait(ctx, op, MLIR_T_PURE);
 }
 
 // Follow the replacement map to the canonical value (flat: replacement targets
@@ -463,7 +441,7 @@ static void lc_process_block(Walk *w, size_t bi) {
             }
             continue;
         }
-        if (!lc_is_pure(c->ctx, op)) w->gen++;                  // call / unknown: clobber
+        if (!MLIR_OpHasTrait(c->ctx, op, MLIR_T_PURE)) w->gen++;  // call / unknown: clobber
     }
 }
 

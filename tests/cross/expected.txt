@@ -45,3 +45,4 @@ dynamic types are per context: yes
 3000 ops, results and uses: yes
 successor operands appended: yes
 successor operands replaced, uses moved: yes
+op traits and verify: yes
