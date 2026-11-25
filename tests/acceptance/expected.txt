@@ -1,0 +1,6 @@
+1. rsqrt f32 loop reduction: yes
+2. rsqrt f64x8 AVX-512: yes
+3. rsqrt skipped on arm64/pow: yes
+4. reductions unknown lane3: yes
+5. reductions zero lane3: yes
+6. reductions skipped without AVX: yes
