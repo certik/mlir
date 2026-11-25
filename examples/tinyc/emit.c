@@ -6075,10 +6075,8 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
     MLIR_ValueHandle *flat_args = arena_new_array(e->arena, MLIR_ValueHandle,
                                                   sig->n_flat_in ? sig->n_flat_in : 1);
     for (size_t i = 0; i < sig->n_flat_in; i++) {
-        string nm = format(e->arena, str_lit("%arg{}"), (int64_t)i);
-        flat_args[i] = MLIR_CreateValueBlockArg(e->ctx, nm, (uint32_t)i,
-                                                sig->flat_in_tys[i], eloc(e, 0));
-        MLIR_AppendBlockArg(e->ctx, entry, flat_args[i]);
+        flat_args[i] = MLIR_AddBlockArgument(e->ctx, entry,
+                                             sig->flat_in_tys[i], eloc(e, 0));
     }
 
     MLIR_BlockHandle saved = e->cur_block;

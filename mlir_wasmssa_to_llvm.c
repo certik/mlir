@@ -1800,9 +1800,8 @@ static MLIR_OpHandle lower_func(MLIR_Context *ctx, MLIR_OpHandle src,
         (n_params ? n_params : 1) * sizeof(MLIR_ValueHandle));
     for (size_t i = 0; i < n_params; i++) {
         MLIR_TypeHandle ty = vt_to_llvm(ctx, local_vt[i]);
-        MLIR_ValueHandle da = MLIR_CreateValueBlockArg(ctx, (string){0},
-            (uint32_t)i, ty, MLIR_CreateLocationUnknown(ctx, (string){0}));
-        MLIR_AppendBlockArg(ctx, entry, da);
+        MLIR_ValueHandle da = MLIR_AddBlockArgument(ctx, entry, ty,
+            MLIR_CreateLocationUnknown(ctx, (string){0}));
         param_args[i] = da;
         if (i < n_src_args)
             vmap_set(&vmap, MLIR_GetBlockArg(ctx, sblk, i), da);
@@ -2064,14 +2063,12 @@ static bool synth_dispatchers(MLIR_Context *ctx, MLIR_BlockHandle out_body,
         size_t n_dp = n_pp + 1;
         MLIR_ValueHandle pvals[16];
         MLIR_TypeHandle i32 = MLIR_CreateTypeInteger(ctx, 32, true);
-        pvals[0] = MLIR_CreateValueBlockArg(ctx, (string){0}, 0, i32,
+        pvals[0] = MLIR_AddBlockArgument(ctx, entry, i32,
             MLIR_CreateLocationUnknown(ctx, (string){0}));
-        MLIR_AppendBlockArg(ctx, entry, pvals[0]);
         for (size_t k = 0; k < n_pp; k++) {
             MLIR_TypeHandle ty = carrier_for_byte(ctx, type_byte_at(ppt, k));
-            pvals[k + 1] = MLIR_CreateValueBlockArg(ctx, (string){0},
-                (uint32_t)(k + 1), ty, MLIR_CreateLocationUnknown(ctx, (string){0}));
-            MLIR_AppendBlockArg(ctx, entry, pvals[k + 1]);
+            pvals[k + 1] = MLIR_AddBlockArgument(ctx, entry, ty,
+                MLIR_CreateLocationUnknown(ctx, (string){0}));
         }
         MLIR_TypeHandle rty = has_result
             ? carrier_for_byte(ctx, type_byte_at(prt, 0)) : MLIR_INVALID_HANDLE;

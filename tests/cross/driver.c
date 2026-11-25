@@ -271,12 +271,8 @@ int app_main(void) {
         MLIR_AppendRegionBlock(ctx, r, entry);
         MLIR_AppendRegionBlock(ctx, r, tgt);
 
-        MLIR_ValueHandle defv = MLIR_CreateValueBlockArg(
-            ctx, str_lit("%d"), 0, i32_ty, MLIR_INVALID_HANDLE);
-        MLIR_AppendBlockArg(ctx, entry, defv);
-        MLIR_ValueHandle replv = MLIR_CreateValueBlockArg(
-            ctx, str_lit("%r"), 1, i32_ty, MLIR_INVALID_HANDLE);
-        MLIR_AppendBlockArg(ctx, entry, replv);
+        MLIR_ValueHandle defv = MLIR_AddBlockArgument(ctx, entry, i32_ty, MLIR_INVALID_HANDLE);
+        MLIR_ValueHandle replv = MLIR_AddBlockArgument(ctx, entry, i32_ty, MLIR_INVALID_HANDLE);
 
         // Build cf.br tgt(defv : i32) — zero regular operands, one successor
         // with one successor-operand.
@@ -316,12 +312,8 @@ int app_main(void) {
     MLIR_RegionHandle func_region = MLIR_CreateRegion(ctx);
     MLIR_BlockHandle  func_block  = MLIR_CreateBlock(ctx);
 
-    MLIR_ValueHandle arg0 = MLIR_CreateValueBlockArg(
-        ctx, str_lit("%arg0"), 0, i32_ty, MLIR_INVALID_HANDLE);
-    MLIR_AppendBlockArg(ctx, func_block, arg0);
-    MLIR_ValueHandle arg1 = MLIR_CreateValueBlockArg(
-        ctx, str_lit("%arg1"), 1, i32_ty, MLIR_INVALID_HANDLE);
-    MLIR_AppendBlockArg(ctx, func_block, arg1);
+    MLIR_ValueHandle arg0 = MLIR_AddBlockArgument(ctx, func_block, i32_ty, MLIR_INVALID_HANDLE);
+    MLIR_ValueHandle arg1 = MLIR_AddBlockArgument(ctx, func_block, i32_ty, MLIR_INVALID_HANDLE);
 
     // %0 = arith.addi(%arg0, %arg1) -> i32
     // func.return(%0)

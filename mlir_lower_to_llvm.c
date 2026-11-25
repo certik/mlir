@@ -606,9 +606,7 @@ static bool lower_scf_if(LowerState *st, MLIR_OpHandle op,
     for (size_t i = 0; i < nr; i++) {
         MLIR_ValueHandle old = MLIR_GetOpResult(st->ctx, op, i);
         MLIR_TypeHandle ty = MLIR_GetValueType(st->ctx, old);
-        cont_args[i] = MLIR_CreateValueBlockArg(
-            st->ctx, str_lit(""), (uint32_t)i, ty, loc);
-        MLIR_AppendBlockArg(st->ctx, cont, cont_args[i]);
+        cont_args[i] = MLIR_AddBlockArgument(st->ctx, cont, ty, loc);
         MLIR_ReplaceAllUsesOfValue(st->ctx, old, cont_args[i]);
     }
 

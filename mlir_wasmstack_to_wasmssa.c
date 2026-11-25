@@ -1330,10 +1330,8 @@ static MLIR_OpHandle lift_func(MLIR_Context *ctx, Arena *arena,
     }
     for (size_t i = 0; i < np; i++) {
         MLIR_TypeHandle ty = vt_to_type(ctx, params[i]);
-        MLIR_ValueHandle a = MLIR_CreateValueBlockArg(ctx, (string){0},
-            (uint32_t)i, ty, MLIR_CreateLocationUnknown(ctx, (string){0}));
-        MLIR_AppendBlockArg(ctx, entry, a);
-        param_args[i] = a;
+        param_args[i] = MLIR_AddBlockArgument(ctx, entry, ty,
+            MLIR_CreateLocationUnknown(ctx, (string){0}));
     }
 
     FnCtx F = {0};

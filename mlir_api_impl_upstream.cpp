@@ -3,7 +3,10 @@
 // All structural queries (getOperand/getResult/getAttrs/getRegions/...)
 // go directly through the upstream MLIR C++ API. MLIR_Context is a subclass
 // of mlir::MLIRContext and owns every piece of auxiliary state (there are no
-// statics). The main one is a map from `mlir::Value` to a `ValueBox`, which
+// Zero-copy handle representation: ops, blocks, regions, values, types,
+// attributes, and locations are raw MLIR pointers (or opaque pointers).
+// The only side tables are for optional parser/printer register names and
+// per-op user-attribute snapshots.
 // exists because:
 //   1. The C API creates `MLIR_ValueHandle` for a future block arg
 //      *before* the block exists (CreateValueBlockArg, then later
@@ -24,7 +27,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <deque>
 #include <unordered_map>
 
 #include "mlir/IR/Block.h"
@@ -138,86 +140,13 @@ mlir::DialectRegistry contextRegistry() {
     return registry;
 }
 
-// One ValueBox per logical mlir::Value. Provides a stable handle and
-// (for block args) carries the register name that upstream doesn't
-// track natively. Owned by the context (MLIR_Context::boxes).
-struct ValueBox {
-    mlir::Value v;                  // bound after AppendBlockArg / Op create
-    std::string name;               // register name; empty for op results
-    mlir::Type pendingType;         // used until AppendBlockArg binds v
-    mlir::Location pending_loc;
-    bool deferredBlockArg = false;
-    explicit ValueBox(mlir::MLIRContext *m) : pending_loc(mlir::UnknownLoc::get(m)) {}
-};
-
-// Small LRU cache for MLIR_GetBlockOp / MLIR_GetBlockNumOps. mlir::Block
-// stores its ops in an intrusive linked list, so `std::advance(begin(), i)`
-// is O(i) and a natural `for (i=0; i<n; i++) GetBlockOp(b, i)` loop is
-// O(n^2). The cache lets sequential and locally-bounded accesses
-// (forward by one, backward by one, small jumps near the last position)
-// run in amortized O(1) by walking `Operation::getNextNode()` from the
-// last position instead of restarting at `begin()`.
-//
-// Multi-slot, not single-slot: the wasm lowering walks the IR recursively
-// (walk_block -> walk_op -> walk_block -> ...) AND interleaves iteration
-// over one block with mutations of another block (read from `mb`, append
-// to `out_body`). A single slot — or coarse-grained "nuke everything"
-// invalidation — would be clobbered on every mutation. NUM_SLOTS is sized
-// to comfortably exceed any nesting depth we hit in practice.
-//
-// Invalidation is per-block: each API entry point that mutates the op list
-// of block B (append, insert, erase, splice) clears only B's slot. Erase
-// also clears any slot whose cached `op` pointer matches the erased op
-// (so it never dangles past the erase). Upstream passes that run on the
-// IR (MLIR_LowerToLLVMDialect*, MLIR_LiftCfToScf) call `resetAll()` to
-// nuke everything, because they can arbitrarily rewrite the IR.
-struct BlockOpIterSlot {
-    mlir::Block *block = nullptr;
-    size_t idx = 0;
-    mlir::Operation *op = nullptr;
-    size_t cached_size = SIZE_MAX;  // SIZE_MAX = unknown; valid otherwise
-};
-struct BlockOpIterCache {
-    static constexpr size_t NUM_SLOTS = 16;
-    BlockOpIterSlot slots[NUM_SLOTS];
-    size_t next_evict = 0;  // round-robin replacement.
-
-    BlockOpIterSlot *find(mlir::Block *b) {
-        for (size_t i = 0; i < NUM_SLOTS; i++) {
-            if (slots[i].block == b && slots[i].op != nullptr) return &slots[i];
-        }
-        return nullptr;
-    }
-    BlockOpIterSlot *findOrEvict(mlir::Block *b) {
-        if (auto *s = find(b)) return s;
-        for (size_t i = 0; i < NUM_SLOTS; i++) {
-            if (slots[i].block == nullptr) {
-                slots[i] = {};
-                return &slots[i];
-            }
-        }
-        auto *s = &slots[next_evict];
-        next_evict = (next_evict + 1) % NUM_SLOTS;
-        *s = {};
-        return s;
-    }
-    void invalidateBlock(mlir::Block *b) {
-        if (!b) return;
-        for (size_t i = 0; i < NUM_SLOTS; i++) {
-            if (slots[i].block == b) slots[i] = {};
-        }
-    }
-    void invalidateOp(mlir::Operation *op) {
-        if (!op) return;
-        for (size_t i = 0; i < NUM_SLOTS; i++) {
-            if (slots[i].op == op) slots[i] = {};
-        }
-    }
-    void resetAll() {
-        for (size_t i = 0; i < NUM_SLOTS; i++) slots[i] = {};
-        next_evict = 0;
-    }
-};
+// Value handles are zero-copy: mlir::Value::getAsOpaquePointer() directly.
+inline MLIR_ValueHandle valH(mlir::Value v) {
+    return reinterpret_cast<MLIR_ValueHandle>(v.getAsOpaquePointer());
+}
+inline mlir::Value valF(MLIR_ValueHandle h) {
+    return mlir::Value::getFromOpaquePointer(reinterpret_cast<void *>(h));
+}
 } // namespace
 
 // The context. It is the mlir::MLIRContext itself (a subclass), so the
@@ -233,9 +162,9 @@ struct MLIR_Context : public mlir::MLIRContext {
     MLIR_DiagnosticHandler diagFn = nullptr;
     void *diagUser = nullptr;
 
-    // Value handles: a ValueBox per mlir::Value (stable addresses).
-    std::deque<ValueBox> boxes;
-    std::unordered_map<const void *, ValueBox *> valueIndex;
+    // Optional register names for parser/printer (MLIR_SetValueRegisterName).
+    // Empty for all compiler/pass pipelines.
+    llvm::DenseMap<const void *, std::string> valueNames;
     // Per-op snapshot of the named attributes the user supplied via
     // MLIR_CreateOp / MLIR_SetOpAttr. Used by
     // MLIR_GetOpNumAttributes / MLIR_GetOpAttribute so that
@@ -250,7 +179,6 @@ struct MLIR_Context : public mlir::MLIRContext {
     llvm::DenseMap<const void *, MLIR_AttrKey> keyOfName;
     // MLIR_GetOpAttr's i32 `case_values` conversions (caseValuesAsI32).
     llvm::DenseMap<const void *, const void *> caseValuesI32;
-    BlockOpIterCache blockOps;
     // Op types (doc/mlir_api_design.md section 2.5). opTypeTable holds the
     // names of the static and dynamic types (in `persistent`); opNames[t] is
     // the mlir::OperationName of type t (as an opaque pointer), so creation
@@ -287,22 +215,6 @@ namespace {
 
 inline MLIR_Context *ctxOf(mlir::MLIRContext *m) { return static_cast<MLIR_Context *>(m); }
 inline MLIR_Context *ctxOf(mlir::Operation *op) { return ctxOf(op->getContext()); }
-
-ValueBox *newBox(MLIR_Context *c) {
-    c->boxes.emplace_back(c);
-    return &c->boxes.back();
-}
-
-ValueBox *boxFor(MLIR_Context *c, mlir::Value v) {
-    auto &m = c->valueIndex;
-    auto it = m.find(v.getAsOpaquePointer());
-    if (it != m.end()) return it->second;
-    auto *box = newBox(c);
-    box->v = v;
-    m[v.getAsOpaquePointer()] = box;
-    return box;
-}
-ValueBox *boxFor(mlir::Value v) { return boxFor(ctxOf(v.getContext()), v); }
 
 // An attribute handle is the mlir::Attribute's storage pointer: attributes
 // are uniqued in the MLIRContext, so equal values are equal handles.
@@ -342,15 +254,15 @@ MLIR_AttrKey keyOf(MLIR_Context *c, mlir::StringAttr name) {
 // they are destroyed: the allocator may reuse their addresses for new ops,
 // and a stale entry would then describe the wrong op.
 void forgetErasedOp(MLIR_Context *c, mlir::Operation *op) {
+    bool has_names = !c->valueNames.empty();
     op->walk([&](mlir::Operation *o) {
         c->opUserAttrs.erase(o);
-        c->blockOps.invalidateOp(o);
-        for (mlir::Value r : o->getResults()) c->valueIndex.erase(r.getAsOpaquePointer());
-        for (mlir::Region &region : o->getRegions())
-            for (mlir::Block &b : region) {
-                c->blockOps.invalidateBlock(&b);
-                for (mlir::Value a : b.getArguments()) c->valueIndex.erase(a.getAsOpaquePointer());
-            }
+        if (has_names) {
+            for (mlir::Value r : o->getResults()) c->valueNames.erase(r.getAsOpaquePointer());
+            for (mlir::Region &region : o->getRegions())
+                for (mlir::Block &b : region)
+                    for (mlir::Value a : b.getArguments()) c->valueNames.erase(a.getAsOpaquePointer());
+        }
     });
 }
 
@@ -379,7 +291,7 @@ static void checkOwnBlock(MLIR_Context *ctx, MLIR_BlockHandle h, const char *fn)
 }
 static void checkOwnValue(MLIR_Context *ctx, MLIR_ValueHandle h, const char *fn) {
     if (h == MLIR_INVALID_HANDLE) return;
-    mlir::Value v = F<ValueBox>(h)->v;
+    mlir::Value v = valF(h);
     if (v) API_CHECK(v.getContext() == ctx, fn, "the value belongs to another context");
 }
 #define CHECK_OWN_OP(c, h, fn) checkOwnOp((c), (h), (fn))
@@ -665,10 +577,6 @@ extern "C" void MLIR_AppendBlockOp(MLIR_Context *cctx, MLIR_BlockHandle b,
     auto *target = F<mlir::Block>(b);
     auto *o = F<mlir::Operation>(op);
     API_CHECK(!o->getBlock(), "MLIR_AppendBlockOp", "op is already in a block (use MLIR_MoveOpToBlockEnd)");
-    auto &cache = cctx->blockOps;
-    // op may be migrating from another block — invalidate its old slot.
-    if (auto *src = o->getBlock()) cache.invalidateBlock(src);
-    cache.invalidateBlock(target);
     cctx->rootOps.erase(o);
     target->push_back(o);
 }
@@ -678,9 +586,6 @@ extern "C" void MLIR_InsertBlockOpAtIndex(MLIR_Context *cctx,
     auto *block = F<mlir::Block>(b);
     auto *o = F<mlir::Operation>(op);
     API_CHECK(!o->getBlock(), "MLIR_InsertBlockOpAtIndex", "op is already in a block (detach it first)");
-    auto &cache = cctx->blockOps;
-    if (auto *src = o->getBlock()) cache.invalidateBlock(src);
-    cache.invalidateBlock(block);
     cctx->rootOps.erase(o);
     auto &ops = block->getOperations();
     size_t n = 0;
@@ -692,21 +597,15 @@ extern "C" void MLIR_InsertBlockOpAtIndex(MLIR_Context *cctx,
 extern "C" void MLIR_AppendBlockArg(MLIR_Context *cctx, MLIR_BlockHandle bh,
                                      MLIR_ValueHandle vh) {
     auto *block = F<mlir::Block>(bh);
-    auto *box = F<ValueBox>(vh);
-    if (!box->deferredBlockArg) {
-        std::fprintf(stderr, "AppendBlockArg: handle is not a deferred block arg\n");
-        std::abort();
+    mlir::Value oldVal = valF(vh);
+    auto realArg = block->addArgument(oldVal.getType(), oldVal.getLoc());
+    auto it = cctx->valueNames.find(oldVal.getAsOpaquePointer());
+    if (it != cctx->valueNames.end()) {
+        std::string nm = std::move(it->second);
+        cctx->valueNames.erase(it);
+        cctx->valueNames[realArg.getAsOpaquePointer()] = std::move(nm);
     }
-    auto realArg = block->addArgument(box->pendingType, box->pending_loc);
-    // If we have a stand-in arg from a hidden holder block, redirect uses.
-    if (box->v) {
-        auto oldOpaque = box->v.getAsOpaquePointer();
-        cctx->valueIndex.erase(oldOpaque);
-        box->v.replaceAllUsesWith(realArg);
-    }
-    box->v = realArg;
-    box->deferredBlockArg = false;
-    cctx->valueIndex[realArg.getAsOpaquePointer()] = box;
+    oldVal.replaceAllUsesWith(realArg);
 }
 
 // -----------------------------------------------------------------------------
@@ -738,7 +637,7 @@ extern "C" MLIR_OpHandle MLIR_CreateOpFromSpec(MLIR_Context *cctx, const MLIR_Op
     uint32_t n_regular = spec->n_operands - n_succ_ops;
 
     for (uint32_t i = 0; i < spec->n_operands; i++) {
-        state.addOperands(F<ValueBox>(spec->operands[i])->v);
+        state.addOperands(valF(spec->operands[i]));
     }
     for (uint32_t i = 0; i < spec->n_results; i++) {
         state.addTypes(typeF(spec->result_types[i]));
@@ -817,7 +716,6 @@ extern "C" void MLIR_InsertOpBefore(MLIR_Context *cctx, MLIR_BlockHandle bh,
     auto *block = F<mlir::Block>(bh);
     auto *op = F<mlir::Operation>(oh);
     if (op->getBlock()) {
-        cctx->blockOps.invalidateBlock(op->getBlock());
         op->remove();
     } else {
         cctx->rootOps.erase(op);
@@ -831,7 +729,6 @@ extern "C" void MLIR_InsertOpBefore(MLIR_Context *cctx, MLIR_BlockHandle bh,
                   "before op is not in target block");
         block->getOperations().insert(mlir::Block::iterator(bef), op);
     }
-    cctx->blockOps.invalidateBlock(block);
 }
 
 extern "C" MLIR_Builder MLIR_BuilderAfter(MLIR_Context *cctx, MLIR_OpHandle oh) {
@@ -893,8 +790,13 @@ extern "C" void MLIR_SetOpTrailingComment(MLIR_Context *ctx, MLIR_OpHandle h, st
 
 extern "C" void MLIR_SetValueRegisterName(MLIR_Context *ctx, MLIR_ValueHandle h, string name) {
     CHECK_OWN_VALUE(ctx, h, "MLIR_SetValueRegisterName");
-    auto *box = F<ValueBox>(h);
-    box->name.assign(name.str, name.size);
+    if (h == MLIR_INVALID_HANDLE) return;
+    mlir::Value v = valF(h);
+    if (name.size == 0) {
+        ctx->valueNames.erase(v.getAsOpaquePointer());
+    } else {
+        ctx->valueNames[v.getAsOpaquePointer()].assign(name.str, name.size);
+    }
 }
 
 extern "C" void MLIR_SetOpAttr(MLIR_Context *cctx, MLIR_OpHandle oh, MLIR_AttrKey key,
@@ -948,6 +850,7 @@ extern "C" string MLIR_GetOpTrailingComment(MLIR_Context *ctx, MLIR_OpHandle h) 
 extern "C" size_t MLIR_GetOpNumOperands(MLIR_Context *ctx, MLIR_OpHandle h) {
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpNumOperands");
     auto *op = F<mlir::Operation>(h);
+    if (op->getNumSuccessors() == 0) return op->getNumOperands();
     if (auto br = mlir::dyn_cast<mlir::BranchOpInterface>(op)) {
         // Exclude successor operands; expose only "regular" (non-forwarded)
         // operands so the API matches the native backend convention.
@@ -963,8 +866,7 @@ extern "C" MLIR_ValueHandle MLIR_GetOpOperand(MLIR_Context *ctx, MLIR_OpHandle h
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpOperand");
     API_CHECK(h != MLIR_INVALID_HANDLE, "MLIR_GetOpOperand", "op handle is NULL");
     API_CHECK(i < MLIR_GetOpNumOperands(ctx, h), "MLIR_GetOpOperand", "index out of range");
-    auto *op = F<mlir::Operation>(h);
-    return H(boxFor(ctxOf(op), op->getOperand(i)));
+    return valH(F<mlir::Operation>(h)->getOperand(i));
 }
 extern "C" size_t MLIR_GetOpNumResults(MLIR_Context *ctx, MLIR_OpHandle h) {
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpNumResults");
@@ -974,8 +876,7 @@ extern "C" MLIR_ValueHandle MLIR_GetOpResult(MLIR_Context *ctx, MLIR_OpHandle h,
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpResult");
     API_CHECK(h != MLIR_INVALID_HANDLE, "MLIR_GetOpResult", "op handle is NULL");
     API_CHECK(i < F<mlir::Operation>(h)->getNumResults(), "MLIR_GetOpResult", "index out of range");
-    auto *op = F<mlir::Operation>(h);
-    return H(boxFor(ctxOf(op), op->getResult(i)));
+    return valH(F<mlir::Operation>(h)->getResult(i));
 }
 extern "C" size_t MLIR_GetOpNumResultTypes(MLIR_Context *ctx, MLIR_OpHandle h) {
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpNumResultTypes");
@@ -1129,7 +1030,7 @@ extern "C" MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_Context *ctx, MLIR_O
     auto *op = F<mlir::Operation>(h);
     if (auto br = mlir::dyn_cast<mlir::BranchOpInterface>(op)) {
         auto ops = br.getSuccessorOperands(s);
-        return H(boxFor(ctxOf(op), ops[i]));
+        return valH(ops[i]);
     }
     return MLIR_INVALID_HANDLE;
 }
@@ -1202,7 +1103,7 @@ extern "C" MLIR_BlockHandle MLIR_GetBlockPrev(MLIR_Context *ctx, MLIR_BlockHandl
 
 extern "C" MLIR_UseHandle MLIR_GetValueFirstUse(MLIR_Context *ctx, MLIR_ValueHandle vh) {
     CHECK_OWN_VALUE(ctx, vh, "MLIR_GetValueFirstUse");
-    mlir::Value v = F<ValueBox>(vh)->v;
+    mlir::Value v = valF(vh);
     if (!v || v.use_empty()) return MLIR_INVALID_HANDLE;
     return H(&*v.use_begin());
 }
@@ -1225,13 +1126,13 @@ extern "C" size_t MLIR_GetUseOperandIndex(MLIR_Context *, MLIR_UseHandle use) {
 
 extern "C" bool MLIR_ValueHasOneUse(MLIR_Context *ctx, MLIR_ValueHandle vh) {
     CHECK_OWN_VALUE(ctx, vh, "MLIR_ValueHasOneUse");
-    mlir::Value v = F<ValueBox>(vh)->v;
+    mlir::Value v = valF(vh);
     return v && v.hasOneUse();
 }
 
 extern "C" bool MLIR_IsValueUnused(MLIR_Context *ctx, MLIR_ValueHandle vh) {
     CHECK_OWN_VALUE(ctx, vh, "MLIR_IsValueUnused");
-    mlir::Value v = F<ValueBox>(vh)->v;
+    mlir::Value v = valF(vh);
     return !v || v.use_empty();
 }
 
@@ -1290,76 +1191,15 @@ extern "C" MLIR_BlockHandle MLIR_GetRegionBlock(MLIR_Context *ctx, MLIR_RegionHa
 extern "C" size_t MLIR_GetBlockNumOps(MLIR_Context *ctx, MLIR_BlockHandle h) {
     CHECK_OWN_BLOCK(ctx, h, "MLIR_GetBlockNumOps");
     auto *b = F<mlir::Block>(h);
-    if (b->empty()) return 0;
-    auto &cache = ctxOf(&b->front())->blockOps;
-    if (auto *s = cache.find(b)) {
-        if (s->cached_size != SIZE_MAX) return s->cached_size;
-        size_t n = std::distance(b->begin(), b->end());
-        s->cached_size = n;
-        return n;
-    }
     return std::distance(b->begin(), b->end());
 }
 extern "C" MLIR_OpHandle MLIR_GetBlockOp(MLIR_Context *ctx, MLIR_BlockHandle h, size_t i) {
     CHECK_OWN_BLOCK(ctx, h, "MLIR_GetBlockOp");
     auto *b = F<mlir::Block>(h);
     API_CHECK(!b->empty(), "MLIR_GetBlockOp", "index out of range");
-    auto &cache = ctxOf(&b->front())->blockOps;
-    if (auto *s = cache.find(b)) {
-        if (i == s->idx) {
-            return H(s->op);
-        }
-        if (i == s->idx + 1) {
-            auto *nx = s->op->getNextNode();
-            if (nx) {
-                s->idx = i;
-                s->op = nx;
-                return H(nx);
-            }
-        }
-        if (s->idx > 0 && i + 1 == s->idx) {
-            auto *pv = s->op->getPrevNode();
-            if (pv) {
-                s->idx = i;
-                s->op = pv;
-                return H(pv);
-            }
-        }
-        // Small jumps near the cached position: walk via getNextNode /
-        // getPrevNode from the cache instead of restarting from begin().
-        // The 64-step cap keeps worst-case behavior bounded if the caller
-        // does scattered access.
-        if (i > s->idx && i - s->idx < 64) {
-            auto *cur = s->op;
-            size_t delta = i - s->idx;
-            for (size_t k = 0; k < delta && cur; k++) cur = cur->getNextNode();
-            if (cur) {
-                s->idx = i;
-                s->op = cur;
-                return H(cur);
-            }
-        }
-        if (i < s->idx && s->idx - i < 64) {
-            auto *cur = s->op;
-            size_t delta = s->idx - i;
-            for (size_t k = 0; k < delta && cur; k++) cur = cur->getPrevNode();
-            if (cur) {
-                s->idx = i;
-                s->op = cur;
-                return H(cur);
-            }
-        }
-    }
-    // Fallback: scan from begin and seed the cache.
     auto it = b->begin();
     std::advance(it, i);
-    mlir::Operation *op = &*it;
-    auto *s = cache.findOrEvict(b);
-    s->block = b;
-    s->idx = i;
-    s->op = op;
-    s->cached_size = SIZE_MAX;  // unknown; will be filled by NumOps if called
-    return H(op);
+    return H(&*it);
 }
 extern "C" size_t MLIR_GetBlockNumArgs(MLIR_Context *ctx, MLIR_BlockHandle h) {
     CHECK_OWN_BLOCK(ctx, h, "MLIR_GetBlockNumArgs");
@@ -1368,7 +1208,7 @@ extern "C" size_t MLIR_GetBlockNumArgs(MLIR_Context *ctx, MLIR_BlockHandle h) {
 extern "C" MLIR_ValueHandle MLIR_GetBlockArg(MLIR_Context *ctx, MLIR_BlockHandle h, size_t i) {
     CHECK_OWN_BLOCK(ctx, h, "MLIR_GetBlockArg");
     API_CHECK(i < F<mlir::Block>(h)->getNumArguments(), "MLIR_GetBlockArg", "index out of range");
-    return H(boxFor(F<mlir::Block>(h)->getArgument(i)));
+    return valH(F<mlir::Block>(h)->getArgument(i));
 }
 
 extern "C" size_t MLIR_GetBlockIndex(MLIR_Context *ctx, MLIR_BlockHandle h) {
@@ -1391,44 +1231,43 @@ extern "C" size_t MLIR_GetBlockIndex(MLIR_Context *ctx, MLIR_BlockHandle h) {
 extern "C" MLIR_ValueHandle MLIR_CreateValueBlockArg(
     MLIR_Context *cctx, string register_name, uint32_t /*idx*/,
     MLIR_TypeHandle type, MLIR_LocationHandle loc) {
-    auto *box = newBox(cctx);
-    box->name.assign(register_name.str, register_name.size);
-    box->pendingType = typeF(type);
-    if (loc != MLIR_INVALID_HANDLE) box->pending_loc = locF(loc);
-    box->deferredBlockArg = true;
-    // Eagerly bind to a hidden holder block so the value can be used as an
-    // operand before AppendBlockArg moves it onto the real block. Upstream
-    // MLIR doesn't allow moving a BlockArgument between blocks, so on
-    // AppendBlockArg we add a fresh arg to the real block and RAUW.
+    mlir::Type ty = (type != MLIR_INVALID_HANDLE)
+        ? typeF(type) : mlir::Type(mlir::NoneType::get(cctx));
+    mlir::Location mloc = (loc != MLIR_INVALID_HANDLE)
+        ? locF(loc) : mlir::Location(mlir::UnknownLoc::get(cctx));
     if (!cctx->holderBlock) cctx->holderBlock = new mlir::Block();
-    auto arg = cctx->holderBlock->addArgument(box->pendingType, box->pending_loc);
-    box->v = arg;
-    cctx->valueIndex[arg.getAsOpaquePointer()] = box;
-    return H(box);
+    auto arg = cctx->holderBlock->addArgument(ty, mloc);
+    if (register_name.size > 0) {
+        cctx->valueNames[arg.getAsOpaquePointer()].assign(register_name.str, register_name.size);
+    }
+    return valH(arg);
 }
 extern "C" MLIR_ValueKind MLIR_GetValueKind(MLIR_Context *ctx, MLIR_ValueHandle h) {
     CHECK_OWN_VALUE(ctx, h, "MLIR_GetValueKind");
-    auto v = F<ValueBox>(h)->v;
+    auto v = valF(h);
     return llvm::isa<mlir::BlockArgument>(v) ? MLIR_VALUE_BLOCK_ARG : MLIR_VALUE_OP_RESULT;
 }
 extern "C" MLIR_TypeHandle MLIR_GetValueType(MLIR_Context *ctx, MLIR_ValueHandle h) {
     CHECK_OWN_VALUE(ctx, h, "MLIR_GetValueType");
-    return typeH(F<ValueBox>(h)->v.getType());
+    return typeH(valF(h).getType());
 }
 extern "C" string MLIR_GetValueRegisterName(MLIR_Context *ctx, MLIR_ValueHandle h) {
     CHECK_OWN_VALUE(ctx, h, "MLIR_GetValueRegisterName");
-    return mkRefString(F<ValueBox>(h)->name);
+    if (h == MLIR_INVALID_HANDLE || ctx->valueNames.empty()) return str_lit("");
+    auto it = ctx->valueNames.find(valF(h).getAsOpaquePointer());
+    if (it == ctx->valueNames.end()) return str_lit("");
+    return mkRefString(it->second);
 }
 extern "C" uint32_t MLIR_GetValueResultIndex(MLIR_Context *ctx, MLIR_ValueHandle h) {
     CHECK_OWN_VALUE(ctx, h, "MLIR_GetValueResultIndex");
-    auto v = F<ValueBox>(h)->v;
+    auto v = valF(h);
     if (auto ba = llvm::dyn_cast<mlir::BlockArgument>(v)) return ba.getArgNumber();
     if (auto opr = llvm::dyn_cast<mlir::OpResult>(v)) return opr.getResultNumber();
     return 0;
 }
 extern "C" MLIR_OpHandle MLIR_GetValueDefiningOp(MLIR_Context *ctx, MLIR_ValueHandle h) {
     CHECK_OWN_VALUE(ctx, h, "MLIR_GetValueDefiningOp");
-    auto v = F<ValueBox>(h)->v;
+    auto v = valF(h);
     if (auto opr = llvm::dyn_cast<mlir::OpResult>(v)) return H(opr.getOwner());
     return MLIR_INVALID_HANDLE;
 }
@@ -2310,7 +2149,7 @@ extern "C" string MLIR_GetLocationName(MLIR_Context *ctx, MLIR_LocationHandle h)
 extern "C" MLIR_LocationHandle MLIR_GetValueLocation(MLIR_Context *ctx, MLIR_ValueHandle h) {
     CHECK_OWN_VALUE(ctx, h, "MLIR_GetValueLocation");
     if (h == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
-    auto v = F<ValueBox>(h)->v;
+    auto v = valF(h);
     if (!v) return MLIR_INVALID_HANDLE;
     return locH(v.getLoc());
 }
@@ -2340,11 +2179,12 @@ extern "C" string MLIR_GetOpTypeName(MLIR_Context *ctx, MLIR_OpType type) {
 extern "C" void MLIR_ReplaceAllUsesOfValue(MLIR_Context *cctx,
                                            MLIR_ValueHandle old_h,
                                            MLIR_ValueHandle new_h) {
+    (void)cctx;
     if (old_h == MLIR_INVALID_HANDLE || new_h == MLIR_INVALID_HANDLE) return;
-    auto *oldBox = F<ValueBox>(old_h);
-    auto *newBox = F<ValueBox>(new_h);
-    if (!oldBox->v || !newBox->v) return;
-    oldBox->v.replaceAllUsesWith(newBox->v);
+    mlir::Value oldV = valF(old_h);
+    mlir::Value newV = valF(new_h);
+    if (!oldV || !newV) return;
+    oldV.replaceAllUsesWith(newV);
 }
 
 namespace {
@@ -2391,11 +2231,6 @@ extern "C" void MLIR_EraseOp(MLIR_Context *cctx, MLIR_OpHandle op_h) {
     API_CHECK(!opUsedOutside(op, [op](mlir::Operation *owner) { return op->isAncestor(owner); }),
               "MLIR_EraseOp", "a value or block defined in the op or nested in it is used outside it");
 #endif
-    if (auto *blk = op->getBlock()) cctx->blockOps.invalidateBlock(blk);
-    // Drop every per-op entry (attribute snapshots, cached block positions,
-    // value boxes) of the op and of the ops nested in it: once they are
-    // erased the allocator may reuse their addresses for new ops, and a
-    // stale snapshot would shadow the new op's real attributes.
     forgetErasedOp(cctx, op);
     cctx->rootOps.erase(op);
     op->erase();
@@ -2407,8 +2242,6 @@ extern "C" void MLIR_DetachOp(MLIR_Context *cctx, MLIR_OpHandle op_h) {
     auto *op = F<mlir::Operation>(op_h);
     auto *blk = op->getBlock();
     if (!blk) return;
-    cctx->blockOps.invalidateBlock(blk);
-    cctx->blockOps.invalidateOp(op);
     op->remove();
     cctx->rootOps.insert(op);
 }
@@ -2419,8 +2252,6 @@ extern "C" MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *cctx,
     if (op_h == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
     auto *op = F<mlir::Operation>(op_h);
     if (idx >= op->getNumRegions()) return MLIR_INVALID_HANDLE;
-    auto &cache = cctx->blockOps;
-    for (auto &b : op->getRegion(idx)) cache.invalidateBlock(&b);
     auto *out = new mlir::Region();
     out->takeBody(op->getRegion(idx));
     cctx->rootRegions.insert(out);
@@ -2448,10 +2279,7 @@ extern "C" void MLIR_MoveOpToBlockEnd(MLIR_Context *cctx, MLIR_OpHandle op_h,
     if (op_h == MLIR_INVALID_HANDLE || dest_h == MLIR_INVALID_HANDLE) return;
     auto *op = F<mlir::Operation>(op_h);
     auto *dest = F<mlir::Block>(dest_h);
-    auto &cache = cctx->blockOps;
-    cache.invalidateBlock(dest);
-    if (auto *src = op->getBlock()) {
-        cache.invalidateBlock(src);
+    if (op->getBlock()) {
         op->moveBefore(dest, dest->end());
     } else {
         // Operation::moveBefore needs a current block.
@@ -2477,12 +2305,13 @@ extern "C" void MLIR_MoveBlockToRegionEnd(MLIR_Context *cctx, MLIR_BlockHandle b
 
 extern "C" void MLIR_SetOpOperand(MLIR_Context *cctx, MLIR_OpHandle op_h,
                                   size_t idx, MLIR_ValueHandle v_h) {
-    if (op_h == MLIR_INVALID_HANDLE) return;
+    (void)cctx;
+    if (op_h == MLIR_INVALID_HANDLE || v_h == MLIR_INVALID_HANDLE) return;
     auto *op = F<mlir::Operation>(op_h);
     if (idx >= op->getNumOperands()) return;
-    auto *box = F<ValueBox>(v_h);
-    if (!box || !box->v) return;
-    op->setOperand(static_cast<unsigned>(idx), box->v);
+    mlir::Value v = valF(v_h);
+    if (!v) return;
+    op->setOperand(static_cast<unsigned>(idx), v);
 }
 
 extern "C" void MLIR_SetOpSuccessor(MLIR_Context *cctx, MLIR_OpHandle op_h,
@@ -2508,8 +2337,7 @@ extern "C" void MLIR_SetOpSuccessorOperands(MLIR_Context *cctx, MLIR_OpHandle op
     vals.reserve(n);
     for (size_t i = 0; i < n; i++) {
         if (values && values[i] != MLIR_INVALID_HANDLE) {
-            auto *box = F<ValueBox>(values[i]);
-            vals.push_back(box ? box->v : mlir::Value());
+            vals.push_back(valF(values[i]));
         } else {
             vals.push_back(mlir::Value());
         }
@@ -2526,7 +2354,6 @@ extern "C" void MLIR_EraseBlock(MLIR_Context *cctx, MLIR_BlockHandle blk_h) {
         API_CHECK(blk->findAncestorOpInBlock(*u.getOwner()) != nullptr, "MLIR_EraseBlock",
                   "the block is still a successor of a block outside it");
 #endif
-    cctx->blockOps.invalidateBlock(blk);
     if (blk->getParent() != nullptr) {
         // Detach without freeing contained ops/args; the context owns it now.
         blk->getParent()->getBlocks().remove(blk);
@@ -2633,7 +2460,7 @@ extern "C" MLIR_ValueHandle MLIR_AddBlockArgument(MLIR_Context *cctx,
         ? mlir::Location(mlir::UnknownLoc::get(cctx))
         : locF(loc_h);
     auto arg = blk->addArgument(ty, loc);
-    return H(boxFor(cctx, arg));
+    return valH(arg);
 }
 
 extern "C" void MLIR_EraseBlockArguments(MLIR_Context *cctx,
@@ -2641,13 +2468,12 @@ extern "C" void MLIR_EraseBlockArguments(MLIR_Context *cctx,
                                           size_t start, size_t count) {
     if (blk_h == MLIR_INVALID_HANDLE || count == 0) return;
     auto *blk = F<mlir::Block>(blk_h);
-    // Clear cached ValueBox entries for the args being erased before
-    // they are destroyed.
-    auto &idx = cctx->valueIndex;
-    for (size_t i = 0; i < count; i++) {
-        unsigned argIdx = static_cast<unsigned>(start + i);
-        if (argIdx >= blk->getNumArguments()) break;
-        idx.erase(blk->getArgument(argIdx).getAsOpaquePointer());
+    if (!cctx->valueNames.empty()) {
+        for (size_t i = 0; i < count; i++) {
+            unsigned argIdx = static_cast<unsigned>(start + i);
+            if (argIdx >= blk->getNumArguments()) break;
+            cctx->valueNames.erase(blk->getArgument(argIdx).getAsOpaquePointer());
+        }
     }
     blk->eraseArguments(static_cast<unsigned>(start),
                         static_cast<unsigned>(count));
@@ -2656,18 +2482,19 @@ extern "C" void MLIR_EraseBlockArguments(MLIR_Context *cctx,
 extern "C" MLIR_BlockHandle MLIR_GetValueParentBlock(MLIR_Context *ctx, MLIR_ValueHandle v_h) {
     CHECK_OWN_VALUE(ctx, v_h, "MLIR_GetValueParentBlock");
     if (v_h == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
-    auto *box = F<ValueBox>(v_h);
-    if (!box->v) return MLIR_INVALID_HANDLE;
-    auto *blk = box->v.getParentBlock();
+    mlir::Value v = valF(v_h);
+    if (!v) return MLIR_INVALID_HANDLE;
+    auto *blk = v.getParentBlock();
     return blk ? H(blk) : MLIR_INVALID_HANDLE;
 }
 
 extern "C" size_t MLIR_GetValueNumUses(MLIR_Context *cctx, MLIR_ValueHandle v_h) {
+    (void)cctx;
     if (v_h == MLIR_INVALID_HANDLE) return 0;
-    auto *box = F<ValueBox>(v_h);
-    if (!box->v) return 0;
+    mlir::Value v = valF(v_h);
+    if (!v) return 0;
     size_t n = 0;
-    for (auto &u : box->v.getUses()) { (void)u; ++n; }
+    for (auto &u : v.getUses()) { (void)u; ++n; }
     return n;
 }
 
@@ -2675,11 +2502,12 @@ extern "C" MLIR_OpHandle MLIR_GetValueUseOwner(MLIR_Context *cctx,
                                                 MLIR_ValueHandle v_h,
                                                 size_t idx,
                                                 size_t *out_operand_idx) {
+    (void)cctx;
     if (v_h == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
-    auto *box = F<ValueBox>(v_h);
-    if (!box->v) return MLIR_INVALID_HANDLE;
+    mlir::Value v = valF(v_h);
+    if (!v) return MLIR_INVALID_HANDLE;
     size_t i = 0;
-    for (auto &u : box->v.getUses()) {
+    for (auto &u : v.getUses()) {
         if (i == idx) {
             if (out_operand_idx) *out_operand_idx = u.getOperandNumber();
             return H(u.getOwner());
@@ -2693,27 +2521,26 @@ extern "C" MLIR_OpHandle MLIR_GetValueUseOwner(MLIR_Context *cctx,
 extern "C" void MLIR_AppendOpSuccessorOperand(MLIR_Context *cctx, MLIR_OpHandle op_h,
                                                size_t succ_idx,
                                                MLIR_ValueHandle v_h) {
+    (void)cctx;
     if (op_h == MLIR_INVALID_HANDLE || v_h == MLIR_INVALID_HANDLE) return;
     auto *op = F<mlir::Operation>(op_h);
     auto branch = mlir::dyn_cast<mlir::BranchOpInterface>(op);
     if (!branch) return;
     if (succ_idx >= op->getNumSuccessors()) return;
-    auto *box = F<ValueBox>(v_h);
-    if (!box || !box->v) return;
+    mlir::Value v = valF(v_h);
+    if (!v) return;
     mlir::SuccessorOperands sops =
         branch.getSuccessorOperands(static_cast<unsigned>(succ_idx));
     mlir::MutableOperandRange mut = sops.getMutableForwardedOperands();
-    mut.append({box->v});
+    mut.append({v});
 }
 
 extern "C" void MLIR_SpliceBlockOps(MLIR_Context *cctx, MLIR_BlockHandle dst_h,
                                      MLIR_BlockHandle src_h) {
+    (void)cctx;
     if (dst_h == MLIR_INVALID_HANDLE || src_h == MLIR_INVALID_HANDLE) return;
     auto *dst = F<mlir::Block>(dst_h);
     auto *src = F<mlir::Block>(src_h);
-    auto &cache = cctx->blockOps;
-    cache.invalidateBlock(dst);
-    cache.invalidateBlock(src);
     dst->getOperations().splice(dst->end(), src->getOperations());
 }
 
@@ -2820,7 +2647,6 @@ static void liftWasmImportExportAttrsToPassthrough(mlir::ModuleOp module) {
 
 extern "C" bool MLIR_LowerToLLVMDialectUpstream(MLIR_Context *ctx,
                                                 MLIR_OpHandle module_h) {
-    ctx->blockOps.resetAll();
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
@@ -2988,7 +2814,6 @@ extern "C" bool MLIR_LiftCfToScfNative(MLIR_Context *ctx,
 extern "C" bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module_h,
                                  const MLIR_LiftCfToScfOptions *options) {
     if (module_h == MLIR_INVALID_HANDLE) return false;
-    ctx->blockOps.resetAll();
     auto *op = F<mlir::Operation>(module_h);
     auto module = llvm::dyn_cast<mlir::ModuleOp>(op);
     if (!module) {
@@ -3018,7 +2843,6 @@ extern "C" bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module_h,
     // output bit-identical between the `native` and `upstream_api` configs
     // for the simple cases we test, and functionally correct for all of
     // tinyc's self-host.
-    ctx->blockOps.resetAll();
     return MLIR_LiftCfToScfNative(ctx, module_h, options);
 }
 
