@@ -49,3 +49,4 @@ op traits and verify: yes
 op builder API: yes
 traversal and CFG info: yes
 llvm completeness: yes
+pass pipeline API: yes

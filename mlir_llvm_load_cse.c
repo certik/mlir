@@ -8,6 +8,7 @@
 // computes its own use counts for the dead-code elimination of detached
 // address chains.
 #include "mlir_llvm_load_cse.h"
+#include "mlir_passes.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -671,4 +672,22 @@ void mlir_llvm_load_cse(MLIR_Context *ctx, MLIR_OpHandle module) {
         if (MLIR_GetOpNumRegions(ctx, op) == 0) continue;
         lc_run_region(ctx, MLIR_GetOpRegion(ctx, op, 0));
     }
+}
+
+bool mlir_pass_load_cse_run(MLIR_PassContext *pc, MLIR_OpHandle fn, void *state) {
+    (void)state;
+    MLIR_OpType ft = MLIR_GetOpType(pc->ctx, fn);
+    if (ft != OP_TYPE_FUNC_FUNC && ft != OP_TYPE_LLVM_FUNC) return true;
+    if (MLIR_GetOpNumRegions(pc->ctx, fn) == 0) return true;
+    lc_run_region(pc->ctx, MLIR_GetOpRegion(pc->ctx, fn, 0));
+    return true;
+}
+
+MLIR_Pass MLIR_PassLoadCSE(void) {
+    MLIR_Pass p;
+    p.name = str_lit("llvm-load-cse");
+    p.anchor = MLIR_ANCHOR_FUNCTION;
+    p.run = mlir_pass_load_cse_run;
+    p.state = NULL;
+    return p;
 }

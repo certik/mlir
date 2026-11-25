@@ -3248,3 +3248,16 @@ static MLIR_OpHandle create_cf_switch_in_block(MLIR_Context *ctx, Arena *arena,
     MLIR_AppendBlockOp(ctx, in_block, op);
     return op;
 }
+
+bool mlir_pass_lift_cf_to_scf_run(MLIR_PassContext *pc, MLIR_OpHandle mod, void *state) {
+    return MLIR_LiftCfToScf(pc->ctx, mod, (const MLIR_LiftCfToScfOptions *)state);
+}
+
+MLIR_Pass MLIR_PassLiftCfToScf(const MLIR_LiftCfToScfOptions *options) {
+    MLIR_Pass p;
+    p.name = str_lit("lift-cf-to-scf");
+    p.anchor = MLIR_ANCHOR_MODULE;
+    p.run = mlir_pass_lift_cf_to_scf_run;
+    p.state = (void *)options;
+    return p;
+}

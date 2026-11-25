@@ -794,3 +794,17 @@ bool MLIR_LowerToLLVMDialect(MLIR_Context *ctx, MLIR_OpHandle module) {
     walk_block(&st, st.module_body);
     return true;
 }
+
+bool mlir_pass_lower_to_llvm_run(MLIR_PassContext *pc, MLIR_OpHandle mod, void *state) {
+    (void)state;
+    return MLIR_LowerToLLVMDialect(pc->ctx, mod);
+}
+
+MLIR_Pass MLIR_PassLowerToLLVMDialect(void) {
+    MLIR_Pass p;
+    p.name = str_lit("lower-to-llvm");
+    p.anchor = MLIR_ANCHOR_MODULE;
+    p.run = mlir_pass_lower_to_llvm_run;
+    p.state = NULL;
+    return p;
+}

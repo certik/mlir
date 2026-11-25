@@ -12,6 +12,7 @@
 // it.
 
 #include "mlir_llvm_mem2reg.h"
+#include "mlir_passes.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1023,4 +1024,24 @@ void mlir_llvm_mem2reg(MLIR_Context *ctx, MLIR_OpHandle module) {
         sroa_region(ctx, body);
         l2r_promote_region(ctx, body);
     }
+}
+
+bool mlir_pass_mem2reg_run(MLIR_PassContext *pc, MLIR_OpHandle fn, void *state) {
+    (void)state;
+    MLIR_OpType ft = MLIR_GetOpType(pc->ctx, fn);
+    if (ft != OP_TYPE_FUNC_FUNC && ft != OP_TYPE_LLVM_FUNC) return true;
+    if (MLIR_GetOpNumRegions(pc->ctx, fn) == 0) return true;
+    MLIR_RegionHandle body = MLIR_GetOpRegion(pc->ctx, fn, 0);
+    sroa_region(pc->ctx, body);
+    l2r_promote_region(pc->ctx, body);
+    return true;
+}
+
+MLIR_Pass MLIR_PassMem2Reg(void) {
+    MLIR_Pass p;
+    p.name = str_lit("llvm-mem2reg");
+    p.anchor = MLIR_ANCHOR_FUNCTION;
+    p.run = mlir_pass_mem2reg_run;
+    p.state = NULL;
+    return p;
 }

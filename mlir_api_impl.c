@@ -13,6 +13,8 @@
 #include "mlir_parser.h"
 #include "mlir_printer.h"
 #include "mlir_passes.h"
+#include "mlir_generic_printer.h"
+#include <platform/platform.h>
 #include "mlir_api_upstream.h"
 #include <string.h>
 #include <stdarg.h>
@@ -3472,6 +3474,90 @@ bool MLIR_VerifyOp(MLIR_Context *ctx, MLIR_OpHandle op) {
 bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module,
                       const MLIR_LiftCfToScfOptions *options) {
     return MLIR_LiftCfToScfNative(ctx, module, options);
+}
+
+static bool pass_should_print_after(string print_after, string name) {
+    if (print_after.size == 0) return false;
+    return str_eq(print_after, str_lit("*")) || str_eq(print_after, name);
+}
+
+bool MLIR_RunPasses(MLIR_Context *ctx, MLIR_OpHandle module,
+                    const MLIR_Pass *passes, size_t n,
+                    const MLIR_PipelineOptions *opts) {
+    API_CHECK(ctx != NULL, "MLIR_RunPasses", "context is NULL");
+    API_CHECK(module != MLIR_INVALID_HANDLE, "MLIR_RunPasses", "module handle is NULL");
+    if (n == 0) return true;
+
+    const MLIR_TargetInfo *target = opts ? opts->target : NULL;
+    bool verify_each = opts ? opts->verify_each : false;
+    bool timing = opts ? opts->timing : false;
+    string print_after = opts ? opts->print_after : str_lit("");
+
+    Arena *scratch = arena_create(256 * 1024);
+    arena_pos_t scratch_base = arena_get_pos(scratch);
+
+    MLIR_PassContext pc;
+    pc.ctx = ctx;
+    pc.target = target;
+    pc.scratch = scratch;
+
+    bool all_ok = true;
+    for (size_t i = 0; i < n; i++) {
+        const MLIR_Pass *p = &passes[i];
+        uint64_t t0 = timing ? platform_clock_ns() : 0;
+        bool ok = true;
+
+        if (p->anchor == MLIR_ANCHOR_MODULE) {
+            ok = p->run(&pc, module, p->state);
+            arena_reset(scratch, scratch_base);
+        } else {
+            // MLIR_ANCHOR_FUNCTION: visit every op in module with MLIR_T_FUNCTION and a body.
+            if (MLIR_GetOpNumRegions(ctx, module) > 0) {
+                MLIR_RegionHandle mr = MLIR_GetOpRegion(ctx, module, 0);
+                for (MLIR_BlockHandle mb = MLIR_GetRegionFirstBlock(ctx, mr);
+                     mb != MLIR_INVALID_HANDLE && ok;
+                     mb = MLIR_GetBlockNext(ctx, mb)) {
+                    for (MLIR_OpHandle op = MLIR_GetBlockFirstOp(ctx, mb);
+                         op != MLIR_INVALID_HANDLE && ok; ) {
+                        MLIR_OpHandle next = MLIR_GetOpNext(ctx, op);
+                        if (MLIR_OpHasTrait(ctx, op, MLIR_T_FUNCTION) &&
+                            MLIR_GetOpNumRegions(ctx, op) > 0 &&
+                            MLIR_GetRegionFirstBlock(ctx, MLIR_GetOpRegion(ctx, op, 0)) != MLIR_INVALID_HANDLE) {
+                            ok = p->run(&pc, op, p->state);
+                            arena_reset(scratch, scratch_base);
+                        }
+                        op = next;
+                    }
+                }
+            }
+        }
+
+        if (!ok) {
+            all_ok = false;
+            break;
+        }
+        if (verify_each && !MLIR_VerifyOp(ctx, module)) {
+            all_ok = false;
+            break;
+        }
+        if (timing) {
+            uint64_t dt_ns = platform_clock_ns() - t0;
+            MLIR_EmitDiagnostic(ctx, MLIR_DIAG_REMARK, MLIR_INVALID_HANDLE,
+                                "pass %.*s: %.3f ms",
+                                (int)p->name.size, p->name.str,
+                                (double)dt_ns * 1e-6);
+        }
+        if (pass_should_print_after(print_after, p->name)) {
+            string ir = print_operation_generic(ctx, 0, module);
+            MLIR_EmitDiagnostic(ctx, MLIR_DIAG_REMARK, MLIR_INVALID_HANDLE,
+                                "// -----// IR Dump After %.*s //----- //\n%.*s",
+                                (int)p->name.size, p->name.str,
+                                (int)ir.size, ir.str);
+        }
+    }
+
+    arena_destroy(scratch);
+    return all_ok;
 }
 
 // The lowering / LLVM-IR-translation / wasm-translation entry points
