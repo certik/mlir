@@ -433,6 +433,49 @@ MLIR_CFGInfo *MLIR_ComputeCFGInfo(MLIR_Context *ctx, MLIR_RegionHandle region, A
     cfg_map_init(&rpo_idx, out, n);
     for (size_t i = 0; i < n; i++) cfg_map_put(&rpo_idx, rpo[i], (int32_t)i);
 
+    // Build a compact CSR predecessor list (pred_off / pred_rpo) in one pass
+    // over reachable blocks so dominators and natural-loop detection run on
+    // flat int32_t arrays with zero API calls or hash lookups.
+    uint32_t *pred_off = arena_new_array(out, uint32_t, n + 1);
+    memset(pred_off, 0, (n + 1) * sizeof(uint32_t));
+    size_t edge_cap = n * 2 + 8;
+    int32_t *edge_u = arena_new_array(out, int32_t, edge_cap);
+    int32_t *edge_v = arena_new_array(out, int32_t, edge_cap);
+    size_t n_edges = 0;
+    for (size_t u = 0; u < n; u++) {
+        MLIR_OpHandle term = MLIR_GetBlockLastOp(ctx, rpo[u]);
+        if (term == MLIR_INVALID_HANDLE) continue;
+        size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
+        for (size_t s = 0; s < ns; s++) {
+            MLIR_BlockHandle succ = MLIR_GetOpSuccessor(ctx, term, s);
+            if (succ == MLIR_INVALID_HANDLE) continue;
+            int32_t v = cfg_map_get(&rpo_idx, succ);
+            if (v < 0) continue;
+            if (n_edges == edge_cap) {
+                size_t new_cap = edge_cap * 2;
+                int32_t *nu = arena_new_array(out, int32_t, new_cap);
+                int32_t *nv = arena_new_array(out, int32_t, new_cap);
+                memcpy(nu, edge_u, n_edges * sizeof(int32_t));
+                memcpy(nv, edge_v, n_edges * sizeof(int32_t));
+                edge_u = nu;
+                edge_v = nv;
+                edge_cap = new_cap;
+            }
+            edge_u[n_edges] = (int32_t)u;
+            edge_v[n_edges] = v;
+            n_edges++;
+            pred_off[(size_t)v + 1]++;
+        }
+    }
+    for (size_t i = 0; i < n; i++) pred_off[i + 1] += pred_off[i];
+    int32_t *pred_rpo = arena_new_array(out, int32_t, n_edges > 0 ? n_edges : 1);
+    uint32_t *pred_cur = arena_new_array(out, uint32_t, n);
+    memcpy(pred_cur, pred_off, n * sizeof(uint32_t));
+    for (size_t e = 0; e < n_edges; e++) {
+        int32_t v = edge_v[e];
+        pred_rpo[pred_cur[v]++] = edge_u[e];
+    }
+
     int32_t *idom = arena_new_array(out, int32_t, n);
     for (size_t i = 0; i < n; i++) idom[i] = -1;
     idom[0] = 0;
@@ -443,12 +486,10 @@ MLIR_CFGInfo *MLIR_ComputeCFGInfo(MLIR_Context *ctx, MLIR_RegionHandle region, A
         changed = false;
         for (size_t i = 1; i < n; i++) {
             int32_t new_idom = -1;
-            for (MLIR_PredHandle p = MLIR_GetBlockFirstPred(ctx, rpo[i]);
-                 p != MLIR_INVALID_HANDLE; p = MLIR_GetPredNext(ctx, p)) {
-                MLIR_BlockHandle pb = MLIR_GetPredBlock(ctx, p);
-                if (pb == MLIR_INVALID_HANDLE) continue;
-                int32_t pi = cfg_map_get(&rpo_idx, pb);
-                if (pi < 0 || idom[pi] < 0) continue;
+            uint32_t pe = pred_off[i + 1];
+            for (uint32_t p = pred_off[i]; p < pe; p++) {
+                int32_t pi = pred_rpo[p];
+                if (idom[pi] < 0) continue;
                 if (new_idom < 0) new_idom = pi;
                 else new_idom = cfg_intersect(idom, pi, new_idom);
             }
@@ -482,12 +523,10 @@ MLIR_CFGInfo *MLIR_ComputeCFGInfo(MLIR_Context *ctx, MLIR_RegionHandle region, A
         bool found_backedge = false;
         stamp++;
         size_t wn = 0;
-        for (MLIR_PredHandle p = MLIR_GetBlockFirstPred(ctx, rpo[hi]);
-             p != MLIR_INVALID_HANDLE; p = MLIR_GetPredNext(ctx, p)) {
-            MLIR_BlockHandle pb = MLIR_GetPredBlock(ctx, p);
-            if (pb == MLIR_INVALID_HANDLE) continue;
-            int32_t ui = cfg_map_get(&rpo_idx, pb);
-            if (ui >= 0 && MLIR_CFGDominates(cfg, (int32_t)hi, ui)) {
+        uint32_t pe = pred_off[hi + 1];
+        for (uint32_t p = pred_off[hi]; p < pe; p++) {
+            int32_t ui = pred_rpo[p];
+            if (MLIR_CFGDominates(cfg, (int32_t)hi, ui)) {
                 found_backedge = true;
                 if (seen[ui] != stamp) {
                     seen[ui] = stamp;
@@ -502,12 +541,10 @@ MLIR_CFGInfo *MLIR_ComputeCFGInfo(MLIR_Context *ctx, MLIR_RegionHandle region, A
         while (wn > 0) {
             int32_t cur = wl[--wn];
             if (cur != (int32_t)hi) loop_depth[cur]++;
-            for (MLIR_PredHandle p = MLIR_GetBlockFirstPred(ctx, rpo[cur]);
-                 p != MLIR_INVALID_HANDLE; p = MLIR_GetPredNext(ctx, p)) {
-                MLIR_BlockHandle pb = MLIR_GetPredBlock(ctx, p);
-                if (pb == MLIR_INVALID_HANDLE) continue;
-                int32_t pi = cfg_map_get(&rpo_idx, pb);
-                if (pi >= 0 && seen[pi] != stamp) {
+            uint32_t cpe = pred_off[cur + 1];
+            for (uint32_t p = pred_off[cur]; p < cpe; p++) {
+                int32_t pi = pred_rpo[p];
+                if (seen[pi] != stamp) {
                     seen[pi] = stamp;
                     wl[wn++] = pi;
                 }

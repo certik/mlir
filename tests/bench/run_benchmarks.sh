@@ -28,10 +28,11 @@ $CC -O2 -I corec -I . -DPLATFORM_SKIP_ENTRY \
 # implementation is included underneath so the compiler can inline API calls.
 cat > "$TMPDIR_B/unity_native.c" <<'EOF'
 #include "mlir_api_impl.c"
+#include "mlir_op_names.c"
 #include "tests/bench/bench_api.c"
 EOF
 $CC -O2 -I corec -I . -DPLATFORM_SKIP_ENTRY \
-    -o "$TMPDIR_B/bench_native_inl" "$TMPDIR_B/unity_native.c" $SHARED $COREC "$PLATFORM_C" -lm
+    -o "$TMPDIR_B/bench_native_inl" "$TMPDIR_B/unity_native.c" mlir_generic_printer.c mlir_lift_cf_to_scf.c $COREC "$PLATFORM_C" -lm
 "$TMPDIR_B/bench_native_inl" native_inl
 
 if [ -n "${CONDA_PREFIX:-}" ] && ls "$CONDA_PREFIX"/lib/libMLIR*.a >/dev/null 2>&1; then
