@@ -100,6 +100,7 @@ typedef struct IR_Value {
 typedef struct IR_Op {
     MLIR_OpType op_type;
     uint32_t parent_block;    // block index, 0 = not in a block
+    uint32_t block_pos;       // index in parent_block->ops
     uint32_t first_operand;   // opnds index
     uint32_t n_operands;      // regular operands
     uint32_t n_succ_operands; // all successor operands, after the regular ones
@@ -128,12 +129,22 @@ typedef struct IR_OpAux {
     bool explicit_result_types;
 } IR_OpAux;
 
+typedef struct IR_PredEdge {
+    uint32_t owner;        // terminator op index
+    uint32_t succ_idx;     // successor slot index in owner
+    uint32_t target_block; // target block index, 0 = unlinked
+    uint32_t next;         // next pred edge of target_block, 0 = end
+    uint32_t prev;         // prev pred edge of target_block, 0 = head
+} IR_PredEdge;
+
 typedef struct IR_Block {
     uint32_t *ops;
     uint32_t *args;
     uint32_t n_ops, cap_ops;
     uint32_t n_args, cap_args;
     uint32_t parent_region;  // region index, 0 = detached
+    uint32_t region_pos;     // index in parent_region->blocks
+    uint32_t first_pred;     // pred_edges index, 0 = none
     uint32_t pad;
 } IR_Block;
 
@@ -262,6 +273,8 @@ struct MLIR_Context {
     // parser texts they refer to.
     IR_Vec locs;
     AttrKeyTable loc_strings;
+    // Predecessor edge list records (indexed by 1-based MLIR_PredHandle).
+    IR_Vec preds;
     // Diagnostic handler; NULL means the default (print to stderr).
     MLIR_DiagnosticHandler diag_fn;
     void *diag_user;
@@ -287,6 +300,29 @@ struct MLIR_Context {
 #define AX(c)      ((uint32_t *)(c)->ax.data)
 #define ATEXT(c)   ((string *)(c)->atext.data)
 #define LOCS(c)    ((IR_Loc *)(c)->locs.data)
+#define PREDS(c)   ((IR_PredEdge *)(c)->preds.data)
+
+static void pred_push(MLIR_Context *c, uint32_t e) {
+    IR_PredEdge *pe = &PREDS(c)[e];
+    uint32_t b = pe->target_block;
+    if (!b) return;
+    uint32_t head = BLOCKS(c)[b].first_pred;
+    pe->prev = 0;
+    pe->next = head;
+    if (head) PREDS(c)[head].prev = e;
+    BLOCKS(c)[b].first_pred = e;
+}
+
+static void pred_unlink(MLIR_Context *c, uint32_t e) {
+    IR_PredEdge *pe = &PREDS(c)[e];
+    uint32_t b = pe->target_block;
+    if (!b) return;
+    if (pe->prev) PREDS(c)[pe->prev].next = pe->next;
+    else BLOCKS(c)[b].first_pred = pe->next;
+    if (pe->next) PREDS(c)[pe->next].prev = pe->prev;
+    pe->prev = pe->next = 0;
+    pe->target_block = 0;
+}
 
 // The one growth hook: makes room for `need` elements. The capacity at least
 // doubles (or becomes `need`, if that is more) and uses all of the buddy
@@ -901,6 +937,7 @@ MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) {
     vec_init(&ctx->atext, (uint32_t)sizeof(string));
     amap_alloc(ctx, 1024);
     vec_init(&ctx->locs, (uint32_t)sizeof(IR_Loc));
+    vec_init(&ctx->preds, (uint32_t)sizeof(IR_PredEdge));
     attr_key_table_init_strings(&ctx->loc_strings, persistent);
     // Element 1: the shared unknown location.
     {
@@ -977,6 +1014,7 @@ void MLIR_DestroyContext(MLIR_Context *ctx) {
     vec_free(&ctx->atext);
     buddy_free(ctx->amap);
     vec_free(&ctx->locs);
+    vec_free(&ctx->preds);
     arena_destroy(ctx->persistent);
 }
 
@@ -1080,7 +1118,7 @@ MLIR_OpHandle MLIR_CreateOpFromSpec(MLIR_Context *ctx, const MLIR_OpSpec *spec) 
     API_CHECK(n_succ_ops <= spec->n_operands, "MLIR_CreateOpFromSpec",
               "successor operand counts exceed n_operands");
     uint32_t n_regular = spec->n_operands - n_succ_ops;
-    size_t n_extra = (size_t)spec->n_regions + 2 * (size_t)spec->n_successors;
+    size_t n_extra = (size_t)spec->n_regions + 3 * (size_t)spec->n_successors;
 
     // Allocate all vector slots first: growing a vector moves it.
     uint32_t op = vec_push(&ctx->ops, 1);
@@ -1091,6 +1129,7 @@ MLIR_OpHandle MLIR_CreateOpFromSpec(MLIR_Context *ctx, const MLIR_OpSpec *spec) 
     uint32_t first_attr = first_extra + (uint32_t)n_extra;
     uint32_t fresh_regions = (!spec->regions && spec->n_regions > 0)
         ? vec_push(&ctx->regions, spec->n_regions) : 0;
+    uint32_t first_pred = spec->n_successors ? vec_push(&ctx->preds, spec->n_successors) : 0;
 
     GEN_SAVE(ctx, ops);
     GEN_SAVE(ctx, opnds);
@@ -1101,6 +1140,7 @@ MLIR_OpHandle MLIR_CreateOpFromSpec(MLIR_Context *ctx, const MLIR_OpSpec *spec) 
     IR_Op *o = &OPS(ctx)[op];
     o->op_type = type;
     o->parent_block = 0;
+    o->block_pos = 0;
     o->first_operand = first_operand;
     o->n_operands = n_regular;
     o->n_succ_operands = n_succ_ops;
@@ -1162,8 +1202,17 @@ MLIR_OpHandle MLIR_CreateOpFromSpec(MLIR_Context *ctx, const MLIR_OpSpec *spec) 
     ex += spec->n_regions;
     for (uint32_t s = 0; s < spec->n_successors; s++) {
         uint32_t cnt = spec->successor_operand_counts ? spec->successor_operand_counts[s] : 0;
-        ex[2 * s] = BLOCK_IDX(ctx, spec->successors[s], "MLIR_CreateOpFromSpec");
-        ex[2 * s + 1] = cnt;
+        uint32_t tb = BLOCK_IDX(ctx, spec->successors[s], "MLIR_CreateOpFromSpec");
+        uint32_t pe_idx = first_pred + s;
+        ex[3 * s] = tb;
+        ex[3 * s + 1] = cnt;
+        ex[3 * s + 2] = pe_idx;
+        IR_PredEdge *pe = &PREDS(ctx)[pe_idx];
+        pe->owner = op;
+        pe->succ_idx = s;
+        pe->target_block = tb;
+        pe->next = pe->prev = 0;
+        if (tb) pred_push(ctx, pe_idx);
     }
 
     uint32_t *pa = EXTRA(ctx) + first_attr;
@@ -1198,9 +1247,7 @@ void MLIR_InsertOpBefore(MLIR_Context *ctx, MLIR_BlockHandle bh,
         CHECK_OP(ctx, bef, "MLIR_InsertOpBefore");
         API_CHECK(OPS(ctx)[bef].parent_block == b, "MLIR_InsertOpBefore",
                   "before op is not in target block");
-        for (size_t i = 0; i < blk->n_ops; i++) {
-            if (blk->ops[i] == bef) { idx = i; break; }
-        }
+        idx = OPS(ctx)[bef].block_pos;
     }
     block_insert_op(ctx, b, o, idx);
 }
@@ -1211,17 +1258,12 @@ MLIR_Builder MLIR_BuilderAfter(MLIR_Context *ctx, MLIR_OpHandle oh) {
     uint32_t b = OPS(ctx)[o].parent_block;
     API_CHECK(b != 0, "MLIR_BuilderAfter", "op has no parent block");
     IR_Block *blk = &BLOCKS(ctx)[b];
+    uint32_t pos = OPS(ctx)[o].block_pos;
     MLIR_Builder res;
     res.ctx = ctx;
     res.block = BLOCK_H(ctx, b);
-    res.before = MLIR_INVALID_HANDLE;
+    res.before = (pos + 1 < blk->n_ops) ? OP_H(ctx, blk->ops[pos + 1]) : MLIR_INVALID_HANDLE;
     res.loc = MLIR_INVALID_HANDLE;
-    for (size_t i = 0; i + 1 < blk->n_ops; i++) {
-        if (blk->ops[i] == o) {
-            res.before = OP_H(ctx, blk->ops[i + 1]);
-            break;
-        }
-    }
     return res;
 }
 
@@ -1270,6 +1312,7 @@ static void block_insert_op(MLIR_Context *ctx, uint32_t b, uint32_t o, size_t id
     blk->ops[idx] = o;
     blk->n_ops++;
     OPS(ctx)[o].parent_block = b;
+    for (size_t i = idx; i < blk->n_ops; i++) OPS(ctx)[blk->ops[i]].block_pos = (uint32_t)i;
 }
 
 void MLIR_AppendBlockOp(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_OpHandle oh) {
@@ -1309,6 +1352,7 @@ void MLIR_AppendRegionBlock(MLIR_Context *ctx, MLIR_RegionHandle rh, MLIR_BlockH
     IR_Region *reg = &REGIONS(ctx)[r];
     reg->blocks = u32_reserve(ctx->arena, reg->blocks, reg->n_blocks, &reg->cap_blocks,
                               (size_t)reg->n_blocks + 1);
+    BLOCKS(ctx)[b].region_pos = reg->n_blocks;
     reg->blocks[reg->n_blocks++] = b;
     BLOCKS(ctx)[b].parent_region = r;
 }
@@ -1469,19 +1513,19 @@ size_t MLIR_GetOpNumSuccessors(MLIR_Context *ctx, MLIR_OpHandle oh) {
     return OPS(ctx)[o].n_successors;
 }
 
-// The (block, operand count) pair of successor `s` of op `o`.
+// The (block, operand count, pred edge) triple of successor `s` of op `o`.
 static inline uint32_t *op_succ_pair(MLIR_Context *ctx, uint32_t o, size_t s) {
     IR_Op *op = &OPS(ctx)[o];
-    return EXTRA(ctx) + op->first_extra + op->n_regions + 2 * s;
+    return EXTRA(ctx) + op->first_extra + op->n_regions + 3 * s;
 }
 
 // The flat operand position (from the op's first operand) of successor
 // operand (s, 0).
 static uint32_t op_succ_operand_base(MLIR_Context *ctx, uint32_t o, size_t s) {
     IR_Op *op = &OPS(ctx)[o];
-    const uint32_t *pairs = EXTRA(ctx) + op->first_extra + op->n_regions;
+    const uint32_t *triples = EXTRA(ctx) + op->first_extra + op->n_regions;
     uint32_t off = op->n_operands;
-    for (size_t k = 0; k < s; k++) off += pairs[2 * k + 1];
+    for (size_t k = 0; k < s; k++) off += triples[3 * k + 1];
     return off;
 }
 
@@ -2550,14 +2594,24 @@ static void detach_from_block(MLIR_Context *ctx, uint32_t o) {
     uint32_t b = OPS(ctx)[o].parent_block;
     if (b) {
         IR_Block *blk = &BLOCKS(ctx)[b];
-        u32_remove(blk->ops, &blk->n_ops, o);
+        uint32_t pos = OPS(ctx)[o].block_pos;
+        if (pos < blk->n_ops && blk->ops[pos] == o) {
+            if (pos + 1 < blk->n_ops)
+                memmove(blk->ops + pos, blk->ops + pos + 1, (blk->n_ops - pos - 1) * sizeof(uint32_t));
+            blk->n_ops--;
+            for (uint32_t i = pos; i < blk->n_ops; i++) OPS(ctx)[blk->ops[i]].block_pos = i;
+        } else {
+            u32_remove(blk->ops, &blk->n_ops, o);
+            for (uint32_t i = 0; i < blk->n_ops; i++) OPS(ctx)[blk->ops[i]].block_pos = i;
+        }
     }
     OPS(ctx)[o].parent_block = 0;
+    OPS(ctx)[o].block_pos = 0;
 }
 
-// Unlinks every operand use of op `o` and of the ops nested in its regions,
-// as upstream's Operation::erase does when it destroys them. Under
-// MLIR_API_CHECKS the ops are also marked erased.
+// Unlinks every operand use and predecessor edge of op `o` and of the ops
+// nested in its regions, as upstream's Operation::erase does when it destroys
+// them. Under MLIR_API_CHECKS the ops are also marked erased.
 static void drop_op_uses(MLIR_Context *ctx, uint32_t o) {
     IR_Op *op = &OPS(ctx)[o];
     uint32_t first = op->first_operand;
@@ -2568,6 +2622,10 @@ static void drop_op_uses(MLIR_Context *ctx, uint32_t o) {
             if (operand_linked(ctx, o, v)) use_unlink(ctx, first + i);
             OPNDS(ctx)[first + i].value = 0;
         }
+    }
+    for (uint32_t s = 0; s < op->n_successors; s++) {
+        uint32_t pe_idx = op_succ_pair(ctx, o, s)[2];
+        if (pe_idx) pred_unlink(ctx, pe_idx);
     }
     for (uint32_t r = 0; r < op->n_regions; r++) {
         IR_Region *reg = &REGIONS(ctx)[EXTRA(ctx)[op->first_extra + r]];
@@ -2641,7 +2699,8 @@ void MLIR_EraseOp(MLIR_Context *ctx, MLIR_OpHandle oh) {
 #else
     // Without def-use tracking and regions there is nothing to drop (the
     // common case in the --from-wasm pipeline's DCE).
-    if ((OPS(ctx)[o].flags & OPF_TRACKED) || OPS(ctx)[o].n_regions) drop_op_uses(ctx, o);
+    if ((OPS(ctx)[o].flags & OPF_TRACKED) || OPS(ctx)[o].n_regions || OPS(ctx)[o].n_successors)
+        drop_op_uses(ctx, o);
 #endif
 }
 
@@ -2693,9 +2752,22 @@ static void detach_from_region(MLIR_Context *ctx, uint32_t b) {
     uint32_t r = BLOCKS(ctx)[b].parent_region;
     if (r) {
         IR_Region *reg = &REGIONS(ctx)[r];
-        u32_remove(reg->blocks, &reg->n_blocks, b);
+        uint32_t pos = BLOCKS(ctx)[b].region_pos;
+        if (pos < reg->n_blocks && reg->blocks[pos] == b) {
+            if (pos + 1 < reg->n_blocks)
+                memmove(reg->blocks + pos, reg->blocks + pos + 1,
+                        (reg->n_blocks - pos - 1) * sizeof(uint32_t));
+            reg->n_blocks--;
+            for (uint32_t i = pos; i < reg->n_blocks; i++)
+                BLOCKS(ctx)[reg->blocks[i]].region_pos = i;
+        } else {
+            u32_remove(reg->blocks, &reg->n_blocks, b);
+            for (uint32_t i = 0; i < reg->n_blocks; i++)
+                BLOCKS(ctx)[reg->blocks[i]].region_pos = i;
+        }
     }
     BLOCKS(ctx)[b].parent_region = 0;
+    BLOCKS(ctx)[b].region_pos = 0;
 }
 
 void MLIR_MoveBlockToRegionEnd(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_RegionHandle dest) {
@@ -2725,7 +2797,15 @@ void MLIR_SetOpSuccessor(MLIR_Context *ctx, MLIR_OpHandle oh, size_t succ_idx, M
     uint32_t b = BLOCK_IDX(ctx, block, "MLIR_SetOpSuccessor");
     CHECK_NOT_ERASED(ctx, o, "MLIR_SetOpSuccessor");
     if (!o || succ_idx >= OPS(ctx)[o].n_successors) return;
-    op_succ_pair(ctx, o, succ_idx)[0] = b;
+    uint32_t *triple = op_succ_pair(ctx, o, succ_idx);
+    if (triple[0] == b) return;
+    uint32_t pe_idx = triple[2];
+    if (pe_idx) {
+        pred_unlink(ctx, pe_idx);
+        PREDS(ctx)[pe_idx].target_block = b;
+        if (b) pred_push(ctx, pe_idx);
+    }
+    triple[0] = b;
 }
 
 // Gives successor `s` of op `o` room for `new_n` operands. If the count
@@ -2826,6 +2906,8 @@ static void region_insert_block(MLIR_Context *ctx, uint32_t r, uint32_t b, uint3
     reg->blocks[at] = b;
     reg->n_blocks++;
     BLOCKS(ctx)[b].parent_region = r;
+    for (uint32_t i = at; i < reg->n_blocks; i++)
+        BLOCKS(ctx)[reg->blocks[i]].region_pos = i;
 }
 
 void MLIR_InsertRegionBlockAfter(MLIR_Context *ctx, MLIR_RegionHandle region,
@@ -2993,11 +3075,165 @@ void MLIR_SpliceBlockOps(MLIR_Context *ctx, MLIR_BlockHandle dst, MLIR_BlockHand
     size_t new_n = (size_t)db->n_ops + sb->n_ops;
     db->ops = u32_reserve(ctx->arena, db->ops, db->n_ops, &db->cap_ops, new_n);
     memcpy(db->ops + db->n_ops, sb->ops, sb->n_ops * sizeof(uint32_t));
-    for (uint32_t i = 0; i < sb->n_ops; i++) OPS(ctx)[sb->ops[i]].parent_block = d;
+    for (uint32_t i = 0; i < sb->n_ops; i++) {
+        OPS(ctx)[sb->ops[i]].parent_block = d;
+        OPS(ctx)[sb->ops[i]].block_pos = db->n_ops + i;
+    }
     db->n_ops = (uint32_t)new_n;
     sb->ops = NULL;
     sb->n_ops = 0;
     sb->cap_ops = 0;
+}
+
+// -----------------------------------------------------------------------------
+// O(1) Traversal iterators (#352)
+// -----------------------------------------------------------------------------
+
+MLIR_OpHandle MLIR_GetBlockFirstOp(MLIR_Context *ctx, MLIR_BlockHandle bh) {
+    uint32_t b = BLOCK_IDX(ctx, bh, "MLIR_GetBlockFirstOp");
+    if (!b) return MLIR_INVALID_HANDLE;
+    IR_Block *blk = &BLOCKS(ctx)[b];
+    return blk->n_ops ? OP_H(ctx, blk->ops[0]) : MLIR_INVALID_HANDLE;
+}
+
+MLIR_OpHandle MLIR_GetBlockLastOp(MLIR_Context *ctx, MLIR_BlockHandle bh) {
+    uint32_t b = BLOCK_IDX(ctx, bh, "MLIR_GetBlockLastOp");
+    if (!b) return MLIR_INVALID_HANDLE;
+    IR_Block *blk = &BLOCKS(ctx)[b];
+    return blk->n_ops ? OP_H(ctx, blk->ops[blk->n_ops - 1]) : MLIR_INVALID_HANDLE;
+}
+
+MLIR_OpHandle MLIR_GetOpNext(MLIR_Context *ctx, MLIR_OpHandle oh) {
+    uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpNext");
+    CHECK_OP(ctx, o, "MLIR_GetOpNext");
+    uint32_t b = OPS(ctx)[o].parent_block;
+    if (!b) return MLIR_INVALID_HANDLE;
+    IR_Block *blk = &BLOCKS(ctx)[b];
+    uint32_t next_pos = OPS(ctx)[o].block_pos + 1;
+    return next_pos < blk->n_ops ? OP_H(ctx, blk->ops[next_pos]) : MLIR_INVALID_HANDLE;
+}
+
+MLIR_OpHandle MLIR_GetOpPrev(MLIR_Context *ctx, MLIR_OpHandle oh) {
+    uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpPrev");
+    CHECK_OP(ctx, o, "MLIR_GetOpPrev");
+    uint32_t b = OPS(ctx)[o].parent_block;
+    if (!b) return MLIR_INVALID_HANDLE;
+    uint32_t pos = OPS(ctx)[o].block_pos;
+    return pos > 0 ? OP_H(ctx, BLOCKS(ctx)[b].ops[pos - 1]) : MLIR_INVALID_HANDLE;
+}
+
+MLIR_OpHandle MLIR_GetParentOp(MLIR_Context *ctx, MLIR_OpHandle oh) {
+    uint32_t o = OP_IDX(ctx, oh, "MLIR_GetParentOp");
+    CHECK_OP(ctx, o, "MLIR_GetParentOp");
+    uint32_t b = OPS(ctx)[o].parent_block;
+    if (!b) return MLIR_INVALID_HANDLE;
+    uint32_t r = BLOCKS(ctx)[b].parent_region;
+    return r ? OP_H(ctx, REGIONS(ctx)[r].parent_op) : MLIR_INVALID_HANDLE;
+}
+
+MLIR_BlockHandle MLIR_GetRegionFirstBlock(MLIR_Context *ctx, MLIR_RegionHandle rh) {
+    uint32_t r = REGION_IDX(ctx, rh, "MLIR_GetRegionFirstBlock");
+    if (!r) return MLIR_INVALID_HANDLE;
+    IR_Region *reg = &REGIONS(ctx)[r];
+    return reg->n_blocks ? BLOCK_H(ctx, reg->blocks[0]) : MLIR_INVALID_HANDLE;
+}
+
+MLIR_BlockHandle MLIR_GetRegionLastBlock(MLIR_Context *ctx, MLIR_RegionHandle rh) {
+    uint32_t r = REGION_IDX(ctx, rh, "MLIR_GetRegionLastBlock");
+    if (!r) return MLIR_INVALID_HANDLE;
+    IR_Region *reg = &REGIONS(ctx)[r];
+    return reg->n_blocks ? BLOCK_H(ctx, reg->blocks[reg->n_blocks - 1]) : MLIR_INVALID_HANDLE;
+}
+
+MLIR_BlockHandle MLIR_GetBlockNext(MLIR_Context *ctx, MLIR_BlockHandle bh) {
+    uint32_t b = BLOCK_IDX(ctx, bh, "MLIR_GetBlockNext");
+    if (!b) return MLIR_INVALID_HANDLE;
+    uint32_t r = BLOCKS(ctx)[b].parent_region;
+    if (!r) return MLIR_INVALID_HANDLE;
+    IR_Region *reg = &REGIONS(ctx)[r];
+    uint32_t next_pos = BLOCKS(ctx)[b].region_pos + 1;
+    return next_pos < reg->n_blocks ? BLOCK_H(ctx, reg->blocks[next_pos]) : MLIR_INVALID_HANDLE;
+}
+
+MLIR_BlockHandle MLIR_GetBlockPrev(MLIR_Context *ctx, MLIR_BlockHandle bh) {
+    uint32_t b = BLOCK_IDX(ctx, bh, "MLIR_GetBlockPrev");
+    if (!b) return MLIR_INVALID_HANDLE;
+    uint32_t r = BLOCKS(ctx)[b].parent_region;
+    if (!r) return MLIR_INVALID_HANDLE;
+    uint32_t pos = BLOCKS(ctx)[b].region_pos;
+    return pos > 0 ? BLOCK_H(ctx, REGIONS(ctx)[r].blocks[pos - 1]) : MLIR_INVALID_HANDLE;
+}
+
+MLIR_UseHandle MLIR_GetValueFirstUse(MLIR_Context *ctx, MLIR_ValueHandle vh) {
+    uint32_t v = VAL_IDX(ctx, vh, "MLIR_GetValueFirstUse");
+    if (!v) return MLIR_INVALID_HANDLE;
+    return (MLIR_UseHandle)VALS(ctx)[v].first_use;
+}
+
+MLIR_UseHandle MLIR_GetUseNext(MLIR_Context *ctx, MLIR_UseHandle use) {
+    API_CHECK(ctx != NULL, "MLIR_GetUseNext", "context is NULL");
+    uint32_t u = (uint32_t)use;
+    if (!u || u >= ctx->opnds.n) return MLIR_INVALID_HANDLE;
+    return (MLIR_UseHandle)OPNDS(ctx)[u].next;
+}
+
+MLIR_OpHandle MLIR_GetUseOwner(MLIR_Context *ctx, MLIR_UseHandle use) {
+    API_CHECK(ctx != NULL, "MLIR_GetUseOwner", "context is NULL");
+    uint32_t u = (uint32_t)use;
+    API_CHECK(u > 0 && u < ctx->opnds.n, "MLIR_GetUseOwner", "invalid use handle");
+    return OP_H(ctx, OPNDS(ctx)[u].owner);
+}
+
+size_t MLIR_GetUseOperandIndex(MLIR_Context *ctx, MLIR_UseHandle use) {
+    API_CHECK(ctx != NULL, "MLIR_GetUseOperandIndex", "context is NULL");
+    uint32_t u = (uint32_t)use;
+    API_CHECK(u > 0 && u < ctx->opnds.n, "MLIR_GetUseOperandIndex", "invalid use handle");
+    uint32_t owner = OPNDS(ctx)[u].owner;
+    return (size_t)(u - OPS(ctx)[owner].first_operand);
+}
+
+bool MLIR_ValueHasOneUse(MLIR_Context *ctx, MLIR_ValueHandle vh) {
+    uint32_t v = VAL_IDX(ctx, vh, "MLIR_ValueHasOneUse");
+    return v != 0 && VALS(ctx)[v].n_uses == 1;
+}
+
+bool MLIR_IsValueUnused(MLIR_Context *ctx, MLIR_ValueHandle vh) {
+    uint32_t v = VAL_IDX(ctx, vh, "MLIR_IsValueUnused");
+    return v == 0 || VALS(ctx)[v].n_uses == 0;
+}
+
+MLIR_PredHandle MLIR_GetBlockFirstPred(MLIR_Context *ctx, MLIR_BlockHandle bh) {
+    uint32_t b = BLOCK_IDX(ctx, bh, "MLIR_GetBlockFirstPred");
+    if (!b) return MLIR_INVALID_HANDLE;
+    return (MLIR_PredHandle)BLOCKS(ctx)[b].first_pred;
+}
+
+MLIR_PredHandle MLIR_GetPredNext(MLIR_Context *ctx, MLIR_PredHandle pred) {
+    API_CHECK(ctx != NULL, "MLIR_GetPredNext", "context is NULL");
+    uint32_t p = (uint32_t)pred;
+    if (!p || p >= ctx->preds.n) return MLIR_INVALID_HANDLE;
+    return (MLIR_PredHandle)PREDS(ctx)[p].next;
+}
+
+MLIR_OpHandle MLIR_GetPredTerminator(MLIR_Context *ctx, MLIR_PredHandle pred) {
+    API_CHECK(ctx != NULL, "MLIR_GetPredTerminator", "context is NULL");
+    uint32_t p = (uint32_t)pred;
+    API_CHECK(p > 0 && p < ctx->preds.n, "MLIR_GetPredTerminator", "invalid pred handle");
+    return OP_H(ctx, PREDS(ctx)[p].owner);
+}
+
+MLIR_BlockHandle MLIR_GetPredBlock(MLIR_Context *ctx, MLIR_PredHandle pred) {
+    API_CHECK(ctx != NULL, "MLIR_GetPredBlock", "context is NULL");
+    uint32_t p = (uint32_t)pred;
+    API_CHECK(p > 0 && p < ctx->preds.n, "MLIR_GetPredBlock", "invalid pred handle");
+    return BLOCK_H(ctx, OPS(ctx)[PREDS(ctx)[p].owner].parent_block);
+}
+
+size_t MLIR_GetPredSuccessorIndex(MLIR_Context *ctx, MLIR_PredHandle pred) {
+    API_CHECK(ctx != NULL, "MLIR_GetPredSuccessorIndex", "context is NULL");
+    uint32_t p = (uint32_t)pred;
+    API_CHECK(p > 0 && p < ctx->preds.n, "MLIR_GetPredSuccessorIndex", "invalid pred handle");
+    return (size_t)PREDS(ctx)[p].succ_idx;
 }
 
 // Trait-driven verification of `op` and all ops nested in its regions.

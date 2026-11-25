@@ -200,11 +200,10 @@ static void dce_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     // 1. Count uses of every value across regular operands AND terminator
     //    successor-operands (block-arg edge values).
     DceMap uses; dcemap_init(&uses, 1024);
-    for (size_t b = 0; b < nb; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, region, b);
-        size_t no = MLIR_GetBlockNumOps(ctx, bk);
-        for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+    for (MLIR_BlockHandle bk = MLIR_GetRegionFirstBlock(ctx, region);
+         bk != MLIR_INVALID_HANDLE; bk = MLIR_GetBlockNext(ctx, bk)) {
+        for (MLIR_OpHandle op = MLIR_GetBlockFirstOp(ctx, bk);
+             op != MLIR_INVALID_HANDLE; op = MLIR_GetOpNext(ctx, op)) {
             size_t non = MLIR_GetOpNumOperands(ctx, op);
             for (size_t kk = 0; kk < non; kk++) {
                 MLIR_ValueHandle v = MLIR_GetOpOperand(ctx, op, kk);
@@ -225,12 +224,12 @@ static void dce_run_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
 
     // 2. Seed a worklist with every op and erase zero-use pure ops transitively.
     MLIR_OpHandle *all = NULL; size_t nall = 0, call = 0;
-    for (size_t b = 0; b < nb; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, region, b);
-        size_t no = MLIR_GetBlockNumOps(ctx, bk);
-        for (size_t i = 0; i < no; i++) {
+    for (MLIR_BlockHandle bk = MLIR_GetRegionFirstBlock(ctx, region);
+         bk != MLIR_INVALID_HANDLE; bk = MLIR_GetBlockNext(ctx, bk)) {
+        for (MLIR_OpHandle op = MLIR_GetBlockFirstOp(ctx, bk);
+             op != MLIR_INVALID_HANDLE; op = MLIR_GetOpNext(ctx, op)) {
             if (nall == call) { call = call ? call * 2 : 256; all = (MLIR_OpHandle *)realloc(all, call * sizeof(MLIR_OpHandle)); }
-            all[nall++] = MLIR_GetBlockOp(ctx, bk, i);
+            all[nall++] = op;
         }
     }
     dce_worklist(ctx, &uses, all, nall);
