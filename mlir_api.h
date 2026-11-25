@@ -939,6 +939,15 @@ MLIR_OpHandle MLIR_GetBlockFirstOp(MLIR_Context *ctx, MLIR_BlockHandle block);
 MLIR_OpHandle MLIR_GetBlockLastOp(MLIR_Context *ctx, MLIR_BlockHandle block);
 MLIR_OpHandle MLIR_GetOpNext(MLIR_Context *ctx, MLIR_OpHandle op);
 MLIR_OpHandle MLIR_GetOpPrev(MLIR_Context *ctx, MLIR_OpHandle op);
+// Fast forward cursor over a block's ops (valid while the block's op list is
+// not structurally modified; use MLIR_GetOpNext/Prev if inserting or erasing).
+// Avoids per-step parent-block lookups on both backends.
+typedef struct MLIR_BlockOpIter {
+    uintptr_t cur;
+    uintptr_t end;
+} MLIR_BlockOpIter;
+MLIR_BlockOpIter MLIR_BlockOpsBegin(MLIR_Context *ctx, MLIR_BlockHandle block);
+MLIR_OpHandle MLIR_BlockOpIterNext(MLIR_Context *ctx, MLIR_BlockOpIter *it);
 // Returns the op whose region contains `op`'s parent block, or MLIR_INVALID_HANDLE.
 MLIR_OpHandle MLIR_GetParentOp(MLIR_Context *ctx, MLIR_OpHandle op);
 

@@ -60,8 +60,8 @@ int main(int argc, char **argv) {
         t0 = platform_clock_ns();
         uintptr_t acc = 0;
         for (int rep = 0; rep < 10; rep++) {
-            for (MLIR_OpHandle op = MLIR_GetBlockFirstOp(ctx, blk); op;
-                 op = MLIR_GetOpNext(ctx, op)) {
+            MLIR_BlockOpIter it = MLIR_BlockOpsBegin(ctx, blk);
+            for (MLIR_OpHandle op; (op = MLIR_BlockOpIterNext(ctx, &it)) != MLIR_INVALID_HANDLE; ) {
                 acc ^= (uintptr_t)MLIR_GetOpType(ctx, op);
                 if (MLIR_GetOpNumOperands(ctx, op) == 2) {
                     acc ^= MLIR_GetOpOperand(ctx, op, 0);
@@ -76,8 +76,8 @@ int main(int argc, char **argv) {
         t0 = platform_clock_ns();
         uintptr_t aacc = 0;
         for (int rep = 0; rep < 10; rep++) {
-            for (MLIR_OpHandle op = MLIR_GetBlockFirstOp(ctx, blk); op;
-                 op = MLIR_GetOpNext(ctx, op)) {
+            MLIR_BlockOpIter it = MLIR_BlockOpsBegin(ctx, blk);
+            for (MLIR_OpHandle op; (op = MLIR_BlockOpIterNext(ctx, &it)) != MLIR_INVALID_HANDLE; ) {
                 aacc ^= MLIR_GetOpAttr(ctx, op, MLIR_KEY_VALUE);
             }
         }

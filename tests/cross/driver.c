@@ -807,13 +807,24 @@ int app_main(void) {
         for (MLIR_BlockHandle b = MLIR_GetRegionLastBlock(ctx, reg);
              b != MLIR_INVALID_HANDLE; b = MLIR_GetBlockPrev(ctx, b)) blk_bwd++;
 
-        // Block op iterators (forward & backward) & GetParentOp.
-        int op_fwd = 0, op_bwd = 0;
+        // Block op iterators (forward & backward), cursor, & GetParentOp.
+        int op_fwd = 0, op_bwd = 0, op_cur = 0;
         for (MLIR_OpHandle o = MLIR_GetBlockFirstOp(ctx, entry);
              o != MLIR_INVALID_HANDLE; o = MLIR_GetOpNext(ctx, o)) op_fwd++;
         for (MLIR_OpHandle o = MLIR_GetBlockLastOp(ctx, entry);
              o != MLIR_INVALID_HANDLE; o = MLIR_GetOpPrev(ctx, o)) op_bwd++;
-        bool parent_ok = MLIR_GetParentOp(ctx, MLIR_GetBlockFirstOp(ctx, entry)) == tmod;
+        bool iter_match = true;
+        {
+            MLIR_BlockOpIter bit = MLIR_BlockOpsBegin(ctx, entry);
+            MLIR_OpHandle expected_op = MLIR_GetBlockFirstOp(ctx, entry);
+            for (MLIR_OpHandle o; (o = MLIR_BlockOpIterNext(ctx, &bit)) != MLIR_INVALID_HANDLE; ) {
+                if (o != expected_op) iter_match = false;
+                expected_op = MLIR_GetOpNext(ctx, expected_op);
+                op_cur++;
+            }
+            if (expected_op != MLIR_INVALID_HANDLE || op_cur != op_fwd) iter_match = false;
+        }
+        bool parent_ok = iter_match && MLIR_GetParentOp(ctx, MLIR_GetBlockFirstOp(ctx, entry)) == tmod;
 
         // Value use iterators & HasOneUse / IsUnused.
         int harg_uses = 0;

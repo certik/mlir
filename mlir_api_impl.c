@@ -3263,6 +3263,27 @@ MLIR_OpHandle MLIR_GetOpPrev(MLIR_Context *ctx, MLIR_OpHandle oh) {
     return pos > 0 ? OP_H(ctx, BLOCKS(ctx)[b].ops[pos - 1]) : MLIR_INVALID_HANDLE;
 }
 
+MLIR_BlockOpIter MLIR_BlockOpsBegin(MLIR_Context *ctx, MLIR_BlockHandle bh) {
+    MLIR_BlockOpIter it;
+    uint32_t b = BLOCK_IDX(ctx, bh, "MLIR_BlockOpsBegin");
+    if (!b) {
+        it.cur = 0;
+        it.end = 0;
+        return it;
+    }
+    IR_Block *blk = &BLOCKS(ctx)[b];
+    it.cur = (uintptr_t)blk->ops;
+    it.end = (uintptr_t)(blk->ops + blk->n_ops);
+    return it;
+}
+
+MLIR_OpHandle MLIR_BlockOpIterNext(MLIR_Context *ctx, MLIR_BlockOpIter *it) {
+    if (it->cur == it->end) return MLIR_INVALID_HANDLE;
+    uint32_t *p = (uint32_t *)it->cur;
+    it->cur = (uintptr_t)(p + 1);
+    return OP_H(ctx, *p);
+}
+
 MLIR_OpHandle MLIR_GetParentOp(MLIR_Context *ctx, MLIR_OpHandle oh) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetParentOp");
     CHECK_OP(ctx, o, "MLIR_GetParentOp");
