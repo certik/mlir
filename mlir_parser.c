@@ -529,13 +529,13 @@ bool parse_type_string(Parser *parser, string *out) {
 MLIR_OpHandle parse_operation(Parser *parser);
 
 MLIR_BlockHandle parse_block(Parser *parser) {
-    VecValue block_args;
-    VecValue_reserve(parser->arena, &block_args, 4);
+    MLIR_BlockHandle block = MLIR_INVALID_HANDLE;
 
     string block_label = str_lit("");
     if (parser_peek(parser, TK_CARET_NAME)) {
         block_label = parser_token_str(parser);
         parser_expect(parser, TK_CARET_NAME);
+        block = parser_get_or_create_block(parser, block_label);
 
         // Parse block arguments if present: ^bb1(%0: i64, %1: i32):
         if (parser_peek(parser, TK_LPAREN)) {
@@ -555,10 +555,9 @@ MLIR_BlockHandle parse_block(Parser *parser) {
                     } else {
                         arg_type = mlir_type_create_from_string(parser->ctx, str_lit("i32"));
                     }
-                    // Create block argument value with parsed type
-                    MLIR_ValueHandle block_arg = MLIR_CreateValueBlockArg(parser->ctx, arg_name, (uint32_t)block_args.size, arg_type, MLIR_INVALID_HANDLE);
-
-                    VecValue_push_back(parser->arena, &block_args, block_arg);
+                    // Add block argument directly to the block.
+                    MLIR_ValueHandle block_arg = MLIR_AddBlockArgument(parser->ctx, block, arg_type, MLIR_INVALID_HANDLE);
+                    if (arg_name.size > 0) MLIR_SetValueRegisterName(parser->ctx, block_arg, arg_name);
 
                     // Register block argument in symbol table
                     symbol_table_add_value(parser->arena, &parser->symbol_table, arg_name, block_arg);
@@ -578,21 +577,8 @@ MLIR_BlockHandle parse_block(Parser *parser) {
             parser_expect(parser, TK_COLON);
         }
         parser_expect(parser, TK_NEWLINE);
-    }
-    // Create the block and bind its arguments BEFORE parsing operations,
-    // so operand references to block args resolve to real values during
-    // op construction (required by upstream MLIR's strict Value model).
-    // Use forward-reference-friendly creation so cf.br targets resolve to
-    // the same MLIR_BlockHandle whether the label appears before or after
-    // the branch op.
-    MLIR_BlockHandle block;
-    if (block_label.size > 0) {
-        block = parser_get_or_create_block(parser, block_label);
     } else {
         block = MLIR_CreateBlock(parser->ctx);
-    }
-    for (size_t i = 0; i < block_args.size; i++) {
-        MLIR_AppendBlockArg(parser->ctx, block, block_args.data[i]);
     }
 
     VecOp operations;

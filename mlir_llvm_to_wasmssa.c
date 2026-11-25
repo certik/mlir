@@ -648,9 +648,8 @@ static MLIR_BlockHandle make_block_with_args(MLIR_Context *ctx,
     MLIR_BlockHandle blk = MLIR_CreateBlock(ctx);
     for (size_t i = 0; i < n_args; i++) {
         MLIR_TypeHandle ty = vt_to_type(ctx, arg_vts[i]);
-        MLIR_ValueHandle a = MLIR_CreateValueBlockArg(ctx, (string){0}, (uint32_t)i, ty,
-                                                     MLIR_CreateLocationUnknown(ctx, (string){0}));
-        MLIR_AppendBlockArg(ctx, blk, a);
+        MLIR_ValueHandle a = MLIR_AddBlockArgument(ctx, blk, ty,
+                                                   MLIR_CreateLocationUnknown(ctx, (string){0}));
         if (out_args) out_args[i] = a;
     }
     return blk;
@@ -808,9 +807,8 @@ static bool lower_scf_while(FnCtx *F, MLIR_OpHandle op) {
     MLIR_BlockHandle loop_body = MLIR_CreateBlock(F->ctx);
     for (size_t i = 0; i < n_iter; i++) {
         MLIR_TypeHandle ty = vt_to_type(F->ctx, iter_vts[i]);
-        MLIR_ValueHandle a = MLIR_CreateValueBlockArg(F->ctx, (string){0}, (uint32_t)i, ty,
-                                                     MLIR_CreateLocationUnknown(F->ctx, (string){0}));
-        MLIR_AppendBlockArg(F->ctx, loop_body, a);
+        MLIR_ValueHandle a = MLIR_AddBlockArgument(F->ctx, loop_body, ty,
+                                                   MLIR_CreateLocationUnknown(F->ctx, (string){0}));
         vmap_set(F, MLIR_GetBlockArg(F->ctx, before_b, i), a);
     }
 
@@ -2329,9 +2327,8 @@ static bool lower_function(MLIR_Context *ctx, Arena *arena, ModCtx *mod,
     MLIR_ValueHandle last_bv = MLIR_INVALID_HANDLE;
     for (size_t i = 0; i < n_params; i++) {
         MLIR_TypeHandle ty = vt_to_type(ctx, param_types[i]);
-        MLIR_ValueHandle bv = MLIR_CreateValueBlockArg(ctx, (string){0}, (uint32_t)i, ty,
-                                                      MLIR_CreateLocationUnknown(ctx, (string){0}));
-        MLIR_AppendBlockArg(ctx, F.body_block, bv);
+        MLIR_ValueHandle bv = MLIR_AddBlockArgument(ctx, F.body_block, ty,
+                                                    MLIR_CreateLocationUnknown(ctx, (string){0}));
         if (i < orig_np) {
             vmap_set(&F, MLIR_GetBlockArg(ctx, entry, i), bv);
         }

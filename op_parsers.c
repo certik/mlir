@@ -2969,9 +2969,11 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
         } else {
             arg_type = mlir_type_create_from_string(parser->ctx, str_lit("index"));
         }
-        MLIR_ValueHandle iv_block_arg = MLIR_CreateValueBlockArg(parser->ctx, loop_name, 0, arg_type, MLIR_INVALID_HANDLE);
-        MLIR_AppendBlockArg(parser->ctx, block, iv_block_arg);
-        if (loop_name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, loop_name, iv_block_arg);
+        MLIR_ValueHandle iv_block_arg = MLIR_AddBlockArgument(parser->ctx, block, arg_type, MLIR_INVALID_HANDLE);
+        if (loop_name.size > 0) {
+            MLIR_SetValueRegisterName(parser->ctx, iv_block_arg, loop_name);
+            symbol_table_add_value(parser->arena, &parser->symbol_table, loop_name, iv_block_arg);
+        }
     }
 
     for (size_t i = 0; i < iter_vars.size; i++) {
@@ -2989,9 +2991,11 @@ OperationParserResult parse_scf_for_op(Parser *parser, const OperationParserPara
         } else {
             arg_type = mlir_type_create_from_string(parser->ctx, str_lit("unknown"));
         }
-        MLIR_ValueHandle iter_block_arg = MLIR_CreateValueBlockArg(parser->ctx, iter_name, (uint32_t)(i + 1), arg_type, MLIR_INVALID_HANDLE);
-        MLIR_AppendBlockArg(parser->ctx, block, iter_block_arg);
-        if (iter_name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, iter_name, iter_block_arg);
+        MLIR_ValueHandle iter_block_arg = MLIR_AddBlockArgument(parser->ctx, block, arg_type, MLIR_INVALID_HANDLE);
+        if (iter_name.size > 0) {
+            MLIR_SetValueRegisterName(parser->ctx, iter_block_arg, iter_name);
+            symbol_table_add_value(parser->arena, &parser->symbol_table, iter_name, iter_block_arg);
+        }
     }
 
     bool prev_flag = parser->capture_trailing_comments;
@@ -3285,15 +3289,17 @@ OperationParserResult parse_gpu_launch_op(Parser *parser, const OperationParserP
     parser_expect(parser, TK_NEWLINE);
 
     MLIR_BlockHandle gpu_block = MLIR_CreateBlock(parser->ctx);
-    for (size_t i = 0; i < launch_args.size; i++) {
-        MLIR_ValueHandle arg = launch_args.data[i];
-        MLIR_AppendBlockArg(parser->ctx, gpu_block, arg);
-    }
-
     symbol_table_push_scope(parser->arena, &parser->symbol_table);
     for (size_t i = 0; i < launch_args.size; i++) {
-        string name = MLIR_GetValueRegisterName(params->ctx, launch_args.data[i]);
-        if (name.size > 0) symbol_table_add_value(parser->arena, &parser->symbol_table, name, launch_args.data[i]);
+        MLIR_ValueHandle old_arg = launch_args.data[i];
+        string name = MLIR_GetValueRegisterName(params->ctx, old_arg);
+        MLIR_ValueHandle arg = MLIR_AddBlockArgument(parser->ctx, gpu_block,
+            MLIR_GetValueType(params->ctx, old_arg), MLIR_INVALID_HANDLE);
+        if (name.size > 0) {
+            MLIR_SetValueRegisterName(parser->ctx, arg, name);
+            symbol_table_add_value(parser->arena, &parser->symbol_table, name, arg);
+        }
+        launch_args.data[i] = arg;
     }
 
     while (!parser_peek(parser, TK_RBRACE)) {
@@ -4042,8 +4048,8 @@ OperationParserResult parse_affine_for_op(Parser *parser, const OperationParserP
 
     MLIR_BlockHandle block = MLIR_CreateBlock(parser->ctx);
     if (iv_name.size > 0) {
-        MLIR_ValueHandle iv_block_arg = MLIR_CreateValueBlockArg(parser->ctx, iv_name, (uint32_t)MLIR_GetBlockNumArgs(params->ctx, block), mlir_type_create_from_string(parser->ctx, str_lit("index")), MLIR_INVALID_HANDLE);
-        MLIR_AppendBlockArg(parser->ctx, block, iv_block_arg);
+        MLIR_ValueHandle iv_block_arg = MLIR_AddBlockArgument(parser->ctx, block, mlir_type_create_from_string(parser->ctx, str_lit("index")), MLIR_INVALID_HANDLE);
+        MLIR_SetValueRegisterName(parser->ctx, iv_block_arg, iv_name);
         symbol_table_add_value(parser->arena, &parser->symbol_table, iv_name, iv_block_arg);
     }
 

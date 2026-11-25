@@ -71,11 +71,11 @@ MLIR_OpHandle construct_test_module_full(MLIR_Context *ctx) {
     MLIR_BlockHandle func_block = MLIR_CreateBlock(ctx);
 
     // Function block arguments (%arg0, %arg1)
-    MLIR_ValueHandle arg0 = MLIR_CreateValueBlockArg(ctx, str_lit("%arg0"), 0, i32_type, MLIR_INVALID_HANDLE);
-    MLIR_AppendBlockArg(ctx, func_block, arg0);
+    MLIR_ValueHandle arg0 = MLIR_AddBlockArgument(ctx, func_block, i32_type, MLIR_INVALID_HANDLE);
+    MLIR_SetValueRegisterName(ctx, arg0, str_lit("%arg0"));
 
-    MLIR_ValueHandle arg1 = MLIR_CreateValueBlockArg(ctx, str_lit("%arg1"), 1, i32_type, MLIR_INVALID_HANDLE);
-    MLIR_AppendBlockArg(ctx, func_block, arg1);
+    MLIR_ValueHandle arg1 = MLIR_AddBlockArgument(ctx, func_block, i32_type, MLIR_INVALID_HANDLE);
+    MLIR_SetValueRegisterName(ctx, arg1, str_lit("%arg1"));
 
     // %0 = arith.constant 5 : i32
     // %1 = arith.addi %arg0, %arg1 : i32
