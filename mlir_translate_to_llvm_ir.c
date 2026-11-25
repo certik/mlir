@@ -955,7 +955,55 @@ static void collect_all_ops(MLIR_Context *ctx, MLIR_RegionHandle body, MLIR_OpHa
     }
 }
 
-static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
+// Emit an LLVM IR string literal with quotes and hex escapes if needed.
+static void emit_attr_quoted(Buf *out, string s) {
+    buf_putc(out, '"');
+    for (size_t i = 0; i < s.size; i++) {
+        unsigned char c = (unsigned char)s.str[i];
+        if (c == '"' || c == '\\' || c < 0x20 || c >= 0x7f)
+            buf_printf(out, "\\%02X", c);
+        else
+            buf_putc(out, (char)c);
+    }
+    buf_putc(out, '"');
+}
+
+static bool has_nonempty_passthrough(MLIR_Context *ctx, MLIR_OpHandle fn) {
+    MLIR_AttributeHandle pt = find_attr(ctx, fn, MLIR_KEY_PASSTHROUGH);
+    return pt != MLIR_INVALID_HANDLE &&
+           MLIR_GetAttributeKind(ctx, pt) == MLIR_ATTR_KIND_ARRAY &&
+           MLIR_GetAttributeArraySize(ctx, pt) > 0;
+}
+
+static void emit_passthrough_group(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn, size_t group_id) {
+    MLIR_AttributeHandle pt = find_attr(ctx, fn, MLIR_KEY_PASSTHROUGH);
+    if (pt == MLIR_INVALID_HANDLE || MLIR_GetAttributeKind(ctx, pt) != MLIR_ATTR_KIND_ARRAY)
+        return;
+    size_t n = MLIR_GetAttributeArraySize(ctx, pt);
+    buf_printf(out, "attributes #%zu = { ", group_id);
+    for (size_t i = 0; i < n; i++) {
+        MLIR_AttributeHandle e = MLIR_GetAttributeArrayElement(ctx, pt, i);
+        MLIR_AttrKind k = MLIR_GetAttributeKind(ctx, e);
+        if (k == MLIR_ATTR_KIND_STRING) {
+            string s = MLIR_GetAttributeString(ctx, e);
+            emit_attr_quoted(out, s);
+            buf_putc(out, ' ');
+        } else if (k == MLIR_ATTR_KIND_ARRAY && MLIR_GetAttributeArraySize(ctx, e) >= 2) {
+            MLIR_AttributeHandle ka = MLIR_GetAttributeArrayElement(ctx, e, 0);
+            MLIR_AttributeHandle va = MLIR_GetAttributeArrayElement(ctx, e, 1);
+            if (MLIR_GetAttributeKind(ctx, ka) == MLIR_ATTR_KIND_STRING &&
+                MLIR_GetAttributeKind(ctx, va) == MLIR_ATTR_KIND_STRING) {
+                emit_attr_quoted(out, MLIR_GetAttributeString(ctx, ka));
+                buf_putc(out, '=');
+                emit_attr_quoted(out, MLIR_GetAttributeString(ctx, va));
+                buf_putc(out, ' ');
+            }
+        }
+    }
+    buf_cstr(out, "}\n");
+}
+
+static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn, int attr_group_id) {
     string sym = {0};
     MLIR_TypeHandle fty = MLIR_INVALID_HANDLE;
     MLIR_AttributeHandle visa = find_attr(ctx, fn, MLIR_KEY_SYM_VISIBILITY);
@@ -987,7 +1035,8 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
             print_type(out, ctx, MLIR_GetTypeFunctionInput(ctx, fty, i));
         }
         if (varargs) { if (ni) buf_cstr(out, ", "); buf_cstr(out, "..."); }
-        buf_cstr(out, ")\n");
+        if (attr_group_id >= 0) buf_printf(out, ") #%d\n", attr_group_id);
+        else                    buf_cstr(out, ")\n");
         return;
     }
 
@@ -1010,7 +1059,8 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn) {
         emit_use(&F, a);
     }
     if (varargs) { if (ni) buf_cstr(out, ", "); buf_cstr(out, "..."); }
-    buf_cstr(out, ") {\n");
+    if (attr_group_id >= 0) buf_printf(out, ") #%d {\n", attr_group_id);
+    else                    buf_cstr(out, ") {\n");
 
     // Collect all ops (for predecessor scans).
     MLIR_OpHandle *all = NULL; size_t an = 0, ac = 0;
@@ -1464,9 +1514,21 @@ string MLIR_TranslateModuleToLLVMIR(MLIR_Context *ctx, MLIR_OpHandle module) {
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
         if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_MLIR_GLOBAL) emit_global(ctx, &out, op);
     }
+    int next_attr_group = 0;
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
-        if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_FUNC) emit_function(ctx, &out, op);
+        if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_FUNC) {
+            int gid = has_nonempty_passthrough(ctx, op) ? next_attr_group++ : -1;
+            emit_function(ctx, &out, op, gid);
+        }
+    }
+    if (next_attr_group > 0) {
+        size_t gid = 0;
+        for (size_t i = 0; i < nops; i++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
+            if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_FUNC && has_nonempty_passthrough(ctx, op))
+                emit_passthrough_group(ctx, &out, op, gid++);
+        }
     }
 
     // Copy result into the arena.

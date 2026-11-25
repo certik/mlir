@@ -213,7 +213,9 @@ typedef enum {
     AK_TYPE,        // type: the payload
     AK_DENSE_I32,   // n values, one word each, from ax[first]
     AK_DENSE_I64,   // n values, two words each (low, high), from ax[first]
-    AK_DISTINCT     // type: the referenced attribute's index; bits: number
+    AK_DISTINCT,    // type: the referenced attribute's index; bits: number
+    AK_FASTMATH,    // bits: MLIR_FastMath bitmask
+    AK_SPLAT        // type: vector/shaped type index; bits: scalar attribute index
 } AttrKindInternal;
 
 typedef struct IR_Attr {
@@ -2217,6 +2219,143 @@ MLIR_AttributeHandle MLIR_CreateAttributeDistinct(MLIR_Context *ctx, MLIR_Attrib
     a.bits = idx;
     ATTRS(ctx)[idx] = a;
     return ATTR_H(ctx, idx);
+}
+
+MLIR_AttributeHandle MLIR_CreateAttributeFastMath(MLIR_Context *ctx, MLIR_FastMath fmf) {
+    return ATTR_H(ctx, attr_intern_scalar(ctx, AK_FASTMATH, 0, (uint64_t)(fmf & MLIR_FMF_FAST)));
+}
+
+MLIR_FastMath MLIR_GetAttributeFastMath(MLIR_Context *ctx, MLIR_AttributeHandle ah) {
+    if (ah == MLIR_INVALID_HANDLE) return MLIR_FMF_NONE;
+    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeFastMath");
+    if (r->kind != AK_FASTMATH) return MLIR_FMF_NONE;
+    return (MLIR_FastMath)(r->bits & MLIR_FMF_FAST);
+}
+
+MLIR_FastMath MLIR_GetOpFastMath(MLIR_Context *ctx, MLIR_OpHandle op) {
+    MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, op, MLIR_KEY_FASTMATH_FLAGS);
+    if (a == MLIR_INVALID_HANDLE) return MLIR_FMF_NONE;
+    return MLIR_GetAttributeFastMath(ctx, a);
+}
+
+void MLIR_SetOpFastMath(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_FastMath fmf) {
+    MLIR_SetOpAttr(ctx, op, MLIR_KEY_FASTMATH_FLAGS,
+                   MLIR_CreateAttributeFastMath(ctx, fmf));
+}
+
+MLIR_AttributeHandle MLIR_CreateAttributeSplat(MLIR_Context *ctx,
+                                               MLIR_TypeHandle vec_type,
+                                               MLIR_AttributeHandle scalar_attr) {
+    uint32_t ti = TYPE_IDX(ctx, vec_type, "MLIR_CreateAttributeSplat");
+    uint32_t ai = ATTR_IDX(ctx, scalar_attr, "MLIR_CreateAttributeSplat");
+    return ATTR_H(ctx, attr_intern_scalar(ctx, AK_SPLAT, ti, (uint64_t)ai));
+}
+
+static bool native_lane_in_bounds(MLIR_Context *ctx, MLIR_TypeHandle ty, int64_t lane) {
+    if (lane < 0) return true;
+    MLIR_TypeKind k = MLIR_GetTypeKind(ctx, ty);
+    if (k == MLIR_TYPE_KIND_VECTOR || k == MLIR_TYPE_KIND_TENSOR) {
+        uint64_t n = MLIR_GetTypeNumElements(ctx, ty);
+        return (uint64_t)lane < n;
+    }
+    return lane == 0;
+}
+
+bool MLIR_MatchConstantFloat(MLIR_Context *ctx, MLIR_ValueHandle v, int64_t lane, double *out) {
+    if (v == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetValueKind(ctx, v) != MLIR_VALUE_OP_RESULT) return false;
+    MLIR_OpHandle def = MLIR_GetValueDefiningOp(ctx, v);
+    if (def == MLIR_INVALID_HANDLE) return false;
+    MLIR_OpType t = MLIR_GetOpType(ctx, def);
+    if (t == OP_TYPE_LLVM_MLIR_ZERO) {
+        MLIR_TypeHandle vty = MLIR_GetValueType(ctx, v);
+        MLIR_TypeHandle ety = (MLIR_GetTypeKind(ctx, vty) == MLIR_TYPE_KIND_VECTOR)
+            ? MLIR_GetTypeElement(ctx, vty) : vty;
+        MLIR_TypeKind ek = MLIR_GetTypeKind(ctx, ety);
+        if ((ek == MLIR_TYPE_KIND_FLOAT || ek == MLIR_TYPE_KIND_BF16) &&
+            native_lane_in_bounds(ctx, vty, lane)) {
+            if (out) *out = 0.0;
+            return true;
+        }
+        return false;
+    }
+    if (!MLIR_OpHasTrait(ctx, def, MLIR_T_CONSTANT)) return false;
+    MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, def, MLIR_KEY_VALUE);
+    if (a == MLIR_INVALID_HANDLE) return false;
+    const IR_Attr *r = ATTR_REC(ctx, a, "MLIR_MatchConstantFloat");
+    if (r->kind == AK_FLOAT) {
+        if (lane > 0) return false;
+        double d;
+        memcpy(&d, &r->bits, sizeof d);
+        if (out) *out = d;
+        return true;
+    }
+    if (r->kind == AK_SPLAT) {
+        MLIR_TypeHandle sty = TYPE_H(ctx, r->type);
+        if (!native_lane_in_bounds(ctx, sty, lane)) return false;
+        const IR_Attr *sr = &ATTRS(ctx)[(uint32_t)r->bits];
+        if (sr->kind != AK_FLOAT) return false;
+        double d;
+        memcpy(&d, &sr->bits, sizeof d);
+        if (out) *out = d;
+        return true;
+    }
+    return false;
+}
+
+bool MLIR_MatchConstantInt(MLIR_Context *ctx, MLIR_ValueHandle v, int64_t lane, int64_t *out) {
+    if (v == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetValueKind(ctx, v) != MLIR_VALUE_OP_RESULT) return false;
+    MLIR_OpHandle def = MLIR_GetValueDefiningOp(ctx, v);
+    if (def == MLIR_INVALID_HANDLE) return false;
+    MLIR_OpType t = MLIR_GetOpType(ctx, def);
+    if (t == OP_TYPE_LLVM_MLIR_ZERO) {
+        MLIR_TypeHandle vty = MLIR_GetValueType(ctx, v);
+        MLIR_TypeHandle ety = (MLIR_GetTypeKind(ctx, vty) == MLIR_TYPE_KIND_VECTOR)
+            ? MLIR_GetTypeElement(ctx, vty) : vty;
+        MLIR_TypeKind ek = MLIR_GetTypeKind(ctx, ety);
+        if ((ek == MLIR_TYPE_KIND_INTEGER || ek == MLIR_TYPE_KIND_INDEX) &&
+            native_lane_in_bounds(ctx, vty, lane)) {
+            if (out) *out = 0;
+            return true;
+        }
+        return false;
+    }
+    if (!MLIR_OpHasTrait(ctx, def, MLIR_T_CONSTANT)) return false;
+    MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, def, MLIR_KEY_VALUE);
+    if (a == MLIR_INVALID_HANDLE) return false;
+    const IR_Attr *r = ATTR_REC(ctx, a, "MLIR_MatchConstantInt");
+    if (r->kind == AK_INTEGER || r->kind == AK_BOOL) {
+        if (lane > 0) return false;
+        if (out) *out = (int64_t)r->bits;
+        return true;
+    }
+    if (r->kind == AK_SPLAT) {
+        MLIR_TypeHandle sty = TYPE_H(ctx, r->type);
+        if (!native_lane_in_bounds(ctx, sty, lane)) return false;
+        const IR_Attr *sr = &ATTRS(ctx)[(uint32_t)r->bits];
+        if (sr->kind != AK_INTEGER && sr->kind != AK_BOOL) return false;
+        if (out) *out = (int64_t)sr->bits;
+        return true;
+    }
+    return false;
+}
+
+bool MLIR_IsConstantZero(MLIR_Context *ctx, MLIR_ValueHandle v, int64_t lane) {
+    if (v == MLIR_INVALID_HANDLE) return false;
+    if (MLIR_GetValueKind(ctx, v) == MLIR_VALUE_OP_RESULT) {
+        MLIR_OpHandle def = MLIR_GetValueDefiningOp(ctx, v);
+        if (def != MLIR_INVALID_HANDLE) {
+            MLIR_OpType t = MLIR_GetOpType(ctx, def);
+            if (t == OP_TYPE_LLVM_MLIR_ZERO || t == OP_TYPE_LLVM_MLIR_NULL)
+                return native_lane_in_bounds(ctx, MLIR_GetValueType(ctx, v), lane);
+        }
+    }
+    int64_t iv = 0;
+    if (MLIR_MatchConstantInt(ctx, v, lane, &iv)) return iv == 0;
+    double dv = 0.0;
+    if (MLIR_MatchConstantFloat(ctx, v, lane, &dv)) return dv == 0.0;
+    return false;
 }
 
 // Value creation
