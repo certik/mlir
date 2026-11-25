@@ -802,6 +802,29 @@ extern "C" MLIR_OpHandle MLIR_BuildOp(MLIR_Builder *b, const MLIR_OpSpec *spec) 
     return H(op);
 }
 
+extern "C" MLIR_ValueHandle MLIR_BuildBinary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y) {
+    MLIR_ValueHandle ops[2] = { x, y };
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = ops;
+    s.n_operands = 2;
+    s.result_types = &rt;
+    s.n_results = 1;
+    return valH(F<mlir::Operation>(MLIR_BuildOp(b, &s))->getResult(0));
+}
+
+extern "C" MLIR_ValueHandle MLIR_BuildUnary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x) {
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = &x;
+    s.n_operands = 1;
+    s.result_types = &rt;
+    s.n_results = 1;
+    return valH(F<mlir::Operation>(MLIR_BuildOp(b, &s))->getResult(0));
+}
+
 extern "C" void MLIR_GetOpSuccessorOperandRange(MLIR_Context *ctx, MLIR_OpHandle h,
                                                 size_t succ, size_t *first, size_t *count) {
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpSuccessorOperandRange");

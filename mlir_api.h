@@ -378,30 +378,11 @@ MLIR_Builder MLIR_BuilderAfter(MLIR_Context *ctx, MLIR_OpHandle op);
 // and insert it at `b`'s insertion point.
 MLIR_OpHandle MLIR_BuildOp(MLIR_Builder *b, const MLIR_OpSpec *spec);
 
-static inline MLIR_ValueHandle MLIR_BuildBinary(MLIR_Builder *b, MLIR_OpType t,
-        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y) {
-    MLIR_ValueHandle ops[2];
-    ops[0] = x;
-    ops[1] = y;
-    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
-    s.type = t;
-    s.operands = ops;
-    s.n_operands = 2;
-    s.result_types = &rt;
-    s.n_results = 1;
-    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
-}
+MLIR_ValueHandle MLIR_BuildBinary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y);
 
-static inline MLIR_ValueHandle MLIR_BuildUnary(MLIR_Builder *b, MLIR_OpType t,
-        MLIR_TypeHandle rt, MLIR_ValueHandle x) {
-    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
-    s.type = t;
-    s.operands = &x;
-    s.n_operands = 1;
-    s.result_types = &rt;
-    s.n_results = 1;
-    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
-}
+MLIR_ValueHandle MLIR_BuildUnary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x);
 
 MLIR_ValueHandle MLIR_BuildConstantInt(MLIR_Builder *b, MLIR_OpType t,
         MLIR_TypeHandle rt, int64_t v);

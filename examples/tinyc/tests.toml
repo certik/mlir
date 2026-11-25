@@ -1613,8 +1613,8 @@ wasm_upstream_skip = true
 wasm_native_emit = "wasmssa"
 wasm_native_direct_source = true
 wasm_native_emit_regex = [
-  "sym_name = \"math_s0\"[^\n]*is_const = true",
-  "sym_name = \"math_pi\"[^\n]*is_const = true",
+  "(sym_name = \"math_s0\"[^\n]*is_const = true|is_const = true[^\n]*sym_name = \"math_s0\")",
+  "(sym_name = \"math_pi\"[^\n]*is_const = true|is_const = true[^\n]*sym_name = \"math_pi\")",
 ]
 
 [[test]]
