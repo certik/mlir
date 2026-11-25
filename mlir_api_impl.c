@@ -92,19 +92,29 @@ typedef struct IR_Operand {
 } IR_Operand;
 
 // IR_Value.index: the result or argument index, plus these flags.
-#define VAL_BLOCK_ARG 0x80000000u  // a block argument (else an op result)
-#define VAL_TRACKED   0x40000000u  // has a use list (see value_create)
-#define VAL_INDEX_MASK 0x3fffffffu
+#define VAL_BLOCK_ARG  0x80000000u  // a block argument (else an op result)
+#define VAL_TRACKED    0x40000000u  // has a use list (see value_create)
+#define VAL_HAS_LOC    0x20000000u  // has explicit location in ctx->vloc_map
+#define VAL_HAS_NAME   0x10000000u  // has register name in ctx->vname_map
+#define VAL_INDEX_MASK 0x0fffffffu
 
+// 20-byte compact value record: op-result locations come from the defining op,
+// and rare register names / block-arg locations live in lazy side tables.
 typedef struct IR_Value {
-    uint32_t location;   // location index, 0 = none
     uint32_t type;       // type index, 0 = none
     uint32_t def;        // op index (result) or block index (block argument)
     uint32_t index;      // result/argument index | VAL_* flags
     uint32_t first_use;  // operand index, 0 = no uses
     uint32_t n_uses;
-    uint32_t name;       // register name: index into ctx->names, 0 = none
 } IR_Value;
+
+// Lazy open-addressing u32 -> u32 side table (0 = empty key).
+typedef struct IR_U32Map {
+    uint32_t *keys;
+    uint32_t *vals;
+    uint32_t cap;
+    uint32_t n;
+} IR_U32Map;
 
 // IR_Op.flags
 #define OPF_TRACKED  1u  // operands were linked into use lists at creation
@@ -269,6 +279,9 @@ struct MLIR_Context {
     uint32_t salt;         // MLIR_API_CHECKS handle salt (see h_make)
     // The IR vectors (see above), owned by the context.
     IR_Vec ops, vals, opnds, extra, blocks, regions, op_aux, names;
+    // Lazy side tables for rare per-value metadata (block-arg/standalone locs,
+    // parser/printer register names). Unallocated during normal compiler passes.
+    IR_U32Map vloc_map, vname_map;
     // The uniqued types (see "Types" below): the type records, their child
     // words, the names of identified structs and the hash table that
     // uniques them.
@@ -544,6 +557,59 @@ static void operand_move(MLIR_Context *c, uint32_t from, uint32_t to) {
     o[from].next = o[from].prev = 0;
 }
 
+static void u32map_free(IR_U32Map *m) {
+    if (m->keys) buddy_free(m->keys);
+    if (m->vals) buddy_free(m->vals);
+    m->keys = m->vals = NULL;
+    m->cap = m->n = 0;
+}
+
+static MLIR_NAT_NOINLINE void u32map_grow(IR_U32Map *m) {
+    uint32_t ncap = m->cap ? m->cap * 2 : 64;
+    size_t dummy = 0;
+    uint32_t *nk = (uint32_t *)buddy_alloc((size_t)ncap * sizeof(uint32_t), &dummy);
+    uint32_t *nv = (uint32_t *)buddy_alloc((size_t)ncap * sizeof(uint32_t), &dummy);
+    memset(nk, 0, (size_t)ncap * sizeof(uint32_t));
+    if (m->cap) {
+        uint32_t mask = ncap - 1;
+        for (uint32_t i = 0; i < m->cap; i++) {
+            uint32_t k = m->keys[i];
+            if (!k) continue;
+            uint32_t s = (k * 2654435761u) & mask;
+            while (nk[s]) s = (s + 1) & mask;
+            nk[s] = k;
+            nv[s] = m->vals[i];
+        }
+        buddy_free(m->keys);
+        buddy_free(m->vals);
+    }
+    m->keys = nk;
+    m->vals = nv;
+    m->cap = ncap;
+}
+
+static MLIR_NAT_NOINLINE uint32_t u32map_get(const IR_U32Map *m, uint32_t k) {
+    if (!m->cap || !k) return 0;
+    uint32_t mask = m->cap - 1;
+    uint32_t s = (k * 2654435761u) & mask;
+    while (m->keys[s]) {
+        if (m->keys[s] == k) return m->vals[s];
+        s = (s + 1) & mask;
+    }
+    return 0;
+}
+
+static MLIR_NAT_NOINLINE void u32map_put(IR_U32Map *m, uint32_t k, uint32_t v) {
+    if (!k) return;
+    if ((m->n + 1) * 2 > m->cap) u32map_grow(m);
+    uint32_t mask = m->cap - 1;
+    uint32_t s = (k * 2654435761u) & mask;
+    while (m->keys[s] && m->keys[s] != k) s = (s + 1) & mask;
+    if (!m->keys[s]) m->n++;
+    m->keys[s] = k;
+    m->vals[s] = v;
+}
+
 // A new value record. A value has a use list if the context tracks uses
 // when it is created, or if it has a register name (as before #354).
 static uint32_t value_create(MLIR_Context *c, uint32_t def, uint32_t index,
@@ -551,18 +617,22 @@ static uint32_t value_create(MLIR_Context *c, uint32_t def, uint32_t index,
                              string register_name) {
     uint32_t v = vec_push(&c->vals, 1);
     IR_Value *p = &VALS(c)[v];
-    p->location = LOC_IDX(c, loc, "MLIR_CreateValue");
     p->type = type;
     p->def = def;
     p->index = index & VAL_INDEX_MASK;
     if (!c->no_def_use_tracking || register_name.size != 0) p->index |= VAL_TRACKED;
     p->first_use = 0;
     p->n_uses = 0;
-    p->name = 0;
+    uint32_t loc_idx = LOC_IDX(c, loc, "MLIR_CreateValue");
+    if (loc_idx != 0) {
+        p->index |= VAL_HAS_LOC;
+        u32map_put(&c->vloc_map, v, loc_idx);
+    }
     if (register_name.size != 0) {
         uint32_t n = vec_push(&c->names, 1);
         NAMES(c)[n] = register_name;
-        VALS(c)[v].name = n;
+        VALS(c)[v].index |= VAL_HAS_NAME;
+        u32map_put(&c->vname_map, v, n);
     }
     return v;
 }
@@ -1024,6 +1094,8 @@ void MLIR_DestroyContext(MLIR_Context *ctx) {
     vec_free(&ctx->regions);
     vec_free(&ctx->op_aux);
     vec_free(&ctx->names);
+    u32map_free(&ctx->vloc_map);
+    u32map_free(&ctx->vname_map);
     vec_free(&ctx->types);
     vec_free(&ctx->tyx);
     vec_free(&ctx->tnames);
@@ -1230,14 +1302,12 @@ static inline uint32_t create_op_from_spec_impl(MLIR_Context *ctx, const MLIR_Op
         IR_Value *res = VALS(ctx) + first_result;
         uint32_t track_bit = track ? VAL_TRACKED : 0;
         for (uint32_t i = 0; i < spec->n_results; i++) {
-            res[i].location = loc_idx;
             res[i].def = op;
             res[i].index = (i & VAL_INDEX_MASK) | track_bit;
             res[i].type = spec->result_types
                 ? TYPE_IDX(ctx, spec->result_types[i], "MLIR_CreateOpFromSpec") : 0;
             res[i].n_uses = 0;
             res[i].first_use = 0;
-            res[i].name = 0;
         }
     }
 
@@ -1332,12 +1402,17 @@ MLIR_OpHandle MLIR_BuildOp(MLIR_Builder *b, const MLIR_OpSpec *spec) {
     return OP_H(ctx, op);
 }
 
-static inline void link_operand_fast(IR_Operand *rec, IR_Value *vals, uint32_t u,
-                                     uint32_t v, uint32_t op, bool track) {
+static MLIR_NAT_NOINLINE void builder_insert_slow(MLIR_Builder *b, uint32_t op) {
+    if (b->block != MLIR_INVALID_HANDLE)
+        MLIR_InsertOpBefore(b->ctx, b->block, OP_H(b->ctx, op), b->before);
+}
+
+static inline void link_operand_tracked(IR_Operand *rec, IR_Value *vals, uint32_t u,
+                                        uint32_t v, uint32_t op) {
     rec[u].value = v;
     rec[u].owner = op;
     rec[u].prev = 0;
-    if (MLIR_NAT_LIKELY(track && v != 0 && (vals[v].index & VAL_TRACKED))) {
+    if (MLIR_NAT_LIKELY(v != 0 && (vals[v].index & VAL_TRACKED))) {
         uint32_t head = vals[v].first_use;
         rec[u].next = head;
         if (head) rec[head].prev = u;
@@ -1359,54 +1434,48 @@ MLIR_ValueHandle MLIR_BuildBinary(MLIR_Builder *b, MLIR_OpType t,
     uint32_t res = vec_push(&ctx->vals, 1);
     uint32_t u0 = vec_push(&ctx->opnds, 2);
     bool track = !ctx->no_def_use_tracking;
-    uint32_t loc_idx = LOC_IDX(ctx, b->loc, "MLIR_BuildBinary");
 
     IR_Op *o = &OPS(ctx)[op];
+    memset(o, 0, sizeof(*o));
     o->op_type = (uint16_t)t;
     o->flags = track ? OPF_TRACKED : 0;
     o->n_operands = 2;
-    o->n_succ_operands = 0;
     o->n_results = 1;
-    o->n_regions = 0;
-    o->n_successors = 0;
-    o->n_attributes = 0;
-    o->parent_block = 0;
-    o->block_pos = 0;
     o->first_operand = u0;
     o->first_result = res;
-    o->first_extra = 0;
-    o->first_attr = 0;
-    o->aux = 0;
-    o->location = loc_idx;
+    o->location = LOC_IDX(ctx, b->loc, "MLIR_BuildBinary");
 
     IR_Value *vals = VALS(ctx);
     IR_Value *rv = &vals[res];
-    rv->location = loc_idx;
     rv->type = TYPE_IDX(ctx, rt, "MLIR_BuildBinary");
     rv->def = op;
     rv->index = track ? VAL_TRACKED : 0;
     rv->first_use = 0;
     rv->n_uses = 0;
-    rv->name = 0;
 
     IR_Operand *rec = OPNDS(ctx);
-    link_operand_fast(rec, vals, u0, VAL_IDX(ctx, x, "MLIR_BuildBinary"), op, track);
-    link_operand_fast(rec, vals, u0 + 1, VAL_IDX(ctx, y, "MLIR_BuildBinary"), op, track);
+    uint32_t vx = VAL_IDX(ctx, x, "MLIR_BuildBinary");
+    uint32_t vy = VAL_IDX(ctx, y, "MLIR_BuildBinary");
+    if (MLIR_NAT_LIKELY(track)) {
+        link_operand_tracked(rec, vals, u0, vx, op);
+        link_operand_tracked(rec, vals, u0 + 1, vy, op);
+    } else {
+        rec[u0].value = vx; rec[u0].owner = op; rec[u0].next = 0; rec[u0].prev = 0;
+        rec[u0 + 1].value = vy; rec[u0 + 1].owner = op; rec[u0 + 1].next = 0; rec[u0 + 1].prev = 0;
+    }
 
-    if (MLIR_NAT_LIKELY(b->block != MLIR_INVALID_HANDLE)) {
-        if (MLIR_NAT_LIKELY(b->before == MLIR_INVALID_HANDLE)) {
-            uint32_t bi = BLOCK_IDX(ctx, b->block, "MLIR_BuildBinary");
-            API_CHECK(bi != 0, "MLIR_BuildBinary", "block handle is NULL");
-            IR_Block *blk = &BLOCKS(ctx)[bi];
-            uint32_t pos = blk->n_ops;
-            blk->ops = u32_reserve(ctx->arena, blk->ops, pos, &blk->cap_ops, (size_t)pos + 1);
-            blk->ops[pos] = op;
-            blk->n_ops = pos + 1;
-            o->parent_block = bi;
-            o->block_pos = pos;
-        } else {
-            MLIR_InsertOpBefore(ctx, b->block, OP_H(ctx, op), b->before);
-        }
+    if (MLIR_NAT_LIKELY(b->block != MLIR_INVALID_HANDLE && b->before == MLIR_INVALID_HANDLE)) {
+        uint32_t bi = BLOCK_IDX(ctx, b->block, "MLIR_BuildBinary");
+        API_CHECK(bi != 0, "MLIR_BuildBinary", "block handle is NULL");
+        IR_Block *blk = &BLOCKS(ctx)[bi];
+        uint32_t pos = blk->n_ops;
+        blk->ops = u32_reserve(ctx->arena, blk->ops, pos, &blk->cap_ops, (size_t)pos + 1);
+        blk->ops[pos] = op;
+        blk->n_ops = pos + 1;
+        o->parent_block = bi;
+        o->block_pos = pos;
+    } else {
+        builder_insert_slow(b, op);
     }
     return VAL_H(ctx, res);
 }
@@ -1422,53 +1491,45 @@ MLIR_ValueHandle MLIR_BuildUnary(MLIR_Builder *b, MLIR_OpType t,
     uint32_t res = vec_push(&ctx->vals, 1);
     uint32_t u0 = vec_push(&ctx->opnds, 1);
     bool track = !ctx->no_def_use_tracking;
-    uint32_t loc_idx = LOC_IDX(ctx, b->loc, "MLIR_BuildUnary");
 
     IR_Op *o = &OPS(ctx)[op];
+    memset(o, 0, sizeof(*o));
     o->op_type = (uint16_t)t;
     o->flags = track ? OPF_TRACKED : 0;
     o->n_operands = 1;
-    o->n_succ_operands = 0;
     o->n_results = 1;
-    o->n_regions = 0;
-    o->n_successors = 0;
-    o->n_attributes = 0;
-    o->parent_block = 0;
-    o->block_pos = 0;
     o->first_operand = u0;
     o->first_result = res;
-    o->first_extra = 0;
-    o->first_attr = 0;
-    o->aux = 0;
-    o->location = loc_idx;
+    o->location = LOC_IDX(ctx, b->loc, "MLIR_BuildUnary");
 
     IR_Value *vals = VALS(ctx);
     IR_Value *rv = &vals[res];
-    rv->location = loc_idx;
     rv->type = TYPE_IDX(ctx, rt, "MLIR_BuildUnary");
     rv->def = op;
     rv->index = track ? VAL_TRACKED : 0;
     rv->first_use = 0;
     rv->n_uses = 0;
-    rv->name = 0;
 
     IR_Operand *rec = OPNDS(ctx);
-    link_operand_fast(rec, vals, u0, VAL_IDX(ctx, x, "MLIR_BuildUnary"), op, track);
+    uint32_t vx = VAL_IDX(ctx, x, "MLIR_BuildUnary");
+    if (MLIR_NAT_LIKELY(track)) {
+        link_operand_tracked(rec, vals, u0, vx, op);
+    } else {
+        rec[u0].value = vx; rec[u0].owner = op; rec[u0].next = 0; rec[u0].prev = 0;
+    }
 
-    if (MLIR_NAT_LIKELY(b->block != MLIR_INVALID_HANDLE)) {
-        if (MLIR_NAT_LIKELY(b->before == MLIR_INVALID_HANDLE)) {
-            uint32_t bi = BLOCK_IDX(ctx, b->block, "MLIR_BuildUnary");
-            API_CHECK(bi != 0, "MLIR_BuildUnary", "block handle is NULL");
-            IR_Block *blk = &BLOCKS(ctx)[bi];
-            uint32_t pos = blk->n_ops;
-            blk->ops = u32_reserve(ctx->arena, blk->ops, pos, &blk->cap_ops, (size_t)pos + 1);
-            blk->ops[pos] = op;
-            blk->n_ops = pos + 1;
-            o->parent_block = bi;
-            o->block_pos = pos;
-        } else {
-            MLIR_InsertOpBefore(ctx, b->block, OP_H(ctx, op), b->before);
-        }
+    if (MLIR_NAT_LIKELY(b->block != MLIR_INVALID_HANDLE && b->before == MLIR_INVALID_HANDLE)) {
+        uint32_t bi = BLOCK_IDX(ctx, b->block, "MLIR_BuildUnary");
+        API_CHECK(bi != 0, "MLIR_BuildUnary", "block handle is NULL");
+        IR_Block *blk = &BLOCKS(ctx)[bi];
+        uint32_t pos = blk->n_ops;
+        blk->ops = u32_reserve(ctx->arena, blk->ops, pos, &blk->cap_ops, (size_t)pos + 1);
+        blk->ops[pos] = op;
+        blk->n_ops = pos + 1;
+        o->parent_block = bi;
+        o->block_pos = pos;
+    } else {
+        builder_insert_slow(b, op);
     }
     return VAL_H(ctx, res);
 }
@@ -1485,10 +1546,11 @@ void MLIR_SetValueRegisterName(MLIR_Context *ctx, MLIR_ValueHandle vh, string na
     uint32_t v = VAL_IDX(ctx, vh, "MLIR_SetValueRegisterName");
     API_CHECK(v != 0, "MLIR_SetValueRegisterName", "value handle is NULL");
     if (name.size == 0) return;
-    uint32_t n = VALS(ctx)[v].name;
+    uint32_t n = (VALS(ctx)[v].index & VAL_HAS_NAME) ? u32map_get(&ctx->vname_map, v) : 0;
     if (!n) {
         n = vec_push(&ctx->names, 1);
-        VALS(ctx)[v].name = n;
+        VALS(ctx)[v].index |= VAL_HAS_NAME;
+        u32map_put(&ctx->vname_map, v, n);
     }
     NAMES(ctx)[n] = name;
 }
@@ -1780,7 +1842,12 @@ size_t MLIR_GetBlockIndex(MLIR_Context *ctx, MLIR_BlockHandle bh) {
 
 MLIR_LocationHandle MLIR_GetValueLocation(MLIR_Context *ctx, MLIR_ValueHandle vh) {
     uint32_t v = VAL_IDX(ctx, vh, "MLIR_GetValueLocation");
-    return LOC_H(ctx, VALS(ctx)[v].location);
+    if (!v) return MLIR_INVALID_HANDLE;
+    IR_Value *p = &VALS(ctx)[v];
+    if (p->index & VAL_HAS_LOC) return LOC_H(ctx, u32map_get(&ctx->vloc_map, v));
+    if (!(p->index & VAL_BLOCK_ARG) && p->def != 0)
+        return LOC_H(ctx, OPS(ctx)[p->def].location);
+    return MLIR_INVALID_HANDLE;
 }
 
 // Stubs for two mlir_api_upstream.h entry points, so that the `parser` test
@@ -2768,7 +2835,8 @@ MLIR_TypeHandle MLIR_GetValueType(MLIR_Context *ctx, MLIR_ValueHandle vh) {
 
 string MLIR_GetValueRegisterName(MLIR_Context *ctx, MLIR_ValueHandle vh) {
     uint32_t v = VAL_IDX(ctx, vh, "MLIR_GetValueRegisterName");
-    uint32_t n = VALS(ctx)[v].name;
+    if (!v || !(VALS(ctx)[v].index & VAL_HAS_NAME)) return str_lit("");
+    uint32_t n = u32map_get(&ctx->vname_map, v);
     return n ? NAMES(ctx)[n] : str_lit("");
 }
 

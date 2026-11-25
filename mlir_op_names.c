@@ -425,47 +425,111 @@ MLIR_CFGInfo *MLIR_ComputeCFGInfo(MLIR_Context *ctx, MLIR_RegionHandle region, A
     cfg->loop_depth = NULL;
     cfg->is_loop_header = NULL;
 
-    MLIR_BlockHandle *rpo = NULL;
-    size_t n = MLIR_GetBlockOrder(ctx, region, MLIR_ORDER_RPO, out, &rpo);
-    if (n == 0) return cfg;
+    MLIR_BlockHandle entry = MLIR_GetRegionFirstBlock(ctx, region);
+    if (entry == MLIR_INVALID_HANDLE) return cfg;
 
-    CfgBlkMap rpo_idx;
-    cfg_map_init(&rpo_idx, out, n);
-    for (size_t i = 0; i < n; i++) cfg_map_put(&rpo_idx, rpo[i], (int32_t)i);
+    size_t n_total = 0;
+    for (MLIR_BlockHandle b = entry; b != MLIR_INVALID_HANDLE; b = MLIR_GetBlockNext(ctx, b))
+        n_total++;
 
-    // Build a compact CSR predecessor list (pred_off / pred_rpo) in one pass
-    // over reachable blocks so dominators and natural-loop detection run on
-    // flat int32_t arrays with zero API calls or hash lookups.
-    uint32_t *pred_off = arena_new_array(out, uint32_t, n + 1);
-    memset(pred_off, 0, (n + 1) * sizeof(uint32_t));
-    size_t edge_cap = n * 2 + 8;
+    // Single fused DFS pass: discovers reachable blocks, computes postorder,
+    // caches terminator + successor count on the DFS stack, and records all
+    // CFG edges in dense discovery-id coordinates with only ONE CfgBlkMap.
+    CfgBlkMap dfs_id;
+    cfg_map_init(&dfs_id, out, n_total);
+    MLIR_BlockHandle *stk_blk = arena_new_array(out, MLIR_BlockHandle, n_total);
+    MLIR_OpHandle *stk_term = arena_new_array(out, MLIR_OpHandle, n_total);
+    int32_t *stk_id = arena_new_array(out, int32_t, n_total);
+    uint32_t *stk_succ = arena_new_array(out, uint32_t, n_total);
+    uint32_t *stk_ns = arena_new_array(out, uint32_t, n_total);
+    MLIR_BlockHandle *po_blk = arena_new_array(out, MLIR_BlockHandle, n_total);
+    int32_t *po_id = arena_new_array(out, int32_t, n_total);
+    int32_t *dfs_to_rpo = arena_new_array(out, int32_t, n_total);
+
+    size_t edge_cap = n_total * 2 + 8;
     int32_t *edge_u = arena_new_array(out, int32_t, edge_cap);
     int32_t *edge_v = arena_new_array(out, int32_t, edge_cap);
     size_t n_edges = 0;
-    for (size_t u = 0; u < n; u++) {
-        MLIR_OpHandle term = MLIR_GetBlockLastOp(ctx, rpo[u]);
-        if (term == MLIR_INVALID_HANDLE) continue;
-        size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
-        for (size_t s = 0; s < ns; s++) {
-            MLIR_BlockHandle succ = MLIR_GetOpSuccessor(ctx, term, s);
-            if (succ == MLIR_INVALID_HANDLE) continue;
-            int32_t v = cfg_map_get(&rpo_idx, succ);
-            if (v < 0) continue;
-            if (n_edges == edge_cap) {
-                size_t new_cap = edge_cap * 2;
-                int32_t *nu = arena_new_array(out, int32_t, new_cap);
-                int32_t *nv = arena_new_array(out, int32_t, new_cap);
-                memcpy(nu, edge_u, n_edges * sizeof(int32_t));
-                memcpy(nv, edge_v, n_edges * sizeof(int32_t));
-                edge_u = nu;
-                edge_v = nv;
-                edge_cap = new_cap;
+
+    size_t sp = 0, n_po = 0;
+    int32_t next_id = 0;
+    {
+        MLIR_OpHandle term = MLIR_GetBlockLastOp(ctx, entry);
+        uint32_t ns = (term != MLIR_INVALID_HANDLE) ? (uint32_t)MLIR_GetOpNumSuccessors(ctx, term) : 0;
+        cfg_map_put(&dfs_id, entry, next_id);
+        stk_blk[0] = entry;
+        stk_term[0] = term;
+        stk_id[0] = next_id++;
+        stk_succ[0] = 0;
+        stk_ns[0] = ns;
+        sp = 1;
+    }
+
+    while (sp > 0) {
+        size_t top = sp - 1;
+        uint32_t si = stk_succ[top];
+        if (si < stk_ns[top]) {
+            stk_succ[top] = si + 1;
+            MLIR_BlockHandle succ = MLIR_GetOpSuccessor(ctx, stk_term[top], si);
+            if (succ != MLIR_INVALID_HANDLE) {
+                int32_t cur_id = stk_id[top];
+                int32_t sid = cfg_map_get(&dfs_id, succ);
+                if (sid < 0) {
+                    sid = next_id++;
+                    cfg_map_put(&dfs_id, succ, sid);
+                    MLIR_OpHandle sterm = MLIR_GetBlockLastOp(ctx, succ);
+                    uint32_t sns = (sterm != MLIR_INVALID_HANDLE)
+                        ? (uint32_t)MLIR_GetOpNumSuccessors(ctx, sterm) : 0;
+                    stk_blk[sp] = succ;
+                    stk_term[sp] = sterm;
+                    stk_id[sp] = sid;
+                    stk_succ[sp] = 0;
+                    stk_ns[sp] = sns;
+                    sp++;
+                }
+                if (n_edges == edge_cap) {
+                    size_t new_cap = edge_cap * 2;
+                    int32_t *nu = arena_new_array(out, int32_t, new_cap);
+                    int32_t *nv = arena_new_array(out, int32_t, new_cap);
+                    memcpy(nu, edge_u, n_edges * sizeof(int32_t));
+                    memcpy(nv, edge_v, n_edges * sizeof(int32_t));
+                    edge_u = nu;
+                    edge_v = nv;
+                    edge_cap = new_cap;
+                }
+                edge_u[n_edges] = cur_id;
+                edge_v[n_edges] = sid;
+                n_edges++;
             }
-            edge_u[n_edges] = (int32_t)u;
-            edge_v[n_edges] = v;
-            n_edges++;
-            pred_off[(size_t)v + 1]++;
+        } else {
+            sp = top;
+            po_blk[n_po] = stk_blk[top];
+            po_id[n_po] = stk_id[top];
+            n_po++;
         }
+    }
+
+    size_t n = n_po;
+    if (n == 0) return cfg;
+
+    // Reverse postorder -> RPO and build dense dfs_id -> rpo_idx table.
+    MLIR_BlockHandle *rpo = arena_new_array(out, MLIR_BlockHandle, n);
+    for (size_t i = 0; i < n; i++) {
+        size_t ri = n - 1 - i;
+        rpo[ri] = po_blk[i];
+        dfs_to_rpo[po_id[i]] = (int32_t)ri;
+    }
+
+    // Build compact CSR predecessor array in RPO coordinates (zero hash lookups,
+    // zero second pass over ops/successors).
+    uint32_t *pred_off = arena_new_array(out, uint32_t, n + 1);
+    memset(pred_off, 0, (n + 1) * sizeof(uint32_t));
+    for (size_t e = 0; e < n_edges; e++) {
+        int32_t u = dfs_to_rpo[edge_u[e]];
+        int32_t v = dfs_to_rpo[edge_v[e]];
+        edge_u[e] = u;
+        edge_v[e] = v;
+        pred_off[(size_t)v + 1]++;
     }
     for (size_t i = 0; i < n; i++) pred_off[i + 1] += pred_off[i];
     int32_t *pred_rpo = arena_new_array(out, int32_t, n_edges > 0 ? n_edges : 1);
