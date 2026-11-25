@@ -95,6 +95,7 @@ typedef struct {
     MLIR_Context    *ctx;
     Arena           *arena;
     MLIR_BlockHandle body;
+    MLIR_BlockHandle src_body;
 } ModCtx;
 
 // =============================================================================
@@ -534,6 +535,16 @@ static int32_t *parse_dense_i32_array(MLIR_Context *ctx, Arena *arena, MLIR_Attr
 // addressof path; that's fine because main / defined funcs that take
 // their own address are rare and not exercised by the test corpus.
 static bool is_function_symbol(const ModCtx *m, const char *nm, size_t nlen) {
+    if (m->src_body != MLIR_INVALID_HANDLE) {
+        for (MLIR_OpHandle op = MLIR_GetBlockFirstOp(m->ctx, m->src_body);
+             op != MLIR_INVALID_HANDLE; op = MLIR_GetOpNext(m->ctx, op)) {
+            if (MLIR_GetOpType(m->ctx, op) != OP_TYPE_LLVM_FUNC) continue;
+            MLIR_AttributeHandle sa = MLIR_GetOpAttr(m->ctx, op, MLIR_KEY_SYM_NAME);
+            if (sa == MLIR_INVALID_HANDLE) continue;
+            string s = MLIR_GetAttributeString(m->ctx, sa);
+            if (s.size == nlen && memcmp(s.str, nm, nlen) == 0) return true;
+        }
+    }
     size_t n = MLIR_GetBlockNumOps(m->ctx, m->body);
     for (size_t i = 0; i < n; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(m->ctx, m->body, i);
@@ -2839,6 +2850,7 @@ MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module) {
     mod.ctx = ctx;
     mod.arena = arena;
     mod.body = body;
+    mod.src_body = mb;
 
     // Pass 1: imported (declared, body-less) funcs first so they take the
     // low function-index space in wasm.

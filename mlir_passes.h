@@ -79,6 +79,52 @@ typedef struct MLIR_LiftCfToScfOptions {
 bool MLIR_LiftCfToScf(MLIR_Context *ctx, MLIR_OpHandle module,
                       const MLIR_LiftCfToScfOptions *options);
 
+// -----------------------------------------------------------------------------
+// Pass and pipeline infrastructure (doc/mlir_api_design.md section 3.3)
+// -----------------------------------------------------------------------------
+
+typedef struct MLIR_PassContext {
+    MLIR_Context          *ctx;
+    const MLIR_TargetInfo *target;   // optional target info; may be NULL
+    Arena                 *scratch;  // reset after each pass invocation
+} MLIR_PassContext;
+
+typedef enum {
+    MLIR_ANCHOR_MODULE = 0,
+    MLIR_ANCHOR_FUNCTION
+} MLIR_PassAnchor;
+
+typedef bool (*MLIR_PassFn)(MLIR_PassContext *pc, MLIR_OpHandle anchor, void *state);
+
+typedef struct MLIR_Pass {
+    string          name;            // for timing, diagnostics, print_after
+    MLIR_PassAnchor anchor;          // FUNCTION = every op with MLIR_T_FUNCTION and a body
+    MLIR_PassFn     run;
+    void           *state;
+} MLIR_Pass;
+
+typedef struct MLIR_PipelineOptions {
+    const MLIR_TargetInfo *target;       // passed through to MLIR_PassContext.target
+    bool                   verify_each;  // MLIR_VerifyOp after every pass
+    bool                   timing;       // per-pass wall time via MLIR_DIAG_REMARK
+    string                 print_after;  // pass name or "*"; empty = none
+} MLIR_PipelineOptions;
+
+// Runs `passes[0..n-1]` in order on `module`. Returns true if every pass
+// (and verification when `verify_each` is set) succeeded. `opts` may be NULL.
+bool MLIR_RunPasses(MLIR_Context *ctx, MLIR_OpHandle module,
+                    const MLIR_Pass *passes, size_t n,
+                    const MLIR_PipelineOptions *opts);
+
+// Standard in-tree passes as MLIR_Pass values. Each constructor lives in its
+// pass's translation unit so callers only link the passes they reference.
+MLIR_Pass MLIR_PassMem2Reg(void);
+MLIR_Pass MLIR_PassLoadCSE(void);
+MLIR_Pass MLIR_PassArithGVN(void);
+MLIR_Pass MLIR_PassDCE(void);
+MLIR_Pass MLIR_PassLowerToLLVMDialect(void);
+MLIR_Pass MLIR_PassLiftCfToScf(const MLIR_LiftCfToScfOptions *options);
+
 #ifdef __cplusplus
 }
 #endif

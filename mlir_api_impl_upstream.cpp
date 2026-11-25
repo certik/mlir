@@ -96,6 +96,8 @@ extern "C" {
 #include "mlir_op_names.h"
 #include "mlir_parser.h"
 #include "mlir_passes.h"
+#include "mlir_generic_printer.h"
+#include <platform/platform.h>
 #include "mlir_printer.h"
 }
 
@@ -1693,7 +1695,7 @@ extern "C" bool MLIR_MatchConstantFloat(MLIR_Context *ctx, MLIR_ValueHandle v,
     auto *op = F<mlir::Operation>(def);
     MLIR_OpType t = MLIR_GetOpType(ctx, def);
     if (t == OP_TYPE_LLVM_MLIR_ZERO) {
-        mlir::Type vty = F<ValueBox>(v)->v.getType();
+        mlir::Type vty = valF(v).getType();
         mlir::Type ety = vty;
         if (auto st = llvm::dyn_cast<mlir::ShapedType>(vty)) ety = st.getElementType();
         if (llvm::isa<mlir::FloatType>(ety) && upstream_lane_in_bounds(vty, lane)) {
@@ -1732,7 +1734,7 @@ extern "C" bool MLIR_MatchConstantInt(MLIR_Context *ctx, MLIR_ValueHandle v,
     auto *op = F<mlir::Operation>(def);
     MLIR_OpType t = MLIR_GetOpType(ctx, def);
     if (t == OP_TYPE_LLVM_MLIR_ZERO) {
-        mlir::Type vty = F<ValueBox>(v)->v.getType();
+        mlir::Type vty = valF(v).getType();
         mlir::Type ety = vty;
         if (auto st = llvm::dyn_cast<mlir::ShapedType>(vty)) ety = st.getElementType();
         if ((llvm::isa<mlir::IntegerType>(ety) || llvm::isa<mlir::IndexType>(ety)) &&
@@ -1770,7 +1772,7 @@ extern "C" bool MLIR_IsConstantZero(MLIR_Context *ctx, MLIR_ValueHandle v, int64
         if (def != MLIR_INVALID_HANDLE) {
             MLIR_OpType t = MLIR_GetOpType(ctx, def);
             if (t == OP_TYPE_LLVM_MLIR_ZERO || t == OP_TYPE_LLVM_MLIR_NULL)
-                return upstream_lane_in_bounds(F<ValueBox>(v)->v.getType(), lane);
+                return upstream_lane_in_bounds(valF(v).getType(), lane);
         }
     }
     int64_t iv = 0;
@@ -3020,4 +3022,125 @@ extern "C" string MLIR_TranslateModuleToWasmUpstream(MLIR_Context *ctx,
     result.str = buf;
     result.size = obj_bytes.size();
     return result;
+}
+
+// -----------------------------------------------------------------------------
+// Pass and pipeline infrastructure (#355): CPassAdapter on mlir::PassManager
+// -----------------------------------------------------------------------------
+
+namespace {
+
+struct CPassShared {
+    MLIR_Context *cctx;
+    MLIR_Pass pass;
+    const MLIR_TargetInfo *target;
+    Arena *scratch;
+    arena_pos_t scratchBase;
+    bool timing;
+    uint64_t elapsedNs = 0;
+};
+
+struct CPassAdapter
+    : public mlir::PassWrapper<CPassAdapter, mlir::OperationPass<>> {
+    MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(CPassAdapter)
+
+    std::shared_ptr<CPassShared> shared;
+    std::string passName;
+
+    explicit CPassAdapter(std::shared_ptr<CPassShared> s)
+        : shared(std::move(s)),
+          passName(shared->pass.name.str, shared->pass.name.size) {}
+
+    llvm::StringRef getArgument() const override { return passName; }
+    llvm::StringRef getDescription() const override { return passName; }
+    std::unique_ptr<mlir::Pass> clonePass() const override {
+        return std::make_unique<CPassAdapter>(shared);
+    }
+
+    void runOnOperation() override {
+        mlir::Operation *op = getOperation();
+        if (shared->pass.anchor == MLIR_ANCHOR_FUNCTION) {
+            if (op->getNumRegions() == 0 || op->getRegion(0).empty()) return;
+        }
+        MLIR_PassContext pc;
+        pc.ctx = shared->cctx;
+        pc.target = shared->target;
+        pc.scratch = shared->scratch;
+        uint64_t t0 = shared->timing ? platform_clock_ns() : 0;
+        bool ok = shared->pass.run(&pc, H(op), shared->pass.state);
+        if (shared->timing) shared->elapsedNs += (platform_clock_ns() - t0);
+        arena_reset(shared->scratch, shared->scratchBase);
+        if (!ok) signalPassFailure();
+    }
+};
+
+static bool upstream_should_print_after(string print_after, string name) {
+    if (print_after.size == 0) return false;
+    return str_eq(print_after, str_lit("*")) || str_eq(print_after, name);
+}
+
+} // namespace
+
+extern "C" bool MLIR_RunPasses(MLIR_Context *ctx, MLIR_OpHandle module_h,
+                               const MLIR_Pass *passes, size_t n,
+                               const MLIR_PipelineOptions *opts) {
+    API_CHECK(ctx != nullptr, "MLIR_RunPasses", "context is NULL");
+    API_CHECK(module_h != MLIR_INVALID_HANDLE, "MLIR_RunPasses", "module handle is NULL");
+    if (n == 0) return true;
+
+    const MLIR_TargetInfo *target = opts ? opts->target : nullptr;
+    bool verify_each = opts ? opts->verify_each : false;
+    bool timing = opts ? opts->timing : false;
+    string print_after = opts ? opts->print_after : str_lit("");
+
+    Arena *scratch = arena_create(256 * 1024);
+    arena_pos_t scratch_base = arena_get_pos(scratch);
+    auto *modOp = F<mlir::Operation>(module_h);
+
+    // C passes share `state` and `scratch` without locking, so run
+    // single-threaded.
+    bool was_mt = ctx->isMultithreadingEnabled();
+    if (was_mt) ctx->disableMultithreading();
+
+    bool all_ok = true;
+    for (size_t i = 0; i < n; i++) {
+        auto shared = std::make_shared<CPassShared>();
+        shared->cctx = ctx;
+        shared->pass = passes[i];
+        shared->target = target;
+        shared->scratch = scratch;
+        shared->scratchBase = scratch_base;
+        shared->timing = timing;
+
+        mlir::PassManager pm(ctx);
+        pm.enableVerifier(verify_each);
+        if (passes[i].anchor == MLIR_ANCHOR_MODULE) {
+            pm.addPass(std::make_unique<CPassAdapter>(shared));
+        } else {
+            pm.nest<mlir::LLVM::LLVMFuncOp>().addPass(std::make_unique<CPassAdapter>(shared));
+            pm.nest<mlir::func::FuncOp>().addPass(std::make_unique<CPassAdapter>(shared));
+        }
+
+        if (mlir::failed(pm.run(modOp))) {
+            all_ok = false;
+            break;
+        }
+        if (timing) {
+            MLIR_EmitDiagnostic(ctx, MLIR_DIAG_REMARK, MLIR_INVALID_HANDLE,
+                                "pass %.*s: %.3f ms",
+                                (int)passes[i].name.size, passes[i].name.str,
+                                (double)shared->elapsedNs * 1e-6);
+        }
+        if (upstream_should_print_after(print_after, passes[i].name)) {
+            string ir = print_operation_generic(ctx, 0, module_h);
+            MLIR_EmitDiagnostic(ctx, MLIR_DIAG_REMARK, MLIR_INVALID_HANDLE,
+                                "// -----// IR Dump After %.*s //----- //\n%.*s",
+                                (int)passes[i].name.size, passes[i].name.str,
+                                (int)ir.size, ir.str);
+        }
+    }
+
+    if (was_mt) ctx->enableMultithreading();
+    arena_destroy(scratch);
+    return all_ok;
 }

@@ -17,6 +17,7 @@
 #include <base/format.h>
 #include <platform/platform.h>
 #include "mlir_api.h"
+#include "mlir_passes.h"
 #include "mlir_generic_printer.h"
 
 // Parser-only type constructors (mlir_parser.h), for the uniquing checks.
@@ -110,6 +111,43 @@ static void capture_diag(void *user, MLIR_DiagSeverity severity,
     c->loc = loc;
     c->len = message.size < sizeof(c->text) ? message.size : sizeof(c->text);
     for (size_t i = 0; i < c->len; i++) c->text[i] = message.str[i];
+}
+
+typedef struct {
+    int module_runs;
+    int fn_runs;
+    int saw_scratch;
+} PassTestState;
+
+static bool test_mod_pass(MLIR_PassContext *pc, MLIR_OpHandle mod, void *state) {
+    PassTestState *st = (PassTestState *)state;
+    st->module_runs++;
+    if (pc->scratch && arena_alloc(pc->scratch, 64) != NULL) st->saw_scratch++;
+    (void)mod;
+    return true;
+}
+
+static bool test_fn_pass(MLIR_PassContext *pc, MLIR_OpHandle fn, void *state) {
+    PassTestState *st = (PassTestState *)state;
+    st->fn_runs++;
+    if (pc->scratch && arena_alloc(pc->scratch, 64) != NULL) st->saw_scratch++;
+    (void)fn;
+    return true;
+}
+
+static bool test_fail_pass(MLIR_PassContext *pc, MLIR_OpHandle mod, void *state) {
+    (void)pc; (void)mod; (void)state;
+    return false;
+}
+
+static bool test_break_ir_pass(MLIR_PassContext *pc, MLIR_OpHandle fn, void *state) {
+    (void)state;
+    // Append an invalid 0-result llvm.add to trigger verify_each failure.
+    MLIR_BlockHandle blk = MLIR_GetRegionFirstBlock(pc->ctx, MLIR_GetOpRegion(pc->ctx, fn, 0));
+    MLIR_OpSpec bad = { OP_TYPE_UNREGISTERED };
+    bad.type = OP_TYPE_LLVM_ADD;
+    MLIR_InsertOpBefore(pc->ctx, blk, MLIR_CreateOpFromSpec(pc->ctx, &bad), MLIR_GetBlockFirstOp(pc->ctx, blk));
+    return true;
 }
 
 int app_main(void) {
@@ -1066,6 +1104,99 @@ int app_main(void) {
         print_string(const_ok && fmf_ok && callee_ok && pt_ok && target_ok && verify_ok
                          ? str_lit("llvm completeness: yes\n")
                          : str_lit("llvm completeness: no\n"));
+    }
+
+    // ---- pass and pipeline infrastructure (#355) ----------------------------
+    {
+        MLIR_OpSpec mspec = {0};
+        mspec.type = OP_TYPE_MODULE;
+        mspec.n_regions = 1;
+        MLIR_OpHandle mod = MLIR_CreateOpFromSpec(ctx, &mspec);
+        MLIR_BlockHandle mb = MLIR_CreateBlock(ctx);
+        MLIR_AppendRegionBlock(ctx, MLIR_GetOpRegion(ctx, mod, 0), mb);
+
+        MLIR_TypeHandle void_ty = MLIR_CreateTypeLLVMVoid(ctx);
+        MLIR_TypeHandle fty = MLIR_CreateTypeLLVMFunction(ctx, void_ty, NULL, 0, false);
+
+        // One declaration (0 blocks) and two definitions (1 block each).
+        MLIR_NamedAttr decl_attrs[2] = {
+            MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("pdecl"))),
+            MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(ctx, fty)),
+        };
+        MLIR_OpSpec fspec = {0};
+        fspec.type = OP_TYPE_LLVM_FUNC;
+        fspec.attrs = decl_attrs;
+        fspec.n_attrs = 2;
+        fspec.n_regions = 1;
+        MLIR_AppendBlockOp(ctx, mb, MLIR_CreateOpFromSpec(ctx, &fspec));
+
+        const char *fnames[2] = { "pdef0", "pdef1" };
+        for (int i = 0; i < 2; i++) {
+            MLIR_NamedAttr fattrs[2] = {
+                MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, (string){ (char *)fnames[i], 5 })),
+                MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(ctx, fty)),
+            };
+            fspec.attrs = fattrs;
+            MLIR_OpHandle fn = MLIR_CreateOpFromSpec(ctx, &fspec);
+            MLIR_AppendBlockOp(ctx, mb, fn);
+            MLIR_BlockHandle fb = MLIR_CreateBlock(ctx);
+            MLIR_AppendRegionBlock(ctx, MLIR_GetOpRegion(ctx, fn, 0), fb);
+            MLIR_OpSpec rspec = {0};
+            rspec.type = OP_TYPE_LLVM_RETURN;
+            MLIR_AppendBlockOp(ctx, fb, MLIR_CreateOpFromSpec(ctx, &rspec));
+        }
+
+        PassTestState st = {0};
+        MLIR_Pass pipeline[2];
+        pipeline[0].name = str_lit("test-mod");
+        pipeline[0].anchor = MLIR_ANCHOR_MODULE;
+        pipeline[0].run = test_mod_pass;
+        pipeline[0].state = &st;
+        pipeline[1].name = str_lit("test-fn");
+        pipeline[1].anchor = MLIR_ANCHOR_FUNCTION;
+        pipeline[1].run = test_fn_pass;
+        pipeline[1].state = &st;
+
+        DiagCapture cap = {0};
+        MLIR_SetDiagnosticHandler(ctx, capture_diag, &cap);
+        MLIR_PipelineOptions popts = {0};
+        popts.verify_each = true;
+        popts.timing = true;
+        popts.print_after = str_lit("test-fn");
+        bool run_ok = MLIR_RunPasses(ctx, mod, pipeline, 2, &popts);
+        // Expected remarks: 2 timing remarks + 1 print_after remark = 3 diagnostics, 0 errors.
+        bool remarks_ok = (cap.count == 3 && !cap.saw_error);
+
+        // Failing pass stops the pipeline before the next pass runs.
+        PassTestState st2 = {0};
+        MLIR_Pass fail_pipe[2];
+        fail_pipe[0].name = str_lit("test-fail");
+        fail_pipe[0].anchor = MLIR_ANCHOR_MODULE;
+        fail_pipe[0].run = test_fail_pass;
+        fail_pipe[0].state = NULL;
+        fail_pipe[1].name = str_lit("after-fail");
+        fail_pipe[1].anchor = MLIR_ANCHOR_MODULE;
+        fail_pipe[1].run = test_mod_pass;
+        fail_pipe[1].state = &st2;
+        bool fail_stopped = !MLIR_RunPasses(ctx, mod, fail_pipe, 2, NULL) && st2.module_runs == 0;
+
+        // verify_each catches an invalid op introduced by a pass.
+        MLIR_Pass bad_pipe[1];
+        bad_pipe[0].name = str_lit("break-ir");
+        bad_pipe[0].anchor = MLIR_ANCHOR_FUNCTION;
+        bad_pipe[0].run = test_break_ir_pass;
+        bad_pipe[0].state = NULL;
+        MLIR_PipelineOptions vopts = {0};
+        vopts.verify_each = true;
+        DiagCapture vcap = {0};
+        MLIR_SetDiagnosticHandler(ctx, capture_diag, &vcap);
+        bool verify_caught = !MLIR_RunPasses(ctx, mod, bad_pipe, 1, &vopts) && vcap.saw_error;
+        MLIR_SetDiagnosticHandler(ctx, NULL, NULL);
+
+        bool pass_ok = run_ok && st.module_runs == 1 && st.fn_runs == 2 &&
+                       st.saw_scratch == 3 && remarks_ok && fail_stopped && verify_caught;
+        print_string(pass_ok ? str_lit("pass pipeline API: yes\n")
+                             : str_lit("pass pipeline API: no\n"));
     }
 
     MLIR_DestroyContext(ctx);

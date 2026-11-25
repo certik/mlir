@@ -7,6 +7,7 @@
 // worklist erases zero-use pure ops and decrements their operands, re-queueing
 // the operand-defining ops (which may themselves become dead).
 #include "mlir_llvm_dce.h"
+#include "mlir_passes.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -262,4 +263,23 @@ void mlir_llvm_dce(MLIR_Context *ctx, MLIR_OpHandle module) {
         if (MLIR_GetOpNumRegions(ctx, op) == 0) continue;
         dce_run_region(ctx, MLIR_GetOpRegion(ctx, op, 0));
     }
+}
+
+bool mlir_pass_dce_run(MLIR_PassContext *pc, MLIR_OpHandle fn, void *state) {
+    (void)state;
+    if (getenv("TINYC_NO_DCE")) return true;
+    MLIR_OpType ft = MLIR_GetOpType(pc->ctx, fn);
+    if (ft != OP_TYPE_FUNC_FUNC && ft != OP_TYPE_LLVM_FUNC) return true;
+    if (MLIR_GetOpNumRegions(pc->ctx, fn) == 0) return true;
+    dce_run_region(pc->ctx, MLIR_GetOpRegion(pc->ctx, fn, 0));
+    return true;
+}
+
+MLIR_Pass MLIR_PassDCE(void) {
+    MLIR_Pass p;
+    p.name = str_lit("llvm-dce");
+    p.anchor = MLIR_ANCHOR_FUNCTION;
+    p.run = mlir_pass_dce_run;
+    p.state = NULL;
+    return p;
 }

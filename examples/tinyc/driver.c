@@ -596,6 +596,34 @@ static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
 // native-lower, and emit a static Linux/x86_64 ELF via mlir_llvm_to_elf.
 // On success `*io_arena` is swapped to the late-llvm arena (early arena
 // destroyed) and `out` receives malloc'd ELF bytes.
+static void driver_run_llvm_opt_passes(MLIR_Context *ctx, MLIR_OpHandle llvm_mod) {
+    MLIR_Pass p;
+    if (!getenv("TINYC_NO_MEM2REG")) {
+        uint64_t t_p = ts_now();
+        p = MLIR_PassMem2Reg();
+        MLIR_RunPasses(ctx, llvm_mod, &p, 1, NULL);
+        ts_add(TS_MEM2REG, t_p);
+    }
+    if (!getenv("TINYC_NO_LOAD_CSE")) {
+        uint64_t t_p = ts_now();
+        p = MLIR_PassLoadCSE();
+        MLIR_RunPasses(ctx, llvm_mod, &p, 1, NULL);
+        ts_add(TS_LOAD_CSE, t_p);
+    }
+    {
+        uint64_t t_p = ts_now();
+        p = MLIR_PassArithGVN();
+        MLIR_RunPasses(ctx, llvm_mod, &p, 1, NULL);
+        ts_add(TS_ARITH_GVN, t_p);
+    }
+    {
+        uint64_t t_p = ts_now();
+        p = MLIR_PassDCE();
+        MLIR_RunPasses(ctx, llvm_mod, &p, 1, NULL);
+        ts_add(TS_DCE, t_p);
+    }
+}
+
 static int driver_emit_from_wasm_elf(
         MLIR_Context *ctx,
         Arena **io_arena,
@@ -658,20 +686,7 @@ static int driver_emit_from_wasm_elf(
         arena_destroy(late_arena);
         return 1;
     }
-    t_p = ts_now();
-    if (!getenv("TINYC_NO_MEM2REG"))
-        mlir_llvm_mem2reg(ctx, llvm_mod);
-    ts_add(TS_MEM2REG, t_p);
-    t_p = ts_now();
-    if (!getenv("TINYC_NO_LOAD_CSE"))
-        mlir_llvm_load_cse(ctx, llvm_mod);
-    ts_add(TS_LOAD_CSE, t_p);
-    t_p = ts_now();
-    mlir_llvm_arith_gvn(ctx, llvm_mod);
-    ts_add(TS_ARITH_GVN, t_p);
-    t_p = ts_now();
-    mlir_llvm_dce(ctx, llvm_mod);
-    ts_add(TS_DCE, t_p);
+    driver_run_llvm_opt_passes(ctx, llvm_mod);
     // Splice pre-compiled host helpers (globals + funcs).
     t_p = ts_now();
     driver_elf_splice_helper_mod(ctx, llvm_mod, hp_mod, TINYC_ELF_HELPER_PLATFORM);
@@ -714,6 +729,34 @@ static int driver_emit_native_x64(MLIR_Context *ctx, MLIR_OpHandle module,
     return 0;
 }
 #else
+static void driver_run_llvm_opt_passes(MLIR_Context *ctx, MLIR_OpHandle llvm_mod) {
+    MLIR_Pass p;
+    if (!getenv("TINYC_NO_MEM2REG")) {
+        uint64_t t_p = ts_now();
+        p = MLIR_PassMem2Reg();
+        MLIR_RunPasses(ctx, llvm_mod, &p, 1, NULL);
+        ts_add(TS_MEM2REG, t_p);
+    }
+    if (!getenv("TINYC_NO_LOAD_CSE")) {
+        uint64_t t_p = ts_now();
+        p = MLIR_PassLoadCSE();
+        MLIR_RunPasses(ctx, llvm_mod, &p, 1, NULL);
+        ts_add(TS_LOAD_CSE, t_p);
+    }
+    {
+        uint64_t t_p = ts_now();
+        p = MLIR_PassArithGVN();
+        MLIR_RunPasses(ctx, llvm_mod, &p, 1, NULL);
+        ts_add(TS_ARITH_GVN, t_p);
+    }
+    {
+        uint64_t t_p = ts_now();
+        p = MLIR_PassDCE();
+        MLIR_RunPasses(ctx, llvm_mod, &p, 1, NULL);
+        ts_add(TS_DCE, t_p);
+    }
+}
+
 static int driver_emit_from_wasm_elf(
         MLIR_Context *ctx,
         Arena **io_arena,
@@ -1457,42 +1500,7 @@ static int tinyc_main(void) {
                     arena_destroy(boot_arena);
                     return 1;
                 }
-                // Promote non-escaping local allocas to SSA so the backend
-                // can keep them in registers instead of a load/store per
-                // access. Skippable via TINYC_NO_MEM2REG for A/B debugging.
-                uint64_t t_p = ts_now();
-                if (!getenv("TINYC_NO_MEM2REG"))
-                    mlir_llvm_mem2reg(ctx, llvm_mod);
-                ts_add(TS_MEM2REG, t_p);
-                // Load CSE on the lifted llvm CFG: within single-entry
-                // regions, removes redundant llvm.loads of a structurally
-                // identical address (no memory clobber in between) and DCEs the
-                // now-detached inttoptr(add(base,zext(idx))) address chains.
-                // Targets the repeated mem[i] reloads that the short-circuit
-                // `||` comparison chains emit, which dominate the runtime of the
-                // code we generate. Skippable via TINYC_NO_LOAD_CSE for A/B.
-                t_p = ts_now();
-                if (!getenv("TINYC_NO_LOAD_CSE"))
-                    mlir_llvm_load_cse(ctx, llvm_mod);
-                ts_add(TS_LOAD_CSE, t_p);
-                // Intra-block value numbering of pure integer arithmetic: dedups
-                // the repeated index/address arithmetic (base+index*stride) the
-                // wasm frontend emits, cutting op count and register pressure.
-                // The memfuse address spine is excluded so [x28,Widx,UXTW]
-                // fusion is preserved. Skippable via TINYC_NO_ARITH_GVN.
-                t_p = ts_now();
-                mlir_llvm_arith_gvn(ctx, llvm_mod);
-                ts_add(TS_ARITH_GVN, t_p);
-                // Whole-function dead-code elimination: the tinyC front end
-                // emits the value of every expression even in statement context
-                // (e.g. the (char)v result of `d[i] = v;`), which survives as a
-                // zero-use pure value after mem2reg/CSE/GVN. The backend has no
-                // DCE and would slot+spill each one (a wasted store per loop
-                // iteration in hot mem/str helpers). Remove them at the source.
-                // Skippable via TINYC_NO_DCE.
-                t_p = ts_now();
-                mlir_llvm_dce(ctx, llvm_mod);
-                ts_add(TS_DCE, t_p);
+                driver_run_llvm_opt_passes(ctx, llvm_mod);
                 // Splice the pre-compiled host platform funcs into the lifted
                 // module now (after the wasm-oriented opt passes, which assume
                 // linmem shapes and must not see the LP64 platform funcs). The
@@ -1553,12 +1561,7 @@ static int tinyc_main(void) {
                     arena_destroy(boot_arena);
                     return 1;
                 }
-                if (!getenv("TINYC_NO_MEM2REG"))
-                    mlir_llvm_mem2reg(ctx, llvm_mod);
-                if (!getenv("TINYC_NO_LOAD_CSE"))
-                    mlir_llvm_load_cse(ctx, llvm_mod);
-                mlir_llvm_arith_gvn(ctx, llvm_mod);
-                mlir_llvm_dce(ctx, llvm_mod);
+                driver_run_llvm_opt_passes(ctx, llvm_mod);
                 if (hp_n2 > 0) {
                     MLIR_BlockHandle dbody =
                         MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, llvm_mod, 0), 0);
