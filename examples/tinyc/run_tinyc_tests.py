@@ -477,21 +477,22 @@ def check_driver_cli() -> list[str]:
                             f"(exit {timed.returncode})")
         if "tinyc --time-stages" not in timed.stderr or " total " not in timed.stderr:
             problems.append(f"--emit={mode} --time-stages printed no report")
-    # --emit=x64 of a TU with no function bodies writes an empty file. (It used
-    # to hang: write_all spun on the 0-byte write.) Builds without the x86-64
-    # backend reject the mode, which is fine here.
+    # --emit=x64 of a TU with no function bodies writes a valid empty ELF64
+    # relocatable object (.o, ET_REL). Builds without the x86-64 backend
+    # reject the mode, which is fine here.
     out_dir = HERE / "tests"
     for name, text in (("empty", ""), ("decls", "int g;\nint f(int x);\n")):
         src = out_dir / f"driver_cli_x64_{name}.c"
-        out = out_dir / f"driver_cli_x64_{name}.bin"
+        out = out_dir / f"driver_cli_x64_{name}.o"
         src.write_text(text)
         out.unlink(missing_ok=True)
         r = run([str(TINYC), "--emit=x64", "-o", str(out), str(src)], timeout=30)
         if "not supported in this build" in r.stderr:
             continue
-        if r.returncode != 0 or not out.exists() or out.stat().st_size != 0:
+        raw = out.read_bytes() if out.exists() else b""
+        if r.returncode != 0 or len(raw) < 64 or raw[:4] != b"\x7fELF" or raw[16:18] != b"\x01\x00":
             problems.append(f"--emit=x64 of a TU without functions ({name}) did not "
-                            f"write an empty file (exit {r.returncode}{r.stderr[-40:]!r})")
+                            f"write a valid ELF64 ET_REL object (exit {r.returncode}, len={len(raw)}{r.stderr[-40:]!r})")
         src.unlink(missing_ok=True)
         out.unlink(missing_ok=True)
     return problems
