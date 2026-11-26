@@ -92,6 +92,7 @@ typedef struct IR_Vec {
 #define OPND_IDX_ESCAPE 63u
 
 static inline uint32_t opnd_pack_owner(uint32_t op, uint32_t idx) {
+    API_CHECK(op <= OPND_OWNER_MASK, "MLIR", "op index exceeds 26-bit operand owner field");
     uint32_t tag = (idx < OPND_IDX_ESCAPE) ? idx : OPND_IDX_ESCAPE;
     return op | (tag << OPND_IDX_SHIFT);
 }
@@ -588,6 +589,10 @@ static MLIR_NAT_NOINLINE void u32map_grow(IR_U32Map *m) {
     size_t dummy = 0;
     uint32_t *nk = (uint32_t *)buddy_alloc((size_t)ncap * sizeof(uint32_t), &dummy);
     uint32_t *nv = (uint32_t *)buddy_alloc((size_t)ncap * sizeof(uint32_t), &dummy);
+    if (!nk || !nv) {
+        fprintf(stderr, "MLIR: out of memory growing an IR side map to %u entries\n", ncap);
+        abort();
+    }
     memset(nk, 0, (size_t)ncap * sizeof(uint32_t));
     if (m->cap) {
         uint32_t mask = ncap - 1;
@@ -1450,11 +1455,6 @@ MLIR_OpHandle MLIR_BuildOp(MLIR_Builder *b, const MLIR_OpSpec *spec) {
         }
     }
     return OP_H(ctx, op);
-}
-
-static MLIR_NAT_NOINLINE void builder_insert_slow(MLIR_Builder *b, uint32_t op) {
-    if (b->block != MLIR_INVALID_HANDLE)
-        MLIR_InsertOpBefore(b->ctx, b->block, OP_H(b->ctx, op), b->before);
 }
 
 static inline void link_operand_tracked(IR_Operand *rec, IR_Value *vals, uint32_t u,
@@ -3711,7 +3711,7 @@ MLIR_BlockOpIter MLIR_BlockOpsBegin(MLIR_Context *ctx, MLIR_BlockHandle bh) {
     }
     IR_Block *blk = &BLOCKS(ctx)[b];
     it.cur = (uintptr_t)blk->ops;
-    it.end = (uintptr_t)(blk->ops + blk->n_ops);
+    it.end = blk->n_ops ? (uintptr_t)(blk->ops + blk->n_ops) : it.cur;
     return it;
 }
 
@@ -4024,7 +4024,8 @@ MLIR_CFGInfo *MLIR_ComputeCFGInfo(MLIR_Context *ctx, MLIR_RegionHandle region, A
         loop_depth[hi]++;
         while (wn > 0) {
             int32_t cur = wl[--wn];
-            if (cur != (int32_t)hi) loop_depth[cur]++;
+            if (cur == (int32_t)hi) continue;
+            loop_depth[cur]++;
             uint32_t cpe = pred_off[cur + 1];
             for (uint32_t p = pred_off[cur]; p < cpe; p++) {
                 int32_t pi = pred_rpo[p];

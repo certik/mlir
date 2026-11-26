@@ -613,7 +613,8 @@ MLIR_CFGInfo *mlir_compute_cfg_info_generic(MLIR_Context *ctx, MLIR_RegionHandle
         loop_depth[hi]++;
         while (wn > 0) {
             int32_t cur = wl[--wn];
-            if (cur != (int32_t)hi) loop_depth[cur]++;
+            if (cur == (int32_t)hi) continue;
+            loop_depth[cur]++;
             uint32_t cpe = pred_off[cur + 1];
             for (uint32_t p = pred_off[cur]; p < cpe; p++) {
                 int32_t pi = pred_rpo[p];
