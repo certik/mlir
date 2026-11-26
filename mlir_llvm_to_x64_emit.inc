@@ -163,10 +163,20 @@ static int icmp_cc(int64_t pred) {
     return CC_E;
 }
 
+static BrFix *g_x64_fix = NULL;
+static size_t g_x64_fix_cap = 0;
+
 static void add_fix(FnCtx *F, int target_block, uint32_t field_off) {
     if (F->n_fix == F->c_fix) {
-        F->c_fix = F->c_fix ? F->c_fix * 2 : 8;
-        F->fix = (BrFix *)realloc(F->fix, F->c_fix * sizeof(BrFix));
+        size_t ncap = F->c_fix ? F->c_fix * 2 : 64;
+        size_t actual = 0;
+        BrFix *nb = (BrFix *)buddy_alloc(ncap * sizeof(BrFix), &actual);
+        if (F->n_fix) memcpy(nb, F->fix, F->n_fix * sizeof(BrFix));
+        if (g_x64_fix) buddy_free(g_x64_fix);
+        g_x64_fix = nb;
+        g_x64_fix_cap = actual / sizeof(BrFix);
+        F->fix = g_x64_fix;
+        F->c_fix = g_x64_fix_cap;
     }
     F->fix[F->n_fix].target_block = target_block;
     F->fix[F->n_fix].field_off = field_off;
@@ -501,8 +511,10 @@ static void emit_sysv_call_args(FnCtx *F, MLIR_OpHandle op, size_t arg_base,
 static void emit_direct_call(FnCtx *F, string callee, SymSet *refs) {
     eb(F, 0xE8);
     uint32_t field = here(F); e32(F, 0);
-    add_text_reloc(F, field, callee);
-    sym_add(refs, callee);
+    if (refs) {
+        add_text_reloc(F, field, callee);
+        sym_add(refs, callee);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -942,15 +954,11 @@ static unsigned alloca_bytes(MLIR_Context *ctx, MLIR_OpHandle op) {
     return (esz + 7) & ~7u;
 }
 
-static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet *refs) {
-    string name = attr_str(ctx, fn, MLIR_KEY_SYM_NAME);
-    char *nm = (char *)malloc(name.size + 1);
-    memcpy(nm, name.str, name.size); nm[name.size] = 0;
-    bool exported = str_eqz(name, "main");
-    ObjFunc *f = obj_add_func(m, nm, exported);
-
+static void emit_func_into(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f, SymSet *refs) {
     FnCtx F; memset(&F, 0, sizeof(F));
     F.ctx = ctx; F.f = f; F.ok = true;
+    F.fix = g_x64_fix;
+    F.c_fix = g_x64_fix_cap;
     F.gm = g_x64_gmap;
     F.module_mb = g_x64_mb;
     F.data_buf = g_x64_data_buf;
@@ -1177,8 +1185,16 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     g_x64_ok = g_x64_ok && F.ok;
 
     vmap_free(&F.slots);
-    free(F.fix);
     if (g_x64_times) g_x64_times->isel_encode_ns += x64_clock() - t_isel;
+}
+
+static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet *refs) {
+    string name = attr_str(ctx, fn, MLIR_KEY_SYM_NAME);
+    char *nm = (char *)malloc(name.size + 1);
+    memcpy(nm, name.str, name.size); nm[name.size] = 0;
+    bool exported = str_eqz(name, "main");
+    ObjFunc *f = obj_add_func(m, nm, exported);
+    emit_func_into(ctx, fn, f, refs);
 }
 
 // ---------------------------------------------------------------------------
@@ -1837,8 +1853,7 @@ bool mlir_llvm_to_x64_code(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     g_x64_data_buf = &data;
     X64PtrReloc *ptr_relocs = NULL;
     size_t n_ptr_relocs = 0;
-    ObjModule m; memset(&m, 0, sizeof(m));
-    SymSet refs; memset(&refs, 0, sizeof(refs));
+    ObjFunc flat_f; memset(&flat_f, 0, sizeof(flat_f));
 
     uint64_t t_setup = x64_clock();
     x64_init_data_section(ctx, mb, &gm, &data, false, &ptr_relocs, &n_ptr_relocs);
@@ -1846,34 +1861,28 @@ bool mlir_llvm_to_x64_code(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     if (g_x64_times) g_x64_times->setup_ns += x64_clock() - t_setup;
 
     // Every defined function: a translation unit has no entry to trim from.
+    // Emit all functions directly into a single flat code buffer to avoid
+    // per-function malloc/realloc/memcpy/free churn.
     size_t no = MLIR_GetBlockNumOps(ctx, mb);
+    buf_grow(&flat_f.code, 16384);
     for (size_t i = 0; i < no && g_x64_ok; i++) {
         MLIR_OpHandle fn = MLIR_GetBlockOp(ctx, mb, i);
         if (MLIR_GetOpType(ctx, fn) != OP_TYPE_LLVM_FUNC) continue;
         if (MLIR_GetOpNumRegions(ctx, fn) == 0 ||
             MLIR_GetRegionNumBlocks(ctx, MLIR_GetOpRegion(ctx, fn, 0)) == 0) continue;
-        emit_func(ctx, fn, &m, &refs);
+        emit_func_into(ctx, fn, &flat_f, NULL);
     }
 
     bool ok = g_x64_ok;
     if (ok) {
-        size_t total = 0;
-        for (size_t i = 0; i < m.n_funcs; i++) total += m.funcs[i].code.len;
-        uint8_t *out = (uint8_t *)malloc(total ? total : 1);
-        size_t pos = 0;
-        for (size_t i = 0; i < m.n_funcs; i++) {
-            if (m.funcs[i].code.len)
-                memcpy(out + pos, m.funcs[i].code.data, m.funcs[i].code.len);
-            pos += m.funcs[i].code.len;
-        }
-        *out_data = out;
-        *out_size = total;
+        *out_data = flat_f.code.data;
+        *out_size = flat_f.code.len;
+    } else {
+        free(flat_f.code.data);
     }
-
-    obj_module_free(&m);
+    free(flat_f.relocs);
     free(data.data);
     gmap_free(&gm);
-    sym_free(&refs);
     free(ptr_relocs);
     g_x64_gmap = NULL;
     g_x64_mb = MLIR_INVALID_HANDLE;

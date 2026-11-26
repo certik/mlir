@@ -121,6 +121,7 @@ bool mlir_obj_to_elf(ObjModule *m, uint8_t **out_data, size_t *out_size) {
     uint64_t entry = m->funcs[m->start_idx].va;
 
     Buf img = {0};
+    buf_grow(&img, (size_t)total);
     // ELF header.
     static const uint8_t ident[16] = {0x7f,'E','L','F',2,1,1,0,0,0,0,0,0,0,0,0};
     buf_append(&img, ident, 16);

@@ -1964,6 +1964,7 @@ static int tinyc_main(void) {
         ts_add(TS_WRITE, t_wr);
     }
 
+#ifdef TINYC_FREE_ON_EXIT
     if (emit_macho || emit_elf || emit_x64) {
         // out.str was malloc'd by the backend. Free it.
         free(out.str);
@@ -1972,6 +1973,7 @@ static int tinyc_main(void) {
     arena_destroy(arena);
     MLIR_DestroyContext(ctx);
     arena_destroy(boot_arena);
+#endif
     return wrc;
 }
 

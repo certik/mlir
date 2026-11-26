@@ -617,34 +617,27 @@ static void emit_cond_branch(E *e, MLIR_ValueHandle cond,
 
 // ----- constants -----
 
-static void emit_init_attr_caches(E *e) {
-    if (e->caches_init) return;
-    e->caches_init = true;
-    e->i64_signed = MLIR_CreateTypeInteger(e->ctx, 64, true);
-    for (int64_t p = 0; p < 10; p++) {
-        e->cmpi_pred_attrs[p] = MLIR_CreateAttributeInteger(e->ctx, p, e->i64_signed);
+static inline MLIR_AttributeHandle emit_cmpi_pred_attr(E *e, int64_t predicate) {
+    if (!e->i64_signed) e->i64_signed = MLIR_CreateTypeInteger(e->ctx, 64, true);
+    if (predicate >= 0 && predicate < 10) {
+        MLIR_AttributeHandle a = e->cmpi_pred_attrs[predicate];
+        if (!a) {
+            a = MLIR_CreateAttributeInteger(e->ctx, predicate, e->i64_signed);
+            e->cmpi_pred_attrs[predicate] = a;
+        }
+        return a;
     }
-    for (int64_t v = 0; v < 128; v++) {
-        e->small_i32_attrs[v] = MLIR_CreateAttributeInteger(e->ctx, v, e->i32);
-    }
-    for (int64_t v = 0; v < 32; v++) {
-        e->small_i64_attrs[v] = MLIR_CreateAttributeInteger(e->ctx, v, e->i64);
-    }
-    for (int32_t k = 0; k < 32; k++) {
-        int32_t pair[2] = { 0, k };
-        e->gep_0k_attrs[k] = MLIR_CreateAttributeDenseI32Array(e->ctx, pair, 2);
-    }
-    int32_t pair_dyn[2] = { 0, (int32_t)0x80000000 };
-    e->gep_0dyn_attr = MLIR_CreateAttributeDenseI32Array(e->ctx, pair_dyn, 2);
-    int32_t single_dyn[1] = { (int32_t)0x80000000 };
-    e->gep_dyn_attr = MLIR_CreateAttributeDenseI32Array(e->ctx, single_dyn, 1);
+    return MLIR_CreateAttributeInteger(e->ctx, predicate, e->i64_signed);
 }
 
 static MLIR_ValueHandle emit_const_i32(E *e, int64_t v) {
     MLIR_AttributeHandle a;
     if (v >= 0 && v < 128) {
-        if (!e->caches_init) emit_init_attr_caches(e);
         a = e->small_i32_attrs[v];
+        if (!a) {
+            a = MLIR_CreateAttributeInteger(e->ctx, v, e->i32);
+            e->small_i32_attrs[v] = a;
+        }
     } else {
         a = MLIR_CreateAttributeInteger(e->ctx, v, e->i32);
     }
@@ -706,8 +699,11 @@ static MLIR_ValueHandle emit_fptrunc_f64_to_f32(E *e, MLIR_ValueHandle v) {
 static MLIR_ValueHandle emit_const_i64(E *e, int64_t v) {
     MLIR_AttributeHandle a;
     if (v >= 0 && v < 32) {
-        if (!e->caches_init) emit_init_attr_caches(e);
         a = e->small_i64_attrs[v];
+        if (!a) {
+            a = MLIR_CreateAttributeInteger(e->ctx, v, e->i64);
+            e->small_i64_attrs[v] = a;
+        }
     } else {
         a = MLIR_CreateAttributeInteger(e->ctx, v, e->i64);
     }
@@ -767,10 +763,7 @@ static MLIR_ValueHandle emit_narrow_i32(E *e, MLIR_ValueHandle v, int bits,
 
 static MLIR_ValueHandle emit_cmpi(E *e, int64_t predicate,
                                   MLIR_ValueHandle a, MLIR_ValueHandle b) {
-    if (!e->caches_init) emit_init_attr_caches(e);
-    MLIR_AttributeHandle pa = (predicate >= 0 && predicate < 10)
-        ? e->cmpi_pred_attrs[predicate]
-        : MLIR_CreateAttributeInteger(e->ctx, predicate, e->i64_signed);
+    MLIR_AttributeHandle pa = emit_cmpi_pred_attr(e, predicate);
     if (e->cur_block) {
         MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
         bd.loc = e->loc;
@@ -783,10 +776,7 @@ static MLIR_ValueHandle emit_cmpi(E *e, int64_t predicate,
 
 static MLIR_ValueHandle emit_cmpf(E *e, int64_t predicate,
                                   MLIR_ValueHandle a, MLIR_ValueHandle b) {
-    if (!e->caches_init) emit_init_attr_caches(e);
-    MLIR_AttributeHandle pa = (predicate >= 0 && predicate < 10)
-        ? e->cmpi_pred_attrs[predicate]
-        : MLIR_CreateAttributeInteger(e->ctx, predicate, e->i64_signed);
+    MLIR_AttributeHandle pa = emit_cmpi_pred_attr(e, predicate);
     if (e->cur_block) {
         MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
         bd.loc = e->loc;
@@ -799,10 +789,7 @@ static MLIR_ValueHandle emit_cmpf(E *e, int64_t predicate,
 
 static MLIR_ValueHandle emit_icmp_ptr(E *e, int64_t predicate,
                                       MLIR_ValueHandle a, MLIR_ValueHandle b) {
-    if (!e->caches_init) emit_init_attr_caches(e);
-    MLIR_AttributeHandle pa = (predicate >= 0 && predicate < 10)
-        ? e->cmpi_pred_attrs[predicate]
-        : MLIR_CreateAttributeInteger(e->ctx, predicate, e->i64_signed);
+    MLIR_AttributeHandle pa = emit_cmpi_pred_attr(e, predicate);
     if (e->cur_block) {
         MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
         bd.loc = e->loc;
@@ -1158,17 +1145,27 @@ static MLIR_ValueHandle emit_gep(E *e,
         MLIR_ValueHandle *dyn_idx, size_t n_dyn) {
     MLIR_AttributeHandle idx_attr;
     if (n_raw == 2 && raw_idx[0] == 0) {
-        if (!e->caches_init) emit_init_attr_caches(e);
         if (raw_idx[1] >= 0 && raw_idx[1] < 32) {
             idx_attr = e->gep_0k_attrs[raw_idx[1]];
+            if (!idx_attr) {
+                idx_attr = MLIR_CreateAttributeDenseI32Array(e->ctx, raw_idx, 2);
+                e->gep_0k_attrs[raw_idx[1]] = idx_attr;
+            }
         } else if (raw_idx[1] == LLVM_GEP_DYN) {
             idx_attr = e->gep_0dyn_attr;
+            if (!idx_attr) {
+                idx_attr = MLIR_CreateAttributeDenseI32Array(e->ctx, raw_idx, 2);
+                e->gep_0dyn_attr = idx_attr;
+            }
         } else {
             idx_attr = MLIR_CreateAttributeDenseI32Array(e->ctx, raw_idx, n_raw);
         }
     } else if (n_raw == 1 && raw_idx[0] == LLVM_GEP_DYN) {
-        if (!e->caches_init) emit_init_attr_caches(e);
         idx_attr = e->gep_dyn_attr;
+        if (!idx_attr) {
+            idx_attr = MLIR_CreateAttributeDenseI32Array(e->ctx, raw_idx, 1);
+            e->gep_dyn_attr = idx_attr;
+        }
     } else {
         idx_attr = MLIR_CreateAttributeDenseI32Array(e->ctx, raw_idx, n_raw);
     }
@@ -2880,6 +2877,19 @@ static void emit_flat_call(E *e, Scope *sc, FuncSig *sig, VecExprPtr args,
         as[0] = callee_attr; as[1] = var_ty;
         emit_op(e, OP_TYPE_LLVM_CALL,
                 rts, n_out, rs, n_out, ops, op_off, as, 2, NULL, 0);
+    } else if (e->cur_block && n_out == 1 && op_off <= 2) {
+        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+        bd.loc = e->loc;
+        if (op_off == 0) {
+            rs[0] = MLIR_BuildNullaryAttr(&bd, OP_TYPE_FUNC_CALL, rts[0],
+                                          MLIR_KEY_CALLEE, sig->callee_attr);
+        } else if (op_off == 1) {
+            rs[0] = MLIR_BuildUnaryAttr(&bd, OP_TYPE_FUNC_CALL, rts[0], ops[0],
+                                        MLIR_KEY_CALLEE, sig->callee_attr);
+        } else {
+            rs[0] = MLIR_BuildBinaryAttr(&bd, OP_TYPE_FUNC_CALL, rts[0], ops[0], ops[1],
+                                         MLIR_KEY_CALLEE, sig->callee_attr);
+        }
     } else {
         emit_op(e, OP_TYPE_FUNC_CALL,
                 rts, n_out, rs, n_out, ops, op_off, &callee_attr, 1, NULL, 0);
@@ -3260,26 +3270,6 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
     EVal r = {0};
     if (ex->kind == EX_GENERIC) {
         return emit_expr(e, sc, generic_select(e, sc, ex));
-    }
-    // `__func__` is a magic predefined identifier carrying the enclosing
-    // function's name as a NUL-terminated string literal. Synthesize the
-    // string from the current FuncSig at emit time.
-    if (ex->kind == EX_VAR &&
-        ex->name.size == 8 &&
-        memcmp(ex->name.str, "__func__", 8) == 0 &&
-        !lookup(e, sc, ex->name)) {
-        string fname = e->cur_sig ? e->cur_sig->name : str_lit("");
-        // Build a NUL-terminated copy in arena and intern.
-        char *buf = arena_alloc(e->arena, fname.size + 1);
-        for (size_t i = 0; i < fname.size; i++) buf[i] = fname.str[i];
-        buf[fname.size] = '\0';
-        string bytes = (string){.str = buf, .size = fname.size + 1};
-        string sym = intern_string(e, bytes);
-        r.val = emit_addressof(e, sym, e->ptr);
-        r.is_ptr = true;
-        r.is_str = true;
-        r.ptr_elem = e->i8;
-        return r;
     }
     // Pre-pass: literal-only integer subtree -> a single arith.constant.
     // Only kicks in for nodes that ast_fold_int actually folds; anything
@@ -3666,6 +3656,19 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             if (ex->kind == EX_VAR) {
                 Sym *s = lookup(e, sc, ex->name);
                 if (!s) {
+                    if (ex->name.size == 8 && memcmp(ex->name.str, "__func__", 8) == 0) {
+                        string fname = e->cur_sig ? e->cur_sig->name : str_lit("");
+                        char *buf = arena_alloc(e->arena, fname.size + 1);
+                        if (fname.size) memcpy(buf, fname.str, fname.size);
+                        buf[fname.size] = '\0';
+                        string bytes = (string){.str = buf, .size = fname.size + 1};
+                        string sym = intern_string(e, bytes);
+                        r.val = emit_addressof(e, sym, e->ptr);
+                        r.is_ptr = true;
+                        r.is_str = true;
+                        r.ptr_elem = e->i8;
+                        return r;
+                    }
                     FuncSig *fsig = find_sig(e, ex->name);
                     if (fsig) {
                         // Build the function MLIR type for func.constant

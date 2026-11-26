@@ -3171,7 +3171,12 @@ MLIR_ValueHandle MLIR_CreateValueBlockArg(MLIR_Context *ctx, string register_nam
 MLIR_BlockHandle MLIR_CreateBlock(MLIR_Context *ctx) {
     API_CHECK(ctx != NULL, "MLIR_CreateBlock", "context is NULL");
     uint32_t b = vec_push(&ctx->blocks, 1);
-    memset(&BLOCKS(ctx)[b], 0, sizeof(IR_Block));
+    IR_Block *blk = &BLOCKS(ctx)[b];
+    memset(blk, 0, sizeof(IR_Block));
+    if (ctx->arena) {
+        blk->ops = (uint32_t *)arena_alloc(ctx->arena, 16 * sizeof(uint32_t));
+        blk->cap_ops = 16;
+    }
     return BLOCK_H(ctx, b);
 }
 

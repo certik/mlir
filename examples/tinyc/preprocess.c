@@ -76,6 +76,7 @@ struct Macro {
     string   name;
     bool     is_func;
     bool     is_variadic;
+    bool     is_simple;  // func macro: !variadic, <=16 params, no #/##
     string  *params;     // arena-allocated; n_params entries
     size_t   n_params;
     PPTok   *body;       // arena-allocated; n_body entries
@@ -889,10 +890,27 @@ static void pp_emit_tctok(PP *pp, const PPTok *t) {
         v->size++;
         return;
     }
-    case PP_STRING:
+    case PP_STRING: {
+        const char *s = t->text.str;
+        size_t n = t->text.size;
+        if (n >= 2 && s[0] == '"' && s[n - 1] == '"' &&
+            memchr(s + 1, '\\', n - 2) == NULL) {
+            size_t slen = n - 2;
+            char *buf = (char *)arena_alloc(pp->arena, slen + 1);
+            if (slen) memcpy(buf, s + 1, slen);
+            buf[slen] = '\0';
+            dst->kind = TC_TK_STRING_LIT;
+            dst->flags = 0;
+            dst->line = t->line;
+            dst->text_str = buf;
+            dst->d.size = slen + 1;
+            v->size++;
+            return;
+        }
         *dst = tinyc_lex_string(pp->arena, t->text, t->line);
         v->size++;
         return;
+    }
     case PP_CHAR:
         *dst = tinyc_lex_char(t->text, t->line);
         v->size++;
@@ -2138,9 +2156,12 @@ static void process_directive_line(PP *pp, PPTok *toks, size_t j, size_t end,
         if (m->is_func && bn > 0 && (m->n_params > 0 || m->is_variadic) && m->n_params < 120) {
             int8_t *pm = arena_new_array(pp->arena, int8_t, bn);
             int va_i = m->is_variadic ? (int)m->n_params : -1;
+            bool simple = (!m->is_variadic && m->n_params <= 16);
             for (size_t k = 0; k < bn; k++) {
                 int8_t idx = -1;
-                if (m->body[k].kind == PP_IDENT) {
+                uint8_t bk = m->body[k].kind;
+                if (bk == PP_HASH || bk == PP_HASHHASH) simple = false;
+                if (bk == PP_IDENT) {
                     string bt = m->body[k].text;
                     for (size_t pi = 0; pi < m->n_params; pi++) {
                         if (str_eq(m->params[pi], bt)) { idx = (int8_t)pi; break; }
@@ -2151,6 +2172,7 @@ static void process_directive_line(PP *pp, PPTok *toks, size_t j, size_t end,
                 pm[k] = idx;
             }
             m->param_map = pm;
+            m->is_simple = simple;
         }
         return;
     }
@@ -2294,7 +2316,7 @@ static void process_tokens(PP *pp, PPTok *toks, size_t n, string file, uint16_t 
 }
 
 static bool pp_lex_scan_macro_args(const char *s, size_t sz, size_t p, int line,
-                                   size_t *out_end, int *out_line) {
+                                   size_t *out_open, size_t *out_end, int *out_line) {
     bool ls = false;
     while (p < sz) {
         char ch = s[p];
@@ -2325,6 +2347,7 @@ static bool pp_lex_scan_macro_args(const char *s, size_t sz, size_t p, int line,
         break;
     }
     if (p >= sz || (ls && s[p] == '#') || s[p] != '(') return false;
+    if (out_open) *out_open = p;
     int depth = 1;
     p++;
     while (p < sz && depth > 0) {
@@ -2424,101 +2447,6 @@ static void process_file_lex(PP *pp, string path, string src) {
             while (i < sz && (g_pp_ctype[(unsigned char)s[i]] & PP_CT_WS)) i++;
             continue;
         }
-        if (c == '\n') {
-            i++;
-            line++;
-            at_line_start = true;
-            continue;
-        }
-        if (at_line_start && c == '#') {
-            int dir_start_line = line;
-            size_t k = i + 1;
-            while (k < sz) {
-                char ch = s[k];
-                if (ch == '\n') break;
-                if (ch == '\\') {
-                    if (k + 1 < sz && s[k + 1] == '\n') { k += 2; line++; continue; }
-                    if (k + 2 < sz && s[k + 1] == '\r' && s[k + 2] == '\n') { k += 3; line++; continue; }
-                    k++; continue;
-                }
-                if (ch == '/' && k + 1 < sz) {
-                    if (s[k + 1] == '/') {
-                        const char *nl = (const char *)memchr(s + k + 2, '\n', sz - (k + 2));
-                        k = nl ? (size_t)(nl - s) : sz;
-                        break;
-                    }
-                    if (s[k + 1] == '*') {
-                        k += 2;
-                        while (k + 1 < sz && !(s[k] == '*' && s[k + 1] == '/')) {
-                            if (s[k] == '\n') line++;
-                            k++;
-                        }
-                        k = (k + 1 < sz) ? k + 2 : sz;
-                        continue;
-                    }
-                }
-                if (ch == '"' || ch == '\'') {
-                    char q = ch;
-                    k++;
-                    while (k < sz && s[k] != q && s[k] != '\n') {
-                        if (s[k] == '\\' && k + 1 < sz) {
-                            if (s[k + 1] == '\n') line++;
-                            k += 2;
-                        } else {
-                            k++;
-                        }
-                    }
-                    if (k < sz && s[k] == q) k++;
-                    continue;
-                }
-                k++;
-            }
-            line_toks.size = 0;
-            pp_tokenize_at(pp->arena, (string){(char *)(s + i), k - i},
-                           file_id, dir_start_line, &line_toks);
-            size_t end = 1;
-            while (end < line_toks.size &&
-                   line_toks.data[end].kind != PP_NEWLINE &&
-                   line_toks.data[end].kind != PP_END) end++;
-            v->size = vsz;
-            process_directive_line(pp, line_toks.data, 1, end,
-                                   dir_start_line, line,
-                                   canonical, file_id, &conds, &active);
-            vd = v->data; vsz = v->size; vmax = v->max;
-            i = k;
-            if (i < sz && s[i] == '\n') { i++; line++; }
-            at_line_start = true;
-            while (!active && i < sz) {
-                while (i < sz && (g_pp_ctype[(unsigned char)s[i]] & PP_CT_WS)) i++;
-                if (i >= sz) break;
-                if (s[i] == '#') break;
-                while (i < sz) {
-                    char ch = s[i];
-                    if (ch == '\n') { i++; line++; break; }
-                    if (ch == '/' && i + 1 < sz) {
-                        if (s[i + 1] == '/') {
-                            const char *nl = (const char *)memchr(s + i + 2, '\n', sz - (i + 2));
-                            if (nl) { i = (size_t)(nl - s) + 1; line++; }
-                            else { i = sz; }
-                            break;
-                        }
-                        if (s[i + 1] == '*') {
-                            i += 2;
-                            while (i + 1 < sz && !(s[i] == '*' && s[i + 1] == '/')) {
-                                if (s[i] == '\n') line++;
-                                i++;
-                            }
-                            i = (i + 1 < sz) ? i + 2 : sz;
-                            continue;
-                        }
-                    }
-                    i++;
-                }
-            }
-            continue;
-        }
-
-        // Active code: lex directly to TcTok[]!
         if (ct & PP_CT_ALPHA) {
             size_t j = i + 1;
             while (j < sz && (g_pp_ctype[(unsigned char)s[j]] & PP_CT_ALNUM)) j++;
@@ -2586,20 +2514,43 @@ static void process_file_lex(PP *pp, string path, string src) {
             }
             if (!m->is_func) {
                 if (m->n_body == 0) { i = j; continue; }
-                if (m->n_body == 1 && m->body[0].kind != PP_IDENT &&
-                    m->body[0].kind != PP_HASHHASH) {
+                if (m->n_body == 1) {
                     PPTok one = m->body[0];
-                    one.line = line;
-                    one.file_id = file_id;
-                    v->size = vsz;
-                    pp_emit_tctok(pp, &one);
-                    vd = v->data; vsz = v->size; vmax = v->max;
-                    i = j;
-                    continue;
+                    if (one.kind == PP_IDENT && !pp_macro_maybe(pp, one.text)) {
+                        LEX_ENSURE();
+                        TcTok *dst = &vd[vsz++];
+                        dst->kind = (uint8_t)tinyc_keyword_or_ident(one.text);
+                        dst->flags = 0;
+                        dst->line = line;
+                        dst->text_str = one.text.str;
+                        dst->d.size = one.text.size;
+                        i = j;
+                        continue;
+                    }
+                    if (one.kind == PP_NUMBER && one.text.size == 1 &&
+                        one.text.str[0] >= '0' && one.text.str[0] <= '9') {
+                        LEX_ENSURE();
+                        TcTok *dst = &vd[vsz++];
+                        dst->kind = TC_TK_INT_LIT;
+                        dst->flags = 0;
+                        dst->line = line;
+                        dst->d.int_value = (int64_t)(one.text.str[0] - '0');
+                        i = j;
+                        continue;
+                    }
+                    if (one.kind != PP_IDENT && one.kind != PP_HASHHASH) {
+                        one.line = line;
+                        one.file_id = file_id;
+                        v->size = vsz;
+                        pp_emit_tctok(pp, &one);
+                        vd = v->data; vsz = v->size; vmax = v->max;
+                        i = j;
+                        continue;
+                    }
                 }
-                size_t arg_end = 0;
+                size_t arg_open = 0, arg_end = 0;
                 int arg_line = line;
-                if (pp_lex_scan_macro_args(s, sz, j, line, &arg_end, &arg_line)) {
+                if (pp_lex_scan_macro_args(s, sz, j, line, &arg_open, &arg_end, &arg_line)) {
                     line_toks.size = 0;
                     pp_tokenize_at(pp->arena, (string){(char *)(s + i), arg_end - i},
                                    file_id, line, &line_toks);
@@ -2622,15 +2573,94 @@ static void process_file_lex(PP *pp, string path, string src) {
                 continue;
             }
             // Function-like macro:
-            size_t arg_end = 0;
+            size_t arg_open = 0, arg_end = 0;
             int arg_line = line;
-            if (pp_lex_scan_macro_args(s, sz, j, line, &arg_end, &arg_line)) {
-                line_toks.size = 0;
-                pp_tokenize_at(pp->arena, (string){(char *)(s + i), arg_end - i},
-                               file_id, line, &line_toks);
-                v->size = vsz;
-                (void)expand_tokens_ex(pp, line_toks.data, line_toks.size, NULL, false);
-                vd = v->data; vsz = v->size; vmax = v->max;
+            if (pp_lex_scan_macro_args(s, sz, j, line, &arg_open, &arg_end, &arg_line)) {
+                bool fast_done = false;
+                if (m->is_simple && arg_end > arg_open + 1 && s[arg_end - 1] == ')') {
+                    line_toks.size = 0;
+                    pp_tokenize_at(pp->arena,
+                                   (string){(char *)(s + arg_open + 1), arg_end - arg_open - 2},
+                                   file_id, line, &line_toks);
+                    size_t n_at = line_toks.size;
+                    while (n_at > 0 && (line_toks.data[n_at - 1].kind == PP_END ||
+                                        line_toks.data[n_at - 1].kind == PP_NEWLINE)) n_at--;
+                    // Split arg tokens in-place by top-level ','.
+                    size_t a_start[16];
+                    size_t a_end[16];
+                    size_t n_a = 0;
+                    int depth = 0;
+                    size_t cur_s = 0;
+                    bool split_ok = true;
+                    for (size_t k = 0; k < n_at; k++) {
+                        PPTok *at = &line_toks.data[k];
+                        if (at->kind == PP_PUNCT && at->text.size == 1) {
+                            char pc = at->text.str[0];
+                            if (pc == '(') depth++;
+                            else if (pc == ')') depth--;
+                            else if (pc == ',' && depth == 0) {
+                                if (n_a >= m->n_params) { split_ok = false; break; }
+                                a_start[n_a] = cur_s;
+                                a_end[n_a] = k;
+                                n_a++;
+                                cur_s = k + 1;
+                            }
+                        }
+                    }
+                    if (split_ok && depth == 0 && n_a < m->n_params) {
+                        a_start[n_a] = cur_s;
+                        a_end[n_a] = n_at;
+                        n_a++;
+                        for (size_t k = n_a; k < m->n_params; k++) {
+                            a_start[k] = n_at; a_end[k] = n_at;
+                        }
+                        // Verify no body token or used argument token can macro-expand.
+                        bool no_macros = true;
+                        for (size_t k = 0; k < m->n_body; k++) {
+                            int8_t pi = m->param_map[k];
+                            if (pi >= 0) {
+                                for (size_t ak = a_start[pi]; ak < a_end[pi]; ak++) {
+                                    PPTok *at = &line_toks.data[ak];
+                                    if (at->kind == PP_IDENT && pp_macro_maybe(pp, at->text)) {
+                                        no_macros = false; break;
+                                    }
+                                }
+                                if (!no_macros) break;
+                            } else if (m->body[k].kind == PP_IDENT &&
+                                       pp_macro_maybe(pp, m->body[k].text)) {
+                                no_macros = false; break;
+                            }
+                        }
+                        if (no_macros) {
+                            v->size = vsz;
+                            for (size_t k = 0; k < m->n_body; k++) {
+                                int8_t pi = m->param_map[k];
+                                if (pi >= 0) {
+                                    for (size_t ak = a_start[pi]; ak < a_end[pi]; ak++) {
+                                        PPTok at = line_toks.data[ak];
+                                        if (at.kind == PP_NEWLINE || at.kind == PP_END) continue;
+                                        at.line = line;
+                                        pp_emit_tctok(pp, &at);
+                                    }
+                                } else {
+                                    PPTok bt = m->body[k];
+                                    bt.line = line;
+                                    pp_emit_tctok(pp, &bt);
+                                }
+                            }
+                            vd = v->data; vsz = v->size; vmax = v->max;
+                            fast_done = true;
+                        }
+                    }
+                }
+                if (!fast_done) {
+                    line_toks.size = 0;
+                    pp_tokenize_at(pp->arena, (string){(char *)(s + i), arg_end - i},
+                                   file_id, line, &line_toks);
+                    v->size = vsz;
+                    (void)expand_tokens_ex(pp, line_toks.data, line_toks.size, NULL, false);
+                    vd = v->data; vsz = v->size; vmax = v->max;
+                }
                 i = arg_end;
                 line = arg_line;
             } else {
@@ -2655,6 +2685,106 @@ static void process_file_lex(PP *pp, string path, string src) {
             at_line_start = false;
             continue;
         }
+        if (c == '\n') {
+            i++;
+            line++;
+            at_line_start = true;
+            continue;
+        }
+        if (at_line_start && c == '#') {
+            int dir_start_line = line;
+            size_t k = i + 1;
+            while (k < sz) {
+                char ch = s[k];
+                if (ch == '\n') break;
+                if (ch == '\\') {
+                    if (k + 1 < sz && s[k + 1] == '\n') { k += 2; line++; continue; }
+                    if (k + 2 < sz && s[k + 1] == '\r' && s[k + 2] == '\n') { k += 3; line++; continue; }
+                    k++; continue;
+                }
+                if (ch == '/' && k + 1 < sz) {
+                    if (s[k + 1] == '/') {
+                        const char *nl = (const char *)memchr(s + k + 2, '\n', sz - (k + 2));
+                        k = nl ? (size_t)(nl - s) : sz;
+                        break;
+                    }
+                    if (s[k + 1] == '*') {
+                        k += 2;
+                        while (k + 1 < sz && !(s[k] == '*' && s[k + 1] == '/')) {
+                            if (s[k] == '\n') line++;
+                            k++;
+                        }
+                        k = (k + 1 < sz) ? k + 2 : sz;
+                        continue;
+                    }
+                }
+                if (ch == '"' || ch == '\'') {
+                    char q = ch;
+                    k++;
+                    while (k < sz && s[k] != q && s[k] != '\n') {
+                        if (s[k] == '\\' && k + 1 < sz) {
+                            if (s[k + 1] == '\n') line++;
+                            k += 2;
+                        } else {
+                            k++;
+                        }
+                    }
+                    if (k < sz && s[k] == q) k++;
+                    continue;
+                }
+                k++;
+            }
+            line_toks.size = 0;
+            pp_tokenize_at(pp->arena, (string){(char *)(s + i), k - i},
+                           file_id, dir_start_line, &line_toks);
+            size_t end = 1;
+            while (end < line_toks.size &&
+                   line_toks.data[end].kind != PP_NEWLINE &&
+                   line_toks.data[end].kind != PP_END) end++;
+            v->size = vsz;
+            process_directive_line(pp, line_toks.data, 1, end,
+                                   dir_start_line, line,
+                                   canonical, file_id, &conds, &active);
+            vd = v->data; vsz = v->size; vmax = v->max;
+            i = k;
+            if (i < sz && s[i] == '\n') { i++; line++; }
+            at_line_start = true;
+            while (!active && i < sz) {
+                while (i < sz && (g_pp_ctype[(unsigned char)s[i]] & PP_CT_WS)) i++;
+                if (i >= sz) break;
+                if (s[i] == '#') {
+                    // Only conditional directives (#if/#ifdef/#ifndef/#elif/#else/#endif)
+                    // matter while inactive; skip all others (#define/#include/...) directly.
+                    size_t dp = i + 1;
+                    while (dp < sz && (g_pp_ctype[(unsigned char)s[dp]] & PP_CT_WS)) dp++;
+                    if (dp < sz && (s[dp] == 'i' || s[dp] == 'e')) break;
+                }
+                while (i < sz) {
+                    char ch = s[i];
+                    if (ch == '\n') { i++; line++; break; }
+                    if (ch == '/' && i + 1 < sz) {
+                        if (s[i + 1] == '/') {
+                            const char *nl = (const char *)memchr(s + i + 2, '\n', sz - (i + 2));
+                            if (nl) { i = (size_t)(nl - s) + 1; line++; }
+                            else { i = sz; }
+                            break;
+                        }
+                        if (s[i + 1] == '*') {
+                            i += 2;
+                            while (i + 1 < sz && !(s[i] == '*' && s[i + 1] == '/')) {
+                                if (s[i] == '\n') line++;
+                                i++;
+                            }
+                            i = (i + 1 < sz) ? i + 2 : sz;
+                            continue;
+                        }
+                    }
+                    i++;
+                }
+            }
+            continue;
+        }
+
         if (ct & PP_CT_DIGIT) {
             // Fast path: 1..9 digit decimal integer without suffix/dot/hex.
             size_t j = i + 1;
