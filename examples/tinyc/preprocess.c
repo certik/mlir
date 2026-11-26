@@ -255,10 +255,11 @@ static string i64_to_str(Arena *arena, int64_t v) {
 // PP tokenizer
 // ----------------------------------------------------------------------
 
-#define PP_CT_ALPHA 1u
-#define PP_CT_DIGIT 2u
-#define PP_CT_ALNUM 3u
-#define PP_CT_WS    4u
+#define PP_CT_ALPHA  1u
+#define PP_CT_DIGIT  2u
+#define PP_CT_ALNUM  3u
+#define PP_CT_WS     4u
+#define PP_CT_PUNCT1 8u
 
 static uint8_t g_pp_ctype[256];
 static uint8_t g_pp_punct1[128];
@@ -273,6 +274,18 @@ static void pp_init_ctype(void) {
     g_pp_ctype[' '] = PP_CT_WS;
     g_pp_ctype['\t'] = PP_CT_WS;
     g_pp_ctype['\r'] = PP_CT_WS;
+    // Always-1-char punctuators (never start a 2- or 3-char operator).
+    g_pp_ctype['('] = PP_CT_PUNCT1;
+    g_pp_ctype[')'] = PP_CT_PUNCT1;
+    g_pp_ctype['{'] = PP_CT_PUNCT1;
+    g_pp_ctype['}'] = PP_CT_PUNCT1;
+    g_pp_ctype['['] = PP_CT_PUNCT1;
+    g_pp_ctype[']'] = PP_CT_PUNCT1;
+    g_pp_ctype[';'] = PP_CT_PUNCT1;
+    g_pp_ctype[','] = PP_CT_PUNCT1;
+    g_pp_ctype['~'] = PP_CT_PUNCT1;
+    g_pp_ctype['?'] = PP_CT_PUNCT1;
+    g_pp_ctype[':'] = PP_CT_PUNCT1;
     g_pp_punct1['('] = TC_TK_LPAREN;
     g_pp_punct1[')'] = TC_TK_RPAREN;
     g_pp_punct1['{'] = TC_TK_LBRACE;
@@ -362,6 +375,20 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
             t->text.size = j - i;
             t->hide = NULL;
             i = j;
+            space_pending = 0;
+            continue;
+        }
+        if (ct & PP_CT_PUNCT1) {
+            if (out->size == out->max) pp_vec_grow(arena, out);
+            PPTok *t = &out->data[out->size++];
+            t->kind = PP_PUNCT;
+            t->has_space = space_pending;
+            t->file_id = file_id;
+            t->line = line;
+            t->text.str = (char *)(s + i);
+            t->text.size = 1;
+            t->hide = NULL;
+            i++;
             space_pending = 0;
             continue;
         }
@@ -783,7 +810,13 @@ static void pp_emit_tctok(PP *pp, const PPTok *t) {
         v->size++;
         return;
     case PP_PUNCT: {
-        TcTokKind k = pp_punct_kind(t->text);
+        TcTokKind k;
+        if (t->text.size == 1) {
+            unsigned char c = (unsigned char)t->text.str[0];
+            k = (c < 128) ? (TcTokKind)g_pp_punct1[c] : TC_TK_EOF;
+        } else {
+            k = pp_punct_kind(t->text);
+        }
         if (k == TC_TK_EOF) {
             println(str_lit("tinyc lex error at line {}: unexpected '{}'"),
                     (int64_t)t->line, t->text);

@@ -510,8 +510,8 @@ static bool op_is_addressof(MLIR_Context *ctx, MLIR_OpHandle op) {
     return MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_MLIR_ADDRESSOF;
 }
 
-// Load an operand value into `reg`. Handles constants, globals, slots.
-static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
+// Load an operand value into `reg`, using caller-supplied width `w` (0=32b, 1=64b).
+static void load_val_w(FnCtx *F, MLIR_ValueHandle v, uint8_t reg, int w) {
     MLIR_Context *ctx = F->ctx;
     MLIR_OpHandle def = MLIR_GetValueDefiningOp(ctx, v);
     if (def != MLIR_INVALID_HANDLE) {
@@ -528,12 +528,12 @@ static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
                     mov_ri(F, reg, (int64_t)fbits, 1);
                     return;
                 }
-                mov_ri(F, reg, MLIR_GetAttributeInteger(ctx, a), val_w(ctx, v));
+                mov_ri(F, reg, MLIR_GetAttributeInteger(ctx, a), w);
                 return;
             }
         } else if (dt == OP_TYPE_LLVM_MLIR_ZERO || dt == OP_TYPE_LLVM_MLIR_NULL ||
                    dt == OP_TYPE_LLVM_MLIR_UNDEF) {
-            mov_ri(F, reg, 0, val_w(ctx, v));
+            mov_ri(F, reg, 0, w);
             return;
         } else if (dt == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
             MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, def, MLIR_KEY_GLOBAL_NAME);
@@ -551,25 +551,31 @@ static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
         }
     }
     uint8_t rH;
-    if (val_in_reg(F, v, &rH)) { mov_rr(F, reg, rH, val_w(ctx, v)); return; }
+    if (val_in_reg(F, v, &rH)) { mov_rr(F, reg, rH, w); return; }
     int32_t slot;
     if (F->has_spill && sm_get_fast(&F->spill, v, &slot)) {
-        load_rbp(F, reg, (slot + 1) * 8, val_w(ctx, v));
+        load_rbp(F, reg, (slot + 1) * 8, w);
         return;
     }
     if (!vmap_get(&F->slots, v, &slot)) { fail(F, "value with no slot", (string){0}); return; }
-    load_rbp(F, reg, slot, val_w(ctx, v));
+    load_rbp(F, reg, slot, w);
 }
-static void store_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
+static inline void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
+    load_val_w(F, v, reg, val_w(F->ctx, v));
+}
+static void store_val_w(FnCtx *F, MLIR_ValueHandle v, uint8_t reg, int w) {
     uint8_t rH;
-    if (val_in_reg(F, v, &rH)) { mov_rr(F, rH, reg, val_w(F->ctx, v)); return; }
+    if (val_in_reg(F, v, &rH)) { mov_rr(F, rH, reg, w); return; }
     int32_t slot;
     if (F->has_spill && sm_get_fast(&F->spill, v, &slot)) {
-        store_rbp(F, (slot + 1) * 8, reg, val_w(F->ctx, v));
+        store_rbp(F, (slot + 1) * 8, reg, w);
         return;
     }
     if (!vmap_get(&F->slots, v, &slot)) { fail(F, "result with no slot", (string){0}); return; }
-    store_rbp(F, slot, reg, val_w(F->ctx, v));
+    store_rbp(F, slot, reg, w);
+}
+static inline void store_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
+    store_val_w(F, v, reg, val_w(F->ctx, v));
 }
 
 #include "mlir_llvm_to_x64_emit.inc"

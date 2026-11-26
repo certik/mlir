@@ -82,6 +82,16 @@ typedef struct RegTarget {
     SlotMap *memfuse, *memspine, *shiftfuse;
 } RegTarget;
 
+// Fast block-local linear-scan allocator for -O0 / default mode: O(ops) with
+// zero global liveness dataflow, zero crosses_call backwards walk, and zero
+// sort. Cross-block values and block args get dedicated frame slots; block-local
+// values are allocated into callee-saved regs (or full pool in call-free blocks)
+// with per-block spill-slot reuse. Returns callee-saved use mask, or RA_BAIL.
+uint32_t mlir_regalloc_fast(MLIR_Context *ctx, MLIR_RegionHandle reg,
+                            size_t n_blocks, SlotMap *rm,
+                            SlotMap *sm, int32_t *out_nslots,
+                            const RegTarget *T);
+
 // Whole-function linear scan. Fills `rm` (value->phys reg) and `sm` (reused
 // frame slots for spilled values), sets *out_nslots, and returns the callee-
 // saved use mask, or RA_BAIL if the function is too large.
