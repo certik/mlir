@@ -378,7 +378,8 @@ static Expr *parse_aggregate_init(P *p, Type decl_type) {
     int line = cur(p).line;
     p->i++;  // '{'
     Expr *e = new_expr(p, EX_COMPOUND, line);
-    e->cast_type = decl_type;
+    e->cast_type = arena_new(p->arena, Type);
+    *e->cast_type = decl_type;
     // Collect (name, value) pairs in a temporary array; allocate the
     // parallel name array once at the end.
     string *names = NULL;
@@ -637,7 +638,8 @@ static Expr *parse_primary(P *p) {
             if (!parse_abstract_type(p, &ty)) {
                 perror_at(p, cur(p).line, str_lit("expected type in sizeof(...)"));
             }
-            e->cast_type = ty;
+            e->cast_type = arena_new(p->arena, Type);
+            *e->cast_type = ty;
         } else {
             e->lhs = parse_expr(p);
             e->sizeof_is_expr = true;
@@ -674,7 +676,8 @@ static Expr *parse_primary(P *p) {
                 // Compound literal: (T){ v0, v1, ... } or (T){.f = v, ...}
                 p->i++;  // consume '{'
                 Expr *e = new_expr(p, EX_COMPOUND, t.line);
-                e->cast_type = ty;
+                e->cast_type = arena_new(p->arena, Type);
+            *e->cast_type = ty;
                 string *names = NULL;
                 size_t nn = 0, cap = 0;
                 bool any_designated = false;
@@ -713,7 +716,8 @@ static Expr *parse_primary(P *p) {
             }
             Expr *operand = parse_primary(p);
             Expr *e = new_expr(p, EX_CAST, t.line);
-            e->cast_type = ty;
+            e->cast_type = arena_new(p->arena, Type);
+            *e->cast_type = ty;
             e->lhs = operand;
             return e;
         }
@@ -826,7 +830,8 @@ static Expr *parse_primary(P *p) {
                     perror_at(p, cur(p).line,
                         str_lit("expected type in va_arg(ap, T)"));
                 }
-                e->cast_type = ty;
+                e->cast_type = arena_new(p->arena, Type);
+            *e->cast_type = ty;
                 expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
                 return parse_postfix(p, e);
             }

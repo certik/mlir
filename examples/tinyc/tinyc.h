@@ -208,7 +208,7 @@ struct Expr {
     VecExprPtr args;
     Expr   *lvalue;
     Expr   *rhs_assign;
-    Type    cast_type;
+    Type   *cast_type;
     string *compound_field_names;
     Type   *generic_types;
 };
@@ -248,7 +248,11 @@ typedef struct {
 DEFINE_VECTOR_FOR_TYPE(SwitchCase, VecSwitchCase)
 
 struct Stmt {
-    StmtKind kind;
+    uint8_t kind;            // StmtKind
+    bool decl_is_static;
+    bool has_else;
+    bool block_no_scope;
+    int line;
     // ST_EXPR / ST_RETURN
     Expr *expr;
     // ST_DECL
@@ -260,13 +264,10 @@ struct Stmt {
     // The emitter treats the local as an alias for that global instead
     // of allocating an `alloca` slot.
     string decl_static_global_sym;
-    // ST_DECL: declared with a leading `static` (scalar or not).
-    bool decl_is_static;
     // ST_IF / ST_WHILE / ST_FOR / ST_SWITCH
     Expr *cond;
     VecStmtPtr then_body;
     VecStmtPtr else_body;
-    bool has_else;
     VecStmtPtr while_body;
     // ST_FOR
     Stmt *for_init;
@@ -277,12 +278,10 @@ struct Stmt {
     VecStmtPtr for_body;
     // ST_BLOCK / ST_SWITCH (body)
     VecStmtPtr block_body;
-    bool block_no_scope;
     // ST_SWITCH
     VecSwitchCase switch_cases;
     // ST_LABEL / ST_GOTO
     string label_name;
-    int line;
 };
 
 typedef struct {

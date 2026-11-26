@@ -403,7 +403,8 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
         if (c == '/' && i + 1 < sz) {
             if (s[i + 1] == '/') {
                 i += 2;
-                while (i < sz && s[i] != '\n') i++;
+                const char *nl = (const char *)memchr(s + i, '\n', sz - i);
+                i = nl ? (size_t)(nl - s) : sz;
                 space_pending = 1;
                 continue;
             }
@@ -787,10 +788,45 @@ static void pp_emit_tctok(PP *pp, const PPTok *t) {
         v->size++;
         return;
     }
-    case PP_NUMBER:
+    case PP_NUMBER: {
+        // Fast path for common small decimal integers (0, 1, 2, ..., 999999999).
+        const char *s = t->text.str;
+        size_t n = t->text.size;
+        if (n == 1 && s[0] >= '0' && s[0] <= '9') {
+            dst->kind = TC_TK_INT_LIT;
+            dst->line = t->line;
+            dst->is_i64 = false;
+            dst->is_long_long = false;
+            dst->is_unsigned = false;
+            dst->is_f64 = false;
+            dst->int_value = (int64_t)(s[0] - '0');
+            v->size++;
+            return;
+        }
+        if (n >= 2 && n <= 9 && s[0] >= '1' && s[0] <= '9') {
+            int64_t val = s[0] - '0';
+            bool all_dig = true;
+            for (size_t k = 1; k < n; k++) {
+                unsigned d = (unsigned)(unsigned char)s[k] - '0';
+                if (d > 9u) { all_dig = false; break; }
+                val = val * 10 + (int64_t)d;
+            }
+            if (all_dig) {
+                dst->kind = TC_TK_INT_LIT;
+                dst->line = t->line;
+                dst->is_i64 = false;
+                dst->is_long_long = false;
+                dst->is_unsigned = false;
+                dst->is_f64 = false;
+                dst->int_value = val;
+                v->size++;
+                return;
+            }
+        }
         *dst = tinyc_lex_number(t->text, t->line);
         v->size++;
         return;
+    }
     case PP_STRING:
         *dst = tinyc_lex_string(pp->arena, t->text, t->line);
         v->size++;
@@ -1229,9 +1265,11 @@ static inline void expand_put(PP *pp, VecPPTok *out, const PPTok *t) {
 }
 
 // Expand tokens in `toks` and append the result to `out` (NULL: emit them).
-// Uses a zero-copy slice stack + rewinding expansion buffer so hitting a macro
-// never copies the rest of the file and reuses L1-resident scratch space.
-static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out) {
+// When `stop_at_directive` is true (top-level process_tokens), stops at the
+// first PP_NEWLINE followed by PP_HASH and returns the index in `toks` where
+// processing stopped, eliminating the separate lookahead scan in process_tokens.
+static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
+                               bool stop_at_directive) {
     PPSlice stk_inline[64];
     PPSlice *stk = stk_inline;
     size_t stk_cap = 64;
@@ -1253,7 +1291,14 @@ static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out) {
         const PPTok *tp = &base[top->pos++];
         uint8_t tkind = tp->kind;
         if (tkind == PP_END) break;
-        if (tkind == PP_NEWLINE) continue;
+        if (tkind == PP_NEWLINE) {
+            if (stop_at_directive && sp == 1 && top->pos < top->end &&
+                base[top->pos].kind == PP_HASH) {
+                top->pos--; // leave PP_NEWLINE for process_tokens
+                break;
+            }
+            continue;
+        }
         if (tkind == PP_IDENT) {
             MacroSlot *slot = macro_find_slot(pp, tp->text);
             if (slot) {
@@ -1397,11 +1442,17 @@ static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out) {
         }
         expand_put(pp, out, tp);
     }
-    // Rewind any remaining exp_buf slices if we broke out early on PP_END.
+    // Rewind any remaining exp_buf slices if we broke out early on PP_END / directive.
+    size_t consumed = stk[0].pos;
     while (sp > 0) {
         sp--;
         if (stk[sp].in_exp_buf) pp->exp_top = stk[sp].saved_exp_top;
     }
+    return consumed;
+}
+
+static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out) {
+    (void)expand_tokens_ex(pp, toks, n, out, false);
 }
 
 // ----------------------------------------------------------------------
@@ -1977,25 +2028,10 @@ static void process_tokens(PP *pp, PPTok *toks, size_t n, string file, uint16_t 
             continue;
         }
 
-        // Non-directive line: collect through end-of-line, expand macros,
-        // emit results. To support macro invocations whose argument list
-        // spans newlines (e.g. println( ..., \n ..., ...)), we keep
-        // extending `end` past plain newlines until we hit a directive
-        // line (a '#' at line start) or EOF. Tokens stay tagged with
-        // their original source line via #line directives in the output.
-        size_t end = i;
-        while (end < n && toks[end].kind != PP_END) {
-            if (toks[end].kind == PP_NEWLINE) {
-                size_t k = end + 1;
-                while (k < n && toks[k].kind == PP_NEWLINE) k++;
-                if (k < n && toks[k].kind == PP_HASH) break;
-                end = k;
-                continue;
-            }
-            end++;
-        }
-        expand_tokens(pp, toks + i, end - i, NULL);
-        i = end;
+        // Non-directive line: expand directly until the next directive line
+        // (PP_NEWLINE followed by PP_HASH) or EOF in a single pass.
+        size_t consumed = expand_tokens_ex(pp, toks + i, n - i, NULL, true);
+        i += consumed;
         // Don't consume the newline; loop will see it next iteration.
     }
     if (conds.size > 0) {

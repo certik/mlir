@@ -57,11 +57,10 @@ static void sm_reserve(SlotMap *m, size_t want) {
     m->t = nt;
     m->cap = ncap;
 }
-static void sm_init_dense(SlotMap *m, uintptr_t base, size_t len) {
+static void sm_init_dense_buf(SlotMap *m, int32_t *buf, uintptr_t base, size_t len) {
     if (m->cap != 0 || m->n != 0 || m->dense != NULL || len == 0) return;
-    int32_t *d = (int32_t *)arena_alloc(m->arena, len * sizeof(int32_t));
-    memset(d, 0xff, len * sizeof(int32_t));
-    m->dense = d;
+    memset(buf, 0xff, len * sizeof(int32_t));
+    m->dense = buf;
     m->dense_base = base;
     m->dense_len = len;
 }
@@ -269,7 +268,7 @@ typedef struct {
 
 static void *ra_pool_ensure(RaPool *p, size_t need) {
     if (need > p->cap) {
-        size_t ncap = p->cap ? p->cap * 2 : 65536u;
+        size_t ncap = p->cap ? p->cap * 2 : 4096u;
         while (ncap < need) ncap *= 2;
         free(p->buf);
         p->buf = (uint8_t *)malloc(ncap);
@@ -290,6 +289,8 @@ static RaPool g_ra_live_pool = { NULL, 0 };
 static RaPool g_ra_vmap_pool = { NULL, 0 };
 static RaPool g_ra_gen_pool  = { NULL, 0 };
 static RaPool g_ra_succ_pool = { NULL, 0 };
+static RaPool g_ra_rm_pool   = { NULL, 0 };
+static RaPool g_ra_sm_pool   = { NULL, 0 };
 
 // ===========================================================================
 // Global (whole-function) linear-scan allocator + block-local fallback.
@@ -332,10 +333,10 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     // --- 1. Linearise + number values + record def_blk / block_vrange / has_call. ---
     size_t nv_alloc = nv_max ? nv_max : 1;
     size_t main_need =
-        n_blocks * (sizeof(uint32_t) * 3 + sizeof(uint8_t) + 8) +
+        n_blocks * (sizeof(uint32_t) * 4 + 8) +
         (n_blocks + 1) * (sizeof(uint32_t) * 2 + sizeof(int64_t) + 8) +
         nv_alloc * (sizeof(MLIR_ValueHandle) + sizeof(uint32_t) * 12 +
-                    sizeof(uint64_t) + sizeof(uint8_t) * 3 + sizeof(int32_t) + 64) +
+                    sizeof(uint64_t) + sizeof(uint8_t) * 3 + sizeof(int32_t) + 8) +
         256;
     uint8_t *mbuf = (uint8_t *)ra_pool_ensure(&g_ra_main_pool, main_need);
     size_t moff = 0;
@@ -477,21 +478,22 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
 
     // --- 2. Single combined operand pass: first_pos / last_use / weight / nuse
     //        AND identify cross-block ("global") values for sparse liveness. ---
-    uint32_t *glob_id = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
-    memset(glob_id, 0xff, nv_alloc * sizeof(uint32_t));
+    size_t nv_sz = nv ? nv : 1;
+    uint32_t *glob_id = (uint32_t *)ra_bump(mbuf, &moff, nv_sz * sizeof(uint32_t));
+    memset(glob_id, 0xff, nv_sz * sizeof(uint32_t));
     uint32_t *glob_vi = NULL;
     uint32_t n_glob = 0;
     size_t gen_cap = 0, gen_n = 0;
     RaGenEdge *gen_edges = NULL;
     uint32_t *nuse = NULL;
     if (n_blocks > 1) {
-        glob_vi = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
+        glob_vi = (uint32_t *)ra_bump(mbuf, &moff, nv_sz * sizeof(uint32_t));
         gen_cap = 256;
         gen_edges = (RaGenEdge *)ra_pool_ensure(&g_ra_gen_pool, gen_cap * sizeof(RaGenEdge));
         gen_cap = g_ra_gen_pool.cap / sizeof(RaGenEdge);
         if (env->phi_coalesce) {
-            nuse = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
-            memset(nuse, 0, nv_alloc * sizeof(uint32_t));
+            nuse = (uint32_t *)ra_bump(mbuf, &moff, nv_sz * sizeof(uint32_t));
+            memset(nuse, 0, nv_sz * sizeof(uint32_t));
         }
     }
 
@@ -794,8 +796,8 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     }
 
     // --- 3c. Phi edge-copy coalescing hints (terminator-only scan). ---
-    int32_t *hint_src = (int32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(int32_t));
-    memset(hint_src, 0xff, nv_alloc * sizeof(int32_t));
+    int32_t *hint_src = (int32_t *)ra_bump(mbuf, &moff, nv_sz * sizeof(int32_t));
+    memset(hint_src, 0xff, nv_sz * sizeof(int32_t));
     if (env->phi_coalesce && n_blocks > 1) {
         for (size_t b = 0; b < n_blocks; b++) {
             MLIR_OpHandle op = MLIR_GetBlockTerminator(ctx, blk_h[b]);
@@ -831,14 +833,14 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     #undef RA_VMAP_GET
 
     // --- 4. Linear scan over the pool, loop-weighted eviction. ---
-    uint32_t *order = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
+    uint32_t *order = (uint32_t *)ra_bump(mbuf, &moff, nv_sz * sizeof(uint32_t));
     for (uint32_t i = 0; i < nv; i++) order[i] = i;
     bool sorted = true;
     for (uint32_t i = 1; i < nv; i++) {
         if (first_pos[i] < first_pos[i - 1]) { sorted = false; break; }
     }
     if (!sorted) {   // stable bottom-up merge sort by first_pos (ties keep numbering order).
-        uint32_t *tmp = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
+        uint32_t *tmp = (uint32_t *)ra_bump(mbuf, &moff, nv_sz * sizeof(uint32_t));
         for (size_t width = 1; width < nv; width *= 2) {
             for (size_t lo = 0; lo < nv; lo += 2 * width) {
                 size_t mid = lo + width;     if (mid > nv) mid = nv;
@@ -853,54 +855,57 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         }
     }
 
-    // Active list: (value index, pool index). reg_busy[pk].
+    // Active list: (value index, pool index, end pos). busy_mask tracks occupied pool regs.
     uint32_t act_vi[RA_MAXPOOL];
+    uint32_t act_end[RA_MAXPOOL];
     uint8_t  act_pk[RA_MAXPOOL];
     size_t nact = 0;
-    bool reg_busy[RA_MAXPOOL]; for (int i = 0; i < T->npool; i++) reg_busy[i] = false;
+    uint32_t busy_mask = 0;
+    uint32_t pool_mask = (T->npool >= 32) ? 0xFFFFFFFFu : ((1u << T->npool) - 1u);
+    uint32_t caller_mask = (T->ncaller >= 32) ? 0xFFFFFFFFu : ((1u << T->ncaller) - 1u);
+    uint32_t callee_mask = pool_mask & ~caller_mask;
 
     for (uint32_t k = 0; k < nv; k++) {
         uint32_t vi = order[k];
+        uint32_t fp = first_pos[vi];
         // Retire active intervals ending before this one starts (strict, so an
         // operand whose last use == this def keeps its register).
         for (size_t a = 0; a < nact; ) {
-            if (last_use[act_vi[a]] < first_pos[vi]) {
-                reg_busy[act_pk[a]] = false;
-                act_vi[a] = act_vi[nact - 1]; act_pk[a] = act_pk[nact - 1]; nact--;
+            if (act_end[a] < fp) {
+                busy_mask &= ~(1u << act_pk[a]);
+                nact--;
+                act_vi[a] = act_vi[nact]; act_end[a] = act_end[nact]; act_pk[a] = act_pk[nact];
             } else a++;
         }
         // Dead-on-def / never-used values keep their slot.
-        if (last_use[vi] <= first_pos[vi]) continue;
+        uint32_t lu = last_use[vi];
+        if (lu <= fp) continue;
         bool callee_only = crosses[vi];
         if (hint_src[vi] >= 0) {
             int32_t vV = hint_src[vi];
             for (size_t a = 0; a < nact; a++) {
                 if (act_vi[a] != (uint32_t)vV) continue;
-                if (last_use[vV] != first_pos[vi]) break;   // not a clean death
+                if (act_end[a] != fp) break;   // not a clean death
                 if (callee_only && act_pk[a] < T->ncaller) break; // reg class
                 uint8_t pk = act_pk[a];
                 home_pk[vi] = (int8_t)pk;        // inherit V's physical register
-                act_vi[a] = vi;                   // ownership transfers; reg stays busy
+                act_vi[a] = vi; act_end[a] = lu; // ownership transfers; reg stays busy
                 break;
             }
             if (home_pk[vi] >= 0) continue;
         }
-        int found = -1;
-        for (int pk = 0; pk < T->npool; pk++) {
-            if (reg_busy[pk]) continue;
-            if (callee_only && pk < T->ncaller) continue;
-            found = pk; break;
-        }
-        if (found >= 0) {
-            reg_busy[found] = true;
-            act_vi[nact] = vi; act_pk[nact] = (uint8_t)found; nact++;
+        uint32_t avail = (~busy_mask) & (callee_only ? callee_mask : pool_mask);
+        if (avail) {
+            uint32_t found = ra_ctz64((uint64_t)avail);
+            busy_mask |= (1u << found);
+            act_vi[nact] = vi; act_end[nact] = lu; act_pk[nact] = (uint8_t)found; nact++;
             home_pk[vi] = (int8_t)found;
             continue;
         }
         size_t evict_a = (size_t)-1; uint64_t best_w = 0; uint32_t best_end = 0;
         for (size_t a = 0; a < nact; a++) {
             if (callee_only && act_pk[a] < T->ncaller) continue;
-            uint64_t aw = weight[act_vi[a]]; uint32_t ae = last_use[act_vi[a]];
+            uint64_t aw = weight[act_vi[a]]; uint32_t ae = act_end[a];
             if (evict_a == (size_t)-1 || aw < best_w || (aw == best_w && ae > best_end)) {
                 evict_a = a; best_w = aw; best_end = ae;
             }
@@ -908,7 +913,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         if (evict_a != (size_t)-1 && best_w >= weight[vi]) evict_a = (size_t)-1;
         if (evict_a != (size_t)-1) {
             home_pk[act_vi[evict_a]] = -1;          // evicted -> slot
-            act_vi[evict_a] = vi;                   // reuse its register
+            act_vi[evict_a] = vi; act_end[evict_a] = lu; // reuse its register
             home_pk[vi] = (int8_t)act_pk[evict_a];
         }
     }
@@ -920,18 +925,25 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         for (uint32_t vi = 0; vi < nv; vi++) if (home_pk[vi] < 0) n_spills++;
         if (v_dense) {
             if (n_spills > 0) {
-                if (v_span <= n_spills * 4u + 64u) sm_init_dense(sm, min_vh, v_span);
-                else sm_reserve(sm, n_spills);
+                if (v_span <= n_spills * 4u + 64u) {
+                    int32_t *sb = (int32_t *)ra_pool_ensure(&g_ra_sm_pool, v_span * sizeof(int32_t));
+                    sm_init_dense_buf(sm, sb, min_vh, v_span);
+                } else {
+                    sm_reserve(sm, n_spills);
+                }
             }
-            if (nv > n_spills) sm_init_dense(rm, min_vh, v_span);
+            if (nv > n_spills) {
+                int32_t *rb = (int32_t *)ra_pool_ensure(&g_ra_rm_pool, v_span * sizeof(int32_t));
+                sm_init_dense_buf(rm, rb, min_vh, v_span);
+            }
         } else {
             if (n_spills > 0) sm_reserve(sm, n_spills);
             if (nv > n_spills) sm_reserve(rm, nv - n_spills);
         }
         bool no_reuse = env->no_slot_reuse;
-        uint32_t *sl_slot = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
-        uint32_t *sl_end  = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
-        uint32_t *freelist= (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
+        uint32_t *sl_slot = (uint32_t *)ra_bump(mbuf, &moff, nv_sz * sizeof(uint32_t));
+        uint32_t *sl_end  = (uint32_t *)ra_bump(mbuf, &moff, nv_sz * sizeof(uint32_t));
+        uint32_t *freelist= (uint32_t *)ra_bump(mbuf, &moff, nv_sz * sizeof(uint32_t));
         size_t n_sact = 0, n_free = 0;
         for (uint32_t k = 0; k < nv; k++) {
             uint32_t vi = order[k];

@@ -53,6 +53,8 @@ typedef struct Sym {
     bool   wide_slot;           // a char / short / bool local whose address is
                                 // never taken, kept in an i32 slot (see
                                 // local_slot_type)
+    bool   is_ssa;              // immutable scalar/pointer param or local:
+                                // `addr` holds the SSA value directly (no alloca)
     struct Sym *next;
 } Sym;
 
@@ -236,6 +238,13 @@ typedef struct {
     // (collected by collect_addr_taken before its body is emitted).
     string          *addr_taken;
     size_t           n_addr_taken, cap_addr_taken;
+    // Names assigned or address-taken anywhere in the current function
+    // (collected alongside addr_taken). Unmutated scalar/pointer params and
+    // initialized locals bind directly to SSA values without alloca/load/store.
+    string          *mutated;
+    size_t           n_mutated, cap_mutated;
+    uint64_t         mutated_bloom;
+    bool             has_goto;
     struct LValS    *compound_lv;
     // What is known about the most recently emitted i32 values (see
     // fact_put): lets emit_narrow_i32 / bool conversion fold constants and
@@ -873,6 +882,15 @@ static MLIR_ValueHandle sym_addr(E *e, Sym *s) {
     return s->addr;
 }
 
+static MLIR_ValueHandle emit_load_v(E *e, MLIR_ValueHandle ptr, MLIR_TypeHandle elem_ty);
+
+static MLIR_ValueHandle sym_load_ptr(E *e, Sym *s) {
+    if (s->is_ssa) return s->addr;
+    return emit_load_v(e, sym_addr(e, s), e->ptr);
+}
+
+static bool is_mutated(E *e, string name);
+
 static void global_register(E *e, Sym *sy) {
     sy->next = e->globals;
     e->globals = sy;
@@ -1488,7 +1506,7 @@ static SCtx walk_struct_lhs(E *e, Scope *sc, Expr *ex) {
         }
         if (s->type.kind == TY_PTR_STRUCT) {
             // Load the inner ptr first.
-            r.base_ptr = emit_load_v(e, sym_addr(e, s), e->ptr);
+            r.base_ptr = sym_load_ptr(e, s);
             r.source_elem = find_struct_type(e, s->sdef);
             r.sd = s->sdef;
             sctx_push(e, &r, 0);
@@ -1505,7 +1523,7 @@ static SCtx walk_struct_lhs(E *e, Scope *sc, Expr *ex) {
                 EMIT_ERR(e, "-> requires a struct pointer");
                 return r;
             }
-            r.base_ptr = emit_load_v(e, sym_addr(e, s), e->ptr);
+            r.base_ptr = sym_load_ptr(e, s);
             r.source_elem = find_struct_type(e, s->sdef);
             r.sd = s->sdef;
             sctx_push(e, &r, 0);
@@ -1531,7 +1549,7 @@ static SCtx walk_struct_lhs(E *e, Scope *sc, Expr *ex) {
         if (s && s->type.kind == TY_PTR_STRUCT && s->sdef) {
             // `p[i].f` where p is a struct pointer: load p, then GEP by index.
             MLIR_ValueHandle idx_i32 = emit_expr_i32(e, sc, ex->rhs);
-            r.base_ptr = emit_load_v(e, sym_addr(e, s), e->ptr);
+            r.base_ptr = sym_load_ptr(e, s);
             r.source_elem = find_struct_type(e, s->sdef);
             r.sd = s->sdef;
             sctx_push(e, &r, LLVM_GEP_DYN);
@@ -1899,7 +1917,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                     MLIR_ValueHandle i_v = emit_expr_i32(e, sc, ex->lhs->rhs);
                     MLIR_ValueHandle j_v = emit_expr_i32(e, sc, ex->rhs);
                     // pp[i]: GEP at base of pp (which holds T**), stride i.
-                    MLIR_ValueHandle base_pp = emit_load_v(e, sym_addr(e, s), e->ptr);
+                    MLIR_ValueHandle base_pp = sym_load_ptr(e, s);
                     int32_t *path1 = arena_new_array(e->arena, int32_t, 1);
                     path1[0] = LLVM_GEP_DYN;
                     MLIR_ValueHandle *dyn1 = arena_new_array(e->arena, MLIR_ValueHandle, 1);
@@ -1955,7 +1973,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                         if (vs) {
                             if (is_arrow && vs->type.kind == TY_PTR_STRUCT) {
                                 sd = find_struct(e, vs->type.struct_name);
-                                parent_base = emit_load_v(e, sym_addr(e, vs), e->ptr);
+                                parent_base = sym_load_ptr(e, vs);
                             } else if (is_dot && vs->type.kind == TY_STRUCT) {
                                 sd = find_struct(e, vs->type.struct_name);
                                 parent_base = sym_addr(e, vs);
@@ -2004,7 +2022,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                     Sym *s = lookup(e, sc, ex->lhs->lhs->name);
                     if (s && s->type.kind == TY_PTR_PTR) {
                         MLIR_ValueHandle iv = emit_expr_i32(e, sc, ex->rhs);
-                        MLIR_ValueHandle outer = emit_load_v(e, sym_addr(e, s), e->ptr);
+                        MLIR_ValueHandle outer = sym_load_ptr(e, s);
                         MLIR_ValueHandle inner = emit_load_v(e, outer, e->ptr);
                         MLIR_TypeHandle elem = pointee_elem_type(e, s->type.pointee);
                         int32_t *gpath = arena_new_array(e->arena, int32_t, 1);
@@ -2060,25 +2078,19 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 }
                 MLIR_TypeHandle st_ty = find_struct_type(e, sd);
                 MLIR_ValueHandle idx_i32 = emit_expr_i32(e, sc, ex->rhs);
-                MLIR_ValueHandle base = emit_load_v(e, sym_addr(e, s), e->ptr);
-                int32_t *path = arena_new_array(e->arena, int32_t, 1);
-                path[0] = LLVM_GEP_DYN;
-                MLIR_ValueHandle *dyn = arena_new_array(e->arena, MLIR_ValueHandle, 1);
-                dyn[0] = idx_i32;
-                r.base_ptr = emit_gep(e, base, st_ty, path, 1, dyn, 1);
+                MLIR_ValueHandle base = sym_load_ptr(e, s);
+                int32_t path[1] = { LLVM_GEP_DYN };
+                r.base_ptr = emit_gep(e, base, st_ty, path, 1, &idx_i32, 1);
                 r.elem_ty = st_ty;
                 return r;
             }
             // Pointer indexing: p[i] for int* / char* — GEP %p[%i].
             if (s->type.kind == TY_PTR_I32 || s->type.kind == TY_PTR_CHAR) {
                 MLIR_ValueHandle idx_i32 = emit_expr_i32(e, sc, ex->rhs);
-                MLIR_ValueHandle base = emit_load_v(e, sym_addr(e, s), e->ptr);
+                MLIR_ValueHandle base = sym_load_ptr(e, s);
                 MLIR_TypeHandle elem = ptr_elem_of_type(e, &s->type);
-                int32_t *path = arena_new_array(e->arena, int32_t, 1);
-                path[0] = LLVM_GEP_DYN;
-                MLIR_ValueHandle *dyn = arena_new_array(e->arena, MLIR_ValueHandle, 1);
-                dyn[0] = idx_i32;
-                r.base_ptr = emit_gep(e, base, elem, path, 1, dyn, 1);
+                int32_t path[1] = { LLVM_GEP_DYN };
+                r.base_ptr = emit_gep(e, base, elem, path, 1, &idx_i32, 1);
                 r.elem_ty = elem;
                 r.is_unsigned = s->type.int_unsigned;
                 r.narrow_bits = type_is_narrow_int(s->type) ? s->type.int_bits : 0;
@@ -2090,12 +2102,9 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
             // a single-level T*.
             if (s->type.kind == TY_PTR_PTR) {
                 MLIR_ValueHandle idx_i32 = emit_expr_i32(e, sc, ex->rhs);
-                MLIR_ValueHandle base = emit_load_v(e, sym_addr(e, s), e->ptr);
-                int32_t *path = arena_new_array(e->arena, int32_t, 1);
-                path[0] = LLVM_GEP_DYN;
-                MLIR_ValueHandle *dyn = arena_new_array(e->arena, MLIR_ValueHandle, 1);
-                dyn[0] = idx_i32;
-                r.base_ptr = emit_gep(e, base, e->ptr, path, 1, dyn, 1);
+                MLIR_ValueHandle base = sym_load_ptr(e, s);
+                int32_t path[1] = { LLVM_GEP_DYN };
+                r.base_ptr = emit_gep(e, base, e->ptr, path, 1, &idx_i32, 1);
                 r.elem_ty = e->ptr;
                 return r;
             }
@@ -2149,7 +2158,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                     return r;
                 }
                 // Load the inner ptr from p's slot.
-                r.base_ptr = emit_load_v(e, sym_addr(e, s), e->ptr);
+                r.base_ptr = sym_load_ptr(e, s);
                 r.elem_ty = ptr_elem_of_type(e, &s->type);
                 r.is_unsigned = s->type.int_unsigned;
                 r.narrow_bits = type_is_narrow_int(s->type) ? s->type.int_bits : 0;
@@ -2291,7 +2300,7 @@ static MLIR_ValueHandle resolve_struct_source(E *e, Scope *sc, Expr *arg, Struct
             // `&p[i]` where p is struct*: load p, then GEP by i (stride sizeof(struct)).
             if (s && s->type.kind == TY_PTR_STRUCT && s->sdef) {
                 MLIR_ValueHandle idx = emit_expr_i32(e, sc, arg->lhs->rhs);
-                MLIR_ValueHandle base = emit_load_v(e, sym_addr(e, s), e->ptr);
+                MLIR_ValueHandle base = sym_load_ptr(e, s);
                 MLIR_TypeHandle st_ty = find_struct_type(e, s->sdef);
                 int32_t path[1] = {LLVM_GEP_DYN};
                 MLIR_ValueHandle dyn[1] = {idx};
@@ -2334,7 +2343,7 @@ static MLIR_ValueHandle resolve_struct_source(E *e, Scope *sc, Expr *arg, Struct
                 return MLIR_INVALID_HANDLE;
             }
             *out_sd = s->sdef;
-            if (s->type.kind == TY_PTR_STRUCT) return emit_load_v(e, sym_addr(e, s), e->ptr);
+            if (s->type.kind == TY_PTR_STRUCT) return sym_load_ptr(e, s);
             return sym_addr(e, s);
         }
     }
@@ -2911,9 +2920,9 @@ static bool emit_fold_leaf(void *ctx, Expr *ex, bool lenient, FoldVal *out) {
                                                : c_sizeof_expr(fc->e, fc->sc, ex->lhs));
         return true;
     }
-    if (ex->cast_type.kind == TY_VOID) return false;
-    *out = fold_size(fc->e, ex->is_alignof ? type_align(fc->e, ex->cast_type)
-                                           : type_size(fc->e, ex->cast_type));
+    if (!ex->cast_type || ex->cast_type->kind == TY_VOID) return false;
+    *out = fold_size(fc->e, ex->is_alignof ? type_align(fc->e, *ex->cast_type)
+                                           : type_size(fc->e, *ex->cast_type));
     return true;
 }
 
@@ -3130,14 +3139,14 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 EMIT_ERR(e, "va_arg first argument must be of type va_list");
                 r.val = emit_const_i32(e, 0); return r;
             }
-            TypeKind tk = ex->cast_type.kind;
+            TypeKind tk = ex->cast_type->kind;
             MLIR_ValueHandle ap_ptr = sym_addr(e, sy);
             MLIR_ValueHandle cursor = emit_load_v(e, ap_ptr, e->ptr);
             if (tk == TY_STRUCT) {
                 // va_arg of a struct: copy sizeof(struct) bytes (rounded up to
                 // a whole number of 8-byte slots) out of the buffer, then
                 // advance the cursor past those slots.
-                StructDef *sd = find_struct(e, ex->cast_type.struct_name);
+                StructDef *sd = find_struct(e, ex->cast_type->struct_name);
                 if (!sd) {
                     EMIT_ERR(e, "unknown struct in va_arg");
                     r.val = emit_const_i32(e, 0); return r;
@@ -3145,7 +3154,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 MLIR_TypeHandle st_ty = find_struct_type(e, sd);
                 MLIR_ValueHandle out = emit_alloca(e, st_ty);
                 emit_struct_copy(e, out, cursor, sd);
-                int64_t words = (type_size(e, ex->cast_type) + 7) / 8;
+                int64_t words = (type_size(e, *ex->cast_type) + 7) / 8;
                 int32_t adv = (int32_t)(words * 8);
                 MLIR_ValueHandle nxt = emit_gep(e, cursor, e->i8, &adv, 1, NULL, 0);
                 emit_store_v(e, nxt, ap_ptr);
@@ -3180,7 +3189,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         || tk == TY_PTR_STRUCT || tk == TY_PTR_PTR);
             r.is_str = (tk == TY_PTR_CHAR);
             r.is_void_ptr = (tk == TY_PTR_VOID);
-            r.ptr_elem = ptr_elem_of_type(e, &ex->cast_type);
+            r.ptr_elem = ptr_elem_of_type(e, ex->cast_type);
             return r;
         }
         case EX_STR: {
@@ -3279,11 +3288,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     n = ex->is_alignof ? type_align(e, infer_expr_type(e, sc, ex->lhs))
                                        : c_sizeof_expr(e, sc, ex->lhs);
                 }
-            } else if (ex->cast_type.kind == TY_VOID) {
+            } else if (!ex->cast_type || ex->cast_type->kind == TY_VOID) {
                 EMIT_ERR(e, "sizeof(void) is not allowed");
             } else {
-                n = ex->is_alignof ? type_align(e, ex->cast_type)
-                                   : type_size(e, ex->cast_type);
+                n = ex->is_alignof ? type_align(e, *ex->cast_type)
+                                   : type_size(e, *ex->cast_type);
             }
             // The result is a size_t (`unsigned long`): unsigned, and 64-bit
             // except on wasm32 (as in ast_fold and infer_expr_type).
@@ -3294,13 +3303,13 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
         }
         case EX_CAST: {
             EVal v = emit_expr(e, sc, ex->lhs);
-            TypeKind ck = ex->cast_type.kind;
+            TypeKind ck = ex->cast_type->kind;
             bool ck_is_ptr = (ck == TY_PTR_VOID || ck == TY_PTR_I32 ||
                               ck == TY_PTR_CHAR || ck == TY_PTR_STRUCT ||
                               ck == TY_FNPTR || ck == TY_PTR_PTR);
             // A cast to bool yields 0 or 1 (from an integer, float or
             // pointer operand).
-            if (!ck_is_ptr && ex->cast_type.is_bool) {
+            if (!ck_is_ptr && ex->cast_type->is_bool) {
                 r.val = emit_bool_i32(e, v);
                 return r;
             }
@@ -3327,15 +3336,15 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     // (A char / short target converts through a signed i32,
                     // as in coerce_eval_to.)
                     v.val = emit_fptoi(e, v.val, v.is_i64 ? e->i64 : e->i32,
-                                       ex->cast_type.int_unsigned &&
-                                       !type_is_narrow_int(ex->cast_type));
+                                       ex->cast_type->int_unsigned &&
+                                       !type_is_narrow_int(*ex->cast_type));
                     // Keep an out-of-range value inside the narrow type.
-                    int fnb = ex->cast_type.int_bits;
+                    int fnb = ex->cast_type->int_bits;
                     if (fnb == 8 || fnb == 16)
-                        v.val = emit_narrow_i32(e, v.val, fnb, ex->cast_type.int_unsigned);
+                        v.val = emit_narrow_i32(e, v.val, fnb, ex->cast_type->int_unsigned);
                     // A char / short result is promoted to (signed) int.
-                    v.is_unsigned = ex->cast_type.int_unsigned &&
-                                    !type_is_narrow_int(ex->cast_type);
+                    v.is_unsigned = ex->cast_type->int_unsigned &&
+                                    !type_is_narrow_int(*ex->cast_type);
                     v.is_float = false; v.is_f64 = false;
                     return v;
                 }
@@ -3357,16 +3366,16 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 }
                 // char / short: keep the low 8 / 16 bits, zero- or
                 // sign-extended by the target's signedness.
-                int nb = ex->cast_type.int_bits;
+                int nb = ex->cast_type->int_bits;
                 if (!want_i64 && (nb == 8 || nb == 16)) {
-                    v.val = emit_narrow_i32(e, v.val, nb, ex->cast_type.int_unsigned);
+                    v.val = emit_narrow_i32(e, v.val, nb, ex->cast_type->int_unsigned);
                 }
                 // A cast to an unsigned integer type yields an unsigned
                 // value: subsequent comparisons / div / shr must use the
                 // unsigned form (e.g. `(unsigned long)x >= CONST`). A char /
                 // short result is promoted to (signed) int.
-                v.is_unsigned = ex->cast_type.int_unsigned &&
-                                !type_is_narrow_int(ex->cast_type);
+                v.is_unsigned = ex->cast_type->int_unsigned &&
+                                !type_is_narrow_int(*ex->cast_type);
                 return v;
             }
             // Pointer-to-integer cast: emit llvm.ptrtoint, then optionally
@@ -3391,7 +3400,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 }
                 // `(uintptr_t)p` / `(unsigned long)p` produce an unsigned
                 // integer: select unsigned comparisons / div / shr below.
-                v.is_unsigned = ex->cast_type.int_unsigned;
+                v.is_unsigned = ex->cast_type->int_unsigned;
                 return v;
             }
             // Pointer-to-pointer cast: opaque !llvm.ptr is universal, so
@@ -3421,7 +3430,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             v.is_float = false;
             v.is_void_ptr = (ck == TY_PTR_VOID);
             if (ck == TY_PTR_STRUCT) {
-                v.sdef = find_struct(e, ex->cast_type.struct_name);
+                v.sdef = find_struct(e, ex->cast_type->struct_name);
             } else {
                 v.sdef = NULL;
             }
@@ -3429,9 +3438,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // `(long long *)vp` steps by 8, a `(struct S *)charp` by the
             // struct size (ptr_elem unset, sdef set), not by the
             // operand's element size.
-            v.ptr_elem = ptr_elem_of_type(e, &ex->cast_type);
+            v.ptr_elem = ptr_elem_of_type(e, ex->cast_type);
             v.is_str = (ck == TY_PTR_CHAR);
-            v.is_unsigned = ex->cast_type.int_unsigned;
+            v.is_unsigned = ex->cast_type->int_unsigned;
             return v;
         }
         case EX_VAR:
@@ -3528,6 +3537,69 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 if (s && s->type.kind == TY_VA_LIST) {
                     r.val = sym_addr(e, s);
                     r.is_ptr = true;
+                    return r;
+                }
+                // Direct fast path for scalar/pointer variables (both direct-SSA
+                // and mutable alloca/global slots): avoids emit_lvalue + load_lvalue
+                // + 2 redundant scope lookups.
+                if (s && s->type.kind != TY_STRUCT) {
+                    TypeKind tk = s->type.kind;
+                    if (s->is_ssa) {
+                        r.val = s->addr;
+                    } else if (tk == TY_I64) {
+                        r.val = emit_load_v(e, sym_addr(e, s), e->i64);
+                    } else if (tk == TY_F32) {
+                        r.val = emit_load_v(e, sym_addr(e, s), e->f32);
+                    } else if (tk == TY_F64) {
+                        r.val = emit_load_v(e, sym_addr(e, s), e->f64);
+                    } else if (tk == TY_I32) {
+                        MLIR_TypeHandle mt = s->wide_slot ? e->i32 : scalar_mem_type(e, &s->type);
+                        MLIR_ValueHandle raw = emit_load_v(e, sym_addr(e, s), mt);
+                        if (mt == e->i8 || mt == e->i16) {
+                            r.val = (s->type.int_unsigned || s->type.is_bool)
+                                ? emit_extui_to_i32(e, raw)
+                                : emit_extsi_to_i32(e, raw);
+                        } else {
+                            r.val = raw;
+                        }
+                    } else {
+                        r.val = emit_load_v(e, sym_addr(e, s), e->ptr);
+                    }
+                    if (tk == TY_I64) {
+                        r.is_i64 = true;
+                        r.is_unsigned = s->type.int_unsigned;
+                    } else if (tk == TY_F32) {
+                        r.is_float = true;
+                    } else if (tk == TY_F64) {
+                        r.is_float = true;
+                        r.is_f64 = true;
+                    } else if (tk == TY_I32) {
+                        r.is_unsigned = s->type.int_unsigned && !type_is_narrow_int(s->type);
+                    } else {
+                        r.is_ptr = true;
+                        r.sdef = s->sdef;
+                        if (tk == TY_PTR_CHAR) { r.is_str = true; r.ptr_elem = e->i8; }
+                        else if (tk == TY_PTR_I32) r.ptr_elem = ptr_elem_of_type(e, &s->type);
+                        else if (tk == TY_PTR_VOID) r.is_void_ptr = true;
+                        else if (tk == TY_PTR_PTR) {
+                            r.ptr_elem = e->ptr;
+                            if (s->type.pointee) {
+                                Type *pe = s->type.pointee;
+                                if (pe->kind == TY_PTR_CHAR) r.is_str = true;
+                                else if (pe->kind == TY_PTR_STRUCT) {
+                                    r.sdef = find_struct(e, pe->struct_name);
+                                } else if (pe->kind == TY_FNPTR) {
+                                    Type *fnty = arena_new(e->arena, Type);
+                                    *fnty = *pe;
+                                    r.fnptr_ty = fnty;
+                                }
+                            }
+                        } else if (tk == TY_FNPTR) {
+                            Type *fnty = arena_new(e->arena, Type);
+                            *fnty = s->type;
+                            r.fnptr_ty = fnty;
+                        }
+                    }
                     return r;
                 }
             }
@@ -4506,7 +4578,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     }
                     fnty = &sy->type;
                     // Load the !llvm.ptr from the variable's storage.
-                    callee_ptr = emit_load_v(e, sym_addr(e, sy), e->ptr);
+                    callee_ptr = sym_load_ptr(e, sy);
                 }
                 size_t na = ex->args.size;
                 if ((int)na != fnty->fnptr_nparams) {
@@ -4684,7 +4756,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
         }
         case EX_COMPOUND: {
             EVal r = (EVal){0};
-            Type t = ex->cast_type;
+            Type t = *ex->cast_type;
             if (t.kind == TY_ARRAY_STRUCT) {
                 // Array-of-struct compound literal `(S[]){{...}, {...}, ...}`.
                 // Each arg is itself an EX_COMPOUND for a single struct
@@ -4798,8 +4870,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         // cast_type: propagate the surrounding field's
                         // struct type so emit_expr resolves it.
                         if (ae->kind == EX_COMPOUND &&
-                            ae->cast_type.kind == TY_VOID) {
-                            ae->cast_type = ft;
+                            ae->cast_type->kind == TY_VOID) {
+                            *ae->cast_type = ft;
                         }
                         StructDef *src_sd = NULL;
                         MLIR_ValueHandle src = resolve_struct_source(e, sc, ae, &src_sd);
@@ -4954,7 +5026,7 @@ static bool expr_is_void_statement(E *e, Expr *ex) {
         return sig && (sig->ret.type.kind == TY_VOID ||
                        sig->ret.type.kind == TY_STRUCT);
     }
-    if (ex->kind == EX_CAST && ex->cast_type.kind == TY_VOID) return true;
+    if (ex->kind == EX_CAST && ex->cast_type->kind == TY_VOID) return true;
     if (ex->kind == EX_TERNARY) {
         return expr_is_void_statement(e, ex->rhs) &&
                expr_is_void_statement(e, ex->lvalue);
@@ -4975,7 +5047,7 @@ static void emit_expr_for_side_effect(E *e, Scope *sc, Expr *ex) {
             return;
         }
     }
-    if (ex->kind == EX_CAST && ex->cast_type.kind == TY_VOID) {
+    if (ex->kind == EX_CAST && ex->cast_type->kind == TY_VOID) {
         emit_expr_for_side_effect(e, sc, ex->lhs);
         return;
     }
@@ -5105,35 +5177,66 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             }
             if (st->decl_type.kind == TY_PTR_I32 || st->decl_type.kind == TY_PTR_VOID ||
                 st->decl_type.kind == TY_PTR_PTR) {
-                sy->addr = emit_alloca(e, e->ptr);
-                if (st->decl_init) {
+                bool direct_ssa = !e->has_goto && !st->decl_is_static &&
+                                  st->decl_init != NULL && !is_mutated(e, st->decl_name);
+                if (direct_ssa) {
                     EVal iv = emit_expr(e, sc, st->decl_init);
                     if (iv.is_ptr) {
-                        emit_store_v(e, iv.val, sy->addr);
+                        sy->addr = iv.val;
                     } else if (st->decl_init->kind == EX_INT && st->decl_init->int_value == 0) {
-                        // Null-pointer constant: `T *p = 0;` / `T *p = NULL;`.
-                        emit_store_v(e, emit_null_ptr(e), sy->addr);
+                        sy->addr = emit_null_ptr(e);
                     } else {
                         EMIT_ERR(e, "pointer initializer must be a pointer expression");
+                        sy->addr = emit_null_ptr(e);
+                    }
+                    sy->is_ssa = true;
+                } else {
+                    sy->addr = emit_alloca(e, e->ptr);
+                    if (st->decl_init) {
+                        EVal iv = emit_expr(e, sc, st->decl_init);
+                        if (iv.is_ptr) {
+                            emit_store_v(e, iv.val, sy->addr);
+                        } else if (st->decl_init->kind == EX_INT && st->decl_init->int_value == 0) {
+                            // Null-pointer constant: `T *p = 0;` / `T *p = NULL;`.
+                            emit_store_v(e, emit_null_ptr(e), sy->addr);
+                        } else {
+                            EMIT_ERR(e, "pointer initializer must be a pointer expression");
+                        }
                     }
                 }
             } else if (st->decl_type.kind == TY_PTR_CHAR) {
-                sy->addr = emit_alloca(e, e->ptr);
-                if (st->decl_init) {
+                bool direct_ssa = !e->has_goto && !st->decl_is_static &&
+                                  st->decl_init != NULL && !is_mutated(e, st->decl_name);
+                if (direct_ssa) {
                     EVal iv = emit_expr(e, sc, st->decl_init);
-                    MLIR_ValueHandle p = int_to_ptr(e, iv);
-                    emit_store_v(e, p, sy->addr);
+                    sy->addr = int_to_ptr(e, iv);
+                    sy->is_ssa = true;
                 } else {
-                    emit_store_v(e, emit_null_ptr(e), sy->addr);
+                    sy->addr = emit_alloca(e, e->ptr);
+                    if (st->decl_init) {
+                        EVal iv = emit_expr(e, sc, st->decl_init);
+                        MLIR_ValueHandle p = int_to_ptr(e, iv);
+                        emit_store_v(e, p, sy->addr);
+                    } else {
+                        emit_store_v(e, emit_null_ptr(e), sy->addr);
+                    }
                 }
             } else if (st->decl_type.kind == TY_FNPTR) {
-                sy->addr = emit_alloca(e, e->ptr);
-                if (st->decl_init) {
+                bool direct_ssa = !e->has_goto && !st->decl_is_static &&
+                                  st->decl_init != NULL && !is_mutated(e, st->decl_name);
+                if (direct_ssa) {
                     EVal iv = emit_expr(e, sc, st->decl_init);
-                    MLIR_ValueHandle p = int_to_ptr(e, iv);
-                    emit_store_v(e, p, sy->addr);
+                    sy->addr = int_to_ptr(e, iv);
+                    sy->is_ssa = true;
                 } else {
-                    emit_store_v(e, emit_null_ptr(e), sy->addr);
+                    sy->addr = emit_alloca(e, e->ptr);
+                    if (st->decl_init) {
+                        EVal iv = emit_expr(e, sc, st->decl_init);
+                        MLIR_ValueHandle p = int_to_ptr(e, iv);
+                        emit_store_v(e, p, sy->addr);
+                    } else {
+                        emit_store_v(e, emit_null_ptr(e), sy->addr);
+                    }
                 }
             } else if (st->decl_type.kind == TY_PTR_STRUCT) {
                 StructDef *sd = find_struct(e, st->decl_type.struct_name);
@@ -5142,22 +5245,41 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                     return;
                 }
                 sy->sdef = sd;
-                sy->addr = emit_alloca(e, e->ptr);
-                if (st->decl_init) {
+                bool direct_ssa = !e->has_goto && !st->decl_is_static &&
+                                  st->decl_init != NULL && !is_mutated(e, st->decl_name);
+                if (direct_ssa) {
                     if (st->decl_init->kind == EX_ADDR &&
                         st->decl_init->lhs->kind == EX_VAR) {
                         Sym *target = lookup(e, sc, st->decl_init->lhs->name);
                         if (!target || target->type.kind != TY_STRUCT || target->sdef != sd) {
                             EMIT_ERR(e, "struct* target type mismatch");
+                            sy->addr = emit_null_ptr(e);
                         } else {
-                            emit_store_v(e, sym_addr(e, target), sy->addr);
+                            sy->addr = sym_addr(e, target);
                         }
                     } else {
-                        // Allow any expression yielding a pointer (e.g., a
-                        // function call returning struct*, or a cast).
                         EVal iv = emit_expr(e, sc, st->decl_init);
-                        MLIR_ValueHandle p = int_to_ptr(e, iv);
-                        emit_store_v(e, p, sy->addr);
+                        sy->addr = int_to_ptr(e, iv);
+                    }
+                    sy->is_ssa = true;
+                } else {
+                    sy->addr = emit_alloca(e, e->ptr);
+                    if (st->decl_init) {
+                        if (st->decl_init->kind == EX_ADDR &&
+                            st->decl_init->lhs->kind == EX_VAR) {
+                            Sym *target = lookup(e, sc, st->decl_init->lhs->name);
+                            if (!target || target->type.kind != TY_STRUCT || target->sdef != sd) {
+                                EMIT_ERR(e, "struct* target type mismatch");
+                            } else {
+                                emit_store_v(e, sym_addr(e, target), sy->addr);
+                            }
+                        } else {
+                            // Allow any expression yielding a pointer (e.g., a
+                            // function call returning struct*, or a cast).
+                            EVal iv = emit_expr(e, sc, st->decl_init);
+                            MLIR_ValueHandle p = int_to_ptr(e, iv);
+                            emit_store_v(e, p, sy->addr);
+                        }
                     }
                 }
             } else if (st->decl_type.kind == TY_ARRAY_I32) {
@@ -5375,8 +5497,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                             continue;
                                         }
                                         if (fe->kind == EX_COMPOUND &&
-                                            fe->cast_type.kind == TY_VOID) {
-                                            fe->cast_type = ft;
+                                            fe->cast_type->kind == TY_VOID) {
+                                            *fe->cast_type = ft;
                                         }
                                         StructDef *src_sd = NULL;
                                         MLIR_ValueHandle src = resolve_struct_source(
@@ -5469,8 +5591,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                         }
                     }
                     if (st->decl_init->kind != EX_COMPOUND ||
-                        st->decl_init->cast_type.kind != TY_STRUCT ||
-                        !str_eq(st->decl_init->cast_type.struct_name,
+                        st->decl_init->cast_type->kind != TY_STRUCT ||
+                        !str_eq(st->decl_init->cast_type->struct_name,
                                 st->decl_type.struct_name)) {
                         EMIT_ERR(e, "struct initializer must be a "
                                     "matching compound literal");
@@ -5522,8 +5644,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                 // emit_expr's EX_COMPOUND path resolves
                                 // the field's struct type.
                                 if (ae->kind == EX_COMPOUND &&
-                                    ae->cast_type.kind == TY_VOID) {
-                                    ae->cast_type = ft;
+                                    ae->cast_type->kind == TY_VOID) {
+                                    *ae->cast_type = ft;
                                 }
                                 StructDef *src_sd = NULL;
                                 MLIR_ValueHandle src = resolve_struct_source(
@@ -5566,43 +5688,72 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                     }
                 }
             } else if (st->decl_type.kind == TY_I64) {
-                sy->addr = emit_alloca(e, e->i64);
-                if (st->decl_init) {
+                if (!e->has_goto && !st->decl_is_static &&
+                    st->decl_init != NULL && !is_mutated(e, st->decl_name)) {
                     EVal v = emit_expr(e, sc, st->decl_init);
-                    MLIR_ValueHandle iv = coerce_eval_to(e, v, e->i64,
-                                                         st->decl_type);
-                    emit_store_v(e, iv, sy->addr);
+                    sy->addr = coerce_eval_to(e, v, e->i64, st->decl_type);
+                    sy->is_ssa = true;
                 } else {
-                    emit_store_v(e, emit_const_i64(e, 0), sy->addr);
+                    sy->addr = emit_alloca(e, e->i64);
+                    if (st->decl_init) {
+                        EVal v = emit_expr(e, sc, st->decl_init);
+                        MLIR_ValueHandle iv = coerce_eval_to(e, v, e->i64,
+                                                             st->decl_type);
+                        emit_store_v(e, iv, sy->addr);
+                    } else {
+                        emit_store_v(e, emit_const_i64(e, 0), sy->addr);
+                    }
                 }
             } else if (st->decl_type.kind == TY_F32) {
-                sy->addr = emit_alloca(e, e->f32);
-                if (st->decl_init) {
+                if (!e->has_goto && !st->decl_is_static &&
+                    st->decl_init != NULL && !is_mutated(e, st->decl_name)) {
                     EVal v = emit_expr(e, sc, st->decl_init);
-                    MLIR_ValueHandle iv = coerce_eval_to(e, v, e->f32, (Type){0});
-                    emit_store_v(e, iv, sy->addr);
+                    sy->addr = coerce_eval_to(e, v, e->f32, (Type){0});
+                    sy->is_ssa = true;
                 } else {
-                    emit_store_v(e, emit_const_f32(e, 0.0), sy->addr);
+                    sy->addr = emit_alloca(e, e->f32);
+                    if (st->decl_init) {
+                        EVal v = emit_expr(e, sc, st->decl_init);
+                        MLIR_ValueHandle iv = coerce_eval_to(e, v, e->f32, (Type){0});
+                        emit_store_v(e, iv, sy->addr);
+                    } else {
+                        emit_store_v(e, emit_const_f32(e, 0.0), sy->addr);
+                    }
                 }
             } else if (st->decl_type.kind == TY_F64) {
-                sy->addr = emit_alloca(e, e->f64);
-                if (st->decl_init) {
+                if (!e->has_goto && !st->decl_is_static &&
+                    st->decl_init != NULL && !is_mutated(e, st->decl_name)) {
                     EVal v = emit_expr(e, sc, st->decl_init);
-                    MLIR_ValueHandle iv = coerce_eval_to(e, v, e->f64, (Type){0});
-                    emit_store_v(e, iv, sy->addr);
+                    sy->addr = coerce_eval_to(e, v, e->f64, (Type){0});
+                    sy->is_ssa = true;
                 } else {
-                    emit_store_v(e, emit_const_f64(e, 0.0), sy->addr);
+                    sy->addr = emit_alloca(e, e->f64);
+                    if (st->decl_init) {
+                        EVal v = emit_expr(e, sc, st->decl_init);
+                        MLIR_ValueHandle iv = coerce_eval_to(e, v, e->f64, (Type){0});
+                        emit_store_v(e, iv, sy->addr);
+                    } else {
+                        emit_store_v(e, emit_const_f64(e, 0.0), sy->addr);
+                    }
                 }
             } else {
-                MLIR_TypeHandle mt = local_slot_type(e, st->decl_name, &st->decl_type,
-                                                     &sy->wide_slot);
-                sy->addr = emit_alloca(e, mt);
-                if (st->decl_init) {
-                    MLIR_ValueHandle v = coerce_eval_to(e, emit_expr(e, sc, st->decl_init),
-                                                        mt, st->decl_type);
-                    emit_store_v(e, v, sy->addr);
+                if (!e->has_goto && !st->decl_is_static &&
+                    st->decl_init != NULL && !is_mutated(e, st->decl_name)) {
+                    sy->wide_slot = type_is_narrow_int(st->decl_type);
+                    sy->addr = coerce_eval_to(e, emit_expr(e, sc, st->decl_init),
+                                              e->i32, st->decl_type);
+                    sy->is_ssa = true;
                 } else {
-                    emit_store_v(e, emit_zero_of(e, mt), sy->addr);
+                    MLIR_TypeHandle mt = local_slot_type(e, st->decl_name, &st->decl_type,
+                                                         &sy->wide_slot);
+                    sy->addr = emit_alloca(e, mt);
+                    if (st->decl_init) {
+                        MLIR_ValueHandle v = coerce_eval_to(e, emit_expr(e, sc, st->decl_init),
+                                                            mt, st->decl_type);
+                        emit_store_v(e, v, sy->addr);
+                    } else {
+                        emit_store_v(e, emit_zero_of(e, mt), sy->addr);
+                    }
                 }
             }
             return;
@@ -5642,7 +5793,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                         emit_struct_copy(e, out, sym_addr(e, s), want);
                     }
                 } else if (st->expr->kind == EX_COMPOUND &&
-                           st->expr->cast_type.kind == TY_STRUCT) {
+                           st->expr->cast_type->kind == TY_STRUCT) {
                     EVal cv = emit_expr(e, sc, st->expr);
                     if (cv.sdef != want) {
                         EMIT_ERR(e, "returned compound literal type mismatch");
@@ -6063,46 +6214,35 @@ static void build_signatures(E *e) {
     }
 }
 
-// Recursively walk all statements in a function body and pre-allocate
-// a block for every ST_LABEL encountered. The blocks are appended to
-// e->labels in source order; emit-time the corresponding ST_LABEL site
-// appends each block to the function region.
-static void collect_labels(E *e, VecStmtPtr body) {
-    for (size_t i = 0; i < body.size; i++) {
-        Stmt *st = body.data[i];
-        if (!st) continue;
-        switch (st->kind) {
-            case ST_LABEL: {
-                struct LabelBlock *lb = arena_new(e->arena, struct LabelBlock);
-                lb->name = st->label_name;
-                lb->block = MLIR_CreateBlock(e->ctx);
-                MLIR_AppendRegionBlock(e->ctx, e->func_region, lb->block);
-                lb->next = e->labels;
-                e->labels = lb;
-                break;
-            }
-            case ST_IF:
-                collect_labels(e, st->then_body);
-                if (st->has_else) collect_labels(e, st->else_body);
-                break;
-            case ST_WHILE:
-            case ST_DO_WHILE:
-                collect_labels(e, st->while_body);
-                break;
-            case ST_FOR:
-                collect_labels(e, st->for_body);
-                break;
-            case ST_BLOCK:
-            case ST_SWITCH:
-                collect_labels(e, st->block_body);
-                break;
-            default:
-                break;
-        }
+static void record_mutated(E *e, string name) {
+    if (name.size == 0) return;
+    uint32_t bit = ((uint32_t)(unsigned char)name.str[0] * 31u + (uint32_t)name.size) & 63u;
+    e->mutated_bloom |= (1ull << bit);
+    if (e->n_mutated == e->cap_mutated) {
+        size_t cap = e->cap_mutated ? e->cap_mutated * 2 : 16;
+        string *na = arena_new_array(e->arena, string, cap);
+        for (size_t i = 0; i < e->n_mutated; i++) na[i] = e->mutated[i];
+        e->mutated = na;
+        e->cap_mutated = cap;
     }
+    e->mutated[e->n_mutated++] = name;
 }
 
-// Record every `&name` in `ex` / `st` (see E.addr_taken).
+static bool is_mutated(E *e, string name) {
+    if (e->n_mutated == 0 || name.size == 0) return false;
+    uint32_t bit = ((uint32_t)(unsigned char)name.str[0] * 31u + (uint32_t)name.size) & 63u;
+    if (((e->mutated_bloom >> bit) & 1u) == 0) return false;
+    size_t n = name.size;
+    char c0 = name.str[0];
+    for (size_t i = 0; i < e->n_mutated; i++) {
+        string m = e->mutated[i];
+        if (m.size == n && m.str[0] == c0 && (n == 1 || memcmp(m.str + 1, name.str + 1, n - 1) == 0))
+            return true;
+    }
+    return false;
+}
+
+// Record every `&name` and assignment target `name = ...` in `ex` / `st`.
 static void collect_addr_taken_expr(E *e, Expr *ex) {
     if (!ex) return;
     if (ex->kind == EX_ADDR && ex->lhs && ex->lhs->kind == EX_VAR) {
@@ -6114,6 +6254,9 @@ static void collect_addr_taken_expr(E *e, Expr *ex) {
             e->cap_addr_taken = cap;
         }
         e->addr_taken[e->n_addr_taken++] = ex->lhs->name;
+        record_mutated(e, ex->lhs->name);
+    } else if (ex->kind == EX_ASSIGN && ex->lvalue && ex->lvalue->kind == EX_VAR) {
+        record_mutated(e, ex->lvalue->name);
     }
     collect_addr_taken_expr(e, ex->lhs);
     collect_addr_taken_expr(e, ex->rhs);
@@ -6126,6 +6269,16 @@ static void collect_addr_taken(E *e, VecStmtPtr body);
 
 static void collect_addr_taken_stmt(E *e, Stmt *st) {
     if (!st) return;
+    if (st->kind == ST_LABEL) {
+        struct LabelBlock *lb = arena_new(e->arena, struct LabelBlock);
+        lb->name = st->label_name;
+        lb->block = MLIR_CreateBlock(e->ctx);
+        MLIR_AppendRegionBlock(e->ctx, e->func_region, lb->block);
+        lb->next = e->labels;
+        e->labels = lb;
+    } else if (st->kind == ST_GOTO || st->kind == ST_SWITCH) {
+        e->has_goto = true;
+    }
     collect_addr_taken_expr(e, st->expr);
     collect_addr_taken_expr(e, st->decl_init);
     collect_addr_taken_expr(e, st->cond);
@@ -6167,8 +6320,9 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
     MLIR_AppendRegionBlock(e->ctx, body_r, entry);
 
     Scope sc = (Scope){.head = NULL, .parent = NULL};
-    MLIR_ValueHandle *flat_args = arena_new_array(e->arena, MLIR_ValueHandle,
-                                                  sig->n_flat_in ? sig->n_flat_in : 1);
+    MLIR_ValueHandle flat_args_stk[16];
+    MLIR_ValueHandle *flat_args = (sig->n_flat_in <= 16) ? flat_args_stk
+        : arena_new_array(e->arena, MLIR_ValueHandle, sig->n_flat_in);
     for (size_t i = 0; i < sig->n_flat_in; i++) {
         flat_args[i] = MLIR_AddBlockArgument(e->ctx, entry,
                                              sig->flat_in_tys[i], eloc(e, 0));
@@ -6192,10 +6346,12 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
     e->terminated = false;
     e->next_ssa = 0;
     e->labels = NULL;
-    // Pre-pass: walk the function body and pre-allocate a block for each
-    // ST_LABEL so that forward `goto` references resolve cleanly.
-    collect_labels(e, f->body);
+    // Single pre-pass: collect ST_LABEL blocks, &name addr-taken vars, and
+    // mutated vars in one AST walk.
     e->n_addr_taken = 0;
+    e->n_mutated = 0;
+    e->mutated_bloom = 0;
+    e->has_goto = false;
     collect_addr_taken(e, f->body);
 
     size_t arg_off = 0;
@@ -6220,15 +6376,22 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
             // Caller-byval: the block-arg IS our copy. Bind directly.
             sy->sdef = p->sdef;
             sy->addr = blk;
-        } else if (p->type.kind == TY_PTR_STRUCT) {
-            sy->sdef = p->sdef;
-            sy->addr = emit_alloca(e, e->ptr);
-            emit_store_v(e, blk, sy->addr);
         } else if (p->type.kind == TY_VA_LIST) {
             // va_list is passed as the alloca pointer of the caller's
             // 32-byte slot. Reuse it directly so va_arg / va_end operate
             // on the caller's slot.
             sy->addr = blk;
+        } else if (!is_mutated(e, sy->name)) {
+            // Unmutated scalar/pointer parameter: bind directly to block-arg SSA
+            // value without emitting alloca + store + loads.
+            if (p->type.kind == TY_PTR_STRUCT) sy->sdef = p->sdef;
+            sy->wide_slot = (p->type.kind == TY_I32 && type_is_narrow_int(p->type));
+            sy->addr = blk;
+            sy->is_ssa = true;
+        } else if (p->type.kind == TY_PTR_STRUCT) {
+            sy->sdef = p->sdef;
+            sy->addr = emit_alloca(e, e->ptr);
+            emit_store_v(e, blk, sy->addr);
         } else if (p->type.kind == TY_F32) {
             sy->addr = emit_alloca(e, e->f32);
             emit_store_v(e, blk, sy->addr);
@@ -6289,7 +6452,7 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
     MLIR_TypeHandle ft = real_variadic ? sig->llvm_fn_ty : sig->fn_ty;
     MLIR_NamedAttr fn_ty_attr = MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(e->ctx, ft));
     // Up to 4 attrs: sym_name, function_type, llvm.linkage, wasm.export_name.
-    MLIR_NamedAttr *attrs = arena_new_array(e->arena, MLIR_NamedAttr, 4);
+    MLIR_NamedAttr attrs[4];
     attrs[0] = sym_name; attrs[1] = fn_ty_attr;
     int n_attrs = 2;
     if (f->is_static) {
@@ -6389,7 +6552,7 @@ static void decay_array_type(E *e, Type *t) {
 // `NULL` or `(void *)0`: a pointer-typed null pointer constant.
 static bool expr_is_null_ptr_const(Expr *x) {
     if (x->kind == EX_NULL) return true;
-    return x->kind == EX_CAST && x->cast_type.kind == TY_PTR_VOID && x->lhs &&
+    return x->kind == EX_CAST && x->cast_type->kind == TY_PTR_VOID && x->lhs &&
            x->lhs->kind == EX_INT && x->lhs->int_value == 0;
 }
 
@@ -6557,9 +6720,9 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
             }
             return t;
         }
-        case EX_CAST: return ex->cast_type;
-        case EX_COMPOUND: return ex->cast_type;
-        case EX_VA_ARG: return ex->cast_type;
+        case EX_CAST: return *ex->cast_type;
+        case EX_COMPOUND: return *ex->cast_type;
+        case EX_VA_ARG: return *ex->cast_type;
         case EX_SIZEOF:
             // size_t is `unsigned long` (corec/base/types.h, and clang):
             // typed as the parser types `unsigned long`, with 32-bit storage
@@ -6943,7 +7106,7 @@ static bool gconst_eval(E *e, Expr *ex, GConst *out) {
     if (ex->kind == EX_CAST) {
         GConst a;
         if (!gconst_eval(e, ex->lhs, &a)) return false;
-        Type t = ex->cast_type;
+        Type t = *ex->cast_type;
         if (t.kind == TY_F32 || t.kind == TY_F64) {
             out->is_float = true;
             out->f = gconst_to_float(a, t.kind == TY_F32);
