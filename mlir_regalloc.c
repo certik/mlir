@@ -263,6 +263,7 @@ static RaPool g_ra_main_pool = { NULL, 0 };
 static RaPool g_ra_live_pool = { NULL, 0 };
 static RaPool g_ra_vmap_pool = { NULL, 0 };
 static RaPool g_ra_gen_pool  = { NULL, 0 };
+static RaPool g_ra_succ_pool = { NULL, 0 };
 
 // ===========================================================================
 // Global (whole-function) linear-scan allocator + block-local fallback.
@@ -278,7 +279,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     bool home_params = env->home_params;
     bool halfopen = env->halfopen;
 
-    // --- 0. Count register-candidate values; cache block handles; bail on nested regions. ---
+    // --- 0. Cache block handles and upper-bound nv_max in O(n_blocks) (no op walk). ---
     MLIR_BlockHandle *blk_h = (MLIR_BlockHandle *)ra_pool_ensure(
         &g_ra_blk_pool, n_blocks * sizeof(MLIR_BlockHandle));
     size_t nv_max = 0;
@@ -286,12 +287,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
         blk_h[b] = bk;
         if (b > 0 || home_params) nv_max += MLIR_GetBlockNumArgs(ctx, bk);
-        size_t no = MLIR_GetBlockNumOps(ctx, bk);
-        for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
-            if (MLIR_GetOpNumRegions(ctx, op) > 0) return RA_BAIL;
-            nv_max += MLIR_GetOpNumResults(ctx, op);
-        }
+        nv_max += MLIR_GetBlockNumOps(ctx, bk);
     }
     if (nv_max == 0) return 0;
     {
@@ -358,6 +354,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+            if (MLIR_GetOpNumRegions(ctx, op) > 0) return RA_BAIL;
             MLIR_OpType oty = MLIR_GetOpType(ctx, op);
             if (oty == OP_TYPE_LLVM_CALL) has_call[b] = 1;
             bool is_c = (oty == OP_TYPE_LLVM_MLIR_CONSTANT ||
@@ -367,6 +364,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             bool skip = is_c || ra_is_folded(T, ctx, op);
             if (!skip) {
                 size_t nr = MLIR_GetOpNumResults(ctx, op);
+                if (nv + nr > nv_max) return RA_BAIL;
                 for (size_t r = 0; r < nr; r++) {
                     MLIR_ValueHandle rv = MLIR_GetOpResult(ctx, op, r);
                     uintptr_t vh = (uintptr_t)rv;
@@ -417,7 +415,8 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         if (term != MLIR_INVALID_HANDLE) n_succ_tot += MLIR_GetOpNumSuccessors(ctx, term);
     }
     succ_off[n_blocks] = (uint32_t)n_succ_tot;
-    uint32_t *succ_idx = (uint32_t *)malloc((n_succ_tot ? n_succ_tot : 1) * sizeof(uint32_t));
+    uint32_t *succ_idx = (uint32_t *)ra_pool_ensure(
+        &g_ra_succ_pool, (n_succ_tot ? n_succ_tot : 1) * sizeof(uint32_t));
     uint32_t *loop_depth = (uint32_t *)ra_bump(mbuf, &moff, n_blocks * sizeof(uint32_t));
     memset(loop_depth, 0, n_blocks * sizeof(uint32_t));
     if (n_blocks > 1) {
@@ -948,7 +947,6 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     #undef A64_BARGP
     #undef A64_COVL
     #undef A64_COVF
-    free(succ_idx);
     if (vmap.cap) a64_hh_free(&vmap);
     return used_mask;
 }

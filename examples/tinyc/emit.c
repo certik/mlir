@@ -62,9 +62,14 @@ typedef struct Scope {
 } Scope;
 
 static Sym *scope_lookup(Scope *s, string name) {
+    size_t n = name.size;
+    char c0 = n ? name.str[0] : 0;
     for (Scope *cur = s; cur; cur = cur->parent) {
         for (Sym *sy = cur->head; sy; sy = sy->next) {
-            if (str_eq(sy->name, name)) return sy;
+            if (sy->name.size == n &&
+                (n == 0 || (sy->name.str[0] == c0 &&
+                 (n == 1 || memcmp(sy->name.str + 1, name.str + 1, n - 1) == 0))))
+                return sy;
         }
     }
     return NULL;
@@ -340,8 +345,14 @@ static MLIR_TypeHandle find_struct_type(E *e, StructDef *sd) {
 }
 
 static int struct_field_index(StructDef *sd, string name) {
-    for (size_t i = 0; i < sd->fields.size; i++) {
-        if (str_eq(sd->fields.data[i].name, name)) return (int)i;
+    size_t n = name.size;
+    char c0 = n ? name.str[0] : 0;
+    size_t nf = sd->fields.size;
+    for (size_t i = 0; i < nf; i++) {
+        string fn = sd->fields.data[i].name;
+        if (fn.size == n && (n == 0 || (fn.str[0] == c0 &&
+            (n == 1 || memcmp(fn.str + 1, name.str + 1, n - 1) == 0))))
+            return (int)i;
     }
     return -1;
 }

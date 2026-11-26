@@ -749,40 +749,8 @@ static TcTokKind pp_punct_kind(string s) {
     return TC_TK_EOF;
 }
 
-static void pp_emit_tctok(PP *pp, PPTok *t) {
+static void pp_emit_tctok(PP *pp, const PPTok *t) {
     VecTcTok *v = pp->tok_out;
-    TcTok tok;
-    switch (t->kind) {
-    case PP_IDENT:
-        tok = (TcTok){0};
-        tok.kind = tinyc_keyword_or_ident(t->text);
-        tok.text = t->text;
-        tok.line = t->line;
-        break;
-    case PP_PUNCT: {
-        TcTokKind k = pp_punct_kind(t->text);
-        if (k == TC_TK_EOF) {
-            println(str_lit("tinyc lex error at line {}: unexpected '{}'"),
-                    (int64_t)t->line, t->text);
-            return;
-        }
-        tok = (TcTok){0};
-        tok.kind = k;
-        tok.line = t->line;
-        break;
-    }
-    case PP_NUMBER:
-        tok = tinyc_lex_number(t->text, t->line);
-        break;
-    case PP_STRING:
-        tok = tinyc_lex_string(pp->arena, t->text, t->line);
-        break;
-    case PP_CHAR:
-        tok = tinyc_lex_char(t->text, t->line);
-        break;
-    default:
-        return;
-    }
     if (v->size == v->max) {
         size_t nmax = v->max ? v->max * 2 : 256;
         TcTok *nd = arena_new_array(pp->arena, TcTok, nmax);
@@ -790,7 +758,41 @@ static void pp_emit_tctok(PP *pp, PPTok *t) {
         v->data = nd;
         v->max = nmax;
     }
-    v->data[v->size++] = tok;
+    TcTok *dst = &v->data[v->size];
+    switch (t->kind) {
+    case PP_IDENT:
+        dst->kind = tinyc_keyword_or_ident(t->text);
+        dst->line = t->line;
+        dst->text = t->text;
+        v->size++;
+        return;
+    case PP_PUNCT: {
+        TcTokKind k = pp_punct_kind(t->text);
+        if (k == TC_TK_EOF) {
+            println(str_lit("tinyc lex error at line {}: unexpected '{}'"),
+                    (int64_t)t->line, t->text);
+            return;
+        }
+        dst->kind = k;
+        dst->line = t->line;
+        v->size++;
+        return;
+    }
+    case PP_NUMBER:
+        *dst = tinyc_lex_number(t->text, t->line);
+        v->size++;
+        return;
+    case PP_STRING:
+        *dst = tinyc_lex_string(pp->arena, t->text, t->line);
+        v->size++;
+        return;
+    case PP_CHAR:
+        *dst = tinyc_lex_char(t->text, t->line);
+        v->size++;
+        return;
+    default:
+        return;
+    }
 }
 
 // Emit a token to the output stream (after macro expansion). Inserts a
@@ -1278,10 +1280,11 @@ static bool collect_args_slices(PP *pp, PPSlice *stk, size_t *sp,
 }
 
 // Append a fully expanded token to `out`, or emit it straight to the output
-// text when `out` is NULL (top level: no need to buffer a whole line group).
-static inline void expand_put(PP *pp, VecPPTok *out, PPTok *t) {
+// text / TcTok stream when `out` is NULL.
+static inline void expand_put(PP *pp, VecPPTok *out, const PPTok *t) {
     if (out) VecPPTok_push_back(pp->arena, out, *t);
-    else emit_pp_token(pp, t);
+    else if (pp->tok_out) pp_emit_tctok(pp, t);
+    else emit_pp_token(pp, (PPTok *)t);
 }
 
 // Expand tokens in `toks` and append the result to `out` (NULL: emit them).
@@ -1306,12 +1309,14 @@ static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out) {
             continue;
         }
         const PPTok *base = top->in_exp_buf ? pp->exp_buf : top->toks;
-        PPTok t = base[top->pos++];
-        if (t.kind == PP_END) break;
-        if (t.kind == PP_NEWLINE) continue;
-        if (t.kind == PP_IDENT) {
-            MacroSlot *slot = macro_find_slot(pp, t.text);
+        const PPTok *tp = &base[top->pos++];
+        uint8_t tkind = tp->kind;
+        if (tkind == PP_END) break;
+        if (tkind == PP_NEWLINE) continue;
+        if (tkind == PP_IDENT) {
+            MacroSlot *slot = macro_find_slot(pp, tp->text);
             if (slot) {
+                PPTok t = *tp;
                 if (slot->special == PP_SPECIAL_FILE) {
                     PPTok s = {0};
                     string tf = pp->files[t.file_id];
@@ -1449,7 +1454,7 @@ static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out) {
                 }
             }
         }
-        expand_put(pp, out, &t);
+        expand_put(pp, out, tp);
     }
     // Rewind any remaining exp_buf slices if we broke out early on PP_END.
     while (sp > 0) {

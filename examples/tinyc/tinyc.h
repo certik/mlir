@@ -188,62 +188,29 @@ DEFINE_VECTOR_FOR_TYPE(Expr*, VecExprPtr)
 
 struct Expr {
     ExprKind kind;
-    // For EX_INT
-    int64_t int_value;
-    bool    is_i64;          // true iff the integer literal had L/LL suffix.
-                             // When `is_i64 && !is_long_long`, the literal had
-                             // a single L: it is TY_I64 on native targets but
-                             // TY_I32 on wasm32 (where `long` is the size of
-                             // `int`).
-    bool    is_long_long;    // true iff the integer literal had an LL suffix.
-                             // LL always means TY_I64 regardless of target.
-    bool    is_unsigned;     // the integer literal has an unsigned type
-                             // (u suffix, or a hex/octal value that only
-                             // fits the unsigned type).
-    bool    is_f64;          // true iff the float literal has TY_F64 type
-                             // (i.e. no `f` suffix; C's default for `1.0`).
-    // For EX_FLOAT
-    double float_value;
-    // For EX_VAR
-    string name;
-    // For EX_BIN / EX_UN
     BinOp op;
-    Expr *lhs;
-    Expr *rhs;
-    // For EX_CALL
-    string callee;
-    VecExprPtr args;
-    // For EX_ASSIGN
-    Expr *lvalue;          // an lvalue expression (EX_VAR / EX_INDEX / EX_DEREF)
-    Expr *rhs_assign;
-    bool is_post_step;     // EX_ASSIGN that originated from a postfix `x++` /
-                           // `x--`. Emit reads the old value of the lvalue,
-                           // stores `old ± 1`, and yields the OLD value.
-    bool is_compound;      // EX_ASSIGN from `lhs op= rhs` or prefix `++x` /
-                           // `--x`: rhs_assign is an EX_BIN whose lhs is the
-                           // same node as `lvalue`. Emit computes the lvalue
-                           // address once and uses it for the load and the
-                           // store, so side effects in it happen once.
-    // For EX_INDEX (lhs = array, rhs = index)
-    // For EX_ADDR / EX_DEREF (lhs = inner)
-    // For EX_SIZEOF / EX_CAST: cast_type is the type being asked about /
-    // cast to. EX_CAST also uses lhs as the operand. EX_SIZEOF may instead
-    // carry an operand expression in lhs (sizeof_is_expr=true), in which
-    // case the emitter infers the type from the expression.
-    Type cast_type;
-    bool sizeof_is_expr;
-    bool is_alignof;       // EX_SIZEOF from `_Alignof`: the alignment, not the size
-    // For EX_COMPOUND with designated initializers: parallel to `args`.
-    // compound_field_names[i].size == 0 indicates a positional entry; a
-    // non-empty name selects the named field. NULL when there are no
-    // designated entries at all.
-    string *compound_field_names;
-    // For EX_GENERIC: parallel to args[]. generic_types[i] is the type
-    // at the i-th association entry; generic_default_index is the
-    // index of the `default:` entry, or -1 if absent.
-    Type   *generic_types;
-    int     generic_default_index;
     int line;
+    int generic_default_index;
+    bool    is_i64;
+    bool    is_long_long;
+    bool    is_unsigned;
+    bool    is_f64;
+    bool    is_post_step;
+    bool    is_compound;
+    bool    sizeof_is_expr;
+    bool    is_alignof;
+    int64_t int_value;
+    double  float_value;
+    string  name;
+    Expr   *lhs;
+    Expr   *rhs;
+    string  callee;
+    VecExprPtr args;
+    Expr   *lvalue;
+    Expr   *rhs_assign;
+    Type    cast_type;
+    string *compound_field_names;
+    Type   *generic_types;
 };
 
 typedef enum {
