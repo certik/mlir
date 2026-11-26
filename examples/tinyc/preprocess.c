@@ -119,6 +119,8 @@ typedef struct {
     char     *out;
     size_t    out_size;
     size_t    out_cap;
+    // Direct TcTok output (non-NULL in tinyc_preprocess_lex() fused mode).
+    VecTcTok *tok_out;
     // Interned file names (indexed by PPTok.file_id).
     string   *files;
     size_t    n_files;
@@ -639,6 +641,7 @@ static bool is_punct1(PPTok *t, char c) {
 // ----------------------------------------------------------------------
 
 static void emit_line_directive_if_needed(PP *pp, uint16_t file_id, int line) {
+    if (pp->tok_out) return;
     if (pp->cur_loc_valid &&
         pp->cur_file_id == file_id && pp->cur_line == line) return;
     string file = pp->files[file_id];
@@ -667,12 +670,113 @@ static void emit_line_directive_if_needed(PP *pp, uint16_t file_id, int line) {
     pp->cur_loc_valid = true;
 }
 
+static TcTokKind pp_punct_kind(string s) {
+    if (s.size == 1) {
+        switch (s.str[0]) {
+            case '(': return TC_TK_LPAREN;
+            case ')': return TC_TK_RPAREN;
+            case '{': return TC_TK_LBRACE;
+            case '}': return TC_TK_RBRACE;
+            case '[': return TC_TK_LBRACK;
+            case ']': return TC_TK_RBRACK;
+            case ';': return TC_TK_SEMI;
+            case ',': return TC_TK_COMMA;
+            case '.': return TC_TK_DOT;
+            case '+': return TC_TK_PLUS;
+            case '-': return TC_TK_MINUS;
+            case '*': return TC_TK_STAR;
+            case '/': return TC_TK_SLASH;
+            case '%': return TC_TK_PERCENT;
+            case '<': return TC_TK_LT;
+            case '>': return TC_TK_GT;
+            case '=': return TC_TK_ASSIGN;
+            case '!': return TC_TK_BANG;
+            case '&': return TC_TK_AMP;
+            case '|': return TC_TK_PIPE;
+            case '^': return TC_TK_CARET;
+            case '~': return TC_TK_TILDE;
+            case '?': return TC_TK_QUESTION;
+            case ':': return TC_TK_COLON;
+            default:  return TC_TK_EOF;
+        }
+    }
+    if (s.size == 2) {
+        char c = s.str[0], d = s.str[1];
+        switch (c) {
+            case '<': return d == '=' ? TC_TK_LE : d == '<' ? TC_TK_SHL : TC_TK_EOF;
+            case '>': return d == '=' ? TC_TK_GE : d == '>' ? TC_TK_SHR : TC_TK_EOF;
+            case '=': return d == '=' ? TC_TK_EQEQ : TC_TK_EOF;
+            case '!': return d == '=' ? TC_TK_NE : TC_TK_EOF;
+            case '&': return d == '&' ? TC_TK_AMPAMP : d == '=' ? TC_TK_AMPEQ : TC_TK_EOF;
+            case '|': return d == '|' ? TC_TK_PIPEPIPE : d == '=' ? TC_TK_PIPEEQ : TC_TK_EOF;
+            case '-': return d == '>' ? TC_TK_ARROW : d == '=' ? TC_TK_MINUSEQ : d == '-' ? TC_TK_MINUSMINUS : TC_TK_EOF;
+            case '+': return d == '+' ? TC_TK_PLUSPLUS : d == '=' ? TC_TK_PLUSEQ : TC_TK_EOF;
+            case '*': return d == '=' ? TC_TK_STAREQ : TC_TK_EOF;
+            case '/': return d == '=' ? TC_TK_SLASHEQ : TC_TK_EOF;
+            case '%': return d == '=' ? TC_TK_PERCENTEQ : TC_TK_EOF;
+            case '^': return d == '=' ? TC_TK_CARETEQ : TC_TK_EOF;
+            default:  return TC_TK_EOF;
+        }
+    }
+    if (s.size == 3) {
+        if (s.str[0] == '.' && s.str[1] == '.' && s.str[2] == '.') return TC_TK_ELLIPSIS;
+        if (s.str[0] == '<' && s.str[1] == '<' && s.str[2] == '=') return TC_TK_SHLEQ;
+        if (s.str[0] == '>' && s.str[1] == '>' && s.str[2] == '=') return TC_TK_SHREQ;
+    }
+    return TC_TK_EOF;
+}
+
+static void pp_emit_tctok(PP *pp, PPTok *t) {
+    VecTcTok *v = pp->tok_out;
+    TcTok tok;
+    switch (t->kind) {
+    case PP_IDENT:
+        tok = (TcTok){0};
+        tok.kind = tinyc_keyword_or_ident(t->text);
+        tok.text = t->text;
+        tok.line = t->line;
+        break;
+    case PP_PUNCT: {
+        TcTokKind k = pp_punct_kind(t->text);
+        if (k == TC_TK_EOF) {
+            println(str_lit("tinyc lex error at line {}: unexpected '{}'"),
+                    (int64_t)t->line, t->text);
+            return;
+        }
+        tok = (TcTok){0};
+        tok.kind = k;
+        tok.line = t->line;
+        break;
+    }
+    case PP_NUMBER:
+        tok = tinyc_lex_number(t->text, t->line);
+        break;
+    case PP_STRING:
+        tok = tinyc_lex_string(pp->arena, t->text, t->line);
+        break;
+    case PP_CHAR:
+        tok = tinyc_lex_char(t->text, t->line);
+        break;
+    default:
+        return;
+    }
+    if (v->size == v->max) {
+        size_t nmax = v->max ? v->max * 2 : 256;
+        TcTok *nd = arena_new_array(pp->arena, TcTok, nmax);
+        if (v->size) memcpy(nd, v->data, v->size * sizeof(TcTok));
+        v->data = nd;
+        v->max = nmax;
+    }
+    v->data[v->size++] = tok;
+}
+
 // Emit a token to the output stream (after macro expansion). Inserts a
 // `#line` directive when the source location changes; otherwise pads with
 // newlines so token line numbers stay roughly faithful.
 static bool g_need_space_sep = false;
 static void emit_pp_token(PP *pp, PPTok *t) {
     if (t->kind == PP_PLACEMARKER || t->kind == PP_NEWLINE || t->kind == PP_END) return;
+    if (pp->tok_out) { pp_emit_tctok(pp, t); return; }
     if (!pp->cur_loc_valid || pp->cur_file_id != t->file_id) {
         emit_line_directive_if_needed(pp, t->file_id, t->line);
         g_need_space_sep = false;
@@ -1726,20 +1830,17 @@ static void process_tokens(PP *pp, PPTok *toks, size_t n, string file, uint16_t 
                 continue;
             }
             if (str_eq(dn, s_lit("line"))) {
-                // Update line/file metadata for subsequent tokens. We
-                // implement this by directly emitting a #line directive
-                // and adjusting cur_line; but the simplest path is to
-                // forward the directive through unchanged so the lexer
-                // honors it.
-                emit_line_directive_if_needed(pp, file_id, t.line);
-                if (pp->out_size > 0 && pp->out[pp->out_size - 1] != '\n') out_char(pp, '\n');
-                out_append(pp, s_lit("#line"));
-                for (size_t k = j; k < end; k++) {
-                    out_char(pp, ' ');
-                    out_append(pp, toks[k].text);
+                if (!pp->tok_out) {
+                    emit_line_directive_if_needed(pp, file_id, t.line);
+                    if (pp->out_size > 0 && pp->out[pp->out_size - 1] != '\n') out_char(pp, '\n');
+                    out_append(pp, s_lit("#line"));
+                    for (size_t k = j; k < end; k++) {
+                        out_char(pp, ' ');
+                        out_append(pp, toks[k].text);
+                    }
+                    out_char(pp, '\n');
+                    pp->cur_loc_valid = false;
                 }
-                out_char(pp, '\n');
-                pp->cur_loc_valid = false;
                 i = end + 1;
                 continue;
             }
@@ -1856,22 +1957,19 @@ static int g_last_preprocess_errors = 0;
 
 int tinyc_last_preprocess_errors(void) { return g_last_preprocess_errors; }
 
-string tinyc_preprocess(Arena *arena, string path,
-                        string *include_dirs, size_t n_include_dirs,
-                        string *defines, size_t n_defines) {
+static void pp_init_state(PP *pp, Arena *arena,
+                          string *include_dirs, size_t n_include_dirs,
+                          string *defines, size_t n_defines) {
     pp_init_ctype();
-    PP pp = {0};
-    pp.arena = arena;
-    pp.include_dirs = include_dirs;
-    pp.n_include_dirs = n_include_dirs;
+    *pp = (PP){0};
+    pp->arena = arena;
+    pp->include_dirs = include_dirs;
+    pp->n_include_dirs = n_include_dirs;
 
-    // __FILE__ and __LINE__ are intercepted at expansion time (before any
-    // macro of that name); their slots carry the marker.
-    macro_get_slot(&pp, s_lit("__FILE__"))->special = PP_SPECIAL_FILE;
-    macro_get_slot(&pp, s_lit("__LINE__"))->special = PP_SPECIAL_LINE;
+    macro_get_slot(pp, s_lit("__FILE__"))->special = PP_SPECIAL_FILE;
+    macro_get_slot(pp, s_lit("__LINE__"))->special = PP_SPECIAL_LINE;
 
-    // Predefined macros: __TINYC__ = 1.
-    Macro *tcm = macro_define(&pp, s_lit("__TINYC__"));
+    Macro *tcm = macro_define(pp, s_lit("__TINYC__"));
     PPTok one = {0};
     one.kind = PP_NUMBER;
     one.text = s_lit("1");
@@ -1879,15 +1977,13 @@ string tinyc_preprocess(Arena *arena, string path,
     tcm->body[0] = one;
     tcm->n_body = 1;
 
-    // Command-line -D defines. Each entry is either "NAME" or "NAME=BODY".
-    // The body is tokenized via the same pp_tokenize() the source uses.
-    uint16_t cmdline_fid = pp_intern_file(&pp, s_lit("<command-line>"));
+    uint16_t cmdline_fid = pp_intern_file(pp, s_lit("<command-line>"));
     for (size_t k = 0; k < n_defines; k++) {
         string d = defines[k];
         size_t eq = 0;
         while (eq < d.size && d.str[eq] != '=') eq++;
         string name = (string){d.str, eq};
-        Macro *m = macro_define(&pp, name);
+        Macro *m = macro_define(pp, name);
         if (eq >= d.size) {
             PPTok body = {0};
             body.kind = PP_NUMBER;
@@ -1899,7 +1995,6 @@ string tinyc_preprocess(Arena *arena, string path,
             string body_src = (string){d.str + eq + 1, d.size - eq - 1};
             VecPPTok body_toks; VecPPTok_reserve(arena, &body_toks, 4);
             pp_tokenize(arena, body_src, cmdline_fid, &body_toks);
-            // Strip trailing PP_NEWLINE / PP_END that pp_tokenize appends.
             size_t bn = body_toks.size;
             while (bn > 0 && (body_toks.data[bn - 1].kind == PP_NEWLINE
                               || body_toks.data[bn - 1].kind == PP_END)) bn--;
@@ -1910,11 +2005,35 @@ string tinyc_preprocess(Arena *arena, string path,
             }
         }
     }
+}
 
+string tinyc_preprocess(Arena *arena, string path,
+                        string *include_dirs, size_t n_include_dirs,
+                        string *defines, size_t n_defines) {
+    PP pp;
+    pp_init_state(&pp, arena, include_dirs, n_include_dirs, defines, n_defines);
     string main_src = read_file_ok(arena, path);
     out_grow(&pp, main_src.size * 2 + 8192);
     process_file(&pp, path, main_src);
     out_char(&pp, '\n');
     g_last_preprocess_errors = pp.n_errors;
     return (string){pp.out, pp.out_size};
+}
+
+VecTcTok tinyc_preprocess_lex(Arena *arena, string path,
+                              string *include_dirs, size_t n_include_dirs,
+                              string *defines, size_t n_defines) {
+    PP pp;
+    pp_init_state(&pp, arena, include_dirs, n_include_dirs, defines, n_defines);
+    string main_src = read_file_ok(arena, path);
+    VecTcTok toks;
+    VecTcTok_reserve(arena, &toks, main_src.size / 4 + 512);
+    pp.tok_out = &toks;
+    process_file(&pp, path, main_src);
+    TcTok eof = {0};
+    eof.kind = TC_TK_EOF;
+    eof.line = toks.size > 0 ? toks.data[toks.size - 1].line : 1;
+    VecTcTok_push_back(arena, &toks, eof);
+    g_last_preprocess_errors = pp.n_errors;
+    return toks;
 }

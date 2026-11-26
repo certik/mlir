@@ -34,7 +34,7 @@ static bool is_alpha(char c) { return (g_lex_ctype[(unsigned char)c] & LEX_CT_AL
 static bool is_digit(char c) { return (g_lex_ctype[(unsigned char)c] & LEX_CT_DIGIT) != 0; }
 static bool is_alnum(char c) { return (g_lex_ctype[(unsigned char)c] & LEX_CT_ALNUM) != 0; }
 
-static TcTokKind keyword_or_ident(string s) {
+TcTokKind tinyc_keyword_or_ident(string s) {
     const char *p = s.str;
     switch (s.size) {
     case 2:
@@ -145,7 +145,7 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
             size_t j = i + 1;
             while (j < sz && (g_lex_ctype[(unsigned char)s[j]] & LEX_CT_ALNUM)) j++;
             string name = (string){.str = (char *)(s + i), .size = j - i};
-            TcTok t = (TcTok){.kind = keyword_or_ident(name), .text = name, .line = line};
+            TcTok t = (TcTok){.kind = tinyc_keyword_or_ident(name), .text = name, .line = line};
             VecTcTok_push_back(arena, &toks, t);
             i = j; continue;
         }
@@ -608,4 +608,244 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
     TcTok eof = (TcTok){.kind = TC_TK_EOF, .line = line};
     VecTcTok_push_back(arena, &toks, eof);
     return toks;
+}
+
+TcTok tinyc_lex_string(Arena *arena, string raw, int line) {
+    const char *s = raw.str;
+    size_t sz = raw.size;
+    size_t j = (sz > 0 && s[0] == '"') ? 1 : 0;
+    size_t end = (sz > j && s[sz - 1] == '"') ? sz - 1 : sz;
+    char *buf = arena_new_array(arena, char, (end - j) + 1);
+    size_t n = 0;
+    while (j < end) {
+        char ch = s[j++];
+        if (ch == '\\' && j < end) {
+            char esc = s[j++];
+            switch (esc) {
+                case 'n': ch = '\n'; break;
+                case 't': ch = '\t'; break;
+                case 'r': ch = '\r'; break;
+                case 'v': ch = '\v'; break;
+                case 'f': ch = '\f'; break;
+                case 'a': ch = '\a'; break;
+                case 'b': ch = '\b'; break;
+                case '\\': ch = '\\'; break;
+                case '"': ch = '"'; break;
+                case '\'': ch = '\''; break;
+                case '?': ch = '?'; break;
+                case '0': ch = '\0'; break;
+                case 'x': {
+                    int v = 0, nh = 0;
+                    while (j < end) {
+                        char h = s[j];
+                        int dv;
+                        if (h >= '0' && h <= '9') dv = h - '0';
+                        else if (h >= 'a' && h <= 'f') dv = 10 + (h - 'a');
+                        else if (h >= 'A' && h <= 'F') dv = 10 + (h - 'A');
+                        else break;
+                        v = v * 16 + dv;
+                        j++; nh++;
+                    }
+                    if (nh == 0) {
+                        println(str_lit("tinyc lex error at line {}: \\x with no hex digits"),
+                                (int64_t)line);
+                    }
+                    ch = (char)(v & 0xff);
+                    break;
+                }
+                default:
+                    println(str_lit("tinyc lex error at line {}: unknown escape '\\{}'"),
+                            (int64_t)line, str_substr(raw, j - 1, 1));
+                    ch = esc;
+            }
+        }
+        buf[n++] = ch;
+    }
+    buf[n++] = '\0';
+    string text = (string){.str = buf, .size = n};
+    return (TcTok){.kind = TC_TK_STRING_LIT, .text = text, .line = line};
+}
+
+TcTok tinyc_lex_char(string raw, int line) {
+    const char *s = raw.str;
+    size_t sz = raw.size;
+    size_t j = (sz > 0 && s[0] == '\'') ? 1 : 0;
+    size_t end = (sz > j && s[sz - 1] == '\'') ? sz - 1 : sz;
+    int64_t v = 0;
+    if (j < end && s[j] == '\\' && j + 1 < end) {
+        j++;
+        char esc = s[j++];
+        switch (esc) {
+            case 'n': v = '\n'; break;
+            case 't': v = '\t'; break;
+            case 'r': v = '\r'; break;
+            case 'v': v = '\v'; break;
+            case 'f': v = '\f'; break;
+            case 'a': v = '\a'; break;
+            case 'b': v = '\b'; break;
+            case '\\': v = '\\'; break;
+            case '\'': v = '\''; break;
+            case '"': v = '"'; break;
+            case '?': v = '?'; break;
+            case '0': v = '\0'; break;
+            case 'x': {
+                int hv = 0, nh = 0;
+                while (j < end) {
+                    char h = s[j];
+                    int dv;
+                    if (h >= '0' && h <= '9') dv = h - '0';
+                    else if (h >= 'a' && h <= 'f') dv = 10 + (h - 'a');
+                    else if (h >= 'A' && h <= 'F') dv = 10 + (h - 'A');
+                    else break;
+                    hv = hv * 16 + dv;
+                    j++; nh++;
+                }
+                if (nh == 0) {
+                    println(str_lit("tinyc lex error at line {}: \\x with no hex digits"),
+                            (int64_t)line);
+                }
+                v = (int64_t)(hv & 0xff);
+                break;
+            }
+            default:
+                println(str_lit("tinyc lex error at line {}: unknown char escape"),
+                        (int64_t)line);
+                v = esc;
+        }
+    } else if (j < end) {
+        v = (unsigned char)s[j++];
+    }
+    if (v > 127) v -= 256;
+    return (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
+}
+
+TcTok tinyc_lex_number(string text, int line) {
+    const char *s = text.str;
+    size_t sz = text.size;
+    size_t j = 0;
+    int64_t v = 0;
+    int n_l = 0;
+    bool has_u = false;
+    if (sz >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        j = 2;
+        while (j < sz) {
+            char h = s[j];
+            int dv;
+            if (h >= '0' && h <= '9') dv = h - '0';
+            else if (h >= 'a' && h <= 'f') dv = 10 + (h - 'a');
+            else if (h >= 'A' && h <= 'F') dv = 10 + (h - 'A');
+            else break;
+            v = v * 16 + dv;
+            j++;
+        }
+        TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
+        for (int k = 0; k < 3 && j < sz; k++) {
+            char c2 = s[j];
+            if (c2 == 'l' || c2 == 'L') { n_l++; j++; }
+            else if (c2 == 'u' || c2 == 'U') { has_u = true; j++; }
+            else break;
+        }
+        int_lit_type(&t, n_l, has_u, false);
+        return t;
+    }
+    while (j < sz && s[j] >= '0' && s[j] <= '9') {
+        v = v * 10 + (s[j] - '0');
+        j++;
+    }
+    bool has_dot = (j < sz && s[j] == '.' && j + 1 < sz && s[j + 1] >= '0' && s[j + 1] <= '9');
+    bool has_exp_only = (!has_dot && j < sz && (s[j] == 'e' || s[j] == 'E'));
+    if (has_dot || has_exp_only) {
+        const uint64_t mant_limit = 922337203685477579ULL;
+        uint64_t mantissa = 0;
+        int dropped_int = 0;
+        int dec_places = 0;
+        for (size_t k = 0; k < j; k++) {
+            if (mantissa <= mant_limit) mantissa = mantissa * 10u + (uint64_t)(s[k] - '0');
+            else dropped_int++;
+        }
+        if (has_dot) {
+            j++;
+            while (j < sz && s[j] >= '0' && s[j] <= '9') {
+                if (mantissa <= mant_limit) {
+                    mantissa = mantissa * 10u + (uint64_t)(s[j] - '0');
+                    dec_places++;
+                }
+                j++;
+            }
+        }
+        int exp_sign = 1, exp = 0;
+        if (j < sz && (s[j] == 'e' || s[j] == 'E')) {
+            j++;
+            if (j < sz && (s[j] == '+' || s[j] == '-')) {
+                if (s[j] == '-') exp_sign = -1;
+                j++;
+            }
+            while (j < sz && s[j] >= '0' && s[j] <= '9') {
+                exp = exp * 10 + (s[j] - '0');
+                j++;
+            }
+        }
+        int net_exp = (exp_sign < 0 ? -exp : exp) - dec_places + dropped_int;
+        double f = (double)(int64_t)(mantissa >> 11) * 2048.0;
+        double lo = (double)(int64_t)(mantissa & 2047u);
+        if (net_exp > 0) {
+            f += lo;
+            while (net_exp > 0) {
+                int chunk = net_exp > 22 ? 22 : net_exp;
+                double p = 1.0;
+                for (int k = 0; k < chunk; k++) p *= 10.0;
+                f *= p;
+                net_exp -= chunk;
+            }
+        } else if (net_exp < 0 && net_exp >= -22) {
+            double p = 1.0;
+            for (int k = 0; k < -net_exp; k++) p *= 10.0;
+            double q = f / p;
+            double qp = q * p;
+            double t = 134217729.0 * q;
+            double qh = t - (t - q);
+            double ql = q - qh;
+            t = 134217729.0 * p;
+            double ph = t - (t - p);
+            double pl = p - ph;
+            double qp_err = ((qh * ph - qp) + qh * pl + ql * ph) + ql * pl;
+            double rem = ((f - qp) - qp_err) + lo;
+            f = q + rem / p;
+        } else if (net_exp == 0) {
+            f += lo;
+        } else if (net_exp < 0) {
+            f += lo;
+            int n = -net_exp;
+            while (n > 0) {
+                int chunk = n > 22 ? 22 : n;
+                double p = 1.0;
+                for (int k = 0; k < chunk; k++) p *= 10.0;
+                f /= p;
+                n -= chunk;
+            }
+        }
+        bool is_f64 = true;
+        if (j < sz && (s[j] == 'f' || s[j] == 'F')) { j++; is_f64 = false; }
+        return (TcTok){.kind = TC_TK_FLOAT_LIT, .float_value = f, .is_f64 = is_f64, .line = line};
+    }
+    bool decimal = true;
+    if (sz > 1 && s[0] == '0' && j > 1) {
+        int64_t ov = 0;
+        bool octal_ok = true;
+        for (size_t k = 0; k < j; k++) {
+            char d = s[k];
+            if (d < '0' || d > '7') { octal_ok = false; break; }
+            ov = ov * 8 + (d - '0');
+        }
+        if (octal_ok) { v = ov; decimal = false; }
+    }
+    TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
+    for (int k = 0; k < 3 && j < sz; k++) {
+        char c2 = s[j];
+        if (c2 == 'l' || c2 == 'L') { n_l++; j++; }
+        else if (c2 == 'u' || c2 == 'U') { has_u = true; j++; }
+        else break;
+    }
+    int_lit_type(&t, n_l, has_u, decimal);
+    return t;
 }

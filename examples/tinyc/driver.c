@@ -1646,22 +1646,15 @@ static int tinyc_main(void) {
     size_t total_toks = 0;
     for (size_t k = 0; k < n_input_files; k++) {
         uint64_t t_pp = ts_now();
-        string src = tinyc_preprocess(arena, str_from_cstr_view(input_files[k]),
-                                      include_dirs, n_include_dirs,
-                                      defines, n_defines);
+        VecTcTok toks = tinyc_preprocess_lex(arena, str_from_cstr_view(input_files[k]),
+                                             include_dirs, n_include_dirs,
+                                             defines, n_defines);
         ts_add(TS_PREPROCESS, t_pp);
-        // A preprocessing error (e.g. a missing #include) is fatal: the
-        // text is incomplete, and compiling it only adds follow-on errors.
-        // Keep going to report the other inputs' errors too.
         int pp_errs = tinyc_last_preprocess_errors();
         if (pp_errs > 0) {
             total_errs += pp_errs;
             continue;
         }
-        if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
-        uint64_t t_lx = ts_now();
-        VecTcTok toks = tinyc_lex(arena, src);
-        ts_add(TS_LEX, t_lx);
         total_toks += toks.size;
         uint64_t t_pa = ts_now();
         total_errs += tinyc_parse_into(arena, prog, toks, target_wasm32);

@@ -554,6 +554,10 @@ typedef struct {
 DEFINE_VECTOR_FOR_TYPE(TcTok, VecTcTok)
 
 VecTcTok tinyc_lex(Arena *arena, string src);
+TcTokKind tinyc_keyword_or_ident(string s);
+TcTok tinyc_lex_number(string text, int line);
+TcTok tinyc_lex_string(Arena *arena, string raw, int line);
+TcTok tinyc_lex_char(string raw, int line);
 
 // Integer constant `v` converted to the C type `t` when that is a narrow
 // integer: char / short are truncated and re-extended by signedness, bool
@@ -575,6 +579,12 @@ int tinyc_int_size(const Type *t);
 string tinyc_preprocess(Arena *arena, string path,
                         string *include_dirs, size_t n_include_dirs,
                         string *defines, size_t n_defines);
+
+// Fused preprocess + lex: emits TcTok directly without serializing to text
+// and re-lexing. Equivalent to tinyc_lex(arena, tinyc_preprocess(...)).
+VecTcTok tinyc_preprocess_lex(Arena *arena, string path,
+                              string *include_dirs, size_t n_include_dirs,
+                              string *defines, size_t n_defines);
 
 // Number of errors (missing #include, #error, malformed directives, ...)
 // the most recent tinyc_preprocess() call reported. The returned text is
