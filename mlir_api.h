@@ -132,10 +132,6 @@ enum {
 
 MLIR_OpTraits MLIR_GetOpTypeTraits(MLIR_OpType type);
 MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle op);
-// If supported by the backend, change `op`'s type in place without
-// reallocating or unlinking it (returns true). Returns false if the
-// backend requires creating a replacement op instead.
-bool MLIR_TryRenameOpInPlace(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_OpType new_type);
 
 static inline bool MLIR_OpHasTrait(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_OpTraits traits) {
     return (MLIR_GetOpTypeTraits(MLIR_GetOpType(ctx, op)) & traits) == traits;
