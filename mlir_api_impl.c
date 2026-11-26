@@ -117,27 +117,33 @@ typedef struct IR_U32Map {
 } IR_U32Map;
 
 // IR_Op.flags
-#define OPF_TRACKED  1u  // operands were linked into use lists at creation
+#define OPF_TRACKED   1u  // operands were linked into use lists at creation
+#define OPF_HAS_EXTRA 2u  // has regions or successors (in ctx->op_extra_map)
+#define OPF_HAS_AUX   4u  // has rare printer/parser aux (in ctx->op_aux_map)
 
-// 48-byte compact op record: packs 25% more ops per cache line than a 64-byte layout.
+// 32-byte compact op record (exact half cache line — 2 ops per 64-byte line).
 typedef struct IR_Op {
-    uint16_t op_type;         // MLIR_OpType
-    uint16_t flags;
-    uint16_t n_operands;      // regular operands
-    uint16_t n_succ_operands; // all successor operands, after the regular ones
+    uint16_t op_type;       // MLIR_OpType
+    uint8_t  flags;         // OPF_*
+    uint8_t  n_attributes;  // attribute count (0..255)
+    uint16_t n_operands;    // regular operands
     uint16_t n_results;
+    uint32_t parent_block;  // block index, 0 = not in a block
+    uint32_t block_pos;     // index in parent_block->ops
+    uint32_t first_operand; // opnds index
+    uint32_t first_result;  // vals index
+    uint32_t first_attr;    // extra index: (key, attribute index) pairs
+    uint32_t location;      // location index, 0 = none
+} IR_Op;
+
+// Rare op metadata for ops with regions or successors (~5% of ops).
+typedef struct IR_OpExtra {
+    uint32_t first_extra;     // extra index: regions, then (block, count, pred) triples
     uint16_t n_regions;
     uint16_t n_successors;
-    uint16_t n_attributes;
-    uint32_t parent_block;    // block index, 0 = not in a block
-    uint32_t block_pos;       // index in parent_block->ops
-    uint32_t first_operand;   // opnds index
-    uint32_t first_result;    // vals index
-    uint32_t first_extra;     // extra index: regions, then (block, count, pred) triples
-    uint32_t first_attr;      // extra index: (key, attribute index) pairs
-    uint32_t aux;             // op_aux index, 0 = none
-    uint32_t location;        // location index, 0 = none
-} IR_Op;
+    uint16_t n_succ_operands; // all successor operands, after the regular ones
+    uint16_t pad;
+} IR_OpExtra;
 
 // Rarely-used op metadata consulted only by the classic printer and the
 // parser roundtrip (trailing comments, the unnumbered location def, the
@@ -278,10 +284,9 @@ struct MLIR_Context {
     bool no_def_use_tracking;
     uint32_t salt;         // MLIR_API_CHECKS handle salt (see h_make)
     // The IR vectors (see above), owned by the context.
-    IR_Vec ops, vals, opnds, extra, blocks, regions, op_aux, names;
-    // Lazy side tables for rare per-value metadata (block-arg/standalone locs,
-    // parser/printer register names). Unallocated during normal compiler passes.
-    IR_U32Map vloc_map, vname_map;
+    IR_Vec ops, vals, opnds, extra, blocks, regions, op_extra, op_aux, names;
+    // Lazy side tables for rare per-op / per-value metadata.
+    IR_U32Map op_extra_map, op_aux_map, vloc_map, vname_map;
     // The uniqued types (see "Types" below): the type records, their child
     // words, the names of identified structs and the hash table that
     // uniques them.
@@ -319,6 +324,7 @@ struct MLIR_Context {
 #define EXTRA(c)   ((uint32_t *)(c)->extra.data)
 #define BLOCKS(c)  ((IR_Block *)(c)->blocks.data)
 #define REGIONS(c) ((IR_Region *)(c)->regions.data)
+#define OPEXTRA(c) ((IR_OpExtra *)(c)->op_extra.data)
 #define OPAUX(c)   ((IR_OpAux *)(c)->op_aux.data)
 #define NAMES(c)   ((string *)(c)->names.data)
 #define TYPES(c)   ((IR_Type *)(c)->types.data)
@@ -588,7 +594,7 @@ static MLIR_NAT_NOINLINE void u32map_grow(IR_U32Map *m) {
     m->cap = ncap;
 }
 
-static MLIR_NAT_NOINLINE uint32_t u32map_get(const IR_U32Map *m, uint32_t k) {
+static inline uint32_t u32map_get(const IR_U32Map *m, uint32_t k) {
     if (!m->cap || !k) return 0;
     uint32_t mask = m->cap - 1;
     uint32_t s = (k * 2654435761u) & mask;
@@ -637,9 +643,24 @@ static uint32_t value_create(MLIR_Context *c, uint32_t def, uint32_t index,
     return v;
 }
 
+static inline const IR_OpExtra *op_extra_get(MLIR_Context *c, uint32_t o) {
+    if (MLIR_NAT_LIKELY(!(OPS(c)[o].flags & OPF_HAS_EXTRA))) return NULL;
+    return &OPEXTRA(c)[u32map_get(&c->op_extra_map, o)];
+}
+
+static inline IR_OpExtra *op_extra_mut(MLIR_Context *c, uint32_t o) {
+    if (!(OPS(c)[o].flags & OPF_HAS_EXTRA)) return NULL;
+    return &OPEXTRA(c)[u32map_get(&c->op_extra_map, o)];
+}
+
+static inline uint32_t op_aux_lookup(MLIR_Context *c, uint32_t o) {
+    if (MLIR_NAT_LIKELY(!(OPS(c)[o].flags & OPF_HAS_AUX))) return 0;
+    return u32map_get(&c->op_aux_map, o);
+}
+
 // The op's aux record, created on first use.
 static uint32_t op_aux_get(MLIR_Context *c, uint32_t o) {
-    uint32_t a = OPS(c)[o].aux;
+    uint32_t a = op_aux_lookup(c, o);
     if (a) return a;
     a = vec_push(&c->op_aux, 1);
     IR_OpAux *p = &OPAUX(c)[a];
@@ -649,7 +670,8 @@ static uint32_t op_aux_get(MLIR_Context *c, uint32_t o) {
     p->first_result_type = 0;
     p->n_result_types = 0;
     p->explicit_result_types = false;
-    OPS(c)[o].aux = a;
+    OPS(c)[o].flags |= OPF_HAS_AUX;
+    u32map_put(&c->op_aux_map, o, a);
     return a;
 }
 
@@ -1015,6 +1037,7 @@ MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) {
     vec_init(&ctx->extra, (uint32_t)sizeof(uint32_t));
     vec_init(&ctx->blocks, (uint32_t)sizeof(IR_Block));
     vec_init(&ctx->regions, (uint32_t)sizeof(IR_Region));
+    vec_init(&ctx->op_extra, (uint32_t)sizeof(IR_OpExtra));
     vec_init(&ctx->op_aux, (uint32_t)sizeof(IR_OpAux));
     vec_init(&ctx->names, (uint32_t)sizeof(string));
     vec_init(&ctx->types, (uint32_t)sizeof(IR_Type));
@@ -1092,8 +1115,11 @@ void MLIR_DestroyContext(MLIR_Context *ctx) {
     vec_free(&ctx->extra);
     vec_free(&ctx->blocks);
     vec_free(&ctx->regions);
+    vec_free(&ctx->op_extra);
     vec_free(&ctx->op_aux);
     vec_free(&ctx->names);
+    u32map_free(&ctx->op_extra_map);
+    u32map_free(&ctx->op_aux_map);
     u32map_free(&ctx->vloc_map);
     u32map_free(&ctx->vname_map);
     vec_free(&ctx->types);
@@ -1211,12 +1237,19 @@ static MLIR_NAT_NOINLINE void create_op_extra(MLIR_Context *ctx, uint32_t op,
 
     IR_Op *o = &OPS(ctx)[op];
     o->n_operands = (uint16_t)(spec->n_operands - n_succ_ops);
-    o->n_succ_operands = (uint16_t)n_succ_ops;
-    o->first_extra = first_extra;
-    o->n_regions = (uint16_t)spec->n_regions;
-    o->n_successors = (uint16_t)spec->n_successors;
     o->first_attr = first_attr;
-    o->n_attributes = (uint16_t)spec->n_attrs;
+    o->n_attributes = (uint8_t)spec->n_attrs;
+    if (spec->n_regions > 0 || spec->n_successors > 0) {
+        uint32_t ei = vec_push(&ctx->op_extra, 1);
+        IR_OpExtra *ox = &OPEXTRA(ctx)[ei];
+        ox->first_extra = first_extra;
+        ox->n_regions = (uint16_t)spec->n_regions;
+        ox->n_successors = (uint16_t)spec->n_successors;
+        ox->n_succ_operands = (uint16_t)n_succ_ops;
+        ox->pad = 0;
+        OPS(ctx)[op].flags |= OPF_HAS_EXTRA;
+        u32map_put(&ctx->op_extra_map, op, ei);
+    }
 
     uint32_t *ex = EXTRA(ctx) + first_extra;
     if (spec->regions) {
@@ -1269,7 +1302,7 @@ static inline uint32_t create_op_from_spec_impl(MLIR_Context *ctx, const MLIR_Op
                   (uint32_t)type < 0xffffu,
               "MLIR_CreateOpFromSpec", "not an op type of this context");
     API_CHECK(spec->n_operands <= 0xffff && spec->n_results <= 0xffff &&
-                  spec->n_attrs <= 0xffff && spec->n_regions <= 0xffff && spec->n_successors <= 0xffff,
+                  spec->n_attrs <= 0xff && spec->n_regions <= 0xffff && spec->n_successors <= 0xffff,
               "MLIR_CreateOpFromSpec", "too many operands, results, attributes, regions or successors");
 
     uint32_t op = vec_push(&ctx->ops, 1);
@@ -1283,19 +1316,14 @@ static inline uint32_t create_op_from_spec_impl(MLIR_Context *ctx, const MLIR_Op
     IR_Op *o = &OPS(ctx)[op];
     o->op_type = (uint16_t)type;
     o->flags = track ? OPF_TRACKED : 0;
-    o->n_operands = (uint16_t)spec->n_operands;
-    o->n_succ_operands = 0;
-    o->n_results = (uint16_t)spec->n_results;
-    o->n_regions = 0;
-    o->n_successors = 0;
     o->n_attributes = 0;
+    o->n_operands = (uint16_t)spec->n_operands;
+    o->n_results = (uint16_t)spec->n_results;
     o->parent_block = 0;
     o->block_pos = 0;
     o->first_operand = first_operand;
     o->first_result = first_result;
-    o->first_extra = 0;
     o->first_attr = 0;
-    o->aux = 0;
     o->location = loc_idx;
 
     if (spec->n_results > 0) {
@@ -1537,7 +1565,7 @@ MLIR_ValueHandle MLIR_BuildUnary(MLIR_Builder *b, MLIR_OpType t,
 void MLIR_SetOpTrailingComment(MLIR_Context *ctx, MLIR_OpHandle oh, string comment) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_SetOpTrailingComment");
     CHECK_OP(ctx, o, "MLIR_SetOpTrailingComment");
-    if (comment.size == 0 && !OPS(ctx)[o].aux) return;
+    if (comment.size == 0 && !(OPS(ctx)[o].flags & OPF_HAS_AUX)) return;
     uint32_t a = op_aux_get(ctx, o);
     OPAUX(ctx)[a].trailing_comment = comment;
 }
@@ -1645,20 +1673,22 @@ MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle oh) {
 size_t MLIR_GetOpNumRegions(MLIR_Context *ctx, MLIR_OpHandle oh) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpNumRegions");
     CHECK_OP(ctx, o, "MLIR_GetOpNumRegions");
-    return OPS(ctx)[o].n_regions;
+    const IR_OpExtra *ox = op_extra_get(ctx, o);
+    return ox ? ox->n_regions : 0;
 }
 
 MLIR_RegionHandle MLIR_GetOpRegion(MLIR_Context *ctx, MLIR_OpHandle oh, size_t idx) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpRegion");
     CHECK_OP(ctx, o, "MLIR_GetOpRegion");
-    CHECK_INDEX(idx, OPS(ctx)[o].n_regions, "MLIR_GetOpRegion");
-    return REGION_H(ctx, EXTRA(ctx)[OPS(ctx)[o].first_extra + idx]);
+    const IR_OpExtra *ox = op_extra_get(ctx, o);
+    CHECK_INDEX(idx, ox ? ox->n_regions : 0, "MLIR_GetOpRegion");
+    return REGION_H(ctx, EXTRA(ctx)[ox->first_extra + idx]);
 }
 
 string MLIR_GetOpTrailingComment(MLIR_Context *ctx, MLIR_OpHandle oh) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpTrailingComment");
     CHECK_OP(ctx, o, "MLIR_GetOpTrailingComment");
-    uint32_t a = OPS(ctx)[o].aux;
+    uint32_t a = op_aux_lookup(ctx, o);
     return a ? OPAUX(ctx)[a].trailing_comment : str_lit("");
 }
 
@@ -1747,7 +1777,7 @@ MLIR_LocationHandle MLIR_GetOpLocation(MLIR_Context *ctx, MLIR_OpHandle oh) {
 size_t MLIR_GetOpNumResultTypes(MLIR_Context *ctx, MLIR_OpHandle oh) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpNumResultTypes");
     CHECK_OP(ctx, o, "MLIR_GetOpNumResultTypes");
-    uint32_t a = OPS(ctx)[o].aux;
+    uint32_t a = op_aux_lookup(ctx, o);
     if (a && OPAUX(ctx)[a].explicit_result_types) return OPAUX(ctx)[a].n_result_types;
     return OPS(ctx)[o].n_results;
 }
@@ -1756,7 +1786,7 @@ MLIR_TypeHandle MLIR_GetOpResultType(MLIR_Context *ctx, MLIR_OpHandle oh, size_t
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpResultType");
     CHECK_OP(ctx, o, "MLIR_GetOpResultType");
     CHECK_INDEX(idx, MLIR_GetOpNumResultTypes(ctx, oh), "MLIR_GetOpResultType");
-    uint32_t a = OPS(ctx)[o].aux;
+    uint32_t a = op_aux_lookup(ctx, o);
     if (a && OPAUX(ctx)[a].explicit_result_types)
         return TYPE_H(ctx, EXTRA(ctx)[OPAUX(ctx)[a].first_result_type + idx]);
     return TYPE_H(ctx, VALS(ctx)[OPS(ctx)[o].first_result + idx].type);
@@ -1765,20 +1795,22 @@ MLIR_TypeHandle MLIR_GetOpResultType(MLIR_Context *ctx, MLIR_OpHandle oh, size_t
 size_t MLIR_GetOpNumSuccessors(MLIR_Context *ctx, MLIR_OpHandle oh) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpNumSuccessors");
     CHECK_OP(ctx, o, "MLIR_GetOpNumSuccessors");
-    return OPS(ctx)[o].n_successors;
+    const IR_OpExtra *ox = op_extra_get(ctx, o);
+    return ox ? ox->n_successors : 0;
 }
 
 // The (block, operand count, pred edge) triple of successor `s` of op `o`.
 static inline uint32_t *op_succ_pair(MLIR_Context *ctx, uint32_t o, size_t s) {
-    IR_Op *op = &OPS(ctx)[o];
-    return EXTRA(ctx) + op->first_extra + op->n_regions + 3 * s;
+    const IR_OpExtra *ox = op_extra_get(ctx, o);
+    return EXTRA(ctx) + ox->first_extra + ox->n_regions + 3 * s;
 }
 
 // The flat operand position (from the op's first operand) of successor
 // operand (s, 0).
 static uint32_t op_succ_operand_base(MLIR_Context *ctx, uint32_t o, size_t s) {
     IR_Op *op = &OPS(ctx)[o];
-    const uint32_t *triples = EXTRA(ctx) + op->first_extra + op->n_regions;
+    const IR_OpExtra *ox = op_extra_get(ctx, o);
+    const uint32_t *triples = EXTRA(ctx) + ox->first_extra + ox->n_regions;
     uint32_t off = op->n_operands;
     for (size_t k = 0; k < s; k++) off += triples[3 * k + 1];
     return off;
@@ -1787,21 +1819,21 @@ static uint32_t op_succ_operand_base(MLIR_Context *ctx, uint32_t o, size_t s) {
 MLIR_BlockHandle MLIR_GetOpSuccessor(MLIR_Context *ctx, MLIR_OpHandle oh, size_t idx) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpSuccessor");
     CHECK_OP(ctx, o, "MLIR_GetOpSuccessor");
-    CHECK_INDEX(idx, OPS(ctx)[o].n_successors, "MLIR_GetOpSuccessor");
+    CHECK_INDEX(idx, MLIR_GetOpNumSuccessors(ctx, oh), "MLIR_GetOpSuccessor");
     return BLOCK_H(ctx, op_succ_pair(ctx, o, idx)[0]);
 }
 
 size_t MLIR_GetOpNumSuccessorOperands(MLIR_Context *ctx, MLIR_OpHandle oh, size_t s) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpNumSuccessorOperands");
     CHECK_OP(ctx, o, "MLIR_GetOpNumSuccessorOperands");
-    CHECK_INDEX(s, OPS(ctx)[o].n_successors, "MLIR_GetOpNumSuccessorOperands");
+    CHECK_INDEX(s, MLIR_GetOpNumSuccessors(ctx, oh), "MLIR_GetOpNumSuccessorOperands");
     return op_succ_pair(ctx, o, s)[1];
 }
 
 MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_Context *ctx, MLIR_OpHandle oh, size_t s, size_t i) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpSuccessorOperand");
     CHECK_OP(ctx, o, "MLIR_GetOpSuccessorOperand");
-    CHECK_INDEX(s, OPS(ctx)[o].n_successors, "MLIR_GetOpSuccessorOperand");
+    CHECK_INDEX(s, MLIR_GetOpNumSuccessors(ctx, oh), "MLIR_GetOpSuccessorOperand");
     CHECK_INDEX(i, op_succ_pair(ctx, o, s)[1], "MLIR_GetOpSuccessorOperand");
     uint32_t u = OPS(ctx)[o].first_operand + op_succ_operand_base(ctx, o, s) + (uint32_t)i;
     return VAL_H(ctx, OPNDS(ctx)[u].value);
@@ -1811,7 +1843,7 @@ void MLIR_GetOpSuccessorOperandRange(MLIR_Context *ctx, MLIR_OpHandle oh,
                                      size_t succ, size_t *first, size_t *count) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpSuccessorOperandRange");
     CHECK_OP(ctx, o, "MLIR_GetOpSuccessorOperandRange");
-    CHECK_INDEX(succ, OPS(ctx)[o].n_successors, "MLIR_GetOpSuccessorOperandRange");
+    CHECK_INDEX(succ, MLIR_GetOpNumSuccessors(ctx, oh), "MLIR_GetOpSuccessorOperandRange");
     if (first) *first = op_succ_operand_base(ctx, o, succ);
     if (count) *count = op_succ_pair(ctx, o, succ)[1];
 }
@@ -2658,7 +2690,7 @@ void MLIR_SetOpAttr(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_AttrKey key, MLIR_
             return;
         }
     }
-    API_CHECK(n < 0xffff, "MLIR_SetOpAttr", "too many attributes");
+    API_CHECK(n < 0xff, "MLIR_SetOpAttr", "too many attributes");
     if (old + 2 * n == ctx->extra.n) {
         vec_push(&ctx->extra, 2);
     } else {
@@ -2669,7 +2701,7 @@ void MLIR_SetOpAttr(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_AttrKey key, MLIR_
     }
     EXTRA(ctx)[old + 2 * n] = key;
     EXTRA(ctx)[old + 2 * n + 1] = v;
-    OPS(ctx)[o].n_attributes = (uint16_t)(n + 1);
+    OPS(ctx)[o].n_attributes = (uint8_t)(n + 1);
 }
 
 // Attribute accessors: one read of the attribute's record each (dense
@@ -3025,13 +3057,38 @@ static inline void detach_from_block(MLIR_Context *ctx, uint32_t o) {
 static void drop_op_uses(MLIR_Context *ctx, uint32_t o);
 
 static MLIR_NAT_NOINLINE void drop_op_extra_slow(MLIR_Context *ctx, uint32_t o) {
+    const IR_OpExtra *ox = op_extra_get(ctx, o);
+    if (!ox) return;
     IR_Op *op = &OPS(ctx)[o];
-    for (uint32_t s = 0; s < op->n_successors; s++) {
+    if ((op->flags & OPF_TRACKED) && ox->n_succ_operands > 0) {
+        uint32_t first = op->first_operand + op->n_operands;
+        uint32_t n_succ = ox->n_succ_operands;
+        IR_Operand *rec = OPNDS(ctx);
+        IR_Value *vals = VALS(ctx);
+        for (uint32_t i = 0; i < n_succ; i++) {
+            uint32_t u = first + i;
+            uint32_t v = rec[u].value;
+            if (v != 0 && (vals[v].index & VAL_TRACKED)) {
+                uint32_t prev = rec[u].prev;
+                uint32_t next = rec[u].next;
+                if (prev) rec[prev].next = next;
+                else      vals[v].first_use = next;
+                if (next) rec[next].prev = prev;
+                rec[u].next = 0;
+                rec[u].prev = 0;
+                if (vals[v].n_uses) vals[v].n_uses--;
+            }
+            rec[u].value = 0;
+        }
+    }
+    for (uint32_t s = 0; s < ox->n_successors; s++) {
         uint32_t pe_idx = op_succ_pair(ctx, o, s)[2];
         if (pe_idx) pred_unlink(ctx, pe_idx);
     }
-    for (uint32_t r = 0; r < op->n_regions; r++) {
-        IR_Region *reg = &REGIONS(ctx)[EXTRA(ctx)[op->first_extra + r]];
+    uint32_t nr = ox->n_regions;
+    uint32_t fe = ox->first_extra;
+    for (uint32_t r = 0; r < nr; r++) {
+        IR_Region *reg = &REGIONS(ctx)[EXTRA(ctx)[fe + r]];
         for (uint32_t bi = 0; bi < reg->n_blocks; bi++) {
             IR_Block *blk = &BLOCKS(ctx)[reg->blocks[bi]];
             for (uint32_t k = 0; k < blk->n_ops; k++) drop_op_uses(ctx, blk->ops[k]);
@@ -3046,10 +3103,10 @@ static inline void drop_op_uses_inline(MLIR_Context *ctx, uint32_t o) {
     IR_Op *op = &OPS(ctx)[o];
     if (op->flags & OPF_TRACKED) {
         uint32_t first = op->first_operand;
-        uint32_t n_all = (uint32_t)op->n_operands + op->n_succ_operands;
+        uint32_t n_reg = op->n_operands;
         IR_Operand *rec = OPNDS(ctx);
         IR_Value *vals = VALS(ctx);
-        for (uint32_t i = 0; i < n_all; i++) {
+        for (uint32_t i = 0; i < n_reg; i++) {
             uint32_t u = first + i;
             uint32_t v = rec[u].value;
             if (MLIR_NAT_LIKELY(v != 0 && (vals[v].index & VAL_TRACKED))) {
@@ -3065,7 +3122,7 @@ static inline void drop_op_uses_inline(MLIR_Context *ctx, uint32_t o) {
             rec[u].value = 0;
         }
     }
-    if (MLIR_NAT_UNLIKELY((op->n_successors | op->n_regions) != 0))
+    if (MLIR_NAT_UNLIKELY(op->flags & OPF_HAS_EXTRA))
         drop_op_extra_slow(ctx, o);
 #ifdef MLIR_API_CHECKS
     OPS(ctx)[o].op_type = OP_TYPE_ERASED_SENTINEL;
@@ -3106,14 +3163,17 @@ static bool op_used_outside(MLIR_Context *ctx, uint32_t o, uint32_t root) {
     IR_Op *op = &OPS(ctx)[o];
     for (uint32_t i = 0; i < op->n_results; i++)
         if (value_used_outside(ctx, op->first_result + i, root)) return true;
-    for (uint32_t r = 0; r < op->n_regions; r++) {
-        IR_Region *reg = &REGIONS(ctx)[EXTRA(ctx)[op->first_extra + r]];
-        for (uint32_t bi = 0; bi < reg->n_blocks; bi++) {
-            IR_Block *b = &BLOCKS(ctx)[reg->blocks[bi]];
-            for (uint32_t i = 0; i < b->n_args; i++)
-                if (value_used_outside(ctx, b->args[i], root)) return true;
-            for (uint32_t k = 0; k < b->n_ops; k++)
-                if (op_used_outside(ctx, b->ops[k], root)) return true;
+    const IR_OpExtra *ox = op_extra_get(ctx, o);
+    if (ox) {
+        for (uint32_t r = 0; r < ox->n_regions; r++) {
+            IR_Region *reg = &REGIONS(ctx)[EXTRA(ctx)[ox->first_extra + r]];
+            for (uint32_t bi = 0; bi < reg->n_blocks; bi++) {
+                IR_Block *b = &BLOCKS(ctx)[reg->blocks[bi]];
+                for (uint32_t i = 0; i < b->n_args; i++)
+                    if (value_used_outside(ctx, b->args[i], root)) return true;
+                for (uint32_t k = 0; k < b->n_ops; k++)
+                    if (op_used_outside(ctx, b->ops[k], root)) return true;
+            }
         }
     }
     return false;
@@ -3134,9 +3194,8 @@ void MLIR_EraseOp(MLIR_Context *ctx, MLIR_OpHandle oh) {
 #ifdef MLIR_API_CHECKS
     drop_op_uses_inline(ctx, o);  // also marks the op erased
 #else
-    // Without def-use tracking and regions there is nothing to drop (the
-    // common case in the --from-wasm pipeline's DCE).
-    if ((OPS(ctx)[o].flags & OPF_TRACKED) || OPS(ctx)[o].n_regions || OPS(ctx)[o].n_successors)
+    // Without def-use tracking and regions/successors there is nothing to drop.
+    if (OPS(ctx)[o].flags & (OPF_TRACKED | OPF_HAS_EXTRA))
         drop_op_uses_inline(ctx, o);
 #endif
 }
@@ -3151,13 +3210,14 @@ void MLIR_DetachOp(MLIR_Context *ctx, MLIR_OpHandle oh) {
 MLIR_RegionHandle MLIR_TakeOpRegion(MLIR_Context *ctx, MLIR_OpHandle oh, size_t idx) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_TakeOpRegion");
     CHECK_NOT_ERASED(ctx, o, "MLIR_TakeOpRegion");
-    if (!o || idx >= OPS(ctx)[o].n_regions) return MLIR_INVALID_HANDLE;
+    const IR_OpExtra *ox = o ? op_extra_get(ctx, o) : NULL;
+    if (!ox || idx >= ox->n_regions) return MLIR_INVALID_HANDLE;
+    uint32_t slot = ox->first_extra + (uint32_t)idx;
     // Replace it with a fresh empty region; the taken one is detached until
     // it is passed to MLIR_CreateOp.
     MLIR_RegionHandle fresh_h = MLIR_CreateRegion(ctx);
     uint32_t fresh = REGION_IDX(ctx, fresh_h, "MLIR_TakeOpRegion");
     REGIONS(ctx)[fresh].parent_op = o;
-    uint32_t slot = OPS(ctx)[o].first_extra + (uint32_t)idx;
     uint32_t taken = EXTRA(ctx)[slot];
     EXTRA(ctx)[slot] = fresh;
     if (taken) REGIONS(ctx)[taken].parent_op = 0;
@@ -3224,8 +3284,10 @@ void MLIR_SetOpOperand(MLIR_Context *ctx, MLIR_OpHandle oh, size_t idx, MLIR_Val
     CHECK_NOT_ERASED(ctx, o, "MLIR_SetOpOperand");
     if (!o) return;
     IR_Op *op = &OPS(ctx)[o];
+    const IR_OpExtra *ox = op_extra_get(ctx, o);
+    size_t n_total = (size_t)op->n_operands + (ox ? ox->n_succ_operands : 0);
     // idx out of range: silently no-op (as before).
-    if (idx >= (size_t)op->n_operands + op->n_succ_operands) return;
+    if (idx >= n_total) return;
     operand_set(ctx, o, op->first_operand + (uint32_t)idx, v);
 }
 
@@ -3233,7 +3295,8 @@ void MLIR_SetOpSuccessor(MLIR_Context *ctx, MLIR_OpHandle oh, size_t succ_idx, M
     uint32_t o = OP_IDX(ctx, oh, "MLIR_SetOpSuccessor");
     uint32_t b = BLOCK_IDX(ctx, block, "MLIR_SetOpSuccessor");
     CHECK_NOT_ERASED(ctx, o, "MLIR_SetOpSuccessor");
-    if (!o || succ_idx >= OPS(ctx)[o].n_successors) return;
+    const IR_OpExtra *ox = o ? op_extra_get(ctx, o) : NULL;
+    if (!ox || succ_idx >= ox->n_successors) return;
     uint32_t *triple = op_succ_pair(ctx, o, succ_idx);
     if (triple[0] == b) return;
     uint32_t pe_idx = triple[2];
@@ -3254,7 +3317,8 @@ static void op_resize_succ_segment(MLIR_Context *ctx, uint32_t o, size_t s, uint
     if (old_n == new_n) return;
     uint32_t base = op_succ_operand_base(ctx, o, s);
     uint32_t old_first = OPS(ctx)[o].first_operand;
-    uint32_t old_total = OPS(ctx)[o].n_operands + OPS(ctx)[o].n_succ_operands;
+    IR_OpExtra *ox = op_extra_mut(ctx, o);
+    uint32_t old_total = (uint32_t)OPS(ctx)[o].n_operands + ox->n_succ_operands;
     uint32_t new_total = old_total - old_n + new_n;
     uint32_t first = vec_push(&ctx->opnds, new_total);
     GEN_SAVE(ctx, opnds);
@@ -3277,7 +3341,8 @@ static void op_resize_succ_segment(MLIR_Context *ctx, uint32_t o, size_t s, uint
     GEN_CHECK(ctx, opnds, "op_resize_succ_segment");
     IR_Op *op = &OPS(ctx)[o];
     op->first_operand = first;
-    op->n_succ_operands = op->n_succ_operands - old_n + new_n;
+    ox = op_extra_mut(ctx, o);
+    ox->n_succ_operands = (uint16_t)(ox->n_succ_operands - old_n + new_n);
     op_succ_pair(ctx, o, s)[1] = new_n;
 }
 
@@ -3285,7 +3350,8 @@ void MLIR_SetOpSuccessorOperands(MLIR_Context *ctx, MLIR_OpHandle oh, size_t suc
                                  const MLIR_ValueHandle *values, size_t n) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_SetOpSuccessorOperands");
     CHECK_NOT_ERASED(ctx, o, "MLIR_SetOpSuccessorOperands");
-    if (!o || succ_idx >= OPS(ctx)[o].n_successors) return;
+    const IR_OpExtra *ox = o ? op_extra_get(ctx, o) : NULL;
+    if (!ox || succ_idx >= ox->n_successors) return;
     // Drop the existing uses of this segment, then link the new values in
     // order (as before #354).
     uint32_t old_n = op_succ_pair(ctx, o, succ_idx)[1];
@@ -3303,7 +3369,8 @@ void MLIR_AppendOpSuccessorOperand(MLIR_Context *ctx, MLIR_OpHandle oh, size_t s
     uint32_t o = OP_IDX(ctx, oh, "MLIR_AppendOpSuccessorOperand");
     uint32_t v = VAL_IDX(ctx, value, "MLIR_AppendOpSuccessorOperand");
     CHECK_NOT_ERASED(ctx, o, "MLIR_AppendOpSuccessorOperand");
-    if (!o || succ_idx >= OPS(ctx)[o].n_successors) return;
+    const IR_OpExtra *ox = o ? op_extra_get(ctx, o) : NULL;
+    if (!ox || succ_idx >= ox->n_successors) return;
     uint32_t n = op_succ_pair(ctx, o, succ_idx)[1];
     op_resize_succ_segment(ctx, o, succ_idx, n + 1);
     uint32_t u = OPS(ctx)[o].first_operand + op_succ_operand_base(ctx, o, succ_idx) + n;
@@ -3323,7 +3390,9 @@ void MLIR_EraseBlock(MLIR_Context *ctx, MLIR_BlockHandle bh) {
             IR_Block *pb = &BLOCKS(ctx)[reg->blocks[bi]];
             if (reg->blocks[bi] == b || pb->n_ops == 0) continue;
             uint32_t term = pb->ops[pb->n_ops - 1];
-            for (uint32_t k = 0; k < OPS(ctx)[term].n_successors; k++)
+            const IR_OpExtra *ox = op_extra_get(ctx, term);
+            uint32_t ns = ox ? ox->n_successors : 0;
+            for (uint32_t k = 0; k < ns; k++)
                 API_CHECK(op_succ_pair(ctx, term, k)[0] != b, "MLIR_EraseBlock",
                           "the block is still a successor of a block outside it");
         }
@@ -3416,7 +3485,8 @@ static size_t native_preds(MLIR_Context *ctx, uint32_t b, size_t want,
         IR_Block *pb = &BLOCKS(ctx)[reg->blocks[i]];
         if (pb->n_ops == 0) continue;
         uint32_t term = pb->ops[pb->n_ops - 1];
-        uint32_t ns = OPS(ctx)[term].n_successors;
+        const IR_OpExtra *ox = op_extra_get(ctx, term);
+        uint32_t ns = ox ? ox->n_successors : 0;
         for (uint32_t s = 0; s < ns; s++) {
             if (op_succ_pair(ctx, term, s)[0] != b) continue;
             if (n == want) {

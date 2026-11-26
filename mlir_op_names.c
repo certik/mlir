@@ -428,9 +428,7 @@ MLIR_CFGInfo *MLIR_ComputeCFGInfo(MLIR_Context *ctx, MLIR_RegionHandle region, A
     MLIR_BlockHandle entry = MLIR_GetRegionFirstBlock(ctx, region);
     if (entry == MLIR_INVALID_HANDLE) return cfg;
 
-    size_t n_total = 0;
-    for (MLIR_BlockHandle b = entry; b != MLIR_INVALID_HANDLE; b = MLIR_GetBlockNext(ctx, b))
-        n_total++;
+    size_t n_total = MLIR_GetRegionNumBlocks(ctx, region);
 
     // Single fused DFS pass: discovers reachable blocks, computes postorder,
     // caches terminator + successor count on the DFS stack, and records all
@@ -549,15 +547,23 @@ MLIR_CFGInfo *MLIR_ComputeCFGInfo(MLIR_Context *ctx, MLIR_RegionHandle region, A
     while (changed) {
         changed = false;
         for (size_t i = 1; i < n; i++) {
-            int32_t new_idom = -1;
+            uint32_t ps = pred_off[i];
             uint32_t pe = pred_off[i + 1];
-            for (uint32_t p = pred_off[i]; p < pe; p++) {
-                int32_t pi = pred_rpo[p];
-                if (idom[pi] < 0) continue;
-                if (new_idom < 0) new_idom = pi;
-                else new_idom = cfg_intersect(idom, pi, new_idom);
+            int32_t new_idom;
+            if (pe - ps == 1) {
+                new_idom = pred_rpo[ps];
+                if (idom[new_idom] < 0) continue;
+            } else {
+                new_idom = -1;
+                for (uint32_t p = ps; p < pe; p++) {
+                    int32_t pi = pred_rpo[p];
+                    if (idom[pi] < 0) continue;
+                    if (new_idom < 0) new_idom = pi;
+                    else new_idom = cfg_intersect(idom, pi, new_idom);
+                }
+                if (new_idom < 0) continue;
             }
-            if (new_idom >= 0 && idom[i] != new_idom) {
+            if (idom[i] != new_idom) {
                 idom[i] = new_idom;
                 changed = true;
             }
@@ -576,8 +582,8 @@ MLIR_CFGInfo *MLIR_ComputeCFGInfo(MLIR_Context *ctx, MLIR_RegionHandle region, A
     cfg->loop_depth = loop_depth;
     cfg->is_loop_header = is_header;
 
-    // Natural loops: for each back-edge u -> h (where h dominates u),
-    // collect all blocks reaching u without going through h.
+    // Natural loops: for each back-edge u -> h (where h dominates u, so u >= h
+    // in RPO), collect all blocks reaching u without going through h.
     int32_t *wl = arena_new_array(out, int32_t, n);
     uint32_t *seen = arena_new_array(out, uint32_t, n);
     memset(seen, 0, n * sizeof(uint32_t));
@@ -590,7 +596,10 @@ MLIR_CFGInfo *MLIR_ComputeCFGInfo(MLIR_Context *ctx, MLIR_RegionHandle region, A
         uint32_t pe = pred_off[hi + 1];
         for (uint32_t p = pred_off[hi]; p < pe; p++) {
             int32_t ui = pred_rpo[p];
-            if (MLIR_CFGDominates(cfg, (int32_t)hi, ui)) {
+            if (ui < (int32_t)hi) continue;
+            int32_t cur = ui;
+            while (cur > (int32_t)hi) cur = idom[cur];
+            if (cur == (int32_t)hi) {
                 found_backedge = true;
                 if (seen[ui] != stamp) {
                     seen[ui] = stamp;
