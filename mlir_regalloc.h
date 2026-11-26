@@ -91,6 +91,7 @@ uint32_t mlir_regalloc_fast(MLIR_Context *ctx, MLIR_RegionHandle reg,
                             size_t n_blocks, SlotMap *rm,
                             SlotMap *sm, int32_t *out_nslots,
                             const RegTarget *T);
+const MLIR_OpHandle *mlir_regalloc_fast_allocas(size_t *out_n);
 
 // Whole-function linear scan. Fills `rm` (value->phys reg) and `sm` (reused
 // frame slots for spilled values), sets *out_nslots, and returns the callee-

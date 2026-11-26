@@ -17,6 +17,7 @@
 #include <stdio.h>
 
 #include <base/arena.h>
+#include <base/buddy.h>
 #include <base/string.h>
 #include "mlir_api.h"
 
@@ -270,9 +271,10 @@ static void *ra_pool_ensure(RaPool *p, size_t need) {
     if (need > p->cap) {
         size_t ncap = p->cap ? p->cap * 2 : 4096u;
         while (ncap < need) ncap *= 2;
-        free(p->buf);
-        p->buf = (uint8_t *)malloc(ncap);
-        p->cap = ncap;
+        if (p->buf) buddy_free(p->buf);
+        size_t actual = 0;
+        p->buf = (uint8_t *)buddy_alloc(ncap, &actual);
+        p->cap = actual;
     }
     return p->buf;
 }
@@ -296,11 +298,21 @@ static RaPool g_ra_call_pool = { NULL, 0 };
 // ===========================================================================
 // Fast block-local linear-scan allocator (-O0 / default mode).
 // ===========================================================================
+static MLIR_OpHandle *g_ra_fast_allocas = NULL;
+static size_t         g_ra_fast_allocas_n = 0;
+static size_t         g_ra_fast_allocas_cap = 0;
+
+const MLIR_OpHandle *mlir_regalloc_fast_allocas(size_t *out_n) {
+    if (out_n) *out_n = g_ra_fast_allocas_n;
+    return g_ra_fast_allocas;
+}
+
 uint32_t mlir_regalloc_fast(MLIR_Context *ctx, MLIR_RegionHandle reg,
                             size_t n_blocks, SlotMap *rm,
                             SlotMap *sm, int32_t *out_nslots,
                             const RegTarget *T) {
     *out_nslots = 0;
+    g_ra_fast_allocas_n = 0;
     if (n_blocks == 0) return RA_BAIL;
 
     MLIR_BlockHandle *blk_h = (MLIR_BlockHandle *)ra_pool_ensure(
@@ -357,6 +369,15 @@ uint32_t mlir_regalloc_fast(MLIR_Context *ctx, MLIR_RegionHandle reg,
             if (MLIR_GetOpNumRegions(ctx, op) > 0) return RA_BAIL;
             MLIR_OpType oty = MLIR_GetOpType(ctx, op);
             if (oty == OP_TYPE_LLVM_CALL) has_call = 1;
+            else if (oty == OP_TYPE_LLVM_ALLOCA) {
+                if (g_ra_fast_allocas_n == g_ra_fast_allocas_cap) {
+                    size_t nc = g_ra_fast_allocas_cap ? g_ra_fast_allocas_cap * 2 : 32;
+                    g_ra_fast_allocas = (MLIR_OpHandle *)realloc(
+                        g_ra_fast_allocas, nc * sizeof(MLIR_OpHandle));
+                    g_ra_fast_allocas_cap = nc;
+                }
+                g_ra_fast_allocas[g_ra_fast_allocas_n++] = op;
+            }
             if (oty == OP_TYPE_LLVM_MLIR_CONSTANT ||
                 oty == OP_TYPE_LLVM_MLIR_ADDRESSOF ||
                 oty == OP_TYPE_LLVM_MLIR_UNDEF ||
@@ -695,12 +716,13 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 if (first_call[b] == UINT32_MAX) first_call[b] = (uint32_t)i;
                 if (n_calls_tot == call_pos_cap) {
                     size_t ncap = call_pos_cap * 2;
-                    uint32_t *nc = (uint32_t *)malloc(ncap * sizeof(uint32_t));
+                    size_t actual = 0;
+                    uint32_t *nc = (uint32_t *)buddy_alloc(ncap * sizeof(uint32_t), &actual);
                     memcpy(nc, call_pos_arr, n_calls_tot * sizeof(uint32_t));
-                    free(g_ra_call_pool.buf);
+                    buddy_free(g_ra_call_pool.buf);
                     g_ra_call_pool.buf = (uint8_t *)nc;
-                    g_ra_call_pool.cap = ncap * sizeof(uint32_t);
-                    call_pos_arr = nc; call_pos_cap = ncap;
+                    g_ra_call_pool.cap = actual;
+                    call_pos_arr = nc; call_pos_cap = actual / sizeof(uint32_t);
                 }
                 call_pos_arr[n_calls_tot++] = pos;
             }
@@ -777,12 +799,13 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             if (sc + ns > succ_cap) {
                 size_t ncap = succ_cap * 2;
                 while (ncap < sc + ns) ncap *= 2;
-                uint32_t *ns_buf = (uint32_t *)malloc(ncap * sizeof(uint32_t));
+                size_t actual = 0;
+                uint32_t *ns_buf = (uint32_t *)buddy_alloc(ncap * sizeof(uint32_t), &actual);
                 memcpy(ns_buf, succ_idx, sc * sizeof(uint32_t));
-                free(g_ra_succ_pool.buf);
+                buddy_free(g_ra_succ_pool.buf);
                 g_ra_succ_pool.buf = (uint8_t *)ns_buf;
-                g_ra_succ_pool.cap = ncap * sizeof(uint32_t);
-                succ_idx = ns_buf; succ_cap = ncap;
+                g_ra_succ_pool.cap = actual;
+                succ_idx = ns_buf; succ_cap = actual / sizeof(uint32_t);
             }
             for (size_t s = 0; s < ns; s++) {
                 size_t ti_s = MLIR_GetBlockIndex(ctx, MLIR_GetOpSuccessor(ctx, term, s));
@@ -884,12 +907,13 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             } \
             if (gen_n == gen_cap) { \
                 size_t new_cap = gen_cap * 2; \
-                RaGenEdge *ng = (RaGenEdge *)malloc(new_cap * sizeof(RaGenEdge)); \
+                size_t actual = 0; \
+                RaGenEdge *ng = (RaGenEdge *)buddy_alloc(new_cap * sizeof(RaGenEdge), &actual); \
                 memcpy(ng, gen_edges, gen_n * sizeof(RaGenEdge)); \
-                free(g_ra_gen_pool.buf); \
+                buddy_free(g_ra_gen_pool.buf); \
                 g_ra_gen_pool.buf = (uint8_t *)ng; \
-                g_ra_gen_pool.cap = new_cap * sizeof(RaGenEdge); \
-                gen_edges = ng; gen_cap = new_cap; \
+                g_ra_gen_pool.cap = actual; \
+                gen_edges = ng; gen_cap = actual / sizeof(RaGenEdge); \
             } \
             gen_edges[gen_n].b = (uint32_t)(BLK_B); \
             gen_edges[gen_n].gid = _gid; \

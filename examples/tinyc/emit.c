@@ -55,6 +55,8 @@ typedef struct Sym {
                                 // local_slot_type)
     bool   is_ssa;              // immutable scalar/pointer param or local:
                                 // `addr` holds the SSA value directly (no alloca)
+    uint8_t bucket;             // index into E.local_buckets[64]
+    struct Sym *prev_in_bucket; // saved bucket head for O(1) scope undo
     struct Sym *next;
 } Sym;
 
@@ -63,18 +65,11 @@ typedef struct Scope {
     struct Scope *parent;
 } Scope;
 
-static Sym *scope_lookup(Scope *s, string name) {
-    size_t n = name.size;
-    char c0 = n ? name.str[0] : 0;
-    for (Scope *cur = s; cur; cur = cur->parent) {
-        for (Sym *sy = cur->head; sy; sy = sy->next) {
-            if (sy->name.size == n &&
-                (n == 0 || (sy->name.str[0] == c0 &&
-                 (n == 1 || memcmp(sy->name.str + 1, name.str + 1, n - 1) == 0))))
-                return sy;
-        }
-    }
-    return NULL;
+static inline uint32_t sym_bucket(string s) {
+    if (s.size == 0) return 0;
+    return ((uint32_t)(unsigned char)s.str[0] * 31u +
+            (uint32_t)(unsigned char)s.str[s.size - 1] * 7u +
+            (uint32_t)s.size) & 63u;
 }
 
 // ----- emit context -----
@@ -201,6 +196,7 @@ typedef struct {
     Sym    **global_map;    // open-addressing hash table: NULL=empty
     size_t   global_map_cap;
     size_t   global_map_n;
+    Sym     *local_buckets[64]; // O(1) scoped local symbol table with undo
     size_t  *struct_ty_map; // open-addressing hash table: 0=empty, idx+1 into struct_types
     size_t   struct_ty_map_cap;
     size_t   struct_ty_map_n;
@@ -1034,10 +1030,34 @@ static Sym *global_lookup(E *e, string name) {
     return NULL;
 }
 
-// Combined lookup: locals/scope chain first, then module globals.
+static inline void scope_add(E *e, Scope *sc, Sym *sy) {
+    uint32_t b = sym_bucket(sy->name);
+    sy->bucket = (uint8_t)b;
+    sy->prev_in_bucket = e->local_buckets[b];
+    e->local_buckets[b] = sy;
+    sy->next = sc->head;
+    sc->head = sy;
+}
+
+static inline void scope_pop(E *e, Scope *sc) {
+    for (Sym *sy = sc->head; sy; sy = sy->next) {
+        e->local_buckets[sy->bucket] = sy->prev_in_bucket;
+    }
+}
+
+// Combined lookup: O(1) scoped local buckets first, then module globals.
 static Sym *lookup(E *e, Scope *sc, string name) {
-    Sym *s = scope_lookup(sc, name);
-    if (s) return s;
+    if (sc) {
+        size_t n = name.size;
+        char c0 = n ? name.str[0] : 0;
+        uint32_t b = sym_bucket(name);
+        for (Sym *sy = e->local_buckets[b]; sy; sy = sy->prev_in_bucket) {
+            if (sy->name.size == n &&
+                (n == 0 || (sy->name.str[0] == c0 &&
+                 (n == 1 || memcmp(sy->name.str + 1, name.str + 1, n - 1) == 0))))
+                return sy;
+        }
+    }
     return global_lookup(e, name);
 }
 
@@ -4164,7 +4184,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // `p = x` has p's type, not x's: `q = p = i` and `if ((p = i))`
             // must not convert the result again, and `(p = x)[1]` / `+ 1`
             // step by p's element.
-            if (lv.elem_ty == e->ptr) {
+            if (lv.elem_ty == e->ptr && e->unused_assign != ex) {
                 Type lt = infer_expr_type(e, sc, ex->lvalue);
                 if (type_kind_is_ptr(lt.kind)) v = ptr_eval_of_type(e, v.val, &lt);
                 else v.is_ptr = true;
@@ -5298,8 +5318,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             if (st->extra && st->extra->decl_static_global_sym.size > 0) {
                 sy->is_global = true;
                 sy->global_sym = st->extra->decl_static_global_sym;
-                sy->next = sc->head;
-                sc->head = sy;
+                scope_add(e, sc, sy);
                 return;
             }
 
@@ -5314,8 +5333,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             // `T *p = alloc(sizeof(*p))`). Register the symbol now, before the
             // initializer is emitted, so type/size queries on it resolve
             // correctly. (The static-global case above has already returned.)
-            sy->next = sc->head;
-            sc->head = sy;
+            scope_add(e, sc, sy);
 
             if (st->decl_type->kind == TY_VA_LIST) {
                 // Allocate a 32-byte buffer (sufficient for x86_64-SysV
@@ -6030,6 +6048,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             }
             Scope inner = (Scope){.head = NULL, .parent = sc};
             emit_block(e, &inner, st->body);
+            scope_pop(e, &inner);
             return;
         }
         case ST_IF: {
@@ -6044,7 +6063,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             e->cur_block = then_b; e->terminated = false;
             { Scope inner = (Scope){.head = NULL, .parent = sc};
               for (size_t i = 0; i < st->body.size && !e->terminated; i++)
-                  emit_stmt(e, &inner, st->body.data[i]); }
+                  emit_stmt(e, &inner, st->body.data[i]);
+              scope_pop(e, &inner); }
             emit_branch(e, end_b);
 
             if (st->has_else) {
@@ -6052,6 +6072,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 Scope inner = (Scope){.head = NULL, .parent = sc};
                 for (size_t i = 0; i < st->extra->else_body.size && !e->terminated; i++)
                     emit_stmt(e, &inner, st->extra->else_body.data[i]);
+                scope_pop(e, &inner);
                 emit_branch(e, end_b);
             }
 
@@ -6074,7 +6095,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             e->loops = &lc;
             { Scope inner = (Scope){.head = NULL, .parent = sc};
               for (size_t i = 0; i < st->body.size && !e->terminated; i++)
-                  emit_stmt(e, &inner, st->body.data[i]); }
+                  emit_stmt(e, &inner, st->body.data[i]);
+              scope_pop(e, &inner); }
             e->loops = lc.parent;
             emit_branch(e, hdr_b);
 
@@ -6094,7 +6116,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             e->loops = &lc;
             { Scope inner = (Scope){.head = NULL, .parent = sc};
               for (size_t i = 0; i < st->body.size && !e->terminated; i++)
-                  emit_stmt(e, &inner, st->body.data[i]); }
+                  emit_stmt(e, &inner, st->body.data[i]);
+              scope_pop(e, &inner); }
             e->loops = lc.parent;
             emit_branch(e, cond_b);
 
@@ -6113,7 +6136,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             // shadows it only inside the body.
             Scope inner = (Scope){.head = NULL, .parent = sc};
             if (st->extra->for_init) emit_stmt(e, &inner, st->extra->for_init);
-            if (e->terminated) return;
+            if (e->terminated) { scope_pop(e, &inner); return; }
 
             MLIR_BlockHandle hdr_b  = new_cfg_block(e);
             MLIR_BlockHandle body_b = new_cfg_block(e);
@@ -6137,7 +6160,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             e->loops = &lc;
             { Scope body = (Scope){.head = NULL, .parent = &inner};
               for (size_t i = 0; i < st->body.size && !e->terminated; i++)
-                  emit_stmt(e, &body, st->body.data[i]); }
+                  emit_stmt(e, &body, st->body.data[i]);
+              scope_pop(e, &body); }
             e->loops = lc.parent;
             emit_branch(e, step_b);
 
@@ -6145,6 +6169,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             for (size_t i = 0; i < st->extra->for_steps.size; i++) {
                 emit_expr_for_side_effect(e, &inner, st->extra->for_steps.data[i]);
             }
+            scope_pop(e, &inner);
             emit_branch(e, hdr_b);
 
             e->cur_block = exit_b; e->terminated = false;
@@ -6234,6 +6259,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                     emit_branch(e, nxt);
                 }
             }
+            scope_pop(e, &inner);
             e->loops = lc.parent;
             e->cur_block = exit_b; e->terminated = false;
             return;
@@ -6563,11 +6589,11 @@ static MLIR_OpHandle emit_func(E *e, Func *f) {
             sy->addr = emit_alloca(e, mt);
             emit_store_v(e, mt == e->i32 ? blk : emit_trunci_to(e, blk, mt), sy->addr);
         }
-        sy->next = sc.head;
-        sc.head = sy;
+        scope_add(e, &sc, sy);
     }
 
     emit_block(e, &sc, f->body);
+    scope_pop(e, &sc);
     if (!e->terminated) {
         if (sig->sret || sig->ret.type.kind == TY_VOID) {
             emit_return_op(e, NULL, 0);

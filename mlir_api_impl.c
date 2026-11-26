@@ -3120,6 +3120,16 @@ int64_t MLIR_GetAttributeDenseElement(MLIR_Context *ctx, MLIR_AttributeHandle ah
     return (int64_t)(((uint64_t)AX(ctx)[r->first + 2 * idx + 1] << 32) | AX(ctx)[r->first + 2 * idx]);
 }
 
+const int32_t *MLIR_GetAttributeDenseI32Data(MLIR_Context *ctx, MLIR_AttributeHandle ah, size_t *out_n) {
+    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeDenseI32Data");
+    if (r->kind != AK_DENSE_I32) {
+        if (out_n) *out_n = 0;
+        return NULL;
+    }
+    if (out_n) *out_n = r->n;
+    return (const int32_t *)(AX(ctx) + r->first);
+}
+
 // Value accessors
 MLIR_ValueKind MLIR_GetValueKind(MLIR_Context *ctx, MLIR_ValueHandle vh) {
     uint32_t v = VAL_IDX(ctx, vh, "MLIR_GetValueKind");

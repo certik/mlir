@@ -28,6 +28,7 @@
 #include <string.h>
 
 #include <base/arena.h>
+#include <base/buddy.h>
 #include <base/format.h>
 #include <base/io.h>
 #include <base/string.h>
@@ -319,10 +320,25 @@ static void pp_vec_grow(Arena *arena, VecPPTok *out) {
         PPTok *nd = arena_new_array(arena, PPTok, nmax);
         if (out->size) memcpy(nd, out->data, out->size * sizeof(PPTok));
         out->data = nd;
+        out->max = nmax;
     } else {
-        out->data = (PPTok *)realloc(out->data, nmax * sizeof(PPTok));
+        size_t actual = 0;
+        PPTok *nd = (PPTok *)buddy_alloc(nmax * sizeof(PPTok), &actual);
+        if (out->size) memcpy(nd, out->data, out->size * sizeof(PPTok));
+        if (out->data) buddy_free(out->data);
+        out->data = nd;
+        out->max = actual / sizeof(PPTok);
     }
-    out->max = nmax;
+}
+
+static void pp_tctok_grow(VecTcTok *v) {
+    size_t nmax = v->max ? v->max * 2 : 256;
+    size_t actual = 0;
+    TcTok *nd = (TcTok *)buddy_alloc(nmax * sizeof(TcTok), &actual);
+    if (v->size) memcpy(nd, v->data, v->size * sizeof(TcTok));
+    if (v->data) buddy_free(v->data);
+    v->data = nd;
+    v->max = actual / sizeof(TcTok);
 }
 
 // Tokenize `src` into PP tokens. Comments are dropped. Newlines become
@@ -805,13 +821,7 @@ static TcTokKind pp_punct_kind(string s) {
 
 static void pp_emit_tctok(PP *pp, const PPTok *t) {
     VecTcTok *v = pp->tok_out;
-    if (v->size == v->max) {
-        size_t nmax = v->max ? v->max * 2 : 256;
-        TcTok *nd = arena_new_array(pp->arena, TcTok, nmax);
-        if (v->size) memcpy(nd, v->data, v->size * sizeof(TcTok));
-        v->data = nd;
-        v->max = nmax;
-    }
+    if (v->size == v->max) pp_tctok_grow(v);
     TcTok *dst = &v->data[v->size];
     switch (t->kind) {
     case PP_IDENT:
@@ -1354,35 +1364,47 @@ static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
                 const PPTok *tp = &base[pos];
                 uint8_t tk = tp->kind;
                 if (tk == PP_PUNCT) {
+                    TcTokKind k = TC_TK_EOF;
                     if (tp->text.size == 1) {
                         unsigned char c = (unsigned char)tp->text.str[0];
-                        TcTokKind k = (c < 128) ? (TcTokKind)g_pp_punct1[c] : TC_TK_EOF;
-                        if (k != TC_TK_EOF) {
-                            if (vsz == vmax) {
-                                size_t nmax = vmax ? vmax * 2 : 256;
-                                TcTok *nd = arena_new_array(pp->arena, TcTok, nmax);
-                                if (vsz) memcpy(nd, vd, vsz * sizeof(TcTok));
-                                vd = nd; vmax = nmax;
-                                v->data = nd; v->max = nmax;
-                            }
-                            TcTok *dst = &vd[vsz++];
-                            dst->kind = (uint8_t)k;
-                            dst->flags = 0;
-                            dst->line = tp->line;
-                            pos++;
-                            continue;
+                        k = (c < 128) ? (TcTokKind)g_pp_punct1[c] : TC_TK_EOF;
+                    } else if (tp->text.size == 2) {
+                        char c0 = tp->text.str[0], c1 = tp->text.str[1];
+                        if (c0 == '-' && c1 == '>') k = TC_TK_ARROW;
+                        else if (c0 == '=' && c1 == '=') k = TC_TK_EQEQ;
+                        else if (c0 == '!' && c1 == '=') k = TC_TK_NE;
+                        else if (c0 == '<' && c1 == '=') k = TC_TK_LE;
+                        else if (c0 == '>' && c1 == '=') k = TC_TK_GE;
+                        else if (c0 == '&' && c1 == '&') k = TC_TK_AMPAMP;
+                        else if (c0 == '|' && c1 == '|') k = TC_TK_PIPEPIPE;
+                        else if (c0 == '+' && c1 == '+') k = TC_TK_PLUSPLUS;
+                        else if (c0 == '-' && c1 == '-') k = TC_TK_MINUSMINUS;
+                        else if (c0 == '+' && c1 == '=') k = TC_TK_PLUSEQ;
+                        else if (c0 == '-' && c1 == '=') k = TC_TK_MINUSEQ;
+                        else if (c0 == '<' && c1 == '<') k = TC_TK_SHL;
+                        else if (c0 == '>' && c1 == '>') k = TC_TK_SHR;
+                    }
+                    if (k != TC_TK_EOF) {
+                        if (vsz == vmax) {
+                            v->size = vsz;
+                            pp_tctok_grow(v);
+                            vd = v->data; vmax = v->max;
                         }
+                        TcTok *dst = &vd[vsz++];
+                        dst->kind = (uint8_t)k;
+                        dst->flags = 0;
+                        dst->line = tp->line;
+                        pos++;
+                        continue;
                     }
                     break;
                 }
                 if (tk == PP_IDENT) {
                     if (!pp_macro_maybe(pp, tp->text)) {
                         if (vsz == vmax) {
-                            size_t nmax = vmax ? vmax * 2 : 256;
-                            TcTok *nd = arena_new_array(pp->arena, TcTok, nmax);
-                            if (vsz) memcpy(nd, vd, vsz * sizeof(TcTok));
-                            vd = nd; vmax = nmax;
-                            v->data = nd; v->max = nmax;
+                            v->size = vsz;
+                            pp_tctok_grow(v);
+                            vd = v->data; vmax = v->max;
                         }
                         TcTok *dst = &vd[vsz++];
                         dst->kind = (uint8_t)tinyc_keyword_or_ident(tp->text);
@@ -1404,20 +1426,53 @@ static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
                     }
                     continue;
                 }
-                if (tk == PP_NUMBER && tp->text.size == 1 &&
-                    tp->text.str[0] >= '0' && tp->text.str[0] <= '9') {
+                if (tk == PP_NUMBER) {
+                    const char *ns = tp->text.str;
+                    size_t nn = tp->text.size;
+                    if (nn >= 1 && nn <= 9 && ns[0] >= '0' && ns[0] <= '9' &&
+                        (nn == 1 || ns[0] != '0')) {
+                        int64_t val = ns[0] - '0';
+                        bool ok = true;
+                        for (size_t di = 1; di < nn; di++) {
+                            char ch = ns[di];
+                            if (ch < '0' || ch > '9') { ok = false; break; }
+                            val = val * 10 + (ch - '0');
+                        }
+                        if (ok) {
+                            if (vsz == vmax) {
+                                v->size = vsz;
+                                pp_tctok_grow(v);
+                                vd = v->data; vmax = v->max;
+                            }
+                            TcTok *dst = &vd[vsz++];
+                            dst->kind = TC_TK_INT_LIT;
+                            dst->flags = 0;
+                            dst->line = tp->line;
+                            dst->d.int_value = val;
+                            pos++;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                if (tk == PP_STRING && tp->text.size >= 2 &&
+                    tp->text.str[0] == '"' && tp->text.str[tp->text.size - 1] == '"' &&
+                    memchr(tp->text.str + 1, '\\', tp->text.size - 2) == NULL) {
+                    size_t slen = tp->text.size - 2;
+                    char *buf = (char *)arena_alloc(pp->arena, slen + 1);
+                    if (slen) memcpy(buf, tp->text.str + 1, slen);
+                    buf[slen] = '\0';
                     if (vsz == vmax) {
-                        size_t nmax = vmax ? vmax * 2 : 256;
-                        TcTok *nd = arena_new_array(pp->arena, TcTok, nmax);
-                        if (vsz) memcpy(nd, vd, vsz * sizeof(TcTok));
-                        vd = nd; vmax = nmax;
-                        v->data = nd; v->max = nmax;
+                        v->size = vsz;
+                        pp_tctok_grow(v);
+                        vd = v->data; vmax = v->max;
                     }
                     TcTok *dst = &vd[vsz++];
-                    dst->kind = TC_TK_INT_LIT;
+                    dst->kind = TC_TK_STRING_LIT;
                     dst->flags = 0;
                     dst->line = tp->line;
-                    dst->d.int_value = (int64_t)(tp->text.str[0] - '0');
+                    dst->text_str = buf;
+                    dst->d.size = slen + 1;
                     pos++;
                     continue;
                 }
@@ -2226,24 +2281,26 @@ static void process_file(PP *pp, string path, string src) {
     string canonical = s_dup(pp->arena, path);
     uint16_t file_id = pp_intern_file(pp, canonical);
     if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
-    // Reuse a per-depth heap buffer so included headers stay in warm pages
-    // instead of malloc/free + minor page faults on every #include.
+    // Reuse a per-depth buddy buffer so included headers stay in warm pages
+    // and return to the buddy freelist (no munmap) for downstream IR/codegen.
     size_t init_cap = src.size / 5 + 256;
     VecPPTok toks;
     int depth = g_pp_file_depth++;
     if (depth < 16) {
         if (g_pp_file_caps[depth] < init_cap) {
-            free(g_pp_file_bufs[depth]);
-            g_pp_file_bufs[depth] = (PPTok *)malloc(init_cap * sizeof(PPTok));
-            g_pp_file_caps[depth] = init_cap;
+            if (g_pp_file_bufs[depth]) buddy_free(g_pp_file_bufs[depth]);
+            size_t actual = 0;
+            g_pp_file_bufs[depth] = (PPTok *)buddy_alloc(init_cap * sizeof(PPTok), &actual);
+            g_pp_file_caps[depth] = actual / sizeof(PPTok);
         }
         toks.data = g_pp_file_bufs[depth];
         toks.size = 0;
         toks.max = g_pp_file_caps[depth];
     } else {
-        toks.data = (PPTok *)malloc(init_cap * sizeof(PPTok));
+        size_t actual = 0;
+        toks.data = (PPTok *)buddy_alloc(init_cap * sizeof(PPTok), &actual);
         toks.size = 0;
-        toks.max = init_cap;
+        toks.max = actual / sizeof(PPTok);
     }
     pp_tokenize(NULL, src, file_id, &toks);
     if (depth < 16) {
@@ -2252,7 +2309,7 @@ static void process_file(PP *pp, string path, string src) {
     }
     process_tokens(pp, toks.data, toks.size, canonical, file_id);
     g_pp_file_depth--;
-    if (depth >= 16) free(toks.data);
+    if (depth >= 16) buddy_free(toks.data);
 }
 
 // ----------------------------------------------------------------------
@@ -2321,6 +2378,13 @@ string tinyc_preprocess(Arena *arena, string path,
     string main_src = read_file_ok(arena, path);
     out_grow(&pp, main_src.size * 2 + 8192);
     process_file(&pp, path, main_src);
+    for (int d = 0; d < 16; d++) {
+        if (g_pp_file_bufs[d]) {
+            buddy_free(g_pp_file_bufs[d]);
+            g_pp_file_bufs[d] = NULL;
+            g_pp_file_caps[d] = 0;
+        }
+    }
     out_char(&pp, '\n');
     g_last_preprocess_errors = pp.n_errors;
     return (string){pp.out, pp.out_size};
@@ -2333,13 +2397,25 @@ VecTcTok tinyc_preprocess_lex(Arena *arena, string path,
     pp_init_state(&pp, arena, include_dirs, n_include_dirs, defines, n_defines);
     string main_src = read_file_ok(arena, path);
     VecTcTok toks;
-    VecTcTok_reserve(arena, &toks, main_src.size / 3 + 4096);
+    size_t tok_actual = 0;
+    size_t init_toks = main_src.size / 2 + 16384;
+    toks.data = (TcTok *)buddy_alloc(init_toks * sizeof(TcTok), &tok_actual);
+    toks.size = 0;
+    toks.max = tok_actual / sizeof(TcTok);
     pp.tok_out = &toks;
     process_file(&pp, path, main_src);
+    for (int d = 0; d < 16; d++) {
+        if (g_pp_file_bufs[d]) {
+            buddy_free(g_pp_file_bufs[d]);
+            g_pp_file_bufs[d] = NULL;
+            g_pp_file_caps[d] = 0;
+        }
+    }
     TcTok eof = {0};
     eof.kind = TC_TK_EOF;
     eof.line = toks.size > 0 ? toks.data[toks.size - 1].line : 1;
-    VecTcTok_push_back(arena, &toks, eof);
+    if (toks.size == toks.max) pp_tctok_grow(&toks);
+    toks.data[toks.size++] = eof;
     g_last_preprocess_errors = pp.n_errors;
     return toks;
 }

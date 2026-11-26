@@ -658,8 +658,13 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         MLIR_AttributeHandle ria = MLIR_GetOpAttr(ctx, op, MLIR_KEY_RAW_CONSTANT_INDICES);
         if (!eta || !ria) { fail(F, "getelementptr missing elem_type/indices", (string){0}); return; }
         MLIR_TypeHandle elem_ty = MLIR_GetAttributeTypeValue(ctx, eta);
-        int32_t cidx[64];
-        size_t n_idx = parse_i32_array(ctx, ria, cidx, 64);
+        int32_t cidx_stk[64];
+        size_t n_idx = 0;
+        const int32_t *cidx = MLIR_GetAttributeDenseI32Data(ctx, ria, &n_idx);
+        if (!cidx) {
+            n_idx = parse_i32_array(ctx, ria, cidx_stk, 64);
+            cidx = cidx_stk;
+        }
         if (n_idx == 0) { fail(F, "getelementptr with no indices", (string){0}); return; }
         load_val_w(F, MLIR_GetOpOperand(ctx, op, 0), RAX, 1);  // running address (ptr = 64-bit)
         size_t op_idx = 1;                                 // next dynamic operand
@@ -1037,23 +1042,48 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
                 }
             }
         }
-        for (size_t b = 0; b < nb; b++) {
-            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
-            size_t no = MLIR_GetBlockNumOps(ctx, bk);
-            for (size_t i = 0; i < no; i++) {
-                MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
-                if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_ALLOCA) {
-                    unsigned rb = alloca_bytes(ctx, op);
-                    cur += (int32_t)rb;
-                    vmap_put(&F.slots, x64_region_key(op), cur);
+        if (F.fast_ra) {
+            size_t n_allocas = 0;
+            const MLIR_OpHandle *allocas = mlir_regalloc_fast_allocas(&n_allocas);
+            for (size_t ai = 0; ai < n_allocas; ai++) {
+                MLIR_OpHandle op = allocas[ai];
+                unsigned rb = alloca_bytes(ctx, op);
+                cur += (int32_t)rb;
+                vmap_put(&F.slots, x64_region_key(op), cur);
+            }
+            if (nb > 1) {
+                for (size_t b = 0; b < nb; b++) {
+                    MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+                    size_t no = MLIR_GetBlockNumOps(ctx, bk);
+                    if (no > 0) {
+                        MLIR_OpHandle t = MLIR_GetBlockOp(ctx, bk, no - 1);
+                        size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
+                        for (size_t s = 0; s < ns; s++) {
+                            uint32_t c = (uint32_t)MLIR_GetOpNumSuccessorOperands(ctx, t, s);
+                            if (c > max_edge) max_edge = c;
+                        }
+                    }
                 }
             }
-            if (nb > 1 && no > 0) {
-                MLIR_OpHandle t = MLIR_GetBlockOp(ctx, bk, no - 1);
-                size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
-                for (size_t s = 0; s < ns; s++) {
-                    uint32_t c = (uint32_t)MLIR_GetOpNumSuccessorOperands(ctx, t, s);
-                    if (c > max_edge) max_edge = c;
+        } else {
+            for (size_t b = 0; b < nb; b++) {
+                MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+                size_t no = MLIR_GetBlockNumOps(ctx, bk);
+                for (size_t i = 0; i < no; i++) {
+                    MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+                    if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_ALLOCA) {
+                        unsigned rb = alloca_bytes(ctx, op);
+                        cur += (int32_t)rb;
+                        vmap_put(&F.slots, x64_region_key(op), cur);
+                    }
+                }
+                if (nb > 1 && no > 0) {
+                    MLIR_OpHandle t = MLIR_GetBlockOp(ctx, bk, no - 1);
+                    size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
+                    for (size_t s = 0; s < ns; s++) {
+                        uint32_t c = (uint32_t)MLIR_GetOpNumSuccessorOperands(ctx, t, s);
+                        if (c > max_edge) max_edge = c;
+                    }
                 }
             }
         }

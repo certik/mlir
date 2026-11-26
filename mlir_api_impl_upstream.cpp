@@ -1947,6 +1947,18 @@ extern "C" int64_t MLIR_GetAttributeDenseElement(MLIR_Context *ctx, MLIR_Attribu
     return (*(d.getValues<llvm::APInt>().begin() + i)).getSExtValue();
 }
 
+extern "C" const int32_t *MLIR_GetAttributeDenseI32Data(MLIR_Context *ctx, MLIR_AttributeHandle h, size_t *out_n) {
+    (void)ctx;
+    mlir::Attribute a = attrF(h);
+    if (auto d = llvm::dyn_cast<mlir::DenseI32ArrayAttr>(a)) {
+        llvm::ArrayRef<int32_t> ref = d.asArrayRef();
+        if (out_n) *out_n = ref.size();
+        return ref.data();
+    }
+    if (out_n) *out_n = 0;
+    return nullptr;
+}
+
 extern "C" MLIR_AttrKey MLIR_InternAttrKey(MLIR_Context *ctx, string name) {
     API_CHECK(name.size > 0, "MLIR_InternAttrKey", "empty attribute name");
     return attr_key_table_intern(&ctx->keyTable, name);

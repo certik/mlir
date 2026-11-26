@@ -1065,6 +1065,8 @@ MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_Context *ctx, MLIR_AttributeHand
 // (MLIR_GetAttributeAsString) is made on demand.
 size_t MLIR_GetAttributeDenseSize(MLIR_Context *ctx, MLIR_AttributeHandle attr);
 int64_t MLIR_GetAttributeDenseElement(MLIR_Context *ctx, MLIR_AttributeHandle attr, size_t idx);
+// Fast direct pointer to dense i32 array storage (or NULL if not dense i32 / unsupported).
+const int32_t *MLIR_GetAttributeDenseI32Data(MLIR_Context *ctx, MLIR_AttributeHandle attr, size_t *out_n);
 
 // -----------------------------------------------------------------------------
 // LLVM-level completeness: fast-math flags, splats, constant matchers,

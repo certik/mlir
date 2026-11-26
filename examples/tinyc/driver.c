@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <base/arena.h>
+#include <base/buddy.h>
 #include <base/io.h>
 #include <base/string.h>
 #include <base/strbuf.h>
@@ -1652,12 +1653,14 @@ static int tinyc_main(void) {
         ts_add(TS_PREPROCESS, t_pp);
         int pp_errs = tinyc_last_preprocess_errors();
         if (pp_errs > 0) {
+            if (toks.data) buddy_free(toks.data);
             total_errs += pp_errs;
             continue;
         }
         total_toks += toks.size;
         uint64_t t_pa = ts_now();
         total_errs += tinyc_parse_into(arena, prog, toks, target_wasm32);
+        if (toks.data) buddy_free(toks.data);
         ts_add(TS_PARSE, t_pa);
     }
     if (total_errs > 0) {
@@ -1712,7 +1715,7 @@ static int tinyc_main(void) {
     // the wasm pipeline's wasmssa and wasmstack IR to 3-6.4 (tinyc's own
     // sources). Too low costs doublings, too high wastes heap; the backend
     // caps the reservation, so a large input cannot exhaust its heap.
-    MLIR_SetContextExpectedOps(ctx, target_wasm32 ? total_toks * 3 : total_toks / 3);
+    MLIR_SetContextExpectedOps(ctx, target_wasm32 ? total_toks * 3 : total_toks * 2 / 3);
     uint64_t t_em = ts_now();
     MLIR_OpHandle module = tinyc_emit_module(ctx, prog);
     ts_add(TS_EMIT, t_em);
