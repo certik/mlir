@@ -156,10 +156,10 @@ typedef struct {
     MLIR_TypeHandle index;
     MLIR_TypeHandle ptr;             // !llvm.ptr
     MLIR_TypeHandle size_t_ty;       // i32 on wasm32, i64 on native (matches `unsigned long`)
-    MLIR_NamedAttr  cmpi_pred_attrs[10]; // cached predicate attrs 0..9
-    MLIR_NamedAttr  small_i32_attrs[128]; // cached i32 constant attrs 0..127
-    MLIR_NamedAttr  small_i64_attrs[32];  // cached i64 constant attrs 0..31
-    bool            caches_init;
+    MLIR_AttributeHandle cmpi_pred_attrs[10]; // cached predicate attrs 0..9
+    MLIR_AttributeHandle small_i32_attrs[128]; // cached i32 constant attrs 0..127
+    MLIR_AttributeHandle small_i64_attrs[32];  // cached i64 constant attrs 0..31
+    bool                 caches_init;
     bool             target_wasm32;  // mirrors program->target_wasm32, cached on E for convenience
     MLIR_BlockHandle cur_block;
     MLIR_BlockHandle entry_block;    // function entry block, alloca insertion point
@@ -565,30 +565,25 @@ static void emit_init_attr_caches(E *e) {
     e->caches_init = true;
     e->i64_signed = MLIR_CreateTypeInteger(e->ctx, 64, true);
     for (int64_t p = 0; p < 10; p++) {
-        e->cmpi_pred_attrs[p] = MLIR_Named(
-            MLIR_KEY_PREDICATE,
-            MLIR_CreateAttributeInteger(e->ctx, p, e->i64_signed));
+        e->cmpi_pred_attrs[p] = MLIR_CreateAttributeInteger(e->ctx, p, e->i64_signed);
     }
     for (int64_t v = 0; v < 128; v++) {
-        e->small_i32_attrs[v] = MLIR_Named(
-            MLIR_KEY_VALUE,
-            MLIR_CreateAttributeInteger(e->ctx, v, e->i32));
+        e->small_i32_attrs[v] = MLIR_CreateAttributeInteger(e->ctx, v, e->i32);
     }
     for (int64_t v = 0; v < 32; v++) {
-        e->small_i64_attrs[v] = MLIR_Named(
-            MLIR_KEY_VALUE,
-            MLIR_CreateAttributeInteger(e->ctx, v, e->i64));
+        e->small_i64_attrs[v] = MLIR_CreateAttributeInteger(e->ctx, v, e->i64);
     }
 }
 
 static MLIR_ValueHandle emit_const_i32(E *e, int64_t v) {
-    MLIR_NamedAttr val;
+    MLIR_AttributeHandle a;
     if (v >= 0 && v < 128) {
         if (!e->caches_init) emit_init_attr_caches(e);
-        val = e->small_i32_attrs[v];
+        a = e->small_i32_attrs[v];
     } else {
-        val = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(e->ctx, v, e->i32));
+        a = MLIR_CreateAttributeInteger(e->ctx, v, e->i32);
     }
+    MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, a);
     MLIR_ValueHandle r = emit_op1(e, OP_TYPE_ARITH_CONSTANT, e->i32, NULL, 0, &val, 1);
     fact_put(e, r, FACT_CONST, 0, false, (int64_t)(int32_t)v);
     return r;
@@ -615,13 +610,14 @@ static MLIR_ValueHandle emit_fptrunc_f64_to_f32(E *e, MLIR_ValueHandle v) {
 }
 
 static MLIR_ValueHandle emit_const_i64(E *e, int64_t v) {
-    MLIR_NamedAttr val;
+    MLIR_AttributeHandle a;
     if (v >= 0 && v < 32) {
         if (!e->caches_init) emit_init_attr_caches(e);
-        val = e->small_i64_attrs[v];
+        a = e->small_i64_attrs[v];
     } else {
-        val = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(e->ctx, v, e->i64));
+        a = MLIR_CreateAttributeInteger(e->ctx, v, e->i64);
     }
+    MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, a);
     return emit_op1(e, OP_TYPE_ARITH_CONSTANT, e->i64, NULL, 0, &val, 1);
 }
 
@@ -669,9 +665,10 @@ static MLIR_ValueHandle emit_cmpi(E *e, int64_t predicate,
                                   MLIR_ValueHandle a, MLIR_ValueHandle b) {
     if (!e->caches_init) emit_init_attr_caches(e);
     MLIR_ValueHandle ops[2] = { a, b };
-    MLIR_NamedAttr pred = (predicate >= 0 && predicate < 10)
+    MLIR_AttributeHandle pa = (predicate >= 0 && predicate < 10)
         ? e->cmpi_pred_attrs[predicate]
-        : MLIR_Named(MLIR_KEY_PREDICATE, MLIR_CreateAttributeInteger(e->ctx, predicate, e->i64_signed));
+        : MLIR_CreateAttributeInteger(e->ctx, predicate, e->i64_signed);
+    MLIR_NamedAttr pred = MLIR_Named(MLIR_KEY_PREDICATE, pa);
     return emit_op1(e, OP_TYPE_ARITH_CMPI, e->i1, ops, 2, &pred, 1);
 }
 
@@ -679,9 +676,10 @@ static MLIR_ValueHandle emit_cmpf(E *e, int64_t predicate,
                                   MLIR_ValueHandle a, MLIR_ValueHandle b) {
     if (!e->caches_init) emit_init_attr_caches(e);
     MLIR_ValueHandle ops[2] = { a, b };
-    MLIR_NamedAttr pred = (predicate >= 0 && predicate < 10)
+    MLIR_AttributeHandle pa = (predicate >= 0 && predicate < 10)
         ? e->cmpi_pred_attrs[predicate]
-        : MLIR_Named(MLIR_KEY_PREDICATE, MLIR_CreateAttributeInteger(e->ctx, predicate, e->i64_signed));
+        : MLIR_CreateAttributeInteger(e->ctx, predicate, e->i64_signed);
+    MLIR_NamedAttr pred = MLIR_Named(MLIR_KEY_PREDICATE, pa);
     return emit_op1(e, OP_TYPE_ARITH_CMPF, e->i1, ops, 2, &pred, 1);
 }
 
@@ -689,9 +687,10 @@ static MLIR_ValueHandle emit_icmp_ptr(E *e, int64_t predicate,
                                       MLIR_ValueHandle a, MLIR_ValueHandle b) {
     if (!e->caches_init) emit_init_attr_caches(e);
     MLIR_ValueHandle ops[2] = { a, b };
-    MLIR_NamedAttr pred = (predicate >= 0 && predicate < 10)
+    MLIR_AttributeHandle pa = (predicate >= 0 && predicate < 10)
         ? e->cmpi_pred_attrs[predicate]
-        : MLIR_Named(MLIR_KEY_PREDICATE, MLIR_CreateAttributeInteger(e->ctx, predicate, e->i64_signed));
+        : MLIR_CreateAttributeInteger(e->ctx, predicate, e->i64_signed);
+    MLIR_NamedAttr pred = MLIR_Named(MLIR_KEY_PREDICATE, pa);
     return emit_op1(e, OP_TYPE_LLVM_ICMP, e->i1, ops, 2, &pred, 1);
 }
 
