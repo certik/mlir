@@ -73,7 +73,7 @@ Static keys are generated from `mlir_attr_keys.def` (`MLIR_KEY_*`).
 
 ### 3.6 O(1) Traversal, Walks, and CFG Info
 Prefer O(1) iterators over indexed loops (`GetBlockOp(i)`, `GetRegionBlock(i)`, `GetValueUseOwner(i)`, `GetBlockPredecessor(i)`):
-- Ops in a block: `MLIR_GetBlockFirstOp`, `MLIR_GetBlockLastOp`, `MLIR_GetOpNext`, `MLIR_GetOpPrev`, `MLIR_GetParentOp`.
+- Ops in a block: `MLIR_GetBlockFirstOp`, `MLIR_GetBlockLastOp`, `MLIR_GetOpNext`, `MLIR_GetOpPrev`, `MLIR_GetParentOp`. For read-only hot loops over a block's ops, prefer the cursor `MLIR_BlockOpIter it = MLIR_BlockOpsBegin(ctx, blk); while ((op = MLIR_BlockOpIterNext(ctx, &it)) != MLIR_INVALID_HANDLE)` which avoids per-step parent-block lookups on both backends.
 - Blocks in a region: `MLIR_GetRegionFirstBlock`, `MLIR_GetRegionLastBlock`, `MLIR_GetBlockNext`, `MLIR_GetBlockPrev`.
 - Uses of a value: `MLIR_GetValueFirstUse`, `MLIR_GetUseNext`, `MLIR_GetUseOwner`, `MLIR_GetUseOperandIndex`, `MLIR_ValueHasOneUse`, `MLIR_IsValueUnused`.
 - Predecessors of a block: `MLIR_GetBlockFirstPred`, `MLIR_GetPredNext`, `MLIR_GetPredBlock`, `MLIR_GetPredTerminator`, `MLIR_GetPredSuccessorIndex`, `MLIR_GetIncomingValue`, `MLIR_SetIncomingValue`.

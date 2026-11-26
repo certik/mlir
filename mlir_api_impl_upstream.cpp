@@ -158,7 +158,7 @@ inline mlir::Value valF(MLIR_ValueHandle h) {
 // no process-wide state.
 struct MLIR_Context : public mlir::MLIRContext {
     explicit MLIR_Context(const mlir::DialectRegistry &registry)
-        : mlir::MLIRContext(registry) {}
+        : mlir::MLIRContext(registry), unknownLoc(mlir::UnknownLoc::get(this)) {}
 
     Arena *arena = nullptr;  // current IR arena (owned by the caller)
     MLIR_DiagnosticHandler diagFn = nullptr;
@@ -167,16 +167,18 @@ struct MLIR_Context : public mlir::MLIRContext {
     // Optional register names for parser/printer (MLIR_SetValueRegisterName).
     // Empty for all compiler/pass pipelines.
     llvm::DenseMap<const void *, std::string> valueNames;
-    // Per-op snapshot of the named attributes the user supplied via
-    // MLIR_CreateOp / MLIR_SetOpAttr. Used by
-    // MLIR_GetOpNumAttributes / MLIR_GetOpAttribute so that
-    // dialect-injected inherent attributes (e.g. arith.addi's default
-    // `overflowFlags = #arith.overflow<none>` property) don't leak through
-    // the API and cause spurious diffs against the native backend.
-    std::unordered_map<const mlir::Operation *, std::vector<mlir::NamedAttribute>> opUserAttrs;
+    // Lazy per-op attribute cache populated only on demand when a printer
+    // calls MLIR_GetOpNumAttributes / MLIR_GetOpAttribute / MLIR_GetOpAttributeKey.
+    // Empty during all non-printing compiler/pass pipelines.
+    std::unordered_map<const mlir::Operation *, std::vector<mlir::NamedAttribute>> opAttrCache;
+    // Cached UnknownLoc so op creation never calls UnknownLoc::get(&ctx).
+    mlir::Location unknownLoc;
     // Attribute keys (mlir_api.h): the names, the StringAttr of each key
     // (as an opaque pointer, created on first use) and the reverse map.
+    // Static keys (1..MLIR_KEY_COUNT-1) are cached in a fixed array for a
+    // single-load fast path in MLIR_GetOpAttr.
     AttrKeyTable keyTable;
+    const void *staticKeyNames[MLIR_KEY_COUNT] = {};
     std::vector<const void *> keyNames;
     llvm::DenseMap<const void *, MLIR_AttrKey> keyOfName;
     // MLIR_GetOpAttr's i32 `case_values` conversions (caseValuesAsI32).
@@ -189,6 +191,11 @@ struct MLIR_Context : public mlir::MLIRContext {
     OpTypeTable opTypeTable;
     std::vector<const void *> opNames;
     llvm::DenseMap<const void *, MLIR_OpType> opTypes;
+    struct OpTypeCacheEntry {
+        const void *ptr = nullptr;
+        MLIR_OpType type = OP_TYPE_UNREGISTERED;
+    };
+    OpTypeCacheEntry opTypeCache[64];
     // Printed form of each type (MLIR_GetTypeString).
     llvm::DenseMap<const void *, std::string> typeStrings;
     // Strings returned by MLIR_GetAttributeString that are not stored in an
@@ -225,18 +232,39 @@ mlir::Attribute attrF(uintptr_t h) {
     return mlir::Attribute::getFromOpaquePointer(reinterpret_cast<const void *>(h));
 }
 
-// The StringAttr of `key`.
-mlir::StringAttr keyName(MLIR_Context *c, MLIR_AttrKey key) {
-    API_CHECK(key != MLIR_KEY_INVALID && key < c->keyTable.n_keys, "MLIR attribute key",
-              "not a key of this context");
+#if defined(__GNUC__) || defined(__clang__)
+#define MLIR_UP_NOINLINE __attribute__((noinline))
+#define MLIR_UP_LIKELY(x) __builtin_expect(!!(x), 1)
+#define MLIR_UP_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define MLIR_UP_NOINLINE
+#define MLIR_UP_LIKELY(x) (x)
+#define MLIR_UP_UNLIKELY(x) (x)
+#endif
+
+// Slow path for dynamic or uncached attribute keys.
+MLIR_UP_NOINLINE mlir::StringAttr keyNameSlow(MLIR_Context *c, MLIR_AttrKey key) {
     if (key >= c->keyNames.size()) c->keyNames.resize(c->keyTable.n_keys, nullptr);
     if (!c->keyNames[key]) {
         string n = attr_key_table_name(&c->keyTable, key);
         mlir::StringAttr a = mlir::StringAttr::get(c, llvm::StringRef(n.str, n.size));
         c->keyNames[key] = a.getAsOpaquePointer();
         c->keyOfName[a.getAsOpaquePointer()] = key;
+        if (key < MLIR_KEY_COUNT) c->staticKeyNames[key] = a.getAsOpaquePointer();
     }
     return mlir::StringAttr::getFromOpaquePointer(c->keyNames[key]);
+}
+
+// The StringAttr of `key`. Static keys (1..MLIR_KEY_COUNT-1) are pre-populated
+// in MLIR_CreateContext, so the hot path is a single fixed-array load.
+inline mlir::StringAttr keyName(MLIR_Context *c, MLIR_AttrKey key) {
+    API_CHECK(key != MLIR_KEY_INVALID && key < c->keyTable.n_keys, "MLIR attribute key",
+              "not a key of this context");
+    if (MLIR_UP_LIKELY(key < MLIR_KEY_COUNT))
+        return mlir::StringAttr::getFromOpaquePointer(c->staticKeyNames[key]);
+    if (MLIR_UP_LIKELY(key < c->keyNames.size() && c->keyNames[key] != nullptr))
+        return mlir::StringAttr::getFromOpaquePointer(c->keyNames[key]);
+    return keyNameSlow(c, key);
 }
 
 // The key of the attribute name `name` (interned on first use).
@@ -256,9 +284,11 @@ MLIR_AttrKey keyOf(MLIR_Context *c, mlir::StringAttr name) {
 // they are destroyed: the allocator may reuse their addresses for new ops,
 // and a stale entry would then describe the wrong op.
 void forgetErasedOp(MLIR_Context *c, mlir::Operation *op) {
+    bool has_attrs = !c->opAttrCache.empty();
     bool has_names = !c->valueNames.empty();
+    if (!has_attrs && !has_names) return;
     op->walk([&](mlir::Operation *o) {
-        c->opUserAttrs.erase(o);
+        if (has_attrs) c->opAttrCache.erase(o);
         if (has_names) {
             for (mlir::Value r : o->getResults()) c->valueNames.erase(r.getAsOpaquePointer());
             for (mlir::Region &region : o->getRegions())
@@ -447,6 +477,8 @@ extern "C" MLIR_Context *MLIR_CreateContext(const MLIR_ContextOptions *options) 
     c->persistent = arena_create(16 * 1024);
     op_type_table_init(&c->opTypeTable, c->persistent);
     attr_key_table_init(&c->keyTable, c->persistent);
+    c->keyNames.assign((size_t)MLIR_KEY_COUNT, nullptr);
+    for (uint32_t k = 1; k < (uint32_t)MLIR_KEY_COUNT; k++) (void)keyNameSlow(c, (MLIR_AttrKey)k);
     c->opNames.assign((size_t)OP_TYPE_COUNT, nullptr);
     for (int t = 1; t < (int)OP_TYPE_COUNT; t++) bindOpName(c, (MLIR_OpType)t);
 #ifdef MLIR_API_CHECKS
@@ -614,29 +646,17 @@ extern "C" void MLIR_AppendBlockArg(MLIR_Context *cctx, MLIR_BlockHandle bh,
 // Op specification & Builder API
 // -----------------------------------------------------------------------------
 
-extern "C" MLIR_OpHandle MLIR_CreateOpFromSpec(MLIR_Context *cctx, const MLIR_OpSpec *spec) {
-    API_CHECK(cctx != nullptr, "MLIR_CreateOpFromSpec", "context is NULL");
-    API_CHECK(spec != nullptr, "MLIR_CreateOpFromSpec", "spec is NULL");
+static mlir::Operation *createOpFromSpecImpl(MLIR_Context *cctx, const MLIR_OpSpec *spec,
+                                             MLIR_LocationHandle locOverride) {
     MLIR_Context &ctx = *cctx;
     MLIR_OpType type = spec->type;
     API_CHECK(type != OP_TYPE_UNREGISTERED && (size_t)type < ctx.opNames.size() &&
                   ctx.opNames[type],
               "MLIR_CreateOpFromSpec", "not an op type of this context");
 
-    mlir::Location loc = (spec->loc == MLIR_INVALID_HANDLE)
-                             ? mlir::Location(mlir::UnknownLoc::get(&ctx))
-                             : locF(spec->loc);
+    MLIR_LocationHandle locHnd = (spec->loc != MLIR_INVALID_HANDLE) ? spec->loc : locOverride;
+    mlir::Location loc = (locHnd == MLIR_INVALID_HANDLE) ? ctx.unknownLoc : locF(locHnd);
     mlir::OperationState state(loc, mlir::OperationName::getFromOpaquePointer(ctx.opNames[type]));
-    bool is_switch = type == OP_TYPE_CF_SWITCH || type == OP_TYPE_LLVM_SWITCH;
-
-    uint32_t n_succ_ops = 0;
-    if (spec->successor_operand_counts) {
-        for (uint32_t s = 0; s < spec->n_successors; s++)
-            n_succ_ops += spec->successor_operand_counts[s];
-    }
-    API_CHECK(n_succ_ops <= spec->n_operands, "MLIR_CreateOpFromSpec",
-              "successor operand counts exceed n_operands");
-    uint32_t n_regular = spec->n_operands - n_succ_ops;
 
     for (uint32_t i = 0; i < spec->n_operands; i++) {
         state.addOperands(valF(spec->operands[i]));
@@ -644,39 +664,48 @@ extern "C" MLIR_OpHandle MLIR_CreateOpFromSpec(MLIR_Context *cctx, const MLIR_Op
     for (uint32_t i = 0; i < spec->n_results; i++) {
         state.addTypes(typeF(spec->result_types[i]));
     }
-    for (uint32_t i = 0; i < spec->n_attrs; i++) {
-        mlir::StringAttr name = keyName(cctx, spec->attrs[i].key);
-        mlir::Attribute val = attrF(spec->attrs[i].value);
-        if (is_switch && spec->attrs[i].key == MLIR_KEY_CASE_VALUES) {
-            if (auto arr = mlir::dyn_cast<mlir::DenseI32ArrayAttr>(val)) {
-                auto i32Ty = mlir::IntegerType::get(&ctx, 32);
-                auto shaped = mlir::RankedTensorType::get(
-                    {(int64_t)arr.size()}, i32Ty);
-                val = mlir::DenseIntElementsAttr::get(
-                    shaped, llvm::ArrayRef<int32_t>(arr.asArrayRef().data(),
-                                                    arr.size()));
+    if (spec->n_attrs > 0) {
+        bool is_switch = type == OP_TYPE_CF_SWITCH || type == OP_TYPE_LLVM_SWITCH;
+        for (uint32_t i = 0; i < spec->n_attrs; i++) {
+            mlir::StringAttr name = keyName(cctx, spec->attrs[i].key);
+            mlir::Attribute val = attrF(spec->attrs[i].value);
+            if (is_switch && spec->attrs[i].key == MLIR_KEY_CASE_VALUES) {
+                if (auto arr = mlir::dyn_cast<mlir::DenseI32ArrayAttr>(val)) {
+                    auto i32Ty = mlir::IntegerType::get(&ctx, 32);
+                    auto shaped = mlir::RankedTensorType::get(
+                        {(int64_t)arr.size()}, i32Ty);
+                    val = mlir::DenseIntElementsAttr::get(
+                        shaped, llvm::ArrayRef<int32_t>(arr.asArrayRef().data(),
+                                                        arr.size()));
+                }
+            }
+            state.addAttribute(name, val);
+        }
+    }
+    if (spec->n_regions > 0) {
+        if (spec->regions) {
+            for (uint32_t i = 0; i < spec->n_regions; i++) {
+                cctx->rootRegions.erase(F<mlir::Region>(spec->regions[i]));
+                state.addRegion(std::unique_ptr<mlir::Region>(F<mlir::Region>(spec->regions[i])));
+            }
+        } else {
+            for (uint32_t i = 0; i < spec->n_regions; i++) {
+                state.addRegion();
             }
         }
-        state.addAttribute(name, val);
     }
-    if (spec->regions) {
-        for (uint32_t i = 0; i < spec->n_regions; i++) {
-            cctx->rootRegions.erase(F<mlir::Region>(spec->regions[i]));
-            state.addRegion(std::unique_ptr<mlir::Region>(F<mlir::Region>(spec->regions[i])));
-        }
-    } else {
-        for (uint32_t i = 0; i < spec->n_regions; i++) {
-            state.addRegion();
-        }
-    }
-    for (uint32_t i = 0; i < spec->n_successors; i++) {
-        state.addSuccessors(F<mlir::Block>(spec->successors[i]));
-    }
-
-    std::vector<mlir::NamedAttribute> userAttrs(state.attributes.begin(),
-                                                state.attributes.end());
-
     if (spec->n_successors > 0) {
+        uint32_t n_succ_ops = 0;
+        if (spec->successor_operand_counts) {
+            for (uint32_t s = 0; s < spec->n_successors; s++)
+                n_succ_ops += spec->successor_operand_counts[s];
+        }
+        API_CHECK(n_succ_ops <= spec->n_operands, "MLIR_CreateOpFromSpec",
+                  "successor operand counts exceed n_operands");
+        uint32_t n_regular = spec->n_operands - n_succ_ops;
+        for (uint32_t i = 0; i < spec->n_successors; i++) {
+            state.addSuccessors(F<mlir::Block>(spec->successors[i]));
+        }
         if (type == OP_TYPE_CF_COND_BR || type == OP_TYPE_LLVM_COND_BR) {
             llvm::SmallVector<int32_t, 4> seg;
             seg.push_back((int32_t)n_regular);
@@ -685,7 +714,7 @@ extern "C" MLIR_OpHandle MLIR_CreateOpFromSpec(MLIR_Context *cctx, const MLIR_Op
             }
             state.addAttribute("operandSegmentSizes",
                 mlir::DenseI32ArrayAttr::get(&ctx, seg));
-        } else if (is_switch) {
+        } else if (type == OP_TYPE_CF_SWITCH || type == OP_TYPE_LLVM_SWITCH) {
             uint32_t n_default = spec->successor_operand_counts ? spec->successor_operand_counts[0] : 0;
             int32_t n_case_total = 0;
             llvm::SmallVector<int32_t, 4> case_seg;
@@ -705,9 +734,14 @@ extern "C" MLIR_OpHandle MLIR_CreateOpFromSpec(MLIR_Context *cctx, const MLIR_Op
         }
     }
 
-    mlir::Operation *op = mlir::Operation::create(state);
+    return mlir::Operation::create(state);
+}
+
+extern "C" MLIR_OpHandle MLIR_CreateOpFromSpec(MLIR_Context *cctx, const MLIR_OpSpec *spec) {
+    API_CHECK(cctx != nullptr, "MLIR_CreateOpFromSpec", "context is NULL");
+    API_CHECK(spec != nullptr, "MLIR_CreateOpFromSpec", "spec is NULL");
+    mlir::Operation *op = createOpFromSpecImpl(cctx, spec, MLIR_INVALID_HANDLE);
     cctx->rootOps.insert(op);
-    cctx->opUserAttrs[op] = std::move(userAttrs);
     return H(op);
 }
 
@@ -749,17 +783,46 @@ extern "C" MLIR_Builder MLIR_BuilderAfter(MLIR_Context *cctx, MLIR_OpHandle oh) 
 
 extern "C" MLIR_OpHandle MLIR_BuildOp(MLIR_Builder *b, const MLIR_OpSpec *spec) {
     API_CHECK(b != nullptr && b->ctx != nullptr && spec != nullptr, "MLIR_BuildOp", "NULL argument");
-    MLIR_OpHandle op;
-    if (spec->loc == MLIR_INVALID_HANDLE && b->loc != MLIR_INVALID_HANDLE) {
-        MLIR_OpSpec s = *spec;
-        s.loc = b->loc;
-        op = MLIR_CreateOpFromSpec(b->ctx, &s);
+    mlir::Operation *op = createOpFromSpecImpl(b->ctx, spec, b->loc);
+    if (b->block != MLIR_INVALID_HANDLE) {
+        CHECK_OWN_BLOCK(b->ctx, b->block, "MLIR_BuildOp");
+        auto *block = F<mlir::Block>(b->block);
+        if (b->before == MLIR_INVALID_HANDLE) {
+            block->push_back(op);
+        } else {
+            CHECK_OWN_OP(b->ctx, b->before, "MLIR_BuildOp");
+            auto *bef = F<mlir::Operation>(b->before);
+            API_CHECK(bef->getBlock() == block, "MLIR_BuildOp",
+                      "before op is not in target block");
+            block->getOperations().insert(mlir::Block::iterator(bef), op);
+        }
     } else {
-        op = MLIR_CreateOpFromSpec(b->ctx, spec);
+        b->ctx->rootOps.insert(op);
     }
-    if (b->block != MLIR_INVALID_HANDLE)
-        MLIR_InsertOpBefore(b->ctx, b->block, op, b->before);
-    return op;
+    return H(op);
+}
+
+extern "C" MLIR_ValueHandle MLIR_BuildBinary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y) {
+    MLIR_ValueHandle ops[2] = { x, y };
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = ops;
+    s.n_operands = 2;
+    s.result_types = &rt;
+    s.n_results = 1;
+    return valH(F<mlir::Operation>(MLIR_BuildOp(b, &s))->getResult(0));
+}
+
+extern "C" MLIR_ValueHandle MLIR_BuildUnary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x) {
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = &x;
+    s.n_operands = 1;
+    s.result_types = &rt;
+    s.n_results = 1;
+    return valH(F<mlir::Operation>(MLIR_BuildOp(b, &s))->getResult(0));
 }
 
 extern "C" void MLIR_GetOpSuccessorOperandRange(MLIR_Context *ctx, MLIR_OpHandle h,
@@ -807,17 +870,17 @@ extern "C" void MLIR_SetOpAttr(MLIR_Context *cctx, MLIR_OpHandle oh, MLIR_AttrKe
     auto *op = F<mlir::Operation>(oh);
     mlir::NamedAttribute na(keyName(cctx, key), attrF(ah));
     op->setAttr(na.getName(), na.getValue());
-    auto &m = cctx->opUserAttrs;
-    auto it = m.find(op);
-    if (it != m.end()) {
-        // Replace if name already present, else append.
-        for (auto &existing : it->second) {
-            if (existing.getName() == na.getName()) {
-                existing = na;
-                return;
+    if (!cctx->opAttrCache.empty()) {
+        auto it = cctx->opAttrCache.find(op);
+        if (it != cctx->opAttrCache.end()) {
+            for (auto &existing : it->second) {
+                if (existing.getName() == na.getName()) {
+                    existing = na;
+                    return;
+                }
             }
+            it->second.push_back(na);
         }
-        it->second.push_back(na);
     }
 }
 
@@ -825,20 +888,24 @@ extern "C" void MLIR_SetOpAttr(MLIR_Context *cctx, MLIR_OpHandle oh, MLIR_AttrKe
 // Op accessors — straight passthrough to upstream
 // -----------------------------------------------------------------------------
 
+static MLIR_UP_NOINLINE MLIR_OpType getOpTypeSlow(MLIR_Context *c, mlir::OperationName name,
+                                                  MLIR_Context::OpTypeCacheEntry &slot) {
+    const void *p = name.getAsOpaquePointer();
+    auto it = c->opTypes.find(p);
+    MLIR_OpType t = (it != c->opTypes.end()) ? it->second : registerOpType(c, name.getStringRef());
+    slot.ptr = p;
+    slot.type = t;
+    return t;
+}
+
 extern "C" MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle h) {
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpType");
     auto *op = F<mlir::Operation>(h);
-    // mlir::OperationName::getAsOpaquePointer() returns the interned
-    // Impl pointer — unique per registered op name. Cache the
-    // (name pointer -> MLIR_OpType) mapping so the common case is a
-    // single DenseMap lookup instead of a 256-entry string scan.
     auto name = op->getName();
-    MLIR_Context *c = ctxOf(op);
-    auto it = c->opTypes.find(name.getAsOpaquePointer());
-    if (it != c->opTypes.end()) return it->second;
-    // An op of a name the context has not seen, created by the upstream
-    // parser or a pass: give the name a dynamic type.
-    return registerOpType(c, name.getStringRef());
+    const void *p = name.getAsOpaquePointer();
+    auto &slot = ctx->opTypeCache[(reinterpret_cast<uintptr_t>(p) >> 4) & 63];
+    if (MLIR_UP_LIKELY(slot.ptr == p)) return slot.type;
+    return getOpTypeSlow(ctx, name, slot);
 }
 extern "C" MLIR_LocationHandle MLIR_GetOpLocation(MLIR_Context *ctx, MLIR_OpHandle h) {
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpLocation");
@@ -849,10 +916,7 @@ extern "C" string MLIR_GetOpTrailingComment(MLIR_Context *ctx, MLIR_OpHandle h) 
     string s; s.str = nullptr; s.size = 0; return s;
 }
 
-extern "C" size_t MLIR_GetOpNumOperands(MLIR_Context *ctx, MLIR_OpHandle h) {
-    CHECK_OWN_OP(ctx, h, "MLIR_GetOpNumOperands");
-    auto *op = F<mlir::Operation>(h);
-    if (op->getNumSuccessors() == 0) return op->getNumOperands();
+static MLIR_UP_NOINLINE size_t getOpNumOperandsSlow(mlir::Operation *op) {
     if (auto br = mlir::dyn_cast<mlir::BranchOpInterface>(op)) {
         // Exclude successor operands; expose only "regular" (non-forwarded)
         // operands so the API matches the native backend convention.
@@ -863,6 +927,13 @@ extern "C" size_t MLIR_GetOpNumOperands(MLIR_Context *ctx, MLIR_OpHandle h) {
         return total;
     }
     return op->getNumOperands();
+}
+
+extern "C" size_t MLIR_GetOpNumOperands(MLIR_Context *ctx, MLIR_OpHandle h) {
+    CHECK_OWN_OP(ctx, h, "MLIR_GetOpNumOperands");
+    auto *op = F<mlir::Operation>(h);
+    if (MLIR_UP_LIKELY(op->getNumSuccessors() == 0)) return op->getNumOperands();
+    return getOpNumOperandsSlow(op);
 }
 extern "C" MLIR_ValueHandle MLIR_GetOpOperand(MLIR_Context *ctx, MLIR_OpHandle h, size_t i) {
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpOperand");
@@ -903,14 +974,36 @@ extern "C" MLIR_TypeHandle MLIR_GetOpResultType(MLIR_Context *ctx, MLIR_OpHandle
 // The MLIR_EraseOp path invalidates this cache, so the seeded snapshot can
 // never be shadowed by a freshly-allocated op reusing a stale Operation*
 // slab address.
+static bool isDefaultInherentAttr(const mlir::NamedAttribute &na) {
+    llvm::StringRef k = na.getName().getValue();
+    if (k == "operandSegmentSizes" || k == "case_operand_segments") return true;
+    mlir::Attribute v = na.getValue();
+    if (k == "overflowFlags") {
+        if (auto a = mlir::dyn_cast<mlir::arith::IntegerOverflowFlagsAttr>(v))
+            return a.getValue() == mlir::arith::IntegerOverflowFlags::none;
+        if (auto a = mlir::dyn_cast<mlir::LLVM::IntegerOverflowFlagsAttr>(v))
+            return a.getValue() == mlir::LLVM::IntegerOverflowFlags::none;
+    }
+    if (k == "fastmath") {
+        if (auto a = mlir::dyn_cast<mlir::arith::FastMathFlagsAttr>(v))
+            return a.getValue() == mlir::arith::FastMathFlags::none;
+    }
+    if (k == "fastmathFlags") {
+        if (auto a = mlir::dyn_cast<mlir::LLVM::FastmathFlagsAttr>(v))
+            return a.getValue() == mlir::LLVM::FastmathFlags::none;
+    }
+    return false;
+}
+
 static std::vector<mlir::NamedAttribute> &
 ensureCachedAttrs(mlir::Operation *op) {
-    auto &m = ctxOf(op)->opUserAttrs;
+    auto &m = ctxOf(op)->opAttrCache;
     auto it = m.find(op);
     if (it != m.end()) return it->second;
-    auto attrs = op->getAttrs();
     auto &v = m[op];
-    v.assign(attrs.begin(), attrs.end());
+    for (const mlir::NamedAttribute &na : op->getAttrs()) {
+        if (!isDefaultInherentAttr(na)) v.push_back(na);
+    }
     return v;
 }
 extern "C" size_t MLIR_GetOpNumAttributes(MLIR_Context *ctx, MLIR_OpHandle h) {
@@ -943,60 +1036,47 @@ static mlir::Attribute caseValuesAsI32(MLIR_Context &mctx, mlir::DenseIntElement
     return a;
 }
 
+static MLIR_UP_NOINLINE MLIR_AttributeHandle getOpAttrSpecial(MLIR_Context *ctx,
+                                                              mlir::Operation *op,
+                                                              MLIR_AttrKey key) {
+    if (key == MLIR_KEY_CALLEE || key == MLIR_KEY_VAR_CALLEE_TYPE) {
+        if (auto call = mlir::dyn_cast<mlir::LLVM::CallOp>(op)) {
+            if (key == MLIR_KEY_CALLEE) {
+                if (auto c = call.getCalleeAttr()) return attrH(c);
+                return MLIR_INVALID_HANDLE;
+            }
+            if (auto t = call.getVarCalleeTypeAttr()) return attrH(t);
+            return MLIR_INVALID_HANDLE;
+        }
+    } else if (key == MLIR_KEY_CASE_VALUES) {
+        if (auto sw = mlir::dyn_cast<mlir::cf::SwitchOp>(op)) {
+            if (auto cv = sw.getCaseValuesAttr()) {
+                if (cv.getElementType().isInteger(32)) return attrH(caseValuesAsI32(*ctx, cv));
+                return attrH(cv);
+            }
+        }
+        if (auto sw = mlir::dyn_cast<mlir::LLVM::SwitchOp>(op)) {
+            if (auto cv = sw.getCaseValuesAttr()) {
+                if (cv.getElementType().isInteger(32)) return attrH(caseValuesAsI32(*ctx, cv));
+                return attrH(cv);
+            }
+        }
+    }
+    mlir::StringAttr nameAttr = keyName(ctx, key);
+    if (auto a = op->getAttr(nameAttr)) return attrH(a);
+    return MLIR_INVALID_HANDLE;
+}
+
 // Inherent attributes (properties) included: Operation::getAttr reads them.
 extern "C" MLIR_AttributeHandle MLIR_GetOpAttr(MLIR_Context *ctx, MLIR_OpHandle h,
                                                MLIR_AttrKey key) {
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpAttr");
     auto *op = F<mlir::Operation>(h);
-    MLIR_Context &mctx = *ctx;
-    auto stash = [&](mlir::Attribute a) -> MLIR_AttributeHandle { return attrH(a); };
+    if (MLIR_UP_UNLIKELY(key == MLIR_KEY_CALLEE || key == MLIR_KEY_VAR_CALLEE_TYPE ||
+                         key == MLIR_KEY_CASE_VALUES))
+        return getOpAttrSpecial(ctx, op, key);
     mlir::StringAttr nameAttr = keyName(ctx, key);
-    llvm::StringRef name = nameAttr.getValue();
-    if (auto call = mlir::dyn_cast<mlir::LLVM::CallOp>(op)) {
-        if (key == MLIR_KEY_CALLEE) {
-            if (auto c = call.getCalleeAttr()) return stash(c);
-            return MLIR_INVALID_HANDLE;
-        }
-        if (key == MLIR_KEY_VAR_CALLEE_TYPE) {
-            if (auto t = call.getVarCalleeTypeAttr()) return stash(t);
-            return MLIR_INVALID_HANDLE;
-        }
-    }
-    // cf.switch stores case_values as a DenseIntElementsAttr (typed
-    // property). The agnostic-API consumers (e.g. the C CF-to-SCF lifter)
-    // pass it in / read it out as a DenseI32ArrayAttr and parse the
-    // resulting `array<i32: V0, V1, ...>` text format. Round-trip the
-    // attribute back to DenseI32ArrayAttr here so reads under upstream
-    // produce the same text format as native. Only safe when the IR's
-    // case_values element type is i32 (the only width the agnostic API
-    // currently supports); for wider integer types fall through and
-    // return the underlying DenseIntElementsAttr unchanged so callers
-    // see the full-width values instead of silently truncated i32s.
-    if (mlir::isa<mlir::cf::SwitchOp>(op) &&
-        key == MLIR_KEY_CASE_VALUES) {
-        if (auto sw = mlir::dyn_cast<mlir::cf::SwitchOp>(op)) {
-            if (auto cv = sw.getCaseValuesAttr()) {
-                auto elemTy = cv.getElementType();
-                if (elemTy.isInteger(32)) return stash(caseValuesAsI32(mctx, cv));
-                return stash(cv);
-            }
-        }
-    }
-    // Same round-trip for llvm.switch (the lift's switch when it runs on an
-    // LLVM-dialect CFG).
-    if (mlir::isa<mlir::LLVM::SwitchOp>(op) &&
-        key == MLIR_KEY_CASE_VALUES) {
-        if (auto sw = mlir::dyn_cast<mlir::LLVM::SwitchOp>(op)) {
-            if (auto cv = sw.getCaseValuesAttr()) {
-                auto elemTy = cv.getElementType();
-                if (elemTy.isInteger(32)) return stash(caseValuesAsI32(mctx, cv));
-                return stash(cv);
-            }
-        }
-    }
-    if (auto a = op->getAttr(nameAttr)) return stash(a);
-    auto dict = op->getAttrDictionary();
-    if (auto na = dict.getNamed(name)) return attrH(na->getValue());
+    if (auto a = op->getAttr(nameAttr)) return attrH(a);
     return MLIR_INVALID_HANDLE;
 }
 extern "C" size_t MLIR_GetOpNumRegions(MLIR_Context *ctx, MLIR_OpHandle h) {
@@ -1056,17 +1136,39 @@ extern "C" MLIR_OpHandle MLIR_GetBlockLastOp(MLIR_Context *ctx, MLIR_BlockHandle
 extern "C" MLIR_OpHandle MLIR_GetOpNext(MLIR_Context *ctx, MLIR_OpHandle oh) {
     CHECK_OWN_OP(ctx, oh, "MLIR_GetOpNext");
     auto *op = F<mlir::Operation>(oh);
-    if (!op->getBlock()) return MLIR_INVALID_HANDLE;
-    auto *next = op->getNextNode();
-    return next ? H(next) : MLIR_INVALID_HANDLE;
+    mlir::Block *b = op->getBlock();
+    if (MLIR_UP_UNLIKELY(!b)) return MLIR_INVALID_HANDLE;
+    auto it = std::next(mlir::Block::iterator(op));
+    return (it == b->end()) ? MLIR_INVALID_HANDLE : H(&*it);
 }
 
 extern "C" MLIR_OpHandle MLIR_GetOpPrev(MLIR_Context *ctx, MLIR_OpHandle oh) {
     CHECK_OWN_OP(ctx, oh, "MLIR_GetOpPrev");
     auto *op = F<mlir::Operation>(oh);
-    if (!op->getBlock()) return MLIR_INVALID_HANDLE;
-    auto *prev = op->getPrevNode();
-    return prev ? H(prev) : MLIR_INVALID_HANDLE;
+    mlir::Block *b = op->getBlock();
+    if (MLIR_UP_UNLIKELY(!b)) return MLIR_INVALID_HANDLE;
+    auto it = mlir::Block::iterator(op);
+    return (it == b->begin()) ? MLIR_INVALID_HANDLE : H(&*std::prev(it));
+}
+
+extern "C" MLIR_BlockOpIter MLIR_BlockOpsBegin(MLIR_Context *ctx, MLIR_BlockHandle bh) {
+    CHECK_OWN_BLOCK(ctx, bh, "MLIR_BlockOpsBegin");
+    auto *b = F<mlir::Block>(bh);
+    MLIR_BlockOpIter it;
+    it.cur = reinterpret_cast<uintptr_t>(b->begin().getNodePtr());
+    it.end = reinterpret_cast<uintptr_t>(b->end().getNodePtr());
+    return it;
+}
+
+extern "C" MLIR_OpHandle MLIR_BlockOpIterNext(MLIR_Context *ctx, MLIR_BlockOpIter *it) {
+    (void)ctx;
+    if (it->cur == it->end) return MLIR_INVALID_HANDLE;
+    using NodePtr = decltype(std::declval<mlir::Block::iterator>().getNodePtr());
+    mlir::Block::iterator bit(*reinterpret_cast<NodePtr>(it->cur));
+    mlir::Operation *op = &*bit;
+    ++bit;
+    it->cur = reinterpret_cast<uintptr_t>(bit.getNodePtr());
+    return H(op);
 }
 
 extern "C" MLIR_OpHandle MLIR_GetParentOp(MLIR_Context *ctx, MLIR_OpHandle oh) {
@@ -1101,6 +1203,10 @@ extern "C" MLIR_BlockHandle MLIR_GetBlockPrev(MLIR_Context *ctx, MLIR_BlockHandl
     if (!b->getParent()) return MLIR_INVALID_HANDLE;
     auto *prev = b->getPrevNode();
     return prev ? H(prev) : MLIR_INVALID_HANDLE;
+}
+
+extern "C" MLIR_CFGInfo *MLIR_ComputeCFGInfo(MLIR_Context *ctx, MLIR_RegionHandle region, Arena *out) {
+    return mlir_compute_cfg_info_generic(ctx, region, out);
 }
 
 extern "C" MLIR_UseHandle MLIR_GetValueFirstUse(MLIR_Context *ctx, MLIR_ValueHandle vh) {
@@ -2097,7 +2203,7 @@ namespace {
 } // namespace
 
 extern "C" MLIR_LocationHandle MLIR_CreateLocationUnknown(MLIR_Context *cctx, string /*orig*/) {
-    return locH(mlir::UnknownLoc::get(cctx));
+    return locH(cctx->unknownLoc);
 }
 extern "C" MLIR_LocationHandle MLIR_CreateLocationFile(MLIR_Context *cctx, string filename,
                                                         int line, int column) {
@@ -2233,8 +2339,10 @@ extern "C" void MLIR_EraseOp(MLIR_Context *cctx, MLIR_OpHandle op_h) {
     API_CHECK(!opUsedOutside(op, [op](mlir::Operation *owner) { return op->isAncestor(owner); }),
               "MLIR_EraseOp", "a value or block defined in the op or nested in it is used outside it");
 #endif
-    forgetErasedOp(cctx, op);
-    cctx->rootOps.erase(op);
+    if (!cctx->opAttrCache.empty() || !cctx->valueNames.empty())
+        forgetErasedOp(cctx, op);
+    if (!op->getBlock())
+        cctx->rootOps.erase(op);
     op->erase();
 }
 

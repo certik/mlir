@@ -75,6 +75,9 @@ MLIR_AttrKey attr_key_table_intern(AttrKeyTable *t, string name);
 // The name of `key`, or "" for MLIR_KEY_INVALID and unknown values.
 string attr_key_table_name(const AttrKeyTable *t, MLIR_AttrKey key);
 
+// Generic backend-agnostic CFG + dominators + natural loops implementation.
+MLIR_CFGInfo *mlir_compute_cfg_info_generic(MLIR_Context *ctx, MLIR_RegionHandle region, Arena *out);
+
 #ifdef __cplusplus
 }
 #endif

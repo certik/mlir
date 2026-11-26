@@ -378,30 +378,11 @@ MLIR_Builder MLIR_BuilderAfter(MLIR_Context *ctx, MLIR_OpHandle op);
 // and insert it at `b`'s insertion point.
 MLIR_OpHandle MLIR_BuildOp(MLIR_Builder *b, const MLIR_OpSpec *spec);
 
-static inline MLIR_ValueHandle MLIR_BuildBinary(MLIR_Builder *b, MLIR_OpType t,
-        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y) {
-    MLIR_ValueHandle ops[2];
-    ops[0] = x;
-    ops[1] = y;
-    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
-    s.type = t;
-    s.operands = ops;
-    s.n_operands = 2;
-    s.result_types = &rt;
-    s.n_results = 1;
-    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
-}
+MLIR_ValueHandle MLIR_BuildBinary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y);
 
-static inline MLIR_ValueHandle MLIR_BuildUnary(MLIR_Builder *b, MLIR_OpType t,
-        MLIR_TypeHandle rt, MLIR_ValueHandle x) {
-    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
-    s.type = t;
-    s.operands = &x;
-    s.n_operands = 1;
-    s.result_types = &rt;
-    s.n_results = 1;
-    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
-}
+MLIR_ValueHandle MLIR_BuildUnary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x);
 
 MLIR_ValueHandle MLIR_BuildConstantInt(MLIR_Builder *b, MLIR_OpType t,
         MLIR_TypeHandle rt, int64_t v);
@@ -939,6 +920,15 @@ MLIR_OpHandle MLIR_GetBlockFirstOp(MLIR_Context *ctx, MLIR_BlockHandle block);
 MLIR_OpHandle MLIR_GetBlockLastOp(MLIR_Context *ctx, MLIR_BlockHandle block);
 MLIR_OpHandle MLIR_GetOpNext(MLIR_Context *ctx, MLIR_OpHandle op);
 MLIR_OpHandle MLIR_GetOpPrev(MLIR_Context *ctx, MLIR_OpHandle op);
+// Fast forward cursor over a block's ops (valid while the block's op list is
+// not structurally modified; use MLIR_GetOpNext/Prev if inserting or erasing).
+// Avoids per-step parent-block lookups on both backends.
+typedef struct MLIR_BlockOpIter {
+    uintptr_t cur;
+    uintptr_t end;
+} MLIR_BlockOpIter;
+MLIR_BlockOpIter MLIR_BlockOpsBegin(MLIR_Context *ctx, MLIR_BlockHandle block);
+MLIR_OpHandle MLIR_BlockOpIterNext(MLIR_Context *ctx, MLIR_BlockOpIter *it);
 // Returns the op whose region contains `op`'s parent block, or MLIR_INVALID_HANDLE.
 MLIR_OpHandle MLIR_GetParentOp(MLIR_Context *ctx, MLIR_OpHandle op);
 
