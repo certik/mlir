@@ -1023,171 +1023,214 @@ static void substitute(PP *pp, Macro *m, VecPPTok *args, VecPPTok *out) {
     }
 }
 
-// The pending (not yet rescanned) tokens of expand_tokens() live at the end
-// of an array: w[pos .. *wsize). Everything before `pos` has already been
-// emitted, so a replacement is written into that dead prefix and the tail
-// never moves. Replaces w[pos .. pos+del) with the `ins_n` tokens at `ins`
-// and returns the new start of the pending tokens. Only when the dead prefix
-// is too small is the array reallocated, with a front gap as large as the
-// tail, so the copies stay amortized O(1) per token.
-static size_t work_splice(Arena *a, PPTok **pw, size_t *wsize, size_t pos,
-                          size_t del, const PPTok *ins, size_t ins_n) {
-    PPTok *w = *pw;
-    size_t end = pos + del;
-    if (ins_n <= end) {
-        size_t start = end - ins_n;
-        for (size_t k = 0; k < ins_n; k++) w[start + k] = ins[k];
-        return start;
+typedef struct {
+    const PPTok *toks;
+    size_t pos;
+    size_t end;
+} PPSlice;
+
+static bool pp_slice_peek_lparen(const PPSlice *stk, size_t sp) {
+    for (size_t s = sp; s-- > 0; ) {
+        for (size_t p = stk[s].pos; p < stk[s].end; p++) {
+            uint8_t k = stk[s].toks[p].kind;
+            if (k == PP_NEWLINE) continue;
+            if (k == PP_END) return false;
+            return k == PP_PUNCT && stk[s].toks[p].text.size == 1 &&
+                   stk[s].toks[p].text.str[0] == '(';
+        }
     }
-    size_t tail_n = *wsize - end;
-    size_t gap = ins_n + tail_n + 64;
-    PPTok *nw = arena_new_array(a, PPTok, gap + tail_n);
-    size_t start = gap - ins_n;
-    for (size_t k = 0; k < ins_n; k++) nw[start + k] = ins[k];
-    if (tail_n) memcpy(nw + gap, w + end, tail_n * sizeof(PPTok));
-    *pw = nw;
-    *wsize = gap + tail_n;
-    return start;
+    return false;
+}
+
+static bool pp_slice_next_tok(PPSlice *stk, size_t *sp, PPTok *out) {
+    while (*sp > 0) {
+        PPSlice *top = &stk[*sp - 1];
+        if (top->pos < top->end) {
+            *out = top->toks[top->pos++];
+            return true;
+        }
+        (*sp)--;
+    }
+    return false;
+}
+
+static bool collect_args_slices(PP *pp, PPSlice *stk, size_t *sp,
+                                Macro *m, VecPPTok *args) {
+    PPTok t;
+    while (pp_slice_next_tok(stk, sp, &t)) {
+        if (t.kind == PP_NEWLINE) continue;
+        break;
+    }
+    // Caller already verified next non-newline token is '('.
+    int depth = 0;
+    size_t arg_idx = 0;
+    size_t expected = m->n_params + (m->is_variadic ? 1 : 0);
+    size_t arg_end[72];
+    size_t nbuf = 0;
+    while (pp_slice_next_tok(stk, sp, &t)) {
+        if (t.kind == PP_END) {
+            pp_error(pp, pp->files[t.file_id], t.line, s_lit("unterminated macro arguments"));
+            return false;
+        }
+        if (t.kind == PP_NEWLINE) continue;
+        if (is_punct1(&t, '(')) depth++;
+        else if (is_punct1(&t, ')')) {
+            if (depth == 0) break;
+            depth--;
+        } else if (is_punct1(&t, ',') && depth == 0) {
+            if (m->is_variadic && arg_idx >= m->n_params) {
+                arg_buf_push(pp, &nbuf, &t);
+                continue;
+            }
+            arg_end[arg_idx] = nbuf;
+            arg_idx++;
+            if (arg_idx >= expected) {
+                pp_error(pp, pp->files[t.file_id], t.line, s_lit("too many arguments to macro"));
+                return false;
+            }
+            continue;
+        }
+        arg_buf_push(pp, &nbuf, &t);
+    }
+    arg_end[arg_idx] = nbuf;
+    PPTok *block = arena_new_array(pp->arena, PPTok, nbuf ? nbuf : 1);
+    if (nbuf) memcpy(block, pp->arg_buf, nbuf * sizeof(PPTok));
+    size_t start = 0;
+    for (size_t k = 0; k < expected; k++) {
+        size_t end = k <= arg_idx ? arg_end[k] : nbuf;
+        args[k].data = block + start;
+        args[k].size = end - start;
+        args[k].max = end - start;
+        start = end;
+    }
+    return true;
 }
 
 // Append a fully expanded token to `out`, or emit it straight to the output
 // text when `out` is NULL (top level: no need to buffer a whole line group).
-static void expand_put(PP *pp, VecPPTok *out, PPTok *t) {
+static inline void expand_put(PP *pp, VecPPTok *out, PPTok *t) {
     if (out) VecPPTok_push_back(pp->arena, out, *t);
     else emit_pp_token(pp, t);
 }
 
 // Expand tokens in `toks` and append the result to `out` (NULL: emit them).
+// Uses a zero-copy slice stack so hitting a macro never copies the rest of
+// the file's token stream.
 static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out) {
-    // Fast path: scan tokens in place with zero allocation/copy until we hit
-    // an actual macro or __FILE__/__LINE__. Most C lines have no macros.
-    size_t scan = 0;
-    while (scan < n) {
-        PPTok t = toks[scan];
-        if (t.kind == PP_END) return;
-        if (t.kind == PP_NEWLINE) { scan++; continue; }
-        if (t.kind == PP_IDENT) {
-            MacroSlot *slot = macro_find_slot(pp, t.text);
-            if (slot && (slot->special != PP_SPECIAL_NONE ||
-                         (slot->macro && !slot->macro->expanding &&
-                          !hide_contains(t.hide, t.text)))) {
-                break;
-            }
-        }
-        expand_put(pp, out, &t);
-        scan++;
-    }
-    if (scan >= n) return;
+    PPSlice stk_inline[64];
+    PPSlice *stk = stk_inline;
+    size_t stk_cap = 64;
+    size_t sp = 1;
+    stk[0].toks = toks;
+    stk[0].pos = 0;
+    stk[0].end = n;
 
-    // Copy remaining suffix into a working buffer so substitutions can be
-    // spliced back in for proper rescanning across the original input boundary.
-    size_t rem = n - scan;
-    size_t gap0 = 64;
-    size_t wsize = gap0 + rem;
-    PPTok *w = arena_new_array(pp->arena, PPTok, wsize);
-    memcpy(w + gap0, toks + scan, rem * sizeof(PPTok));
-    size_t i = gap0;
-    while (i < wsize) {
-        PPTok t = w[i];
+    while (sp > 0) {
+        PPSlice *top = &stk[sp - 1];
+        if (top->pos >= top->end) { sp--; continue; }
+        PPTok t = top->toks[top->pos++];
         if (t.kind == PP_END) break;
-        if (t.kind == PP_NEWLINE) { i++; continue; }
+        if (t.kind == PP_NEWLINE) continue;
         if (t.kind == PP_IDENT) {
             MacroSlot *slot = macro_find_slot(pp, t.text);
-            // __FILE__ / __LINE__: expand to dynamic literal.
-            if (slot && slot->special == PP_SPECIAL_FILE) {
-                PPTok s = {0};
-                // File name as string literal.
-                string tf = pp->files[t.file_id];
-                size_t fsz = tf.size;
-                char *buf = arena_new_array(pp->arena, char, 2 * fsz + 3);
-                size_t k = 0;
-                buf[k++] = '"';
-                for (size_t j = 0; j < fsz; j++) {
-                    char c = tf.str[j];
-                    if (c == '\\' || c == '"') { buf[k++] = '\\'; }
-                    buf[k++] = c;
+            if (slot) {
+                if (slot->special == PP_SPECIAL_FILE) {
+                    PPTok s = {0};
+                    string tf = pp->files[t.file_id];
+                    size_t fsz = tf.size;
+                    char *buf = arena_new_array(pp->arena, char, 2 * fsz + 3);
+                    size_t k = 0;
+                    buf[k++] = '"';
+                    for (size_t j = 0; j < fsz; j++) {
+                        char c = tf.str[j];
+                        if (c == '\\' || c == '"') buf[k++] = '\\';
+                        buf[k++] = c;
+                    }
+                    buf[k++] = '"';
+                    buf[k] = '\0';
+                    s.kind = PP_STRING;
+                    s.text = (string){buf, k};
+                    s.line = t.line; s.file_id = t.file_id; s.has_space = t.has_space;
+                    expand_put(pp, out, &s);
+                    continue;
                 }
-                buf[k++] = '"';
-                buf[k] = '\0';
-                s.kind = PP_STRING;
-                s.text = (string){buf, k};
-                s.line = t.line; s.file_id = t.file_id; s.has_space = t.has_space;
-                expand_put(pp, out, &s);
-                i++;
-                continue;
-            }
-            if (slot && slot->special == PP_SPECIAL_LINE) {
-                PPTok s = {0};
-                s.kind = PP_NUMBER;
-                s.text = i64_to_str(pp->arena, (int64_t)t.line);
-                s.line = t.line; s.file_id = t.file_id; s.has_space = t.has_space;
-                expand_put(pp, out, &s);
-                i++;
-                continue;
-            }
-            Macro *m = slot ? slot->macro : NULL;
-            if (m && hide_contains(t.hide, t.text)) {
-                expand_put(pp, out, &t);
-                i++;
-                continue;
-            }
-            if (m && !m->expanding) {
-                if (!m->is_func) {
-                    // Object-like: substitute, then splice the result back
-                    // into the work buffer at position `i` so rescanning
-                    // happens against the rest of the original input too.
-                    m->expanding = true;
-                    VecPPTok inner; VecPPTok_reserve(pp->arena, &inner, m->n_body + 4);
-                    substitute(pp, m, NULL, &inner);
-                    m->expanding = false;
-                    for (size_t k = 0; k < inner.size; k++) {
-                        inner.data[k].line = t.line;
-                        inner.data[k].file_id = t.file_id;
-                        inner.data[k].hide = hide_add(pp->arena, inner.data[k].hide, m->name);
-                    }
-                    if (inner.size > 0) inner.data[0].has_space = t.has_space;
-                    i = work_splice(pp->arena, &w, &wsize, i, 1, inner.data, inner.size);
+                if (slot->special == PP_SPECIAL_LINE) {
+                    PPTok s = {0};
+                    s.kind = PP_NUMBER;
+                    s.text = i64_to_str(pp->arena, (int64_t)t.line);
+                    s.line = t.line; s.file_id = t.file_id; s.has_space = t.has_space;
+                    expand_put(pp, out, &s);
                     continue;
-                } else {
-                    // Function-like: peek for '(' across the work buffer.
-                    size_t j = i + 1;
-                    while (j < wsize && w[j].kind == PP_NEWLINE) j++;
-                    if (j >= wsize || !is_punct1(&w[j], '(')) {
-                        expand_put(pp, out, &t);
-                        i++;
+                }
+                Macro *m = slot->macro;
+                if (m && !m->expanding && !hide_contains(t.hide, t.text)) {
+                    if (!m->is_func) {
+                        m->expanding = true;
+                        VecPPTok inner; VecPPTok_reserve(pp->arena, &inner, m->n_body + 2);
+                        substitute(pp, m, NULL, &inner);
+                        m->expanding = false;
+                        if (inner.size > 0) {
+                            PPHide *shared_hide = hide_add(pp->arena, NULL, m->name);
+                            for (size_t k = 0; k < inner.size; k++) {
+                                inner.data[k].line = t.line;
+                                inner.data[k].file_id = t.file_id;
+                                inner.data[k].hide = inner.data[k].hide
+                                    ? hide_add(pp->arena, inner.data[k].hide, m->name)
+                                    : shared_hide;
+                            }
+                            inner.data[0].has_space = t.has_space;
+                            if (sp == stk_cap) {
+                                size_t ncap = stk_cap * 2;
+                                PPSlice *ns = arena_new_array(pp->arena, PPSlice, ncap);
+                                memcpy(ns, stk, sp * sizeof(PPSlice));
+                                stk = ns; stk_cap = ncap;
+                            }
+                            stk[sp].toks = inner.data;
+                            stk[sp].pos = 0;
+                            stk[sp].end = inner.size;
+                            sp++;
+                        }
+                        continue;
+                    } else if (pp_slice_peek_lparen(stk, sp)) {
+                        size_t expected = m->n_params + (m->is_variadic ? 1 : 0);
+                        VecPPTok *args = arena_new_array(pp->arena, VecPPTok,
+                                                         expected ? expected : 1);
+                        if (!collect_args_slices(pp, stk, &sp, m, args)) {
+                            continue;
+                        }
+                        size_t est = m->n_body + 4;
+                        for (size_t k = 0; k < expected; k++) est += args[k].size;
+                        m->expanding = true;
+                        VecPPTok inner; VecPPTok_reserve(pp->arena, &inner, est);
+                        substitute(pp, m, args, &inner);
+                        m->expanding = false;
+                        if (inner.size > 0) {
+                            PPHide *shared_hide = hide_add(pp->arena, NULL, m->name);
+                            for (size_t k = 0; k < inner.size; k++) {
+                                inner.data[k].line = t.line;
+                                inner.data[k].file_id = t.file_id;
+                                inner.data[k].hide = inner.data[k].hide
+                                    ? hide_add(pp->arena, inner.data[k].hide, m->name)
+                                    : shared_hide;
+                            }
+                            inner.data[0].has_space = t.has_space;
+                            if (sp == stk_cap) {
+                                size_t ncap = stk_cap * 2;
+                                PPSlice *ns = arena_new_array(pp->arena, PPSlice, ncap);
+                                memcpy(ns, stk, sp * sizeof(PPSlice));
+                                stk = ns; stk_cap = ncap;
+                            }
+                            stk[sp].toks = inner.data;
+                            stk[sp].pos = 0;
+                            stk[sp].end = inner.size;
+                            sp++;
+                        }
                         continue;
                     }
-                    size_t expected = m->n_params + (m->is_variadic ? 1 : 0);
-                    VecPPTok *args = arena_new_array(pp->arena, VecPPTok,
-                                                     expected ? expected : 1);
-                    size_t cur = j;
-                    if (!collect_args(pp, w, wsize, &cur, m, args)) {
-                        i++;
-                        continue;
-                    }
-                    // Room for the body plus every argument once.
-                    size_t est = m->n_body + 4;
-                    for (size_t k = 0; k < expected; k++) est += args[k].size;
-                    m->expanding = true;
-                    VecPPTok inner; VecPPTok_reserve(pp->arena, &inner, est);
-                    substitute(pp, m, args, &inner);
-                    m->expanding = false;
-                    for (size_t k = 0; k < inner.size; k++) {
-                        inner.data[k].line = t.line;
-                        inner.data[k].file_id = t.file_id;
-                        inner.data[k].hide = hide_add(pp->arena, inner.data[k].hide, m->name);
-                    }
-                    if (inner.size > 0) inner.data[0].has_space = t.has_space;
-                    // Splice inner tokens into the work buffer in place of
-                    // the call (identifier + arg list); rescan from there.
-                    i = work_splice(pp->arena, &w, &wsize, i, cur - i,
-                                    inner.data, inner.size);
-                    continue;
                 }
             }
         }
         expand_put(pp, out, &t);
-        i++;
     }
 }
 
