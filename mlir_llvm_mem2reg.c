@@ -138,7 +138,6 @@ typedef struct {
     size_t p_pool_n, p_pool_cap;
     HMap defOut;                // (bi*na+ai+1) -> last value stored in block
     HMap entryDef;              // (bi*na+ai+1) -> memoised reaching vref at entry
-    HMap bidx;                  // block handle -> block index
     HMap aidx;                  // alloca result handle -> candidate index
     HMap remap;                 // llvm.load result handle -> reaching vref
 } M;
@@ -148,9 +147,8 @@ static MLIR_LocationHandle l2r_unkloc(MLIR_Context *ctx) {
 }
 
 static size_t l2r_block_index(M *m, MLIR_BlockHandle b) {
-    uintptr_t v;
-    if (hmap_get(&m->bidx, (uintptr_t)b, &v)) return (size_t)v;
-    return (size_t)-1;
+    size_t idx = MLIR_GetBlockIndex(m->ctx, b);
+    return (idx < m->nb && m->blocks[idx] == b) ? idx : (size_t)-1;
 }
 
 // Returns candidate-alloca index of `v` (an alloca pointer result), or -1.
@@ -368,16 +366,14 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
 
     m.blocks = (MLIR_BlockHandle *)malloc(nb * sizeof(MLIR_BlockHandle));
     m.terms  = (MLIR_OpHandle *)malloc(nb * sizeof(MLIR_OpHandle));
-    hmap_init(&m.bidx, nb);
     for (size_t bi = 0; bi < nb; bi++) {
         m.blocks[bi] = MLIR_GetRegionBlock(ctx, region, bi);
         m.terms[bi]  = MLIR_GetBlockTerminator(ctx, m.blocks[bi]);
-        hmap_put(&m.bidx, (uintptr_t)m.blocks[bi], (uintptr_t)bi);
     }
 
     // ---- Collect candidate allocas (every llvm.alloca in the region) -------
-    hmap_init(&m.aidx, 64);
-    size_t cap = 64;
+    hmap_init(&m.aidx, 16);
+    size_t cap = 32;
     m.elemty     = (MLIR_TypeHandle *)malloc(cap * sizeof(MLIR_TypeHandle));
     m.promotable = (bool *)malloc(cap * sizeof(bool));
     MLIR_ValueHandle *alloca_res = (MLIR_ValueHandle *)malloc(cap * sizeof(MLIR_ValueHandle));
@@ -410,7 +406,7 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     if (na == 0) {
         free(m.blocks); free(m.terms);
         free(m.elemty); free(m.promotable); free(alloca_res); free(alloca_op);
-        hmap_free(&m.bidx); hmap_free(&m.aidx);
+        hmap_free(&m.aidx);
         return;
     }
 
@@ -449,58 +445,66 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     if (!any) {
         free(m.blocks); free(m.terms);
         free(m.elemty); free(m.promotable); free(alloca_res); free(alloca_op);
-        hmap_free(&m.bidx); hmap_free(&m.aidx);
+        hmap_free(&m.aidx);
         return;
     }
 
-    hmap_init(&m.defOut, 256);
-    hmap_init(&m.entryDef, 256);
-    hmap_init(&m.remap, 256);
+    size_t remap_hint = na * 2 < 16 ? 16 : na * 2;
+    hmap_init(&m.remap, remap_hint);
 
-    // ---- defOut: last value stored to each promotable alloca per block -----
-    for (size_t bi = 0; bi < nb; bi++) {
-        MLIR_BlockHandle blk = m.blocks[bi];
-        size_t nops = MLIR_GetBlockNumOps(ctx, blk);
-        for (size_t j = 0; j < nops; j++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, j);
-            if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_STORE) continue;
-            size_t ai = l2r_alloca_index(&m, MLIR_GetOpOperand(ctx, op, 1));
-            if (ai == (size_t)-1 || !m.promotable[ai]) continue;
-            hmap_put(&m.defOut, (uintptr_t)(bi * na + ai + 1),
-                     (uintptr_t)MLIR_GetOpOperand(ctx, op, 0));
-        }
-    }
+    if (nb > 1) {
+        size_t def_hint = nb * 2 < 16 ? 16 : nb * 2;
+        hmap_init(&m.defOut, def_hint);
+        hmap_init(&m.entryDef, def_hint);
 
-    // ---- Predecessor edges (one per terminator successor slot) -------------
-    m.pred_off = (size_t *)calloc(nb + 1, sizeof(size_t));
-    for (size_t bi = 0; bi < nb; bi++) {
-        MLIR_OpHandle t = m.terms[bi];
-        if (t == 0) continue;
-        size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
-        for (size_t s = 0; s < ns; s++) {
-            size_t k = l2r_block_index(&m, MLIR_GetOpSuccessor(ctx, t, s));
-            if (k != (size_t)-1) m.pred_off[k + 1]++;
+        // ---- defOut: last value stored to each promotable alloca per block -----
+        for (size_t bi = 0; bi < nb; bi++) {
+            MLIR_BlockHandle blk = m.blocks[bi];
+            size_t nops = MLIR_GetBlockNumOps(ctx, blk);
+            for (size_t j = 0; j < nops; j++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, j);
+                if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_STORE) continue;
+                size_t ai = l2r_alloca_index(&m, MLIR_GetOpOperand(ctx, op, 1));
+                if (ai == (size_t)-1 || !m.promotable[ai]) continue;
+                hmap_put(&m.defOut, (uintptr_t)(bi * na + ai + 1),
+                         (uintptr_t)MLIR_GetOpOperand(ctx, op, 0));
+            }
         }
-    }
-    for (size_t bi = 0; bi < nb; bi++) m.pred_off[bi + 1] += m.pred_off[bi];
-    size_t nedges = m.pred_off[nb];
-    m.pred_blk  = (size_t *)malloc((nedges ? nedges : 1) * sizeof(size_t));
-    m.pred_slot = (size_t *)malloc((nedges ? nedges : 1) * sizeof(size_t));
-    {
-        size_t *fill = (size_t *)calloc(nb, sizeof(size_t));
+
+        // ---- Predecessor edges (one per terminator successor slot) -------------
+        m.pred_off = (size_t *)calloc(nb + 1, sizeof(size_t));
         for (size_t bi = 0; bi < nb; bi++) {
             MLIR_OpHandle t = m.terms[bi];
             if (t == 0) continue;
             size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
             for (size_t s = 0; s < ns; s++) {
                 size_t k = l2r_block_index(&m, MLIR_GetOpSuccessor(ctx, t, s));
-                if (k == (size_t)-1) continue;
-                size_t pos = m.pred_off[k] + fill[k]++;
-                m.pred_blk[pos] = bi;
-                m.pred_slot[pos] = s;
+                if (k != (size_t)-1) m.pred_off[k + 1]++;
             }
         }
-        free(fill);
+        for (size_t bi = 0; bi < nb; bi++) m.pred_off[bi + 1] += m.pred_off[bi];
+        size_t nedges = m.pred_off[nb];
+        m.pred_blk  = (size_t *)malloc((nedges ? nedges : 1) * sizeof(size_t));
+        m.pred_slot = (size_t *)malloc((nedges ? nedges : 1) * sizeof(size_t));
+        {
+            size_t *fill = (size_t *)calloc(nb, sizeof(size_t));
+            for (size_t bi = 0; bi < nb; bi++) {
+                MLIR_OpHandle t = m.terms[bi];
+                if (t == 0) continue;
+                size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
+                for (size_t s = 0; s < ns; s++) {
+                    size_t k = l2r_block_index(&m, MLIR_GetOpSuccessor(ctx, t, s));
+                    if (k == (size_t)-1) continue;
+                    size_t pos = m.pred_off[k] + fill[k]++;
+                    m.pred_blk[pos] = bi;
+                    m.pred_slot[pos] = s;
+                }
+            }
+            free(fill);
+        }
+    } else {
+        m.pred_off = (size_t *)calloc(2, sizeof(size_t));
+        hmap_init(&m.entryDef, 8);
     }
 
     // ---- Rewrite: build the remap table and lazily create phi ids ----------
@@ -544,46 +548,49 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     for (size_t ai = 0; ai < na; ai++)
         if (m.promotable[ai]) L2R_ERASE(alloca_op[ai]);
 
-    // ---- Trivial-phi elimination (Braun et al.) to a fixpoint --------------
-    for (size_t pass = 0; pass < m.pcount + 2; pass++) {
-        bool changed = false;
-        for (size_t pid = 0; pid < m.pcount; pid++) {
-            if (m.p_rep[pid] != L2R_MK_PHI(pid)) continue;
-            uintptr_t self = L2R_MK_PHI(pid);
-            uintptr_t same = 0;
-            bool trivial = true;
-            size_t base_off = m.p_op_off[pid];
-            for (size_t o = 0; o < m.p_nops[pid]; o++) {
-                uintptr_t r = l2r_resolve_phi(&m, m.p_op_pool[base_off + o]);
-                if (r == self) continue;
-                if (same == 0) same = r;
-                else if (r != same) { trivial = false; break; }
+    // ---- Trivial-phi elimination + materialisation (skipped if no phis) ----
+    size_t *surv_off = NULL;
+    size_t *surv_pid = NULL;
+    if (m.pcount > 0) {
+        for (size_t pass = 0; pass < m.pcount + 2; pass++) {
+            bool changed = false;
+            for (size_t pid = 0; pid < m.pcount; pid++) {
+                if (m.p_rep[pid] != L2R_MK_PHI(pid)) continue;
+                uintptr_t self = L2R_MK_PHI(pid);
+                uintptr_t same = 0;
+                bool trivial = true;
+                size_t base_off = m.p_op_off[pid];
+                for (size_t o = 0; o < m.p_nops[pid]; o++) {
+                    uintptr_t r = l2r_resolve_phi(&m, m.p_op_pool[base_off + o]);
+                    if (r == self) continue;
+                    if (same == 0) same = r;
+                    else if (r != same) { trivial = false; break; }
+                }
+                if (trivial && same != 0) { m.p_rep[pid] = same; changed = true; }
             }
-            if (trivial && same != 0) { m.p_rep[pid] = same; changed = true; }
+            if (!changed) break;
         }
-        if (!changed) break;
-    }
 
-    // ---- Materialise surviving phis as block arguments (pid order) ---------
-    size_t *surv_off = (size_t *)calloc(nb + 1, sizeof(size_t));
-    for (size_t pid = 0; pid < m.pcount; pid++) {
-        if (l2r_resolve_phi(&m, L2R_MK_PHI(pid)) != L2R_MK_PHI(pid)) continue;
-        MLIR_TypeHandle ty = m.elemty[m.p_alloca[pid]];
-        m.p_handle[pid] =
-            MLIR_AddBlockArgument(ctx, m.blocks[m.p_block[pid]], ty, l2r_unkloc(ctx));
-        surv_off[m.p_block[pid] + 1]++;
-    }
-    for (size_t bi = 0; bi < nb; bi++) surv_off[bi + 1] += surv_off[bi];
-    size_t nsurv = surv_off[nb];
-    size_t *surv_pid = (size_t *)malloc((nsurv ? nsurv : 1) * sizeof(size_t));
-    {
-        size_t *fill = (size_t *)calloc(nb, sizeof(size_t));
+        surv_off = (size_t *)calloc(nb + 1, sizeof(size_t));
         for (size_t pid = 0; pid < m.pcount; pid++) {
             if (l2r_resolve_phi(&m, L2R_MK_PHI(pid)) != L2R_MK_PHI(pid)) continue;
-            size_t bi = m.p_block[pid];
-            surv_pid[surv_off[bi] + fill[bi]++] = pid;
+            MLIR_TypeHandle ty = m.elemty[m.p_alloca[pid]];
+            m.p_handle[pid] =
+                MLIR_AddBlockArgument(ctx, m.blocks[m.p_block[pid]], ty, l2r_unkloc(ctx));
+            surv_off[m.p_block[pid] + 1]++;
         }
-        free(fill);
+        for (size_t bi = 0; bi < nb; bi++) surv_off[bi + 1] += surv_off[bi];
+        size_t nsurv = surv_off[nb];
+        surv_pid = (size_t *)malloc((nsurv ? nsurv : 1) * sizeof(size_t));
+        {
+            size_t *fill = (size_t *)calloc(nb, sizeof(size_t));
+            for (size_t pid = 0; pid < m.pcount; pid++) {
+                if (l2r_resolve_phi(&m, L2R_MK_PHI(pid)) != L2R_MK_PHI(pid)) continue;
+                size_t bi = m.p_block[pid];
+                surv_pid[surv_off[bi] + fill[bi]++] = pid;
+            }
+            free(fill);
+        }
     }
 
     // ---- Final sweep: resolve every regular operand to a concrete value ----
@@ -604,41 +611,43 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     }
 
     // ---- Edge wiring: append each surviving phi's incoming value -----------
-    size_t sobuf_cap = 8;
-    MLIR_ValueHandle *sobuf =
-        (MLIR_ValueHandle *)malloc(sobuf_cap * sizeof(MLIR_ValueHandle));
-    for (size_t k = 0; k < nb; k++) {
-        size_t add = surv_off[k + 1] - surv_off[k];
-        for (size_t e = m.pred_off[k]; e < m.pred_off[k + 1]; e++) {
-            MLIR_OpHandle term = m.terms[m.pred_blk[e]];
-            size_t slot = m.pred_slot[e];
-            size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, term, slot);
-            size_t total = nso + add;
-            if (total == 0) continue;
-            if (total > sobuf_cap) {
-                while (sobuf_cap < total) sobuf_cap <<= 1;
-                sobuf = (MLIR_ValueHandle *)realloc(
-                    sobuf, sobuf_cap * sizeof(MLIR_ValueHandle));
+    MLIR_ValueHandle *sobuf = NULL;
+    if (nb > 1) {
+        size_t sobuf_cap = 8;
+        sobuf = (MLIR_ValueHandle *)malloc(sobuf_cap * sizeof(MLIR_ValueHandle));
+        for (size_t k = 0; k < nb; k++) {
+            size_t add = surv_off ? (surv_off[k + 1] - surv_off[k]) : 0;
+            for (size_t e = m.pred_off[k]; e < m.pred_off[k + 1]; e++) {
+                MLIR_OpHandle term = m.terms[m.pred_blk[e]];
+                size_t slot = m.pred_slot[e];
+                size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, term, slot);
+                size_t total = nso + add;
+                if (total == 0) continue;
+                if (total > sobuf_cap) {
+                    while (sobuf_cap < total) sobuf_cap <<= 1;
+                    sobuf = (MLIR_ValueHandle *)realloc(
+                        sobuf, sobuf_cap * sizeof(MLIR_ValueHandle));
+                }
+                bool changed = (add > 0);
+                for (size_t i = 0; i < nso; i++) {
+                    MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(ctx, term, slot, i);
+                    MLIR_ValueHandle r = l2r_concrete(&m, (uintptr_t)v);
+                    sobuf[i] = r;
+                    if (r != v) changed = true;
+                }
+                size_t eidx = e - m.pred_off[k];
+                for (size_t s = 0; s < add; s++) {
+                    size_t pid = surv_pid[surv_off[k] + s];
+                    sobuf[nso + s] = l2r_concrete(&m, m.p_op_pool[m.p_op_off[pid] + eidx]);
+                }
+                if (changed)
+                    MLIR_SetOpSuccessorOperands(ctx, term, slot, sobuf, total);
             }
-            bool changed = (add > 0);
-            for (size_t i = 0; i < nso; i++) {
-                MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(ctx, term, slot, i);
-                MLIR_ValueHandle r = l2r_concrete(&m, (uintptr_t)v);
-                sobuf[i] = r;
-                if (r != v) changed = true;
-            }
-            size_t eidx = e - m.pred_off[k];
-            for (size_t s = 0; s < add; s++) {
-                size_t pid = surv_pid[surv_off[k] + s];
-                sobuf[nso + s] = l2r_concrete(&m, m.p_op_pool[m.p_op_off[pid] + eidx]);
-            }
-            if (changed)
-                MLIR_SetOpSuccessorOperands(ctx, term, slot, sobuf, total);
         }
     }
 
-    // ---- Erase the now-dead load / store / alloca ops ----------------------
-    for (size_t i = 0; i < erase_n; i++)
+    // ---- Erase the now-dead load / store / alloca ops (reverse order) ------
+    for (size_t i = erase_n; i-- > 0; )
         MLIR_EraseOp(ctx, erase[i]);
 
     #undef L2R_ERASE
@@ -666,7 +675,6 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     free(alloca_op);
     hmap_free(&m.defOut);
     hmap_free(&m.entryDef);
-    hmap_free(&m.bidx);
     hmap_free(&m.aidx);
     hmap_free(&m.remap);
 }
