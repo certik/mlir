@@ -19,6 +19,11 @@ extern "C" {
 // arena) or an empty string on failure.
 string mlir_wasmstack_to_bin(MLIR_Context *ctx, MLIR_OpHandle stk_module);
 
+// Fused wasmssa -> wasm32 relocatable object bytes emitter. Produces
+// bit-identical output to mlir_wasmssa_to_wasmstack + mlir_wasmstack_to_bin
+// without materializing intermediate wasmstack MLIR ops.
+string mlir_wasmssa_to_bin(MLIR_Context *ctx, MLIR_OpHandle ssa_module);
+
 #ifdef __cplusplus
 }
 #endif

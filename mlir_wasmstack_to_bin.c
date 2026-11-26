@@ -289,31 +289,74 @@ static char *strdup_str(string s) {
     r[s.size] = 0;
     return r;
 }
-static int find_func_by_name(EmFunc *funcs, size_t n, string nm) {
-    for (size_t i = 0; i < n; i++) {
-        if (strlen(funcs[i].name) == nm.size &&
-            memcmp(funcs[i].name, nm.str, nm.size) == 0) return (int)i;
+typedef struct {
+    const char **keys;
+    size_t      *klens;
+    int         *vals;
+    size_t       cap;
+} NameMap;
+
+static uint32_t nm_hash(const char *s, size_t len) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint8_t)s[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+static void nm_init(NameMap *m, size_t n) {
+    size_t cap = 16;
+    while (cap < n * 2u + 1u) cap <<= 1;
+    m->keys  = (const char **)calloc(cap, sizeof(const char *));
+    m->klens = (size_t *)calloc(cap, sizeof(size_t));
+    m->vals  = (int *)malloc(cap * sizeof(int));
+    m->cap   = cap;
+}
+static void nm_put(NameMap *m, const char *k, int val) {
+    size_t klen = strlen(k);
+    size_t mask = m->cap - 1;
+    size_t i = nm_hash(k, klen) & mask;
+    while (m->keys[i]) {
+        if (m->klens[i] == klen && memcmp(m->keys[i], k, klen) == 0) return;
+        i = (i + 1) & mask;
+    }
+    m->keys[i] = k;
+    m->klens[i] = klen;
+    m->vals[i] = val;
+}
+static int nm_get(const NameMap *m, string nm) {
+    if (m->cap == 0) return -1;
+    size_t mask = m->cap - 1;
+    size_t i = nm_hash(nm.str, nm.size) & mask;
+    while (m->keys[i]) {
+        if (m->klens[i] == nm.size && memcmp(m->keys[i], nm.str, nm.size) == 0)
+            return m->vals[i];
+        i = (i + 1) & mask;
     }
     return -1;
 }
-static int find_global_by_name(const EmGlobal *gs, size_t n, string nm) {
-    for (size_t i = 0; i < n; i++) {
-        if (strlen(gs[i].name) == nm.size &&
-            memcmp(gs[i].name, nm.str, nm.size) == 0) return (int)i;
-    }
-    return -1;
+static void nm_free(NameMap *m) {
+    free(m->keys); free(m->klens); free(m->vals);
+    m->keys = NULL; m->klens = NULL; m->vals = NULL; m->cap = 0;
+}
+
+static int find_func_by_name(const NameMap *fmap, string nm) {
+    return nm_get(fmap, nm);
+}
+static int find_global_by_name(const NameMap *gmap, string nm) {
+    return nm_get(gmap, nm);
 }
 
 // =============================================================================
 // Per-op encoding. Reads attrs from the MLIR op and writes bytecode.
 // =============================================================================
-static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t sp_sym_idx,
-                      EmFunc *all_funcs, size_t all_funcs_n,
-                      const EmGlobal *globals, size_t n_globals,
-                      uint32_t global_sym_base, SigTab *sigs) {
+static bool encode_op_typed(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op,
+                            MLIR_OpType t, uint8_t valtype,
+                            uint32_t sp_sym_idx,
+                            EmFunc *all_funcs, const NameMap *fmap,
+                            const NameMap *gmap,
+                            uint32_t global_sym_base, SigTab *sigs) {
     Buf *b = &F->body;
-    MLIR_OpType t = MLIR_GetOpType(ctx, op);
-    uint8_t valtype = (uint8_t)at_i(ctx, op, MLIR_KEY_VALTYPE);
 
     switch (t) {
     case OP_TYPE_WASMSTACK_LOCAL_GET:
@@ -453,7 +496,7 @@ static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t s
 
     case OP_TYPE_WASMSTACK_CALL: {
         string tgt = at_s(ctx, op, MLIR_KEY_TARGET);
-        int idx = find_func_by_name(all_funcs, all_funcs_n, tgt);
+        int idx = find_func_by_name(fmap, tgt);
         if (idx < 0) {
             fprintf(stderr, "wasm-emit: call to unknown function '%.*s'\n",
                     (int)tgt.size, tgt.str);
@@ -469,7 +512,7 @@ static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t s
 
     case OP_TYPE_WASMSTACK_ADDRESSOF: {
         string tgt = at_s(ctx, op, MLIR_KEY_TARGET);
-        int idx = find_global_by_name(globals, n_globals, tgt);
+        int idx = find_global_by_name(gmap, tgt);
         if (idx < 0) {
             fprintf(stderr, "wasm-emit: addressof unknown global '%.*s'\n",
                     (int)tgt.size, tgt.str);
@@ -485,7 +528,7 @@ static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t s
 
     case OP_TYPE_WASMSTACK_FUNC_ADDR: {
         string tgt = at_s(ctx, op, MLIR_KEY_TARGET);
-        int idx = find_func_by_name(all_funcs, all_funcs_n, tgt);
+        int idx = find_func_by_name(fmap, tgt);
         if (idx < 0) {
             fprintf(stderr, "wasm-emit: func_addr unknown function '%.*s'\n",
                     (int)tgt.size, tgt.str);
@@ -537,8 +580,8 @@ static bool encode_op(MLIR_Context *ctx, EmFunc *F, MLIR_OpHandle op, uint32_t s
 // Function body builder: locals prelude + ops + 0x0b end.
 // =============================================================================
 static bool build_body(MLIR_Context *ctx, EmFunc *F, uint32_t sp_sym_idx,
-                       EmFunc *all_funcs, size_t all_funcs_n,
-                       const EmGlobal *globals, size_t n_globals,
+                       EmFunc *all_funcs, const NameMap *fmap,
+                       const NameMap *gmap,
                        uint32_t global_sym_base, SigTab *sigs) {
     // Walk MLIR ops within the func op's body region/block.
     if (MLIR_GetOpNumRegions(ctx, F->src_op) < 1) return false;
@@ -552,8 +595,10 @@ static bool build_body(MLIR_Context *ctx, EmFunc *F, uint32_t sp_sym_idx,
     F->body = insns;
     for (size_t i = 0; i < nops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, i);
-        if (!encode_op(ctx, F, op, sp_sym_idx, all_funcs, all_funcs_n,
-                       globals, n_globals, global_sym_base, sigs)) {
+        MLIR_OpType t = MLIR_GetOpType(ctx, op);
+        uint8_t valtype = (uint8_t)at_i(ctx, op, MLIR_KEY_VALTYPE);
+        if (!encode_op_typed(ctx, F, op, t, valtype, sp_sym_idx, all_funcs, fmap,
+                             gmap, global_sym_base, sigs)) {
             buf_free(&F->body);
             F->body = saved;
             return false;
@@ -585,6 +630,382 @@ static bool build_body(MLIR_Context *ctx, EmFunc *F, uint32_t sp_sym_idx,
         }
     }
 
+    buf_append(&F->body, prelude.data, prelude.len);
+    uint32_t shift = (uint32_t)prelude.len;
+    buf_append(&F->body, body_insns.data, body_insns.len);
+    for (size_t i = 0; i < F->n_relocs; i++) {
+        F->relocs[i].body_offset += shift;
+    }
+    buf_free(&prelude);
+    buf_free(&body_insns);
+    return true;
+}
+
+// =============================================================================
+// Fused wasmssa -> bytecode body builder (avoids materializing wasmstack ops).
+// =============================================================================
+typedef struct {
+    MLIR_ValueHandle *keys;
+    uint32_t *vals;
+    size_t n, cap;
+} SsaVMap;
+
+static size_t ssavmap_hash(MLIR_ValueHandle k) {
+    size_t h = (size_t)k;
+    h ^= h >> 15;
+    h *= 2654435761u;
+    h ^= h >> 13;
+    return h;
+}
+static void ssavmap_grow(SsaVMap *m) {
+    size_t ncap = m->cap ? m->cap * 2 : 64;
+    MLIR_ValueHandle *nk = (MLIR_ValueHandle *)calloc(ncap, sizeof(*nk));
+    uint32_t *nv = (uint32_t *)malloc(ncap * sizeof(*nv));
+    size_t mask = ncap - 1;
+    for (size_t i = 0; i < m->cap; i++) {
+        if (m->keys[i] == MLIR_INVALID_HANDLE) continue;
+        size_t j = ssavmap_hash(m->keys[i]) & mask;
+        while (nk[j] != MLIR_INVALID_HANDLE) j = (j + 1) & mask;
+        nk[j] = m->keys[i];
+        nv[j] = m->vals[i];
+    }
+    free(m->keys); free(m->vals);
+    m->keys = nk; m->vals = nv; m->cap = ncap;
+}
+static void ssavmap_set(SsaVMap *m, MLIR_ValueHandle k, uint32_t v) {
+    if ((m->n + 1) * 4 >= m->cap * 3) ssavmap_grow(m);
+    size_t mask = m->cap - 1;
+    size_t i = ssavmap_hash(k) & mask;
+    while (m->keys[i] != MLIR_INVALID_HANDLE) {
+        if (m->keys[i] == k) return;
+        i = (i + 1) & mask;
+    }
+    m->keys[i] = k; m->vals[i] = v; m->n++;
+}
+static int ssavmap_get(const SsaVMap *m, MLIR_ValueHandle k, uint32_t *out) {
+    if (m->cap == 0) return 0;
+    size_t mask = m->cap - 1;
+    size_t i = ssavmap_hash(k) & mask;
+    while (m->keys[i] != MLIR_INVALID_HANDLE) {
+        if (m->keys[i] == k) { *out = m->vals[i]; return 1; }
+        i = (i + 1) & mask;
+    }
+    return 0;
+}
+
+typedef struct {
+    MLIR_OpType op_type;
+    uint32_t   *result_locals;
+    size_t      n_results;
+    uint32_t   *entry_arg_locals;
+    size_t      n_entry_args;
+} SsaFrame;
+
+typedef struct {
+    SsaFrame *data;
+    size_t    n, cap;
+} SsaRStack;
+
+typedef struct {
+    uint8_t *types;
+    size_t   n, cap;
+    size_t   n_params;
+} SsaLocals;
+
+typedef struct {
+    MLIR_Context *ctx;
+    Arena        *arena;
+    EmFunc       *F;
+    uint32_t      sp_sym_idx;
+    EmFunc       *all_funcs;
+    const NameMap *fmap;
+    const NameMap *gmap;
+    uint32_t      global_sym_base;
+    SigTab       *sigs;
+    SsaVMap      *vmap;
+    SsaLocals    *L;
+    SsaRStack    *rs;
+    bool         *need_indirect_table;
+    uint32_t    **addr_taken;
+    size_t       *n_addr_taken;
+} SsaEmitCtx;
+
+static uint32_t ssalocals_add(SsaLocals *L, uint8_t vt) {
+    if (L->n == L->cap) {
+        L->cap = L->cap ? L->cap * 2 : 32;
+        L->types = (uint8_t *)realloc(L->types, L->cap);
+    }
+    L->types[L->n] = vt;
+    return (uint32_t)(L->n_params + L->n++);
+}
+static uint8_t ssa_val_to_vt(MLIR_Context *ctx, MLIR_ValueHandle v) {
+    MLIR_TypeHandle ty = MLIR_GetValueType(ctx, v);
+    MLIR_TypeKind k = MLIR_GetTypeKind(ctx, ty);
+    uint32_t w = MLIR_GetTypeWidth(ctx, ty);
+    if (k == MLIR_TYPE_KIND_FLOAT && w == 32) return WT_F32;
+    if (k == MLIR_TYPE_KIND_FLOAT && w == 64) return WT_F64;
+    if (k == MLIR_TYPE_KIND_INTEGER && w == 64) return WT_I64;
+    return WT_I32;
+}
+static MLIR_OpType ssa_to_stack_op(MLIR_OpType t) {
+    switch (t) {
+    case OP_TYPE_WASMSSA_CONST:         return OP_TYPE_WASMSTACK_CONST;
+    case OP_TYPE_WASMSSA_ADD:           return OP_TYPE_WASMSTACK_ADD;
+    case OP_TYPE_WASMSSA_SUB:           return OP_TYPE_WASMSTACK_SUB;
+    case OP_TYPE_WASMSSA_BINOP:         return OP_TYPE_WASMSTACK_BINOP;
+    case OP_TYPE_WASMSSA_UNOP:          return OP_TYPE_WASMSTACK_UNOP;
+    case OP_TYPE_WASMSSA_LOAD:          return OP_TYPE_WASMSTACK_LOAD;
+    case OP_TYPE_WASMSSA_STORE:         return OP_TYPE_WASMSTACK_STORE;
+    case OP_TYPE_WASMSSA_GLOBAL_GET:    return OP_TYPE_WASMSTACK_GLOBAL_GET;
+    case OP_TYPE_WASMSSA_GLOBAL_SET:    return OP_TYPE_WASMSTACK_GLOBAL_SET;
+    case OP_TYPE_WASMSSA_EXTEND_I32_S:  return OP_TYPE_WASMSTACK_EXTEND_I32_S;
+    case OP_TYPE_WASMSSA_RETURN:        return OP_TYPE_WASMSTACK_RETURN;
+    case OP_TYPE_WASMSSA_CALL:          return OP_TYPE_WASMSTACK_CALL;
+    case OP_TYPE_WASMSSA_BR:            return OP_TYPE_WASMSTACK_BR;
+    case OP_TYPE_WASMSSA_BR_IF:         return OP_TYPE_WASMSTACK_BR_IF;
+    case OP_TYPE_WASMSSA_SELECT:        return OP_TYPE_WASMSTACK_SELECT;
+    case OP_TYPE_WASMSSA_EQZ:           return OP_TYPE_WASMSTACK_EQZ;
+    case OP_TYPE_WASMSSA_ADDRESSOF:     return OP_TYPE_WASMSTACK_ADDRESSOF;
+    case OP_TYPE_WASMSSA_FUNC_ADDR:     return OP_TYPE_WASMSTACK_FUNC_ADDR;
+    case OP_TYPE_WASMSSA_CALL_INDIRECT: return OP_TYPE_WASMSTACK_CALL_INDIRECT;
+    case OP_TYPE_WASMSSA_MEMORY_SIZE:   return OP_TYPE_WASMSTACK_MEMORY_SIZE;
+    case OP_TYPE_WASMSSA_MEMORY_GROW:   return OP_TYPE_WASMSTACK_MEMORY_GROW;
+    default: return (MLIR_OpType)0;
+    }
+}
+
+static bool ssa_emit_block(SsaEmitCtx *E, MLIR_BlockHandle src_blk);
+
+static bool ssa_emit_region_op(SsaEmitCtx *E, MLIR_OpHandle bo, MLIR_OpType t) {
+    MLIR_Context *ctx = E->ctx;
+    Buf *b = &E->F->body;
+    size_t n_results = MLIR_GetOpNumResults(ctx, bo);
+    size_t n_operands = MLIR_GetOpNumOperands(ctx, bo);
+
+    SsaFrame fr = {0};
+    fr.op_type = t;
+    fr.n_results = n_results;
+    if (n_results) {
+        fr.result_locals = (uint32_t *)arena_alloc(E->arena, n_results * sizeof(uint32_t));
+        for (size_t i = 0; i < n_results; i++) {
+            fr.result_locals[i] = ssalocals_add(E->L, ssa_val_to_vt(ctx, MLIR_GetOpResult(ctx, bo, i)));
+        }
+    }
+    if (t == OP_TYPE_WASMSSA_LOOP) {
+        fr.n_entry_args = n_operands;
+        if (n_operands) {
+            fr.entry_arg_locals = (uint32_t *)arena_alloc(E->arena, n_operands * sizeof(uint32_t));
+        }
+        if (MLIR_GetOpNumRegions(ctx, bo) < 1) return false;
+        MLIR_BlockHandle entry = MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, bo, 0), 0);
+        if (MLIR_GetBlockNumArgs(ctx, entry) != n_operands) return false;
+        for (size_t i = 0; i < n_operands; i++) {
+            MLIR_ValueHandle ba = MLIR_GetBlockArg(ctx, entry, i);
+            fr.entry_arg_locals[i] = ssalocals_add(E->L, ssa_val_to_vt(ctx, ba));
+            uint32_t li;
+            if (!ssavmap_get(E->vmap, MLIR_GetOpOperand(ctx, bo, i), &li)) return false;
+            buf_putc(b, 0x20); leb_u(b, li);
+            buf_putc(b, 0x21); leb_u(b, fr.entry_arg_locals[i]);
+            ssavmap_set(E->vmap, ba, fr.entry_arg_locals[i]);
+        }
+    } else if (t == OP_TYPE_WASMSSA_IF) {
+        if (n_operands != 1) return false;
+        uint32_t cli;
+        if (!ssavmap_get(E->vmap, MLIR_GetOpOperand(ctx, bo, 0), &cli)) return false;
+        buf_putc(b, 0x20); leb_u(b, cli);
+    }
+
+    buf_putc(b, (t == OP_TYPE_WASMSSA_BLOCK) ? 0x02 : (t == OP_TYPE_WASMSSA_LOOP) ? 0x03 : 0x04);
+    buf_putc(b, 0x40);
+
+    if (E->rs->n == E->rs->cap) {
+        E->rs->cap = E->rs->cap ? E->rs->cap * 2 : 16;
+        E->rs->data = (SsaFrame *)realloc(E->rs->data, E->rs->cap * sizeof(SsaFrame));
+    }
+    E->rs->data[E->rs->n++] = fr;
+
+    if (t == OP_TYPE_WASMSSA_IF) {
+        if (MLIR_GetOpNumRegions(ctx, bo) < 1) { E->rs->n--; return false; }
+        MLIR_BlockHandle then_blk = MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, bo, 0), 0);
+        if (!ssa_emit_block(E, then_blk)) { E->rs->n--; return false; }
+        bool has_else = MLIR_GetOpNumRegions(ctx, bo) >= 2 &&
+                        MLIR_GetRegionNumBlocks(ctx, MLIR_GetOpRegion(ctx, bo, 1)) > 0;
+        if (has_else) {
+            buf_putc(b, 0x05);
+            MLIR_BlockHandle else_blk = MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, bo, 1), 0);
+            if (!ssa_emit_block(E, else_blk)) { E->rs->n--; return false; }
+        }
+    } else {
+        if (MLIR_GetOpNumRegions(ctx, bo) < 1) { E->rs->n--; return false; }
+        MLIR_BlockHandle inner = MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, bo, 0), 0);
+        if (!ssa_emit_block(E, inner)) { E->rs->n--; return false; }
+    }
+    E->rs->n--;
+
+    buf_putc(b, 0x0b);
+    for (size_t i = 0; i < n_results; i++) {
+        ssavmap_set(E->vmap, MLIR_GetOpResult(ctx, bo, i), fr.result_locals[i]);
+    }
+    return true;
+}
+
+static bool ssa_emit_block(SsaEmitCtx *E, MLIR_BlockHandle src_blk) {
+    MLIR_Context *ctx = E->ctx;
+    Buf *b = &E->F->body;
+    size_t n_body = MLIR_GetBlockNumOps(ctx, src_blk);
+    for (size_t i = 0; i < n_body; i++) {
+        MLIR_OpHandle bo = MLIR_GetBlockOp(ctx, src_blk, i);
+        MLIR_OpType t = MLIR_GetOpType(ctx, bo);
+
+        if (t == OP_TYPE_WASMSSA_BLOCK || t == OP_TYPE_WASMSSA_LOOP || t == OP_TYPE_WASMSSA_IF) {
+            if (!ssa_emit_region_op(E, bo, t)) return false;
+            continue;
+        }
+        if (t == OP_TYPE_WASMSSA_BLOCK_RETURN) {
+            SsaFrame *top = E->rs->n ? &E->rs->data[E->rs->n - 1] : NULL;
+            if (!top) return false;
+            size_t no = MLIR_GetOpNumOperands(ctx, bo);
+            if (no != top->n_results) return false;
+            for (size_t k = 0; k < no; k++) {
+                uint32_t li;
+                if (!ssavmap_get(E->vmap, MLIR_GetOpOperand(ctx, bo, k), &li)) return false;
+                buf_putc(b, 0x20); leb_u(b, li);
+                buf_putc(b, 0x21); leb_u(b, top->result_locals[k]);
+            }
+            continue;
+        }
+        if (t == OP_TYPE_WASMSSA_UNREACHABLE) {
+            buf_putc(b, 0x00);
+            continue;
+        }
+        if (t == OP_TYPE_WASMSSA_BR && MLIR_GetOpNumOperands(ctx, bo) > 0) {
+            uint32_t depth = (uint32_t)at_i(ctx, bo, MLIR_KEY_DEPTH);
+            if (depth >= E->rs->n) return false;
+            SsaFrame *target = &E->rs->data[E->rs->n - 1 - depth];
+            uint32_t *dst_locals = (target->op_type == OP_TYPE_WASMSSA_LOOP)
+                                 ? target->entry_arg_locals : target->result_locals;
+            size_t n_dst = (target->op_type == OP_TYPE_WASMSSA_LOOP)
+                         ? target->n_entry_args : target->n_results;
+            size_t no = MLIR_GetOpNumOperands(ctx, bo);
+            if (no != n_dst) return false;
+            for (size_t k = 0; k < no; k++) {
+                uint32_t li;
+                if (!ssavmap_get(E->vmap, MLIR_GetOpOperand(ctx, bo, k), &li)) return false;
+                buf_putc(b, 0x20); leb_u(b, li);
+                buf_putc(b, 0x21); leb_u(b, dst_locals[k]);
+            }
+            buf_putc(b, 0x0c); leb_u(b, depth);
+            continue;
+        }
+
+        if (t == OP_TYPE_WASMSSA_CALL_INDIRECT) {
+            *E->need_indirect_table = true;
+        } else if (t == OP_TYPE_WASMSSA_FUNC_ADDR) {
+            *E->need_indirect_table = true;
+            string tgt = at_s(ctx, bo, MLIR_KEY_TARGET);
+            int idx = find_func_by_name(E->fmap, tgt);
+            if (idx >= 0) {
+                uint32_t fi = E->all_funcs[idx].func_index;
+                bool dup = false;
+                for (size_t k = 0; k < *E->n_addr_taken; k++)
+                    if ((*E->addr_taken)[k] == fi) { dup = true; break; }
+                if (!dup) {
+                    *E->addr_taken = (uint32_t *)realloc(
+                        *E->addr_taken, (*E->n_addr_taken + 1) * sizeof(uint32_t));
+                    (*E->addr_taken)[(*E->n_addr_taken)++] = fi;
+                }
+            }
+        }
+
+        size_t n_ops = MLIR_GetOpNumOperands(ctx, bo);
+        for (size_t k = 0; k < n_ops; k++) {
+            uint32_t li;
+            if (!ssavmap_get(E->vmap, MLIR_GetOpOperand(ctx, bo, k), &li)) return false;
+            buf_putc(b, 0x20); leb_u(b, li);
+        }
+
+        MLIR_OpType st = ssa_to_stack_op(t);
+        if (!st) return false;
+        uint8_t valtype = (uint8_t)at_i(ctx, bo, MLIR_KEY_VALTYPE);
+        if (!encode_op_typed(ctx, E->F, bo, st, valtype, E->sp_sym_idx,
+                             E->all_funcs, E->fmap, E->gmap,
+                             E->global_sym_base, E->sigs)) {
+            return false;
+        }
+
+        if (MLIR_GetOpNumResults(ctx, bo) > 0) {
+            uint32_t li = ssalocals_add(E->L, valtype);
+            buf_putc(b, 0x21); leb_u(b, li);
+            ssavmap_set(E->vmap, MLIR_GetOpResult(ctx, bo, 0), li);
+        }
+    }
+    return true;
+}
+
+static bool build_body_from_wasmssa(MLIR_Context *ctx, Arena *arena, EmFunc *F,
+                                    size_t n_params, uint32_t sp_sym_idx,
+                                    EmFunc *all_funcs, const NameMap *fmap,
+                                    const NameMap *gmap,
+                                    uint32_t global_sym_base, SigTab *sigs,
+                                    SsaVMap *vmap, SsaRStack *rs, SsaLocals *L,
+                                    bool *need_indirect_table,
+                                    uint32_t **addr_taken, size_t *n_addr_taken) {
+    L->n = 0;
+    L->n_params = n_params;
+    rs->n = 0;
+    if (vmap->cap > 0) {
+        memset(vmap->keys, 0, vmap->cap * sizeof(*vmap->keys));
+        vmap->n = 0;
+    }
+
+    Buf insns = {0};
+    Buf saved = F->body;
+    F->body = insns;
+
+    if (MLIR_GetOpNumRegions(ctx, F->src_op) >= 1) {
+        MLIR_RegionHandle r = MLIR_GetOpRegion(ctx, F->src_op, 0);
+        if (MLIR_GetRegionNumBlocks(ctx, r) >= 1) {
+            MLIR_BlockHandle src_blk = MLIR_GetRegionBlock(ctx, r, 0);
+            size_t n_args = MLIR_GetBlockNumArgs(ctx, src_blk);
+            for (size_t i = 0; i < n_args; i++) {
+                ssavmap_set(vmap, MLIR_GetBlockArg(ctx, src_blk, i), (uint32_t)i);
+            }
+            SsaEmitCtx E = {
+                ctx, arena, F, sp_sym_idx, all_funcs, fmap, gmap,
+                global_sym_base, sigs, vmap, L, rs,
+                need_indirect_table, addr_taken, n_addr_taken
+            };
+            if (!ssa_emit_block(&E, src_blk)) {
+                buf_free(&F->body);
+                F->body = saved;
+                return false;
+            }
+        }
+    }
+    buf_putc(&F->body, 0x0b);
+    Buf body_insns = F->body;
+    F->body = saved;
+
+    Buf prelude = {0};
+    {
+        size_t i = 0, groups = 0;
+        while (i < L->n) {
+            uint8_t t = L->types[i];
+            size_t j = i + 1;
+            while (j < L->n && L->types[j] == t) j++;
+            groups++; i = j;
+        }
+        leb_u(&prelude, groups);
+        i = 0;
+        while (i < L->n) {
+            uint8_t t = L->types[i];
+            size_t j = i + 1;
+            while (j < L->n && L->types[j] == t) j++;
+            leb_u(&prelude, (uint32_t)(j - i));
+            buf_putc(&prelude, t);
+            i = j;
+        }
+    }
     buf_append(&F->body, prelude.data, prelude.len);
     uint32_t shift = (uint32_t)prelude.len;
     buf_append(&F->body, body_insns.data, body_insns.len);
@@ -744,34 +1165,42 @@ static void build_reloc_code_section(EmFunc *funcs, size_t n_funcs,
 }
 
 // =============================================================================
-// Top-level translator. Walks the input wasmstack-MLIR module directly.
+// Top-level translator. Walks either a wasmstack or wasmssa MLIR module.
 // =============================================================================
-string mlir_wasmstack_to_bin(MLIR_Context *ctx,
-                             MLIR_OpHandle stk_module) {
+static string wasm_module_to_bin_impl(MLIR_Context *ctx,
+                                      MLIR_OpHandle mod,
+                                      bool from_ssa) {
     string fail = {0};
-    if (!stk_module) return fail;
+    if (!mod) return fail;
 
-    if (MLIR_GetOpNumRegions(ctx, stk_module) < 1) return fail;
-    MLIR_RegionHandle mr = MLIR_GetOpRegion(ctx, stk_module, 0);
+    if (MLIR_GetOpNumRegions(ctx, mod) < 1) return fail;
+    MLIR_RegionHandle mr = MLIR_GetOpRegion(ctx, mod, 0);
     if (MLIR_GetRegionNumBlocks(ctx, mr) < 1) return fail;
     MLIR_BlockHandle mb = MLIR_GetRegionBlock(ctx, mr, 0);
     size_t n_top = MLIR_GetBlockNumOps(ctx, mb);
+
+    MLIR_OpType ty_imp_func   = from_ssa ? OP_TYPE_WASMSSA_IMPORT_FUNC   : OP_TYPE_WASMSTACK_IMPORT_FUNC;
+    MLIR_OpType ty_func       = from_ssa ? OP_TYPE_WASMSSA_FUNC          : OP_TYPE_WASMSTACK_FUNC;
+    MLIR_OpType ty_imp_global = from_ssa ? OP_TYPE_WASMSSA_IMPORT_GLOBAL : OP_TYPE_WASMSTACK_IMPORT_GLOBAL;
 
     SigTab sigs = {0};
 
     // ---- Materialize EmFuncs: imports first, then defs. -------------------
     EmFunc *funcs = NULL;
     size_t n_funcs = 0;
+    size_t *func_nparams = NULL;
 
     // Pass A: imports.
     for (size_t ti = 0; ti < n_top; ti++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, ti);
-        if (MLIR_GetOpType(ctx, op) != OP_TYPE_WASMSTACK_IMPORT_FUNC) continue;
+        if (MLIR_GetOpType(ctx, op) != ty_imp_func) continue;
         size_t np, nr;
         uint8_t *p = hex_decode(at_s(ctx, op, MLIR_KEY_PARAM_TYPES), &np);
         uint8_t *r = hex_decode(at_s(ctx, op, MLIR_KEY_RESULT_TYPES), &nr);
         funcs = (EmFunc *)realloc(funcs, (n_funcs + 1) * sizeof(EmFunc));
+        func_nparams = (size_t *)realloc(func_nparams, (n_funcs + 1) * sizeof(size_t));
         memset(&funcs[n_funcs], 0, sizeof(EmFunc));
+        func_nparams[n_funcs] = np;
         funcs[n_funcs].name = strdup_str(at_s(ctx, op, MLIR_KEY_SYM_NAME));
         funcs[n_funcs].sig = sig_intern(&sigs, p, np, r, nr);
         funcs[n_funcs].imported = true;
@@ -786,14 +1215,16 @@ string mlir_wasmstack_to_bin(MLIR_Context *ctx,
     // Pass B: defs.
     for (size_t ti = 0; ti < n_top; ti++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, ti);
-        if (MLIR_GetOpType(ctx, op) != OP_TYPE_WASMSTACK_FUNC) continue;
+        if (MLIR_GetOpType(ctx, op) != ty_func) continue;
         size_t np, nr;
         uint8_t *p = hex_decode(at_s(ctx, op, MLIR_KEY_PARAM_TYPES), &np);
         uint8_t *r = hex_decode(at_s(ctx, op, MLIR_KEY_RESULT_TYPES), &nr);
-        size_t nl;
-        uint8_t *ll = hex_decode(at_s(ctx, op, MLIR_KEY_LOCAL_TYPES), &nl);
+        size_t nl = 0;
+        uint8_t *ll = from_ssa ? NULL : hex_decode(at_s(ctx, op, MLIR_KEY_LOCAL_TYPES), &nl);
         funcs = (EmFunc *)realloc(funcs, (n_funcs + 1) * sizeof(EmFunc));
+        func_nparams = (size_t *)realloc(func_nparams, (n_funcs + 1) * sizeof(size_t));
         memset(&funcs[n_funcs], 0, sizeof(EmFunc));
+        func_nparams[n_funcs] = np;
         funcs[n_funcs].name = strdup_str(at_s(ctx, op, MLIR_KEY_SYM_NAME));
         funcs[n_funcs].sig = sig_intern(&sigs, p, np, r, nr);
         funcs[n_funcs].imported = false;
@@ -814,7 +1245,7 @@ string mlir_wasmstack_to_bin(MLIR_Context *ctx,
     size_t n_globals = 0;
     for (size_t ti = 0; ti < n_top; ti++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, ti);
-        if (MLIR_GetOpType(ctx, op) != OP_TYPE_WASMSTACK_IMPORT_GLOBAL) continue;
+        if (MLIR_GetOpType(ctx, op) != ty_imp_global) continue;
         globals = (EmGlobal *)realloc(globals, (n_globals + 1) * sizeof(EmGlobal));
         memset(&globals[n_globals], 0, sizeof(EmGlobal));
         globals[n_globals].name = strdup_str(at_s(ctx, op, MLIR_KEY_SYM_NAME));
@@ -831,48 +1262,76 @@ string mlir_wasmstack_to_bin(MLIR_Context *ctx,
         n_globals++;
     }
 
+    NameMap fmap = {0}, gmap = {0};
+    nm_init(&fmap, n_funcs);
+    for (size_t i = 0; i < n_funcs; i++) nm_put(&fmap, funcs[i].name, (int)i);
+    nm_init(&gmap, n_globals);
+    for (size_t i = 0; i < n_globals; i++) nm_put(&gmap, globals[i].name, (int)i);
+
     uint32_t sp_sym = 0;
     for (size_t i = 0; i < n_funcs; i++) funcs[i].sym_index = (uint32_t)(i + 1);
     uint32_t global_sym_base = 1u + (uint32_t)n_funcs;
 
-    // ---- Detect address-taken funcs and indirect-call sites ----------------
+    // ---- Detect address-taken funcs and emit defined function bodies -------
     bool need_indirect_table = false;
     uint32_t *addr_taken = NULL;
     size_t n_addr_taken = 0;
-    for (size_t i = 0; i < n_funcs; i++) {
-        if (funcs[i].imported) continue;
-        MLIR_RegionHandle rg = MLIR_GetOpRegion(ctx, funcs[i].src_op, 0);
-        MLIR_BlockHandle  bl = MLIR_GetRegionBlock(ctx, rg, 0);
-        size_t nb = MLIR_GetBlockNumOps(ctx, bl);
-        for (size_t j = 0; j < nb; j++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bl, j);
-            MLIR_OpType t = MLIR_GetOpType(ctx, op);
-            if (t == OP_TYPE_WASMSTACK_CALL_INDIRECT) {
-                need_indirect_table = true;
-            } else if (t == OP_TYPE_WASMSTACK_FUNC_ADDR) {
-                need_indirect_table = true;
-                string tgt = at_s(ctx, op, MLIR_KEY_TARGET);
-                int idx = find_func_by_name(funcs, n_funcs, tgt);
-                if (idx < 0) continue;
-                bool dup = false;
-                for (size_t k = 0; k < n_addr_taken; k++)
-                    if (addr_taken[k] == funcs[idx].func_index) { dup = true; break; }
-                if (!dup) {
-                    addr_taken = (uint32_t *)realloc(
-                        addr_taken, (n_addr_taken + 1) * sizeof(uint32_t));
-                    addr_taken[n_addr_taken++] = funcs[idx].func_index;
+    if (!from_ssa) {
+        for (size_t i = 0; i < n_funcs; i++) {
+            if (funcs[i].imported) continue;
+            MLIR_RegionHandle rg = MLIR_GetOpRegion(ctx, funcs[i].src_op, 0);
+            MLIR_BlockHandle  bl = MLIR_GetRegionBlock(ctx, rg, 0);
+            size_t nb = MLIR_GetBlockNumOps(ctx, bl);
+            for (size_t j = 0; j < nb; j++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bl, j);
+                MLIR_OpType t = MLIR_GetOpType(ctx, op);
+                if (t == OP_TYPE_WASMSTACK_CALL_INDIRECT) {
+                    need_indirect_table = true;
+                } else if (t == OP_TYPE_WASMSTACK_FUNC_ADDR) {
+                    need_indirect_table = true;
+                    string tgt = at_s(ctx, op, MLIR_KEY_TARGET);
+                    int idx = find_func_by_name(&fmap, tgt);
+                    if (idx < 0) continue;
+                    bool dup = false;
+                    for (size_t k = 0; k < n_addr_taken; k++)
+                        if (addr_taken[k] == funcs[idx].func_index) { dup = true; break; }
+                    if (!dup) {
+                        addr_taken = (uint32_t *)realloc(
+                            addr_taken, (n_addr_taken + 1) * sizeof(uint32_t));
+                        addr_taken[n_addr_taken++] = funcs[idx].func_index;
+                    }
                 }
             }
         }
-    }
-
-    // ---- Emit each defined function's body ---------------------------------
-    for (size_t i = 0; i < n_funcs; i++) {
-        if (funcs[i].imported) continue;
-        if (!build_body(ctx, &funcs[i], sp_sym, funcs, n_funcs,
-                        globals, n_globals, global_sym_base, &sigs)) {
-            goto fail_after_funcs;
+        for (size_t i = 0; i < n_funcs; i++) {
+            if (funcs[i].imported) continue;
+            if (!build_body(ctx, &funcs[i], sp_sym, funcs, &fmap,
+                            &gmap, global_sym_base, &sigs)) {
+                goto fail_after_funcs;
+            }
         }
+    } else {
+        Arena *arena = MLIR_GetArenaAllocator(ctx);
+        SsaVMap vmap = {0};
+        SsaRStack rs = {0};
+        SsaLocals L = {0};
+        bool ok = true;
+        for (size_t i = 0; i < n_funcs; i++) {
+            if (funcs[i].imported) continue;
+            if (!build_body_from_wasmssa(ctx, arena, &funcs[i], func_nparams[i],
+                                         sp_sym, funcs, &fmap, &gmap,
+                                         global_sym_base, &sigs,
+                                         &vmap, &rs, &L,
+                                         &need_indirect_table,
+                                         &addr_taken, &n_addr_taken)) {
+                ok = false;
+                break;
+            }
+        }
+        free(vmap.keys); free(vmap.vals);
+        free(rs.data);
+        free(L.types);
+        if (!ok) goto fail_after_funcs;
     }
 
     // ---- Build sections -----------------------------------------------------
@@ -1062,7 +1521,10 @@ string mlir_wasmstack_to_bin(MLIR_Context *ctx,
         free(funcs[i].relocs);
     }
     free(funcs);
+    free(func_nparams);
     free(addr_taken);
+    nm_free(&fmap);
+    nm_free(&gmap);
     for (size_t i = 0; i < n_globals; i++) {
         free(globals[i].name);
         free(globals[i].data);
@@ -1081,7 +1543,10 @@ fail_after_funcs:
         free(funcs[i].relocs);
     }
     free(funcs);
+    free(func_nparams);
     free(addr_taken);
+    nm_free(&fmap);
+    nm_free(&gmap);
     for (size_t i = 0; i < n_globals; i++) {
         free(globals[i].name);
         free(globals[i].data);
@@ -1091,4 +1556,12 @@ fail_after_funcs:
     free(globals);
     sigtab_free(&sigs);
     return fail;
+}
+
+string mlir_wasmstack_to_bin(MLIR_Context *ctx, MLIR_OpHandle stk_module) {
+    return wasm_module_to_bin_impl(ctx, stk_module, false);
+}
+
+string mlir_wasmssa_to_bin(MLIR_Context *ctx, MLIR_OpHandle ssa_module) {
+    return wasm_module_to_bin_impl(ctx, ssa_module, true);
 }

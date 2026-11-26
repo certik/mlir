@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <base/io.h>
 #include <base/string.h>
@@ -14,45 +15,73 @@ static bool is_digit(char c) { return c >= '0' && c <= '9'; }
 static bool is_alnum(char c) { return is_alpha(c) || is_digit(c); }
 
 static TcTokKind keyword_or_ident(string s) {
-    if (str_eq(s, str_lit("int")))      return TC_TK_KW_INT;
-    if (str_eq(s, str_lit("float")))    return TC_TK_KW_FLOAT;
-    if (str_eq(s, str_lit("double")))   return TC_TK_KW_DOUBLE;
-    if (str_eq(s, str_lit("return")))   return TC_TK_KW_RETURN;
-    if (str_eq(s, str_lit("if")))       return TC_TK_KW_IF;
-    if (str_eq(s, str_lit("else")))     return TC_TK_KW_ELSE;
-    if (str_eq(s, str_lit("while")))    return TC_TK_KW_WHILE;
-    if (str_eq(s, str_lit("do")))       return TC_TK_KW_DO;
-    if (str_eq(s, str_lit("for")))      return TC_TK_KW_FOR;
-    if (str_eq(s, str_lit("break")))    return TC_TK_KW_BREAK;
-    if (str_eq(s, str_lit("continue"))) return TC_TK_KW_CONTINUE;
-    if (str_eq(s, str_lit("struct")))   return TC_TK_KW_STRUCT;
-    if (str_eq(s, str_lit("union")))    return TC_TK_KW_UNION;
-    if (str_eq(s, str_lit("null")))     return TC_TK_KW_NULL;
-    if (str_eq(s, str_lit("sizeof")))   return TC_TK_KW_SIZEOF;
-    if (str_eq(s, str_lit("_Alignof"))) return TC_TK_KW_ALIGNOF;
-    if (str_eq(s, str_lit("char")))     return TC_TK_KW_CHAR;
-    if (str_eq(s, str_lit("typedef")))  return TC_TK_KW_TYPEDEF;
-    if (str_eq(s, str_lit("extern")))   return TC_TK_KW_EXTERN;
-    if (str_eq(s, str_lit("switch")))   return TC_TK_KW_SWITCH;
-    if (str_eq(s, str_lit("case")))     return TC_TK_KW_CASE;
-    if (str_eq(s, str_lit("default")))  return TC_TK_KW_DEFAULT;
-    if (str_eq(s, str_lit("enum")))     return TC_TK_KW_ENUM;
-    if (str_eq(s, str_lit("const")))    return TC_TK_KW_CONST;
-    if (str_eq(s, str_lit("void")))     return TC_TK_KW_VOID;
-    if (str_eq(s, str_lit("static")))   return TC_TK_KW_STATIC;
-    if (str_eq(s, str_lit("inline")))   return TC_TK_KW_INLINE;
-    if (str_eq(s, str_lit("long")))     return TC_TK_KW_LONG;
-    if (str_eq(s, str_lit("signed")))   return TC_TK_KW_SIGNED;
-    if (str_eq(s, str_lit("unsigned"))) return TC_TK_KW_UNSIGNED;
-    if (str_eq(s, str_lit("short")))    return TC_TK_KW_SHORT;
-    if (str_eq(s, str_lit("_Bool")))    return TC_TK_KW_BOOL;
-    if (str_eq(s, str_lit("bool")))     return TC_TK_KW_BOOL;
-    if (str_eq(s, str_lit("_Generic")))    return TC_TK_KW_GENERIC;
-    if (str_eq(s, str_lit("va_list"))) return TC_TK_KW_VA_LIST;
-    if (str_eq(s, str_lit("__builtin_va_list"))) return TC_TK_KW_VA_LIST;
-    if (str_eq(s, str_lit("goto")))     return TC_TK_KW_GOTO;
-    if (str_eq(s, str_lit("__attribute__"))) return TC_TK_KW_ATTRIBUTE;
-    return TC_TK_IDENT;
+    const char *p = s.str;
+    switch (s.size) {
+    case 2:
+        if (p[0] == 'i' && p[1] == 'f') return TC_TK_KW_IF;
+        if (p[0] == 'd' && p[1] == 'o') return TC_TK_KW_DO;
+        return TC_TK_IDENT;
+    case 3:
+        if (p[0] == 'i' && p[1] == 'n' && p[2] == 't') return TC_TK_KW_INT;
+        if (p[0] == 'f' && p[1] == 'o' && p[2] == 'r') return TC_TK_KW_FOR;
+        return TC_TK_IDENT;
+    case 4:
+        switch (p[0]) {
+        case 'e': if (memcmp(p, "else", 4) == 0) return TC_TK_KW_ELSE;
+                  if (memcmp(p, "enum", 4) == 0) return TC_TK_KW_ENUM; break;
+        case 'c': if (memcmp(p, "char", 4) == 0) return TC_TK_KW_CHAR;
+                  if (memcmp(p, "case", 4) == 0) return TC_TK_KW_CASE; break;
+        case 'v': if (memcmp(p, "void", 4) == 0) return TC_TK_KW_VOID; break;
+        case 'l': if (memcmp(p, "long", 4) == 0) return TC_TK_KW_LONG; break;
+        case 'b': if (memcmp(p, "bool", 4) == 0) return TC_TK_KW_BOOL; break;
+        case 'g': if (memcmp(p, "goto", 4) == 0) return TC_TK_KW_GOTO; break;
+        case 'n': if (memcmp(p, "null", 4) == 0) return TC_TK_KW_NULL; break;
+        }
+        return TC_TK_IDENT;
+    case 5:
+        switch (p[0]) {
+        case 'c': if (memcmp(p, "const", 5) == 0) return TC_TK_KW_CONST; break;
+        case 'w': if (memcmp(p, "while", 5) == 0) return TC_TK_KW_WHILE; break;
+        case 'b': if (memcmp(p, "break", 5) == 0) return TC_TK_KW_BREAK; break;
+        case 's': if (memcmp(p, "short", 5) == 0) return TC_TK_KW_SHORT; break;
+        case 'f': if (memcmp(p, "float", 5) == 0) return TC_TK_KW_FLOAT; break;
+        case 'u': if (memcmp(p, "union", 5) == 0) return TC_TK_KW_UNION; break;
+        case '_': if (memcmp(p, "_Bool", 5) == 0) return TC_TK_KW_BOOL; break;
+        }
+        return TC_TK_IDENT;
+    case 6:
+        switch (p[0]) {
+        case 'r': if (memcmp(p, "return", 6) == 0) return TC_TK_KW_RETURN; break;
+        case 's': if (memcmp(p, "struct", 6) == 0) return TC_TK_KW_STRUCT;
+                  if (memcmp(p, "static", 6) == 0) return TC_TK_KW_STATIC;
+                  if (memcmp(p, "sizeof", 6) == 0) return TC_TK_KW_SIZEOF;
+                  if (memcmp(p, "switch", 6) == 0) return TC_TK_KW_SWITCH;
+                  if (memcmp(p, "signed", 6) == 0) return TC_TK_KW_SIGNED; break;
+        case 'd': if (memcmp(p, "double", 6) == 0) return TC_TK_KW_DOUBLE; break;
+        case 'e': if (memcmp(p, "extern", 6) == 0) return TC_TK_KW_EXTERN; break;
+        case 'i': if (memcmp(p, "inline", 6) == 0) return TC_TK_KW_INLINE; break;
+        }
+        return TC_TK_IDENT;
+    case 7:
+        if (p[0] == 't' && memcmp(p, "typedef", 7) == 0) return TC_TK_KW_TYPEDEF;
+        if (p[0] == 'd' && memcmp(p, "default", 7) == 0) return TC_TK_KW_DEFAULT;
+        if (p[0] == 'v' && memcmp(p, "va_list", 7) == 0) return TC_TK_KW_VA_LIST;
+        return TC_TK_IDENT;
+    case 8:
+        if (p[0] == 'c' && memcmp(p, "continue", 8) == 0) return TC_TK_KW_CONTINUE;
+        if (p[0] == 'u' && memcmp(p, "unsigned", 8) == 0) return TC_TK_KW_UNSIGNED;
+        if (p[0] == '_' && memcmp(p, "_Alignof", 8) == 0) return TC_TK_KW_ALIGNOF;
+        if (p[0] == '_' && memcmp(p, "_Generic", 8) == 0) return TC_TK_KW_GENERIC;
+        return TC_TK_IDENT;
+    case 13:
+        if (p[0] == '_' && memcmp(p, "__attribute__", 13) == 0) return TC_TK_KW_ATTRIBUTE;
+        return TC_TK_IDENT;
+    case 17:
+        if (p[0] == '_' && memcmp(p, "__builtin_va_list", 17) == 0) return TC_TK_KW_VA_LIST;
+        return TC_TK_IDENT;
+    default:
+        return TC_TK_IDENT;
+    }
 }
 
 // Give an integer-literal token its C type (C11 6.4.4.1): the first type
@@ -128,10 +157,15 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
             // Otherwise: stray '#'. Fall through to error.
         }
         if (c == '"') {
-            // String literal. Decode escapes into an arena buffer; append a
-            // trailing NUL so callers can pass the bytes to printf/fputs.
+            // String literal. Scan raw length first so we allocate only the
+            // string's size (not the entire remaining file).
+            size_t end = i + 1;
+            while (end < src.size && src.str[end] != '"') {
+                if (src.str[end] == '\\' && end + 1 < src.size) end += 2;
+                else end++;
+            }
             size_t j = i + 1;
-            char *buf = arena_new_array(arena, char, src.size - i + 1);
+            char *buf = arena_new_array(arena, char, (end - j) + 1);
             size_t n = 0;
             while (j < src.size && src.str[j] != '"') {
                 char ch = src.str[j++];

@@ -2413,6 +2413,14 @@ extern "C" void MLIR_MoveBlockToRegionEnd(MLIR_Context *cctx, MLIR_BlockHandle b
     }
 }
 
+extern "C" void MLIR_MoveBlocksToRegionEnd(MLIR_Context *cctx,
+                                           const MLIR_BlockHandle *blks,
+                                           size_t n_blocks,
+                                           MLIR_RegionHandle dest_h) {
+    for (size_t i = 0; i < n_blocks; ++i)
+        MLIR_MoveBlockToRegionEnd(cctx, blks[i], dest_h);
+}
+
 extern "C" void MLIR_SetOpOperand(MLIR_Context *cctx, MLIR_OpHandle op_h,
                                   size_t idx, MLIR_ValueHandle v_h) {
     (void)cctx;

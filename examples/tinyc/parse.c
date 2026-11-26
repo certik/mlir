@@ -28,8 +28,8 @@ typedef struct {
     TcTok *toks;
     size_t n;
     size_t i;
-    Typedef *typedefs;
-    Enumerator *enums;
+    Typedef *td_buckets[256];
+    Enumerator *en_buckets[512];
     int err_count;
     struct Program *prog;
     // When true, `long` / `size_t` / `intptr_t` / `uintptr_t` /
@@ -47,15 +47,38 @@ typedef struct {
 static TcTok cur(P *p) { return p->toks[p->i]; }
 static TcTok peek(P *p, size_t k) { return p->toks[p->i + k < p->n ? p->i + k : p->n - 1]; }
 
+static uint32_t parse_str_hash(string s) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < s.size; i++) {
+        h ^= (uint8_t)s.str[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void typedef_insert(P *p, Typedef *td) {
+    uint32_t b = parse_str_hash(td->name) & 255u;
+    td->next = p->td_buckets[b];
+    p->td_buckets[b] = td;
+}
+
 static Typedef *typedef_lookup(P *p, string name) {
-    for (Typedef *t = p->typedefs; t; t = t->next) {
+    uint32_t b = parse_str_hash(name) & 255u;
+    for (Typedef *t = p->td_buckets[b]; t; t = t->next) {
         if (str_eq(t->name, name)) return t;
     }
     return NULL;
 }
 
+static void enum_insert(P *p, Enumerator *e) {
+    uint32_t b = parse_str_hash(e->name) & 511u;
+    e->next = p->en_buckets[b];
+    p->en_buckets[b] = e;
+}
+
 static Enumerator *enum_lookup(P *p, string name) {
-    for (Enumerator *e = p->enums; e; e = e->next) {
+    uint32_t b = parse_str_hash(name) & 511u;
+    for (Enumerator *e = p->en_buckets[b]; e; e = e->next) {
         if (str_eq(e->name, name)) return e;
     }
     return NULL;
@@ -133,7 +156,9 @@ static Expr *new_expr(P *p, ExprKind k, int line) {
     *e = (Expr){0};
     e->kind = k;
     e->line = line;
-    VecExprPtr_reserve(p->arena, &e->args, 4);
+    if (k == EX_CALL || k == EX_COMPOUND || k == EX_GENERIC) {
+        VecExprPtr_reserve(p->arena, &e->args, 4);
+    }
     return e;
 }
 static Stmt *new_stmt(P *p, StmtKind k, int line) {
@@ -141,12 +166,17 @@ static Stmt *new_stmt(P *p, StmtKind k, int line) {
     *s = (Stmt){0};
     s->kind = k;
     s->line = line;
-    VecStmtPtr_reserve(p->arena, &s->then_body, 4);
-    VecStmtPtr_reserve(p->arena, &s->else_body, 4);
-    VecStmtPtr_reserve(p->arena, &s->while_body, 4);
-    VecStmtPtr_reserve(p->arena, &s->for_body, 4);
-    VecExprPtr_reserve(p->arena, &s->for_steps, 2);
-    VecStmtPtr_reserve(p->arena, &s->block_body, 4);
+    if (k == ST_IF) {
+        VecStmtPtr_reserve(p->arena, &s->then_body, 4);
+        VecStmtPtr_reserve(p->arena, &s->else_body, 4);
+    } else if (k == ST_WHILE || k == ST_DO_WHILE) {
+        VecStmtPtr_reserve(p->arena, &s->while_body, 4);
+    } else if (k == ST_FOR) {
+        VecStmtPtr_reserve(p->arena, &s->for_body, 4);
+        VecExprPtr_reserve(p->arena, &s->for_steps, 2);
+    } else if (k == ST_BLOCK || k == ST_SWITCH) {
+        VecStmtPtr_reserve(p->arena, &s->block_body, 4);
+    }
     return s;
 }
 
@@ -2644,8 +2674,7 @@ static void parse_enum_body(P *p) {
         Enumerator *e = arena_new(p->arena, Enumerator);
         e->name = nm.text;
         e->value = value;
-        e->next = p->enums;
-        p->enums = e;
+        enum_insert(p, e);
         next_value = (int64_t)((uint64_t)value + 1);
         if (!accept(p, TC_TK_COMMA)) break;
     }
@@ -2743,8 +2772,7 @@ static void parse_typedef_decl(P *p) {
             Typedef *td = arena_new(arena, Typedef);
             td->name = nm.text;
             td->ty = ty;
-            td->next = p->typedefs;
-            p->typedefs = td;
+            typedef_insert(p, td);
         }
         expect(p, TC_TK_SEMI, str_lit("expected ';' after typedef"));
         return;
@@ -2789,8 +2817,7 @@ static void parse_typedef_decl(P *p) {
                 Typedef *td = arena_new(arena, Typedef);
                 td->name = alias;
                 td->ty = ty;
-                td->next = p->typedefs;
-                p->typedefs = td;
+                typedef_insert(p, td);
             }
             expect(p, TC_TK_SEMI, str_lit("expected ';' after typedef"));
             return;
@@ -2832,8 +2859,7 @@ static void parse_typedef_decl(P *p) {
         Typedef *td = arena_new(arena, Typedef);
         td->name = fnp_name;
         td->ty = ty;
-        td->next = p->typedefs;
-        p->typedefs = td;
+        typedef_insert(p, td);
         return;
     }
     TcTok nm = cur(p);
@@ -2854,15 +2880,14 @@ static void parse_typedef_decl(P *p) {
     Typedef *td = arena_new(arena, Typedef);
     td->name = nm.text;
     td->ty = ty;
-    td->next = p->typedefs;
-    p->typedefs = td;
+    typedef_insert(p, td);
 }
 
 int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_wasm32) {
     prog->target_wasm32 = target_wasm32;
-    P p = {.arena = arena, .toks = toks.data, .n = toks.size, .i = 0,
-           .typedefs = NULL, .enums = NULL, .prog = prog,
-           .target_wasm32 = target_wasm32};
+    P p = {0};
+    p.arena = arena; p.toks = toks.data; p.n = toks.size; p.i = 0;
+    p.prog = prog; p.target_wasm32 = target_wasm32;
     // Built-in typedefs. `int64_t` / `uint64_t` are always 64-bit;
     // `size_t` / `ssize_t` / `intptr_t` / `uintptr_t` / `ptrdiff_t`
     // are pointer-sized in C, which means 32-bit on wasm32 and
@@ -2888,8 +2913,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
             // also on wasm32, where the storage is i32.
             td->ty.int_bits = 64;
             td->ty.int_unsigned = unsigneds[k];
-            td->next = p.typedefs;
-            p.typedefs = td;
+            typedef_insert(&p, td);
         }
         // int32_t / uint32_t — match TY_I32 to keep existing semantics.
         const char *n32[] = {"int32_t", "uint32_t"};
@@ -2902,8 +2926,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
             td->ty.kind = TY_I32;
             td->ty.int_bits = 32;
             td->ty.int_unsigned = u32[k];
-            td->next = p.typedefs;
-            p.typedefs = td;
+            typedef_insert(&p, td);
         }
         // int8_t / int16_t / uint8_t / uint16_t — narrow ints. Bucketed
         // to TY_I32 storage but tagged with int_bits for `_Generic`.
@@ -2918,8 +2941,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
             td->ty.kind = TY_I32;
             td->ty.int_bits = nbits[k];
             td->ty.int_unsigned = nuns[k];
-            td->next = p.typedefs;
-            p.typedefs = td;
+            typedef_insert(&p, td);
         }
     }
     if (prog->funcs.max == 0) {
@@ -3375,12 +3397,14 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
     }
     // Publish the parser's enumerator list to the Program for emit-time
     // resolution (lookup falls back to it after locals/globals/functions).
-    for (Enumerator *en = p.enums; en; en = en->next) {
-        ProgramEnum *pe = arena_new(arena, ProgramEnum);
-        pe->name = en->name;
-        pe->value = en->value;
-        pe->next = prog->enums;
-        prog->enums = pe;
+    for (size_t bi = 0; bi < 512; bi++) {
+        for (Enumerator *en = p.en_buckets[bi]; en; en = en->next) {
+            ProgramEnum *pe = arena_new(arena, ProgramEnum);
+            pe->name = en->name;
+            pe->value = en->value;
+            pe->next = prog->enums;
+            prog->enums = pe;
+        }
     }
     return p.err_count;
 }

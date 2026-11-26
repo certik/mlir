@@ -23,7 +23,5 @@ string MLIR_TranslateModuleToWasm(MLIR_Context *ctx, MLIR_OpHandle module) {
     string fail = {0};
     MLIR_OpHandle ssa = mlir_llvm_to_wasmssa(ctx, module);
     if (ssa == MLIR_INVALID_HANDLE) return fail;
-    MLIR_OpHandle stk = mlir_wasmssa_to_wasmstack(ctx, ssa);
-    if (stk == MLIR_INVALID_HANDLE) return fail;
-    return mlir_wasmstack_to_bin(ctx, stk);
+    return mlir_wasmssa_to_bin(ctx, ssa);
 }
