@@ -798,6 +798,12 @@ void MLIR_MoveOpToBlockEnd(MLIR_Context *ctx, MLIR_OpHandle op,
 void MLIR_MoveBlockToRegionEnd(MLIR_Context *ctx, MLIR_BlockHandle block,
                                MLIR_RegionHandle dest);
 
+// Batch form of MLIR_MoveBlockToRegionEnd: moves `n_blocks` blocks in order
+// to the end of `dest` in O(N_src + n_blocks) time.
+void MLIR_MoveBlocksToRegionEnd(MLIR_Context *ctx,
+                                const MLIR_BlockHandle *blocks,
+                                size_t n_blocks, MLIR_RegionHandle dest);
+
 // Replace operand `idx` of `op` with `value`. The previous operand
 // reference is dropped (use lists are updated transparently by the
 // upstream backend; the native backend simply overwrites the slot).

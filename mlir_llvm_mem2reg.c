@@ -25,6 +25,8 @@ typedef struct {
     uintptr_t *vals;
     size_t cap;   // power of two
     size_t n;
+    uintptr_t min_key;
+    uintptr_t max_key;
 } HMap;
 
 static void hmap_init(HMap *m, size_t hint) {
@@ -34,6 +36,8 @@ static void hmap_init(HMap *m, size_t hint) {
     m->vals = (uintptr_t *)calloc(cap, sizeof(uintptr_t));
     m->cap = cap;
     m->n = 0;
+    m->min_key = (uintptr_t)-1;
+    m->max_key = 0;
 }
 
 static void hmap_free(HMap *m) {
@@ -43,6 +47,8 @@ static void hmap_free(HMap *m) {
     m->vals = NULL;
     m->cap = 0;
     m->n = 0;
+    m->min_key = (uintptr_t)-1;
+    m->max_key = 0;
 }
 
 static size_t hmap_slot(uintptr_t *keys, size_t cap, uintptr_t key) {
@@ -82,12 +88,14 @@ static void hmap_put(HMap *m, uintptr_t key, uintptr_t val) {
     if (m->keys[i] == 0) {
         m->keys[i] = key;
         m->n++;
+        if (key < m->min_key) m->min_key = key;
+        if (key > m->max_key) m->max_key = key;
     }
     m->vals[i] = val;
 }
 
 static bool hmap_get(HMap *m, uintptr_t key, uintptr_t *out) {
-    if (m->cap == 0) return false;
+    if (m->n == 0 || key < m->min_key || key > m->max_key) return false;
     size_t i = hmap_slot(m->keys, m->cap, key);
     if (m->keys[i] == 0) return false;
     *out = m->vals[i];
@@ -122,10 +130,12 @@ typedef struct {
     size_t pcount, pcap;
     size_t *p_block;            // block index of each phi
     size_t *p_alloca;           // candidate-alloca index of each phi
-    uintptr_t **p_ops;          // p_ops[pid][k] = vref from k-th pred
+    size_t *p_op_off;           // offset into p_op_pool for each phi
     size_t *p_nops;             // number of operands == preds of p_block
     uintptr_t *p_rep;           // representative vref (self phi-ref if surviving)
     MLIR_ValueHandle *p_handle; // materialised block-arg handle (0 until done)
+    uintptr_t *p_op_pool;       // flat operand pool for all phis
+    size_t p_pool_n, p_pool_cap;
     HMap defOut;                // (bi*na+ai+1) -> last value stored in block
     HMap entryDef;              // (bi*na+ai+1) -> memoised reaching vref at entry
     HMap bidx;                  // block handle -> block index
@@ -231,18 +241,26 @@ static size_t l2r_new_phi(M *m, size_t bi, size_t ai, size_t np) {
         size_t nc = m->pcap ? m->pcap * 2 : 1024;
         m->p_block  = (size_t *)realloc(m->p_block, nc * sizeof(size_t));
         m->p_alloca = (size_t *)realloc(m->p_alloca, nc * sizeof(size_t));
-        m->p_ops    = (uintptr_t **)realloc(m->p_ops, nc * sizeof(uintptr_t *));
+        m->p_op_off = (size_t *)realloc(m->p_op_off, nc * sizeof(size_t));
         m->p_nops   = (size_t *)realloc(m->p_nops, nc * sizeof(size_t));
         m->p_rep    = (uintptr_t *)realloc(m->p_rep, nc * sizeof(uintptr_t));
         m->p_handle = (MLIR_ValueHandle *)realloc(m->p_handle,
                                                   nc * sizeof(MLIR_ValueHandle));
         m->pcap = nc;
     }
+    size_t need = np ? np : 1;
+    if (m->p_pool_n + need > m->p_pool_cap) {
+        size_t ncap = m->p_pool_cap ? m->p_pool_cap * 2 : 2048;
+        while (ncap < m->p_pool_n + need) ncap *= 2;
+        m->p_op_pool = (uintptr_t *)realloc(m->p_op_pool, ncap * sizeof(uintptr_t));
+        m->p_pool_cap = ncap;
+    }
     size_t pid = m->pcount++;
     m->p_block[pid]  = bi;
     m->p_alloca[pid] = ai;
     m->p_nops[pid]   = np;
-    m->p_ops[pid]    = (uintptr_t *)malloc((np ? np : 1) * sizeof(uintptr_t));
+    m->p_op_off[pid] = m->p_pool_n;
+    m->p_pool_n += need;
     m->p_rep[pid]    = L2R_MK_PHI(pid);  // assume surviving until proven trivial
     m->p_handle[pid] = 0;
     return pid;
@@ -273,8 +291,11 @@ static uintptr_t l2r_live_in(M *m, size_t ai, size_t bi) {
     size_t pid = l2r_new_phi(m, bi, ai, np);
     uintptr_t ref = L2R_MK_PHI(pid);
     hmap_put(&m->entryDef, key, ref);
-    for (size_t e2 = po; e2 < pe; e2++)
-        m->p_ops[pid][e2 - po] = l2r_live_out(m, ai, m->pred_blk[e2]);
+    size_t base_off = m->p_op_off[pid];
+    for (size_t e2 = po; e2 < pe; e2++) {
+        uintptr_t v = l2r_live_out(m, ai, m->pred_blk[e2]);
+        m->p_op_pool[base_off + (e2 - po)] = v;
+    }
     return ref;
 }
 
@@ -395,10 +416,33 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
 
     // ---- Escape / type-mismatch analysis -----------------------------------
     // An alloca pointer is promotable iff every use is a top-level llvm.load
-    // (op 0) / llvm.store (op 1) of matching element type. Recurses into
-    // nested scf/structured regions to disqualify allocas used there.
-    for (size_t bi = 0; bi < nb; bi++)
-        l2r_mark_escapes_block(&m, m.blocks[bi], false);
+    // (op 0) / llvm.store (op 1) of matching element type. When def-use
+    // tracking is active, walk each alloca's use list in O(uses) instead of
+    // scanning every op in the function.
+    bool tracked = MLIR_HasContextDefUseTracking(ctx);
+    if (tracked) {
+        for (size_t ai = 0; ai < na; ai++) {
+            for (MLIR_UseHandle u = MLIR_GetValueFirstUse(ctx, alloca_res[ai]);
+                 u != MLIR_INVALID_HANDLE; u = MLIR_GetUseNext(ctx, u)) {
+                MLIR_OpHandle op = MLIR_GetUseOwner(ctx, u);
+                size_t k = MLIR_GetUseOperandIndex(ctx, u);
+                MLIR_BlockHandle ob = MLIR_GetOpParentBlock(ctx, op);
+                bool nested = (ob == MLIR_INVALID_HANDLE ||
+                               MLIR_GetBlockParentRegion(ctx, ob) != region);
+                MLIR_OpType t = MLIR_GetOpType(ctx, op);
+                bool ok = false;
+                if (!nested && t == OP_TYPE_LLVM_LOAD && k == 0) {
+                    ok = (MLIR_GetValueType(ctx, MLIR_GetOpResult(ctx, op, 0)) == m.elemty[ai]);
+                } else if (!nested && t == OP_TYPE_LLVM_STORE && k == 1) {
+                    ok = (MLIR_GetValueType(ctx, MLIR_GetOpOperand(ctx, op, 0)) == m.elemty[ai]);
+                }
+                if (!ok) { m.promotable[ai] = false; break; }
+            }
+        }
+    } else {
+        for (size_t bi = 0; bi < nb; bi++)
+            l2r_mark_escapes_block(&m, m.blocks[bi], false);
+    }
 
     bool any = false;
     for (size_t ai = 0; ai < na; ai++) if (m.promotable[ai]) { any = true; break; }
@@ -461,6 +505,8 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
 
     // ---- Rewrite: build the remap table and lazily create phi ids ----------
     uintptr_t *cur = (uintptr_t *)malloc(na * sizeof(uintptr_t));
+    uint32_t *cur_gen = (uint32_t *)calloc(na, sizeof(uint32_t));
+    uint32_t gen = 0;
     size_t erase_cap = 256, erase_n = 0;
     MLIR_OpHandle *erase = (MLIR_OpHandle *)malloc(erase_cap * sizeof(MLIR_OpHandle));
     #define L2R_ERASE(o) do { \
@@ -469,7 +515,7 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
         erase[erase_n++] = (o); } while (0)
 
     for (size_t bi = 0; bi < nb; bi++) {
-        for (size_t ai = 0; ai < na; ai++) cur[ai] = 0;
+        gen++;
         MLIR_BlockHandle blk = m.blocks[bi];
         size_t nops = MLIR_GetBlockNumOps(ctx, blk);
         for (size_t j = 0; j < nops; j++) {
@@ -479,11 +525,12 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
                 size_t ai = l2r_alloca_index(&m, MLIR_GetOpOperand(ctx, op, 1));
                 if (ai == (size_t)-1 || !m.promotable[ai]) continue;
                 cur[ai] = (uintptr_t)MLIR_GetOpOperand(ctx, op, 0);
+                cur_gen[ai] = gen;
             } else if (t == OP_TYPE_LLVM_LOAD) {
                 size_t ai = l2r_alloca_index(&m, MLIR_GetOpOperand(ctx, op, 0));
                 if (ai == (size_t)-1 || !m.promotable[ai]) continue;
-                uintptr_t val = cur[ai];
-                if (val == 0) { val = l2r_live_in(&m, ai, bi); cur[ai] = val; }
+                uintptr_t val = (cur_gen[ai] == gen) ? cur[ai] : 0;
+                if (val == 0) { val = l2r_live_in(&m, ai, bi); cur[ai] = val; cur_gen[ai] = gen; }
                 hmap_put(&m.remap, (uintptr_t)MLIR_GetOpResult(ctx, op, 0), val);
             } else {
                 continue;
@@ -505,8 +552,9 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
             uintptr_t self = L2R_MK_PHI(pid);
             uintptr_t same = 0;
             bool trivial = true;
+            size_t base_off = m.p_op_off[pid];
             for (size_t o = 0; o < m.p_nops[pid]; o++) {
-                uintptr_t r = l2r_resolve_phi(&m, m.p_ops[pid][o]);
+                uintptr_t r = l2r_resolve_phi(&m, m.p_op_pool[base_off + o]);
                 if (r == self) continue;
                 if (same == 0) same = r;
                 else if (r != same) { trivial = false; break; }
@@ -539,10 +587,21 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     }
 
     // ---- Final sweep: resolve every regular operand to a concrete value ----
-    // Recurses into nested scf/structured regions so any reference to a
-    // remapped (now-erased) load result is updated wherever it appears.
-    for (size_t bi = 0; bi < nb; bi++)
-        l2r_sweep_block(&m, m.blocks[bi]);
+    // When def-use tracking is active, directly replace all uses of each
+    // remapped load result in O(|loads|) instead of scanning every op in the
+    // function.
+    if (tracked) {
+        for (size_t i = 0; i < m.remap.cap; i++) {
+            if (m.remap.keys[i] == 0) continue;
+            MLIR_ValueHandle load_res = (MLIR_ValueHandle)m.remap.keys[i];
+            MLIR_ValueHandle conc = l2r_concrete(&m, m.remap.vals[i]);
+            if (conc != load_res)
+                MLIR_ReplaceAllUsesOfValue(ctx, load_res, conc);
+        }
+    } else {
+        for (size_t bi = 0; bi < nb; bi++)
+            l2r_sweep_block(&m, m.blocks[bi]);
+    }
 
     // ---- Edge wiring: append each surviving phi's incoming value -----------
     size_t sobuf_cap = 8;
@@ -571,7 +630,7 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
             size_t eidx = e - m.pred_off[k];
             for (size_t s = 0; s < add; s++) {
                 size_t pid = surv_pid[surv_off[k] + s];
-                sobuf[nso + s] = l2r_concrete(&m, m.p_ops[pid][eidx]);
+                sobuf[nso + s] = l2r_concrete(&m, m.p_op_pool[m.p_op_off[pid] + eidx]);
             }
             if (changed)
                 MLIR_SetOpSuccessorOperands(ctx, term, slot, sobuf, total);
@@ -588,10 +647,11 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     free(surv_pid);
     free(erase);
     free(cur);
-    for (size_t pid = 0; pid < m.pcount; pid++) free(m.p_ops[pid]);
+    free(cur_gen);
+    free(m.p_op_pool);
     free(m.p_block);
     free(m.p_alloca);
-    free(m.p_ops);
+    free(m.p_op_off);
     free(m.p_nops);
     free(m.p_rep);
     free(m.p_handle);
@@ -904,18 +964,9 @@ static void sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     S s;
     memset(&s, 0, sizeof(s));
     s.ctx = ctx;
-    s.acap = 64;
-    s.a_op    = malloc(s.acap * sizeof(*s.a_op));
-    s.a_blk   = malloc(s.acap * sizeof(*s.a_blk));
-    s.a_res   = malloc(s.acap * sizeof(*s.a_res));
-    s.a_size  = malloc(s.acap * sizeof(*s.a_size));
-    s.a_elem  = malloc(s.acap * sizeof(*s.a_elem));
-    s.a_ptrty = malloc(s.acap * sizeof(*s.a_ptrty));
-    s.a_split = malloc(s.acap * sizeof(*s.a_split));
-    hmap_init(&s.aidx, 64);
-    hmap_init(&s.gidx, 256);
 
     // Collect aggregate (struct/array) allocas with a constant element count.
+    // Lazily allocate arrays/hash tables only if at least one exists.
     for (size_t bi = 0; bi < nb; bi++) {
         MLIR_BlockHandle blk = MLIR_GetRegionBlock(ctx, region, bi);
         size_t nops = MLIR_GetBlockNumOps(ctx, blk);
@@ -927,7 +978,18 @@ static void sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
             if (ea == MLIR_INVALID_HANDLE) continue;
             MLIR_TypeHandle et = MLIR_GetAttributeTypeValue(ctx, ea);
             if (MLIR_GetTypeKind(ctx, et) != MLIR_TYPE_KIND_LLVM_STRUCT && MLIR_GetTypeKind(ctx, et) != MLIR_TYPE_KIND_LLVM_ARRAY) continue;
-            if (s.na == s.acap) {
+            if (s.acap == 0) {
+                s.acap = 32;
+                s.a_op    = malloc(s.acap * sizeof(*s.a_op));
+                s.a_blk   = malloc(s.acap * sizeof(*s.a_blk));
+                s.a_res   = malloc(s.acap * sizeof(*s.a_res));
+                s.a_size  = malloc(s.acap * sizeof(*s.a_size));
+                s.a_elem  = malloc(s.acap * sizeof(*s.a_elem));
+                s.a_ptrty = malloc(s.acap * sizeof(*s.a_ptrty));
+                s.a_split = malloc(s.acap * sizeof(*s.a_split));
+                hmap_init(&s.aidx, 32);
+                hmap_init(&s.gidx, 128);
+            } else if (s.na == s.acap) {
                 s.acap <<= 1;
                 s.a_op    = realloc(s.a_op,    s.acap * sizeof(*s.a_op));
                 s.a_blk   = realloc(s.a_blk,   s.acap * sizeof(*s.a_blk));
@@ -949,12 +1011,73 @@ static void sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
             hmap_put(&s.aidx, (uintptr_t)res, (uintptr_t)ai);
         }
     }
-    if (s.na == 0) goto done;
+    if (s.na == 0) return;
 
-    for (size_t bi = 0; bi < nb; bi++)
-        sroa_scan_uses(&s, MLIR_GetRegionBlock(ctx, region, bi), false);
-    for (size_t bi = 0; bi < nb; bi++)
-        sroa_scan_gep_uses(&s, MLIR_GetRegionBlock(ctx, region, bi));
+    bool tracked = MLIR_HasContextDefUseTracking(ctx);
+    if (tracked) {
+        // Phase 1 (O(uses)): classify direct uses of each aggregate alloca.
+        for (size_t ai = 0; ai < s.na; ai++) {
+            for (MLIR_UseHandle u = MLIR_GetValueFirstUse(ctx, s.a_res[ai]);
+                 u != MLIR_INVALID_HANDLE; u = MLIR_GetUseNext(ctx, u)) {
+                MLIR_OpHandle op = MLIR_GetUseOwner(ctx, u);
+                size_t k = MLIR_GetUseOperandIndex(ctx, u);
+                MLIR_BlockHandle ob = MLIR_GetOpParentBlock(ctx, op);
+                bool nested = (ob == MLIR_INVALID_HANDLE ||
+                               MLIR_GetBlockParentRegion(ctx, ob) != region);
+                if (!nested && k == 0 && MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_GEP &&
+                    MLIR_GetOpNumOperands(ctx, op) == 1) {
+                    MLIR_AttributeHandle ria = MLIR_GetOpAttr(ctx, op, MLIR_KEY_RAW_CONSTANT_INDICES);
+                    int32_t idx[SROA_MAX_PATH]; int nidx = 0;
+                    MLIR_TypeHandle leaf = MLIR_INVALID_HANDLE;
+                    bool good = ria != MLIR_INVALID_HANDLE &&
+                        sroa_parse_indices(ctx, ria, idx, SROA_MAX_PATH, &nidx) &&
+                        sroa_leaf_type(ctx, s.a_elem[ai], idx, nidx, &leaf);
+                    if (!good) { s.a_split[ai] = false; break; }
+                    if (s.ng == s.gcap) {
+                        s.gcap = s.gcap ? s.gcap * 2 : 256;
+                        s.geps = (SroaGep *)realloc(s.geps, s.gcap * sizeof(SroaGep));
+                    }
+                    SroaGep *g = &s.geps[s.ng];
+                    memset(g, 0, sizeof(*g));
+                    g->op = op;
+                    g->res = MLIR_GetOpResult(ctx, op, 0);
+                    g->ai = ai;
+                    g->leaf = leaf;
+                    g->plen = nidx;
+                    for (int pi = 0; pi < nidx; pi++) g->path[pi] = idx[pi];
+                    g->valid = true;
+                    s.ng++;
+                } else {
+                    s.a_split[ai] = false;
+                    break;
+                }
+            }
+        }
+        // Phase 2 (O(uses)): every use of a candidate GEP must be a matching scalar load/store.
+        for (size_t gi = 0; gi < s.ng; gi++) {
+            SroaGep *g = &s.geps[gi];
+            if (!s.a_split[g->ai]) continue;
+            for (MLIR_UseHandle u = MLIR_GetValueFirstUse(ctx, g->res);
+                 u != MLIR_INVALID_HANDLE; u = MLIR_GetUseNext(ctx, u)) {
+                MLIR_OpHandle op = MLIR_GetUseOwner(ctx, u);
+                size_t k = MLIR_GetUseOperandIndex(ctx, u);
+                MLIR_OpType t = MLIR_GetOpType(ctx, op);
+                bool ok = false;
+                if (t == OP_TYPE_LLVM_LOAD && k == 0)
+                    ok = (MLIR_GetValueType(ctx, MLIR_GetOpResult(ctx, op, 0)) == g->leaf);
+                else if (t == OP_TYPE_LLVM_STORE && k == 1)
+                    ok = (MLIR_GetValueType(ctx, MLIR_GetOpOperand(ctx, op, 0)) == g->leaf);
+                if (!ok) { s.a_split[g->ai] = false; break; }
+            }
+        }
+    } else {
+        for (size_t bi = 0; bi < nb; bi++)
+            sroa_scan_uses(&s, MLIR_GetRegionBlock(ctx, region, bi), false);
+        if (s.ng > 0) {
+            for (size_t bi = 0; bi < nb; bi++)
+                sroa_scan_gep_uses(&s, MLIR_GetRegionBlock(ctx, region, bi));
+        }
+    }
 
     bool any = false;
     for (size_t ai = 0; ai < s.na; ai++)
@@ -986,8 +1109,15 @@ static void sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
         g->scalar = sroa_field_alloca(&s, g->ai, g->path, g->plen, g->leaf);
     }
 
-    for (size_t bi = 0; bi < nb; bi++)
-        sroa_rewrite(&s, MLIR_GetRegionBlock(ctx, region, bi));
+    if (tracked) {
+        for (size_t gi = 0; gi < s.ng; gi++) {
+            if (s.geps[gi].scalar != MLIR_INVALID_HANDLE)
+                MLIR_ReplaceAllUsesOfValue(ctx, s.geps[gi].res, s.geps[gi].scalar);
+        }
+    } else {
+        for (size_t bi = 0; bi < nb; bi++)
+            sroa_rewrite(&s, MLIR_GetRegionBlock(ctx, region, bi));
+    }
 
     // Erase now-dead field GEPs, then the split aggregate allocas.
     for (size_t gi = 0; gi < s.ng; gi++) {

@@ -926,15 +926,33 @@ static void expand_put(PP *pp, VecPPTok *out, PPTok *t) {
 
 // Expand tokens in `toks` and append the result to `out` (NULL: emit them).
 static void expand_tokens(PP *pp, PPTok *toks, size_t n, VecPPTok *out) {
-    // Copy input into a working buffer so substitutions can be spliced
-    // back in for proper rescanning across the original input boundary.
-    // This is required by C: after a macro is replaced, the result is
-    // reinserted into the source stream so that nested function-like
-    // macros can pick up arguments that follow in the original input.
+    // Fast path: scan tokens in place with zero allocation/copy until we hit
+    // an actual macro or __FILE__/__LINE__. Most C lines have no macros.
+    size_t scan = 0;
+    while (scan < n) {
+        PPTok t = toks[scan];
+        if (t.kind == PP_END) return;
+        if (t.kind == PP_NEWLINE) { scan++; continue; }
+        if (t.kind == PP_IDENT) {
+            MacroSlot *slot = macro_find_slot(pp, t.text);
+            if (slot && (slot->special != PP_SPECIAL_NONE ||
+                         (slot->macro && !slot->macro->expanding &&
+                          !hide_contains(t.hide, t.text)))) {
+                break;
+            }
+        }
+        expand_put(pp, out, &t);
+        scan++;
+    }
+    if (scan >= n) return;
+
+    // Copy remaining suffix into a working buffer so substitutions can be
+    // spliced back in for proper rescanning across the original input boundary.
+    size_t rem = n - scan;
     size_t gap0 = 64;
-    size_t wsize = gap0 + n;
+    size_t wsize = gap0 + rem;
     PPTok *w = arena_new_array(pp->arena, PPTok, wsize);
-    if (n) memcpy(w + gap0, toks, n * sizeof(PPTok));
+    memcpy(w + gap0, toks + scan, rem * sizeof(PPTok));
     size_t i = gap0;
     while (i < wsize) {
         PPTok t = w[i];

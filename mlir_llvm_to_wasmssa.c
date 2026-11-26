@@ -223,15 +223,116 @@ static bool known_sext(MLIR_Context *ctx, MLIR_ValueHandle v, int w, int depth) 
     }
 }
 
+// Cached wasm32 (ptr=4) struct layout table (reset per mlir_llvm_to_wasmssa call).
+#define SLC_CAP 512
+typedef struct {
+    MLIR_TypeHandle ty;
+    unsigned size;
+    unsigned align;
+    unsigned n_fields;
+    unsigned *offsets;
+} StructLayoutEntry;
+
+static MLIR_Context *g_slc_ctx;
+static StructLayoutEntry *g_slc_tab;
+static MLIR_TypeHandle g_wasm_i32_ty;
+static MLIR_TypeHandle g_wasm_i64_ty;
+static MLIR_TypeHandle g_wasm_f32_ty;
+static MLIR_TypeHandle g_wasm_f64_ty;
+static MLIR_AttributeHandle g_wasm_i32_attr[256];
+
+static void slc_reset(MLIR_Context *ctx) {
+    g_slc_ctx = ctx;
+    g_slc_tab = NULL;
+    g_wasm_i32_ty = MLIR_CreateTypeInteger(ctx, 32, true);
+    g_wasm_i64_ty = MLIR_CreateTypeInteger(ctx, 64, true);
+    g_wasm_f32_ty = MLIR_CreateTypeFloat(ctx, 32, false);
+    g_wasm_f64_ty = MLIR_CreateTypeFloat(ctx, 64, false);
+    memset(g_wasm_i32_attr, 0, sizeof(g_wasm_i32_attr));
+}
+
+static unsigned type_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty);
+static unsigned type_align_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty);
+
+static StructLayoutEntry *slc_get_struct(MLIR_Context *ctx, MLIR_TypeHandle sty) {
+    if (ctx != g_slc_ctx) return NULL;
+    if (!g_slc_tab) {
+        Arena *a = MLIR_GetArenaAllocator(ctx);
+        g_slc_tab = (StructLayoutEntry *)arena_alloc(a, SLC_CAP * sizeof(StructLayoutEntry));
+        memset(g_slc_tab, 0, SLC_CAP * sizeof(StructLayoutEntry));
+    }
+    size_t mask = SLC_CAP - 1;
+    size_t slot = ((size_t)((uintptr_t)sty * 2654435761u >> 16)) & mask;
+    for (size_t probe = 0; probe < SLC_CAP; probe++) {
+        size_t i = (slot + probe) & mask;
+        if (g_slc_tab[i].ty == sty) return &g_slc_tab[i];
+        if (g_slc_tab[i].ty == MLIR_INVALID_HANDLE) {
+            size_t nf = MLIR_GetTypeLLVMStructNumFields(ctx, sty);
+            Arena *a = MLIR_GetArenaAllocator(ctx);
+            unsigned *offs = nf ? (unsigned *)arena_alloc(a, nf * sizeof(unsigned)) : NULL;
+            unsigned off = 0, max_align = 1;
+            bool valid_size = true;
+            for (size_t f = 0; f < nf; f++) {
+                MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(ctx, sty, f);
+                unsigned fal = type_align_bytes(ctx, ft);
+                unsigned fsz = type_size_bytes(ctx, ft);
+                if (fal == 0) { valid_size = false; fal = 1; }
+                if (fsz == 0 && !llvm_type_is_empty(ctx, ft, 4)) valid_size = false;
+                off = llvm_align_up(off, fal);
+                offs[f] = off;
+                off += fsz;
+                if (fal > max_align) max_align = fal;
+            }
+            g_slc_tab[i].ty = sty;
+            g_slc_tab[i].size = valid_size ? llvm_align_up(off, max_align) : 0;
+            g_slc_tab[i].align = max_align;
+            g_slc_tab[i].n_fields = (unsigned)nf;
+            g_slc_tab[i].offsets = offs;
+            return &g_slc_tab[i];
+        }
+    }
+    return NULL;
+}
+
 // Type layout (mlir_llvm_type_layout.h) on wasm32: pointers are 4 bytes.
 static unsigned type_size_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    return llvm_type_size(ctx, ty, 4);
+    MLIR_TypeKind k = MLIR_GetTypeKind(ctx, ty);
+    if (k == MLIR_TYPE_KIND_LLVM_POINTER) return 4;
+    if (k == MLIR_TYPE_KIND_INTEGER) {
+        uint32_t w = MLIR_GetTypeWidth(ctx, ty);
+        if (w == 1 || w == 8) return 1;
+        if (w == 16 || w == 32 || w == 64) return w / 8;
+        return 0;
+    }
+    if (k == MLIR_TYPE_KIND_FLOAT) {
+        uint32_t w = MLIR_GetTypeWidth(ctx, ty);
+        return (w == 32 || w == 64) ? w / 8 : 0;
+    }
+    if (k == MLIR_TYPE_KIND_LLVM_ARRAY) {
+        unsigned esz = type_size_bytes(ctx, MLIR_GetTypeElement(ctx, ty));
+        return esz ? esz * (unsigned)MLIR_GetTypeNumElements(ctx, ty) : 0;
+    }
+    if (k == MLIR_TYPE_KIND_LLVM_STRUCT) {
+        StructLayoutEntry *e = slc_get_struct(ctx, ty);
+        return e ? e->size : llvm_type_size(ctx, ty, 4);
+    }
+    return 0;
 }
 static unsigned type_align_bytes(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    return llvm_type_align(ctx, ty, 4);
+    MLIR_TypeKind k = MLIR_GetTypeKind(ctx, ty);
+    if (k == MLIR_TYPE_KIND_LLVM_ARRAY)
+        return type_align_bytes(ctx, MLIR_GetTypeElement(ctx, ty));
+    if (k == MLIR_TYPE_KIND_LLVM_STRUCT) {
+        StructLayoutEntry *e = slc_get_struct(ctx, ty);
+        return e ? e->align : llvm_type_align(ctx, ty, 4);
+    }
+    unsigned sz = type_size_bytes(ctx, ty);
+    return sz ? sz : 1;
 }
 static unsigned struct_field_offset(MLIR_Context *ctx, MLIR_TypeHandle sty,
                                     size_t fld_idx) {
+    StructLayoutEntry *e = slc_get_struct(ctx, sty);
+    if (e && fld_idx < e->n_fields) return e->offsets[fld_idx];
     return llvm_struct_field_offset(ctx, sty, fld_idx, 4);
 }
 
@@ -2645,6 +2746,15 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
 // in-function op) and by the module walker (for import_func / globals).
 // =============================================================================
 static MLIR_TypeHandle vt_to_type(MLIR_Context *ctx, uint8_t vt) {
+    if (ctx == g_slc_ctx) {
+        switch (vt) {
+            case WT_I32: return g_wasm_i32_ty;
+            case WT_I64: return g_wasm_i64_ty;
+            case WT_F32: return g_wasm_f32_ty;
+            case WT_F64: return g_wasm_f64_ty;
+        }
+        return g_wasm_i32_ty;
+    }
     switch (vt) {
         case WT_I32: return MLIR_CreateTypeInteger(ctx, 32, true);
         case WT_I64: return MLIR_CreateTypeInteger(ctx, 64, true);
@@ -2654,12 +2764,24 @@ static MLIR_TypeHandle vt_to_type(MLIR_Context *ctx, uint8_t vt) {
     return MLIR_CreateTypeInteger(ctx, 32, true);
 }
 static MLIR_NamedAttr attr_i32(MLIR_Context *ctx, MLIR_AttrKey key, int64_t v) {
+    if (ctx == g_slc_ctx) {
+        if (v >= 0 && v < 256) {
+            MLIR_AttributeHandle a = g_wasm_i32_attr[v];
+            if (!a) {
+                a = MLIR_CreateAttributeInteger(ctx, v, g_wasm_i32_ty);
+                g_wasm_i32_attr[v] = a;
+            }
+            return MLIR_Named(key, a);
+        }
+        return MLIR_Named(key, MLIR_CreateAttributeInteger(ctx, v, g_wasm_i32_ty));
+    }
     return MLIR_Named(key, MLIR_CreateAttributeInteger(ctx, v,
                                        MLIR_CreateTypeInteger(ctx, 32, true)));
 }
 static MLIR_NamedAttr attr_i64(MLIR_Context *ctx, MLIR_AttrKey key, int64_t v) {
-    return MLIR_Named(key, MLIR_CreateAttributeInteger(ctx, v,
-                                       MLIR_CreateTypeInteger(ctx, 64, true)));
+    MLIR_TypeHandle ty = (ctx == g_slc_ctx) ? g_wasm_i64_ty
+                                            : MLIR_CreateTypeInteger(ctx, 64, true);
+    return MLIR_Named(key, MLIR_CreateAttributeInteger(ctx, v, ty));
 }
 static MLIR_NamedAttr attr_b(MLIR_Context *ctx, MLIR_AttrKey key, bool v) {
     return MLIR_Named(key, MLIR_CreateAttributeBool(ctx, v));
@@ -2808,6 +2930,7 @@ static bool check_llvm_only_block(MLIR_Context *ctx, MLIR_BlockHandle block,
 }
 
 MLIR_OpHandle mlir_llvm_to_wasmssa(MLIR_Context *ctx, MLIR_OpHandle module) {
+    slc_reset(ctx);
     // Step 0: enforce the input contract before anything else looks at the
     // module (in particular before step 1 introduces the backend's own
     // scf.* ops).

@@ -962,6 +962,7 @@ typedef struct {
     size_t           *scc_starts;   // length n_sccs+1; scc i = blocks_in_sccs[scc_starts[i]..scc_starts[i+1]]
     size_t           *blocks_in_sccs; // permutation of [0..n_blocks)
     bool             *scc_is_cycle; // length n_sccs; true if SCC has size>=2 OR has a self-edge
+    BlockMap          dense;        // block -> dense index [0..n_blocks)
 } SccResult;
 
 // Look up the dense index of a block in `blocks[0..n)`. Returns SIZE_MAX if not found.
@@ -1019,8 +1020,9 @@ static SccResult scc_compute(MLIR_Context *ctx, Arena *arena, MLIR_RegionHandle 
     if (n == 0) return r;
     Scratch tmp = scratch_begin_avoid_conflict(arena);
     BlockMap dense;   // block -> index into `blocks`
-    block_map_init(tmp.arena, &dense, n);
+    block_map_init(arena, &dense, n);
     for (size_t i = 0; i < n; ++i) block_map_insert(&dense, blocks[i], i);
+    r.dense = dense;
 
     size_t *index_of    = arena_new_array(arena, size_t, n);
     size_t *lowlink     = arena_new_array(arena, size_t, n);
@@ -1141,9 +1143,9 @@ static SccResult scc_compute(MLIR_Context *ctx, Arena *arena, MLIR_RegionHandle 
     return r;
 }
 
-// Returns true iff `block` is in the SCC `scc_id`.
+// Returns true iff `block` is in the SCC `scc_id`. O(1) via r->dense.
 static bool scc_contains(const SccResult *r, size_t scc_id, MLIR_BlockHandle block) {
-    size_t bi = scc_block_index(r->blocks, r->n_blocks, block);
+    size_t bi = block_map_get(&r->dense, block);
     if (bi == SIZE_MAX) return false;
     return r->scc_of[bi] == scc_id;
 }
@@ -1318,18 +1320,19 @@ typedef struct {
     size_t            n_real;        // count of real blocks
     size_t            root_po;       // postorder index of root (entry for fwd, virt/leaf for post)
     size_t           *idom;          // [n_total] -> postorder index of immediate dominator
-    size_t          **neighbors;     // [n_total] predecessor lists (in postdom these are successors-in-original)
-    size_t           *n_neighbors;   // [n_total]
     bool              has_virt;      // true if a virtual exit was added (post-dom only)
+    // O(1) handle -> postorder index map (built during DFS in dom_compute).
+    BlockMap          po_map;
+    // CSR dominator-tree children (built in O(n) in dom_compute for O(|subtree|) collection).
+    size_t           *child_off;     // [n_real + 1]
+    size_t           *children;      // [n_real]
 } DomInfo;
 
 // Returns SIZE_MAX if `b` is not in the region (or is the virtual exit
-// pseudo-block).
+// pseudo-block). O(1) via the BlockMap built during dom_dfs_postorder.
 static size_t dom_po_index_of(const DomInfo *d, MLIR_BlockHandle b) {
-    for (size_t i = 0; i < d->n_real; ++i) {
-        if (d->po_blocks[i] == b) return i;
-    }
-    return SIZE_MAX;
+    if (b == MLIR_INVALID_HANDLE || d->po_map.cap == 0) return SIZE_MAX;
+    return block_map_get(&d->po_map, b);
 }
 
 // Intersect two postorder indices on the dominator tree. Both must have
@@ -1376,36 +1379,20 @@ static void dom_dfs_postorder(MLIR_Context *ctx, MLIR_BlockHandle root,
                               size_t n_leaves,
                               bool is_post,
                               bool root_is_virt,
+                              size_t nb_hint,
                               MLIR_BlockHandle *out_blocks, size_t *out_n,
-                              MLIR_BlockHandle **visited_arr, size_t *visited_n,
+                              BlockMap *out_po_map,
                               Arena *arena) {
-    // Bounded stack: in practice tinyc regions are <100 blocks. Resize
-    // dynamically just in case.
-    size_t stack_cap = 64;
+    size_t stack_cap = nb_hint > 16 ? nb_hint : 16;
     DomFrame *stack = arena_new_array(arena, DomFrame, stack_cap);
     size_t sp = 0;
 
-    // visited array (in visit order) + a hash set over it for the
-    // "already visited?" test, which is asked once per CFG edge.
-    size_t v_cap = 64, v_n = 0;
-    MLIR_BlockHandle *v_arr = arena_new_array(arena, MLIR_BlockHandle, v_cap);
-    Scratch tmp = scratch_begin_avoid_conflict(arena);
     BlockMap v_set;
-    block_map_init(tmp.arena, &v_set, v_cap);
-    // Helpers for the postorder walk; written as inline code rather
-    // than statement-expression macros so tinyC can parse them.
+    block_map_init(arena, &v_set, stack_cap);
 
     if (root_is_virt) {
-        // Root is the virtual exit. Push every real leaf as first level.
         for (size_t i = 0; i < n_leaves; ++i) {
             if (!block_map_insert(&v_set, leaf_blocks[i], 0)) continue;
-            if (v_n == v_cap) {
-                size_t nc = v_cap * 2;
-                MLIR_BlockHandle *na = arena_new_array(arena, MLIR_BlockHandle, nc);
-                memcpy(na, v_arr, sizeof(MLIR_BlockHandle) * v_n);
-                v_arr = na; v_cap = nc;
-            }
-            v_arr[v_n++] = leaf_blocks[i];
             if (sp == stack_cap) {
                 size_t nc = stack_cap * 2;
                 DomFrame *ns = arena_new_array(arena, DomFrame, nc);
@@ -1417,32 +1404,22 @@ static void dom_dfs_postorder(MLIR_Context *ctx, MLIR_BlockHandle root,
             sp++;
         }
     } else {
-        if (v_n == v_cap) {
-            size_t nc = v_cap * 2;
-            MLIR_BlockHandle *na = arena_new_array(arena, MLIR_BlockHandle, nc);
-            memcpy(na, v_arr, sizeof(MLIR_BlockHandle) * v_n);
-            v_arr = na; v_cap = nc;
-        }
-        v_arr[v_n++] = root;
         block_map_insert(&v_set, root, 0);
         stack[sp].block = root;
         stack[sp].next_child = 0;
         sp++;
     }
 
-    size_t out_cap = 64;
-    MLIR_BlockHandle *out = arena_new_array(arena, MLIR_BlockHandle, out_cap);
     size_t out_count = 0;
 
     while (sp > 0) {
         DomFrame *fr = &stack[sp - 1];
         MLIR_BlockHandle b = fr->block;
 
-        // Neighbor count + accessor: forward dom uses successors;
-        // postdom uses predecessors.
         size_t nn;
+        MLIR_OpHandle term = MLIR_INVALID_HANDLE;
         if (!is_post) {
-            MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
+            term = MLIR_GetBlockTerminator(ctx, b);
             nn = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(ctx, term);
         } else {
             nn = MLIR_GetBlockNumPredecessors(ctx, b);
@@ -1451,7 +1428,6 @@ static void dom_dfs_postorder(MLIR_Context *ctx, MLIR_BlockHandle root,
         if (fr->next_child < nn) {
             MLIR_BlockHandle child;
             if (!is_post) {
-                MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
                 child = MLIR_GetOpSuccessor(ctx, term, fr->next_child);
             } else {
                 child = MLIR_GetBlockPredecessor(ctx, b, fr->next_child, NULL);
@@ -1459,13 +1435,6 @@ static void dom_dfs_postorder(MLIR_Context *ctx, MLIR_BlockHandle root,
             fr->next_child++;
             if (child == MLIR_INVALID_HANDLE) continue;
             if (!block_map_insert(&v_set, child, 0)) continue;
-            if (v_n == v_cap) {
-                size_t nc = v_cap * 2;
-                MLIR_BlockHandle *na = arena_new_array(arena, MLIR_BlockHandle, nc);
-                memcpy(na, v_arr, sizeof(MLIR_BlockHandle) * v_n);
-                v_arr = na; v_cap = nc;
-            }
-            v_arr[v_n++] = child;
             if (sp == stack_cap) {
                 size_t nc = stack_cap * 2;
                 DomFrame *ns = arena_new_array(arena, DomFrame, nc);
@@ -1476,27 +1445,20 @@ static void dom_dfs_postorder(MLIR_Context *ctx, MLIR_BlockHandle root,
             stack[sp].next_child = 0;
             sp++;
         } else {
-            // Done with this node; emit it in postorder.
-            if (out_count == out_cap) {
-                size_t nc = out_cap * 2;
-                MLIR_BlockHandle *na = arena_new_array(arena, MLIR_BlockHandle, nc);
-                memcpy(na, out, sizeof(MLIR_BlockHandle) * out_count);
-                out = na; out_cap = nc;
-            }
-            out[out_count++] = b;
+            // Record exact postorder index directly in v_set (reused by dom_compute).
+            size_t slot = block_map_slot(&v_set, b);
+            v_set.vals[slot] = out_count;
+            out_blocks[out_count++] = b;
             sp--;
         }
     }
 
-    scratch_end(tmp);
-    for (size_t i = 0; i < out_count; ++i) out_blocks[i] = out[i];
     *out_n = out_count;
-    if (visited_arr) *visited_arr = v_arr;
-    if (visited_n) *visited_n = v_n;
+    *out_po_map = v_set;
 }
 
-static DomInfo dom_compute(MLIR_Context *ctx, Arena *arena, MLIR_RegionHandle region,
-                           bool is_post) {
+static DomInfo dom_compute_ex(MLIR_Context *ctx, Arena *arena, MLIR_RegionHandle region,
+                              bool is_post, bool is_dag) {
     DomInfo d = {0};
     d.arena = arena;
     d.is_post = is_post;
@@ -1506,14 +1468,11 @@ static DomInfo dom_compute(MLIR_Context *ctx, Arena *arena, MLIR_RegionHandle re
         return d;
     }
 
-    // Identify the root.
-    //   forward dom: region's entry block (block 0).
-    //   postdom:     the unique block with no successors, or a virtual
-    //                exit if there are zero or multiple such blocks.
     MLIR_BlockHandle entry = MLIR_GetRegionBlock(ctx, region, 0);
-    MLIR_BlockHandle *leaves = arena_new_array(arena, MLIR_BlockHandle, nb);
+    MLIR_BlockHandle *leaves = NULL;
     size_t n_leaves = 0;
     if (is_post) {
+        leaves = arena_new_array(arena, MLIR_BlockHandle, nb);
         for (size_t i = 0; i < nb; ++i) {
             MLIR_BlockHandle b = MLIR_GetRegionBlock(ctx, region, i);
             MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
@@ -1523,131 +1482,84 @@ static DomInfo dom_compute(MLIR_Context *ctx, Arena *arena, MLIR_RegionHandle re
     }
     bool need_virt = is_post && n_leaves != 1;
 
-    // Worst-case capacity for postorder result = all real blocks.
     MLIR_BlockHandle *po = arena_new_array(arena, MLIR_BlockHandle, nb + 1);
     size_t po_n = 0;
+    BlockMap po_map;
     MLIR_BlockHandle root_for_dfs = is_post ? (need_virt ? MLIR_INVALID_HANDLE : leaves[0]) : entry;
     dom_dfs_postorder(ctx, root_for_dfs, leaves, n_leaves, is_post, need_virt,
-                      po, &po_n, NULL, NULL, arena);
+                      nb, po, &po_n, &po_map, arena);
 
     d.n_real = po_n;
     d.has_virt = need_virt;
     d.n_total = po_n + (need_virt ? 1 : 0);
-    d.po_blocks = arena_new_array(arena, MLIR_BlockHandle, d.n_total);
-    for (size_t i = 0; i < po_n; ++i) d.po_blocks[i] = po[i];
+    d.po_blocks = po;
     if (need_virt) {
         d.po_blocks[po_n] = MLIR_INVALID_HANDLE;
         d.root_po = po_n;
     } else {
-        // Root is the LAST node in postorder (postorder visits root last).
         d.root_po = po_n - 1;
     }
 
-    // Build neighbor lists.
-    //   forward dom: neighbors = predecessors-in-original-CFG.
-    //   postdom:     neighbors = successors-in-original-CFG (= predecessors-
-    //                in-reverse-CFG). Additionally, each leaf gets a virt
-    //                neighbor when has_virt is true.
-    d.neighbors   = arena_new_array(arena, size_t *, d.n_total);
-    d.n_neighbors = arena_new_array(arena, size_t,   d.n_total);
-    // Build a handle -> postorder-index hash over the real blocks so each
-    // CFG edge resolves in O(1) instead of a linear scan of po_blocks.
-    // Open addressing, power-of-two capacity, MLIR_INVALID_HANDLE (0) as the
-    // empty sentinel (real block handles are never 0). This turns the whole
-    // neighbor construction from O(n_blocks^2) into O(n_blocks + n_edges) --
-    // it was a dominant hot spot in the cf->scf lift (dom_compute).
-    size_t hcap = 8;
-    while (hcap < d.n_real * 2u + 1u) hcap <<= 1;
-    size_t hmask = hcap - 1u;
-    MLIR_BlockHandle *hk = arena_new_array(arena, MLIR_BlockHandle, hcap);
-    size_t *hv = arena_new_array(arena, size_t, hcap);
-    for (size_t t = 0; t < hcap; ++t) hk[t] = MLIR_INVALID_HANDLE;
-    for (size_t i = 0; i < d.n_real; ++i) {
-        MLIR_BlockHandle h = d.po_blocks[i];
-        size_t slot = (size_t)((uint64_t)h * 0x9E3779B97F4A7C15ull >> 32) & hmask;
-        while (hk[slot] != MLIR_INVALID_HANDLE) slot = (slot + 1u) & hmask;
-        hk[slot] = h; hv[slot] = i;
-    }
+    // Reuse po_map built during DFS directly (zero second hash table).
+    d.po_map = po_map;
     #define PO_INDEX_OF(H, OUT) do {                                          \
-        (OUT) = SIZE_MAX;                                                     \
         MLIR_BlockHandle _h = (H);                                           \
-        if (_h != MLIR_INVALID_HANDLE) {                                     \
-            size_t _s = (size_t)((uint64_t)_h * 0x9E3779B97F4A7C15ull >> 32) \
-                        & hmask;                                             \
-            while (hk[_s] != MLIR_INVALID_HANDLE) {                          \
-                if (hk[_s] == _h) { (OUT) = hv[_s]; break; }                 \
-                _s = (_s + 1u) & hmask;                                      \
-            }                                                                \
-        }                                                                    \
+        (OUT) = (_h == MLIR_INVALID_HANDLE) ? SIZE_MAX : block_map_get(&d.po_map, _h); \
     } while (0)
 
+    // Build CSR neighbor lists in 2 flat allocations instead of n_real separate ones.
+    size_t *nbr_off = arena_new_array(arena, size_t, d.n_total + 1);
+    memset(nbr_off, 0, sizeof(size_t) * (d.n_total + 1));
+    size_t *nbr_data = NULL;
     if (!is_post) {
-        // Forward dominators: neighbors[j] = predecessors of po-block j.
-        // One O(n+E) pass: for each block i (a predecessor) and each of its
-        // successors s in postorder, append i to neighbors[po_index(s)].
-        for (size_t i = 0; i < d.n_real; ++i) d.n_neighbors[i] = 0;
         for (size_t i = 0; i < d.n_real; ++i) {
             MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, d.po_blocks[i]);
             size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(ctx, term);
             for (size_t k = 0; k < ns; ++k) {
                 size_t si; PO_INDEX_OF(MLIR_GetOpSuccessor(ctx, term, k), si);
-                if (si != SIZE_MAX) d.n_neighbors[si]++;
+                if (si != SIZE_MAX) nbr_off[si + 1]++;
             }
         }
-        for (size_t i = 0; i < d.n_real; ++i) {
-            d.neighbors[i] = d.n_neighbors[i]
-                ? arena_new_array(arena, size_t, d.n_neighbors[i]) : NULL;
-            d.n_neighbors[i] = 0;  // reused below as a fill cursor
-        }
+        for (size_t i = 0; i < d.n_total; ++i) nbr_off[i + 1] += nbr_off[i];
+        size_t total_edges = nbr_off[d.n_total];
+        nbr_data = arena_new_array(arena, size_t, total_edges ? total_edges : 1);
+        size_t *cur_off = arena_new_array(arena, size_t, d.n_total);
+        memcpy(cur_off, nbr_off, sizeof(size_t) * d.n_total);
         for (size_t i = 0; i < d.n_real; ++i) {
             MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, d.po_blocks[i]);
             size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(ctx, term);
             for (size_t k = 0; k < ns; ++k) {
                 size_t si; PO_INDEX_OF(MLIR_GetOpSuccessor(ctx, term, k), si);
-                if (si != SIZE_MAX) d.neighbors[si][d.n_neighbors[si]++] = i;
+                if (si != SIZE_MAX) nbr_data[cur_off[si]++] = i;
             }
         }
     } else {
-        // Post-dominators: neighbors[i] = successors of po-block i (plus a
-        // virtual-exit neighbor for leaves). Already O(E); the hash removes
-        // the former linear po_blocks scan per edge.
         for (size_t i = 0; i < d.n_real; ++i) {
-            MLIR_BlockHandle b = d.po_blocks[i];
-            size_t cap = 8;
-            size_t *buf = arena_new_array(arena, size_t, cap);
+            MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, d.po_blocks[i]);
+            size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(ctx, term);
             size_t cnt = 0;
-            MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, b);
+            for (size_t k = 0; k < ns; ++k) {
+                size_t si; PO_INDEX_OF(MLIR_GetOpSuccessor(ctx, term, k), si);
+                if (si != SIZE_MAX) cnt++;
+            }
+            if (ns == 0 && need_virt) cnt++;
+            nbr_off[i + 1] = cnt;
+        }
+        for (size_t i = 0; i < d.n_total; ++i) nbr_off[i + 1] += nbr_off[i];
+        size_t total_edges = nbr_off[d.n_total];
+        nbr_data = arena_new_array(arena, size_t, total_edges ? total_edges : 1);
+        for (size_t i = 0; i < d.n_real; ++i) {
+            size_t pos = nbr_off[i];
+            MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, d.po_blocks[i]);
             size_t ns = (term == MLIR_INVALID_HANDLE) ? 0 : MLIR_GetOpNumSuccessors(ctx, term);
             for (size_t k = 0; k < ns; ++k) {
                 size_t si; PO_INDEX_OF(MLIR_GetOpSuccessor(ctx, term, k), si);
-                if (si == SIZE_MAX) continue;
-                if (cnt == cap) {
-                    size_t nc = cap * 2;
-                    size_t *nb2 = arena_new_array(arena, size_t, nc);
-                    memcpy(nb2, buf, sizeof(size_t) * cnt);
-                    buf = nb2; cap = nc;
-                }
-                buf[cnt++] = si;
+                if (si != SIZE_MAX) nbr_data[pos++] = si;
             }
-            // If this is a leaf and we have a virtual exit, add it.
-            if (ns == 0 && need_virt) {
-                if (cnt == cap) {
-                    size_t nc = cap * 2;
-                    size_t *nb2 = arena_new_array(arena, size_t, nc);
-                    memcpy(nb2, buf, sizeof(size_t) * cnt);
-                    buf = nb2; cap = nc;
-                }
-                buf[cnt++] = po_n;  // virt index
-            }
-            d.neighbors[i] = buf;
-            d.n_neighbors[i] = cnt;
+            if (ns == 0 && need_virt) nbr_data[pos++] = po_n;
         }
     }
     #undef PO_INDEX_OF
-    if (need_virt) {
-        d.neighbors[po_n] = NULL;
-        d.n_neighbors[po_n] = 0;
-    }
 
     // Initialize idom.
     d.idom = arena_new_array(arena, size_t, d.n_total);
@@ -1655,16 +1567,17 @@ static DomInfo dom_compute(MLIR_Context *ctx, Arena *arena, MLIR_RegionHandle re
     d.idom[d.root_po] = d.root_po;
 
     // Iterate in reverse-postorder (highest po first), skipping root.
+    // On a DAG, RPO is a topological order so a single pass is exact.
     bool changed = true;
     while (changed) {
         changed = false;
-        // Iterate i from d.n_total-1 down to 0, but skip root_po.
         for (size_t k = 0; k < d.n_total; ++k) {
             size_t i = d.n_total - 1 - k;
             if (i == d.root_po) continue;
             size_t new_id = SIZE_MAX;
-            for (size_t j = 0; j < d.n_neighbors[i]; ++j) {
-                size_t p = d.neighbors[i][j];
+            size_t e0 = nbr_off[i], e1 = nbr_off[i + 1];
+            for (size_t j = e0; j < e1; ++j) {
+                size_t p = nbr_data[j];
                 if (d.idom[p] == SIZE_MAX) continue;
                 if (new_id == SIZE_MAX) new_id = p;
                 else new_id = dom_intersect(&d, new_id, p);
@@ -1674,9 +1587,31 @@ static DomInfo dom_compute(MLIR_Context *ctx, Arena *arena, MLIR_RegionHandle re
                 changed = true;
             }
         }
+        if (is_dag) break;
+    }
+
+    // Build CSR dominator-tree child list in O(n_real) for O(|subtree|) queries.
+    d.child_off = arena_new_array(arena, size_t, d.n_real + 1);
+    memset(d.child_off, 0, sizeof(size_t) * (d.n_real + 1));
+    for (size_t i = 0; i < d.n_real; ++i) {
+        size_t p = d.idom[i];
+        if (p != i && p < d.n_real) d.child_off[p + 1]++;
+    }
+    for (size_t i = 0; i < d.n_real; ++i) d.child_off[i + 1] += d.child_off[i];
+    d.children = arena_new_array(arena, size_t, d.n_real ? d.n_real : 1);
+    size_t *ccur = arena_new_array(arena, size_t, d.n_real ? d.n_real : 1);
+    if (d.n_real) memcpy(ccur, d.child_off, sizeof(size_t) * d.n_real);
+    for (size_t i = 0; i < d.n_real; ++i) {
+        size_t p = d.idom[i];
+        if (p != i && p < d.n_real) d.children[ccur[p]++] = i;
     }
 
     return d;
+}
+
+static DomInfo dom_compute(MLIR_Context *ctx, Arena *arena, MLIR_RegionHandle region,
+                           bool is_post) {
+    return dom_compute_ex(ctx, arena, region, is_post, /*is_dag=*/false);
 }
 
 // ============================================================================
@@ -1730,16 +1665,19 @@ typedef struct { MLIR_OpHandle op; size_t operand_idx; } UseRecord;
 // Snapshot all uses of `v` into a fresh arena array, since the use list
 // may be invalidated when we start mutating operands.
 static UseRecord *snapshot_uses(LiftState *st, MLIR_ValueHandle v, size_t *out_n) {
-    size_t nu = MLIR_GetValueNumUses(st->ctx, v);
+    MLIR_Context *ctx = st->ctx;
+    size_t nu = MLIR_GetValueNumUses(ctx, v);
     *out_n = nu;
     if (nu == 0) return NULL;
     UseRecord *uses = arena_new_array(st->arena, UseRecord, nu);
-    for (size_t i = 0; i < nu; ++i) {
-        size_t op_idx = 0;
-        MLIR_OpHandle owner = MLIR_GetValueUseOwner(st->ctx, v, i, &op_idx);
-        uses[i].op = owner;
-        uses[i].operand_idx = op_idx;
+    size_t i = 0;
+    for (MLIR_UseHandle u = MLIR_GetValueFirstUse(ctx, v);
+         u != MLIR_INVALID_HANDLE && i < nu;
+         u = MLIR_GetUseNext(ctx, u), ++i) {
+        uses[i].op = MLIR_GetUseOwner(ctx, u);
+        uses[i].operand_idx = MLIR_GetUseOperandIndex(ctx, u);
     }
+    *out_n = i;
     return uses;
 }
 
@@ -1753,6 +1691,7 @@ typedef struct {
     MLIR_RegionHandle loop_region;
     const MLIR_BlockHandle *loop_blocks;
     size_t                  n_loop_blocks;
+    BlockMap                loop_set;
 
     // Growable list of values to be passed to loop_header via the back
     // edge. Initialized from the latch's existing back-edge operands.
@@ -1785,6 +1724,26 @@ static void replace_use(LiftState *st, UseRecord u, MLIR_ValueHandle replacement
 // the back edge (requirement 1 of reduce form).
 static void check_value(MLIR_Context *ctx, ReduceCtx *r, MLIR_ValueHandle value) {
     if (value == MLIR_INVALID_HANDLE) return;
+
+    // Fast zero-alloc pre-check: 99% of values defined in a loop have all uses
+    // inside the loop; avoid snapshot_uses allocation unless an external use exists.
+    MLIR_UseHandle u_first = MLIR_GetValueFirstUse(ctx, value);
+    if (u_first == MLIR_INVALID_HANDLE) return;
+    MLIR_BlockHandle def_blk_fast = MLIR_GetValueParentBlock(ctx, value);
+    bool has_external = false;
+    for (MLIR_UseHandle u = u_first; u != MLIR_INVALID_HANDLE; u = MLIR_GetUseNext(ctx, u)) {
+        MLIR_OpHandle owner = MLIR_GetUseOwner(ctx, u);
+        if (owner == MLIR_INVALID_HANDLE) continue;
+        MLIR_BlockHandle ob = MLIR_GetOpParentBlock(ctx, owner);
+        if (ob == def_blk_fast) continue;
+        MLIR_BlockHandle curr = find_block_at_region_level(ctx, ob, r->loop_region);
+        if (curr == MLIR_INVALID_HANDLE) continue;
+        if (block_map_get(&r->loop_set, curr) != SIZE_MAX) continue;
+        has_external = true;
+        break;
+    }
+    if (!has_external) return;
+
     MLIR_TypeHandle ty = MLIR_GetValueType(ctx, value);
 
     MLIR_ValueHandle block_arg = MLIR_INVALID_HANDLE;
@@ -1795,13 +1754,12 @@ static void check_value(MLIR_Context *ctx, ReduceCtx *r, MLIR_ValueHandle value)
         MLIR_OpHandle owner = uses[i].op;
         if (owner == MLIR_INVALID_HANDLE) continue;
         MLIR_BlockHandle owner_block = MLIR_GetOpParentBlock(ctx, owner);
+        if (owner_block == def_blk_fast) continue;
         MLIR_BlockHandle curr = find_block_at_region_level(ctx, owner_block, r->loop_region);
         if (curr == MLIR_INVALID_HANDLE) {
-            // Detached or in a region we don't recognize; conservative
-            // skip rather than mis-replace.
             continue;
         }
-        if (block_set_contains(r->loop_blocks, r->n_loop_blocks, curr))
+        if (block_map_get(&r->loop_set, curr) != SIZE_MAX)
             continue;
 
         // External use found. Lazily build the exit/loop-header args.
@@ -1885,6 +1843,10 @@ static MLIR_ValueHandle *transform_to_reduce_loop(MLIR_Context *ctx,
     r.loop_region = MLIR_GetBlockParentRegion(ctx, loop_header);
     r.loop_blocks = loop_blocks;
     r.n_loop_blocks = n_loop_blocks;
+    block_map_init(st->arena, &r.loop_set, n_loop_blocks > 8 ? n_loop_blocks : 8);
+    for (size_t i = 0; i < n_loop_blocks; ++i) {
+        block_map_insert(&r.loop_set, loop_blocks[i], i);
+    }
     r.loc = loc;
     r.cap_lhso = n_init + 16;
     r.lhso = arena_new_array(st->arena, MLIR_ValueHandle, r.cap_lhso);
@@ -1911,7 +1873,7 @@ static MLIR_ValueHandle *transform_to_reduce_loop(MLIR_Context *ctx,
             MLIR_BlockHandle ob = MLIR_GetOpParentBlock(ctx, owner);
             MLIR_BlockHandle curr = find_block_at_region_level(ctx, ob, r.loop_region);
             if (curr == MLIR_INVALID_HANDLE) continue;
-            if (block_set_contains(loop_blocks, n_loop_blocks, curr)) continue;
+            if (block_map_get(&r.loop_set, curr) != SIZE_MAX) continue;
             // Don't replace the use that IS the back-edge successor operand
             // we just iterated past: we still want that operand to be the
             // original value `v`. But by definition, that use is *inside*
@@ -2150,17 +2112,20 @@ static MLIR_BlockHandle *transform_cycles_to_scf_loops(MLIR_Context *ctx,
                                                 iter_arg_types[i], hdr_loc);
         }
 
-        // Move blocks (header first, others, latch last) into the body region.
+        // Move blocks (header first, others, latch last) into the body region in one batch.
         MLIR_RegionHandle body_region = MLIR_CreateRegion(st->ctx);
-        MLIR_MoveBlockToRegionEnd(st->ctx, latch == loop_header ? latch : loop_header, body_region);
+        MLIR_BlockHandle *ordered = arena_new_array(arena, MLIR_BlockHandle, s_n + 2);
+        size_t n_ord = 0;
+        ordered[n_ord++] = (latch == loop_header) ? latch : loop_header;
         for (size_t i = 0; i < s_n; ++i) {
             MLIR_BlockHandle b = scc_blocks[i];
             if (b == loop_header || b == latch) continue;
-            MLIR_MoveBlockToRegionEnd(st->ctx, b, body_region);
+            ordered[n_ord++] = b;
         }
         if (latch != loop_header) {
-            MLIR_MoveBlockToRegionEnd(st->ctx, latch, body_region);
+            ordered[n_ord++] = latch;
         }
+        MLIR_MoveBlocksToRegionEnd(st->ctx, ordered, n_ord, body_region);
 
         // (5) Replace latch's terminator with scf.condition.
         MLIR_OpHandle old_latch_term = MLIR_GetBlockTerminator(ctx, latch);
@@ -2291,10 +2256,17 @@ static size_t collect_dominated_blocks(Arena *arena, const DomInfo *dom,
     while (sp > 0) {
         size_t cur = stack[--sp];
         MLIR_BlockHandle b = dom->po_blocks[cur];
-        n = block_set_insert(arena, out, n, cap, b);
-        for (size_t i = 0; i < n_in; ++i) {
-            if (i == cur) continue;
-            if (dom->idom[i] == cur) stack[sp++] = i;
+        // A dominator tree DFS visits each node in the subtree exactly once.
+        if (n == *cap) {
+            size_t nc = *cap ? (*cap) * 2 : 8;
+            MLIR_BlockHandle *na = arena_new_array(arena, MLIR_BlockHandle, nc);
+            if (n) memcpy(na, *out, sizeof(MLIR_BlockHandle) * n);
+            *out = na; *cap = nc;
+        }
+        (*out)[n++] = b;
+        size_t ce = dom->child_off[cur + 1];
+        for (size_t ci = dom->child_off[cur]; ci < ce; ++ci) {
+            stack[sp++] = dom->children[ci];
         }
     }
     return n;
@@ -2308,14 +2280,13 @@ typedef struct {
     bool              made_progress;   // false: branch shape unhandled, no IR change
 } BranchXformResult;
 
-static BranchXformResult transform_to_structured_cf_branches(MLIR_Context *ctx, 
-    LiftState *st, MLIR_BlockHandle region_entry, const DomInfo *dom)
+static BranchXformResult transform_to_structured_cf_branches(MLIR_Context *ctx,
+    LiftState *st, Arena *arena, MLIR_BlockHandle region_entry, MLIR_RegionHandle cur_region)
 {
     BranchXformResult res = {0};
     res.ok = true;
     res.made_progress = true;
 
-    Arena *arena = st->arena;
     MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, region_entry);
     if (term == MLIR_INVALID_HANDLE) { res.ok = false; return res; }
     size_t num_succ = MLIR_GetOpNumSuccessors(ctx, term);
@@ -2363,18 +2334,124 @@ static BranchXformResult transform_to_structured_cf_branches(MLIR_Context *ctx,
         return res;
     }
 
-    // Compute branch regions: blocks dominated by each successor edge.
-    // Edge dominates iff region_entry is the unique predecessor of succ.
-    MLIR_BlockHandle *not_continuation = NULL;
-    size_t n_nc = 0, cap_nc = 0;
-    n_nc = block_set_insert(arena, &not_continuation, n_nc, &cap_nc, region_entry);
-
     MLIR_BlockHandle **branch_regions = arena_new_array(arena, MLIR_BlockHandle*, num_succ);
     size_t *n_br = arena_new_array(arena, size_t, num_succ);
     size_t *cap_br = arena_new_array(arena, size_t, num_succ);
     memset(branch_regions, 0, sizeof(MLIR_BlockHandle*) * num_succ);
     memset(n_br, 0, sizeof(size_t) * num_succ);
     memset(cap_br, 0, sizeof(size_t) * num_succ);
+
+    MLIR_BlockHandle continuation = MLIR_INVALID_HANDLE;
+    bool fast_matched = false;
+
+    // O(1) fast path for simple if-then, if-else, 2-arm diamonds, and
+    // 1-block early-exit splits: avoids dom_compute + BlockMap completely.
+    if (is_cond_br && num_succ == 2) {
+        MLIR_BlockHandle s0 = MLIR_GetOpSuccessor(ctx, term, 0);
+        MLIR_BlockHandle s1 = MLIR_GetOpSuccessor(ctx, term, 1);
+        if (s0 != s1 && s0 != region_entry && s1 != region_entry) {
+            size_t np0 = MLIR_GetBlockNumPredecessors(ctx, s0);
+            size_t np1 = MLIR_GetBlockNumPredecessors(ctx, s1);
+            MLIR_OpHandle t0 = (np0 == 1) ? MLIR_GetBlockTerminator(ctx, s0) : MLIR_INVALID_HANDLE;
+            MLIR_OpHandle t1 = (np1 == 1) ? MLIR_GetBlockTerminator(ctx, s1) : MLIR_INVALID_HANDLE;
+            size_t ns0 = (t0 != MLIR_INVALID_HANDLE) ? MLIR_GetOpNumSuccessors(ctx, t0) : 0;
+            size_t ns1 = (t1 != MLIR_INVALID_HANDLE) ? MLIR_GetOpNumSuccessors(ctx, t1) : 0;
+            if (np0 == 1 && ns0 == 1 && MLIR_GetOpSuccessor(ctx, t0, 0) == s1 && np1 >= 2) {
+                branch_regions[0] = arena_new_array(arena, MLIR_BlockHandle, 1);
+                branch_regions[0][0] = s0;
+                n_br[0] = 1;
+                continuation = s1;
+                fast_matched = true;
+            } else if (np1 == 1 && ns1 == 1 && MLIR_GetOpSuccessor(ctx, t1, 0) == s0 && np0 >= 2) {
+                branch_regions[1] = arena_new_array(arena, MLIR_BlockHandle, 1);
+                branch_regions[1][0] = s1;
+                n_br[1] = 1;
+                continuation = s0;
+                fast_matched = true;
+            } else if (np0 == 1 && ns0 == 1 && np1 == 1 && ns1 == 1) {
+                MLIR_BlockHandle m0 = MLIR_GetOpSuccessor(ctx, t0, 0);
+                MLIR_BlockHandle m1 = MLIR_GetOpSuccessor(ctx, t1, 0);
+                if (m0 == m1 && m0 != region_entry && m0 != s0 && m0 != s1 &&
+                    MLIR_GetBlockNumPredecessors(ctx, m0) >= 2) {
+                    branch_regions[0] = arena_new_array(arena, MLIR_BlockHandle, 1);
+                    branch_regions[0][0] = s0;
+                    n_br[0] = 1;
+                    branch_regions[1] = arena_new_array(arena, MLIR_BlockHandle, 1);
+                    branch_regions[1][0] = s1;
+                    n_br[1] = 1;
+                    continuation = m0;
+                    fast_matched = true;
+                }
+            }
+            // Fast path for `if (cond) { 1-block -> exit } <rest of region>`:
+            // when one arm jumps straight to the region's unique exit block `ex`
+            // (n_succs == 0, n_preds >= 2) and the other arm has np == 1, the other
+            // arm dominates all remaining blocks in the DAG region.
+            if (!fast_matched && np0 == 1 && np1 == 1) {
+                int short_arm = -1;
+                MLIR_BlockHandle ex = MLIR_INVALID_HANDLE;
+                if (ns0 == 1) {
+                    MLIR_BlockHandle c0 = MLIR_GetOpSuccessor(ctx, t0, 0);
+                    if (c0 != region_entry && c0 != s0 && c0 != s1) {
+                        MLIR_OpHandle tex = MLIR_GetBlockTerminator(ctx, c0);
+                        size_t nsex = (tex != MLIR_INVALID_HANDLE) ? MLIR_GetOpNumSuccessors(ctx, tex) : 0;
+                        if (nsex == 0 && MLIR_GetBlockNumPredecessors(ctx, c0) >= 2) {
+                            short_arm = 0; ex = c0;
+                        }
+                    }
+                }
+                if (short_arm < 0 && ns1 == 1) {
+                    MLIR_BlockHandle c1 = MLIR_GetOpSuccessor(ctx, t1, 0);
+                    if (c1 != region_entry && c1 != s0 && c1 != s1) {
+                        MLIR_OpHandle tex = MLIR_GetBlockTerminator(ctx, c1);
+                        size_t nsex = (tex != MLIR_INVALID_HANDLE) ? MLIR_GetOpNumSuccessors(ctx, tex) : 0;
+                        if (nsex == 0 && MLIR_GetBlockNumPredecessors(ctx, c1) >= 2) {
+                            short_arm = 1; ex = c1;
+                        }
+                    }
+                }
+                if (short_arm >= 0) {
+                    MLIR_BlockHandle s_short = (short_arm == 0) ? s0 : s1;
+                    MLIR_BlockHandle s_long  = (short_arm == 0) ? s1 : s0;
+                    size_t nb_reg = MLIR_GetRegionNumBlocks(ctx, cur_region);
+                    MLIR_BlockHandle *long_arr = arena_new_array(arena, MLIR_BlockHandle, nb_reg);
+                    size_t n_long = 0;
+                    long_arr[n_long++] = s_long;
+                    bool ok_fast = true;
+                    for (size_t bi = 0; bi < nb_reg; ++bi) {
+                        MLIR_BlockHandle b = MLIR_GetRegionBlock(ctx, cur_region, bi);
+                        if (b == region_entry || b == s_short || b == s_long || b == ex) continue;
+                        MLIR_OpHandle bt = MLIR_GetBlockTerminator(ctx, b);
+                        size_t bns = (bt != MLIR_INVALID_HANDLE) ? MLIR_GetOpNumSuccessors(ctx, bt) : 0;
+                        if (bns == 0 || MLIR_GetBlockNumPredecessors(ctx, b) == 0) {
+                            ok_fast = false;
+                            break;
+                        }
+                        long_arr[n_long++] = b;
+                    }
+                    if (ok_fast) {
+                        branch_regions[short_arm] = arena_new_array(arena, MLIR_BlockHandle, 1);
+                        branch_regions[short_arm][0] = s_short;
+                        n_br[short_arm] = 1;
+                        branch_regions[1 - short_arm] = long_arr;
+                        n_br[1 - short_arm] = n_long;
+                        continuation = ex;
+                        fast_matched = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!fast_matched) {
+    DomInfo dom_val = dom_compute_ex(ctx, arena, cur_region, /*is_post=*/false, /*is_dag=*/true);
+    const DomInfo *dom = &dom_val;
+
+    // Compute branch regions: blocks dominated by each successor edge.
+    // Edge dominates iff region_entry is the unique predecessor of succ.
+    BlockMap not_continuation;
+    block_map_init(arena, &not_continuation, dom->n_real > 8 ? dom->n_real : 8);
+    block_map_insert(&not_continuation, region_entry, 0);
 
     for (size_t i = 0; i < num_succ; ++i) {
         MLIR_BlockHandle succ = MLIR_GetOpSuccessor(ctx, term, i);
@@ -2383,8 +2460,7 @@ static BranchXformResult transform_to_structured_cf_branches(MLIR_Context *ctx,
         n_br[i] = collect_dominated_blocks(arena, dom, succ,
                                            &branch_regions[i], n_br[i], &cap_br[i]);
         for (size_t k = 0; k < n_br[i]; ++k) {
-            n_nc = block_set_insert(arena, &not_continuation, n_nc, &cap_nc,
-                                    branch_regions[i][k]);
+            block_map_insert(&not_continuation, branch_regions[i][k], 0);
         }
     }
 
@@ -2432,7 +2508,7 @@ static BranchXformResult transform_to_structured_cf_branches(MLIR_Context *ctx,
             size_t bns = MLIR_GetOpNumSuccessors(ctx, bterm);
             for (size_t s = 0; s < bns; ++s) {
                 MLIR_BlockHandle bs = MLIR_GetOpSuccessor(ctx, bterm, s);
-                if (block_set_contains(not_continuation, n_nc, bs)) continue;
+                if (block_map_get(&not_continuation, bs) != SIZE_MAX) continue;
                 if (n_ce == cap_ce) {
                     size_t nc = cap_ce ? cap_ce * 2 : 4;
                     Edge *na = arena_new_array(arena, Edge, nc);
@@ -2558,7 +2634,6 @@ static BranchXformResult transform_to_structured_cf_branches(MLIR_Context *ctx,
     }
 
     // Find unique continuation block (or NULL).
-    MLIR_BlockHandle continuation = MLIR_INVALID_HANDLE;
     bool single = true;
     for (size_t i = 0; i < n_ce; ++i) {
         MLIR_BlockHandle s = MLIR_GetOpSuccessor(ctx, 
@@ -2582,6 +2657,7 @@ static BranchXformResult transform_to_structured_cf_branches(MLIR_Context *ctx,
         res.n_new_sub_regions = 1;
         return res;
     }
+    } // end if (!fast_matched)
 
     // Build conditional regions. For each successor:
     //   - empty branch region: a single dummy block carrying entry-edge operands.
@@ -2708,10 +2784,8 @@ static BranchXformResult transform_to_structured_cf_branches(MLIR_Context *ctx,
             }
         }
 
-        // Move branch region's blocks into `regions[i]`.
-        for (size_t k = 0; k < n_br[i]; ++k) {
-            MLIR_MoveBlockToRegionEnd(st->ctx, branch_regions[i][k], regions[i]);
-        }
+        // Move branch region's blocks into `regions[i]` in a single O(N) batch.
+        MLIR_MoveBlocksToRegionEnd(st->ctx, branch_regions[i], n_br[i], regions[i]);
         if (single_exit != MLIR_INVALID_HANDLE) {
             MLIR_MoveBlockToRegionEnd(st->ctx, single_exit, regions[i]);
         }
@@ -2912,6 +2986,11 @@ static MLIR_OpHandle create_scf_condition(MLIR_Context *ctx, Arena *arena,
 // cf.switch -> scf.index_switch). Newly-created sub-regions get pushed
 // onto the worklist so the algorithm reaches a fixed point.
 // ============================================================================
+typedef struct {
+    MLIR_BlockHandle block;
+    bool needs_scc;
+} LiftWlEntry;
+
 static bool transform_cfg_to_scf_region(MLIR_Context *ctx, LiftState *st, Combiner *combiner,
                                         MLIR_RegionHandle region) {
     if (MLIR_GetRegionNumBlocks(ctx, region) == 0) return false;
@@ -2922,48 +3001,84 @@ static bool transform_cfg_to_scf_region(MLIR_Context *ctx, LiftState *st, Combin
                                                    combiner);
 
     Arena *arena = st->arena;
-    MLIR_BlockHandle *worklist = arena_new_array(arena, MLIR_BlockHandle, 32);
+    LiftWlEntry *worklist = arena_new_array(arena, LiftWlEntry, 32);
     size_t wl_n = 0, wl_cap = 32;
-    worklist[wl_n++] = MLIR_GetRegionBlock(ctx, region, 0);
+    worklist[wl_n].block = MLIR_GetRegionBlock(ctx, region, 0);
+    worklist[wl_n].needs_scc = true;
+    wl_n++;
 
     bool changed_any = false;
     size_t safety_iter = 0;
     size_t safety_limit = 4096;
     while (wl_n > 0 && safety_iter++ < safety_limit) {
-        MLIR_BlockHandle cur = worklist[--wl_n];
+        LiftWlEntry ent = worklist[--wl_n];
+        MLIR_BlockHandle cur = ent.block;
         MLIR_RegionHandle cur_region = MLIR_GetBlockParentRegion(ctx, cur);
         if (MLIR_GetRegionNumBlocks(ctx, cur_region) <= 1) continue;
 
-        // M7: cycles -> scf.while.
-        size_t n_new7 = 0;
-        MLIR_BlockHandle *new7 = NULL;
-        new7 = transform_cycles_to_scf_loops(ctx, st, combiner, cur, &n_new7);
-        for (size_t i = 0; i < n_new7; ++i) {
-            if (wl_n == wl_cap) {
-                size_t nc = wl_cap * 2;
-                MLIR_BlockHandle *nw = arena_new_array(arena, MLIR_BlockHandle, nc);
-                memcpy(nw, worklist, sizeof(MLIR_BlockHandle) * wl_n);
-                worklist = nw; wl_cap = nc;
+        // Fast path: fuse trivial unique-pred 1-successor chain before SCC/dom.
+        for (;;) {
+            MLIR_OpHandle t0 = MLIR_GetBlockTerminator(ctx, cur);
+            if (t0 == MLIR_INVALID_HANDLE || MLIR_GetOpNumSuccessors(ctx, t0) != 1) break;
+            MLIR_BlockHandle s0 = MLIR_GetOpSuccessor(ctx, t0, 0);
+            if (s0 == cur || MLIR_GetBlockNumPredecessors(ctx, s0) != 1) break;
+            size_t n_args = MLIR_GetBlockNumArgs(ctx, s0);
+            size_t n_so   = MLIR_GetOpNumSuccessorOperands(ctx, t0, 0);
+            size_t n_share = n_args < n_so ? n_args : n_so;
+            for (size_t i = 0; i < n_share; ++i) {
+                MLIR_ValueHandle old_v = MLIR_GetBlockArg(ctx, s0, i);
+                MLIR_ValueHandle new_v = MLIR_GetOpSuccessorOperand(ctx, t0, 0, i);
+                MLIR_ReplaceAllUsesOfValue(st->ctx, old_v, new_v);
             }
-            worklist[wl_n++] = new7[i];
+            MLIR_EraseOp(st->ctx, t0);
+            MLIR_SpliceBlockOps(st->ctx, cur, s0);
+            MLIR_EraseBlock(st->ctx, s0);
+            changed_any = true;
         }
-        if (n_new7) changed_any = true;
+        if (MLIR_GetRegionNumBlocks(ctx, cur_region) <= 1) continue;
+
+        // M7: cycles -> scf.while. Only needed for initial region and loop body
+        // sub-regions created by M7 (M8 only partitions DAGs into DAGs).
+        if (ent.needs_scc) {
+            size_t n_new7 = 0;
+            MLIR_BlockHandle *new7 =
+                transform_cycles_to_scf_loops(ctx, st, combiner, cur, &n_new7);
+            for (size_t i = 0; i < n_new7; ++i) {
+                if (wl_n == wl_cap) {
+                    size_t nc = wl_cap * 2;
+                    LiftWlEntry *nw = arena_new_array(arena, LiftWlEntry, nc);
+                    memcpy(nw, worklist, sizeof(LiftWlEntry) * wl_n);
+                    worklist = nw; wl_cap = nc;
+                }
+                worklist[wl_n].block = new7[i];
+                worklist[wl_n].needs_scc = true;
+                wl_n++;
+            }
+            if (n_new7) changed_any = true;
+        }
 
         // M8: cond_br -> scf.if; cf.switch -> scf.index_switch.
-        DomInfo dom = dom_compute(ctx, arena, cur_region, /*is_post=*/false);
-        BranchXformResult r = transform_to_structured_cf_branches(ctx, st, cur, &dom);
-        if (!r.ok) continue;
-        if (r.made_progress) changed_any = true;
-        for (size_t i = 0; i < r.n_new_sub_regions; ++i) {
-            if (r.new_sub_regions[i] == cur && !r.made_progress) continue;
-            if (wl_n == wl_cap) {
-                size_t nc = wl_cap * 2;
-                MLIR_BlockHandle *nw = arena_new_array(arena, MLIR_BlockHandle, nc);
-                memcpy(nw, worklist, sizeof(MLIR_BlockHandle) * wl_n);
-                worklist = nw; wl_cap = nc;
+        // Allocate per-iteration DomInfo & temporary arrays on a Scratch arena
+        // so memory is reclaimed immediately and stays L1-hot.
+        Scratch iter_tmp = scratch_begin_avoid_conflict(arena);
+        BranchXformResult r =
+            transform_to_structured_cf_branches(ctx, st, iter_tmp.arena, cur, cur_region);
+        if (r.ok) {
+            if (r.made_progress) changed_any = true;
+            for (size_t i = 0; i < r.n_new_sub_regions; ++i) {
+                if (r.new_sub_regions[i] == cur && !r.made_progress) continue;
+                if (wl_n == wl_cap) {
+                    size_t nc = wl_cap * 2;
+                    LiftWlEntry *nw = arena_new_array(arena, LiftWlEntry, nc);
+                    memcpy(nw, worklist, sizeof(LiftWlEntry) * wl_n);
+                    worklist = nw; wl_cap = nc;
+                }
+                worklist[wl_n].block = r.new_sub_regions[i];
+                worklist[wl_n].needs_scc = false;
+                wl_n++;
             }
-            worklist[wl_n++] = r.new_sub_regions[i];
         }
+        scratch_end(iter_tmp);
     }
     if (wl_n > 0) {
         // Worklist still non-empty after `safety_limit` iterations.
@@ -3052,7 +3167,7 @@ bool MLIR_LiftCfToScfNative(MLIR_Context *ctx, MLIR_OpHandle module,
     bool llvm_cfg = options && options->llvm_cfg;
     if (MLIR_GetOpNumRegions(ctx, module) == 0) return true;
 
-    Arena *scratch = arena_create(4096);
+    Arena *scratch = arena_create(65536);
     MLIR_RegionHandle mod_body = MLIR_GetOpRegion(ctx, module, 0);
     size_t nb = MLIR_GetRegionNumBlocks(ctx, mod_body);
     for (size_t bi = 0; bi < nb; ++bi) {

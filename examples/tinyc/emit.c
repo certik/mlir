@@ -171,6 +171,10 @@ typedef struct {
     Program *program;
     FuncSig *sigs;
     size_t   n_sigs;
+    size_t  *sig_map;       // open-addressing hash table: 0=empty, idx+1 into sigs
+    size_t   sig_map_cap;
+    StructDef **struct_map; // open-addressing hash table: NULL=empty
+    size_t   struct_map_cap;
     FuncSig *cur_sig;
     MLIR_ValueHandle cur_sret_ptr;   // for struct-returning functions
     MLIR_ValueHandle cur_va_args;    // cursor_va functions: the hidden
@@ -254,11 +258,41 @@ static void emit_warn(E *e, string msg) {
     write_all(PLATFORM_STDERR_FD, &iov, 1);
 }
 
+static uint32_t emit_str_hash(string s) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < s.size; i++) {
+        h ^= (uint8_t)s.str[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
 static StructDef *find_struct(E *e, string name) {
     if (!e->program) return NULL;
-    for (size_t i = 0; i < e->program->structs.size; i++) {
-        StructDef *sd = e->program->structs.data[i];
-        if (str_eq(sd->name, name)) return sd;
+    size_t n = e->program->structs.size;
+    if (n == 0) return NULL;
+    if (!e->struct_map) {
+        size_t cap = 16;
+        while (cap < n * 2u + 1u) cap <<= 1;
+        e->struct_map = arena_new_array(e->arena, StructDef *, cap);
+        memset(e->struct_map, 0, cap * sizeof(StructDef *));
+        e->struct_map_cap = cap;
+        size_t mask = cap - 1;
+        for (size_t i = 0; i < n; i++) {
+            StructDef *sd = e->program->structs.data[i];
+            size_t slot = emit_str_hash(sd->name) & mask;
+            while (e->struct_map[slot]) {
+                if (str_eq(e->struct_map[slot]->name, sd->name)) break;
+                slot = (slot + 1) & mask;
+            }
+            if (!e->struct_map[slot]) e->struct_map[slot] = sd;
+        }
+    }
+    size_t mask = e->struct_map_cap - 1;
+    size_t slot = emit_str_hash(name) & mask;
+    while (e->struct_map[slot]) {
+        if (str_eq(e->struct_map[slot]->name, name)) return e->struct_map[slot];
+        slot = (slot + 1) & mask;
     }
     return NULL;
 }
@@ -278,17 +312,16 @@ static int struct_field_index(StructDef *sd, string name) {
 }
 
 static FuncSig *find_sig(E *e, string name) {
-    for (size_t i = 0; i < e->n_sigs; i++) {
-        if (str_eq(e->sigs[i].name, name)) {
-            // Mark the signature as referenced. Forward-declared
-            // functions that never end up being looked up here are
-            // skipped in the late `emit extern decls` pass — emitting
-            // a `func.func` declaration for an unreferenced extern
-            // would otherwise turn into a spurious wasm import that
-            // fails to resolve at link time.
-            e->sigs[i].is_used = true;
-            return &e->sigs[i];
+    if (!e->sig_map || e->n_sigs == 0) return NULL;
+    size_t mask = e->sig_map_cap - 1;
+    size_t slot = emit_str_hash(name) & mask;
+    while (e->sig_map[slot]) {
+        size_t idx = e->sig_map[slot] - 1;
+        if (str_eq(e->sigs[idx].name, name)) {
+            e->sigs[idx].is_used = true;
+            return &e->sigs[idx];
         }
+        slot = (slot + 1) & mask;
     }
     return NULL;
 }
@@ -5964,6 +5997,22 @@ static void build_signatures(E *e) {
             sig->llvm_fn_ty = MLIR_CreateTypeLLVMFunction(e->ctx,
                 ret_ty, sig->flat_in_tys, sig->n_flat_in,
                 /*is_var_arg=*/sig->is_variadic && !sig->cursor_va);
+        }
+    }
+    if (e->n_sigs > 0) {
+        size_t cap = 16;
+        while (cap < e->n_sigs * 2u + 1u) cap <<= 1;
+        e->sig_map = arena_new_array(e->arena, size_t, cap);
+        memset(e->sig_map, 0, cap * sizeof(size_t));
+        e->sig_map_cap = cap;
+        size_t mask = cap - 1;
+        for (size_t i = 0; i < e->n_sigs; i++) {
+            size_t slot = emit_str_hash(e->sigs[i].name) & mask;
+            while (e->sig_map[slot]) {
+                if (str_eq(e->sigs[e->sig_map[slot] - 1].name, e->sigs[i].name)) break;
+                slot = (slot + 1) & mask;
+            }
+            if (!e->sig_map[slot]) e->sig_map[slot] = i + 1;
         }
     }
 }

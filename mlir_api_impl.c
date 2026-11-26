@@ -1911,10 +1911,7 @@ size_t MLIR_GetBlockIndex(MLIR_Context *ctx, MLIR_BlockHandle bh) {
     if (!b) return (size_t)-1;
     uint32_t r = BLOCKS(ctx)[b].parent_region;
     if (!r) return (size_t)-1;
-    IR_Region *reg = &REGIONS(ctx)[r];
-    for (uint32_t i = 0; i < reg->n_blocks; i++)
-        if (reg->blocks[i] == b) return i;
-    return (size_t)-1;
+    return (size_t)BLOCKS(ctx)[b].region_pos;
 }
 
 MLIR_LocationHandle MLIR_GetValueLocation(MLIR_Context *ctx, MLIR_ValueHandle vh) {
@@ -3340,6 +3337,62 @@ void MLIR_MoveBlockToRegionEnd(MLIR_Context *ctx, MLIR_BlockHandle bh, MLIR_Regi
     MLIR_AppendRegionBlock(ctx, dest, bh);
 }
 
+void MLIR_MoveBlocksToRegionEnd(MLIR_Context *ctx, const MLIR_BlockHandle *bhs,
+                                size_t n_blocks, MLIR_RegionHandle dest) {
+    if (n_blocks == 0) return;
+    if (n_blocks == 1) {
+        MLIR_MoveBlockToRegionEnd(ctx, bhs[0], dest);
+        return;
+    }
+    uint32_t dst_r = REGION_IDX(ctx, dest, "MLIR_MoveBlocksToRegionEnd");
+    if (dst_r == 0) return;
+    // Fast path: all blocks currently belong to the same source region (and not dst_r).
+    uint32_t first_b = BLOCK_IDX(ctx, bhs[0], "MLIR_MoveBlocksToRegionEnd");
+    uint32_t src_r = first_b ? BLOCKS(ctx)[first_b].parent_region : 0;
+    bool same_src = (src_r != 0 && src_r != dst_r);
+    if (same_src) {
+        for (size_t i = 1; i < n_blocks; i++) {
+            uint32_t b = BLOCK_IDX(ctx, bhs[i], "MLIR_MoveBlocksToRegionEnd");
+            if (b == 0 || BLOCKS(ctx)[b].parent_region != src_r) {
+                same_src = false;
+                break;
+            }
+        }
+    }
+    if (!same_src) {
+        for (size_t i = 0; i < n_blocks; i++)
+            MLIR_MoveBlockToRegionEnd(ctx, bhs[i], dest);
+        return;
+    }
+    IR_Block *blks = BLOCKS(ctx);
+    for (size_t i = 0; i < n_blocks; i++) {
+        uint32_t b = BLOCK_IDX(ctx, bhs[i], "MLIR_MoveBlocksToRegionEnd");
+        blks[b].parent_region = 0;
+    }
+    IR_Region *sreg = &REGIONS(ctx)[src_r];
+    uint32_t w = 0;
+    for (uint32_t i = 0; i < sreg->n_blocks; i++) {
+        uint32_t x = sreg->blocks[i];
+        if (blks[x].parent_region == src_r) {
+            sreg->blocks[w] = x;
+            blks[x].region_pos = w;
+            w++;
+        }
+    }
+    sreg->n_blocks = w;
+
+    IR_Region *dreg = &REGIONS(ctx)[dst_r];
+    dreg->blocks = u32_reserve(ctx->arena, dreg->blocks, dreg->n_blocks,
+                               &dreg->cap_blocks, (size_t)dreg->n_blocks + n_blocks);
+    for (size_t i = 0; i < n_blocks; i++) {
+        uint32_t b = BLOCK_IDX(ctx, bhs[i], "MLIR_MoveBlocksToRegionEnd");
+        uint32_t pos = dreg->n_blocks++;
+        dreg->blocks[pos] = b;
+        blks[b].parent_region = dst_r;
+        blks[b].region_pos = pos;
+    }
+}
+
 // `idx` indexes the op's combined operand sequence (as upstream's
 // Operation::setOperand): the regular operands, then the successor operands
 // segment by segment. MLIR_GetValueUseOwner reports the same indices.
@@ -3496,9 +3549,7 @@ void MLIR_InsertRegionBlockAfter(MLIR_Context *ctx, MLIR_RegionHandle region,
     IR_Region *reg = &REGIONS(ctx)[r];
     uint32_t at = 0;
     if (a != 0) {
-        at = reg->n_blocks;
-        for (uint32_t i = 0; i < reg->n_blocks; i++)
-            if (reg->blocks[i] == a) { at = i + 1; break; }
+        at = (BLOCKS(ctx)[a].parent_region == r) ? (BLOCKS(ctx)[a].region_pos + 1) : reg->n_blocks;
     }
     region_insert_block(ctx, r, b, at);
 }
@@ -3511,11 +3562,8 @@ void MLIR_InsertRegionBlockBefore(MLIR_Context *ctx, MLIR_RegionHandle region,
     if (r == 0 || b == 0) return;
     detach_from_region(ctx, b);
     IR_Region *reg = &REGIONS(ctx)[r];
-    uint32_t at = reg->n_blocks;  // append if not found / invalid
-    if (bf != 0) {
-        for (uint32_t i = 0; i < reg->n_blocks; i++)
-            if (reg->blocks[i] == bf) { at = i; break; }
-    }
+    uint32_t at = (bf != 0 && BLOCKS(ctx)[bf].parent_region == r)
+        ? BLOCKS(ctx)[bf].region_pos : reg->n_blocks;
     region_insert_block(ctx, r, b, at);
 }
 
@@ -3538,51 +3586,45 @@ bool MLIR_IsBlockEntry(MLIR_Context *ctx, MLIR_BlockHandle bh) {
     return r && REGIONS(ctx)[r].n_blocks > 0 && REGIONS(ctx)[r].blocks[0] == b;
 }
 
-// Predecessors: walks the blocks of the parent region; each terminator
-// successor slot equal to `b` is one (predecessor block, successor slot)
-// entry. Returns the number of entries; stops at entry `want` (setting
-// *out_block and *out_succ) if `want` is in range.
-static size_t native_preds(MLIR_Context *ctx, uint32_t b, size_t want,
-                           uint32_t *out_block, size_t *out_succ) {
+// Predecessors: walks the block's O(in-degree) predecessor edge list.
+size_t MLIR_GetBlockNumPredecessors(MLIR_Context *ctx, MLIR_BlockHandle bh) {
+    uint32_t b = BLOCK_IDX(ctx, bh, "MLIR_GetBlockNumPredecessors");
     if (!b) return 0;
     uint32_t r = BLOCKS(ctx)[b].parent_region;
     if (!r) return 0;
-    IR_Region *reg = &REGIONS(ctx)[r];
+    const IR_PredEdge *preds = PREDS(ctx);
+    const IR_Op *ops = OPS(ctx);
+    const IR_Block *blocks = BLOCKS(ctx);
     size_t n = 0;
-    for (uint32_t i = 0; i < reg->n_blocks; i++) {
-        IR_Block *pb = &BLOCKS(ctx)[reg->blocks[i]];
-        if (pb->n_ops == 0) continue;
-        uint32_t term = pb->ops[pb->n_ops - 1];
-        const IR_OpExtra *ox = op_extra_get(ctx, term);
-        uint32_t ns = ox ? ox->n_successors : 0;
-        for (uint32_t s = 0; s < ns; s++) {
-            if (op_succ_pair(ctx, term, s)[0] != b) continue;
-            if (n == want) {
-                *out_block = reg->blocks[i];
-                *out_succ = s;
-                return n;
-            }
-            n++;
-        }
+    for (uint32_t p = blocks[b].first_pred; p; p = preds[p].next) {
+        uint32_t pb = ops[preds[p].owner].parent_block;
+        if (pb && blocks[pb].parent_region == r) n++;
     }
     return n;
 }
 
-size_t MLIR_GetBlockNumPredecessors(MLIR_Context *ctx, MLIR_BlockHandle bh) {
-    uint32_t b = BLOCK_IDX(ctx, bh, "MLIR_GetBlockNumPredecessors");
-    uint32_t pb = 0;
-    size_t s = 0;
-    return native_preds(ctx, b, SIZE_MAX, &pb, &s);
-}
-
 MLIR_BlockHandle MLIR_GetBlockPredecessor(MLIR_Context *ctx, MLIR_BlockHandle bh, size_t idx,
                                           size_t *out_succ_idx) {
+    if (out_succ_idx) *out_succ_idx = SIZE_MAX;
     uint32_t b = BLOCK_IDX(ctx, bh, "MLIR_GetBlockPredecessor");
-    uint32_t pb = 0;
-    size_t s = SIZE_MAX;
-    native_preds(ctx, b, idx, &pb, &s);
-    if (out_succ_idx) *out_succ_idx = pb ? s : SIZE_MAX;
-    return BLOCK_H(ctx, pb);
+    if (!b) return MLIR_INVALID_HANDLE;
+    uint32_t r = BLOCKS(ctx)[b].parent_region;
+    if (!r) return MLIR_INVALID_HANDLE;
+    const IR_PredEdge *preds = PREDS(ctx);
+    const IR_Op *ops = OPS(ctx);
+    const IR_Block *blocks = BLOCKS(ctx);
+    size_t n = 0;
+    for (uint32_t p = blocks[b].first_pred; p; p = preds[p].next) {
+        uint32_t pb = ops[preds[p].owner].parent_block;
+        if (pb && blocks[pb].parent_region == r) {
+            if (n == idx) {
+                if (out_succ_idx) *out_succ_idx = preds[p].succ_idx;
+                return BLOCK_H(ctx, pb);
+            }
+            n++;
+        }
+    }
+    return MLIR_INVALID_HANDLE;
 }
 
 MLIR_ValueHandle MLIR_AddBlockArgument(MLIR_Context *ctx, MLIR_BlockHandle bh,
