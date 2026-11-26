@@ -21,12 +21,91 @@ static int type_bytes(MLIR_Context *ctx, MLIR_ValueHandle v) {
 }
 
 // --- LLVM-type layout (mlir_llvm_type_layout.h; LP64: pointers are 8 bytes) --
-// Shared by getelementptr stride math and typed global serialization.
+// Direct-mapped cache for composite (struct/array) size & alignment so GEP
+// lowering doesn't re-walk nested struct fields on every instruction.
+#define X64_TY_CACHE_SZ 512u
+typedef struct {
+    MLIR_Context *ctx;
+    MLIR_TypeHandle ty;
+    unsigned size;
+    unsigned align;
+} X64TyCacheEnt;
+static X64TyCacheEnt g_x64_ty_cache[X64_TY_CACHE_SZ];
+
+static unsigned x64_type_align(MLIR_Context *ctx, MLIR_TypeHandle ty);
 static unsigned x64_type_size(MLIR_Context *ctx, MLIR_TypeHandle ty) {
-    return llvm_type_size(ctx, ty, 8);
+    MLIR_TypeKind k = MLIR_GetTypeKind(ctx, ty);
+    if (k == MLIR_TYPE_KIND_LLVM_POINTER) return 8;
+    if (k == MLIR_TYPE_KIND_INTEGER) {
+        uint32_t w = MLIR_GetTypeWidth(ctx, ty);
+        if (w == 1 || w == 8) return 1;
+        if (w == 16 || w == 32 || w == 64) return w / 8;
+        return 0;
+    }
+    if (k == MLIR_TYPE_KIND_FLOAT) {
+        uint32_t w = MLIR_GetTypeWidth(ctx, ty);
+        return (w == 32 || w == 64) ? w / 8 : 0;
+    }
+    size_t slot = (((uintptr_t)ty * 2654435761u) >> 4) & (X64_TY_CACHE_SZ - 1);
+    X64TyCacheEnt *e = &g_x64_ty_cache[slot];
+    if (e->ctx == ctx && e->ty == ty) return e->size;
+    unsigned sz = 0, al = 1;
+    if (k == MLIR_TYPE_KIND_LLVM_ARRAY) {
+        MLIR_TypeHandle et = MLIR_GetTypeElement(ctx, ty);
+        unsigned esz = x64_type_size(ctx, et);
+        al = x64_type_align(ctx, et);
+        sz = esz ? esz * (unsigned)MLIR_GetTypeNumElements(ctx, ty) : 0;
+    } else if (k == MLIR_TYPE_KIND_LLVM_STRUCT) {
+        size_t nf = MLIR_GetTypeLLVMStructNumFields(ctx, ty);
+        unsigned off = 0, ma = 1;
+        bool ok = true;
+        for (size_t i = 0; i < nf; i++) {
+            MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(ctx, ty, i);
+            unsigned fsz = x64_type_size(ctx, ft);
+            unsigned fal = x64_type_align(ctx, ft);
+            if ((fsz == 0 && !llvm_type_is_empty(ctx, ft, 8)) || fal == 0) {
+                ok = false; break;
+            }
+            off = llvm_align_up(off, fal) + fsz;
+            if (fal > ma) ma = fal;
+        }
+        al = ma;
+        sz = ok ? llvm_align_up(off, ma) : 0;
+    } else {
+        sz = llvm_type_size(ctx, ty, 8);
+        al = sz ? sz : 1;
+    }
+    e->ctx = ctx; e->ty = ty; e->size = sz; e->align = al;
+    return sz;
+}
+static unsigned x64_type_align(MLIR_Context *ctx, MLIR_TypeHandle ty) {
+    MLIR_TypeKind k = MLIR_GetTypeKind(ctx, ty);
+    if (k == MLIR_TYPE_KIND_LLVM_POINTER) return 8;
+    if (k == MLIR_TYPE_KIND_INTEGER) {
+        uint32_t w = MLIR_GetTypeWidth(ctx, ty);
+        if (w == 1 || w == 8) return 1;
+        if (w == 16 || w == 32 || w == 64) return w / 8;
+        return 1;
+    }
+    if (k == MLIR_TYPE_KIND_FLOAT) {
+        uint32_t w = MLIR_GetTypeWidth(ctx, ty);
+        return (w == 32 || w == 64) ? w / 8 : 1;
+    }
+    size_t slot = (((uintptr_t)ty * 2654435761u) >> 4) & (X64_TY_CACHE_SZ - 1);
+    X64TyCacheEnt *e = &g_x64_ty_cache[slot];
+    if (e->ctx == ctx && e->ty == ty) return e->align;
+    (void)x64_type_size(ctx, ty);
+    return e->align;
 }
 static unsigned x64_struct_field_offset(MLIR_Context *ctx, MLIR_TypeHandle sty, size_t fld) {
-    return llvm_struct_field_offset(ctx, sty, fld, 8);
+    unsigned off = 0;
+    for (size_t i = 0; i <= fld; i++) {
+        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(ctx, sty, i);
+        off = llvm_align_up(off, x64_type_align(ctx, ft));
+        if (i == fld) return off;
+        off += x64_type_size(ctx, ft);
+    }
+    return off;
 }
 
 // The elements of a dense i32 array (GEP rawConstantIndices), at most `cap`.
@@ -80,12 +159,11 @@ static void patch_rel32_at(FnCtx *F, uint32_t field_off, uint32_t target_off) {
     buf_patch_le32(&F->f->code, field_off, (uint32_t)rel);
 }
 
-// block index of a successor block within this function's single region
+// block index of a successor block within this function's single region (O(1))
 static int block_index(MLIR_Context *ctx, MLIR_RegionHandle reg, MLIR_BlockHandle blk) {
-    size_t n = MLIR_GetRegionNumBlocks(ctx, reg);
-    for (size_t i = 0; i < n; i++)
-        if (MLIR_GetRegionBlock(ctx, reg, i) == blk) return (int)i;
-    return -1;
+    (void)reg;
+    size_t idx = MLIR_GetBlockIndex(ctx, blk);
+    return idx == (size_t)-1 ? -1 : (int)idx;
 }
 
 // emit setcc al ; movzx eax, al
@@ -1612,9 +1690,8 @@ x64_done:
     obj_module_free(&m);
     free(data.data);
     free(entry_cstr);
-    for (size_t i = 0; i < gm.n; i++) free(gm.name[i]);
-    free(gm.name); free(gm.off); free(gm.sz);
-    free(refs.n);
+    gmap_free(&gm);
+    sym_free(&refs);
     free(reach.n);
     free(ptr_relocs);
     g_x64_gmap = NULL;
@@ -1674,9 +1751,8 @@ bool mlir_llvm_to_x64_code(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
 
     obj_module_free(&m);
     free(data.data);
-    for (size_t i = 0; i < gm.n; i++) free(gm.name[i]);
-    free(gm.name); free(gm.off); free(gm.sz);
-    free(refs.n);
+    gmap_free(&gm);
+    sym_free(&refs);
     free(ptr_relocs);
     g_x64_gmap = NULL;
     g_x64_mb = MLIR_INVALID_HANDLE;

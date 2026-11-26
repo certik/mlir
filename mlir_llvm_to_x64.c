@@ -83,38 +83,93 @@ static inline MLIR_ValueHandle x64_region_key(MLIR_OpHandle op) {
     return (MLIR_ValueHandle)((uintptr_t)op | ((uintptr_t)1 << (sizeof(uintptr_t) * 8 - 1)));
 }
 
-// Global symbol -> byte offset (and size) in the module data blob.
-typedef struct { char **name; uint32_t *off; uint32_t *sz; size_t n, cap; } GMap;
+static inline uint32_t x64_str_hash(const char *s, size_t n) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i++) {
+        h ^= (uint32_t)(unsigned char)s[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+// Global symbol -> byte offset (and size) in the module data blob (O(1) hash table).
+typedef struct {
+    char **name;
+    size_t *nlen;
+    uint32_t *off;
+    uint32_t *sz;
+    size_t n, cap;
+    size_t *ht;    // 0 = empty, else index + 1
+    size_t hcap;
+} GMap;
+static void gmap_rehash(GMap *g, size_t ncap) {
+    size_t *ht = (size_t *)calloc(ncap, sizeof(size_t));
+    size_t mask = ncap - 1;
+    for (size_t i = 0; i < g->n; i++) {
+        size_t k = x64_str_hash(g->name[i], g->nlen[i]) & mask;
+        while (ht[k]) k = (k + 1) & mask;
+        ht[k] = i + 1;
+    }
+    free(g->ht);
+    g->ht = ht;
+    g->hcap = ncap;
+}
 static bool gmap_get(GMap *g, string nm, uint32_t *out) {
-    for (size_t i = 0; i < g->n; i++)
-        if (strlen(g->name[i]) == nm.size && memcmp(g->name[i], nm.str, nm.size) == 0) {
-            *out = g->off[i]; return true;
+    if (!g->hcap) return false;
+    size_t mask = g->hcap - 1;
+    size_t k = x64_str_hash(nm.str, nm.size) & mask;
+    while (g->ht[k]) {
+        size_t idx = g->ht[k] - 1;
+        if (g->nlen[idx] == nm.size && memcmp(g->name[idx], nm.str, nm.size) == 0) {
+            *out = g->off[idx];
+            return true;
         }
+        k = (k + 1) & mask;
+    }
     return false;
 }
 static bool gmap_get_cstr(GMap *g, const char *nm, uint32_t *off, uint32_t *size) {
-    for (size_t i = 0; i < g->n; i++) {
-        if (strcmp(g->name[i], nm) == 0) {
-            if (off) *off = g->off[i];
-            if (size) *size = g->sz[i];
+    if (!g->hcap) return false;
+    size_t len = strlen(nm);
+    size_t mask = g->hcap - 1;
+    size_t k = x64_str_hash(nm, len) & mask;
+    while (g->ht[k]) {
+        size_t idx = g->ht[k] - 1;
+        if (g->nlen[idx] == len && memcmp(g->name[idx], nm, len) == 0) {
+            if (off) *off = g->off[idx];
+            if (size) *size = g->sz[idx];
             return true;
         }
+        k = (k + 1) & mask;
     }
     return false;
 }
 static void gmap_put(GMap *g, string nm, uint32_t off, uint32_t sz) {
     if (g->n == g->cap) {
-        g->cap = g->cap ? g->cap * 2 : 8;
+        g->cap = g->cap ? g->cap * 2 : 16;
         g->name = realloc(g->name, g->cap * sizeof(char *));
+        g->nlen = realloc(g->nlen, g->cap * sizeof(size_t));
         g->off  = realloc(g->off,  g->cap * sizeof(uint32_t));
         g->sz   = realloc(g->sz,   g->cap * sizeof(uint32_t));
     }
-    g->name[g->n] = (char *)malloc(nm.size + 1);
-    memcpy(g->name[g->n], nm.str, nm.size);
-    g->name[g->n][nm.size] = 0;
-    g->off[g->n] = off;
-    g->sz[g->n]  = sz;
-    g->n++;
+    if ((g->n + 1) * 2 > g->hcap) {
+        gmap_rehash(g, g->hcap ? g->hcap * 2 : 32);
+    }
+    size_t idx = g->n++;
+    g->name[idx] = (char *)malloc(nm.size + 1);
+    memcpy(g->name[idx], nm.str, nm.size);
+    g->name[idx][nm.size] = 0;
+    g->nlen[idx] = nm.size;
+    g->off[idx] = off;
+    g->sz[idx]  = sz;
+    size_t mask = g->hcap - 1;
+    size_t k = x64_str_hash(nm.str, nm.size) & mask;
+    while (g->ht[k]) k = (k + 1) & mask;
+    g->ht[k] = idx + 1;
+}
+static void gmap_free(GMap *g) {
+    for (size_t i = 0; i < g->n; i++) free(g->name[i]);
+    free(g->name); free(g->nlen); free(g->off); free(g->sz); free(g->ht);
 }
 
 // Reserve `sz` zero bytes at the end of a .data blob; return the slot offset.
@@ -137,16 +192,41 @@ static uint32_t x64_data_alloc_global(GMap *gm, Buf *data, string name, size_t s
 
 // Referenced external symbols (callees / addressof targets), for thunk synthesis.
 // Names are stored as views into MLIR attribute storage or string literals.
-typedef struct { string *n; size_t c, cap; } SymSet;
+typedef struct { string *n; size_t c, cap; size_t *ht; size_t hcap; } SymSet;
 static void sym_add(SymSet *s, string nm) {
-    for (size_t i = 0; i < s->c; i++)
-        if (str_eq(s->n[i], nm)) return;
+    if (s->hcap) {
+        size_t mask = s->hcap - 1;
+        size_t k = x64_str_hash(nm.str, nm.size) & mask;
+        while (s->ht[k]) {
+            if (str_eq(s->n[s->ht[k] - 1], nm)) return;
+            k = (k + 1) & mask;
+        }
+    }
     if (s->c == s->cap) {
-        s->cap = s->cap ? s->cap * 2 : 8;
+        s->cap = s->cap ? s->cap * 2 : 16;
         s->n = realloc(s->n, s->cap * sizeof(string));
     }
-    s->n[s->c++] = nm;
+    if ((s->c + 1) * 2 > s->hcap) {
+        size_t ncap = s->hcap ? s->hcap * 2 : 32;
+        size_t *ht = (size_t *)calloc(ncap, sizeof(size_t));
+        size_t mask = ncap - 1;
+        for (size_t i = 0; i < s->c; i++) {
+            size_t k = x64_str_hash(s->n[i].str, s->n[i].size) & mask;
+            while (ht[k]) k = (k + 1) & mask;
+            ht[k] = i + 1;
+        }
+        free(s->ht);
+        s->ht = ht;
+        s->hcap = ncap;
+    }
+    size_t idx = s->c++;
+    s->n[idx] = nm;
+    size_t mask = s->hcap - 1;
+    size_t k = x64_str_hash(nm.str, nm.size) & mask;
+    while (s->ht[k]) k = (k + 1) & mask;
+    s->ht[k] = idx + 1;
 }
+static void sym_free(SymSet *s) { free(s->n); free(s->ht); }
 
 // ---------------------------------------------------------------------------
 // Per-function lowering state.
@@ -400,33 +480,49 @@ static bool op_is_addressof(MLIR_Context *ctx, MLIR_OpHandle op) {
 
 // Load an operand value into `reg`. Handles constants, globals, slots.
 static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
-    MLIR_OpHandle def = MLIR_GetValueDefiningOp(F->ctx, v);
-    uint64_t fbits;
-    if (fp_const_val(F->ctx, v, &fbits)) { mov_ri(F, reg, (int64_t)fbits, 1); return; }
-    int64_t c;
-    if (is_const(F->ctx, def, &c)) { mov_ri(F, reg, c, val_w(F->ctx, v)); return; }
-    if (def != MLIR_INVALID_HANDLE && MLIR_GetOpType(F->ctx, def) == OP_TYPE_LLVM_MLIR_UNDEF) {
-        mov_ri(F, reg, 0, val_w(F->ctx, v)); return;
-    }
-    if (def != MLIR_INVALID_HANDLE && op_is_addressof(F->ctx, def)) {
-        MLIR_AttributeHandle a = MLIR_GetOpAttr(F->ctx, def, MLIR_KEY_GLOBAL_NAME);
-        if (a == MLIR_INVALID_HANDLE) a = MLIR_GetOpAttr(F->ctx, def, MLIR_KEY_VALUE);
-        string gn = strip_at(a ? MLIR_GetAttributeString(F->ctx, a) : (string){0});
-        if (!gn.size) { fail(F, "addressof missing symbol", (string){0}); return; }
-        uint32_t off;
-        if (gmap_get(F->gm, gn, &off) || x64_ensure_global_in_gmap(F, gn, &off))
-            lea_rip_data(F, reg, off);
-        else if (F->wasm_lifted && x64_is_wasm_data_sym(gn))
-            fail(F, "wasm global missing from data map", gn);
-        else
-            lea_rip_func(F, reg, gn);   // function / external symbol
-        return;
+    MLIR_Context *ctx = F->ctx;
+    MLIR_OpHandle def = MLIR_GetValueDefiningOp(ctx, v);
+    if (def != MLIR_INVALID_HANDLE) {
+        MLIR_OpType dt = MLIR_GetOpType(ctx, def);
+        if (dt == OP_TYPE_LLVM_MLIR_CONSTANT) {
+            MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, def, MLIR_KEY_VALUE);
+            if (a != MLIR_INVALID_HANDLE) {
+                int fb = fp_bytes(ctx, v);
+                if (fb) {
+                    double d = MLIR_GetAttributeFloat(ctx, a);
+                    uint64_t fbits;
+                    if (fb == 4) { float f = (float)d; uint32_t b32; memcpy(&b32, &f, 4); fbits = b32; }
+                    else         { memcpy(&fbits, &d, 8); }
+                    mov_ri(F, reg, (int64_t)fbits, 1);
+                    return;
+                }
+                mov_ri(F, reg, MLIR_GetAttributeInteger(ctx, a), val_w(ctx, v));
+                return;
+            }
+        } else if (dt == OP_TYPE_LLVM_MLIR_ZERO || dt == OP_TYPE_LLVM_MLIR_NULL ||
+                   dt == OP_TYPE_LLVM_MLIR_UNDEF) {
+            mov_ri(F, reg, 0, val_w(ctx, v));
+            return;
+        } else if (dt == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
+            MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, def, MLIR_KEY_GLOBAL_NAME);
+            if (a == MLIR_INVALID_HANDLE) a = MLIR_GetOpAttr(ctx, def, MLIR_KEY_VALUE);
+            string gn = strip_at(a ? MLIR_GetAttributeString(ctx, a) : (string){0});
+            if (!gn.size) { fail(F, "addressof missing symbol", (string){0}); return; }
+            uint32_t off;
+            if (gmap_get(F->gm, gn, &off) || x64_ensure_global_in_gmap(F, gn, &off))
+                lea_rip_data(F, reg, off);
+            else if (F->wasm_lifted && x64_is_wasm_data_sym(gn))
+                fail(F, "wasm global missing from data map", gn);
+            else
+                lea_rip_func(F, reg, gn);   // function / external symbol
+            return;
+        }
     }
     uint8_t rH;
-    if (val_in_reg(F, v, &rH)) { mov_rr(F, reg, rH, val_w(F->ctx, v)); return; }
+    if (val_in_reg(F, v, &rH)) { mov_rr(F, reg, rH, val_w(ctx, v)); return; }
     int32_t slot;
     if (!vmap_get(&F->slots, v, &slot)) { fail(F, "value with no slot", (string){0}); return; }
-    load_rbp(F, reg, slot, val_w(F->ctx, v));
+    load_rbp(F, reg, slot, val_w(ctx, v));
 }
 static void store_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
     uint8_t rH;

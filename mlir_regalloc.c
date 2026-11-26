@@ -132,15 +132,15 @@ static inline bool ra_is_const(const RegTarget *T, MLIR_Context *c, MLIR_OpHandl
     (void)T; int64_t v; uint8_t b; return const_int_val(c, o, &v, &b);
 }
 static inline bool ra_is_folded(const RegTarget *T, MLIR_Context *c, MLIR_OpHandle o) {
-    return a64_is_spine(c, o, T->memspine);
+    return T->memspine != NULL && a64_is_spine(c, o, T->memspine);
 }
 static inline bool ra_memfuse(const RegTarget *T, MLIR_Context *c, MLIR_OpHandle o,
                               MLIR_ValueHandle *b, MLIR_ValueHandle *i) {
-    return a64_memfuse_uses(c, o, T->memfuse, b, i);
+    return T->memfuse != NULL && a64_memfuse_uses(c, o, T->memfuse, b, i);
 }
 static inline bool ra_shiftfuse(const RegTarget *T, MLIR_Context *c, MLIR_OpHandle o,
                                 MLIR_ValueHandle *x) {
-    return a64_shiftfuse_uses(c, o, T->shiftfuse, x);
+    return T->shiftfuse != NULL && a64_shiftfuse_uses(c, o, T->shiftfuse, x);
 }
 
 static inline uint32_t ra_ctz64(uint64_t x) {

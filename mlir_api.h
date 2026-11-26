@@ -132,6 +132,10 @@ enum {
 
 MLIR_OpTraits MLIR_GetOpTypeTraits(MLIR_OpType type);
 MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle op);
+// If supported by the backend, change `op`'s type in place without
+// reallocating or unlinking it (returns true). Returns false if the
+// backend requires creating a replacement op instead.
+bool MLIR_TryRenameOpInPlace(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_OpType new_type);
 
 static inline bool MLIR_OpHasTrait(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_OpTraits traits) {
     return (MLIR_GetOpTypeTraits(MLIR_GetOpType(ctx, op)) & traits) == traits;
@@ -442,6 +446,10 @@ void MLIR_SetOpAttr(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key, MLIR_
 // The op's type, as created. For its name use
 // MLIR_GetOpTypeName(ctx, MLIR_GetOpType(ctx, op)).
 MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle op);
+// If supported by the backend, change `op`'s type in place without
+// reallocating or unlinking it (returns true). Returns false if the
+// backend requires creating a replacement op instead.
+bool MLIR_TryRenameOpInPlace(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_OpType new_type);
 MLIR_LocationHandle MLIR_GetOpLocation(MLIR_Context *ctx, MLIR_OpHandle op);
 size_t MLIR_GetOpNumOperands(MLIR_Context *ctx, MLIR_OpHandle op);
 MLIR_ValueHandle MLIR_GetOpOperand(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx);
@@ -987,6 +995,7 @@ typedef enum {
     MLIR_ORDER_PO
 } MLIR_BlockOrder;
 
+size_t MLIR_GetBlockIndex(MLIR_Context *ctx, MLIR_BlockHandle block);
 size_t MLIR_GetBlockOrder(MLIR_Context *ctx, MLIR_RegionHandle region,
                           MLIR_BlockOrder order, Arena *out,
                           MLIR_BlockHandle **out_blocks);

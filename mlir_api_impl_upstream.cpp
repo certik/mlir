@@ -907,6 +907,10 @@ extern "C" MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle h) {
     if (MLIR_UP_LIKELY(slot.ptr == p)) return slot.type;
     return getOpTypeSlow(ctx, name, slot);
 }
+extern "C" bool MLIR_TryRenameOpInPlace(MLIR_Context *ctx, MLIR_OpHandle h, MLIR_OpType new_type) {
+    (void)ctx; (void)h; (void)new_type;
+    return false;
+}
 extern "C" MLIR_LocationHandle MLIR_GetOpLocation(MLIR_Context *ctx, MLIR_OpHandle h) {
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpLocation");
     return locH(F<mlir::Operation>(h)->getLoc());

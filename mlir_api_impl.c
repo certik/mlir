@@ -1715,6 +1715,13 @@ MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle oh) {
     return (MLIR_OpType)OPS(ctx)[o].op_type;
 }
 
+bool MLIR_TryRenameOpInPlace(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_OpType new_type) {
+    uint32_t o = OP_IDX(ctx, oh, "MLIR_TryRenameOpInPlace");
+    CHECK_OP(ctx, o, "MLIR_TryRenameOpInPlace");
+    OPS(ctx)[o].op_type = (uint16_t)new_type;
+    return true;
+}
+
 size_t MLIR_GetOpNumRegions(MLIR_Context *ctx, MLIR_OpHandle oh) {
     uint32_t o = OP_IDX(ctx, oh, "MLIR_GetOpNumRegions");
     CHECK_OP(ctx, o, "MLIR_GetOpNumRegions");
