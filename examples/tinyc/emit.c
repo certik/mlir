@@ -125,6 +125,7 @@ typedef struct FuncSig {
     bool           defined_here;     // the body is in this TU, so a char /
                                      // short / bool result is already
                                      // narrowed (by its return statement)
+    MLIR_AttributeHandle callee_attr; // cached SymbolRef attr for sig->name
 } FuncSig;
 
 typedef struct StructTypeEntry {
@@ -159,6 +160,11 @@ typedef struct {
     MLIR_AttributeHandle cmpi_pred_attrs[10]; // cached predicate attrs 0..9
     MLIR_AttributeHandle small_i32_attrs[128]; // cached i32 constant attrs 0..127
     MLIR_AttributeHandle small_i64_attrs[32];  // cached i64 constant attrs 0..31
+    MLIR_AttributeHandle gep_0k_attrs[32];     // cached GEP [0, k] attrs 0..31
+    MLIR_AttributeHandle gep_0dyn_attr;        // cached GEP [0, dyn] attr
+    MLIR_AttributeHandle gep_dyn_attr;         // cached GEP [dyn] attr
+    MLIR_TypeHandle      ty_attr_k[128];       // direct-mapped cache: type -> TypeAttr
+    MLIR_AttributeHandle ty_attr_v[128];
     bool                 caches_init;
     bool             target_wasm32;  // mirrors program->target_wasm32, cached on E for convenience
     MLIR_BlockHandle cur_block;
@@ -573,6 +579,14 @@ static void emit_init_attr_caches(E *e) {
     for (int64_t v = 0; v < 32; v++) {
         e->small_i64_attrs[v] = MLIR_CreateAttributeInteger(e->ctx, v, e->i64);
     }
+    for (int32_t k = 0; k < 32; k++) {
+        int32_t pair[2] = { 0, k };
+        e->gep_0k_attrs[k] = MLIR_CreateAttributeDenseI32Array(e->ctx, pair, 2);
+    }
+    int32_t pair_dyn[2] = { 0, (int32_t)0x80000000 };
+    e->gep_0dyn_attr = MLIR_CreateAttributeDenseI32Array(e->ctx, pair_dyn, 2);
+    int32_t single_dyn[1] = { (int32_t)0x80000000 };
+    e->gep_dyn_attr = MLIR_CreateAttributeDenseI32Array(e->ctx, single_dyn, 1);
 }
 
 static MLIR_ValueHandle emit_const_i32(E *e, int64_t v) {
@@ -911,6 +925,16 @@ static Sym *lookup(E *e, Scope *sc, string name) {
 
 // ----- LLVM-dialect storage primitives -----
 
+static MLIR_AttributeHandle emit_type_attr(E *e, MLIR_TypeHandle ty) {
+    size_t slot = (((uintptr_t)ty * 2654435761u) >> 4) & 127u;
+    if (e->ty_attr_k[slot] == ty && ty != MLIR_INVALID_HANDLE)
+        return e->ty_attr_v[slot];
+    MLIR_AttributeHandle a = MLIR_CreateAttributeType(e->ctx, ty);
+    e->ty_attr_k[slot] = ty;
+    e->ty_attr_v[slot] = a;
+    return a;
+}
+
 static MLIR_ValueHandle emit_alloca(E *e, MLIR_TypeHandle elem_ty) {
     // Hoist all `llvm.alloca` ops to the function's entry block so loops
     // (where local declarations sit on each iteration) don't grow the stack
@@ -919,7 +943,7 @@ static MLIR_ValueHandle emit_alloca(E *e, MLIR_TypeHandle elem_ty) {
     MLIR_ValueHandle r = MLIR_INVALID_HANDLE;
     MLIR_TypeHandle rts[1] = { e->ptr };
     MLIR_ValueHandle ops[1] = { e->entry_const_one };
-    MLIR_NamedAttr as[1] = { MLIR_Named(MLIR_KEY_ELEM_TYPE, MLIR_CreateAttributeType(e->ctx, elem_ty)) };
+    MLIR_NamedAttr as[1] = { MLIR_Named(MLIR_KEY_ELEM_TYPE, emit_type_attr(e, elem_ty)) };
 
     bool hoist = e->entry_block && e->entry_block != e->cur_block;
     MLIR_BlockHandle saved = e->cur_block;
@@ -963,10 +987,25 @@ static MLIR_ValueHandle emit_gep(E *e,
         : arena_new_array(e->arena, MLIR_ValueHandle, n_ops);
     ops[0] = base;
     for (size_t i = 0; i < n_dyn; i++) ops[1 + i] = dyn_idx[i];
+    MLIR_AttributeHandle idx_attr;
+    if (n_raw == 2 && raw_idx[0] == 0) {
+        if (!e->caches_init) emit_init_attr_caches(e);
+        if (raw_idx[1] >= 0 && raw_idx[1] < 32) {
+            idx_attr = e->gep_0k_attrs[raw_idx[1]];
+        } else if (raw_idx[1] == LLVM_GEP_DYN) {
+            idx_attr = e->gep_0dyn_attr;
+        } else {
+            idx_attr = MLIR_CreateAttributeDenseI32Array(e->ctx, raw_idx, n_raw);
+        }
+    } else if (n_raw == 1 && raw_idx[0] == LLVM_GEP_DYN) {
+        if (!e->caches_init) emit_init_attr_caches(e);
+        idx_attr = e->gep_dyn_attr;
+    } else {
+        idx_attr = MLIR_CreateAttributeDenseI32Array(e->ctx, raw_idx, n_raw);
+    }
     MLIR_NamedAttr as[2];
-    as[0] = MLIR_Named(MLIR_KEY_RAW_CONSTANT_INDICES, MLIR_CreateAttributeDenseI32Array(
-        e->ctx, raw_idx, n_raw));
-    as[1] = MLIR_Named(MLIR_KEY_ELEM_TYPE, MLIR_CreateAttributeType(e->ctx, source_elem_ty));
+    as[0] = MLIR_Named(MLIR_KEY_RAW_CONSTANT_INDICES, idx_attr);
+    as[1] = MLIR_Named(MLIR_KEY_ELEM_TYPE, emit_type_attr(e, source_elem_ty));
     return emit_op1(e, OP_TYPE_LLVM_GEP, e->ptr, ops, (uint32_t)n_ops, as, 2);
 }
 
@@ -2507,7 +2546,9 @@ static void emit_flat_call(E *e, Scope *sc, FuncSig *sig, VecExprPtr args,
             }
         }
     }
-    MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, n_in ? n_in : 1);
+    MLIR_ValueHandle ops_stk[16];
+    MLIR_ValueHandle *ops = (n_in <= 16) ? ops_stk
+        : arena_new_array(e->arena, MLIR_ValueHandle, n_in);
     size_t op_off = 0;
     MLIR_ValueHandle ret_buf = MLIR_INVALID_HANDLE;
     if (sig->sret) {
@@ -2619,25 +2660,27 @@ static void emit_flat_call(E *e, Scope *sc, FuncSig *sig, VecExprPtr args,
         }
     }
     size_t n_out = sig->n_flat_out;
-    MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, n_out ? n_out : 1);
-    MLIR_ValueHandle *rs  = arena_new_array(e->arena, MLIR_ValueHandle, n_out ? n_out : 1);
+    MLIR_TypeHandle rts_stk[2];
+    MLIR_ValueHandle rs_stk[2];
+    MLIR_TypeHandle *rts = (n_out <= 2) ? rts_stk : arena_new_array(e->arena, MLIR_TypeHandle, n_out);
+    MLIR_ValueHandle *rs = (n_out <= 2) ? rs_stk  : arena_new_array(e->arena, MLIR_ValueHandle, n_out);
     for (size_t i = 0; i < n_out; i++) {
         rts[i] = sig->flat_out_tys[i];
     }
-    MLIR_NamedAttr callee_attr = MLIR_Named(MLIR_KEY_CALLEE, MLIR_CreateAttributeSymbolRef(
-        e->ctx, sig->name));
+    if (!sig->callee_attr) {
+        sig->callee_attr = MLIR_CreateAttributeSymbolRef(e->ctx, sig->name);
+    }
+    MLIR_NamedAttr callee_attr = MLIR_Named(MLIR_KEY_CALLEE, sig->callee_attr);
     if (real_variadic) {
         MLIR_NamedAttr var_ty = MLIR_Named(MLIR_KEY_VAR_CALLEE_TYPE, MLIR_CreateAttributeType(
             e->ctx, sig->llvm_fn_ty));
-        MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 2);
+        MLIR_NamedAttr as[2];
         as[0] = callee_attr; as[1] = var_ty;
         emit_op(e, OP_TYPE_LLVM_CALL,
                 rts, n_out, rs, n_out, ops, op_off, as, 2, NULL, 0);
     } else {
-        MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1);
-        as[0] = callee_attr;
         emit_op(e, OP_TYPE_FUNC_CALL,
-                rts, n_out, rs, n_out, ops, op_off, as, 1, NULL, 0);
+                rts, n_out, rs, n_out, ops, op_off, &callee_attr, 1, NULL, 0);
     }
     if (out_results) {
         if (sig->sret) out_results[0] = ret_buf;
@@ -4228,7 +4271,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // operating on the !llvm.ptr that backs the va_list buffer.
             // The first argument must be a va_list lvalue; we take its
             // address (the alloca pointer) directly.
-            if (!indirect_fnty && (str_eq(ex->callee, str_lit("va_start"))
+            char callee_c0 = (!indirect_fnty && ex->callee.size > 0) ? ex->callee.str[0] : 0;
+            if ((callee_c0 == 'v' || callee_c0 == '_') &&
+                                 (str_eq(ex->callee, str_lit("va_start"))
                                  || str_eq(ex->callee, str_lit("va_end"))
                                  || str_eq(ex->callee, str_lit("va_copy"))
                                  || str_eq(ex->callee, str_lit("__builtin_va_start"))
@@ -4285,7 +4330,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             }
             // Built-in __builtin_sqrt / __builtin_sqrtf: lower to
             // llvm.intr.sqrt on f64 / f32 respectively.
-            if (!indirect_fnty &&
+            if (callee_c0 == '_' &&
                 (str_eq(ex->callee, str_lit("__builtin_sqrt")) ||
                  str_eq(ex->callee, str_lit("__builtin_sqrtf")))) {
                 bool is_f32 = str_eq(ex->callee, str_lit("__builtin_sqrtf"));
@@ -4318,7 +4363,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // (e.g. after a noreturn syscall). tinyC does no flow analysis on
             // it, so treat it as a no-op — any code the C author placed after
             // it is already dead. Returns a dummy i32 for expression contexts.
-            if (!indirect_fnty && str_eq(ex->callee, str_lit("__builtin_unreachable"))) {
+            if (callee_c0 == '_' && str_eq(ex->callee, str_lit("__builtin_unreachable"))) {
                 if (ex->args.size != 0) {
                     EMIT_ERR(e, "__builtin_unreachable expects 0 arguments");
                 }
@@ -4331,7 +4376,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // primitive corec's platform_*.c builds raw syscalls from; it has
             // meaning only for native targets (there are no raw syscalls on
             // wasm — use the WASI platform there).
-            if (!indirect_fnty && str_eq(ex->callee, str_lit("__builtin_syscall6"))) {
+            if (callee_c0 == '_' && str_eq(ex->callee, str_lit("__builtin_syscall6"))) {
                 if (ex->args.size != 7) {
                     EMIT_ERR(e, "__builtin_syscall6 expects 7 arguments (num + 6)");
                     r.val = emit_const_i64(e, 0); r.is_i64 = true; return r;
@@ -4360,7 +4405,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // argument (memory index) must be the integer literal 0;
             // we don't model multi-memory wasm yet so we just verify
             // and drop it. Both intrinsics produce i32 results.
-            if (!indirect_fnty &&
+            if (callee_c0 == '_' &&
                 (str_eq(ex->callee, str_lit("__builtin_wasm_memory_size")) ||
                  str_eq(ex->callee, str_lit("__builtin_wasm_memory_grow")))) {
                 bool is_grow = str_eq(ex->callee, str_lit("__builtin_wasm_memory_grow"));
@@ -4399,7 +4444,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // coerce_eval avoids emitting a no-op `arith.extsi i64->i64`
             // when the source is already size_t-sized (e.g. `size_t n;
             // malloc(n)` on a 64-bit host).
-            if (!indirect_fnty && str_eq(ex->callee, str_lit("malloc"))) {
+            if (callee_c0 == 'm' && str_eq(ex->callee, str_lit("malloc"))) {
                 // If the user provided their own `extern void *malloc(...);`
                 // prototype, mark that signature as referenced so the
                 // forward-decl loop in emit_program emits a proper
@@ -4426,7 +4471,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         rts, 1, rs, 1, ops, 1, as, 1, NULL, 0);
                 r.val = res; r.is_ptr = true; return r;
             }
-            if (!indirect_fnty && str_eq(ex->callee, str_lit("free"))) {
+            if (callee_c0 == 'f' && str_eq(ex->callee, str_lit("free"))) {
                 (void)find_sig(e, ex->callee);
                 if (ex->args.size != 1) {
                     EMIT_ERR(e, "free expects 1 argument");
@@ -7576,8 +7621,14 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         Func *fwd = program->funcs.data[i];
         if (!fwd->is_forward) continue;
         FuncSig *sig = NULL;
-        for (size_t j = 0; j < e.n_sigs; j++) {
-            if (str_eq(e.sigs[j].name, fwd->name)) { sig = &e.sigs[j]; break; }
+        if (e.sig_map_cap > 0) {
+            size_t mask = e.sig_map_cap - 1;
+            size_t slot = emit_str_hash(fwd->name) & mask;
+            while (e.sig_map[slot] != 0) {
+                size_t idx = e.sig_map[slot] - 1;
+                if (str_eq(e.sigs[idx].name, fwd->name)) { sig = &e.sigs[idx]; break; }
+                slot = (slot + 1) & mask;
+            }
         }
         if (!sig) continue;
         // Skip extern decls for forward-declared functions nobody

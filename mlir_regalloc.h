@@ -31,7 +31,16 @@ extern "C" {
 // Value handle -> int32 map (slot index / physical register / use count),
 // open-addressed and arena-backed.
 typedef struct { uintptr_t key; int32_t slot; } SlotEnt;
-typedef struct { SlotEnt *t; size_t cap; size_t n; Arena *arena; } SlotMap;
+typedef struct {
+    SlotEnt *t;
+    size_t cap;
+    size_t n;
+    Arena *arena;
+    // Optional dense direct-indexed table (empty = -1) for native dense handles.
+    int32_t *dense;
+    uintptr_t dense_base;
+    size_t dense_len;
+} SlotMap;
 void sm_put(SlotMap *m, MLIR_ValueHandle k, int32_t slot);
 bool sm_get(SlotMap *m, MLIR_ValueHandle k, int32_t *out);
 void uc_inc(SlotMap *m, MLIR_ValueHandle k);

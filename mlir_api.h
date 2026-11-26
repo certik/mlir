@@ -770,6 +770,11 @@ void MLIR_ReplaceAllUsesOfValue(MLIR_Context *ctx,
 // the storage to the arena.
 void MLIR_EraseOp(MLIR_Context *ctx, MLIR_OpHandle op);
 
+// Batch-erases `ops[0..n)` in order. Equivalent to calling MLIR_EraseOp on
+// each element, but the native backend compacts each affected block in a
+// single O(block.n_ops) pass instead of shifting on every erase.
+void MLIR_EraseOps(MLIR_Context *ctx, const MLIR_OpHandle *ops, size_t n);
+
 // Removes `op` from its parent block (if any) and keeps it: the handle stays
 // valid, and its operands, results, attributes and regions are unchanged.
 // Insert it again with MLIR_AppendBlockOp / MLIR_InsertBlockOpAtIndex, or

@@ -29,11 +29,29 @@ typedef struct {
     uintptr_t max_key;
 } HMap;
 
+static HMap g_hmap_pool[8];
+static size_t g_hmap_pool_n = 0;
+
 static void hmap_init(HMap *m, size_t hint) {
     size_t cap = 16;
     while (cap < hint * 2) cap <<= 1;
+    if (g_hmap_pool_n > 0) {
+        HMap p = g_hmap_pool[--g_hmap_pool_n];
+        if (p.cap >= cap && p.cap <= cap * 4) {
+            memset(p.keys, 0, p.cap * sizeof(uintptr_t));
+            m->keys = p.keys;
+            m->vals = p.vals;
+            m->cap = p.cap;
+            m->n = 0;
+            m->min_key = (uintptr_t)-1;
+            m->max_key = 0;
+            return;
+        }
+        free(p.keys);
+        free(p.vals);
+    }
     m->keys = (uintptr_t *)calloc(cap, sizeof(uintptr_t));
-    m->vals = (uintptr_t *)calloc(cap, sizeof(uintptr_t));
+    m->vals = (uintptr_t *)malloc(cap * sizeof(uintptr_t));
     m->cap = cap;
     m->n = 0;
     m->min_key = (uintptr_t)-1;
@@ -41,8 +59,12 @@ static void hmap_init(HMap *m, size_t hint) {
 }
 
 static void hmap_free(HMap *m) {
-    free(m->keys);
-    free(m->vals);
+    if (m->keys && g_hmap_pool_n < 8 && m->cap <= 16384) {
+        g_hmap_pool[g_hmap_pool_n++] = *m;
+    } else {
+        free(m->keys);
+        free(m->vals);
+    }
     m->keys = NULL;
     m->vals = NULL;
     m->cap = 0;
@@ -67,7 +89,7 @@ static void hmap_put(HMap *m, uintptr_t key, uintptr_t val);
 static void hmap_grow(HMap *m) {
     size_t ncap = m->cap << 1;
     uintptr_t *nk = (uintptr_t *)calloc(ncap, sizeof(uintptr_t));
-    uintptr_t *nv = (uintptr_t *)calloc(ncap, sizeof(uintptr_t));
+    uintptr_t *nv = (uintptr_t *)malloc(ncap * sizeof(uintptr_t));
     for (size_t i = 0; i < m->cap; i++) {
         if (m->keys[i] != 0) {
             size_t s = hmap_slot(nk, ncap, m->keys[i]);
@@ -138,9 +160,35 @@ typedef struct {
     size_t p_pool_n, p_pool_cap;
     HMap defOut;                // (bi*na+ai+1) -> last value stored in block
     HMap entryDef;              // (bi*na+ai+1) -> memoised reaching vref at entry
+    uintptr_t *def_arr;         // flat pooled [nb * na] when nb * na <= 32768
+    uintptr_t *entry_arr;       // flat pooled [nb * na] when nb * na <= 32768
     HMap aidx;                  // alloca result handle -> candidate index
     HMap remap;                 // llvm.load result handle -> reaching vref
 } M;
+
+static uintptr_t *g_l2r_flat_buf = NULL;
+static size_t g_l2r_flat_cap = 0;
+
+static inline uintptr_t l2r_def_get(M *m, size_t bi, size_t ai) {
+    if (m->def_arr) return m->def_arr[bi * m->na + ai];
+    uintptr_t d = 0;
+    hmap_get(&m->defOut, (uintptr_t)(bi * m->na + ai + 1), &d);
+    return d;
+}
+static inline void l2r_def_put(M *m, size_t bi, size_t ai, uintptr_t v) {
+    if (m->def_arr) { m->def_arr[bi * m->na + ai] = v; return; }
+    hmap_put(&m->defOut, (uintptr_t)(bi * m->na + ai + 1), v);
+}
+static inline uintptr_t l2r_entry_get(M *m, size_t bi, size_t ai) {
+    if (m->entry_arr) return m->entry_arr[bi * m->na + ai];
+    uintptr_t e = 0;
+    hmap_get(&m->entryDef, (uintptr_t)(bi * m->na + ai + 1), &e);
+    return e;
+}
+static inline void l2r_entry_put(M *m, size_t bi, size_t ai, uintptr_t v) {
+    if (m->entry_arr) { m->entry_arr[bi * m->na + ai] = v; return; }
+    hmap_put(&m->entryDef, (uintptr_t)(bi * m->na + ai + 1), v);
+}
 
 static MLIR_LocationHandle l2r_unkloc(MLIR_Context *ctx) {
     return MLIR_CreateLocationUnknown(ctx, (string){0});
@@ -228,9 +276,8 @@ static MLIR_ValueHandle l2r_make_zero(M *m, size_t bi, size_t ai) {
 static uintptr_t l2r_live_in(M *m, size_t ai, size_t bi);
 
 static uintptr_t l2r_live_out(M *m, size_t ai, size_t bi) {
-    uintptr_t d;
-    if (hmap_get(&m->defOut, (uintptr_t)(bi * m->na + ai + 1), &d))
-        return d;
+    uintptr_t d = l2r_def_get(m, bi, ai);
+    if (d) return d;
     return l2r_live_in(m, ai, bi);
 }
 
@@ -265,9 +312,8 @@ static size_t l2r_new_phi(M *m, size_t bi, size_t ai, size_t np) {
 }
 
 static uintptr_t l2r_live_in(M *m, size_t ai, size_t bi) {
-    uintptr_t key = (uintptr_t)(bi * m->na + ai + 1);
-    uintptr_t e;
-    if (hmap_get(&m->entryDef, key, &e)) return e;
+    uintptr_t e = l2r_entry_get(m, bi, ai);
+    if (e) return e;
 
     size_t po = m->pred_off[bi];
     size_t pe = m->pred_off[bi + 1];
@@ -275,12 +321,12 @@ static uintptr_t l2r_live_in(M *m, size_t ai, size_t bi) {
 
     if (np == 0) {
         uintptr_t v = (uintptr_t)l2r_make_zero(m, bi, ai);
-        hmap_put(&m->entryDef, key, v);
+        l2r_entry_put(m, bi, ai, v);
         return v;
     }
     if (np == 1) {
         uintptr_t v = l2r_live_out(m, ai, m->pred_blk[po]);
-        hmap_put(&m->entryDef, key, v);
+        l2r_entry_put(m, bi, ai, v);
         return v;
     }
 
@@ -288,7 +334,7 @@ static uintptr_t l2r_live_in(M *m, size_t ai, size_t bi) {
     // so back-edges in loops terminate.
     size_t pid = l2r_new_phi(m, bi, ai, np);
     uintptr_t ref = L2R_MK_PHI(pid);
-    hmap_put(&m->entryDef, key, ref);
+    l2r_entry_put(m, bi, ai, ref);
     size_t base_off = m->p_op_off[pid];
     for (size_t e2 = po; e2 < pe; e2++) {
         uintptr_t v = l2r_live_out(m, ai, m->pred_blk[e2]);
@@ -355,7 +401,7 @@ static void l2r_sweep_block(M *m, MLIR_BlockHandle blk) {
 }
 
 // Promote one function body region (flat cf CFG) in place.
-static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
+static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region, size_t max_alloca_blk) {
     size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
     if (nb == 0) return;
 
@@ -371,7 +417,7 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
         m.terms[bi]  = MLIR_GetBlockTerminator(ctx, m.blocks[bi]);
     }
 
-    // ---- Collect candidate allocas (every llvm.alloca in the region) -------
+    // ---- Collect candidate allocas (every llvm.alloca in blocks 0..max_alloca_blk) ----
     hmap_init(&m.aidx, 16);
     size_t cap = 32;
     m.elemty     = (MLIR_TypeHandle *)malloc(cap * sizeof(MLIR_TypeHandle));
@@ -379,7 +425,8 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     MLIR_ValueHandle *alloca_res = (MLIR_ValueHandle *)malloc(cap * sizeof(MLIR_ValueHandle));
     MLIR_OpHandle    *alloca_op  = (MLIR_OpHandle *)malloc(cap * sizeof(MLIR_OpHandle));
     size_t na = 0;
-    for (size_t bi = 0; bi < nb; bi++) {
+    size_t scan_nb = (max_alloca_blk < nb) ? (max_alloca_blk + 1) : nb;
+    for (size_t bi = 0; bi < scan_nb; bi++) {
         MLIR_BlockHandle blk = m.blocks[bi];
         size_t nops = MLIR_GetBlockNumOps(ctx, blk);
         for (size_t j = 0; j < nops; j++) {
@@ -453,9 +500,22 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     hmap_init(&m.remap, remap_hint);
 
     if (nb > 1) {
-        size_t def_hint = nb * 2 < 16 ? 16 : nb * 2;
-        hmap_init(&m.defOut, def_hint);
-        hmap_init(&m.entryDef, def_hint);
+        size_t grid = nb * na;
+        if (grid <= 32768) {
+            size_t need = grid * 2;
+            if (need > g_l2r_flat_cap) {
+                free(g_l2r_flat_buf);
+                g_l2r_flat_cap = need < 256 ? 256 : need;
+                g_l2r_flat_buf = (uintptr_t *)malloc(g_l2r_flat_cap * sizeof(uintptr_t));
+            }
+            memset(g_l2r_flat_buf, 0, need * sizeof(uintptr_t));
+            m.def_arr = g_l2r_flat_buf;
+            m.entry_arr = g_l2r_flat_buf + grid;
+        } else {
+            size_t def_hint = nb * 2 < 16 ? 16 : nb * 2;
+            hmap_init(&m.defOut, def_hint);
+            hmap_init(&m.entryDef, def_hint);
+        }
 
         // ---- defOut: last value stored to each promotable alloca per block -----
         for (size_t bi = 0; bi < nb; bi++) {
@@ -466,8 +526,7 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
                 if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_STORE) continue;
                 size_t ai = l2r_alloca_index(&m, MLIR_GetOpOperand(ctx, op, 1));
                 if (ai == (size_t)-1 || !m.promotable[ai]) continue;
-                hmap_put(&m.defOut, (uintptr_t)(bi * na + ai + 1),
-                         (uintptr_t)MLIR_GetOpOperand(ctx, op, 0));
+                l2r_def_put(&m, bi, ai, (uintptr_t)MLIR_GetOpOperand(ctx, op, 0));
             }
         }
 
@@ -607,8 +666,11 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
     }
 
     // ---- Edge wiring: append each surviving phi's incoming value -----------
+    // When def-use tracking is on and there are no surviving phis, all
+    // successor-operand uses of remapped loads were already updated by
+    // MLIR_ReplaceAllUsesOfValue above.
     MLIR_ValueHandle *sobuf = NULL;
-    if (nb > 1) {
+    if (nb > 1 && (!tracked || surv_off != NULL)) {
         size_t sobuf_cap = 8;
         sobuf = (MLIR_ValueHandle *)malloc(sobuf_cap * sizeof(MLIR_ValueHandle));
         for (size_t k = 0; k < nb; k++) {
@@ -642,12 +704,11 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
         }
     }
 
-    // ---- Erase the now-dead load / store ops first (reverse order), then
-    //      the promotable allocas (whose uses are now gone). ----------------
-    for (size_t i = erase_n; i-- > 0; )
-        MLIR_EraseOp(ctx, erase[i]);
-    for (size_t ai = na; ai-- > 0; )
-        if (m.promotable[ai]) MLIR_EraseOp(ctx, alloca_op[ai]);
+    // ---- Erase the now-dead load / store ops first, then the promotable
+    //      allocas (whose uses are now gone) in a single O(n) batch compaction.
+    for (size_t ai = 0; ai < na; ai++)
+        if (m.promotable[ai]) L2R_ERASE(alloca_op[ai]);
+    MLIR_EraseOps(ctx, erase, erase_n);
 
     #undef L2R_ERASE
     free(sobuf);
@@ -964,9 +1025,12 @@ static void sroa_rewrite(S *s, MLIR_BlockHandle blk) {
     }
 }
 
-static void sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
+// Returns true if the region contains any llvm.alloca at all, and sets
+// *out_max_alloca_blk to the highest block index that contained an alloca.
+static bool sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region, size_t *out_max_alloca_blk) {
+    *out_max_alloca_blk = 0;
     size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
-    if (nb == 0) return;
+    if (nb == 0) return false;
 
     S s;
     memset(&s, 0, sizeof(s));
@@ -974,12 +1038,16 @@ static void sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
 
     // Collect aggregate (struct/array) allocas with a constant element count.
     // Lazily allocate arrays/hash tables only if at least one exists.
+    bool saw_any_alloca = false;
+    size_t max_alloca_blk = 0;
     for (size_t bi = 0; bi < nb; bi++) {
         MLIR_BlockHandle blk = MLIR_GetRegionBlock(ctx, region, bi);
         size_t nops = MLIR_GetBlockNumOps(ctx, blk);
         for (size_t j = 0; j < nops; j++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, j);
             if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_ALLOCA) continue;
+            saw_any_alloca = true;
+            max_alloca_blk = bi;
             if (MLIR_GetOpNumOperands(ctx, op) < 1) continue;
             MLIR_AttributeHandle ea = MLIR_GetOpAttr(ctx, op, MLIR_KEY_ELEM_TYPE);
             if (ea == MLIR_INVALID_HANDLE) continue;
@@ -1018,7 +1086,8 @@ static void sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
             hmap_put(&s.aidx, (uintptr_t)res, (uintptr_t)ai);
         }
     }
-    if (s.na == 0) return;
+    *out_max_alloca_blk = max_alloca_blk;
+    if (s.na == 0) return saw_any_alloca;
 
     bool tracked = MLIR_HasContextDefUseTracking(ctx);
     if (tracked) {
@@ -1141,6 +1210,7 @@ done:
     free(s.a_elem); free(s.a_ptrty); free(s.a_split);
     free(s.geps);
     hmap_free(&s.aidx); hmap_free(&s.gidx);
+    return saw_any_alloca;
 }
 
 void mlir_llvm_mem2reg(MLIR_Context *ctx, MLIR_OpHandle module) {
@@ -1158,8 +1228,9 @@ void mlir_llvm_mem2reg(MLIR_Context *ctx, MLIR_OpHandle module) {
         if (!is_func) continue;
         if (MLIR_GetOpNumRegions(ctx, op) == 0) continue;
         MLIR_RegionHandle body = MLIR_GetOpRegion(ctx, op, 0);
-        sroa_region(ctx, body);
-        l2r_promote_region(ctx, body);
+        size_t max_blk = 0;
+        if (sroa_region(ctx, body, &max_blk))
+            l2r_promote_region(ctx, body, max_blk);
     }
 }
 
@@ -1169,8 +1240,9 @@ bool mlir_pass_mem2reg_run(MLIR_PassContext *pc, MLIR_OpHandle fn, void *state) 
     if (ft != OP_TYPE_FUNC_FUNC && ft != OP_TYPE_LLVM_FUNC) return true;
     if (MLIR_GetOpNumRegions(pc->ctx, fn) == 0) return true;
     MLIR_RegionHandle body = MLIR_GetOpRegion(pc->ctx, fn, 0);
-    sroa_region(pc->ctx, body);
-    l2r_promote_region(pc->ctx, body);
+    size_t max_blk = 0;
+    if (sroa_region(pc->ctx, body, &max_blk))
+        l2r_promote_region(pc->ctx, body, max_blk);
     return true;
 }
 

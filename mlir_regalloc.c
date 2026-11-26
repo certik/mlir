@@ -57,7 +57,25 @@ static void sm_reserve(SlotMap *m, size_t want) {
     m->t = nt;
     m->cap = ncap;
 }
+static void sm_init_dense(SlotMap *m, uintptr_t base, size_t len) {
+    if (m->cap != 0 || m->n != 0 || m->dense != NULL || len == 0) return;
+    int32_t *d = (int32_t *)arena_alloc(m->arena, len * sizeof(int32_t));
+    memset(d, 0xff, len * sizeof(int32_t));
+    m->dense = d;
+    m->dense_base = base;
+    m->dense_len = len;
+}
 void sm_put(SlotMap *m, MLIR_ValueHandle k, int32_t slot) {
+    if (m->dense) {
+        uintptr_t idx = (uintptr_t)k - m->dense_base;
+        if (idx < m->dense_len && slot >= 0) {
+            if (m->dense[idx] < 0) {
+                m->dense[idx] = slot;
+                m->n++;
+            }
+            return;
+        }
+    }
     if ((m->n + 1) * 4 >= m->cap * 3) sm_grow(m);
     size_t mask = m->cap - 1;
     size_t i = sm_hash((uintptr_t)k) & mask;
@@ -70,6 +88,14 @@ void sm_put(SlotMap *m, MLIR_ValueHandle k, int32_t slot) {
     m->n++;
 }
 bool sm_get(SlotMap *m, MLIR_ValueHandle k, int32_t *out) {
+    if (m->dense) {
+        uintptr_t idx = (uintptr_t)k - m->dense_base;
+        if (idx < m->dense_len) {
+            int32_t v = m->dense[idx];
+            if (v >= 0) { *out = v; return true; }
+        }
+        if (m->cap == 0) return false;
+    }
     if (m->cap == 0) return false;
     size_t mask = m->cap - 1;
     size_t i = sm_hash((uintptr_t)k) & mask;
@@ -317,8 +343,8 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     uint32_t *block_first = (uint32_t *)ra_bump(mbuf, &moff, n_blocks * sizeof(uint32_t));
     uint32_t *block_last  = (uint32_t *)ra_bump(mbuf, &moff, n_blocks * sizeof(uint32_t));
     uint32_t *blk_vstart  = (uint32_t *)ra_bump(mbuf, &moff, (n_blocks + 1) * sizeof(uint32_t));
-    uint8_t  *has_call    = (uint8_t  *)ra_bump(mbuf, &moff, n_blocks * sizeof(uint8_t));
-    memset(has_call, 0, n_blocks * sizeof(uint8_t));
+    uint32_t *first_call  = (uint32_t *)ra_bump(mbuf, &moff, n_blocks * sizeof(uint32_t));
+    memset(first_call, 0xff, n_blocks * sizeof(uint32_t));
     MLIR_ValueHandle *handle = (MLIR_ValueHandle *)ra_bump(mbuf, &moff, nv_alloc * sizeof(MLIR_ValueHandle));
     uint32_t *def_pos   = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
     uint32_t *def_blk   = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
@@ -356,7 +382,8 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
             if (MLIR_GetOpNumRegions(ctx, op) > 0) return RA_BAIL;
             MLIR_OpType oty = MLIR_GetOpType(ctx, op);
-            if (oty == OP_TYPE_LLVM_CALL) has_call[b] = 1;
+            if (oty == OP_TYPE_LLVM_CALL && first_call[b] == UINT32_MAX)
+                first_call[b] = (uint32_t)i;
             bool is_c = (oty == OP_TYPE_LLVM_MLIR_CONSTANT ||
                          oty == OP_TYPE_LLVM_MLIR_ZERO ||
                          oty == OP_TYPE_LLVM_MLIR_NULL) &&
@@ -407,19 +434,22 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     )
 
     // --- 1b. Precompute CSR successors + per-block loop depth via terminator only. ---
-    uint32_t *succ_off = (uint32_t *)ra_bump(mbuf, &moff, (n_blocks + 1) * sizeof(uint32_t));
-    size_t n_succ_tot = 0;
-    for (size_t b = 0; b < n_blocks; b++) {
-        succ_off[b] = (uint32_t)n_succ_tot;
-        MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, blk_h[b]);
-        if (term != MLIR_INVALID_HANDLE) n_succ_tot += MLIR_GetOpNumSuccessors(ctx, term);
-    }
-    succ_off[n_blocks] = (uint32_t)n_succ_tot;
-    uint32_t *succ_idx = (uint32_t *)ra_pool_ensure(
-        &g_ra_succ_pool, (n_succ_tot ? n_succ_tot : 1) * sizeof(uint32_t));
-    uint32_t *loop_depth = (uint32_t *)ra_bump(mbuf, &moff, n_blocks * sizeof(uint32_t));
-    memset(loop_depth, 0, n_blocks * sizeof(uint32_t));
+    uint32_t *succ_off = NULL;
+    uint32_t *succ_idx = NULL;
+    uint32_t *loop_depth = NULL;
     if (n_blocks > 1) {
+        succ_off = (uint32_t *)ra_bump(mbuf, &moff, (n_blocks + 1) * sizeof(uint32_t));
+        size_t n_succ_tot = 0;
+        for (size_t b = 0; b < n_blocks; b++) {
+            succ_off[b] = (uint32_t)n_succ_tot;
+            MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, blk_h[b]);
+            if (term != MLIR_INVALID_HANDLE) n_succ_tot += MLIR_GetOpNumSuccessors(ctx, term);
+        }
+        succ_off[n_blocks] = (uint32_t)n_succ_tot;
+        succ_idx = (uint32_t *)ra_pool_ensure(
+            &g_ra_succ_pool, (n_succ_tot ? n_succ_tot : 1) * sizeof(uint32_t));
+        loop_depth = (uint32_t *)ra_bump(mbuf, &moff, n_blocks * sizeof(uint32_t));
+        memset(loop_depth, 0, n_blocks * sizeof(uint32_t));
         int64_t *delta = (int64_t *)ra_bump(mbuf, &moff, (n_blocks + 1) * sizeof(int64_t));
         memset(delta, 0, (n_blocks + 1) * sizeof(int64_t));
         size_t sc = 0;
@@ -449,15 +479,20 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     //        AND identify cross-block ("global") values for sparse liveness. ---
     uint32_t *glob_id = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
     memset(glob_id, 0xff, nv_alloc * sizeof(uint32_t));
-    uint32_t *glob_vi = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
+    uint32_t *glob_vi = NULL;
     uint32_t n_glob = 0;
-    size_t gen_cap = 256, gen_n = 0;
-    RaGenEdge *gen_edges = (RaGenEdge *)ra_pool_ensure(&g_ra_gen_pool, gen_cap * sizeof(RaGenEdge));
-    gen_cap = g_ra_gen_pool.cap / sizeof(RaGenEdge);
+    size_t gen_cap = 0, gen_n = 0;
+    RaGenEdge *gen_edges = NULL;
     uint32_t *nuse = NULL;
-    if (env->phi_coalesce) {
-        nuse = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
-        memset(nuse, 0, nv_alloc * sizeof(uint32_t));
+    if (n_blocks > 1) {
+        glob_vi = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
+        gen_cap = 256;
+        gen_edges = (RaGenEdge *)ra_pool_ensure(&g_ra_gen_pool, gen_cap * sizeof(RaGenEdge));
+        gen_cap = g_ra_gen_pool.cap / sizeof(RaGenEdge);
+        if (env->phi_coalesce) {
+            nuse = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
+            memset(nuse, 0, nv_alloc * sizeof(uint32_t));
+        }
     }
 
     #define RA_RECORD_USE(VI, BLK_B, UP, W) do { \
@@ -491,7 +526,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     for (size_t b = 0; b < n_blocks; b++) {
         MLIR_BlockHandle bk = blk_h[b];
         uint32_t op_pos = block_first[b];
-        uint64_t w = A64_USE_WEIGHT_AT(loop_depth[b]);
+        uint64_t w = loop_depth ? A64_USE_WEIGHT_AT(loop_depth[b]) : 1ull;
         size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
@@ -653,13 +688,14 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         uint32_t *call_ps = call_ps_stk;
         size_t call_cap = 64;
         for (size_t b = 0; b < n_blocks; b++) {
-            if (!has_call[b]) continue;
+            uint32_t fci = first_call[b];
+            if (fci == UINT32_MAX) continue;
             MLIR_BlockHandle bk = blk_h[b];
             size_t no = MLIR_GetBlockNumOps(ctx, bk);
             if (bw_g) memcpy(live_g, live_out + b * bw_g, bw_g * sizeof(uint64_t));
             size_t n_calls = 0;
             uint32_t bfirst = block_first[b];
-            for (size_t ii = no; ii-- > 0; ) {
+            for (size_t ii = no; ii-- > (size_t)fci; ) {
                 MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, ii);
                 if (ra_is_folded(T, ctx, op)) continue;
                 if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_CALL) {
@@ -882,8 +918,16 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     {
         size_t n_spills = 0;
         for (uint32_t vi = 0; vi < nv; vi++) if (home_pk[vi] < 0) n_spills++;
-        if (n_spills > 0) sm_reserve(sm, n_spills);
-        if (nv > n_spills) sm_reserve(rm, nv - n_spills);
+        if (v_dense) {
+            if (n_spills > 0) {
+                if (v_span <= n_spills * 4u + 64u) sm_init_dense(sm, min_vh, v_span);
+                else sm_reserve(sm, n_spills);
+            }
+            if (nv > n_spills) sm_init_dense(rm, min_vh, v_span);
+        } else {
+            if (n_spills > 0) sm_reserve(sm, n_spills);
+            if (nv > n_spills) sm_reserve(rm, nv - n_spills);
+        }
         bool no_reuse = env->no_slot_reuse;
         uint32_t *sl_slot = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
         uint32_t *sl_end  = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));

@@ -2350,6 +2350,10 @@ extern "C" void MLIR_EraseOp(MLIR_Context *cctx, MLIR_OpHandle op_h) {
     op->erase();
 }
 
+extern "C" void MLIR_EraseOps(MLIR_Context *cctx, const MLIR_OpHandle *ops, size_t n) {
+    for (size_t i = 0; i < n; i++) MLIR_EraseOp(cctx, ops[i]);
+}
+
 extern "C" void MLIR_DetachOp(MLIR_Context *cctx, MLIR_OpHandle op_h) {
     API_CHECK(op_h != MLIR_INVALID_HANDLE, "MLIR_DetachOp", "op handle is NULL");
     if (op_h == MLIR_INVALID_HANDLE) return;

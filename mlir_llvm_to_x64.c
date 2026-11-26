@@ -57,13 +57,43 @@ enum { CC_E=0x4, CC_NE=0x5, CC_B=0x2, CC_AE=0x3, CC_BE=0x6, CC_A=0x7,
 // Value -> stack-slot map (open-addressing on the value handle).
 // ---------------------------------------------------------------------------
 typedef struct { uintptr_t *k; int32_t *v; size_t cap, n; } VMap;
+static uintptr_t *g_x64_vmap_k = NULL;
+static int32_t   *g_x64_vmap_v = NULL;
+static size_t     g_x64_vmap_cap = 0;
 static void vmap_init(VMap *m, size_t want) {
     size_t cap = 16; while (cap < want * 2) cap *= 2;
-    m->k = (uintptr_t *)calloc(cap, sizeof(uintptr_t));
-    m->v = (int32_t *)malloc(cap * sizeof(int32_t));
+    if (cap > g_x64_vmap_cap) {
+        free(g_x64_vmap_k);
+        free(g_x64_vmap_v);
+        g_x64_vmap_k = (uintptr_t *)malloc(cap * sizeof(uintptr_t));
+        g_x64_vmap_v = (int32_t *)malloc(cap * sizeof(int32_t));
+        g_x64_vmap_cap = cap;
+    }
+    memset(g_x64_vmap_k, 0, cap * sizeof(uintptr_t));
+    m->k = g_x64_vmap_k;
+    m->v = g_x64_vmap_v;
     m->cap = cap; m->n = 0;
 }
+static void vmap_grow(VMap *m) {
+    size_t ncap = m->cap * 2;
+    uintptr_t *nk = (uintptr_t *)calloc(ncap, sizeof(uintptr_t));
+    int32_t   *nv = (int32_t *)malloc(ncap * sizeof(int32_t));
+    size_t mask = ncap - 1;
+    for (size_t i = 0; i < m->cap; i++) {
+        if (!m->k[i]) continue;
+        size_t j = (m->k[i] * 1099511628211ull) & mask;
+        while (nk[j]) j = (j + 1) & mask;
+        nk[j] = m->k[i]; nv[j] = m->v[i];
+    }
+    free(g_x64_vmap_k);
+    free(g_x64_vmap_v);
+    g_x64_vmap_k = nk;
+    g_x64_vmap_v = nv;
+    g_x64_vmap_cap = ncap;
+    m->k = nk; m->v = nv; m->cap = ncap;
+}
 static void vmap_put(VMap *m, MLIR_ValueHandle key, int32_t val) {
+    if ((m->n + 1) * 2 >= m->cap) vmap_grow(m);
     uintptr_t k = (uintptr_t)key;
     size_t i = (k * 1099511628211ull) & (m->cap - 1);
     while (m->k[i]) { if (m->k[i] == k) { m->v[i] = val; return; } i = (i + 1) & (m->cap - 1); }
@@ -75,7 +105,7 @@ static bool vmap_get(VMap *m, MLIR_ValueHandle key, int32_t *out) {
     while (m->k[i]) { if (m->k[i] == k) { *out = m->v[i]; return true; } i = (i + 1) & (m->cap - 1); }
     return false;
 }
-static void vmap_free(VMap *m) { free(m->k); free(m->v); m->k = NULL; m->v = NULL; }
+static void vmap_free(VMap *m) { m->k = NULL; m->v = NULL; m->cap = 0; m->n = 0; }
 // The slot map also holds each alloca's region, keyed by its op handle with
 // the top bit set: op and value handles can be equal natively (both are
 // indices), and neither kind of handle has the top bit.

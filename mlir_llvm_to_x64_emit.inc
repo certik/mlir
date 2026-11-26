@@ -97,14 +97,34 @@ static unsigned x64_type_align(MLIR_Context *ctx, MLIR_TypeHandle ty) {
     (void)x64_type_size(ctx, ty);
     return e->align;
 }
-static unsigned x64_struct_field_offset(MLIR_Context *ctx, MLIR_TypeHandle sty, size_t fld) {
+#define X64_FLD_CACHE_SZ 256
+typedef struct {
+    MLIR_Context *ctx;
+    MLIR_TypeHandle sty;
+    uint32_t fld;
+    uint32_t off;
+    MLIR_TypeHandle fty;
+} X64FldCacheEnt;
+static X64FldCacheEnt g_x64_fld_cache[X64_FLD_CACHE_SZ];
+
+static unsigned x64_struct_field_info(MLIR_Context *ctx, MLIR_TypeHandle sty, size_t fld,
+                                      MLIR_TypeHandle *out_fty) {
+    size_t slot = ((((uintptr_t)sty * 2654435761u) ^ ((uintptr_t)fld * 40503u))) & (X64_FLD_CACHE_SZ - 1);
+    X64FldCacheEnt *e = &g_x64_fld_cache[slot];
+    if (e->ctx == ctx && e->sty == sty && e->fld == (uint32_t)fld) {
+        if (out_fty) *out_fty = e->fty;
+        return e->off;
+    }
     unsigned off = 0;
+    MLIR_TypeHandle ft = MLIR_INVALID_HANDLE;
     for (size_t i = 0; i <= fld; i++) {
-        MLIR_TypeHandle ft = MLIR_GetTypeLLVMStructField(ctx, sty, i);
+        ft = MLIR_GetTypeLLVMStructField(ctx, sty, i);
         off = llvm_align_up(off, x64_type_align(ctx, ft));
-        if (i == fld) return off;
+        if (i == fld) break;
         off += x64_type_size(ctx, ft);
     }
+    e->ctx = ctx; e->sty = sty; e->fld = (uint32_t)fld; e->off = off; e->fty = ft;
+    if (out_fty) *out_fty = ft;
     return off;
 }
 
@@ -647,8 +667,9 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                 stride = x64_type_size(ctx, elem_ty);
             } else if (MLIR_GetTypeKind(ctx, cur_ty) == MLIR_TYPE_KIND_LLVM_STRUCT) {    // struct field: constant offset
                 if (is_dyn) { fail(F, "dynamic struct index in gep", (string){0}); return; }
-                unsigned foff = x64_struct_field_offset(ctx, cur_ty, (size_t)cidx[i]);
-                cur_ty = MLIR_GetTypeLLVMStructField(ctx, cur_ty, (size_t)cidx[i]);
+                MLIR_TypeHandle next_ty = MLIR_INVALID_HANDLE;
+                unsigned foff = x64_struct_field_info(ctx, cur_ty, (size_t)cidx[i], &next_ty);
+                cur_ty = next_ty;
                 add_const_off(F, RAX, (int64_t)foff);
                 continue;
             } else if (MLIR_GetTypeKind(ctx, cur_ty) == MLIR_TYPE_KIND_LLVM_ARRAY) {     // array element stride
@@ -927,7 +948,16 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     MLIR_RegionHandle reg = MLIR_GetOpRegion(ctx, fn, 0);
     size_t nb = MLIR_GetRegionNumBlocks(ctx, reg);
     F.n_blocks = nb;
-    F.block_off = (uint32_t *)calloc(nb ? nb : 1, sizeof(uint32_t));
+    static uint32_t *g_x64_block_off = NULL;
+    static size_t g_x64_block_off_cap = 0;
+    size_t nb_need = nb ? nb : 1;
+    if (nb_need > g_x64_block_off_cap) {
+        free(g_x64_block_off);
+        g_x64_block_off_cap = nb_need < 64 ? 64 : nb_need * 2;
+        g_x64_block_off = (uint32_t *)malloc(g_x64_block_off_cap * sizeof(uint32_t));
+    }
+    memset(g_x64_block_off, 0, nb_need * sizeof(uint32_t));
+    F.block_off = g_x64_block_off;
 
     // --- register allocation: shared linear-scan allocator -> F.rm
     //     (value -> physical register). Values it leaves out stay in frame
@@ -940,6 +970,7 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     SlotMap sm_spill; memset(&sm_spill, 0, sizeof(sm_spill));
     sm_spill.arena = MLIR_GetArenaAllocator(ctx);
     int32_t nslots = 0;
+    bool used_global = false;
     static int x64_noregalloc = 0;
     if (x64_noregalloc == 0) x64_noregalloc = getenv("TINYC_X64_NOREGALLOC") ? 2 : 1;
     uint64_t t_ra = x64_clock();
@@ -953,6 +984,8 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
             sm_spill.arena = MLIR_GetArenaAllocator(ctx);
             nslots = 0;
             um = mlir_regalloc_cfg(ctx, reg, nb, &F.rm, &T);
+        } else {
+            used_global = true;
         }
         F.used_mask = um;
         for (int k = 0; k < T.npool - T.ncaller; k++)
@@ -971,9 +1004,13 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     //     which overflowed the 8 MiB stack in recursive code (the wasm lifter's
     //     lower_op <-> lower_region) of the self-hosted ELF compiler. ---
     size_t want = 0;
-    for (size_t b = 0; b < nb; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
-        want += MLIR_GetBlockNumArgs(ctx, bk) + MLIR_GetBlockNumOps(ctx, bk) + 4;
+    if (used_global) {
+        want = sm_spill.n + 32;
+    } else {
+        for (size_t b = 0; b < nb; b++) {
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+            want += MLIR_GetBlockNumArgs(ctx, bk) + MLIR_GetBlockNumOps(ctx, bk) + 4;
+        }
     }
     vmap_init(&F.slots, want ? want : 8);
     int32_t cur = nslots * 8;
@@ -1057,7 +1094,6 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     g_x64_ok = g_x64_ok && F.ok;
 
     vmap_free(&F.slots);
-    free(F.block_off);
     free(F.fix);
     if (g_x64_times) g_x64_times->isel_encode_ns += x64_clock() - t_isel;
 }

@@ -110,7 +110,7 @@ typedef struct {
     MacroSlot *mtab;             // macro_cap slots, a power of two
     size_t    macro_cap;
     size_t    macro_used;        // occupied slots
-    uint64_t  macro_filter[8];   // 512-bit L1 filter on (c0, len) to skip macro_find_slot
+    uint64_t  macro_filter[64];  // 4096-bit L1 filter on (c0, c_last, len) to skip macro_find_slot
     string   *include_dirs;
     size_t    n_include_dirs;
     PathNode *pragma_once;       // files that emitted `#pragma once`
@@ -259,6 +259,7 @@ static string i64_to_str(Arena *arena, int64_t v) {
 #define PP_CT_WS    4u
 
 static uint8_t g_pp_ctype[256];
+static uint8_t g_pp_punct1[128];
 static bool g_pp_ctype_init = false;
 
 static void pp_init_ctype(void) {
@@ -270,6 +271,30 @@ static void pp_init_ctype(void) {
     g_pp_ctype[' '] = PP_CT_WS;
     g_pp_ctype['\t'] = PP_CT_WS;
     g_pp_ctype['\r'] = PP_CT_WS;
+    g_pp_punct1['('] = TC_TK_LPAREN;
+    g_pp_punct1[')'] = TC_TK_RPAREN;
+    g_pp_punct1['{'] = TC_TK_LBRACE;
+    g_pp_punct1['}'] = TC_TK_RBRACE;
+    g_pp_punct1['['] = TC_TK_LBRACK;
+    g_pp_punct1[']'] = TC_TK_RBRACK;
+    g_pp_punct1[';'] = TC_TK_SEMI;
+    g_pp_punct1[','] = TC_TK_COMMA;
+    g_pp_punct1['.'] = TC_TK_DOT;
+    g_pp_punct1['+'] = TC_TK_PLUS;
+    g_pp_punct1['-'] = TC_TK_MINUS;
+    g_pp_punct1['*'] = TC_TK_STAR;
+    g_pp_punct1['/'] = TC_TK_SLASH;
+    g_pp_punct1['%'] = TC_TK_PERCENT;
+    g_pp_punct1['<'] = TC_TK_LT;
+    g_pp_punct1['>'] = TC_TK_GT;
+    g_pp_punct1['='] = TC_TK_ASSIGN;
+    g_pp_punct1['!'] = TC_TK_BANG;
+    g_pp_punct1['&'] = TC_TK_AMP;
+    g_pp_punct1['|'] = TC_TK_PIPE;
+    g_pp_punct1['^'] = TC_TK_CARET;
+    g_pp_punct1['~'] = TC_TK_TILDE;
+    g_pp_punct1['?'] = TC_TK_QUESTION;
+    g_pp_punct1[':'] = TC_TK_COLON;
     g_pp_ctype_init = true;
 }
 
@@ -306,15 +331,17 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
             continue;
         }
         if (c == '\n') {
-            if (out->size == out->max) pp_vec_grow(arena, out);
-            PPTok *t = &out->data[out->size++];
-            t->kind = PP_NEWLINE;
-            t->has_space = 0;
-            t->file_id = file_id;
-            t->line = line;
-            t->text.str = NULL;
-            t->text.size = 0;
-            t->hide = NULL;
+            if (out->size > 0 && out->data[out->size - 1].kind != PP_NEWLINE) {
+                if (out->size == out->max) pp_vec_grow(arena, out);
+                PPTok *t = &out->data[out->size++];
+                t->kind = PP_NEWLINE;
+                t->has_space = 0;
+                t->file_id = file_id;
+                t->line = line;
+                t->text.str = NULL;
+                t->text.size = 0;
+                t->hide = NULL;
+            }
             i++;
             line++;
             space_pending = 0;
@@ -565,15 +592,21 @@ static bool pp_str_eq(string a, string b) {
     return a.size == b.size && (a.str == b.str || memcmp(a.str, b.str, a.size) == 0);
 }
 
+static inline uint32_t pp_macro_filter_idx(string s) {
+    uint32_t c0 = (uint32_t)(unsigned char)s.str[0];
+    uint32_t cl = (uint32_t)(unsigned char)s.str[s.size - 1];
+    return (c0 * 131u + cl * 31u + (uint32_t)s.size * 7u) & 4095u;
+}
+
 static inline bool pp_macro_maybe(const PP *pp, string s) {
     if (s.size == 0) return false;
-    uint32_t fi = (((uint32_t)(unsigned char)s.str[0] & 63u) << 3) | ((uint32_t)s.size & 7u);
+    uint32_t fi = pp_macro_filter_idx(s);
     return ((pp->macro_filter[fi >> 6] >> (fi & 63u)) & 1u) != 0;
 }
 
 static inline void pp_macro_filter_add(PP *pp, string s) {
     if (s.size == 0) return;
-    uint32_t fi = (((uint32_t)(unsigned char)s.str[0] & 63u) << 3) | ((uint32_t)s.size & 7u);
+    uint32_t fi = pp_macro_filter_idx(s);
     pp->macro_filter[fi >> 6] |= (1ull << (fi & 63u));
 }
 
@@ -695,33 +728,9 @@ static void emit_line_directive_if_needed(PP *pp, uint16_t file_id, int line) {
 
 static TcTokKind pp_punct_kind(string s) {
     if (s.size == 1) {
-        switch (s.str[0]) {
-            case '(': return TC_TK_LPAREN;
-            case ')': return TC_TK_RPAREN;
-            case '{': return TC_TK_LBRACE;
-            case '}': return TC_TK_RBRACE;
-            case '[': return TC_TK_LBRACK;
-            case ']': return TC_TK_RBRACK;
-            case ';': return TC_TK_SEMI;
-            case ',': return TC_TK_COMMA;
-            case '.': return TC_TK_DOT;
-            case '+': return TC_TK_PLUS;
-            case '-': return TC_TK_MINUS;
-            case '*': return TC_TK_STAR;
-            case '/': return TC_TK_SLASH;
-            case '%': return TC_TK_PERCENT;
-            case '<': return TC_TK_LT;
-            case '>': return TC_TK_GT;
-            case '=': return TC_TK_ASSIGN;
-            case '!': return TC_TK_BANG;
-            case '&': return TC_TK_AMP;
-            case '|': return TC_TK_PIPE;
-            case '^': return TC_TK_CARET;
-            case '~': return TC_TK_TILDE;
-            case '?': return TC_TK_QUESTION;
-            case ':': return TC_TK_COLON;
-            default:  return TC_TK_EOF;
-        }
+        unsigned char c = (unsigned char)s.str[0];
+        if (c < 128 && g_pp_punct1[c]) return (TcTokKind)g_pp_punct1[c];
+        return TC_TK_EOF;
     }
     if (s.size == 2) {
         char c = s.str[0], d = s.str[1];
@@ -1994,22 +2003,42 @@ static void process_tokens(PP *pp, PPTok *toks, size_t n, string file, uint16_t 
     }
 }
 
+static PPTok *g_pp_file_bufs[16];
+static size_t g_pp_file_caps[16];
+static int    g_pp_file_depth = 0;
+
 // `src` is the file's contents as read_file() returns them.
 static void process_file(PP *pp, string path, string src) {
     string canonical = s_dup(pp->arena, path);
     uint16_t file_id = pp_intern_file(pp, canonical);
     if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
-    // Heap-allocate the per-file token buffer and free it on return so
-    // included headers reuse the same pages instead of faulting fresh arena
-    // memory for every header. (Macro bodies copy their tokens to pp->arena.)
-    size_t init_cap = src.size / 4 + 256;
+    // Reuse a per-depth heap buffer so included headers stay in warm pages
+    // instead of malloc/free + minor page faults on every #include.
+    size_t init_cap = src.size / 5 + 256;
     VecPPTok toks;
-    toks.data = (PPTok *)malloc(init_cap * sizeof(PPTok));
-    toks.size = 0;
-    toks.max = init_cap;
+    int depth = g_pp_file_depth++;
+    if (depth < 16) {
+        if (g_pp_file_caps[depth] < init_cap) {
+            free(g_pp_file_bufs[depth]);
+            g_pp_file_bufs[depth] = (PPTok *)malloc(init_cap * sizeof(PPTok));
+            g_pp_file_caps[depth] = init_cap;
+        }
+        toks.data = g_pp_file_bufs[depth];
+        toks.size = 0;
+        toks.max = g_pp_file_caps[depth];
+    } else {
+        toks.data = (PPTok *)malloc(init_cap * sizeof(PPTok));
+        toks.size = 0;
+        toks.max = init_cap;
+    }
     pp_tokenize(NULL, src, file_id, &toks);
+    if (depth < 16) {
+        g_pp_file_bufs[depth] = toks.data;
+        g_pp_file_caps[depth] = toks.max;
+    }
     process_tokens(pp, toks.data, toks.size, canonical, file_id);
-    free(toks.data);
+    g_pp_file_depth--;
+    if (depth >= 16) free(toks.data);
 }
 
 // ----------------------------------------------------------------------
@@ -2090,7 +2119,7 @@ VecTcTok tinyc_preprocess_lex(Arena *arena, string path,
     pp_init_state(&pp, arena, include_dirs, n_include_dirs, defines, n_defines);
     string main_src = read_file_ok(arena, path);
     VecTcTok toks;
-    VecTcTok_reserve(arena, &toks, main_src.size / 4 + 512);
+    VecTcTok_reserve(arena, &toks, main_src.size / 3 + 4096);
     pp.tok_out = &toks;
     process_file(&pp, path, main_src);
     TcTok eof = {0};

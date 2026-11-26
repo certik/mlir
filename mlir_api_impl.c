@@ -700,7 +700,7 @@ static uint32_t op_aux_get(MLIR_Context *c, uint32_t o) {
 // Grows an arena array of 32-bit indices so it holds `need` entries; the
 // old array is left to the arena.
 static MLIR_NAT_NOINLINE uint32_t *u32_grow(Arena *arena, uint32_t *old, uint32_t n, uint32_t *cap, size_t need) {
-    size_t nc = *cap ? (size_t)*cap * 2 : 4;
+    size_t nc = *cap ? (size_t)*cap * 2 : 8;
     while (nc < need) nc *= 2;
     uint32_t *p = arena_new_array(arena, uint32_t, nc);
     if (n) memcpy(p, old, (size_t)n * sizeof(uint32_t));
@@ -1386,8 +1386,21 @@ static inline uint32_t create_op_from_spec_impl(MLIR_Context *ctx, const MLIR_Op
         }
     }
 
-    if (MLIR_NAT_UNLIKELY((spec->n_regions | spec->n_successors | spec->n_attrs) != 0))
+    if (MLIR_NAT_UNLIKELY((spec->n_regions | spec->n_successors) != 0)) {
         create_op_extra(ctx, op, spec);
+    } else if (spec->n_attrs > 0) {
+        uint32_t first_attr = vec_push(&ctx->extra, 2u * (uint32_t)spec->n_attrs);
+        o->first_attr = first_attr;
+        o->n_attributes = (uint8_t)spec->n_attrs;
+        uint32_t *pa = EXTRA(ctx) + first_attr;
+        for (uint32_t i = 0; i < spec->n_attrs; i++) {
+            API_CHECK(spec->attrs[i].key != MLIR_KEY_INVALID && spec->attrs[i].key < ctx->keys.n_keys &&
+                      spec->attrs[i].value != MLIR_INVALID_HANDLE,
+                      "MLIR_CreateOpFromSpec", "bad attribute key or value");
+            pa[2 * i] = spec->attrs[i].key;
+            pa[2 * i + 1] = ATTR_IDX(ctx, spec->attrs[i].value, "MLIR_CreateOpFromSpec");
+        }
+    }
 
     return op;
 }
@@ -3266,6 +3279,65 @@ void MLIR_EraseOp(MLIR_Context *ctx, MLIR_OpHandle oh) {
     // Without def-use tracking and regions/successors there is nothing to drop.
     if (OPS(ctx)[o].flags & (OPF_TRACKED | OPF_HAS_EXTRA))
         drop_op_uses_inline(ctx, o);
+#endif
+}
+
+void MLIR_EraseOps(MLIR_Context *ctx, const MLIR_OpHandle *ops, size_t n) {
+    if (n == 0) return;
+    if (n == 1) { MLIR_EraseOp(ctx, ops[0]); return; }
+#ifdef MLIR_API_CHECKS
+    for (size_t i = 0; i < n; i++) MLIR_EraseOp(ctx, ops[i]);
+#else
+    uint32_t blks_stk[64];
+    uint32_t *blks = blks_stk;
+    size_t n_blks = 0, cap_blks = 64;
+    IR_Op *all_ops = OPS(ctx);
+    IR_Block *all_blks = BLOCKS(ctx);
+    for (size_t i = 0; i < n; i++) {
+        uint32_t o = OP_IDX(ctx, ops[i], "MLIR_EraseOps");
+        if (!o) continue;
+        uint32_t b = all_ops[o].parent_block;
+        if (b != 0) {
+            IR_Block *blk = &all_blks[b];
+            uint32_t pos = all_ops[o].block_pos;
+            if (pos < blk->n_ops && blk->ops[pos] == o) {
+                blk->ops[pos] = 0;
+                if (n_blks == 0 || blks[n_blks - 1] != b) {
+                    if (n_blks == cap_blks) {
+                        size_t ncap = cap_blks * 2;
+                        uint32_t *nb = (uint32_t *)malloc(ncap * sizeof(uint32_t));
+                        memcpy(nb, blks, n_blks * sizeof(uint32_t));
+                        if (blks != blks_stk) free(blks);
+                        blks = nb; cap_blks = ncap;
+                    }
+                    blks[n_blks++] = b;
+                }
+            } else {
+                detach_from_block(ctx, o);
+            }
+            all_ops[o].parent_block = 0;
+            all_ops[o].block_pos = 0;
+        }
+        if (all_ops[o].flags & (OPF_TRACKED | OPF_HAS_EXTRA))
+            drop_op_uses_inline(ctx, o);
+    }
+    for (size_t bi = 0; bi < n_blks; bi++) {
+        IR_Block *blk = &all_blks[blks[bi]];
+        uint32_t w = 0, no = blk->n_ops;
+        uint32_t *bops = blk->ops;
+        for (uint32_t r = 0; r < no; r++) {
+            uint32_t op = bops[r];
+            if (op != 0) {
+                if (w != r) {
+                    bops[w] = op;
+                    all_ops[op].block_pos = w;
+                }
+                w++;
+            }
+        }
+        blk->n_ops = w;
+    }
+    if (blks != blks_stk) free(blks);
 #endif
 }
 

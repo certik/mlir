@@ -23,6 +23,12 @@ typedef struct Enumerator {
     struct Enumerator *next;
 } Enumerator;
 
+typedef struct IdxNode {
+    string name;
+    size_t idx;
+    struct IdxNode *next;
+} IdxNode;
+
 typedef struct {
     Arena *arena;
     TcTok *toks;
@@ -30,6 +36,9 @@ typedef struct {
     size_t i;
     Typedef *td_buckets[256];
     Enumerator *en_buckets[512];
+    IdxNode *fn_buckets[256];
+    IdxNode *st_buckets[256];
+    IdxNode *gl_buckets[256];
     int err_count;
     struct Program *prog;
     // When true, `long` / `size_t` / `intptr_t` / `uintptr_t` /
@@ -82,6 +91,23 @@ static Enumerator *enum_lookup(P *p, string name) {
         if (str_eq(e->name, name)) return e;
     }
     return NULL;
+}
+
+static bool idx_lookup(IdxNode **buckets, string name, size_t *out) {
+    uint32_t b = parse_str_hash(name) & 255u;
+    for (IdxNode *nd = buckets[b]; nd; nd = nd->next) {
+        if (str_eq(nd->name, name)) { *out = nd->idx; return true; }
+    }
+    return false;
+}
+
+static void idx_insert(P *p, IdxNode **buckets, string name, size_t idx) {
+    uint32_t b = parse_str_hash(name) & 255u;
+    IdxNode *nd = arena_new(p->arena, IdxNode);
+    nd->name = name;
+    nd->idx = idx;
+    nd->next = buckets[b];
+    buckets[b] = nd;
 }
 
 // The parser's leaves for tinyc_fold: previously-declared enumerators,
@@ -1457,14 +1483,11 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             }
             // Register in the program-level struct table (skipping
             // duplicates by tag name).
-            bool already = false;
-            for (size_t i = 0; i < p->prog->structs.size; i++) {
-                if (str_eq(p->prog->structs.data[i]->name, sd->name)) {
-                    already = true; break;
-                }
-            }
-            if (!already) {
+            size_t dummy_idx = 0;
+            if (!idx_lookup(p->st_buckets, sd->name, &dummy_idx)) {
+                size_t si = p->prog->structs.size;
                 VecStructDefPtr_push_back(p->arena, &p->prog->structs, sd);
+                idx_insert(p, p->st_buckets, sd->name, si);
             }
             sn = (TcTok){0};
             sn.kind = TC_TK_IDENT;
@@ -2723,9 +2746,9 @@ static bool struct_def_equal(StructDef *a, StructDef *b) {
 //   * existing has_init=true  + new has_init=false -> drop new.
 //   * both has_init=true                           -> error.
 static void merge_push_global(P *p, Program *prog, Global g) {
-    for (size_t i = 0; i < prog->globals.size; i++) {
-        Global *ex = &prog->globals.data[i];
-        if (!str_eq(ex->name, g.name)) continue;
+    size_t ex_idx = 0;
+    if (idx_lookup(p->gl_buckets, g.name, &ex_idx)) {
+        Global *ex = &prog->globals.data[ex_idx];
         if (ex->type.kind != g.type.kind) {
             perror_at(p, g.line,
                 str_lit("conflicting global declaration types"));
@@ -2739,7 +2762,9 @@ static void merge_push_global(P *p, Program *prog, Global g) {
         // tentative + tentative or definition + tentative: dedup.
         return;
     }
+    size_t gi = prog->globals.size;
     VecGlobal_push_back(p->arena, &prog->globals, g);
+    idx_insert(p, p->gl_buckets, g.name, gi);
 }
 
 // Parse a `typedef ...;` declaration. Assumes cur(p) is TC_TK_KW_TYPEDEF.
@@ -2796,14 +2821,14 @@ static void parse_typedef_decl(P *p) {
                 sd->name = alias;
             }
             StructDef *existing_sd = NULL;
-            for (size_t i = 0; i < prog->structs.size; i++) {
-                if (str_eq(prog->structs.data[i]->name, sd->name)) {
-                    existing_sd = prog->structs.data[i];
-                    break;
-                }
+            size_t ex_si = 0;
+            if (idx_lookup(p->st_buckets, sd->name, &ex_si)) {
+                existing_sd = prog->structs.data[ex_si];
             }
             if (!existing_sd) {
+                size_t si = prog->structs.size;
                 VecStructDefPtr_push_back(arena, &prog->structs, sd);
+                idx_insert(p, p->st_buckets, sd->name, si);
             } else if (existing_sd->fields.size == 0) {
                 existing_sd->fields = sd->fields;
                 existing_sd->line = sd->line;
@@ -2825,19 +2850,16 @@ static void parse_typedef_decl(P *p) {
         // No body: `typedef struct Tag Alias;`.
         if (peek(p, 1).kind == TC_TK_IDENT) {
             string tag = peek(p, 1).text;
-            bool found = false;
-            for (size_t i = 0; i < prog->structs.size; i++) {
-                if (str_eq(prog->structs.data[i]->name, tag)) {
-                    found = true; break;
-                }
-            }
-            if (!found) {
+            size_t dummy_si = 0;
+            if (!idx_lookup(p->st_buckets, tag, &dummy_si)) {
                 StructDef *sd = arena_new(arena, StructDef);
                 *sd = (StructDef){0};
                 sd->name = tag;
                 sd->line = line;
                 VecStructField_reserve(arena, &sd->fields, 0);
+                size_t si = prog->structs.size;
                 VecStructDefPtr_push_back(arena, &prog->structs, sd);
+                idx_insert(p, p->st_buckets, tag, si);
             }
         }
         // Fall through to parse_sig_type below (which handles `struct Tag`).
@@ -2948,6 +2970,13 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
         VecFuncPtr_reserve(arena, &prog->funcs, 4);
         VecStructDefPtr_reserve(arena, &prog->structs, 4);
         VecGlobal_reserve(arena, &prog->globals, 4);
+    } else {
+        for (size_t i = 0; i < prog->funcs.size; i++)
+            idx_insert(&p, p.fn_buckets, prog->funcs.data[i]->name, i);
+        for (size_t i = 0; i < prog->structs.size; i++)
+            idx_insert(&p, p.st_buckets, prog->structs.data[i]->name, i);
+        for (size_t i = 0; i < prog->globals.size; i++)
+            idx_insert(&p, p.gl_buckets, prog->globals.data[i].name, i);
     }
     while (cur(&p).kind != TC_TK_EOF) {
         // Top-level storage-class qualifiers. Track `static` so we can emit
@@ -2973,14 +3002,14 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
             // include of a shared header). Identical -> skip; mismatched
             // -> diagnostic.
             StructDef *existing_sd = NULL;
-            for (size_t i = 0; i < prog->structs.size; i++) {
-                if (str_eq(prog->structs.data[i]->name, sd->name)) {
-                    existing_sd = prog->structs.data[i];
-                    break;
-                }
+            size_t ex_si = 0;
+            if (idx_lookup(p.st_buckets, sd->name, &ex_si)) {
+                existing_sd = prog->structs.data[ex_si];
             }
             if (!existing_sd) {
+                size_t si = prog->structs.size;
                 VecStructDefPtr_push_back(arena, &prog->structs, sd);
+                idx_insert(&p, p.st_buckets, sd->name, si);
             } else if (existing_sd->fields.size == 0) {
                 // Existing entry is a forward-declared placeholder; upgrade
                 // it in place by copying the new full definition's fields.
@@ -3006,20 +3035,16 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
             string nm = cur(&p).text;
             p.i++;  // IDENT
             p.i++;  // SEMI
-            StructDef *existing = NULL;
-            for (size_t i = 0; i < prog->structs.size; i++) {
-                if (str_eq(prog->structs.data[i]->name, nm)) {
-                    existing = prog->structs.data[i];
-                    break;
-                }
-            }
-            if (!existing) {
+            size_t dummy_si = 0;
+            if (!idx_lookup(p.st_buckets, nm, &dummy_si)) {
                 StructDef *sd = arena_new(arena, StructDef);
                 *sd = (StructDef){0};
                 sd->name = nm;
                 sd->line = line;
                 VecStructField_reserve(arena, &sd->fields, 0);
+                size_t si = prog->structs.size;
                 VecStructDefPtr_push_back(arena, &prog->structs, sd);
+                idx_insert(&p, p.st_buckets, nm, si);
             }
             continue;
         }
@@ -3369,15 +3394,13 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
         // a forward decl after a definition is dropped.
         Func *existing = NULL;
         size_t existing_idx = 0;
-        for (size_t i = 0; i < prog->funcs.size; i++) {
-            if (str_eq(prog->funcs.data[i]->name, f->name)) {
-                existing = prog->funcs.data[i];
-                existing_idx = i;
-                break;
-            }
+        if (idx_lookup(p.fn_buckets, f->name, &existing_idx)) {
+            existing = prog->funcs.data[existing_idx];
         }
         if (!existing) {
+            size_t fi = prog->funcs.size;
             VecFuncPtr_push_back(arena, &prog->funcs, f);
+            idx_insert(&p, p.fn_buckets, f->name, fi);
         } else {
             if (existing->is_variadic != f->is_variadic) {
                 perror_at(&p, f->line,

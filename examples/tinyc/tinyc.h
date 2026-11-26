@@ -126,9 +126,9 @@ typedef enum {
 
 typedef struct Type Type;
 struct Type {
-    TypeKind kind;
-    int      fnptr_nparams;
-    int      int_bits;
+    uint8_t  kind;            // TypeKind
+    uint8_t  int_bits;
+    int16_t  fnptr_nparams;
     bool     ptr_is_i64;
     bool     ptr_is_f32;
     bool     ptr_is_f64;
@@ -187,10 +187,8 @@ typedef struct Expr Expr;
 DEFINE_VECTOR_FOR_TYPE(Expr*, VecExprPtr)
 
 struct Expr {
-    ExprKind kind;
-    BinOp op;
-    int line;
-    int generic_default_index;
+    uint8_t kind;             // ExprKind
+    uint8_t op;               // BinOp
     bool    is_i64;
     bool    is_long_long;
     bool    is_unsigned;
@@ -199,6 +197,8 @@ struct Expr {
     bool    is_compound;
     bool    sizeof_is_expr;
     bool    is_alignof;
+    int line;
+    int generic_default_index;
     int64_t int_value;
     double  float_value;
     string  name;
