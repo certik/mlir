@@ -24,6 +24,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <base/arena.h>
@@ -109,6 +110,7 @@ typedef struct {
     MacroSlot *mtab;             // macro_cap slots, a power of two
     size_t    macro_cap;
     size_t    macro_used;        // occupied slots
+    uint64_t  macro_filter[8];   // 512-bit L1 filter on (c0, len) to skip macro_find_slot
     string   *include_dirs;
     size_t    n_include_dirs;
     PathNode *pragma_once;       // files that emitted `#pragma once`
@@ -273,9 +275,13 @@ static void pp_init_ctype(void) {
 
 static void pp_vec_grow(Arena *arena, VecPPTok *out) {
     size_t nmax = out->max ? out->max * 2 : 256;
-    PPTok *nd = arena_new_array(arena, PPTok, nmax);
-    if (out->size) memcpy(nd, out->data, out->size * sizeof(PPTok));
-    out->data = nd;
+    if (arena) {
+        PPTok *nd = arena_new_array(arena, PPTok, nmax);
+        if (out->size) memcpy(nd, out->data, out->size * sizeof(PPTok));
+        out->data = nd;
+    } else {
+        out->data = (PPTok *)realloc(out->data, nmax * sizeof(PPTok));
+    }
     out->max = nmax;
 }
 
@@ -559,9 +565,21 @@ static bool pp_str_eq(string a, string b) {
     return a.size == b.size && (a.str == b.str || memcmp(a.str, b.str, a.size) == 0);
 }
 
+static inline bool pp_macro_maybe(const PP *pp, string s) {
+    if (s.size == 0) return false;
+    uint32_t fi = (((uint32_t)(unsigned char)s.str[0] & 63u) << 3) | ((uint32_t)s.size & 7u);
+    return ((pp->macro_filter[fi >> 6] >> (fi & 63u)) & 1u) != 0;
+}
+
+static inline void pp_macro_filter_add(PP *pp, string s) {
+    if (s.size == 0) return;
+    uint32_t fi = (((uint32_t)(unsigned char)s.str[0] & 63u) << 3) | ((uint32_t)s.size & 7u);
+    pp->macro_filter[fi >> 6] |= (1ull << (fi & 63u));
+}
+
 // The slot holding `name`, or NULL.
 static MacroSlot *macro_find_slot(PP *pp, string name) {
-    if (pp->macro_cap == 0) return NULL;
+    if (pp->macro_cap == 0 || !pp_macro_maybe(pp, name)) return NULL;
     uint32_t h = pp_hash(name);
     size_t mask = pp->macro_cap - 1;
     size_t k = (size_t)h & mask;
@@ -604,6 +622,7 @@ static MacroSlot *macro_get_slot(PP *pp, string name) {
     e->special = PP_SPECIAL_NONE;
     e->macro = NULL;
     pp->macro_used++;
+    pp_macro_filter_add(pp, e->name);
     return e;
 }
 
@@ -2043,11 +2062,17 @@ static void process_file(PP *pp, string path, string src) {
     string canonical = s_dup(pp->arena, path);
     uint16_t file_id = pp_intern_file(pp, canonical);
     if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
-    // C source averages about 5 bytes per token: reserve enough that the
-    // token vector of a .c file is not regrown (and recopied) while lexing.
-    VecPPTok toks; VecPPTok_reserve(pp->arena, &toks, src.size / 4 + 256);
-    pp_tokenize(pp->arena, src, file_id, &toks);
+    // Heap-allocate the per-file token buffer and free it on return so
+    // included headers reuse the same pages instead of faulting fresh arena
+    // memory for every header. (Macro bodies copy their tokens to pp->arena.)
+    size_t init_cap = src.size / 4 + 256;
+    VecPPTok toks;
+    toks.data = (PPTok *)malloc(init_cap * sizeof(PPTok));
+    toks.size = 0;
+    toks.max = init_cap;
+    pp_tokenize(NULL, src, file_id, &toks);
     process_tokens(pp, toks.data, toks.size, canonical, file_id);
+    free(toks.data);
 }
 
 // ----------------------------------------------------------------------

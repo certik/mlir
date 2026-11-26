@@ -1712,7 +1712,7 @@ static int tinyc_main(void) {
     // the wasm pipeline's wasmssa and wasmstack IR to 3-6.4 (tinyc's own
     // sources). Too low costs doublings, too high wastes heap; the backend
     // caps the reservation, so a large input cannot exhaust its heap.
-    MLIR_SetContextExpectedOps(ctx, target_wasm32 ? total_toks * 3 : total_toks * 3 / 2);
+    MLIR_SetContextExpectedOps(ctx, target_wasm32 ? total_toks * 3 : total_toks / 2);
     uint64_t t_em = ts_now();
     MLIR_OpHandle module = tinyc_emit_module(ctx, prog);
     ts_add(TS_EMIT, t_em);

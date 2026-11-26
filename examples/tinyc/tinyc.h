@@ -127,54 +127,22 @@ typedef enum {
 typedef struct Type Type;
 struct Type {
     TypeKind kind;
-    int64_t  array_len;       // 1st dimension for TY_ARRAY_I32 / TY_ARRAY_STRUCT
-    int64_t  array_len2;      // 2nd dimension for TY_ARRAY_I32 (0 = 1D)
-    // Optional deferred array-length expression (constant integer
-    // expression, may use sizeof of in-scope variables). When non-NULL,
-    // the emitter folds it via ast_fold_int(scope) at the alloca site
-    // and writes the result into `array_len` before allocating storage.
-    // Used to support `T arr[CONST_EXPR]` where CONST_EXPR is not a bare
-    // integer literal (e.g. `T arr[sizeof(x) / sizeof(x[0])]`).
-    struct Expr *array_len_expr;
-    string   struct_name;     // for TY_STRUCT
-    // For TY_FNPTR: arena-allocated return type and parameter types.
-    // Storage type is always !llvm.ptr; this signature is consulted at
-    // indirect-call sites to build the func.call_indirect operand types.
-    Type    *fnptr_ret;
-    Type    *fnptr_params;
     int      fnptr_nparams;
-    // For TY_PTR_PTR: the (single-level) pointer type that this T** points
-    // at. Carries the inner pointee kind / fnptr signature / struct_name
-    // so a deref can be typed correctly.
-    Type    *pointee;
-    // For TY_PTR_I32: when true, the pointed-at element is 64-bit wide
-    // (i64). Used to map `int64_t *` / `long *` / `size_t *` to a single
-    // generic pointer kind without losing the element width needed for
-    // pointer arithmetic, indexing, and dereferenced-load typing.
-    bool     ptr_is_i64;
-    // For TY_PTR_I32: when true, the pointed-at element is f32 (float).
-    // Used to map `float *` to a generic pointer kind without losing the
-    // element width needed for dereferenced-load/store typing.
-    bool     ptr_is_f32;
-    // For TY_PTR_I32: when true, the pointed-at element is f64 (double).
-    bool     ptr_is_f64;
-    // For TY_ARRAY_I32: when true, the elements are 64-bit wide (i64).
-    // Used to support `size_t arr[N]` / `long arr[N]` / `int64_t arr[N]`
-    // without introducing a separate TY_ARRAY_I64 kind.
-    bool     array_elem_is_i64;
-    // For TY_I32/TY_I64: optional explicit bit width hint (0 = unspecified,
-    // 8/16/32/64 = explicit width). Used by `_Generic` for typedef
-    // matching on narrow-int aliases (`int8_t`, `int16_t`, ...). For
-    // wasm32 we also use int_bits == 64 with kind == TY_I32 to tag
-    // `long`-semantic types (storage is i32 because of the ABI, but
-    // `_Generic` must keep them distinct from `int`).
-    // 8 / 16 (char / bool / short) also selects 1- / 2-byte storage: for a
-    // TY_I32 scalar, a TY_ARRAY_I32 element and a TY_PTR_I32 pointee (see
-    // tinyc_int_size). Values of these types are still i32 in registers.
     int      int_bits;
+    bool     ptr_is_i64;
+    bool     ptr_is_f32;
+    bool     ptr_is_f64;
+    bool     array_elem_is_i64;
     bool     int_unsigned;
     bool     is_bool;        // `bool` / `_Bool` (int_bits is 8 like char)
     bool     is_const;       // type was declared with the `const` qualifier
+    int64_t  array_len;       // 1st dimension for TY_ARRAY_I32 / TY_ARRAY_STRUCT
+    int64_t  array_len2;      // 2nd dimension for TY_ARRAY_I32 (0 = 1D)
+    struct Expr *array_len_expr;
+    string   struct_name;     // for TY_STRUCT
+    Type    *fnptr_ret;
+    Type    *fnptr_params;
+    Type    *pointee;
 };
 
 typedef enum {
@@ -536,19 +504,14 @@ typedef enum {
 
 typedef struct {
     TcTokKind kind;
+    int line;
+    bool    is_i64;
+    bool    is_long_long;
+    bool    is_unsigned;
+    bool    is_f64;
     int64_t int_value;
-    bool    is_i64;          // EX_INT / TC_TK_INT_LIT marked with L/LL suffix
-    bool    is_long_long;    // EX_INT / TC_TK_INT_LIT marked with LL suffix
-                             // (always 64-bit). When `is_i64 && !is_long_long`
-                             // the literal had a single L: it is 64-bit on
-                             // native targets but 32-bit on wasm32 (where
-                             // `long` is `int`). Also set for an unsuffixed
-                             // literal whose value needs 64 bits.
-    bool    is_unsigned;     // TC_TK_INT_LIT has an unsigned C type
-    bool    is_f64;          // TC_TK_FLOAT_LIT without `f` suffix (i.e. double)
     double  float_value;
     string text;             // interned identifier text (for IDENT)
-    int line;
 } TcTok;
 
 DEFINE_VECTOR_FOR_TYPE(TcTok, VecTcTok)

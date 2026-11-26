@@ -358,8 +358,13 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
-            if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_CALL) has_call[b] = 1;
-            bool skip = ra_is_const(T, ctx, op) || ra_is_folded(T, ctx, op);
+            MLIR_OpType oty = MLIR_GetOpType(ctx, op);
+            if (oty == OP_TYPE_LLVM_CALL) has_call[b] = 1;
+            bool is_c = (oty == OP_TYPE_LLVM_MLIR_CONSTANT ||
+                         oty == OP_TYPE_LLVM_MLIR_ZERO ||
+                         oty == OP_TYPE_LLVM_MLIR_NULL) &&
+                        ra_is_const(T, ctx, op);
+            bool skip = is_c || ra_is_folded(T, ctx, op);
             if (!skip) {
                 size_t nr = MLIR_GetOpNumResults(ctx, op);
                 for (size_t r = 0; r < nr; r++) {
@@ -499,17 +504,19 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 if (RA_VMAP_GET(MLIR_GetOpOperand(ctx, op, k), &vi))
                     RA_RECORD_USE(vi, b, up, w);
             }
-            size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
-            for (size_t s = 0; s < ns; s++) {
-                MLIR_BlockHandle succ = MLIR_GetOpSuccessor(ctx, op, s);
-                size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, s);
-                for (size_t k = 0; k < nso; k++) {
-                    uint32_t vi;
-                    if (RA_VMAP_GET(MLIR_GetOpSuccessorOperand(ctx, op, s, k), &vi))
-                        RA_RECORD_USE(vi, b, up, w);
-                    uint32_t avi;
-                    if (RA_VMAP_GET(MLIR_GetBlockArg(ctx, succ, k), &avi) &&
-                        up < first_pos[avi]) first_pos[avi] = up;
+            if (i + 1 == no) {
+                size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
+                for (size_t s = 0; s < ns; s++) {
+                    MLIR_BlockHandle succ = MLIR_GetOpSuccessor(ctx, op, s);
+                    size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, s);
+                    for (size_t k = 0; k < nso; k++) {
+                        uint32_t vi;
+                        if (RA_VMAP_GET(MLIR_GetOpSuccessorOperand(ctx, op, s, k), &vi))
+                            RA_RECORD_USE(vi, b, up, w);
+                        uint32_t avi;
+                        if (RA_VMAP_GET(MLIR_GetBlockArg(ctx, succ, k), &avi) &&
+                            up < first_pos[avi]) first_pos[avi] = up;
+                    }
                 }
             }
             MLIR_ValueHandle mbase, midx;
@@ -691,13 +698,15 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                         if (RA_VMAP_GET(MLIR_GetOpOperand(ctx, op, k), &vi) &&
                             glob_id[vi] != UINT32_MAX) a64_bs_set(live_g, glob_id[vi]);
                     }
-                    size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
-                    for (size_t s = 0; s < ns; s++) {
-                        size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, s);
-                        for (size_t k = 0; k < nso; k++) {
-                            uint32_t vi;
-                            if (RA_VMAP_GET(MLIR_GetOpSuccessorOperand(ctx, op, s, k), &vi) &&
-                                glob_id[vi] != UINT32_MAX) a64_bs_set(live_g, glob_id[vi]);
+                    if (ii + 1 == no) {
+                        size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
+                        for (size_t s = 0; s < ns; s++) {
+                            size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, s);
+                            for (size_t k = 0; k < nso; k++) {
+                                uint32_t vi;
+                                if (RA_VMAP_GET(MLIR_GetOpSuccessorOperand(ctx, op, s, k), &vi) &&
+                                    glob_id[vi] != UINT32_MAX) a64_bs_set(live_g, glob_id[vi]);
+                            }
                         }
                     }
                     MLIR_ValueHandle mbase, midx;
