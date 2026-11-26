@@ -825,6 +825,92 @@ extern "C" MLIR_ValueHandle MLIR_BuildUnary(MLIR_Builder *b, MLIR_OpType t,
     return valH(F<mlir::Operation>(MLIR_BuildOp(b, &s))->getResult(0));
 }
 
+extern "C" MLIR_OpHandle MLIR_BuildVoidBinary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_ValueHandle x, MLIR_ValueHandle y) {
+    MLIR_ValueHandle ops[2] = { x, y };
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = ops;
+    s.n_operands = 2;
+    return MLIR_BuildOp(b, &s);
+}
+
+extern "C" MLIR_ValueHandle MLIR_BuildNullaryAttr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_AttrKey key, MLIR_AttributeHandle val) {
+    MLIR_NamedAttr a = MLIR_Named(key, val);
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.result_types = &rt;
+    s.n_results = 1;
+    s.attrs = &a;
+    s.n_attrs = 1;
+    return valH(F<mlir::Operation>(MLIR_BuildOp(b, &s))->getResult(0));
+}
+
+extern "C" MLIR_ValueHandle MLIR_BuildUnaryAttr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x,
+        MLIR_AttrKey key, MLIR_AttributeHandle val) {
+    MLIR_NamedAttr a = MLIR_Named(key, val);
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = &x;
+    s.n_operands = 1;
+    s.result_types = &rt;
+    s.n_results = 1;
+    s.attrs = &a;
+    s.n_attrs = 1;
+    return valH(F<mlir::Operation>(MLIR_BuildOp(b, &s))->getResult(0));
+}
+
+extern "C" MLIR_ValueHandle MLIR_BuildBinaryAttr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y,
+        MLIR_AttrKey key, MLIR_AttributeHandle val) {
+    MLIR_ValueHandle ops[2] = { x, y };
+    MLIR_NamedAttr a = MLIR_Named(key, val);
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = ops;
+    s.n_operands = 2;
+    s.result_types = &rt;
+    s.n_results = 1;
+    s.attrs = &a;
+    s.n_attrs = 1;
+    return valH(F<mlir::Operation>(MLIR_BuildOp(b, &s))->getResult(0));
+}
+
+extern "C" MLIR_ValueHandle MLIR_BuildUnary2Attr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1) {
+    MLIR_NamedAttr a[2] = { MLIR_Named(k0, v0), MLIR_Named(k1, v1) };
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = &x;
+    s.n_operands = 1;
+    s.result_types = &rt;
+    s.n_results = 1;
+    s.attrs = a;
+    s.n_attrs = 2;
+    return valH(F<mlir::Operation>(MLIR_BuildOp(b, &s))->getResult(0));
+}
+
+extern "C" MLIR_ValueHandle MLIR_BuildBinary2Attr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1) {
+    MLIR_ValueHandle ops[2] = { x, y };
+    MLIR_NamedAttr a[2] = { MLIR_Named(k0, v0), MLIR_Named(k1, v1) };
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = ops;
+    s.n_operands = 2;
+    s.result_types = &rt;
+    s.n_results = 1;
+    s.attrs = a;
+    s.n_attrs = 2;
+    return valH(F<mlir::Operation>(MLIR_BuildOp(b, &s))->getResult(0));
+}
+
 extern "C" void MLIR_GetOpSuccessorOperandRange(MLIR_Context *ctx, MLIR_OpHandle h,
                                                 size_t succ, size_t *first, size_t *count) {
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpSuccessorOperandRange");
@@ -906,6 +992,10 @@ extern "C" MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle h) {
     auto &slot = ctx->opTypeCache[(reinterpret_cast<uintptr_t>(p) >> 4) & 63];
     if (MLIR_UP_LIKELY(slot.ptr == p)) return slot.type;
     return getOpTypeSlow(ctx, name, slot);
+}
+extern "C" bool MLIR_TryRenameOpInPlace(MLIR_Context *ctx, MLIR_OpHandle h, MLIR_OpType new_type) {
+    (void)ctx; (void)h; (void)new_type;
+    return false;
 }
 extern "C" MLIR_LocationHandle MLIR_GetOpLocation(MLIR_Context *ctx, MLIR_OpHandle h) {
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpLocation");
@@ -1905,6 +1995,18 @@ extern "C" int64_t MLIR_GetAttributeDenseElement(MLIR_Context *ctx, MLIR_Attribu
     return (*(d.getValues<llvm::APInt>().begin() + i)).getSExtValue();
 }
 
+extern "C" const int32_t *MLIR_GetAttributeDenseI32Data(MLIR_Context *ctx, MLIR_AttributeHandle h, size_t *out_n) {
+    (void)ctx;
+    mlir::Attribute a = attrF(h);
+    if (auto d = llvm::dyn_cast<mlir::DenseI32ArrayAttr>(a)) {
+        llvm::ArrayRef<int32_t> ref = d.asArrayRef();
+        if (out_n) *out_n = ref.size();
+        return ref.data();
+    }
+    if (out_n) *out_n = 0;
+    return nullptr;
+}
+
 extern "C" MLIR_AttrKey MLIR_InternAttrKey(MLIR_Context *ctx, string name) {
     API_CHECK(name.size > 0, "MLIR_InternAttrKey", "empty attribute name");
     return attr_key_table_intern(&ctx->keyTable, name);
@@ -2344,6 +2446,10 @@ extern "C" void MLIR_EraseOp(MLIR_Context *cctx, MLIR_OpHandle op_h) {
     if (!op->getBlock())
         cctx->rootOps.erase(op);
     op->erase();
+}
+
+extern "C" void MLIR_EraseOps(MLIR_Context *cctx, const MLIR_OpHandle *ops, size_t n) {
+    for (size_t i = 0; i < n; i++) MLIR_EraseOp(cctx, ops[i]);
 }
 
 extern "C" void MLIR_DetachOp(MLIR_Context *cctx, MLIR_OpHandle op_h) {
