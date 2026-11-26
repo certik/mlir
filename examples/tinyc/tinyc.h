@@ -186,6 +186,12 @@ typedef struct Expr Expr;
 
 DEFINE_VECTOR_FOR_TYPE(Expr*, VecExprPtr)
 
+typedef struct {
+    string *compound_field_names;
+    Type   *generic_types;
+    int     generic_default_index;
+} ExprExtra;
+
 struct Expr {
     uint8_t kind;             // ExprKind
     uint8_t op;               // BinOp
@@ -198,19 +204,15 @@ struct Expr {
     bool    sizeof_is_expr;
     bool    is_alignof;
     int line;
-    int generic_default_index;
     int64_t int_value;
     double  float_value;
-    string  name;
+    string  name;             // EX_VAR / EX_STR / EX_FIELD / EX_CALL (callee)
     Expr   *lhs;
-    Expr   *rhs;
-    string  callee;
+    Expr   *rhs;              // EX_BIN / EX_TERNARY (then) / EX_ASSIGN (rhs)
+    Expr   *lvalue;           // EX_ASSIGN (lhs) / EX_TERNARY (else)
     VecExprPtr args;
-    Expr   *lvalue;
-    Expr   *rhs_assign;
     Type   *cast_type;
-    string *compound_field_names;
-    Type   *generic_types;
+    ExprExtra *extra;         // EX_COMPOUND / EX_GENERIC rare metadata
 };
 
 typedef enum {
@@ -264,20 +266,16 @@ struct Stmt {
     // The emitter treats the local as an alias for that global instead
     // of allocating an `alloca` slot.
     string decl_static_global_sym;
-    // ST_IF / ST_WHILE / ST_FOR / ST_SWITCH
+    // ST_IF / ST_WHILE / ST_DO_WHILE / ST_FOR / ST_BLOCK / ST_SWITCH
     Expr *cond;
-    VecStmtPtr then_body;
+    VecStmtPtr body;          // then / while / for / block / switch body
     VecStmtPtr else_body;
-    VecStmtPtr while_body;
     // ST_FOR
     Stmt *for_init;
     // Zero or more for-update expressions, lowered in order at the end
     // of each iteration. Multiple entries arise from the C comma
     // operator: `for (i = 0; i < n; ++i, ++j)` parses as two entries.
     VecExprPtr for_steps;
-    VecStmtPtr for_body;
-    // ST_BLOCK / ST_SWITCH (body)
-    VecStmtPtr block_body;
     // ST_SWITCH
     VecSwitchCase switch_cases;
     // ST_LABEL / ST_GOTO
@@ -468,17 +466,36 @@ typedef enum {
     TC_TK_ELLIPSIS,               // ... (variadic parameter marker)
 } TcTokKind;
 
+#define TC_TOK_F_I64       1u
+#define TC_TOK_F_LONG_LONG 2u
+#define TC_TOK_F_UNSIGNED  4u
+#define TC_TOK_F_F64       8u
+
+typedef union {
+    uint64_t size;
+    int64_t  int_value;
+    double   float_value;
+} TcTokData;
+
 typedef struct {
-    TcTokKind kind;
-    int line;
-    bool    is_i64;
-    bool    is_long_long;
-    bool    is_unsigned;
-    bool    is_f64;
-    int64_t int_value;
-    double  float_value;
-    string text;             // interned identifier text (for IDENT)
+    uint8_t   kind;          // TcTokKind
+    uint8_t   flags;         // TC_TOK_F_*
+    int       line;
+    char     *text_str;      // identifier / string literal bytes
+    TcTokData d;             // text size / int_value / float_value
 } TcTok;
+
+static inline string tc_tok_text(TcTok t) {
+    string s;
+    s.str = t.text_str;
+    s.size = t.d.size;
+    return s;
+}
+
+static inline void tc_tok_set_text(TcTok *t, string s) {
+    t->text_str = s.str;
+    t->d.size = s.size;
+}
 
 DEFINE_VECTOR_FOR_TYPE(TcTok, VecTcTok)
 

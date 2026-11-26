@@ -35,7 +35,9 @@ static bool is_digit(char c) { return (g_lex_ctype[(unsigned char)c] & LEX_CT_DI
 static bool is_alnum(char c) { return (g_lex_ctype[(unsigned char)c] & LEX_CT_ALNUM) != 0; }
 
 TcTokKind tinyc_keyword_or_ident(string s) {
+    if (s.size < 2 || s.size > 17) return TC_TK_IDENT;
     const char *p = s.str;
+    if ((unsigned)((unsigned char)p[0] - 'a') > 25u && p[0] != '_') return TC_TK_IDENT;
     switch (s.size) {
     case 2:
         if (p[0] == 'i' && p[1] == 'f') return TC_TK_KW_IF;
@@ -113,16 +115,18 @@ TcTokKind tinyc_keyword_or_ident(string s) {
 // decided for a 64-bit `long`; the parser adjusts a single-L literal that
 // stays 32-bit on wasm32.
 static void int_lit_type(TcTok *t, int n_l, bool has_u, bool decimal) {
-    uint64_t v = (uint64_t)t->int_value;
+    uint64_t v = (uint64_t)t->d.int_value;
     bool fits_i32 = v <= 0x7FFFFFFFull;
     bool fits_u32 = v <= 0xFFFFFFFFull;
     bool fits_i64 = v <= 0x7FFFFFFFFFFFFFFFull;
     // Can a 32-bit type (int / unsigned int, or a 32-bit long) hold it?
     bool fits32 = (has_u || !decimal) ? fits_u32 : fits_i32;
-    t->is_i64 = n_l >= 1 || !fits32;
-    t->is_long_long = n_l >= 2 || !fits32;
-    if (t->is_i64) t->is_unsigned = has_u || !fits_i64;
-    else           t->is_unsigned = has_u || !fits_i32;
+    bool is_i64 = n_l >= 1 || !fits32;
+    bool is_ll  = n_l >= 2 || !fits32;
+    bool is_u   = is_i64 ? (has_u || !fits_i64) : (has_u || !fits_i32);
+    t->flags = (uint8_t)((is_i64 ? TC_TOK_F_I64 : 0u) |
+                         (is_ll  ? TC_TOK_F_LONG_LONG : 0u) |
+                         (is_u   ? TC_TOK_F_UNSIGNED : 0u));
 }
 
 VecTcTok tinyc_lex(Arena *arena, string src) {
@@ -145,7 +149,11 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
             size_t j = i + 1;
             while (j < sz && (g_lex_ctype[(unsigned char)s[j]] & LEX_CT_ALNUM)) j++;
             string name = (string){.str = (char *)(s + i), .size = j - i};
-            TcTok t = (TcTok){.kind = tinyc_keyword_or_ident(name), .text = name, .line = line};
+            TcTok t = {0};
+            t.kind = (uint8_t)tinyc_keyword_or_ident(name);
+            t.text_str = name.str;
+            t.d.size = name.size;
+            t.line = line;
             VecTcTok_push_back(arena, &toks, t);
             i = j; continue;
         }
@@ -260,7 +268,11 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
             }
             buf[n++] = '\0';   // NUL terminator (counted in str.size)
             string text = (string){.str = buf, .size = n};
-            TcTok t = (TcTok){.kind = TC_TK_STRING_LIT, .text = text, .line = line};
+            TcTok t = {0};
+            t.kind = TC_TK_STRING_LIT;
+            t.text_str = text.str;
+            t.d.size = text.size;
+            t.line = line;
             VecTcTok_push_back(arena, &toks, t);
             i = j; continue;
         }
@@ -320,7 +332,7 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
             // A char literal is an `int` holding the value of the byte
             // converted to (signed) char: '\xff' is -1.
             if (v > 127) v -= 256;
-            TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
+            TcTok t = {0}; t.kind = TC_TK_INT_LIT; t.d.int_value = v; t.line = line;
             VecTcTok_push_back(arena, &toks, t);
             i = j; continue;
         }
@@ -343,7 +355,7 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                     v = v * 16 + dv;
                     j++;
                 }
-                TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
+                TcTok t = {0}; t.kind = TC_TK_INT_LIT; t.d.int_value = v; t.line = line;
                 // Optional integer-literal suffix: any mix of 'l'/'L' /
                 // 'u'/'U' in any order (see below for the decimal path).
                 for (int k = 0; k < 3 && j < src.size; k++) {
@@ -474,7 +486,8 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                 // (per C99) it has TY_F64 (double).
                 bool is_f64 = true;
                 if (j < src.size && (src.str[j] == 'f' || src.str[j] == 'F')) { j++; is_f64 = false; }
-                TcTok t = (TcTok){.kind = TC_TK_FLOAT_LIT, .float_value = f, .is_f64 = is_f64, .line = line};
+                TcTok t = {0}; t.kind = TC_TK_FLOAT_LIT; t.d.float_value = f;
+                t.flags = is_f64 ? TC_TOK_F_F64 : 0u; t.line = line;
                 VecTcTok_push_back(arena, &toks, t);
                 i = j; continue;
             }
@@ -497,7 +510,7 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                 }
                 if (octal_ok) { v = ov; decimal = false; }
             }
-            TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
+            TcTok t = {0}; t.kind = TC_TK_INT_LIT; t.d.int_value = v; t.line = line;
             // Optional integer-literal suffix: any combination of 'l'/'L'
             // and 'u'/'U' in either order. So 'L', 'LL', 'UL', 'LU', 'ULL',
             // 'LLU', 'U' are all accepted. A single L denotes `long`
@@ -663,7 +676,8 @@ TcTok tinyc_lex_string(Arena *arena, string raw, int line) {
     }
     buf[n++] = '\0';
     string text = (string){.str = buf, .size = n};
-    return (TcTok){.kind = TC_TK_STRING_LIT, .text = text, .line = line};
+    TcTok t = {0}; t.kind = TC_TK_STRING_LIT; t.text_str = text.str; t.d.size = text.size; t.line = line;
+    return t;
 }
 
 TcTok tinyc_lex_char(string raw, int line) {
@@ -716,7 +730,8 @@ TcTok tinyc_lex_char(string raw, int line) {
         v = (unsigned char)s[j++];
     }
     if (v > 127) v -= 256;
-    return (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
+    TcTok t = {0}; t.kind = TC_TK_INT_LIT; t.d.int_value = v; t.line = line;
+    return t;
 }
 
 TcTok tinyc_lex_number(string text, int line) {
@@ -738,7 +753,7 @@ TcTok tinyc_lex_number(string text, int line) {
             v = v * 16 + dv;
             j++;
         }
-        TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
+        TcTok t = {0}; t.kind = TC_TK_INT_LIT; t.d.int_value = v; t.line = line;
         for (int k = 0; k < 3 && j < sz; k++) {
             char c2 = s[j];
             if (c2 == 'l' || c2 == 'L') { n_l++; j++; }
@@ -826,7 +841,9 @@ TcTok tinyc_lex_number(string text, int line) {
         }
         bool is_f64 = true;
         if (j < sz && (s[j] == 'f' || s[j] == 'F')) { j++; is_f64 = false; }
-        return (TcTok){.kind = TC_TK_FLOAT_LIT, .float_value = f, .is_f64 = is_f64, .line = line};
+        TcTok t = {0}; t.kind = TC_TK_FLOAT_LIT; t.d.float_value = f;
+        t.flags = is_f64 ? TC_TOK_F_F64 : 0u; t.line = line;
+        return t;
     }
     bool decimal = true;
     if (sz > 1 && s[0] == '0' && j > 1) {
@@ -839,7 +856,7 @@ TcTok tinyc_lex_number(string text, int line) {
         }
         if (octal_ok) { v = ov; decimal = false; }
     }
-    TcTok t = (TcTok){.kind = TC_TK_INT_LIT, .int_value = v, .line = line};
+    TcTok t = {0}; t.kind = TC_TK_INT_LIT; t.d.int_value = v; t.line = line;
     for (int k = 0; k < 3 && j < sz; k++) {
         char c2 = s[j];
         if (c2 == 'l' || c2 == 'L') { n_l++; j++; }

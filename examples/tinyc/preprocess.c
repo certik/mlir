@@ -80,6 +80,7 @@ struct Macro {
     PPTok   *body;       // arena-allocated; n_body entries
     size_t   n_body;
     bool     expanding;          // currently-expanding flag (no self-recursion)
+    PPHide   self_hide;          // reusable single-element hide node {name, NULL}
 };
 
 // One slot per identifier name ever defined (or predefined). A slot is never
@@ -675,6 +676,8 @@ static Macro *macro_define(PP *pp, string name) {
     Macro *m = arena_new(pp->arena, Macro);
     *m = (Macro){0};
     m->name = e->name;
+    m->self_hide.name = e->name;
+    m->self_hide.next = NULL;
     e->macro = m;
     return m;
 }
@@ -771,9 +774,11 @@ static void pp_emit_tctok(PP *pp, const PPTok *t) {
     TcTok *dst = &v->data[v->size];
     switch (t->kind) {
     case PP_IDENT:
-        dst->kind = tinyc_keyword_or_ident(t->text);
+        dst->kind = (uint8_t)tinyc_keyword_or_ident(t->text);
+        dst->flags = 0;
         dst->line = t->line;
-        dst->text = t->text;
+        dst->text_str = t->text.str;
+        dst->d.size = t->text.size;
         v->size++;
         return;
     case PP_PUNCT: {
@@ -783,7 +788,8 @@ static void pp_emit_tctok(PP *pp, const PPTok *t) {
                     (int64_t)t->line, t->text);
             return;
         }
-        dst->kind = k;
+        dst->kind = (uint8_t)k;
+        dst->flags = 0;
         dst->line = t->line;
         v->size++;
         return;
@@ -794,12 +800,9 @@ static void pp_emit_tctok(PP *pp, const PPTok *t) {
         size_t n = t->text.size;
         if (n == 1 && s[0] >= '0' && s[0] <= '9') {
             dst->kind = TC_TK_INT_LIT;
+            dst->flags = 0;
             dst->line = t->line;
-            dst->is_i64 = false;
-            dst->is_long_long = false;
-            dst->is_unsigned = false;
-            dst->is_f64 = false;
-            dst->int_value = (int64_t)(s[0] - '0');
+            dst->d.int_value = (int64_t)(s[0] - '0');
             v->size++;
             return;
         }
@@ -813,12 +816,9 @@ static void pp_emit_tctok(PP *pp, const PPTok *t) {
             }
             if (all_dig) {
                 dst->kind = TC_TK_INT_LIT;
+                dst->flags = 0;
                 dst->line = t->line;
-                dst->is_i64 = false;
-                dst->is_long_long = false;
-                dst->is_unsigned = false;
-                dst->is_f64 = false;
-                dst->int_value = val;
+                dst->d.int_value = val;
                 v->size++;
                 return;
             }
@@ -1112,9 +1112,17 @@ static void substitute(PP *pp, Macro *m, VecPPTok *args, VecPPTok *out) {
         // Plain parameter substitution (use pre-expanded form).
         if (t.kind == PP_IDENT) {
             int p = -1;
-            for (size_t k = 0; k < m->n_params; k++)
-                if (str_eq(m->params[k], t.text)) { p = (int)k; break; }
-            if (p < 0 && va_idx >= 0 && str_eq(t.text, s_lit("__VA_ARGS__"))) p = va_idx;
+            size_t tsz = t.text.size;
+            char tc0 = tsz ? t.text.str[0] : 0;
+            for (size_t k = 0; k < m->n_params; k++) {
+                string pk = m->params[k];
+                if (pk.size == tsz && pk.str[0] == tc0 &&
+                    (tsz <= 1 || memcmp(pk.str + 1, t.text.str + 1, tsz - 1) == 0)) {
+                    p = (int)k; break;
+                }
+            }
+            if (p < 0 && va_idx >= 0 && tsz == 11 && tc0 == '_' &&
+                memcmp(t.text.str, "__VA_ARGS__", 11) == 0) p = va_idx;
             if (p >= 0) {
                 // Look ahead for ## — if the next non-this body token is
                 // ##, do NOT pre-expand (per C); use unexpanded form.
@@ -1359,7 +1367,7 @@ static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
                         substitute(pp, m, NULL, &inner);
                         m->expanding = false;
                         if (inner.size > 0) {
-                            PPHide *shared_hide = hide_add(pp->arena, NULL, m->name);
+                            PPHide *shared_hide = &m->self_hide;
                             size_t start_idx = pp->exp_top;
                             PPTok *dst = pp_exp_alloc(pp, inner.size);
                             for (size_t k = 0; k < inner.size; k++) {
@@ -1410,7 +1418,7 @@ static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
                         // Rewind argument token storage before pushing inner!
                         pp->exp_top = saved_arg_exp;
                         if (inner.size > 0) {
-                            PPHide *shared_hide = hide_add(pp->arena, NULL, m->name);
+                            PPHide *shared_hide = &m->self_hide;
                             size_t start_idx = pp->exp_top;
                             PPTok *dst = pp_exp_alloc(pp, inner.size);
                             for (size_t k = 0; k < inner.size; k++) {

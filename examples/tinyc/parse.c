@@ -156,9 +156,9 @@ int tinyc_int_size(const Type *t) {
 // Negate an integer-literal token in its own C type: a 32-bit unsigned
 // literal wraps modulo 2^32, so `-1u` is 4294967295 and `-0xFFFFFFFF` is 1.
 static int64_t neg_int_lit(P *p, TcTok t) {
-    int64_t v = (int64_t)(0 - (uint64_t)t.int_value);
-    bool is32 = !t.is_i64 || (!t.is_long_long && p->target_wasm32);
-    if (t.is_unsigned && is32) v = (int64_t)(uint32_t)v;
+    int64_t v = (int64_t)(0 - (uint64_t)t.d.int_value);
+    bool is32 = !(t.flags & TC_TOK_F_I64) || (!(t.flags & TC_TOK_F_LONG_LONG) && p->target_wasm32);
+    if (((t.flags & TC_TOK_F_UNSIGNED) != 0) && is32) v = (int64_t)(uint32_t)v;
     return v;
 }
 
@@ -193,15 +193,15 @@ static Stmt *new_stmt(P *p, StmtKind k, int line) {
     s->kind = k;
     s->line = line;
     if (k == ST_IF) {
-        VecStmtPtr_reserve(p->arena, &s->then_body, 4);
+        VecStmtPtr_reserve(p->arena, &s->body, 4);
         VecStmtPtr_reserve(p->arena, &s->else_body, 4);
     } else if (k == ST_WHILE || k == ST_DO_WHILE) {
-        VecStmtPtr_reserve(p->arena, &s->while_body, 4);
+        VecStmtPtr_reserve(p->arena, &s->body, 4);
     } else if (k == ST_FOR) {
-        VecStmtPtr_reserve(p->arena, &s->for_body, 4);
+        VecStmtPtr_reserve(p->arena, &s->body, 4);
         VecExprPtr_reserve(p->arena, &s->for_steps, 2);
     } else if (k == ST_BLOCK || k == ST_SWITCH) {
-        VecStmtPtr_reserve(p->arena, &s->block_body, 4);
+        VecStmtPtr_reserve(p->arena, &s->body, 4);
     }
     return s;
 }
@@ -279,7 +279,7 @@ static void parse_attributes(P *p, AttrInfo *out) {
             // `const` and `static` as identifiers in this position too
             // (gcc allows things like `__attribute__((const))`).
             TcTok nm = cur(p);
-            string aname = nm.text;
+            string aname = tc_tok_text(nm);
             if (nm.kind != TC_TK_IDENT && aname.size == 0) {
                 // Skip whatever token this is.
                 p->i++;
@@ -298,11 +298,11 @@ static void parse_attributes(P *p, AttrInfo *out) {
                 int64_t int_arg = 0;
                 bool have_int_arg = false;
                 if (cur(p).kind == TC_TK_INT_LIT) {
-                    int_arg = cur(p).int_value;
+                    int_arg = cur(p).d.int_value;
                     have_int_arg = true;
                 }
                 if (cur(p).kind == TC_TK_STRING_LIT) {
-                    str_arg = cur(p).text;
+                    str_arg = tc_tok_text(cur(p));
                     if (str_arg.size > 0 &&
                         str_arg.str[str_arg.size - 1] == '\0') {
                         str_arg.size--;
@@ -354,7 +354,7 @@ static void parse_array_len_bracket(P *p, int64_t *out_len, Expr **out_expr) {
         TcTok lit = cur(p);
         p->i++;
         p->i++;  // ']'
-        *out_len = lit.int_value;
+        *out_len = lit.d.int_value;
         return;
     }
     Expr *ex = parse_expr(p);
@@ -393,7 +393,7 @@ static Expr *parse_aggregate_init(P *p, Type decl_type) {
                 TcTok ft = cur(p);
                 expect(p, TC_TK_IDENT, str_lit("expected field name after '.'"));
                 expect(p, TC_TK_ASSIGN, str_lit("expected '=' in designated initializer"));
-                fname = ft.text;
+                fname = tc_tok_text(ft);
                 any_designated = true;
             }
             Expr *v;
@@ -430,7 +430,9 @@ static Expr *parse_aggregate_init(P *p, Type decl_type) {
     }
     expect(p, TC_TK_RBRACE, str_lit("expected '}' in initializer"));
     if (any_designated) {
-        e->compound_field_names = names;
+        e->extra = arena_new(p->arena, ExprExtra);
+        *e->extra = (ExprExtra){0};
+        e->extra->compound_field_names = names;
     }
     return e;
 }
@@ -485,7 +487,7 @@ static Expr *parse_postfix(P *p, Expr *base) {
             TcTok name = cur(p);
             expect(p, TC_TK_IDENT, str_lit("expected field name"));
             Expr *e = new_expr(p, EX_FIELD, line);
-            e->lhs = base; e->name = name.text;
+            e->lhs = base; e->name = tc_tok_text(name);
             base = e;
             continue;
         }
@@ -498,7 +500,7 @@ static Expr *parse_postfix(P *p, Expr *base) {
             Expr *deref = new_expr(p, EX_DEREF, line);
             deref->lhs = base;
             Expr *e = new_expr(p, EX_FIELD, line);
-            e->lhs = deref; e->name = name.text;
+            e->lhs = deref; e->name = tc_tok_text(name);
             base = e;
             continue;
         }
@@ -515,7 +517,7 @@ static Expr *parse_postfix(P *p, Expr *base) {
             Expr *bin = new_expr(p, EX_BIN, line);
             bin->op = op; bin->lhs = base; bin->rhs = one;
             Expr *as = new_expr(p, EX_ASSIGN, line);
-            as->lvalue = base; as->rhs_assign = bin;
+            as->lvalue = base; as->rhs = bin;
             as->is_post_step = true;
             base = as;
             continue;
@@ -555,23 +557,23 @@ static Expr *parse_postfix(P *p, Expr *base) {
 static string parse_string_lits(P *p) {
     TcTok t = cur(p);
     p->i++;
-    if (cur(p).kind != TC_TK_STRING_LIT) return t.text;
-    size_t total = (t.text.size > 0 ? t.text.size - 1 : 0);
+    if (cur(p).kind != TC_TK_STRING_LIT) return tc_tok_text(t);
+    size_t total = (tc_tok_text(t).size > 0 ? tc_tok_text(t).size - 1 : 0);
     size_t k = p->i;
     while (k < p->n && p->toks[k].kind == TC_TK_STRING_LIT) {
-        size_t sz = p->toks[k].text.size;
+        size_t sz = p->toks[k].d.size;
         total += (sz > 0 ? sz - 1 : 0);
         k++;
     }
     total += 1;  // single trailing NUL
     char *buf = arena_new_array(p->arena, char, total);
     size_t off = 0;
-    size_t body0 = (t.text.size > 0 ? t.text.size - 1 : 0);
-    for (size_t j = 0; j < body0; j++) buf[off++] = t.text.str[j];
+    size_t body0 = (tc_tok_text(t).size > 0 ? tc_tok_text(t).size - 1 : 0);
+    for (size_t j = 0; j < body0; j++) buf[off++] = tc_tok_text(t).str[j];
     while (cur(p).kind == TC_TK_STRING_LIT) {
         TcTok nx = cur(p);
-        size_t body = (nx.text.size > 0 ? nx.text.size - 1 : 0);
-        for (size_t j = 0; j < body; j++) buf[off++] = nx.text.str[j];
+        size_t body = (tc_tok_text(nx).size > 0 ? tc_tok_text(nx).size - 1 : 0);
+        for (size_t j = 0; j < body; j++) buf[off++] = tc_tok_text(nx).str[j];
         p->i++;
     }
     buf[off++] = '\0';
@@ -583,10 +585,10 @@ static Expr *parse_primary(P *p) {
     if (t.kind == TC_TK_INT_LIT) {
         p->i++;
         Expr *e = new_expr(p, EX_INT, t.line);
-        e->int_value = t.int_value;
-        e->is_i64 = t.is_i64;
-        e->is_long_long = t.is_long_long;
-        e->is_unsigned = t.is_unsigned;
+        e->int_value = t.d.int_value;
+        e->is_i64 = (t.flags & TC_TOK_F_I64) != 0;
+        e->is_long_long = (t.flags & TC_TOK_F_LONG_LONG) != 0;
+        e->is_unsigned = ((t.flags & TC_TOK_F_UNSIGNED) != 0);
         // On wasm32, a single-L suffix (`long`) is 32-bit, not 64-bit. Only
         // `LL` (or having no L at all) is target-independent. The lexer
         // promotes a value that does not fit 32 bits to `long long`, so a
@@ -600,8 +602,8 @@ static Expr *parse_primary(P *p) {
     if (t.kind == TC_TK_FLOAT_LIT) {
         p->i++;
         Expr *e = new_expr(p, EX_FLOAT, t.line);
-        e->float_value = t.float_value;
-        e->is_f64 = t.is_f64;
+        e->float_value = t.d.float_value;
+        e->is_f64 = (t.flags & TC_TOK_F_F64) != 0;
         return e;
     }
     if (t.kind == TC_TK_KW_NULL) {
@@ -632,7 +634,7 @@ static Expr *parse_primary(P *p) {
             nxt == TC_TK_KW_CONST || nxt == TC_TK_KW_LONG ||
             nxt == TC_TK_KW_SIGNED || nxt == TC_TK_KW_UNSIGNED ||
             nxt == TC_TK_KW_SHORT || nxt == TC_TK_KW_BOOL ||
-            (nxt == TC_TK_IDENT && typedef_lookup(p, cur(p).text) != NULL);
+            (nxt == TC_TK_IDENT && typedef_lookup(p, tc_tok_text(cur(p))) != NULL);
         if (looks_like_type) {
             Type ty = {0};
             if (!parse_abstract_type(p, &ty)) {
@@ -662,7 +664,7 @@ static Expr *parse_primary(P *p) {
                         nxt == TC_TK_KW_SHORT || nxt == TC_TK_KW_BOOL ||
                         nxt == TC_TK_KW_VOID);
         if (!is_cast && nxt == TC_TK_IDENT &&
-            typedef_lookup(p, peek(p, 1).text)) {
+            typedef_lookup(p, tc_tok_text(peek(p, 1)))) {
             is_cast = true;
         }
         if (is_cast) {
@@ -689,7 +691,7 @@ static Expr *parse_primary(P *p) {
                             TcTok ft = cur(p);
                             expect(p, TC_TK_IDENT, str_lit("expected field name after '.'"));
                             expect(p, TC_TK_ASSIGN, str_lit("expected '=' in designated initializer"));
-                            fname = ft.text;
+                            fname = tc_tok_text(ft);
                             any_designated = true;
                         }
                         Expr *v = parse_expr(p);
@@ -711,7 +713,11 @@ static Expr *parse_primary(P *p) {
                 }
                 expect(p, TC_TK_RBRACE,
                        str_lit("expected '}' in compound literal"));
-                if (any_designated) e->compound_field_names = names;
+                if (any_designated) {
+                    e->extra = arena_new(p->arena, ExprExtra);
+                    *e->extra = (ExprExtra){0};
+                    e->extra->compound_field_names = names;
+                }
                 return e;
             }
             Expr *operand = parse_primary(p);
@@ -757,7 +763,7 @@ static Expr *parse_primary(P *p) {
         Expr *bin = new_expr(p, EX_BIN, t.line);
         bin->op = op; bin->lhs = target; bin->rhs = one;
         Expr *as = new_expr(p, EX_ASSIGN, t.line);
-        as->lvalue = target; as->rhs_assign = bin;
+        as->lvalue = target; as->rhs = bin;
         as->is_compound = true;
         return as;
     }
@@ -778,7 +784,9 @@ static Expr *parse_primary(P *p) {
         expect(p, TC_TK_LPAREN, str_lit("expected '(' after _Generic"));
         Expr *ge = new_expr(p, EX_GENERIC, t.line);
         ge->lhs = parse_expr(p);
-        ge->generic_default_index = -1;
+        ge->extra = arena_new(p->arena, ExprExtra);
+        *ge->extra = (ExprExtra){0};
+        ge->extra->generic_default_index = -1;
         // Collect entries. Types go into a parallel array; result exprs
         // go into ge->args (already reserved by new_expr).
         int cap = 0;
@@ -806,11 +814,11 @@ static Expr *parse_primary(P *p) {
             }
             types[n] = ty;
             VecExprPtr_push_back(p->arena, &ge->args, val);
-            if (is_default) ge->generic_default_index = n;
+            if (is_default) ge->extra->generic_default_index = n;
             n++;
             (void)line;
         }
-        ge->generic_types = types;
+        ge->extra->generic_types = types;
         expect(p, TC_TK_RPAREN, str_lit("expected ')' in _Generic"));
         return parse_postfix(p, ge);
     }
@@ -819,8 +827,8 @@ static Expr *parse_primary(P *p) {
         if (cur(p).kind == TC_TK_LPAREN) {
             // Built-in `va_arg(ap, T)`: second argument is a TYPE-NAME, not
             // an expression. Lower to EX_VA_ARG.
-            if (str_eq(t.text, str_lit("va_arg")) ||
-                str_eq(t.text, str_lit("__builtin_va_arg"))) {
+            if (str_eq(tc_tok_text(t), str_lit("va_arg")) ||
+                str_eq(tc_tok_text(t), str_lit("__builtin_va_arg"))) {
                 p->i++;  // consume '('
                 Expr *e = new_expr(p, EX_VA_ARG, t.line);
                 e->lhs = parse_expr(p);
@@ -837,7 +845,7 @@ static Expr *parse_primary(P *p) {
             }
             p->i++;
             Expr *e = new_expr(p, EX_CALL, t.line);
-            e->callee = t.text;
+            e->name = tc_tok_text(t);
             if (cur(p).kind != TC_TK_RPAREN) {
                 for (;;) {
                     Expr *a = parse_expr(p);
@@ -849,7 +857,7 @@ static Expr *parse_primary(P *p) {
             return parse_postfix(p, e);
         }
         Expr *e = new_expr(p, EX_VAR, t.line);
-        e->name = t.text;
+        e->name = tc_tok_text(t);
         return parse_postfix(p, e);
     }
     perror_at(p, t.line, str_lit("expected expression"));
@@ -1049,7 +1057,7 @@ static Expr *parse_assign_or_or(P *p) {
         Expr *bin = new_expr(p, EX_BIN, line);
         bin->op = compound; bin->lhs = lhs; bin->rhs = rhs;
         Expr *e = new_expr(p, EX_ASSIGN, line);
-        e->lvalue = lhs; e->rhs_assign = bin;
+        e->lvalue = lhs; e->rhs = bin;
         e->is_compound = true;
         return e;
     }
@@ -1059,7 +1067,7 @@ static Expr *parse_assign_or_or(P *p) {
         Expr *rhs = parse_assign_or_or(p);   // right-assoc
         Expr *e = new_expr(p, EX_ASSIGN, line);
         e->lvalue = lhs;
-        e->rhs_assign = rhs;
+        e->rhs = rhs;
         return e;
     }
     return lhs;
@@ -1294,8 +1302,8 @@ static void promote_static_locals(P *p, Stmt *s, int line) {
     if (s->kind == ST_DECL) {
         promote_static_local(p, s, line);
     } else if (s->kind == ST_BLOCK) {
-        for (size_t i = 0; i < s->block_body.size; i++) {
-            promote_static_local(p, s->block_body.data[i], line);
+        for (size_t i = 0; i < s->body.size; i++) {
+            promote_static_local(p, s->body.data[i], line);
         }
     }
 }
@@ -1359,13 +1367,13 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         return s;
     }
     // Typedef'd type-name takes precedence over manual parsing.
-    if (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, cur(p).text)) {
+    if (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, tc_tok_text(cur(p)))) {
         Type ty = {0};
         parse_sig_type(p, &ty);
         TcTok name = cur(p);
         expect(p, TC_TK_IDENT, str_lit("expected identifier"));
         Stmt *s = new_stmt(p, ST_DECL, line);
-        s->decl_name = name.text;
+        s->decl_name = tc_tok_text(name);
         s->decl_type = ty;
         if (accept(p, TC_TK_LBRACK)) {
             int64_t alen = 0; Expr *aexpr = NULL;
@@ -1401,7 +1409,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         if (cur(p).kind == TC_TK_COMMA) {
             Stmt *blk = new_stmt(p, ST_BLOCK, line);
             blk->block_no_scope = true;
-            VecStmtPtr_push_back(p->arena, &blk->block_body, s);
+            VecStmtPtr_push_back(p->arena, &blk->body, s);
             while (accept(p, TC_TK_COMMA)) {
                 // Accept (and ignore) any leading `*`s that match the
                 // pointer-ness already absorbed into `ty` by parse_sig_type.
@@ -1412,7 +1420,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 TcTok dname = cur(p);
                 expect(p, TC_TK_IDENT, str_lit("expected identifier"));
                 Stmt *ds = new_stmt(p, ST_DECL, dname.line);
-                ds->decl_name = dname.text;
+                ds->decl_name = tc_tok_text(dname);
                 ds->decl_type = ty;
                 // Optional `[N]` (or `[N][M]`) suffix on this declarator
                 // — promote the per-declarator type into the matching
@@ -1448,7 +1456,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                     Expr *agg = parse_aggregate_init(p, ds->decl_type);
                     ds->decl_init = agg ? agg : parse_expr(p);
                 }
-                VecStmtPtr_push_back(p->arena, &blk->block_body, ds);
+                VecStmtPtr_push_back(p->arena, &blk->body, ds);
             }
             if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
             if (saw_static) promote_static_locals(p, blk, line);
@@ -1496,7 +1504,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             }
             sn = (TcTok){0};
             sn.kind = TC_TK_IDENT;
-            sn.text = sd->name;
+            tc_tok_set_text(&sn, sd->name);
             sn.line = line;
         } else {
             p->i++;
@@ -1508,8 +1516,8 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         TcTok name = cur(p);
         expect(p, TC_TK_IDENT, str_lit("expected variable name"));
         Stmt *s = new_stmt(p, ST_DECL, line);
-        s->decl_name = name.text;
-        s->decl_type.struct_name = sn.text;
+        s->decl_name = tc_tok_text(name);
+        s->decl_type.struct_name = tc_tok_text(sn);
         if (accept(p, TC_TK_LBRACK)) {
             if (is_ptr_ptr) {
                 perror_at(p, line, str_lit("array of struct ** is not supported"));
@@ -1530,10 +1538,10 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             Type *inner = arena_new(p->arena, Type);
             *inner = (Type){0};
             inner->kind = TY_PTR_STRUCT;
-            inner->struct_name = sn.text;
+            inner->struct_name = tc_tok_text(sn);
             s->decl_type.kind = TY_PTR_PTR;
             s->decl_type.pointee = inner;
-            s->decl_type.struct_name = sn.text;
+            s->decl_type.struct_name = tc_tok_text(sn);
         } else {
             s->decl_type.kind = is_ptr ? TY_PTR_STRUCT : TY_STRUCT;
         }
@@ -1558,7 +1566,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         TcTok name = cur(p);
         expect(p, TC_TK_IDENT, str_lit("expected identifier"));
         Stmt *s = new_stmt(p, ST_DECL, line);
-        s->decl_name = name.text;
+        s->decl_name = tc_tok_text(name);
         s->decl_type.kind = TY_VA_LIST;
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
         if (saw_static) promote_static_locals(p, s, line);
@@ -1581,7 +1589,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     TcTok name = cur(p);
     expect(p, TC_TK_IDENT, str_lit("expected identifier"));
     Stmt *s = new_stmt(p, ST_DECL, line);
-    s->decl_name = name.text;
+    s->decl_name = tc_tok_text(name);
     s->decl_type.kind = base;
     if (is_long) s->decl_type.int_bits = 64;
     // int_unsigned is meaningful for both value types AND pointer types
@@ -1656,7 +1664,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     if (cur(p).kind == TC_TK_COMMA) {
         Stmt *blk = new_stmt(p, ST_BLOCK, line);
         blk->block_no_scope = true;
-        VecStmtPtr_push_back(p->arena, &blk->block_body, s);
+        VecStmtPtr_push_back(p->arena, &blk->body, s);
         while (accept(p, TC_TK_COMMA)) {
             bool dis_ptr = false, dis_pp = false;
             if (accept(p, TC_TK_STAR)) {
@@ -1666,7 +1674,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             TcTok dname = cur(p);
             expect(p, TC_TK_IDENT, str_lit("expected identifier"));
             Stmt *ds = new_stmt(p, ST_DECL, dname.line);
-            ds->decl_name = dname.text;
+            ds->decl_name = tc_tok_text(dname);
             ds->decl_type.kind = base;
             ds->decl_type.int_unsigned = is_unsigned;
             ds->decl_type.int_bits = int_bits;
@@ -1710,7 +1718,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                     ds->decl_type.array_len = (int64_t)ds->decl_init->name.size;
                 }
             }
-            VecStmtPtr_push_back(p->arena, &blk->block_body, ds);
+            VecStmtPtr_push_back(p->arena, &blk->body, ds);
         }
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
         if (saw_static) promote_static_locals(p, blk, line);
@@ -1737,7 +1745,7 @@ static Stmt *parse_stmt(P *p) {
     }
     if (t.kind == TC_TK_LBRACE) {
         Stmt *s = new_stmt(p, ST_BLOCK, t.line);
-        parse_block(p, &s->block_body);
+        parse_block(p, &s->body);
         return s;
     }
     if (t.kind == TC_TK_KW_GOTO) {
@@ -1745,7 +1753,7 @@ static Stmt *parse_stmt(P *p) {
         TcTok nm = cur(p);
         expect(p, TC_TK_IDENT, str_lit("expected label after 'goto'"));
         Stmt *s = new_stmt(p, ST_GOTO, t.line);
-        s->label_name = nm.text;
+        s->label_name = tc_tok_text(nm);
         expect(p, TC_TK_SEMI, str_lit("expected ';' after goto"));
         return s;
     }
@@ -1754,7 +1762,7 @@ static Stmt *parse_stmt(P *p) {
     if (t.kind == TC_TK_IDENT && peek(p, 1).kind == TC_TK_COLON) {
         p->i += 2;  // consume IDENT and ':'
         Stmt *s = new_stmt(p, ST_LABEL, t.line);
-        s->label_name = t.text;
+        s->label_name = tc_tok_text(t);
         return s;
     }
     if (t.kind == TC_TK_KW_RETURN) {
@@ -1788,7 +1796,7 @@ static Stmt *parse_stmt(P *p) {
         expect(p, TC_TK_LPAREN, str_lit("expected '('"));
         s->cond = parse_expr(p);
         expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
-        parse_block(p, &s->then_body);
+        parse_block(p, &s->body);
         if (accept(p, TC_TK_KW_ELSE)) {
             s->has_else = true;
             parse_block(p, &s->else_body);
@@ -1801,13 +1809,13 @@ static Stmt *parse_stmt(P *p) {
         expect(p, TC_TK_LPAREN, str_lit("expected '('"));
         s->cond = parse_expr(p);
         expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
-        parse_block(p, &s->while_body);
+        parse_block(p, &s->body);
         return s;
     }
     if (t.kind == TC_TK_KW_DO) {
         p->i++;
         Stmt *s = new_stmt(p, ST_DO_WHILE, t.line);
-        parse_block(p, &s->while_body);
+        parse_block(p, &s->body);
         expect(p, TC_TK_KW_WHILE, str_lit("expected 'while' after do-block"));
         expect(p, TC_TK_LPAREN, str_lit("expected '('"));
         s->cond = parse_expr(p);
@@ -1830,7 +1838,7 @@ static Stmt *parse_stmt(P *p) {
                    cur(p).kind == TC_TK_KW_LONG || cur(p).kind == TC_TK_KW_SIGNED ||
                    cur(p).kind == TC_TK_KW_UNSIGNED ||
                    cur(p).kind == TC_TK_KW_SHORT || cur(p).kind == TC_TK_KW_BOOL ||
-                   (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, cur(p).text))) {
+                   (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, tc_tok_text(cur(p))))) {
             s->for_init = parse_decl(p, /*require_semi*/ true);
         } else {
             Stmt *es = new_stmt(p, ST_EXPR, cur(p).line);
@@ -1851,7 +1859,7 @@ static Stmt *parse_stmt(P *p) {
             }
         }
         expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
-        parse_block(p, &s->for_body);
+        parse_block(p, &s->body);
         return s;
     }
     if (t.kind == TC_TK_KW_SWITCH) {
@@ -1870,10 +1878,10 @@ static Stmt *parse_stmt(P *p) {
                 TcTok lit = cur(p);
                 int64_t cval = 0;
                 if (lit.kind == TC_TK_INT_LIT) {
-                    cval = lit.int_value;
+                    cval = lit.d.int_value;
                     p->i++;
-                } else if (lit.kind == TC_TK_IDENT && enum_lookup(p, lit.text)) {
-                    cval = enum_lookup(p, lit.text)->value;
+                } else if (lit.kind == TC_TK_IDENT && enum_lookup(p, tc_tok_text(lit))) {
+                    cval = enum_lookup(p, tc_tok_text(lit))->value;
                     p->i++;
                 } else {
                     expect(p, TC_TK_INT_LIT, str_lit("expected integer or enumerator in 'case'"));
@@ -1882,7 +1890,7 @@ static Stmt *parse_stmt(P *p) {
                 SwitchCase sc = (SwitchCase){
                     .value = neg ? -cval : cval,
                     .is_default = false,
-                    .body_start = s->block_body.size,
+                    .body_start = s->body.size,
                 };
                 VecSwitchCase_push_back(p->arena, &s->switch_cases, sc);
                 continue;
@@ -1892,13 +1900,13 @@ static Stmt *parse_stmt(P *p) {
                 expect(p, TC_TK_COLON, str_lit("expected ':' after default"));
                 SwitchCase sc = (SwitchCase){
                     .value = 0, .is_default = true,
-                    .body_start = s->block_body.size,
+                    .body_start = s->body.size,
                 };
                 VecSwitchCase_push_back(p->arena, &s->switch_cases, sc);
                 continue;
             }
             Stmt *bs = parse_stmt(p);
-            VecStmtPtr_push_back(p->arena, &s->block_body, bs);
+            VecStmtPtr_push_back(p->arena, &s->body, bs);
         }
         expect(p, TC_TK_RBRACE, str_lit("expected '}'"));
         return s;
@@ -1912,7 +1920,7 @@ static Stmt *parse_stmt(P *p) {
         t.kind == TC_TK_KW_UNSIGNED ||
         t.kind == TC_TK_KW_SHORT || t.kind == TC_TK_KW_BOOL ||
         t.kind == TC_TK_KW_VA_LIST ||
-        (t.kind == TC_TK_IDENT && typedef_lookup(p, t.text) &&
+        (t.kind == TC_TK_IDENT && typedef_lookup(p, tc_tok_text(t)) &&
          (peek(p, 1).kind == TC_TK_IDENT || peek(p, 1).kind == TC_TK_STAR ||
           (peek(p, 1).kind == TC_TK_LPAREN && peek(p, 2).kind == TC_TK_STAR)))) {
         // `enum [Tag] { ... };` is a module-scope-only registration form;
@@ -1973,7 +1981,7 @@ static bool try_parse_fnptr_suffix(P *p, Type *ty, string *out_name) {
         p->i++;
     }
     if (cur(p).kind == TC_TK_IDENT) {
-        if (out_name) *out_name = cur(p).text;
+        if (out_name) *out_name = tc_tok_text(cur(p));
         p->i++;
     }
     expect(p, TC_TK_RPAREN, str_lit("expected ')' in function-pointer declarator"));
@@ -2166,7 +2174,7 @@ static bool parse_sig_type(P *p, Type *out) {
         TcTok sn = cur(p);
         if (!expect(p, TC_TK_IDENT, str_lit("expected struct name"))) return false;
         out->kind = TY_STRUCT;
-        out->struct_name = sn.text;
+        out->struct_name = tc_tok_text(sn);
         skip_const(p);
         if (accept(p, TC_TK_STAR)) {
             out->kind = TY_PTR_STRUCT;
@@ -2204,7 +2212,7 @@ static bool parse_sig_type(P *p, Type *out) {
         return true;
     }
     if (cur(p).kind == TC_TK_IDENT) {
-        Typedef *td = typedef_lookup(p, cur(p).text);
+        Typedef *td = typedef_lookup(p, tc_tok_text(cur(p)));
         if (td) {
             p->i++;
             *out = td->ty;
@@ -2293,7 +2301,7 @@ static Func *parse_func(P *p) {
     expect(p, TC_TK_LPAREN, str_lit("expected '('"));
     Func *f = arena_new(p->arena, Func);
     *f = (Func){0};
-    f->name = name.text;
+    f->name = tc_tok_text(name);
     f->return_type = ret_ty;
     f->line = line;
     f->wasm_import_module = attrs.import_module;
@@ -2335,7 +2343,7 @@ static Func *parse_func(P *p) {
                 perror_at(p, pline,
                     str_lit("'void' is only valid as the lone parameter spec"));
             } else if (cur(p).kind == TC_TK_IDENT) {
-                pname = cur(p).text;
+                pname = tc_tok_text(cur(p));
                 p->i++;
                 // C function-parameter array decay: `T name[N]` is a synonym
                 // for `T *name`. Consume one or more `[expr?]` suffixes and
@@ -2415,7 +2423,7 @@ static StructDef *parse_struct_def(P *p) {
     }
     string name = (string){0};
     if (cur(p).kind == TC_TK_IDENT) {
-        name = cur(p).text;
+        name = tc_tok_text(cur(p));
         p->i++;
     }
     // Anonymous struct (no tag): caller must patch sd->name afterwards.
@@ -2478,7 +2486,7 @@ static StructDef *parse_struct_def(P *p) {
             if (!expect(p, TC_TK_IDENT, str_lit("expected struct name"))) { p->i++; continue; }
             is_ptr = accept(p, TC_TK_STAR);
             ft.kind = is_ptr ? TY_PTR_STRUCT : TY_STRUCT;
-            ft.struct_name = sn.text;
+            ft.struct_name = tc_tok_text(sn);
             is_struct_kind = true;
             // `struct Inner **name`: a pointer to a struct pointer. The
             // second `*` used to be skipped below, typing the field
@@ -2502,12 +2510,12 @@ static StructDef *parse_struct_def(P *p) {
             if (cur(p).kind == TC_TK_IDENT) p->i++;
             ft.kind = TY_I32;
             ft.int_bits = 32;
-        } else if (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, cur(p).text)) {
+        } else if (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, tc_tok_text(cur(p)))) {
             // Typedef'd field type, e.g. `size_t buf_len;` or `ciovec_t* p;`.
             // We resolve the typedef and reuse the existing pointer/array
             // logic by mapping the resolved type to one of the supported
             // field kinds.
-            Typedef *td = typedef_lookup(p, cur(p).text);
+            Typedef *td = typedef_lookup(p, tc_tok_text(cur(p)));
             p->i++;
             ft = td->ty;
             // Pointer suffix `*` applies to the resolved typedef.
@@ -2611,8 +2619,11 @@ static StructDef *parse_struct_def(P *p) {
             first_decl = false;
             TcTok fn;
             if (fnptr_field_name.size > 0) {
-                fn = (TcTok){.kind = TC_TK_IDENT, .text = fnptr_field_name,
-                             .line = cur(p).line};
+                fn = (TcTok){0};
+                fn.kind = TC_TK_IDENT;
+                fn.text_str = fnptr_field_name.str;
+                fn.d.size = fnptr_field_name.size;
+                fn.line = cur(p).line;
                 fnptr_field_name = (string){0};
             } else {
                 fn = cur(p);
@@ -2626,13 +2637,13 @@ static StructDef *parse_struct_def(P *p) {
                 TcTok lit = cur(p);
                 expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
                 expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
-                int64_t n1 = lit.int_value;
+                int64_t n1 = lit.d.int_value;
                 int64_t n2 = 0;
                 if (accept(p, TC_TK_LBRACK)) {
                     TcTok lit2 = cur(p);
                     expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
                     expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
-                    n2 = lit2.int_value;
+                    n2 = lit2.d.int_value;
                 }
                 // Map (element-type, dim) -> array TypeKind.
                 if (is_struct_kind && !is_ptr) {
@@ -2656,7 +2667,7 @@ static StructDef *parse_struct_def(P *p) {
                 }
             }
             VecStructField_push_back(p->arena, &sd->fields,
-                ((StructField){.name = fn.text, .type = ft}));
+                ((StructField){.name = tc_tok_text(fn), .type = ft}));
             more_decls = accept(p, TC_TK_COMMA);
         }
         expect(p, TC_TK_SEMI, str_lit("expected ';' after field"));
@@ -2696,11 +2707,11 @@ static void parse_enum_body(P *p) {
                 value = v;
             }
         }
-        if (enum_lookup(p, nm.text)) {
+        if (enum_lookup(p, tc_tok_text(nm))) {
             perror_at(p, nm.line, str_lit("duplicate enumerator"));
         }
         Enumerator *e = arena_new(p->arena, Enumerator);
-        e->name = nm.text;
+        e->name = tc_tok_text(nm);
         e->value = value;
         enum_insert(p, e);
         next_value = (int64_t)((uint64_t)value + 1);
@@ -2800,7 +2811,7 @@ static void parse_typedef_decl(P *p) {
             Type ty = (Type){0};
             ty.kind = TY_I32;
             Typedef *td = arena_new(arena, Typedef);
-            td->name = nm.text;
+            td->name = tc_tok_text(nm);
             td->ty = ty;
             typedef_insert(p, td);
         }
@@ -2815,7 +2826,7 @@ static void parse_typedef_decl(P *p) {
             StructDef *sd = parse_struct_def(p);
             string alias = (string){0};
             if (cur(p).kind == TC_TK_IDENT) {
-                alias = cur(p).text;
+                alias = tc_tok_text(cur(p));
                 p->i++;
             }
             if (sd->name.size == 0) {
@@ -2854,7 +2865,7 @@ static void parse_typedef_decl(P *p) {
         }
         // No body: `typedef struct Tag Alias;`.
         if (peek(p, 1).kind == TC_TK_IDENT) {
-            string tag = peek(p, 1).text;
+            string tag = tc_tok_text(peek(p, 1));
             size_t dummy_si = 0;
             if (!idx_lookup(p->st_buckets, tag, &dummy_si)) {
                 StructDef *sd = arena_new(arena, StructDef);
@@ -2898,14 +2909,14 @@ static void parse_typedef_decl(P *p) {
         expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
         if (ty.kind == TY_I32) {
             ty.kind = TY_ARRAY_I32;
-            ty.array_len = lit.int_value;
+            ty.array_len = lit.d.int_value;
         } else {
             perror_at(p, line, str_lit("typedef array only supported for int"));
         }
     }
     expect(p, TC_TK_SEMI, str_lit("expected ';' after typedef"));
     Typedef *td = arena_new(arena, Typedef);
-    td->name = nm.text;
+    td->name = tc_tok_text(nm);
     td->ty = ty;
     typedef_insert(p, td);
 }
@@ -3037,7 +3048,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
             peek(&p, 2).kind == TC_TK_SEMI) {
             int line = cur(&p).line;
             p.i++;
-            string nm = cur(&p).text;
+            string nm = tc_tok_text(cur(&p));
             p.i++;  // IDENT
             p.i++;  // SEMI
             size_t dummy_si = 0;
@@ -3119,7 +3130,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                     TcTok nm = cur(&p);
                     p.i++;
                     Global g = (Global){0};
-                    g.name = nm.text;
+                    g.name = tc_tok_text(nm);
                     g.is_extern = saw_extern;
                     g.is_static = saw_static;
                     g.is_const = global_object_is_const(&tty);
@@ -3207,14 +3218,14 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                     int64_t val = 0;
                                     bool have_int_val = false;
                                     if (el.kind == TC_TK_INT_LIT) {
-                                        val = el.int_value;
+                                        val = el.d.int_value;
                                         have_int_val = true;
                                         ok = true;
                                     } else if (el.kind == TC_TK_KW_NULL) {
                                         val = 0; have_int_val = true; ok = true;
                                     } else if (el.kind == TC_TK_MINUS &&
                                                peek(&p, 1).kind == TC_TK_INT_LIT) {
-                                        val = -peek(&p, 1).int_value;
+                                        val = -peek(&p, 1).d.int_value;
                                         have_int_val = true;
                                         ok = true;
                                         p.i++;       // skip the '-'
@@ -3231,13 +3242,13 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                         }
                                         // optional int after the cast
                                         if (cur(&p).kind == TC_TK_INT_LIT) {
-                                            val = cur(&p).int_value;
+                                            val = cur(&p).d.int_value;
                                             have_int_val = true;
                                             p.i++;
                                         }
                                         ok = true;
-                                    } else if (el.kind == TC_TK_IDENT && enum_lookup(&p, el.text)) {
-                                        val = enum_lookup(&p, el.text)->value;
+                                    } else if (el.kind == TC_TK_IDENT && enum_lookup(&p, tc_tok_text(el))) {
+                                        val = enum_lookup(&p, tc_tok_text(el))->value;
                                         have_int_val = true;
                                         ok = true;
                                     }
@@ -3299,15 +3310,15 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                         } else if (lit.kind == TC_TK_INT_LIT &&
                                    peek(&p, 1).kind == TC_TK_SHL &&
                                    peek(&p, 2).kind == TC_TK_INT_LIT) {
-                            int64_t a = lit.int_value;
-                            int64_t b = peek(&p, 2).int_value;
+                            int64_t a = lit.d.int_value;
+                            int64_t b = peek(&p, 2).d.int_value;
                             g.init_int = a << b;
                             p.i += 3;
                         } else if (lit.kind == TC_TK_INT_LIT) {
-                            g.init_int = lit.int_value;
+                            g.init_int = lit.d.int_value;
                             p.i++;
                         } else if (lit.kind == TC_TK_FLOAT_LIT) {
-                            g.init_float = lit.float_value;
+                            g.init_float = lit.d.float_value;
                             p.i++;
                         } else if (lit.kind == TC_TK_KW_NULL) {
                             // a null-initialized pointer; init_int=0 means null.
@@ -3330,10 +3341,10 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                    peek(&p, 1).kind == TC_TK_FLOAT_LIT) {
                             p.i++;
                             TcTok n = cur(&p);
-                            g.init_float = -n.float_value;
+                            g.init_float = -n.d.float_value;
                             p.i++;
-                        } else if (lit.kind == TC_TK_IDENT && enum_lookup(&p, lit.text)) {
-                            g.init_int = enum_lookup(&p, lit.text)->value;
+                        } else if (lit.kind == TC_TK_IDENT && enum_lookup(&p, tc_tok_text(lit))) {
+                            g.init_int = enum_lookup(&p, tc_tok_text(lit))->value;
                             p.i++;
                         } else if (lit.kind == TC_TK_LPAREN) {
                             // `((void*)0)` — scalar null pointer init via cast.
@@ -3349,11 +3360,11 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                             if (cur(&p).kind == TC_TK_RPAREN) { p.i++; depth--; }
                             bool neg = accept(&p, TC_TK_MINUS);
                             if (cur(&p).kind == TC_TK_INT_LIT) {
-                                int64_t iv = cur(&p).int_value;
+                                int64_t iv = cur(&p).d.int_value;
                                 g.init_int = neg ? neg_int_lit(&p, cur(&p)) : iv;
                                 p.i++;
                             } else if (cur(&p).kind == TC_TK_FLOAT_LIT) {
-                                double fv = cur(&p).float_value;
+                                double fv = cur(&p).d.float_value;
                                 g.init_float = neg ? -fv : fv;
                                 p.i++;
                             } else if (neg) {
@@ -3367,8 +3378,8 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                         } else if (lit.kind == TC_TK_INT_LIT &&
                                    peek(&p, 1).kind == TC_TK_SHL &&
                                    peek(&p, 2).kind == TC_TK_INT_LIT) {
-                            int64_t a = lit.int_value;
-                            int64_t b = peek(&p, 2).int_value;
+                            int64_t a = lit.d.int_value;
+                            int64_t b = peek(&p, 2).d.int_value;
                             g.init_int = a << b;
                             p.i += 3;
                         } else {

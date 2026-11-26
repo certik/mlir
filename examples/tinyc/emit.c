@@ -1370,7 +1370,8 @@ static MLIR_ValueHandle emit_bool_i32(E *e, EVal v) {
 typedef struct LValS {
     MLIR_ValueHandle base_ptr;
     MLIR_TypeHandle  source_elem;     // INVALID if no GEP needed
-    int32_t         *const_path;
+    int32_t         *const_path;      // NULL => use inline_path[0..n_const_path)
+    int32_t          inline_path[8];
     size_t           n_const_path;
     MLIR_ValueHandle dyn_index;       // INVALID for purely-static GEP
     MLIR_TypeHandle  elem_ty;         // i32 or f32
@@ -1416,7 +1417,8 @@ static MLIR_ValueHandle lval_address(E *e, LVal lv) {
         n_dyn = 1;
     }
     return emit_gep(e, lv.base_ptr, lv.source_elem,
-                    lv.const_path, lv.n_const_path, dyn, n_dyn);
+                    lv.const_path ? lv.const_path : lv.inline_path,
+                    lv.n_const_path, dyn, n_dyn);
 }
 
 static EVal load_lvalue(E *e, LVal lv) {
@@ -1472,15 +1474,37 @@ typedef struct {
     MLIR_ValueHandle base_ptr;
     MLIR_TypeHandle  source_elem;
     StructDef       *sd;
-    int32_t         *const_path;
+    int32_t         *const_path;      // NULL => use inline_path[0..n_const_path)
+    int32_t          inline_path[8];
     size_t           n_const_path;
     size_t           cap_const_path;
     MLIR_ValueHandle dyn_index;
 } SCtx;
 
+static inline int32_t *sctx_path(SCtx *c) {
+    return c->const_path ? c->const_path : c->inline_path;
+}
+
+static inline void lval_copy_sctx_path(LVal *lv, const SCtx *c) {
+    lv->const_path = c->const_path;
+    lv->n_const_path = c->n_const_path;
+    if (!c->const_path && c->n_const_path > 0) {
+        for (size_t i = 0; i < c->n_const_path; i++) lv->inline_path[i] = c->inline_path[i];
+    }
+}
+
 static void sctx_push(E *e, SCtx *c, int32_t v) {
-    if (c->n_const_path == c->cap_const_path) {
-        size_t cap = c->cap_const_path ? c->cap_const_path * 2 : 4;
+    if (!c->const_path) {
+        if (c->n_const_path < 8) {
+            c->inline_path[c->n_const_path++] = v;
+            return;
+        }
+        int32_t *np = arena_new_array(e->arena, int32_t, 16);
+        for (size_t i = 0; i < 8; i++) np[i] = c->inline_path[i];
+        c->const_path = np;
+        c->cap_const_path = 16;
+    } else if (c->n_const_path == c->cap_const_path) {
+        size_t cap = c->cap_const_path * 2;
         int32_t *np = arena_new_array(e->arena, int32_t, cap);
         for (size_t i = 0; i < c->n_const_path; i++) np[i] = c->const_path[i];
         c->const_path = np;
@@ -1617,7 +1641,7 @@ static SCtx walk_struct_lhs(E *e, Scope *sc, Expr *ex) {
             // The path so far may hold a dynamic index (`gu[k].s.x`).
             MLIR_ValueHandle udyn[1] = {r.dyn_index};
             MLIR_ValueHandle base = emit_gep(e, r.base_ptr, r.source_elem,
-                                              r.const_path, r.n_const_path,
+                                              sctx_path(&r), r.n_const_path,
                                               udyn, r.dyn_index != MLIR_INVALID_HANDLE ? 1 : 0);
             r.base_ptr = base;
             r.source_elem = find_struct_type(e, find_struct(e, ft.struct_name));
@@ -1797,7 +1821,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                             size_t n_pd = 0;
                             if (parent.dyn_index != MLIR_INVALID_HANDLE) pd[n_pd++] = parent.dyn_index;
                             MLIR_ValueHandle ubase = emit_gep(e, parent.base_ptr,
-                                parent.source_elem, parent.const_path, parent.n_const_path,
+                                parent.source_elem, sctx_path(&parent), parent.n_const_path,
                                 pd, n_pd);
                             int32_t upath[3] = {0, LLVM_GEP_DYN, LLVM_GEP_DYN};
                             MLIR_ValueHandle udyn[2] = {iv, jv};
@@ -1812,7 +1836,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                         size_t extra = 1 + (is_2d ? 2 : 1);
                         size_t total = parent_n + extra;
                         int32_t *path = arena_new_array(e->arena, int32_t, total);
-                        for (size_t k = 0; k < parent_n; k++) path[k] = parent.const_path[k];
+                        for (size_t k = 0; k < parent_n; k++) path[k] = sctx_path(&parent)[k];
                         path[parent_n] = (int32_t)fidx;
                         path[parent_n + 1] = LLVM_GEP_DYN;
                         if (is_2d) path[parent_n + 2] = LLVM_GEP_DYN;
@@ -1844,7 +1868,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                         size_t parent_n = parent.n_const_path;
                         size_t total = parent_n + 1;
                         int32_t *fpath = arena_new_array(e->arena, int32_t, total);
-                        for (size_t k = 0; k < parent_n; k++) fpath[k] = parent.const_path[k];
+                        for (size_t k = 0; k < parent_n; k++) fpath[k] = sctx_path(&parent)[k];
                         fpath[parent_n] = (int32_t)fidx;
                         size_t n_dyn = (parent.dyn_index != MLIR_INVALID_HANDLE ? 1 : 0);
                         MLIR_ValueHandle *fdyn = arena_new_array(e->arena, MLIR_ValueHandle,
@@ -2061,9 +2085,8 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 r.base_ptr = sym_addr(e, s);
                 r.source_elem = MLIR_CreateTypeLLVMArray(e->ctx, st_ty,
                     (uint64_t)s->type.array_len);
-                int32_t *path = arena_new_array(e->arena, int32_t, 2);
-                path[0] = 0; path[1] = LLVM_GEP_DYN;
-                r.const_path = path; r.n_const_path = 2;
+                r.inline_path[0] = 0; r.inline_path[1] = LLVM_GEP_DYN;
+                r.n_const_path = 2;
                 r.dyn_index = idx_i32;
                 r.elem_ty = st_ty;
                 return r;
@@ -2113,9 +2136,8 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 MLIR_ValueHandle idx_i32 = emit_expr_i32(e, sc, ex->rhs);
                 r.base_ptr = sym_addr(e, s);
                 r.source_elem = MLIR_CreateTypeLLVMArray(e->ctx, e->ptr, (uint64_t)s->type.array_len);
-                int32_t *path = arena_new_array(e->arena, int32_t, 2);
-                path[0] = 0; path[1] = LLVM_GEP_DYN;
-                r.const_path = path; r.n_const_path = 2;
+                r.inline_path[0] = 0; r.inline_path[1] = LLVM_GEP_DYN;
+                r.n_const_path = 2;
                 r.dyn_index = idx_i32;
                 r.elem_ty = e->ptr;
                 return r;
@@ -2203,8 +2225,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
             sctx_push(e, &parent, parent.sd->is_union ? 0 : idx);
             r.base_ptr = parent.base_ptr;
             r.source_elem = parent.source_elem;
-            r.const_path = parent.const_path;
-            r.n_const_path = parent.n_const_path;
+            lval_copy_sctx_path(&r, &parent);
             r.dyn_index = parent.dyn_index;
             r.elem_ty = scalar_mem_type(e, &ft);
             r.is_unsigned = ft.int_unsigned;
@@ -2322,8 +2343,7 @@ static MLIR_ValueHandle resolve_struct_source(E *e, Scope *sc, Expr *arg, Struct
                         LVal lv = (LVal){0};
                         lv.base_ptr = c.base_ptr;
                         lv.source_elem = c.source_elem;
-                        lv.const_path = c.const_path;
-                        lv.n_const_path = c.n_const_path;
+                        lval_copy_sctx_path(&lv, &c);
                         lv.dyn_index = c.dyn_index;
                         *out_sd = sd;
                         return lval_address(e, lv);
@@ -2377,8 +2397,7 @@ static MLIR_ValueHandle resolve_struct_source(E *e, Scope *sc, Expr *arg, Struct
                     LVal lv = (LVal){0};
                     lv.base_ptr = c.base_ptr;
                     lv.source_elem = c.source_elem;
-                    lv.const_path = c.const_path;
-                    lv.n_const_path = c.n_const_path;
+                    lval_copy_sctx_path(&lv, &c);
                     lv.dyn_index = c.dyn_index;
                     *out_sd = sd;
                     return lval_address(e, lv);
@@ -2452,7 +2471,8 @@ static void emit_struct_copy_path(E *e, MLIR_ValueHandle dst, MLIR_ValueHandle s
         union_blob_layout(e, sd, &uelem, &ues, &uc);
         for (int64_t j = 0; j < uc; j++) {
             size_t total = n_prefix + 2;
-            int32_t *p2 = arena_new_array(e->arena, int32_t, total);
+            int32_t p2_stk[16];
+            int32_t *p2 = (total <= 16) ? p2_stk : arena_new_array(e->arena, int32_t, total);
             for (size_t k = 0; k < n_prefix; k++) p2[k] = prefix[k];
             p2[n_prefix] = 0;
             p2[n_prefix + 1] = (int32_t)j;
@@ -2466,7 +2486,8 @@ static void emit_struct_copy_path(E *e, MLIR_ValueHandle dst, MLIR_ValueHandle s
     for (size_t i = 0; i < sd->fields.size; i++) {
         Type ft = sd->fields.data[i].type;
         size_t n_path = n_prefix + 1;
-        int32_t *path = arena_new_array(e->arena, int32_t, n_path);
+        int32_t path_stk[16];
+        int32_t *path = (n_path <= 16) ? path_stk : arena_new_array(e->arena, int32_t, n_path);
         for (size_t k = 0; k < n_prefix; k++) path[k] = prefix[k];
         path[n_prefix] = (int32_t)i;
         if (ft.kind == TY_STRUCT) {
@@ -3048,12 +3069,12 @@ static Expr *generic_select(E *e, Scope *sc, Expr *ex) {
     int n = (int)ex->args.size;
     int chosen = -1;
     for (int i = 0; i < n; i++) {
-        if (i == ex->generic_default_index) continue;
-        if (generic_type_matches(ex->generic_types[i], ct)) {
+        if (i == ex->extra->generic_default_index) continue;
+        if (generic_type_matches(ex->extra->generic_types[i], ct)) {
             chosen = i; break;
         }
     }
-    if (chosen < 0) chosen = ex->generic_default_index;
+    if (chosen < 0) chosen = ex->extra->generic_default_index;
     if (chosen < 0 || chosen >= n) {
         EMIT_ERR(e, "_Generic: no matching association and no default");
         return ex->lhs;
@@ -3643,7 +3664,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                             }
                             MLIR_ValueHandle p = emit_gep(e,
                                 parent.base_ptr, parent.source_elem,
-                                parent.const_path, parent.n_const_path,
+                                sctx_path(&parent), parent.n_const_path,
                                 dyn, n_dyn);
                             r.val = p;
                             r.is_ptr = true;
@@ -3920,14 +3941,14 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
         }
         case EX_ASSIGN: {
             // Struct rhs from a struct-returning call: q = f(args);
-            if (ex->lvalue->kind == EX_VAR && ex->rhs_assign->kind == EX_CALL) {
+            if (ex->lvalue->kind == EX_VAR && ex->rhs->kind == EX_CALL) {
                 Sym *target = lookup(e, sc, ex->lvalue->name);
-                FuncSig *sig = find_sig(e, ex->rhs_assign->callee);
+                FuncSig *sig = find_sig(e, ex->rhs->name);
                 if (target && target->type.kind == TY_STRUCT && target->sdef &&
                     sig && sig->ret.type.kind == TY_STRUCT &&
                     sig->ret.sdef == target->sdef) {
                     // Pass &q as the sret slot; no extra copy needed.
-                    emit_flat_call(e, sc, sig, ex->rhs_assign->args, NULL, sym_addr(e, target));
+                    emit_flat_call(e, sc, sig, ex->rhs->args, NULL, sym_addr(e, target));
                     return r;
                 }
             }
@@ -3942,7 +3963,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         StructDef *src_sd = NULL;
                         StructDef *dst_sd = NULL;
                         MLIR_ValueHandle src = resolve_struct_source(
-                            e, sc, ex->rhs_assign, &src_sd);
+                            e, sc, ex->rhs, &src_sd);
                         MLIR_ValueHandle dst = resolve_struct_source(
                             e, sc, ex->lvalue, &dst_sd);
                         if (src != MLIR_INVALID_HANDLE &&
@@ -3958,7 +3979,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             LVal lv = emit_lvalue(e, sc, ex->lvalue);
             if (ex->is_post_step) {
                 EVal old = load_lvalue(e, lv);
-                bool sub = (ex->rhs_assign && ex->rhs_assign->op == OP_SUB);
+                bool sub = (ex->rhs && ex->rhs->op == OP_SUB);
                 if (lv.elem_ty == e->ptr) {
                     // Pointer postfix `p++` / `p--`: step by sizeof(*p)
                     // via GEP, store new pointer, return the OLD pointer.
@@ -4006,11 +4027,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 LVal *saved_lv = e->compound_lv;
                 e->compound_lv_expr = ex->lvalue;
                 e->compound_lv = &at;
-                v = emit_expr(e, sc, ex->rhs_assign);
+                v = emit_expr(e, sc, ex->rhs);
                 e->compound_lv_expr = saved_expr;
                 e->compound_lv = saved_lv;
             } else {
-                v = emit_expr(e, sc, ex->rhs_assign);
+                v = emit_expr(e, sc, ex->rhs);
             }
             v.val = coerce_eval_to(e, v, lv.elem_ty, lval_ctype(lv));
             // `p = x` has p's type, not x's: `q = p = i` and `if ((p = i))`
@@ -4329,7 +4350,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // emission used for the named-fnptr-variable case below.
             Type *indirect_fnty = NULL;
             MLIR_ValueHandle indirect_callee_ptr = MLIR_INVALID_HANDLE;
-            if (ex->callee.size == 0 && ex->lhs) {
+            if (ex->name.size == 0 && ex->lhs) {
                 EVal cv = emit_expr(e, sc, ex->lhs);
                 if (!cv.is_ptr || !cv.fnptr_ty || !cv.fnptr_ty->fnptr_ret) {
                     EMIT_ERR(e, "callee expression is not a function pointer");
@@ -4343,31 +4364,31 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // operating on the !llvm.ptr that backs the va_list buffer.
             // The first argument must be a va_list lvalue; we take its
             // address (the alloca pointer) directly.
-            char callee_c0 = (!indirect_fnty && ex->callee.size > 0) ? ex->callee.str[0] : 0;
+            char callee_c0 = (!indirect_fnty && ex->name.size > 0) ? ex->name.str[0] : 0;
             if ((callee_c0 == 'v' || callee_c0 == '_') &&
-                                 (str_eq(ex->callee, str_lit("va_start"))
-                                 || str_eq(ex->callee, str_lit("va_end"))
-                                 || str_eq(ex->callee, str_lit("va_copy"))
-                                 || str_eq(ex->callee, str_lit("__builtin_va_start"))
-                                 || str_eq(ex->callee, str_lit("__builtin_va_end"))
-                                 || str_eq(ex->callee, str_lit("__builtin_va_copy")))) {
-                bool is_start = str_eq(ex->callee, str_lit("va_start")) ||
-                                str_eq(ex->callee, str_lit("__builtin_va_start"));
-                bool is_copy  = str_eq(ex->callee, str_lit("va_copy")) ||
-                                str_eq(ex->callee, str_lit("__builtin_va_copy"));
+                                 (str_eq(ex->name, str_lit("va_start"))
+                                 || str_eq(ex->name, str_lit("va_end"))
+                                 || str_eq(ex->name, str_lit("va_copy"))
+                                 || str_eq(ex->name, str_lit("__builtin_va_start"))
+                                 || str_eq(ex->name, str_lit("__builtin_va_end"))
+                                 || str_eq(ex->name, str_lit("__builtin_va_copy")))) {
+                bool is_start = str_eq(ex->name, str_lit("va_start")) ||
+                                str_eq(ex->name, str_lit("__builtin_va_start"));
+                bool is_copy  = str_eq(ex->name, str_lit("va_copy")) ||
+                                str_eq(ex->name, str_lit("__builtin_va_copy"));
                 size_t expected = is_start ? 2 : (is_copy ? 2 : 1);
                 if (ex->args.size != expected) {
-                    EMIT_ERR(e, "{} expects {} argument(s)", ex->callee, (int64_t)expected);
+                    EMIT_ERR(e, "{} expects {} argument(s)", ex->name, (int64_t)expected);
                     r.val = emit_const_i32(e, 0); return r;
                 }
                 Expr *ap = ex->args.data[0];
                 if (ap->kind != EX_VAR) {
-                    EMIT_ERR(e, "{} first argument must be a va_list variable", ex->callee);
+                    EMIT_ERR(e, "{} first argument must be a va_list variable", ex->name);
                     r.val = emit_const_i32(e, 0); return r;
                 }
                 Sym *sy = lookup(e, sc, ap->name);
                 if (!sy || sy->type.kind != TY_VA_LIST) {
-                    EMIT_ERR(e, "{} first argument must be of type va_list", ex->callee);
+                    EMIT_ERR(e, "{} first argument must be of type va_list", ex->name);
                     r.val = emit_const_i32(e, 0); return r;
                 }
                 MLIR_ValueHandle ap_ptr = sym_addr(e, sy);
@@ -4403,11 +4424,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // Built-in __builtin_sqrt / __builtin_sqrtf: lower to
             // llvm.intr.sqrt on f64 / f32 respectively.
             if (callee_c0 == '_' &&
-                (str_eq(ex->callee, str_lit("__builtin_sqrt")) ||
-                 str_eq(ex->callee, str_lit("__builtin_sqrtf")))) {
-                bool is_f32 = str_eq(ex->callee, str_lit("__builtin_sqrtf"));
+                (str_eq(ex->name, str_lit("__builtin_sqrt")) ||
+                 str_eq(ex->name, str_lit("__builtin_sqrtf")))) {
+                bool is_f32 = str_eq(ex->name, str_lit("__builtin_sqrtf"));
                 if (ex->args.size != 1) {
-                    EMIT_ERR(e, "{} expects 1 argument", ex->callee);
+                    EMIT_ERR(e, "{} expects 1 argument", ex->name);
                     r.val = is_f32 ? emit_const_f32(e, 0.0) : emit_const_f64(e, 0.0);
                     r.is_float = true; r.is_f64 = !is_f32; return r;
                 }
@@ -4435,7 +4456,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // (e.g. after a noreturn syscall). tinyC does no flow analysis on
             // it, so treat it as a no-op — any code the C author placed after
             // it is already dead. Returns a dummy i32 for expression contexts.
-            if (callee_c0 == '_' && str_eq(ex->callee, str_lit("__builtin_unreachable"))) {
+            if (callee_c0 == '_' && str_eq(ex->name, str_lit("__builtin_unreachable"))) {
                 if (ex->args.size != 0) {
                     EMIT_ERR(e, "__builtin_unreachable expects 0 arguments");
                 }
@@ -4448,7 +4469,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // primitive corec's platform_*.c builds raw syscalls from; it has
             // meaning only for native targets (there are no raw syscalls on
             // wasm — use the WASI platform there).
-            if (callee_c0 == '_' && str_eq(ex->callee, str_lit("__builtin_syscall6"))) {
+            if (callee_c0 == '_' && str_eq(ex->name, str_lit("__builtin_syscall6"))) {
                 if (ex->args.size != 7) {
                     EMIT_ERR(e, "__builtin_syscall6 expects 7 arguments (num + 6)");
                     r.val = emit_const_i64(e, 0); r.is_i64 = true; return r;
@@ -4478,12 +4499,12 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // we don't model multi-memory wasm yet so we just verify
             // and drop it. Both intrinsics produce i32 results.
             if (callee_c0 == '_' &&
-                (str_eq(ex->callee, str_lit("__builtin_wasm_memory_size")) ||
-                 str_eq(ex->callee, str_lit("__builtin_wasm_memory_grow")))) {
-                bool is_grow = str_eq(ex->callee, str_lit("__builtin_wasm_memory_grow"));
+                (str_eq(ex->name, str_lit("__builtin_wasm_memory_size")) ||
+                 str_eq(ex->name, str_lit("__builtin_wasm_memory_grow")))) {
+                bool is_grow = str_eq(ex->name, str_lit("__builtin_wasm_memory_grow"));
                 size_t want = is_grow ? 2 : 1;
                 if (ex->args.size != want) {
-                    EMIT_ERR(e, "{} expects {} argument(s)", ex->callee,
+                    EMIT_ERR(e, "{} expects {} argument(s)", ex->name,
                              want == 1 ? str_lit("1") : str_lit("2"));
                     r.val = emit_const_i32(e, 0); return r;
                 }
@@ -4492,7 +4513,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 Expr *aidx = ex->args.data[0];
                 if (aidx->kind != EX_INT || aidx->int_value != 0) {
                     EMIT_ERR(e, "{}: first arg must be the constant 0",
-                             ex->callee);
+                             ex->name);
                 }
                 MLIR_TypeHandle rty = e->i32;
                 MLIR_ValueHandle res = MLIR_INVALID_HANDLE;
@@ -4516,7 +4537,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // coerce_eval avoids emitting a no-op `arith.extsi i64->i64`
             // when the source is already size_t-sized (e.g. `size_t n;
             // malloc(n)` on a 64-bit host).
-            if (callee_c0 == 'm' && str_eq(ex->callee, str_lit("malloc"))) {
+            if (callee_c0 == 'm' && str_eq(ex->name, str_lit("malloc"))) {
                 // If the user provided their own `extern void *malloc(...);`
                 // prototype, mark that signature as referenced so the
                 // forward-decl loop in emit_program emits a proper
@@ -4525,7 +4546,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 // usage), so without this we'd drop the user decl AND
                 // skip our auto-decl (because have_user_malloc is true),
                 // leaving the @malloc call unresolved.
-                (void)find_sig(e, ex->callee);
+                (void)find_sig(e, ex->name);
                 if (ex->args.size != 1) {
                     EMIT_ERR(e, "malloc expects 1 argument");
                     r.val = emit_null_ptr(e); r.is_ptr = true; return r;
@@ -4543,8 +4564,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         rts, 1, rs, 1, ops, 1, as, 1, NULL, 0);
                 r.val = res; r.is_ptr = true; return r;
             }
-            if (callee_c0 == 'f' && str_eq(ex->callee, str_lit("free"))) {
-                (void)find_sig(e, ex->callee);
+            if (callee_c0 == 'f' && str_eq(ex->name, str_lit("free"))) {
+                (void)find_sig(e, ex->name);
                 if (ex->args.size != 1) {
                     EMIT_ERR(e, "free expects 1 argument");
                     return r;
@@ -4560,7 +4581,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 r.val = emit_const_i32(e, 0);
                 return r;
             }
-            FuncSig *sig = indirect_fnty ? NULL : find_sig(e, ex->callee);
+            FuncSig *sig = indirect_fnty ? NULL : find_sig(e, ex->name);
             if (!sig) {
                 Type *fnty = NULL;
                 MLIR_ValueHandle callee_ptr = MLIR_INVALID_HANDLE;
@@ -4570,9 +4591,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 } else {
                     // Indirect call through a function-pointer value bound to
                     // `ex->callee` (local var, parameter, or module global).
-                    Sym *sy = lookup(e, sc, ex->callee);
+                    Sym *sy = lookup(e, sc, ex->name);
                     if (!sy || sy->type.kind != TY_FNPTR || !sy->type.fnptr_ret) {
-                        EMIT_ERR(e, "undefined function: {}", ex->callee);
+                        EMIT_ERR(e, "undefined function: {}", ex->name);
                         r.val = emit_const_i32(e, 0);
                         return r;
                     }
@@ -4583,7 +4604,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 size_t na = ex->args.size;
                 if ((int)na != fnty->fnptr_nparams) {
                     EMIT_ERR(e, "indirect call to {} arity mismatch",
-                            ex->callee);
+                            ex->name);
                 }
                 // Struct-returning indirect call uses sret ABI: a hidden
                 // first !llvm.ptr param receives the buffer the callee
@@ -4836,18 +4857,18 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 }
                 for (size_t i = 0; i < n; i++) {
                     size_t fi = i;
-                    if (ex->compound_field_names &&
-                        ex->compound_field_names[i].size > 0) {
+                    if (ex->extra && ex->extra->compound_field_names &&
+                        ex->extra->compound_field_names[i].size > 0) {
                         bool found = false;
                         for (size_t k = 0; k < sd->fields.size; k++) {
                             if (str_eq(sd->fields.data[k].name,
-                                       ex->compound_field_names[i])) {
+                                       ex->extra->compound_field_names[i])) {
                                 fi = k; found = true; break;
                             }
                         }
                         if (!found) {
                             EMIT_ERR(e, "unknown field '{}' in designated initializer",
-                                     ex->compound_field_names[i]);
+                                     ex->extra->compound_field_names[i]);
                             continue;
                         }
                     }
@@ -4955,7 +4976,8 @@ static void emit_struct_zero(E *e, MLIR_ValueHandle base, MLIR_TypeHandle source
         MLIR_ValueHandle z = emit_zero_of(e, uelem);
         for (int64_t j = 0; j < uc; j++) {
             size_t total = n_prefix + 2;
-            int32_t *p2 = arena_new_array(e->arena, int32_t, total);
+            int32_t p2_stk[16];
+            int32_t *p2 = (total <= 16) ? p2_stk : arena_new_array(e->arena, int32_t, total);
             for (size_t k = 0; k < n_prefix; k++) p2[k] = prefix[k];
             p2[n_prefix] = 0;
             p2[n_prefix + 1] = (int32_t)j;
@@ -4967,7 +4989,8 @@ static void emit_struct_zero(E *e, MLIR_ValueHandle base, MLIR_TypeHandle source
     for (size_t i = 0; i < sd->fields.size; i++) {
         Type ft = sd->fields.data[i].type;
         size_t n_path = n_prefix + 1;
-        int32_t *path = arena_new_array(e->arena, int32_t, n_path);
+        int32_t path_stk[16];
+        int32_t *path = (n_path <= 16) ? path_stk : arena_new_array(e->arena, int32_t, n_path);
         for (size_t k = 0; k < n_prefix; k++) path[k] = prefix[k];
         path[n_prefix] = (int32_t)i;
         if (ft.kind == TY_STRUCT) {
@@ -5022,7 +5045,7 @@ static void emit_struct_zero(E *e, MLIR_ValueHandle base, MLIR_TypeHandle source
 static bool expr_is_void_statement(E *e, Expr *ex) {
     if (!ex) return false;
     if (ex->kind == EX_CALL) {
-        FuncSig *sig = find_sig(e, ex->callee);
+        FuncSig *sig = find_sig(e, ex->name);
         return sig && (sig->ret.type.kind == TY_VOID ||
                        sig->ret.type.kind == TY_STRUCT);
     }
@@ -5037,7 +5060,7 @@ static bool expr_is_void_statement(E *e, Expr *ex) {
 static void emit_expr_for_side_effect(E *e, Scope *sc, Expr *ex) {
     if (e->terminated) return;
     if (ex->kind == EX_CALL) {
-        FuncSig *sig = find_sig(e, ex->callee);
+        FuncSig *sig = find_sig(e, ex->name);
         if (sig && sig->ret.type.kind == TY_STRUCT) {
             emit_flat_call(e, sc, sig, ex->args, NULL, MLIR_INVALID_HANDLE);
             return;
@@ -5107,8 +5130,8 @@ static void infer_unsized_array_len(E *e, Stmt *st) {
 // switch's first case label.
 static void declare_without_init(E *e, Scope *sc, Stmt *st) {
     if (st->kind == ST_BLOCK && st->block_no_scope) {
-        for (size_t i = 0; i < st->block_body.size; i++)
-            declare_without_init(e, sc, st->block_body.data[i]);
+        for (size_t i = 0; i < st->body.size; i++)
+            declare_without_init(e, sc, st->body.data[i]);
         return;
     }
     if (st->kind != ST_DECL) return;
@@ -5469,8 +5492,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                 }
                                 for (size_t i = 0; i < fn; i++) {
                                     int fidx = (int)i;
-                                    if (elem->compound_field_names) {
-                                        string fname = elem->compound_field_names[i];
+                                    if (elem->extra && elem->extra->compound_field_names) {
+                                        string fname = elem->extra->compound_field_names[i];
                                         if (fname.size != 0) {
                                             fidx = struct_field_index(sd, fname);
                                             if (fidx < 0) {
@@ -5571,7 +5594,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 if (st->decl_init) {
                     // Struct rhs from a struct-returning call: `S x = f(...)`.
                     if (st->decl_init->kind == EX_CALL) {
-                        FuncSig *sig = find_sig(e, st->decl_init->callee);
+                        FuncSig *sig = find_sig(e, st->decl_init->name);
                         if (sig && sig->ret.type.kind == TY_STRUCT &&
                             sig->ret.sdef == sd) {
                             emit_flat_call(e, sc, sig, st->decl_init->args, NULL, sy->addr);
@@ -5608,8 +5631,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                             // designated entries (.fname = v), look up
                             // fname in the struct's field list.
                             int fidx = (int)i;
-                            if (st->decl_init->compound_field_names) {
-                                string fname = st->decl_init->compound_field_names[i];
+                            if (st->decl_init->extra && st->decl_init->extra->compound_field_names) {
+                                string fname = st->decl_init->extra->compound_field_names[i];
                                 if (fname.size != 0) {
                                     fidx = struct_field_index(sd, fname);
                                     if (fidx < 0) {
@@ -5779,7 +5802,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 StructDef *want = sig->ret.sdef;
                 MLIR_ValueHandle out = e->cur_sret_ptr;
                 if (st->expr->kind == EX_CALL) {
-                    FuncSig *csig = find_sig(e, st->expr->callee);
+                    FuncSig *csig = find_sig(e, st->expr->name);
                     if (!csig || csig->ret.type.kind != TY_STRUCT || csig->ret.sdef != want) {
                         EMIT_ERR(e, "returned call type mismatch");
                     } else {
@@ -5874,12 +5897,12 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
         }
         case ST_BLOCK: {
             if (st->block_no_scope) {
-                for (size_t i = 0; i < st->block_body.size && !e->terminated; i++)
-                    emit_stmt(e, sc, st->block_body.data[i]);
+                for (size_t i = 0; i < st->body.size && !e->terminated; i++)
+                    emit_stmt(e, sc, st->body.data[i]);
                 return;
             }
             Scope inner = (Scope){.head = NULL, .parent = sc};
-            emit_block(e, &inner, st->block_body);
+            emit_block(e, &inner, st->body);
             return;
         }
         case ST_IF: {
@@ -5893,8 +5916,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
 
             e->cur_block = then_b; e->terminated = false;
             { Scope inner = (Scope){.head = NULL, .parent = sc};
-              for (size_t i = 0; i < st->then_body.size && !e->terminated; i++)
-                  emit_stmt(e, &inner, st->then_body.data[i]); }
+              for (size_t i = 0; i < st->body.size && !e->terminated; i++)
+                  emit_stmt(e, &inner, st->body.data[i]); }
             emit_branch(e, end_b);
 
             if (st->has_else) {
@@ -5923,8 +5946,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             LoopCtx lc = (LoopCtx){.continue_block = hdr_b, .break_block = exit_b, .parent = e->loops};
             e->loops = &lc;
             { Scope inner = (Scope){.head = NULL, .parent = sc};
-              for (size_t i = 0; i < st->while_body.size && !e->terminated; i++)
-                  emit_stmt(e, &inner, st->while_body.data[i]); }
+              for (size_t i = 0; i < st->body.size && !e->terminated; i++)
+                  emit_stmt(e, &inner, st->body.data[i]); }
             e->loops = lc.parent;
             emit_branch(e, hdr_b);
 
@@ -5943,8 +5966,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             LoopCtx lc = (LoopCtx){.continue_block = cond_b, .break_block = exit_b, .parent = e->loops};
             e->loops = &lc;
             { Scope inner = (Scope){.head = NULL, .parent = sc};
-              for (size_t i = 0; i < st->while_body.size && !e->terminated; i++)
-                  emit_stmt(e, &inner, st->while_body.data[i]); }
+              for (size_t i = 0; i < st->body.size && !e->terminated; i++)
+                  emit_stmt(e, &inner, st->body.data[i]); }
             e->loops = lc.parent;
             emit_branch(e, cond_b);
 
@@ -5986,8 +6009,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             LoopCtx lc = (LoopCtx){.continue_block = step_b, .break_block = exit_b, .parent = e->loops};
             e->loops = &lc;
             { Scope body = (Scope){.head = NULL, .parent = &inner};
-              for (size_t i = 0; i < st->for_body.size && !e->terminated; i++)
-                  emit_stmt(e, &body, st->for_body.data[i]); }
+              for (size_t i = 0; i < st->body.size && !e->terminated; i++)
+                  emit_stmt(e, &body, st->body.data[i]); }
             e->loops = lc.parent;
             emit_branch(e, step_b);
 
@@ -6015,9 +6038,9 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             // names without running their initializers; skip the rest.
             Scope inner = (Scope){.head = NULL, .parent = sc};
             int64_t first_case = nc ? st->switch_cases.data[0].body_start
-                                    : (int64_t)st->block_body.size;
+                                    : (int64_t)st->body.size;
             for (int64_t k = 0; k < first_case; k++)
-                declare_without_init(e, &inner, st->block_body.data[k]);
+                declare_without_init(e, &inner, st->body.data[k]);
 
             MLIR_BlockHandle exit_b = new_cfg_block(e);
 
@@ -6061,14 +6084,14 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 for (size_t j = 0; j < i; j++) if (body_start[j] == body_start[i]) { dup = true; break; }
                 if (dup) continue;
                 e->cur_block = case_blocks[i]; e->terminated = false;
-                int64_t end = (int64_t)st->block_body.size;
+                int64_t end = (int64_t)st->body.size;
                 // Find the next case's body_start after this one.
                 for (size_t j = 0; j < nc; j++) {
                     if (body_start[j] > body_start[i] && body_start[j] < end)
                         end = body_start[j];
                 }
                 for (int64_t k = body_start[i]; k < end && !e->terminated; k++) {
-                    emit_stmt(e, &inner, st->block_body.data[k]);
+                    emit_stmt(e, &inner, st->body.data[k]);
                 }
                 // Fall through to the next case block in source order, or exit.
                 if (!e->terminated) {
@@ -6261,7 +6284,6 @@ static void collect_addr_taken_expr(E *e, Expr *ex) {
     collect_addr_taken_expr(e, ex->lhs);
     collect_addr_taken_expr(e, ex->rhs);
     collect_addr_taken_expr(e, ex->lvalue);
-    collect_addr_taken_expr(e, ex->rhs_assign);
     for (size_t i = 0; i < ex->args.size; i++) collect_addr_taken_expr(e, ex->args.data[i]);
 }
 
@@ -6282,14 +6304,11 @@ static void collect_addr_taken_stmt(E *e, Stmt *st) {
     collect_addr_taken_expr(e, st->expr);
     collect_addr_taken_expr(e, st->decl_init);
     collect_addr_taken_expr(e, st->cond);
-    collect_addr_taken(e, st->then_body);
+    collect_addr_taken(e, st->body);
     collect_addr_taken(e, st->else_body);
-    collect_addr_taken(e, st->while_body);
     collect_addr_taken_stmt(e, st->for_init);
     for (size_t i = 0; i < st->for_steps.size; i++)
         collect_addr_taken_expr(e, st->for_steps.data[i]);
-    collect_addr_taken(e, st->for_body);
-    collect_addr_taken(e, st->block_body);
 }
 
 static void collect_addr_taken(E *e, VecStmtPtr body) {
@@ -6657,10 +6676,8 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
             if (st.kind == TY_STRUCT)      sd = find_struct(e, st.struct_name);
             else if (st.kind == TY_PTR_STRUCT) sd = find_struct(e, st.struct_name);
             if (!sd) return t;
-            for (size_t i = 0; i < sd->fields.size; i++) {
-                if (str_eq(sd->fields.data[i].name, ex->name))
-                    return sd->fields.data[i].type;
-            }
+            int fi = struct_field_index(sd, ex->name);
+            if (fi >= 0) return sd->fields.data[fi].type;
             return t;
         }
         case EX_INDEX: {
@@ -6706,15 +6723,15 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
             return t;
         }
         case EX_CALL: {
-            FuncSig *sig = find_sig(e, ex->callee);
+            FuncSig *sig = find_sig(e, ex->name);
             if (sig) return sig->ret.type;
             // Indirect call through a fnptr-typed local/param/global.
-            Sym *sy = lookup(e, sc, ex->callee);
+            Sym *sy = lookup(e, sc, ex->name);
             if (sy && sy->type.kind == TY_FNPTR && sy->type.fnptr_ret) {
                 return *sy->type.fnptr_ret;
             }
             // Call through a callable expression (`s.f(x)`, `(*fp)(x)`).
-            if (ex->callee.size == 0 && ex->lhs) {
+            if (ex->name.size == 0 && ex->lhs) {
                 Type ft = infer_expr_type(e, sc, ex->lhs);
                 if (ft.kind == TY_FNPTR && ft.fnptr_ret) return *ft.fnptr_ret;
             }
@@ -7405,7 +7422,7 @@ static void ginit_members_in(GInit *gi, Type t, Expr *list, size_t *pos, bool br
     int64_t k = 0;
     while (*pos < list->args.size) {
         Expr *a = list->args.data[*pos];
-        string dn = list->compound_field_names ? list->compound_field_names[*pos]
+        string dn = (list->extra && list->extra->compound_field_names) ? list->extra->compound_field_names[*pos]
                                                : (string){0};
         if (dn.size > 0 && (*pos != start || braced)) {
             if (!braced) return;
