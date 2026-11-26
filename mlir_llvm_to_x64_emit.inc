@@ -940,8 +940,10 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     SlotMap sm_spill; memset(&sm_spill, 0, sizeof(sm_spill));
     sm_spill.arena = MLIR_GetArenaAllocator(ctx);
     int32_t nslots = 0;
+    static int x64_noregalloc = -1;
+    if (x64_noregalloc < 0) x64_noregalloc = getenv("TINYC_X64_NOREGALLOC") ? 1 : 0;
     uint64_t t_ra = x64_clock();
-    if (!getenv("TINYC_X64_NOREGALLOC")) {
+    if (!x64_noregalloc) {
         RegTarget T = x64_regtarget();
         uint32_t um = mlir_regalloc_global(ctx, reg, nb, &F.rm, &sm_spill, &nslots, &T);
         if (um == RA_BAIL) {

@@ -41,6 +41,22 @@ static void sm_grow(SlotMap *m) {
     m->t = nt;
     m->cap = ncap;
 }
+static void sm_reserve(SlotMap *m, size_t want) {
+    size_t need = want + want / 2 + 8;
+    if (m->cap >= need) return;
+    size_t ncap = m->cap ? m->cap * 2 : 64;
+    while (ncap < need) ncap *= 2;
+    SlotEnt *nt = (SlotEnt *)arena_alloc(m->arena, ncap * sizeof(SlotEnt));
+    memset(nt, 0, ncap * sizeof(SlotEnt));
+    for (size_t i = 0; i < m->cap; i++) {
+        if (m->t[i].key == 0) continue;
+        size_t j = sm_hash(m->t[i].key) & (ncap - 1);
+        while (nt[j].key != 0) j = (j + 1) & (ncap - 1);
+        nt[j] = m->t[i];
+    }
+    m->t = nt;
+    m->cap = ncap;
+}
 void sm_put(SlotMap *m, MLIR_ValueHandle k, int32_t slot) {
     if ((m->n + 1) * 4 >= m->cap * 3) sm_grow(m);
     size_t mask = m->cap - 1;
@@ -856,6 +872,10 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     // --- 4b. Assign frame slots to spilled values with min-heap reuse. ---
     int32_t next_slot = 0;
     {
+        size_t n_spills = 0;
+        for (uint32_t vi = 0; vi < nv; vi++) if (home_pk[vi] < 0) n_spills++;
+        if (n_spills > 0) sm_reserve(sm, n_spills);
+        if (nv > n_spills) sm_reserve(rm, nv - n_spills);
         bool no_reuse = env->no_slot_reuse;
         uint32_t *sl_slot = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
         uint32_t *sl_end  = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
