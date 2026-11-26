@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <base/arena.h>
+#include <base/buddy.h>
 #include <base/io.h>
 #include <base/string.h>
 #include <base/strbuf.h>
@@ -1639,35 +1640,32 @@ static int tinyc_main(void) {
     bool target_wasm32 = (emit_wasm || emit_wasmssa || emit_wasmstack ||
                           emit_wat || emit_macho) &&
                          !macho_backend_llvm;
-    Program *prog = arena_new(arena, Program);
+    Arena *fe_arena = arena_create(4 * 1024 * 1024 - 4096);
+    Program *prog = arena_new(fe_arena, Program);
     *prog = (Program){0};
     prog->host_varargs = host_varargs;
     int total_errs = 0;
     size_t total_toks = 0;
     for (size_t k = 0; k < n_input_files; k++) {
         uint64_t t_pp = ts_now();
-        string src = tinyc_preprocess(arena, str_from_cstr_view(input_files[k]),
-                                      include_dirs, n_include_dirs,
-                                      defines, n_defines);
+        VecTcTok toks = tinyc_preprocess_lex(fe_arena, str_from_cstr_view(input_files[k]),
+                                             include_dirs, n_include_dirs,
+                                             defines, n_defines);
         ts_add(TS_PREPROCESS, t_pp);
-        // A preprocessing error (e.g. a missing #include) is fatal: the
-        // text is incomplete, and compiling it only adds follow-on errors.
-        // Keep going to report the other inputs' errors too.
         int pp_errs = tinyc_last_preprocess_errors();
         if (pp_errs > 0) {
+            if (toks.data) buddy_free(toks.data);
             total_errs += pp_errs;
             continue;
         }
-        if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
-        uint64_t t_lx = ts_now();
-        VecTcTok toks = tinyc_lex(arena, src);
-        ts_add(TS_LEX, t_lx);
         total_toks += toks.size;
         uint64_t t_pa = ts_now();
-        total_errs += tinyc_parse_into(arena, prog, toks, target_wasm32);
+        total_errs += tinyc_parse_into(fe_arena, prog, toks, target_wasm32);
+        if (toks.data) buddy_free(toks.data);
         ts_add(TS_PARSE, t_pa);
     }
     if (total_errs > 0) {
+        arena_destroy(fe_arena);
         arena_destroy(arena);
         MLIR_DestroyContext(ctx);
         arena_destroy(boot_arena);
@@ -1680,16 +1678,17 @@ static int tinyc_main(void) {
     // synthesized syscall thunks. PLATFORM_SKIP_ENTRY drops its _start (tinyC
     // supplies its own); unreached platform funcs are trimmed by the backend.
     if (emit_elf && host_platform_path) {
-        string *pdefs = arena_new_array(arena, string, n_defines + 1);
+        string *pdefs = arena_new_array(fe_arena, string, n_defines + 1);
         for (size_t k = 0; k < n_defines; k++) pdefs[k] = defines[k];
         pdefs[n_defines] = str_from_cstr_view((char *)"PLATFORM_SKIP_ENTRY=1");
         uint64_t t_pp = ts_now();
-        string psrc = tinyc_preprocess(arena, str_from_cstr_view(host_platform_path),
+        string psrc = tinyc_preprocess(fe_arena, str_from_cstr_view(host_platform_path),
                                        include_dirs, n_include_dirs, pdefs, n_defines + 1);
         ts_add(TS_PREPROCESS, t_pp);
         if (tinyc_last_preprocess_errors() > 0) {
             fprintf(stderr, "tinyc: preprocessing failed for host platform '%s'\n",
                     host_platform_path);
+            arena_destroy(fe_arena);
             arena_destroy(arena);
             MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
@@ -1697,15 +1696,16 @@ static int tinyc_main(void) {
         }
         if (psrc.size > 0 && psrc.str[psrc.size - 1] == '\0') psrc.size -= 1;
         uint64_t t_lx = ts_now();
-        VecTcTok ptoks = tinyc_lex(arena, psrc);
+        VecTcTok ptoks = tinyc_lex(fe_arena, psrc);
         ts_add(TS_LEX, t_lx);
         total_toks += ptoks.size;
         uint64_t t_pa = ts_now();
-        int perrs = tinyc_parse_into(arena, prog, ptoks, target_wasm32);
+        int perrs = tinyc_parse_into(fe_arena, prog, ptoks, target_wasm32);
         ts_add(TS_PARSE, t_pa);
         if (perrs > 0) {
             fprintf(stderr, "tinyc: parse failed for host platform '%s'\n",
                     host_platform_path);
+            arena_destroy(fe_arena);
             arena_destroy(arena);
             MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
@@ -1719,10 +1719,14 @@ static int tinyc_main(void) {
     // the wasm pipeline's wasmssa and wasmstack IR to 3-6.4 (tinyc's own
     // sources). Too low costs doublings, too high wastes heap; the backend
     // caps the reservation, so a large input cannot exhaust its heap.
-    MLIR_SetContextExpectedOps(ctx, target_wasm32 ? total_toks * 3 : total_toks * 3 / 2);
+    MLIR_SetContextExpectedOps(ctx, target_wasm32 ? total_toks * 3 : total_toks * 2 / 3);
     uint64_t t_em = ts_now();
     MLIR_OpHandle module = tinyc_emit_module(ctx, prog);
     ts_add(TS_EMIT, t_em);
+    // All AST, preprocessor, and source-buffer memory is dead once MLIR IR is
+    // emitted; return fe_arena's warm pages to corec's buddy freelist for the
+    // lowering and codegen stages.
+    arena_destroy(fe_arena);
     if (tinyc_last_emit_errors() > 0) {
         arena_destroy(arena);
         MLIR_DestroyContext(ctx);
@@ -1731,13 +1735,17 @@ static int tinyc_main(void) {
     }
 
     // Promote non-escaping `llvm.alloca` locals to SSA (mem2reg) on the flat
-    // cf CFG, before the lowering to the LLVM dialect. This keeps non-address-taken locals out of
-    // the linear-memory shadow stack so the downstream register allocator can
-    // hold them in registers instead of spilling every access. Skippable via
-    // TINYC_NO_MEM2REG for A/B debugging.
+    // cf CFG, before the lowering to the LLVM dialect. On x64/ELF in default
+    // (-O0) mode with mlir_regalloc_fast, cross-block values and block args
+    // stay in frame slots while unmutated locals are already bound directly
+    // to SSA in emit.c, so skipping mem2reg matches clang -O0 and avoids
+    // redundant SSA construction + edge-copy overhead.
     uint64_t t_m2r = ts_now();
-    if (!getenv("TINYC_NO_MEM2REG"))
-        mlir_llvm_mem2reg(ctx, module);
+    bool skip_m2r_x64 = (emit_x64 || emit_elf) &&
+                        !getenv("TINYC_X64_GLOBAL_RA") &&
+                        !getenv("TINYC_FORCE_MEM2REG");
+    if (!skip_m2r_x64 && !getenv("TINYC_NO_MEM2REG"))
+        mlir_llvm_mem2reg_ex(ctx, module, true);
     ts_add(TS_MEM2REG, t_m2r);
 
     if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64 || emit_elf || emit_x64) {
@@ -1956,6 +1964,7 @@ static int tinyc_main(void) {
         ts_add(TS_WRITE, t_wr);
     }
 
+#ifdef TINYC_FREE_ON_EXIT
     if (emit_macho || emit_elf || emit_x64) {
         // out.str was malloc'd by the backend. Free it.
         free(out.str);
@@ -1964,6 +1973,7 @@ static int tinyc_main(void) {
     arena_destroy(arena);
     MLIR_DestroyContext(ctx);
     arena_destroy(boot_arena);
+#endif
     return wrc;
 }
 
