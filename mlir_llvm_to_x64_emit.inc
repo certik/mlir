@@ -963,9 +963,11 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     static size_t g_x64_block_off_cap = 0;
     size_t nb_need = nb ? nb : 1;
     if (nb_need > g_x64_block_off_cap) {
-        free(g_x64_block_off);
-        g_x64_block_off_cap = nb_need < 64 ? 64 : nb_need * 2;
-        g_x64_block_off = (uint32_t *)malloc(g_x64_block_off_cap * sizeof(uint32_t));
+        if (g_x64_block_off) buddy_free(g_x64_block_off);
+        size_t want_cap = nb_need < 64 ? 64 : nb_need * 2;
+        size_t actual_bo = 0;
+        g_x64_block_off = (uint32_t *)buddy_alloc(want_cap * sizeof(uint32_t), &actual_bo);
+        g_x64_block_off_cap = actual_bo / sizeof(uint32_t);
     }
     memset(g_x64_block_off, 0, nb_need * sizeof(uint32_t));
     F.block_off = g_x64_block_off;

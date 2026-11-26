@@ -49,6 +49,7 @@ typedef struct Sym {
     StructDef *sdef;            // for TY_STRUCT / TY_PTR_STRUCT / TY_ARRAY_STRUCT
     bool   is_global;           // if true, addr is unused; reload via addressof
     string global_sym;          // sym_name of the llvm.mlir.global (for globals)
+    MLIR_AttributeHandle global_sym_attr; // cached SymbolRef attr for global_sym
     uint32_t address_space;     // LLVM pointer AS for global addressof (0=default)
     bool   wide_slot;           // a char / short / bool local whose address is
                                 // never taken, kept in an i32 slot (see
@@ -399,6 +400,16 @@ static FuncSig *find_sig(E *e, string name) {
 // so that an inner-scope variable with the same name correctly shadows
 // the enum constant (e.g. `enum {A=1}; int f(){ int A=2; return A; }`
 // must return 2, not 1).
+static inline bool enum_bloom_maybe(E *e, string name) {
+    if (!e->program || !e->program->enums) return false;
+    if (!e->enum_map_built) return true;
+    if (name.size == 0) return false;
+    uint32_t bit = ((uint32_t)(unsigned char)name.str[0] * 31u +
+                    (uint32_t)(unsigned char)name.str[name.size - 1] * 7u +
+                    (uint32_t)name.size) & 63u;
+    return ((e->enum_bloom >> bit) & 1u) != 0;
+}
+
 static bool find_enum(E *e, string name, int64_t *out_value) {
     if (!e->program || !e->program->enums) return false;
     if (!e->enum_map_built) {
@@ -895,9 +906,8 @@ static MLIR_TypeHandle ptr_for_as(E *e, uint32_t as) {
     return p;
 }
 
-static MLIR_ValueHandle emit_addressof(E *e, string sym, MLIR_TypeHandle ptr_ty) {
+static MLIR_ValueHandle emit_addressof_attr(E *e, MLIR_AttributeHandle sa, MLIR_TypeHandle ptr_ty) {
     if (!ptr_ty) ptr_ty = e->ptr;
-    MLIR_AttributeHandle sa = MLIR_CreateAttributeSymbolRef(e->ctx, sym);
     if (e->cur_block) {
         MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
         bd.loc = e->loc;
@@ -905,6 +915,10 @@ static MLIR_ValueHandle emit_addressof(E *e, string sym, MLIR_TypeHandle ptr_ty)
     }
     MLIR_NamedAttr a = MLIR_Named(MLIR_KEY_GLOBAL_NAME, sa);
     return emit_op1(e, OP_TYPE_LLVM_MLIR_ADDRESSOF, ptr_ty, NULL, 0, &a, 1);
+}
+
+static MLIR_ValueHandle emit_addressof(E *e, string sym, MLIR_TypeHandle ptr_ty) {
+    return emit_addressof_attr(e, MLIR_CreateAttributeSymbolRef(e->ctx, sym), ptr_ty);
 }
 
 // Look up (or create) a string-literal global; return its sym_name (O(1) hash table).
@@ -973,7 +987,9 @@ static MLIR_ValueHandle emit_gep(E *e, MLIR_ValueHandle base,
 // addressof for a module-level global.
 static MLIR_ValueHandle sym_addr(E *e, Sym *s) {
     if (s->is_global) {
-        return emit_addressof(e, s->global_sym, ptr_for_as(e, s->address_space));
+        if (!s->global_sym_attr)
+            s->global_sym_attr = MLIR_CreateAttributeSymbolRef(e->ctx, s->global_sym);
+        return emit_addressof_attr(e, s->global_sym_attr, ptr_for_as(e, s->address_space));
     }
     return s->addr;
 }
@@ -1078,12 +1094,22 @@ static MLIR_ValueHandle emit_alloca(E *e, MLIR_TypeHandle elem_ty) {
     // (where local declarations sit on each iteration) don't grow the stack
     // unboundedly. We share a single `arith.constant 1 : i64` count operand
     // that lives at the top of the entry block.
+    MLIR_AttributeHandle elem_attr = emit_type_attr(e, elem_ty);
+    bool hoist = e->entry_block && e->entry_block != e->cur_block;
+    if (!hoist && e->cur_block) {
+        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+        bd.loc = e->loc;
+        MLIR_ValueHandle r = MLIR_BuildUnaryAttr(&bd, OP_TYPE_LLVM_ALLOCA,
+                                                 e->ptr, e->entry_const_one,
+                                                 MLIR_KEY_ELEM_TYPE, elem_attr);
+        if (e->cur_block == e->entry_block) e->entry_alloca_insert_idx++;
+        return r;
+    }
     MLIR_ValueHandle r = MLIR_INVALID_HANDLE;
     MLIR_TypeHandle rts[1] = { e->ptr };
     MLIR_ValueHandle ops[1] = { e->entry_const_one };
-    MLIR_NamedAttr as[1] = { MLIR_Named(MLIR_KEY_ELEM_TYPE, emit_type_attr(e, elem_ty)) };
+    MLIR_NamedAttr as[1] = { MLIR_Named(MLIR_KEY_ELEM_TYPE, elem_attr) };
 
-    bool hoist = e->entry_block && e->entry_block != e->cur_block;
     MLIR_BlockHandle saved = e->cur_block;
     if (hoist) e->cur_block = MLIR_INVALID_HANDLE;
     MLIR_OpHandle aop = emit_op(e, OP_TYPE_LLVM_ALLOCA,
@@ -1130,12 +1156,6 @@ static MLIR_ValueHandle emit_gep(E *e,
         MLIR_TypeHandle source_elem_ty,
         const int32_t *raw_idx, size_t n_raw,
         MLIR_ValueHandle *dyn_idx, size_t n_dyn) {
-    size_t n_ops = 1 + n_dyn;
-    MLIR_ValueHandle ops_stk[8];
-    MLIR_ValueHandle *ops = (n_ops <= 8) ? ops_stk
-        : arena_new_array(e->arena, MLIR_ValueHandle, n_ops);
-    ops[0] = base;
-    for (size_t i = 0; i < n_dyn; i++) ops[1 + i] = dyn_idx[i];
     MLIR_AttributeHandle idx_attr;
     if (n_raw == 2 && raw_idx[0] == 0) {
         if (!e->caches_init) emit_init_attr_caches(e);
@@ -1152,9 +1172,30 @@ static MLIR_ValueHandle emit_gep(E *e,
     } else {
         idx_attr = MLIR_CreateAttributeDenseI32Array(e->ctx, raw_idx, n_raw);
     }
+    MLIR_AttributeHandle elem_attr = emit_type_attr(e, source_elem_ty);
+    if (e->cur_block) {
+        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+        bd.loc = e->loc;
+        if (n_dyn == 0) {
+            return MLIR_BuildUnary2Attr(&bd, OP_TYPE_LLVM_GEP, e->ptr, base,
+                                        MLIR_KEY_RAW_CONSTANT_INDICES, idx_attr,
+                                        MLIR_KEY_ELEM_TYPE, elem_attr);
+        }
+        if (n_dyn == 1) {
+            return MLIR_BuildBinary2Attr(&bd, OP_TYPE_LLVM_GEP, e->ptr, base, dyn_idx[0],
+                                         MLIR_KEY_RAW_CONSTANT_INDICES, idx_attr,
+                                         MLIR_KEY_ELEM_TYPE, elem_attr);
+        }
+    }
+    size_t n_ops = 1 + n_dyn;
+    MLIR_ValueHandle ops_stk[8];
+    MLIR_ValueHandle *ops = (n_ops <= 8) ? ops_stk
+        : arena_new_array(e->arena, MLIR_ValueHandle, n_ops);
+    ops[0] = base;
+    for (size_t i = 0; i < n_dyn; i++) ops[1 + i] = dyn_idx[i];
     MLIR_NamedAttr as[2];
     as[0] = MLIR_Named(MLIR_KEY_RAW_CONSTANT_INDICES, idx_attr);
-    as[1] = MLIR_Named(MLIR_KEY_ELEM_TYPE, emit_type_attr(e, source_elem_ty));
+    as[1] = MLIR_Named(MLIR_KEY_ELEM_TYPE, elem_attr);
     return emit_op1(e, OP_TYPE_LLVM_GEP, e->ptr, ops, (uint32_t)n_ops, as, 2);
 }
 
@@ -3248,14 +3289,17 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
         if (ex->kind == EX_BIN) {
             uint8_t lk = ex->lhs ? ex->lhs->kind : EX_INT;
             uint8_t rk = ex->rhs ? ex->rhs->kind : EX_INT;
-            if (lk == EX_FIELD || lk == EX_INDEX || lk == EX_CALL || lk == EX_DEREF ||
+            if ((lk == EX_VAR && !enum_bloom_maybe(e, ex->lhs->name)) ||
+                (rk == EX_VAR && !enum_bloom_maybe(e, ex->rhs->name)) ||
+                lk == EX_FIELD || lk == EX_INDEX || lk == EX_CALL || lk == EX_DEREF ||
                 lk == EX_ASSIGN || lk == EX_STR || lk == EX_ADDR || lk == EX_FLOAT ||
                 rk == EX_FIELD || rk == EX_INDEX || rk == EX_CALL || rk == EX_DEREF ||
                 rk == EX_ASSIGN || rk == EX_STR || rk == EX_ADDR || rk == EX_FLOAT)
                 maybe_const = false;
         } else if (ex->kind == EX_UN && ex->lhs) {
             uint8_t lk = ex->lhs->kind;
-            if (lk == EX_FIELD || lk == EX_INDEX || lk == EX_CALL || lk == EX_DEREF ||
+            if ((lk == EX_VAR && !enum_bloom_maybe(e, ex->lhs->name)) ||
+                lk == EX_FIELD || lk == EX_INDEX || lk == EX_CALL || lk == EX_DEREF ||
                 lk == EX_ASSIGN || lk == EX_STR || lk == EX_ADDR || lk == EX_FLOAT)
                 maybe_const = false;
         }
@@ -6406,7 +6450,9 @@ static bool is_mutated(E *e, string name) {
 // Record every `&name` and assignment target `name = ...` in `ex` / `st`.
 static void collect_addr_taken_expr(E *e, Expr *ex) {
     if (!ex) return;
-    if (ex->kind == EX_ADDR && ex->lhs && ex->lhs->kind == EX_VAR) {
+    uint8_t k = ex->kind;
+    if (k == EX_INT || k == EX_VAR || k == EX_STR || k == EX_FLOAT || k == EX_NULL) return;
+    if (k == EX_ADDR && ex->lhs && ex->lhs->kind == EX_VAR) {
         string an = ex->lhs->name;
         if (an.size > 0) {
             uint32_t bit = ((uint32_t)(unsigned char)an.str[0] * 31u + (uint32_t)an.size) & 63u;
@@ -6421,12 +6467,12 @@ static void collect_addr_taken_expr(E *e, Expr *ex) {
         }
         e->addr_taken[e->n_addr_taken++] = ex->lhs->name;
         record_mutated(e, ex->lhs->name);
-    } else if (ex->kind == EX_ASSIGN && ex->lvalue && ex->lvalue->kind == EX_VAR) {
+    } else if (k == EX_ASSIGN && ex->lvalue && ex->lvalue->kind == EX_VAR) {
         record_mutated(e, ex->lvalue->name);
     }
-    collect_addr_taken_expr(e, ex->lhs);
-    collect_addr_taken_expr(e, ex->rhs);
-    collect_addr_taken_expr(e, ex->lvalue);
+    if (ex->lhs) collect_addr_taken_expr(e, ex->lhs);
+    if (ex->rhs) collect_addr_taken_expr(e, ex->rhs);
+    if (ex->lvalue) collect_addr_taken_expr(e, ex->lvalue);
     if (ex->extra) {
         for (size_t i = 0; i < ex->extra->args.size; i++)
             collect_addr_taken_expr(e, ex->extra->args.data[i]);

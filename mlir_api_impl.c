@@ -1745,6 +1745,85 @@ MLIR_ValueHandle MLIR_BuildNullaryAttr(MLIR_Builder *b, MLIR_OpType t,
     return VAL_H(ctx, res);
 }
 
+static MLIR_NAT_NOINLINE MLIR_ValueHandle build_unary_attr_slow(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x,
+        MLIR_AttrKey key, MLIR_AttributeHandle val) {
+    MLIR_NamedAttr a = MLIR_Named(key, val);
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = &x;
+    s.n_operands = 1;
+    s.result_types = &rt;
+    s.n_results = 1;
+    s.attrs = &a;
+    s.n_attrs = 1;
+    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
+}
+
+MLIR_ValueHandle MLIR_BuildUnaryAttr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x,
+        MLIR_AttrKey key, MLIR_AttributeHandle val) {
+    API_CHECK(b != NULL && b->ctx != NULL, "MLIR_BuildUnaryAttr", "NULL argument");
+    MLIR_Context *ctx = b->ctx;
+    API_CHECK(t != OP_TYPE_UNREGISTERED && (uint32_t)t < ctx->op_types.n_types && (uint32_t)t < 0xffffu,
+              "MLIR_BuildUnaryAttr", "not an op type of this context");
+    API_CHECK(key != MLIR_KEY_INVALID && key < ctx->keys.n_keys && val != MLIR_INVALID_HANDLE,
+              "MLIR_BuildUnaryAttr", "bad attribute key or value");
+
+    uint32_t op = ctx->ops.n;
+    uint32_t res = ctx->vals.n;
+    uint32_t u0 = ctx->opnds.n;
+    uint32_t fa = ctx->extra.n;
+    uint32_t bi = BLOCK_IDX(ctx, b->block, "MLIR_BuildUnaryAttr");
+    if (MLIR_NAT_UNLIKELY(ctx->no_def_use_tracking ||
+                          op >= ctx->ops.cap || res >= ctx->vals.cap ||
+                          u0 + 1 > ctx->opnds.cap || fa + 2 > ctx->extra.cap ||
+                          bi == 0 || b->before != MLIR_INVALID_HANDLE)) {
+        return build_unary_attr_slow(b, t, rt, x, key, val);
+    }
+    IR_Block *blk = &BLOCKS(ctx)[bi];
+    uint32_t pos = blk->n_ops;
+    if (MLIR_NAT_UNLIKELY(pos >= blk->cap_ops)) {
+        return build_unary_attr_slow(b, t, rt, x, key, val);
+    }
+
+    ctx->ops.n = op + 1;
+    ctx->vals.n = res + 1;
+    ctx->opnds.n = u0 + 1;
+    ctx->extra.n = fa + 2;
+    blk->ops[pos] = op;
+    blk->n_ops = pos + 1;
+
+    IR_Op *o = &OPS(ctx)[op];
+    o->op_type = (uint16_t)t;
+    o->flags = OPF_TRACKED;
+    o->n_attributes = 1;
+    o->n_operands = 1;
+    o->n_results = 1;
+    o->parent_block = bi;
+    o->block_pos = pos;
+    o->first_operand = u0;
+    o->first_result = res;
+    o->first_attr = fa;
+    o->location = LOC_IDX(ctx, b->loc, "MLIR_BuildUnaryAttr");
+
+    IR_Value *vals = VALS(ctx);
+    IR_Value *rv = &vals[res];
+    rv->type = TYPE_IDX(ctx, rt, "MLIR_BuildUnaryAttr");
+    rv->def = op;
+    rv->index = VAL_TRACKED;
+    rv->first_use = 0;
+    rv->n_uses = 0;
+
+    IR_Operand *rec = OPNDS(ctx);
+    link_operand_tracked(rec, vals, u0, VAL_IDX(ctx, x, "MLIR_BuildUnaryAttr"), op);
+
+    uint32_t *pa = EXTRA(ctx) + fa;
+    pa[0] = key;
+    pa[1] = ATTR_IDX(ctx, val, "MLIR_BuildUnaryAttr");
+    return VAL_H(ctx, res);
+}
+
 static MLIR_NAT_NOINLINE MLIR_ValueHandle build_binary_attr_slow(MLIR_Builder *b, MLIR_OpType t,
         MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y,
         MLIR_AttrKey key, MLIR_AttributeHandle val) {
@@ -1823,6 +1902,169 @@ MLIR_ValueHandle MLIR_BuildBinaryAttr(MLIR_Builder *b, MLIR_OpType t,
     uint32_t *pa = EXTRA(ctx) + fa;
     pa[0] = key;
     pa[1] = ATTR_IDX(ctx, val, "MLIR_BuildBinaryAttr");
+    return VAL_H(ctx, res);
+}
+
+static MLIR_NAT_NOINLINE MLIR_ValueHandle build_unary2attr_slow(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1) {
+    MLIR_NamedAttr a[2];
+    a[0] = MLIR_Named(k0, v0);
+    a[1] = MLIR_Named(k1, v1);
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = &x;
+    s.n_operands = 1;
+    s.result_types = &rt;
+    s.n_results = 1;
+    s.attrs = a;
+    s.n_attrs = 2;
+    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
+}
+
+MLIR_ValueHandle MLIR_BuildUnary2Attr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1) {
+    API_CHECK(b != NULL && b->ctx != NULL, "MLIR_BuildUnary2Attr", "NULL argument");
+    MLIR_Context *ctx = b->ctx;
+    API_CHECK(t != OP_TYPE_UNREGISTERED && (uint32_t)t < ctx->op_types.n_types && (uint32_t)t < 0xffffu,
+              "MLIR_BuildUnary2Attr", "not an op type of this context");
+
+    uint32_t op = ctx->ops.n;
+    uint32_t res = ctx->vals.n;
+    uint32_t u0 = ctx->opnds.n;
+    uint32_t fa = ctx->extra.n;
+    uint32_t bi = BLOCK_IDX(ctx, b->block, "MLIR_BuildUnary2Attr");
+    if (MLIR_NAT_UNLIKELY(ctx->no_def_use_tracking ||
+                          op >= ctx->ops.cap || res >= ctx->vals.cap ||
+                          u0 + 1 > ctx->opnds.cap || fa + 4 > ctx->extra.cap ||
+                          bi == 0 || b->before != MLIR_INVALID_HANDLE)) {
+        return build_unary2attr_slow(b, t, rt, x, k0, v0, k1, v1);
+    }
+    IR_Block *blk = &BLOCKS(ctx)[bi];
+    uint32_t pos = blk->n_ops;
+    if (MLIR_NAT_UNLIKELY(pos >= blk->cap_ops)) {
+        return build_unary2attr_slow(b, t, rt, x, k0, v0, k1, v1);
+    }
+
+    ctx->ops.n = op + 1;
+    ctx->vals.n = res + 1;
+    ctx->opnds.n = u0 + 1;
+    ctx->extra.n = fa + 4;
+    blk->ops[pos] = op;
+    blk->n_ops = pos + 1;
+
+    IR_Op *o = &OPS(ctx)[op];
+    o->op_type = (uint16_t)t;
+    o->flags = OPF_TRACKED;
+    o->n_attributes = 2;
+    o->n_operands = 1;
+    o->n_results = 1;
+    o->parent_block = bi;
+    o->block_pos = pos;
+    o->first_operand = u0;
+    o->first_result = res;
+    o->first_attr = fa;
+    o->location = LOC_IDX(ctx, b->loc, "MLIR_BuildUnary2Attr");
+
+    IR_Value *vals = VALS(ctx);
+    IR_Value *rv = &vals[res];
+    rv->type = TYPE_IDX(ctx, rt, "MLIR_BuildUnary2Attr");
+    rv->def = op;
+    rv->index = VAL_TRACKED;
+    rv->first_use = 0;
+    rv->n_uses = 0;
+
+    link_operand_tracked(OPNDS(ctx), vals, u0, VAL_IDX(ctx, x, "MLIR_BuildUnary2Attr"), op);
+
+    uint32_t *pa = EXTRA(ctx) + fa;
+    pa[0] = k0; pa[1] = ATTR_IDX(ctx, v0, "MLIR_BuildUnary2Attr");
+    pa[2] = k1; pa[3] = ATTR_IDX(ctx, v1, "MLIR_BuildUnary2Attr");
+    return VAL_H(ctx, res);
+}
+
+static MLIR_NAT_NOINLINE MLIR_ValueHandle build_binary2attr_slow(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1) {
+    MLIR_ValueHandle ops[2] = { x, y };
+    MLIR_NamedAttr a[2];
+    a[0] = MLIR_Named(k0, v0);
+    a[1] = MLIR_Named(k1, v1);
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = ops;
+    s.n_operands = 2;
+    s.result_types = &rt;
+    s.n_results = 1;
+    s.attrs = a;
+    s.n_attrs = 2;
+    return MLIR_GetOpResult(b->ctx, MLIR_BuildOp(b, &s), 0);
+}
+
+MLIR_ValueHandle MLIR_BuildBinary2Attr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1) {
+    API_CHECK(b != NULL && b->ctx != NULL, "MLIR_BuildBinary2Attr", "NULL argument");
+    MLIR_Context *ctx = b->ctx;
+    API_CHECK(t != OP_TYPE_UNREGISTERED && (uint32_t)t < ctx->op_types.n_types && (uint32_t)t < 0xffffu,
+              "MLIR_BuildBinary2Attr", "not an op type of this context");
+
+    uint32_t op = ctx->ops.n;
+    uint32_t res = ctx->vals.n;
+    uint32_t u0 = ctx->opnds.n;
+    uint32_t fa = ctx->extra.n;
+    uint32_t bi = BLOCK_IDX(ctx, b->block, "MLIR_BuildBinary2Attr");
+    if (MLIR_NAT_UNLIKELY(ctx->no_def_use_tracking ||
+                          op >= ctx->ops.cap || res >= ctx->vals.cap ||
+                          u0 + 2 > ctx->opnds.cap || fa + 4 > ctx->extra.cap ||
+                          bi == 0 || b->before != MLIR_INVALID_HANDLE)) {
+        return build_binary2attr_slow(b, t, rt, x, y, k0, v0, k1, v1);
+    }
+    IR_Block *blk = &BLOCKS(ctx)[bi];
+    uint32_t pos = blk->n_ops;
+    if (MLIR_NAT_UNLIKELY(pos >= blk->cap_ops)) {
+        return build_binary2attr_slow(b, t, rt, x, y, k0, v0, k1, v1);
+    }
+
+    ctx->ops.n = op + 1;
+    ctx->vals.n = res + 1;
+    ctx->opnds.n = u0 + 2;
+    ctx->extra.n = fa + 4;
+    blk->ops[pos] = op;
+    blk->n_ops = pos + 1;
+
+    IR_Op *o = &OPS(ctx)[op];
+    o->op_type = (uint16_t)t;
+    o->flags = OPF_TRACKED;
+    o->n_attributes = 2;
+    o->n_operands = 2;
+    o->n_results = 1;
+    o->parent_block = bi;
+    o->block_pos = pos;
+    o->first_operand = u0;
+    o->first_result = res;
+    o->first_attr = fa;
+    o->location = LOC_IDX(ctx, b->loc, "MLIR_BuildBinary2Attr");
+
+    IR_Value *vals = VALS(ctx);
+    IR_Value *rv = &vals[res];
+    rv->type = TYPE_IDX(ctx, rt, "MLIR_BuildBinary2Attr");
+    rv->def = op;
+    rv->index = VAL_TRACKED;
+    rv->first_use = 0;
+    rv->n_uses = 0;
+
+    IR_Operand *rec = OPNDS(ctx);
+    link_operand_tracked(rec, vals, u0, VAL_IDX(ctx, x, "MLIR_BuildBinary2Attr"), op);
+    link_operand_tracked(rec, vals, u0 + 1, VAL_IDX(ctx, y, "MLIR_BuildBinary2Attr"), op | (1u << OPND_IDX_SHIFT));
+
+    uint32_t *pa = EXTRA(ctx) + fa;
+    pa[0] = k0; pa[1] = ATTR_IDX(ctx, v0, "MLIR_BuildBinary2Attr");
+    pa[2] = k1; pa[3] = ATTR_IDX(ctx, v1, "MLIR_BuildBinary2Attr");
     return VAL_H(ctx, res);
 }
 

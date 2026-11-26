@@ -35,6 +35,7 @@ typedef struct {
     size_t n;
     size_t i;
     Typedef *td_buckets[256];
+    uint64_t td_bloom;
     Enumerator *en_buckets[512];
     IdxNode *fn_buckets[256];
     IdxNode *st_buckets[256];
@@ -65,13 +66,21 @@ static uint32_t parse_str_hash(string s) {
     return h;
 }
 
+static inline uint32_t td_bloom_bit(string s) {
+    return ((uint32_t)(unsigned char)s.str[0] * 31u +
+            (uint32_t)(unsigned char)s.str[s.size - 1] * 7u +
+            (uint32_t)s.size) & 63u;
+}
+
 static void typedef_insert(P *p, Typedef *td) {
+    if (td->name.size > 0) p->td_bloom |= (1ull << td_bloom_bit(td->name));
     uint32_t b = parse_str_hash(td->name) & 255u;
     td->next = p->td_buckets[b];
     p->td_buckets[b] = td;
 }
 
 static Typedef *typedef_lookup(P *p, string name) {
+    if (name.size > 0 && ((p->td_bloom >> td_bloom_bit(name)) & 1u) == 0) return NULL;
     uint32_t b = parse_str_hash(name) & 255u;
     for (Typedef *t = p->td_buckets[b]; t; t = t->next) {
         if (str_eq(t->name, name)) return t;

@@ -847,6 +847,21 @@ extern "C" MLIR_ValueHandle MLIR_BuildNullaryAttr(MLIR_Builder *b, MLIR_OpType t
     return valH(F<mlir::Operation>(MLIR_BuildOp(b, &s))->getResult(0));
 }
 
+extern "C" MLIR_ValueHandle MLIR_BuildUnaryAttr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x,
+        MLIR_AttrKey key, MLIR_AttributeHandle val) {
+    MLIR_NamedAttr a = MLIR_Named(key, val);
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = &x;
+    s.n_operands = 1;
+    s.result_types = &rt;
+    s.n_results = 1;
+    s.attrs = &a;
+    s.n_attrs = 1;
+    return valH(F<mlir::Operation>(MLIR_BuildOp(b, &s))->getResult(0));
+}
+
 extern "C" MLIR_ValueHandle MLIR_BuildBinaryAttr(MLIR_Builder *b, MLIR_OpType t,
         MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y,
         MLIR_AttrKey key, MLIR_AttributeHandle val) {
@@ -860,6 +875,39 @@ extern "C" MLIR_ValueHandle MLIR_BuildBinaryAttr(MLIR_Builder *b, MLIR_OpType t,
     s.n_results = 1;
     s.attrs = &a;
     s.n_attrs = 1;
+    return valH(F<mlir::Operation>(MLIR_BuildOp(b, &s))->getResult(0));
+}
+
+extern "C" MLIR_ValueHandle MLIR_BuildUnary2Attr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1) {
+    MLIR_NamedAttr a[2] = { MLIR_Named(k0, v0), MLIR_Named(k1, v1) };
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = &x;
+    s.n_operands = 1;
+    s.result_types = &rt;
+    s.n_results = 1;
+    s.attrs = a;
+    s.n_attrs = 2;
+    return valH(F<mlir::Operation>(MLIR_BuildOp(b, &s))->getResult(0));
+}
+
+extern "C" MLIR_ValueHandle MLIR_BuildBinary2Attr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1) {
+    MLIR_ValueHandle ops[2] = { x, y };
+    MLIR_NamedAttr a[2] = { MLIR_Named(k0, v0), MLIR_Named(k1, v1) };
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.operands = ops;
+    s.n_operands = 2;
+    s.result_types = &rt;
+    s.n_results = 1;
+    s.attrs = a;
+    s.n_attrs = 2;
     return valH(F<mlir::Operation>(MLIR_BuildOp(b, &s))->getResult(0));
 }
 

@@ -1640,14 +1640,15 @@ static int tinyc_main(void) {
     bool target_wasm32 = (emit_wasm || emit_wasmssa || emit_wasmstack ||
                           emit_wat || emit_macho) &&
                          !macho_backend_llvm;
-    Program *prog = arena_new(arena, Program);
+    Arena *fe_arena = arena_create(4 * 1024 * 1024 - 4096);
+    Program *prog = arena_new(fe_arena, Program);
     *prog = (Program){0};
     prog->host_varargs = host_varargs;
     int total_errs = 0;
     size_t total_toks = 0;
     for (size_t k = 0; k < n_input_files; k++) {
         uint64_t t_pp = ts_now();
-        VecTcTok toks = tinyc_preprocess_lex(arena, str_from_cstr_view(input_files[k]),
+        VecTcTok toks = tinyc_preprocess_lex(fe_arena, str_from_cstr_view(input_files[k]),
                                              include_dirs, n_include_dirs,
                                              defines, n_defines);
         ts_add(TS_PREPROCESS, t_pp);
@@ -1659,11 +1660,12 @@ static int tinyc_main(void) {
         }
         total_toks += toks.size;
         uint64_t t_pa = ts_now();
-        total_errs += tinyc_parse_into(arena, prog, toks, target_wasm32);
+        total_errs += tinyc_parse_into(fe_arena, prog, toks, target_wasm32);
         if (toks.data) buddy_free(toks.data);
         ts_add(TS_PARSE, t_pa);
     }
     if (total_errs > 0) {
+        arena_destroy(fe_arena);
         arena_destroy(arena);
         MLIR_DestroyContext(ctx);
         arena_destroy(boot_arena);
@@ -1676,16 +1678,17 @@ static int tinyc_main(void) {
     // synthesized syscall thunks. PLATFORM_SKIP_ENTRY drops its _start (tinyC
     // supplies its own); unreached platform funcs are trimmed by the backend.
     if (emit_elf && host_platform_path) {
-        string *pdefs = arena_new_array(arena, string, n_defines + 1);
+        string *pdefs = arena_new_array(fe_arena, string, n_defines + 1);
         for (size_t k = 0; k < n_defines; k++) pdefs[k] = defines[k];
         pdefs[n_defines] = str_from_cstr_view((char *)"PLATFORM_SKIP_ENTRY=1");
         uint64_t t_pp = ts_now();
-        string psrc = tinyc_preprocess(arena, str_from_cstr_view(host_platform_path),
+        string psrc = tinyc_preprocess(fe_arena, str_from_cstr_view(host_platform_path),
                                        include_dirs, n_include_dirs, pdefs, n_defines + 1);
         ts_add(TS_PREPROCESS, t_pp);
         if (tinyc_last_preprocess_errors() > 0) {
             fprintf(stderr, "tinyc: preprocessing failed for host platform '%s'\n",
                     host_platform_path);
+            arena_destroy(fe_arena);
             arena_destroy(arena);
             MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
@@ -1693,15 +1696,16 @@ static int tinyc_main(void) {
         }
         if (psrc.size > 0 && psrc.str[psrc.size - 1] == '\0') psrc.size -= 1;
         uint64_t t_lx = ts_now();
-        VecTcTok ptoks = tinyc_lex(arena, psrc);
+        VecTcTok ptoks = tinyc_lex(fe_arena, psrc);
         ts_add(TS_LEX, t_lx);
         total_toks += ptoks.size;
         uint64_t t_pa = ts_now();
-        int perrs = tinyc_parse_into(arena, prog, ptoks, target_wasm32);
+        int perrs = tinyc_parse_into(fe_arena, prog, ptoks, target_wasm32);
         ts_add(TS_PARSE, t_pa);
         if (perrs > 0) {
             fprintf(stderr, "tinyc: parse failed for host platform '%s'\n",
                     host_platform_path);
+            arena_destroy(fe_arena);
             arena_destroy(arena);
             MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
@@ -1719,6 +1723,10 @@ static int tinyc_main(void) {
     uint64_t t_em = ts_now();
     MLIR_OpHandle module = tinyc_emit_module(ctx, prog);
     ts_add(TS_EMIT, t_em);
+    // All AST, preprocessor, and source-buffer memory is dead once MLIR IR is
+    // emitted; return fe_arena's warm pages to corec's buddy freelist for the
+    // lowering and codegen stages.
+    arena_destroy(fe_arena);
     if (tinyc_last_emit_errors() > 0) {
         arena_destroy(arena);
         MLIR_DestroyContext(ctx);

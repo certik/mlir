@@ -45,7 +45,9 @@ MLIR_OpType op_type_table_lookup(const OpTypeTable *t, string name);
 MLIR_OpType op_type_table_register(OpTypeTable *t, string name);
 
 // The name of `type`, or "" for OP_TYPE_UNREGISTERED and unknown values.
+void op_type_table_ensure_names(OpTypeTable *t);
 static inline string op_type_table_name(const OpTypeTable *t, MLIR_OpType type) {
+    if (!t->names) op_type_table_ensure_names((OpTypeTable *)t);
     if ((uint32_t)type < t->n_types) return t->names[type];
     return t->names[OP_TYPE_UNREGISTERED];
 }

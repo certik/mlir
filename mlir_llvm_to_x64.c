@@ -27,6 +27,7 @@
 #include "mlir_elf.h"
 #include "mlir_llvm_type_layout.h"
 #include "mlir_regalloc.h"
+#include <base/buddy.h>
 #include <platform/platform.h>
 
 // ---------------------------------------------------------------------------
@@ -63,10 +64,11 @@ static size_t     g_x64_vmap_cap = 0;
 static void vmap_init(VMap *m, size_t want) {
     size_t cap = 16; while (cap < want * 2) cap *= 2;
     if (cap > g_x64_vmap_cap) {
-        free(g_x64_vmap_k);
-        free(g_x64_vmap_v);
-        g_x64_vmap_k = (uintptr_t *)malloc(cap * sizeof(uintptr_t));
-        g_x64_vmap_v = (int32_t *)malloc(cap * sizeof(int32_t));
+        if (g_x64_vmap_k) buddy_free(g_x64_vmap_k);
+        if (g_x64_vmap_v) buddy_free(g_x64_vmap_v);
+        size_t actual_k = 0, actual_v = 0;
+        g_x64_vmap_k = (uintptr_t *)buddy_alloc(cap * sizeof(uintptr_t), &actual_k);
+        g_x64_vmap_v = (int32_t *)buddy_alloc(cap * sizeof(int32_t), &actual_v);
         g_x64_vmap_cap = cap;
     }
     memset(g_x64_vmap_k, 0, cap * sizeof(uintptr_t));
@@ -76,8 +78,10 @@ static void vmap_init(VMap *m, size_t want) {
 }
 static void vmap_grow(VMap *m) {
     size_t ncap = m->cap * 2;
-    uintptr_t *nk = (uintptr_t *)calloc(ncap, sizeof(uintptr_t));
-    int32_t   *nv = (int32_t *)malloc(ncap * sizeof(int32_t));
+    size_t actual_k = 0, actual_v = 0;
+    uintptr_t *nk = (uintptr_t *)buddy_alloc(ncap * sizeof(uintptr_t), &actual_k);
+    int32_t   *nv = (int32_t *)buddy_alloc(ncap * sizeof(int32_t), &actual_v);
+    memset(nk, 0, ncap * sizeof(uintptr_t));
     size_t mask = ncap - 1;
     for (size_t i = 0; i < m->cap; i++) {
         if (!m->k[i]) continue;
@@ -85,8 +89,8 @@ static void vmap_grow(VMap *m) {
         while (nk[j]) j = (j + 1) & mask;
         nk[j] = m->k[i]; nv[j] = m->v[i];
     }
-    free(g_x64_vmap_k);
-    free(g_x64_vmap_v);
+    if (g_x64_vmap_k) buddy_free(g_x64_vmap_k);
+    if (g_x64_vmap_v) buddy_free(g_x64_vmap_v);
     g_x64_vmap_k = nk;
     g_x64_vmap_v = nv;
     g_x64_vmap_cap = ncap;

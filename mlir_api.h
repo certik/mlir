@@ -390,9 +390,23 @@ MLIR_OpHandle MLIR_BuildVoidBinary(MLIR_Builder *b, MLIR_OpType t,
 MLIR_ValueHandle MLIR_BuildNullaryAttr(MLIR_Builder *b, MLIR_OpType t,
         MLIR_TypeHandle rt, MLIR_AttrKey key, MLIR_AttributeHandle val);
 
+MLIR_ValueHandle MLIR_BuildUnaryAttr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x,
+        MLIR_AttrKey key, MLIR_AttributeHandle val);
+
 MLIR_ValueHandle MLIR_BuildBinaryAttr(MLIR_Builder *b, MLIR_OpType t,
         MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y,
         MLIR_AttrKey key, MLIR_AttributeHandle val);
+
+MLIR_ValueHandle MLIR_BuildUnary2Attr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1);
+
+MLIR_ValueHandle MLIR_BuildBinary2Attr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1);
 
 MLIR_ValueHandle MLIR_BuildConstantInt(MLIR_Builder *b, MLIR_OpType t,
         MLIR_TypeHandle rt, int64_t v);

@@ -790,25 +790,23 @@ static void walk_op(LowerState *st, MLIR_OpHandle op) {
 }
 
 static void walk_block(LowerState *st, MLIR_BlockHandle block) {
+    MLIR_Context *ctx = st->ctx;
     size_t i = 0;
-    while (i < MLIR_GetBlockNumOps(st->ctx, block)) {
-        MLIR_OpHandle op = MLIR_GetBlockOp(st->ctx, block, i);
-        walk_op(st, op);
-        size_t before = MLIR_GetBlockNumOps(st->ctx, block);
+    size_t n_ops = MLIR_GetBlockNumOps(ctx, block);
+    while (i < n_ops) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, block, i);
+        if (MLIR_GetOpNumRegions(ctx, op) != 0) walk_op(st, op);
         int res = try_lower_op(st, op, block, i);
         if (res == LOWER_NONE || res == LOWER_INPLACE) { i++; continue; }
         if (res == LOWER_DONE_BLOCK) {
-            // The lowering restructured this block (and likely created
-            // sibling blocks); nothing more to walk here. The new blocks
-            // are appended to the parent region and will be visited by
-            // the outer walker as it enumerates them.
             return;
         }
         // LOWER_REPLACED: simple in-place rewrite. Original is still
         // attached at position i + inserted; erase it and skip the inserts.
-        size_t after = MLIR_GetBlockNumOps(st->ctx, block);
-        size_t inserted = after - before;
-        MLIR_EraseOp(st->ctx, op);
+        size_t after = MLIR_GetBlockNumOps(ctx, block);
+        size_t inserted = after - n_ops;
+        MLIR_EraseOp(ctx, op);
+        n_ops = after - 1;
         i += inserted;
     }
 }

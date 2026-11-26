@@ -81,8 +81,9 @@ MLIR_OpTraits MLIR_GetOpTypeTraits(MLIR_OpType type) {
     return MLIR_T_NONE;
 }
 
-void op_type_table_init(OpTypeTable *t, Arena *arena) {
-    t->arena = arena;
+void op_type_table_ensure_names(OpTypeTable *t) {
+    if (t->names) return;
+    Arena *arena = t->arena;
     t->cap_types = (uint32_t)OP_TYPE_COUNT + 64;
     t->names = arena_new_array(arena, string, t->cap_types);
     t->n_types = (uint32_t)OP_TYPE_COUNT;
@@ -102,12 +103,23 @@ void op_type_table_init(OpTypeTable *t, Arena *arena) {
     t->n_aliases = 0;
 #define MLIR_OP_ALIAS(enumerator, name) op_type_table_add_alias(t, enumerator, str_lit(name));
 #include "mlir_ops.def"
+}
+
+void op_type_table_init(OpTypeTable *t, Arena *arena) {
+    t->arena = arena;
+    t->names = NULL;
+    t->n_types = (uint32_t)OP_TYPE_COUNT;
+    t->cap_types = 0;
+    t->alias_names = NULL;
+    t->alias_types = NULL;
+    t->n_aliases = 0;
     t->slots = NULL;
     t->n_slots = 0;
 }
 
 MLIR_OpType op_type_table_lookup(const OpTypeTable *t, string name) {
     if (name.size == 0) return OP_TYPE_UNREGISTERED;
+    if (!t->names) op_type_table_ensure_names((OpTypeTable *)t);
     if (!t->slots) op_type_table_rehash((OpTypeTable *)t, 1024);
     uint32_t mask = t->n_slots - 1;
     uint32_t i = op_name_hash(name) & mask;
@@ -170,38 +182,51 @@ static const char g_static_key_names[] =
 #include "mlir_attr_keys.def"
     ;
 
+static void attr_key_table_ensure_names(AttrKeyTable *t) {
+    if (t->names) return;
+    Arena *arena = t->arena;
+    if (t->n_keys > 1) {
+        t->cap_keys = (uint32_t)MLIR_KEY_COUNT + 64;
+        t->names = arena_new_array(arena, string, t->cap_keys);
+        t->names[MLIR_KEY_INVALID].str = (char *)g_static_key_names + sizeof(g_static_key_names) - 1;
+        t->names[MLIR_KEY_INVALID].size = 0;
+        const char *p = g_static_key_names;
+        for (uint32_t k = 1; k < t->n_keys; k++) {
+            size_t n = strlen(p);
+            t->names[k].str = (char *)p;
+            t->names[k].size = n;
+            p += n + 1;
+        }
+        assert(p == g_static_key_names + sizeof(g_static_key_names) - 1);
+    } else {
+        t->cap_keys = 64;
+        t->names = arena_new_array(arena, string, t->cap_keys);
+        t->names[0].str = (char *)g_static_key_names + sizeof(g_static_key_names) - 1;
+        t->names[0].size = 0;
+    }
+}
+
 void attr_key_table_init(AttrKeyTable *t, Arena *arena) {
     t->arena = arena;
-    t->cap_keys = (uint32_t)MLIR_KEY_COUNT + 64;
-    t->names = arena_new_array(arena, string, t->cap_keys);
+    t->names = NULL;
+    t->cap_keys = 0;
     t->n_keys = (uint32_t)MLIR_KEY_COUNT;
-    t->names[MLIR_KEY_INVALID].str = (char *)g_static_key_names + sizeof(g_static_key_names) - 1;
-    t->names[MLIR_KEY_INVALID].size = 0;
-    const char *p = g_static_key_names;
-    for (uint32_t k = 1; k < t->n_keys; k++) {
-        size_t n = strlen(p);
-        t->names[k].str = (char *)p;
-        t->names[k].size = n;
-        p += n + 1;
-    }
-    assert(p == g_static_key_names + sizeof(g_static_key_names) - 1);
     t->slots = NULL;
     t->n_slots = 0;
 }
 
 void attr_key_table_init_strings(AttrKeyTable *t, Arena *arena) {
     t->arena = arena;
-    t->cap_keys = 64;
-    t->names = arena_new_array(arena, string, t->cap_keys);
+    t->names = NULL;
+    t->cap_keys = 0;
     t->n_keys = 1;
-    t->names[0].str = (char *)g_static_key_names + sizeof(g_static_key_names) - 1;
-    t->names[0].size = 0;
     t->slots = NULL;
     t->n_slots = 0;
 }
 
 MLIR_AttrKey attr_key_table_lookup(const AttrKeyTable *t, string name) {
     if (name.size == 0) return MLIR_KEY_INVALID;
+    if (!t->names) attr_key_table_ensure_names((AttrKeyTable *)t);
     if (!t->slots) attr_key_table_rehash((AttrKeyTable *)t, t->n_keys > 64 ? 512 : 128);
     uint32_t mask = t->n_slots - 1;
     uint32_t i = op_name_hash(name) & mask;
@@ -234,6 +259,7 @@ MLIR_AttrKey attr_key_table_intern(AttrKeyTable *t, string name) {
 }
 
 string attr_key_table_name(const AttrKeyTable *t, MLIR_AttrKey key) {
+    if (!t->names) attr_key_table_ensure_names((AttrKeyTable *)t);
     if (key < t->n_keys) return t->names[key];
     return t->names[MLIR_KEY_INVALID];
 }
