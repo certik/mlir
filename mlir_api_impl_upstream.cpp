@@ -1205,6 +1205,10 @@ extern "C" MLIR_BlockHandle MLIR_GetBlockPrev(MLIR_Context *ctx, MLIR_BlockHandl
     return prev ? H(prev) : MLIR_INVALID_HANDLE;
 }
 
+extern "C" MLIR_CFGInfo *MLIR_ComputeCFGInfo(MLIR_Context *ctx, MLIR_RegionHandle region, Arena *out) {
+    return mlir_compute_cfg_info_generic(ctx, region, out);
+}
+
 extern "C" MLIR_UseHandle MLIR_GetValueFirstUse(MLIR_Context *ctx, MLIR_ValueHandle vh) {
     CHECK_OWN_VALUE(ctx, vh, "MLIR_GetValueFirstUse");
     mlir::Value v = valF(vh);

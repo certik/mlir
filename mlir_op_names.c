@@ -417,7 +417,7 @@ static int32_t cfg_intersect(const int32_t *idom, int32_t b1, int32_t b2) {
     return b1;
 }
 
-MLIR_CFGInfo *MLIR_ComputeCFGInfo(MLIR_Context *ctx, MLIR_RegionHandle region, Arena *out) {
+MLIR_CFGInfo *mlir_compute_cfg_info_generic(MLIR_Context *ctx, MLIR_RegionHandle region, Arena *out) {
     MLIR_CFGInfo *cfg = arena_new(out, MLIR_CFGInfo);
     cfg->n_blocks = 0;
     cfg->rpo = NULL;
