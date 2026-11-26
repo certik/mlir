@@ -4298,7 +4298,40 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             if (ex->op == OP_AND || ex->op == OP_OR) {
                 EVal a = emit_expr(e, sc, ex->lhs);
                 MLIR_ValueHandle ab = emit_to_bool_i1(e, a);
-
+                if (!e->target_wasm32) {
+                    MLIR_BlockHandle rhs_b = new_cfg_block(e);
+                    MLIR_BlockHandle merge_b = new_cfg_block(e);
+                    MLIR_ValueHandle res = MLIR_AddBlockArgument(e->ctx, merge_b, e->i32, e->loc);
+                    MLIR_ValueHandle short_val = emit_const_i32(e, ex->op == OP_AND ? 0 : 1);
+                    if (!e->terminated) {
+                        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+                        bd.loc = e->loc;
+                        if (ex->op == OP_AND) {
+                            MLIR_BuildCondBr(&bd, OP_TYPE_CF_COND_BR, ab,
+                                             rhs_b, NULL, 0,
+                                             merge_b, &short_val, 1);
+                        } else {
+                            MLIR_BuildCondBr(&bd, OP_TYPE_CF_COND_BR, ab,
+                                             merge_b, &short_val, 1,
+                                             rhs_b, NULL, 0);
+                        }
+                        e->terminated = true;
+                    }
+                    e->cur_block = rhs_b;
+                    e->terminated = false;
+                    EVal b = emit_expr(e, sc, ex->rhs);
+                    MLIR_ValueHandle bv = bool_to_i32(e, emit_to_bool_i1(e, b));
+                    if (!e->terminated) {
+                        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+                        bd.loc = e->loc;
+                        MLIR_BuildBr(&bd, OP_TYPE_CF_BR, merge_b, &bv, 1);
+                        e->terminated = true;
+                    }
+                    e->cur_block = merge_b;
+                    e->terminated = false;
+                    r.val = res;
+                    return r;
+                }
                 MLIR_RegionHandle then_r = MLIR_CreateRegion(e->ctx);
                 MLIR_BlockHandle then_b = MLIR_CreateBlock(e->ctx);
                 MLIR_AppendRegionBlock(e->ctx, then_r, then_b);
@@ -4307,13 +4340,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 MLIR_AppendRegionBlock(e->ctx, else_r, else_b);
 
                 MLIR_ValueHandle if_res = MLIR_INVALID_HANDLE;
-                MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->i32;
-                MLIR_ValueHandle *rs = &if_res;
-                MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = ab;
-                MLIR_RegionHandle *regs = arena_new_array(e->arena, MLIR_RegionHandle, 2);
-                regs[0] = then_r; regs[1] = else_r;
+                MLIR_TypeHandle rts[1] = { e->i32 };
+                MLIR_ValueHandle ops[1] = { ab };
+                MLIR_RegionHandle regs[2] = { then_r, else_r };
                 emit_op(e, OP_TYPE_SCF_IF,
-                        rts, 1, rs, 1, ops, 1, NULL, 0, regs, 2);
+                        rts, 1, &if_res, 1, ops, 1, NULL, 0, regs, 2);
 
                 MLIR_BlockHandle saved = e->cur_block;
                 bool saved_term = e->terminated;
@@ -4326,9 +4357,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 } else {
                     then_val = emit_const_i32(e, 1);
                 }
-                MLIR_ValueHandle *ty = arena_new_array(e->arena, MLIR_ValueHandle, 1); ty[0] = then_val;
                 emit_op(e, OP_TYPE_SCF_YIELD,
-                        NULL, 0, NULL, 0, ty, 1, NULL, 0, NULL, 0);
+                        NULL, 0, NULL, 0, &then_val, 1, NULL, 0, NULL, 0);
 
                 e->cur_block = else_b; e->terminated = false;
                 MLIR_ValueHandle else_val;
@@ -4338,9 +4368,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     EVal b = emit_expr(e, sc, ex->rhs);
                     else_val = bool_to_i32(e, emit_to_bool_i1(e, b));
                 }
-                MLIR_ValueHandle *ey = arena_new_array(e->arena, MLIR_ValueHandle, 1); ey[0] = else_val;
                 emit_op(e, OP_TYPE_SCF_YIELD,
-                        NULL, 0, NULL, 0, ey, 1, NULL, 0, NULL, 0);
+                        NULL, 0, NULL, 0, &else_val, 1, NULL, 0, NULL, 0);
                 e->cur_block = saved; e->terminated = saved_term;
                 r.val = if_res;
                 return r;
@@ -5294,6 +5323,40 @@ static void emit_expr_for_side_effect(E *e, Scope *sc, Expr *ex) {
     e->unused_assign = saved_unused;
 }
 
+static void emit_cond_jump(E *e, Scope *sc, Expr *cond,
+                           MLIR_BlockHandle true_b, MLIR_BlockHandle false_b) {
+    if (e->terminated) return;
+    // Direct short-circuit jumps produce multi-exit DAGs (e.g. `(a && b) || c`
+    // branching straight to `true_b`/`false_b`), which is ideal for native CFG
+    // targets (x86_64/aarch64) while wasm32's structured control-flow raiser
+    // requires single-entry/single-exit diamonds.
+    if (!e->target_wasm32) {
+        if (cond->kind == EX_UN && cond->op == OP_NOT) {
+            emit_cond_jump(e, sc, cond->lhs, false_b, true_b);
+            return;
+        }
+        if (cond->kind == EX_BIN && cond->op == OP_AND) {
+            MLIR_BlockHandle rhs_b = new_cfg_block(e);
+            emit_cond_jump(e, sc, cond->lhs, rhs_b, false_b);
+            e->cur_block = rhs_b;
+            e->terminated = false;
+            emit_cond_jump(e, sc, cond->rhs, true_b, false_b);
+            return;
+        }
+        if (cond->kind == EX_BIN && cond->op == OP_OR) {
+            MLIR_BlockHandle rhs_b = new_cfg_block(e);
+            emit_cond_jump(e, sc, cond->lhs, true_b, rhs_b);
+            e->cur_block = rhs_b;
+            e->terminated = false;
+            emit_cond_jump(e, sc, cond->rhs, true_b, false_b);
+            return;
+        }
+    }
+    EVal c = emit_expr(e, sc, cond);
+    MLIR_ValueHandle cb = emit_to_bool_i1(e, c);
+    emit_cond_branch(e, cb, true_b, false_b);
+}
+
 static void emit_stmt(E *e, Scope *sc, Stmt *st);
 
 // Unsized `T arr[] = {a, b, ...}`: infer the length from the aggregate
@@ -6096,13 +6159,10 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             return;
         }
         case ST_IF: {
-            EVal c = emit_expr(e, sc, st->expr);
-            MLIR_ValueHandle cb = emit_to_bool_i1(e, c);
-
             MLIR_BlockHandle then_b = new_cfg_block(e);
             MLIR_BlockHandle else_b = st->has_else ? new_cfg_block(e) : MLIR_INVALID_HANDLE;
             MLIR_BlockHandle end_b  = new_cfg_block(e);
-            emit_cond_branch(e, cb, then_b, st->has_else ? else_b : end_b);
+            emit_cond_jump(e, sc, st->expr, then_b, st->has_else ? else_b : end_b);
 
             e->cur_block = then_b; e->terminated = false;
             { Scope inner = (Scope){.head = NULL, .parent = sc};
@@ -6130,9 +6190,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             emit_branch(e, hdr_b);
 
             e->cur_block = hdr_b; e->terminated = false;
-            EVal c = emit_expr(e, sc, st->expr);
-            MLIR_ValueHandle cb = emit_to_bool_i1(e, c);
-            emit_cond_branch(e, cb, body_b, exit_b);
+            emit_cond_jump(e, sc, st->expr, body_b, exit_b);
 
             e->cur_block = body_b; e->terminated = false;
             LoopCtx lc = (LoopCtx){.continue_block = hdr_b, .break_block = exit_b, .parent = e->loops};
@@ -6166,9 +6224,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             emit_branch(e, cond_b);
 
             e->cur_block = cond_b; e->terminated = false;
-            EVal c = emit_expr(e, sc, st->expr);
-            MLIR_ValueHandle cb = emit_to_bool_i1(e, c);
-            emit_cond_branch(e, cb, body_b, exit_b);
+            emit_cond_jump(e, sc, st->expr, body_b, exit_b);
 
             e->cur_block = exit_b; e->terminated = false;
             return;
@@ -6189,15 +6245,11 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             emit_branch(e, hdr_b);
 
             e->cur_block = hdr_b; e->terminated = false;
-            MLIR_ValueHandle cb;
             if (st->expr) {
-                EVal c = emit_expr(e, &inner, st->expr);
-                cb = emit_to_bool_i1(e, c);
+                emit_cond_jump(e, &inner, st->expr, body_b, exit_b);
             } else {
-                MLIR_ValueHandle one = emit_const_i32(e, 1);
-                cb = emit_cmpi(e, /*ne*/ 1, one, emit_const_i32(e, 0));
+                emit_branch(e, body_b);
             }
-            emit_cond_branch(e, cb, body_b, exit_b);
 
             e->cur_block = body_b; e->terminated = false;
             LoopCtx lc = (LoopCtx){.continue_block = step_b, .break_block = exit_b, .parent = e->loops};
@@ -6240,22 +6292,23 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
 
             MLIR_BlockHandle exit_b = new_cfg_block(e);
 
-            // Per-case body block, one per unique body_start.
+            // Per-case body block, one per unique body_start (switch_cases
+            // is already in non-decreasing body_start source order).
             MLIR_BlockHandle *case_blocks = arena_new_array(e->arena, MLIR_BlockHandle, nc ? nc : 1);
             int64_t *body_start = arena_new_array(e->arena, int64_t, nc ? nc : 1);
+            MLIR_BlockHandle default_b = MLIR_INVALID_HANDLE;
             for (size_t i = 0; i < nc; i++) {
                 int64_t bs = st->extra->switch_cases.data[i].body_start;
                 body_start[i] = bs;
-                case_blocks[i] = MLIR_INVALID_HANDLE;
-                for (size_t j = 0; j < i; j++) {
-                    if (body_start[j] == bs) { case_blocks[i] = case_blocks[j]; break; }
+                if (i > 0 && body_start[i - 1] == bs) {
+                    case_blocks[i] = case_blocks[i - 1];
+                } else {
+                    case_blocks[i] = new_cfg_block(e);
                 }
-                if (case_blocks[i] == MLIR_INVALID_HANDLE) case_blocks[i] = new_cfg_block(e);
-            }
-            // Locate default block (if any) and emit the test cascade.
-            MLIR_BlockHandle default_b = MLIR_INVALID_HANDLE;
-            for (size_t i = 0; i < nc; i++) {
-                if (st->extra->switch_cases.data[i].is_default) { default_b = case_blocks[i]; break; }
+                if (st->extra->switch_cases.data[i].is_default &&
+                    default_b == MLIR_INVALID_HANDLE) {
+                    default_b = case_blocks[i];
+                }
             }
             for (size_t i = 0; i < nc; i++) {
                 SwitchCase *c = &st->extra->switch_cases.data[i];
@@ -6276,30 +6329,17 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             e->loops = &lc;
             for (size_t i = 0; i < nc; i++) {
                 // Skip duplicate entries pointing at a body_start already emitted.
-                bool dup = false;
-                for (size_t j = 0; j < i; j++) if (body_start[j] == body_start[i]) { dup = true; break; }
-                if (dup) continue;
+                if (i > 0 && body_start[i] == body_start[i - 1]) continue;
                 e->cur_block = case_blocks[i]; e->terminated = false;
-                int64_t end = (int64_t)st->body.size;
-                // Find the next case's body_start after this one.
-                for (size_t j = 0; j < nc; j++) {
-                    if (body_start[j] > body_start[i] && body_start[j] < end)
-                        end = body_start[j];
-                }
+                size_t next_i = i + 1;
+                while (next_i < nc && body_start[next_i] == body_start[i]) next_i++;
+                int64_t end = (next_i < nc) ? body_start[next_i] : (int64_t)st->body.size;
                 for (int64_t k = body_start[i]; k < end && !e->terminated; k++) {
                     emit_stmt(e, &inner, st->body.data[k]);
                 }
                 // Fall through to the next case block in source order, or exit.
                 if (!e->terminated) {
-                    MLIR_BlockHandle nxt = exit_b;
-                    int64_t best = -1;
-                    for (size_t j = 0; j < nc; j++) {
-                        if (body_start[j] > body_start[i] &&
-                            (best < 0 || body_start[j] < best)) {
-                            best = body_start[j];
-                            nxt = case_blocks[j];
-                        }
-                    }
+                    MLIR_BlockHandle nxt = (next_i < nc) ? case_blocks[next_i] : exit_b;
                     emit_branch(e, nxt);
                 }
             }
