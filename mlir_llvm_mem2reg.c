@@ -544,10 +544,6 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
             nops = MLIR_GetBlockNumOps(ctx, blk);
         }
     }
-    // The promotable alloca ops are now dead.
-    for (size_t ai = 0; ai < na; ai++)
-        if (m.promotable[ai]) L2R_ERASE(alloca_op[ai]);
-
     // ---- Trivial-phi elimination + materialisation (skipped if no phis) ----
     size_t *surv_off = NULL;
     size_t *surv_pid = NULL;
@@ -646,9 +642,12 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region) {
         }
     }
 
-    // ---- Erase the now-dead load / store / alloca ops (reverse order) ------
+    // ---- Erase the now-dead load / store ops first (reverse order), then
+    //      the promotable allocas (whose uses are now gone). ----------------
     for (size_t i = erase_n; i-- > 0; )
         MLIR_EraseOp(ctx, erase[i]);
+    for (size_t ai = na; ai-- > 0; )
+        if (m.promotable[ai]) MLIR_EraseOp(ctx, alloca_op[ai]);
 
     #undef L2R_ERASE
     free(sobuf);
