@@ -284,8 +284,10 @@ typedef struct {
     uint32_t      frame;     // total frame size (16-aligned)
     uint32_t      edge_tmp;  // rbp offset base of the parallel-move temp area
     // register allocation (shared mlir_regalloc): value -> physical register.
-    // Values absent from `rm` live in their frame slot.
+    // Values absent from `rm` live in `spill` (shared global-alloc slots) or `slots`.
     SlotMap       rm;
+    SlotMap       spill;
+    bool          has_spill;
     uint32_t      used_mask; // callee-saved pool regs the allocator used
     int32_t       cs_base;   // rbp offset base of the callee-saved spill area
     int           n_cs;      // # of callee-saved regs to save/restore
@@ -311,9 +313,9 @@ static RegTarget x64_regtarget(void) {
     return T;
 }
 // True (with *reg set) if value `v` has a physical-register home.
-static bool val_in_reg(FnCtx *F, MLIR_ValueHandle v, uint8_t *reg) {
+static inline bool val_in_reg(FnCtx *F, MLIR_ValueHandle v, uint8_t *reg) {
     int32_t r;
-    if (sm_get(&F->rm, v, &r)) { *reg = (uint8_t)r; return true; }
+    if (sm_get_fast(&F->rm, v, &r)) { *reg = (uint8_t)r; return true; }
     return false;
 }
 
@@ -551,6 +553,10 @@ static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
     uint8_t rH;
     if (val_in_reg(F, v, &rH)) { mov_rr(F, reg, rH, val_w(ctx, v)); return; }
     int32_t slot;
+    if (F->has_spill && sm_get_fast(&F->spill, v, &slot)) {
+        load_rbp(F, reg, (slot + 1) * 8, val_w(ctx, v));
+        return;
+    }
     if (!vmap_get(&F->slots, v, &slot)) { fail(F, "value with no slot", (string){0}); return; }
     load_rbp(F, reg, slot, val_w(ctx, v));
 }
@@ -558,6 +564,10 @@ static void store_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
     uint8_t rH;
     if (val_in_reg(F, v, &rH)) { mov_rr(F, rH, reg, val_w(F->ctx, v)); return; }
     int32_t slot;
+    if (F->has_spill && sm_get_fast(&F->spill, v, &slot)) {
+        store_rbp(F, (slot + 1) * 8, reg, val_w(F->ctx, v));
+        return;
+    }
     if (!vmap_get(&F->slots, v, &slot)) { fail(F, "result with no slot", (string){0}); return; }
     store_rbp(F, slot, reg, val_w(F->ctx, v));
 }

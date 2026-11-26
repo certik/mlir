@@ -827,8 +827,7 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
 
 // emit a terminator (also collects callee refs via lower_op for calls? no -
 // terminators here are br/cond_br/return/unreachable only)
-static void lower_term(FnCtx *F, MLIR_OpHandle op) {
-    MLIR_RegionHandle reg = MLIR_GetBlockParentRegion(F->ctx, MLIR_GetOpParentBlock(F->ctx, op));
+static void lower_term(FnCtx *F, MLIR_RegionHandle reg, MLIR_OpHandle op) {
     switch (MLIR_GetOpType(F->ctx, op)) {
     case OP_TYPE_LLVM_RETURN: case OP_TYPE_FUNC_RETURN: {
         if (MLIR_GetOpNumOperands(F->ctx, op) >= 1)
@@ -1003,38 +1002,75 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     //     A slot per SSA value made the frame of a large function tens of KiB,
     //     which overflowed the 8 MiB stack in recursive code (the wasm lifter's
     //     lower_op <-> lower_region) of the self-hosted ELF compiler. ---
-    size_t want = 0;
+    int32_t cur = nslots * 8;
+    uint32_t max_edge = 0;
     if (used_global) {
-        want = sm_spill.n + 32;
+        F.spill = sm_spill;
+        F.has_spill = (sm_spill.n > 0);
+        // Only alloca regions (and unhomed entry args if TINYC_NO_PARAM_HOME) go in F.slots.
+        vmap_init(&F.slots, 16);
+        if (nb > 0) {
+            MLIR_BlockHandle e0 = MLIR_GetRegionBlock(ctx, reg, 0);
+            size_t na = MLIR_GetBlockNumArgs(ctx, e0);
+            for (size_t a = 0; a < na; a++) {
+                MLIR_ValueHandle av = MLIR_GetBlockArg(ctx, e0, a);
+                int32_t dummy;
+                if (!sm_get_fast(&F.rm, av, &dummy) &&
+                    (!F.has_spill || !sm_get_fast(&F.spill, av, &dummy))) {
+                    cur += 8;
+                    vmap_put(&F.slots, av, cur);
+                }
+            }
+        }
+        for (size_t b = 0; b < nb; b++) {
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t no = MLIR_GetBlockNumOps(ctx, bk);
+            for (size_t i = 0; i < no; i++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+                if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_ALLOCA) {
+                    unsigned rb = alloca_bytes(ctx, op);
+                    cur += (int32_t)rb;
+                    vmap_put(&F.slots, x64_region_key(op), cur);
+                }
+            }
+            if (nb > 1 && no > 0) {
+                MLIR_OpHandle t = MLIR_GetBlockOp(ctx, bk, no - 1);
+                size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
+                for (size_t s = 0; s < ns; s++) {
+                    uint32_t c = (uint32_t)MLIR_GetOpNumSuccessorOperands(ctx, t, s);
+                    if (c > max_edge) max_edge = c;
+                }
+            }
+        }
     } else {
+        size_t want = 0;
         for (size_t b = 0; b < nb; b++) {
             MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
             want += MLIR_GetBlockNumArgs(ctx, bk) + MLIR_GetBlockNumOps(ctx, bk) + 4;
         }
-    }
-    vmap_init(&F.slots, want ? want : 8);
-    int32_t cur = nslots * 8;
-    uint32_t max_edge = 0;
-    for (size_t b = 0; b < nb; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
-        size_t na = MLIR_GetBlockNumArgs(ctx, bk);
-        for (size_t a = 0; a < na; a++) x64_assign_slot(&F, &sm_spill, MLIR_GetBlockArg(ctx, bk, a), &cur);
-        size_t no = MLIR_GetBlockNumOps(ctx, bk);
-        for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
-            if (MLIR_GetOpNumRegions(ctx, op) > 0) { fail(&F, "nested region (expected flat cf)", MLIR_GetOpTypeName(ctx, MLIR_GetOpType(ctx, op))); }
-            if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_ALLOCA) {
-                unsigned rb = alloca_bytes(ctx, op);
-                cur += (int32_t)rb;
-                vmap_put(&F.slots, x64_region_key(op), cur);  // region
-            }
-            if (MLIR_GetOpNumResults(ctx, op) == 1 && !x64_op_rematerialized(ctx, op))
-                x64_assign_slot(&F, &sm_spill, MLIR_GetOpResult(ctx, op, 0), &cur);
-            MLIR_OpHandle t = op;
-            size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
-            for (size_t s = 0; s < ns; s++) {
-                uint32_t c = (uint32_t)MLIR_GetOpNumSuccessorOperands(ctx, t, s);
-                if (c > max_edge) max_edge = c;
+        vmap_init(&F.slots, want ? want : 8);
+        for (size_t b = 0; b < nb; b++) {
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t na = MLIR_GetBlockNumArgs(ctx, bk);
+            for (size_t a = 0; a < na; a++) x64_assign_slot(&F, &sm_spill, MLIR_GetBlockArg(ctx, bk, a), &cur);
+            size_t no = MLIR_GetBlockNumOps(ctx, bk);
+            for (size_t i = 0; i < no; i++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+                if (MLIR_GetOpNumRegions(ctx, op) > 0) { fail(&F, "nested region (expected flat cf)", MLIR_GetOpTypeName(ctx, MLIR_GetOpType(ctx, op))); }
+                if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_ALLOCA) {
+                    unsigned rb = alloca_bytes(ctx, op);
+                    cur += (int32_t)rb;
+                    vmap_put(&F.slots, x64_region_key(op), cur);  // region
+                }
+                if (MLIR_GetOpNumResults(ctx, op) == 1 && !x64_op_rematerialized(ctx, op))
+                    x64_assign_slot(&F, &sm_spill, MLIR_GetOpResult(ctx, op, 0), &cur);
+                if (i + 1 == no) {
+                    size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
+                    for (size_t s = 0; s < ns; s++) {
+                        uint32_t c = (uint32_t)MLIR_GetOpNumSuccessorOperands(ctx, op, s);
+                        if (c > max_edge) max_edge = c;
+                    }
+                }
             }
         }
     }
@@ -1077,7 +1113,7 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
         size_t no = MLIR_GetBlockNumOps(ctx, bk);
         for (size_t i = 0; i < no && F.ok; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
-            if (i + 1 == no) lower_term(&F, op);
+            if (i + 1 == no) lower_term(&F, reg, op);
             else             lower_op(&F, op, refs);
         }
     }

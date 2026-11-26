@@ -183,7 +183,9 @@ static Expr *new_expr(P *p, ExprKind k, int line) {
     e->kind = k;
     e->line = line;
     if (k == EX_CALL || k == EX_COMPOUND || k == EX_GENERIC) {
-        VecExprPtr_reserve(p->arena, &e->args, 4);
+        e->extra = arena_new(p->arena, ExprExtra);
+        *e->extra = (ExprExtra){0};
+        VecExprPtr_reserve(p->arena, &e->extra->args, 4);
     }
     return e;
 }
@@ -192,16 +194,20 @@ static Stmt *new_stmt(P *p, StmtKind k, int line) {
     *s = (Stmt){0};
     s->kind = k;
     s->line = line;
-    if (k == ST_IF) {
+    if (k == ST_IF || k == ST_WHILE || k == ST_DO_WHILE ||
+        k == ST_FOR || k == ST_BLOCK || k == ST_SWITCH) {
         VecStmtPtr_reserve(p->arena, &s->body, 4);
-        VecStmtPtr_reserve(p->arena, &s->else_body, 4);
-    } else if (k == ST_WHILE || k == ST_DO_WHILE) {
-        VecStmtPtr_reserve(p->arena, &s->body, 4);
+    }
+    if (k == ST_DECL) {
+        s->decl_type = arena_new(p->arena, Type);
+        *s->decl_type = (Type){0};
     } else if (k == ST_FOR) {
-        VecStmtPtr_reserve(p->arena, &s->body, 4);
-        VecExprPtr_reserve(p->arena, &s->for_steps, 2);
-    } else if (k == ST_BLOCK || k == ST_SWITCH) {
-        VecStmtPtr_reserve(p->arena, &s->body, 4);
+        s->extra = arena_new(p->arena, StmtExtra);
+        *s->extra = (StmtExtra){0};
+        VecExprPtr_reserve(p->arena, &s->extra->for_steps, 2);
+    } else if (k == ST_SWITCH) {
+        s->extra = arena_new(p->arena, StmtExtra);
+        *s->extra = (StmtExtra){0};
     }
     return s;
 }
@@ -412,7 +418,7 @@ static Expr *parse_aggregate_init(P *p, Type decl_type) {
             } else {
                 v = parse_expr(p);
             }
-            VecExprPtr_push_back(p->arena, &e->args, v);
+            VecExprPtr_push_back(p->arena, &e->extra->args, v);
             if (nn == cap) {
                 size_t ncap = cap ? cap * 2 : 4;
                 string *nb = arena_new_array(p->arena, string, ncap);
@@ -430,8 +436,6 @@ static Expr *parse_aggregate_init(P *p, Type decl_type) {
     }
     expect(p, TC_TK_RBRACE, str_lit("expected '}' in initializer"));
     if (any_designated) {
-        e->extra = arena_new(p->arena, ExprExtra);
-        *e->extra = (ExprExtra){0};
         e->extra->compound_field_names = names;
     }
     return e;
@@ -513,7 +517,7 @@ static Expr *parse_postfix(P *p, Expr *base) {
             int line = cur(p).line;
             p->i++;
             Expr *one = new_expr(p, EX_INT, line);
-            one->int_value = 1;
+            one->val.int_value = 1;
             Expr *bin = new_expr(p, EX_BIN, line);
             bin->op = op; bin->lhs = base; bin->rhs = one;
             Expr *as = new_expr(p, EX_ASSIGN, line);
@@ -536,7 +540,7 @@ static Expr *parse_postfix(P *p, Expr *base) {
             if (cur(p).kind != TC_TK_RPAREN) {
                 for (;;) {
                     Expr *a = parse_expr(p);
-                    VecExprPtr_push_back(p->arena, &e->args, a);
+                    VecExprPtr_push_back(p->arena, &e->extra->args, a);
                     if (!accept(p, TC_TK_COMMA)) break;
                 }
             }
@@ -585,7 +589,7 @@ static Expr *parse_primary(P *p) {
     if (t.kind == TC_TK_INT_LIT) {
         p->i++;
         Expr *e = new_expr(p, EX_INT, t.line);
-        e->int_value = t.d.int_value;
+        e->val.int_value = t.d.int_value;
         e->is_i64 = (t.flags & TC_TOK_F_I64) != 0;
         e->is_long_long = (t.flags & TC_TOK_F_LONG_LONG) != 0;
         e->is_unsigned = ((t.flags & TC_TOK_F_UNSIGNED) != 0);
@@ -595,14 +599,14 @@ static Expr *parse_primary(P *p) {
         // value above INT_MAX here is hex/octal or u-suffixed: `unsigned long`.
         if (e->is_i64 && !e->is_long_long && p->target_wasm32) {
             e->is_i64 = false;
-            if ((uint64_t)e->int_value > 0x7FFFFFFFull) e->is_unsigned = true;
+            if ((uint64_t)e->val.int_value > 0x7FFFFFFFull) e->is_unsigned = true;
         }
         return e;
     }
     if (t.kind == TC_TK_FLOAT_LIT) {
         p->i++;
         Expr *e = new_expr(p, EX_FLOAT, t.line);
-        e->float_value = t.d.float_value;
+        e->val.float_value = t.d.float_value;
         e->is_f64 = (t.flags & TC_TOK_F_F64) != 0;
         return e;
     }
@@ -695,7 +699,7 @@ static Expr *parse_primary(P *p) {
                             any_designated = true;
                         }
                         Expr *v = parse_expr(p);
-                        VecExprPtr_push_back(p->arena, &e->args, v);
+                        VecExprPtr_push_back(p->arena, &e->extra->args, v);
                         if (nn == cap) {
                             size_t ncap = cap ? cap * 2 : 4;
                             string *nb = arena_new_array(p->arena, string, ncap);
@@ -714,8 +718,6 @@ static Expr *parse_primary(P *p) {
                 expect(p, TC_TK_RBRACE,
                        str_lit("expected '}' in compound literal"));
                 if (any_designated) {
-                    e->extra = arena_new(p->arena, ExprExtra);
-                    *e->extra = (ExprExtra){0};
                     e->extra->compound_field_names = names;
                 }
                 return e;
@@ -759,7 +761,7 @@ static Expr *parse_primary(P *p) {
         p->i++;
         Expr *target = parse_primary(p);
         Expr *one = new_expr(p, EX_INT, t.line);
-        one->int_value = 1;
+        one->val.int_value = 1;
         Expr *bin = new_expr(p, EX_BIN, t.line);
         bin->op = op; bin->lhs = target; bin->rhs = one;
         Expr *as = new_expr(p, EX_ASSIGN, t.line);
@@ -784,11 +786,9 @@ static Expr *parse_primary(P *p) {
         expect(p, TC_TK_LPAREN, str_lit("expected '(' after _Generic"));
         Expr *ge = new_expr(p, EX_GENERIC, t.line);
         ge->lhs = parse_expr(p);
-        ge->extra = arena_new(p->arena, ExprExtra);
-        *ge->extra = (ExprExtra){0};
         ge->extra->generic_default_index = -1;
         // Collect entries. Types go into a parallel array; result exprs
-        // go into ge->args (already reserved by new_expr).
+        // go into ge->extra->args (already reserved by new_expr).
         int cap = 0;
         Type *types = NULL;
         int n = 0;
@@ -813,7 +813,7 @@ static Expr *parse_primary(P *p) {
                 cap = ncap;
             }
             types[n] = ty;
-            VecExprPtr_push_back(p->arena, &ge->args, val);
+            VecExprPtr_push_back(p->arena, &ge->extra->args, val);
             if (is_default) ge->extra->generic_default_index = n;
             n++;
             (void)line;
@@ -827,8 +827,8 @@ static Expr *parse_primary(P *p) {
         if (cur(p).kind == TC_TK_LPAREN) {
             // Built-in `va_arg(ap, T)`: second argument is a TYPE-NAME, not
             // an expression. Lower to EX_VA_ARG.
-            if (str_eq(tc_tok_text(t), str_lit("va_arg")) ||
-                str_eq(tc_tok_text(t), str_lit("__builtin_va_arg"))) {
+            if ((t.d.size == 6 && t.text_str[0] == 'v' && str_eq(tc_tok_text(t), str_lit("va_arg"))) ||
+                (t.d.size == 16 && t.text_str[0] == '_' && str_eq(tc_tok_text(t), str_lit("__builtin_va_arg")))) {
                 p->i++;  // consume '('
                 Expr *e = new_expr(p, EX_VA_ARG, t.line);
                 e->lhs = parse_expr(p);
@@ -849,7 +849,7 @@ static Expr *parse_primary(P *p) {
             if (cur(p).kind != TC_TK_RPAREN) {
                 for (;;) {
                     Expr *a = parse_expr(p);
-                    VecExprPtr_push_back(p->arena, &e->args, a);
+                    VecExprPtr_push_back(p->arena, &e->extra->args, a);
                     if (!accept(p, TC_TK_COMMA)) break;
                 }
             }
@@ -1243,7 +1243,7 @@ static void promote_static_local(P *p, Stmt *ds, int line) {
     if (ds->kind != ST_DECL) return;
     ds->decl_is_static = true;
     if (p->cur_func_name.size == 0) return;  // file-scope: handled elsewhere
-    Type ty = ds->decl_type;
+    Type ty = *ds->decl_type;
     bool is_scalar = (ty.kind == TY_I32 || ty.kind == TY_I64 ||
                       ty.kind == TY_F32 || ty.kind == TY_F64 ||
                       ty.kind == TY_PTR_CHAR || ty.kind == TY_PTR_I32 ||
@@ -1260,12 +1260,12 @@ static void promote_static_local(P *p, Stmt *ds, int line) {
     int sid = ++p->static_local_counter;
     g.name = format(p->arena,
                     str_lit("__static.{}.{}.{}"),
-                    p->cur_func_name, ds->decl_name, (int64_t)sid);
+                    p->cur_func_name, ds->name, (int64_t)sid);
     g.type = ty;
     g.line = line;
     g.is_static = true;
-    if (ds->decl_init) {
-        Expr *e = ds->decl_init;
+    if (ds->expr) {
+        Expr *e = ds->expr;
         // Unwrap `(T)0` / `(T*)0` / `(void*)0` casts written by NULL-like
         // macros around an integer-zero literal so the result is treated
         // as a null pointer initializer.
@@ -1277,10 +1277,10 @@ static void promote_static_local(P *p, Stmt *ds, int line) {
             g.init_int = 0;
         } else if (e && e->kind == EX_INT) {
             g.has_init = true;
-            g.init_int = e->int_value;
+            g.init_int = e->val.int_value;
         } else if (e && e->kind == EX_FLOAT) {
             g.has_init = true;
-            g.init_float = e->float_value;
+            g.init_float = e->val.float_value;
         } else if (e && e->kind == EX_STR && ty.kind == TY_PTR_CHAR) {
             g.has_init = true;
             g.init_str = e->name;
@@ -1291,8 +1291,12 @@ static void promote_static_local(P *p, Stmt *ds, int line) {
         }
     }
     VecGlobal_push_back(p->arena, &p->prog->globals, g);
-    ds->decl_static_global_sym = g.name;
-    ds->decl_init = NULL;  // emitter must not re-emit the init at the use site
+    if (!ds->extra) {
+        ds->extra = arena_new(p->arena, StmtExtra);
+        *ds->extra = (StmtExtra){0};
+    }
+    ds->extra->decl_static_global_sym = g.name;
+    ds->expr = NULL;  // emitter must not re-emit the init at the use site
 }
 
 // Walk a parse_decl result (single ST_DECL or a no-scope ST_BLOCK of
@@ -1354,14 +1358,14 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     // type (a pointer, a struct, a typedef name, ...).
     if (decl_is_fnptr(p)) {
         Stmt *s = new_stmt(p, ST_DECL, line);
-        parse_sig_type(p, &s->decl_type);
+        parse_sig_type(p, s->decl_type);
         string nm = (string){0};
-        try_parse_fnptr_suffix(p, &s->decl_type, &nm);
+        try_parse_fnptr_suffix(p, s->decl_type, &nm);
         if (nm.size == 0) {
             perror_at(p, line, str_lit("function-pointer declaration requires a name"));
         }
-        s->decl_name = nm;
-        if (accept(p, TC_TK_ASSIGN)) s->decl_init = parse_expr(p);
+        s->name = nm;
+        if (accept(p, TC_TK_ASSIGN)) s->expr = parse_expr(p);
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
         if (saw_static) promote_static_locals(p, s, line);
         return s;
@@ -1373,37 +1377,37 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         TcTok name = cur(p);
         expect(p, TC_TK_IDENT, str_lit("expected identifier"));
         Stmt *s = new_stmt(p, ST_DECL, line);
-        s->decl_name = tc_tok_text(name);
-        s->decl_type = ty;
+        s->name = tc_tok_text(name);
+        *s->decl_type = ty;
         if (accept(p, TC_TK_LBRACK)) {
             int64_t alen = 0; Expr *aexpr = NULL;
             parse_array_len_bracket(p, &alen, &aexpr);
-            if (s->decl_type.kind == TY_STRUCT) {
-                s->decl_type.kind = TY_ARRAY_STRUCT;
-                s->decl_type.array_len = alen;
-                s->decl_type.array_len_expr = aexpr;
-            } else if (kind_is_ptr(s->decl_type.kind)) {
+            if (s->decl_type->kind == TY_STRUCT) {
+                s->decl_type->kind = TY_ARRAY_STRUCT;
+                s->decl_type->array_len = alen;
+                s->decl_type->array_len_expr = aexpr;
+            } else if (kind_is_ptr(s->decl_type->kind)) {
                 // T *arr[N] (typedef'd): an array of pointers.
-                make_ptr_array(p, &s->decl_type, alen, aexpr);
+                make_ptr_array(p, s->decl_type, alen, aexpr);
             } else {
-                bool is_i64 = (s->decl_type.kind == TY_I64);
-                if (s->decl_type.kind != TY_I32 && s->decl_type.kind != TY_I64) {
+                bool is_i64 = (s->decl_type->kind == TY_I64);
+                if (s->decl_type->kind != TY_I32 && s->decl_type->kind != TY_I64) {
                     perror_at(p, line, str_lit("only int[N] / long long[N] arrays are supported"));
                 }
-                s->decl_type.kind = TY_ARRAY_I32;
-                s->decl_type.array_elem_is_i64 = is_i64;
-                s->decl_type.array_len = alen;
-                s->decl_type.array_len_expr = aexpr;
+                s->decl_type->kind = TY_ARRAY_I32;
+                s->decl_type->array_elem_is_i64 = is_i64;
+                s->decl_type->array_len = alen;
+                s->decl_type->array_len_expr = aexpr;
                 if (accept(p, TC_TK_LBRACK)) {
                     int64_t alen2 = 0; Expr *aexpr2 = NULL;
                     parse_array_len_bracket(p, &alen2, &aexpr2);
-                    s->decl_type.array_len2 = alen2;
+                    s->decl_type->array_len2 = alen2;
                     if (aexpr2) perror_at(p, line, str_lit("2D array second dim must be a literal"));
                 }
             }
         }
         if (accept(p, TC_TK_ASSIGN)) {
-            { Expr *agg = parse_aggregate_init(p, s->decl_type); s->decl_init = agg ? agg : parse_expr(p); }
+            { Expr *agg = parse_aggregate_init(p, *s->decl_type); s->expr = agg ? agg : parse_expr(p); }
         }
         // Comma-separated additional declarators sharing the same typedef'd type.
         if (cur(p).kind == TC_TK_COMMA) {
@@ -1420,8 +1424,8 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 TcTok dname = cur(p);
                 expect(p, TC_TK_IDENT, str_lit("expected identifier"));
                 Stmt *ds = new_stmt(p, ST_DECL, dname.line);
-                ds->decl_name = tc_tok_text(dname);
-                ds->decl_type = ty;
+                ds->name = tc_tok_text(dname);
+                *ds->decl_type = ty;
                 // Optional `[N]` (or `[N][M]`) suffix on this declarator
                 // — promote the per-declarator type into the matching
                 // array kind, mirroring the first-declarator branch
@@ -1429,32 +1433,32 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 if (accept(p, TC_TK_LBRACK)) {
                     int64_t alen = 0; Expr *aexpr = NULL;
                     parse_array_len_bracket(p, &alen, &aexpr);
-                    if (ds->decl_type.kind == TY_STRUCT) {
-                        ds->decl_type.kind = TY_ARRAY_STRUCT;
-                        ds->decl_type.array_len = alen;
-                        ds->decl_type.array_len_expr = aexpr;
-                    } else if (kind_is_ptr(ds->decl_type.kind)) {
-                        make_ptr_array(p, &ds->decl_type, alen, aexpr);
+                    if (ds->decl_type->kind == TY_STRUCT) {
+                        ds->decl_type->kind = TY_ARRAY_STRUCT;
+                        ds->decl_type->array_len = alen;
+                        ds->decl_type->array_len_expr = aexpr;
+                    } else if (kind_is_ptr(ds->decl_type->kind)) {
+                        make_ptr_array(p, ds->decl_type, alen, aexpr);
                     } else {
-                        bool is_i64 = (ds->decl_type.kind == TY_I64);
-                        if (ds->decl_type.kind != TY_I32 && ds->decl_type.kind != TY_I64) {
+                        bool is_i64 = (ds->decl_type->kind == TY_I64);
+                        if (ds->decl_type->kind != TY_I32 && ds->decl_type->kind != TY_I64) {
                             perror_at(p, line, str_lit("only int[N] / long long[N] arrays are supported"));
                         }
-                        ds->decl_type.kind = TY_ARRAY_I32;
-                        ds->decl_type.array_elem_is_i64 = is_i64;
-                        ds->decl_type.array_len = alen;
-                        ds->decl_type.array_len_expr = aexpr;
+                        ds->decl_type->kind = TY_ARRAY_I32;
+                        ds->decl_type->array_elem_is_i64 = is_i64;
+                        ds->decl_type->array_len = alen;
+                        ds->decl_type->array_len_expr = aexpr;
                         if (accept(p, TC_TK_LBRACK)) {
                             int64_t alen2 = 0; Expr *aexpr2 = NULL;
                             parse_array_len_bracket(p, &alen2, &aexpr2);
-                            ds->decl_type.array_len2 = alen2;
+                            ds->decl_type->array_len2 = alen2;
                             if (aexpr2) perror_at(p, line, str_lit("2D array second dim must be a literal"));
                         }
                     }
                 }
                 if (accept(p, TC_TK_ASSIGN)) {
-                    Expr *agg = parse_aggregate_init(p, ds->decl_type);
-                    ds->decl_init = agg ? agg : parse_expr(p);
+                    Expr *agg = parse_aggregate_init(p, *ds->decl_type);
+                    ds->expr = agg ? agg : parse_expr(p);
                 }
                 VecStmtPtr_push_back(p->arena, &blk->body, ds);
             }
@@ -1516,8 +1520,8 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         TcTok name = cur(p);
         expect(p, TC_TK_IDENT, str_lit("expected variable name"));
         Stmt *s = new_stmt(p, ST_DECL, line);
-        s->decl_name = tc_tok_text(name);
-        s->decl_type.struct_name = tc_tok_text(sn);
+        s->name = tc_tok_text(name);
+        s->decl_type->struct_name = tc_tok_text(sn);
         if (accept(p, TC_TK_LBRACK)) {
             if (is_ptr_ptr) {
                 perror_at(p, line, str_lit("array of struct ** is not supported"));
@@ -1526,12 +1530,12 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             parse_array_len_bracket(p, &alen, &aexpr);
             if (is_ptr) {
                 // `struct S *name[N]`: an array of struct pointers.
-                s->decl_type.kind = TY_PTR_STRUCT;
-                make_ptr_array(p, &s->decl_type, alen, aexpr);
+                s->decl_type->kind = TY_PTR_STRUCT;
+                make_ptr_array(p, s->decl_type, alen, aexpr);
             } else {
-                s->decl_type.kind = TY_ARRAY_STRUCT;
-                s->decl_type.array_len = alen;
-                s->decl_type.array_len_expr = aexpr;
+                s->decl_type->kind = TY_ARRAY_STRUCT;
+                s->decl_type->array_len = alen;
+                s->decl_type->array_len_expr = aexpr;
             }
         } else if (is_ptr_ptr) {
             // struct Foo **var: TY_PTR_PTR(pointee=TY_PTR_STRUCT).
@@ -1539,21 +1543,21 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             *inner = (Type){0};
             inner->kind = TY_PTR_STRUCT;
             inner->struct_name = tc_tok_text(sn);
-            s->decl_type.kind = TY_PTR_PTR;
-            s->decl_type.pointee = inner;
-            s->decl_type.struct_name = tc_tok_text(sn);
+            s->decl_type->kind = TY_PTR_PTR;
+            s->decl_type->pointee = inner;
+            s->decl_type->struct_name = tc_tok_text(sn);
         } else {
-            s->decl_type.kind = is_ptr ? TY_PTR_STRUCT : TY_STRUCT;
+            s->decl_type->kind = is_ptr ? TY_PTR_STRUCT : TY_STRUCT;
         }
         if (accept(p, TC_TK_ASSIGN)) {
-            if (s->decl_type.kind != TY_PTR_STRUCT &&
-                s->decl_type.kind != TY_PTR_PTR &&
-                s->decl_type.kind != TY_STRUCT &&
-                s->decl_type.kind != TY_ARRAY_STRUCT &&
-                s->decl_type.kind != TY_ARRAY_PTR_STRUCT) {
+            if (s->decl_type->kind != TY_PTR_STRUCT &&
+                s->decl_type->kind != TY_PTR_PTR &&
+                s->decl_type->kind != TY_STRUCT &&
+                s->decl_type->kind != TY_ARRAY_STRUCT &&
+                s->decl_type->kind != TY_ARRAY_PTR_STRUCT) {
                 perror_at(p, line, str_lit("struct/array initializers are not supported"));
             }
-            { Expr *agg = parse_aggregate_init(p, s->decl_type); s->decl_init = agg ? agg : parse_expr(p); }
+            { Expr *agg = parse_aggregate_init(p, *s->decl_type); s->expr = agg ? agg : parse_expr(p); }
         }
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
         if (saw_static) promote_static_locals(p, s, line);
@@ -1566,8 +1570,8 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         TcTok name = cur(p);
         expect(p, TC_TK_IDENT, str_lit("expected identifier"));
         Stmt *s = new_stmt(p, ST_DECL, line);
-        s->decl_name = tc_tok_text(name);
-        s->decl_type.kind = TY_VA_LIST;
+        s->name = tc_tok_text(name);
+        s->decl_type->kind = TY_VA_LIST;
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
         if (saw_static) promote_static_locals(p, s, line);
         return s;
@@ -1589,41 +1593,41 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     TcTok name = cur(p);
     expect(p, TC_TK_IDENT, str_lit("expected identifier"));
     Stmt *s = new_stmt(p, ST_DECL, line);
-    s->decl_name = tc_tok_text(name);
-    s->decl_type.kind = base;
-    if (is_long) s->decl_type.int_bits = 64;
+    s->name = tc_tok_text(name);
+    s->decl_type->kind = base;
+    if (is_long) s->decl_type->int_bits = 64;
     // int_unsigned is meaningful for both value types AND pointer types
     // (it controls zero- vs sign-extension on byte loads through
     // `unsigned char *` — see load_lvalue in emit.c). Setting it on
     // pointer decls preserves the `unsigned char *p;` distinction.
-    s->decl_type.int_unsigned = is_unsigned;
+    s->decl_type->int_unsigned = is_unsigned;
     // char / short / bool width; it also selects the 1- / 2-byte storage.
-    s->decl_type.int_bits = int_bits;
-    s->decl_type.is_bool = is_bool;
+    s->decl_type->int_bits = int_bits;
+    s->decl_type->is_bool = is_bool;
     if (is_ptr) {
-        if (was_char) s->decl_type.kind = TY_PTR_CHAR;
-        else if (base == TY_I32) s->decl_type.kind = TY_PTR_I32;
+        if (was_char) s->decl_type->kind = TY_PTR_CHAR;
+        else if (base == TY_I32) s->decl_type->kind = TY_PTR_I32;
         else if (base == TY_I64) {
-            s->decl_type.kind = TY_PTR_I32;
-            s->decl_type.ptr_is_i64 = true;
+            s->decl_type->kind = TY_PTR_I32;
+            s->decl_type->ptr_is_i64 = true;
         }
         else if (base == TY_F32) {
-            s->decl_type.kind = TY_PTR_I32;
-            s->decl_type.ptr_is_f32 = true;
+            s->decl_type->kind = TY_PTR_I32;
+            s->decl_type->ptr_is_f32 = true;
         }
         else if (base == TY_F64) {
-            s->decl_type.kind = TY_PTR_I32;
-            s->decl_type.ptr_is_f64 = true;
+            s->decl_type->kind = TY_PTR_I32;
+            s->decl_type->ptr_is_f64 = true;
         }
-        else if (base == TY_VOID) s->decl_type.kind = TY_PTR_VOID;
+        else if (base == TY_VOID) s->decl_type->kind = TY_PTR_VOID;
         else perror_at(p, line, str_lit("only int*/char*/void* pointers are supported"));
         if (is_ptr_ptr) {
             // Wrap into TY_PTR_PTR carrying the inner single-level pointer.
             Type *inner = arena_new(p->arena, Type);
-            *inner = s->decl_type;
-            s->decl_type = (Type){0};
-            s->decl_type.kind = TY_PTR_PTR;
-            s->decl_type.pointee = inner;
+            *inner = *s->decl_type;
+            *s->decl_type = (Type){0};
+            s->decl_type->kind = TY_PTR_PTR;
+            s->decl_type->pointee = inner;
         }
     } else if (base == TY_VOID) {
         perror_at(p, line, str_lit("'void' is not a valid variable type (did you mean 'void*'?)"));
@@ -1634,29 +1638,29 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         parse_array_len_bracket(p, &alen, &aexpr);
         if (is_ptr) {
             // `T *name[N]`: an array of pointers.
-            make_ptr_array(p, &s->decl_type, alen, aexpr);
+            make_ptr_array(p, s->decl_type, alen, aexpr);
         } else {
-            s->decl_type.kind = TY_ARRAY_I32;
-            s->decl_type.array_len = alen;
-            s->decl_type.array_len_expr = aexpr;
+            s->decl_type->kind = TY_ARRAY_I32;
+            s->decl_type->array_len = alen;
+            s->decl_type->array_len_expr = aexpr;
         }
         if (accept(p, TC_TK_LBRACK)) {
             int64_t alen2 = 0; Expr *aexpr2 = NULL;
             parse_array_len_bracket(p, &alen2, &aexpr2);
-            s->decl_type.array_len2 = alen2;
+            s->decl_type->array_len2 = alen2;
             if (aexpr2) perror_at(p, line, str_lit("2D array second dim must be a literal"));
             if (is_ptr) perror_at(p, line, str_lit("2D arrays of pointers are not supported"));
         }
     }
     if (accept(p, TC_TK_ASSIGN)) {
-        { Expr *agg = parse_aggregate_init(p, s->decl_type); s->decl_init = agg ? agg : parse_expr(p); }
+        { Expr *agg = parse_aggregate_init(p, *s->decl_type); s->expr = agg ? agg : parse_expr(p); }
         // `char arr[] = "string"` — infer array length from the string
         // literal (size includes the trailing NUL set by the lexer).
-        if (s->decl_init && s->decl_init->kind == EX_STR &&
-            s->decl_type.kind == TY_ARRAY_I32 &&
-            s->decl_type.int_bits == 8 &&
-            s->decl_type.array_len == 0) {
-            s->decl_type.array_len = (int64_t)s->decl_init->name.size;
+        if (s->expr && s->expr->kind == EX_STR &&
+            s->decl_type->kind == TY_ARRAY_I32 &&
+            s->decl_type->int_bits == 8 &&
+            s->decl_type->array_len == 0) {
+            s->decl_type->array_len = (int64_t)s->expr->name.size;
         }
     }
     // Comma-separated additional declarators sharing the same base type:
@@ -1674,26 +1678,26 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             TcTok dname = cur(p);
             expect(p, TC_TK_IDENT, str_lit("expected identifier"));
             Stmt *ds = new_stmt(p, ST_DECL, dname.line);
-            ds->decl_name = tc_tok_text(dname);
-            ds->decl_type.kind = base;
-            ds->decl_type.int_unsigned = is_unsigned;
-            ds->decl_type.int_bits = int_bits;
-            ds->decl_type.is_bool = is_bool;
+            ds->name = tc_tok_text(dname);
+            ds->decl_type->kind = base;
+            ds->decl_type->int_unsigned = is_unsigned;
+            ds->decl_type->int_bits = int_bits;
+            ds->decl_type->is_bool = is_bool;
             if (dis_ptr) {
-                if (was_char) ds->decl_type.kind = TY_PTR_CHAR;
-                else if (base == TY_I32) ds->decl_type.kind = TY_PTR_I32;
+                if (was_char) ds->decl_type->kind = TY_PTR_CHAR;
+                else if (base == TY_I32) ds->decl_type->kind = TY_PTR_I32;
                 else if (base == TY_I64) {
-                    ds->decl_type.kind = TY_PTR_I32;
-                    ds->decl_type.ptr_is_i64 = true;
+                    ds->decl_type->kind = TY_PTR_I32;
+                    ds->decl_type->ptr_is_i64 = true;
                 }
-                else if (base == TY_VOID) ds->decl_type.kind = TY_PTR_VOID;
+                else if (base == TY_VOID) ds->decl_type->kind = TY_PTR_VOID;
                 else perror_at(p, dname.line, str_lit("only int*/char*/void* pointers are supported"));
                 if (dis_pp) {
                     Type *inner = arena_new(p->arena, Type);
-                    *inner = ds->decl_type;
-                    ds->decl_type = (Type){0};
-                    ds->decl_type.kind = TY_PTR_PTR;
-                    ds->decl_type.pointee = inner;
+                    *inner = *ds->decl_type;
+                    *ds->decl_type = (Type){0};
+                    ds->decl_type->kind = TY_PTR_PTR;
+                    ds->decl_type->pointee = inner;
                 }
             }
             if (accept(p, TC_TK_LBRACK)) {
@@ -1701,21 +1705,21 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 int64_t alen = 0; Expr *aexpr = NULL;
                 parse_array_len_bracket(p, &alen, &aexpr);
                 if (dis_ptr) {
-                    make_ptr_array(p, &ds->decl_type, alen, aexpr);
+                    make_ptr_array(p, ds->decl_type, alen, aexpr);
                 } else {
-                    ds->decl_type.kind = TY_ARRAY_I32;
-                    ds->decl_type.array_len = alen;
-                    ds->decl_type.array_len_expr = aexpr;
+                    ds->decl_type->kind = TY_ARRAY_I32;
+                    ds->decl_type->array_len = alen;
+                    ds->decl_type->array_len_expr = aexpr;
                 }
             }
             if (accept(p, TC_TK_ASSIGN)) {
-                Expr *agg = parse_aggregate_init(p, ds->decl_type);
-                ds->decl_init = agg ? agg : parse_expr(p);
-                if (ds->decl_init && ds->decl_init->kind == EX_STR &&
-                    ds->decl_type.kind == TY_ARRAY_I32 &&
-                    ds->decl_type.int_bits == 8 &&
-                    ds->decl_type.array_len == 0) {
-                    ds->decl_type.array_len = (int64_t)ds->decl_init->name.size;
+                Expr *agg = parse_aggregate_init(p, *ds->decl_type);
+                ds->expr = agg ? agg : parse_expr(p);
+                if (ds->expr && ds->expr->kind == EX_STR &&
+                    ds->decl_type->kind == TY_ARRAY_I32 &&
+                    ds->decl_type->int_bits == 8 &&
+                    ds->decl_type->array_len == 0) {
+                    ds->decl_type->array_len = (int64_t)ds->expr->name.size;
                 }
             }
             VecStmtPtr_push_back(p->arena, &blk->body, ds);
@@ -1753,7 +1757,7 @@ static Stmt *parse_stmt(P *p) {
         TcTok nm = cur(p);
         expect(p, TC_TK_IDENT, str_lit("expected label after 'goto'"));
         Stmt *s = new_stmt(p, ST_GOTO, t.line);
-        s->label_name = tc_tok_text(nm);
+        s->name = tc_tok_text(nm);
         expect(p, TC_TK_SEMI, str_lit("expected ';' after goto"));
         return s;
     }
@@ -1762,7 +1766,7 @@ static Stmt *parse_stmt(P *p) {
     if (t.kind == TC_TK_IDENT && peek(p, 1).kind == TC_TK_COLON) {
         p->i += 2;  // consume IDENT and ':'
         Stmt *s = new_stmt(p, ST_LABEL, t.line);
-        s->label_name = tc_tok_text(t);
+        s->name = tc_tok_text(t);
         return s;
     }
     if (t.kind == TC_TK_KW_RETURN) {
@@ -1794,12 +1798,15 @@ static Stmt *parse_stmt(P *p) {
         p->i++;
         Stmt *s = new_stmt(p, ST_IF, t.line);
         expect(p, TC_TK_LPAREN, str_lit("expected '('"));
-        s->cond = parse_expr(p);
+        s->expr = parse_expr(p);
         expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
         parse_block(p, &s->body);
         if (accept(p, TC_TK_KW_ELSE)) {
             s->has_else = true;
-            parse_block(p, &s->else_body);
+            s->extra = arena_new(p->arena, StmtExtra);
+            *s->extra = (StmtExtra){0};
+            VecStmtPtr_reserve(p->arena, &s->extra->else_body, 4);
+            parse_block(p, &s->extra->else_body);
         }
         return s;
     }
@@ -1807,7 +1814,7 @@ static Stmt *parse_stmt(P *p) {
         p->i++;
         Stmt *s = new_stmt(p, ST_WHILE, t.line);
         expect(p, TC_TK_LPAREN, str_lit("expected '('"));
-        s->cond = parse_expr(p);
+        s->expr = parse_expr(p);
         expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
         parse_block(p, &s->body);
         return s;
@@ -1818,7 +1825,7 @@ static Stmt *parse_stmt(P *p) {
         parse_block(p, &s->body);
         expect(p, TC_TK_KW_WHILE, str_lit("expected 'while' after do-block"));
         expect(p, TC_TK_LPAREN, str_lit("expected '('"));
-        s->cond = parse_expr(p);
+        s->expr = parse_expr(p);
         expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
         expect(p, TC_TK_SEMI, str_lit("expected ';' after do-while"));
         return s;
@@ -1830,7 +1837,7 @@ static Stmt *parse_stmt(P *p) {
         // init: empty | decl | expr
         if (cur(p).kind == TC_TK_SEMI) {
             p->i++;
-            s->for_init = NULL;
+            s->extra->for_init = NULL;
         } else if (cur(p).kind == TC_TK_KW_INT || cur(p).kind == TC_TK_KW_FLOAT || cur(p).kind == TC_TK_KW_DOUBLE ||
                    cur(p).kind == TC_TK_KW_CHAR || cur(p).kind == TC_TK_KW_ENUM ||
                    cur(p).kind == TC_TK_KW_CONST || cur(p).kind == TC_TK_KW_VOID ||
@@ -1839,23 +1846,23 @@ static Stmt *parse_stmt(P *p) {
                    cur(p).kind == TC_TK_KW_UNSIGNED ||
                    cur(p).kind == TC_TK_KW_SHORT || cur(p).kind == TC_TK_KW_BOOL ||
                    (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, tc_tok_text(cur(p))))) {
-            s->for_init = parse_decl(p, /*require_semi*/ true);
+            s->extra->for_init = parse_decl(p, /*require_semi*/ true);
         } else {
             Stmt *es = new_stmt(p, ST_EXPR, cur(p).line);
             es->expr = parse_expr(p);
             expect(p, TC_TK_SEMI, str_lit("expected ';'"));
-            s->for_init = es;
+            s->extra->for_init = es;
         }
         // cond: empty means "true"
-        if (cur(p).kind != TC_TK_SEMI) s->cond = parse_expr(p);
+        if (cur(p).kind != TC_TK_SEMI) s->expr = parse_expr(p);
         expect(p, TC_TK_SEMI, str_lit("expected ';' after for-cond"));
         // step: empty allowed. Multiple comma-separated expressions are
         // collected and emitted in order. C's comma operator: usually
         // `++i, ++j`.
         if (cur(p).kind != TC_TK_RPAREN) {
-            VecExprPtr_push_back(p->arena, &s->for_steps, parse_expr(p));
+            VecExprPtr_push_back(p->arena, &s->extra->for_steps, parse_expr(p));
             while (accept(p, TC_TK_COMMA)) {
-                VecExprPtr_push_back(p->arena, &s->for_steps, parse_expr(p));
+                VecExprPtr_push_back(p->arena, &s->extra->for_steps, parse_expr(p));
             }
         }
         expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
@@ -1866,10 +1873,10 @@ static Stmt *parse_stmt(P *p) {
         p->i++;
         Stmt *s = new_stmt(p, ST_SWITCH, t.line);
         expect(p, TC_TK_LPAREN, str_lit("expected '('"));
-        s->cond = parse_expr(p);
+        s->expr = parse_expr(p);
         expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
         expect(p, TC_TK_LBRACE, str_lit("expected '{'"));
-        VecSwitchCase_reserve(p->arena, &s->switch_cases, 4);
+        VecSwitchCase_reserve(p->arena, &s->extra->switch_cases, 4);
         while (cur(p).kind != TC_TK_RBRACE && cur(p).kind != TC_TK_EOF) {
             if (cur(p).kind == TC_TK_KW_CASE) {
                 p->i++;
@@ -1892,7 +1899,7 @@ static Stmt *parse_stmt(P *p) {
                     .is_default = false,
                     .body_start = s->body.size,
                 };
-                VecSwitchCase_push_back(p->arena, &s->switch_cases, sc);
+                VecSwitchCase_push_back(p->arena, &s->extra->switch_cases, sc);
                 continue;
             }
             if (cur(p).kind == TC_TK_KW_DEFAULT) {
@@ -1902,7 +1909,7 @@ static Stmt *parse_stmt(P *p) {
                     .value = 0, .is_default = true,
                     .body_start = s->body.size,
                 };
-                VecSwitchCase_push_back(p->arena, &s->switch_cases, sc);
+                VecSwitchCase_push_back(p->arena, &s->extra->switch_cases, sc);
                 continue;
             }
             Stmt *bs = parse_stmt(p);

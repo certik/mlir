@@ -410,8 +410,10 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region, size
     m.ctx = ctx;
     m.nb = nb;
 
-    m.blocks = (MLIR_BlockHandle *)malloc(nb * sizeof(MLIR_BlockHandle));
-    m.terms  = (MLIR_OpHandle *)malloc(nb * sizeof(MLIR_OpHandle));
+    MLIR_BlockHandle blocks_stk[64];
+    MLIR_OpHandle    terms_stk[64];
+    m.blocks = nb <= 64 ? blocks_stk : (MLIR_BlockHandle *)malloc(nb * sizeof(MLIR_BlockHandle));
+    m.terms  = nb <= 64 ? terms_stk  : (MLIR_OpHandle *)malloc(nb * sizeof(MLIR_OpHandle));
     for (size_t bi = 0; bi < nb; bi++) {
         m.blocks[bi] = MLIR_GetRegionBlock(ctx, region, bi);
         m.terms[bi]  = MLIR_GetBlockTerminator(ctx, m.blocks[bi]);
@@ -420,10 +422,14 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region, size
     // ---- Collect candidate allocas (every llvm.alloca in blocks 0..max_alloca_blk) ----
     hmap_init(&m.aidx, 16);
     size_t cap = 32;
-    m.elemty     = (MLIR_TypeHandle *)malloc(cap * sizeof(MLIR_TypeHandle));
-    m.promotable = (bool *)malloc(cap * sizeof(bool));
-    MLIR_ValueHandle *alloca_res = (MLIR_ValueHandle *)malloc(cap * sizeof(MLIR_ValueHandle));
-    MLIR_OpHandle    *alloca_op  = (MLIR_OpHandle *)malloc(cap * sizeof(MLIR_OpHandle));
+    MLIR_TypeHandle  elemty_stk[32];
+    bool             prom_stk[32];
+    MLIR_ValueHandle ares_stk[32];
+    MLIR_OpHandle    aop_stk[32];
+    m.elemty     = elemty_stk;
+    m.promotable = prom_stk;
+    MLIR_ValueHandle *alloca_res = ares_stk;
+    MLIR_OpHandle    *alloca_op  = aop_stk;
     size_t na = 0;
     size_t scan_nb = (max_alloca_blk < nb) ? (max_alloca_blk + 1) : nb;
     for (size_t bi = 0; bi < scan_nb; bi++) {
@@ -435,11 +441,23 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region, size
             MLIR_AttributeHandle ea = MLIR_GetOpAttr(ctx, op, MLIR_KEY_ELEM_TYPE);
             if (ea == MLIR_INVALID_HANDLE) continue;
             if (na == cap) {
+                size_t old_cap = cap;
                 cap <<= 1;
-                m.elemty     = (MLIR_TypeHandle *)realloc(m.elemty, cap * sizeof(MLIR_TypeHandle));
-                m.promotable = (bool *)realloc(m.promotable, cap * sizeof(bool));
-                alloca_res   = (MLIR_ValueHandle *)realloc(alloca_res, cap * sizeof(MLIR_ValueHandle));
-                alloca_op    = (MLIR_OpHandle *)realloc(alloca_op, cap * sizeof(MLIR_OpHandle));
+                if (m.elemty == elemty_stk) {
+                    m.elemty     = (MLIR_TypeHandle *)malloc(cap * sizeof(MLIR_TypeHandle));
+                    m.promotable = (bool *)malloc(cap * sizeof(bool));
+                    alloca_res   = (MLIR_ValueHandle *)malloc(cap * sizeof(MLIR_ValueHandle));
+                    alloca_op    = (MLIR_OpHandle *)malloc(cap * sizeof(MLIR_OpHandle));
+                    memcpy(m.elemty, elemty_stk, old_cap * sizeof(MLIR_TypeHandle));
+                    memcpy(m.promotable, prom_stk, old_cap * sizeof(bool));
+                    memcpy(alloca_res, ares_stk, old_cap * sizeof(MLIR_ValueHandle));
+                    memcpy(alloca_op, aop_stk, old_cap * sizeof(MLIR_OpHandle));
+                } else {
+                    m.elemty     = (MLIR_TypeHandle *)realloc(m.elemty, cap * sizeof(MLIR_TypeHandle));
+                    m.promotable = (bool *)realloc(m.promotable, cap * sizeof(bool));
+                    alloca_res   = (MLIR_ValueHandle *)realloc(alloca_res, cap * sizeof(MLIR_ValueHandle));
+                    alloca_op    = (MLIR_OpHandle *)realloc(alloca_op, cap * sizeof(MLIR_OpHandle));
+                }
             }
             m.elemty[na]     = MLIR_GetAttributeTypeValue(ctx, ea);
             m.promotable[na] = true;
@@ -451,8 +469,9 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region, size
     }
     m.na = na;
     if (na == 0) {
-        free(m.blocks); free(m.terms);
-        free(m.elemty); free(m.promotable); free(alloca_res); free(alloca_op);
+        if (m.blocks != blocks_stk) free(m.blocks);
+        if (m.terms  != terms_stk)  free(m.terms);
+        if (m.elemty != elemty_stk) { free(m.elemty); free(m.promotable); free(alloca_res); free(alloca_op); }
         hmap_free(&m.aidx);
         return;
     }
@@ -461,9 +480,14 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region, size
     // An alloca pointer is promotable iff every use is a top-level llvm.load
     // (op 0) / llvm.store (op 1) of matching element type. When def-use
     // tracking is active, walk each alloca's use list in O(uses) instead of
-    // scanning every op in the function.
+    // scanning every op in the function, and record which blocks have any
+    // store (bit 0) or load (bit 1) so defOut and Rewrite skip untouched blocks.
     bool tracked = MLIR_HasContextDefUseTracking(ctx);
+    uint8_t blk_flags_stk[256];
+    uint8_t *blk_flags = NULL;
     if (tracked) {
+        blk_flags = nb <= 256 ? blk_flags_stk : (uint8_t *)malloc(nb);
+        memset(blk_flags, 0, nb);
         for (size_t ai = 0; ai < na; ai++) {
             for (MLIR_UseHandle u = MLIR_GetValueFirstUse(ctx, alloca_res[ai]);
                  u != MLIR_INVALID_HANDLE; u = MLIR_GetUseNext(ctx, u)) {
@@ -476,8 +500,16 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region, size
                 bool ok = false;
                 if (!nested && t == OP_TYPE_LLVM_LOAD && k == 0) {
                     ok = (MLIR_GetValueType(ctx, MLIR_GetOpResult(ctx, op, 0)) == m.elemty[ai]);
+                    if (ok) {
+                        size_t obi = MLIR_GetBlockIndex(ctx, ob);
+                        if (obi < nb) blk_flags[obi] |= 2u;
+                    }
                 } else if (!nested && t == OP_TYPE_LLVM_STORE && k == 1) {
                     ok = (MLIR_GetValueType(ctx, MLIR_GetOpOperand(ctx, op, 0)) == m.elemty[ai]);
+                    if (ok) {
+                        size_t obi = MLIR_GetBlockIndex(ctx, ob);
+                        if (obi < nb) blk_flags[obi] |= 1u;
+                    }
                 }
                 if (!ok) { m.promotable[ai] = false; break; }
             }
@@ -490,8 +522,10 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region, size
     bool any = false;
     for (size_t ai = 0; ai < na; ai++) if (m.promotable[ai]) { any = true; break; }
     if (!any) {
-        free(m.blocks); free(m.terms);
-        free(m.elemty); free(m.promotable); free(alloca_res); free(alloca_op);
+        if (blk_flags && blk_flags != blk_flags_stk) free(blk_flags);
+        if (m.blocks != blocks_stk) free(m.blocks);
+        if (m.terms  != terms_stk)  free(m.terms);
+        if (m.elemty != elemty_stk) { free(m.elemty); free(m.promotable); free(alloca_res); free(alloca_op); }
         hmap_free(&m.aidx);
         return;
     }
@@ -519,6 +553,7 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region, size
 
         // ---- defOut: last value stored to each promotable alloca per block -----
         for (size_t bi = 0; bi < nb; bi++) {
+            if (blk_flags && !(blk_flags[bi] & 1u)) continue;
             MLIR_BlockHandle blk = m.blocks[bi];
             size_t nops = MLIR_GetBlockNumOps(ctx, blk);
             for (size_t j = 0; j < nops; j++) {
@@ -567,17 +602,29 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region, size
     }
 
     // ---- Rewrite: build the remap table and lazily create phi ids ----------
-    uintptr_t *cur = (uintptr_t *)malloc(na * sizeof(uintptr_t));
-    uint32_t *cur_gen = (uint32_t *)calloc(na, sizeof(uint32_t));
+    uintptr_t cur_stk[32];
+    uint32_t  cgen_stk[32];
+    uintptr_t *cur = na <= 32 ? cur_stk : (uintptr_t *)malloc(na * sizeof(uintptr_t));
+    uint32_t *cur_gen = na <= 32 ? cgen_stk : (uint32_t *)malloc(na * sizeof(uint32_t));
+    memset(cur_gen, 0, na * sizeof(uint32_t));
     uint32_t gen = 0;
-    size_t erase_cap = 256, erase_n = 0;
-    MLIR_OpHandle *erase = (MLIR_OpHandle *)malloc(erase_cap * sizeof(MLIR_OpHandle));
+    MLIR_OpHandle erase_stk[128];
+    size_t erase_cap = 128, erase_n = 0;
+    MLIR_OpHandle *erase = erase_stk;
     #define L2R_ERASE(o) do { \
-        if (erase_n == erase_cap) { erase_cap <<= 1; \
-            erase = (MLIR_OpHandle *)realloc(erase, erase_cap * sizeof(MLIR_OpHandle)); } \
+        if (erase_n == erase_cap) { \
+            size_t old_ec = erase_cap; erase_cap <<= 1; \
+            if (erase == erase_stk) { \
+                erase = (MLIR_OpHandle *)malloc(erase_cap * sizeof(MLIR_OpHandle)); \
+                memcpy(erase, erase_stk, old_ec * sizeof(MLIR_OpHandle)); \
+            } else { \
+                erase = (MLIR_OpHandle *)realloc(erase, erase_cap * sizeof(MLIR_OpHandle)); \
+            } \
+        } \
         erase[erase_n++] = (o); } while (0)
 
     for (size_t bi = 0; bi < nb; bi++) {
+        if (blk_flags && blk_flags[bi] == 0) continue;
         gen++;
         MLIR_BlockHandle blk = m.blocks[bi];
         size_t nops = MLIR_GetBlockNumOps(ctx, blk);
@@ -711,12 +758,13 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region, size
     MLIR_EraseOps(ctx, erase, erase_n);
 
     #undef L2R_ERASE
+    if (blk_flags && blk_flags != blk_flags_stk) free(blk_flags);
     free(sobuf);
     free(surv_off);
     free(surv_pid);
-    free(erase);
-    free(cur);
-    free(cur_gen);
+    if (erase != erase_stk) free(erase);
+    if (cur != cur_stk) free(cur);
+    if (cur_gen != cgen_stk) free(cur_gen);
     free(m.p_op_pool);
     free(m.p_block);
     free(m.p_alloca);
@@ -727,12 +775,9 @@ static void l2r_promote_region(MLIR_Context *ctx, MLIR_RegionHandle region, size
     free(m.pred_blk);
     free(m.pred_slot);
     free(m.pred_off);
-    free(m.blocks);
-    free(m.terms);
-    free(m.elemty);
-    free(m.promotable);
-    free(alloca_res);
-    free(alloca_op);
+    if (m.blocks != blocks_stk) free(m.blocks);
+    if (m.terms  != terms_stk)  free(m.terms);
+    if (m.elemty != elemty_stk) { free(m.elemty); free(m.promotable); free(alloca_res); free(alloca_op); }
     hmap_free(&m.defOut);
     hmap_free(&m.entryDef);
     hmap_free(&m.aidx);
@@ -1027,7 +1072,8 @@ static void sroa_rewrite(S *s, MLIR_BlockHandle blk) {
 
 // Returns true if the region contains any llvm.alloca at all, and sets
 // *out_max_alloca_blk to the highest block index that contained an alloca.
-static bool sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region, size_t *out_max_alloca_blk) {
+static bool sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region,
+                        bool entry_only_allocas, size_t *out_max_alloca_blk) {
     *out_max_alloca_blk = 0;
     size_t nb = MLIR_GetRegionNumBlocks(ctx, region);
     if (nb == 0) return false;
@@ -1040,7 +1086,8 @@ static bool sroa_region(MLIR_Context *ctx, MLIR_RegionHandle region, size_t *out
     // Lazily allocate arrays/hash tables only if at least one exists.
     bool saw_any_alloca = false;
     size_t max_alloca_blk = 0;
-    for (size_t bi = 0; bi < nb; bi++) {
+    size_t scan_nb = entry_only_allocas ? 1 : nb;
+    for (size_t bi = 0; bi < scan_nb; bi++) {
         MLIR_BlockHandle blk = MLIR_GetRegionBlock(ctx, region, bi);
         size_t nops = MLIR_GetBlockNumOps(ctx, blk);
         for (size_t j = 0; j < nops; j++) {
@@ -1213,7 +1260,7 @@ done:
     return saw_any_alloca;
 }
 
-void mlir_llvm_mem2reg(MLIR_Context *ctx, MLIR_OpHandle module) {
+void mlir_llvm_mem2reg_ex(MLIR_Context *ctx, MLIR_OpHandle module, bool entry_only_allocas) {
     if (MLIR_GetOpNumRegions(ctx, module) == 0) return;
     MLIR_RegionHandle mr = MLIR_GetOpRegion(ctx, module, 0);
     if (MLIR_GetRegionNumBlocks(ctx, mr) == 0) return;
@@ -1229,9 +1276,13 @@ void mlir_llvm_mem2reg(MLIR_Context *ctx, MLIR_OpHandle module) {
         if (MLIR_GetOpNumRegions(ctx, op) == 0) continue;
         MLIR_RegionHandle body = MLIR_GetOpRegion(ctx, op, 0);
         size_t max_blk = 0;
-        if (sroa_region(ctx, body, &max_blk))
+        if (sroa_region(ctx, body, entry_only_allocas, &max_blk))
             l2r_promote_region(ctx, body, max_blk);
     }
+}
+
+void mlir_llvm_mem2reg(MLIR_Context *ctx, MLIR_OpHandle module) {
+    mlir_llvm_mem2reg_ex(ctx, module, false);
 }
 
 bool mlir_pass_mem2reg_run(MLIR_PassContext *pc, MLIR_OpHandle fn, void *state) {
@@ -1241,7 +1292,7 @@ bool mlir_pass_mem2reg_run(MLIR_PassContext *pc, MLIR_OpHandle fn, void *state) 
     if (MLIR_GetOpNumRegions(pc->ctx, fn) == 0) return true;
     MLIR_RegionHandle body = MLIR_GetOpRegion(pc->ctx, fn, 0);
     size_t max_blk = 0;
-    if (sroa_region(pc->ctx, body, &max_blk))
+    if (sroa_region(pc->ctx, body, false, &max_blk))
         l2r_promote_region(pc->ctx, body, max_blk);
     return true;
 }

@@ -629,6 +629,13 @@ TcTok tinyc_lex_string(Arena *arena, string raw, int line) {
     size_t j = (sz > 0 && s[0] == '"') ? 1 : 0;
     size_t end = (sz > j && s[sz - 1] == '"') ? sz - 1 : sz;
     char *buf = arena_new_array(arena, char, (end - j) + 1);
+    size_t len = end - j;
+    if (len == 0 || memchr(s + j, '\\', len) == NULL) {
+        if (len) memcpy(buf, s + j, len);
+        buf[len] = '\0';
+        TcTok t = {0}; t.kind = TC_TK_STRING_LIT; t.text_str = buf; t.d.size = len + 1; t.line = line;
+        return t;
+    }
     size_t n = 0;
     while (j < end) {
         char ch = s[j++];

@@ -187,10 +187,16 @@ typedef struct Expr Expr;
 DEFINE_VECTOR_FOR_TYPE(Expr*, VecExprPtr)
 
 typedef struct {
+    VecExprPtr args;
     string *compound_field_names;
     Type   *generic_types;
     int     generic_default_index;
 } ExprExtra;
+
+typedef union {
+    int64_t int_value;
+    double  float_value;
+} ExprVal;
 
 struct Expr {
     uint8_t kind;             // ExprKind
@@ -204,15 +210,13 @@ struct Expr {
     bool    sizeof_is_expr;
     bool    is_alignof;
     int line;
-    int64_t int_value;
-    double  float_value;
+    ExprVal val;              // int_value / float_value
     string  name;             // EX_VAR / EX_STR / EX_FIELD / EX_CALL (callee)
     Expr   *lhs;
     Expr   *rhs;              // EX_BIN / EX_TERNARY (then) / EX_ASSIGN (rhs)
     Expr   *lvalue;           // EX_ASSIGN (lhs) / EX_TERNARY (else)
-    VecExprPtr args;
     Type   *cast_type;
-    ExprExtra *extra;         // EX_COMPOUND / EX_GENERIC rare metadata
+    ExprExtra *extra;         // EX_CALL / EX_COMPOUND / EX_GENERIC metadata
 };
 
 typedef enum {
@@ -249,37 +253,34 @@ typedef struct {
 
 DEFINE_VECTOR_FOR_TYPE(SwitchCase, VecSwitchCase)
 
+typedef struct {
+    // For function-local `static` variables: mangled module-scope symbol name.
+    string        decl_static_global_sym;
+    // ST_IF (only allocated when `else` is present)
+    VecStmtPtr    else_body;
+    // ST_FOR
+    Stmt         *for_init;
+    VecExprPtr    for_steps;
+    // ST_SWITCH
+    VecSwitchCase switch_cases;
+} StmtExtra;
+
 struct Stmt {
     uint8_t kind;            // StmtKind
     bool decl_is_static;
     bool has_else;
     bool block_no_scope;
     int line;
-    // ST_EXPR / ST_RETURN
+    // ST_EXPR / ST_RETURN / ST_DECL (init) / ST_IF / ST_WHILE / ST_DO_WHILE / ST_FOR / ST_SWITCH (cond)
     Expr *expr;
-    // ST_DECL
-    Type  decl_type;
-    string decl_name;
-    Expr *decl_init;
-    // For function-local `static` variables: when non-empty, this is the
-    // mangled module-scope symbol name registered in `program->globals`.
-    // The emitter treats the local as an alias for that global instead
-    // of allocating an `alloca` slot.
-    string decl_static_global_sym;
-    // ST_IF / ST_WHILE / ST_DO_WHILE / ST_FOR / ST_BLOCK / ST_SWITCH
-    Expr *cond;
-    VecStmtPtr body;          // then / while / for / block / switch body
-    VecStmtPtr else_body;
-    // ST_FOR
-    Stmt *for_init;
-    // Zero or more for-update expressions, lowered in order at the end
-    // of each iteration. Multiple entries arise from the C comma
-    // operator: `for (i = 0; i < n; ++i, ++j)` parses as two entries.
-    VecExprPtr for_steps;
-    // ST_SWITCH
-    VecSwitchCase switch_cases;
-    // ST_LABEL / ST_GOTO
-    string label_name;
+    // ST_DECL (decl_name) / ST_LABEL / ST_GOTO (label_name)
+    string name;
+    // ST_IF (then) / ST_WHILE / ST_DO_WHILE / ST_FOR / ST_BLOCK / ST_SWITCH
+    VecStmtPtr body;
+    // ST_DECL only (arena-allocated)
+    Type *decl_type;
+    // ST_IF(else) / ST_FOR / ST_SWITCH / ST_DECL(static) rare metadata
+    StmtExtra *extra;
 };
 
 typedef struct {

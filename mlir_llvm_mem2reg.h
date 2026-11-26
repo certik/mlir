@@ -25,5 +25,6 @@
 #include "mlir_api.h"
 
 void mlir_llvm_mem2reg(MLIR_Context *ctx, MLIR_OpHandle module);
+void mlir_llvm_mem2reg_ex(MLIR_Context *ctx, MLIR_OpHandle module, bool entry_only_allocas);
 
 #endif

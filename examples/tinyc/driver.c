@@ -1730,7 +1730,7 @@ static int tinyc_main(void) {
     // TINYC_NO_MEM2REG for A/B debugging.
     uint64_t t_m2r = ts_now();
     if (!getenv("TINYC_NO_MEM2REG"))
-        mlir_llvm_mem2reg(ctx, module);
+        mlir_llvm_mem2reg_ex(ctx, module, true);
     ts_add(TS_MEM2REG, t_m2r);
 
     if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64 || emit_elf || emit_x64) {

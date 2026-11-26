@@ -115,6 +115,7 @@ typedef struct {
     string   *include_dirs;
     size_t    n_include_dirs;
     PathNode *pragma_once;       // files that emitted `#pragma once`
+    PathNode *pragma_once_angle; // <name> includes whose resolved file had `#pragma once`
     // collect_args() gathers argument tokens here (reused, only grows).
     PPTok    *arg_buf;
     size_t    arg_buf_cap;
@@ -1022,9 +1023,10 @@ static void substitute(PP *pp, Macro *m, VecPPTok *args, VecPPTok *out) {
         }
 
         // __VA_OPT__(content): emits content if VA_ARGS non-empty.
-        if (t.kind == PP_IDENT && str_eq(t.text, s_lit("__VA_OPT__"))
+        if (va_idx >= 0 && t.kind == PP_IDENT && t.text.size == 10 &&
+            t.text.str[0] == '_' && memcmp(t.text.str, "__VA_OPT__", 10) == 0
             && i + 1 < nb && body[i + 1].kind == PP_PUNCT
-            && str_eq(body[i + 1].text, s_lit("("))) {
+            && body[i + 1].text.size == 1 && body[i + 1].text.str[0] == '(') {
             // Find matching ).
             int depth = 1;
             size_t j = i + 2;
@@ -1729,7 +1731,7 @@ static string parent_dir(Arena *arena, string path) {
 
 static bool pragma_once_seen(PP *pp, string path) {
     for (PathNode *n = pp->pragma_once; n; n = n->next)
-        if (str_eq(n->path, path)) return true;
+        if (n->path.size == path.size && memcmp(n->path.str, path.str, path.size) == 0) return true;
     return false;
 }
 static void pragma_once_add(PP *pp, string path) {
@@ -1738,6 +1740,17 @@ static void pragma_once_add(PP *pp, string path) {
     n->next = pp->pragma_once;
     pp->pragma_once = n;
 }
+static bool pragma_once_angle_seen(PP *pp, string name) {
+    for (PathNode *n = pp->pragma_once_angle; n; n = n->next)
+        if (n->path.size == name.size && memcmp(n->path.str, name.str, name.size) == 0) return true;
+    return false;
+}
+static void pragma_once_angle_add(PP *pp, string name) {
+    PathNode *n = arena_new(pp->arena, PathNode);
+    n->path = s_dup(pp->arena, name);
+    n->next = pp->pragma_once_angle;
+    pp->pragma_once_angle = n;
+}
 
 // Find the include file and read it (once: the contents are what
 // process_file() then tokenizes). Checks pragma_once_seen BEFORE reading
@@ -1745,6 +1758,10 @@ static void pragma_once_add(PP *pp, string path) {
 static bool resolve_include(PP *pp, string from_file, string name, bool angle,
                             string *out, string *out_src, bool *already_seen) {
     *already_seen = false;
+    if (angle && pragma_once_angle_seen(pp, name)) {
+        *already_seen = true;
+        return true;
+    }
     if (!angle) {
         // First: relative to the directory of `from_file`.
         string dir = parent_dir(pp->arena, from_file);
@@ -2018,7 +2035,13 @@ static void process_tokens(PP *pp, PPTok *toks, size_t n, string file, uint16_t 
                     i = end + 1; continue;
                 }
                 if (already_seen) { i = end + 1; continue; }
+                PathNode *po_before = pp->pragma_once;
                 process_file(pp, resolved, inc_src);
+                if (angle && pp->pragma_once != po_before &&
+                    pp->pragma_once->path.size == resolved.size &&
+                    memcmp(pp->pragma_once->path.str, resolved.str, resolved.size) == 0) {
+                    pragma_once_angle_add(pp, name);
+                }
                 // Restore #line tracking back to enclosing file.
                 emit_line_directive_if_needed(pp, file_id, toks[end].line);
                 i = end + 1;

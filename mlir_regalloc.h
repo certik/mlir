@@ -45,6 +45,18 @@ void sm_put(SlotMap *m, MLIR_ValueHandle k, int32_t slot);
 bool sm_get(SlotMap *m, MLIR_ValueHandle k, int32_t *out);
 void uc_inc(SlotMap *m, MLIR_ValueHandle k);
 
+static inline bool sm_get_fast(SlotMap *m, MLIR_ValueHandle k, int32_t *out) {
+    if (m->dense) {
+        uintptr_t idx = (uintptr_t)k - m->dense_base;
+        if (idx < m->dense_len) {
+            int32_t v = m->dense[idx];
+            if (v >= 0) { *out = v; return true; }
+        }
+        if (m->cap == 0) return false;
+    }
+    return sm_get(m, k, out);
+}
+
 // Fold/const/cast hooks the allocators call, defined by the aarch64 backend
 // (mlir_llvm_to_aarch64.c). x64 reuses const_int_val / cast_src (generic) and
 // passes NULL fusion maps.
