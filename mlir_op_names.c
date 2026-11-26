@@ -102,11 +102,13 @@ void op_type_table_init(OpTypeTable *t, Arena *arena) {
     t->n_aliases = 0;
 #define MLIR_OP_ALIAS(enumerator, name) op_type_table_add_alias(t, enumerator, str_lit(name));
 #include "mlir_ops.def"
-    op_type_table_rehash(t, 1024);
+    t->slots = NULL;
+    t->n_slots = 0;
 }
 
 MLIR_OpType op_type_table_lookup(const OpTypeTable *t, string name) {
     if (name.size == 0) return OP_TYPE_UNREGISTERED;
+    if (!t->slots) op_type_table_rehash((OpTypeTable *)t, 1024);
     uint32_t mask = t->n_slots - 1;
     uint32_t i = op_name_hash(name) & mask;
     uint32_t slot;
@@ -183,7 +185,8 @@ void attr_key_table_init(AttrKeyTable *t, Arena *arena) {
         p += n + 1;
     }
     assert(p == g_static_key_names + sizeof(g_static_key_names) - 1);
-    attr_key_table_rehash(t, 512);
+    t->slots = NULL;
+    t->n_slots = 0;
 }
 
 void attr_key_table_init_strings(AttrKeyTable *t, Arena *arena) {
@@ -193,11 +196,13 @@ void attr_key_table_init_strings(AttrKeyTable *t, Arena *arena) {
     t->n_keys = 1;
     t->names[0].str = (char *)g_static_key_names + sizeof(g_static_key_names) - 1;
     t->names[0].size = 0;
-    attr_key_table_rehash(t, 128);
+    t->slots = NULL;
+    t->n_slots = 0;
 }
 
 MLIR_AttrKey attr_key_table_lookup(const AttrKeyTable *t, string name) {
     if (name.size == 0) return MLIR_KEY_INVALID;
+    if (!t->slots) attr_key_table_rehash((AttrKeyTable *)t, t->n_keys > 64 ? 512 : 128);
     uint32_t mask = t->n_slots - 1;
     uint32_t i = op_name_hash(name) & mask;
     uint32_t k;

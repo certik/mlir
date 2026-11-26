@@ -336,6 +336,17 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
     int line = 1;
     size_t i = 0;
     uint8_t space_pending = 0;
+    PPTok *odata = out->data;
+    size_t osz = out->size;
+    size_t omax = out->max;
+    #define PP_ENSURE(N) do { \
+        if (osz + (N) > omax) { \
+            out->size = osz; \
+            pp_vec_grow(arena, out); \
+            odata = out->data; \
+            omax = out->max; \
+        } \
+    } while (0)
     while (i < sz) {
         char c = s[i];
         uint8_t ct = g_pp_ctype[(unsigned char)c];
@@ -345,28 +356,11 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
             space_pending = 1;
             continue;
         }
-        if (c == '\n') {
-            if (out->size > 0 && out->data[out->size - 1].kind != PP_NEWLINE) {
-                if (out->size == out->max) pp_vec_grow(arena, out);
-                PPTok *t = &out->data[out->size++];
-                t->kind = PP_NEWLINE;
-                t->has_space = 0;
-                t->file_id = file_id;
-                t->line = line;
-                t->text.str = NULL;
-                t->text.size = 0;
-                t->hide = NULL;
-            }
-            i++;
-            line++;
-            space_pending = 0;
-            continue;
-        }
         if (ct & PP_CT_ALPHA) {
             size_t j = i + 1;
             while (j < sz && (g_pp_ctype[(unsigned char)s[j]] & PP_CT_ALNUM)) j++;
-            if (out->size == out->max) pp_vec_grow(arena, out);
-            PPTok *t = &out->data[out->size++];
+            PP_ENSURE(1);
+            PPTok *t = &odata[osz++];
             t->kind = PP_IDENT;
             t->has_space = space_pending;
             t->file_id = file_id;
@@ -379,8 +373,8 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
             continue;
         }
         if (ct & PP_CT_PUNCT1) {
-            if (out->size == out->max) pp_vec_grow(arena, out);
-            PPTok *t = &out->data[out->size++];
+            PP_ENSURE(1);
+            PPTok *t = &odata[osz++];
             t->kind = PP_PUNCT;
             t->has_space = space_pending;
             t->file_id = file_id;
@@ -389,6 +383,23 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
             t->text.size = 1;
             t->hide = NULL;
             i++;
+            space_pending = 0;
+            continue;
+        }
+        if (c == '\n') {
+            if (osz > 0 && odata[osz - 1].kind != PP_NEWLINE) {
+                PP_ENSURE(1);
+                PPTok *t = &odata[osz++];
+                t->kind = PP_NEWLINE;
+                t->has_space = 0;
+                t->file_id = file_id;
+                t->line = line;
+                t->text.str = NULL;
+                t->text.size = 0;
+                t->hide = NULL;
+            }
+            i++;
+            line++;
             space_pending = 0;
             continue;
         }
@@ -404,8 +415,8 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
                 }
                 break;
             }
-            if (out->size == out->max) pp_vec_grow(arena, out);
-            PPTok *t = &out->data[out->size++];
+            PP_ENSURE(1);
+            PPTok *t = &odata[osz++];
             t->kind = PP_NUMBER;
             t->has_space = space_pending;
             t->file_id = file_id;
@@ -457,8 +468,8 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
                 else { if (s[j] == '\n') line++; j++; }
             }
             if (j < sz) j++;
-            if (out->size == out->max) pp_vec_grow(arena, out);
-            PPTok *t = &out->data[out->size++];
+            PP_ENSURE(1);
+            PPTok *t = &odata[osz++];
             t->kind = PP_STRING;
             t->has_space = space_pending;
             t->file_id = file_id;
@@ -477,8 +488,8 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
                 else j++;
             }
             if (j < sz) j++;
-            if (out->size == out->max) pp_vec_grow(arena, out);
-            PPTok *t = &out->data[out->size++];
+            PP_ENSURE(1);
+            PPTok *t = &odata[osz++];
             t->kind = PP_CHAR;
             t->has_space = space_pending;
             t->file_id = file_id;
@@ -502,8 +513,8 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
                 }
                 break;
             }
-            if (out->size == out->max) pp_vec_grow(arena, out);
-            PPTok *t = &out->data[out->size++];
+            PP_ENSURE(1);
+            PPTok *t = &odata[osz++];
             t->kind = PP_NUMBER;
             t->has_space = space_pending;
             t->file_id = file_id;
@@ -516,8 +527,8 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
             continue;
         }
         if (c == '#') {
-            if (out->size == out->max) pp_vec_grow(arena, out);
-            PPTok *t = &out->data[out->size++];
+            PP_ENSURE(1);
+            PPTok *t = &odata[osz++];
             t->has_space = space_pending;
             t->file_id = file_id;
             t->line = line;
@@ -572,8 +583,8 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
                 break;
             }
         }
-        if (out->size == out->max) pp_vec_grow(arena, out);
-        PPTok *t = &out->data[out->size++];
+        PP_ENSURE(1);
+        PPTok *t = &odata[osz++];
         t->kind = PP_PUNCT;
         t->has_space = space_pending;
         t->file_id = file_id;
@@ -585,8 +596,8 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
         space_pending = 0;
     }
     // Final newline guarantees directives at EOF terminate.
-    if (out->size + 2 > out->max) pp_vec_grow(arena, out);
-    PPTok *eol = &out->data[out->size++];
+    PP_ENSURE(2);
+    PPTok *eol = &odata[osz++];
     eol->kind = PP_NEWLINE;
     eol->has_space = 0;
     eol->file_id = file_id;
@@ -594,7 +605,7 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
     eol->text.str = NULL;
     eol->text.size = 0;
     eol->hide = NULL;
-    PPTok *end = &out->data[out->size++];
+    PPTok *end = &odata[osz++];
     end->kind = PP_END;
     end->has_space = 0;
     end->file_id = file_id;
@@ -602,6 +613,8 @@ static void pp_tokenize(Arena *arena, string src, uint16_t file_id, VecPPTok *ou
     end->text.str = NULL;
     end->text.size = 0;
     end->hide = NULL;
+    out->size = osz;
+    #undef PP_ENSURE
 }
 
 // ----------------------------------------------------------------------
@@ -1324,6 +1337,106 @@ static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
     stk[0].in_exp_buf = false;
 
     while (sp > 0) {
+        // Fast fused loop for emitting non-macro tokens directly to TcTok[]
+        // (runs both at top level sp==1 and inside macro expansions sp>1).
+        if (out == NULL && pp->tok_out != NULL) {
+            PPSlice *top = &stk[sp - 1];
+            const PPTok *base = top->in_exp_buf ? pp->exp_buf : top->toks;
+            VecTcTok *v = pp->tok_out;
+            TcTok *vd = v->data;
+            size_t vsz = v->size;
+            size_t vmax = v->max;
+            size_t pos = top->pos;
+            size_t end = top->end;
+            bool check_dir = (sp == 1) && stop_at_directive;
+            bool hit_stop = false;
+            while (pos < end) {
+                const PPTok *tp = &base[pos];
+                uint8_t tk = tp->kind;
+                if (tk == PP_PUNCT) {
+                    if (tp->text.size == 1) {
+                        unsigned char c = (unsigned char)tp->text.str[0];
+                        TcTokKind k = (c < 128) ? (TcTokKind)g_pp_punct1[c] : TC_TK_EOF;
+                        if (k != TC_TK_EOF) {
+                            if (vsz == vmax) {
+                                size_t nmax = vmax ? vmax * 2 : 256;
+                                TcTok *nd = arena_new_array(pp->arena, TcTok, nmax);
+                                if (vsz) memcpy(nd, vd, vsz * sizeof(TcTok));
+                                vd = nd; vmax = nmax;
+                                v->data = nd; v->max = nmax;
+                            }
+                            TcTok *dst = &vd[vsz++];
+                            dst->kind = (uint8_t)k;
+                            dst->flags = 0;
+                            dst->line = tp->line;
+                            pos++;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                if (tk == PP_IDENT) {
+                    if (!pp_macro_maybe(pp, tp->text)) {
+                        if (vsz == vmax) {
+                            size_t nmax = vmax ? vmax * 2 : 256;
+                            TcTok *nd = arena_new_array(pp->arena, TcTok, nmax);
+                            if (vsz) memcpy(nd, vd, vsz * sizeof(TcTok));
+                            vd = nd; vmax = nmax;
+                            v->data = nd; v->max = nmax;
+                        }
+                        TcTok *dst = &vd[vsz++];
+                        dst->kind = (uint8_t)tinyc_keyword_or_ident(tp->text);
+                        dst->flags = 0;
+                        dst->line = tp->line;
+                        dst->text_str = tp->text.str;
+                        dst->d.size = tp->text.size;
+                        pos++;
+                        continue;
+                    }
+                    break;
+                }
+                if (tk == PP_NEWLINE) {
+                    pos++;
+                    if (check_dir && pos < end && base[pos].kind == PP_HASH) {
+                        pos--;
+                        hit_stop = true;
+                        break;
+                    }
+                    continue;
+                }
+                if (tk == PP_NUMBER && tp->text.size == 1 &&
+                    tp->text.str[0] >= '0' && tp->text.str[0] <= '9') {
+                    if (vsz == vmax) {
+                        size_t nmax = vmax ? vmax * 2 : 256;
+                        TcTok *nd = arena_new_array(pp->arena, TcTok, nmax);
+                        if (vsz) memcpy(nd, vd, vsz * sizeof(TcTok));
+                        vd = nd; vmax = nmax;
+                        v->data = nd; v->max = nmax;
+                    }
+                    TcTok *dst = &vd[vsz++];
+                    dst->kind = TC_TK_INT_LIT;
+                    dst->flags = 0;
+                    dst->line = tp->line;
+                    dst->d.int_value = (int64_t)(tp->text.str[0] - '0');
+                    pos++;
+                    continue;
+                }
+                if (tk == PP_END) {
+                    pos++;
+                    hit_stop = true;
+                    break;
+                }
+                break;
+            }
+            top->pos = pos;
+            v->size = vsz;
+            if (hit_stop) break;
+            if (pos >= end) {
+                if (top->in_exp_buf) pp->exp_top = top->saved_exp_top;
+                sp--;
+                continue;
+            }
+        }
         PPSlice *top = &stk[sp - 1];
         if (top->pos >= top->end) {
             if (top->in_exp_buf) pp->exp_top = top->saved_exp_top;
@@ -1852,8 +1965,9 @@ static void process_tokens(PP *pp, PPTok *toks, size_t n, string file, uint16_t 
             }
             string dn = name.text;
             j++;
+            char d0 = dn.size ? dn.str[0] : 0;
 
-            if (str_eq(dn, s_lit("if"))) {
+            if (d0 == 'i' && dn.size == 2 && dn.str[1] == 'f') {
                 CondFrame f = {0};
                 f.was_active = active;
                 f.branch_taken = false;

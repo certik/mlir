@@ -127,6 +127,7 @@ typedef struct FuncSig {
     bool           defined_here;     // the body is in this TU, so a char /
                                      // short / bool result is already
                                      // narrowed (by its return statement)
+    bool           resolved;         // lazily populated on first use/emit
     MLIR_AttributeHandle callee_attr; // cached SymbolRef attr for sig->name
 } FuncSig;
 
@@ -195,6 +196,7 @@ typedef struct {
     size_t   struct_map_cap;
     ProgramEnum **enum_map; // open-addressing hash table: NULL=empty
     size_t   enum_map_cap;
+    uint64_t enum_bloom;    // 64-bit bloom filter over enum names
     bool     enum_map_built;
     Sym    **global_map;    // open-addressing hash table: NULL=empty
     size_t   global_map_cap;
@@ -334,6 +336,8 @@ static StructDef *find_struct(E *e, string name) {
     return NULL;
 }
 
+static MLIR_TypeHandle resolve_struct_type(E *e, size_t idx);
+
 static MLIR_TypeHandle find_struct_type(E *e, StructDef *sd) {
     if (e->n_struct_types == 0) return MLIR_INVALID_HANDLE;
     if (e->struct_ty_map_n != e->n_struct_types) {
@@ -354,7 +358,11 @@ static MLIR_TypeHandle find_struct_type(E *e, StructDef *sd) {
     size_t slot = (((uintptr_t)sd * 2654435761u) >> 4) & mask;
     while (e->struct_ty_map[slot]) {
         size_t idx = e->struct_ty_map[slot] - 1;
-        if (e->struct_types[idx].sd == sd) return e->struct_types[idx].ty;
+        if (e->struct_types[idx].sd == sd) {
+            if (e->struct_types[idx].ty == MLIR_INVALID_HANDLE)
+                return resolve_struct_type(e, idx);
+            return e->struct_types[idx].ty;
+        }
         slot = (slot + 1) & mask;
     }
     return MLIR_INVALID_HANDLE;
@@ -373,6 +381,8 @@ static int struct_field_index(StructDef *sd, string name) {
     return -1;
 }
 
+static void ensure_sig_resolved(E *e, FuncSig *sig);
+
 static FuncSig *find_sig(E *e, string name) {
     if (!e->sig_map || e->n_sigs == 0) return NULL;
     size_t mask = e->sig_map_cap - 1;
@@ -380,6 +390,7 @@ static FuncSig *find_sig(E *e, string name) {
     while (e->sig_map[slot]) {
         size_t idx = e->sig_map[slot] - 1;
         if (str_eq(e->sigs[idx].name, name)) {
+            if (!e->sigs[idx].resolved) ensure_sig_resolved(e, &e->sigs[idx]);
             e->sigs[idx].is_used = true;
             return &e->sigs[idx];
         }
@@ -403,8 +414,15 @@ static bool find_enum(E *e, string name, int64_t *out_value) {
         e->enum_map = arena_new_array(e->arena, ProgramEnum *, cap);
         memset(e->enum_map, 0, cap * sizeof(ProgramEnum *));
         e->enum_map_cap = cap;
+        e->enum_bloom = 0;
         size_t mask = cap - 1;
         for (ProgramEnum *pe = e->program->enums; pe; pe = pe->next) {
+            if (pe->name.size > 0) {
+                uint32_t bit = ((uint32_t)(unsigned char)pe->name.str[0] * 31u +
+                                (uint32_t)(unsigned char)pe->name.str[pe->name.size - 1] * 7u +
+                                (uint32_t)pe->name.size) & 63u;
+                e->enum_bloom |= (1ull << bit);
+            }
             size_t slot = emit_str_hash(pe->name) & mask;
             while (e->enum_map[slot]) {
                 if (str_eq(e->enum_map[slot]->name, pe->name)) break;
@@ -412,6 +430,12 @@ static bool find_enum(E *e, string name, int64_t *out_value) {
             }
             if (!e->enum_map[slot]) e->enum_map[slot] = pe;
         }
+    }
+    if (name.size > 0) {
+        uint32_t bit = ((uint32_t)(unsigned char)name.str[0] * 31u +
+                        (uint32_t)(unsigned char)name.str[name.size - 1] * 7u +
+                        (uint32_t)name.size) & 63u;
+        if (((e->enum_bloom >> bit) & 1u) == 0) return false;
     }
     size_t mask = e->enum_map_cap - 1;
     size_t slot = emit_str_hash(name) & mask;
@@ -617,30 +641,59 @@ static MLIR_ValueHandle emit_const_i32(E *e, int64_t v) {
     } else {
         a = MLIR_CreateAttributeInteger(e->ctx, v, e->i32);
     }
-    MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, a);
-    MLIR_ValueHandle r = emit_op1(e, OP_TYPE_ARITH_CONSTANT, e->i32, NULL, 0, &val, 1);
+    MLIR_ValueHandle r;
+    if (e->cur_block) {
+        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+        bd.loc = e->loc;
+        r = MLIR_BuildNullaryAttr(&bd, OP_TYPE_ARITH_CONSTANT, e->i32, MLIR_KEY_VALUE, a);
+    } else {
+        MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, a);
+        r = emit_op1(e, OP_TYPE_ARITH_CONSTANT, e->i32, NULL, 0, &val, 1);
+    }
     fact_put(e, r, FACT_CONST, 0, false, (int64_t)(int32_t)v);
     return r;
 }
 
 static MLIR_ValueHandle emit_const_f32(E *e, double v) {
-    MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeFloat(e->ctx, v, e->f32));
+    MLIR_AttributeHandle a = MLIR_CreateAttributeFloat(e->ctx, v, e->f32);
+    if (e->cur_block) {
+        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+        bd.loc = e->loc;
+        return MLIR_BuildNullaryAttr(&bd, OP_TYPE_ARITH_CONSTANT, e->f32, MLIR_KEY_VALUE, a);
+    }
+    MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, a);
     return emit_op1(e, OP_TYPE_ARITH_CONSTANT, e->f32, NULL, 0, &val, 1);
 }
 
 static MLIR_ValueHandle emit_const_f64(E *e, double v) {
-    MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeFloat(e->ctx, v, e->f64));
+    MLIR_AttributeHandle a = MLIR_CreateAttributeFloat(e->ctx, v, e->f64);
+    if (e->cur_block) {
+        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+        bd.loc = e->loc;
+        return MLIR_BuildNullaryAttr(&bd, OP_TYPE_ARITH_CONSTANT, e->f64, MLIR_KEY_VALUE, a);
+    }
+    MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, a);
     return emit_op1(e, OP_TYPE_ARITH_CONSTANT, e->f64, NULL, 0, &val, 1);
+}
+
+static MLIR_ValueHandle emit_unary(E *e, MLIR_OpType type,
+                                   MLIR_TypeHandle rt, MLIR_ValueHandle v) {
+    if (e->cur_block) {
+        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+        bd.loc = eloc(e, 0);
+        return MLIR_BuildUnary(&bd, type, rt, v);
+    }
+    return emit_op1(e, type, rt, &v, 1, NULL, 0);
 }
 
 // arith.extf : f32 -> f64
 static MLIR_ValueHandle emit_fpext_f32_to_f64(E *e, MLIR_ValueHandle v) {
-    return emit_op1(e, OP_TYPE_ARITH_EXTF, e->f64, &v, 1, NULL, 0);
+    return emit_unary(e, OP_TYPE_ARITH_EXTF, e->f64, v);
 }
 
 // arith.truncf : f64 -> f32
 static MLIR_ValueHandle emit_fptrunc_f64_to_f32(E *e, MLIR_ValueHandle v) {
-    return emit_op1(e, OP_TYPE_ARITH_TRUNCF, e->f32, &v, 1, NULL, 0);
+    return emit_unary(e, OP_TYPE_ARITH_TRUNCF, e->f32, v);
 }
 
 static MLIR_ValueHandle emit_const_i64(E *e, int64_t v) {
@@ -650,6 +703,11 @@ static MLIR_ValueHandle emit_const_i64(E *e, int64_t v) {
         a = e->small_i64_attrs[v];
     } else {
         a = MLIR_CreateAttributeInteger(e->ctx, v, e->i64);
+    }
+    if (e->cur_block) {
+        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+        bd.loc = e->loc;
+        return MLIR_BuildNullaryAttr(&bd, OP_TYPE_ARITH_CONSTANT, e->i64, MLIR_KEY_VALUE, a);
     }
     MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, a);
     return emit_op1(e, OP_TYPE_ARITH_CONSTANT, e->i64, NULL, 0, &val, 1);
@@ -703,10 +761,15 @@ static MLIR_ValueHandle emit_narrow_i32(E *e, MLIR_ValueHandle v, int bits,
 static MLIR_ValueHandle emit_cmpi(E *e, int64_t predicate,
                                   MLIR_ValueHandle a, MLIR_ValueHandle b) {
     if (!e->caches_init) emit_init_attr_caches(e);
-    MLIR_ValueHandle ops[2] = { a, b };
     MLIR_AttributeHandle pa = (predicate >= 0 && predicate < 10)
         ? e->cmpi_pred_attrs[predicate]
         : MLIR_CreateAttributeInteger(e->ctx, predicate, e->i64_signed);
+    if (e->cur_block) {
+        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+        bd.loc = e->loc;
+        return MLIR_BuildBinaryAttr(&bd, OP_TYPE_ARITH_CMPI, e->i1, a, b, MLIR_KEY_PREDICATE, pa);
+    }
+    MLIR_ValueHandle ops[2] = { a, b };
     MLIR_NamedAttr pred = MLIR_Named(MLIR_KEY_PREDICATE, pa);
     return emit_op1(e, OP_TYPE_ARITH_CMPI, e->i1, ops, 2, &pred, 1);
 }
@@ -714,10 +777,15 @@ static MLIR_ValueHandle emit_cmpi(E *e, int64_t predicate,
 static MLIR_ValueHandle emit_cmpf(E *e, int64_t predicate,
                                   MLIR_ValueHandle a, MLIR_ValueHandle b) {
     if (!e->caches_init) emit_init_attr_caches(e);
-    MLIR_ValueHandle ops[2] = { a, b };
     MLIR_AttributeHandle pa = (predicate >= 0 && predicate < 10)
         ? e->cmpi_pred_attrs[predicate]
         : MLIR_CreateAttributeInteger(e->ctx, predicate, e->i64_signed);
+    if (e->cur_block) {
+        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+        bd.loc = e->loc;
+        return MLIR_BuildBinaryAttr(&bd, OP_TYPE_ARITH_CMPF, e->i1, a, b, MLIR_KEY_PREDICATE, pa);
+    }
+    MLIR_ValueHandle ops[2] = { a, b };
     MLIR_NamedAttr pred = MLIR_Named(MLIR_KEY_PREDICATE, pa);
     return emit_op1(e, OP_TYPE_ARITH_CMPF, e->i1, ops, 2, &pred, 1);
 }
@@ -725,10 +793,15 @@ static MLIR_ValueHandle emit_cmpf(E *e, int64_t predicate,
 static MLIR_ValueHandle emit_icmp_ptr(E *e, int64_t predicate,
                                       MLIR_ValueHandle a, MLIR_ValueHandle b) {
     if (!e->caches_init) emit_init_attr_caches(e);
-    MLIR_ValueHandle ops[2] = { a, b };
     MLIR_AttributeHandle pa = (predicate >= 0 && predicate < 10)
         ? e->cmpi_pred_attrs[predicate]
         : MLIR_CreateAttributeInteger(e->ctx, predicate, e->i64_signed);
+    if (e->cur_block) {
+        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+        bd.loc = e->loc;
+        return MLIR_BuildBinaryAttr(&bd, OP_TYPE_LLVM_ICMP, e->i1, a, b, MLIR_KEY_PREDICATE, pa);
+    }
+    MLIR_ValueHandle ops[2] = { a, b };
     MLIR_NamedAttr pred = MLIR_Named(MLIR_KEY_PREDICATE, pa);
     return emit_op1(e, OP_TYPE_LLVM_ICMP, e->i1, ops, 2, &pred, 1);
 }
@@ -738,57 +811,63 @@ static MLIR_ValueHandle emit_null_ptr(E *e) {
 }
 
 static MLIR_ValueHandle emit_extsi_i32_to_i64(E *e, MLIR_ValueHandle v) {
-    return emit_op1(e, OP_TYPE_ARITH_EXTSI, e->i64, &v, 1, NULL, 0);
+    return emit_unary(e, OP_TYPE_ARITH_EXTSI, e->i64, v);
 }
 
 // Zero-extend i32 -> i64 (arith.extui), used to widen unsigned operands.
 static MLIR_ValueHandle emit_extui_i32_to_i64(E *e, MLIR_ValueHandle v) {
-    return emit_op1(e, OP_TYPE_ARITH_EXTUI, e->i64, &v, 1, NULL, 0);
+    return emit_unary(e, OP_TYPE_ARITH_EXTUI, e->i64, v);
 }
 
 // Reinterpret a pointer as an i64 (llvm.ptrtoint). Used to pass pointer
 // arguments to __builtin_syscall6 without requiring an explicit (long) cast.
 static MLIR_ValueHandle emit_ptrtoint_i64(E *e, MLIR_ValueHandle v) {
-    return emit_op1(e, OP_TYPE_LLVM_PTRTOINT, e->i64, &v, 1, NULL, 0);
+    return emit_unary(e, OP_TYPE_LLVM_PTRTOINT, e->i64, v);
 }
 
 // Reinterpret the i64 `v` as a pointer (llvm.inttoptr).
 static MLIR_ValueHandle emit_inttoptr_i64(E *e, MLIR_ValueHandle v) {
-    return emit_op1(e, OP_TYPE_LLVM_INTTOPTR, e->ptr, &v, 1, NULL, 0);
+    return emit_unary(e, OP_TYPE_LLVM_INTTOPTR, e->ptr, v);
 }
 
 // Floating-point negation (llvm.fneg): flips the sign bit, so -(+0.0) is
 // -0.0. `0.0 - x` would give +0.0 there.
 static MLIR_ValueHandle emit_fneg(E *e, MLIR_TypeHandle ft, MLIR_ValueHandle v) {
-    return emit_op1(e, OP_TYPE_LLVM_FNEG, ft, &v, 1, NULL, 0);
+    return emit_unary(e, OP_TYPE_LLVM_FNEG, ft, v);
 }
 
 // Sign-extend i8 / i16 -> i32 (arith.extsi).
 static MLIR_ValueHandle emit_extsi_to_i32(E *e, MLIR_ValueHandle v) {
-    return emit_op1(e, OP_TYPE_ARITH_EXTSI, e->i32, &v, 1, NULL, 0);
+    return emit_unary(e, OP_TYPE_ARITH_EXTSI, e->i32, v);
 }
 
 // Zero-extend i8 / i16 -> i32 (arith.extui), used to widen loads of
 // `unsigned char` / `unsigned short` / bool storage.
 static MLIR_ValueHandle emit_extui_to_i32(E *e, MLIR_ValueHandle v) {
-    return emit_op1(e, OP_TYPE_ARITH_EXTUI, e->i32, &v, 1, NULL, 0);
+    return emit_unary(e, OP_TYPE_ARITH_EXTUI, e->i32, v);
 }
 
 // Truncate i64 -> i32 (arith.trunci).
 static MLIR_ValueHandle emit_trunci_i64_to_i32(E *e, MLIR_ValueHandle v) {
-    return emit_op1(e, OP_TYPE_ARITH_TRUNCI, e->i32, &v, 1, NULL, 0);
+    return emit_unary(e, OP_TYPE_ARITH_TRUNCI, e->i32, v);
 }
 
 // Truncate any integer to the narrower integer type `ty` (arith.trunci).
 static MLIR_ValueHandle emit_trunci_to(E *e, MLIR_ValueHandle v, MLIR_TypeHandle ty) {
-    return emit_op1(e, OP_TYPE_ARITH_TRUNCI, ty, &v, 1, NULL, 0);
+    return emit_unary(e, OP_TYPE_ARITH_TRUNCI, ty, v);
 }
 
 // arith.constant <v> : `ty` (i8 / i16) — narrow stores of constants, e.g.
 // char-array string-literal init. `v` is the zero-extended bit pattern
 // (0..255 / 0..65535): the backends hold narrow values zero-extended.
 static MLIR_ValueHandle emit_const_narrow(E *e, int64_t v, MLIR_TypeHandle ty) {
-    MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(e->ctx, v, ty));
+    MLIR_AttributeHandle a = MLIR_CreateAttributeInteger(e->ctx, v, ty);
+    if (e->cur_block) {
+        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+        bd.loc = e->loc;
+        return MLIR_BuildNullaryAttr(&bd, OP_TYPE_ARITH_CONSTANT, ty, MLIR_KEY_VALUE, a);
+    }
+    MLIR_NamedAttr val = MLIR_Named(MLIR_KEY_VALUE, a);
     return emit_op1(e, OP_TYPE_ARITH_CONSTANT, ty, NULL, 0, &val, 1);
 }
 
@@ -822,8 +901,13 @@ static MLIR_TypeHandle ptr_for_as(E *e, uint32_t as) {
 
 static MLIR_ValueHandle emit_addressof(E *e, string sym, MLIR_TypeHandle ptr_ty) {
     if (!ptr_ty) ptr_ty = e->ptr;
-    MLIR_NamedAttr a = MLIR_Named(MLIR_KEY_GLOBAL_NAME, MLIR_CreateAttributeSymbolRef(
-        e->ctx, sym));
+    MLIR_AttributeHandle sa = MLIR_CreateAttributeSymbolRef(e->ctx, sym);
+    if (e->cur_block) {
+        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+        bd.loc = e->loc;
+        return MLIR_BuildNullaryAttr(&bd, OP_TYPE_LLVM_MLIR_ADDRESSOF, ptr_ty, MLIR_KEY_GLOBAL_NAME, sa);
+    }
+    MLIR_NamedAttr a = MLIR_Named(MLIR_KEY_GLOBAL_NAME, sa);
     return emit_op1(e, OP_TYPE_LLVM_MLIR_ADDRESSOF, ptr_ty, NULL, 0, &a, 1);
 }
 
@@ -995,6 +1079,12 @@ static MLIR_ValueHandle emit_alloca(E *e, MLIR_TypeHandle elem_ty) {
 }
 
 static void emit_store_v(E *e, MLIR_ValueHandle val, MLIR_ValueHandle ptr) {
+    if (e->cur_block) {
+        MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
+        bd.loc = e->loc;
+        MLIR_BuildVoidBinary(&bd, OP_TYPE_LLVM_STORE, val, ptr);
+        return;
+    }
     MLIR_ValueHandle ops[2] = { val, ptr };
     emit_op(e, OP_TYPE_LLVM_STORE,
             NULL, 0, NULL, 0, ops, 2, NULL, 0, NULL, 0);
@@ -2933,9 +3023,10 @@ static bool emit_fold_leaf(void *ctx, Expr *ex, bool lenient, FoldVal *out) {
     EmitFoldCtx *fc = (EmitFoldCtx *)ctx;
     if (ex->kind == EX_VAR) {
         // An enumerator (an `int`) unless a variable shadows it, as in
-        // emit_expr's EX_VAR.
+        // emit_expr's EX_VAR. Check find_enum first (bloom-filtered) so
+        // ordinary local variables don't pay a full scope-chain lookup.
         int64_t en_v;
-        if (lookup(fc->e, fc->sc, ex->name) || !find_enum(fc->e, ex->name, &en_v))
+        if (!find_enum(fc->e, ex->name, &en_v) || lookup(fc->e, fc->sc, ex->name))
             return false;
         *out = fold_int(en_v);
         return true;
@@ -3133,8 +3224,23 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
     // Only kicks in for nodes that ast_fold_int actually folds; anything
     // with a side effect or a non-int operand falls through unchanged.
     if (ex->kind == EX_BIN || ex->kind == EX_UN || ex->kind == EX_TERNARY) {
+        bool maybe_const = true;
+        if (ex->kind == EX_BIN) {
+            uint8_t lk = ex->lhs ? ex->lhs->kind : EX_INT;
+            uint8_t rk = ex->rhs ? ex->rhs->kind : EX_INT;
+            if (lk == EX_FIELD || lk == EX_INDEX || lk == EX_CALL || lk == EX_DEREF ||
+                lk == EX_ASSIGN || lk == EX_STR || lk == EX_ADDR || lk == EX_FLOAT ||
+                rk == EX_FIELD || rk == EX_INDEX || rk == EX_CALL || rk == EX_DEREF ||
+                rk == EX_ASSIGN || rk == EX_STR || rk == EX_ADDR || rk == EX_FLOAT)
+                maybe_const = false;
+        } else if (ex->kind == EX_UN && ex->lhs) {
+            uint8_t lk = ex->lhs->kind;
+            if (lk == EX_FIELD || lk == EX_INDEX || lk == EX_CALL || lk == EX_DEREF ||
+                lk == EX_ASSIGN || lk == EX_STR || lk == EX_ADDR || lk == EX_FLOAT)
+                maybe_const = false;
+        }
         FoldVal fv;
-        if (ast_fold(e, sc, ex, &fv)) {
+        if (maybe_const && ast_fold(e, sc, ex, &fv)) {
             r.val = fv.is_i64 ? emit_const_i64(e, fv.v) : emit_const_i32(e, fv.v);
             r.is_i64 = fv.is_i64;
             r.is_unsigned = fv.is_unsigned;
@@ -6168,6 +6274,53 @@ static MLIR_TypeHandle slot_param_type(E *e, SlotInfo *p) {
     return scalar_mlir_type(e, p->type.kind);
 }
 
+static void ensure_sig_resolved(E *e, FuncSig *sig) {
+    if (sig->resolved) return;
+    sig->resolved = true;
+    Func *f = sig->func;
+    sig->is_variadic = f->is_variadic;
+    slot_resolve(e, f->return_type, &sig->ret);
+    sig->n_params = f->params.size;
+    sig->params = arena_new_array(e->arena, SlotInfo, sig->n_params ? sig->n_params : 1);
+    for (size_t i = 0; i < sig->n_params; i++) {
+        slot_resolve(e, f->params.data[i].type, &sig->params[i]);
+    }
+    sig->sret = (sig->ret.type.kind == TY_STRUCT);
+    bool is_void = (sig->ret.type.kind == TY_VOID);
+    sig->cursor_va = sig->is_variadic && f &&
+        (!f->is_forward || !e->program->host_varargs);
+    sig->defined_here = f && !f->is_forward;
+    size_t in_total = sig->n_params + (sig->sret ? 1 : 0) +
+                      (sig->cursor_va ? 1 : 0);
+    size_t out_total = (sig->sret || is_void) ? 0 : 1;
+    sig->flat_in_tys  = arena_new_array(e->arena, MLIR_TypeHandle, in_total ? in_total : 1);
+    sig->flat_out_tys = arena_new_array(e->arena, MLIR_TypeHandle, out_total ? out_total : 1);
+    size_t off = 0;
+    if (sig->sret) sig->flat_in_tys[off++] = e->ptr;
+    for (size_t i = 0; i < sig->n_params; i++) {
+        sig->flat_in_tys[off++] = slot_param_type(e, &sig->params[i]);
+    }
+    if (sig->cursor_va) sig->flat_in_tys[off++] = e->ptr;  // hidden __va
+    sig->n_flat_in = off;
+    if (!sig->sret && !is_void) {
+        sig->flat_out_tys[0] = scalar_mlir_type(e, sig->ret.type.kind);
+        sig->n_flat_out = 1;
+    } else {
+        sig->n_flat_out = 0;
+    }
+    bool real_variadic = sig->is_variadic && !sig->cursor_va;
+    if (real_variadic) {
+        MLIR_TypeHandle ret_ty = (sig->n_flat_out == 1)
+            ? sig->flat_out_tys[0]
+            : MLIR_CreateTypeLLVMVoid(e->ctx);
+        sig->llvm_fn_ty = MLIR_CreateTypeLLVMFunction(e->ctx,
+            ret_ty, sig->flat_in_tys, sig->n_flat_in, /*is_var_arg=*/true);
+    } else {
+        sig->fn_ty = MLIR_CreateTypeFunction(e->ctx,
+            sig->flat_in_tys, sig->n_flat_in, sig->flat_out_tys, sig->n_flat_out);
+    }
+}
+
 static void build_signatures(E *e) {
     e->n_sigs = e->program->funcs.size;
     e->sigs = arena_new_array(e->arena, FuncSig, e->n_sigs ? e->n_sigs : 1);
@@ -6177,68 +6330,6 @@ static void build_signatures(E *e) {
         *sig = (FuncSig){0};
         sig->name = f->name;
         sig->func = f;
-        sig->is_variadic = f->is_variadic;
-        slot_resolve(e, f->return_type, &sig->ret);
-        sig->n_params = f->params.size;
-        sig->params = arena_new_array(e->arena, SlotInfo, sig->n_params ? sig->n_params : 1);
-        for (size_t i = 0; i < sig->n_params; i++) {
-            slot_resolve(e, f->params.data[i].type, &sig->params[i]);
-        }
-        sig->sret = (sig->ret.type.kind == TY_STRUCT);
-        // Note: variadic + sret is allowed. The sret pointer is the first
-        // argument, followed by fixed args, then variadic args. The function
-        // returns void via llvm.return.
-        bool is_void = (sig->ret.type.kind == TY_VOID);
-        // A variadic function lowered with tinyC's portable 8-byte cursor
-        // va_list takes one extra hidden trailing `ptr` parameter (the
-        // caller-packed varargs buffer). Use the cursor model only for
-        // variadic functions DEFINED in this TU (tinyc va_list / wasm path).
-        // Extern variadic callees (libc `open`, `printf`, `fcntl`, ...) lower
-        // as real `llvm.func` variadic + `llvm.call` and bypass `func.func`.
-        // is_forward distinguishes the cases: a prototype ends with ';' and
-        // stays forward-only; a later definition replaces it and enables (A).
-        // Extern decls never get a tinyc body, so they always take (B).
-        //
-        // Gate (B) on program->host_varargs (--host-varargs): native tests that
-        // link host libc need real ABI for forward decls. wasm/ELF self-host
-        // compiles each .c to a separate .wasm.o without --host-varargs; forward
-        // decls there must keep cursor_va so calls match tinyc-defined printf
-        // etc. in other objects (restores pre-fix wasm self-host behavior).
-        sig->cursor_va = sig->is_variadic && f &&
-            (!f->is_forward || !e->program->host_varargs);
-        sig->defined_here = f && !f->is_forward;
-        size_t in_total = sig->n_params + (sig->sret ? 1 : 0) +
-                          (sig->cursor_va ? 1 : 0);
-        size_t out_total = (sig->sret || is_void) ? 0 : 1;
-        sig->flat_in_tys  = arena_new_array(e->arena, MLIR_TypeHandle, in_total ? in_total : 1);
-        sig->flat_out_tys = arena_new_array(e->arena, MLIR_TypeHandle, out_total ? out_total : 1);
-        size_t off = 0;
-        if (sig->sret) sig->flat_in_tys[off++] = e->ptr;
-        for (size_t i = 0; i < sig->n_params; i++) {
-            sig->flat_in_tys[off++] = slot_param_type(e, &sig->params[i]);
-        }
-        if (sig->cursor_va) sig->flat_in_tys[off++] = e->ptr;  // hidden __va
-        sig->n_flat_in = off;
-        if (!sig->sret && !is_void) {
-            sig->flat_out_tys[0] = scalar_mlir_type(e, sig->ret.type.kind);
-            sig->n_flat_out = 1;
-        } else {
-            sig->n_flat_out = 0;
-        }
-        sig->fn_ty = MLIR_CreateTypeFunction(e->ctx,
-            sig->flat_in_tys, sig->n_flat_in, sig->flat_out_tys, sig->n_flat_out);
-        // Always compute llvm_fn_ty too — needed for variadic emit and for
-        // static functions which we emit as `llvm.func` with internal linkage.
-        // cursor_va functions are NOT real LLVM varargs (the hidden ptr param
-        // already carries the args), so their llvm_fn_ty is non-variadic.
-        {
-            MLIR_TypeHandle ret_ty = (sig->n_flat_out == 1)
-                ? sig->flat_out_tys[0]
-                : MLIR_CreateTypeLLVMVoid(e->ctx);
-            sig->llvm_fn_ty = MLIR_CreateTypeLLVMFunction(e->ctx,
-                ret_ty, sig->flat_in_tys, sig->n_flat_in,
-                /*is_var_arg=*/sig->is_variadic && !sig->cursor_va);
-        }
     }
     if (e->n_sigs > 0) {
         size_t cap = 16;
@@ -7009,56 +7100,58 @@ static void check_struct_cycles(E *e) {
     }
 }
 
-// Pre-pass: register identified !llvm.struct types for each StructDef and
-// then set their bodies (allowing already-registered types to be looked up
-// when nested by-value structs reference each other).
+// Lazily register identified !llvm.struct type and set its body on first use
+// (unused structs from included headers never allocate MLIR types).
+static MLIR_TypeHandle resolve_struct_type(E *e, size_t idx) {
+    if (e->struct_types[idx].ty != MLIR_INVALID_HANDLE)
+        return e->struct_types[idx].ty;
+    StructDef *sd = e->struct_types[idx].sd;
+    MLIR_TypeHandle ty = MLIR_CreateTypeLLVMStructIdentified(e->ctx, sd->name);
+    e->struct_types[idx].ty = ty;
+    int saved_line = e->cur_line;
+    e->cur_line = sd->line;
+    if (sd->is_union) {
+        MLIR_TypeHandle uelem; int64_t ues, uc;
+        union_blob_layout(e, sd, &uelem, &ues, &uc);
+        MLIR_TypeHandle *ubody = arena_new_array(e->arena, MLIR_TypeHandle, 1);
+        ubody[0] = MLIR_CreateTypeLLVMArray(e->ctx, uelem, (uint64_t)uc);
+        MLIR_SetTypeLLVMStructBody(e->ctx, ty, ubody, 1);
+        e->cur_line = saved_line;
+        return ty;
+    }
+    size_t n = sd->fields.size;
+    MLIR_TypeHandle *body = arena_new_array(e->arena, MLIR_TypeHandle, n ? n : 1);
+    for (size_t k = 0; k < n; k++) {
+        Type ft = sd->fields.data[k].type;
+        if (ft.kind == TY_I32 || ft.kind == TY_I64 || ft.kind == TY_F32 ||
+            ft.kind == TY_F64 || ft.kind == TY_PTR_STRUCT || ft.kind == TY_PTR_I32 ||
+            ft.kind == TY_PTR_CHAR || ft.kind == TY_PTR_VOID ||
+            ft.kind == TY_PTR_PTR || ft.kind == TY_FNPTR) {
+            body[k] = scalar_mem_type(e, &ft);
+        } else if (ft.kind == TY_STRUCT) {
+            StructDef *inner = find_struct(e, ft.struct_name);
+            MLIR_TypeHandle t = find_struct_type(e, inner);
+            body[k] = t;
+        } else if (ft.kind == TY_ARRAY_I32 || ft.kind == TY_ARRAY_F32 ||
+                   ft.kind == TY_ARRAY_PTR_STRUCT || ft.kind == TY_ARRAY_PTR_CHAR) {
+            body[k] = array_mlir_type(e, &ft);
+        } else {
+            EMIT_ERR(e, "unsupported struct field type in {}", sd->name);
+            body[k] = e->i32;
+        }
+    }
+    MLIR_SetTypeLLVMStructBody(e->ctx, ty, body, n);
+    e->cur_line = saved_line;
+    return ty;
+}
+
 static void init_struct_types(E *e) {
     e->n_struct_types = e->program->structs.size;
     e->struct_types = arena_new_array(e->arena, StructTypeEntry,
                                       e->n_struct_types ? e->n_struct_types : 1);
     for (size_t i = 0; i < e->n_struct_types; i++) {
-        StructDef *sd = e->program->structs.data[i];
-        e->struct_types[i].sd = sd;
-        e->struct_types[i].ty = MLIR_CreateTypeLLVMStructIdentified(e->ctx, sd->name);
-    }
-    for (size_t i = 0; i < e->n_struct_types; i++) {
-        StructDef *sd = e->struct_types[i].sd;
-        e->cur_line = sd->line;
-        if (sd->is_union) {
-            // A union overlaps all members at offset 0. Emit its body as a
-            // single blob field (array of alignment-wide integers) sized to
-            // the largest member, so the llvm.struct size equals max(member
-            // sizes) rather than their sum. All union member accesses are
-            // normalised to offset 0 elsewhere (see walk_struct_lhs).
-            MLIR_TypeHandle uelem; int64_t ues, uc;
-            union_blob_layout(e, sd, &uelem, &ues, &uc);
-            MLIR_TypeHandle *ubody = arena_new_array(e->arena, MLIR_TypeHandle, 1);
-            ubody[0] = MLIR_CreateTypeLLVMArray(e->ctx, uelem, (uint64_t)uc);
-            MLIR_SetTypeLLVMStructBody(e->ctx, e->struct_types[i].ty, ubody, 1);
-            continue;
-        }
-        size_t n = sd->fields.size;
-        MLIR_TypeHandle *body = arena_new_array(e->arena, MLIR_TypeHandle, n ? n : 1);
-        for (size_t k = 0; k < n; k++) {
-            Type ft = sd->fields.data[k].type;
-            if (ft.kind == TY_I32 || ft.kind == TY_I64 || ft.kind == TY_F32 ||
-                ft.kind == TY_F64 || ft.kind == TY_PTR_STRUCT || ft.kind == TY_PTR_I32 ||
-                ft.kind == TY_PTR_CHAR || ft.kind == TY_PTR_VOID ||
-                ft.kind == TY_PTR_PTR || ft.kind == TY_FNPTR) {
-                body[k] = scalar_mem_type(e, &ft);
-            } else if (ft.kind == TY_STRUCT) {
-                StructDef *inner = find_struct(e, ft.struct_name);
-                MLIR_TypeHandle t = find_struct_type(e, inner);
-                body[k] = t;
-            } else if (ft.kind == TY_ARRAY_I32 || ft.kind == TY_ARRAY_F32 ||
-                       ft.kind == TY_ARRAY_PTR_STRUCT || ft.kind == TY_ARRAY_PTR_CHAR) {
-                body[k] = array_mlir_type(e, &ft);
-            } else {
-                EMIT_ERR(e, "unsupported struct field type in {}", sd->name);
-                body[k] = e->i32;
-            }
-        }
-        MLIR_SetTypeLLVMStructBody(e->ctx, e->struct_types[i].ty, body, n);
+        e->struct_types[i].sd = e->program->structs.data[i];
+        e->struct_types[i].ty = MLIR_INVALID_HANDLE;
     }
 }
 

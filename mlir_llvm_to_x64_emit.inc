@@ -986,9 +986,11 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
     uint64_t t_ra = x64_clock();
     if (x64_ra_mode != 3) {
         RegTarget T = x64_regtarget();
-        uint32_t um = (x64_ra_mode == 1 && !F.wasm_lifted)
+        bool use_fast = (x64_ra_mode == 1 && !F.wasm_lifted);
+        uint32_t um = use_fast
             ? mlir_regalloc_fast(ctx, reg, nb, &F.rm, &sm_spill, &nslots, &T)
             : mlir_regalloc_global(ctx, reg, nb, &F.rm, &sm_spill, &nslots, &T);
+        if (um != RA_BAIL) F.fast_ra = use_fast;
         if (um == RA_BAIL) {
             memset(&F.rm, 0, sizeof(F.rm));
             F.rm.arena = MLIR_GetArenaAllocator(ctx);

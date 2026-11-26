@@ -315,7 +315,7 @@ uint32_t mlir_regalloc_fast(MLIR_Context *ctx, MLIR_RegionHandle reg,
 
     size_t nv_alloc = nv_max;
     size_t main_need =
-        n_blocks * (sizeof(uint32_t) * 2 + sizeof(uint8_t) + 8) +
+        n_blocks * (sizeof(uint32_t) * 3 + sizeof(uint8_t) + 8) +
         (n_blocks + 1) * (sizeof(uint32_t) + 8) +
         nv_alloc * (sizeof(MLIR_ValueHandle) + sizeof(uint32_t) * 3 + sizeof(uint8_t) + 8) +
         256;
@@ -323,6 +323,7 @@ uint32_t mlir_regalloc_fast(MLIR_Context *ctx, MLIR_RegionHandle reg,
     size_t moff = 0;
 
     uint32_t *block_first  = (uint32_t *)ra_bump(mbuf, &moff, n_blocks * sizeof(uint32_t));
+    uint32_t *blk_nops     = (uint32_t *)ra_bump(mbuf, &moff, n_blocks * sizeof(uint32_t));
     uint32_t *blk_vstart   = (uint32_t *)ra_bump(mbuf, &moff, (n_blocks + 1) * sizeof(uint32_t));
     uint8_t  *blk_has_call = (uint8_t  *)ra_bump(mbuf, &moff, n_blocks * sizeof(uint8_t));
     MLIR_ValueHandle *handle = (MLIR_ValueHandle *)ra_bump(mbuf, &moff, nv_alloc * sizeof(MLIR_ValueHandle));
@@ -350,15 +351,19 @@ uint32_t mlir_regalloc_fast(MLIR_Context *ctx, MLIR_RegionHandle reg,
             nv++;
         }
         size_t no = MLIR_GetBlockNumOps(ctx, bk);
+        blk_nops[b] = (uint32_t)no;
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
             if (MLIR_GetOpNumRegions(ctx, op) > 0) return RA_BAIL;
             MLIR_OpType oty = MLIR_GetOpType(ctx, op);
             if (oty == OP_TYPE_LLVM_CALL) has_call = 1;
             if (oty == OP_TYPE_LLVM_MLIR_CONSTANT ||
+                oty == OP_TYPE_LLVM_MLIR_ADDRESSOF ||
+                oty == OP_TYPE_LLVM_MLIR_UNDEF ||
                 oty == OP_TYPE_LLVM_MLIR_ZERO ||
                 oty == OP_TYPE_LLVM_MLIR_NULL) {
-                if (ra_is_const(T, ctx, op)) { pos++; continue; }
+                pos++;
+                continue;
             }
             size_t nr = MLIR_GetOpNumResults(ctx, op);
             if (nv + nr > nv_max) return RA_BAIL;
@@ -394,60 +399,127 @@ uint32_t mlir_regalloc_fast(MLIR_Context *ctx, MLIR_RegionHandle reg,
         for (uint32_t i = 0; i < nv; i++) a64_hh_put(&vmap, handle[i], i);
     }
 
-    #define RAF_VMAP_GET(VH, OUT) ( \
-        use_dense_vmap \
-            ? (((uintptr_t)(VH) - min_vh) < v_span && \
-               ((*(OUT) = v_dense[(uintptr_t)(VH) - min_vh]) != UINT32_MAX)) \
-            : (vmap.cap != 0 && a64_hh_get(&vmap, (VH), (OUT))) \
-    )
-
     // Pass 2: record last_use and mark cross-block uses as global.
-    for (size_t b = 0; b < n_blocks; b++) {
-        MLIR_BlockHandle bk = blk_h[b];
-        uint32_t op_pos = block_first[b];
-        size_t no = MLIR_GetBlockNumOps(ctx, bk);
-        for (size_t i = 0; i < no; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
-            size_t nop = MLIR_GetOpNumOperands(ctx, op);
-            for (size_t k = 0; k < nop; k++) {
-                uint32_t vi;
-                if (RAF_VMAP_GET(MLIR_GetOpOperand(ctx, op, k), &vi)) {
-                    if (def_blk[vi] != (uint32_t)b) is_global[vi] = 1;
-                    else if (op_pos > last_use[vi]) last_use[vi] = op_pos;
+    if (use_dense_vmap) {
+        if (n_blocks == 1) {
+            MLIR_BlockHandle bk = blk_h[0];
+            size_t no = blk_nops[0];
+            uint32_t op_pos = 0;
+            for (size_t i = 0; i < no; i++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+                size_t nop = MLIR_GetOpNumOperands(ctx, op);
+                for (size_t k = 0; k < nop; k++) {
+                    uintptr_t d = (uintptr_t)MLIR_GetOpOperand(ctx, op, k) - min_vh;
+                    if (d < v_span) {
+                        uint32_t vi = v_dense[d];
+                        if (vi != UINT32_MAX && op_pos > last_use[vi]) last_use[vi] = op_pos;
+                    }
+                }
+                op_pos++;
+            }
+        } else {
+            for (size_t b = 0; b < n_blocks; b++) {
+                MLIR_BlockHandle bk = blk_h[b];
+                uint32_t op_pos = block_first[b];
+                size_t no = blk_nops[b];
+                for (size_t i = 0; i < no; i++) {
+                    MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+                    size_t nop = MLIR_GetOpNumOperands(ctx, op);
+                    for (size_t k = 0; k < nop; k++) {
+                        uintptr_t d = (uintptr_t)MLIR_GetOpOperand(ctx, op, k) - min_vh;
+                        if (d < v_span) {
+                            uint32_t vi = v_dense[d];
+                            if (vi != UINT32_MAX) {
+                                if (def_blk[vi] != (uint32_t)b) is_global[vi] = 1;
+                                else if (op_pos > last_use[vi]) last_use[vi] = op_pos;
+                            }
+                        }
+                    }
+                    op_pos++;
+                }
+                if (no > 0) {
+                    MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+                    uint32_t tpos = op_pos - 1;
+                    size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
+                    for (size_t s = 0; s < ns; s++) {
+                        size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, term, s);
+                        for (size_t k = 0; k < nso; k++) {
+                            uintptr_t d = (uintptr_t)MLIR_GetOpSuccessorOperand(ctx, term, s, k) - min_vh;
+                            if (d < v_span) {
+                                uint32_t vi = v_dense[d];
+                                if (vi != UINT32_MAX) {
+                                    if (def_blk[vi] != (uint32_t)b) is_global[vi] = 1;
+                                    else if (tpos > last_use[vi]) last_use[vi] = tpos;
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            op_pos++;
         }
-        if (n_blocks > 1 && no > 0) {
-            MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
-            uint32_t tpos = op_pos - 1;
-            size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
-            for (size_t s = 0; s < ns; s++) {
-                size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, term, s);
-                for (size_t k = 0; k < nso; k++) {
+    } else {
+        for (size_t b = 0; b < n_blocks; b++) {
+            MLIR_BlockHandle bk = blk_h[b];
+            uint32_t op_pos = block_first[b];
+            size_t no = blk_nops[b];
+            for (size_t i = 0; i < no; i++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+                size_t nop = MLIR_GetOpNumOperands(ctx, op);
+                for (size_t k = 0; k < nop; k++) {
                     uint32_t vi;
-                    if (RAF_VMAP_GET(MLIR_GetOpSuccessorOperand(ctx, term, s, k), &vi)) {
+                    if (vmap.cap != 0 && a64_hh_get(&vmap, MLIR_GetOpOperand(ctx, op, k), &vi)) {
                         if (def_blk[vi] != (uint32_t)b) is_global[vi] = 1;
-                        else if (tpos > last_use[vi]) last_use[vi] = tpos;
+                        else if (op_pos > last_use[vi]) last_use[vi] = op_pos;
+                    }
+                }
+                op_pos++;
+            }
+            if (n_blocks > 1 && no > 0) {
+                MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+                uint32_t tpos = op_pos - 1;
+                size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
+                for (size_t s = 0; s < ns; s++) {
+                    size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, term, s);
+                    for (size_t k = 0; k < nso; k++) {
+                        uint32_t vi;
+                        if (vmap.cap != 0 && a64_hh_get(&vmap, MLIR_GetOpSuccessorOperand(ctx, term, s, k), &vi)) {
+                            if (def_blk[vi] != (uint32_t)b) is_global[vi] = 1;
+                            else if (tpos > last_use[vi]) last_use[vi] = tpos;
+                        }
                     }
                 }
             }
         }
     }
-    #undef RAF_VMAP_GET
     if (vmap.cap) a64_hh_free(&vmap);
 
-    // Prepare dense output tables for rm and sm.
+    // Prepare dense output table for rm; initialize sm lazily only on first spill.
     int32_t *rm_d = NULL, *sm_d = NULL;
+    bool sm_inited = false;
     if (use_dense_vmap) {
         rm_d = (int32_t *)ra_pool_ensure(&g_ra_rm_pool, v_span * sizeof(int32_t));
         sm_init_dense_buf(rm, rm_d, min_vh, v_span);
-        sm_d = (int32_t *)ra_pool_ensure(&g_ra_sm_pool, v_span * sizeof(int32_t));
-        sm_init_dense_buf(sm, sm_d, min_vh, v_span);
     } else {
         sm_reserve(rm, nv);
-        sm_reserve(sm, nv);
     }
+
+    #define RAF_SM_PUT(VH, SLOT) do { \
+        if (!sm_inited) { \
+            sm_inited = true; \
+            if (use_dense_vmap) { \
+                sm_d = (int32_t *)ra_pool_ensure(&g_ra_sm_pool, v_span * sizeof(int32_t)); \
+                sm_init_dense_buf(sm, sm_d, min_vh, v_span); \
+            } else { \
+                sm_reserve(sm, nv); \
+            } \
+        } \
+        if (sm_d) { \
+            uintptr_t _idx = (uintptr_t)(VH) - min_vh; \
+            if (sm_d[_idx] < 0) { sm_d[_idx] = (SLOT); sm_n++; } \
+        } else { \
+            sm_put(sm, (VH), (SLOT)); \
+        } \
+    } while (0)
 
     // Pass 3: assign dedicated slots to cross-block values, then per-block linear scan.
     int32_t glob_slots = 0;
@@ -455,12 +527,7 @@ uint32_t mlir_regalloc_fast(MLIR_Context *ctx, MLIR_RegionHandle reg,
     for (uint32_t vi = 0; vi < nv; vi++) {
         if (!is_global[vi]) continue;
         int32_t slot = glob_slots++;
-        if (sm_d) {
-            uintptr_t idx = (uintptr_t)handle[vi] - min_vh;
-            if (sm_d[idx] < 0) { sm_d[idx] = slot; sm_n++; }
-        } else {
-            sm_put(sm, handle[vi], slot);
-        }
+        RAF_SM_PUT(handle[vi], slot);
     }
 
     uint32_t pool_mask = (T->npool >= 32) ? 0xFFFFFFFFu : ((1u << T->npool) - 1u);
@@ -490,12 +557,7 @@ uint32_t mlir_regalloc_fast(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 // Dead-on-def: share a dedicated scratch slot at dead_slot (never
                 // aliases any live global [0..glob_slots) or live local [local_slot_base..)).
                 if (dead_slot + 1 > max_slot) max_slot = dead_slot + 1;
-                if (sm_d) {
-                    uintptr_t idx = (uintptr_t)handle[vi] - min_vh;
-                    if (sm_d[idx] < 0) { sm_d[idx] = dead_slot; sm_n++; }
-                } else {
-                    sm_put(sm, handle[vi], dead_slot);
-                }
+                RAF_SM_PUT(handle[vi], dead_slot);
                 continue;
             }
             for (size_t a = 0; a < nact; ) {
@@ -523,15 +585,11 @@ uint32_t mlir_regalloc_fast(MLIR_Context *ctx, MLIR_RegionHandle reg,
             } else {
                 int32_t slot = local_slot++;
                 if (local_slot > max_slot) max_slot = local_slot;
-                if (sm_d) {
-                    uintptr_t idx = (uintptr_t)handle[vi] - min_vh;
-                    if (sm_d[idx] < 0) { sm_d[idx] = slot; sm_n++; }
-                } else {
-                    sm_put(sm, handle[vi], slot);
-                }
+                RAF_SM_PUT(handle[vi], slot);
             }
         }
     }
+    #undef RAF_SM_PUT
     if (rm_d) rm->n = rm_n;
     if (sm_d) sm->n = sm_n;
     *out_nslots = max_slot;

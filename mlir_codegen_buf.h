@@ -42,23 +42,35 @@ static inline void buf_pad_to(Buf *b, size_t target) {
     b->len = target;
 }
 static inline void buf_le16(Buf *b, uint16_t v) {
-    buf_u8(b, (uint8_t)(v & 0xff));
-    buf_u8(b, (uint8_t)((v >> 8) & 0xff));
+    if (b->len + 2 > b->cap) buf_grow(b, 2);
+    uint8_t *p = b->data + b->len;
+    p[0] = (uint8_t)(v & 0xff);
+    p[1] = (uint8_t)((v >> 8) & 0xff);
+    b->len += 2;
 }
 static inline void buf_le32(Buf *b, uint32_t v) {
-    buf_u8(b, (uint8_t)(v & 0xff));
-    buf_u8(b, (uint8_t)((v >> 8) & 0xff));
-    buf_u8(b, (uint8_t)((v >> 16) & 0xff));
-    buf_u8(b, (uint8_t)((v >> 24) & 0xff));
+    if (b->len + 4 > b->cap) buf_grow(b, 4);
+    uint8_t *p = b->data + b->len;
+    p[0] = (uint8_t)(v & 0xff);
+    p[1] = (uint8_t)((v >> 8) & 0xff);
+    p[2] = (uint8_t)((v >> 16) & 0xff);
+    p[3] = (uint8_t)((v >> 24) & 0xff);
+    b->len += 4;
 }
 static inline void buf_le64(Buf *b, uint64_t v) {
-    for (int i = 0; i < 8; i++) buf_u8(b, (uint8_t)((v >> (8 * i)) & 0xff));
+    if (b->len + 8 > b->cap) buf_grow(b, 8);
+    uint8_t *p = b->data + b->len;
+    for (int i = 0; i < 8; i++) p[i] = (uint8_t)((v >> (8 * i)) & 0xff);
+    b->len += 8;
 }
 static inline void buf_be32(Buf *b, uint32_t v) {
-    buf_u8(b, (uint8_t)((v >> 24) & 0xff));
-    buf_u8(b, (uint8_t)((v >> 16) & 0xff));
-    buf_u8(b, (uint8_t)((v >> 8) & 0xff));
-    buf_u8(b, (uint8_t)(v & 0xff));
+    if (b->len + 4 > b->cap) buf_grow(b, 4);
+    uint8_t *p = b->data + b->len;
+    p[0] = (uint8_t)((v >> 24) & 0xff);
+    p[1] = (uint8_t)((v >> 16) & 0xff);
+    p[2] = (uint8_t)((v >> 8) & 0xff);
+    p[3] = (uint8_t)(v & 0xff);
+    b->len += 4;
 }
 static inline void buf_uleb(Buf *b, uint64_t v) {
     do {

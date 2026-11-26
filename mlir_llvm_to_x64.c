@@ -288,6 +288,7 @@ typedef struct {
     SlotMap       rm;
     SlotMap       spill;
     bool          has_spill;
+    bool          fast_ra;   // true when mlir_regalloc_fast ran (never maps remat ops)
     uint32_t      used_mask; // callee-saved pool regs the allocator used
     int32_t       cs_base;   // rbp offset base of the callee-saved spill area
     int           n_cs;      // # of callee-saved regs to save/restore
@@ -328,15 +329,15 @@ static void fail(FnCtx *F, const char *msg, string extra) {
 }
 
 // --- byte emission ---------------------------------------------------------
-static void eb(FnCtx *F, uint8_t b) { buf_u8(&F->f->code, b); }
-static void e32(FnCtx *F, uint32_t v) { buf_le32(&F->f->code, v); }
-static uint32_t here(FnCtx *F) { return (uint32_t)F->f->code.len; }
+static inline void eb(FnCtx *F, uint8_t b) { buf_u8(&F->f->code, b); }
+static inline void e32(FnCtx *F, uint32_t v) { buf_le32(&F->f->code, v); }
+static inline uint32_t here(FnCtx *F) { return (uint32_t)F->f->code.len; }
 
-static void rex(FnCtx *F, int w, int r, int x, int b) {
+static inline void rex(FnCtx *F, int w, int r, int x, int b) {
     uint8_t v = 0x40 | (w << 3) | ((r >= 8) << 2) | ((x >= 8) << 1) | (b >= 8);
     if (v != 0x40 || w) eb(F, v);
 }
-static void modrm(FnCtx *F, int mod, int reg, int rm) {
+static inline void modrm(FnCtx *F, int mod, int reg, int rm) {
     eb(F, (uint8_t)((mod << 6) | ((reg & 7) << 3) | (rm & 7)));
 }
 
@@ -353,12 +354,17 @@ static void mov_ri(FnCtx *F, uint8_t reg, int64_t imm, int w) {
     }
 }
 // generic ALU r/m64-or-32, r : opcode form (dst = dst OP src)
-static void alu_rr(FnCtx *F, uint8_t op, uint8_t dst, uint8_t src, int w) {
-    rex(F, w, src, 0, dst);
-    eb(F, op);
-    modrm(F, 3, src, dst);
+static inline void alu_rr(FnCtx *F, uint8_t op, uint8_t dst, uint8_t src, int w) {
+    Buf *b = &F->f->code;
+    if (b->len + 3 > b->cap) buf_grow(b, 3);
+    uint8_t *p = b->data + b->len;
+    uint8_t rv = (uint8_t)(0x40 | (w << 3) | ((src >= 8) << 2) | (dst >= 8));
+    if (rv != 0x40 || w) *p++ = rv;
+    *p++ = op;
+    *p++ = (uint8_t)(0xC0 | ((src & 7) << 3) | (dst & 7));
+    b->len = (size_t)(p - b->data);
 }
-static void mov_rr(FnCtx *F, uint8_t dst, uint8_t src, int w) {
+static inline void mov_rr(FnCtx *F, uint8_t dst, uint8_t src, int w) {
     if (dst == src && !w) return;
     alu_rr(F, 0x89, dst, src, w);
 }
@@ -368,24 +374,44 @@ static void imul_rr(FnCtx *F, uint8_t dst, uint8_t src, int w) {
     modrm(F, 3, dst, src);
 }
 // load reg, [rbp - off]
-static void load_rbp(FnCtx *F, uint8_t reg, int32_t off, int w) {
-    rex(F, w, reg, 0, 0);
-    eb(F, 0x8B);
-    modrm(F, 2, reg, RBP);
-    e32(F, (uint32_t)(-off));
+static inline void load_rbp(FnCtx *F, uint8_t reg, int32_t off, int w) {
+    Buf *b = &F->f->code;
+    if (b->len + 7 > b->cap) buf_grow(b, 7);
+    uint8_t *p = b->data + b->len;
+    uint8_t rv = (uint8_t)(0x40 | (w << 3) | ((reg >= 8) << 2));
+    if (rv != 0x40 || w) *p++ = rv;
+    *p++ = 0x8B;
+    *p++ = (uint8_t)(0x80 | ((reg & 7) << 3) | RBP);
+    uint32_t d = (uint32_t)(-off);
+    p[0] = (uint8_t)(d & 0xff); p[1] = (uint8_t)((d >> 8) & 0xff);
+    p[2] = (uint8_t)((d >> 16) & 0xff); p[3] = (uint8_t)((d >> 24) & 0xff);
+    b->len = (size_t)(p + 4 - b->data);
 }
 // store [rbp - off], reg
-static void store_rbp(FnCtx *F, int32_t off, uint8_t reg, int w) {
-    rex(F, w, reg, 0, 0);
-    eb(F, 0x89);
-    modrm(F, 2, reg, RBP);
-    e32(F, (uint32_t)(-off));
+static inline void store_rbp(FnCtx *F, int32_t off, uint8_t reg, int w) {
+    Buf *b = &F->f->code;
+    if (b->len + 7 > b->cap) buf_grow(b, 7);
+    uint8_t *p = b->data + b->len;
+    uint8_t rv = (uint8_t)(0x40 | (w << 3) | ((reg >= 8) << 2));
+    if (rv != 0x40 || w) *p++ = rv;
+    *p++ = 0x89;
+    *p++ = (uint8_t)(0x80 | ((reg & 7) << 3) | RBP);
+    uint32_t d = (uint32_t)(-off);
+    p[0] = (uint8_t)(d & 0xff); p[1] = (uint8_t)((d >> 8) & 0xff);
+    p[2] = (uint8_t)((d >> 16) & 0xff); p[3] = (uint8_t)((d >> 24) & 0xff);
+    b->len = (size_t)(p + 4 - b->data);
 }
-static void lea_rbp(FnCtx *F, uint8_t reg, int32_t off) {
-    rex(F, 1, reg, 0, 0);
-    eb(F, 0x8D);
-    modrm(F, 2, reg, RBP);
-    e32(F, (uint32_t)(-off));
+static inline void lea_rbp(FnCtx *F, uint8_t reg, int32_t off) {
+    Buf *b = &F->f->code;
+    if (b->len + 7 > b->cap) buf_grow(b, 7);
+    uint8_t *p = b->data + b->len;
+    *p++ = (uint8_t)(0x48 | ((reg >= 8) << 2));
+    *p++ = 0x8D;
+    *p++ = (uint8_t)(0x80 | ((reg & 7) << 3) | RBP);
+    uint32_t d = (uint32_t)(-off);
+    p[0] = (uint8_t)(d & 0xff); p[1] = (uint8_t)((d >> 8) & 0xff);
+    p[2] = (uint8_t)((d >> 16) & 0xff); p[3] = (uint8_t)((d >> 24) & 0xff);
+    b->len = (size_t)(p + 4 - b->data);
 }
 // Emit `lea reg, [rip+disp32]` with disp32 left at 0; return offset of disp32 field.
 static uint32_t lea_rip_emit(FnCtx *F, uint8_t reg) {
@@ -512,6 +538,18 @@ static bool op_is_addressof(MLIR_Context *ctx, MLIR_OpHandle op) {
 
 // Load an operand value into `reg`, using caller-supplied width `w` (0=32b, 1=64b).
 static void load_val_w(FnCtx *F, MLIR_ValueHandle v, uint8_t reg, int w) {
+    // Fast path: mlir_regalloc_fast never puts rematerialized ops (constant,
+    // zero, null, undef, addressof) in rm or spill, so check those dense maps
+    // before MLIR_GetValueDefiningOp.
+    if (F->fast_ra) {
+        uint8_t rH;
+        if (val_in_reg(F, v, &rH)) { mov_rr(F, reg, rH, w); return; }
+        int32_t slot;
+        if (F->has_spill && sm_get_fast(&F->spill, v, &slot)) {
+            load_rbp(F, reg, (slot + 1) * 8, w);
+            return;
+        }
+    }
     MLIR_Context *ctx = F->ctx;
     MLIR_OpHandle def = MLIR_GetValueDefiningOp(ctx, v);
     if (def != MLIR_INVALID_HANDLE) {
@@ -550,13 +588,16 @@ static void load_val_w(FnCtx *F, MLIR_ValueHandle v, uint8_t reg, int w) {
             return;
         }
     }
-    uint8_t rH;
-    if (val_in_reg(F, v, &rH)) { mov_rr(F, reg, rH, w); return; }
-    int32_t slot;
-    if (F->has_spill && sm_get_fast(&F->spill, v, &slot)) {
-        load_rbp(F, reg, (slot + 1) * 8, w);
-        return;
+    if (!F->fast_ra) {
+        uint8_t rH;
+        if (val_in_reg(F, v, &rH)) { mov_rr(F, reg, rH, w); return; }
+        int32_t slot;
+        if (F->has_spill && sm_get_fast(&F->spill, v, &slot)) {
+            load_rbp(F, reg, (slot + 1) * 8, w);
+            return;
+        }
     }
+    int32_t slot;
     if (!vmap_get(&F->slots, v, &slot)) { fail(F, "value with no slot", (string){0}); return; }
     load_rbp(F, reg, slot, w);
 }

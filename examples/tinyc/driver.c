@@ -1724,12 +1724,16 @@ static int tinyc_main(void) {
     }
 
     // Promote non-escaping `llvm.alloca` locals to SSA (mem2reg) on the flat
-    // cf CFG, before the lowering to the LLVM dialect. This keeps non-address-taken locals out of
-    // the linear-memory shadow stack so the downstream register allocator can
-    // hold them in registers instead of spilling every access. Skippable via
-    // TINYC_NO_MEM2REG for A/B debugging.
+    // cf CFG, before the lowering to the LLVM dialect. On x64/ELF in default
+    // (-O0) mode with mlir_regalloc_fast, cross-block values and block args
+    // stay in frame slots while unmutated locals are already bound directly
+    // to SSA in emit.c, so skipping mem2reg matches clang -O0 and avoids
+    // redundant SSA construction + edge-copy overhead.
     uint64_t t_m2r = ts_now();
-    if (!getenv("TINYC_NO_MEM2REG"))
+    bool skip_m2r_x64 = (emit_x64 || emit_elf) &&
+                        !getenv("TINYC_X64_GLOBAL_RA") &&
+                        !getenv("TINYC_FORCE_MEM2REG");
+    if (!skip_m2r_x64 && !getenv("TINYC_NO_MEM2REG"))
         mlir_llvm_mem2reg_ex(ctx, module, true);
     ts_add(TS_MEM2REG, t_m2r);
 
