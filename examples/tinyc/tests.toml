@@ -1843,3 +1843,27 @@ name = "elf_setjmp_longjmp"
 targets = ["elf"]
 # __builtin_setjmp / __builtin_longjmp on x86_64/ELF (#337).
 expected_stdout = "first\ncaught 42\nzero-becomes 1\n"
+
+[[test]]
+name = "pp_mutual_recursion"
+targets = ["native", "wasm", "macho", "elf"]
+# Mutually recursive object-like and function-like macros terminate (#380).
+expected_stdout = "41 42 100\n"
+
+[[test]]
+name = "pp_predefined_macros"
+targets = ["native", "wasm", "macho", "elf"]
+# Target-appropriate predefined macros and LP64/wasm32 LONG_MAX (#338).
+expected_stdout = "1 1 1 1\n"
+
+[[test]]
+name = "diag_filename_parse"
+targets = ["native", "wasm", "macho", "elf"]
+# Parse diagnostics include the source filename (#338).
+expected_compile_error = "diag_filename_parse.tc:2:"
+
+[[test]]
+name = "diag_filename_emit"
+targets = ["native", "wasm", "macho", "elf"]
+# Emit diagnostics include the source filename (#338).
+expected_compile_error = "diag_filename_emit.tc:2:"

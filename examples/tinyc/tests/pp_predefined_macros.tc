@@ -1,0 +1,19 @@
+#include <limits.h>
+extern int printf(const char *fmt, ...);
+
+int main(void) {
+    int ok_stdc = (__STDC__ == 1) && (__STDC_VERSION__ >= 201112L);
+    int ok_sizes = (__CHAR_BIT__ == 8) && (__SIZEOF_INT__ == 4) &&
+                   (__SIZEOF_LONG_LONG__ == 8);
+    int ok_long = (sizeof(long) == 8)
+        ? (LONG_MAX > 2147483647L)
+        : (LONG_MAX == 2147483647L);
+    int ok_target = 0;
+#if defined(__wasm__)
+    ok_target = (__SIZEOF_POINTER__ == 4 && __SIZEOF_LONG__ == 4);
+#elif defined(__x86_64__) || defined(__aarch64__) || defined(__LP64__)
+    ok_target = (__SIZEOF_POINTER__ == 8);
+#endif
+    printf("%d %d %d %d\n", ok_stdc, ok_sizes, ok_long, ok_target);
+    return 0;
+}

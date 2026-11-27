@@ -850,7 +850,74 @@ static void target_set_default(Target *t) {
 #if defined(__linux__) && defined(__x86_64__) && !defined(__TINYC__)
     t->arch = TINYC_ARCH_X86_64;
     t->os = TINYC_OS_LINUX;
+#elif defined(__linux__) && defined(__aarch64__) && !defined(__TINYC__)
+    t->arch = TINYC_ARCH_AARCH64;
+    t->os = TINYC_OS_LINUX;
+#elif defined(__APPLE__) && defined(__aarch64__) && !defined(__TINYC__)
+    t->arch = TINYC_ARCH_AARCH64;
+    t->os = TINYC_OS_DARWIN;
+#elif defined(__APPLE__) && defined(__x86_64__) && !defined(__TINYC__)
+    t->arch = TINYC_ARCH_X86_64;
+    t->os = TINYC_OS_DARWIN;
+#elif defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__)) && !defined(__TINYC__)
+    t->arch = TINYC_ARCH_X86_64;
+    t->os = TINYC_OS_WINDOWS;
 #endif
+}
+
+static size_t driver_append_target_defines(string *out, bool target_wasm32,
+                                           bool emit_elf, bool emit_x64,
+                                           bool emit_aarch64, bool emit_macho,
+                                           bool macho_backend_llvm,
+                                           Target target) {
+    size_t n = 0;
+    if (target_wasm32) {
+        out[n++] = str_lit("__wasm__=1");
+        out[n++] = str_lit("__wasm32__=1");
+        out[n++] = str_lit("__wasi__=1");
+        out[n++] = str_lit("__SIZEOF_LONG__=4");
+        out[n++] = str_lit("__SIZEOF_POINTER__=4");
+        out[n++] = str_lit("__SIZEOF_SIZE_T__=4");
+        return n;
+    }
+    TargetArch arch = target.arch;
+    TargetOS os = target.os;
+    if (emit_elf || emit_x64) {
+        arch = TINYC_ARCH_X86_64;
+        os = TINYC_OS_LINUX;
+    } else if (emit_aarch64 || (emit_macho && macho_backend_llvm)) {
+        arch = TINYC_ARCH_AARCH64;
+        os = TINYC_OS_DARWIN;
+    }
+    if (arch == TINYC_ARCH_X86_64) {
+        out[n++] = str_lit("__x86_64__=1");
+        out[n++] = str_lit("__amd64__=1");
+    } else if (arch == TINYC_ARCH_AARCH64) {
+        out[n++] = str_lit("__aarch64__=1");
+        out[n++] = str_lit("__arm64__=1");
+    }
+    if (os == TINYC_OS_LINUX) {
+        out[n++] = str_lit("__linux__=1");
+        out[n++] = str_lit("__unix__=1");
+        out[n++] = str_lit("__ELF__=1");
+    } else if (os == TINYC_OS_DARWIN) {
+        out[n++] = str_lit("__APPLE__=1");
+        out[n++] = str_lit("__MACH__=1");
+        out[n++] = str_lit("__unix__=1");
+    } else if (os == TINYC_OS_WINDOWS) {
+        out[n++] = str_lit("_WIN32=1");
+        out[n++] = str_lit("_WIN64=1");
+    }
+    if (os != TINYC_OS_WINDOWS) {
+        out[n++] = str_lit("__LP64__=1");
+        out[n++] = str_lit("_LP64=1");
+        out[n++] = str_lit("__SIZEOF_LONG__=8");
+    } else {
+        out[n++] = str_lit("__SIZEOF_LONG__=4");
+    }
+    out[n++] = str_lit("__SIZEOF_POINTER__=8");
+    out[n++] = str_lit("__SIZEOF_SIZE_T__=8");
+    return n;
 }
 
 // Is the triple component s[0..n) `name`, optionally followed by a version
@@ -1643,6 +1710,11 @@ static int tinyc_main(void) {
                           emit_wat || emit_macho) &&
                          !macho_backend_llvm;
     Arena *fe_arena = arena_create(4 * 1024 * 1024 - 4096);
+    string *all_defines = arena_new_array(fe_arena, string, n_defines + 16);
+    size_t n_all_defines = driver_append_target_defines(
+        all_defines, target_wasm32, emit_elf, emit_x64,
+        emit_aarch64, emit_macho, macho_backend_llvm, target);
+    for (size_t k = 0; k < n_defines; k++) all_defines[n_all_defines++] = defines[k];
     Program *prog = arena_new(fe_arena, Program);
     *prog = (Program){0};
     prog->host_varargs = host_varargs;
@@ -1652,7 +1724,7 @@ static int tinyc_main(void) {
         uint64_t t_pp = ts_now();
         VecTcTok toks = tinyc_preprocess_lex(fe_arena, str_from_cstr_view(input_files[k]),
                                              include_dirs, n_include_dirs,
-                                             defines, n_defines);
+                                             all_defines, n_all_defines);
         ts_add(TS_PREPROCESS, t_pp);
         int pp_errs = tinyc_last_preprocess_errors();
         if (pp_errs > 0) {
@@ -1680,12 +1752,12 @@ static int tinyc_main(void) {
     // synthesized syscall thunks. PLATFORM_SKIP_ENTRY drops its _start (tinyC
     // supplies its own); unreached platform funcs are trimmed by the backend.
     if (emit_elf && host_platform_path) {
-        string *pdefs = arena_new_array(fe_arena, string, n_defines + 1);
-        for (size_t k = 0; k < n_defines; k++) pdefs[k] = defines[k];
-        pdefs[n_defines] = str_from_cstr_view((char *)"PLATFORM_SKIP_ENTRY=1");
+        string *pdefs = arena_new_array(fe_arena, string, n_all_defines + 1);
+        for (size_t k = 0; k < n_all_defines; k++) pdefs[k] = all_defines[k];
+        pdefs[n_all_defines] = str_from_cstr_view((char *)"PLATFORM_SKIP_ENTRY=1");
         uint64_t t_pp = ts_now();
         string psrc = tinyc_preprocess(fe_arena, str_from_cstr_view(host_platform_path),
-                                       include_dirs, n_include_dirs, pdefs, n_defines + 1);
+                                       include_dirs, n_include_dirs, pdefs, n_all_defines + 1);
         ts_add(TS_PREPROCESS, t_pp);
         if (tinyc_last_preprocess_errors() > 0) {
             fprintf(stderr, "tinyc: preprocessing failed for host platform '%s'\n",
