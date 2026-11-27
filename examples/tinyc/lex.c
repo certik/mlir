@@ -227,7 +227,16 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                         case '"': ch = '"'; break;
                         case '\'': ch = '\''; break;
                         case '?': ch = '?'; break;
-                        case '0': ch = '\0'; break;
+                        case '0': case '1': case '2': case '3':
+                        case '4': case '5': case '6': case '7': {
+                            int v = esc - '0';
+                            for (int oc = 0; oc < 2 && j < src.size &&
+                                 src.str[j] >= '0' && src.str[j] <= '7'; oc++) {
+                                v = v * 8 + (src.str[j++] - '0');
+                            }
+                            ch = (char)(v & 0xff);
+                            break;
+                        }
                         case 'x': {
                             // Hex escape: \xHH... — consume hex digits until
                             // a non-hex byte. Result is the low 8 bits.
@@ -295,7 +304,16 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                     case '\'': v = '\''; break;
                     case '"': v = '"'; break;
                     case '?': v = '?'; break;
-                    case '0': v = '\0'; break;
+                    case '0': case '1': case '2': case '3':
+                    case '4': case '5': case '6': case '7': {
+                        int ov = esc - '0';
+                        for (int oc = 0; oc < 2 && j < src.size &&
+                             src.str[j] >= '0' && src.str[j] <= '7'; oc++) {
+                            ov = ov * 8 + (src.str[j++] - '0');
+                        }
+                        v = (int64_t)(ov & 0xff);
+                        break;
+                    }
                     case 'x': {
                         // Hex char escape: '\xHH...' — accept as many hex
                         // digits as appear; result is the low 8 bits.
@@ -653,7 +671,16 @@ TcTok tinyc_lex_string(Arena *arena, string raw, int line) {
                 case '"': ch = '"'; break;
                 case '\'': ch = '\''; break;
                 case '?': ch = '?'; break;
-                case '0': ch = '\0'; break;
+                case '0': case '1': case '2': case '3':
+                case '4': case '5': case '6': case '7': {
+                    int v = esc - '0';
+                    for (int oc = 0; oc < 2 && j < end &&
+                         s[j] >= '0' && s[j] <= '7'; oc++) {
+                        v = v * 8 + (s[j++] - '0');
+                    }
+                    ch = (char)(v & 0xff);
+                    break;
+                }
                 case 'x': {
                     int v = 0, nh = 0;
                     while (j < end) {
@@ -708,7 +735,16 @@ TcTok tinyc_lex_char(string raw, int line) {
             case '\'': v = '\''; break;
             case '"': v = '"'; break;
             case '?': v = '?'; break;
-            case '0': v = '\0'; break;
+            case '0': case '1': case '2': case '3':
+            case '4': case '5': case '6': case '7': {
+                int ov = esc - '0';
+                for (int oc = 0; oc < 2 && j < end &&
+                     s[j] >= '0' && s[j] <= '7'; oc++) {
+                    ov = ov * 8 + (s[j++] - '0');
+                }
+                v = (int64_t)(ov & 0xff);
+                break;
+            }
             case 'x': {
                 int hv = 0, nh = 0;
                 while (j < end) {

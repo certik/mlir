@@ -1,0 +1,40 @@
+extern int printf(const char *fmt, ...);
+
+static int (twice)(int x) {
+    return 2 * x;
+}
+
+static int first_ch(char ***p) {
+    return (*p)[0][0];
+}
+
+int main(void) {
+    // Octal escapes in strings and char literals
+    const char *s = "\1\12\101\377";
+    char c1 = '\1';
+    char c2 = '\101';
+    printf("%d %d %d %d %d %d\n",
+           (unsigned char)s[0], (unsigned char)s[1],
+           (unsigned char)s[2], (unsigned char)s[3],
+           (int)c1, (int)c2);
+
+    // Parenthesized function declarator name
+    printf("%d\n", twice(21));
+
+    // Block-scope struct tag definition with no declarator
+    struct P { char c; long l; };
+    struct P pv;
+    pv.c = 'Z';
+    pv.l = 123;
+    printf("%c %ld\n", pv.c, pv.l);
+
+    // Three-level pointer
+    char *word = "Hello";
+    char **wptr = &word;
+    printf("%c\n", first_ch(&wptr));
+
+    // long double
+    long double ld = 3.5;
+    printf("%d %.1f\n", (int)sizeof(long double), (double)ld);
+    return 0;
+}
