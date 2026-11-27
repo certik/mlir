@@ -1840,39 +1840,11 @@ static void synth_start(ObjModule *m, GMap *gm, Buf *data,
     eb(&F, 0x0F); eb(&F, 0x05);
 }
 
-// Synthesize a stub for platform_init, __assert_fail, or __tinyc_syscall6/syscall.
-// `wasm_lifted`: the module was lifted from wasm and has the host platform
-// (__host_platform_*) spliced in; only then do the two forwarding stubs exist.
-static bool synth_thunk(ObjModule *m, string name, bool wasm_lifted) {
-    // The forwarding stubs are tail jumps, not `call X; ret`: a stub is entered
-    // with rsp == 8 (mod 16) like any SysV function, and a nested call would
-    // push a second return address and enter X with rsp == 0 (mod 16), i.e.
-    // with a misaligned stack. `jmp` hands X the caller's frame unchanged.
-    //
-    // Lifted wasm still calls platform_init; host splice provides __host_platform_init.
-    if (wasm_lifted && str_eqz(name, "platform_init")) {
-        char *fn = (char *)malloc(name.size + 1);
-        memcpy(fn, name.str, name.size);
-        fn[name.size] = '\0';
-        ObjFunc *f = obj_add_func(m, fn, false);
-        FnCtx F; memset(&F,0,sizeof(F)); F.f = f;
-        eb(&F, 0xE9); uint32_t fld = here(&F); e32(&F, 0);         // jmp __host_platform_init
-        obj_add_reloc(f, fld, fld + 4, false, heapdup_cstr("__host_platform_init"), 0);
-        return true;
-    }
-    // assert() from spliced host platform code; assert.c is GC'd out of the
-    // linked wasm module so lift never defines this symbol.
-    if (wasm_lifted && str_eqz(name, "__assert_fail")) {
-        char *fn = (char *)malloc(name.size + 1);
-        memcpy(fn, name.str, name.size);
-        fn[name.size] = '\0';
-        ObjFunc *f = obj_add_func(m, fn, false);
-        FnCtx F; memset(&F,0,sizeof(F)); F.f = f;
-        mov_ri(&F, RDI, 1, 0);
-        eb(&F, 0xE9); uint32_t fld = here(&F); e32(&F, 0);         // jmp __host_platform_exit
-        obj_add_reloc(f, fld, fld + 4, false, heapdup_cstr("__host_platform_exit"), 0);
-        return true;
-    }
+// Synthesize the raw-syscall thunk for __tinyc_syscall6 / syscall.
+// All corec/WASI forwarding stubs (platform_init, __assert_fail) live in
+// corec/wasm/wasi_adapter.c so the x86_64 backend stays agnostic to corec
+// symbol names.
+static bool synth_thunk(ObjModule *m, string name) {
     // __tinyc_syscall6(num, a1..a6): the runtime syscall number is the first C
     // argument, so we cannot bake an NR_* constant — instead reshuffle the SysV
     // argument registers into the Linux x86_64 kernel convention (number in
@@ -2078,7 +2050,7 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
             k = (k + 1) & def_hmask;
         }
         if (defined) continue;
-        if (!synth_thunk(&m, refs.n[i], wasm_lifted)) {
+        if (!synth_thunk(&m, refs.n[i])) {
             fprintf(stderr, "x64: unresolved symbol '%.*s'\n",
                     (int)refs.n[i].size, refs.n[i].str);
             g_x64_ok = false;
@@ -2087,15 +2059,6 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     free(workq);
     free(def_ht);
     free(defs);
-
-    // Lifted code may reference platform_init through a reloc that never went
-    // through `refs`. If the wasm-side platform_init was DCE'd, forward it to
-    // __host_platform_init. Never for a native module: there platform_init is
-    // the real one from platform_linux.c, and a missing definition must stay a
-    // link error rather than become a jump to a symbol that does not exist.
-    if (g_x64_ok && wasm_lifted && x64_obj_needs_func(&m, "platform_init") &&
-            !x64_obj_has_func(&m, "platform_init"))
-        synth_thunk(&m, str_from_cstr_view("platform_init"), wasm_lifted);
 
     ok = g_x64_ok;
     if (ok) {
