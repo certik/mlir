@@ -151,7 +151,7 @@ static string print_region_internal(PrintCtx *ctx, int indent_level, MLIR_Region
 }
 
 static void append_escaped_string(Arena *arena, strbuf *out, string s) {
-    static const char hex[16] = "0123456789ABCDEF";
+    static const char *hex = "0123456789ABCDEF";
     strbuf_append(arena, out, str_lit("\""));
     for (size_t i = 0; i < s.size; i++) {
         unsigned char c = (unsigned char)s.str[i];
