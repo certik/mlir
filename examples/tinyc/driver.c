@@ -519,8 +519,10 @@ static bool driver_elf_compile_helper(MLIR_Context *ctx, const char *path,
     MLIR_SetContextDefUseTracking(ctx, true);
 
     string defs[16]; size_t nd = 0;
-    if (kind == TINYC_ELF_HELPER_WASI)
+    if (kind == TINYC_ELF_HELPER_WASI) {
         defs[nd++] = str_from_cstr_view((char *)"PLATFORM_HOST_SHIM=1");
+        defs[nd++] = str_from_cstr_view((char *)"WASI_ADAPTER_LIFTER_STUBS=1");
+    }
     if (kind == TINYC_ELF_HELPER_PLATFORM) {
         // platform_linux.c talks to the kernel through __builtin_syscall6, so
         // (unlike the Mach-O helper) there are no libc symbols to rename.
