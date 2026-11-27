@@ -126,55 +126,23 @@ typedef enum {
 
 typedef struct Type Type;
 struct Type {
-    TypeKind kind;
-    int64_t  array_len;       // 1st dimension for TY_ARRAY_I32 / TY_ARRAY_STRUCT
-    int64_t  array_len2;      // 2nd dimension for TY_ARRAY_I32 (0 = 1D)
-    // Optional deferred array-length expression (constant integer
-    // expression, may use sizeof of in-scope variables). When non-NULL,
-    // the emitter folds it via ast_fold_int(scope) at the alloca site
-    // and writes the result into `array_len` before allocating storage.
-    // Used to support `T arr[CONST_EXPR]` where CONST_EXPR is not a bare
-    // integer literal (e.g. `T arr[sizeof(x) / sizeof(x[0])]`).
-    struct Expr *array_len_expr;
-    string   struct_name;     // for TY_STRUCT
-    // For TY_FNPTR: arena-allocated return type and parameter types.
-    // Storage type is always !llvm.ptr; this signature is consulted at
-    // indirect-call sites to build the func.call_indirect operand types.
-    Type    *fnptr_ret;
-    Type    *fnptr_params;
-    int      fnptr_nparams;
-    // For TY_PTR_PTR: the (single-level) pointer type that this T** points
-    // at. Carries the inner pointee kind / fnptr signature / struct_name
-    // so a deref can be typed correctly.
-    Type    *pointee;
-    // For TY_PTR_I32: when true, the pointed-at element is 64-bit wide
-    // (i64). Used to map `int64_t *` / `long *` / `size_t *` to a single
-    // generic pointer kind without losing the element width needed for
-    // pointer arithmetic, indexing, and dereferenced-load typing.
+    uint8_t  kind;            // TypeKind
+    uint8_t  int_bits;
+    int16_t  fnptr_nparams;
     bool     ptr_is_i64;
-    // For TY_PTR_I32: when true, the pointed-at element is f32 (float).
-    // Used to map `float *` to a generic pointer kind without losing the
-    // element width needed for dereferenced-load/store typing.
     bool     ptr_is_f32;
-    // For TY_PTR_I32: when true, the pointed-at element is f64 (double).
     bool     ptr_is_f64;
-    // For TY_ARRAY_I32: when true, the elements are 64-bit wide (i64).
-    // Used to support `size_t arr[N]` / `long arr[N]` / `int64_t arr[N]`
-    // without introducing a separate TY_ARRAY_I64 kind.
     bool     array_elem_is_i64;
-    // For TY_I32/TY_I64: optional explicit bit width hint (0 = unspecified,
-    // 8/16/32/64 = explicit width). Used by `_Generic` for typedef
-    // matching on narrow-int aliases (`int8_t`, `int16_t`, ...). For
-    // wasm32 we also use int_bits == 64 with kind == TY_I32 to tag
-    // `long`-semantic types (storage is i32 because of the ABI, but
-    // `_Generic` must keep them distinct from `int`).
-    // 8 / 16 (char / bool / short) also selects 1- / 2-byte storage: for a
-    // TY_I32 scalar, a TY_ARRAY_I32 element and a TY_PTR_I32 pointee (see
-    // tinyc_int_size). Values of these types are still i32 in registers.
-    int      int_bits;
     bool     int_unsigned;
     bool     is_bool;        // `bool` / `_Bool` (int_bits is 8 like char)
     bool     is_const;       // type was declared with the `const` qualifier
+    int64_t  array_len;       // 1st dimension for TY_ARRAY_I32 / TY_ARRAY_STRUCT
+    int64_t  array_len2;      // 2nd dimension for TY_ARRAY_I32 (0 = 1D)
+    struct Expr *array_len_expr;
+    string   struct_name;     // for TY_STRUCT
+    Type    *fnptr_ret;
+    Type    *fnptr_params;
+    Type    *pointee;
 };
 
 typedef enum {
@@ -218,64 +186,37 @@ typedef struct Expr Expr;
 
 DEFINE_VECTOR_FOR_TYPE(Expr*, VecExprPtr)
 
-struct Expr {
-    ExprKind kind;
-    // For EX_INT
-    int64_t int_value;
-    bool    is_i64;          // true iff the integer literal had L/LL suffix.
-                             // When `is_i64 && !is_long_long`, the literal had
-                             // a single L: it is TY_I64 on native targets but
-                             // TY_I32 on wasm32 (where `long` is the size of
-                             // `int`).
-    bool    is_long_long;    // true iff the integer literal had an LL suffix.
-                             // LL always means TY_I64 regardless of target.
-    bool    is_unsigned;     // the integer literal has an unsigned type
-                             // (u suffix, or a hex/octal value that only
-                             // fits the unsigned type).
-    bool    is_f64;          // true iff the float literal has TY_F64 type
-                             // (i.e. no `f` suffix; C's default for `1.0`).
-    // For EX_FLOAT
-    double float_value;
-    // For EX_VAR
-    string name;
-    // For EX_BIN / EX_UN
-    BinOp op;
-    Expr *lhs;
-    Expr *rhs;
-    // For EX_CALL
-    string callee;
+typedef struct {
     VecExprPtr args;
-    // For EX_ASSIGN
-    Expr *lvalue;          // an lvalue expression (EX_VAR / EX_INDEX / EX_DEREF)
-    Expr *rhs_assign;
-    bool is_post_step;     // EX_ASSIGN that originated from a postfix `x++` /
-                           // `x--`. Emit reads the old value of the lvalue,
-                           // stores `old ± 1`, and yields the OLD value.
-    bool is_compound;      // EX_ASSIGN from `lhs op= rhs` or prefix `++x` /
-                           // `--x`: rhs_assign is an EX_BIN whose lhs is the
-                           // same node as `lvalue`. Emit computes the lvalue
-                           // address once and uses it for the load and the
-                           // store, so side effects in it happen once.
-    // For EX_INDEX (lhs = array, rhs = index)
-    // For EX_ADDR / EX_DEREF (lhs = inner)
-    // For EX_SIZEOF / EX_CAST: cast_type is the type being asked about /
-    // cast to. EX_CAST also uses lhs as the operand. EX_SIZEOF may instead
-    // carry an operand expression in lhs (sizeof_is_expr=true), in which
-    // case the emitter infers the type from the expression.
-    Type cast_type;
-    bool sizeof_is_expr;
-    bool is_alignof;       // EX_SIZEOF from `_Alignof`: the alignment, not the size
-    // For EX_COMPOUND with designated initializers: parallel to `args`.
-    // compound_field_names[i].size == 0 indicates a positional entry; a
-    // non-empty name selects the named field. NULL when there are no
-    // designated entries at all.
     string *compound_field_names;
-    // For EX_GENERIC: parallel to args[]. generic_types[i] is the type
-    // at the i-th association entry; generic_default_index is the
-    // index of the `default:` entry, or -1 if absent.
     Type   *generic_types;
     int     generic_default_index;
+} ExprExtra;
+
+typedef union {
+    int64_t int_value;
+    double  float_value;
+} ExprVal;
+
+struct Expr {
+    uint8_t kind;             // ExprKind
+    uint8_t op;               // BinOp
+    bool    is_i64;
+    bool    is_long_long;
+    bool    is_unsigned;
+    bool    is_f64;
+    bool    is_post_step;
+    bool    is_compound;
+    bool    sizeof_is_expr;
+    bool    is_alignof;
     int line;
+    ExprVal val;              // int_value / float_value
+    string  name;             // EX_VAR / EX_STR / EX_FIELD / EX_CALL (callee)
+    Expr   *lhs;
+    Expr   *rhs;              // EX_BIN / EX_TERNARY (then) / EX_ASSIGN (rhs)
+    Expr   *lvalue;           // EX_ASSIGN (lhs) / EX_TERNARY (else)
+    Type   *cast_type;
+    ExprExtra *extra;         // EX_CALL / EX_COMPOUND / EX_GENERIC metadata
 };
 
 typedef enum {
@@ -312,42 +253,34 @@ typedef struct {
 
 DEFINE_VECTOR_FOR_TYPE(SwitchCase, VecSwitchCase)
 
-struct Stmt {
-    StmtKind kind;
-    // ST_EXPR / ST_RETURN
-    Expr *expr;
-    // ST_DECL
-    Type  decl_type;
-    string decl_name;
-    Expr *decl_init;
-    // For function-local `static` variables: when non-empty, this is the
-    // mangled module-scope symbol name registered in `program->globals`.
-    // The emitter treats the local as an alias for that global instead
-    // of allocating an `alloca` slot.
-    string decl_static_global_sym;
-    // ST_DECL: declared with a leading `static` (scalar or not).
-    bool decl_is_static;
-    // ST_IF / ST_WHILE / ST_FOR / ST_SWITCH
-    Expr *cond;
-    VecStmtPtr then_body;
-    VecStmtPtr else_body;
-    bool has_else;
-    VecStmtPtr while_body;
+typedef struct {
+    // For function-local `static` variables: mangled module-scope symbol name.
+    string        decl_static_global_sym;
+    // ST_IF (only allocated when `else` is present)
+    VecStmtPtr    else_body;
     // ST_FOR
-    Stmt *for_init;
-    // Zero or more for-update expressions, lowered in order at the end
-    // of each iteration. Multiple entries arise from the C comma
-    // operator: `for (i = 0; i < n; ++i, ++j)` parses as two entries.
-    VecExprPtr for_steps;
-    VecStmtPtr for_body;
-    // ST_BLOCK / ST_SWITCH (body)
-    VecStmtPtr block_body;
-    bool block_no_scope;
+    Stmt         *for_init;
+    VecExprPtr    for_steps;
     // ST_SWITCH
     VecSwitchCase switch_cases;
-    // ST_LABEL / ST_GOTO
-    string label_name;
+} StmtExtra;
+
+struct Stmt {
+    uint8_t kind;            // StmtKind
+    bool decl_is_static;
+    bool has_else;
+    bool block_no_scope;
     int line;
+    // ST_EXPR / ST_RETURN / ST_DECL (init) / ST_IF / ST_WHILE / ST_DO_WHILE / ST_FOR / ST_SWITCH (cond)
+    Expr *expr;
+    // ST_DECL (decl_name) / ST_LABEL / ST_GOTO (label_name)
+    string name;
+    // ST_IF (then) / ST_WHILE / ST_DO_WHILE / ST_FOR / ST_BLOCK / ST_SWITCH
+    VecStmtPtr body;
+    // ST_DECL only (arena-allocated)
+    Type *decl_type;
+    // ST_IF(else) / ST_FOR / ST_SWITCH / ST_DECL(static) rare metadata
+    StmtExtra *extra;
 };
 
 typedef struct {
@@ -534,26 +467,44 @@ typedef enum {
     TC_TK_ELLIPSIS,               // ... (variadic parameter marker)
 } TcTokKind;
 
+#define TC_TOK_F_I64       1u
+#define TC_TOK_F_LONG_LONG 2u
+#define TC_TOK_F_UNSIGNED  4u
+#define TC_TOK_F_F64       8u
+
+typedef union {
+    uint64_t size;
+    int64_t  int_value;
+    double   float_value;
+} TcTokData;
+
 typedef struct {
-    TcTokKind kind;
-    int64_t int_value;
-    bool    is_i64;          // EX_INT / TC_TK_INT_LIT marked with L/LL suffix
-    bool    is_long_long;    // EX_INT / TC_TK_INT_LIT marked with LL suffix
-                             // (always 64-bit). When `is_i64 && !is_long_long`
-                             // the literal had a single L: it is 64-bit on
-                             // native targets but 32-bit on wasm32 (where
-                             // `long` is `int`). Also set for an unsuffixed
-                             // literal whose value needs 64 bits.
-    bool    is_unsigned;     // TC_TK_INT_LIT has an unsigned C type
-    bool    is_f64;          // TC_TK_FLOAT_LIT without `f` suffix (i.e. double)
-    double  float_value;
-    string text;             // interned identifier text (for IDENT)
-    int line;
+    uint8_t   kind;          // TcTokKind
+    uint8_t   flags;         // TC_TOK_F_*
+    int       line;
+    char     *text_str;      // identifier / string literal bytes
+    TcTokData d;             // text size / int_value / float_value
 } TcTok;
+
+static inline string tc_tok_text(TcTok t) {
+    string s;
+    s.str = t.text_str;
+    s.size = t.d.size;
+    return s;
+}
+
+static inline void tc_tok_set_text(TcTok *t, string s) {
+    t->text_str = s.str;
+    t->d.size = s.size;
+}
 
 DEFINE_VECTOR_FOR_TYPE(TcTok, VecTcTok)
 
 VecTcTok tinyc_lex(Arena *arena, string src);
+TcTokKind tinyc_keyword_or_ident(string s);
+TcTok tinyc_lex_number(string text, int line);
+TcTok tinyc_lex_string(Arena *arena, string raw, int line);
+TcTok tinyc_lex_char(string raw, int line);
 
 // Integer constant `v` converted to the C type `t` when that is a narrow
 // integer: char / short are truncated and re-extended by signedness, bool
@@ -575,6 +526,12 @@ int tinyc_int_size(const Type *t);
 string tinyc_preprocess(Arena *arena, string path,
                         string *include_dirs, size_t n_include_dirs,
                         string *defines, size_t n_defines);
+
+// Fused preprocess + lex: emits TcTok directly without serializing to text
+// and re-lexing. Equivalent to tinyc_lex(arena, tinyc_preprocess(...)).
+VecTcTok tinyc_preprocess_lex(Arena *arena, string path,
+                              string *include_dirs, size_t n_include_dirs,
+                              string *defines, size_t n_defines);
 
 // Number of errors (missing #include, #error, malformed directives, ...)
 // the most recent tinyc_preprocess() call reported. The returned text is
