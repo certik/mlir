@@ -466,10 +466,12 @@ void MLIR_SetOpAttr(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key, MLIR_
 // The op's type, as created. For its name use
 // MLIR_GetOpTypeName(ctx, MLIR_GetOpType(ctx, op)).
 MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle op);
-// If supported by the backend, change `op`'s type in place without
-// reallocating or unlinking it (returns true). Returns false if the
-// backend requires creating a replacement op instead.
-bool MLIR_TryRenameOpInPlace(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_OpType new_type);
+// Change a region-less op's type to `new_type`, preserving its operands,
+// results, attributes, successors, and position in its parent block.
+// Mutates `op` in place when supported by the backend, or replaces `op`
+// (redirecting all uses of its results and erasing `op`) otherwise.
+// Returns the handle of the resulting op.
+MLIR_OpHandle MLIR_RenameOp(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_OpType new_type);
 MLIR_LocationHandle MLIR_GetOpLocation(MLIR_Context *ctx, MLIR_OpHandle op);
 size_t MLIR_GetOpNumOperands(MLIR_Context *ctx, MLIR_OpHandle op);
 MLIR_ValueHandle MLIR_GetOpOperand(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx);

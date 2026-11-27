@@ -993,10 +993,6 @@ extern "C" MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle h) {
     if (MLIR_UP_LIKELY(slot.ptr == p)) return slot.type;
     return getOpTypeSlow(ctx, name, slot);
 }
-extern "C" bool MLIR_TryRenameOpInPlace(MLIR_Context *ctx, MLIR_OpHandle h, MLIR_OpType new_type) {
-    (void)ctx; (void)h; (void)new_type;
-    return false;
-}
 extern "C" MLIR_LocationHandle MLIR_GetOpLocation(MLIR_Context *ctx, MLIR_OpHandle h) {
     CHECK_OWN_OP(ctx, h, "MLIR_GetOpLocation");
     return locH(F<mlir::Operation>(h)->getLoc());
@@ -1205,6 +1201,69 @@ extern "C" MLIR_ValueHandle MLIR_GetOpSuccessorOperand(MLIR_Context *ctx, MLIR_O
         return valH(ops[i]);
     }
     return MLIR_INVALID_HANDLE;
+}
+
+extern "C" MLIR_OpHandle MLIR_RenameOp(MLIR_Context *ctx, MLIR_OpHandle h, MLIR_OpType new_type) {
+    CHECK_OWN_OP(ctx, h, "MLIR_RenameOp");
+    auto *op = F<mlir::Operation>(h);
+    API_CHECK(op->getNumRegions() == 0, "MLIR_RenameOp", "cannot rename op with regions");
+
+    llvm::SmallVector<MLIR_ValueHandle, 8> operands;
+    llvm::SmallVector<MLIR_BlockHandle, 4> succs;
+    llvm::SmallVector<uint32_t, 4> succ_counts;
+    unsigned ns = op->getNumSuccessors();
+    if (ns == 0) {
+        operands.reserve(op->getNumOperands());
+        for (mlir::Value v : op->getOperands()) operands.push_back(valH(v));
+    } else {
+        size_t n_reg = MLIR_GetOpNumOperands(ctx, h);
+        operands.reserve(op->getNumOperands());
+        for (size_t i = 0; i < n_reg; i++)
+            operands.push_back(MLIR_GetOpOperand(ctx, h, i));
+        succs.reserve(ns);
+        succ_counts.reserve(ns);
+        for (unsigned s = 0; s < ns; s++) {
+            succs.push_back(H(op->getSuccessor(s)));
+            size_t k = MLIR_GetOpNumSuccessorOperands(ctx, h, s);
+            succ_counts.push_back((uint32_t)k);
+            for (size_t j = 0; j < k; j++)
+                operands.push_back(MLIR_GetOpSuccessorOperand(ctx, h, s, j));
+        }
+    }
+
+    llvm::SmallVector<MLIR_TypeHandle, 4> rts;
+    rts.reserve(op->getNumResults());
+    for (mlir::Type t : op->getResultTypes()) rts.push_back(typeH(t));
+
+    auto &cached = ensureCachedAttrs(op);
+    llvm::SmallVector<MLIR_NamedAttr, 4> attrs;
+    attrs.reserve(cached.size());
+    for (const mlir::NamedAttribute &na : cached)
+        attrs.push_back(MLIR_Named(keyOf(ctx, na.getName()), attrH(na.getValue())));
+
+    MLIR_OpSpec spec = {};
+    spec.type = new_type;
+    spec.operands = operands.empty() ? nullptr : operands.data();
+    spec.n_operands = (uint32_t)operands.size();
+    spec.result_types = rts.empty() ? nullptr : rts.data();
+    spec.n_results = (uint32_t)rts.size();
+    spec.attrs = attrs.empty() ? nullptr : attrs.data();
+    spec.n_attrs = (uint32_t)attrs.size();
+    spec.successors = succs.empty() ? nullptr : succs.data();
+    spec.n_successors = (uint32_t)succs.size();
+    spec.successor_operand_counts = succ_counts.empty() ? nullptr : succ_counts.data();
+    spec.loc = locH(op->getLoc());
+
+    mlir::Operation *nop = createOpFromSpecImpl(ctx, &spec, MLIR_INVALID_HANDLE);
+    if (mlir::Block *blk = op->getBlock()) {
+        blk->getOperations().insert(mlir::Block::iterator(op), nop);
+    } else {
+        ctx->rootOps.insert(nop);
+    }
+    if (op->getNumResults() > 0)
+        op->replaceAllUsesWith(nop);
+    MLIR_EraseOp(ctx, h);
+    return H(nop);
 }
 
 // -----------------------------------------------------------------------------

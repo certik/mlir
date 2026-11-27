@@ -2176,11 +2176,13 @@ MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle oh) {
     return (MLIR_OpType)OPS(ctx)[o].op_type;
 }
 
-bool MLIR_TryRenameOpInPlace(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_OpType new_type) {
-    uint32_t o = OP_IDX(ctx, oh, "MLIR_TryRenameOpInPlace");
-    CHECK_OP(ctx, o, "MLIR_TryRenameOpInPlace");
+MLIR_OpHandle MLIR_RenameOp(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_OpType new_type) {
+    uint32_t o = OP_IDX(ctx, oh, "MLIR_RenameOp");
+    CHECK_OP(ctx, o, "MLIR_RenameOp");
+    const IR_OpExtra *ox = op_extra_get(ctx, o);
+    API_CHECK(!ox || ox->n_regions == 0, "MLIR_RenameOp", "cannot rename op with regions");
     OPS(ctx)[o].op_type = (uint16_t)new_type;
-    return true;
+    return oh;
 }
 
 size_t MLIR_GetOpNumRegions(MLIR_Context *ctx, MLIR_OpHandle oh) {
