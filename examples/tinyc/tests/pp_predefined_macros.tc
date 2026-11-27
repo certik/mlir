@@ -4,10 +4,13 @@ extern int printf(const char *fmt, ...);
 int main(void) {
     int ok_stdc = (__STDC__ == 1) && (__STDC_VERSION__ >= 201112L);
     int ok_sizes = (__CHAR_BIT__ == 8) && (__SIZEOF_INT__ == 4) &&
+                   (__SIZEOF_LONG__ == (int)sizeof(long)) &&
                    (__SIZEOF_LONG_LONG__ == 8);
-    int ok_long = (sizeof(long) == 8)
-        ? (LONG_MAX > 2147483647L)
-        : (LONG_MAX == 2147483647L);
+#if defined(__LP64__)
+    int ok_long = (sizeof(long) == 8) && (LONG_MAX > 2147483647L);
+#else
+    int ok_long = (LONG_MAX == 2147483647L);
+#endif
     int ok_target = 0;
 #if defined(__wasm__)
     ok_target = (__SIZEOF_POINTER__ == 4 && __SIZEOF_LONG__ == 4);

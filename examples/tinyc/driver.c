@@ -911,10 +911,8 @@ static size_t driver_append_target_defines(string *out, bool target_wasm32,
     if (os != TINYC_OS_WINDOWS) {
         out[n++] = str_lit("__LP64__=1");
         out[n++] = str_lit("_LP64=1");
-        out[n++] = str_lit("__SIZEOF_LONG__=8");
-    } else {
-        out[n++] = str_lit("__SIZEOF_LONG__=4");
     }
+    out[n++] = str_lit("__SIZEOF_LONG__=8");
     out[n++] = str_lit("__SIZEOF_POINTER__=8");
     out[n++] = str_lit("__SIZEOF_SIZE_T__=8");
     return n;
