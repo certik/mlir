@@ -34,7 +34,7 @@ module() {
         %21 = arith.extf(%20: tensor<65536xbf16>) -> tensor<65536xf32>
         %22 = tt.reduce(%21: tensor<65536xf32>) {axis = 0} -> f32 {
         ^bb0(%arg5: f32, %arg6: f32):
-            %30 = tt.pure_extern_elementwise(%arg5: f32, %arg6: f32) {libname = ""libdevice"", libpath = ""/opt/conda/lib/python3.11/site-packages/triton/language/../third_party/cuda/lib/libdevice.10.bc"", symbol = ""__nv_fmaxf""} -> f32
+            %30 = tt.pure_extern_elementwise(%arg5: f32, %arg6: f32) {libname = "\"libdevice\"", libpath = "\"/opt/conda/lib/python3.11/site-packages/triton/language/../third_party/cuda/lib/libdevice.10.bc\"", symbol = "\"__nv_fmaxf\""} -> f32
             tt.reduce.return(%30: f32)
         }
         %23 = tt.splat(%22: f32) -> tensor<65536xf32>
