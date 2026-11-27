@@ -157,15 +157,9 @@ def uses_wasm_runtime() -> bool:
 
 def use_unity_source() -> bool:
     # Every target builds one generated single-TU "unity" (test + corec +
-    # corec-stdlib + platform_<os>.c) EXCEPT Windows native, which takes the
-    # "no-runtime" path: each test .tc is compiled directly against the MSVCRT,
-    # with no unity, no corec-stdlib, and no platform_windows.c. tinyC cannot
-    # yet parse platform_windows.c's __declspec(dllimport)/__stdcall, and the
-    # suite only needs libc-providable symbols (printf), so Windows native is
-    # both runtime-shim-free AND corec-free. This is one of the two documented
-    # exceptions to "all OS access goes via corec/platform.h" — see
-    # doc/platform_paths.md.
-    return not (IS_WIN and TARGET == "native")
+    # corec-stdlib + platform_<os>.c), including Windows (tinyC now parses
+    # platform_windows.c's __declspec(dllimport) / __stdcall).
+    return True
 
 
 def platform_source_for_unity() -> Path:
@@ -287,6 +281,7 @@ def link_native(obj_path: Path, exe_path: Path, host_sources: list[Path] | None 
             *extra,
             "msvcrt.lib", "ucrt.lib", "vcruntime.lib",
             "legacy_stdio_definitions.lib",
+            "kernel32.lib", "shell32.lib",
             f"/Fe:{exe_path}",
         ])
     cmd = [CC, str(obj_path), *extra, "-o", str(exe_path)]
