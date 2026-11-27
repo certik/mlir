@@ -1566,7 +1566,56 @@ typedef struct LValS {
     bool             in_union;        // a union member: the slot may have been
                                       // written through another member
     bool             wide_slot;       // a char / short / bool local in an i32 slot
+    uint8_t          bit_width;       // >0 for bit-field lvalue
+    uint8_t          bit_offset;      // bit offset within backing storage unit
 } LVal;
+
+static void struct_compute_layout(StructDef *sd) {
+    if (!sd || sd->layout_computed) return;
+    sd->layout_computed = true;
+    if (sd->is_union) {
+        for (size_t i = 0; i < sd->fields.size; i++) {
+            sd->fields.data[i].llvm_field_idx = 0;
+            sd->fields.data[i].bit_offset = 0;
+        }
+        return;
+    }
+    int llvm_idx = 0;
+    int cur_unit_bits = 0;
+    int cur_bit_pos = 0;
+    int cur_llvm_idx = 0;
+    for (size_t i = 0; i < sd->fields.size; i++) {
+        StructField *sf = &sd->fields.data[i];
+        if (!sf->is_bitfield) {
+            cur_unit_bits = 0;
+            sf->llvm_field_idx = llvm_idx++;
+            sf->bit_offset = 0;
+        } else if (sf->bit_width == 0) {
+            cur_unit_bits = 0;
+            sf->llvm_field_idx = -1;
+            sf->bit_offset = 0;
+        } else {
+            int ubits = (sf->type.kind == TY_I64) ? 64 : tinyc_int_size(&sf->type) * 8;
+            if (cur_unit_bits == ubits && cur_bit_pos + sf->bit_width <= ubits) {
+                sf->llvm_field_idx = cur_llvm_idx;
+                sf->bit_offset = (uint8_t)cur_bit_pos;
+                cur_bit_pos += sf->bit_width;
+            } else {
+                cur_llvm_idx = llvm_idx++;
+                cur_unit_bits = ubits;
+                sf->llvm_field_idx = cur_llvm_idx;
+                sf->bit_offset = 0;
+                cur_bit_pos = sf->bit_width;
+            }
+        }
+    }
+}
+
+static inline int32_t struct_llvm_field(StructDef *sd, int c_idx) {
+    if (sd->is_union) return 0;
+    if (!sd->layout_computed) struct_compute_layout(sd);
+    return (int32_t)sd->fields.data[c_idx].llvm_field_idx;
+}
 
 // A char / short / bool value (int_bits 8 / 16) is promoted to (signed) int
 // in expressions (C integer promotion). For a pointer type this describes
@@ -1610,6 +1659,46 @@ static EVal load_lvalue(E *e, LVal lv) {
     EVal r = {0};
     MLIR_ValueHandle p = lval_address(e, lv);
     r.val = emit_load_v(e, p, lv.elem_ty);
+    if (lv.bit_width > 0) {
+        bool is64 = (lv.elem_ty == e->i64);
+        MLIR_ValueHandle v = r.val;
+        if (lv.elem_ty == e->i8 || lv.elem_ty == e->i16) {
+            v = emit_extui_to_i32(e, v);
+        }
+        int ubits = is64 ? 64 : 32;
+        MLIR_TypeHandle vty = is64 ? e->i64 : e->i32;
+        if (lv.is_unsigned || lv.is_bool) {
+            if (lv.bit_offset > 0) {
+                MLIR_ValueHandle sh = is64 ? emit_const_i64(e, lv.bit_offset)
+                                           : emit_const_i32(e, lv.bit_offset);
+                v = emit_binop(e, OP_TYPE_ARITH_SHRUI, vty, v, sh);
+            }
+            if (lv.bit_width < ubits) {
+                uint64_t mask = (1ULL << lv.bit_width) - 1ULL;
+                MLIR_ValueHandle mv = is64 ? emit_const_i64(e, (int64_t)mask)
+                                           : emit_const_i32(e, (int64_t)mask);
+                v = emit_binop(e, OP_TYPE_ARITH_ANDI, vty, v, mv);
+            }
+        } else {
+            int shl = ubits - lv.bit_offset - lv.bit_width;
+            int shr = ubits - lv.bit_width;
+            if (shl > 0) {
+                MLIR_ValueHandle sl = is64 ? emit_const_i64(e, shl)
+                                           : emit_const_i32(e, shl);
+                v = emit_binop(e, OP_TYPE_ARITH_SHLI, vty, v, sl);
+            }
+            if (shr > 0) {
+                MLIR_ValueHandle sr = is64 ? emit_const_i64(e, shr)
+                                           : emit_const_i32(e, shr);
+                v = emit_binop(e, OP_TYPE_ARITH_SHRSI, vty, v, sr);
+            }
+        }
+        r.val = v;
+        r.is_i64 = is64;
+        r.is_unsigned = lv.is_unsigned && (is64 || lv.bit_width == 32);
+        r.ptr_elem = MLIR_INVALID_HANDLE;
+        return r;
+    }
     bool narrow = lv.elem_ty == e->i8 || lv.elem_ty == e->i16;
     if (narrow) {
         // Widen char / short / bool storage to int: zero-extend an unsigned
@@ -1648,6 +1737,35 @@ static EVal load_lvalue(E *e, LVal lv) {
 // Store `v`, already converted to the lvalue's storage type lv.elem_ty.
 static void store_lvalue(E *e, LVal lv, MLIR_ValueHandle v) {
     MLIR_ValueHandle p = lval_address(e, lv);
+    if (lv.bit_width > 0) {
+        bool is64 = (lv.elem_ty == e->i64);
+        bool narrow = (lv.elem_ty == e->i8 || lv.elem_ty == e->i16);
+        MLIR_TypeHandle vty = is64 ? e->i64 : e->i32;
+        MLIR_ValueHandle old = emit_load_v(e, p, lv.elem_ty);
+        if (narrow) {
+            old = emit_extui_to_i32(e, old);
+            v = emit_extui_to_i32(e, v);
+        }
+        uint64_t field_mask = (lv.bit_width >= 64) ? ~0ULL : ((1ULL << lv.bit_width) - 1ULL);
+        uint64_t shifted_mask = field_mask << lv.bit_offset;
+        MLIR_ValueHandle keep_mask = is64 ? emit_const_i64(e, (int64_t)(~shifted_mask))
+                                          : emit_const_i32(e, (int64_t)(int32_t)(~shifted_mask));
+        MLIR_ValueHandle cleared = emit_binop(e, OP_TYPE_ARITH_ANDI, vty, old, keep_mask);
+        MLIR_ValueHandle fmask = is64 ? emit_const_i64(e, (int64_t)field_mask)
+                                      : emit_const_i32(e, (int64_t)(int32_t)field_mask);
+        MLIR_ValueHandle masked = emit_binop(e, OP_TYPE_ARITH_ANDI, vty, v, fmask);
+        if (lv.bit_offset > 0) {
+            MLIR_ValueHandle sh = is64 ? emit_const_i64(e, lv.bit_offset)
+                                       : emit_const_i32(e, lv.bit_offset);
+            masked = emit_binop(e, OP_TYPE_ARITH_SHLI, vty, masked, sh);
+        }
+        MLIR_ValueHandle merged = emit_binop(e, OP_TYPE_ARITH_ORI, vty, cleared, masked);
+        if (narrow) {
+            merged = emit_unary(e, OP_TYPE_ARITH_TRUNCI, lv.elem_ty, merged);
+        }
+        emit_store_v(e, merged, p);
+        return;
+    }
     emit_store_v(e, v, p);
 }
 
@@ -1836,7 +1954,7 @@ static SCtx walk_struct_lhs(E *e, Scope *sc, Expr *ex) {
             r.dyn_index = MLIR_INVALID_HANDLE;
             sctx_push(e, &r, 0);
         } else {
-            sctx_push(e, &r, idx);
+            sctx_push(e, &r, struct_llvm_field(parent.sd, idx));
         }
         r.sd = find_struct(e, ft.struct_name);
         r.ok = (r.sd != NULL);
@@ -2025,7 +2143,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                         size_t total = parent_n + extra;
                         int32_t *path = arena_new_array(e->arena, int32_t, total);
                         for (size_t k = 0; k < parent_n; k++) path[k] = sctx_path(&parent)[k];
-                        path[parent_n] = (int32_t)fidx;
+                        path[parent_n] = struct_llvm_field(parent.sd, fidx);
                         path[parent_n + 1] = LLVM_GEP_DYN;
                         if (is_2d) path[parent_n + 2] = LLVM_GEP_DYN;
                         size_t n_dyn = (parent.dyn_index != MLIR_INVALID_HANDLE ? 1 : 0)
@@ -2057,7 +2175,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                         size_t total = parent_n + 1;
                         int32_t *fpath = arena_new_array(e->arena, int32_t, total);
                         for (size_t k = 0; k < parent_n; k++) fpath[k] = sctx_path(&parent)[k];
-                        fpath[parent_n] = (int32_t)fidx;
+                        fpath[parent_n] = struct_llvm_field(parent.sd, fidx);
                         size_t n_dyn = (parent.dyn_index != MLIR_INVALID_HANDLE ? 1 : 0);
                         MLIR_ValueHandle *fdyn = arena_new_array(e->arena, MLIR_ValueHandle,
                                                                  n_dyn ? n_dyn : 1);
@@ -2202,7 +2320,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                             if (found && fldt.kind == TY_PTR_PTR) {
                                 MLIR_TypeHandle st_ty = find_struct_type(e, sd);
                                 int32_t *fpath = arena_new_array(e->arena, int32_t, 2);
-                                fpath[0] = 0; fpath[1] = (int32_t)fidx;
+                                fpath[0] = 0; fpath[1] = struct_llvm_field(sd, (int)fidx);
                                 MLIR_ValueHandle field_addr = emit_gep(e, parent_base,
                                     st_ty, fpath, 2, NULL, 0);
                                 MLIR_ValueHandle pp = emit_load_v(e, field_addr, e->ptr);
@@ -2410,7 +2528,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 EMIT_ERR(e, "field {} is not a scalar lvalue", ex->name);
                 return r;
             }
-            sctx_push(e, &parent, parent.sd->is_union ? 0 : idx);
+            sctx_push(e, &parent, struct_llvm_field(parent.sd, idx));
             r.base_ptr = parent.base_ptr;
             r.source_elem = parent.source_elem;
             lval_copy_sctx_path(&r, &parent);
@@ -2420,6 +2538,8 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
             r.narrow_bits = type_is_narrow_int(ft) ? ft.int_bits : 0;
             r.is_bool = ft.is_bool;
             r.in_union = parent.sd->is_union;
+            r.bit_width = parent.sd->fields.data[idx].bit_width;
+            r.bit_offset = parent.sd->fields.data[idx].bit_offset;
             return r;
         }
         default:
@@ -2667,13 +2787,16 @@ static void emit_struct_copy_path(E *e, MLIR_ValueHandle dst, MLIR_ValueHandle s
         }
         return;
     }
+    struct_compute_layout(sd);
     for (size_t i = 0; i < sd->fields.size; i++) {
-        Type ft = sd->fields.data[i].type;
+        StructField *sf = &sd->fields.data[i];
+        if (sf->is_bitfield && (sf->bit_width == 0 || sf->bit_offset > 0)) continue;
+        Type ft = sf->type;
         size_t n_path = n_prefix + 1;
         int32_t path_stk[16];
         int32_t *path = (n_path <= 16) ? path_stk : arena_new_array(e->arena, int32_t, n_path);
         for (size_t k = 0; k < n_prefix; k++) path[k] = prefix[k];
-        path[n_prefix] = (int32_t)i;
+        path[n_prefix] = struct_llvm_field(sd, (int)i);
         if (ft.kind == TY_STRUCT) {
             StructDef *inner = find_struct(e, ft.struct_name);
             emit_struct_copy_path(e, dst, src, source_elem, inner, path, n_path);
@@ -3887,7 +4010,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     }
                     if (sd && !sd->is_union) {
                         int fidx = struct_field_index(sd, ex->name);
-                        if (fidx >= 0) {
+                        if (fidx >= 0 && !sd->fields.data[fidx].is_bitfield) {
                             Type ft = sd->fields.data[fidx].type;
                             TypeKind fk = ft.kind;
                             if (fk == TY_I32 || fk == TY_I64 ||
@@ -3896,7 +4019,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                                 fk == TY_PTR_I32 || fk == TY_PTR_STRUCT) {
                                 MLIR_ValueHandle base = is_arrow ? sym_load_ptr(e, vs) : sym_addr(e, vs);
                                 MLIR_TypeHandle st_ty = find_struct_type(e, sd);
-                                int32_t path[2] = {0, fidx};
+                                int32_t path[2] = {0, struct_llvm_field(sd, fidx)};
                                 MLIR_ValueHandle ptr = emit_gep(e, base, st_ty, path, 2, NULL, 0);
                                 MLIR_TypeHandle mt = scalar_mem_type(e, &ft);
                                 MLIR_ValueHandle raw = emit_load_v(e, ptr, mt);
@@ -3966,7 +4089,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                             ft.kind == TY_ARRAY_PTR_STRUCT ||
                             ft.kind == TY_ARRAY_PTR_CHAR) {
                             sctx_push(e, &parent,
-                                      parent.sd->is_union ? 0 : fidx);
+                                      struct_llvm_field(parent.sd, fidx));
                             MLIR_ValueHandle dyn[1];
                             size_t n_dyn = 0;
                             if (parent.dyn_index != MLIR_INVALID_HANDLE) {
@@ -4318,7 +4441,7 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                                 ft.kind != TY_ARRAY_PTR_STRUCT && ft.kind != TY_ARRAY_PTR_CHAR) {
                                 MLIR_ValueHandle base = is_arrow ? sym_load_ptr(e, vs) : sym_addr(e, vs);
                                 MLIR_TypeHandle st_ty = find_struct_type(e, sd);
-                                int32_t path[2] = {0, fidx};
+                                int32_t path[2] = {0, struct_llvm_field(sd, fidx)};
                                 lv = (LVal){0};
                                 lv.source_elem = MLIR_INVALID_HANDLE;
                                 lv.dyn_index = MLIR_INVALID_HANDLE;
@@ -4327,6 +4450,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                                 lv.is_unsigned = ft.int_unsigned;
                                 lv.narrow_bits = type_is_narrow_int(ft) ? ft.int_bits : 0;
                                 lv.is_bool = ft.is_bool;
+                                lv.bit_width = sd->fields.data[fidx].bit_width;
+                                lv.bit_offset = sd->fields.data[fidx].bit_offset;
                                 have_lv = true;
                             }
                         }
@@ -5365,13 +5490,16 @@ static void emit_struct_zero(E *e, MLIR_ValueHandle base, MLIR_TypeHandle source
         }
         return;
     }
+    struct_compute_layout(sd);
     for (size_t i = 0; i < sd->fields.size; i++) {
-        Type ft = sd->fields.data[i].type;
+        StructField *sf = &sd->fields.data[i];
+        if (sf->is_bitfield && (sf->bit_width == 0 || sf->bit_offset > 0)) continue;
+        Type ft = sf->type;
         size_t n_path = n_prefix + 1;
         int32_t path_stk[16];
         int32_t *path = (n_path <= 16) ? path_stk : arena_new_array(e->arena, int32_t, n_path);
         for (size_t k = 0; k < n_prefix; k++) path[k] = prefix[k];
-        path[n_prefix] = (int32_t)i;
+        path[n_prefix] = struct_llvm_field(sd, (int)i);
         if (ft.kind == TY_STRUCT) {
             StructDef *inner = find_struct(e, ft.struct_name);
             emit_struct_zero(e, base, source_elem, inner, path, n_path);
@@ -7254,9 +7382,12 @@ static int64_t type_size(E *e, Type t) {
             union_blob_layout(e, sd, &elem, &es, &c);
             return es * c;
         }
+        struct_compute_layout(sd);
         int64_t off = 0, max_align = 1;
         for (size_t i = 0; i < sd->fields.size; i++) {
-            Type ft = sd->fields.data[i].type;
+            StructField *sf = &sd->fields.data[i];
+            if (sf->is_bitfield && (sf->bit_width == 0 || sf->bit_offset > 0)) continue;
+            Type ft = sf->type;
             int64_t fa = type_align(e, ft);
             int64_t fs = type_size(e, ft);
             if (fa > max_align) max_align = fa;
@@ -7280,9 +7411,12 @@ static int64_t type_size(E *e, Type t) {
             union_blob_layout(e, sd, &elem, &es, &c);
             return es * c * t.array_len;
         }
+        struct_compute_layout(sd);
         int64_t off = 0, max_align = 1;
         for (size_t i = 0; i < sd->fields.size; i++) {
-            Type ft = sd->fields.data[i].type;
+            StructField *sf = &sd->fields.data[i];
+            if (sf->is_bitfield && (sf->bit_width == 0 || sf->bit_offset > 0)) continue;
+            Type ft = sf->type;
             int64_t fa = type_align(e, ft);
             int64_t fs = type_size(e, ft);
             if (fa > max_align) max_align = fa;
@@ -7408,28 +7542,32 @@ static MLIR_TypeHandle resolve_struct_type(E *e, size_t idx) {
         e->cur_line = saved_line;
         return ty;
     }
+    struct_compute_layout(sd);
     size_t n = sd->fields.size;
     MLIR_TypeHandle *body = arena_new_array(e->arena, MLIR_TypeHandle, n ? n : 1);
+    size_t nb = 0;
     for (size_t k = 0; k < n; k++) {
-        Type ft = sd->fields.data[k].type;
+        StructField *sf = &sd->fields.data[k];
+        if (sf->is_bitfield && (sf->bit_width == 0 || sf->bit_offset > 0)) continue;
+        Type ft = sf->type;
         if (ft.kind == TY_I32 || ft.kind == TY_I64 || ft.kind == TY_F32 ||
             ft.kind == TY_F64 || ft.kind == TY_PTR_STRUCT || ft.kind == TY_PTR_I32 ||
             ft.kind == TY_PTR_CHAR || ft.kind == TY_PTR_VOID ||
             ft.kind == TY_PTR_PTR || ft.kind == TY_FNPTR) {
-            body[k] = scalar_mem_type(e, &ft);
+            body[nb++] = scalar_mem_type(e, &ft);
         } else if (ft.kind == TY_STRUCT) {
             StructDef *inner = find_struct(e, ft.struct_name);
             MLIR_TypeHandle t = find_struct_type(e, inner);
-            body[k] = t;
+            body[nb++] = t;
         } else if (ft.kind == TY_ARRAY_I32 || ft.kind == TY_ARRAY_F32 ||
                    ft.kind == TY_ARRAY_PTR_STRUCT || ft.kind == TY_ARRAY_PTR_CHAR) {
-            body[k] = array_mlir_type(e, &ft);
+            body[nb++] = array_mlir_type(e, &ft);
         } else {
             EMIT_ERR(e, "unsupported struct field type in {}", sd->name);
-            body[k] = e->i32;
+            body[nb++] = e->i32;
         }
     }
-    MLIR_SetTypeLLVMStructBody(e->ctx, ty, body, n);
+    MLIR_SetTypeLLVMStructBody(e->ctx, ty, body, nb);
     e->cur_line = saved_line;
     return ty;
 }

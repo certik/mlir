@@ -2794,9 +2794,26 @@ static StructDef *parse_struct_def(P *p) {
                 fn.d.size = fnptr_field_name.size;
                 fn.line = cur(p).line;
                 fnptr_field_name = (string){0};
+            } else if (cur(p).kind == TC_TK_COLON) {
+                // Anonymous bit-field: `unsigned : 0;` or `unsigned : 3;`
+                fn = (TcTok){0};
+                fn.line = cur(p).line;
             } else {
                 fn = cur(p);
                 expect(p, TC_TK_IDENT, str_lit("expected field name"));
+            }
+            bool is_bf = false;
+            uint8_t bf_width = 0;
+            if (accept(p, TC_TK_COLON)) {
+                is_bf = true;
+                int bw_line = cur(p).line;
+                Expr *bw_ex = parse_ternary(p);
+                int64_t bw = 0;
+                if (!parse_const_eval(p, bw_ex, &bw) || bw < 0 || bw > 64) {
+                    perror_at(p, bw_line, str_lit("expected constant bit-field width (0..64)"));
+                } else {
+                    bf_width = (uint8_t)bw;
+                }
             }
             // Optional array suffix `[N]` or `[N][M]`.
             if (accept(p, TC_TK_LBRACK)) {
@@ -2839,7 +2856,12 @@ static StructDef *parse_struct_def(P *p) {
                 }
             }
             VecStructField_push_back(p->arena, &sd->fields,
-                ((StructField){.name = tc_tok_text(fn), .type = ft}));
+                ((StructField){
+                    .name = tc_tok_text(fn),
+                    .type = ft,
+                    .bit_width = bf_width,
+                    .is_bitfield = is_bf,
+                }));
             more_decls = accept(p, TC_TK_COMMA);
         }
         expect(p, TC_TK_SEMI, str_lit("expected ';' after field"));

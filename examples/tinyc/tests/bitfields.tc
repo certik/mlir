@@ -1,0 +1,41 @@
+extern int printf(const char *fmt, ...);
+
+struct F {
+    unsigned a : 1;
+    unsigned b : 3;
+    int c;
+};
+
+struct S {
+    int x : 4;
+    unsigned y : 4;
+    unsigned : 0;
+    unsigned z : 5;
+};
+
+struct B {
+    unsigned char f0 : 3;
+    unsigned char f1 : 5;
+    unsigned char f2 : 2;
+};
+
+int main(void) {
+    struct F f;
+    f.a = 1;
+    f.b = 5;
+    f.c = 9;
+    printf("%u %u %d %d\n", f.a, f.b, f.c, (int)sizeof(struct F));
+
+    struct S s;
+    s.x = -3;
+    s.y = 11;
+    s.z = 19;
+    printf("%d %u %u %d\n", s.x, s.y, s.z, (int)sizeof(struct S));
+
+    struct B b;
+    b.f0 = 6;
+    b.f1 = 25;
+    b.f2 = 3;
+    printf("%u %u %u %d\n", b.f0, b.f1, b.f2, (int)sizeof(struct B));
+    return 0;
+}
