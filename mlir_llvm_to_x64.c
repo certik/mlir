@@ -347,10 +347,24 @@ static inline void modrm(FnCtx *F, int mod, int reg, int rm) {
 
 // mov reg, imm  (w=1 -> full 64-bit immediate via movabs)
 static void mov_ri(FnCtx *F, uint8_t reg, int64_t imm, int w) {
+    if (imm == 0) {
+        // xor reg32, reg32 (2-3 bytes, zero-extends to 64 bits)
+        uint8_t rv = (uint8_t)(0x40 | ((reg >= 8) << 2) | (reg >= 8));
+        if (rv != 0x40) eb(F, rv);
+        eb(F, 0x31);
+        modrm(F, 3, reg, reg);
+        return;
+    }
     if (w) {
-        rex(F, 1, 0, 0, reg);
-        eb(F, 0xB8 + (reg & 7));
-        buf_le64(&F->f->code, (uint64_t)imm);
+        if (imm >= 0 && imm <= UINT32_MAX) {
+            if (reg >= 8) eb(F, 0x41);
+            eb(F, 0xB8 + (reg & 7));
+            e32(F, (uint32_t)imm);
+        } else {
+            rex(F, 1, 0, 0, reg);
+            eb(F, 0xB8 + (reg & 7));
+            buf_le64(&F->f->code, (uint64_t)imm);
+        }
     } else {
         if (reg >= 8) eb(F, 0x41);
         eb(F, 0xB8 + (reg & 7));
@@ -368,8 +382,29 @@ static inline void alu_rr(FnCtx *F, uint8_t op, uint8_t dst, uint8_t src, int w)
     *p++ = (uint8_t)(0xC0 | ((src & 7) << 3) | (dst & 7));
     b->len = (size_t)(p - b->data);
 }
+// ALU r/m64-or-32, imm8/imm32 (ext: 0=add, 1=or, 4=and, 5=sub, 6=xor, 7=cmp)
+static inline void alu_ri(FnCtx *F, uint8_t ext, uint8_t dst, int32_t imm, int w) {
+    Buf *b = &F->f->code;
+    if (b->len + 7 > b->cap) buf_grow(b, 7);
+    uint8_t *p = b->data + b->len;
+    uint8_t rv = (uint8_t)(0x40 | (w << 3) | (dst >= 8));
+    if (rv != 0x40 || w) *p++ = rv;
+    if (imm >= -128 && imm <= 127) {
+        *p++ = 0x83;
+        *p++ = (uint8_t)(0xC0 | ((ext & 7) << 3) | (dst & 7));
+        *p++ = (uint8_t)(int8_t)imm;
+    } else {
+        *p++ = 0x81;
+        *p++ = (uint8_t)(0xC0 | ((ext & 7) << 3) | (dst & 7));
+        uint32_t u = (uint32_t)imm;
+        p[0] = (uint8_t)(u & 0xff); p[1] = (uint8_t)((u >> 8) & 0xff);
+        p[2] = (uint8_t)((u >> 16) & 0xff); p[3] = (uint8_t)((u >> 24) & 0xff);
+        p += 4;
+    }
+    b->len = (size_t)(p - b->data);
+}
 static inline void mov_rr(FnCtx *F, uint8_t dst, uint8_t src, int w) {
-    if (dst == src && !w) return;
+    if (dst == src) return;
     alu_rr(F, 0x89, dst, src, w);
 }
 static void imul_rr(FnCtx *F, uint8_t dst, uint8_t src, int w) {
@@ -385,11 +420,18 @@ static inline void load_rbp(FnCtx *F, uint8_t reg, int32_t off, int w) {
     uint8_t rv = (uint8_t)(0x40 | (w << 3) | ((reg >= 8) << 2));
     if (rv != 0x40 || w) *p++ = rv;
     *p++ = 0x8B;
-    *p++ = (uint8_t)(0x80 | ((reg & 7) << 3) | RBP);
-    uint32_t d = (uint32_t)(-off);
-    p[0] = (uint8_t)(d & 0xff); p[1] = (uint8_t)((d >> 8) & 0xff);
-    p[2] = (uint8_t)((d >> 16) & 0xff); p[3] = (uint8_t)((d >> 24) & 0xff);
-    b->len = (size_t)(p + 4 - b->data);
+    int32_t d = -off;
+    if (d >= -128 && d <= 127) {
+        *p++ = (uint8_t)(0x40 | ((reg & 7) << 3) | RBP);
+        *p++ = (uint8_t)(int8_t)d;
+    } else {
+        *p++ = (uint8_t)(0x80 | ((reg & 7) << 3) | RBP);
+        uint32_t u = (uint32_t)d;
+        p[0] = (uint8_t)(u & 0xff); p[1] = (uint8_t)((u >> 8) & 0xff);
+        p[2] = (uint8_t)((u >> 16) & 0xff); p[3] = (uint8_t)((u >> 24) & 0xff);
+        p += 4;
+    }
+    b->len = (size_t)(p - b->data);
 }
 // store [rbp - off], reg
 static inline void store_rbp(FnCtx *F, int32_t off, uint8_t reg, int w) {
@@ -399,11 +441,18 @@ static inline void store_rbp(FnCtx *F, int32_t off, uint8_t reg, int w) {
     uint8_t rv = (uint8_t)(0x40 | (w << 3) | ((reg >= 8) << 2));
     if (rv != 0x40 || w) *p++ = rv;
     *p++ = 0x89;
-    *p++ = (uint8_t)(0x80 | ((reg & 7) << 3) | RBP);
-    uint32_t d = (uint32_t)(-off);
-    p[0] = (uint8_t)(d & 0xff); p[1] = (uint8_t)((d >> 8) & 0xff);
-    p[2] = (uint8_t)((d >> 16) & 0xff); p[3] = (uint8_t)((d >> 24) & 0xff);
-    b->len = (size_t)(p + 4 - b->data);
+    int32_t d = -off;
+    if (d >= -128 && d <= 127) {
+        *p++ = (uint8_t)(0x40 | ((reg & 7) << 3) | RBP);
+        *p++ = (uint8_t)(int8_t)d;
+    } else {
+        *p++ = (uint8_t)(0x80 | ((reg & 7) << 3) | RBP);
+        uint32_t u = (uint32_t)d;
+        p[0] = (uint8_t)(u & 0xff); p[1] = (uint8_t)((u >> 8) & 0xff);
+        p[2] = (uint8_t)((u >> 16) & 0xff); p[3] = (uint8_t)((u >> 24) & 0xff);
+        p += 4;
+    }
+    b->len = (size_t)(p - b->data);
 }
 static inline void lea_rbp(FnCtx *F, uint8_t reg, int32_t off) {
     Buf *b = &F->f->code;
@@ -411,11 +460,39 @@ static inline void lea_rbp(FnCtx *F, uint8_t reg, int32_t off) {
     uint8_t *p = b->data + b->len;
     *p++ = (uint8_t)(0x48 | ((reg >= 8) << 2));
     *p++ = 0x8D;
-    *p++ = (uint8_t)(0x80 | ((reg & 7) << 3) | RBP);
-    uint32_t d = (uint32_t)(-off);
-    p[0] = (uint8_t)(d & 0xff); p[1] = (uint8_t)((d >> 8) & 0xff);
-    p[2] = (uint8_t)((d >> 16) & 0xff); p[3] = (uint8_t)((d >> 24) & 0xff);
-    b->len = (size_t)(p + 4 - b->data);
+    int32_t d = -off;
+    if (d >= -128 && d <= 127) {
+        *p++ = (uint8_t)(0x40 | ((reg & 7) << 3) | RBP);
+        *p++ = (uint8_t)(int8_t)d;
+    } else {
+        *p++ = (uint8_t)(0x80 | ((reg & 7) << 3) | RBP);
+        uint32_t u = (uint32_t)d;
+        p[0] = (uint8_t)(u & 0xff); p[1] = (uint8_t)((u >> 8) & 0xff);
+        p[2] = (uint8_t)((u >> 16) & 0xff); p[3] = (uint8_t)((u >> 24) & 0xff);
+        p += 4;
+    }
+    b->len = (size_t)(p - b->data);
+}
+static void load_rbp_sized(FnCtx *F, uint8_t dst, int32_t off, int bytes) {
+    if (bytes == 8) { load_rbp(F, dst, off, 1); return; }
+    if (bytes == 4) { load_rbp(F, dst, off, 0); return; }
+    rex(F, 1, dst, 0, 0);
+    eb(F, 0x0F); eb(F, bytes == 2 ? 0xB7 : 0xB6);
+    int32_t d = -off;
+    if (d >= -128 && d <= 127) { modrm(F, 1, dst, RBP); eb(F, (uint8_t)(int8_t)d); }
+    else                       { modrm(F, 2, dst, RBP); e32(F, (uint32_t)d); }
+}
+static void store_rbp_sized(FnCtx *F, int32_t off, uint8_t src, int bytes) {
+    if (bytes == 8) { store_rbp(F, off, src, 1); return; }
+    if (bytes == 4) { store_rbp(F, off, src, 0); return; }
+    if (bytes == 2) { eb(F, 0x66); rex(F, 0, src, 0, 0); eb(F, 0x89); }
+    else {
+        if (src >= 4) eb(F, (uint8_t)(0x40 | ((src >= 8) << 2)));
+        eb(F, 0x88);
+    }
+    int32_t d = -off;
+    if (d >= -128 && d <= 127) { modrm(F, 1, src, RBP); eb(F, (uint8_t)(int8_t)d); }
+    else                       { modrm(F, 2, src, RBP); e32(F, (uint32_t)d); }
 }
 // Emit `lea reg, [rip+disp32]` with disp32 left at 0; return offset of disp32 field.
 static uint32_t lea_rip_emit(FnCtx *F, uint8_t reg) {
@@ -462,19 +539,29 @@ static void lea_rip_func(FnCtx *F, uint8_t reg, string sym) {
     uint32_t field = lea_rip_emit(F, reg);
     add_text_reloc(F, field, sym);
 }
+// Emit ModRM (+ SIB/disp8 if needed) for [addr] addressing with any GP register.
+static inline void modrm_mem0(FnCtx *F, uint8_t reg, uint8_t addr) {
+    if ((addr & 7) == 4)      { modrm(F, 0, reg, addr); eb(F, 0x24); }
+    else if ((addr & 7) == 5) { modrm(F, 1, reg, addr); eb(F, 0x00); }
+    else                      { modrm(F, 0, reg, addr); }
+}
 // width-aware memory load/store through an address already in `addr`
 static void load_mem(FnCtx *F, uint8_t dst, uint8_t addr, int bytes, bool sgn) {
-    if (bytes == 8) { rex(F,1,dst,0,addr); eb(F,0x8B); modrm(F,0,dst,addr); }
-    else if (bytes == 4) { rex(F,0,dst,0,addr); eb(F,0x8B); modrm(F,0,dst,addr);
+    if (bytes == 8) { rex(F,1,dst,0,addr); eb(F,0x8B); modrm_mem0(F,dst,addr); }
+    else if (bytes == 4) { rex(F,0,dst,0,addr); eb(F,0x8B); modrm_mem0(F,dst,addr);
                            if (sgn) { /* movsxd done by caller width */ } }
-    else if (bytes == 2) { rex(F,1,dst,0,addr); eb(F,0x0F); eb(F, sgn?0xBF:0xB7); modrm(F,0,dst,addr); }
-    else { rex(F,1,dst,0,addr); eb(F,0x0F); eb(F, sgn?0xBE:0xB6); modrm(F,0,dst,addr); }
+    else if (bytes == 2) { rex(F,1,dst,0,addr); eb(F,0x0F); eb(F, sgn?0xBF:0xB7); modrm_mem0(F,dst,addr); }
+    else { rex(F,1,dst,0,addr); eb(F,0x0F); eb(F, sgn?0xBE:0xB6); modrm_mem0(F,dst,addr); }
 }
 static void store_mem(FnCtx *F, uint8_t addr, uint8_t src, int bytes) {
-    if (bytes == 1) { rex(F,0,src,0,addr); eb(F,0x88); modrm(F,0,src,addr); }
-    else if (bytes == 2) { eb(F,0x66); rex(F,0,src,0,addr); eb(F,0x89); modrm(F,0,src,addr); }
-    else if (bytes == 4) { rex(F,0,src,0,addr); eb(F,0x89); modrm(F,0,src,addr); }
-    else { rex(F,1,src,0,addr); eb(F,0x89); modrm(F,0,src,addr); }
+    if (bytes == 1) {
+        if (src >= 4 && src < 8 && addr < 8) eb(F, 0x40);
+        else rex(F,0,src,0,addr);
+        eb(F,0x88); modrm_mem0(F,src,addr);
+    }
+    else if (bytes == 2) { eb(F,0x66); rex(F,0,src,0,addr); eb(F,0x89); modrm_mem0(F,src,addr); }
+    else if (bytes == 4) { rex(F,0,src,0,addr); eb(F,0x89); modrm_mem0(F,src,addr); }
+    else { rex(F,1,src,0,addr); eb(F,0x89); modrm_mem0(F,src,addr); }
 }
 
 // ---------------------------------------------------------------------------
@@ -631,6 +718,31 @@ static void store_val_w(FnCtx *F, MLIR_ValueHandle v, uint8_t reg, int w) {
 }
 static inline void store_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
     store_val_w(F, v, reg, val_w(F->ctx, v));
+}
+
+static inline bool x64_is_remat_type(MLIR_OpType t) {
+    return t == OP_TYPE_LLVM_MLIR_CONSTANT || t == OP_TYPE_LLVM_MLIR_ADDRESSOF ||
+           t == OP_TYPE_LLVM_MLIR_UNDEF    || t == OP_TYPE_LLVM_MLIR_ZERO ||
+           t == OP_TYPE_LLVM_MLIR_NULL;
+}
+static inline uint8_t val_reg_or_load(FnCtx *F, MLIR_ValueHandle v, uint8_t scratch, int w) {
+    uint8_t rH;
+    if (F->fast_ra) {
+        if (val_in_reg(F, v, &rH)) return rH;
+    } else {
+        MLIR_OpHandle def = MLIR_GetValueDefiningOp(F->ctx, v);
+        if ((def == MLIR_INVALID_HANDLE || !x64_is_remat_type(MLIR_GetOpType(F->ctx, def))) &&
+            val_in_reg(F, v, &rH))
+            return rH;
+    }
+    load_val_w(F, v, scratch, w);
+    return scratch;
+}
+static inline bool alloca_slot(FnCtx *F, MLIR_ValueHandle v, int32_t *out_off) {
+    MLIR_OpHandle def = MLIR_GetValueDefiningOp(F->ctx, v);
+    if (def == MLIR_INVALID_HANDLE || MLIR_GetOpType(F->ctx, def) != OP_TYPE_LLVM_ALLOCA)
+        return false;
+    return vmap_get(&F->slots, x64_region_key(def), out_off);
 }
 
 #include "mlir_llvm_to_x64_emit.inc"
