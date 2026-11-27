@@ -1,0 +1,37 @@
+extern int printf(const char *fmt, ...);
+
+static const struct {
+    unsigned char left, right;
+} prio[] = {
+    { 10, 10 },
+    { 11, 12 },
+};
+
+static int add1(int x) { return x + 1; }
+static void hello(void) { printf("hello\n"); }
+
+static void (*get_fn(int x))(void) {
+    (void)x;
+    return hello;
+}
+
+struct V {
+    void (*(*sym)(int))(void);
+};
+
+int (*g_tab[2])(int);
+
+int main(void) {
+    printf("%d %d %d %d\n", prio[0].left, prio[0].right, prio[1].left, prio[1].right);
+    void (*fp)(void) = get_fn(1);
+    fp();
+    struct V v;
+    v.sym = get_fn;
+    void (*fp2)(void) = v.sym(2);
+    fp2();
+    int (*l_tab[1])(int);
+    l_tab[0] = add1;
+    g_tab[0] = add1;
+    printf("%d %d\n", l_tab[0](5), g_tab[0](9));
+    return 0;
+}
