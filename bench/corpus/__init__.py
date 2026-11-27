@@ -87,11 +87,10 @@ CORPUS = [
         "unity": _coremark_unity,
         "inc": lambda src: [HERE / "coremark", src, HERE / "common"],
         "defines": ["TOTAL_DATA_SIZE=2000", "ITERATIONS=10000"],
-        # `volatile` is not parsed yet: dropping it is harmless here (seeds).
-        "tinyc_flags": ["--host-varargs", "-Dvolatile="],
+        "tinyc_flags": ["--host-varargs"],
         "argv": lambda src: [],
         "check": "Correct operation validated",
-        "blockers": "workarounds: -Dvolatile= (#333), global pointer-array init rewrite (#317)",
+        "blockers": "workaround: global pointer-array init rewrite (#317)",
     },
     {
         "name": "lua",

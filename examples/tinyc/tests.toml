@@ -1780,3 +1780,21 @@ expected_stdout = "-56 255 34 4464 65535\n[\\0A][  -42][-42  ][-0042][+5][ 5]\n[
 name = "global_string_concat"
 targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "9 13\n[abc] 3\n[de] 2\n[f] 1\nhello, world\n"
+
+[[test]]
+name = "volatile_qualifier"
+targets = ["native", "wasm", "macho", "elf"]
+# volatile / restrict / register qualifiers (#333).
+expected_stdout = "14 30 3 1\n"
+
+[[test]]
+name = "comma_operator"
+targets = ["native", "wasm", "macho", "elf"]
+# Comma operator (a, b) with side effects and type of RHS (#287).
+expected_stdout = "-5 7 7 60 7\n"
+
+[[test]]
+name = "pp_nested_self_macro"
+targets = ["native", "wasm", "macho", "elf"]
+# Function-like macro argument prescan allows nested same-name calls (#335).
+expected_stdout = "5 4 10\n"

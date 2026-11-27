@@ -92,8 +92,19 @@ TcTokKind tinyc_keyword_or_ident(string s) {
     case 8:
         if (p[0] == 'c' && memcmp(p, "continue", 8) == 0) return TC_TK_KW_CONTINUE;
         if (p[0] == 'u' && memcmp(p, "unsigned", 8) == 0) return TC_TK_KW_UNSIGNED;
+        if (p[0] == 'v' && memcmp(p, "volatile", 8) == 0) return TC_TK_KW_VOLATILE;
+        if (p[0] == 'r' && memcmp(p, "restrict", 8) == 0) return TC_TK_KW_RESTRICT;
+        if (p[0] == 'r' && memcmp(p, "register", 8) == 0) return TC_TK_KW_REGISTER;
         if (p[0] == '_' && memcmp(p, "_Alignof", 8) == 0) return TC_TK_KW_ALIGNOF;
         if (p[0] == '_' && memcmp(p, "_Generic", 8) == 0) return TC_TK_KW_GENERIC;
+        return TC_TK_IDENT;
+    case 10:
+        if (p[0] == '_' && memcmp(p, "__restrict", 10) == 0) return TC_TK_KW_RESTRICT;
+        if (p[0] == '_' && memcmp(p, "__volatile", 10) == 0) return TC_TK_KW_VOLATILE;
+        return TC_TK_IDENT;
+    case 12:
+        if (p[0] == '_' && memcmp(p, "__restrict__", 12) == 0) return TC_TK_KW_RESTRICT;
+        if (p[0] == '_' && memcmp(p, "__volatile__", 12) == 0) return TC_TK_KW_VOLATILE;
         return TC_TK_IDENT;
     case 13:
         if (p[0] == '_' && memcmp(p, "__attribute__", 13) == 0) return TC_TK_KW_ATTRIBUTE;

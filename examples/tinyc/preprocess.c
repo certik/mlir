@@ -1648,9 +1648,11 @@ static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
                         } else {
                             VecPPTok_reserve(pp->arena, &inner, est);
                         }
-                        m->expanding = true;
+                        // C11 6.10.3.1: macro arguments are fully macro-replaced
+                        // before substitution, so `m` must NOT be hidden during
+                        // substitute() (only during rescan of `inner`, which the
+                        // hideset on `dst[k].hide` below enforces per 6.10.3.4).
                         substitute(pp, m, args, &inner);
-                        m->expanding = false;
                         // Rewind argument token storage before pushing inner!
                         pp->exp_top = saved_arg_exp;
                         if (inner.size > 0) {
