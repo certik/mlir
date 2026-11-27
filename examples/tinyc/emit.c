@@ -1996,10 +1996,6 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                             EMIT_ERR(e, "1D field array indexed twice");
                             return r;
                         }
-                        if ((is_arr_pst || is_arr_pch) && is_2d) {
-                            EMIT_ERR(e, "2D pointer-array fields are not supported");
-                            return r;
-                        }
                         MLIR_TypeHandle elem = array_elem_type(e, &ft);
                         MLIR_ValueHandle iv = emit_expr_i32(e, sc, idx_a);
                         MLIR_ValueHandle jv = is_2d ? emit_expr_i32(e, sc, idx_b)
@@ -2997,6 +2993,39 @@ static bool fold_expr(Expr *ex, FoldLeafFn leaf, void *ctx, bool lenient,
             r.is_unsigned = ex->is_unsigned;
             r.v = fold_norm(ex->val.int_value, r.is_i64, r.is_unsigned);
             *out = r;
+            return true;
+        }
+        case EX_NULL: {
+            FoldVal r = {0};
+            r.v = 0;
+            r.is_i64 = true;
+            r.is_unsigned = true;
+            *out = r;
+            return true;
+        }
+        case EX_CAST: {
+            if (!ex->cast_type) return false;
+            Type ct = *ex->cast_type;
+            if (ct.kind != TY_I32 && ct.kind != TY_I64 &&
+                ct.kind != TY_PTR_I32 && ct.kind != TY_PTR_CHAR &&
+                ct.kind != TY_PTR_VOID && ct.kind != TY_PTR_STRUCT &&
+                ct.kind != TY_PTR_PTR && ct.kind != TY_FNPTR)
+                return false;
+            FoldVal a;
+            if (!fold_expr(ex->lhs, leaf, ctx, lenient, &a)) return false;
+            if (ct.kind == TY_I32) {
+                a.v = tinyc_narrow_const(a.v, ct);
+                a.is_i64 = false;
+                a.is_unsigned = ct.int_unsigned;
+                a.v = fold_norm(a.v, false, a.is_unsigned);
+            } else if (ct.kind == TY_I64) {
+                a.is_i64 = true;
+                a.is_unsigned = ct.int_unsigned;
+            } else {
+                a.is_i64 = true;
+                a.is_unsigned = true;
+            }
+            *out = a;
             return true;
         }
         case EX_UN: {
@@ -7266,7 +7295,7 @@ static int64_t type_size(E *e, Type t) {
         return tinyc_int_size(&t) * t.array_len * (t.array_len2 ? t.array_len2 : 1);
     if (t.kind == TY_ARRAY_F32) return 4 * t.array_len * (t.array_len2 ? t.array_len2 : 1);
     if (t.kind == TY_ARRAY_PTR_STRUCT || t.kind == TY_ARRAY_PTR_CHAR)
-        return ptr_sz * t.array_len;
+        return ptr_sz * t.array_len * (t.array_len2 ? t.array_len2 : 1);
     if (t.kind == TY_STRUCT) {
         StructDef *sd = find_struct(e, t.struct_name);
         if (!sd) return 0;

@@ -119,19 +119,134 @@ static void idx_insert(P *p, IdxNode **buckets, string name, size_t idx) {
     buckets[b] = nd;
 }
 
-// The parser's leaves for tinyc_fold: previously-declared enumerators,
-// which have type `int` (or a 64-bit type when the value needs one), and an
-// unevaluated `sizeof`, which only needs its type: size_t (`unsigned
-// long`). The parser cannot size types, so an evaluated one is refused.
+static bool parse_type_align(P *p, Type t, int64_t *out);
+static bool parse_type_size(P *p, Type t, int64_t *out);
+
+static bool parse_type_align(P *p, Type t, int64_t *out) {
+    int64_t ptr_sz = p->target_wasm32 ? 4 : 8;
+    switch (t.kind) {
+        case TY_I32: *out = tinyc_int_size(&t); return true;
+        case TY_I64: *out = 8; return true;
+        case TY_F32: *out = 4; return true;
+        case TY_F64: *out = 8; return true;
+        case TY_PTR_I32: case TY_PTR_STRUCT: case TY_PTR_CHAR:
+        case TY_PTR_VOID: case TY_FNPTR: case TY_PTR_PTR:
+            *out = ptr_sz; return true;
+        case TY_ARRAY_I32: *out = tinyc_int_size(&t); return true;
+        case TY_ARRAY_F32: *out = 4; return true;
+        case TY_ARRAY_PTR_STRUCT: case TY_ARRAY_PTR_CHAR:
+            *out = ptr_sz; return true;
+        case TY_ARRAY_STRUCT: {
+            Type elem = {0}; elem.kind = TY_STRUCT; elem.struct_name = t.struct_name;
+            return parse_type_align(p, elem, out);
+        }
+        case TY_STRUCT: {
+            size_t si = 0;
+            if (!idx_lookup(p->st_buckets, t.struct_name, &si)) return false;
+            StructDef *sd = p->prog->structs.data[si];
+            if (!sd || sd->fields.size == 0) return false;
+            int64_t ma = 1;
+            for (size_t i = 0; i < sd->fields.size; i++) {
+                int64_t fa = 1;
+                if (!parse_type_align(p, sd->fields.data[i].type, &fa)) return false;
+                if (fa > ma) ma = fa;
+            }
+            *out = ma;
+            return true;
+        }
+        default: return false;
+    }
+}
+
+static bool parse_type_size(P *p, Type t, int64_t *out) {
+    int64_t ptr_sz = p->target_wasm32 ? 4 : 8;
+    switch (t.kind) {
+        case TY_I32: *out = tinyc_int_size(&t); return true;
+        case TY_I64: *out = 8; return true;
+        case TY_F32: *out = 4; return true;
+        case TY_F64: *out = 8; return true;
+        case TY_PTR_I32: case TY_PTR_STRUCT: case TY_PTR_CHAR:
+        case TY_PTR_VOID: case TY_FNPTR: case TY_PTR_PTR:
+            *out = ptr_sz; return true;
+        case TY_ARRAY_I32:
+            if (t.array_len <= 0) return false;
+            *out = tinyc_int_size(&t) * t.array_len * (t.array_len2 ? t.array_len2 : 1);
+            return true;
+        case TY_ARRAY_F32:
+            if (t.array_len <= 0) return false;
+            *out = 4 * t.array_len * (t.array_len2 ? t.array_len2 : 1);
+            return true;
+        case TY_ARRAY_PTR_STRUCT: case TY_ARRAY_PTR_CHAR:
+            if (t.array_len <= 0) return false;
+            *out = ptr_sz * t.array_len * (t.array_len2 ? t.array_len2 : 1);
+            return true;
+        case TY_ARRAY_STRUCT: {
+            if (t.array_len <= 0) return false;
+            Type elem = {0}; elem.kind = TY_STRUCT; elem.struct_name = t.struct_name;
+            int64_t es = 0;
+            if (!parse_type_size(p, elem, &es)) return false;
+            *out = es * t.array_len;
+            return true;
+        }
+        case TY_STRUCT: {
+            size_t si = 0;
+            if (!idx_lookup(p->st_buckets, t.struct_name, &si)) return false;
+            StructDef *sd = p->prog->structs.data[si];
+            if (!sd || sd->fields.size == 0) return false;
+            if (sd->is_union) {
+                int64_t max_sz = 0, max_al = 1;
+                for (size_t i = 0; i < sd->fields.size; i++) {
+                    int64_t fs = 0, fa = 1;
+                    if (!parse_type_size(p, sd->fields.data[i].type, &fs)) return false;
+                    if (!parse_type_align(p, sd->fields.data[i].type, &fa)) return false;
+                    if (fs > max_sz) max_sz = fs;
+                    if (fa > max_al) max_al = fa;
+                }
+                *out = (max_sz + max_al - 1) / max_al * max_al;
+                return true;
+            }
+            int64_t off = 0, max_al = 1;
+            for (size_t i = 0; i < sd->fields.size; i++) {
+                int64_t fs = 0, fa = 1;
+                if (!parse_type_size(p, sd->fields.data[i].type, &fs)) return false;
+                if (!parse_type_align(p, sd->fields.data[i].type, &fa)) return false;
+                if (fa > max_al) max_al = fa;
+                off = (off + fa - 1) / fa * fa;
+                off += fs;
+            }
+            *out = (off + max_al - 1) / max_al * max_al;
+            return true;
+        }
+        default: return false;
+    }
+}
+
+// The parser's leaves for tinyc_fold: previously-declared enumerators
+// and `sizeof(T)` / `_Alignof(T)` for types known at parse time.
 static bool parse_fold_leaf(void *ctx, Expr *ex, bool lenient, FoldVal *out) {
-    if (ex->kind == EX_SIZEOF && lenient) {
-        out->v = 0;
-        out->is_i64 = !((P *)ctx)->target_wasm32;
-        out->is_unsigned = true;
-        return true;
+    P *p = (P *)ctx;
+    if (ex->kind == EX_SIZEOF) {
+        if (!ex->sizeof_is_expr && ex->cast_type) {
+            int64_t sv = 0;
+            bool ok = ex->is_alignof ? parse_type_align(p, *ex->cast_type, &sv)
+                                     : parse_type_size(p, *ex->cast_type, &sv);
+            if (ok) {
+                out->v = sv;
+                out->is_i64 = !p->target_wasm32;
+                out->is_unsigned = true;
+                return true;
+            }
+        }
+        if (lenient) {
+            out->v = 0;
+            out->is_i64 = !p->target_wasm32;
+            out->is_unsigned = true;
+            return true;
+        }
+        return false;
     }
     if (ex->kind != EX_VAR) return false;
-    Enumerator *en = enum_lookup((P *)ctx, ex->name);
+    Enumerator *en = enum_lookup(p, ex->name);
     if (!en) return false;
     out->v = en->value;
     out->is_i64 = en->value != (int64_t)(int32_t)en->value;
@@ -1188,12 +1303,13 @@ static void promote_static_local(P *p, Stmt *ds, int line) {
         while (e && e->kind == EX_CAST && e->lhs) {
             e = e->lhs;
         }
+        int64_t cv = 0;
         if (e && e->kind == EX_NULL) {
             g.has_init = true;
             g.init_int = 0;
-        } else if (e && e->kind == EX_INT) {
+        } else if (e && parse_const_eval(p, e, &cv)) {
             g.has_init = true;
-            g.init_int = e->val.int_value;
+            g.init_int = cv;
         } else if (e && e->kind == EX_FLOAT) {
             g.has_init = true;
             g.init_float = e->val.float_value;
@@ -1805,22 +1921,15 @@ static Stmt *parse_stmt(P *p) {
         while (cur(p).kind != TC_TK_RBRACE && cur(p).kind != TC_TK_EOF) {
             if (cur(p).kind == TC_TK_KW_CASE) {
                 p->i++;
-                bool neg = false;
-                if (accept(p, TC_TK_MINUS)) neg = true;
-                TcTok lit = cur(p);
+                int cline = cur(p).line;
+                Expr *cex = parse_ternary(p);
                 int64_t cval = 0;
-                if (lit.kind == TC_TK_INT_LIT) {
-                    cval = lit.d.int_value;
-                    p->i++;
-                } else if (lit.kind == TC_TK_IDENT && enum_lookup(p, tc_tok_text(lit))) {
-                    cval = enum_lookup(p, tc_tok_text(lit))->value;
-                    p->i++;
-                } else {
-                    expect(p, TC_TK_INT_LIT, str_lit("expected integer or enumerator in 'case'"));
+                if (!parse_const_eval(p, cex, &cval)) {
+                    perror_at(p, cline, str_lit("expected integer constant expression in 'case'"));
                 }
                 expect(p, TC_TK_COLON, str_lit("expected ':' after case"));
                 SwitchCase sc = (SwitchCase){
-                    .value = neg ? -cval : cval,
+                    .value = cval,
                     .is_default = false,
                     .body_start = s->body.size,
                 };
@@ -2477,8 +2586,10 @@ static StructDef *parse_struct_def(P *p) {
             p->i++;
             ft = td->ty;
             // Pointer suffix `*` applies to the resolved typedef.
+            skip_const(p);
             if (accept(p, TC_TK_STAR)) {
                 is_ptr = true;
+                skip_const(p);
                 if (ft.kind == TY_STRUCT) {
                     ft.kind = TY_PTR_STRUCT;
                 } else if (ft.kind == TY_VOID) {
@@ -2491,16 +2602,21 @@ static StructDef *parse_struct_def(P *p) {
                     bool is_i64 = (ft.kind == TY_I64);
                     ft.kind = TY_PTR_I32;
                     ft.ptr_is_i64 = is_i64;
+                } else if (ft.kind == TY_F32) {
+                    ft.kind = TY_PTR_I32;
+                    ft.ptr_is_f32 = true;
+                } else if (ft.kind == TY_F64) {
+                    ft.kind = TY_PTR_I32;
+                    ft.ptr_is_f64 = true;
+                } else if (kind_is_ptr(ft.kind) || ft.kind == TY_FNPTR) {
+                    wrap_ptr_to_ptr(p, &ft);
                 } else {
                     perror_at(p, cur(p).line,
                         str_lit("unsupported pointer-to-typedef field type"));
                 }
-                if (accept(p, TC_TK_STAR)) {
-                    Type *inner = arena_new(p->arena, Type);
-                    *inner = ft;
-                    ft = (Type){0};
-                    ft.kind = TY_PTR_PTR;
-                    ft.pointee = inner;
+                while (accept(p, TC_TK_STAR)) {
+                    wrap_ptr_to_ptr(p, &ft);
+                    skip_const(p);
                 }
             }
         } else {
@@ -2527,19 +2643,19 @@ static StructDef *parse_struct_def(P *p) {
             // single-level pointer kind into a TY_PTR_PTR.
             if (accept(p, TC_TK_STAR)) {
                 is_ptr = true;
+                skip_const(p);
                 if (was_char) ft.kind = TY_PTR_CHAR;
                 else if (k == TY_I32) ft.kind = TY_PTR_I32;
                 else if (k == TY_I64) { ft.kind = TY_PTR_I32; ft.ptr_is_i64 = true; }
+                else if (k == TY_F32) { ft.kind = TY_PTR_I32; ft.ptr_is_f32 = true; }
+                else if (k == TY_F64) { ft.kind = TY_PTR_I32; ft.ptr_is_f64 = true; }
                 else if (k == TY_VOID) ft.kind = TY_PTR_VOID;
                 else {
                     perror_at(p, cur(p).line, str_lit("only int*/char*/void* pointer fields are supported"));
                 }
-                if (accept(p, TC_TK_STAR)) {
-                    Type *inner = arena_new(p->arena, Type);
-                    *inner = ft;
-                    ft = (Type){0};
-                    ft.kind = TY_PTR_PTR;
-                    ft.pointee = inner;
+                while (accept(p, TC_TK_STAR)) {
+                    wrap_ptr_to_ptr(p, &ft);
+                    skip_const(p);
                 }
             }
         }
@@ -2592,26 +2708,29 @@ static StructDef *parse_struct_def(P *p) {
                 if (cur(p).kind == TC_TK_RBRACK) {
                     perror_at(p, cur(p).line, str_lit("flexible array fields are not supported"));
                 }
-                TcTok lit = cur(p);
-                expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
+                int bline1 = cur(p).line;
+                Expr *bex1 = parse_expr(p);
+                int64_t n1 = 0;
+                if (!parse_const_eval(p, bex1, &n1)) {
+                    perror_at(p, bline1, str_lit("expected array length"));
+                }
                 expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
-                int64_t n1 = lit.d.int_value;
                 int64_t n2 = 0;
                 if (accept(p, TC_TK_LBRACK)) {
-                    TcTok lit2 = cur(p);
-                    expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
+                    int bline2 = cur(p).line;
+                    Expr *bex2 = parse_expr(p);
+                    if (!parse_const_eval(p, bex2, &n2)) {
+                        perror_at(p, bline2, str_lit("expected array length"));
+                    }
                     expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
-                    n2 = lit2.d.int_value;
                 }
                 // Map (element-type, dim) -> array TypeKind.
                 if (is_struct_kind && !is_ptr) {
                     perror_at(p, cur(p).line, str_lit("array of nested struct value is not supported as a field"));
                 } else if (kind_is_ptr(ft.kind)) {
-                    // `T *f[N]`, also with a typedef'd pointer type T *.
-                    if (n2 != 0) {
-                        perror_at(p, cur(p).line, str_lit("only 1D arrays of pointers are supported as a field"));
-                    }
+                    // `T *f[N]` or `T *f[N][M]`, also with a typedef'd pointer type T *.
                     make_ptr_array(p, &ft, n1, NULL);
+                    ft.array_len2 = n2;
                 } else if (was_float) {
                     ft.kind = TY_ARRAY_F32;
                     ft.array_len = n1;
@@ -2862,12 +2981,26 @@ static void parse_typedef_decl(P *p) {
     if (!expect(p, TC_TK_IDENT, str_lit("expected typedef name"))) return;
     // Optional `[N]` to support `typedef int Vec[N];` (1D only).
     if (accept(p, TC_TK_LBRACK)) {
-        TcTok lit = cur(p);
-        expect(p, TC_TK_INT_LIT, str_lit("expected array length"));
+        int bline = cur(p).line;
+        Expr *bex = parse_expr(p);
+        int64_t alen = 0;
+        if (!parse_const_eval(p, bex, &alen)) {
+            perror_at(p, bline, str_lit("expected array length"));
+        }
         expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
-        if (ty.kind == TY_I32) {
+        if (ty.kind == TY_I32 || ty.kind == TY_I64) {
+            bool is_i64 = (ty.kind == TY_I64);
             ty.kind = TY_ARRAY_I32;
-            ty.array_len = lit.d.int_value;
+            ty.array_elem_is_i64 = is_i64;
+            ty.array_len = alen;
+        } else if (ty.kind == TY_F32) {
+            ty.kind = TY_ARRAY_F32;
+            ty.array_len = alen;
+        } else if (ty.kind == TY_STRUCT) {
+            ty.kind = TY_ARRAY_STRUCT;
+            ty.array_len = alen;
+        } else if (kind_is_ptr(ty.kind)) {
+            make_ptr_array(p, &ty, alen, NULL);
         } else {
             perror_at(p, line, str_lit("typedef array only supported for int"));
         }
@@ -3176,40 +3309,13 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                     bool ok = false;
                                     int64_t val = 0;
                                     bool have_int_val = false;
-                                    if (el.kind == TC_TK_INT_LIT) {
-                                        val = el.d.int_value;
+                                    size_t el_save = p.i;
+                                    Expr *elex = parse_assign_or_or(&p);
+                                    if (elex && parse_const_eval(&p, elex, &val)) {
                                         have_int_val = true;
                                         ok = true;
-                                    } else if (el.kind == TC_TK_KW_NULL) {
-                                        val = 0; have_int_val = true; ok = true;
-                                    } else if (el.kind == TC_TK_MINUS &&
-                                               peek(&p, 1).kind == TC_TK_INT_LIT) {
-                                        val = -peek(&p, 1).d.int_value;
-                                        have_int_val = true;
-                                        ok = true;
-                                        p.i++;       // skip the '-'
-                                        el = cur(&p); // now the int lit
-                                    } else if (el.kind == TC_TK_LPAREN) {
-                                        // tolerate `(void*)0`-style tokens by
-                                        // skipping to matching ')'. Followed
-                                        // by an int 0 constant.
-                                        int depth = 1; p.i++;
-                                        while (depth > 0 && cur(&p).kind != TC_TK_EOF) {
-                                            if (cur(&p).kind == TC_TK_LPAREN) depth++;
-                                            else if (cur(&p).kind == TC_TK_RPAREN) depth--;
-                                            p.i++;
-                                        }
-                                        // optional int after the cast
-                                        if (cur(&p).kind == TC_TK_INT_LIT) {
-                                            val = cur(&p).d.int_value;
-                                            have_int_val = true;
-                                            p.i++;
-                                        }
-                                        ok = true;
-                                    } else if (el.kind == TC_TK_IDENT && enum_lookup(&p, tc_tok_text(el))) {
-                                        val = enum_lookup(&p, tc_tok_text(el))->value;
-                                        have_int_val = true;
-                                        ok = true;
+                                    } else {
+                                        p.i = el_save;
                                     }
                                     if (have_int_val && val != 0 &&
                                         (g.type.kind == TY_ARRAY_PTR_CHAR ||
@@ -3222,8 +3328,6 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                     if (!ok) {
                                         perror_at(&p, el.line,
                                             str_lit("global array initializer element must be int/long literal or NULL"));
-                                        p.i++;
-                                    } else if (el.kind != TC_TK_LPAREN) {
                                         p.i++;
                                     }
                                     if (have_int_val && bytes &&
@@ -3266,18 +3370,14 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                 g.init_array_data.str  = (char *)bytes;
                                 g.init_array_data.size = bcap;
                             }
-                        } else if (lit.kind == TC_TK_INT_LIT &&
-                                   peek(&p, 1).kind == TC_TK_SHL &&
-                                   peek(&p, 2).kind == TC_TK_INT_LIT) {
-                            int64_t a = lit.d.int_value;
-                            int64_t b = peek(&p, 2).d.int_value;
-                            g.init_int = a << b;
-                            p.i += 3;
-                        } else if (lit.kind == TC_TK_INT_LIT) {
-                            g.init_int = lit.d.int_value;
-                            p.i++;
                         } else if (lit.kind == TC_TK_FLOAT_LIT) {
                             g.init_float = lit.d.float_value;
+                            p.i++;
+                        } else if (lit.kind == TC_TK_MINUS &&
+                                   peek(&p, 1).kind == TC_TK_FLOAT_LIT) {
+                            p.i++;
+                            TcTok n = cur(&p);
+                            g.init_float = -n.d.float_value;
                             p.i++;
                         } else if (lit.kind == TC_TK_KW_NULL) {
                             // a null-initialized pointer; init_int=0 means null.
@@ -3290,61 +3390,25 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                             if (g.type.kind == TY_ARRAY_I32 &&
                                 g.type.array_len == 0 && !g.type.array_len_expr)
                                 g.type.array_len = (int64_t)g.init_str.size;
-                        } else if (lit.kind == TC_TK_MINUS &&
-                                   peek(&p, 1).kind == TC_TK_INT_LIT) {
-                            p.i++;
-                            TcTok n = cur(&p);
-                            g.init_int = neg_int_lit(&p, n);
-                            p.i++;
-                        } else if (lit.kind == TC_TK_MINUS &&
-                                   peek(&p, 1).kind == TC_TK_FLOAT_LIT) {
-                            p.i++;
-                            TcTok n = cur(&p);
-                            g.init_float = -n.d.float_value;
-                            p.i++;
-                        } else if (lit.kind == TC_TK_IDENT && enum_lookup(&p, tc_tok_text(lit))) {
-                            g.init_int = enum_lookup(&p, tc_tok_text(lit))->value;
-                            p.i++;
-                        } else if (lit.kind == TC_TK_LPAREN) {
-                            // `((void*)0)` — scalar null pointer init via cast.
-                            // Also `(int32_t)<int-lit>` and similar simple
-                            // single-token cast forms used in tinyc's own
-                            // source (e.g. `(int32_t)0x80000000`); recognise
-                            // these by looking for an INT_LIT or MINUS+INT_LIT
-                            // after a single matching `)`.
-                            int depth = 0;
-                            while (cur(&p).kind == TC_TK_LPAREN) { depth++; p.i++; }
-                            while (cur(&p).kind != TC_TK_RPAREN &&
-                                   cur(&p).kind != TC_TK_EOF) p.i++;
-                            if (cur(&p).kind == TC_TK_RPAREN) { p.i++; depth--; }
-                            bool neg = accept(&p, TC_TK_MINUS);
-                            if (cur(&p).kind == TC_TK_INT_LIT) {
-                                int64_t iv = cur(&p).d.int_value;
-                                g.init_int = neg ? neg_int_lit(&p, cur(&p)) : iv;
-                                p.i++;
-                            } else if (cur(&p).kind == TC_TK_FLOAT_LIT) {
-                                double fv = cur(&p).d.float_value;
-                                g.init_float = neg ? -fv : fv;
-                                p.i++;
-                            } else if (neg) {
-                                // Roll back the consumed MINUS — it wasn't a
-                                // negative number literal.
-                                p.i--;
-                            }
-                            while (depth > 0 && cur(&p).kind == TC_TK_RPAREN) {
-                                p.i++; depth--;
-                            }
-                        } else if (lit.kind == TC_TK_INT_LIT &&
-                                   peek(&p, 1).kind == TC_TK_SHL &&
-                                   peek(&p, 2).kind == TC_TK_INT_LIT) {
-                            int64_t a = lit.d.int_value;
-                            int64_t b = peek(&p, 2).d.int_value;
-                            g.init_int = a << b;
-                            p.i += 3;
                         } else {
-                            perror_at(&p, lit.line,
-                                str_lit("global initializer must be a literal"));
-                            p.i++;
+                            size_t init_save = p.i;
+                            Expr *gex = parse_assign_or_or(&p);
+                            int64_t cv = 0;
+                            if (gex && parse_const_eval(&p, gex, &cv)) {
+                                g.init_int = cv;
+                            } else if (gex && gex->kind == EX_CAST && gex->lhs &&
+                                       gex->lhs->kind == EX_FLOAT) {
+                                g.init_float = gex->lhs->val.float_value;
+                            } else if (gex && gex->kind == EX_CAST && gex->lhs &&
+                                       gex->lhs->kind == EX_UN && gex->lhs->op == OP_NEG &&
+                                       gex->lhs->lhs && gex->lhs->lhs->kind == EX_FLOAT) {
+                                g.init_float = -gex->lhs->lhs->val.float_value;
+                            } else {
+                                p.i = init_save;
+                                perror_at(&p, lit.line,
+                                    str_lit("global initializer must be a constant expression"));
+                                p.i++;
+                            }
                         }
                     }
                     expect(&p, TC_TK_SEMI, str_lit("expected ';' after global"));
