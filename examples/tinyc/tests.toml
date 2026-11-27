@@ -1787,3 +1787,26 @@ targets = ["native", "wasm", "macho", "elf"]
 # Octal escapes (\1..\377), parenthesized fn name, block-scope struct tag,
 # 3-level pointers (char ***), and long double (#339).
 expected_stdout = "1 10 65 255 1 65\n42\nZ 123\nH\n8 3.5\n"
+
+[[test]]
+name = "volatile_qualifier"
+targets = ["native", "wasm", "macho", "elf"]
+# volatile / restrict / register qualifiers (#333).
+expected_stdout = "14 30 3 1\n"
+
+[[test]]
+name = "comma_operator"
+targets = ["native", "wasm", "macho", "elf"]
+# Comma operator (a, b) with side effects and type of RHS (#287).
+expected_stdout = "-5 7 7 60 7\n"
+
+[[test]]
+name = "pp_nested_self_macro"
+targets = ["native", "wasm", "macho", "elf"]
+# Function-like macro argument prescan allows nested same-name calls (#335).
+expected_stdout = "5 4 10\n"
+
+[[test]]
+name = "elf_main_argc_argv"
+targets = ["elf"]
+expected_stdout = "argc=1\nargv0=ok\n"

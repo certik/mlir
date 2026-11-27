@@ -1,0 +1,11 @@
+#include <stdio.h>
+#include <string.h>
+
+// Verify main(argc, argv) receives uncorrupted argc and argv on --emit=elf (#334).
+int main(int argc, char **argv) {
+    printf("argc=%d\n", argc);
+    if (argc >= 1 && argv && argv[0] && strlen(argv[0]) > 0) {
+        printf("argv0=ok\n");
+    }
+    return 0;
+}

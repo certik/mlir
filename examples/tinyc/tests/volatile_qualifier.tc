@@ -1,0 +1,26 @@
+extern int printf(const char *fmt, ...);
+
+typedef int sig_atomic_t;
+volatile int g = 5;
+
+struct S {
+    volatile sig_atomic_t trap;
+    int volatile count;
+};
+
+static int read_vol(void volatile **p) {
+    return p != 0 ? 1 : 0;
+}
+
+int main(void) {
+    volatile int x = 2;
+    int volatile y = 3;
+    register int z = 4;
+    struct S s;
+    s.trap = 10;
+    s.count = 20;
+    void *ptr = 0;
+    int *restrict rp = &y;
+    printf("%d %d %d %d\n", g + x + y + z, s.trap + s.count, *rp, read_vol(&ptr));
+    return 0;
+}
