@@ -4960,56 +4960,6 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 }
                 r.val = res; return r;
             }
-            // Built-in malloc(size) -> !llvm.ptr. The libc signature
-            // takes i64, so accept any integer expression (i32, i64,
-            // pointer-sized) and coerce up to i64. Using emit_expr +
-            // coerce_eval avoids emitting a no-op `arith.extsi i64->i64`
-            // when the source is already size_t-sized (e.g. `size_t n;
-            // malloc(n)` on a 64-bit host).
-            if (callee_c0 == 'm' && str_eq(ex->name, str_lit("malloc"))) {
-                // If the user provided their own `extern void *malloc(...);`
-                // prototype, mark that signature as referenced so the
-                // forward-decl loop in emit_program emits a proper
-                // `func.func` declaration for it. The special-case path
-                // here bypasses find_sig (which is what normally tracks
-                // usage), so without this we'd drop the user decl AND
-                // skip our auto-decl (because have_user_malloc is true),
-                // leaving the @malloc call unresolved.
-                (void)find_sig(e, ex->name);
-                if (ex->extra->args.size != 1) {
-                    EMIT_ERR(e, "malloc expects 1 argument");
-                    r.val = emit_null_ptr(e); r.is_ptr = true; return r;
-                }
-                EVal sz_v = emit_expr(e, sc, ex->extra->args.data[0]);
-                MLIR_ValueHandle sz_coerced = coerce_eval_to(e, sz_v, e->size_t_ty, (Type){.int_unsigned = true});
-                MLIR_ValueHandle res = MLIR_INVALID_HANDLE;
-                MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = e->ptr;
-                MLIR_ValueHandle *rs = &res;
-                MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = sz_coerced;
-                MLIR_NamedAttr ca = MLIR_Named(MLIR_KEY_CALLEE, MLIR_CreateAttributeSymbolRef(
-                    e->ctx, str_lit("malloc")));
-                MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1); as[0] = ca;
-                emit_op(e, OP_TYPE_FUNC_CALL,
-                        rts, 1, rs, 1, ops, 1, as, 1, NULL, 0);
-                r.val = res; r.is_ptr = true; return r;
-            }
-            if (callee_c0 == 'f' && str_eq(ex->name, str_lit("free"))) {
-                (void)find_sig(e, ex->name);
-                if (ex->extra->args.size != 1) {
-                    EMIT_ERR(e, "free expects 1 argument");
-                    return r;
-                }
-                EVal pv = emit_expr(e, sc, ex->extra->args.data[0]);
-                MLIR_ValueHandle p = int_to_ptr(e, pv);
-                MLIR_ValueHandle *ops = arena_new_array(e->arena, MLIR_ValueHandle, 1); ops[0] = p;
-                MLIR_NamedAttr ca = MLIR_Named(MLIR_KEY_CALLEE, MLIR_CreateAttributeSymbolRef(
-                    e->ctx, str_lit("free")));
-                MLIR_NamedAttr *as = arena_new_array(e->arena, MLIR_NamedAttr, 1); as[0] = ca;
-                emit_op(e, OP_TYPE_FUNC_CALL,
-                        NULL, 0, NULL, 0, ops, 1, as, 1, NULL, 0);
-                r.val = emit_const_i32(e, 0);
-                return r;
-            }
             FuncSig *sig = indirect_fnty ? NULL : find_sig(e, ex->name);
             if (!sig) {
                 Type *fnty = NULL;
@@ -8371,54 +8321,6 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         decl_spec.type = decl_real_variadic ? OP_TYPE_LLVM_FUNC : OP_TYPE_FUNC_FUNC;
         decl_spec.attrs = attrs;
         decl_spec.n_attrs = (uint32_t)na;
-        decl_spec.n_regions = 1;
-        decl_spec.loc = e.loc;
-        MLIR_OpHandle decl = MLIR_CreateOpFromSpec(ctx, &decl_spec);
-        MLIR_AppendBlockOp(ctx, mb, decl);
-    }
-
-    // Emit `malloc`/`free` extern declarations at module scope so that
-    // user code calling them links against libc — unless the user has
-    // already provided their own forward declaration above (which would
-    // otherwise create duplicate symbols and fail symbol verification).
-    bool have_user_malloc = false, have_user_free = false;
-    for (size_t i = 0; i < program->funcs.size; i++) {
-        Func *fwd = program->funcs.data[i];
-        // Skip the auto-decl if the user already has a forward decl OR a
-        // full definition (corec-stdlib's stdlib/stdlib.c defines them).
-        if (str_eq(fwd->name, str_lit("malloc"))) have_user_malloc = true;
-        else if (str_eq(fwd->name, str_lit("free"))) have_user_free = true;
-    }
-    if (!have_user_malloc) {
-        MLIR_TypeHandle *ins = arena_new_array(arena, MLIR_TypeHandle, 1); ins[0] = e.size_t_ty;
-        MLIR_TypeHandle *outs = arena_new_array(arena, MLIR_TypeHandle, 1); outs[0] = e.ptr;
-        MLIR_TypeHandle fty = MLIR_CreateTypeFunction(ctx, ins, 1, outs, 1);
-        MLIR_NamedAttr a0 = MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("malloc")));
-        MLIR_NamedAttr a1 = MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(ctx, fty));
-        MLIR_NamedAttr a2 = MLIR_Named(MLIR_KEY_SYM_VISIBILITY, MLIR_CreateAttributeString(ctx, str_lit("private")));
-        MLIR_NamedAttr *attrs = arena_new_array(arena, MLIR_NamedAttr, 3);
-        attrs[0] = a0; attrs[1] = a1; attrs[2] = a2;
-        MLIR_OpSpec decl_spec = {0};
-        decl_spec.type = OP_TYPE_FUNC_FUNC;
-        decl_spec.attrs = attrs;
-        decl_spec.n_attrs = 3;
-        decl_spec.n_regions = 1;
-        decl_spec.loc = e.loc;
-        MLIR_OpHandle decl = MLIR_CreateOpFromSpec(ctx, &decl_spec);
-        MLIR_AppendBlockOp(ctx, mb, decl);
-    }
-    if (!have_user_free) {
-        MLIR_TypeHandle *ins = arena_new_array(arena, MLIR_TypeHandle, 1); ins[0] = e.ptr;
-        MLIR_TypeHandle fty = MLIR_CreateTypeFunction(ctx, ins, 1, NULL, 0);
-        MLIR_NamedAttr a0 = MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("free")));
-        MLIR_NamedAttr a1 = MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(ctx, fty));
-        MLIR_NamedAttr a2 = MLIR_Named(MLIR_KEY_SYM_VISIBILITY, MLIR_CreateAttributeString(ctx, str_lit("private")));
-        MLIR_NamedAttr *attrs = arena_new_array(arena, MLIR_NamedAttr, 3);
-        attrs[0] = a0; attrs[1] = a1; attrs[2] = a2;
-        MLIR_OpSpec decl_spec = {0};
-        decl_spec.type = OP_TYPE_FUNC_FUNC;
-        decl_spec.attrs = attrs;
-        decl_spec.n_attrs = 3;
         decl_spec.n_regions = 1;
         decl_spec.loc = e.loc;
         MLIR_OpHandle decl = MLIR_CreateOpFromSpec(ctx, &decl_spec);

@@ -1,3 +1,4 @@
+#include <stdlib.h>
 extern int printf(const char *fmt, ...);
 // `Td *` where Td is a typedef for `long`/i64 must yield a 64-bit pointer.
 

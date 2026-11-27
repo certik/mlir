@@ -1,3 +1,4 @@
+#include <stdlib.h>
 // libc interop: full read/write/cycle through libc. Open a file, write a
 // known string, close, reopen, fread, close, print. Cross-platform: uses
 // a relative filename in cwd. Passes on Linux/macOS/Windows.

@@ -1,3 +1,4 @@
+#include <stdlib.h>
 extern int printf(const char *fmt, ...);
 
 // `a[i]` is `*(a + i)` for any pointer-valued `a`, not just a variable or
