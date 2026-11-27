@@ -1,0 +1,17 @@
+extern int printf(const char *fmt, ...);
+
+static int bump(int *p, int v) {
+    *p += v;
+    return *p;
+}
+
+int main(void) {
+    int i = 0;
+    unsigned u = 7;
+    int r = (i = -5, u);
+    int a = 1;
+    int b = (bump(&a, 2), bump(&a, 3), a * 10);
+    int c = (a > 0) ? (a += 1, a) : 0;
+    printf("%d %d %d %d %d\n", i, r, a, b, c);
+    return 0;
+}

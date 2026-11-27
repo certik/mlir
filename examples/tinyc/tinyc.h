@@ -176,6 +176,7 @@ typedef enum {
     OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
     OP_LT, OP_LE, OP_GT, OP_GE, OP_EQ, OP_NE,
     OP_AND, OP_OR,                // logical && || (short-circuit)
+    OP_COMMA,                     // comma operator (a, b)
     OP_BAND, OP_BOR, OP_BXOR,     // bitwise & | ^
     OP_SHL, OP_SHR,               // shifts << >>
     OP_NEG, OP_NOT,               // unary - !
@@ -435,6 +436,9 @@ typedef enum {
     TC_TK_KW_DEFAULT,
     TC_TK_KW_ENUM,
     TC_TK_KW_CONST,
+    TC_TK_KW_VOLATILE,
+    TC_TK_KW_RESTRICT,
+    TC_TK_KW_REGISTER,
     TC_TK_KW_VOID,
     TC_TK_KW_STATIC,
     TC_TK_KW_INLINE,

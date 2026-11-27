@@ -222,6 +222,7 @@ static Stmt *new_stmt(P *p, StmtKind k, int line) {
 }
 
 static Expr *parse_expr(P *p);
+static Expr *parse_assign_or_or(P *p);
 static bool parse_sig_type(P *p, Type *out);
 
 // Holder for the subset of `__attribute__((...))` annotations that
@@ -425,7 +426,7 @@ static Expr *parse_aggregate_init(P *p, Type decl_type) {
                 unset.kind = TY_VOID;
                 v = parse_aggregate_init(p, unset);
             } else {
-                v = parse_expr(p);
+                v = parse_assign_or_or(p);
             }
             VecExprPtr_push_back(p->arena, &e->extra->args, v);
             if (nn == cap) {
@@ -464,6 +465,9 @@ static Expr *parse_aggregate_init(P *p, Type decl_type) {
 // Any combination, in any order, even repetitions, is accepted.
 static void skip_const(P *p) {
     while (cur(p).kind == TC_TK_KW_CONST ||
+           cur(p).kind == TC_TK_KW_VOLATILE ||
+           cur(p).kind == TC_TK_KW_RESTRICT ||
+           cur(p).kind == TC_TK_KW_REGISTER ||
            cur(p).kind == TC_TK_KW_STATIC ||
            cur(p).kind == TC_TK_KW_INLINE) {
         p->i++;
@@ -541,7 +545,7 @@ static Expr *parse_postfix(P *p, Expr *base) {
             e->lhs = base;
             if (p->toks[p->i].kind != TC_TK_RPAREN) {
                 for (;;) {
-                    Expr *a = parse_expr(p);
+                    Expr *a = parse_assign_or_or(p);
                     VecExprPtr_push_back(p->arena, &e->extra->args, a);
                     if (!accept(p, TC_TK_COMMA)) break;
                 }
@@ -599,7 +603,7 @@ static Expr *parse_primary(P *p) {
                 (t.d.size == 16 && t.text_str[0] == '_' && str_eq(tc_tok_text(t), str_lit("__builtin_va_arg")))) {
                 p->i++;  // consume '('
                 Expr *e = new_expr(p, EX_VA_ARG, t.line);
-                e->lhs = parse_expr(p);
+                e->lhs = parse_assign_or_or(p);
                 expect(p, TC_TK_COMMA, str_lit("expected ',' in va_arg(ap, T)"));
                 Type ty = {0};
                 if (!parse_abstract_type(p, &ty)) {
@@ -616,7 +620,7 @@ static Expr *parse_primary(P *p) {
             e->name = tc_tok_text(t);
             if (p->toks[p->i].kind != TC_TK_RPAREN) {
                 for (;;) {
-                    Expr *a = parse_expr(p);
+                    Expr *a = parse_assign_or_or(p);
                     VecExprPtr_push_back(p->arena, &e->extra->args, a);
                     if (!accept(p, TC_TK_COMMA)) break;
                 }
@@ -650,7 +654,8 @@ static Expr *parse_primary(P *p) {
         TcTokKind nxt = peek(p, 1).kind;
         bool is_cast = (nxt == TC_TK_KW_INT || nxt == TC_TK_KW_FLOAT || nxt == TC_TK_KW_DOUBLE ||
                         nxt == TC_TK_KW_STRUCT || nxt == TC_TK_KW_UNION || nxt == TC_TK_KW_CHAR ||
-                        nxt == TC_TK_KW_CONST || nxt == TC_TK_KW_LONG ||
+                        nxt == TC_TK_KW_CONST || nxt == TC_TK_KW_VOLATILE ||
+                        nxt == TC_TK_KW_RESTRICT || nxt == TC_TK_KW_LONG ||
                         nxt == TC_TK_KW_SIGNED || nxt == TC_TK_KW_UNSIGNED ||
                         nxt == TC_TK_KW_SHORT || nxt == TC_TK_KW_BOOL ||
                         nxt == TC_TK_KW_VOID);
@@ -684,7 +689,7 @@ static Expr *parse_primary(P *p) {
                             fname = tc_tok_text(ft);
                             any_designated = true;
                         }
-                        Expr *v = parse_expr(p);
+                        Expr *v = parse_assign_or_or(p);
                         VecExprPtr_push_back(p->arena, &e->extra->args, v);
                         if (nn == cap) {
                             size_t ncap = cap ? cap * 2 : 4;
@@ -794,7 +799,8 @@ static Expr *parse_primary(P *p) {
             nxt == TC_TK_KW_INT || nxt == TC_TK_KW_FLOAT || nxt == TC_TK_KW_DOUBLE ||
             nxt == TC_TK_KW_CHAR || nxt == TC_TK_KW_VOID ||
             nxt == TC_TK_KW_STRUCT || nxt == TC_TK_KW_UNION || nxt == TC_TK_KW_ENUM ||
-            nxt == TC_TK_KW_CONST || nxt == TC_TK_KW_LONG ||
+            nxt == TC_TK_KW_CONST || nxt == TC_TK_KW_VOLATILE ||
+            nxt == TC_TK_KW_RESTRICT || nxt == TC_TK_KW_LONG ||
             nxt == TC_TK_KW_SIGNED || nxt == TC_TK_KW_UNSIGNED ||
             nxt == TC_TK_KW_SHORT || nxt == TC_TK_KW_BOOL ||
             (nxt == TC_TK_IDENT && typedef_lookup(p, tc_tok_text(cur(p))) != NULL);
@@ -816,7 +822,7 @@ static Expr *parse_primary(P *p) {
         p->i++;
         expect(p, TC_TK_LPAREN, str_lit("expected '(' after _Generic"));
         Expr *ge = new_expr(p, EX_GENERIC, t.line);
-        ge->lhs = parse_expr(p);
+        ge->lhs = parse_assign_or_or(p);
         ge->extra->generic_default_index = -1;
         int cap = 0;
         Type *types = NULL;
@@ -833,7 +839,7 @@ static Expr *parse_primary(P *p) {
                     str_lit("expected type or 'default' in _Generic"));
             }
             expect(p, TC_TK_COLON, str_lit("expected ':' in _Generic entry"));
-            Expr *val = parse_expr(p);
+            Expr *val = parse_assign_or_or(p);
             if (n >= cap) {
                 int ncap = cap == 0 ? 4 : cap * 2;
                 Type *nt = arena_alloc(p->arena, sizeof(Type) * (size_t)ncap);
@@ -961,7 +967,20 @@ static Expr *parse_assign_or_or(P *p) {
     return lhs;
 }
 
-static Expr *parse_expr(P *p) { return parse_assign_or_or(p); }
+static Expr *parse_expr(P *p) {
+    Expr *lhs = parse_assign_or_or(p);
+    while (cur(p).kind == TC_TK_COMMA) {
+        int line = cur(p).line;
+        p->i++;
+        Expr *rhs = parse_assign_or_or(p);
+        Expr *e = new_expr(p, EX_BIN, line);
+        e->op = OP_COMMA;
+        e->lhs = lhs;
+        e->rhs = rhs;
+        lhs = e;
+    }
+    return lhs;
+}
 
 // Parse a base type keyword. Returns true if we consumed one and writes
 // the kind to *out. Pointer/array suffixes are handled at decl time.
@@ -1234,6 +1253,9 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     {
         size_t save = p->i;
         while (cur(p).kind == TC_TK_KW_CONST ||
+               cur(p).kind == TC_TK_KW_VOLATILE ||
+               cur(p).kind == TC_TK_KW_RESTRICT ||
+               cur(p).kind == TC_TK_KW_REGISTER ||
                cur(p).kind == TC_TK_KW_STATIC ||
                cur(p).kind == TC_TK_KW_INLINE) {
             if (cur(p).kind == TC_TK_KW_STATIC) saw_static = true;
@@ -1253,7 +1275,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             perror_at(p, line, str_lit("function-pointer declaration requires a name"));
         }
         s->name = nm;
-        if (accept(p, TC_TK_ASSIGN)) s->expr = parse_expr(p);
+        if (accept(p, TC_TK_ASSIGN)) s->expr = parse_assign_or_or(p);
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
         if (saw_static) promote_static_locals(p, s, line);
         return s;
@@ -1295,7 +1317,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             }
         }
         if (accept(p, TC_TK_ASSIGN)) {
-            { Expr *agg = parse_aggregate_init(p, *s->decl_type); s->expr = agg ? agg : parse_expr(p); }
+            { Expr *agg = parse_aggregate_init(p, *s->decl_type); s->expr = agg ? agg : parse_assign_or_or(p); }
         }
         // Comma-separated additional declarators sharing the same typedef'd type.
         if (cur(p).kind == TC_TK_COMMA) {
@@ -1346,7 +1368,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 }
                 if (accept(p, TC_TK_ASSIGN)) {
                     Expr *agg = parse_aggregate_init(p, *ds->decl_type);
-                    ds->expr = agg ? agg : parse_expr(p);
+                    ds->expr = agg ? agg : parse_assign_or_or(p);
                 }
                 VecStmtPtr_push_back(p->arena, &blk->body, ds);
             }
@@ -1445,7 +1467,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 s->decl_type->kind != TY_ARRAY_PTR_STRUCT) {
                 perror_at(p, line, str_lit("struct/array initializers are not supported"));
             }
-            { Expr *agg = parse_aggregate_init(p, *s->decl_type); s->expr = agg ? agg : parse_expr(p); }
+            { Expr *agg = parse_aggregate_init(p, *s->decl_type); s->expr = agg ? agg : parse_assign_or_or(p); }
         }
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
         if (saw_static) promote_static_locals(p, s, line);
@@ -1541,7 +1563,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         }
     }
     if (accept(p, TC_TK_ASSIGN)) {
-        { Expr *agg = parse_aggregate_init(p, *s->decl_type); s->expr = agg ? agg : parse_expr(p); }
+        { Expr *agg = parse_aggregate_init(p, *s->decl_type); s->expr = agg ? agg : parse_assign_or_or(p); }
         // `char arr[] = "string"` — infer array length from the string
         // literal (size includes the trailing NUL set by the lexer).
         if (s->expr && s->expr->kind == EX_STR &&
@@ -1602,7 +1624,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             }
             if (accept(p, TC_TK_ASSIGN)) {
                 Expr *agg = parse_aggregate_init(p, *ds->decl_type);
-                ds->expr = agg ? agg : parse_expr(p);
+                ds->expr = agg ? agg : parse_assign_or_or(p);
                 if (ds->expr && ds->expr->kind == EX_STR &&
                     ds->decl_type->kind == TY_ARRAY_I32 &&
                     ds->decl_type->int_bits == 8 &&
@@ -1728,7 +1750,9 @@ static Stmt *parse_stmt(P *p) {
             s->extra->for_init = NULL;
         } else if (cur(p).kind == TC_TK_KW_INT || cur(p).kind == TC_TK_KW_FLOAT || cur(p).kind == TC_TK_KW_DOUBLE ||
                    cur(p).kind == TC_TK_KW_CHAR || cur(p).kind == TC_TK_KW_ENUM ||
-                   cur(p).kind == TC_TK_KW_CONST || cur(p).kind == TC_TK_KW_VOID ||
+                   cur(p).kind == TC_TK_KW_CONST || cur(p).kind == TC_TK_KW_VOLATILE ||
+                   cur(p).kind == TC_TK_KW_RESTRICT || cur(p).kind == TC_TK_KW_REGISTER ||
+                   cur(p).kind == TC_TK_KW_VOID ||
                    cur(p).kind == TC_TK_KW_STATIC || cur(p).kind == TC_TK_KW_INLINE ||
                    cur(p).kind == TC_TK_KW_LONG || cur(p).kind == TC_TK_KW_SIGNED ||
                    cur(p).kind == TC_TK_KW_UNSIGNED ||
@@ -1809,6 +1833,8 @@ static Stmt *parse_stmt(P *p) {
     if (t.kind == TC_TK_KW_INT || t.kind == TC_TK_KW_FLOAT || t.kind == TC_TK_KW_DOUBLE ||
         t.kind == TC_TK_KW_STRUCT || t.kind == TC_TK_KW_UNION || t.kind == TC_TK_KW_CHAR ||
         t.kind == TC_TK_KW_ENUM || t.kind == TC_TK_KW_CONST ||
+        t.kind == TC_TK_KW_VOLATILE || t.kind == TC_TK_KW_RESTRICT ||
+        t.kind == TC_TK_KW_REGISTER ||
         t.kind == TC_TK_KW_VOID ||
         t.kind == TC_TK_KW_STATIC || t.kind == TC_TK_KW_INLINE ||
         t.kind == TC_TK_KW_LONG || t.kind == TC_TK_KW_SIGNED ||
@@ -1945,7 +1971,11 @@ static void wrap_ptr_to_ptr(P *p, Type *out) {
 static bool parse_sig_type(P *p, Type *out) {
     *out = (Type){0};
     bool saw_const = false;
-    while (cur(p).kind == TC_TK_KW_CONST) { saw_const = true; p->i++; }
+    while (cur(p).kind == TC_TK_KW_CONST || cur(p).kind == TC_TK_KW_VOLATILE ||
+           cur(p).kind == TC_TK_KW_RESTRICT || cur(p).kind == TC_TK_KW_REGISTER) {
+        if (cur(p).kind == TC_TK_KW_CONST) saw_const = true;
+        p->i++;
+    }
     skip_const(p);
     out->is_const = saw_const;
     // Accept signed/unsigned/short/long/char/_Bool/bool/int modifiers in any

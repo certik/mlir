@@ -4478,6 +4478,10 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             return r;
         }
         case EX_BIN: {
+            if (ex->op == OP_COMMA) {
+                emit_expr_for_side_effect(e, sc, ex->lhs);
+                return emit_expr(e, sc, ex->rhs);
+            }
             if (ex->op == OP_AND || ex->op == OP_OR) {
                 EVal a = emit_expr(e, sc, ex->lhs);
                 if (e->err_count > 0) return r;
@@ -7185,6 +7189,7 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
             t.int_unsigned = true;
             return t;
         case EX_BIN: {
+            if (ex->op == OP_COMMA) return infer_expr_type(e, sc, ex->rhs);
             // A comparison or logical operator gives an `int`.
             if (ex->op == OP_LT || ex->op == OP_LE || ex->op == OP_GT || ex->op == OP_GE ||
                 ex->op == OP_EQ || ex->op == OP_NE || ex->op == OP_AND || ex->op == OP_OR)

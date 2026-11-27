@@ -1,0 +1,13 @@
+extern int printf(const char *fmt, ...);
+
+#define ID(x) (x)
+#define cast(t, e) ((t)(e))
+#define ADD(a, b) ((a) + (b))
+
+int main(void) {
+    int v1 = ID(ID(4) + 1);
+    long v2 = cast(long, cast(int, 3) + 1);
+    int v3 = ADD(ADD(1, 2), ADD(3, 4));
+    printf("%d %ld %d\n", v1, v2, v3);
+    return 0;
+}
