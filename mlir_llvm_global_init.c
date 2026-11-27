@@ -159,8 +159,13 @@ bool llvm_global_init_bytes_relocs(MLIR_Context *ctx, MLIR_OpHandle gop,
                 if (ga == MLIR_INVALID_HANDLE)
                     ga = MLIR_GetOpAttr(ctx, c, MLIR_KEY_VALUE);
                 if (ga == MLIR_INVALID_HANDLE) return false;
-                string ts = MLIR_GetAttributeAsString(ctx, ga);
+                string ts = (MLIR_GetAttributeKind(ctx, ga) == MLIR_ATTR_KIND_STRING)
+                    ? MLIR_GetAttributeString(ctx, ga)
+                    : MLIR_GetAttributeAsString(ctx, ga);
                 if (ts.size > 0 && ts.str[0] == '@') { ts.str++; ts.size--; }
+                if (ts.size >= 2 && ts.str[0] == '"' && ts.str[ts.size - 1] == '"') {
+                    ts.str++; ts.size -= 2;
+                }
                 if (ts.size == 0) return false;
                 on_reloc(ud, off, ts);
                 cur = MLIR_GetOpResult(ctx, op, 0);
