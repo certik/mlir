@@ -114,9 +114,10 @@ static bool elem_from_cursor(MLIR_Context *ctx, MLIR_TypeHandle gty, const int64
 // struct initializer, and MLIR_CreateLLVMGlobalArrayInit's upstream
 // implementation for an array. Returns false for any other region (e.g. one
 // returning an address).
-bool llvm_global_init_bytes(MLIR_Context *ctx, MLIR_OpHandle gop,
-                            MLIR_TypeHandle gty, unsigned ptr_bytes,
-                            uint8_t *buf, unsigned size) {
+bool llvm_global_init_bytes_relocs(MLIR_Context *ctx, MLIR_OpHandle gop,
+                                   MLIR_TypeHandle gty, unsigned ptr_bytes,
+                                   uint8_t *buf, unsigned size,
+                                   LlvmGlobalRelocFn on_reloc, void *ud) {
     if (MLIR_GetOpNumRegions(ctx, gop) == 0) return false;
     MLIR_RegionHandle rgn = MLIR_GetOpRegion(ctx, gop, 0);
     if (MLIR_GetRegionNumBlocks(ctx, rgn) == 0) return false;
@@ -132,7 +133,8 @@ bool llvm_global_init_bytes(MLIR_Context *ctx, MLIR_OpHandle gop,
             t == OP_TYPE_LLVM_MLIR_POISON) {
             if (cur != MLIR_INVALID_HANDLE || MLIR_GetOpNumResults(ctx, op) != 1) return false;
             cur = MLIR_GetOpResult(ctx, op, 0);
-        } else if (t == OP_TYPE_LLVM_MLIR_CONSTANT) {
+        } else if (t == OP_TYPE_LLVM_MLIR_CONSTANT ||
+                   t == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
             // Read through the llvm.insertvalue that uses it.
         } else if (t == OP_TYPE_LLVM_INSERTVALUE) {
             if (cur == MLIR_INVALID_HANDLE || MLIR_GetOpNumOperands(ctx, op) != 2 ||
@@ -149,8 +151,22 @@ bool llvm_global_init_bytes(MLIR_Context *ctx, MLIR_OpHandle gop,
             unsigned esz = llvm_type_size(ctx, et, ptr_bytes);
             if (esz == 0 || esz > 8 || off + esz > size) return false;
             MLIR_OpHandle c = MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, op, 1));
-            if (c == MLIR_INVALID_HANDLE || MLIR_GetOpType(ctx, c) != OP_TYPE_LLVM_MLIR_CONSTANT)
-                return false;
+            if (c == MLIR_INVALID_HANDLE) return false;
+            MLIR_OpType ct = MLIR_GetOpType(ctx, c);
+            if (ct == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
+                if (!on_reloc || esz != ptr_bytes) return false;
+                MLIR_AttributeHandle ga = MLIR_GetOpAttr(ctx, c, MLIR_KEY_GLOBAL_NAME);
+                if (ga == MLIR_INVALID_HANDLE)
+                    ga = MLIR_GetOpAttr(ctx, c, MLIR_KEY_VALUE);
+                if (ga == MLIR_INVALID_HANDLE) return false;
+                string ts = MLIR_GetAttributeAsString(ctx, ga);
+                if (ts.size > 0 && ts.str[0] == '@') { ts.str++; ts.size--; }
+                if (ts.size == 0) return false;
+                on_reloc(ud, off, ts);
+                cur = MLIR_GetOpResult(ctx, op, 0);
+                continue;
+            }
+            if (ct != OP_TYPE_LLVM_MLIR_CONSTANT) return false;
             MLIR_AttributeHandle va = MLIR_GetOpAttr(ctx, c, MLIR_KEY_VALUE);
             if (va == MLIR_INVALID_HANDLE) return false;
             MLIR_AttrKind k = MLIR_GetAttributeKind(ctx, va);
@@ -178,4 +194,10 @@ bool llvm_global_init_bytes(MLIR_Context *ctx, MLIR_OpHandle gop,
         }
     }
     return false;
+}
+
+bool llvm_global_init_bytes(MLIR_Context *ctx, MLIR_OpHandle gop,
+                            MLIR_TypeHandle gty, unsigned ptr_bytes,
+                            uint8_t *buf, unsigned size) {
+    return llvm_global_init_bytes_relocs(ctx, gop, gty, ptr_bytes, buf, size, NULL, NULL);
 }
