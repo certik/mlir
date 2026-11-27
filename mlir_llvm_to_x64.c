@@ -27,6 +27,7 @@
 #include "mlir_elf.h"
 #include "mlir_llvm_type_layout.h"
 #include "mlir_regalloc.h"
+#include <base/buddy.h>
 #include <platform/platform.h>
 
 // ---------------------------------------------------------------------------
@@ -57,13 +58,46 @@ enum { CC_E=0x4, CC_NE=0x5, CC_B=0x2, CC_AE=0x3, CC_BE=0x6, CC_A=0x7,
 // Value -> stack-slot map (open-addressing on the value handle).
 // ---------------------------------------------------------------------------
 typedef struct { uintptr_t *k; int32_t *v; size_t cap, n; } VMap;
+static uintptr_t *g_x64_vmap_k = NULL;
+static int32_t   *g_x64_vmap_v = NULL;
+static size_t     g_x64_vmap_cap = 0;
 static void vmap_init(VMap *m, size_t want) {
     size_t cap = 16; while (cap < want * 2) cap *= 2;
-    m->k = (uintptr_t *)calloc(cap, sizeof(uintptr_t));
-    m->v = (int32_t *)malloc(cap * sizeof(int32_t));
+    if (cap > g_x64_vmap_cap) {
+        if (g_x64_vmap_k) buddy_free(g_x64_vmap_k);
+        if (g_x64_vmap_v) buddy_free(g_x64_vmap_v);
+        size_t actual_k = 0, actual_v = 0;
+        g_x64_vmap_k = (uintptr_t *)buddy_alloc(cap * sizeof(uintptr_t), &actual_k);
+        g_x64_vmap_v = (int32_t *)buddy_alloc(cap * sizeof(int32_t), &actual_v);
+        g_x64_vmap_cap = cap;
+    }
+    memset(g_x64_vmap_k, 0, cap * sizeof(uintptr_t));
+    m->k = g_x64_vmap_k;
+    m->v = g_x64_vmap_v;
     m->cap = cap; m->n = 0;
 }
+static void vmap_grow(VMap *m) {
+    size_t ncap = m->cap * 2;
+    size_t actual_k = 0, actual_v = 0;
+    uintptr_t *nk = (uintptr_t *)buddy_alloc(ncap * sizeof(uintptr_t), &actual_k);
+    int32_t   *nv = (int32_t *)buddy_alloc(ncap * sizeof(int32_t), &actual_v);
+    memset(nk, 0, ncap * sizeof(uintptr_t));
+    size_t mask = ncap - 1;
+    for (size_t i = 0; i < m->cap; i++) {
+        if (!m->k[i]) continue;
+        size_t j = (m->k[i] * 1099511628211ull) & mask;
+        while (nk[j]) j = (j + 1) & mask;
+        nk[j] = m->k[i]; nv[j] = m->v[i];
+    }
+    if (g_x64_vmap_k) buddy_free(g_x64_vmap_k);
+    if (g_x64_vmap_v) buddy_free(g_x64_vmap_v);
+    g_x64_vmap_k = nk;
+    g_x64_vmap_v = nv;
+    g_x64_vmap_cap = ncap;
+    m->k = nk; m->v = nv; m->cap = ncap;
+}
 static void vmap_put(VMap *m, MLIR_ValueHandle key, int32_t val) {
+    if ((m->n + 1) * 2 >= m->cap) vmap_grow(m);
     uintptr_t k = (uintptr_t)key;
     size_t i = (k * 1099511628211ull) & (m->cap - 1);
     while (m->k[i]) { if (m->k[i] == k) { m->v[i] = val; return; } i = (i + 1) & (m->cap - 1); }
@@ -75,7 +109,7 @@ static bool vmap_get(VMap *m, MLIR_ValueHandle key, int32_t *out) {
     while (m->k[i]) { if (m->k[i] == k) { *out = m->v[i]; return true; } i = (i + 1) & (m->cap - 1); }
     return false;
 }
-static void vmap_free(VMap *m) { free(m->k); free(m->v); m->k = NULL; m->v = NULL; }
+static void vmap_free(VMap *m) { m->k = NULL; m->v = NULL; m->cap = 0; m->n = 0; }
 // The slot map also holds each alloca's region, keyed by its op handle with
 // the top bit set: op and value handles can be equal natively (both are
 // indices), and neither kind of handle has the top bit.
@@ -83,38 +117,93 @@ static inline MLIR_ValueHandle x64_region_key(MLIR_OpHandle op) {
     return (MLIR_ValueHandle)((uintptr_t)op | ((uintptr_t)1 << (sizeof(uintptr_t) * 8 - 1)));
 }
 
-// Global symbol -> byte offset (and size) in the module data blob.
-typedef struct { char **name; uint32_t *off; uint32_t *sz; size_t n, cap; } GMap;
+static inline uint32_t x64_str_hash(const char *s, size_t n) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i++) {
+        h ^= (uint32_t)(unsigned char)s[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+// Global symbol -> byte offset (and size) in the module data blob (O(1) hash table).
+typedef struct {
+    char **name;
+    size_t *nlen;
+    uint32_t *off;
+    uint32_t *sz;
+    size_t n, cap;
+    size_t *ht;    // 0 = empty, else index + 1
+    size_t hcap;
+} GMap;
+static void gmap_rehash(GMap *g, size_t ncap) {
+    size_t *ht = (size_t *)calloc(ncap, sizeof(size_t));
+    size_t mask = ncap - 1;
+    for (size_t i = 0; i < g->n; i++) {
+        size_t k = x64_str_hash(g->name[i], g->nlen[i]) & mask;
+        while (ht[k]) k = (k + 1) & mask;
+        ht[k] = i + 1;
+    }
+    free(g->ht);
+    g->ht = ht;
+    g->hcap = ncap;
+}
 static bool gmap_get(GMap *g, string nm, uint32_t *out) {
-    for (size_t i = 0; i < g->n; i++)
-        if (strlen(g->name[i]) == nm.size && memcmp(g->name[i], nm.str, nm.size) == 0) {
-            *out = g->off[i]; return true;
+    if (!g->hcap) return false;
+    size_t mask = g->hcap - 1;
+    size_t k = x64_str_hash(nm.str, nm.size) & mask;
+    while (g->ht[k]) {
+        size_t idx = g->ht[k] - 1;
+        if (g->nlen[idx] == nm.size && memcmp(g->name[idx], nm.str, nm.size) == 0) {
+            *out = g->off[idx];
+            return true;
         }
+        k = (k + 1) & mask;
+    }
     return false;
 }
 static bool gmap_get_cstr(GMap *g, const char *nm, uint32_t *off, uint32_t *size) {
-    for (size_t i = 0; i < g->n; i++) {
-        if (strcmp(g->name[i], nm) == 0) {
-            if (off) *off = g->off[i];
-            if (size) *size = g->sz[i];
+    if (!g->hcap) return false;
+    size_t len = strlen(nm);
+    size_t mask = g->hcap - 1;
+    size_t k = x64_str_hash(nm, len) & mask;
+    while (g->ht[k]) {
+        size_t idx = g->ht[k] - 1;
+        if (g->nlen[idx] == len && memcmp(g->name[idx], nm, len) == 0) {
+            if (off) *off = g->off[idx];
+            if (size) *size = g->sz[idx];
             return true;
         }
+        k = (k + 1) & mask;
     }
     return false;
 }
 static void gmap_put(GMap *g, string nm, uint32_t off, uint32_t sz) {
     if (g->n == g->cap) {
-        g->cap = g->cap ? g->cap * 2 : 8;
+        g->cap = g->cap ? g->cap * 2 : 16;
         g->name = realloc(g->name, g->cap * sizeof(char *));
+        g->nlen = realloc(g->nlen, g->cap * sizeof(size_t));
         g->off  = realloc(g->off,  g->cap * sizeof(uint32_t));
         g->sz   = realloc(g->sz,   g->cap * sizeof(uint32_t));
     }
-    g->name[g->n] = (char *)malloc(nm.size + 1);
-    memcpy(g->name[g->n], nm.str, nm.size);
-    g->name[g->n][nm.size] = 0;
-    g->off[g->n] = off;
-    g->sz[g->n]  = sz;
-    g->n++;
+    if ((g->n + 1) * 2 > g->hcap) {
+        gmap_rehash(g, g->hcap ? g->hcap * 2 : 32);
+    }
+    size_t idx = g->n++;
+    g->name[idx] = (char *)malloc(nm.size + 1);
+    memcpy(g->name[idx], nm.str, nm.size);
+    g->name[idx][nm.size] = 0;
+    g->nlen[idx] = nm.size;
+    g->off[idx] = off;
+    g->sz[idx]  = sz;
+    size_t mask = g->hcap - 1;
+    size_t k = x64_str_hash(nm.str, nm.size) & mask;
+    while (g->ht[k]) k = (k + 1) & mask;
+    g->ht[k] = idx + 1;
+}
+static void gmap_free(GMap *g) {
+    for (size_t i = 0; i < g->n; i++) free(g->name[i]);
+    free(g->name); free(g->nlen); free(g->off); free(g->sz); free(g->ht);
 }
 
 // Reserve `sz` zero bytes at the end of a .data blob; return the slot offset.
@@ -137,16 +226,41 @@ static uint32_t x64_data_alloc_global(GMap *gm, Buf *data, string name, size_t s
 
 // Referenced external symbols (callees / addressof targets), for thunk synthesis.
 // Names are stored as views into MLIR attribute storage or string literals.
-typedef struct { string *n; size_t c, cap; } SymSet;
+typedef struct { string *n; size_t c, cap; size_t *ht; size_t hcap; } SymSet;
 static void sym_add(SymSet *s, string nm) {
-    for (size_t i = 0; i < s->c; i++)
-        if (str_eq(s->n[i], nm)) return;
+    if (s->hcap) {
+        size_t mask = s->hcap - 1;
+        size_t k = x64_str_hash(nm.str, nm.size) & mask;
+        while (s->ht[k]) {
+            if (str_eq(s->n[s->ht[k] - 1], nm)) return;
+            k = (k + 1) & mask;
+        }
+    }
     if (s->c == s->cap) {
-        s->cap = s->cap ? s->cap * 2 : 8;
+        s->cap = s->cap ? s->cap * 2 : 16;
         s->n = realloc(s->n, s->cap * sizeof(string));
     }
-    s->n[s->c++] = nm;
+    if ((s->c + 1) * 2 > s->hcap) {
+        size_t ncap = s->hcap ? s->hcap * 2 : 32;
+        size_t *ht = (size_t *)calloc(ncap, sizeof(size_t));
+        size_t mask = ncap - 1;
+        for (size_t i = 0; i < s->c; i++) {
+            size_t k = x64_str_hash(s->n[i].str, s->n[i].size) & mask;
+            while (ht[k]) k = (k + 1) & mask;
+            ht[k] = i + 1;
+        }
+        free(s->ht);
+        s->ht = ht;
+        s->hcap = ncap;
+    }
+    size_t idx = s->c++;
+    s->n[idx] = nm;
+    size_t mask = s->hcap - 1;
+    size_t k = x64_str_hash(nm.str, nm.size) & mask;
+    while (s->ht[k]) k = (k + 1) & mask;
+    s->ht[k] = idx + 1;
 }
+static void sym_free(SymSet *s) { free(s->n); free(s->ht); }
 
 // ---------------------------------------------------------------------------
 // Per-function lowering state.
@@ -174,8 +288,11 @@ typedef struct {
     uint32_t      frame;     // total frame size (16-aligned)
     uint32_t      edge_tmp;  // rbp offset base of the parallel-move temp area
     // register allocation (shared mlir_regalloc): value -> physical register.
-    // Values absent from `rm` live in their frame slot.
+    // Values absent from `rm` live in `spill` (shared global-alloc slots) or `slots`.
     SlotMap       rm;
+    SlotMap       spill;
+    bool          has_spill;
+    bool          fast_ra;   // true when mlir_regalloc_fast ran (never maps remat ops)
     uint32_t      used_mask; // callee-saved pool regs the allocator used
     int32_t       cs_base;   // rbp offset base of the callee-saved spill area
     int           n_cs;      // # of callee-saved regs to save/restore
@@ -201,9 +318,9 @@ static RegTarget x64_regtarget(void) {
     return T;
 }
 // True (with *reg set) if value `v` has a physical-register home.
-static bool val_in_reg(FnCtx *F, MLIR_ValueHandle v, uint8_t *reg) {
+static inline bool val_in_reg(FnCtx *F, MLIR_ValueHandle v, uint8_t *reg) {
     int32_t r;
-    if (sm_get(&F->rm, v, &r)) { *reg = (uint8_t)r; return true; }
+    if (sm_get_fast(&F->rm, v, &r)) { *reg = (uint8_t)r; return true; }
     return false;
 }
 
@@ -216,15 +333,15 @@ static void fail(FnCtx *F, const char *msg, string extra) {
 }
 
 // --- byte emission ---------------------------------------------------------
-static void eb(FnCtx *F, uint8_t b) { buf_u8(&F->f->code, b); }
-static void e32(FnCtx *F, uint32_t v) { buf_le32(&F->f->code, v); }
-static uint32_t here(FnCtx *F) { return (uint32_t)F->f->code.len; }
+static inline void eb(FnCtx *F, uint8_t b) { buf_u8(&F->f->code, b); }
+static inline void e32(FnCtx *F, uint32_t v) { buf_le32(&F->f->code, v); }
+static inline uint32_t here(FnCtx *F) { return (uint32_t)F->f->code.len; }
 
-static void rex(FnCtx *F, int w, int r, int x, int b) {
+static inline void rex(FnCtx *F, int w, int r, int x, int b) {
     uint8_t v = 0x40 | (w << 3) | ((r >= 8) << 2) | ((x >= 8) << 1) | (b >= 8);
     if (v != 0x40 || w) eb(F, v);
 }
-static void modrm(FnCtx *F, int mod, int reg, int rm) {
+static inline void modrm(FnCtx *F, int mod, int reg, int rm) {
     eb(F, (uint8_t)((mod << 6) | ((reg & 7) << 3) | (rm & 7)));
 }
 
@@ -241,12 +358,17 @@ static void mov_ri(FnCtx *F, uint8_t reg, int64_t imm, int w) {
     }
 }
 // generic ALU r/m64-or-32, r : opcode form (dst = dst OP src)
-static void alu_rr(FnCtx *F, uint8_t op, uint8_t dst, uint8_t src, int w) {
-    rex(F, w, src, 0, dst);
-    eb(F, op);
-    modrm(F, 3, src, dst);
+static inline void alu_rr(FnCtx *F, uint8_t op, uint8_t dst, uint8_t src, int w) {
+    Buf *b = &F->f->code;
+    if (b->len + 3 > b->cap) buf_grow(b, 3);
+    uint8_t *p = b->data + b->len;
+    uint8_t rv = (uint8_t)(0x40 | (w << 3) | ((src >= 8) << 2) | (dst >= 8));
+    if (rv != 0x40 || w) *p++ = rv;
+    *p++ = op;
+    *p++ = (uint8_t)(0xC0 | ((src & 7) << 3) | (dst & 7));
+    b->len = (size_t)(p - b->data);
 }
-static void mov_rr(FnCtx *F, uint8_t dst, uint8_t src, int w) {
+static inline void mov_rr(FnCtx *F, uint8_t dst, uint8_t src, int w) {
     if (dst == src && !w) return;
     alu_rr(F, 0x89, dst, src, w);
 }
@@ -256,24 +378,44 @@ static void imul_rr(FnCtx *F, uint8_t dst, uint8_t src, int w) {
     modrm(F, 3, dst, src);
 }
 // load reg, [rbp - off]
-static void load_rbp(FnCtx *F, uint8_t reg, int32_t off, int w) {
-    rex(F, w, reg, 0, 0);
-    eb(F, 0x8B);
-    modrm(F, 2, reg, RBP);
-    e32(F, (uint32_t)(-off));
+static inline void load_rbp(FnCtx *F, uint8_t reg, int32_t off, int w) {
+    Buf *b = &F->f->code;
+    if (b->len + 7 > b->cap) buf_grow(b, 7);
+    uint8_t *p = b->data + b->len;
+    uint8_t rv = (uint8_t)(0x40 | (w << 3) | ((reg >= 8) << 2));
+    if (rv != 0x40 || w) *p++ = rv;
+    *p++ = 0x8B;
+    *p++ = (uint8_t)(0x80 | ((reg & 7) << 3) | RBP);
+    uint32_t d = (uint32_t)(-off);
+    p[0] = (uint8_t)(d & 0xff); p[1] = (uint8_t)((d >> 8) & 0xff);
+    p[2] = (uint8_t)((d >> 16) & 0xff); p[3] = (uint8_t)((d >> 24) & 0xff);
+    b->len = (size_t)(p + 4 - b->data);
 }
 // store [rbp - off], reg
-static void store_rbp(FnCtx *F, int32_t off, uint8_t reg, int w) {
-    rex(F, w, reg, 0, 0);
-    eb(F, 0x89);
-    modrm(F, 2, reg, RBP);
-    e32(F, (uint32_t)(-off));
+static inline void store_rbp(FnCtx *F, int32_t off, uint8_t reg, int w) {
+    Buf *b = &F->f->code;
+    if (b->len + 7 > b->cap) buf_grow(b, 7);
+    uint8_t *p = b->data + b->len;
+    uint8_t rv = (uint8_t)(0x40 | (w << 3) | ((reg >= 8) << 2));
+    if (rv != 0x40 || w) *p++ = rv;
+    *p++ = 0x89;
+    *p++ = (uint8_t)(0x80 | ((reg & 7) << 3) | RBP);
+    uint32_t d = (uint32_t)(-off);
+    p[0] = (uint8_t)(d & 0xff); p[1] = (uint8_t)((d >> 8) & 0xff);
+    p[2] = (uint8_t)((d >> 16) & 0xff); p[3] = (uint8_t)((d >> 24) & 0xff);
+    b->len = (size_t)(p + 4 - b->data);
 }
-static void lea_rbp(FnCtx *F, uint8_t reg, int32_t off) {
-    rex(F, 1, reg, 0, 0);
-    eb(F, 0x8D);
-    modrm(F, 2, reg, RBP);
-    e32(F, (uint32_t)(-off));
+static inline void lea_rbp(FnCtx *F, uint8_t reg, int32_t off) {
+    Buf *b = &F->f->code;
+    if (b->len + 7 > b->cap) buf_grow(b, 7);
+    uint8_t *p = b->data + b->len;
+    *p++ = (uint8_t)(0x48 | ((reg >= 8) << 2));
+    *p++ = 0x8D;
+    *p++ = (uint8_t)(0x80 | ((reg & 7) << 3) | RBP);
+    uint32_t d = (uint32_t)(-off);
+    p[0] = (uint8_t)(d & 0xff); p[1] = (uint8_t)((d >> 8) & 0xff);
+    p[2] = (uint8_t)((d >> 16) & 0xff); p[3] = (uint8_t)((d >> 24) & 0xff);
+    b->len = (size_t)(p + 4 - b->data);
 }
 // Emit `lea reg, [rip+disp32]` with disp32 left at 0; return offset of disp32 field.
 static uint32_t lea_rip_emit(FnCtx *F, uint8_t reg) {
@@ -293,11 +435,21 @@ static char *heapdup_cstr(const char *s) {
     return r;
 }
 
+// When true (mlir_llvm_to_x64_code), reloc symbol pointers are borrowed directly
+// from MLIR_Context attribute storage (zero malloc/free per call site).
+static bool g_x64_borrow_reloc_syms = false;
+
 // Record a PC-relative text-section reloc at `field` (shared by lea/call sites).
 static void add_text_reloc(FnCtx *F, uint32_t field, string sym) {
-    char *cs = (char *)malloc(sym.size + 1);
-    memcpy(cs, sym.str, sym.size); cs[sym.size] = 0;
+    char *cs;
+    if (g_x64_borrow_reloc_syms) {
+        cs = (char *)sym.str;
+    } else {
+        cs = (char *)malloc(sym.size + 1);
+        memcpy(cs, sym.str, sym.size); cs[sym.size] = 0;
+    }
     obj_add_reloc(F->f, field, field + 4, false, cs, 0);
+    F->f->relocs[F->f->n_relocs - 1].sym_len = (uint32_t)sym.size;
 }
 
 // lea reg, [rip + disp32]  (records a data reloc onto the global at `data_off`)
@@ -398,42 +550,87 @@ static bool op_is_addressof(MLIR_Context *ctx, MLIR_OpHandle op) {
     return MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_MLIR_ADDRESSOF;
 }
 
-// Load an operand value into `reg`. Handles constants, globals, slots.
-static void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
-    MLIR_OpHandle def = MLIR_GetValueDefiningOp(F->ctx, v);
-    uint64_t fbits;
-    if (fp_const_val(F->ctx, v, &fbits)) { mov_ri(F, reg, (int64_t)fbits, 1); return; }
-    int64_t c;
-    if (is_const(F->ctx, def, &c)) { mov_ri(F, reg, c, val_w(F->ctx, v)); return; }
-    if (def != MLIR_INVALID_HANDLE && MLIR_GetOpType(F->ctx, def) == OP_TYPE_LLVM_MLIR_UNDEF) {
-        mov_ri(F, reg, 0, val_w(F->ctx, v)); return;
+// Load an operand value into `reg`, using caller-supplied width `w` (0=32b, 1=64b).
+static void load_val_w(FnCtx *F, MLIR_ValueHandle v, uint8_t reg, int w) {
+    // Fast path: mlir_regalloc_fast never puts rematerialized ops (constant,
+    // zero, null, undef, addressof) in rm or spill, so check those dense maps
+    // before MLIR_GetValueDefiningOp.
+    if (F->fast_ra) {
+        uint8_t rH;
+        if (val_in_reg(F, v, &rH)) { mov_rr(F, reg, rH, w); return; }
+        int32_t slot;
+        if (F->has_spill && sm_get_fast(&F->spill, v, &slot)) {
+            load_rbp(F, reg, (slot + 1) * 8, w);
+            return;
+        }
     }
-    if (def != MLIR_INVALID_HANDLE && op_is_addressof(F->ctx, def)) {
-        MLIR_AttributeHandle a = MLIR_GetOpAttr(F->ctx, def, MLIR_KEY_GLOBAL_NAME);
-        if (a == MLIR_INVALID_HANDLE) a = MLIR_GetOpAttr(F->ctx, def, MLIR_KEY_VALUE);
-        string gn = strip_at(a ? MLIR_GetAttributeString(F->ctx, a) : (string){0});
-        if (!gn.size) { fail(F, "addressof missing symbol", (string){0}); return; }
-        uint32_t off;
-        if (gmap_get(F->gm, gn, &off) || x64_ensure_global_in_gmap(F, gn, &off))
-            lea_rip_data(F, reg, off);
-        else if (F->wasm_lifted && x64_is_wasm_data_sym(gn))
-            fail(F, "wasm global missing from data map", gn);
-        else
-            lea_rip_func(F, reg, gn);   // function / external symbol
-        return;
+    MLIR_Context *ctx = F->ctx;
+    MLIR_OpHandle def = MLIR_GetValueDefiningOp(ctx, v);
+    if (def != MLIR_INVALID_HANDLE) {
+        MLIR_OpType dt = MLIR_GetOpType(ctx, def);
+        if (dt == OP_TYPE_LLVM_MLIR_CONSTANT) {
+            MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, def, MLIR_KEY_VALUE);
+            if (a != MLIR_INVALID_HANDLE) {
+                int fb = fp_bytes(ctx, v);
+                if (fb) {
+                    double d = MLIR_GetAttributeFloat(ctx, a);
+                    uint64_t fbits;
+                    if (fb == 4) { float f = (float)d; uint32_t b32; memcpy(&b32, &f, 4); fbits = b32; }
+                    else         { memcpy(&fbits, &d, 8); }
+                    mov_ri(F, reg, (int64_t)fbits, 1);
+                    return;
+                }
+                mov_ri(F, reg, MLIR_GetAttributeInteger(ctx, a), w);
+                return;
+            }
+        } else if (dt == OP_TYPE_LLVM_MLIR_ZERO || dt == OP_TYPE_LLVM_MLIR_NULL ||
+                   dt == OP_TYPE_LLVM_MLIR_UNDEF) {
+            mov_ri(F, reg, 0, w);
+            return;
+        } else if (dt == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
+            MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, def, MLIR_KEY_GLOBAL_NAME);
+            if (a == MLIR_INVALID_HANDLE) a = MLIR_GetOpAttr(ctx, def, MLIR_KEY_VALUE);
+            string gn = strip_at(a ? MLIR_GetAttributeString(ctx, a) : (string){0});
+            if (!gn.size) { fail(F, "addressof missing symbol", (string){0}); return; }
+            uint32_t off;
+            if (gmap_get(F->gm, gn, &off) || x64_ensure_global_in_gmap(F, gn, &off))
+                lea_rip_data(F, reg, off);
+            else if (F->wasm_lifted && x64_is_wasm_data_sym(gn))
+                fail(F, "wasm global missing from data map", gn);
+            else
+                lea_rip_func(F, reg, gn);   // function / external symbol
+            return;
+        }
     }
-    uint8_t rH;
-    if (val_in_reg(F, v, &rH)) { mov_rr(F, reg, rH, val_w(F->ctx, v)); return; }
+    if (!F->fast_ra) {
+        uint8_t rH;
+        if (val_in_reg(F, v, &rH)) { mov_rr(F, reg, rH, w); return; }
+        int32_t slot;
+        if (F->has_spill && sm_get_fast(&F->spill, v, &slot)) {
+            load_rbp(F, reg, (slot + 1) * 8, w);
+            return;
+        }
+    }
     int32_t slot;
     if (!vmap_get(&F->slots, v, &slot)) { fail(F, "value with no slot", (string){0}); return; }
-    load_rbp(F, reg, slot, val_w(F->ctx, v));
+    load_rbp(F, reg, slot, w);
 }
-static void store_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
+static inline void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
+    load_val_w(F, v, reg, val_w(F->ctx, v));
+}
+static void store_val_w(FnCtx *F, MLIR_ValueHandle v, uint8_t reg, int w) {
     uint8_t rH;
-    if (val_in_reg(F, v, &rH)) { mov_rr(F, rH, reg, val_w(F->ctx, v)); return; }
+    if (val_in_reg(F, v, &rH)) { mov_rr(F, rH, reg, w); return; }
     int32_t slot;
+    if (F->has_spill && sm_get_fast(&F->spill, v, &slot)) {
+        store_rbp(F, (slot + 1) * 8, reg, w);
+        return;
+    }
     if (!vmap_get(&F->slots, v, &slot)) { fail(F, "result with no slot", (string){0}); return; }
-    store_rbp(F, slot, reg, val_w(F->ctx, v));
+    store_rbp(F, slot, reg, w);
+}
+static inline void store_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
+    store_val_w(F, v, reg, val_w(F->ctx, v));
 }
 
 #include "mlir_llvm_to_x64_emit.inc"

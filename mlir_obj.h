@@ -35,8 +35,9 @@ extern "C" {
 typedef struct {
     uint32_t off;          // offset of the 4-byte LE field within the function
     uint32_t pcrel_from;   // within-function offset the displacement is relative to
+    uint32_t sym_len;      // length of `sym` when !to_data (0 => compute via strlen)
     bool     to_data;      // true: target is the data blob; false: target is `sym`
-    char    *sym;          // callee function name (heap-owned) when !to_data
+    char    *sym;          // callee function name when !to_data
     int64_t  addend;       // data-blob byte offset when to_data
 } ObjReloc;
 
@@ -54,6 +55,7 @@ typedef struct {
     size_t   n_funcs, c_funcs;
     uint8_t *data;         // module data blob (globals / string literals)
     size_t   data_len;
+    size_t   bss_len;      // zero-initialized tail after `data` (p_memsz > p_filesz)
     size_t   start_idx;    // index of the entry function (`_start`)
 } ObjModule;
 
